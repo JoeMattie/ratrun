@@ -1,0 +1,21 @@
+[package]
+name = "ratrun"
+version = "0.1.0"
+edition = "2021"
+description = "Rat Run — a terminal bullet-hell horde survivor built with ratatui"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[profile.dev]
+opt-level = 1

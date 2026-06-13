@@ -1,0 +1,300 @@
+//! Top-level application state machine: menus, the active run, and the
+//! transitions between them.
+
+use crossterm::event::KeyCode;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Style};
+use ratatui::widgets::Block;
+use ratatui::Frame;
+
+use crate::game::director;
+use crate::game::level::Theme;
+use crate::game::loadout::Upgrade;
+use crate::game::world::World;
+use crate::input::InputState;
+use crate::render::framebuffer::PixelBuffer;
+use crate::render::{hud, menu};
+use crate::scores::{ScoreEntry, ScoreTable};
+
+enum Screen {
+    Title,
+    Playing,
+    LevelUp,
+    Paused,
+    End, // game over or win (distinguished by world.won)
+}
+
+pub struct App {
+    screen: Screen,
+    pub should_quit: bool,
+    pub input: InputState,
+    scores: ScoreTable,
+    theme_idx: usize,
+    menu_idx: usize,
+    world: Option<World>,
+    levelup_choices: Vec<Upgrade>,
+    levelup_desc: Vec<(String, String)>,
+    levelup_idx: usize,
+    run_counter: u64,
+    recorded: bool,
+    new_best: bool,
+    last_score: u32,
+}
+
+impl App {
+    pub fn new(kitty: bool) -> Self {
+        App {
+            screen: Screen::Title,
+            should_quit: false,
+            input: InputState::new(kitty),
+            scores: ScoreTable::load(),
+            theme_idx: 0,
+            menu_idx: 0,
+            world: None,
+            levelup_choices: Vec::new(),
+            levelup_desc: Vec::new(),
+            levelup_idx: 0,
+            run_counter: 0,
+            recorded: false,
+            new_best: false,
+            last_score: 0,
+        }
+    }
+
+    fn seed(&mut self) -> u64 {
+        self.run_counter += 1;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        nanos ^ (self.run_counter.wrapping_mul(0x9E3779B97F4A7C15))
+    }
+
+    fn start_run(&mut self) {
+        let theme = Theme::all()[self.theme_idx];
+        let seed = self.seed();
+        self.world = Some(World::new(theme, seed));
+        self.recorded = false;
+        self.new_best = false;
+        self.screen = Screen::Playing;
+    }
+
+    pub fn update(&mut self, dt: f32) {
+        self.input.tick(dt);
+        match self.screen {
+            Screen::Title => self.update_title(),
+            Screen::Playing => self.update_playing(dt),
+            Screen::LevelUp => self.update_levelup(),
+            Screen::Paused => self.update_paused(),
+            Screen::End => self.update_end(),
+        }
+    }
+
+    fn update_title(&mut self) {
+        if self.input.pressed_char('q') {
+            self.should_quit = true;
+            return;
+        }
+        if self.input.just_pressed(KeyCode::Up) {
+            self.menu_idx = (self.menu_idx + 2) % 3;
+        }
+        if self.input.just_pressed(KeyCode::Down) {
+            self.menu_idx = (self.menu_idx + 1) % 3;
+        }
+        let n = Theme::all().len();
+        if self.input.just_pressed(KeyCode::Left) {
+            self.theme_idx = (self.theme_idx + n - 1) % n;
+        }
+        if self.input.just_pressed(KeyCode::Right) {
+            self.theme_idx = (self.theme_idx + 1) % n;
+        }
+        if self.input.just_pressed(KeyCode::Enter) {
+            match self.menu_idx {
+                0 => self.start_run(),
+                2 => self.should_quit = true,
+                _ => {}
+            }
+        }
+    }
+
+    fn update_playing(&mut self, dt: f32) {
+        if self.input.just_pressed(KeyCode::Esc) || self.input.pressed_char('p') {
+            self.screen = Screen::Paused;
+            return;
+        }
+        let move_dir = self.input.move_dir();
+        let dash = self.input.just_pressed(KeyCode::Char(' '));
+        let mut open_levelup = false;
+        let mut ended = false;
+        if let Some(w) = self.world.as_mut() {
+            w.update(dt, move_dir, dash);
+            if w.pending_levelups > 0 {
+                open_levelup = true;
+            } else if w.finished() {
+                ended = true;
+            }
+        }
+        if open_levelup {
+            self.open_levelup();
+        } else if ended {
+            self.finalize();
+            self.screen = Screen::End;
+        }
+    }
+
+    fn open_levelup(&mut self) {
+        if let Some(w) = self.world.as_mut() {
+            let choices = w.player.loadout.generate_choices(&mut w.rng);
+            self.levelup_desc = choices.iter().map(|c| w.player.loadout.describe(c)).collect();
+            self.levelup_choices = choices;
+            self.levelup_idx = 0;
+            self.screen = Screen::LevelUp;
+        }
+    }
+
+    fn update_levelup(&mut self) {
+        let n = self.levelup_choices.len().max(1);
+        if self.input.just_pressed(KeyCode::Up) || self.input.just_pressed(KeyCode::Left) {
+            self.levelup_idx = (self.levelup_idx + n - 1) % n;
+        }
+        if self.input.just_pressed(KeyCode::Down) || self.input.just_pressed(KeyCode::Right) {
+            self.levelup_idx = (self.levelup_idx + 1) % n;
+        }
+        let mut pick: Option<usize> = None;
+        for (i, key) in ['1', '2', '3'].iter().enumerate() {
+            if self.input.pressed_char(*key) && i < self.levelup_choices.len() {
+                pick = Some(i);
+            }
+        }
+        if self.input.just_pressed(KeyCode::Enter) {
+            pick = Some(self.levelup_idx);
+        }
+        if let Some(i) = pick {
+            self.apply_levelup(i);
+        }
+    }
+
+    fn apply_levelup(&mut self, i: usize) {
+        if let Some(w) = self.world.as_mut() {
+            if let Some(up) = self.levelup_choices.get(i).cloned() {
+                let heal = w.player.loadout.apply(&up);
+                w.player.heal(heal);
+                w.pending_levelups = w.pending_levelups.saturating_sub(1);
+            }
+            if w.pending_levelups > 0 {
+                self.open_levelup();
+            } else {
+                self.screen = Screen::Playing;
+            }
+        }
+    }
+
+    fn update_paused(&mut self) {
+        if self.input.just_pressed(KeyCode::Esc) || self.input.pressed_char('p') {
+            self.screen = Screen::Playing;
+        }
+        if self.input.pressed_char('q') {
+            self.world = None;
+            self.screen = Screen::Title;
+        }
+    }
+
+    fn update_end(&mut self) {
+        if self.input.just_pressed(KeyCode::Enter) {
+            self.start_run();
+        }
+        if self.input.pressed_char('q') {
+            self.world = None;
+            self.screen = Screen::Title;
+        }
+    }
+
+    fn finalize(&mut self) {
+        if self.recorded {
+            return;
+        }
+        if let Some(w) = self.world.as_ref() {
+            let bonus_time = (w.elapsed as u32) * 5;
+            let bonus_level = w.player.level * 100;
+            let bonus_win = if w.won { 5000 } else { 0 };
+            let final_score = w.score + bonus_time + bonus_level + bonus_win;
+            self.last_score = final_score;
+            self.new_best = self.scores.is_high_score(final_score);
+            self.scores.insert(ScoreEntry {
+                score: final_score,
+                time: w.elapsed,
+                level: w.player.level,
+                map: w.level.theme.name().to_string(),
+                won: w.won,
+            });
+            self.scores.save();
+        }
+        self.recorded = true;
+    }
+
+    // ---- Rendering ------------------------------------------------------
+
+    pub fn render(&mut self, frame: &mut Frame) {
+        let area = frame.area();
+        match self.screen {
+            Screen::Title => {
+                let theme = Theme::all()[self.theme_idx];
+                menu::draw_title(frame, area, theme, self.menu_idx, &self.scores);
+            }
+            Screen::Playing | Screen::Paused | Screen::LevelUp | Screen::End => {
+                self.draw_game(frame, area);
+                match self.screen {
+                    Screen::Paused => menu::draw_pause(frame, area),
+                    Screen::LevelUp => {
+                        let level = self.world.as_ref().map(|w| w.player.level).unwrap_or(1);
+                        menu::draw_levelup(frame, area, level, &self.levelup_desc, self.levelup_idx);
+                    }
+                    Screen::End => {
+                        if let Some(w) = self.world.as_ref() {
+                            menu::draw_end(
+                                frame,
+                                area,
+                                w.won,
+                                self.last_score,
+                                w.elapsed,
+                                w.player.level,
+                                w.kills,
+                                self.new_best,
+                                &self.scores,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn draw_game(&mut self, frame: &mut Frame, area: Rect) {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        let (top, game, bottom) = (rows[0], rows[1], rows[2]);
+
+        if let Some(w) = self.world.as_mut() {
+            if game.width > 0 && game.height > 0 {
+                let mut pb = PixelBuffer::new(game.width as usize, game.height as usize * 2);
+                w.draw(&mut pb);
+                pb.render_to(game, frame.buffer_mut());
+            }
+        } else {
+            frame.render_widget(Block::default().style(Style::default().bg(Color::Black)), game);
+        }
+
+        if let Some(w) = self.world.as_ref() {
+            hud::draw_top(frame, top, w);
+            hud::draw_bottom(frame, bottom, w);
+        }
+        let _ = director::RUN_SECONDS; // keep module referenced for clarity
+    }
+}
