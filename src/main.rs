@@ -12,6 +12,7 @@ mod lore;
 mod math;
 mod render;
 mod scores;
+mod titleart;
 
 mod game;
 

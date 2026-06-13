@@ -47,6 +47,7 @@ pub struct App {
     intro_timer: f32,
     /// Game viewport rect from the last frame, for mouse→world mapping.
     last_game: Rect,
+    rat_art: Vec<String>,
     run_counter: u64,
     recorded: bool,
     new_best: bool,
@@ -69,6 +70,7 @@ impl App {
             levelup_idx: 0,
             intro_timer: 0.0,
             last_game: Rect::new(0, 0, 0, 0),
+            rat_art: crate::titleart::rat_lines(40).unwrap_or_default(),
             run_counter: 0,
             recorded: false,
             new_best: false,
@@ -379,10 +381,10 @@ impl App {
         let area = frame.area();
         match self.screen {
             Screen::Title => {
-                menu::draw_title(frame, area, self.theme(), self.menu_idx, &self.scores);
+                menu::draw_title(frame, area, self.theme(), self.menu_idx, &self.scores, &self.rat_art);
             }
             Screen::Story => {
-                menu::draw_title(frame, area, self.theme(), self.menu_idx, &self.scores);
+                menu::draw_title(frame, area, self.theme(), self.menu_idx, &self.scores, &self.rat_art);
                 menu::draw_story(frame, area);
             }
             Screen::MapIntro | Screen::Playing | Screen::Paused | Screen::LevelUp | Screen::End => {
@@ -559,6 +561,9 @@ mod tests {
         hh.frame(&[]);
 
         match target.as_str() {
+            "title" => {
+                hh.frame(&[]);
+            }
             "story" => {
                 hh.frame(&[KeyCode::Char('l')]);
             }

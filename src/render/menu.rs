@@ -8,6 +8,7 @@ use ratatui::Frame;
 
 use crate::game::level::Theme;
 use crate::lore;
+use crate::render::palette;
 use crate::scores::ScoreTable;
 
 pub fn centered_rect(w: u16, h: u16, area: Rect) -> Rect {
@@ -34,6 +35,7 @@ pub fn draw_title(
     theme: Theme,
     menu_idx: usize,
     scores: &ScoreTable,
+    rat: &[String],
 ) {
     frame.render_widget(Clear, area);
     let block = Block::default()
@@ -45,15 +47,33 @@ pub fn draw_title(
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::raw(""));
-    for l in LOGO {
+    // RASCII rat logo, colored top→bottom with a warm-white → cool-gray fade.
+    let n = rat.len().max(1);
+    for (i, row) in rat.iter().enumerate() {
+        let t = i as f32 / n as f32;
+        let c = palette::mix((240, 232, 215), (130, 145, 175), t);
         lines.push(Line::from(Span::styled(
-            *l,
-            Style::default()
-                .fg(Color::Rgb(255, 220, 120))
-                .add_modifier(Modifier::BOLD),
+            row.clone(),
+            Style::default().fg(palette::to_color(c)),
         )));
     }
-    lines.push(Line::raw(""));
+    if rat.is_empty() {
+        // Fallback wordmark if the art couldn't render.
+        for l in LOGO {
+            lines.push(Line::from(Span::styled(
+                *l,
+                Style::default()
+                    .fg(Color::Rgb(255, 220, 120))
+                    .add_modifier(Modifier::BOLD),
+            )));
+        }
+    }
+    lines.push(Line::from(Span::styled(
+        "R A T   R U N",
+        Style::default()
+            .fg(Color::Rgb(255, 220, 120))
+            .add_modifier(Modifier::BOLD),
+    )));
     lines.push(Line::from(Span::styled(
         "a terminal bullet-hell horde survivor",
         Style::default().fg(Color::Gray),

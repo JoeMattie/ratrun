@@ -13,6 +13,8 @@ serde_json = "1"
 dirs = "5"
 anyhow = "1"
 rodio = { version = "0.20", default-features = false }
+rascii_art = "0.4.5"
+image = "0.24" # must match rascii_art's image version so DynamicImage unifies
 
 [profile.release]
 opt-level = 3
