@@ -92,7 +92,13 @@ fn run(
         let frame_start = Instant::now();
 
         app.input.begin_frame();
-        while event::poll(Duration::from_millis(0))? {
+        // Cap events per frame: mouse "report all motion" (mode 1003) can
+        // stream faster than one frame, and an unbounded drain loop would
+        // starve update/draw and freeze the main thread. We only need the
+        // latest cursor position, so deferring excess events is harmless.
+        let mut budget = 256;
+        while budget > 0 && event::poll(Duration::from_millis(0))? {
+            budget -= 1;
             match event::read()? {
                 Event::Key(k) => {
                     if k.kind == KeyEventKind::Press
