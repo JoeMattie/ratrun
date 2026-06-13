@@ -53,6 +53,10 @@ impl Vec2 {
         (self - o).len_sq()
     }
 
+    pub fn dot(self, o: Vec2) -> f32 {
+        self.x * o.x + self.y * o.y
+    }
+
     pub fn perp(self) -> Vec2 {
         Vec2::new(-self.y, self.x)
     }

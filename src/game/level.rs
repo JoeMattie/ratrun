@@ -3,6 +3,8 @@
 use crate::math::Vec2;
 use crate::render::palette::Rgb;
 
+use super::nav::NavGrid;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Theme {
     Sewer,
@@ -65,6 +67,7 @@ pub struct Level {
     pub arena: Vec2,
     pub walls: Vec<Rectf>,
     pub palette: Palette,
+    pub nav: NavGrid,
 }
 
 impl Level {
@@ -154,11 +157,13 @@ impl Level {
             }
         };
         walls.retain(clear);
+        let nav = NavGrid::build(arena, &walls, 16.0);
         Level {
             theme,
             arena,
             walls,
             palette,
+            nav,
         }
     }
 }

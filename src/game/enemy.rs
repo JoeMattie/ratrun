@@ -119,28 +119,37 @@ impl Enemy {
         }
     }
 
-    /// Steer toward (or, for spitters, around) the player.
-    pub fn steer(&mut self, target: Vec2, dt: f32, speed_mult: f32) {
+    /// Steer toward the player, routing around walls via the flow field.
+    /// `flow_dir` is the pathfinding direction at this enemy's cell (ZERO
+    /// near the goal / off-grid, in which case we head straight at the player).
+    pub fn steer(&mut self, target: Vec2, flow_dir: Vec2, dt: f32, speed_mult: f32) {
         let to = target - self.pos;
         let dist = to.len();
-        let dir = to.normalized();
+        let direct = to.normalized();
+        // Use the routed direction when far; switch to direct on final approach
+        // (within ~1.5 cells) for a smooth, un-gridded last stretch.
+        let chase = if flow_dir.len_sq() > 0.001 && dist > 26.0 {
+            flow_dir
+        } else {
+            direct
+        };
         let speed = self.kind.speed() * speed_mult;
         let desired = match self.kind {
             EnemyKind::Bat => {
                 self.wander += dt * 4.0;
-                (dir + Vec2::from_angle(self.wander) * 0.6).normalized() * speed
+                (chase + Vec2::from_angle(self.wander) * 0.6).normalized() * speed
             }
             EnemyKind::Spitter => {
-                // Keep a stand-off range.
+                // Keep a stand-off range: approach via the route, retreat directly.
                 if dist > 110.0 {
-                    dir * speed
+                    chase * speed
                 } else if dist < 80.0 {
-                    dir * (-speed)
+                    direct * (-speed)
                 } else {
-                    dir.perp() * speed * 0.5
+                    chase.perp() * speed * 0.5
                 }
             }
-            _ => dir * speed,
+            _ => chase * speed,
         };
         // Smooth toward desired velocity.
         self.vel += (desired - self.vel) * (6.0 * dt).min(1.0);

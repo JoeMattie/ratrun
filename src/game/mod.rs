@@ -5,6 +5,7 @@ pub mod enemy;
 pub mod gem;
 pub mod level;
 pub mod loadout;
+pub mod nav;
 pub mod particle;
 pub mod player;
 pub mod weapon;

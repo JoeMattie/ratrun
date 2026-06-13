@@ -16,6 +16,7 @@ use super::director::{self, Director};
 use super::enemy::{Enemy, EnemyKind};
 use super::gem::{Gem, Pickup, PickupKind};
 use super::level::{Level, Theme};
+use super::nav::FlowField;
 use super::particle::{Particles, Ramp};
 use super::player::Player;
 use super::weapon::WeaponKind;
@@ -43,6 +44,7 @@ pub struct World {
     pub pools: Vec<Pool>,
     pub particles: Particles,
     pub director: Director,
+    pub flow: FlowField,
     pub elapsed: f32,
     pub kills: u32,
     pub score: u32,
@@ -61,8 +63,11 @@ impl World {
     pub fn new(theme: Theme, seed: u64) -> World {
         let level = Level::new(theme);
         let center = level.arena * 0.5;
+        let mut flow = FlowField::new(&level.nav);
+        flow.update(&level.nav, center);
         World {
             rng: StdRng::seed_from_u64(seed),
+            flow,
             level,
             player: Player::new(center, WeaponKind::Gnaw),
             enemies: Vec::new(),
@@ -106,6 +111,9 @@ impl World {
         }
 
         self.update_player(dt, move_dir, dash);
+        // Refresh the shared flow field toward the player (cheap: only
+        // recomputes when the player crosses into a new nav cell).
+        self.flow.update(&self.level.nav, self.player.pos);
         self.run_director(dt);
         self.update_enemies(dt);
 
@@ -233,7 +241,8 @@ impl World {
         let ppos = self.player.pos;
         let speed_mult = 1.0 + self.elapsed / 400.0;
         for i in 0..self.enemies.len() {
-            self.enemies[i].steer(ppos, dt, speed_mult);
+            let flow_dir = self.flow.dir_at(self.enemies[i].pos);
+            self.enemies[i].steer(ppos, flow_dir, dt, speed_mult);
             // Keep enemies inside the arena.
             self.enemies[i].pos = self.enemies[i]
                 .pos
