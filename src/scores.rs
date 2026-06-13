@@ -43,7 +43,7 @@ impl ScoreTable {
     /// Returns the rank (0-based) if it made the table.
     pub fn insert(&mut self, entry: ScoreEntry) -> Option<usize> {
         self.entries.push(entry);
-        self.entries.sort_by(|a, b| b.score.cmp(&a.score));
+        self.entries.sort_by_key(|e| std::cmp::Reverse(e.score));
         self.entries.truncate(MAX_ENTRIES);
         // Find the most recently inserted entry's rank by identity is awkward;
         // callers only care whether the top score changed, so report best rank

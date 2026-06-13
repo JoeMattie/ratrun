@@ -5,6 +5,7 @@
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
+use crate::audio::Sfx;
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette::{self, Rgb};
@@ -52,6 +53,8 @@ pub struct World {
     pub won: bool,
     pub cam: Vec2,
     pub viewport: Vec2,
+    /// SFX events emitted this tick; drained by the app after `update`.
+    pub sfx: Vec<Sfx>,
 }
 
 impl World {
@@ -79,6 +82,7 @@ impl World {
             won: false,
             cam: Vec2::ZERO,
             viewport: Vec2::new(160.0, 80.0),
+            sfx: Vec::new(),
         }
     }
 
@@ -149,6 +153,7 @@ impl World {
             let face = self.player.face;
             self.particles
                 .cone(&mut self.rng, pos, -face, 16, 90.0, Ramp::Smoke, 0.4);
+            self.sfx.push(Sfx::Dash);
         }
 
         let dash_boost = if self.player.dash_active > 0.0 { 3.2 } else { 1.0 };
@@ -209,6 +214,7 @@ impl World {
             self.enemies
                 .push(Enemy::spawn(EnemyKind::Boss, pos, 1.0, &mut self.rng));
             self.shake = 14.0;
+            self.sfx.push(Sfx::Boss);
         }
     }
 
@@ -324,6 +330,7 @@ impl World {
 
     fn fire_one(&mut self, kind: WeaponKind, dmg: f32, cd: f32, projs: i32, ppos: Vec2, pface: Vec2) {
         let color = kind.color();
+        self.sfx.push(Sfx::Shoot);
         match kind {
             WeaponKind::Gnaw => {
                 if let Some((_, epos)) = self.nearest_enemy(ppos) {
@@ -452,6 +459,7 @@ impl World {
 
     fn resolve_player_bullets(&mut self, grid: &SpatialGrid) {
         let mut neigh = Vec::new();
+        let mut hit_any = false;
         for b in self.bullets.iter_mut() {
             if b.faction != Faction::Player || b.hit_cd > 0.0 {
                 continue;
@@ -464,6 +472,7 @@ impl World {
                 }
                 if collision::circles_overlap(b.pos, b.radius, e.pos, e.radius) {
                     e.hurt(b.damage);
+                    hit_any = true;
                     self.particles
                         .burst(&mut self.rng, b.pos, 4, 50.0, 1.0, Ramp::Spark, 0.18, true);
                     if b.pierce > 0 {
@@ -475,6 +484,9 @@ impl World {
                     break;
                 }
             }
+        }
+        if hit_any {
+            self.sfx.push(Sfx::Hit);
         }
     }
 
@@ -497,6 +509,7 @@ impl World {
             self.particles
                 .burst(&mut self.rng, p, 10, 40.0, 1.0, Ramp::Custom((255, 90, 90), (90, 20, 20)), 0.4, false);
             self.shake = self.shake.max(4.0);
+            self.sfx.push(Sfx::Hurt);
         }
     }
 
@@ -525,6 +538,7 @@ impl World {
                 false,
             );
             self.shake = self.shake.max(5.0);
+            self.sfx.push(Sfx::Hurt);
         }
     }
 
@@ -554,6 +568,9 @@ impl World {
                 );
                 if big {
                     self.shake = self.shake.max(if e.kind == EnemyKind::Boss { 16.0 } else { 6.0 });
+                    self.sfx.push(Sfx::Explosion);
+                } else {
+                    self.sfx.push(Sfx::Kill);
                 }
                 // Drop XP gem(s).
                 self.gems.push(Gem::new(e.pos, e.kind.xp()));
@@ -610,7 +627,12 @@ impl World {
             let p = self.player.pos;
             self.particles
                 .burst(&mut self.rng, p, 4, 30.0, 1.0, Ramp::Gem, 0.25, true);
-            self.pending_levelups += self.player.add_xp(gained);
+            self.sfx.push(Sfx::Gem);
+            let ups = self.player.add_xp(gained);
+            if ups > 0 {
+                self.sfx.push(Sfx::LevelUp);
+            }
+            self.pending_levelups += ups;
         }
     }
 
@@ -627,6 +649,7 @@ impl World {
             }
         });
         for k in collected {
+            self.sfx.push(Sfx::Pickup);
             match k {
                 PickupKind::Heal => {
                     let h = self.player.max_hp() * 0.35;
@@ -649,6 +672,7 @@ impl World {
                     let p = self.player.pos;
                     self.particles
                         .burst(&mut self.rng, p, 80, 140.0, 2.0, Ramp::Fire, 0.7, true);
+                    self.sfx.push(Sfx::Explosion);
                 }
             }
         }

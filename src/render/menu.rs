@@ -7,6 +7,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::game::level::Theme;
+use crate::lore;
 use crate::scores::ScoreTable;
 
 pub fn centered_rect(w: u16, h: u16, area: Rect) -> Rect {
@@ -57,6 +58,10 @@ pub fn draw_title(
         "a terminal bullet-hell horde survivor",
         Style::default().fg(Color::Gray),
     )));
+    lines.push(Line::from(Span::styled(
+        lore::TITLE_BLURB,
+        Style::default().fg(Color::Rgb(180, 160, 120)),
+    )));
     lines.push(Line::raw(""));
 
     let start_style = sel_style(menu_idx == 0);
@@ -80,11 +85,11 @@ pub fn draw_title(
     )));
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
-        "WASD/Arrows move · weapons auto-fire · Space dash",
+        "WASD/Arrows move · weapons auto-fire · Space dash · M mute",
         Style::default().fg(Color::DarkGray),
     )));
     lines.push(Line::from(Span::styled(
-        "↑/↓ select · ←/→ change map · Enter confirm · Q quit",
+        "↑/↓ select · ←/→ change map · Enter confirm · L story · Q quit",
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -109,11 +114,11 @@ pub fn draw_levelup(
     frame: &mut Frame,
     area: Rect,
     level: u32,
-    choices: &[(String, String)],
+    choices: &[(String, String, String)],
     idx: usize,
 ) {
-    let h = 4 + choices.len() as u16 * 3;
-    let r = centered_rect(54, h.max(10), area);
+    let h = 4 + choices.len() as u16 * 4;
+    let r = centered_rect(58, h.max(12), area);
     frame.render_widget(Clear, r);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -128,12 +133,12 @@ pub fn draw_levelup(
         .constraints(
             choices
                 .iter()
-                .map(|_| Constraint::Length(3))
+                .map(|_| Constraint::Length(4))
                 .collect::<Vec<_>>(),
         )
         .split(inner);
 
-    for (i, (title, desc)) in choices.iter().enumerate() {
+    for (i, (title, desc, flavor)) in choices.iter().enumerate() {
         let selected = i == idx;
         let style = if selected {
             Style::default()
@@ -150,6 +155,16 @@ pub fn draw_levelup(
                 format!("    {}", desc),
                 Style::default().fg(if selected { Color::Black } else { Color::Gray }),
             )),
+            Line::from(Span::styled(
+                format!("    “{}”", flavor),
+                Style::default()
+                    .fg(if selected {
+                        Color::Rgb(60, 40, 0)
+                    } else {
+                        Color::DarkGray
+                    })
+                    .add_modifier(Modifier::ITALIC),
+            )),
         ])
         .style(if selected {
             Style::default().bg(Color::Rgb(255, 220, 120))
@@ -158,6 +173,78 @@ pub fn draw_levelup(
         });
         frame.render_widget(card, rows[i]);
     }
+}
+
+pub fn draw_story(frame: &mut Frame, area: Rect) {
+    let r = centered_rect(64, 22, area);
+    frame.render_widget(Clear, r);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" DOSSIER ")
+        .border_style(Style::default().fg(Color::Rgb(90, 220, 200)))
+        .style(Style::default().bg(Color::Rgb(8, 12, 14)));
+    let inner = block.inner(r);
+    frame.render_widget(block, r);
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, l) in lore::INTRO.iter().enumerate() {
+        let style = if i < 2 {
+            Style::default()
+                .fg(Color::Rgb(255, 120, 120))
+                .add_modifier(Modifier::BOLD)
+        } else if l.starts_with("EXTERMINATION") {
+            Style::default()
+                .fg(Color::Rgb(255, 200, 90))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        lines.push(Line::from(Span::styled(*l, style)));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "Enter / Esc — back",
+        Style::default().fg(Color::DarkGray),
+    )));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
+}
+
+pub fn draw_map_intro(frame: &mut Frame, area: Rect, theme: Theme) {
+    let (heading, flavor) = lore::map_intro(theme);
+    let r = centered_rect(56, 11, area);
+    frame.render_widget(Clear, r);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(120, 220, 255)))
+        .style(Style::default().bg(Color::Rgb(10, 12, 18)));
+    let inner = block.inner(r);
+    frame.render_widget(block, r);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::raw(""),
+            Line::from(Span::styled(
+                heading,
+                Style::default()
+                    .fg(Color::Rgb(255, 220, 120))
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::raw(""),
+            Line::from(Span::styled(flavor, Style::default().fg(Color::Gray))),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "Enter — begin",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ])
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true }),
+        inner,
+    );
 }
 
 pub fn draw_pause(frame: &mut Frame, area: Rect) {
@@ -193,9 +280,10 @@ pub fn draw_end(
     level: u32,
     kills: u32,
     new_best: bool,
+    lore_line: &str,
     scores: &ScoreTable,
 ) {
-    let r = centered_rect(50, 18, area);
+    let r = centered_rect(56, 21, area);
     frame.render_widget(Clear, r);
     let (title, color) = if won {
         ("YOU SURVIVED!", Color::Green)
@@ -214,6 +302,13 @@ pub fn draw_end(
         Line::from(Span::styled(
             title,
             Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            lore_line,
+            Style::default()
+                .fg(Color::Rgb(180, 170, 140))
+                .add_modifier(Modifier::ITALIC),
         )),
         Line::raw(""),
         Line::from(format!("Score: {}", score)),

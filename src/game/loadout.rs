@@ -51,6 +51,18 @@ impl PassiveKind {
             PassiveKind::Armor => "+1 armor (flat dmg cut).",
         }
     }
+
+    pub fn flavor(self) -> &'static str {
+        match self {
+            PassiveKind::MaxHp => "Winter is always coming.",
+            PassiveKind::MoveSpeed => "Twitchier than the cameras.",
+            PassiveKind::Damage => "Filed sharp on rebar.",
+            PassiveKind::FireRate => "More is, itself, a strategy.",
+            PassiveKind::Magnet => "Feel the room before you enter it.",
+            PassiveKind::Regen => "Bred to survive worse than this.",
+            PassiveKind::Armor => "Scar tissue, all the way down.",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -104,18 +116,27 @@ impl Loadout {
         self.weapons.iter().any(|w| w.kind == k)
     }
 
-    /// Title + description for an upgrade card.
-    pub fn describe(&self, up: &Upgrade) -> (String, String) {
+    /// Title, mechanical description, and flavor line for an upgrade card.
+    pub fn describe(&self, up: &Upgrade) -> (String, String, String) {
         match up {
-            Upgrade::NewWeapon(k) => (format!("{} (NEW)", k.name()), k.desc().to_string()),
+            Upgrade::NewWeapon(k) => (
+                format!("{} (NEW)", k.name()),
+                k.desc().to_string(),
+                k.flavor().to_string(),
+            ),
             Upgrade::LevelWeapon(i) => {
                 let w = &self.weapons[*i];
                 (
                     format!("{} Lv{}→{}", w.kind.name(), w.level, w.level + 1),
                     w.kind.desc().to_string(),
+                    w.kind.flavor().to_string(),
                 )
             }
-            Upgrade::Passive(p) => (p.name().to_string(), p.desc().to_string()),
+            Upgrade::Passive(p) => (
+                p.name().to_string(),
+                p.desc().to_string(),
+                p.flavor().to_string(),
+            ),
         }
     }
 

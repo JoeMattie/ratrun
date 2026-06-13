@@ -1,23 +1,30 @@
 //! Top-level application state machine: menus, the active run, and the
 //! transitions between them.
 
+use std::collections::HashSet;
+
 use crossterm::event::KeyCode;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::widgets::Block;
 use ratatui::Frame;
 
+use crate::audio::{AudioEngine, Sfx};
 use crate::game::director;
+use crate::game::enemy::EnemyKind;
 use crate::game::level::Theme;
 use crate::game::loadout::Upgrade;
 use crate::game::world::World;
 use crate::input::InputState;
+use crate::lore;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::{hud, menu};
 use crate::scores::{ScoreEntry, ScoreTable};
 
 enum Screen {
     Title,
+    Story,
+    MapIntro,
     Playing,
     LevelUp,
     Paused,
@@ -28,13 +35,15 @@ pub struct App {
     screen: Screen,
     pub should_quit: bool,
     pub input: InputState,
+    audio: Option<AudioEngine>,
     scores: ScoreTable,
     theme_idx: usize,
     menu_idx: usize,
     world: Option<World>,
     levelup_choices: Vec<Upgrade>,
-    levelup_desc: Vec<(String, String)>,
+    levelup_desc: Vec<(String, String, String)>,
     levelup_idx: usize,
+    intro_timer: f32,
     run_counter: u64,
     recorded: bool,
     new_best: bool,
@@ -42,11 +51,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(kitty: bool) -> Self {
-        App {
+    pub fn new(kitty: bool, audio: Option<AudioEngine>) -> Self {
+        let mut app = App {
             screen: Screen::Title,
             should_quit: false,
             input: InputState::new(kitty),
+            audio,
             scores: ScoreTable::load(),
             theme_idx: 0,
             menu_idx: 0,
@@ -54,10 +64,30 @@ impl App {
             levelup_choices: Vec::new(),
             levelup_desc: Vec::new(),
             levelup_idx: 0,
+            intro_timer: 0.0,
             run_counter: 0,
             recorded: false,
             new_best: false,
             last_score: 0,
+        };
+        app.menu_music();
+        app
+    }
+
+    fn theme(&self) -> Theme {
+        Theme::all()[self.theme_idx]
+    }
+
+    fn menu_music(&mut self) {
+        let theme = self.theme();
+        if let Some(a) = self.audio.as_mut() {
+            a.play_music(theme, 0); // calm: bass only
+        }
+    }
+
+    fn sfx(&self, sfx: Sfx) {
+        if let Some(a) = self.audio.as_ref() {
+            a.play_sfx(sfx);
         }
     }
 
@@ -71,18 +101,30 @@ impl App {
     }
 
     fn start_run(&mut self) {
-        let theme = Theme::all()[self.theme_idx];
+        let theme = self.theme();
         let seed = self.seed();
         self.world = Some(World::new(theme, seed));
         self.recorded = false;
         self.new_best = false;
-        self.screen = Screen::Playing;
+        self.intro_timer = 4.0;
+        self.screen = Screen::MapIntro;
+        if let Some(a) = self.audio.as_mut() {
+            a.play_music(theme, 1);
+        }
     }
 
     pub fn update(&mut self, dt: f32) {
         self.input.tick(dt);
+        // Global mute toggle.
+        if self.input.pressed_char('m') {
+            if let Some(a) = self.audio.as_mut() {
+                a.toggle_mute();
+            }
+        }
         match self.screen {
             Screen::Title => self.update_title(),
+            Screen::Story => self.update_story(),
+            Screen::MapIntro => self.update_mapintro(dt),
             Screen::Playing => self.update_playing(dt),
             Screen::LevelUp => self.update_levelup(),
             Screen::Paused => self.update_paused(),
@@ -95,25 +137,59 @@ impl App {
             self.should_quit = true;
             return;
         }
+        if self.input.pressed_char('l') {
+            self.sfx(Sfx::UiSelect);
+            self.screen = Screen::Story;
+            return;
+        }
         if self.input.just_pressed(KeyCode::Up) {
             self.menu_idx = (self.menu_idx + 2) % 3;
+            self.sfx(Sfx::UiMove);
         }
         if self.input.just_pressed(KeyCode::Down) {
             self.menu_idx = (self.menu_idx + 1) % 3;
+            self.sfx(Sfx::UiMove);
         }
         let n = Theme::all().len();
         if self.input.just_pressed(KeyCode::Left) {
             self.theme_idx = (self.theme_idx + n - 1) % n;
+            self.menu_music();
+            self.sfx(Sfx::UiMove);
         }
         if self.input.just_pressed(KeyCode::Right) {
             self.theme_idx = (self.theme_idx + 1) % n;
+            self.menu_music();
+            self.sfx(Sfx::UiMove);
         }
         if self.input.just_pressed(KeyCode::Enter) {
             match self.menu_idx {
-                0 => self.start_run(),
+                0 => {
+                    self.sfx(Sfx::UiSelect);
+                    self.start_run();
+                }
                 2 => self.should_quit = true,
                 _ => {}
             }
+        }
+    }
+
+    fn update_story(&mut self) {
+        if self.input.just_pressed(KeyCode::Enter)
+            || self.input.just_pressed(KeyCode::Esc)
+            || self.input.pressed_char('q')
+        {
+            self.sfx(Sfx::UiSelect);
+            self.screen = Screen::Title;
+        }
+    }
+
+    fn update_mapintro(&mut self, dt: f32) {
+        self.intro_timer -= dt;
+        if self.intro_timer <= 0.0
+            || self.input.just_pressed(KeyCode::Enter)
+            || self.input.just_pressed(KeyCode::Char(' '))
+        {
+            self.screen = Screen::Playing;
         }
     }
 
@@ -126,13 +202,30 @@ impl App {
         let dash = self.input.just_pressed(KeyCode::Char(' '));
         let mut open_levelup = false;
         let mut ended = false;
+        let mut events: Vec<Sfx> = Vec::new();
+        let mut intensity = 1u32;
         if let Some(w) = self.world.as_mut() {
             w.update(dt, move_dir, dash);
+            // Drain SFX, de-duplicated per frame so a 16-shot nova is one sound.
+            let mut seen = HashSet::new();
+            for s in w.sfx.drain(..) {
+                if seen.insert(s) {
+                    events.push(s);
+                }
+            }
+            let boss_alive = w.enemies.iter().any(|e| e.kind == EnemyKind::Boss);
+            intensity = if boss_alive || w.enemies.len() > 45 { 2 } else { 1 };
             if w.pending_levelups > 0 {
                 open_levelup = true;
             } else if w.finished() {
                 ended = true;
             }
+        }
+        for s in events {
+            self.sfx(s);
+        }
+        if let Some(a) = self.audio.as_ref() {
+            a.set_intensity(intensity);
         }
         if open_levelup {
             self.open_levelup();
@@ -156,9 +249,11 @@ impl App {
         let n = self.levelup_choices.len().max(1);
         if self.input.just_pressed(KeyCode::Up) || self.input.just_pressed(KeyCode::Left) {
             self.levelup_idx = (self.levelup_idx + n - 1) % n;
+            self.sfx(Sfx::UiMove);
         }
         if self.input.just_pressed(KeyCode::Down) || self.input.just_pressed(KeyCode::Right) {
             self.levelup_idx = (self.levelup_idx + 1) % n;
+            self.sfx(Sfx::UiMove);
         }
         let mut pick: Option<usize> = None;
         for (i, key) in ['1', '2', '3'].iter().enumerate() {
@@ -170,6 +265,7 @@ impl App {
             pick = Some(self.levelup_idx);
         }
         if let Some(i) = pick {
+            self.sfx(Sfx::UiSelect);
             self.apply_levelup(i);
         }
     }
@@ -196,6 +292,7 @@ impl App {
         if self.input.pressed_char('q') {
             self.world = None;
             self.screen = Screen::Title;
+            self.menu_music();
         }
     }
 
@@ -206,6 +303,7 @@ impl App {
         if self.input.pressed_char('q') {
             self.world = None;
             self.screen = Screen::Title;
+            self.menu_music();
         }
     }
 
@@ -230,6 +328,12 @@ impl App {
             self.scores.save();
         }
         self.recorded = true;
+        // Music settles, plus a sting.
+        if let Some(a) = self.audio.as_ref() {
+            a.set_intensity(0);
+        }
+        let won = self.world.as_ref().map(|w| w.won).unwrap_or(false);
+        self.sfx(if won { Sfx::Win } else { Sfx::Lose });
     }
 
     // ---- Rendering ------------------------------------------------------
@@ -238,12 +342,16 @@ impl App {
         let area = frame.area();
         match self.screen {
             Screen::Title => {
-                let theme = Theme::all()[self.theme_idx];
-                menu::draw_title(frame, area, theme, self.menu_idx, &self.scores);
+                menu::draw_title(frame, area, self.theme(), self.menu_idx, &self.scores);
             }
-            Screen::Playing | Screen::Paused | Screen::LevelUp | Screen::End => {
+            Screen::Story => {
+                menu::draw_title(frame, area, self.theme(), self.menu_idx, &self.scores);
+                menu::draw_story(frame, area);
+            }
+            Screen::MapIntro | Screen::Playing | Screen::Paused | Screen::LevelUp | Screen::End => {
                 self.draw_game(frame, area);
                 match self.screen {
+                    Screen::MapIntro => menu::draw_map_intro(frame, area, self.theme()),
                     Screen::Paused => menu::draw_pause(frame, area),
                     Screen::LevelUp => {
                         let level = self.world.as_ref().map(|w| w.player.level).unwrap_or(1);
@@ -251,6 +359,11 @@ impl App {
                     }
                     Screen::End => {
                         if let Some(w) = self.world.as_ref() {
+                            let lore_line = if w.won {
+                                lore::victory(w.level.theme)
+                            } else {
+                                lore::DEFEAT
+                            };
                             menu::draw_end(
                                 frame,
                                 area,
@@ -260,6 +373,7 @@ impl App {
                                 w.player.level,
                                 w.kills,
                                 self.new_best,
+                                lore_line,
                                 &self.scores,
                             );
                         }
@@ -317,7 +431,7 @@ mod tests {
     impl Harness {
         fn new(w: u16, h: u16) -> Self {
             Harness {
-                app: App::new(false),
+                app: App::new(false, None), // silent in tests
                 terminal: Terminal::new(TestBackend::new(w, h)).unwrap(),
             }
         }
@@ -381,28 +495,56 @@ mod tests {
     }
 
     /// Render a real frame and dump it as a PPM (each cell → 1×2 pixels:
-    /// fg on top, bg below). Gated behind RATRUN_DUMP so it's a manual tool.
+    /// fg on top, bg below). Gated behind RATRUN_DUMP (value selects the
+    /// screen: play|story|levelup) so it's a manual screenshot tool.
     #[test]
     fn dump_frame_ppm() {
-        if std::env::var("RATRUN_DUMP").is_err() {
-            return;
-        }
+        let target = match std::env::var("RATRUN_DUMP") {
+            Ok(v) => v,
+            Err(_) => return,
+        };
         let (w, h) = (120u16, 46u16);
         let mut hh = Harness::new(w, h);
         hh.frame(&[]);
-        hh.frame(&[KeyCode::Enter]);
-        for tick in 0..900u32 {
-            let mv = match (tick / 18) % 4 {
-                0 => KeyCode::Right,
-                1 => KeyCode::Down,
-                2 => KeyCode::Left,
-                _ => KeyCode::Up,
-            };
-            let text = hh.frame(&[mv]);
-            if text.contains("LEVEL UP") {
-                hh.frame(&[KeyCode::Enter]);
+
+        match target.as_str() {
+            "story" => {
+                hh.frame(&[KeyCode::Char('l')]);
+            }
+            "levelup" => {
+                hh.frame(&[KeyCode::Enter]); // -> MapIntro
+                hh.frame(&[KeyCode::Enter]); // skip intro -> Playing
+                for tick in 0..3600u32 {
+                    let mv = match (tick / 20) % 4 {
+                        0 => KeyCode::Right,
+                        1 => KeyCode::Down,
+                        2 => KeyCode::Left,
+                        _ => KeyCode::Up,
+                    };
+                    let text = hh.frame(&[mv]);
+                    if text.contains("LEVEL UP") {
+                        break; // dump the card itself
+                    }
+                }
+            }
+            _ => {
+                hh.frame(&[KeyCode::Enter]); // -> MapIntro
+                hh.frame(&[KeyCode::Enter]); // skip -> Playing
+                for tick in 0..900u32 {
+                    let mv = match (tick / 18) % 4 {
+                        0 => KeyCode::Right,
+                        1 => KeyCode::Down,
+                        2 => KeyCode::Left,
+                        _ => KeyCode::Up,
+                    };
+                    let text = hh.frame(&[mv]);
+                    if text.contains("LEVEL UP") {
+                        hh.frame(&[KeyCode::Enter]);
+                    }
+                }
             }
         }
+
         let buf = hh.terminal.backend().buffer().clone();
         let (iw, ih) = (w as usize, h as usize * 2);
         let mut px = vec![0u8; iw * ih * 3];
@@ -422,7 +564,7 @@ mod tests {
         }
         let mut out = format!("P6\n{} {}\n255\n", iw, ih).into_bytes();
         out.extend_from_slice(&px);
-        std::fs::write("/tmp/ratrun_frame.ppm", out).unwrap();
+        std::fs::write(format!("/tmp/ratrun_{}.ppm", target), out).unwrap();
     }
 
     #[test]

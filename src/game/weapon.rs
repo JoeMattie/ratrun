@@ -47,6 +47,17 @@ impl WeaponKind {
         }
     }
 
+    pub fn flavor(self) -> &'static str {
+        match self {
+            WeaponKind::Gnaw => "Teeth are the original weapon.",
+            WeaponKind::CheeseSpray => "Weaponized dairy. Don't ask.",
+            WeaponKind::SqueakNova => "A scream pitched past hearing. It still hurts.",
+            WeaponKind::SporeOrbit => "Fungal hitchhikers from Vat 9, now loyal.",
+            WeaponKind::TailWhip => "Forty grams of pure indignation.",
+            WeaponKind::AcidSpit => "Stomach contents, redirected.",
+        }
+    }
+
     pub fn color(self) -> Rgb {
         match self {
             WeaponKind::Gnaw => (255, 240, 180),

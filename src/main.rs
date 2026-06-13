@@ -5,8 +5,10 @@
 #![allow(dead_code)]
 
 mod app;
+mod audio;
 mod config;
 mod input;
+mod lore;
 mod math;
 mod render;
 mod scores;
@@ -80,7 +82,8 @@ fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     kitty: bool,
 ) -> Result<()> {
-    let mut app = App::new(kitty);
+    let audio = audio::AudioEngine::new();
+    let mut app = App::new(kitty, audio);
     let target = Duration::from_micros(16_667); // ~60 FPS
     let mut last = Instant::now();
 
