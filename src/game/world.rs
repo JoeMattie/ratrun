@@ -111,6 +111,7 @@ impl World {
 
         let grid = SpatialGrid::build(self.enemies.iter().map(|e| e.pos), self.level.arena, 16.0);
         self.separate_enemies(&grid);
+        self.resolve_enemy_walls();
         self.fire_weapons(dt);
         self.update_bullets(dt);
         self.update_pools(dt);
@@ -289,6 +290,21 @@ impl World {
                 }
             }
             self.enemies[i].pos += push.clamp_len(6.0);
+        }
+    }
+
+    /// Push enemies out of interior walls (final position constraint, after
+    /// steering + separation) so they path around obstacles instead of through.
+    fn resolve_enemy_walls(&mut self) {
+        let arena = self.level.arena;
+        for i in 0..self.enemies.len() {
+            let r = self.enemies[i].radius;
+            for w in &self.level.walls {
+                self.enemies[i].pos = collision::resolve_circle_rect(self.enemies[i].pos, r, w);
+            }
+            self.enemies[i].pos = self.enemies[i]
+                .pos
+                .clamp_box(Vec2::splat(2.0), arena - Vec2::splat(2.0));
         }
     }
 
@@ -1100,6 +1116,42 @@ mod tests {
             }
         }
         std::fs::write("/tmp/ratrun_bugs.ppm", out).unwrap();
+    }
+
+    #[test]
+    fn enemies_are_pushed_out_of_walls() {
+        let mut w = World::new(Theme::Sewer, 5);
+        let wall = w.level.walls[0];
+        let mut rng = StdRng::seed_from_u64(9);
+        // Spawn an enemy buried in the middle of a wall.
+        w.enemies
+            .push(Enemy::spawn(EnemyKind::Cat, wall.center(), 1.0, &mut rng));
+        w.update(1.0 / 60.0, Vec2::ZERO, false);
+        let c = w.enemies[0].pos;
+        assert!(!wall.contains(c), "enemy center should be outside the wall");
+    }
+
+    /// After a long run, no enemy should ever sit inside a wall.
+    #[test]
+    fn run_keeps_enemies_out_of_walls() {
+        for theme in Theme::all() {
+            let mut w = World::new(theme, 21);
+            for tick in 0..1800u32 {
+                let dir = Vec2::from_angle(tick as f32 * 0.05);
+                w.update(1.0 / 60.0, dir, false);
+                apply_pending(&mut w);
+            }
+            for e in &w.enemies {
+                for wall in &w.level.walls {
+                    assert!(
+                        !wall.contains(e.pos),
+                        "{:?} enemy inside a wall at {:?}",
+                        theme,
+                        e.pos
+                    );
+                }
+            }
+        }
     }
 
     /// Exercise the boss + every pickup/pool/gem draw branch in one frame.
