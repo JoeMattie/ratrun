@@ -85,7 +85,7 @@ pub fn draw_title(
     )));
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
-        "WASD/Arrows move · weapons auto-fire · Space dash · M mute",
+        "WASD/Arrows or Mouse move · weapons auto-fire · Space dash · M mute",
         Style::default().fg(Color::DarkGray),
     )));
     lines.push(Line::from(Span::styled(

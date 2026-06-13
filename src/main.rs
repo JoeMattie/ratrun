@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::cursor;
 use crossterm::event::{
-    self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     self, EnterAlternateScreen, LeaveAlternateScreen,
@@ -52,7 +52,7 @@ fn main() -> Result<()> {
 fn setup_terminal() -> Result<(Terminal<CrosstermBackend<io::Stdout>>, bool)> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, cursor::Hide)?;
 
     let kitty = terminal::supports_keyboard_enhancement().unwrap_or(false);
     if kitty {
@@ -73,7 +73,7 @@ fn restore_terminal() -> Result<()> {
     if KITTY_PUSHED.swap(false, Ordering::SeqCst) {
         let _ = execute!(stdout, PopKeyboardEnhancementFlags);
     }
-    let _ = execute!(stdout, LeaveAlternateScreen, cursor::Show);
+    let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen, cursor::Show);
     let _ = terminal::disable_raw_mode();
     Ok(())
 }
@@ -92,14 +92,18 @@ fn run(
 
         app.input.begin_frame();
         while event::poll(Duration::from_millis(0))? {
-            if let Event::Key(k) = event::read()? {
-                if k.kind == KeyEventKind::Press
-                    && k.code == KeyCode::Char('c')
-                    && k.modifiers.contains(KeyModifiers::CONTROL)
-                {
-                    app.should_quit = true;
+            match event::read()? {
+                Event::Key(k) => {
+                    if k.kind == KeyEventKind::Press
+                        && k.code == KeyCode::Char('c')
+                        && k.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        app.should_quit = true;
+                    }
+                    app.input.handle_key(k);
                 }
-                app.input.handle_key(k);
+                Event::Mouse(m) => app.input.handle_mouse(m),
+                _ => {}
             }
         }
 

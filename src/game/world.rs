@@ -157,7 +157,9 @@ impl World {
         }
 
         let dash_boost = if self.player.dash_active > 0.0 { 3.2 } else { 1.0 };
-        let target_vel = move_dir.normalized() * stats.move_speed * dash_boost;
+        // `move_dir` is a throttle vector: unit length = full speed (keyboard),
+        // shorter = proportionally slower (mouse easing near the cursor).
+        let target_vel = move_dir.clamp_len(1.0) * stats.move_speed * dash_boost;
         self.player.vel += (target_vel - self.player.vel) * (12.0 * dt).min(1.0);
         self.player.pos += self.player.vel * dt;
 

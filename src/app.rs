@@ -17,6 +17,7 @@ use crate::game::loadout::Upgrade;
 use crate::game::world::World;
 use crate::input::InputState;
 use crate::lore;
+use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::{hud, menu};
 use crate::scores::{ScoreEntry, ScoreTable};
@@ -44,6 +45,8 @@ pub struct App {
     levelup_desc: Vec<(String, String, String)>,
     levelup_idx: usize,
     intro_timer: f32,
+    /// Game viewport rect from the last frame, for mouse→world mapping.
+    last_game: Rect,
     run_counter: u64,
     recorded: bool,
     new_best: bool,
@@ -65,6 +68,7 @@ impl App {
             levelup_desc: Vec::new(),
             levelup_idx: 0,
             intro_timer: 0.0,
+            last_game: Rect::new(0, 0, 0, 0),
             run_counter: 0,
             recorded: false,
             new_best: false,
@@ -89,6 +93,39 @@ impl App {
         if let Some(a) = self.audio.as_ref() {
             a.play_sfx(sfx);
         }
+    }
+
+    /// Map the latest mouse cursor cell to a world position, using the same
+    /// game viewport + camera the renderer used last frame.
+    fn mouse_world(&self) -> Option<Vec2> {
+        let (mc, mr) = self.input.mouse_pos?;
+        let a = self.last_game;
+        if a.width == 0 || a.height == 0 {
+            return None;
+        }
+        let w = self.world.as_ref()?;
+        // Clamp the cursor into the viewport so off-field targets still pull
+        // the player toward that edge. Two pixels per cell row.
+        let gx = (mc as i32 - a.x as i32).clamp(0, a.width as i32 - 1) as f32;
+        let gy = (mr as i32 - a.y as i32).clamp(0, a.height as i32 - 1) as f32;
+        Some(w.cam + Vec2::new(gx + 0.5, gy * 2.0 + 1.0))
+    }
+
+    /// The throttle vector fed to the world: keyboard unit vector, or — when
+    /// the mouse was the last input — toward the cursor, easing to a stop.
+    fn resolve_move_dir(&self) -> Vec2 {
+        if self.input.prefer_mouse {
+            if let (Some(target), Some(w)) = (self.mouse_world(), self.world.as_ref()) {
+                let to = target - w.player.pos;
+                let d = to.len();
+                return if d > 1.5 {
+                    to.normalized() * (d / 12.0).clamp(0.0, 1.0)
+                } else {
+                    Vec2::ZERO
+                };
+            }
+        }
+        self.input.move_dir()
     }
 
     fn seed(&mut self) -> u64 {
@@ -198,7 +235,7 @@ impl App {
             self.screen = Screen::Paused;
             return;
         }
-        let move_dir = self.input.move_dir();
+        let move_dir = self.resolve_move_dir();
         let dash = self.input.just_pressed(KeyCode::Char(' '));
         let mut open_levelup = false;
         let mut ended = false;
@@ -394,6 +431,7 @@ impl App {
             ])
             .split(area);
         let (top, game, bottom) = (rows[0], rows[1], rows[2]);
+        self.last_game = game;
 
         if let Some(w) = self.world.as_mut() {
             if game.width > 0 && game.height > 0 {
@@ -416,7 +454,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -445,6 +483,19 @@ mod tests {
             self.app.update(1.0 / 60.0);
             self.terminal.draw(|f| self.app.render(f)).unwrap();
             self.screen_text()
+        }
+
+        fn set_mouse(&mut self, col: u16, row: u16) {
+            self.app.input.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: col,
+                row: row,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+
+        fn player_x(&self) -> f32 {
+            self.app.world.as_ref().unwrap().player.pos.x
         }
 
         fn screen_text(&self) -> String {
@@ -565,6 +616,32 @@ mod tests {
         let mut out = format!("P6\n{} {}\n255\n", iw, ih).into_bytes();
         out.extend_from_slice(&px);
         std::fs::write(format!("/tmp/ratrun_{}.ppm", target), out).unwrap();
+    }
+
+    #[test]
+    fn player_follows_mouse_cursor() {
+        let mut h = Harness::new(100, 44);
+        h.frame(&[]); // title
+        h.frame(&[KeyCode::Enter]); // -> MapIntro
+        h.frame(&[KeyCode::Enter]); // skip intro -> Playing
+        h.frame(&[]); // render so last_game + cam are set
+
+        // Cursor at the far right → player should drift right.
+        let x0 = h.player_x();
+        for _ in 0..120 {
+            h.set_mouse(97, 22);
+            h.frame(&[]);
+        }
+        let x1 = h.player_x();
+        assert!(x1 > x0 + 10.0, "player should chase the cursor right ({x0}→{x1})");
+
+        // Now far left → player reverses.
+        for _ in 0..120 {
+            h.set_mouse(2, 22);
+            h.frame(&[]);
+        }
+        let x2 = h.player_x();
+        assert!(x2 < x1 - 10.0, "player should chase the cursor left ({x1}→{x2})");
     }
 
     #[test]
