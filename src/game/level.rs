@@ -69,60 +69,91 @@ pub struct Level {
 
 impl Level {
     pub fn new(theme: Theme) -> Level {
-        let arena = Vec2::new(360.0, 280.0);
-        let (palette, walls) = match theme {
-            Theme::Sewer => (
-                Palette {
-                    bg: (14, 22, 20),
-                    bg_alt: (18, 28, 26),
-                    wall: (40, 70, 64),
-                    wall_edge: (70, 120, 110),
-                    accent: (90, 220, 200),
-                    blood: (120, 200, 90),
-                },
-                vec![
-                    Rectf::new(70.0, 60.0, 14.0, 80.0),
-                    Rectf::new(276.0, 60.0, 14.0, 80.0),
-                    Rectf::new(70.0, 150.0, 14.0, 80.0),
-                    Rectf::new(276.0, 150.0, 14.0, 80.0),
-                    Rectf::new(150.0, 120.0, 60.0, 14.0),
-                    Rectf::new(150.0, 170.0, 60.0, 14.0),
-                ],
-            ),
-            Theme::Kitchen => (
-                Palette {
-                    bg: (26, 20, 16),
-                    bg_alt: (34, 26, 20),
-                    wall: (110, 80, 50),
-                    wall_edge: (170, 130, 80),
-                    accent: (255, 180, 90),
-                    blood: (200, 60, 50),
-                },
-                vec![
-                    Rectf::new(40.0, 40.0, 90.0, 22.0),
-                    Rectf::new(230.0, 40.0, 90.0, 22.0),
-                    Rectf::new(40.0, 218.0, 90.0, 22.0),
-                    Rectf::new(230.0, 218.0, 90.0, 22.0),
-                    Rectf::new(168.0, 128.0, 24.0, 24.0),
-                ],
-            ),
-            Theme::Lab => (
-                Palette {
-                    bg: (12, 14, 24),
-                    bg_alt: (16, 20, 34),
-                    wall: (40, 50, 90),
-                    wall_edge: (90, 120, 220),
-                    accent: (120, 220, 255),
-                    blood: (90, 200, 255),
-                },
-                vec![
-                    Rectf::new(110.0, 60.0, 140.0, 12.0),
-                    Rectf::new(110.0, 208.0, 140.0, 12.0),
-                    Rectf::new(110.0, 60.0, 12.0, 60.0),
-                    Rectf::new(238.0, 160.0, 12.0, 60.0),
-                ],
-            ),
+        // ~8x the area of the original 360x280 arena.
+        let arena = Vec2::new(1020.0, 800.0);
+        let center = arena * 0.5;
+        // Keep a clear circle around the player spawn (arena center).
+        let clear = |r: &Rectf| r.center().dist(center) > 90.0;
+
+        let (palette, mut walls) = match theme {
+            Theme::Sewer => {
+                let mut w = Vec::new();
+                // A grid of pipe pillars with horizontal connectors.
+                for &x in &[150.0, 360.0, 570.0, 780.0] {
+                    for &y in &[120.0, 330.0, 540.0] {
+                        w.push(Rectf::new(x, y, 20.0, 130.0));
+                    }
+                }
+                for &y in &[230.0, 470.0, 690.0] {
+                    w.push(Rectf::new(260.0, y, 220.0, 18.0));
+                    w.push(Rectf::new(560.0, y, 220.0, 18.0));
+                }
+                (
+                    Palette {
+                        bg: (14, 22, 20),
+                        bg_alt: (18, 28, 26),
+                        wall: (40, 70, 64),
+                        wall_edge: (70, 120, 110),
+                        accent: (90, 220, 200),
+                        blood: (120, 200, 90),
+                    },
+                    w,
+                )
+            }
+            Theme::Kitchen => {
+                let mut w = Vec::new();
+                // Counter blocks around the edges + scattered islands.
+                for &x in &[70.0, 860.0] {
+                    for &y in &[80.0, 320.0, 560.0] {
+                        w.push(Rectf::new(x, y, 90.0, 120.0));
+                    }
+                }
+                for &x in &[260.0, 520.0, 760.0] {
+                    w.push(Rectf::new(x, 60.0, 120.0, 30.0));
+                    w.push(Rectf::new(x, 710.0, 120.0, 30.0));
+                }
+                for &(x, y) in &[(300.0, 300.0), (640.0, 300.0), (300.0, 520.0), (640.0, 520.0)] {
+                    w.push(Rectf::new(x, y, 40.0, 40.0));
+                }
+                (
+                    Palette {
+                        bg: (26, 20, 16),
+                        bg_alt: (34, 26, 20),
+                        wall: (110, 80, 50),
+                        wall_edge: (170, 130, 80),
+                        accent: (255, 180, 90),
+                        blood: (200, 60, 50),
+                    },
+                    w,
+                )
+            }
+            Theme::Lab => {
+                let mut w = Vec::new();
+                // Long barrier walls forming partial chambers.
+                for &y in &[150.0, 650.0] {
+                    w.push(Rectf::new(200.0, y, 280.0, 16.0));
+                    w.push(Rectf::new(560.0, y, 280.0, 16.0));
+                }
+                for &x in &[200.0, 820.0] {
+                    w.push(Rectf::new(x, 250.0, 16.0, 300.0));
+                }
+                for &(x, y) in &[(360.0, 360.0), (660.0, 360.0), (510.0, 540.0)] {
+                    w.push(Rectf::new(x, y, 16.0, 100.0));
+                }
+                (
+                    Palette {
+                        bg: (12, 14, 24),
+                        bg_alt: (16, 20, 34),
+                        wall: (40, 50, 90),
+                        wall_edge: (90, 120, 220),
+                        accent: (120, 220, 255),
+                        blood: (90, 200, 255),
+                    },
+                    w,
+                )
+            }
         };
+        walls.retain(clear);
         Level {
             theme,
             arena,

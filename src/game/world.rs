@@ -706,17 +706,24 @@ impl World {
         let pal = &self.level.palette;
         pb.clear(pal.bg);
 
-        // Floor dots for motion reference.
-        let mut gx = 0;
-        while (gx as f32) < arena.x {
-            let mut gy = 0;
-            while (gy as f32) < arena.y {
-                let sx = (gx as f32 - cam.x).round() as i32;
-                let sy = (gy as f32 - cam.y).round() as i32;
-                pb.plot(sx, sy, pal.bg_alt);
-                gy += 14;
+        // Floor dots for motion reference — only across the visible region.
+        let step = 14.0;
+        let x0 = ((cam.x / step).floor() * step) as i32;
+        let y0 = ((cam.y / step).floor() * step) as i32;
+        let mut gx = x0;
+        while (gx as f32) < cam.x + vw + step {
+            let mut gy = y0;
+            while (gy as f32) < cam.y + vh + step {
+                if gx >= 0 && gy >= 0 && (gx as f32) < arena.x && (gy as f32) < arena.y {
+                    pb.plot(
+                        (gx as f32 - cam.x).round() as i32,
+                        (gy as f32 - cam.y).round() as i32,
+                        pal.bg_alt,
+                    );
+                }
+                gy += step as i32;
             }
-            gx += 14;
+            gx += step as i32;
         }
 
         // Arena border.
@@ -756,28 +763,29 @@ impl World {
             pb.plot_add(s.0, s.1 + 1, palette::scale(g.color, 0.5));
         }
 
-        // Pickups (pulsing diamond).
+        // Pickups with a pulsing additive glow halo.
         for p in &self.pickups {
             let s = self.w2s(p.pos, cam);
-            let pulse = 0.6 + 0.4 * (p.bob.sin() * 0.5 + 0.5);
-            let c = palette::scale(p.kind.color(), pulse);
-            pb.filled_circle(s.0, s.1, 2, c);
+            let pulse = 0.5 + 0.5 * (p.bob.sin() * 0.5 + 0.5); // 0.5..1.0
+            let base = p.kind.color();
+            let gr = (7.0 + pulse * 4.0) as i32;
+            let grf = gr as f32;
+            for dy in -gr..=gr {
+                for dx in -gr..=gr {
+                    let d = ((dx * dx + dy * dy) as f32).sqrt();
+                    if d <= grf {
+                        let fall = (1.0 - d / grf).powi(2);
+                        pb.plot_add(s.0 + dx, s.1 + dy, palette::scale(base, fall * pulse * 0.7));
+                    }
+                }
+            }
+            pb.filled_circle(s.0, s.1, 2, palette::scale(base, 0.7 + pulse * 0.3));
             pb.plot(s.0, s.1, (255, 255, 255));
         }
 
-        // Enemies.
+        // Enemies (animated insects).
         for e in &self.enemies {
-            let s = self.w2s(e.pos, cam);
-            let mut c = e.kind.color();
-            if e.flash > 0.0 {
-                c = (255, 255, 255);
-            }
-            pb.filled_circle(s.0, s.1, e.radius as i32, c);
-            // Boss health ring.
-            if e.kind == EnemyKind::Boss {
-                let frac = (e.hp / e.max_hp).clamp(0.0, 1.0);
-                pb.ring(s.0, s.1, e.radius as i32 + 3, palette::mix((90, 20, 20), (255, 80, 80), frac));
-            }
+            self.draw_bug(pb, e, cam);
         }
 
         // Bullets.
@@ -795,6 +803,104 @@ impl World {
 
         // Particles on top.
         self.particles.draw(pb, cam);
+    }
+
+    /// Draw one enemy as an animated insect: flapping/buzzing wings, a
+    /// segmented body, a tripod leg gait, and antennae.
+    fn draw_bug(&self, pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
+        let s = self.w2s(e.pos, cam);
+        let base = Vec2::new(s.0 as f32, s.1 as f32);
+        let f = if e.facing.len_sq() > 0.01 {
+            e.facing.normalized()
+        } else {
+            Vec2::new(1.0, 0.0)
+        };
+        let p = f.perp();
+        let r = e.radius;
+        let flash = e.flash > 0.0;
+        let body = if flash { (255, 255, 255) } else { e.kind.color() };
+        let dark = palette::scale(body, 0.55);
+        let st = bug_style(e.kind);
+
+        // Wings under the body, flapping (additive so they read as gauzy).
+        if st.wings {
+            let flap = e.anim.sin().abs();
+            let wr = (r * (0.45 + flap * 0.7)).max(1.0);
+            let wb = (wr * 0.6).max(1.0);
+            let wc = palette::scale(self.level.palette.accent, 0.4 + flap * 0.45);
+            for side in [-1.0f32, 1.0] {
+                let c = base + p * (side * r * 0.7) - f * (r * 0.1);
+                let cx = c.x as i32;
+                let cy = (c.y - r * 0.4) as i32;
+                let rr = wr as i32;
+                for dy in -rr..=rr {
+                    for dx in -rr..=rr {
+                        let nx = dx as f32 / wr;
+                        let ny = dy as f32 / wb;
+                        if nx * nx + ny * ny <= 1.0 {
+                            pb.plot_add(cx + dx, cy + dy, wc);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Legs: pairs distributed along the body, alternating tripod gait.
+        for i in 0..st.leg_pairs {
+            let along = f * (r * (0.55 - i as f32 * 0.55));
+            let phase = e.anim + i as f32 * 2.1;
+            for (k, side) in [(-1.0f32, 0.0f32), (1.0, std::f32::consts::PI)] {
+                let swing = (phase + side).sin() * 0.5;
+                let hip = base + along + p * (k * r * 0.45);
+                let dir = (p * k + f * swing).normalized();
+                let knee = hip + dir * (r * 0.85);
+                let foot = knee + (p * k * 0.4 + f * (swing - 0.2)).normalized() * (r * 0.7);
+                pb.line(hip.x as i32, hip.y as i32, knee.x as i32, knee.y as i32, dark);
+                pb.line(knee.x as i32, knee.y as i32, foot.x as i32, foot.y as i32, dark);
+            }
+        }
+
+        // Body segments, head (front) → abdomen (back).
+        for seg in 0..st.segs {
+            let t = seg as f32 / st.segs.max(1) as f32;
+            let c = base + f * (r * (0.7 - t * 1.5));
+            let rad = (r * (0.42 + 0.28 * (1.0 - t))).max(1.0);
+            let col = if st.stripes && seg % 2 == 1 {
+                if flash {
+                    (255, 255, 255)
+                } else {
+                    palette::scale(body, 0.55)
+                }
+            } else {
+                body
+            };
+            pb.filled_circle(c.x as i32, c.y as i32, rad as i32, col);
+        }
+
+        // Head detail: antennae, eyes, optional horn.
+        let head = base + f * (r * 0.7);
+        let wave = (e.anim * 0.5).sin() * 0.4;
+        for side in [-1.0f32, 1.0] {
+            let dir = (f + p * (side * 0.55 + wave * side)).normalized();
+            let tip = head + dir * (r * 1.05);
+            pb.line(head.x as i32, head.y as i32, tip.x as i32, tip.y as i32, dark);
+        }
+        if st.eyes && r >= 3.0 {
+            for side in [-1.0f32, 1.0] {
+                let ep = head + p * (side * r * 0.35);
+                pb.plot(ep.x as i32, ep.y as i32, (15, 15, 18));
+            }
+        }
+        if st.horn && r >= 4.0 {
+            let tip = head + f * (r * 0.9);
+            pb.line(head.x as i32, head.y as i32, tip.x as i32, tip.y as i32, palette::scale(body, 1.25));
+        }
+
+        // Boss health ring.
+        if e.kind == EnemyKind::Boss {
+            let frac = (e.hp / e.max_hp).clamp(0.0, 1.0);
+            pb.ring(s.0, s.1, r as i32 + 4, palette::mix((90, 20, 20), (255, 80, 80), frac));
+        }
     }
 
     fn draw_player(&self, pb: &mut PixelBuffer, cam: Vec2) {
@@ -828,6 +934,75 @@ impl World {
     #[inline]
     fn w2s(&self, p: Vec2, cam: Vec2) -> (i32, i32) {
         ((p.x - cam.x).round() as i32, (p.y - cam.y).round() as i32)
+    }
+}
+
+struct BugStyle {
+    segs: i32,
+    leg_pairs: i32,
+    wings: bool,
+    stripes: bool,
+    horn: bool,
+    eyes: bool,
+}
+
+/// Per-kind insect anatomy.
+fn bug_style(kind: EnemyKind) -> BugStyle {
+    match kind {
+        // Ant: three crisp segments, six legs, antennae.
+        EnemyKind::Skitterer => BugStyle {
+            segs: 3,
+            leg_pairs: 3,
+            wings: false,
+            stripes: false,
+            horn: false,
+            eyes: false,
+        },
+        // Fly/mosquito: tiny body, fast buzzing wings.
+        EnemyKind::Bat => BugStyle {
+            segs: 2,
+            leg_pairs: 2,
+            wings: true,
+            stripes: false,
+            horn: false,
+            eyes: true,
+        },
+        // Beetle: rounded shell, six legs, eyes.
+        EnemyKind::Cat => BugStyle {
+            segs: 2,
+            leg_pairs: 3,
+            wings: false,
+            stripes: false,
+            horn: false,
+            eyes: true,
+        },
+        // Wasp: striped abdomen, wings, stinger-ish.
+        EnemyKind::Spitter => BugStyle {
+            segs: 3,
+            leg_pairs: 3,
+            wings: true,
+            stripes: true,
+            horn: false,
+            eyes: true,
+        },
+        // Rhino beetle: bulky, horn, heavy legs.
+        EnemyKind::Brute => BugStyle {
+            segs: 2,
+            leg_pairs: 3,
+            wings: false,
+            stripes: false,
+            horn: true,
+            eyes: true,
+        },
+        // Hornet queen: big, winged, striped, mandible eyes.
+        EnemyKind::Boss => BugStyle {
+            segs: 3,
+            leg_pairs: 4,
+            wings: true,
+            stripes: true,
+            horn: true,
+            eyes: true,
+        },
     }
 }
 
@@ -873,6 +1048,58 @@ mod tests {
             assert!(w.enemies.len() <= ENEMY_CAP);
             assert!(w.particles.len() <= PARTICLE_CAP);
         }
+    }
+
+    /// Manual screenshot tool: line up one of each insect + a glowing pickup
+    /// in a zoomable frame. `RATRUN_DUMP=bugs cargo test dump_bestiary`.
+    #[test]
+    fn dump_bestiary() {
+        if std::env::var("RATRUN_DUMP").as_deref() != Ok("bugs") {
+            return;
+        }
+        let mut w = World::new(Theme::Sewer, 1);
+        let cx = w.level.arena.x * 0.5;
+        let cy = w.level.arena.y * 0.5;
+        w.player.pos = Vec2::new(cx, cy + 42.0);
+        let mut rng = StdRng::seed_from_u64(3);
+        let kinds = [
+            EnemyKind::Skitterer,
+            EnemyKind::Bat,
+            EnemyKind::Cat,
+            EnemyKind::Spitter,
+            EnemyKind::Brute,
+            EnemyKind::Boss,
+        ];
+        for (i, k) in kinds.iter().enumerate() {
+            let mut e = Enemy::spawn(*k, Vec2::new(cx - 78.0 + i as f32 * 30.0, cy), 1.0, &mut rng);
+            e.facing = Vec2::new(0.25, 1.0).normalized();
+            e.anim = i as f32 * 0.9;
+            w.enemies.push(e);
+        }
+        w.pickups.push(Pickup {
+            pos: Vec2::new(cx - 30.0, cy + 22.0),
+            kind: PickupKind::Heal,
+            bob: 1.2,
+        });
+        w.pickups.push(Pickup {
+            pos: Vec2::new(cx + 30.0, cy + 22.0),
+            kind: PickupKind::Nuke,
+            bob: 0.3,
+        });
+        let mut pb = PixelBuffer::new(200, 120);
+        w.draw(&mut pb);
+        // Write PPM (top fg + bottom bg per cell handled by caller's converter;
+        // here we dump the raw pixel grid directly).
+        let mut out = format!("P6\n{} {}\n255\n", pb.w, pb.h).into_bytes();
+        for y in 0..pb.h {
+            for x in 0..pb.w {
+                let c = pb.pixel_at(x, y);
+                out.push(c.0);
+                out.push(c.1);
+                out.push(c.2);
+            }
+        }
+        std::fs::write("/tmp/ratrun_bugs.ppm", out).unwrap();
     }
 
     /// Exercise the boss + every pickup/pool/gem draw branch in one frame.

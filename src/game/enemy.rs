@@ -93,6 +93,10 @@ pub struct Enemy {
     pub fire_cd: f32,
     pub wander: f32,
     pub contact_cd: f32,
+    /// Gait/wing animation phase, advanced by movement.
+    pub anim: f32,
+    /// Smoothed facing direction for sprite orientation.
+    pub facing: Vec2,
 }
 
 impl Enemy {
@@ -110,6 +114,8 @@ impl Enemy {
             fire_cd: rng.gen_range(1.0..2.5),
             wander: rng.gen_range(0.0..std::f32::consts::TAU),
             contact_cd: 0.0,
+            anim: rng.gen_range(0.0..std::f32::consts::TAU),
+            facing: Vec2::new(1.0, 0.0),
         }
     }
 
@@ -139,6 +145,20 @@ impl Enemy {
         // Smooth toward desired velocity.
         self.vel += (desired - self.vel) * (6.0 * dt).min(1.0);
         self.pos += self.vel * dt;
+
+        // Animation + facing.
+        let sp = self.vel.len();
+        // Flyers buzz constantly; crawlers scuttle in proportion to speed.
+        let cadence = if matches!(self.kind, EnemyKind::Bat) {
+            22.0
+        } else {
+            4.0 + sp * 0.5
+        };
+        self.anim += dt * cadence;
+        if sp > 1.0 {
+            self.facing += (self.vel.normalized() - self.facing) * (8.0 * dt).min(1.0);
+        }
+
         if self.flash > 0.0 {
             self.flash -= dt;
         }

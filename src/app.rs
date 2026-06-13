@@ -70,7 +70,7 @@ impl App {
             levelup_idx: 0,
             intro_timer: 0.0,
             last_game: Rect::new(0, 0, 0, 0),
-            rat_art: crate::titleart::rat_lines(40).unwrap_or_default(),
+            rat_art: crate::titleart::rat_lines(44).unwrap_or_default(),
             run_counter: 0,
             recorded: false,
             new_best: false,

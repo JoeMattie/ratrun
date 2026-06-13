@@ -120,6 +120,11 @@ impl PixelBuffer {
         }
     }
 
+    /// Read a pixel (for screenshot tooling).
+    pub fn pixel_at(&self, x: usize, y: usize) -> Rgb {
+        self.get(x, y)
+    }
+
     #[inline]
     fn get(&self, x: usize, y: usize) -> Rgb {
         if x < self.w && y < self.h {
