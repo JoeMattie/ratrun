@@ -298,3 +298,169 @@ impl App {
         let _ = director::RUN_SECONDS; // keep module referenced for clarity
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// End-to-end harness: drives the real `App` through ratatui's `Terminal`
+    /// + in-memory `Buffer`, exactly like `main`'s loop but without crossterm's
+    /// event source or a TTY. Returns the rendered screen as text.
+    struct Harness {
+        app: App,
+        terminal: Terminal<TestBackend>,
+    }
+
+    impl Harness {
+        fn new(w: u16, h: u16) -> Self {
+            Harness {
+                app: App::new(false),
+                terminal: Terminal::new(TestBackend::new(w, h)).unwrap(),
+            }
+        }
+
+        /// Advance one frame, injecting the given keys this frame.
+        fn frame(&mut self, keys: &[KeyCode]) -> String {
+            self.app.input.begin_frame();
+            for k in keys {
+                self.app.input.handle_key(KeyEvent::from(*k));
+            }
+            self.app.update(1.0 / 60.0);
+            self.terminal.draw(|f| self.app.render(f)).unwrap();
+            self.screen_text()
+        }
+
+        fn screen_text(&self) -> String {
+            self.terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect()
+        }
+    }
+
+    #[test]
+    fn title_screen_renders() {
+        let mut h = Harness::new(80, 40);
+        let text = h.frame(&[]);
+        assert!(text.contains("START"), "title should show START RUN");
+        assert!(text.contains("QUIT"));
+    }
+
+    #[test]
+    fn quit_from_title() {
+        let mut h = Harness::new(80, 40);
+        h.frame(&[]);
+        h.frame(&[KeyCode::Char('q')]);
+        assert!(h.app.should_quit);
+    }
+
+    fn color_rgb(c: ratatui::style::Color) -> (u8, u8, u8) {
+        use ratatui::style::Color::*;
+        match c {
+            Rgb(r, g, b) => (r, g, b),
+            White => (235, 235, 235),
+            Red => (220, 70, 70),
+            LightRed => (255, 120, 120),
+            Green => (80, 220, 95),
+            LightGreen => (140, 255, 150),
+            Yellow => (235, 210, 95),
+            LightYellow => (255, 235, 140),
+            Blue => (90, 120, 230),
+            Magenta => (200, 90, 200),
+            Cyan => (95, 210, 235),
+            Gray => (150, 150, 155),
+            DarkGray => (80, 80, 85),
+            _ => (0, 0, 0),
+        }
+    }
+
+    /// Render a real frame and dump it as a PPM (each cell → 1×2 pixels:
+    /// fg on top, bg below). Gated behind RATRUN_DUMP so it's a manual tool.
+    #[test]
+    fn dump_frame_ppm() {
+        if std::env::var("RATRUN_DUMP").is_err() {
+            return;
+        }
+        let (w, h) = (120u16, 46u16);
+        let mut hh = Harness::new(w, h);
+        hh.frame(&[]);
+        hh.frame(&[KeyCode::Enter]);
+        for tick in 0..900u32 {
+            let mv = match (tick / 18) % 4 {
+                0 => KeyCode::Right,
+                1 => KeyCode::Down,
+                2 => KeyCode::Left,
+                _ => KeyCode::Up,
+            };
+            let text = hh.frame(&[mv]);
+            if text.contains("LEVEL UP") {
+                hh.frame(&[KeyCode::Enter]);
+            }
+        }
+        let buf = hh.terminal.backend().buffer().clone();
+        let (iw, ih) = (w as usize, h as usize * 2);
+        let mut px = vec![0u8; iw * ih * 3];
+        for cy in 0..h {
+            for cx in 0..w {
+                let cell = &buf[(cx, cy)];
+                let top = color_rgb(cell.fg);
+                let bot = color_rgb(cell.bg);
+                for (row, (r, g, b)) in [(0usize, top), (1, bot)] {
+                    let y = cy as usize * 2 + row;
+                    let i = (y * iw + cx as usize) * 3;
+                    px[i] = r;
+                    px[i + 1] = g;
+                    px[i + 2] = b;
+                }
+            }
+        }
+        let mut out = format!("P6\n{} {}\n255\n", iw, ih).into_bytes();
+        out.extend_from_slice(&px);
+        std::fs::write("/tmp/ratrun_frame.ppm", out).unwrap();
+    }
+
+    #[test]
+    fn full_run_renders_and_handles_levelup() {
+        let mut h = Harness::new(100, 44);
+        h.frame(&[]); // title
+        h.frame(&[KeyCode::Enter]); // START RUN -> Playing
+
+        let mut saw_pixels = false;
+        let mut saw_levelup = false;
+        let mut saw_hud = false;
+
+        // Drive ~60 in-game seconds, weaving so we bump into the horde and gain XP.
+        for tick in 0..3600u32 {
+            let mv = match (tick / 30) % 4 {
+                0 => KeyCode::Right,
+                1 => KeyCode::Down,
+                2 => KeyCode::Left,
+                _ => KeyCode::Up,
+            };
+            let text = h.frame(&[mv]);
+
+            if text.contains('▀') {
+                saw_pixels = true;
+            }
+            if text.contains("Score") {
+                saw_hud = true;
+            }
+            if text.contains("LEVEL UP") {
+                saw_levelup = true;
+                // Confirm the highlighted upgrade and continue playing.
+                h.frame(&[KeyCode::Enter]);
+            }
+        }
+
+        assert!(saw_pixels, "game viewport should render half-block pixels");
+        assert!(saw_hud, "HUD should render the score readout");
+        assert!(saw_levelup, "player should have leveled up within 60s");
+        assert!(!h.app.should_quit);
+    }
+}
