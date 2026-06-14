@@ -48,6 +48,7 @@ pub struct App {
     /// Game viewport rect from the last frame, for mouse→world mapping.
     last_game: Rect,
     rat_art: Vec<String>,
+    rat_art_w: u32,
     run_counter: u64,
     recorded: bool,
     new_best: bool,
@@ -70,7 +71,8 @@ impl App {
             levelup_idx: 0,
             intro_timer: 0.0,
             last_game: Rect::new(0, 0, 0, 0),
-            rat_art: crate::titleart::rat_lines(44).unwrap_or_default(),
+            rat_art: Vec::new(),
+            rat_art_w: 0,
             run_counter: 0,
             recorded: false,
             new_best: false,
@@ -82,6 +84,19 @@ impl App {
 
     fn theme(&self) -> Theme {
         Theme::all()[self.theme_idx]
+    }
+
+    /// Render the RASCII rat logo sized to the title area: as large as the
+    /// width allows, but capped by height so it doesn't crowd the menu.
+    /// Recomputed only when the target width changes.
+    fn ensure_rat_art(&mut self, area: Rect) {
+        let by_w = area.width as i32 - 8;
+        let by_h = area.height as i32 * 3 / 2; // rat rows ≈ width * 0.29
+        let desired = by_w.min(by_h).clamp(40, 92) as u32;
+        if desired != self.rat_art_w {
+            self.rat_art = crate::titleart::rat_lines(desired).unwrap_or_default();
+            self.rat_art_w = desired;
+        }
     }
 
     fn menu_music(&mut self) {
@@ -381,9 +396,11 @@ impl App {
         let area = frame.area();
         match self.screen {
             Screen::Title => {
+                self.ensure_rat_art(area);
                 menu::draw_title(frame, area, self.theme(), self.menu_idx, &self.scores, &self.rat_art);
             }
             Screen::Story => {
+                self.ensure_rat_art(area);
                 menu::draw_title(frame, area, self.theme(), self.menu_idx, &self.scores, &self.rat_art);
                 menu::draw_story(frame, area);
             }

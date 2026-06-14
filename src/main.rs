@@ -79,6 +79,20 @@ fn restore_terminal() -> Result<()> {
     Ok(())
 }
 
+/// Spawn a thread that blocks on terminal input and forwards parsed events
+/// over a channel. Exits when the receiver is dropped or reading fails.
+fn input_thread() -> std::sync::mpsc::Receiver<Event> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        while let Ok(ev) = event::read() {
+            if tx.send(ev).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
 fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     kitty: bool,
@@ -88,18 +102,19 @@ fn run(
     let target = Duration::from_micros(16_667); // ~60 FPS
     let mut last = Instant::now();
 
+    // Read input on a dedicated thread. The terminal's mouse "report all
+    // motion" (mode 1003) can stream events faster than a frame; doing the
+    // blocking reads + escape-sequence parsing here means the main loop only
+    // drains an already-parsed channel and can never be stalled by the input
+    // stream. The main loop keeps rendering even under a flood.
+    let rx = input_thread();
+
     while !app.should_quit {
         let frame_start = Instant::now();
 
         app.input.begin_frame();
-        // Cap events per frame: mouse "report all motion" (mode 1003) can
-        // stream faster than one frame, and an unbounded drain loop would
-        // starve update/draw and freeze the main thread. We only need the
-        // latest cursor position, so deferring excess events is harmless.
-        let mut budget = 256;
-        while budget > 0 && event::poll(Duration::from_millis(0))? {
-            budget -= 1;
-            match event::read()? {
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
                 Event::Key(k) => {
                     if k.kind == KeyEventKind::Press
                         && k.code == KeyCode::Char('c')
