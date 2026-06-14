@@ -62,10 +62,89 @@ pub struct Palette {
     pub blood: Rgb,
 }
 
+/// A solid obstacle drawn as a themed object. Its `rect` is the collision +
+/// nav footprint; the kind selects how it's rendered.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PropKind {
+    PipeV,
+    PipeH,
+    Valve,
+    Grate,
+    Table,
+    Crate,
+    Barrel,
+    Counter,
+    Console,
+    Tank,
+    Barrier,
+}
+
+impl PropKind {
+    pub fn size(self) -> (f32, f32) {
+        match self {
+            PropKind::PipeV => (14.0, 72.0),
+            PropKind::PipeH => (72.0, 14.0),
+            PropKind::Valve => (20.0, 20.0),
+            PropKind::Grate => (30.0, 30.0),
+            PropKind::Table => (40.0, 26.0),
+            PropKind::Crate => (22.0, 22.0),
+            PropKind::Barrel => (20.0, 20.0),
+            PropKind::Counter => (66.0, 22.0),
+            PropKind::Console => (46.0, 18.0),
+            PropKind::Tank => (24.0, 24.0),
+            PropKind::Barrier => (16.0, 66.0),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Prop {
+    pub kind: PropKind,
+    pub rect: Rectf,
+}
+
+fn theme_props(theme: Theme) -> &'static [PropKind] {
+    match theme {
+        Theme::Sewer => &[
+            PropKind::PipeV,
+            PropKind::PipeH,
+            PropKind::Valve,
+            PropKind::Grate,
+            PropKind::Barrier,
+            PropKind::PipeH,
+            PropKind::PipeV,
+            PropKind::Valve,
+        ],
+        Theme::Kitchen => &[
+            PropKind::Table,
+            PropKind::Crate,
+            PropKind::Barrel,
+            PropKind::Counter,
+            PropKind::Crate,
+            PropKind::Table,
+            PropKind::Barrel,
+            PropKind::Counter,
+        ],
+        Theme::Lab => &[
+            PropKind::Console,
+            PropKind::Tank,
+            PropKind::Crate,
+            PropKind::Barrier,
+            PropKind::Console,
+            PropKind::Tank,
+            PropKind::Barrier,
+            PropKind::Crate,
+        ],
+    }
+}
+
 pub struct Level {
     pub theme: Theme,
     pub arena: Vec2,
+    /// Collision + nav footprints (one per prop).
     pub walls: Vec<Rectf>,
+    /// Rendered obstacle objects.
+    pub props: Vec<Prop>,
     pub palette: Palette,
     pub nav: NavGrid,
 }
@@ -75,93 +154,72 @@ impl Level {
         // ~8x the area of the original 360x280 arena.
         let arena = Vec2::new(1020.0, 800.0);
         let center = arena * 0.5;
-        // Keep a clear circle around the player spawn (arena center).
-        let clear = |r: &Rectf| r.center().dist(center) > 90.0;
 
-        let (palette, mut walls) = match theme {
-            Theme::Sewer => {
-                let mut w = Vec::new();
-                // A grid of pipe pillars with horizontal connectors.
-                for &x in &[150.0, 360.0, 570.0, 780.0] {
-                    for &y in &[120.0, 330.0, 540.0] {
-                        w.push(Rectf::new(x, y, 20.0, 130.0));
-                    }
-                }
-                for &y in &[230.0, 470.0, 690.0] {
-                    w.push(Rectf::new(260.0, y, 220.0, 18.0));
-                    w.push(Rectf::new(560.0, y, 220.0, 18.0));
-                }
-                (
-                    Palette {
-                        bg: (14, 22, 20),
-                        bg_alt: (18, 28, 26),
-                        wall: (40, 70, 64),
-                        wall_edge: (70, 120, 110),
-                        accent: (90, 220, 200),
-                        blood: (120, 200, 90),
-                    },
-                    w,
-                )
-            }
-            Theme::Kitchen => {
-                let mut w = Vec::new();
-                // Counter blocks around the edges + scattered islands.
-                for &x in &[70.0, 860.0] {
-                    for &y in &[80.0, 320.0, 560.0] {
-                        w.push(Rectf::new(x, y, 90.0, 120.0));
-                    }
-                }
-                for &x in &[260.0, 520.0, 760.0] {
-                    w.push(Rectf::new(x, 60.0, 120.0, 30.0));
-                    w.push(Rectf::new(x, 710.0, 120.0, 30.0));
-                }
-                for &(x, y) in &[(300.0, 300.0), (640.0, 300.0), (300.0, 520.0), (640.0, 520.0)] {
-                    w.push(Rectf::new(x, y, 40.0, 40.0));
-                }
-                (
-                    Palette {
-                        bg: (26, 20, 16),
-                        bg_alt: (34, 26, 20),
-                        wall: (110, 80, 50),
-                        wall_edge: (170, 130, 80),
-                        accent: (255, 180, 90),
-                        blood: (200, 60, 50),
-                    },
-                    w,
-                )
-            }
-            Theme::Lab => {
-                let mut w = Vec::new();
-                // Long barrier walls forming partial chambers.
-                for &y in &[150.0, 650.0] {
-                    w.push(Rectf::new(200.0, y, 280.0, 16.0));
-                    w.push(Rectf::new(560.0, y, 280.0, 16.0));
-                }
-                for &x in &[200.0, 820.0] {
-                    w.push(Rectf::new(x, 250.0, 16.0, 300.0));
-                }
-                for &(x, y) in &[(360.0, 360.0), (660.0, 360.0), (510.0, 540.0)] {
-                    w.push(Rectf::new(x, y, 16.0, 100.0));
-                }
-                (
-                    Palette {
-                        bg: (12, 14, 24),
-                        bg_alt: (16, 20, 34),
-                        wall: (40, 50, 90),
-                        wall_edge: (90, 120, 220),
-                        accent: (120, 220, 255),
-                        blood: (90, 200, 255),
-                    },
-                    w,
-                )
-            }
+        let palette = match theme {
+            Theme::Sewer => Palette {
+                bg: (14, 22, 20),
+                bg_alt: (18, 28, 26),
+                wall: (40, 70, 64),
+                wall_edge: (70, 120, 110),
+                accent: (90, 220, 200),
+                blood: (120, 200, 90),
+            },
+            Theme::Kitchen => Palette {
+                bg: (26, 20, 16),
+                bg_alt: (34, 26, 20),
+                wall: (110, 80, 50),
+                wall_edge: (170, 130, 80),
+                accent: (255, 180, 90),
+                blood: (200, 60, 50),
+            },
+            Theme::Lab => Palette {
+                bg: (12, 14, 24),
+                bg_alt: (16, 20, 34),
+                wall: (40, 50, 90),
+                wall_edge: (90, 120, 220),
+                accent: (120, 220, 255),
+                blood: (90, 200, 255),
+            },
         };
-        walls.retain(clear);
+
+        // Scatter many small props on a staggered grid, skipping the spawn
+        // circle and the arena margins.
+        let kinds = theme_props(theme);
+        let slot = 132.0;
+        let cols = ((arena.x - 120.0) / slot) as i32;
+        let rows = ((arena.y - 120.0) / slot) as i32;
+        let mut props = Vec::new();
+        let mut idx = 0usize;
+        for j in 0..=rows {
+            for i in 0..=cols {
+                let kind = kinds[idx % kinds.len()];
+                idx += 1;
+                let stagger = if j % 2 == 0 { 0.0 } else { slot * 0.5 };
+                let cxp = 90.0 + i as f32 * slot + stagger;
+                let cyp = 90.0 + j as f32 * slot;
+                let (w, h) = kind.size();
+                let rect = Rectf::new(cxp - w * 0.5, cyp - h * 0.5, w, h);
+                if rect.center().dist(center) < 120.0 {
+                    continue; // keep the spawn clear
+                }
+                if rect.x < 26.0
+                    || rect.right() > arena.x - 26.0
+                    || rect.y < 26.0
+                    || rect.bottom() > arena.y - 26.0
+                {
+                    continue; // keep off the arena edges
+                }
+                props.push(Prop { kind, rect });
+            }
+        }
+
+        let walls: Vec<Rectf> = props.iter().map(|p| p.rect).collect();
         let nav = NavGrid::build(arena, &walls, 16.0);
         Level {
             theme,
             arena,
             walls,
+            props,
             palette,
             nav,
         }

@@ -15,7 +15,7 @@ use super::collision::{self, SpatialGrid};
 use super::director::{self, Director};
 use super::enemy::{Enemy, EnemyKind};
 use super::gem::{Gem, Pickup, PickupKind};
-use super::level::{Level, Theme};
+use super::level::{Level, Palette, Prop, PropKind, Theme};
 use super::nav::FlowField;
 use super::particle::{Particles, Ramp};
 use super::player::Player;
@@ -759,11 +759,9 @@ impl World {
         pb.line(b0.0, b0.1, b0.0, b1.1, pal.wall_edge);
         pb.line(b1.0, b0.1, b1.0, b1.1, pal.wall_edge);
 
-        // Walls.
-        for w in &self.level.walls {
-            let s = self.w2s(Vec2::new(w.x, w.y), cam);
-            pb.rect_fill(s.0, s.1, w.w as i32, w.h as i32, pal.wall);
-            pb.line(s.0, s.1, s.0 + w.w as i32, s.1, pal.wall_edge);
+        // Props (themed obstacles).
+        for p in &self.level.props {
+            draw_prop(pb, p, cam, pal);
         }
 
         // Acid pools.
@@ -960,6 +958,166 @@ impl World {
     fn w2s(&self, p: Vec2, cam: Vec2) -> (i32, i32) {
         ((p.x - cam.x).round() as i32, (p.y - cam.y).round() as i32)
     }
+}
+
+// ---- Prop rendering -------------------------------------------------------
+
+fn draw_prop(pb: &mut PixelBuffer, prop: &Prop, cam: Vec2, pal: &Palette) {
+    let x = (prop.rect.x - cam.x).round() as i32;
+    let y = (prop.rect.y - cam.y).round() as i32;
+    let w = prop.rect.w as i32;
+    let h = prop.rect.h as i32;
+    match prop.kind {
+        PropKind::PipeV => pipe(pb, x, y, w, h, true),
+        PropKind::PipeH => pipe(pb, x, y, w, h, false),
+        PropKind::Barrier => barrier(pb, x, y, w, h),
+        PropKind::Valve => valve(pb, x, y, w, h),
+        PropKind::Grate => grate(pb, x, y, w, h, pal),
+        PropKind::Table => table(pb, x, y, w, h),
+        PropKind::Crate => crate_box(pb, x, y, w, h),
+        PropKind::Barrel => barrel(pb, x, y, w, h),
+        PropKind::Counter => counter(pb, x, y, w, h),
+        PropKind::Console => console(pb, x, y, w, h, pal),
+        PropKind::Tank => tank(pb, x, y, w, h, pal),
+    }
+}
+
+/// A shaded metal cylinder with flange bands.
+fn pipe(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, vert: bool) {
+    let base = (95, 118, 112);
+    let shade = |t: f32| palette::scale(base, 0.55 + 0.75 * (1.0 - (t - 0.32).abs() * 1.4).max(0.0));
+    if vert {
+        for col in 0..w {
+            let t = col as f32 / (w.max(2) - 1) as f32;
+            pb.rect_fill(x + col, y, 1, h, shade(t));
+        }
+        let fl = palette::scale(base, 0.45);
+        pb.rect_fill(x, y, w, 3, fl);
+        pb.rect_fill(x, y + h - 3, w, 3, fl);
+        pb.rect_fill(x, y + h / 2 - 1, w, 3, fl);
+    } else {
+        for row in 0..h {
+            let t = row as f32 / (h.max(2) - 1) as f32;
+            pb.rect_fill(x, y + row, w, 1, shade(t));
+        }
+        let fl = palette::scale(base, 0.45);
+        pb.rect_fill(x, y, 3, h, fl);
+        pb.rect_fill(x + w - 3, y, 3, h, fl);
+        pb.rect_fill(x + w / 2 - 1, y, 3, h, fl);
+    }
+}
+
+fn barrier(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32) {
+    let base = (66, 76, 116);
+    let yellow = (220, 200, 80);
+    // Diagonal hazard stripes, clipped to the footprint.
+    for py in 0..h {
+        for px in 0..w {
+            let c = if (px + py).rem_euclid(10) < 4 { yellow } else { base };
+            pb.plot(x + px, y + py, c);
+        }
+    }
+    pb.rect_fill(x, y, w, 1, palette::scale(base, 1.6));
+    pb.rect_fill(x, y + h - 1, w, 1, palette::scale(base, 0.5));
+}
+
+fn valve(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32) {
+    pb.rect_fill(x, y, w, h, (90, 110, 106));
+    let cx = x + w / 2;
+    let cy = y + h / 2;
+    let r = (w.min(h) / 2 - 1).max(1);
+    pb.filled_circle(cx, cy, r, (190, 70, 60));
+    pb.line(cx - r, cy, cx + r, cy, (40, 30, 30));
+    pb.line(cx, cy - r, cx, cy + r, (40, 30, 30));
+}
+
+fn grate(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, pal: &Palette) {
+    pb.rect_fill(x, y, w, h, (28, 36, 34));
+    let line = palette::scale(pal.wall_edge, 0.8);
+    let mut i = 2;
+    while i < w {
+        pb.rect_fill(x + i, y, 1, h, line);
+        i += 5;
+    }
+    let mut j = 2;
+    while j < h {
+        pb.rect_fill(x, y + j, w, 1, line);
+        j += 5;
+    }
+}
+
+fn table(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32) {
+    let top = (162, 120, 74);
+    let rim = (108, 76, 44);
+    let leg = (78, 54, 32);
+    pb.rect_fill(x, y, w, h, top);
+    // rim
+    pb.line(x, y, x + w - 1, y, rim);
+    pb.line(x, y + h - 1, x + w - 1, y + h - 1, rim);
+    pb.line(x, y, x, y + h - 1, rim);
+    pb.line(x + w - 1, y, x + w - 1, y + h - 1, rim);
+    // plank seams
+    pb.line(x + 1, y + h / 2, x + w - 2, y + h / 2, palette::scale(top, 0.85));
+    // legs (overhead nubs)
+    for (lx, ly) in [(x + 1, y + 1), (x + w - 3, y + 1), (x + 1, y + h - 3), (x + w - 3, y + h - 3)] {
+        pb.rect_fill(lx, ly, 2, 2, leg);
+    }
+}
+
+fn crate_box(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32) {
+    let wood = (152, 112, 66);
+    let edge = (96, 68, 38);
+    pb.rect_fill(x, y, w, h, wood);
+    // border
+    pb.line(x, y, x + w - 1, y, edge);
+    pb.line(x, y + h - 1, x + w - 1, y + h - 1, edge);
+    pb.line(x, y, x, y + h - 1, edge);
+    pb.line(x + w - 1, y, x + w - 1, y + h - 1, edge);
+    // diagonal braces
+    pb.line(x, y, x + w - 1, y + h - 1, edge);
+    pb.line(x + w - 1, y, x, y + h - 1, edge);
+    pb.line(x, y, x + w - 1, y, (186, 146, 92)); // top highlight
+}
+
+fn barrel(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32) {
+    let cx = x + w / 2;
+    let cy = y + h / 2;
+    let r = (w.min(h) / 2).max(1);
+    pb.filled_circle(cx, cy, r, (142, 96, 60));
+    pb.ring(cx, cy, r - 1, (92, 92, 100));
+    pb.ring(cx, cy, (r / 2).max(1), (92, 92, 100));
+    pb.plot(cx - r / 3, cy - r / 3, (200, 160, 120));
+}
+
+fn counter(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32) {
+    pb.rect_fill(x, y, w, h, (150, 152, 160));
+    pb.rect_fill(x, y, w, 1, (205, 210, 220)); // top highlight
+    pb.rect_fill(x, y + h - 1, w, 1, (92, 96, 108)); // base shadow
+    pb.rect_fill(x, y + h / 2, w, 1, (118, 122, 132)); // seam
+}
+
+fn console(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, pal: &Palette) {
+    pb.rect_fill(x, y, w, h, (48, 54, 70));
+    // screen
+    let sc = palette::scale(pal.accent, 0.8);
+    pb.rect_fill(x + 2, y + 2, w - 4, h - 6, palette::scale(sc, 0.4));
+    for gx in (x + 3..x + w - 3).step_by(3) {
+        pb.plot_add(gx, y + 3, palette::scale(sc, 0.5));
+    }
+    // buttons
+    for (i, c) in [(2, (220, 90, 80)), (6, (220, 200, 90)), (10, (110, 220, 130))] {
+        pb.filled_circle(x + i, y + h - 2, 1, c);
+    }
+}
+
+fn tank(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, pal: &Palette) {
+    let cx = x + w / 2;
+    let cy = y + h / 2;
+    let r = (w.min(h) / 2).max(1);
+    pb.filled_circle(cx, cy, r, (70, 120, 140));
+    pb.filled_circle(cx, cy, (r - 2).max(1), palette::scale(pal.accent, 0.85));
+    pb.plot(cx - r / 3, cy - r / 3, (220, 240, 245));
+    pb.ring(cx, cy, r, (40, 70, 84));
 }
 
 struct BugStyle {
@@ -1161,6 +1319,32 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Screenshot tool for the themed props. `RATRUN_DUMP=props cargo test dump_props`.
+    #[test]
+    fn dump_props() {
+        let theme = match std::env::var("RATRUN_DUMP").as_deref() {
+            Ok("props") => Theme::Kitchen,
+            Ok("props_sewer") => Theme::Sewer,
+            Ok("props_lab") => Theme::Lab,
+            _ => return,
+        };
+        let mut w = World::new(theme, 1);
+        w.player.pos = w.level.arena * 0.5;
+        // Full-arena overview.
+        let mut pb = PixelBuffer::new(w.level.arena.x as usize, w.level.arena.y as usize);
+        w.draw(&mut pb);
+        let mut out = format!("P6\n{} {}\n255\n", pb.w, pb.h).into_bytes();
+        for y in 0..pb.h {
+            for x in 0..pb.w {
+                let c = pb.pixel_at(x, y);
+                out.push(c.0);
+                out.push(c.1);
+                out.push(c.2);
+            }
+        }
+        std::fs::write("/tmp/ratrun_props.ppm", out).unwrap();
     }
 
     /// Exercise the boss + every pickup/pool/gem draw branch in one frame.
