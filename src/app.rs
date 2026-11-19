@@ -1,16 +1,13 @@
 //! Top-level application state machine: menus, the active run, and the
 //! transitions between them.
 
-use std::collections::HashSet;
-
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::widgets::Block;
 use ratatui::Frame;
 
 use crate::audio::{AudioEngine, Sfx};
-use crate::game::director;
 use crate::game::enemy::EnemyKind;
 use crate::game::level::Theme;
 use crate::game::loadout::Upgrade;
@@ -22,6 +19,9 @@ use crate::render::framebuffer::PixelBuffer;
 use crate::render::{hud, menu};
 use crate::scores::{ScoreEntry, ScoreTable};
 
+use menu::{HitMap, Target};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Title,
     Story,
@@ -30,6 +30,23 @@ enum Screen {
     LevelUp,
     Paused,
     End, // game over or win (distinguished by world.won)
+}
+
+#[cfg(test)]
+impl Screen {
+    /// Screen name, so tests can assert which screen the app is on without
+    /// deriving `PartialEq` for a production enum.
+    fn name_for_test(&self) -> &'static str {
+        match self {
+            Screen::Title => "Title",
+            Screen::Story => "Story",
+            Screen::MapIntro => "MapIntro",
+            Screen::Playing => "Playing",
+            Screen::LevelUp => "LevelUp",
+            Screen::Paused => "Paused",
+            Screen::End => "End",
+        }
+    }
 }
 
 pub struct App {
@@ -45,6 +62,7 @@ pub struct App {
     levelup_desc: Vec<(String, String, String)>,
     levelup_idx: usize,
     intro_timer: f32,
+    story_time: f32,
     /// Game viewport rect from the last frame, for mouse→world mapping.
     last_game: Rect,
     rat_art: Vec<String>,
@@ -53,16 +71,41 @@ pub struct App {
     recorded: bool,
     new_best: bool,
     last_score: u32,
+    /// Whether finalized runs are written to the score file on disk. Tests turn
+    /// this off so they never touch the user's real high scores.
+    persist: bool,
+    /// Fixed base seed for reproducible runs (tests); `None` uses the clock.
+    fixed_seed: Option<u64>,
+    /// Reused game-viewport pixel buffer, reallocated only on resize.
+    pixels: PixelBuffer,
+    /// Reused per-frame SFX de-duplication buffer.
+    sfx_frame: Vec<Sfx>,
+    /// Reused HUD text buffers, so the status line does not re-format every
+    /// frame.
+    hud: hud::HudState,
+    hits: HitMap,
 }
 
 impl App {
     pub fn new(kitty: bool, audio: Option<AudioEngine>) -> Self {
+        Self::with_options(kitty, audio, ScoreTable::load(), true, None)
+    }
+
+    /// Full constructor: inject the starting score table, whether finalized
+    /// runs persist to disk, and an optional fixed seed (tests).
+    pub fn with_options(
+        kitty: bool,
+        audio: Option<AudioEngine>,
+        scores: ScoreTable,
+        persist: bool,
+        fixed_seed: Option<u64>,
+    ) -> Self {
         let mut app = App {
             screen: Screen::Title,
             should_quit: false,
             input: InputState::new(kitty),
             audio,
-            scores: ScoreTable::load(),
+            scores,
             theme_idx: 0,
             menu_idx: 0,
             world: None,
@@ -70,6 +113,7 @@ impl App {
             levelup_desc: Vec::new(),
             levelup_idx: 0,
             intro_timer: 0.0,
+            story_time: 0.0,
             last_game: Rect::new(0, 0, 0, 0),
             rat_art: Vec::new(),
             rat_art_w: 0,
@@ -77,6 +121,12 @@ impl App {
             recorded: false,
             new_best: false,
             last_score: 0,
+            persist,
+            fixed_seed,
+            pixels: PixelBuffer::new(0, 0),
+            sfx_frame: Vec::new(),
+            hud: hud::HudState::default(),
+            hits: HitMap::default(),
         };
         app.menu_music();
         app
@@ -86,15 +136,18 @@ impl App {
         Theme::all()[self.theme_idx]
     }
 
-    /// Render the RASCII rat logo sized to the title area: as large as the
-    /// width allows, but capped by height so it doesn't crowd the menu.
-    /// Recomputed only when the target width changes.
+    /// Render the RASCII rat logo sized to the title area. The menu and key
+    /// legend are laid out first (see `menu::title_art_width`), so the art is
+    /// fitted — or omitted — in whatever rows remain. Recomputed only when the
+    /// target width changes.
     fn ensure_rat_art(&mut self, area: Rect) {
-        let by_w = area.width as i32 - 8;
-        let by_h = area.height as i32 * 3 / 2; // rat rows ≈ width * 0.29
-        let desired = by_w.min(by_h).clamp(40, 92) as u32;
+        let desired = menu::title_art_width(area).unwrap_or(0);
         if desired != self.rat_art_w {
-            self.rat_art = crate::titleart::rat_lines(desired).unwrap_or_default();
+            self.rat_art = if desired == 0 {
+                Vec::new()
+            } else {
+                crate::titleart::rat_lines(desired).unwrap_or_default()
+            };
             self.rat_art_w = desired;
         }
     }
@@ -147,11 +200,16 @@ impl App {
 
     fn seed(&mut self) -> u64 {
         self.run_counter += 1;
+        let jitter = self.run_counter.wrapping_mul(0x9E3779B97F4A7C15);
+        if let Some(base) = self.fixed_seed {
+            // Deterministic run: same seed sequence every launch.
+            return base ^ jitter;
+        }
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
-        nanos ^ (self.run_counter.wrapping_mul(0x9E3779B97F4A7C15))
+        nanos ^ jitter
     }
 
     fn start_run(&mut self) {
@@ -167,6 +225,53 @@ impl App {
         }
     }
 
+    fn cycle_map(&mut self, backwards: bool) {
+        let n = Theme::all().len();
+        self.theme_idx = (self.theme_idx + if backwards { n - 1 } else { 1 }) % n;
+        self.menu_music();
+        self.sfx(Sfx::UiMove);
+    }
+
+    /// Resolve against the last displayed frame. Stop on the first activation:
+    /// queued presses cannot land on controls revealed by that activation.
+    fn mouse_action(&mut self) -> Option<Target> {
+        if !self.input.pressed.is_empty() {
+            self.hits.hovered = None;
+        }
+        for i in 0..self.input.mouse_events.len() {
+            let ev = self.input.mouse_events[i];
+            let target = self.hits.at(ev.column, ev.row);
+            match ev.kind {
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    if matches!(target, Some(Target::NextMap | Target::PreviousMap)) {
+                        self.menu_idx = 1;
+                        self.cycle_map(ev.kind == MouseEventKind::ScrollUp);
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Right) if target == Some(Target::Dash) => {
+                    return Some(Target::Pause)
+                }
+                MouseEventKind::Moved
+                | MouseEventKind::Drag(_)
+                | MouseEventKind::Down(MouseButton::Left) => {
+                    self.hits.hovered = target;
+                    match target {
+                        Some(Target::Start) => self.menu_idx = 0,
+                        Some(Target::NextMap | Target::PreviousMap) => self.menu_idx = 1,
+                        Some(Target::Quit) => self.menu_idx = 2,
+                        Some(Target::Upgrade(idx)) => self.levelup_idx = idx,
+                        _ => {}
+                    }
+                    if ev.kind == MouseEventKind::Down(MouseButton::Left) && target.is_some() {
+                        return target;
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     pub fn update(&mut self, dt: f32) {
         self.input.tick(dt);
         // Global mute toggle.
@@ -175,60 +280,73 @@ impl App {
                 a.toggle_mute();
             }
         }
+        let previous = self.screen;
+        let click = self.mouse_action();
         match self.screen {
-            Screen::Title => self.update_title(),
-            Screen::Story => self.update_story(),
-            Screen::MapIntro => self.update_mapintro(dt),
-            Screen::Playing => self.update_playing(dt),
-            Screen::LevelUp => self.update_levelup(),
-            Screen::Paused => self.update_paused(),
-            Screen::End => self.update_end(),
-        }
-    }
-
-    fn update_title(&mut self) {
-        if self.input.pressed_char('q') {
-            self.should_quit = true;
-            return;
-        }
-        if self.input.pressed_char('l') {
-            self.sfx(Sfx::UiSelect);
-            self.screen = Screen::Story;
-            return;
-        }
-        if self.input.just_pressed(KeyCode::Up) {
-            self.menu_idx = (self.menu_idx + 2) % 3;
-            self.sfx(Sfx::UiMove);
-        }
-        if self.input.just_pressed(KeyCode::Down) {
-            self.menu_idx = (self.menu_idx + 1) % 3;
-            self.sfx(Sfx::UiMove);
-        }
-        let n = Theme::all().len();
-        if self.input.just_pressed(KeyCode::Left) {
-            self.theme_idx = (self.theme_idx + n - 1) % n;
-            self.menu_music();
-            self.sfx(Sfx::UiMove);
-        }
-        if self.input.just_pressed(KeyCode::Right) {
-            self.theme_idx = (self.theme_idx + 1) % n;
-            self.menu_music();
-            self.sfx(Sfx::UiMove);
-        }
-        if self.input.just_pressed(KeyCode::Enter) {
-            match self.menu_idx {
-                0 => {
-                    self.sfx(Sfx::UiSelect);
-                    self.start_run();
-                }
-                2 => self.should_quit = true,
-                _ => {}
+            Screen::Title => self.update_title(click),
+            Screen::Story => {
+                self.story_time += dt;
+                self.update_story(click);
             }
+            Screen::MapIntro => self.update_mapintro(dt, click),
+            Screen::Playing => self.update_playing(dt, click),
+            Screen::LevelUp => self.update_levelup(click),
+            Screen::Paused => self.update_paused(click),
+            Screen::End => self.update_end(click),
+        }
+        if self.screen != previous {
+            self.hits.clear();
+            self.hits.hovered = None;
         }
     }
 
-    fn update_story(&mut self) {
-        if self.input.just_pressed(KeyCode::Enter)
+    fn update_title(&mut self, click: Option<Target>) {
+        // A click selects its own action, independent of simultaneous keys.
+        let action = if click.is_some() {
+            click
+        } else if self.input.pressed_char('q') {
+            Some(Target::Quit)
+        } else if self.input.pressed_char('l') {
+            Some(Target::Story)
+        } else {
+            if self.input.just_pressed(KeyCode::Up) {
+                self.menu_idx = (self.menu_idx + 2) % 3;
+                self.sfx(Sfx::UiMove);
+            }
+            if self.input.just_pressed(KeyCode::Down) {
+                self.menu_idx = (self.menu_idx + 1) % 3;
+                self.sfx(Sfx::UiMove);
+            }
+            if self.input.just_pressed(KeyCode::Left) {
+                self.cycle_map(true);
+            }
+            if self.input.just_pressed(KeyCode::Right) {
+                self.cycle_map(false);
+            }
+            self.input
+                .just_pressed(KeyCode::Enter)
+                .then(|| [Target::Start, Target::NextMap, Target::Quit][self.menu_idx])
+        };
+        match action {
+            Some(Target::Story) => {
+                self.sfx(Sfx::UiSelect);
+                self.story_time = 0.0;
+                self.screen = Screen::Story;
+            }
+            Some(Target::Quit) => self.should_quit = true,
+            Some(Target::Start) => {
+                self.sfx(Sfx::UiSelect);
+                self.start_run();
+            }
+            Some(Target::NextMap) => self.cycle_map(false),
+            Some(Target::PreviousMap) => self.cycle_map(true),
+            _ => {}
+        }
+    }
+
+    fn update_story(&mut self, click: Option<Target>) {
+        if click == Some(Target::Back)
+            || self.input.just_pressed(KeyCode::Enter)
             || self.input.just_pressed(KeyCode::Esc)
             || self.input.pressed_char('q')
         {
@@ -237,9 +355,10 @@ impl App {
         }
     }
 
-    fn update_mapintro(&mut self, dt: f32) {
+    fn update_mapintro(&mut self, dt: f32, click: Option<Target>) {
         self.intro_timer -= dt;
-        if self.intro_timer <= 0.0
+        if click == Some(Target::Begin)
+            || self.intro_timer <= 0.0
             || self.input.just_pressed(KeyCode::Enter)
             || self.input.just_pressed(KeyCode::Char(' '))
         {
@@ -247,35 +366,45 @@ impl App {
         }
     }
 
-    fn update_playing(&mut self, dt: f32) {
-        if self.input.just_pressed(KeyCode::Esc) || self.input.pressed_char('p') {
+    fn update_playing(&mut self, dt: f32, click: Option<Target>) {
+        if click == Some(Target::Pause)
+            || self.input.just_pressed(KeyCode::Esc)
+            || self.input.pressed_char('p')
+        {
             self.screen = Screen::Paused;
             return;
         }
         let move_dir = self.resolve_move_dir();
-        let dash = self.input.just_pressed(KeyCode::Char(' '));
+        let dash = click == Some(Target::Dash) || self.input.just_pressed(KeyCode::Char(' '));
         let mut open_levelup = false;
         let mut ended = false;
-        let mut events: Vec<Sfx> = Vec::new();
         let mut intensity = 1u32;
         if let Some(w) = self.world.as_mut() {
             w.update(dt, move_dir, dash);
-            // Drain SFX, de-duplicated per frame so a 16-shot nova is one sound.
-            let mut seen = HashSet::new();
+            // Drain SFX into a reused buffer, de-duplicated per frame so a
+            // 16-shot nova is one sound.
+            self.sfx_frame.clear();
             for s in w.sfx.drain(..) {
-                if seen.insert(s) {
-                    events.push(s);
+                if !self.sfx_frame.contains(&s) {
+                    self.sfx_frame.push(s);
                 }
             }
             let boss_alive = w.enemies.iter().any(|e| e.kind == EnemyKind::Boss);
-            intensity = if boss_alive || w.enemies.len() > 45 { 2 } else { 1 };
-            if w.pending_levelups > 0 {
-                open_levelup = true;
-            } else if w.finished() {
+            intensity = if boss_alive || w.enemies.len() > 45 {
+                2
+            } else {
+                1
+            };
+            // A finished run wins over pending upgrades: dying (or winning) on
+            // the same tick as an XP award must not open the level-up cards.
+            if w.finished() {
                 ended = true;
+            } else if w.pending_levelups > 0 {
+                open_levelup = true;
             }
         }
-        for s in events {
+        for i in 0..self.sfx_frame.len() {
+            let s = self.sfx_frame[i];
             self.sfx(s);
         }
         if let Some(a) = self.audio.as_ref() {
@@ -292,14 +421,17 @@ impl App {
     fn open_levelup(&mut self) {
         if let Some(w) = self.world.as_mut() {
             let choices = w.player.loadout.generate_choices(&mut w.rng);
-            self.levelup_desc = choices.iter().map(|c| w.player.loadout.describe(c)).collect();
+            self.levelup_desc = choices
+                .iter()
+                .map(|c| w.player.loadout.describe(c))
+                .collect();
             self.levelup_choices = choices;
             self.levelup_idx = 0;
             self.screen = Screen::LevelUp;
         }
     }
 
-    fn update_levelup(&mut self) {
+    fn update_levelup(&mut self, click: Option<Target>) {
         let n = self.levelup_choices.len().max(1);
         if self.input.just_pressed(KeyCode::Up) || self.input.just_pressed(KeyCode::Left) {
             self.levelup_idx = (self.levelup_idx + n - 1) % n;
@@ -317,6 +449,9 @@ impl App {
         }
         if self.input.just_pressed(KeyCode::Enter) {
             pick = Some(self.levelup_idx);
+        }
+        if let Some(Target::Upgrade(i)) = click {
+            pick = Some(i);
         }
         if let Some(i) = pick {
             self.sfx(Sfx::UiSelect);
@@ -339,22 +474,25 @@ impl App {
         }
     }
 
-    fn update_paused(&mut self) {
-        if self.input.just_pressed(KeyCode::Esc) || self.input.pressed_char('p') {
+    fn update_paused(&mut self, click: Option<Target>) {
+        if click == Some(Target::Resume)
+            || self.input.just_pressed(KeyCode::Esc)
+            || self.input.pressed_char('p')
+        {
             self.screen = Screen::Playing;
         }
-        if self.input.pressed_char('q') {
+        if click == Some(Target::Menu) || self.input.pressed_char('q') {
             self.world = None;
             self.screen = Screen::Title;
             self.menu_music();
         }
     }
 
-    fn update_end(&mut self) {
-        if self.input.just_pressed(KeyCode::Enter) {
+    fn update_end(&mut self, click: Option<Target>) {
+        if click == Some(Target::Restart) || self.input.just_pressed(KeyCode::Enter) {
             self.start_run();
         }
-        if self.input.pressed_char('q') {
+        if click == Some(Target::Menu) || self.input.pressed_char('q') {
             self.world = None;
             self.screen = Screen::Title;
             self.menu_music();
@@ -371,6 +509,8 @@ impl App {
             let bonus_win = if w.won { 5000 } else { 0 };
             let final_score = w.score + bonus_time + bonus_level + bonus_win;
             self.last_score = final_score;
+            // "New high score" means it beat the table's best, computed before
+            // this run's entry is inserted (an under-full table is no free pass).
             self.new_best = self.scores.is_high_score(final_score);
             self.scores.insert(ScoreEntry {
                 score: final_score,
@@ -379,7 +519,9 @@ impl App {
                 map: w.level.theme.name().to_string(),
                 won: w.won,
             });
-            self.scores.save();
+            if self.persist {
+                self.scores.save();
+            }
         }
         self.recorded = true;
         // Music settles, plus a sting.
@@ -394,24 +536,63 @@ impl App {
 
     pub fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
+        self.hits.clear();
         match self.screen {
             Screen::Title => {
                 self.ensure_rat_art(area);
-                menu::draw_title(frame, area, self.theme(), self.menu_idx, &self.scores, &self.rat_art);
+                menu::draw_title(
+                    frame,
+                    area,
+                    self.theme(),
+                    self.menu_idx,
+                    &self.scores,
+                    &self.rat_art,
+                    &mut self.hits,
+                );
             }
             Screen::Story => {
                 self.ensure_rat_art(area);
-                menu::draw_title(frame, area, self.theme(), self.menu_idx, &self.scores, &self.rat_art);
-                menu::draw_story(frame, area);
+                menu::draw_title(
+                    frame,
+                    area,
+                    self.theme(),
+                    self.menu_idx,
+                    &self.scores,
+                    &self.rat_art,
+                    &mut self.hits,
+                );
+                menu::draw_story(frame, area, self.story_time, &mut self.hits);
             }
             Screen::MapIntro | Screen::Playing | Screen::Paused | Screen::LevelUp | Screen::End => {
                 self.draw_game(frame, area);
                 match self.screen {
-                    Screen::MapIntro => menu::draw_map_intro(frame, area, self.theme()),
-                    Screen::Paused => menu::draw_pause(frame, area),
+                    Screen::MapIntro => menu::draw_map_intro(
+                        frame,
+                        area,
+                        self.theme(),
+                        self.world
+                            .as_ref()
+                            .map(|w| {
+                                crate::render::palette::marking(
+                                    w.level.palette.wall_edge,
+                                    w.level.palette.accent,
+                                )
+                            })
+                            .unwrap_or(crate::render::palette::MUTED),
+                        &mut self.hits,
+                    ),
+                    Screen::Paused => menu::draw_pause(frame, area, &mut self.hits),
                     Screen::LevelUp => {
                         let level = self.world.as_ref().map(|w| w.player.level).unwrap_or(1);
-                        menu::draw_levelup(frame, area, level, &self.levelup_desc, self.levelup_idx);
+                        menu::draw_levelup(
+                            frame,
+                            area,
+                            level,
+                            &self.levelup_desc,
+                            &self.levelup_choices,
+                            self.levelup_idx,
+                            &mut self.hits,
+                        );
                     }
                     Screen::End => {
                         if let Some(w) = self.world.as_ref() {
@@ -431,9 +612,11 @@ impl App {
                                 self.new_best,
                                 lore_line,
                                 &self.scores,
+                                &mut self.hits,
                             );
                         }
                     }
+                    Screen::Playing => self.hits.add(area, Target::Dash),
                     _ => {}
                 }
             }
@@ -454,19 +637,24 @@ impl App {
 
         if let Some(w) = self.world.as_mut() {
             if game.width > 0 && game.height > 0 {
-                let mut pb = PixelBuffer::new(game.width as usize, game.height as usize * 2);
-                w.draw(&mut pb);
-                pb.render_to(game, frame.buffer_mut());
+                // Reuse the pixel buffer between frames: only a viewport resize
+                // reallocates it.
+                self.pixels
+                    .resize(game.width as usize, game.height as usize * 2);
+                w.draw(&mut self.pixels);
+                self.pixels.render_to(game, frame.buffer_mut());
             }
         } else {
-            frame.render_widget(Block::default().style(Style::default().bg(Color::Black)), game);
+            frame.render_widget(
+                Block::default().style(Style::default().bg(Color::Black)),
+                game,
+            );
         }
 
         if let Some(w) = self.world.as_ref() {
-            hud::draw_top(frame, top, w);
-            hud::draw_bottom(frame, bottom, w);
+            hud::draw_top(frame, top, w, &mut self.hud);
+            hud::draw_bottom(frame, bottom, w, &mut self.hud);
         }
-        let _ = director::RUN_SECONDS; // keep module referenced for clarity
     }
 }
 
@@ -477,9 +665,22 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
+    /// Fixed base seed so runs in tests are reproducible: level-ups and deaths
+    /// land on the same tick every time. With this seed the weave used by
+    /// `full_run_renders_and_handles_levelup` survives the whole 60 s (and still
+    /// levels up several times).
+    const TEST_SEED: u64 = 2;
+
+    /// Test-app constructor: silent, empty in-memory score table, no persistence,
+    /// deterministic seeds. Nothing here ever reads or writes the user's real
+    /// score file.
+    fn test_app() -> App {
+        App::with_options(false, None, ScoreTable::default(), false, Some(TEST_SEED))
+    }
+
     /// End-to-end harness: drives the real `App` through ratatui's `Terminal`
-    /// + in-memory `Buffer`, exactly like `main`'s loop but without crossterm's
-    /// event source or a TTY. Returns the rendered screen as text.
+    /// and an in-memory `Buffer`, exactly like `main`'s loop but without
+    /// crossterm's event source or a TTY. `frame` returns the screen as text.
     struct Harness {
         app: App,
         terminal: Terminal<TestBackend>,
@@ -487,17 +688,40 @@ mod tests {
 
     impl Harness {
         fn new(w: u16, h: u16) -> Self {
+            Harness::with_app(test_app(), w, h)
+        }
+
+        fn with_app(app: App, w: u16, h: u16) -> Self {
             Harness {
-                app: App::new(false, None), // silent in tests
+                app,
                 terminal: Terminal::new(TestBackend::new(w, h)).unwrap(),
             }
         }
 
+        /// Start a run and skip the map intro, landing in `Playing`.
+        fn enter_playing(&mut self) {
+            self.frame(&[]); // title
+            self.frame(&[KeyCode::Enter]); // START RUN -> MapIntro
+            self.frame(&[KeyCode::Enter]); // skip intro -> Playing
+        }
+
         /// Advance one frame, injecting the given keys this frame.
         fn frame(&mut self, keys: &[KeyCode]) -> String {
+            self.events(keys, &[])
+        }
+
+        fn events(&mut self, keys: &[KeyCode], mouse: &[(MouseEventKind, (u16, u16))]) -> String {
             self.app.input.begin_frame();
             for k in keys {
                 self.app.input.handle_key(KeyEvent::from(*k));
+            }
+            for &(kind, (column, row)) in mouse {
+                self.app.input.handle_mouse(MouseEvent {
+                    kind,
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                });
             }
             self.app.update(1.0 / 60.0);
             self.terminal.draw(|f| self.app.render(f)).unwrap();
@@ -508,9 +732,46 @@ mod tests {
             self.app.input.handle_mouse(MouseEvent {
                 kind: MouseEventKind::Moved,
                 column: col,
-                row: row,
+                row,
                 modifiers: KeyModifiers::NONE,
             });
+        }
+
+        /// Locate the leftmost cell of visible text, independently of the hit map.
+        fn locate(&self, text: &str) -> (u16, u16) {
+            let buf = self.terminal.backend().buffer();
+            for y in 0..buf.area.height {
+                let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+                if let Some(byte) = row.find(text) {
+                    return (row[..byte].chars().count() as u16, y);
+                }
+            }
+            panic!("{text:?} is missing from the frame")
+        }
+
+        fn click(&mut self, text: &str) {
+            let pos = self.locate(text);
+            self.events(&[], &[(MouseEventKind::Down(MouseButton::Left), pos)]);
+        }
+
+        fn show_upgrade_cards(&mut self) {
+            use crate::game::loadout::PassiveKind;
+            self.enter_playing();
+            self.app.world.as_mut().unwrap().pending_levelups = 1;
+            self.frame(&[]);
+            let loadout = &self.app.world.as_ref().unwrap().player.loadout;
+            self.app.levelup_choices = vec![
+                Upgrade::Passive(PassiveKind::Damage),
+                Upgrade::Passive(PassiveKind::Armor),
+                Upgrade::Passive(PassiveKind::Magnet),
+            ];
+            self.app.levelup_desc = self
+                .app
+                .levelup_choices
+                .iter()
+                .map(|up| loadout.describe(up))
+                .collect();
+            self.frame(&[]);
         }
 
         fn player_x(&self) -> f32 {
@@ -526,6 +787,155 @@ mod tests {
                 .map(|c| c.symbol())
                 .collect()
         }
+    }
+
+    #[test]
+    fn mouse_title_map_story_and_quit() {
+        for size in [(57, 20), (80, 16)] {
+            let mut h = Harness::new(size.0, size.1);
+            h.frame(&[]);
+            let name = h.locate("Sewer");
+            h.events(&[], &[(MouseEventKind::Moved, name)]);
+            assert_eq!(h.app.menu_idx, 1);
+            h.click("‹");
+            assert_eq!(h.app.theme(), Theme::Lab);
+            h.click("›");
+            h.click("Sewer");
+            assert_eq!(h.app.theme(), Theme::Kitchen);
+            let pos = h.locate("Kitchen");
+            h.events(&[], &[(MouseEventKind::ScrollUp, pos)]);
+            assert_eq!(h.app.theme(), Theme::Sewer);
+            h.events(
+                &[],
+                &[
+                    (MouseEventKind::ScrollDown, pos),
+                    (MouseEventKind::ScrollDown, pos),
+                ],
+            );
+            assert_eq!(h.app.theme(), Theme::Lab);
+            h.events(&[], &[(MouseEventKind::ScrollUp, (0, 0))]);
+            assert_eq!(h.app.theme(), Theme::Lab);
+            h.click("L story");
+            assert!(matches!(h.app.screen, Screen::Story));
+            h.click("back");
+            assert!(matches!(h.app.screen, Screen::Title));
+            h.click("QUIT");
+            assert!(h.app.should_quit);
+        }
+    }
+
+    #[test]
+    fn mouse_only_run_pause_and_end_actions() {
+        let left = MouseEventKind::Down(MouseButton::Left);
+        let right = MouseEventKind::Down(MouseButton::Right);
+        for size in [(57, 20), (80, 16)] {
+            let mut h = Harness::new(size.0, size.1);
+            h.frame(&[]);
+            let start = h.locate("START RUN");
+            h.events(&[], &[(left, start), (left, start)]);
+            assert!(matches!(h.app.screen, Screen::MapIntro));
+            h.events(&[], &[(left, (0, 0))]);
+            assert!(matches!(h.app.screen, Screen::MapIntro));
+            h.click("begin");
+            assert!(matches!(h.app.screen, Screen::Playing));
+            assert_eq!(h.app.world.as_ref().unwrap().player.dash_cd, 0.0);
+            let field = h.locate("▀");
+            h.events(&[], &[(left, field)]);
+            assert!(h.app.world.as_ref().unwrap().player.dash_cd > 0.0);
+            h.events(&[], &[(right, field)]);
+            assert!(matches!(h.app.screen, Screen::Paused));
+            h.events(&[], &[(left, (0, 0))]);
+            assert!(matches!(h.app.screen, Screen::Paused));
+            h.click("resume");
+            assert!(matches!(h.app.screen, Screen::Playing));
+            h.events(&[], &[(right, field)]);
+            h.click("Q to menu");
+            assert!(matches!(h.app.screen, Screen::Title));
+            for button in ["restart", "Q to menu"] {
+                if matches!(h.app.screen, Screen::Title) {
+                    h.click("START RUN");
+                }
+                h.click("begin");
+                h.app.world.as_mut().unwrap().game_over = true;
+                h.frame(&[]);
+                assert!(matches!(h.app.screen, Screen::End));
+                h.click(button);
+                assert_eq!(
+                    h.app.screen.name_for_test(),
+                    if button == "restart" {
+                        "MapIntro"
+                    } else {
+                        "Title"
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mouse_card_body_picks_and_hover_works_with_keyboard() {
+        let left = MouseEventKind::Down(MouseButton::Left);
+        for size in [(57, 20), (80, 16)] {
+            for keyboard in [false, true] {
+                let mut h = Harness::new(size.0, size.1);
+                h.show_upgrade_cards();
+                let effect = h.locate("+1 armor");
+                // Blank padding at the right of the effect is also on the card.
+                let body = (effect.0 + 37, effect.1);
+                h.events(&[], &[(MouseEventKind::Moved, body)]);
+                assert_eq!(h.app.levelup_idx, 1);
+                assert!(h.screen_text().contains("◆  02   Thick Hide"));
+                if keyboard {
+                    h.frame(&[KeyCode::Down]);
+                    h.events(&[], &[(MouseEventKind::Moved, body)]);
+                    assert_eq!(h.app.levelup_idx, 2, "resting pointer stole selection");
+                    h.events(&[], &[(MouseEventKind::Moved, effect)]);
+                    h.frame(&[KeyCode::Enter]);
+                } else {
+                    h.events(&[], &[(left, body), (left, body)]);
+                }
+                assert!(matches!(h.app.screen, Screen::Playing));
+                let player = &h.app.world.as_ref().unwrap().player;
+                assert_eq!(player.loadout.stats.armor, 1.0);
+                assert_eq!(player.dash_cd, 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn resized_title_uses_the_displayed_row_and_press_position() {
+        let mut h = Harness::new(140, 45);
+        h.frame(&[]);
+        let old = h.locate("START RUN");
+        h.terminal.backend_mut().resize(57, 20);
+        h.frame(&[]);
+        let start = h.locate("START RUN");
+        assert_ne!(old, start);
+        let left = MouseEventKind::Down(MouseButton::Left);
+        h.events(&[], &[(left, old)]);
+        assert!(matches!(h.app.screen, Screen::Title));
+        let quit = h.locate("QUIT");
+        h.events(&[], &[(left, start), (MouseEventKind::Moved, quit)]);
+        assert!(matches!(h.app.screen, Screen::MapIntro));
+        assert!(!h.app.should_quit);
+    }
+
+    #[test]
+    fn only_left_press_activates_a_menu_target() {
+        let mut h = Harness::new(57, 20);
+        h.frame(&[]);
+        let start = h.locate("START RUN");
+        for kind in [
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Down(MouseButton::Middle),
+            MouseEventKind::Down(MouseButton::Right),
+        ] {
+            h.events(&[], &[(kind, start)]);
+            assert!(matches!(h.app.screen, Screen::Title));
+        }
+        h.events(&[], &[(MouseEventKind::Down(MouseButton::Left), (0, 0))]);
+        assert!(matches!(h.app.screen, Screen::Title));
     }
 
     #[test]
@@ -655,7 +1065,10 @@ mod tests {
             h.frame(&[]);
         }
         let x1 = h.player_x();
-        assert!(x1 > x0 + 10.0, "player should chase the cursor right ({x0}→{x1})");
+        assert!(
+            x1 > x0 + 10.0,
+            "player should chase the cursor right ({x0}→{x1})"
+        );
 
         // Now far left → player reverses.
         for _ in 0..120 {
@@ -663,7 +1076,10 @@ mod tests {
             h.frame(&[]);
         }
         let x2 = h.player_x();
-        assert!(x2 < x1 - 10.0, "player should chase the cursor left ({x1}→{x2})");
+        assert!(
+            x2 < x1 - 10.0,
+            "player should chase the cursor left ({x1}→{x2})"
+        );
     }
 
     #[test]
@@ -703,5 +1119,279 @@ mod tests {
         assert!(saw_hud, "HUD should render the score readout");
         assert!(saw_levelup, "player should have leveled up within 60s");
         assert!(!h.app.should_quit);
+        // The rat may or may not survive the 60 s; either way tests never
+        // persist scores to disk.
+        assert!(!h.app.persist);
+    }
+
+    /// A small window (the size the rat art no longer fits in) shows the pixel
+    /// wordmark and the short legend, with nothing clipped at the right edge.
+    #[test]
+    fn small_title_shows_wordmark_and_unclipped_legend() {
+        let mut h = Harness::new(57, 20);
+        let text = h.frame(&[]);
+        if std::env::var("RATRUN_DUMP").is_ok() {
+            println!("{text}");
+        }
+        assert!(
+            text.contains("██▀█▄ ▄█▀█▄ █████"),
+            "wordmark top row missing"
+        );
+        assert!(text.contains("START RUN"));
+        assert!(text.contains("M mute"), "legend line 1 clipped");
+        assert!(text.contains("Q quit"), "legend line 2 clipped");
+    }
+
+    /// Item 4: the menu and legend are reserved before the art, so short
+    /// terminals keep them.
+    #[test]
+    fn title_keeps_menu_on_short_terminals() {
+        for (w, h) in [(80u16, 16u16), (80, 24)] {
+            let mut hh = Harness::new(w, h);
+            let text = hh.frame(&[]);
+            assert!(
+                text.contains("START RUN"),
+                "{w}x{h} title should still show START RUN"
+            );
+            assert!(
+                text.contains("Map"),
+                "{w}x{h} title should show the map row"
+            );
+            assert!(text.contains("QUIT"), "{w}x{h} title should show QUIT");
+            assert!(
+                text.contains("Enter confirm"),
+                "{w}x{h} title should keep the key legend"
+            );
+        }
+    }
+
+    /// Item 5: Enter on the "Map" row cycles the map instead of doing nothing.
+    #[test]
+    fn enter_on_map_row_cycles_theme() {
+        let mut h = Harness::new(80, 40);
+        h.frame(&[]);
+        h.frame(&[KeyCode::Down]); // select the Map row
+        assert_eq!(h.app.menu_idx, 1);
+        let before = h.app.theme_idx;
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.theme_idx, (before + 1) % Theme::all().len());
+        assert!(
+            matches!(h.app.screen, Screen::Title),
+            "must stay on the title"
+        );
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.theme_idx, (before + 2) % Theme::all().len());
+    }
+
+    /// Item 11: pause freezes the simulation and resumes, and Q bails to the menu.
+    #[test]
+    fn pause_freezes_run_and_resumes() {
+        let mut h = Harness::new(80, 30);
+        h.enter_playing();
+        for _ in 0..10 {
+            h.frame(&[]);
+        }
+        let t0 = h.app.world.as_ref().unwrap().elapsed;
+        h.frame(&[KeyCode::Esc]);
+        assert!(matches!(h.app.screen, Screen::Paused));
+        for _ in 0..30 {
+            h.frame(&[]);
+        }
+        let t1 = h.app.world.as_ref().unwrap().elapsed;
+        assert_eq!(t1, t0, "a paused run must not advance");
+
+        h.frame(&[KeyCode::Char('p')]);
+        assert!(matches!(h.app.screen, Screen::Playing));
+        h.frame(&[]);
+        assert!(
+            h.app.world.as_ref().unwrap().elapsed > t0,
+            "resumed run should keep ticking"
+        );
+
+        h.frame(&[KeyCode::Char('p')]);
+        assert!(matches!(h.app.screen, Screen::Paused));
+        h.frame(&[KeyCode::Char('q')]);
+        assert!(matches!(h.app.screen, Screen::Title));
+        assert!(h.app.world.is_none(), "quitting drops the run");
+    }
+
+    /// Item 11: the end screen renders, records the score in memory, and Enter
+    /// starts a fresh run.
+    #[test]
+    fn end_screen_records_and_restarts() {
+        let mut h = Harness::new(100, 40);
+        h.enter_playing();
+        for _ in 0..30 {
+            h.frame(&[]);
+        }
+        h.app.world.as_mut().unwrap().game_over = true;
+        let text = h.frame(&[]);
+        assert!(matches!(h.app.screen, Screen::End));
+        assert!(text.contains("YOU DIED"), "end screen should render");
+        assert!(h.app.recorded, "the run should be finalized once");
+        assert!(h.app.last_score > 0);
+        assert!(
+            h.app.new_best,
+            "the first score on an empty table is a personal best"
+        );
+        assert_eq!(h.app.scores.entries.len(), 1);
+
+        h.frame(&[KeyCode::Enter]); // restart
+        assert!(matches!(h.app.screen, Screen::MapIntro));
+        let w = h.app.world.as_ref().unwrap();
+        assert_eq!(w.elapsed, 0.0, "restart begins a fresh run");
+        assert_eq!(w.kills, 0);
+        assert!(!h.app.recorded);
+        assert!(!h.app.new_best);
+    }
+
+    /// Item 2: "NEW HIGH SCORE" requires beating the previous best, not merely
+    /// fitting in a table that still has room.
+    #[test]
+    fn new_best_requires_beating_previous_best() {
+        let mut table = ScoreTable::default();
+        table.insert(ScoreEntry {
+            score: 9_000,
+            time: 60.0,
+            level: 4,
+            map: "Sewer".into(),
+            won: false,
+        });
+        let app = App::with_options(false, None, table, false, Some(TEST_SEED));
+        let mut h = Harness::with_app(app, 100, 40);
+        h.enter_playing();
+        for _ in 0..30 {
+            h.frame(&[]);
+        }
+        h.app.world.as_mut().unwrap().game_over = true;
+        let text = h.frame(&[]);
+        assert!(matches!(h.app.screen, Screen::End));
+        assert!(
+            h.app.last_score < 9_000,
+            "this short run scores well under the best"
+        );
+        assert!(
+            !h.app.new_best,
+            "a low-scoring run is not a new best just because the table has room"
+        );
+        assert!(!text.contains("NEW HIGH SCORE"), "banner must not be drawn");
+        assert_eq!(h.app.scores.entries.len(), 2, "but it is still recorded");
+    }
+
+    /// Item 3: dying on the same tick as an XP award must end the run, not open
+    /// upgrade cards (which could heal the dead player).
+    #[test]
+    fn finished_run_beats_pending_levelup() {
+        let mut h = Harness::new(80, 30);
+        h.enter_playing();
+        if let Some(w) = h.app.world.as_mut() {
+            w.game_over = true;
+            w.pending_levelups = 1;
+        }
+        h.frame(&[]);
+        assert!(
+            matches!(h.app.screen, Screen::End),
+            "a finished run must not open the level-up screen"
+        );
+        assert!(h.app.recorded);
+    }
+
+    /// Item 6: the pixel buffer is allocated once per viewport size, not once
+    /// per frame.
+    #[test]
+    fn pixel_buffer_is_reused_between_frames() {
+        let mut h = Harness::new(100, 40);
+        h.enter_playing();
+        h.frame(&[]);
+        let ptr = h.app.pixels.px_ptr_for_test();
+        let (w, hgt) = (h.app.pixels.w, h.app.pixels.h);
+        assert_eq!(w, 100, "buffer spans the game viewport width");
+        assert_eq!(hgt, 38 * 2, "two pixels per viewport row");
+
+        for _ in 0..5 {
+            h.frame(&[]);
+        }
+        assert_eq!(
+            h.app.pixels.px_ptr_for_test(),
+            ptr,
+            "same-size frames must not reallocate the pixel buffer"
+        );
+
+        // A viewport change does resize it.
+        h.terminal.backend_mut().resize(80, 30);
+        h.frame(&[]);
+        assert_eq!((h.app.pixels.w, h.app.pixels.h), (80, 28 * 2));
+    }
+
+    /// Item 1: the test constructor is pinned to a fixed seed sequence and keeps
+    /// scores in memory only.
+    #[test]
+    fn test_app_is_deterministic_and_does_not_persist() {
+        let mut a = Harness::new(80, 30);
+        let mut b = Harness::new(80, 30);
+        a.enter_playing();
+        b.enter_playing();
+        for _ in 0..240 {
+            a.frame(&[KeyCode::Right]);
+            b.frame(&[KeyCode::Right]);
+        }
+        assert_eq!(a.player_x(), b.player_x());
+        let (wa, wb) = (a.app.world.as_ref().unwrap(), b.app.world.as_ref().unwrap());
+        assert_eq!(wa.elapsed, wb.elapsed);
+        assert_eq!(wa.score, wb.score);
+        assert_eq!(wa.enemies.len(), wb.enemies.len());
+
+        // A finalized run updates the in-memory table only.
+        a.app.world.as_mut().unwrap().game_over = true;
+        a.frame(&[]);
+        assert!(a.app.recorded);
+        assert_eq!(a.app.scores.entries.len(), 1);
+    }
+
+    /// Item 13: every screen survives a degenerate terminal (0×0, 0×5, 5×0, 1×1)
+    /// — update + render, not just layout.
+    #[test]
+    fn degenerate_terminal_sizes_do_not_panic() {
+        for (w, h) in [(0u16, 0u16), (0, 5), (5, 0), (1, 1), (1, 3), (3, 1), (3, 3)] {
+            for target in [
+                "Title", "Story", "MapIntro", "Playing", "LevelUp", "Paused", "End",
+            ] {
+                let mut hh = Harness::with_app(test_app(), w, h);
+                hh.frame(&[]);
+                match target {
+                    "Title" => {}
+                    "Story" => {
+                        hh.frame(&[KeyCode::Char('l')]);
+                    }
+                    "MapIntro" => {
+                        hh.frame(&[KeyCode::Enter]);
+                    }
+                    "Playing" => hh.enter_playing(),
+                    "LevelUp" => {
+                        hh.enter_playing();
+                        hh.app.world.as_mut().unwrap().pending_levelups = 1;
+                        hh.frame(&[]);
+                    }
+                    "Paused" => {
+                        hh.enter_playing();
+                        hh.frame(&[KeyCode::Esc]);
+                    }
+                    _ => {
+                        hh.enter_playing();
+                        hh.app.world.as_mut().unwrap().game_over = true;
+                        hh.frame(&[]);
+                    }
+                }
+                assert_eq!(
+                    hh.app.screen.name_for_test(),
+                    target,
+                    "should be on {target} at {w}x{h}"
+                );
+                // Two more frames: the update and render paths run again.
+                hh.frame(&[]);
+                hh.frame(&[]);
+                assert_eq!(hh.app.screen.name_for_test(), target, "{target} at {w}x{h}");
+            }
+        }
     }
 }

@@ -122,9 +122,14 @@ impl Weapon {
         self.kind.base_damage() * (1.0 + 0.25 * (self.level - 1) as f32)
     }
 
-    /// Cooldown shrinks slightly with level.
+    /// Cooldown shrinks slightly with level (6% faster per level).
+    ///
+    /// No floor is needed: the factor only reaches 0.76 at `max_level()`, and
+    /// `level` is capped there by the upgrade loop, so a clamp could never
+    /// bind. (Clamping the *factor* as before looked like a safety net but was
+    /// dead code — 1.0 - 0.06 * 4 = 0.76 never drops under 0.5.)
     pub fn cooldown(&self) -> f32 {
-        self.kind.base_cooldown() * (1.0 - 0.06 * (self.level - 1) as f32).max(0.5)
+        self.kind.base_cooldown() * (1.0 - 0.06 * (self.level - 1) as f32)
     }
 
     /// Extra projectiles granted by level (for multi-shot weapons).
@@ -134,6 +139,46 @@ impl Weapon {
             WeaponKind::SqueakNova => 6 + 2 * self.level as i32,
             WeaponKind::SporeOrbit => 2 + self.level as i32,
             _ => self.level as i32,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cooldown_shrinks_6_percent_per_level() {
+        for kind in WeaponKind::all() {
+            let base = kind.base_cooldown();
+            let mut prev = f32::INFINITY;
+            for level in 1..=kind.max_level() {
+                let mut w = Weapon::new(kind);
+                w.level = level;
+                let expect = base * (1.0 - 0.06 * (level - 1) as f32);
+                assert!(
+                    (w.cooldown() - expect).abs() < 1e-6,
+                    "{kind:?} L{level}: {} != {expect}",
+                    w.cooldown()
+                );
+                assert!(w.cooldown() < prev, "{kind:?} L{level} must be faster");
+                prev = w.cooldown();
+            }
+            // The removed clamp was unreachable: the factor bottoms out at
+            // 0.76, well above the old 0.5 floor.
+            let mut w = Weapon::new(kind);
+            w.level = kind.max_level();
+            assert!((w.cooldown() / base - 0.76).abs() < 1e-6);
+            assert!(w.cooldown() > base * 0.5);
+        }
+    }
+
+    #[test]
+    fn level_one_cooldown_is_the_base() {
+        for kind in WeaponKind::all() {
+            let w = Weapon::new(kind);
+            assert_eq!(w.cooldown(), kind.base_cooldown());
+            assert_eq!(w.damage(), kind.base_damage());
         }
     }
 }

@@ -57,3 +57,16 @@ pub fn ramp(stops: &[(f32, Rgb)], t: f32) -> Rgb {
     }
     stops[stops.len() - 1].1
 }
+
+/// UI ink takes its highlights from the rat's coat and exposed tail.
+pub const COAT: Color = Color::Rgb(235, 232, 232);
+pub const TAIL: Color = Color::Rgb(239, 168, 185);
+pub const MUTED: Color = Color::Rgb(156, 167, 169);
+pub const EDGE: Color = Color::Rgb(82, 96, 100);
+pub const PLATE: Color = Color::Rgb(19, 24, 27);
+pub const TRACK: Color = Color::Rgb(44, 52, 56);
+
+/// Painted map markings sit between the kerb highlight and the signal colour.
+pub fn marking(edge: Rgb, accent: Rgb) -> Color {
+    to_color(mix(edge, accent, 0.45))
+}

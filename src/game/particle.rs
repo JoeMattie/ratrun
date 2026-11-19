@@ -1,9 +1,11 @@
 //! Particle system — the visual "juice". Bursts, trails, explosions.
 
+use std::collections::VecDeque;
+
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette::{self, Rgb};
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 #[derive(Clone, Copy)]
 pub enum Ramp {
@@ -36,10 +38,7 @@ impl Ramp {
                 ],
                 t,
             ),
-            Ramp::Smoke => palette::ramp(
-                &[(0.0, (120, 120, 130)), (1.0, (24, 24, 28))],
-                t,
-            ),
+            Ramp::Smoke => palette::ramp(&[(0.0, (120, 120, 130)), (1.0, (24, 24, 28))], t),
             Ramp::Gem => palette::ramp(
                 &[
                     (0.0, (220, 255, 255)),
@@ -66,24 +65,34 @@ pub struct Particle {
 
 #[derive(Default)]
 pub struct Particles {
-    pub items: Vec<Particle>,
+    /// Insertion order: front = oldest, back = newest.
+    pub items: VecDeque<Particle>,
     cap: usize,
 }
 
 impl Particles {
     pub fn new(cap: usize) -> Self {
         Self {
-            items: Vec::with_capacity(1024),
+            // Size the buffer up front: a Nuke on a full horde pushes the
+            // whole cap in a single tick and must not reallocate.
+            items: VecDeque::with_capacity(cap),
             cap,
         }
     }
 
     pub fn push(&mut self, p: Particle) {
-        if self.items.len() >= self.cap {
-            // Oldest-first recycling keeps the framerate bounded.
-            self.items.remove(0);
+        // `Particles::default()` has no capacity to store anything in (and
+        // `pop_front` on the empty deque below would be wrong either way).
+        if self.cap == 0 {
+            return;
         }
-        self.items.push(p);
+        if self.items.len() >= self.cap {
+            // Oldest-first recycling keeps the framerate bounded, in O(1):
+            // `remove(0)` here was O(cap) per push, i.e. quadratic once a Nuke
+            // tops the buffer up.
+            self.items.pop_front();
+        }
+        self.items.push_back(p);
     }
 
     pub fn len(&self) -> usize {
@@ -104,11 +113,14 @@ impl Particles {
         additive: bool,
     ) {
         for _ in 0..n {
-            let a = rng.gen_range(0.0..std::f32::consts::TAU);
-            let s = speed * rng.gen_range(0.3..1.0);
-            let l = life * rng.gen_range(0.6..1.2);
+            let a = rng.random_range(0.0..std::f32::consts::TAU);
+            let s = speed * rng.random_range(0.3..1.0);
+            let l = life * rng.random_range(0.6..1.2);
             let jitter = if spread > 0.0 {
-                Vec2::new(rng.gen_range(-spread..spread), rng.gen_range(-spread..spread))
+                Vec2::new(
+                    rng.random_range(-spread..spread),
+                    rng.random_range(-spread..spread),
+                )
             } else {
                 Vec2::ZERO
             };
@@ -139,9 +151,9 @@ impl Particles {
     ) {
         let base = dir.angle();
         for _ in 0..n {
-            let a = base + rng.gen_range(-0.5..0.5);
-            let s = speed * rng.gen_range(0.4..1.1);
-            let l = life * rng.gen_range(0.5..1.0);
+            let a = base + rng.random_range(-0.5..0.5);
+            let s = speed * rng.random_range(0.4..1.1);
+            let l = life * rng.random_range(0.5..1.0);
             self.push(Particle {
                 pos,
                 vel: Vec2::from_angle(a) * s,
@@ -195,6 +207,45 @@ mod tests {
             ps.burst(&mut rng, Vec2::ZERO, 20, 40.0, 1.0, Ramp::Spark, 1.0, true);
         }
         assert!(ps.len() <= 50);
+    }
+
+    fn particle(life: f32) -> Particle {
+        Particle {
+            pos: Vec2::ZERO,
+            vel: Vec2::ZERO,
+            life,
+            max_life: life,
+            drag: 0.0,
+            gravity: 0.0,
+            ramp: Ramp::Spark,
+            additive: true,
+        }
+    }
+
+    #[test]
+    fn oldest_particles_are_evicted_first() {
+        let mut ps = Particles::new(3);
+        for i in 0..6 {
+            ps.push(particle(1.0 + i as f32));
+        }
+        assert_eq!(ps.len(), 3);
+        let lives: Vec<f32> = ps.items.iter().map(|p| p.life).collect();
+        assert_eq!(lives, vec![4.0, 5.0, 6.0], "only the newest survive");
+    }
+
+    #[test]
+    fn zero_cap_drops_pushes_instead_of_panicking() {
+        let mut ps = Particles::default();
+        assert_eq!(ps.len(), 0);
+        ps.push(particle(1.0));
+        assert_eq!(ps.len(), 0);
+        assert_eq!(ps.cap, 0);
+    }
+
+    #[test]
+    fn cap_is_allocated_up_front() {
+        let ps = Particles::new(500);
+        assert!(ps.items.capacity() >= 500);
     }
 
     #[test]

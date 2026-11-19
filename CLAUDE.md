@@ -26,7 +26,7 @@ cargo clippy             # lint (keep clean)
 
 Flow: `main.rs` (terminal lifecycle + 60 FPS loop) → `app.rs` (`App` state machine) → `game/world.rs` (`World`, the whole simulation).
 
-- **`main.rs`** owns terminal setup/teardown (raw mode, alt screen, Kitty keyboard flags, panic-safe restore via a `KITTY_PUSHED` static + panic hook), polls crossterm events into `InputState`, computes `dt`, and calls `app.update(dt)` + `terminal.draw(app.render)`.
+- **`main.rs`** owns terminal setup/teardown (raw mode, alt screen, Kitty keyboard flags, focus reporting, restore via a drop guard + `KITTY_PUSHED` static + panic hook), reads crossterm events on a joined input thread into `InputState`, wraps each frame in a synchronized update (DEC 2026), computes `dt`, and calls `app.update(dt)` + `terminal.draw(app.render)`.
 - **`app.rs`** is the only place that knows about screens (`Title / Story / MapIntro / Playing / LevelUp / Paused / End`). It drives the world during `Playing`, freezes it during overlays, owns menu/level-up selection state, finalizes scores, and bridges to audio.
 - **`game/world.rs`** owns every entity in plain `Vec`s (no ECS) and a single `update(dt, move_dir, dash)` that runs the whole tick in order: player → director spawns → enemy steering → spatial-grid build → separation → weapon fire → bullets/pools → collisions → death reaping → gems/pickups → particles → shake. `draw(&mut PixelBuffer)` renders the world; the App composites HUD/menus around it.
 
@@ -43,7 +43,7 @@ Flow: `main.rs` (terminal lifecycle + 60 FPS loop) → `app.rs` (`App` state mac
 - **Audio (`audio.rs`)** is fully procedural (no asset files) and optional: `AudioEngine::new()` returns `None` if there's no device, and everything no-ops silently. The sim never calls audio directly — `World` pushes `Sfx` enum values into `world.sfx`; the App **drains and de-duplicates them per frame** (so a 16-shot nova is one sound) and plays them, and sets music intensity. Music is a custom infinite `rodio::Source` (`MusicSynth`) with per-theme key/scale/pattern; an `Arc<AtomicU32>` intensity gates the lead + hat layers.
 - **Spawning (`game/director.rs`)** is time-curve based, not fixed waves: `spawn_interval`/`pulse_count`/`hp_mult`/`pick_kind` all read `elapsed`; a boss spawns near the end.
 - **Progression (`game/loadout.rs`)** holds owned weapons + passive `Stats`. On level-up the World sets `pending_levelups`; the App opens the `LevelUp` screen, calls `generate_choices` (1-of-3) and `apply`. Weapon damage/cooldown/projectile-count scale with level inside `game/weapon.rs`; firing patterns live in `World::fire_one`.
-- **Input (`input.rs`)** tracks held movement via the Kitty keyboard protocol (real press/release) when available, else a short auto-repeat **grace window** fallback. Discrete presses (menus, dash, mute) come from a per-frame `pressed` list.
+- **Input (`input.rs`)** tracks held movement via the Kitty keyboard protocol (real press/release; Ghostty is the primary target terminal and implements it, as does Kitty) when available, else a short auto-repeat **grace window** fallback. Discrete presses (menus, dash, mute) come from a per-frame `pressed` list.
 - **Lore (`lore.rs`)** is pure content (intro crawl, per-`Theme` map-intro + victory lines, defeat line); weapon/passive flavor strings live on their enums and surface on level-up cards.
 
 ### Where to add content

@@ -1,14 +1,25 @@
 //! Input handling. Movement keys need to be treated as "held", but terminals
 //! only reliably report key *presses* (plus auto-repeat). When the Kitty
-//! keyboard protocol is available we get release events too, so a key stays
-//! down until released. Otherwise we fall back to a short grace window that
-//! auto-repeat keeps refreshing.
+//! keyboard protocol (Ghostty, Kitty and others) is available we get release
+//! events too, so a key stays down until released. Otherwise we fall back to a
+//! short grace window that auto-repeat keeps refreshing.
+//!
+//! Under the protocol's `REPORT_EVENT_TYPES` flag, letter keys report releases;
+//! Enter, Tab and Backspace do not unless report-all-keys is also pushed. The
+//! game only uses those as discrete presses, so it never relies on their
+//! release events.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::math::Vec2;
 
+/// Grace given to a key that is being refreshed by auto-repeat.
 const GRACE: f32 = 0.13;
+/// Grace given to the *first* press of a direction. Without the protocol a
+/// terminal only reports presses plus auto-repeat, and the OS initial repeat
+/// delay is typically 250–600 ms: with only `GRACE` the rat would move for
+/// 0.13 s, stop, then start again once repeats begin.
+const FIRST_PRESS_GRACE: f32 = 0.6;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Dir {
@@ -18,11 +29,24 @@ enum Dir {
     Right,
 }
 
+/// Whether a key event should be recorded as a discrete press.
+///
+/// A terminal without the protocol reports auto-repeat as `Press`; with it the
+/// repeat arrives as `Repeat`. Recording a repeated Space (dash) as a press
+/// makes holding it behave the same in both modes, while menu keys stay
+/// single-shot because their `Repeat` events are never recorded.
+fn records_press(ev: KeyEvent) -> bool {
+    ev.kind == KeyEventKind::Press
+        || (ev.kind == KeyEventKind::Repeat && ev.code == KeyCode::Char(' '))
+}
+
 pub struct InputState {
     grace: [f32; 4],
     pub kitty: bool,
     /// Discrete key presses captured this frame (menus, pause, dash, quit).
     pub pressed: Vec<KeyEvent>,
+    /// Ordered UI gestures for this frame, retaining the position of each press.
+    pub mouse_events: Vec<MouseEvent>,
     /// Latest mouse cursor cell (column, row), persisted across frames.
     pub mouse_pos: Option<(u16, u16)>,
     /// True when the mouse was the most recent movement input. A movement
@@ -37,15 +61,18 @@ impl InputState {
             kitty,
             pressed: Vec::new(),
             mouse_pos: None,
+            mouse_events: Vec::new(),
             prefer_mouse: false,
         }
     }
 
     pub fn begin_frame(&mut self) {
         self.pressed.clear();
+        self.mouse_events.clear();
     }
 
-    /// Decay held-key grace timers (no-op when kitty release events are used).
+    /// Decay held-key grace timers (no-op when the protocol's release events
+    /// are used).
     pub fn tick(&mut self, dt: f32) {
         if !self.kitty {
             for g in self.grace.iter_mut() {
@@ -66,12 +93,22 @@ impl InputState {
         match ev.kind {
             KeyEventKind::Press | KeyEventKind::Repeat => {
                 if let Some(d) = dir {
-                    let v = if self.kitty { f32::INFINITY } else { GRACE };
+                    // The protocol reports the release, so a press holds until then.
+                    // Otherwise: a long window on the initial press (bridges
+                    // the OS repeat delay), the short one on auto-repeats (so
+                    // stopping stays responsive once repeats flow).
+                    let v = if self.kitty {
+                        f32::INFINITY
+                    } else if ev.kind == KeyEventKind::Press {
+                        FIRST_PRESS_GRACE
+                    } else {
+                        GRACE
+                    };
                     self.grace[d as usize] = v;
                     // A movement key hands control back to the keyboard.
                     self.prefer_mouse = false;
                 }
-                if ev.kind == KeyEventKind::Press {
+                if records_press(ev) {
                     self.pressed.push(ev);
                 }
             }
@@ -84,6 +121,16 @@ impl InputState {
     }
 
     pub fn handle_mouse(&mut self, ev: MouseEvent) {
+        let moved = self.mouse_pos != Some((ev.column, ev.row));
+        if matches!(
+            ev.kind,
+            MouseEventKind::Down(MouseButton::Left | MouseButton::Right)
+                | MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+        ) || (moved && matches!(ev.kind, MouseEventKind::Moved | MouseEventKind::Drag(_)))
+        {
+            self.mouse_events.push(ev);
+        }
         match ev.kind {
             MouseEventKind::Moved | MouseEventKind::Drag(_) | MouseEventKind::Down(_) => {
                 self.mouse_pos = Some((ev.column, ev.row));
@@ -91,6 +138,13 @@ impl InputState {
             }
             _ => {}
         }
+    }
+
+    /// Forget every held movement key. Called when the terminal loses focus:
+    /// a release for a key that was down at that moment never arrives, so a
+    /// held direction would otherwise stay down forever.
+    pub fn release_all(&mut self) {
+        self.grace = [0.0; 4];
     }
 
     fn down(&self, d: Dir) -> bool {
@@ -119,9 +173,9 @@ impl InputState {
     }
 
     pub fn pressed_char(&self, c: char) -> bool {
-        self.pressed.iter().any(|e| {
-            matches!(e.code, KeyCode::Char(k) if k.eq_ignore_ascii_case(&c))
-        })
+        self.pressed
+            .iter()
+            .any(|e| matches!(e.code, KeyCode::Char(k) if k.eq_ignore_ascii_case(&c)))
     }
 }
 
@@ -134,7 +188,7 @@ mod tests {
         MouseEvent {
             kind,
             column: col,
-            row: row,
+            row,
             modifiers: KeyModifiers::NONE,
         }
     }
@@ -163,5 +217,139 @@ mod tests {
         let mut s = InputState::new(false);
         s.handle_mouse(mouse(MouseEventKind::ScrollDown, 3, 3));
         assert!(!s.prefer_mouse);
+    }
+
+    fn key(code: KeyCode, kind: KeyEventKind) -> KeyEvent {
+        KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind)
+    }
+
+    #[test]
+    fn first_press_bridges_os_repeat_delay_but_repeat_stops_quickly() {
+        let mut s = InputState::new(false);
+        s.handle_key(key(KeyCode::Char('w'), KeyEventKind::Press));
+        assert!(s.move_dir().y < 0.0);
+
+        // No auto-repeat has arrived yet (an OS delay of up to ~0.6 s).
+        s.tick(0.3);
+        assert!(s.move_dir().y < 0.0, "stopped during the OS repeat delay");
+        s.tick(0.25);
+        assert!(
+            s.move_dir().y < 0.0,
+            "stopped before the first auto-repeat could arrive"
+        );
+
+        // Auto-repeat refreshes with the short window...
+        s.handle_key(key(KeyCode::Char('w'), KeyEventKind::Repeat));
+        s.tick(GRACE / 2.0);
+        assert!(s.move_dir().y < 0.0);
+        // ...so letting go (once repeats have stopped) stops quickly.
+        s.tick(GRACE);
+        assert_eq!(s.move_dir(), Vec2::ZERO);
+    }
+
+    #[test]
+    fn first_press_alone_expires_after_its_long_window() {
+        let mut s = InputState::new(false);
+        s.handle_key(key(KeyCode::Char('d'), KeyEventKind::Press));
+        s.tick(FIRST_PRESS_GRACE + 0.01);
+        assert_eq!(s.move_dir(), Vec2::ZERO);
+    }
+
+    #[test]
+    fn release_stops_movement_immediately() {
+        let mut s = InputState::new(false);
+        s.handle_key(key(KeyCode::Char('a'), KeyEventKind::Press));
+        s.handle_key(key(KeyCode::Char('a'), KeyEventKind::Repeat));
+        s.handle_key(key(KeyCode::Char('a'), KeyEventKind::Release));
+        assert_eq!(s.move_dir(), Vec2::ZERO);
+    }
+
+    #[test]
+    fn space_repeat_re_dashes_in_both_input_modes() {
+        for kitty in [true, false] {
+            let mut s = InputState::new(kitty);
+            s.handle_key(key(KeyCode::Char(' '), KeyEventKind::Repeat));
+            assert!(
+                s.just_pressed(KeyCode::Char(' ')),
+                "Space repeat ignored (kitty={kitty})"
+            );
+        }
+    }
+
+    #[test]
+    fn menu_keys_do_not_repeat_fire() {
+        for kitty in [true, false] {
+            let mut s = InputState::new(kitty);
+            for code in [
+                KeyCode::Enter,
+                KeyCode::Up,
+                KeyCode::Down,
+                KeyCode::Left,
+                KeyCode::Right,
+                KeyCode::Esc,
+                KeyCode::Char('m'),
+                KeyCode::Char('p'),
+                KeyCode::Char('q'),
+                KeyCode::Char('w'),
+            ] {
+                s.begin_frame();
+                s.handle_key(key(code, KeyEventKind::Repeat));
+                assert!(
+                    !s.just_pressed(code),
+                    "Repeat fired for {code:?} (kitty={kitty})"
+                );
+                assert!(
+                    s.pressed.is_empty(),
+                    "Repeat recorded for {code:?} (kitty={kitty})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn release_all_clears_kitty_held_keys() {
+        let mut s = InputState::new(true);
+        s.handle_key(key(KeyCode::Char('w'), KeyEventKind::Press));
+        s.handle_key(key(KeyCode::Char('d'), KeyEventKind::Press));
+        // Protocol grace is infinite, so the directions stay down without a release.
+        assert_eq!(s.move_dir(), Vec2::new(1.0, -1.0).normalized());
+
+        s.release_all();
+        assert_eq!(s.move_dir(), Vec2::ZERO);
+
+        // A fresh press still moves after the focus loss.
+        s.handle_key(key(KeyCode::Char('s'), KeyEventKind::Press));
+        assert!(s.move_dir().y > 0.0);
+    }
+
+    /// Documents why the enhancement flags stay at `REPORT_EVENT_TYPES` only:
+    /// Ghostty and Kitty report releases for letter keys under that flag, so
+    /// w/a/s/d are held until released; Enter, Tab and Backspace have no
+    /// releases without report-all-keys, but the game only uses them as
+    /// discrete presses, so nothing can stick.
+    #[test]
+    fn kitty_protocol_reports_letter_releases() {
+        let mut s = InputState::new(true);
+        let cases = [
+            (KeyCode::Char('w'), Vec2::new(0.0, -1.0)),
+            (KeyCode::Char('a'), Vec2::new(-1.0, 0.0)),
+            (KeyCode::Char('s'), Vec2::new(0.0, 1.0)),
+            (KeyCode::Char('d'), Vec2::new(1.0, 0.0)),
+        ];
+        for (code, expected) in cases {
+            s.handle_key(key(code, KeyEventKind::Press));
+            assert_eq!(s.move_dir(), expected, "press of {code:?}");
+            s.handle_key(key(code, KeyEventKind::Release));
+            assert_eq!(s.move_dir(), Vec2::ZERO, "release of {code:?}");
+        }
+
+        // A press without a release leaves no movement state behind for the
+        // keys that lack release events under REPORT_EVENT_TYPES.
+        for code in [KeyCode::Enter, KeyCode::Tab, KeyCode::Backspace] {
+            s.begin_frame();
+            s.handle_key(key(code, KeyEventKind::Press));
+            assert!(s.just_pressed(code), "press of {code:?} not recorded");
+            assert_eq!(s.move_dir(), Vec2::ZERO, "{code:?} held movement");
+        }
     }
 }

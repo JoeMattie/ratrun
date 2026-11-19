@@ -1,3 +1,7 @@
+pub mod art_enemy;
+pub mod art_floor;
+pub mod art_props;
+pub mod art_rat;
 pub mod bullet;
 pub mod collision;
 pub mod director;

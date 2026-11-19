@@ -5,14 +5,14 @@ edition = "2021"
 description = "Rat Run — a terminal bullet-hell horde survivor built with ratatui"
 
 [dependencies]
-ratatui = "0.29"
-crossterm = "0.28"
-rand = "0.8"
+ratatui = "0.30"
+crossterm = "0.29"
+rand = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-dirs = "5"
+dirs = "7"
 anyhow = "1"
-rodio = { version = "0.20", default-features = false }
+rodio = { version = "0.23", default-features = false, features = ["playback"] }
 rascii_art = "0.4.5"
 image = "0.24" # must match rascii_art's image version so DynamicImage unifies
 
