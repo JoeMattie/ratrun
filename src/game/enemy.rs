@@ -203,7 +203,7 @@ mod tests {
     use super::*;
     use crate::game::collision;
     use crate::game::level::{Level, Rectf, Theme};
-    use crate::game::nav::{FlowField, NavGrid};
+    use crate::game::nav::{test_tiles, FlowField, NavBudget};
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
@@ -234,22 +234,24 @@ mod tests {
     fn enemy_behind_a_prop_is_not_dragged_into_it() {
         // Player just right of a barrier, enemy just left of it: the straight
         // line crosses the prop, the flow must bend around it.
-        let wall = Rectf::new(100.0, 40.0, 16.0, 66.0);
-        let g = NavGrid::build(Vec2::new(320.0, 320.0), &[wall], 16.0);
-        let mut f = FlowField::new(&g);
+        let wall = Rectf::new(96.0, 32.0, 16.0, 80.0);
+        let tiles = test_tiles(20, 20, &[wall]);
+        let mut f = FlowField::new(&tiles);
         let player = Vec2::new(122.0, 73.0);
-        f.update(&g, player);
+        f.update(&tiles, player, NavBudget::FULL);
         let mut rng = StdRng::seed_from_u64(3);
-        let mut e = Enemy::spawn(EnemyKind::Skitterer, Vec2::new(96.0, 73.0), 1.0, &mut rng);
+        let mut e = Enemy::spawn(EnemyKind::Skitterer, Vec2::new(94.0, 73.0), 1.0, &mut rng);
         assert!(
-            e.pos.dist(player) <= 26.0,
+            e.pos.dist(player) <= 30.0,
             "the case under test is a short hop"
         );
-        let flow = f.dir_at(e.pos);
+        let flow = f.dir_at(collision::SizeClass::Small, e.pos);
         assert!(flow.len() > 0.5, "the flow should route around the prop");
         let before = e.pos.dist(player);
-        for _ in 0..30 {
-            let flow = f.dir_at(e.pos);
+        // The wall is five cells tall, so the detour around it is longer than
+        // half a second of a skitterer's life: give it five.
+        for _ in 0..300 {
+            let flow = f.dir_at(collision::SizeClass::Small, e.pos);
             e.steer(player, flow, 1.0 / 60.0, 1.0);
             e.pos = collision::resolve_circle_rect(e.pos, e.radius, &wall);
         }
@@ -266,12 +268,12 @@ mod tests {
     #[test]
     fn skitterers_parked_in_a_prop_halo_reach_the_player() {
         // The reported stall: 20 skitterers tucked behind a 16x66 barrier.
-        let wall = Rectf::new(100.0, 40.0, 16.0, 66.0);
+        let wall = Rectf::new(96.0, 32.0, 16.0, 80.0);
         let walls = [wall];
-        let g = NavGrid::build(Vec2::new(320.0, 320.0), &walls, 16.0);
-        let mut f = FlowField::new(&g);
+        let tiles = test_tiles(20, 20, &walls);
+        let mut f = FlowField::new(&tiles);
         let player = Vec2::new(200.0, 73.0);
-        f.update(&g, player);
+        f.update(&tiles, player, NavBudget::FULL);
         let mut rng = StdRng::seed_from_u64(11);
         let mut enemies: Vec<Enemy> = (0..20)
             .map(|i| {
@@ -282,7 +284,7 @@ mod tests {
         let dt = 1.0 / 60.0;
         for _ in 0..20 * 60 {
             for e in enemies.iter_mut() {
-                let flow = f.dir_at(e.pos);
+                let flow = f.dir_at(collision::SizeClass::Small, e.pos);
                 e.steer(player, flow, dt, 1.0);
                 e.pos = e.pos.clamp_box(Vec2::splat(2.0), Vec2::new(318.0, 318.0));
                 for w in &walls {
@@ -301,32 +303,42 @@ mod tests {
     #[test]
     fn enemies_reach_the_player_on_every_theme() {
         // Same promise on the real maps: nobody is left in a blocked cell.
+        //
+        // The map is 3200 × 2560 px now, so a skitterer (30 px/s) cannot cross
+        // the whole arena in 60 s of simulated time: the enemies are scattered
+        // inside a ring around the rat — the director spawns them a few dozen
+        // pixels out, and the flow field's fine window covers 384 px — which
+        // still exercises walls, corners and doorways. (Beyond the fine window
+        // the coarse block field is best-effort: a point whose block-graph exit
+        // needs a detour *inside* its own 8 × 8-cell block can stall.)
         for theme in Theme::all() {
             let level = Level::new(theme);
-            let mut f = FlowField::new(&level.nav);
+            let mut f = FlowField::new(&level.tiles);
             let player = level.arena * 0.5;
-            f.update(&level.nav, player);
+            f.update(&level.tiles, player, NavBudget::FULL);
             let mut rng = StdRng::seed_from_u64(5);
             let mut enemies: Vec<Enemy> = (0..12)
                 .map(|_| {
-                    let p = Vec2::new(
-                        rng.random_range(0.0..level.arena.x),
-                        rng.random_range(0.0..level.arena.y),
-                    );
+                    let angle = rng.random_range(0.0..std::f32::consts::TAU);
+                    let radius = rng.random_range(60.0..350.0);
+                    let p = player + Vec2::from_angle(angle) * radius;
                     Enemy::spawn(EnemyKind::Skitterer, p, 1.0, &mut rng)
                 })
                 .collect();
             let dt = 1.0 / 60.0;
             for _ in 0..60 * 60 {
                 for e in enemies.iter_mut() {
-                    let flow = f.dir_at(e.pos);
+                    let flow = f.dir_at(collision::SizeClass::Small, e.pos);
                     e.steer(player, flow, dt, 1.0);
                     e.pos = e
                         .pos
                         .clamp_box(Vec2::splat(2.0), level.arena - Vec2::splat(2.0));
-                    for w in &level.walls {
-                        e.pos = collision::resolve_circle_rect(e.pos, e.radius, w);
-                    }
+                    e.pos = level.tiles.resolve_circle(
+                        e.pos,
+                        e.radius,
+                        collision::SizeClass::of_enemy(e.kind),
+                        None,
+                    );
                 }
             }
             let stuck: Vec<Vec2> = enemies

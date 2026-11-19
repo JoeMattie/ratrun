@@ -3,3 +3,5 @@ pub mod hud;
 pub mod menu;
 pub mod overlay;
 pub mod palette;
+pub mod minimap;
+pub mod minimap_source;

@@ -107,15 +107,21 @@ fn draw_damage_and_low_hp(frame: &mut Frame, game: Rect, world: &World, state: &
     }
 }
 
+/// How long before `BOSS_TIME` the pre-boss warning banner opens, in seconds.
+pub const BOSS_WARNING_SECS: f32 = 25.0;
+
 /// Draw Boss Countdown Warning, Arrival Banner, or Persistent Boss Health Bar.
 /// Returns how many rows at the top of `game` are occupied by boss chrome.
 fn draw_boss_ui(frame: &mut Frame, game: Rect, world: &World, state: &mut HudState) -> u16 {
     let boss_soon = !world.director.boss_spawned
-        && world.elapsed >= director::BOSS_TIME - 10.0
+        && world.elapsed >= director::BOSS_TIME - BOSS_WARNING_SECS
         && world.elapsed < director::BOSS_TIME;
     let pulse = 0.5 + 0.5 * (state.clock * 8.0).sin();
 
-    // Case 1: Pre-boss 10-second containment breach countdown.
+    // Case 1: Pre-boss containment-breach countdown. It now opens 25 s out
+    // (BOSS_WARNING_SECS), so the player gets a real warning while the crowd is
+    // still arriving instead of a last-moment flash; the compass below takes
+    // over once the boss actually exists.
     if boss_soon && game.width >= 30 {
         let rem = (director::BOSS_TIME - world.elapsed).ceil().max(1.0) as u32;
         state.boss_banner.clear();
@@ -574,6 +580,36 @@ mod tests {
         assert!(
             text.contains("APEX SPECIMEN IN 07s"),
             "missing pre-boss countdown in {text}"
+        );
+    }
+
+    /// The warning is a *warning*: it opens 25 s before the boss, not 10 s.
+    #[test]
+    fn pre_boss_warning_opens_twenty_five_seconds_out() {
+        let mut w = World::new(Theme::Lab, 7);
+        w.elapsed = director::BOSS_TIME - 20.0;
+        let mut hud = HudState::default();
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| draw_overlays(f, f.area(), &w, &mut hud))
+            .unwrap();
+        let text = buf_text(&terminal);
+        assert!(
+            text.contains("APEX SPECIMEN IN 20s"),
+            "no 25 s pre-boss warning in {text}"
+        );
+
+        // Well before the window: nothing yet (the top rows stay free).
+        w.elapsed = director::BOSS_TIME - 30.0;
+        let mut hud = HudState::default();
+        terminal
+            .draw(|f| draw_overlays(f, f.area(), &w, &mut hud))
+            .unwrap();
+        let text = buf_text(&terminal);
+        assert!(
+            !text.contains("APEX SPECIMEN IN"),
+            "the warning started too early: {text}"
         );
     }
 

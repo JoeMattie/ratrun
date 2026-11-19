@@ -23,7 +23,7 @@
 //!   the pre-decay `dashing` flag exactly as the other team's `world.rs` does.
 //!
 //! Resources: `Res<TickInput>` (dt/move_dir/dash), `ResMut<Player>`,
-//! `Res<Level>` (arena + walls), `ResMut<Particles>` + `ResMut<RngRes>` +
+//! `Res<Level>` (arena + tile grid), `ResMut<Particles>` + `ResMut<RngRes>` +
 //! `ResMut<SfxQueue>` (dash start burst + dash trail + `Sfx::Dash`).
 //! Both dash hooks are plain `vfx` functions over `&mut Particles` +
 //! `&mut rng`, so this system needs no shared state beyond the resources it
@@ -38,8 +38,10 @@
 //! - `move_dir` is a throttle vector, not a unit direction; keep
 //!   `clamp_len(1.0)` and the dash-without-input facing rule.
 //! - Movement is sub-stepped (`PLAYER_SUBSTEP`, clamp 1..=64) and each step is
-//!   clamped to the arena then pushed out of every wall with
-//!   `collision::resolve_circle_rect`. Do not move the whole delta at once.
+//!   clamped to the arena then pushed out of the walls it overlaps with
+//!   `TileMap::resolve_circle` (a lookup in the cells around the rat, with the
+//!   player's velocity as the one-way-door permission). Do not move the whole
+//!   delta at once.
 //! - RNG: the dash-start burst and, while dashing, the trail are the only
 //!   draws, and they happen exactly where the legacy code-197 drew its cone
 //!   and where the neon hook inserted the trail, so the per-tick rng sequence
@@ -52,7 +54,7 @@
 use bevy_ecs::prelude::*;
 
 use crate::audio::Sfx;
-use crate::game::collision;
+use crate::game::collision::SizeClass;
 use crate::game::ecs::constants::{PLAYER_RADIUS, PLAYER_SUBSTEP};
 use crate::game::ecs::resources::{RngRes, SfxQueue, TickInput};
 use crate::game::level::Level;
@@ -119,9 +121,14 @@ pub fn player_system(
     for _ in 0..steps {
         player.pos += step;
         player.pos = player.pos.clamp_box(lo, hi);
-        for w in &level.walls {
-            player.pos = collision::resolve_circle_rect(player.pos, PLAYER_RADIUS, w);
-        }
+        // One tile-grid query per sub-step: the cells around the rat, never
+        // the level's walls. `Some(player.vel)` is the one-way-door
+        // permission — it is the only entity that may push a gate leaf open,
+        // every enemy passes `None`.
+        let vel = player.vel;
+        player.pos = level
+            .tiles
+            .resolve_circle(player.pos, PLAYER_RADIUS, SizeClass::Small, Some(vel));
     }
 
     // Continuous dash motion trail (neon hook: after the sub-step move and
@@ -148,19 +155,38 @@ pub fn player_system(
 mod tests {
     use super::player_system;
     use crate::audio::Sfx;
+    use crate::game::art_walls::WallKind;
+    use crate::game::collision::{TileKind, TileMap};
     use crate::game::ecs::constants::PLAYER_RADIUS;
     use crate::game::ecs::resources::SfxQueue;
-    use crate::game::level::{Rectf, Theme};
+    use crate::game::level::{Theme, MAP_COLS, MAP_ROWS};
     use crate::game::particle::{Particles, Ramp, Shape};
     use crate::game::player::Player;
     use crate::game::world::World;
     use crate::math::Vec2;
 
-    /// Legacy `fast_player_cannot_tunnel_a_thin_wall`.
+    /// Strip the generated layout's walls so the test measures the movement
+    /// system instead of the map (what `Level::walls.clear()` used to do
+    /// before the tile grid owned collision).
+    fn open_map(w: &mut World) {
+        w.level.tiles = TileMap::new(MAP_COLS, MAP_ROWS, w.level.theme, 0);
+    }
+
+    /// Legacy `fast_player_cannot_tunnel_a_thin_wall`: a dash-speed step must
+    /// not jump a one-cell (`WallKind::Maze`, 8 px spine) partition.
     #[test]
     fn fast_player_cannot_tunnel_a_thin_wall() {
         let mut w = World::new(Theme::Sewer, 23);
-        w.level.walls = vec![Rectf::new(512.0, 300.0, 1.0, 200.0)];
+        open_map(&mut w);
+        // Cell column 32 (world x 512..528) is an 8 px spine at 516..524.
+        w.level.tiles.fill_cells(
+            32,
+            18,
+            1,
+            14,
+            TileKind::Wall(WallKind::Maze),
+        );
+        w.level.tiles.rebuild_masks();
         w.player.pos = Vec2::new(500.0, 400.0);
         w.player.vel = Vec2::new(900.0, 0.0);
 
@@ -171,9 +197,75 @@ mod tests {
         w.end_tick();
 
         assert!(
-            w.player.pos.x <= 512.0 - PLAYER_RADIUS + 0.01,
+            w.player.pos.x <= 516.0 - PLAYER_RADIUS + 0.01,
             "player tunnelled to {:?}",
             w.player.pos
+        );
+    }
+
+    /// The player is the only entity that may push a one-way gate leaf open:
+    /// walking along its allowed direction it gets through, walking back
+    /// against it — or an enemy, which passes no velocity — does not.
+    #[test]
+    fn one_way_gate_opens_for_the_player_only() {
+        use crate::game::art_walls::Cardinal;
+
+        let gate_cell = (40, 40);
+        let lift = |w: &mut World| {
+            open_map(w);
+            w.level.tiles.set(
+                gate_cell.0,
+                gate_cell.1,
+                TileKind::Wall(WallKind::OneWayDoor {
+                    dir: Cardinal::East,
+                }),
+            );
+            w.level.tiles.rebuild_masks();
+        };
+        let centre = TileMap::tile_rect(gate_cell.0, gate_cell.1).center();
+
+        // East (the allowed direction): through the cell.
+        let mut w = World::new(Theme::Sewer, 41);
+        lift(&mut w);
+        w.player.pos = Vec2::new(centre.x - 20.0, centre.y);
+        w.player.vel = Vec2::new(120.0, 0.0);
+        for _ in 0..40 {
+            w.begin_tick(1.0 / 60.0, Vec2::new(1.0, 0.0), false);
+            w.ecs
+                .run_system_cached(player_system)
+                .expect("player system must run");
+            w.end_tick();
+        }
+        assert!(
+            w.player.pos.x > centre.x + 8.0,
+            "the rat was refused its own gate at {:?}",
+            w.player.pos
+        );
+
+        // West (against the gate): refused, never inside the leaf.
+        let mut w = World::new(Theme::Sewer, 43);
+        lift(&mut w);
+        w.player.pos = Vec2::new(centre.x + 20.0, centre.y);
+        w.player.vel = Vec2::new(-120.0, 0.0);
+        for _ in 0..40 {
+            w.begin_tick(1.0 / 60.0, Vec2::new(-1.0, 0.0), false);
+            w.ecs
+                .run_system_cached(player_system)
+                .expect("player system must run");
+            w.end_tick();
+        }
+        // The leaf is 4 px wide, 6 px into the cell: a radius-3 rat pushed
+        // west stops on its east face.
+        let gate = crate::game::art_walls::one_way_gate_rect(
+            gate_cell.0,
+            gate_cell.1,
+            Cardinal::East,
+        );
+        assert!(
+            w.player.pos.x >= gate.right() + PLAYER_RADIUS - 0.01,
+            "the rat walked a gate against its direction to {:?} (leaf ends at {})",
+            w.player.pos,
+            gate.right()
         );
     }
 
@@ -181,7 +273,7 @@ mod tests {
     #[test]
     fn dash_without_direction_uses_facing() {
         let mut w = World::new(Theme::Sewer, 37);
-        w.level.walls.clear();
+        open_map(&mut w);
         w.player.pos = w.level.arena * 0.5;
         w.player.face = Vec2::new(1.0, 0.0);
         w.player.dash_cd = 0.0;
@@ -202,7 +294,7 @@ mod tests {
     #[test]
     fn timers_decay_and_player_stays_in_the_arena() {
         let mut w = World::new(Theme::Sewer, 5);
-        w.level.walls.clear();
+        open_map(&mut w);
         w.player.pos = Vec2::new(4.0, 4.0);
         w.player.dash_cd = 1.0;
         w.player.dash_active = 0.5;
@@ -232,7 +324,7 @@ mod tests {
     #[test]
     fn regen_applies_after_the_timers() {
         let mut w = World::new(Theme::Sewer, 9);
-        w.level.walls.clear();
+        open_map(&mut w);
         w.player.pos = w.level.arena * 0.5;
         w.player.hp = 50.0;
         w.player.loadout.stats.regen = 10.0;
@@ -253,7 +345,7 @@ mod tests {
     #[test]
     fn dash_start_emits_the_vfx_burst_and_one_dash_sfx() {
         let mut w = World::new(Theme::Sewer, 11);
-        w.level.walls.clear();
+        open_map(&mut w);
         w.player.pos = w.level.arena * 0.5;
         w.player.dash_cd = 0.0;
         w.sfx.clear();
@@ -307,7 +399,7 @@ mod tests {
     #[test]
     fn dashing_emits_the_continuous_trail() {
         let mut w = World::new(Theme::Sewer, 13);
-        w.level.walls.clear();
+        open_map(&mut w);
         w.player.pos = w.level.arena * 0.5;
         w.player.dash_cd = 1.0; // no new dash start this tick
         w.player.dash_active = 0.1; // mid-dash
@@ -365,7 +457,7 @@ mod tests {
     #[test]
     fn dash_trail_starts_at_the_post_move_position() {
         let mut w = World::new(Theme::Sewer, 17);
-        w.level.walls.clear();
+        open_map(&mut w);
         w.player.pos = w.level.arena * 0.5;
         w.player.dash_cd = 1.0;
         w.player.dash_active = 0.1;

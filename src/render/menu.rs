@@ -31,6 +31,9 @@ pub enum Target {
     Resume,
     Menu,
     Restart,
+    /// The compact minimap in the play field: a left press toggles the
+    /// expanded map (the run keeps going either way).
+    Minimap,
 }
 
 /// Only the currently displayed layer is interactive. More specific targets

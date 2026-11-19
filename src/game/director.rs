@@ -18,6 +18,11 @@ pub struct Director {
     pub spawn_timer: f32,
     pub boss_spawned: bool,
     pub elite_timer: f32,
+    /// How many spawn pulses have fired this run. Drives the room-wave cadence
+    /// in `systems/spawn.rs` (every [`ROOM_WAVE_EVERY`]-th pulse brings its
+    /// first enemy in through a doorway instead of the ring) and is exposed for
+    /// the HUD/debug readouts.
+    pub pulses: u32,
 }
 
 impl Default for Director {
@@ -25,6 +30,7 @@ impl Default for Director {
         Director {
             spawn_timer: 0.0,
             boss_spawned: false,
+            pulses: 0,
             // Count down to the first elite, which is gated on ELITE_START. A
             // shorter seed (it used to be 25 s) just ran far negative and the
             // first brute popped the moment the gate opened.
@@ -38,14 +44,32 @@ pub fn hp_mult(elapsed: f32) -> f32 {
     1.0 + elapsed / 45.0
 }
 
-/// Seconds between spawn pulses, shrinking over time (floor 0.28s).
+/// Seconds between spawn pulses, shrinking over time (floor 0.20s).
+///
+/// The floor came down from 0.28 s and the pulse grew (see [`pulse_count`]) for
+/// the ten-times-larger map: the horde has to fill 3200 × 2560 px instead of
+/// 1020 × 800, so the late game needs a noticeably higher spawn rate to keep
+/// the screen busy while the player kites across it.
 pub fn spawn_interval(elapsed: f32) -> f32 {
-    (1.4 - elapsed / 220.0).max(0.28)
+    (1.4 - elapsed / 220.0).max(0.20)
 }
 
 /// Enemies emitted per pulse, growing over time.
+///
+/// The starting pulse grew from 2 to 3 (three enemies on a 3 200 px map are
+/// barely a blip) and the ramp steepened from `t/16` to `t/12`: with the ring
+/// finally wall-clear and reachable, every spawn now actually reaches the rat,
+/// so `3 + t/16` was measured to peak at only 35 live enemies in the scripted
+/// crowd case; `3 + t/12` clears the "peak ≥ 40 before 60 s" acceptance test
+/// while the late game stays clamped at [`crate::game::ecs::constants::ENEMY_CAP`]
+/// from about 160 s on.
 pub fn pulse_count(elapsed: f32) -> usize {
-    (2.0 + elapsed / 22.0) as usize
+    (3.0 + elapsed / 12.0) as usize
+}
+
+/// Late-run spawn rate in enemies per second (tests, tuning screens).
+pub fn spawn_rate(elapsed: f32) -> f32 {
+    pulse_count(elapsed) as f32 / spawn_interval(elapsed).max(1e-3)
 }
 
 /// Kinds that unlock over time: (unlock time, kind, weight). Kept in table
@@ -135,7 +159,29 @@ mod tests {
 
     #[test]
     fn spawn_interval_has_floor() {
-        assert!(spawn_interval(100000.0) >= 0.28 - 1e-6);
+        assert!(spawn_interval(100000.0) >= 0.20 - 1e-6);
+    }
+
+    /// The retuned curve, as the content contract specifies it: at least three
+    /// enemies per pulse from the start, a 0.20 s floor, and a rate that keeps
+    /// climbing (so the ten-times-larger map still fills up) up to a rate that
+    /// overshoots the 600-enemy cap well before the clock runs out.
+    #[test]
+    fn the_curve_fills_a_map_ten_times_larger() {
+        assert_eq!(pulse_count(0.0), 3);
+        assert!((spawn_interval(1_000.0) - 0.20).abs() < 1e-6);
+        // Monotone on the way there: no dip in rate, no dip in pulse size.
+        let mut prev = 0.0f32;
+        for t in [0.0f32, 30.0, 60.0, 120.0, 180.0, 240.0, 255.0, 300.0] {
+            let rate = spawn_rate(t);
+            assert!(rate >= prev - 1e-4, "spawn rate dipped at {t}s");
+            prev = rate;
+        }
+        // 300 s: ~21 enemies every 0.2 s, far past the cap (it is clamped by
+        // `ENEMY_CAP`, this only proves the curve wants to overflow it).
+        assert!(spawn_rate(300.0) > 60.0, "late rate {}", spawn_rate(300.0));
+        // And the early game is not a wall of bugs: the first seconds stay slow.
+        assert!(spawn_rate(0.0) < 3.0, "early rate {}", spawn_rate(0.0));
     }
 
     #[test]

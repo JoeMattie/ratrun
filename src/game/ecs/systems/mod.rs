@@ -7,6 +7,7 @@
 
 pub mod combat;
 pub mod enemy_move;
+pub mod fog;
 pub mod fx;
 pub mod loot;
 pub mod player;

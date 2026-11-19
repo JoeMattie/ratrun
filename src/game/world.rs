@@ -46,6 +46,7 @@ use super::bullet::Bullet;
 use super::collision::SpatialGrid;
 use super::director::{self, Director};
 pub use super::ecs::components::Pool;
+use super::fog::{Fog, MazeMarker};
 use super::ecs::components::SpawnId;
 use super::ecs::constants::{GRID_CELL, PARTICLE_CAP};
 use super::ecs::resources::{
@@ -56,13 +57,14 @@ use super::ecs::resources::{
 use super::ecs::schedule::{build_settle_schedule, build_tick_schedule};
 use super::enemy::{Enemy, EnemyKind};
 use super::gem::{Gem, Pickup, PickupKind};
+use super::art_traps::MazeRewardState;
 use super::level::{Level, Theme};
-use super::nav::FlowField;
+use super::nav::{FlowField, NavBudget};
 use super::particle::damage_number::{DamageNumbers, DEFAULT_CAP as DAMAGE_NUMBER_CAP};
 use super::particle::Particles;
 use super::player::Player;
 use super::weapon::WeaponKind;
-use super::{art_enemy, art_floor, art_props, art_rat};
+use super::{art_enemy, art_floor, art_props, art_rat, art_traps, art_walls};
 
 pub struct World {
     /// The Bevy world: entity components + the singleton resources during a
@@ -89,6 +91,9 @@ pub struct World {
     last_pickups: Vec<PickupKind>,
     pub director: Director,
     pub flow: FlowField,
+    /// Explored map cells (fog of war). Revealed by
+    /// `ecs::systems::fog::reveal_system`; read by the minimap between ticks.
+    pub fog: Fog,
     pub elapsed: f32,
     pub kills: u32,
     pub score: u32,
@@ -110,15 +115,22 @@ pub struct World {
     damage_numbers_spare: Option<DamageNumbers>,
     director_spare: Option<Director>,
     flow_spare: Option<FlowField>,
+    fog_spare: Option<Fog>,
 }
 
 impl World {
     pub fn new(theme: Theme, seed: u64) -> World {
-        let level = Level::new(theme);
-        let center = level.arena * 0.5;
-        let mut flow = FlowField::new(&level.nav);
-        flow.update(&level.nav, center);
-        let flow_spare = FlowField::new(&level.nav);
+        // The level is generated from the run seed (same seed + theme = same
+        // map, always). `Level::new` is the seed-0 convenience wrapper.
+        let level = Level::generate(theme, seed);
+        let center = level.start;
+        let mut flow = FlowField::new(&level.tiles);
+        flow.update(&level.tiles, center, NavBudget::FULL);
+        let flow_spare = FlowField::new(&level.tiles);
+        // Fog of war: one bitset over this level's cells, reset every run (it
+        // lives in the facade, so a new `World` starts fully unexplored).
+        let fog = Fog::with_mazes(level.tiles.cols(), level.tiles.rows(), level.mazes.len());
+        let fog_spare = fog.empty_like();
 
         let mut ecs = EcsWorld::new();
         ecs.insert_resource(NextSpawnId(0));
@@ -143,6 +155,7 @@ impl World {
             last_pickups: Vec::new(),
             director: Director::default(),
             flow,
+            fog,
             elapsed: 0.0,
             kills: 0,
             score: 0,
@@ -161,12 +174,15 @@ impl World {
             // for the whole run (no per-tick allocation), and only the
             // facade-owned one is ever mutated.
             rng_spare: Some(StdRng::seed_from_u64(0)),
-            level_spare: Some(Level::new(theme)),
+            // The round-trip spare is never simulated or drawn: a blank map is
+            // enough and spares a full generation at startup.
+            level_spare: Some(Level::empty(theme)),
             player_spare: Some(Player::new(center, WeaponKind::Gnaw)),
             particles_spare: Some(Particles::new(PARTICLE_CAP)),
             damage_numbers_spare: Some(DamageNumbers::new(DAMAGE_NUMBER_CAP)),
             director_spare: Some(Director::default()),
             flow_spare: Some(flow_spare),
+            fog_spare: Some(fog_spare),
         }
     }
 
@@ -202,6 +218,80 @@ impl World {
     /// World-space offset from the player to the living boss, if active.
     pub fn boss_offset(&self) -> Option<Vec2> {
         self.living_boss().map(|e| e.pos - self.player.pos)
+    }
+
+    // ---- Fog of war / minimap accessors --------------------------------
+    //
+    // Allocation-free `&self` reads of the explored set and of the markers the
+    // minimap draws. The minimap source (`render::minimap_source`) builds its
+    // view struct from these once per frame.
+
+    /// The explored-cell set (fog of war).
+    #[inline]
+    pub fn fog(&self) -> &Fog {
+        &self.fog
+    }
+
+    /// Has the player explored map cell `(cx, cy)`?
+    #[inline]
+    pub fn explored(&self, cx: i32, cy: i32) -> bool {
+        self.fog.is_seen(cx, cy)
+    }
+
+    /// `1.0` for a cell revealed this tick, fading to `0.0` after
+    /// [`crate::game::fog::FOG_FADE_TICKS`] (the minimap's "seen recently"
+    /// glow). `0.0` for unexplored cells.
+    #[inline]
+    pub fn explored_recency(&self, cx: i32, cy: i32) -> f32 {
+        self.fog.recency(cx, cy)
+    }
+
+    /// The boss marker: where the living boss is.
+    ///
+    /// The minimap shows it while the boss is alive (fog does not hide the
+    /// threat the boss bar and the compass already announce).
+    pub fn boss_marker(&self) -> Option<Vec2> {
+        self.living_boss().map(|e| e.pos)
+    }
+
+    /// The boss-arena marker: its cell rectangle, once any of its cells has
+    /// been explored.
+    pub fn boss_arena_marker(&self) -> Option<super::level::TileRect> {
+        let rect = self.level.boss_room()?.rect;
+        self.fog.any_seen_in(rect).then_some(rect)
+    }
+
+    /// Discovery state of every maze section, for the minimap.
+    ///
+    /// `entrance_seen` and `claimed` are the fog's persistent per-maze flags; a
+    /// maze's entrance marker therefore survives the player walking away, while
+    /// the reward star (`reward_seen`) only exists while its cell is explored.
+    /// `claimed` also reads the reward view's `Opened` state, so the maze-reward
+    /// runtime (a later phase) can drive it either way.
+    pub fn maze_markers(&self) -> impl Iterator<Item = MazeMarker> + '_ {
+        let fog = &self.fog;
+        self.level
+            .mazes
+            .iter()
+            .enumerate()
+            .map(move |(index, maze)| {
+                let (cx, cy) = crate::game::collision::cell_of(maze.reward);
+                let reward_view = self
+                    .level
+                    .objects
+                    .rewards
+                    .get(index)
+                    .map(|r| r.state == MazeRewardState::Opened)
+                    .unwrap_or(false);
+                MazeMarker {
+                    index,
+                    entrance: maze.entry,
+                    reward: maze.reward,
+                    entrance_seen: fog.maze_entrance_seen(index),
+                    reward_seen: fog.is_seen(cx, cy),
+                    claimed: fog.maze_claimed(index) || reward_view,
+                }
+            })
     }
 
     /// Number of active enemies in the arena.
@@ -312,6 +402,7 @@ impl World {
         );
         swap_in(&mut self.ecs, &mut self.director, &mut self.director_spare);
         swap_in(&mut self.ecs, &mut self.flow, &mut self.flow_spare);
+        swap_in(&mut self.ecs, &mut self.fog, &mut self.fog_spare);
     }
 
     /// Move the resources back into the facade and refresh the entity caches.
@@ -333,6 +424,7 @@ impl World {
         );
         swap_out(&mut self.ecs, &mut self.director, &mut self.director_spare);
         swap_out(&mut self.ecs, &mut self.flow, &mut self.flow_spare);
+        swap_out(&mut self.ecs, &mut self.fog, &mut self.fog_spare);
 
         self.next_enemy_id = self
             .ecs
@@ -502,6 +594,15 @@ impl World {
         // Floor stains (ichor splatters & explosion scorches) beneath props/entities.
         self.particles.draw_stains(pb, cam);
 
+        // Wall ground layer: contact shadows and floor thresholds, under
+        // everything that stands on the floor.
+        self.draw_wall_layer(pb, cam, WallLayer::Ground);
+        self.draw_object_layer(pb, cam, false);
+
+        // Wall bodies: caps and south faces, under the entities (the lintels
+        // that go *over* the rat are drawn after them).
+        self.draw_wall_layer(pb, cam, WallLayer::Body);
+
         // Props (themed obstacles): skip any rect that cannot touch the view.
         for p in &self.level.props {
             let x = (p.rect.x - cam.x).round() as i32;
@@ -609,6 +710,13 @@ impl World {
         // Player rat.
         self.draw_player(pb, cam);
 
+        // Overhang layer: lintels over rat-holes, doorways and one-way doors,
+        // so the rat is visibly ducking *under* them; then the foreground half
+        // of the level objects (glue strands, striker bars, door leaves, the
+        // rat-hole arch and the reward pedestal).
+        self.draw_wall_layer(pb, cam, WallLayer::Overhang);
+        self.draw_object_layer(pb, cam, true);
+
         // Particles and shockwaves on top.
         self.particles.draw(pb, cam);
 
@@ -620,11 +728,122 @@ impl World {
         art_rat::draw_rat(pb, &self.player, self.elapsed, cam);
     }
 
+    /// Wall cells of the three art layers, culled to the view (see
+    /// [`super::art_walls`] for the layer contract).
+    fn draw_wall_layer(&self, pb: &mut PixelBuffer, cam: Vec2, layer: WallLayer) {
+        let accent = self.level.palette.accent;
+        let (x0, y0, x1, y1) = self
+            .level
+            .tiles
+            .visible_range(cam, self.viewport, WALL_DRAW_MARGIN);
+        for cy in y0..=y1 {
+            for cx in x0..=x1 {
+                if !self.level.tiles.get(cx, cy).is_wall() {
+                    continue;
+                }
+                let view = self.level.wall_view(cx, cy, self.elapsed);
+                match layer {
+                    WallLayer::Ground => art_walls::draw_wall_ground(pb, &view, cam, accent),
+                    WallLayer::Body => art_walls::draw_wall_cell(pb, &view, cam, accent),
+                    WallLayer::Overhang => {
+                        art_walls::draw_wall_overhang(pb, &view, cam, accent)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Traps, doors, rat-holes and maze rewards: `foreground == false` draws
+    /// the ground layer (before entities), `true` the overlay layer (after
+    /// them). Culled to the view.
+    fn draw_object_layer(&self, pb: &mut PixelBuffer, cam: Vec2, foreground: bool) {
+        let accent = self.level.palette.accent;
+        let vp = self.viewport;
+        let anim = self.elapsed;
+        let objects = &self.level.objects;
+
+        for view in &objects.sticky_traps {
+            if !on_screen(self.w2s(view.pos, cam), 16.0, vp) {
+                continue;
+            }
+            let mut view = *view;
+            view.anim = anim;
+            if foreground {
+                art_traps::draw_sticky_trap(pb, &view, cam, accent);
+            } else {
+                art_traps::draw_sticky_trap_ground(pb, &view, cam, accent);
+            }
+        }
+        for view in &objects.mousetraps {
+            if !on_screen(self.w2s(view.pos, cam), 16.0, vp) {
+                continue;
+            }
+            let mut view = *view;
+            view.anim = anim;
+            if foreground {
+                art_traps::draw_mousetrap(pb, &view, cam, accent);
+            } else {
+                art_traps::draw_mousetrap_ground(pb, &view, cam, accent);
+            }
+        }
+        for door in &objects.one_way_doors {
+            if !on_screen(self.w2s(door.view.pos, cam), 20.0, vp) {
+                continue;
+            }
+            let mut view = door.view;
+            view.anim = anim;
+            if foreground {
+                art_traps::draw_one_way_door(pb, &view, cam, accent);
+            } else {
+                art_traps::draw_one_way_door_ground(pb, &view, cam, accent);
+            }
+        }
+        for hole in &objects.rat_holes {
+            if !on_screen(self.w2s(hole.view.pos, cam), 20.0, vp) {
+                continue;
+            }
+            let mut view = hole.view;
+            view.anim = anim;
+            if foreground {
+                art_traps::draw_rat_hole(pb, &view, cam, accent);
+            } else {
+                art_traps::draw_rat_hole_ground(pb, &view, cam, accent);
+            }
+        }
+        for reward in &objects.rewards {
+            if !on_screen(self.w2s(reward.pos, cam), 22.0, vp) {
+                continue;
+            }
+            let mut view = *reward;
+            view.anim = anim;
+            if foreground {
+                art_traps::draw_maze_reward(pb, &view, cam, accent);
+            } else {
+                art_traps::draw_maze_reward_ground(pb, &view, cam, accent);
+            }
+        }
+    }
+
     #[inline]
     fn w2s(&self, p: Vec2, cam: Vec2) -> (i32, i32) {
         ((p.x - cam.x).round() as i32, (p.y - cam.y).round() as i32)
     }
 }
+
+/// Which layer of the wall art [`World::draw_wall_layer`] is drawing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WallLayer {
+    /// Contact shadows and floor thresholds (under everything).
+    Ground,
+    /// Wall caps and south faces (under the entities).
+    Body,
+    /// Lintels that go over the entities (doors, rat-holes).
+    Overhang,
+}
+
+/// Extra cells to draw around the viewport: wall art casts shadows up to 4 px
+/// south/east and the overhang layer reaches a few pixels up.
+const WALL_DRAW_MARGIN: i32 = 1;
 
 // ---- Prop rendering -------------------------------------------------------
 
@@ -635,4 +854,190 @@ pub(crate) fn on_screen(s: (i32, i32), margin: f32, viewport: Vec2) -> bool {
     let x = s.0 as f32;
     let y = s.1 as f32;
     x + margin >= 0.0 && y + margin >= 0.0 && x - margin < viewport.x && y - margin < viewport.y
+}
+
+// ---- Draw-layer tests ------------------------------------------------------
+//
+// `World::draw` is the only place the four level layers are ordered, so these
+// tests pin the contract from `art_walls` ("Render Layers (Call Order)") and
+// `art_traps` ("Render Pass Order"): wall cells paint, a rat-hole does *not*
+// read as a solid cell, the object overlay paints over the entity line, and
+// nothing outside the viewport is drawn at all.
+#[cfg(test)]
+mod draw_tests {
+    use super::World;
+    use crate::game::art_traps::RatHoleView;
+    use crate::game::art_walls::{WallAxis, WallKind};
+    use crate::game::collision::{TileKind, TileMap};
+    use crate::game::level::{Level, RatHole, Theme};
+    use crate::math::Vec2;
+    use crate::render::framebuffer::PixelBuffer;
+
+    /// The harness viewport (160 × 84 cells = 160 × 168 pixel rows), so a cell
+    /// is exactly one screen cell column wide and two pixel rows tall.
+    const VIEW: (usize, usize) = (160, 168);
+
+    /// Render a frame of `level` with the rat parked on the map centre.
+    fn frame(theme: Theme, level: Level) -> (PixelBuffer, Vec2) {
+        let mut w = World::new(theme, 1);
+        let centre = level.start;
+        w.level = level;
+        w.player.pos = centre;
+        w.elapsed = 7.0; // a fixed clock: doors/overlays animate off it
+        let mut pb = PixelBuffer::new(VIEW.0, VIEW.1);
+        w.draw(&mut pb);
+        (pb, w.cam)
+    }
+
+    /// A blank map with a 2 × 2 block of solid cells and one rat-hole cell to
+    /// its east, both a few pixels off the camera origin.
+    fn walled(theme: Theme) -> Level {
+        let mut level = Level::empty(theme);
+        level
+            .tiles
+            .fill_cells(95, 75, 2, 2, TileKind::Wall(WallKind::Solid));
+        level.tiles.set(
+            99,
+            75,
+            TileKind::Wall(WallKind::RatHole {
+                axis: WallAxis::Vertical,
+            }),
+        );
+        level.objects.rat_holes.push(RatHole {
+            cell: (99, 75),
+            // Vertical wall, east-west passage (`WallAxis` names the *wall*).
+            view: RatHoleView::new(
+                TileMap::tile_rect(99, 75).center(),
+                Vec2::new(1.0, 0.0),
+            ),
+        });
+        level.tiles.rebuild_masks();
+        level
+    }
+
+    /// Same map, but the rat-hole cell is full solid and there is no hole
+    /// object: the reference for "the hole is not a wall".
+    fn solid_reference(theme: Theme) -> Level {
+        let mut level = walled(theme);
+        level.objects.rat_holes.clear();
+        level.tiles.set(99, 75, TileKind::Wall(WallKind::Solid));
+        level.tiles.rebuild_masks();
+        level
+    }
+
+    /// Screen pixel range of one cell.
+    fn cell_span(cam: Vec2, cx: i32, cy: i32) -> (i32, i32, i32, i32) {
+        let x = (cx * 16) as f32 - cam.x.floor();
+        let y = (cy * 16) as f32 - cam.y.floor();
+        let x = x.round() as i32;
+        let y = y.round() as i32;
+        (x, y, x + 16, y + 16)
+    }
+
+    /// How many pixels differ between two frames inside one cell, and how many
+    /// of the second frame's pixels in that cell are not the background.
+    fn diff_in_cell(a: &PixelBuffer, b: &PixelBuffer, cam: Vec2, cx: i32, cy: i32) -> (usize, usize) {
+        let (x0, y0, x1, y1) = cell_span(cam, cx, cy);
+        let (mut diff, mut lit) = (0, 0);
+        for y in y0.max(0)..y1.min(VIEW.1 as i32) {
+            for x in x0.max(0)..x1.min(VIEW.0 as i32) {
+                let pa = a.pixel_at(x as usize, y as usize);
+                let pb = b.pixel_at(x as usize, y as usize);
+                if pa != pb {
+                    diff += 1;
+                }
+                if pb != (0, 0, 0) {
+                    lit += 1;
+                }
+            }
+        }
+        (diff, lit)
+    }
+
+    /// **Frame test per theme**: the same map renders on all three themes, the
+    /// wall body layer actually paints the solid cells, and it paints more than
+    /// the blank map does there.
+    #[test]
+    fn every_theme_paints_its_wall_cells() {
+        for theme in Theme::all() {
+            let (blank, cam) = frame(theme, Level::empty(theme));
+            let (walled, _) = frame(theme, walled(theme));
+            for (cx, cy) in [(95, 75), (96, 75), (95, 76), (96, 76)] {
+                let (diff, lit) = diff_in_cell(&blank, &walled, cam, cx, cy);
+                assert!(
+                    diff > 100,
+                    "{theme:?}: wall cell {cx},{cy} barely changed ({diff} px)"
+                );
+                assert!(
+                    lit >= 16 * 16,
+                    "{theme:?}: wall cell {cx},{cy} is mostly empty ({lit} px lit)"
+                );
+            }
+            // A cell four cells away from any wall is untouched: the layer is
+            // culled per cell and does not paint a carpet of caps.
+            let (diff, _) = diff_in_cell(&blank, &walled, cam, 90, 70);
+            assert_eq!(diff, 0, "{theme:?}: empty floor repainted by the wall layer");
+        }
+    }
+
+    /// The rat-hole cell must not read as a solid wall: the object layer (its
+    /// recessed floor, cheeks and over-arch lintel) and the wall layer's piers
+    /// together paint a visibly different cell from a `Solid` one, and the pass
+    /// through the middle of the gap stays open floor.
+    #[test]
+    fn a_rat_hole_does_not_read_as_a_solid_wall() {
+        for theme in Theme::all() {
+            let (hole, cam) = frame(theme, walled(theme));
+            let (solid, _) = frame(theme, solid_reference(theme));
+            let (diff, _) = diff_in_cell(&hole, &solid, cam, 99, 75);
+            assert!(
+                diff > 20,
+                "{theme:?}: a rat-hole looks the same as a solid cell ({diff} px)"
+            );
+            // The gap is 8 px wide and centred in the cell; its middle rows
+            // must show floor/arch, not the solid top face.
+            let (gx0, gy0, _, _) = cell_span(cam, 99, 75);
+            let mut gap_diff = 0;
+            for y in gy0 + 6..gy0 + 12 {
+                for x in gx0 + 4..gx0 + 12 {
+                    if hole.pixel_at(x as usize, y as usize) != solid.pixel_at(x as usize, y as usize)
+                    {
+                        gap_diff += 1;
+                    }
+                }
+            }
+            assert!(
+                gap_diff > 4,
+                "{theme:?}: the rat-hole gap is drawn like solid wall"
+            );
+        }
+    }
+
+    /// Culling: a wall cluster on the far side of the 3 200 × 2 560 map is not
+    /// drawn at all, so the frame is byte-identical to a map without it. That
+    /// is the whole reason `draw_wall_layer` walks `visible_range` instead of
+    /// the 32 000 cells.
+    #[test]
+    fn walls_outside_the_viewport_are_never_drawn() {
+        for theme in Theme::all() {
+            let (blank, _) = frame(theme, Level::empty(theme));
+            let mut far = Level::empty(theme);
+            far.tiles
+                .fill_cells(10, 12, 24, 18, TileKind::Wall(WallKind::Solid));
+            far.tiles.rebuild_masks();
+            let (with_far, _) = frame(theme, far);
+            let mut differing = 0;
+            for y in 0..VIEW.1 {
+                for x in 0..VIEW.0 {
+                    if blank.pixel_at(x, y) != with_far.pixel_at(x, y) {
+                        differing += 1;
+                    }
+                }
+            }
+            assert_eq!(
+                differing, 0,
+                "{theme:?}: off-screen walls painted {differing} px"
+            );
+        }
+    }
 }

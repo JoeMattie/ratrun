@@ -2,7 +2,7 @@
 //! and wall resolution.
 //!
 //! Ported verbatim from the legacy `World`:
-//! - the flow-field refresh call (`flow.update(&level.nav, player.pos)`);
+//! - the flow-field refresh call (`flow.update(&level.tiles, player.pos, ..)`);
 //! - `World::update_enemies`: per-enemy steering, arena clamp, ranged-enemy
 //!   fire (`fire_cd`, boss ring of 10, spitter aimed shot);
 //! - the two grid rebuilds + `max_radius`;
@@ -84,7 +84,7 @@
 use bevy_ecs::prelude::*;
 
 use crate::game::bullet::{Bullet, Faction};
-use crate::game::collision::{self, SpatialGrid};
+use crate::game::collision::{SizeClass, SpatialGrid};
 use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::constants::GRID_CELL;
 use crate::game::ecs::resources::{
@@ -94,7 +94,7 @@ use crate::game::ecs::resources::{
 use crate::game::ecs::resources::debug_assert_enemy_index;
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::level::Level;
-use crate::game::nav::FlowField;
+use crate::game::nav::{FlowField, NavBudget};
 use crate::game::player::Player;
 use crate::math::Vec2;
 
@@ -107,10 +107,13 @@ use crate::math::Vec2;
 /// to the stable order legacy got from its `Vec`.
 type GridEntry = (u64, Entity, Vec2, f32);
 
-/// Legacy `World::update`: refresh the shared flow field toward the
-/// player (cheap: only recomputes when the player crosses into a new nav cell).
+/// Legacy `World::update`: refresh the shared flow field toward the player.
+///
+/// Cheap by construction: a recompute only starts when the player crosses into
+/// a new cell, and even then it is spread over frames by [`NavBudget`] (the
+/// previous field stays readable meanwhile).
 pub fn flow_refresh_system(mut flow: ResMut<FlowField>, level: Res<Level>, player: Res<Player>) {
-    flow.update(&level.nav, player.pos);
+    flow.update(&level.tiles, player.pos, NavBudget::default());
 }
 
 /// Legacy `World::update_enemies`: steering + arena clamp, in
@@ -142,7 +145,9 @@ pub fn enemy_steering_system(
         let (_, _, mut e) = enemies
             .get_mut(entity)
             .expect("ordered enemy must still be alive");
-        let flow_dir = flow.dir_at(e.pos);
+        // One field per size class: a rat-sized enemy may take a rat-hole, a
+        // Cat or a Brute must route around it.
+        let flow_dir = flow.dir_at(SizeClass::of_enemy(e.kind), e.pos);
         e.steer(ppos, flow_dir, dt, speed_mult);
         // Keep enemies inside the arena.
         e.pos = e
@@ -336,9 +341,11 @@ pub fn wall_resolve_system(
             continue;
         };
         let r = e.radius;
-        for w in &level.walls {
-            e.pos = collision::resolve_circle_rect(e.pos, r, w);
-        }
+        let class = SizeClass::of_enemy(e.kind);
+        // One tile-grid query per enemy: the cells it touches, never the
+        // level's walls. `None` = no one-way-door permission, so a gate is
+        // solid to the horde from both sides forever.
+        e.pos = level.tiles.resolve_circle(e.pos, r, class, None);
         e.pos = e.pos.clamp_box(Vec2::splat(2.0), arena - Vec2::splat(2.0));
     }
 }
@@ -375,7 +382,9 @@ pub fn grid_refresh_system(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::level::Theme;
+    use crate::game::art_walls::WallKind;
+    use crate::game::collision::{circle_rect_overlap, TileKind, TileMap, TILE_F};
+    use crate::game::level::{Rectf, Theme, MAP_COLS, MAP_ROWS};
     use crate::game::world::World;
 
     /// Positions are f32 arithmetic; compare with a small tolerance.
@@ -408,14 +417,21 @@ mod tests {
         let center = w.level.arena * 0.5;
         // `World::new` builds the field toward the arena center, so the center
         // cell is the goal cell and has no direction.
-        assert_eq!(w.flow.dir_at(center).len_sq(), 0.0);
+        assert_eq!(w.flow.dir_at(SizeClass::Small, center).len_sq(), 0.0);
 
         // Move the player two cells to the right; the field must retarget.
+        // The refresh is staggered across frames by `NavBudget`, so give it a
+        // handful of ticks — the previous field stays usable in between.
         w.player.pos = Vec2::new(center.x + 200.0, center.y);
-        run_one(&mut w, flow_refresh_system);
+        for _ in 0..16 {
+            run_one(&mut w, flow_refresh_system);
+            if w.flow.dir_at(SizeClass::Small, center).len_sq() > 0.0 {
+                break;
+            }
+        }
 
         assert!(
-            w.flow.dir_at(center).len_sq() > 0.0,
+            w.flow.dir_at(SizeClass::Small, center).len_sq() > 0.0,
             "flow field did not follow the player"
         );
     }
@@ -603,16 +619,50 @@ mod tests {
         assert!(w.sfx.is_empty(), "enemy fire emitted sfx: {:?}", w.sfx);
     }
 
+    /// Does any wall collider overlap a circle of `r` at `p` for `class`?
+    fn overlaps_a_wall(w: &World, p: Vec2, r: f32, class: SizeClass) -> bool {
+        let mut hit = false;
+        let m = r + TILE_F;
+        w.level.tiles.for_each_collider_in(
+            Rectf::new(p.x - m, p.y - m, 2.0 * m, 2.0 * m),
+            class,
+            None,
+            |rect| {
+                if circle_rect_overlap(p, r, &rect) {
+                    hit = true;
+                }
+            },
+        );
+        hit
+    }
+
     /// Legacy `enemies_are_pushed_out_of_walls`.
     ///
     /// `wall_resolve_system` walks `EnemyIndex` (no re-sort), exactly as in the
     /// schedule where `grid_build_system` ran earlier in the same tick.
+    ///
+    /// The map is painted here rather than sampled from the generator: the
+    /// first interior `Solid` cell of a real map is deep inside a wall block,
+    /// and a body buried that deep has nowhere to be ejected *to* (the tile
+    /// grid's search window is three cells and says so). An isolated 2 × 2
+    /// block with open floor all around is the case the system actually
+    /// guarantees.
     #[test]
     fn enemies_are_pushed_out_of_walls() {
         let mut w = World::new(Theme::Sewer, 5);
-        let wall = w.level.walls[0];
-        // Spawn an enemy buried in the middle of a wall.
-        w.spawn_enemy(EnemyKind::Cat, wall.center(), 1.0);
+        w.level.tiles = TileMap::new(MAP_COLS, MAP_ROWS, Theme::Sewer, 0);
+        w.level
+            .tiles
+            .fill_cells(60, 60, 2, 2, TileKind::Wall(WallKind::Solid));
+        w.level.tiles.rebuild_masks();
+        let block = Rectf::new(60.0 * TILE_F, 60.0 * TILE_F, 2.0 * TILE_F, 2.0 * TILE_F);
+        // Spawn an enemy buried in the middle of the block.
+        w.spawn_enemy(EnemyKind::Cat, block.center(), 1.0);
+        let class = SizeClass::of_enemy(EnemyKind::Cat);
+        assert!(
+            overlaps_a_wall(&w, block.center(), EnemyKind::Cat.radius(), class),
+            "the case under test starts buried"
+        );
 
         tick(&mut w, |w| {
             w.ecs.run_system_cached(grid_build_system).unwrap();
@@ -620,7 +670,10 @@ mod tests {
         });
 
         let c = w.enemies()[0].pos;
-        assert!(!wall.contains(c), "enemy center should be outside the wall: {c:?}");
+        assert!(
+            !overlaps_a_wall(&w, c, EnemyKind::Cat.radius(), class),
+            "wall resolution left the body overlapping a wall: {c:?}"
+        );
     }
 
     /// The reused grid buffer must be cleared, not appended to, on the next

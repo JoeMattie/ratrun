@@ -20,9 +20,10 @@
 //! - `enemy_bullet_hits_system`: `ResMut<Player>`, the same bullet query,
 //!   `ResMut<RngRes>`, `ResMut<Particles>`, `ResMut<SfxQueue>`,
 //!   `ResMut<Shake>`, `Commands`.
-//! - `contact_system`: `Res<Level>` (walls for knockback re-resolution),
-//!   `ResMut<Player>`, `Query<(&SpawnId, &mut Enemy)>`, `ResMut<RngRes>`,
-//!   `ResMut<Particles>`, `ResMut<SfxQueue>`, `ResMut<Shake>`.
+//! - `contact_system`: `Res<Level>` (tile grid for the knockback
+//!   re-resolution), `ResMut<Player>`, `Query<(&SpawnId, &mut Enemy)>`,
+//!   `ResMut<RngRes>`, `ResMut<Particles>`, `ResMut<SfxQueue>`,
+//!   `ResMut<Shake>`.
 //!
 //! Ordering: after `pools_system`, in order player-bullets → enemy-bullets →
 //! contact , then reaping (`loot.rs`).
@@ -110,7 +111,7 @@ use bevy_ecs::prelude::*;
 
 use crate::audio::Sfx;
 use crate::game::bullet::{Bullet, Faction};
-use crate::game::collision::{self, SpatialGrid};
+use crate::game::collision::{self, SizeClass, SpatialGrid};
 use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::resources::{EnemyIndex, GridScratch, NeighborScratch, RngRes, Shake, SfxQueue};
@@ -295,10 +296,12 @@ fn contact_one(
         let knockback = (e.pos - ppos).normalized() * 4.0;
         e.pos += knockback;
         // Wall resolution already ran this tick, so re-resolve the
-        // knocked-back enemy to avoid a frame inside a prop.
-        for w in &level.walls {
-            e.pos = collision::resolve_circle_rect(e.pos, e.radius, w);
-        }
+        // knocked-back enemy to avoid a frame inside a prop. One tile-grid
+        // query of the cells around it; `None` keeps every one-way gate shut
+        // to the horde.
+        let r = e.radius;
+        let class = SizeClass::of_enemy(e.kind);
+        e.pos = level.tiles.resolve_circle(e.pos, r, class, None);
     }
 }
 
@@ -367,14 +370,22 @@ mod tests {
     use crate::game::collision::SpatialGrid;
     use crate::game::ecs::constants::GRID_CELL;
     use crate::game::ecs::resources::{EnemyIndex, GridScratch};
+    use crate::game::art_walls::WallKind;
+    use crate::game::collision::{circle_rect_overlap, TileKind, TileMap};
     use crate::game::ecs::systems::combat;
     use crate::game::enemy::EnemyKind;
-    use crate::game::level::{Rectf, Theme};
+    use crate::game::level::{Theme, MAP_COLS, MAP_ROWS};
     use crate::game::particle::Ramp;
     use crate::game::world::World;
     use crate::math::Vec2;
 
     const DT: f32 = 1.0 / 60.0;
+
+    /// Strip the generated layout's walls so the test measures one system
+    /// instead of the map (what `Level::walls.clear()` used to do).
+    fn open_map(w: &mut World) {
+        w.level.tiles = TileMap::new(MAP_COLS, MAP_ROWS, w.level.theme, 0);
+    }
 
     /// Fill `SpatialGrid` + `EnemyIndex` + `GridScratch` the way
     /// `enemy_move::grid_build_system` does (in `SpawnId` order), without
@@ -434,7 +445,7 @@ mod tests {
     #[test]
     fn iframed_player_does_not_spend_contact_cooldowns() {
         let mut w = World::new(Theme::Sewer, 71);
-        w.level.walls.clear();
+        open_map(&mut w);
         w.player.pos = w.level.arena * 0.5;
         w.clear_enemies();
         let p = w.player.pos;
@@ -484,19 +495,22 @@ mod tests {
     #[test]
     fn contact_knockback_stays_out_of_walls() {
         let mut w = World::new(Theme::Sewer, 43);
-        w.level.walls = vec![Rectf::new(100.0, 90.0, 10.0, 20.0)];
-        w.player.pos = Vec2::new(94.0, 100.0);
+        open_map(&mut w);
+        // One solid cell (100..116, 96..112) with the cat just left of it.
+        w.level.tiles.fill_cells(6, 6, 1, 1, TileKind::Wall(WallKind::Solid));
+        w.level.tiles.rebuild_masks();
+        let wall = TileMap::tile_rect(6, 6);
+        w.player.pos = Vec2::new(94.0, 104.0);
         w.clear_enemies();
-        let entity = w.spawn_enemy(EnemyKind::Cat, Vec2::new(96.5, 100.0), 1.0);
+        let entity = w.spawn_enemy(EnemyKind::Cat, Vec2::new(96.5, 104.0), 1.0);
         w.ecs.get_mut::<Enemy>(entity).unwrap().contact_cd = 0.0;
         rebuild_broadphase(&mut w);
 
         run(&mut w, combat::contact_system);
-        let wall = w.level.walls[0];
+        let pos = w.enemies()[0].pos;
         assert!(
-            !wall.contains(w.enemies()[0].pos),
-            "knockback left the enemy inside a wall at {:?}",
-            w.enemies()[0].pos
+            !circle_rect_overlap(pos, w.enemies()[0].radius, &wall),
+            "knockback left the enemy inside a wall at {pos:?}"
         );
     }
 
@@ -623,7 +637,7 @@ mod tests {
     #[test]
     fn contact_uses_max_damage_and_cools_every_touching_enemy() {
         let mut w = World::new(Theme::Sewer, 95);
-        w.level.walls.clear();
+        open_map(&mut w);
         w.clear_enemies();
         let p = w.player.pos;
         w.spawn_enemy(EnemyKind::Skitterer, p, 1.0);
@@ -776,7 +790,7 @@ mod tests {
     #[test]
     fn contact_hurt_emits_the_hurt_shockwave() {
         let mut w = World::new(Theme::Sewer, 104);
-        w.level.walls.clear();
+        open_map(&mut w);
         w.clear_enemies();
         let p = w.player.pos;
         w.spawn_enemy(EnemyKind::Brute, p, 1.0);

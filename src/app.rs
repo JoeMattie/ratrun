@@ -16,7 +16,7 @@ use crate::input::InputState;
 use crate::lore;
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
-use crate::render::{hud, menu, overlay};
+use crate::render::{hud, menu, minimap, minimap_source, overlay};
 use crate::scores::{ScoreEntry, ScoreTable};
 
 use menu::{HitMap, RunSummary, Target};
@@ -91,6 +91,16 @@ pub struct App {
     boss_slain: bool,
     prev_boss_alive: bool,
     last_summary: Option<RunSummary>,
+    /// Expanded minimap (Tab / clicking the compact map). The simulation keeps
+    /// running while it is open.
+    map_open: bool,
+    /// Panel rects from the last frame, for pointer hit tests and tests.
+    last_minimap: Rect,
+    last_map: Rect,
+    /// Reused minimap scratch (the art module promises zero allocation per
+    /// frame once this is warm) and the per-frame marker/label buffers.
+    minimap_scratch: minimap::MinimapScratch,
+    map_frame: minimap_source::MinimapFrame,
 }
 
 impl App {
@@ -141,6 +151,11 @@ impl App {
             boss_slain: false,
             prev_boss_alive: false,
             last_summary: None,
+            map_open: false,
+            last_minimap: Rect::new(0, 0, 0, 0),
+            last_map: Rect::new(0, 0, 0, 0),
+            minimap_scratch: minimap::MinimapScratch::new(),
+            map_frame: minimap_source::MinimapFrame::new(),
         };
         app.menu_music();
         app
@@ -238,6 +253,10 @@ impl App {
         self.boss_slain = false;
         self.prev_boss_alive = false;
         self.last_summary = None;
+        // Fog of war resets with the run: a new `World` starts unexplored.
+        self.map_open = false;
+        self.last_minimap = Rect::new(0, 0, 0, 0);
+        self.last_map = Rect::new(0, 0, 0, 0);
         self.hud.reset();
         self.intro_timer = 4.0;
         self.screen = Screen::MapIntro;
@@ -390,10 +409,23 @@ impl App {
     }
 
     fn update_playing(&mut self, dt: f32, click: Option<Target>) {
+        // The minimap is the first claim on Tab, a click on the compact map and
+        // Esc: while it is open those *close* it instead of pausing. The
+        // simulation keeps running either way.
+        let mut esc_used = false;
+        if self.input.just_pressed(KeyCode::Tab) || click == Some(Target::Minimap) {
+            self.map_open = !self.map_open;
+            self.sfx(Sfx::UiMove);
+        } else if self.map_open && self.input.just_pressed(KeyCode::Esc) {
+            self.map_open = false;
+            esc_used = true;
+            self.sfx(Sfx::UiMove);
+        }
         if click == Some(Target::Pause)
-            || self.input.just_pressed(KeyCode::Esc)
+            || (self.input.just_pressed(KeyCode::Esc) && !esc_used)
             || self.input.pressed_char('p')
         {
+            self.map_open = false;
             self.screen = Screen::Paused;
             return;
         }
@@ -465,6 +497,7 @@ impl App {
     }
 
     fn open_levelup(&mut self) {
+        self.map_open = false;
         if let Some(w) = self.world.as_mut() {
             let choices = w.player.loadout.generate_choices(&mut w.rng);
             self.levelup_desc = choices
@@ -723,6 +756,16 @@ impl App {
                     Screen::Playing => self.hits.add(area, Target::Dash),
                     _ => {}
                 }
+                // The minimap is registered last, so it takes precedence over
+                // the full-field Dash target. Only a left press activates a
+                // target (`mouse_action`), so right-click still dashes/pauses.
+                if matches!(self.screen, Screen::Playing) {
+                    if !self.last_map.is_empty() {
+                        self.hits.add(self.last_map, Target::Minimap);
+                    } else if !self.last_minimap.is_empty() {
+                        self.hits.add(self.last_minimap, Target::Minimap);
+                    }
+                }
             }
         }
     }
@@ -762,7 +805,68 @@ impl App {
             hud::draw_top(frame, top, w, &mut self.hud);
             hud::draw_bottom(frame, bottom, w, &mut self.hud);
         }
+
+        // Minimap over the play field, under the pause / level-up panels (which
+        // `render` draws after `draw_game`). Only the play screens have it: the
+        // intro and the end summary own the whole frame.
+        self.last_minimap = Rect::new(0, 0, 0, 0);
+        self.last_map = Rect::new(0, 0, 0, 0);
+        if !matches!(self.screen, Screen::Playing | Screen::Paused | Screen::LevelUp) {
+            return;
+        }
+        let Some(w) = self.world.as_ref() else {
+            return;
+        };
+        let expanded = self.map_open && matches!(self.screen, Screen::Playing);
+        // Markers + labels first (reused buffers), then the art's own layout and
+        // drawing: `render/minimap.rs` owns the panel geometry, the radar window
+        // and the modal legend rail.
+        self.map_frame.refresh(w);
+        let hovered = self.hits.hovered == Some(Target::Minimap);
+        let view = self.map_frame.view(w, expanded, hovered);
+        minimap::draw(frame, game, &view, w, &mut self.minimap_scratch);
+        if expanded {
+            let panel = minimap_source::expanded_rect(game);
+            if panel.is_empty() {
+                return;
+            }
+            self.last_map = panel;
+            draw_map_legend(frame, game, panel);
+        } else {
+            let panel = minimap_source::compact_rect(game);
+            if panel.is_empty() {
+                return;
+            }
+            self.last_minimap = panel;
+        }
     }
+}
+
+/// The expanded map's own legend rail comes from `render/minimap.rs`; this adds
+/// the one promise that rail does not state: opening the map does not pause the
+/// run. Drawn on the first free row under the modal, and skipped when the
+/// terminal has no room for it.
+fn draw_map_legend(frame: &mut Frame, game: Rect, panel: Rect) {
+    let y = panel.bottom();
+    if y >= game.bottom() || game.height == 0 {
+        return;
+    }
+    let text = if game.width >= 60 {
+        " TAB/Esc close · click the map · the run keeps running "
+    } else {
+        " TAB/Esc close · run continues "
+    };
+    let width = text.chars().count() as u16;
+    if width >= game.width {
+        return;
+    }
+    let x = game.x + (game.width - width) / 2;
+    frame.buffer_mut().set_string(
+        x,
+        y,
+        text,
+        Style::default().fg(Color::Rgb(156, 167, 169)),
+    );
 }
 
 #[cfg(test)]
@@ -878,6 +982,36 @@ mod tests {
                 .iter()
                 .map(|up| loadout.describe(up))
                 .collect();
+            self.frame(&[]);
+        }
+
+        /// Text of the compact minimap panel from the last frame.
+        fn minimap_text(&self) -> String {
+            self.panel_text(self.app.last_minimap)
+        }
+
+        /// Text of the expanded map panel from the last frame.
+        fn map_text(&self) -> String {
+            self.panel_text(self.app.last_map)
+        }
+
+        fn panel_text(&self, r: Rect) -> String {
+            if r.is_empty() {
+                return String::new();
+            }
+            let buf = self.terminal.backend().buffer();
+            let mut out = String::new();
+            for y in r.y..r.bottom().min(buf.area.height) {
+                for x in r.x..r.right().min(buf.area.width) {
+                    out.push_str(buf[(x, y)].symbol());
+                }
+            }
+            out
+        }
+
+        /// Resize the in-memory terminal (tests the tiny-viewport paths).
+        fn resize(&mut self, w: u16, h: u16) {
+            self.terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
             self.frame(&[]);
         }
 
@@ -1749,4 +1883,337 @@ mod tests {
             }
         }
     }
+    // ---- Minimap + fog of war -------------------------------------------
+
+    #[test]
+    fn the_minimap_is_drawn_during_play_at_80x24_and_120x40() {
+        for (w, h) in [(80u16, 24u16), (120, 40)] {
+            let mut hh = Harness::new(w, h);
+            hh.enter_playing();
+            hh.frame(&[]);
+            let panel = hh.app.last_minimap;
+            assert!(
+                !panel.is_empty(),
+                "no compact minimap on {w}x{h} (field {:?})",
+                hh.app.last_game
+            );
+            // The play field contains it (it is an overlay, not a HUD row).
+            let game = hh.app.last_game;
+            assert!(game.union(panel) == game, "the minimap escaped the field");
+            let text = hh.minimap_text();
+            assert!(text.contains("MAP"), "no MAP title on {w}x{h}: {text:?}");
+            assert!(text.contains("TAB"), "no TAB hint on {w}x{h}: {text:?}");
+            // The art paints half-block pixels: the radar has real content.
+            assert!(
+                text.chars().any(|c| c == '▀' || c == '█' || c == '▄'),
+                "the radar painted no pixels on {w}x{h}: {text:?}"
+            );
+            // The fog has revealed the start room (charted percentage > 0 is
+            // only reached after 1% of the map, so check the fog itself).
+            assert!(hh.app.world.as_ref().unwrap().fog().seen_count() > 0);
+            // The hit map resolves a left press inside the panel to the map.
+            assert_eq!(
+                hh.app.hits.at(panel.x + panel.width / 2, panel.y + panel.height / 2),
+                Some(Target::Minimap)
+            );
+        }
+    }
+
+    #[test]
+    fn the_minimap_is_absent_on_a_tiny_terminal() {
+        let mut hh = Harness::new(20, 6);
+        hh.enter_playing();
+        hh.frame(&[]);
+        assert!(hh.app.last_minimap.is_empty());
+        assert!(hh.app.last_map.is_empty());
+        assert!(!hh.screen_text().contains("MAP"));
+    }
+
+    #[test]
+    fn tab_toggles_the_expanded_map_and_esc_closes_it_without_pausing() {
+        let mut hh = Harness::new(120, 40);
+        hh.enter_playing();
+        assert!(hh.app.last_map.is_empty());
+        let compact = hh.app.last_minimap;
+        hh.frame(&[KeyCode::Tab]);
+        assert!(hh.app.map_open, "Tab did not open the map");
+        assert!(!hh.app.last_map.is_empty(), "the expanded map was not drawn");
+        assert!(
+            hh.app.last_map.width > compact.width,
+            "the expanded map is not bigger than the compact one"
+        );
+        // The art's modal carries its own legend rail (and a `[TAB] CLOSE`
+        // hint); the promise that the run keeps going is one line under it.
+        assert!(hh.map_text().contains("CLOSE"), "no art close hint");
+        let screen = hh.screen_text();
+        assert!(
+            screen.contains("the run keeps running"),
+            "the expanded map does not say the run keeps running"
+        );
+
+        hh.frame(&[KeyCode::Tab]);
+        assert!(!hh.app.map_open, "Tab did not close the map");
+        assert!(hh.app.last_map.is_empty());
+
+        hh.frame(&[KeyCode::Tab]);
+        assert!(hh.app.map_open);
+        hh.frame(&[KeyCode::Esc]);
+        assert!(!hh.app.map_open, "Esc did not close the map");
+        assert_eq!(
+            hh.app.screen.name_for_test(),
+            "Playing",
+            "Esc closed the map but also paused"
+        );
+        // The next Esc is the old pause binding again.
+        hh.frame(&[KeyCode::Esc]);
+        assert_eq!(hh.app.screen.name_for_test(), "Paused");
+    }
+
+    #[test]
+    fn the_simulation_keeps_running_while_the_map_is_open() {
+        let mut hh = Harness::new(120, 40);
+        hh.enter_playing();
+        hh.frame(&[KeyCode::Tab]);
+        let t0 = hh.app.world.as_ref().unwrap().elapsed;
+        hh.frame(&[]);
+        hh.frame(&[]);
+        let t1 = hh.app.world.as_ref().unwrap().elapsed;
+        assert!(t1 > t0, "the run froze while the map was open");
+    }
+
+    #[test]
+    fn clicking_the_compact_minimap_toggles_the_map_but_only_with_the_left_button() {
+        let mut hh = Harness::new(120, 40);
+        hh.enter_playing();
+        hh.frame(&[]);
+        let panel = hh.app.last_minimap;
+        assert!(!panel.is_empty());
+        let (cx, cy) = (panel.x + panel.width / 2, panel.y + panel.height / 2);
+
+        // Right button: not a map toggle (the existing right-click rule).
+        hh.events(&[], &[(MouseEventKind::Down(MouseButton::Right), (cx, cy))]);
+        assert!(!hh.app.map_open, "a right press toggled the map");
+
+        hh.events(&[], &[(MouseEventKind::Down(MouseButton::Left), (cx, cy))]);
+        assert!(hh.app.map_open, "a left press did not open the map");
+        assert!(!hh.app.last_map.is_empty());
+
+        // The expanded panel covers the same corner, so a second left press
+        // anywhere on it closes the map too.
+        let map = hh.app.last_map;
+        hh.events(
+            &[],
+            &[(
+                MouseEventKind::Down(MouseButton::Left),
+                (map.x + map.width / 2, map.y + map.height / 2),
+            )],
+        );
+        assert!(!hh.app.map_open, "a left press on the expanded map did not close it");
+    }
+
+    #[test]
+    fn the_minimap_is_drawn_under_the_pause_and_levelup_overlays() {
+        let mut hh = Harness::new(120, 40);
+        hh.enter_playing();
+        hh.frame(&[]);
+        assert!(!hh.app.last_minimap.is_empty());
+
+        hh.frame(&[KeyCode::Char('p')]);
+        assert_eq!(hh.app.screen.name_for_test(), "Paused");
+        assert!(
+            !hh.app.last_minimap.is_empty(),
+            "the minimap vanished behind the pause panel"
+        );
+        // Not clickable while paused: the pause panel owns the hit map.
+        let panel = hh.app.last_minimap;
+        assert_ne!(
+            hh.app.hits.at(panel.x + panel.width / 2, panel.y + panel.height / 2),
+            Some(Target::Minimap)
+        );
+        hh.frame(&[KeyCode::Esc]);
+        assert_eq!(hh.app.screen.name_for_test(), "Playing");
+
+        hh.show_upgrade_cards();
+        assert_eq!(hh.app.screen.name_for_test(), "LevelUp");
+        assert!(!hh.app.last_minimap.is_empty());
+    }
+
+    #[test]
+    fn a_new_run_starts_with_unexplored_fog() {
+        let mut hh = Harness::new(120, 40);
+        hh.enter_playing();
+        for _ in 0..30 {
+            hh.frame(&[]);
+        }
+        let seen = hh.app.world.as_ref().unwrap().fog().seen_count();
+        assert!(seen > 0);
+        // Restart: the fog resets with the new world.
+        hh.app.start_run();
+        assert_eq!(hh.app.world.as_ref().unwrap().fog().seen_count(), 0);
+        assert!(!hh.app.map_open);
+    }
+
+    #[test]
+    fn the_minimap_never_panics_on_degenerate_terminal_sizes() {
+        for (w, h) in [(0u16, 0u16), (0, 5), (5, 0), (1, 1), (2, 2), (10, 3)] {
+            let mut hh = Harness::new(80, 24);
+            hh.enter_playing();
+            hh.resize(w, h);
+            // Tab and a click must not panic either (the map cannot open).
+            hh.frame(&[KeyCode::Tab]);
+            hh.events(&[], &[(MouseEventKind::Down(MouseButton::Left), (0, 0))]);
+            hh.frame(&[KeyCode::Tab]);
+            assert!(hh.app.last_map.is_empty(), "map opened on {w}x{h}");
+        }
+    }
+
+    #[test]
+    fn a_seen_maze_keeps_a_hollow_cache_marker_until_it_is_claimed() {
+        // A map with a maze, standing in its breach: the frame hands the art a
+        // breach fork plus a hollow cache marker, which survives walking away
+        // and fills in only when the cache is claimed.
+        use crate::game::collision::TileMap;
+        use crate::game::level::Level;
+        use crate::render::minimap::MarkerKind;
+        let mut seed = None;
+        for candidate in 0..64u64 {
+            if !Level::generate(Theme::Sewer, candidate).mazes.is_empty() {
+                seed = Some(candidate);
+                break;
+            }
+        }
+        let Some(seed) = seed else {
+            panic!("no Sewer map in the first 64 seeds has a maze");
+        };
+        let mut hh = Harness::new(120, 40);
+        hh.enter_playing();
+        hh.app.world = Some(World::new(Theme::Sewer, seed));
+        hh.app.map_open = false;
+        hh.frame(&[]);
+        let maze = *hh.app.world.as_ref().unwrap().level.mazes.first().unwrap();
+
+        // The maze is still undiscovered: nothing marks it.
+        let kinds = |hh: &Harness| -> Vec<MarkerKind> {
+            hh.app.map_frame.markers().iter().map(|m| m.kind).collect()
+        };
+        assert!(!kinds(&hh).contains(&MarkerKind::MazeEntrance));
+        assert!(!kinds(&hh).contains(&MarkerKind::MazeCacheHollow));
+
+        // Step into the breach, then walk away again.
+        hh.app.world.as_mut().unwrap().player.pos =
+            TileMap::tile_rect(maze.entry.0, maze.entry.1).center();
+        hh.frame(&[]);
+        assert!(
+            hh.app.world.as_ref().unwrap().fog().maze_entrance_seen(0),
+            "the breach was seen but not flagged"
+        );
+        hh.app.world.as_mut().unwrap().player.pos =
+            TileMap::tile_rect(maze.entry.0 + 12, maze.entry.1).center();
+        hh.frame(&[]);
+        assert!(kinds(&hh).contains(&MarkerKind::MazeEntrance));
+        assert!(
+            kinds(&hh).contains(&MarkerKind::MazeCacheHollow),
+            "the found maze lost its cache marker"
+        );
+        assert!(hh
+            .app
+            .map_frame
+            .labels()
+            .iter()
+            .any(|l| l.kind == crate::render::minimap::LabelKind::Maze));
+
+        // Claimed: the marker fills in.
+        hh.app.world.as_mut().unwrap().fog.set_maze_claimed(0, true);
+        hh.frame(&[]);
+        assert!(kinds(&hh).contains(&MarkerKind::MazeCacheClaimed));
+        assert!(!kinds(&hh).contains(&MarkerKind::MazeCacheHollow));
+    }
+
+    #[test]
+    fn the_expanded_map_shows_cache_status_that_the_compact_map_omits() {
+        use crate::game::level::Level;
+        use crate::render::minimap::MarkerKind;
+        let mut seed = None;
+        for candidate in 0..64u64 {
+            if !Level::generate(Theme::Sewer, candidate).mazes.is_empty() {
+                seed = Some(candidate);
+                break;
+            }
+        }
+        let Some(seed) = seed else {
+            panic!("no Sewer map in the first 64 seeds has a maze");
+        };
+        let mut hh = Harness::new(120, 40);
+        hh.enter_playing();
+        hh.app.world = Some(World::new(Theme::Sewer, seed));
+        hh.frame(&[]);
+        let maze = *hh.app.world.as_ref().unwrap().level.mazes.first().unwrap();
+        // Explore the pedestal's cell directly (its pocket may be walled off
+        // from wherever the rat stands), leaving the player elsewhere so the
+        // player glyph cannot cover the star.
+        let same_map = Level::generate(Theme::Sewer, seed);
+        let (rcx, rcy) = crate::game::collision::cell_of(maze.reward);
+        hh.app
+            .world
+            .as_mut()
+            .unwrap()
+            .fog
+            .reveal_cell(&same_map, (rcx, rcy));
+        hh.frame(&[]);
+        assert!(
+            hh.app
+                .map_frame
+                .markers()
+                .iter()
+                .any(|m| m.kind == MarkerKind::MazeReward),
+            "the discovered cache is not in the frame"
+        );
+        // The art only stamps the cache glyphs on the expanded map.
+        assert!(
+            !hh.minimap_text().contains('✦'),
+            "cache status leaked onto the compact radar"
+        );
+        hh.frame(&[KeyCode::Tab]);
+        assert!(
+            hh.map_text().contains('✦'),
+            "the expanded map does not show the discovered cache"
+        );
+    }
+
+    #[test]
+    fn the_boss_bearing_appears_on_the_map_after_three_minutes() {
+        use crate::render::minimap::{fog_edge_cell, MinimapSource};
+        let mut hh = Harness::new(120, 40);
+        hh.enter_playing();
+        hh.frame(&[]);
+        {
+            let w = hh.app.world.as_ref().unwrap();
+            assert!(minimap_source::boss_bearing_dir(w).is_none(), "bearing too early");
+        }
+        let w = hh.app.world.as_mut().unwrap();
+        w.elapsed = crate::render::minimap_source::ARENA_BEARING_AFTER_SECS + 1.0;
+        let player_cell = (w.player.pos.x / 16.0, w.player.pos.y / 16.0);
+        let dir = minimap_source::boss_bearing_dir(w).expect("no bearing after 180 s");
+        // The art projects it onto the fog boundary, so it lands on explored
+        // ground and never uncovers the route.
+        let edge = fog_edge_cell(w, player_cell, dir).expect("no fog boundary on the bearing ray");
+        let (ecx, ecy) = (edge.0.floor() as i32, edge.1.floor() as i32);
+        assert!(w.seen(ecx, ecy), "the bearing marker is outside the fog");
+        let arena_cell = w
+            .level
+            .boss_room()
+            .map(|room| {
+                let c = room.center();
+                (c.x / 16.0, c.y / 16.0)
+            })
+            .unwrap();
+        assert!(
+            !w.seen(arena_cell.0.floor() as i32, arena_cell.1.floor() as i32),
+            "the bearing must not uncover the arena"
+        );
+        // And the frame still draws with the bearing active.
+        hh.frame(&[]);
+        assert!(!hh.app.last_minimap.is_empty());
+    }
+
 }

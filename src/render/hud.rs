@@ -572,7 +572,7 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
     let urgent = time_left <= 30.0;
     let boss_alive = state.telemetry.boss_alive;
     let boss_soon = !world.director.boss_spawned
-        && world.elapsed >= director::BOSS_TIME - 10.0
+        && world.elapsed >= director::BOSS_TIME - crate::render::overlay::BOSS_WARNING_SECS
         && world.elapsed < director::BOSS_TIME;
     let pulse = 0.5 + 0.5 * (state.clock * 7.5).sin();
 

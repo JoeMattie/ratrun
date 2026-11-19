@@ -25,8 +25,10 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 
 use crate::audio::Sfx;
+use crate::game::art_walls::WallKind;
 use crate::game::bullet::{Bullet, Faction, Orbit};
 use crate::game::collision;
+use crate::game::collision::{SizeClass, TileKind, TileMap};
 use crate::game::director;
 use crate::game::ecs::components::Pool;
 use crate::game::ecs::constants::{ENEMY_CAP, PARTICLE_CAP, PLAYER_RADIUS};
@@ -34,7 +36,7 @@ use crate::game::ecs::resources::{GridScratch, PickupScratch};
 use crate::game::ecs::systems::{combat, enemy_move, loot, player, projectiles, weapons};
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::{Gem, Pickup, PickupKind};
-use crate::game::level::{Rectf, Theme};
+use crate::game::level::{Rectf, Theme, MAP_COLS, MAP_ROWS};
 use crate::game::particle::damage_number::DamageSource;
 use crate::game::particle::vfx;
 use crate::game::player::Player;
@@ -57,6 +59,38 @@ where
 fn edit_enemy(w: &mut World, entity: Entity, f: impl FnOnce(&mut Enemy)) {
     let mut enemy = w.ecs.get_mut::<Enemy>(entity).expect("enemy exists");
     f(&mut enemy);
+}
+
+/// Strip the generated layout's walls so the test measures one system instead
+/// of the map (what `Level::walls.clear()` used to do before the tile grid
+/// owned collision).
+fn open_map(w: &mut World) {
+    w.level.tiles = TileMap::new(MAP_COLS, MAP_ROWS, w.level.theme, 0);
+}
+
+/// Paint a solid cell (`WallKind::Solid`) and rebuild the neighbour masks.
+fn paint_solid(w: &mut World, cx: i32, cy: i32, cw: i32, ch: i32) {
+    w.level
+        .tiles
+        .fill_cells(cx, cy, cw, ch, TileKind::Wall(WallKind::Solid));
+    w.level.tiles.rebuild_masks();
+}
+
+/// Does any wall collider overlap a circle of `r` at `p` for `class`?
+fn touches_a_wall(w: &World, p: Vec2, r: f32, class: SizeClass) -> bool {
+    let mut hit = false;
+    let m = r + collision::TILE_F;
+    w.level.tiles.for_each_collider_in(
+        Rectf::new(p.x - m, p.y - m, 2.0 * m, 2.0 * m),
+        class,
+        None,
+        |rect| {
+            if collision::circle_rect_overlap(p, r, &rect) {
+                hit = true;
+            }
+        },
+    );
+    hit
 }
 
 fn apply_pending(w: &mut World) {
@@ -186,16 +220,113 @@ fn dump_bestiary() {
     std::fs::write("/tmp/ratrun_bugs.ppm", out).unwrap();
 }
 
+/// The map here is painted, not sampled from the generator: the first interior
+/// `Solid` cell of a real map is deep inside a wall block, where a body has
+/// nowhere to be ejected *to* (the tile grid's search window is three cells and
+/// documents that as best-effort). An isolated 2 × 2 block surrounded by open
+/// floor is the case wall resolution actually guarantees.
 #[test]
 fn enemies_are_pushed_out_of_walls() {
     let mut w = World::new(Theme::Sewer, 5);
-    let wall = w.level.walls[0];
+    open_map(&mut w);
+    paint_solid(&mut w, 60, 60, 2, 2);
+    let block = Rectf::new(
+        60.0 * collision::TILE_F,
+        60.0 * collision::TILE_F,
+        2.0 * collision::TILE_F,
+        2.0 * collision::TILE_F,
+    );
+    let class = SizeClass::of_enemy(EnemyKind::Cat);
     let mut rng = StdRng::seed_from_u64(9);
-    // Spawn an enemy buried in the middle of a wall.
-    w.spawn_enemy_with_rng(EnemyKind::Cat, wall.center(), 1.0, &mut rng);
+    // Spawn an enemy buried in the middle of the block.
+    w.spawn_enemy_with_rng(EnemyKind::Cat, block.center(), 1.0, &mut rng);
+    assert!(
+        touches_a_wall(&w, block.center(), EnemyKind::Cat.radius(), class),
+        "the case under test starts buried"
+    );
     w.update(1.0 / 60.0, Vec2::ZERO, false);
     let c = w.enemies()[0].pos;
-    assert!(!wall.contains(c), "enemy center should be outside the wall");
+    assert!(
+        !touches_a_wall(&w, c, EnemyKind::Cat.radius(), class),
+        "wall resolution left the body overlapping a wall: {c:?}"
+    );
+}
+
+/// Bodies that stop moving while they are nowhere near the rat are a routing
+/// bug, not a lull: the flow field is steering them into a wall face, `steer`
+/// pushes them into it and wall resolution pushes them straight back out, so
+/// the position is bit-for-bit unchanged every tick (measured before the fix
+/// below: 9 of 261 bodies in a 90 s run, plus bodies that dithered on the spot
+/// when their coarse target sat under them).
+///
+/// This drives the **real schedule** — director, steering, separation, wall
+/// resolution, the lot — with a rat that wanders, samples every body every tick
+/// and counts the ones that stayed put for two seconds while more than 40 px
+/// from the rat (a body pressed against the rat is contact-blocked, which is
+/// legitimate). Each body is counted once, however long it stays stuck.
+#[test]
+fn no_enemy_is_pinned_against_a_wall() {
+    use crate::game::ecs::components::SpawnId;
+
+    const DT: f32 = 1.0 / 60.0;
+    /// 2 s at 60 Hz: how long a body has to be motionless to count as pinned.
+    const STILL_TICKS: u32 = 120;
+    const NEAR_PLAYER: f32 = 40.0;
+    const TICKS: u32 = 1800;
+
+    let mut total_pinned = 0;
+    let mut total_bodies = 0;
+    for theme in Theme::all() {
+        for seed in [3u64, 11, 29] {
+            let mut w = World::new(theme, seed);
+            // (SpawnId, last position that moved, tick it last moved, counted).
+            let mut track: Vec<(u64, Vec2, u32, bool)> = Vec::new();
+            let mut pinned_here = 0;
+            for tick in 0..TICKS {
+                // A rat wandering in a slow circle: the flow field retargets
+                // the way it does in a real run and the horde has to route.
+                let dir = Vec2::from_angle(tick as f32 * 0.03);
+                w.update(DT, dir, false);
+                apply_pending(&mut w);
+                w.player.hp = w.player.max_hp();
+                let ppos = w.player.pos;
+                let current: Vec<(u64, Vec2)> = {
+                    let mut q = w.ecs.query::<(Entity, &SpawnId, &Enemy)>();
+                    q.iter(&w.ecs).map(|(_, id, e)| (id.0, e.pos)).collect()
+                };
+                for (id, pos) in &current {
+                    match track.iter_mut().find(|(i, _, _, _)| i == id) {
+                        Some(slot) if slot.1.dist(*pos) > 0.05 => {
+                            slot.1 = *pos;
+                            slot.2 = tick;
+                        }
+                        Some(slot) => {
+                            if !slot.3
+                                && tick.saturating_sub(slot.2) >= STILL_TICKS
+                                && pos.dist(ppos) > NEAR_PLAYER
+                            {
+                                slot.3 = true;
+                                pinned_here += 1;
+                            }
+                        }
+                        None => track.push((*id, *pos, tick, false)),
+                    }
+                }
+                track.retain(|(id, _, _, _)| current.iter().any(|(i, _)| i == id));
+            }
+            total_bodies += track.len();
+            total_pinned += pinned_here;
+            eprintln!(
+                "{theme:?} seed {seed}: {pinned_here} pinned of {} bodies",
+                track.len()
+            );
+        }
+    }
+    eprintln!("pinned: {total_pinned} of {total_bodies} bodies");
+    assert_eq!(
+        total_pinned, 0,
+        "{total_pinned} of {total_bodies} enemies stood still for 2 s away from the rat"
+    );
 }
 
 /// After a long run, no enemy should ever sit inside a wall.
@@ -209,14 +340,12 @@ fn run_keeps_enemies_out_of_walls() {
             apply_pending(&mut w);
         }
         for e in &w.enemies() {
-            for wall in &w.level.walls {
-                assert!(
-                    !wall.contains(e.pos),
-                    "{:?} enemy inside a wall at {:?}",
-                    theme,
-                    e.pos
-                );
-            }
+            assert!(
+                !touches_a_wall(&w, e.pos, e.radius, SizeClass::of_enemy(e.kind)),
+                "{:?} enemy overlapping a wall at {:?}",
+                theme,
+                e.pos
+            );
         }
     }
 }
@@ -356,7 +485,14 @@ fn spawn_point_stays_in_bounds_clear_of_walls_and_player() {
     let mut w = World::new(Theme::Sewer, 13);
     let center = w.level.arena * 0.5;
     w.player.pos = center;
-    w.level.walls = vec![Rectf::new(center.x + 110.0, center.y - 20.0, 40.0, 40.0)];
+    open_map(&mut w);
+    // A 2 x 2-cell solid block out on the 120 px ring, east of the rat.
+    let (ccx, ccy) = collision::cell_of(center);
+    paint_solid(&mut w, ccx + 7, ccy - 2, 2, 2);
+    let block = {
+        let r = TileMap::tile_rect(ccx + 7, ccy - 2);
+        Rectf::new(r.x, r.y, 2.0 * collision::TILE_F, 2.0 * collision::TILE_F)
+    };
     for _ in 0..300 {
         let p = w.spawn_point();
         assert!(
@@ -371,11 +507,10 @@ fn spawn_point_stays_in_bounds_clear_of_walls_and_player() {
             p.dist(center) >= 90.0 - 1e-3,
             "spawn {p:?} too close to player"
         );
-        let wall = w.level.walls[0];
-        let cx = p.x.clamp(wall.x, wall.right());
-        let cy = p.y.clamp(wall.y, wall.bottom());
-        let d = ((p.x - cx).powi(2) + (p.y - cy).powi(2)).sqrt();
-        assert!(d >= 4.0 - 1e-3, "spawn {p:?} overlaps a wall");
+        assert!(
+            !collision::circle_rect_overlap(p, 4.0 - 1e-3, &block),
+            "spawn {p:?} overlaps a wall"
+        );
     }
 }
 
@@ -439,14 +574,19 @@ fn bullet_query_reaches_large_enemies_across_cells() {
 #[test]
 fn fast_player_cannot_tunnel_a_thin_wall() {
     let mut w = World::new(Theme::Sewer, 23);
-    w.level.walls = vec![Rectf::new(512.0, 300.0, 1.0, 200.0)];
+    open_map(&mut w);
+    // A one-cell `WallKind::Maze` column: an 8 px spine at world x 516..524.
+    w.level
+        .tiles
+        .fill_cells(32, 18, 1, 14, TileKind::Wall(WallKind::Maze));
+    w.level.tiles.rebuild_masks();
     w.player.pos = Vec2::new(500.0, 400.0);
     w.player.vel = Vec2::new(900.0, 0.0);
     w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
     run(&mut w, player::player_system);
     w.end_tick();
     assert!(
-        w.player.pos.x <= 512.0 - PLAYER_RADIUS + 0.01,
+        w.player.pos.x <= 516.0 - PLAYER_RADIUS + 0.01,
         "player tunnelled to {:?}",
         w.player.pos
     );
@@ -570,7 +710,7 @@ fn orbit_bullets_survive_the_edge_cull() {
 #[test]
 fn dash_without_direction_uses_facing() {
     let mut w = World::new(Theme::Sewer, 37);
-    w.level.walls.clear();
+    open_map(&mut w);
     w.player.pos = w.level.arena * 0.5;
     w.player.face = Vec2::new(1.0, 0.0);
     w.player.dash_cd = 0.0;
@@ -628,7 +768,10 @@ fn exactly_stacked_enemies_are_nudged_apart() {
 #[test]
 fn contact_knockback_stays_out_of_walls() {
     let mut w = World::new(Theme::Sewer, 43);
-    w.level.walls = vec![Rectf::new(100.0, 90.0, 10.0, 20.0)];
+    open_map(&mut w);
+    // One solid cell (96..112, 96..112) with the cat just left of it.
+    paint_solid(&mut w, 6, 6, 1, 1);
+    let wall = TileMap::tile_rect(6, 6);
     w.player.pos = Vec2::new(94.0, 100.0);
     w.clear_enemies();
     let mut rng = StdRng::seed_from_u64(5);
@@ -637,11 +780,10 @@ fn contact_knockback_stays_out_of_walls() {
     w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
     run(&mut w, combat::contact_system);
     w.end_tick();
-    let wall = w.level.walls[0];
+    let pos = w.enemies()[0].pos;
     assert!(
-        !wall.contains(w.enemies()[0].pos),
-        "knockback left the enemy inside a wall at {:?}",
-        w.enemies()[0].pos
+        !collision::circle_rect_overlap(pos, w.enemies()[0].radius, &wall),
+        "knockback left the enemy inside a wall at {pos:?}"
     );
 }
 
@@ -698,7 +840,7 @@ fn iframed_player_keeps_enemy_bullets() {
 #[test]
 fn iframed_player_does_not_spend_contact_cooldowns() {
     let mut w = World::new(Theme::Sewer, 71);
-    w.level.walls.clear();
+    open_map(&mut w);
     w.player.pos = w.level.arena * 0.5;
     w.clear_enemies();
     let mut rng = StdRng::seed_from_u64(7);
@@ -853,7 +995,7 @@ fn acid_spit_pool_lands_at_its_target_after_travel() {
     w.clear_enemies();
     w.clear_bullets();
     w.clear_pools();
-    w.level.walls.clear();
+    open_map(&mut w);
     let ppos = w.player.pos;
     let face = Vec2::new(1.0, 0.0);
     w.player.face = face;
@@ -889,8 +1031,10 @@ fn acid_spit_pool_lands_on_a_wall_not_behind_it() {
     let ppos = w.player.pos;
     let face = Vec2::new(1.0, 0.0);
     w.player.face = face;
-    let wall = Rectf::new(ppos.x + 20.0, ppos.y - 20.0, 4.0, 40.0);
-    w.level.walls = vec![wall];
+    // A one-cell (`Solid`) wall column 20..36 px east of the rat.
+    let (cx, cy) = collision::cell_of(ppos);
+    paint_solid(&mut w, cx + 1, cy - 1, 1, 3);
+    let wall = TileMap::tile_rect(cx + 1, cy);
     w.player.loadout.weapons = vec![Weapon {
         kind: WeaponKind::AcidSpit,
         level: 1,
@@ -1055,7 +1199,7 @@ fn dump_vfx_showcase() {
 
     if mode == "vfx_sheet" {
         let mut w = World::new(Theme::Sewer, 7);
-        w.level.walls.clear();
+        open_map(&mut w);
         w.level.props.clear();
         let c = w.level.arena * 0.5;
         // Camera centers on `w.player.pos`, so place the dashing rat at `c`
@@ -1145,7 +1289,7 @@ fn dump_vfx_showcase() {
 
     if mode == "vfx_boss_death" {
         let mut w = World::new(Theme::Lab, 99);
-        w.level.walls.clear();
+        open_map(&mut w);
         w.level.props.clear();
         let c = w.level.arena * 0.5;
         w.player.pos = c + Vec2::new(-44.0, 12.0);

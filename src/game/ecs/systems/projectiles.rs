@@ -11,7 +11,7 @@
 //!   despawn) plus `vfx::emit_pool_bubbles`, the `!e.alive()` guard and
 //!   `DamageNumbers::record(..., DamageSource::Acid)` per damaged enemy.
 //!
-//! Resources: `Res<TickInput>` (dt), `Res<Level>` (arena, walls),
+//! Resources: `Res<TickInput>` (dt), `Res<Level>` (arena, tile grid),
 //! `Res<Player>` (orbit centre), `ResMut<RngRes>`, `ResMut<Particles>`,
 //! `Commands` + `ResMut<NextSpawnId>` (pools), `Res<EnemyIndex>` (stable enemy
 //! walk in `pools_system`) and `ResMut<DamageNumbers>`.
@@ -59,7 +59,6 @@ use bevy_ecs::prelude::*;
 use crate::game::bullet::Bullet;
 use bevy_ecs::entity::Entity;
 
-use crate::game::collision;
 use crate::game::ecs::components::{Pool, SpawnId};
 use crate::game::ecs::resources::{EnemyIndex, NextSpawnId, RngRes, TickInput};
 #[cfg(debug_assertions)]
@@ -125,16 +124,13 @@ pub fn bullets_system(
         if let Some(lob) = b.lob {
             let step = b.pos - b.prev_pos;
             let step_len = step.len();
-            let mut land: Option<Vec2> = None;
-            let mut best_t = f32::INFINITY;
-            for w in &level.walls {
-                if let Some(t) = collision::segment_rect_hit(b.prev_pos, b.pos, b.radius, w) {
-                    if t < best_t {
-                        best_t = t;
-                        land = Some(b.prev_pos + step * t);
-                    }
-                }
-            }
+            // One swept tile query for the whole step: the cells the segment
+            // crosses, earliest hit `t`, so a fast lob cannot skip the near
+            // face of a 16 px wall.
+            let mut land: Option<Vec2> = level
+                .tiles
+                .segment_hit(b.prev_pos, b.pos, b.radius)
+                .map(|t| b.prev_pos + step * t);
             if land.is_none() && step_len >= (lob.target - b.prev_pos).len() - 0.01 {
                 land = Some(lob.target);
             }
@@ -248,10 +244,18 @@ pub fn pools_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::art_walls::WallKind;
     use crate::game::bullet::{Faction, Lob, Orbit};
+    use crate::game::collision::{self, TileKind, TileMap};
     use crate::game::ecs::systems::enemy_move;
-    use crate::game::level::{Rectf, Theme};
+    use crate::game::level::{Theme, MAP_COLS, MAP_ROWS};
     use crate::game::world::World;
+
+    /// Strip the generated layout's walls so the test measures the bullet pass
+    /// instead of the map (what `Level::walls.clear()` used to do).
+    fn open_map(w: &mut World) {
+        w.level.tiles = TileMap::new(MAP_COLS, MAP_ROWS, w.level.theme, 0);
+    }
 
     /// Legacy `acid_spit_pool_lands_at_its_target_after_travel` setup: the
     /// bullet weapons.rs builds for a level-1 Acid Spit aimed at `target`.
@@ -373,7 +377,7 @@ mod tests {
         w.clear_enemies();
         w.clear_bullets();
         w.clear_pools();
-        w.level.walls.clear();
+        open_map(&mut w);
         let ppos = w.player.pos;
         let face = Vec2::new(1.0, 0.0);
         let target = ppos + face * 50.0;
@@ -400,10 +404,16 @@ mod tests {
         w.clear_enemies();
         w.clear_bullets();
         w.clear_pools();
+        open_map(&mut w);
         let ppos = w.player.pos;
         let face = Vec2::new(1.0, 0.0);
-        let wall = Rectf::new(ppos.x + 20.0, ppos.y - 20.0, 4.0, 40.0);
-        w.level.walls = vec![wall];
+        // A one-cell (`Solid`) wall column 20..36 px east of the rat.
+        let (cx, cy) = collision::cell_of(ppos);
+        w.level
+            .tiles
+            .fill_cells(cx + 1, cy - 1, 1, 3, TileKind::Wall(WallKind::Solid));
+        w.level.tiles.rebuild_masks();
+        let wall = TileMap::tile_rect(cx + 1, cy);
         let target = ppos + face * 50.0;
         w.spawn_bullet(acid_bullet(ppos, target, w.level.arena));
 
@@ -431,7 +441,7 @@ mod tests {
         w.clear_enemies();
         w.clear_bullets();
         w.clear_pools();
-        w.level.walls.clear();
+        open_map(&mut w);
         let ppos = w.player.pos;
         let target = ppos + Vec2::new(6.0, 0.0);
         w.spawn_bullet(acid_bullet(ppos, target, w.level.arena));
@@ -462,7 +472,7 @@ mod tests {
         w.clear_enemies();
         w.clear_bullets();
         w.clear_pools();
-        w.level.walls.clear();
+        open_map(&mut w);
         let ppos = w.player.pos;
         // Far target: the lob stays airborne for a while.
         let target = ppos + Vec2::new(120.0, 0.0);
@@ -494,7 +504,7 @@ mod tests {
         w.clear_enemies();
         w.clear_bullets();
         w.clear_pools();
-        w.level.walls.clear();
+        open_map(&mut w);
         let ppos = w.player.pos;
         let mut rng = rand::rngs::StdRng::seed_from_u64(9);
         w.spawn_enemy_with_rng(
