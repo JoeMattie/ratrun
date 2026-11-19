@@ -13,6 +13,7 @@ pub const ELITE_START: f32 = 60.0;
 /// Gap between elites once they start, and the value the timer is reset to.
 pub const ELITE_INTERVAL: f32 = 30.0;
 
+#[derive(bevy_ecs::resource::Resource)]
 pub struct Director {
     pub spawn_timer: f32,
     pub boss_spawned: bool,

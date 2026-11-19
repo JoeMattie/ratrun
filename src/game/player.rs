@@ -5,6 +5,7 @@ use crate::math::Vec2;
 use super::loadout::Loadout;
 use super::weapon::WeaponKind;
 
+#[derive(bevy_ecs::resource::Resource)]
 pub struct Player {
     pub pos: Vec2,
     pub vel: Vec2,

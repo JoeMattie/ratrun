@@ -1,0 +1,696 @@
+//! (c) Flow-field refresh, enemy steering + shooting, grid build, separation
+//! and wall resolution.
+//!
+//! Ported verbatim from the legacy `World`:
+//! - the flow-field refresh call (`flow.update(&level.nav, player.pos)`);
+//! - `World::update_enemies`: per-enemy steering, arena clamp, ranged-enemy
+//!   fire (`fire_cd`, boss ring of 10, spitter aimed shot);
+//! - the two grid rebuilds + `max_radius`;
+//! - `World::separate_enemies` and `World::resolve_enemy_walls`.
+//!
+//! Resources: `ResMut<FlowField>`, `Res<Level>`, `Res<Player>`,
+//! `Res<RunCounters>` (elapsed speed multiplier), `ResMut<SpatialGrid>`,
+//! `ResMut<EnemyIndex>`, `ResMut<GridScratch>` (max radius), `ResMut<RngRes>`
+//! (not used by these legacy functions but a neighbour resource), `Commands` +
+//! `ResMut<NextSpawnId>` (enemy bullets), `Res<NeighborScratch>`.
+//!
+//! Components: `Enemy` + `SpawnId`; bullets are `Bullet` + `SpawnId`.
+//!
+//! ## Stable ordering (critical)
+//!
+//! Legacy indexes enemies by `Vec` position. The ECS port replaces that with
+//! `SpawnId` order: `grid_build_system` iterates the enemy query sorted by
+//! `SpawnId`, fills the grid in that order **and** stores the entities in
+//! `EnemyIndex` in the same order, so a bucket index `j` means
+//! `EnemyIndex.0[j]` (exactly legacy `self.enemies[j]`).
+//!
+//! Separation keeps the **in-place sequential** semantics of the legacy
+//! `separate_enemies`: enemy 0's push is visible to enemy 1's neighbour read.
+//! It snapshots `(pos, radius)` into a reused `Local` array in `EnemyIndex`
+//! order and updates that array in place, so later indices see earlier pushes
+//! (legacy `self.enemies[j].pos`); final positions are written back to the
+//! components in the same order.
+//!
+//! ## `EnemyIndex` validity window (this module owns it)
+//!
+//! `grid_build_system` (schedule point 6) fills [`EnemyIndex`] in `SpawnId`
+//! order, and `grid_refresh_system` (schedule point 9) refills it identically
+//! from the post-separation/post-wall positions. The grid bucket values are
+//! indices into that vector, i.e. legacy `self.enemies[j]`, so any system may
+//! use `EnemyIndex.0[j]` instead of re-sorting by `SpawnId` **exactly while no
+//! enemy is spawned or despawned**. In the current schedule that is:
+//!
+//! | after | valid until | usable by |
+//! | --- | --- | --- |
+//! | `grid_build_system` | `grid_refresh_system` | `separation_system`, `wall_resolve_system`, `grid_refresh_system` |
+//! | `grid_refresh_system` | `loot::reap_enemies_system` despawns | `weapons::fire_weapons_system`, `projectiles::*`, `combat::*` (all before the reap) |
+//!
+//! It is **stale** at these points, so never read it there:
+//!
+//! - inside `enemy_steering_system` / `enemy_fire_system`: the index still
+//!   describes the *previous* tick (or is empty on the first tick) because
+//!   `spawn::director_system` may have added enemies since it was built; those
+//!   two systems keep their own `Local` ordered buffer instead;
+//! - after `loot::reap_enemies_system`, `loot::nuke_reap_system` and any other
+//!   despawn site (`World::clear_enemies`, the facade spawn helpers): the
+//!   index can hold dead entities, so `Query::get` would fail (it would index
+//!   legacy `self.enemies` out of range just the same).
+//!
+//! Next tick's `grid_build_system` rebuilds it from scratch, so no system has
+//! to repair it.
+//!
+//! ## Neon-merge hooks (re-applied from the merged reference)
+//!
+//! **None apply here.** The merge diff touched nothing between the director
+//! and the weapon fire, and `update_enemies`, `separate_enemies` and
+//! `resolve_enemy_walls` in the merged reference are byte-identical to the
+//! pre-merge legacy (verified with `diff`): enemy shooting gained no `Sfx`/vfx
+//! call, separation and wall ejection gained nothing. The one contract that does touch this file
+//! is `Bullet::weapon`: the other team tags only *player* bullets in
+//! `fire_one`, so enemy bullets must keep `Bullet::new`'s `None` (asserted by
+//! `enemy_bullets_are_not_tagged_with_a_weapon`).
+//!
+//! ## Split of `update_enemies`
+//!
+//! The legacy loop runs steer → arena clamp → ranged fire for each enemy.
+//! The schedule splits it into `enemy_steering_system` (steer + clamp) then
+//! `enemy_fire_system` (cooldown, range check, bullet spawn). Nothing in the
+//! fire half is read by the steering half and both walk enemies in `SpawnId`
+//! order, so two passes over all enemies are equivalent to one: per-enemy the
+//! sequence is unchanged and bullet spawn order (what must match legacy) is
+//! preserved. `enemy_fire_system` therefore needs `Res<TickInput>` for `dt`
+//! (a parameter the Phase 0 stub was missing); reported to the integrator.
+
+use bevy_ecs::prelude::*;
+
+use crate::game::bullet::{Bullet, Faction};
+use crate::game::collision::{self, SpatialGrid};
+use crate::game::ecs::components::SpawnId;
+use crate::game::ecs::constants::GRID_CELL;
+use crate::game::ecs::resources::{
+    EnemyIndex, GridScratch, NeighborScratch, NextSpawnId, RunCounters, TickInput,
+};
+#[cfg(debug_assertions)]
+use crate::game::ecs::resources::debug_assert_enemy_index;
+use crate::game::enemy::{Enemy, EnemyKind};
+use crate::game::level::Level;
+use crate::game::nav::FlowField;
+use crate::game::player::Player;
+use crate::math::Vec2;
+
+/// Scratch entry for the two grid builds: `(SpawnId, Entity, pos, radius)`.
+///
+/// Kept in a per-system `Local<Vec<_>>` and reused every tick: the port was
+/// measured ~45% slower than the `Vec`-based legacy sim, and one allocation
+/// per sorted query pass per tick was a measurable part of it. Sorting is
+/// `sort_unstable_by_key` on a `SpawnId` that is unique, so it is equivalent
+/// to the stable order legacy got from its `Vec`.
+type GridEntry = (u64, Entity, Vec2, f32);
+
+/// Legacy `World::update`: refresh the shared flow field toward the
+/// player (cheap: only recomputes when the player crosses into a new nav cell).
+pub fn flow_refresh_system(mut flow: ResMut<FlowField>, level: Res<Level>, player: Res<Player>) {
+    flow.update(&level.nav, player.pos);
+}
+
+/// Legacy `World::update_enemies`: steering + arena clamp, in
+/// `SpawnId` order.
+///
+/// The ordered entity list is built in a reused `Local` buffer: bevy's
+/// `QueryIter::sort_by_key` allocates a fresh entity list on every call, which
+/// this system (plus the fire pass) paid once per tick.
+pub fn enemy_steering_system(
+    input: Res<TickInput>,
+    counters: Res<RunCounters>,
+    player: Res<Player>,
+    flow: Res<FlowField>,
+    level: Res<Level>,
+    mut order: Local<Vec<(u64, Entity)>>,
+    mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
+) {
+    let dt = input.dt;
+    let ppos = player.pos;
+    let speed_mult = 1.0 + counters.elapsed / 400.0;
+
+    // Legacy indexed `self.enemies[i]`; here that is `SpawnId` order. Unique
+    // ids, so an unstable sort is the same order.
+    order.clear();
+    order.extend(enemies.iter_mut().map(|(entity, id, _)| (id.0, entity)));
+    order.sort_unstable_by_key(|(id, _)| *id);
+
+    for &(_, entity) in order.iter() {
+        let (_, _, mut e) = enemies
+            .get_mut(entity)
+            .expect("ordered enemy must still be alive");
+        let flow_dir = flow.dir_at(e.pos);
+        e.steer(ppos, flow_dir, dt, speed_mult);
+        // Keep enemies inside the arena.
+        e.pos = e
+            .pos
+            .clamp_box(Vec2::splat(2.0), level.arena - Vec2::splat(2.0));
+    }
+}
+
+/// Legacy `World::update_enemies`: ranged enemies shoot.
+///
+/// Each enemy's shot depends only on that enemy, the player and the level, so
+/// the loop walks the query in whatever order the storage yields; the only
+/// order-sensitive output, the order bullets are *spawned* in (`SpawnId` order,
+/// and the boss's 10 spokes in `k` order), is restored by buffering the shots
+/// in a reused `Local` list and sorting it stably by `SpawnId` before spawning.
+/// Enemy bullets keep `Bullet::new`'s `weapon: None` (only player bullets are
+/// tagged in `World::fire_one` by the neon merge).
+pub fn enemy_fire_system(
+    input: Res<TickInput>,
+    player: Res<Player>,
+    level: Res<Level>,
+    mut commands: Commands,
+    mut pending: Local<Vec<(u64, Bullet)>>,
+    mut enemies: Query<(&SpawnId, &mut Enemy)>,
+    mut next_id: ResMut<NextSpawnId>,
+) {
+    let dt = input.dt;
+    let ppos = player.pos;
+    let color = level.palette.accent;
+    pending.clear();
+    for (id, mut e) in enemies.iter_mut() {
+        if !e.kind.ranged() {
+            continue;
+        }
+        e.fire_cd -= dt;
+        let dist = e.pos.dist(ppos);
+        if e.fire_cd <= 0.0 && dist < 170.0 {
+            let is_boss = e.kind == EnemyKind::Boss;
+            e.fire_cd = if is_boss { 1.2 } else { 2.2 };
+            let from = e.pos;
+            let dmg = e.damage * 0.6;
+            if is_boss {
+                for k in 0..10 {
+                    let a = k as f32 / 10.0 * std::f32::consts::TAU;
+                    let v = Vec2::from_angle(a) * 60.0;
+                    let mut b = Bullet::new(from, v, dmg, Faction::Enemy, (255, 120, 160));
+                    b.life = 5.0;
+                    b.size = 2;
+                    pending.push((id.0, b));
+                }
+            } else {
+                let v = (ppos - from).normalized() * 75.0;
+                let mut b = Bullet::new(from, v, dmg, Faction::Enemy, color);
+                b.life = 4.0;
+                pending.push((id.0, b));
+            }
+        }
+    }
+    // Stable: the boss's spokes share one `SpawnId` and must keep `k` order.
+    pending.sort_by_key(|(id, _)| *id);
+    for (_, bullet) in pending.drain(..) {
+        commands.spawn((bullet, next_id.take()));
+    }
+}
+
+/// First grid build: before separation. Also records `GridScratch::max_radius`
+/// (`enemies.iter().map(|e| e.radius).fold(0.0, f32::max)`).
+///
+/// Legacy. Positions are inserted in `SpawnId` order, so the
+/// `u32` indices stored in the buckets address `EnemyIndex.0` (legacy
+/// `self.enemies` index) directly.
+pub fn grid_build_system(
+    level: Res<Level>,
+    enemies: Query<(Entity, &SpawnId, &Enemy)>,
+    mut cache: Local<Vec<GridEntry>>,
+    mut grid: ResMut<SpatialGrid>,
+    mut index: ResMut<EnemyIndex>,
+    mut scratch: ResMut<GridScratch>,
+) {
+    // One query pass into the reused buffer, then one in-place sort; the grid,
+    // `EnemyIndex` and `max_radius` all come from that buffer.
+    cache.clear();
+    cache.extend(
+        enemies
+            .iter()
+            .map(|(entity, id, e)| (id.0, entity, e.pos, e.radius)),
+    );
+    cache.sort_unstable_by_key(|entry| entry.0);
+
+    grid.reset(level.arena, GRID_CELL);
+    grid.fill(cache.iter().map(|entry| entry.2));
+
+    index.0.clear();
+    index.0.extend(cache.iter().map(|entry| entry.1));
+    scratch.max_radius = cache.iter().map(|entry| entry.3).fold(0.0, f32::max);
+}
+
+/// Legacy `World::separate_enemies` .
+///
+/// The widest possible overlapping pair spans two largest radii
+/// (`reach = max_radius * 2.0`). Enemy `i` is read, its neighbours' current
+/// positions are read (so earlier pushes are already visible) and the clamped
+/// nudge is written back, exactly like the legacy in-place loop.
+pub fn separation_system(
+    grid: Res<SpatialGrid>,
+    index: Res<EnemyIndex>,
+    scratch: Res<GridScratch>,
+    mut neigh: ResMut<NeighborScratch>,
+    mut state: Local<Vec<(Vec2, f32)>>,
+    mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
+) {
+    // Debug builds (i.e. every `cargo test`): prove the cached order is still
+    // the live `SpawnId` order before indexing the grid with it.
+    #[cfg(debug_assertions)]
+    debug_assert_enemy_index(
+        &index.0,
+        enemies.iter().map(|(entity, id, _)| (id.0, entity)),
+    );
+    // Snapshot `(pos, radius)` once into the reused buffer, in `EnemyIndex`
+    // (= legacy `self.enemies`) order: the legacy loop then only touches that
+    // flat array, so the tick pays two entity lookups per enemy instead of one
+    // per neighbour in the 5x5 bucket query.
+    state.clear();
+    for &entity in index.0.iter() {
+        let Ok((_, _, e)) = enemies.get(entity) else {
+            continue;
+        };
+        state.push((e.pos, e.radius));
+    }
+
+    let reach = scratch.max_radius * 2.0;
+    for i in 0..state.len() {
+        let (pi, ri) = state[i];
+        grid.neighbors_within(pi, reach, &mut neigh.0);
+        let mut push = Vec2::ZERO;
+        for &j in &neigh.0 {
+            let j = j as usize;
+            if j == i {
+                continue;
+            }
+            let (pj, rj) = state[j];
+            let sum = ri + rj;
+            let d2 = pi.dist_sq(pj);
+            if d2 < sum * sum {
+                if d2 > 1e-6 {
+                    let d = d2.sqrt();
+                    push += (pi - pj) * ((sum - d) / d) * 0.5;
+                } else {
+                    // Perfectly stacked: nudge apart deterministically by
+                    // index order so they never stay glued together.
+                    let dir = if i < j { -1.0 } else { 1.0 };
+                    push += Vec2::new(dir * sum * 0.5, 0.0);
+                }
+            }
+        }
+        // Legacy wrote `self.enemies[i].pos += push`, so a later neighbour read
+        // must see this push: update the array in place, not a copy.
+        state[i].0 += push.clamp_len(6.0);
+    }
+
+    // Write the final positions back in the same order (no sort, no clone).
+    for (i, &entity) in index.0.iter().enumerate() {
+        let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
+            continue;
+        };
+        e.pos = state[i].0;
+    }
+}
+
+/// Legacy `World::resolve_enemy_walls` : push enemies out of
+/// interior walls (final position constraint, after steering + separation) so
+/// they path around obstacles instead of through.
+///
+/// Wall ejection is per-enemy independent, and the `EnemyIndex` built by
+/// `grid_build_system` earlier in this same tick is still valid here (nothing
+/// spawns or despawns between the two), so it iterates that instead of sorting
+/// the query again.
+pub fn wall_resolve_system(
+    level: Res<Level>,
+    index: Res<EnemyIndex>,
+    mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
+) {
+    #[cfg(debug_assertions)]
+    debug_assert_enemy_index(
+        &index.0,
+        enemies.iter().map(|(entity, id, _)| (id.0, entity)),
+    );
+    let arena = level.arena;
+    for &entity in index.0.iter() {
+        let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
+            continue;
+        };
+        let r = e.radius;
+        for w in &level.walls {
+            e.pos = collision::resolve_circle_rect(e.pos, r, w);
+        }
+        e.pos = e.pos.clamp_box(Vec2::splat(2.0), arena - Vec2::splat(2.0));
+    }
+}
+
+/// Second grid build: after separation + wall ejection, before weapon fire, so
+/// bullet queries use the enemies' final positions. Keeps `EnemyIndex` as is.
+///
+/// Legacy only reset + refill the grid: `max_radius` is *not*
+/// recomputed there (no enemy changes radius between the two builds, and no
+/// enemy is spawned or reaped in between), so `GridScratch::max_radius` keeps
+/// the value from [`grid_build_system`].
+///
+/// `EnemyIndex` is still the authoritative `SpawnId` order here — nothing has
+/// spawned or despawned since `grid_build_system` built it — so the grid is
+/// refilled straight from it (only the positions are re-read, because
+/// separation and wall ejection moved the enemies) instead of sorting the
+/// query a second time.
+pub fn grid_refresh_system(
+    level: Res<Level>,
+    enemies: Query<(Entity, &SpawnId, &Enemy)>,
+    index: Res<EnemyIndex>,
+    mut grid: ResMut<SpatialGrid>,
+    mut _scratch: ResMut<GridScratch>,
+) {
+    #[cfg(debug_assertions)]
+    debug_assert_enemy_index(
+        &index.0,
+        enemies.iter().map(|(entity, id, _)| (id.0, entity)),
+    );
+    grid.reset(level.arena, GRID_CELL);
+    grid.fill(index.0.iter().filter_map(|&entity| enemies.get(entity).ok().map(|(_, _, e)| e.pos)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::level::Theme;
+    use crate::game::world::World;
+
+    /// Positions are f32 arithmetic; compare with a small tolerance.
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-3
+    }
+
+    fn approx_v(a: Vec2, b: Vec2) -> bool {
+        approx(a.x, b.x) && approx(a.y, b.y)
+    }
+
+    /// Narrow harness (PORT_PLAN §2): one system, no schedule.
+    fn run_one<O: 'static, M>(w: &mut World, system: impl IntoSystem<(), O, M> + 'static) -> O {
+        w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+        let out = w.ecs.run_system_cached(system).unwrap();
+        w.end_tick();
+        out
+    }
+
+    /// Narrow harness for a whole sub-sequence of systems inside one tick.
+    fn tick(w: &mut World, run: impl FnOnce(&mut World)) {
+        w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+        run(w);
+        w.end_tick();
+    }
+
+    #[test]
+    fn flow_refresh_follows_the_player() {
+        let mut w = World::new(Theme::Sewer, 3);
+        let center = w.level.arena * 0.5;
+        // `World::new` builds the field toward the arena center, so the center
+        // cell is the goal cell and has no direction.
+        assert_eq!(w.flow.dir_at(center).len_sq(), 0.0);
+
+        // Move the player two cells to the right; the field must retarget.
+        w.player.pos = Vec2::new(center.x + 200.0, center.y);
+        run_one(&mut w, flow_refresh_system);
+
+        assert!(
+            w.flow.dir_at(center).len_sq() > 0.0,
+            "flow field did not follow the player"
+        );
+    }
+
+    #[test]
+    fn enemy_steering_chases_the_player_and_stays_in_the_arena() {
+        let mut w = World::new(Theme::Sewer, 5);
+        let center = w.level.arena * 0.5;
+        // Start outside the arena: steering must still clamp it back inside.
+        w.spawn_enemy(EnemyKind::Cat, Vec2::new(-40.0, center.y), 1.0);
+
+        run_one(&mut w, enemy_steering_system);
+
+        let e = &w.enemies()[0];
+        assert!(approx(e.pos.x, 2.0), "enemy not clamped to the arena: {:?}", e.pos);
+        assert!(approx(e.pos.y, center.y), "enemy drifted off its row: {:?}", e.pos);
+        assert!(e.vel.x > 0.0, "enemy did not steer toward the player: {:?}", e.vel);
+    }
+
+    #[test]
+    fn spitter_fires_an_aimed_shot_and_resets_its_cooldown() {
+        let mut w = World::new(Theme::Sewer, 7);
+        let center = w.level.arena * 0.5;
+        let from = Vec2::new(center.x + 100.0, center.y);
+        let e = w.spawn_enemy(EnemyKind::Spitter, from, 1.0);
+        w.ecs.get_mut::<Enemy>(e).unwrap().fire_cd = 0.0;
+        let accent = w.level.palette.accent;
+
+        run_one(&mut w, enemy_fire_system);
+
+        // Neon-merge hook check: enemy shots are NOT player bullets, so they
+        // keep `Bullet::new`'s `weapon: None` (only `World::fire_one` tags
+        // player bullets) and enemy fire emits no `Sfx` of its own.
+        assert!(w.bullets()[0].weapon.is_none(), "enemy bullet was weapon-tagged");
+        assert!(w.sfx.is_empty(), "enemy fire emitted sfx: {:?}", w.sfx);
+
+        assert_eq!(w.bullets().len(), 1, "spitter fired {:?} bullets", w.bullets().len());
+        let b = &w.bullets()[0];
+        assert!(matches!(b.faction, Faction::Enemy));
+        assert!(approx_v(b.pos, from));
+        assert!(approx_v(b.vel, (center - from).normalized() * 75.0), "{:?}", b.vel);
+        assert!(approx(b.damage, EnemyKind::Spitter.damage() * 0.6));
+        assert_eq!(b.life, 4.0);
+        assert_eq!(b.size, 1);
+        assert_eq!(b.color, accent);
+        assert!(approx(w.enemies()[0].fire_cd, 2.2), "{:?}", w.enemies()[0].fire_cd);
+    }
+
+    #[test]
+    fn boss_fires_a_ten_way_ring() {
+        let mut w = World::new(Theme::Lab, 8);
+        let center = w.level.arena * 0.5;
+        let from = Vec2::new(center.x + 60.0, center.y);
+        let e = w.spawn_enemy(EnemyKind::Boss, from, 1.0);
+        w.ecs.get_mut::<Enemy>(e).unwrap().fire_cd = 0.0;
+
+        run_one(&mut w, enemy_fire_system);
+
+        assert_eq!(w.bullets().len(), 10, "boss ring should be 10 bullets");
+        for (k, b) in w.bullets().iter().enumerate() {
+            let a = k as f32 / 10.0 * std::f32::consts::TAU;
+            assert!(approx_v(b.pos, from));
+            assert!(approx_v(b.vel, Vec2::from_angle(a) * 60.0), "spoke {k}");
+            assert_eq!(b.life, 5.0);
+            assert_eq!(b.size, 2);
+            assert_eq!(b.color, (255, 120, 160));
+            assert!(approx(b.damage, EnemyKind::Boss.damage() * 0.6));
+        }
+        assert!(approx(w.enemies()[0].fire_cd, 1.2), "{:?}", w.enemies()[0].fire_cd);
+    }
+
+    #[test]
+    fn ranged_enemies_respect_cooldown_range_and_spawn_id_order() {
+        let mut w = World::new(Theme::Sewer, 9);
+        let center = w.level.arena * 0.5;
+        let near = w.spawn_enemy(EnemyKind::Spitter, Vec2::new(center.x + 100.0, center.y), 1.0);
+        let also_near = w.spawn_enemy(EnemyKind::Spitter, Vec2::new(center.x - 100.0, center.y), 1.0);
+        let far = w.spawn_enemy(EnemyKind::Spitter, Vec2::new(center.x + 300.0, center.y), 1.0);
+        let melee = w.spawn_enemy(EnemyKind::Skitterer, Vec2::new(center.x, center.y + 40.0), 1.0);
+        w.ecs.get_mut::<Enemy>(near).unwrap().fire_cd = 0.0;
+        w.ecs.get_mut::<Enemy>(also_near).unwrap().fire_cd = 0.0;
+        w.ecs.get_mut::<Enemy>(far).unwrap().fire_cd = 0.0;
+        w.ecs.get_mut::<Enemy>(melee).unwrap().fire_cd = 1.5;
+
+        run_one(&mut w, enemy_fire_system);
+
+        // Bullets are spawned in `SpawnId` order: the nearer spitter first.
+        assert_eq!(w.bullets().len(), 2, "out-of-range or melee enemy fired");
+        assert!(approx_v(w.bullets()[0].pos, Vec2::new(center.x + 100.0, center.y)));
+        assert!(approx_v(w.bullets()[1].pos, Vec2::new(center.x - 100.0, center.y)));
+        // Out of range: the cooldown is still spent (legacy keeps decrementing)
+        // and no bullet is spawned.
+        assert!(w.enemies()[2].fire_cd < 0.0, "{:?}", w.enemies()[2].fire_cd);
+        // Melee enemies have no fire cooldown at all.
+        assert!(approx(w.enemies()[3].fire_cd, 1.5));
+    }
+
+    #[test]
+    fn grid_build_orders_the_index_by_spawn_id_and_records_max_radius() {
+        let mut w = World::new(Theme::Sewer, 11);
+        w.clear_enemies();
+        let cat = w.spawn_enemy(EnemyKind::Cat, Vec2::new(100.0, 100.0), 1.0);
+        let skitterer = w.spawn_enemy(EnemyKind::Skitterer, Vec2::new(200.0, 200.0), 1.0);
+        let boss = w.spawn_enemy(EnemyKind::Boss, Vec2::new(300.0, 300.0), 1.0);
+
+        run_one(&mut w, grid_build_system);
+
+        let index = w.ecs.resource::<EnemyIndex>();
+        assert_eq!(index.0, vec![cat, skitterer, boss]);
+        assert!(approx(
+            w.ecs.resource::<GridScratch>().max_radius,
+            EnemyKind::Boss.radius()
+        ));
+    }
+
+    /// Legacy `exactly_stacked_enemies_are_nudged_apart`, plus the exact
+    /// positions the in-place sequential algorithm produces (earlier pushes
+    /// visible to later neighbour reads).
+    #[test]
+    fn exactly_stacked_enemies_are_nudged_apart() {
+        let mut w = World::new(Theme::Sewer, 41);
+        w.clear_enemies();
+        let p = w.level.arena * 0.5;
+        w.spawn_enemy(EnemyKind::Cat, p, 1.0);
+        w.spawn_enemy(EnemyKind::Cat, p, 1.0);
+
+        run_one(&mut w, grid_build_system);
+        // `run_one` ends the tick; the grid/index survive (internal scratch).
+        w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+        w.ecs.run_system_cached(separation_system).unwrap();
+        w.end_tick();
+
+        assert!(
+            w.enemies()[0].pos.dist(w.enemies()[1].pos) > 0.1,
+            "stacked enemies stayed glued together"
+        );
+        // i = 0 (stacked, i < j) is pushed -sum/2; i = 1 then sees the moved
+        // enemy 0 and is pushed +2.0.
+        assert!(approx_v(w.enemies()[0].pos, Vec2::new(p.x - 4.0, p.y)), "{:?}", w.enemies()[0].pos);
+        assert!(approx_v(w.enemies()[1].pos, Vec2::new(p.x + 2.0, p.y)), "{:?}", w.enemies()[1].pos);
+    }
+
+    /// The separation broadphase reach is `2 * max_radius`, so a fat enemy in
+    /// one grid cell must still see an overlapping neighbour two cells away.
+    #[test]
+    fn separation_reaches_across_grid_cells() {
+        let mut w = World::new(Theme::Lab, 19);
+        w.clear_enemies();
+        // 15.9 (cell 0) and 32.5 (cell 2) are 16.6 px apart; a radius-14 boss
+        // and a radius-4 cat overlap (sum 18) but span two cells.
+        w.spawn_enemy(EnemyKind::Boss, Vec2::new(15.9, 100.0), 1.0);
+        w.spawn_enemy(EnemyKind::Cat, Vec2::new(32.5, 100.0), 1.0);
+
+        run_one(&mut w, grid_build_system);
+        w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+        w.ecs.run_system_cached(separation_system).unwrap();
+        w.end_tick();
+
+        let d = w.enemies()[0].pos.dist(w.enemies()[1].pos);
+        assert!(d > 17.0, "wide separation query missed the cross-cell neighbour: {d}");
+    }
+
+    /// Neon-merge hook check for this file: the other team tags only *player*
+    /// bullets (`World::fire_one` sets `Bullet::weapon = Some(kind)`), so enemy
+    /// shots must keep `Bullet::new`'s `None`, and enemy fire emits no `Sfx`.
+    #[test]
+    fn enemy_bullets_are_not_tagged_with_a_weapon() {
+        let mut w = World::new(Theme::Sewer, 23);
+        let center = w.level.arena * 0.5;
+        let spitter = w.spawn_enemy(EnemyKind::Spitter, Vec2::new(center.x + 100.0, center.y), 1.0);
+        let boss = w.spawn_enemy(EnemyKind::Boss, Vec2::new(center.x - 60.0, center.y), 1.0);
+        w.ecs.get_mut::<Enemy>(spitter).unwrap().fire_cd = 0.0;
+        w.ecs.get_mut::<Enemy>(boss).unwrap().fire_cd = 0.0;
+
+        run_one(&mut w, enemy_fire_system);
+
+        assert_eq!(w.bullets().len(), 11, "spitter shot + boss ring");
+        for (i, b) in w.bullets().iter().enumerate() {
+            assert!(
+                b.weapon.is_none(),
+                "enemy bullet {i} was tagged with {:?}",
+                b.weapon
+            );
+        }
+        assert!(w.sfx.is_empty(), "enemy fire emitted sfx: {:?}", w.sfx);
+    }
+
+    /// Legacy `enemies_are_pushed_out_of_walls`.
+    ///
+    /// `wall_resolve_system` walks `EnemyIndex` (no re-sort), exactly as in the
+    /// schedule where `grid_build_system` ran earlier in the same tick.
+    #[test]
+    fn enemies_are_pushed_out_of_walls() {
+        let mut w = World::new(Theme::Sewer, 5);
+        let wall = w.level.walls[0];
+        // Spawn an enemy buried in the middle of a wall.
+        w.spawn_enemy(EnemyKind::Cat, wall.center(), 1.0);
+
+        tick(&mut w, |w| {
+            w.ecs.run_system_cached(grid_build_system).unwrap();
+            w.ecs.run_system_cached(wall_resolve_system).unwrap();
+        });
+
+        let c = w.enemies()[0].pos;
+        assert!(!wall.contains(c), "enemy center should be outside the wall: {c:?}");
+    }
+
+    /// The reused grid buffer must be cleared, not appended to, on the next
+    /// call (a stale entry would multiply `EnemyIndex`).
+    #[test]
+    fn grid_build_reuses_its_scratch_without_duplicating() {
+        let mut w = World::new(Theme::Sewer, 13);
+        w.clear_enemies();
+        let cat = w.spawn_enemy(EnemyKind::Cat, Vec2::new(100.0, 100.0), 1.0);
+        let boss = w.spawn_enemy(EnemyKind::Boss, Vec2::new(300.0, 300.0), 1.0);
+
+        tick(&mut w, |w| {
+            for _ in 0..2 {
+                w.ecs.run_system_cached(grid_build_system).unwrap();
+            }
+        });
+
+        assert_eq!(w.ecs.resource::<EnemyIndex>().0, vec![cat, boss]);
+        assert!(approx(
+            w.ecs.resource::<GridScratch>().max_radius,
+            EnemyKind::Boss.radius()
+        ));
+    }
+
+    /// The buffered-shot list must be drained every tick and still spawn the
+    /// boss's ring in spoke order.
+    #[test]
+    fn fire_scratch_does_not_leak_between_ticks() {
+        let mut w = World::new(Theme::Lab, 17);
+        let center = w.level.arena * 0.5;
+        let from = Vec2::new(center.x + 60.0, center.y);
+        let boss = w.spawn_enemy(EnemyKind::Boss, from, 1.0);
+
+        w.ecs.get_mut::<Enemy>(boss).unwrap().fire_cd = 0.0;
+        run_one(&mut w, enemy_fire_system);
+        assert_eq!(w.bullets().len(), 10);
+
+        w.ecs.get_mut::<Enemy>(boss).unwrap().fire_cd = 0.0;
+        run_one(&mut w, enemy_fire_system);
+        assert_eq!(w.bullets().len(), 20, "stale shots from the scratch buffer");
+        // Spokes stay in `k` order after the stable `SpawnId` sort.
+        for k in 0..10 {
+            let a = k as f32 / 10.0 * std::f32::consts::TAU;
+            assert!(approx_v(w.bullets()[10 + k].vel, Vec2::from_angle(a) * 60.0));
+        }
+    }
+
+    /// Separation snapshots positions from the components each call (the
+    /// reused array must not carry the previous tick's pushes into this one).
+    #[test]
+    fn separation_rebuilds_its_scratch_each_tick() {
+        let mut w = World::new(Theme::Sewer, 43);
+        w.clear_enemies();
+        let p = w.level.arena * 0.5;
+        w.spawn_enemy(EnemyKind::Cat, p, 1.0);
+        w.spawn_enemy(EnemyKind::Cat, p, 1.0);
+        let separate = |w: &mut World| {
+            w.ecs.run_system_cached(grid_build_system).unwrap();
+            w.ecs.run_system_cached(separation_system).unwrap();
+        };
+
+        tick(&mut w, separate);
+        // Tick 1: 0 -> p - 4 (stacked, i < j), then 1 sees the moved 0.
+        assert!(approx_v(w.enemies()[0].pos, Vec2::new(p.x - 4.0, p.y)));
+        assert!(approx_v(w.enemies()[1].pos, Vec2::new(p.x + 2.0, p.y)));
+
+        tick(&mut w, separate);
+        // Tick 2 starts from those positions (6 and 7 px apart, sum of radii 8):
+        // 0 is pushed a further -1.0, 1 a further +0.5.
+        assert!(approx_v(w.enemies()[0].pos, Vec2::new(p.x - 5.0, p.y)), "{:?}", w.enemies()[0].pos);
+        assert!(approx_v(w.enemies()[1].pos, Vec2::new(p.x + 2.5, p.y)), "{:?}", w.enemies()[1].pos);
+    }
+}

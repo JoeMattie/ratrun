@@ -3,6 +3,7 @@
 use crate::math::Vec2;
 use crate::render::palette::Rgb;
 
+#[derive(Clone)]
 pub struct Gem {
     pub pos: Vec2,
     pub vel: Vec2,
@@ -55,6 +56,7 @@ impl PickupKind {
     }
 }
 
+#[derive(Clone)]
 pub struct Pickup {
     pub pos: Vec2,
     pub kind: PickupKind,

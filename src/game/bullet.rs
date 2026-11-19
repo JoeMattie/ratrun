@@ -32,6 +32,7 @@ pub struct Lob {
     pub color: Rgb,
 }
 
+#[derive(Clone)]
 pub struct Bullet {
     pub pos: Vec2,
     /// Position at the start of this tick's movement, so collision passes can

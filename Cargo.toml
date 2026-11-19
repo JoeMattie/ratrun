@@ -15,6 +15,10 @@ anyhow = "1"
 rodio = { version = "0.23", default-features = false, features = ["playback"] }
 rascii_art = "0.4.5"
 image = "0.24" # must match rascii_art's image version so DynamicImage unifies
+# ECS for the simulation port. Single-threaded determinism is required:
+# default features (bevy_reflect, async_executor, backtrace, std) are off and
+# only `std` is re-enabled; `multi_threaded` must stay off.
+bevy_ecs = { version = "0.20", default-features = false, features = ["std"] }
 
 [profile.release]
 opt-level = 3

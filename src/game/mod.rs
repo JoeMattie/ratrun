@@ -5,6 +5,7 @@ pub mod art_rat;
 pub mod bullet;
 pub mod collision;
 pub mod director;
+pub mod ecs;
 pub mod enemy;
 pub mod gem;
 pub mod level;

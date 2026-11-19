@@ -81,6 +81,7 @@ impl EnemyKind {
     }
 }
 
+#[derive(Clone)]
 pub struct Enemy {
     /// Monotonic runtime identifier assigned on spawn (0 if constructed outside `World`).
     pub id: u32,

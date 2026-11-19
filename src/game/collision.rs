@@ -103,6 +103,7 @@ pub fn segment_rect_hit(a: Vec2, b: Vec2, r: f32, rect: &Rectf) -> Option<f32> {
 /// Uniform grid over enemy positions. The world keeps one and reuses it:
 /// `reset` clears buckets in place (keeping their capacity) and `fill`
 /// re-populates them, so a frame does no bucket allocation.
+#[derive(bevy_ecs::resource::Resource)]
 pub struct SpatialGrid {
     cell: f32,
     cols: i32,

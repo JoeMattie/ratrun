@@ -111,6 +111,7 @@ fn diagonal_ok(g: &NavGrid, cx: i32, cy: i32, dx: i32, dy: i32) -> bool {
     dx == 0 || dy == 0 || (!g.is_blocked(cx + dx, cy) && !g.is_blocked(cx, cy + dy))
 }
 
+#[derive(bevy_ecs::resource::Resource)]
 pub struct FlowField {
     cols: i32,
     rows: i32,

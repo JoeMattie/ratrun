@@ -1,0 +1,1262 @@
+//! ECS facade tests.
+//!
+//! Port of **every** test from the legacy `world.rs` suite. Assertions are kept
+//! identical in intent; only the setup/inspection mechanics changed:
+//!
+//! - Entities are spawned through the facade helpers (`World::spawn_enemy`,
+//!   `spawn_bullet`, `spawn_gem`, `spawn_pickup`, `spawn_pool`) instead of
+//!   pushing to the legacy `Vec` fields.
+//! - Single-system tests use the narrow harness from `PORT_PLAN.md` §2:
+//!   `world.begin_tick(dt, dir, dash)`,
+//!   `world.ecs.run_system_cached(systems::..::system)`, `world.end_tick()`.
+//!   Between `begin_tick` and `end_tick` the facade singleton fields are
+//!   placeholders, so those tests read/write `world.ecs.resource::<T>()`.
+//! - `apply_pending` is the same loop over `world.pending_levelups` using
+//!   `world.player.loadout.generate_choices(&mut world.rng)`.
+//!
+//! The legacy `fire_one`/`update_bullets`/`update_gems`/... private helpers are
+//! not part of the facade, so the tests that called them drive the equivalent
+//! system through the narrow harness with the same inputs (weapon kind/level,
+//! dt, seeded rng). `nearest_enemy` is exercised through the facade helper of
+//! the same name (it returns the entity instead of the legacy `Vec` index).
+
+use bevy_ecs::entity::Entity;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
+
+use crate::audio::Sfx;
+use crate::game::bullet::{Bullet, Faction, Orbit};
+use crate::game::collision;
+use crate::game::director;
+use crate::game::ecs::components::Pool;
+use crate::game::ecs::constants::{ENEMY_CAP, PARTICLE_CAP, PLAYER_RADIUS};
+use crate::game::ecs::resources::{GridScratch, PickupScratch};
+use crate::game::ecs::systems::{combat, enemy_move, loot, player, projectiles, weapons};
+use crate::game::enemy::{Enemy, EnemyKind};
+use crate::game::gem::{Gem, Pickup, PickupKind};
+use crate::game::level::{Rectf, Theme};
+use crate::game::particle::damage_number::DamageSource;
+use crate::game::particle::vfx;
+use crate::game::player::Player;
+use crate::game::weapon::{Weapon, WeaponKind};
+use crate::game::world::{on_screen, World};
+use crate::math::Vec2;
+use crate::render::framebuffer::PixelBuffer;
+
+/// Run one system through the narrow harness (deferred `Commands` are applied
+/// by `run_system_cached`, exactly like a chained schedule step).
+fn run<O: 'static, M, S>(w: &mut World, system: S) -> O
+where
+    S: bevy_ecs::system::IntoSystem<(), O, M> + 'static,
+{
+    w.ecs.run_system_cached(system).expect("system runs")
+}
+
+/// Mutate one spawned enemy component straight in the ECS world (queries see
+/// it immediately; there is no facade cache to refresh).
+fn edit_enemy(w: &mut World, entity: Entity, f: impl FnOnce(&mut Enemy)) {
+    let mut enemy = w.ecs.get_mut::<Enemy>(entity).expect("enemy exists");
+    f(&mut enemy);
+}
+
+fn apply_pending(w: &mut World) {
+    while w.pending_levelups > 0 {
+        let choices = w.player.loadout.generate_choices(&mut w.rng);
+        if let Some(up) = choices.first().cloned() {
+            let heal = w.player.loadout.apply(&up);
+            w.player.heal(heal);
+        }
+        w.pending_levelups -= 1;
+    }
+}
+
+/// Drive a long simulation across all themes, drawing every few frames at
+/// several viewport sizes, to catch panics in the update + render paths.
+#[test]
+fn headless_run_does_not_panic() {
+    for theme in Theme::all() {
+        let mut w = World::new(theme, 12345);
+        let dt = 1.0 / 60.0;
+        let sizes = [(120usize, 60usize), (1, 1), (240, 120)];
+        for tick in 0..6000u32 {
+            let dir = Vec2::from_angle(tick as f32 * 0.05);
+            let dash = tick % 90 == 0;
+            w.update(dt, dir, dash);
+            apply_pending(&mut w);
+            if tick % 7 == 0 {
+                let (sw, sh) = sizes[(tick as usize / 7) % sizes.len()];
+                let mut pb = PixelBuffer::new(sw, sh);
+                w.draw(&mut pb);
+            }
+            if w.finished() {
+                break;
+            }
+        }
+        // Invariants.
+        assert!(w.enemies().len() <= ENEMY_CAP);
+        assert!(w.particles.len() <= PARTICLE_CAP);
+    }
+}
+
+/// The `EnemyIndex` validity proof, run as a real full-length game.
+///
+/// `weapons`, `combat::player_bullet_hits_system`, `combat::contact_system`
+/// and `projectiles::pools_system` read the cached `SpawnId`-ordered
+/// `EnemyIndex` (as do `separation`, `wall_resolve` and `grid_refresh` in
+/// `enemy_move`). Each of them calls `resources::debug_assert_enemy_index`
+/// first, which compares the cache against a freshly sorted `SpawnId` list and
+/// fails the test if any slot disagrees. `cargo test` builds with
+/// `debug_assertions`, so this test drives the longest shape a run takes —
+/// 300 s at 60 Hz with the rat kept alive, so the horde cap, elites and the
+/// boss window are all reached — and every tick of it is checked.
+#[test]
+fn enemy_index_is_fresh_at_every_reader_for_a_full_run() {
+    let mut w = World::new(Theme::Sewer, 4242);
+    let dt = 1.0 / 60.0;
+    let mut peak = 0usize;
+    let mut ticks = 0u32;
+    while !w.finished() && ticks < 18_100 {
+        let dir = Vec2::from_angle(ticks as f32 * 0.05);
+        w.update(dt, dir, ticks.is_multiple_of(157));
+        w.player.hp = w.player.max_hp();
+        apply_pending(&mut w);
+        peak = peak.max(w.enemies().len());
+        ticks += 1;
+    }
+    assert!(w.director.boss_spawned, "run never reached the boss window");
+    assert!(w.elapsed >= director::RUN_SECONDS, "run did not reach 300 s");
+    assert!(peak > 40, "crowd never grew (peak {peak}): guard untested");
+}
+
+/// Manual screenshot tool: line up one of each insect + a glowing pickup
+/// in a zoomable frame. `RATRUN_DUMP=bugs cargo test dump_bestiary`.
+#[test]
+fn dump_bestiary() {
+    if std::env::var("RATRUN_DUMP").as_deref() != Ok("bugs") {
+        return;
+    }
+    let mut w = World::new(Theme::Sewer, 1);
+    let cx = w.level.arena.x * 0.5;
+    let cy = w.level.arena.y * 0.5;
+    w.player.pos = Vec2::new(cx, cy + 42.0);
+    let mut rng = StdRng::seed_from_u64(3);
+    let kinds = [
+        EnemyKind::Skitterer,
+        EnemyKind::Bat,
+        EnemyKind::Cat,
+        EnemyKind::Spitter,
+        EnemyKind::Brute,
+        EnemyKind::Boss,
+    ];
+    for (i, k) in kinds.iter().enumerate() {
+        let e = w.spawn_enemy_with_rng(
+            *k,
+            Vec2::new(cx - 78.0 + i as f32 * 30.0, cy),
+            1.0,
+            &mut rng,
+        );
+        edit_enemy(&mut w, e, |enemy| {
+            enemy.facing = Vec2::new(0.25, 1.0).normalized();
+            enemy.anim = i as f32 * 0.9;
+        });
+    }
+    w.spawn_pickup(Pickup {
+        pos: Vec2::new(cx - 30.0, cy + 22.0),
+        kind: PickupKind::Heal,
+        bob: 1.2,
+    });
+    w.spawn_pickup(Pickup {
+        pos: Vec2::new(cx + 30.0, cy + 22.0),
+        kind: PickupKind::Nuke,
+        bob: 0.3,
+    });
+    let mut pb = PixelBuffer::new(200, 120);
+    w.draw(&mut pb);
+    // Write PPM (top fg + bottom bg per cell handled by caller's converter;
+    // here we dump the raw pixel grid directly).
+    let mut out = format!("P6\n{} {}\n255\n", pb.w, pb.h).into_bytes();
+    for y in 0..pb.h {
+        for x in 0..pb.w {
+            let c = pb.pixel_at(x, y);
+            out.push(c.0);
+            out.push(c.1);
+            out.push(c.2);
+        }
+    }
+    std::fs::write("/tmp/ratrun_bugs.ppm", out).unwrap();
+}
+
+#[test]
+fn enemies_are_pushed_out_of_walls() {
+    let mut w = World::new(Theme::Sewer, 5);
+    let wall = w.level.walls[0];
+    let mut rng = StdRng::seed_from_u64(9);
+    // Spawn an enemy buried in the middle of a wall.
+    w.spawn_enemy_with_rng(EnemyKind::Cat, wall.center(), 1.0, &mut rng);
+    w.update(1.0 / 60.0, Vec2::ZERO, false);
+    let c = w.enemies()[0].pos;
+    assert!(!wall.contains(c), "enemy center should be outside the wall");
+}
+
+/// After a long run, no enemy should ever sit inside a wall.
+#[test]
+fn run_keeps_enemies_out_of_walls() {
+    for theme in Theme::all() {
+        let mut w = World::new(theme, 21);
+        for tick in 0..1800u32 {
+            let dir = Vec2::from_angle(tick as f32 * 0.05);
+            w.update(1.0 / 60.0, dir, false);
+            apply_pending(&mut w);
+        }
+        for e in &w.enemies() {
+            for wall in &w.level.walls {
+                assert!(
+                    !wall.contains(e.pos),
+                    "{:?} enemy inside a wall at {:?}",
+                    theme,
+                    e.pos
+                );
+            }
+        }
+    }
+}
+
+/// Screenshot tool for the themed props. `RATRUN_DUMP=props cargo test dump_props`.
+#[test]
+fn dump_props() {
+    let theme = match std::env::var("RATRUN_DUMP").as_deref() {
+        Ok("props") => Theme::Kitchen,
+        Ok("props_sewer") => Theme::Sewer,
+        Ok("props_lab") => Theme::Lab,
+        _ => return,
+    };
+    let mut w = World::new(theme, 1);
+    w.player.pos = w.level.arena * 0.5;
+    // Full-arena overview.
+    let mut pb = PixelBuffer::new(w.level.arena.x as usize, w.level.arena.y as usize);
+    w.draw(&mut pb);
+    let mut out = format!("P6\n{} {}\n255\n", pb.w, pb.h).into_bytes();
+    for y in 0..pb.h {
+        for x in 0..pb.w {
+            let c = pb.pixel_at(x, y);
+            out.push(c.0);
+            out.push(c.1);
+            out.push(c.2);
+        }
+    }
+    std::fs::write("/tmp/ratrun_props.ppm", out).unwrap();
+}
+
+/// Exercise the boss + every pickup/pool/gem draw branch in one frame.
+#[test]
+fn draw_all_entity_kinds() {
+    let mut w = World::new(Theme::Lab, 99);
+    let c = w.level.arena * 0.5;
+    let mut rng = StdRng::seed_from_u64(1);
+    w.spawn_enemy_with_rng(EnemyKind::Boss, c + Vec2::new(30.0, 0.0), 1.0, &mut rng);
+    for k in [
+        EnemyKind::Skitterer,
+        EnemyKind::Bat,
+        EnemyKind::Cat,
+        EnemyKind::Spitter,
+        EnemyKind::Brute,
+    ] {
+        w.spawn_enemy_with_rng(k, c + Vec2::from_angle(0.3) * 20.0, 1.0, &mut rng);
+    }
+    w.spawn_gem(Gem::new(c, 1));
+    w.spawn_gem(Gem::new(c, 30));
+    for kind in [PickupKind::Heal, PickupKind::Magnet, PickupKind::Nuke] {
+        w.spawn_pickup(Pickup {
+            pos: c,
+            kind,
+            bob: 0.5,
+        });
+    }
+    w.spawn_pool(Pool {
+        pos: c,
+        radius: 14.0,
+        dps: 5.0,
+        life: 2.0,
+        color: (140, 220, 70),
+    });
+    let mut b = Bullet::new(c, Vec2::new(10.0, 0.0), 3.0, Faction::Enemy, (255, 0, 0));
+    b.size = 2;
+    w.spawn_bullet(b);
+
+    let mut pb = PixelBuffer::new(100, 50);
+    w.draw(&mut pb);
+}
+
+// ---- Review-fix regression tests -----------------------------------
+
+#[test]
+fn dead_enemies_deal_no_contact_damage() {
+    let mut w = World::new(Theme::Sewer, 12);
+    w.clear_enemies();
+    let mut rng = StdRng::seed_from_u64(1);
+    let ppos = w.player.pos;
+    let e = w.spawn_enemy_with_rng(EnemyKind::Cat, ppos, 1.0, &mut rng);
+    edit_enemy(&mut w, e, |enemy| {
+        enemy.hp = -1.0;
+        enemy.contact_cd = 0.0;
+    });
+    let hp = w.player.hp;
+    w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+    run(&mut w, combat::contact_system);
+    w.end_tick();
+    assert_eq!(w.player.hp, hp, "a dead enemy still dealt contact damage");
+    assert_eq!(w.enemies()[0].contact_cd, 0.0);
+}
+
+#[test]
+fn loss_beats_win_on_the_final_tick() {
+    let mut w = World::new(Theme::Sewer, 7);
+    w.elapsed = director::RUN_SECONDS - 0.001;
+    w.player.hp = -1.0;
+    w.update(1.0 / 60.0, Vec2::ZERO, false);
+    assert!(w.game_over, "death on the final tick should be a loss");
+    assert!(!w.won, "death must not also score a win");
+}
+
+#[test]
+fn win_is_set_only_when_alive_at_the_end_of_the_tick() {
+    let mut w = World::new(Theme::Sewer, 8);
+    w.elapsed = director::RUN_SECONDS - 0.001;
+    w.player.hp = w.player.max_hp();
+    w.update(1.0 / 60.0, Vec2::ZERO, false);
+    assert!(w.won, "surviving the full clock should win");
+    assert!(!w.game_over);
+}
+
+#[test]
+fn nuke_kills_are_reaped_on_the_same_tick() {
+    let mut w = World::new(Theme::Sewer, 47);
+    w.director.spawn_timer = 1.0e9;
+    w.director.elite_timer = 1.0e9;
+    w.clear_enemies();
+    let mut rng = StdRng::seed_from_u64(6);
+    let ppos = w.player.pos;
+    let e = w.spawn_enemy_with_rng(EnemyKind::Cat, ppos, 1.0, &mut rng);
+    edit_enemy(&mut w, e, |enemy| {
+        enemy.hp = 1.0e6;
+        enemy.max_hp = 1.0e6;
+    });
+    w.spawn_pickup(Pickup {
+        pos: ppos,
+        kind: PickupKind::Nuke,
+        bob: 0.0,
+    });
+    w.update(1.0 / 60.0, Vec2::ZERO, false);
+    assert!(w.enemies().is_empty(), "a Nuke kill survived the tick");
+    assert_eq!(w.kills, 1);
+}
+
+#[test]
+fn spawn_point_stays_in_bounds_clear_of_walls_and_player() {
+    let mut w = World::new(Theme::Sewer, 13);
+    let center = w.level.arena * 0.5;
+    w.player.pos = center;
+    w.level.walls = vec![Rectf::new(center.x + 110.0, center.y - 20.0, 40.0, 40.0)];
+    for _ in 0..300 {
+        let p = w.spawn_point();
+        assert!(
+            p.x >= 8.0 - 1e-3 && p.y >= 8.0 - 1e-3,
+            "spawn {p:?} past min margin"
+        );
+        assert!(
+            p.x <= w.level.arena.x - 8.0 + 1e-3 && p.y <= w.level.arena.y - 8.0 + 1e-3,
+            "spawn {p:?} past max margin"
+        );
+        assert!(
+            p.dist(center) >= 90.0 - 1e-3,
+            "spawn {p:?} too close to player"
+        );
+        let wall = w.level.walls[0];
+        let cx = p.x.clamp(wall.x, wall.right());
+        let cy = p.y.clamp(wall.y, wall.bottom());
+        let d = ((p.x - cx).powi(2) + (p.y - cy).powi(2)).sqrt();
+        assert!(d >= 4.0 - 1e-3, "spawn {p:?} overlaps a wall");
+    }
+}
+
+#[test]
+fn enemy_cap_holds_through_a_full_run() {
+    let mut w = World::new(Theme::Sewer, 17);
+    let dt = 0.1;
+    let mut ticks = 0;
+    while !w.finished() && ticks < 4000 {
+        w.update(dt, Vec2::ZERO, false);
+        apply_pending(&mut w);
+        // Keep the rat alive so the run actually reaches the boss + win.
+        w.player.hp = w.player.max_hp();
+        let live = w.enemies().len();
+        assert!(
+            live <= ENEMY_CAP,
+            "cap exceeded at {:.1}s: {}",
+            w.elapsed,
+            live
+        );
+        ticks += 1;
+    }
+    assert!(w.director.boss_spawned, "boss never spawned");
+    assert!(
+        w.elapsed >= director::RUN_SECONDS,
+        "run did not reach the clock"
+    );
+}
+
+#[test]
+fn bullet_query_reaches_large_enemies_across_cells() {
+    let mut w = World::new(Theme::Lab, 19);
+    w.clear_enemies();
+    w.clear_bullets();
+    let mut rng = StdRng::seed_from_u64(2);
+    // 15.9 (cell 0) and 32.5 (cell 2) are 16.6 px apart, which overlaps a
+    // radius-3 bullet with a radius-14 boss but spans two cells.
+    w.spawn_enemy_with_rng(EnemyKind::Boss, Vec2::new(32.5, 100.0), 1.0, &mut rng);
+    let boss_hp = w.enemies()[0].hp;
+    let mut b = Bullet::new(
+        Vec2::new(15.9, 100.0),
+        Vec2::ZERO,
+        7.0,
+        Faction::Player,
+        (255, 255, 255),
+    );
+    b.radius = 3.0;
+    w.spawn_bullet(b);
+    w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+    // The legacy test built the grid by hand and passed `max_enemy_radius`
+    // 14.0; `grid_build_system` derives exactly that from the boss radius.
+    run(&mut w, enemy_move::grid_build_system);
+    run(&mut w, combat::player_bullet_hits_system);
+    w.end_tick();
+    assert!(
+        w.enemies()[0].hp < boss_hp,
+        "wide bullet query missed the boss across cells"
+    );
+}
+
+#[test]
+fn fast_player_cannot_tunnel_a_thin_wall() {
+    let mut w = World::new(Theme::Sewer, 23);
+    w.level.walls = vec![Rectf::new(512.0, 300.0, 1.0, 200.0)];
+    w.player.pos = Vec2::new(500.0, 400.0);
+    w.player.vel = Vec2::new(900.0, 0.0);
+    w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+    run(&mut w, player::player_system);
+    w.end_tick();
+    assert!(
+        w.player.pos.x <= 512.0 - PLAYER_RADIUS + 0.01,
+        "player tunnelled to {:?}",
+        w.player.pos
+    );
+}
+
+#[test]
+fn spore_orbit_replaces_its_ring_and_keeps_its_angle() {
+    let mut w = World::new(Theme::Sewer, 4);
+    w.clear_enemies();
+    w.clear_bullets();
+    // Legacy `fire_one(SporeOrbit, 5.0, 1.0, 4, ..)`: level 2 gives 4 spores.
+    w.player.loadout.weapons = vec![Weapon {
+        kind: WeaponKind::SporeOrbit,
+        level: 2,
+        timer: 0.0,
+    }];
+    w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+    run(&mut w, weapons::fire_weapons_system);
+    {
+        let mut query = w.ecs.query::<&mut Bullet>();
+        for mut b in query.iter_mut(&mut w.ecs) {
+            if let Some(o) = b.orbit.as_mut() {
+                o.angle += 0.7;
+            }
+        }
+    }
+    assert_eq!(w.bullets().len(), 4);
+    let carried = w.bullets()[0].orbit.unwrap().angle;
+    w.ecs.resource_mut::<Player>().loadout.weapons[0].timer = 0.0;
+    run(&mut w, weapons::fire_weapons_system);
+    w.end_tick();
+    let orbits: Vec<_> = w.bullets().iter().filter_map(|b| b.orbit).collect();
+    assert_eq!(orbits.len(), 4, "two spore rings stacked");
+    assert!(
+        (orbits[0].angle - carried).abs() < 1e-4,
+        "ring angle snapped instead of carrying forward"
+    );
+}
+
+#[test]
+fn untargeted_gnaw_does_not_emit_a_shoot_sfx() {
+    let mut w = World::new(Theme::Sewer, 2);
+    w.clear_enemies();
+    w.clear_bullets();
+    w.sfx.clear();
+    w.player.loadout.weapons = vec![Weapon {
+        kind: WeaponKind::Gnaw,
+        level: 1,
+        timer: 0.0,
+    }];
+    w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+    run(&mut w, weapons::fire_weapons_system);
+    w.end_tick();
+    assert!(w.bullets().is_empty());
+    assert!(!w.sfx.contains(&Sfx::Shoot));
+}
+
+#[test]
+fn nearest_enemy_skips_dead_and_nan_positions() {
+    let mut w = World::new(Theme::Sewer, 29);
+    w.clear_enemies();
+    let mut rng = StdRng::seed_from_u64(3);
+    let from = w.player.pos;
+    let dead = w.spawn_enemy_with_rng(EnemyKind::Skitterer, from, 1.0, &mut rng);
+    edit_enemy(&mut w, dead, |enemy| enemy.hp = 0.0);
+    let nan = w.spawn_enemy_with_rng(EnemyKind::Skitterer, from, 1.0, &mut rng);
+    edit_enemy(&mut w, nan, |enemy| enemy.pos = Vec2::new(f32::NAN, f32::NAN));
+    let alive_pos = from + Vec2::new(10.0, 0.0);
+    let alive = w.spawn_enemy_with_rng(EnemyKind::Skitterer, alive_pos, 1.0, &mut rng);
+    let (picked, p) = w.nearest_enemy(from).expect("should pick the live enemy");
+    // Legacy asserted the `Vec` index 2; the facade returns the entity.
+    assert_eq!(picked, alive);
+    assert_eq!(p, alive_pos);
+}
+
+#[test]
+fn on_screen_culls_offscreen_entities() {
+    let vp = Vec2::new(100.0, 50.0);
+    assert!(on_screen((10, 10), 2.0, vp));
+    assert!(
+        on_screen((-2, 10), 4.0, vp),
+        "an overhanging edge is visible"
+    );
+    assert!(!on_screen((-10, 10), 2.0, vp));
+    assert!(!on_screen((120, 10), 2.0, vp));
+    assert!(!on_screen((10, 60), 3.0, vp));
+}
+
+#[test]
+fn orbit_bullets_survive_the_edge_cull() {
+    let mut w = World::new(Theme::Sewer, 31);
+    w.player.pos = Vec2::new(50.0, 50.0);
+    w.clear_bullets();
+    let ppos = w.player.pos;
+    let arena_x = w.level.arena.x;
+    let mut orbit = Bullet::new(ppos, Vec2::ZERO, 1.0, Faction::Player, (255, 255, 255));
+    orbit.orbit = Some(Orbit {
+        angle: 0.0,
+        radius: arena_x + 20.0,
+        speed: 0.0,
+    });
+    w.spawn_bullet(orbit);
+    let free = Bullet::new(
+        Vec2::new(arena_x + 50.0, 50.0),
+        Vec2::ZERO,
+        1.0,
+        Faction::Player,
+        (255, 255, 255),
+    );
+    w.spawn_bullet(free);
+    w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+    run(&mut w, projectiles::bullets_system);
+    w.end_tick();
+    assert_eq!(w.bullets().len(), 1, "free bullet should be culled");
+    assert!(
+        w.bullets()[0].orbit.is_some(),
+        "orbit bullet was culled at the edge"
+    );
+}
+
+#[test]
+fn dash_without_direction_uses_facing() {
+    let mut w = World::new(Theme::Sewer, 37);
+    w.level.walls.clear();
+    w.player.pos = w.level.arena * 0.5;
+    w.player.face = Vec2::new(1.0, 0.0);
+    w.player.dash_cd = 0.0;
+    let x0 = w.player.pos.x;
+    w.begin_tick(1.0 / 60.0, Vec2::ZERO, true);
+    run(&mut w, player::player_system);
+    w.end_tick();
+    assert!(w.player.pos.x > x0 + 0.1, "dash with no input did not move");
+    assert!(w.player.dash_cd > 0.0);
+}
+
+#[test]
+fn magnetized_gem_reaches_the_player() {
+    let mut w = World::new(Theme::Sewer, 53);
+    w.clear_gems();
+    w.player.pos = Vec2::new(200.0, 200.0);
+    let ppos = w.player.pos;
+    let mut g = Gem::new(ppos + Vec2::new(100.0, 0.0), 5);
+    g.magnetized = true;
+    w.spawn_gem(g);
+    let xp0 = w.player.xp;
+    w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+    for _ in 0..300 {
+        run(&mut w, loot::gems_system);
+        if w.gems().is_empty() {
+            break;
+        }
+    }
+    w.end_tick();
+    assert!(w.gems().is_empty(), "magnetized gem was never collected");
+    assert!(w.player.xp > xp0);
+}
+
+#[test]
+fn exactly_stacked_enemies_are_nudged_apart() {
+    let mut w = World::new(Theme::Sewer, 41);
+    w.clear_enemies();
+    let mut rng = StdRng::seed_from_u64(4);
+    let p = w.level.arena * 0.5;
+    w.spawn_enemy_with_rng(EnemyKind::Cat, p, 1.0, &mut rng);
+    w.spawn_enemy_with_rng(EnemyKind::Cat, p, 1.0, &mut rng);
+    w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+    run(&mut w, enemy_move::grid_build_system);
+    // Legacy called `separate_enemies(&grid, 6.5)`; the system derives its
+    // reach as `2 * max_radius`, so feed it the same 6.5 reach.
+    w.ecs.resource_mut::<GridScratch>().max_radius = 3.25;
+    run(&mut w, enemy_move::separation_system);
+    w.end_tick();
+    assert!(
+        w.enemies()[0].pos.dist(w.enemies()[1].pos) > 0.1,
+        "stacked enemies stayed glued together"
+    );
+}
+
+#[test]
+fn contact_knockback_stays_out_of_walls() {
+    let mut w = World::new(Theme::Sewer, 43);
+    w.level.walls = vec![Rectf::new(100.0, 90.0, 10.0, 20.0)];
+    w.player.pos = Vec2::new(94.0, 100.0);
+    w.clear_enemies();
+    let mut rng = StdRng::seed_from_u64(5);
+    let e = w.spawn_enemy_with_rng(EnemyKind::Cat, Vec2::new(96.5, 100.0), 1.0, &mut rng);
+    edit_enemy(&mut w, e, |enemy| enemy.contact_cd = 0.0);
+    w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+    run(&mut w, combat::contact_system);
+    w.end_tick();
+    let wall = w.level.walls[0];
+    assert!(
+        !wall.contains(w.enemies()[0].pos),
+        "knockback left the enemy inside a wall at {:?}",
+        w.enemies()[0].pos
+    );
+}
+
+#[test]
+fn untargeted_gnaw_retries_next_tick() {
+    let mut w = World::new(Theme::Sewer, 61);
+    w.clear_enemies();
+    w.clear_bullets();
+    w.player.loadout.weapons[0].timer = 0.0;
+    w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+    run(&mut w, weapons::fire_weapons_system);
+    w.end_tick();
+    assert!(w.bullets().is_empty(), "Gnaw fired with no target");
+    assert_eq!(
+        w.player.loadout.weapons[0].timer, 0.0,
+        "a dud shot should leave the timer ready for next tick"
+    );
+}
+
+#[test]
+fn iframed_player_keeps_enemy_bullets() {
+    let mut w = World::new(Theme::Sewer, 67);
+    w.clear_bullets();
+    w.player.pos = w.level.arena * 0.5;
+    let ppos = w.player.pos;
+    w.spawn_bullet(Bullet::new(
+        ppos,
+        Vec2::ZERO,
+        5.0,
+        Faction::Enemy,
+        (255, 0, 0),
+    ));
+    w.player.iframes = 0.5;
+    let hp = w.player.hp;
+    w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+    run(&mut w, combat::enemy_bullet_hits_system);
+    assert_eq!(
+        w.ecs.resource::<Player>().hp,
+        hp,
+        "i-frames should block the damage"
+    );
+    assert!(w.bullets()[0].life > 0.0, "i-frames must not delete the bullet");
+
+    w.ecs.resource_mut::<Player>().iframes = 0.0;
+    run(&mut w, combat::enemy_bullet_hits_system);
+    w.end_tick();
+    assert!(w.player.hp < hp, "a vulnerable player should take the hit");
+    assert_eq!(
+        w.bullets()[0].life, 0.0,
+        "a landed hit should consume the bullet"
+    );
+}
+
+#[test]
+fn iframed_player_does_not_spend_contact_cooldowns() {
+    let mut w = World::new(Theme::Sewer, 71);
+    w.level.walls.clear();
+    w.player.pos = w.level.arena * 0.5;
+    w.clear_enemies();
+    let mut rng = StdRng::seed_from_u64(7);
+    let ppos = w.player.pos;
+    let e = w.spawn_enemy_with_rng(EnemyKind::Cat, ppos, 1.0, &mut rng);
+    edit_enemy(&mut w, e, |enemy| enemy.contact_cd = 0.0);
+    w.player.iframes = 0.5;
+    let hp = w.player.hp;
+    let pos = w.enemies()[0].pos;
+    w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+    run(&mut w, combat::contact_system);
+    assert_eq!(w.ecs.resource::<Player>().hp, hp);
+    assert_eq!(w.enemies()[0].contact_cd, 0.0, "i-frames spent the cooldown");
+    assert_eq!(w.enemies()[0].pos, pos, "i-frames applied knockback");
+
+    w.ecs.resource_mut::<Player>().iframes = 0.0;
+    run(&mut w, combat::contact_system);
+    w.end_tick();
+    assert!(w.player.hp < hp, "vulnerable contact should damage");
+    assert!(
+        w.enemies()[0].contact_cd > 0.0,
+        "a landed hit should set cooldown"
+    );
+}
+
+// ---- Round 3 review fixes -------------------------------------------
+
+#[test]
+fn fast_bullet_through_a_skitterer_registers_a_hit() {
+    let mut w = World::new(Theme::Sewer, 89);
+    w.clear_enemies();
+    w.clear_bullets();
+    let mut rng = StdRng::seed_from_u64(8);
+    w.spawn_enemy_with_rng(EnemyKind::Skitterer, Vec2::new(86.0, 100.0), 1.0, &mut rng);
+    let hp = w.enemies()[0].hp;
+    let mut b = Bullet::new(
+        Vec2::new(80.0, 100.0),
+        Vec2::new(240.0, 0.0),
+        3.0,
+        Faction::Player,
+        (255, 255, 255),
+    );
+    b.radius = 2.0;
+    w.spawn_bullet(b);
+    w.begin_tick(0.05, Vec2::ZERO, false);
+    run(&mut w, projectiles::bullets_system);
+    // Endpoint-only collision misses: the bullet ends 6 px past center,
+    // outside the 4.5 px combined hit radius.
+    assert!(!collision::circles_overlap(
+        w.bullets()[0].pos,
+        2.0,
+        w.enemies()[0].pos,
+        2.5
+    ));
+    run(&mut w, enemy_move::grid_build_system);
+    run(&mut w, combat::player_bullet_hits_system);
+    w.end_tick();
+    assert!(w.enemies()[0].hp < hp, "fast bullet passed through the enemy");
+    assert_eq!(w.bullets()[0].life, 0.0);
+}
+
+#[test]
+fn fast_enemy_bullet_cannot_skip_the_player() {
+    let mut w = World::new(Theme::Sewer, 91);
+    w.clear_bullets();
+    w.player.pos = Vec2::new(100.0, 100.0);
+    w.player.iframes = 0.0;
+    let hp = w.player.hp;
+    let mut b = Bullet::new(
+        Vec2::new(88.0, 100.0),
+        Vec2::new(400.0, 0.0),
+        5.0,
+        Faction::Enemy,
+        (255, 0, 0),
+    );
+    b.radius = 2.0;
+    w.spawn_bullet(b);
+    w.begin_tick(0.05, Vec2::ZERO, false);
+    run(&mut w, projectiles::bullets_system);
+    let ppos = w.ecs.resource::<Player>().pos;
+    assert!(!collision::circles_overlap(
+        w.bullets()[0].pos,
+        2.0,
+        ppos,
+        PLAYER_RADIUS
+    ));
+    run(&mut w, combat::enemy_bullet_hits_system);
+    w.end_tick();
+    assert!(
+        w.player.hp < hp,
+        "fast enemy bullet passed through the player"
+    );
+    assert_eq!(w.bullets()[0].life, 0.0);
+}
+
+#[test]
+fn pickup_scratch_vec_is_reused_across_ticks() {
+    let mut w = World::new(Theme::Sewer, 97);
+    w.clear_pickups();
+    let ppos = w.player.pos;
+    w.spawn_pickup(Pickup {
+        pos: ppos,
+        kind: PickupKind::Heal,
+        bob: 0.0,
+    });
+    w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+    run(&mut w, loot::pickups_system);
+    w.end_tick();
+    let ptr = w.ecs.resource::<PickupScratch>().0.as_ptr();
+    let cap = w.ecs.resource::<PickupScratch>().0.capacity();
+    assert!(cap > 0, "scratch vec should be kept on the world");
+    assert!(w.ecs.resource::<PickupScratch>().0.is_empty());
+    w.spawn_pickup(Pickup {
+        pos: ppos,
+        kind: PickupKind::Heal,
+        bob: 0.0,
+    });
+    w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+    run(&mut w, loot::pickups_system);
+    w.end_tick();
+    assert_eq!(
+        w.ecs.resource::<PickupScratch>().0.as_ptr(),
+        ptr,
+        "scratch vec reallocated"
+    );
+    assert_eq!(w.ecs.resource::<PickupScratch>().0.capacity(), cap);
+}
+
+#[test]
+fn acid_spit_launches_a_projectile_not_an_instant_pool() {
+    let mut w = World::new(Theme::Sewer, 73);
+    w.clear_enemies();
+    w.clear_bullets();
+    w.clear_pools();
+    // Legacy `fire_one(AcidSpit, 10.0, 1.0, 1, ..)`: level 1 gives 1 lob.
+    w.player.loadout.weapons = vec![Weapon {
+        kind: WeaponKind::AcidSpit,
+        level: 1,
+        timer: 0.0,
+    }];
+    w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+    run(&mut w, weapons::fire_weapons_system);
+    w.end_tick();
+    assert_eq!(w.bullets().len(), 1);
+    assert!(w.bullets()[0].lob.is_some(), "acid shot should be lobbed");
+    assert!(w.pools().is_empty(), "acid pool appeared instantly");
+}
+
+#[test]
+fn acid_spit_pool_lands_at_its_target_after_travel() {
+    let mut w = World::new(Theme::Sewer, 79);
+    w.clear_enemies();
+    w.clear_bullets();
+    w.clear_pools();
+    w.level.walls.clear();
+    let ppos = w.player.pos;
+    let face = Vec2::new(1.0, 0.0);
+    w.player.face = face;
+    let target = ppos + face * 50.0;
+    w.player.loadout.weapons = vec![Weapon {
+        kind: WeaponKind::AcidSpit,
+        level: 1,
+        timer: 0.0,
+    }];
+    w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+    run(&mut w, weapons::fire_weapons_system);
+    let mut ticks = 0;
+    while w.pools().is_empty() && ticks < 120 {
+        run(&mut w, projectiles::bullets_system);
+        ticks += 1;
+    }
+    w.end_tick();
+    assert_eq!(w.pools().len(), 1, "acid pool never landed");
+    assert!(
+        w.pools()[0].pos.dist(target) < 1.0,
+        "pool landed at {:?}, target {target:?}",
+        w.pools()[0].pos
+    );
+    assert!(w.bullets().is_empty(), "landed projectile should be removed");
+}
+
+#[test]
+fn acid_spit_pool_lands_on_a_wall_not_behind_it() {
+    let mut w = World::new(Theme::Sewer, 83);
+    w.clear_enemies();
+    w.clear_bullets();
+    w.clear_pools();
+    let ppos = w.player.pos;
+    let face = Vec2::new(1.0, 0.0);
+    w.player.face = face;
+    let wall = Rectf::new(ppos.x + 20.0, ppos.y - 20.0, 4.0, 40.0);
+    w.level.walls = vec![wall];
+    w.player.loadout.weapons = vec![Weapon {
+        kind: WeaponKind::AcidSpit,
+        level: 1,
+        timer: 0.0,
+    }];
+    w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+    run(&mut w, weapons::fire_weapons_system);
+    let mut ticks = 0;
+    while w.pools().is_empty() && ticks < 120 {
+        run(&mut w, projectiles::bullets_system);
+        ticks += 1;
+    }
+    w.end_tick();
+    assert_eq!(w.pools().len(), 1, "acid pool never landed");
+    assert!(
+        w.pools()[0].pos.x <= wall.x + 0.01,
+        "pool landed past the wall at {:?}",
+        w.pools()[0].pos
+    );
+    assert!(w.pools()[0].pos.x > ppos.x + 10.0, "pool landed short");
+}
+
+// ---- Neon combat-feedback merge tests -------------------------------------
+// Ported from the other team's `world.rs` additions (audited hunk by hunk in
+// `PORT_PLAN.md`, "Merge-hook audit"). Entity setup goes through the facade
+// spawn helpers; single-system steps use the narrow harness.
+
+#[test]
+fn world_accessors_report_boss_enemies_and_pickups() {
+    let mut w = World::new(Theme::Sewer, 101);
+    w.clear_enemies();
+    assert_eq!(w.enemy_count(), 0);
+    assert_eq!(w.boss_hp(), None);
+    assert_eq!(w.boss_offset(), None);
+    assert!(w.last_pickups().is_empty());
+
+    let mut rng = StdRng::seed_from_u64(11);
+    let bpos = w.player.pos + Vec2::new(40.0, -15.0);
+    let boss = w.spawn_enemy_with_rng(EnemyKind::Boss, bpos, 1.0, &mut rng);
+    edit_enemy(&mut w, boss, |enemy| enemy.hp = 900.0);
+    assert_eq!(w.enemy_count(), 1);
+    let (hp, max_hp) = w.boss_hp().expect("living boss should report hp");
+    assert!((hp - 900.0).abs() < 1e-3);
+    assert!((max_hp - 1400.0).abs() < 1e-3);
+    let ofs = w.boss_offset().expect("living boss should report offset");
+    assert!((ofs.x - 40.0).abs() < 1e-3 && (ofs.y + 15.0).abs() < 1e-3);
+
+    let ppos = w.player.pos;
+    w.spawn_pickup(Pickup {
+        pos: ppos,
+        kind: PickupKind::Heal,
+        bob: 0.0,
+    });
+    w.update(1.0 / 60.0, Vec2::ZERO, false);
+    assert_eq!(w.last_pickups(), &[PickupKind::Heal]);
+    assert!(w.sfx.contains(&Sfx::Heal));
+    w.update(1.0 / 60.0, Vec2::ZERO, false);
+    assert!(w.last_pickups().is_empty());
+}
+
+#[test]
+fn enemy_hits_spawn_damage_numbers_and_deaths_stain_floor() {
+    let mut w = World::new(Theme::Kitchen, 109);
+    w.clear_enemies();
+    w.clear_bullets();
+    let mut rng = StdRng::seed_from_u64(12);
+    let epos = w.player.pos + Vec2::new(16.0, 0.0);
+    let e = w.spawn_enemy_with_rng(EnemyKind::Brute, epos, 1.0, &mut rng);
+    edit_enemy(&mut w, e, |enemy| enemy.id = 77);
+
+    let mut b = Bullet::new(
+        epos - Vec2::new(2.0, 0.0),
+        Vec2::new(120.0, 0.0),
+        12.0,
+        Faction::Player,
+        WeaponKind::Gnaw.color(),
+    );
+    b.weapon = Some(WeaponKind::Gnaw);
+    w.spawn_bullet(b);
+
+    w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+    run(&mut w, enemy_move::grid_build_system);
+    run(&mut w, combat::player_bullet_hits_system);
+    w.end_tick();
+    assert_eq!(w.damage_numbers.len(), 1);
+    assert_eq!(w.damage_numbers.items[0].display_value(), 12);
+
+    // Killing the brute leaves a floor stain and shockwave.
+    edit_enemy(&mut w, e, |enemy| enemy.hp = -1.0);
+    w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+    run(&mut w, loot::reap_enemies_system);
+    w.end_tick();
+    assert!(
+        !w.particles.stains.is_empty(),
+        "death should stain the floor"
+    );
+    assert!(
+        !w.particles.shockwaves.is_empty(),
+        "brute death should emit a shockwave"
+    );
+}
+
+#[test]
+fn weapons_emit_specialized_sfx() {
+    let mut w = World::new(Theme::Lab, 113);
+    let mut rng = StdRng::seed_from_u64(14);
+    let ppos = w.player.pos;
+    let cases = [
+        (WeaponKind::Gnaw, Sfx::Shoot),
+        (WeaponKind::CheeseSpray, Sfx::ShootSpray),
+        (WeaponKind::SqueakNova, Sfx::ShootNova),
+        (WeaponKind::SporeOrbit, Sfx::ShootOrbit),
+        (WeaponKind::TailWhip, Sfx::ShootWhip),
+        (WeaponKind::AcidSpit, Sfx::ShootAcid),
+    ];
+    for (kind, expected) in cases {
+        w.clear_enemies();
+        w.clear_bullets();
+        w.spawn_enemy_with_rng(
+            EnemyKind::Skitterer,
+            ppos + Vec2::new(20.0, 0.0),
+            1.0,
+            &mut rng,
+        );
+        w.sfx.clear();
+        w.player.loadout.weapons = vec![Weapon {
+            kind,
+            level: 1,
+            timer: 0.0,
+        }];
+        w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+        run(&mut w, weapons::fire_weapons_system);
+        w.end_tick();
+        assert!(
+            w.sfx.contains(&expected),
+            "{kind:?} did not emit {expected:?} (got {:?})",
+            w.sfx
+        );
+    }
+}
+
+/// Visual showcase dumper for combat feedback iteration:
+/// `RATRUN_DUMP=vfx_sheet|vfx_combat|vfx_nuke|vfx_kitchen|vfx_lab cargo test dump_vfx_showcase`
+#[test]
+fn dump_vfx_showcase() {
+    let mode = match std::env::var("RATRUN_DUMP") {
+        Ok(m) if m.starts_with("vfx_") => m,
+        _ => return,
+    };
+    let save_ppm = |pb: &PixelBuffer, path: &str| {
+        let mut out = format!("P6\n{} {}\n255\n", pb.w, pb.h).into_bytes();
+        for y in 0..pb.h {
+            for x in 0..pb.w {
+                let c = pb.pixel_at(x, y);
+                out.push(c.0);
+                out.push(c.1);
+                out.push(c.2);
+            }
+        }
+        std::fs::write(path, out).unwrap();
+    };
+
+    if mode == "vfx_sheet" {
+        let mut w = World::new(Theme::Sewer, 7);
+        w.level.walls.clear();
+        w.level.props.clear();
+        let c = w.level.arena * 0.5;
+        // Camera centers on `w.player.pos`, so place the dashing rat at `c`
+        // and arrange all 3 showcase rows symmetrically inside 220x120.
+        w.player.pos = c;
+        w.player.face = Vec2::new(1.0, -0.1).normalized();
+        w.player.dash_active = 0.12;
+        let mut rng = StdRng::seed_from_u64(42);
+
+        // Row 1 (top, y = c.y - 34): Enemies + damage numbers (normal, kill, medium, acid, big kill, boss nuke).
+        let samples: &[(EnemyKind, f32, bool, DamageSource)] = &[
+            (EnemyKind::Skitterer, 5.0, false, DamageSource::Normal),
+            (EnemyKind::Bat, 7.0, true, DamageSource::Normal),
+            (EnemyKind::Cat, 14.0, false, DamageSource::Normal),
+            (EnemyKind::Spitter, 18.0, false, DamageSource::Acid),
+            (EnemyKind::Brute, 34.0, true, DamageSource::TailWhip),
+            (EnemyKind::Boss, 200.0, false, DamageSource::Nuke),
+        ];
+        for (i, &(kind, dmg, kill, src)) in samples.iter().enumerate() {
+            let p = Vec2::new(c.x - 86.0 + i as f32 * 32.0, c.y - 30.0);
+            let e = w.spawn_enemy_with_rng(kind, p, 1.0, &mut rng);
+            edit_enemy(&mut w, e, |enemy| {
+                enemy.id = (i + 1) as u32;
+                enemy.facing = Vec2::new(0.2, 1.0).normalized();
+                if i == 0 || i == 4 {
+                    enemy.flash = 0.1;
+                }
+            });
+            let id = e_id(&w, e);
+            let radius = w.enemies()[i].radius;
+            w.damage_numbers.record(id, p, radius, dmg, kill, src);
+        }
+
+        // Row 2 (middle, y = c.y): Left/right weapon hit sparks + center dashing rat + right acid splash.
+        let weapon_xs = [-88.0, -64.0, -40.0, 32.0, 56.0, 82.0];
+        for (i, &wk) in WeaponKind::all().iter().enumerate() {
+            let p = Vec2::new(c.x + weapon_xs[i], c.y + 2.0);
+            vfx::emit_weapon_hit(
+                &mut w.particles,
+                &mut rng,
+                p,
+                Vec2::new(100.0, 0.0),
+                Some(wk),
+                EnemyKind::Cat,
+                i % 2 == 1,
+            );
+        }
+        vfx::emit_dash_start(
+            &mut w.particles,
+            &mut rng,
+            c - Vec2::new(5.0, 0.0),
+            w.player.face,
+        );
+        for k in 0..5 {
+            vfx::emit_dash_trail(
+                &mut w.particles,
+                &mut rng,
+                c - Vec2::new(k as f32 * 3.2, 0.0),
+                w.player.face * 130.0,
+                1.0 / 60.0,
+            );
+        }
+
+        // Row 3 (bottom, y = c.y + 34): Acid splash, level-up burst, brute death + stain, heal & magnet.
+        vfx::emit_acid_splash(&mut w.particles, &mut rng, c + Vec2::new(-78.0, 34.0), 12.0);
+        vfx::emit_level_up(&mut w.particles, &mut rng, c + Vec2::new(-28.0, 34.0));
+        vfx::emit_enemy_death(
+            &mut w.particles,
+            &mut rng,
+            c + Vec2::new(26.0, 34.0),
+            6.5,
+            EnemyKind::Brute,
+            w.level.palette.blood,
+        );
+        vfx::emit_pickup_heal(&mut w.particles, &mut rng, c + Vec2::new(78.0, 34.0));
+
+        // Advance 3 frames so shockwaves, streaks, and numbers are crisp mid-pop.
+        for _ in 0..3 {
+            w.particles.update(1.0 / 60.0);
+            w.damage_numbers.update(1.0 / 60.0);
+        }
+        let mut pb = PixelBuffer::new(220, 120);
+        w.draw(&mut pb);
+        save_ppm(&pb, "/tmp/ratrun_vfx.ppm");
+        return;
+    }
+
+    if mode == "vfx_boss_death" {
+        let mut w = World::new(Theme::Lab, 99);
+        w.level.walls.clear();
+        w.level.props.clear();
+        let c = w.level.arena * 0.5;
+        w.player.pos = c + Vec2::new(-44.0, 12.0);
+        w.player.face = Vec2::new(1.0, -0.2).normalized();
+        let mut rng = StdRng::seed_from_u64(77);
+        // Boss death centerpiece on right + Magnet pickup & Gem sparkles on left + Player hurt.
+        let bpos = c + Vec2::new(14.0, -6.0);
+        vfx::emit_enemy_death(
+            &mut w.particles,
+            &mut rng,
+            bpos,
+            14.0,
+            EnemyKind::Boss,
+            w.level.palette.blood,
+        );
+        w.damage_numbers
+            .record(500, bpos, 14.0, 200.0, true, DamageSource::Nuke);
+        vfx::emit_pickup_magnet(
+            &mut w.particles,
+            &mut rng,
+            w.player.pos + Vec2::new(-32.0, -24.0),
+        );
+        vfx::emit_gem_collect(
+            &mut w.particles,
+            &mut rng,
+            w.player.pos + Vec2::new(-10.0, -24.0),
+            25,
+        );
+        vfx::emit_player_hurt(&mut w.particles, &mut rng, w.player.pos);
+        // Enemy death gallery along the bottom: Skitterer, Bat, Cat, Spitter, Elite Brute.
+        let kinds = [
+            (EnemyKind::Skitterer, false),
+            (EnemyKind::Bat, false),
+            (EnemyKind::Cat, false),
+            (EnemyKind::Spitter, false),
+            (EnemyKind::Brute, true),
+        ];
+        for (i, &(k, elite)) in kinds.iter().enumerate() {
+            let p = w.player.pos + Vec2::new(-64.0 + i as f32 * 34.0, 34.0);
+            vfx::emit_enemy_death(
+                &mut w.particles,
+                &mut rng,
+                p,
+                k.radius(),
+                k,
+                w.level.palette.blood,
+            );
+            if elite {
+                vfx::emit_elite_death_accent(&mut w.particles, &mut rng, p);
+            }
+        }
+        for _ in 0..6 {
+            w.particles.update(1.0 / 60.0);
+            w.damage_numbers.update(1.0 / 60.0);
+        }
+        let mut pb = PixelBuffer::new(220, 120);
+        w.draw(&mut pb);
+        save_ppm(&pb, "/tmp/ratrun_vfx.ppm");
+        return;
+    }
+
+    let theme = match mode.as_str() {
+        "vfx_kitchen" => Theme::Kitchen,
+        "vfx_lab" => Theme::Lab,
+        _ => Theme::Sewer,
+    };
+    let mut w = World::new(theme, 2025);
+    // Equip a rich mid-game build so every weapon + pool + orbit + whip is active.
+    for wk in [
+        WeaponKind::CheeseSpray,
+        WeaponKind::SqueakNova,
+        WeaponKind::SporeOrbit,
+        WeaponKind::TailWhip,
+        WeaponKind::AcidSpit,
+    ] {
+        let _ = w
+            .player
+            .loadout
+            .apply(&crate::game::loadout::Upgrade::NewWeapon(wk));
+    }
+    w.elapsed = 125.0; // brutes + spitters + dense horde active
+    let dt = 1.0 / 60.0;
+    for tick in 0..420u32 {
+        let dir = Vec2::from_angle(tick as f32 * 0.035);
+        let dash = tick % 110 == 40;
+        w.update(dt, dir, dash);
+        w.player.hp = w.player.max_hp();
+        apply_pending(&mut w);
+    }
+    if mode == "vfx_nuke" {
+        let bpos = w.player.pos + Vec2::new(36.0, -14.0);
+        let boss = w.spawn_enemy(EnemyKind::Boss, bpos, 1.0);
+        edit_enemy(&mut w, boss, |enemy| enemy.id = 9999);
+        let ppos = w.player.pos;
+        w.spawn_pickup(Pickup {
+            pos: ppos,
+            kind: PickupKind::Nuke,
+            bob: 0.0,
+        });
+        for _ in 0..7 {
+            w.update(dt, Vec2::new(1.0, 0.0), false);
+        }
+    }
+    let mut pb = PixelBuffer::new(200, 110);
+    w.draw(&mut pb);
+    save_ppm(&pb, "/tmp/ratrun_vfx.ppm");
+}
+
+/// Read the runtime `Enemy::id` of a spawned entity (test helper).
+fn e_id(w: &World, entity: Entity) -> u32 {
+    w.ecs.get::<Enemy>(entity).map(|e| e.id).unwrap_or(0)
+}
+
+

@@ -222,6 +222,7 @@ pub struct Stain {
 }
 
 #[derive(Default)]
+#[derive(bevy_ecs::resource::Resource)]
 pub struct Particles {
     /// Insertion order: front = oldest, back = newest.
     pub items: VecDeque<Particle>,

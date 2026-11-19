@@ -1,0 +1,7 @@
+# bevy_ecs 0.20.1 declares `rust-version = 1.95.0` and the machine's global
+# stable is 1.94.0, so this worktree pins a newer toolchain through this file
+# instead of changing the user's global rustup default. Any channel >= 1.95
+# works; rustup installs the pinned one on demand.
+[toolchain]
+channel = "1.100.0"
+profile = "minimal"

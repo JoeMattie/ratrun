@@ -117,7 +117,7 @@ impl DamageNumber {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, bevy_ecs::resource::Resource)]
 pub struct DamageNumbers {
     pub items: Vec<DamageNumber>,
     cap: usize,

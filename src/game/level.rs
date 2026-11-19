@@ -138,6 +138,7 @@ fn theme_props(theme: Theme) -> &'static [PropKind] {
     }
 }
 
+#[derive(bevy_ecs::resource::Resource)]
 pub struct Level {
     pub theme: Theme,
     pub arena: Vec2,
