@@ -1165,11 +1165,9 @@ pub fn draw_expanded(
 
     // 6. Exploration percentage & top frame header bar.
     let explored_pct = view.explored_pct.unwrap_or_else(|| {
-        if total_blocks == 0 {
-            0
-        } else {
-            ((total_seen_blocks * 100) / total_blocks).min(100) as u8
-        }
+        (total_seen_blocks * 100)
+            .checked_div(total_blocks)
+            .map_or(0, |p| p.min(100) as u8)
     });
 
     let sector = if view.sector_name.is_empty() {
@@ -1991,6 +1989,7 @@ mod tests {
             }
         }
 
+        #[allow(clippy::too_many_arguments)]
         fn carve_maze(
             &mut self,
             x: i32,
@@ -2164,6 +2163,7 @@ mod tests {
         ]
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn make_view<'a>(
         mode: MinimapMode,
         palette: MinimapPalette,
@@ -2498,21 +2498,34 @@ mod tests {
         let labels_boss = sample_labels(true);
         let mut scratch = MinimapScratch::new();
 
-        let cases: &[(&str, u16, u16, MinimapMode, MinimapPalette, &str, bool, bool)] = &[
-            ("57x20-compact-sewer", 57, 20, MinimapMode::Compact, MinimapPalette::SEWER, "SEWER", false, false),
-            ("57x20-expanded-sewer", 57, 20, MinimapMode::Expanded, MinimapPalette::SEWER, "SEWER", false, false),
-            ("80x24-compact-sewer", 80, 24, MinimapMode::Compact, MinimapPalette::SEWER, "SEWER", false, false),
-            ("80x24-compact-hovered", 80, 24, MinimapMode::Compact, MinimapPalette::SEWER, "SEWER", false, true),
-            ("80x24-expanded-sewer", 80, 24, MinimapMode::Expanded, MinimapPalette::SEWER, "SEWER", false, false),
-            ("120x40-compact-sewer", 120, 40, MinimapMode::Compact, MinimapPalette::SEWER, "SEWER", false, false),
-            ("120x40-expanded-sewer", 120, 40, MinimapMode::Expanded, MinimapPalette::SEWER, "SEWER", false, false),
-            ("120x40-expanded-boss-kitchen", 120, 40, MinimapMode::Expanded, MinimapPalette::KITCHEN, "KITCHEN", true, false),
-            ("120x40-compact-lab", 120, 40, MinimapMode::Compact, MinimapPalette::LAB, "LAB", true, false),
-            ("200x60-compact-sewer", 200, 60, MinimapMode::Compact, MinimapPalette::SEWER, "SEWER", false, false),
-            ("200x60-expanded-lab", 200, 60, MinimapMode::Expanded, MinimapPalette::LAB, "LAB", false, false),
+        struct DumpCase {
+            name: &'static str,
+            w: u16,
+            h: u16,
+            mode: MinimapMode,
+            pal: MinimapPalette,
+            sector: &'static str,
+            boss_disc: bool,
+            hovered: bool,
+        }
+
+        let cases = [
+            DumpCase { name: "57x20-compact-sewer", w: 57, h: 20, mode: MinimapMode::Compact, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false },
+            DumpCase { name: "57x20-expanded-sewer", w: 57, h: 20, mode: MinimapMode::Expanded, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false },
+            DumpCase { name: "80x24-compact-sewer", w: 80, h: 24, mode: MinimapMode::Compact, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false },
+            DumpCase { name: "80x24-compact-hovered", w: 80, h: 24, mode: MinimapMode::Compact, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: true },
+            DumpCase { name: "80x24-expanded-sewer", w: 80, h: 24, mode: MinimapMode::Expanded, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false },
+            DumpCase { name: "120x40-compact-sewer", w: 120, h: 40, mode: MinimapMode::Compact, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false },
+            DumpCase { name: "120x40-expanded-sewer", w: 120, h: 40, mode: MinimapMode::Expanded, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false },
+            DumpCase { name: "120x40-expanded-boss-kitchen", w: 120, h: 40, mode: MinimapMode::Expanded, pal: MinimapPalette::KITCHEN, sector: "KITCHEN", boss_disc: true, hovered: false },
+            DumpCase { name: "120x40-compact-lab", w: 120, h: 40, mode: MinimapMode::Compact, pal: MinimapPalette::LAB, sector: "LAB", boss_disc: true, hovered: false },
+            DumpCase { name: "200x60-compact-sewer", w: 200, h: 60, mode: MinimapMode::Compact, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false },
+            DumpCase { name: "200x60-expanded-lab", w: 200, h: 60, mode: MinimapMode::Expanded, pal: MinimapPalette::LAB, sector: "LAB", boss_disc: false, hovered: false },
         ];
 
-        for &(name, w, h, mode, pal, sector, boss_disc, hovered) in cases {
+        for c in &cases {
+            let (name, w, h, mode, pal, sector, boss_disc, hovered) =
+                (c.name, c.w, c.h, c.mode, c.pal, c.sector, c.boss_disc, c.hovered);
             let map = if boss_disc { &map_boss } else { &map_mid };
             let markers = if boss_disc { &markers_boss } else { &markers_mid };
             let labels = if boss_disc { &labels_boss } else { &labels_mid };
