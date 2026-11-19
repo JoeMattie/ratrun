@@ -8,7 +8,7 @@ use ratatui::widgets::Block;
 use ratatui::Frame;
 
 use crate::audio::{AudioEngine, Sfx};
-use crate::game::enemy::EnemyKind;
+use crate::game::gem::PickupKind;
 use crate::game::level::Theme;
 use crate::game::loadout::Upgrade;
 use crate::game::world::World;
@@ -16,10 +16,10 @@ use crate::input::InputState;
 use crate::lore;
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
-use crate::render::{hud, menu};
+use crate::render::{hud, menu, overlay};
 use crate::scores::{ScoreEntry, ScoreTable};
 
-use menu::{HitMap, Target};
+use menu::{HitMap, RunSummary, Target};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
@@ -84,6 +84,13 @@ pub struct App {
     /// frame.
     hud: hud::HudState,
     hits: HitMap,
+    muted: bool,
+    damage_taken: f32,
+    dashes_used: u32,
+    heals_picked: u32,
+    boss_slain: bool,
+    prev_boss_alive: bool,
+    last_summary: Option<RunSummary>,
 }
 
 impl App {
@@ -127,6 +134,13 @@ impl App {
             sfx_frame: Vec::new(),
             hud: hud::HudState::default(),
             hits: HitMap::default(),
+            muted: false,
+            damage_taken: 0.0,
+            dashes_used: 0,
+            heals_picked: 0,
+            boss_slain: false,
+            prev_boss_alive: false,
+            last_summary: None,
         };
         app.menu_music();
         app
@@ -218,6 +232,13 @@ impl App {
         self.world = Some(World::new(theme, seed));
         self.recorded = false;
         self.new_best = false;
+        self.damage_taken = 0.0;
+        self.dashes_used = 0;
+        self.heals_picked = 0;
+        self.boss_slain = false;
+        self.prev_boss_alive = false;
+        self.last_summary = None;
+        self.hud.reset();
         self.intro_timer = 4.0;
         self.screen = Screen::MapIntro;
         if let Some(a) = self.audio.as_mut() {
@@ -276,6 +297,8 @@ impl App {
         self.input.tick(dt);
         // Global mute toggle.
         if self.input.pressed_char('m') {
+            self.muted = !self.muted;
+            self.hud.telemetry.muted = self.muted;
             if let Some(a) = self.audio.as_mut() {
                 a.toggle_mute();
             }
@@ -380,6 +403,7 @@ impl App {
         let mut ended = false;
         let mut intensity = 1u32;
         if let Some(w) = self.world.as_mut() {
+            let hp_before = w.player.hp;
             w.update(dt, move_dir, dash);
             // Drain SFX into a reused buffer, de-duplicated per frame so a
             // 16-shot nova is one sound.
@@ -389,8 +413,30 @@ impl App {
                     self.sfx_frame.push(s);
                 }
             }
-            let boss_alive = w.enemies.iter().any(|e| e.kind == EnemyKind::Boss);
-            intensity = if boss_alive || w.enemies.len() > 45 {
+            if w.player.hp < hp_before {
+                self.damage_taken += hp_before - w.player.hp;
+            }
+            if self.sfx_frame.contains(&Sfx::Dash) {
+                self.dashes_used += 1;
+            }
+            for &pk in w.last_pickups() {
+                if pk == PickupKind::Heal {
+                    self.heals_picked += 1;
+                }
+            }
+            let boss_hp = w.boss_hp();
+            let boss_alive = boss_hp.is_some();
+            if self.prev_boss_alive && !boss_alive && w.director.boss_spawned {
+                self.boss_slain = true;
+            }
+            self.prev_boss_alive = boss_alive;
+            self.hud.telemetry.set_boss_alive(boss_alive);
+            self.hud.telemetry.set_boss_hp(boss_hp);
+            self.hud.telemetry.set_boss_offset(w.boss_offset());
+            let enemy_count = w.enemy_count();
+            self.hud.telemetry.set_enemy_count(enemy_count);
+            self.hud.tick(dt, w, &self.sfx_frame, self.muted);
+            intensity = if boss_alive || enemy_count > 45 {
                 2
             } else {
                 1
@@ -462,6 +508,9 @@ impl App {
     fn apply_levelup(&mut self, i: usize) {
         if let Some(w) = self.world.as_mut() {
             if let Some(up) = self.levelup_choices.get(i).cloned() {
+                if let Some((title, _, _)) = self.levelup_desc.get(i) {
+                    self.hud.notify_upgrade(title);
+                }
                 let heal = w.player.loadout.apply(&up);
                 w.player.heal(heal);
                 w.pending_levelups = w.pending_levelups.saturating_sub(1);
@@ -499,6 +548,38 @@ impl App {
         }
     }
 
+    fn build_summary(&self, w: &World, final_score: u32) -> RunSummary {
+        let bonus_time = (w.elapsed as u32) * 5;
+        let bonus_level = w.player.level * 100;
+        let bonus_win = if w.won { 5000 } else { 0 };
+        RunSummary {
+            won: w.won,
+            theme: w.level.theme,
+            combat_score: w.score,
+            bonus_time,
+            bonus_level,
+            bonus_win,
+            final_score,
+            time: w.elapsed,
+            level: w.player.level,
+            kills: w.kills,
+            damage_taken: self.damage_taken,
+            dashes_used: self.dashes_used,
+            heals_picked: self.heals_picked,
+            boss_slain: self.boss_slain,
+            weapons: w
+                .player
+                .loadout
+                .weapons
+                .iter()
+                .map(|wp| (wp.kind, wp.level))
+                .collect(),
+            damage_mult: w.player.loadout.stats.damage_mult,
+            fire_rate_mult: w.player.loadout.stats.fire_rate_mult,
+            armor: w.player.loadout.stats.armor,
+        }
+    }
+
     fn finalize(&mut self) {
         if self.recorded {
             return;
@@ -509,6 +590,7 @@ impl App {
             let bonus_win = if w.won { 5000 } else { 0 };
             let final_score = w.score + bonus_time + bonus_level + bonus_win;
             self.last_score = final_score;
+            self.last_summary = Some(self.build_summary(w, final_score));
             // "New high score" means it beat the table's best, computed before
             // this run's entry is inserted (an under-full table is no free pass).
             self.new_best = self.scores.is_high_score(final_score);
@@ -581,18 +663,36 @@ impl App {
                             .unwrap_or(crate::render::palette::MUTED),
                         &mut self.hits,
                     ),
-                    Screen::Paused => menu::draw_pause(frame, area, &mut self.hits),
+                    Screen::Paused => {
+                        if let Some(w) = self.world.as_ref() {
+                            menu::draw_pause_with_run(frame, area, w, self.muted, &mut self.hits);
+                        } else {
+                            menu::draw_pause(frame, area, &mut self.hits);
+                        }
+                    }
                     Screen::LevelUp => {
-                        let level = self.world.as_ref().map(|w| w.player.level).unwrap_or(1);
-                        menu::draw_levelup(
-                            frame,
-                            area,
-                            level,
-                            &self.levelup_desc,
-                            &self.levelup_choices,
-                            self.levelup_idx,
-                            &mut self.hits,
-                        );
+                        if let Some(w) = self.world.as_ref() {
+                            menu::draw_levelup_with_loadout(
+                                frame,
+                                area,
+                                w.player.level,
+                                &self.levelup_desc,
+                                &self.levelup_choices,
+                                &w.player.loadout,
+                                self.levelup_idx,
+                                &mut self.hits,
+                            );
+                        } else {
+                            menu::draw_levelup(
+                                frame,
+                                area,
+                                1,
+                                &self.levelup_desc,
+                                &self.levelup_choices,
+                                self.levelup_idx,
+                                &mut self.hits,
+                            );
+                        }
                     }
                     Screen::End => {
                         if let Some(w) = self.world.as_ref() {
@@ -601,14 +701,18 @@ impl App {
                             } else {
                                 lore::DEFEAT
                             };
-                            menu::draw_end(
+                            let fallback;
+                            let summary = match self.last_summary.as_ref() {
+                                Some(s) => s,
+                                None => {
+                                    fallback = self.build_summary(w, self.last_score);
+                                    &fallback
+                                }
+                            };
+                            menu::draw_end_summary(
                                 frame,
                                 area,
-                                w.won,
-                                self.last_score,
-                                w.elapsed,
-                                w.player.level,
-                                w.kills,
+                                summary,
                                 self.new_best,
                                 lore_line,
                                 &self.scores,
@@ -652,6 +756,9 @@ impl App {
         }
 
         if let Some(w) = self.world.as_ref() {
+            if matches!(self.screen, Screen::Playing) {
+                overlay::draw_overlays(frame, game, w, &mut self.hud);
+            }
             hud::draw_top(frame, top, w, &mut self.hud);
             hud::draw_bottom(frame, bottom, w, &mut self.hud);
         }
@@ -1339,7 +1446,7 @@ mod tests {
         let (wa, wb) = (a.app.world.as_ref().unwrap(), b.app.world.as_ref().unwrap());
         assert_eq!(wa.elapsed, wb.elapsed);
         assert_eq!(wa.score, wb.score);
-        assert_eq!(wa.enemies.len(), wb.enemies.len());
+        assert_eq!(wa.enemy_count(), wb.enemy_count());
 
         // A finalized run updates the in-memory table only.
         a.app.world.as_mut().unwrap().game_over = true;
@@ -1391,6 +1498,254 @@ mod tests {
                 hh.frame(&[]);
                 hh.frame(&[]);
                 assert_eq!(hh.app.screen.name_for_test(), target, "{target} at {w}x{h}");
+            }
+        }
+    }
+
+    #[test]
+    fn hud_tracks_mute_upgrade_callout_and_incident_summary() {
+        let mut h = Harness::new(100, 32);
+        h.enter_playing();
+        // Mute while paused updates the HUD telemetry immediately.
+        h.frame(&[KeyCode::Esc]);
+        assert!(matches!(h.app.screen, Screen::Paused));
+        let paused_text = h.frame(&[KeyCode::Char('m')]);
+        assert!(h.app.muted);
+        assert!(h.app.hud.telemetry.muted);
+        assert!(paused_text.contains("MUTE"), "top bar should show MUTE");
+        assert!(paused_text.contains("ARSENAL"), "pause dossier should show ARSENAL");
+        h.frame(&[KeyCode::Char('m')]); // unmute
+        h.frame(&[KeyCode::Esc]); // resume
+
+        // Picking an upgrade emits an EQUIPPED callout visible on the next frame.
+        h.show_upgrade_cards();
+        h.frame(&[KeyCode::Enter]);
+        assert!(matches!(h.app.screen, Screen::Playing));
+        let after_pick = h.frame(&[]);
+        assert!(
+            after_pick.contains("EQUIPPED"),
+            "HUD should display EQUIPPED callout after upgrade pick"
+        );
+
+        // Ending the run populates RunSummary matching finalized score.
+        h.app.world.as_mut().unwrap().game_over = true;
+        let end_text = h.frame(&[]);
+        assert!(matches!(h.app.screen, Screen::End));
+        let summary = h.app.last_summary.as_ref().expect("summary must be populated");
+        assert_eq!(summary.final_score, h.app.last_score);
+        assert!(end_text.contains("SCORE BREAKDOWN"));
+        assert!(end_text.contains("COMBAT METRICS"));
+    }
+
+    /// Gated behind `RATRUN_HUD_DIR`: captures ANSI + plain text frames of
+    /// every redesigned HUD and in-game overlay state across terminal sizes.
+    #[test]
+    fn capture_hud_neon() {
+        use crate::game::loadout::{PassiveKind, Upgrade};
+        use crate::game::weapon::{Weapon, WeaponKind};
+        use crate::render::hud::CalloutKind;
+        use std::fmt::Write;
+
+        let Some(dir) = std::env::var_os("RATRUN_HUD_DIR") else {
+            return;
+        };
+        let dir = std::path::Path::new(&dir);
+        std::fs::create_dir_all(dir).unwrap();
+        let theme_idx: usize = std::env::var("RATRUN_HUD_THEME")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        let scenes = [
+            "hud-combat",
+            "hud-boss",
+            "hud-lowhp",
+            "hud-callouts",
+            "upgrades",
+            "pause",
+            "defeat",
+            "victory",
+        ];
+
+        for (width, height) in [
+            (57u16, 20u16),
+            (80, 24),
+            (80, 16),
+            (140, 45),
+            (0, 0),
+            (0, 5),
+            (5, 0),
+            (1, 1),
+        ] {
+            let mut h = Harness::new(width, height);
+            h.app.theme_idx = theme_idx;
+            h.enter_playing();
+            if let Some(w) = h.app.world.as_mut() {
+                for _ in 0..240 {
+                    w.update(1.0 / 60.0, Vec2::new(0.25, 0.05), false);
+                }
+            }
+
+            for name in scenes {
+                h.app.hud.reset();
+                h.app.muted = false;
+                h.app.hud.telemetry.muted = false;
+                h.app.damage_taken = 94.0;
+                h.app.dashes_used = 17;
+                h.app.heals_picked = 2;
+                h.app.boss_slain = name == "victory";
+
+                if let Some(w) = h.app.world.as_mut() {
+                    w.player.loadout.weapons = WeaponKind::all()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, k)| {
+                            let mut wp = Weapon::new(k);
+                            wp.level = match i {
+                                0 => k.max_level(),
+                                1 => 4,
+                                2 => 3,
+                                3 => 2,
+                                _ => 1,
+                            };
+                            let eff_cd = wp.cooldown() / 1.24;
+                            wp.timer = eff_cd * [0.94, 0.72, 0.50, 0.30, 0.14, 0.02][i];
+                            wp
+                        })
+                        .collect();
+                    w.player.loadout.stats.damage_mult = 1.45;
+                    w.player.loadout.stats.fire_rate_mult = 1.24;
+                    w.player.loadout.stats.armor = 2.0;
+                    w.player.loadout.stats.regen = 1.0;
+                    w.player.level = 9;
+                    w.kills = 248;
+                    w.score = 3420;
+                    w.elapsed = 148.0;
+                    w.player.hp = 78.0;
+                    w.player.hurt_flash = 0.0;
+                    w.player.dash_cd = 0.0;
+                    w.player.dash_active = 0.0;
+                    w.player.xp = (w.player.xp_to_next * 3) / 5;
+                    w.director.boss_spawned = false;
+                    w.won = false;
+                    w.game_over = false;
+
+                    match name {
+                        "hud-combat" => {
+                            h.app.screen = Screen::Playing;
+                            w.player.dash_cd = 0.75;
+                            h.app.hud.streak_kills = 14;
+                            h.app.hud.hp_trail = 0.92;
+                            h.app.hud.clock = 1.2;
+                        }
+                        "hud-boss" => {
+                            h.app.screen = Screen::Playing;
+                            w.elapsed = 264.0;
+                            w.director.boss_spawned = true;
+                            h.app.hud.telemetry.set_boss_hp(Some((860.0, 1400.0)));
+                            h.app.hud.telemetry.set_boss_offset(Some(Vec2::new(260.0, -20.0)));
+                            h.app.hud.boss_hp_trail = 0.78;
+                            h.app.hud.boss_intro_timer = 1.5;
+                            h.app.hud.clock = 0.4;
+                        }
+                        "hud-lowhp" => {
+                            h.app.screen = Screen::Playing;
+                            w.elapsed = 278.0;
+                            w.player.hp = 18.0;
+                            w.player.hurt_flash = 0.2;
+                            w.player.dash_active = 0.12;
+                            h.app.hud.hp_trail = 0.44;
+                            h.app.hud.hurt_edge = 0.28;
+                            h.app.hud.clock = 0.25;
+                        }
+                        "hud-callouts" => {
+                            h.app.screen = Screen::Playing;
+                            w.elapsed = 249.4;
+                            h.app.muted = true;
+                            h.app.hud.telemetry.muted = true;
+                            h.app.hud.push_callout(
+                                CalloutKind::Heal,
+                                "+MEDKIT",
+                                "HP RESTORED",
+                                2.2,
+                            );
+                            h.app.hud.push_callout(
+                                CalloutKind::Upgrade,
+                                "EQUIPPED",
+                                "Squeak Nova Lv3→4",
+                                2.5,
+                            );
+                            h.app.hud.clock = 0.15;
+                        }
+                        "upgrades" => {
+                            h.app.screen = Screen::LevelUp;
+                            h.app.levelup_idx = 0;
+                            h.app.levelup_choices = vec![
+                                Upgrade::LevelWeapon(2),
+                                Upgrade::Passive(PassiveKind::Magnet),
+                                Upgrade::Passive(PassiveKind::Armor),
+                            ];
+                            h.app.levelup_desc = h
+                                .app
+                                .levelup_choices
+                                .iter()
+                                .map(|u| w.player.loadout.describe(u))
+                                .collect();
+                        }
+                        "pause" => {
+                            h.app.screen = Screen::Paused;
+                        }
+                        "defeat" | "victory" => {
+                            h.app.screen = Screen::End;
+                            w.won = name == "victory";
+                            w.elapsed = if w.won { 300.0 } else { 276.0 };
+                            let final_score =
+                                w.score + (w.elapsed as u32) * 5 + w.player.level * 100
+                                    + if w.won { 5000 } else { 0 };
+                            h.app.last_score = final_score;
+                            h.app.new_best = w.won;
+                            h.app.scores = ScoreTable::default();
+                            for i in 0..5u32 {
+                                h.app.scores.insert(ScoreEntry {
+                                    score: final_score.saturating_sub(i * 480),
+                                    time: (w.elapsed - i as f32 * 32.0).max(30.0),
+                                    level: w.player.level.saturating_sub(i),
+                                    map: w.level.theme.name().to_string(),
+                                    won: i == 0 && w.won,
+                                });
+                            }
+                            h.app.last_summary = None;
+                        }
+                        _ => {}
+                    }
+                }
+
+                h.terminal.draw(|f| h.app.render(f)).unwrap();
+                if width < 6 || height < 6 {
+                    continue;
+                }
+                let buf = h.terminal.backend().buffer();
+                let mut ansi = String::new();
+                let mut plain = String::new();
+                for y in 0..height {
+                    for x in 0..width {
+                        let c = &buf[(x, y)];
+                        let (r, g, b) = color_rgb(c.fg);
+                        let (br, bg, bb) = color_rgb(c.bg);
+                        write!(
+                            ansi,
+                            "\x1b[38;2;{r};{g};{b};48;2;{br};{bg};{bb}m{}",
+                            c.symbol()
+                        )
+                        .unwrap();
+                        plain.push_str(c.symbol());
+                    }
+                    ansi.push_str("\x1b[0m\n");
+                    plain.push('\n');
+                }
+                let path = dir.join(format!("{width}x{height}-{name}"));
+                std::fs::write(path.with_extension("ansi"), ansi).unwrap();
+                std::fs::write(path.with_extension("txt"), plain).unwrap();
             }
         }
     }

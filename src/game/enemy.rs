@@ -82,7 +82,11 @@ impl EnemyKind {
 }
 
 pub struct Enemy {
+    /// Monotonic runtime identifier assigned on spawn (0 if constructed outside `World`).
+    pub id: u32,
     pub kind: EnemyKind,
+    /// True for periodic elite Brutes spawned by the director.
+    pub elite: bool,
     pub pos: Vec2,
     pub vel: Vec2,
     pub hp: f32,
@@ -103,7 +107,9 @@ impl Enemy {
     pub fn spawn(kind: EnemyKind, pos: Vec2, hp_mult: f32, rng: &mut impl Rng) -> Self {
         let hp = kind.base_hp() * hp_mult;
         Enemy {
+            id: 0,
             kind,
+            elite: false,
             pos,
             vel: Vec2::ZERO,
             hp,

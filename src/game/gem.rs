@@ -31,7 +31,7 @@ impl Gem {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PickupKind {
     Heal,
     Magnet,

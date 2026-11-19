@@ -3,6 +3,8 @@
 use crate::math::Vec2;
 use crate::render::palette::Rgb;
 
+use super::weapon::WeaponKind;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Faction {
     Player,
@@ -48,6 +50,8 @@ pub struct Bullet {
     pub lob: Option<Lob>,
     /// Re-hit cooldown so orbit/piercing shots don't delete an enemy in one frame.
     pub hit_cd: f32,
+    /// Weapon that fired this projectile (used for weapon-specific impact VFX).
+    pub weapon: Option<WeaponKind>,
 }
 
 impl Bullet {
@@ -66,6 +70,7 @@ impl Bullet {
             orbit: None,
             lob: None,
             hit_cd: 0.0,
+            weapon: None,
         }
     }
 }

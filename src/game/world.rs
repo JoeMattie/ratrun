@@ -18,7 +18,10 @@ use super::enemy::{Enemy, EnemyKind};
 use super::gem::{Gem, Pickup, PickupKind};
 use super::level::{Level, Theme};
 use super::nav::FlowField;
-use super::particle::{Particles, Ramp};
+use super::particle::damage_number::{
+    DamageNumbers, DamageSource, DEFAULT_CAP as DAMAGE_NUMBER_CAP,
+};
+use super::particle::{vfx, Particles};
 use super::player::Player;
 use super::weapon::WeaponKind;
 
@@ -48,6 +51,8 @@ pub struct World {
     pub pickups: Vec<Pickup>,
     pub pools: Vec<Pool>,
     pub particles: Particles,
+    pub damage_numbers: DamageNumbers,
+    next_enemy_id: u32,
     pub director: Director,
     pub flow: FlowField,
     /// Reused broadphase grid (cleared + refilled each tick, never reallocated
@@ -56,6 +61,8 @@ pub struct World {
     neigh: Vec<u32>,
     /// Reused scratch list of pickups collected this tick (no per-frame alloc).
     pickup_scratch: Vec<PickupKind>,
+    /// Pickups collected during the most recent `update` tick (for HUD telemetry).
+    last_pickups: Vec<PickupKind>,
     pub elapsed: f32,
     pub kills: u32,
     pub score: u32,
@@ -83,6 +90,7 @@ impl World {
             grid,
             neigh: Vec::new(),
             pickup_scratch: Vec::new(),
+            last_pickups: Vec::new(),
             level,
             player: Player::new(center, WeaponKind::Gnaw),
             enemies: Vec::new(),
@@ -91,6 +99,8 @@ impl World {
             pickups: Vec::new(),
             pools: Vec::new(),
             particles: Particles::new(PARTICLE_CAP),
+            damage_numbers: DamageNumbers::new(DAMAGE_NUMBER_CAP),
+            next_enemy_id: 1,
             director: Director::default(),
             elapsed: 0.0,
             kills: 0,
@@ -114,10 +124,38 @@ impl World {
         (director::RUN_SECONDS - self.elapsed).max(0.0)
     }
 
+    /// Current and maximum HP of the living boss, if one is active.
+    pub fn boss_hp(&self) -> Option<(f32, f32)> {
+        self.enemies
+            .iter()
+            .find(|e| e.kind == EnemyKind::Boss && e.alive())
+            .map(|e| (e.hp.max(0.0), e.max_hp))
+    }
+
+    /// World-space offset from the player to the living boss, if active.
+    pub fn boss_offset(&self) -> Option<Vec2> {
+        self.enemies
+            .iter()
+            .find(|e| e.kind == EnemyKind::Boss && e.alive())
+            .map(|e| e.pos - self.player.pos)
+    }
+
+    /// Number of active enemies in the arena.
+    pub fn enemy_count(&self) -> usize {
+        self.enemies.len()
+    }
+
+    /// Pickups collected during the most recent `update()` tick.
+    pub fn last_pickups(&self) -> &[PickupKind] {
+        &self.last_pickups
+    }
+
     pub fn update(&mut self, dt: f32, move_dir: Vec2, dash: bool) {
+        self.last_pickups.clear();
         if self.finished() {
-            // Keep particles settling for a beat, but freeze the sim.
+            // Keep particles and damage numbers settling for a beat, but freeze the sim.
             self.particles.update(dt);
+            self.damage_numbers.update(dt);
             return;
         }
         self.elapsed += dt;
@@ -159,6 +197,7 @@ impl World {
             self.reap_enemies();
         }
         self.particles.update(dt);
+        self.damage_numbers.update(dt);
 
         // Screen-shake decay + jitter offset.
         if self.shake > 0.05 {
@@ -193,8 +232,7 @@ impl World {
             self.player.iframes = self.player.iframes.max(0.18);
             let pos = self.player.pos;
             let face = self.player.face;
-            self.particles
-                .cone(&mut self.rng, pos, -face, 16, 90.0, Ramp::Smoke, 0.4);
+            vfx::emit_dash_start(&mut self.particles, &mut self.rng, pos, face);
             self.sfx.push(Sfx::Dash);
         }
 
@@ -230,6 +268,13 @@ impl World {
             }
         }
 
+        // Continuous dash motion trail.
+        if dashing {
+            let pos = self.player.pos;
+            let vel = self.player.vel;
+            vfx::emit_dash_trail(&mut self.particles, &mut self.rng, pos, vel, dt);
+        }
+
         // Timers.
         self.player.dash_cd = (self.player.dash_cd - dt).max(0.0);
         self.player.dash_active = (self.player.dash_active - dt).max(0.0);
@@ -260,8 +305,10 @@ impl World {
                 }
                 let kind = director::pick_kind(self.elapsed, &mut self.rng);
                 let pos = self.spawn_point();
-                self.enemies
-                    .push(Enemy::spawn(kind, pos, mult, &mut self.rng));
+                let mut e = Enemy::spawn(kind, pos, mult, &mut self.rng);
+                e.id = self.next_enemy_id;
+                self.next_enemy_id = self.next_enemy_id.wrapping_add(1).max(1);
+                self.enemies.push(e);
             }
         }
 
@@ -272,8 +319,11 @@ impl World {
             if self.enemies.len() < cap {
                 let pos = self.spawn_point();
                 let mult = director::hp_mult(self.elapsed) * 1.6;
-                self.enemies
-                    .push(Enemy::spawn(EnemyKind::Brute, pos, mult, &mut self.rng));
+                let mut e = Enemy::spawn(EnemyKind::Brute, pos, mult, &mut self.rng);
+                e.id = self.next_enemy_id;
+                e.elite = true;
+                self.next_enemy_id = self.next_enemy_id.wrapping_add(1).max(1);
+                self.enemies.push(e);
             }
         }
 
@@ -281,8 +331,12 @@ impl World {
         if !self.director.boss_spawned && self.elapsed >= director::BOSS_TIME {
             self.director.boss_spawned = true;
             let pos = self.spawn_point();
-            self.enemies
-                .push(Enemy::spawn(EnemyKind::Boss, pos, 1.0, &mut self.rng));
+            let mut e = Enemy::spawn(EnemyKind::Boss, pos, 1.0, &mut self.rng);
+            e.id = self.next_enemy_id;
+            self.next_enemy_id = self.next_enemy_id.wrapping_add(1).max(1);
+            self.enemies.push(e);
+            let accent = self.level.palette.accent;
+            vfx::emit_boss_spawn(&mut self.particles, &mut self.rng, pos, accent);
             self.shake = 14.0;
             self.sfx.push(Sfx::Boss);
         }
@@ -485,9 +539,9 @@ impl World {
                     let dir = (epos - ppos).normalized();
                     let mut b = Bullet::new(ppos, dir * 120.0, dmg, Faction::Player, color);
                     b.size = 1;
+                    b.weapon = Some(kind);
                     self.bullets.push(b);
-                    self.particles
-                        .cone(&mut self.rng, ppos, dir, 4, 60.0, Ramp::Spark, 0.2);
+                    vfx::emit_weapon_fire(&mut self.particles, &mut self.rng, kind, ppos, dir, 0.0);
                     fired = true;
                 }
             }
@@ -502,10 +556,10 @@ impl World {
                     let v = Vec2::from_angle(base + spread) * 110.0;
                     let mut b = Bullet::new(ppos, v, dmg, Faction::Player, color);
                     b.life = 1.4;
+                    b.weapon = Some(kind);
                     self.bullets.push(b);
                 }
-                self.particles
-                    .cone(&mut self.rng, ppos, aim, 6, 70.0, Ramp::Fire, 0.25);
+                vfx::emit_weapon_fire(&mut self.particles, &mut self.rng, kind, ppos, aim, 0.0);
                 fired = true;
             }
             WeaponKind::SqueakNova => {
@@ -514,10 +568,10 @@ impl World {
                     let v = Vec2::from_angle(a) * 95.0;
                     let mut b = Bullet::new(ppos, v, dmg, Faction::Player, color);
                     b.life = 1.3;
+                    b.weapon = Some(kind);
                     self.bullets.push(b);
                 }
-                self.particles
-                    .burst(&mut self.rng, ppos, 12, 80.0, 1.0, Ramp::Spark, 0.35, true);
+                vfx::emit_weapon_fire(&mut self.particles, &mut self.rng, kind, ppos, pface, 0.0);
                 fired = true;
             }
             WeaponKind::SporeOrbit => {
@@ -537,6 +591,7 @@ impl World {
                     b.pierce = 999;
                     b.size = 2;
                     b.radius = 3.0;
+                    b.weapon = Some(kind);
                     b.orbit = Some(Orbit {
                         angle,
                         radius,
@@ -544,31 +599,33 @@ impl World {
                     });
                     self.bullets.push(b);
                 }
+                vfx::emit_weapon_fire(&mut self.particles, &mut self.rng, kind, ppos, pface, radius);
                 fired = true;
             }
             WeaponKind::TailWhip => {
                 let radius = 26.0 + projs as f32 * 3.0;
                 for e in self.enemies.iter_mut() {
-                    if e.pos.dist(ppos) <= radius + e.radius {
+                    if e.alive() && e.pos.dist(ppos) <= radius + e.radius {
                         e.hurt(dmg);
+                        let killed = !e.alive();
+                        vfx::emit_tail_whip_hit(
+                            &mut self.particles,
+                            &mut self.rng,
+                            e.pos,
+                            e.pos - ppos,
+                            killed,
+                        );
+                        self.damage_numbers.record(
+                            e.id,
+                            e.pos,
+                            e.radius,
+                            dmg,
+                            killed,
+                            DamageSource::TailWhip,
+                        );
                     }
                 }
-                // Visual pulse.
-                let steps = 28;
-                for k in 0..steps {
-                    let a = k as f32 / steps as f32 * std::f32::consts::TAU;
-                    let p = ppos + Vec2::from_angle(a) * radius;
-                    self.particles.burst(
-                        &mut self.rng,
-                        p,
-                        1,
-                        18.0,
-                        0.5,
-                        Ramp::Custom(color, (120, 40, 90)),
-                        0.3,
-                        true,
-                    );
-                }
+                vfx::emit_weapon_fire(&mut self.particles, &mut self.rng, kind, ppos, pface, radius);
                 fired = true;
             }
             WeaponKind::AcidSpit => {
@@ -585,6 +642,7 @@ impl World {
                 b.size = 2;
                 b.radius = 3.0;
                 b.life = to.len() / speed + 0.5;
+                b.weapon = Some(kind);
                 b.lob = Some(Lob {
                     target,
                     radius: 12.0 + projs as f32 * 1.5,
@@ -593,13 +651,22 @@ impl World {
                     color: (140, 220, 70),
                 });
                 self.bullets.push(b);
+                vfx::emit_weapon_fire(&mut self.particles, &mut self.rng, kind, ppos, to, 0.0);
                 fired = true;
             }
         }
         // Only announce a shot when the weapon actually produced something
         // (Gnaw with no target in range fires nothing).
         if fired {
-            self.sfx.push(Sfx::Shoot);
+            let sfx = match kind {
+                WeaponKind::Gnaw => Sfx::Shoot,
+                WeaponKind::CheeseSpray => Sfx::ShootSpray,
+                WeaponKind::SqueakNova => Sfx::ShootNova,
+                WeaponKind::SporeOrbit => Sfx::ShootOrbit,
+                WeaponKind::TailWhip => Sfx::ShootWhip,
+                WeaponKind::AcidSpit => Sfx::ShootAcid,
+            };
+            self.sfx.push(sfx);
         }
         fired
     }
@@ -612,6 +679,7 @@ impl World {
             if let Some(o) = b.orbit.as_mut() {
                 o.angle += o.speed * dt;
                 b.pos = ppos + Vec2::from_angle(o.angle) * o.radius;
+                vfx::emit_orbit_trail(&mut self.particles, &mut self.rng, b.pos, dt);
             } else {
                 b.pos += b.vel * dt;
             }
@@ -647,17 +715,10 @@ impl World {
                         life: lob.life,
                         color: lob.color,
                     });
-                    self.particles.burst(
-                        &mut self.rng,
-                        p,
-                        14,
-                        30.0,
-                        2.0,
-                        Ramp::Custom((180, 255, 90), (40, 90, 20)),
-                        0.5,
-                        false,
-                    );
+                    vfx::emit_acid_splash(&mut self.particles, &mut self.rng, p, lob.radius);
                     b.life = 0.0;
+                } else {
+                    vfx::emit_acid_drip(&mut self.particles, &mut self.rng, b.pos, dt);
                 }
             }
         }
@@ -680,10 +741,23 @@ impl World {
     fn update_pools(&mut self, dt: f32) {
         for p in self.pools.iter_mut() {
             p.life -= dt;
+            vfx::emit_pool_bubbles(&mut self.particles, &mut self.rng, p.pos, p.radius, p.life, dt);
+            let tick_dmg = p.dps * dt;
             for e in self.enemies.iter_mut() {
+                if !e.alive() {
+                    continue;
+                }
                 if e.pos.dist(p.pos) <= p.radius + e.radius {
-                    e.hp -= p.dps * dt;
+                    e.hp -= tick_dmg;
                     e.flash = e.flash.max(0.05);
+                    self.damage_numbers.record(
+                        e.id,
+                        e.pos,
+                        e.radius,
+                        tick_dmg,
+                        !e.alive(),
+                        DamageSource::Acid,
+                    );
                 }
             }
         }
@@ -714,16 +788,24 @@ impl World {
                 }
                 if collision::segment_circle_hit(b.prev_pos, b.pos, b.radius, e.pos, e.radius) {
                     e.hurt(b.damage);
+                    let killed = !e.alive();
                     hit_any = true;
-                    self.particles.burst(
+                    vfx::emit_weapon_hit(
+                        &mut self.particles,
                         &mut self.rng,
                         b.pos,
-                        4,
-                        50.0,
-                        1.0,
-                        Ramp::Spark,
-                        0.18,
-                        true,
+                        b.vel,
+                        b.weapon,
+                        e.kind,
+                        killed,
+                    );
+                    self.damage_numbers.record(
+                        e.id,
+                        e.pos,
+                        e.radius,
+                        b.damage,
+                        killed,
+                        DamageSource::from_weapon(b.weapon),
                     );
                     if b.pierce > 0 {
                         b.pierce -= 1;
@@ -759,16 +841,7 @@ impl World {
         }
         if hit {
             let p = self.player.pos;
-            self.particles.burst(
-                &mut self.rng,
-                p,
-                10,
-                40.0,
-                1.0,
-                Ramp::Custom((255, 90, 90), (90, 20, 20)),
-                0.4,
-                false,
-            );
+            vfx::emit_player_hurt(&mut self.particles, &mut self.rng, p);
             self.shake = self.shake.max(4.0);
             self.sfx.push(Sfx::Hurt);
         }
@@ -805,16 +878,7 @@ impl World {
         }
         if hit_dmg > 0.0 && self.player.take_damage(hit_dmg) {
             let p = self.player.pos;
-            self.particles.burst(
-                &mut self.rng,
-                p,
-                12,
-                45.0,
-                1.0,
-                Ramp::Custom((255, 90, 90), (90, 20, 20)),
-                0.4,
-                false,
-            );
+            vfx::emit_player_hurt(&mut self.particles, &mut self.rng, p);
             self.shake = self.shake.max(5.0);
             self.sfx.push(Sfx::Hurt);
         }
@@ -827,27 +891,22 @@ impl World {
                 let e = self.enemies.swap_remove(i);
                 let blood = self.level.palette.blood;
                 let big = matches!(e.kind, EnemyKind::Brute | EnemyKind::Boss);
-                let n = if e.kind == EnemyKind::Boss {
-                    120
-                } else if big {
-                    28
-                } else {
-                    10
-                };
-                self.particles.burst(
+                vfx::emit_enemy_death(
+                    &mut self.particles,
                     &mut self.rng,
                     e.pos,
-                    n,
-                    if big { 90.0 } else { 55.0 },
                     e.radius,
-                    Ramp::Custom(blood, palette::scale(blood, 0.25)),
-                    0.6,
-                    false,
+                    e.kind,
+                    blood,
                 );
-                if big {
-                    self.shake = self
-                        .shake
-                        .max(if e.kind == EnemyKind::Boss { 16.0 } else { 6.0 });
+                if e.elite {
+                    vfx::emit_elite_death_accent(&mut self.particles, &mut self.rng, e.pos);
+                }
+                if e.kind == EnemyKind::Boss {
+                    self.shake = self.shake.max(16.0);
+                    self.sfx.push(Sfx::BossDeath);
+                } else if big {
+                    self.shake = self.shake.max(6.0);
                     self.sfx.push(Sfx::Explosion);
                 } else {
                     self.sfx.push(Sfx::Kill);
@@ -887,6 +946,8 @@ impl World {
         let magnet = self.player.loadout.stats.magnet;
         let mut gained = 0u32;
         let collect_r = PLAYER_RADIUS + 3.0;
+        let particles = &mut self.particles;
+        let rng = &mut self.rng;
         self.gems.retain_mut(|g| {
             let to = ppos - g.pos;
             let dist = to.len();
@@ -898,6 +959,7 @@ impl World {
                 let speed = 90.0 + closeness * 150.0;
                 let desired = to.normalized() * speed;
                 g.vel += (desired - g.vel) * (12.0 * dt).min(1.0);
+                vfx::emit_gem_trail(particles, rng, g.pos, g.color, dt);
             }
             g.pos += g.vel * dt;
             // Collect on the post-move distance, so a gem that just arrived
@@ -911,11 +973,11 @@ impl World {
         });
         if gained > 0 {
             let p = self.player.pos;
-            self.particles
-                .burst(&mut self.rng, p, 4, 30.0, 1.0, Ramp::Gem, 0.25, true);
+            vfx::emit_gem_collect(&mut self.particles, &mut self.rng, p, gained);
             self.sfx.push(Sfx::Gem);
             let ups = self.player.add_xp(gained);
             if ups > 0 {
+                vfx::emit_level_up(&mut self.particles, &mut self.rng, p);
                 self.sfx.push(Sfx::LevelUp);
             }
             self.pending_levelups += ups;
@@ -929,26 +991,35 @@ impl World {
         let mut nuked = false;
         let mut collected = std::mem::take(&mut self.pickup_scratch);
         collected.clear();
+        let particles = &mut self.particles;
+        let rng = &mut self.rng;
         self.pickups.retain_mut(|p| {
             p.bob += dt * 4.0;
             if p.pos.dist(ppos) < PLAYER_RADIUS + 5.0 {
                 collected.push(p.kind);
                 false
             } else {
+                vfx::emit_pickup_ambient(particles, rng, p.pos, p.kind, dt);
                 true
             }
         });
         for &k in &collected {
-            self.sfx.push(Sfx::Pickup);
+            self.last_pickups.push(k);
             match k {
                 PickupKind::Heal => {
                     let h = self.player.max_hp() * 0.35;
                     self.player.heal(h);
+                    let p = self.player.pos;
+                    vfx::emit_pickup_heal(&mut self.particles, &mut self.rng, p);
+                    self.sfx.push(Sfx::Heal);
                 }
                 PickupKind::Magnet => {
                     for g in self.gems.iter_mut() {
                         g.magnetized = true;
                     }
+                    let p = self.player.pos;
+                    vfx::emit_pickup_magnet(&mut self.particles, &mut self.rng, p);
+                    self.sfx.push(Sfx::Magnet);
                 }
                 PickupKind::Nuke => {
                     nuked = true;
@@ -958,12 +1029,19 @@ impl World {
                             e.hp = -1.0;
                         } else {
                             e.hurt(200.0);
+                            self.damage_numbers.record(
+                                e.id,
+                                e.pos,
+                                e.radius,
+                                200.0,
+                                !e.alive(),
+                                DamageSource::Nuke,
+                            );
                         }
                     }
                     let p = self.player.pos;
-                    self.particles
-                        .burst(&mut self.rng, p, 80, 140.0, 2.0, Ramp::Fire, 0.7, true);
-                    self.sfx.push(Sfx::Explosion);
+                    vfx::emit_nuke(&mut self.particles, &mut self.rng, p);
+                    self.sfx.push(Sfx::Nuke);
                 }
             }
         }
@@ -1001,6 +1079,9 @@ impl World {
 
         // Floor and arena border.
         art_floor::draw_floor(pb, &self.level, cam, self.elapsed);
+
+        // Floor stains (ichor splatters & explosion scorches) beneath props/entities.
+        self.particles.draw_stains(pb, cam);
 
         // Props (themed obstacles): skip any rect that cannot touch the view.
         for p in &self.level.props {
@@ -1092,8 +1173,11 @@ impl World {
         // Player rat.
         self.draw_player(pb, cam);
 
-        // Particles on top.
+        // Particles and shockwaves on top.
         self.particles.draw(pb, cam);
+
+        // Floating enemy damage numbers on top of everything in the playfield.
+        self.damage_numbers.draw(pb, cam);
     }
 
     fn draw_player(&self, pb: &mut PixelBuffer, cam: Vec2) {
@@ -1871,5 +1955,312 @@ mod tests {
             w.pools[0].pos
         );
         assert!(w.pools[0].pos.x > ppos.x + 10.0, "pool landed short");
+    }
+
+    // ---- Combat feedback & worker-request tests ----------------------------
+
+    #[test]
+    fn world_accessors_report_boss_enemies_and_pickups() {
+        let mut w = World::new(Theme::Sewer, 101);
+        w.enemies.clear();
+        assert_eq!(w.enemy_count(), 0);
+        assert_eq!(w.boss_hp(), None);
+        assert_eq!(w.boss_offset(), None);
+        assert!(w.last_pickups().is_empty());
+
+        let mut rng = StdRng::seed_from_u64(11);
+        let bpos = w.player.pos + Vec2::new(40.0, -15.0);
+        let mut boss = Enemy::spawn(EnemyKind::Boss, bpos, 1.0, &mut rng);
+        boss.hp = 900.0;
+        w.enemies.push(boss);
+        assert_eq!(w.enemy_count(), 1);
+        let (hp, max_hp) = w.boss_hp().expect("living boss should report hp");
+        assert!((hp - 900.0).abs() < 1e-3);
+        assert!((max_hp - 1400.0).abs() < 1e-3);
+        let ofs = w.boss_offset().expect("living boss should report offset");
+        assert!((ofs.x - 40.0).abs() < 1e-3 && (ofs.y + 15.0).abs() < 1e-3);
+
+        w.pickups.push(Pickup {
+            pos: w.player.pos,
+            kind: PickupKind::Heal,
+            bob: 0.0,
+        });
+        w.update(1.0 / 60.0, Vec2::ZERO, false);
+        assert_eq!(w.last_pickups(), &[PickupKind::Heal]);
+        assert!(w.sfx.contains(&Sfx::Heal));
+        w.update(1.0 / 60.0, Vec2::ZERO, false);
+        assert!(w.last_pickups().is_empty());
+    }
+
+    #[test]
+    fn enemy_hits_spawn_damage_numbers_and_deaths_stain_floor() {
+        let mut w = World::new(Theme::Kitchen, 109);
+        w.enemies.clear();
+        w.bullets.clear();
+        let mut rng = StdRng::seed_from_u64(12);
+        let epos = w.player.pos + Vec2::new(16.0, 0.0);
+        let mut e = Enemy::spawn(EnemyKind::Brute, epos, 1.0, &mut rng);
+        e.id = 77;
+        w.enemies.push(e);
+
+        let mut b = Bullet::new(
+            epos - Vec2::new(2.0, 0.0),
+            Vec2::new(120.0, 0.0),
+            12.0,
+            Faction::Player,
+            WeaponKind::Gnaw.color(),
+        );
+        b.weapon = Some(WeaponKind::Gnaw);
+        w.bullets.push(b);
+
+        let mut grid = SpatialGrid::new(w.level.arena, GRID_CELL);
+        grid.fill(w.enemies.iter().map(|e| e.pos));
+        w.resolve_player_bullets(&grid, 6.5);
+        assert_eq!(w.damage_numbers.len(), 1);
+        assert_eq!(w.damage_numbers.items[0].display_value(), 12);
+
+        // Killing the brute leaves a floor stain and shockwave.
+        w.enemies[0].hp = -1.0;
+        w.reap_enemies();
+        assert!(!w.particles.stains.is_empty(), "death should stain the floor");
+        assert!(
+            !w.particles.shockwaves.is_empty(),
+            "brute death should emit a shockwave"
+        );
+    }
+
+    #[test]
+    fn weapons_emit_specialized_sfx() {
+        let mut w = World::new(Theme::Lab, 113);
+        let mut rng = StdRng::seed_from_u64(14);
+        w.enemies.push(Enemy::spawn(
+            EnemyKind::Skitterer,
+            w.player.pos + Vec2::new(20.0, 0.0),
+            1.0,
+            &mut rng,
+        ));
+        let cases = [
+            (WeaponKind::Gnaw, Sfx::Shoot),
+            (WeaponKind::CheeseSpray, Sfx::ShootSpray),
+            (WeaponKind::SqueakNova, Sfx::ShootNova),
+            (WeaponKind::SporeOrbit, Sfx::ShootOrbit),
+            (WeaponKind::TailWhip, Sfx::ShootWhip),
+            (WeaponKind::AcidSpit, Sfx::ShootAcid),
+        ];
+        let ppos = w.player.pos;
+        let face = w.player.face;
+        for (kind, expected) in cases {
+            w.sfx.clear();
+            assert!(w.fire_one(kind, 5.0, 1.0, 3, ppos, face));
+            assert!(
+                w.sfx.contains(&expected),
+                "{kind:?} did not emit {expected:?} (got {:?})",
+                w.sfx
+            );
+        }
+    }
+
+    /// Visual showcase dumper for combat feedback iteration:
+    /// `RATRUN_DUMP=vfx_sheet|vfx_combat|vfx_nuke|vfx_kitchen|vfx_lab cargo test dump_vfx_showcase`
+    #[test]
+    fn dump_vfx_showcase() {
+        let mode = match std::env::var("RATRUN_DUMP") {
+            Ok(m) if m.starts_with("vfx_") => m,
+            _ => return,
+        };
+        let save_ppm = |pb: &PixelBuffer, path: &str| {
+            let mut out = format!("P6\n{} {}\n255\n", pb.w, pb.h).into_bytes();
+            for y in 0..pb.h {
+                for x in 0..pb.w {
+                    let c = pb.pixel_at(x, y);
+                    out.push(c.0);
+                    out.push(c.1);
+                    out.push(c.2);
+                }
+            }
+            std::fs::write(path, out).unwrap();
+        };
+
+        if mode == "vfx_sheet" {
+            let mut w = World::new(Theme::Sewer, 7);
+            w.level.walls.clear();
+            w.level.props.clear();
+            let c = w.level.arena * 0.5;
+            // Camera centers on `w.player.pos`, so place the dashing rat at `c`
+            // and arrange all 3 showcase rows symmetrically inside 220x120.
+            w.player.pos = c;
+            w.player.face = Vec2::new(1.0, -0.1).normalized();
+            w.player.dash_active = 0.12;
+            let mut rng = StdRng::seed_from_u64(42);
+
+            // Row 1 (top, y = c.y - 34): Enemies + damage numbers (normal, kill, medium, acid, big kill, boss nuke).
+            let samples: &[(EnemyKind, f32, bool, DamageSource)] = &[
+                (EnemyKind::Skitterer, 5.0, false, DamageSource::Normal),
+                (EnemyKind::Bat, 7.0, true, DamageSource::Normal),
+                (EnemyKind::Cat, 14.0, false, DamageSource::Normal),
+                (EnemyKind::Spitter, 18.0, false, DamageSource::Acid),
+                (EnemyKind::Brute, 34.0, true, DamageSource::TailWhip),
+                (EnemyKind::Boss, 200.0, false, DamageSource::Nuke),
+            ];
+            for (i, &(kind, dmg, kill, src)) in samples.iter().enumerate() {
+                let p = Vec2::new(c.x - 86.0 + i as f32 * 32.0, c.y - 30.0);
+                let mut e = Enemy::spawn(kind, p, 1.0, &mut rng);
+                e.id = (i + 1) as u32;
+                e.facing = Vec2::new(0.2, 1.0).normalized();
+                if i == 0 || i == 4 {
+                    e.flash = 0.1;
+                }
+                w.damage_numbers.record(e.id, e.pos, e.radius, dmg, kill, src);
+                w.enemies.push(e);
+            }
+
+            // Row 2 (middle, y = c.y): Left/right weapon hit sparks + center dashing rat + right acid splash.
+            let weapon_xs = [-88.0, -64.0, -40.0, 32.0, 56.0, 82.0];
+            for (i, &wk) in WeaponKind::all().iter().enumerate() {
+                let p = Vec2::new(c.x + weapon_xs[i], c.y + 2.0);
+                vfx::emit_weapon_hit(
+                    &mut w.particles,
+                    &mut rng,
+                    p,
+                    Vec2::new(100.0, 0.0),
+                    Some(wk),
+                    EnemyKind::Cat,
+                    i % 2 == 1,
+                );
+            }
+            vfx::emit_dash_start(&mut w.particles, &mut rng, c - Vec2::new(5.0, 0.0), w.player.face);
+            for k in 0..5 {
+                vfx::emit_dash_trail(
+                    &mut w.particles,
+                    &mut rng,
+                    c - Vec2::new(k as f32 * 3.2, 0.0),
+                    w.player.face * 130.0,
+                    1.0 / 60.0,
+                );
+            }
+
+            // Row 3 (bottom, y = c.y + 34): Acid splash, level-up burst, brute death + stain, heal & magnet.
+            vfx::emit_acid_splash(&mut w.particles, &mut rng, c + Vec2::new(-78.0, 34.0), 12.0);
+            vfx::emit_level_up(&mut w.particles, &mut rng, c + Vec2::new(-28.0, 34.0));
+            vfx::emit_enemy_death(
+                &mut w.particles,
+                &mut rng,
+                c + Vec2::new(26.0, 34.0),
+                6.5,
+                EnemyKind::Brute,
+                w.level.palette.blood,
+            );
+            vfx::emit_pickup_heal(&mut w.particles, &mut rng, c + Vec2::new(78.0, 34.0));
+
+            // Advance 3 frames so shockwaves, streaks, and numbers are crisp mid-pop.
+            for _ in 0..3 {
+                w.particles.update(1.0 / 60.0);
+                w.damage_numbers.update(1.0 / 60.0);
+            }
+            let mut pb = PixelBuffer::new(220, 120);
+            w.draw(&mut pb);
+            save_ppm(&pb, "/tmp/ratrun_vfx.ppm");
+            return;
+        }
+
+        if mode == "vfx_boss_death" {
+            let mut w = World::new(Theme::Lab, 99);
+            w.level.walls.clear();
+            w.level.props.clear();
+            let c = w.level.arena * 0.5;
+            w.player.pos = c + Vec2::new(-44.0, 12.0);
+            w.player.face = Vec2::new(1.0, -0.2).normalized();
+            let mut rng = StdRng::seed_from_u64(77);
+            // Boss death centerpiece on right + Magnet pickup & Gem sparkles on left + Player hurt.
+            let bpos = c + Vec2::new(14.0, -6.0);
+            vfx::emit_enemy_death(
+                &mut w.particles,
+                &mut rng,
+                bpos,
+                14.0,
+                EnemyKind::Boss,
+                w.level.palette.blood,
+            );
+            w.damage_numbers.record(500, bpos, 14.0, 200.0, true, DamageSource::Nuke);
+            vfx::emit_pickup_magnet(&mut w.particles, &mut rng, w.player.pos + Vec2::new(-32.0, -24.0));
+            vfx::emit_gem_collect(&mut w.particles, &mut rng, w.player.pos + Vec2::new(-10.0, -24.0), 25);
+            vfx::emit_player_hurt(&mut w.particles, &mut rng, w.player.pos);
+            // Enemy death gallery along the bottom: Skitterer, Bat, Cat, Spitter, Elite Brute.
+            let kinds = [
+                (EnemyKind::Skitterer, false),
+                (EnemyKind::Bat, false),
+                (EnemyKind::Cat, false),
+                (EnemyKind::Spitter, false),
+                (EnemyKind::Brute, true),
+            ];
+            for (i, &(k, elite)) in kinds.iter().enumerate() {
+                let p = w.player.pos + Vec2::new(-64.0 + i as f32 * 34.0, 34.0);
+                vfx::emit_enemy_death(
+                    &mut w.particles,
+                    &mut rng,
+                    p,
+                    k.radius(),
+                    k,
+                    w.level.palette.blood,
+                );
+                if elite {
+                    vfx::emit_elite_death_accent(&mut w.particles, &mut rng, p);
+                }
+            }
+            for _ in 0..6 {
+                w.particles.update(1.0 / 60.0);
+                w.damage_numbers.update(1.0 / 60.0);
+            }
+            let mut pb = PixelBuffer::new(220, 120);
+            w.draw(&mut pb);
+            save_ppm(&pb, "/tmp/ratrun_vfx.ppm");
+            return;
+        }
+
+        let theme = match mode.as_str() {
+            "vfx_kitchen" => Theme::Kitchen,
+            "vfx_lab" => Theme::Lab,
+            _ => Theme::Sewer,
+        };
+        let mut w = World::new(theme, 2025);
+        // Equip a rich mid-game build so every weapon + pool + orbit + whip is active.
+        for wk in [
+            WeaponKind::CheeseSpray,
+            WeaponKind::SqueakNova,
+            WeaponKind::SporeOrbit,
+            WeaponKind::TailWhip,
+            WeaponKind::AcidSpit,
+        ] {
+            let _ = w
+                .player
+                .loadout
+                .apply(&crate::game::loadout::Upgrade::NewWeapon(wk));
+        }
+        w.elapsed = 125.0; // brutes + spitters + dense horde active
+        let dt = 1.0 / 60.0;
+        for tick in 0..420u32 {
+            let dir = Vec2::from_angle(tick as f32 * 0.035);
+            let dash = tick % 110 == 40;
+            w.update(dt, dir, dash);
+            w.player.hp = w.player.max_hp();
+            apply_pending(&mut w);
+        }
+        if mode == "vfx_nuke" {
+            let bpos = w.player.pos + Vec2::new(36.0, -14.0);
+            let mut boss = Enemy::spawn(EnemyKind::Boss, bpos, 1.0, &mut w.rng);
+            boss.id = 9999;
+            w.enemies.push(boss);
+            w.pickups.push(Pickup {
+                pos: w.player.pos,
+                kind: PickupKind::Nuke,
+                bob: 0.0,
+            });
+            for _ in 0..7 {
+                w.update(dt, Vec2::new(1.0, 0.0), false);
+            }
+        }
+        let mut pb = PixelBuffer::new(200, 110);
+        w.draw(&mut pb);
+        save_ppm(&pb, "/tmp/ratrun_vfx.ppm");
     }
 }
