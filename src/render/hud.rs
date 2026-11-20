@@ -8,16 +8,48 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::Frame;
 
 use crate::audio::Sfx;
+use crate::game::campaign;
 use crate::game::director;
 use crate::game::gem::PickupKind;
 use crate::game::level::Theme;
 use crate::game::weapon::WeaponKind;
 use crate::game::world::World;
 use crate::math::Vec2;
+use crate::render::campaign::{
+    campaign_pips_width, draw_campaign_pips, CampaignLevel, CampaignProgressView,
+};
 use crate::render::palette::{self, Rgb, COAT, EDGE, MUTED, PLATE, TAIL, TRACK};
 
 /// Maximum simultaneous transient callouts held on the HUD.
 pub const MAX_CALLOUTS: usize = 3;
+
+/// How close to `director::BOSS_TIME` the build-up starts reading as urgent.
+///
+/// The clock counts *down to the boss*, not to the end of the run (the level
+/// now lasts until the boss or the rat dies), so this is the last stretch of
+/// the build-up and the moment the top rail switches to the danger styling.
+pub const BOSS_URGENT_SECS: f32 = 30.0;
+
+/// Mazes per level the HUD's per-maze latches cover (a map carries at most
+/// one; the extra bit costs nothing and keeps an old two-maze map working).
+const MAX_MAZE_FEED: usize = 4;
+
+/// Escalation stage of the boss fight itself: the build-up is over and the
+/// level lasts until the boss or the rat dies.
+const BOSS_STAGE: u8 = 7;
+
+/// Is the elite warning badge due?
+///
+/// The director's elite gate is on the *curve* clock, which each campaign
+/// level shifts by `director::LEVEL_CLOCK_OFFSET` (the first elite arrives at
+/// 60 s on the Sewer, 40 s on the Kitchen and 15 s on the Lab). Reading the
+/// wall clock here announced the Sewer's schedule on every level.
+pub fn elite_badge_due(world: &World) -> bool {
+    !world.director.boss_spawned
+        && director::curve_clock(world.level_index(), world.elapsed)
+            >= director::ELITE_START - 5.0
+        && world.director.elite_timer <= 4.0
+}
 
 /// Danger / critical alert red (cohesive with rat tail pink, higher urgency).
 pub const DANGER: Color = Color::Rgb(248, 92, 102);
@@ -28,6 +60,8 @@ pub const BOSS_HOT: Color = Color::Rgb(255, 118, 88);
 pub const HEAL_MINT: Color = Color::Rgb(126, 224, 152);
 pub const MAGNET_ICE: Color = Color::Rgb(128, 206, 250);
 pub const TRAIL_GOLD: Color = Color::Rgb(248, 214, 152);
+/// Cold steel for the one-way gate slamming shut behind the rat.
+pub const GATE_STEEL: Color = Color::Rgb(176, 204, 220);
 
 /// Distinct single-cell geometric glyph for each weapon kind.
 pub fn weapon_glyph(kind: WeaponKind) -> char {
@@ -41,24 +75,42 @@ pub fn weapon_glyph(kind: WeaponKind) -> char {
     }
 }
 
-/// Sector-specific codename for the end-of-run apex boss.
+/// Codename of the level's themed boss, plus the overlay's classification tag.
+///
+/// The names are the campaign screens' own ([`CampaignLevel::boss_name`] in
+/// `render/campaign.rs`), so the boss bar, the pre-boss warning and the
+/// level-complete stamp all call the same fight the same thing: the Sewer's
+/// **Apex Jaguar**, the Kitchen's **The Sweeper** and the Lab's
+/// **Turf-Reaper Mk.IV**. The second element is the arrival banner's flavour
+/// tag and never names a boss.
 pub fn boss_codename(theme: Theme) -> (&'static str, &'static str) {
-    match theme {
-        Theme::Sewer => ("SEWER BROODMOTHER", "CLASS-V BIOWEAPON"),
-        Theme::Kitchen => ("THE HEAD BUTCHER", "CLASS-V EXTERMINATOR"),
-        Theme::Lab => ("PRIME CHIMERA", "CLASS-V CONTAINMENT UNIT"),
-    }
+    let level = match theme {
+        Theme::Sewer => CampaignLevel::Sewer,
+        Theme::Kitchen => CampaignLevel::Kitchen,
+        Theme::Lab => CampaignLevel::Lab,
+    };
+    let class_tag = match level {
+        CampaignLevel::Sewer => "CLASS-V APEX PREDATOR",
+        CampaignLevel::Kitchen => "CLASS-V CUSTODIAN",
+        CampaignLevel::Lab => "MK.IV AUTONOMOUS UNIT",
+    };
+    (level.boss_name(), class_tag)
 }
 
-/// Difficulty escalation tier (1..=5) derived purely from the director clock.
-pub fn threat_tier(elapsed: f32, boss_alive: bool) -> u8 {
-    if boss_alive || elapsed >= director::BOSS_TIME {
+/// Difficulty escalation tier (1..=5) derived purely from the director's
+/// *curve* clock (see [`crate::game::director::curve_clock`]).
+///
+/// `boss` is the boss phase itself, which is decided by the real run clock
+/// (`World::boss_time_reached` / a living boss), not by the curve: the curve
+/// freezes at `BOSS_TIME` but a later campaign level's curve starts above it.
+pub fn threat_tier(curve: f32, boss: bool) -> u8 {
+    if boss {
         5
-    } else if elapsed >= 120.0 {
+    } else if curve >= 120.0 {
         4
-    } else if elapsed >= director::ELITE_START {
+    } else if curve >= director::ELITE_START {
         3
-    } else if elapsed >= 20.0 {
+    } else if curve >= 20.0 {
         2
     } else {
         1
@@ -75,6 +127,10 @@ pub enum CalloutKind {
     Escalation,
     Milestone,
     BossSlain,
+    /// A maze cache was looted (the heist's free upgrade).
+    MazeCache,
+    /// A maze's one-way gate slammed shut behind the rat.
+    GateSlam,
 }
 
 impl CalloutKind {
@@ -87,6 +143,8 @@ impl CalloutKind {
             CalloutKind::Escalation => WARN_AMBER,
             CalloutKind::Milestone => sector_accent,
             CalloutKind::BossSlain => HEAL_MINT,
+            CalloutKind::MazeCache => TRAIL_GOLD,
+            CalloutKind::GateSlam => GATE_STEEL,
         }
     }
 }
@@ -198,6 +256,15 @@ pub struct HudState {
     pub callouts: [CalloutSlot; MAX_CALLOUTS],
     /// Telemetry snapshot updated by `App` each tick.
     pub telemetry: HudTelemetry,
+
+    /// Per-maze latches for the object layer's event feed: bit `i` is set once
+    /// maze `i`'s cache has been claimed / its gate slammed, so a callout fires
+    /// exactly once even though the feed only holds one tick.
+    maze_claimed_bits: u32,
+    maze_slammed_bits: u32,
+    /// `(campaign level, level seed)` the maze latches belong to; a new level
+    /// clears the bits (maze indices restart from 0 every level).
+    maze_key: (usize, u64),
 }
 
 impl Default for HudState {
@@ -238,6 +305,9 @@ impl Default for HudState {
             streak_timer: 0.0,
             callouts: Default::default(),
             telemetry: HudTelemetry::default(),
+            maze_claimed_bits: 0,
+            maze_slammed_bits: 0,
+            maze_key: (usize::MAX, u64::MAX),
         }
     }
 }
@@ -270,6 +340,9 @@ impl HudState {
             slot.active = false;
             slot.timer = 0.0;
         }
+        self.maze_claimed_bits = 0;
+        self.maze_slammed_bits = 0;
+        self.maze_key = (usize::MAX, u64::MAX);
         let muted = self.telemetry.muted;
         self.telemetry = HudTelemetry {
             muted,
@@ -318,6 +391,71 @@ impl HudState {
         }
     }
 
+    /// Notify the HUD of the maze object layer's events for this tick.
+    ///
+    /// `GateRuntime::feed` is cleared and refilled every tick, so a claim could
+    /// be lost by any frame the HUD does not observe. Each maze's claim/slam is
+    /// therefore latched by index, and the persistent state (the fog's
+    /// `maze_claimed` flag, the reward view's `Opened` state and the door's
+    /// one-shot `slammed` latch) is OR-ed in every tick: a claim can only ever
+    /// produce one callout, and it can never be missed. Allocation-free.
+    fn notify_maze_feed(&mut self, world: &World) {
+        // A new level restarts the maze indices, so drop the previous level's
+        // latches instead of swallowing the new level's first claim.
+        let key = (world.level_index(), world.level.seed);
+        if key != self.maze_key {
+            self.maze_key = key;
+            self.maze_claimed_bits = 0;
+            self.maze_slammed_bits = 0;
+        }
+
+        let mut claimed = self.maze_claimed_bits;
+        let mut slammed = self.maze_slammed_bits;
+        for event in world.maze_feed() {
+            match *event {
+                crate::game::ecs::systems::gates::MazeEvent::CacheClaimed { index } => {
+                    claimed |= 1u32 << index.min(31);
+                }
+                crate::game::ecs::systems::gates::MazeEvent::GateSlammed { index } => {
+                    slammed |= 1u32 << index.min(31);
+                }
+            }
+        }
+        // Recover an event whose tick the HUD never saw (the frame may be
+        // skipped while the simulation keeps ticking).
+        for maze in world.maze_markers() {
+            if maze.claimed {
+                claimed |= 1u32 << maze.index.min(31);
+            }
+            if world.maze_gate_slammed(maze.index) {
+                slammed |= 1u32 << maze.index.min(31);
+            }
+        }
+
+        let new_claims = claimed & !self.maze_claimed_bits;
+        let new_slams = slammed & !self.maze_slammed_bits;
+        self.maze_claimed_bits = claimed;
+        self.maze_slammed_bits = slammed;
+        for index in 0..MAX_MAZE_FEED {
+            if new_claims & (1u32 << index) != 0 {
+                self.push_callout(
+                    CalloutKind::MazeCache,
+                    "+CACHE",
+                    "ONE FREE UPGRADE",
+                    3.0,
+                );
+            }
+            if new_slams & (1u32 << index) != 0 {
+                self.push_callout(
+                    CalloutKind::GateSlam,
+                    "GATE SLAM",
+                    "PACK SEALED BEHIND YOU",
+                    2.8,
+                );
+            }
+        }
+    }
+
     /// Notify the HUD that the player just equipped an upgrade from the level-up screen.
     pub fn notify_upgrade(&mut self, title: &str) {
         self.level_flash = 0.9;
@@ -340,7 +478,14 @@ impl HudState {
             self.prev_level = world.player.level;
             self.prev_kills = world.kills;
             self.prev_boss_alive = self.telemetry.boss_alive;
-            self.escalation_stage = Self::stage_for_elapsed(world.elapsed);
+            self.escalation_stage = if world.boss_time_reached() {
+                BOSS_STAGE
+            } else {
+                Self::stage_for_curve(director::curve_clock(
+                    world.level_index(),
+                    world.elapsed,
+                ))
+            };
             return;
         }
 
@@ -418,7 +563,11 @@ impl HudState {
             }
         }
 
-        // 6. Kill streak burst & kill milestones.
+        // 6. Maze cache claims and one-way gate slams (latched, see
+        //    `notify_maze_feed`).
+        self.notify_maze_feed(world);
+
+        // 7. Kill streak burst & kill milestones.
         let dk = world.kills.saturating_sub(self.prev_kills);
         if dk > 0 {
             self.streak_kills = self.streak_kills.saturating_add(dk);
@@ -447,8 +596,19 @@ impl HudState {
             };
         }
 
-        // 7. Time-curve escalation callouts (fire once per threshold).
-        let stage = Self::stage_for_elapsed(world.elapsed);
+        // 8. Time-curve escalation callouts (fire once per threshold).
+        //    Thresholds read the director's *curve* clock, so a later campaign
+        //    level (whose curve opens further along) announces its own
+        //    milestones instead of the Sewer's, and the boss hand-off replaces
+        //    the old "final 30 s" extraction callout.
+        let stage = if world.boss_time_reached() {
+            BOSS_STAGE
+        } else {
+            Self::stage_for_curve(director::curve_clock(
+                world.level_index(),
+                world.elapsed,
+            ))
+        };
         if stage > self.escalation_stage {
             self.escalation_stage = stage;
             match stage {
@@ -482,17 +642,17 @@ impl HudState {
                     "HEAVY BRUTES DEPLOYED",
                     2.8,
                 ),
-                6 => self.push_callout(
+                BOSS_STAGE => self.push_callout(
                     CalloutKind::Escalation,
-                    "FINAL 30s",
-                    "HOLD OUT FOR EXTRACTION",
+                    "BOSS FIGHT",
+                    "APEX SPECIMEN ENGAGED",
                     3.0,
                 ),
                 _ => {}
             }
         }
 
-        // 8. Tick & expire active callout slots.
+        // 9. Tick & expire active callout slots.
         for slot in &mut self.callouts {
             if slot.active {
                 slot.timer -= dt;
@@ -511,18 +671,21 @@ impl HudState {
         self.prev_boss_alive = self.telemetry.boss_alive;
     }
 
-    fn stage_for_elapsed(elapsed: f32) -> u8 {
-        if elapsed >= director::RUN_SECONDS - 30.0 {
-            6
-        } else if elapsed >= 120.0 {
+    /// Escalation stage for the director's *curve* clock.
+    ///
+    /// Every director curve function reads `curve_clock` (see
+    /// `director::curve_clock`), so the milestones this stage fires land where
+    /// the spawns actually change even on a level whose curve opens partway in.
+    fn stage_for_curve(curve: f32) -> u8 {
+        if curve >= 120.0 {
             5
-        } else if elapsed >= 75.0 {
+        } else if curve >= 75.0 {
             4
-        } else if elapsed >= director::ELITE_START {
+        } else if curve >= director::ELITE_START {
             3
-        } else if elapsed >= 45.0 {
+        } else if curve >= 45.0 {
             2
-        } else if elapsed >= 20.0 {
+        } else if curve >= 20.0 {
             1
         } else {
             0
@@ -568,16 +731,29 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
     }
 
     let accent = palette::marking(world.level.palette.wall_edge, world.level.palette.accent);
+    // The clock counts down to `director::BOSS_TIME` and stops there: from then
+    // on the level lasts until the boss or the rat dies, so the rail switches
+    // from a countdown to a boss-fight state instead of sitting at 00:00.
+    let boss_phase = world.boss_time_reached();
     let time_left = world.time_left();
-    let urgent = time_left <= 30.0;
+    let urgent = !boss_phase && time_left <= BOSS_URGENT_SECS;
     let boss_alive = state.telemetry.boss_alive;
+    let clock_boss = boss_phase || boss_alive;
     let boss_soon = !world.director.boss_spawned
-        && world.elapsed >= director::BOSS_TIME - crate::render::overlay::BOSS_WARNING_SECS
-        && world.elapsed < director::BOSS_TIME;
+        && !boss_phase
+        && world.elapsed >= director::BOSS_TIME - crate::render::overlay::BOSS_WARNING_SECS;
+    let elite_due = elite_badge_due(world);
     let pulse = 0.5 + 0.5 * (state.clock * 7.5).sin();
 
     // Format numbers into retained buffers (zero per-frame heap allocation).
-    refill(&mut state.time, |b| fmt_time_into(b, time_left));
+    refill(&mut state.time, |b| {
+        if boss_phase {
+            // Time *into* the fight since the boss arrived.
+            fmt_time_into(b, world.elapsed - director::BOSS_TIME);
+        } else {
+            fmt_time_into(b, time_left);
+        }
+    });
     refill(&mut state.level, |b| {
         let _ = write!(b, "{}", world.player.level);
     });
@@ -613,17 +789,22 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
 
     // Build right-aligned status pill text.
     refill(&mut state.right_badge, |b| {
-        if urgent {
-            b.push_str(" FINAL SECONDS ");
+        if boss_phase {
+            if boss_alive {
+                b.push_str(" ◆ APEX ACTIVE ");
+            } else {
+                b.push_str(" ◆ BOSS FIGHT ");
+            }
         } else if boss_alive {
             b.push_str(" ◆ APEX ACTIVE ");
         } else if boss_soon {
+            // The precise countdown outranks the generic urgency pill once the
+            // 25 s warning window opens; `urgent` still styles the rail.
             let rem = (director::BOSS_TIME - world.elapsed).ceil().max(1.0) as u32;
             let _ = write!(b, " ▲ BOSS {:02}s ", rem);
-        } else if !world.director.boss_spawned
-            && world.elapsed >= director::ELITE_START - 5.0
-            && world.director.elite_timer <= 4.0
-        {
+        } else if urgent {
+            b.push_str(" ▲ BOSS INBOUND ");
+        } else if elite_due {
             b.push_str(" ▲ ELITE ");
         } else if state.telemetry.muted {
             b.push_str(" MUTE ");
@@ -657,17 +838,17 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
     let value = Style::default().fg(COAT).add_modifier(Modifier::BOLD);
     let muted = Style::default().fg(MUTED);
 
-    // 1. Clock badge + countdown.
-    let badge_bg = if urgent {
-        palette::to_color(palette::mix((239, 168, 185), (248, 92, 102), pulse))
-    } else if boss_alive {
+    // 1. Clock badge + countdown (or the boss-fight state after the boss time).
+    let badge_bg = if clock_boss {
         palette::to_color(palette::mix((220, 64, 118), (248, 116, 152), pulse))
+    } else if urgent {
+        palette::to_color(palette::mix((239, 168, 185), (248, 92, 102), pulse))
     } else if boss_soon {
         WARN_AMBER
     } else {
         accent
     };
-    let badge_label = if boss_alive {
+    let badge_label = if clock_boss {
         if compact {
             "◆"
         } else {
@@ -691,10 +872,10 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
             .fg(PLATE)
             .add_modifier(Modifier::BOLD),
     );
-    let time_style = if urgent {
-        Style::default().fg(DANGER).add_modifier(Modifier::BOLD)
-    } else if boss_alive {
+    let time_style = if clock_boss {
         Style::default().fg(TAIL).add_modifier(Modifier::BOLD)
+    } else if urgent {
+        Style::default().fg(DANGER).add_modifier(Modifier::BOLD)
     } else {
         value
     };
@@ -703,7 +884,10 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
 
     // 2. Threat escalation micro-pips on wider screens (`▪▪▪▫▫`).
     if show_threat {
-        let tier = threat_tier(world.elapsed, boss_alive);
+        let tier = threat_tier(
+            director::curve_clock(world.level_index(), world.elapsed),
+            boss_alive || boss_phase,
+        );
         put(" ", Style::default().bg(PLATE));
         for t in 1..=5u8 {
             let pip_col = if t <= tier {
@@ -800,10 +984,38 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
         }
     }
 
-    // 5. Right-aligned contextual status pill (only if it won't collide with weapons).
+    // 5. Campaign progress pips, right-aligned at the rail's end (the art's
+    //    "HUD / Pause" placement). The full `LV 2/3  ● ◆ ○  Kitchen` legend
+    //    needs 24 columns, the compact `2/3 ●◆○` 9; both are only stamped when
+    //    the status pill still fits to their left. The status pill then ends at
+    //    `pill_right` instead of the row's edge.
     let badge_w = state.right_badge.chars().count() as u16;
-    if badge_w > 0 && right.saturating_sub(x) >= badge_w + 2 {
-        let bx = right - badge_w;
+    let spare = right.saturating_sub(x);
+    let pips_w = if spare >= badge_w + campaign_pips_width(false) + 3 {
+        campaign_pips_width(false)
+    } else if spare >= badge_w + campaign_pips_width(true) + 3 {
+        campaign_pips_width(true)
+    } else {
+        0
+    };
+    let pill_right = if pips_w > 0 {
+        let pips_x = right - pips_w;
+        let pips = CampaignProgressView {
+            current: CampaignLevel::from_index(world.level_index()),
+            cleared_count: world.level_index().min(campaign::LEVEL_COUNT) as u8,
+            bg: None,
+        };
+        draw_campaign_pips(frame, Rect::new(pips_x, area.y, pips_w, 1), &pips);
+        pips_x.saturating_sub(1)
+    } else {
+        right
+    };
+
+    // 6. Right-aligned contextual status pill (only if it won't collide with
+    //    the weapons or the campaign pips).
+    let buf = frame.buffer_mut();
+    if badge_w > 0 && pill_right.saturating_sub(x) >= badge_w + 2 {
+        let bx = pill_right - badge_w;
         // If audio is muted while a higher-priority status badge owns the right slot,
         // tuck a compact `MUTE` chip immediately to its left when space permits.
         if state.telemetry.muted
@@ -827,7 +1039,7 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
                     pulse,
                 )))
                 .add_modifier(Modifier::BOLD)
-        } else if boss_alive {
+        } else if clock_boss {
             Style::default()
                 .fg(BOSS_ROSE)
                 .bg(PLATE)
@@ -837,10 +1049,7 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
                 .fg(PLATE)
                 .bg(WARN_AMBER)
                 .add_modifier(Modifier::BOLD)
-        } else if !world.director.boss_spawned
-            && world.elapsed >= director::ELITE_START - 5.0
-            && world.director.elite_timer <= 4.0
-        {
+        } else if elite_due {
             Style::default()
                 .fg(WARN_AMBER)
                 .bg(PLATE)
@@ -1135,7 +1344,7 @@ fn meter(frame: &mut Frame, r: Rect, label: &str, ratio: f32, color: Color) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::level::Theme;
+    use crate::game::level::{Level, Theme};
     use crate::game::weapon::Weapon;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -1162,7 +1371,7 @@ mod tests {
 
     fn known_world() -> World {
         let mut w = World::new(Theme::Sewer, 7);
-        w.elapsed = 65.0; // 300s run → 235s left
+        w.elapsed = 65.0; // boss at 255 s → 190 s left in the build-up
         w.player.level = 3;
         w.kills = 42;
         w.score = 1234;
@@ -1170,6 +1379,16 @@ mod tests {
         w.player.hp = 100.0;
         w.player.dash_cd = 0.0;
         w
+    }
+
+    /// Does any cell use the danger red (the urgent clock text)?
+    fn has_danger_text(terminal: &Terminal<TestBackend>) -> bool {
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .any(|c| c.fg == DANGER)
     }
 
     fn row_text(terminal: &Terminal<TestBackend>) -> String {
@@ -1195,11 +1414,64 @@ mod tests {
             .unwrap();
 
         let text = row_text(&terminal);
-        assert!(text.contains("03:55"), "missing countdown in {text:?}");
+        assert!(text.contains("03:10"), "missing countdown in {text:?}");
         assert!(text.contains("Lv3"), "missing level in {text:?}");
         assert!(text.contains("KO 42"), "missing kills in {text:?}");
         assert!(text.contains("Score 1234"), "missing score in {text:?}");
         assert!(text.contains("▸Gnaw2"), "missing icon + weapon in {text:?}");
+    }
+
+    /// The campaign pips are stamped into the top rail's right end (the art's
+    /// "HUD / Pause" placement), so which sector of the campaign the run is in
+    /// is visible without opening the pause plate. They only appear where the
+    /// row can afford them together with the status pill.
+    #[test]
+    fn the_top_rail_stamps_the_campaign_pips_where_there_is_room() {
+        // Level 2 of 3: the Sewer is cleared (filled pip), the Kitchen is
+        // active (diamond) and the Lab is still ahead (hollow pip).
+        let w = World::new_level(
+            1,
+            7,
+            crate::game::loadout::Loadout::new(WeaponKind::Gnaw),
+        );
+        let mut state = HudState::default();
+        let mut terminal = Terminal::new(TestBackend::new(120, 1)).unwrap();
+        terminal
+            .draw(|f| draw_top(f, f.area(), &w, &mut state))
+            .unwrap();
+        let text = row_text(&terminal);
+        assert!(
+            text.contains("LV 2/3"),
+            "no campaign pips on the rail: {text:?}"
+        );
+        assert!(
+            text.contains('●'),
+            "the cleared Sewer pip is missing: {text:?}"
+        );
+        assert!(
+            text.contains('◆'),
+            "the active Kitchen pip is missing: {text:?}"
+        );
+        assert!(
+            text.trim_end().ends_with("Kitchen"),
+            "the pips are not right-aligned: {text:?}"
+        );
+
+        // A 57-column rail cannot afford them: the clock keeps its slot and the
+        // pips drop out rather than overprinting the weapons or the pill.
+        let mut narrow = Terminal::new(TestBackend::new(57, 1)).unwrap();
+        narrow
+            .draw(|f| draw_top(f, f.area(), &w, &mut state))
+            .unwrap();
+        let text = row_text(&narrow);
+        assert!(
+            !text.contains("LV 2/3"),
+            "the pips overprinted a 57-column rail: {text:?}"
+        );
+        assert!(
+            text.contains("04:15"),
+            "the clock lost its slot: {text:?}"
+        );
     }
 
     #[test]
@@ -1336,6 +1608,226 @@ mod tests {
         assert!(
             state.callouts.iter().any(|c| c.active && c.tag == "+MEDKIT"),
             "heal pickup should emit MEDKIT callout"
+        );
+    }
+
+    /// A map with a maze: the first Sewer seed that has one.
+    fn maze_world() -> World {
+        for candidate in 0..64u64 {
+            if !Level::generate(Theme::Sewer, candidate).mazes.is_empty() {
+                return World::new(Theme::Sewer, candidate);
+            }
+        }
+        panic!("no Sewer map in the first 64 seeds has a maze");
+    }
+
+    fn push_maze_event(w: &mut World, event: crate::game::ecs::systems::gates::MazeEvent) {
+        w.ecs
+            .resource_mut::<crate::game::ecs::systems::gates::GateRuntime>()
+            .feed
+            .push(event);
+    }
+
+    fn clear_maze_feed(w: &mut World) {
+        w.ecs
+            .resource_mut::<crate::game::ecs::systems::gates::GateRuntime>()
+            .feed
+            .clear();
+    }
+
+    /// The clock counts down to the *boss time*, and the last 30 s of the
+    /// build-up is the urgency window (it used to be the last 30 s of a 300 s
+    /// survival clock that no longer decides anything).
+    #[test]
+    fn the_countdown_targets_the_boss_time_and_goes_urgent_at_thirty_seconds() {
+        // The intended contract: 255 s of build-up, the last 30 s urgent, then
+        // the boss-fight state (a count-up) forever after.
+        assert_eq!(director::BOSS_TIME, 255.0, "the boss time moved");
+        assert_eq!(BOSS_URGENT_SECS, 30.0);
+        let mut w = known_world();
+        let mut state = HudState::default();
+        let mut terminal = Terminal::new(TestBackend::new(100, 1)).unwrap();
+
+        w.elapsed = director::BOSS_TIME - BOSS_URGENT_SECS - 1.0;
+        terminal
+            .draw(|f| draw_top(f, f.area(), &w, &mut state))
+            .unwrap();
+        let calm = row_text(&terminal);
+        assert!(calm.contains("00:31"), "countdown to 255 s: {calm:?}");
+        assert!(!calm.contains("BOSS INBOUND"), "urgent too early: {calm:?}");
+        assert!(!has_danger_text(&terminal), "danger styling too early");
+
+        // 28 s out: urgent, but before the precise 25 s warning window.
+        w.elapsed = director::BOSS_TIME - 28.0;
+        terminal
+            .draw(|f| draw_top(f, f.area(), &w, &mut state))
+            .unwrap();
+        let urgent = row_text(&terminal);
+        assert!(
+            urgent.contains("BOSS INBOUND"),
+            "the last 30 s must read as urgent: {urgent:?}"
+        );
+        assert!(has_danger_text(&terminal), "the clock is not in danger red");
+
+        // Inside the 25 s warning window the precise countdown takes the pill
+        // (and the rail stays urgent).
+        w.elapsed = director::BOSS_TIME - 10.0;
+        terminal
+            .draw(|f| draw_top(f, f.area(), &w, &mut state))
+            .unwrap();
+        let warning = row_text(&terminal);
+        assert!(
+            warning.contains("BOSS 10s"),
+            "no precise pre-boss countdown: {warning:?}"
+        );
+        assert!(has_danger_text(&terminal), "the clock left danger red");
+    }
+
+    /// At the boss time the rail stops counting down (it would sit at 00:00 for
+    /// the whole fight) and shows the fight instead.
+    #[test]
+    fn the_boss_phase_replaces_the_zero_clock_with_the_fight_state() {
+        let mut w = known_world();
+        w.elapsed = director::BOSS_TIME + 42.0;
+        let mut state = HudState::default();
+        let mut terminal = Terminal::new(TestBackend::new(100, 1)).unwrap();
+        terminal
+            .draw(|f| draw_top(f, f.area(), &w, &mut state))
+            .unwrap();
+        let text = row_text(&terminal);
+        assert!(
+            text.contains("BOSS FIGHT"),
+            "no boss-fight badge after the boss time: {text:?}"
+        );
+        assert!(
+            text.contains("00:42"),
+            "the rail should count time into the fight: {text:?}"
+        );
+        assert!(
+            !text.contains("00:00"),
+            "a dead countdown is still drawn: {text:?}"
+        );
+
+        // The boss itself being alive takes over the label.
+        state.telemetry.boss_alive = true;
+        terminal
+            .draw(|f| draw_top(f, f.area(), &w, &mut state))
+            .unwrap();
+        let live = row_text(&terminal);
+        assert!(live.contains("APEX ACTIVE"), "no apex label: {live:?}");
+    }
+
+    /// The threat pips read the same curve the director spawns off, so a
+    /// campaign level does not start the player at tier 1 of the Sewer's curve.
+    #[test]
+    fn the_threat_tier_reads_the_levels_curve_clock() {
+        // Sewer: t = 0 is the curve's start.
+        assert_eq!(threat_tier(director::curve_clock(0, 0.0), false), 1);
+        assert_eq!(threat_tier(director::curve_clock(0, 30.0), false), 2);
+        assert_eq!(threat_tier(director::curve_clock(0, 70.0), false), 3);
+        assert_eq!(threat_tier(director::curve_clock(0, 130.0), false), 4);
+        // Kitchen opens at level 0's 20 s mark, Lab at its 45 s mark.
+        assert_eq!(threat_tier(director::curve_clock(1, 0.0), false), 2);
+        assert_eq!(threat_tier(director::curve_clock(2, 0.0), false), 2);
+        assert_eq!(threat_tier(director::curve_clock(2, 20.0), false), 3);
+        // The boss phase is the top tier whatever the curve says.
+        assert_eq!(threat_tier(director::curve_clock(0, 0.0), true), 5);
+    }
+
+    /// The elite badge reads the director's curve clock, which each campaign
+    /// level shifts: the first elite is due at 60 s on the Sewer, 40 s on the
+    /// Kitchen and 15 s on the Lab.
+    #[test]
+    fn the_elite_badge_follows_the_levels_curve_clock() {
+        // (campaign level, elapsed just before the 5 s elite warning opens)
+        let cases = [(0usize, 52.0f32), (1, 32.0), (2, 7.0)];
+        for (level_index, before) in cases {
+            let mut w = World::new_level(
+                level_index,
+                7,
+                crate::game::loadout::Loadout::new(WeaponKind::Gnaw),
+            );
+            // Well before the gate (curve < 55): no badge.
+            w.elapsed = before;
+            assert!(
+                !elite_badge_due(&w),
+                "level {level_index} announced an elite at {} s",
+                w.elapsed
+            );
+            // Inside the 5 s warning window.
+            w.elapsed = before + 3.0;
+            assert!(
+                elite_badge_due(&w),
+                "level {level_index} missed its elite at {} s",
+                w.elapsed
+            );
+            // A badge that is due must reach the rail.
+            let mut state = HudState::default();
+            let mut terminal = Terminal::new(TestBackend::new(100, 1)).unwrap();
+            terminal
+                .draw(|f| draw_top(f, f.area(), &w, &mut state))
+                .unwrap();
+            let text = row_text(&terminal);
+            assert!(
+                text.contains("ELITE"),
+                "level {level_index}: no ELITE badge in {text:?}"
+            );
+        }
+    }
+
+    /// A cache claim and a gate slam each get their own callout, exactly once,
+    /// even when the per-tick feed has already moved on.
+    #[test]
+    fn maze_events_produce_one_callout_each_and_never_repeat() {
+        use crate::game::ecs::systems::gates::MazeEvent;
+
+        let mut w = maze_world();
+        let mut state = HudState::default();
+        state.tick(1.0 / 60.0, &w, &[], false);
+
+        // Tick 1: the claim is in the per-tick feed.
+        push_maze_event(&mut w, MazeEvent::CacheClaimed { index: 0 });
+        state.tick(1.0 / 60.0, &w, &[], false);
+        assert!(
+            state.callouts.iter().any(|c| c.active && c.tag == "+CACHE"),
+            "the cache claim produced no callout"
+        );
+
+        // The app skipped a frame: the feed is gone, the claim is not repeated.
+        clear_maze_feed(&mut w);
+        for slot in &mut state.callouts {
+            slot.active = false;
+            slot.timer = 0.0;
+        }
+        state.tick(1.0 / 60.0, &w, &[], false);
+        assert!(
+            !state.callouts.iter().any(|c| c.active && c.tag == "+CACHE"),
+            "the cache callout fired twice"
+        );
+
+        // A slam is its own pill.
+        push_maze_event(&mut w, MazeEvent::GateSlammed { index: 0 });
+        state.tick(1.0 / 60.0, &w, &[], false);
+        assert!(
+            state.callouts.iter().any(|c| c.active && c.tag == "GATE SLAM"),
+            "the gate slam produced no callout"
+        );
+    }
+
+    /// A claim made during a tick the HUD never saw (the reward view is already
+    /// `Opened`) is still reported once the HUD looks again.
+    #[test]
+    fn a_claim_is_latched_from_the_persistent_reward_state() {
+        let mut w = maze_world();
+        let mut state = HudState::default();
+        state.tick(1.0 / 60.0, &w, &[], false);
+
+        // The claim happens with no feed at all (as if the frame were skipped).
+        w.level.objects.rewards[0].state = crate::game::art_traps::MazeRewardState::Opened;
+        state.tick(1.0 / 60.0, &w, &[], false);
+        assert!(
+            state.callouts.iter().any(|c| c.active && c.tag == "+CACHE"),
+            "a latched claim was dropped"
         );
     }
 }

@@ -1,0 +1,203 @@
+# Builds release binaries for macOS, Linux and Windows when a version tag
+# (v*) is pushed, and attaches them to a GitHub Release for that tag.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach binaries to (e.g. v0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Create the release if it does not exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "Rat Run $TAG" --generate-notes
+
+  build:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      # rodio/cpal link ALSA on Linux; the dev headers are a build prerequisite.
+      - name: Install ALSA headers (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      # rust-toolchain.toml pins the compiler; rustup installs it on first use.
+      - name: Install the pinned toolchain and target
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          name="ratrun-$TAG-${{ matrix.name }}"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/ratrun" "$name/"
+          cp README.md "$name/" 2>/dev/null || true
+          tar -czf "$name.tar.gz" "$name"
+          echo "ASSET=$name.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          name="ratrun-$TAG-${{ matrix.name }}"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/ratrun.exe" "$name/"
+          cp README.md "$name/" 2>/dev/null || true
+          7z a "$name.zip" "$name"
+          echo "ASSET=$name.zip" >> "$GITHUB_ENV"
+
+      - name: Upload to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "$ASSET" --clobber
+
+  # macOS: one universal binary (Apple Silicon + Intel), shipped two ways: a
+  # double-clickable "Rat Run.app" that opens the game in a terminal window,
+  # and the bare binary for people who launch it from their own terminal.
+  macos:
+    needs: create-release
+    runs-on: macos-14
+    env:
+      HAVE_CERT: ${{ secrets.MACOS_CERT_P12 != '' }}
+      HAVE_NOTARY: ${{ secrets.APPLE_API_KEY_P8 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Install the pinned toolchain and both targets
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Build both architectures
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+
+      - name: Make the universal binary
+        run: |
+          mkdir -p dist
+          lipo -create -output dist/ratrun \
+            target/aarch64-apple-darwin/release/ratrun \
+            target/x86_64-apple-darwin/release/ratrun
+          lipo -info dist/ratrun
+
+      - name: Assemble Rat Run.app
+        run: |
+          version="${TAG#v}"
+          app="dist/Rat Run.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp dist/ratrun "$app/Contents/Resources/ratrun"
+          cp packaging/macos/launcher.sh "$app/Contents/MacOS/RatRun"
+          chmod +x "$app/Contents/MacOS/RatRun" "$app/Contents/Resources/ratrun"
+          sed "s/__VERSION__/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          if [ -f packaging/macos/RatRun.icns ]; then cp packaging/macos/RatRun.icns "$app/Contents/Resources/"; fi
+          # Ad-hoc signature so the bundle runs on Apple Silicon even when no
+          # Developer ID secrets are configured (forks, or before setup).
+          codesign --force --deep --sign - "$app"
+
+      # --- Developer ID signing and notarisation (runs only when the secrets
+      # are configured; see packaging/macos/SIGNING.md) ----------------------
+      - name: Import the Developer ID certificate
+        if: env.HAVE_CERT == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          pw="$(uuidgen)"
+          security create-keychain -p "$pw" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$pw" "$keychain"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$pw" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+
+      - name: Sign with Developer ID (hardened runtime)
+        if: env.HAVE_CERT == 'true'
+        run: |
+          app="dist/Rat Run.app"
+          id="Developer ID Application"
+          codesign --force --options runtime --timestamp --sign "$id" dist/ratrun
+          codesign --force --options runtime --timestamp --sign "$id" "$app/Contents/Resources/ratrun"
+          codesign --force --options runtime --timestamp --sign "$id" \
+            --entitlements packaging/macos/entitlements.plist "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+      - name: Notarise and staple
+        if: env.HAVE_CERT == 'true' && env.HAVE_NOTARY == 'true'
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          key="$RUNNER_TEMP/AuthKey.p8"
+          echo "$APPLE_API_KEY_P8" > "$key"
+          cd dist
+          ditto -c -k --keepParent "Rat Run.app" notarise-app.zip
+          xcrun notarytool submit notarise-app.zip --key "$key" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait
+          xcrun stapler staple "Rat Run.app"
+          # A bare binary cannot be stapled, but notarising it lets Gatekeeper
+          # approve it online on first run.
+          ditto -c -k ratrun notarise-bin.zip
+          xcrun notarytool submit notarise-bin.zip --key "$key" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait
+          rm -f "$key" notarise-app.zip notarise-bin.zip
+          spctl --assess --type execute --verbose=2 "Rat Run.app"
+
+      - name: Package
+        run: |
+          cd dist
+          ditto -c -k --keepParent "Rat Run.app" "RatRun-$TAG-macos.app.zip"
+          name="ratrun-$TAG-macos-universal"
+          mkdir "$name" && cp ratrun "$name/" && cp ../README.md "$name/" 2>/dev/null || true
+          tar -czf "$name.tar.gz" "$name"
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/RatRun-$TAG-macos.app.zip dist/ratrun-$TAG-macos-universal.tar.gz --clobber

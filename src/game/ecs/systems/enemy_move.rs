@@ -116,12 +116,23 @@ pub fn flow_refresh_system(mut flow: ResMut<FlowField>, level: Res<Level>, playe
     flow.update(&level.tiles, player.pos, NavBudget::default());
 }
 
+/// Radius of an enemy projectile, used for the line-of-sight check below.
+///
+/// Every enemy shot is a `Bullet::new` projectile (`enemy_fire_system` never
+/// overrides `radius`), so this must stay in step with `Bullet::new`'s radius;
+/// `spitter_holds_fire_until_the_line_to_the_rat_is_clear` asserts the two agree.
+const ENEMY_SHOT_RADIUS: f32 = 2.0;
+
 /// Legacy `World::update_enemies`: steering + arena clamp, in
 /// `SpawnId` order.
 ///
 /// The ordered entity list is built in a reused `Local` buffer: bevy's
 /// `QueryIter::sort_by_key` allocates a fresh entity list on every call, which
 /// this system (plus the fire pass) paid once per tick.
+///
+/// (Eight parameters because the trap glue is a separate query — see
+/// `traps::TrapSlow` — not a fourth component of the enemy query.)
+#[allow(clippy::too_many_arguments)]
 pub fn enemy_steering_system(
     input: Res<TickInput>,
     counters: Res<RunCounters>,
@@ -130,6 +141,7 @@ pub fn enemy_steering_system(
     level: Res<Level>,
     mut order: Local<Vec<(u64, Entity)>>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
+    slow: Query<&crate::game::ecs::systems::traps::TrapSlow>,
 ) {
     let dt = input.dt;
     let ppos = player.pos;
@@ -148,7 +160,10 @@ pub fn enemy_steering_system(
         // One field per size class: a rat-sized enemy may take a rat-hole, a
         // Cat or a Brute must route around it.
         let flow_dir = flow.dir_at(SizeClass::of_enemy(e.kind), e.pos);
-        e.steer(ppos, flow_dir, dt, speed_mult);
+        // `traps::TrapSlow` is the per-enemy movement multiplier a sticky board
+        // inserts while it holds this enemy (absent = unaffected).
+        let glue = slow.get(entity).map_or(1.0, |s| s.0);
+        e.steer(ppos, flow_dir, dt, speed_mult * glue);
         // Keep enemies inside the arena.
         e.pos = e
             .pos
@@ -165,6 +180,13 @@ pub fn enemy_steering_system(
 /// in a reused `Local` list and sorting it stably by `SpawnId` before spawning.
 /// Enemy bullets keep `Bullet::new`'s `weapon: None` (only player bullets are
 /// tagged in `World::fire_one` by the neon merge).
+///
+/// Since bullets stop on walls, a shot at a rat behind cover is a wasted shot:
+/// the fire gate asks `projectiles::los_clear` for a clear line at the bullet's
+/// own radius ([`ENEMY_SHOT_RADIUS`]) and holds the shot when cover blocks it.
+/// The cooldown keeps running on the held path (it is never re-armed), so the
+/// shot leaves on the first tick the line opens — no extra rng draw, and the
+/// `SpawnId` order of the shots that *do* leave is unchanged.
 pub fn enemy_fire_system(
     input: Res<TickInput>,
     player: Res<Player>,
@@ -185,6 +207,18 @@ pub fn enemy_fire_system(
         e.fire_cd -= dt;
         let dist = e.pos.dist(ppos);
         if e.fire_cd <= 0.0 && dist < 170.0 {
+            // Hold the shot when cover blocks the line to the rat: a shot that
+            // would die on the first wall is wasted, and the cooldown keeps
+            // ticking (it stays <= 0), so the shot leaves the instant the line
+            // opens. No rng draw happens on either path.
+            if !crate::game::ecs::systems::projectiles::los_clear(
+                &level,
+                e.pos,
+                ppos,
+                ENEMY_SHOT_RADIUS,
+            ) {
+                continue;
+            }
             let is_boss = e.kind == EnemyKind::Boss;
             e.fire_cd = if is_boss { 1.2 } else { 2.2 };
             let from = e.pos;
@@ -527,6 +561,57 @@ mod tests {
         assert!(w.enemies()[2].fire_cd < 0.0, "{:?}", w.enemies()[2].fire_cd);
         // Melee enemies have no fire cooldown at all.
         assert!(approx(w.enemies()[3].fire_cd, 1.5));
+    }
+
+    /// Bullets stop on walls, so a spitter must not fire through cover. The
+    /// shot is held while the line is blocked *and the cooldown keeps ticking*,
+    /// so it leaves on the first tick the line opens. No rng draw happens on
+    /// the held path (this system has no rng at all), and the shot order of the
+    /// shots that do leave is still `SpawnId` order.
+    #[test]
+    fn spitter_holds_fire_until_the_line_to_the_rat_is_clear() {
+        use crate::game::ecs::systems::projectiles::los_clear;
+
+        // The LOS radius must be the radius the bullet it gates actually has.
+        let shot = Bullet::new(Vec2::ZERO, Vec2::ZERO, 0.0, Faction::Enemy, (0, 0, 0));
+        assert!(approx(shot.radius, ENEMY_SHOT_RADIUS));
+
+        let mut w = World::new(Theme::Sewer, 601);
+        // An empty map: the only wall on the line is the one painted below.
+        w.level.tiles = TileMap::new(MAP_COLS, MAP_ROWS, Theme::Sewer, 0);
+        let center = w.level.arena * 0.5;
+        let from = Vec2::new(center.x + 100.0, center.y);
+        let e = w.spawn_enemy(EnemyKind::Spitter, from, 1.0);
+        w.ecs.get_mut::<Enemy>(e).unwrap().fire_cd = 0.0;
+
+        // One solid cell on the line between spitter and player.
+        let (cx, cy) = crate::game::collision::cell_of((from + center) * 0.5);
+        w.level.tiles.set(cx, cy, TileKind::Wall(WallKind::Solid));
+        w.level.tiles.rebuild_masks();
+        assert!(
+            !los_clear(&w.level, from, center, ENEMY_SHOT_RADIUS),
+            "the case under test must start with cover on the line"
+        );
+
+        run_one(&mut w, enemy_fire_system);
+        assert!(w.bullets().is_empty(), "the spitter fired through cover");
+        assert!(
+            w.enemies()[0].fire_cd < 0.0,
+            "the held shot must keep the cooldown ticking: {:?}",
+            w.enemies()[0].fire_cd
+        );
+
+        // The line opens: the very next tick releases the held shot.
+        w.level.tiles.set(cx, cy, TileKind::Open);
+        w.level.tiles.rebuild_masks();
+        run_one(&mut w, enemy_fire_system);
+        assert_eq!(
+            w.bullets().len(),
+            1,
+            "the held shot did not leave when the line opened"
+        );
+        assert!(approx_v(w.bullets()[0].pos, from));
+        assert!(approx(w.enemies()[0].fire_cd, 2.2), "{:?}", w.enemies()[0].fire_cd);
     }
 
     #[test]

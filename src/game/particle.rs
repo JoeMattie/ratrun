@@ -37,6 +37,8 @@ pub enum Shape {
     Blob,
     /// Flickering ember dot that pulses gently as it drifts.
     Ember,
+    /// Soft alpha-blended billowing dust, smoke, or steam cloud (3×3 -> 2×2 -> 1×1).
+    Puff,
 }
 
 #[derive(Clone, Copy)]
@@ -209,7 +211,21 @@ pub struct Shockwave {
     pub arc_half_angle: f32,
 }
 
-/// A subtle alpha-blended floor splatter (ichor/blood) or explosion scorch mark.
+/// Visual decal style for floor [`Stain`]s.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum StainKind {
+    /// Wet organic splatter (ichor, acid, honey glue) with top-left specular glint.
+    #[default]
+    Splat,
+    /// Charred radial explosion scorch smudge.
+    Scorch,
+    /// Jagged radial floor fracture web with subtle top-left chipped-stone bevels.
+    Crack,
+    /// Concave wall/floor impact dent with shadowed top-left bowl and lit outer bevel.
+    Dent,
+}
+
+/// A subtle alpha-blended floor decal (ichor splatter, scorch mark, floor cracks, or impact dent).
 #[derive(Clone, Copy)]
 pub struct Stain {
     pub pos: Vec2,
@@ -218,7 +234,7 @@ pub struct Stain {
     pub life: f32,
     pub max_life: f32,
     pub seed: u16,
-    pub scorch: bool,
+    pub kind: StainKind,
 }
 
 #[derive(Default)]
@@ -457,6 +473,9 @@ impl Particles {
         let bh = pb.h as i32;
 
         for st in &self.stains {
+            if !st.pos.x.is_finite() || !st.pos.y.is_finite() || !st.radius.is_finite() || st.radius <= 0.2 {
+                continue;
+            }
             let sx = (st.pos.x - cam.x).round() as i32;
             let sy = (st.pos.y - cam.y).round() as i32;
             let reach = (st.radius * 2.2).ceil() as i32 + 2;
@@ -474,7 +493,20 @@ impl Particles {
                 continue;
             }
 
-            let base_alpha = if st.scorch { 0.54 * fade } else { 0.66 * fade };
+            match st.kind {
+                StainKind::Crack => {
+                    draw_crack_stain(pb, bw, bh, sx, sy, st, fade);
+                    continue;
+                }
+                StainKind::Dent => {
+                    draw_dent_stain(pb, bw, bh, sx, sy, st, fade);
+                    continue;
+                }
+                StainKind::Splat | StainKind::Scorch => {}
+            }
+
+            let scorch = st.kind == StainKind::Scorch;
+            let base_alpha = if scorch { 0.54 * fade } else { 0.66 * fade };
             let r = st.radius;
             let ri = r.ceil() as i32;
             let r2 = r * r;
@@ -498,7 +530,7 @@ impl Particles {
                         let fall = (1.0 - (d2 / (r2 * jitter).max(0.5)).sqrt()).clamp(0.25, 1.0);
                         let local_alpha = base_alpha * (0.55 + 0.45 * fall);
                         let bg = pb.pixel_at(px as usize, py as usize);
-                        let tint = if st.scorch {
+                        let tint = if scorch {
                             palette::scale(st.color, 0.5 + 0.5 * (1.0 - fall))
                         } else {
                             // Slightly darker core, wet rim.
@@ -525,7 +557,7 @@ impl Particles {
             }
 
             // Fresh wet top-left specular glint (matches the game's top-left lighting).
-            if !st.scorch && age < 0.45 && r >= 2.0 {
+            if !scorch && age < 0.45 && r >= 2.0 {
                 let gx = sx - (r * 0.30).round() as i32;
                 let gy = sy - (r * 0.30).round() as i32;
                 if gx >= 0 && gx < bw && gy >= 0 && gy < bh {
@@ -613,6 +645,42 @@ impl Particles {
                     c = palette::scale(c, flicker);
                     plot_mode(pb, x, y, c, p.additive);
                 }
+                Shape::Puff => {
+                    // Soft alpha-blended billowing dust/smoke/steam cloud with top-left cel highlight.
+                    let alpha = (1.0 - t).powf(1.20) * 0.88;
+                    if alpha > 0.02 {
+                        let hi = palette::mix(c, (255, 255, 255), 0.26);
+                        let lo = palette::scale(c, 0.70);
+                        if t < 0.40 {
+                            // Plump 5×5 rounded cloud puff (center + cardinal + soft corners).
+                            plot_alpha(pb, x, y, c, alpha, p.additive);
+                            plot_alpha(pb, x - 1, y, hi, alpha * 0.88, p.additive);
+                            plot_alpha(pb, x, y - 1, hi, alpha * 0.88, p.additive);
+                            plot_alpha(pb, x - 1, y - 1, hi, alpha * 0.68, p.additive);
+                            plot_alpha(pb, x + 1, y, lo, alpha * 0.80, p.additive);
+                            plot_alpha(pb, x, y + 1, lo, alpha * 0.80, p.additive);
+                            plot_alpha(pb, x + 1, y + 1, lo, alpha * 0.48, p.additive);
+                            plot_alpha(pb, x - 1, y + 1, c, alpha * 0.56, p.additive);
+                            plot_alpha(pb, x + 1, y - 1, c, alpha * 0.56, p.additive);
+                            // Soft outer wisps on cardinal tips.
+                            plot_alpha(pb, x - 2, y, hi, alpha * 0.34, p.additive);
+                            plot_alpha(pb, x, y - 2, hi, alpha * 0.34, p.additive);
+                            plot_alpha(pb, x + 2, y, lo, alpha * 0.28, p.additive);
+                            plot_alpha(pb, x, y + 2, lo, alpha * 0.28, p.additive);
+                        } else if t < 0.72 {
+                            // Soft 3×3 thinning puff.
+                            plot_alpha(pb, x, y, c, alpha * 0.88, p.additive);
+                            plot_alpha(pb, x - 1, y, hi, alpha * 0.66, p.additive);
+                            plot_alpha(pb, x, y - 1, hi, alpha * 0.66, p.additive);
+                            plot_alpha(pb, x + 1, y, lo, alpha * 0.56, p.additive);
+                            plot_alpha(pb, x, y + 1, lo, alpha * 0.56, p.additive);
+                        } else {
+                            // Fading wisp.
+                            plot_alpha(pb, x, y, c, alpha * 0.70, p.additive);
+                            plot_alpha(pb, x - 1, y, hi, alpha * 0.35, p.additive);
+                        }
+                    }
+                }
             }
         }
     }
@@ -624,6 +692,167 @@ fn plot_mode(pb: &mut PixelBuffer, x: i32, y: i32, c: Rgb, additive: bool) {
         pb.plot_add(x, y, c);
     } else {
         pb.plot(x, y, c);
+    }
+}
+
+#[inline]
+fn plot_alpha(pb: &mut PixelBuffer, x: i32, y: i32, c: Rgb, a: f32, additive: bool) {
+    if a <= 0.01 || x < 0 || y < 0 {
+        return;
+    }
+    let (ux, uy) = (x as usize, y as usize);
+    if ux >= pb.w || uy >= pb.h {
+        return;
+    }
+    if additive {
+        pb.plot_add(x, y, palette::scale(c, a));
+    } else {
+        let bg = pb.pixel_at(ux, uy);
+        pb.plot(x, y, palette::mix(bg, c, a.clamp(0.0, 1.0)));
+    }
+}
+
+/// Jagged radial floor fracture lines with subtle chipped-stone top-left bevels.
+fn draw_crack_stain(pb: &mut PixelBuffer, bw: i32, bh: i32, sx: i32, sy: i32, st: &Stain, fade: f32) {
+    let r = st.radius.clamp(2.0, 24.0);
+    let crack_col = palette::scale(st.color, 0.28);
+    let chip_hi = palette::mix(st.color, (228, 222, 206), 0.68);
+
+    // Subtle darkened central impact dimple.
+    let cr = (r * 0.30).clamp(1.0, 4.5);
+    let cri = cr.ceil() as i32;
+    let cr2 = cr * cr;
+    for dy in -cri..=cri {
+        let py = sy + dy;
+        if py < 0 || py >= bh {
+            continue;
+        }
+        for dx in -cri..=cri {
+            let px = sx + dx;
+            if px < 0 || px >= bw {
+                continue;
+            }
+            let d2 = (dx * dx + dy * dy) as f32;
+            if d2 <= cr2 {
+                let fall = 1.0 - (d2 / cr2.max(0.5)).sqrt();
+                let bg = pb.pixel_at(px as usize, py as usize);
+                pb.plot(px, py, palette::mix(bg, crack_col, (0.36 + 0.44 * fall) * fade));
+            }
+        }
+    }
+
+    // 5..7 deterministic jagged radial fracture rays + secondary fork branches.
+    let rays: i32 = if r >= 8.0 { 7 } else if r >= 5.0 { 6 } else { 5 };
+    for k in 0..rays {
+        let jitter_a = (stain_hash(st.seed, k * 13 + 5, 7) as f32 / 255.0 - 0.5) * 0.48;
+        let base_a = (k as f32 / rays as f32) * std::f32::consts::TAU + jitter_a;
+        let ray_len = r * (0.82 + (stain_hash(st.seed, k * 19 + 3, 29) as f32 / 255.0) * 0.36);
+        let steps = (ray_len * 1.35).ceil().clamp(3.0, 26.0) as i32;
+        let mut ang = base_a;
+        let mut cx = sx as f32;
+        let mut cy = sy as f32;
+
+        for s in 1..=steps {
+            let frac = s as f32 / steps as f32;
+            // Periodic zigzag kink for natural masonry/concrete cracks.
+            if s % 3 == 0 {
+                let kink = (stain_hash(st.seed.wrapping_add(k as u16 * 41), s, k) as f32 / 255.0
+                    - 0.5)
+                    * 0.62;
+                ang += kink;
+            }
+            let step_len = ray_len / steps as f32;
+            cx += ang.cos() * step_len;
+            cy += ang.sin() * step_len;
+            let px = cx.round() as i32;
+            let py = cy.round() as i32;
+            let w_alpha = (1.0 - frac * 0.48) * 0.90 * fade;
+            // Pale chipped-stone top-left bevel lip beside the dark fracture line so
+            // cracks read crisply even on dark Sewer/Lab floor tiles.
+            if frac < 0.84 {
+                plot_alpha(pb, px - 1, py - 1, chip_hi, w_alpha * 0.46, false);
+            }
+            plot_alpha(pb, px, py, crack_col, w_alpha, false);
+
+            // Secondary fork halfway down alternating cracks.
+            if k % 2 == 0 && s == steps / 2 && r >= 5.5 {
+                let fork_dir = if k % 4 == 0 { 0.58 } else { -0.58 };
+                let fa = ang + fork_dir;
+                let mut fx = cx;
+                let mut fy = cy;
+                let fsteps = (steps / 2).clamp(2, 8);
+                for fs in 1..=fsteps {
+                    fx += fa.cos() * step_len * 0.92;
+                    fy += fa.sin() * step_len * 0.92;
+                    let fpx = fx.round() as i32;
+                    let fpy = fy.round() as i32;
+                    let falpha = (1.0 - fs as f32 / (fsteps as f32 + 1.0)) * 0.74 * fade;
+                    plot_alpha(pb, fpx - 1, fpy - 1, chip_hi, falpha * 0.36, false);
+                    plot_alpha(pb, fpx, fpy, crack_col, falpha, false);
+                }
+            }
+        }
+    }
+}
+
+/// Concave floor/wall-edge impact dent with shadowed top-left inner wall and lit bottom-right rim.
+fn draw_dent_stain(pb: &mut PixelBuffer, bw: i32, bh: i32, sx: i32, sy: i32, st: &Stain, fade: f32) {
+    let r = st.radius.clamp(2.0, 14.0);
+    let ri = (r + 1.5).ceil() as i32;
+    let r2 = r * r;
+    let deep_col = palette::scale(st.color, 0.25);
+    let rim_hi = palette::mix(st.color, (234, 232, 224), 0.74);
+
+    for dy in -ri..=ri {
+        let py = sy + dy;
+        if py < 0 || py >= bh {
+            continue;
+        }
+        for dx in -ri..=ri {
+            let px = sx + dx;
+            if px < 0 || px >= bw {
+                continue;
+            }
+            let d2 = (dx * dx + dy * dy) as f32;
+            let h = stain_hash(st.seed, dx * 2, dy * 2);
+            let jitter = 0.80 + (h as f32 / 255.0) * 0.34;
+            let eff_r2 = r2 * jitter;
+            if d2 <= eff_r2 {
+                let norm_d = (d2 / eff_r2.max(0.5)).sqrt();
+                // Top-left light = (-0.55, -0.83). Inside a concave bowl, the top-left
+                // inner slope is in deep shadow and the bottom-right slope catches light!
+                let light_dot = if d2 > 0.25 {
+                    let inv = 1.0 / d2.sqrt();
+                    (dx as f32 * inv) * (-0.55) + (dy as f32 * inv) * (-0.83)
+                } else {
+                    0.0
+                };
+                let bg = pb.pixel_at(px as usize, py as usize);
+                if norm_d > 0.58 && light_dot < -0.14 {
+                    // Lit bottom-right concave bevel rim!
+                    let a = ((-light_dot - 0.14) * 0.86).clamp(0.16, 0.72) * fade;
+                    pb.plot(px, py, palette::mix(bg, rim_hi, a));
+                } else {
+                    // Dark recessed dent shadow (deepest on top-left inner wall).
+                    let bowl = (0.62 + 0.38 * light_dot.max(0.0)) * (1.0 - norm_d * 0.28);
+                    let col = palette::mix(st.color, deep_col, 0.75);
+                    pb.plot(px, py, palette::mix(bg, col, (0.82 * bowl).clamp(0.22, 0.88) * fade));
+                }
+            }
+        }
+    }
+
+    // 4 short radial stress ticks around the dent rim.
+    for k in 0..4 {
+        let a = (stain_hash(st.seed, k * 23 + 7, 13) as f32 / 255.0) * std::f32::consts::TAU;
+        let (sa, ca) = a.sin_cos();
+        for step in 0..3 {
+            let dist = r * 0.90 + step as f32 * 0.95;
+            let px = sx + (ca * dist).round() as i32;
+            let py = sy + (sa * dist).round() as i32;
+            plot_alpha(pb, px - 1, py - 1, rim_hi, (0.32 - step as f32 * 0.08) * fade, false);
+            plot_alpha(pb, px, py, deep_col, (0.72 - step as f32 * 0.18) * fade, false);
+        }
     }
 }
 
@@ -657,7 +886,8 @@ fn draw_shockwave(pb: &mut PixelBuffer, cam: Vec2, bw: i32, bh: i32, sw: &Shockw
         return;
     }
 
-    let ring_col = palette::scale(palette::mix(sw.core, sw.color, (t * 2.2).min(1.0)), fade);
+    let base_col = palette::mix(sw.core, sw.color, (t * 2.2).min(1.0));
+    let ring_col = palette::scale(base_col, fade);
     let wake_col = palette::scale(sw.color, fade * 0.42);
     let layers = if sw.thick >= 1.8 { 2 } else { 1 };
 
@@ -691,13 +921,21 @@ fn draw_shockwave(pb: &mut PixelBuffer, cam: Vec2, bw: i32, bh: i32, sw: &Shockw
             } else {
                 1.0
             };
-            plot_mode(pb, px, py, palette::scale(ring_col, end_atten), sw.additive);
+            if sw.additive {
+                pb.plot_add(px, py, palette::scale(ring_col, end_atten));
+            } else {
+                plot_alpha(pb, px, py, base_col, fade * end_atten * 0.85, false);
+            }
         }
         if layers == 2 && r > 2.5 {
             let ix = cx + (ca * (r - 1.25)).round() as i32;
             let iy = cy + (sa * (r - 1.25)).round() as i32;
             if (ix, iy) != (px, py) && ix >= 0 && ix < bw && iy >= 0 && iy < bh {
-                plot_mode(pb, ix, iy, wake_col, sw.additive);
+                if sw.additive {
+                    pb.plot_add(ix, iy, wake_col);
+                } else {
+                    plot_alpha(pb, ix, iy, sw.color, fade * 0.36, false);
+                }
             }
         }
     }
@@ -769,7 +1007,7 @@ mod tests {
             life: 5.0,
             max_life: 5.0,
             seed: 1,
-            scorch: false,
+            kind: StainKind::Splat,
         });
         assert_eq!(ps.len(), 0);
         assert!(ps.shockwaves.is_empty());
@@ -837,7 +1075,7 @@ mod tests {
                 life: 6.0,
                 max_life: 6.0,
                 seed: i as u16,
-                scorch: false,
+                kind: StainKind::Splat,
             });
         }
         assert_eq!(ps.shockwaves.len(), SHOCKWAVE_CAP);
@@ -854,6 +1092,80 @@ mod tests {
 
         ps.update(0.1);
         ps.draw(&mut pb, Vec2::ZERO);
+
+        // Zero-size buffer must never panic.
+        let mut zero = PixelBuffer::new(0, 0);
+        ps.draw_stains(&mut zero, Vec2::ZERO);
+        ps.draw(&mut zero, Vec2::ZERO);
+    }
+
+    #[test]
+    fn puff_shape_and_crack_dent_stains_render_cleanly() {
+        let mut ps = Particles::new(64);
+        // Young, mid-life, and fading Puff particles (both alpha-blended and additive).
+        for (i, life) in [0.95, 0.40, 0.10].iter().enumerate() {
+            ps.push(Particle {
+                pos: Vec2::new(12.0 + i as f32 * 14.0, 20.0),
+                vel: Vec2::new(6.0, -4.0),
+                life: *life,
+                max_life: 1.0,
+                drag: 2.0,
+                gravity: 0.0,
+                ramp: Ramp::Custom((210, 204, 190), (110, 104, 96)),
+                additive: i == 2,
+                shape: Shape::Puff,
+            });
+        }
+        // Non-additive translucent dust shockwave.
+        ps.push_shockwave(Shockwave {
+            pos: Vec2::new(32.0, 32.0),
+            start_r: 3.0,
+            end_r: 18.0,
+            life: 0.25,
+            max_life: 0.40,
+            color: (204, 196, 180),
+            core: (238, 232, 218),
+            thick: 2.0,
+            additive: false,
+            arc_dir: None,
+            arc_half_angle: 0.0,
+        });
+        // Crack and Dent floor stains.
+        ps.push_stain(Stain {
+            pos: Vec2::new(20.0, 44.0),
+            radius: 10.0,
+            color: (48, 44, 40),
+            life: 10.0,
+            max_life: 10.0,
+            seed: 42,
+            kind: StainKind::Crack,
+        });
+        ps.push_stain(Stain {
+            pos: Vec2::new(46.0, 44.0),
+            radius: 6.0,
+            color: (44, 48, 54),
+            life: 10.0,
+            max_life: 10.0,
+            seed: 99,
+            kind: StainKind::Dent,
+        });
+
+        let mut pb = PixelBuffer::new(64, 64);
+        let bg = (28, 32, 30);
+        pb.clear(bg);
+        ps.draw_stains(&mut pb, Vec2::ZERO);
+        let stained = (0..pb.h)
+            .flat_map(|y| (0..pb.w).map(move |x| (x, y)))
+            .filter(|&(x, y)| pb.pixel_at(x, y) != bg)
+            .count();
+        assert!(stained > 25, "crack and dent stains should paint visible floor pixels");
+
+        ps.draw(&mut pb, Vec2::ZERO);
+        let drawn = (0..pb.h)
+            .flat_map(|y| (0..pb.w).map(move |x| (x, y)))
+            .filter(|&(x, y)| pb.pixel_at(x, y) != bg)
+            .count();
+        assert!(drawn > stained + 15, "puffs and non-additive shockwave should paint over floor");
 
         // Zero-size buffer must never panic.
         let mut zero = PixelBuffer::new(0, 0);

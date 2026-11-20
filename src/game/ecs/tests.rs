@@ -447,14 +447,21 @@ fn loss_beats_win_on_the_final_tick() {
     assert!(!w.won, "death must not also score a win");
 }
 
+/// Campaign rule (P8): the clock no longer wins a level. Surviving past
+/// `director::RUN_SECONDS` only means the boss fight is on — the level ends
+/// when the boss or the rat dies.
 #[test]
-fn win_is_set_only_when_alive_at_the_end_of_the_tick() {
+fn the_level_does_not_end_at_the_run_clock() {
     let mut w = World::new(Theme::Sewer, 8);
     w.elapsed = director::RUN_SECONDS - 0.001;
     w.player.hp = w.player.max_hp();
     w.update(1.0 / 60.0, Vec2::ZERO, false);
-    assert!(w.won, "surviving the full clock should win");
+    assert!(!w.won, "surviving the full clock must not win the level");
     assert!(!w.game_over);
+    assert!(!w.level_complete());
+    assert!(!w.finished(), "the level keeps simulating past the clock");
+    assert_eq!(w.time_left(), 0.0, "the countdown saturates at BOSS_TIME");
+    assert!(w.boss_time_reached());
 }
 
 #[test]
@@ -871,6 +878,10 @@ fn iframed_player_does_not_spend_contact_cooldowns() {
 #[test]
 fn fast_bullet_through_a_skitterer_registers_a_hit() {
     let mut w = World::new(Theme::Sewer, 89);
+    // Fixed world coordinates (below) are inside a `Solid` cell on some
+    // generated maps, and a shot now stops on the first wall it meets, so the
+    // swept-hit fixture needs open floor.
+    open_map(&mut w);
     w.clear_enemies();
     w.clear_bullets();
     let mut rng = StdRng::seed_from_u64(8);
@@ -905,6 +916,9 @@ fn fast_bullet_through_a_skitterer_registers_a_hit() {
 #[test]
 fn fast_enemy_bullet_cannot_skip_the_player() {
     let mut w = World::new(Theme::Sewer, 91);
+    // See `fast_bullet_through_a_skitterer_registers_a_hit`: the fixture uses
+    // fixed coordinates, so it needs open floor now that shots stop on walls.
+    open_map(&mut w);
     w.clear_bullets();
     w.player.pos = Vec2::new(100.0, 100.0);
     w.player.iframes = 0.0;

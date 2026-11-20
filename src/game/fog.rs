@@ -742,7 +742,12 @@ mod tests {
 
     #[test]
     fn maze_discovery_and_claim_flags_start_empty_and_follow_sight() {
-        let level = Level::generate(Theme::Sewer, 3);
+        // Mazes are rare now (~1 map in 8), so a fixed seed is not guaranteed to
+        // have one: search the first seeds for a maze-bearing Sewer map.
+        let level = (0..64u64)
+            .map(|seed| Level::generate(Theme::Sewer, seed))
+            .find(|level| !level.mazes.is_empty())
+            .expect("no Sewer map in the first 64 seeds has a maze");
         let mut fog = Fog::with_mazes(level.tiles.cols(), level.tiles.rows(), level.mazes.len());
         assert_eq!(fog.maze_count(), level.mazes.len());
         for i in 0..fog.maze_count() {

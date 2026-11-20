@@ -1,4 +1,31 @@
-//! (b) Spawn director, spawn ring, elite + boss spawns, enemy cap.
+//! (b) Spawn director, spawn ring, flanking groups, elite spawns, enemy cap.
+//!
+//! ## Where the horde may arrive (content wave)
+//!
+//! * **Never inside a warren.** A maze's ring and interior are excluded from
+//!   every spawn path — ring pulses, room waves, flanking groups, the elite
+//!   and the fallback point. The chase begins at the mouth: existing enemies
+//!   pursue through the entrance, the director never introduces one there.
+//! * **Skip, never shove.** When no safe off-screen point exists (the rat is
+//!   deep in a maze, or boxed in a corner) the director skips that spawn
+//!   instead of materialising a body in a warren or on top of the player.
+//! * **Two off-screen flanking groups** when the rat has held one chamber for
+//!   [`director::FLANK_DWELL_SECS`] and the chamber has two real approaches:
+//!   the pulse's own enemies are reused, split between the two doorways, so a
+//!   camper is pinched instead of fed from the ring one at a time.
+//! * **A room wave is short-leashed**: the staging room is within
+//!   [`ROOM_WAVE_RANGE`] and the approach from the player is at most
+//!   [`APPROACH_CELLS`] path cells, so a wave arrives instead of queueing
+//!   behind a wall on the far side of the map.
+//!
+//! ## The boss
+//!
+//! The director no longer spawns one. At `director::BOSS_TIME` it raises the
+//! `BossDue` resource ([`director::raise_boss_due`]) and the boss framework
+//! spawns the level's boss in its arena; the shake, the arrival VFX and
+//! `Sfx::Boss` belong to that arrival now, not to the ring.
+//!
+//! ## Port notes
 //!
 //! Reproduce **verbatim**:
 //! - `World::run_director`.
@@ -29,9 +56,7 @@
 //! pulse is the legacy loop order: one `pick_kind` draw, one `spawn_point`
 //! (which draws from the same rng), then `Enemy::spawn`.
 //!
-//! ## Port notes
-//!
-//! The only structural change is the cap bookkeeping above: legacy asked
+//! The only structural change from the port is the cap bookkeeping above: legacy asked
 //! `self.enemies.len()` after each push (the `Vec` grew immediately), the ECS
 //! port asks the query once and adds `queued`. Rng draws, their order and the
 //! spawn order are unchanged — `spawn_point` draws its ring angle before
@@ -45,16 +70,14 @@ use bevy_ecs::prelude::*;
 use rand::rngs::StdRng;
 use rand::RngExt;
 
-use crate::audio::Sfx;
 use crate::game::collision::{SizeClass, TileMap};
 use crate::game::director::{self, Director};
 use crate::game::ecs::constants::ENEMY_CAP;
 use crate::game::ecs::resources::{
-    NextEnemyId, NextSpawnId, RngRes, RunCounters, Shake, SfxQueue, TickInput, Viewport,
+    BossDue, LevelIndex, NextEnemyId, NextSpawnId, RngRes, RunCounters, TickInput, Viewport,
 };
 use crate::game::enemy::{Enemy, EnemyKind};
-use crate::game::level::{Level, RoomKind};
-use crate::game::particle::{vfx, Particles};
+use crate::game::level::{Level, MazeSection, Room, RoomKind, TileRect};
 use crate::game::player::Player;
 use crate::math::Vec2;
 
@@ -80,21 +103,73 @@ const OFF_SCREEN_MARGIN: f32 = 8.0;
 /// Every `ROOM_WAVE_EVERY`-th pulse sends its first enemy in through a room
 /// instead of materialising it on the ring.
 const ROOM_WAVE_EVERY: u32 = 5;
-/// Pulse count that must have fired before room waves start (a wave from a
-/// room 1 000 px away in the first second would just be a lost enemy).
+/// Pulse count that must have fired before room waves start (a wave in the
+/// first second would just be a lost enemy).
 const ROOM_WAVE_AFTER_PULSES: u32 = 8;
-/// Only rooms this close to the player are used for a room wave: the horde has
-/// to reach the player within roughly one pulse cycle.
-const ROOM_WAVE_RANGE: f32 = 1400.0;
+/// Only rooms whose centre is this close to the player are used for a room
+/// wave (design change 6 cut this from 1 400 px: a wave that takes fifteen
+/// seconds to arrive is a queue, not pressure).
+pub const ROOM_WAVE_RANGE: f32 = 320.0;
+/// Longest approach (path length, in cells, from the player's cell) a room
+/// wave or a flanking group may be staged at — 20 cells ≈ 320 px.
+///
+/// Measured on the horde's own graph by [`SpawnScratch::build_approach`] and
+/// deliberately *path* cells, not straight-line distance: a room 300 px away
+/// on the other side of a wall is a 30-cell walk, and that is what the cap is
+/// for.
+pub const APPROACH_CELLS: i32 = 20;
 /// Random cells [`spawn_point_in_room`] tries before giving up.
 const ROOM_SAMPLES: u32 = 8;
 /// Cells the wall-clear fallback searches around a blocked ring point.
 const FALLBACK_SEARCH_CELLS: i32 = 10;
+/// Minimum angle between the two flanking approaches (radians, ≈ 60°): two
+/// doors on the same wall are one approach, not a pinch.
+const FLANK_MIN_SEPARATION: f32 = std::f32::consts::FRAC_PI_3;
+
+/// Member offsets (in cells) for a flanking group, ordered outwards from the
+/// doorway. Members cycle through it, so a late pulse (25+ bodies) still
+/// spreads instead of stacking on one pixel; a per-member clearance check keeps
+/// a candidate out of a prop or a wall.
+const FLANK_OFFSETS: [(i32, i32); 32] = [
+    (0, 0),
+    (1, 0),
+    (-1, 0),
+    (0, 1),
+    (0, -1),
+    (1, 1),
+    (-1, 1),
+    (1, -1),
+    (-1, -1),
+    (2, 0),
+    (-2, 0),
+    (0, 2),
+    (0, -2),
+    (2, 1),
+    (-2, 1),
+    (2, -1),
+    (-2, -1),
+    (1, 2),
+    (-1, 2),
+    (1, -2),
+    (-1, -2),
+    (2, 2),
+    (-2, 2),
+    (2, -2),
+    (-2, -2),
+    (3, 0),
+    (-3, 0),
+    (0, 3),
+    (0, -3),
+    (3, 1),
+    (-3, 1),
+    (3, -1),
+];
 
 /// Cells of a cell rectangle's inset that a room spawn stays inside.
 const ROOM_INSET: i32 = 2;
 
-/// Legacy `World::run_director` .
+/// Legacy `World::run_director`, now with the campaign curve, the maze-free
+/// spawn rule, room waves and the two-group flank.
 #[allow(clippy::too_many_arguments)]
 pub fn director_system(
     mut commands: Commands,
@@ -103,13 +178,12 @@ pub fn director_system(
     viewport: Res<Viewport>,
     level: Res<Level>,
     player: Res<Player>,
+    level_index: Res<LevelIndex>,
     mut director: ResMut<Director>,
+    mut boss_due: ResMut<BossDue>,
     mut rng: ResMut<RngRes>,
     mut next_id: ResMut<NextSpawnId>,
     mut next_enemy_id: ResMut<NextEnemyId>,
-    mut particles: ResMut<Particles>,
-    mut shake: ResMut<Shake>,
-    mut sfx: ResMut<SfxQueue>,
     enemies: Query<&Enemy>,
     // Per-run scratch, reused across ticks: the per-level reachability cache
     // costs one flood fill per map and must not be recomputed per spawn.
@@ -117,8 +191,13 @@ pub fn director_system(
 ) {
     let dt = input.dt;
     let elapsed = counters.elapsed;
-    // Keep one slot reserved for the mandatory boss until it has spawned, so
-    // the live count stays `<= ENEMY_CAP` for the whole run.
+    // The campaign level shifts the whole curve (`director::curve_clock`), which
+    // also freezes at the boss time, so the horde keeps its late-curve rate for
+    // as long as the boss fight lasts.
+    let curve = director::curve_clock(level_index.0, elapsed);
+    // Keep one slot reserved for the level's boss until it is due, so the live
+    // count stays `<= ENEMY_CAP` for the whole level: the boss framework spends
+    // the reservation on the boss itself.
     let cap = if director.boss_spawned {
         ENEMY_CAP
     } else {
@@ -135,11 +214,15 @@ pub fn director_system(
     // pulse branch saw.
     let mut queued = 0usize;
 
+    // Flank bookkeeping runs every tick: the dwell is time spent *staying* in
+    // one chamber, so leaving it has to reset the clock on the tick it happens.
+    director.note_chamber(chamber_room_index(&level, player.pos), dt);
+
     director.spawn_timer -= dt;
     if director.spawn_timer <= 0.0 {
-        director.spawn_timer = director::spawn_interval(elapsed);
-        let count = director::pulse_count(elapsed);
-        let mult = director::hp_mult(elapsed);
+        director.spawn_timer = director::spawn_interval_at(curve);
+        let count = director::pulse_count_at(curve);
+        let mult = director::hp_mult_at(curve);
         let live = enemies.iter().count();
         // One pulse in `ROOM_WAVE_EVERY` brings its first enemy in through a
         // doorway of a room the player is not in, so the horde arrives instead
@@ -147,19 +230,42 @@ pub fn director_system(
         let room_wave = director.pulses >= ROOM_WAVE_AFTER_PULSES
             && director.pulses.is_multiple_of(ROOM_WAVE_EVERY);
         director.pulses = director.pulses.wrapping_add(1);
+        // Two off-screen flanking groups: only after the rat has held one
+        // chamber for `FLANK_DWELL_SECS`, only when that chamber has two real
+        // approaches, and only from the pulse's own enemies. The attempt spends
+        // the dwell either way, so a bad chamber is retried once every 8 s, not
+        // every pulse.
+        let flank = if director.take_flank() {
+            let room = director.chamber_room;
+            scratch.sync(&level);
+            if room >= 0 {
+                plan_flank(&level, &player, viewport.0, room as usize, &mut scratch)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         for i in 0..count {
             if live + queued >= cap {
                 break;
             }
-            let kind = director::pick_kind(elapsed, &mut rng.0);
-            let pos = spawn_pulse_point(
+            let kind = director::pick_kind_at(curve, &mut rng.0);
+            let Some(pos) = spawn_pulse_point(
                 &mut rng.0,
                 &level,
                 &player,
                 viewport.0,
                 &mut scratch,
                 room_wave && i == 0,
-            );
+                flank.as_ref(),
+                i,
+            ) else {
+                // No safe, off-screen, wall-clear point (the rat is deep in a
+                // maze, or boxed into a pocket): skip the spawn. A body in a
+                // warren or on top of the player is worse than no body.
+                continue;
+            };
             let mut enemy = Enemy::spawn(kind, pos, mult, &mut rng.0);
             // Neon merge: legacy `run_director` ids every director-spawned
             // enemy from the monotonic `next_enemy_id` counter (0 is reserved
@@ -171,50 +277,33 @@ pub fn director_system(
         }
     }
 
-    // Periodic elite brute. Skip it instead of taking the boss's slot.
+    // Periodic elite brute. Skip it instead of taking the boss's slot, and skip
+    // outright when no safe point exists.
     director.elite_timer -= dt;
-    if director.elite_timer <= 0.0 && elapsed > director::ELITE_START {
+    if director.elite_timer <= 0.0 && curve > director::ELITE_START {
         director.elite_timer = director::ELITE_INTERVAL;
         if enemies.iter().count() + queued < cap {
-            let pos = spawn_point_reachable(
+            if let Some(pos) = spawn_point_reachable(
                 &mut rng.0,
                 &level,
                 &player,
                 viewport.0,
                 &mut scratch,
-            );
-            let mult = director::hp_mult(elapsed) * 1.6;
-            let mut enemy = Enemy::spawn(EnemyKind::Brute, pos, mult, &mut rng.0);
-            enemy.id = next_enemy_id.take();
-            // Director elites are flagged so the art and death VFX can tell
-            // them apart from late-game Brutes with overlapping scaled HP.
-            enemy.elite = true;
-            commands.spawn((enemy, next_id.take()));
+            ) {
+                let mult = director::hp_mult_at(curve) * 1.6;
+                let mut enemy = Enemy::spawn(EnemyKind::Brute, pos, mult, &mut rng.0);
+                enemy.id = next_enemy_id.take();
+                // Director elites are flagged so the art and death VFX can tell
+                // them apart from late-game Brutes with overlapping scaled HP.
+                enemy.elite = true;
+                commands.spawn((enemy, next_id.take()));
+            }
         }
     }
 
-    // Boss.
-    if !director.boss_spawned && elapsed >= director::BOSS_TIME {
-        director.boss_spawned = true;
-        // The boss stays a ring spawn at `BOSS_TIME` (the five-minute threat is
-        // unchanged); only its placement gets the wall/reachability filter.
-        let pos = spawn_point_reachable(
-            &mut rng.0,
-            &level,
-            &player,
-            viewport.0,
-            &mut scratch,
-        );
-        let mut enemy = Enemy::spawn(EnemyKind::Boss, pos, 1.0, &mut rng.0);
-        enemy.id = next_enemy_id.take();
-        commands.spawn((enemy, next_id.take()));
-        // Neon merge: arrival shockwave + cross burst, drawn before the shake
-        // and SFX exactly like `run_director` in the merged reference.
-        let accent = level.palette.accent;
-        vfx::emit_boss_spawn(&mut particles, &mut rng.0, pos, accent);
-        shake.amount = 14.0;
-        sfx.0.push(Sfx::Boss);
-    }
+    // Boss hand-off (no generic boss spawn any more): the boss framework reads
+    // `BossDue` and spawns the level's boss in its arena.
+    director::raise_boss_due(&mut director, &mut boss_due, elapsed, level_index.0);
 }
 
 /// 8-connected neighbourhood, cardinals first.
@@ -277,16 +366,77 @@ fn horde_reachable(tiles: &TileMap, from: (i32, i32)) -> Vec<bool> {
     seen
 }
 
-/// Facts about one level that every spawn needs but that are far too expensive
-/// to recompute per spawn: which cells the horde can actually path to, and which
-/// rooms contain such a cell.
+/// The ring/interior rectangle of one maze section: the area no enemy may ever
+/// be *introduced* in.
 ///
-/// The map is static for a whole run, so this is built **once** (at the first
-/// pulse) and then read as O(1) table lookups — the "cache a per-room
-/// reachability flag" the content plan asks for instead of a flood fill per
-/// spawn. It is keyed by the level's identity (`seed`, `theme`, room count), so
-/// a test that swaps in a different map rebuilds it automatically; a test that
-/// repaints a map in place must give it a different seed.
+/// This is the generator's own ring (`maze_ring`), i.e. the `WallKind::Maze`
+/// border plus everything inside it. The one-cell open moat between the ring and
+/// the reserved slot's edge is a normal corridor and stays legal ground — the
+/// ring is what the designer measured against. Worker P1 is exporting this
+/// rectangle on `Level`; until that lands this derives it from `Level::mazes`
+/// with the generator's own helper, so there is still exactly one definition of
+/// where a warren is.
+#[inline]
+pub fn maze_region(maze: &MazeSection) -> TileRect {
+    crate::game::levelgen::maze::maze_ring(maze.bounds)
+}
+
+/// Is `p` inside any maze's ring or interior?
+#[inline]
+pub fn in_maze(level: &Level, p: Vec2) -> bool {
+    level.mazes.iter().any(|m| maze_region(m).contains_world(p))
+}
+
+/// Is `(cx, cy)` inside any maze's ring or interior?
+#[inline]
+pub fn cell_in_maze(level: &Level, cx: i32, cy: i32) -> bool {
+    level
+        .mazes
+        .iter()
+        .any(|m| maze_region(m).contains(cx, cy))
+}
+
+/// The chamber the player is standing in, as a `Level::rooms` index.
+///
+/// Only the kinds a player can *camp* in count (a hall, an ordinary room, the
+/// start room, the boss arena); a corridor is a passage, not a chamber, so it
+/// never charges the flank timer.
+#[inline]
+pub fn chamber_room_index(level: &Level, p: Vec2) -> Option<usize> {
+    level
+        .rooms
+        .iter()
+        .position(|room| room.rect.contains_world(p))
+        .filter(|&i| {
+            matches!(
+                level.rooms[i].kind,
+                RoomKind::Start | RoomKind::Boss | RoomKind::Hall | RoomKind::Room
+            )
+        })
+        .or_else(|| {
+            // `position` may have found a corridor drawn over the chamber
+            // first; fall through to any chamber that also contains the point.
+            level.rooms.iter().position(|room| {
+                room.rect.contains_world(p)
+                    && matches!(
+                        room.kind,
+                        RoomKind::Start | RoomKind::Boss | RoomKind::Hall | RoomKind::Room
+                    )
+            })
+        })
+}
+
+/// Facts about one level that every spawn needs but that are far too expensive
+/// to recompute per spawn: which cells the horde can actually path to, which
+/// rooms contain such a cell, and (rebuilt when the player changes cell) the
+/// path distance from the player out to [`APPROACH_CELLS`] cells.
+///
+/// The map is static for a whole run, so the reachability side is built **once**
+/// (at the first pulse) and then read as O(1) table lookups — the "cache a
+/// per-room reachability flag" the content plan asks for instead of a flood
+/// fill per spawn. It is keyed by the level's identity (`seed`, `theme`, room
+/// count), so a test that swaps in a different map rebuilds it automatically; a
+/// test that repaints a map in place must give it a different seed.
 #[derive(Default)]
 pub struct SpawnScratch {
     key: Option<(u64, u8, usize)>,
@@ -296,16 +446,42 @@ pub struct SpawnScratch {
     /// One flag per entry in `Level::rooms`: does the room hold a reachable
     /// cell (so the horde can enter it)?
     room_ok: Vec<bool>,
+    /// Bounded path-length table around the player: `0` = not built, otherwise
+    /// `steps` from the player's cell (1 = the player's own cell). Bounded to
+    /// ≤ [`APPROACH_CELLS`], so a build touches a few thousand cells at most.
+    approach: Vec<u16>,
+    /// Cells written into `approach` by the last build, so resetting it costs
+    /// the cells it touched instead of the whole map.
+    approach_touched: Vec<(i32, i32)>,
+    /// The cell `approach` was built from.
+    approach_from: Option<(i32, i32)>,
+    /// BFS queue, reused.
+    queue: Vec<(i32, i32)>,
+    /// One flag per entry in `Level::rooms`: does the room hold a cell inside
+    /// the current approach table? Built with the table, read per room-wave
+    /// candidate (the room scan itself is ~100x more expensive than this).
+    approach_rooms: Vec<bool>,
+    /// Chamber openings: raw candidates, then one representative per cluster.
+    raw_openings: Vec<(i32, i32)>,
+    openings: Vec<(i32, i32)>,
 }
 
 impl SpawnScratch {
     /// (Re)build the cached facts when this is a different map.
     pub fn sync(&mut self, level: &Level) {
+        let cells = (level.tiles.cols() * level.tiles.rows()) as usize;
+        if self.approach.len() != cells {
+            self.approach = vec![0u16; cells];
+            self.approach_touched.clear();
+            self.approach_from = None;
+        }
         let key = (level.seed, level.theme as u8, level.rooms.len());
-        if self.key == Some(key) && self.reach.len() == (level.tiles.cols() * level.tiles.rows()) as usize {
+        if self.key == Some(key) && self.reach.len() == cells {
             return;
         }
         self.key = Some(key);
+        // A different map: the approach table describes the old one.
+        self.approach_from = None;
         // The horde's own map, not the validator's: see [`horde_reachable`].
         self.reach = horde_reachable(&level.tiles, cell_of(level.start));
         let cols = level.tiles.cols();
@@ -333,6 +509,152 @@ impl SpawnScratch {
     /// Can the horde enter `room` (any reachable cell inside it)?
     pub fn room_reachable(&self, index: usize) -> bool {
         self.room_ok.get(index).copied().unwrap_or(false)
+    }
+
+    /// (Re)build the bounded approach table around `from` when the player has
+    /// moved to a new cell. Costs one BFS over ≤ ~1 700 cells, so it is only
+    /// called when a room wave or a flank is actually being considered.
+    pub fn build_approach(&mut self, level: &Level, from: Vec2) {
+        let start = cell_of(from);
+        if self.approach_from == Some(start) {
+            return;
+        }
+        let cols = level.tiles.cols();
+        let rows = level.tiles.rows();
+        if self.approach.len() != (cols * rows) as usize {
+            self.approach = vec![0u16; (cols * rows) as usize];
+        }
+        for (cx, cy) in self.approach_touched.drain(..) {
+            if cx >= 0 && cy >= 0 && cx < cols && cy < rows {
+                self.approach[(cy * cols + cx) as usize] = 0;
+            }
+        }
+        self.approach_rooms.clear();
+        self.approach_from = Some(start);
+        let walkable = |tiles: &TileMap, cx: i32, cy: i32| {
+            tiles.passable(cx, cy, SizeClass::Large) && tiles.one_way_dir(cx, cy).is_none()
+        };
+        if !walkable(&level.tiles, start.0, start.1) {
+            return;
+        }
+        self.approach[(start.1 * cols + start.0) as usize] = 1;
+        self.approach_touched.push(start);
+        self.queue.clear();
+        self.queue.push(start);
+        let mut head = 0usize;
+        while head < self.queue.len() {
+            let (cx, cy) = self.queue[head];
+            head += 1;
+            let d = self.approach[(cy * cols + cx) as usize];
+            if d as i32 >= APPROACH_CELLS {
+                continue;
+            }
+            for (dx, dy) in HORDE_OFFS {
+                let (nx, ny) = (cx + dx, cy + dy);
+                if !level.tiles.in_bounds(nx, ny) {
+                    continue;
+                }
+                let i = (ny * cols + nx) as usize;
+                if self.approach[i] != 0 || !walkable(&level.tiles, nx, ny) {
+                    continue;
+                }
+                if dx != 0
+                    && dy != 0
+                    && !(walkable(&level.tiles, cx + dx, cy) && walkable(&level.tiles, cx, cy + dy))
+                {
+                    continue;
+                }
+                self.approach[i] = d + 1;
+                self.approach_touched.push((nx, ny));
+                self.queue.push((nx, ny));
+            }
+        }
+        // One pass over the rooms: which of them hold a cell in the table.
+        let mut rooms = std::mem::take(&mut self.approach_rooms);
+        rooms.clear();
+        let approach = &self.approach;
+        rooms.extend(level.rooms.iter().map(|room| {
+            room.rect
+                .cells()
+                .any(|(cx, cy)| approach[(cy * cols + cx) as usize] != 0)
+        }));
+        self.approach_rooms = rooms;
+    }
+
+    /// Path length in cells from the player's cell to the cell containing `p`,
+    /// if the approach table reaches it (≤ [`APPROACH_CELLS`]).
+    #[inline]
+    pub fn approach_cells(&self, level: &Level, p: Vec2) -> Option<u16> {
+        let (cx, cy) = cell_of(p);
+        if cx < 0 || cy < 0 || cx >= level.tiles.cols() || cy >= level.tiles.rows() {
+            return None;
+        }
+        match self.approach[(cy * level.tiles.cols() + cx) as usize] {
+            0 => None,
+            d => Some(d - 1),
+        }
+    }
+
+    /// Does `index` (a `Level::rooms` position) hold a cell within
+    /// [`APPROACH_CELLS`] path cells of the player?
+    #[inline]
+    fn room_in_approach(&self, index: usize) -> bool {
+        self.approach_rooms.get(index).copied().unwrap_or(false)
+    }
+
+    /// Collect one representative per approach (doorway) of `room`.
+    ///
+    /// An approach is a cell on the room's boundary that is open floor inside
+    /// the room *and* touches open floor outside it. Adjacent boundary cells of
+    /// the same opening are merged (a two-cell doorway is one approach), so the
+    /// "two real approaches" test cannot be satisfied by the two halves of one
+    /// door. Fills `self.openings`; allocation-free after warm-up.
+    fn scan_openings(&mut self, level: &Level, room: &Room) {
+        self.raw_openings.clear();
+        let rect = room.rect;
+        for (cx, cy) in rect.cells() {
+            let edge = cx == rect.x
+                || cy == rect.y
+                || cx == rect.right() - 1
+                || cy == rect.bottom() - 1;
+            if !edge {
+                continue;
+            }
+            if !level.tiles.passable(cx, cy, SizeClass::Large) {
+                continue;
+            }
+            let mut opens = false;
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let (nx, ny) = (cx + dx, cy + dy);
+                if rect.contains(nx, ny) {
+                    continue;
+                }
+                if level.tiles.passable(nx, ny, SizeClass::Large) {
+                    opens = true;
+                    break;
+                }
+            }
+            if opens {
+                self.raw_openings.push((cx, cy));
+            }
+        }
+        self.openings.clear();
+        for k in 0..self.raw_openings.len() {
+            let (cx, cy) = self.raw_openings[k];
+            let near = self
+                .openings
+                .iter()
+                .any(|&(ox, oy)| (cx - ox).abs() <= 1 && (cy - oy).abs() <= 1);
+            if !near {
+                self.openings.push((cx, cy));
+            }
+        }
+    }
+
+    /// The representatives from the last [`SpawnScratch::scan_openings`].
+    #[inline]
+    pub fn openings(&self) -> &[(i32, i32)] {
+        &self.openings
     }
 }
 
@@ -366,39 +688,58 @@ pub fn ring_radius(viewport: Vec2) -> f32 {
 /// below, so there is one ring implementation, not two.
 pub fn spawn_point(rng: &mut StdRng, level: &Level, player: &Player, viewport: Vec2) -> Vec2 {
     let base = ring_base_angle(rng, player);
-    if let Some(p) = sample_ring(level, player, viewport, base, None) {
-        return p;
-    }
-    fallback_point(level, player, viewport, base, None)
+    spawn_point_from_base(level, player, viewport, base, None)
+        .or_else(|| fallback_point(level, player, viewport, base, None))
+        .unwrap_or_else(|| last_resort(level, player, viewport, base))
+}
+
+/// The ring given an angle that has *already* been drawn: the pulse loop draws
+/// one angle per enemy (so the draw count never depends on which placement rule
+/// an enemy ends up using) and hands it in here.
+fn spawn_point_from_base(
+    level: &Level,
+    player: &Player,
+    viewport: Vec2,
+    base: f32,
+    reach: Option<&[bool]>,
+) -> Option<Vec2> {
+    sample_ring(level, player, viewport, base, reach)
 }
 
 /// The director's spawn point: [`spawn_point`] plus the cached reachability
 /// test, so an enemy never materialises in a pocket the horde cannot leave.
-/// When the whole ring is walled in (the rat ducking through a rat-hole or into
-/// a maze aisle) it spawns in the nearest room the horde can enter instead, and
-/// only then falls back to the nearest wall-clear cell.
+///
+/// `None` means "skip this spawn": the ring had no wall-clear, off-screen,
+/// maze-free, reachable candidate and the only fallbacks left would drop a body
+/// into a warren or onto the rat, which is worse than one fewer enemy.
+///
+/// When the whole ring is walled in (the rat ducking through a rat-hole or
+/// into a maze aisle) the last legal fallback is the nearest room the horde can
+/// enter — still never a maze cell.
 pub fn spawn_point_reachable(
     rng: &mut StdRng,
     level: &Level,
     player: &Player,
     viewport: Vec2,
     scratch: &mut SpawnScratch,
-) -> Vec2 {
-    scratch.sync(level);
+) -> Option<Vec2> {
     let base = ring_base_angle(rng, player);
-    let reach = &scratch.reach;
-    if let Some(p) = sample_ring(level, player, viewport, base, Some(reach)) {
-        return p;
+    scratch.sync(level);
+    if let Some(p) = spawn_point_from_base(level, player, viewport, base, Some(&scratch.reach)) {
+        return Some(p);
     }
     if let Some(p) = nearest_reachable_room_cell(level, scratch, player, SizeClass::Large) {
-        return p;
+        return Some(p);
     }
-    fallback_point(level, player, viewport, base, Some(reach))
+    fallback_point(level, player, viewport, base, Some(&scratch.reach))
 }
 
-/// Where the `room_wave`-th enemy of a pulse spawns: a wall-clear, reachable
-/// cell inside a room the player is **not** in (so the horde arrives through a
-/// doorway), or the ordinary ring when no such room is close enough.
+/// Where member `index` of a pulse spawns.
+///
+/// Order matters for determinism: the ring angle is drawn first, whatever
+/// placement rule the enemy ends up using (a flank reuses the pulse's enemies,
+/// so it must not change how many rng values a pulse consumes per member).
+/// `None` means skip.
 pub fn spawn_pulse_point(
     rng: &mut StdRng,
     level: &Level,
@@ -406,13 +747,27 @@ pub fn spawn_pulse_point(
     viewport: Vec2,
     scratch: &mut SpawnScratch,
     room_wave: bool,
-) -> Vec2 {
+    flank: Option<&FlankPlan>,
+    index: usize,
+) -> Option<Vec2> {
+    // One angle draw per pulse member, exactly like the legacy ring.
+    let base = ring_base_angle(rng, player);
+    if let Some(flank) = flank {
+        return flank.point(level, player, viewport, index);
+    }
     if room_wave {
         if let Some(p) = room_wave_point(rng, level, player, scratch) {
-            return p;
+            return Some(p);
         }
     }
-    spawn_point_reachable(rng, level, player, viewport, scratch)
+    scratch.sync(level);
+    if let Some(p) = spawn_point_from_base(level, player, viewport, base, Some(&scratch.reach)) {
+        return Some(p);
+    }
+    if let Some(p) = nearest_reachable_room_cell(level, scratch, player, SizeClass::Large) {
+        return Some(p);
+    }
+    fallback_point(level, player, viewport, base, Some(&scratch.reach))
 }
 
 /// A room-wave spawn: pick (deterministically, from the caller's rng) one room
@@ -430,6 +785,7 @@ pub fn room_wave_point(
     scratch: &mut SpawnScratch,
 ) -> Option<Vec2> {
     scratch.sync(level);
+    scratch.build_approach(level, player.pos);
     let mut count = 0u32;
     for (i, room) in level.rooms.iter().enumerate() {
         if room_wave_ok(scratch, i, room, player) {
@@ -446,7 +802,7 @@ pub fn room_wave_point(
             continue;
         }
         if seen == pick {
-            return spawn_point_in_room(rng, level, room, SizeClass::Large);
+            return room_approach_point(rng, level, room, player, scratch);
         }
         seen += 1;
     }
@@ -454,16 +810,17 @@ pub fn room_wave_point(
 }
 
 /// Is this room a legal room-wave target?
+///
+/// Three filters, in increasing cost: a staging room (the horde can enter it),
+/// a room the player is not in, within [`ROOM_WAVE_RANGE`] of him, and — the
+/// design change — an approach of at most [`APPROACH_CELLS`] path cells so the
+/// wave arrives in seconds instead of queueing behind a wall.
 #[inline]
-fn room_wave_ok(
-    scratch: &SpawnScratch,
-    index: usize,
-    room: &crate::game::level::Room,
-    player: &Player,
-) -> bool {
+fn room_wave_ok(scratch: &SpawnScratch, index: usize, room: &Room, player: &Player) -> bool {
     room_staging_ok(scratch, index, room)
         && !room.rect.contains_world(player.pos)
         && room.center().dist(player.pos) <= ROOM_WAVE_RANGE
+        && scratch.room_in_approach(index)
 }
 
 /// Is this room a place the horde can gather in at all? Narrow corridors and
@@ -480,7 +837,16 @@ fn room_staging_ok(scratch: &SpawnScratch, index: usize, room: &crate::game::lev
 
 /// A wall-clear cell inside `room`, chosen without any rng (the first one in
 /// cell order): the deterministic escape used when no ring point is legal.
-fn room_open_cell(level: &Level, room: &crate::game::level::Room, class: SizeClass) -> Option<Vec2> {
+///
+/// `keep_away` is the rat: a cell closer than [`SPAWN_MIN_DIST`] to it is never
+/// chosen, so "no safe off-screen point" degrades to *skipping* the spawn rather
+/// than dropping a body on top of the player.
+fn room_open_cell(
+    level: &Level,
+    room: &Room,
+    class: SizeClass,
+    keep_away: Option<Vec2>,
+) -> Option<Vec2> {
     let area = room.rect.inflate(-ROOM_INSET);
     if area.w <= 0 || area.h <= 0 {
         return None;
@@ -488,7 +854,15 @@ fn room_open_cell(level: &Level, room: &crate::game::level::Room, class: SizeCla
     let clear = room_clearance(class);
     let mut found = None;
     for (cx, cy) in area.cells() {
+        if cell_in_maze(level, cx, cy) {
+            continue;
+        }
         let p = TileMap::tile_rect(cx, cy).center();
+        if let Some(from) = keep_away {
+            if p.dist_sq(from) < SPAWN_MIN_DIST * SPAWN_MIN_DIST {
+                continue;
+            }
+        }
         if level.tiles.passable(cx, cy, class) && level.tiles.circle_clear(p, clear, class) {
             found = Some(p);
             break;
@@ -513,7 +887,7 @@ fn nearest_reachable_room_cell(
         if best.is_some_and(|(bd, _)| bd <= d) {
             continue;
         }
-        if let Some(p) = room_open_cell(level, room, class) {
+        if let Some(p) = room_open_cell(level, room, class, Some(player.pos)) {
             best = Some((d, p));
         }
     }
@@ -528,7 +902,7 @@ fn nearest_reachable_room_cell(
 pub fn spawn_point_in_room(
     rng: &mut StdRng,
     level: &Level,
-    room: &crate::game::level::Room,
+    room: &Room,
     class: SizeClass,
 ) -> Option<Vec2> {
     let area = room.rect.inflate(-ROOM_INSET);
@@ -539,12 +913,200 @@ pub fn spawn_point_in_room(
     for _ in 0..ROOM_SAMPLES {
         let cx = rng.random_range(area.x..area.right());
         let cy = rng.random_range(area.y..area.bottom());
+        if cell_in_maze(level, cx, cy) {
+            continue;
+        }
         let p = TileMap::tile_rect(cx, cy).center();
         if level.tiles.passable(cx, cy, class) && level.tiles.circle_clear(p, clear, class) {
             return Some(p);
         }
     }
     None
+}
+
+/// A room-wave point: like [`spawn_point_in_room`], but it must also be a real
+/// approach — at least [`SPAWN_MIN_DIST`] from the rat and within
+/// [`APPROACH_CELLS`] path cells of him — so the bodies that appear there
+/// actually arrive. Draws the same fixed [`ROOM_SAMPLES`] pairs as
+/// `spawn_point_in_room`, so the number of rng values a room wave consumes does
+/// not depend on the map.
+fn room_approach_point(
+    rng: &mut StdRng,
+    level: &Level,
+    room: &Room,
+    player: &Player,
+    scratch: &SpawnScratch,
+) -> Option<Vec2> {
+    let area = room.rect.inflate(-ROOM_INSET);
+    if area.w <= 0 || area.h <= 0 {
+        return None;
+    }
+    let clear = room_clearance(SizeClass::Large);
+    for _ in 0..ROOM_SAMPLES {
+        let cx = rng.random_range(area.x..area.right());
+        let cy = rng.random_range(area.y..area.bottom());
+        if cell_in_maze(level, cx, cy) {
+            continue;
+        }
+        let p = TileMap::tile_rect(cx, cy).center();
+        if !level.tiles.passable(cx, cy, SizeClass::Large) {
+            continue;
+        }
+        if !level.tiles.circle_clear(p, clear, SizeClass::Large) {
+            continue;
+        }
+        if p.dist(player.pos) < SPAWN_MIN_DIST {
+            continue;
+        }
+        if !scratch.is_reachable(level, p) {
+            continue;
+        }
+        if scratch.approach_cells(level, p).is_none() {
+            continue;
+        }
+        return Some(p);
+    }
+    None
+}
+
+/// Two off-screen flanking groups: one per real approach of the chamber the rat
+/// has been holding.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FlankPlan {
+    /// The two chamber openings, as world points just inside the room.
+    pub anchors: [Vec2; 2],
+}
+
+impl FlankPlan {
+    /// Where member `index` of the pulse appears: group `index % 2`, member
+    /// `index / 2` of that group.
+    ///
+    /// No rng: the offsets are a fixed spiral from the doorway, so the pulse's
+    /// enemies stay one pulse's worth of bodies (the angle draw still happened
+    /// in [`spawn_pulse_point`]).
+    pub fn point(
+        &self,
+        level: &Level,
+        player: &Player,
+        viewport: Vec2,
+        index: usize,
+    ) -> Option<Vec2> {
+        let anchor = self.anchors[index % 2];
+        let member = index / 2;
+        let (acx, acy) = cell_of(anchor);
+        for step in 0..FLANK_OFFSETS.len() {
+            let (dx, dy) = FLANK_OFFSETS[(member + step) % FLANK_OFFSETS.len()];
+            let (cx, cy) = (acx + dx, acy + dy);
+            if cell_in_maze(level, cx, cy) {
+                continue;
+            }
+            if !level.tiles.passable(cx, cy, SizeClass::Large) {
+                continue;
+            }
+            let p = TileMap::tile_rect(cx, cy).center();
+            if !level
+                .tiles
+                .circle_clear(p, SPAWN_WALL_CLEAR, SizeClass::Large)
+            {
+                continue;
+            }
+            if p.dist(player.pos) < SPAWN_MIN_DIST {
+                continue;
+            }
+            if !off_screen(p, player.pos, viewport) {
+                continue;
+            }
+            return Some(p);
+        }
+        // The anchor was validated by `plan_flank`; a crowded doorway is still
+        // better than dropping the group.
+        Some(anchor)
+    }
+}
+
+/// Plan the two off-screen flanking groups for chamber `room_index`.
+///
+/// `None` unless the chamber offers **two real approaches**: openings on its
+/// boundary that are reachable, off screen from the rat, at least
+/// [`SPAWN_MIN_DIST`] away, within [`APPROACH_CELLS`] path cells, and at least
+/// [`FLANK_MIN_SEPARATION`] apart in bearing. The pair with the widest bearing
+/// wins (deterministically; ties keep the first).
+pub fn plan_flank(
+    level: &Level,
+    player: &Player,
+    viewport: Vec2,
+    room_index: usize,
+    scratch: &mut SpawnScratch,
+) -> Option<FlankPlan> {
+    let room = *level.rooms.get(room_index)?;
+    scratch.build_approach(level, player.pos);
+    scratch.scan_openings(level, &room);
+    let n = scratch.openings.len();
+    let mut best: Option<(f32, Vec2, Vec2)> = None;
+    for i in 0..n {
+        let (ax, ay) = scratch.openings[i];
+        let a = TileMap::tile_rect(ax, ay).center();
+        if !flank_anchor_ok(level, player, viewport, scratch, a) {
+            continue;
+        }
+        for j in (i + 1)..n {
+            let (bx, by) = scratch.openings[j];
+            let b = TileMap::tile_rect(bx, by).center();
+            if !flank_anchor_ok(level, player, viewport, scratch, b) {
+                continue;
+            }
+            let sep = angle_between(a - player.pos, b - player.pos);
+            if sep < FLANK_MIN_SEPARATION {
+                continue;
+            }
+            if best.is_none_or(|(bs, _, _)| sep > bs) {
+                best = Some((sep, a, b));
+            }
+        }
+    }
+    best.map(|(_, a, b)| FlankPlan { anchors: [a, b] })
+}
+
+/// Is this chamber opening a legal flanking approach?
+fn flank_anchor_ok(
+    level: &Level,
+    player: &Player,
+    viewport: Vec2,
+    scratch: &SpawnScratch,
+    p: Vec2,
+) -> bool {
+    let (cx, cy) = cell_of(p);
+    if cell_in_maze(level, cx, cy) {
+        return false;
+    }
+    if !level.tiles.passable(cx, cy, SizeClass::Large) {
+        return false;
+    }
+    if !level
+        .tiles
+        .circle_clear(p, room_clearance(SizeClass::Large), SizeClass::Large)
+    {
+        return false;
+    }
+    if p.dist(player.pos) < SPAWN_MIN_DIST {
+        return false;
+    }
+    if !off_screen(p, player.pos, viewport) {
+        return false;
+    }
+    if !scratch.is_reachable(level, p) {
+        return false;
+    }
+    scratch.approach_cells(level, p).is_some()
+}
+
+/// Angle between two vectors, in radians (`0` for a degenerate one).
+fn angle_between(a: Vec2, b: Vec2) -> f32 {
+    let (la, lb) = (a.len(), b.len());
+    if la < 1e-3 || lb < 1e-3 {
+        return 0.0;
+    }
+    (a.dot(b) / (la * lb)).clamp(-1.0, 1.0).acos()
 }
 
 /// Clearance a room spawn keeps from any wall, per size class (a boss-sized
@@ -621,7 +1183,7 @@ fn fallback_point(
     viewport: Vec2,
     base: f32,
     reach: Option<&[bool]>,
-) -> Vec2 {
+) -> Option<Vec2> {
     let p = player.pos + Vec2::from_angle(base) * ring_radius(viewport);
     for min_dist in [SPAWN_MIN_DIST, NEAR_SPAWN_DIST] {
         if let Some(q) = nearest_clear(
@@ -633,9 +1195,17 @@ fn fallback_point(
             Some(player.pos),
             min_dist,
         ) {
-            return q;
+            return Some(q);
         }
     }
+    None
+}
+
+/// The void primitive's very last resort ([`spawn_point`], the facade's test
+/// hook): a ring point clamped inside the arena. The director never uses this —
+/// it skips the spawn instead ([`spawn_point_reachable`]).
+fn last_resort(level: &Level, player: &Player, viewport: Vec2, base: f32) -> Vec2 {
+    let p = player.pos + Vec2::from_angle(base) * ring_radius(viewport);
     p.clamp_box(Vec2::splat(6.0), level.arena - Vec2::splat(6.0))
 }
 
@@ -692,6 +1262,9 @@ fn nearest_clear(
                     if !level.tiles.in_bounds(cx, cy) {
                         continue;
                     }
+                    if cell_in_maze(level, cx, cy) {
+                        continue;
+                    }
                     let c = TileMap::tile_rect(cx, cy).center();
                     if let Some(from) = min_from {
                         if c.dist_sq(from) < min_dist * min_dist {
@@ -732,7 +1305,11 @@ pub fn spawn_point_ok(
     // grow with the map. The horde is the `Large` class, so a rat-hole cell
     // reads as a solid face here and no enemy materialises in a hole the
     // player could duck through.
-    level.tiles.circle_clear(p, wall_clear, SizeClass::Large)
+    if !level.tiles.circle_clear(p, wall_clear, SizeClass::Large) {
+        return false;
+    }
+    // Never inside a maze's ring or interior: the chase begins at the mouth.
+    !in_maze(level, p)
 }
 
 #[cfg(test)]
@@ -742,17 +1319,18 @@ mod tests {
     use rand::SeedableRng;
 
     use super::{
-        director_system, ring_radius, spawn_point, spawn_point_in_room, spawn_point_ok,
-        spawn_point_reachable, SpawnScratch,
+        director_system, in_maze, plan_flank, ring_radius, spawn_point, spawn_point_in_room,
+        spawn_point_ok, spawn_point_reachable, SpawnScratch, APPROACH_CELLS,
     };
     use crate::audio::Sfx;
     use crate::game::art_walls::WallKind;
     use crate::game::collision::{circle_rect_overlap, SizeClass, TileKind, TileMap, TILE_F};
-    use crate::game::director::{self, Director};
-    use crate::game::ecs::constants::{ENEMY_CAP, PARTICLE_CAP};
+    use crate::game::director;
+    use crate::game::ecs::constants::ENEMY_CAP;
+    use crate::game::ecs::resources::BossDue;
     use crate::game::enemy::{Enemy, EnemyKind};
     use crate::game::level::{Level, Rectf, RoomKind, Theme, MAP_COLS, MAP_ROWS};
-    use crate::game::particle::{vfx, Particles};
+    use crate::game::loadout::Loadout;
     use crate::game::player::Player;
     use crate::game::weapon::WeaponKind;
     use crate::game::world::World;
@@ -763,6 +1341,10 @@ mod tests {
     /// collision).
     fn open_level(level: &mut Level) {
         level.tiles = TileMap::new(MAP_COLS, MAP_ROWS, level.theme, 0);
+        // The maze exclusion reads `Level::mazes`, not the tiles, so a blank
+        // map has to clear them as well.
+        level.mazes.clear();
+        level.rooms.clear();
     }
 
     /// Drive exactly one director tick at a chosen run clock, exactly the way
@@ -935,9 +1517,10 @@ mod tests {
         assert!(!w.director.boss_spawned);
     }
 
-    /// The reserved slot holds for the whole run and is only spent by the boss.
+    /// The reserved slot holds for the whole run and is only released when the
+    /// boss becomes due (the boss framework then spends it on the boss itself).
     #[test]
-    fn director_reserves_one_slot_for_the_boss_until_it_spawns() {
+    fn director_reserves_one_slot_until_the_boss_is_due() {
         let mut w = World::new(Theme::Sewer, 17);
         let dt = 0.1;
         let mut elapsed = 0.0;
@@ -955,45 +1538,84 @@ mod tests {
                 break;
             }
         }
-        // The reserved slot is still free: the next tick past BOSS_TIME fills
-        // it, and the cap still holds.
+        // The hand-off tick still spawns against the reserved cap (the boss is
+        // not due yet when the pulse runs) and releases the slot for the boss.
         director_tick(&mut w, dt, director::BOSS_TIME);
         assert!(w.director.boss_spawned);
+        assert!(w.ecs.resource::<BossDue>().is_pending());
+        assert!(w.enemies().len() <= ENEMY_CAP);
+        // From the next tick on, the horde may use the last slot; the boss
+        // framework spends its own reservation (a 600-body cap with the boss is
+        // still 600 bodies, one of them the boss).
+        w.director.spawn_timer = 0.0;
+        director_tick(&mut w, 0.5, director::BOSS_TIME + 0.5);
         assert_eq!(w.enemies().len(), ENEMY_CAP);
-        assert!(w.enemies().iter().any(|e| e.kind == EnemyKind::Boss));
     }
 
-    /// Boss spawn *assigns* `shake = 14.0` (the legacy code, not a `max`) and
-    /// pushes `Sfx::Boss`.
+    /// The boss is handed over, not spawned: at `BOSS_TIME` the director raises
+    /// `BossDue`, sets `boss_spawned` (so the 25 s warning still closes) and
+    /// spawns no boss of its own — and no longer plays the arrival either.
     #[test]
-    fn boss_spawn_shakes_the_screen_and_plays_the_boss_sfx() {
-        let mut w = World::new(Theme::Sewer, 19);
+    fn the_boss_is_handed_over_instead_of_spawned() {
+        let mut w = World::new(Theme::Sewer, 23);
+        // A dying-screen shake from earlier must not be overwritten by a boss.
         w.shake = 40.0;
         w.sfx.clear();
+        director_tick(&mut w, 0.1, director::BOSS_TIME - 0.1);
+        assert!(!w.director.boss_spawned, "the boss came early");
+        assert!(!w.ecs.resource::<BossDue>().due);
+
         director_tick(&mut w, 0.1, director::BOSS_TIME);
         assert!(w.director.boss_spawned);
-        assert_eq!(w.shake, 14.0);
-        assert_eq!(w.sfx.iter().filter(|s| **s == Sfx::Boss).count(), 1);
+        let due = *w.ecs.resource::<BossDue>();
+        assert!(due.is_pending(), "the boss signal was not raised");
+        assert_eq!(due.level, 0);
+        assert!((due.at - director::BOSS_TIME).abs() < 1e-3);
+        assert!(
+            !w.enemies().iter().any(|e| e.kind == EnemyKind::Boss),
+            "the director still spawns a generic boss"
+        );
+        // The boss framework owns the arrival feedback now.
+        assert_eq!(w.shake, 40.0);
+        assert!(!w.sfx.contains(&Sfx::Boss));
     }
 
-    /// The boss spawns exactly once.
+    /// The signal is raised once and consumed once; the boss framework's
+    /// `take` is the only thing that clears it.
     #[test]
-    fn boss_spawns_once() {
-        let mut w = World::new(Theme::Sewer, 23);
+    fn the_boss_signal_is_raised_and_claimed_once() {
+        let mut w = World::new_level(1, 24, Loadout::starting());
+        director_tick(&mut w, 0.1, director::BOSS_TIME);
         director_tick(&mut w, 0.1, director::BOSS_TIME + 3.0);
-        let first = w
-            .enemies()
-            .iter()
-            .filter(|e| e.kind == EnemyKind::Boss)
-            .count();
-        assert_eq!(first, 1);
-        director_tick(&mut w, 0.1, director::BOSS_TIME + 300.0);
-        let second = w
-            .enemies()
-            .iter()
-            .filter(|e| e.kind == EnemyKind::Boss)
-            .count();
-        assert_eq!(second, 1, "the boss respawned");
+        {
+            let mut due = w.ecs.resource_mut::<BossDue>();
+            assert!(due.take(), "the first take must hand the boss over");
+            assert!(!due.take(), "the signal was handed over twice");
+            assert!(!due.is_pending());
+        }
+        // Never raised again, however long the fight lasts.
+        director_tick(&mut w, 0.1, director::BOSS_TIME + 400.0);
+        assert!(!w.ecs.resource::<BossDue>().is_pending());
+        assert_eq!(w.ecs.resource::<BossDue>().level, 1);
+    }
+
+    /// After the hand-off the horde keeps coming at the level's late-curve rate
+    /// — the curve froze at `BOSS_TIME` instead of running away — and the cap
+    /// still holds.
+    #[test]
+    fn the_horde_keeps_coming_after_the_boss_is_due() {
+        let mut w = World::new(Theme::Sewer, 25);
+        director_tick(&mut w, 0.1, director::BOSS_TIME);
+        let before = w.enemies().len();
+        assert!(before > 0, "no horde arrived on the boss tick");
+        for k in 1..=120 {
+            director_tick(&mut w, 0.2, director::BOSS_TIME + k as f32 * 0.2);
+        }
+        assert!(
+            w.enemies().len() > before,
+            "the horde stopped spawning after the boss was due"
+        );
+        assert_eq!(w.enemies().len(), ENEMY_CAP, "the cap slipped");
     }
 
     /// Elites are gated on `elapsed > ELITE_START` (strictly greater), spawn a
@@ -1032,10 +1654,10 @@ mod tests {
         assert!(!w.enemies().iter().any(|e| e.kind == EnemyKind::Brute));
     }
 
-    /// A tick that both pulses *and* crosses the boss gate still respects the
-    /// cap: the pulse is blocked, the boss still gets its reserved slot.
+    /// A tick that both pulses *and* crosses the boss time still respects the
+    /// cap and still hands the boss over.
     #[test]
-    fn a_late_tick_blocked_at_the_cap_still_spawns_the_boss() {
+    fn a_late_tick_blocked_at_the_cap_still_hands_the_boss_over() {
         let mut w = World::new(Theme::Sewer, 43);
         let centre = w.level.arena * 0.5;
         for _ in 0..(ENEMY_CAP - 1) {
@@ -1043,87 +1665,9 @@ mod tests {
         }
         w.director.spawn_timer = 0.0;
         director_tick(&mut w, 500.0, director::BOSS_TIME);
-        assert_eq!(w.enemies().len(), ENEMY_CAP);
+        assert_eq!(w.enemies().len(), ENEMY_CAP - 1, "the pulse spent the reserved slot");
         assert!(w.director.boss_spawned);
-    }
-
-    /// The neon-era legacy body of `run_director`, kept as an independent
-    /// reference so the rng
-    /// draw order can be compared tick by tick — including the enemy-id
-    /// counter and the boss-arrival VFX, both of which consume rng or touch
-    /// state in the same order the system must.
-    #[allow(clippy::too_many_arguments)]
-    fn legacy_director_tick(
-        dt: f32,
-        elapsed: f32,
-        director: &mut Director,
-        rng: &mut StdRng,
-        level: &Level,
-        player: &Player,
-        viewport: Vec2,
-        particles: &mut Particles,
-        next_enemy_id: &mut u32,
-        scratch: &mut SpawnScratch,
-        out: &mut Vec<Enemy>,
-    ) {
-        let cap = if director.boss_spawned {
-            ENEMY_CAP
-        } else {
-            ENEMY_CAP - 1
-        };
-
-        director.spawn_timer -= dt;
-        if director.spawn_timer <= 0.0 {
-            director.spawn_timer = director::spawn_interval(elapsed);
-            let count = director::pulse_count(elapsed);
-            let mult = director::hp_mult(elapsed);
-            let room_wave = director.pulses >= super::ROOM_WAVE_AFTER_PULSES
-                && director.pulses.is_multiple_of(super::ROOM_WAVE_EVERY);
-            director.pulses = director.pulses.wrapping_add(1);
-            for i in 0..count {
-                if out.len() >= cap {
-                    break;
-                }
-                let kind = director::pick_kind(elapsed, rng);
-                let pos = super::spawn_pulse_point(
-                    rng,
-                    level,
-                    player,
-                    viewport,
-                    scratch,
-                    room_wave && i == 0,
-                );
-                let mut e = Enemy::spawn(kind, pos, mult, rng);
-                e.id = *next_enemy_id;
-                *next_enemy_id = next_enemy_id.wrapping_add(1).max(1);
-                out.push(e);
-            }
-        }
-
-        director.elite_timer -= dt;
-        if director.elite_timer <= 0.0 && elapsed > director::ELITE_START {
-            director.elite_timer = director::ELITE_INTERVAL;
-            if out.len() < cap {
-                let pos = super::spawn_point_reachable(rng, level, player, viewport, scratch);
-                let mult = director::hp_mult(elapsed) * 1.6;
-                let mut e = Enemy::spawn(EnemyKind::Brute, pos, mult, rng);
-                e.id = *next_enemy_id;
-                e.elite = true;
-                *next_enemy_id = next_enemy_id.wrapping_add(1).max(1);
-                out.push(e);
-            }
-        }
-
-        if !director.boss_spawned && elapsed >= director::BOSS_TIME {
-            director.boss_spawned = true;
-            let pos = super::spawn_point_reachable(rng, level, player, viewport, scratch);
-            let mut e = Enemy::spawn(EnemyKind::Boss, pos, 1.0, rng);
-            e.id = *next_enemy_id;
-            *next_enemy_id = next_enemy_id.wrapping_add(1).max(1);
-            out.push(e);
-            let accent = level.palette.accent;
-            vfx::emit_boss_spawn(particles, rng, pos, accent);
-        }
+        assert!(w.ecs.resource::<BossDue>().is_pending());
     }
 
     /// Everything `spawn_point` and `Enemy::spawn` derive from the rng, so any
@@ -1132,80 +1676,48 @@ mod tests {
         let fields = [
             e.pos.x, e.pos.y, e.hp, e.max_hp, e.radius, e.damage, e.fire_cd, e.wander, e.anim,
         ];
-        (
-            e.kind,
-            e.elite,
-            fields.iter().map(|f| f.to_bits()).collect(),
-        )
+        (e.kind, e.elite, fields.iter().map(|f| f.to_bits()).collect())
     }
 
-    /// The system is a line-by-line port: the same seed, clock, level and
-    /// viewport must produce the same enemies in the same order as the legacy
-    /// body, which only holds if every rng draw (count, range and order)
-    /// matches.
+    /// **Twin runs.** Same seed, same map, same clock ⇒ the same enemies in the
+    /// same order, down to the last rng-derived bit.
+    ///
+    /// This is the determinism contract the golden reference trace cannot check
+    /// while the content wave is in flight (the integrator regenerates those
+    /// once); it also covers the *number* of rng draws per pulse, which the
+    /// room-wave, flank and skip rules all have to keep independent of their
+    /// outcomes: every pulse member draws exactly one ring angle, then
+    /// `Enemy::spawn` draws three fields.
     #[test]
-    fn director_matches_the_legacy_draw_order() {
+    fn the_director_is_deterministic_across_twin_runs() {
         let seed = 41;
-        let mut w = World::new(Theme::Sewer, seed);
-
-        // The spawn ring depends on the map (reachability, rooms), so the
-        // reference must play the *same* map: `Level::generate` is the same
-        // deterministic call `World::new` made, and no other system moves the
-        // player during a director-only run.
-        let level = Level::generate(Theme::Sewer, seed);
-        let player = Player::new(level.start, WeaponKind::Gnaw);
-        assert_eq!(w.player.pos, player.pos);
-        assert_eq!(w.level.arena, level.arena);
-        let viewport = w.viewport;
-
-        let mut ref_rng = StdRng::seed_from_u64(seed);
-        let mut ref_director = Director::default();
-        let mut ref_particles = Particles::new(PARTICLE_CAP);
-        let mut ref_scratch = SpawnScratch::default();
-        let mut ref_next_enemy_id: u32 = 1;
-        let mut reference: Vec<Enemy> = Vec::new();
-
+        let mut a = World::new(Theme::Sewer, seed);
+        let mut b = World::new(Theme::Sewer, seed);
+        assert_eq!(a.level.arena, b.level.arena);
         let dt = 0.5;
         let mut elapsed = 0.0;
-        let mut compared = 0usize;
         for _ in 0..620 {
             elapsed += dt;
-            legacy_director_tick(
-                dt,
-                elapsed,
-                &mut ref_director,
-                &mut ref_rng,
-                &level,
-                &player,
-                viewport,
-                &mut ref_particles,
-                &mut ref_next_enemy_id,
-                &mut ref_scratch,
-                &mut reference,
-            );
-            director_tick(&mut w, dt, elapsed);
-
-            let port = w.enemies();
-            assert_eq!(port.len(), reference.len(), "count at {elapsed:.2}s");
-            for (i, expected) in reference.iter().enumerate().skip(compared) {
+            director_tick(&mut a, dt, elapsed);
+            director_tick(&mut b, dt, elapsed);
+            let (ea, eb) = (a.enemies(), b.enemies());
+            assert_eq!(ea.len(), eb.len(), "count differs at {elapsed:.2}s");
+            for (x, y) in ea.iter().zip(eb.iter()) {
                 assert_eq!(
-                    fingerprint(&port[i]),
-                    fingerprint(expected),
-                    "enemy {i} differs at {elapsed:.2}s"
+                    fingerprint(x),
+                    fingerprint(y),
+                    "enemy differs at {elapsed:.2}s"
                 );
             }
-            compared = reference.len();
-            assert_eq!(w.director.spawn_timer, ref_director.spawn_timer);
-            assert_eq!(w.director.elite_timer, ref_director.elite_timer);
-            assert_eq!(w.director.boss_spawned, ref_director.boss_spawned);
+            assert_eq!(a.director.spawn_timer, b.director.spawn_timer);
+            assert_eq!(a.director.elite_timer, b.director.elite_timer);
+            assert_eq!(a.director.chamber_room, b.director.chamber_room);
+            assert_eq!(a.director.boss_spawned, b.director.boss_spawned);
         }
-        assert_eq!(compared, ENEMY_CAP, "the run must exercise the cap");
-        assert!(w.director.boss_spawned, "the run must reach the boss");
-        // In a director-only run the port's SpawnId-derived enemy ids land on
-        // exactly the legacy values (1, 2, 3, ...), so the ids above are a real
-        // equivalence check, not just uniqueness.
+        assert!(a.enemies().len() > 100, "the run must exercise the cap");
+        assert!(a.director.boss_spawned, "the run must reach the boss hand-off");
         assert_eq!(
-            w.enemies().first().map(|e| e.id),
+            a.enemies().first().map(|e| e.id),
             Some(1),
             "first director enemy must get id 1"
         );
@@ -1265,87 +1777,6 @@ mod tests {
         assert_eq!(elites.len(), 1, "exactly one elite per elite spawn");
         assert_eq!(elites[0].kind, EnemyKind::Brute);
         assert_ne!(elites[0].id, 0, "the elite still needs a runtime id");
-    }
-
-    /// Hook: `vfx::emit_boss_spawn(...)` right after the boss is pushed and
-    /// before the shake/SFX, so the arrival shockwave and cross burst exist on
-    /// the boss tick.
-    #[test]
-    fn boss_arrival_emits_the_spawn_vfx() {
-        let mut w = World::new(Theme::Sewer, 59);
-        assert_eq!(w.particles.shockwaves.len(), 0);
-        let particles_before = w.particles.len();
-
-        director_tick(&mut w, 0.1, director::BOSS_TIME);
-
-        assert!(w.director.boss_spawned);
-        assert_eq!(
-            w.particles.shockwaves.len(),
-            1,
-            "boss arrival should push its shockwave"
-        );
-        assert!(
-            w.particles.len() > particles_before,
-            "boss arrival should emit particles"
-        );
-        // Still the legacy shake + SFX.
-        assert_eq!(w.shake, 14.0);
-        assert_eq!(w.sfx.iter().filter(|s| **s == Sfx::Boss).count(), 1);
-    }
-
-    /// The boss VFX draws from the same rng the spawn used, in the same place:
-    /// the tick after the boss spawn must continue the identical draw sequence.
-    #[test]
-    fn boss_vfx_draws_do_not_disturb_the_following_tick() {
-        let seed = 61;
-        let mut w = World::new(Theme::Sewer, seed);
-
-        let level = Level::generate(Theme::Sewer, seed);
-        let player = Player::new(level.start, WeaponKind::Gnaw);
-        let viewport = w.viewport;
-        let mut ref_rng = StdRng::seed_from_u64(seed);
-        let mut ref_director = Director::default();
-        let mut ref_particles = Particles::new(PARTICLE_CAP);
-        let mut ref_scratch = SpawnScratch::default();
-        let mut ref_next_enemy_id: u32 = 1;
-        let mut reference: Vec<Enemy> = Vec::new();
-
-        let dt = 0.5;
-        let mut elapsed = 0.0;
-        for _ in 0..560 {
-            elapsed += dt;
-            legacy_director_tick(
-                dt,
-                elapsed,
-                &mut ref_director,
-                &mut ref_rng,
-                &level,
-                &player,
-                viewport,
-                &mut ref_particles,
-                &mut ref_next_enemy_id,
-                &mut ref_scratch,
-                &mut reference,
-            );
-            director_tick(&mut w, dt, elapsed);
-        }
-        // Past BOSS_TIME: the boss VFX consumed rng inside the spawn tick, so
-        // the next pulse's enemies only match if the draw order is unchanged.
-        assert!(w.director.boss_spawned);
-        assert_eq!(w.enemies().len(), reference.len());
-        assert_eq!(
-            w.enemies()
-                .iter()
-                .map(|e| e.fire_cd.to_bits())
-                .collect::<Vec<_>>(),
-            reference
-                .iter()
-                .map(|e| e.fire_cd.to_bits())
-                .collect::<Vec<_>>(),
-            "the boss VFX rng draws disturbed the following spawns"
-        );
-        assert_eq!(w.particles.shockwaves.len(), 1);
-        assert_eq!(ref_particles.shockwaves.len(), 1);
     }
 
     // ---- Content update: spawn pacing on the big procedural maps ----------
@@ -1466,7 +1897,8 @@ mod tests {
                             &w.player,
                             w.viewport,
                             &mut scratch,
-                        );
+                        )
+                        .expect("a generated map must offer a spawn point");
                         assert!(
                             scratch.is_reachable(&w.level, p),
                             "{theme:?} seed {seed}: spawn {p:?} is unreachable for the horde"
@@ -1474,6 +1906,10 @@ mod tests {
                         assert!(
                             w.level.tiles.circle_clear(p, RING_CLEAR, SizeClass::Large),
                             "{theme:?} seed {seed}: reachable spawn {p:?} overlaps a wall"
+                        );
+                        assert!(
+                            !super::in_maze(&w.level, p),
+                            "{theme:?} seed {seed}: spawn {p:?} is inside a maze"
                         );
                     }
                 }
@@ -1514,7 +1950,9 @@ mod tests {
     /// Room waves: a pulse can stage its first enemy inside a room the player
     /// is not in, so the horde arrives through a doorway instead of all of it
     /// materialising on the ring. Deterministic per rng, always inside a
-    /// staging room, always reachable for the horde.
+    /// staging room, always reachable for the horde, and — design change 6 —
+    /// never further than [`super::ROOM_WAVE_RANGE`] away or more than
+    /// [`super::APPROACH_CELLS`] path cells from the rat.
     #[test]
     fn room_waves_stage_enemies_outside_the_players_room() {
         let mut hits = 0;
@@ -1523,41 +1961,60 @@ mod tests {
                 let mut w = World::new(theme, seed);
                 let mut scratch = SpawnScratch::default();
                 scratch.sync(&w.level);
-                // Stand in an open hall so another room is inside wave range.
-                if let Some(centre) = w
-                    .level
-                    .rooms
-                    .iter()
-                    .find(|r| matches!(r.kind, RoomKind::Hall | RoomKind::Room))
-                    .map(|r| r.center())
-                {
-                    w.player.pos = centre;
-                }
-                let mut a = StdRng::seed_from_u64(seed);
-                let mut b = StdRng::seed_from_u64(seed);
-                for _ in 0..20 {
-                    let pa = super::room_wave_point(&mut a, &w.level, &w.player, &mut scratch);
-                    let pb = super::room_wave_point(&mut b, &w.level, &w.player, &mut scratch);
-                    assert_eq!(pa, pb, "{theme:?} seed {seed}: room wave is not deterministic");
-                    let Some(p) = pa else { continue };
-                    hits += 1;
-                    assert!(
-                        scratch.is_reachable(&w.level, p),
-                        "{theme:?} seed {seed}: wave spawn {p:?} is unreachable"
-                    );
-                    assert!(w.level.tiles.circle_clear(p, RING_CLEAR, SizeClass::Large));
-                    let room = w
-                        .level
-                        .room_at(p)
-                        .expect("a room wave must land inside a room");
-                    assert!(
-                        !room.rect.contains_world(w.player.pos),
-                        "{theme:?} seed {seed}: wave spawned in the player's own room"
-                    );
-                    assert!(matches!(
-                        room.kind,
-                        RoomKind::Start | RoomKind::Boss | RoomKind::Hall | RoomKind::Room
-                    ));
+                // Try every chamber centre: with the wave range cut to 320 px
+                // only a standpoint with a neighbour room inside it qualifies,
+                // and which rooms those are depends on the map.
+                let mut standpoints: Vec<Vec2> =
+                    w.level.rooms.iter().map(|r| r.center()).collect();
+                standpoints.insert(0, w.player.pos);
+                for spot in standpoints {
+                    w.player.pos = spot;
+                    let mut a = StdRng::seed_from_u64(seed);
+                    let mut b = StdRng::seed_from_u64(seed);
+                    for _ in 0..8 {
+                        let pa = super::room_wave_point(&mut a, &w.level, &w.player, &mut scratch);
+                        let pb = super::room_wave_point(&mut b, &w.level, &w.player, &mut scratch);
+                        assert_eq!(
+                            pa, pb,
+                            "{theme:?} seed {seed}: room wave is not deterministic"
+                        );
+                        let Some(p) = pa else { continue };
+                        hits += 1;
+                        assert!(
+                            scratch.is_reachable(&w.level, p),
+                            "{theme:?} seed {seed}: wave spawn {p:?} is unreachable"
+                        );
+                        assert!(w.level.tiles.circle_clear(p, RING_CLEAR, SizeClass::Large));
+                        assert!(
+                            !super::in_maze(&w.level, p),
+                            "{theme:?} seed {seed}: wave spawn {p:?} is in a maze"
+                        );
+                        let room = w
+                            .level
+                            .room_at(p)
+                            .expect("a room wave must land inside a room");
+                        assert!(
+                            !room.rect.contains_world(w.player.pos),
+                            "{theme:?} seed {seed}: wave spawned in the player's own room"
+                        );
+                        assert!(matches!(
+                            room.kind,
+                            RoomKind::Start | RoomKind::Boss | RoomKind::Hall | RoomKind::Room
+                        ));
+                        assert!(
+                            room.center().dist(w.player.pos) <= super::ROOM_WAVE_RANGE + 1e-3,
+                            "{theme:?} seed {seed}: wave room is out of range"
+                        );
+                        assert!(
+                            scratch.approach_cells(&w.level, p).is_some(),
+                            "{theme:?} seed {seed}: wave approach is longer than {} cells",
+                            super::APPROACH_CELLS
+                        );
+                        assert!(
+                            p.dist(w.player.pos) >= super::SPAWN_MIN_DIST - 1e-3,
+                            "{theme:?} seed {seed}: wave spawned on top of the rat"
+                        );
+                    }
                 }
             }
         }
@@ -1769,5 +2226,420 @@ mod tests {
             kills_before,
             w.kills
         );
+    }
+
+    // ---- Content wave: where and how the horde arrives --------------------
+
+    /// **Design change 1 — the chase begins at the mouth.**
+    ///
+    /// No spawn path may place a body inside a maze's ring or interior: not the
+    /// ring, not a room wave, not the fallback, not an elite (all of which share
+    /// the director's sampler). Sampled from the two worst vantage points: the
+    /// maze's mouth (where the spawn ring falls inside the warren) and its cache
+    /// (where the entire ring is inside it).
+    ///
+    /// The designer measured 2 609 / 5 376 inside on the baseline; the
+    /// acceptance number is zero. Mazes are rare by owner decision (about one
+    /// map in eight), so the sweep walks seeds until it has enough maps.
+    #[test]
+    fn zero_spawns_land_inside_a_maze() {
+        let mut maps = 0usize;
+        let mut sampled = 0usize;
+        let mut mazes = 0usize;
+        for theme in Theme::all() {
+            for seed in 0..64u64 {
+                if maps >= 6 {
+                    break;
+                }
+                let mut w = World::new(theme, seed);
+                if w.level.mazes.is_empty() {
+                    continue;
+                }
+                maps += 1;
+                let sections = w.level.mazes.clone();
+                let mut scratch = SpawnScratch::default();
+                scratch.sync(&w.level);
+                for maze in &sections {
+                    mazes += 1;
+                    let entry = TileMap::tile_rect(maze.entry.0, maze.entry.1).center();
+                    for spot in [entry, maze.reward] {
+                        w.player.pos = spot;
+                        for _ in 0..500 {
+                            let p = spawn_point_reachable(
+                                &mut w.rng,
+                                &w.level,
+                                &w.player,
+                                w.viewport,
+                                &mut scratch,
+                            )
+                            .expect("a maze side still has rooms to spawn in");
+                            assert!(
+                                !in_maze(&w.level, p),
+                                "{theme:?} seed {seed}: ring/fallback spawn {p:?} is inside a maze"
+                            );
+                            sampled += 1;
+                        }
+                        for k in 0..200 {
+                            let p = super::spawn_pulse_point(
+                                &mut w.rng,
+                                &w.level,
+                                &w.player,
+                                w.viewport,
+                                &mut scratch,
+                                true,
+                                None,
+                                k,
+                            )
+                            .expect("a room wave or the ring must find a point");
+                            assert!(
+                                !in_maze(&w.level, p),
+                                "{theme:?} seed {seed}: pulse spawn {p:?} is inside a maze"
+                            );
+                            sampled += 1;
+                        }
+                    }
+                }
+            }
+        }
+        println!("zero-spawn-in-maze: {sampled} samples over {maps} maps / {mazes} mazes");
+        assert!(maps >= 3, "only {maps} maze-bearing maps: the test is thin");
+        assert!(sampled >= 4_000, "only {sampled} samples: not a property test");
+    }
+
+    /// **Design change 6, first half — two off-screen flanking groups.**
+    ///
+    /// A chamber only earns a flank when it has two *real* approaches: openings
+    /// that are reachable, off screen from the rat, at least `SPAWN_MIN_DIST`
+    /// away, inside the 20-cell approach cap and at least 60° apart in bearing.
+    /// Every planned anchor must satisfy all of that, and the two must be on
+    /// different sides.
+    #[test]
+    fn a_flank_needs_two_real_off_screen_approaches() {
+        let mut planned = 0usize;
+        let mut refused = 0usize;
+        for theme in Theme::all() {
+            for seed in [2u64, 9, 21, 44] {
+                let mut w = World::new(theme, seed);
+                let mut scratch = SpawnScratch::default();
+                scratch.sync(&w.level);
+                for (i, room) in w.level.rooms.iter().enumerate() {
+                    if !matches!(
+                        room.kind,
+                        RoomKind::Start | RoomKind::Hall | RoomKind::Room | RoomKind::Boss
+                    ) || !scratch.room_reachable(i)
+                    {
+                        continue;
+                    }
+                    w.player.pos = room.center();
+                    scratch.build_approach(&w.level, w.player.pos);
+                    let Some(plan) = plan_flank(&w.level, &w.player, w.viewport, i, &mut scratch)
+                    else {
+                        refused += 1;
+                        continue;
+                    };
+                    planned += 1;
+                    for anchor in plan.anchors {
+                        assert!(
+                            !in_maze(&w.level, anchor),
+                            "{theme:?} seed {seed}: flank anchor {anchor:?} is in a maze"
+                        );
+                        assert!(
+                            super::off_screen(anchor, w.player.pos, w.viewport),
+                            "{theme:?} seed {seed}: flank anchor {anchor:?} is on screen"
+                        );
+                        assert!(
+                            anchor.dist(w.player.pos) >= super::SPAWN_MIN_DIST - 1e-3,
+                            "{theme:?} seed {seed}: flank anchor {anchor:?} is on the rat"
+                        );
+                        assert!(
+                            scratch.is_reachable(&w.level, anchor),
+                            "{theme:?} seed {seed}: flank anchor {anchor:?} is unreachable"
+                        );
+                        assert!(
+                            scratch.approach_cells(&w.level, anchor).is_some(),
+                            "{theme:?} seed {seed}: flank approach is longer than {APPROACH_CELLS} cells"
+                        );
+                    }
+                    let sep = super::angle_between(
+                        plan.anchors[0] - w.player.pos,
+                        plan.anchors[1] - w.player.pos,
+                    );
+                    assert!(
+                        sep >= super::FLANK_MIN_SEPARATION - 1e-4,
+                        "{theme:?} seed {seed}: the two flank groups are {sep:.2} rad apart"
+                    );
+                    // Each group's bodies stay off screen and in the chamber's
+                    // neighbourhood (the offsets are a fixed cell spiral).
+                    for member in 0..8 {
+                        if let Some(p) = plan.point(&w.level, &w.player, w.viewport, member) {
+                            assert!(!in_maze(&w.level, p));
+                            assert!(w
+                                .level
+                                .tiles
+                                .circle_clear(p, super::SPAWN_WALL_CLEAR, SizeClass::Large));
+                            assert!(p.dist(w.player.pos) >= super::SPAWN_MIN_DIST - 1e-3);
+                            assert!(super::off_screen(p, w.player.pos, w.viewport));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(planned > 0, "no chamber ever offered two approaches");
+        println!("flank planner: {planned} chambers flankable, {refused} refused");
+    }
+
+    /// The flank actually fires through the director: a rat that holds one
+    /// flankable chamber for more than `FLANK_DWELL_SECS` spends the dwell (the
+    /// director's own `take_flank` resets it), while a chamber with no second
+    /// approach keeps the dwell climbing.
+    #[test]
+    fn a_camped_chamber_is_flanked_through_the_director() {
+        use crate::game::director::FLANK_DWELL_SECS;
+        let mut flanked = 0;
+        let mut refused = 0;
+        'maps: for theme in Theme::all() {
+            for seed in [2u64, 9, 21, 44, 61] {
+                let mut probe_scratch = SpawnScratch::default();
+                let probe = World::new(theme, seed);
+                probe_scratch.sync(&probe.level);
+                for (i, room) in probe.level.rooms.iter().enumerate() {
+                    if !matches!(
+                        room.kind,
+                        RoomKind::Start | RoomKind::Hall | RoomKind::Room | RoomKind::Boss
+                    ) {
+                        continue;
+                    }
+                    let centre = room.center();
+                    probe_scratch.build_approach(&probe.level, centre);
+                    let flankable = plan_flank(
+                        &probe.level,
+                        &probe.player,
+                        probe.viewport,
+                        i,
+                        &mut probe_scratch,
+                    )
+                    .is_some();
+                    let mut w = World::new(theme, seed);
+                    w.player.pos = centre;
+                    // 12 s in 0.25 s ticks: the dwell crosses 8 s and a pulse
+                    // follows within one interval.
+                    let mut elapsed = 0.0;
+                    while elapsed < 12.0 {
+                        elapsed += 0.25;
+                        director_tick(&mut w, 0.25, elapsed);
+                    }
+                    if flankable {
+                        assert!(
+                            w.director.chamber_dwell < FLANK_DWELL_SECS,
+                            "{theme:?} seed {seed}: a camped, flankable chamber never spent its dwell"
+                        );
+                        assert_eq!(w.director.chamber_room, i as i32);
+                        flanked += 1;
+                    } else {
+                        refused += 1;
+                    }
+                }
+                if flanked >= 4 {
+                    break 'maps;
+                }
+            }
+        }
+        assert!(flanked >= 4, "only {flanked} flankable chambers ({refused} refused)");
+    }
+
+    /// **Design change 6, measurement.** Bodies arriving within 60 px of a
+    /// stationary rat, per 4 s window, and from how many distinct sides (8
+    /// compass sectors), standing in a hall, in a corridor and in a doorway.
+    ///
+    /// Run with `cargo test arrivals_within_sixty_pixels -- --nocapture` to read
+    /// the table.
+    #[test]
+    fn arrivals_within_sixty_pixels_by_sides() {
+        const WINDOW: f32 = 4.0;
+        const NEAR: f32 = 60.0;
+        const RUN: f32 = 24.0;
+        const SIDES: usize = 8;
+        let dt = 1.0 / 30.0;
+
+        // One standpoint per shape, taken from the first maps that have one of
+        // each (the shapes are on different maps, which is fine: the point is
+        // the arrival pattern per shape, not one map).
+        let mut spots: Vec<(&str, Theme, u64, Vec2)> = Vec::new();
+        'outer: for theme in Theme::all() {
+            for seed in 0..8u64 {
+                let w = World::new(theme, seed);
+                for (label, kind) in [("hall", RoomKind::Hall), ("corridor", RoomKind::Corridor)] {
+                    if spots.iter().any(|(l, _, _, _)| *l == label) {
+                        continue;
+                    }
+                    if let Some(room) = w.level.rooms.iter().find(|r| r.kind == kind) {
+                        let p = room.center();
+                        // The rat is `Small` (radius 3): a one-cell corridor
+                        // and a doorway both clear 4 px but no more.
+                        if w.level.tiles.circle_clear(p, 4.0, SizeClass::Small) {
+                            spots.push((label, theme, seed, p));
+                        }
+                    }
+                }
+                if !spots.iter().any(|(l, _, _, _)| *l == "doorway") {
+                    if let Some((cx, cy, _)) = w
+                        .level
+                        .tiles
+                        .iter_walls()
+                        .find(|(_, _, k)| matches!(k, WallKind::Doorway { .. }))
+                    {
+                        let p = TileMap::tile_rect(cx, cy).center();
+                        if w.level.tiles.circle_clear(p, 4.0, SizeClass::Small) {
+                            spots.push(("doorway", theme, seed, p));
+                        }
+                    }
+                }
+                if spots.len() >= 3 {
+                    break 'outer;
+                }
+            }
+        }
+        assert_eq!(spots.len(), 3, "could not find a hall + corridor + doorway");
+
+        println!("\narrivals within {NEAR} px, per {WINDOW} s window (8 sides):");
+        let mut totals = Vec::new();
+        for (label, theme, seed, spot) in spots {
+            let mut w = World::new(theme, seed);
+            w.player.pos = spot;
+            // Per-enemy previous distance, keyed by the runtime enemy id.
+            let mut was: Vec<(u32, f32)> = Vec::new();
+            let mut windows: Vec<u32> = vec![0; (RUN / WINDOW) as usize];
+            let mut sides: Vec<[bool; SIDES]> = vec![[false; SIDES]; windows.len()];
+            let mut steps = 0u32;
+            let mut t = 0.0f32;
+            while t < RUN {
+                w.update(dt, Vec2::ZERO, false);
+                w.player.hp = w.player.max_hp();
+                w.pending_levelups = 0;
+                t += dt;
+                steps += 1;
+                let index = ((t - 1e-4) / WINDOW) as usize;
+                if index >= windows.len() {
+                    break;
+                }
+                let mut now: Vec<(u32, f32)> = Vec::with_capacity(w.enemies().len());
+                for e in w.enemies() {
+                    let d = e.pos.dist(w.player.pos);
+                    let before = was
+                        .iter()
+                        .find(|(id, _)| *id == e.id)
+                        .map(|(_, d)| *d)
+                        .unwrap_or(f32::INFINITY);
+                    if before > NEAR && d <= NEAR {
+                        windows[index] += 1;
+                        let a = (e.pos - w.player.pos).angle().rem_euclid(std::f32::consts::TAU);
+                        let side = (a / std::f32::consts::TAU * SIDES as f32) as usize % SIDES;
+                        sides[index][side] = true;
+                    }
+                    now.push((e.id, d));
+                }
+                was = now;
+            }
+            let mut total = 0u32;
+            let mut all_sides = [false; SIDES];
+            print!("  {label:<9}");
+            for (i, arrivals) in windows.iter().enumerate() {
+                let distinct = sides[i].iter().filter(|s| **s).count();
+                for (k, s) in sides[i].iter().enumerate() {
+                    all_sides[k] |= *s;
+                }
+                total += *arrivals;
+                print!(
+                    "  {}–{}s: {arrivals:>3} from {distinct} sides",
+                    i as f32 * WINDOW,
+                    (i + 1) as f32 * WINDOW
+                );
+            }
+            println!(
+                "  | total {total}, {} sides over {:.0} s ({} ticks)",
+                all_sides.iter().filter(|s| **s).count(),
+                RUN,
+                steps
+            );
+            assert!(
+                total > 0,
+                "{label}: the horde never arrived within {NEAR} px in {RUN} s"
+            );
+            totals.push((label, total, all_sides.iter().filter(|s| **s).count()));
+        }
+        let hall_sides = totals
+            .iter()
+            .find(|(label, _, _)| *label == "hall")
+            .map(|(_, _, s)| *s)
+            .unwrap_or(0);
+        assert!(
+            hall_sides >= 2,
+            "a stationary rat in a hall was only ever approached from {hall_sides} side(s)"
+        );
+    }
+
+    /// The campaign level scales the horde: level 2 and level 3 open with the
+    /// hp of a mid-run level 1, because the director reads `LevelIndex` and
+    /// runs the whole curve through `director::curve_clock`.
+    #[test]
+    fn the_campaign_level_scales_the_horde() {
+        let mut multipliers = Vec::new();
+        for level in 0..crate::game::campaign::LEVEL_COUNT {
+            let mut w = World::new_level(level, 7, Loadout::starting());
+            w.director.spawn_timer = 0.0;
+            director_tick(&mut w, 0.1, 30.0);
+            let enemies = w.enemies();
+            assert!(!enemies.is_empty(), "level {level} spawned nothing");
+            let expected = director::hp_mult_for(level, 30.0);
+            for e in enemies.iter().filter(|e| !e.elite) {
+                // (The elite branch stacks its own 1.6x on top of the curve.)
+                let base = e.max_hp / expected;
+                assert!(
+                    (base - e.kind.base_hp()).abs() < 1e-2,
+                    "level {level}: {:?} hp {} is not its base × {expected}",
+                    e.kind,
+                    e.max_hp
+                );
+            }
+            let plain = enemies.iter().find(|e| !e.elite).expect("a plain spawn");
+            multipliers.push(plain.max_hp / plain.kind.base_hp());
+        }
+        assert!(
+            multipliers[1] > multipliers[0] && multipliers[2] > multipliers[1],
+            "hp did not scale with the campaign level: {multipliers:?}"
+        );
+    }
+
+    /// The maze exclusion is a *spawn* rule only: a maze stays on the horde's
+    /// connected map, so enemies that follow the rat in keep chasing it (the
+    /// one-way door is the exception — it is a wall to them).
+    #[test]
+    fn a_maze_is_still_walkable_for_the_horde() {
+        let mut checked = 0;
+        for theme in Theme::all() {
+            for seed in 0..64u64 {
+                if checked >= 4 {
+                    break;
+                }
+                let w = World::new(theme, seed);
+                let Some(maze) = w.level.mazes.first().copied() else {
+                    continue;
+                };
+                let mut scratch = SpawnScratch::default();
+                scratch.sync(&w.level);
+                let entry = TileMap::tile_rect(maze.entry.0, maze.entry.1).center();
+                let reward = maze.reward;
+                assert!(
+                    scratch.is_reachable(&w.level, entry),
+                    "{theme:?} seed {seed}: the maze mouth is off the horde's map"
+                );
+                assert!(
+                    scratch.is_reachable(&w.level, reward),
+                    "{theme:?} seed {seed}: the horde cannot follow the rat to the cache"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no maze-bearing maps in the sweep");
     }
 }

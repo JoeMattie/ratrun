@@ -14,6 +14,7 @@
 //! | 2 | `fog::reveal_system` | fog of war (minimap; new, writes only `Fog`) |
 //! | 3 | `enemy_move::flow_refresh_system` | flow refresh |
 //! | 4 | `spawn::director_system` | `run_director` |
+//! | 4b | `boss::boss_spawn_system` | boss hand-off (reads `BossDue`) |
 //! | 5 | `enemy_move::enemy_steering_system` | `update_enemies` steer |
 //! | 6 | `enemy_move::enemy_fire_system` | `update_enemies` fire |
 //! | 7 | `enemy_move::grid_build_system` | first grid build + `max_radius` |
@@ -23,6 +24,8 @@
 //! | 11 | `weapons::fire_weapons_system` | `fire_weapons` |
 //! | 12 | `projectiles::bullets_system` | `update_bullets` |
 //! | 13 | `projectiles::pools_system` | `update_pools` |
+//! | 13b | `boss::boss_damage_system` | player damage → boss hit shapes |
+//! | 13c | `boss::boss_update_system` | boss state machine + hazards |
 //! | 14 | `combat::player_bullet_hits_system` | `resolve_player_bullets` |
 //! | 15 | `combat::enemy_bullet_hits_system` | `resolve_enemy_hits` |
 //! | 16 | `combat::contact_system` | `resolve_contact` |
@@ -39,6 +42,14 @@
 //! player position and the tile grid, writes the `Fog` resource and nothing
 //! else (no rng draw, no entity, no simulated value), so the golden traces are
 //! identical with it enabled or disabled.
+//!
+//! `gates::passage_system`, `gates::cache_system` and `gates::door_system`
+//! (the interactive-object runtime: rat-hole states and centring, the maze
+//! cache heist, the one-way door leaves and the exit slam) are new in the same
+//! sense. They are chained after `fog::reveal_system` and before
+//! `enemy_move::flow_refresh_system` so they read the rat's post-move position
+//! and write only `Level::objects`, `player.iframes`/`pending_levelups`,
+//! `Fog::maze_claimed` and the `GateRuntime` scratch.
 //!
 //! The chain is split into two tuples because `IntoScheduleConfigs` is
 //! implemented for tuples up to 20 elements. Each tuple is `.chain()`ed, so
@@ -63,7 +74,9 @@
 use bevy_ecs::prelude::*;
 
 use super::resources::TickInput;
-use super::systems::{combat, enemy_move, fog, fx, loot, player, projectiles, spawn, weapons};
+use super::systems::{
+    boss, combat, enemy_move, fog, fx, gates, loot, player, projectiles, spawn, traps, weapons,
+};
 
 /// Legacy `self.damage_numbers.update(dt)` (neon merge, `World::update`).
 ///
@@ -82,6 +95,14 @@ fn damage_numbers_system(
 pub fn build_tick_schedule() -> Schedule {
     let mut schedule = Schedule::default();
 
+    // 0: floor traps. First in the tick, because the sticky board's slow is
+    // applied to this tick's `TickInput` throttle (before `player_system`
+    // derives its movement from it) and to the enemies' `TrapSlow` component
+    // (which `enemy_steering_system` multiplies in); damage dealt here also
+    // lands before `loot::reap_enemies_system`, so trap kills take the normal
+    // loot path. Trap state lives in `level.objects` (see `traps.rs`).
+    schedule.add_systems(traps::traps_system.before(player::player_system));
+
     // 1-15: everything up to and including contact damage.
     schedule.add_systems(
         (
@@ -89,6 +110,7 @@ pub fn build_tick_schedule() -> Schedule {
             fog::reveal_system,
             enemy_move::flow_refresh_system,
             spawn::director_system,
+            boss::boss_spawn_system,
             enemy_move::enemy_steering_system,
             enemy_move::enemy_fire_system,
             enemy_move::grid_build_system,
@@ -98,11 +120,28 @@ pub fn build_tick_schedule() -> Schedule {
             weapons::fire_weapons_system,
             projectiles::bullets_system,
             projectiles::pools_system,
+            boss::boss_damage_system,
+            boss::boss_update_system,
             combat::player_bullet_hits_system,
             combat::enemy_bullet_hits_system,
             combat::contact_system,
         )
             .chain(),
+    );
+
+    // The interactive-object runtime (gates.rs): rat-holes + centring, the
+    // maze-cache heist, then the one-way doors and the exit slam. Chained
+    // between the fog reveal and the flow refresh so all three see this tick's
+    // player position and nothing downstream sees a stale cell.
+    schedule.add_systems(
+        (
+            gates::passage_system,
+            gates::cache_system,
+            gates::door_system,
+        )
+            .chain()
+            .after(fog::reveal_system)
+            .before(enemy_move::flow_refresh_system),
     );
 
     // 16-22: reaping through the outcome. Ordered after contact; internally

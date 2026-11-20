@@ -5,12 +5,15 @@
 //! See `PORT_PLAN.md` for the ownership table and the stable-ordering rule
 //! (`SpawnId`).
 
+pub mod boss;
 pub mod combat;
 pub mod enemy_move;
 pub mod fog;
 pub mod fx;
+pub mod gates;
 pub mod loot;
 pub mod player;
 pub mod projectiles;
 pub mod spawn;
+pub mod traps;
 pub mod weapons;

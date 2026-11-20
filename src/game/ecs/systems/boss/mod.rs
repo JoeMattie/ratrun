@@ -1,0 +1,2271 @@
+//! Boss fight framework (P7).
+//!
+//! One shared tick system drives the three themed campaign bosses:
+//!
+//! | level | theme | boss | art module |
+//! |-------|-------|------|-----------|
+//! | 0 | Sewer | Jungle Cat (Apex Jaguar) | [`crate::game::art_boss_cat`] |
+//! | 1 | Kitchen | The Sweeper (broom) | [`crate::game::art_boss_broom`] |
+//! | 2 | Lab | TURF-REAPER MK.IV (mower) | [`crate::game::art_boss_mower`] |
+//!
+//! The art files are the gameplay spec: their view structs, state enums,
+//! per-state timings/damage and hit-shape helpers (`body_hit_circles`,
+//! `foot_hitboxes`, `collision_radius`, `BODY_RADIUS`, ...) are binding. This
+//! module owns the shared machinery; each per-boss file owns only its
+//! transitions and attack definitions.
+//!
+//! # API the three boss workers implement
+//!
+//! A boss file contains a zero-sized controller implementing [`BossController`]:
+//!
+//! ```ignore
+//! pub struct CatController;
+//!
+//! impl BossController for CatController {
+//!     fn kind(&self) -> BossKind { BossKind::Cat }
+//!
+//!     fn tick(&self, ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut BossOutput) {
+//!         // `boss.state` is the art enum; `boss.progress()` is 0..=1.
+//!         // Draw only from `ctx.rng` — never the main run rng.
+//!         match boss.state {
+//!             BossState::Cat(BossCatState::Stalk) => {
+//!                 if move_boss(ctx, boss, ctx.seek(boss), art_boss_cat::STALK_SPEED_P1) {
+//!                     boss.facing = ctx.seek(boss);
+//!                 }
+//!             }
+//!             _ => {}
+//!         }
+//!     }
+//! }
+//! ```
+//!
+//! `BossContext` gives the player position/velocity, the arena rectangle,
+//! `TileMap` queries (`footprint_fits`, `los_clear`, `attack_fits`,
+//! `nearest_open`), the large-class flow field (`seek`) and the boss rng.
+//! `BossOutput` collects projectiles and phase/death notifications.
+//!
+//! # Shared services
+//!
+//! * [`move_boss`] — movement with large-body tile collision (axis slide).
+//! * [`BossContext::attack_fits`] — "does this attack footprint fit, and is
+//!   the player's escape lane clear?".
+//! * [`BossHazard`] — timed circles/annuli/arcs/rects/corridors with a warn
+//!   window then an active window; resolved against the player (damage +
+//!   optional knockback) and against regular enemies when requested.
+//! * [`BossProjectile`] — boss-owned projectiles with wall bouncing.
+//! * [`Boss::invuln`] / [`Boss::damage_mult`] — vulnerable/invulnerable windows.
+//! * [`Boss::hit_shapes`] — the art-defined hit shapes for player damage.
+//! * [`Boss::target_points`] — the targetable points for auto-aim (P4).
+//!
+//! # Determinism
+//!
+//! The boss owns a separate rng stream (`BossRng`, seeded from the run seed and
+//! the kind's salt), so boss behaviour never perturbs the main rng order. The
+//! shared system iterates entities in `SpawnId` order where order matters and
+//! allocates nothing per tick after warm-up (`BossFight::scratch` and the
+//! `Local` output buffer are reused).
+
+use bevy_ecs::prelude::*;
+use rand::rngs::StdRng;
+use rand::{RngExt, SeedableRng};
+
+use crate::audio::Sfx;
+use crate::game::art_boss_broom::{self, BroomBossState, BroomBossView};
+use crate::game::art_boss_cat::{self, BossCatState, BossCatView};
+use crate::game::art_boss_mower::{self, MowerState, MowerView};
+use crate::game::art_traps::{
+    local_box_contains, MousetrapState, MOUSETRAP_DAMAGE_ENEMY, MOUSETRAP_HIT_PROGRESS_MAX,
+    MOUSETRAP_HIT_PROGRESS_MIN, MOUSETRAP_KILL_HALF_V, MOUSETRAP_KILL_U_MAX, MOUSETRAP_KILL_U_MIN,
+};
+use crate::game::bullet::{Bullet, Faction};
+use crate::game::collision::{self, SizeClass};
+use crate::game::director;
+use crate::game::ecs::components::{Pool, SpawnId};
+use crate::game::ecs::constants::PLAYER_RADIUS;
+use crate::game::ecs::resources::{
+    BossDue, LevelIndex, NextEnemyId, NextSpawnId, RunCounters, Shake, SfxQueue, TickInput,
+};
+use crate::game::enemy::{Enemy, EnemyKind};
+use crate::game::level::{Level, Theme, TileRect};
+use crate::game::nav::FlowField;
+use crate::game::particle::damage_number::{DamageNumbers, DamageSource};
+use crate::game::particle::Particles;
+use crate::game::player::Player;
+use crate::game::particle::vfx;
+use crate::game::weapon::WeaponKind;
+use crate::math::Vec2;
+use crate::render::palette::Rgb;
+
+pub mod broom;
+pub mod cat;
+pub mod mower;
+
+// ============================================================================
+// Kind, rng, resource
+// ============================================================================
+
+/// Which themed boss this is (one per campaign level).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BossKind {
+    /// Sewer — the Jungle Cat (Apex Jaguar).
+    Cat,
+    /// Kitchen — The Sweeper (broom).
+    Broom,
+    /// Lab — TURF-REAPER MK.IV (mower).
+    Mower,
+}
+
+impl BossKind {
+    /// The boss for a campaign theme.
+    #[inline]
+    pub fn for_theme(theme: Theme) -> Self {
+        match theme {
+            Theme::Sewer => BossKind::Cat,
+            Theme::Kitchen => BossKind::Broom,
+            Theme::Lab => BossKind::Mower,
+        }
+    }
+
+    /// The boss for a campaign level slot (0 Sewer, 1 Kitchen, 2 Lab).
+    #[inline]
+    pub fn for_level(level: usize) -> Self {
+        match level {
+            0 => BossKind::Cat,
+            1 => BossKind::Broom,
+            _ => BossKind::Mower,
+        }
+    }
+
+    /// The art's recommended base HP pool (before the director's `hp_mult`).
+    #[inline]
+    pub fn base_hp(self) -> f32 {
+        match self {
+            BossKind::Cat => art_boss_cat::BOSS_BASE_HP,
+            BossKind::Broom => 1600.0,
+            BossKind::Mower => 1600.0,
+        }
+    }
+
+    /// Single-circle collision radius used for movement and contact.
+    #[inline]
+    pub fn body_radius(self) -> f32 {
+        match self {
+            BossKind::Cat => art_boss_cat::BODY_RADIUS,
+            BossKind::Broom => art_boss_broom::STANCE_HALF_WIDTH + art_boss_broom::FOOT_HIT_RADIUS,
+            BossKind::Mower => art_boss_mower::BODY_RADIUS,
+        }
+    }
+
+    /// Balance multiplier applied on top of the art's base pool and the
+    /// director's curve, so the fight lasts the intended beat for the build the
+    /// campaign actually produces.
+    ///
+    /// Measured with `boss::tests::measure_campaign_boss_dps`
+    /// (`RATRUN_BOSS_DPS=1 cargo test boss::tests::measure_campaign_boss_dps --
+    /// --nocapture`): the scripted campaign (auto-pick the first card, flee/kite
+    /// script) plays each level to [`director::BOSS_TIME`], then spends 60 s
+    /// circling the real, unkillable boss while `boss_damage_system` books
+    /// every point of damage by source ([`BossDamageTally`]). The horde is
+    /// present and competes for the weapons' aim, so the boss gets whatever the
+    /// nearest-body pick gives it. Retune here and nowhere else.
+    ///
+    /// Median dps into the boss (four seeds, targeting wired): level 0 1532,
+    /// level 1 1435, level 2 1989. Only 10-20% of that is aimed (Gnaw / Cheese
+    /// Spray); the rest is the Tail Whip arc (~840), Squeak Nova / Spore Orbit
+    /// (~250) and acid pools (~200), because the rat fights the boss at 30-40
+    /// px where those weapons already reach.
+    ///
+    /// The art/director pools are 14.7k / 11.4k / 12.3k HP, so the *unscaled*
+    /// boss died in 10 s / 8 s / 6 s. These scales give median fights of 72 s /
+    /// 71 s / 62 s, with the slowest seed at 78 s / 75 s / 73 s and the fastest
+    /// at 61 s / 61 s / 55 s (see the measurement's per-level report).
+    ///
+    /// The measurement is chaotic — one clip in the horde (`hit_cd` on a shot
+    /// spent on the boss) moved level 2's median 13% — so these are round
+    /// numbers inside the 60-90 s band rather than a fit to the last run.
+    #[inline]
+    pub fn hp_scale(self) -> f32 {
+        match self {
+            BossKind::Cat => 7.5,
+            BossKind::Broom => 9.0,
+            BossKind::Mower => 10.0,
+        }
+    }
+
+    /// Body-contact damage (the art's per-kind number).
+    #[inline]
+    pub fn contact_damage(self) -> f32 {
+        match self {
+            BossKind::Cat => art_boss_cat::CONTACT_DAMAGE,
+            BossKind::Broom => 10.0,
+            BossKind::Mower => 14.0,
+        }
+    }
+
+    /// Death-state duration in seconds.
+    #[inline]
+    pub fn death_duration(self) -> f32 {
+        match self {
+            BossKind::Cat => art_boss_cat::DEATH_DURATION,
+            BossKind::Broom => 2.40,
+            BossKind::Mower => 2.4,
+        }
+    }
+
+    /// Phase index for an hp fraction (1 = healthiest).
+    #[inline]
+    pub fn phase_for(self, hp_frac: f32) -> u8 {
+        match self {
+            BossKind::Cat => {
+                if hp_frac <= art_boss_cat::PHASE2_HP_FRAC {
+                    2
+                } else {
+                    1
+                }
+            }
+            BossKind::Broom => {
+                if hp_frac <= 0.50 {
+                    2
+                } else {
+                    1
+                }
+            }
+            BossKind::Mower => {
+                if hp_frac <= 0.33 {
+                    3
+                } else if hp_frac <= 0.66 {
+                    2
+                } else {
+                    1
+                }
+            }
+        }
+    }
+
+    /// The neutral state a freshly spawned boss starts in.
+    #[inline]
+    pub fn initial_state(self) -> BossState {
+        match self {
+            BossKind::Cat => BossState::Cat(BossCatState::Stalk),
+            BossKind::Broom => BossState::Broom(BroomBossState::Idle),
+            BossKind::Mower => BossState::Mower(MowerState::Patrol),
+        }
+    }
+
+    /// The first state's duration (the art's neutral-state beat).
+    #[inline]
+    pub fn initial_duration(self) -> f32 {
+        match self {
+            BossKind::Cat => 2.6,
+            BossKind::Broom => 0.55,
+            BossKind::Mower => 1.80,
+        }
+    }
+
+    /// The art's death/defeat state.
+    #[inline]
+    pub fn death_state(self) -> BossState {
+        match self {
+            BossKind::Cat => BossState::Cat(BossCatState::Death),
+            BossKind::Broom => BossState::Broom(BroomBossState::Defeat),
+            BossKind::Mower => BossState::Mower(MowerState::Dying),
+        }
+    }
+
+    /// Constant salt mixed into the run seed for the boss rng stream.
+    #[inline]
+    pub fn seed_salt(self) -> u64 {
+        match self {
+            BossKind::Cat => 0x9E37_79B9_7F4A_7C15,
+            BossKind::Broom => 0xC2B2_AE3D_27D4_EB4F,
+            BossKind::Mower => 0x1656_67B1_9E37_79F9,
+        }
+    }
+
+    /// Culling margin for the art's largest sprite (world px).
+    #[inline]
+    pub fn cull_margin(self) -> f32 {
+        match self {
+            BossKind::Cat => art_boss_cat::BODY_LENGTH + art_boss_cat::TAIL_LENGTH,
+            BossKind::Broom => art_boss_broom::CULL_MARGIN,
+            BossKind::Mower => art_boss_mower::BODY_RADIUS + 20.0,
+        }
+    }
+
+    /// The zero-sized controller for this kind.
+    #[inline]
+    pub fn controller(self) -> &'static dyn BossController {
+        match self {
+            BossKind::Cat => &cat::CatController,
+            BossKind::Broom => &broom::BroomController,
+            BossKind::Mower => &mower::MowerController,
+        }
+    }
+}
+
+/// The boss's private rng stream.
+///
+/// Seeded from the run seed and the kind's salt so the boss never draws from
+/// the main run rng (which would perturb the golden trace).
+pub struct BossRng(pub StdRng);
+
+impl BossRng {
+    /// Seed the stream from the run seed.
+    #[inline]
+    pub fn for_run(seed: u64, kind: BossKind) -> Self {
+        Self(StdRng::seed_from_u64(seed ^ kind.seed_salt()))
+    }
+
+    /// Draw a float in `0..1`.
+    #[inline]
+    pub fn next_f32(&mut self) -> f32 {
+        self.0.random::<f32>()
+    }
+}
+
+impl Default for BossRng {
+    fn default() -> Self {
+        Self(StdRng::seed_from_u64(BossKind::Cat.seed_salt()))
+    }
+}
+
+/// Reusable per-system scratch (no per-tick heap allocation after warm-up).
+#[derive(Default)]
+pub struct BossScratch {
+    /// Bullet `(SpawnId, Entity)` order for the damage system.
+    pub bullet_order: Vec<(u64, Entity)>,
+    /// Enemy `(SpawnId, Entity)` order for hazard damage.
+    pub enemy_order: Vec<(u64, Entity)>,
+    /// Mousetrap indices already credited to the boss this snap.
+    pub mouse_latch: Vec<u32>,
+    /// This tick's `dt`, copied in by the damage system.
+    pub dt: f32,
+    /// Balance attribution: the damage the boss took **this tick**, split by
+    /// source. All five are reset at the top of every [`boss_damage_system`]
+    /// tick and are only read by `boss::tests::measure_campaign_boss_dps`; no
+    /// other code reads them and they never feed the simulation, so they cannot
+    /// affect determinism. The split answers "how much of the fight is the
+    /// weapons aiming at the boss versus area damage it happens to stand in".
+    pub dmg: BossDamageTally,
+}
+
+/// Per-tick damage attributed to the boss, by source (see
+/// [`BossScratch::dmg`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BossDamageTally {
+    /// Bullets from a weapon that picks its own target: Gnaw, Cheese Spray.
+    pub aimed: f32,
+    /// Squeak Nova and Spore Orbit bullets (fired on a pattern around the rat,
+    /// so they never aim at a body).
+    pub pattern: f32,
+    /// Acid Spit's landed pools (dps over the tick).
+    pub pools: f32,
+    /// Tail Whip's melee arc.
+    pub whip: f32,
+    /// Mousetrap snaps.
+    pub traps: f32,
+}
+
+impl BossDamageTally {
+    /// Accumulate another tick into this one (the measurement's running total).
+    #[inline]
+    pub fn add(&mut self, other: BossDamageTally) {
+        self.aimed += other.aimed;
+        self.pattern += other.pattern;
+        self.pools += other.pools;
+        self.whip += other.whip;
+        self.traps += other.traps;
+    }
+
+    /// Everything that was not an aimed bullet.
+    #[inline]
+    pub fn incidental(&self) -> f32 {
+        self.pattern + self.pools + self.whip + self.traps
+    }
+
+    /// The whole tick.
+    #[inline]
+    pub fn total(&self) -> f32 {
+        self.aimed + self.incidental()
+    }
+}
+
+/// Boss-fight state that lives permanently in the ECS world.
+#[derive(Resource, Default)]
+pub struct BossFight {
+    /// The boss's private rng stream (re-seeded on spawn).
+    pub rng: BossRng,
+    /// The boss's damage-number identity (allocated from `NextEnemyId`).
+    pub next_id: u32,
+    /// Set once when the boss dies; the integrator/P8 reads it or
+    /// `RunCounters::level_complete`.
+    pub level_complete: bool,
+    /// Reused scratch.
+    pub scratch: BossScratch,
+}
+
+// ============================================================================
+// State, hit shapes, targets, art view
+// ============================================================================
+
+/// The boss's current art state, tagged by kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BossState {
+    Cat(BossCatState),
+    Broom(BroomBossState),
+    Mower(MowerState),
+}
+
+/// One art-defined hit shape. Bosses are hit through these, not a single circle.
+#[derive(Clone, Copy, Debug)]
+pub enum BossHitShape {
+    /// A circle, optionally grounded (lifted feet are not hit by ground weapons).
+    Circle {
+        center: Vec2,
+        radius: f32,
+        grounded: bool,
+    },
+    /// An oriented box (`half` along facing, `half_perp` across).
+    Box {
+        center: Vec2,
+        facing: Vec2,
+        half: f32,
+        half_perp: f32,
+        grounded: bool,
+    },
+}
+
+impl BossHitShape {
+    /// Does a circle at `point` with `radius` overlap this shape?
+    #[inline]
+    pub fn overlaps_circle(&self, point: Vec2, radius: f32) -> bool {
+        match *self {
+            BossHitShape::Circle {
+                center,
+                radius: r,
+                ..
+            } => center.dist_sq(point) <= (r + radius) * (r + radius),
+            BossHitShape::Box {
+                center,
+                facing,
+                half,
+                half_perp,
+                ..
+            } => {
+                let d = point - center;
+                let u = d.dot(facing);
+                let v = d.dot(facing.perp());
+                u.abs() <= half + radius && v.abs() <= half_perp + radius
+            }
+        }
+    }
+
+    /// Does a swept segment hit this shape? (Approximated by sampling the
+    /// segment; the art's shapes are small and the sweep is short.)
+    #[inline]
+    pub fn overlaps_segment(&self, from: Vec2, to: Vec2, radius: f32) -> bool {
+        let steps = ((to - from).len() / 4.0).ceil().max(1.0) as u32;
+        for i in 0..=steps {
+            let t = i as f32 / steps as f32;
+            if self.overlaps_circle(from + (to - from) * t, radius) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The shape's center (targetable point / knockback origin).
+    #[inline]
+    pub fn center(&self) -> Vec2 {
+        match *self {
+            BossHitShape::Circle { center, .. } | BossHitShape::Box { center, .. } => center,
+        }
+    }
+
+    /// Can ground weapons hit this shape?
+    #[inline]
+    pub fn grounded(&self) -> bool {
+        match *self {
+            BossHitShape::Circle { grounded, .. } | BossHitShape::Box { grounded, .. } => grounded,
+        }
+    }
+}
+
+/// Up to three art-defined hit shapes (cat: 3 circles, broom: 2 feet, mower: 1).
+#[derive(Clone, Copy, Debug)]
+pub struct BossHitShapes {
+    shapes: [BossHitShape; 3],
+    len: u8,
+}
+
+impl BossHitShapes {
+    /// Empty set.
+    #[inline]
+    pub fn empty() -> Self {
+        Self {
+            shapes: [BossHitShape::Circle {
+                center: Vec2::ZERO,
+                radius: 0.0,
+                grounded: false,
+            }; 3],
+            len: 0,
+        }
+    }
+
+    /// Build from a slice (clamped to three).
+    #[inline]
+    pub fn from_slice(shapes: &[BossHitShape]) -> Self {
+        let mut out = Self::empty();
+        for (i, s) in shapes.iter().take(3).enumerate() {
+            out.shapes[i] = *s;
+            out.len = (i + 1) as u8;
+        }
+        out
+    }
+
+    /// Iterate the live shapes.
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = &BossHitShape> {
+        self.shapes[..self.len as usize].iter()
+    }
+
+    /// Is any grounded shape hit by a swept segment?
+    #[inline]
+    pub fn segment_hits_grounded(&self, from: Vec2, to: Vec2, radius: f32) -> bool {
+        self.iter()
+            .any(|s| s.grounded() && s.overlaps_segment(from, to, radius))
+    }
+
+    /// Is any grounded shape hit by a circle?
+    #[inline]
+    pub fn circle_hits_grounded(&self, point: Vec2, radius: f32) -> bool {
+        self.iter()
+            .any(|s| s.grounded() && s.overlaps_circle(point, radius))
+    }
+
+    /// Is any shape hit by a circle (including lifted ones)?
+    #[inline]
+    pub fn circle_hits_any(&self, point: Vec2, radius: f32) -> bool {
+        self.iter().any(|s| s.overlaps_circle(point, radius))
+    }
+}
+
+/// Targetable points for auto-aim (worker P4).
+#[derive(Clone, Copy, Debug)]
+pub struct BossTargetable {
+    points: [Vec2; 3],
+    len: u8,
+}
+
+impl BossTargetable {
+    /// Empty set.
+    #[inline]
+    pub fn empty() -> Self {
+        Self {
+            points: [Vec2::ZERO; 3],
+            len: 0,
+        }
+    }
+
+    /// Iterate the live points.
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = Vec2> + '_ {
+        self.points[..self.len as usize].iter().copied()
+    }
+
+    /// The first point, if any.
+    #[inline]
+    pub fn first(&self) -> Option<Vec2> {
+        self.points.first().copied().filter(|_| self.len > 0)
+    }
+
+    /// Number of points.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// Is the set empty?
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+/// A `Copy` snapshot of the art view for the current kind.
+#[derive(Clone, Copy, Debug)]
+pub enum BossArtView {
+    Cat(BossCatView),
+    Broom(BroomBossView),
+    Mower(MowerView),
+}
+
+// ============================================================================
+// Hazard
+// ============================================================================
+
+/// The geometric footprint of a timed boss hazard.
+#[derive(Clone, Copy, Debug)]
+pub enum HazardShape {
+    /// Filled circle.
+    Circle { center: Vec2, radius: f32 },
+    /// Ring between `inner` and `outer`.
+    Annulus {
+        center: Vec2,
+        inner: f32,
+        outer: f32,
+    },
+    /// Pie slice between `inner` and `outer`, `half_angle` either side of `facing`.
+    Arc {
+        center: Vec2,
+        inner: f32,
+        outer: f32,
+        facing: Vec2,
+        half_angle: f32,
+    },
+    /// Oriented rectangle.
+    Rect {
+        center: Vec2,
+        facing: Vec2,
+        half: f32,
+        half_perp: f32,
+    },
+    /// Thick segment (corridor).
+    Corridor {
+        from: Vec2,
+        to: Vec2,
+        half_width: f32,
+    },
+}
+
+impl HazardShape {
+    /// The shape's center (knockback origin).
+    #[inline]
+    pub fn center(&self) -> Vec2 {
+        match *self {
+            HazardShape::Circle { center, .. }
+            | HazardShape::Annulus { center, .. }
+            | HazardShape::Arc { center, .. }
+            | HazardShape::Rect { center, .. } => center,
+            HazardShape::Corridor { from, to, .. } => (from + to) * 0.5,
+        }
+    }
+
+    /// Does a circle at `point` with `radius` overlap the hazard?
+    #[inline]
+    pub fn contains(&self, point: Vec2, radius: f32) -> bool {
+        match *self {
+            HazardShape::Circle { center, radius: r } => {
+                center.dist_sq(point) <= (r + radius) * (r + radius)
+            }
+            HazardShape::Annulus {
+                center,
+                inner,
+                outer,
+            } => {
+                let d = center.dist(point);
+                d >= (inner - radius).max(0.0) && d <= outer + radius
+            }
+            HazardShape::Arc {
+                center,
+                inner,
+                outer,
+                facing,
+                half_angle,
+            } => {
+                let d = point - center;
+                let dist = d.len();
+                if dist < (inner - radius).max(0.0) || dist > outer + radius {
+                    return false;
+                }
+                if dist <= radius {
+                    return true;
+                }
+                let f = facing.normalized();
+                if f.len_sq() <= 0.0 {
+                    return true;
+                }
+                let cos = d.normalized().dot(f).clamp(-1.0, 1.0);
+                cos >= half_angle.cos()
+            }
+            HazardShape::Rect {
+                center,
+                facing,
+                half,
+                half_perp,
+            } => {
+                let d = point - center;
+                let u = d.dot(facing);
+                let v = d.dot(facing.perp());
+                u.abs() <= half + radius && v.abs() <= half_perp + radius
+            }
+            HazardShape::Corridor {
+                from,
+                to,
+                half_width,
+            } => {
+                let ab = to - from;
+                let t = if ab.len_sq() <= 0.0 {
+                    0.0
+                } else {
+                    ((point - from).dot(ab) / ab.len_sq()).clamp(0.0, 1.0)
+                };
+                let closest = from + ab * t;
+                closest.dist_sq(point) <= (half_width + radius) * (half_width + radius)
+            }
+        }
+    }
+}
+
+/// A timed boss hazard: `warn` seconds of telegraph, then `active` seconds of
+/// damage. Each target is damaged at most once per activation.
+#[derive(Clone, Copy, Debug)]
+pub struct BossHazard {
+    pub shape: HazardShape,
+    pub warn: f32,
+    pub active: f32,
+    pub elapsed: f32,
+    pub damage: f32,
+    pub knockback: f32,
+    pub hit_player: bool,
+    pub hit_enemies: bool,
+    pub fired: bool,
+    pub fired_enemies: bool,
+}
+
+impl BossHazard {
+    /// A player-only hazard.
+    #[inline]
+    pub fn new(shape: HazardShape, warn: f32, active: f32, damage: f32) -> Self {
+        Self {
+            shape,
+            warn,
+            active,
+            elapsed: 0.0,
+            damage,
+            knockback: 0.0,
+            hit_player: true,
+            hit_enemies: false,
+            fired: false,
+            fired_enemies: false,
+        }
+    }
+
+    /// Also damage regular enemies.
+    #[inline]
+    pub fn with_enemies(mut self) -> Self {
+        self.hit_enemies = true;
+        self
+    }
+
+    /// Add a knockback impulse (px/s).
+    #[inline]
+    pub fn with_knockback(mut self, knockback: f32) -> Self {
+        self.knockback = knockback;
+        self
+    }
+
+    /// Is the active window open this tick?
+    #[inline]
+    pub fn is_active(&self) -> bool {
+        self.elapsed >= self.warn && self.elapsed < self.warn + self.active
+    }
+
+    /// Is the hazard expired?
+    #[inline]
+    pub fn is_expired(&self) -> bool {
+        self.elapsed >= self.warn + self.active
+    }
+}
+
+// ============================================================================
+// Boss-owned projectiles
+// ============================================================================
+
+/// Which art projectile this is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BossProjectileKind {
+    /// Mower spinning steel blade disc.
+    BladeDisc,
+    /// Mower razor grass shrapnel.
+    GrassShrapnel,
+    /// Cat phase-2 sonic fang.
+    SonicFang,
+    /// Broom dustpan shard.
+    DustpanShard,
+}
+
+impl BossProjectileKind {
+    /// Collision radius.
+    #[inline]
+    pub fn radius(self) -> f32 {
+        match self {
+            BossProjectileKind::BladeDisc => art_boss_mower::BLADE_DISC_RADIUS,
+            BossProjectileKind::GrassShrapnel => art_boss_mower::SHRAPNEL_RADIUS,
+            BossProjectileKind::SonicFang => 2.5,
+            BossProjectileKind::DustpanShard => 2.0,
+        }
+    }
+
+    /// Damage.
+    #[inline]
+    pub fn damage(self) -> f32 {
+        match self {
+            BossProjectileKind::BladeDisc => 16.0,
+            BossProjectileKind::GrassShrapnel => 9.0,
+            BossProjectileKind::SonicFang => 12.0,
+            BossProjectileKind::DustpanShard => 10.0,
+        }
+    }
+
+    /// Wall bounces before despawning.
+    #[inline]
+    pub fn bounces(self) -> u8 {
+        match self {
+            BossProjectileKind::BladeDisc => 1,
+            _ => 0,
+        }
+    }
+}
+
+/// A request from a controller to spawn a boss projectile.
+#[derive(Clone, Copy, Debug)]
+pub struct BossProjectileSpawn {
+    pub kind: BossProjectileKind,
+    pub pos: Vec2,
+    pub vel: Vec2,
+    pub radius: f32,
+    pub damage: f32,
+    pub life: f32,
+    pub bounces: u8,
+}
+
+impl BossProjectileSpawn {
+    /// Spawn request for a kind at a position/velocity.
+    #[inline]
+    pub fn new(kind: BossProjectileKind, pos: Vec2, vel: Vec2) -> Self {
+        Self {
+            kind,
+            pos,
+            vel,
+            radius: kind.radius(),
+            damage: kind.damage(),
+            life: 2.4,
+            bounces: kind.bounces(),
+        }
+    }
+}
+
+/// A live boss projectile.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct BossProjectile {
+    pub kind: BossProjectileKind,
+    pub pos: Vec2,
+    pub prev: Vec2,
+    pub vel: Vec2,
+    pub radius: f32,
+    pub damage: f32,
+    pub life: f32,
+    pub bounces: u8,
+    pub anim: f32,
+}
+
+// ============================================================================
+// Boss component
+// ============================================================================
+
+/// The boss entity's authoritative state.
+#[derive(Component, Clone, Debug)]
+pub struct Boss {
+    pub kind: BossKind,
+    /// Damage-number identity (`NextEnemyId`).
+    pub id: u32,
+    pub pos: Vec2,
+    pub facing: Vec2,
+    pub hp: f32,
+    pub max_hp: f32,
+    pub phase: u8,
+    pub state: BossState,
+    pub elapsed: f32,
+    pub duration: f32,
+    pub anim: f32,
+    pub hit_flash: f32,
+    pub hurt: f32,
+    pub invuln: f32,
+    pub damage_mult: f32,
+    pub contact_cd: f32,
+    /// Body-contact damage for the **current state** (the art's per-state
+    /// number). The framework resets it to [`BossKind::contact_damage`] before
+    /// every controller tick; a controller then lowers it with
+    /// [`Boss::no_contact`] when its art gives the state no body damage
+    /// (mower `Overheat`/`Flipped`, the broom's safe pocket during a rake) or
+    /// sets the state's own number with [`Boss::set_contact_damage`] (broom
+    /// `Hurt` = 6 bump, mower `Docking` = 12).
+    pub contact_damage: f32,
+    pub dead: bool,
+    pub death_announced: bool,
+    pub arena: TileRect,
+    pub hunting: bool,
+    pub target: Vec2,
+    /// The art view's leap origin (cat `Pounce`, mower `trail_start`).
+    pub pounce_origin: Vec2,
+    /// The art view's paw/side selector (cat `swipe_side`).
+    pub swipe_side: f32,
+    /// The art view's dock pad (mower `dock_pos`).
+    pub dock: Vec2,
+    /// The art view's bounce counter (mower `bounce_count`).
+    pub bounce_count: u8,
+    /// Per-controller memory. The framework and the art views never read it:
+    /// each controller owns a documented layout (see the boss files).
+    pub scratch: [f32; 6],
+    /// Per-controller flag word (state-local one-shots).
+    pub flags: u32,
+    pub hazards: Vec<BossHazard>,
+}
+
+impl Boss {
+    /// Spawn a healthy boss in `arena`.
+    pub fn new(kind: BossKind, pos: Vec2, hp: f32, arena: TileRect, dock: Vec2, hunting: bool) -> Self {
+        Self {
+            kind,
+            id: 0,
+            pos,
+            facing: Vec2::new(1.0, 0.0),
+            hp,
+            max_hp: hp,
+            phase: 1,
+            state: kind.initial_state(),
+            elapsed: 0.0,
+            duration: kind.initial_duration(),
+            anim: 0.0,
+            hit_flash: 0.0,
+            hurt: 0.0,
+            invuln: 0.0,
+            damage_mult: 1.0,
+            contact_cd: 0.0,
+            contact_damage: kind.contact_damage(),
+            dead: false,
+            death_announced: false,
+            arena,
+            hunting,
+            target: pos,
+            pounce_origin: pos,
+            swipe_side: 1.0,
+            dock,
+            bounce_count: 0,
+            scratch: [0.0; 6],
+            flags: 0,
+            hazards: Vec::with_capacity(16),
+        }
+    }
+
+    /// Replace the body-contact damage for the current state.
+    #[inline]
+    pub fn set_contact_damage(&mut self, damage: f32) {
+        self.contact_damage = damage.max(0.0);
+    }
+
+    /// This state deals no body-contact damage at all (the art's `0` states).
+    #[inline]
+    pub fn no_contact(&mut self) {
+        self.contact_damage = 0.0;
+    }
+
+    /// Remaining health fraction in `0..=1`.
+    #[inline]
+    pub fn hp_frac(&self) -> f32 {
+        if self.max_hp <= 0.0 {
+            0.0
+        } else {
+            (self.hp / self.max_hp).clamp(0.0, 1.0)
+        }
+    }
+
+    /// Progress through the current state in `0..=1`.
+    #[inline]
+    pub fn progress(&self) -> f32 {
+        if self.duration <= 0.0 {
+            1.0
+        } else {
+            (self.elapsed / self.duration).clamp(0.0, 1.0)
+        }
+    }
+
+    /// Enter a new state, resetting its clock.
+    #[inline]
+    pub fn set_state(&mut self, state: BossState, duration: f32) {
+        self.state = state;
+        self.duration = duration.max(0.01);
+        self.elapsed = 0.0;
+    }
+
+    /// Queue a hazard. Returns false when the ring is full.
+    #[inline]
+    pub fn push_hazard(&mut self, hazard: BossHazard) -> bool {
+        if self.hazards.len() < self.hazards.capacity() {
+            self.hazards.push(hazard);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Take damage. Returns true when the hit landed (not invulnerable).
+    #[inline]
+    pub fn take_damage(&mut self, amount: f32) -> bool {
+        if self.dead || self.invuln > 0.0 {
+            return false;
+        }
+        self.hp -= amount.max(0.0);
+        self.hit_flash = 1.0;
+        self.hurt = 0.12;
+        true
+    }
+
+    /// Is the boss airborne (cat pounce) for drawing/contact purposes?
+    #[inline]
+    pub fn is_airborne(&self) -> bool {
+        match self.state {
+            BossState::Cat(s) => {
+                s == BossCatState::Pounce
+                    && self.progress() > 0.12
+                    && self.progress() < art_boss_cat::POUNCE_LAND_PROGRESS
+            }
+            _ => false,
+        }
+    }
+
+    /// The art-defined hit shapes for player damage.
+    ///
+    /// The cat's three body circles are the art's `body_hit_circles`, but while
+    /// [`art_boss_cat::is_airborne`] holds (mid-`Pounce`) they are marked
+    /// ungrounded: the jaguar is leaping **over** the rat, so ground weapons and
+    /// ground-level feedback pass underneath it and [`Boss::target_points`] is
+    /// empty for that window. The broom carries the same rule per foot from the
+    /// art's `foot_hitboxes` (`grounded`); the mower is always on the ground.
+    pub fn hit_shapes(&self) -> BossHitShapes {
+        match self.kind {
+            BossKind::Cat => {
+                let view = self.cat_view();
+                let circles = art_boss_cat::body_hit_circles(&view);
+                let grounded = !self.is_airborne();
+                let shapes: [BossHitShape; 3] = [
+                    BossHitShape::Circle {
+                        center: circles[0].0,
+                        radius: circles[0].1,
+                        grounded,
+                    },
+                    BossHitShape::Circle {
+                        center: circles[1].0,
+                        radius: circles[1].1,
+                        grounded,
+                    },
+                    BossHitShape::Circle {
+                        center: circles[2].0,
+                        radius: circles[2].1,
+                        grounded,
+                    },
+                ];
+                BossHitShapes::from_slice(&shapes)
+            }
+            BossKind::Broom => {
+                let view = self.broom_view();
+                let feet = art_boss_broom::foot_hitboxes(&view);
+                let shapes: [BossHitShape; 2] = [
+                    BossHitShape::Circle {
+                        center: feet[0].pos,
+                        radius: feet[0].radius,
+                        grounded: feet[0].grounded,
+                    },
+                    BossHitShape::Circle {
+                        center: feet[1].pos,
+                        radius: feet[1].radius,
+                        grounded: feet[1].grounded,
+                    },
+                ];
+                BossHitShapes::from_slice(&shapes)
+            }
+            BossKind::Mower => {
+                let view = self.mower_view();
+                let radius = art_boss_mower::collision_radius(view.state, view.progress);
+                let shape = BossHitShape::Circle {
+                    center: view.pos,
+                    radius,
+                    grounded: true,
+                };
+                BossHitShapes::from_slice(&[shape])
+            }
+        }
+    }
+
+    /// Targetable points for auto-aim (worker P4).
+    ///
+    /// Only **grounded** shapes count: a lifted foot (the broom's raised
+    /// slipper during `StompWalk`, its injured foot during `Hurt`) is high
+    /// above the rat, so aiming at it would fire ground weapons at empty air.
+    pub fn target_points(&self) -> BossTargetable {
+        let shapes = self.hit_shapes();
+        let mut points = [Vec2::ZERO; 3];
+        let mut len = 0u8;
+        for shape in shapes.iter() {
+            if len as usize >= points.len() {
+                break;
+            }
+            if !shape.grounded() {
+                continue;
+            }
+            points[len as usize] = shape.center();
+            len += 1;
+        }
+        BossTargetable { points, len }
+    }
+
+    /// The art view for drawing.
+    pub fn view(&self) -> BossArtView {
+        match self.kind {
+            BossKind::Cat => BossArtView::Cat(self.cat_view()),
+            BossKind::Broom => BossArtView::Broom(self.broom_view()),
+            BossKind::Mower => BossArtView::Mower(self.mower_view()),
+        }
+    }
+
+    fn cat_state(&self) -> BossCatState {
+        match self.state {
+            BossState::Cat(s) => s,
+            _ => BossCatState::Stalk,
+        }
+    }
+
+    fn broom_state(&self) -> BroomBossState {
+        match self.state {
+            BossState::Broom(s) => s,
+            _ => BroomBossState::Idle,
+        }
+    }
+
+    fn mower_state(&self) -> MowerState {
+        match self.state {
+            BossState::Mower(s) => s,
+            _ => MowerState::Patrol,
+        }
+    }
+
+    fn cat_view(&self) -> BossCatView {
+        BossCatView {
+            pos: self.pos,
+            facing: self.facing,
+            state: self.cat_state(),
+            progress: self.progress(),
+            anim: self.anim,
+            hit_flash: self.hit_flash,
+            hp_frac: self.hp_frac(),
+            target: self.target,
+            pounce_origin: self.pounce_origin,
+            swipe_side: self.swipe_side,
+        }
+    }
+
+    fn broom_view(&self) -> BroomBossView {
+        BroomBossView {
+            pos: self.pos,
+            facing: self.facing,
+            state: self.broom_state(),
+            progress: self.progress(),
+            anim: self.anim,
+            hit_flash: self.hit_flash,
+            hp_frac: self.hp_frac(),
+            target: self.target,
+            enraged: self.phase >= 2,
+        }
+    }
+
+    fn mower_view(&self) -> MowerView {
+        MowerView {
+            pos: self.pos,
+            facing: self.facing,
+            state: self.mower_state(),
+            progress: self.progress(),
+            anim: self.anim,
+            hit_flash: self.hit_flash,
+            hp_frac: self.hp_frac(),
+            target: self.target,
+            trail_start: self.pounce_origin,
+            dock_pos: self.dock,
+            bounce_count: self.bounce_count,
+        }
+    }
+}
+
+// ============================================================================
+// Controller context + output
+// ============================================================================
+
+/// The context a per-boss controller reads each tick.
+pub struct BossContext<'a> {
+    pub dt: f32,
+    pub time: f32,
+    pub player_pos: Vec2,
+    pub player_vel: Vec2,
+    pub player_radius: f32,
+    pub arena: TileRect,
+    pub level: &'a Level,
+    pub flow: &'a FlowField,
+    pub rng: &'a mut StdRng,
+}
+
+impl<'a> BossContext<'a> {
+    /// Player position.
+    #[inline]
+    pub fn player_pos(&self) -> Vec2 {
+        self.player_pos
+    }
+
+    /// Player velocity.
+    #[inline]
+    pub fn player_vel(&self) -> Vec2 {
+        self.player_vel
+    }
+
+    /// Is the line from `from` to `to` clear of walls for `radius`?
+    #[inline]
+    pub fn los_clear(&self, from: Vec2, to: Vec2, radius: f32) -> bool {
+        self.level.tiles.segment_hit(from, to, radius).is_none()
+    }
+
+    /// Does a large body of `radius` fit at `pos`?
+    #[inline]
+    pub fn footprint_fits(&self, pos: Vec2, radius: f32) -> bool {
+        self.level.tiles.circle_clear(pos, radius, SizeClass::Large)
+    }
+
+    /// Does an attack footprint fit at `origin`, and is the player's escape
+    /// lane from `origin` along `escape_dir` clear for `escape_dist`?
+    #[inline]
+    pub fn attack_fits(
+        &self,
+        origin: Vec2,
+        radius: f32,
+        escape_dir: Vec2,
+        escape_dist: f32,
+    ) -> bool {
+        self.footprint_fits(origin, radius)
+            && self.los_clear(
+                origin,
+                origin + escape_dir.normalized() * escape_dist,
+                self.player_radius,
+            )
+    }
+
+    /// The nearest open large-class center to `pos`.
+    #[inline]
+    pub fn nearest_open(&self, pos: Vec2) -> Vec2 {
+        self.level
+            .tiles
+            .nearest_open_center(pos, SizeClass::Large, 8)
+            .unwrap_or(pos)
+    }
+
+    /// The large-class flow-field direction at `pos`.
+    #[inline]
+    pub fn flow_dir(&self, pos: Vec2) -> Vec2 {
+        self.flow.dir_at(SizeClass::Large, pos).normalized()
+    }
+
+    /// Steering direction: hunt via the large-class flow field when hunting,
+    /// otherwise chase the player directly when the line is clear.
+    pub fn seek(&self, boss: &Boss) -> Vec2 {
+        if boss.hunting {
+            let dir = self.flow_dir(boss.pos);
+            if dir.len_sq() > 0.0 {
+                return dir;
+            }
+        }
+        if self.los_clear(boss.pos, self.player_pos, boss.kind.body_radius()) {
+            let to = self.player_pos - boss.pos;
+            if to.len_sq() > 0.0 {
+                return to.normalized();
+            }
+        }
+        let dir = self.flow_dir(boss.pos);
+        if dir.len_sq() > 0.0 {
+            dir
+        } else {
+            (self.player_pos - boss.pos).normalized()
+        }
+    }
+}
+
+/// One piece of audio/particle feedback a controller asks for.
+///
+/// Controllers cannot touch `SfxQueue` or `Particles` (they only get a
+/// [`BossContext`]), so they push cues into [`BossOutput::cues`] and the shared
+/// system drains them right after the controller tick: each cue maps to exactly
+/// one [`Sfx`] push and one `vfx::emit_*` call (see `emit_cues`), drawing its
+/// randomness from the boss's own stream so the order stays deterministic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BossCue {
+    // ---- Jungle Cat (Sewer) ----
+    /// `Crouch` entry: the jaguar digs in (paw dust + crouch growl).
+    CatCrouch,
+    /// `Crouch → Pounce`: the leap launches.
+    CatPounce,
+    /// The pounce impact at `POUNCE_LAND_PROGRESS`.
+    CatLand,
+    /// The overshoot skid after a missed pounce.
+    CatSkid,
+    /// `SwipeWindup → Swipe`: the claws go through.
+    CatSwipe,
+    /// `Roar` entry (phase change / phase-2 territory call).
+    CatRoar,
+    /// One fan of phase-2 sonic fangs.
+    CatFangs,
+    /// A heavy burst staggered the cat into `Hurt`.
+    CatHurt,
+    /// The `Death` collapse.
+    CatDeath,
+
+    // ---- The Sweeper (Kitchen) ----
+    /// `StompWalk` footfall (the art's `progress 0.66`).
+    BroomStomp,
+    /// The rake's active window opens (`progress 0.46`).
+    BroomSweep,
+    /// The dustpan slams down (`progress 0.48`).
+    BroomDustpan,
+    /// The `PhaseChange` tantrum slam (`progress 0.38`).
+    BroomSlam,
+    /// `Hurt` entry: the stubbed toe.
+    BroomHurtHop,
+    /// Each touchdown of the hop.
+    BroomHop,
+    /// The `Defeat` walk-off (the broom hits the floor).
+    BroomDefeat,
+
+    // ---- TURF-REAPER MK.IV (Lab) ----
+    /// `Scan` entry: the lidar sweep starts.
+    MowerScan,
+    /// The scan snap-locks (`SCAN_LOCK_PROGRESS`).
+    MowerLockOn,
+    /// `ChargeWindup` entry: the motor revs.
+    MowerWindup,
+    /// `Charge` entry: the blades spin up and it launches.
+    MowerCharge,
+    /// A wall impact ends a charge or a rebound leg.
+    MowerWallImpact,
+    /// `Flipped` entry: it goes over onto its back.
+    MowerFlip,
+    /// `Overheat` entry: the motors stall and vent.
+    MowerOverheat,
+    /// `Docking` entry: the retreat to the charging pad.
+    MowerDock,
+    /// The meltdown detonation in `Dying`.
+    MowerDeath,
+}
+
+impl BossCue {
+    /// The sound this cue plays.
+    #[inline]
+    pub fn sfx(self) -> Sfx {
+        match self {
+            BossCue::CatCrouch => Sfx::CatCrouch,
+            BossCue::CatPounce => Sfx::CatPounce,
+            // `Sfx::CatLand` is the landing thud *and* the claw skid.
+            BossCue::CatLand => Sfx::CatLand,
+            BossCue::CatSkid => Sfx::CatLand,
+            BossCue::CatSwipe => Sfx::CatSwipe,
+            BossCue::CatRoar => Sfx::CatRoar,
+            // The sonic fang fan is a short bark out of the roar's throat.
+            BossCue::CatFangs => Sfx::CatGrowl,
+            BossCue::CatHurt => Sfx::CatHurt,
+            BossCue::CatDeath => Sfx::CatDeath,
+            BossCue::BroomStomp => Sfx::BroomStomp,
+            BossCue::BroomSweep => Sfx::BroomSweep,
+            BossCue::BroomDustpan => Sfx::BroomDustpan,
+            // The tantrum slam is a double footfall: the stomp sound.
+            BossCue::BroomSlam => Sfx::BroomStomp,
+            BossCue::BroomHurtHop => Sfx::BroomHurt,
+            BossCue::BroomHop => Sfx::BroomHop,
+            BossCue::BroomDefeat => Sfx::BroomDefeat,
+            BossCue::MowerScan => Sfx::MowerScan,
+            BossCue::MowerLockOn => Sfx::MowerLockOn,
+            BossCue::MowerWindup => Sfx::MowerCharge,
+            BossCue::MowerCharge => Sfx::MowerBladeSpin,
+            BossCue::MowerWallImpact => Sfx::MowerWallClang,
+            BossCue::MowerFlip => Sfx::MowerFlipped,
+            BossCue::MowerOverheat => Sfx::MowerOverheat,
+            BossCue::MowerDock => Sfx::MowerDockHum,
+            BossCue::MowerDeath => Sfx::MowerDeath,
+        }
+    }
+}
+
+/// Per-tick output from a controller. Reused across ticks.
+#[derive(Default)]
+pub struct BossOutput {
+    pub phase_changed: bool,
+    pub death: bool,
+    pub projectiles: Vec<BossProjectileSpawn>,
+    /// Feedback requests for this tick, drained in push order.
+    pub cues: Vec<BossCue>,
+}
+
+impl BossOutput {
+    /// Reset for the next tick (keeps capacity).
+    #[inline]
+    pub fn clear(&mut self) {
+        self.phase_changed = false;
+        self.death = false;
+        self.projectiles.clear();
+        self.cues.clear();
+    }
+
+    /// Ask for one piece of feedback once the controller tick is done.
+    #[inline]
+    pub fn cue(&mut self, cue: BossCue) {
+        self.cues.push(cue);
+    }
+}
+
+/// A per-kind boss controller. Implement only transitions and attack definitions.
+pub trait BossController: Send + Sync {
+    /// Which kind this controller drives.
+    fn kind(&self) -> BossKind;
+
+    /// Advance one tick. The shared system owns phase detection, death and
+    /// hazard/projectile resolution; this only transitions states and queues
+    /// hazards/projectiles/cues.
+    fn tick(&self, ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut BossOutput);
+
+    /// The death beat, called instead of [`BossController::tick`] for every
+    /// tick of the art's death state (`Death` / `Defeat` / `Dying`).
+    ///
+    /// The controller may queue the art's last-gasp hazards (the mower's 28 px
+    /// detonation) and its death cues, but must not start new attacks: the
+    /// boss is already reaped and `level_complete` fires when this beat ends.
+    fn death_tick(&self, _ctx: &mut BossContext<'_>, _boss: &mut Boss, _out: &mut BossOutput) {}
+}
+
+// ============================================================================
+// Shared movement / hazard resolution
+// ============================================================================
+
+/// Move a large body toward `dir` at `speed`, sliding along walls. Returns
+/// true when the full step fit.
+pub fn move_boss(ctx: &BossContext<'_>, boss: &mut Boss, dir: Vec2, speed: f32) -> bool {
+    let step = dir.normalized() * (speed * ctx.dt);
+    if step.len_sq() <= 0.0 {
+        return false;
+    }
+    let radius = boss.kind.body_radius();
+    let next = boss.pos + step;
+    if ctx.footprint_fits(next, radius) {
+        boss.pos = next;
+        return true;
+    }
+    // Axis slide: try x then y so a body grazes a wall instead of sticking.
+    let try_x = Vec2::new(step.x, 0.0);
+    if try_x.len_sq() > 0.0 && ctx.footprint_fits(boss.pos + try_x, radius) {
+        boss.pos += try_x;
+        return false;
+    }
+    let try_y = Vec2::new(0.0, step.y);
+    if try_y.len_sq() > 0.0 && ctx.footprint_fits(boss.pos + try_y, radius) {
+        boss.pos += try_y;
+        return false;
+    }
+    false
+}
+
+/// Resolve active hazards against the player and regular enemies. Returns true
+/// when the player was hit.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_hazards(
+    boss: &mut Boss,
+    dt: f32,
+    player: &mut Player,
+    enemies: &mut Query<(Entity, &SpawnId, &mut Enemy)>,
+    enemy_order: &mut Vec<(u64, Entity)>,
+    particles: &mut Particles,
+    damage_numbers: &mut DamageNumbers,
+    rng: &mut StdRng,
+    sfx: &mut SfxQueue,
+) -> bool {
+    let mut player_hit = false;
+    for hazard in boss.hazards.iter_mut() {
+        hazard.elapsed += dt;
+        if !hazard.is_active() {
+            continue;
+        }
+        if hazard.hit_player && !hazard.fired && hazard.shape.contains(player.pos, PLAYER_RADIUS) {
+            if hazard.damage <= 0.0 {
+                // Push-only hazard (the cat's damage-free outer roar ring):
+                // the knockback is a sustained shove in px/s, applied every
+                // active tick the rat is inside the shape. Nothing is "hit",
+                // so no damage, no i-frames and no hurt vfx are spent.
+                if hazard.knockback > 0.0 {
+                    let dir = (player.pos - hazard.shape.center()).normalized();
+                    player.pos += dir * hazard.knockback * dt;
+                }
+            } else if player.take_damage(hazard.damage) {
+                player_hit = true;
+                hazard.fired = true;
+                if hazard.knockback > 0.0 {
+                    let dir = (player.pos - hazard.shape.center()).normalized();
+                    player.pos += dir * hazard.knockback * dt;
+                }
+                vfx::emit_player_hurt(particles, rng, player.pos);
+                sfx.0.push(Sfx::Hurt);
+            }
+        }
+        if hazard.hit_enemies && !hazard.fired_enemies {
+            // Determinism: damage and vfx in `SpawnId` order, never storage
+            // order.
+            enemy_order.clear();
+            for (entity, id, _) in enemies.iter() {
+                enemy_order.push((id.0, entity));
+            }
+            enemy_order.sort_unstable_by_key(|(id, _)| *id);
+            for &(_, entity) in enemy_order.iter() {
+                let Ok((_, _, mut enemy)) = enemies.get_mut(entity) else {
+                    continue;
+                };
+                if !enemy.alive() || !hazard.shape.contains(enemy.pos, enemy.radius) {
+                    continue;
+                }
+                enemy.hurt(hazard.damage);
+                let killed = !enemy.alive();
+                vfx::emit_weapon_hit(
+                    particles,
+                    rng,
+                    enemy.pos,
+                    Vec2::ZERO,
+                    None,
+                    enemy.kind,
+                    killed,
+                );
+                damage_numbers.record(
+                    enemy.id,
+                    enemy.pos,
+                    enemy.radius,
+                    hazard.damage,
+                    killed,
+                    DamageSource::Normal,
+                );
+            }
+            hazard.fired_enemies = true;
+        }
+    }
+    boss.hazards.retain(|h| !h.is_expired());
+    player_hit
+}
+
+// ============================================================================
+// Cue channel
+// ============================================================================
+
+/// Drain a controller's cues into the audio queue and the particle system.
+///
+/// Each cue plays its [`Sfx`](BossCue::sfx) and calls the matching `vfx::emit_*`
+/// helper with geometry taken from the boss's art view, so a cue never has to
+/// carry coordinates (and the enum stays `Copy`). Randomness comes from the
+/// caller's stream — the boss's own rng, the same one every other boss vfx call
+/// in the tick uses — and cues are emitted in push order, which is the order the
+/// controller queued them.
+#[allow(clippy::too_many_arguments)]
+fn emit_cues(
+    cues: &[BossCue],
+    boss: &Boss,
+    blood: Rgb,
+    particles: &mut Particles,
+    rng: &mut StdRng,
+    sfx: &mut SfxQueue,
+) {
+    for &cue in cues {
+        sfx.0.push(cue.sfx());
+        match cue {
+            // ---- cat ----------------------------------------------------
+            // The crouch digs in and the leap launches: both are a paw-dust
+            // burst (the art has no dedicated emitter for the two poses).
+            BossCue::CatCrouch | BossCue::CatPounce | BossCue::CatHurt => {
+                vfx::emit_boss_cat_skid(particles, rng, boss.pos, boss.facing, 0.14);
+            }
+            BossCue::CatLand => {
+                let phase2 = boss.phase >= 2;
+                vfx::emit_boss_cat_pounce_land(
+                    particles,
+                    rng,
+                    boss.target,
+                    art_boss_cat::POUNCE_LAND_RADIUS,
+                    phase2,
+                );
+            }
+            BossCue::CatSkid => {
+                let move_dir = boss.facing;
+                vfx::emit_boss_cat_skid(particles, rng, boss.pos, move_dir, 0.16);
+            }
+            BossCue::CatSwipe => {
+                let view = boss.cat_view();
+                let origin = art_boss_cat::swipe_origin(&view);
+                vfx::emit_boss_cat_swipe(
+                    particles,
+                    rng,
+                    origin,
+                    boss.facing,
+                    boss.swipe_side,
+                    boss.phase >= 2,
+                );
+            }
+            BossCue::CatRoar | BossCue::CatFangs => {
+                let view = boss.cat_view();
+                let origin = art_boss_cat::roar_origin(&view);
+                vfx::emit_boss_cat_roar(particles, rng, origin, boss.phase >= 2);
+            }
+            BossCue::CatDeath => {
+                vfx::emit_boss_cat_death(particles, rng, boss.pos, boss.facing, blood);
+            }
+
+            // ---- broom --------------------------------------------------
+            BossCue::BroomStomp => {
+                vfx::emit_boss_broom_stomp(
+                    particles,
+                    rng,
+                    boss.target,
+                    art_boss_broom::STOMP_SHOCKWAVE_RADIUS,
+                    boss.phase >= 2,
+                );
+            }
+            BossCue::BroomSlam => {
+                vfx::emit_boss_broom_stomp(
+                    particles,
+                    rng,
+                    boss.pos,
+                    art_boss_broom::PHASE_SLAM_RADIUS,
+                    true,
+                );
+            }
+            BossCue::BroomSweep => {
+                let view = boss.broom_view();
+                let angle = art_boss_broom::broom_sweep_angle(&view);
+                let clockwise = matches!(
+                    boss.state,
+                    BossState::Broom(BroomBossState::BroomSweep { clockwise: true })
+                );
+                // One discrete burst at the top of the active window (`dt` is
+                // the burst's own budget, not the tick length).
+                vfx::emit_boss_broom_sweep(particles, rng, boss.pos, angle, clockwise, 0.18);
+            }
+            BossCue::BroomDustpan => {
+                vfx::emit_boss_broom_dustpan_drop(
+                    particles,
+                    rng,
+                    boss.target,
+                    art_boss_broom::DUSTPAN_IMPACT_RADIUS,
+                );
+            }
+            BossCue::BroomHurtHop | BossCue::BroomHop => {
+                let view = boss.broom_view();
+                let feet = art_boss_broom::foot_hitboxes(&view);
+                // The grounded slipper is the hopping one; the lifted one is
+                // the stubbed foot the pain stars belong to.
+                let (hop, hurt) = if feet[0].grounded {
+                    (feet[0].pos, feet[1].pos)
+                } else {
+                    (feet[1].pos, feet[0].pos)
+                };
+                vfx::emit_boss_broom_hurt_hop(particles, rng, hop, hurt);
+            }
+            BossCue::BroomDefeat => {
+                let view = boss.broom_view();
+                let broom = art_boss_broom::broom_head_pos(&view);
+                vfx::emit_boss_broom_defeat(particles, rng, boss.pos, broom);
+            }
+
+            // ---- mower --------------------------------------------------
+            // Lidar ping, lock-on spark and the dock's brass contact spark are
+            // all a small electric glint (the art draws the cones/rings).
+            BossCue::MowerScan => {
+                vfx::emit_weapon_hit(particles, rng, boss.pos, Vec2::ZERO, None, EnemyKind::Boss, false);
+            }
+            BossCue::MowerLockOn => {
+                vfx::emit_weapon_hit(
+                    particles,
+                    rng,
+                    boss.target,
+                    Vec2::ZERO,
+                    None,
+                    EnemyKind::Boss,
+                    false,
+                );
+            }
+            BossCue::MowerDock => {
+                vfx::emit_weapon_hit(
+                    particles,
+                    rng,
+                    boss.dock,
+                    Vec2::ZERO,
+                    None,
+                    EnemyKind::Boss,
+                    false,
+                );
+            }
+            BossCue::MowerWindup => {
+                vfx::emit_boss_mower_overheat_steam(particles, rng, boss.pos, boss.facing, 0.12);
+            }
+            BossCue::MowerCharge => {
+                vfx::emit_boss_mower_charge_trail(particles, rng, boss.pos, boss.facing, false, 0.15);
+            }
+            BossCue::MowerWallImpact => {
+                // The bumper is the front of the chassis; the wall normal points
+                // back into the arena.
+                let impact = boss.pos + boss.facing * art_boss_mower::CHASSIS_HALF_LEN;
+                let normal = -boss.facing;
+                vfx::emit_boss_mower_wall_impact(particles, rng, impact, normal, true);
+            }
+            BossCue::MowerFlip => {
+                vfx::emit_boss_mower_flipped_smoke(particles, rng, boss.pos, 0.15);
+            }
+            BossCue::MowerOverheat => {
+                vfx::emit_boss_mower_overheat_steam(particles, rng, boss.pos, boss.facing, 0.15);
+            }
+            BossCue::MowerDeath => {
+                vfx::emit_boss_mower_death(particles, rng, boss.pos);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Systems
+// ============================================================================
+
+/// Spawn the level's boss when the director raises [`BossDue`].
+///
+/// `BossDue` is raised by `director::raise_boss_due`; P3 owns that call site.
+#[allow(clippy::too_many_arguments)]
+pub fn boss_spawn_system(
+    mut commands: Commands,
+    mut due: ResMut<BossDue>,
+    mut fight: ResMut<BossFight>,
+    mut next_enemy_id: ResMut<NextEnemyId>,
+    mut next_spawn_id: ResMut<NextSpawnId>,
+    level: Res<Level>,
+    level_index: Res<LevelIndex>,
+    player: Res<Player>,
+    bosses: Query<&Boss>,
+    mut particles: ResMut<Particles>,
+    mut shake: ResMut<Shake>,
+    mut sfx: ResMut<SfxQueue>,
+) {
+    if !due.take() || !bosses.is_empty() {
+        return;
+    }
+    let kind = BossKind::for_level(level_index.0);
+    let arena = level
+        .boss_room()
+        .map(|r| r.rect)
+        .unwrap_or_else(|| TileRect::new(0, 0, level.tiles.cols(), level.tiles.rows()));
+    // The generator exports the arena's fight furniture: the clear encounter
+    // floor (which is where the art's flip/escape layouts are guaranteed) and,
+    // on the Lab, the charging dock against the wall. Spawn on the clear floor,
+    // not on the arena's geometric centre, and hand the boss its real dock.
+    let centre = level
+        .boss_clear_floor()
+        .map(|f| f.center_world())
+        .unwrap_or_else(|| arena.center_world());
+    let dock = level.boss_dock().unwrap_or_else(|| arena.center_world());
+    let radius = kind.body_radius();
+    let pos = if level.tiles.circle_clear(centre, radius, SizeClass::Large) {
+        centre
+    } else {
+        level
+            .tiles
+            .nearest_open_center(centre, SizeClass::Large, 16)
+            .unwrap_or(centre)
+    };
+    let hunting = !arena.contains_world(player.pos);
+    // The director's curve freezes at BOSS_TIME; the boss spawns then.
+    let hp = kind.base_hp()
+        * kind.hp_scale()
+        * director::hp_mult_for(level_index.0, director::BOSS_TIME);
+    let mut boss = Boss::new(kind, pos, hp, arena, dock, hunting);
+    boss.id = next_enemy_id.take();
+    boss.facing = (player.pos - pos).normalized();
+    boss.target = player.pos;
+    fight.rng = BossRng::for_run(level.seed, kind);
+    fight.next_id = boss.id;
+    fight.level_complete = false;
+    let accent = level.palette.accent;
+    vfx::emit_boss_spawn(&mut particles, &mut fight.rng.0, pos, accent);
+    shake.amount = shake.amount.max(14.0);
+    sfx.0.push(Sfx::Boss);
+    commands.spawn((boss, next_spawn_id.take()));
+}
+
+/// Apply player damage to the boss through its art-defined hit shapes.
+///
+/// Sources: player bullets (including orbit), acid pools, Tail Whip and
+/// mousetraps. Damage numbers and hit vfx use the existing hooks.
+#[allow(clippy::too_many_arguments)]
+pub fn boss_damage_system(
+    tick: Res<TickInput>,
+    level: Res<Level>,
+    player: Res<Player>,
+    mut fight: ResMut<BossFight>,
+    mut bosses: Query<&mut Boss>,
+    mut bullets: Query<(Entity, &SpawnId, &mut Bullet)>,
+    pools: Query<&Pool>,
+    mut particles: ResMut<Particles>,
+    mut damage_numbers: ResMut<DamageNumbers>,
+    mut shake: ResMut<Shake>,
+    mut sfx: ResMut<SfxQueue>,
+) {
+    fight.scratch.dt = tick.dt;
+    fight.scratch.dmg = BossDamageTally::default();
+    for mut boss in bosses.iter_mut() {
+        if boss.dead {
+            continue;
+        }
+        let shapes = boss.hit_shapes();
+        if shapes.iter().next().is_none() {
+            continue;
+        }
+        // Player bullets in SpawnId order.
+        fight.scratch.bullet_order.clear();
+        for (entity, id, _) in bullets.iter() {
+            fight.scratch.bullet_order.push((id.0, entity));
+        }
+        fight.scratch.bullet_order.sort_unstable_by_key(|(id, _)| *id);
+        for i in 0..fight.scratch.bullet_order.len() {
+            let entity = fight.scratch.bullet_order[i].1;
+            let Ok((_, _, mut bullet)) = bullets.get_mut(entity) else {
+                continue;
+            };
+            if bullet.faction != Faction::Player || bullet.hit_cd > 0.0 || bullet.lob.is_some() {
+                continue;
+            }
+            if !shapes.segment_hits_grounded(bullet.prev_pos, bullet.pos, bullet.radius) {
+                continue;
+            }
+            let amount = bullet.damage * boss.damage_mult;
+            if !boss.take_damage(amount) {
+                continue;
+            }
+            // Balance attribution only (see `BossDamageTally`): a projectile
+            // from a weapon that picks its target counts as aimed, a
+            // radial/orbit bullet as pattern damage.
+            if is_aimed_weapon(bullet.weapon) {
+                fight.scratch.dmg.aimed += amount;
+            } else {
+                fight.scratch.dmg.pattern += amount;
+            }
+            let killed = boss.hp <= 0.0;
+            vfx::emit_weapon_hit(
+                &mut particles,
+                &mut fight.rng.0,
+                bullet.pos,
+                bullet.vel,
+                bullet.weapon,
+                EnemyKind::Boss,
+                killed,
+            );
+            damage_numbers.record(
+                boss.id,
+                boss.pos,
+                boss.kind.body_radius(),
+                amount,
+                killed,
+                DamageSource::from_weapon(bullet.weapon),
+            );
+            // Exactly the enemy rule: a pierce charge is spent and the shot
+            // cannot re-hit inside the re-hit cooldown; otherwise the shot is
+            // dead. The `hit_cd` on the spent shot matters for the *same*
+            // tick: `combat::player_bullet_hits_system` runs after this system
+            // and does not itself look at `life` (a wall-stopped shot has to
+            // keep resolving the part of its sweep that did connect), so
+            // without it one dart could be spent on the boss and an enemy at
+            // once.
+            if bullet.pierce > 0 {
+                bullet.pierce -= 1;
+                bullet.hit_cd = 0.12;
+            } else {
+                bullet.life = 0.0;
+                bullet.hit_cd = 0.12;
+            }
+            sfx.0.push(Sfx::Hit);
+        }
+        // Acid pools (DPS through the hit shapes).
+        for pool in pools.iter() {
+            if !shapes.circle_hits_grounded(pool.pos, pool.radius) {
+                continue;
+            }
+            let amount = pool.dps * tick.dt;
+            if boss.take_damage(amount) {
+                fight.scratch.dmg.pools += amount;
+                damage_numbers.record(
+                    boss.id,
+                    boss.pos,
+                    boss.kind.body_radius(),
+                    amount,
+                    false,
+                    DamageSource::Acid,
+                );
+            }
+        }
+        // Tail Whip: the weapons system pushed `Sfx::ShootWhip` this tick.
+        if sfx.0.contains(&Sfx::ShootWhip) {
+            if let Some(weapon) = player
+                .loadout
+                .weapons
+                .iter()
+                .find(|w| w.kind == WeaponKind::TailWhip)
+            {
+                // Exactly the aura `weapons::fire_one` used for this volley
+                // (`26.0 + 3.0 * projectiles`), so a whip that clipped an
+                // enemy also reaches a body standing that far away.
+                let reach = 26.0 + weapon.level_projectiles() as f32 * 3.0;
+                let dmg = weapon.damage();
+                if shapes.circle_hits_grounded(player.pos, reach)
+                    && level
+                        .tiles
+                        .segment_hit(player.pos, boss.pos, 1.0)
+                        .is_none()
+                {
+                    let amount = dmg * boss.damage_mult;
+                    if boss.take_damage(amount) {
+                        fight.scratch.dmg.whip += amount;
+                        vfx::emit_tail_whip_hit(
+                            &mut particles,
+                            &mut fight.rng.0,
+                            boss.pos,
+                            boss.pos - player.pos,
+                            false,
+                        );
+                        damage_numbers.record(
+                            boss.id,
+                            boss.pos,
+                            boss.kind.body_radius(),
+                            amount,
+                            false,
+                            DamageSource::TailWhip,
+                        );
+                    }
+                }
+            }
+        }
+        // Mousetraps: an active snap under a hit shape damages once per snap.
+        for (i, trap) in level.objects.mousetraps.iter().enumerate() {
+            if trap.state != MousetrapState::Snapping {
+                continue;
+            }
+            let p = trap.progress;
+            if p < MOUSETRAP_HIT_PROGRESS_MIN || p > MOUSETRAP_HIT_PROGRESS_MAX {
+                continue;
+            }
+            let latch = i as u32;
+            if fight.scratch.mouse_latch.contains(&latch) {
+                continue;
+            }
+            if shapes.iter().any(|s| {
+                in_mouse_kill_rect(trap.pos, trap.facing, s.center(), s_radius(s))
+            }) {
+                let amount = MOUSETRAP_DAMAGE_ENEMY * boss.damage_mult;
+                if boss.take_damage(amount) {
+                    fight.scratch.dmg.traps += amount;
+                    fight.scratch.mouse_latch.push(latch);
+                    vfx::emit_weapon_hit(
+                        &mut particles,
+                        &mut fight.rng.0,
+                        boss.pos,
+                        Vec2::ZERO,
+                        None,
+                        EnemyKind::Boss,
+                        false,
+                    );
+                    damage_numbers.record(
+                        boss.id,
+                        boss.pos,
+                        boss.kind.body_radius(),
+                        amount,
+                        false,
+                        DamageSource::Normal,
+                    );
+                }
+            }
+        }
+        // Clear latches for traps no longer snapping.
+        fight.scratch.mouse_latch.retain(|&i| {
+            level
+                .objects
+                .mousetraps
+                .get(i as usize)
+                .map(|t| t.state == MousetrapState::Snapping)
+                .unwrap_or(false)
+        });
+        if boss.hit_flash > 0.0 {
+            shake.amount = shake.amount.max(1.5);
+        }
+    }
+}
+
+/// Advance the boss: phase, controller, hazards, projectiles, death.
+#[allow(clippy::too_many_arguments)]
+pub fn boss_update_system(
+    mut commands: Commands,
+    mut fight: ResMut<BossFight>,
+    mut counters: ResMut<RunCounters>,
+    tick: Res<TickInput>,
+    level: Res<Level>,
+    mut player: ResMut<Player>,
+    flow: Res<FlowField>,
+    mut particles: ResMut<Particles>,
+    mut damage_numbers: ResMut<DamageNumbers>,
+    mut shake: ResMut<Shake>,
+    mut sfx: ResMut<SfxQueue>,
+    mut next_spawn_id: ResMut<NextSpawnId>,
+    mut bosses: Query<(Entity, &mut Boss)>,
+    mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
+    mut projectiles: Query<(Entity, &mut BossProjectile)>,
+    mut out: Local<BossOutput>,
+) {
+    let dt = tick.dt;
+    // One mutable borrow of the resource, so the scratch buffer and the rng
+    // stream can be borrowed at the same time.
+    let fight = &mut *fight;
+    out.clear();
+    fight.scratch.dt = dt;
+    for (entity, mut boss) in bosses.iter_mut() {
+        boss.anim += dt;
+        boss.hit_flash = (boss.hit_flash - dt * 8.0).max(0.0);
+        boss.hurt = (boss.hurt - dt).max(0.0);
+        boss.invuln = (boss.invuln - dt).max(0.0);
+        boss.contact_cd = (boss.contact_cd - dt).max(0.0);
+        boss.elapsed += dt;
+
+        // Lethal hit: the damage system runs before this one, so the death
+        // starts on the same tick. The art's death state then plays out
+        // (`Death` / `Defeat` / `Dying`) — hazards and cues only, no new
+        // attacks — and `level_complete` is raised when it ends, so the death
+        // animation (and the mower's last-gasp 28 px blast) always reads
+        // before the App shows the level-complete screen.
+        if boss.hp <= 0.0 && !boss.dead {
+            boss.dead = true;
+            boss.hp = 0.0;
+            boss.no_contact();
+            boss.damage_mult = 1.0;
+            let death_state = boss.kind.death_state();
+            let death_duration = boss.kind.death_duration();
+            boss.set_state(death_state, death_duration);
+        }
+
+        if boss.dead {
+            if !boss.death_announced {
+                boss.death_announced = true;
+                shake.amount = shake.amount.max(16.0);
+                // Clear every remaining enemy (the horde breaks and flees).
+                for (enemy_entity, _, _) in enemies.iter_mut() {
+                    commands.entity(enemy_entity).despawn();
+                }
+            }
+            // The death beat: the per-kind controller queues its last-gasp
+            // hazards (the mower's detonation) and its death cues.
+            {
+                let mut ctx = BossContext {
+                    dt,
+                    time: boss.elapsed,
+                    player_pos: player.pos,
+                    player_vel: player.vel,
+                    player_radius: PLAYER_RADIUS,
+                    arena: boss.arena,
+                    level: &level,
+                    flow: &flow,
+                    rng: &mut fight.rng.0,
+                };
+                boss.kind.controller().death_tick(&mut ctx, &mut boss, &mut out);
+            }
+            emit_cues(
+                &out.cues,
+                &boss,
+                level.palette.blood,
+                &mut particles,
+                &mut fight.rng.0,
+                &mut sfx,
+            );
+            out.cues.clear();
+            resolve_hazards(
+                &mut boss,
+                dt,
+                &mut player,
+                &mut enemies,
+                &mut fight.scratch.enemy_order,
+                &mut particles,
+                &mut damage_numbers,
+                &mut fight.rng.0,
+                &mut sfx,
+            );
+            if boss.elapsed >= boss.duration {
+                if !fight.level_complete {
+                    fight.level_complete = true;
+                    counters.level_complete = true;
+                }
+                commands.entity(entity).despawn();
+            }
+            continue;
+        }
+
+        // Phase detection.
+        let new_phase = boss.kind.phase_for(boss.hp_frac());
+        if new_phase > boss.phase {
+            boss.phase = new_phase;
+            out.phase_changed = true;
+        }
+
+        // The state's own body-contact number: reset to the kind's default
+        // every tick so a controller only has to say what is different.
+        boss.contact_damage = boss.kind.contact_damage();
+
+        // Controller tick. The block scopes the rng borrow so hazards can
+        // draw from the same stream afterwards.
+        {
+            let mut ctx = BossContext {
+                dt,
+                time: boss.elapsed,
+                player_pos: player.pos,
+                player_vel: player.vel,
+                player_radius: PLAYER_RADIUS,
+                arena: boss.arena,
+                level: &level,
+                flow: &flow,
+                rng: &mut fight.rng.0,
+            };
+            boss.kind.controller().tick(&mut ctx, &mut boss, &mut out);
+        }
+
+        // The controller's feedback requests, mapped to sound and particles.
+        emit_cues(
+            &out.cues,
+            &boss,
+            level.palette.blood,
+            &mut particles,
+            &mut fight.rng.0,
+            &mut sfx,
+        );
+        out.cues.clear();
+
+        // Hazards.
+        resolve_hazards(
+            &mut boss,
+            dt,
+            &mut player,
+            &mut enemies,
+            &mut fight.scratch.enemy_order,
+            &mut particles,
+            &mut damage_numbers,
+            &mut fight.rng.0,
+            &mut sfx,
+        );
+
+        // Body contact: only **grounded** hit shapes bump the rat (a lifted
+        // slipper passes overhead), and only when the state deals contact
+        // damage at all (`contact_damage == 0` is the art's "blades stopped" /
+        // "safe pocket" state).
+        if !boss.is_airborne() && boss.contact_cd <= 0.0 && boss.contact_damage > 0.0 {
+            let shapes = boss.hit_shapes();
+            if shapes.circle_hits_grounded(player.pos, PLAYER_RADIUS)
+                && player.take_damage(boss.contact_damage) {
+                    boss.contact_cd = 0.5;
+                    sfx.0.push(Sfx::Hurt);
+                    vfx::emit_player_hurt(&mut particles, &mut fight.rng.0, player.pos);
+                }
+        }
+
+        // Spawn queued projectiles.
+        for spawn in out.projectiles.iter() {
+            let projectile = BossProjectile {
+                kind: spawn.kind,
+                pos: spawn.pos,
+                prev: spawn.pos,
+                vel: spawn.vel,
+                radius: spawn.radius,
+                damage: spawn.damage,
+                life: spawn.life,
+                bounces: spawn.bounces,
+                anim: 0.0,
+            };
+            commands.spawn((projectile, next_spawn_id.take()));
+        }
+
+    }
+
+    // Advance boss projectiles.
+    for (entity, mut p) in projectiles.iter_mut() {
+        p.anim += dt;
+        p.life -= dt;
+        if p.life <= 0.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        p.prev = p.pos;
+        let next = p.pos + p.vel * dt;
+        if level.tiles.segment_hit(p.pos, next, p.radius).is_some() {
+            if p.bounces > 0 {
+                p.bounces -= 1;
+                p.vel = -p.vel;
+                let vel = p.vel;
+                p.pos += vel * dt;
+            } else {
+                commands.entity(entity).despawn();
+                continue;
+            }
+        } else {
+            p.pos = next;
+        }
+        if collision::segment_circle_hit(p.prev, p.pos, p.radius, player.pos, PLAYER_RADIUS)
+            && player.take_damage(p.damage)
+        {
+            vfx::emit_player_hurt(&mut particles, &mut fight.rng.0, player.pos);
+            sfx.0.push(Sfx::Hurt);
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+// ============================================================================
+// Small helpers
+// ============================================================================
+
+/// Did this projectile come from a weapon that picks its own target?
+///
+/// The aiming families in `weapons::nearest_visible` are Gnaw, Cheese Spray and
+/// Acid Spit (whose lob never damages in flight); Squeak Nova and Spore Orbit
+/// fire on a pattern around the rat and never look at a body. Only used for the
+/// balance attribution in [`BossScratch`].
+#[inline]
+fn is_aimed_weapon(kind: Option<WeaponKind>) -> bool {
+    matches!(
+        kind,
+        Some(WeaponKind::Gnaw | WeaponKind::CheeseSpray | WeaponKind::AcidSpit)
+    )
+}
+
+#[inline]
+fn s_radius(shape: &BossHitShape) -> f32 {
+    match *shape {
+        BossHitShape::Circle { radius, .. } => radius,
+        BossHitShape::Box { half, half_perp, .. } => half.max(half_perp),
+    }
+}
+
+/// Circle-vs-oriented-rect test for the mousetrap kill rectangle.
+#[inline]
+fn in_mouse_kill_rect(pos: Vec2, facing: Vec2, point: Vec2, radius: f32) -> bool {
+    local_box_contains(
+        pos,
+        facing,
+        point,
+        MOUSETRAP_KILL_U_MIN - radius,
+        MOUSETRAP_KILL_U_MAX + radius,
+        MOUSETRAP_KILL_HALF_V + radius,
+    )
+}
+
+#[cfg(test)]
+mod tests;

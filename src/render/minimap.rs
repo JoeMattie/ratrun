@@ -222,6 +222,92 @@ pub enum MinimapMode {
     Expanded,
 }
 
+/// Player-selectable size state for the compact corner minimap.
+///
+/// Cycled during play with `N` (`Normal -> Small -> Hidden -> Normal`) or
+/// stepped with the mouse wheel over the compact radar. Persisted across runs
+/// in the game's data store (`Normal` by default). On terminals too small for
+/// `Normal`, [`effective_compact_size`] falls back automatically to `Small` or
+/// `Hidden` without overwriting the saved preference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MinimapSize {
+    /// Full corner radar (`24×10` on `80×24`, `34×14` on `120×40`, `44×18` on `200×60`).
+    #[default]
+    Normal,
+    /// Tight tactical corner radar (`14×7` on `57×20`/`80×24`, `18×9` on `120×40`, `24×11` on `200×60`):
+    /// walls, the rat, boss/arena bearing, and seen maze entrances without viewport or pickup clutter.
+    Small,
+    /// Hidden: clears the playfield (leaving only a 1-cell corner hint, or the
+    /// pre-warning arena bearing chevron when the HUD compass is not active).
+    Hidden,
+}
+
+impl MinimapSize {
+    /// Cycle through the three compact states (`Normal -> Small -> Hidden -> Normal`).
+    #[inline]
+    pub const fn cycle(self) -> Self {
+        match self {
+            Self::Normal => Self::Small,
+            Self::Small => Self::Hidden,
+            Self::Hidden => Self::Normal,
+        }
+    }
+
+    /// Step the compact size from a scroll-wheel delta (`delta > 0` shrinks
+    /// toward `Hidden`, `delta < 0` grows toward `Normal`), clamping at both ends.
+    #[inline]
+    pub const fn step(self, delta: i32) -> Self {
+        if delta > 0 {
+            match self {
+                Self::Normal => Self::Small,
+                Self::Small | Self::Hidden => Self::Hidden,
+            }
+        } else if delta < 0 {
+            match self {
+                Self::Hidden => Self::Small,
+                Self::Small | Self::Normal => Self::Normal,
+            }
+        } else {
+            self
+        }
+    }
+
+    /// Canonical lowercase string persisted in the settings/score store.
+    #[inline]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Small => "small",
+            Self::Hidden => "hidden",
+        }
+    }
+
+    /// Parse a persisted setting string (case-insensitive); returns `None` for
+    /// unrecognized values so callers fall back cleanly to [`Self::Normal`].
+    pub fn parse_setting(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        if trimmed.eq_ignore_ascii_case("normal") {
+            Some(Self::Normal)
+        } else if trimmed.eq_ignore_ascii_case("small") {
+            Some(Self::Small)
+        } else if trimmed.eq_ignore_ascii_case("hidden") {
+            Some(Self::Hidden)
+        } else {
+            None
+        }
+    }
+
+    /// Short uppercase status line for the expanded map's sidebar.
+    #[inline]
+    const fn sidebar_status(self) -> &'static str {
+        match self {
+            Self::Normal => "RADAR: NORMAL",
+            Self::Small => "RADAR: SMALL",
+            Self::Hidden => "RADAR: HIDDEN",
+        }
+    }
+}
+
 /// Axis-aligned rectangle in map cell coordinates (`world_px / 16.0`).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CellRect {
@@ -321,11 +407,26 @@ pub struct MinimapView<'a> {
     pub clock: f32,
     /// Compact corner radar or expanded full-level map.
     pub mode: MinimapMode,
+    /// Saved compact radar size preference (`Normal`, `Small`, or `Hidden`).
+    /// Effective display size falls back automatically on smaller terminals
+    /// via [`effective_compact_size`].
+    pub compact_size: MinimapSize,
+    /// True when the HUD edge compass (`overlay.rs`) is already pointing at
+    /// the boss or pre-boss arena warning, so `Hidden` mode does not duplicate
+    /// the bearing cue.
+    pub hud_compass_active: bool,
     /// True when the mouse cursor hovers the compact minimap hit rect.
     pub hovered: bool,
     /// Optional precomputed exploration percentage (`0..=100`) for the expanded
     /// map readout; if `None`, computed on the fly in expanded mode only.
     pub explored_pct: Option<u8>,
+    /// Whether the player has discovered a maze on this level.
+    ///
+    /// When `false` (on maze-less maps, or on maze-bearing maps before any maze
+    /// entrance/reward is seen), maze-specific rows are omitted from the expanded
+    /// map's legend and compact legend strip so rare mazes are neither dead
+    /// clutter nor spoiled before discovery.
+    pub maze_discovered: bool,
 }
 
 /// Reusable scratch buffers kept across frames by the caller (e.g. on `App`).
@@ -375,29 +476,86 @@ impl MinimapScratch {
 
 // ---- Layout & Hit-Testing --------------------------------------------------
 
-/// Returns the outer screen [`Rect`] occupied by the compact corner minimap
-/// inside `area` (pass the playfield `game` rect between the HUD strips).
+/// Whether the playfield `area` has enough room for the requested compact size.
 ///
-/// Returns an empty `Rect::default()` on tiny terminals (`width < 72` or
-/// `height < 18`, which includes `57 × 20`) so the radar never swallows the
-/// combat playfield.
+/// - `Normal` requires at least `72 × 18` playfield cells (e.g. `80 × 24` terminal).
+/// - `Small` requires at least `48 × 14` playfield cells (includes `57 × 20` terminal).
+/// - `Hidden` always fits.
+#[inline]
+pub fn compact_size_fits(area: Rect, size: MinimapSize) -> bool {
+    match size {
+        MinimapSize::Normal => area.width >= 72 && area.height >= 18,
+        MinimapSize::Small => area.width >= 48 && area.height >= 14,
+        MinimapSize::Hidden => true,
+    }
+}
+
+/// Resolve the effective compact minimap size for `area` without modifying the
+/// player's saved `preferred` setting.
+///
+/// Terminals too small for `Normal` (such as `57 × 20`) automatically step down
+/// to `Small`, and tiny terminals (`< 48 × 14`) step down to `Hidden`.
+#[inline]
+pub fn effective_compact_size(area: Rect, preferred: MinimapSize) -> MinimapSize {
+    match preferred {
+        MinimapSize::Normal => {
+            if compact_size_fits(area, MinimapSize::Normal) {
+                MinimapSize::Normal
+            } else if compact_size_fits(area, MinimapSize::Small) {
+                MinimapSize::Small
+            } else {
+                MinimapSize::Hidden
+            }
+        }
+        MinimapSize::Small => {
+            if compact_size_fits(area, MinimapSize::Small) {
+                MinimapSize::Small
+            } else {
+                MinimapSize::Hidden
+            }
+        }
+        MinimapSize::Hidden => MinimapSize::Hidden,
+    }
+}
+
+/// Returns the outer screen [`Rect`] occupied by the compact corner minimap
+/// inside `area` for `preferred` (automatically clamped to
+/// [`effective_compact_size`]).
+///
+/// Returns an empty `Rect::default()` when effective size is [`MinimapSize::Hidden`]
+/// (explicitly hidden or terminal `< 48 × 14`), leaving no click blocker over
+/// the playfield.
 ///
 /// Anchored in the **bottom-right** corner inset by 1 column and 1 row so it
 /// never collides with top-center boss bars, top-right callout pills, the
 /// bottom-center critical-HP banner, or corner low-HP brackets.
-pub fn compact_rect(area: Rect) -> Rect {
-    if area.width < 72 || area.height < 18 {
-        return Rect::default();
-    }
-    let (w, h) = if area.width >= 160 && area.height >= 44 {
-        // Large (e.g. 200x60 -> game 200x58): inner 42x16 cells = 42x32 map cells.
-        (44u16, 18u16)
-    } else if area.width >= 106 && area.height >= 28 {
-        // Medium (e.g. 120x40 -> game 120x38): inner 32x12 cells = 32x24 map cells.
-        (34u16, 14u16)
-    } else {
-        // Standard (e.g. 80x24 -> game 80x22): inner 22x8 cells = 22x16 map cells.
-        (24u16, 10u16)
+pub fn compact_rect_for_size(area: Rect, preferred: MinimapSize) -> Rect {
+    let (w, h) = match effective_compact_size(area, preferred) {
+        MinimapSize::Hidden => return Rect::default(),
+        MinimapSize::Normal => {
+            if area.width >= 160 && area.height >= 44 {
+                // Large (e.g. 200x60 -> game 200x58): inner 42x16 cells = 42x32 map cells.
+                (44u16, 18u16)
+            } else if area.width >= 106 && area.height >= 28 {
+                // Medium (e.g. 120x40 -> game 120x38): inner 32x12 cells = 32x24 map cells.
+                (34u16, 14u16)
+            } else {
+                // Standard (e.g. 80x24 -> game 80x22): inner 22x8 cells = 22x16 map cells.
+                (24u16, 10u16)
+            }
+        }
+        MinimapSize::Small => {
+            if area.width >= 160 && area.height >= 44 {
+                // Large small radar: inner 22x9 cells = 22x18 map cells (33% of normal area).
+                (24u16, 11u16)
+            } else if area.width >= 106 && area.height >= 28 {
+                // Medium small radar (120x40): inner 16x7 cells = 16x14 map cells (34% of normal).
+                (18u16, 9u16)
+            } else {
+                // Standard & narrow small radar (80x24 & 57x20): inner 12x5 cells = 12x10 map cells.
+                (14u16, 7u16)
+            }
+        }
     };
     let w = w.min(area.width.saturating_sub(2));
     let h = h.min(area.height.saturating_sub(2));
@@ -407,6 +565,12 @@ pub fn compact_rect(area: Rect) -> Rect {
     let x = area.right().saturating_sub(w + 1).max(area.x);
     let y = area.bottom().saturating_sub(h + 1).max(area.y);
     Rect::new(x, y, w, h)
+}
+
+/// Returns the outer screen [`Rect`] occupied by the default (`Normal`, falling
+/// back to `Small` / `Hidden` on narrow terminals) compact corner minimap.
+pub fn compact_rect(area: Rect) -> Rect {
+    compact_rect_for_size(area, MinimapSize::Normal)
 }
 
 /// Returns the outer [`Rect`] occupied by the expanded Tab map modal inside `area`.
@@ -509,6 +673,13 @@ pub fn draw_into(
 }
 
 /// Render only the compact corner radar into `buf` (zero heap allocation after init).
+///
+/// Honors `view.compact_size` clamped via [`effective_compact_size`]:
+/// - `Normal`: full local 1:1 radar with viewport brackets and all compact markers.
+/// - `Small`: tighter corner radar keeping walls, the rat, boss/arena bearing,
+///   and seen maze entrances without viewport brackets or pickup clutter.
+/// - `Hidden`: clears the playfield except a 1-cell bottom-right corner hint
+///   (or the pre-warning arena bearing chevron when the HUD compass is not active).
 pub fn draw_compact(
     buf: &mut Buffer,
     area: Rect,
@@ -516,7 +687,13 @@ pub fn draw_compact(
     source: &(impl MinimapSource + ?Sized),
     scratch: &mut MinimapScratch,
 ) {
-    let rect = compact_rect(area);
+    let effective = effective_compact_size(area, view.compact_size);
+    if effective == MinimapSize::Hidden {
+        draw_hidden_hint(buf, area, view);
+        return;
+    }
+
+    let rect = compact_rect_for_size(area, effective);
     if rect.is_empty() || source.cols() <= 0 || source.rows() <= 0 {
         return;
     }
@@ -531,6 +708,7 @@ pub fn draw_compact(
         return;
     }
 
+    let is_small = effective == MinimapSize::Small;
     let pw = inner.width as usize;
     let ph = (inner.height as usize) * 2;
     scratch.prepare(pw * ph);
@@ -539,55 +717,161 @@ pub fn draw_compact(
     let rows = source.rows();
     let theme = DerivedPalette::from_palette(view.palette);
 
-    // Local 1:1 window centered on the player, clamped to map bounds.
-    let half_w = pw as f32 * 0.5;
-    let half_h = ph as f32 * 0.5;
-    let max_ox = (cols as f32 - pw as f32).max(0.0);
-    let max_oy = (rows as f32 - ph as f32).max(0.0);
-    let origin_x = (view.player_cell.0 - half_w).clamp(0.0, max_ox).floor() as i32;
-    let origin_y = (view.player_cell.1 - half_h).clamp(0.0, max_oy).floor() as i32;
+    // Normal renders 1:1 cells-per-pixel; Small uses feature-preserving 2×2
+    // downsampling so room walls, doorways, and nearby maze entrances remain
+    // visible even inside a 14×7 corner box.
+    let step: i32 = if is_small { 2 } else { 1 };
+    let inv_step = 1.0 / step as f32;
+    let span_w = (pw as i32 * step) as f32;
+    let span_h = (ph as i32 * step) as f32;
+    let max_ox = (cols as f32 - span_w).max(0.0);
+    let max_oy = (rows as f32 - span_h).max(0.0);
+    let origin_x = (view.player_cell.0 - span_w * 0.5)
+        .clamp(0.0, max_ox)
+        .floor() as i32;
+    let origin_y = (view.player_cell.1 - span_h * 0.5)
+        .clamp(0.0, max_oy)
+        .floor() as i32;
 
-    // 1. Sample 1:1 cells into pixel + visibility + kind buffers (strictly skipping unseen cell_at!).
-    for py in 0..ph {
-        let cy = origin_y + py as i32;
-        for px in 0..pw {
-            let cx = origin_x + px as i32;
-            let idx = py * pw + px;
-            if cx < 0 || cy < 0 || cx >= cols || cy >= rows || !source.seen(cx, cy) {
-                scratch.vis[idx] = 0;
-                scratch.kind[idx] = KIND_UNSEEN;
-                scratch.pixels[idx] = fog_void_color(&theme, cx, cy);
-                continue;
+    // 1. Sample cells into pixel + visibility + kind buffers (strictly skipping unseen cell_at!).
+    if !is_small {
+        for py in 0..ph {
+            let cy = origin_y + py as i32;
+            for px in 0..pw {
+                let cx = origin_x + px as i32;
+                let idx = py * pw + px;
+                if cx < 0 || cy < 0 || cx >= cols || cy >= rows || !source.seen(cx, cy) {
+                    scratch.vis[idx] = 0;
+                    scratch.kind[idx] = KIND_UNSEEN;
+                    scratch.pixels[idx] = fog_void_color(&theme, cx, cy);
+                    continue;
+                }
+                let rec = source.recency(cx, cy).clamp(0.0, 1.0);
+                scratch.vis[idx] = encode_vis(rec);
+                let cell = source.cell_at(cx, cy);
+                let (base_col, k) = classify_compact_cell(&theme, cell, cx, cy, source);
+                scratch.kind[idx] = k;
+                scratch.pixels[idx] = apply_recency_shading(&theme, base_col, rec);
             }
-            let rec = source.recency(cx, cy).clamp(0.0, 1.0);
-            scratch.vis[idx] = encode_vis(rec);
-            let cell = source.cell_at(cx, cy);
-            let (base_col, k) = classify_compact_cell(&theme, cell, cx, cy, source);
-            scratch.kind[idx] = k;
-            scratch.pixels[idx] = apply_recency_shading(&theme, base_col, rec);
+        }
+    } else {
+        for py in 0..ph {
+            let cy0 = origin_y + (py as i32) * 2;
+            for px in 0..pw {
+                let cx0 = origin_x + (px as i32) * 2;
+                let idx = py * pw + px;
+
+                let mut seen_n = 0u32;
+                let mut max_rec = 0.0f32;
+                let mut floor_n = 0u32;
+                let mut boss_floor_n = 0u32;
+                let mut wall_n = 0u32;
+                let mut maze_n = 0u32;
+                let mut door_n = 0u32;
+                let mut one_way_n = 0u32;
+                let mut hole_linked_n = 0u32;
+                let mut hole_near_n = 0u32;
+
+                for dy in 0..2 {
+                    let cy = cy0 + dy;
+                    if cy < 0 || cy >= rows {
+                        continue;
+                    }
+                    for dx in 0..2 {
+                        let cx = cx0 + dx;
+                        if cx < 0 || cx >= cols || !source.seen(cx, cy) {
+                            continue;
+                        }
+                        seen_n += 1;
+                        let r = source.recency(cx, cy).clamp(0.0, 1.0);
+                        if r > max_rec {
+                            max_rec = r;
+                        }
+                        match source.cell_at(cx, cy) {
+                            MinimapCell::Unknown => {}
+                            // Traps drop out in Small so amber stays exclusive to the bearing.
+                            MinimapCell::Floor | MinimapCell::Trap => floor_n += 1,
+                            MinimapCell::BossFloor => boss_floor_n += 1,
+                            MinimapCell::Wall => wall_n += 1,
+                            MinimapCell::MazeWall => maze_n += 1,
+                            MinimapCell::Doorway => door_n += 1,
+                            MinimapCell::OneWayDoor(_) => one_way_n += 1,
+                            MinimapCell::RatHole(axis) => {
+                                if source.rat_hole_far_known(cx, cy, axis) {
+                                    hole_linked_n += 1;
+                                } else {
+                                    hole_near_n += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if seen_n == 0 {
+                    scratch.vis[idx] = 0;
+                    scratch.kind[idx] = KIND_UNSEEN;
+                    scratch.pixels[idx] = fog_void_color(&theme, px as i32, py as i32);
+                    continue;
+                }
+
+                scratch.vis[idx] = encode_vis(max_rec);
+                let floor_col = if boss_floor_n > 0 && boss_floor_n >= floor_n {
+                    theme.boss_floor
+                } else {
+                    theme.floor_live
+                };
+                let (base_col, k) = if one_way_n > 0 {
+                    (ONE_WAY_EXIT_RGB, KIND_FEATURE)
+                } else if hole_linked_n > 0 {
+                    (RAT_HOLE_LINKED_RGB, KIND_FEATURE)
+                } else if hole_near_n > 0 {
+                    (RAT_HOLE_NEAR_RGB, KIND_FEATURE)
+                } else if door_n > 0 {
+                    (theme.doorway, KIND_FLOOR)
+                } else if maze_n > 0 && (floor_n + boss_floor_n) > 0 {
+                    let t = (maze_n as f32 / (maze_n + floor_n + boss_floor_n) as f32)
+                        .clamp(0.45, 0.85);
+                    (palette::mix(floor_col, theme.maze_wall, t), KIND_FEATURE)
+                } else if maze_n > 0 {
+                    (theme.maze_wall, KIND_FEATURE)
+                } else if wall_n > 0 && (floor_n + boss_floor_n) > 0 {
+                    (theme.wall_rim, KIND_FEATURE)
+                } else if wall_n > 0 {
+                    (theme.wall_mass, KIND_WALL)
+                } else {
+                    (floor_col, KIND_FLOOR)
+                };
+                scratch.kind[idx] = k;
+                scratch.pixels[idx] = apply_recency_shading(&theme, base_col, max_rec);
+            }
         }
     }
 
     // 2. Architectural wall-rim elevation & fog-of-war frontier mist.
     apply_wall_rims_and_fog_frontier(scratch, pw, ph, &theme);
 
-    // 3. Delicate corner-bracketed viewport frame (visible camera bounds in cells).
-    draw_viewport_brackets(
-        &mut scratch.pixels,
-        pw,
-        ph,
-        view.viewport_cells,
-        origin_x as f32,
-        origin_y as f32,
-        1.0,
-        1.0,
-        &theme,
-        true,
-    );
+    // 3. Delicate corner-bracketed viewport frame (Normal only — in Small the
+    //    tight window itself is the immediate area around the rat).
+    if !is_small {
+        draw_viewport_brackets(
+            &mut scratch.pixels,
+            pw,
+            ph,
+            view.viewport_cells,
+            origin_x as f32,
+            origin_y as f32,
+            1.0,
+            1.0,
+            &theme,
+            true,
+        );
+    }
 
-    // 4. Compact markers: visible geometry, found forks (seen maze entrances),
-    //    live boss, seen rewards, seen pickups, and fog-edge arena bearing.
-    //    (Cache status hollow/claimed and arena names belong on the expanded map.)
+    // 4. Compact markers:
+    //    - Normal: found forks (seen maze entrances), live boss, seen rewards,
+    //      seen pickups, and fog-edge arena bearing.
+    //    - Small: only live boss, arena bearing, and seen maze entrances so
+    //      every bright pixel reads immediately on the smaller canvas.
     let pulse = 0.5 + 0.5 * (view.clock * 6.0).sin();
     let fast_pulse = 0.5 + 0.5 * (view.clock * 9.5).sin();
 
@@ -613,12 +897,15 @@ pub fn draw_compact(
                     &mut scratch.pixels,
                     pw,
                     ph,
-                    m.cx - origin_x as f32,
-                    m.cy - origin_y as f32,
+                    (m.cx - origin_x as f32) * inv_step,
+                    (m.cy - origin_y as f32) * inv_step,
                     col,
                 );
             }
             MarkerKind::MazeReward => {
+                if is_small {
+                    continue;
+                }
                 let (mcx, mcy) = (m.cx.floor() as i32, m.cy.floor() as i32);
                 if !in_bounds(source, mcx, mcy) || !source.seen(mcx, mcy) {
                     continue;
@@ -628,12 +915,15 @@ pub fn draw_compact(
                     &mut scratch.pixels,
                     pw,
                     ph,
-                    m.cx - origin_x as f32,
-                    m.cy - origin_y as f32,
+                    (m.cx - origin_x as f32) * inv_step,
+                    (m.cy - origin_y as f32) * inv_step,
                     col,
                 );
             }
             MarkerKind::Pickup(tag) => {
+                if is_small {
+                    continue;
+                }
                 let (mcx, mcy) = (m.cx.floor() as i32, m.cy.floor() as i32);
                 if !in_bounds(source, mcx, mcy) || !source.seen(mcx, mcy) {
                     continue;
@@ -647,22 +937,22 @@ pub fn draw_compact(
                     &mut scratch.pixels,
                     pw,
                     ph,
-                    m.cx - origin_x as f32,
-                    m.cy - origin_y as f32,
+                    (m.cx - origin_x as f32) * inv_step,
+                    (m.cy - origin_y as f32) * inv_step,
                     base,
                 );
             }
             MarkerKind::Boss => {
-                let lx = m.cx - origin_x as f32;
-                let ly = m.cy - origin_y as f32;
+                let lx = (m.cx - origin_x as f32) * inv_step;
+                let ly = (m.cy - origin_y as f32) * inv_step;
                 let col = palette::mix(BOSS_ROSE_RGB, BOSS_HOT_RGB, fast_pulse);
                 if !plot_pixel_in_window(&mut scratch.pixels, pw, ph, lx, ly, col) {
                     edge_boss = Some((m.cx - view.player_cell.0, m.cy - view.player_cell.1));
                 }
             }
             MarkerKind::ArenaBearing => {
-                let lx = m.cx - origin_x as f32;
-                let ly = m.cy - origin_y as f32;
+                let lx = (m.cx - origin_x as f32) * inv_step;
+                let ly = (m.cy - origin_y as f32) * inv_step;
                 let col = palette::mix(WARN_AMBER_RGB, CACHE_GOLD_RGB, 0.35 + 0.45 * pulse);
                 if !plot_pixel_in_window(&mut scratch.pixels, pw, ph, lx, ly, col) {
                     edge_bearing = Some((m.cx - view.player_cell.0, m.cy - view.player_cell.1));
@@ -674,8 +964,8 @@ pub fn draw_compact(
     // Automatic fog-edge boss bearing projection when `boss_bearing_dir` is set.
     if let Some(dir) = view.boss_bearing_dir {
         if let Some((bx, by)) = fog_edge_cell(source, view.player_cell, dir) {
-            let lx = bx - origin_x as f32;
-            let ly = by - origin_y as f32;
+            let lx = (bx - origin_x as f32) * inv_step;
+            let ly = (by - origin_y as f32) * inv_step;
             let col = palette::mix(WARN_AMBER_RGB, CACHE_GOLD_RGB, 0.35 + 0.45 * pulse);
             if !plot_pixel_in_window(&mut scratch.pixels, pw, ph, lx, ly, col) {
                 edge_bearing = Some(dir);
@@ -685,16 +975,19 @@ pub fn draw_compact(
         }
     }
 
-    // 5. Player position + subtle directional facing pip.
-    let plx = view.player_cell.0 - origin_x as f32;
-    let ply = view.player_cell.1 - origin_y as f32;
-    let flen = (view.player_facing.0 * view.player_facing.0
-        + view.player_facing.1 * view.player_facing.1)
-        .sqrt();
-    if flen > 0.1 {
-        let fx = plx + (view.player_facing.0 / flen) * 1.15;
-        let fy = ply + (view.player_facing.1 / flen) * 1.15;
-        plot_pixel_in_window(&mut scratch.pixels, pw, ph, fx, fy, TAIL_RGB);
+    // 5. Player position + subtle directional facing pip (in Normal; Small uses
+    //    a crisp single-pixel rat blip so nearby doorways/walls stay clear).
+    let plx = (view.player_cell.0 - origin_x as f32) * inv_step;
+    let ply = (view.player_cell.1 - origin_y as f32) * inv_step;
+    if !is_small {
+        let flen = (view.player_facing.0 * view.player_facing.0
+            + view.player_facing.1 * view.player_facing.1)
+            .sqrt();
+        if flen > 0.1 {
+            let fx = plx + (view.player_facing.0 / flen) * 1.15;
+            let fy = ply + (view.player_facing.1 / flen) * 1.15;
+            plot_pixel_in_window(&mut scratch.pixels, pw, ph, fx, fy, TAIL_RGB);
+        }
     }
     let player_col = palette::mix(COAT_RGB, (255, 255, 255), 0.35 * pulse);
     plot_pixel_in_window(&mut scratch.pixels, pw, ph, plx, ply, player_col);
@@ -715,19 +1008,27 @@ pub fn draw_compact(
         rect.width.saturating_sub(4) as usize,
         title_style,
     );
-    if rect.width >= 20 {
-        let hint = if view.hovered { " ▸TAB " } else { " TAB " };
+    let hint_opt = if rect.width >= 18 {
+        Some(if view.hovered { " ▸TAB " } else { " N·TAB " })
+    } else if rect.width >= 14 {
+        Some(if view.hovered { " ▸TAB " } else { " N " })
+    } else {
+        None
+    };
+    if let Some(hint) = hint_opt {
         let hw = hint.chars().count() as u16;
         let hx = rect.right().saturating_sub(hw + 1);
-        let hint_style = if view.hovered {
-            Style::default()
-                .fg(PLATE)
-                .bg(TAIL)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(MUTED).bg(PLATE)
-        };
-        buf.set_stringn(hx, rect.y, hint, hw as usize, hint_style);
+        if hx >= rect.x + 7 {
+            let hint_style = if view.hovered {
+                Style::default()
+                    .fg(PLATE)
+                    .bg(TAIL)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MUTED).bg(PLATE)
+            };
+            buf.set_stringn(hx, rect.y, hint, hw as usize, hint_style);
+        }
     }
 
     // 7. Blit half-block pixel buffer into `inner`.
@@ -752,6 +1053,50 @@ pub fn draw_compact(
             palette::to_color(palette::mix(BOSS_ROSE_RGB, COAT_RGB, 0.4 * fast_pulse)),
         );
     }
+}
+
+/// Hidden compact state: leaves the playfield clear except a single bottom-right
+/// corner cell (`N` key hint, or the 8-way amber arena bearing chevron during
+/// the 180–230 s pre-warning window when the HUD compass is not yet active).
+/// Draws nothing at all on unusable terminals where even the expanded map
+/// cannot open (`< 32 × 14`). Zero allocations; never reads unseen cells.
+fn draw_hidden_hint(buf: &mut Buffer, area: Rect, view: &MinimapView<'_>) {
+    if expanded_rect(area).is_empty() || area.width < 2 || area.height < 2 {
+        return;
+    }
+    let x = area.right() - 2;
+    let y = area.bottom() - 2;
+
+    if !view.hud_compass_active {
+        let bearing = view.boss_bearing_dir.or_else(|| {
+            view.markers
+                .iter()
+                .find(|m| m.kind == MarkerKind::ArenaBearing)
+                .map(|m| (m.cx - view.player_cell.0, m.cy - view.player_cell.1))
+        });
+        if let Some((dx, dy)) = bearing {
+            if dx.abs() >= 1e-4 || dy.abs() >= 1e-4 {
+                let pulse = 0.5 + 0.5 * (view.clock * 6.0).sin();
+                let fg = palette::to_color(palette::mix(
+                    WARN_AMBER_RGB,
+                    CACHE_GOLD_RGB,
+                    0.35 + 0.45 * pulse,
+                ));
+                buf[(x, y)].set_char(dir_chevron_8(dx, dy)).set_style(
+                    Style::default()
+                        .fg(fg)
+                        .bg(PLATE)
+                        .add_modifier(Modifier::BOLD),
+                );
+                return;
+            }
+        }
+    }
+
+    // Quiet 1-cell hint that a map exists and `N` cycles it back.
+    buf[(x, y)]
+        .set_char('N')
+        .set_style(Style::default().fg(EDGE).bg(PLATE));
 }
 
 /// Render the expanded full-level Tab cartography modal into `buf`.
@@ -1225,16 +1570,22 @@ pub fn draw_expanded(
             &theme,
             accent_color,
             explored_pct,
+            view.maze_discovered,
             caches_unclaimed,
             caches_claimed,
             boss_arena_discovered,
             boss_active,
             bearing_active,
+            effective_compact_size(area, view.compact_size),
             scratch,
         );
     } else {
         let ly = inner.bottom().saturating_sub(1);
-        let legend = " ●You ◇Cache ◆Done ▸Breach ◤Bear ";
+        let legend = if view.maze_discovered {
+            " ●You ◇Cache ◆Done ▸Breach ◤Bear "
+        } else {
+            " ●You ▪Wall ▪Hole ◈Boss ◤Bear "
+        };
         buf.set_stringn(
             inner.x,
             ly,
@@ -1254,11 +1605,13 @@ fn draw_expanded_sidebar(
     theme: &DerivedPalette,
     accent: Color,
     explored_pct: u8,
+    maze_discovered: bool,
     caches_unclaimed: u32,
     caches_claimed: u32,
     boss_arena_discovered: bool,
     boss_active: bool,
     bearing_active: bool,
+    compact_size: MinimapSize,
     scratch: &mut MinimapScratch,
 ) {
     if side.width < 12 || side.height < 10 {
@@ -1322,20 +1675,23 @@ fn draw_expanded_sidebar(
         y += 1;
     }
 
-    let entries: &[(&str, Color, &str, &str)] = &[
-        ("●", COAT, "You", "Player"),
-        ("▪", palette::to_color(theme.wall_rim), "Wall", "Wall Edge"),
-        ("▪", palette::to_color(theme.maze_wall), "Maze", "Maze Partition"),
-        ("▪", palette::to_color(RAT_HOLE_LINKED_RGB), "Hole", "Rat-Hole"),
-        ("▪", palette::to_color(ONE_WAY_EXIT_RGB), "Exit", "One-Way Exit"),
-        ("▸", palette::to_color(theme.accent), "Door", "Maze Breach"),
-        ("◇", palette::to_color(CACHE_GOLD_RGB), "Open", "Unclaimed Cache"),
-        ("◆", palette::to_color(CLAIMED_MINT_RGB), "Done", "Claimed Cache"),
-        ("◈", palette::to_color(BOSS_ROSE_RGB), "Boss", "Boss Arena"),
-        ("◤", palette::to_color(WARN_AMBER_RGB), "Bear", "Arena Bearing"),
+    let entries: &[(&str, Color, &str, &str, bool)] = &[
+        ("●", COAT, "You", "Player", false),
+        ("▪", palette::to_color(theme.wall_rim), "Wall", "Wall Edge", false),
+        ("▪", palette::to_color(theme.maze_wall), "Maze", "Maze Partition", true),
+        ("▪", palette::to_color(RAT_HOLE_LINKED_RGB), "Hole", "Rat-Hole", false),
+        ("▪", palette::to_color(ONE_WAY_EXIT_RGB), "Exit", "One-Way Exit", true),
+        ("▸", palette::to_color(theme.accent), "Door", "Maze Breach", true),
+        ("◇", palette::to_color(CACHE_GOLD_RGB), "Open", "Unclaimed Cache", true),
+        ("◆", palette::to_color(CLAIMED_MINT_RGB), "Done", "Claimed Cache", true),
+        ("◈", palette::to_color(BOSS_ROSE_RGB), "Boss", "Boss Arena", false),
+        ("◤", palette::to_color(WARN_AMBER_RGB), "Bear", "Arena Bearing", false),
     ];
 
-    for &(sym, col, short_lbl, long_lbl) in entries {
+    for &(sym, col, short_lbl, long_lbl, maze_only) in entries {
+        if maze_only && !maze_discovered {
+            continue;
+        }
         if y + 2 >= bottom {
             break;
         }
@@ -1469,14 +1825,23 @@ fn draw_expanded_sidebar(
         }
     }
 
-    // Pin subtle key-hint line at the bottom of tall sidebars.
+    // Pin radar size status + key-hint line at the bottom of tall sidebars.
     if !compact && bottom >= side.y + 22 {
         let ky = bottom - 1;
+        if ky > y + 1 {
+            buf.set_stringn(
+                x,
+                ky - 1,
+                compact_size.sidebar_status(),
+                max_w,
+                Style::default().fg(MUTED).bg(PLATE),
+            );
+        }
         if ky > y {
             buf.set_stringn(
                 x,
                 ky,
-                "[TAB] Close  [CLICK] Radar",
+                "[TAB] Close  [N] Size",
                 max_w,
                 Style::default().fg(EDGE).bg(PLATE),
             );
@@ -1872,8 +2237,11 @@ fn draw_rim_chevron(buf: &mut Buffer, rect: Rect, dx: f32, dy: f32, fg: Color) {
         } else {
             rect.y
         };
-        if y == rect.y && (x < rect.x + 7 || x > rect.right().saturating_sub(7)) {
-            let cx = rect.x + rect.width / 2;
+        let right_guard = if rect.width >= 18 { 8 } else { 4 };
+        if y == rect.y && (x < rect.x + 7 || x >= rect.right().saturating_sub(right_guard)) {
+            let left_bound = rect.x + 7;
+            let right_bound = rect.right().saturating_sub(right_guard + 1).max(left_bound);
+            let cx = left_bound + (right_bound - left_bound) / 2;
             buf[(cx, y)].set_char(ch).set_style(style);
         } else {
             buf[(x, y)].set_char(ch).set_style(style);
@@ -2196,8 +2564,11 @@ mod tests {
             sector_name: sector,
             clock: 185.4,
             mode,
+            compact_size: MinimapSize::Normal,
+            hud_compass_active: false,
             hovered: false,
             explored_pct: None,
+            maze_discovered: true,
         }
     }
 
@@ -2208,22 +2579,39 @@ mod tests {
         let labels = sample_labels(false);
         let mut scratch = MinimapScratch::new();
 
-        for (w, h) in [(0, 0), (1, 1), (20, 10), (57, 20), (80, 24), (120, 40), (200, 60)] {
+        for (w, h) in [
+            (0, 0),
+            (0, 5),
+            (5, 0),
+            (1, 1),
+            (20, 10),
+            (57, 20),
+            (80, 24),
+            (120, 40),
+            (200, 60),
+        ] {
             for mode in [MinimapMode::Compact, MinimapMode::Expanded] {
-                let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
-                let view = make_view(
-                    mode,
-                    MinimapPalette::SEWER,
-                    "SEWER",
-                    &markers,
-                    &labels,
-                    false,
-                    w,
-                    h,
-                );
-                terminal
-                    .draw(|f| draw(f, f.area(), &view, &map, &mut scratch))
-                    .unwrap();
+                for compact_size in [
+                    MinimapSize::Normal,
+                    MinimapSize::Small,
+                    MinimapSize::Hidden,
+                ] {
+                    let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                    let mut view = make_view(
+                        mode,
+                        MinimapPalette::SEWER,
+                        "SEWER",
+                        &markers,
+                        &labels,
+                        false,
+                        w,
+                        h,
+                    );
+                    view.compact_size = compact_size;
+                    terminal
+                        .draw(|f| draw(f, f.area(), &view, &map, &mut scratch))
+                        .unwrap();
+                }
             }
         }
         assert_eq!(
@@ -2244,22 +2632,29 @@ mod tests {
         let cap_kind = scratch.kind.capacity();
         let cap_text = scratch.text_buf.capacity();
 
-        for (w, h) in [(80, 24), (120, 40), (200, 60)] {
-            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
-            let view = make_view(
-                MinimapMode::Compact,
-                MinimapPalette::SEWER,
-                "SEWER",
-                &markers,
-                &labels,
-                false,
-                w,
-                h,
-            );
-            for _ in 0..3 {
-                terminal
-                    .draw(|f| draw(f, f.area(), &view, &map, &mut scratch))
-                    .unwrap();
+        for (w, h) in [(57, 20), (80, 24), (120, 40), (200, 60)] {
+            for compact_size in [
+                MinimapSize::Normal,
+                MinimapSize::Small,
+                MinimapSize::Hidden,
+            ] {
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                let mut view = make_view(
+                    MinimapMode::Compact,
+                    MinimapPalette::SEWER,
+                    "SEWER",
+                    &markers,
+                    &labels,
+                    false,
+                    w,
+                    h,
+                );
+                view.compact_size = compact_size;
+                for _ in 0..3 {
+                    terminal
+                        .draw(|f| draw(f, f.area(), &view, &map, &mut scratch))
+                        .unwrap();
+                }
             }
         }
         assert_eq!(scratch.pixels.capacity(), cap_pixels);
@@ -2270,20 +2665,127 @@ mod tests {
 
     #[test]
     fn compact_degrades_to_empty_on_tiny_terminals() {
-        assert!(compact_rect(Rect::new(0, 0, 57, 20)).is_empty());
-        assert!(compact_rect(Rect::new(0, 0, 57, 18)).is_empty());
-        assert!(compact_rect(Rect::new(0, 0, 71, 22)).is_empty());
-        assert!(compact_rect(Rect::new(0, 0, 80, 17)).is_empty());
+        // Tiny terminals below Small threshold (48x14) degrade to empty.
+        assert!(compact_rect(Rect::new(0, 0, 47, 18)).is_empty());
+        assert!(compact_rect(Rect::new(0, 0, 57, 13)).is_empty());
+        assert!(compact_rect(Rect::new(0, 0, 20, 6)).is_empty());
+        assert!(compact_rect(Rect::new(0, 0, 0, 0)).is_empty());
+        assert!(compact_rect(Rect::new(0, 0, 0, 5)).is_empty());
+        assert!(compact_rect(Rect::new(0, 0, 5, 0)).is_empty());
+        assert!(compact_rect(Rect::new(0, 0, 1, 1)).is_empty());
 
-        let r80 = compact_rect(Rect::new(0, 1, 80, 22));
-        assert!(!r80.is_empty());
+        // Narrow terminals (e.g. 57x20 -> game 57x18) automatically step down
+        // from Normal to Small without overwriting the saved preference.
+        let game57 = Rect::new(0, 1, 57, 18);
+        assert!(!compact_size_fits(game57, MinimapSize::Normal));
+        assert!(compact_size_fits(game57, MinimapSize::Small));
+        assert_eq!(
+            effective_compact_size(game57, MinimapSize::Normal),
+            MinimapSize::Small
+        );
+        let r57 = compact_rect_for_size(game57, MinimapSize::Normal);
+        assert_eq!((r57.width, r57.height), (14, 7));
+        assert!(compact_rect_for_size(game57, MinimapSize::Hidden).is_empty());
+
+        // Standard (80x24 -> game 80x22): Normal 24x10, Small 14x7, Hidden empty.
+        let game80 = Rect::new(0, 1, 80, 22);
+        let r80 = compact_rect_for_size(game80, MinimapSize::Normal);
+        let r80_sm = compact_rect_for_size(game80, MinimapSize::Small);
         assert_eq!((r80.width, r80.height), (24, 10));
+        assert_eq!((r80_sm.width, r80_sm.height), (14, 7));
+        assert!(r80_sm.area() < r80.area());
+        assert!(compact_rect_for_size(game80, MinimapSize::Hidden).is_empty());
 
-        let r120 = compact_rect(Rect::new(0, 1, 120, 38));
+        // Medium (120x40 -> game 120x38): Normal 34x14, Small 18x9, Hidden empty.
+        let game120 = Rect::new(0, 1, 120, 38);
+        let r120 = compact_rect_for_size(game120, MinimapSize::Normal);
+        let r120_sm = compact_rect_for_size(game120, MinimapSize::Small);
         assert_eq!((r120.width, r120.height), (34, 14));
+        assert_eq!((r120_sm.width, r120_sm.height), (18, 9));
+        assert!(r120_sm.area() < r120.area());
+        assert!(compact_rect_for_size(game120, MinimapSize::Hidden).is_empty());
 
-        let r200 = compact_rect(Rect::new(0, 1, 200, 58));
+        // Large (200x60 -> game 200x58): Normal 44x18, Small 24x11, Hidden empty.
+        let game200 = Rect::new(0, 1, 200, 58);
+        let r200 = compact_rect_for_size(game200, MinimapSize::Normal);
+        let r200_sm = compact_rect_for_size(game200, MinimapSize::Small);
         assert_eq!((r200.width, r200.height), (44, 18));
+        assert_eq!((r200_sm.width, r200_sm.height), (24, 11));
+        assert!(r200_sm.area() < r200.area());
+        assert!(compact_rect_for_size(game200, MinimapSize::Hidden).is_empty());
+    }
+
+    #[test]
+    fn minimap_size_cycle_step_and_setting_round_trip() {
+        assert_eq!(MinimapSize::Normal.cycle(), MinimapSize::Small);
+        assert_eq!(MinimapSize::Small.cycle(), MinimapSize::Hidden);
+        assert_eq!(MinimapSize::Hidden.cycle(), MinimapSize::Normal);
+
+        assert_eq!(MinimapSize::Normal.step(1), MinimapSize::Small);
+        assert_eq!(MinimapSize::Small.step(1), MinimapSize::Hidden);
+        assert_eq!(MinimapSize::Hidden.step(1), MinimapSize::Hidden);
+        assert_eq!(MinimapSize::Hidden.step(-1), MinimapSize::Small);
+        assert_eq!(MinimapSize::Small.step(-1), MinimapSize::Normal);
+        assert_eq!(MinimapSize::Normal.step(-1), MinimapSize::Normal);
+
+        for s in [MinimapSize::Normal, MinimapSize::Small, MinimapSize::Hidden] {
+            assert_eq!(MinimapSize::parse_setting(s.as_str()), Some(s));
+        }
+        assert_eq!(MinimapSize::parse_setting("SMALL"), Some(MinimapSize::Small));
+        assert_eq!(MinimapSize::parse_setting("bogus"), None);
+        assert_eq!(MinimapSize::parse_setting(""), None);
+    }
+
+    #[test]
+    fn hidden_mode_draws_only_one_cell_and_respects_hud_compass() {
+        let map = FakeMap::showcase(false);
+        let markers = sample_markers(false);
+        let labels = sample_labels(false);
+        let mut scratch = MinimapScratch::new();
+
+        // Pre-warning bearing active (hud_compass_active = false): single corner
+        // cell shows the 8-way amber bearing chevron (`◤` for NW), nothing else.
+        let mut view = make_view(
+            MinimapMode::Compact,
+            MinimapPalette::SEWER,
+            "SEWER",
+            &markers,
+            &labels,
+            false,
+            80,
+            24,
+        );
+        view.compact_size = MinimapSize::Hidden;
+        view.hud_compass_active = false;
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| draw(f, f.area(), &view, &map, &mut scratch))
+            .unwrap();
+        let buf = term.backend().buffer();
+        let non_blank: Vec<(u16, u16, &str)> = (0..24u16)
+            .flat_map(|y| (0..80u16).map(move |x| (x, y)))
+            .filter_map(|(x, y)| {
+                let s = buf[(x, y)].symbol();
+                (s != " ").then_some((x, y, s))
+            })
+            .collect();
+        assert_eq!(non_blank, vec![(78, 22, "◤")]);
+
+        // When the HUD warning compass is active, do NOT duplicate the bearing:
+        // only the quiet 1-cell `N` hint appears.
+        view.hud_compass_active = true;
+        let mut term2 = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term2
+            .draw(|f| draw(f, f.area(), &view, &map, &mut scratch))
+            .unwrap();
+        let buf2 = term2.backend().buffer();
+        let non_blank2: Vec<(u16, u16, &str)> = (0..24u16)
+            .flat_map(|y| (0..80u16).map(move |x| (x, y)))
+            .filter_map(|(x, y)| {
+                let s = buf2[(x, y)].symbol();
+                (s != " ").then_some((x, y, s))
+            })
+            .collect();
+        assert_eq!(non_blank2, vec![(78, 22, "N")]);
     }
 
     #[test]
@@ -2307,25 +2809,36 @@ mod tests {
 
         for (w, h) in [(80, 24), (120, 40)] {
             for mode in [MinimapMode::Compact, MinimapMode::Expanded] {
-                let view = make_view(
-                    mode,
-                    MinimapPalette::SEWER,
-                    "SEWER",
-                    &markers,
-                    &labels,
-                    false,
-                    w,
-                    h,
-                );
-                let mut term_a = Terminal::new(TestBackend::new(w, h)).unwrap();
-                let mut term_b = Terminal::new(TestBackend::new(w, h)).unwrap();
-                term_a.draw(|f| draw(f, f.area(), &view, &map_a, &mut scratch)).unwrap();
-                term_b.draw(|f| draw(f, f.area(), &view, &map_b, &mut scratch)).unwrap();
-                assert_eq!(
-                    term_a.backend().buffer().content,
-                    term_b.backend().buffer().content,
-                    "fog of war leaked unseen terrain in {mode:?} at {w}x{h}"
-                );
+                for compact_size in [
+                    MinimapSize::Normal,
+                    MinimapSize::Small,
+                    MinimapSize::Hidden,
+                ] {
+                    let mut view = make_view(
+                        mode,
+                        MinimapPalette::SEWER,
+                        "SEWER",
+                        &markers,
+                        &labels,
+                        false,
+                        w,
+                        h,
+                    );
+                    view.compact_size = compact_size;
+                    let mut term_a = Terminal::new(TestBackend::new(w, h)).unwrap();
+                    let mut term_b = Terminal::new(TestBackend::new(w, h)).unwrap();
+                    term_a
+                        .draw(|f| draw(f, f.area(), &view, &map_a, &mut scratch))
+                        .unwrap();
+                    term_b
+                        .draw(|f| draw(f, f.area(), &view, &map_b, &mut scratch))
+                        .unwrap();
+                    assert_eq!(
+                        term_a.backend().buffer().content,
+                        term_b.backend().buffer().content,
+                        "fog of war leaked unseen terrain in {mode:?}/{compact_size:?} at {w}x{h}"
+                    );
+                }
             }
         }
         assert_eq!(map_a.unseen_reads.get(), 0);
@@ -2403,6 +2916,157 @@ mod tests {
             "fog edge marker must sit on a seen cell"
         );
         assert_eq!(map.unseen_reads.get(), 0);
+    }
+
+    /// Collect each row of a `TestBackend` buffer as a `String`.
+    fn buffer_rows(buf: &Buffer) -> Vec<String> {
+        let area = buf.area;
+        (area.y..area.bottom())
+            .map(|y| {
+                (area.x..area.right())
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn expanded_legend_omits_maze_rows_until_maze_discovered() {
+        let map = FakeMap::showcase(false);
+        let markers = sample_markers(false);
+        let labels = sample_labels(false);
+        let non_maze_markers: Vec<MapMarker> = markers
+            .iter()
+            .copied()
+            .filter(|m| {
+                !matches!(
+                    m.kind,
+                    MarkerKind::MazeEntrance
+                        | MarkerKind::MazeCacheHollow
+                        | MarkerKind::MazeCacheClaimed
+                        | MarkerKind::MazeReward
+                )
+            })
+            .collect();
+        let mut scratch = MinimapScratch::new();
+
+        // 1. Sidebar layout (120×40): maze_discovered = false omits all 5 maze
+        //    legend rows and closes the vertical gap (Boss Arena directly below Rat-Hole).
+        let mut view_no_maze = make_view(
+            MinimapMode::Expanded,
+            MinimapPalette::SEWER,
+            "SEWER",
+            &non_maze_markers,
+            &labels,
+            false,
+            120,
+            40,
+        );
+        view_no_maze.maze_discovered = false;
+        let mut term_no = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term_no
+            .draw(|f| draw(f, f.area(), &view_no_maze, &map, &mut scratch))
+            .unwrap();
+        let rows_no = buffer_rows(term_no.backend().buffer());
+        let text_no = rows_no.join("\n");
+        for forbidden in [
+            "Maze Partition",
+            "One-Way Exit",
+            "Maze Breach",
+            "Unclaimed Cache",
+            "Claimed Cache",
+            "CACHES:",
+        ] {
+            assert!(
+                !text_no.contains(forbidden),
+                "maze legend row '{forbidden}' leaked when maze_discovered == false"
+            );
+        }
+        let hole_row = rows_no
+            .iter()
+            .position(|r| r.contains("Rat-Hole"))
+            .expect("Rat-Hole legend row missing");
+        let boss_row = rows_no
+            .iter()
+            .position(|r| r.contains("Boss Arena"))
+            .expect("Boss Arena legend row missing");
+        assert_eq!(
+            boss_row,
+            hole_row + 1,
+            "omitting maze rows must close the gap (Rat-Hole on {hole_row}, Boss Arena on {boss_row})"
+        );
+
+        // 2. Sidebar layout (120×40): maze_discovered = true renders all 5 maze rows.
+        let mut view_maze = make_view(
+            MinimapMode::Expanded,
+            MinimapPalette::SEWER,
+            "SEWER",
+            &markers,
+            &labels,
+            false,
+            120,
+            40,
+        );
+        view_maze.maze_discovered = true;
+        let mut term_yes = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term_yes
+            .draw(|f| draw(f, f.area(), &view_maze, &map, &mut scratch))
+            .unwrap();
+        let text_yes = buffer_rows(term_yes.backend().buffer()).join("\n");
+        for expected in [
+            "Maze Partition",
+            "One-Way Exit",
+            "Maze Breach",
+            "Unclaimed Cache",
+            "Claimed Cache",
+        ] {
+            assert!(
+                text_yes.contains(expected),
+                "maze legend row '{expected}' missing when maze_discovered == true"
+            );
+        }
+
+        // 3. Compact bottom-strip layout (48×16, where has_sidebar == false):
+        //    no maze words when maze_discovered == false, maze key when true.
+        let mut strip_no = make_view(
+            MinimapMode::Expanded,
+            MinimapPalette::SEWER,
+            "SEWER",
+            &non_maze_markers,
+            &labels,
+            false,
+            48,
+            16,
+        );
+        strip_no.maze_discovered = false;
+        let mut term_strip_no = Terminal::new(TestBackend::new(48, 16)).unwrap();
+        term_strip_no
+            .draw(|f| draw(f, f.area(), &strip_no, &map, &mut scratch))
+            .unwrap();
+        let strip_text_no = buffer_rows(term_strip_no.backend().buffer()).join("\n");
+        assert!(!strip_text_no.contains("Cache"));
+        assert!(!strip_text_no.contains("Breach"));
+        assert!(strip_text_no.contains("Hole"));
+        assert!(strip_text_no.contains("Boss"));
+
+        let mut strip_yes = make_view(
+            MinimapMode::Expanded,
+            MinimapPalette::SEWER,
+            "SEWER",
+            &markers,
+            &labels,
+            false,
+            48,
+            16,
+        );
+        strip_yes.maze_discovered = true;
+        let mut term_strip_yes = Terminal::new(TestBackend::new(48, 16)).unwrap();
+        term_strip_yes
+            .draw(|f| draw(f, f.area(), &strip_yes, &map, &mut scratch))
+            .unwrap();
+        let strip_text_yes = buffer_rows(term_strip_yes.backend().buffer()).join("\n");
+        assert!(strip_text_yes.contains("Cache"));
+        assert!(strip_text_yes.contains("Breach"));
     }
 
     fn color_rgb(c: Color) -> (u8, u8, u8) {
@@ -2507,30 +3171,64 @@ mod tests {
             sector: &'static str,
             boss_disc: bool,
             hovered: bool,
+            maze_discovered: bool,
         }
 
         let cases = [
-            DumpCase { name: "57x20-compact-sewer", w: 57, h: 20, mode: MinimapMode::Compact, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false },
-            DumpCase { name: "57x20-expanded-sewer", w: 57, h: 20, mode: MinimapMode::Expanded, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false },
-            DumpCase { name: "80x24-compact-sewer", w: 80, h: 24, mode: MinimapMode::Compact, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false },
-            DumpCase { name: "80x24-compact-hovered", w: 80, h: 24, mode: MinimapMode::Compact, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: true },
-            DumpCase { name: "80x24-expanded-sewer", w: 80, h: 24, mode: MinimapMode::Expanded, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false },
-            DumpCase { name: "120x40-compact-sewer", w: 120, h: 40, mode: MinimapMode::Compact, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false },
-            DumpCase { name: "120x40-expanded-sewer", w: 120, h: 40, mode: MinimapMode::Expanded, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false },
-            DumpCase { name: "120x40-expanded-boss-kitchen", w: 120, h: 40, mode: MinimapMode::Expanded, pal: MinimapPalette::KITCHEN, sector: "KITCHEN", boss_disc: true, hovered: false },
-            DumpCase { name: "120x40-compact-lab", w: 120, h: 40, mode: MinimapMode::Compact, pal: MinimapPalette::LAB, sector: "LAB", boss_disc: true, hovered: false },
-            DumpCase { name: "200x60-compact-sewer", w: 200, h: 60, mode: MinimapMode::Compact, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false },
-            DumpCase { name: "200x60-expanded-lab", w: 200, h: 60, mode: MinimapMode::Expanded, pal: MinimapPalette::LAB, sector: "LAB", boss_disc: false, hovered: false },
+            DumpCase { name: "57x20-compact-sewer", w: 57, h: 20, mode: MinimapMode::Compact, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false, maze_discovered: true },
+            DumpCase { name: "57x20-expanded-sewer", w: 57, h: 20, mode: MinimapMode::Expanded, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false, maze_discovered: true },
+            DumpCase { name: "80x24-compact-sewer", w: 80, h: 24, mode: MinimapMode::Compact, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false, maze_discovered: true },
+            DumpCase { name: "80x24-compact-hovered", w: 80, h: 24, mode: MinimapMode::Compact, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: true, maze_discovered: true },
+            DumpCase { name: "80x24-expanded-sewer", w: 80, h: 24, mode: MinimapMode::Expanded, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false, maze_discovered: true },
+            DumpCase { name: "120x40-compact-sewer", w: 120, h: 40, mode: MinimapMode::Compact, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false, maze_discovered: true },
+            DumpCase { name: "120x40-expanded-sewer", w: 120, h: 40, mode: MinimapMode::Expanded, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false, maze_discovered: true },
+            DumpCase { name: "120x40-expanded-no-maze-sewer", w: 120, h: 40, mode: MinimapMode::Expanded, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false, maze_discovered: false },
+            DumpCase { name: "120x40-expanded-boss-kitchen", w: 120, h: 40, mode: MinimapMode::Expanded, pal: MinimapPalette::KITCHEN, sector: "KITCHEN", boss_disc: true, hovered: false, maze_discovered: true },
+            DumpCase { name: "120x40-compact-lab", w: 120, h: 40, mode: MinimapMode::Compact, pal: MinimapPalette::LAB, sector: "LAB", boss_disc: true, hovered: false, maze_discovered: true },
+            DumpCase { name: "200x60-compact-sewer", w: 200, h: 60, mode: MinimapMode::Compact, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false, maze_discovered: true },
+            DumpCase { name: "200x60-expanded-lab", w: 200, h: 60, mode: MinimapMode::Expanded, pal: MinimapPalette::LAB, sector: "LAB", boss_disc: false, hovered: false, maze_discovered: true },
+            DumpCase { name: "48x16-expanded-no-maze", w: 48, h: 16, mode: MinimapMode::Expanded, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false, maze_discovered: false },
+            DumpCase { name: "48x16-expanded-with-maze", w: 48, h: 16, mode: MinimapMode::Expanded, pal: MinimapPalette::SEWER, sector: "SEWER", boss_disc: false, hovered: false, maze_discovered: true },
         ];
 
+        let markers_no_maze: Vec<MapMarker> = markers_mid
+            .iter()
+            .copied()
+            .filter(|m| {
+                !matches!(
+                    m.kind,
+                    MarkerKind::MazeEntrance
+                        | MarkerKind::MazeCacheHollow
+                        | MarkerKind::MazeCacheClaimed
+                        | MarkerKind::MazeReward
+                )
+            })
+            .collect();
+
         for c in &cases {
-            let (name, w, h, mode, pal, sector, boss_disc, hovered) =
-                (c.name, c.w, c.h, c.mode, c.pal, c.sector, c.boss_disc, c.hovered);
+            let (name, w, h, mode, pal, sector, boss_disc, hovered, maze_disc) = (
+                c.name,
+                c.w,
+                c.h,
+                c.mode,
+                c.pal,
+                c.sector,
+                c.boss_disc,
+                c.hovered,
+                c.maze_discovered,
+            );
             let map = if boss_disc { &map_boss } else { &map_mid };
-            let markers = if boss_disc { &markers_boss } else { &markers_mid };
+            let markers: &[MapMarker] = if !maze_disc {
+                &markers_no_maze
+            } else if boss_disc {
+                &markers_boss
+            } else {
+                &markers_mid
+            };
             let labels = if boss_disc { &labels_boss } else { &labels_mid };
             let mut view = make_view(mode, pal, sector, markers, labels, boss_disc, w, h);
             view.hovered = hovered;
+            view.maze_discovered = maze_disc;
 
             let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
             terminal
@@ -2558,6 +3256,95 @@ mod tests {
                 ansi.push_str("\x1b[0m\n");
             }
             std::fs::write(dir.join(format!("{name}.ansi")), ansi).unwrap();
+        }
+    }
+
+    #[test]
+    fn dump_minimap_size_captures() {
+        if std::env::var("RATRUN_DUMP").ok().as_deref() != Some("minimap_sizes") {
+            return;
+        }
+        let dir = std::env::var("RATRUN_MINIMAP_DIR").unwrap_or_else(|_| {
+            "/private/tmp/claude-501/-Users-joe-dev-ratrun/a0cccbef-9e45-4849-814a-e727185739a1/scratchpad/minimap/sizes".to_string()
+        });
+        let dir = std::path::Path::new(&dir);
+        std::fs::create_dir_all(dir).unwrap();
+
+        let map_mid = FakeMap::showcase(false);
+        let markers_mid = sample_markers(false);
+        let labels_mid = sample_labels(false);
+        let mut scratch = MinimapScratch::new();
+
+        struct SizeCase {
+            name: &'static str,
+            w: u16,
+            h: u16,
+            mode: MinimapMode,
+            size: MinimapSize,
+            hovered: bool,
+            hud_compass: bool,
+        }
+
+        let cases = [
+            // 80x24: Normal, Small, Small-hovered, Hidden (with pre-warning bearing), Hidden (quiet/HUD compass), Expanded
+            SizeCase { name: "80x24-normal", w: 80, h: 24, mode: MinimapMode::Compact, size: MinimapSize::Normal, hovered: false, hud_compass: false },
+            SizeCase { name: "80x24-small", w: 80, h: 24, mode: MinimapMode::Compact, size: MinimapSize::Small, hovered: false, hud_compass: false },
+            SizeCase { name: "80x24-small-hovered", w: 80, h: 24, mode: MinimapMode::Compact, size: MinimapSize::Small, hovered: true, hud_compass: false },
+            SizeCase { name: "80x24-hidden-bearing", w: 80, h: 24, mode: MinimapMode::Compact, size: MinimapSize::Hidden, hovered: false, hud_compass: false },
+            SizeCase { name: "80x24-hidden-quiet", w: 80, h: 24, mode: MinimapMode::Compact, size: MinimapSize::Hidden, hovered: false, hud_compass: true },
+            // 120x40: Normal, Small, Small-hovered, Hidden (with pre-warning bearing), Hidden (quiet/HUD compass), Expanded
+            SizeCase { name: "120x40-normal", w: 120, h: 40, mode: MinimapMode::Compact, size: MinimapSize::Normal, hovered: false, hud_compass: false },
+            SizeCase { name: "120x40-small", w: 120, h: 40, mode: MinimapMode::Compact, size: MinimapSize::Small, hovered: false, hud_compass: false },
+            SizeCase { name: "120x40-small-hovered", w: 120, h: 40, mode: MinimapMode::Compact, size: MinimapSize::Small, hovered: true, hud_compass: false },
+            SizeCase { name: "120x40-hidden-bearing", w: 120, h: 40, mode: MinimapMode::Compact, size: MinimapSize::Hidden, hovered: false, hud_compass: false },
+            SizeCase { name: "120x40-hidden-quiet", w: 120, h: 40, mode: MinimapMode::Compact, size: MinimapSize::Hidden, hovered: false, hud_compass: true },
+            SizeCase { name: "120x40-expanded-small-pref", w: 120, h: 40, mode: MinimapMode::Expanded, size: MinimapSize::Small, hovered: false, hud_compass: false },
+            // 57x20: auto-Small fallback from Normal preference, plus Hidden
+            SizeCase { name: "57x20-auto-small", w: 57, h: 20, mode: MinimapMode::Compact, size: MinimapSize::Normal, hovered: false, hud_compass: false },
+            SizeCase { name: "57x20-hidden-bearing", w: 57, h: 20, mode: MinimapMode::Compact, size: MinimapSize::Hidden, hovered: false, hud_compass: false },
+        ];
+
+        for c in &cases {
+            let mut view = make_view(
+                c.mode,
+                MinimapPalette::SEWER,
+                "SEWER",
+                &markers_mid,
+                &labels_mid,
+                false,
+                c.w,
+                c.h,
+            );
+            view.compact_size = c.size;
+            view.hovered = c.hovered;
+            view.hud_compass_active = c.hud_compass;
+
+            let mut terminal = Terminal::new(TestBackend::new(c.w, c.h)).unwrap();
+            terminal
+                .draw(|f| {
+                    let area = f.area();
+                    let game = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(2));
+                    paint_mock_game_backdrop(f.buffer_mut(), area, MinimapPalette::SEWER, "SEWER");
+                    draw(f, game, &view, &map_mid, &mut scratch);
+                })
+                .unwrap();
+
+            let buf = terminal.backend().buffer();
+            let mut ansi = String::with_capacity((c.w as usize) * (c.h as usize) * 28);
+            for y in 0..c.h {
+                for x in 0..c.w {
+                    let cell = &buf[(x, y)];
+                    let (r, g, b) = color_rgb(cell.fg);
+                    let (br, bg, bb) = color_rgb(cell.bg);
+                    let _ = write!(
+                        ansi,
+                        "\x1b[38;2;{r};{g};{b};48;2;{br};{bg};{bb}m{}",
+                        cell.symbol()
+                    );
+                }
+                ansi.push_str("\x1b[0m\n");
+            }
+            std::fs::write(dir.join(format!("{}.ansi", c.name)), ansi).unwrap();
         }
     }
 }

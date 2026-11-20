@@ -1,3 +1,4 @@
+pub mod campaign;
 pub mod framebuffer;
 pub mod hud;
 pub mod menu;

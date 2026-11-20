@@ -8,28 +8,56 @@ use ratatui::widgets::Block;
 use ratatui::Frame;
 
 use crate::audio::{AudioEngine, Sfx};
+use crate::game::campaign::{self, CampaignState, KeepKind, Keepable};
 use crate::game::gem::PickupKind;
 use crate::game::level::Theme;
-use crate::game::loadout::Upgrade;
+use crate::game::loadout::{Loadout, PassiveKind, Upgrade};
 use crate::game::world::World;
 use crate::input::InputState;
 use crate::lore;
 use crate::math::Vec2;
+use crate::render::campaign as campaign_ui;
 use crate::render::framebuffer::PixelBuffer;
+use crate::render::palette;
 use crate::render::{hud, menu, minimap, minimap_source, overlay};
 use crate::scores::{ScoreEntry, ScoreTable};
 
 use menu::{HitMap, RunSummary, Target};
 
+/// Backdrop behind the campaign's full-screen plates (the same near-black the
+/// story dossier paints).
+const BACKDROP: Color = Color::Rgb(11, 15, 17);
+
+/// How long a level-clear fanfare waits before it plays. The simulation has
+/// already played the boss's own death sting on the killing tick, so the
+/// fanfare follows it a beat later rather than stacking on top of it.
+const FANFARE_DELAY_SECS: f32 = 0.55;
+
+/// The level-intro label for a single-sector practice run.
+const PRACTICE_BLURB: &str = "PRACTICE RUN — this sector alone, on the default loadout. \
+     Clearing it opens the next sector, but it is not a campaign win.";
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Title,
+    /// Sector select: the art's level-select screen (the title's row 2).
+    SectorSelect,
     Story,
+    /// Level 1's access-route card (`menu::draw_map_intro`).
     MapIntro,
+    /// Levels 2 and 3's intro plate (`campaign_ui::draw_level_intro`).
+    LevelIntro,
     Playing,
     LevelUp,
     Paused,
-    End, // game over or win (distinguished by world.won)
+    /// A non-final level's boss died: the sector-cleared plate.
+    LevelComplete,
+    /// The keep-three manifest before the next campaign level.
+    KeepThree,
+    /// All three campaign levels cleared.
+    Victory,
+    /// Defeat, or the end of a single-sector practice run.
+    End,
 }
 
 #[cfg(test)]
@@ -39,14 +67,28 @@ impl Screen {
     fn name_for_test(&self) -> &'static str {
         match self {
             Screen::Title => "Title",
+            Screen::SectorSelect => "SectorSelect",
             Screen::Story => "Story",
             Screen::MapIntro => "MapIntro",
+            Screen::LevelIntro => "LevelIntro",
             Screen::Playing => "Playing",
             Screen::LevelUp => "LevelUp",
             Screen::Paused => "Paused",
+            Screen::LevelComplete => "LevelComplete",
+            Screen::KeepThree => "KeepThree",
+            Screen::Victory => "Victory",
             Screen::End => "End",
         }
     }
+}
+
+/// One campaign level's banked numbers, shown in the victory breakdown.
+#[derive(Clone, Copy, Default, Debug)]
+struct LevelRecord {
+    time: f32,
+    kills: u32,
+    score: u32,
+    player_level: u32,
 }
 
 pub struct App {
@@ -55,8 +97,35 @@ pub struct App {
     pub input: InputState,
     audio: Option<AudioEngine>,
     scores: ScoreTable,
-    theme_idx: usize,
+    /// The sector-select cursor (`0..3`); also the sector the title shows, so
+    /// the title's material tint and menu music follow it.
+    select_idx: usize,
     menu_idx: usize,
+    /// The campaign run in flight (`None` on the title and during a practice
+    /// run). It owns the carried loadout and the banked totals.
+    campaign: Option<CampaignState>,
+    /// A single-sector practice run: the level index it plays alone.
+    practice: Option<usize>,
+    /// Per-level numbers banked as each level completes (victory breakdown).
+    records: [LevelRecord; campaign::LEVEL_COUNT],
+    /// Keep-three manifest: what the finished level offered, in the art's
+    /// card order, plus the parallel selection flags and the cursor/scroll.
+    keep_items: Vec<Keepable>,
+    keep_entries: Vec<campaign_ui::UpgradeEntry<'static>>,
+    keep_selected: Vec<bool>,
+    keep_cursor: usize,
+    keep_scroll: usize,
+    /// How many manifest rows the last rendered frame could show (the art's
+    /// `keep_three_visible_rows`), so the cursor never scrolls out of view.
+    keep_visible_rows: usize,
+    /// Upgrades carried into the level on screen (the intro's pack strip).
+    carried_entries: Vec<campaign_ui::UpgradeEntry<'static>>,
+    /// Final loadout shown on the campaign-victory plate.
+    victory_loadout: Vec<campaign_ui::UpgradeEntry<'static>>,
+    /// Victory plate keyboard focus.
+    victory_focus: campaign_ui::CampaignVictoryAction,
+    /// Cards the finished level offered (counted once, not per frame).
+    owned_upgrades: usize,
     world: Option<World>,
     levelup_choices: Vec<Upgrade>,
     levelup_desc: Vec<(String, String, String)>,
@@ -80,6 +149,10 @@ pub struct App {
     pixels: PixelBuffer,
     /// Reused per-frame SFX de-duplication buffer.
     sfx_frame: Vec<Sfx>,
+    /// A sting that plays a beat *after* the event that caused it
+    /// (`(sound, seconds left)`), so a level-clear fanfare follows the boss's
+    /// own death sting instead of doubling it.
+    sting: Option<(Sfx, f32)>,
     /// Reused HUD text buffers, so the status line does not re-format every
     /// frame.
     hud: hud::HudState,
@@ -123,8 +196,21 @@ impl App {
             input: InputState::new(kitty),
             audio,
             scores,
-            theme_idx: 0,
+            select_idx: 0,
             menu_idx: 0,
+            campaign: None,
+            practice: None,
+            records: [LevelRecord::default(); campaign::LEVEL_COUNT],
+            keep_items: Vec::new(),
+            keep_entries: Vec::new(),
+            keep_selected: Vec::new(),
+            keep_cursor: 0,
+            keep_scroll: 0,
+            keep_visible_rows: 8,
+            carried_entries: Vec::new(),
+            victory_loadout: Vec::new(),
+            victory_focus: campaign_ui::CampaignVictoryAction::PlayAgain,
+            owned_upgrades: 0,
             world: None,
             levelup_choices: Vec::new(),
             levelup_desc: Vec::new(),
@@ -142,6 +228,7 @@ impl App {
             fixed_seed,
             pixels: PixelBuffer::new(0, 0),
             sfx_frame: Vec::new(),
+            sting: None,
             hud: hud::HudState::default(),
             hits: HitMap::default(),
             muted: false,
@@ -161,8 +248,22 @@ impl App {
         app
     }
 
+    /// The theme of the sector the title/select screen points at.
     fn theme(&self) -> Theme {
-        Theme::all()[self.theme_idx]
+        campaign::level_theme(self.select_idx)
+    }
+
+    /// The sector-select cursor, clamped into the campaign.
+    fn sector(&self) -> usize {
+        self.select_idx.min(campaign::LEVEL_COUNT - 1)
+    }
+
+    /// Step the sector cursor, wrapping through the three levels.
+    fn cycle_sector(&mut self, step: isize) {
+        let n = campaign::LEVEL_COUNT as isize;
+        self.select_idx = (self.select_idx as isize + step).rem_euclid(n) as usize;
+        self.menu_music();
+        self.sfx(Sfx::UiMove);
     }
 
     /// Render the RASCII rat logo sized to the title area. The menu and key
@@ -191,6 +292,30 @@ impl App {
     fn sfx(&self, sfx: Sfx) {
         if let Some(a) = self.audio.as_ref() {
             a.play_sfx(sfx);
+        }
+    }
+
+    /// Queue a sting to play `delay` seconds from now (latest one wins).
+    fn queue_sting(&mut self, sfx: Sfx, delay: f32) {
+        self.sting = Some((sfx, delay.max(0.0)));
+    }
+
+    /// The sting still waiting to play, if any (tests read this).
+    fn pending_sting(&self) -> Option<Sfx> {
+        self.sting.map(|(s, _)| s)
+    }
+
+    /// Advance the deferred-sting clock and play it when it comes due.
+    fn tick_stings(&mut self, dt: f32) {
+        let Some((sfx, left)) = self.sting else {
+            return;
+        };
+        let left = left - dt.max(0.0);
+        if left <= 0.0 {
+            self.sting = None;
+            self.sfx(sfx);
+        } else {
+            self.sting = Some((sfx, left));
         }
     }
 
@@ -241,10 +366,70 @@ impl App {
         nanos ^ jitter
     }
 
+    /// Begin a **campaign** at level 1 (the title's START RUN, and sector 1 on
+    /// the select screen). A run that starts from the title goes through the
+    /// story dossier and then the access-route intro; a retry after a defeat
+    /// skips the dossier.
     fn start_run(&mut self) {
-        let theme = self.theme();
+        self.start_campaign(true);
+    }
+
+    fn start_campaign(&mut self, via_story: bool) {
         let seed = self.seed();
-        self.world = Some(World::new(theme, seed));
+        self.campaign = Some(CampaignState::new(seed));
+        self.practice = None;
+        self.records = [LevelRecord::default(); campaign::LEVEL_COUNT];
+        self.keep_items.clear();
+        self.keep_entries.clear();
+        self.keep_selected.clear();
+        self.victory_loadout.clear();
+        let Some(world) = self.campaign.as_ref().map(|c| c.world()) else {
+            return;
+        };
+        self.enter_world(world, via_story);
+    }
+
+    /// Begin a **practice run**: one later sector, alone, on the default
+    /// loadout, carrying nothing in and nothing out. It still records the
+    /// sector clear (so the next one unlocks) but never a campaign win.
+    fn start_practice(&mut self, level: usize) {
+        let level = level.clamp(1, campaign::LEVEL_COUNT - 1);
+        let seed = campaign::level_seed(self.seed(), level);
+        self.campaign = None;
+        self.practice = Some(level);
+        self.records = [LevelRecord::default(); campaign::LEVEL_COUNT];
+        self.keep_items.clear();
+        self.keep_entries.clear();
+        self.keep_selected.clear();
+        self.victory_loadout.clear();
+        let world = World::new_level(level, seed, Loadout::starting());
+        self.enter_world(world, false);
+    }
+
+    /// Start the sector the select screen points at: sector 1 is the campaign
+    /// from the beginning, a later sector is a labelled practice run. A locked
+    /// sector refuses and stays put.
+    fn start_sector(&mut self) {
+        let level = self.sector();
+        if !self.scores.level_unlocked(level) {
+            self.sfx(Sfx::UiMove);
+            return;
+        }
+        self.sfx(Sfx::UiSelect);
+        if level == 0 {
+            self.start_run();
+        } else {
+            self.start_practice(level);
+        }
+    }
+
+    /// Hand a freshly built level to the app: reset the per-level telemetry,
+    /// refresh the carried-upgrade strip, pick the intro screen and start the
+    /// sector's music.
+    fn enter_world(&mut self, world: World, via_story: bool) {
+        let level = world.level_index;
+        let theme = world.level.theme;
+        self.world = Some(world);
         self.recorded = false;
         self.new_best = false;
         self.damage_taken = 0.0;
@@ -253,23 +438,45 @@ impl App {
         self.boss_slain = false;
         self.prev_boss_alive = false;
         self.last_summary = None;
-        // Fog of war resets with the run: a new `World` starts unexplored.
+        self.owned_upgrades = 0;
+        // Fog of war resets with the level: a new `World` starts unexplored.
         self.map_open = false;
         self.last_minimap = Rect::new(0, 0, 0, 0);
         self.last_map = Rect::new(0, 0, 0, 0);
         self.hud.reset();
         self.intro_timer = 4.0;
-        self.screen = Screen::MapIntro;
+        self.carried_entries = match self.campaign.as_ref() {
+            Some(c) if level > 0 => entries_for(&campaign::keepables(&c.loadout)),
+            _ => Vec::new(),
+        };
+        self.screen = if via_story {
+            self.story_time = 0.0;
+            Screen::Story
+        } else if level == 0 {
+            Screen::MapIntro
+        } else {
+            Screen::LevelIntro
+        };
         if let Some(a) = self.audio.as_mut() {
             a.play_music(theme, 1);
         }
     }
 
-    fn cycle_map(&mut self, backwards: bool) {
-        let n = Theme::all().len();
-        self.theme_idx = (self.theme_idx + if backwards { n - 1 } else { 1 }) % n;
+    /// Another run of the kind just played, skipping the story dossier.
+    fn retry(&mut self) {
+        match self.practice {
+            Some(level) => self.start_practice(level),
+            None => self.start_campaign(false),
+        }
+    }
+
+    /// Drop the run and return to the title (pause → Q, end → Q, victory → Q).
+    fn back_to_title(&mut self) {
+        self.world = None;
+        self.campaign = None;
+        self.practice = None;
+        self.screen = Screen::Title;
         self.menu_music();
-        self.sfx(Sfx::UiMove);
     }
 
     /// Resolve against the last displayed frame. Stop on the first activation:
@@ -283,9 +490,34 @@ impl App {
             let target = self.hits.at(ev.column, ev.row);
             match ev.kind {
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                    if matches!(target, Some(Target::NextMap | Target::PreviousMap)) {
-                        self.menu_idx = 1;
-                        self.cycle_map(ev.kind == MouseEventKind::ScrollUp);
+                    let step = if ev.kind == MouseEventKind::ScrollDown {
+                        1
+                    } else {
+                        -1
+                    };
+                    match self.screen {
+                        // The wheel steps the sector on the title row and
+                        // anywhere on the select screen.
+                        Screen::SectorSelect => self.cycle_sector(step),
+                        Screen::Title
+                            if matches!(
+                                target,
+                                Some(
+                                    Target::Sectors
+                                        | Target::PreviousSector
+                                        | Target::NextSector
+                                )
+                            ) =>
+                        {
+                            self.menu_idx = 1;
+                            self.cycle_sector(step);
+                        }
+                        Screen::Playing
+                            if !self.map_open && target == Some(Target::Minimap) =>
+                        {
+                            self.step_minimap_size(step);
+                        }
+                        _ => {}
                     }
                 }
                 MouseEventKind::Down(MouseButton::Right) if target == Some(Target::Dash) => {
@@ -297,8 +529,14 @@ impl App {
                     self.hits.hovered = target;
                     match target {
                         Some(Target::Start) => self.menu_idx = 0,
-                        Some(Target::NextMap | Target::PreviousMap) => self.menu_idx = 1,
+                        Some(Target::Sectors | Target::PreviousSector | Target::NextSector) => {
+                            self.menu_idx = 1
+                        }
                         Some(Target::Quit) => self.menu_idx = 2,
+                        Some(Target::SelectSector(i)) => {
+                            self.select_idx = i.min(campaign::LEVEL_COUNT - 1)
+                        }
+                        Some(Target::KeepItem(i)) => self.keep_cursor = i,
                         Some(Target::Upgrade(idx)) => self.levelup_idx = idx,
                         _ => {}
                     }
@@ -314,6 +552,9 @@ impl App {
 
     pub fn update(&mut self, dt: f32) {
         self.input.tick(dt);
+        // Deferred stings first: a queued fanfare lands after the sound that
+        // caused it (see `queue_sting`).
+        self.tick_stings(dt);
         // Global mute toggle.
         if self.input.pressed_char('m') {
             self.muted = !self.muted;
@@ -326,14 +567,19 @@ impl App {
         let click = self.mouse_action();
         match self.screen {
             Screen::Title => self.update_title(click),
+            Screen::SectorSelect => self.update_sector_select(click),
             Screen::Story => {
                 self.story_time += dt;
                 self.update_story(click);
             }
             Screen::MapIntro => self.update_mapintro(dt, click),
+            Screen::LevelIntro => self.update_levelintro(click),
             Screen::Playing => self.update_playing(dt, click),
             Screen::LevelUp => self.update_levelup(click),
             Screen::Paused => self.update_paused(click),
+            Screen::LevelComplete => self.update_levelcomplete(click),
+            Screen::KeepThree => self.update_keep_three(click),
+            Screen::Victory => self.update_victory(click),
             Screen::End => self.update_end(click),
         }
         if self.screen != previous {
@@ -360,14 +606,14 @@ impl App {
                 self.sfx(Sfx::UiMove);
             }
             if self.input.just_pressed(KeyCode::Left) {
-                self.cycle_map(true);
+                self.cycle_sector(-1);
             }
             if self.input.just_pressed(KeyCode::Right) {
-                self.cycle_map(false);
+                self.cycle_sector(1);
             }
             self.input
                 .just_pressed(KeyCode::Enter)
-                .then(|| [Target::Start, Target::NextMap, Target::Quit][self.menu_idx])
+                .then(|| [Target::Start, Target::Sectors, Target::Quit][self.menu_idx])
         };
         match action {
             Some(Target::Story) => {
@@ -380,9 +626,46 @@ impl App {
                 self.sfx(Sfx::UiSelect);
                 self.start_run();
             }
-            Some(Target::NextMap) => self.cycle_map(false),
-            Some(Target::PreviousMap) => self.cycle_map(true),
+            Some(Target::Sectors) => {
+                // The sector select opens on the sector the title shows.
+                self.sfx(Sfx::UiSelect);
+                self.screen = Screen::SectorSelect;
+            }
+            Some(Target::NextSector) => self.cycle_sector(1),
+            Some(Target::PreviousSector) => self.cycle_sector(-1),
             _ => {}
+        }
+    }
+
+    /// Sector select: `←`/`→` move, Enter starts the highlighted sector, Esc
+    /// or the art's Back control returns to the title.
+    fn update_sector_select(&mut self, click: Option<Target>) {
+        if click == Some(Target::Back)
+            || self.input.just_pressed(KeyCode::Esc)
+            || self.input.pressed_char('q')
+        {
+            self.sfx(Sfx::UiSelect);
+            self.screen = Screen::Title;
+            return;
+        }
+        match click {
+            Some(Target::SelectSector(i)) => {
+                self.select_idx = i.min(campaign::LEVEL_COUNT - 1);
+                self.menu_music();
+                self.sfx(Sfx::UiMove);
+            }
+            Some(Target::PreviousSector) => self.cycle_sector(-1),
+            Some(Target::NextSector) => self.cycle_sector(1),
+            _ => {}
+        }
+        if self.input.just_pressed(KeyCode::Left) || self.input.just_pressed(KeyCode::Up) {
+            self.cycle_sector(-1);
+        }
+        if self.input.just_pressed(KeyCode::Right) || self.input.just_pressed(KeyCode::Down) {
+            self.cycle_sector(1);
+        }
+        if click == Some(Target::StartSector) || self.input.just_pressed(KeyCode::Enter) {
+            self.start_sector();
         }
     }
 
@@ -393,7 +676,19 @@ impl App {
             || self.input.pressed_char('q')
         {
             self.sfx(Sfx::UiSelect);
-            self.screen = Screen::Title;
+            // The dossier is also the campaign's opening: a run in flight
+            // continues into its map intro, while the title's `L story` viewer
+            // goes back to the title.
+            if self.campaign.is_some() && self.world.is_some() {
+                self.screen = if self.world.as_ref().map(|w| w.level_index) == Some(0) {
+                    self.intro_timer = 4.0;
+                    Screen::MapIntro
+                } else {
+                    Screen::LevelIntro
+                };
+            } else {
+                self.screen = Screen::Title;
+            }
         }
     }
 
@@ -405,6 +700,65 @@ impl App {
             || self.input.just_pressed(KeyCode::Char(' '))
         {
             self.screen = Screen::Playing;
+        }
+    }
+
+    /// Levels 2 and 3's intro plate: Enter/Space/click drops into the level.
+    fn update_levelintro(&mut self, click: Option<Target>) {
+        if click == Some(Target::Begin)
+            || self.input.just_pressed(KeyCode::Enter)
+            || self.input.just_pressed(KeyCode::Char(' '))
+        {
+            self.sfx(Sfx::UiMove);
+            self.screen = Screen::Playing;
+        }
+    }
+
+    /// Effective compact minimap size for the current playfield, stepping down
+    /// automatically on narrow terminals without overwriting the saved setting.
+    fn effective_minimap_size(&self) -> minimap::MinimapSize {
+        minimap::effective_compact_size(self.last_game, self.scores.minimap_size)
+    }
+
+    /// Update and persist the compact minimap size preference (in-memory only
+    /// when `self.persist` is false, as in tests).
+    fn set_minimap_size(&mut self, size: minimap::MinimapSize) {
+        if self.scores.minimap_size != size {
+            self.scores.minimap_size = size;
+            if self.persist {
+                self.scores.save();
+            }
+        }
+    }
+
+    /// Cycle compact minimap size (`Normal -> Small -> Hidden -> Normal`),
+    /// advancing from the currently visible effective size so narrow terminals
+    /// react on the first press. No-op when no compact radar fits at all.
+    fn cycle_minimap_size(&mut self) {
+        if !minimap::compact_size_fits(self.last_game, minimap::MinimapSize::Small) {
+            return;
+        }
+        let next = self.effective_minimap_size().cycle();
+        self.set_minimap_size(next);
+        self.sfx(Sfx::UiMove);
+    }
+
+    /// Step compact minimap size from a mouse-wheel scroll over the compact
+    /// radar (`step > 0` shrinks toward `Hidden`, `step < 0` grows toward `Normal`).
+    fn step_minimap_size(&mut self, step: isize) {
+        if !minimap::compact_size_fits(self.last_game, minimap::MinimapSize::Small) {
+            return;
+        }
+        let cur = self.effective_minimap_size();
+        let candidate = cur.step(step as i32);
+        let next = if minimap::compact_size_fits(self.last_game, candidate) {
+            candidate
+        } else {
+            cur
+        };
+        if next != cur {
+            self.set_minimap_size(next);
+            self.sfx(Sfx::UiMove);
         }
     }
 
@@ -421,6 +775,9 @@ impl App {
             esc_used = true;
             self.sfx(Sfx::UiMove);
         }
+        if self.input.pressed_char('n') {
+            self.cycle_minimap_size();
+        }
         if click == Some(Target::Pause)
             || (self.input.just_pressed(KeyCode::Esc) && !esc_used)
             || self.input.pressed_char('p')
@@ -433,6 +790,7 @@ impl App {
         let dash = click == Some(Target::Dash) || self.input.just_pressed(KeyCode::Char(' '));
         let mut open_levelup = false;
         let mut ended = false;
+        let mut level_done = false;
         let mut intensity = 1u32;
         if let Some(w) = self.world.as_mut() {
             let hp_before = w.player.hp;
@@ -473,10 +831,13 @@ impl App {
             } else {
                 1
             };
-            // A finished run wins over pending upgrades: dying (or winning) on
-            // the same tick as an XP award must not open the level-up cards.
-            if w.finished() {
+            // A finished level wins over pending upgrades, and a loss wins
+            // over a completion: dying (or finishing a boss) on the same tick
+            // as an XP award must not open the level-up cards.
+            if w.game_over {
                 ended = true;
+            } else if w.level_complete() || w.campaign_won() {
+                level_done = true;
             } else if w.pending_levelups > 0 {
                 open_levelup = true;
             }
@@ -493,6 +854,260 @@ impl App {
         } else if ended {
             self.finalize();
             self.screen = Screen::End;
+        } else if level_done {
+            self.on_level_complete();
+        }
+    }
+
+    /// The level's boss died. Bank the level's own numbers (they unlock the
+    /// next sector and feed the victory breakdown), then pick the plate: the
+    /// campaign's final level goes straight to victory, every other level goes
+    /// through the sector-cleared card.
+    fn on_level_complete(&mut self) {
+        let Some(w) = self.world.as_ref() else {
+            return;
+        };
+        let level = w.level_index.min(campaign::LEVEL_COUNT - 1);
+        let record = LevelRecord {
+            time: w.elapsed,
+            kills: w.kills,
+            score: w.score,
+            player_level: w.player.level,
+        };
+        let campaign_won = self.campaign.is_some() && w.campaign_won();
+        self.records[level] = record;
+        // One card per owned weapon and per passive; counted without building
+        // the keepable list twice.
+        self.owned_upgrades = w.player.loadout.weapons.len() + w.player.loadout.passives.len();
+        if campaign_won {
+            self.victory_loadout = entries_for(&w.keepables());
+        }
+        self.scores.record_level(level, record.score, record.time);
+        if self.persist {
+            // The clear (and the unlock it grants) is durable even if the
+            // player quits right after it.
+            self.scores.save();
+        }
+        if campaign_won {
+            // `finalize` owns the victory sting (it knows the run won).
+            self.finalize();
+            self.screen = Screen::Victory;
+        } else {
+            // The simulation already played the boss's own death sting this
+            // tick (`loot` / `boss::announce`), so the fanfare follows it a
+            // beat later instead of stacking on top of it.
+            self.queue_sting(Sfx::LevelComplete, FANFARE_DELAY_SECS);
+            self.screen = Screen::LevelComplete;
+        }
+    }
+
+    /// Sector-cleared card → the keep-three manifest (campaign) or the end of a
+    /// practice run.
+    fn update_levelcomplete(&mut self, click: Option<Target>) {
+        if click == Some(Target::Continue)
+            || self.input.just_pressed(KeyCode::Enter)
+            || self.input.just_pressed(KeyCode::Char(' '))
+        {
+            self.sfx(Sfx::UiSelect);
+            if self.practice.is_some() {
+                // Practice: this sector alone, no carry-over, no campaign win.
+                self.finalize();
+                self.screen = Screen::End;
+            } else {
+                self.open_keep_three();
+            }
+        }
+    }
+
+    /// Build the keep-three manifest from what the finished level owns.
+    fn open_keep_three(&mut self) {
+        let items = match self.world.as_ref() {
+            Some(w) => w.keepables(),
+            None => return,
+        };
+        if items.is_empty() {
+            // Nothing to pack (unreachable: the starting weapon is always
+            // owned), so advance with an empty pack rather than dead-ending.
+            self.keep_items.clear();
+            self.keep_entries.clear();
+            self.keep_selected.clear();
+            self.confirm_keep();
+            return;
+        }
+        self.keep_entries = entries_for(&items);
+        self.keep_items = items;
+        self.keep_selected = vec![false; self.keep_items.len()];
+        self.keep_cursor = 0;
+        self.keep_scroll = 0;
+        self.screen = Screen::KeepThree;
+    }
+
+    /// `(selected, required)` straight from the art's own helpers, so the pack
+    /// size is decided in one place (`keep_three_required`).
+    fn keep_counts(&self) -> (usize, usize) {
+        let view = campaign_ui::KeepThreeView {
+            from_level: campaign_ui::CampaignLevel::from_index(self.keep_from_level()),
+            next_level: campaign_ui::CampaignLevel::from_index(self.keep_from_level() + 1),
+            items: &self.keep_entries,
+            selected: &self.keep_selected,
+            max_keep: campaign::KEEP_COUNT,
+            cursor: self.keep_cursor,
+            scroll: self.keep_scroll,
+            hovered: None,
+        };
+        (
+            campaign_ui::keep_three_selected_count(&view),
+            campaign_ui::keep_three_required(&view),
+        )
+    }
+
+    /// The campaign level whose pack is being chosen.
+    fn keep_from_level(&self) -> usize {
+        self.world
+            .as_ref()
+            .map(|w| w.level_index)
+            .unwrap_or(0)
+            .min(campaign::LEVEL_COUNT - 1)
+    }
+
+    /// Keep the cursor inside the manifest window the art will draw.
+    fn keep_clamp_scroll(&mut self) {
+        let visible = self.keep_visible_rows.max(1);
+        if self.keep_cursor < self.keep_scroll {
+            self.keep_scroll = self.keep_cursor;
+        } else if self.keep_cursor >= self.keep_scroll + visible {
+            self.keep_scroll = self.keep_cursor + 1 - visible;
+        }
+        let max_scroll = self.keep_items.len().saturating_sub(visible);
+        self.keep_scroll = self.keep_scroll.min(max_scroll);
+    }
+
+    /// Keep-three: arrows move, Space toggles, Enter confirms (only at the
+    /// required count). Mouse toggles come from the art's card rectangles and
+    /// the wheel walks the manifest.
+    fn update_keep_three(&mut self, click: Option<Target>) {
+        let n = self.keep_items.len();
+        for i in 0..self.input.mouse_events.len() {
+            match self.input.mouse_events[i].kind {
+                MouseEventKind::ScrollUp => self.keep_cursor = self.keep_cursor.saturating_sub(1),
+                MouseEventKind::ScrollDown if n > 0 => {
+                    self.keep_cursor = (self.keep_cursor + 1).min(n - 1);
+                }
+                _ => continue,
+            }
+        }
+        if n > 0 {
+            if self.input.just_pressed(KeyCode::Up) || self.input.just_pressed(KeyCode::Left) {
+                self.keep_cursor = (self.keep_cursor + n - 1) % n;
+                self.sfx(Sfx::UiMove);
+            }
+            if self.input.just_pressed(KeyCode::Down) || self.input.just_pressed(KeyCode::Right) {
+                self.keep_cursor = (self.keep_cursor + 1) % n;
+                self.sfx(Sfx::UiMove);
+            }
+        }
+        self.keep_clamp_scroll();
+
+        let mut toggle = match click {
+            Some(Target::KeepItem(i)) => Some(i),
+            _ => None,
+        };
+        if self.input.just_pressed(KeyCode::Char(' ')) && n > 0 {
+            toggle = Some(self.keep_cursor);
+        }
+        if let Some(i) = toggle {
+            self.keep_cursor = i.min(n.saturating_sub(1));
+            let (selected, required) = self.keep_counts();
+            if let Some(flag) = self.keep_selected.get_mut(i) {
+                if *flag {
+                    *flag = false;
+                    self.sfx(Sfx::UiMove);
+                } else if selected < required || selected == 0 {
+                    *flag = true;
+                    self.sfx(Sfx::UiSelect);
+                } else {
+                    // The pack is full: a new pick replaces nothing, it refuses.
+                    self.sfx(Sfx::UiMove);
+                }
+            }
+        }
+
+        let confirm = click == Some(Target::KeepConfirm)
+            || self.input.just_pressed(KeyCode::Enter);
+        if confirm {
+            let (selected, required) = self.keep_counts();
+            if selected == required {
+                self.confirm_keep();
+            } else {
+                // Below the required count the confirm is refused (the art only
+                // emits its button when it can be pressed).
+                self.sfx(Sfx::UiMove);
+            }
+        }
+    }
+
+    /// Carry the chosen entries into the next level and build its world.
+    fn confirm_keep(&mut self) {
+        let chosen: Vec<Keepable> = self
+            .keep_items
+            .iter()
+            .zip(self.keep_selected.iter())
+            .filter(|(_, picked)| **picked)
+            .map(|(entry, _)| *entry)
+            .collect();
+        let mut next = None;
+        if let (Some(camp), Some(w)) = (self.campaign.as_mut(), self.world.as_ref()) {
+            if camp.complete_level(w, &chosen).is_ok() {
+                next = Some(camp.world());
+            }
+        }
+        match next {
+            Some(world) => {
+                self.sfx(Sfx::UiSelect);
+                self.enter_world(world, false);
+            }
+            None => self.sfx(Sfx::UiMove),
+        }
+    }
+
+    /// Campaign victory plate: Enter/click on the focused action, arrows/Tab
+    /// move the focus, Q returns to the title.
+    fn update_victory(&mut self, click: Option<Target>) {
+        if self.input.just_pressed(KeyCode::Left)
+            || self.input.just_pressed(KeyCode::Right)
+            || self.input.just_pressed(KeyCode::Tab)
+        {
+            self.victory_focus = match self.victory_focus {
+                campaign_ui::CampaignVictoryAction::PlayAgain => {
+                    campaign_ui::CampaignVictoryAction::Menu
+                }
+                campaign_ui::CampaignVictoryAction::Menu => {
+                    campaign_ui::CampaignVictoryAction::PlayAgain
+                }
+            };
+            self.sfx(Sfx::UiMove);
+        }
+        let activated = click.or_else(|| {
+            self.input.just_pressed(KeyCode::Enter).then_some({
+                match self.victory_focus {
+                    campaign_ui::CampaignVictoryAction::PlayAgain => Target::Restart,
+                    campaign_ui::CampaignVictoryAction::Menu => Target::Menu,
+                }
+            })
+        });
+        match activated {
+            Some(Target::Restart) => {
+                self.sfx(Sfx::UiSelect);
+                self.start_run();
+            }
+            Some(Target::Menu) => {
+                self.sfx(Sfx::UiSelect);
+                self.back_to_title();
+            }
+            _ => {}
+        }
+        if self.input.pressed_char('q') {
+            self.back_to_title();
         }
     }
 
@@ -564,38 +1179,44 @@ impl App {
             self.screen = Screen::Playing;
         }
         if click == Some(Target::Menu) || self.input.pressed_char('q') {
-            self.world = None;
-            self.screen = Screen::Title;
-            self.menu_music();
+            self.back_to_title();
         }
     }
 
     fn update_end(&mut self, click: Option<Target>) {
         if click == Some(Target::Restart) || self.input.just_pressed(KeyCode::Enter) {
-            self.start_run();
+            self.retry();
         }
         if click == Some(Target::Menu) || self.input.pressed_char('q') {
-            self.world = None;
-            self.screen = Screen::Title;
-            self.menu_music();
+            self.back_to_title();
         }
     }
 
+    /// Did this run win in the display sense (campaign cleared, or a practice
+    /// sector cleared)?
+    fn run_won(&self, w: &World) -> bool {
+        let campaign_won = self.campaign.is_some() && w.campaign_won();
+        let practice_cleared = self.practice.is_some() && w.level_complete();
+        campaign_won || practice_cleared
+    }
+
+    /// The end-of-run summary. Everything is **cumulative**: the campaign
+    /// banks each completed level's score/kills/time, so the incident report
+    /// shows the totals and the sector the run reached.
     fn build_summary(&self, w: &World, final_score: u32) -> RunSummary {
-        let bonus_time = (w.elapsed as u32) * 5;
-        let bonus_level = w.player.level * 100;
-        let bonus_win = if w.won { 5000 } else { 0 };
+        let time = w.total_time();
+        let campaign_won = self.campaign.is_some() && w.campaign_won();
         RunSummary {
-            won: w.won,
+            won: self.run_won(w),
             theme: w.level.theme,
-            combat_score: w.score,
-            bonus_time,
-            bonus_level,
-            bonus_win,
+            combat_score: w.total_score(),
+            bonus_time: (time as u32) * 5,
+            bonus_level: w.player.level * 100,
+            bonus_win: if campaign_won { 5000 } else { 0 },
             final_score,
-            time: w.elapsed,
+            time,
             level: w.player.level,
-            kills: w.kills,
+            kills: w.total_kills(),
             damage_taken: self.damage_taken,
             dashes_used: self.dashes_used,
             heals_picked: self.heals_picked,
@@ -610,6 +1231,8 @@ impl App {
             damage_mult: w.player.loadout.stats.damage_mult,
             fire_rate_mult: w.player.loadout.stats.fire_rate_mult,
             armor: w.player.loadout.stats.armor,
+            sector: (w.level_index + 1).clamp(1, campaign::LEVEL_COUNT) as u8,
+            practice: self.practice.is_some(),
         }
     }
 
@@ -617,11 +1240,17 @@ impl App {
         if self.recorded {
             return;
         }
+        // Hoisted: the sting choice at the end of this function needs it too.
+        let campaign_won = self.campaign.is_some()
+            && self.world.as_ref().is_some_and(|w| w.campaign_won());
         if let Some(w) = self.world.as_ref() {
-            let bonus_time = (w.elapsed as u32) * 5;
+            let time = w.total_time();
+            let won = self.run_won(w);
+            let bonus_time = (time as u32) * 5;
             let bonus_level = w.player.level * 100;
-            let bonus_win = if w.won { 5000 } else { 0 };
-            let final_score = w.score + bonus_time + bonus_level + bonus_win;
+            let bonus_win = if campaign_won { 5000 } else { 0 };
+            let final_score = w.total_score() + bonus_time + bonus_level + bonus_win;
+            let sector = (w.level_index + 1).clamp(1, campaign::LEVEL_COUNT) as u8;
             self.last_score = final_score;
             self.last_summary = Some(self.build_summary(w, final_score));
             // "New high score" means it beat the table's best, computed before
@@ -629,10 +1258,12 @@ impl App {
             self.new_best = self.scores.is_high_score(final_score);
             self.scores.insert(ScoreEntry {
                 score: final_score,
-                time: w.elapsed,
+                time,
                 level: w.player.level,
                 map: w.level.theme.name().to_string(),
-                won: w.won,
+                won,
+                campaign_level: sector,
+                campaign_won,
             });
             if self.persist {
                 self.scores.save();
@@ -643,8 +1274,14 @@ impl App {
         if let Some(a) = self.audio.as_ref() {
             a.set_intensity(0);
         }
-        let won = self.world.as_ref().map(|w| w.won).unwrap_or(false);
-        self.sfx(if won { Sfx::Win } else { Sfx::Lose });
+        let won = self.last_summary.as_ref().is_some_and(|s| s.won);
+        match (campaign_won, won) {
+            // Same rule as the sector card: the campaign fanfare follows the
+            // Lab boss's death sting; a practice clear just wins.
+            (true, _) => self.queue_sting(Sfx::CampaignVictory, FANFARE_DELAY_SECS),
+            (false, true) => self.sfx(Sfx::Win),
+            (false, false) => self.sfx(Sfx::Lose),
+        }
     }
 
     // ---- Rendering ------------------------------------------------------
@@ -660,11 +1297,14 @@ impl App {
                     area,
                     self.theme(),
                     self.menu_idx,
+                    self.sector(),
+                    self.scores.level_unlocked(self.sector()),
                     &self.scores,
                     &self.rat_art,
                     &mut self.hits,
                 );
             }
+            Screen::SectorSelect => self.draw_sector_select(frame, area),
             Screen::Story => {
                 self.ensure_rat_art(area);
                 menu::draw_title(
@@ -672,12 +1312,18 @@ impl App {
                     area,
                     self.theme(),
                     self.menu_idx,
+                    self.sector(),
+                    self.scores.level_unlocked(self.sector()),
                     &self.scores,
                     &self.rat_art,
                     &mut self.hits,
                 );
                 menu::draw_story(frame, area, self.story_time, &mut self.hits);
             }
+            Screen::LevelIntro => self.draw_level_intro(frame, area),
+            Screen::LevelComplete => self.draw_level_complete(frame, area),
+            Screen::KeepThree => self.draw_keep_three(frame, area),
+            Screen::Victory => self.draw_victory(frame, area),
             Screen::MapIntro | Screen::Playing | Screen::Paused | Screen::LevelUp | Screen::End => {
                 self.draw_game(frame, area);
                 match self.screen {
@@ -729,11 +1375,6 @@ impl App {
                     }
                     Screen::End => {
                         if let Some(w) = self.world.as_ref() {
-                            let lore_line = if w.won {
-                                lore::victory(w.level.theme)
-                            } else {
-                                lore::DEFEAT
-                            };
                             let fallback;
                             let summary = match self.last_summary.as_ref() {
                                 Some(s) => s,
@@ -741,6 +1382,13 @@ impl App {
                                     fallback = self.build_summary(w, self.last_score);
                                     &fallback
                                 }
+                            };
+                            // A cleared practice sector earns the victory line
+                            // too, even though it is not a campaign win.
+                            let lore_line = if summary.won {
+                                lore::victory(w.level.theme)
+                            } else {
+                                lore::DEFEAT
                             };
                             menu::draw_end_summary(
                                 frame,
@@ -767,6 +1415,197 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    // ---- Campaign plates -------------------------------------------------
+
+    /// Sector select: three bay cards fed from the persisted per-level bests,
+    /// with the art's own hover/selection styling and click rectangles.
+    fn draw_sector_select(&mut self, frame: &mut Frame, area: Rect) {
+        draw_backdrop(frame, area);
+        let mut slots = [campaign_ui::LevelSlotView {
+            level: campaign_ui::CampaignLevel::Sewer,
+            unlocked: true,
+            best: None,
+        }; campaign::LEVEL_COUNT];
+        for (i, slot) in slots.iter_mut().enumerate() {
+            slot.level = campaign_ui::CampaignLevel::from_index(i);
+            slot.unlocked = self.scores.level_unlocked(i);
+            slot.best = self.scores.level_best(i).map(|b| campaign_ui::LevelBest {
+                score: b.score,
+                best_time_secs: b.time,
+                cleared: b.cleared,
+            });
+        }
+        let view = campaign_ui::LevelSelectView {
+            slots,
+            selected: self.sector(),
+            hovered: match self.hits.hovered {
+                Some(Target::SelectSector(i)) => {
+                    Some(campaign_ui::LevelSelectAction::SelectLevel(
+                        campaign_ui::CampaignLevel::from_index(i),
+                    ))
+                }
+                Some(Target::StartSector) => Some(campaign_ui::LevelSelectAction::Start),
+                Some(Target::Back) => Some(campaign_ui::LevelSelectAction::Back),
+                _ => None,
+            },
+        };
+        let list = campaign_ui::draw_level_select(frame, area, &view);
+        for (rect, action) in list.iter() {
+            let target = match action {
+                campaign_ui::LevelSelectAction::SelectLevel(level) => {
+                    Target::SelectSector(level.index())
+                }
+                campaign_ui::LevelSelectAction::Start => Target::StartSector,
+                campaign_ui::LevelSelectAction::Back => Target::Back,
+            };
+            self.hits.add(rect, target);
+        }
+    }
+
+    /// The cleared-sector plate for the boss the level ended on.
+    fn draw_level_complete(&mut self, frame: &mut Frame, area: Rect) {
+        draw_backdrop(frame, area);
+        let list = match self.world.as_ref() {
+            Some(w) => {
+                let view = campaign_ui::LevelCompleteView {
+                    level: campaign_ui::CampaignLevel::from_index(w.level_index),
+                    time_secs: w.elapsed,
+                    kills: w.kills,
+                    score_so_far: w.total_score(),
+                    level_score: w.score,
+                    player_level: w.player.level,
+                    owned_upgrades: self.owned_upgrades,
+                    custom_triumph: None,
+                    hovered: (self.hits.hovered == Some(Target::Continue))
+                        .then_some(campaign_ui::LevelCompleteAction::Continue),
+                };
+                campaign_ui::draw_level_complete(frame, area, &view)
+            }
+            None => return,
+        };
+        for (rect, _) in list.iter() {
+            self.hits.add(rect, Target::Continue);
+        }
+    }
+
+    /// Levels 2 and 3's intro plate, showing the pack carried in.
+    fn draw_level_intro(&mut self, frame: &mut Frame, area: Rect) {
+        draw_backdrop(frame, area);
+        let practice = self.practice.is_some();
+        let list = match self.world.as_ref() {
+            Some(w) => {
+                let view = campaign_ui::LevelIntroView {
+                    level: campaign_ui::CampaignLevel::from_index(w.level_index),
+                    flavor: practice.then_some(PRACTICE_BLURB),
+                    carried: &self.carried_entries,
+                    score_so_far: w.total_score(),
+                    hovered: (self.hits.hovered == Some(Target::Begin))
+                        .then_some(campaign_ui::LevelIntroAction::Begin),
+                };
+                campaign_ui::draw_level_intro(frame, area, &view)
+            }
+            None => return,
+        };
+        for (rect, _) in list.iter() {
+            self.hits.add(rect, Target::Begin);
+        }
+    }
+
+    /// The keep-three escape manifest: cards toggled by the art's own row
+    /// rectangles, plus its confirm button (only present when the required
+    /// count is packed).
+    fn draw_keep_three(&mut self, frame: &mut Frame, area: Rect) {
+        draw_backdrop(frame, area);
+        let from = self.keep_from_level();
+        let list = {
+            let view = campaign_ui::KeepThreeView {
+                from_level: campaign_ui::CampaignLevel::from_index(from),
+                next_level: campaign_ui::CampaignLevel::from_index(from + 1),
+                items: &self.keep_entries,
+                selected: &self.keep_selected,
+                max_keep: campaign::KEEP_COUNT,
+                cursor: self.keep_cursor,
+                scroll: self.keep_scroll,
+                hovered: match self.hits.hovered {
+                    Some(Target::KeepItem(i)) => {
+                        Some(campaign_ui::KeepThreeAction::ToggleItem(i))
+                    }
+                    Some(Target::KeepConfirm) => Some(campaign_ui::KeepThreeAction::Confirm),
+                    Some(Target::KeepScrollUp) => Some(campaign_ui::KeepThreeAction::ScrollUp),
+                    Some(Target::KeepScrollDown) => {
+                        Some(campaign_ui::KeepThreeAction::ScrollDown)
+                    }
+                    _ => None,
+                },
+            };
+            campaign_ui::draw_keep_three(frame, area, &view)
+        };
+        for (rect, action) in list.iter() {
+            let target = match action {
+                campaign_ui::KeepThreeAction::ToggleItem(i) => Target::KeepItem(i),
+                campaign_ui::KeepThreeAction::ScrollUp => Target::KeepScrollUp,
+                campaign_ui::KeepThreeAction::ScrollDown => Target::KeepScrollDown,
+                campaign_ui::KeepThreeAction::Confirm => Target::KeepConfirm,
+            };
+            self.hits.add(rect, target);
+        }
+        self.keep_visible_rows = campaign_ui::keep_three_visible_rows(area).max(1);
+    }
+
+    /// Campaign victory: the per-level breakdown plus the loadout carried out.
+    fn draw_victory(&mut self, frame: &mut Frame, area: Rect) {
+        draw_backdrop(frame, area);
+        let mut levels = [campaign_ui::LevelBreakdown {
+            level: campaign_ui::CampaignLevel::Sewer,
+            time_secs: 0.0,
+            kills: 0,
+            score: 0,
+            player_level: 0,
+        }; campaign::LEVEL_COUNT];
+        for (i, row) in levels.iter_mut().enumerate() {
+            let record = self.records[i];
+            *row = campaign_ui::LevelBreakdown {
+                level: campaign_ui::CampaignLevel::from_index(i),
+                time_secs: record.time,
+                kills: record.kills,
+                score: record.score,
+                player_level: record.player_level,
+            };
+        }
+        let (total_time, total_kills) = match self.world.as_ref() {
+            Some(w) => (w.total_time(), w.total_kills()),
+            None => (
+                self.records.iter().map(|r| r.time).sum(),
+                self.records.iter().map(|r| r.kills).sum(),
+            ),
+        };
+        let list = {
+            let view = campaign_ui::CampaignVictoryView {
+                final_score: self.last_score,
+                total_time_secs: total_time,
+                total_kills,
+                new_best: self.new_best,
+                levels,
+                final_loadout: &self.victory_loadout,
+                custom_blurb: None,
+                focus: self.victory_focus,
+                hovered: match self.hits.hovered {
+                    Some(Target::Restart) => Some(campaign_ui::CampaignVictoryAction::PlayAgain),
+                    Some(Target::Menu) => Some(campaign_ui::CampaignVictoryAction::Menu),
+                    _ => None,
+                },
+            };
+            campaign_ui::draw_campaign_victory(frame, area, &view)
+        };
+        for (rect, action) in list.iter() {
+            let target = match action {
+                campaign_ui::CampaignVictoryAction::PlayAgain => Target::Restart,
+                campaign_ui::CampaignVictoryAction::Menu => Target::Menu,
+            };
+            self.hits.add(rect, target);
         }
     }
 
@@ -823,7 +1662,10 @@ impl App {
         // and the modal legend rail.
         self.map_frame.refresh(w);
         let hovered = self.hits.hovered == Some(Target::Minimap);
-        let view = self.map_frame.view(w, expanded, hovered);
+        let compact_size = self.scores.minimap_size;
+        let view = self
+            .map_frame
+            .view_sized(w, expanded, compact_size, hovered);
         minimap::draw(frame, game, &view, w, &mut self.minimap_scratch);
         if expanded {
             let panel = minimap_source::expanded_rect(game);
@@ -833,13 +1675,61 @@ impl App {
             self.last_map = panel;
             draw_map_legend(frame, game, panel);
         } else {
-            let panel = minimap_source::compact_rect(game);
+            let panel = minimap_source::compact_rect_for_size(game, compact_size);
             if panel.is_empty() {
                 return;
             }
             self.last_minimap = panel;
         }
     }
+}
+
+/// Paint the near-black plate backdrop the campaign screens sit on.
+fn draw_backdrop(frame: &mut Frame, area: Rect) {
+    frame.render_widget(Block::default().style(Style::default().bg(BACKDROP)), area);
+}
+
+/// The single-cell glyph and tint for a passive, so the keep/intro cards mix
+/// weapons and passives without inventing a second badge table.
+fn passive_badge(passive: PassiveKind) -> (char, palette::Rgb) {
+    match passive {
+        PassiveKind::MaxHp => ('+', (222, 120, 132)),
+        PassiveKind::MoveSpeed => ('~', (128, 206, 250)),
+        PassiveKind::Damage => ('×', (248, 214, 152)),
+        PassiveKind::FireRate => ('÷', (242, 184, 102)),
+        PassiveKind::Magnet => ('◇', (176, 140, 240)),
+        PassiveKind::Regen => ('=', (126, 224, 152)),
+        PassiveKind::Armor => ('#', (150, 190, 200)),
+    }
+}
+
+/// Build the art's upgrade cards from campaign keepables (one card per owned
+/// weapon at its level and per passive at its stacks).
+fn entries_for(items: &[Keepable]) -> Vec<campaign_ui::UpgradeEntry<'static>> {
+    items
+        .iter()
+        .map(|k| {
+            let (glyph, color) = match k.kind {
+                KeepKind::Weapon(kind) => (hud::weapon_glyph(kind), kind.color()),
+                KeepKind::Passive(passive) => passive_badge(passive),
+            };
+            campaign_ui::UpgradeEntry {
+                name: k.name,
+                glyph,
+                color,
+                category: match k.kind {
+                    KeepKind::Weapon(kind) => campaign_ui::UpgradeCategory::Weapon {
+                        level: k.level,
+                        max_level: kind.max_level(),
+                    },
+                    KeepKind::Passive(_) => campaign_ui::UpgradeCategory::Passive {
+                        stacks: k.level,
+                    },
+                },
+                detail: k.desc,
+            }
+        })
+        .collect()
 }
 
 /// The expanded map's own legend rail comes from `render/minimap.rs`; this adds
@@ -851,10 +1741,12 @@ fn draw_map_legend(frame: &mut Frame, game: Rect, panel: Rect) {
     if y >= game.bottom() || game.height == 0 {
         return;
     }
-    let text = if game.width >= 60 {
-        " TAB/Esc close · click the map · the run keeps running "
+    let text = if game.width >= 72 {
+        " TAB/Esc close · N radar size · click the map · the run keeps running "
+    } else if game.width >= 60 {
+        " TAB/Esc close · N size · click map · the run keeps running "
     } else {
-        " TAB/Esc close · run continues "
+        " TAB/Esc close · N size · run continues "
     };
     let width = text.chars().count() as u16;
     if width >= game.width {
@@ -909,11 +1801,40 @@ mod tests {
             }
         }
 
-        /// Start a run and skip the map intro, landing in `Playing`.
+        /// Start the campaign from the title and skip the story dossier and the
+        /// map intro, landing in `Playing` on level 1.
         fn enter_playing(&mut self) {
             self.frame(&[]); // title
-            self.frame(&[KeyCode::Enter]); // START RUN -> MapIntro
+            self.frame(&[KeyCode::Enter]); // START RUN -> Story
+            self.frame(&[KeyCode::Enter]); // dossier -> MapIntro
             self.frame(&[KeyCode::Enter]); // skip intro -> Playing
+        }
+
+        /// Give the running level more than three keepable powerups, so the
+        /// keep-three screen has a real choice to make.
+        fn grant_keepables(&mut self) {
+            use crate::game::weapon::WeaponKind;
+            let w = self.app.world.as_mut().unwrap();
+            for upgrade in [
+                Upgrade::NewWeapon(WeaponKind::CheeseSpray),
+                Upgrade::NewWeapon(WeaponKind::SqueakNova),
+                Upgrade::Passive(PassiveKind::Armor),
+                Upgrade::Passive(PassiveKind::Damage),
+            ] {
+                w.player.loadout.apply(&upgrade);
+            }
+        }
+
+        /// The level's boss dies (the boss framework is still in progress, so
+        /// `mark_level_complete` is the facade's hook) and one frame runs.
+        fn finish_level(&mut self) {
+            self.app.world.as_mut().unwrap().mark_level_complete();
+            self.frame(&[]);
+        }
+
+        /// The keepables the current level offers, in the art's card order.
+        fn keepables(&self) -> Vec<Keepable> {
+            self.app.world.as_ref().unwrap().keepables()
         }
 
         /// Advance one frame, injecting the given keys this frame.
@@ -1031,31 +1952,32 @@ mod tests {
     }
 
     #[test]
-    fn mouse_title_map_story_and_quit() {
-        for size in [(57, 20), (80, 16)] {
+    fn mouse_title_sector_row_story_and_quit() {
+        for size in [(57, 20), (80, 24)] {
             let mut h = Harness::new(size.0, size.1);
             h.frame(&[]);
-            let name = h.locate("Sewer");
-            h.events(&[], &[(MouseEventKind::Moved, name)]);
-            assert_eq!(h.app.menu_idx, 1);
+            let row = h.locate("Sewer");
+            h.events(&[], &[(MouseEventKind::Moved, row)]);
+            assert_eq!(h.app.menu_idx, 1, "the sector row is menu row 2");
+            // The arrows step the campaign sector (wrapping through all three).
             h.click("‹");
             assert_eq!(h.app.theme(), Theme::Lab);
             h.click("›");
-            h.click("Sewer");
+            assert_eq!(h.app.theme(), Theme::Sewer);
+            // The wheel over the sector row steps it too.
+            let pos = h.locate("Sewer");
+            h.events(&[], &[(MouseEventKind::ScrollDown, pos)]);
             assert_eq!(h.app.theme(), Theme::Kitchen);
-            let pos = h.locate("Kitchen");
             h.events(&[], &[(MouseEventKind::ScrollUp, pos)]);
             assert_eq!(h.app.theme(), Theme::Sewer);
-            h.events(
-                &[],
-                &[
-                    (MouseEventKind::ScrollDown, pos),
-                    (MouseEventKind::ScrollDown, pos),
-                ],
+            // A sector that has not been unlocked is marked on the title row.
+            h.frame(&[KeyCode::Right]);
+            h.frame(&[KeyCode::Right]);
+            assert!(
+                h.screen_text().contains("Lab ×"),
+                "a locked sector is marked on the title"
             );
-            assert_eq!(h.app.theme(), Theme::Lab);
-            h.events(&[], &[(MouseEventKind::ScrollUp, (0, 0))]);
-            assert_eq!(h.app.theme(), Theme::Lab);
+            h.frame(&[KeyCode::Left, KeyCode::Left]);
             h.click("L story");
             assert!(matches!(h.app.screen, Screen::Story));
             h.click("back");
@@ -1073,7 +1995,12 @@ mod tests {
             let mut h = Harness::new(size.0, size.1);
             h.frame(&[]);
             let start = h.locate("START RUN");
-            h.events(&[], &[(left, start), (left, start)]);
+            h.events(&[], &[(left, start)]);
+            assert!(
+                matches!(h.app.screen, Screen::Story),
+                "START RUN opens the campaign dossier"
+            );
+            h.click("back");
             assert!(matches!(h.app.screen, Screen::MapIntro));
             h.events(&[], &[(left, (0, 0))]);
             assert!(matches!(h.app.screen, Screen::MapIntro));
@@ -1095,6 +2022,7 @@ mod tests {
             for button in ["restart", "Q to menu"] {
                 if matches!(h.app.screen, Screen::Title) {
                     h.click("START RUN");
+                    h.click("back"); // dossier -> MapIntro
                 }
                 h.click("begin");
                 h.app.world.as_mut().unwrap().game_over = true;
@@ -1157,7 +2085,7 @@ mod tests {
         assert!(matches!(h.app.screen, Screen::Title));
         let quit = h.locate("QUIT");
         h.events(&[], &[(left, start), (MouseEventKind::Moved, quit)]);
-        assert!(matches!(h.app.screen, Screen::MapIntro));
+        assert!(matches!(h.app.screen, Screen::Story));
         assert!(!h.app.should_quit);
     }
 
@@ -1236,7 +2164,8 @@ mod tests {
                 hh.frame(&[KeyCode::Char('l')]);
             }
             "levelup" => {
-                hh.frame(&[KeyCode::Enter]); // -> MapIntro
+                hh.frame(&[KeyCode::Enter]); // -> Story
+                hh.frame(&[KeyCode::Enter]); // dossier -> MapIntro
                 hh.frame(&[KeyCode::Enter]); // skip intro -> Playing
                 for tick in 0..3600u32 {
                     let mv = match (tick / 20) % 4 {
@@ -1252,7 +2181,8 @@ mod tests {
                 }
             }
             _ => {
-                hh.frame(&[KeyCode::Enter]); // -> MapIntro
+                hh.frame(&[KeyCode::Enter]); // -> Story
+                hh.frame(&[KeyCode::Enter]); // dossier -> MapIntro
                 hh.frame(&[KeyCode::Enter]); // skip -> Playing
                 for tick in 0..900u32 {
                     let mv = match (tick / 18) % 4 {
@@ -1295,7 +2225,8 @@ mod tests {
     fn player_follows_mouse_cursor() {
         let mut h = Harness::new(100, 44);
         h.frame(&[]); // title
-        h.frame(&[KeyCode::Enter]); // -> MapIntro
+        h.frame(&[KeyCode::Enter]); // -> Story
+        h.frame(&[KeyCode::Enter]); // dossier -> MapIntro
         h.frame(&[KeyCode::Enter]); // skip intro -> Playing
         h.frame(&[]); // render so last_game + cam are set
 
@@ -1327,7 +2258,9 @@ mod tests {
     fn full_run_renders_and_handles_levelup() {
         let mut h = Harness::new(100, 44);
         h.frame(&[]); // title
-        h.frame(&[KeyCode::Enter]); // START RUN -> Playing
+        h.frame(&[KeyCode::Enter]); // START RUN -> Story
+        h.frame(&[KeyCode::Enter]); // dossier -> MapIntro
+        h.frame(&[KeyCode::Enter]); // intro -> Playing
 
         let mut saw_pixels = false;
         let mut saw_levelup = false;
@@ -1379,6 +2312,7 @@ mod tests {
             "wordmark top row missing"
         );
         assert!(text.contains("START RUN"));
+        assert!(text.contains("Sector"), "the sector row is missing");
         assert!(text.contains("M mute"), "legend line 1 clipped");
         assert!(text.contains("Q quit"), "legend line 2 clipped");
     }
@@ -1395,8 +2329,8 @@ mod tests {
                 "{w}x{h} title should still show START RUN"
             );
             assert!(
-                text.contains("Map"),
-                "{w}x{h} title should show the map row"
+                text.contains("Sector"),
+                "{w}x{h} title should show the sector row"
             );
             assert!(text.contains("QUIT"), "{w}x{h} title should show QUIT");
             assert!(
@@ -1406,22 +2340,23 @@ mod tests {
         }
     }
 
-    /// Item 5: Enter on the "Map" row cycles the map instead of doing nothing.
+    /// The sector row opens the art's sector-select screen (the free map
+    /// selector is gone), and Esc returns to the title.
     #[test]
-    fn enter_on_map_row_cycles_theme() {
-        let mut h = Harness::new(80, 40);
+    fn enter_on_sector_row_opens_the_select_screen() {
+        let mut h = Harness::new(80, 24);
         h.frame(&[]);
-        h.frame(&[KeyCode::Down]); // select the Map row
+        h.frame(&[KeyCode::Down]); // select the Sector row
         assert_eq!(h.app.menu_idx, 1);
-        let before = h.app.theme_idx;
         h.frame(&[KeyCode::Enter]);
-        assert_eq!(h.app.theme_idx, (before + 1) % Theme::all().len());
         assert!(
-            matches!(h.app.screen, Screen::Title),
-            "must stay on the title"
+            matches!(h.app.screen, Screen::SectorSelect),
+            "the sector row must open the sector select"
         );
-        h.frame(&[KeyCode::Enter]);
-        assert_eq!(h.app.theme_idx, (before + 2) % Theme::all().len());
+        assert!(h.screen_text().contains("SELECT SECTOR"));
+        h.frame(&[KeyCode::Esc]);
+        assert!(matches!(h.app.screen, Screen::Title));
+        assert_eq!(h.app.menu_idx, 1, "the title keeps its row");
     }
 
     /// Item 11: pause freezes the simulation and resumes, and Q bails to the menu.
@@ -1497,6 +2432,8 @@ mod tests {
             level: 4,
             map: "Sewer".into(),
             won: false,
+            campaign_level: 2,
+            campaign_won: false,
         });
         let app = App::with_options(false, None, table, false, Some(TEST_SEED));
         let mut h = Harness::with_app(app, 100, 40);
@@ -1595,17 +2532,36 @@ mod tests {
     fn degenerate_terminal_sizes_do_not_panic() {
         for (w, h) in [(0u16, 0u16), (0, 5), (5, 0), (1, 1), (1, 3), (3, 1), (3, 3)] {
             for target in [
-                "Title", "Story", "MapIntro", "Playing", "LevelUp", "Paused", "End",
+                "Title",
+                "SectorSelect",
+                "Story",
+                "MapIntro",
+                "LevelIntro",
+                "Playing",
+                "LevelUp",
+                "Paused",
+                "LevelComplete",
+                "KeepThree",
+                "Victory",
+                "End",
             ] {
                 let mut hh = Harness::with_app(test_app(), w, h);
                 hh.frame(&[]);
                 match target {
                     "Title" => {}
+                    "SectorSelect" => {
+                        hh.app.screen = Screen::SectorSelect;
+                    }
                     "Story" => {
                         hh.frame(&[KeyCode::Char('l')]);
                     }
                     "MapIntro" => {
-                        hh.frame(&[KeyCode::Enter]);
+                        hh.frame(&[KeyCode::Enter]); // -> Story
+                        hh.frame(&[KeyCode::Enter]); // dossier -> MapIntro
+                    }
+                    "LevelIntro" => {
+                        // A practice run of Kitchen opens on its intro plate.
+                        hh.app.start_practice(1);
                     }
                     "Playing" => hh.enter_playing(),
                     "LevelUp" => {
@@ -1616,6 +2572,23 @@ mod tests {
                     "Paused" => {
                         hh.enter_playing();
                         hh.frame(&[KeyCode::Esc]);
+                    }
+                    "LevelComplete" => {
+                        hh.enter_playing();
+                        hh.grant_keepables();
+                        hh.finish_level();
+                    }
+                    "KeepThree" => {
+                        hh.enter_playing();
+                        hh.grant_keepables();
+                        hh.finish_level();
+                        hh.frame(&[KeyCode::Enter]);
+                    }
+                    "Victory" => {
+                        hh.enter_playing();
+                        hh.app.world.as_mut().unwrap().level_index = 2;
+                        hh.app.campaign.as_mut().unwrap().level = 2;
+                        hh.finish_level();
                     }
                     _ => {
                         hh.enter_playing();
@@ -1712,8 +2685,18 @@ mod tests {
             (1, 1),
         ] {
             let mut h = Harness::new(width, height);
-            h.app.theme_idx = theme_idx;
+            h.app.select_idx = theme_idx.min(campaign::LEVEL_COUNT - 1);
             h.enter_playing();
+            if theme_idx != 0 {
+                // The capture tool wants a specific map's palette; the campaign
+                // only starts on the Sewer, so swap the world for the sector
+                // under capture.
+                h.app.world = Some(World::new_level(
+                    theme_idx.min(campaign::LEVEL_COUNT - 1),
+                    TEST_SEED,
+                    Loadout::starting(),
+                ));
+            }
             if let Some(w) = h.app.world.as_mut() {
                 for _ in 0..240 {
                     w.update(1.0 / 60.0, Vec2::new(0.25, 0.05), false);
@@ -1846,6 +2829,8 @@ mod tests {
                                     level: w.player.level.saturating_sub(i),
                                     map: w.level.theme.name().to_string(),
                                     won: i == 0 && w.won,
+                                    campaign_level: 3,
+                                    campaign_won: i == 0 && w.won,
                                 });
                             }
                             h.app.last_summary = None;
@@ -2216,4 +3201,798 @@ mod tests {
         assert!(!hh.app.last_minimap.is_empty());
     }
 
+    #[test]
+    fn n_key_cycles_minimap_sizes_and_drawn_area_shrinks_then_disappears() {
+        use crate::render::minimap::MinimapSize;
+        for (w, h) in [(80u16, 24u16), (120, 40)] {
+            let mut hh = Harness::new(w, h);
+            hh.enter_playing();
+            hh.frame(&[]);
+
+            assert_eq!(hh.app.scores.minimap_size, MinimapSize::Normal);
+            let normal = hh.app.last_minimap;
+            assert!(!normal.is_empty(), "Normal minimap missing at {w}x{h}");
+            assert!(hh.app.last_game.union(normal) == hh.app.last_game);
+
+            // First press: Normal -> Small (area shrinks noticeably).
+            hh.frame(&[KeyCode::Char('n')]);
+            assert_eq!(hh.app.scores.minimap_size, MinimapSize::Small);
+            let small = hh.app.last_minimap;
+            assert!(!small.is_empty(), "Small minimap missing at {w}x{h}");
+            assert!(
+                small.area() < normal.area() && small.width < normal.width && small.height < normal.height,
+                "Small ({small:?}) did not shrink from Normal ({normal:?}) at {w}x{h}"
+            );
+            assert!(hh.app.last_game.union(small) == hh.app.last_game);
+            assert!(hh.minimap_text().contains("MAP"));
+
+            // Second press: Small -> Hidden (drawn area disappears, no click target).
+            hh.frame(&[KeyCode::Char('n')]);
+            assert_eq!(hh.app.scores.minimap_size, MinimapSize::Hidden);
+            assert!(
+                hh.app.last_minimap.is_empty(),
+                "Hidden minimap still occupied playfield at {w}x{h}"
+            );
+            let corner_x = small.x + small.width / 2;
+            let corner_y = small.y + small.height / 2;
+            assert_ne!(
+                hh.app.hits.at(corner_x, corner_y),
+                Some(Target::Minimap),
+                "Hidden minimap left a click blocker over the playfield"
+            );
+
+            // Third press: Hidden -> Normal.
+            hh.frame(&[KeyCode::Char('n')]);
+            assert_eq!(hh.app.scores.minimap_size, MinimapSize::Normal);
+            assert_eq!(hh.app.last_minimap, normal);
+        }
+    }
+
+    #[test]
+    fn mouse_wheel_over_compact_minimap_steps_sizes() {
+        use crate::render::minimap::MinimapSize;
+        let mut hh = Harness::new(120, 40);
+        hh.enter_playing();
+        hh.frame(&[]);
+
+        let normal = hh.app.last_minimap;
+        assert_eq!(hh.app.scores.minimap_size, MinimapSize::Normal);
+
+        // Scrolling outside the minimap does not change size.
+        hh.events(&[], &[(MouseEventKind::ScrollDown, (2, 2))]);
+        assert_eq!(hh.app.scores.minimap_size, MinimapSize::Normal);
+
+        // ScrollDown over Normal -> Small.
+        let center_n = (normal.x + normal.width / 2, normal.y + normal.height / 2);
+        hh.events(&[], &[(MouseEventKind::ScrollDown, center_n)]);
+        assert_eq!(hh.app.scores.minimap_size, MinimapSize::Small);
+        let small = hh.app.last_minimap;
+        assert!(small.area() < normal.area());
+
+        // ScrollUp over Small -> back to Normal.
+        let center_s = (small.x + small.width / 2, small.y + small.height / 2);
+        hh.events(&[], &[(MouseEventKind::ScrollUp, center_s)]);
+        assert_eq!(hh.app.scores.minimap_size, MinimapSize::Normal);
+        assert_eq!(hh.app.last_minimap, normal);
+
+        // ScrollDown twice -> Small -> Hidden.
+        hh.events(&[], &[(MouseEventKind::ScrollDown, center_n)]);
+        assert_eq!(hh.app.scores.minimap_size, MinimapSize::Small);
+        let small2 = hh.app.last_minimap;
+        let center_s2 = (small2.x + small2.width / 2, small2.y + small2.height / 2);
+        hh.events(&[], &[(MouseEventKind::ScrollDown, center_s2)]);
+        assert_eq!(hh.app.scores.minimap_size, MinimapSize::Hidden);
+        assert!(hh.app.last_minimap.is_empty());
+    }
+
+    #[test]
+    fn expanded_map_opens_from_every_compact_state() {
+        use crate::render::minimap::MinimapSize;
+        let mut hh = Harness::new(120, 40);
+        hh.enter_playing();
+        hh.frame(&[]);
+
+        // 1. From Normal via Tab and click.
+        assert_eq!(hh.app.scores.minimap_size, MinimapSize::Normal);
+        hh.frame(&[KeyCode::Tab]);
+        assert!(hh.app.map_open && !hh.app.last_map.is_empty());
+        hh.frame(&[KeyCode::Tab]);
+        assert!(!hh.app.map_open);
+
+        // 2. From Small via left-click and Tab.
+        hh.frame(&[KeyCode::Char('n')]);
+        assert_eq!(hh.app.scores.minimap_size, MinimapSize::Small);
+        let small = hh.app.last_minimap;
+        assert!(!small.is_empty());
+        let sc = (small.x + small.width / 2, small.y + small.height / 2);
+        hh.events(&[], &[(MouseEventKind::Down(MouseButton::Left), sc)]);
+        assert!(hh.app.map_open, "clicking Small minimap did not open expanded map");
+        assert!(!hh.app.last_map.is_empty());
+        hh.frame(&[KeyCode::Tab]);
+        assert!(!hh.app.map_open);
+        assert_eq!(hh.app.scores.minimap_size, MinimapSize::Small);
+
+        // 3. From Hidden via Tab.
+        hh.frame(&[KeyCode::Char('n')]);
+        assert_eq!(hh.app.scores.minimap_size, MinimapSize::Hidden);
+        assert!(hh.app.last_minimap.is_empty());
+        hh.frame(&[KeyCode::Tab]);
+        assert!(hh.app.map_open, "Tab did not open expanded map from Hidden");
+        assert!(!hh.app.last_map.is_empty());
+        hh.frame(&[KeyCode::Tab]);
+        assert!(!hh.app.map_open);
+        assert_eq!(hh.app.scores.minimap_size, MinimapSize::Hidden);
+        assert!(hh.app.last_minimap.is_empty());
+    }
+
+    #[test]
+    fn minimap_size_persists_through_injected_store_and_falls_back_when_missing() {
+        use crate::render::minimap::MinimapSize;
+
+        // Missing setting in store JSON defaults to Normal.
+        let missing = ScoreTable::parse(r#"{"entries":[]}"#);
+        assert_eq!(missing.minimap_size, MinimapSize::Normal);
+        let app_missing = App::with_options(false, None, missing, false, Some(TEST_SEED));
+        let mut h0 = Harness::with_app(app_missing, 120, 40);
+        h0.enter_playing();
+        h0.frame(&[]);
+        assert_eq!(h0.app.last_minimap.width, 34);
+
+        // Cycle to Small (in-memory only: persist == false) and reload via JSON.
+        h0.frame(&[KeyCode::Char('n')]);
+        assert_eq!(h0.app.scores.minimap_size, MinimapSize::Small);
+        let reloaded = ScoreTable::parse(&h0.app.scores.to_json());
+        assert_eq!(reloaded.minimap_size, MinimapSize::Small);
+
+        let app_reloaded = App::with_options(false, None, reloaded, false, Some(TEST_SEED));
+        let mut h1 = Harness::with_app(app_reloaded, 120, 40);
+        h1.enter_playing();
+        h1.frame(&[]);
+        assert_eq!(h1.app.scores.minimap_size, MinimapSize::Small);
+        assert_eq!(
+            (h1.app.last_minimap.width, h1.app.last_minimap.height),
+            (18, 9)
+        );
+
+        // Cycle to Hidden and reload via JSON.
+        h1.frame(&[KeyCode::Char('n')]);
+        let reloaded_hidden = ScoreTable::parse(&h1.app.scores.to_json());
+        let app_hidden = App::with_options(false, None, reloaded_hidden, false, Some(TEST_SEED));
+        let mut h2 = Harness::with_app(app_hidden, 120, 40);
+        h2.enter_playing();
+        h2.frame(&[]);
+        assert_eq!(h2.app.scores.minimap_size, MinimapSize::Hidden);
+        assert!(h2.app.last_minimap.is_empty());
+    }
+
+    #[test]
+    fn narrow_terminal_falls_back_automatically_without_overwriting_saved_preference() {
+        use crate::render::minimap::MinimapSize;
+
+        // 57x20 is too small for Normal (needs 72x18 playfield), so it starts
+        // at Small automatically while keeping saved preference == Normal.
+        let mut hh = Harness::new(57, 20);
+        hh.enter_playing();
+        hh.frame(&[]);
+        assert_eq!(hh.app.scores.minimap_size, MinimapSize::Normal);
+        assert_eq!(
+            (hh.app.last_minimap.width, hh.app.last_minimap.height),
+            (14, 7)
+        );
+        assert!(hh.app.last_game.union(hh.app.last_minimap) == hh.app.last_game);
+
+        // Resizing larger restores Normal automatically since saved pref wasn't overwritten.
+        hh.resize(120, 40);
+        hh.frame(&[]);
+        assert_eq!(hh.app.scores.minimap_size, MinimapSize::Normal);
+        assert_eq!(
+            (hh.app.last_minimap.width, hh.app.last_minimap.height),
+            (34, 14)
+        );
+
+        // Back to 57x20: first N press hides immediately (Small -> Hidden),
+        // second N press restores Small.
+        hh.resize(57, 20);
+        hh.frame(&[]);
+        assert_eq!((hh.app.last_minimap.width, hh.app.last_minimap.height), (14, 7));
+        hh.frame(&[KeyCode::Char('n')]);
+        assert_eq!(hh.app.scores.minimap_size, MinimapSize::Hidden);
+        assert!(hh.app.last_minimap.is_empty());
+        hh.frame(&[KeyCode::Char('n')]);
+        assert_eq!((hh.app.last_minimap.width, hh.app.last_minimap.height), (14, 7));
+    }
+
+    #[test]
+    fn hidden_minimap_keeps_pre_warning_bearing_without_duplicating_hud_compass() {
+        use crate::render::minimap::MinimapSize;
+
+        let mut hh = Harness::new(80, 24);
+        hh.enter_playing();
+        hh.frame(&[KeyCode::Char('n')]); // Small
+        hh.frame(&[KeyCode::Char('n')]); // Hidden
+        assert_eq!(hh.app.scores.minimap_size, MinimapSize::Hidden);
+        assert!(hh.app.last_minimap.is_empty());
+
+        // 185s: arena bearing active (180..230s), HUD warning compass not yet active.
+        hh.app.world.as_mut().unwrap().elapsed =
+            crate::render::minimap_source::ARENA_BEARING_AFTER_SECS + 5.0;
+        hh.frame(&[]);
+        let game = hh.app.last_game;
+        let corner = hh.terminal.backend().buffer()[(game.right() - 2, game.bottom() - 2)]
+            .symbol()
+            .to_string();
+        assert!(
+            matches!(
+                corner.as_str(),
+                "▲" | "◥" | "►" | "◢" | "▼" | "◣" | "◄" | "◤"
+            ),
+            "expected 1-cell arena bearing chevron when hidden at 185s, got {corner:?}"
+        );
+
+        // 240s: pre-boss warning active (230..255s); HUD compass now owns the
+        // arena bearing so the hidden corner reverts to the quiet `N` hint.
+        hh.app.world.as_mut().unwrap().elapsed = crate::game::director::BOSS_TIME - 15.0;
+        hh.frame(&[]);
+        let corner_warn = hh.terminal.backend().buffer()[(game.right() - 2, game.bottom() - 2)]
+            .symbol()
+            .to_string();
+        assert_eq!(
+            corner_warn, "N",
+            "hidden corner must not duplicate the HUD warning compass"
+        );
+    }
+
+    #[test]
+    fn minimap_sizes_never_panic_on_degenerate_terminals() {
+        for (w, h) in [(0u16, 0u16), (0, 5), (5, 0), (1, 1)] {
+            let mut hh = Harness::new(80, 24);
+            hh.enter_playing();
+            hh.resize(w, h);
+            for _ in 0..4 {
+                hh.frame(&[KeyCode::Char('n')]);
+                hh.events(&[], &[(MouseEventKind::ScrollDown, (0, 0))]);
+                hh.frame(&[KeyCode::Tab]);
+                hh.frame(&[KeyCode::Tab]);
+            }
+            assert!(hh.app.last_minimap.is_empty());
+            assert!(hh.app.last_map.is_empty());
+        }
+    }
+
+    // ---- Campaign flow ---------------------------------------------------
+
+    /// Does `loadout` own `kind` (a weapon at any level, or any stacks)?
+    fn owns(loadout: &Loadout, kind: KeepKind) -> bool {
+        match kind {
+            KeepKind::Weapon(k) => loadout.has(k),
+            KeepKind::Passive(p) => loadout.stacks(p) > 0,
+        }
+    }
+
+    /// Pack the first three manifest cards with the keyboard.
+    fn pack_three(h: &mut Harness) {
+        for key in [
+            KeyCode::Char(' '),
+            KeyCode::Down,
+            KeyCode::Char(' '),
+            KeyCode::Down,
+            KeyCode::Char(' '),
+        ] {
+            h.frame(&[key]);
+        }
+    }
+
+    /// The title's START RUN begins the campaign at level 1 (Sewer), through
+    /// the story dossier and the access-route card.
+    #[test]
+    fn starting_from_the_title_opens_the_campaign_at_level_one() {
+        let mut h = Harness::new(80, 24);
+        h.frame(&[]);
+        assert!(
+            h.screen_text().contains("Sector"),
+            "the title carries the sector row"
+        );
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "Story");
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "MapIntro");
+        assert!(h.screen_text().contains("THE SEWERS"));
+        h.frame(&[KeyCode::Enter]);
+        let w = h.app.world.as_ref().unwrap();
+        assert_eq!(w.level_index, 0);
+        assert_eq!(w.level.theme, Theme::Sewer);
+        let c = h.app.campaign.as_ref().expect("a campaign is in flight");
+        assert_eq!(c.level, 0);
+        assert!(h.app.practice.is_none());
+        assert_eq!(
+            c.loadout.weapons.len(),
+            1,
+            "the campaign starts on the default loadout"
+        );
+        assert_eq!(h.app.scores.entries.len(), 0, "nothing is recorded yet");
+    }
+
+    /// A whole three-level campaign through simulated keys: keep three at each
+    /// gate, the carried upgrades present at each level's start, and the
+    /// victory plate with the per-level breakdown.
+    #[test]
+    fn full_campaign_reaches_the_victory_plate_with_carried_upgrades() {
+        let mut h = Harness::new(120, 40);
+        h.enter_playing();
+        assert_eq!(h.app.world.as_ref().unwrap().level_index, 0);
+
+        // -- Level 1 (Sewer) -------------------------------------------------
+        {
+            let w = h.app.world.as_mut().unwrap();
+            w.score = 1200;
+            w.kills = 40;
+            w.elapsed = 90.0;
+        }
+        h.grant_keepables();
+        let offered = h.keepables();
+        assert!(offered.len() > 3, "the keep screen needs a real choice");
+        h.finish_level();
+        assert_eq!(h.app.screen.name_for_test(), "LevelComplete");
+        let text = h.screen_text();
+        assert!(text.contains("SECTOR CLEARED"), "no clear plate: {text}");
+        assert!(text.contains("APEX JAGUAR"), "the Sewer boss must be named");
+
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "KeepThree");
+        pack_three(&mut h);
+        assert_eq!(h.app.keep_counts(), (3, 3));
+        let chosen: Vec<KeepKind> = offered[..3].iter().map(|k| k.kind).collect();
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "LevelIntro");
+        assert!(
+            h.screen_text().contains("CARRIED IN"),
+            "the level intro must list what was carried"
+        );
+        assert_eq!(h.app.carried_entries.len(), 3);
+
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "Playing");
+        {
+            let w = h.app.world.as_ref().unwrap();
+            assert_eq!(w.level_index, 1, "level 2 is the Kitchen");
+            assert_eq!(w.level.theme, Theme::Kitchen);
+            for kind in &chosen {
+                assert!(owns(&w.player.loadout, *kind), "{kind:?} was not carried in");
+            }
+            assert_eq!(w.carried.score, 1200, "level 1's score is banked");
+        }
+
+        // -- Level 2 (Kitchen) -----------------------------------------------
+        h.finish_level();
+        assert_eq!(h.app.screen.name_for_test(), "LevelComplete");
+        assert!(
+            h.screen_text().contains("THE SWEEPER"),
+            "the Kitchen boss must be named"
+        );
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "KeepThree");
+        let offered = h.keepables();
+        assert!(offered.len() >= 3);
+        let chosen: Vec<KeepKind> = offered[..3].iter().map(|k| k.kind).collect();
+        pack_three(&mut h);
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "LevelIntro");
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "Playing");
+        {
+            let w = h.app.world.as_ref().unwrap();
+            assert_eq!(w.level_index, 2, "level 3 is the Lab");
+            assert_eq!(w.level.theme, Theme::Lab);
+            for kind in &chosen {
+                assert!(owns(&w.player.loadout, *kind), "{kind:?} was not carried in");
+            }
+        }
+
+        // -- Level 3 (Lab): the final boss wins the campaign -----------------
+        h.finish_level();
+        assert_eq!(h.app.screen.name_for_test(), "Victory");
+        let text = h.screen_text();
+        assert!(text.contains("EXTRACTION COMPLETE"), "no victory plate: {text}");
+        // The breakdown names every sector's boss.
+        for boss in ["APEX JAGUAR", "THE SWEEPER", "TURF-REAPER MK.IV"] {
+            assert!(text.contains(boss), "{boss} missing from the breakdown: {text}");
+        }
+        assert!(text.contains("3 / 3"), "the sectors column must read 3/3");
+        assert!(h.app.new_best, "the first campaign win is a new best");
+        let entry = &h.app.scores.entries[0];
+        assert!(entry.campaign_won, "the run records a campaign win");
+        assert_eq!(entry.campaign_level, 3);
+        assert!(entry.won);
+        assert!(entry.score >= 2000, "cumulative score: {entry:?}");
+        assert_eq!(h.app.records[0].time, 90.0, "level 1's clock was recorded");
+        assert_eq!(h.app.records[0].score, 1200, "level 1's score was recorded");
+        assert_eq!(h.app.records[0].kills, 40, "level 1's kills were recorded");
+        assert_eq!(h.app.records[2].time, 0.0, "level 3 finished on the first tick");
+
+        // Play again restarts the campaign from the dossier.
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "Story");
+        assert_eq!(h.app.campaign.as_ref().unwrap().level, 0);
+        assert_eq!(h.app.campaign.as_ref().unwrap().totals.score, 0);
+    }
+
+    /// Keep-three by keyboard: the confirm is refused below the required count
+    /// (decided by the art's helper), a full pack confirms, and a fourth pick
+    /// cannot overflow the pack.
+    #[test]
+    fn keep_three_keyboard_refuses_confirm_below_the_required_count() {
+        let mut h = Harness::new(120, 40);
+        h.enter_playing();
+        h.grant_keepables();
+        h.finish_level();
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "KeepThree");
+        assert_eq!(h.app.keep_counts(), (0, 3));
+
+        // Nothing packed: Enter is refused.
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "KeepThree");
+        // Two of three: still refused.
+        pack_two(&mut h);
+        assert_eq!(h.app.keep_counts(), (2, 3));
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(
+            h.app.screen.name_for_test(),
+            "KeepThree",
+            "confirm must be refused at 2/3"
+        );
+        // A fourth card cannot be packed once the pack is full.
+        h.frame(&[KeyCode::Down]);
+        h.frame(&[KeyCode::Char(' ')]);
+        assert_eq!(h.app.keep_counts(), (3, 3));
+        h.frame(&[KeyCode::Down]);
+        h.frame(&[KeyCode::Char(' ')]);
+        assert_eq!(h.app.keep_counts(), (3, 3), "the pack holds exactly three");
+        // The full pack confirms into the next level's intro.
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "LevelIntro");
+    }
+
+    /// Keep-three by mouse: hovering picks the cursor, clicking the card rows
+    /// toggles them, the confirm button is absent (and inert) until the pack is
+    /// full, and clicking it advances.
+    #[test]
+    fn keep_three_mouse_toggles_and_confirms() {
+        let left = MouseEventKind::Down(MouseButton::Left);
+        let mut h = Harness::new(120, 40);
+        h.enter_playing();
+        h.grant_keepables();
+        h.finish_level();
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "KeepThree");
+
+        // Below the required count the art emits no confirm rectangle, so a
+        // press on the disabled button text does nothing.
+        let disabled = h.locate("SELECT 3 MORE");
+        h.events(&[], &[(left, disabled)]);
+        assert_eq!(h.app.screen.name_for_test(), "KeepThree");
+        assert_eq!(h.app.keep_counts(), (0, 3));
+
+        let names: Vec<String> = h
+            .app
+            .keep_items
+            .iter()
+            .take(3)
+            .map(|k| k.name.to_string())
+            .collect();
+        for name in &names {
+            let pos = h.locate(name);
+            h.events(&[], &[(MouseEventKind::Moved, pos)]);
+            assert!(h.app.hits.hovered.is_some(), "the card row is not hoverable");
+            h.events(&[], &[(left, pos)]);
+        }
+        assert_eq!(h.app.keep_counts(), (3, 3));
+
+        let confirm = h.locate("ENTER THE");
+        h.events(&[], &[(MouseEventKind::Moved, confirm)]);
+        h.events(&[], &[(left, confirm)]);
+        assert_eq!(h.app.screen.name_for_test(), "LevelIntro");
+        assert_eq!(h.app.carried_entries.len(), 3);
+    }
+
+    /// Dying on level 2 records the level reached and the cumulative totals.
+    #[test]
+    fn death_on_level_two_records_the_level_and_totals() {
+        let mut h = Harness::new(100, 40);
+        h.enter_playing();
+        {
+            let w = h.app.world.as_mut().unwrap();
+            w.score = 1200;
+            w.kills = 40;
+            w.elapsed = 90.0;
+        }
+        h.grant_keepables();
+        h.finish_level();
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "KeepThree");
+        pack_three(&mut h);
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "LevelIntro");
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "Playing");
+
+        {
+            let w = h.app.world.as_mut().unwrap();
+            assert_eq!(w.level_index, 1);
+            w.score = 800;
+            w.kills = 25;
+            w.elapsed = 60.0;
+            w.player.hp = 0.0;
+            w.game_over = true;
+        }
+        let text = h.frame(&[]);
+        assert_eq!(h.app.screen.name_for_test(), "End");
+        assert!(
+            text.contains("SECTOR 2/3"),
+            "the defeat screen must name the sector reached: {text}"
+        );
+        assert!(text.contains("Total time"), "cumulative totals must be shown");
+        let summary = h.app.last_summary.as_ref().unwrap();
+        assert_eq!(summary.sector, 2);
+        assert!(!summary.practice);
+        assert!(summary.time >= 150.0, "cumulative time: {}", summary.time);
+        let entry = &h.app.scores.entries[0];
+        assert_eq!(entry.campaign_level, 2);
+        assert!(!entry.campaign_won);
+        assert!(!entry.won);
+        assert!(
+            entry.score > 1200 + 800,
+            "the score must bank level 1 too: {entry:?}"
+        );
+        assert!(h.app.scores.level_cleared(0));
+    }
+
+    /// Sector select reads the injected table: locked/unlocked states, the
+    /// per-level bests, a locked sector refusing to start, a practice run
+    /// labelled as such, and the unlock persisting through the store.
+    #[test]
+    fn sector_select_locks_unlocks_and_persists() {
+        let mut table = ScoreTable::default();
+        table.record_level(0, 6420, 252.0); // a previous run cleared the Sewer
+        let app = App::with_options(false, None, table, false, Some(TEST_SEED));
+        let mut h = Harness::with_app(app, 120, 40);
+        h.frame(&[]);
+        assert!(
+            h.screen_text().contains("01 Sewer") && !h.screen_text().contains('×'),
+            "the Sewer is open, so the title row marks nothing locked"
+        );
+        h.frame(&[KeyCode::Down, KeyCode::Right]);
+        assert!(
+            h.screen_text().contains("02 Kitchen") && !h.screen_text().contains('×'),
+            "the cleared Sewer unlocked the Kitchen"
+        );
+        h.frame(&[KeyCode::Right]);
+        assert!(
+            h.screen_text().contains("03 Lab ×"),
+            "the Lab is still locked on the title row"
+        );
+        h.frame(&[KeyCode::Left, KeyCode::Left]); // back to sector 1
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "SectorSelect");
+        let text = h.screen_text();
+        assert!(text.contains("CLEARED"), "Sewer was cleared: {text}");
+        assert!(text.contains("OPEN"), "Kitchen is open: {text}");
+        assert!(text.contains("LOCKED"), "Lab is locked: {text}");
+        assert!(text.contains("BEST 6420"), "the stored best score: {text}");
+        assert!(text.contains("04:12"), "the stored best time: {text}");
+
+        // A locked sector refuses to start and leaves the title state alone.
+        h.frame(&[KeyCode::Right, KeyCode::Right]); // Sewer -> Kitchen -> Lab
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(
+            h.app.screen.name_for_test(),
+            "SectorSelect",
+            "a locked sector must not start"
+        );
+        assert!(h.app.world.is_none());
+
+        // Kitchen starts a labelled single-sector practice run.
+        h.frame(&[KeyCode::Left]);
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "LevelIntro");
+        assert_eq!(h.app.practice, Some(1));
+        assert!(h.app.campaign.is_none());
+        assert!(
+            h.screen_text().contains("PRACTICE"),
+            "the practice run must be labelled"
+        );
+        {
+            let w = h.app.world.as_ref().unwrap();
+            assert_eq!(w.level_index, 1);
+            assert_eq!(
+                w.player.loadout.weapons.len(),
+                1,
+                "practice uses the default loadout"
+            );
+        }
+
+        // Clearing it records the sector (but never a campaign win).
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "Playing");
+
+        // The play screens keep working on a later level: the minimap draws,
+        // the level-up cards open, and the pause dossier carries the campaign
+        // pips for the sector in flight.
+        h.frame(&[]);
+        assert!(
+            !h.app.last_minimap.is_empty(),
+            "the minimap must draw on level 2"
+        );
+        h.app.world.as_mut().unwrap().pending_levelups = 1;
+        h.frame(&[]);
+        assert_eq!(h.app.screen.name_for_test(), "LevelUp");
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "Playing");
+        let paused = h.frame(&[KeyCode::Esc]);
+        assert_eq!(h.app.screen.name_for_test(), "Paused");
+        assert!(
+            paused.contains("2/3"),
+            "the pause dossier must carry the sector pips: {paused}"
+        );
+        h.frame(&[KeyCode::Esc]);
+        assert_eq!(h.app.screen.name_for_test(), "Playing");
+        h.finish_level();
+        assert_eq!(h.app.screen.name_for_test(), "LevelComplete");
+        h.frame(&[KeyCode::Char(' ')]);
+        assert_eq!(h.app.screen.name_for_test(), "End");
+        let entry = &h.app.scores.entries[0];
+        assert_eq!(entry.campaign_level, 2);
+        assert!(entry.won, "a cleared practice sector wins its own plate");
+        assert!(!entry.campaign_won, "but it never wins the campaign");
+        assert!(h.app.scores.level_cleared(1));
+        assert!(
+            h.app.scores.level_unlocked(2),
+            "clearing Kitchen unlocks the Lab"
+        );
+
+        // The unlock survives a save/load through the injected store.
+        let reloaded = ScoreTable::parse(&h.app.scores.to_json());
+        assert!(reloaded.level_unlocked(2));
+        assert_eq!(
+            reloaded.level_best(1).map(|b| b.cleared),
+            Some(true),
+            "the Kitchen best was persisted"
+        );
+    }
+
+    /// Every new campaign screen renders its own furniture at the two reference
+    /// terminal sizes.
+    #[test]
+    fn campaign_screens_lay_out_at_57x20_and_80x24() {
+        for (w, height) in [(57u16, 20u16), (80, 24)] {
+            let cases: [(&str, &str); 5] = [
+                ("SectorSelect", "SECTOR"),
+                ("LevelIntro", "ACCESS ROUTE"),
+                ("LevelComplete", "SECTOR CLEARED"),
+                ("KeepThree", "PACK"),
+                ("Victory", "EXTRACTION"),
+            ];
+            for (screen, needle) in cases {
+                let mut h = Harness::new(w, height);
+                h.frame(&[]);
+                match screen {
+                    "SectorSelect" => h.app.screen = Screen::SectorSelect,
+                    "LevelIntro" => h.app.start_practice(1),
+                    "Victory" => {
+                        h.enter_playing();
+                        h.app.campaign.as_mut().unwrap().level = 2;
+                        h.app.world.as_mut().unwrap().level_index = 2;
+                        h.finish_level();
+                    }
+                    _ => {
+                        h.enter_playing();
+                        h.grant_keepables();
+                        h.finish_level();
+                        if screen == "KeepThree" {
+                            h.frame(&[KeyCode::Enter]);
+                        }
+                    }
+                }
+                assert_eq!(h.app.screen.name_for_test(), screen, "{screen} at {w}x{height}");
+                let text = h.frame(&[]);
+                assert!(
+                    text.contains(needle),
+                    "{screen} at {w}x{height} is missing {needle:?}: {text}"
+                );
+            }
+        }
+    }
+
+    // ---- Campaign fanfares -----------------------------------------------
+
+    /// A cleared level's fanfare is its own sound, and it is *deferred* so it
+    /// follows the boss's death sting the simulation already played on the
+    /// killing tick instead of doubling it.
+    #[test]
+    fn a_sector_clear_fanfare_follows_the_boss_death() {
+        let mut h = Harness::new(120, 40);
+        h.enter_playing();
+        assert_eq!(h.app.pending_sting(), None);
+        h.finish_level();
+        assert_eq!(h.app.screen.name_for_test(), "LevelComplete");
+        assert_eq!(
+            h.app.pending_sting(),
+            Some(Sfx::LevelComplete),
+            "the sector card plays the level-complete fanfare"
+        );
+        // It is still waiting the frame after the kill: nothing is stacking on
+        // the simulation's own `BossDeath`.
+        h.frame(&[]);
+        assert_eq!(h.app.pending_sting(), Some(Sfx::LevelComplete));
+        // `FANFARE_DELAY_SECS` at 60 fps, plus a frame of slack: it comes due.
+        for _ in 0..((FANFARE_DELAY_SECS * 60.0) as usize + 2) {
+            h.frame(&[]);
+        }
+        assert_eq!(h.app.pending_sting(), None, "the fanfare must come due");
+        assert_eq!(h.app.screen.name_for_test(), "LevelComplete");
+    }
+
+    /// Beating the Lab queues the campaign fanfare; a practice clear keeps the
+    /// plain win sting and never claims a campaign victory.
+    #[test]
+    fn campaign_victory_and_practice_use_their_own_stings() {
+        // Campaign win: level 3's boss dies.
+        let mut h = Harness::new(120, 40);
+        h.enter_playing();
+        h.app.campaign.as_mut().unwrap().level = campaign::LEVEL_COUNT - 1;
+        h.app.world.as_mut().unwrap().level_index = campaign::LEVEL_COUNT - 1;
+        h.finish_level();
+        assert_eq!(h.app.screen.name_for_test(), "Victory");
+        assert_eq!(
+            h.app.pending_sting(),
+            Some(Sfx::CampaignVictory),
+            "the campaign win is its own fanfare"
+        );
+
+        // Practice clear of the Kitchen: the sector card, then the plain `Win`
+        // on the end plate — never `CampaignVictory`.
+        let mut h = Harness::new(120, 40);
+        h.frame(&[]);
+        h.app.start_practice(1);
+        assert_eq!(h.app.screen.name_for_test(), "LevelIntro");
+        assert_eq!(h.app.practice, Some(1));
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "Playing");
+        h.finish_level();
+        assert_eq!(h.app.screen.name_for_test(), "LevelComplete");
+        assert_eq!(h.app.pending_sting(), Some(Sfx::LevelComplete));
+        // Let the sector fanfare come due, then take the card.
+        for _ in 0..((FANFARE_DELAY_SECS * 60.0) as usize + 2) {
+            h.frame(&[]);
+        }
+        assert_eq!(h.app.pending_sting(), None);
+        h.frame(&[KeyCode::Char(' ')]); // sector card -> the end plate
+        assert_eq!(h.app.screen.name_for_test(), "End");
+        assert_eq!(
+            h.app.last_summary.as_ref().map(|s| (s.won, s.practice)),
+            Some((true, true)),
+            "a cleared practice sector wins its own plate"
+        );
+        assert_eq!(
+            h.app.pending_sting(),
+            None,
+            "the practice win is played at once, never queued as a campaign fanfare"
+        );
+        assert_ne!(
+            h.app.pending_sting(),
+            Some(Sfx::CampaignVictory),
+            "a practice clear is never a campaign victory"
+        );
+    }
+
+    /// Two of the required three cards, packed with the keyboard.
+    fn pack_two(h: &mut Harness) {
+        for key in [
+            KeyCode::Char(' '),
+            KeyCode::Down,
+            KeyCode::Char(' '),
+        ] {
+            h.frame(&[key]);
+        }
+    }
 }

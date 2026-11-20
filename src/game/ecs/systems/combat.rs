@@ -38,6 +38,17 @@
 //! enemy query and the player. `b.lob.is_some()` bullets are skipped by the
 //! player-bullet pass.
 //!
+//! **Walls are already inside the sweep.** `projectiles::bullets_system`
+//! truncates every free-flying bullet's `prev_pos -> pos` segment at the first
+//! wall it hit this tick, so the swept oracles below can only see the part of
+//! the path that happened before that wall: a hit earlier along the sweep
+//! counts, a hit behind cover does not. Nothing here needs a wall query —
+//! except **Spore Orbit**, whose bullets pass through walls on purpose
+//! (`weapons.rs` documents why a 24 px ring cannot be destroyed by the walls of
+//! a two-cell corridor). Their damage therefore asks for a clear line from the
+//! ring's centre (the rat) to the enemy ([`ORBIT_LOS_RADIUS`]), so a spore can
+//! sit inside a maze partition without hurting whatever is on the far side.
+//!
 //! **i-frames:** `Player::take_damage` returns false while i-framed; the enemy
 //! bullet is only consumed on a landed hit. Contact skips the whole enemy loop
 //! when `iframes > 0.0`, so no cooldown is spent and no knockback applied.
@@ -114,6 +125,7 @@ use crate::game::bullet::{Bullet, Faction};
 use crate::game::collision::{self, SizeClass, SpatialGrid};
 use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::constants::PLAYER_RADIUS;
+use crate::game::ecs::systems::projectiles::los_clear;
 use crate::game::ecs::resources::{EnemyIndex, GridScratch, NeighborScratch, RngRes, Shake, SfxQueue};
 #[cfg(debug_assertions)]
 use crate::game::ecs::resources::debug_assert_enemy_index;
@@ -124,6 +136,11 @@ use crate::game::particle::vfx;
 use crate::game::particle::Particles;
 use crate::game::player::Player;
 use crate::math::Vec2;
+
+/// Line-of-sight radius for an orbiting spore's damage: a spore is a cloud
+/// around the rat, so the test is "is there a wall between the rat and this
+/// body", not "does the 3 px blob fit".
+const ORBIT_LOS_RADIUS: f32 = 1.0;
 
 /// Collect every bullet entity with its `SpawnId` into `order` (a per-system
 /// scratch buffer reused across ticks) and sort it, so iteration matches the
@@ -146,6 +163,8 @@ pub fn player_bullet_hits_system(
     grid: Res<SpatialGrid>,
     grid_scratch: Res<GridScratch>,
     index: Res<EnemyIndex>,
+    level: Res<Level>,
+    player: Res<Player>,
     mut neigh: ResMut<NeighborScratch>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
     mut bullets: Query<(Entity, &SpawnId, &mut Bullet)>,
@@ -156,6 +175,8 @@ pub fn player_bullet_hits_system(
     mut order: Local<Vec<(u64, Entity)>>,
 ) {
     let max_enemy_radius = grid_scratch.max_radius;
+    // Ring centre for the Spore Orbit cover test (see the module docs).
+    let ring_centre = player.pos;
     // Debug-only guard: the grid buckets index `EnemyIndex`, so it must still
     // be the live `SpawnId` order here (see `enemy_move` module docs).
     #[cfg(debug_assertions)]
@@ -194,6 +215,12 @@ pub fn player_bullet_hits_system(
                 continue;
             }
             if collision::segment_circle_hit(b.prev_pos, b.pos, b.radius, e.pos, e.radius) {
+                // Orbit bullets ignore walls in flight (`projectiles.rs`), so
+                // their point-blank damage is the one hit that needs the line
+                // test: no hurting a body that is behind a partition.
+                if b.orbit.is_some() && !los_clear(&level, ring_centre, e.pos, ORBIT_LOS_RADIUS) {
+                    continue;
+                }
                 e.hurt(b.damage);
                 let killed = !e.alive();
                 hit_any = true;
@@ -808,6 +835,127 @@ mod tests {
         assert_eq!(w.sfx.len(), 1);
         assert!(matches!(w.sfx[0], Sfx::Hurt));
         assert!(w.shake >= 5.0, "contact must raise the shake floor");
+    }
+
+    /// Spore Orbit bullets pass through walls in flight (`projectiles.rs`
+    /// documents why a 24 px ring has to), so its point-blank damage is the one
+    /// hit that needs a line test: a spore sitting on a body across a partition
+    /// must not hurt it, and the same spore must hurt the body when the rat is
+    /// on that side.
+    #[test]
+    fn orbit_bullets_do_not_damage_through_a_wall() {
+        use crate::game::bullet::Orbit;
+
+        let mut w = World::new(Theme::Sewer, 106);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        w.level
+            .tiles
+            .fill_cells(11, 9, 1, 3, TileKind::Wall(WallKind::Solid));
+        w.level.tiles.rebuild_masks();
+        let hidden = w.spawn_enemy(EnemyKind::Cat, Vec2::new(196.0, 168.0), 1.0);
+        let hp = w.enemies()[0].hp;
+        // The spore sits exactly on the hidden body's centre.
+        let mut b = Bullet::new(
+            Vec2::new(196.0, 168.0),
+            Vec2::ZERO,
+            3.0,
+            Faction::Player,
+            (140, 255, 180),
+        );
+        b.pierce = 999;
+        b.radius = 3.0;
+        b.life = 10.0;
+        b.orbit = Some(Orbit {
+            angle: 0.0,
+            radius: 26.0,
+            speed: 0.0,
+        });
+        w.spawn_bullet(b);
+        rebuild_broadphase(&mut w);
+
+        // Rat on the near side of the partition: no damage through it.
+        w.player.pos = Vec2::new(170.0, 168.0);
+        run(&mut w, combat::player_bullet_hits_system);
+        assert_eq!(
+            w.ecs.get::<Enemy>(hidden).unwrap().hp,
+            hp,
+            "an orbiting spore damaged a body behind a wall"
+        );
+
+        // Rat on the same side as the body: the spore lands.
+        w.player.pos = Vec2::new(220.0, 168.0);
+        run(&mut w, combat::player_bullet_hits_system);
+        assert!(
+            w.ecs.get::<Enemy>(hidden).unwrap().hp < hp,
+            "the spore missed a body on its own side of the wall"
+        );
+    }
+
+    /// A shot spent on the boss may not also be spent on an enemy in the same
+    /// tick: `boss_damage_system` runs before this system and marks the shot
+    /// spent (`life = 0`, re-hit cooldown set), and this pass honours that.
+    #[test]
+    fn a_shot_spent_on_the_boss_cannot_also_hit_an_enemy() {
+        use crate::game::ecs::systems::boss::{Boss, BossKind, boss_damage_system, BossState};
+        use crate::game::level::TileRect;
+
+        let mut w = World::new(Theme::Sewer, 107);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        w.clear_pools();
+        let ppos = w.player.pos;
+        // The horde body sits between the dart and the boss, and both hit
+        // shapes overlap the one-tick sweep (24 -> 32 px from the rat).
+        let enemy = w.spawn_enemy(EnemyKind::Cat, ppos + Vec2::new(31.0, 0.0), 1.0);
+        let boss_pos = ppos + Vec2::new(40.0, 0.0);
+        let mut boss = Boss::new(
+            BossKind::Cat,
+            boss_pos,
+            5000.0,
+            TileRect::new(0, 0, 400, 400),
+            boss_pos,
+            false,
+        );
+        boss.state = BossState::Cat(crate::game::art_boss_cat::BossCatState::Stalk);
+        w.ecs.spawn((boss, SpawnId(0)));
+        let mut b = Bullet::new(
+            ppos + Vec2::new(24.0, 0.0),
+            Vec2::new(480.0, 0.0),
+            12.0,
+            Faction::Player,
+            (250, 250, 250),
+        );
+        b.weapon = Some(crate::game::weapon::WeaponKind::Gnaw);
+        w.spawn_bullet(b);
+        rebuild_broadphase(&mut w);
+        let enemy_hp = w.ecs.get::<Enemy>(enemy).unwrap().hp;
+        let boss_hp = w.boss_hp().expect("boss alive").0;
+
+        // The schedule's order: bullets move, boss absorbs, enemies resolve.
+        w.begin_tick(DT, Vec2::ZERO, false);
+        w.ecs
+            .run_system_cached(crate::game::ecs::systems::projectiles::bullets_system)
+            .expect("bullets system");
+        w.ecs
+            .run_system_cached(boss_damage_system)
+            .expect("boss damage system");
+        w.ecs
+            .run_system_cached(combat::player_bullet_hits_system)
+            .expect("player bullet hits");
+        w.end_tick();
+
+        assert!(
+            w.boss_hp().expect("boss alive").0 < boss_hp,
+            "test setup: the dart must reach the boss"
+        );
+        assert_eq!(
+            w.ecs.get::<Enemy>(enemy).unwrap().hp,
+            enemy_hp,
+            "one dart was spent on the boss and the enemy behind it"
+        );
     }
 
     /// Bullet order must stay `SpawnId` order even when the archetype's row

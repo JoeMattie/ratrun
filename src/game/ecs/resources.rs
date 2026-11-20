@@ -71,6 +71,11 @@ pub struct SfxQueue(pub Vec<Sfx>);
 
 /// The legacy `elapsed`, `kills`, `score`, `pending_levelups`, `game_over`,
 /// `won` fields, gathered into one resource for the round-trip.
+///
+/// Campaign structure (see [`crate::game::campaign`]): a level is complete when
+/// its boss dies, which sets [`RunCounters::level_complete`]. Surviving
+/// `director::RUN_SECONDS` no longer ends anything — the clock only tops out the
+/// difficulty curve, and the boss fight runs past it.
 #[derive(Resource, Default)]
 pub struct RunCounters {
     pub elapsed: f32,
@@ -79,6 +84,37 @@ pub struct RunCounters {
     pub pending_levelups: u32,
     pub game_over: bool,
     pub won: bool,
+    /// The level's boss is dead ⇒ the level is complete.
+    ///
+    /// Raised by the boss framework when the living boss's death is reaped
+    /// (`loot::reap_dead` sees `EnemyKind::Boss`, or the boss system's own
+    /// level-complete hook), read by `loot::outcome_system` to set `won` on the
+    /// final level, and round-tripped to `World::level_complete`.
+    pub level_complete: bool,
+}
+
+/// Which campaign level is being simulated: 0 Sewer, 1 Kitchen, 2 Lab.
+///
+/// Inserted by `World::begin_tick` from `World::level_index`, so every system
+/// (the director's per-level difficulty scaling, the boss framework) can read
+/// it without touching the facade. The theme and the final-level flag are
+/// derived from it by [`crate::game::campaign::level_theme`] /
+/// [`crate::game::campaign::is_final_level`].
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct LevelIndex(pub usize);
+
+impl LevelIndex {
+    /// Is this the campaign's last level (its completion wins the run)?
+    #[inline]
+    pub fn is_final(self) -> bool {
+        crate::game::campaign::is_final_level(self.0)
+    }
+
+    /// How many levels of the campaign come after this one.
+    #[inline]
+    pub fn levels_remaining(self) -> usize {
+        crate::game::campaign::levels_remaining(self.0)
+    }
 }
 
 /// The legacy `shake` / `shake_ofs` fields.
@@ -228,6 +264,53 @@ impl NextEnemyId {
 /// `World::last_pickups`), read by the HUD telemetry.
 #[derive(Resource, Default)]
 pub struct LastPickups(pub Vec<PickupKind>);
+
+// ---- Boss hand-off -------------------------------------------------------
+
+/// "The boss is due": the spawn director's hand-off to the boss framework.
+///
+/// `director::raise_boss_due` raises it exactly once, at
+/// `director::BOSS_TIME`; the boss framework (P7) consumes it with
+/// [`BossDue::take`] and spawns the level's themed boss. It lives in the ECS
+/// world permanently (like `NukeTick`), **not** in the facade round-trip, so a
+/// boss system anywhere in the schedule reads the same flag.
+///
+/// The pre-boss warning is unchanged: the HUD derives it from
+/// `Director::boss_spawned`, which the director also sets at the boss time, so
+/// the 25 s countdown still runs from `BOSS_TIME - 25 s` to `BOSS_TIME`.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct BossDue {
+    /// The director has reached the boss time and wants a boss.
+    pub due: bool,
+    /// The boss framework has taken the signal (it has spawned, or is
+    /// spawning, the boss). A second `take` is a no-op.
+    pub claimed: bool,
+    /// Campaign level the boss belongs to: 0 Sewer (jaguar), 1 Kitchen (broom),
+    /// 2 Lab (mower) — see `crate::game::campaign::level_theme`.
+    pub level: usize,
+    /// Run clock when the signal was raised (`director::BOSS_TIME`).
+    pub at: f32,
+}
+
+impl BossDue {
+    /// Consume the signal: `true` on the first call after the director raised
+    /// it, then `false` forever (per level).
+    #[inline]
+    pub fn take(&mut self) -> bool {
+        if self.due && !self.claimed {
+            self.claimed = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Raised and not yet claimed.
+    #[inline]
+    pub fn is_pending(&self) -> bool {
+        self.due && !self.claimed
+    }
+}
 
 // ---- Round-trip helpers --------------------------------------------------
 

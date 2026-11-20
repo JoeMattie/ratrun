@@ -258,13 +258,27 @@ fn trace_hash(script_mode: Script, theme: Theme, seed: u64) -> u64 {
 /// into a wall face and stand there; the coarse direction is now a legal step
 /// chosen by block-cost gradient. Every path in the coarse zone changes, so all
 /// six traces move. Regenerated deliberately, in the change that fixed it.
+///
+/// **Regenerated for the content wave** (2026-11-20): the wave changed
+/// spawning pacing, wall-aware shots, traps, one-way doors, the three bosses,
+/// enemy targeting and the boss arenas, so every scripted trace moved. This
+/// list was regenerated once in the integration pass that closed the wave; the
+/// level generator's own follow-up regeneration supersedes it.
+///
+/// **Regenerated for the open-world generator** (2026-11-21, levelgen worker):
+/// the layout is no longer rooms hung off 1-2-cell corridors but a sprawl of
+/// great halls and medium rooms merged through 4-10-cell openings (about 52 %
+/// of the grid walkable, five times the old floor), so every scripted run walks
+/// a different level. Five of six traces moved; `Evade/Kitchen/29` did not, which
+/// is the one case whose short script never leaves the start area's old shape.
+/// Regenerated deliberately, in the change that altered the generator.
 const CASES: [(Script, Theme, u64, u64); 6] = [
-    (Script::Wander, Theme::Sewer, 11, 15713698686219086120),
-    (Script::Wander, Theme::Kitchen, 29, 7775861748229032194),
-    (Script::Wander, Theme::Lab, 1234, 6271973976159059642),
-    (Script::Evade, Theme::Sewer, 11, 4104282051027704250),
-    (Script::Evade, Theme::Kitchen, 29, 11841899079837900014),
-    (Script::Evade, Theme::Lab, 1234, 1909269440592464739),
+    (Script::Wander, Theme::Sewer, 11, 11071988357280468211),
+    (Script::Wander, Theme::Kitchen, 29, 4793531602214586762),
+    (Script::Wander, Theme::Lab, 1234, 6458543673689705465),
+    (Script::Evade, Theme::Sewer, 11, 8282690810494291152),
+    (Script::Evade, Theme::Kitchen, 29, 12758249072391838746),
+    (Script::Evade, Theme::Lab, 1234, 15798741948597978183),
 ];
 
 #[test]

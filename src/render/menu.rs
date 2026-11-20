@@ -6,12 +6,16 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::game::{
+    campaign,
     level::Theme,
     loadout::{Loadout, Upgrade},
     weapon::WeaponKind,
     world::World,
 };
 use crate::lore;
+use crate::render::campaign::{
+    campaign_pips_width, draw_campaign_pips, CampaignLevel, CampaignProgressView,
+};
 use crate::render::hud::{weapon_glyph, HEAL_MINT, TRAIL_GOLD, WARN_AMBER};
 use crate::render::palette::{self, mix, to_color, COAT, EDGE, MUTED, PLATE, TAIL, TRACK};
 use crate::scores::ScoreTable;
@@ -20,8 +24,23 @@ use crate::scores::ScoreTable;
 pub enum Target {
     Start,
     Quit,
-    PreviousMap,
-    NextMap,
+    /// Previous / next *campaign sector* (the title's sector row and the
+    /// level-select screen; the free map selector is gone).
+    PreviousSector,
+    NextSector,
+    /// The title's sector row: opens the sector-select screen.
+    Sectors,
+    /// A sector card on the sector-select screen (`0..3`).
+    SelectSector(usize),
+    /// Start the sector selected on the sector-select screen.
+    StartSector,
+    /// Proceed past a non-final level-complete card.
+    Continue,
+    /// Keep-three manifest: toggle the card at this index.
+    KeepItem(usize),
+    KeepScrollUp,
+    KeepScrollDown,
+    KeepConfirm,
     Story,
     Back,
     Begin,
@@ -36,13 +55,27 @@ pub enum Target {
     Minimap,
 }
 
+/// How many interactive rectangles one screen can register. The campaign
+/// screens are the widest: the keep-three manifest registers one row per owned
+/// upgrade (the art's own `HitList` holds 32) plus its confirm button.
+const HIT_CAPACITY: usize = 40;
+
 /// Only the currently displayed layer is interactive. More specific targets
 /// registered last (the map's back arrow) take precedence over their parent.
-#[derive(Default)]
 pub struct HitMap {
-    targets: [Option<(Rect, Target)>; 8],
+    targets: [Option<(Rect, Target)>; HIT_CAPACITY],
     len: usize,
     pub hovered: Option<Target>,
+}
+
+impl Default for HitMap {
+    fn default() -> Self {
+        HitMap {
+            targets: [None; HIT_CAPACITY],
+            len: 0,
+            hovered: None,
+        }
+    }
 }
 
 impl HitMap {
@@ -50,7 +83,7 @@ impl HitMap {
         self.len = 0;
     }
     pub fn add(&mut self, rect: Rect, target: Target) {
-        if !rect.is_empty() {
+        if !rect.is_empty() && self.len < self.targets.len() {
             self.targets[self.len] = Some((rect, target));
             self.len += 1;
         }
@@ -135,6 +168,17 @@ fn panel(f: &mut Frame, r: Rect, caption: &str, edge: Color) -> Rect {
 }
 
 // Title screens have no World. These desaturated inks match the three facility materials.
+/// The title's sector-row text: the campaign level number, its short name and
+/// a `×` when the level has not been unlocked yet.
+fn sector_name(sector: usize, unlocked: bool) -> String {
+    let level = crate::render::campaign::CampaignLevel::from_index(sector);
+    if unlocked {
+        format!("{:02} {}", level.number(), level.short_name())
+    } else {
+        format!("{:02} {} ×", level.number(), level.short_name())
+    }
+}
+
 fn material(theme: Theme) -> palette::Rgb {
     match theme {
         Theme::Sewer => (144, 184, 173),
@@ -197,11 +241,20 @@ fn masthead(f: &mut Frame, r: Rect, large: bool, clock: usize) {
     }
 }
 
+/// The title screen: wordmark, specimen art, then `START RUN / SECTOR / QUIT`.
+///
+/// The old free map selector is gone; row 1 is the campaign's sector row. It
+/// shows the selected sector and whether it is open, `←`/`→` move the
+/// selection, and Enter opens the art's sector-select screen
+/// ([`crate::render::campaign::draw_level_select`]).
+#[allow(clippy::too_many_arguments)]
 pub fn draw_title(
     f: &mut Frame,
     area: Rect,
     theme: Theme,
     choice: usize,
+    sector: usize,
+    sector_unlocked: bool,
     scores: &ScoreTable,
     rat: &[String],
     hits: &mut HitMap,
@@ -258,10 +311,14 @@ pub fn draw_title(
     let mut y = rat_h + art_gap + logo_h;
     center(f, body, y, label(lore::TITLE_BLURB, MUTED));
     y += 1 + gap;
-    let menu = centered_rect(26, body.height, body);
-    let map_label = "Map     ";
-    let map = format!("{map_label}‹ {} ›", theme.name());
-    for (i, text) in ["START RUN", map.as_str(), "QUIT"].into_iter().enumerate() {
+    let menu = centered_rect(30, body.height, body);
+    let sector_label = "Sector   ";
+    let sector_text = sector_name(sector, sector_unlocked);
+    let sector_row = format!("{sector_label}‹ {sector_text} ›");
+    for (i, text) in ["START RUN", sector_row.as_str(), "QUIT"]
+        .into_iter()
+        .enumerate()
+    {
         let selected = i == choice;
         let style = if selected {
             heavy(PLATE).bg(to_color(mix(
@@ -273,13 +330,21 @@ pub fn draw_title(
             ink(COAT)
         };
         let rr = band(menu, y + i as u16, 1);
-        hits.add(rr, [Target::Start, Target::NextMap, Target::Quit][i]);
+        hits.add(rr, [Target::Start, Target::Sectors, Target::Quit][i]);
         let prefix = if selected { " ▸  " } else { "    " };
         if i == 1 {
+            // The arrows carry their own targets, so the pointer can step the
+            // sector without opening the select screen.
             let arrow_x =
-                rr.x.saturating_add((prefix.chars().count() + map_label.len()) as u16);
+                rr.x.saturating_add((prefix.chars().count() + sector_label.len()) as u16);
             if arrow_x < rr.right() {
-                hits.add(Rect::new(arrow_x, rr.y, 1, rr.height), Target::PreviousMap);
+                hits.add(Rect::new(arrow_x, rr.y, 1, rr.height), Target::PreviousSector);
+            }
+            let right_arrow = arrow_x
+                .saturating_add(sector_text.chars().count() as u16)
+                .saturating_add(3);
+            if right_arrow < rr.right() {
+                hits.add(Rect::new(right_arrow, rr.y, 1, rr.height), Target::NextSector);
             }
         }
         f.render_widget(
@@ -557,8 +622,12 @@ pub fn draw_end(
     lore_line: &str,
     scores: &ScoreTable,
     hits: &mut HitMap,
+    sector: u8,
+    practice: bool,
 ) {
-    let (status, accent) = if won {
+    let (status, accent) = if won && practice {
+        ("SECTOR CLEARED", Color::Rgb(169, 210, 186))
+    } else if won {
         ("YOU SURVIVED!", Color::Rgb(169, 210, 186))
     } else {
         ("YOU DIED", TAIL)
@@ -566,7 +635,10 @@ pub fn draw_end(
     let r = panel(
         f,
         centered_rect(61, 21, area),
-        " INCIDENT REPORT   /   R-47 ",
+        &format!(
+            " INCIDENT REPORT   /   R-47   /   {} ",
+            sector_tag(sector, practice)
+        ),
         accent,
     );
     let inner = r.inner(Margin::new(2, 0));
@@ -599,7 +671,7 @@ pub fn draw_end(
         7,
         Line::styled(
             format!(
-                "{:02}:{:02} elapsed   ·   Lv {level}   ·   {kills} kills",
+                "{:02}:{:02} total   ·   Lv {level}   ·   {kills} kills",
                 seconds / 60,
                 seconds % 60
             ),
@@ -669,6 +741,20 @@ pub struct RunSummary {
     pub damage_mult: f32,
     pub fire_rate_mult: f32,
     pub armor: f32,
+    /// The campaign level the run reached (`1..=3`).
+    pub sector: u8,
+    /// A single-sector practice run (labelled, and never a campaign win).
+    pub practice: bool,
+}
+
+/// `SECTOR 2/3`, plus a `PRACTICE` marker for single-sector runs.
+fn sector_tag(sector: u8, practice: bool) -> String {
+    let sector = sector.clamp(1, campaign::LEVEL_COUNT as u8);
+    if practice {
+        format!("SECTOR {sector}/{} PRACTICE", campaign::LEVEL_COUNT)
+    } else {
+        format!("SECTOR {sector}/{}", campaign::LEVEL_COUNT)
+    }
 }
 
 fn weapon_pips(level: u8, max: u8) -> String {
@@ -844,23 +930,48 @@ pub fn draw_pause_with_run(
     }
 
     let accent = palette::marking(world.level.palette.wall_edge, world.level.palette.accent);
+    let card = centered_rect(58, 18, area);
     let r = panel(
         f,
-        centered_rect(58, 18, area),
+        card,
         &format!(" RUN CONTROL   /   {} ", world.level.theme.name().to_uppercase()),
         accent,
     );
     let inner = r.inner(Margin::new(2, 0));
 
+    // Campaign progress pips on the panel's top-right border (the art file's
+    // "HUD / Pause" placement). Skipped when the caption would collide.
+    let pips_w = campaign_pips_width(true);
+    if card.width > pips_w + 34 {
+        let pips = CampaignProgressView {
+            current: CampaignLevel::from_index(world.level_index),
+            cleared_count: world.level_index.min(campaign::LEVEL_COUNT) as u8,
+            bg: None,
+        };
+        draw_campaign_pips(
+            f,
+            Rect::new(card.right().saturating_sub(pips_w + 1), card.y, pips_w, 1),
+            &pips,
+        );
+    }
+
     center(f, r, 1, Span::styled("━━━  ▌▌  PAUSED  ▌▌  ━━━", heavy(TAIL)));
 
-    let rem = world.time_left().max(0.0) as u32;
+    // The clock counts down to the boss and stops there; once the boss fight is
+    // on, show how long it has been running instead of a dead 00:00.
+    let clock_text = if world.boss_time_reached() {
+        let fought = (world.elapsed - crate::game::director::BOSS_TIME).max(0.0) as u32;
+        format!("BOSS FIGHT +{:02}:{:02}", fought / 60, fought % 60)
+    } else {
+        let rem = world.time_left().max(0.0) as u32;
+        format!("{:02}:{:02} to boss", rem / 60, rem % 60)
+    };
     center(
         f,
         r,
         2,
         Line::from(vec![
-            Span::styled(format!("{:02}:{:02} left", rem / 60, rem % 60), heavy(COAT)),
+            Span::styled(clock_text, heavy(COAT)),
             label("   ·   Lv ", MUTED),
             Span::styled(world.player.level.to_string(), heavy(COAT)),
             label("   ·   ", MUTED),
@@ -981,13 +1092,17 @@ pub fn draw_end_summary(
             lore_line,
             scores,
             hits,
+            summary.sector,
+            summary.practice,
         );
         return;
     }
 
     let compact_v = area.height < 27;
     let panel_h: u16 = if compact_v { 22 } else { 27 };
-    let (status, accent) = if summary.won {
+    let (status, accent) = if summary.won && summary.practice {
+        ("SECTOR CLEARED", Color::Rgb(169, 210, 186))
+    } else if summary.won {
         ("YOU SURVIVED!", Color::Rgb(169, 210, 186))
     } else {
         ("YOU DIED", TAIL)
@@ -997,8 +1112,9 @@ pub fn draw_end_summary(
         f,
         centered_rect(68, panel_h, area),
         &format!(
-            " INCIDENT REPORT   /   R-47   /   {} ",
-            summary.theme.name().to_uppercase()
+            " INCIDENT REPORT   /   R-47   /   {}   /   {} ",
+            summary.theme.name().to_uppercase(),
+            sector_tag(summary.sector, summary.practice)
         ),
         accent,
     );
@@ -1061,6 +1177,7 @@ pub fn draw_end_summary(
     }
 
     let score_rows: [(&str, String, Style); 5] = [
+        // `combat_score` is the cumulative campaign score.
         ("Combat", format!("{}", summary.combat_score), ink(COAT)),
         ("Time bonus", format!("+{}", summary.bonus_time), ink(COAT)),
         ("Level bonus", format!("+{}", summary.bonus_level), ink(COAT)),
@@ -1100,9 +1217,20 @@ pub fn draw_end_summary(
     } else {
         0
     };
-    let metric_rows: [(&str, String); 5] = [
-        ("Elapsed", format!("{:02}:{:02}", secs / 60, secs % 60)),
-        ("Kills", format!("{}  ({}/m)", summary.kills, kpm)),
+    let metric_rows: [(&str, String); 6] = [
+        // Cumulative across the campaign: the totals the run banked, not just
+        // this sector's clock.
+        ("Total time", format!("{:02}:{:02}", secs / 60, secs % 60)),
+        ("Total kills", format!("{}  ({}/m)", summary.kills, kpm)),
+        (
+            "Sector",
+            format!(
+                "{} / {}{}",
+                summary.sector.clamp(1, campaign::LEVEL_COUNT as u8),
+                campaign::LEVEL_COUNT,
+                if summary.practice { " practice" } else { "" }
+            ),
+        ),
         ("Level", format!("Lv {}", summary.level)),
         ("Dmg Taken", format!("{:.0}", summary.damage_taken)),
         (
@@ -1286,6 +1414,33 @@ mod tests {
         assert!(ct.contains("Esc/P resume"));
     }
 
+    /// The pause rail counts down to the boss and, once the boss fight is on,
+    /// counts the fight up instead of sitting at `00:00 left`.
+    #[test]
+    fn pause_shows_a_boss_fight_clock_instead_of_a_dead_countdown() {
+        let mut w = World::new(Theme::Kitchen, 7);
+        let mut hits = HitMap::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        w.elapsed = 65.0; // 255 s boss time → 03:10 to go
+        terminal
+            .draw(|f| draw_pause_with_run(f, f.area(), &w, true, &mut hits))
+            .unwrap();
+        let text = screen_text(&terminal);
+        assert!(text.contains("03:10 to boss"), "no build-up clock: {text}");
+
+        w.elapsed = crate::game::director::BOSS_TIME + 42.0;
+        terminal
+            .draw(|f| draw_pause_with_run(f, f.area(), &w, true, &mut hits))
+            .unwrap();
+        let text = screen_text(&terminal);
+        assert!(
+            text.contains("BOSS FIGHT +00:42"),
+            "no boss-fight clock: {text}"
+        );
+        assert!(!text.contains("00:00 left"), "a dead clock is still shown");
+    }
+
     #[test]
     fn end_summary_renders_breakdown_boss_badge_and_compact_fallback() {
         let summary = RunSummary {
@@ -1307,6 +1462,8 @@ mod tests {
             damage_mult: 1.45,
             fire_rate_mult: 1.24,
             armor: 2.0,
+            sector: 3,
+            practice: false,
         };
         let mut scores = ScoreTable::default();
         scores.insert(ScoreEntry {
@@ -1315,6 +1472,8 @@ mod tests {
             level: 9,
             map: "Lab".into(),
             won: true,
+            campaign_level: 3,
+            campaign_won: true,
         });
 
         let mut hits = HitMap::default();
@@ -1325,11 +1484,25 @@ mod tests {
         .unwrap();
         let bt = screen_text(&big);
         assert!(bt.contains("YOU SURVIVED!"));
+        assert!(bt.contains("SECTOR 3/3"), "the header names the sector reached");
         assert!(bt.contains("APEX NEUTRALIZED"));
         assert!(bt.contains("SCORE BREAKDOWN"));
         assert!(bt.contains("COMBAT METRICS"));
         assert!(bt.contains("NEW HIGH SCORE"));
         assert!(bt.contains("▸Gnaw★"));
+
+        // A practice clear is labelled, and its status line says so.
+        let mut practice = summary.clone();
+        practice.practice = true;
+        practice.sector = 2;
+        hits.clear();
+        big.draw(|f| {
+            draw_end_summary(f, f.area(), &practice, false, "Cleared.", &scores, &mut hits)
+        })
+        .unwrap();
+        let pt = screen_text(&big);
+        assert!(pt.contains("SECTOR CLEARED"), "practice clear status missing");
+        assert!(pt.contains("SECTOR 2/3 PRACTICE"), "practice label missing");
 
         for (tw, th) in [(0, 0), (1, 1), (57, 20), (80, 16)] {
             hits.clear();

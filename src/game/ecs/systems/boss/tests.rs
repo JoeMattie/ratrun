@@ -1,0 +1,1169 @@
+//! Narrow tests for the boss framework (P7).
+//!
+//! Every test drives one system through `begin_tick` → `run_system_cached` →
+//! `end_tick`, the same harness the other `systems/*.rs` files use. The art
+//! files are the gameplay spec, so the numbers asserted here are the art's
+//! constants, not copies.
+
+use super::*;
+use crate::game::art_traps::MousetrapView;
+use crate::game::collision::TileMap;
+use crate::game::ecs::systems::projectiles;
+use crate::game::level::{MAP_COLS, MAP_ROWS, Theme};
+use crate::game::world::World;
+
+const DT: f32 = 1.0 / 60.0;
+
+fn boss_of(w: &mut World) -> Option<Boss> {
+    let mut query = w.ecs.query::<&Boss>();
+    query.iter(&w.ecs).next().cloned()
+}
+
+fn spawn_boss(w: &mut World) {
+    w.ecs.resource_mut::<BossDue>().due = true;
+    w.begin_tick(DT, Vec2::ZERO, false);
+    w.ecs
+        .run_system_cached(boss_spawn_system)
+        .expect("boss spawn system must run");
+    w.end_tick();
+}
+
+fn update_boss(w: &mut World, dt: f32) {
+    w.begin_tick(dt, Vec2::ZERO, false);
+    w.ecs
+        .run_system_cached(boss_update_system)
+        .expect("boss update system must run");
+    w.end_tick();
+}
+
+// ---- spawn ---------------------------------------------------------------
+
+#[test]
+fn boss_spawns_in_the_boss_room_when_due() {
+    let mut w = World::new(Theme::Sewer, 7);
+    let arena = w.level.boss_room().expect("generated level has a boss room").rect;
+    spawn_boss(&mut w);
+
+    let boss = boss_of(&mut w).expect("BossDue spawned the boss");
+    assert_eq!(boss.kind, BossKind::Cat);
+    assert!(arena.contains_world(boss.pos), "boss must spawn in its arena");
+    assert!(boss.hp > 0.0);
+    assert!(boss.max_hp > 0.0);
+    assert_eq!(boss.phase, 1);
+    // The boss's private rng stream is seeded from the run seed.
+    assert!(!w.ecs.resource::<BossFight>().level_complete);
+}
+
+#[test]
+fn boss_does_not_spawn_without_the_due_signal() {
+    let mut w = World::new(Theme::Sewer, 8);
+    w.begin_tick(DT, Vec2::ZERO, false);
+    w.ecs
+        .run_system_cached(boss_spawn_system)
+        .expect("boss spawn system must run");
+    w.end_tick();
+    assert!(boss_of(&mut w).is_none());
+}
+
+#[test]
+fn boss_kind_follows_the_campaign_level() {
+    assert_eq!(BossKind::for_level(0), BossKind::Cat);
+    assert_eq!(BossKind::for_level(1), BossKind::Broom);
+    assert_eq!(BossKind::for_level(2), BossKind::Mower);
+    assert_eq!(BossKind::for_theme(Theme::Sewer), BossKind::Cat);
+    assert_eq!(BossKind::for_theme(Theme::Kitchen), BossKind::Broom);
+    assert_eq!(BossKind::for_theme(Theme::Lab), BossKind::Mower);
+}
+
+// ---- hit shapes ----------------------------------------------------------
+
+#[test]
+fn cat_hit_shapes_are_the_art_body_circles() {
+    let arena = TileRect::new(0, 0, 400, 400);
+    let boss = Boss::new(
+        BossKind::Cat,
+        Vec2::new(200.0, 200.0),
+        art_boss_cat::BOSS_BASE_HP,
+        arena,
+        Vec2::new(200.0, 200.0),
+        false,
+    );
+    let shapes = boss.hit_shapes();
+    assert_eq!(shapes.iter().count(), 3);
+    // A bullet crossing the body center must hit; a bullet 60 px away must not.
+    assert!(shapes.segment_hits_grounded(
+        boss.pos - Vec2::new(2.0, 0.0),
+        boss.pos + Vec2::new(2.0, 0.0),
+        1.0
+    ));
+    assert!(!shapes.segment_hits_grounded(
+        boss.pos + Vec2::new(60.0, 0.0),
+        boss.pos + Vec2::new(64.0, 0.0),
+        1.0
+    ));
+}
+
+#[test]
+fn lifted_cat_pounce_is_not_hit_by_ground_weapons() {
+    let arena = TileRect::new(0, 0, 400, 400);
+    let mut boss = Boss::new(
+        BossKind::Cat,
+        Vec2::new(200.0, 200.0),
+        art_boss_cat::BOSS_BASE_HP,
+        arena,
+        Vec2::new(200.0, 200.0),
+        false,
+    );
+    boss.set_state(BossState::Cat(BossCatState::Pounce), 0.6);
+    boss.elapsed = 0.3;
+    // The cat's hit circles are all grounded in the shared shape set; the
+    // airborne window is carried by `Boss::is_airborne` so the contact/damage
+    // systems can skip it.
+    assert!(boss.is_airborne());
+}
+
+// ---- hazards -------------------------------------------------------------
+
+#[test]
+fn hazard_warns_then_activates_then_expires() {
+    let mut hazard = BossHazard::new(
+        HazardShape::Circle {
+            center: Vec2::ZERO,
+            radius: 10.0,
+        },
+        1.0,
+        0.5,
+        12.0,
+    );
+    assert!(!hazard.is_active());
+    assert!(hazard.shape.contains(Vec2::new(5.0, 0.0), 0.0));
+    assert!(!hazard.shape.contains(Vec2::new(20.0, 0.0), 0.0));
+    hazard.elapsed = 1.0;
+    assert!(hazard.is_active());
+    hazard.elapsed = 1.5;
+    assert!(!hazard.is_active());
+    assert!(hazard.is_expired());
+}
+
+#[test]
+fn hazard_shapes_cover_their_footprints() {
+    let ring = HazardShape::Annulus {
+        center: Vec2::ZERO,
+        inner: 10.0,
+        outer: 20.0,
+    };
+    assert!(!ring.contains(Vec2::ZERO, 0.0));
+    assert!(ring.contains(Vec2::new(15.0, 0.0), 0.0));
+
+    let arc = HazardShape::Arc {
+        center: Vec2::ZERO,
+        inner: 0.0,
+        outer: 20.0,
+        facing: Vec2::new(1.0, 0.0),
+        half_angle: 0.5,
+    };
+    assert!(arc.contains(Vec2::new(10.0, 0.0), 0.0));
+    assert!(!arc.contains(Vec2::new(-10.0, 0.0), 0.0));
+
+    let corridor = HazardShape::Corridor {
+        from: Vec2::new(-10.0, 0.0),
+        to: Vec2::new(10.0, 0.0),
+        half_width: 3.0,
+    };
+    assert!(corridor.contains(Vec2::new(0.0, 2.0), 0.0));
+    assert!(!corridor.contains(Vec2::new(0.0, 5.0), 0.0));
+}
+
+// ---- phases --------------------------------------------------------------
+
+#[test]
+fn phase_thresholds_follow_the_art() {
+    assert_eq!(BossKind::Cat.phase_for(0.9), 1);
+    assert_eq!(BossKind::Cat.phase_for(0.4), 2);
+    assert_eq!(BossKind::Broom.phase_for(0.9), 1);
+    assert_eq!(BossKind::Broom.phase_for(0.4), 2);
+    assert_eq!(BossKind::Mower.phase_for(0.9), 1);
+    assert_eq!(BossKind::Mower.phase_for(0.5), 2);
+    assert_eq!(BossKind::Mower.phase_for(0.2), 3);
+}
+
+// ---- death ---------------------------------------------------------------
+
+#[test]
+fn boss_death_plays_its_beat_then_completes_the_level_once() {
+    let mut w = World::new(Theme::Sewer, 9);
+    spawn_boss(&mut w);
+    {
+        let mut query = w.ecs.query::<&mut Boss>();
+        for mut boss in query.iter_mut(&mut w.ecs) {
+            boss.hp = 0.0;
+        }
+    }
+    update_boss(&mut w, DT);
+    // The lethal tick only *starts* the art's death state: the level is not
+    // complete yet, so the App cannot cut the death animation short.
+    let boss = boss_of(&mut w).expect("death state plays before despawn");
+    assert!(boss.dead);
+    assert!(boss.death_announced);
+    assert_eq!(boss.state, BossKind::Cat.death_state());
+    assert!(
+        !w.level_complete,
+        "the level completes after the death state, not on the lethal tick"
+    );
+    assert!(!w.ecs.resource::<BossFight>().level_complete);
+
+    // Every tick of the beat keeps the boss (and never re-raises anything).
+    let ticks = (art_boss_cat::DEATH_DURATION / DT).ceil() as usize + 2;
+    let mut completions = 0usize;
+    let mut was_complete = false;
+    for _ in 0..ticks {
+        update_boss(&mut w, DT);
+        if w.level_complete && !was_complete {
+            completions += 1;
+            was_complete = true;
+        }
+    }
+    assert_eq!(completions, 1, "the signal must rise exactly once");
+    assert!(w.ecs.resource::<BossFight>().level_complete);
+    assert!(
+        boss_of(&mut w).is_none(),
+        "the death state despawns the boss when it ends"
+    );
+
+    // And it stays risen.
+    update_boss(&mut w, DT);
+    assert!(w.level_complete);
+    assert_eq!(completions, 1);
+}
+
+// ---- cues ----------------------------------------------------------------
+
+#[test]
+fn every_cue_maps_to_its_sound_and_at_least_one_particle() {
+    use crate::game::particle::Particles;
+
+    // The cue channel is driven directly (a controller only queues the enum),
+    // so the mapping is tested on the same function the system drains with.
+    let all = [
+        BossCue::CatCrouch,
+        BossCue::CatPounce,
+        BossCue::CatLand,
+        BossCue::CatSkid,
+        BossCue::CatSwipe,
+        BossCue::CatRoar,
+        BossCue::CatFangs,
+        BossCue::CatHurt,
+        BossCue::CatDeath,
+        BossCue::BroomStomp,
+        BossCue::BroomSweep,
+        BossCue::BroomDustpan,
+        BossCue::BroomSlam,
+        BossCue::BroomHurtHop,
+        BossCue::BroomHop,
+        BossCue::BroomDefeat,
+        BossCue::MowerScan,
+        BossCue::MowerLockOn,
+        BossCue::MowerWindup,
+        BossCue::MowerCharge,
+        BossCue::MowerWallImpact,
+        BossCue::MowerFlip,
+        BossCue::MowerOverheat,
+        BossCue::MowerDock,
+        BossCue::MowerDeath,
+    ];
+    for cue in all {
+        // A real particle buffer: `Particles::default()` has a zero cap, so
+        // every `budget_count` would (correctly) return nothing.
+        let mut ps = Particles::new(crate::game::ecs::constants::PARTICLE_CAP);
+        let mut rng = StdRng::seed_from_u64(7);
+        let mut sfx = SfxQueue::default();
+        let mut boss = Boss::new(
+            BossKind::Cat,
+            Vec2::new(300.0, 300.0),
+            1000.0,
+            TileRect::new(0, 0, 64, 64),
+            Vec2::new(280.0, 300.0),
+            false,
+        );
+        boss.target = Vec2::new(320.0, 300.0);
+        boss.facing = Vec2::new(1.0, 0.0);
+        let before = ps.len();
+        emit_cues(&[cue], &boss, (120, 20, 30), &mut ps, &mut rng, &mut sfx);
+        assert_eq!(sfx.0, vec![cue.sfx()], "{cue:?} played the wrong sound");
+        assert!(ps.len() > before, "{cue:?} emitted no particles");
+    }
+}
+
+// ---- push-only hazards ---------------------------------------------------
+
+#[test]
+fn a_zero_damage_hazard_pushes_without_hurting() {
+    let mut w = World::new(Theme::Sewer, 22);
+    let mut boss = Boss::new(
+        BossKind::Cat,
+        Vec2::new(300.0, 300.0),
+        1000.0,
+        TileRect::new(0, 0, 64, 64),
+        Vec2::new(280.0, 300.0),
+        false,
+    );
+    boss.push_hazard(
+        BossHazard::new(
+            HazardShape::Annulus {
+                center: Vec2::new(300.0, 300.0),
+                inner: 26.0,
+                outer: 44.0,
+            },
+            0.0,
+            0.5,
+            0.0,
+        )
+        .with_knockback(85.0),
+    );
+    w.ecs.spawn((boss, SpawnId(0)));
+    w.player.pos = Vec2::new(300.0 + 35.0, 300.0);
+    let hp = w.player.hp;
+    let start = w.player.pos;
+    for _ in 0..6 {
+        update_boss(&mut w, DT);
+    }
+    assert!((w.player.hp - hp).abs() < 1e-6, "a push-only ring dealt damage");
+    assert!(
+        w.player.pos.dist(start) > 2.0,
+        "the ring must shove the rat outward"
+    );
+    assert!(w.player.iframes <= 0.0, "a shove must not spend i-frames");
+}
+
+// ---- grounded shapes -----------------------------------------------------
+
+#[test]
+fn the_lifted_foot_neither_contacts_nor_is_targeted() {
+    let arena = TileRect::new(0, 0, 200, 200);
+    let mut boss = Boss::new(
+        BossKind::Broom,
+        Vec2::new(1600.0, 1280.0),
+        1600.0,
+        arena,
+        Vec2::new(1600.0, 1280.0),
+        false,
+    );
+    boss.facing = Vec2::new(1.0, 0.0);
+    boss.set_state(BossState::Broom(BroomBossState::StompWalk { left_foot: true }), 1.15);
+    boss.elapsed = 0.2 * 1.15;
+    let feet = art_boss_broom::foot_hitboxes(&boss.broom_view());
+    let lifted = feet.iter().find(|f| !f.grounded).expect("one slipper is aloft");
+    let planted = feet.iter().find(|f| f.grounded).expect("one slipper is planted");
+    // Auto-aim never targets the lifted foot.
+    let targets: Vec<Vec2> = boss.target_points().iter().collect();
+    assert!(
+        targets.iter().all(|p| p.dist(lifted.pos) > 1e-3),
+        "a lifted foot attracted auto-aim"
+    );
+    assert!(
+        targets.iter().any(|p| p.dist(planted.pos) < 1e-3),
+        "the planted foot must stay targetable"
+    );
+    // Body contact goes through grounded shapes only.
+    let shapes = boss.hit_shapes();
+    assert!(!shapes.circle_hits_grounded(lifted.pos, 1.0));
+    assert!(shapes.circle_hits_grounded(planted.pos, 1.0));
+}
+
+// ---- movement ------------------------------------------------------------
+
+#[test]
+fn boss_never_ends_a_tick_inside_a_wall() {
+    let mut w = World::new(Theme::Sewer, 10);
+    spawn_boss(&mut w);
+    let radius = BossKind::Cat.body_radius();
+    for _ in 0..120 {
+        update_boss(&mut w, DT);
+        let boss = boss_of(&mut w).expect("boss alive");
+        assert!(
+            w.level
+                .tiles
+                .circle_clear(boss.pos, radius, SizeClass::Large),
+            "large body left the passable cells at {:?}",
+            boss.pos
+        );
+    }
+}
+
+// ---- determinism ---------------------------------------------------------
+
+#[test]
+fn twin_runs_with_a_boss_match() {
+    let run = |seed: u64| {
+        let mut w = World::new(Theme::Kitchen, seed);
+        spawn_boss(&mut w);
+        for _ in 0..120 {
+            update_boss(&mut w, DT);
+        }
+        let boss = boss_of(&mut w).expect("boss alive");
+        (boss.pos, boss.hp, boss.state, boss.phase, w.level_complete)
+    };
+    let a = run(4242);
+    let b = run(4242);
+    assert_eq!(a.0, b.0);
+    assert_eq!(a.1, b.1);
+    assert_eq!(a.2, b.2);
+    assert_eq!(a.3, b.3);
+    assert_eq!(a.4, b.4);
+}
+
+// ---- the real schedule ----------------------------------------------------
+
+#[test]
+fn real_schedule_spawns_the_boss_at_boss_time() {
+    let mut w = World::new(Theme::Sewer, 12);
+    // The director raises `BossDue` when the run clock reaches `BOSS_TIME`;
+    // jump the clock and let the real tick schedule run the hand-off.
+    w.elapsed = crate::game::director::BOSS_TIME;
+    w.update(DT, Vec2::ZERO, false);
+
+    assert!(w.boss_time_reached());
+    let boss = boss_of(&mut w).expect("the real schedule spawned the boss");
+    assert_eq!(boss.kind, BossKind::Cat);
+    let (hp, max_hp) = w.boss_hp().expect("HUD accessor reports the boss");
+    assert!((hp - boss.hp).abs() < 1e-3);
+    assert!((max_hp - boss.max_hp).abs() < 1e-3);
+    assert!(w.boss_offset().is_some());
+    assert!(w.boss_marker().is_some());
+
+    // Keep the fight running for a second of real ticks: hazards, contact and
+    // the controller must all resolve without panicking.
+    for _ in 0..60 {
+        w.update(DT, Vec2::ZERO, false);
+    }
+    assert!(boss_of(&mut w).is_some());
+}
+
+// ---- the mower's last gasp -----------------------------------------------
+
+#[test]
+fn the_mower_death_blast_lands_inside_the_art_radius() {
+    use crate::game::level::Theme as BossTheme;
+
+    let mut w = World::new(BossTheme::Lab, 23);
+    w.level_index = 2;
+    w.ecs.resource_mut::<BossDue>().due = true;
+    w.begin_tick(DT, Vec2::ZERO, false);
+    w.ecs
+        .run_system_cached(boss_spawn_system)
+        .expect("spawn");
+    w.end_tick();
+    let boss = boss_of(&mut w).expect("the mower spawned");
+    // The blast is the art's `18` inside `DEATH_BLAST_RADIUS` (`28 px`), and
+    // only fires once the death state has had its `0.42` of telegraph.
+    // Stand the rat so the blast covers it after the telegraph.
+    w.player.pos = boss.pos + Vec2::new(6.0, 0.0);
+    {
+        let mut query = w.ecs.query::<&mut Boss>();
+        for mut b in query.iter_mut(&mut w.ecs) {
+            b.hp = 0.0;
+        }
+    }
+    // Let the meltdown reach the detonation window.
+    let detonate_at = (BossKind::Mower.death_duration() * 0.42 / DT).ceil() as usize;
+    let mut drops = Vec::new();
+    for i in 0..detonate_at + 60 {
+        let hp = w.player.hp;
+        // Re-park the rat inside the blast every tick: the knockback shoves it.
+        if i + 6 > detonate_at {
+            w.player.pos = boss.pos + Vec2::new(6.0, 0.0);
+            w.player.iframes = 0.0;
+        }
+        update_boss(&mut w, DT);
+        if w.player.hp < hp - 1e-3 {
+            drops.push(hp - w.player.hp);
+        }
+    }
+    assert!(
+        drops.iter().any(|d| (d - 18.0).abs() < 1e-3),
+        "the death blast must deal the art's 18 damage: {drops:?}"
+    );
+}
+
+// ---- the landing ring is visible with the cat off screen -----------------
+
+#[test]
+fn the_landing_ring_is_drawn_with_the_cat_off_screen() {
+    use crate::game::level::{Level, Theme as BossTheme};
+    use crate::game::world::World as GameWorld;
+    use crate::render::framebuffer::PixelBuffer;
+
+    const VIEW: (usize, usize) = (160, 168);
+
+    let render = |with_boss: bool| {
+        let mut w = GameWorld::new(BossTheme::Sewer, 31);
+        w.level = Level::empty(BossTheme::Sewer);
+        w.player.pos = Vec2::new(1600.0, 1200.0);
+        let mut pb = PixelBuffer::new(VIEW.0, VIEW.1);
+        if !with_boss {
+            w.draw(&mut pb);
+            return (pb, w.cam);
+        }
+        // Draw once to learn the camera, then park the cat just off screen with
+        // its landing ring (a 96 px leap away) inside the view.
+        w.draw(&mut pb);
+        let cam = w.cam;
+        let pos = Vec2::new(cam.x - 100.0, cam.y + 84.0);
+        let target = pos + Vec2::new(art_boss_cat::POUNCE_MAX_DIST, 0.0);
+        let mut boss = Boss::new(
+            BossKind::Cat,
+            pos,
+            art_boss_cat::BOSS_BASE_HP,
+            TileRect::new(0, 0, w.level.tiles.cols(), w.level.tiles.rows()),
+            pos,
+            false,
+        );
+        boss.facing = Vec2::new(1.0, 0.0);
+        boss.set_state(BossState::Cat(BossCatState::Crouch), art_boss_cat::CROUCH_DURATION_P1);
+        boss.elapsed = 0.4 * boss.duration;
+        boss.target = target;
+        w.ecs.spawn((boss, SpawnId(0)));
+        let mut pb = PixelBuffer::new(VIEW.0, VIEW.1);
+        w.draw(&mut pb);
+        (pb, w.cam)
+    };
+
+    let (blank, _) = render(false);
+    let (with_ring, cam) = render(true);
+    // The cat body itself is outside the view (the 85 px margin test fails).
+    let cat_screen = Vec2::new(cam.x - 100.0, cam.y + 84.0) - cam;
+    assert!(
+        cat_screen.x + BossKind::Cat.cull_margin() < 0.0,
+        "test setup: the cat body must be off screen ({cat_screen:?})"
+    );
+    // ...yet the ring at the target is drawn.
+    let target = cat_screen + Vec2::new(art_boss_cat::POUNCE_MAX_DIST, 0.0);
+    let (tx, ty) = (target.x as i32, target.y as i32);
+    let mut diff = 0;
+    for y in (ty - 24).max(0)..(ty + 24).min(VIEW.1 as i32) {
+        for x in (tx - 24).max(0)..(tx + 24).min(VIEW.0 as i32) {
+            if blank.pixel_at(x as usize, y as usize) != with_ring.pixel_at(x as usize, y as usize) {
+                diff += 1;
+            }
+        }
+    }
+    assert!(
+        diff > 30,
+        "the landing ring must be drawn with the cat off screen (only {diff} px differ)"
+    );
+}
+
+// ---- player damage actually reaches the boss ------------------------------
+//
+// `boss_damage_system` is the single place player damage lands on the boss:
+// bullets (aimed and pattern), acid pools, Tail Whip and mousetraps. Each test
+// drives the real system(s) through the tick harness and reads the boss's HP,
+// the same shape as the per-system tests in the other `systems/*` files.
+
+/// Flat map (the generated walls would decide every sweep), no horde, no
+/// leftover projectiles.
+fn open_arena(w: &mut World) {
+    w.level.tiles = TileMap::new(MAP_COLS, MAP_ROWS, w.level.theme, 0);
+    w.clear_enemies();
+    w.clear_bullets();
+    w.clear_pools();
+}
+
+fn arena_rect(w: &World) -> TileRect {
+    w.level
+        .boss_room()
+        .map(|r| r.rect)
+        .unwrap_or_else(|| TileRect::new(0, 0, w.level.tiles.cols(), w.level.tiles.rows()))
+}
+
+/// A live boss of `kind` at `pos` with a real `max_hp`.
+fn spawn_boss_at(w: &mut World, kind: BossKind, pos: Vec2, hp: f32) {
+    let arena = arena_rect(w);
+    let boss = Boss::new(kind, pos, hp, arena, pos, false);
+    w.ecs.spawn((boss, SpawnId(0)));
+}
+
+/// One tick of the projectile pass then the boss damage pass (the schedule's
+/// order: bullets move, then `boss_damage_system` resolves the sweep).
+fn tick_bullets_and_damage(w: &mut World) {
+    w.begin_tick(DT, Vec2::ZERO, false);
+    w.ecs
+        .run_system_cached(projectiles::bullets_system)
+        .expect("bullets system");
+    w.ecs
+        .run_system_cached(boss_damage_system)
+        .expect("boss damage system");
+    w.end_tick();
+}
+
+/// One tick of the boss damage pass alone (pools, whip, traps).
+fn tick_boss_damage(w: &mut World) {
+    w.begin_tick(DT, Vec2::ZERO, false);
+    w.ecs
+        .run_system_cached(boss_damage_system)
+        .expect("boss damage system");
+    w.end_tick();
+}
+
+/// A player dart already inside the body, moving right at 480 px/s (8 px/tick).
+fn dart_at(from: Vec2, damage: f32, weapon: WeaponKind) -> crate::game::bullet::Bullet {
+    let mut b = crate::game::bullet::Bullet::new(
+        from,
+        Vec2::new(480.0, 0.0),
+        damage,
+        Faction::Player,
+        (250, 250, 250),
+    );
+    b.weapon = Some(weapon);
+    b
+}
+
+/// A player bullet is swept against the boss's grounded hit shapes, damages it
+/// through `boss_damage_system`, and is consumed by the hit.
+#[test]
+fn player_bullets_damage_the_boss_and_are_consumed() {
+    let mut w = World::new(Theme::Sewer, 31);
+    open_arena(&mut w);
+    let ppos = w.player.pos;
+    let boss_pos = ppos + Vec2::new(40.0, 0.0);
+    spawn_boss_at(&mut w, BossKind::Cat, boss_pos, 5000.0);
+    // A fast dart: one tick crosses the whole chest circle, so only the swept
+    // segment (not the endpoint) can register the hit.
+    let start = boss_pos - Vec2::new(9.0, 0.0);
+    let bullet = w.spawn_bullet(dart_at(start, 12.0, WeaponKind::Gnaw));
+    let hp_before = w.boss_hp().expect("boss alive").0;
+
+    tick_bullets_and_damage(&mut w);
+
+    let hp_after = w.boss_hp().expect("boss alive").0;
+    assert!(
+        (hp_before - hp_after - 12.0).abs() < 1e-3,
+        "the dart dealt {} damage, expected 12",
+        hp_before - hp_after
+    );
+    let b = w.ecs.get::<crate::game::bullet::Bullet>(bullet).unwrap();
+    assert!(
+        b.life <= 0.0,
+        "a non-piercing shot must be consumed by the boss"
+    );
+    // ...and the next projectile pass reaps it.
+    tick_bullets_and_damage(&mut w);
+    assert!(w.bullets().is_empty(), "the spent dart survived another pass");
+    assert!(
+        (w.boss_hp().expect("boss alive").0 - hp_after).abs() < 1e-3,
+        "a spent dart hit the boss twice"
+    );
+}
+
+/// Pierce behaves exactly as it does on enemies: one hit spent, the shot keeps
+/// flying and cannot re-hit inside its re-hit cooldown.
+#[test]
+fn a_piercing_shot_spends_one_hit_on_the_boss() {
+    let mut w = World::new(Theme::Sewer, 32);
+    open_arena(&mut w);
+    let boss_pos = w.player.pos + Vec2::new(40.0, 0.0);
+    spawn_boss_at(&mut w, BossKind::Cat, boss_pos, 5000.0);
+    let mut b = dart_at(boss_pos - Vec2::new(9.0, 0.0), 9.0, WeaponKind::Gnaw);
+    b.pierce = 2;
+    let bullet = w.spawn_bullet(b);
+    let hp_before = w.boss_hp().expect("boss alive").0;
+
+    tick_bullets_and_damage(&mut w);
+
+    let hp_after = w.boss_hp().expect("boss alive").0;
+    assert!((hp_before - hp_after - 9.0).abs() < 1e-3);
+    let b = w.ecs.get::<crate::game::bullet::Bullet>(bullet).unwrap();
+    assert_eq!(b.pierce, 1, "a pierce charge was not spent");
+    assert!(b.hit_cd > 0.0, "the re-hit cooldown was not set");
+    assert!(b.life > 0.0, "a piercing shot must survive the boss");
+}
+
+/// A grounded boss is hit by the pattern weapons too: Squeak Nova's ring and
+/// Spore Orbit's spore.
+#[test]
+fn squeak_nova_and_spore_orbit_damage_the_boss() {
+    // Squeak Nova: a radial dart crossing the body.
+    let mut w = World::new(Theme::Sewer, 33);
+    open_arena(&mut w);
+    let boss_pos = w.player.pos + Vec2::new(40.0, 0.0);
+    spawn_boss_at(&mut w, BossKind::Cat, boss_pos, 5000.0);
+    w.spawn_bullet(dart_at(boss_pos - Vec2::new(9.0, 0.0), 7.0, WeaponKind::SqueakNova));
+    let hp_before = w.boss_hp().expect("boss alive").0;
+    tick_bullets_and_damage(&mut w);
+    assert!(
+        (hp_before - w.boss_hp().expect("boss alive").0 - 7.0).abs() < 1e-3,
+        "Squeak Nova did not damage the boss"
+    );
+    // The tally books it as pattern damage, not as an aimed hit.
+    let dmg = w.ecs.resource::<BossFight>().scratch.dmg;
+    assert!((dmg.pattern - 7.0).abs() < 1e-3, "pattern tally {dmg:?}");
+    assert!(dmg.aimed.abs() < 1e-6, "a radial dart counted as aimed");
+
+    // Spore Orbit: the spore sits on its ring, 24 px from the rat, and the body
+    // is 30 px out, so the two overlap on the ring.
+    let mut w = World::new(Theme::Sewer, 34);
+    open_arena(&mut w);
+    let ppos = w.player.pos;
+    spawn_boss_at(&mut w, BossKind::Cat, ppos + Vec2::new(30.0, 0.0), 5000.0);
+    let mut b = crate::game::bullet::Bullet::new(
+        ppos + Vec2::new(24.0, 0.0),
+        Vec2::ZERO,
+        5.0,
+        Faction::Player,
+        (250, 250, 250),
+    );
+    b.pierce = 999;
+    b.radius = 3.0;
+    b.weapon = Some(WeaponKind::SporeOrbit);
+    b.orbit = Some(crate::game::bullet::Orbit {
+        angle: 0.0,
+        radius: 24.0,
+        speed: 0.0,
+    });
+    w.spawn_bullet(b);
+    let hp_before = w.boss_hp().expect("boss alive").0;
+    tick_bullets_and_damage(&mut w);
+    assert!(
+        (hp_before - w.boss_hp().expect("boss alive").0 - 5.0).abs() < 1e-3,
+        "a spore on its ring did not damage the boss"
+    );
+}
+
+/// Tail Whip's arc reaches the boss at the same radius it reaches enemies.
+#[test]
+fn tail_whip_damages_the_boss() {
+    use crate::game::weapon::Weapon;
+
+    let mut w = World::new(Theme::Sewer, 35);
+    open_arena(&mut w);
+    // Level 8: `fire_one`'s aura is 26 + 3 * 8 = 50 px, so a body at 45 px is
+    // inside the whip (and outside the old 30 px melee reach).
+    w.player.loadout.weapons = vec![Weapon {
+        kind: WeaponKind::TailWhip,
+        level: 8,
+        timer: 0.0,
+    }];
+    let ppos = w.player.pos;
+    spawn_boss_at(&mut w, BossKind::Cat, ppos + Vec2::new(45.0, 0.0), 5000.0);
+    let expected = w.player.loadout.weapons[0].damage();
+    let hp_before = w.boss_hp().expect("boss alive").0;
+
+    w.begin_tick(DT, Vec2::ZERO, false);
+    w.ecs
+        .run_system_cached(super::super::weapons::fire_weapons_system)
+        .expect("weapons system");
+    w.ecs
+        .run_system_cached(boss_damage_system)
+        .expect("boss damage system");
+    w.end_tick();
+
+    let dealt = hp_before - w.boss_hp().expect("boss alive").0;
+    assert!(
+        (dealt - expected).abs() < 1e-3,
+        "Tail Whip dealt {dealt}, expected {expected}"
+    );
+}
+
+/// A landed acid pool ticks damage into the boss while it stands in it.
+#[test]
+fn acid_pools_damage_the_boss() {
+    let mut w = World::new(Theme::Sewer, 36);
+    open_arena(&mut w);
+    let boss_pos = w.player.pos + Vec2::new(40.0, 0.0);
+    spawn_boss_at(&mut w, BossKind::Cat, boss_pos, 5000.0);
+    w.spawn_pool(Pool {
+        pos: boss_pos,
+        radius: 12.0,
+        dps: 240.0,
+        life: 3.0,
+        color: (140, 220, 70),
+    });
+    let hp_before = w.boss_hp().expect("boss alive").0;
+
+    tick_boss_damage(&mut w);
+
+    let dealt = hp_before - w.boss_hp().expect("boss alive").0;
+    assert!(
+        (dealt - 240.0 * DT).abs() < 1e-3,
+        "the pool dealt {dealt} in one tick, expected {}",
+        240.0 * DT
+    );
+}
+
+/// A snapping mousetrap under the boss damages it once per snap, not once per
+/// tick of the snap.
+#[test]
+fn mousetraps_damage_the_boss_once_per_snap() {
+    let mut w = World::new(Theme::Sewer, 37);
+    open_arena(&mut w);
+    let boss_pos = w.player.pos + Vec2::new(40.0, 0.0);
+    spawn_boss_at(&mut w, BossKind::Cat, boss_pos, 5000.0);
+    w.level.objects.mousetraps.push(MousetrapView {
+        pos: boss_pos,
+        facing: Vec2::new(1.0, 0.0),
+        state: MousetrapState::Snapping,
+        // Inside the art's `MOUSETRAP_HIT_PROGRESS_MIN..=MAX` window.
+        progress: 0.5,
+        anim: 0.0,
+        hit_flash: 0.0,
+    });
+    let hp_before = w.boss_hp().expect("boss alive").0;
+
+    tick_boss_damage(&mut w);
+    let first = hp_before - w.boss_hp().expect("boss alive").0;
+    assert!(
+        (first - MOUSETRAP_DAMAGE_ENEMY).abs() < 1e-3,
+        "the snap dealt {first}, expected {MOUSETRAP_DAMAGE_ENEMY}"
+    );
+    tick_boss_damage(&mut w);
+    let second = hp_before - w.boss_hp().expect("boss alive").0;
+    assert!(
+        (second - first).abs() < 1e-3,
+        "the same snap hit the boss twice ({first} then {second})"
+    );
+}
+
+/// The leaping cat has no grounded shape, so a dart sweeps underneath it: no
+/// damage, and the shot is not consumed by a body it cannot touch.
+#[test]
+fn a_leaping_cat_takes_no_ground_damage() {
+    let mut w = World::new(Theme::Sewer, 38);
+    open_arena(&mut w);
+    let boss_pos = w.player.pos + Vec2::new(40.0, 0.0);
+    spawn_boss_at(&mut w, BossKind::Cat, boss_pos, 5000.0);
+    {
+        let mut query = w.ecs.query::<&mut Boss>();
+        let mut boss = query.iter_mut(&mut w.ecs).next().expect("boss alive");
+        boss.set_state(BossState::Cat(BossCatState::Pounce), 0.70);
+        boss.elapsed = 0.35;
+        assert!(boss.is_airborne());
+    }
+    let bullet = w.spawn_bullet(dart_at(boss_pos - Vec2::new(9.0, 0.0), 12.0, WeaponKind::Gnaw));
+    let hp_before = w.boss_hp().expect("boss alive").0;
+
+    tick_bullets_and_damage(&mut w);
+
+    assert!(
+        (w.boss_hp().expect("boss alive").0 - hp_before).abs() < 1e-3,
+        "a leaping cat took ground damage"
+    );
+    assert!(
+        w.ecs.get::<crate::game::bullet::Bullet>(bullet).is_some(),
+        "the shot was consumed by a body it passed under"
+    );
+}
+
+/// Same seed, same run, with a boss on the field and the weapons firing at it:
+/// the targeting, the damage pass and the boss's own rng must all be
+/// reproducible.
+#[test]
+fn twin_runs_with_a_boss_and_weapons_match() {
+    let run = |kind: BossKind, seed: u64| -> Vec<u32> {
+        let mut w = World::new(Theme::Sewer, seed);
+        w.level.tiles = TileMap::new(MAP_COLS, MAP_ROWS, w.level.theme, 0);
+        w.clear_enemies();
+        w.clear_bullets();
+        let arena = arena_rect(&w);
+        let centre = arena.center_world();
+        let mut boss = Boss::new(kind, centre, 20_000.0, arena, centre, false);
+        boss.id = 1;
+        w.ecs.spawn((boss, SpawnId(0)));
+        // In weapons range, so the aimed families have to choose between the
+        // boss points and the horde the director keeps spawning.
+        w.player.pos = centre + Vec2::new(40.0, 0.0);
+        let mut trace = Vec::with_capacity(240 * 10);
+        for k in 0..240 {
+            let dir = Vec2::new((k as f32 * 0.13).sin(), (k as f32 * 0.09).cos());
+            w.update(DT, dir, k % 70 == 0);
+            let (hp, _) = w.boss_hp().expect("boss alive");
+            let boss = boss_of(&mut w).expect("boss alive");
+            trace.push(hp.to_bits());
+            trace.push(boss.pos.x.to_bits());
+            trace.push(boss.pos.y.to_bits());
+            // `duration` and `flags` are state-local, so they pin the state
+            // machine without needing a `State -> u32` mapping.
+            trace.push(boss.duration.to_bits());
+            trace.push(boss.flags);
+            trace.push((boss.phase as u32) << 8 | (boss.elapsed.to_bits() & 0xff));
+            trace.push(w.player.hp.to_bits());
+            trace.push(w.enemy_count() as u32);
+            trace.push(w.player.level);
+            trace.push(w.kills);
+        }
+        trace
+    };
+    for kind in [BossKind::Cat, BossKind::Broom, BossKind::Mower] {
+        assert_eq!(run(kind, 4242), run(kind, 4242), "{kind:?} twin run diverged");
+    }
+}
+
+// ---- campaign DPS measurement (balance; gated, slow) ---------------------
+//
+// `RATRUN_BOSS_DPS=1 cargo test boss::tests::measure_campaign_boss_dps -- --nocapture`
+//
+// Plays the campaign with the App's level-up behaviour (auto-pick the first
+// card) and a flee script, then measures the real damage the weapons deal to
+// the boss-sized target at the boss time on each level. The output feeds the
+// per-boss HP multipliers ([`BossKind::hp_scale`]).
+
+#[test]
+fn measure_campaign_boss_dps() {
+    use crate::game::campaign;
+    use crate::game::loadout::Loadout;
+
+    if std::env::var("RATRUN_BOSS_DPS").is_err() {
+        return;
+    }
+    const SEEDS: [u64; 4] = [4242, 7, 99, 1234];
+    // A warm-up while the weapons' target pick settles onto the boss and the
+    // rat finds its range, then a full minute of measurement.
+    const WARMUP_SECS: f32 = 15.0;
+    const MEASURE_SECS: f32 = 60.0;
+
+    /// Flee the local crowd, with a deterministic wander bias (the harness's
+    /// `Evade` script), and dash on a fixed cadence.
+    fn script(w: &mut World, tick: u64) -> (Vec2, bool) {
+        let t = tick as f32;
+        let phase = t * 0.013;
+        let bias = Vec2::new(phase.sin(), (phase * 0.7).cos());
+        let p = w.player.pos;
+        let enemies = w.enemies();
+        let (mut fx, mut fy) = (0.0f32, 0.0f32);
+        let mut nearest = f32::MAX;
+        for e in &enemies {
+            let dx = p.x - e.pos.x;
+            let dy = p.y - e.pos.y;
+            let d2 = dx * dx + dy * dy;
+            nearest = nearest.min(d2);
+            if d2 < 12100.0 {
+                let d = d2.sqrt();
+                let wgt = 1.4 / (d + 6.0);
+                fx += dx * wgt;
+                fy += dy * wgt;
+            }
+        }
+        let nearest = nearest.sqrt();
+        let len = (fx * fx + fy * fy).sqrt();
+        let flee = if len > 1e-4 {
+            Vec2::new(fx / len, fy / len)
+        } else {
+            bias
+        };
+        // Kite around the arena centre on top of the flee vector: running a
+        // wide circle is how a survivor keeps the horde behind it.
+        let centre = w.level.arena * 0.5;
+        let outward = p - centre;
+        let tangent = if outward.len_sq() > 1.0 {
+            outward.normalized().perp()
+        } else {
+            bias
+        };
+        let dir = Vec2::new(
+            flee.x * 0.65 + tangent.x * 0.30 + bias.x * 0.05,
+            flee.y * 0.65 + tangent.y * 0.30 + bias.y * 0.05,
+        );
+        (dir, nearest < 26.0)
+    }
+
+    fn resolve_levelups(w: &mut World) {
+        let mut guard = 0;
+        while w.pending_levelups > 0 && !w.finished() && guard < 64 {
+            guard += 1;
+            let choices = w.player.loadout.generate_choices(&mut w.rng);
+            let Some(up) = choices.into_iter().next() else {
+                break;
+            };
+            let heal = w.player.loadout.apply(&up);
+            w.player.heal(heal);
+            w.pending_levelups = w.pending_levelups.saturating_sub(1);
+        }
+    }
+
+    let mut totals = [0.0f32; 3];
+    let mut samples: [Vec<f32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    for seed in SEEDS {
+        let mut carried = Loadout::starting();
+        for (level, total) in totals.iter_mut().enumerate() {
+            let mut w = World::new_level(level, campaign::level_seed(seed, level), carried.clone());
+            let mut tick = 0u64;
+            let mut deaths = 0usize;
+            // Build phase: play to the boss time exactly as the App would. The
+            // rat is topped up when hurt (the measurement is about the weapons'
+            // damage, not about surviving the horde), while the script keeps
+            // kiting so the fire patterns and targeting stay realistic.
+            while w.elapsed < crate::game::director::BOSS_TIME && !w.finished() {
+                let (dir, dash) = script(&mut w, tick);
+                w.update(DT, dir, dash);
+                resolve_levelups(&mut w);
+                if w.player.hp < 55.0 {
+                    deaths += 1;
+                    let max = w.player.max_hp();
+                    w.player.heal(max);
+                }
+                tick += 1;
+            }
+            let _ = deaths;
+            assert!(
+                !w.finished(),
+                "seed {seed} level {level}: the scripted rat died at {:.1} s",
+                w.elapsed
+            );
+            assert!(
+                w.boss_hp().is_some(),
+                "the boss spawned at the boss time"
+            );
+            // Make it unkillable so the fixed window measures a damage *rate*
+            // rather than a time-to-kill, and hold it at `hp_frac == 1` so
+            // every seed measures the same phase (phase 2 would speed the boss
+            // up and change how much of the window it spends in range). The
+            // per-controller `damage_mult` is left alone: the mower's overheat
+            // window is part of what a real build gets to shoot into.
+            // `hp = 1e6` with the **real** `max_hp`: `hp_frac` clamps to 1 so
+            // the boss stays in phase 1, every absolute-damage threshold in the
+            // controllers (the cat's burst, the dodge hits) still reads the
+            // true per-tick number, and the f32 ulp at 1e6 is 0.06 so the
+            // measured loss is not quantised (at 1e9 the ulp is 64 and a 20
+            // damage tick rounds away — the first version of this measurement
+            // read 4x low). The broom's relative poise stagger needs a burst of
+            // 18% of the pool in one beat; no build reaches that with a
+            // 100k pool, so it is not distorted by this either.
+            {
+                let mut query = w.ecs.query::<&mut Boss>();
+                for mut b in query.iter_mut(&mut w.ecs) {
+                    b.hp = 1.0e6;
+                    b.phase = 1;
+                    b.invuln = 0.0;
+                    b.damage_mult = 1.0;
+                }
+            }
+            // The fight starts in the arena: put the rat there (the App leads
+            // the player to the boss room with the minimap bearing; this
+            // measurement is about the weapons' damage, not about the walk).
+            if let Some(room) = w.level.boss_room() {
+                let centre = room.rect.center_world();
+                if let Some(open) = w
+                    .level
+                    .tiles
+                    .nearest_open_center(centre, crate::game::collision::SizeClass::Small, 16)
+                {
+                    w.player.pos = open;
+                }
+            }
+            // The real boss is the target: `weapons::nearest_visible` takes
+            // `Boss::target_points` as ordinary bodies in the aim queue, so
+            // aimed bullets land on its grounded hit shapes and
+            // `boss_damage_system` books their damage (and every incidental
+            // source) per source. Nothing has to be pinned to a punch-bag: the
+            // boss is both the thing that gets shot and the thing measured.
+            let mut tally = BossDamageTally::default();
+            let measure_ticks = ((WARMUP_SECS + MEASURE_SECS) / DT) as usize;
+            for k in 0..measure_ticks {
+                let before = 1.0e6 - w.boss_hp().map(|(h, _)| h).unwrap_or(1.0e6);
+                if k % 600 == 0 {
+                    println!(
+                        "   t={:.0}s boss_hp_lost={:.0} dist={:?} elapsed={:.1} finished={} enemies={} aimed={:.0} incident={:.0}",
+                        k as f32 * DT,
+                        before,
+                        w.boss_marker().map(|b| b.dist(w.player.pos)),
+                        w.elapsed,
+                        w.finished(),
+                        w.enemy_count(),
+                        tally.aimed,
+                        tally.incidental()
+                    );
+                }
+                // The boss fight: close to fighting range and circle it, so the
+                // weapons actually fire at the boss-sized target (with the
+                // horde still in the way, exactly as in a real fight).
+                let (flee, dash) = script(&mut w, tick);
+                let dir = if let Some(boss_pos) = w.boss_marker() {
+                    let to = boss_pos - w.player.pos;
+                    let dist = to.len();
+                    if dist > 120.0 {
+                        // Long trek across the level: follow the bearing.
+                        to.normalized()
+                    } else if dist > 34.0 {
+                        (to.normalized() * 0.85 + flee * 0.15).normalized()
+                    } else {
+                        (-to.normalized() * 0.6 + to.normalized().perp() * 0.4)
+                            .normalized()
+                    }
+                } else {
+                    flee
+                };
+                w.update(DT, dir, dash);
+                resolve_levelups(&mut w);
+                tick += 1;
+                // This tick's attributed damage, straight from the boss damage
+                // system (reset per tick; it never feeds the simulation).
+                let dmg = w.ecs.resource::<BossFight>().scratch.dmg;
+                if k as f32 * DT >= WARMUP_SECS {
+                    tally.add(dmg);
+                }
+                if w.player.hp < 55.0 {
+                    let max = w.player.max_hp();
+                    w.player.heal(max);
+                }
+                if w.finished() {
+                    break;
+                }
+            }
+            let dps = tally.total() / MEASURE_SECS;
+            let d = |v: f32| v / MEASURE_SECS;
+            samples[level].push(dps);
+            *total += dps;
+            let (weapons, passives) = (
+                w.player.loadout.weapons.len(),
+                w.player.loadout.passives.len(),
+            );
+            println!(
+                "seed {seed} level {level}: dps {dps:.1} (aimed {:.1}, pattern {:.1}, pools {:.1}, whip {:.1}, traps {:.1}; incidental {:.1})  (weapons {weapons}, passives {passives}, lvl {})",
+                d(tally.aimed),
+                d(tally.pattern),
+                d(tally.pools),
+                d(tally.whip),
+                d(tally.traps),
+                d(tally.incidental()),
+                w.player.level
+            );
+            // The campaign carry: the player's first three keepable upgrades.
+            let keeps = campaign::keepables(&w.player.loadout);
+            let chosen: Vec<_> = keeps.into_iter().take(campaign::KEEP_COUNT).collect();
+            carried = campaign::next_loadout(&w.player.loadout, &chosen)
+                .expect("a keep-three selection is valid");
+        }
+    }
+    println!(
+        "mean dps: level 0 {:.1}, level 1 {:.1}, level 2 {:.1}",
+        totals[0] / SEEDS.len() as f32,
+        totals[1] / SEEDS.len() as f32,
+        totals[2] / SEEDS.len() as f32
+    );
+    // Median (the balance target) and the spread (how badly a seed can swing),
+    // plus the `hp_scale` each target fight length implies.
+    for (level, sample) in samples.iter().enumerate() {
+        let mut v = sample.clone();
+        v.sort_by(f32::total_cmp);
+        let median = (v[1] + v[2]) * 0.5;
+        let kind = BossKind::for_level(level);
+        let pool = kind.base_hp() * director::hp_mult_for(level, director::BOSS_TIME);
+        println!(
+            "level {level}: median dps {median:.1}  spread {:.1}..{:.1}  pool {pool:.0} hp  \
+             scale@60s {:.2}@75s {:.2}@90s {:.2}  current {:.2} -> {:.0}s",
+            v[0],
+            v[v.len() - 1],
+            median * 60.0 / pool,
+            median * 75.0 / pool,
+            median * 90.0 / pool,
+            kind.hp_scale(),
+            pool * kind.hp_scale() / median
+        );
+        if v[0] > 0.0 {
+            println!(
+                "   at that scale: slowest seed {:.0}s, fastest seed {:.0}s",
+                pool * kind.hp_scale() / v[0],
+                pool * kind.hp_scale() / v[v.len() - 1]
+            );
+        }
+    }
+}

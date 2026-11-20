@@ -328,18 +328,34 @@ impl Room {
 
 /// One maze section: a puzzle pocket with a reward at its end and a one-way
 /// door as its exit.
+///
+/// Everything later systems need is exported here, so no consumer has to
+/// re-derive the lattice: the breach ([`Self::entry`]), the public fork the
+/// gnaw-mark trail starts from ([`Self::fork`]), the partition ring
+/// ([`Self::ring`], for spawn exclusion and fog), and the cache
+/// ([`Self::reward`], [`Self::reward_cell`]).
 #[derive(Clone, Copy, Debug)]
 pub struct MazeSection {
     /// Bounding cells of the section (its entry is on this boundary).
     pub bounds: TileRect,
-    /// Cell the player enters the maze through (on `bounds`' edge).
+    /// The section's [`WallKind::Maze`](super::art_walls::WallKind::Maze)
+    /// partition ring: the one-cell wall the breach and the one-way door sit
+    /// in. Spawn exclusion and fog use this, not `bounds`.
+    pub ring: TileRect,
+    /// Cell the player enters the maze through (the breach, on `ring`).
     pub entry: (i32, i32),
+    /// Public walkway cell the gnaw-mark trail starts from: three marks along
+    /// the final four cells between here and the breach.
+    pub fork: (i32, i32),
     /// The [`super::art_walls::WallKind::OneWayDoor`] cell that exits the maze.
     pub exit: (i32, i32),
     /// The only allowed travel direction through `exit` (out of the maze).
     pub exit_dir: Cardinal,
     /// World position of the [`MazeRewardView`] pedestal at the maze's end.
     pub reward: Vec2,
+    /// The pedestal's cell (precomputed: `cell_of(reward)`, without the
+    /// per-frame divide).
+    pub reward_cell: (i32, i32),
 }
 
 // ---- Interactive level objects --------------------------------------------
@@ -382,6 +398,48 @@ pub struct RatHole {
     pub view: RatHoleView,
 }
 
+/// What a rat-hole is **for** — the designer's three roles (`DESIGN_REVIEW.md`
+/// §4). The generator sets it; gameplay reads it through
+/// [`LevelObjects::rat_hole_record`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RatHoleRole {
+    /// Near the first excursion out of the start room.
+    Excursion,
+    /// Outside a mid-run gathering spot (a hall).
+    Gathering,
+    /// Any other hole, grown by the random scatter pass.
+    #[default]
+    Incidental,
+}
+
+/// The generator's record for one rat-hole: what it is for and which side of
+/// the wall the routes arrive from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RatHoleRecord {
+    /// Why this hole exists.
+    pub role: RatHoleRole,
+    /// Direction from the hole toward the **public** side: the mouth nearer the
+    /// start room, i.e. the side the rat is expected to arrive from. Holes are
+    /// passable both ways; this is the orientation the art faces
+    /// ([`RatHoleView::facing`]) and the side a "useful hole" cue should point
+    /// back to.
+    pub approach: Cardinal,
+}
+
+/// The generator's record for one trap: what it was placed for and which way
+/// the routes arrive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrapRecord {
+    /// True when the trap is a room-mouth **encounter**: one or two cells
+    /// inside a hall or room where a corridor fans out, with two parallel ways
+    /// past it. Those are worth an audible/visual cue; the rest are incidental.
+    pub encounter: bool,
+    /// Direction from the trap toward the side the routes arrive from (the
+    /// public side). For a mousetrap this is the baited kill end's side, so it
+    /// greets the arriving lane; a sticky board only uses it as its long axis.
+    pub approach: Cardinal,
+}
+
 /// Every non-wall object placed on the map. Mutated by the simulation (trap
 /// and door systems, later phase) and read by the renderer.
 #[derive(Clone, Debug, Default)]
@@ -391,6 +449,14 @@ pub struct LevelObjects {
     pub one_way_doors: Vec<OneWayDoor>,
     pub rat_holes: Vec<RatHole>,
     pub rewards: Vec<MazeRewardView>,
+    /// Generator record for each entry of [`Self::sticky_traps`], **same
+    /// index**. Filled once by the generator; nothing in the simulation writes
+    /// it.
+    pub sticky_trap_records: Vec<TrapRecord>,
+    /// Generator record for each entry of [`Self::mousetraps`], same index.
+    pub mousetrap_records: Vec<TrapRecord>,
+    /// Generator record for each entry of [`Self::rat_holes`], same index.
+    pub rat_hole_records: Vec<RatHoleRecord>,
 }
 
 impl LevelObjects {
@@ -399,6 +465,60 @@ impl LevelObjects {
         self.one_way_doors
             .iter()
             .find(|d| d.cell == (cx, cy))
+    }
+
+    /// The generator record of the sticky trap at `pos`, if there is one.
+    ///
+    /// Matched by position, so a caller that passes a live
+    /// [`StickyTrapView::pos`] gets the right record even if an earlier entry
+    /// was removed from the list.
+    pub fn sticky_trap_record(&self, pos: Vec2) -> Option<TrapRecord> {
+        self.sticky_traps
+            .iter()
+            .zip(&self.sticky_trap_records)
+            .find(|(trap, _)| trap.pos == pos)
+            .map(|(_, record)| *record)
+    }
+
+    /// The generator record of the mousetrap at `pos`, if there is one.
+    pub fn mousetrap_record(&self, pos: Vec2) -> Option<TrapRecord> {
+        self.mousetraps
+            .iter()
+            .zip(&self.mousetrap_records)
+            .find(|(trap, _)| trap.pos == pos)
+            .map(|(_, record)| *record)
+    }
+
+    /// The generator record of the trap at `pos`, whichever kind it is.
+    pub fn trap_record(&self, pos: Vec2) -> Option<TrapRecord> {
+        self.sticky_trap_record(pos)
+            .or_else(|| self.mousetrap_record(pos))
+    }
+
+    /// Is the trap at `pos` a room-mouth encounter (rather than incidental)?
+    pub fn is_encounter_trap(&self, pos: Vec2) -> bool {
+        self.trap_record(pos).is_some_and(|record| record.encounter)
+    }
+
+    /// The generator record of the rat-hole in `cell`, if there is one.
+    pub fn rat_hole_record(&self, cell: (i32, i32)) -> Option<RatHoleRecord> {
+        self.rat_holes
+            .iter()
+            .zip(&self.rat_hole_records)
+            .find(|(hole, _)| hole.cell == cell)
+            .map(|(_, record)| *record)
+    }
+
+    /// Every rat-hole with the given role, in generation order.
+    pub fn rat_holes_with_role(
+        &self,
+        role: RatHoleRole,
+    ) -> impl Iterator<Item = &RatHole> + '_ {
+        self.rat_holes
+            .iter()
+            .zip(&self.rat_hole_records)
+            .filter(move |(_, record)| record.role == role)
+            .map(|(hole, _)| hole)
     }
 
     /// Number of placed objects (generator tests / validation).
@@ -441,10 +561,78 @@ pub struct Level {
     /// Where the rat spawns: the centre of the start room, always
     /// `arena * 0.5`.
     pub start: Vec2,
-    /// Zero to two maze sections.
+    /// At most one maze section: about one map in eight carries a maze
+    /// ([`crate::game::levelgen::layout::MAZE_ONE_IN`]).
     pub mazes: Vec<MazeSection>,
     /// Traps, doors, rat-holes and maze rewards.
     pub objects: LevelObjects,
+    /// What the boss arena furnishes for its fight (the central clear floor,
+    /// the Lab's bumpers and charging dock, the Sewer's escape rat-hole).
+    pub boss: BossArena,
+}
+
+/// The fight furniture inside the boss arena, exported by the generator so the
+/// boss framework, the art and the validator agree on one place instead of
+/// re-deriving it (`DESIGN_REVIEW.md` §5).
+///
+/// Every theme gets a `floor`; the rest is theme-specific:
+///
+/// - **Lab** (mower): two `bumpers` flanking the floor, so a 135 px charge
+///   always has a solid to flip onto within a screenful, and a `dock` pad
+///   against a wall away from the mouth.
+/// - **Sewer** (jaguar): an `escape_hole` in the wall ring, the rat-hole the
+///   rat ducks through so the pounce overshoots.
+/// - **Kitchen** (human with a broom): just the 96 × 80 px clear floor; the
+///   barrels/counter ends stay at the perimeter.
+#[derive(Clone, Debug)]
+pub struct BossArena {
+    /// The clear encounter floor at the arena's centre. For the Lab every cell
+    /// of it has a solid within [`levelgen::layout::SOLID_REACH_PX`] in at
+    /// least two cardinal directions — the mower's flip is always on offer
+    /// from here.
+    pub floor: TileRect,
+    /// World position of the charging dock pad's centre (Lab only): the art's
+    /// [`crate::game::art_boss_mower::draw_dock_pad`] footprint is 32 × 30 px
+    /// around it, so the pad sits against the wall without overlapping one.
+    pub dock: Option<Vec2>,
+    /// The dock pad's cell (same place as [`Self::dock`]; for the minimap and
+    /// the generator's own checks).
+    pub dock_cell: Option<(i32, i32)>,
+    /// Solid bumper cells (Lab only), each a 1 × 3 or 3 × 1 bar.
+    pub bumpers: Vec<TileRect>,
+    /// The rat-hole in the arena's wall ring that leads out through a duct
+    /// (Sewer only).
+    pub escape_hole: Option<(i32, i32)>,
+    /// The arena's mouth cells: the doorway cells in its wall ring. Nothing
+    /// the arena furnishes may block them.
+    pub mouths: Vec<(i32, i32)>,
+}
+
+impl Default for BossArena {
+    fn default() -> Self {
+        BossArena {
+            floor: TileRect::new(0, 0, 0, 0),
+            dock: None,
+            dock_cell: None,
+            bumpers: Vec::new(),
+            escape_hole: None,
+            mouths: Vec::new(),
+        }
+    }
+}
+
+impl BossArena {
+    /// The charging dock's world position (Lab only).
+    pub fn dock_pos(&self) -> Option<Vec2> {
+        self.dock
+    }
+
+    /// Where the boss framework should put the mower's dock: the exported pad
+    /// in the Lab, the arena's centre on the other maps (the dock is unused
+    /// there).
+    pub fn dock_or_centre(&self, centre: Vec2) -> Vec2 {
+        self.dock.unwrap_or(centre)
+    }
 }
 
 impl Level {
@@ -480,6 +668,7 @@ impl Level {
             start: MAP_SIZE * 0.5,
             mazes: Vec::new(),
             objects: LevelObjects::default(),
+            boss: BossArena::default(),
         }
     }
 
@@ -508,6 +697,31 @@ impl Level {
     /// The boss arena, if the map has one.
     pub fn boss_room(&self) -> Option<&Room> {
         self.rooms.iter().find(|r| r.kind == RoomKind::Boss)
+    }
+
+    /// The boss arena's fight furniture, when the map has an arena.
+    pub fn boss_arena(&self) -> Option<&BossArena> {
+        self.boss_room().map(|_| &self.boss)
+    }
+
+    /// The Lab's charging dock pad centre (see [`BossArena::dock`]).
+    pub fn boss_dock(&self) -> Option<Vec2> {
+        self.boss_arena().and_then(|a| a.dock)
+    }
+
+    /// The clear encounter floor at the arena's centre.
+    pub fn boss_clear_floor(&self) -> Option<TileRect> {
+        self.boss_arena().map(|a| a.floor)
+    }
+
+    /// The Lab's solid bumpers (empty on the other maps).
+    pub fn boss_bumpers(&self) -> &[TileRect] {
+        self.boss_arena().map_or(&[], |a| a.bumpers.as_slice())
+    }
+
+    /// The Sewer's escape rat-hole in the arena's wall ring.
+    pub fn boss_escape_hole(&self) -> Option<(i32, i32)> {
+        self.boss_arena().and_then(|a| a.escape_hole)
     }
 
     /// Every room of one kind, in generation order.

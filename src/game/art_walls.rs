@@ -44,6 +44,12 @@
 //!    damage numbers. Draws the upper lintel beams of horizontal [`WallKind::RatHole`],
 //!    [`WallKind::Doorway`], and north/south [`WallKind::OneWayDoor`] cells so
 //!    the rat visibly ducks *under* arches and wall openings.
+//! 4. **Boss arena threshold overlay** (optional, `WallKind`-independent) —
+//!    [`draw_boss_threshold_ground`] (in the Ground layer, right after
+//!    [`draw_wall_ground`]) and [`draw_boss_threshold_overhang`] (in the Overhang
+//!    layer, right after [`draw_wall_overhang`]). Call once per mouth cell of the
+//!    boss arena's double doorway using [`BossThresholdView`]. Purely decorative:
+//!    **never changes collision**.
 //!
 //! # Generator Neighbor-Mask Contract
 //!
@@ -516,7 +522,36 @@ pub const fn one_way_gate_rect(cell_x: i32, cell_y: i32, dir: Cardinal) -> Rectf
     }
 }
 
-// ---- Theme Material Palettes -----------------------------------------------
+// ---- Theme Material Palettes & Precomputed LUTs ----------------------------
+
+#[inline]
+const fn mix_c(a: Rgb, b: Rgb, t: f32) -> Rgb {
+    let t = if t < 0.0 {
+        0.0
+    } else if t > 1.0 {
+        1.0
+    } else {
+        t
+    };
+    (
+        (a.0 as f32 + (b.0 as f32 - a.0 as f32) * t) as u8,
+        (a.1 as f32 + (b.1 as f32 - a.1 as f32) * t) as u8,
+        (a.2 as f32 + (b.2 as f32 - a.2 as f32) * t) as u8,
+    )
+}
+
+#[inline]
+const fn scale_c(a: Rgb, f: f32) -> Rgb {
+    let f = if f < 0.0 { 0.0 } else { f };
+    let r = a.0 as f32 * f;
+    let g = a.1 as f32 * f;
+    let b = a.2 as f32 * f;
+    (
+        if r > 255.0 { 255 } else { r as u8 },
+        if g > 255.0 { 255 } else { g as u8 },
+        if b > 255.0 { 255 } else { b as u8 },
+    )
+}
 
 #[derive(Clone, Copy)]
 struct WallPalette {
@@ -542,76 +577,260 @@ struct WallPalette {
     thresh_hi: Rgb,
 }
 
-fn theme_palette(theme: Theme) -> WallPalette {
+const PAL_SEWER: WallPalette = WallPalette {
+    outline: (12, 20, 18),
+    top_base: (50, 74, 69),
+    top_alt: (43, 65, 60),
+    top_hi: (94, 134, 124),
+    top_lo: (30, 48, 45),
+    cornice: (106, 146, 136),
+    front_base: (38, 60, 55),
+    front_alt: (48, 72, 65),
+    front_dark: (20, 34, 31),
+    mortar: (18, 30, 28),
+    trim_hi: (128, 156, 148),
+    trim_lo: (25, 38, 36),
+    detail_a: (60, 102, 50),  // damp moss (richer green pop)
+    detail_b: (92, 118, 114), // bolted sewer pipe iron
+    detail_c: (116, 72, 46),  // weathered iron rust patina
+    maze_top: (76, 88, 84),   // cast-iron culvert slat divider
+    maze_hi: (132, 148, 140),
+    maze_front: (46, 58, 56),
+    thresh_base: (34, 50, 48),
+    thresh_hi: (84, 112, 106),
+};
+
+const PAL_KITCHEN: WallPalette = WallPalette {
+    outline: (26, 17, 11),
+    top_base: (104, 78, 54),
+    top_alt: (94, 70, 48),
+    top_hi: (166, 132, 94),
+    top_lo: (62, 44, 30),
+    cornice: (178, 142, 100),
+    front_base: (86, 60, 38),
+    front_alt: (134, 116, 92), // crisp cream-ochre subway tile dado
+    front_dark: (44, 28, 18),  // rich dark mahogany skirting board
+    mortar: (46, 32, 22),
+    trim_hi: (206, 172, 98),   // brushed brass hardware
+    trim_lo: (54, 36, 22),
+    detail_a: (212, 178, 96),  // brass cabinet knobs
+    detail_b: (158, 142, 116), // glazed ceramic highlight
+    detail_c: (68, 74, 84),    // wrought-iron pantry strap
+    maze_top: (128, 92, 56),   // slatted oak pantry divider
+    maze_hi: (186, 144, 94),
+    maze_front: (78, 54, 32),
+    thresh_base: (56, 40, 26),
+    thresh_hi: (178, 146, 86),
+};
+
+const PAL_LAB: WallPalette = WallPalette {
+    outline: (12, 15, 24),
+    top_base: (52, 62, 88),
+    top_alt: (44, 54, 78),
+    top_hi: (114, 134, 170),
+    top_lo: (28, 34, 52),
+    cornice: (128, 148, 186),
+    front_base: (40, 48, 72),
+    front_alt: (52, 62, 90),
+    front_dark: (20, 24, 38),
+    mortar: (19, 24, 38),
+    trim_hi: (150, 168, 200),
+    trim_lo: (24, 30, 44),
+    detail_a: (190, 154, 64),  // industrial hazard ochre
+    detail_b: (76, 92, 122),   // conduit steel
+    detail_c: (182, 212, 232), // glass/steel glint
+    maze_top: (68, 110, 136),  // frosted glass & steel test maze
+    maze_hi: (154, 210, 232),
+    maze_front: (40, 54, 76),
+    thresh_base: (28, 36, 54),
+    thresh_hi: (98, 118, 150),
+};
+
+#[inline]
+const fn theme_palette(theme: Theme) -> &'static WallPalette {
     match theme {
-        Theme::Sewer => WallPalette {
-            outline: (12, 20, 18),
-            top_base: (50, 74, 69),
-            top_alt: (43, 65, 60),
-            top_hi: (94, 134, 124),
-            top_lo: (30, 48, 45),
-            cornice: (106, 146, 136),
-            front_base: (38, 60, 55),
-            front_alt: (48, 72, 65),
-            front_dark: (20, 34, 31),
-            mortar: (18, 30, 28),
-            trim_hi: (128, 156, 148),
-            trim_lo: (25, 38, 36),
-            detail_a: (60, 102, 50),  // damp moss (richer green pop)
-            detail_b: (92, 118, 114), // bolted sewer pipe iron
-            detail_c: (116, 72, 46),  // weathered iron rust patina
-            maze_top: (76, 88, 84),   // cast-iron culvert slat divider
-            maze_hi: (132, 148, 140),
-            maze_front: (46, 58, 56),
-            thresh_base: (34, 50, 48),
-            thresh_hi: (84, 112, 106),
-        },
-        Theme::Kitchen => WallPalette {
-            outline: (26, 17, 11),
-            top_base: (104, 78, 54),
-            top_alt: (94, 70, 48),
-            top_hi: (166, 132, 94),
-            top_lo: (62, 44, 30),
-            cornice: (178, 142, 100),
-            front_base: (86, 60, 38),
-            front_alt: (134, 116, 92), // crisp cream-ochre subway tile dado
-            front_dark: (44, 28, 18),  // rich dark mahogany skirting board
-            mortar: (46, 32, 22),
-            trim_hi: (206, 172, 98),   // brushed brass hardware
-            trim_lo: (54, 36, 22),
-            detail_a: (212, 178, 96),  // brass cabinet knobs
-            detail_b: (158, 142, 116), // glazed ceramic highlight
-            detail_c: (68, 74, 84),    // wrought-iron pantry strap
-            maze_top: (128, 92, 56),   // slatted oak pantry divider
-            maze_hi: (186, 144, 94),
-            maze_front: (78, 54, 32),
-            thresh_base: (56, 40, 26),
-            thresh_hi: (178, 146, 86),
-        },
-        Theme::Lab => WallPalette {
-            outline: (12, 15, 24),
-            top_base: (52, 62, 88),
-            top_alt: (44, 54, 78),
-            top_hi: (114, 134, 170),
-            top_lo: (28, 34, 52),
-            cornice: (128, 148, 186),
-            front_base: (40, 48, 72),
-            front_alt: (52, 62, 90),
-            front_dark: (20, 24, 38),
-            mortar: (19, 24, 38),
-            trim_hi: (150, 168, 200),
-            trim_lo: (24, 30, 44),
-            detail_a: (190, 154, 64),  // industrial hazard ochre
-            detail_b: (76, 92, 122),   // conduit steel
-            detail_c: (182, 212, 232), // glass/steel glint
-            maze_top: (68, 110, 136),  // frosted glass & steel test maze
-            maze_hi: (154, 210, 232),
-            maze_front: (40, 54, 76),
-            thresh_base: (28, 36, 54),
-            thresh_hi: (98, 118, 150),
-        },
+        Theme::Sewer => &PAL_SEWER,
+        Theme::Kitchen => &PAL_KITCHEN,
+        Theme::Lab => &PAL_LAB,
     }
 }
+
+/// Precomputed compile-time color table for Sewer top coping stones.
+struct SewerTopLut {
+    base: [Rgb; 3],
+    mortar: [Rgb; 3],
+    hi: [Rgb; 3],
+    crack: [Rgb; 3],
+    moss_base: Rgb,
+    moss_mortar: Rgb,
+    moss_hi: Rgb,
+}
+
+const SEWER_TOP_LUT: SewerTopLut = {
+    let p = PAL_SEWER;
+    let b0 = p.top_alt;
+    let b1 = scale_c(p.top_base, 1.08);
+    let b2 = p.top_base;
+    let m0 = mix_c(b0, p.mortar, 0.64);
+    let m1 = mix_c(b1, p.mortar, 0.64);
+    let m2 = mix_c(b2, p.mortar, 0.64);
+    let h0 = mix_c(b0, p.top_hi, 0.16);
+    let h1 = mix_c(b1, p.top_hi, 0.16);
+    let h2 = mix_c(b2, p.top_hi, 0.16);
+    SewerTopLut {
+        base: [b0, b1, b2],
+        mortar: [m0, m1, m2],
+        hi: [h0, h1, h2],
+        crack: [scale_c(b0, 0.66), scale_c(b1, 0.66), scale_c(b2, 0.66)],
+        moss_base: mix_c(b2, p.detail_a, 0.52),
+        moss_mortar: mix_c(m2, p.detail_a, 0.52),
+        moss_hi: mix_c(h2, p.detail_a, 0.52),
+    }
+};
+
+/// Precomputed compile-time color table for Sewer south brick front face.
+struct SewerFrontLut {
+    brick: [Rgb; 2],
+    brick_hi: [Rgb; 2],
+    brick_bot: [Rgb; 2],
+    moss_hi: Rgb,
+    moss_lo: Rgb,
+}
+
+const SEWER_FRONT_LUT: SewerFrontLut = {
+    let p = PAL_SEWER;
+    SewerFrontLut {
+        brick: [p.front_base, p.front_alt],
+        brick_hi: [
+            mix_c(p.front_base, p.top_hi, 0.16),
+            mix_c(p.front_alt, p.top_hi, 0.16),
+        ],
+        brick_bot: [
+            mix_c(p.front_base, p.front_dark, 0.68),
+            mix_c(p.front_alt, p.front_dark, 0.68),
+        ],
+        moss_hi: scale_c(p.detail_a, 1.15),
+        moss_lo: scale_c(p.detail_a, 0.88),
+    }
+};
+
+/// Precomputed compile-time color table for Kitchen top oak planks.
+/// Indexed by `row_kind` (0 = plain, 1 = py_in==0 mortar, 2 = py_in==1 hi) and `bi` (0..2).
+struct KitchenTopLut {
+    row: [[Rgb; 2]; 3],
+    row_grain: [[Rgb; 2]; 3],
+    seam: [[Rgb; 2]; 3],
+    seam_grain: [[Rgb; 2]; 3],
+}
+
+const KITCHEN_TOP_LUT: KitchenTopLut = {
+    let p = PAL_KITCHEN;
+    let b = [p.top_base, p.top_alt];
+    let r0 = [mix_c(b[0], p.mortar, 0.32), mix_c(b[1], p.mortar, 0.32)];
+    let r1 = [mix_c(b[0], p.top_hi, 0.14), mix_c(b[1], p.top_hi, 0.14)];
+    let s_plain = [mix_c(b[0], p.mortar, 0.48), mix_c(b[1], p.mortar, 0.48)];
+    let s_r0 = [mix_c(r0[0], p.mortar, 0.48), mix_c(r0[1], p.mortar, 0.48)];
+    let s_r1 = [mix_c(r1[0], p.mortar, 0.48), mix_c(r1[1], p.mortar, 0.48)];
+    KitchenTopLut {
+        row: [b, r0, r1],
+        row_grain: [
+            [scale_c(b[0], 0.93), scale_c(b[1], 0.93)],
+            [scale_c(r0[0], 0.93), scale_c(r0[1], 0.93)],
+            [scale_c(r1[0], 0.93), scale_c(r1[1], 0.93)],
+        ],
+        seam: [s_plain, s_r0, s_r1],
+        seam_grain: [
+            [scale_c(s_plain[0], 0.93), scale_c(s_plain[1], 0.93)],
+            [scale_c(s_r0[0], 0.93), scale_c(s_r0[1], 0.93)],
+            [scale_c(s_r1[0], 0.93), scale_c(s_r1[1], 0.93)],
+        ],
+    }
+};
+
+/// Precomputed compile-time color table for Kitchen cabinets and subway tile dado.
+struct KitchenFrontLut {
+    cab_div: Rgb,
+    cab_seam: Rgb,
+    cab_hi: Rgb,
+    cab_panel_sh: Rgb,
+    skirt_lip: Rgb,
+    tile_grout: Rgb,
+    tile: [Rgb; 2],
+    tile_bot: [Rgb; 2],
+    tile_hi: [Rgb; 2],
+}
+
+const KITCHEN_FRONT_LUT: KitchenFrontLut = {
+    let p = PAL_KITCHEN;
+    let t0 = p.front_alt;
+    let t1 = scale_c(p.front_alt, 0.91);
+    KitchenFrontLut {
+        cab_div: scale_c(p.front_base, 0.56),
+        cab_seam: scale_c(p.front_base, 0.66),
+        cab_hi: scale_c(p.front_base, 1.12),
+        cab_panel_sh: scale_c(p.front_base, 0.72),
+        skirt_lip: scale_c(p.front_base, 0.88),
+        tile_grout: mix_c(p.front_alt, p.mortar, 0.56),
+        tile: [t0, t1],
+        tile_bot: [scale_c(t0, 0.86), scale_c(t1, 0.86)],
+        tile_hi: [mix_c(t0, p.detail_b, 0.48), mix_c(t1, p.detail_b, 0.48)],
+    }
+};
+
+/// Precomputed compile-time color table for Lab interlocking hull armor plates.
+struct LabTopLut {
+    base: [Rgb; 3],
+    seam: [Rgb; 3],
+    hi: [Rgb; 3],
+    bolt: [Rgb; 3],
+    conduit: Rgb,
+}
+
+const LAB_TOP_LUT: LabTopLut = {
+    let p = PAL_LAB;
+    let b0 = p.top_alt;
+    let b1 = scale_c(p.top_base, 1.07);
+    let b2 = p.top_base;
+    LabTopLut {
+        base: [b0, b1, b2],
+        seam: [
+            mix_c(b0, p.mortar, 0.72),
+            mix_c(b1, p.mortar, 0.72),
+            mix_c(b2, p.mortar, 0.72),
+        ],
+        hi: [
+            mix_c(b0, p.top_hi, 0.20),
+            mix_c(b1, p.top_hi, 0.20),
+            mix_c(b2, p.top_hi, 0.20),
+        ],
+        bolt: [
+            mix_c(b0, p.trim_hi, 0.50),
+            mix_c(b1, p.trim_hi, 0.50),
+            mix_c(b2, p.trim_hi, 0.50),
+        ],
+        conduit: mix_c(b2, p.mortar, 0.62),
+    }
+};
+
+/// Precomputed compile-time color table for Lab steel bulkhead front face.
+struct LabFrontLut {
+    hazard_hi: Rgb,
+    hazard_lo: Rgb,
+    rib_lo: Rgb,
+    rib_hi: Rgb,
+    mid_band: Rgb,
+}
+
+const LAB_FRONT_LUT: LabFrontLut = {
+    let p = PAL_LAB;
+    LabFrontLut {
+        hazard_hi: p.detail_a,
+        hazard_lo: scale_c(p.detail_a, 0.82),
+        rib_lo: scale_c(p.front_base, 0.64),
+        rib_hi: mix_c(p.front_alt, p.trim_hi, 0.28),
+        mid_band: scale_c(p.front_base, 0.82),
+    }
+};
 
 // ---- Deterministic Hashing & Pixel Helpers ---------------------------------
 
@@ -654,7 +873,7 @@ fn darken_px(pb: &mut PixelBuffer, x: i32, y: i32, factor: f32) {
         return;
     }
     let cur = pb.pixel_at(ux, uy);
-    pb.plot(x, y, palette::scale(cur, factor));
+    pb.plot(x, y, scale_c(cur, factor));
 }
 
 #[inline]
@@ -667,7 +886,7 @@ fn blend_px(pb: &mut PixelBuffer, x: i32, y: i32, c: Rgb, alpha: f32) {
         return;
     }
     let cur = pb.pixel_at(ux, uy);
-    pb.plot(x, y, palette::mix(cur, c, alpha));
+    pb.plot(x, y, mix_c(cur, c, alpha));
 }
 
 // ============================================================================
@@ -680,6 +899,12 @@ fn blend_px(pb: &mut PixelBuffer, x: i32, y: i32, c: Rgb, alpha: f32) {
 /// Call right after `art_floor::draw_floor` and floor stains, **before**
 /// entities, traps, pickups, and [`draw_wall_cell`]. Zero heap allocation.
 pub fn draw_wall_ground(pb: &mut PixelBuffer, view: &WallCellView, cam: Vec2, accent: Rgb) {
+    if matches!(view.kind, WallKind::Solid)
+        && view.mask.has(NeighborMask::S)
+        && view.mask.has(NeighborMask::E)
+    {
+        return;
+    }
     let (sx, sy) = cell_screen_origin(view, cam);
     if culled(pb, sx, sy) {
         return;
@@ -691,7 +916,7 @@ pub fn draw_wall_ground(pb: &mut PixelBuffer, view: &WallCellView, cam: Vec2, ac
         WallKind::Maze => draw_maze_shadow(pb, sx, sy, view.mask),
         WallKind::RatHole { axis } => draw_rathole_ground(pb, sx, sy, view.mask, axis),
         WallKind::Doorway { axis } => {
-            draw_doorway_ground(pb, sx, sy, view.mask, axis, view.theme, &pal, accent);
+            draw_doorway_ground(pb, sx, sy, view.mask, axis, view.theme, pal, accent);
         }
         WallKind::OneWayDoor { dir } => {
             draw_doorway_ground(
@@ -701,7 +926,7 @@ pub fn draw_wall_ground(pb: &mut PixelBuffer, view: &WallCellView, cam: Vec2, ac
                 view.mask,
                 dir.wall_axis(),
                 view.theme,
-                &pal,
+                pal,
                 accent,
             );
             draw_oneway_chevron(pb, sx, sy, dir, view.open_progress, view.anim_clock, accent);
@@ -1093,14 +1318,626 @@ pub fn draw_wall_cell(pb: &mut PixelBuffer, view: &WallCellView, cam: Vec2, acce
 
     match view.kind {
         WallKind::Solid => {
-            draw_solid_cell(pb, sx, sy, view, &pal, accent, 0..CELL_SIZE, 0..CELL_SIZE)
+            draw_solid_cell(pb, sx, sy, view, pal, accent, 0..CELL_SIZE, 0..CELL_SIZE)
         }
-        WallKind::Maze => draw_maze_cell(pb, sx, sy, view, &pal, accent),
-        WallKind::RatHole { axis } => draw_rathole_cell(pb, sx, sy, view, &pal, accent, axis),
-        WallKind::Doorway { axis } => draw_doorway_jambs(pb, sx, sy, view, &pal, accent, axis),
+        WallKind::Maze => draw_maze_cell(pb, sx, sy, view, pal, accent),
+        WallKind::RatHole { axis } => draw_rathole_cell(pb, sx, sy, view, pal, accent, axis),
+        WallKind::Doorway { axis } => draw_doorway_jambs(pb, sx, sy, view, pal, accent, axis),
         WallKind::OneWayDoor { dir } => {
-            draw_doorway_jambs(pb, sx, sy, view, &pal, accent, dir.wall_axis());
-            draw_oneway_gate(pb, sx, sy, view, &pal, accent, dir);
+            draw_doorway_jambs(pb, sx, sy, view, pal, accent, dir.wall_axis());
+            draw_oneway_gate(pb, sx, sy, view, pal, accent, dir);
+        }
+    }
+}
+
+/// Fast span-based Lab solid interior renderer (`NeighborMask::ALL`, full 16×16 cell).
+/// Computes at most 2 divisions and 2–4 block hashes per cell instead of 256 per pixel,
+/// using compile-time [`LAB_TOP_LUT`] colors and `PixelBuffer::rect_fill`.
+#[inline]
+fn draw_lab_solid_interior(pb: &mut PixelBuffer, sx: i32, sy: i32, view: &WallCellView) {
+    let (wx0, _) = view.world_origin();
+    let bh = pb.h as i32;
+    for band in 0..2i32 {
+        let y_base = sy + band * 8;
+        if y_base + 8 <= 0 || y_base >= bh {
+            continue;
+        }
+        let row = view.cell_y * 2 + band;
+        let stagger = band * 10;
+        let x_start = wx0 + stagger;
+        let col0 = x_start.div_euclid(20);
+        let bx0 = x_start.rem_euclid(20);
+        let seg0_w = (20 - bx0).min(CELL_SIZE);
+
+        draw_lab_plate_segment(pb, sx, y_base, seg0_w, bx0, hash3(col0, row, 0x33F5));
+        if seg0_w < CELL_SIZE {
+            draw_lab_plate_segment(
+                pb,
+                sx + seg0_w,
+                y_base,
+                CELL_SIZE - seg0_w,
+                0,
+                hash3(col0 + 1, row, 0x33F5),
+            );
+        }
+    }
+}
+
+#[inline]
+fn draw_lab_plate_segment(
+    pb: &mut PixelBuffer,
+    px0: i32,
+    py0: i32,
+    seg_w: i32,
+    bx_start: i32,
+    ph: u32,
+) {
+    let bi = if (ph & 3) == 0 {
+        0
+    } else if (ph & 7) == 2 {
+        1
+    } else {
+        2
+    };
+    let base = LAB_TOP_LUT.base[bi];
+    let seam = LAB_TOP_LUT.seam[bi];
+    let hi = LAB_TOP_LUT.hi[bi];
+    let bolt = LAB_TOP_LUT.bolt[bi];
+    let bx_end = bx_start + seg_w;
+
+    // by == 0: horizontal plate seam
+    pb.rect_fill(px0, py0, seg_w, 1, seam);
+    // by == 1: top bevel highlight (`bx in 2..19`), base at `bx == 1, 19`, seam at `bx == 0`
+    pb.rect_fill(px0, py0 + 1, seg_w, 1, hi);
+    if bx_start == 0 {
+        pb.plot(px0, py0 + 1, seam);
+    }
+    if bx_start <= 1 && bx_end > 1 {
+        pb.plot(px0 + (1 - bx_start), py0 + 1, base);
+    }
+    if bx_start <= 19 && bx_end > 19 {
+        pb.plot(px0 + (19 - bx_start), py0 + 1, base);
+    }
+    // by in 2..8: plate body + left vertical seam + corner hex bolts + optional conduit
+    pb.rect_fill(px0, py0 + 2, seg_w, 6, base);
+    if bx_start == 0 {
+        pb.rect_fill(px0, py0 + 2, 1, 6, seam);
+    }
+    if bx_start <= 2 && bx_end > 2 {
+        let bx_x = px0 + (2 - bx_start);
+        pb.plot(bx_x, py0 + 2, bolt);
+        pb.plot(bx_x, py0 + 6, bolt);
+    }
+    if bx_start <= 17 && bx_end > 17 {
+        let bx_x = px0 + (17 - bx_start);
+        pb.plot(bx_x, py0 + 2, bolt);
+        pb.plot(bx_x, py0 + 6, bolt);
+    }
+    if (ph & 7) == 5 {
+        let c0 = 4.max(bx_start);
+        let c1 = 16.min(bx_end);
+        if c0 < c1 {
+            pb.rect_fill(px0 + (c0 - bx_start), py0 + 4, c1 - c0, 1, LAB_TOP_LUT.conduit);
+        }
+    }
+}
+
+/// Fast span-based Sewer solid interior renderer (`NeighborMask::ALL`, full 16×16 cell).
+#[inline]
+fn draw_sewer_solid_interior(pb: &mut PixelBuffer, sx: i32, sy: i32, view: &WallCellView, cell_h: u32) {
+    let (_, wy0) = view.world_origin();
+    let allow_moss = (cell_h & 7) < 3;
+    let has_crack = (cell_h & 15) == 4;
+    let bh = pb.h as i32;
+
+    let mut ly = 0;
+    let mut row = wy0.div_euclid(6);
+    let mut by0 = wy0.rem_euclid(6);
+    while ly < CELL_SIZE {
+        let band_h = (6 - by0).min(CELL_SIZE - ly);
+        let py_band = sy + ly;
+        if py_band + band_h > 0 && py_band < bh {
+            let base_col = view.cell_x * 2;
+            if (row & 1) == 0 {
+                draw_sewer_stone_segment(
+                    pb, sx, py_band, 8, band_h, 0, by0, base_col, row, allow_moss, has_crack,
+                );
+                draw_sewer_stone_segment(
+                    pb, sx + 8, py_band, 8, band_h, 0, by0, base_col + 1, row, allow_moss, has_crack,
+                );
+            } else {
+                draw_sewer_stone_segment(
+                    pb, sx, py_band, 4, band_h, 4, by0, base_col, row, allow_moss, has_crack,
+                );
+                draw_sewer_stone_segment(
+                    pb, sx + 4, py_band, 8, band_h, 0, by0, base_col + 1, row, allow_moss, has_crack,
+                );
+                draw_sewer_stone_segment(
+                    pb, sx + 12, py_band, 4, band_h, 0, by0, base_col + 2, row, allow_moss, has_crack,
+                );
+            }
+        }
+        ly += band_h;
+        row += 1;
+        by0 = 0;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn draw_sewer_stone_segment(
+    pb: &mut PixelBuffer,
+    px0: i32,
+    py0: i32,
+    seg_w: i32,
+    band_h: i32,
+    bx_start: i32,
+    by0: i32,
+    col: i32,
+    row: i32,
+    allow_moss: bool,
+    has_crack: bool,
+) {
+    let sh = hash3(col, row, 0x1147);
+    let bi = if (sh & 3) == 0 {
+        0
+    } else if (sh & 7) == 1 {
+        1
+    } else {
+        2
+    };
+    let moss = allow_moss && (sh & 7) == 5;
+    let by_end = by0 + band_h;
+
+    pb.rect_fill(px0, py0, seg_w, band_h, SEWER_TOP_LUT.base[bi]);
+    if bx_start == 0 {
+        pb.rect_fill(px0, py0, 1, band_h, SEWER_TOP_LUT.mortar[bi]);
+    }
+    if by0 == 0 {
+        let c = if moss {
+            SEWER_TOP_LUT.moss_mortar
+        } else {
+            SEWER_TOP_LUT.mortar[bi]
+        };
+        pb.rect_fill(px0, py0, seg_w, 1, c);
+    }
+    if by0 <= 1 && by_end > 1 {
+        let y1 = py0 + (1 - by0);
+        let hi_c = if moss {
+            SEWER_TOP_LUT.moss_hi
+        } else {
+            SEWER_TOP_LUT.hi[bi]
+        };
+        if bx_start == 0 {
+            let m_c = if moss {
+                SEWER_TOP_LUT.moss_mortar
+            } else {
+                SEWER_TOP_LUT.mortar[bi]
+            };
+            pb.plot(px0, y1, m_c);
+            if seg_w > 1 {
+                pb.rect_fill(px0 + 1, y1, seg_w - 1, 1, hi_c);
+            }
+        } else {
+            pb.rect_fill(px0, y1, seg_w, 1, hi_c);
+        }
+    }
+    if moss && by0 <= 2 && by_end > 2 {
+        let y2 = py0 + (2 - by0);
+        if bx_start == 0 {
+            pb.plot(px0, y2, SEWER_TOP_LUT.moss_mortar);
+            if seg_w > 1 {
+                pb.rect_fill(px0 + 1, y2, seg_w - 1, 1, SEWER_TOP_LUT.moss_base);
+            }
+        } else {
+            pb.rect_fill(px0, y2, seg_w, 1, SEWER_TOP_LUT.moss_base);
+        }
+    }
+    if has_crack && bx_start <= 3 && bx_start + seg_w > 3 {
+        let cx = px0 + (3 - bx_start);
+        let cc = SEWER_TOP_LUT.crack[bi];
+        if by0 <= 2 && by_end > 2 {
+            pb.plot(cx, py0 + (2 - by0), cc);
+        }
+        if by0 <= 3 && by_end > 3 {
+            pb.plot(cx, py0 + (3 - by0), cc);
+        }
+    }
+}
+
+/// Fast span-based Kitchen solid interior renderer (`NeighborMask::ALL`, full 16×16 cell).
+#[inline]
+fn draw_kitchen_solid_interior(pb: &mut PixelBuffer, sx: i32, sy: i32, view: &WallCellView) {
+    let (wx0, wy0) = view.world_origin();
+    let bh = pb.h as i32;
+
+    let mut ly = 0;
+    let mut plank = wy0.div_euclid(5);
+    let mut py0 = wy0.rem_euclid(5);
+    while ly < CELL_SIZE {
+        let band_h = (5 - py0).min(CELL_SIZE - ly);
+        let stagger = (plank & 1) * 11;
+        let x_start = wx0 + stagger;
+        let col0 = x_start.div_euclid(22);
+        let sx0 = x_start.rem_euclid(22);
+        let seg0_w = (22 - sx0).min(CELL_SIZE);
+        let bi0 = (hash3(plank, col0, 0x2291) & 1) as usize;
+        let bi1 = if seg0_w < CELL_SIZE {
+            (hash3(plank, col0 + 1, 0x2291) & 1) as usize
+        } else {
+            0
+        };
+
+        for dy in 0..band_h {
+            let py = sy + ly + dy;
+            if py < 0 || py >= bh {
+                continue;
+            }
+            let py_in = py0 + dy;
+            let wy = wy0 + ly + dy;
+            let rk = if py_in == 0 {
+                1
+            } else if py_in == 1 {
+                2
+            } else {
+                0
+            };
+
+            pb.rect_fill(sx, py, seg0_w, 1, KITCHEN_TOP_LUT.row[rk][bi0]);
+            if sx0 == 0 {
+                pb.plot(sx, py, KITCHEN_TOP_LUT.seam[rk][bi0]);
+            }
+            if seg0_w < CELL_SIZE {
+                pb.rect_fill(
+                    sx + seg0_w,
+                    py,
+                    CELL_SIZE - seg0_w,
+                    1,
+                    KITCHEN_TOP_LUT.row[rk][bi1],
+                );
+                pb.plot(sx + seg0_w, py, KITCHEN_TOP_LUT.seam[rk][bi1]);
+            }
+
+            // Wood grain flecks (`(wx + wy * 3) & 7 == 0`): exactly 2 pixels per 16-px row
+            let g0 = (-(wx0 + wy * 3)).rem_euclid(8);
+            for lx in [g0, g0 + 8] {
+                let c = if lx < seg0_w {
+                    if sx0 == 0 && lx == 0 {
+                        KITCHEN_TOP_LUT.seam_grain[rk][bi0]
+                    } else {
+                        KITCHEN_TOP_LUT.row_grain[rk][bi0]
+                    }
+                } else if lx == seg0_w {
+                    KITCHEN_TOP_LUT.seam_grain[rk][bi1]
+                } else {
+                    KITCHEN_TOP_LUT.row_grain[rk][bi1]
+                };
+                pb.plot(sx + lx, py, c);
+            }
+        }
+        ly += band_h;
+        plank += 1;
+        py0 = 0;
+    }
+}
+
+/// Fill one row (`x_start..x_end`) of top-face material pixels without per-pixel
+/// divisions, hashing, or floating-point palette math.
+#[inline]
+fn fill_top_row(
+    theme: Theme,
+    wx0: i32,
+    wy: i32,
+    cell_h: u32,
+    x_start: i32,
+    x_end: i32,
+    row_px: &mut [Rgb; CELL_SIZE as usize],
+) {
+    match theme {
+        Theme::Sewer => {
+            let row = wy.div_euclid(6);
+            let by = wy.rem_euclid(6);
+            let stagger = (row & 1) * 4;
+            let allow_moss = (cell_h & 7) < 3 && by <= 2;
+            let has_crack = (cell_h & 15) == 4 && (by == 2 || by == 3);
+
+            let x0 = wx0 + x_start + stagger;
+            let mut col = x0.div_euclid(8);
+            let mut bx = x0.rem_euclid(8);
+            let mut sh = hash3(col, row, 0x1147);
+            let mut bi = if sh & 3 == 0 {
+                0
+            } else if sh & 7 == 1 {
+                1
+            } else {
+                2
+            };
+            let mut moss = allow_moss && (sh & 7) == 5;
+
+            for lx in x_start..x_end {
+                let c = if bx == 0 || by == 0 {
+                    if moss {
+                        SEWER_TOP_LUT.moss_mortar
+                    } else {
+                        SEWER_TOP_LUT.mortar[bi]
+                    }
+                } else if by == 1 {
+                    if moss {
+                        SEWER_TOP_LUT.moss_hi
+                    } else {
+                        SEWER_TOP_LUT.hi[bi]
+                    }
+                } else if moss {
+                    SEWER_TOP_LUT.moss_base
+                } else if has_crack && bx == 3 {
+                    SEWER_TOP_LUT.crack[bi]
+                } else {
+                    SEWER_TOP_LUT.base[bi]
+                };
+                row_px[lx as usize] = c;
+
+                bx += 1;
+                if bx == 8 {
+                    bx = 0;
+                    col += 1;
+                    sh = hash3(col, row, 0x1147);
+                    bi = if sh & 3 == 0 {
+                        0
+                    } else if sh & 7 == 1 {
+                        1
+                    } else {
+                        2
+                    };
+                    moss = allow_moss && (sh & 7) == 5;
+                }
+            }
+        }
+        Theme::Kitchen => {
+            let plank = wy.div_euclid(5);
+            let py_in = wy.rem_euclid(5);
+            let rk = if py_in == 0 {
+                1
+            } else if py_in == 1 {
+                2
+            } else {
+                0
+            };
+            let stagger = (plank & 1) * 11;
+            let x0 = wx0 + x_start + stagger;
+            let mut col = x0.div_euclid(22);
+            let mut seam_x = x0.rem_euclid(22);
+            let mut bi = (hash3(plank, col, 0x2291) & 1) as usize;
+            let mut grain_phase = (wx0 + x_start + wy * 3) & 7;
+
+            for lx in x_start..x_end {
+                let c = if grain_phase == 0 {
+                    if seam_x == 0 {
+                        KITCHEN_TOP_LUT.seam_grain[rk][bi]
+                    } else {
+                        KITCHEN_TOP_LUT.row_grain[rk][bi]
+                    }
+                } else if seam_x == 0 {
+                    KITCHEN_TOP_LUT.seam[rk][bi]
+                } else {
+                    KITCHEN_TOP_LUT.row[rk][bi]
+                };
+                row_px[lx as usize] = c;
+
+                seam_x += 1;
+                if seam_x == 22 {
+                    seam_x = 0;
+                    col += 1;
+                    bi = (hash3(plank, col, 0x2291) & 1) as usize;
+                }
+                grain_phase = (grain_phase + 1) & 7;
+            }
+        }
+        Theme::Lab => {
+            let row = wy.div_euclid(8);
+            let by = wy.rem_euclid(8);
+            let stagger = (row & 1) * 10;
+            let x0 = wx0 + x_start + stagger;
+            let mut col = x0.div_euclid(20);
+            let mut bx = x0.rem_euclid(20);
+            let mut ph = hash3(col, row, 0x33F5);
+            let mut bi = if (ph & 3) == 0 {
+                0
+            } else if (ph & 7) == 2 {
+                1
+            } else {
+                2
+            };
+            let mut has_conduit = by == 4 && (ph & 7) == 5;
+            let is_bolt_row = by == 2 || by == 6;
+
+            for lx in x_start..x_end {
+                let c = if bx == 0 || by == 0 {
+                    LAB_TOP_LUT.seam[bi]
+                } else if by == 1 && bx > 1 && bx < 19 {
+                    LAB_TOP_LUT.hi[bi]
+                } else if is_bolt_row && (bx == 2 || bx == 17) {
+                    LAB_TOP_LUT.bolt[bi]
+                } else if has_conduit && (4..=15).contains(&bx) {
+                    LAB_TOP_LUT.conduit
+                } else {
+                    LAB_TOP_LUT.base[bi]
+                };
+                row_px[lx as usize] = c;
+
+                bx += 1;
+                if bx == 20 {
+                    bx = 0;
+                    col += 1;
+                    ph = hash3(col, row, 0x33F5);
+                    bi = if (ph & 3) == 0 {
+                        0
+                    } else if (ph & 7) == 2 {
+                        1
+                    } else {
+                        2
+                    };
+                    has_conduit = by == 4 && (ph & 7) == 5;
+                }
+            }
+        }
+    }
+}
+
+/// Fill one row (`x_start..x_end`) of south front-face material (`fy in 0..5`)
+/// without per-pixel divisions, hashing, or palette math.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn fill_front_row(
+    theme: Theme,
+    wx0: i32,
+    fy: i32,
+    cell_h: u32,
+    bay_h: u32,
+    has_w: bool,
+    has_e: bool,
+    pal: &WallPalette,
+    x_start: i32,
+    x_end: i32,
+    row_px: &mut [Rgb; CELL_SIZE as usize],
+) {
+    match theme {
+        Theme::Sewer => {
+            let course = if fy < 2 { 0 } else { 1 };
+            let x0 = wx0 + x_start + course * 3;
+            let mut bcol = x0.div_euclid(6);
+            let mut bx = x0.rem_euclid(6);
+            let mut bi = (hash3(bcol, course, 0x4129) & 1) as usize;
+            let has_moss_tongue = (cell_h & 7) < 3;
+            let mx = 3 + ((cell_h >> 3) % 9) as i32;
+            let moss_col = if fy == 1 {
+                SEWER_FRONT_LUT.moss_hi
+            } else {
+                SEWER_FRONT_LUT.moss_lo
+            };
+
+            for lx in x_start..x_end {
+                let mut c = if fy == 2 || bx == 0 {
+                    pal.mortar
+                } else if fy == 1 && bx == 1 {
+                    SEWER_FRONT_LUT.brick_hi[bi]
+                } else if fy == 4 {
+                    SEWER_FRONT_LUT.brick_bot[bi]
+                } else {
+                    SEWER_FRONT_LUT.brick[bi]
+                };
+                if has_moss_tongue {
+                    let md = (lx - mx).abs();
+                    if md <= 2 && fy <= (3 - md).max(0) {
+                        c = mix_c(c, moss_col, 0.78);
+                    }
+                }
+                row_px[lx as usize] = c;
+
+                bx += 1;
+                if bx == 6 {
+                    bx = 0;
+                    bcol += 1;
+                    bi = (hash3(bcol, course, 0x4129) & 1) as usize;
+                }
+            }
+        }
+        Theme::Kitchen => {
+            let is_cabinet = (bay_h & 1) == 0 && (has_w || has_e);
+            if is_cabinet {
+                if fy == 4 {
+                    for lx in x_start..x_end {
+                        row_px[lx as usize] = pal.front_dark;
+                    }
+                } else {
+                    let panel_row = fy == 1 || fy == 2;
+                    let panel_c = if fy == 1 {
+                        KITCHEN_FRONT_LUT.cab_panel_sh
+                    } else {
+                        KITCHEN_FRONT_LUT.cab_hi
+                    };
+                    for lx in x_start..x_end {
+                        row_px[lx as usize] = if lx == 0 || lx == 15 {
+                            KITCHEN_FRONT_LUT.cab_div
+                        } else if lx == 7 {
+                            KITCHEN_FRONT_LUT.cab_seam
+                        } else if lx == 8 {
+                            KITCHEN_FRONT_LUT.cab_hi
+                        } else if panel_row {
+                            panel_c
+                        } else {
+                            pal.front_base
+                        };
+                    }
+                }
+            } else if fy >= 3 {
+                let c = if fy == 3 {
+                    KITCHEN_FRONT_LUT.skirt_lip
+                } else {
+                    pal.front_dark
+                };
+                for lx in x_start..x_end {
+                    row_px[lx as usize] = c;
+                }
+            } else {
+                let course = if fy <= 1 { 0 } else { 1 };
+                let x0 = wx0 + x_start + course * 2;
+                let mut tile_id = x0.div_euclid(5);
+                let mut tile_x = x0.rem_euclid(5);
+                for lx in x_start..x_end {
+                    row_px[lx as usize] = if tile_x == 0 {
+                        KITCHEN_FRONT_LUT.tile_grout
+                    } else {
+                        let ti = ((tile_id + course) & 1) as usize;
+                        if fy == 2 {
+                            KITCHEN_FRONT_LUT.tile_bot[ti]
+                        } else if fy == 1 && tile_x == 1 {
+                            KITCHEN_FRONT_LUT.tile_hi[ti]
+                        } else {
+                            KITCHEN_FRONT_LUT.tile[ti]
+                        }
+                    };
+                    tile_x += 1;
+                    if tile_x == 5 {
+                        tile_x = 0;
+                        tile_id += 1;
+                    }
+                }
+            }
+        }
+        Theme::Lab => {
+            let hazard = (bay_h & 3) == 1 || (!has_w || !has_e);
+            if hazard && (fy == 2 || fy == 3) {
+                let hi_c = if fy == 2 {
+                    LAB_FRONT_LUT.hazard_hi
+                } else {
+                    LAB_FRONT_LUT.hazard_lo
+                };
+                let mut stripe = (wx0 + x_start + fy).rem_euclid(6);
+                for lx in x_start..x_end {
+                    row_px[lx as usize] = if stripe < 3 { hi_c } else { pal.front_dark };
+                    stripe += 1;
+                    if stripe == 6 {
+                        stripe = 0;
+                    }
+                }
+            } else if fy == 4 {
+                for lx in x_start..x_end {
+                    row_px[lx as usize] = pal.front_dark;
+                }
+            } else {
+                let mid = fy == 2;
+                for lx in x_start..x_end {
+                    row_px[lx as usize] = if lx == 3 || lx == 12 {
+                        LAB_FRONT_LUT.rib_lo
+                    } else if lx == 4 || lx == 13 {
+                        LAB_FRONT_LUT.rib_hi
+                    } else if mid && lx > 4 && lx < 12 {
+                        LAB_FRONT_LUT.mid_band
+                    } else {
+                        pal.front_base
+                    };
+                }
+            }
         }
     }
 }
@@ -1119,6 +1956,35 @@ fn draw_solid_cell(
     y_range: std::ops::Range<i32>,
 ) {
     let m = view.mask;
+
+    // Fast path for interior bedrock cells (no outlines, no front face, no bevels).
+    if m.0 == NeighborMask::ALL.0
+        && x_range.start == 0
+        && x_range.end == CELL_SIZE
+        && y_range.start == 0
+        && y_range.end == CELL_SIZE
+    {
+        match view.theme {
+            Theme::Lab => draw_lab_solid_interior(pb, sx, sy, view),
+            Theme::Sewer => {
+                let cell_h = hash3(view.cell_x, view.cell_y, view.seed);
+                draw_sewer_solid_interior(pb, sx, sy, view, cell_h);
+            }
+            Theme::Kitchen => draw_kitchen_solid_interior(pb, sx, sy, view),
+        }
+        return;
+    }
+
+    let bw = pb.w as i32;
+    let bh = pb.h as i32;
+    let x_start = x_range.start.max(-sx);
+    let x_end = x_range.end.min(bw - sx);
+    let y_start = y_range.start.max(-sy);
+    let y_end = y_range.end.min(bh - sy);
+    if x_start >= x_end || y_start >= y_end {
+        return;
+    }
+
     let has_n = m.has(NeighborMask::N);
     let has_e = m.has(NeighborMask::E);
     let has_s = m.has(NeighborMask::S);
@@ -1135,356 +2001,249 @@ fn draw_solid_cell(
     let bay_h = hash3(view.cell_x.div_euclid(2), view.cell_y, view.seed ^ 0x5A3C);
     let (wx0, wy0) = view.world_origin();
 
-    let bw = pb.w as i32;
-    let bh = pb.h as i32;
+    let mut row_px = [(0u8, 0u8, 0u8); CELL_SIZE as usize];
+    let top_end = y_end.min(top_h);
 
-    for ly in y_range {
+    // --- Lit top face (`ly in y_start..top_end`) ---
+    for ly in y_start..top_end {
         let py = sy + ly;
-        if py < 0 || py >= bh {
+        if ly == 0 && !has_n {
+            pb.rect_fill(sx + x_start, py, x_end - x_start, 1, pal.outline);
             continue;
         }
         let wy = wy0 + ly;
-        let is_front = has_front && ly >= top_h;
+        fill_top_row(view.theme, wx0, wy, cell_h, x_start, x_end, &mut row_px);
 
-        for lx in x_range.clone() {
-            let px = sx + lx;
-            if px < 0 || px >= bw {
-                continue;
+        let cornice = has_front && ly == TOP_FACE_H - 1;
+        let bevel_n = ly == 1 && !has_n;
+        let bevel_w = !has_w || (has_s && !has_sw && ly >= TOP_FACE_H);
+        let bevel_e = !has_e || (has_s && !has_se && ly >= TOP_FACE_H);
+
+        if cornice {
+            for lx in x_start..x_end {
+                row_px[lx as usize] = mix_c(row_px[lx as usize], pal.cornice, 0.74);
             }
-            let wx = wx0 + lx;
-
-            // --- 1. Crisp 1px outer & concave inner outlines ---
-            let outer_n = ly == 0 && !has_n;
-            let outer_s = ly == CELL_SIZE - 1 && !has_s;
-            let outer_w = lx == 0 && !has_w;
-            let outer_e = lx == CELL_SIZE - 1 && !has_e;
-            let inner_nw = lx == 0 && ly == 0 && has_n && has_w && !has_nw;
-            let inner_ne = lx == CELL_SIZE - 1 && ly == 0 && has_n && has_e && !has_ne;
-            let inner_sw_edge = lx == 0 && ly >= TOP_FACE_H && has_s && has_w && !has_sw;
-            let inner_se_edge =
-                lx == CELL_SIZE - 1 && ly >= TOP_FACE_H && has_s && has_e && !has_se;
-
-            if outer_n
-                || outer_s
-                || outer_w
-                || outer_e
-                || inner_nw
-                || inner_ne
-                || inner_sw_edge
-                || inner_se_edge
-            {
-                pb.plot(px, py, pal.outline);
-                continue;
+        } else if bevel_n {
+            for lx in x_start..x_end {
+                row_px[lx as usize] = mix_c(row_px[lx as usize], pal.top_hi, 0.68);
             }
-
-            // --- 2. South vertical front face (ly in 10..15) ---
-            if is_front {
-                let fy = ly - TOP_FACE_H; // 0..5 (ly == 15 is outline above)
-                let mut c = sample_front_material(
-                    view.theme,
-                    wx,
-                    wy,
-                    lx,
-                    fy,
-                    cell_h,
-                    bay_h,
-                    has_w,
-                    has_e,
-                    pal,
-                    accent,
-                    view.anim_clock,
-                );
-                // Crisp horizontal cast shadow right beneath the protruding top cornice
-                if fy == 0 {
-                    c = palette::scale(c, 0.58);
-                }
-                // Ambient occlusion cast onto south face from protruding west L-wall (top-left light!)
-                if has_w && has_sw && lx < 3 {
-                    let ao = match lx {
-                        0 => 0.44,
-                        1 => 0.66,
-                        _ => 0.84,
-                    };
-                    c = palette::scale(c, ao);
-                }
-                if has_e && has_se && lx == CELL_SIZE - 1 {
-                    c = palette::scale(c, 0.72);
-                }
-                if !has_w && lx == 1 {
-                    c = palette::scale(c, 1.18);
-                }
-                if !has_e && lx == CELL_SIZE - 2 {
-                    c = palette::scale(c, 0.72);
-                }
-                pb.plot(px, py, c);
-                continue;
+        } else {
+            if bevel_w && x_start <= 1 && 1 < x_end {
+                row_px[1] = mix_c(row_px[1], pal.top_hi, 0.68);
             }
-
-            // --- 3. Lit top face (ly in 0..top_h) ---
-            let mut c = sample_top_material(view.theme, wx, wy, cell_h, pal);
-
-            let bevel_n = ly == 1 && !has_n;
-            let bevel_w = lx == 1 && (!has_w || (has_s && !has_sw && ly >= TOP_FACE_H));
-            let bevel_e =
-                lx == CELL_SIZE - 2 && (!has_e || (has_s && !has_se && ly >= TOP_FACE_H));
-            let cornice = has_front && ly == TOP_FACE_H - 1;
-
-            if cornice {
-                c = palette::mix(c, pal.cornice, 0.74);
-            } else if bevel_n || bevel_w {
-                c = palette::mix(c, pal.top_hi, 0.68);
-            } else if bevel_e {
-                c = palette::mix(c, pal.top_lo, 0.56);
+            if bevel_e && x_start <= CELL_SIZE - 2 && CELL_SIZE - 2 < x_end {
+                row_px[(CELL_SIZE - 2) as usize] =
+                    mix_c(row_px[(CELL_SIZE - 2) as usize], pal.top_lo, 0.56);
             }
+        }
 
-            // Inner concave corner catchlights so top bevels wrap cleanly around bends
-            if has_n && has_w && !has_nw && ((lx == 1 && ly == 0) || (lx == 0 && ly == 1)) {
-                c = palette::mix(c, pal.top_hi, 0.54);
+        // Inner concave corner catchlights
+        if has_n && has_w && !has_nw {
+            if ly == 0 && x_start <= 1 && 1 < x_end {
+                row_px[1] = mix_c(row_px[1], pal.top_hi, 0.54);
+            } else if ly == 1 && x_start == 0 {
+                row_px[0] = mix_c(row_px[0], pal.top_hi, 0.54);
             }
-            if has_n && has_e && !has_ne && lx == CELL_SIZE - 2 && ly == 0 {
-                c = palette::mix(c, pal.top_lo, 0.45);
-            }
+        }
+        if has_n
+            && has_e
+            && !has_ne
+            && ly == 0
+            && x_start <= CELL_SIZE - 2
+            && CELL_SIZE - 2 < x_end
+        {
+            row_px[(CELL_SIZE - 2) as usize] =
+                mix_c(row_px[(CELL_SIZE - 2) as usize], pal.top_lo, 0.45);
+        }
 
-            pb.plot(px, py, c);
+        // Crisp 1 px left/right outer & concave inner outlines
+        if x_start == 0
+            && (!has_w
+                || (ly == 0 && has_n && has_w && !has_nw)
+                || (ly >= TOP_FACE_H && has_s && has_w && !has_sw))
+        {
+            row_px[0] = pal.outline;
+        }
+        if x_end == CELL_SIZE
+            && (!has_e
+                || (ly == 0 && has_n && has_e && !has_ne)
+                || (ly >= TOP_FACE_H && has_s && has_e && !has_se))
+        {
+            row_px[(CELL_SIZE - 1) as usize] = pal.outline;
+        }
+
+        for lx in x_start..x_end {
+            pb.plot(sx + lx, py, row_px[lx as usize]);
         }
     }
 
-    // --- 4. Cohesive per-cell surface accents on exposed south front face ---
-    if has_front && x_range.start == 0 && x_range.end == CELL_SIZE {
-        draw_front_accents(pb, sx, sy, view, cell_h, bay_h, pal, accent);
+    // --- South vertical front face (`ly in top_h..CELL_SIZE`) ---
+    if has_front {
+        let front_start = y_start.max(top_h);
+        for ly in front_start..y_end {
+            let py = sy + ly;
+            if ly == CELL_SIZE - 1 {
+                pb.rect_fill(sx + x_start, py, x_end - x_start, 1, pal.outline);
+                continue;
+            }
+            let fy = ly - TOP_FACE_H;
+            fill_front_row(
+                view.theme,
+                wx0,
+                fy,
+                cell_h,
+                bay_h,
+                has_w,
+                has_e,
+                pal,
+                x_start,
+                x_end,
+                &mut row_px,
+            );
+
+            // Crisp horizontal cast shadow right beneath the protruding top cornice
+            if fy == 0 {
+                for lx in x_start..x_end {
+                    row_px[lx as usize] = scale_c(row_px[lx as usize], 0.58);
+                }
+            }
+            // Ambient occlusion from protruding west/east L-walls
+            if has_w && has_sw {
+                if x_start == 0 {
+                    row_px[0] = scale_c(row_px[0], 0.44);
+                }
+                if x_start <= 1 && 1 < x_end {
+                    row_px[1] = scale_c(row_px[1], 0.66);
+                }
+                if x_start <= 2 && 2 < x_end {
+                    row_px[2] = scale_c(row_px[2], 0.84);
+                }
+            }
+            if has_e && has_se && x_end == CELL_SIZE {
+                row_px[(CELL_SIZE - 1) as usize] = scale_c(row_px[(CELL_SIZE - 1) as usize], 0.72);
+            }
+            if !has_w && x_start <= 1 && 1 < x_end {
+                row_px[1] = scale_c(row_px[1], 1.18);
+            }
+            if !has_e && x_start <= CELL_SIZE - 2 && CELL_SIZE - 2 < x_end {
+                row_px[(CELL_SIZE - 2) as usize] =
+                    scale_c(row_px[(CELL_SIZE - 2) as usize], 0.72);
+            }
+            if !has_w && x_start == 0 {
+                row_px[0] = pal.outline;
+            }
+            if !has_e && x_end == CELL_SIZE {
+                row_px[(CELL_SIZE - 1) as usize] = pal.outline;
+            }
+
+            for lx in x_start..x_end {
+                pb.plot(sx + lx, py, row_px[lx as usize]);
+            }
+        }
+
+        // --- Cohesive per-cell surface accents on exposed south front face ---
+        if x_range.start == 0 && x_range.end == CELL_SIZE {
+            draw_front_accents(pb, sx, sy, view, cell_h, bay_h, pal, accent);
+        }
     }
 }
 
+#[inline]
 fn sample_top_material(
     theme: Theme,
     wx: i32,
     wy: i32,
     cell_h: u32,
-    pal: &WallPalette,
+    _pal: &WallPalette,
 ) -> Rgb {
     match theme {
         Theme::Sewer => {
-            // World-aligned coursed damp coping stones (8x6 staggered blocks)
             let row = wy.div_euclid(6);
             let stagger = (row & 1) * 4;
             let col = (wx + stagger).div_euclid(8);
             let bx = (wx + stagger).rem_euclid(8);
             let by = wy.rem_euclid(6);
             let sh = hash3(col, row, 0x1147);
-
-            let mut c = if sh & 3 == 0 {
-                pal.top_alt
+            let bi = if sh & 3 == 0 {
+                0
             } else if sh & 7 == 1 {
-                palette::scale(pal.top_base, 1.08)
+                1
             } else {
-                pal.top_base
+                2
             };
+            let moss = (cell_h & 7) < 3 && (sh & 7) == 5 && by <= 2;
             if bx == 0 || by == 0 {
-                c = palette::mix(c, pal.mortar, 0.64);
+                if moss {
+                    SEWER_TOP_LUT.moss_mortar
+                } else {
+                    SEWER_TOP_LUT.mortar[bi]
+                }
             } else if by == 1 {
-                c = palette::mix(c, pal.top_hi, 0.16);
+                if moss {
+                    SEWER_TOP_LUT.moss_hi
+                } else {
+                    SEWER_TOP_LUT.hi[bi]
+                }
+            } else if moss {
+                SEWER_TOP_LUT.moss_base
+            } else if (cell_h & 15) == 4 && bx == 3 && (by == 2 || by == 3) {
+                SEWER_TOP_LUT.crack[bi]
+            } else {
+                SEWER_TOP_LUT.base[bi]
             }
-            // Moss patches creeping from mortar seams
-            if (cell_h & 7) < 3 && (sh & 7) == 5 && by <= 2 {
-                c = palette::mix(c, pal.detail_a, 0.52);
-            }
-            // Hairline crack
-            if (cell_h & 15) == 4 && bx == 3 && (by == 2 || by == 3) {
-                c = palette::scale(c, 0.66);
-            }
-            c
         }
         Theme::Kitchen => {
-            // Warm butcher-plaster & oak crown molding with world-aligned wood planks
             let plank = wy.div_euclid(5);
             let py_in = wy.rem_euclid(5);
-            let seam_x = (wx + (plank & 1) * 11).rem_euclid(22);
-            let ph = hash3(plank, (wx + (plank & 1) * 11).div_euclid(22), 0x2291);
-
-            let mut c = if (ph & 1) == 0 {
-                pal.top_base
-            } else {
-                pal.top_alt
-            };
-            if py_in == 0 {
-                c = palette::mix(c, pal.mortar, 0.32);
+            let rk = if py_in == 0 {
+                1
             } else if py_in == 1 {
-                c = palette::mix(c, pal.top_hi, 0.14);
+                2
+            } else {
+                0
+            };
+            let x = wx + (plank & 1) * 11;
+            let seam_x = x.rem_euclid(22);
+            let bi = (hash3(plank, x.div_euclid(22), 0x2291) & 1) as usize;
+            let grain = ((wx + wy * 3) & 7) == 0;
+            if grain {
+                if seam_x == 0 {
+                    KITCHEN_TOP_LUT.seam_grain[rk][bi]
+                } else {
+                    KITCHEN_TOP_LUT.row_grain[rk][bi]
+                }
+            } else if seam_x == 0 {
+                KITCHEN_TOP_LUT.seam[rk][bi]
+            } else {
+                KITCHEN_TOP_LUT.row[rk][bi]
             }
-            if seam_x == 0 {
-                c = palette::mix(c, pal.mortar, 0.48);
-            }
-            if ((wx + wy * 3) & 7) == 0 {
-                c = palette::scale(c, 0.93);
-            }
-            c
         }
         Theme::Lab => {
-            // Staggered interlocking hull armor plates (20x8 shifted by 10 per row — zero 16px grid echo!)
             let row = wy.div_euclid(8);
             let stagger = (row & 1) * 10;
-            let col = (wx + stagger).div_euclid(20);
-            let bx = (wx + stagger).rem_euclid(20);
+            let x = wx + stagger;
+            let col = x.div_euclid(20);
+            let bx = x.rem_euclid(20);
             let by = wy.rem_euclid(8);
             let ph = hash3(col, row, 0x33F5);
-
-            let mut c = if (ph & 3) == 0 {
-                pal.top_alt
+            let bi = if (ph & 3) == 0 {
+                0
             } else if (ph & 7) == 2 {
-                palette::scale(pal.top_base, 1.07)
+                1
             } else {
-                pal.top_base
+                2
             };
-            // Recessed plate seams
             if bx == 0 || by == 0 {
-                c = palette::mix(c, pal.mortar, 0.72);
+                LAB_TOP_LUT.seam[bi]
             } else if by == 1 && bx > 1 && bx < 19 {
-                c = palette::mix(c, pal.top_hi, 0.20);
-            }
-            // Corner hex-bolts on hull plates
-            if (bx == 2 || bx == 17) && (by == 2 || by == 6) {
-                c = palette::mix(c, pal.trim_hi, 0.50);
-            }
-            // Recessed cable conduit channel on hashed plates
-            if (ph & 7) == 5 && by == 4 && (4..=15).contains(&bx) {
-                c = palette::mix(c, pal.mortar, 0.62);
-            }
-            c
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn sample_front_material(
-    theme: Theme,
-    wx: i32,
-    _wy: i32,
-    lx: i32,
-    fy: i32, // 0..5 (0 = under cornice, 4 = above ground outline)
-    cell_h: u32,
-    bay_h: u32,
-    has_w: bool,
-    has_e: bool,
-    pal: &WallPalette,
-    _accent: Rgb,
-    _anim_clock: f32,
-) -> Rgb {
-    match theme {
-        Theme::Sewer => {
-            // Two distinct courses of weathered sewer brick + damp waterline grime
-            let course = if fy < 2 { 0 } else { 1 };
-            let bx = (wx + course * 3).rem_euclid(6);
-            let bh = hash3((wx + course * 3).div_euclid(6), course, 0x4129);
-            let mut c = if (bh & 1) == 0 {
-                pal.front_base
+                LAB_TOP_LUT.hi[bi]
+            } else if (bx == 2 || bx == 17) && (by == 2 || by == 6) {
+                LAB_TOP_LUT.bolt[bi]
+            } else if (ph & 7) == 5 && by == 4 && (4..=15).contains(&bx) {
+                LAB_TOP_LUT.conduit
             } else {
-                pal.front_alt
-            };
-            if fy == 2 || bx == 0 {
-                c = pal.mortar;
-            } else if fy == 1 && bx == 1 {
-                // Subtle lit upper-left brick corner catchlight
-                c = palette::mix(c, pal.top_hi, 0.16);
-            } else if fy == 4 {
-                c = palette::mix(c, pal.front_dark, 0.68);
+                LAB_TOP_LUT.base[bi]
             }
-            // Moss tongues spilling down from the cornice over masonry
-            if (cell_h & 7) < 3 {
-                let mx = 3 + ((cell_h >> 3) % 9) as i32;
-                let md = (lx - mx).abs();
-                if md <= 2 && fy <= (3 - md).max(0) {
-                    let tip = if fy == 1 { 1.15 } else { 0.88 };
-                    c = palette::mix(c, palette::scale(pal.detail_a, tip), 0.78);
-                }
-            }
-            c
-        }
-        Theme::Kitchen => {
-            // Alternate multi-cell runs between warm oak kitchen cabinets and
-            // crisp cream-ochre subway-tiled wainscoting over a dark oak skirting board!
-            let is_cabinet = (bay_h & 1) == 0 && (has_w || has_e);
-            if is_cabinet {
-                if fy == 4 {
-                    return pal.front_dark; // recessed dark toe-kick plinth
-                }
-                let is_stile = lx == 0 || lx == 7 || lx == 8 || lx == 15;
-                let in_panel = !is_stile && (fy == 1 || fy == 2);
-                if lx == 0 || lx == 15 {
-                    palette::scale(pal.front_base, 0.56) // cabinet bay divider
-                } else if lx == 7 {
-                    palette::scale(pal.front_base, 0.66) // double-door center seam
-                } else if lx == 8 {
-                    palette::scale(pal.front_base, 1.12) // right-door lit bevel
-                } else if in_panel {
-                    if fy == 1 {
-                        palette::scale(pal.front_base, 0.72) // recessed panel shadow
-                    } else {
-                        palette::scale(pal.front_base, 1.12) // recessed panel warm face
-                    }
-                } else {
-                    pal.front_base
-                }
-            } else {
-                // Cream-ochre subway-tiled kitchen dado (`fy 0..3`, two staggered tile courses)
-                // over a warm dark mahogany skirting board (`fy 3..5`)!
-                if fy >= 3 {
-                    return if fy == 3 {
-                        palette::scale(pal.front_base, 0.88) // skirting top molding lip
-                    } else {
-                        pal.front_dark // deep mahogany baseboard skirting
-                    };
-                }
-                let course = if fy <= 1 { 0 } else { 1 };
-                let tile_x = (wx + course * 2).rem_euclid(5);
-                if tile_x == 0 {
-                    palette::mix(pal.front_alt, pal.mortar, 0.56)
-                } else {
-                    let tile_id = (wx + course * 2).div_euclid(5);
-                    let mut tone = if ((tile_id + course) & 1) == 0 {
-                        pal.front_alt
-                    } else {
-                        palette::scale(pal.front_alt, 0.91)
-                    };
-                    if fy == 2 {
-                        // Subtle horizontal grout separation between upper & lower courses
-                        tone = palette::scale(tone, 0.86);
-                    } else if fy == 1 && tile_x == 1 {
-                        tone = palette::mix(tone, pal.detail_b, 0.48);
-                    }
-                    tone
-                }
-            }
-        }
-        Theme::Lab => {
-            // Steel bulkhead fascia with structural gusset ribs & bold 2px-tall
-            // diagonal ochre/charcoal warning stripes on hazard bays and corners!
-            let hazard = (bay_h & 3) == 1 || (!has_w || !has_e);
-            if hazard && (fy == 2 || fy == 3) {
-                let stripe = (wx + fy).rem_euclid(6);
-                let c = if stripe < 3 {
-                    if fy == 2 {
-                        pal.detail_a
-                    } else {
-                        palette::scale(pal.detail_a, 0.82)
-                    }
-                } else {
-                    pal.front_dark
-                };
-                return c;
-            }
-            if fy == 4 {
-                return pal.front_dark; // bolted floor flange
-            }
-            let mut c = pal.front_base;
-            if lx == 3 || lx == 12 {
-                c = palette::scale(pal.front_base, 0.64);
-            } else if lx == 4 || lx == 13 {
-                c = palette::mix(pal.front_alt, pal.trim_hi, 0.28);
-            }
-            if fy == 2 && lx > 4 && lx < 12 {
-                c = palette::scale(c, 0.82);
-            }
-            c
         }
     }
 }
@@ -1678,6 +2437,18 @@ fn draw_maze_cell(
     let bh = pb.h as i32;
     let y_front_start = CELL_SIZE - MAZE_INSET_Y - MAZE_FRONT_H; // 8
 
+    // Precompute theme-specific maze colors once per cell instead of per pixel.
+    let lab_top_base = mix_c(pal.maze_top, accent, 0.16);
+    let lab_top_sheen = mix_c(lab_top_base, pal.detail_c, 0.34);
+    let lab_front_mid = mix_c(pal.maze_front, pal.maze_top, 0.36);
+    let lab_haz_hi = scale_c(pal.detail_a, 0.86);
+    let sewer_top_rib = scale_c(pal.maze_top, 0.84);
+    let sewer_front_rib = scale_c(pal.maze_front, 0.76);
+    let kitchen_top_lo = scale_c(pal.maze_top, 0.84);
+    let kitchen_top_hi = scale_c(pal.maze_top, 1.04);
+    let kitchen_front_lo = scale_c(pal.maze_front, 0.78);
+    let kitchen_front_hi = scale_c(pal.maze_front, 1.06);
+
     for ly in 0..CELL_SIZE {
         let py = sy + ly;
         if py < 0 || py >= bh {
@@ -1723,12 +2494,13 @@ fn draw_maze_cell(
                 let mut c = match view.theme {
                     Theme::Sewer => {
                         // Riveted weathered iron-slat culvert divider with rust flecks
-                        let mut b = pal.maze_top;
-                        if (wx + wy) % 6 == 0 {
-                            b = palette::scale(b, 0.84);
-                        }
+                        let mut b = if (wx + wy) % 6 == 0 {
+                            sewer_top_rib
+                        } else {
+                            pal.maze_top
+                        };
                         if ((wx * 3 + wy * 5) & 15) == 0 {
-                            b = palette::mix(b, pal.detail_c, 0.34);
+                            b = mix_c(b, pal.detail_c, 0.34);
                         }
                         if (wx & 7) == 0 && ly == MAZE_INSET_Y + 2 {
                             b = pal.maze_hi;
@@ -1741,9 +2513,10 @@ fn draw_maze_cell(
                             && (ly == MAZE_INSET_Y + 1 || ly == y_front_start - 2);
                         if at_joint {
                             pal.detail_c
+                        } else if ((wx + wy) & 3) == 0 {
+                            kitchen_top_lo
                         } else {
-                            let slat = if ((wx + wy) & 3) == 0 { 0.84 } else { 1.04 };
-                            palette::scale(pal.maze_top, slat)
+                            kitchen_top_hi
                         }
                     }
                     Theme::Lab => {
@@ -1751,10 +2524,10 @@ fn draw_maze_cell(
                         let at_post = (wx % 8 == 0) && (ly == MAZE_INSET_Y + 1 || ly == y_front_start - 1);
                         if at_post {
                             pal.trim_hi
+                        } else if (wx + wy).rem_euclid(7) == 0 {
+                            lab_top_sheen
                         } else {
-                            let sheen = if (wx + wy).rem_euclid(7) == 0 { 0.34 } else { 0.0 };
-                            let base = palette::mix(pal.maze_top, accent, 0.16);
-                            palette::mix(base, pal.detail_c, sheen)
+                            lab_top_base
                         }
                     }
                 };
@@ -1765,11 +2538,11 @@ fn draw_maze_cell(
                 let cornice = in_maze_front(lx, ly + 1, m);
 
                 if cornice {
-                    c = palette::mix(c, pal.maze_hi, 0.74);
+                    c = mix_c(c, pal.maze_hi, 0.74);
                 } else if lit_n || lit_w {
-                    c = palette::mix(c, pal.maze_hi, 0.56);
+                    c = mix_c(c, pal.maze_hi, 0.56);
                 } else if shade_e {
-                    c = palette::scale(c, 0.70);
+                    c = scale_c(c, 0.70);
                 }
                 pb.plot(px, py, c);
             } else {
@@ -1777,41 +2550,45 @@ fn draw_maze_cell(
                 let fy = ly - y_front_start;
                 let mut c = match view.theme {
                     Theme::Sewer => {
-                        let rib = if (wx & 3) == 0 { 0.76 } else { 1.0 };
-                        let mut b = palette::scale(pal.maze_front, rib);
+                        let mut b = if (wx & 3) == 0 {
+                            sewer_front_rib
+                        } else {
+                            pal.maze_front
+                        };
                         if fy == 3 {
-                            b = palette::mix(b, pal.detail_a, 0.42);
+                            b = mix_c(b, pal.detail_a, 0.42);
                         }
                         b
                     }
                     Theme::Kitchen => {
                         if fy == 3 {
                             pal.front_dark
+                        } else if (wx & 2) == 0 {
+                            kitchen_front_lo
                         } else {
-                            let slat = if (wx & 2) == 0 { 0.78 } else { 1.06 };
-                            palette::scale(pal.maze_front, slat)
+                            kitchen_front_hi
                         }
                     }
                     Theme::Lab => {
                         if fy == 3 {
                             let s = (wx + fy).rem_euclid(6);
                             if s < 3 {
-                                palette::scale(pal.detail_a, 0.86)
+                                lab_haz_hi
                             } else {
                                 pal.front_dark
                             }
                         } else if (wx & 7) == 0 {
                             pal.trim_hi
                         } else {
-                            palette::mix(pal.maze_front, pal.maze_top, 0.36)
+                            lab_front_mid
                         }
                     }
                 };
                 if fy == 0 {
-                    c = palette::scale(c, 0.60);
+                    c = scale_c(c, 0.60);
                 }
                 if in_maze_top(lx - 1, ly, m) || in_maze_top(lx - 2, ly, m) {
-                    c = palette::scale(c, 0.56);
+                    c = scale_c(c, 0.56);
                 }
                 pb.plot(px, py, c);
             }
@@ -2228,6 +3005,19 @@ fn draw_gate_leaf(
 /// Call **after** drawing entities and **before** HUD/particles. No-op for
 /// `Solid`, `Maze`, and `Vertical` doorways. Zero heap allocation.
 pub fn draw_wall_overhang(pb: &mut PixelBuffer, view: &WallCellView, cam: Vec2, _accent: Rgb) {
+    if matches!(
+        view.kind,
+        WallKind::Solid
+            | WallKind::Maze
+            | WallKind::Doorway {
+                axis: WallAxis::Vertical
+            }
+            | WallKind::OneWayDoor {
+                dir: Cardinal::East | Cardinal::West
+            }
+    ) {
+        return;
+    }
     let (sx, sy) = cell_screen_origin(view, cam);
     if culled(pb, sx, sy) {
         return;
@@ -2249,13 +3039,13 @@ pub fn draw_wall_overhang(pb: &mut PixelBuffer, view: &WallCellView, cam: Vec2, 
                 for lx in (RAT_HOLE_PIER - 1)..(CELL_SIZE - RAT_HOLE_PIER + 1) {
                     let px = sx + lx;
                     let wx = wx0 + lx;
-                    let mut c = sample_top_material(view.theme, wx, wy, cell_h, &pal);
+                    let mut c = sample_top_material(view.theme, wx, wy, cell_h, pal);
                     if (ly == 0 && !has_n) || ly == 4 {
                         c = pal.outline;
                     } else if ly == 1 && !has_n {
-                        c = palette::mix(c, pal.top_hi, 0.68);
+                        c = mix_c(c, pal.top_hi, 0.68);
                     } else if ly == 3 {
-                        c = palette::mix(c, pal.cornice, 0.72);
+                        c = mix_c(c, pal.cornice, 0.72);
                     }
                     pb.plot(px, py, c);
                 }
@@ -2282,12 +3072,12 @@ pub fn draw_wall_overhang(pb: &mut PixelBuffer, view: &WallCellView, cam: Vec2, 
                 }
                 for lx in 6..10 {
                     let wx = wx0 + lx;
-                    let mut c = sample_top_material(view.theme, wx, wy, cell_h, &pal);
+                    let mut c = sample_top_material(view.theme, wx, wy, cell_h, pal);
                     if in_gap {
                         if lx == 6 {
-                            c = palette::mix(c, pal.top_hi, 0.66);
+                            c = mix_c(c, pal.top_hi, 0.66);
                         } else if lx == 9 {
-                            c = palette::mix(c, pal.top_lo, 0.54);
+                            c = mix_c(c, pal.top_lo, 0.54);
                         }
                     }
                     pb.plot(sx + lx, sy + ly, c);
@@ -2314,16 +3104,822 @@ pub fn draw_wall_overhang(pb: &mut PixelBuffer, view: &WallCellView, cam: Vec2, 
             };
             for lx in x0..x1 {
                 let wx = wx0 + lx;
-                let base = sample_top_material(view.theme, wx, wy0 + 1, cell_h, &pal);
+                let base = sample_top_material(view.theme, wx, wy0 + 1, cell_h, pal);
                 pb.plot(sx + lx, sy, pal.outline);
-                pb.plot(sx + lx, sy + 1, palette::mix(base, pal.top_hi, 0.52));
-                pb.plot(sx + lx, sy + 2, palette::mix(base, pal.cornice, 0.45));
+                pb.plot(sx + lx, sy + 1, mix_c(base, pal.top_hi, 0.52));
+                pb.plot(sx + lx, sy + 2, mix_c(base, pal.cornice, 0.45));
                 pb.plot(sx + lx, sy + 3, pal.outline);
                 darken_px(pb, sx + lx, sy + 4, 0.58);
                 darken_px(pb, sx + lx, sy + 5, 0.80);
             }
         }
         _ => {}
+    }
+}
+
+// ============================================================================
+// BOSS ARENA THRESHOLD OVERLAY (WALLKIND-INDEPENDENT, ZERO COLLISION IMPACT)
+// ============================================================================
+
+/// Extra floor-apron reach (in world pixels) extending from a boss arena mouth
+/// cell onto the immediately adjacent approach and interior floor cells.
+/// Purely decorative ground decals — never solid.
+pub const BOSS_THRESHOLD_APRON: i32 = 9;
+
+/// Plain `Copy` view describing one mouth cell of a boss arena's double doorway.
+///
+/// This is a **purely decorative, `WallKind`-independent overlay**: calling
+/// [`draw_boss_threshold_ground`] or [`draw_boss_threshold_overhang`] **never
+/// changes collision** (`wall_colliders` for the underlying doorway cells is
+/// completely unaffected, preserving the full 30 px boss clearance).
+///
+/// # Cell Coverage
+/// Call once for each doorway mouth cell of the boss arena:
+/// - **North / South arena wall** (`inward` is [`Cardinal::South`] / [`Cardinal::North`]):
+///   the **2 horizontally adjacent doorway cells** `(cx, cy)` and `(cx + 1, cy)`
+///   piercing the boss room's 1-cell perimeter wall ring, with the shared inner
+///   mask bit (`E` / `W`) unset so the two cells fuse into one 32 px landmark.
+/// - **West / East arena wall** (`inward` is [`Cardinal::East`] / [`Cardinal::West`]):
+///   the **2 vertically adjacent doorway cells** `(cx, cy)` and `(cx, cy + 1)`
+///   piercing the boss room's 1-cell perimeter wall ring, with the shared inner
+///   mask bit (`S` / `N`) unset.
+/// - **Floor apron bleed**: ground decals extend up to [`BOSS_THRESHOLD_APRON`]
+///   (`9 px`) onto the immediately adjacent open floor cells on both the corridor
+///   approach side and the arena interior side. Single-cell doorways are also
+///   supported gracefully (centered motif).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BossThresholdView {
+    /// Underlying mouth cell view (`cell_x`, `cell_y`, `seed`, `theme`, `mask`,
+    /// `anim_clock`; `kind` is ignored so callers do not need a new `WallKind`).
+    pub cell: WallCellView,
+    /// Cardinal direction pointing **into** the boss arena from the approach corridor.
+    pub inward: Cardinal,
+}
+
+impl BossThresholdView {
+    /// Construct a boss-arena threshold overlay for one mouth cell.
+    #[inline]
+    pub const fn new(cell: WallCellView, inward: Cardinal) -> Self {
+        Self { cell, inward }
+    }
+}
+
+/// Map doorway-local `(u, v)` coordinates into screen pixels `(px, py)`:
+/// - `u` (`0..16`) runs along the doorway opening width (parallel to the wall).
+/// - `v` (`-BOSS_THRESHOLD_APRON..CELL_SIZE + BOSS_THRESHOLD_APRON`) runs
+///   perpendicular to the wall, increasing **into** the boss arena (`inward`).
+#[inline]
+fn boss_uv_to_screen(sx: i32, sy: i32, inward: Cardinal, u: i32, v: i32) -> (i32, i32) {
+    match inward {
+        Cardinal::South => (sx + u, sy + v),
+        Cardinal::North => (sx + u, sy + (CELL_SIZE - 1 - v)),
+        Cardinal::East => (sx + v, sy + u),
+        Cardinal::West => (sx + (CELL_SIZE - 1 - v), sy + u),
+    }
+}
+
+/// Compute local opening span `(u0, u1)` and 32 px double-doorway offset `du_off`
+/// so two adjacent mouth cells seamlessly form one centered 32 px threshold.
+#[inline]
+fn boss_opening_span(mask: NeighborMask, inward: Cardinal) -> (i32, i32, i32) {
+    let (has_lo, has_hi) = match inward.wall_axis() {
+        WallAxis::Horizontal => (mask.has(NeighborMask::W), mask.has(NeighborMask::E)),
+        WallAxis::Vertical => (mask.has(NeighborMask::N), mask.has(NeighborMask::S)),
+    };
+    let u0 = if has_lo { DOORWAY_JAMB_VISUAL } else { 0 };
+    let u1 = if has_hi {
+        CELL_SIZE - DOORWAY_JAMB_VISUAL
+    } else {
+        CELL_SIZE
+    };
+    let du_off = match (has_lo, has_hi) {
+        (true, false) => 0,  // left / top half of 2-cell mouth -> du in 2..16
+        (false, true) => 16, // right / bottom half of 2-cell mouth -> du in 16..30
+        _ => 8,              // single-cell or middle cell -> centered
+    };
+    (u0, u1, du_off)
+}
+
+#[inline]
+fn boss_culled(pb: &PixelBuffer, sx: i32, sy: i32) -> bool {
+    let bw = pb.w as i32;
+    let bh = pb.h as i32;
+    let pad = BOSS_THRESHOLD_APRON + 2;
+    sx >= bw + pad || sy >= bh + pad || sx + CELL_SIZE + pad < 0 || sy + CELL_SIZE + pad < 0
+}
+
+/// **Ground layer**: draw the boss arena's per-theme landmark threshold overlay
+/// for one mouth cell (claw-scored stone for Sewer, worn doormat & scuffed lino
+/// edge for Kitchen, hazard chevrons & scorched lawn-strip for Lab).
+///
+/// Call in the Ground layer right **after** [`draw_wall_ground`] and **before**
+/// entities and [`draw_wall_cell`]. Zero heap allocation; **never changes collision**.
+pub fn draw_boss_threshold_ground(
+    pb: &mut PixelBuffer,
+    view: &BossThresholdView,
+    cam: Vec2,
+    accent: Rgb,
+) {
+    let (sx, sy) = cell_screen_origin(&view.cell, cam);
+    if boss_culled(pb, sx, sy) {
+        return;
+    }
+    let pal = theme_palette(view.cell.theme);
+    let (u0, u1, du_off) = boss_opening_span(view.cell.mask, view.inward);
+
+    match view.cell.theme {
+        Theme::Sewer => {
+            draw_boss_threshold_sewer(pb, sx, sy, view.inward, u0, u1, du_off, view.cell.seed, pal);
+        }
+        Theme::Kitchen => {
+            draw_boss_threshold_kitchen(pb, sx, sy, view.inward, u0, u1, du_off, pal);
+        }
+        Theme::Lab => {
+            draw_boss_threshold_lab(
+                pb,
+                sx,
+                sy,
+                view.inward,
+                u0,
+                u1,
+                du_off,
+                view.cell.anim_clock,
+                pal,
+                accent,
+            );
+        }
+    }
+}
+
+/// **Overhang layer (optional)**: add subtle per-theme boss-doorway trim to the
+/// 4 px horizontal doorway lintel (claw-notched stone for Sewer, brass-cornered
+/// timber architrave for Kitchen, hazard-striped warning beam + beacons for Lab).
+///
+/// Call right **after** [`draw_wall_overhang`] for horizontal boss doorways.
+/// No-op for vertical doorways. Zero heap allocation; **never changes collision**.
+pub fn draw_boss_threshold_overhang(
+    pb: &mut PixelBuffer,
+    view: &BossThresholdView,
+    cam: Vec2,
+    accent: Rgb,
+) {
+    if view.inward.wall_axis() != WallAxis::Horizontal {
+        return;
+    }
+    let (sx, sy) = cell_screen_origin(&view.cell, cam);
+    if culled(pb, sx, sy) {
+        return;
+    }
+    let pal = theme_palette(view.cell.theme);
+    let (u0, u1, du_off) = boss_opening_span(view.cell.mask, view.inward);
+
+    match view.cell.theme {
+        Theme::Sewer => {
+            // Three bold chipped jaguar claw-notches across the overhead stone lintel
+            let chip_hi: Rgb = (162, 190, 174);
+            let claw_dark: Rgb = (8, 12, 11);
+            for u in u0..u1 {
+                let du = u + du_off;
+                let px = sx + u;
+                if du == 9 || du == 15 || du == 21 {
+                    pb.plot(px, sy + 1, claw_dark);
+                    pb.plot(px + 1, sy + 2, claw_dark);
+                    pb.plot(px, sy + 2, chip_hi);
+                    pb.plot(px - 1, sy + 1, chip_hi);
+                } else if du == 3 || du == 28 {
+                    pb.plot(px, sy + 2, pal.detail_a);
+                    pb.plot(px, sy + 3, scale_c(pal.detail_a, 0.72));
+                }
+            }
+        }
+        Theme::Kitchen => {
+            // Tarnished brass corner brackets + oak architrave header highlight
+            let brass_hi: Rgb = (232, 200, 122);
+            let brass_mid: Rgb = (188, 152, 78);
+            for u in u0..u1 {
+                let du = u + du_off;
+                let px = sx + u;
+                if (2..=5).contains(&du) || (26..=29).contains(&du) {
+                    pb.plot(px, sy + 1, brass_hi);
+                    pb.plot(px, sy + 2, brass_mid);
+                    if du == 3 || du == 28 {
+                        pb.plot(px, sy + 2, pal.outline);
+                    }
+                }
+            }
+        }
+        Theme::Lab => {
+            // Bold amber-and-charcoal hazard header stripe + framed pulsing warning beacons
+            let haz_hi: Rgb = (234, 182, 54);
+            let haz_lo: Rgb = (180, 134, 38);
+            let haz_dk: Rgb = (18, 22, 32);
+            let pulse = 0.55 + 0.45 * (view.cell.anim_clock * 4.2).sin();
+            let beacon = mix_c((232, 66, 44), accent, 0.16 * pulse);
+            for u in u0..u1 {
+                let du = u + du_off;
+                let px = sx + u;
+                if du == 3 || du == 28 {
+                    pb.plot(px, sy + 1, scale_c(beacon, 0.72 + 0.28 * pulse));
+                    pb.plot(px, sy + 2, scale_c(beacon, 0.48 + 0.28 * pulse));
+                } else if du == 4 || du == 27 {
+                    pb.plot(px, sy + 1, pal.outline);
+                    pb.plot(px, sy + 2, pal.outline);
+                } else if (5..=26).contains(&du) {
+                    let s1 = (du + 1).rem_euclid(6);
+                    let s2 = (du + 2).rem_euclid(6);
+                    pb.plot(px, sy + 1, if s1 < 3 { haz_hi } else { haz_dk });
+                    pb.plot(px, sy + 2, if s2 < 3 { haz_lo } else { haz_dk });
+                }
+            }
+        }
+    }
+}
+
+/// **Sewer boss threshold**: weathered pale-limestone den threshold and cracked
+/// approach flagstones deeply slashed by three bold, curved jaguar claw gouges
+/// with high-contrast bone-pale chipped edges, mossy crevices, and den-spoor flecks.
+#[allow(clippy::too_many_arguments)]
+fn draw_boss_threshold_sewer(
+    pb: &mut PixelBuffer,
+    sx: i32,
+    sy: i32,
+    inward: Cardinal,
+    u0: i32,
+    u1: i32,
+    du_off: i32,
+    seed: u32,
+    pal: &WallPalette,
+) {
+    // Pale weathered limestone-slate contrasts sharply against dark damp sewer
+    // walls so the jaguar's den mouth reads cleanly from across the room.
+    let stone_base: Rgb = (90, 108, 96);
+    let stone_alt: Rgb = (74, 92, 82);
+    let stone_hi: Rgb = (144, 168, 152);
+    let stone_lo: Rgb = (44, 60, 54);
+    let apron_stone: Rgb = (62, 78, 70);
+    let chip_hi: Rgb = (182, 204, 186);
+    let claw_core: Rgb = (7, 11, 10);
+    let claw_wall: Rgb = (22, 34, 30);
+    let claw_rust: Rgb = (156, 94, 52);
+    let moss_hi: Rgb = (74, 128, 54);
+    let moss_lo: Rgb = (42, 78, 36);
+
+    // Clear the 4 px overhead lintel (`v in 0..4`) on North walls (`inward == South`)
+    // and extend the approach flagstones slightly ahead of the mouth.
+    let (apron_v0, apron_v1, slab_v0, slab_v1) = if inward == Cardinal::South {
+        (-6, 0, 5, 16)
+    } else {
+        (-4, 3, 4, 15)
+    };
+
+    // 1. Approach fractured limestone apron + heavy carved den sill + interior step
+    for u in u0..u1 {
+        let du = u + du_off;
+
+        // Fractured pale-stone approach apron (gives high-contrast backing to approach claw rakes!)
+        if (4..=27).contains(&du) {
+            for v in apron_v0..apron_v1 {
+                let h = hash3(du, v, seed ^ 0xA910);
+                // Organic broken/chipped outer stone edge
+                let dist_edge = v - apron_v0;
+                if dist_edge == 0 && (!(7..=24).contains(&du) || (h & 3) == 0) {
+                    continue;
+                }
+                if (du == 4 || du == 27) && dist_edge <= 1 {
+                    continue;
+                }
+                let (px, py) = boss_uv_to_screen(sx, sy, inward, u, v);
+                let c = if dist_edge == 0 {
+                    stone_lo
+                } else if du == 11 || du == 21 {
+                    pal.mortar
+                } else if (h & 3) == 0 {
+                    stone_alt
+                } else {
+                    apron_stone
+                };
+                let alpha = if dist_edge == 0 { 0.56 } else { 0.84 };
+                blend_px(pb, px, py, c, alpha);
+            }
+        }
+
+        // Cast shadows framing the raised threshold slab
+        for (v_sh, f) in [(slab_v0 - 1, 0.62), (slab_v1, 0.54), (slab_v1 + 1, 0.76)] {
+            let (px, py) = boss_uv_to_screen(sx, sy, inward, u, v_sh);
+            darken_px(pb, px, py, f);
+        }
+
+        // Three thick ancient limestone flagstones (joints at du == 10 and du == 22)
+        let slab_id = if du < 10 {
+            0
+        } else if du < 22 {
+            1
+        } else {
+            2
+        };
+        let is_joint = du == 10 || du == 22;
+
+        for v in slab_v0..slab_v1 {
+            let lv = v - slab_v0; // 0..11
+            // Chipped stone notches where the 3 claws bit into the threshold lip
+            if lv == 0 && (du == 9 || du == 15 || du == 21) {
+                continue;
+            }
+            let (px, py) = boss_uv_to_screen(sx, sy, inward, u, v);
+            let h = hash3(du, v, seed ^ 0xB055);
+            let mut c = if lv == 0 || lv == 10 {
+                pal.outline
+            } else if lv == 1 {
+                stone_hi
+            } else if lv == 9 {
+                stone_lo
+            } else if is_joint && (2..=8).contains(&lv) {
+                pal.mortar
+            } else if (slab_id & 1) == 0 {
+                if (h & 7) == 0 {
+                    stone_alt
+                } else {
+                    stone_base
+                }
+            } else if (h & 5) == 0 {
+                stone_base
+            } else {
+                stone_alt
+            };
+
+            if (du == 11 || du == 23) && (2..=8).contains(&lv) {
+                c = mix_c(c, stone_hi, 0.28);
+            }
+            // Lush damp moss hugging the jamb edges of the stone den sill
+            if (du <= 5 || du >= 26) && (1..=9).contains(&lv) && (h & 3) != 0 {
+                let mc = if (h & 4) == 0 { moss_hi } else { moss_lo };
+                c = mix_c(c, mc, if du <= 3 || du >= 28 { 0.72 } else { 0.42 });
+            }
+            blend_px(pb, px, py, c, 0.96);
+        }
+
+        // Weathered arena-side cracked stone step leading inward
+        if (5..=26).contains(&du) {
+            for dv in 1..=4 {
+                let v = slab_v1 + dv;
+                let h = hash3(du, v, seed ^ 0x5E0E);
+                if (du == 5 || du == 26) && dv > 2 {
+                    continue;
+                }
+                let (px, py) = boss_uv_to_screen(sx, sy, inward, u, v);
+                let c = if dv == 4 || (du == 16 && dv < 4) {
+                    pal.mortar
+                } else if (h & 3) == 0 {
+                    stone_alt
+                } else {
+                    stone_lo
+                };
+                let alpha = if dv <= 2 { 0.72 } else { 0.42 };
+                blend_px(pb, px, py, c, alpha);
+            }
+        }
+    }
+
+    // 2. Three bold, widely spaced diagonal Jaguar claw gouges slashing across
+    //    the limestone sill and out onto the approach apron! Wide spacing (6 px)
+    //    keeps every gouge unmistakably legible at 1× playing resolution.
+    let v_shift = slab_v0 - 4;
+    const PRIMARY_CLAWS: [(i32, i32, i32); 3] = [
+        (9, -3, 16),  // left claw
+        (15, -5, 19), // center main claw (longest, deepest)
+        (21, -3, 17), // right claw
+    ];
+    let mid_v = (slab_v0 + slab_v1) / 2;
+    for &(base_du, v_min_rel, v_max_rel) in &PRIMARY_CLAWS {
+        let v_min = v_min_rel + v_shift;
+        let v_max = v_max_rel + v_shift;
+        for v in v_min..=v_max {
+            let dv = v - mid_v;
+            let curve = (dv * dv) / 52;
+            let gouge_du = base_du + (dv * 6) / 11 + curve;
+            let u = gouge_du - du_off;
+            if u < u0 || u >= u1 {
+                continue;
+            }
+            let in_slab = v > slab_v0 && v < slab_v1 - 1;
+            let deep_core = v >= slab_v0 + 2 && v <= slab_v1 - 3;
+            let in_apron = v >= apron_v0 && v < apron_v1;
+            let (px, py) = boss_uv_to_screen(sx, sy, inward, u, v);
+
+            if in_slab {
+                pb.plot(px, py, claw_core);
+                // Bold bone-pale chipped limestone highlight on the upper-left gouge rim
+                if u > u0 {
+                    let (hx, hy) = boss_uv_to_screen(sx, sy, inward, u - 1, v);
+                    blend_px(pb, hx, hy, chip_hi, if deep_core { 0.88 } else { 0.56 });
+                }
+                // Deepened dark shadow wall on the lower-right side of the gouge
+                if deep_core && u + 1 < u1 {
+                    let (sx2, sy2) = boss_uv_to_screen(sx, sy, inward, u + 1, v);
+                    blend_px(pb, sx2, sy2, claw_wall, 0.84);
+                }
+            } else if in_apron {
+                // High-contrast dark gouge raking across the fractured approach stone
+                pb.plot(px, py, claw_core);
+                if u > u0 {
+                    let (hx, hy) = boss_uv_to_screen(sx, sy, inward, u - 1, v);
+                    blend_px(pb, hx, hy, chip_hi, 0.62);
+                }
+            } else {
+                let dist_end = (v - v_min).min(v_max - v);
+                let alpha = if dist_end == 0 { 0.45 } else { 0.78 };
+                blend_px(pb, px, py, claw_core, alpha);
+            }
+        }
+    }
+
+    // 3. Chipped pale limestone shards & warm amber-ochre den spoor flecks
+    const FLECKS: [(i32, i32, bool); 8] = [
+        (7, -2, false),
+        (11, 0, true),
+        (14, -4, false),
+        (18, 1, true),
+        (22, -2, false),
+        (16, 17, true),
+        (10, 16, false),
+        (24, 14, true),
+    ];
+    for &(f_du, fv_rel, rust) in &FLECKS {
+        let u = f_du - du_off;
+        if u >= u0 && u < u1 {
+            let (px, py) = boss_uv_to_screen(sx, sy, inward, u, fv_rel + v_shift);
+            blend_px(pb, px, py, if rust { claw_rust } else { chip_hi }, 0.78);
+        }
+    }
+}
+
+/// **Kitchen boss threshold**: frayed woven coir & oxblood-bordered kitchen
+/// doormat with a deep scuffed slipper-wear hollow and dog-eared corner, paired
+/// with a scuffed vintage checker-lino transition strip, tarnished brass binder
+/// bar, and stray golden corn-straw broom bristles.
+#[allow(clippy::too_many_arguments)]
+fn draw_boss_threshold_kitchen(
+    pb: &mut PixelBuffer,
+    sx: i32,
+    sy: i32,
+    inward: Cardinal,
+    u0: i32,
+    u1: i32,
+    du_off: i32,
+    pal: &WallPalette,
+) {
+    let coir_hi: Rgb = (166, 122, 74);
+    let coir_mid: Rgb = (138, 96, 56);
+    let coir_lo: Rgb = (106, 70, 38);
+    let coir_hem: Rgb = (64, 40, 24);
+    let coir_worn: Rgb = (66, 44, 28);
+    let oxblood: Rgb = (118, 44, 38);
+    let oxblood_hi: Rgb = (148, 60, 50);
+    let lino_cream: Rgb = (172, 152, 122);
+    let lino_tan: Rgb = (122, 98, 72);
+    let lino_scuff: Rgb = (56, 38, 28);
+    let brass_hi: Rgb = (232, 198, 120);
+    let brass_mid: Rgb = (186, 150, 80);
+    let straw: Rgb = (218, 180, 88);
+
+    // Keep both the doormat AND the tarnished brass binder strip 100% clear of
+    // the 4 px overhead lintel (`ly in 0..4`) on horizontal North & South walls!
+    let (mat_v0, mat_v1, binder_v, lino_v0, lino_v1) = match inward {
+        Cardinal::South => (-9, 0, 5, 7, 16),
+        Cardinal::North => (-6, 7, 8, 10, 20),
+        Cardinal::East | Cardinal::West => (-4, 10, 11, 13, 19),
+    };
+    let mat_cy = (mat_v0 + mat_v1) as f32 * 0.5;
+    let mat_ry = ((mat_v1 - mat_v0) as f32 * 0.34).max(2.6);
+
+    for u in u0..u1 {
+        let du = u + du_off;
+
+        // 1. Scuffed vintage checker-lino transition edge on the arena side
+        if (2..=29).contains(&du) {
+            for v in lino_v0..lino_v1 {
+                let (px, py) = boss_uv_to_screen(sx, sy, inward, u, v);
+                let lv = v - lino_v0;
+                let checker = ((du / 4) + (lv / 3)) & 1;
+                let mut c = if checker == 0 { lino_cream } else { lino_tan };
+                if v == lino_v1 - 1 || (du & 3) == 0 {
+                    c = mix_c(c, pal.mortar, 0.48);
+                }
+                let scuff = (lv == 2 && (9..=15).contains(&du))
+                    || (lv == 3 && (17..=23).contains(&du))
+                    || (lv == 1 && (13..=17).contains(&du))
+                    || (lv == 4 && (11..=14).contains(&du));
+                if scuff {
+                    c = mix_c(c, lino_scuff, 0.64);
+                }
+                let dist_far = lino_v1 - 1 - v;
+                let alpha = if dist_far >= 2 {
+                    0.90
+                } else if dist_far == 1 {
+                    0.70
+                } else {
+                    0.46
+                };
+                blend_px(pb, px, py, c, alpha);
+            }
+        }
+
+        // 2. Tarnished brass carpet-to-lino binder strip with screw heads
+        for dv in 0..=1 {
+            let v = binder_v + dv;
+            let (px, py) = boss_uv_to_screen(sx, sy, inward, u, v);
+            let is_screw = dv == 0 && (du == 4 || du == 10 || du == 16 || du == 22 || du == 28);
+            let c = if is_screw {
+                pal.outline
+            } else if dv == 0 {
+                brass_hi
+            } else {
+                brass_mid
+            };
+            blend_px(pb, px, py, c, 0.96);
+        }
+        let (bx, by) = boss_uv_to_screen(sx, sy, inward, u, binder_v + 2);
+        darken_px(pb, bx, by, 0.70);
+
+        // 3. Worn woven coir & oxblood doormat (`du in 4..28`, `v in mat_v0..=mat_v1`)
+        if (3..=28).contains(&du) {
+            let (sx_top, sy_top) = boss_uv_to_screen(sx, sy, inward, u, mat_v0 - 1);
+            darken_px(pb, sx_top, sy_top, 0.68);
+        }
+        if du == 3 || du == 28 {
+            for v in mat_v0..=mat_v1 {
+                let (px, py) = boss_uv_to_screen(sx, sy, inward, u, v);
+                darken_px(pb, px, py, 0.62);
+                if (v - mat_v0) % 4 == 2 {
+                    blend_px(pb, px, py, coir_lo, 0.78);
+                }
+            }
+        }
+        if (4..=27).contains(&du) {
+            if du == 6 || du == 11 || du == 16 || du == 21 || du == 25 {
+                let (fx, fy) = boss_uv_to_screen(sx, sy, inward, u, mat_v0 - 1);
+                blend_px(pb, fx, fy, coir_mid, 0.80);
+            }
+            for v in mat_v0..=mat_v1 {
+                // Dog-eared / curled approach corner casting a crisp shadow
+                if du == 27 && v == mat_v0 {
+                    let (px, py) = boss_uv_to_screen(sx, sy, inward, u, v);
+                    darken_px(pb, px, py, 0.54);
+                    continue;
+                }
+                let (px, py) = boss_uv_to_screen(sx, sy, inward, u, v);
+                if (du == 26 && v == mat_v0) || (du == 27 && v == mat_v0 + 1) {
+                    pb.plot(px, py, coir_hi);
+                    continue;
+                }
+
+                let on_outer_rim = du == 4 || du == 27 || v == mat_v0 || v == mat_v1;
+                let on_oxblood_stripe = !on_outer_rim
+                    && (du == 6 || du == 25 || v == mat_v0 + 2 || v == mat_v1 - 2)
+                    && (6..=25).contains(&du)
+                    && (v >= mat_v0 + 2 && v <= mat_v1 - 2);
+
+                let mut c = if on_outer_rim {
+                    if v == mat_v0 && (du & 1) == 0 {
+                        coir_lo
+                    } else {
+                        coir_hem
+                    }
+                } else if on_oxblood_stripe {
+                    if ((du + v) & 1) == 0 {
+                        oxblood_hi
+                    } else {
+                        oxblood
+                    }
+                } else {
+                    let weave = ((du + (v & 1)) & 3) == 0;
+                    let alt = ((du ^ v) & 1) == 0;
+                    if weave {
+                        coir_lo
+                    } else if alt {
+                        coir_hi
+                    } else {
+                        coir_mid
+                    }
+                };
+
+                // Deep worn heel-pivot hollow in the center of the doormat
+                let dx = (du - 16) as f32 / 7.2;
+                let dy = (v as f32 - mat_cy) / mat_ry;
+                let d2 = dx * dx + dy * dy;
+                if !on_outer_rim && d2 < 1.0 {
+                    let wear = (1.0 - d2) * 0.78;
+                    c = mix_c(c, coir_worn, wear);
+                    if ((du - v) & 3) == 0 && d2 < 0.48 {
+                        c = mix_c(c, lino_cream, 0.28);
+                    }
+                }
+                if v == mat_v0 + 1 && (5..=25).contains(&du) {
+                    c = mix_c(c, coir_hi, 0.28);
+                }
+                pb.plot(px, py, c);
+            }
+        }
+    }
+
+    // 4. Stray golden corn-straw broom bristles tucked beside the jamb corners
+    let straw_v_base = match inward {
+        Cardinal::South => 8,
+        Cardinal::North => 2,
+        _ => 4,
+    };
+    const STRAWS: [(i32, i32); 6] = [(3, 0), (3, 1), (2, 2), (28, -1), (29, 0), (28, 3)];
+    for &(s_du, sv) in &STRAWS {
+        let u = s_du - du_off;
+        if u >= u0 && u < u1 {
+            let (px, py) = boss_uv_to_screen(sx, sy, inward, u, straw_v_base + sv);
+            blend_px(pb, px, py, straw, 0.88);
+        }
+    }
+}
+
+/// **Lab boss threshold**: bold inward-pointing amber/charcoal hazard chevrons on
+/// the approach apron, steel containment sill with mower tire skids & blade scratches,
+/// and an asymmetric mown, scorched botanical test-lawn strip on the arena side.
+#[allow(clippy::too_many_arguments)]
+fn draw_boss_threshold_lab(
+    pb: &mut PixelBuffer,
+    sx: i32,
+    sy: i32,
+    inward: Cardinal,
+    u0: i32,
+    u1: i32,
+    du_off: i32,
+    anim_clock: f32,
+    pal: &WallPalette,
+    accent: Rgb,
+) {
+    let haz_hi: Rgb = (234, 182, 54);
+    let haz_mid: Rgb = (198, 148, 42);
+    let haz_dk: Rgb = (18, 22, 32);
+    let steel_hi: Rgb = (106, 126, 156);
+    let steel_mid: Rgb = (52, 64, 88);
+    let steel_lo: Rgb = (32, 40, 58);
+    let rubber: Rgb = (16, 18, 26);
+    let scratch_hi: Rgb = (190, 218, 236);
+    let grass_dk: Rgb = (36, 84, 40);
+    let grass_mid: Rgb = (58, 130, 52);
+    let grass_hi: Rgb = (96, 178, 70);
+    let grass_fresh: Rgb = (122, 198, 76);
+    let scorch_edge: Rgb = (102, 72, 36);
+    let scorch_mid: Rgb = (44, 30, 22);
+    let scorch_char: Rgb = (20, 16, 16);
+    let ember: Rgb = (176, 82, 36);
+
+    let pulse = 0.55 + 0.45 * (anim_clock * 4.2).sin();
+    let beacon = mix_c((228, 76, 44), accent, 0.14 * pulse);
+
+    // Keep approach hazard chevrons, steel sill, and scorched lawn-strip clear of
+    // the 4 px overhead lintel (`ly in 0..4`) on both North and South walls.
+    let (haz_v0, haz_v1, sill_v0, sill_v1, lawn_v0, lawn_v1_base) = match inward {
+        Cardinal::South => (-8, 0, 4, 13, 13, 20),
+        Cardinal::North => (-6, 3, 3, 12, 15, 22),
+        Cardinal::East | Cardinal::West => (-5, 4, 4, 13, 13, 20),
+    };
+
+    for u in u0..u1 {
+        let du = u + du_off;
+        let dist_c = (du - 16).abs();
+        let on_tire_l = (7..=10).contains(&du);
+        let on_tire_r = (21..=24).contains(&du);
+
+        let (bx_a, by_a) = boss_uv_to_screen(sx, sy, inward, u, haz_v0 - 1);
+        darken_px(pb, bx_a, by_a, 0.72);
+
+        // 1. Approach apron: bolted steel frame + inward-pointing hazard chevrons
+        for v in haz_v0..haz_v1 {
+            let lv = v - haz_v0;
+            let (px, py) = boss_uv_to_screen(sx, sy, inward, u, v);
+            let mut c = if v == haz_v0 || v == haz_v1 - 1 {
+                pal.outline
+            } else if du == 2 || du == 29 {
+                steel_lo
+            } else if du == 3 || du == 28 {
+                if lv == 3 || lv == 4 {
+                    scale_c(beacon, 0.65 + 0.35 * pulse)
+                } else {
+                    steel_mid
+                }
+            } else {
+                let phase = (dist_c - lv).rem_euclid(6);
+                if phase < 3 {
+                    if lv == 1 || phase == 0 {
+                        haz_hi
+                    } else {
+                        haz_mid
+                    }
+                } else {
+                    haz_dk
+                }
+            };
+            if (on_tire_l || on_tire_r) && v >= haz_v1 - 3 && v < haz_v1 - 1 {
+                c = mix_c(c, rubber, 0.42);
+            }
+            blend_px(pb, px, py, c, 0.94);
+        }
+
+        // 2. Heavy steel containment sill with mower tire skids & blade scratches
+        for v in sill_v0..sill_v1 {
+            let lv = v - sill_v0;
+            let (px, py) = boss_uv_to_screen(sx, sy, inward, u, v);
+            let mut c = if v == sill_v0 || v == sill_v1 - 1 {
+                steel_hi
+            } else if lv == 4 {
+                pal.outline
+            } else if (v & 1) == 0 {
+                steel_mid
+            } else {
+                steel_lo
+            };
+
+            if (on_tire_l || on_tire_r) && v > sill_v0 && v < sill_v1 - 1 {
+                let tread = ((du + v) & 1) == 0;
+                c = mix_c(c, rubber, if tread { 0.82 } else { 0.50 });
+            }
+            if (lv == 2 && (12..=15).contains(&du))
+                || (lv == 3 && (15..=19).contains(&du))
+                || (lv == 6 && (13..=17).contains(&du))
+            {
+                c = mix_c(c, scratch_hi, 0.76);
+            }
+            blend_px(pb, px, py, c, 0.95);
+        }
+
+        // 3. Arena-side scorched botanical test-lawn strip
+        let h_col = hash3(du, 7, 0x1A00);
+        let tip_v = lawn_v1_base + (h_col & 1) as i32;
+        for v in lawn_v0..=tip_v {
+            let lv = v - lawn_v0;
+            let (px, py) = boss_uv_to_screen(sx, sy, inward, u, v);
+            let h = hash3(du, v, 0x92A5);
+            let scorch_center = 15 + lv / 3;
+            let sd = (du - scorch_center).abs();
+            let c = if lv == 0 {
+                pal.outline
+            } else if sd <= 4 {
+                if sd <= 2 && (2..=5).contains(&lv) {
+                    if (du == 14 && lv == 3) || (du == 17 && lv == 4) || (du == 15 && lv == 5) {
+                        ember
+                    } else {
+                        scorch_char
+                    }
+                } else if (h & 3) == 0 {
+                    scorch_edge
+                } else {
+                    scorch_mid
+                }
+            } else if sd == 5 || sd == 6 {
+                if sd == 6 && (h & 1) == 0 && v < tip_v {
+                    grass_fresh
+                } else if (h & 2) == 0 {
+                    scorch_edge
+                } else {
+                    grass_dk
+                }
+            } else {
+                let mut g = {
+                    let blade = (du + v * 3 + (h as i32)) & 3;
+                    if v == tip_v || blade == 0 {
+                        grass_dk
+                    } else if blade == 1 {
+                        grass_hi
+                    } else {
+                        grass_mid
+                    }
+                };
+                if (on_tire_l || on_tire_r) && lv <= 3 {
+                    g = mix_c(g, scorch_mid, 0.56);
+                }
+                g
+            };
+            let alpha = if v == tip_v { 0.78 } else { 0.94 };
+            blend_px(pb, px, py, c, alpha);
+        }
+        let (sx_t, sy_t) = boss_uv_to_screen(sx, sy, inward, u, tip_v + 1);
+        darken_px(pb, sx_t, sy_t, 0.76);
+    }
+
+    // 4. Scattered bright-green cut grass clippings thrown back onto the steel sill
+    const CLIPPINGS: [(i32, i32); 7] = [
+        (6, 6),
+        (11, 7),
+        (14, 5),
+        (19, 7),
+        (23, 6),
+        (26, 5),
+        (12, 8),
+    ];
+    for &(c_du, cv_rel) in &CLIPPINGS {
+        let u = c_du - du_off;
+        if u >= u0 && u < u1 {
+            let (px, py) = boss_uv_to_screen(sx, sy, inward, u, sill_v0 + cv_rel);
+            blend_px(pb, px, py, grass_fresh, 0.86);
+        }
     }
 }
 
@@ -2739,5 +4335,452 @@ mod tests {
             }
         }
         std::fs::write("/tmp/ratrun_walls.ppm", out).unwrap();
+    }
+
+    fn fnv1a_pixels(pb: &PixelBuffer) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for y in 0..pb.h {
+            for x in 0..pb.w {
+                let (r, g, b) = pb.pixel_at(x, y);
+                for byte in [r, g, b] {
+                    h ^= byte as u64;
+                    h = h.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+        }
+        h
+    }
+
+    fn render_sample_map(theme: Theme) -> PixelBuffer {
+        let cols = SAMPLE_MAP[0].len();
+        let rows = SAMPLE_MAP.len();
+        let w = cols * CELL_SIZE as usize;
+        let h = rows * CELL_SIZE as usize;
+        let accent = crate::game::level::Palette::for_theme(theme).accent;
+        let cam = Vec2::new(64.0, 64.0);
+        let cx_off = 4;
+        let cy_off = 4;
+        let mut pb = PixelBuffer::new(w, h);
+        pb.clear(crate::game::level::Palette::for_theme(theme).bg);
+
+        let mut views = Vec::new();
+        for y in 0..rows as i32 {
+            for x in 0..cols as i32 {
+                if let Some((kind, prog)) = grid_at(x, y) {
+                    views.push(WallCellView {
+                        cell_x: x + cx_off,
+                        cell_y: y + cy_off,
+                        seed: 1337,
+                        theme,
+                        kind,
+                        mask: compute_mask(x, y, kind),
+                        open_progress: prog,
+                        anim_clock: 1.5,
+                    });
+                }
+            }
+        }
+        for v in &views {
+            draw_wall_ground(&mut pb, v, cam, accent);
+        }
+        for v in &views {
+            draw_wall_cell(&mut pb, v, cam, accent);
+        }
+        for v in &views {
+            draw_wall_overhang(&mut pb, v, cam, accent);
+        }
+        pb
+    }
+
+    /// Pins the exact FNV-1a pixel hash of the rendered 18 × 12 sample layout
+    /// (covering Solid, Maze, RatHole H/V, Doorway H/V, OneWayDoor W/S/E,
+    /// shadows, and overhangs) for every theme so visual changes are deliberate.
+    #[test]
+    fn sample_render_hashes_are_pinned() {
+        const EXPECTED: [(Theme, u64); 3] = [
+            (Theme::Sewer, 0xa556_4534_949c_5d82),
+            (Theme::Kitchen, 0xcc14_6036_0100_16a7),
+            (Theme::Lab, 0x1a39_d95b_f07f_e784),
+        ];
+        for (theme, expected) in EXPECTED {
+            let pb = render_sample_map(theme);
+            let actual = fnv1a_pixels(&pb);
+            assert_eq!(
+                actual, expected,
+                "{theme:?} wall render hash drifted: got 0x{actual:016x}, expected 0x{expected:016x}"
+            );
+        }
+    }
+
+    /// Draws a screenful (10 × 11 = 110 cells) of each theme across many
+    /// interleaved rounds (balancing CPU turbo / contention) and asserts that
+    /// Lab stays well under 2× Sewer's draw time.
+    #[test]
+    fn lab_wall_perf_within_ratio_of_sewer() {
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+
+        let mut pb = PixelBuffer::new(160, 168);
+        let cam = Vec2::new(64.0, 64.0);
+        let rounds = 40;
+        let frames_per_round = 10;
+
+        let build_screenful = |theme: Theme, interior_only: bool| -> (Rgb, Vec<WallCellView>) {
+            let accent = crate::game::level::Palette::for_theme(theme).accent;
+            let mut views = Vec::with_capacity(110);
+            for cy in 4..15 {
+                for cx in 4..14 {
+                    let mask = if interior_only {
+                        NeighborMask::ALL
+                    } else if cy == 14 {
+                        NeighborMask::from_cardinals(true, true, false, true)
+                    } else if cx == 4 || cx == 13 || cy == 4 {
+                        NeighborMask::from_cardinals(cy > 4, cx < 13, cy < 14, cx > 4)
+                    } else {
+                        NeighborMask::ALL
+                    };
+                    views.push(WallCellView {
+                        cell_x: cx,
+                        cell_y: cy,
+                        seed: 1337,
+                        theme,
+                        kind: WallKind::Solid,
+                        mask,
+                        open_progress: 0.0,
+                        anim_clock: 1.5,
+                    });
+                }
+            }
+            (accent, views)
+        };
+
+        for (label, interior_only) in [("solid_bedrock", true), ("mixed_screenful", false)] {
+            let cases = [
+                build_screenful(Theme::Sewer, interior_only),
+                build_screenful(Theme::Kitchen, interior_only),
+                build_screenful(Theme::Lab, interior_only),
+            ];
+            // Warmup all three themes
+            for (accent, views) in &cases {
+                for v in views {
+                    draw_wall_ground(&mut pb, v, cam, *accent);
+                    draw_wall_cell(&mut pb, v, cam, *accent);
+                    draw_wall_overhang(&mut pb, v, cam, *accent);
+                }
+            }
+
+            let mut totals = [Duration::ZERO; 3];
+            for r in 0..rounds {
+                // Rotate theme order each round so transient OS scheduling noise cancels out
+                for step in 0..3 {
+                    let ti = (r + step) % 3;
+                    let (accent, views) = &cases[ti];
+                    let t0 = Instant::now();
+                    for _ in 0..frames_per_round {
+                        for v in views {
+                            draw_wall_ground(&mut pb, v, cam, *accent);
+                        }
+                        for v in views {
+                            draw_wall_cell(&mut pb, v, cam, *accent);
+                        }
+                        for v in views {
+                            draw_wall_overhang(&mut pb, v, cam, *accent);
+                        }
+                    }
+                    totals[ti] += t0.elapsed();
+                    black_box(pb.pixel_at(80, 84));
+                }
+            }
+
+            let total_frames = (rounds * frames_per_round) as f64;
+            let sewer_us = totals[0].as_secs_f64() * 1e6 / total_frames;
+            let kitchen_us = totals[1].as_secs_f64() * 1e6 / total_frames;
+            let lab_us = totals[2].as_secs_f64() * 1e6 / total_frames;
+            let ratio = lab_us / sewer_us.max(0.001);
+            eprintln!(
+                "wall perf ({label}, {total_frames:.0} frames × 110 cells): \
+                 Sewer={sewer_us:.1}us Kitchen={kitchen_us:.1}us Lab={lab_us:.1}us \
+                 Lab/Sewer={ratio:.2}x"
+            );
+            assert!(
+                ratio < 2.0,
+                "{label}: Lab ({lab_us:.1}us) / Sewer ({sewer_us:.1}us) = {ratio:.2}x >= 2.0"
+            );
+        }
+    }
+
+    #[test]
+    fn boss_threshold_never_changes_collision_and_paints_each_theme() {
+        let mut buf = [Rectf::new(0.0, 0.0, 0.0, 0.0); 2];
+        let mut pb = PixelBuffer::new(96, 96);
+        let cam = Vec2::new(0.0, 0.0);
+
+        // Collision on the underlying 2-cell doorway remains strictly 1 px outer jambs (30 px clear)
+        let left_cell = WallCellView::new(
+            2,
+            2,
+            42,
+            Theme::Sewer,
+            WallKind::Doorway {
+                axis: WallAxis::Horizontal,
+            },
+            NeighborMask::from_cardinals(false, false, false, true),
+        );
+        let right_cell = WallCellView::new(
+            3,
+            2,
+            42,
+            Theme::Sewer,
+            WallKind::Doorway {
+                axis: WallAxis::Horizontal,
+            },
+            NeighborMask::from_cardinals(false, true, false, false),
+        );
+        assert_eq!(wall_colliders(&left_cell, &mut buf), 1);
+        let left_edge = buf[0].right();
+        assert_eq!(wall_colliders(&right_cell, &mut buf), 1);
+        let right_edge = buf[0].x;
+        assert_eq!(right_edge - left_edge, 30.0);
+
+        // Render all 3 themes × all 4 inward directions × edge cameras with zero panics
+        let mut theme_hashes = [0u64; 3];
+        for (ti, theme) in Theme::all().into_iter().enumerate() {
+            let accent = crate::game::level::Palette::for_theme(theme).accent;
+            let bg = crate::game::level::Palette::for_theme(theme).bg;
+
+            for &inward in &[
+                Cardinal::North,
+                Cardinal::South,
+                Cardinal::East,
+                Cardinal::West,
+            ] {
+                let (m0, m1, c1_dx, c1_dy) = match inward.wall_axis() {
+                    WallAxis::Horizontal => (
+                        NeighborMask::from_cardinals(false, false, false, true),
+                        NeighborMask::from_cardinals(false, true, false, false),
+                        1,
+                        0,
+                    ),
+                    WallAxis::Vertical => (
+                        NeighborMask::from_cardinals(true, false, false, false),
+                        NeighborMask::from_cardinals(false, false, true, false),
+                        0,
+                        1,
+                    ),
+                };
+                for &test_cam in &[
+                    cam,
+                    Vec2::new(-40.0, -40.0),
+                    Vec2::new(400.0, 400.0),
+                    Vec2::new(28.0, 28.0),
+                ] {
+                    let v0 = BossThresholdView::new(
+                        WallCellView {
+                            cell_x: 2,
+                            cell_y: 2,
+                            seed: 1337,
+                            theme,
+                            kind: WallKind::Doorway {
+                                axis: inward.wall_axis(),
+                            },
+                            mask: m0,
+                            open_progress: 0.0,
+                            anim_clock: 1.5,
+                        },
+                        inward,
+                    );
+                    let v1 = BossThresholdView::new(
+                        WallCellView {
+                            cell_x: 2 + c1_dx,
+                            cell_y: 2 + c1_dy,
+                            seed: 1337,
+                            theme,
+                            kind: WallKind::Doorway {
+                                axis: inward.wall_axis(),
+                            },
+                            mask: m1,
+                            open_progress: 0.0,
+                            anim_clock: 1.5,
+                        },
+                        inward,
+                    );
+                    pb.clear(bg);
+                    draw_wall_ground(&mut pb, &v0.cell, test_cam, accent);
+                    draw_wall_ground(&mut pb, &v1.cell, test_cam, accent);
+                    let before = fnv1a_pixels(&pb);
+                    draw_boss_threshold_ground(&mut pb, &v0, test_cam, accent);
+                    draw_boss_threshold_ground(&mut pb, &v1, test_cam, accent);
+                    draw_wall_cell(&mut pb, &v0.cell, test_cam, accent);
+                    draw_wall_cell(&mut pb, &v1.cell, test_cam, accent);
+                    draw_wall_overhang(&mut pb, &v0.cell, test_cam, accent);
+                    draw_wall_overhang(&mut pb, &v1.cell, test_cam, accent);
+                    draw_boss_threshold_overhang(&mut pb, &v0, test_cam, accent);
+                    draw_boss_threshold_overhang(&mut pb, &v1, test_cam, accent);
+
+                    if test_cam == cam && inward == Cardinal::South {
+                        let after = fnv1a_pixels(&pb);
+                        assert_ne!(
+                            before, after,
+                            "{theme:?}: boss threshold must visibly change the doorway"
+                        );
+                        theme_hashes[ti] = after;
+                    }
+                }
+            }
+        }
+        assert_ne!(theme_hashes[0], theme_hashes[1]);
+        assert_ne!(theme_hashes[1], theme_hashes[2]);
+        assert_ne!(theme_hashes[0], theme_hashes[2]);
+    }
+
+    /// Visual sheet: `RATRUN_DUMP=boss_thresholds cargo test dump_boss_thresholds_sheet`
+    /// writes `/tmp/ratrun_boss_thresholds.ppm` showing all 3 themes' boss arena
+    /// double-doorway thresholds across all 4 wall orientations (South/North/East/West
+    /// inward mouths), with rats placed for scale.
+    #[test]
+    fn dump_boss_thresholds_sheet() {
+        if std::env::var("RATRUN_DUMP").as_deref() != Ok("boss_thresholds") {
+            return;
+        }
+        // 16 × 10 miniature boss-chamber showcase per theme:
+        // - Top wall: 2-cell South-inward boss mouth at (7, 2) & (8, 2)
+        // - Bottom wall: 2-cell North-inward boss mouth at (7, 7) & (8, 7)
+        // - Left wall: 2-cell East-inward boss mouth at (4, 4) & (4, 5)
+        // - Right wall: 2-cell West-inward boss mouth at (11, 4) & (11, 5)
+        const ARENA_MAP: [&str; 10] = [
+            "................",
+            "................",
+            "....###DD###....",
+            "....#......#....",
+            "....d......d....",
+            "....d......d....",
+            "....#......#....",
+            "....###DD###....",
+            "................",
+            "................",
+        ];
+
+        let cols = ARENA_MAP[0].len();
+        let rows = ARENA_MAP.len();
+        let w = cols * CELL_SIZE as usize;
+        let h = rows * CELL_SIZE as usize;
+        let sep = 2usize;
+        let total_h = h * 3 + sep * 2;
+        let mut out = format!("P6\n{} {}\n255\n", w, total_h).into_bytes();
+
+        let cell_at = |x: i32, y: i32| -> Option<WallKind> {
+            if y < 0 || y >= rows as i32 || x < 0 || x >= cols as i32 {
+                return None;
+            }
+            match ARENA_MAP[y as usize].as_bytes()[x as usize] {
+                b'#' => Some(WallKind::Solid),
+                b'D' => Some(WallKind::Doorway {
+                    axis: WallAxis::Horizontal,
+                }),
+                b'd' => Some(WallKind::Doorway {
+                    axis: WallAxis::Vertical,
+                }),
+                _ => None,
+            }
+        };
+        let mask_at = |x: i32, y: i32, kind: WallKind| -> NeighborMask {
+            let conn = |ox: i32, oy: i32| connects(kind, cell_at(ox, oy).map(|k| (k, 0.0)));
+            NeighborMask::from_all(
+                conn(x, y - 1),
+                conn(x + 1, y),
+                conn(x, y + 1),
+                conn(x - 1, y),
+                conn(x + 1, y - 1),
+                conn(x + 1, y + 1),
+                conn(x - 1, y + 1),
+                conn(x - 1, y - 1),
+            )
+        };
+
+        for (ti, theme) in Theme::all().into_iter().enumerate() {
+            let level = Level::new(theme);
+            let accent = level.palette.accent;
+            let cam = Vec2::new(64.0, 64.0);
+            let cx_off = 4;
+            let cy_off = 4;
+            let mut pb = PixelBuffer::new(w, h);
+            draw_floor(&mut pb, &level, cam, 1.5);
+
+            let mut views = Vec::new();
+            let mut thresholds = Vec::new();
+            for y in 0..rows as i32 {
+                for x in 0..cols as i32 {
+                    if let Some(kind) = cell_at(x, y) {
+                        let v = WallCellView {
+                            cell_x: x + cx_off,
+                            cell_y: y + cy_off,
+                            seed: 1337,
+                            theme,
+                            kind,
+                            mask: mask_at(x, y, kind),
+                            open_progress: 0.0,
+                            anim_clock: 1.5,
+                        };
+                        if matches!(kind, WallKind::Doorway { .. }) {
+                            let inward = if y == 2 {
+                                Cardinal::South
+                            } else if y == 7 {
+                                Cardinal::North
+                            } else if x == 4 {
+                                Cardinal::East
+                            } else {
+                                Cardinal::West
+                            };
+                            thresholds.push(BossThresholdView::new(v, inward));
+                        }
+                        views.push(v);
+                    }
+                }
+            }
+
+            // Pass 1: Wall ground + Boss threshold ground overlays
+            for v in &views {
+                draw_wall_ground(&mut pb, v, cam, accent);
+            }
+            for t in &thresholds {
+                draw_boss_threshold_ground(&mut pb, t, cam, accent);
+            }
+            // Pass 2: Wall bodies & doorway jambs
+            for v in &views {
+                draw_wall_cell(&mut pb, v, cam, accent);
+            }
+            // Rats approaching the North, East, and South boss thresholds for scale
+            for (rx, ry, fx, fy) in [
+                (8.0, 1.25, 0.0, 1.0),
+                (3.0, 5.0, 1.0, 0.0),
+                (8.0, 8.75, 0.0, -1.0),
+            ] {
+                let pos = cam + Vec2::new(rx * CELL_SIZE_F, ry * CELL_SIZE_F);
+                let mut p = Player::new(pos, WeaponKind::Gnaw);
+                p.face = Vec2::new(fx, fy).normalized();
+                p.vel = p.face * 55.0;
+                draw_rat(&mut pb, &p, 0.7, cam);
+            }
+            // Pass 3: Wall overhang + Boss threshold overhang trim
+            for v in &views {
+                draw_wall_overhang(&mut pb, v, cam, accent);
+            }
+            for t in &thresholds {
+                draw_boss_threshold_overhang(&mut pb, t, cam, accent);
+            }
+
+            for y in 0..pb.h {
+                for x in 0..pb.w {
+                    let c = pb.pixel_at(x, y);
+                    out.extend_from_slice(&[c.0, c.1, c.2]);
+                }
+            }
+            if ti < 2 {
+                for _ in 0..(w * sep) {
+                    out.extend_from_slice(&[8, 8, 10]);
+                }
+            }
+        }
+        std::fs::write("/tmp/ratrun_boss_thresholds.ppm", out).unwrap();
     }
 }

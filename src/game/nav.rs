@@ -2109,6 +2109,91 @@ mod tests {
         hash
     }
 
+    /// The reachable open cell farthest from `start` by path distance whose
+    /// 49 x 49 fine window holds no rat-hole and no one-way door, so both size
+    /// classes share the field computed there. Returns the goal's world
+    /// position and its path distance in cells.
+    ///
+    /// The BFS uses the flow field's own 8-connected step rule (a cardinal
+    /// step needs a legal door direction; a diagonal needs both orthogonal
+    /// neighbours open), so "reachable" means routable by the field, not just
+    /// connected in the generator's looser sense.
+    fn farthest_shared_goal(tiles: &TileMap, start: Vec2) -> Option<(Vec2, u32)> {
+        let cols = tiles.cols();
+        let rows = tiles.rows();
+        let idx = |cx: i32, cy: i32| (cy * cols + cx) as usize;
+        let open = |cx: i32, cy: i32| tiles.passable(cx, cy, SizeClass::Small);
+        let door = |cx: i32, cy: i32| tiles.one_way_dir(cx, cy);
+        let step_ok = |cx: i32, cy: i32, dx: i32, dy: i32| match cardinal_of(dx, dy) {
+            Some(dir) => {
+                let nx = cx + dx;
+                let ny = cy + dy;
+                tiles.travel_ok(nx, ny, SizeClass::Small, dir)
+                    && door(cx, cy).is_none_or(|allowed| allowed == dir)
+            }
+            None => {
+                open(cx + dx, cy + dy)
+                    && door(cx + dx, cy + dy).is_none()
+                    && door(cx, cy).is_none()
+                    && (open(cx + dx, cy) || open(cx, cy + dy))
+            }
+        };
+        let (sx, sy) = cell_of_pos(start);
+        if sx < 0 || sy < 0 || sx >= cols || sy >= rows || !open(sx, sy) {
+            return None;
+        }
+        let mut dist = vec![u32::MAX; (cols * rows) as usize];
+        dist[idx(sx, sy)] = 0;
+        let mut queue = VecDeque::new();
+        queue.push_back((sx, sy));
+        while let Some((cx, cy)) = queue.pop_front() {
+            let d = dist[idx(cx, cy)];
+            for &(dx, dy) in OFFS.iter() {
+                let (nx, ny) = (cx + dx, cy + dy);
+                if nx < 0 || ny < 0 || nx >= cols || ny >= rows {
+                    continue;
+                }
+                let i = idx(nx, ny);
+                if dist[i] != u32::MAX || !step_ok(cx, cy, dx, dy) {
+                    continue;
+                }
+                dist[i] = d + 1;
+                queue.push_back((nx, ny));
+            }
+        }
+        // A window is gate-free when no cell in it is a rat-hole or a one-way
+        // door (the only kinds whose passability differs between the classes).
+        let gate_free = |cx: i32, cy: i32| {
+            for wy in cy - FINE_RADIUS_CELLS..=cy + FINE_RADIUS_CELLS {
+                for wx in cx - FINE_RADIUS_CELLS..=cx + FINE_RADIUS_CELLS {
+                    if matches!(
+                        tiles.get(wx, wy),
+                        TileKind::Wall(WallKind::RatHole { .. } | WallKind::OneWayDoor { .. })
+                    ) {
+                        return false;
+                    }
+                }
+            }
+            true
+        };
+        let mut best: Option<(u32, i32, i32)> = None;
+        for cy in 0..rows {
+            for cx in 0..cols {
+                let d = dist[idx(cx, cy)];
+                if d == u32::MAX {
+                    continue;
+                }
+                if best.is_some_and(|(bd, _, _)| d <= bd) {
+                    continue;
+                }
+                if gate_free(cx, cy) {
+                    best = Some((d, cx, cy));
+                }
+            }
+        }
+        best.map(|(d, cx, cy)| (cell_centre(cx, cy), d))
+    }
+
     #[test]
     fn nav_benchmark() {
         // A complete field always exists before each timed update, and every
@@ -2124,30 +2209,17 @@ mod tests {
         let goal = level.start;
         // A second goal cell whose window the two size classes *share* (no
         // rat-hole, no one-way door in it), so the shared columns measure the
-        // real thing on this map. The window is fixed-size, so the distance
-        // does not matter — only that the goal cell moved.
+        // real thing on this map. Pick the reachable open cell farthest from
+        // the start by path distance among those whose fine window is shared:
+        // a genuinely distant goal, and the size classes still read one field.
         let mut tiles = std::mem::replace(&mut level.tiles, TileMap::new(2, 2, Theme::Sewer, 0));
-        let far = {
-            let mut probe = FlowField::new(&tiles);
-            let mut far = goal;
-            for offset in [
-                Vec2::new(400.0, 300.0),
-                Vec2::new(160.0, 96.0),
-                Vec2::new(-240.0, 160.0),
-                Vec2::new(320.0, -160.0),
-                Vec2::new(-96.0, -256.0),
-            ] {
-                let cand = goal + offset;
-                probe.update(&tiles, goal, NavBudget::FULL);
-                let u = probe.update(&tiles, cand, NavBudget::FULL);
-                if u.changed && u.shared {
-                    far = cand;
-                    break;
-                }
-            }
-            far
-        };
+        let (far, far_steps) = farthest_shared_goal(&tiles, goal)
+            .expect("the map must have a reachable open cell with a gate-free window");
         assert_ne!(cell_of_pos(far), cell_of_pos(goal), "the far goal must move");
+        assert!(
+            far_steps >= 32,
+            "the far goal is only {far_steps} cells from the start; the benchmark needs a distant goal"
+        );
 
         // Baseline: the pre-split full-map field, one class, one shot.
         let mut baseline_hash = 0u64;
@@ -2193,12 +2265,18 @@ mod tests {
         fine_only_ms /= f64::from(REPEATS);
         shared_ms /= f64::from(REPEATS);
 
-        // Both classes unshared: a rat-hole three cells from the player, so the
-        // two windows differ. Same goal pair, same repeat structure.
-        let (sx, sy) = cell_of_pos(goal);
+        // Both classes unshared: a rat-hole three cells from the far goal, so
+        // the two class masks differ inside its window. Same goal pair, same
+        // repeat structure.
+        let (fx, fy) = cell_of_pos(far);
+        let hole = [(3, 0), (-3, 0), (0, 3), (0, -3), (2, 2), (-2, -2)]
+            .into_iter()
+            .map(|(dx, dy)| (fx + dx, fy + dy))
+            .find(|&(x, y)| tiles.get(x, y) == TileKind::Open)
+            .expect("an open cell near the far goal to hold the rat-hole");
         tiles.set(
-            sx + 3,
-            sy,
+            hole.0,
+            hole.1,
             TileKind::Wall(WallKind::RatHole {
                 axis: WallAxis::Vertical,
             }),
@@ -2218,12 +2296,14 @@ mod tests {
         unshared_ms /= f64::from(REPEATS);
 
         // Amortised per-frame cost at the default budget: walk the rat across
-        // the map for 30 s of frames and pay whatever `update` charges.
+        // the map for 60 s of frames and pay whatever `update` charges. The
+        // goal cell snaps to the nearest open cell, so a 30 s walk completed
+        // only ~50 recomputes; 60 s keeps the "many updates" assertion honest.
         std::mem::swap(&mut level.tiles, &mut tiles);
         let mut walker = FlowField::new(&level.tiles);
         let budget = NavBudget::default();
         walker.update(&level.tiles, level.start, budget);
-        let frames = 1_800;
+        let frames = 3_600;
         let mut worst = 0.0f64;
         let mut updates = 0;
         let mut spent_fine = 0u64;
@@ -2310,3 +2390,4 @@ mod tests {
         );
     }
 }
+

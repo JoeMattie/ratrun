@@ -28,7 +28,7 @@ use crate::game::level::{Level, RoomKind, Theme};
 use crate::game::world::World;
 use crate::render::minimap::{
     self, LabelKind, MapLabel, MapMarker, MarkerKind, MinimapAxis, MinimapCell, MinimapDir,
-    MinimapMode, MinimapPalette, MinimapSource, MinimapView, PickupTag,
+    MinimapMode, MinimapPalette, MinimapSize, MinimapSource, MinimapView, PickupTag,
 };
 
 /// Seconds into the run when the boss arena starts showing as a bearing on the
@@ -201,8 +201,21 @@ impl MinimapFrame {
         }
     }
 
-    /// Build the per-frame view for `world` (borrows the refreshed buffers).
+    /// Build the per-frame view for `world` using the default `Normal` compact
+    /// size (borrows the refreshed buffers).
     pub fn view(&self, world: &World, expanded: bool, hovered: bool) -> MinimapView<'_> {
+        self.view_sized(world, expanded, MinimapSize::Normal, hovered)
+    }
+
+    /// Build the per-frame view for `world` with an explicit saved
+    /// [`MinimapSize`] preference (borrows the refreshed buffers).
+    pub fn view_sized(
+        &self,
+        world: &World,
+        expanded: bool,
+        compact_size: MinimapSize,
+        hovered: bool,
+    ) -> MinimapView<'_> {
         let palette = match world.level.theme {
             Theme::Sewer => MinimapPalette::SEWER,
             Theme::Kitchen => MinimapPalette::KITCHEN,
@@ -212,6 +225,17 @@ impl MinimapFrame {
         let rows = world.level.tiles.rows().max(1);
         let seen = world.fog().seen_count();
         let pct = ((seen * 100) / (cols as usize * rows as usize)).min(100) as u8;
+        let maze_discovered = world
+            .maze_markers()
+            .any(|m| m.entrance_seen || m.reward_seen);
+        // Mirror `overlay::draw_boss_compass`: the HUD compass already points
+        // at the arena during the 25 s warning window and at the living boss
+        // once spawned, so `Hidden` mode does not duplicate that cue.
+        let hud_compass_active = world.boss_offset().is_some()
+            || (!world.director.boss_spawned
+                && world.elapsed
+                    >= crate::game::director::BOSS_TIME - crate::render::overlay::BOSS_WARNING_SECS
+                && world.elapsed < crate::game::director::BOSS_TIME);
         MinimapView {
             player_cell: (
                 world.player.pos.x / TILE_F,
@@ -235,8 +259,11 @@ impl MinimapFrame {
             } else {
                 MinimapMode::Compact
             },
+            compact_size,
+            hud_compass_active,
             hovered,
             explored_pct: Some(pct),
+            maze_discovered,
         }
     }
 }
@@ -264,6 +291,11 @@ pub fn boss_bearing_dir(world: &World) -> Option<(f32, f32)> {
 /// geometry; the App only needs it for the hit map and for tests).
 pub fn compact_rect(game: Rect) -> Rect {
     minimap::compact_rect(game)
+}
+
+/// The compact panel rect for a play field and saved [`MinimapSize`] preference.
+pub fn compact_rect_for_size(game: Rect, size: MinimapSize) -> Rect {
+    minimap::compact_rect_for_size(game, size)
 }
 
 /// The expanded panel rect for a play field.
@@ -628,6 +660,131 @@ mod tests {
             .markers
             .iter()
             .any(|m| m.kind == MarkerKind::MazeCacheHollow));
+    }
+
+    /// The first seed in `theme`'s first 64 that has a maze, or `None`.
+    fn maze_seed(theme: Theme) -> Option<u64> {
+        (0..64u64).find(|&seed| !Level::generate(theme, seed).mazes.is_empty())
+    }
+
+    /// Render the expanded map for `w` into a `120 × 38` terminal and return its
+    /// text, so a test can read what the art's side panel actually says.
+    fn expanded_panel_text(w: &World, frame: &MinimapFrame) -> String {
+        let view = frame.view(w, true, false);
+        let mut scratch = minimap::MinimapScratch::new();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 38)).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                minimap::draw(f, area, &view, w, &mut scratch);
+            })
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    /// Seven maps in eight have no maze now, and the expanded map must not
+    /// claim otherwise: with no discovered maze the art omits its
+    /// `CACHES: n / m` line and all maze-specific legend rows.
+    #[test]
+    fn a_map_without_a_maze_draws_no_cache_telemetry() {
+        let seed = (0..64u64)
+            .find(|&seed| Level::generate(Theme::Sewer, seed).mazes.is_empty())
+            .expect("no maze-less Sewer map in the first 64 seeds");
+        let mut w = World::new(Theme::Sewer, seed);
+        for _ in 0..20 {
+            w.update(1.0 / 60.0, Vec2::new(1.0, 0.0), false);
+        }
+        let mut frame = MinimapFrame::new();
+        frame.refresh(&w);
+        assert!(
+            !frame.markers().iter().any(|m| matches!(
+                m.kind,
+                MarkerKind::MazeEntrance
+                    | MarkerKind::MazeCacheHollow
+                    | MarkerKind::MazeCacheClaimed
+                    | MarkerKind::MazeReward
+            )),
+            "a maze-less map contributed a maze marker"
+        );
+        assert!(!frame.view(&w, true, false).maze_discovered);
+        let text = expanded_panel_text(&w, &frame);
+        assert!(
+            !text.contains("CACHE"),
+            "the side panel invented cache telemetry: {text}"
+        );
+        for maze_row in [
+            "Maze Partition",
+            "One-Way Exit",
+            "Maze Breach",
+            "Unclaimed Cache",
+            "Claimed Cache",
+        ] {
+            assert!(
+                !text.contains(maze_row),
+                "a maze-less map showed maze legend row '{maze_row}'"
+            );
+        }
+    }
+
+    /// Even on the 1-in-8 map that carries a maze, the expanded legend must
+    /// not spoil its existence until the player discovers the breach.
+    #[test]
+    fn an_undiscovered_maze_does_not_spoil_the_legend_until_seen() {
+        let seed = maze_seed(Theme::Sewer).expect("no Sewer map in the first 64 has a maze");
+        let mut w = World::new(Theme::Sewer, seed);
+        let maze = *w.level.mazes.first().unwrap();
+        let mut frame = MinimapFrame::new();
+        frame.refresh(&w);
+
+        assert!(
+            !frame.view(&w, true, false).maze_discovered,
+            "undiscovered maze spoiled maze_discovered before entry was seen"
+        );
+        let before = expanded_panel_text(&w, &frame);
+        assert!(!before.contains("Maze Partition"));
+        assert!(!before.contains("Maze Breach"));
+
+        // Seeing the maze entrance reveals the maze legend rows.
+        w.fog.reveal_cell(&w.level, maze.entry);
+        frame.refresh(&w);
+        assert!(frame.view(&w, true, false).maze_discovered);
+        let after = expanded_panel_text(&w, &frame);
+        assert!(after.contains("Maze Partition"));
+        assert!(after.contains("Maze Breach"));
+        assert!(after.contains("Unclaimed Cache"));
+    }
+
+    /// On the one map in eight that has a maze, the panel's total is the number
+    /// of *known* caches — one — and claiming it fills the line in.
+    #[test]
+    fn a_found_cache_is_counted_one_of_one_and_fills_on_claim() {
+        let seed = maze_seed(Theme::Sewer).expect("no Sewer map in the first 64 has a maze");
+        let mut w = World::new(Theme::Sewer, seed);
+        let maze = *w.level.mazes.first().unwrap();
+        w.fog.reveal_cell(&w.level, maze.entry);
+        let mut frame = MinimapFrame::new();
+        frame.refresh(&w);
+
+        let text = expanded_panel_text(&w, &frame);
+        assert!(
+            text.contains("CACHES: 0 / 1 CLAIMED"),
+            "the cache total is not the mazes on the map: {text}"
+        );
+
+        w.fog.set_maze_claimed(0, true);
+        frame.refresh(&w);
+        let text = expanded_panel_text(&w, &frame);
+        assert!(
+            text.contains("CACHES: 1 / 1 CLAIMED"),
+            "a claimed cache did not fill the counter: {text}"
+        );
     }
 
     #[test]

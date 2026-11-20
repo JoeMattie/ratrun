@@ -8,15 +8,20 @@
 //! map floors while staying unmistakably distinct from the white lab rat,
 //! glowing pickups, and bullets.
 //!
-//! Performance: up to 600 enemies can be active at once. Small swarmers use
-//! tight clamped bounding boxes and single-sample analytic SDF shading (zero
-//! heap allocations, no supersampling), scaling detail up with `e.radius`.
+//! Performance: up to 600 enemies can be active at once. Every draw path uses
+//! zero heap allocations, early screen-bounds culling, oriented tight bounding
+//! boxes, incremental affine `(u, v)` stepping, precomputed SDF reciprocals,
+//! and compile-time math lookup tables (zero per-pixel trig or `powf`). For
+//! massive crowds (`visible_count > CROWD_LOD_THRESHOLD`) or tiny radii
+//! (`r < 1.8`), [`draw_enemy_lod`] / [`draw_enemy_crowd`] provide a zero-`sqrt`
+//! level-of-detail path that preserves silhouette, colour identity, facing,
+//! hit flash, and ranged telegraphs.
 
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
-use crate::render::palette::{mix, scale, Rgb};
+use crate::render::palette::Rgb;
 
 use super::enemy::{Enemy, EnemyKind};
 
@@ -27,11 +32,392 @@ const LIGHT: Vec2 = Vec2 { x: -0.55, y: -0.83 };
 /// Hit-flash peak duration in `Enemy::hurt`.
 const FLASH_MAX: f32 = 0.12;
 
+// ---- Compile-time math lookup tables (zero heap, zero per-pixel trig/powf) ---
+
+const SIN_LUT_BITS: usize = 10;
+const SIN_LUT_LEN: usize = 1 << SIN_LUT_BITS; // 1024
+const SIN_LUT_MASK: usize = SIN_LUT_LEN - 1;
+const COS_LUT_QUARTER: usize = SIN_LUT_LEN / 4;
+const INV_TAU_LUT: f32 = SIN_LUT_LEN as f32 / TAU;
+
+const fn const_sin_reduced(x: f32) -> f32 {
+    let x2 = x * x;
+    let x3 = x2 * x;
+    let x5 = x3 * x2;
+    let x7 = x5 * x2;
+    let x9 = x7 * x2;
+    let x11 = x9 * x2;
+    x - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0 + x9 / 362_880.0 - x11 / 39_916_800.0
+}
+
+const fn const_sin(mut x: f32) -> f32 {
+    while x > PI {
+        x -= TAU;
+    }
+    while x < -PI {
+        x += TAU;
+    }
+    if x > FRAC_PI_2 {
+        const_sin_reduced(PI - x)
+    } else if x < -FRAC_PI_2 {
+        const_sin_reduced(-PI - x)
+    } else {
+        const_sin_reduced(x)
+    }
+}
+
+const fn const_ln(mut x: f32) -> f32 {
+    const LN2: f32 = core::f32::consts::LN_2;
+    let mut k = 0i32;
+    while x > core::f32::consts::SQRT_2 {
+        x *= 0.5;
+        k += 1;
+    }
+    while x < core::f32::consts::FRAC_1_SQRT_2 {
+        x *= 2.0;
+        k -= 1;
+    }
+    let y = (x - 1.0) / (x + 1.0);
+    let y2 = y * y;
+    let mut term = y;
+    let mut sum = term;
+    term *= y2;
+    sum += term / 3.0;
+    term *= y2;
+    sum += term / 5.0;
+    term *= y2;
+    sum += term / 7.0;
+    term *= y2;
+    sum += term / 9.0;
+    term *= y2;
+    sum += term / 11.0;
+    2.0 * sum + k as f32 * LN2
+}
+
+const fn const_exp(x: f32) -> f32 {
+    const LN2: f32 = core::f32::consts::LN_2;
+    let kf = x / LN2;
+    let k = if kf >= 0.0 {
+        (kf + 0.5) as i32
+    } else {
+        (kf - 0.5) as i32
+    };
+    let r = x - k as f32 * LN2;
+    let r2 = r * r;
+    let r3 = r2 * r;
+    let r4 = r2 * r2;
+    let r5 = r4 * r;
+    let r6 = r4 * r2;
+    let r7 = r6 * r;
+    let r8 = r4 * r4;
+    let mut e = 1.0
+        + r
+        + r2 / 2.0
+        + r3 / 6.0
+        + r4 / 24.0
+        + r5 / 120.0
+        + r6 / 720.0
+        + r7 / 5040.0
+        + r8 / 40_320.0;
+    let mut n = k;
+    while n > 0 {
+        e *= 2.0;
+        n -= 1;
+    }
+    while n < 0 {
+        e *= 0.5;
+        n += 1;
+    }
+    e
+}
+
+const fn const_pow(x: f32, p: f32) -> f32 {
+    if x <= 0.0 {
+        0.0
+    } else {
+        const_exp(p * const_ln(x))
+    }
+}
+
+const fn build_sin_lut() -> [f32; SIN_LUT_LEN + 1] {
+    let mut tbl = [0.0f32; SIN_LUT_LEN + 1];
+    let mut i = 0;
+    while i < SIN_LUT_LEN {
+        tbl[i] = const_sin(i as f32 * TAU / SIN_LUT_LEN as f32);
+        i += 1;
+    }
+    tbl[SIN_LUT_LEN] = 0.0;
+    tbl
+}
+
+static SIN_LUT: [f32; SIN_LUT_LEN + 1] = build_sin_lut();
+
+#[inline(always)]
+fn fast_sin(x: f32) -> f32 {
+    let scaled = x * INV_TAU_LUT;
+    let floored = scaled.floor();
+    let frac = scaled - floored;
+    let idx = (floored as i32 as usize) & SIN_LUT_MASK;
+    let a = SIN_LUT[idx];
+    a + (SIN_LUT[idx + 1] - a) * frac
+}
+
+#[inline(always)]
+fn fast_sin_cos(x: f32) -> (f32, f32) {
+    let scaled = x * INV_TAU_LUT;
+    let floored = scaled.floor();
+    let frac = scaled - floored;
+    let idx = (floored as i32 as usize) & SIN_LUT_MASK;
+    let cidx = (idx + COS_LUT_QUARTER) & SIN_LUT_MASK;
+    let sa = SIN_LUT[idx];
+    let ca = SIN_LUT[cidx];
+    (
+        sa + (SIN_LUT[idx + 1] - sa) * frac,
+        ca + (SIN_LUT[cidx + 1] - ca) * frac,
+    )
+}
+
+/// Precomputed Bat M-wing profile `(elbow_u_unit, chord_unit)` over `t in [0, 1]`.
+const WING_LUT_N: usize = 128;
+const fn build_bat_wing_lut() -> [(f32, f32); WING_LUT_N + 1] {
+    let mut tbl = [(0.0f32, 0.0f32); WING_LUT_N + 1];
+    let mut i = 0;
+    while i <= WING_LUT_N {
+        let t = i as f32 / WING_LUT_N as f32;
+        let elbow = if t < 0.48 {
+            let k = t / 0.48;
+            -0.25 + 1.85 * k * k * (3.0 - 2.0 * k)
+        } else {
+            let k = (t - 0.48) / 0.52;
+            1.6 - 2.15 * const_pow(k, 1.15)
+        };
+        let sc = const_sin(t * TAU);
+        let scallop = if sc < 0.0 { -sc } else { sc };
+        let raw_chord = 2.45 * (1.0 - t * 0.84) - 0.85 * scallop * (1.0 - t * 0.25);
+        let chord = if raw_chord > 0.28 { raw_chord } else { 0.28 };
+        tbl[i] = (elbow, chord);
+        i += 1;
+    }
+    tbl
+}
+
+static BAT_WING_LUT: [(f32, f32); WING_LUT_N + 1] = build_bat_wing_lut();
+
+#[inline(always)]
+fn bat_wing_profile(t: f32) -> (f32, f32) {
+    let f = t * WING_LUT_N as f32;
+    let i = (f as usize).min(WING_LUT_N - 1);
+    let frac = f - i as f32;
+    let (e0, c0) = BAT_WING_LUT[i];
+    let (e1, c1) = BAT_WING_LUT[i + 1];
+    (e0 + (e1 - e0) * frac, c0 + (c1 - c0) * frac)
+}
+
+/// Precomputed Boss forewing & hindwing width envelopes `(fore_env, hind_env)` over `t in [0, 1]`.
+const fn build_boss_wing_lut() -> [(f32, f32); WING_LUT_N + 1] {
+    let mut tbl = [(0.0f32, 0.0f32); WING_LUT_N + 1];
+    let mut i = 0;
+    while i <= WING_LUT_N {
+        let t = i as f32 / WING_LUT_N as f32;
+        let omt = 1.0 - t;
+        let f_raw = const_pow(t, 0.42) * const_pow(omt, 0.6) * 2.2;
+        let h_raw = const_pow(t, 0.45) * const_pow(omt, 0.6) * 2.2;
+        let f_env = if f_raw > 1.0 { 1.0 } else { f_raw };
+        let h_env = if h_raw > 1.0 { 1.0 } else { h_raw };
+        tbl[i] = (f_env, h_env);
+        i += 1;
+    }
+    tbl
+}
+
+static BOSS_WING_LUT: [(f32, f32); WING_LUT_N + 1] = build_boss_wing_lut();
+
+#[inline(always)]
+fn boss_wing_fore_env(t: f32) -> f32 {
+    let f = t * WING_LUT_N as f32;
+    let i = (f as usize).min(WING_LUT_N - 1);
+    let frac = f - i as f32;
+    let a = BOSS_WING_LUT[i].0;
+    a + (BOSS_WING_LUT[i + 1].0 - a) * frac
+}
+
+#[inline(always)]
+fn boss_wing_hind_env(t: f32) -> f32 {
+    let f = t * WING_LUT_N as f32;
+    let i = (f as usize).min(WING_LUT_N - 1);
+    let frac = f - i as f32;
+    let a = BOSS_WING_LUT[i].1;
+    a + (BOSS_WING_LUT[i + 1].1 - a) * frac
+}
+
+/// Precomputed Spitter wing teardrop profile `sqrt(4 * t * (1 - t))`.
+const fn build_spitter_wing_lut() -> [f32; WING_LUT_N + 1] {
+    let mut tbl = [0.0f32; WING_LUT_N + 1];
+    let mut i = 0;
+    while i <= WING_LUT_N {
+        let t = i as f32 / WING_LUT_N as f32;
+        let v = t * (1.0 - t) * 4.0;
+        tbl[i] = const_pow(v, 0.5);
+        i += 1;
+    }
+    tbl
+}
+
+static SPITTER_WING_LUT: [f32; WING_LUT_N + 1] = build_spitter_wing_lut();
+
+#[inline(always)]
+fn spitter_wing_profile(t: f32) -> f32 {
+    let f = t * WING_LUT_N as f32;
+    let i = (f as usize).min(WING_LUT_N - 1);
+    let frac = f - i as f32;
+    let a = SPITTER_WING_LUT[i];
+    a + (SPITTER_WING_LUT[i + 1] - a) * frac
+}
+
+/// Precomputed feline tail curl curve `1.75 * t.powf(1.25)` for the 16 tail segments.
+const CAT_TAIL_STEPS: usize = 16;
+const fn build_cat_tail_curl() -> [f32; CAT_TAIL_STEPS] {
+    let mut tbl = [0.0f32; CAT_TAIL_STEPS];
+    let mut i = 0;
+    while i < CAT_TAIL_STEPS {
+        let t = (i as f32 + 0.5) / CAT_TAIL_STEPS as f32;
+        tbl[i] = 1.75 * const_pow(t, 1.25);
+        i += 1;
+    }
+    tbl
+}
+
+static CAT_TAIL_CURL: [f32; CAT_TAIL_STEPS] = build_cat_tail_curl();
+
+/// Precomputed unit directions `(cos, sin)` for the Boss's 10-bullet nova telegraph.
+const fn build_nova_10() -> [(f32, f32); 10] {
+    let mut tbl = [(0.0f32, 0.0f32); 10];
+    let mut k = 0;
+    while k < 10 {
+        let a = k as f32 / 10.0 * TAU;
+        tbl[k] = (const_sin(a + FRAC_PI_2), const_sin(a));
+        k += 1;
+    }
+    tbl
+}
+
+static NOVA_10: [(f32, f32); 10] = build_nova_10();
+
+/// Conservative screen-space culling radius per kind (covers legs, wings, tail,
+/// shadow, and boss HP ring).
+#[inline(always)]
+fn cull_reach(kind: EnemyKind, r: f32) -> f32 {
+    match kind {
+        EnemyKind::Skitterer => r * 2.2 + 2.0, // 5.5 * (r/2.5) + 2
+        EnemyKind::Bat => r * 4.25 + 2.0,      // 8.5 * (r/2.0) + 2
+        EnemyKind::Cat => r * 3.0 + 2.0,       // 12.0 * (r/4.0) + 2
+        EnemyKind::Spitter => r * 2.2 + 3.0,   // 6.6 * (r/3.0) + 3
+        EnemyKind::Brute => r * 1.8 + 2.0,     // 11.7 * (r/6.5) + 2
+        EnemyKind::Boss => r * 1.5 + 3.0,      // 21.0 * (r/14.0) + 3
+    }
+}
+
+/// Visible enemy count above which callers (e.g. `World::draw`) should switch
+/// non-boss enemies to [`draw_enemy_lod`] to preserve frame headroom.
+pub const CROWD_LOD_THRESHOLD: usize = 120;
+
 /// Draw one enemy at `e.pos`, facing `e.facing`. `e.anim` is its own animation
 /// phase, `e.flash > 0` means it was just hit, and `accent` is the current
 /// map's accent colour.
 pub fn draw_enemy(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2, accent: Rgb) {
     draw_enemy_styled(pb, e, cam, accent, e.elite);
+}
+
+/// Draw one enemy using the fast level-of-detail path (for massive crowds or
+/// tiny radii), preserving silhouette, colour identity, facing, hit flash, and
+/// attack telegraphs with zero per-pixel `sqrt` or trig.
+pub fn draw_enemy_lod(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2, accent: Rgb) {
+    let Some(fr) = prepare_frame(pb, e, cam, accent) else {
+        return;
+    };
+    draw_enemy_lod_frame(pb, &fr, e, e.elite);
+}
+
+/// Crowd-aware entry point: uses full detail up to [`CROWD_LOD_THRESHOLD`]
+/// visible enemies (and always for bosses), switching smaller swarmers to the
+/// fast level-of-detail path beyond that threshold.
+pub fn draw_enemy_crowd(
+    pb: &mut PixelBuffer,
+    e: &Enemy,
+    cam: Vec2,
+    accent: Rgb,
+    visible_count: usize,
+) {
+    if visible_count > CROWD_LOD_THRESHOLD && e.kind != EnemyKind::Boss {
+        draw_enemy_lod(pb, e, cam, accent);
+    } else {
+        draw_enemy(pb, e, cam, accent);
+    }
+}
+
+/// Shared early-out (screen culling + sub-pixel fast path) and local-frame setup.
+#[inline(always)]
+fn prepare_frame(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2, accent: Rgb) -> Option<Frame> {
+    if pb.w == 0 || pb.h == 0 {
+        return None;
+    }
+    let pos = e.pos - cam;
+    let r = e.radius.max(1.0);
+    let reach = cull_reach(e.kind, r);
+    if pos.x + reach < -1.0
+        || pos.x - reach > pb.w as f32 + 1.0
+        || pos.y + reach < -1.0
+        || pos.y - reach > pb.h as f32 + 1.0
+    {
+        return None;
+    }
+    // Sub-pixel early-out for vanishingly tiny radii.
+    if e.radius < 0.6 {
+        let px = pos.x.round() as i32;
+        let py = pos.y.round() as i32;
+        let hit = (e.flash / FLASH_MAX).clamp(0.0, 1.0);
+        darken_px(pb, px + 1, py + 1, 0.35);
+        pb.plot(px, py, apply_hit(e.kind.color(), hit));
+        return None;
+    }
+
+    let len_sq = e.facing.x * e.facing.x + e.facing.y * e.facing.y;
+    let f = if len_sq > 1e-4 {
+        let inv = 1.0 / len_sq.sqrt();
+        Vec2::new(e.facing.x * inv, e.facing.y * inv)
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    let p = Vec2::new(-f.y, f.x);
+    let hit = (e.flash / FLASH_MAX).clamp(0.0, 1.0);
+    let (flash_col, flash_str) = if hit > 0.0 {
+        let fc = if hit > 0.6 {
+            (255, 244, 218)
+        } else {
+            (255, 218, 152)
+        };
+        (fc, (0.30 + hit * 0.56).min(0.86))
+    } else {
+        ((0, 0, 0), 0.0)
+    };
+    Some(Frame {
+        pos,
+        f,
+        p,
+        r,
+        anim: e.anim,
+        hit,
+        flash_col,
+        flash_str,
+        hp_frac: if e.max_hp > 0.0 {
+            (e.hp / e.max_hp).clamp(0.0, 1.0)
+        } else {
+            1.0
+        },
+        fl: f.x * LIGHT.x + f.y * LIGHT.y,
+        pl: p.x * LIGHT.x + p.y * LIGHT.y,
+        accent,
+    })
 }
 
 /// Draw one enemy with an explicit `elite` flag (used for gilded elite brutes).
@@ -42,31 +428,14 @@ pub fn draw_enemy_styled(
     accent: Rgb,
     elite: bool,
 ) {
-    if pb.w == 0 || pb.h == 0 {
+    let Some(fr) = prepare_frame(pb, e, cam, accent) else {
+        return;
+    };
+    // Automatic LOD for tiny radii below the smallest standard kind (Bat = 2.0).
+    if e.radius < 1.8 {
+        draw_enemy_lod_frame(pb, &fr, e, elite);
         return;
     }
-    let f = if e.facing.len_sq() > 1e-4 {
-        e.facing.normalized()
-    } else {
-        Vec2::new(1.0, 0.0)
-    };
-    let p = f.perp();
-    let fr = Frame {
-        pos: e.pos - cam,
-        f,
-        p,
-        r: e.radius.max(1.0),
-        anim: e.anim,
-        hit: (e.flash / FLASH_MAX).clamp(0.0, 1.0),
-        hp_frac: if e.max_hp > 0.0 {
-            (e.hp / e.max_hp).clamp(0.0, 1.0)
-        } else {
-            1.0
-        },
-        fl: f.dot(LIGHT),
-        pl: p.dot(LIGHT),
-        accent,
-    };
 
     match e.kind {
         EnemyKind::Skitterer => draw_skitterer(pb, &fr),
@@ -75,6 +444,18 @@ pub fn draw_enemy_styled(
         EnemyKind::Spitter => draw_spitter(pb, &fr, e.fire_cd),
         EnemyKind::Brute => draw_brute(pb, &fr, elite),
         EnemyKind::Boss => draw_boss(pb, &fr, e.fire_cd),
+    }
+}
+
+#[inline]
+fn draw_enemy_lod_frame(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
+    match e.kind {
+        EnemyKind::Skitterer => draw_skitterer_lod(pb, fr),
+        EnemyKind::Bat => draw_bat_lod(pb, fr),
+        EnemyKind::Cat => draw_cat_lod(pb, fr, e.contact_cd),
+        EnemyKind::Spitter => draw_spitter_lod(pb, fr, e.fire_cd),
+        EnemyKind::Brute => draw_brute_lod(pb, fr, elite),
+        EnemyKind::Boss => draw_boss_lod(pb, fr, e.fire_cd),
     }
 }
 
@@ -87,6 +468,8 @@ struct Frame {
     r: f32,
     anim: f32,
     hit: f32,
+    flash_col: Rgb,
+    flash_str: f32,
     hp_frac: f32,
     fl: f32,
     pl: f32,
@@ -94,38 +477,93 @@ struct Frame {
 }
 
 impl Frame {
-    #[inline]
+    #[inline(always)]
     fn place(&self, u: f32, v: f32) -> Vec2 {
-        self.pos + self.f * u + self.p * v
+        Vec2::new(
+            self.pos.x + self.f.x * u + self.p.x * v,
+            self.pos.y + self.f.y * u + self.p.y * v,
+        )
     }
 
-    #[inline]
+    #[inline(always)]
     fn px(&self, u: f32, v: f32) -> (i32, i32) {
-        let q = self.place(u, v);
-        (q.x.round() as i32, q.y.round() as i32)
+        (
+            (self.pos.x + self.f.x * u + self.p.x * v).round() as i32,
+            (self.pos.y + self.f.y * u + self.p.y * v).round() as i32,
+        )
     }
 
-    #[inline]
+    #[inline(always)]
     fn local(&self, x: i32, y: i32) -> (f32, f32) {
         let dx = x as f32 - self.pos.x;
         let dy = y as f32 - self.pos.y;
         (dx * self.f.x + dy * self.f.y, dx * self.p.x + dy * self.p.y)
     }
 
-    #[inline]
+    #[inline(always)]
     fn lit(&self, nu: f32, nv: f32) -> f32 {
         nu * self.fl + nv * self.pl
     }
 
-    #[inline]
-    fn bbox_pb(&self, pb: &PixelBuffer, reach: f32) -> Option<(i32, i32, i32, i32)> {
-        let rr = reach.ceil() as i32;
+    #[inline(always)]
+    fn apply_hit(&self, c: Rgb) -> Rgb {
+        if self.flash_str <= 0.0 {
+            c
+        } else {
+            mix_rgb(c, self.flash_col, self.flash_str)
+        }
+    }
+
+    /// Tight oriented screen bounding box for local `[u_min, u_max] × [-v_max, v_max]`,
+    /// expanded by `(pad_x_pos, pad_y_pos)` in `+x/+y` for drop shadows.
+    #[inline(always)]
+    fn bbox_oriented(
+        &self,
+        pb: &PixelBuffer,
+        u_min: f32,
+        u_max: f32,
+        v_max: f32,
+        pad_x_pos: i32,
+        pad_y_pos: i32,
+    ) -> Option<(i32, i32, i32, i32)> {
+        let u_mid = 0.5 * (u_min + u_max);
+        let hu = 0.5 * (u_max - u_min);
+        let cx = self.pos.x + self.f.x * u_mid;
+        let cy = self.pos.y + self.f.y * u_mid;
+        let hx = hu * self.f.x.abs() + v_max * self.p.x.abs();
+        let hy = hu * self.f.y.abs() + v_max * self.p.y.abs();
+        let x0 = ((cx - hx).floor() as i32).max(0);
+        let x1 = ((cx + hx).ceil() as i32 + pad_x_pos).min(pb.w as i32 - 1);
+        let y0 = ((cy - hy).floor() as i32).max(0);
+        let y1 = ((cy + hy).ceil() as i32 + pad_y_pos).min(pb.h as i32 - 1);
+        if x0 > x1 || y0 > y1 {
+            None
+        } else {
+            Some((x0, x1, y0, y1))
+        }
+    }
+
+    /// Intersects [`Self::bbox_oriented`] with a circular bound `circ_r` centered
+    /// at `self.pos` — trims the empty corners of diagonal `+`-shaped sprites (e.g. Bat).
+    #[inline(always)]
+    fn bbox_oriented_circ(
+        &self,
+        pb: &PixelBuffer,
+        u_min: f32,
+        u_max: f32,
+        v_max: f32,
+        circ_r: f32,
+        pad: (i32, i32),
+    ) -> Option<(i32, i32, i32, i32)> {
+        let (x0, x1, y0, y1) =
+            self.bbox_oriented(pb, u_min, u_max, v_max, pad.0, pad.1)?;
+        let rr = circ_r.ceil() as i32;
         let cx = self.pos.x.round() as i32;
         let cy = self.pos.y.round() as i32;
-        let x0 = (cx - rr).max(0);
-        let x1 = (cx + rr).min(pb.w as i32 - 1);
-        let y0 = (cy - rr).max(0);
-        let y1 = (cy + rr).min(pb.h as i32 - 1);
+        let x0 = x0.max(cx - rr).max(0);
+        let x1 = x1.min(cx + rr + pad.0).min(pb.w as i32 - 1);
+        let y0 = y0.max(cy - rr).max(0);
+        let y1 = y1.min(cy + rr + pad.1).min(pb.h as i32 - 1);
         if x0 > x1 || y0 > y1 {
             None
         } else {
@@ -134,9 +572,29 @@ impl Frame {
     }
 }
 
-// ---- Pixel & colour helpers -------------------------------------------------
+// ---- Fast inline pixel & colour helpers -------------------------------------
 
-#[inline]
+#[inline(always)]
+fn mix_rgb(a: Rgb, b: Rgb, t: f32) -> Rgb {
+    let t = t.clamp(0.0, 1.0);
+    (
+        (a.0 as f32 + (b.0 as f32 - a.0 as f32) * t) as u8,
+        (a.1 as f32 + (b.1 as f32 - a.1 as f32) * t) as u8,
+        (a.2 as f32 + (b.2 as f32 - a.2 as f32) * t) as u8,
+    )
+}
+
+#[inline(always)]
+fn scale_rgb(a: Rgb, f: f32) -> Rgb {
+    let f = f.max(0.0);
+    (
+        (a.0 as f32 * f).min(255.0) as u8,
+        (a.1 as f32 * f).min(255.0) as u8,
+        (a.2 as f32 * f).min(255.0) as u8,
+    )
+}
+
+#[inline(always)]
 fn blend_px(pb: &mut PixelBuffer, x: i32, y: i32, c: Rgb, a: f32) {
     if a <= 0.0 || x < 0 || y < 0 {
         return;
@@ -149,11 +607,11 @@ fn blend_px(pb: &mut PixelBuffer, x: i32, y: i32, c: Rgb, a: f32) {
         pb.plot(x, y, c);
     } else {
         let bg = pb.pixel_at(ux, uy);
-        pb.plot(x, y, mix(bg, c, a));
+        pb.plot(x, y, mix_rgb(bg, c, a));
     }
 }
 
-#[inline]
+#[inline(always)]
 fn darken_px(pb: &mut PixelBuffer, x: i32, y: i32, amount: f32) {
     if amount <= 0.0 || x < 0 || y < 0 {
         return;
@@ -163,22 +621,22 @@ fn darken_px(pb: &mut PixelBuffer, x: i32, y: i32, amount: f32) {
         return;
     }
     let bg = pb.pixel_at(ux, uy);
-    pb.plot(x, y, scale(bg, (1.0 - amount).clamp(0.0, 1.0)));
+    pb.plot(x, y, scale_rgb(bg, (1.0 - amount).clamp(0.0, 1.0)));
 }
 
-#[inline]
+#[inline(always)]
 fn shade3(shadow: Rgb, mid: Rgb, hi: Rgb, lum: f32) -> Rgb {
     let l = lum.clamp(0.0, 1.15);
     if l < 0.65 {
-        mix(shadow, mid, l / 0.65)
+        mix_rgb(shadow, mid, l * (1.0 / 0.65))
     } else {
-        mix(mid, hi, (l - 0.65) / 0.5)
+        mix_rgb(mid, hi, (l - 0.65) * 2.0)
     }
 }
 
 /// Sculptural warm-white hit flash: snaps bright on impact while preserving
 /// slight form contrast so struck enemies stay distinct from the cool-white rat.
-#[inline]
+#[inline(always)]
 fn apply_hit(c: Rgb, hit: f32) -> Rgb {
     if hit <= 0.0 {
         return c;
@@ -189,29 +647,60 @@ fn apply_hit(c: Rgb, hit: f32) -> Rgb {
         (255, 218, 152)
     };
     let strength = (0.30 + hit * 0.56).min(0.86);
-    mix(c, flash_col, strength)
+    mix_rgb(c, flash_col, strength)
 }
 
+#[inline]
 fn line_blend(pb: &mut PixelBuffer, a: (i32, i32), b: (i32, i32), c: Rgb, alpha: f32) {
     let dx = (b.0 - a.0).abs();
-    let dy = -(b.1 - a.1).abs();
+    let ady = (b.1 - a.1).abs();
+    // Fast path for 1- or 2-pixel leg/antenna segments (avoids Bresenham setup).
+    if dx <= 1 && ady <= 1 {
+        blend_px(pb, a.0, a.1, c, alpha);
+        if a != b {
+            blend_px(pb, b.0, b.1, c, alpha);
+        }
+        return;
+    }
+    let dy = -ady;
     let sx = if a.0 < b.0 { 1 } else { -1 };
     let sy = if a.1 < b.1 { 1 } else { -1 };
     let mut err = dx + dy;
     let (mut x, mut y) = a;
-    loop {
-        blend_px(pb, x, y, c, alpha);
-        if x == b.0 && y == b.1 {
-            break;
+    let (bw, bh) = (pb.w as i32, pb.h as i32);
+    let inside = a.0 >= 0 && a.1 >= 0 && a.0 < bw && a.1 < bh && b.0 >= 0 && b.1 >= 0 && b.0 < bw && b.1 < bh;
+    if inside {
+        loop {
+            let bg = pb.pixel_at(x as usize, y as usize);
+            pb.plot(x, y, mix_rgb(bg, c, alpha));
+            if x == b.0 && y == b.1 {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
         }
-        let e2 = 2 * err;
-        if e2 >= dy {
-            err += dy;
-            x += sx;
-        }
-        if e2 <= dx {
-            err += dx;
-            y += sy;
+    } else {
+        loop {
+            blend_px(pb, x, y, c, alpha);
+            if x == b.0 && y == b.1 {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
         }
     }
 }
@@ -247,46 +736,153 @@ fn thick_line(pb: &mut PixelBuffer, a: (i32, i32), b: (i32, i32), core: Rgb, edg
     }
 }
 
-#[inline]
-fn sd_ellipse(u: f32, v: f32, cu: f32, cv: f32, ru: f32, rv: f32) -> f32 {
-    let nu = (u - cu) / ru;
-    let nv = (v - cv) / rv;
-    let d = (nu * nu + nv * nv).sqrt();
-    (d - 1.0) * ru.min(rv)
+/// Precomputed ellipse SDF (eliminates two per-pixel divisions).
+#[derive(Clone, Copy)]
+struct EllipseSdf {
+    cu: f32,
+    cv: f32,
+    inv_ru: f32,
+    inv_rv: f32,
+    min_r: f32,
 }
 
-#[inline]
-fn sd_capsule(u: f32, v: f32, au: f32, av: f32, bu: f32, bv: f32, rad: f32) -> f32 {
-    let pax = u - au;
-    let pay = v - av;
-    let bax = bu - au;
-    let bay = bv - av;
-    let denom = (bax * bax + bay * bay).max(1e-6);
-    let h = ((pax * bax + pay * bay) / denom).clamp(0.0, 1.0);
-    let dx = pax - bax * h;
-    let dy = pay - bay * h;
-    (dx * dx + dy * dy).sqrt() - rad
+impl EllipseSdf {
+    #[inline(always)]
+    fn new(cu: f32, cv: f32, ru: f32, rv: f32) -> Self {
+        Self {
+            cu,
+            cv,
+            inv_ru: 1.0 / ru,
+            inv_rv: 1.0 / rv,
+            min_r: ru.min(rv),
+        }
+    }
+
+    #[inline(always)]
+    fn eval(&self, u: f32, v: f32) -> f32 {
+        let nu = (u - self.cu) * self.inv_ru;
+        let nv = (v - self.cv) * self.inv_rv;
+        ((nu * nu + nv * nv).sqrt() - 1.0) * self.min_r
+    }
+
+    /// Precomputed squared-norm threshold `(1 + max_d / min_r)^2` for `eval_near` / `within_sq`.
+    #[inline(always)]
+    fn r2_limit(&self, max_d: f32) -> f32 {
+        let k = (1.0 + max_d / self.min_r).max(0.0);
+        k * k
+    }
+
+    /// Evaluates exact SDF only when `d < max_d` (via squared norm `r2 < lim_sq`),
+    /// avoiding `sqrt()` on far exterior pixels.
+    #[inline(always)]
+    fn eval_near(&self, u: f32, v: f32, lim_sq: f32) -> f32 {
+        let nu = (u - self.cu) * self.inv_ru;
+        let nv = (v - self.cv) * self.inv_rv;
+        let r2 = nu * nu + nv * nv;
+        if r2 >= lim_sq {
+            10.0
+        } else {
+            (r2.sqrt() - 1.0) * self.min_r
+        }
+    }
+
+    /// Zero-`sqrt` exact check for `self.eval(u, v) < d_thresh` using precomputed `lim_sq`.
+    #[inline(always)]
+    fn within_sq(&self, u: f32, v: f32, lim_sq: f32) -> bool {
+        let nu = (u - self.cu) * self.inv_ru;
+        let nv = (v - self.cv) * self.inv_rv;
+        nu * nu + nv * nv < lim_sq
+    }
 }
 
-/// Tapered capsule SDF (radius interpolates linearly from `r0` at `a` to `r1` at `b`).
-#[inline]
-fn sd_taper(u: f32, v: f32, a: (f32, f32), b: (f32, f32), r0: f32, r1: f32) -> f32 {
-    let pax = u - a.0;
-    let pay = v - a.1;
-    let bax = b.0 - a.0;
-    let bay = b.1 - a.1;
-    let denom = (bax * bax + bay * bay).max(1e-6);
-    let h = ((pax * bax + pay * bay) / denom).clamp(0.0, 1.0);
-    let dx = pax - bax * h;
-    let dy = pay - bay * h;
-    let rad = r0 + (r1 - r0) * h;
-    (dx * dx + dy * dy).sqrt() - rad
+/// Precomputed capsule SDF (eliminates per-pixel segment projection division).
+#[derive(Clone, Copy)]
+struct CapsuleSdf {
+    au: f32,
+    av: f32,
+    bax: f32,
+    bay: f32,
+    inv_denom: f32,
+    rad: f32,
 }
 
-#[inline]
-fn smin(a: f32, b: f32, k: f32) -> f32 {
-    let h = (k - (a - b).abs()).max(0.0) / k;
-    a.min(b) - h * h * k * 0.25
+impl CapsuleSdf {
+    #[inline(always)]
+    fn new(au: f32, av: f32, bu: f32, bv: f32, rad: f32) -> Self {
+        let bax = bu - au;
+        let bay = bv - av;
+        let inv_denom = 1.0 / (bax * bax + bay * bay).max(1e-6);
+        Self {
+            au,
+            av,
+            bax,
+            bay,
+            inv_denom,
+            rad,
+        }
+    }
+
+    #[inline(always)]
+    fn eval(&self, u: f32, v: f32) -> f32 {
+        let pax = u - self.au;
+        let pay = v - self.av;
+        let h = ((pax * self.bax + pay * self.bay) * self.inv_denom).clamp(0.0, 1.0);
+        let dx = pax - self.bax * h;
+        let dy = pay - self.bay * h;
+        (dx * dx + dy * dy).sqrt() - self.rad
+    }
+}
+
+/// Precomputed tapered capsule SDF (radius interpolates from `r0` at `a` to `r1` at `b`).
+#[derive(Clone, Copy)]
+struct TaperSdf {
+    au: f32,
+    av: f32,
+    bax: f32,
+    bay: f32,
+    inv_denom: f32,
+    r0: f32,
+    dr: f32,
+}
+
+impl TaperSdf {
+    #[inline(always)]
+    fn new(a: (f32, f32), b: (f32, f32), r0: f32, r1: f32) -> Self {
+        let bax = b.0 - a.0;
+        let bay = b.1 - a.1;
+        let inv_denom = 1.0 / (bax * bax + bay * bay).max(1e-6);
+        Self {
+            au: a.0,
+            av: a.1,
+            bax,
+            bay,
+            inv_denom,
+            r0,
+            dr: r1 - r0,
+        }
+    }
+
+    #[inline(always)]
+    fn eval(&self, u: f32, v: f32) -> f32 {
+        let pax = u - self.au;
+        let pay = v - self.av;
+        let h = ((pax * self.bax + pay * self.bay) * self.inv_denom).clamp(0.0, 1.0);
+        let dx = pax - self.bax * h;
+        let dy = pay - self.bay * h;
+        let rad = self.r0 + self.dr * h;
+        (dx * dx + dy * dy).sqrt() - rad
+    }
+}
+
+#[inline(always)]
+fn smin_inv(a: f32, b: f32, k: f32, inv_k: f32) -> f32 {
+    let diff = (a - b).abs();
+    if diff >= k {
+        a.min(b)
+    } else {
+        let h = (k - diff) * inv_k;
+        a.min(b) - h * h * k * 0.25
+    }
 }
 
 // ============================================================================
@@ -294,19 +890,21 @@ fn smin(a: f32, b: f32, k: f32) -> f32 {
 // ============================================================================
 
 fn draw_skitterer(pb: &mut PixelBuffer, fr: &Frame) {
-    let s = fr.r / 2.5;
-    let leg_col = apply_hit((144, 86, 46), fr.hit);
-    let foot_col = apply_hit((98, 56, 30), fr.hit);
-    let ant_col = apply_hit((184, 122, 68), fr.hit);
+    let s = fr.r * (1.0 / 2.5);
+    let leg_col = fr.apply_hit((144, 86, 46));
+    let foot_col = fr.apply_hit((98, 56, 30));
+    let ant_col = fr.apply_hit((184, 122, 68));
+    let ant_tip = scale_rgb(ant_col, 0.72);
 
     // 6 crisp alternating tripod-gait legs with visible copper knees.
     for (i, &u_hip) in [1.1f32, -0.35, -1.75].iter().enumerate() {
         let phase = fr.anim + i as f32 * 2.1;
-        for (side, side_ph) in [(-1.0f32, 0.0f32), (1.0, PI)] {
-            let swing = (phase + side_ph).sin() * 0.85 * s;
-            let hip = fr.px(u_hip * s, side * 1.15 * s);
-            let knee = fr.px(u_hip * s + swing * 0.45, side * 2.45 * s);
-            let foot = fr.px(u_hip * s + swing - 0.3 * s, side * 3.25 * s);
+        let sw_base = fast_sin(phase) * 0.85 * s;
+        let uh = u_hip * s;
+        for (side, swing) in [(-1.0f32, sw_base), (1.0, -sw_base)] {
+            let hip = fr.px(uh, side * 1.15 * s);
+            let knee = fr.px(uh + swing * 0.45, side * 2.45 * s);
+            let foot = fr.px(uh + swing - 0.3 * s, side * 3.25 * s);
             darken_px(pb, foot.0 + 1, foot.1 + 1, 0.25);
             line_blend(pb, hip, knee, leg_col, 0.92);
             line_blend(pb, knee, foot, foot_col, 0.85);
@@ -314,17 +912,19 @@ fn draw_skitterer(pb: &mut PixelBuffer, fr: &Frame) {
     }
 
     // Sweeping twitching roach antennae that telegraph facing clearly.
-    let wave = (fr.anim * 0.7).sin() * 0.42 * s;
+    let wave = fast_sin(fr.anim * 0.7) * 0.42 * s;
     for side in [-1.0f32, 1.0] {
         let a0 = fr.px(2.25 * s, side * 0.55 * s);
         let a1 = fr.px(3.55 * s, side * 1.15 * s + wave * side * 0.5);
         let a2 = fr.px(4.35 * s, side * 1.95 * s + wave * side);
         line_blend(pb, a0, a1, ant_col, 0.82);
-        line_blend(pb, a1, a2, scale(ant_col, 0.72), 0.62);
+        line_blend(pb, a1, a2, ant_tip, 0.62);
     }
 
     // Elongated copper-mahogany carapace: tapered abdomen + pinched head.
-    let Some((x0, x1, y0, y1)) = fr.bbox_pb(pb, 4.3 * s) else {
+    let Some((x0, x1, y0, y1)) =
+        fr.bbox_oriented_circ(pb, -4.0 * s, 4.0 * s, 2.75 * s, 4.3 * s, (1, 1))
+    else {
         return;
     };
     let shadow_c = (72, 36, 18);
@@ -333,39 +933,71 @@ fn draw_skitterer(pb: &mut PixelBuffer, fr: &Frame) {
     let seam_c = (48, 22, 12);
     let rim_col = if fr.hit > 0.4 { (160, 110, 60) } else { (0, 0, 0) };
 
+    let abd_sdf = EllipseSdf::new(-0.75 * s, 0.0, 2.25 * s, 1.75 * s);
+    let thorax_sdf = EllipseSdf::new(0.95 * s, 0.0, 1.05 * s, 1.35 * s);
+    let head_sdf = EllipseSdf::new(2.15 * s, 0.0, 0.82 * s, 1.05 * s);
+    let k1 = 0.35 * s;
+    let inv_k1 = 1.0 / k1;
+    let k2 = 0.25 * s;
+    let inv_k2 = 1.0 / k2;
+
+    let rim_lim = 0.85 * s;
+    let sh_lim = 0.35 * s;
+    // Near-field r^2 limits for zero-sqrt rejection (include smin smoothing margin).
+    let abd_near = abd_sdf.r2_limit(rim_lim + k1 + 0.05);
+    let thx_near = thorax_sdf.r2_limit(rim_lim + k1 + k2 + 0.05);
+    let head_near = head_sdf.r2_limit(rim_lim + k2 + 0.05);
+    let abd_sh_sq = abd_sdf.r2_limit(sh_lim);
+    let thx_sh_sq = thorax_sdf.r2_limit(sh_lim);
+    let head_sh_sq = head_sdf.r2_limit(sh_lim);
+    let abd_sh_smin_sq = abd_sdf.r2_limit(sh_lim + k1);
+    let thx_sh_smin_sq = thorax_sdf.r2_limit(sh_lim + k1 + k2);
+    let head_sh_smin_sq = head_sdf.r2_limit(sh_lim + k2);
+
     let body_sd = |u: f32, v: f32| -> f32 {
-        let abd = sd_ellipse(u, v, -0.75 * s, 0.0, 2.25 * s, 1.75 * s);
-        let thorax = sd_ellipse(u, v, 0.95 * s, 0.0, 1.05 * s, 1.35 * s);
-        let head = sd_ellipse(u, v, 2.15 * s, 0.0, 0.82 * s, 1.05 * s);
-        smin(smin(abd, thorax, 0.35 * s), head, 0.25 * s)
+        let abd = abd_sdf.eval_near(u, v, abd_near);
+        let thorax = thorax_sdf.eval_near(u, v, thx_near);
+        let head = head_sdf.eval_near(u, v, head_near);
+        smin_inv(smin_inv(abd, thorax, k1, inv_k1), head, k2, inv_k2)
     };
 
+    let body_sh_hit = |su: f32, sv: f32| -> bool {
+        if abd_sdf.within_sq(su, sv, abd_sh_sq)
+            || thorax_sdf.within_sq(su, sv, thx_sh_sq)
+            || head_sdf.within_sq(su, sv, head_sh_sq)
+        {
+            return true;
+        }
+        // Only evaluate smin when at least one shape is within smoothing reach.
+        if abd_sdf.within_sq(su, sv, abd_sh_smin_sq)
+            || thorax_sdf.within_sq(su, sv, thx_sh_smin_sq)
+            || head_sdf.within_sq(su, sv, head_sh_smin_sq)
+        {
+            body_sd(su, sv) < sh_lim
+        } else {
+            false
+        }
+    };
+
+    let u_body_lim = 3.95 * s;
+    let v_body_lim = 2.7 * s;
+    let u_sh_lim = 3.45 * s;
+    let v_sh_lim = 2.2 * s;
+    let inv_nu = 1.0 / (2.9 * s);
+    let inv_nv = 1.0 / (1.8 * s);
+    let du_sh = -(fr.f.x + fr.f.y);
+    let dv_sh = -(fr.p.x + fr.p.y);
+
     for y in y0..=y1 {
+        let (mut u, mut v) = fr.local(x0, y);
         for x in x0..=x1 {
-            let (u, v) = fr.local(x, y);
-            let d = body_sd(u, v);
+            let in_body_box = u >= -u_body_lim && u <= u_body_lim && v.abs() <= v_body_lim;
+            let d = if in_body_box { body_sd(u, v) } else { 10.0 };
             let cover = (0.5 - d * 1.18).clamp(0.0, 1.0);
 
-            let mut dark = 0.0f32;
-            if cover < 1.0 {
-                if d < 0.85 * s {
-                    dark = 0.6;
-                } else {
-                    let (su, sv) = fr.local(x - 1, y - 1);
-                    if body_sd(su, sv) < 0.35 * s {
-                        dark = 0.34;
-                    }
-                }
-            }
-            if cover <= 0.0 && dark <= 0.0 {
-                continue;
-            }
-
-            let bg = pb.pixel_at(x as usize, y as usize);
-            let mut out = mix(bg, rim_col, dark);
-            if cover > 0.0 {
-                let nu = ((u + 0.1 * s) / (2.9 * s)).clamp(-1.0, 1.0);
-                let nv = (v / (1.8 * s)).clamp(-1.0, 1.0);
+            if cover >= 1.0 {
+                let nu = ((u + 0.1 * s) * inv_nu).clamp(-1.0, 1.0);
+                let nv = (v * inv_nv).clamp(-1.0, 1.0);
                 let dome = (1.0 - (nu * nu * 0.45 + nv * nv * 0.85)).clamp(0.0, 1.0);
                 let lit = fr.lit(nu, nv);
                 let mut lum = 0.44 + 0.38 * dome + 0.56 * lit;
@@ -373,15 +1005,57 @@ fn draw_skitterer(pb: &mut PixelBuffer, fr: &Frame) {
                     lum += 0.26;
                 }
                 let mut col = shade3(shadow_c, mid_c, hi_c, lum);
-                // Darker pronotum collar + elytra wing-case split.
                 if u < 0.7 * s && v.abs() < 0.28 * s {
-                    col = mix(col, seam_c, 0.48);
+                    col = mix_rgb(col, seam_c, 0.48);
                 } else if (u - 1.35 * s).abs() < 0.3 * s {
-                    col = mix(col, seam_c, 0.58);
+                    col = mix_rgb(col, seam_c, 0.58);
                 }
-                out = mix(out, apply_hit(col, fr.hit), cover);
+                pb.plot(x, y, fr.apply_hit(col));
+            } else {
+                let dark = if d < rim_lim {
+                    0.6
+                } else {
+                    let su = u + du_sh;
+                    let sv = v + dv_sh;
+                    if su >= -u_sh_lim
+                        && su <= u_sh_lim
+                        && sv.abs() <= v_sh_lim
+                        && body_sh_hit(su, sv)
+                    {
+                        0.34
+                    } else {
+                        0.0
+                    }
+                };
+                if cover > 0.0 || dark > 0.0 {
+                    let bg = pb.pixel_at(x as usize, y as usize);
+                    let mut out = if dark > 0.0 {
+                        mix_rgb(bg, rim_col, dark)
+                    } else {
+                        bg
+                    };
+                    if cover > 0.0 {
+                        let nu = ((u + 0.1 * s) * inv_nu).clamp(-1.0, 1.0);
+                        let nv = (v * inv_nv).clamp(-1.0, 1.0);
+                        let dome = (1.0 - (nu * nu * 0.45 + nv * nv * 0.85)).clamp(0.0, 1.0);
+                        let lit = fr.lit(nu, nv);
+                        let mut lum = 0.44 + 0.38 * dome + 0.56 * lit;
+                        if lit > 0.4 && dome > 0.42 {
+                            lum += 0.26;
+                        }
+                        let mut col = shade3(shadow_c, mid_c, hi_c, lum);
+                        if u < 0.7 * s && v.abs() < 0.28 * s {
+                            col = mix_rgb(col, seam_c, 0.48);
+                        } else if (u - 1.35 * s).abs() < 0.3 * s {
+                            col = mix_rgb(col, seam_c, 0.58);
+                        }
+                        out = mix_rgb(out, fr.apply_hit(col), cover);
+                    }
+                    pb.plot(x, y, out);
+                }
             }
-            pb.plot(x, y, out);
+            u += fr.f.x;
+            v += fr.p.x;
         }
     }
 
@@ -404,8 +1078,8 @@ fn draw_skitterer(pb: &mut PixelBuffer, fr: &Frame) {
 // ============================================================================
 
 fn draw_bat(pb: &mut PixelBuffer, fr: &Frame) {
-    let s = fr.r / 2.0;
-    let flap = fr.anim.sin(); // -1..1
+    let s = fr.r * 0.5;
+    let flap = fast_sin(fr.anim); // -1..1
     let spread = 0.5 + 0.5 * flap; // 0..1
     // Wide dramatic bat wingspan throughout the whole flap cycle.
     let span = (4.1 + 1.85 * spread) * s;
@@ -416,31 +1090,37 @@ fn draw_bat(pb: &mut PixelBuffer, fr: &Frame) {
     let sh_ofs_y = (3.4 * s + 0.45 * flap * s).round() as i32;
     let sh_rx = (2.4 + 1.0 * spread) * s;
     let sh_ry = 1.45 * s;
+    let inv_sh_rx = 1.0 / sh_rx;
+    let inv_sh_ry = 1.0 / sh_ry;
     let scx = fr.pos.x.round() as i32 + sh_ofs_x;
     let scy = fr.pos.y.round() as i32 + sh_ofs_y;
     let srx = sh_rx.ceil() as i32;
     let sry = sh_ry.ceil() as i32;
-    for dy in -sry..=sry {
-        let y = scy + dy;
-        if y < 0 || y >= pb.h as i32 {
-            continue;
-        }
-        for dx in -srx..=srx {
-            let x = scx + dx;
-            if x < 0 || x >= pb.w as i32 {
-                continue;
-            }
-            let nx = dx as f32 / sh_rx;
-            let ny = dy as f32 / sh_ry;
-            let r2 = nx * nx + ny * ny;
+    let sy0 = (scy - sry).max(0);
+    let sy1 = (scy + sry).min(pb.h as i32 - 1);
+    let sx0 = (scx - srx).max(0);
+    let sx1 = (scx + srx).min(pb.w as i32 - 1);
+    for y in sy0..=sy1 {
+        let ny = (y - scy) as f32 * inv_sh_ry;
+        let ny2 = ny * ny;
+        for x in sx0..=sx1 {
+            let nx = (x - scx) as f32 * inv_sh_rx;
+            let r2 = nx * nx + ny2;
             if r2 <= 1.0 {
-                darken_px(pb, x, y, 0.34 * (1.0 - r2 * 0.5));
+                let bg = pb.pixel_at(x as usize, y as usize);
+                let amt = 0.34 * (1.0 - r2 * 0.5);
+                pb.plot(x, y, scale_rgb(bg, 1.0 - amt));
             }
         }
     }
 
     // 2) Classic M-arched scalloped bat wings + furry violet torso + pointed ears.
-    let Some((x0, x1, y0, y1)) = fr.bbox_pb(pb, (span + 2.0 * s).max(6.4 * s)) else {
+    let u_min = (-0.65 * s + sweep.min(0.0) - 2.55 * s).min(-2.1 * s) - 1.1 * s;
+    let u_max = (1.65 * s + sweep.max(0.0)).max(3.2 * s) + 1.1 * s;
+    let v_max = span + 1.3 * s;
+    let circ_r = (span + 2.0 * s).max(6.4 * s);
+    let Some((x0, x1, y0, y1)) = fr.bbox_oriented_circ(pb, u_min, u_max, v_max, circ_r, (0, 0))
+    else {
         return;
     };
 
@@ -452,92 +1132,132 @@ fn draw_bat(pb: &mut PixelBuffer, fr: &Frame) {
     let wing_bone = (204, 166, 252);
     let rim_col = if fr.hit > 0.4 { (140, 100, 180) } else { (0, 0, 0) };
 
-    // Classic M-shape bat wing: dips slightly at shoulder behind the ears,
-    // arches forward to a crisp wing elbow at t≈0.48, sweeps back to sharp tips,
-    // with two concave scalloped arches cut out of the trailing membrane.
-    let wing_sd = |u: f32, av: f32| -> (f32, bool) {
-        if av < 0.9 * s || av > span + 1.2 * s {
-            return (10.0, false);
-        }
-        let t = ((av - 1.05 * s) / (span - 1.05 * s).max(0.5)).clamp(0.0, 1.0);
-        // Distinct dip near shoulder (t=0 -> u=-0.25s), rising to elbow at t=0.48 (+1.6s),
-        // then sweeping back to pointed wingtip at t=1.0 (-0.55s).
-        let elbow = if t < 0.48 {
-            let k = t / 0.48;
-            -0.25 + 1.85 * k * k * (3.0 - 2.0 * k)
-        } else {
-            let k = (t - 0.48) / 0.52;
-            1.6 - 2.15 * k.powf(1.15)
-        };
-        let u_lead = elbow * s + sweep * t;
-        // Double concave bat-wing scallops along trailing edge.
-        let scallop = (t * PI * 2.0).sin().abs();
-        let chord = (2.45 * (1.0 - t * 0.84) - 0.85 * scallop * (1.0 - t * 0.25)) * s;
-        let u_trail = u_lead - chord.max(0.28 * s);
-        let du_top = u - u_lead;
-        let du_bot = u_trail - u;
-        let dv_tip = av - span;
-        let d = du_top.max(du_bot).max(dv_tip);
-        let on_bone = du_top.abs() < 0.58 * s && d < 0.35 * s;
-        (d, on_bone)
-    };
+    let torso_sdf = EllipseSdf::new(0.2 * s, 0.0, 2.0 * s, 1.3 * s);
+    let ear_sdf = TaperSdf::new((1.45 * s, 0.65 * s), (2.9 * s, 1.35 * s), 0.5 * s, 0.16 * s);
+    let wing_start = 1.05 * s;
+    let inv_wing_span = 1.0 / (span - wing_start).max(0.5);
+    let wing_av_min = 0.9 * s;
+    let wing_av_max = span + 1.2 * s;
+    let rim_lim = 0.85 * s;
+    let inv_nu = 1.0 / (2.0 * s);
+    let inv_nv = 1.0 / (1.35 * s);
+    let bone_w = 0.58 * s;
+    let bone_d = 0.35 * s;
+
+    let lit_wing_pos = fr.lit(0.25, 0.65);
+    let lit_wing_neg = fr.lit(0.25, -0.65);
+    let wing_bone_pos = fr.apply_hit(mix_rgb(
+        wing_mid,
+        wing_bone,
+        (0.82 + 0.25 * lit_wing_pos).clamp(0.0, 1.0),
+    ));
+    let wing_bone_neg = fr.apply_hit(mix_rgb(
+        wing_mid,
+        wing_bone,
+        (0.82 + 0.25 * lit_wing_neg).clamp(0.0, 1.0),
+    ));
+    let wing_base_pos = shade3(wing_sh, wing_mid, wing_bone, 0.46 + 0.36 * lit_wing_pos);
+    let wing_base_neg = shade3(wing_sh, wing_mid, wing_bone, 0.46 + 0.36 * lit_wing_neg);
+    let wing_mem_pos = fr.apply_hit(wing_base_pos);
+    let wing_mem_neg = fr.apply_hit(wing_base_neg);
+    let wing_rib_pos = fr.apply_hit(scale_rgb(wing_base_pos, 0.76));
+    let wing_rib_neg = fr.apply_hit(scale_rgb(wing_base_neg, 0.76));
 
     for y in y0..=y1 {
+        let (mut u, mut v) = fr.local(x0, y);
         for x in x0..=x1 {
-            let (u, v) = fr.local(x, y);
             let av = v.abs();
 
-            let torso = sd_ellipse(u, v, 0.2 * s, 0.0, 2.0 * s, 1.3 * s);
-            // Distinct pointed bat ears rising forward past the shoulder notch.
-            let ear = sd_taper(u, av, (1.45 * s, 0.65 * s), (2.9 * s, 1.35 * s), 0.5 * s, 0.16 * s);
-            let d_body = torso.min(ear);
-            let (d_wing, on_bone) = wing_sd(u, av);
+            let d_body = if av < 2.6 * s && u > -2.85 * s && u < 4.15 * s {
+                let torso = if av < 2.35 * s && u < 3.25 * s {
+                    torso_sdf.eval(u, v)
+                } else {
+                    10.0
+                };
+                let ear = if u > 0.1 * s {
+                    ear_sdf.eval(u, av)
+                } else {
+                    10.0
+                };
+                torso.min(ear)
+            } else {
+                10.0
+            };
+
+            let (d_wing, on_bone, t) = if av >= wing_av_min && av <= wing_av_max {
+                let t = ((av - wing_start) * inv_wing_span).clamp(0.0, 1.0);
+                let (elbow, chord) = bat_wing_profile(t);
+                let u_lead = elbow * s + sweep * t;
+                let u_trail = u_lead - chord * s;
+                let du_top = u - u_lead;
+                let du_bot = u_trail - u;
+                let dv_tip = av - span;
+                let d = du_top.max(du_bot).max(dv_tip);
+                let on_bone = du_top.abs() < bone_w && d < bone_d;
+                (d, on_bone, t)
+            } else {
+                (10.0, false, 0.0)
+            };
+
             let d_all = d_body.min(d_wing);
+            if d_all >= rim_lim {
+                u += fr.f.x;
+                v += fr.p.x;
+                continue;
+            }
 
             let body_cov = (0.5 - d_body * 1.2).clamp(0.0, 1.0);
             let wing_cov = (0.48 - d_wing * 1.15).clamp(0.0, 1.0);
             let cover = body_cov.max(wing_cov);
 
             if cover <= 0.0 {
-                if d_all < 0.85 * s {
-                    let bg = pb.pixel_at(x as usize, y as usize);
-                    pb.plot(x, y, mix(bg, rim_col, 0.54));
-                }
-                continue;
-            }
-
-            let bg = pb.pixel_at(x as usize, y as usize);
-            let mut out = if cover < 1.0 {
-                mix(bg, rim_col, 0.54 * (1.0 - cover))
-            } else {
-                bg
-            };
-
-            if body_cov >= wing_cov {
-                let nu = (u / (2.0 * s)).clamp(-1.0, 1.0);
-                let nv = (v / (1.35 * s)).clamp(-1.0, 1.0);
+                let bg = pb.pixel_at(x as usize, y as usize);
+                pb.plot(x, y, mix_rgb(bg, rim_col, 0.54));
+            } else if body_cov >= wing_cov {
+                let nu = (u * inv_nu).clamp(-1.0, 1.0);
+                let nv = (v * inv_nv).clamp(-1.0, 1.0);
                 let dome = (1.0 - (nu * nu * 0.5 + nv * nv * 0.7)).clamp(0.0, 1.0);
                 let lum = 0.44 + 0.38 * dome + 0.56 * fr.lit(nu, nv);
-                let col = apply_hit(shade3(body_sh, body_mid, body_hi, lum), fr.hit);
-                out = mix(out, col, body_cov);
+                let col = fr.apply_hit(shade3(body_sh, body_mid, body_hi, lum));
+                if body_cov >= 1.0 {
+                    pb.plot(x, y, col);
+                } else {
+                    let bg = pb.pixel_at(x as usize, y as usize);
+                    let out = mix_rgb(bg, rim_col, 0.54 * (1.0 - cover));
+                    pb.plot(x, y, mix_rgb(out, col, body_cov));
+                }
             } else {
-                let t = ((av - 1.05 * s) / (span - 1.05 * s).max(0.5)).clamp(0.0, 1.0);
-                let lit = fr.lit(0.25, v.signum() * 0.65);
-                let mut col = if on_bone {
-                    mix(wing_mid, wing_bone, (0.82 + 0.25 * lit).clamp(0.0, 1.0))
+                let pos_side = v >= 0.0;
+                let col = if on_bone {
+                    if pos_side {
+                        wing_bone_pos
+                    } else {
+                        wing_bone_neg
+                    }
                 } else {
                     let rib = ((t * 2.5).fract() - 0.5).abs() < 0.1;
-                    let base = shade3(wing_sh, wing_mid, wing_bone, 0.46 + 0.36 * lit);
                     if rib {
-                        scale(base, 0.76)
+                        if pos_side {
+                            wing_rib_pos
+                        } else {
+                            wing_rib_neg
+                        }
+                    } else if pos_side {
+                        wing_mem_pos
                     } else {
-                        base
+                        wing_mem_neg
                     }
                 };
-                col = apply_hit(col, fr.hit);
-                out = mix(out, col, wing_cov * 0.92);
+                let bg = pb.pixel_at(x as usize, y as usize);
+                let out = if cover < 1.0 {
+                    mix_rgb(bg, rim_col, 0.54 * (1.0 - cover))
+                } else {
+                    bg
+                };
+                pb.plot(x, y, mix_rgb(out, col, wing_cov * 0.92));
             }
-            pb.plot(x, y, out);
+            u += fr.f.x;
+            v += fr.p.x;
         }
     }
 
@@ -558,33 +1278,45 @@ fn draw_bat(pb: &mut PixelBuffer, fr: &Frame) {
 // ============================================================================
 
 fn draw_cat(pb: &mut PixelBuffer, fr: &Frame, vel: Vec2, contact_cd: f32) {
-    let s = fr.r / 4.0;
+    let s = fr.r * 0.25;
+    let inv_s = 1.0 / s;
+    let inv_flex_denom = 1.0 / (6.4 * s);
+    let spine_freq = 0.48 * inv_s;
 
     let spine = |u: f32| -> f32 {
-        let flex = ((2.0 * s - u) / (6.4 * s)).clamp(0.0, 1.0);
-        0.52 * s * flex * (fr.anim - u * 0.48 / s).sin()
+        let flex = ((2.0 * s - u) * inv_flex_denom).clamp(0.0, 1.0);
+        if flex <= 0.0 {
+            0.0
+        } else {
+            0.52 * s * flex * fast_sin(fr.anim - u * spine_freq)
+        }
     };
 
     // 1) Bold curved feline S-hook tail (always curls gracefully, never straightens!).
-    let lag = if vel.len_sq() > 4.0 {
-        let vd = vel.normalized();
-        let cross = fr.f.x * vd.y - fr.f.y * vd.x;
-        (cross.atan2(fr.f.dot(vd)) * 1.1).clamp(-1.4, 1.4)
+    let vel_sq = vel.x * vel.x + vel.y * vel.y;
+    let lag = if vel_sq > 4.0 {
+        let inv_v = 1.0 / vel_sq.sqrt();
+        let vdx = vel.x * inv_v;
+        let vdy = vel.y * inv_v;
+        let cross = fr.f.x * vdy - fr.f.y * vdx;
+        let dot = fr.f.x * vdx + fr.f.y * vdy;
+        (cross.atan2(dot) * 1.1).clamp(-1.4, 1.4)
     } else {
         0.0
     };
-    const TAIL_STEPS: usize = 16;
-    let step = 7.4 * s / TAIL_STEPS as f32;
-    let back = fr.f * -1.0;
-    let mut tail_pts = [(0i32, 0i32); TAIL_STEPS];
+    let step = 7.4 * s / CAT_TAIL_STEPS as f32;
+    let back_x = -fr.f.x;
+    let back_y = -fr.f.y;
+    let mut tail_pts = [(0i32, 0i32); CAT_TAIL_STEPS];
     let mut tp = fr.place(-4.0 * s, spine(-4.0 * s));
     for (i, slot) in tail_pts.iter_mut().enumerate() {
-        let t = (i as f32 + 0.5) / TAIL_STEPS as f32;
-        // Strong feline hook (~105 deg curl) with lively tail-tip swish.
-        let curl = 1.75 * t.powf(1.25);
-        let wave = 0.38 * t * (fr.anim * 0.9 - t * 3.2).sin();
+        let t = (i as f32 + 0.5) * (1.0 / CAT_TAIL_STEPS as f32);
+        let curl = CAT_TAIL_CURL[i];
+        let wave = 0.38 * t * fast_sin(fr.anim * 0.9 - t * 3.2);
         let theta = lag * t + curl + wave;
-        tp += back.rotate(theta) * step;
+        let (st, ct) = fast_sin_cos(theta);
+        tp.x += (back_x * ct - back_y * st) * step;
+        tp.y += (back_x * st + back_y * ct) * step;
         *slot = (tp.x.round() as i32, tp.y.round() as i32);
     }
     let mut last_sh = (i32::MIN, i32::MIN);
@@ -594,47 +1326,50 @@ fn draw_cat(pb: &mut PixelBuffer, fr: &Frame, vel: Vec2, contact_cd: f32) {
             last_sh = (tx, ty);
         }
     }
+    let side_dx = fr.p.x.round() as i32;
+    let side_dy = fr.p.y.round() as i32;
+    let tail_tip_c = fr.apply_hit((178, 190, 212));
+    let tail_dark_c = fr.apply_hit((34, 40, 54));
+    let tail_mid_c = fr.apply_hit((106, 118, 144));
+    let tail_dark_edge = scale_rgb(tail_dark_c, 0.6);
+    let tail_mid_edge = scale_rgb(tail_mid_c, 0.6);
     for (i, &(tx, ty)) in tail_pts.iter().enumerate() {
         let stripe = (i / 2) % 2 == 1;
-        let mut c = if i >= TAIL_STEPS - 2 {
-            (178, 190, 212) // pale silver tip
+        let c = if i >= CAT_TAIL_STEPS - 2 {
+            tail_tip_c
         } else if stripe {
-            (34, 40, 54)
+            tail_dark_c
         } else {
-            (106, 118, 144)
+            tail_mid_c
         };
-        c = apply_hit(c, fr.hit);
-        if i < TAIL_STEPS - 4 {
-            let side = fr.p;
-            blend_px(
-                pb,
-                tx + side.x.round() as i32,
-                ty + side.y.round() as i32,
-                scale(c, 0.6),
-                0.72,
-            );
+        if i < CAT_TAIL_STEPS - 4 {
+            let ec = if stripe { tail_dark_edge } else { tail_mid_edge };
+            blend_px(pb, tx + side_dx, ty + side_dy, ec, 0.72);
         }
         pb.plot(tx, ty, c);
     }
 
     // 2) Four stalking feline paws (diagonal stride + claw swipe on contact).
     let swiping = contact_cd > 0.32;
-    let paw_col = apply_hit((76, 86, 108), fr.hit);
-    let toe_col = apply_hit((168, 180, 202), fr.hit);
-    for (k, &(u0, side)) in [
-        (1.6f32, 1.0f32),
-        (-2.5, -1.0),
-        (1.6, -1.0),
-        (-2.5, 1.0),
+    let paw_col = fr.apply_hit((76, 86, 108));
+    let toe_col = fr.apply_hit((168, 180, 202));
+    let (s0, c0) = fast_sin_cos(fr.anim);
+    let sp_front = spine(1.6 * s);
+    let sp_back = spine(-2.5 * s);
+    for (k, &(u0, side, sp_u)) in [
+        (1.6f32, 1.0f32, sp_front),
+        (-2.5, -1.0, sp_back),
+        (1.6, -1.0, sp_front),
+        (-2.5, 1.0, sp_back),
     ]
     .iter()
     .enumerate()
     {
-        let ph = fr.anim + if k < 2 { 0.0 } else { PI };
-        let swing = ph.sin() * 1.3 * s;
+        let (sph, cph) = if k < 2 { (s0, c0) } else { (-s0, -c0) };
+        let swing = sph * 1.3 * s;
         let reach_u = u0 * s + swing + if swiping && u0 > 0.0 { 1.2 * s } else { 0.0 };
-        let reach_v = side * (2.6 + 0.55 * ph.cos().max(0.0)) * s + spine(u0 * s);
-        let p0 = fr.px(u0 * s, side * 1.6 * s + spine(u0 * s));
+        let reach_v = side * (2.6 + 0.55 * cph.max(0.0)) * s + sp_u;
+        let p0 = fr.px(u0 * s, side * 1.6 * s + sp_u);
         let p1 = fr.px(reach_u, reach_v);
         darken_px(pb, p1.0 + 1, p1.1 + 1, 0.32);
         line_blend(pb, p0, p1, paw_col, 0.92);
@@ -646,7 +1381,7 @@ fn draw_cat(pb: &mut PixelBuffer, fr: &Frame, vel: Vec2, contact_cd: f32) {
     }
 
     // 3) Sculpted feline torso + slim neck + prominent pointed triangular cat ears.
-    let Some((x0, x1, y0, y1)) = fr.bbox_pb(pb, 7.4 * s) else {
+    let Some((x0, x1, y0, y1)) = fr.bbox_oriented(pb, -5.8 * s, 5.9 * s, 4.9 * s, 1, 2) else {
         return;
     };
 
@@ -654,26 +1389,49 @@ fn draw_cat(pb: &mut PixelBuffer, fr: &Frame, vel: Vec2, contact_cd: f32) {
     let fur_mid = (104, 116, 142);
     let fur_hi = (182, 196, 222);
     let stripe_c = (26, 30, 44);
-    let ear_in = (176, 112, 134); // clear dusty-rose inner ear triangle
+    let ear_in = fr.apply_hit((176, 112, 134));
+    let ear_out = fr.apply_hit(mix_rgb(fur_sh, fur_mid, 0.42));
     let rim_col = if fr.hit > 0.4 { (145, 130, 120) } else { (0, 0, 0) };
 
-    let body_sd = |u: f32, v: f32| -> (f32, bool) {
-        let vs = v - spine(u);
-        let haunch = sd_ellipse(u, vs, -2.4 * s, 0.0, 2.2 * s, 2.5 * s);
-        let chest = sd_ellipse(u, vs, 0.7 * s, 0.0, 1.95 * s, 2.2 * s);
-        let torso = smin(haunch, chest, 0.6 * s);
-        let neck = sd_capsule(u, vs, 1.25 * s, 0.0, 2.45 * s, 0.0, 1.15 * s);
-        let head = sd_ellipse(u, vs, 3.25 * s, 0.0, 1.5 * s, 1.95 * s);
-        let body = smin(torso.min(neck), head, 0.28 * s);
-        // Sharp forward-and-outward pointed cat ears clearly standing proud of the skull!
-        let ear = sd_taper(
-            u,
-            vs.abs(),
-            (2.3 * s, 1.3 * s),
-            (3.75 * s, 3.3 * s),
-            0.96 * s,
-            0.2 * s,
-        );
+    let haunch_sdf = EllipseSdf::new(-2.4 * s, 0.0, 2.2 * s, 2.5 * s);
+    let chest_sdf = EllipseSdf::new(0.7 * s, 0.0, 1.95 * s, 2.2 * s);
+    let neck_sdf = CapsuleSdf::new(1.25 * s, 0.0, 2.45 * s, 0.0, 1.15 * s);
+    let head_sdf = EllipseSdf::new(3.25 * s, 0.0, 1.5 * s, 1.95 * s);
+    let ear_sdf = TaperSdf::new((2.3 * s, 1.3 * s), (3.75 * s, 3.3 * s), 0.96 * s, 0.2 * s);
+    let k_torso = 0.6 * s;
+    let inv_k_torso = 1.0 / k_torso;
+    let k_head = 0.28 * s;
+    let inv_k_head = 1.0 / k_head;
+
+    let body_sd_vs = |u: f32, vs: f32| -> (f32, bool) {
+        let avs = vs.abs();
+        let haunch = if u < 1.6 * s && avs < 4.5 * s {
+            haunch_sdf.eval(u, vs)
+        } else {
+            10.0
+        };
+        let chest = if u > -3.1 * s && u < 4.5 * s && avs < 4.2 * s {
+            chest_sdf.eval(u, vs)
+        } else {
+            10.0
+        };
+        let torso = smin_inv(haunch, chest, k_torso, inv_k_torso);
+        let neck = if u > -0.8 * s && u < 4.5 * s && avs < 3.1 * s {
+            neck_sdf.eval(u, vs)
+        } else {
+            10.0
+        };
+        let head = if u > 0.3 * s && avs < 3.8 * s {
+            head_sdf.eval(u, vs)
+        } else {
+            10.0
+        };
+        let body = smin_inv(torso.min(neck), head, k_head, inv_k_head);
+        let ear = if u > 0.6 * s && avs > 0.2 * s && avs < 4.8 * s {
+            ear_sdf.eval(u, avs)
+        } else {
+            10.0
+        };
         if ear < body {
             (ear, true)
         } else {
@@ -681,64 +1439,130 @@ fn draw_cat(pb: &mut PixelBuffer, fr: &Frame, vel: Vec2, contact_cd: f32) {
         }
     };
 
+    let rim_lim = 0.92 * s;
+    let sh_lim = 0.45 * s;
+    let haunch_sh_sq = haunch_sdf.r2_limit(sh_lim);
+    let chest_sh_sq = chest_sdf.r2_limit(sh_lim);
+    let head_sh_sq = head_sdf.r2_limit(sh_lim);
+    let inv_nu = 1.0 / (4.4 * s);
+    let inv_nv = 1.0 / (2.4 * s);
+    let inv_dorsal = 1.0 / (2.5 * s);
+    let du_sh = -(fr.f.x + 2.0 * fr.f.y);
+    let dv_sh = -(fr.p.x + 2.0 * fr.p.y);
+    let u_lim_lo = -5.6 * s;
+    let u_lim_hi = 5.8 * s;
+    let v_lim = 4.8 * s;
+    let u_sh_lo = -5.2 * s;
+    let u_sh_hi = 5.4 * s;
+    let v_sh_lim = 4.4 * s;
+
     for y in y0..=y1 {
+        let (mut u, mut v) = fr.local(x0, y);
         for x in x0..=x1 {
-            let (u, v) = fr.local(x, y);
-            let (d, is_ear) = body_sd(u, v);
+            let in_body_box = u >= u_lim_lo && u <= u_lim_hi && v.abs() <= v_lim;
+            let (d, is_ear, vs) = if in_body_box {
+                let vs = v - spine(u);
+                let (d, is_ear) = body_sd_vs(u, vs);
+                (d, is_ear, vs)
+            } else {
+                (10.0, false, 0.0)
+            };
             let cover = (0.5 - d * 1.18).clamp(0.0, 1.0);
 
-            let mut dark = 0.0f32;
-            if cover < 1.0 {
-                if d < 0.92 * s {
-                    dark = 0.64;
-                } else {
-                    let (su, sv) = fr.local(x - 1, y - 2);
-                    if body_sd(su, sv).0 < 0.45 * s {
-                        dark = 0.36;
-                    }
-                }
-            }
-            if cover <= 0.0 && dark <= 0.0 {
-                continue;
-            }
-
-            let bg = pb.pixel_at(x as usize, y as usize);
-            let mut out = mix(bg, rim_col, dark);
-            if cover > 0.0 {
-                let vs = v - spine(u);
+            if cover >= 1.0 {
                 let col = if is_ear {
-                    // Inner dusty-rose ear triangle vs dark charcoal outer ear edge.
-                    let inner = u > 2.8 * s && vs.abs() > 1.7 * s && vs.abs() < 2.95 * s;
-                    if inner {
+                    let avs = vs.abs();
+                    if u > 2.8 * s && avs > 1.7 * s && avs < 2.95 * s {
                         ear_in
                     } else {
-                        mix(fur_sh, fur_mid, 0.42)
+                        ear_out
                     }
                 } else {
-                    let nu = ((u - 0.3 * s) / (4.4 * s)).clamp(-1.0, 1.0);
-                    let nv = (vs / (2.4 * s)).clamp(-1.0, 1.0);
+                    let nu = ((u - 0.3 * s) * inv_nu).clamp(-1.0, 1.0);
+                    let nv = (vs * inv_nv).clamp(-1.0, 1.0);
                     let dome = (1.0 - (nu * nu * 0.45 + nv * nv * 0.85)).clamp(0.0, 1.0);
                     let lum = 0.42 + 0.35 * dome + 0.58 * fr.lit(nu, nv);
                     let mut fur = shade3(fur_sh, fur_mid, fur_hi, lum);
-
-                    // Bold tiger-tabby dorsal stripes across back & haunches.
+                    let avs = vs.abs();
                     if u < 1.8 * s {
-                        let band = ((u / s) * 2.25).sin();
-                        let dorsal = (1.0 - (vs.abs() / (2.5 * s))).clamp(0.0, 1.0);
+                        let band = fast_sin((u * inv_s) * 2.25);
+                        let dorsal = (1.0 - avs * inv_dorsal).clamp(0.0, 1.0);
                         if band > 0.22 && dorsal > 0.18 {
-                            fur = mix(fur, stripe_c, 0.74 * dorsal);
+                            fur = mix_rgb(fur, stripe_c, 0.74 * dorsal);
                         }
-                        if vs.abs() < 0.38 * s {
-                            fur = mix(fur, stripe_c, 0.42);
+                        if avs < 0.38 * s {
+                            fur = mix_rgb(fur, stripe_c, 0.42);
                         }
-                    } else if u > 2.2 * s && u < 3.45 * s && vs.abs() < 0.75 * s {
-                        fur = mix(fur, stripe_c, 0.55);
+                    } else if u > 2.2 * s && u < 3.45 * s && avs < 0.75 * s {
+                        fur = mix_rgb(fur, stripe_c, 0.55);
                     }
-                    fur
+                    fr.apply_hit(fur)
                 };
-                out = mix(out, apply_hit(col, fr.hit), cover);
+                pb.plot(x, y, col);
+            } else {
+                let dark = if d < rim_lim {
+                    0.64
+                } else {
+                    let su = u + du_sh;
+                    let sv = v + dv_sh;
+                    if su >= u_sh_lo && su <= u_sh_hi && sv.abs() <= v_sh_lim {
+                        let svs = sv - spine(su);
+                        if haunch_sdf.within_sq(su, svs, haunch_sh_sq)
+                            || chest_sdf.within_sq(su, svs, chest_sh_sq)
+                            || head_sdf.within_sq(su, svs, head_sh_sq)
+                            || body_sd_vs(su, svs).0 < sh_lim
+                        {
+                            0.36
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        0.0
+                    }
+                };
+                if cover > 0.0 || dark > 0.0 {
+                    let bg = pb.pixel_at(x as usize, y as usize);
+                    let mut out = if dark > 0.0 {
+                        mix_rgb(bg, rim_col, dark)
+                    } else {
+                        bg
+                    };
+                    if cover > 0.0 {
+                        let col = if is_ear {
+                            let avs = vs.abs();
+                            if u > 2.8 * s && avs > 1.7 * s && avs < 2.95 * s {
+                                ear_in
+                            } else {
+                                ear_out
+                            }
+                        } else {
+                            let nu = ((u - 0.3 * s) * inv_nu).clamp(-1.0, 1.0);
+                            let nv = (vs * inv_nv).clamp(-1.0, 1.0);
+                            let dome = (1.0 - (nu * nu * 0.45 + nv * nv * 0.85)).clamp(0.0, 1.0);
+                            let lum = 0.42 + 0.35 * dome + 0.58 * fr.lit(nu, nv);
+                            let mut fur = shade3(fur_sh, fur_mid, fur_hi, lum);
+                            let avs = vs.abs();
+                            if u < 1.8 * s {
+                                let band = fast_sin((u * inv_s) * 2.25);
+                                let dorsal = (1.0 - avs * inv_dorsal).clamp(0.0, 1.0);
+                                if band > 0.22 && dorsal > 0.18 {
+                                    fur = mix_rgb(fur, stripe_c, 0.74 * dorsal);
+                                }
+                                if avs < 0.38 * s {
+                                    fur = mix_rgb(fur, stripe_c, 0.42);
+                                }
+                            } else if u > 2.2 * s && u < 3.45 * s && avs < 0.75 * s {
+                                fur = mix_rgb(fur, stripe_c, 0.55);
+                            }
+                            fr.apply_hit(fur)
+                        };
+                        out = mix_rgb(out, col, cover);
+                    }
+                    pb.plot(x, y, out);
+                }
             }
-            pb.plot(x, y, out);
+            u += fr.f.x;
+            v += fr.p.x;
         }
     }
 
@@ -758,7 +1582,7 @@ fn draw_cat(pb: &mut PixelBuffer, fr: &Frame, vel: Vec2, contact_cd: f32) {
         pb.plot_add(w2.0, w2.1, (38, 44, 54));
     }
     let nose = fr.px(4.65 * s, sp_head);
-    blend_px(pb, nose.0, nose.1, apply_hit((176, 112, 130), fr.hit), 0.92);
+    blend_px(pb, nose.0, nose.1, fr.apply_hit((176, 112, 130)), 0.92);
 }
 
 // ============================================================================
@@ -766,36 +1590,42 @@ fn draw_cat(pb: &mut PixelBuffer, fr: &Frame, vel: Vec2, contact_cd: f32) {
 // ============================================================================
 
 fn draw_spitter(pb: &mut PixelBuffer, fr: &Frame, fire_cd: f32) {
-    let s = fr.r / 3.0;
+    let s = fr.r * (1.0 / 3.0);
+    let inv_s = 1.0 / s;
 
     let charge = if fire_cd <= 0.0 {
-        0.82 + 0.18 * (fr.anim * 2.0).sin().abs()
+        0.82 + 0.18 * fast_sin(fr.anim * 2.0).abs()
     } else if fire_cd < 0.75 {
-        ((0.75 - fire_cd) / 0.75).clamp(0.0, 1.0)
+        ((0.75 - fire_cd) * (1.0 / 0.75)).clamp(0.0, 1.0)
     } else {
         0.0
     };
     let recoil = if fire_cd > 1.95 {
-        ((fire_cd - 1.95) / 0.25).clamp(0.0, 1.0)
+        ((fire_cd - 1.95) * 4.0).clamp(0.0, 1.0)
     } else {
         0.0
     };
     let swell = 1.0 + 0.28 * charge - 0.14 * recoil;
 
     // 1) Slender dark-emerald legs.
-    let leg_col = apply_hit((52, 102, 42), fr.hit);
+    let leg_col = fr.apply_hit((52, 102, 42));
     for (i, &u_hip) in [0.95f32, -0.35, -1.6].iter().enumerate() {
         let phase = fr.anim + i as f32 * 2.1;
-        for (side, sph) in [(-1.0f32, 0.0f32), (1.0, PI)] {
-            let swing = (phase + sph).sin() * 0.65 * s;
-            let hip = fr.px(u_hip * s, side * 1.15 * s);
-            let foot = fr.px(u_hip * s + swing, side * 3.15 * s);
+        let sw_base = fast_sin(phase) * 0.65 * s;
+        let uh = u_hip * s;
+        for (side, swing) in [(-1.0f32, sw_base), (1.0, -sw_base)] {
+            let hip = fr.px(uh, side * 1.15 * s);
+            let foot = fr.px(uh + swing, side * 3.15 * s);
             line_blend(pb, hip, foot, leg_col, 0.85);
         }
     }
 
     // 2) Distinct hourglass wasp body: plump venom sac + pinched waist + thorax/head + curved mandibles.
-    let Some((x0, x1, y0, y1)) = fr.bbox_pb(pb, 5.8 * s) else {
+    let u_min = (-1.9 - 1.9 * swell - 1.0) * s;
+    let u_max = (4.2 + 0.3 * charge + 1.2) * s;
+    let mand_tip_v = (0.45 + 1.15 * charge) * s;
+    let v_max = (2.0 * swell * s + 1.0 * s).max(mand_tip_v + 1.3 * s);
+    let Some((x0, x1, y0, y1)) = fr.bbox_oriented(pb, u_min, u_max, v_max, 1, 1) else {
         return;
     };
 
@@ -803,111 +1633,211 @@ fn draw_spitter(pb: &mut PixelBuffer, fr: &Frame, fire_cd: f32) {
     let ch_mid = (114, 214, 68);
     let ch_hi = (210, 255, 118);
     let stripe_c = (20, 44, 18);
-    let venom_hot = mix(fr.accent, (242, 255, 138), 0.55);
+    let venom_hot = mix_rgb(fr.accent, (242, 255, 138), 0.55);
+    let mand_col = fr.apply_hit(mix_rgb((60, 118, 44), (195, 248, 108), 0.55 + 0.35 * charge));
     let rim_col = if fr.hit > 0.4 { (130, 160, 80) } else { (0, 0, 0) };
 
-    let mand_tip_v = (0.45 + 1.15 * charge) * s;
+    let abd_ru = 1.9 * s * swell;
+    let abd_rv = 2.0 * s * swell;
+    let abd_sdf = EllipseSdf::new(-1.9 * s, 0.0, abd_ru, abd_rv);
+    let thorax_sdf = EllipseSdf::new(0.85 * s, 0.0, 1.2 * s, 1.3 * s);
+    let head_sdf = EllipseSdf::new(2.4 * s, 0.0, 0.95 * s, 1.25 * s);
+    let waist_sdf = CapsuleSdf::new(-0.55 * s, 0.0, 0.35 * s, 0.0, 0.52 * s);
+    let mand_sdf = TaperSdf::new(
+        (2.85 * s, 0.95 * s),
+        ((4.2 + 0.3 * charge) * s, mand_tip_v),
+        0.48 * s,
+        0.2 * s,
+    );
+    let k_front = 0.32 * s;
+    let inv_k_front = 1.0 / k_front;
+
     let body_sd = |u: f32, v: f32| -> (f32, u8) {
-        let abd = sd_ellipse(u, v, -1.9 * s, 0.0, 1.9 * s * swell, 2.0 * s * swell);
-        let thorax = sd_ellipse(u, v, 0.85 * s, 0.0, 1.2 * s, 1.3 * s);
-        let head = sd_ellipse(u, v, 2.4 * s, 0.0, 0.95 * s, 1.25 * s);
-        let front = smin(thorax, head, 0.32 * s);
-        let waist = sd_capsule(u, v, -0.55 * s, 0.0, 0.35 * s, 0.0, 0.52 * s);
-        // Sculpted curved pincer mandibles (hooked inward when calm, wide when charging!).
-        let mand = sd_taper(
-            u,
-            v.abs(),
-            (2.85 * s, 0.95 * s),
-            ((4.2 + 0.3 * charge) * s, mand_tip_v),
-            0.48 * s,
-            0.2 * s,
-        );
+        let av = v.abs();
+        let abd = if u < (-1.9 + 1.9 * swell + 1.1) * s {
+            abd_sdf.eval(u, v)
+        } else {
+            10.0
+        };
+        let thorax = if u > -1.5 * s && u < 3.4 * s && av < 2.6 * s {
+            thorax_sdf.eval(u, v)
+        } else {
+            10.0
+        };
+        let head = if u > 0.2 * s && av < 2.6 * s {
+            head_sdf.eval(u, v)
+        } else {
+            10.0
+        };
+        let front = smin_inv(thorax, head, k_front, inv_k_front);
+        let waist = if u > -2.0 * s && u < 1.8 * s && av < 1.8 * s {
+            waist_sdf.eval(u, v)
+        } else {
+            10.0
+        };
+        let mand = if u > 1.4 * s && av < mand_tip_v + 1.6 * s {
+            mand_sdf.eval(u, av)
+        } else {
+            10.0
+        };
         let body = abd.min(front).min(waist).min(mand);
         let part = if mand < abd && mand < front && mand < waist {
-            2 // mandible
+            2
         } else if abd < front && abd < waist {
-            0 // venom sac abdomen
+            0
         } else {
-            1 // thorax/head
+            1
         };
         (body, part)
     };
 
+    let rim_lim = 0.85 * s;
+    let sh_lim = 0.35 * s;
+    let abd_sh_sq = abd_sdf.r2_limit(sh_lim);
+    let thx_sh_sq = thorax_sdf.r2_limit(sh_lim);
+    let head_sh_sq = head_sdf.r2_limit(sh_lim);
+    let inv_abd_ru = 1.0 / abd_ru;
+    let inv_abd_rv = 1.0 / abd_rv;
+    let inv_th_ru = 1.0 / (1.85 * s);
+    let inv_th_rv = 1.0 / (1.3 * s);
+    let du_sh = -(fr.f.x + fr.f.y);
+    let dv_sh = -(fr.p.x + fr.p.y);
+    let stripe_mix = 0.76 * (1.0 - 0.5 * charge);
+
     for y in y0..=y1 {
+        let (mut u, mut v) = fr.local(x0, y);
         for x in x0..=x1 {
-            let (u, v) = fr.local(x, y);
-            let (d, part) = body_sd(u, v);
+            let in_box = u >= u_min && u <= u_max && v.abs() <= v_max;
+            let (d, part) = if in_box { body_sd(u, v) } else { (10.0, 0) };
             let cover = (0.5 - d * 1.18).clamp(0.0, 1.0);
 
-            let mut dark = 0.0f32;
-            if cover < 1.0 {
-                if d < 0.85 * s {
-                    dark = 0.62;
-                } else {
-                    let (su, sv) = fr.local(x - 1, y - 1);
-                    if body_sd(su, sv).0 < 0.35 * s {
-                        dark = 0.34;
-                    }
-                }
-            }
-            if cover <= 0.0 && dark <= 0.0 {
-                continue;
-            }
-
-            let bg = pb.pixel_at(x as usize, y as usize);
-            let mut out = mix(bg, rim_col, dark);
-            if cover > 0.0 {
+            if cover >= 1.0 {
                 let col = if part == 2 {
-                    mix((60, 118, 44), (195, 248, 108), 0.55 + 0.35 * charge)
+                    mand_col
                 } else {
-                    let (cu, ru, rv) = if part == 0 {
-                        (-1.9 * s, 1.9 * s * swell, 2.0 * s * swell)
+                    let (nu, nv) = if part == 0 {
+                        (
+                            ((u + 1.9 * s) * inv_abd_ru).clamp(-1.0, 1.0),
+                            (v * inv_abd_rv).clamp(-1.0, 1.0),
+                        )
                     } else {
-                        (1.4 * s, 1.85 * s, 1.3 * s)
+                        (
+                            ((u - 1.4 * s) * inv_th_ru).clamp(-1.0, 1.0),
+                            (v * inv_th_rv).clamp(-1.0, 1.0),
+                        )
                     };
-                    let nu = ((u - cu) / ru).clamp(-1.0, 1.0);
-                    let nv = (v / rv).clamp(-1.0, 1.0);
                     let dome = (1.0 - (nu * nu * 0.52 + nv * nv * 0.72)).clamp(0.0, 1.0);
                     let lum = 0.44 + 0.38 * dome + 0.52 * fr.lit(nu, nv);
                     let mut c = shade3(ch_sh, ch_mid, ch_hi, lum);
                     if part == 0 {
-                        let stripe = ((u / s + 1.9) * 3.2).sin() > 0.42;
+                        let stripe = fast_sin((u * inv_s + 1.9) * 3.2) > 0.42;
                         if stripe {
-                            c = mix(c, stripe_c, 0.76 * (1.0 - 0.5 * charge));
+                            c = mix_rgb(c, stripe_c, stripe_mix);
                         } else if charge > 0.05 {
-                            c = mix(c, venom_hot, charge * (0.45 + 0.48 * dome));
+                            c = mix_rgb(c, venom_hot, charge * (0.45 + 0.48 * dome));
                         }
                     }
-                    c
+                    fr.apply_hit(c)
                 };
-                out = mix(out, apply_hit(col, fr.hit), cover);
+                pb.plot(x, y, col);
+            } else {
+                let dark = if d < rim_lim {
+                    0.62
+                } else {
+                    let su = u + du_sh;
+                    let sv = v + dv_sh;
+                    if su >= u_min
+                        && su <= u_max
+                        && sv.abs() <= v_max
+                        && (abd_sdf.within_sq(su, sv, abd_sh_sq)
+                            || thorax_sdf.within_sq(su, sv, thx_sh_sq)
+                            || head_sdf.within_sq(su, sv, head_sh_sq)
+                            || body_sd(su, sv).0 < sh_lim)
+                    {
+                        0.34
+                    } else {
+                        0.0
+                    }
+                };
+                if cover > 0.0 || dark > 0.0 {
+                    let bg = pb.pixel_at(x as usize, y as usize);
+                    let mut out = if dark > 0.0 {
+                        mix_rgb(bg, rim_col, dark)
+                    } else {
+                        bg
+                    };
+                    if cover > 0.0 {
+                        let col = if part == 2 {
+                            mand_col
+                        } else {
+                            let (nu, nv) = if part == 0 {
+                                (
+                                    ((u + 1.9 * s) * inv_abd_ru).clamp(-1.0, 1.0),
+                                    (v * inv_abd_rv).clamp(-1.0, 1.0),
+                                )
+                            } else {
+                                (
+                                    ((u - 1.4 * s) * inv_th_ru).clamp(-1.0, 1.0),
+                                    (v * inv_th_rv).clamp(-1.0, 1.0),
+                                )
+                            };
+                            let dome = (1.0 - (nu * nu * 0.52 + nv * nv * 0.72)).clamp(0.0, 1.0);
+                            let lum = 0.44 + 0.38 * dome + 0.52 * fr.lit(nu, nv);
+                            let mut c = shade3(ch_sh, ch_mid, ch_hi, lum);
+                            if part == 0 {
+                                let stripe = fast_sin((u * inv_s + 1.9) * 3.2) > 0.42;
+                                if stripe {
+                                    c = mix_rgb(c, stripe_c, stripe_mix);
+                                } else if charge > 0.05 {
+                                    c = mix_rgb(c, venom_hot, charge * (0.45 + 0.48 * dome));
+                                }
+                            }
+                            fr.apply_hit(c)
+                        };
+                        out = mix_rgb(out, col, cover);
+                    }
+                    pb.plot(x, y, out);
+                }
             }
-            pb.plot(x, y, out);
+            u += fr.f.x;
+            v += fr.p.x;
         }
     }
 
     // 3) Tapered gauzy buzzing wasp V-wings blended softly over thorax.
-    let buzz = (fr.anim * 2.6).sin();
+    let buzz = fast_sin(fr.anim * 2.6);
     let wing_reach = (3.4 + 1.0 * buzz.abs()) * s;
-    let wing_col = mix((185, 240, 200), fr.accent, 0.45);
-    if let Some((wx0, wx1, wy0, wy1)) = fr.bbox_pb(pb, 5.2 * s) {
+    let wing_col = mix_rgb((185, 240, 200), fr.accent, 0.45);
+    let wu_min = (-2.3 + 0.45 * buzz.min(0.0) - 1.1) * s;
+    let wu_max = (0.7 + 0.45 * buzz.max(0.0) + 1.1) * s;
+    if let Some((wx0, wx1, wy0, wy1)) = fr.bbox_oriented(pb, wu_min, wu_max, wing_reach + 0.5, 0, 0)
+    {
+        let w_start = 0.9 * s;
+        let inv_w_span = 1.0 / (wing_reach - w_start).max(0.5);
+        let u_slope = (-3.0 + 0.45 * buzz) * s;
+        let u_base = 0.7 * s;
+        let max_ch = 0.95 * s;
+        let edge_pad = 0.45 * s;
         for y in wy0..=wy1 {
+            let (mut u, mut v) = fr.local(wx0, y);
             for x in wx0..=wx1 {
-                let (u, v) = fr.local(x, y);
                 let av = v.abs();
-                if av < 0.9 * s || av > wing_reach {
-                    continue;
+                if av >= w_start && av <= wing_reach {
+                    let t = (av - w_start) * inv_w_span;
+                    let u_center = u_base + u_slope * t;
+                    let du = (u - u_center).abs();
+                    if du <= max_ch {
+                        let half_ch = max_ch * spitter_wing_profile(t);
+                        if du <= half_ch {
+                            let edge = du > half_ch - edge_pad;
+                            let alpha = if edge { 0.46 } else { 0.26 } * (1.0 - t * 0.35);
+                            let bg = pb.pixel_at(x as usize, y as usize);
+                            pb.plot(x, y, mix_rgb(bg, wing_col, alpha));
+                        }
+                    }
                 }
-                let t = (av - 0.9 * s) / (wing_reach - 0.9 * s).max(0.5);
-                // Smooth tapered elliptical teardrop swept back from thorax shoulder.
-                let u_center = (0.7 - 3.0 * t + 0.45 * buzz * t) * s;
-                let half_ch = (0.95 * (t * (1.0 - t) * 4.0).clamp(0.0, 1.0).sqrt()) * s;
-                let du = (u - u_center).abs();
-                if du <= half_ch {
-                    let edge = du > half_ch - 0.45 * s;
-                    let alpha = if edge { 0.46 } else { 0.26 } * (1.0 - t * 0.35);
-                    blend_px(pb, x, y, wing_col, alpha);
-                }
+                u += fr.f.x;
+                v += fr.p.x;
             }
         }
     }
@@ -926,9 +1856,9 @@ fn draw_spitter(pb: &mut PixelBuffer, fr: &Frame, fire_cd: f32) {
     // 5) Live shot telegraph orb + 4-point charge sparkle between open mandibles!
     if charge > 0.08 {
         let mp = fr.px(4.0 * s, 0.0);
-        let orb_col = mix(venom_hot, (255, 255, 225), charge * 0.65);
+        let orb_col = mix_rgb(venom_hot, (255, 255, 225), charge * 0.65);
         pb.plot(mp.0, mp.1, orb_col);
-        let glow = scale(orb_col, 0.45 + 0.55 * charge);
+        let glow = scale_rgb(orb_col, 0.45 + 0.55 * charge);
         if charge > 0.35 {
             pb.plot_add(mp.0 + 1, mp.1, glow);
             pb.plot_add(mp.0 - 1, mp.1, glow);
@@ -936,7 +1866,7 @@ fn draw_spitter(pb: &mut PixelBuffer, fr: &Frame, fire_cd: f32) {
             pb.plot_add(mp.0, mp.1 - 1, glow);
         }
         if charge > 0.7 {
-            let tip = scale(orb_col, 0.6);
+            let tip = scale_rgb(orb_col, 0.6);
             pb.plot_add(mp.0 + 2, mp.1, tip);
             pb.plot_add(mp.0 - 2, mp.1, tip);
             pb.plot_add(mp.0, mp.1 + 2, tip);
@@ -950,21 +1880,21 @@ fn draw_spitter(pb: &mut PixelBuffer, fr: &Frame, fire_cd: f32) {
 // ============================================================================
 
 fn draw_brute(pb: &mut PixelBuffer, fr: &Frame, elite: bool) {
-    let s = fr.r / 6.5;
+    let s = fr.r * (1.0 / 6.5);
     let stomp = fr.anim * 0.72;
 
     // 1) Elite threat perimeter: crisp 1px rotating royal-gold corner arcs.
     if elite {
-        let pulse = 0.55 + 0.45 * (fr.anim * 1.4).sin();
+        let pulse = 0.55 + 0.45 * fast_sin(fr.anim * 1.4);
         let aura_r = fr.r + 2.3 * s;
-        let gold = scale((255, 206, 72), 0.52 + 0.35 * pulse);
+        let gold = scale_rgb((255, 206, 72), 0.52 + 0.35 * pulse);
         for i in 0..8 {
-            let a0 = i as f32 / 8.0 * TAU + fr.anim * 0.14;
+            let a0 = i as f32 * (TAU / 8.0) + fr.anim * 0.14;
             let mut last = (i32::MIN, i32::MIN);
             for step in 0..5 {
-                let a = a0 + step as f32 * 0.07;
-                let tx = (fr.pos.x + a.cos() * aura_r).round() as i32;
-                let ty = (fr.pos.y + a.sin() * aura_r).round() as i32;
+                let (sa, ca) = fast_sin_cos(a0 + step as f32 * 0.07);
+                let tx = (fr.pos.x + ca * aura_r).round() as i32;
+                let ty = (fr.pos.y + sa * aura_r).round() as i32;
                 if (tx, ty) != last {
                     blend_px(pb, tx, ty, gold, 0.72);
                     last = (tx, ty);
@@ -974,22 +1904,17 @@ fn draw_brute(pb: &mut PixelBuffer, fr: &Frame, elite: bool) {
     }
 
     // 2) Six thick heavy-stomping armored legs with lit top-left knees.
-    let leg_core = apply_hit(
-        if elite { (154, 98, 52) } else { (134, 54, 44) },
-        fr.hit,
-    );
-    let leg_edge = apply_hit((46, 18, 22), fr.hit);
-    let knee_hi = apply_hit(
-        if elite { (252, 212, 92) } else { (212, 98, 72) },
-        fr.hit,
-    );
+    let leg_core = fr.apply_hit(if elite { (154, 98, 52) } else { (134, 54, 44) });
+    let leg_edge = fr.apply_hit((46, 18, 22));
+    let knee_hi = fr.apply_hit(if elite { (252, 212, 92) } else { (212, 98, 72) });
     for (i, &u_hip) in [2.6f32, -0.5, -3.6].iter().enumerate() {
         let phase = stomp + i as f32 * 2.1;
-        for (side, sph) in [(-1.0f32, 0.0f32), (1.0, PI)] {
-            let swing = (phase + sph).sin() * 1.35 * s;
-            let hip = fr.px(u_hip * s, side * 4.2 * s);
-            let knee = fr.px(u_hip * s + swing * 0.55, side * 7.0 * s);
-            let foot = fr.px(u_hip * s + swing - 0.55 * s, side * 8.2 * s);
+        let sw_base = fast_sin(phase) * 1.35 * s;
+        let uh = u_hip * s;
+        for (side, swing) in [(-1.0f32, sw_base), (1.0, -sw_base)] {
+            let hip = fr.px(uh, side * 4.2 * s);
+            let knee = fr.px(uh + swing * 0.55, side * 7.0 * s);
+            let foot = fr.px(uh + swing - 0.55 * s, side * 8.2 * s);
             thick_line(pb, hip, knee, leg_core, leg_edge);
             line_blend(pb, knee, foot, leg_edge, 0.95);
             pb.plot(knee.0, knee.1, knee_hi);
@@ -997,7 +1922,10 @@ fn draw_brute(pb: &mut PixelBuffer, fr: &Frame, elite: bool) {
     }
 
     // 3) Massive domed armored carapace + sculpted SDF rhino horn & cheek tusks!
-    let Some((x0, x1, y0, y1)) = fr.bbox_pb(pb, 10.6 * s) else {
+    let u_min = -7.8 * s;
+    let u_max = 10.3 * s;
+    let v_max = 6.9 * s;
+    let Some((x0, x1, y0, y1)) = fr.bbox_oriented(pb, u_min, u_max, v_max, 2, 2) else {
         return;
     };
 
@@ -1024,143 +1952,181 @@ fn draw_brute(pb: &mut PixelBuffer, fr: &Frame, elite: bool) {
     let seam_c = (32, 12, 16);
     let rim_col = if fr.hit > 0.4 { (165, 95, 75) } else { (0, 0, 0) };
 
-    // Returns (signed_distance, is_horn).
+    let elytra_sdf = EllipseSdf::new(-1.55 * s, 0.0, 5.1 * s, 5.65 * s);
+    let pronotum_sdf = EllipseSdf::new(3.15 * s, 0.0, 2.75 * s, 4.45 * s);
+    let main_horn_sdf = TaperSdf::new((4.4 * s, 0.0), (8.6 * s, 0.0), 1.85 * s, 0.45 * s);
+    let fork_sdf = TaperSdf::new((7.2 * s, 0.35 * s), (8.9 * s, 1.35 * s), 0.55 * s, 0.22 * s);
+    let side_horn_sdf = if elite {
+        TaperSdf::new((3.6 * s, 2.8 * s), (6.8 * s, 5.0 * s), 0.95 * s, 0.28 * s)
+    } else {
+        TaperSdf::new((4.4 * s, 2.5 * s), (6.2 * s, 3.35 * s), 0.72 * s, 0.22 * s)
+    };
+    let k_shell = 0.95 * s;
+    let inv_k_shell = 1.0 / k_shell;
+    let k_comb = 0.4 * s;
+    let inv_k_comb = 1.0 / k_comb;
+
     let shell_sd = |u: f32, v: f32| -> (f32, bool) {
-        let elytra = sd_ellipse(u, v, -1.55 * s, 0.0, 5.1 * s, 5.65 * s);
-        let pronotum = sd_ellipse(u, v, 3.15 * s, 0.0, 2.75 * s, 4.45 * s);
-        let shell = smin(elytra, pronotum, 0.95 * s);
-        // Sculpted heavy armored rhino horn growing smoothly from the brow!
-        let main_horn = sd_taper(u, v, (4.4 * s, 0.0), (8.6 * s, 0.0), 1.85 * s, 0.45 * s);
-        let fork = sd_taper(
-            u,
-            v.abs(),
-            (7.2 * s, 0.35 * s),
-            (8.9 * s, 1.35 * s),
-            0.55 * s,
-            0.22 * s,
-        );
-        // Short heavy cheek tusks (or swept royal crown horns on Elite!).
-        let side_horn = if elite {
-            sd_taper(
-                u,
-                v.abs(),
-                (3.6 * s, 2.8 * s),
-                (6.8 * s, 5.0 * s),
-                0.95 * s,
-                0.28 * s,
-            )
+        let av = v.abs();
+        let elytra = if u < 5.6 * s {
+            elytra_sdf.eval(u, v)
         } else {
-            sd_taper(
-                u,
-                v.abs(),
-                (4.4 * s, 2.5 * s),
-                (6.2 * s, 3.35 * s),
-                0.72 * s,
-                0.22 * s,
-            )
+            10.0
+        };
+        let pronotum = if u > -1.7 * s && u < 8.0 * s && av < 6.5 * s {
+            pronotum_sdf.eval(u, v)
+        } else {
+            10.0
+        };
+        let shell = smin_inv(elytra, pronotum, k_shell, inv_k_shell);
+        if u <= 1.2 * s {
+            return (shell, false);
+        }
+        let main_horn = if av < 3.5 * s {
+            main_horn_sdf.eval(u, v)
+        } else {
+            10.0
+        };
+        let fork = if u > 5.0 * s && av < 3.2 * s {
+            fork_sdf.eval(u, av)
+        } else {
+            10.0
+        };
+        let side_horn = if u < 8.6 * s && av > 0.6 * s {
+            side_horn_sdf.eval(u, av)
+        } else {
+            10.0
         };
         let horns = main_horn.min(fork).min(side_horn);
-        let combined = smin(shell, horns, 0.4 * s);
+        let combined = smin_inv(shell, horns, k_comb, inv_k_comb);
         let is_horn = horns < shell + 0.1 * s && u > 4.6 * s;
         (combined, is_horn)
     };
 
     let damaged = fr.hp_frac < 0.68;
     let critical = fr.hp_frac < 0.38;
+    let rim_lim = 1.0 * s;
+    let sh_lim = 0.55 * s;
+    let elytra_sh_sq = elytra_sdf.r2_limit(sh_lim);
+    let pronotum_sh_sq = pronotum_sdf.r2_limit(sh_lim);
+    let inv_h_nu = 1.0 / (2.5 * s);
+    let inv_h_nv = 1.0 / (2.0 * s);
+    let inv_h_tip = 1.0 / (3.4 * s);
+    let inv_s_nu = 1.0 / (6.4 * s);
+    let inv_s_nv = 1.0 / (5.7 * s);
+    let du_sh = -2.0 * (fr.f.x + fr.f.y);
+    let dv_sh = -2.0 * (fr.p.x + fr.p.y);
 
-    for y in y0..=y1 {
-        for x in x0..=x1 {
-            let (u, v) = fr.local(x, y);
-            let (d, is_horn) = shell_sd(u, v);
-            let cover = (0.5 - d * 1.18).clamp(0.0, 1.0);
+    let shade_brute = |u: f32, v: f32, d: f32, is_horn: bool| -> Rgb {
+        let col = if is_horn {
+            let nu = ((u - 6.4 * s) * inv_h_nu).clamp(-1.0, 1.0);
+            let nv = (v * inv_h_nv).clamp(-1.0, 1.0);
+            let lit = fr.lit(nu * 0.6, nv);
+            let tip_t = ((u - 5.2 * s) * inv_h_tip).clamp(0.0, 1.0);
+            let lum = 0.42 + 0.35 * tip_t + 0.55 * lit;
+            shade3(horn_sh, horn_mid, horn_hi, lum)
+        } else {
+            let nu = ((u + 0.2 * s) * inv_s_nu).clamp(-1.0, 1.0);
+            let nv = (v * inv_s_nv).clamp(-1.0, 1.0);
+            let dome = (1.0 - (nu * nu * 0.55 + nv * nv * 0.72)).clamp(0.0, 1.0);
+            let lit = fr.lit(nu, nv);
+            let mut lum = 0.36 + 0.4 * dome + 0.62 * lit;
+            if lit > 0.46 && dome > 0.32 {
+                lum += 0.28;
+            }
+            let mut c = shade3(sh_c, mid_c, hi_c, lum);
 
-            let mut dark = 0.0f32;
-            if cover < 1.0 {
-                if d < 1.0 * s {
-                    dark = 0.68;
+            let collar = (u - 1.5 * s).abs();
+            if collar < 0.55 * s {
+                c = mix_rgb(c, seam_c, 0.72);
+            } else if u > 1.5 * s && collar < 1.15 * s {
+                c = mix_rgb(c, trim_c, if elite { 0.85 } else { 0.35 });
+            }
+
+            if u < 1.4 * s && v.abs() < 0.45 * s {
+                c = if elite {
+                    mix_rgb(trim_c, (255, 245, 180), (0.35 + 0.5 * lit).clamp(0.0, 1.0))
                 } else {
-                    let (su, sv) = fr.local(x - 2, y - 2);
-                    if shell_sd(su, sv).0 < 0.55 * s {
-                        dark = 0.42;
-                    }
+                    mix_rgb(c, seam_c, 0.72)
+                };
+            }
+
+            if d > -1.05 * s {
+                if elite {
+                    c = mix_rgb(c, trim_c, 0.65);
+                } else if lit < -0.15 {
+                    c = scale_rgb(c, 0.72);
                 }
             }
-            if cover <= 0.0 && dark <= 0.0 {
-                continue;
+
+            if u < 0.8 * s
+                && ((u + 1.2 * s).abs() < 0.35 * s || (u + 3.8 * s).abs() < 0.35 * s)
+            {
+                c = scale_rgb(c, 0.8);
             }
 
-            let bg = pb.pixel_at(x as usize, y as usize);
-            let mut out = mix(bg, rim_col, dark);
-            if cover > 0.0 {
-                let mut col = if is_horn {
-                    let nu = ((u - 6.4 * s) / (2.5 * s)).clamp(-1.0, 1.0);
-                    let nv = (v / (2.0 * s)).clamp(-1.0, 1.0);
-                    let lit = fr.lit(nu * 0.6, nv);
-                    let tip_t = ((u - 5.2 * s) / (3.4 * s)).clamp(0.0, 1.0);
-                    let lum = 0.42 + 0.35 * tip_t + 0.55 * lit;
-                    shade3(horn_sh, horn_mid, horn_hi, lum)
+            if damaged {
+                let crack1 = ((u + 1.8 * s) - (v - 1.5 * s) * 0.7).abs() < 0.38 * s
+                    && u < 0.6 * s
+                    && v > 0.4 * s;
+                let crack2 = ((u + 3.1 * s) + (v + 1.2 * s) * 0.85).abs() < 0.38 * s
+                    && u < -0.5 * s
+                    && v < -0.3 * s;
+                if crack1 || (critical && crack2) {
+                    c = if critical {
+                        (255, 165, 65)
+                    } else {
+                        (24, 10, 12)
+                    };
+                }
+            }
+            c
+        };
+        fr.apply_hit(col)
+    };
+
+    for y in y0..=y1 {
+        let (mut u, mut v) = fr.local(x0, y);
+        for x in x0..=x1 {
+            let in_box = u >= u_min && u <= u_max && v.abs() <= v_max;
+            let (d, is_horn) = if in_box { shell_sd(u, v) } else { (10.0, false) };
+            let cover = (0.5 - d * 1.18).clamp(0.0, 1.0);
+
+            if cover >= 1.0 {
+                pb.plot(x, y, shade_brute(u, v, d, is_horn));
+            } else {
+                let dark = if d < rim_lim {
+                    0.68
                 } else {
-                    let nu = ((u + 0.2 * s) / (6.4 * s)).clamp(-1.0, 1.0);
-                    let nv = (v / (5.7 * s)).clamp(-1.0, 1.0);
-                    let dome = (1.0 - (nu * nu * 0.55 + nv * nv * 0.72)).clamp(0.0, 1.0);
-                    let lit = fr.lit(nu, nv);
-                    let mut lum = 0.36 + 0.4 * dome + 0.62 * lit;
-                    if lit > 0.46 && dome > 0.32 {
-                        lum += 0.28;
-                    }
-                    let mut c = shade3(sh_c, mid_c, hi_c, lum);
-
-                    let collar = (u - 1.5 * s).abs();
-                    if collar < 0.55 * s {
-                        c = mix(c, seam_c, 0.72);
-                    } else if u > 1.5 * s && collar < 1.15 * s {
-                        c = mix(c, trim_c, if elite { 0.85 } else { 0.35 });
-                    }
-
-                    if u < 1.4 * s && v.abs() < 0.45 * s {
-                        c = if elite {
-                            mix(trim_c, (255, 245, 180), (0.35 + 0.5 * lit).clamp(0.0, 1.0))
-                        } else {
-                            mix(c, seam_c, 0.72)
-                        };
-                    }
-
-                    if d > -1.05 * s {
-                        if elite {
-                            c = mix(c, trim_c, 0.65);
-                        } else if lit < -0.15 {
-                            c = scale(c, 0.72);
-                        }
-                    }
-
-                    if u < 0.8 * s
-                        && ((u + 1.2 * s).abs() < 0.35 * s || (u + 3.8 * s).abs() < 0.35 * s)
+                    let su = u + du_sh;
+                    let sv = v + dv_sh;
+                    if su >= u_min
+                        && su <= u_max
+                        && sv.abs() <= v_max
+                        && (elytra_sdf.within_sq(su, sv, elytra_sh_sq)
+                            || pronotum_sdf.within_sq(su, sv, pronotum_sh_sq)
+                            || shell_sd(su, sv).0 < sh_lim)
                     {
-                        c = scale(c, 0.8);
+                        0.42
+                    } else {
+                        0.0
                     }
-
-                    if damaged {
-                        let crack1 = ((u + 1.8 * s) - (v - 1.5 * s) * 0.7).abs() < 0.38 * s
-                            && u < 0.6 * s
-                            && v > 0.4 * s;
-                        let crack2 = ((u + 3.1 * s) + (v + 1.2 * s) * 0.85).abs() < 0.38 * s
-                            && u < -0.5 * s
-                            && v < -0.3 * s;
-                        if crack1 || (critical && crack2) {
-                            c = if critical {
-                                (255, 165, 65)
-                            } else {
-                                (24, 10, 12)
-                            };
-                        }
-                    }
-                    c
                 };
-
-                col = apply_hit(col, fr.hit);
-                out = mix(out, col, cover);
+                if cover > 0.0 || dark > 0.0 {
+                    let bg = pb.pixel_at(x as usize, y as usize);
+                    let mut out = if dark > 0.0 {
+                        mix_rgb(bg, rim_col, dark)
+                    } else {
+                        bg
+                    };
+                    if cover > 0.0 {
+                        out = mix_rgb(out, shade_brute(u, v, d, is_horn), cover);
+                    }
+                    pb.plot(x, y, out);
+                }
             }
-            pb.plot(x, y, out);
+            u += fr.f.x;
+            v += fr.p.x;
         }
     }
 
@@ -1172,11 +2138,12 @@ fn draw_brute(pb: &mut PixelBuffer, fr: &Frame, elite: bool) {
     } else {
         (255, 202, 56)
     };
+    let eye_sub = scale_rgb(eye_col, 0.72);
     for side in [-1.0f32, 1.0] {
         let e0 = fr.px(4.7 * s, side * 2.15 * s);
         let e1 = fr.px(4.15 * s, side * 2.55 * s);
         pb.plot(e0.0, e0.1, eye_col);
-        blend_px(pb, e1.0, e1.1, scale(eye_col, 0.72), 0.9);
+        blend_px(pb, e1.0, e1.1, eye_sub, 0.9);
     }
 }
 
@@ -1185,49 +2152,70 @@ fn draw_brute(pb: &mut PixelBuffer, fr: &Frame, elite: bool) {
 // ============================================================================
 
 fn draw_boss(pb: &mut PixelBuffer, fr: &Frame, fire_cd: f32) {
-    let s = fr.r / 14.0;
+    let s = fr.r * (1.0 / 14.0);
+    let inv_s = 1.0 / s;
     let charge = if fire_cd <= 0.0 {
-        0.85 + 0.15 * (fr.anim * 2.6).sin().abs()
+        0.85 + 0.15 * fast_sin(fr.anim * 2.6).abs()
     } else if fire_cd < 0.50 {
-        ((0.50 - fire_cd) / 0.50).clamp(0.0, 1.0)
+        ((0.50 - fire_cd) * 2.0).clamp(0.0, 1.0)
     } else {
         0.0
     };
     let enraged = fr.hp_frac < 0.45;
-    let pulse = 0.5 + 0.5 * (fr.anim * 2.2).sin();
+    let pulse = 0.5 + 0.5 * fast_sin(fr.anim * 2.2);
 
     // Sculpted multi-part queen anatomy + curved scythe mandibles + crown horns + needle stinger!
     let mand_open = (1.8 + 3.0 * charge) * s;
+    let mand_mid_v = (3.7 + 1.5 * charge) * s;
+    let abd_sdf = EllipseSdf::new(-7.0 * s, 0.0, 6.4 * s, 7.9 * s);
+    let stinger_sdf = TaperSdf::new((-12.0 * s, 0.0), (-16.0 * s, 0.0), 1.8 * s, 0.25 * s);
+    let thorax_sdf = EllipseSdf::new(1.9 * s, 0.0, 5.4 * s, 8.2 * s);
+    let head_sdf = EllipseSdf::new(9.2 * s, 0.0, 3.6 * s, 5.4 * s);
+    let crown_sdf = TaperSdf::new((8.2 * s, 4.2 * s), (5.4 * s, 8.6 * s), 1.35 * s, 0.32 * s);
+    let m_base_sdf = TaperSdf::new((11.0 * s, 3.1 * s), (13.8 * s, mand_mid_v), 1.15 * s, 0.65 * s);
+    let m_blade_sdf = TaperSdf::new((13.8 * s, mand_mid_v), (16.1 * s, mand_open), 0.65 * s, 0.22 * s);
+    let k1 = 1.0 * s;
+    let inv_k1 = 1.0 / k1;
+    let k_core = 0.9 * s;
+    let inv_k_core = 1.0 / k_core;
+
     let body_sd = |u: f32, v: f32| -> (f32, u8) {
         let av = v.abs();
-        let abd = sd_ellipse(u, v, -7.0 * s, 0.0, 6.4 * s, 7.9 * s);
-        let stinger = sd_taper(u, v, (-12.0 * s, 0.0), (-16.0 * s, 0.0), 1.8 * s, 0.25 * s);
-        let rear = smin(abd, stinger, 1.0 * s);
+        let abd = if u < 1.8 * s && av < 10.5 * s {
+            abd_sdf.eval(u, v)
+        } else {
+            20.0
+        };
+        let stinger = if u < -8.0 * s && av < 4.5 * s {
+            stinger_sdf.eval(u, v)
+        } else {
+            20.0
+        };
+        let rear = smin_inv(abd, stinger, k1, inv_k1);
 
-        let thorax = sd_ellipse(u, v, 1.9 * s, 0.0, 5.4 * s, 8.2 * s);
-        let head = sd_ellipse(u, v, 9.2 * s, 0.0, 3.6 * s, 5.4 * s);
-        let crown = sd_taper(u, av, (8.2 * s, 4.2 * s), (5.4 * s, 8.6 * s), 1.35 * s, 0.32 * s);
-        // Sculpted curved scythe mandibles (outer base + inward-hooking blade!).
-        let m_base = sd_taper(
-            u,
-            av,
-            (11.0 * s, 3.1 * s),
-            (13.8 * s, (3.7 + 1.5 * charge) * s),
-            1.15 * s,
-            0.65 * s,
-        );
-        let m_blade = sd_taper(
-            u,
-            av,
-            (13.8 * s, (3.7 + 1.5 * charge) * s),
-            (16.1 * s, mand_open),
-            0.65 * s,
-            0.22 * s,
-        );
-        let mand = m_base.min(m_blade);
+        let thorax = if u > -6.0 * s && u < 9.8 * s && av < 10.8 * s {
+            thorax_sdf.eval(u, v)
+        } else {
+            20.0
+        };
+        let head = if u > 3.2 * s && av < 8.0 * s {
+            head_sdf.eval(u, v)
+        } else {
+            20.0
+        };
+        let front = smin_inv(thorax, head, k1, inv_k1);
+        let core = smin_inv(rear, front, k_core, inv_k_core);
 
-        let front = smin(thorax, head, 1.0 * s);
-        let core = smin(rear, front, 0.9 * s);
+        let crown = if u > 2.5 * s && u < 11.8 * s && av > 1.5 * s && av < 11.2 * s {
+            crown_sdf.eval(u, av)
+        } else {
+            20.0
+        };
+        let mand = if u > 8.2 * s && av < mand_mid_v + 3.5 * s {
+            m_base_sdf.eval(u, av).min(m_blade_sdf.eval(u, av))
+        } else {
+            20.0
+        };
         let all = core.min(crown).min(mand);
 
         let part = if mand < core && mand < crown {
@@ -1245,32 +2233,52 @@ fn draw_boss(pb: &mut PixelBuffer, fr: &Frame, fire_cd: f32) {
     };
 
     // 1) Deep hover drop shadow so the Boss looms over the arena floor.
-    if let Some((x0, x1, y0, y1)) = fr.bbox_pb(pb, 19.5 * s) {
-        let sx = (3.0 * s).round() as i32;
-        let sy = (3.5 * s).round() as i32;
+    let sx = (3.0 * s).round() as i32;
+    let sy = (3.5 * s).round() as i32;
+    let mut sh_fr = *fr;
+    sh_fr.pos.x += sx as f32;
+    sh_fr.pos.y += sy as f32;
+    if let Some((x0, x1, y0, y1)) = sh_fr.bbox_oriented(pb, -17.2 * s, 17.5 * s, 10.2 * s, 0, 0) {
+        let sh_lim = 0.6 * s;
+        let inv_sh_fade = 1.0 / (1.5 * s);
         for y in y0..=y1 {
+            let (mut su, mut sv) = fr.local(x0 - sx, y - sy);
             for x in x0..=x1 {
-                let (su, sv) = fr.local(x - sx, y - sy);
-                let (d, _) = body_sd(su, sv);
-                if d < 0.6 * s {
-                    let a = (0.44 * (1.0 - (d / (1.5 * s)).clamp(0.0, 1.0))).max(0.18);
-                    darken_px(pb, x, y, a);
+                if su >= -17.2 * s && su <= 17.5 * s && sv.abs() <= 10.2 * s {
+                    // Fast zero-sqrt interior accept: anywhere inside abd/thorax/head has d <= 0 -> a = 0.44.
+                    if abd_sdf.within_sq(su, sv, 1.0)
+                        || thorax_sdf.within_sq(su, sv, 1.0)
+                        || head_sdf.within_sq(su, sv, 1.0)
+                    {
+                        let bg = pb.pixel_at(x as usize, y as usize);
+                        pb.plot(x, y, scale_rgb(bg, 1.0 - 0.44));
+                    } else {
+                        let (d, _) = body_sd(su, sv);
+                        if d < sh_lim {
+                            let a = (0.44 * (1.0 - (d * inv_sh_fade).clamp(0.0, 1.0))).max(0.18);
+                            let bg = pb.pixel_at(x as usize, y as usize);
+                            pb.plot(x, y, scale_rgb(bg, 1.0 - a));
+                        }
+                    }
                 }
+                su += fr.f.x;
+                sv += fr.p.x;
             }
         }
     }
 
     // 2) Eight jointed armored legs (4 pairs) gripping outward.
-    let leg_core = apply_hit((116, 30, 66), fr.hit);
-    let leg_dark = apply_hit((36, 12, 26), fr.hit);
-    let leg_joint = apply_hit((244, 202, 130), fr.hit);
+    let leg_core = fr.apply_hit((116, 30, 66));
+    let leg_dark = fr.apply_hit((36, 12, 26));
+    let leg_joint = fr.apply_hit((244, 202, 130));
     for (i, &u_hip) in [5.4f32, 1.8, -2.2, -6.2].iter().enumerate() {
         let phase = fr.anim * 0.8 + i as f32 * 1.6;
-        for (side, sph) in [(-1.0f32, 0.0f32), (1.0, PI)] {
-            let swing = (phase + sph).sin() * 2.1 * s;
-            let hip = fr.px(u_hip * s, side * 6.8 * s);
-            let knee = fr.px(u_hip * s + swing * 0.5, side * 12.2 * s);
-            let foot = fr.px(u_hip * s + swing - 1.4 * s, side * 15.0 * s);
+        let sw_base = fast_sin(phase) * 2.1 * s;
+        let uh = u_hip * s;
+        for (side, swing) in [(-1.0f32, sw_base), (1.0, -sw_base)] {
+            let hip = fr.px(uh, side * 6.8 * s);
+            let knee = fr.px(uh + swing * 0.5, side * 12.2 * s);
+            let foot = fr.px(uh + swing - 1.4 * s, side * 15.0 * s);
             thick_line(pb, hip, knee, leg_core, leg_dark);
             line_blend(pb, knee, foot, leg_dark, 0.95);
             pb.plot(knee.0, knee.1, leg_joint);
@@ -1278,7 +2286,7 @@ fn draw_boss(pb: &mut PixelBuffer, fr: &Frame, fire_cd: f32) {
     }
 
     // 3) Sculpted royal carapace body.
-    if let Some((x0, x1, y0, y1)) = fr.bbox_pb(pb, 17.6 * s) {
+    if let Some((x0, x1, y0, y1)) = fr.bbox_oriented(pb, -17.6 * s, 17.8 * s, 10.6 * s, 0, 0) {
         let sh_c = (56, 14, 36);
         let mid_c = (196, 38, 96);
         let hi_c = (255, 138, 188);
@@ -1288,133 +2296,163 @@ fn draw_boss(pb: &mut PixelBuffer, fr: &Frame, fire_cd: f32) {
         let obsidian = (30, 12, 28);
         let gold_sh = (146, 98, 42);
         let gold_hi = (252, 224, 146);
-        let hot_core = mix((255, 118, 182), (255, 248, 224), charge);
+        let hot_core = mix_rgb((255, 118, 182), (255, 248, 224), charge);
         let rim_col = if fr.hit > 0.4 { (185, 95, 130) } else { (0, 0, 0) };
+        let fissure_col = mix_rgb(
+            (255, 110, 56),
+            (255, 240, 155),
+            pulse * 0.6 + charge * 0.4,
+        );
+        let rim_lim = 1.2 * s;
+        let inv_p0_ru = 1.0 / (6.8 * s);
+        let inv_p0_rv = 1.0 / (8.0 * s);
+        let inv_p1_ru = 1.0 / (5.6 * s);
+        let inv_p1_rv = 1.0 / (8.2 * s);
+        let inv_p2_ru = 1.0 / (4.0 * s);
+        let inv_p2_rv = 1.0 / (5.5 * s);
+        let inv_stinger = 1.0 / (3.6 * s);
+        let inv_mand = 1.0 / (5.0 * s);
+        let core_u = 2.2 * s;
+        let core_r_max_sq = (2.5 * s * 0.96) * (2.5 * s * 0.96);
+        let inv_core_r = 1.0 / (2.5 * s);
+        let abd_glow = (charge * 0.65 + if enraged { 0.28 * pulse } else { 0.0 }).min(0.92);
+        let core_intensity =
+            (0.45 + 0.55 * charge + if enraged { 0.25 * pulse } else { 0.0 }).min(1.0);
+        let has_fissures = fr.hp_frac < 0.55;
 
         for y in y0..=y1 {
+            let (mut u, mut v) = fr.local(x0, y);
             for x in x0..=x1 {
-                let (u, v) = fr.local(x, y);
-                let (d, part) = body_sd(u, v);
-                let cover = (0.55 - d * 1.18).clamp(0.0, 1.0);
-                if cover <= 0.0 {
-                    if d < 1.2 * s {
-                        let bg = pb.pixel_at(x as usize, y as usize);
-                        pb.plot(x, y, mix(bg, rim_col, 0.72));
-                    }
-                    continue;
-                }
-
-                let bg = pb.pixel_at(x as usize, y as usize);
-                let mut out = if cover < 1.0 {
-                    mix(bg, rim_col, 0.72 * (1.0 - cover))
-                } else {
-                    bg
-                };
-
-                let (cu, ru, rv) = match part {
-                    0 => (-7.0 * s, 6.8 * s, 8.0 * s),
-                    1 => (1.9 * s, 5.6 * s, 8.2 * s),
-                    _ => (9.5 * s, 4.0 * s, 5.5 * s),
-                };
-                let nu = ((u - cu) / ru).clamp(-1.0, 1.0);
-                let nv = (v / rv).clamp(-1.0, 1.0);
-                let dome = (1.0 - (nu * nu * 0.52 + nv * nv * 0.72)).clamp(0.0, 1.0);
-                let lit = fr.lit(nu, nv);
-                let mut lum = 0.36 + 0.4 * dome + 0.62 * lit;
-                if lit > 0.45 && dome > 0.35 {
-                    lum += 0.24;
-                }
-
-                let mut col = match part {
-                    0 => {
-                        // Royal hornet-striped abdomen + needle venom stinger.
-                        let mut c = shade3(sh_c, mid_c, hi_c, lum);
-                        if u < -12.4 * s {
-                            let tip_t = ((-12.4 * s - u) / (3.6 * s)).clamp(0.0, 1.0);
-                            c = mix(gold_sh, hot_core, 0.35 + 0.65 * tip_t);
+                if u >= -17.6 * s && u <= 17.8 * s && v.abs() <= 10.6 * s {
+                    let (d, part) = body_sd(u, v);
+                    if d < rim_lim {
+                        let cover = (0.55 - d * 1.18).clamp(0.0, 1.0);
+                        if cover <= 0.0 {
+                            let bg = pb.pixel_at(x as usize, y as usize);
+                            pb.plot(x, y, mix_rgb(bg, rim_col, 0.72));
                         } else {
-                            let band = ((u / s + 7.0) * 1.6).sin();
-                            if band > 0.18 {
-                                c = mix(c, obsidian, 0.8);
-                            } else if charge > 0.1 || enraged {
-                                let glow =
-                                    (charge * 0.65 + if enraged { 0.28 * pulse } else { 0.0 })
-                                        .min(0.92);
-                                c = mix(c, hot_core, glow * dome);
+                            let (nu, nv) = match part {
+                                0 => (
+                                    ((u + 7.0 * s) * inv_p0_ru).clamp(-1.0, 1.0),
+                                    (v * inv_p0_rv).clamp(-1.0, 1.0),
+                                ),
+                                1 => (
+                                    ((u - 1.9 * s) * inv_p1_ru).clamp(-1.0, 1.0),
+                                    (v * inv_p1_rv).clamp(-1.0, 1.0),
+                                ),
+                                _ => (
+                                    ((u - 9.5 * s) * inv_p2_ru).clamp(-1.0, 1.0),
+                                    (v * inv_p2_rv).clamp(-1.0, 1.0),
+                                ),
+                            };
+                            let dome = (1.0 - (nu * nu * 0.52 + nv * nv * 0.72)).clamp(0.0, 1.0);
+                            let lit = fr.lit(nu, nv);
+                            let mut lum = 0.36 + 0.4 * dome + 0.62 * lit;
+                            if lit > 0.45 && dome > 0.35 {
+                                lum += 0.24;
                             }
-                            if v.abs() < 0.7 * s {
-                                c = mix(c, gold_hi, 0.55);
-                            }
-                        }
-                        c
-                    }
-                    1 => {
-                        // Layered chevron chitinous thorax plates + recessed glowing core!
-                        let mut c = shade3(armor_sh, armor_mid, armor_hi, lum);
-                        // Overlapping V-shaped armor plate seams.
-                        let chev = ((u / s - 2.2) + v.abs() * 0.42 / s).rem_euclid(2.8);
-                        if chev < 0.48 {
-                            c = mix(c, obsidian, 0.82);
-                        } else if chev < 0.85 {
-                            c = mix(c, gold_hi, 0.35 * (0.5 + 0.5 * lit).clamp(0.0, 1.0));
-                        }
-                        // Gilded royal shoulder pauldrons along outer flank.
-                        if d > -1.4 * s && v.abs() > 3.6 * s {
-                            c = shade3(gold_sh, (226, 178, 92), gold_hi, 0.45 + 0.55 * lit);
-                        }
-                        // Dark armored collar framing the glowing central nova reactor!
-                        let r_core = (((u - 2.2 * s).powi(2) + v * v).sqrt() / (2.5 * s))
-                            .clamp(0.0, 1.2);
-                        if r_core < 0.72 {
-                            let intensity = (0.45
-                                + 0.55 * charge
-                                + if enraged { 0.25 * pulse } else { 0.0 })
-                            .min(1.0);
-                            c = mix((185, 32, 88), hot_core, (1.0 - r_core / 0.72) * intensity);
-                        } else if r_core < 0.96 {
-                            c = mix(c, obsidian, 0.75);
-                        }
-                        c
-                    }
-                    2 => {
-                        // Angular armored royal helm with golden nasal crest.
-                        let mut c = shade3(armor_sh, mid_c, hi_c, lum);
-                        if v.abs() < 0.95 * s && u > 7.2 * s && u < 11.8 * s {
-                            c = shade3(gold_sh, (226, 178, 92), gold_hi, 0.5 + 0.5 * lit);
-                        }
-                        c
-                    }
-                    3 => {
-                        // Swept gilded crown horns.
-                        shade3(gold_sh, (226, 178, 92), gold_hi, 0.45 + 0.55 * lit)
-                    }
-                    _ => {
-                        // Scythe mandibles: obsidian outer blade, bright ivory-gold cutting edge.
-                        let tip_t = ((u - 11.2 * s) / (5.0 * s)).clamp(0.0, 1.0);
-                        shade3(obsidian, (92, 46, 72), gold_hi, 0.25 + 0.75 * tip_t)
-                    }
-                };
+                            let av = v.abs();
 
-                // Glowing enraged battle-damage fissures below 55% HP.
-                if fr.hp_frac < 0.55 && part <= 1 {
-                    let f1 = ((u + 5.5 * s) - (v - 2.2 * s) * 0.8).abs() < 0.48 * s
-                        && u < -2.5 * s
-                        && v > 0.8 * s;
-                    let f2 = ((u - 1.5 * s) + (v + 3.0 * s) * 0.75).abs() < 0.48 * s
-                        && u > -s
-                        && u < 5.5 * s
-                        && v < -s;
-                    if f1 || f2 {
-                        col = mix(
-                            (255, 110, 56),
-                            (255, 240, 155),
-                            pulse * 0.6 + charge * 0.4,
-                        );
+                            let mut col = match part {
+                                0 => {
+                                    let mut c = shade3(sh_c, mid_c, hi_c, lum);
+                                    if u < -12.4 * s {
+                                        let tip_t = ((-12.4 * s - u) * inv_stinger).clamp(0.0, 1.0);
+                                        c = mix_rgb(gold_sh, hot_core, 0.35 + 0.65 * tip_t);
+                                    } else {
+                                        let band = fast_sin((u * inv_s + 7.0) * 1.6);
+                                        if band > 0.18 {
+                                            c = mix_rgb(c, obsidian, 0.8);
+                                        } else if charge > 0.1 || enraged {
+                                            c = mix_rgb(c, hot_core, abd_glow * dome);
+                                        }
+                                        if av < 0.7 * s {
+                                            c = mix_rgb(c, gold_hi, 0.55);
+                                        }
+                                    }
+                                    c
+                                }
+                                1 => {
+                                    let mut c = shade3(armor_sh, armor_mid, armor_hi, lum);
+                                    let chev = ((u * inv_s - 2.2) + av * 0.42 * inv_s).rem_euclid(2.8);
+                                    if chev < 0.48 {
+                                        c = mix_rgb(c, obsidian, 0.82);
+                                    } else if chev < 0.85 {
+                                        c = mix_rgb(
+                                            c,
+                                            gold_hi,
+                                            0.35 * (0.5 + 0.5 * lit).clamp(0.0, 1.0),
+                                        );
+                                    }
+                                    if d > -1.4 * s && av > 3.6 * s {
+                                        c = shade3(
+                                            gold_sh,
+                                            (226, 178, 92),
+                                            gold_hi,
+                                            0.45 + 0.55 * lit,
+                                        );
+                                    }
+                                    let du_c = u - core_u;
+                                    let r2_core = du_c * du_c + v * v;
+                                    if r2_core < core_r_max_sq {
+                                        let r_core = r2_core.sqrt() * inv_core_r;
+                                        if r_core < 0.72 {
+                                            c = mix_rgb(
+                                                (185, 32, 88),
+                                                hot_core,
+                                                (1.0 - r_core * (1.0 / 0.72)) * core_intensity,
+                                            );
+                                        } else {
+                                            c = mix_rgb(c, obsidian, 0.75);
+                                        }
+                                    }
+                                    c
+                                }
+                                2 => {
+                                    let mut c = shade3(armor_sh, mid_c, hi_c, lum);
+                                    if av < 0.95 * s && u > 7.2 * s && u < 11.8 * s {
+                                        c = shade3(
+                                            gold_sh,
+                                            (226, 178, 92),
+                                            gold_hi,
+                                            0.5 + 0.5 * lit,
+                                        );
+                                    }
+                                    c
+                                }
+                                3 => shade3(gold_sh, (226, 178, 92), gold_hi, 0.45 + 0.55 * lit),
+                                _ => {
+                                    let tip_t = ((u - 11.2 * s) * inv_mand).clamp(0.0, 1.0);
+                                    shade3(obsidian, (92, 46, 72), gold_hi, 0.25 + 0.75 * tip_t)
+                                }
+                            };
+
+                            if has_fissures && part <= 1 {
+                                let f1 = ((u + 5.5 * s) - (v - 2.2 * s) * 0.8).abs() < 0.48 * s
+                                    && u < -2.5 * s
+                                    && v > 0.8 * s;
+                                let f2 = ((u - 1.5 * s) + (v + 3.0 * s) * 0.75).abs() < 0.48 * s
+                                    && u > -s
+                                    && u < 5.5 * s
+                                    && v < -s;
+                                if f1 || f2 {
+                                    col = fissure_col;
+                                }
+                            }
+
+                            let lit_col = fr.apply_hit(col);
+                            if cover >= 1.0 {
+                                pb.plot(x, y, lit_col);
+                            } else {
+                                let bg = pb.pixel_at(x as usize, y as usize);
+                                let out = mix_rgb(bg, rim_col, 0.72 * (1.0 - cover));
+                                pb.plot(x, y, mix_rgb(out, lit_col, cover));
+                            }
+                        }
                     }
                 }
-
-                out = mix(out, apply_hit(col, fr.hit), cover);
-                pb.plot(x, y, out);
+                u += fr.f.x;
+                v += fr.p.x;
             }
         }
     }
@@ -1423,8 +2461,9 @@ fn draw_boss(pb: &mut PixelBuffer, fr: &Frame, fire_cd: f32) {
     let eye_main = if fr.hit > 0.7 {
         (30, 14, 24)
     } else {
-        mix((255, 236, 86), (255, 255, 235), charge * 0.5)
+        mix_rgb((255, 236, 86), (255, 255, 235), charge * 0.5)
     };
+    let eye_main_dim = scale_rgb(eye_main, 0.88);
     let eye_sub = if fr.hit > 0.7 {
         (30, 14, 24)
     } else {
@@ -1434,85 +2473,91 @@ fn draw_boss(pb: &mut PixelBuffer, fr: &Frame, fire_cd: f32) {
         let e0 = fr.px(10.3 * s, side * 2.35 * s);
         let e1 = fr.px(9.8 * s, side * 3.0 * s);
         pb.plot(e0.0, e0.1, eye_main);
-        pb.plot(e1.0, e1.1, scale(eye_main, 0.88));
+        pb.plot(e1.0, e1.1, eye_main_dim);
         let eo = fr.px(8.5 * s, side * 4.35 * s);
         pb.plot(eo.0, eo.1, eye_sub);
     }
 
     // 5) Four smoothly curved tapered hornet wings (tucked cleanly inside the HP arc!).
-    let flap = (fr.anim * 1.8).sin();
+    let flap = fast_sin(fr.anim * 1.8);
     let wing_span = (13.8 + 2.1 * flap.abs()) * s;
-    let wing_tint = mix((235, 148, 212), fr.accent, 0.42);
-    let vein_col = mix((78, 28, 66), wing_tint, 0.32);
-    if let Some((x0, x1, y0, y1)) = fr.bbox_pb(pb, wing_span + 1.5 * s) {
-        let inv_span = 1.0 / (wing_span - 4.4 * s).max(1.0);
+    let wing_tint = mix_rgb((235, 148, 212), fr.accent, 0.42);
+    let wing_spar_col = apply_hit(wing_tint, fr.hit * 0.45);
+    let vein_col = mix_rgb((78, 28, 66), wing_tint, 0.32);
+    let wu_min = (-8.6 + 1.3 * flap.min(0.0) - 3.0) * s;
+    let wu_max = (3.4 + 1.3 * flap.max(0.0) + 3.0) * s;
+    if let Some((x0, x1, y0, y1)) = fr.bbox_oriented_circ(
+        pb,
+        wu_min,
+        wu_max,
+        wing_span + 0.5,
+        wing_span + 1.5 * s,
+        (0, 0),
+    ) {
+        let w_start = 4.4 * s;
+        let inv_span = 1.0 / (wing_span - w_start).max(1.0);
+        let min_half = 0.35 * s;
+        let spar_w = 0.85 * s;
         for y in y0..=y1 {
+            let (mut u, mut v) = fr.local(x0, y);
             for x in x0..=x1 {
-                let (u, v) = fr.local(x, y);
                 let av = v.abs();
-                if av < 4.4 * s || av > wing_span {
-                    continue;
-                }
-                let t = (av - 4.4 * s) * inv_span; // 0 at root -> 1 at tip
+                if av >= w_start && av <= wing_span && u >= wu_min && u <= wu_max {
+                    let t = (av - w_start) * inv_span;
 
-                // Graceful curved hornet forewing sweeping cleanly inside the HP ring.
-                let fore_env = (t.powf(0.42) * (1.0 - t).powf(0.6) * 2.2).clamp(0.0, 1.0);
-                let fore_mid = (2.8 - 4.6 * t - 2.9 * t * t + 1.3 * flap * t) * s;
-                let fore_half = 2.9 * s * fore_env;
-                let df = (u - fore_mid).abs();
-                let in_fore = fore_half > 0.35 * s && df <= fore_half;
+                    let fore_env = boss_wing_fore_env(t);
+                    let fore_mid = (2.8 - 4.6 * t - 2.9 * t * t + 1.3 * flap * t) * s;
+                    let fore_half = 2.9 * s * fore_env;
+                    let in_fore = fore_half > min_half && (u - fore_mid).abs() <= fore_half;
 
-                // Sleeker hindwing nested cleanly behind forewing (ends at t = 0.72).
-                let th = t / 0.72;
-                let in_hind = if th < 1.0 {
-                    let hind_env = (th.powf(0.45) * (1.0 - th).powf(0.6) * 2.2).clamp(0.0, 1.0);
-                    let hind_mid = (-1.8 - 4.2 * th - 2.4 * th * th + 0.85 * flap * th) * s;
-                    let hind_half = 2.2 * s * hind_env;
-                    hind_half > 0.35 * s && (u - hind_mid).abs() <= hind_half
-                } else {
-                    false
-                };
+                    let th = t * (1.0 / 0.72);
+                    let in_hind = if !in_fore && th < 1.0 {
+                        let hind_env = boss_wing_hind_env(th);
+                        let hind_mid = (-1.8 - 4.2 * th - 2.4 * th * th + 0.85 * flap * th) * s;
+                        let hind_half = 2.2 * s * hind_env;
+                        hind_half > min_half && (u - hind_mid).abs() <= hind_half
+                    } else {
+                        false
+                    };
 
-                if !in_fore && !in_hind {
-                    continue;
+                    if in_fore || in_hind {
+                        let leading_spar = in_fore && (fore_mid + fore_half - u) < spar_w;
+                        let cross_vein = ((t * 4.5).fract() < 0.13)
+                            || ((u * inv_s + 10.0).rem_euclid(3.4) < 0.34);
+                        let edge_fade = (1.0 - t * 0.42).clamp(0.28, 1.0);
+                        let bg = pb.pixel_at(x as usize, y as usize);
+                        let out = if leading_spar {
+                            mix_rgb(bg, wing_spar_col, 0.66 * edge_fade)
+                        } else if cross_vein {
+                            mix_rgb(bg, vein_col, 0.38 * edge_fade)
+                        } else {
+                            mix_rgb(bg, wing_tint, 0.22 * edge_fade)
+                        };
+                        pb.plot(x, y, out);
+                    }
                 }
-                let leading_spar = in_fore && (fore_mid + fore_half - u) < 0.85 * s;
-                let cross_vein =
-                    ((t * 4.5).fract() < 0.13) || ((u / s + 10.0).rem_euclid(3.4) < 0.34);
-                let edge_fade = (1.0 - t * 0.42).clamp(0.28, 1.0);
-                if leading_spar {
-                    blend_px(
-                        pb,
-                        x,
-                        y,
-                        apply_hit(wing_tint, fr.hit * 0.45),
-                        0.66 * edge_fade,
-                    );
-                } else if cross_vein {
-                    blend_px(pb, x, y, vein_col, 0.38 * edge_fade);
-                } else {
-                    blend_px(pb, x, y, wing_tint, 0.22 * edge_fade);
-                }
+                u += fr.f.x;
+                v += fr.p.x;
             }
         }
     }
 
     // Tiny glowing venom bead at the rear stinger tip.
     let tip = fr.px(-16.1 * s, 0.0);
-    let bead = mix((255, 110, 175), (255, 250, 220), 0.35 + 0.65 * charge);
+    let bead = mix_rgb((255, 110, 175), (255, 250, 220), 0.35 + 0.65 * charge);
     blend_px(pb, tip.0, tip.1, bead, 0.9);
 
     // 6) 10-bullet nova telegraph pips aligned to exact firing angles (k/10 * TAU).
     if charge > 0.08 {
         let pip_r = fr.r + (1.6 + (1.0 - charge) * 2.8) * s;
-        let pip_col = mix((255, 100, 165), (255, 250, 230), charge);
-        for k in 0..10 {
-            let a = k as f32 / 10.0 * TAU;
-            let px = (fr.pos.x + a.cos() * pip_r).round() as i32;
-            let py = (fr.pos.y + a.sin() * pip_r).round() as i32;
+        let pip_col = mix_rgb((255, 100, 165), (255, 250, 230), charge);
+        let glow = scale_rgb(pip_col, 0.55 * charge);
+        let do_glow = charge > 0.5;
+        for &(ca, sa) in &NOVA_10 {
+            let px = (fr.pos.x + ca * pip_r).round() as i32;
+            let py = (fr.pos.y + sa * pip_r).round() as i32;
             pb.plot(px, py, pip_col);
-            if charge > 0.5 {
-                let glow = scale(pip_col, 0.55 * charge);
+            if do_glow {
                 pb.plot_add(px + 1, py, glow);
                 pb.plot_add(px - 1, py, glow);
                 pb.plot_add(px, py + 1, glow);
@@ -1527,25 +2572,28 @@ fn draw_boss(pb: &mut PixelBuffer, fr: &Frame, fire_cd: f32) {
 
 fn draw_boss_hp_arc(pb: &mut PixelBuffer, fr: &Frame, s: f32, pulse: f32) {
     let arc_r = fr.r + 4.3 * s;
+    let outer_r = arc_r + 1.0;
     let steps = (arc_r * 7.0).round() as i32;
+    let inv_steps = 1.0 / steps as f32;
     let hp_col = if fr.hp_frac > 0.5 {
-        mix((255, 165, 62), (255, 72, 136), (fr.hp_frac - 0.5) * 2.0)
+        mix_rgb((255, 165, 62), (255, 72, 136), (fr.hp_frac - 0.5) * 2.0)
     } else if fr.hp_frac > 0.25 {
-        mix((255, 65, 58), (255, 165, 62), (fr.hp_frac - 0.25) * 4.0)
+        mix_rgb((255, 65, 58), (255, 165, 62), (fr.hp_frac - 0.25) * 4.0)
     } else {
-        mix((190, 28, 36), (255, 86, 76), pulse)
+        mix_rgb((190, 28, 36), (255, 86, 76), pulse)
     };
     let track_col = (18, 12, 18);
     let mut last = (i32::MIN, i32::MIN);
 
     for i in 0..steps {
-        let t = i as f32 / steps as f32;
+        let t = i as f32 * inv_steps;
         let near_tick = (t - 0.25).abs() < 0.012
             || (t - 0.50).abs() < 0.012
             || (t - 0.75).abs() < 0.012;
         let a = -FRAC_PI_2 + t * TAU;
-        let x = (fr.pos.x + a.cos() * arc_r).round() as i32;
-        let y = (fr.pos.y + a.sin() * arc_r).round() as i32;
+        let (sa, ca) = fast_sin_cos(a);
+        let x = (fr.pos.x + ca * arc_r).round() as i32;
+        let y = (fr.pos.y + sa * arc_r).round() as i32;
         if (x, y) == last {
             continue;
         }
@@ -1553,15 +2601,792 @@ fn draw_boss_hp_arc(pb: &mut PixelBuffer, fr: &Frame, s: f32, pulse: f32) {
         if near_tick {
             blend_px(pb, x, y, (10, 8, 12), 0.8);
         } else if t <= fr.hp_frac {
-            // Subtle outer dark rim keeps the arc crisp over bright wings.
-            let ox = (fr.pos.x + a.cos() * (arc_r + 1.0)).round() as i32;
-            let oy = (fr.pos.y + a.sin() * (arc_r + 1.0)).round() as i32;
+            let ox = (fr.pos.x + ca * outer_r).round() as i32;
+            let oy = (fr.pos.y + sa * outer_r).round() as i32;
             darken_px(pb, ox, oy, 0.45);
             blend_px(pb, x, y, hp_col, 0.94);
         } else {
             blend_px(pb, x, y, track_col, 0.52);
         }
     }
+}
+
+// ============================================================================
+// LEVEL-OF-DETAIL (CROWD / SMALL-RADIUS) PATH
+//
+// Zero per-pixel `sqrt` or trig, pre-baked hit-flashed 4-stop directional ramps,
+// quadratic ellipse coverage + crisp 1px silhouette rim, clear facing markers,
+// and intact ranged/elite telegraphs.
+// ============================================================================
+
+#[inline(always)]
+fn build_ramp4(sh: Rgb, mid: Rgb, hi: Rgb, fr: &Frame) -> [Rgb; 4] {
+    [
+        fr.apply_hit(sh),
+        fr.apply_hit(mix_rgb(sh, mid, 0.58)),
+        fr.apply_hit(mid),
+        fr.apply_hit(mix_rgb(mid, hi, 0.68)),
+    ]
+}
+
+#[inline(always)]
+fn ramp4_idx(lit: f32, r2: f32) -> usize {
+    let lum = 0.52 + 0.30 * (1.0 - r2).max(0.0) + 0.58 * lit;
+    (lum * 3.1).clamp(0.0, 3.0) as usize
+}
+
+#[inline(always)]
+fn plot_rim(pb: &mut PixelBuffer, x: i32, y: i32, rim_col: Rgb, dark: f32, hit_tint: bool) {
+    let bg = pb.pixel_at(x as usize, y as usize);
+    let out = if hit_tint {
+        mix_rgb(bg, rim_col, dark)
+    } else {
+        scale_rgb(bg, 1.0 - dark)
+    };
+    pb.plot(x, y, out);
+}
+
+fn draw_skitterer_lod(pb: &mut PixelBuffer, fr: &Frame) {
+    let s = fr.r * (1.0 / 2.5);
+    let leg_col = fr.apply_hit((144, 86, 46));
+    let foot_col = fr.apply_hit((98, 56, 30));
+    let ant_col = fr.apply_hit((184, 122, 68));
+
+    // Compact 6-leg dots (knee + foot) and 2 sweeping antennae for facing.
+    for (i, &u_hip) in [1.1f32, -0.35, -1.75].iter().enumerate() {
+        let sw = fast_sin(fr.anim + i as f32 * 2.1) * 0.85 * s;
+        let uh = u_hip * s;
+        for (side, swing) in [(-1.0f32, sw), (1.0, -sw)] {
+            let knee = fr.px(uh + swing * 0.45, side * 2.35 * s);
+            let foot = fr.px(uh + swing - 0.3 * s, side * 3.15 * s);
+            pb.plot(knee.0, knee.1, leg_col);
+            blend_px(pb, foot.0, foot.1, foot_col, 0.82);
+        }
+    }
+    let wave = fast_sin(fr.anim * 0.7) * 0.42 * s;
+    for side in [-1.0f32, 1.0] {
+        let a1 = fr.px(3.35 * s, side * 1.15 * s + wave * side * 0.5);
+        let a2 = fr.px(4.25 * s, side * 1.9 * s + wave * side);
+        blend_px(pb, a1.0, a1.1, ant_col, 0.82);
+        blend_px(pb, a2.0, a2.1, ant_col, 0.56);
+    }
+
+    let Some((x0, x1, y0, y1)) =
+        fr.bbox_oriented_circ(pb, -3.9 * s, 3.9 * s, 2.6 * s, 4.2 * s, (1, 1))
+    else {
+        return;
+    };
+    let ramp = build_ramp4((72, 36, 18), (196, 118, 52), (252, 206, 126), fr);
+    let seam_col = fr.apply_hit((64, 30, 16));
+    let hit_tint = fr.hit > 0.4;
+    let rim_col = if hit_tint { (160, 110, 60) } else { (0, 0, 0) };
+    let inv_au = 1.0 / (2.3 * s);
+    let inv_av = 1.0 / (1.75 * s);
+    let inv_hu = 1.0 / (1.42 * s);
+    let inv_hv = 1.0 / (1.22 * s);
+    let seam_u = 1.35 * s;
+    let seam_w = 0.32 * s;
+
+    for y in y0..=y1 {
+        let (mut u, mut v) = fr.local(x0, y);
+        for x in x0..=x1 {
+            let anu = (u + 0.72 * s) * inv_au;
+            let anv = v * inv_av;
+            let r2_a = anu * anu + anv * anv;
+            let hnu = (u - 1.55 * s) * inv_hu;
+            let hnv = v * inv_hv;
+            let r2_h = hnu * hnu + hnv * hnv;
+            let r2 = r2_a.min(r2_h);
+            if r2 <= 1.0 {
+                let col = if (u - seam_u).abs() < seam_w || (u < 0.7 * s && v.abs() < 0.28 * s) {
+                    seam_col
+                } else {
+                    let (nu, nv) = if r2_h < r2_a { (hnu, hnv) } else { (anu, anv) };
+                    ramp[ramp4_idx(fr.lit(nu, nv), r2)]
+                };
+                pb.plot(x, y, col);
+            } else if r2 <= 1.95 {
+                plot_rim(pb, x, y, rim_col, 0.56, hit_tint);
+            }
+            u += fr.f.x;
+            v += fr.p.x;
+        }
+    }
+
+    if fr.r >= 2.0 {
+        let eye_col = if fr.hit > 0.65 {
+            (40, 20, 16)
+        } else {
+            (255, 138, 62)
+        };
+        for side in [-1.0f32, 1.0] {
+            let ep = fr.px(2.35 * s, side * 0.75 * s);
+            blend_px(pb, ep.0, ep.1, eye_col, 0.9);
+        }
+    }
+}
+
+fn draw_bat_lod(pb: &mut PixelBuffer, fr: &Frame) {
+    let s = fr.r * 0.5;
+    let flap = fast_sin(fr.anim);
+    let spread = 0.5 + 0.5 * flap;
+    let span = (4.1 + 1.85 * spread) * s;
+    let sweep = (-0.75 + 1.35 * flap) * s;
+
+    // Compact elevated hover shadow matching full-detail footprint.
+    let scx = fr.pos.x.round() as i32 + (2.2 * s).round() as i32;
+    let scy = fr.pos.y.round() as i32 + (3.4 * s + 0.45 * flap * s).round() as i32;
+    for dy in -1..=1 {
+        for dx in -2..=2 {
+            if dx * dx + dy * dy * 2 <= 5 {
+                darken_px(pb, scx + dx, scy + dy, 0.30);
+            }
+        }
+    }
+
+    let u_min = (-0.65 * s + sweep.min(0.0) - 2.55 * s).min(-2.1 * s) - 0.9 * s;
+    let u_max = (1.65 * s + sweep.max(0.0)).max(3.1 * s) + 0.9 * s;
+    let v_max = span + 1.0 * s;
+    let circ_r = (span + 1.8 * s).max(6.2 * s);
+    let Some((x0, x1, y0, y1)) = fr.bbox_oriented_circ(pb, u_min, u_max, v_max, circ_r, (0, 0))
+    else {
+        return;
+    };
+
+    let ramp = build_ramp4((54, 32, 92), (144, 96, 206), (218, 178, 255), fr);
+    let wing_sh = (46, 24, 84);
+    let wing_mid = (114, 70, 178);
+    let wing_bone = (204, 166, 252);
+    let lit_pos = fr.lit(0.25, 0.65);
+    let lit_neg = fr.lit(0.25, -0.65);
+    let wing_mem_pos = fr.apply_hit(shade3(wing_sh, wing_mid, wing_bone, 0.44 + 0.34 * lit_pos));
+    let wing_mem_neg = fr.apply_hit(shade3(wing_sh, wing_mid, wing_bone, 0.44 + 0.34 * lit_neg));
+    let wing_bone_pos = fr.apply_hit(mix_rgb(
+        wing_mid,
+        wing_bone,
+        (0.76 + 0.24 * lit_pos).clamp(0.0, 1.0),
+    ));
+    let wing_bone_neg = fr.apply_hit(mix_rgb(
+        wing_mid,
+        wing_bone,
+        (0.76 + 0.24 * lit_neg).clamp(0.0, 1.0),
+    ));
+    let hit_tint = fr.hit > 0.4;
+    let rim_col = if hit_tint { (140, 100, 180) } else { (0, 0, 0) };
+    let inv_ru = 1.0 / (2.0 * s);
+    let inv_rv = 1.0 / (1.3 * s);
+    let wing_start = 1.05 * s;
+    let inv_wing_span = 1.0 / (span - wing_start).max(0.5);
+    let wing_av_min = 0.9 * s;
+    let wing_av_max = span + 0.9 * s;
+    let bone_w = 0.50 * s;
+    let rim_w = 0.80 * s;
+
+    for y in y0..=y1 {
+        let (mut u, mut v) = fr.local(x0, y);
+        for x in x0..=x1 {
+            let av = v.abs();
+            let nu = (u - 0.2 * s) * inv_ru;
+            let nv = v * inv_rv;
+            let r2 = nu * nu + nv * nv;
+            if r2 <= 1.0 {
+                pb.plot(x, y, ramp[ramp4_idx(fr.lit(nu, nv), r2)]);
+            } else if av >= wing_av_min && av <= wing_av_max {
+                let t = ((av - wing_start) * inv_wing_span).clamp(0.0, 1.0);
+                let (elbow, chord) = bat_wing_profile(t);
+                let u_lead = elbow * s + sweep * t;
+                let u_trail = u_lead - chord * s;
+                let d_wing = (u - u_lead).max(u_trail - u).max(av - span);
+                if d_wing <= 0.16 * s {
+                    let pos_side = v >= 0.0;
+                    let col = if (u - u_lead).abs() < bone_w {
+                        if pos_side {
+                            wing_bone_pos
+                        } else {
+                            wing_bone_neg
+                        }
+                    } else if pos_side {
+                        wing_mem_pos
+                    } else {
+                        wing_mem_neg
+                    };
+                    let bg = pb.pixel_at(x as usize, y as usize);
+                    pb.plot(x, y, mix_rgb(bg, col, 0.88));
+                } else if d_wing < rim_w {
+                    plot_rim(pb, x, y, rim_col, 0.52, hit_tint);
+                }
+            } else if r2 <= 1.85 {
+                plot_rim(pb, x, y, rim_col, 0.52, hit_tint);
+            }
+            u += fr.f.x;
+            v += fr.p.x;
+        }
+    }
+
+    // Pointed bat ear tips + golden eyes.
+    let ear_col = ramp[2];
+    let eye_col = if fr.hit > 0.7 {
+        (30, 18, 45)
+    } else {
+        (255, 222, 74)
+    };
+    for side in [-1.0f32, 1.0] {
+        let ear0 = fr.px(2.05 * s, side * 0.95 * s);
+        let ear1 = fr.px(2.75 * s, side * 1.25 * s);
+        pb.plot(ear0.0, ear0.1, ear_col);
+        blend_px(pb, ear1.0, ear1.1, ear_col, 0.82);
+        let ep = fr.px(1.65 * s, side * 0.65 * s);
+        pb.plot(ep.0, ep.1, eye_col);
+    }
+}
+
+fn draw_cat_lod(pb: &mut PixelBuffer, fr: &Frame, contact_cd: f32) {
+    let s = fr.r * 0.25;
+    let inv_s = 1.0 / s;
+
+    // 1) Compact 8-segment curved S-hook tail with silver tip.
+    let step = 7.4 * s / 8.0;
+    let back_x = -fr.f.x;
+    let back_y = -fr.f.y;
+    let mut tp = fr.place(-4.0 * s, 0.0);
+    let tail_tip_c = fr.apply_hit((178, 190, 212));
+    let tail_dark_c = fr.apply_hit((34, 40, 54));
+    let tail_mid_c = fr.apply_hit((106, 118, 144));
+    for i in 0..8 {
+        let t = (i as f32 + 0.5) * 0.125;
+        let curl = CAT_TAIL_CURL[i * 2];
+        let wave = 0.35 * t * fast_sin(fr.anim * 0.9 - t * 3.2);
+        let (st, ct) = fast_sin_cos(curl + wave);
+        tp.x += (back_x * ct - back_y * st) * step;
+        tp.y += (back_x * st + back_y * ct) * step;
+        let tx = tp.x.round() as i32;
+        let ty = tp.y.round() as i32;
+        let c = if i >= 7 {
+            tail_tip_c
+        } else if i % 2 == 1 {
+            tail_dark_c
+        } else {
+            tail_mid_c
+        };
+        pb.plot(tx, ty, c);
+    }
+
+    // 2) Four paw dots + swipe claw.
+    let swiping = contact_cd > 0.32;
+    let paw_col = fr.apply_hit((76, 86, 108));
+    let toe_col = fr.apply_hit((168, 180, 202));
+    let s0 = fast_sin(fr.anim);
+    for (k, &(u0, side)) in [(1.6f32, 1.0f32), (-2.5, -1.0), (1.6, -1.0), (-2.5, 1.0)]
+        .iter()
+        .enumerate()
+    {
+        let swing = (if k < 2 { s0 } else { -s0 }) * 1.3 * s;
+        let ru = u0 * s + swing + if swiping && u0 > 0.0 { 1.2 * s } else { 0.0 };
+        let rv = side * 2.75 * s;
+        let p0 = fr.px(u0 * s, side * 1.9 * s);
+        let p1 = fr.px(ru, rv);
+        pb.plot(p0.0, p0.1, paw_col);
+        pb.plot(p1.0, p1.1, toe_col);
+        if swiping && u0 > 0.0 {
+            let claw = fr.px(ru + 1.1 * s, rv + side * 0.3 * s);
+            pb.plot(claw.0, claw.1, (240, 245, 255));
+        }
+    }
+
+    // 3) Quadratic torso + head + triangular cat ears.
+    let Some((x0, x1, y0, y1)) = fr.bbox_oriented(pb, -5.4 * s, 5.6 * s, 4.4 * s, 1, 1) else {
+        return;
+    };
+    let ramp = build_ramp4((38, 44, 62), (104, 116, 142), (182, 196, 222), fr);
+    let stripe_col = fr.apply_hit((30, 35, 50));
+    let ear_in = fr.apply_hit((176, 112, 134));
+    let ear_out = fr.apply_hit((65, 74, 95));
+    let hit_tint = fr.hit > 0.4;
+    let rim_col = if hit_tint { (145, 130, 120) } else { (0, 0, 0) };
+
+    let inv_tu = 1.0 / (3.65 * s);
+    let inv_tv = 1.0 / (2.35 * s);
+    let inv_hu = 1.0 / (1.55 * s);
+    let inv_hv = 1.0 / (1.98 * s);
+
+    for y in y0..=y1 {
+        let (mut u, mut v) = fr.local(x0, y);
+        for x in x0..=x1 {
+            let av = v.abs();
+            let tnu = (u + 0.9 * s) * inv_tu;
+            let tnv = v * inv_tv;
+            let r2_t = tnu * tnu + tnv * tnv;
+            let hnu = (u - 3.25 * s) * inv_hu;
+            let hnv = v * inv_hv;
+            let r2_h = hnu * hnu + hnv * hnv;
+            let r2 = r2_t.min(r2_h);
+
+            // Pointed triangular ears: u in [2.0s, 3.85s], av in [1.3s, 3.35s].
+            let in_ear = if u > 1.9 * s && u < 3.9 * s && av > 1.25 * s && av < 3.4 * s {
+                let ear_t = ((av - 1.3 * s) * (1.0 / (2.1 * s))).clamp(0.0, 1.0);
+                let u_center = (2.35 + 1.4 * ear_t) * s;
+                let half_w = (0.98 - 0.78 * ear_t) * s;
+                (u - u_center).abs() <= half_w
+            } else {
+                false
+            };
+
+            if r2 <= 1.0 {
+                let (nu, nv) = if r2_h < r2_t { (hnu, hnv) } else { (tnu, tnv) };
+                let mut col = ramp[ramp4_idx(fr.lit(nu, nv), r2)];
+                if u < 1.8 * s {
+                    if av < 0.38 * s || fast_sin((u * inv_s) * 2.25) > 0.25 {
+                        col = stripe_col;
+                    }
+                } else if u > 2.2 * s && u < 3.45 * s && av < 0.75 * s {
+                    col = stripe_col;
+                }
+                pb.plot(x, y, col);
+            } else if in_ear {
+                let inner = u > 2.8 * s && av > 1.7 * s && av < 2.95 * s;
+                pb.plot(x, y, if inner { ear_in } else { ear_out });
+            } else if r2 <= 1.65 {
+                plot_rim(pb, x, y, rim_col, 0.58, hit_tint);
+            }
+            u += fr.f.x;
+            v += fr.p.x;
+        }
+    }
+
+    // Glowing yellow-green cat eyes + pink nose.
+    let eye_col = if fr.hit > 0.7 {
+        (24, 28, 22)
+    } else {
+        (232, 255, 68)
+    };
+    for side in [-1.0f32, 1.0] {
+        let ep = fr.px(3.75 * s, side * 0.9 * s);
+        pb.plot(ep.0, ep.1, eye_col);
+    }
+    let nose = fr.px(4.65 * s, 0.0);
+    blend_px(pb, nose.0, nose.1, fr.apply_hit((176, 112, 130)), 0.92);
+}
+
+fn draw_spitter_lod(pb: &mut PixelBuffer, fr: &Frame, fire_cd: f32) {
+    let s = fr.r * (1.0 / 3.0);
+    let inv_s = 1.0 / s;
+
+    let charge = if fire_cd <= 0.0 {
+        0.82 + 0.18 * fast_sin(fr.anim * 2.0).abs()
+    } else if fire_cd < 0.75 {
+        ((0.75 - fire_cd) * (1.0 / 0.75)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let recoil = if fire_cd > 1.95 {
+        ((fire_cd - 1.95) * 4.0).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let swell = 1.0 + 0.28 * charge - 0.14 * recoil;
+
+    // 1) Compact leg dots.
+    let leg_col = fr.apply_hit((52, 102, 42));
+    for (i, &u_hip) in [0.95f32, -0.35, -1.6].iter().enumerate() {
+        let sw = fast_sin(fr.anim + i as f32 * 2.1) * 0.65 * s;
+        let uh = u_hip * s;
+        for (side, swing) in [(-1.0f32, sw), (1.0, -sw)] {
+            let foot = fr.px(uh + swing, side * 2.95 * s);
+            blend_px(pb, foot.0, foot.1, leg_col, 0.85);
+        }
+    }
+
+    // 2) Quadratic hourglass body (abdomen venom sac + thorax/head).
+    let u_min = (-1.9 - 1.9 * swell - 0.9) * s;
+    let u_max = (4.2 + 0.3 * charge + 0.8) * s;
+    let mand_tip_v = (0.45 + 1.15 * charge) * s;
+    let v_max = (2.0 * swell * s + 0.9 * s).max(mand_tip_v + 1.0 * s);
+    let Some((x0, x1, y0, y1)) = fr.bbox_oriented(pb, u_min, u_max, v_max, 1, 1) else {
+        return;
+    };
+
+    let ramp = build_ramp4((30, 68, 26), (114, 214, 68), (210, 255, 118), fr);
+    let stripe_col = fr.apply_hit((24, 52, 22));
+    let venom_hot = mix_rgb(fr.accent, (242, 255, 138), 0.55);
+    let hot_col = fr.apply_hit(mix_rgb((114, 214, 68), venom_hot, charge * 0.78));
+    let mand_col = fr.apply_hit(mix_rgb((60, 118, 44), (195, 248, 108), 0.55 + 0.35 * charge));
+    let hit_tint = fr.hit > 0.4;
+    let rim_col = if hit_tint { (130, 160, 80) } else { (0, 0, 0) };
+
+    let inv_aru = 1.0 / (1.92 * s * swell);
+    let inv_arv = 1.0 / (2.02 * s * swell);
+    let inv_fru = 1.0 / (1.95 * s);
+    let inv_frv = 1.0 / (1.35 * s);
+
+    for y in y0..=y1 {
+        let (mut u, mut v) = fr.local(x0, y);
+        for x in x0..=x1 {
+            let anu = (u + 1.9 * s) * inv_aru;
+            let anv = v * inv_arv;
+            let r2_a = anu * anu + anv * anv;
+            let fnu = (u - 1.5 * s) * inv_fru;
+            let fnv = v * inv_frv;
+            let r2_f = fnu * fnu + fnv * fnv;
+            let r2 = r2_a.min(r2_f);
+
+            if r2 <= 1.0 {
+                let col = if r2_a < r2_f {
+                    if fast_sin((u * inv_s + 1.9) * 3.2) > 0.42 {
+                        stripe_col
+                    } else if charge > 0.15 {
+                        hot_col
+                    } else {
+                        ramp[ramp4_idx(fr.lit(anu, anv), r2_a)]
+                    }
+                } else {
+                    ramp[ramp4_idx(fr.lit(fnu, fnv), r2_f)]
+                };
+                pb.plot(x, y, col);
+            } else if r2 <= 1.75 {
+                plot_rim(pb, x, y, rim_col, 0.58, hit_tint);
+            }
+            u += fr.f.x;
+            v += fr.p.x;
+        }
+    }
+
+    // 3) Mandibles, translucent wing glint, eyes, and FULL live charge telegraph!
+    let wing_col = mix_rgb((185, 240, 200), fr.accent, 0.45);
+    let eye_col = if fr.hit > 0.7 {
+        (30, 30, 20)
+    } else {
+        (255, 108, 44)
+    };
+    for side in [-1.0f32, 1.0] {
+        let m0 = fr.px(3.2 * s, side * 0.9 * s);
+        let m1 = fr.px((4.1 + 0.3 * charge) * s, side * mand_tip_v);
+        pb.plot(m0.0, m0.1, mand_col);
+        pb.plot(m1.0, m1.1, mand_col);
+        let w0 = fr.px(-0.5 * s, side * 1.9 * s);
+        let w1 = fr.px(-1.3 * s, side * 2.7 * s);
+        let w2 = fr.px(-2.1 * s, side * 3.3 * s);
+        blend_px(pb, w0.0, w0.1, wing_col, 0.42);
+        blend_px(pb, w1.0, w1.1, wing_col, 0.36);
+        blend_px(pb, w2.0, w2.1, wing_col, 0.28);
+        let ep = fr.px(2.4 * s, side * 1.05 * s);
+        pb.plot(ep.0, ep.1, eye_col);
+    }
+
+    if charge > 0.08 {
+        let mp = fr.px(4.0 * s, 0.0);
+        let orb_col = mix_rgb(venom_hot, (255, 255, 225), charge * 0.65);
+        pb.plot(mp.0, mp.1, orb_col);
+        let glow = scale_rgb(orb_col, 0.45 + 0.55 * charge);
+        if charge > 0.35 {
+            pb.plot_add(mp.0 + 1, mp.1, glow);
+            pb.plot_add(mp.0 - 1, mp.1, glow);
+            pb.plot_add(mp.0, mp.1 + 1, glow);
+            pb.plot_add(mp.0, mp.1 - 1, glow);
+        }
+        if charge > 0.7 {
+            let tip = scale_rgb(orb_col, 0.6);
+            pb.plot_add(mp.0 + 2, mp.1, tip);
+            pb.plot_add(mp.0 - 2, mp.1, tip);
+            pb.plot_add(mp.0, mp.1 + 2, tip);
+            pb.plot_add(mp.0, mp.1 - 2, tip);
+        }
+    }
+}
+
+fn draw_brute_lod(pb: &mut PixelBuffer, fr: &Frame, elite: bool) {
+    let s = fr.r * (1.0 / 6.5);
+    let stomp = fr.anim * 0.72;
+
+    // 1) Elite gold perimeter pips.
+    if elite {
+        let pulse = 0.55 + 0.45 * fast_sin(fr.anim * 1.4);
+        let aura_r = fr.r + 2.3 * s;
+        let gold = scale_rgb((255, 206, 72), 0.55 + 0.35 * pulse);
+        for i in 0..8 {
+            let a0 = i as f32 * (TAU / 8.0) + fr.anim * 0.14;
+            for step in 0..2 {
+                let (sa, ca) = fast_sin_cos(a0 + step as f32 * 0.14);
+                let tx = (fr.pos.x + ca * aura_r).round() as i32;
+                let ty = (fr.pos.y + sa * aura_r).round() as i32;
+                blend_px(pb, tx, ty, gold, 0.75);
+            }
+        }
+    }
+
+    // 2) Six armored leg segments.
+    let leg_core = fr.apply_hit(if elite { (154, 98, 52) } else { (134, 54, 44) });
+    let knee_hi = fr.apply_hit(if elite { (252, 212, 92) } else { (212, 98, 72) });
+    for (i, &u_hip) in [2.6f32, -0.5, -3.6].iter().enumerate() {
+        let sw = fast_sin(stomp + i as f32 * 2.1) * 1.35 * s;
+        let uh = u_hip * s;
+        for (side, swing) in [(-1.0f32, sw), (1.0, -sw)] {
+            let hip = fr.px(uh, side * 4.5 * s);
+            let knee = fr.px(uh + swing * 0.55, side * 6.9 * s);
+            let foot = fr.px(uh + swing - 0.55 * s, side * 8.1 * s);
+            line_blend(pb, hip, knee, leg_core, 0.92);
+            pb.plot(knee.0, knee.1, knee_hi);
+            pb.plot(foot.0, foot.1, leg_core);
+        }
+    }
+
+    // 3) Quadratic carapace + rhino horn wedge.
+    let Some((x0, x1, y0, y1)) = fr.bbox_oriented(pb, -7.6 * s, 9.8 * s, 6.6 * s, 1, 1) else {
+        return;
+    };
+    let (sh_c, mid_c, hi_c, trim_c) = if elite {
+        ((62, 18, 42), (158, 36, 78), (240, 108, 150), (252, 206, 76))
+    } else {
+        ((68, 18, 20), (186, 54, 44), (250, 138, 84), (116, 34, 30))
+    };
+    let ramp = build_ramp4(sh_c, mid_c, hi_c, fr);
+    let horn_base = fr.apply_hit(if elite { (190, 140, 42) } else { (128, 82, 60) });
+    let horn_tip = fr.apply_hit(if elite { (252, 232, 148) } else { (215, 174, 134) });
+    let trim_lit = fr.apply_hit(trim_c);
+    let seam_col = fr.apply_hit((32, 12, 16));
+    let hit_tint = fr.hit > 0.4;
+    let rim_col = if hit_tint { (165, 95, 75) } else { (0, 0, 0) };
+
+    let inv_eu = 1.0 / (5.15 * s);
+    let inv_ev = 1.0 / (5.68 * s);
+    let inv_pu = 1.0 / (2.8 * s);
+    let inv_pv = 1.0 / (4.48 * s);
+    let damaged = fr.hp_frac < 0.68;
+    let critical = fr.hp_frac < 0.38;
+
+    for y in y0..=y1 {
+        let (mut u, mut v) = fr.local(x0, y);
+        for x in x0..=x1 {
+            let av = v.abs();
+            let enu = (u + 1.55 * s) * inv_eu;
+            let env = v * inv_ev;
+            let r2_e = enu * enu + env * env;
+            let pnu = (u - 3.15 * s) * inv_pu;
+            let pnv = v * inv_pv;
+            let r2_p = pnu * pnu + pnv * pnv;
+            let r2 = r2_e.min(r2_p);
+
+            let in_main_horn = u > 4.4 * s
+                && u < 9.1 * s
+                && (av < (9.2 * s - u) * 0.36
+                    || (u > 7.0 * s
+                        && (av - (0.35 + (u - 7.0 * s) * 0.55 / s) * s).abs() < 0.45 * s));
+            let in_side_horn = elite
+                && u > 3.8 * s
+                && u < 7.0 * s
+                && (av - (2.8 + (u - 3.8 * s) * 0.68 / s) * s).abs() < 0.62 * s;
+
+            if in_main_horn || in_side_horn {
+                pb.plot(x, y, if u > 6.6 * s { horn_tip } else { horn_base });
+            } else if r2 <= 1.0 {
+                let (nu, nv) = if r2_p < r2_e { (pnu, pnv) } else { (enu, env) };
+                let mut col = ramp[ramp4_idx(fr.lit(nu, nv), r2)];
+                let collar = (u - 1.5 * s).abs();
+                if collar < 0.55 * s {
+                    col = seam_col;
+                } else if elite
+                    && (r2 > 0.80
+                        || (u < 1.4 * s && av < 0.48 * s)
+                        || (u > 1.5 * s && collar < 1.15 * s))
+                {
+                    col = trim_lit;
+                } else if !elite && u < 1.4 * s && av < 0.45 * s {
+                    col = seam_col;
+                }
+                if damaged
+                    && ((u + 1.8 * s) - (v - 1.5 * s) * 0.7).abs() < 0.42 * s
+                    && u < 0.6 * s
+                    && v > 0.4 * s
+                {
+                    col = if critical { (255, 165, 65) } else { (24, 10, 12) };
+                }
+                pb.plot(x, y, col);
+            } else if r2 <= 1.42 {
+                plot_rim(pb, x, y, rim_col, 0.64, hit_tint);
+            }
+            u += fr.f.x;
+            v += fr.p.x;
+        }
+    }
+
+    // Glowing ember eyes.
+    let eye_col = if fr.hit > 0.7 {
+        (30, 14, 16)
+    } else if elite {
+        (255, 118, 232)
+    } else {
+        (255, 202, 56)
+    };
+    for side in [-1.0f32, 1.0] {
+        let e0 = fr.px(4.7 * s, side * 2.15 * s);
+        pb.plot(e0.0, e0.1, eye_col);
+    }
+}
+
+fn draw_boss_lod(pb: &mut PixelBuffer, fr: &Frame, fire_cd: f32) {
+    let s = fr.r * (1.0 / 14.0);
+    let inv_s = 1.0 / s;
+    let charge = if fire_cd <= 0.0 {
+        0.85 + 0.15 * fast_sin(fr.anim * 2.6).abs()
+    } else if fire_cd < 0.50 {
+        ((0.50 - fire_cd) * 2.0).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let pulse = 0.5 + 0.5 * fast_sin(fr.anim * 2.2);
+
+    // 1) Eight compact armored legs.
+    let leg_core = fr.apply_hit((116, 30, 66));
+    let leg_joint = fr.apply_hit((244, 202, 130));
+    for (i, &u_hip) in [5.4f32, 1.8, -2.2, -6.2].iter().enumerate() {
+        let sw = fast_sin(fr.anim * 0.8 + i as f32 * 1.6) * 2.1 * s;
+        let uh = u_hip * s;
+        for (side, swing) in [(-1.0f32, sw), (1.0, -sw)] {
+            let hip = fr.px(uh, side * 7.2 * s);
+            let knee = fr.px(uh + swing * 0.5, side * 12.2 * s);
+            let foot = fr.px(uh + swing - 1.4 * s, side * 14.8 * s);
+            line_blend(pb, hip, knee, leg_core, 0.92);
+            line_blend(pb, knee, foot, leg_core, 0.78);
+            pb.plot(knee.0, knee.1, leg_joint);
+        }
+    }
+
+    // 2) Quadratic 3-segment carapace (abdomen, thorax, head) + stinger + mandibles.
+    if let Some((x0, x1, y0, y1)) = fr.bbox_oriented(pb, -16.8 * s, 16.8 * s, 9.8 * s, 0, 0) {
+        let abd_ramp = build_ramp4((56, 14, 36), (196, 38, 96), (255, 138, 188), fr);
+        let th_ramp = build_ramp4((42, 12, 32), (128, 26, 68), (206, 68, 124), fr);
+        let obsidian = fr.apply_hit((30, 12, 28));
+        let gold_hi = fr.apply_hit((252, 224, 146));
+        let hot_core = fr.apply_hit(mix_rgb((255, 118, 182), (255, 248, 224), charge));
+        let hit_tint = fr.hit > 0.4;
+        let rim_col = if hit_tint { (185, 95, 130) } else { (0, 0, 0) };
+
+        let inv_au = 1.0 / (6.45 * s);
+        let inv_av = 1.0 / (7.95 * s);
+        let inv_tu = 1.0 / (5.45 * s);
+        let inv_tv = 1.0 / (8.25 * s);
+        let inv_hu = 1.0 / (3.65 * s);
+        let inv_hv = 1.0 / (5.45 * s);
+        let core_r2_max = (2.1 * s) * (2.1 * s);
+
+        for y in y0..=y1 {
+            let (mut u, mut v) = fr.local(x0, y);
+            for x in x0..=x1 {
+                let av = v.abs();
+                let anu = (u + 7.0 * s) * inv_au;
+                let anv = v * inv_av;
+                let r2_a = anu * anu + anv * anv;
+                let tnu = (u - 1.9 * s) * inv_tu;
+                let tnv = v * inv_tv;
+                let r2_t = tnu * tnu + tnv * tnv;
+                let hnu = (u - 9.2 * s) * inv_hu;
+                let hnv = v * inv_hv;
+                let r2_h = hnu * hnu + hnv * hnv;
+                let r2 = r2_a.min(r2_t).min(r2_h);
+
+                if r2 <= 1.0 {
+                    let col = if r2_h <= r2_t && r2_h <= r2_a {
+                        if av < 0.95 * s && u > 7.2 * s && u < 11.8 * s {
+                            gold_hi
+                        } else {
+                            abd_ramp[ramp4_idx(fr.lit(hnu, hnv), r2_h)]
+                        }
+                    } else if r2_t <= r2_a {
+                        let du_c = u - 2.2 * s;
+                        if du_c * du_c + v * v < core_r2_max {
+                            hot_core
+                        } else if r2_t > 0.74 && av > 3.6 * s {
+                            gold_hi
+                        } else {
+                            th_ramp[ramp4_idx(fr.lit(tnu, tnv), r2_t)]
+                        }
+                    } else if fast_sin((u * inv_s + 7.0) * 1.6) > 0.18 {
+                        obsidian
+                    } else if av < 0.7 * s {
+                        gold_hi
+                    } else {
+                        abd_ramp[ramp4_idx(fr.lit(anu, anv), r2_a)]
+                    };
+                    pb.plot(x, y, col);
+                } else if u < -12.0 * s && u > -16.2 * s && av < (16.4 * s + u) * 0.42 {
+                    pb.plot(x, y, gold_hi);
+                } else if r2 <= 1.28 {
+                    plot_rim(pb, x, y, rim_col, 0.68, hit_tint);
+                }
+                u += fr.f.x;
+                v += fr.p.x;
+            }
+        }
+    }
+
+    // 3) Mandible blades, crown horns, eyes, translucent forewings, nova pips, and HP arc.
+    let gold_hi = fr.apply_hit((252, 224, 146));
+    let mand_open = (1.8 + 3.0 * charge) * s;
+    let eye_main = if fr.hit > 0.7 {
+        (30, 14, 24)
+    } else {
+        mix_rgb((255, 236, 86), (255, 255, 235), charge * 0.5)
+    };
+    for side in [-1.0f32, 1.0] {
+        let c0 = fr.px(8.2 * s, side * 4.2 * s);
+        let c1 = fr.px(5.4 * s, side * 8.4 * s);
+        line_blend(pb, c0, c1, gold_hi, 0.92);
+        let m0 = fr.px(11.0 * s, side * 3.1 * s);
+        let m1 = fr.px(15.8 * s, side * mand_open);
+        line_blend(pb, m0, m1, gold_hi, 0.92);
+        let e0 = fr.px(10.3 * s, side * 2.35 * s);
+        pb.plot(e0.0, e0.1, eye_main);
+    }
+
+    // Fast translucent hornet forewing sweep (single-pass LUT, zero powf).
+    let flap = fast_sin(fr.anim * 1.8);
+    let wing_span = (13.8 + 2.1 * flap.abs()) * s;
+    let wing_tint = mix_rgb((235, 148, 212), fr.accent, 0.42);
+    let wu_min = (-6.5 + 1.3 * flap.min(0.0) - 2.6) * s;
+    let wu_max = (3.4 + 1.3 * flap.max(0.0) + 2.6) * s;
+    if let Some((x0, x1, y0, y1)) =
+        fr.bbox_oriented_circ(pb, wu_min, wu_max, wing_span + 0.5, wing_span + 1.0, (0, 0))
+    {
+        let w_start = 4.6 * s;
+        let inv_span = 1.0 / (wing_span - w_start).max(1.0);
+        for y in y0..=y1 {
+            let (mut u, mut v) = fr.local(x0, y);
+            for x in x0..=x1 {
+                let av = v.abs();
+                if av >= w_start && av <= wing_span && u >= wu_min && u <= wu_max {
+                    let t = (av - w_start) * inv_span;
+                    let fore_half = 2.9 * s * boss_wing_fore_env(t);
+                    let fore_mid = (2.8 - 4.6 * t - 2.9 * t * t + 1.3 * flap * t) * s;
+                    if fore_half > 0.4 * s && (u - fore_mid).abs() <= fore_half {
+                        let spar = (fore_mid + fore_half - u) < 0.85 * s;
+                        let alpha = if spar { 0.56 } else { 0.24 } * (1.0 - t * 0.4);
+                        let bg = pb.pixel_at(x as usize, y as usize);
+                        pb.plot(x, y, mix_rgb(bg, wing_tint, alpha));
+                    }
+                }
+                u += fr.f.x;
+                v += fr.p.x;
+            }
+        }
+    }
+
+    if charge > 0.08 {
+        let pip_r = fr.r + (1.6 + (1.0 - charge) * 2.8) * s;
+        let pip_col = mix_rgb((255, 100, 165), (255, 250, 230), charge);
+        let glow = scale_rgb(pip_col, 0.55 * charge);
+        let do_glow = charge > 0.5;
+        for &(ca, sa) in &NOVA_10 {
+            let px = (fr.pos.x + ca * pip_r).round() as i32;
+            let py = (fr.pos.y + sa * pip_r).round() as i32;
+            pb.plot(px, py, pip_col);
+            if do_glow {
+                pb.plot_add(px + 1, py, glow);
+                pb.plot_add(px - 1, py, glow);
+                pb.plot_add(px, py + 1, glow);
+                pb.plot_add(px, py - 1, glow);
+            }
+        }
+    }
+    draw_boss_hp_arc(pb, fr, s, pulse);
 }
 
 #[cfg(test)]
@@ -1885,5 +3710,489 @@ mod tests {
             }
         }
         std::fs::write("/tmp/ratrun_enemies.ppm", out).unwrap();
+    }
+
+    fn fnv1a_pixels(pb: &PixelBuffer) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for y in 0..pb.h {
+            for x in 0..pb.w {
+                let (r, g, b) = pb.pixel_at(x, y);
+                for byte in [r, g, b] {
+                    h ^= byte as u64;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+            }
+        }
+        h
+    }
+
+    /// Deterministic self-contained bestiary sheet (no external art_floor/art_rat
+    /// dependency so the pinned hash only tracks `art_enemy.rs`).
+    fn render_bestiary_pb(draw: impl Fn(&mut PixelBuffer, &Enemy, Vec2, Rgb)) -> PixelBuffer {
+        let w = 260usize;
+        let h = 128usize;
+        let mut pb = PixelBuffer::new(w, h);
+        pb.clear((18, 28, 26));
+        let cam = Vec2::new(300.0, 300.0);
+        let acc = (90, 220, 200);
+
+        // Row 1 (y=24): Lineup facing down-right.
+        let y1 = cam.y + 24.0;
+        let lineup: [(EnemyKind, bool, f32); 6] = [
+            (EnemyKind::Skitterer, false, 38.0),
+            (EnemyKind::Bat, false, 68.0),
+            (EnemyKind::Cat, false, 100.0),
+            (EnemyKind::Spitter, false, 134.0),
+            (EnemyKind::Brute, false, 174.0),
+            (EnemyKind::Brute, true, 218.0),
+        ];
+        for &(kind, elite, x) in &lineup {
+            let mut e = make_enemy(kind, Vec2::new(cam.x + x, y1), 0.7);
+            e.elite = elite;
+            draw(&mut pb, &e, cam, acc);
+        }
+
+        // Row 2 (y=60): Action states (angles, wing flap, swipe, spitter telegraph, flash, damaged).
+        let y2 = cam.y + 60.0;
+        for (k, &(dx, dy, ang, anim)) in [
+            (18.0, -4.0, -2.4, 0.2),
+            (28.0, 4.0, -1.8, 1.8),
+            (38.0, -2.0, -2.9, 3.1),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut e = make_enemy(EnemyKind::Skitterer, Vec2::new(cam.x + dx, y2 + dy), ang);
+            e.anim = anim;
+            if k == 1 {
+                e.flash = 0.11;
+            }
+            draw(&mut pb, &e, cam, acc);
+        }
+        let mut bat1 = make_enemy(EnemyKind::Bat, Vec2::new(cam.x + 64.0, y2 - 3.0), -0.5);
+        bat1.anim = 1.5;
+        draw(&mut pb, &bat1, cam, acc);
+        let mut bat2 = make_enemy(EnemyKind::Bat, Vec2::new(cam.x + 84.0, y2 + 3.0), 2.5);
+        bat2.anim = -1.5;
+        draw(&mut pb, &bat2, cam, acc);
+
+        let mut cat = make_enemy(EnemyKind::Cat, Vec2::new(cam.x + 114.0, y2), 2.8);
+        cat.contact_cd = 0.5;
+        cat.anim = 2.1;
+        draw(&mut pb, &cat, cam, acc);
+
+        let mut sp1 = make_enemy(EnemyKind::Spitter, Vec2::new(cam.x + 144.0, y2 - 4.0), 0.0);
+        sp1.fire_cd = 0.35;
+        draw(&mut pb, &sp1, cam, acc);
+        let mut sp2 = make_enemy(EnemyKind::Spitter, Vec2::new(cam.x + 144.0, y2 + 12.0), 0.0);
+        sp2.fire_cd = 0.05;
+        draw(&mut pb, &sp2, cam, acc);
+
+        let mut br_dmg = make_enemy(EnemyKind::Brute, Vec2::new(cam.x + 178.0, y2), -0.6);
+        br_dmg.hp = br_dmg.max_hp * 0.28;
+        draw(&mut pb, &br_dmg, cam, acc);
+        let mut br_hit = make_enemy(EnemyKind::Brute, Vec2::new(cam.x + 218.0, y2), -2.4);
+        br_hit.flash = 0.10;
+        br_hit.elite = true;
+        draw(&mut pb, &br_hit, cam, acc);
+
+        // Row 3 (y=98): Boss showcase — full HP, telegraphing nova, enraged low HP.
+        let y3 = cam.y + 98.0;
+        let mut boss1 = make_enemy(EnemyKind::Boss, Vec2::new(cam.x + 48.0, y3), 0.55);
+        boss1.hp = boss1.max_hp * 0.92;
+        boss1.fire_cd = 1.0;
+        draw(&mut pb, &boss1, cam, acc);
+
+        let mut boss2 = make_enemy(EnemyKind::Boss, Vec2::new(cam.x + 130.0, y3), 1.35);
+        boss2.hp = boss2.max_hp * 0.55;
+        boss2.fire_cd = 0.06;
+        boss2.anim = 1.2;
+        draw(&mut pb, &boss2, cam, acc);
+
+        let mut boss3 = make_enemy(EnemyKind::Boss, Vec2::new(cam.x + 212.0, y3), -2.2);
+        boss3.hp = boss3.max_hp * 0.22;
+        boss3.fire_cd = 0.22;
+        boss3.anim = 2.6;
+        draw(&mut pb, &boss3, cam, acc);
+
+        pb
+    }
+
+    /// Pins the exact FNV-1a 64-bit hash of the full-detail bestiary sheet so
+    /// any visual change to `draw_enemy` must be deliberate.
+    #[test]
+    fn bestiary_sheet_full_detail_hash_is_pinned() {
+        const PINNED_BESTIARY_HASH: u64 = 0x44c7_96bc_47ed_af91;
+        let pb = render_bestiary_pb(draw_enemy);
+        let actual = fnv1a_pixels(&pb);
+        assert_eq!(
+            actual, PINNED_BESTIARY_HASH,
+            "Full-detail bestiary sheet changed (expected 0x{PINNED_BESTIARY_HASH:016x}, got 0x{actual:016x}); inspect RATRUN_DUMP=enemies before updating the pin"
+        );
+    }
+
+    #[test]
+    fn lookup_tables_match_std_math() {
+        for i in -100..=200 {
+            let x = i as f32 * 0.137;
+            let (fs, fc) = fast_sin_cos(x);
+            assert!(
+                (fs - x.sin()).abs() < 2e-4,
+                "fast_sin({x}) = {fs} vs {}",
+                x.sin()
+            );
+            assert!(
+                (fc - x.cos()).abs() < 2e-4,
+                "fast_cos({x}) = {fc} vs {}",
+                x.cos()
+            );
+            assert!((fast_sin(x) - fs).abs() < 1e-6);
+        }
+        for i in 0..=32 {
+            let t = i as f32 / 32.0;
+            let (el, ch) = bat_wing_profile(t);
+            let exp_el = if t < 0.48 {
+                let k = t / 0.48;
+                -0.25 + 1.85 * k * k * (3.0 - 2.0 * k)
+            } else {
+                let k = (t - 0.48) / 0.52;
+                1.6 - 2.15 * k.powf(1.15)
+            };
+            let exp_ch = (2.45 * (1.0 - t * 0.84)
+                - 0.85 * (t * TAU).sin().abs() * (1.0 - t * 0.25))
+            .max(0.28);
+            assert!((el - exp_el).abs() < 5e-3, "bat elbow t={t}: {el} vs {exp_el}");
+            assert!((ch - exp_ch).abs() < 5e-3, "bat chord t={t}: {ch} vs {exp_ch}");
+
+            let f_env = boss_wing_fore_env(t);
+            let exp_f = (t.powf(0.42) * (1.0 - t).powf(0.6) * 2.2).clamp(0.0, 1.0);
+            assert!((f_env - exp_f).abs() < 1e-2, "boss fore t={t}: {f_env} vs {exp_f}");
+
+            let h_env = boss_wing_hind_env(t);
+            let exp_h = (t.powf(0.45) * (1.0 - t).powf(0.6) * 2.2).clamp(0.0, 1.0);
+            assert!((h_env - exp_h).abs() < 1e-2, "boss hind t={t}: {h_env} vs {exp_h}");
+
+            let sp = spitter_wing_profile(t);
+            let exp_sp = (t * (1.0 - t) * 4.0).clamp(0.0, 1.0).sqrt();
+            assert!((sp - exp_sp).abs() < 1e-2, "spitter wing t={t}: {sp} vs {exp_sp}");
+        }
+        for (k, &(ca, sa)) in NOVA_10.iter().enumerate() {
+            let a = k as f32 / 10.0 * TAU;
+            assert!((ca - a.cos()).abs() < 1e-5);
+            assert!((sa - a.sin()).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn lod_matches_full_detail_within_tolerance() {
+        let bg = (18, 28, 26);
+        let acc = (90, 220, 200);
+        for &(kind, elite, max_mae, min_overlap) in &[
+            (EnemyKind::Skitterer, false, 18.0f32, 0.55f32),
+            (EnemyKind::Bat, false, 18.0, 0.50),
+            (EnemyKind::Cat, false, 24.0, 0.58),
+            (EnemyKind::Spitter, false, 22.0, 0.55),
+            (EnemyKind::Brute, false, 26.0, 0.65),
+            (EnemyKind::Brute, true, 28.0, 0.65),
+            (EnemyKind::Boss, false, 32.0, 0.65),
+        ] {
+            let mut full_pb = PixelBuffer::new(48, 48);
+            let mut lod_pb = PixelBuffer::new(48, 48);
+            full_pb.clear(bg);
+            lod_pb.clear(bg);
+            let mut e = make_enemy(kind, Vec2::new(24.0, 24.0), 0.7);
+            e.elite = elite;
+            e.fire_cd = 0.2;
+            draw_enemy(&mut full_pb, &e, Vec2::ZERO, acc);
+            draw_enemy_lod(&mut lod_pb, &e, Vec2::ZERO, acc);
+
+            // Compare inside active silhouette union (excluding untouched bg).
+            let mut union_px = 0usize;
+            let mut both_px = 0usize;
+            let mut abs_err_sum = 0f64;
+            let mut full_rgb = [0f64; 3];
+            let mut lod_rgb = [0f64; 3];
+            let mut full_cnt = 0usize;
+            let mut lod_cnt = 0usize;
+
+            for y in 0..48 {
+                for x in 0..48 {
+                    let a = full_pb.pixel_at(x, y);
+                    let b = lod_pb.pixel_at(x, y);
+                    let a_on = a != bg;
+                    let b_on = b != bg;
+                    if a_on {
+                        full_cnt += 1;
+                        full_rgb[0] += a.0 as f64;
+                        full_rgb[1] += a.1 as f64;
+                        full_rgb[2] += a.2 as f64;
+                    }
+                    if b_on {
+                        lod_cnt += 1;
+                        lod_rgb[0] += b.0 as f64;
+                        lod_rgb[1] += b.1 as f64;
+                        lod_rgb[2] += b.2 as f64;
+                    }
+                    if a_on || b_on {
+                        union_px += 1;
+                        if a_on && b_on {
+                            both_px += 1;
+                        }
+                        abs_err_sum += (a.0 as f64 - b.0 as f64).abs()
+                            + (a.1 as f64 - b.1 as f64).abs()
+                            + (a.2 as f64 - b.2 as f64).abs();
+                    }
+                }
+            }
+            let overlap = both_px as f32 / union_px.max(1) as f32;
+            let mae_box = (abs_err_sum / (48.0 * 48.0 * 3.0)) as f32;
+            let mean_color_err = [0, 1, 2]
+                .iter()
+                .map(|&c| {
+                    ((full_rgb[c] / full_cnt.max(1) as f64)
+                        - (lod_rgb[c] / lod_cnt.max(1) as f64))
+                    .abs()
+                })
+                .sum::<f64>()
+                / 3.0;
+
+            assert!(
+                overlap >= min_overlap,
+                "{kind:?} (elite={elite}): LOD silhouette overlap {overlap:.2} < {min_overlap:.2}"
+            );
+            assert!(
+                mae_box <= max_mae,
+                "{kind:?} (elite={elite}): LOD MAE {mae_box:.2} > {max_mae:.2}"
+            );
+            assert!(
+                mean_color_err < 35.0,
+                "{kind:?} (elite={elite}): LOD mean colour drift {mean_color_err:.1} >= 35"
+            );
+
+            // Hit flash must brighten LOD too.
+            let mut hit_pb = PixelBuffer::new(48, 48);
+            hit_pb.clear(bg);
+            e.flash = 0.12;
+            draw_enemy_lod(&mut hit_pb, &e, Vec2::ZERO, acc);
+            let sum_rgb = |pb: &PixelBuffer| -> u64 {
+                (0..48)
+                    .flat_map(|y| (0..48).map(move |x| pb.pixel_at(x, y)))
+                    .map(|c| c.0 as u64 + c.1 as u64 + c.2 as u64)
+                    .sum()
+            };
+            assert!(
+                sum_rgb(&hit_pb) > sum_rgb(&lod_pb) + 150,
+                "{kind:?} (elite={elite}): LOD hit flash must brighten"
+            );
+
+            // Facing change must visibly rotate the LOD sprite.
+            let mut rot_pb = PixelBuffer::new(48, 48);
+            rot_pb.clear(bg);
+            e.flash = 0.0;
+            e.facing = Vec2::from_angle(0.7 + PI);
+            draw_enemy_lod(&mut rot_pb, &e, Vec2::ZERO, acc);
+            assert_ne!(
+                fnv1a_pixels(&lod_pb),
+                fnv1a_pixels(&rot_pb),
+                "{kind:?}: LOD facing must stay legible"
+            );
+        }
+    }
+
+    #[test]
+    fn crowd_and_subpixel_paths_work_cleanly() {
+        let mut pb = PixelBuffer::new(48, 48);
+        pb.clear((18, 28, 26));
+        let mut tiny = make_enemy(EnemyKind::Skitterer, Vec2::new(24.0, 24.0), 0.5);
+        tiny.radius = 0.4;
+        draw_enemy(&mut pb, &tiny, Vec2::ZERO, (90, 220, 200));
+        assert_ne!(pb.pixel_at(24, 24), (18, 28, 26));
+
+        let mut small = make_enemy(EnemyKind::Bat, Vec2::new(12.0, 12.0), 0.5);
+        small.radius = 1.4;
+        draw_enemy(&mut pb, &small, Vec2::ZERO, (90, 220, 200));
+        assert_ne!(pb.pixel_at(12, 12), (18, 28, 26));
+
+        let e = make_enemy(EnemyKind::Skitterer, Vec2::new(36.0, 36.0), 0.0);
+        let mut pb_full = PixelBuffer::new(48, 48);
+        let mut pb_crowd = PixelBuffer::new(48, 48);
+        pb_full.clear((18, 28, 26));
+        pb_crowd.clear((18, 28, 26));
+        draw_enemy_crowd(&mut pb_full, &e, Vec2::ZERO, (90, 220, 200), 10);
+        draw_enemy_crowd(
+            &mut pb_crowd,
+            &e,
+            Vec2::ZERO,
+            (90, 220, 200),
+            CROWD_LOD_THRESHOLD + 50,
+        );
+        assert_ne!(pb_full.pixel_at(36, 36), (18, 28, 26));
+        assert_ne!(pb_crowd.pixel_at(36, 36), (18, 28, 26));
+    }
+
+    /// Side-by-side Full Detail (top), LOD (middle), and 3x diff heatmap (bottom):
+    /// `RATRUN_DUMP=enemies_lod cargo test dump_lod_comparison_sheet` writes `/tmp/ratrun_enemies_lod.ppm`.
+    #[test]
+    fn dump_lod_comparison_sheet() {
+        if std::env::var("RATRUN_DUMP").as_deref() != Ok("enemies_lod") {
+            return;
+        }
+        let full = render_bestiary_pb(draw_enemy);
+        let lod = render_bestiary_pb(draw_enemy_lod);
+        let w = full.w;
+        let h = full.h;
+        let mut out = format!("P6\n{} {}\n255\n", w, h * 3).into_bytes();
+        for pb in [&full, &lod] {
+            for y in 0..h {
+                for x in 0..w {
+                    let c = pb.pixel_at(x, y);
+                    out.extend_from_slice(&[c.0, c.1, c.2]);
+                }
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let a = full.pixel_at(x, y);
+                let b = lod.pixel_at(x, y);
+                let dr = (a.0 as i32 - b.0 as i32).unsigned_abs().min(85) as u8 * 3;
+                let dg = (a.1 as i32 - b.1 as i32).unsigned_abs().min(85) as u8 * 3;
+                let db = (a.2 as i32 - b.2 as i32).unsigned_abs().min(85) as u8 * 3;
+                out.extend_from_slice(&[dr, dg, db]);
+            }
+        }
+        std::fs::write("/tmp/ratrun_enemies_lod.ppm", out).unwrap();
+    }
+
+    #[test]
+    fn benchmark_draw_enemy_per_kind() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let pb_ref = render_bestiary_pb(draw_enemy);
+        println!("bestiary_hash = 0x{:016x}", fnv1a_pixels(&pb_ref));
+
+        let mut pb = PixelBuffer::new(160, 168);
+        pb.clear((18, 28, 26));
+        let acc = (90, 220, 200);
+        // Baseline timings measured on unmodified `art_enemy.rs` (dev opt=1 / release opt=3):
+        let cases: [(&str, EnemyKind, bool, f32, f32, f64, f64); 7] = [
+            ("Skitterer", EnemyKind::Skitterer, false, 1.5, 0.0, 2.547, 2.912),
+            ("Bat", EnemyKind::Bat, false, 1.5, 0.0, 3.552, 3.508),
+            ("Cat", EnemyKind::Cat, false, 1.5, 0.0, 10.674, 9.224),
+            ("Spitter", EnemyKind::Spitter, false, 0.35, 0.0, 4.779, 3.563),
+            ("Brute", EnemyKind::Brute, false, 1.5, 0.0, 13.985, 12.373),
+            ("EliteBrute", EnemyKind::Brute, true, 1.5, 0.0, 16.362, 13.895),
+            ("Boss", EnemyKind::Boss, false, 0.15, 0.0, 124.580, 86.908),
+        ];
+
+        println!(
+            "{:<12} | {:>10} | {:>10} | {:>10} | {:>10}",
+            "Kind", "Before(us)", "Full(us)", "LOD(us)", "Speedup"
+        );
+        for &(label, kind, elite, fire_cd, flash, before_dev, before_rel) in &cases {
+            let before = if cfg!(debug_assertions) {
+                before_dev
+            } else {
+                before_rel
+            };
+            let n = if kind == EnemyKind::Boss { 400 } else { 4000 };
+            let enemies: Vec<Enemy> = (0..16)
+                .map(|i| {
+                    let mut e = make_enemy(
+                        kind,
+                        Vec2::new(80.0 + (i % 4) as f32 * 0.25, 84.0 + (i / 4) as f32 * 0.25),
+                        i as f32 * (TAU / 16.0),
+                    );
+                    e.elite = elite;
+                    e.fire_cd = fire_cd;
+                    e.flash = flash;
+                    e.anim = i as f32 * 0.41;
+                    e
+                })
+                .collect();
+            for e in &enemies {
+                draw_enemy(&mut pb, black_box(e), Vec2::ZERO, acc);
+            }
+            let t0 = Instant::now();
+            for i in 0..n {
+                draw_enemy(&mut pb, black_box(&enemies[i & 15]), Vec2::ZERO, acc);
+            }
+            let full_us = t0.elapsed().as_secs_f64() * 1e6 / n as f64;
+
+            for e in &enemies {
+                draw_enemy_lod(&mut pb, black_box(e), Vec2::ZERO, acc);
+            }
+            let t1 = Instant::now();
+            for i in 0..n {
+                draw_enemy_lod(&mut pb, black_box(&enemies[i & 15]), Vec2::ZERO, acc);
+            }
+            let lod_us = t1.elapsed().as_secs_f64() * 1e6 / n as f64;
+
+            println!(
+                "{label:<12} | {before:10.3} | {full_us:10.3} | {lod_us:10.3} | {:>4.2}x / {:>4.2}x",
+                before / full_us,
+                before / lod_us
+            );
+        }
+
+        // Off-screen early-out benchmark
+        let off_n = 20_000;
+        let off_e = make_enemy(EnemyKind::Cat, Vec2::new(-40.0, -40.0), 0.7);
+        let t0 = Instant::now();
+        for _ in 0..off_n {
+            draw_enemy(&mut pb, black_box(&off_e), Vec2::ZERO, acc);
+        }
+        let off_us = t0.elapsed().as_secs_f64() * 1e6 / off_n as f64;
+        println!("{:<12} | {:10.4} | {:10.4}", "OffScreenCat", 0.250, off_us);
+
+        // 600-enemy cap realistic mix (same 160x168 view)
+        let mut rng = StdRng::seed_from_u64(123);
+        let mix_kinds = [
+            EnemyKind::Skitterer,
+            EnemyKind::Skitterer,
+            EnemyKind::Skitterer,
+            EnemyKind::Bat,
+            EnemyKind::Bat,
+            EnemyKind::Cat,
+            EnemyKind::Spitter,
+            EnemyKind::Brute,
+        ];
+        let swarm: Vec<Enemy> = (0..600)
+            .map(|i| {
+                let kind = if i == 599 {
+                    EnemyKind::Boss
+                } else {
+                    mix_kinds[i % mix_kinds.len()]
+                };
+                let x = ((i * 29) % 150) as f32 + 5.0;
+                let y = ((i * 47) % 158) as f32 + 5.0;
+                let mut e = Enemy::spawn(kind, Vec2::new(x, y), 1.0, &mut rng);
+                e.facing = Vec2::from_angle(i as f32 * 0.37);
+                e.anim = i as f32 * 0.2;
+                e.elite = kind == EnemyKind::Brute && i % 16 == 0;
+                e.fire_cd = if kind.ranged() && i % 3 == 0 { 0.2 } else { 1.5 };
+                e
+            })
+            .collect();
+        let frames = 20;
+        let t0 = Instant::now();
+        for _ in 0..frames {
+            for e in &swarm {
+                draw_enemy(&mut pb, black_box(e), Vec2::ZERO, acc);
+            }
+        }
+        let full_frame_us = t0.elapsed().as_secs_f64() * 1e6 / frames as f64;
+
+        let t1 = Instant::now();
+        for _ in 0..frames {
+            for e in &swarm {
+                draw_enemy_crowd(&mut pb, black_box(e), Vec2::ZERO, acc, swarm.len());
+            }
+        }
+        let crowd_frame_us = t1.elapsed().as_secs_f64() * 1e6 / frames as f64;
+        println!(
+            "600-swarm   : full={full_frame_us:6.1} us/frame, crowd-LOD={crowd_frame_us:6.1} us/frame"
+        );
+        black_box(pb.pixel_at(80, 84));
     }
 }

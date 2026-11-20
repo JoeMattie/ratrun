@@ -8,6 +8,13 @@ use crate::render::palette::{mix, scale, Rgb};
 
 use super::level::{Level, Palette, Theme};
 
+#[allow(unused_imports)]
+pub use super::art_marks::{
+    draw_boss_arena_floor, draw_gnaw_mark, draw_gold_fleck, draw_hall_landmark,
+    BOSS_ARENA_MOTIF_CELLS, GNAW_MARK_OFFSETS, GNAW_MARK_SPACING, GOLD_FLECK_SPACING,
+    HALL_LANDMARK_HALF_EXTENT, HALL_LANDMARK_VARIANTS,
+};
+
 /// Paint the floor for the visible region and the arena border. The buffer has
 /// already been cleared to `level.palette.bg`. `cam` is the world position of
 /// the buffer's top-left pixel; `elapsed` is the run clock in seconds.

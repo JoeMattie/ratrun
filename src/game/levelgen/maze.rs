@@ -1,62 +1,111 @@
-//! **Stage B — mazes, rat-holes and traps.**
+//! **Stage B (mazes).**
 //!
-//! Owner: *generator worker B*.
+//! Owner: *generator worker P1*.
 //!
-//! - [`carve_mazes`] turns zero to two of the layout's reserved
-//!   [`Layout::maze_slots`] into real mazes: a [`WallKind::Maze`] partition
-//!   warren, a [`MazeRewardView`](crate::game::art_traps::MazeRewardView)
-//!   pedestal at its end, and a [`WallKind::OneWayDoor`] as its only exit.
-//! - [`place_rat_holes`] pierces structural walls with
-//!   [`WallKind::RatHole`] cells: passable for the small size class only.
-//! - [`place_traps`] scatters sticky traps and mousetraps in corridors and
-//!   rooms (never on the spawn point, never inside a wall).
+//! - [`carve_mazes`] turns **every** [`Layout::maze_slots`] reservation into a
+//!   real maze: a [`WallKind::Maze`] partition warren, a
+//!   [`MazeRewardView`](crate::game::art_traps::MazeRewardView) pedestal at
+//!   its end, and a [`WallKind::OneWayDoor`] as its only exit.
+//!
+//! Rat-holes and traps live in [`super::placement`] (worker P2).
 //!
 //! Nothing here validates the map — [`super::validate`] does, and
 //! [`super::generate`] retries when a stage produces an unplayable map.
 //!
+//! ## The shape of a maze
+//!
+//! A maze is an odd-sized slot (19/21/23 by 15/17/19 cells) carrying an aisle
+//! lattice with one open cell per aisle and one [`WallKind::Maze`] partition
+//! cell between two aisles (`AISLE_STEP`). A recursive-backtracker spanning
+//! tree gives long winding aisles, then one or two blind-tip links are opened
+//! so every maze has at least one loop the rat can double back around a
+//! pursuer in. The breach is a two-cell gap in the ring on the wall that faces
+//! the access corridor from the starting chamber (within
+//! [`ENTRY_SLACK_CELLS`] cells of where that corridor meets the walkway), and
+//! the one-way door always sits on a **different** wall from the breach, at
+//! the aisle whose route from the breach is closest to
+//! a route inside [`REWARD_STEPS_BAND`] and closest to [`REWARD_STEPS_TARGET`]
+//! lattice steps. The cache pedestal stands at that door, and
+//! [`MazeSection::fork`] is the public walkway cell the gnaw-mark trail starts
+//! from.
+//!
+//! Layout and carving agree by construction: the layout reserves at most one
+//! slot (`layout::MAZE_ONE_IN`), of a size this stage can always carve, and
+//! this stage carves *every* slot it is given. A reserved-but-empty maze room
+//! is a generator bug and is caught in debug builds.
+//!
 //! ## Determinism
 //!
 //! Every random choice is one `rng` draw in call order: no clock, no hash map,
-//! no query order. Two runs of the same seed produce the same mazes, holes and
-//! traps.
-//!
-//! ## Known constraints of the fixed pipeline signature
-//!
-//! The stages only receive the [`TileMap`] and the [`Layout`], so a rat-hole
-//! cannot be told apart from a furnished prop by the grid alone (both are
-//! [`WallKind::Solid`] cells). Stage B therefore only pierces walls **outside**
-//! every room rectangle — the contract places props inside rooms and structural
-//! walls between them — and only walls that are part of a solid component of at
-//! least [`MIN_PIERCE_COMPONENT`] cells (a prop island is a dozen cells at
-//! most). See the report for the deviation this implies.
+//! no query order. Two runs of the same seed produce the same mazes.
 
 use std::collections::VecDeque;
 
 use rand::rngs::StdRng;
 use rand::RngExt;
 
-use crate::game::art_walls::{Cardinal, WallAxis, WallKind};
-use crate::game::collision::{cardinal_delta, SizeClass, TileKind, TileMap};
-use crate::game::level::{MazeSection, RoomKind, Theme, TileRect, MAP_COLS, MAP_ROWS};
-use crate::math::Vec2;
+use crate::game::art_walls::{Cardinal, WallKind};
+use crate::game::collision::{cardinal_delta, SizeClass, TileKind, TileMap, TILE_F};
+use crate::game::level::{MazeSection, Room, RoomKind, Theme, TileRect, MAP_COLS, MAP_ROWS};
 
 use super::layout::Layout;
 
-/// The most maze sections a map may have (`Layout::maze_slots` holds 0..=2).
+/// The data model's cap on sections per map (`Level::mazes`). A map actually
+/// carries at most [`MAZES_PER_MAP`]; the wider cap is the data model's.
 pub const MAX_MAZES: usize = 2;
+
+/// How many mazes a map carries: at most one.
+///
+/// The owner's decision — an expedition is a find — so `layout` rolls one slot
+/// with probability one in `layout::MAZE_ONE_IN`, and this stage carves it.
+pub const MAZES_PER_MAP: usize = 1;
 
 /// Aisle lattice spacing of a carved maze: partition cells sit one cell to the
 /// side of every aisle, so a maze aisle is one open cell wide (24 px of clear
 /// floor between two 8 px [`WallKind::Maze`] spines).
 const AISLE_STEP: i32 = 2;
 
-/// A solid component smaller than this is a prop/cover block, not a wall run,
-/// and is never pierced. Props are at most ~10 cells; a wall run is far longer.
-const MIN_PIERCE_COMPONENT: usize = 8;
+/// Aisle steps the cache aims for along the best route from the breach.
+///
+/// One lattice step is two 16 px cells, so 16 steps ≈ 8.8 s at the rat's
+/// 58 px/s — the designer's "seven to twelve second" cache walk, with the
+/// reward at the exit's own aisle.
+pub const REWARD_STEPS_TARGET: i32 = 16;
 
-/// How many rat-holes a map tries to grow (the layout may offer fewer walls).
-const HOLE_COUNT_MIN: usize = 6;
-const HOLE_COUNT_SPREAD: usize = 7;
+/// The band of route lengths a door may sit at, in lattice steps.
+///
+/// A lattice step is two 16 px cells, so 13–19 steps is a 7.7–11.6 s cache
+/// walk at 58 px/s — the designer's "seven to twelve seconds" with the target
+/// in the middle of the band. A door outside the band is only used when a
+/// lattice has nothing better (hand-built test layouts).
+pub const REWARD_STEPS_BAND: (i32, i32) = (13, 19);
+
+/// How many cells along the outside walkway the breach may sit from the cell
+/// where its access corridor meets that walkway.
+///
+/// The breach still faces the corridor, but a maze whose route is only ten
+/// steps from a mid-wall breach is not worth the gamble; sliding the breach a
+/// few cells along the walkway (never across a corner) buys the route its
+/// length. The three gnaw marks cover the turn.
+pub const ENTRY_SLACK_CELLS: i32 = 4;
+
+/// The farthest a breach may sit from the start cell, in cells on the worse
+/// axis, for the first cache to count as an opening choice (the owner's "within
+/// about 32 cells of the start").
+pub const ENTRY_NEAR_CELLS: i32 = 32;
+
+/// Cells from the public fork to the breach that the gnaw-mark trail covers
+/// (three marks on the final four cells).
+pub const TRAIL_CELLS: i32 = 4;
+
+/// Two blind-tip links for a lattice of 45+ nodes, one below.
+const LOOP_NODE_THRESHOLD: i32 = 45;
+const LOOP_LINKS_BIG: usize = 2;
+const LOOP_LINKS_SMALL: usize = 1;
+
+/// How far from the exit's landing a junction with two onward choices still
+/// counts as "the landing opens onto another route".
+const LANDING_RANGE: i32 = 8;
 
 /// Every corner of the map, in the fixed order all stage-B tie-breaks use.
 const SIDES: [Cardinal; 4] = [
@@ -65,25 +114,6 @@ const SIDES: [Cardinal; 4] = [
     Cardinal::South,
     Cardinal::West,
 ];
-
-/// A trap the generator wants on the floor. The simulation turns these into
-/// [`StickyTrapView`](crate::game::art_traps::StickyTrapView) /
-/// [`MousetrapView`](crate::game::art_traps::MousetrapView) in its idle state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TrapKind {
-    /// Glue board (`STICKY_TRAP_*`): slows, never damages.
-    Sticky,
-    /// Wooden snap trap (`MOUSETRAP_*`): warns, then damages.
-    Snap,
-}
-
-/// One trap placement: world position, orientation and kind.
-#[derive(Clone, Copy, Debug)]
-pub struct TrapPlacement {
-    pub kind: TrapKind,
-    pub pos: Vec2,
-    pub facing: Vec2,
-}
 
 // ---- Mazes -----------------------------------------------------------------
 
@@ -99,27 +129,24 @@ pub fn ring_border(ring: TileRect) -> impl Iterator<Item = (i32, i32)> {
     })
 }
 
-/// The [`WallKind::Maze`] ring that encloses a maze slot.
+/// The [`WallKind::Maze`] ring that encloses a maze slot: the slot's own
+/// boundary cells, one cell thick.
 ///
-/// A slot of at least 9 × 9 cells keeps a one-cell open moat between the ring
-/// and the slot's edge, so the one-way door always swings onto floor that is
-/// inside the reserved slot; a smaller slot is ringed on its own edge.
+/// The breach and the one-way door sit in this ring, so both open straight
+/// onto the outside walkway the layout carved (`slot.inflate(1)`), and the
+/// lattice inside is as large as the slot allows — a 23 × 19 slot carries an
+/// 11 × 9 aisle lattice.
 pub fn maze_ring(bounds: TileRect) -> TileRect {
-    if bounds.w >= 9 && bounds.h >= 9 {
-        bounds.inflate(-1)
-    } else {
-        bounds
-    }
+    bounds
 }
 
-/// **Stage B (mazes).** Carve up to two maze sections into the layout's
-/// reserved slots and return them.
+/// **Stage B (mazes).** Carve a maze into every slot the layout reserved.
 ///
 /// Each section is a recursive-backtracker warren of [`WallKind::Maze`]
-/// partitions: one open cell per aisle, one partition cell between two aisles,
-/// a two-cell entry gap in the ring, the reward pedestal on the boundary aisle
-/// farthest from that entry, and a [`WallKind::OneWayDoor`] beside the reward
-/// as the maze's only door — pointing out of the maze.
+/// partitions with one or two blind-tip links for a loop, a two-cell entry gap
+/// in the ring on the wall its access corridor faces, and a
+/// [`WallKind::OneWayDoor`] on a different wall as the maze's only exit — with
+/// the reward pedestal at that door.
 pub fn carve_mazes(
     tiles: &mut TileMap,
     layout: &Layout,
@@ -128,48 +155,74 @@ pub fn carve_mazes(
 ) -> Vec<MazeSection> {
     // The maze structure is theme independent; the art tints the partitions.
     let _ = theme;
-    let slots = layout.maze_slots.len().min(MAX_MAZES);
+    let slots = layout
+        .maze_slots
+        .len()
+        .min(MAZES_PER_MAP)
+        .min(MAX_MAZES);
     if slots == 0 {
         return Vec::new();
     }
-    // One maze always, a second one half the time: mazes show up in maps
-    // "sometimes" without ever wasting a slot the layout reserved.
-    let want = if slots == 1 {
-        1
-    } else {
-        rng.random_range(1..=MAX_MAZES)
-    };
-    let mut mazes = Vec::with_capacity(want);
-    for index in 0..want {
+    let mut mazes = Vec::with_capacity(slots);
+    for index in 0..slots {
         let Some(slot) = layout.maze_slot(index) else {
             break;
         };
-        if let Some(section) = carve_one(tiles, slot, rng) {
-            mazes.push(section);
+        match carve_one(tiles, layout, slot, rng) {
+            Some(section) => mazes.push(section),
+            None => {
+                // A reservation is a promise. `layout` only reserves slots of
+                // a size, and in a place, this stage can always carve, so a
+                // bail-out here is a generator bug, not weather.
+                debug_assert!(
+                    false,
+                    "reserved maze slot {slot:?} could not be carved"
+                );
+                clear_rect(tiles, slot);
+            }
         }
     }
+    debug_assert_eq!(
+        mazes.len(),
+        slots,
+        "layout reserved {slots} maze slot(s) and stage B carved {}",
+        mazes.len()
+    );
     mazes
 }
 
-/// Carve one maze into `bounds`, or leave the slot untouched and return `None`
-/// when it is too small or has nowhere to put its door.
-fn carve_one(tiles: &mut TileMap, bounds: TileRect, rng: &mut StdRng) -> Option<MazeSection> {
+/// Carve one maze into `bounds`.
+fn carve_one(
+    tiles: &mut TileMap,
+    layout: &Layout,
+    bounds: TileRect,
+    rng: &mut StdRng,
+) -> Option<MazeSection> {
     let ring = maze_ring(bounds);
     // Never touch the two-cell map border.
     if ring.x < 2 || ring.y < 2 || ring.right() > MAP_COLS - 2 || ring.bottom() > MAP_ROWS - 2 {
         return None;
     }
     let inner = ring.inflate(-1);
-    if inner.w < 3 || inner.h < 3 {
+    if inner.w < 5 || inner.h < 5 {
         return None;
     }
-    let cols = inner.w.div_euclid(AISLE_STEP);
-    let rows = inner.h.div_euclid(AISLE_STEP);
+    // `(w + 1) / 2` aisle columns: the last one lands on `inner.right() - 1`,
+    // hard against the ring, so a boundary aisle always exists for the entry
+    // and the exit.
+    let cols = (inner.w + 1).div_euclid(AISLE_STEP);
+    let rows = (inner.h + 1).div_euclid(AISLE_STEP);
     if cols < 2 || rows < 2 {
         return None;
     }
+    let nodes = (cols * rows) as usize;
     let node = |i: i32, j: i32| (j * cols + i) as usize;
     let aisle = |i: i32, j: i32| (inner.x + i * AISLE_STEP, inner.y + j * AISLE_STEP);
+    // The partition cell between two lattice neighbours, if both are inside.
+    let inside_lattice = |i: i32, j: i32| (0..cols).contains(&i) && (0..rows).contains(&j);
+    let link = |i: i32, j: i32, di: i32, dj: i32| {
+        (inner.x + 2 * i + di, inner.y + 2 * j + dj)
+    };
 
     // 1. Solid maze partitions everywhere inside the ring, then the aisle
     //    lattice opened up on the odd offsets.
@@ -189,7 +242,7 @@ fn carve_one(tiles: &mut TileMap, bounds: TileRect, rng: &mut StdRng) -> Option<
 
     // 2. Recursive-backtracker spanning tree: long winding aisles with exactly
     //    one route between any two aisle cells.
-    let mut visited = vec![false; (cols * rows) as usize];
+    let mut visited = vec![false; nodes];
     let root = (rng.random_range(0..cols), rng.random_range(0..rows));
     visited[node(root.0, root.1)] = true;
     let mut stack = vec![root];
@@ -198,7 +251,7 @@ fn carve_one(tiles: &mut TileMap, bounds: TileRect, rng: &mut StdRng) -> Option<
         let mut count = 0;
         for (di, dj) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
             let (ni, nj) = (i + di, j + dj);
-            if ni < 0 || nj < 0 || ni >= cols || nj >= rows || visited[node(ni, nj)] {
+            if !inside_lattice(ni, nj) || visited[node(ni, nj)] {
                 continue;
             }
             options[count] = (ni, nj);
@@ -209,23 +262,79 @@ fn carve_one(tiles: &mut TileMap, bounds: TileRect, rng: &mut StdRng) -> Option<
             continue;
         }
         let (ni, nj) = options[rng.random_range(0..count)];
-        // The one partition cell between the two aisles (`i + ni`, `j + nj`).
-        tiles.set(
-            inner.x + i + ni,
-            inner.y + j + nj,
-            TileKind::Open,
-        );
+        // The one partition cell between the two aisles.
+        let (cx, cy) = link(i, j, ni - i, nj - j);
+        tiles.set(cx, cy, TileKind::Open);
         visited[node(ni, nj)] = true;
         stack.push((ni, nj));
     }
 
-    // 3. A two-cell entry gap in the ring, aligned with a boundary aisle.
+    // 3. Blind-tip links: a warren with no loop is one unavoidable corridor
+    //    once a horde is behind you. Open one or two partitions at dead ends,
+    //    so the rat can reverse around a pursuer while still paying distance.
+    //    Only interior links open — a ring cell is never touched.
+    let loop_budget = if cols * rows >= LOOP_NODE_THRESHOLD {
+        LOOP_LINKS_BIG
+    } else {
+        LOOP_LINKS_SMALL
+    };
+    let mut dead_ends: Vec<(i32, i32)> = Vec::new();
+    for j in 0..rows {
+        for i in 0..cols {
+            let mut degree = 0;
+            for (di, dj) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                if !inside_lattice(i + di, j + dj) {
+                    continue;
+                }
+                let (cx, cy) = link(i, j, di, dj);
+                if tiles.get(cx, cy).is_open() {
+                    degree += 1;
+                }
+            }
+            if degree == 1 {
+                dead_ends.push((i, j));
+            }
+        }
+    }
+    let mut opened = 0usize;
+    for (i, j) in dead_ends {
+        if opened >= loop_budget {
+            break;
+        }
+        let mut options = [(0, 0); 4];
+        let mut count = 0;
+        for (di, dj) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            if !inside_lattice(i + di, j + dj) {
+                continue;
+            }
+            let (cx, cy) = link(i, j, di, dj);
+            if !tiles.get(cx, cy).is_open() {
+                options[count] = (di, dj);
+                count += 1;
+            }
+        }
+        if count == 0 {
+            continue;
+        }
+        let (di, dj) = options[rng.random_range(0..count)];
+        let (cx, cy) = link(i, j, di, dj);
+        tiles.set(cx, cy, TileKind::Open);
+        opened += 1;
+    }
+    debug_assert!(opened >= 1, "a maze without an interior loop is a dead end");
+    let _ = opened;
+
+    // 4. The breach: a two-cell gap in the ring on the wall that faces the
+    //    outside walkway's access corridor — and, within `ENTRY_SLACK_CELLS`
+    //    of where that corridor lands, the spot whose best door on another
+    //    wall comes closest to the target route.
+    //
+    //    Every boundary aisle reaches the ring (the lattice is packed against
+    //    it), so every `(side, along)` is a possible breach whose ingress cell
+    //    is already open floor.
     let mut entry_options: Vec<(Cardinal, i32)> = Vec::new();
     for side in SIDES {
-        let count = match side {
-            Cardinal::North | Cardinal::South => cols,
-            _ => rows,
-        };
+        let count = side_count(side, cols, rows);
         for along in 0..count {
             let (_, ingress) = ring_cell(ring, inner, side, along);
             if tiles.get(ingress.0, ingress.1).is_open() {
@@ -237,7 +346,110 @@ fn carve_one(tiles: &mut TileMap, bounds: TileRect, rng: &mut StdRng) -> Option<
         clear_rect(tiles, bounds);
         return None;
     }
-    let (entry_side, entry_along) = entry_options[rng.random_range(0..entry_options.len())];
+    let approach = approach_cells(tiles, bounds);
+    // Distance from each candidate breach cell to the nearest cell where an
+    // access corridor meets the walkway.
+    let access: Vec<i32> = entry_options
+        .iter()
+        .map(|&(side, along)| {
+            let (cell, _) = ring_cell(ring, inner, side, along);
+            approach
+                .iter()
+                .map(|&(ax, ay)| (cell.0 - ax).abs() + (cell.1 - ay).abs())
+                .min()
+                .unwrap_or(i32::MAX / 4)
+        })
+        .collect();
+    // The breach also has to be within `ENTRY_NEAR_CELLS` of the rat: the
+    // outside walkway has a second corridor (the bypass), so "nearest access
+    // cell" alone could put the breach on the far side of the slot. The slack
+    // is measured against the nearest access cell *among the near candidates*,
+    // so the breach always faces the corridor the rat arrives by.
+    let start_cell = (
+        (layout.start.x / TILE_F) as i32,
+        (layout.start.y / TILE_F) as i32,
+    );
+    let start_dist: Vec<i32> = entry_options
+        .iter()
+        .map(|&(side, along)| {
+            let (cell, _) = ring_cell(ring, inner, side, along);
+            (cell.0 - start_cell.0)
+                .abs()
+                .max((cell.1 - start_cell.1).abs())
+        })
+        .collect();
+    let least_access = (0..entry_options.len())
+        .filter(|&index| start_dist[index] <= ENTRY_NEAR_CELLS)
+        .map(|index| access[index])
+        .min()
+        .unwrap_or(0);
+    // Rotate first so ties are broken by a seed draw, then keep the breach
+    // whose best door on another wall comes closest to the target route (a
+    // door inside `REWARD_STEPS_BAND` always wins over one outside it, even if
+    // the outside one is numerically nearer: the band is the design).
+    let rotation = rng.random_range(0..entry_options.len());
+    let mut best_entry: Option<(usize, i32, bool)> = None; // (index, miss, in band)
+    for k in 0..entry_options.len() {
+        let index = (k + rotation) % entry_options.len();
+        if access[index] > least_access + ENTRY_SLACK_CELLS
+            || start_dist[index] > ENTRY_NEAR_CELLS
+        {
+            continue;
+        }
+        let (side, along) = entry_options[index];
+        let (bi, bj) = aisle_of(side, along, cols, rows);
+        let row = lattice_row(tiles, inner, cols, rows, (bi, bj));
+        // The best door on any other wall, whether or not it is picked later.
+        let mut miss = i32::MAX;
+        let mut in_band = false;
+        for other in SIDES {
+            if other == side {
+                continue;
+            }
+            for oalong in 0..side_count(other, cols, rows) {
+                let (oi, oj) = aisle_of(other, oalong, cols, rows);
+                let d = row[node(oi, oj)];
+                if d < 0 {
+                    continue;
+                }
+                miss = miss.min((d - REWARD_STEPS_TARGET).abs());
+                in_band |= (REWARD_STEPS_BAND.0..=REWARD_STEPS_BAND.1).contains(&d);
+            }
+        }
+        let better = match best_entry {
+            None => true,
+            Some((best_index, best_miss, best_in_band)) => {
+                in_band & !best_in_band
+                    || (in_band == best_in_band
+                        && (miss < best_miss
+                            || (miss == best_miss && access[index] < access[best_index])))
+            }
+        };
+        if better {
+            best_entry = Some((index, miss, in_band));
+        }
+    }
+    let chosen = match best_entry {
+        Some((index, _, _)) => index,
+        None => {
+            // The layout promises a slot whose near ring cell is inside the
+            // 32-cell bound, so this is a fallback for a hand-built layout in
+            // a test rather than a normal path.
+            let mut best = 0usize;
+            for index in 1..entry_options.len() {
+                if start_dist[index] < start_dist[best] {
+                    best = index;
+                }
+            }
+            best
+        }
+    };
+    debug_assert!(
+        start_dist[chosen] <= ENTRY_NEAR_CELLS,
+        "breach {} cells from the start",
+        start_dist[chosen]
+    );
+    let (entry_side, entry_along) = entry_options[chosen];
     let (entry, entry_ingress) = ring_cell(ring, inner, entry_side, entry_along);
     let entry_aisle = aisle_of(entry_side, entry_along, cols, rows);
     debug_assert_eq!(aisle(entry_aisle.0, entry_aisle.1), entry_ingress);
@@ -263,74 +475,90 @@ fn carve_one(tiles: &mut TileMap, bounds: TileRect, rng: &mut StdRng) -> Option<
         break;
     }
 
-    // 4. Distances over the carved lattice, so the reward can sit at the far
-    //    end of the warren rather than next to the entry.
-    let mut dist = vec![-1i32; (cols * rows) as usize];
-    dist[node(entry_aisle.0, entry_aisle.1)] = 0;
-    let mut queue = VecDeque::new();
-    queue.push_back(entry_aisle);
-    while let Some((i, j)) = queue.pop_front() {
-        for (di, dj) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-            let (ni, nj) = (i + di, j + dj);
-            if ni < 0 || nj < 0 || ni >= cols || nj >= rows || dist[node(ni, nj)] >= 0 {
-                continue;
-            }
-            if !tiles
-                .get(inner.x + i + ni, inner.y + j + nj)
-                .is_open()
-            {
-                continue;
-            }
-            dist[node(ni, nj)] = dist[node(i, j)] + 1;
-            queue.push_back((ni, nj));
-        }
-    }
-
-    // 5. The exit: the one-way door on the farthest boundary aisle that has
-    //    open floor on both faces of its ring cell. Prefer a different side
-    //    from the entry so the maze reads as a one-way shortcut.
-    let mut best: Option<ExitSpec> = None;
+    // 6. The exit: a wall the breach is not on, at the aisle whose route from
+    //    the breach is inside [`REWARD_STEPS_BAND`] and closest to
+    //    `REWARD_STEPS_TARGET`. Every wall with a usable door gets its own
+    //    draw, so all four exit orientations occur across seeds.
+    //
+    //    The distance row is recomputed here, after the breach's vestibule has
+    //    opened one more link: the picker must measure the maze the player
+    //    actually walks, not the tree it started as.
+    let row = lattice_row(tiles, inner, cols, rows, entry_aisle);
+    // Per wall: its best door inside the band, as (miss, -landing tier, along).
+    let mut sides: Vec<(Cardinal, i32, i32, i32)> = Vec::new();
     for side in SIDES {
-        let count = match side {
-            Cardinal::North | Cardinal::South => cols,
-            _ => rows,
-        };
-        for along in 0..count {
+        if side == entry_side {
+            continue;
+        }
+        let mut best: Option<(i32, i32, i32)> = None;
+        for along in 0..side_count(side, cols, rows) {
             let (cell, ingress) = ring_cell(ring, inner, side, along);
-            if !tiles.get(ingress.0, ingress.1).is_open() || entry_cells.contains(&cell) {
+            if entry_cells.contains(&cell) || !tiles.get(ingress.0, ingress.1).is_open() {
                 continue;
             }
             let (dx, dy) = cardinal_delta(side);
-            let outside = (cell.0 + dx, cell.1 + dy);
-            if !tiles.get(outside.0, outside.1).is_open() {
+            let landing = (cell.0 + dx, cell.1 + dy);
+            if !tiles.get(landing.0, landing.1).is_open() {
                 continue;
             }
             let (i, j) = aisle_of(side, along, cols, rows);
-            let d = dist[node(i, j)];
-            if d < 0 {
+            let dist = row[node(i, j)];
+            if !(REWARD_STEPS_BAND.0..=REWARD_STEPS_BAND.1).contains(&dist) {
                 continue;
             }
-            let candidate = ExitSpec {
-                rank: u8::from(side == entry_side),
-                dist: d,
-                dir: side,
+            let tier = i32::from(landing_tier(tiles, &layout.rooms, landing));
+            let key = (
+                (dist - REWARD_STEPS_TARGET).abs(),
+                -tier,
                 along,
-                cell,
+            );
+            let better = match best {
+                None => true,
+                Some((bm, bt, ba)) => {
+                    key.0 < bm || (key.0 == bm && (key.1 < bt || (key.1 == bt && key.2 < ba)))
+                }
             };
-            if best.is_none_or(|best| candidate.better_than(&best)) {
-                best = Some(candidate);
+            if better {
+                best = Some(key);
             }
         }
+        if let Some((miss, tier, along)) = best {
+            sides.push((side, miss, tier, along));
+        }
     }
-    let Some(exit_spec) = best else {
-        clear_rect(tiles, bounds);
-        return None;
+    let (exit_dir, exit_along) = if sides.is_empty() {
+        // No wall offers a route inside the band (a tiny hand-built lattice):
+        // take the closest there is.
+        let mut best: Option<(i32, i32, Cardinal, i32)> = None;
+        for side in SIDES {
+            if side == entry_side {
+                continue;
+            }
+            for along in 0..side_count(side, cols, rows) {
+                let (i, j) = aisle_of(side, along, cols, rows);
+                let d = row[node(i, j)];
+                if d < 0 {
+                    continue;
+                }
+                let miss = (d - REWARD_STEPS_TARGET).abs();
+                if best.is_none_or(|(bm, _, _, _)| miss < bm) {
+                    best = Some((miss, -1, side, along));
+                }
+            }
+        }
+        let Some((_, _, side, along)) = best else {
+            clear_rect(tiles, bounds);
+            return None;
+        };
+        (side, along)
+    } else {
+        let pick = rng.random_range(0..sides.len());
+        (sides[pick].0, sides[pick].3)
     };
-    let exit_dir = exit_spec.dir;
-    let exit_along = exit_spec.along;
-    let exit = exit_spec.cell;
+    let (exit, _) = ring_cell(ring, inner, exit_dir, exit_along);
     let (reward_i, reward_j) = aisle_of(exit_dir, exit_along, cols, rows);
-    // The pedestal sits one aisle back from the door, at the true dead end.
+    // The pedestal stands on the aisle right beside the door: the cache is the
+    // last step of the route, and claiming it is what opens the way out.
     let (rx, ry) = aisle(reward_i, reward_j);
     let reward = TileMap::tile_rect(rx, ry).center();
     tiles.set(
@@ -339,13 +567,192 @@ fn carve_one(tiles: &mut TileMap, bounds: TileRect, rng: &mut StdRng) -> Option<
         TileKind::Wall(WallKind::OneWayDoor { dir: exit_dir }),
     );
 
+    // 7. The public fork: from the breach outwards along the walkway, the
+    //    farthest cell within `TRAIL_CELLS` that is still open floor. This is
+    //    where the gnaw-mark trail starts; the three marks sit on the cells
+    //    between it and the breach.
+    let fork = trail_fork(tiles, ring, entry, &approach);
+
     Some(MazeSection {
         bounds,
+        ring,
         entry,
+        fork,
         exit,
         exit_dir,
         reward,
+        reward_cell: (rx, ry),
     })
+}
+
+/// Cells just outside the maze's open walkway (two to three cells out from the
+/// slot) that are open floor: where its access corridors meet the walkway.
+///
+/// The walkway itself (`bounds.inflate(1)`) is open by construction, so those
+/// cells say nothing about where a corridor arrives and are excluded.
+fn approach_cells(tiles: &TileMap, bounds: TileRect) -> Vec<(i32, i32)> {
+    let walkway = bounds.inflate(1);
+    bounds
+        .inflate(3)
+        .cells()
+        .filter(|&(cx, cy)| {
+            !walkway.contains(cx, cy) && tiles.passable(cx, cy, SizeClass::Small)
+        })
+        .collect()
+}
+
+/// The public fork cell: the farthest open cell within [`TRAIL_CELLS`] steps of
+/// the breach that is outside the maze's ring.
+///
+/// The walk follows the outside walkway (`slot.inflate(1)`, which the layout
+/// carves as a continuous ring), so it may turn a corner when the breach slid
+/// along the wall to where its corridor lands. Ties prefer a cell straight out
+/// of the breach and then the one nearest an access corridor: that is where a
+/// rat coming down the passage first sees the marks.
+fn trail_fork(
+    tiles: &TileMap,
+    ring: TileRect,
+    entry: (i32, i32),
+    approach: &[(i32, i32)],
+) -> (i32, i32) {
+    let mut reached: Vec<((i32, i32), i32)> = Vec::with_capacity(24);
+    let mut seen: Vec<(i32, i32)> = Vec::with_capacity(24);
+    let mut queue: VecDeque<((i32, i32), i32)> = VecDeque::new();
+    seen.push(entry);
+    queue.push_back((entry, 0));
+    while let Some((cell, dist)) = queue.pop_front() {
+        if dist == TRAIL_CELLS {
+            continue;
+        }
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let next = (cell.0 + dx, cell.1 + dy);
+            // Never back into the warren, and never twice.
+            if ring.contains(next.0, next.1) || seen.contains(&next) {
+                continue;
+            }
+            if !tiles.passable(next.0, next.1, SizeClass::Small) {
+                continue;
+            }
+            seen.push(next);
+            reached.push((next, dist + 1));
+            queue.push_back((next, dist + 1));
+        }
+    }
+    let mut best: Option<(i32, i32, i32, (i32, i32))> = None;
+    for &(cell, dist) in &reached {
+        // `0` for a cell straight out of the breach (same row or column).
+        let off_axis = i32::from(cell.0 != entry.0 && cell.1 != entry.1);
+        let corridor = approach
+            .iter()
+            .map(|&(ax, ay)| (cell.0 - ax).abs() + (cell.1 - ay).abs())
+            .min()
+            .unwrap_or(0);
+        let key = (-dist, off_axis, corridor);
+        if best.is_none_or(|(bd, bo, bc, _)| {
+            key.0 < bd
+                || (key.0 == bd && (key.1 < bo || (key.1 == bo && key.2 < bc)))
+        }) {
+            best = Some((key.0, key.1, key.2, cell));
+        }
+    }
+    best.map(|(_, _, _, cell)| cell).unwrap_or(entry)
+}
+
+/// Cells of the gnaw-mark trail: how many open-floor steps the breach is from
+/// [`MazeSection::fork`], walking the outside walkway (never back inside the
+/// ring). `None` when the fork is not on that walk.
+///
+/// Three marks are drawn along the final [`TRAIL_CELLS`] cells between the fork
+/// and the breach, so this is the length of the trail the player reads.
+pub fn trail_walk_cells(tiles: &TileMap, maze: &MazeSection) -> Option<i32> {
+    let mut seen: Vec<(i32, i32)> = Vec::with_capacity(24);
+    let mut queue: VecDeque<((i32, i32), i32)> = VecDeque::new();
+    seen.push(maze.entry);
+    queue.push_back((maze.entry, 0));
+    while let Some((cell, dist)) = queue.pop_front() {
+        if cell == maze.fork {
+            return Some(dist);
+        }
+        if dist == TRAIL_CELLS {
+            continue;
+        }
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let next = (cell.0 + dx, cell.1 + dy);
+            if maze.ring.contains(next.0, next.1) || seen.contains(&next) {
+                continue;
+            }
+            if !tiles.passable(next.0, next.1, SizeClass::Small) {
+                continue;
+            }
+            seen.push(next);
+            queue.push_back((next, dist + 1));
+        }
+    }
+    None
+}
+
+/// How good the floor outside a one-way door is: `2` when it is inside or next
+/// to an ordinary room, `1` when a junction with two onward choices is within
+/// [`LANDING_RANGE`] cells, `0` otherwise.
+///
+/// The designer's requirement for the exit is "in or next to a second room or
+/// a junction with two onward choices within 8 cells": the maze's outside
+/// walkway is joined to a second room by the layout (`layout::nearest_ordinary`),
+/// and this is how the exit picker measures whether its landing reaches that.
+pub fn landing_tier(tiles: &TileMap, rooms: &[Room], landing: (i32, i32)) -> u8 {
+    for room in rooms {
+        if matches!(room.kind, RoomKind::Room | RoomKind::Hall)
+            && room.rect.inflate(1).contains(landing.0, landing.1)
+        {
+            return 2;
+        }
+    }
+    if junction_within(tiles, landing, LANDING_RANGE) {
+        1
+    } else {
+        0
+    }
+}
+
+/// Is there a cell with two onward choices (three or more open neighbours)
+/// within `range` steps of `from`, over open floor?
+fn junction_within(tiles: &TileMap, from: (i32, i32), range: i32) -> bool {
+    let limit = ((2 * range + 1) * (2 * range + 1)) as usize;
+    let mut seen: Vec<(i32, i32)> = Vec::with_capacity(limit);
+    let mut reached: Vec<(i32, i32)> = Vec::with_capacity(limit);
+    seen.push(from);
+    reached.push(from);
+    let mut head = 0;
+    while head < reached.len() {
+        let cell = reached[head];
+        head += 1;
+        let mut open = 0;
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let next = (cell.0 + dx, cell.1 + dy);
+            if !tiles.passable(next.0, next.1, SizeClass::Small) {
+                continue;
+            }
+            open += 1;
+            if seen.len() >= limit || seen.contains(&next) {
+                continue;
+            }
+            seen.push(next);
+            reached.push(next);
+        }
+        let travelled = (cell.0 - from.0).abs() + (cell.1 - from.1).abs();
+        if travelled > 0 && open >= 3 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Open ring cells of a side's lattice (the candidates for a breach or a door).
+fn side_count(side: Cardinal, cols: i32, rows: i32) -> i32 {
+    match side {
+        Cardinal::North | Cardinal::South => cols,
+        Cardinal::East | Cardinal::West => rows,
+    }
 }
 
 /// The ring cell of `side` at aisle index `along`, plus the cell just inside
@@ -376,27 +783,6 @@ fn ring_cell(
     }
 }
 
-/// The best one-way door found for a maze so far (see step 5 of [`carve_one`]).
-#[derive(Clone, Copy, Debug)]
-struct ExitSpec {
-    /// `0` when the door is on a side the entry is not on (preferred).
-    rank: u8,
-    /// Aisle distance from the entry (the reward sits at the farthest one).
-    dist: i32,
-    /// Outward travel direction through the door.
-    dir: Cardinal,
-    /// Aisle index along that side.
-    along: i32,
-    /// The `OneWayDoor` ring cell.
-    cell: (i32, i32),
-}
-
-impl ExitSpec {
-    fn better_than(&self, other: &ExitSpec) -> bool {
-        (self.rank, self.dist) > (other.rank, other.dist)
-    }
-}
-
 /// Aisle lattice index reached from a ring side.
 fn aisle_of(side: Cardinal, along: i32, cols: i32, rows: i32) -> (i32, i32) {
     match side {
@@ -407,435 +793,162 @@ fn aisle_of(side: Cardinal, along: i32, cols: i32, rows: i32) -> (i32, i32) {
     }
 }
 
+/// The side of `bounds` a ring cell sits on (for the entry/exit wall check).
+pub fn side_of_ring(bounds: TileRect, cell: (i32, i32)) -> Option<Cardinal> {
+    let ring = maze_ring(bounds);
+    if cell.1 == ring.y {
+        Some(Cardinal::North)
+    } else if cell.1 == ring.bottom() - 1 {
+        Some(Cardinal::South)
+    } else if cell.0 == ring.x {
+        Some(Cardinal::West)
+    } else if cell.0 == ring.right() - 1 {
+        Some(Cardinal::East)
+    } else {
+        None
+    }
+}
+
+/// The lattice geometry of a carved section: `(inner, cols, rows)`.
+fn lattice_of(bounds: TileRect) -> (TileRect, i32, i32) {
+    let ring = maze_ring(bounds);
+    let inner = ring.inflate(-1);
+    (
+        inner,
+        (inner.w + 1).div_euclid(AISLE_STEP),
+        (inner.h + 1).div_euclid(AISLE_STEP),
+    )
+}
+
+/// The partition cell between two lattice neighbours (see [`carve_one`]).
+fn link_cell(inner: TileRect, i: i32, j: i32, di: i32, dj: i32) -> (i32, i32) {
+    (inner.x + 2 * i + di, inner.y + 2 * j + dj)
+}
+
+/// Lattice distances from one aisle node to every node, `-1` where the carved
+/// aisles do not reach — indexed by the lattice's own `node(i, j)` layout, so
+/// `row[node(i, j)]` is the route length in lattice steps.
+fn lattice_row(
+    tiles: &TileMap,
+    inner: TileRect,
+    cols: i32,
+    rows: i32,
+    from: (i32, i32),
+) -> Vec<i32> {
+    let node = |i: i32, j: i32| (j * cols + i) as usize;
+    let inside = |i: i32, j: i32| (0..cols).contains(&i) && (0..rows).contains(&j);
+    let mut row = vec![-1i32; (cols * rows) as usize];
+    let mut queue: VecDeque<(i32, i32)> = VecDeque::new();
+    row[node(from.0, from.1)] = 0;
+    queue.push_back(from);
+    while let Some((ci, cj)) = queue.pop_front() {
+        for (di, dj) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let (ni, nj) = (ci + di, cj + dj);
+            if !inside(ni, nj) || row[node(ni, nj)] >= 0 {
+                continue;
+            }
+            let (cx, cy) = link_cell(inner, ci, cj, di, dj);
+            if !tiles.get(cx, cy).is_open() {
+                continue;
+            }
+            row[node(ni, nj)] = row[node(ci, cj)] + 1;
+            queue.push_back((ni, nj));
+        }
+    }
+    row
+}
+
+/// Independent interior loops of a maze's aisle lattice: edges − vertices + 1.
+///
+/// One loop means the rat can reverse around a pursuer inside the warren; zero
+/// means every route is the only route.
+pub fn maze_loops(tiles: &TileMap, maze: &MazeSection) -> i32 {
+    let (inner, cols, rows) = lattice_of(maze.bounds);
+    if cols < 2 || rows < 2 {
+        return 0;
+    }
+    let mut nodes = 0;
+    let mut edges = 0;
+    for j in 0..rows {
+        for i in 0..cols {
+            let (cx, cy) = (inner.x + i * AISLE_STEP, inner.y + j * AISLE_STEP);
+            if !tiles.passable(cx, cy, SizeClass::Small) {
+                continue;
+            }
+            nodes += 1;
+            // Count east and south links only, so every edge is counted once.
+            for (di, dj) in [(1, 0), (0, 1)] {
+                if i + di >= cols || j + dj >= rows {
+                    continue;
+                }
+                let (lx, ly) = link_cell(inner, i, j, di, dj);
+                if tiles.passable(lx, ly, SizeClass::Small)
+                    && tiles.passable(
+                        inner.x + (i + di) * AISLE_STEP,
+                        inner.y + (j + dj) * AISLE_STEP,
+                        SizeClass::Small,
+                    )
+                {
+                    edges += 1;
+                }
+            }
+        }
+    }
+    if nodes == 0 {
+        0
+    } else {
+        edges - nodes + 1
+    }
+}
+
+/// Grid cells from the breach to the cache, along the maze's own aisles — the
+/// designer's "cache walk": `cells * 16 / 58` seconds at the rat's 58 px/s.
+///
+/// The search is confined to `maze.bounds`, so it measures the warren and not
+/// the walkway outside it. `None` when the cache cannot be walked to.
+pub fn maze_walk_cells(tiles: &TileMap, maze: &MazeSection) -> Option<i32> {
+    let bounds = maze.bounds;
+    if !bounds.contains(maze.entry.0, maze.entry.1) {
+        return None;
+    }
+    let target = maze.reward_cell;
+    let mut seen = vec![false; (bounds.w.max(0) * bounds.h.max(0)) as usize];
+    let index = |cx: i32, cy: i32| ((cy - bounds.y) * bounds.w + (cx - bounds.x)) as usize;
+    if !bounds.contains(target.0, target.1) || !bounds.contains(maze.entry.0, maze.entry.1) {
+        return None;
+    }
+    let mut dist = vec![-1i32; seen.len()];
+    let mut queue = VecDeque::new();
+    dist[index(maze.entry.0, maze.entry.1)] = 0;
+    seen[index(maze.entry.0, maze.entry.1)] = true;
+    queue.push_back(maze.entry);
+    while let Some((cx, cy)) = queue.pop_front() {
+        if (cx, cy) == target {
+            return Some(dist[index(cx, cy)]);
+        }
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let next = (cx + dx, cy + dy);
+            if !bounds.contains(next.0, next.1) || !tiles.passable(next.0, next.1, SizeClass::Small)
+            {
+                continue;
+            }
+            let i = index(next.0, next.1);
+            if seen[i] {
+                continue;
+            }
+            seen[i] = true;
+            dist[i] = dist[index(cx, cy)] + 1;
+            queue.push_back(next);
+        }
+    }
+    None
+}
+
 /// Put a slot back the way stage A left it (open floor).
 fn clear_rect(tiles: &mut TileMap, bounds: TileRect) {
     for (cx, cy) in bounds.cells() {
         tiles.set(cx, cy, TileKind::Open);
     }
-}
-
-// ---- Rat-holes -------------------------------------------------------------
-
-/// One candidate piercing: one or two adjacent wall cells, depending on how
-/// thick the wall on the passage axis is.
-#[derive(Clone, Copy, Debug)]
-struct Pierce {
-    first: (i32, i32),
-    second: Option<(i32, i32)>,
-    axis: WallAxis,
-}
-
-impl Pierce {
-    fn cells(&self) -> impl Iterator<Item = (i32, i32)> + '_ {
-        [Some(self.first), self.second].into_iter().flatten()
-    }
-}
-
-/// **Stage B (rat-holes).** Pierce structural walls with rat-hole cells and
-/// return every rat-hole cell (with the wall axis), including any an earlier
-/// stage already carved.
-///
-/// A hole goes into a wall that is one cell thick on its passage axis; a
-/// two-cell-thick wall is pierced as a pair of aligned cells, so the 8 px
-/// tunnel stays straight (`CONTENT_PLAN.md` §2). Holes never touch the border,
-/// the start room, the boss arena, a room interior (props live there) or a
-/// doorway, and two picks are kept apart so they never merge into a door.
-pub fn place_rat_holes(
-    tiles: &mut TileMap,
-    layout: &Layout,
-    rng: &mut StdRng,
-) -> Vec<((i32, i32), WallAxis)> {
-    let field = HoleField::new(tiles, layout);
-    let mut candidates: Vec<Pierce> = Vec::new();
-    for cy in 2..tiles.rows() - 2 {
-        for cx in 2..tiles.cols() - 2 {
-            if !tiles.is_full_solid(cx, cy) {
-                continue;
-            }
-            if let Some(pierce) = pierce_at(tiles, layout, &field, cx, cy) {
-                candidates.push(pierce);
-            }
-        }
-    }
-
-    let want = HOLE_COUNT_MIN + rng.random_range(0..=HOLE_COUNT_SPREAD);
-    for _ in 0..want {
-        if candidates.is_empty() {
-            break;
-        }
-        let pierce = candidates.swap_remove(rng.random_range(0..candidates.len()));
-        for (cx, cy) in pierce.cells() {
-            tiles.set(
-                cx,
-                cy,
-                TileKind::Wall(WallKind::RatHole { axis: pierce.axis }),
-            );
-        }
-        // Keep holes apart so two picks never merge into a doorway-sized gap.
-        candidates.retain(|other| {
-            other.cells().all(|(ox, oy)| {
-                pierce
-                    .cells()
-                    .all(|(px, py)| (ox - px).abs() > 2 || (oy - py).abs() > 2)
-            })
-        });
-    }
-
-    // Report **every** hole in the map, including the ones the layout carved
-    // itself: this is the list the level turns into `RatHoleView`s.
-    let mut holes: Vec<((i32, i32), WallAxis)> = tiles
-        .iter_walls()
-        .filter_map(|(cx, cy, kind)| match kind {
-            WallKind::RatHole { axis } => Some(((cx, cy), axis)),
-            _ => None,
-        })
-        .collect();
-    holes.sort_by_key(|((cx, cy), _)| (*cy, *cx));
-    holes
-}
-
-/// Can the solid cell at `(cx, cy)` carry a rat-hole? The wall must pierce a
-/// one- or two-cell-thick run, with open floor at both mouths.
-fn pierce_at(
-    tiles: &TileMap,
-    layout: &Layout,
-    field: &HoleField,
-    cx: i32,
-    cy: i32,
-) -> Option<Pierce> {
-    if !hole_zone_ok(tiles, layout, field, cx, cy) {
-        return None;
-    }
-    let north = tiles.get(cx, cy - 1);
-    let south = tiles.get(cx, cy + 1);
-    let west = tiles.get(cx - 1, cy);
-    let east = tiles.get(cx + 1, cy);
-
-    // A one-cell-thick east-west wall: passage north-south.
-    if north.is_open() && south.is_open() && west.is_wall() && east.is_wall() {
-        if mouth_ok(tiles, cx, cy - 1) && mouth_ok(tiles, cx, cy + 1) {
-            return Some(Pierce {
-                first: (cx, cy),
-                second: None,
-                axis: WallAxis::Horizontal,
-            });
-        }
-        return None;
-    }
-    // A one-cell-thick north-south wall: passage east-west.
-    if west.is_open() && east.is_open() && north.is_wall() && south.is_wall() {
-        if mouth_ok(tiles, cx - 1, cy) && mouth_ok(tiles, cx + 1, cy) {
-            return Some(Pierce {
-                first: (cx, cy),
-                second: None,
-                axis: WallAxis::Vertical,
-            });
-        }
-        return None;
-    }
-    // A two-cell-thick wall, pierced as a pair. Only the northern/western cell
-    // of the pair starts a candidate, so each pair is offered once.
-    if north.is_open()
-        && tiles.is_full_solid(cx, cy + 1)
-        && tiles.get(cx, cy + 2).is_open()
-        && west.is_wall()
-        && east.is_wall()
-        && tiles.get(cx - 1, cy + 1).is_wall()
-        && tiles.get(cx + 1, cy + 1).is_wall()
-        && hole_zone_ok(tiles, layout, field, cx, cy + 1)
-        && mouth_ok(tiles, cx, cy - 1)
-        && mouth_ok(tiles, cx, cy + 2)
-    {
-        return Some(Pierce {
-            first: (cx, cy),
-            second: Some((cx, cy + 1)),
-            axis: WallAxis::Horizontal,
-        });
-    }
-    if west.is_open()
-        && tiles.is_full_solid(cx + 1, cy)
-        && tiles.get(cx + 2, cy).is_open()
-        && north.is_wall()
-        && south.is_wall()
-        && tiles.get(cx + 1, cy - 1).is_wall()
-        && tiles.get(cx + 1, cy + 1).is_wall()
-        && hole_zone_ok(tiles, layout, field, cx + 1, cy)
-        && mouth_ok(tiles, cx - 1, cy)
-        && mouth_ok(tiles, cx + 2, cy)
-    {
-        return Some(Pierce {
-            first: (cx, cy),
-            second: Some((cx + 1, cy)),
-            axis: WallAxis::Vertical,
-        });
-    }
-    None
-}
-
-/// Places a rat-hole may never appear: the border, the start room, the boss
-/// arena, any room interior (props are painted there as solid cells), and the
-/// cells immediately around a doorway, door or another hole. Also requires the
-/// cell to belong to a real wall run rather than a prop-sized island.
-fn hole_zone_ok(tiles: &TileMap, layout: &Layout, field: &HoleField, cx: i32, cy: i32) -> bool {
-    if cx < 2 || cy < 2 || cx > tiles.cols() - 3 || cy > tiles.rows() - 3 {
-        return false;
-    }
-    let cell = TileRect::new(cx, cy, 1, 1);
-    if cell.intersects(&layout.start_room.inflate(1)) || cell.intersects(&layout.boss_arena) {
-        return false;
-    }
-    if field.in_room(cx, cy) {
-        return false; // furnished room interiors are props, not walls
-    }
-    for dy in -1..=1 {
-        for dx in -1..=1 {
-            if matches!(
-                tiles.get(cx + dx, cy + dy),
-                TileKind::Wall(
-                    WallKind::Doorway { .. } | WallKind::OneWayDoor { .. } | WallKind::RatHole { .. }
-                )
-            ) {
-                return false;
-            }
-        }
-    }
-    field.component_at_least(tiles, cx, cy, MIN_PIERCE_COMPONENT)
-}
-
-/// Which cells may carry a rat-hole, precomputed once per map.
-///
-/// Stage B only sees the grid, so it tells a prop from a wall by two things it
-/// can precompute in one pass: the room rectangles (props live inside rooms)
-/// and the size of each 4-connected solid component (a prop island is a dozen
-/// cells at most, a wall run far longer). Building both up front keeps the
-/// candidate scan itself free of allocation and flood fills.
-struct HoleField {
-    cols: i32,
-    rows: i32,
-    in_room: Vec<bool>,
-    /// Solid-component id per cell (`u32::MAX` for open floor).
-    component: Vec<u32>,
-    /// Cell count per component id.
-    component_size: Vec<u32>,
-}
-
-impl HoleField {
-    fn new(tiles: &TileMap, layout: &Layout) -> HoleField {
-        let (cols, rows) = (tiles.cols(), tiles.rows());
-        let mut in_room = vec![false; (cols * rows) as usize];
-        for room in &layout.rooms {
-            let rect = room.rect;
-            for cy in rect.y.max(0)..rect.bottom().min(rows) {
-                for cx in rect.x.max(0)..rect.right().min(cols) {
-                    in_room[(cy * cols + cx) as usize] = true;
-                }
-            }
-        }
-
-        let mut component = vec![u32::MAX; (cols * rows) as usize];
-        let mut component_size: Vec<u32> = Vec::new();
-        let mut queue: VecDeque<(i32, i32)> = VecDeque::new();
-        for cy in 0..rows {
-            for cx in 0..cols {
-                if !tiles.is_full_solid(cx, cy) || component[(cy * cols + cx) as usize] != u32::MAX
-                {
-                    continue;
-                }
-                let id = component_size.len() as u32;
-                let mut count = 0u32;
-                component[(cy * cols + cx) as usize] = id;
-                queue.push_back((cx, cy));
-                while let Some((ax, ay)) = queue.pop_front() {
-                    count += 1;
-                    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                        let (nx, ny) = (ax + dx, ay + dy);
-                        // Out of bounds reads as solid, so bounds first.
-                        if !tiles.in_bounds(nx, ny) || !tiles.is_full_solid(nx, ny) {
-                            continue;
-                        }
-                        let i = (ny * cols + nx) as usize;
-                        if component[i] != u32::MAX {
-                            continue;
-                        }
-                        component[i] = id;
-                        queue.push_back((nx, ny));
-                    }
-                }
-                component_size.push(count);
-            }
-        }
-
-        HoleField {
-            cols,
-            rows,
-            in_room,
-            component,
-            component_size,
-        }
-    }
-
-    fn in_room(&self, cx: i32, cy: i32) -> bool {
-        cx >= 0 && cy >= 0 && cx < self.cols && cy < self.rows && self.in_room[(cy * self.cols + cx) as usize]
-    }
-
-    fn component_at_least(&self, tiles: &TileMap, cx: i32, cy: i32, cap: usize) -> bool {
-        if !tiles.in_bounds(cx, cy) {
-            return false;
-        }
-        let id = self.component[(cy * self.cols + cx) as usize];
-        id != u32::MAX && self.component_size[id as usize] as usize >= cap
-    }
-}
-
-/// Is `(cx, cy)` open floor a rat can approach and turn around on?
-fn mouth_ok(tiles: &TileMap, cx: i32, cy: i32) -> bool {
-    if !tiles.get(cx, cy).is_open() {
-        return false;
-    }
-    let mut open = 0;
-    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-        if tiles.get(cx + dx, cy + dy).is_open() {
-            open += 1;
-        }
-    }
-    open >= 2
-}
-
-// ---- Traps -----------------------------------------------------------------
-
-/// **Stage B (traps).** Scatter sticky traps and mousetraps across the map.
-///
-/// Traps go on open floor in halls, rooms and corridors — never in the start
-/// room (or on the spawn point), never in the boss arena, and never within a
-/// few cells of a maze mouth, door or reward. Maze interiors stay trap-free:
-/// a maze aisle is the only route to its reward, so a trap there could not be
-/// walked around. Placement reads only cell kinds (masks are still stale at
-/// this point in the pipeline).
-pub fn place_traps(
-    tiles: &TileMap,
-    layout: &Layout,
-    mazes: &[MazeSection],
-    rng: &mut StdRng,
-) -> Vec<TrapPlacement> {
-    /// Hard cap so a huge map cannot end up as a carpet of traps.
-    const MAX_TRAPS: usize = 24;
-    let keep_clear = layout.start_room.inflate(6);
-    let mut protected: Vec<(i32, i32)> = Vec::new();
-    for maze in mazes {
-        protected.push(maze.entry);
-        protected.push(maze.exit);
-        protected.push(super::validate::cell_of(maze.reward));
-    }
-
-    let mut traps: Vec<TrapPlacement> = Vec::new();
-    let mut taken: Vec<(i32, i32)> = Vec::new();
-    for room in &layout.rooms {
-        if !matches!(
-            room.kind,
-            RoomKind::Hall | RoomKind::Room | RoomKind::Corridor
-        ) {
-            continue;
-        }
-        let inner = room.rect.inflate(-1);
-        if inner.w < 1 || inner.h < 1 {
-            continue;
-        }
-        let cap = match room.kind {
-            RoomKind::Corridor => 2,
-            _ => 4,
-        };
-        // A corridor is only a cell or two wide, so its area is small; it still
-        // gets one trap once it is long enough to be worth walking down.
-        let floor = i32::from(inner.area() >= 10);
-        let want = (inner.area() / 120).clamp(floor, cap) as usize;
-        let mut placed = 0;
-        for _ in 0..want * 8 {
-            if placed >= want || traps.len() >= MAX_TRAPS {
-                break;
-            }
-            let cx = rng.random_range(inner.x..inner.right());
-            let cy = rng.random_range(inner.y..inner.bottom());
-            let pos = TileMap::tile_rect(cx, cy).center();
-            if !trap_cell_ok(tiles, (cx, cy), &keep_clear, &protected, &taken) {
-                continue;
-            }
-            let facing = trap_facing(tiles, cx, cy, rng);
-            let kind = if rng.random_range(0..100u32) < 55 {
-                TrapKind::Sticky
-            } else {
-                TrapKind::Snap
-            };
-            traps.push(TrapPlacement { kind, pos, facing });
-            taken.push((cx, cy));
-            placed += 1;
-        }
-    }
-    traps
-}
-
-/// Is this cell a fair trap spot?
-fn trap_cell_ok(
-    tiles: &TileMap,
-    cell: (i32, i32),
-    keep_clear: &TileRect,
-    protected: &[(i32, i32)],
-    taken: &[(i32, i32)],
-) -> bool {
-    let (cx, cy) = cell;
-    if !tiles.get(cx, cy).is_open() || keep_clear.contains_world(TileMap::tile_rect(cx, cy).center())
-    {
-        return false;
-    }
-    if protected.iter().any(|&(px, py)| (px - cx).abs() <= 3 && (py - cy).abs() <= 3)
-        || taken
-            .iter()
-            .any(|&(tx, ty)| (tx - cx).abs() <= 3 && (ty - cy).abs() <= 3)
-    {
-        return false;
-    }
-    let mut open = 0;
-    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-        let kind = tiles.get(cx + dx, cy + dy);
-        if matches!(
-            kind,
-            TileKind::Wall(
-                WallKind::Doorway { .. } | WallKind::OneWayDoor { .. } | WallKind::RatHole { .. }
-            )
-        ) {
-            return false; // never block a threshold
-        }
-        if kind.is_open() {
-            open += 1;
-        }
-    }
-    // Room to walk around the hazard instead of over it.
-    open >= 2
-}
-
-/// Which way the trap's long axis points: along the corridor when it is in one,
-/// at a random open side when it is in the open.
-fn trap_facing(tiles: &TileMap, cx: i32, cy: i32, rng: &mut StdRng) -> Vec2 {
-    let north_south = tiles.get(cx, cy - 1).is_open() && tiles.get(cx, cy + 1).is_open();
-    let east_west = tiles.get(cx - 1, cy).is_open() && tiles.get(cx + 1, cy).is_open();
-    if north_south && !east_west {
-        return Vec2::new(0.0, if rng.random_range(0..2) == 0 { 1.0 } else { -1.0 });
-    }
-    if east_west && !north_south {
-        return Vec2::new(if rng.random_range(0..2) == 0 { 1.0 } else { -1.0 }, 0.0);
-    }
-    let mut options = [(0.0f32, 0.0f32); 4];
-    let mut count = 0;
-    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-        if tiles.get(cx + dx, cy + dy).is_open() {
-            options[count] = (dx as f32, dy as f32);
-            count += 1;
-        }
-    }
-    if count == 0 {
-        return Vec2::new(1.0, 0.0);
-    }
-    let (dx, dy) = options[rng.random_range(0..count)];
-    Vec2::new(dx, dy)
 }
 
 // ---- Helpers ---------------------------------------------------------------
@@ -857,12 +970,14 @@ pub fn open_cells(tiles: &TileMap, rect: TileRect, class: SizeClass) -> Vec<(i32
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::collision::TILE_F;
-    use crate::game::level::{level_rng, Level, Room, MAP_SIZE};
+    use crate::game::level::{level_rng, Level, MAP_SIZE};
     use crate::game::levelgen::{generate_once, validate};
 
     /// Seeds used by the property-style sweeps: three themes × these seeds.
     const SEEDS: [u64; 8] = [0, 1, 2, 3, 7, 11, 42, 99];
+
+    /// Cells / second the rat walks, for turning a maze walk into seconds.
+    const RAT_PX_PER_SEC: f32 = 58.0;
 
     fn generated() -> impl Iterator<Item = Level> {
         Theme::all()
@@ -871,14 +986,54 @@ mod tests {
             .map(|(theme, seed)| generate_once(theme, seed, 0))
     }
 
+    /// One map's **maze stage** only: layout, props and the carve.
+    ///
+    /// The later stages (rat-holes, traps, navigation) cost ~40 ms a map and
+    /// change nothing about a maze's shape, so the property sweeps here run
+    /// this instead — a few hundred microseconds a map, thousands of maps.
+    struct Carved {
+        theme: Theme,
+        tiles: TileMap,
+        layout: Layout,
+        mazes: Vec<MazeSection>,
+    }
+
+    fn carve_only(theme: Theme, seed: u64) -> Carved {
+        let mut tiles = TileMap::new(MAP_COLS, MAP_ROWS, theme, seed as u32);
+        let mut rng = level_rng(theme, seed, 0);
+        let layout = crate::game::levelgen::layout::build_layout(&mut tiles, &mut rng, theme);
+        let _ = crate::game::levelgen::layout::furnish(&mut tiles, &layout, &mut rng, theme);
+        let mazes = carve_mazes(&mut tiles, &layout, &mut rng, theme);
+        Carved {
+            theme,
+            tiles,
+            layout,
+            mazes,
+        }
+    }
+
+    /// `per_theme` seeds on every theme, maze stage only.
+    fn carve_sweep(per_theme: u64) -> impl Iterator<Item = Carved> {
+        Theme::all().into_iter().flat_map(move |theme| {
+            (0..per_theme).map(move |seed| carve_only(theme, seed))
+        })
+    }
+
     fn layout_with(slots: Vec<TileRect>) -> Layout {
         Layout {
             rooms: Vec::new(),
             start: MAP_SIZE * 0.5,
             start_room: TileRect::new(MAP_COLS / 2, MAP_ROWS / 2, 8, 8),
             boss_arena: TileRect::new(20, 20, 20, 20),
+            boss: Default::default(),
             maze_slots: slots,
+            partitions: Vec::new(),
         }
+    }
+
+    /// The side of `bounds` a ring/bounds cell sits on, from its coordinates.
+    fn side_of(bounds: TileRect, cell: (i32, i32)) -> Cardinal {
+        side_of_ring(bounds, cell).expect("cell is not on the ring")
     }
 
     #[test]
@@ -908,12 +1063,13 @@ mod tests {
                     "{theme:?} maze {i}: exit is not the door the section claims"
                 );
                 // The pedestal is real floor, reachable in the maze.
-                let reward = validate::cell_of(maze.reward);
+                let reward = maze.reward_cell;
                 assert!(level.tiles.passable(reward.0, reward.1, SizeClass::Small));
                 assert!(maze.bounds.contains(reward.0, reward.1));
                 assert_eq!(level.objects.rewards[i].pos, maze.reward);
                 // The ring is closed except the entry gap and the one-way door.
                 let ring = maze_ring(maze.bounds);
+                assert_eq!(maze.ring, ring, "{theme:?} maze {i}: ring mismatch");
                 let mut open = Vec::new();
                 let mut doors = Vec::new();
                 for (cx, cy) in ring_border(ring) {
@@ -936,6 +1092,31 @@ mod tests {
                         "{theme:?} maze {i}: the ring leaks at {cell:?}"
                     );
                 }
+                // The exit is never on the breach's wall, and vice versa.
+                assert_ne!(
+                    side_of(maze.bounds, maze.exit),
+                    side_of(maze.bounds, maze.entry),
+                    "{theme:?} maze {i}: exit on the entry wall"
+                );
+                // At least one loop to double back around a pursuer in.
+                assert!(
+                    maze_loops(&level.tiles, maze) >= 1,
+                    "{theme:?} maze {i}: no interior loop"
+                );
+                // The fork is public walkway floor outside the ring.
+                assert!(
+                    !ring.contains(maze.fork.0, maze.fork.1),
+                    "{theme:?} maze {i}: fork {:?} is inside the maze",
+                    maze.fork
+                );
+                assert!(level.tiles.passable(maze.fork.0, maze.fork.1, SizeClass::Small));
+                let trail = trail_walk_cells(&level.tiles, maze)
+                    .expect("the fork is on the walkway from its breach");
+                assert_eq!(
+                    trail, TRAIL_CELLS,
+                    "{theme:?} maze {i}: the trail from fork {:?} is {trail} cells",
+                    maze.fork
+                );
             }
         }
     }
@@ -945,7 +1126,7 @@ mod tests {
         for level in generated() {
             for (i, maze) in level.mazes.iter().enumerate() {
                 let seen = validate::reachable(&level.tiles, validate::cell_of(level.start), SizeClass::Small);
-                let reward = validate::cell_of(maze.reward);
+                let reward = maze.reward_cell;
                 assert!(
                     validate::is_reached(&seen, &level.tiles, reward),
                     "{:?} maze {i}: the player cannot reach the reward",
@@ -963,253 +1144,17 @@ mod tests {
     }
 
     #[test]
-    fn a_slot_too_small_to_hold_a_maze_is_left_alone() {
+    fn a_slot_too_small_to_carve_is_refused_before_anything_is_painted() {
+        // `carve_mazes` carves **every** reservation, so the layout only
+        // reserves slots of 19/21/23 × 15/17/19 cells. This checks the guard
+        // underneath: a slot below that size bails out without touching it.
         let theme = Theme::Sewer;
         let mut tiles = TileMap::new(MAP_COLS, MAP_ROWS, theme, 1);
         let mut rng = level_rng(theme, 5, 0);
+        let layout = layout_with(Vec::new());
         let slot = TileRect::new(40, 40, 4, 4);
-        let layout = layout_with(vec![slot]);
-        let mazes = carve_mazes(&mut tiles, &layout, &mut rng, theme);
-        assert!(mazes.is_empty(), "a 4 × 4 slot cannot hold a maze");
+        assert!(carve_one(&mut tiles, &layout, slot, &mut rng).is_none());
         assert!(slot.cells().all(|(cx, cy)| tiles.get(cx, cy).is_open()));
-    }
-
-    #[test]
-    fn every_rat_hole_pierces_a_wall_and_the_large_class_cannot_follow() {
-        let mut total = 0;
-        for level in generated() {
-            let theme = level.theme;
-            for hole in &level.objects.rat_holes {
-                total += 1;
-                let TileKind::Wall(WallKind::RatHole { axis }) = level.tiles.get(hole.cell.0, hole.cell.1)
-                else {
-                    panic!("{theme:?}: rat-hole {:?} is not a rat-hole cell", hole.cell);
-                };
-                // The view faces along the passage, the axis names the wall.
-                let along_y = hole.view.facing.y.abs() >= hole.view.facing.x.abs();
-                assert_eq!(
-                    axis,
-                    if along_y {
-                        WallAxis::Horizontal
-                    } else {
-                        WallAxis::Vertical
-                    },
-                    "{theme:?}: rat-hole {:?} faces across its wall",
-                    hole.cell
-                );
-                // Small gets through, large is stopped, and both ends of the
-                // tunnel are open floor.
-                assert!(level.tiles.passable(hole.cell.0, hole.cell.1, SizeClass::Small));
-                assert!(!level.tiles.passable(hole.cell.0, hole.cell.1, SizeClass::Large));
-                let step = if along_y {
-                    (0, hole.view.facing.y.signum() as i32)
-                } else {
-                    (hole.view.facing.x.signum() as i32, 0)
-                };
-                for sign in [1, -1] {
-                    let mut cell = hole.cell;
-                    for _ in 0..3 {
-                        cell = (cell.0 + sign * step.0, cell.1 + sign * step.1);
-                        if !matches!(
-                            level.tiles.get(cell.0, cell.1),
-                            TileKind::Wall(WallKind::RatHole { .. })
-                        ) {
-                            break;
-                        }
-                    }
-                    assert!(
-                        level.tiles.get(cell.0, cell.1).is_open(),
-                        "{theme:?}: rat-hole {:?} opens into a wall at {cell:?}",
-                        hole.cell
-                    );
-                }
-            }
-        }
-        assert!(total > 0, "no generated map had a single rat-hole");
-    }
-
-    #[test]
-    fn a_two_cell_wall_is_pierced_as_an_aligned_pair() {
-        let theme = Theme::Lab;
-        let mut made = 0;
-        for seed in 0..8u64 {
-            let mut tiles = TileMap::new(60, 24, theme, seed as u32);
-            let solid = TileKind::Wall(WallKind::Solid);
-            tiles.fill_cells(0, 0, 60, 2, solid);
-            tiles.fill_cells(0, 22, 60, 2, solid);
-            tiles.fill_cells(0, 0, 2, 24, solid);
-            tiles.fill_cells(58, 0, 2, 24, solid);
-            // A two-cell-thick east-west wall right across the map.
-            tiles.fill_cells(2, 10, 56, 2, solid);
-            tiles.rebuild_masks();
-
-            let mut rng = level_rng(theme, seed, 0);
-            let layout = layout_with(Vec::new());
-            let holes = place_rat_holes(&mut tiles, &layout, &mut rng);
-            let small = validate::reachable(&tiles, (5, 5), SizeClass::Small);
-            let large = validate::reachable(&tiles, (5, 5), SizeClass::Large);
-            if holes.is_empty() {
-                assert!(
-                    !validate::is_reached(&small, &tiles, (5, 18)),
-                    "seed {seed}: nobody crossed a wall without a hole"
-                );
-                continue;
-            }
-            made += 1;
-            assert!(
-                validate::is_reached(&small, &tiles, (5, 18)),
-                "seed {seed}: the rat cannot use its hole"
-            );
-            assert!(
-                !validate::is_reached(&large, &tiles, (5, 18)),
-                "seed {seed}: a large agent squeezed through a rat-hole"
-            );
-            // Every hole in the two-cell wall is part of an aligned pair.
-            for &((cx, cy), axis) in &holes {
-                assert_eq!(axis, WallAxis::Horizontal);
-                let partner = if matches!(
-                    tiles.get(cx, cy + 1),
-                    TileKind::Wall(WallKind::RatHole { axis: WallAxis::Horizontal })
-                ) {
-                    (cx, cy + 1)
-                } else {
-                    (cx, cy - 1)
-                };
-                assert!(
-                    matches!(
-                        tiles.get(partner.0, partner.1),
-                        TileKind::Wall(WallKind::RatHole { axis: WallAxis::Horizontal })
-                    ),
-                    "seed {seed}: hole ({cx}, {cy}) is not aligned with a partner cell"
-                );
-            }
-        }
-        assert!(made > 0, "no seed grew a hole in a two-cell wall");
-    }
-
-    #[test]
-    fn traps_stay_on_open_floor_away_from_the_spawn() {
-        for level in generated() {
-            let theme = level.theme;
-            let mut traps = 0;
-            for pos in level
-                .objects
-                .sticky_traps
-                .iter()
-                .map(|t| t.pos)
-                .chain(level.objects.mousetraps.iter().map(|t| t.pos))
-            {
-                traps += 1;
-                let cell = validate::cell_of(pos);
-                assert!(
-                    level.tiles.get(cell.0, cell.1).is_open(),
-                    "{theme:?}: trap at {pos:?} is not on open floor"
-                );
-                assert!(
-                    (pos - level.start).len() > 6.0 * TILE_F,
-                    "{theme:?}: trap at {pos:?} sits on the spawn"
-                );
-                assert!(
-                    level.start_room().is_none_or(|room| !room.rect.contains(cell.0, cell.1)),
-                    "{theme:?}: trap at {pos:?} is inside the start room"
-                );
-                for maze in &level.mazes {
-                    assert!(
-                        !maze.bounds.contains(cell.0, cell.1),
-                        "{theme:?}: trap at {pos:?} blocks a maze route"
-                    );
-                }
-            }
-            // Traps are only placed in halls, rooms and corridors, so a map
-            // that has one of those must have grown at least one trap.
-            let has_room = level.rooms.iter().any(|room| {
-                matches!(
-                    room.kind,
-                    RoomKind::Hall | RoomKind::Room | RoomKind::Corridor
-                ) && room.rect.area() >= 200
-            });
-            if has_room {
-                assert!(traps > 0, "{theme:?}: no traps on a furnished map");
-            }
-        }
-    }
-
-    #[test]
-    fn holes_never_sit_in_the_border_the_start_room_or_the_boss_arena() {
-        for level in generated() {
-            let theme = level.theme;
-            for hole in &level.objects.rat_holes {
-                let (cx, cy) = hole.cell;
-                let cell = TileRect::new(cx, cy, 1, 1);
-                assert!(
-                    !cell.intersects(&level.start_room().expect("start room").rect.inflate(1)),
-                    "{theme:?}: hole {cell:?} is in the start room"
-                );
-                assert!(
-                    !cell.intersects(&level.boss_room().expect("boss room").rect),
-                    "{theme:?}: hole {cell:?} is in the boss arena"
-                );
-                assert!(
-                    cx >= 2 && cy >= 2 && cx <= MAP_COLS - 3 && cy <= MAP_ROWS - 3,
-                    "{theme:?}: hole {cell:?} is in the border"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn a_hole_zone_excludes_borders_rooms_and_prop_islands() {
-        let theme = Theme::Sewer;
-        let mut tiles = TileMap::new(40, 30, theme, 1);
-        let solid = TileKind::Wall(WallKind::Solid);
-        // A long east-west run: pierceable.
-        tiles.fill_cells(2, 10, 36, 1, solid);
-        // A three-cell prop island inside the hall: solid, but not a wall.
-        tiles.fill_cells(10, 20, 3, 1, solid);
-        let mut layout = layout_with(Vec::new());
-        layout.rooms.push(Room::new(TileRect::new(6, 16, 20, 12), RoomKind::Hall));
-        let field = HoleField::new(&tiles, &layout);
-        assert!(
-            hole_zone_ok(&tiles, &layout, &field, 20, 10),
-            "a long run outside every room must be pierceable"
-        );
-        assert!(!hole_zone_ok(&tiles, &layout, &field, 1, 10), "the border is out");
-        assert!(
-            !hole_zone_ok(&tiles, &layout, &field, 11, 20),
-            "a cell inside a room rect is a prop, not a wall"
-        );
-        assert!(
-            !field.component_at_least(&tiles, 11, 20, MIN_PIERCE_COMPONENT),
-            "a three-cell prop island is not a wall run"
-        );
-        assert!(field.component_at_least(&tiles, 20, 10, MIN_PIERCE_COMPONENT));
-    }
-
-    #[test]
-    fn a_seed_grows_the_same_map_twice() {
-        for theme in Theme::all() {
-            for seed in [0u64, 3, 77] {
-                let a = generate_once(theme, seed, 0);
-                let b = generate_once(theme, seed, 0);
-                assert_eq!(a.mazes.len(), b.mazes.len(), "{theme:?} seed {seed}");
-                for (x, y) in a.mazes.iter().zip(&b.mazes) {
-                    assert_eq!(x.entry, y.entry);
-                    assert_eq!(x.exit, y.exit);
-                    assert_eq!(x.exit_dir, y.exit_dir);
-                    assert_eq!(x.reward, y.reward);
-                }
-                assert_eq!(a.objects.rat_holes.len(), b.objects.rat_holes.len());
-                for (x, y) in a.objects.rat_holes.iter().zip(&b.objects.rat_holes) {
-                    assert_eq!(x.cell, y.cell);
-                }
-                let cell = |m: &Level, cx: i32, cy: i32| m.tiles.get(cx, cy);
-                for cy in 0..MAP_ROWS {
-                    for cx in 0..MAP_COLS {
-                        assert_eq!(cell(&a, cx, cy), cell(&b, cx, cy), "{theme:?} {cx},{cy}");
-                    }
-                }
-            }
-        }
     }
 
     #[test]
@@ -1218,8 +1163,274 @@ mod tests {
         let rect = level.boss_room().expect("boss arena").rect;
         let small = open_cells(&level.tiles, rect, SizeClass::Small);
         let large = open_cells(&level.tiles, rect, SizeClass::Large);
-        assert_eq!(small.len(), rect.area() as usize, "the boss arena is open");
+        // The arena is furnished for its fight (perimeter props, the Sewer's
+        // escape hole), so it is not uniformly open: the list must be exactly
+        // the passable cells of the rect.
+        let passable: Vec<(i32, i32)> = rect
+            .cells()
+            .filter(|&(cx, cy)| level.tiles.passable(cx, cy, SizeClass::Small))
+            .collect();
+        assert_eq!(small.len(), passable.len(), "the boss arena's open cells are listed");
         assert_eq!(large.len(), small.len());
         assert!(small.iter().all(|(cx, cy)| level.tiles.passable(*cx, *cy, SizeClass::Small)));
     }
+
+    /// The owner's frequency: about one map in eight, decided by the seed.
+    ///
+    /// Swept over [`crate::game::levelgen::layout::build_layout`] rather than
+    /// the whole pipeline — the decision is that stage's draw — and
+    /// [`every_reserved_slot_is_carved`] proves a reservation and a maze are
+    /// the same thing, so 4000 maps stay cheap enough for the default suite.
+    #[test]
+    fn maze_rate_is_about_one_in_eight() {
+        const MAPS: u64 = 4000;
+        let mut with_maze = 0u64;
+        for seed in 0..MAPS {
+            let theme = Theme::all()[(seed % 3) as usize];
+            let mut tiles = TileMap::new(MAP_COLS, MAP_ROWS, theme, seed as u32);
+            let mut rng = level_rng(theme, seed, 0);
+            let layout =
+                crate::game::levelgen::layout::build_layout(&mut tiles, &mut rng, theme);
+            assert!(
+                layout.maze_slots.len() <= MAZES_PER_MAP,
+                "seed {seed}: {} reserved slots",
+                layout.maze_slots.len()
+            );
+            if !layout.maze_slots.is_empty() {
+                with_maze += 1;
+            }
+        }
+        let rate = with_maze as f64 / MAPS as f64;
+        println!(
+            "maze rate: {with_maze} of {MAPS} maps ({:.1} %, one in eight is 12.5 %)",
+            rate * 100.0
+        );
+        assert!(
+            (0.10..=0.15).contains(&rate),
+            "maze rate {rate:.3} over {MAPS} maps ({with_maze} with a maze)"
+        );
+    }
+
+    /// Every reservation is carved: a reserved maze room is never left bare
+    /// (the designer found nine of those because layout and carving each rolled
+    /// their own maze count).
+    #[test]
+    fn every_reserved_slot_is_carved() {
+        let mut mazes = 0;
+        for map in carve_sweep(400) {
+            let slots: Vec<TileRect> = map
+                .layout
+                .rooms
+                .iter()
+                .filter(|room| room.kind == RoomKind::Maze)
+                .map(|room| room.rect)
+                .collect();
+            let carved: Vec<TileRect> = map.mazes.iter().map(|m| m.bounds).collect();
+            assert_eq!(
+                slots, carved,
+                "{:?}: reserved {slots:?} but carved {carved:?}",
+                map.theme
+            );
+            assert_eq!(slots.len(), map.layout.maze_slots.len());
+            assert!(map.mazes.len() <= MAZES_PER_MAP);
+            mazes += carved.len();
+        }
+        assert!(mazes > 0, "the sweep found no maze at all");
+    }
+
+    /// A maze is an opening choice, not a hunt: its slot is reserved inside an
+    /// open area near the spawn, so the rat can walk from the spawn right onto
+    /// its outside walkway — and the walkway is floor all the way round, so a
+    /// bad wager can be walked past instead of trapping the player.
+    #[test]
+    fn maze_slot_sits_in_open_floor_near_the_start() {
+        let mut mazes = 0;
+        for map in carve_sweep(400) {
+            let Some(slot) = map.layout.maze_slots.first().copied() else {
+                continue;
+            };
+            mazes += 1;
+            let start = validate::cell_of(map.layout.start);
+            let seen = validate::reachable(&map.tiles, start, SizeClass::Small);
+            // The whole outside walkway is reachable from the spawn, breach
+            // included: that is the passage from the starting chamber.
+            for (cx, cy) in slot
+                .inflate(1)
+                .cells()
+                .filter(|&(cx, cy)| !slot.contains(cx, cy))
+            {
+                assert!(
+                    validate::is_reached(&seen, &map.tiles, (cx, cy)),
+                    "{:?} at {slot:?}: walkway cell ({cx}, {cy}) is not reachable from the spawn",
+                    map.theme
+                );
+            }
+            let Some(maze) = map.mazes.first() else {
+                panic!("{:?} at {slot:?}: the slot was not carved", map.theme);
+            };
+            assert!(validate::is_reached(&seen, &map.tiles, maze.entry));
+            // The walkway is open floor all the way round, so the maze can be
+            // walked past: a full ring of open cells outside the partition.
+            for (cx, cy) in slot.inflate(1).cells() {
+                if slot.contains(cx, cy) {
+                    continue;
+                }
+                let outside = !slot.inflate(1).contains(cx, cy) || !map.tiles.get(cx, cy).is_open();
+                assert!(
+                    outside || map.tiles.passable(cx, cy, SizeClass::Small),
+                    "{:?} at {slot:?}: the walkway at ({cx}, {cy}) is walled",
+                    map.theme
+                );
+            }
+            // The breach is within the owner's 32-cell promise.
+            let gap = (maze.entry.0 - start.0)
+                .abs()
+                .max((maze.entry.1 - start.1).abs());
+            assert!(
+                gap <= ENTRY_NEAR_CELLS,
+                "{:?} at {slot:?}: the breach is {gap} cells from the spawn",
+                map.theme
+            );
+        }
+        assert!(mazes >= 100, "only {mazes} mazes in the sweep");
+    }
+
+    /// The shape requirements, measured on a sweep: breach near the start and
+    /// facing its corridor, cache walk 7–12 s, all four exit walls, a loop.
+    #[test]
+    fn maze_shape_holds_on_a_sweep() {
+        let mut exits = [0usize; 4];
+        let mut walks = Vec::new();
+        let mut mazes = 0;
+        let mut shortest = f32::MAX;
+        for map in carve_sweep(800) {
+            let start = validate::cell_of(map.layout.start);
+            for (i, maze) in map.mazes.iter().enumerate() {
+                mazes += 1;
+                let ctx = format!("{:?} maze {i} at {:?}", map.theme, maze.bounds);
+                // The breach is within about 32 cells of the rat's start.
+                let gap = (maze.entry.0 - start.0).abs().max((maze.entry.1 - start.1).abs());
+                assert!(
+                    gap <= ENTRY_NEAR_CELLS,
+                    "{ctx}: breach {gap} cells from the start"
+                );
+                // It faces its access corridor: within the slack of the
+                // nearest corridor meeting point among the ring cells that are
+                // themselves within the 32-cell promise.
+                let approach = approach_cells(&map.tiles, maze.bounds);
+                let cell_gap = |cell: (i32, i32)| {
+                    (cell.0 - start.0).abs().max((cell.1 - start.1).abs())
+                };
+                let corridor_gap = |cell: (i32, i32)| {
+                    approach
+                        .iter()
+                        .map(|&(ax, ay)| (cell.0 - ax).abs() + (cell.1 - ay).abs())
+                        .min()
+                        .unwrap_or(i32::MAX / 4)
+                };
+                let least = ring_border(maze.ring)
+                    .filter(|&cell| cell_gap(cell) <= ENTRY_NEAR_CELLS)
+                    .map(corridor_gap)
+                    .min()
+                    .unwrap_or(0);
+                let nearest = corridor_gap(maze.entry);
+                assert!(
+                    nearest <= least + ENTRY_SLACK_CELLS + 1,
+                    "{ctx}: the breach is {nearest} cells from any corridor (least {least})"
+                );
+                // Cache walk: 7–12 s at 58 px/s.
+                let cells = maze_walk_cells(&map.tiles, maze).expect("reward unreachable");
+                let seconds = cells as f32 * 16.0 / RAT_PX_PER_SEC;
+                walks.push(seconds);
+                shortest = shortest.min(seconds);
+                // A loop to double back in, a gnaw-mark trail of four cells,
+                // and a landing with a way onward.
+                assert!(maze_loops(&map.tiles, maze) >= 1, "{ctx}: no loop");
+                assert_eq!(
+                    trail_walk_cells(&map.tiles, maze),
+                    Some(TRAIL_CELLS),
+                    "{ctx}: the gnaw-mark trail is not the final four cells"
+                );
+                let (dx, dy) = cardinal_delta(maze.exit_dir);
+                let landing = (maze.exit.0 + dx, maze.exit.1 + dy);
+                assert!(map.tiles.passable(landing.0, landing.1, SizeClass::Small));
+                assert!(
+                    landing_tier(&map.tiles, &map.layout.rooms, landing) >= 1,
+                    "{ctx}: the exit lands on a dead end"
+                );
+                exits[side_index(maze.exit_dir)] += 1;
+            }
+        }
+        assert!(mazes >= 150, "only {mazes} mazes in the sweep");
+        assert!(
+            exits.iter().all(|count| *count > 0),
+            "exit orientations: {exits:?}"
+        );
+        walks.sort_by(f32::total_cmp);
+        let median = f64::from(walks[walks.len() / 2]);
+        assert!(
+            (7.0..=12.0).contains(&median),
+            "median cache walk {median:.2} s over {} mazes",
+            walks.len()
+        );
+        let longest = f64::from(walks[walks.len() - 1]);
+        let at = |q: f64| f64::from(walks[((walks.len() - 1) as f64 * q).round() as usize]);
+        println!(
+            "maze sweep: {mazes} mazes, cache walk min {shortest:.2} p05 {:.2} p25 {:.2} med {median:.2} p75 {:.2} p95 {:.2} max {longest:.2}; exits N {} E {} S {} W {}",
+            at(0.05),
+            at(0.25),
+            at(0.75),
+            at(0.95),
+            exits[0],
+            exits[1],
+            exits[2],
+            exits[3]
+        );
+        // The cache walk band is the design; a lattice whose spanning-tree
+        // distances skip it (they come in steps of two, and can jump from 11 to
+        // 21) can miss it, so the tail is bounded rather than forced:
+        // median and the bulk inside 7–12 s, and no maze far outside.
+        assert!(
+            (7.0..=12.0).contains(&median),
+            "median cache walk {median:.2} s"
+        );
+        assert!(
+            at(0.25) >= 7.0,
+            "a quarter of mazes walk under 7 s ({:.2} s)",
+            at(0.25)
+        );
+        assert!(at(0.95) <= 12.0, "p95 cache walk {:.2} s", at(0.95));
+        assert!(longest <= 13.0, "longest cache walk {longest:.2} s");
+        assert!(shortest >= 5.5, "shortest cache walk {shortest:.2} s");
+    }
+
+    #[test]
+    fn a_seed_grows_the_same_maze_twice() {
+        for theme in Theme::all() {
+            for seed in [0u64, 3, 7] {
+                let a = generate_once(theme, seed, 0);
+                let b = generate_once(theme, seed, 0);
+                assert_eq!(a.mazes.len(), b.mazes.len(), "{theme:?} seed {seed}");
+                for (x, y) in a.mazes.iter().zip(&b.mazes) {
+                    assert_eq!(x.entry, y.entry);
+                    assert_eq!(x.fork, y.fork);
+                    assert_eq!(x.ring, y.ring);
+                    assert_eq!(x.exit, y.exit);
+                    assert_eq!(x.exit_dir, y.exit_dir);
+                    assert_eq!(x.reward, y.reward);
+                    assert_eq!(x.reward_cell, y.reward_cell);
+                }
+            }
+        }
+    }
+
+    fn side_index(dir: Cardinal) -> usize {
+        match dir {
+            Cardinal::North => 0,
+            Cardinal::East => 1,
+            Cardinal::South => 2,
+            Cardinal::West => 3,
+        }
+    }
+
 }

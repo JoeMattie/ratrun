@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 mod app;
+mod autoplay;
 mod audio;
 mod config;
 mod input;
@@ -12,6 +13,7 @@ mod lore;
 mod math;
 mod render;
 mod scores;
+mod spectate;
 mod titleart;
 
 mod game;
@@ -23,7 +25,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use crossterm::cursor;
 use crossterm::event::{
     self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, Event,
@@ -55,10 +57,31 @@ impl Drop for TerminalGuard {
 }
 
 fn main() -> Result<()> {
+    // Headless self-playing batch mode (`--bot-batch N`, worker A).
+    if let Some(code) = autoplay::batch::maybe_run_cli() {
+        std::process::exit(code);
+    }
+    // Parse before touching the terminal, so a bad flag is a plain error
+    // message rather than a screen that flickers into raw mode first.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let ai = parse_spectate_args(&args)?;
+
     let original = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = restore_terminal();
-        original(info);
+        // A self-playing wall worker (`--ai`) contains its own panics: it
+        // turns the tile into a FAILED plate and retries. Restoring here would
+        // leave raw mode and the alternate screen while the wall is still
+        // drawing, and printing would corrupt it, so worker panics are silent.
+        let wall_worker = std::thread::current()
+            .name()
+            .is_some_and(|name| name.starts_with("ratrun-ai-"));
+        if wall_worker {
+            // Keep the reason for the cell's FAILED plate.
+            crate::spectate::record_worker_panic(info.payload_as_str());
+        } else {
+            let _ = restore_terminal();
+            original(info);
+        }
     }));
 
     // Raw mode is the first mutation of terminal state, so the guard is armed
@@ -67,7 +90,93 @@ fn main() -> Result<()> {
     let _guard = TerminalGuard;
 
     let (mut terminal, kitty) = setup_terminal()?;
-    run(&mut terminal, kitty)
+    match ai {
+        // `ratrun --ai [N]`: the self-playing wall. No `AudioEngine` is ever
+        // constructed on this path (spectate.rs has no audio code at all).
+        Some(opts) => spectate::run(&mut terminal, kitty, opts),
+        None => run(&mut terminal, kitty),
+    }
+}
+
+/// Parse the self-playing wall's flags: `--ai [N]`, `--seed S`,
+/// `--skill expert|casual`, `--level 1|2|3`, `--once`.
+///
+/// Returns `None` for normal play (no `--ai`), so the default no-argument
+/// behaviour — and any other mode's flags — stay exactly as they were. Unknown
+/// `--flags` are ignored here because they belong to another mode; a stray
+/// positional argument is an error.
+fn parse_spectate_args(args: &[String]) -> Result<Option<spectate::AiOpts>> {
+    let mut ai_seen = false;
+    let mut opts = spectate::AiOpts::default();
+    let mut swallow_value = false;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if swallow_value {
+            // The value of another mode's flag (e.g. `--bot-batch 4`).
+            swallow_value = false;
+            if !arg.starts_with('-') {
+                i += 1;
+                continue;
+            }
+        }
+        match arg {
+            "--ai" => {
+                ai_seen = true;
+                if let Some(next) = args.get(i + 1) {
+                    if !next.starts_with('-') {
+                        if let Ok(n) = next.parse::<usize>() {
+                            opts.games = n.clamp(1, spectate::MAX_GAMES);
+                            i += 1;
+                        }
+                    }
+                }
+            }
+            "--seed" => {
+                let value = args
+                    .get(i + 1)
+                    .with_context(|| "--seed needs a number".to_string())?;
+                let seed: u64 = value
+                    .parse()
+                    .with_context(|| format!("invalid --seed value {value:?}"))?;
+                opts.seed = Some(seed);
+                i += 1;
+            }
+            "--skill" => {
+                let value = args
+                    .get(i + 1)
+                    .with_context(|| "--skill needs expert or casual".to_string())?;
+                let skill = spectate::AiOpts::parse_skill(value).with_context(|| {
+                    format!("unknown --skill {value:?} (expected expert or casual)")
+                })?;
+                opts.skill = Some(skill);
+                i += 1;
+            }
+            "--level" => {
+                let value = args
+                    .get(i + 1)
+                    .with_context(|| "--level needs 1, 2 or 3".to_string())?;
+                let level: usize = value
+                    .parse()
+                    .with_context(|| format!("invalid --level value {value:?}"))?;
+                if !(1..=game::campaign::LEVEL_COUNT).contains(&level) {
+                    bail!(
+                        "--level must be 1, 2 or 3 (got {value}); the campaign has {} levels",
+                        game::campaign::LEVEL_COUNT
+                    );
+                }
+                opts.level = Some(level);
+                i += 1;
+            }
+            "--once" => opts.once = true,
+            // Another mode's flag (e.g. worker A's headless batch): not ours,
+            // and its value (if any) is skipped on the next iteration.
+            other if other.starts_with("--") => swallow_value = true,
+            other => bail!("unexpected argument {other:?}"),
+        }
+        i += 1;
+    }
+    Ok(ai_seen.then_some(opts))
 }
 
 /// Set up the alternate screen, mouse + focus reporting and the Kitty keyboard
@@ -163,7 +272,7 @@ fn reader_loop(
 /// The input reader thread plus the flag that stops it. Dropping this sets the
 /// flag and joins the thread, so the terminal is never restored while a read is
 /// still in flight (joining waits at most one poll interval).
-struct InputThread {
+pub(crate) struct InputThread {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
@@ -171,7 +280,7 @@ struct InputThread {
 impl InputThread {
     /// Spawn the reader. The receiver yields parsed events and, if the reader
     /// fails, the error that ended it.
-    fn spawn() -> (InputThread, mpsc::Receiver<io::Result<Event>>) {
+    pub(crate) fn spawn() -> (InputThread, mpsc::Receiver<io::Result<Event>>) {
         let (tx, rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let handle = {
@@ -203,7 +312,7 @@ impl Drop for InputThread {
 /// presented atomically instead of tearing. Terminals without support ignore
 /// the sequences. The end sequence is always issued, even when the draw fails,
 /// so the terminal is never left in a held update.
-fn with_synchronized_update<T>(
+pub(crate) fn with_synchronized_update<T>(
     out: &mut impl io::Write,
     draw: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
@@ -231,7 +340,10 @@ fn is_mouse_motion(kind: MouseEventKind) -> bool {
 /// event, so key presses are never dropped, reordered or hidden behind motion.
 /// `Ok(true)` means the user asked to quit (Ctrl-C); `Err` means the input
 /// reader died and the caller must end the run so the terminal is restored.
-fn drain_input(rx: &mpsc::Receiver<io::Result<Event>>, input: &mut InputState) -> io::Result<bool> {
+pub(crate) fn drain_input(
+    rx: &mpsc::Receiver<io::Result<Event>>,
+    input: &mut InputState,
+) -> io::Result<bool> {
     let mut quit = false;
     let mut pending_move: Option<MouseEvent> = None;
     let mut drained = 0usize;
@@ -347,6 +459,74 @@ mod tests {
 
     fn reader() -> (Tx, Rx) {
         mpsc::channel()
+    }
+
+    fn args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn no_arguments_keeps_normal_play() {
+        assert_eq!(parse_spectate_args(&args(&[])).unwrap(), None);
+        // Flags that belong to another mode never switch on the wall.
+        assert_eq!(
+            parse_spectate_args(&args(&["--bot-batch", "4", "--trace"])).unwrap(),
+            None
+        );
+        assert_eq!(parse_spectate_args(&args(&["--seed", "9"])).unwrap(), None);
+    }
+
+    #[test]
+    fn ai_flag_defaults_to_sixteen_and_accepts_a_count() {
+        let ai = parse_spectate_args(&args(&["--ai"])).unwrap().unwrap();
+        assert_eq!(ai.games, spectate::DEFAULT_GAMES);
+        assert_eq!(ai.games, 16);
+        assert_eq!(ai.seed, None);
+        assert_eq!(ai.skill, None);
+        assert_eq!(ai.level, None);
+        assert!(!ai.once);
+
+        let ai = parse_spectate_args(&args(&["--ai", "20"])).unwrap().unwrap();
+        assert_eq!(ai.games, 20);
+        // The flag caps the wall at MAX_GAMES instead of failing.
+        let ai = parse_spectate_args(&args(&["--ai", "1000"])).unwrap().unwrap();
+        assert_eq!(ai.games, spectate::MAX_GAMES);
+        let ai = parse_spectate_args(&args(&["--ai", "0"])).unwrap().unwrap();
+        assert_eq!(ai.games, 1);
+        // A following flag is not swallowed as the count.
+        let ai = parse_spectate_args(&args(&["--ai", "--once"])).unwrap().unwrap();
+        assert_eq!(ai.games, 16);
+        assert!(ai.once);
+    }
+
+    #[test]
+    fn ai_options_are_parsed_in_any_order() {
+        let ai = parse_spectate_args(&args(&[
+            "--seed", "42", "--ai", "4", "--skill", "casual", "--level", "2", "--once",
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(ai.games, 4);
+        assert_eq!(ai.seed, Some(42));
+        assert_eq!(ai.skill, Some(crate::game::bot::Skill::Casual));
+        assert_eq!(ai.level, Some(2));
+        assert!(ai.once);
+
+        let ai = parse_spectate_args(&args(&["--ai", "8", "--seed", "7"])).unwrap().unwrap();
+        // The same seed and options reproduce the same wall.
+        let again = parse_spectate_args(&args(&["--ai", "8", "--seed", "7"])).unwrap().unwrap();
+        assert_eq!(ai, again);
+    }
+
+    #[test]
+    fn bad_ai_values_are_errors() {
+        assert!(parse_spectate_args(&args(&["--ai", "2", "--seed"])).is_err());
+        assert!(parse_spectate_args(&args(&["--ai", "2", "--seed", "nope"])).is_err());
+        assert!(parse_spectate_args(&args(&["--ai", "2", "--skill"])).is_err());
+        assert!(parse_spectate_args(&args(&["--ai", "2", "--skill", "godlike"])).is_err());
+        assert!(parse_spectate_args(&args(&["--ai", "2", "--level", "0"])).is_err());
+        assert!(parse_spectate_args(&args(&["--ai", "2", "--level", "4"])).is_err());
+        assert!(parse_spectate_args(&args(&["--ai", "2", "junk"])).is_err());
     }
 
     #[test]

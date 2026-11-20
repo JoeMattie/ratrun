@@ -10,8 +10,8 @@
 //!
 //! Public singleton fields (`rng`, `level`, `player`, `particles`, `director`,
 //! `flow`, `elapsed`, `kills`, `score`, `shake`, `shake_ofs`,
-//! `pending_levelups`, `game_over`, `won`, `sfx`) are **real fields** and are
-//! authoritative between ticks. `World::update`:
+//! `pending_levelups`, `game_over`, `won`, `level_complete`, `sfx`) are **real
+//! fields** and are authoritative between ticks. `World::update`:
 //!
 //! 1. checks `finished()` (legacy: only particles settle), increments
 //!    `elapsed`, then calls `begin_tick`, which moves the facade values into
@@ -31,6 +31,24 @@
 //! Internal scratch (`SpatialGrid`, `NeighborScratch`, `PickupScratch`,
 //! `NextSpawnId`, `NukeTick`, `EnemyIndex`, `GridScratch`) lives permanently in
 //! the Bevy world.
+//!
+//! ## Campaign structure (see [`super::campaign`])
+//!
+//! A `World` simulates **one level** of a three-level campaign (Sewer →
+//! Kitchen → Lab). The level index, the carried loadout and the banked totals
+//! are constructor inputs:
+//!
+//! * [`World::new`] — level 0 with the default loadout (the legacy signature).
+//! * [`World::new_level`] — any level index + a carried [`Loadout`].
+//! * [`World::from_campaign`] — the App's entry point: everything a
+//!   [`CampaignState`] holds, including the deterministic per-level map seed.
+//!
+//! The level's boss dying sets `level_complete` (the boss framework writes
+//! `RunCounters::level_complete`; [`World::mark_level_complete`] is the facade
+//! equivalent). The outcome rules live in `ecs::systems::loot::outcome_system`,
+//! and only the **final** level's completion sets `won`. The five-minute clock no longer ends
+//! anything: [`World::time_left`] counts down to `director::BOSS_TIME` and then
+//! reports zero, and [`World::boss_time_reached`] marks the phase change.
 
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World as EcsWorld;
@@ -43,28 +61,38 @@ use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette;
 
 use super::bullet::Bullet;
-use super::collision::SpatialGrid;
+use super::campaign::{self, CampaignState, CampaignTotals, Keepable};
+use super::collision::{SpatialGrid, TileKind, TileMap};
 use super::director::{self, Director};
 pub use super::ecs::components::Pool;
 use super::fog::{Fog, MazeMarker};
 use super::ecs::components::SpawnId;
 use super::ecs::constants::{GRID_CELL, PARTICLE_CAP};
 use super::ecs::resources::{
-    collect_sorted, spawn_with_id, swap_in, swap_out, EnemyIndex, GridScratch, LastPickups,
-    NeighborScratch, NextEnemyId, NextSpawnId, NukeTick, PickupScratch, RngRes, RunCounters,
-    SfxQueue, Shake, TickInput, Viewport,
+    collect_sorted, spawn_with_id, swap_in, swap_out, BossDue, EnemyIndex, GridScratch, LastPickups,
+    LevelIndex, NeighborScratch, NextEnemyId, NextSpawnId, NukeTick, PickupScratch, RngRes,
+    RunCounters, SfxQueue, Shake, TickInput, Viewport,
 };
 use super::ecs::schedule::{build_settle_schedule, build_tick_schedule};
+use super::ecs::systems::boss::{
+    Boss, BossArtView, BossFight, BossProjectile, BossProjectileKind, BossTargetable,
+};
+use super::ecs::systems::gates::{GateRuntime, MazeEvent};
 use super::enemy::{Enemy, EnemyKind};
 use super::gem::{Gem, Pickup, PickupKind};
 use super::art_traps::MazeRewardState;
-use super::level::{Level, Theme};
+use super::level::{Level, RoomKind, Theme};
+use super::loadout::Loadout;
 use super::nav::{FlowField, NavBudget};
 use super::particle::damage_number::{DamageNumbers, DEFAULT_CAP as DAMAGE_NUMBER_CAP};
 use super::particle::Particles;
 use super::player::Player;
 use super::weapon::WeaponKind;
-use super::{art_enemy, art_floor, art_props, art_rat, art_traps, art_walls};
+use super::art_walls::{Cardinal, WallKind};
+use super::{
+    art_boss_broom, art_boss_cat, art_boss_mower, art_enemy, art_floor, art_marks, art_props,
+    art_rat, art_traps, art_walls,
+};
 
 pub struct World {
     /// The Bevy world: entity components + the singleton resources during a
@@ -101,7 +129,22 @@ pub struct World {
     pub shake_ofs: Vec2,
     pub pending_levelups: u32,
     pub game_over: bool,
+    /// The run was won: the **final** campaign level was completed.
+    ///
+    /// Kept as a plain field because `app.rs`/`render` summarise a run from it;
+    /// `outcome_system` only raises it for the final level, and
+    /// [`World::campaign_won`] also accepts a final level whose completion the
+    /// App has not ticked through yet.
     pub won: bool,
+    /// Which campaign level this world simulates: 0 Sewer, 1 Kitchen, 2 Lab.
+    /// See [`crate::game::campaign`].
+    pub level_index: usize,
+    /// The level's boss died ⇒ the level is complete (`RunCounters`
+    /// `level_complete` round-trips here).
+    pub level_complete: bool,
+    /// Score/kills/time banked by the levels already completed, so the HUD can
+    /// show cumulative numbers (`total_score`/`total_kills`/`total_time`).
+    pub carried: CampaignTotals,
     pub cam: Vec2,
     pub viewport: Vec2,
     /// SFX events emitted this tick; drained by the app after `update`.
@@ -119,8 +162,67 @@ pub struct World {
 }
 
 impl World {
+    /// Level 0 of the campaign with the default loadout: the constructor every
+    /// existing caller (tests, `app.rs`) uses, unchanged.
+    ///
+    /// Use [`World::new_level`] (level index + carried loadout) or
+    /// [`World::from_campaign`] to start any other level of a campaign.
     pub fn new(theme: Theme, seed: u64) -> World {
-        // The level is generated from the run seed (same seed + theme = same
+        World::new_level_with_theme(
+            0,
+            theme,
+            seed,
+            Loadout::starting(),
+            CampaignTotals::default(),
+        )
+    }
+
+    /// Start campaign level `level_index` from `seed`, carrying `carried` in.
+    ///
+    /// The theme comes from the level index (0 Sewer, 1 Kitchen, 2 Lab) and the
+    /// cumulative counters start at zero — [`World::from_campaign`] is the
+    /// app-facing constructor that also passes the banked totals.
+    pub fn new_level(level_index: usize, seed: u64, carried: Loadout) -> World {
+        World::new_level_with_theme(
+            level_index,
+            campaign::level_theme(level_index),
+            seed,
+            carried,
+            CampaignTotals::default(),
+        )
+    }
+
+    /// Start the level a [`CampaignState`] points at: its theme, its derived
+    /// seed, its carried loadout and its banked totals.
+    ///
+    /// ```ignore
+    /// // play → boss dies → keep three → next level
+    /// let mut campaign = CampaignState::new(seed);
+    /// let mut world = campaign.world();
+    /// // ... world.level_complete() == true ...
+    /// let keep = world.keepables();
+    /// campaign.complete_level(&world, &keep[..3]).unwrap();
+    /// world = campaign.world();
+    /// ```
+    pub fn from_campaign(campaign: &CampaignState) -> World {
+        World::new_level_with_theme(
+            campaign.level,
+            campaign.theme(),
+            campaign.level_seed(),
+            campaign.loadout.clone(),
+            campaign.totals,
+        )
+    }
+
+    /// The full constructor: every knob a level start has.
+    pub fn new_level_with_theme(
+        level_index: usize,
+        theme: Theme,
+        seed: u64,
+        carried: Loadout,
+        carried_totals: CampaignTotals,
+    ) -> World {
+        // The level is generated from the level seed (same seed + theme = same
         // map, always). `Level::new` is the seed-0 convenience wrapper.
         let level = Level::generate(theme, seed);
         let center = level.start;
@@ -140,6 +242,19 @@ impl World {
         ecs.insert_resource(GridScratch::default());
         ecs.insert_resource(EnemyIndex::default());
         ecs.insert_resource(SpatialGrid::new(level.arena, GRID_CELL));
+        // The director's boss hand-off (raised at `director::BOSS_TIME`, taken
+        // by the boss framework). Permanent, like `NukeTick`.
+        ecs.insert_resource(BossDue::default());
+        // The boss fight's own state (private rng stream, damage-number id,
+        // reusable scratch). Permanent, like `BossDue`; a spawn re-seeds it.
+        ecs.insert_resource(BossFight::default());
+        // Floor-trap side table (glue victims + mousetrap hit bookkeeping);
+        // `traps::TrapRuntime::sync` sizes it from `level.objects`.
+        ecs.insert_resource(super::ecs::systems::traps::TrapRuntime::default());
+        // Interactive-object side table (one-way door latches/slam, rat-hole
+        // squeeze + blocked latches, cache claims and the HUD maze feed);
+        // `gates::GateRuntime::sync` sizes it from `level.objects`.
+        ecs.insert_resource(super::ecs::systems::gates::GateRuntime::default());
 
         World {
             ecs,
@@ -148,7 +263,7 @@ impl World {
 
             rng: StdRng::seed_from_u64(seed),
             level,
-            player: Player::new(center, WeaponKind::Gnaw),
+            player: carried_player(center, carried),
             particles: Particles::new(PARTICLE_CAP),
             damage_numbers: DamageNumbers::new(DAMAGE_NUMBER_CAP),
             next_enemy_id: 1,
@@ -164,6 +279,9 @@ impl World {
             pending_levelups: 0,
             game_over: false,
             won: false,
+            level_index,
+            level_complete: false,
+            carried: carried_totals,
             cam: Vec2::ZERO,
             viewport: Vec2::new(160.0, 80.0),
             sfx: Vec::new(),
@@ -186,12 +304,96 @@ impl World {
         }
     }
 
+    /// Will this world simulate any further? A finished world only settles
+    /// particles and damage numbers (see [`super::ecs::schedule::build_settle_schedule`]).
+    ///
+    /// `won` is included for the App's benefit: it is set directly by a few
+    /// tests and summaries, and a world that has already been declared won must
+    /// not keep simulating even before `level_complete` round-trips.
     pub fn finished(&self) -> bool {
-        self.game_over || self.won
+        self.game_over || self.level_complete || self.won
     }
 
+    /// Seconds until the boss fight starts (`director::BOSS_TIME`), then zero.
+    ///
+    /// The level no longer ends at a clock time: from the boss time on the
+    /// level lasts until the boss or the player dies, so the HUD's countdown
+    /// saturates at `0` and `boss_time_reached()` takes over.
     pub fn time_left(&self) -> f32 {
-        (director::RUN_SECONDS - self.elapsed).max(0.0)
+        (director::BOSS_TIME - self.elapsed).max(0.0)
+    }
+
+    /// Has the level reached the boss time (the horde now fights on until the
+    /// boss or the player dies)?
+    pub fn boss_time_reached(&self) -> bool {
+        self.elapsed >= director::BOSS_TIME
+    }
+
+    // ---- Campaign accessors --------------------------------------------
+
+    /// Which campaign level this world simulates (0 Sewer, 1 Kitchen, 2 Lab).
+    #[inline]
+    pub fn level_index(&self) -> usize {
+        self.level_index
+    }
+
+    /// Is this the campaign's last level? Completing it wins the run.
+    #[inline]
+    pub fn is_final_level(&self) -> bool {
+        campaign::is_final_level(self.level_index)
+    }
+
+    /// Has this level's boss died? (The level is then complete; the App awards
+    /// the keep-three screen.)
+    #[inline]
+    pub fn level_complete(&self) -> bool {
+        self.level_complete
+    }
+
+    /// Did the **campaign** finish? That is the final level's completion: the
+    /// Lab boss died.
+    #[inline]
+    pub fn campaign_won(&self) -> bool {
+        self.won || (self.level_complete && self.is_final_level())
+    }
+
+    /// Mark the level complete from outside the simulation (the boss framework
+    /// sets `RunCounters::level_complete` during a tick; this is the facade
+    /// equivalent for tests and for an App that observed the boss die).
+    ///
+    /// Sets `won` as well on the final level, so a world marked complete between
+    /// ticks reads correctly even though the settle path does not run
+    /// `outcome_system`.
+    pub fn mark_level_complete(&mut self) {
+        self.level_complete = true;
+        if self.is_final_level() {
+            self.won = true;
+        }
+    }
+
+    /// Cumulative score across the campaign (completed levels + this one).
+    #[inline]
+    pub fn total_score(&self) -> u32 {
+        self.carried.score + self.score
+    }
+
+    /// Cumulative kills across the campaign.
+    #[inline]
+    pub fn total_kills(&self) -> u32 {
+        self.carried.kills + self.kills
+    }
+
+    /// Cumulative seconds played across the campaign.
+    #[inline]
+    pub fn total_time(&self) -> f32 {
+        self.carried.elapsed + self.elapsed
+    }
+
+    /// Everything the player may keep between levels: one entry per owned
+    /// weapon (at its level) and per passive (at its stacks), in a stable order
+    /// with display strings. See [`crate::game::campaign::keepables`].
+    pub fn keepables(&self) -> Vec<Keepable> {
+        campaign::keepables(&self.player.loadout)
     }
 
     // ---- Read-only HUD accessors (neon merge) ---------------------------
@@ -203,7 +405,19 @@ impl World {
     // does no per-tick entity copying.
 
     /// The living boss, if one is active.
-    fn living_boss(&self) -> Option<&Enemy> {
+    ///
+    /// The P7 boss framework owns a dedicated [`Boss`] component (the art's
+    /// hit shapes are per-boss, so a generic `Enemy` cannot express them). The
+    /// legacy `EnemyKind::Boss` fallback stays for tests and any pre-P7 spawn.
+    fn living_boss(&self) -> Option<&Boss> {
+        self.ecs
+            .iter_entities()
+            .filter_map(|entity| entity.get::<Boss>())
+            .find(|b| !b.dead)
+    }
+
+    /// The legacy `EnemyKind::Boss` entity, if a test spawned one.
+    fn living_enemy_boss(&self) -> Option<&Enemy> {
         self.ecs
             .iter_entities()
             .filter_map(|entity| entity.get::<Enemy>())
@@ -212,12 +426,38 @@ impl World {
 
     /// Current and maximum HP of the living boss, if one is active.
     pub fn boss_hp(&self) -> Option<(f32, f32)> {
-        self.living_boss().map(|e| (e.hp.max(0.0), e.max_hp))
+        if let Some(b) = self.living_boss() {
+            return Some((b.hp.max(0.0), b.max_hp));
+        }
+        self.living_enemy_boss()
+            .map(|e| (e.hp.max(0.0), e.max_hp))
+    }
+
+    /// Current fight phase of the living boss (`1..=3`, 1 = healthiest).
+    ///
+    /// The boss framework derives it from the remaining HP fraction with the
+    /// per-kind thresholds ([`BossKind::phase_for`](crate::game::ecs::systems::boss::BossKind::phase_for)):
+    /// the cat and the broom have two phases, the mower three. `None` when no
+    /// `Boss` entity is alive (the legacy `EnemyKind::Boss` fallback has none).
+    pub fn boss_phase(&self) -> Option<u8> {
+        self.living_boss().map(|b| b.phase)
+    }
+
+    /// Targetable points for auto-aim: the boss's art-defined hit shapes.
+    ///
+    /// The boss is hit through its art shapes (three body circles for the cat,
+    /// two feet for the broom, one chassis circle for the mower), so a weapon
+    /// that aims at "the boss" should aim at one of these points.
+    pub fn boss_target_points(&self) -> Option<BossTargetable> {
+        self.living_boss().map(|b| b.target_points())
     }
 
     /// World-space offset from the player to the living boss, if active.
     pub fn boss_offset(&self) -> Option<Vec2> {
-        self.living_boss().map(|e| e.pos - self.player.pos)
+        if let Some(b) = self.living_boss() {
+            return Some(b.pos - self.player.pos);
+        }
+        self.living_enemy_boss().map(|e| e.pos - self.player.pos)
     }
 
     // ---- Fog of war / minimap accessors --------------------------------
@@ -251,7 +491,10 @@ impl World {
     /// The minimap shows it while the boss is alive (fog does not hide the
     /// threat the boss bar and the compass already announce).
     pub fn boss_marker(&self) -> Option<Vec2> {
-        self.living_boss().map(|e| e.pos)
+        if let Some(b) = self.living_boss() {
+            return Some(b.pos);
+        }
+        self.living_enemy_boss().map(|e| e.pos)
     }
 
     /// The boss-arena marker: its cell rectangle, once any of its cells has
@@ -305,6 +548,30 @@ impl World {
     /// Pickups collected during the most recent `update()` tick.
     pub fn last_pickups(&self) -> &[PickupKind] {
         &self.last_pickups
+    }
+
+    // ---- Maze object rail (HUD) -----------------------------------------
+    //
+    // The object layer (`systems/gates.rs`) reports cache claims and gate
+    // slams in `GateRuntime`: the feed only holds the most recent tick, the
+    // per-object records hold the one-shot latches. The HUD reads both so a
+    // callout can be neither duplicated nor lost.
+
+    /// The maze object layer's event feed for the most recent tick.
+    pub fn maze_feed(&self) -> &[MazeEvent] {
+        self.ecs.resource::<GateRuntime>().feed()
+    }
+
+    /// Did maze `index`'s one-way exit slam shut behind the rat? A persistent
+    /// one-shot latch (the art's `DoorRuntime::slammed`).
+    ///
+    /// Door `i` is maze `i`'s exit: the generator pushes them in `mazes` order.
+    pub fn maze_gate_slammed(&self, index: usize) -> bool {
+        self.ecs
+            .resource::<GateRuntime>()
+            .doors
+            .get(index)
+            .is_some_and(|door| door.slammed)
     }
 
     // ---- Entity snapshots (tests + determinism harness) ------------------
@@ -366,6 +633,7 @@ impl World {
         self.ecs.insert_resource(TickInput { dt, move_dir, dash });
         self.ecs.insert_resource(Viewport(self.viewport));
         self.ecs.insert_resource(NukeTick(false));
+        self.ecs.insert_resource(LevelIndex(self.level_index));
         self.ecs.insert_resource(RunCounters {
             elapsed: self.elapsed,
             kills: self.kills,
@@ -373,6 +641,7 @@ impl World {
             pending_levelups: self.pending_levelups,
             game_over: self.game_over,
             won: self.won,
+            level_complete: self.level_complete,
         });
         self.ecs.insert_resource(Shake {
             amount: self.shake,
@@ -447,6 +716,7 @@ impl World {
         self.pending_levelups = counters.pending_levelups;
         self.game_over = counters.game_over;
         self.won = counters.won;
+        self.level_complete = counters.level_complete;
 
         let shake = self
             .ecs
@@ -591,12 +861,25 @@ impl World {
         // Floor and arena border.
         art_floor::draw_floor(pb, &self.level, cam, self.elapsed);
 
+        // Purely decorative floor marks (`art_marks`'s own layer order): the
+        // boss arena's repeating motif, one landmark per major hall, and the
+        // gnaw-mark / gold-fleck trail of each maze approach.
+        self.draw_floor_marks(pb, cam);
+
         // Floor stains (ichor splatters & explosion scorches) beneath props/entities.
         self.particles.draw_stains(pb, cam);
+
+        // Boss ground layer: floor telegraphs and drop shadows, after the
+        // stains and before props/entities (the art's "Ground" layer).
+        self.draw_boss_ground(pb, cam);
 
         // Wall ground layer: contact shadows and floor thresholds, under
         // everything that stands on the floor.
         self.draw_wall_layer(pb, cam, WallLayer::Ground);
+        // The boss arena's doorway landmark: chip/scuff/chevron decals that
+        // bleed onto the floor on both sides of the mouth (`art_walls` asks for
+        // this right after the wall ground layer).
+        self.draw_boss_thresholds(pb, cam, WallLayer::Ground);
         self.draw_object_layer(pb, cam, false);
 
         // Wall bodies: caps and south faces, under the entities (the lintels
@@ -680,14 +963,23 @@ impl World {
         let accent = self.level.palette.accent;
         {
             let mut query = self.ecs.query::<(&SpawnId, &Enemy)>();
+            // Count what is on screen first: past CROWD_LOD_THRESHOLD the art
+            // switches small enemies to its cheaper level-of-detail drawing.
+            let visible = query
+                .iter(&self.ecs)
+                .filter(|(_, e)| on_screen(self.w2s(e.pos, cam), e.radius * 3.0 + 8.0, viewport))
+                .count();
             for (_, e) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
                 let s = self.w2s(e.pos, cam);
                 if !on_screen(s, e.radius * 3.0 + 8.0, viewport) {
                     continue;
                 }
-                art_enemy::draw_enemy(pb, e, cam, accent);
+                art_enemy::draw_enemy_crowd(pb, e, cam, accent, visible);
             }
         }
+
+        // Boss bodies in the entity pass (airborne ones go over the player).
+        self.draw_boss_body(pb, cam, false);
 
         // Bullets.
         {
@@ -707,14 +999,21 @@ impl World {
             }
         }
 
+        // Boss-owned projectiles (blade discs, shrapnel) in the bullet pass.
+        self.draw_boss_projectiles(pb, cam);
+
         // Player rat.
         self.draw_player(pb, cam);
+
+        // The cat's airborne pounce passes visibly overhead.
+        self.draw_boss_body(pb, cam, true);
 
         // Overhang layer: lintels over rat-holes, doorways and one-way doors,
         // so the rat is visibly ducking *under* them; then the foreground half
         // of the level objects (glue strands, striker bars, door leaves, the
         // rat-hole arch and the reward pedestal).
         self.draw_wall_layer(pb, cam, WallLayer::Overhang);
+        self.draw_boss_thresholds(pb, cam, WallLayer::Overhang);
         self.draw_object_layer(pb, cam, true);
 
         // Particles and shockwaves on top.
@@ -726,6 +1025,216 @@ impl World {
 
     fn draw_player(&self, pb: &mut PixelBuffer, cam: Vec2) {
         art_rat::draw_rat(pb, &self.player, self.elapsed, cam);
+    }
+
+    /// Boss ground layer: floor telegraphs and drop shadows, drawn after the
+    /// floor stains and before props/entities (the art's "Ground" layer).
+    ///
+    /// The ground layer carries the *warnings* (the cat's landing ring, the
+    /// stomp's shadow, the mower's charge rails), so it is culled on the boss
+    /// **and** on its telegraph target: a jaguar that has leapt off screen must
+    /// not take the landing ring the rat is standing in with it. The ring can
+    /// sit a whole leap (`POUNCE_MAX_DIST = 96 px`) away, further than the
+    /// art's 85 px sprite margin, so the target needs its own test.
+    fn draw_boss_ground(&mut self, pb: &mut PixelBuffer, cam: Vec2) {
+        let accent = self.level.palette.accent;
+        let mut query = self.ecs.query::<&Boss>();
+        for boss in query.iter(&self.ecs) {
+            let margin = boss.kind.cull_margin();
+            let body_visible = on_screen(self.w2s(boss.pos, cam), margin, self.viewport);
+            let target_visible = on_screen(self.w2s(boss.target, cam), margin, self.viewport);
+            if !body_visible && !target_visible {
+                continue;
+            }
+            match boss.view() {
+                BossArtView::Cat(v) => art_boss_cat::draw_boss_cat_ground(pb, &v, cam, accent),
+                BossArtView::Broom(v) => art_boss_broom::draw_ground(pb, &v, cam, accent),
+                BossArtView::Mower(v) => {
+                    art_boss_mower::draw_dock_pad(pb, v.dock_pos, v.anim, 0.0, cam, accent);
+                    art_boss_mower::draw_mower_ground(pb, &v, cam, accent);
+                }
+            }
+        }
+    }
+
+    /// Boss entity layer. `airborne_only` selects the cat's leaping pass, which
+    /// the art draws after the player so it visibly passes overhead.
+    fn draw_boss_body(&mut self, pb: &mut PixelBuffer, cam: Vec2, airborne_only: bool) {
+        let accent = self.level.palette.accent;
+        let mut query = self.ecs.query::<&Boss>();
+        for boss in query.iter(&self.ecs) {
+            if boss.is_airborne() != airborne_only {
+                continue;
+            }
+            if !on_screen(self.w2s(boss.pos, cam), boss.kind.cull_margin(), self.viewport) {
+                continue;
+            }
+            match boss.view() {
+                BossArtView::Cat(v) => art_boss_cat::draw_boss_cat(pb, &v, cam, accent),
+                BossArtView::Broom(v) => art_boss_broom::draw(pb, &v, cam, accent),
+                BossArtView::Mower(v) => art_boss_mower::draw_mower(pb, &v, cam, accent),
+            }
+        }
+    }
+
+    /// Boss-owned projectiles in the bullet pass (blade discs, shrapnel).
+    fn draw_boss_projectiles(&mut self, pb: &mut PixelBuffer, cam: Vec2) {
+        let accent = self.level.palette.accent;
+        let mut query = self.ecs.query::<(&SpawnId, &BossProjectile)>();
+        for (_, p) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+            if !on_screen(self.w2s(p.pos, cam), p.radius + 4.0, self.viewport) {
+                continue;
+            }
+            match p.kind {
+                BossProjectileKind::BladeDisc => {
+                    art_boss_mower::draw_blade_disc(pb, p.pos, p.anim, cam, accent)
+                }
+                BossProjectileKind::GrassShrapnel => {
+                    art_boss_mower::draw_grass_shrapnel(pb, p.pos, p.vel, cam, accent)
+                }
+                _ => {
+                    let s = self.w2s(p.pos, cam);
+                    pb.filled_circle(s.0, s.1, p.radius.max(1.0) as i32, accent);
+                }
+            }
+        }
+    }
+
+    /// Floor-layer decoration with no collision impact (see `art_marks`).
+    ///
+    /// Called right after [`art_floor::draw_floor`] so everything else (stains,
+    /// walls, objects, entities) sits on top. Every pass is culled to the view
+    /// and the whole method allocates nothing.
+    fn draw_floor_marks(&self, pb: &mut PixelBuffer, cam: Vec2) {
+        let level = &self.level;
+        let vp = self.viewport;
+        let theme = level.theme;
+
+        // 1. Boss arena: the repeating 4 × 4-cell motif, strictly inside the
+        //    arena rect (the art also clips it to the visible slice).
+        if let Some(room) = level.boss_room() {
+            art_marks::draw_boss_arena_floor(pb, room.rect, theme, cam);
+        }
+
+        // 2. One landmark per major hall, its variant its own hall index, so no
+        //    two halls read the same (the Lab stencils it as a bay number).
+        let mut hall = 0u8;
+        for room in level.rooms.iter().filter(|r| r.kind == RoomKind::Hall) {
+            let variant = hall;
+            hall = hall.wrapping_add(1);
+            let centre = room.rect.center_world();
+            if !on_screen(
+                self.w2s(centre, cam),
+                art_marks::HALL_LANDMARK_HALF_EXTENT,
+                vp,
+            ) {
+                continue;
+            }
+            art_marks::draw_hall_landmark(pb, centre, variant, cam, theme);
+        }
+
+        // 3. Each maze: the three gnaw marks back from the breach (pointing into
+        //    it) and the art's sparing gold trail inside.
+        for maze in &level.mazes {
+            let entry = TileMap::tile_rect(maze.entry.0, maze.entry.1).center();
+            let fork = TileMap::tile_rect(maze.fork.0, maze.fork.1).center();
+            let to_entry = entry - fork;
+            let approach = to_entry.len();
+
+            // The gnaw marks sit `GNAW_MARK_OFFSETS` back from the entrance
+            // centre along the approach. Nothing is painted past the public
+            // fork: a mark in an unrelated corridor would point the wrong way.
+            if approach >= 1.0 {
+                let dir = to_entry * (1.0 / approach);
+                for &dist in art_marks::GNAW_MARK_OFFSETS.iter() {
+                    if dist > approach + 8.0 {
+                        continue;
+                    }
+                    let pos = entry - dir * dist;
+                    if !on_screen(self.w2s(pos, cam), 10.0, vp) {
+                        continue;
+                    }
+                    art_marks::draw_gnaw_mark(pb, pos, dir, cam, theme);
+                }
+            }
+
+            // Gold: one mark 1.5 cells inside the breach, two on the final
+            // stretch to the cache (`GOLD_FLECK_SPACING` apart), and only on
+            // open floor so a fleck never lands on a partition.
+            let to_cache = maze.reward - entry;
+            let trail = to_cache.len();
+            if trail < 1.0 {
+                continue;
+            }
+            let dir = to_cache * (1.0 / trail);
+            let mut fleck = |pos: Vec2| {
+                let (cx, cy) = crate::game::collision::cell_of(pos);
+                if !level.tiles.get(cx, cy).is_open() || !on_screen(self.w2s(pos, cam), 8.0, vp) {
+                    return;
+                }
+                art_marks::draw_gold_fleck(pb, pos, dir, cam, self.elapsed);
+            };
+            fleck(entry + dir * 24.0);
+            if trail >= 2.0 * art_marks::GOLD_FLECK_SPACING + 24.0 {
+                fleck(maze.reward - dir * art_marks::GOLD_FLECK_SPACING);
+                fleck(maze.reward - dir * (2.0 * art_marks::GOLD_FLECK_SPACING));
+            }
+        }
+    }
+
+    /// The boss arena's doorway landmark, per mouth cell, on the ground or the
+    /// overhang wall layer (`art_walls`' `BossThresholdView` contract).
+    ///
+    /// The mouth cells are the `Doorway` cells piercing the arena's one-cell
+    /// wall ring; a two-cell mouth is one landmark, which is why each adjacent
+    /// pair gets its own view (the art fuses them through the shared mask bit).
+    fn draw_boss_thresholds(&self, pb: &mut PixelBuffer, cam: Vec2, layer: WallLayer) {
+        let accent = self.level.palette.accent;
+        let anim = self.elapsed;
+        let mut draw = |view: &mut art_walls::BossThresholdView| {
+            view.cell.anim_clock = anim;
+            match layer {
+                WallLayer::Ground => {
+                    art_walls::draw_boss_threshold_ground(pb, view, cam, accent)
+                }
+                WallLayer::Overhang => {
+                    art_walls::draw_boss_threshold_overhang(pb, view, cam, accent)
+                }
+                WallLayer::Body => {}
+            }
+        };
+        self.for_each_boss_threshold(|mut view| draw(&mut view));
+    }
+
+    /// Visit each mouth cell of the boss arena's doorway(s) with the direction
+    /// that points *into* the arena. Allocation-free.
+    fn for_each_boss_threshold(&self, mut f: impl FnMut(art_walls::BossThresholdView)) {
+        let Some(room) = self.level.boss_room() else {
+            return;
+        };
+        let arena = room.rect;
+        let tiles = &self.level.tiles;
+        let mut visit = |cx: i32, cy: i32, inward: Cardinal| {
+            if !tiles.in_bounds(cx, cy)
+                || !matches!(tiles.get(cx, cy), TileKind::Wall(WallKind::Doorway { .. }))
+            {
+                return;
+            }
+            f(art_walls::BossThresholdView::new(
+                tiles.wall_view(cx, cy),
+                inward,
+            ));
+        };
+        // North and south wall ring rows, then west and east wall ring columns
+        // (the corner cells belong to no side).
+        for cx in arena.x..arena.right() {
+            visit(cx, arena.y - 1, Cardinal::South);
+            visit(cx, arena.bottom(), Cardinal::North);
+        }
+        for cy in arena.y..arena.bottom() {
+            visit(arena.x - 1, cy, Cardinal::East);
+            visit(arena.right(), cy, Cardinal::West);
+        }
     }
 
     /// Wall cells of the three art layers, culled to the view (see
@@ -830,6 +1339,17 @@ impl World {
     }
 }
 
+/// A fresh level's player: the carried loadout, at full health.
+///
+/// XP and the player level restart every level (the carried powerups *are* the
+/// progression); only the loadout crosses.
+fn carried_player(center: Vec2, carried: Loadout) -> Player {
+    let mut player = Player::new(center, Loadout::START_WEAPON);
+    player.hp = carried.stats.max_hp;
+    player.loadout = carried;
+    player
+}
+
 /// Which layer of the wall art [`World::draw_wall_layer`] is drawing.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WallLayer {
@@ -867,9 +1387,9 @@ pub(crate) fn on_screen(s: (i32, i32), margin: f32, viewport: Vec2) -> bool {
 mod draw_tests {
     use super::World;
     use crate::game::art_traps::RatHoleView;
-    use crate::game::art_walls::{WallAxis, WallKind};
+    use crate::game::art_walls::{Cardinal, WallAxis, WallKind};
     use crate::game::collision::{TileKind, TileMap};
-    use crate::game::level::{Level, RatHole, Theme};
+    use crate::game::level::{Level, MazeSection, RatHole, Room, RoomKind, Theme, TileRect};
     use crate::math::Vec2;
     use crate::render::framebuffer::PixelBuffer;
 
@@ -1009,6 +1529,277 @@ mod draw_tests {
             assert!(
                 gap_diff > 4,
                 "{theme:?}: the rat-hole gap is drawn like solid wall"
+            );
+        }
+    }
+
+    /// Pixels differing between two frames inside a screen box.
+    fn diff_in_box(a: &PixelBuffer, b: &PixelBuffer, x0: i32, y0: i32, w: i32, h: i32) -> usize {
+        let mut diff = 0;
+        for y in y0.max(0)..(y0 + h).min(VIEW.1 as i32) {
+            for x in x0.max(0)..(x0 + w).min(VIEW.0 as i32) {
+                if a.pixel_at(x as usize, y as usize) != b.pixel_at(x as usize, y as usize) {
+                    diff += 1;
+                }
+            }
+        }
+        diff
+    }
+
+    /// Screen origin of one cell (matches [`cell_span`]'s rounding).
+    fn cell_at(cam: Vec2, cx: i32, cy: i32) -> (i32, i32) {
+        let (x, y, _, _) = cell_span(cam, cx, cy);
+        (x, y)
+    }
+
+    /// A maze section whose approach runs west→east along row 80, from the
+    /// public fork at (96, 80) through the breach at (100, 80) to a cache six
+    /// cells inside.
+    fn maze_section() -> MazeSection {
+        MazeSection {
+            bounds: TileRect::new(98, 76, 12, 9),
+            ring: TileRect::new(100, 78, 8, 5),
+            entry: (100, 80),
+            fork: (96, 80),
+            exit: (103, 86),
+            exit_dir: Cardinal::East,
+            reward: TileMap::tile_rect(106, 80).center(),
+            reward_cell: (106, 80),
+        }
+    }
+
+    /// **Boss arena floor**: `art_marks::draw_boss_arena_floor` paints the
+    /// arena's repeating motif inside the arena rect and nowhere else.
+    #[test]
+    fn the_boss_arena_floor_motif_is_drawn_inside_the_arena_only() {
+        for theme in Theme::all() {
+            let (plain, cam) = frame(theme, Level::empty(theme));
+            let mut level = Level::empty(theme);
+            level.rooms.push(Room::new(
+                TileRect::new(97, 76, 8, 8),
+                RoomKind::Boss,
+            ));
+            let (marked, _) = frame(theme, level);
+
+            let (ix, iy) = cell_at(cam, 100, 79);
+            let (dx, dy) = cell_at(cam, 95, 79);
+            let inside = diff_in_box(&plain, &marked, ix, iy, 16, 16);
+            let outside = diff_in_box(&plain, &marked, dx, dy, 16, 16);
+            assert!(
+                inside > 8,
+                "{theme:?}: the boss arena motif painted {inside} px"
+            );
+            assert_eq!(
+                outside, 0,
+                "{theme:?}: the boss arena motif bled onto {outside} floor px"
+            );
+        }
+    }
+
+    /// **Hall landmarks**: one per major hall, the variant following the hall's
+    /// own index, so the second hall on a map is not a copy of the first.
+    #[test]
+    fn each_major_hall_gets_its_own_landmark_variant() {
+        const A: TileRect = TileRect::new(96, 74, 6, 6);
+        const B: TileRect = TileRect::new(100, 80, 6, 6);
+        for theme in Theme::all() {
+            let (plain, cam) = frame(theme, Level::empty(theme));
+
+            let mut only_b = Level::empty(theme);
+            only_b.rooms.push(Room::new(B, RoomKind::Hall));
+            let (b_first, _) = frame(theme, only_b);
+
+            let mut both = Level::empty(theme);
+            both.rooms.push(Room::new(A, RoomKind::Hall));
+            both.rooms.push(Room::new(B, RoomKind::Hall));
+            let (b_second, _) = frame(theme, both);
+
+            // Hall A (index 0) is painted.
+            let (ax, ay) = cell_at(cam, 98, 76);
+            assert!(
+                diff_in_box(&plain, &b_second, ax, ay, 16, 16) > 0,
+                "{theme:?}: the first hall got no landmark"
+            );
+            // Hall B is drawn with variant 1 when it is the second hall but
+            // variant 0 when it is the first: different art.
+            let (bx, by) = cell_at(cam, 102, 82);
+            assert!(
+                diff_in_box(&b_first, &b_second, bx - 8, by - 8, 32, 32) > 0,
+                "{theme:?}: every hall drew the same landmark variant"
+            );
+        }
+    }
+
+    /// **Gnaw marks & gold flecks**: the maze approach is marked at the art's
+    /// offsets back from the breach, and the inside of the maze gets the
+    /// sparing gold trail.
+    #[test]
+    fn a_maze_approach_gets_gnaw_marks_and_a_gold_trail() {
+        for theme in Theme::all() {
+            let (plain, cam) = frame(theme, Level::empty(theme));
+            let mut level = Level::empty(theme);
+            level.mazes.push(maze_section());
+            let (marked, _) = frame(theme, level);
+
+            // Gnaw marks at 16 / 35 / 54 px back from the breach centre: cells
+            // 99, 98 and 97 of row 80.
+            for cx in [99, 98, 97] {
+                let (x, y) = cell_at(cam, cx, 80);
+                let d = diff_in_box(&plain, &marked, x, y, 16, 16);
+                assert!(
+                    d > 0,
+                    "{theme:?}: no gnaw mark in cell {cx},80 ({d} px)"
+                );
+            }
+            // Beyond the public fork (col 95 and west) nothing is painted.
+            let (fx, fy) = cell_at(cam, 95, 80);
+            assert_eq!(
+                diff_in_box(&plain, &marked, fx, fy, 16, 16),
+                0,
+                "{theme:?}: a gnaw mark was painted past the public fork"
+            );
+
+            // The gold trail starts 24 px inside the breach (cell 101).
+            let (gx, gy) = cell_at(cam, 101, 80);
+            assert!(
+                diff_in_box(&plain, &marked, gx + 8, gy + 4, 12, 12) > 0,
+                "{theme:?}: no gold fleck inside the maze"
+            );
+        }
+    }
+
+    /// A blank map whose row 75 is a north wall with a fused two-cell doorway
+    /// at columns 98–99 (the shape a boss arena's double door has).
+    fn boss_mouth_map(theme: Theme) -> Level {
+        let mut level = Level::empty(theme);
+        level
+            .tiles
+            .fill_cells(96, 75, 12, 1, TileKind::Wall(WallKind::Solid));
+        for cx in [98, 99] {
+            level.tiles.set(
+                cx,
+                75,
+                TileKind::Wall(WallKind::Doorway {
+                    axis: WallAxis::Horizontal,
+                }),
+            );
+        }
+        level.tiles.rebuild_masks();
+        level
+    }
+
+    /// **Boss threshold**: the arena's doorway mouth cells get the themed
+    /// threshold decal on the ground layer (and the overhang trim), and a map
+    /// with the same holes but no boss arena gets neither.
+    #[test]
+    fn the_boss_arena_doorway_gets_its_threshold_landmark() {
+        for theme in Theme::all() {
+            // North wall ring of the arena at row 75: two adjacent doorway
+            // cells fusing into one 32 px mouth, walled on both flanks.
+            let mut level = boss_mouth_map(theme);
+            let mut no_arena = boss_mouth_map(theme);
+            no_arena.rooms.push(Room::new(
+                TileRect::new(97, 76, 8, 8),
+                RoomKind::Room,
+            ));
+            level.rooms.push(Room::new(
+                TileRect::new(97, 76, 8, 8),
+                RoomKind::Boss,
+            ));
+
+            let (plain, cam) = frame(theme, no_arena);
+            let (threshold, _) = frame(theme, level);
+            for cx in [98, 99] {
+                let (x, y) = cell_at(cam, cx, 75);
+                let d = diff_in_box(&plain, &threshold, x, y, 16, 16);
+                assert!(
+                    d > 0,
+                    "{theme:?}: mouth cell {cx},75 got no threshold decal"
+                );
+            }
+        }
+    }
+
+    /// The detector the threshold overlay hangs off has to find real mouths:
+    /// every generated map has a boss arena whose double door pierces its wall
+    /// ring, and the inward direction points from the corridor into the arena.
+    #[test]
+    fn every_generated_map_has_a_boss_arena_mouth() {
+        for (theme, seed) in [
+            (Theme::Sewer, 0u64),
+            (Theme::Sewer, 1),
+            (Theme::Kitchen, 2),
+            (Theme::Kitchen, 5),
+            (Theme::Lab, 3),
+            (Theme::Lab, 9),
+        ] {
+            let w = World::new(theme, seed);
+            let arena = w
+                .level
+                .boss_room()
+                .expect("every generated map has a boss arena")
+                .rect;
+            let ring = arena.inflate(1);
+            let mut mouths = 0;
+            let mut bad = None;
+            w.for_each_boss_threshold(|view| {
+                mouths += 1;
+                let (cx, cy) = (view.cell.cell_x, view.cell.cell_y);
+                let on_ring = ring.contains(cx, cy) && !arena.contains(cx, cy);
+                let points_in = match view.inward {
+                    Cardinal::North => cy == arena.bottom(),
+                    Cardinal::South => cy == arena.y - 1,
+                    Cardinal::East => cx == arena.x - 1,
+                    Cardinal::West => cx == arena.right(),
+                };
+                if !on_ring || !points_in {
+                    bad = Some((cx, cy, view.inward));
+                }
+            });
+            assert!(
+                mouths >= 1,
+                "{theme:?}/{seed}: the boss arena mouth was not found"
+            );
+            assert_eq!(bad, None, "{theme:?}/{seed}: mouth outside the wall ring");
+        }
+    }
+
+    /// Culling: decoration whose cells are all far outside the view never
+    /// reaches the frame, so it is byte-identical to a map without it.
+    #[test]
+    fn floor_marks_outside_the_viewport_are_never_drawn() {
+        for theme in Theme::all() {
+            let (plain, _) = frame(theme, Level::empty(theme));
+            let mut far = Level::empty(theme);
+            far.rooms.push(Room::new(
+                TileRect::new(4, 4, 10, 10),
+                RoomKind::Boss,
+            ));
+            far.rooms.push(Room::new(TileRect::new(20, 20, 8, 8), RoomKind::Hall));
+            far.tiles
+                .fill_cells(3, 3, 12, 1, TileKind::Wall(WallKind::Solid));
+            for cx in [8, 9] {
+                far.tiles.set(
+                    cx,
+                    3,
+                    TileKind::Wall(WallKind::Doorway {
+                        axis: WallAxis::Horizontal,
+                    }),
+                );
+            }
+            far.tiles.rebuild_masks();
+            let mut maze = maze_section();
+            maze.entry = (30, 30);
+            maze.fork = (26, 30);
+            maze.reward = TileMap::tile_rect(36, 30).center();
+            maze.reward_cell = (36, 30);
+            far.mazes.push(maze);
+
+            let (with_far, _) = frame(theme, far);
+            let differing = diff_in_box(&plain, &with_far, 0, 0, VIEW.0 as i32, VIEW.1 as i32);
+            assert_eq!(
+                differing, 0,
+                "{theme:?}: off-screen floor marks painted {differing} px"
             );
         }
     }

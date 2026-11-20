@@ -1,23 +1,126 @@
 //! High-score table persisted as JSON in the user data dir.
+//!
+//! The table holds two things:
+//!
+//! * `entries` — one record per finished run: the **cumulative** campaign
+//!   score, the campaign level the run reached (1..=3) and whether the run won
+//!   the campaign. Files written by an older build have no campaign fields;
+//!   they load as "reached level 1, campaign not won" (see
+//!   [`ScoreEntry::campaign_level`]).
+//! * `progress` — the per-level bests and clear flags behind the title's
+//!   sector-select. A level unlocks once the previous one has been cleared in
+//!   any run, so the flags must persist independently of the top-ten entries
+//!   (a strong table can drop an old entry, but it never relocks a level).
 
 use serde::{Deserialize, Serialize};
 
 use crate::config;
+use crate::game::campaign::LEVEL_COUNT;
+use crate::render::minimap::MinimapSize;
 
 pub const MAX_ENTRIES: usize = 10;
 
+/// The campaign level an old score file's entries belong to.
+fn default_campaign_level() -> u8 {
+    1
+}
+
+fn default_level_bests() -> [LevelBestEntry; LEVEL_COUNT] {
+    [LevelBestEntry::default(); LEVEL_COUNT]
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScoreEntry {
+    /// Cumulative score of the whole run (completed levels + this one + bonuses).
     pub score: u32,
+    /// Total seconds played across the whole run.
     pub time: f32,
+    /// The player's character level at the end of the run.
     pub level: u32,
+    /// The sector the run ended (or finished) in, for the records table.
     pub map: String,
+    /// Did the run win? For a campaign that means the Lab boss died; a practice
+    /// clear also shows the victory styling.
     pub won: bool,
+    /// Which campaign level the run reached, 1..=3.
+    ///
+    /// Missing in files written before the campaign existed, which default to
+    /// `1` (every old run was a single Sewer map).
+    #[serde(default = "default_campaign_level")]
+    pub campaign_level: u8,
+    /// Did the run clear the whole three-level campaign (not just a practice
+    /// sector)? Missing in old files ⇒ `false`.
+    #[serde(default)]
+    pub campaign_won: bool,
+}
+
+/// Best results recorded for one campaign level (level-select cards).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LevelBestEntry {
+    /// Has this level been completed in any run?
+    #[serde(default)]
+    pub cleared: bool,
+    /// Highest score earned on this level alone.
+    #[serde(default)]
+    pub score: u32,
+    /// Fastest completion of this level, in seconds (`0.0` = none yet).
+    #[serde(default)]
+    pub time: f32,
+}
+
+/// Persisted per-level progress: clear flags + best results.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CampaignProgress {
+    #[serde(default = "default_level_bests")]
+    pub levels: [LevelBestEntry; LEVEL_COUNT],
+}
+
+impl Default for CampaignProgress {
+    fn default() -> Self {
+        CampaignProgress {
+            levels: default_level_bests(),
+        }
+    }
+}
+
+impl CampaignProgress {
+    fn get(&self, level: usize) -> Option<&LevelBestEntry> {
+        self.levels.get(level)
+    }
+}
+
+fn serialize_minimap_size<S: serde::Serializer>(
+    size: &MinimapSize,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(size.as_str())
+}
+
+fn deserialize_minimap_size<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<MinimapSize, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_str()
+        .and_then(MinimapSize::parse_setting)
+        .unwrap_or(MinimapSize::Normal))
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ScoreTable {
+    #[serde(default)]
     pub entries: Vec<ScoreEntry>,
+    /// Per-level clear flags + bests: what the sector select reads.
+    #[serde(default)]
+    pub progress: CampaignProgress,
+    /// Player's preferred compact minimap size (`normal` | `small` | `hidden`).
+    /// Missing or unreadable values fall back to `Normal`.
+    #[serde(
+        default,
+        serialize_with = "serialize_minimap_size",
+        deserialize_with = "deserialize_minimap_size"
+    )]
+    pub minimap_size: MinimapSize,
 }
 
 impl ScoreTable {
@@ -36,6 +139,11 @@ impl ScoreTable {
         let mut table: ScoreTable = serde_json::from_str(json).unwrap_or_default();
         table.normalize();
         table
+    }
+
+    /// The table as it would be written to disk (round-trips through [`parse`]).
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_default()
     }
 
     fn normalize(&mut self) {
@@ -81,6 +189,46 @@ impl ScoreTable {
     pub fn is_high_score(&self, score: u32) -> bool {
         score > self.best()
     }
+
+    // ---- Campaign progress (sector select) ------------------------------
+
+    /// Has campaign level `level` (0-based) been cleared in any run?
+    pub fn level_cleared(&self, level: usize) -> bool {
+        self.progress.get(level).is_some_and(|l| l.cleared)
+    }
+
+    /// Is level `level` (0-based) selectable? Level 1 is always open; later
+    /// levels unlock once the previous one has been cleared in any run.
+    pub fn level_unlocked(&self, level: usize) -> bool {
+        if level == 0 {
+            return true;
+        }
+        level < LEVEL_COUNT && self.level_cleared(level - 1)
+    }
+
+    /// Recorded bests for a level, if it has ever been cleared.
+    pub fn level_best(&self, level: usize) -> Option<LevelBestEntry> {
+        self.progress
+            .get(level)
+            .filter(|l| l.cleared)
+            .copied()
+    }
+
+    /// Record a level completion: flag it cleared, keep the highest level score
+    /// and the fastest time. Out-of-range levels are ignored so a corrupt file
+    /// cannot index past the campaign.
+    pub fn record_level(&mut self, level: usize, score: u32, time: f32) {
+        let Some(entry) = self.progress.levels.get_mut(level) else {
+            return;
+        };
+        entry.cleared = true;
+        if score > entry.score {
+            entry.score = score;
+        }
+        if time > 0.0 && (entry.time <= 0.0 || time < entry.time) {
+            entry.time = time;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -94,6 +242,8 @@ mod tests {
             level: 1,
             map: "Sewer".into(),
             won: false,
+            campaign_level: 1,
+            campaign_won: false,
         }
     }
 
@@ -173,6 +323,86 @@ mod tests {
         assert!(ScoreTable::parse("{ not json").entries.is_empty());
     }
 
+    /// A file written before the campaign existed has neither campaign field:
+    /// every entry loads as "reached level 1, campaign not won", and nothing is
+    /// unlocked by it.
+    #[test]
+    fn old_format_entries_load_as_level_one_and_not_won() {
+        let json = r#"{"entries":[
+            {"score":900,"time":300.0,"level":9,"map":"Sewer","won":true},
+            {"score":400,"time":120.0,"level":4,"map":"Lab","won":false}
+        ]}"#;
+        let t = ScoreTable::parse(json);
+        assert_eq!(t.entries.len(), 2);
+        for entry in &t.entries {
+            assert_eq!(entry.campaign_level, 1, "old entries reached level 1");
+            assert!(!entry.campaign_won, "no old entry won a campaign");
+        }
+        assert_eq!(t.entries[0].score, 900);
+        assert_eq!(t.progress.levels[0], LevelBestEntry::default());
+        assert!(t.level_unlocked(0), "level 1 is always open");
+        assert!(!t.level_unlocked(1), "an old file unlocks nothing later");
+        assert!(t.level_best(0).is_none());
+    }
+
+    #[test]
+    fn level_progress_unlocks_and_round_trips() {
+        let mut t = ScoreTable::default();
+        assert!(t.level_unlocked(0));
+        assert!(!t.level_unlocked(1));
+        assert!(!t.level_unlocked(2));
+
+        t.record_level(0, 6420, 252.0);
+        assert!(t.level_cleared(0));
+        assert!(t.level_unlocked(1), "clearing level 1 unlocks level 2");
+        assert!(!t.level_unlocked(2));
+        assert_eq!(
+            t.level_best(0),
+            Some(LevelBestEntry {
+                cleared: true,
+                score: 6420,
+                time: 252.0
+            })
+        );
+
+        // Bests keep the highest score and the fastest time.
+        t.record_level(0, 5000, 260.0);
+        t.record_level(0, 8000, 240.0);
+        let best = t.level_best(0).unwrap();
+        assert_eq!(best.score, 8000, "a lower score must not replace the best");
+        assert_eq!(best.time, 240.0, "a slower time must not replace the best");
+
+        t.record_level(1, 4180, 198.0);
+        assert!(t.level_unlocked(2));
+
+        // Progress survives a save/load round trip, including the clear flags.
+        let back = ScoreTable::parse(&t.to_json());
+        assert!(back.level_unlocked(2));
+        assert_eq!(back.level_best(0), t.level_best(0));
+        assert_eq!(back.level_best(1), t.level_best(1));
+
+        // Out-of-range levels are ignored rather than panicking.
+        t.record_level(9, 1, 1.0);
+        assert!(!t.level_unlocked(9));
+    }
+
+    /// A cleared level stays unlocked even when its score entry has been pushed
+    /// out of the top ten by later runs.
+    #[test]
+    fn clearing_survives_the_top_ten_rolling_over() {
+        let mut t = ScoreTable::default();
+        t.record_level(1, 100, 200.0);
+        for s in 0..(MAX_ENTRIES as u32 + 3) {
+            t.insert(e(1000 + s));
+        }
+        assert_eq!(t.entries.len(), MAX_ENTRIES);
+        assert!(t
+            .entries
+            .iter()
+            .all(|x| x.campaign_level == 1 && !x.campaign_won));
+        assert!(t.level_unlocked(2), "the clear flag is independent of the table");
+    }
+
     #[test]
     fn roundtrip_json() {
         let mut t = ScoreTable::default();
@@ -180,5 +410,36 @@ mod tests {
         let json = serde_json::to_string(&t).unwrap();
         let back: ScoreTable = serde_json::from_str(&json).unwrap();
         assert_eq!(back.entries[0].score, 123);
+        assert_eq!(back.entries[0].campaign_level, 1);
+        assert_eq!(back.minimap_size, MinimapSize::Normal);
+    }
+
+    #[test]
+    fn minimap_size_persists_and_falls_back_to_normal_when_missing_or_invalid() {
+        // Default / missing field -> Normal.
+        let missing = ScoreTable::parse(r#"{"entries":[]}"#);
+        assert_eq!(missing.minimap_size, MinimapSize::Normal);
+
+        // Unreadable / invalid field values fall back to Normal without dropping scores.
+        for bad in [
+            r#"{"entries":[{"score":500,"time":10.0,"level":2,"map":"Sewer","won":false}],"minimap_size":"huge"}"#,
+            r#"{"entries":[{"score":500,"time":10.0,"level":2,"map":"Sewer","won":false}],"minimap_size":42}"#,
+            r#"{"entries":[{"score":500,"time":10.0,"level":2,"map":"Sewer","won":false}],"minimap_size":null}"#,
+        ] {
+            let parsed = ScoreTable::parse(bad);
+            assert_eq!(parsed.minimap_size, MinimapSize::Normal);
+            assert_eq!(parsed.best(), 500);
+        }
+
+        // Completely corrupt JSON falls back to default (Normal).
+        assert_eq!(ScoreTable::parse("{ broken").minimap_size, MinimapSize::Normal);
+
+        // Valid values round-trip cleanly.
+        for size in [MinimapSize::Normal, MinimapSize::Small, MinimapSize::Hidden] {
+            let mut t = ScoreTable::default();
+            t.minimap_size = size;
+            let reloaded = ScoreTable::parse(&t.to_json());
+            assert_eq!(reloaded.minimap_size, size);
+        }
     }
 }

@@ -110,6 +110,53 @@ fn draw_damage_and_low_hp(frame: &mut Frame, game: Rect, world: &World, state: &
 /// How long before `BOSS_TIME` the pre-boss warning banner opens, in seconds.
 pub const BOSS_WARNING_SECS: f32 = 25.0;
 
+/// The pre-boss warning banner, drawn 25 s out (`BOSS_WARNING_SECS`).
+///
+/// It names the boss that is coming and sends the player to the arena — the
+/// compass (`draw_boss_compass`) points at the arena until the boss spawns,
+/// then at the boss itself. Returns the rows it reserved at the top of `game`
+/// (0 when it did not draw: too narrow, or no warning window).
+fn draw_boss_warning(
+    frame: &mut Frame,
+    game: Rect,
+    world: &World,
+    state: &mut HudState,
+    codename: &str,
+    pulse: f32,
+) -> u16 {
+    if game.width < 30 {
+        return 0;
+    }
+    let rem = (director::BOSS_TIME - world.elapsed).ceil().max(1.0) as u32;
+    state.boss_banner.clear();
+    if game.width >= 56 {
+        let _ = write!(
+            state.boss_banner,
+            " ▸ {} IN {:02}s  ·  HEAD FOR THE ARENA ◂ ",
+            codename,
+            rem
+        );
+    } else if game.width >= 40 {
+        let _ = write!(state.boss_banner, " ▸ {} IN {:02}s ◂ ", codename, rem);
+    } else {
+        let _ = write!(state.boss_banner, " ▸ ARENA IN {:02}s ◂ ", rem);
+    }
+    let bw = (state.boss_banner.chars().count() as u16).min(game.width);
+    let bx = game.x + (game.width - bw) / 2;
+    let by = game.y + 1;
+    let fg = if pulse > 0.5 { PLATE } else { WARN_AMBER };
+    let bg = if pulse > 0.5 { WARN_AMBER } else { PLATE };
+    let buf = frame.buffer_mut();
+    buf.set_stringn(
+        bx,
+        by,
+        &state.boss_banner,
+        bw as usize,
+        Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+    );
+    3
+}
+
 /// Draw Boss Countdown Warning, Arrival Banner, or Persistent Boss Health Bar.
 /// Returns how many rows at the top of `game` are occupied by boss chrome.
 fn draw_boss_ui(frame: &mut Frame, game: Rect, world: &World, state: &mut HudState) -> u16 {
@@ -117,41 +164,21 @@ fn draw_boss_ui(frame: &mut Frame, game: Rect, world: &World, state: &mut HudSta
         && world.elapsed >= director::BOSS_TIME - BOSS_WARNING_SECS
         && world.elapsed < director::BOSS_TIME;
     let pulse = 0.5 + 0.5 * (state.clock * 8.0).sin();
+    // The level's own boss name: the campaign screens' names (Apex Jaguar,
+    // The Sweeper, Turf-Reaper Mk.IV) are used by the warning and the bar.
+    // Themes and campaign levels are 1:1 (`campaign::level_theme`), so this is
+    // the boss the boss framework spawns for the level.
+    let (codename, class_tag) = boss_codename(world.level.theme);
 
-    // Case 1: Pre-boss containment-breach countdown. It now opens 25 s out
-    // (BOSS_WARNING_SECS), so the player gets a real warning while the crowd is
-    // still arriving instead of a last-moment flash; the compass below takes
-    // over once the boss actually exists.
-    if boss_soon && game.width >= 30 {
-        let rem = (director::BOSS_TIME - world.elapsed).ceil().max(1.0) as u32;
-        state.boss_banner.clear();
-        if game.width >= 56 {
-            let _ = write!(
-                state.boss_banner,
-                " ▸ CONTAINMENT BREACH  ·  APEX SPECIMEN IN {:02}s ◂ ",
-                rem
-            );
-        } else {
-            let _ = write!(state.boss_banner, " ▸ APEX SPECIMEN IN {:02}s ◂ ", rem);
+    // Case 1: pre-boss warning (see `draw_boss_warning`).
+    if boss_soon {
+        let rows = draw_boss_warning(frame, game, world, state, codename, pulse);
+        if rows > 0 {
+            return rows;
         }
-        let bw = (state.boss_banner.chars().count() as u16).min(game.width);
-        let bx = game.x + (game.width - bw) / 2;
-        let by = game.y + 1;
-        let fg = if pulse > 0.5 { PLATE } else { WARN_AMBER };
-        let bg = if pulse > 0.5 { WARN_AMBER } else { PLATE };
-        let buf = frame.buffer_mut();
-        buf.set_stringn(
-            bx,
-            by,
-            &state.boss_banner,
-            bw as usize,
-            Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
-        );
-        return 3;
     }
 
     // Case 2: Boss is alive (full health bar if `boss_hp` is populated, else engaged banner).
-    let (codename, class_tag) = boss_codename(world.level.theme);
     if let Some((hp, max_hp)) = state.telemetry.boss_hp {
         let ratio = (hp.max(0.0) / max_hp.max(1.0)).clamp(0.0, 1.0);
         let trail = state.boss_hp_trail.clamp(ratio, 1.0);
@@ -219,8 +246,40 @@ fn draw_boss_ui(frame: &mut Frame, game: Rect, world: &World, state: &mut HudSta
                 .add_modifier(Modifier::BOLD),
         );
 
-        // During arrival intro, show classification subtitle if room permits.
+        // Fight phase, read straight from the boss framework's `Boss::phase`
+        // (1 = healthiest; the cat and the broom have two phases, the mower
+        // three). Drawn as `  PHASE n` from stack buffers, so the header stays
+        // allocation-free. Skipped when the header cannot also fit the HP
+        // readout to its right.
         let hp_tw = state.boss_hp_text.chars().count() as u16;
+        if let Some(phase) = world.boss_phase() {
+            let mut digit = [0u8; 4];
+            let d = char::from_digit(u32::from(phase.min(9)), 10)
+                .unwrap_or('1')
+                .encode_utf8(&mut digit);
+            let phase_w = 8 + d.len() as u16;
+            if hdr_right.saturating_sub(cx) >= phase_w + hp_tw + 2 {
+                (cx, _) = buf.set_stringn(
+                    cx,
+                    y_hdr,
+                    "  PHASE ",
+                    hdr_right.saturating_sub(cx) as usize,
+                    Style::default().fg(WARN_AMBER).bg(PLATE),
+                );
+                (cx, _) = buf.set_stringn(
+                    cx,
+                    y_hdr,
+                    d,
+                    hdr_right.saturating_sub(cx) as usize,
+                    Style::default()
+                        .fg(WARN_AMBER)
+                        .bg(PLATE)
+                        .add_modifier(Modifier::BOLD),
+                );
+            }
+        }
+
+        // During arrival intro, show classification subtitle if room permits.
         if state.boss_intro_timer > 0.0
             && hdr_right > cx + hp_tw + class_tag.len() as u16 + 4
         {
@@ -355,10 +414,29 @@ fn draw_boss_ui(frame: &mut Frame, game: Rect, world: &World, state: &mut HudSta
     0
 }
 
-/// Draw a compact directional edge pointer when the active boss is off-screen.
+/// Draw a compact directional edge pointer when the target is off-screen.
+///
+/// The pointer follows the living boss. Before the boss spawns it follows the
+/// **arena** instead, so the 25 s warning's "head for the arena" is a real
+/// bearing and not only text; the pointer switches to the boss the moment the
+/// boss exists.
 fn draw_boss_compass(frame: &mut Frame, game: Rect, world: &World, state: &HudState) {
-    let Some(offset) = state.telemetry.boss_offset else {
-        return;
+    // The target: the boss once it exists, else the arena during the pre-boss
+    // warning window. `to_boss` only picks the edge label.
+    let (offset, to_boss) = match state.telemetry.boss_offset {
+        Some(offset) => (offset, true),
+        None => {
+            let warning = !world.director.boss_spawned
+                && world.elapsed >= director::BOSS_TIME - BOSS_WARNING_SECS
+                && world.elapsed < director::BOSS_TIME;
+            if !warning {
+                return;
+            }
+            let Some(room) = world.level.boss_room() else {
+                return;
+            };
+            (room.center() - world.player.pos, false)
+        }
     };
     if game.width < 24 || game.height < 10 {
         return;
@@ -385,10 +463,10 @@ fn draw_boss_compass(frame: &mut Frame, game: Rect, world: &World, state: &HudSt
         let frac_y = ((ny / nx.abs().max(1.0)) * 0.5 + 0.5).clamp(0.18, 0.82);
         let y = game.y + ((game.height.saturating_sub(2)) as f32 * frac_y) as u16;
         if nx < 0.0 {
-            let label = " ◄ BOSS ";
+            let label = if to_boss { " ◄ BOSS " } else { " ◄ ARENA " };
             buf.set_stringn(game.x + 1, y, label, (game.width - 2) as usize, style);
         } else {
-            let label = " BOSS ► ";
+            let label = if to_boss { " BOSS ► " } else { " ARENA ► " };
             let lw = label.chars().count() as u16;
             let x = game.right().saturating_sub(lw + 1).max(game.x);
             buf.set_stringn(x, y, label, lw as usize, style);
@@ -396,7 +474,12 @@ fn draw_boss_compass(frame: &mut Frame, game: Rect, world: &World, state: &HudSt
     } else {
         // Top or bottom edge.
         let frac_x = ((nx / ny.abs().max(1.0)) * 0.5 + 0.5).clamp(0.15, 0.85);
-        let label = if ny < 0.0 { " ▲ BOSS " } else { " ▼ BOSS " };
+        let label = match (ny < 0.0, to_boss) {
+            (true, true) => " ▲ BOSS ",
+            (true, false) => " ▲ ARENA ",
+            (false, true) => " ▼ BOSS ",
+            (false, false) => " ▼ ARENA ",
+        };
         let lw = label.chars().count() as u16;
         let cx = game.x + ((game.width.saturating_sub(lw)) as f32 * frac_x) as u16;
         let y = if ny < 0.0 {
@@ -548,10 +631,34 @@ mod tests {
             .collect()
     }
 
+    /// Spawn the level's themed boss straight into the ECS world, so the bar's
+    /// phase readout (which reads `World::boss_phase()`) has a real entity.
+    fn spawn_boss(w: &mut World, phase: u8) {
+        use crate::game::ecs::systems::boss::{Boss, BossKind};
+        let arena = w
+            .level
+            .boss_room()
+            .expect("generated level has a boss room")
+            .rect;
+        let mut boss = Boss::new(
+            BossKind::for_theme(w.level.theme),
+            w.player.pos,
+            1400.0,
+            arena,
+            arena.center_world(),
+            false,
+        );
+        boss.phase = phase;
+        w.ecs.spawn(boss);
+    }
+
+    /// The bar names the level's own boss — the campaign screens' names, not
+    /// the old generic "apex" codename — and shows the framework's phase.
     #[test]
-    fn boss_health_bar_renders_codename_and_hp() {
+    fn boss_health_bar_renders_codename_hp_and_phase() {
         let mut w = World::new(Theme::Sewer, 7);
         w.director.boss_spawned = true;
+        spawn_boss(&mut w, 2);
         let mut hud = HudState::default();
         hud.telemetry.set_boss_hp(Some((980.0, 1400.0)));
         hud.boss_hp_trail = 0.85;
@@ -561,9 +668,31 @@ mod tests {
             .draw(|f| draw_overlays(f, f.area(), &w, &mut hud))
             .unwrap();
         let text = buf_text(&terminal);
-        assert!(text.contains("SEWER BROODMOTHER"), "missing boss name: {text}");
+        assert!(text.contains("APEX JAGUAR"), "missing boss name: {text}");
         assert!(text.contains("980/1400"), "missing boss HP numbers: {text}");
         assert!(text.contains("70%"), "missing boss HP percent: {text}");
+        assert!(text.contains("PHASE 2"), "missing the fight phase: {text}");
+    }
+
+    /// Each campaign level gets its own boss name on the bar.
+    #[test]
+    fn the_boss_bar_uses_each_levels_boss_name() {
+        for (level, name) in [(0usize, "APEX JAGUAR"), (1, "THE SWEEPER"), (2, "TURF-REAPER MK.IV")] {
+            let mut w = World::new_level(
+                level,
+                7,
+                crate::game::loadout::Loadout::new(crate::game::weapon::WeaponKind::Gnaw),
+            );
+            w.director.boss_spawned = true;
+            let mut hud = HudState::default();
+            hud.telemetry.set_boss_hp(Some((900.0, 1400.0)));
+            let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+            terminal
+                .draw(|f| draw_overlays(f, f.area(), &w, &mut hud))
+                .unwrap();
+            let text = buf_text(&terminal);
+            assert!(text.contains(name), "level {level}: missing {name} in {text}");
+        }
     }
 
     #[test]
@@ -578,8 +707,12 @@ mod tests {
             .unwrap();
         let text = buf_text(&terminal);
         assert!(
-            text.contains("APEX SPECIMEN IN 07s"),
+            text.contains("TURF-REAPER MK.IV IN 07s"),
             "missing pre-boss countdown in {text}"
+        );
+        assert!(
+            text.contains("HEAD FOR THE ARENA"),
+            "the 25 s warning must send the player to the arena: {text}"
         );
     }
 
@@ -596,7 +729,7 @@ mod tests {
             .unwrap();
         let text = buf_text(&terminal);
         assert!(
-            text.contains("APEX SPECIMEN IN 20s"),
+            text.contains("TURF-REAPER MK.IV IN 20s"),
             "no 25 s pre-boss warning in {text}"
         );
 
@@ -608,8 +741,47 @@ mod tests {
             .unwrap();
         let text = buf_text(&terminal);
         assert!(
-            !text.contains("APEX SPECIMEN IN"),
+            !text.contains("IN 30s") && !text.contains("HEAD FOR THE ARENA"),
             "the warning started too early: {text}"
+        );
+    }
+
+    /// Before the boss exists, the compass points at the arena the warning
+    /// sends the player to; it switches to the boss once there is one.
+    #[test]
+    fn the_warning_compass_points_at_the_arena_until_the_boss_arrives() {
+        let mut w = World::new(Theme::Lab, 7);
+        w.viewport = Vec2::new(80.0, 48.0);
+        w.elapsed = director::BOSS_TIME - 20.0;
+        let arena = w.level.boss_room().expect("boss room").center();
+        let to = arena - w.player.pos;
+        let mut hud = HudState::default();
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| draw_overlays(f, f.area(), &w, &mut hud))
+            .unwrap();
+        let text = buf_text(&terminal);
+        assert!(
+            !text.contains("BOSS ►") && !text.contains("◄ BOSS"),
+            "the compass pointed at a boss that does not exist yet: {text}"
+        );
+        // The right edge for the arena's bearing (the warning banner also says
+        // "ARENA", so match a labelled edge, not just the word).
+        let expected = if to.x.abs() >= to.y.abs() {
+            if to.x < 0.0 {
+                "◄ ARENA"
+            } else {
+                "ARENA ►"
+            }
+        } else if to.y < 0.0 {
+            "▲ ARENA"
+        } else {
+            "▼ ARENA"
+        };
+        assert!(
+            text.contains(expected),
+            "no {expected} bearing on the warning: {text}"
         );
     }
 

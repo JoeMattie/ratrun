@@ -51,12 +51,11 @@ use rand::RngExt;
 
 use crate::audio::Sfx;
 use crate::game::particle::damage_number::{DamageNumbers, DamageSource};
-use crate::game::director;
 use crate::game::ecs::components::{Entity, SpawnId};
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::resources::{
-    LastPickups, NextSpawnId, NukeTick, PickupScratch, RngRes, RunCounters, SfxQueue, Shake,
-    TickInput,
+    LastPickups, LevelIndex, NextSpawnId, NukeTick, PickupScratch, RngRes, RunCounters, SfxQueue,
+    Shake, TickInput,
 };
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::{Gem, Pickup, PickupKind};
@@ -392,20 +391,45 @@ pub fn pickups_system(
     collected.clear();
 }
 
-/// Legacy `update`: defeat takes precedence over the win.
-pub fn outcome_system(mut counters: ResMut<RunCounters>, player: Res<Player>) {
+/// The run/level outcome: defeat takes precedence over completion.
+///
+/// ## Campaign rule (this replaces the old "survive 300 s to win")
+///
+/// * Death is still `game_over`.
+/// * Reaching `director::RUN_SECONDS` no longer completes anything: the clock
+///   only tops out the difficulty curve, the boss fight starts at
+///   `director::BOSS_TIME` and the level lasts until the boss (or the player)
+///   dies while the horde keeps coming.
+/// * A level is complete when its boss dies, which the boss framework signals
+///   with [`RunCounters::level_complete`] (this system does not detect the kill
+///   itself: the boss fight owns its own death sequence).
+/// * `won` means **the campaign** was won: the final level (Lab) completed.
+///   Non-final completions leave `won` false; the App shows the keep-three
+///   screen and starts the next level.
+///
+/// The legacy "loss beats win on the same tick" rule is kept: a rat that dies
+/// on the tick its boss dies does not get the level.
+pub fn outcome_system(
+    mut counters: ResMut<RunCounters>,
+    player: Res<Player>,
+    level: Res<LevelIndex>,
+) {
     if !player.alive() {
         counters.game_over = true;
-    } else if counters.elapsed >= director::RUN_SECONDS {
-        counters.won = true;
+        counters.level_complete = false;
+        counters.won = false;
+    } else if counters.level_complete {
+        counters.won = level.is_final();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::director;
     use crate::game::ecs::resources::PickupScratch;
     use crate::game::level::Theme;
+    use crate::game::loadout::Loadout;
     use crate::game::world::World;
     use crate::math::Vec2;
 
@@ -812,46 +836,131 @@ mod tests {
         assert_eq!(w.pickups().len(), 1);
     }
 
+    /// Run one `outcome_system` tick through the facade round-trip.
+    fn outcome_tick(w: &mut World) {
+        w.begin_tick(DT, Vec2::ZERO, false);
+        w.ecs
+            .run_system_cached(outcome_system)
+            .expect("outcome runs");
+        w.end_tick();
+    }
+
     #[test]
     fn loss_beats_win_on_the_final_tick() {
         let mut w = World::new(Theme::Sewer, 7);
         // `World::update` adds dt before the tick; mirror the post-add clock.
         w.elapsed = director::RUN_SECONDS - 0.001 + DT;
         w.player.hp = -1.0;
-        w.begin_tick(DT, Vec2::ZERO, false);
-        w.ecs
-            .run_system_cached(outcome_system)
-            .expect("outcome runs");
-        w.end_tick();
+        outcome_tick(&mut w);
         assert!(w.game_over, "death on the final tick should be a loss");
         assert!(!w.won, "death must not also score a win");
     }
 
+    /// **The level does not end at the five-minute mark.** The clock only tops
+    /// out the difficulty curve now: the old "survive 300 s ⇒ win" rule is
+    /// gone, and the level runs on until the boss (or the rat) dies.
     #[test]
-    fn win_is_set_only_when_alive_at_the_end_of_the_tick() {
+    fn the_level_does_not_end_at_five_minutes() {
         let mut w = World::new(Theme::Sewer, 8);
         w.elapsed = director::RUN_SECONDS - 0.001 + DT;
         w.player.hp = w.player.max_hp();
-        w.begin_tick(DT, Vec2::ZERO, false);
-        w.ecs
-            .run_system_cached(outcome_system)
-            .expect("outcome runs");
-        w.end_tick();
-        assert!(w.won, "surviving the full clock should win");
+        outcome_tick(&mut w);
+        assert!(!w.won, "surviving the clock must not win any more");
+        assert!(!w.game_over);
+        assert!(!w.level_complete());
+        assert!(!w.finished(), "the level must keep simulating");
+        // The HUD countdown saturates at the boss time and reports the phase.
+        assert_eq!(w.time_left(), 0.0, "time_left counts down to BOSS_TIME");
+        assert!(w.boss_time_reached());
+    }
+
+    /// A full simulated tick past the clock keeps the run alive: no system
+    /// completes a level on time alone.
+    #[test]
+    fn a_real_tick_past_the_clock_never_finishes_a_level() {
+        let mut w = World::new(Theme::Sewer, 12);
+        w.elapsed = director::RUN_SECONDS + 30.0;
+        w.player.hp = 1.0e9;
+        w.update(DT, Vec2::ZERO, false);
+        assert!(!w.finished(), "a level ended on the clock alone");
+        assert!(!w.won && !w.game_over && !w.level_complete());
+        assert_eq!(w.time_left(), 0.0);
+        assert!(w.boss_time_reached());
+    }
+
+    /// The boss dies once ⇒ the level is complete once, and a non-final level
+    /// does not win the campaign (the App shows the keep screen instead).
+    #[test]
+    fn a_boss_kill_completes_the_level_once() {
+        let mut w = World::new(Theme::Sewer, 13);
+        assert_eq!(w.level_index(), 0, "World::new is level 0");
+        // What the boss framework does when the living boss is reaped.
+        w.level_complete = true;
+        outcome_tick(&mut w);
+        assert!(w.level_complete(), "the level should be complete");
+        assert!(!w.won, "the Sewer is not the last level");
+        assert!(!w.game_over);
+        assert!(!w.campaign_won());
+        assert!(w.finished(), "a complete level stops simulating");
+
+        // Idempotent: a second outcome tick keeps the same verdict.
+        outcome_tick(&mut w);
+        assert!(w.level_complete());
+        assert!(!w.won);
         assert!(!w.game_over);
     }
 
+    /// The final level's completion *is* the campaign win.
     #[test]
-    fn outcome_keeps_the_clock_running_before_time_is_up() {
+    fn the_final_levels_completion_wins_the_campaign() {
+        let mut w = World::new_level(2, 13, Loadout::starting());
+        assert_eq!(w.level_index(), 2);
+        assert!(w.is_final_level());
+        w.mark_level_complete();
+        outcome_tick(&mut w);
+        assert!(w.level_complete());
+        assert!(w.won, "the Lab boss completes the campaign");
+        assert!(w.campaign_won());
+        assert!(!w.game_over);
+        assert!(w.finished());
+    }
+
+    /// Death stays a loss, and it beats a same-tick completion.
+    #[test]
+    fn death_cancels_a_same_tick_completion() {
+        let mut w = World::new_level(2, 14, Loadout::starting());
+        w.level_complete = true;
+        w.player.hp = -1.0;
+        outcome_tick(&mut w);
+        assert!(w.game_over, "death is still game over");
+        assert!(!w.level_complete(), "loss beats completion");
+        assert!(!w.won);
+        assert!(!w.campaign_won());
+    }
+
+    #[test]
+    fn outcome_keeps_the_clock_running_before_the_boss_time() {
         let mut w = World::new(Theme::Sewer, 9);
         w.elapsed = 1.0;
-        w.begin_tick(DT, Vec2::ZERO, false);
-        w.ecs
-            .run_system_cached(outcome_system)
-            .expect("outcome runs");
-        w.end_tick();
+        outcome_tick(&mut w);
         assert!(!w.won);
         assert!(!w.game_over);
+        assert!(!w.level_complete());
+        assert!(!w.boss_time_reached());
+        assert!((w.time_left() - (director::BOSS_TIME - 1.0)).abs() < 1e-4);
+    }
+
+    /// The level index is available to every system during a tick (the director
+    /// scales difficulty per level from it; the boss framework reads the same
+    /// resource).
+    #[test]
+    fn the_level_index_is_a_tick_resource() {
+        let mut w = World::new_level(1, 15, Loadout::starting());
+        w.begin_tick(DT, Vec2::ZERO, false);
+        assert_eq!(w.ecs.resource::<LevelIndex>().0, 1);
+        assert!(!w.ecs.resource::<LevelIndex>().is_final());
+        assert_eq!(w.ecs.resource::<LevelIndex>().levels_remaining(), 1);
+        w.end_tick();
     }
 
     #[test]
