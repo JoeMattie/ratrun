@@ -36,9 +36,9 @@ pub const RUN_SECONDS: f32 = 300.0;
 pub const BOSS_TIME: f32 = RUN_SECONDS - 45.0;
 /// Elites (buffed brutes) only start spawning once the *curve* clock passes
 /// this — the world's elite branch gates on the same instant.
-pub const ELITE_START: f32 = 60.0;
+pub const ELITE_START: f32 = 90.0;
 /// Gap between elites once they start, and the value the timer is reset to.
-pub const ELITE_INTERVAL: f32 = 30.0;
+pub const ELITE_INTERVAL: f32 = 40.0;
 
 /// How far along level 0's curve each campaign level opens, in seconds.
 ///
@@ -48,7 +48,7 @@ pub const ELITE_INTERVAL: f32 = 30.0;
 /// 45 s mark (hp ×2.0, 6 enemies a pulse). Tune here and nowhere else: every
 /// curve function is a function of [`curve_clock`], so one table moves hp, the
 /// spawn curve, the kind unlocks and the elite gate together.
-pub const LEVEL_CLOCK_OFFSET: [f32; 3] = [0.0, 20.0, 45.0];
+pub const LEVEL_CLOCK_OFFSET: [f32; 3] = [0.0, 60.0, 120.0];
 
 /// Seconds the rat has to hold one chamber before the director stages a flank.
 ///
@@ -171,7 +171,7 @@ pub fn raise_boss_due(director: &mut Director, due: &mut BossDue, elapsed: f32, 
 /// How tough enemies are right now (HP multiplier) on the curve clock.
 #[inline]
 pub fn hp_mult_at(curve: f32) -> f32 {
-    1.0 + curve / 45.0
+    1.0 + curve / 80.0
 }
 
 /// [`hp_mult_at`] for a campaign level and the real run clock.
@@ -195,7 +195,7 @@ pub fn hp_mult(elapsed: f32) -> f32 {
 /// of 1020 × 800, so the late game needs a noticeably higher spawn rate to keep
 /// the screen busy while the player kites across it.
 pub fn spawn_interval_at(curve: f32) -> f32 {
-    (1.4 - curve / 220.0).max(0.20)
+    (1.7 - curve / 330.0).max(0.50)
 }
 
 /// [`spawn_interval_at`] for a campaign level and the real run clock.
@@ -221,7 +221,7 @@ pub fn spawn_interval(elapsed: f32) -> f32 {
 /// while the late game stays clamped at [`crate::game::ecs::constants::ENEMY_CAP`]
 /// from about 160 s on.
 pub fn pulse_count_at(curve: f32) -> usize {
-    (3.0 + curve / 12.0) as usize
+    (2.0 + curve / 20.0) as usize
 }
 
 /// [`pulse_count_at`] for a campaign level and the real run clock.

@@ -47,11 +47,11 @@ impl EnemyKind {
     }
     pub fn damage(self) -> f32 {
         match self {
-            EnemyKind::Skitterer => 6.0,
-            EnemyKind::Bat => 5.0,
-            EnemyKind::Cat => 12.0,
-            EnemyKind::Spitter => 8.0,
-            EnemyKind::Brute => 22.0,
+            EnemyKind::Skitterer => 5.0,
+            EnemyKind::Bat => 4.0,
+            EnemyKind::Cat => 9.0,
+            EnemyKind::Spitter => 6.0,
+            EnemyKind::Brute => 16.0,
             EnemyKind::Boss => 30.0,
         }
     }

@@ -543,7 +543,7 @@ mod tests {
 
         // The stats are replayed from the stacks, not copied blindly: three
         // MaxHp picks in total would give 160 max HP, here only the kept two do.
-        assert_eq!(next.stats.max_hp, 100.0 + 2.0 * 20.0);
+        assert_eq!(next.stats.max_hp, StatsDefault::MAX_HP + 2.0 * 20.0);
         assert_eq!(next.stats.damage_mult, 1.15);
         // Nothing else leaks through.
         assert_eq!(next.stats.move_speed, StatsDefault::MOVE_SPEED);
@@ -554,6 +554,9 @@ mod tests {
     struct StatsDefault;
     impl StatsDefault {
         const MOVE_SPEED: f32 = 58.0;
+        /// The base pool the b3-balance pass raised from 100 (contact damage
+        /// came down with it; see `Stats::default`).
+        const MAX_HP: f32 = 130.0;
     }
 
     #[test]
@@ -574,7 +577,7 @@ mod tests {
         assert_eq!(next.weapons.len(), 1);
         assert_eq!(next.weapons[0].kind, STARTING_WEAPON);
         assert!(next.passives.is_empty());
-        assert_eq!(next.stats.max_hp, 100.0);
+        assert_eq!(next.stats.max_hp, StatsDefault::MAX_HP);
     }
 
     #[test]

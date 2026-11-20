@@ -21,8 +21,21 @@ pub struct Player {
     pub hurt_flash: f32,
 }
 
+/// XP needed to go from `level` to `level + 1`.
+///
+/// Linear (+5 per level) for the first ten levels — that is the teaching
+/// stretch and it should stay quick — then a quadratic drag
+/// (`(level-10)^2/2` extra). Without the drag a build that is killing 400
+/// bodies a minute reached player level 90-140 by the boss, which made the
+/// boss pool arbitrary and the last two minutes a formality. With it, a strong
+/// run reaches the level-1 boss around level 20-30 and the levels it does earn
+/// are all meaningful.
+///
+/// Totals: level 10 = 325 XP (unchanged), level 20 ≈ 1 347 XP,
+/// level 30 ≈ 3 910 XP.
 pub fn xp_for_level(level: u32) -> u32 {
-    5 + level * 5
+    let drag = level.saturating_sub(10);
+    5 + level * 5 + drag * drag / 2
 }
 
 impl Player {
@@ -72,7 +85,7 @@ impl Player {
         }
         let dmg = (raw - self.loadout.stats.armor).max(1.0);
         self.hp -= dmg;
-        self.iframes = 0.6;
+        self.iframes = 0.9;
         self.hurt_flash = 0.25;
         true
     }

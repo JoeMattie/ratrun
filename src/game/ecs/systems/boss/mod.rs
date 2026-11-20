@@ -213,9 +213,9 @@ impl BossKind {
     #[inline]
     pub fn hp_scale(self) -> f32 {
         match self {
-            BossKind::Cat => 7.5,
-            BossKind::Broom => 9.0,
-            BossKind::Mower => 10.0,
+            BossKind::Cat => 1.5,
+            BossKind::Broom => 3.2,
+            BossKind::Mower => 3.4,
         }
     }
 
@@ -223,7 +223,12 @@ impl BossKind {
     #[inline]
     pub fn contact_damage(self) -> f32 {
         match self {
-            BossKind::Cat => art_boss_cat::CONTACT_DAMAGE,
+            // The art's 18 is the melee-number against a 100 HP rat; with the
+            // b3-balance pass (130 HP, 0.9 s i-frames, 0.4 HP/s base regen) an
+            // unread body slam was the single largest run-ender in the batch,
+            // and the Cat is the *level 1* boss. 13 keeps the pounce scary and
+            // survivable once.
+            BossKind::Cat => 13.0,
             BossKind::Broom => 10.0,
             BossKind::Mower => 14.0,
         }
@@ -235,7 +240,7 @@ impl BossKind {
         match self {
             BossKind::Cat => art_boss_cat::DEATH_DURATION,
             BossKind::Broom => 2.40,
-            BossKind::Mower => 2.4,
+            BossKind::Mower => 3.4,
         }
     }
 
@@ -964,6 +969,10 @@ pub struct Boss {
     pub scratch: [f32; 6],
     /// Per-controller flag word (state-local one-shots).
     pub flags: u32,
+    /// Seconds the boss has been too far away to fight (see
+    /// [`BossKind::REJOIN_DIST`] and [`RELOCATE_AFTER_SECS`]): the framework
+    /// walks an off-screen, stranded boss back into the fight.
+    pub lost: f32,
     pub hazards: Vec<BossHazard>,
 }
 
@@ -999,6 +1008,7 @@ impl Boss {
             bounce_count: 0,
             scratch: [0.0; 6],
             flags: 0,
+            lost: 0.0,
             hazards: Vec::with_capacity(16),
         }
     }
@@ -1837,6 +1847,15 @@ pub fn boss_spawn_system(
     fight.rng = BossRng::for_run(level.seed, kind);
     fight.next_id = boss.id;
     fight.level_complete = false;
+    // The horde parts for its master: the arriving boss scatters the live
+    // bodies (the same no-loot removal the boss's *death* uses — see
+    // [`BossFight::horde_break`]). Measured (bot batches, seed 900): with 400+
+    // bodies up at the boss time, most of the rat's fire went into the crowd
+    // and measurably none into the boss, so boss fights ranged from 16 s to 35
+    // minutes on the same build. A clean stage is the fair version of that: the
+    // fight is about the boss, the throttled horde trickles back in, and the
+    // gems already on the floor are untouched.
+    fight.horde_break = true;
     let accent = level.palette.accent;
     vfx::emit_boss_spawn(&mut particles, &mut fight.rng.0, pos, accent);
     shake.amount = shake.amount.max(14.0);
@@ -2052,6 +2071,48 @@ pub fn boss_damage_system(
 
 /// Advance the boss: phase, controller, hazards, projectiles, death.
 #[allow(clippy::too_many_arguments)]
+/// Distance (px) beyond which a live boss counts as "not in the fight" for
+/// the rejoin rule below.
+pub const REJOIN_DIST: f32 = 260.0;
+/// How long a boss may spend out of the fight — further than [`REJOIN_DIST`]
+/// from the rat, or with no line to him — before it is walked back into range.
+///
+/// The boss is an objective and a level cannot end until it dies, but the
+/// horde's flow field is coarse far from the rat, and a rat that keeps kiting
+/// can leave the boss behind a wall it never routes around. Measured on the bot
+/// ladder (seed 900): 3 of 13 boss fights dealt **zero damage for 1 100-2 137 s**
+/// with the boss 200-2 300 px away and stuck in `Cat(Stalk)` / `Broom(Idle)` /
+/// `Mower(Patrol)`, plus one broom Idle-looping at 51 px with a wall in
+/// between; those levels were uncompletable. The boss is only relocated when it
+/// is off screen (or cannot see the rat) and has failed to close for this long,
+/// with a full arrival cue, so a player never sees a pop-in.
+pub const RELOCATE_AFTER_SECS: f32 = 8.0;
+/// Where a rejoin puts the boss: this far from the rat, on a large-clear cell.
+const REJOIN_RADIUS: f32 = 130.0;
+
+/// Where a rejoining boss is put: a large-clear cell roughly
+/// [`REJOIN_RADIUS`] from the rat **with a clear line to him**, nearest bearing
+/// first. The line-of-sight requirement is what makes the move work: the boss
+/// and the rat can be 50 px apart on opposite sides of a wall, which is exactly
+/// the stalemate this exists to break. Falls back to the closest clear cell to
+/// the rat.
+fn rejoin_spot(level: &Level, player: Vec2, radius: f32) -> Option<Vec2> {
+    let class = SizeClass::Large;
+    for step in 0..24 {
+        let angle = step as f32 * std::f32::consts::TAU / 24.0;
+        for r in [REJOIN_RADIUS, REJOIN_RADIUS + 40.0, REJOIN_RADIUS + 90.0] {
+            let p = player + Vec2::from_angle(angle) * r;
+            if level.tiles.circle_clear(p, radius, class)
+                && level.tiles.segment_hit(player, p, radius).is_none()
+            {
+                return Some(p);
+            }
+        }
+    }
+    let p = player + Vec2::new(REJOIN_RADIUS, 0.0);
+    level.tiles.nearest_open_center(p, class, 24)
+}
+
 pub fn boss_update_system(
     mut commands: Commands,
     mut fight: ResMut<BossFight>,
@@ -2168,6 +2229,37 @@ pub fn boss_update_system(
         // The state's own body-contact number: reset to the kind's default
         // every tick so a controller only has to say what is different.
         boss.contact_damage = boss.kind.contact_damage();
+
+        // Rejoin rule: a boss that is off screen and has not closed on the rat
+        // for [`RELOCATE_AFTER_SECS`] is walked back into the fight. A level
+        // cannot end until the boss dies, so a boss that the horde flow field
+        // cannot route back (or cannot outrun a kiting rat) must not be able
+        // to strand the level. See [`RELOCATE_AFTER_SECS`].
+        let to_player = player.pos - boss.pos;
+        let no_los = level
+            .tiles
+            .segment_hit(boss.pos, player.pos, boss.kind.body_radius())
+            .is_some();
+        if to_player.len() > REJOIN_DIST || no_los {
+            boss.lost += dt;
+            if boss.lost >= RELOCATE_AFTER_SECS {
+                if let Some(spot) = rejoin_spot(&level, player.pos, boss.kind.body_radius()) {
+                    boss.lost = 0.0;
+                    boss.pos = spot;
+                    boss.target = player.pos;
+                    let to = player.pos - spot;
+                    if to.len_sq() > 1e-6 {
+                        boss.facing = to.normalized();
+                    }
+                    let accent = level.palette.accent;
+                    vfx::emit_boss_spawn(&mut particles, &mut fight.rng.0, spot, accent);
+                    shake.amount = shake.amount.max(8.0);
+                    sfx.0.push(Sfx::Boss);
+                }
+            }
+        } else {
+            boss.lost = 0.0;
+        }
 
         // Controller tick. The block scopes the rng borrow so hazards can
         // draw from the same stream afterwards.

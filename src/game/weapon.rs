@@ -85,14 +85,24 @@ impl WeaponKind {
         }
     }
 
+    /// Base damage per hit before weapon levels, damage passives and the
+    /// player's fire-rate stats.
+    ///
+    /// Raised by ~60% across the board (b3-balance): the old numbers did
+    /// ~9 dps into a 6-14 hp skitterer, i.e. ~0.5 bodies/s, against a spawn
+    /// curve that reaches 3.5/s by 60 s. The XP engine could not start, so a
+    /// level-1 build fell behind from the first minute and only the runs that
+    /// survived that cliff snowballed. These values let a starting Gnaw keep
+    /// its screen clear at a modest trickle, which is what makes the first
+    /// minute teach instead of execute.
     pub fn base_damage(self) -> f32 {
         match self {
-            WeaponKind::Gnaw => 5.0,
-            WeaponKind::CheeseSpray => 4.0,
-            WeaponKind::SqueakNova => 5.0,
-            WeaponKind::SporeOrbit => 4.0,
-            WeaponKind::TailWhip => 7.0,
-            WeaponKind::AcidSpit => 3.0,
+            WeaponKind::Gnaw => 8.0,
+            WeaponKind::CheeseSpray => 6.5,
+            WeaponKind::SqueakNova => 8.0,
+            WeaponKind::SporeOrbit => 6.5,
+            WeaponKind::TailWhip => 11.0,
+            WeaponKind::AcidSpit => 5.0,
         }
     }
 }

@@ -106,6 +106,20 @@ const ROOM_WAVE_EVERY: u32 = 5;
 /// Pulse count that must have fired before room waves start (a wave in the
 /// first second would just be a lost enemy).
 const ROOM_WAVE_AFTER_PULSES: u32 = 8;
+
+/// While the level's boss is on the field the horde is a chorus, not the
+/// headline: the curve is frozen at its late value for the whole fight (see
+/// `director::curve_clock`), which used to keep the 600-body cap saturated and
+/// the arena opaque, so the bot could not get near the boss for 20-35 minutes
+/// while the horde never let go of it: the threat field around the pack
+/// outranked the boss.
+///
+/// So during a boss fight the pulses are stretched by this factor and their
+/// size divided by [`BOSS_HORDE_PULSE_DIV`]: the fight is about the boss, the
+/// horde still trickles in, and the rat's weapons are not spent on bodies it
+/// cannot walk past.
+const BOSS_HORDE_INTERVAL_MULT: f32 = 3.0;
+const BOSS_HORDE_PULSE_DIV: usize = 3;
 /// Only rooms whose centre is this close to the player are used for a room
 /// wave (design change 6 cut this from 1 400 px: a wave that takes fifteen
 /// seconds to arrive is a queue, not pressure).
@@ -220,8 +234,19 @@ pub fn director_system(
 
     director.spawn_timer -= dt;
     if director.spawn_timer <= 0.0 {
-        director.spawn_timer = director::spawn_interval_at(curve);
-        let count = director::pulse_count_at(curve);
+        // Boss phase: a thinner horde (see `BOSS_HORDE_INTERVAL_MULT`).
+        let boss_phase = director.boss_spawned;
+        director.spawn_timer = director::spawn_interval_at(curve)
+            * if boss_phase {
+                BOSS_HORDE_INTERVAL_MULT
+            } else {
+                1.0
+            };
+        let count = if boss_phase {
+            (director::pulse_count_at(curve) / BOSS_HORDE_PULSE_DIV).max(1)
+        } else {
+            director::pulse_count_at(curve)
+        };
         let mult = director::hp_mult_at(curve);
         let live = enemies.iter().count();
         // One pulse in `ROOM_WAVE_EVERY` brings its first enemy in through a

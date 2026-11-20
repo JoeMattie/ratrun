@@ -46,9 +46,41 @@ impl PassiveKind {
             PassiveKind::MoveSpeed => "+12% move speed.",
             PassiveKind::Damage => "+15% damage.",
             PassiveKind::FireRate => "+12% fire rate.",
-            PassiveKind::Magnet => "+40% pickup radius.",
+            PassiveKind::Magnet => "+30% pickup radius.",
             PassiveKind::Regen => "+0.5 HP/s regen.",
             PassiveKind::Armor => "+1 armor (flat dmg cut).",
+        }
+    }
+
+    /// How many stacks of this passive a build may own.
+    ///
+    /// Caps bound the snowball: a run that reaches level 60-100 used to stack
+    /// Sharp Teeth hundreds of times (x266 over the 30-run baseline) and deal
+    /// 25-80x its base damage, which made the boss pool meaningless and turned
+    /// survival into a binary "did the build start". Every cap here is chosen
+    /// so a maxed passive multiplies its stat by roughly 2-3x and nothing more:
+    ///
+    /// | passive | effect per stack | cap | max multiplier |
+    /// |---|---|---|---|
+    /// | MaxHp | +20 HP | 8 | 260 HP (x2.6) |
+    /// | MoveSpeed | x1.12 | 6 | x1.97 |
+    /// | Damage | +15% | 8 | x2.20 |
+    /// | FireRate | +12% | 8 | x1.96 |
+    /// | Magnet | x1.3 | 4 | x2.86 |
+    /// | Regen | +0.5 HP/s | 6 | 3.0 HP/s |
+    /// | Armor | +1 flat | 6 | -6 damage per hit |
+    ///
+    /// When every passive is capped the level-up pool offers them as
+    /// *Bandages* instead (see [`Loadout::apply`]), so a card is never dead.
+    pub fn max_stacks(self) -> u32 {
+        match self {
+            PassiveKind::MaxHp => 8,
+            PassiveKind::MoveSpeed => 6,
+            PassiveKind::Damage => 8,
+            PassiveKind::FireRate => 8,
+            PassiveKind::Magnet => 4,
+            PassiveKind::Regen => 6,
+            PassiveKind::Armor => 6,
         }
     }
 
@@ -80,12 +112,12 @@ pub struct Stats {
 impl Default for Stats {
     fn default() -> Self {
         Stats {
-            max_hp: 100.0,
+            max_hp: 130.0,
             move_speed: 58.0,
             damage_mult: 1.0,
             fire_rate_mult: 1.0,
             magnet: 22.0,
-            regen: 0.0,
+            regen: 0.4,
             armor: 0.0,
             dash_cd: 2.0,
         }
@@ -98,6 +130,10 @@ pub enum Upgrade {
     LevelWeapon(usize),
     Passive(PassiveKind),
 }
+
+/// Fraction of max HP a capped passive restores when it is played as a
+/// bandage (see [`PassiveKind::max_stacks`]).
+const BANDAGE_HEAL_FRAC: f32 = 0.25;
 
 /// Apply one stack of `p` to `stats`, returning the HP the pick heals.
 ///
@@ -124,7 +160,7 @@ fn apply_passive_stack(stats: &mut Stats, p: PassiveKind) -> f32 {
             0.0
         }
         PassiveKind::Magnet => {
-            stats.magnet *= 1.4;
+            stats.magnet *= 1.3;
             0.0
         }
         PassiveKind::Regen => {
@@ -205,7 +241,9 @@ impl Loadout {
     pub fn from_parts(weapons: Vec<Weapon>, passives: Vec<(PassiveKind, u32)>) -> Self {
         let mut stats = Stats::default();
         for &(kind, stacks) in &passives {
-            for _ in 0..stacks {
+            // Defensive: the cap is a property of the passive, so a carried
+            // record can never buy more than it here either.
+            for _ in 0..stacks.min(kind.max_stacks()) {
                 apply_passive_stack(&mut stats, kind);
             }
         }
@@ -254,11 +292,25 @@ impl Loadout {
                     w.kind.flavor().to_string(),
                 )
             }
-            Upgrade::Passive(p) => (
-                p.name().to_string(),
-                p.desc().to_string(),
-                p.flavor().to_string(),
-            ),
+            Upgrade::Passive(p) => {
+                if self.stacks(*p) >= p.max_stacks() {
+                    (
+                        format!("{} (capped)", p.name()),
+                        format!(
+                            "At the cap of {}: restores {:.0}% of max HP.",
+                            p.max_stacks(),
+                            BANDAGE_HEAL_FRAC * 100.0
+                        ),
+                        p.flavor().to_string(),
+                    )
+                } else {
+                    (
+                        p.name().to_string(),
+                        format!("{} ({}/{})", p.desc(), self.stacks(*p) + 1, p.max_stacks()),
+                        p.flavor().to_string(),
+                    )
+                }
+            }
         }
     }
 
@@ -280,9 +332,22 @@ impl Loadout {
                 }
             }
         }
-        // Always offer some passives.
+        // Passives that are still under their cap. A capped passive is not a
+        // choice a player would ever want, so it is held back for the fallback
+        // below instead of competing with a real upgrade.
+        let mut capped: Vec<Upgrade> = Vec::new();
         for p in PassiveKind::all() {
-            pool.push(Upgrade::Passive(p));
+            if self.stacks(p) >= p.max_stacks() {
+                capped.push(Upgrade::Passive(p));
+            } else {
+                pool.push(Upgrade::Passive(p));
+            }
+        }
+        // Fallback: an exhausted pool (every weapon maxed, every passive
+        // capped — only reachable at absurd player levels) still fills three
+        // cards, as bandages.
+        if pool.len() < 3 {
+            pool.extend(capped);
         }
 
         pool.shuffle(rng);
@@ -307,6 +372,12 @@ impl Loadout {
                 0.0
             }
             Upgrade::Passive(p) => {
+                if self.stacks(*p) >= p.max_stacks() {
+                    // Every card must stay useful: a passive at its cap is
+                    // offered (only once the rest of the pool is thin) and
+                    // played as a bandage instead of a dead stack.
+                    return BANDAGE_HEAL_FRAC * self.stats.max_hp;
+                }
                 self.bump_stack(*p);
                 apply_passive_stack(&mut self.stats, *p)
             }
