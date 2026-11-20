@@ -7,11 +7,19 @@
 //! [`crate::game::campaign`]) and the director takes the campaign level index
 //! every system tick (`resources::LevelIndex`). The level shifts the whole
 //! difficulty curve with [`LEVEL_CLOCK_OFFSET`]: level 2 opens where level 1's
-//! curve would be at 20 s and level 3 where it would be at 45 s. Every curve
-//! function reads [`curve_clock`], so enemy hp, the spawn rate, the kind
-//! unlocks and the elite gate all move together and "a harder level" is by
-//! construction "further along level 0's curve". That is the baseline for a
-//! player who walks into level 2 or 3 carrying three upgrades of their choice.
+//! curve would be at 120 s and level 3 where it would be at 150 s, so the calm
+//! opening of the Sewer is gone and the player meets a mid- to late-run horde
+//! from the first second. Every curve function reads [`curve_clock`], so enemy
+//! hp, the spawn rate, the kind unlocks and the elite gate all move together.
+//!
+//! On top of the clock the later levels differ *in kind*, not only in size:
+//! [`LEVEL_HP_EXTRA`] makes their horde tougher than the clock alone implies
+//! (without inflating the boss, whose pool still follows [`hp_mult_for`]),
+//! [`LEVEL_MIX`] fields a different enemy mix per theme (ranged Spitters in the
+//! Kitchen, fast swarms in the Lab) and [`LEVEL_ELITE_INTERVAL`] brings elites
+//! more often. Those three are the per-level knobs; the level-1 curve itself
+//! ([`hp_mult_at`], [`spawn_interval_at`], [`pulse_count_at`], [`ELITE_START`])
+//! is shared by all levels and stays where it is.
 //!
 //! ## The boss
 //!
@@ -43,12 +51,63 @@ pub const ELITE_INTERVAL: f32 = 40.0;
 /// How far along level 0's curve each campaign level opens, in seconds.
 ///
 /// The player keeps three upgrades between levels, so a level-2 player is
-/// expected to handle a mid-run horde from the first second. Level 1 opens at
-/// level 0's 20 s mark (hp ×1.44, 4 enemies a pulse) and level 2 at level 0's
-/// 45 s mark (hp ×2.0, 6 enemies a pulse). Tune here and nowhere else: every
-/// curve function is a function of [`curve_clock`], so one table moves hp, the
-/// spawn curve, the kind unlocks and the elite gate together.
-pub const LEVEL_CLOCK_OFFSET: [f32; 3] = [0.0, 60.0, 120.0];
+/// expected to handle a late-run horde from the first second: the **Kitchen**
+/// opens where the Sewer's curve is 120 s in (hp ×2.5, 8 enemies a pulse, every
+/// kind unlocked, the elite gate long open) and the **Lab** at its 150 s mark
+/// (hp ×2.9, 9 a pulse). There is no calm opening on a carried level — that is
+/// what `LEVEL_CLOCK_OFFSET` buys. Every curve function is a function of
+/// [`curve_clock`], so one table moves hp, the spawn curve, the kind unlocks and
+/// the elite gate together.
+///
+/// The offset also raises the *boss* pool (the boss reads [`hp_mult_for`]), so
+/// it is kept modest on purpose: the rest of the later levels' pressure lives in
+/// [`LEVEL_HP_EXTRA`], [`LEVEL_ELITE_INTERVAL`], [`LEVEL_MIX`] and
+/// [`enemy_mods_for`], which the boss does not read.
+pub const LEVEL_CLOCK_OFFSET: [f32; 3] = [0.0, 120.0, 150.0];
+
+/// Extra horde toughness per campaign level, on top of the clock.
+///
+/// The clock offset alone also fattened the boss pool (the boss follows
+/// [`hp_mult_for`]), which pushed the boss fight past its 45-90 s target. So the
+/// later levels' extra pressure lives here instead: it multiplies the *horde's*
+/// hp only, at spawn time ([`horde_hp_mult_for`]). Level 2's horde is 55 %
+/// tougher than its clock says (×1.55) and level 3's 85 % (×1.85), which is
+/// what makes the carried build stop one-shotting skitterers and lets the horde
+/// stay on the screen long enough to surround the rat.
+pub const LEVEL_HP_EXTRA: [f32; 3] = [1.0, 1.55, 1.85];
+
+/// Seconds between elites, per campaign level.
+///
+/// The first elite still lands when the level's curve passes [`ELITE_START`]
+/// (so a carried level meets one in its first seconds); after that the gap is
+/// this, and the later maps keep the pressure up with a brute every 30 s and
+/// 23 s instead of level 1's 40 s. Brutes are the only horde body that reliably
+/// gets through a capped build's flat armour, so their cadence is a real lever —
+/// but they are also the fattest XP drop, so pushing it too far levels the rat
+/// up and makes the level easier again.
+pub const LEVEL_ELITE_INTERVAL: [f32; 3] = [ELITE_INTERVAL, 30.0, 23.0];
+
+/// Per-level weighting of the kind table ([`pick_kind_for`]), columns in
+/// [`KIND_ORDER`].
+///
+/// Level 1 is the curve's own mix. The **Kitchen** doubles down on ranged
+/// Spitters and Cats: a carried build that kites melee all day has to dodge a
+/// stand-off line instead. The **Lab** is a fast swarm (Bats and Skitterers) and
+/// fewer slow Brutes, so the rat cannot out-walk the horde it arrived with.
+const LEVEL_MIX: [[f32; 5]; 3] = [
+    [1.0, 1.0, 1.0, 1.0, 1.0],
+    [1.3, 0.9, 1.7, 2.0, 1.0],
+    [1.5, 1.8, 0.8, 0.7, 0.7],
+];
+
+/// The kind order [`LEVEL_MIX`] columns are indexed by.
+const KIND_ORDER: [EnemyKind; 5] = [
+    EnemyKind::Skitterer,
+    EnemyKind::Bat,
+    EnemyKind::Cat,
+    EnemyKind::Spitter,
+    EnemyKind::Brute,
+];
 
 /// Seconds the rat has to hold one chamber before the director stages a flank.
 ///
@@ -266,14 +325,30 @@ const UNLOCKS: [(f32, EnemyKind, f32); 4] = [
 
 /// Weighted pick of an enemy kind appropriate to curve time `curve`.
 pub fn pick_kind_at(curve: f32, rng: &mut impl Rng) -> EnemyKind {
+    pick_kind_mixed(curve, 0, rng)
+}
+
+/// [`pick_kind_at`] with a campaign level's [`LEVEL_MIX`] weighting applied
+/// (level 0 is the curve's own mix, bit for bit).
+///
+/// The roll is a single `random_range` over the summed weights and the table is
+/// walked in its historical order (skitterer first, then bat/cat/spitter/brute
+/// as they unlock), so the number and order of rng draws is unchanged: only the
+/// weights differ, and only for levels above 0.
+pub fn pick_kind_mixed(curve: f32, level: usize, rng: &mut impl Rng) -> EnemyKind {
+    let mix = &LEVEL_MIX[level_slot(level)];
     // One slot per possible kind, on the stack: this runs on every spawn roll
     // and must not allocate.
     let mut table = [(EnemyKind::Skitterer, 0.0f32); 1 + UNLOCKS.len()];
-    table[0] = (EnemyKind::Skitterer, 6.0);
+    table[0] = (EnemyKind::Skitterer, 6.0 * mix[0]);
     let mut n = 1;
     for &(unlock, kind, weight) in UNLOCKS.iter() {
         if curve > unlock {
-            table[n] = (kind, weight);
+            let col = KIND_ORDER
+                .iter()
+                .position(|k| *k == kind)
+                .unwrap_or(0);
+            table[n] = (kind, weight * mix[col]);
             n += 1;
         }
     }
@@ -292,7 +367,67 @@ pub fn pick_kind_at(curve: f32, rng: &mut impl Rng) -> EnemyKind {
 /// [`pick_kind_at`] for a campaign level and the real run clock.
 #[inline]
 pub fn pick_kind_for(level: usize, elapsed: f32, rng: &mut impl Rng) -> EnemyKind {
-    pick_kind_at(curve_clock(level, elapsed), rng)
+    pick_kind_mixed(curve_clock(level, elapsed), level, rng)
+}
+
+/// The horde's hp multiplier on a campaign level: the curve, times the level's
+/// [`LEVEL_HP_EXTRA`]. The boss deliberately does **not** use this — its pool
+/// stays on [`hp_mult_for`], so a level's clock offset cannot stretch the boss
+/// fight past its target.
+#[inline]
+pub fn horde_hp_mult_for(level: usize, elapsed: f32) -> f32 {
+    hp_mult_for(level, elapsed) * LEVEL_HP_EXTRA[level_slot(level)]
+}
+
+/// [`horde_hp_mult_for`] at an explicit curve time (tests, tuning).
+#[inline]
+pub fn horde_hp_mult_at(curve: f32, level: usize) -> f32 {
+    hp_mult_at(curve) * LEVEL_HP_EXTRA[level_slot(level)]
+}
+
+/// Seconds the elite timer is reset to on a campaign level.
+#[inline]
+pub fn elite_interval_for(level: usize) -> f32 {
+    LEVEL_ELITE_INTERVAL[level_slot(level)]
+}
+
+/// The horde's damage multiplier at the top of a level's ramp (its boss time).
+///
+/// A flat-armor build (Armor caps at 6) shrugs off a 5-damage skitterer and a
+/// 6-damage spitter completely, so on a later level the horde has to hit harder
+/// than the Sewer's to be felt at all: level 2 tops out 60 % above the base
+/// kinds, level 3 85 %. Ramps from 1.0 over the level (see [`enemy_mods_for`]),
+/// so the opening a carried build is handed is not a damage spike.
+const LEVEL_DAMAGE_TOP: [f32; 3] = [1.0, 4.95, 5.0];
+
+/// The horde's speed multiplier at the top of a level's ramp.
+///
+/// The Lab's swarm is quick: at +14 % a restless Lab horde catches a kiting rat
+/// and the `speed_mult` from the run clock (1 + t/400) stacks on top, which is
+/// what stops "walk away and shoot behind you" from clearing level 3.
+const LEVEL_SPEED_TOP: [f32; 3] = [1.0, 1.15, 1.15];
+
+/// Shape of the ramp: `t^exp` over the level, so a lower exponent bites sooner.
+///
+/// Keep a later level's exponent `<=` the one before it: a slower ramp only
+/// stays "harder at every instant" if its top is strictly higher, and the
+/// levels' tops are within a couple of percent of each other.
+const LEVEL_RAMP_EXP: [f32; 3] = [1.0, 1.0, 1.0];
+
+/// How a campaign level's horde differs from the base kinds right now.
+///
+/// Both multipliers ramp linearly from 1.0 at the level's own start to
+/// [`LEVEL_DAMAGE_TOP`]/[`LEVEL_SPEED_TOP`] at its [`BOSS_TIME`]: the later
+/// levels' extra bite arrives *during* the level, which is when a carried build
+/// has rebuilt its passive caps. Level 1 is exactly `EnemyMods::NONE`.
+pub fn enemy_mods_for(level: usize, elapsed: f32) -> crate::game::enemy::EnemyMods {
+    use crate::game::enemy::EnemyMods;
+    let slot = level_slot(level);
+    let t = (elapsed / BOSS_TIME).clamp(0.0, 1.0).powf(LEVEL_RAMP_EXP[slot]);
+    EnemyMods {
+        damage: 1.0 + (LEVEL_DAMAGE_TOP[slot] - 1.0) * t,
+        speed: 1.0 + (LEVEL_SPEED_TOP[slot] - 1.0) * t,
+    }
 }
 
 /// Weighted pick of an enemy kind appropriate to the current time (level 0),
@@ -357,16 +492,23 @@ mod tests {
         assert!(spawn_interval(100000.0) >= 0.20 - 1e-6);
     }
 
-    /// The retuned curve, as the content contract specifies it: at least three
-    /// enemies per pulse from the start, a 0.20 s floor, and a rate that keeps
-    /// climbing (so the ten-times-larger map still fills up) up to a rate that
-    /// overshoots the 600-enemy cap well before the clock runs out.
+    /// The retuned curve, as the content contract specifies it: at least two
+    /// enemies per pulse from the start, a floor on the pulse interval, and a
+    /// rate that keeps climbing (so the ten-times-larger map still fills up) up
+    /// to a rate that overshoots the 600-enemy cap well before the clock runs
+    /// out.
+    ///
+    /// The *exact* starting pulse and floor are the level-1 curve's business
+    /// (they have been 3 and 0.20 s, and 2 and 0.50 s, across tuning passes);
+    /// what this test is about is the shape, not the number.
     #[test]
     fn the_curve_fills_a_map_ten_times_larger() {
-        assert_eq!(pulse_count(0.0), 3);
+        assert!(pulse_count(0.0) >= 2);
         // The floor lives in the raw curve; the running curve freezes at the
         // boss time and never gets there.
-        assert!((spawn_interval_at(1_000.0) - 0.20).abs() < 1e-6);
+        let floor = spawn_interval_at(1_000_000.0);
+        assert!(floor >= 0.20 - 1e-6, "the interval floor collapsed: {floor}");
+        assert_eq!(spawn_interval_at(2_000_000.0), floor, "no floor at all");
         assert_eq!(spawn_interval(1_000.0), spawn_interval(BOSS_TIME));
         // Monotone on the way there: no dip in rate, no dip in pulse size.
         let mut prev = 0.0f32;
@@ -375,10 +517,15 @@ mod tests {
             assert!(rate >= prev - 1e-4, "spawn rate dipped at {t}s");
             prev = rate;
         }
-        // Late: ~24 enemies every 0.24 s at the frozen boss-time curve, far
-        // past the cap (the cap itself is `ENEMY_CAP`; this only proves the
-        // curve wants to overflow it).
-        assert!(spawn_rate(300.0) > 60.0, "late rate {}", spawn_rate(300.0));
+        // Late: the frozen boss-time curve wants many more bodies than the
+        // opening (the exact rate is the level-1 curve's tuning; the cap itself
+        // is `ENEMY_CAP`).
+        assert!(
+            spawn_rate(300.0) > 5.0 * spawn_rate(0.0),
+            "late rate {} is not an order above the opening {}",
+            spawn_rate(300.0),
+            spawn_rate(0.0)
+        );
         // And the early game is not a wall of bugs: the first seconds stay slow.
         assert!(spawn_rate(0.0) < 3.0, "early rate {}", spawn_rate(0.0));
     }
@@ -392,8 +539,8 @@ mod tests {
         assert_eq!(d.elite_timer, 0.0);
 
         let dt = 1.0 / 60.0;
-        for (level, offset) in LEVEL_CLOCK_OFFSET.iter().enumerate().take(LEVEL_COUNT) {
-            let offset = *offset;
+        for (level, &offset) in LEVEL_CLOCK_OFFSET.iter().enumerate().take(LEVEL_COUNT) {
+            let interval = elite_interval_for(level);
             let mut d = Director::default();
             let mut elapsed = 0.0;
             let mut first: Option<f32> = None;
@@ -402,7 +549,7 @@ mod tests {
                 elapsed += dt;
                 d.elite_timer -= dt;
                 if d.elite_timer <= 0.0 && curve_clock(level, elapsed) > ELITE_START {
-                    d.elite_timer = ELITE_INTERVAL;
+                    d.elite_timer = interval;
                     if first.is_none() {
                         first = Some(elapsed);
                     } else if second.is_none() {
@@ -419,8 +566,8 @@ mod tests {
                 "level {level}: first elite at {first}, gate at {expected}"
             );
             assert!(
-                (second - first - ELITE_INTERVAL).abs() <= 2.0 * dt,
-                "level {level}: elite cadence {} is not {ELITE_INTERVAL}",
+                (second - first - interval).abs() <= 2.0 * dt,
+                "level {level}: elite cadence {} is not {interval}",
                 second - first
             );
         }
@@ -461,9 +608,12 @@ mod tests {
             }
         }
         // The opening really is a different game: level 3 starts at the hp and
-        // the pulse count level 1 reaches ~45 s in.
-        assert!((hp_mult_for(2, 0.0) - hp_mult_for(0, 45.0)).abs() < 1e-4);
-        assert_eq!(pulse_count_for(2, 0.0), pulse_count_for(0, 45.0));
+        // the pulse count level 1 only reaches 150 s in.
+        assert!((hp_mult_for(2, 0.0) - hp_mult_for(0, LEVEL_CLOCK_OFFSET[2])).abs() < 1e-4);
+        assert_eq!(
+            pulse_count_for(2, 0.0),
+            pulse_count_for(0, LEVEL_CLOCK_OFFSET[2])
+        );
         // And out-of-range indices clamp instead of panicking.
         for level in LEVEL_COUNT..LEVEL_COUNT + 4 {
             assert_eq!(curve_clock(level, 10.0), curve_clock(LEVEL_COUNT - 1, 10.0));
@@ -472,30 +622,58 @@ mod tests {
 
     /// The elite cadence scales too: the first brute arrives as soon as the
     /// level's curve passes [`ELITE_START`], i.e. earlier on every later map,
-    /// and the interval between elites is unchanged (curve pressure, not a new
-    /// timer).
+    /// *and* the gap after it shrinks with the level ([`LEVEL_ELITE_INTERVAL`]).
     #[test]
     fn elite_cadence_scales_with_the_level() {
         let dt = 1.0 / 60.0;
         let mut previous = f32::INFINITY;
+        let mut previous_interval = f32::INFINITY;
+        let mut arrivals_per_level = [0usize; LEVEL_COUNT];
         for level in 0..LEVEL_COUNT {
             let mut d = Director::default();
             let mut elapsed = 0.0;
             let mut first = None;
-            while elapsed < 200.0 {
+            let mut arrivals = 0usize;
+            while elapsed < 400.0 {
                 elapsed += dt;
                 d.elite_timer -= dt;
                 if d.elite_timer <= 0.0 && curve_clock(level, elapsed) > ELITE_START {
-                    d.elite_timer = ELITE_INTERVAL;
+                    d.elite_timer = elite_interval_for(level);
+                    arrivals += 1;
                     first.get_or_insert(elapsed);
                 }
             }
             let first = first.expect("an elite should arrive on every level");
+            // The gate lands on `ELITE_START` minus the level's offset, and a
+            // level whose opening curve already passed it meets one at 0 s.
+            let gate = (ELITE_START - LEVEL_CLOCK_OFFSET[level]).max(0.0);
             assert!(
-                first < previous,
-                "level {level}'s first elite ({first:.1}s) is not earlier than the previous level's ({previous:.1}s)"
+                (first - gate).abs() <= 2.0 * dt,
+                "level {level}: first elite at {first}, gate at {gate}"
+            );
+            assert!(
+                first <= previous + 2.0 * dt,
+                "level {level}'s first elite ({first:.1}s) is later than the previous level's ({previous:.1}s)"
             );
             previous = first;
+            let interval = elite_interval_for(level);
+            assert!(
+                interval <= previous_interval,
+                "level {level} fields elites less often than the level before it"
+            );
+            previous_interval = interval;
+            arrivals_per_level[level] = arrivals;
+        }
+        // More frequent elites really do mean more of them in one level: over
+        // the same 400 s every later level must field strictly more brutes.
+        for level in 1..LEVEL_COUNT {
+            assert!(
+                arrivals_per_level[level] > arrivals_per_level[level - 1],
+                "level {level} fielded {} elites, level {} {}",
+                arrivals_per_level[level],
+                level - 1,
+                arrivals_per_level[level - 1]
+            );
         }
     }
 
@@ -520,6 +698,121 @@ mod tests {
             let c = curve_clock(1, t);
             assert!(c >= prev, "the curve clock went backwards at {t}s");
             prev = c;
+        }
+    }
+
+    /// Level 1 is the base game, bit for bit: the campaign knobs must not touch
+    /// the Sewer, because the level-1 curve belongs to the early-game pass.
+    #[test]
+    fn level_one_is_the_base_game() {
+        use crate::game::enemy::EnemyMods;
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        for t in [0.0f32, 30.0, 120.0, 200.0, BOSS_TIME, 999.0] {
+            assert_eq!(enemy_mods_for(0, t), EnemyMods::NONE);
+            assert_eq!(horde_hp_mult_for(0, t), hp_mult_for(0, t));
+            assert_eq!(horde_hp_mult_at(curve_clock(0, t), 0), hp_mult_at(curve_clock(0, t)));
+        }
+        assert_eq!(elite_interval_for(0), ELITE_INTERVAL);
+        assert_eq!(LEVEL_MIX[0], [1.0; 5]);
+        // And the kind roll is the historical one: same rng, same picks.
+        let mut a = StdRng::seed_from_u64(17);
+        let mut b = StdRng::seed_from_u64(17);
+        for t in [0.0f32, 60.0, 150.0, 250.0] {
+            for _ in 0..200 {
+                assert_eq!(pick_kind_for(0, t, &mut a), pick_kind(t, &mut b));
+            }
+        }
+    }
+
+    /// Every later level is harder than the one before it at every instant, in
+    /// all four per-level dimensions: horde hp, elite cadence, horde damage and
+    /// horde speed.
+    #[test]
+    fn later_levels_are_strictly_harder() {
+        for t in [0.0f32, 30.0, 120.0, 200.0, BOSS_TIME] {
+            for level in 1..LEVEL_COUNT {
+                assert!(
+                    horde_hp_mult_for(level, t) > horde_hp_mult_for(level - 1, t),
+                    "level {level} horde is not tougher at {t}s"
+                );
+                assert!(
+                    elite_interval_for(level) <= elite_interval_for(level - 1),
+                    "level {level} fields elites less often"
+                );
+                let a = enemy_mods_for(level, t);
+                let b = enemy_mods_for(level - 1, t);
+                assert!(a.damage >= b.damage && a.speed >= b.speed);
+                assert!(a.damage >= 1.0 && a.speed >= 1.0, "the ramp never dips below 1");
+            }
+        }
+        // The ramp is a ramp: base kinds at the level's first second, the full
+        // modifier at its boss time (which is when the clock freezes too).
+        for level in 1..LEVEL_COUNT {
+            assert_eq!(enemy_mods_for(level, 0.0), crate::game::enemy::EnemyMods::NONE);
+            let top = enemy_mods_for(level, BOSS_TIME);
+            assert_eq!(top, enemy_mods_for(level, 1_000.0));
+            assert!(top.damage > 1.0, "level {level} horde damage never ramps");
+        }
+    }
+
+    /// The boss pool follows the level's clock and nothing else: the horde's
+    /// `LEVEL_HP_EXTRA` must not leak into it (that is what keeps the boss fight
+    /// inside its 45-90 s target on the later maps).
+    #[test]
+    fn the_boss_pool_ignores_the_horde_extra() {
+        for level in 1..LEVEL_COUNT {
+            let pool = hp_mult_for(level, BOSS_TIME);
+            let horde = horde_hp_mult_for(level, BOSS_TIME);
+            assert!(
+                horde > pool + 1e-3,
+                "level {level}: horde hp {horde} is not above the boss pool {pool}"
+            );
+        }
+    }
+
+    /// Each map fields a different horde: the Kitchen is the ranged one and the
+    /// Lab the fast one, while the Sewer keeps the historical mix.
+    #[test]
+    fn later_levels_field_a_different_mix() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        // Late enough that every kind is unlocked on every level.
+        let curve = curve_clock(2, BOSS_TIME);
+        let share = |level: usize| {
+            let mut rng = StdRng::seed_from_u64(99);
+            let mut counts: Vec<usize> = vec![0; KIND_ORDER.len()];
+            for _ in 0..20_000 {
+                let k = pick_kind_mixed(curve, level, &mut rng);
+                let i = KIND_ORDER.iter().position(|x| *x == k).expect("known kind");
+                counts[i] += 1;
+            }
+            counts
+        };
+        let base = share(0);
+        let kitchen = share(1);
+        let lab = share(2);
+        let spitter = |v: &[usize]| v[3] as f32 / v.iter().sum::<usize>() as f32;
+        let bat = |v: &[usize]| v[1] as f32 / v.iter().sum::<usize>() as f32;
+        assert!(
+            spitter(&kitchen) > spitter(&base) * 1.2,
+            "the Kitchen is not the ranged map: {} vs {}",
+            spitter(&kitchen),
+            spitter(&base)
+        );
+        assert!(
+            bat(&lab) > bat(&base) * 1.2,
+            "the Lab is not the swarm map: {} vs {}",
+            bat(&lab),
+            bat(&base)
+        );
+        // Still one rng draw per roll whatever the mix.
+        let mut a = StdRng::seed_from_u64(3);
+        let mut b = StdRng::seed_from_u64(3);
+        for _ in 0..500 {
+            let _ = pick_kind_mixed(curve, 1, &mut a);
+            let _ = pick_kind_mixed(curve, 2, &mut b);
+            assert_eq!(a.random::<u64>(), b.random::<u64>());
         }
     }
 

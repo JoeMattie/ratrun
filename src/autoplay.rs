@@ -62,6 +62,61 @@ pub mod batch;
 /// Player collision radius, as the simulation defines it.
 const R: f32 = PLAYER_RADIUS;
 
+/// What loadout a measured level starts with.
+///
+/// A `--level 2` / `--level 3` batch used to start with [`Loadout::starting`],
+/// which is not the level a carried player meets: a real campaign arrives with
+/// the three powerups the keep screen hands over. [`CarryPreset`] lets the
+/// batch runner reproduce that start without the whole campaign before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CarryPreset {
+    /// The real level-1 start: one Gnaw at level 1, no passives.
+    #[default]
+    None,
+    /// Three max-level weapons: the modal keep from the 30-run seed-900
+    /// campaigns at every skill (Tail Whip Lv5 + Squeak Nova Lv5 + Spore Orbit
+    /// Lv5; the "carried on" lines of `base_*.txt`), i.e. what a player who
+    /// finished the Sewer actually walks into the Kitchen with.
+    Typical,
+}
+
+impl CarryPreset {
+    /// Parse the `--carry` value. `None` on an unknown name.
+    pub fn parse(name: &str) -> Option<CarryPreset> {
+        match name {
+            "none" => Some(CarryPreset::None),
+            "typical" => Some(CarryPreset::Typical),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            CarryPreset::None => "none",
+            CarryPreset::Typical => "typical",
+        }
+    }
+
+    /// The loadout this preset starts a level with.
+    pub fn loadout(self) -> Loadout {
+        match self {
+            CarryPreset::None => Loadout::starting(),
+            CarryPreset::Typical => {
+                use crate::game::weapon::{Weapon, WeaponKind};
+                let weapons = [WeaponKind::TailWhip, WeaponKind::SqueakNova, WeaponKind::SporeOrbit]
+                    .into_iter()
+                    .map(|kind| {
+                        let mut w = Weapon::new(kind);
+                        w.level = kind.max_level();
+                        w
+                    })
+                    .collect();
+                Loadout::from_parts(weapons, Vec::new())
+            }
+        }
+    }
+}
+
 /// How a run is configured.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AutoOpts {
@@ -72,6 +127,9 @@ pub struct AutoOpts {
     pub campaign: bool,
     /// How well the bot plays.
     pub skill: Skill,
+    /// What `start_level` starts with (measurement only: the campaign itself
+    /// always builds its loadout through [`crate::game::campaign`]).
+    pub carry: CarryPreset,
 }
 
 impl AutoOpts {
@@ -81,6 +139,7 @@ impl AutoOpts {
             start_level,
             campaign: true,
             skill,
+            carry: CarryPreset::None,
         }
     }
 
@@ -90,6 +149,17 @@ impl AutoOpts {
             start_level: level,
             campaign: false,
             skill,
+            carry: CarryPreset::None,
+        }
+    }
+
+    /// One level alone, starting with `carry` (see [`CarryPreset`]).
+    pub fn practice_with(level: usize, skill: Skill, carry: CarryPreset) -> AutoOpts {
+        AutoOpts {
+            start_level: level,
+            campaign: false,
+            skill,
+            carry,
         }
     }
 }
@@ -100,6 +170,7 @@ impl Default for AutoOpts {
             start_level: 0,
             campaign: true,
             skill: Skill::Expert,
+            carry: CarryPreset::None,
         }
     }
 }
@@ -372,16 +443,18 @@ impl AutoRun {
     /// A fresh, seeded run.
     pub fn new(run_seed: u64, opts: AutoOpts) -> AutoRun {
         let start_level = opts.start_level.min(campaign::LEVEL_COUNT - 1);
+        let start_loadout = opts.carry.loadout();
         let (campaign, world) = if opts.campaign {
             let mut state = CampaignState::new(run_seed);
             state.level = start_level;
+            state.loadout = start_loadout;
             let world = state.world();
             (Some(state), world)
         } else {
             let world = World::new_level(
                 start_level,
                 campaign::level_seed(run_seed, start_level),
-                Loadout::starting(),
+                start_loadout,
             );
             (None, world)
         };
@@ -1231,6 +1304,7 @@ mod tests {
             start_level: level,
             campaign,
             skill,
+            carry: CarryPreset::None,
         };
         let mut out: Vec<Option<super::RunStats>> = (0..jobs.len()).map(|_| None).collect();
         if threads <= 1 {

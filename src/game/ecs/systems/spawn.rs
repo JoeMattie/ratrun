@@ -209,6 +209,9 @@ pub fn director_system(
     // also freezes at the boss time, so the horde keeps its late-curve rate for
     // as long as the boss fight lasts.
     let curve = director::curve_clock(level_index.0, elapsed);
+    // The level's own horde modifiers: damage and speed ramp over the level
+    // (`director::enemy_mods_for`); level 1 is exactly `EnemyMods::NONE`.
+    let mods = director::enemy_mods_for(level_index.0, elapsed);
     // Keep one slot reserved for the level's boss until it is due, so the live
     // count stays `<= ENEMY_CAP` for the whole level: the boss framework spends
     // the reservation on the boss itself.
@@ -247,7 +250,9 @@ pub fn director_system(
         } else {
             director::pulse_count_at(curve)
         };
-        let mult = director::hp_mult_at(curve);
+        // Horde hp: the level's curve *and* its `LEVEL_HP_EXTRA` (the boss's
+        // pool stays on `hp_mult_for`, so this cannot stretch a boss fight).
+        let mult = director::horde_hp_mult_for(level_index.0, elapsed);
         let live = enemies.iter().count();
         // One pulse in `ROOM_WAVE_EVERY` brings its first enemy in through a
         // doorway of a room the player is not in, so the horde arrives instead
@@ -275,7 +280,7 @@ pub fn director_system(
             if live + queued >= cap {
                 break;
             }
-            let kind = director::pick_kind_at(curve, &mut rng.0);
+            let kind = director::pick_kind_for(level_index.0, elapsed, &mut rng.0);
             let Some(pos) = spawn_pulse_point(
                 &mut rng.0,
                 &level,
@@ -291,7 +296,7 @@ pub fn director_system(
                 // warren or on top of the player is worse than no body.
                 continue;
             };
-            let mut enemy = Enemy::spawn(kind, pos, mult, &mut rng.0);
+            let mut enemy = Enemy::spawn_with_mods(kind, pos, mult, mods, &mut rng.0);
             // Neon merge: legacy `run_director` ids every director-spawned
             // enemy from the monotonic `next_enemy_id` counter (0 is reserved
             // for "anonymous enemy" in `DamageNumbers`). `SpawnId` and the
@@ -306,7 +311,7 @@ pub fn director_system(
     // outright when no safe point exists.
     director.elite_timer -= dt;
     if director.elite_timer <= 0.0 && curve > director::ELITE_START {
-        director.elite_timer = director::ELITE_INTERVAL;
+        director.elite_timer = director::elite_interval_for(level_index.0);
         if enemies.iter().count() + queued < cap {
             if let Some(pos) = spawn_point_reachable(
                 &mut rng.0,
@@ -315,8 +320,9 @@ pub fn director_system(
                 viewport.0,
                 &mut scratch,
             ) {
-                let mult = director::hp_mult_at(curve) * 1.6;
-                let mut enemy = Enemy::spawn(EnemyKind::Brute, pos, mult, &mut rng.0);
+                let mult = director::horde_hp_mult_for(level_index.0, elapsed) * 1.6;
+                let mut enemy =
+                    Enemy::spawn_with_mods(EnemyKind::Brute, pos, mult, mods, &mut rng.0);
                 enemy.id = next_enemy_id.take();
                 // Director elites are flagged so the art and death VFX can tell
                 // them apart from late-game Brutes with overlapping scaled HP.
@@ -2605,7 +2611,8 @@ mod tests {
 
     /// The campaign level scales the horde: level 2 and level 3 open with the
     /// hp of a mid-run level 1, because the director reads `LevelIndex` and
-    /// runs the whole curve through `director::curve_clock`.
+    /// runs the whole curve through `director::curve_clock` — and their horde
+    /// carries the level's `LEVEL_HP_EXTRA` on top (`horde_hp_mult_for`).
     #[test]
     fn the_campaign_level_scales_the_horde() {
         let mut multipliers = Vec::new();
@@ -2615,7 +2622,7 @@ mod tests {
             director_tick(&mut w, 0.1, 30.0);
             let enemies = w.enemies();
             assert!(!enemies.is_empty(), "level {level} spawned nothing");
-            let expected = director::hp_mult_for(level, 30.0);
+            let expected = director::horde_hp_mult_for(level, 30.0);
             for e in enemies.iter().filter(|e| !e.elite) {
                 // (The elite branch stacks its own 1.6x on top of the curve.)
                 let base = e.max_hp / expected;
