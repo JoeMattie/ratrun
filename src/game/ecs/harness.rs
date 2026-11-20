@@ -319,6 +319,17 @@ fn same_seed_same_run() {
 
 /// The scripted crowd must actually grow: a regression that stops spawning
 /// would keep the hashes stable (all zero) and silently pass.
+///
+/// The threshold is 15, not the 40 it was first written at, because it
+/// measures the *script*, not the curve: `Script::Evade` never turns into the
+/// horde, so it only ever meets the ten or so bodies that close on it in its
+/// first minute, and the opening deliberately stays calm (1.2 → 3.3 enemies a
+/// second over that minute; the 2025-11 balance pass kept the first 60 s as a
+/// teaching stretch). The real run's peak is measured elsewhere and is far
+/// higher: a bot run has ~40 live enemies at 60 s and saturates the 600 cap by
+/// ~180 s, and `director::tests::the_curve_fills_a_map_ten_times_larger`
+/// asserts the spawn-rate curve itself. Re-baselined 2026-11 by the early-game
+/// balance worker; raise it again only together with the opening curve.
 #[test]
 fn scripted_crowd_reaches_the_cap_curve() {
     let mut w = World::new(Theme::Sewer, 11);
@@ -334,7 +345,7 @@ fn scripted_crowd_reaches_the_cap_curve() {
         }
     }
     assert!(
-        peak >= 40,
+        peak >= 15,
         "crowd never grew (peak {peak}): the trace cases would be vacuous"
     );
     assert!(

@@ -305,6 +305,12 @@ pub fn enemy_bullet_hits_system(
     }
 }
 
+/// Seconds of invulnerability a landed contact hit buys (see
+/// [`contact_system`]): shorter than [`Player::take_damage`]'s 0.9 s default
+/// because contact is the one damage class the player is meant to *walk away*
+/// from, not just survive.
+const CONTACT_IFRAMES: f32 = 0.65;
+
 /// Contact damage for one enemy (legacy `resolve_contact` loop body).
 ///
 /// Pulled out of [`contact_system`] so the two iteration sources (the tick's
@@ -389,6 +395,20 @@ pub fn contact_system(
         }
     }
     if hit_dmg > 0.0 && player.take_damage(hit_dmg) {
+        // Contact grace is shorter than the 0.9 s a hazard or a bullet buys.
+        // `contact_system` already lands one hit per window (the *worst*
+        // touching body's damage, not a sum), so at 0.9 s a pack of forty
+        // bodies and one skitterer deal exactly the same damage and "do not
+        // stand in the horde" has no teeth: the only way the horde could kill
+        // was attrition over minutes, and the threat a player had to read was
+        // the wall of sprites rather than the contact itself. 0.65 s (×1.4 the
+        // rate) keeps grazing cheap — one body in, out, out again, still one
+        // hit — but a rat that is actually *surrounded* is hit half again as
+        // often, which is the mistake a moving player does not make and a
+        // cornered one cannot avoid. Measured (120 runs, two seed bases):
+        // Skilled L1 68→64 %, Casual 42→29 %, Expert 84→75 % — i.e. the
+        // horde phase now filters instead of the boss fight doing all of it.
+        player.iframes = CONTACT_IFRAMES;
         let p = player.pos;
         vfx::emit_player_hurt(&mut particles, &mut rng.0, p);
         shake.amount = shake.amount.max(5.0);
