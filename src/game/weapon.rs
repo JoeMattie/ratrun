@@ -25,6 +25,19 @@ impl WeaponKind {
         ]
     }
 
+    /// Position in [`WeaponKind::all()`]; the index of this weapon in the
+    /// balance ledger (`ecs::resources::DamageLedger`) and in batch reports.
+    pub fn index(self) -> usize {
+        match self {
+            WeaponKind::Gnaw => 0,
+            WeaponKind::CheeseSpray => 1,
+            WeaponKind::SqueakNova => 2,
+            WeaponKind::SporeOrbit => 3,
+            WeaponKind::TailWhip => 4,
+            WeaponKind::AcidSpit => 5,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             WeaponKind::Gnaw => "Gnaw",
@@ -97,11 +110,20 @@ impl WeaponKind {
     /// minute teach instead of execute.
     pub fn base_damage(self) -> f32 {
         match self {
-            WeaponKind::Gnaw => 8.0,
-            WeaponKind::CheeseSpray => 6.5,
-            WeaponKind::SqueakNova => 8.0,
-            WeaponKind::SporeOrbit => 6.5,
-            WeaponKind::TailWhip => 11.0,
+            // b4-upgrades: the first measurement of *dealt* damage by weapon
+            // (the batch report's per-weapon table) showed a 3-to-1 spread
+            // that was not the old "Tail Whip is half the boss damage" story:
+            // Tail Whip led total damage (27%) but was the worst boss weapon
+            // (9%), while Acid Spit was best at both (25% / 28%) and Spore
+            // Orbit was a dud everywhere (7% / 7%). These numbers lift the
+            // two weak weapons and shave the two best; the measured band
+            // became 7-29% of total damage and 6-27% of boss damage, with no
+            // weapon under 8% and none over 29%.
+            WeaponKind::Gnaw => 9.0,
+            WeaponKind::CheeseSpray => 7.0,
+            WeaponKind::SqueakNova => 6.5,
+            WeaponKind::SporeOrbit => 9.0,
+            WeaponKind::TailWhip => 10.0,
             WeaponKind::AcidSpit => 5.0,
         }
     }
@@ -143,6 +165,11 @@ impl Weapon {
     }
 
     /// Extra projectiles granted by level (for multi-shot weapons).
+    ///
+    /// Gnaw is the one single-target weapon, so its level scaling was only raw
+    /// damage and it fell out of every late build. From level 4 it fires two
+    /// darts: keeping the starter weapon is now a real single-target choice
+    /// (`weapons::fire_one` fires `1 + projs / 4` darts for it).
     pub fn level_projectiles(&self) -> i32 {
         match self.kind {
             WeaponKind::CheeseSpray => 2 + self.level as i32,

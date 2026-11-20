@@ -124,6 +124,41 @@ pub struct Shake {
     pub ofs: Vec2,
 }
 
+// ---- Balance instrumentation (lives in the ECS world permanently) --------
+
+/// Cumulative damage the player's weapons actually dealt, split by weapon
+/// (`WeaponKind::all()` index).
+///
+/// This is *instrumentation*, not simulation: nothing reads it inside the
+/// schedule, so it cannot change behaviour or rng draws, and it is reset when a
+/// new [`crate::game::world::World`] is built (one per campaign level). The
+/// batch harness (`autoplay`) reads it to report each weapon's share of total
+/// damage — the number that used to be inferred from "Tail Whip is about half
+/// of boss damage" anecdotes.
+///
+/// Damage is booked at the sites that hurt an enemy, as *effective* damage
+/// (`hp_before - hp_after`, floored at zero), so overkill on a nearly-dead
+/// skitterer does not inflate a weapon's share. The boss is not an `Enemy` and
+/// applies damage in its own system, so boss damage is attributed by the
+/// harness from the boss fight's per-tick tally instead (`autoplay`).
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct DamageLedger {
+    /// Effective damage dealt to every enemy, by weapon index.
+    pub dealt: [f32; 6],
+}
+
+impl DamageLedger {
+    /// Book `amount` effective damage from `kind` (no-op for non-positive
+    /// amounts, which keeps a floor-clamped hit from subtracting).
+    #[inline]
+    pub fn add(&mut self, kind: crate::game::weapon::WeaponKind, amount: f32) {
+        if amount <= 0.0 {
+            return;
+        }
+        self.dealt[kind.index()] += amount;
+    }
+}
+
 // ---- Internal scratch (lives in the ECS world permanently) ---------------
 
 /// Monotonic spawn-id source. Entities are not respawned between ticks, so

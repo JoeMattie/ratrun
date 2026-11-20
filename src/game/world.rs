@@ -70,8 +70,8 @@ use super::ecs::components::SpawnId;
 use super::ecs::constants::{GRID_CELL, PARTICLE_CAP};
 use super::ecs::resources::{
     collect_sorted, spawn_with_id, swap_in, swap_out, BossDue, EnemyIndex, GridScratch, LastPickups,
-    LevelIndex, NeighborScratch, NextEnemyId, NextSpawnId, NukeTick, PickupScratch, RngRes,
-    RunCounters, SfxQueue, Shake, TickInput, Viewport,
+    DamageLedger, LevelIndex, NeighborScratch, NextEnemyId, NextSpawnId, NukeTick, PickupScratch,
+    RngRes, RunCounters, SfxQueue, Shake, TickInput, Viewport,
 };
 use super::ecs::schedule::{build_settle_schedule, build_tick_schedule};
 use super::ecs::systems::boss::{
@@ -241,6 +241,9 @@ impl World {
         ecs.insert_resource(NukeTick(false));
         ecs.insert_resource(GridScratch::default());
         ecs.insert_resource(EnemyIndex::default());
+        // Per-weapon damage bookkeeping for the batch harness (never read by
+        // the schedule; fresh per level, like the counters below).
+        ecs.insert_resource(DamageLedger::default());
         ecs.insert_resource(SpatialGrid::new(level.arena, GRID_CELL));
         // The director's boss hand-off (raised at `director::BOSS_TIME`, taken
         // by the boss framework). Permanent, like `NukeTick`.

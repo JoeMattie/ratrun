@@ -50,7 +50,9 @@ use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::art_boss_broom::BroomBossState;
 use crate::game::art_boss_cat::BossCatState;
 use crate::game::art_boss_mower::MowerState;
-use crate::game::ecs::systems::boss::{Boss, BossKind, BossProjectile, BossState};
+use crate::game::ecs::resources::DamageLedger;
+use crate::game::ecs::systems::boss::{Boss, BossFight, BossKind, BossProjectile, BossState};
+use crate::game::weapon::WeaponKind;
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::loadout::Loadout;
 use crate::game::world::World;
@@ -269,12 +271,26 @@ pub struct LevelStats {
     pub kills: u32,
     /// Seconds spent with an enemy body within [`NEAR_ENEMY_PX`].
     pub near_seconds: f32,
+    /// Player XP level when the boss first appeared (`None` if it never did).
+    /// The "level about 15 to 30 at the first boss" target is read from this.
+    pub level_at_boss: Option<u32>,
     /// Player state at the fixed progress checkpoints (see [`PROGRESS_TIMES`]).
     pub progress: Vec<Progress>,
     /// Enemies alive when the rat died here.
     pub enemies_at_death: Option<u32>,
     /// One-line cause-of-death classification (diagnostic, not a spec).
     pub death_note: Option<String>,
+    /// Effective damage dealt to enemies, by weapon (`WeaponKind::all()`
+    /// index). Read from the simulation's `DamageLedger`, which no system
+    /// reads back: pure balance instrumentation.
+    pub dealt: [f32; 6],
+    /// Damage dealt to this level's boss, by weapon (`WeaponKind::all()`
+    /// index). The boss is not an `Enemy`, so this comes from the boss fight's
+    /// own per-tick source tally: acid pools and Tail Whip are exact, aimed
+    /// bullets (Gnaw / Cheese Spray) and pattern bullets (Squeak Nova / Spore
+    /// Orbit) are split in proportion to those weapons' analytic dps (see
+    /// [`boss_weapon_split`]).
+    pub boss_dealt: [f32; 6],
 }
 
 /// Progress checkpoints the batch reports level/upgrade snapshots at (seconds
@@ -757,6 +773,7 @@ impl AutoRun {
                 self.boss_damage = 0.0;
                 stats.reached_boss = true;
                 stats.dps_at_boss = dps_now;
+                stats.level_at_boss = Some(player_level);
             }
             (Some((before, _)), Some((frac, _))) => {
                 let dealt = (before - frac) * boss_max;
@@ -781,6 +798,13 @@ impl AutoRun {
             }
             (None, None) => {}
         }
+
+        // Balance instrumentation: per-weapon damage actually dealt. The
+        // ledger is cumulative for this level's world; copying the six floats
+        // is cheaper than reading it once at level end (which a capped or
+        // killed run would then have to special-case).
+        stats.dealt = self.world.ecs.resource::<DamageLedger>().dealt;
+        attribute_boss_damage(&self.world, boss_before.is_some(), &mut self.stats.levels[pos]);
     }
 
     /// Best guess at what dealt `lost` HP this tick: exact damage match first,
@@ -1056,6 +1080,67 @@ pub fn analytic_dps(lo: &Loadout) -> f32 {
         dps += weapon.damage() * shots / cooldown;
     }
     dps * lo.stats.damage_mult * lo.stats.fire_rate_mult
+}
+
+/// Add this tick's boss damage to `stats.boss_dealt`, split by weapon.
+///
+/// The boss fight books its per-tick damage by *source* (`BossDamageTally`:
+/// aimed / pattern / pools / whip / traps) rather than by weapon. Acid Spit's
+/// pools and Tail Whip's arc map one-to-one; "aimed" covers Gnaw and Cheese
+/// Spray and "pattern" covers Squeak Nova and Spore Orbit, so those two are
+/// split in proportion to the owned weapons' analytic dps. Traps and anything
+/// else are not weapon damage and are skipped, which is why the boss column
+/// can sum to slightly less than the fight's real damage.
+fn attribute_boss_damage(world: &World, boss_alive: bool, stats: &mut LevelStats) {
+    if !boss_alive {
+        return;
+    }
+    let tally = world.ecs.resource::<BossFight>().scratch.dmg;
+    let lo = &world.player.loadout;
+    let mut add = |kind: WeaponKind, amount: f32| {
+        if amount > 0.0 {
+            stats.boss_dealt[kind.index()] += amount;
+        }
+    };
+    add(WeaponKind::AcidSpit, tally.pools);
+    add(WeaponKind::TailWhip, tally.whip);
+    for (part, a, b) in [
+        (tally.aimed, WeaponKind::Gnaw, WeaponKind::CheeseSpray),
+        (tally.pattern, WeaponKind::SqueakNova, WeaponKind::SporeOrbit),
+    ] {
+        let split = boss_weapon_split(lo, a, b);
+        add(a, part * split[0]);
+        add(b, part * split[1]);
+    }
+}
+
+/// Split a boss-damage bucket between two weapons in proportion to their
+/// analytic dps contribution (see [`LevelStats::boss_dealt`]).
+///
+/// The boss fight books damage by source, and two sources cover two weapons
+/// each ("aimed" = Gnaw + Cheese Spray, "pattern" = Squeak Nova + Spore
+/// Orbit). This is the only assumption in the per-weapon boss column: a weapon
+/// that does not own a bucket gets exactly zero, and a build that owns only one
+/// of a pair gets the whole bucket.
+fn boss_weapon_split(lo: &Loadout, a: WeaponKind, b: WeaponKind) -> [f32; 2] {
+    let weight = |kind: WeaponKind| -> f32 {
+        lo.weapons
+            .iter()
+            .filter(|w| w.kind == kind)
+            .map(|w| {
+                w.damage() * w.level_projectiles().max(1) as f32 / w.cooldown().max(0.05)
+            })
+            .sum::<f32>()
+            * lo.stats.damage_mult
+            * lo.stats.fire_rate_mult
+    };
+    let (wa, wb) = (weight(a), weight(b));
+    let total = wa + wb;
+    if total > 0.0 {
+        [wa / total, wb / total]
+    } else {
+        [0.0, 0.0]
+    }
 }
 
 /// The attack a boss state's hazards belong to.

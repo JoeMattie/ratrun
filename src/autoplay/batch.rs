@@ -29,6 +29,7 @@ use super::{
 };
 use crate::game::bot::Skill;
 use crate::game::campaign;
+use crate::game::weapon::WeaponKind;
 
 /// The simulation step the batch uses. Fixed, so a run is reproducible.
 pub const DT: f32 = 1.0 / 60.0;
@@ -103,6 +104,9 @@ pub struct LevelOutcome {
     pub damage_total: f32,
     pub damage: BTreeMap<String, f32>,
     pub dps_at_boss: f32,
+    /// Player XP level when the boss first appeared.
+    #[serde(default)]
+    pub level_at_boss: Option<u32>,
     pub boss_dps: f32,
     pub upgrades: Vec<String>,
     pub kept: Vec<String>,
@@ -117,6 +121,14 @@ pub struct LevelOutcome {
     pub progress: Vec<ProgressOutcome>,
     /// Enemies alive at death.
     pub enemies_at_death: Option<u32>,
+    /// Effective damage dealt to enemies by each weapon (`WeaponKind::all()`
+    /// order), for the per-weapon balance table.
+    #[serde(default)]
+    pub dealt: BTreeMap<String, f32>,
+    /// Damage dealt to this level's boss by each weapon (see
+    /// [`LevelStats::boss_dealt`]).
+    #[serde(default)]
+    pub boss_dealt: BTreeMap<String, f32>,
 }
 
 /// A progression checkpoint as it appears in a report.
@@ -146,6 +158,7 @@ impl LevelOutcome {
                 .map(|(k, v)| (k.to_string(), *v))
                 .collect(),
             dps_at_boss: s.dps_at_boss,
+            level_at_boss: s.level_at_boss,
             boss_dps: s.boss_dps,
             upgrades: s.upgrades.clone(),
             kept: s.kept.clone(),
@@ -159,8 +172,18 @@ impl LevelOutcome {
             },
             progress: s.progress.iter().map(progress_outcome).collect(),
             enemies_at_death: s.enemies_at_death,
+            dealt: weapon_damage_map(&s.dealt),
+            boss_dealt: weapon_damage_map(&s.boss_dealt),
         }
     }
+}
+
+/// `[f32; 6]` in `WeaponKind::all()` order → a serialisable name map.
+fn weapon_damage_map(by_kind: &[f32; 6]) -> BTreeMap<String, f32> {
+    WeaponKind::all()
+        .iter()
+        .map(|k| (k.name().to_string(), by_kind[k.index()]))
+        .collect()
 }
 
 fn progress_outcome(p: &Progress) -> ProgressOutcome {
@@ -220,6 +243,11 @@ pub struct BatchReport {
     pub run_summaries: Vec<RunSummary>,
     /// Final builds of the runs that reached the last boss, most common first.
     pub builds: Vec<(String, usize)>,
+    /// Per-weapon damage share, pick rate and win correlation (see
+    /// [`WeaponAgg`]). This is the table that answers "is every weapon a
+    /// reasonable pick", which used to be guesswork.
+    #[serde(default)]
+    pub weapons: Vec<WeaponAgg>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -251,6 +279,9 @@ pub struct LevelAgg {
     pub boss_seconds: Percentiles,
     /// Build DPS when the boss appeared.
     pub dps_at_boss: f32,
+    /// Player XP level when the boss appeared (min / p25 / median / p75 / max).
+    #[serde(default)]
+    pub level_at_boss: Percentiles,
     /// Measured DPS into the boss.
     pub boss_dps: f32,
     /// Seconds to the first level-up on this level.
@@ -268,6 +299,9 @@ pub struct LevelAgg {
     pub damage: Vec<DamageAgg>,
     pub upgrades: Vec<(String, usize)>,
     pub kept: Vec<(String, usize)>,
+    /// Per-weapon damage share / pick rate / win correlation on this level.
+    #[serde(default)]
+    pub weapons: Vec<WeaponAgg>,
 }
 
 /// A progression checkpoint aggregated over runs.
@@ -322,6 +356,47 @@ pub struct DamageAgg {
     /// Mean per attempted run (so it reads as "damage per run").
     pub per_run: f32,
     pub hits: usize,
+}
+
+/// One weapon's balance row: how much damage it dealt, how often it was taken,
+/// and how the runs that took it did.
+///
+/// Overall (`BatchReport::weapons`) `taken` counts **runs** in which the weapon
+/// was picked at least once (a starting Gnaw that was never levelled does not
+/// count) and `win_rate_with` is the campaign win rate of those runs, so
+/// `win_rate_with` vs `win_rate_without` is the correlation to read. Per level
+/// (`LevelAgg::weapons`) the same fields count **levels** and use the level's
+/// own clear rate instead of the campaign's.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct WeaponAgg {
+    pub weapon: String,
+    /// Effective damage dealt to enemies, summed over the batch.
+    pub dealt: f32,
+    /// `dealt / every weapon's dealt` (0..1).
+    pub share: f32,
+    /// Damage dealt to bosses, summed over the batch.
+    pub boss_dealt: f32,
+    /// `boss_dealt / every weapon's boss_dealt` (0..1).
+    pub boss_share: f32,
+    /// Level-up picks of this weapon (across every level and run).
+    pub picks: usize,
+    /// Runs (overall) / levels (per level) that took it at least once.
+    pub taken: usize,
+    /// `taken / runs` (overall) or `taken / attempted` (per level).
+    pub pick_rate: f32,
+    /// Of the runs/levels that took it, how many won the campaign (overall) or
+    /// cleared the level (per level).
+    pub wins_with: usize,
+    pub win_rate_with: f32,
+    /// The same rate for the runs/levels that did **not** take it.
+    pub win_rate_without: f32,
+}
+
+impl WeaponAgg {
+    /// Does a level-up card title ("Gnaw Lv2", "Tail Whip (NEW)") name `kind`?
+    fn title_is(title: &str, kind: WeaponKind) -> bool {
+        title.starts_with(kind.name())
+    }
 }
 
 // ---- Running -------------------------------------------------------------
@@ -488,6 +563,12 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
     let mut overall_progress: Vec<Vec<ProgressOutcome>> = vec![Vec::new(); PROGRESS_TIMES.len()];
     let mut near_weighted = 0.0f32;
     let mut near_total_time = 0.0f32;
+    // Per-weapon balance columns (all levels), see `WeaponAgg`.
+    let mut w_dealt: BTreeMap<String, f32> = BTreeMap::new();
+    let mut w_boss: BTreeMap<String, f32> = BTreeMap::new();
+    let mut w_picks: BTreeMap<String, usize> = BTreeMap::new();
+    let mut w_taken: BTreeMap<String, usize> = BTreeMap::new();
+    let mut w_won: BTreeMap<String, usize> = BTreeMap::new();
 
     for outcome in &outcomes {
         if outcome.won {
@@ -511,6 +592,8 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
             near_frac: outcome.near_frac,
             death: outcome.death.clone(),
         });
+        // A weapon "was taken" by a run once, however many levels levelled it.
+        let mut taken_in_run = [false; 6];
         for level in &outcome.levels {
             let agg = match levels.iter_mut().find(|l| l.level == level.level) {
                 Some(a) => a,
@@ -527,6 +610,7 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
                         time: Percentiles::default(),
                         boss_seconds: Percentiles::default(),
                         dps_at_boss: 0.0,
+                        level_at_boss: Percentiles::default(),
                         boss_dps: 0.0,
                         first_levelup: Percentiles::default(),
                         kills_per_min: 0.0,
@@ -537,6 +621,7 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
                         damage: Vec::new(),
                         upgrades: Vec::new(),
                         kept: Vec::new(),
+                        weapons: Vec::new(),
                     });
                     levels.last_mut().expect("just pushed")
                 }
@@ -569,6 +654,27 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
             for up in &level.upgrades {
                 *builds.entry(up.clone()).or_insert(0) += 1;
             }
+            for (w, v) in &level.dealt {
+                *w_dealt.entry(w.clone()).or_insert(0.0) += *v;
+            }
+            for (w, v) in &level.boss_dealt {
+                *w_boss.entry(w.clone()).or_insert(0.0) += *v;
+            }
+            for kind in WeaponKind::all() {
+                for u in &level.upgrades {
+                    if WeaponAgg::title_is(u, kind) {
+                        *w_picks.entry(kind.name().to_string()).or_insert(0) += 1;
+                        if !taken_in_run[kind.index()] {
+                            taken_in_run[kind.index()] = true;
+                            *w_taken.entry(kind.name().to_string()).or_insert(0) += 1;
+                            if outcome.won {
+                                *w_won.entry(kind.name().to_string()).or_insert(0) += 1;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
         }
         // The last level reached carries this run's final kept set.
         if let Some(last) = outcome.levels.last() {
@@ -585,6 +691,7 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
         let mut boss_seconds = Vec::new();
         let mut dps = Vec::new();
         let mut boss_dps = Vec::new();
+        let mut levels_at_boss: Vec<f32> = Vec::new();
         let mut dmg: BTreeMap<String, (f32, usize)> = BTreeMap::new();
         let mut upgrades: BTreeMap<String, usize> = BTreeMap::new();
         let mut kept: BTreeMap<String, usize> = BTreeMap::new();
@@ -596,6 +703,12 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
         let mut kill_rates: Vec<f32> = Vec::new();
         let mut near_weighted = 0.0f32;
         let mut near_time = 0.0f32;
+        // Per-weapon balance columns for this level (see `WeaponAgg`).
+        let mut w_dealt: BTreeMap<String, f32> = BTreeMap::new();
+        let mut w_boss: BTreeMap<String, f32> = BTreeMap::new();
+        let mut w_picks: BTreeMap<String, usize> = BTreeMap::new();
+        let mut w_taken: BTreeMap<String, usize> = BTreeMap::new();
+        let mut w_cleared: BTreeMap<String, usize> = BTreeMap::new();
         for outcome in &outcomes {
             for level in outcome.levels.iter().filter(|l| l.level == agg.level) {
                 times.push(level.time);
@@ -621,6 +734,9 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
                     boss_seconds.push(level.boss_seconds);
                     dps.push(level.dps_at_boss);
                     boss_dps.push(level.boss_dps);
+                    if let Some(lv) = level.level_at_boss {
+                        levels_at_boss.push(lv as f32);
+                    }
                 }
                 for (src, amount) in &level.damage {
                     let e = dmg.entry(src.clone()).or_insert((0.0, 0));
@@ -633,6 +749,32 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
                 for k in &level.kept {
                     *kept.entry(k.clone()).or_insert(0) += 1;
                 }
+                for (w, v) in &level.dealt {
+                    *w_dealt.entry(w.clone()).or_insert(0.0) += *v;
+                }
+                for (w, v) in &level.boss_dealt {
+                    *w_boss.entry(w.clone()).or_insert(0.0) += *v;
+                }
+                let cleared = level.cleared || level.boss_defeated;
+                for kind in WeaponKind::all() {
+                    let took = level
+                        .upgrades
+                        .iter()
+                        .any(|u| WeaponAgg::title_is(u, kind));
+                    if took {
+                        *w_taken.entry(kind.name().to_string()).or_insert(0) += 1;
+                        if cleared {
+                            *w_cleared.entry(kind.name().to_string()).or_insert(0) += 1;
+                        }
+                    }
+                }
+                for u in &level.upgrades {
+                    for kind in WeaponKind::all() {
+                        if WeaponAgg::title_is(u, kind) {
+                            *w_picks.entry(kind.name().to_string()).or_insert(0) += 1;
+                        }
+                    }
+                }
             }
         }
         agg.clear_rate = if agg.attempted == 0 {
@@ -644,6 +786,7 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
         agg.time = Percentiles::of(times);
         agg.boss_seconds = Percentiles::of(boss_seconds);
         agg.dps_at_boss = mean(&dps);
+        agg.level_at_boss = Percentiles::of(levels_at_boss);
         agg.boss_dps = mean(&boss_dps);
         agg.first_levelup = Percentiles::of(firsts);
         agg.kills_per_min = mean(&kill_rates);
@@ -658,6 +801,15 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
         agg.damage = damage_vec(dmg, agg.attempted);
         agg.upgrades = top(upgrades, 12);
         agg.kept = top(kept, 12);
+        agg.weapons = weapon_aggs(
+            &w_dealt,
+            &w_boss,
+            &w_picks,
+            &w_taken,
+            &w_cleared,
+            agg.attempted,
+            agg.cleared,
+        );
     }
     levels.sort_by_key(|l| l.level);
     deaths.sort_by(|a, b| {
@@ -708,7 +860,87 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
         deaths,
         run_summaries,
         builds: top(builds, 16),
+        weapons: weapon_aggs(
+            &w_dealt,
+            &w_boss,
+            &w_picks,
+            &w_taken,
+            &w_won,
+            runs,
+            campaign_wins,
+        ),
     }
+}
+
+/// Build one [`WeaponAgg`] row per weapon from the per-weapon accumulators.
+///
+/// `taken`/`wins_with` are counted in the caller's unit (runs overall, levels
+/// per level); `attempts` and `wins` are that unit's totals, so
+/// `win_rate_without` compares "everyone who did not take it".
+#[allow(clippy::too_many_arguments)]
+fn weapon_aggs(
+    dealt: &BTreeMap<String, f32>,
+    boss: &BTreeMap<String, f32>,
+    picks: &BTreeMap<String, usize>,
+    taken: &BTreeMap<String, usize>,
+    wins_with: &BTreeMap<String, usize>,
+    attempts: usize,
+    wins: usize,
+) -> Vec<WeaponAgg> {
+    let total_dealt: f32 = dealt.values().sum();
+    let total_boss: f32 = boss.values().sum();
+    let mut out: Vec<WeaponAgg> = WeaponKind::all()
+        .iter()
+        .map(|kind| {
+            let name = kind.name();
+            let d = dealt.get(name).copied().unwrap_or(0.0);
+            let b = boss.get(name).copied().unwrap_or(0.0);
+            let taken_n = taken.get(name).copied().unwrap_or(0);
+            let wins_n = wins_with.get(name).copied().unwrap_or(0);
+            let not_taken = attempts.saturating_sub(taken_n);
+            let wins_without = wins.saturating_sub(wins_n);
+            WeaponAgg {
+                weapon: name.to_string(),
+                dealt: d,
+                share: if total_dealt > 0.0 {
+                    d / total_dealt
+                } else {
+                    0.0
+                },
+                boss_dealt: b,
+                boss_share: if total_boss > 0.0 {
+                    b / total_boss
+                } else {
+                    0.0
+                },
+                picks: picks.get(name).copied().unwrap_or(0),
+                taken: taken_n,
+                pick_rate: if attempts > 0 {
+                    taken_n as f32 / attempts as f32
+                } else {
+                    0.0
+                },
+                wins_with: wins_n,
+                win_rate_with: if taken_n > 0 {
+                    wins_n as f32 / taken_n as f32
+                } else {
+                    0.0
+                },
+                win_rate_without: if not_taken > 0 {
+                    wins_without as f32 / not_taken as f32
+                } else {
+                    0.0
+                },
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.dealt
+            .partial_cmp(&a.dealt)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.weapon.cmp(&b.weapon))
+    });
+    out
 }
 
 /// File a checkpoint reading into its bucket (`PROGRESS_TIMES` index).
@@ -1303,6 +1535,30 @@ fn damage_lines(damage: &[DamageAgg], indent: &str) -> String {
     out
 }
 
+/// Per-weapon balance rows: damage share, boss share, pick rate and the win
+/// correlation (runs/levels that took it versus runs/levels that did not).
+fn weapon_lines(weapons: &[WeaponAgg], indent: &str, per_level: bool) -> String {
+    let mut out = String::new();
+    if weapons.iter().all(|w| w.dealt <= 0.0 && w.picks == 0) {
+        return out;
+    }
+    let unit = if per_level { "cleared" } else { "won" };
+    for w in weapons {
+        out.push_str(&format!(
+            "{indent}{:<14} dmg {:>8.0} {:>5}   boss {:>8.0} {:>5}   picked {:>4}   {unit} with {:>4} vs without {:>4}\n",
+            w.weapon,
+            w.dealt,
+            pct(w.share),
+            w.boss_dealt,
+            pct(w.boss_share),
+            pct(w.pick_rate),
+            pct(w.win_rate_with),
+            pct(w.win_rate_without),
+        ));
+    }
+    out
+}
+
 /// A count distribution ("n / median / max", no seconds).
 fn dist_count(p: &Percentiles) -> String {
     if p.n == 0 {
@@ -1403,6 +1659,10 @@ pub fn render_table(r: &BatchReport) -> String {
             l.boss_dps
         ));
         s.push_str(&format!(
+            "  player level at boss: {}\n",
+            dist_count(&l.level_at_boss)
+        ));
+        s.push_str(&format!(
             "  kills/min:       {:.0}   first level-up: {}   near-enemy time: {:.0}%   enemies at death: {}\n",
             l.kills_per_min,
             dist(&l.first_levelup),
@@ -1418,6 +1678,11 @@ pub fn render_table(r: &BatchReport) -> String {
         if !l.damage.is_empty() {
             s.push_str("  damage taken:\n");
             s.push_str(&damage_lines(&l.damage, "    "));
+        }
+        let wl = weapon_lines(&l.weapons, "    ", true);
+        if !wl.is_empty() {
+            s.push_str("  weapons (share / boss share / pick rate / clear rate with vs without):\n");
+            s.push_str(&wl);
         }
         if !l.upgrades.is_empty() {
             let list: Vec<String> = l
@@ -1437,6 +1702,11 @@ pub fn render_table(r: &BatchReport) -> String {
                 .collect();
             s.push_str(&format!("  carried on:      {}\n", list.join(", ")));
         }
+        s.push('\n');
+    }
+    if !r.weapons.is_empty() {
+        s.push_str("Weapons (all levels: damage share / boss share / pick rate / campaign win rate with vs without):\n");
+        s.push_str(&weapon_lines(&r.weapons, "  ", false));
         s.push('\n');
     }
     s.push_str("Damage taken by source (all levels, per run):\n");

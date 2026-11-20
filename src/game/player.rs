@@ -25,17 +25,33 @@ pub struct Player {
 ///
 /// Linear (+5 per level) for the first ten levels — that is the teaching
 /// stretch and it should stay quick — then a quadratic drag
-/// (`(level-10)^2/2` extra). Without the drag a build that is killing 400
+/// (`2/3 * (level-10)^2` extra). Without the drag a build that is killing 400
 /// bodies a minute reached player level 90-140 by the boss, which made the
 /// boss pool arbitrary and the last two minutes a formality. With it, a strong
-/// run reaches the level-1 boss around level 20-30 and the levels it does earn
+/// run reaches the level-1 boss around level 25-30 and the levels it does earn
 /// are all meaningful.
 ///
-/// Totals: level 10 = 325 XP (unchanged), level 20 ≈ 1 347 XP,
-/// level 30 ≈ 3 910 XP.
+/// b4-upgrades: the drag was `(level-10)^2 / 2`, which put the measured level
+/// at the first boss at 29-30 — the very top of the "15 to 30 at the first
+/// boss" target, with no margin for the batch's other workers making level 1
+/// (and therefore the kill rate, and therefore the XP) easier. `2/3` costs
+/// about 4% more XP by level 20 and 12% by level 30. Measured on the 30-run
+/// seed-900 batches, the level at the first boss became 28/29/29 (expert),
+/// 25/26/27 (skilled) and 26/27/28 (casual) p25/median/p75 — inside the band
+/// with margin. Nothing changes before level 11, so the teaching stretch and
+/// the first level-up (the tutorial beat) are untouched.
+///
+/// A full `(level-10)^2` was measured too and is **too steep**: it cost 23
+/// percentage points of level-1 clear rate (expert 83 %→60 %, skilled 67 %→40 %,
+/// casual 33 %→20 %) for one player level at the boss. The XP curve is a
+/// sensitive difficulty lever; `2/3` is the point that meets the level band
+/// without moving the clear rate.
+///
+/// Totals (integer arithmetic, as the code computes them): level 10 = 270 XP
+/// (unchanged), level 20 = 1 231 XP, level 30 = 3 958 XP.
 pub fn xp_for_level(level: u32) -> u32 {
     let drag = level.saturating_sub(10);
-    5 + level * 5 + drag * drag / 2
+    5 + level * 5 + drag * drag * 2 / 3
 }
 
 impl Player {
@@ -120,5 +136,42 @@ mod tests {
         let mut p = Player::new(Vec2::ZERO, WeaponKind::Gnaw);
         assert!(p.take_damage(10.0));
         assert!(!p.take_damage(10.0)); // still invulnerable
+    }
+
+    /// Cumulative XP to reach a level, matching [`Player::add_xp`]'s integer
+    /// arithmetic exactly (so the documented totals cannot drift).
+    fn xp_to_reach(level: u32) -> u32 {
+        (1..level).map(xp_for_level).sum()
+    }
+
+    #[test]
+    fn xp_curve_totals_match_the_documented_band() {
+        // The teaching stretch is linear and unchanged: 270 XP to level 10.
+        assert_eq!(xp_to_reach(10), 270);
+        // The drag is what bounds the snowball. These are the numbers the doc
+        // comment quotes; a curve change that moves them must update both.
+        assert_eq!(xp_to_reach(20), 1231);
+        assert_eq!(xp_to_reach(30), 3958);
+    }
+
+    #[test]
+    fn xp_curve_is_monotonic_and_never_cheapens() {
+        for level in 2..=60 {
+            let prev = xp_for_level(level - 1);
+            let next = xp_for_level(level);
+            assert!(
+                next > prev,
+                "level {level} costs {next} XP, not more than level {}'s {prev}",
+                level - 1
+            );
+        }
+    }
+
+    #[test]
+    fn reaching_level_30_costs_more_than_the_linear_curve_would() {
+        // The drag has to bite: 30 levels of the flat 5+5*level curve would be
+        // 2 325 XP, and the boss pool would be meaningless again.
+        let linear: u32 = (1..30).map(|l| 5 + l * 5).sum();
+        assert!(xp_to_reach(30) > linear * 3 / 2);
     }
 }

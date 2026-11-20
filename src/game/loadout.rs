@@ -343,15 +343,19 @@ impl Loadout {
                 pool.push(Upgrade::Passive(p));
             }
         }
-        // Fallback: an exhausted pool (every weapon maxed, every passive
-        // capped — only reachable at absurd player levels) still fills three
-        // cards, as bandages.
-        if pool.len() < 3 {
-            pool.extend(capped);
-        }
-
+        // Every live card is preferred to a capped one. Only when the live pool
+        // cannot fill the screen do the capped passives come back, as
+        // bandages — and only as many as are needed. (Adding all of them to
+        // the pool and shuffling, as this did, let bandages crowd out live
+        // cards: with one passive left to cap, a level-up could offer three
+        // heals instead of the weapon level-up.)
         pool.shuffle(rng);
-        pool.into_iter().take(3).collect()
+        let mut choices: Vec<Upgrade> = pool.into_iter().take(3).collect();
+        if choices.len() < 3 {
+            capped.shuffle(rng);
+            choices.extend(capped.into_iter().take(3 - choices.len()));
+        }
+        choices
     }
 
     /// Apply an upgrade. Returns extra HP to grant (heal-on-pick effects).
@@ -397,6 +401,96 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(7);
         let c = lo.generate_choices(&mut rng);
         assert!(c.len() <= 3 && !c.is_empty());
+    }
+
+    /// Every weapon maxed, every passive at its cap: the pool is empty and the
+    /// level-up must still fill the screen with bandages.
+    fn exhausted_loadout() -> Loadout {
+        let mut lo = Loadout::starting();
+        for k in WeaponKind::all() {
+            if !lo.has(k) {
+                lo.apply(&Upgrade::NewWeapon(k));
+            }
+        }
+        for i in 0..lo.weapons.len() {
+            while !lo.weapons[i].is_max() {
+                lo.apply(&Upgrade::LevelWeapon(i));
+            }
+        }
+        for p in PassiveKind::all() {
+            for _ in 0..p.max_stacks() {
+                lo.apply(&Upgrade::Passive(p));
+            }
+        }
+        lo
+    }
+
+    #[test]
+    fn capped_passives_never_crowd_out_a_live_card() {
+        // Everything capped except one passive: the one live card must always
+        // be offered, never buried under three bandages.
+        let mut lo = Loadout::starting();
+        for k in WeaponKind::all() {
+            if !lo.has(k) {
+                lo.apply(&Upgrade::NewWeapon(k));
+            }
+        }
+        for i in 0..lo.weapons.len() {
+            while !lo.weapons[i].is_max() {
+                lo.apply(&Upgrade::LevelWeapon(i));
+            }
+        }
+        for p in PassiveKind::all() {
+            let cap = if p == PassiveKind::Damage {
+                p.max_stacks() - 1
+            } else {
+                p.max_stacks()
+            };
+            for _ in 0..cap {
+                lo.apply(&Upgrade::Passive(p));
+            }
+        }
+        for seed in 0..50 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let choices = lo.generate_choices(&mut rng);
+            assert_eq!(choices.len(), 3, "a level-up always offers three cards");
+            let live = choices
+                .iter()
+                .filter(|c| matches!(c, Upgrade::Passive(PassiveKind::Damage)))
+                .count();
+            assert_eq!(live, 1, "the one live card must always be offered");
+            // …and the other two are bandages, not more capped passives than
+            // the screen needs.
+            for c in choices.iter().filter(|c| !matches!(c, Upgrade::Passive(PassiveKind::Damage))) {
+                assert!(lo.describe(c).0.ends_with("(capped)"));
+            }
+        }
+    }
+
+    #[test]
+    fn an_exhausted_pool_fills_three_bandages() {
+        let lo = exhausted_loadout();
+        for seed in 0..50 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let choices = lo.generate_choices(&mut rng);
+            assert_eq!(choices.len(), 3, "a level-up always offers three cards");
+            for c in &choices {
+                assert!(
+                    matches!(c, Upgrade::Passive(_)),
+                    "no weapon card can be live once every weapon is maxed"
+                );
+                assert!(
+                    lo.describe(c).0.ends_with("(capped)"),
+                    "the only remaining cards are bandages"
+                );
+            }
+        }
+        // A bandage is still worth picking: it heals, it is not a dead stack.
+        let mut lo = lo;
+        lo.stats.max_hp = 200.0;
+        let heal = lo.apply(&Upgrade::Passive(PassiveKind::Armor));
+        assert!(heal > 0.0, "a capped pick must heal");
+        assert_eq!(lo.stacks(PassiveKind::Armor), PassiveKind::Armor.max_stacks());
     }
 
     #[test]

@@ -101,6 +101,7 @@ use crate::game::ecs::components::{Pool, SpawnId};
 use crate::game::ecs::resources::{EnemyIndex, NextSpawnId, RngRes, TickInput};
 #[cfg(debug_assertions)]
 use crate::game::ecs::resources::debug_assert_enemy_index;
+use crate::game::ecs::resources::DamageLedger;
 use crate::game::enemy::Enemy;
 use crate::game::level::Level;
 use crate::game::particle::damage_number::{DamageNumbers, DamageSource};
@@ -325,6 +326,7 @@ pub fn pools_system(
     mut particles: ResMut<Particles>,
     mut rng: ResMut<RngRes>,
     mut damage_numbers: ResMut<DamageNumbers>,
+    mut ledger: ResMut<DamageLedger>,
     mut order: Local<OrderScratch>,
     mut pools: Query<(Entity, &SpawnId, &mut Pool)>,
     mut commands: Commands,
@@ -366,7 +368,14 @@ pub fn pools_system(
                 continue;
             }
             if e.pos.dist(p.pos) <= p.radius + e.radius {
+                let hp_before = e.hp.max(0.0);
                 e.hp -= tick_dmg;
+                // Balance instrumentation only: pools are exclusively Acid
+                // Spit's landed lobs, so the weapon is known here.
+                ledger.add(
+                    crate::game::weapon::WeaponKind::AcidSpit,
+                    (hp_before - e.hp.max(0.0)).max(0.0),
+                );
                 e.flash = e.flash.max(0.05);
                 damage_numbers.record(
                     e.id,

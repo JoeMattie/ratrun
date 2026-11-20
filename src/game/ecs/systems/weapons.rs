@@ -92,7 +92,9 @@ use bevy_ecs::prelude::*;
 use crate::audio::Sfx;
 use crate::game::bullet::{Bullet, Faction, Lob, Orbit};
 use crate::game::ecs::components::{Entity, SpawnId};
-use crate::game::ecs::resources::{EnemyIndex, NextSpawnId, RngRes, SfxQueue, TickInput};
+use crate::game::ecs::resources::{
+    DamageLedger, EnemyIndex, NextSpawnId, RngRes, SfxQueue, TickInput,
+};
 use crate::game::ecs::systems::boss::{Boss, BossTargetable};
 use crate::game::ecs::systems::projectiles::los_clear;
 #[cfg(debug_assertions)]
@@ -119,9 +121,8 @@ pub fn fire_weapons_system(
     bosses: Query<&Boss>,
     bullets: Query<(Entity, &SpawnId, &Bullet)>,
     mut damage_numbers: ResMut<DamageNumbers>,
-    mut fallback_order: Local<Vec<Entity>>,
-    mut orbit_scratch: Local<Vec<Entity>>,
-    mut target_scratch: Local<Vec<Candidate>>,
+    mut ledger: ResMut<DamageLedger>,
+    mut scratch: FireScratch,
 ) {
     let dt = input.dt;
     // Legacy: snapshot the player state and the two multipliers.
@@ -149,15 +150,17 @@ pub fn fire_weapons_system(
         );
         &index.0
     } else {
-        fallback_order.clear();
-        fallback_order.extend(enemies.iter().map(|(entity, _, _)| entity));
-        fallback_order.sort_by_key(|&entity| {
+        scratch.fallback_order.clear();
+        scratch
+            .fallback_order
+            .extend(enemies.iter().map(|(entity, _, _)| entity));
+        scratch.fallback_order.sort_by_key(|&entity| {
             enemies
                 .get(entity)
                 .map(|(_, id, _)| id.0)
                 .unwrap_or(u64::MAX)
         });
-        fallback_order.as_slice()
+        scratch.fallback_order.as_slice()
     };
 
     // The boss's grounded target points for this tick, as plain bodies in the
@@ -207,13 +210,14 @@ pub fn fire_weapons_system(
             &mut rng,
             &mut particles,
             &mut damage_numbers,
+            &mut ledger,
             &mut sfx,
             &mut next_id,
             order,
             &mut enemies,
             &bullets,
-            &mut orbit_scratch,
-            &mut target_scratch,
+            &mut scratch.orbit_scratch,
+            &mut scratch.target_scratch,
             &boss_points,
         );
         if fired {
@@ -319,6 +323,20 @@ pub struct Candidate {
     id: u64,
     entity: Entity,
     pos: Vec2,
+}
+
+/// The per-tick reusable scratch the firing loop borrows.
+///
+/// Bundled into one [`bevy_ecs::system::SystemParam`] because bevy caps a
+/// system at 16 parameters and `fire_weapons_system` is at the limit (the
+/// damage ledger, added for the batch harness's per-weapon report, is the 17th
+/// slot without this). Fields are plain `Local`s, so the per-tick behaviour is
+/// unchanged: each buffer is reused across ticks.
+#[derive(bevy_ecs::system::SystemParam)]
+pub struct FireScratch<'s> {
+    fallback_order: Local<'s, Vec<Entity>>,
+    orbit_scratch: Local<'s, Vec<Entity>>,
+    target_scratch: Local<'s, Vec<Candidate>>,
 }
 
 /// Nearest-first ordering key: smaller distance, then the regular enemy before
@@ -455,6 +473,7 @@ fn fire_one(
     rng: &mut RngRes,
     particles: &mut Particles,
     damage_numbers: &mut DamageNumbers,
+    ledger: &mut DamageLedger,
     sfx: &mut SfxQueue,
     next_id: &mut NextSpawnId,
     order: &[Entity],
@@ -472,10 +491,24 @@ fn fire_one(
                 nearest_visible(level, kind, order, enemies, boss_points, ppos, target_scratch)
             {
                 let dir = (epos - ppos).normalized();
-                let mut b = Bullet::new(ppos, dir * 120.0, dmg, Faction::Player, color);
-                b.size = 1;
-                b.weapon = Some(kind);
-                commands.spawn((b, next_id.take()));
+                // One dart, two from level 4 (`Weapon::level_projectiles` is
+                // the level for Gnaw): a fan of ±3° keeps the pair from
+                // stacking into one body at close range while staying
+                // effectively single-target at range.
+                let shots = 1 + projs / 4;
+                for k in 0..shots {
+                    let angle = if shots > 1 {
+                        let spread = (k as f32 - (shots - 1) as f32 / 2.0) * 0.052;
+                        dir.angle() + spread
+                    } else {
+                        dir.angle()
+                    };
+                    let v = Vec2::from_angle(angle) * 120.0;
+                    let mut b = Bullet::new(ppos, v, dmg, Faction::Player, color);
+                    b.size = 1;
+                    b.weapon = Some(kind);
+                    commands.spawn((b, next_id.take()));
+                }
                 vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, dir, 0.0);
                 fired = true;
             }
@@ -509,7 +542,7 @@ fn fire_one(
             fired = true;
         }
         WeaponKind::SporeOrbit => {
-            let radius = 24.0;
+            let radius = 26.0;
             // Carry the ring's current angle forward, then drop the old ring
             // before spawning its replacement so two never stack. One pass:
             // remember the lowest-`SpawnId` orbit angle (legacy `find_map`
@@ -535,7 +568,10 @@ fn fire_one(
                 b.life = cd;
                 b.pierce = 999;
                 b.size = 2;
-                b.radius = 3.0;
+                // A 4 px spore body against a 3-7 px enemy is a wider ring
+                // band: the measured weapon was the weakest pick by a wide
+                // margin even with the same nominal dps.
+                b.radius = 4.0;
                 b.weapon = Some(kind);
                 b.orbit = Some(Orbit {
                     angle,
@@ -560,8 +596,11 @@ fn fire_one(
                     && e.pos.dist(ppos) <= radius + e.radius
                     && los_clear(level, ppos, e.pos, MELEE_LOS_RADIUS)
                 {
+                    let hp_before = e.hp.max(0.0);
                     e.hurt(dmg);
                     let killed = !e.alive();
+                    // Balance instrumentation only (see `DamageLedger`).
+                    ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
                     let pos = e.pos;
                     let enemy_radius = e.radius;
                     let enemy_id = e.id;
@@ -595,7 +634,11 @@ fn fire_one(
             b.lob = Some(Lob {
                 target,
                 radius: 12.0 + projs as f32 * 1.5,
-                dps: dmg * 4.0,
+                // 4.0 was the strongest weapon in both measured columns; the
+                // per-weapon report now puts Acid Spit at ~29% of all damage
+                // and of boss damage, above the 20-25% band. 3.3 takes ~6%
+                // more off the pool without touching the lob/land feel.
+                dps: dmg * 3.3,
                 life: 2.6,
                 color: (140, 220, 70),
             });

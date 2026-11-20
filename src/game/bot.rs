@@ -1382,13 +1382,18 @@ fn sanitize(v: Vec2) -> Vec2 {
 /// A weapon's raw value in the upgrade heuristic (AoE and coverage above
 /// single-target).
 fn weapon_tier(k: WeaponKind) -> f32 {
+    // b4-upgrades retuned the weapons for the measured damage band (Tail Whip
+    // 10 dmg, Squeak Nova 6.5, Spore Orbit 9 with a wider spore, Gnaw a second
+    // dart from level 4, Acid Spit's pool at 3.5x). The tiers follow: Spore
+    // Orbit is no longer the weakest pick, Squeak Nova no longer the best, and
+    // Gnaw's late double dart makes keeping it a real single-target option.
     match k {
-        WeaponKind::Gnaw => 6.0,
+        WeaponKind::Gnaw => 6.5,
         WeaponKind::CheeseSpray => 7.0,
         WeaponKind::SqueakNova => 8.0,
-        WeaponKind::SporeOrbit => 7.5,
+        WeaponKind::SporeOrbit => 8.0,
         WeaponKind::TailWhip => 9.0,
-        WeaponKind::AcidSpit => 7.5,
+        WeaponKind::AcidSpit => 8.0,
     }
 }
 
@@ -1472,8 +1477,14 @@ fn keep_value(lo: &Loadout, k: &Keepable, hp_frac: f32) -> f32 {
             weapon_tier(kind) * (1.0 + 0.18 * k.level as f32)
         }
         crate::game::campaign::KeepKind::Passive(passive) => {
+            // A kept passive carries **every** stack (`Keepable.level`), so
+            // its keep value has to grow faster than one more stack would:
+            // 0.12 per stack made a 5-stack Armor/Fat Reserves card clearly
+            // worse than any level-5 weapon, which is not the choice the keep
+            // screen is supposed to pose. 0.25 per stack keeps a maxed passive
+            // comparable to a kept level-4 weapon.
             let one = Upgrade::Passive(passive);
-            upgrade_value(lo, &one, hp_frac) * (1.0 + 0.12 * k.level as f32)
+            upgrade_value(lo, &one, hp_frac) * (1.0 + 0.25 * k.level as f32)
         }
     }
 }

@@ -126,7 +126,9 @@ use crate::game::collision::{self, SizeClass, SpatialGrid};
 use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::systems::projectiles::los_clear;
-use crate::game::ecs::resources::{EnemyIndex, GridScratch, NeighborScratch, RngRes, Shake, SfxQueue};
+use crate::game::ecs::resources::{
+    DamageLedger, EnemyIndex, GridScratch, NeighborScratch, RngRes, Shake, SfxQueue,
+};
 #[cfg(debug_assertions)]
 use crate::game::ecs::resources::debug_assert_enemy_index;
 use crate::game::enemy::Enemy;
@@ -171,6 +173,7 @@ pub fn player_bullet_hits_system(
     mut rng: ResMut<RngRes>,
     mut particles: ResMut<Particles>,
     mut damage_numbers: ResMut<DamageNumbers>,
+    mut ledger: ResMut<DamageLedger>,
     mut sfx: ResMut<SfxQueue>,
     mut order: Local<Vec<(u64, Entity)>>,
 ) {
@@ -221,8 +224,14 @@ pub fn player_bullet_hits_system(
                 if b.orbit.is_some() && !los_clear(&level, ring_centre, e.pos, ORBIT_LOS_RADIUS) {
                     continue;
                 }
+                let hp_before = e.hp.max(0.0);
                 e.hurt(b.damage);
                 let killed = !e.alive();
+                // Balance instrumentation only (never read by the schedule):
+                // effective damage, so overkill cannot inflate a weapon.
+                if let Some(kind) = b.weapon {
+                    ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
+                }
                 hit_any = true;
                 // Weapon-specific impact sparks (`b.weapon` was tagged by
                 // `weapons::fire_one`) + this enemy's floating damage number.
