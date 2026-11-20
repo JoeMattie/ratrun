@@ -22,9 +22,11 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use super::{run_to_end, AutoOpts, AutoRun, DeathInfo, LevelStats};
+use super::{
+    run_to_end, AutoOpts, AutoRun, DeathInfo, LevelStats, Progress, PROGRESS_TIMES,
+};
 use crate::game::bot::Skill;
 use crate::game::campaign;
 
@@ -66,7 +68,7 @@ impl Default for BatchOpts {
 }
 
 /// One run's outcome (what the aggregation sees).
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunOutcome {
     pub seed: u64,
     pub won: bool,
@@ -74,17 +76,23 @@ pub struct RunOutcome {
     pub total_time: f32,
     pub total_score: u32,
     pub total_kills: u32,
+    /// Kills per simulated minute over the whole run.
+    pub kills_per_min: f32,
+    /// Fraction of simulated time within `NEAR_ENEMY_PX` of an enemy body.
+    pub near_frac: f32,
     pub levels: Vec<LevelOutcome>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeathOutcome {
     pub level: usize,
     pub at: f32,
-    pub cause: &'static str,
+    pub cause: String,
+    /// One-line classification ("surrounded in the open", "cornered", …).
+    pub note: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LevelOutcome {
     pub level: usize,
     pub time: f32,
@@ -93,16 +101,37 @@ pub struct LevelOutcome {
     pub boss_seconds: f32,
     pub boss_defeated: bool,
     pub damage_total: f32,
-    pub damage: BTreeMap<&'static str, f32>,
+    pub damage: BTreeMap<String, f32>,
     pub dps_at_boss: f32,
     pub boss_dps: f32,
     pub upgrades: Vec<String>,
     pub kept: Vec<String>,
     pub death: Option<DeathOutcome>,
+    /// Seconds until the first level-up (`None` when none came).
+    pub first_levelup: Option<f32>,
+    /// Kills on this level.
+    pub kills: u32,
+    /// Fraction of the level's time within `NEAR_ENEMY_PX` of a body.
+    pub near_frac: f32,
+    /// Player level / upgrades / kills at 60, 120, 180, 240 s.
+    pub progress: Vec<ProgressOutcome>,
+    /// Enemies alive at death.
+    pub enemies_at_death: Option<u32>,
+}
+
+/// A progression checkpoint as it appears in a report.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct ProgressOutcome {
+    pub at: f32,
+    pub player_level: u32,
+    pub upgrades: u32,
+    pub kills: u32,
+    pub hp_frac: f32,
 }
 
 impl LevelOutcome {
     fn from_stats(s: &LevelStats) -> LevelOutcome {
+        let note = s.death_note.clone();
         LevelOutcome {
             level: s.level,
             time: s.time,
@@ -111,28 +140,52 @@ impl LevelOutcome {
             boss_seconds: s.boss_seconds,
             boss_defeated: s.boss_defeated,
             damage_total: s.damage_total,
-            damage: s.damage.clone(),
+            damage: s
+                .damage
+                .iter()
+                .map(|(k, v)| (k.to_string(), *v))
+                .collect(),
             dps_at_boss: s.dps_at_boss,
             boss_dps: s.boss_dps,
             upgrades: s.upgrades.clone(),
             kept: s.kept.clone(),
-            death: s.death.map(death_outcome),
+            death: s.death.map(|d| death_outcome(d, note)),
+            first_levelup: s.first_levelup,
+            kills: s.kills,
+            near_frac: if s.time > 0.0 {
+                (s.near_seconds / s.time).clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
+            progress: s.progress.iter().map(progress_outcome).collect(),
+            enemies_at_death: s.enemies_at_death,
         }
     }
 }
 
-fn death_outcome(d: DeathInfo) -> DeathOutcome {
+fn progress_outcome(p: &Progress) -> ProgressOutcome {
+    ProgressOutcome {
+        at: p.at,
+        player_level: p.player_level,
+        upgrades: p.upgrades,
+        kills: p.kills,
+        hp_frac: p.hp_frac,
+    }
+}
+
+fn death_outcome(d: DeathInfo, note: Option<String>) -> DeathOutcome {
     DeathOutcome {
         level: d.level,
         at: d.at,
-        cause: d.cause.name(),
+        cause: d.cause.name().to_string(),
+        note,
     }
 }
 
 /// Everything the report prints.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BatchReport {
-    pub skill: &'static str,
+    pub skill: String,
     pub practice: bool,
     pub start_level: usize,
     pub base_seed: u64,
@@ -143,6 +196,20 @@ pub struct BatchReport {
     pub wall_seconds: f64,
     pub threads: usize,
     pub sim_per_wall_second_per_thread: f64,
+    /// Survival time per run (all levels), as a distribution.
+    pub survival: Percentiles,
+    /// Kills per simulated minute, averaged over runs.
+    pub kills_per_min: f32,
+    /// Fraction of time within `NEAR_ENEMY_PX` of an enemy body, all levels.
+    pub near_frac: f32,
+    /// Seconds to the first level-up, over every level attempted.
+    pub first_levelup: Percentiles,
+    /// Enemies alive at death, over every death.
+    pub enemies_at_death: Percentiles,
+    /// Player level / upgrades / kills at 60, 120, 180 and 240 s (all levels).
+    pub progress: Vec<ProgressAgg>,
+    /// Cause-of-death classifications, most common first.
+    pub death_notes: Vec<(String, usize)>,
     pub levels: Vec<LevelAgg>,
     /// All runs' damage by source, summed and averaged.
     pub damage: Vec<DamageAgg>,
@@ -155,17 +222,19 @@ pub struct BatchReport {
     pub builds: Vec<(String, usize)>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunSummary {
     pub seed: u64,
     pub won: bool,
     /// Levels cleared (0-based count) — a campaign win clears 3.
     pub levels_cleared: usize,
     pub total_time: f32,
+    pub kills_per_min: f32,
+    pub near_frac: f32,
     pub death: Option<DeathOutcome>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LevelAgg {
     pub level: usize,
     pub attempted: usize,
@@ -184,12 +253,35 @@ pub struct LevelAgg {
     pub dps_at_boss: f32,
     /// Measured DPS into the boss.
     pub boss_dps: f32,
+    /// Seconds to the first level-up on this level.
+    pub first_levelup: Percentiles,
+    /// Kills per simulated minute on this level.
+    pub kills_per_min: f32,
+    /// Fraction of this level's time within `NEAR_ENEMY_PX` of a body.
+    pub near_frac: f32,
+    /// Enemies alive at death on this level.
+    pub enemies_at_death: Percentiles,
+    /// Player level / upgrades / kills at the fixed checkpoints.
+    pub progress: Vec<ProgressAgg>,
+    /// Cause-of-death classifications, most common first.
+    pub death_notes: Vec<(String, usize)>,
     pub damage: Vec<DamageAgg>,
     pub upgrades: Vec<(String, usize)>,
     pub kept: Vec<(String, usize)>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+/// A progression checkpoint aggregated over runs.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct ProgressAgg {
+    pub at: f32,
+    pub runs: usize,
+    pub mean_player_level: f32,
+    pub mean_upgrades: f32,
+    pub mean_kills: f32,
+    pub mean_hp_frac: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct Percentiles {
     pub n: usize,
     pub min: f32,
@@ -220,9 +312,9 @@ impl Percentiles {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DamageAgg {
-    pub source: &'static str,
+    pub source: String,
     /// Summed over all runs.
     pub total: f32,
     /// Mean per run that took damage from it.
@@ -238,16 +330,41 @@ pub struct DamageAgg {
 pub fn run_one(seed: u64, opts: AutoOpts, max_sim_seconds: f32) -> RunOutcome {
     let mut run = AutoRun::new(seed, opts);
     run_to_end(&mut run, DT, max_sim_seconds);
-    let _ = &run;
-    let stats = run.stats();
+    outcome_of(seed, run.stats())
+}
+
+/// One run's statistics as a report row (shared by every batch entry point).
+fn outcome_of(seed: u64, stats: &super::RunStats) -> RunOutcome {
+    let levels: Vec<LevelOutcome> = stats.levels.iter().map(LevelOutcome::from_stats).collect();
+    let kills_per_min = if stats.total_time > 0.0 {
+        stats.total_kills as f32 / (stats.total_time / 60.0)
+    } else {
+        0.0
+    };
+    let near_seconds: f32 = stats.levels.iter().map(|l| l.near_seconds).sum();
+    let level_time: f32 = stats.levels.iter().map(|l| l.time).sum();
+    let death = stats.death.map(|d| {
+        let note = stats
+            .levels
+            .iter()
+            .find(|l| l.level == d.level)
+            .and_then(|l| l.death_note.clone());
+        death_outcome(d, note)
+    });
     RunOutcome {
         seed,
         won: stats.won,
-        death: stats.death.map(death_outcome),
+        death,
         total_time: stats.total_time,
         total_score: stats.total_score,
         total_kills: stats.total_kills,
-        levels: stats.levels.iter().map(LevelOutcome::from_stats).collect(),
+        kills_per_min,
+        near_frac: if level_time > 0.0 {
+            (near_seconds / level_time).clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
+        levels,
     }
 }
 
@@ -325,19 +442,10 @@ pub fn run_batch_traced(opts: &BatchOpts) -> BatchReport {
             simulated += DT;
             if i == 0 && run.world().elapsed >= next_trace {
                 eprintln!("{}", run.trace_line());
-                next_trace += 2.0;
+                next_trace += 0.5;
             }
         }
-        let stats = run.stats();
-        outcomes.push(RunOutcome {
-            seed,
-            won: stats.won,
-            death: stats.death.map(death_outcome),
-            total_time: stats.total_time,
-            total_score: stats.total_score,
-            total_kills: stats.total_kills,
-            levels: stats.levels.iter().map(LevelOutcome::from_stats).collect(),
-        });
+        outcomes.push(outcome_of(seed, run.stats()));
     }
     let wall = started.elapsed().as_secs_f64();
     aggregate(opts, outcomes, wall)
@@ -367,27 +475,41 @@ fn auto_opts(opts: &BatchOpts) -> AutoOpts {
 fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> BatchReport {
     let runs = outcomes.len();
     let mut levels: Vec<LevelAgg> = Vec::new();
-    let mut damage: BTreeMap<&'static str, (f32, usize)> = BTreeMap::new();
+    let mut damage: BTreeMap<String, (f32, usize)> = BTreeMap::new();
     let mut deaths: Vec<DeathOutcome> = Vec::new();
     let mut builds: BTreeMap<String, usize> = BTreeMap::new();
     let mut campaign_wins = 0;
     let mut sim_seconds = 0.0f64;
     let mut run_summaries: Vec<RunSummary> = Vec::with_capacity(outcomes.len());
+    // Overall (all levels) accumulators for the new tuning columns.
+    let mut firsts: Vec<f32> = Vec::new();
+    let mut enemies_at_death: Vec<f32> = Vec::new();
+    let mut notes: BTreeMap<String, usize> = BTreeMap::new();
+    let mut overall_progress: Vec<Vec<ProgressOutcome>> = vec![Vec::new(); PROGRESS_TIMES.len()];
+    let mut near_weighted = 0.0f32;
+    let mut near_total_time = 0.0f32;
 
     for outcome in &outcomes {
         if outcome.won {
             campaign_wins += 1;
         }
         sim_seconds += outcome.total_time as f64;
-        if let Some(d) = outcome.death {
-            deaths.push(d);
+        near_weighted += outcome.near_frac * outcome.total_time;
+        near_total_time += outcome.total_time;
+        if let Some(d) = &outcome.death {
+            deaths.push(d.clone());
+            if let Some(n) = &d.note {
+                *notes.entry(n.clone()).or_insert(0) += 1;
+            }
         }
         run_summaries.push(RunSummary {
             seed: outcome.seed,
             won: outcome.won,
             levels_cleared: outcome.levels.iter().filter(|l| l.cleared).count(),
             total_time: outcome.total_time,
-            death: outcome.death,
+            kills_per_min: outcome.kills_per_min,
+            near_frac: outcome.near_frac,
+            death: outcome.death.clone(),
         });
         for level in &outcome.levels {
             let agg = match levels.iter_mut().find(|l| l.level == level.level) {
@@ -406,6 +528,12 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
                         boss_seconds: Percentiles::default(),
                         dps_at_boss: 0.0,
                         boss_dps: 0.0,
+                        first_levelup: Percentiles::default(),
+                        kills_per_min: 0.0,
+                        near_frac: 0.0,
+                        enemies_at_death: Percentiles::default(),
+                        progress: Vec::new(),
+                        death_notes: Vec::new(),
                         damage: Vec::new(),
                         upgrades: Vec::new(),
                         kept: Vec::new(),
@@ -413,8 +541,6 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
                     levels.last_mut().expect("just pushed")
                 }
             };
-            // Scratch accumulators live in side vectors to keep the aggregate
-            // struct simple; see the recompute below.
             agg.attempted += 1;
             if level.cleared || level.boss_defeated {
                 agg.cleared += 1;
@@ -428,16 +554,20 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
             if level.boss_defeated {
                 agg.boss_kills += 1;
             }
+            if let Some(f) = level.first_levelup {
+                firsts.push(f);
+            }
+            if let Some(n) = level.enemies_at_death {
+                enemies_at_death.push(n as f32);
+            }
+            collect_progress(&mut overall_progress, &level.progress);
             for (src, amount) in &level.damage {
-                let entry = damage.entry(src).or_insert((0.0, 0));
+                let entry = damage.entry(src.clone()).or_insert((0.0, 0));
                 entry.0 += *amount;
                 entry.1 += 1;
             }
             for up in &level.upgrades {
                 *builds.entry(up.clone()).or_insert(0) += 1;
-            }
-            if let Some(death) = level.death {
-                let _ = death;
             }
         }
         // The last level reached carries this run's final kept set.
@@ -455,22 +585,45 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
         let mut boss_seconds = Vec::new();
         let mut dps = Vec::new();
         let mut boss_dps = Vec::new();
-        let mut dmg: BTreeMap<&'static str, (f32, usize)> = BTreeMap::new();
+        let mut dmg: BTreeMap<String, (f32, usize)> = BTreeMap::new();
         let mut upgrades: BTreeMap<String, usize> = BTreeMap::new();
         let mut kept: BTreeMap<String, usize> = BTreeMap::new();
+        let mut firsts: Vec<f32> = Vec::new();
+        let mut enemies: Vec<f32> = Vec::new();
+        let mut notes: BTreeMap<String, usize> = BTreeMap::new();
+        let mut progress: Vec<Vec<ProgressOutcome>> =
+            vec![Vec::new(); PROGRESS_TIMES.len()];
+        let mut kill_rates: Vec<f32> = Vec::new();
+        let mut near_weighted = 0.0f32;
+        let mut near_time = 0.0f32;
         for outcome in &outcomes {
             for level in outcome.levels.iter().filter(|l| l.level == agg.level) {
                 times.push(level.time);
-                if let Some(d) = level.death {
-                    death_times.push(d.at);
+                if level.time > 0.0 {
+                    kill_rates.push(level.kills as f32 / (level.time / 60.0));
                 }
+                near_weighted += level.near_frac * level.time;
+                near_time += level.time;
+                if let Some(d) = &level.death {
+                    death_times.push(d.at);
+                    if let Some(n) = &d.note {
+                        *notes.entry(n.clone()).or_insert(0) += 1;
+                    }
+                }
+                if let Some(f) = level.first_levelup {
+                    firsts.push(f);
+                }
+                if let Some(n) = level.enemies_at_death {
+                    enemies.push(n as f32);
+                }
+                collect_progress(&mut progress, &level.progress);
                 if level.reached_boss {
                     boss_seconds.push(level.boss_seconds);
                     dps.push(level.dps_at_boss);
                     boss_dps.push(level.boss_dps);
                 }
                 for (src, amount) in &level.damage {
-                    let e = dmg.entry(src).or_insert((0.0, 0));
+                    let e = dmg.entry(src.clone()).or_insert((0.0, 0));
                     e.0 += *amount;
                     e.1 += 1;
                 }
@@ -492,6 +645,16 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
         agg.boss_seconds = Percentiles::of(boss_seconds);
         agg.dps_at_boss = mean(&dps);
         agg.boss_dps = mean(&boss_dps);
+        agg.first_levelup = Percentiles::of(firsts);
+        agg.kills_per_min = mean(&kill_rates);
+        agg.near_frac = if near_time > 0.0 {
+            (near_weighted / near_time).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        agg.enemies_at_death = Percentiles::of(enemies);
+        agg.progress = progress_aggs(progress);
+        agg.death_notes = top(notes, 8);
         agg.damage = damage_vec(dmg, agg.attempted);
         agg.upgrades = top(upgrades, 12);
         agg.kept = top(kept, 12);
@@ -503,9 +666,16 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
             .then(a.at.partial_cmp(&b.at).unwrap_or(std::cmp::Ordering::Equal))
     });
 
+    let survival: Vec<f32> = outcomes.iter().map(|o| o.total_time).collect();
+    let per_run_kills: Vec<f32> = outcomes.iter().map(|o| o.kills_per_min).collect();
+    let near_frac = if near_total_time > 0.0 {
+        (near_weighted / near_total_time).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let threads = opts.threads.max(1);
     BatchReport {
-        skill: opts.skill.name(),
+        skill: opts.skill.name().to_string(),
         practice: opts.practice,
         start_level: opts.start_level,
         base_seed: opts.seed,
@@ -524,12 +694,55 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
         } else {
             0.0
         },
+        survival: Percentiles::of(survival),
+        // Mean of the runs' own rates: a single 20-minute snowball must not
+        // decide the batch's "kills per minute".
+        kills_per_min: mean(&per_run_kills),
+        near_frac,
+        first_levelup: Percentiles::of(firsts),
+        enemies_at_death: Percentiles::of(enemies_at_death),
+        progress: progress_aggs(overall_progress),
+        death_notes: top(notes, 8),
         levels,
         damage: damage_vec(damage, runs),
         deaths,
         run_summaries,
         builds: top(builds, 16),
     }
+}
+
+/// File a checkpoint reading into its bucket (`PROGRESS_TIMES` index).
+fn collect_progress(into: &mut [Vec<ProgressOutcome>], progress: &[ProgressOutcome]) {
+    for p in progress {
+        if let Some(i) = PROGRESS_TIMES
+            .iter()
+            .position(|t| (*t - p.at).abs() < 0.01)
+        {
+            into[i].push(*p);
+        }
+    }
+}
+
+/// Mean the checkpoint buckets into report rows.
+fn progress_aggs(buckets: Vec<Vec<ProgressOutcome>>) -> Vec<ProgressAgg> {
+    buckets
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, v)| {
+            if v.is_empty() {
+                return None;
+            }
+            let n = v.len() as f32;
+            Some(ProgressAgg {
+                at: PROGRESS_TIMES[i],
+                runs: v.len(),
+                mean_player_level: v.iter().map(|p| p.player_level as f32).sum::<f32>() / n,
+                mean_upgrades: v.iter().map(|p| p.upgrades as f32).sum::<f32>() / n,
+                mean_kills: v.iter().map(|p| p.kills as f32).sum::<f32>() / n,
+                mean_hp_frac: v.iter().map(|p| p.hp_frac).sum::<f32>() / n,
+            })
+        })
+        .collect()
 }
 
 fn mean(v: &[f32]) -> f32 {
@@ -540,7 +753,7 @@ fn mean(v: &[f32]) -> f32 {
     }
 }
 
-fn damage_vec(map: BTreeMap<&'static str, (f32, usize)>, runs: usize) -> Vec<DamageAgg> {
+fn damage_vec(map: BTreeMap<String, (f32, usize)>, runs: usize) -> Vec<DamageAgg> {
     let mut out: Vec<DamageAgg> = map
         .into_iter()
         .map(|(source, (total, hits))| DamageAgg {
@@ -555,7 +768,7 @@ fn damage_vec(map: BTreeMap<&'static str, (f32, usize)>, runs: usize) -> Vec<Dam
         b.total
             .partial_cmp(&a.total)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.source.cmp(b.source))
+            .then_with(|| a.source.cmp(&b.source))
     });
     out
 }
@@ -567,12 +780,376 @@ fn top(map: BTreeMap<String, usize>, n: usize) -> Vec<(String, usize)> {
     v
 }
 
+// ---- Comparing two reports ----------------------------------------------
+
+/// Two saved batch reports, diffed metric by metric (before/after at a glance).
+#[derive(Clone, Debug, Serialize)]
+pub struct CompareReport {
+    pub a: ReportHeader,
+    pub b: ReportHeader,
+    pub rows: Vec<CompareRow>,
+    pub levels: Vec<CompareLevel>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ReportHeader {
+    pub path: String,
+    pub skill: String,
+    pub runs: usize,
+    pub base_seed: u64,
+    pub practice: bool,
+    pub start_level: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CompareLevel {
+    pub level: usize,
+    pub rows: Vec<CompareRow>,
+}
+
+/// One metric, both sides and the delta (`b - a`).
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct CompareRow {
+    pub metric: &'static str,
+    pub a: f32,
+    pub b: f32,
+    pub delta: f32,
+    pub unit: Unit,
+}
+
+/// How a comparison value is printed (and what a delta means).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum Unit {
+    Seconds,
+    Percent,
+    CountPerMin,
+    Count,
+    Level,
+    Damage,
+}
+
+/// Read a report written by `--bot-batch --json`.
+pub fn load_report(path: &str) -> Result<BatchReport, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {path}: {e}"))?;
+    serde_json::from_str(&text).map_err(|e| format!("{path} is not a batch report: {e}"))
+}
+
+/// Diff two reports. Rows are in a fixed order, so two comparisons of the same
+/// files print identically.
+pub fn compare_reports(
+    a: &BatchReport,
+    b: &BatchReport,
+    a_path: &str,
+    b_path: &str,
+) -> CompareReport {
+    let mut rows = vec![
+        row(
+            "campaign wins",
+            a.campaign_wins as f32,
+            b.campaign_wins as f32,
+            Unit::Count,
+        ),
+        row("win rate", a.win_rate * 100.0, b.win_rate * 100.0, Unit::Percent),
+        row("mean survival", a.survival.mean, b.survival.mean, Unit::Seconds),
+        row(
+            "median survival",
+            a.survival.median,
+            b.survival.median,
+            Unit::Seconds,
+        ),
+        row("deaths", a.deaths.len() as f32, b.deaths.len() as f32, Unit::Count),
+        row("kills/min", a.kills_per_min, b.kills_per_min, Unit::CountPerMin),
+        row(
+            "near-enemy time",
+            a.near_frac * 100.0,
+            b.near_frac * 100.0,
+            Unit::Percent,
+        ),
+        row(
+            "first level-up (median)",
+            a.first_levelup.median,
+            b.first_levelup.median,
+            Unit::Seconds,
+        ),
+        row(
+            "enemies at death (median)",
+            a.enemies_at_death.median,
+            b.enemies_at_death.median,
+            Unit::Count,
+        ),
+        row(
+            "damage per run",
+            a.damage.iter().map(|d| d.per_run).sum::<f32>(),
+            b.damage.iter().map(|d| d.per_run).sum::<f32>(),
+            Unit::Damage,
+        ),
+    ];
+    // Damage by source: the union of both sides, so a new source shows up as a
+    // row rather than vanishing.
+    let mut sources: Vec<String> = a
+        .damage
+        .iter()
+        .chain(b.damage.iter())
+        .map(|d| d.source.clone())
+        .collect();
+    sources.sort();
+    sources.dedup();
+    for source in sources {
+        let av = a
+            .damage
+            .iter()
+            .find(|d| d.source == source)
+            .map(|d| d.per_run)
+            .unwrap_or(0.0);
+        let bv = b
+            .damage
+            .iter()
+            .find(|d| d.source == source)
+            .map(|d| d.per_run)
+            .unwrap_or(0.0);
+        let metric: &'static str = Box::leak(format!("damage/run: {source}").into_boxed_str());
+        rows.push(row(metric, av, bv, Unit::Damage));
+    }
+    // Progression checkpoints: the same fixed times on both sides.
+    for at in super::PROGRESS_TIMES {
+        let ap = a.progress.iter().find(|p| (p.at - at).abs() < 0.01);
+        let bp = b.progress.iter().find(|p| (p.at - at).abs() < 0.01);
+        let metric: &'static str = Box::leak(format!("player level @{at:.0}s").into_boxed_str());
+        rows.push(row(
+            metric,
+            ap.map(|p| p.mean_player_level).unwrap_or(0.0),
+            bp.map(|p| p.mean_player_level).unwrap_or(0.0),
+            Unit::Level,
+        ));
+        let metric: &'static str = Box::leak(format!("upgrades @{at:.0}s").into_boxed_str());
+        rows.push(row(
+            metric,
+            ap.map(|p| p.mean_upgrades).unwrap_or(0.0),
+            bp.map(|p| p.mean_upgrades).unwrap_or(0.0),
+            Unit::Count,
+        ));
+    }
+
+    // Per-level rows for the levels either side attempted.
+    let mut level_ids: Vec<usize> = a.levels.iter().chain(b.levels.iter()).map(|l| l.level).collect();
+    level_ids.sort_unstable();
+    level_ids.dedup();
+    let mut levels = Vec::new();
+    for id in level_ids {
+        let al = a.levels.iter().find(|l| l.level == id);
+        let bl = b.levels.iter().find(|l| l.level == id);
+        let get = |l: Option<&LevelAgg>, f: &dyn Fn(&LevelAgg) -> f32| l.map(f).unwrap_or(0.0);
+        levels.push(CompareLevel {
+            level: id,
+            rows: vec![
+                row(
+                    "attempted",
+                    get(al, &|l| l.attempted as f32),
+                    get(bl, &|l| l.attempted as f32),
+                    Unit::Count,
+                ),
+                row(
+                    "cleared",
+                    get(al, &|l| l.cleared as f32),
+                    get(bl, &|l| l.cleared as f32),
+                    Unit::Count,
+                ),
+                row(
+                    "clear rate",
+                    get(al, &|l| l.clear_rate * 100.0),
+                    get(bl, &|l| l.clear_rate * 100.0),
+                    Unit::Percent,
+                ),
+                row(
+                    "death clock (median)",
+                    get(al, &|l| l.death_time.median),
+                    get(bl, &|l| l.death_time.median),
+                    Unit::Seconds,
+                ),
+                row(
+                    "boss reached",
+                    get(al, &|l| l.reached_boss as f32),
+                    get(bl, &|l| l.reached_boss as f32),
+                    Unit::Count,
+                ),
+                row(
+                    "kills/min",
+                    get(al, &|l| l.kills_per_min),
+                    get(bl, &|l| l.kills_per_min),
+                    Unit::CountPerMin,
+                ),
+                row(
+                    "near-enemy time",
+                    get(al, &|l| l.near_frac * 100.0),
+                    get(bl, &|l| l.near_frac * 100.0),
+                    Unit::Percent,
+                ),
+                row(
+                    "first level-up (median)",
+                    get(al, &|l| l.first_levelup.median),
+                    get(bl, &|l| l.first_levelup.median),
+                    Unit::Seconds,
+                ),
+                row(
+                    "enemies at death (median)",
+                    get(al, &|l| l.enemies_at_death.median),
+                    get(bl, &|l| l.enemies_at_death.median),
+                    Unit::Count,
+                ),
+            ],
+        });
+    }
+
+    CompareReport {
+        a: header(a, a_path),
+        b: header(b, b_path),
+        rows,
+        levels,
+    }
+}
+
+fn header(r: &BatchReport, path: &str) -> ReportHeader {
+    ReportHeader {
+        path: path.to_string(),
+        skill: r.skill.clone(),
+        runs: r.runs,
+        base_seed: r.base_seed,
+        practice: r.practice,
+        start_level: r.start_level,
+    }
+}
+
+fn row(metric: &'static str, a: f32, b: f32, unit: Unit) -> CompareRow {
+    CompareRow {
+        metric,
+        a,
+        b,
+        delta: b - a,
+        unit,
+    }
+}
+
+/// A comparison value in its own unit.
+fn fmt_metric(v: f32, unit: Unit) -> String {
+    match unit {
+        Unit::Seconds => secs(v),
+        Unit::Percent => format!("{v:.0}%"),
+        Unit::CountPerMin | Unit::Count | Unit::Damage => format!("{v:.0}"),
+        Unit::Level => format!("{v:.2}"),
+    }
+}
+
+/// A delta in its own unit (percentage rows report percentage points).
+fn fmt_delta(v: f32, unit: Unit) -> String {
+    match unit {
+        Unit::Seconds => {
+            if v.abs() >= 60.0 {
+                format!("{:+}s", v.round() as i64)
+            } else {
+                format!("{v:+.1}s")
+            }
+        }
+        Unit::Percent => format!("{v:+.0}pp"),
+        Unit::CountPerMin | Unit::Count | Unit::Damage => format!("{v:+.0}"),
+        Unit::Level => format!("{v:+.2}"),
+    }
+}
+
+/// The human-readable before/after table.
+pub fn render_comparison(c: &CompareReport) -> String {
+    let mut s = String::new();
+    s.push_str("Rat Run bot comparison (delta = B - A)\n");
+    for h in [&c.a, &c.b] {
+        s.push_str(&format!(
+            "  {}: {} runs, skill {}, {}, seed {}\n",
+            if std::ptr::eq(h, &c.a) { "A" } else { "B" },
+            h.runs,
+            h.skill,
+            if h.practice {
+                "single level (practice)"
+            } else {
+                "full campaign"
+            },
+            h.base_seed
+        ));
+        s.push_str(&format!("     {}\n", h.path));
+    }
+    s.push('\n');
+    let mut table = String::new();
+    table.push_str(&format!(
+        "{:<34} {:>10} {:>10} {:>10}\n",
+        "metric", "A", "B", "delta"
+    ));
+    let mut rows = |rows: &[CompareRow], title: &str| {
+        table.push_str(&format!("{title}\n"));
+        for r in rows {
+            table.push_str(&format!(
+                "{:<34} {:>10} {:>10} {:>10}\n",
+                r.metric,
+                fmt_metric(r.a, r.unit),
+                fmt_metric(r.b, r.unit),
+                fmt_delta(r.delta, r.unit)
+            ));
+        }
+    };
+    rows(&c.rows, "overall");
+    for l in &c.levels {
+        rows(&l.rows, &format!("level {}", l.level + 1));
+    }
+    s.push_str(&table);
+    s
+}
+
+/// `ratrun --bot-compare a.json b.json [--json]`.
+fn run_compare_cli(args: &[String], pos: usize) -> i32 {
+    let json = args.iter().any(|a| a == "--json");
+    let files: Vec<&str> = args[pos + 1..]
+        .iter()
+        .filter(|a| !a.starts_with("--"))
+        .map(|s| s.as_str())
+        .collect();
+    if files.len() != 2 {
+        eprintln!("ratrun --bot-compare: needs exactly two batch JSON files");
+        eprintln!("{USAGE}");
+        return 2;
+    }
+    let a = match load_report(files[0]) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("ratrun --bot-compare: {e}");
+            return 2;
+        }
+    };
+    let b = match load_report(files[1]) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("ratrun --bot-compare: {e}");
+            return 2;
+        }
+    };
+    let cmp = compare_reports(&a, &b, files[0], files[1]);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&cmp).unwrap_or_else(|_| "{}".to_string())
+        );
+    } else {
+        print!("{}", render_comparison(&cmp));
+    }
+    0
+}
+
 // ---- CLI -----------------------------------------------------------------
 
 /// Handle `--bot-batch …`. Returns `None` when the flag is absent (so the real
 /// game starts normally), or the process exit code.
 pub fn maybe_run_cli() -> Option<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `--bot-compare a.json b.json` diff two saved reports.
+    if let Some(pos) = args.iter().position(|a| a == "--bot-compare") {
+        return Some(run_compare_cli(&args, pos));
+    }
     if !args.iter().any(|a| a == "--bot-batch") {
         return None;
     }
@@ -603,7 +1180,8 @@ pub fn maybe_run_cli() -> Option<i32> {
 
 const USAGE: &str = "\
 usage: ratrun --bot-batch <N> [--seed <S>] [--level <1-3>] [--practice] \
-[--skill expert|casual] [--max-sim-seconds <T>] [--threads <K>] [--json]";
+[--skill expert|skilled|casual] [--max-sim-seconds <T>] [--threads <K>] [--json] \
+       ratrun --bot-compare <a.json> <b.json> [--json]";
 
 /// Parse the batch flags. `Ok(None)` means "the flag was not for us".
 pub fn parse_args(args: &[String]) -> Result<Option<BatchOpts>, String> {
@@ -725,6 +1303,44 @@ fn damage_lines(damage: &[DamageAgg], indent: &str) -> String {
     out
 }
 
+/// A count distribution ("n / median / max", no seconds).
+fn dist_count(p: &Percentiles) -> String {
+    if p.n == 0 {
+        "-".to_string()
+    } else {
+        format!(
+            "{:.0} / {:.0} / {:.0} / {:.0} / {:.0} (n={})",
+            p.min, p.p25, p.median, p.p75, p.max, p.n
+        )
+    }
+}
+
+/// One compact line of progression checkpoints.
+fn progress_line(p: &[ProgressAgg]) -> String {
+    if p.is_empty() {
+        return "-".to_string();
+    }
+    p.iter()
+        .map(|g| {
+            format!(
+                "@{:.0}s lv{:.1}/{} upgrades/{} kills",
+                g.at, g.mean_player_level, g.mean_upgrades, g.mean_kills
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One compact line of death classifications.
+fn notes_line(notes: &[(String, usize)]) -> String {
+    notes
+        .iter()
+        .take(6)
+        .map(|(n, c)| format!("{n} x{c}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The human-readable table the owner reads.
 pub fn render_table(r: &BatchReport) -> String {
     let mut s = String::new();
@@ -750,6 +1366,22 @@ pub fn render_table(r: &BatchReport) -> String {
         r.threads,
         r.sim_per_wall_second_per_thread
     ));
+    s.push_str(&format!(
+        "survival per run: {}   kills/min {:.0}   within {} px of a body {:.0}% of the time\n",
+        dist(&r.survival),
+        r.kills_per_min,
+        super::NEAR_ENEMY_PX as u32,
+        r.near_frac * 100.0
+    ));
+    s.push_str(&format!(
+        "first level-up: {}   enemies alive at death: {}\n",
+        dist(&r.first_levelup),
+        dist_count(&r.enemies_at_death)
+    ));
+    s.push_str(&format!("progress: {}\n", progress_line(&r.progress)));
+    if !r.death_notes.is_empty() {
+        s.push_str(&format!("death causes: {}\n", notes_line(&r.death_notes)));
+    }
     s.push('\n');
     for l in &r.levels {
         s.push_str(&format!(
@@ -770,6 +1402,19 @@ pub fn render_table(r: &BatchReport) -> String {
             l.dps_at_boss,
             l.boss_dps
         ));
+        s.push_str(&format!(
+            "  kills/min:       {:.0}   first level-up: {}   near-enemy time: {:.0}%   enemies at death: {}\n",
+            l.kills_per_min,
+            dist(&l.first_levelup),
+            l.near_frac * 100.0,
+            dist_count(&l.enemies_at_death)
+        ));
+        if !l.progress.is_empty() {
+            s.push_str(&format!("  progress:        {}\n", progress_line(&l.progress)));
+        }
+        if !l.death_notes.is_empty() {
+            s.push_str(&format!("  death causes:    {}\n", notes_line(&l.death_notes)));
+        }
         if !l.damage.is_empty() {
             s.push_str("  damage taken:\n");
             s.push_str(&damage_lines(&l.damage, "    "));
@@ -800,10 +1445,14 @@ pub fn render_table(r: &BatchReport) -> String {
         s.push_str("\nDeaths (level, clock, cause):\n");
         for d in r.deaths.iter().take(40) {
             s.push_str(&format!(
-                "  L{} at {:<6} {}\n",
+                "  L{} at {:<6} {}{}\n",
                 d.level + 1,
                 secs(d.at),
-                d.cause
+                d.cause,
+                d.note
+                    .as_ref()
+                    .map(|n| format!("  — {n}"))
+                    .unwrap_or_default()
             ));
         }
         if r.deaths.len() > 40 {
@@ -906,6 +1555,55 @@ mod tests {
         assert_eq!(p.median, 3.0);
         assert_eq!(p.max, 5.0);
         assert_eq!(p.mean, 3.0);
+    }
+
+    /// The tuning columns exist, survive a JSON round trip (the comparison
+    /// mode reads them back) and the progression checkpoints fire.
+    #[test]
+    fn report_has_the_tuning_columns() {
+        let mut opts = tiny(Skill::Expert, 2, 11);
+        opts.max_sim_seconds = 80.0;
+        let r = run_batch(&opts);
+        let v = serde_json::to_value(&r).expect("json");
+        for key in [
+            "survival",
+            "kills_per_min",
+            "near_frac",
+            "first_levelup",
+            "enemies_at_death",
+            "progress",
+            "death_notes",
+        ] {
+            assert!(!v[key].is_null(), "report is missing {key}");
+        }
+        assert!(
+            !r.levels[0].progress.is_empty(),
+            "80 simulated seconds must cross the 60 s checkpoint"
+        );
+        // Round trip: `--bot-compare` reads exactly this shape.
+        let back: BatchReport = serde_json::from_value(v).expect("deserialize");
+        assert_eq!(back.runs, r.runs);
+        assert_eq!(back.levels.len(), r.levels.len());
+        assert_eq!(back.skill, r.skill);
+    }
+
+    /// Comparing a report with itself must show zero everywhere.
+    #[test]
+    fn comparison_of_a_report_with_itself_is_all_zero() {
+        let r = run_batch(&tiny(Skill::Skilled, 2, 5));
+        let c = compare_reports(&r, &r, "a.json", "b.json");
+        for row in &c.rows {
+            assert_eq!(row.delta, 0.0, "{} did not diff to zero", row.metric);
+        }
+        for level in &c.levels {
+            for row in &level.rows {
+                assert_eq!(row.delta, 0.0, "L{} {}", level.level + 1, row.metric);
+            }
+        }
+        let text = render_comparison(&c);
+        assert!(text.contains("delta"));
+        assert!(text.contains("overall"));
+        assert!(text.contains("level 1"));
     }
 
     #[test]

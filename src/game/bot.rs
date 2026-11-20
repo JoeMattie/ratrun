@@ -1,50 +1,107 @@
 //! The autoplay bot: a test instrument that plays Rat Run.
 //!
-//! The bot is deliberately **not** a fair opponent. It reads the whole
-//! simulation (enemy positions *and* velocities, enemy bullets, every
-//! telegraphed boss hazard with its remaining warn time, boss state, trap
-//! pads, the tile map) and steers by a local danger field. Its job is to answer
-//! "is this beatable, and how hard is it?", so it plays like a strong human
-//! and never touches the simulation's own rng: it feeds `move_dir`/`dash`
-//! into [`World::update`] and picks upgrades, and nothing else.
+//! The bot is deliberately **not** a fair opponent: it reads the simulation
+//! (enemy positions and velocities, enemy bullets, every telegraphed boss
+//! hazard with its remaining warn time, boss state, trap pads, the tile map)
+//! and plays it like a strong human. It never touches the simulation's own
+//! rng: it feeds `move_dir`/`dash` into [`World::update`] and picks upgrades,
+//! and nothing else.
+//!
+//! ## The planning model
+//!
+//! Two layers, because the two failure modes are different:
+//!
+//! * **The plan (macro, 2.4–3.2 s).** A waypoint 160–200 px away is chosen from
+//!   a rotating sweep through *open* floor: candidates are scored by local
+//!   walkable area, distance from the crowd centroid, continuation of the
+//!   current loop and enemy density around the target. The waypoint is held
+//!   for its whole window — that is the committed heading; it is re-rolled
+//!   when it is reached or its timer expires. (`update_goal` is the only place
+//!   a new leg is chosen, so the rat laps the open rooms instead of jittering
+//!   in place.)
+//! * **Steering (micro).** Every tick the bot scores 16 compass headings (plus
+//!   "stay") on a danger field. Expert additionally **commits its movement
+//!   heading for 0.08 s** (five ticks) and re-plans on that cadence, while
+//!   scanning and dashing stay live every tick. The 0.08 s hold is the
+//!   heading-commitment A/B: it stops two near-equal directions oscillating,
+//!   but freezing the *dash* with it cost 20 s of median survival, so the
+//!   sensors and the burst never wait for the cadence. The human skills are
+//!   gated 0.25 s / 0.45 s end to end — that delay is their handicap.
+//!
+//! **Planning horizon:** three samples at 0.12 / 0.27 / 0.48 s (weighted
+//! 0.50/0.32/0.18). At the base 58 px/s that is 7–28 px of rat travel and
+//! 3.6–20 px of a Cat's, i.e. everything that can reach contact range inside a
+//! reaction plus one wind-up; a longer lookahead changed no decision (the
+//! danger field only fires inside ~34 px) but cost CPU. The *escape* probe is
+//! longer: mass at 85 / 165 / 250 px out (weights 1.0/0.55/0.3) decides which
+//! arc is thinnest when the rat is inside a pack, and the waypoint leg
+//! (160–200 px) is ~3–4 s of travel — the horizon at which the spawn ring and
+//! the next room matter.
 //!
 //! ## Behaviours, in priority order
 //!
-//! 1. **Do not get hit.** Candidates are 16 compass directions plus "stay";
-//!    each is scored by a danger field built from enemies (predicted with
-//!    their velocity), enemy bullets (closest-approach test), boss body
-//!    contact shapes, boss hazards (`BossHazard::warn`/`active` timers, so a
-//!    telegraphed stomp/pounce/sweep counts before it fires), boss
-//!    projectiles, glue pads and armed mousetraps. Walls are hard, and a
-//!    direction that would corner the rat inside a 20 px pocket is penalised.
-//! 2. **Keep moving along loops.** A waypoint is re-rolled every ~0.7-1.3 s
-//!    from a rotating sweep; candidates are scored by path clearance and the
-//!    open ground around them, so the bot circles the arena instead of
-//!    walking into dead ends.
-//! 3. **Dash out of telegraphed danger.** When a hazard is about to fire
-//!    inside the rat's footprint (or a bullet's closest approach is now), the
-//!    dash is spent along the best-scoring escape direction.
-//! 4. **Collect while safe.** XP gems and pickups attract only when the
-//!    danger field there is low; heals are chased when hurt, the nuke when
-//!    the screen is crowded.
-//! 5. **Boss counters.** The generic hazard field covers the telegraphs; on
-//!    top of it the cat's locked pounce ring is sidestepped perpendicular at
-//!    the last moment (so the leap overshoots) and the mower's charge windup
-//!    is sidestepped out of the corridor.
+//! 1. **Do not get hit.** Candidates are scored by a danger field built from
+//!    enemies (predicted with their velocity: `Enemy::steer` smooths toward
+//!    `EnemyKind::speed`, so the sample already carries the kind's chase),
+//!    enemy bullets (closest-approach test), boss body shapes, telegraphed
+//!    hazards, boss projectiles, glue pads and armed mousetraps. Walls are
+//!    hard and a short runway is penalised. **Fast chasers:** the Cat is 38
+//!    px/s and 12 contact damage against a 58 px/s rat; it catches the rat only
+//!    by cutting across a turn, and a hit is capped at one body's damage per
+//!    0.6 s, so the rules are: never let a Cat (or Brute, `damage >= 10`) sit
+//!    on the rat (dash), and treat a pack of three bodies within 14 px (~0.4 s
+//!    at a Cat's chase) as the encirclement trigger. The kinds' speeds
+//!    (Skitterer 30, Bat 42, Cat 38, Spitter 22, Brute 16) also widen a fast
+//!    body's danger trigger a little (`0.9 x speed`, so the bat is read at
+//!    38 px and the crawlers at 34).
+//! 2. **Kite in wide loops through open floor.** The waypoint sweep prefers
+//!    local walkable area and headings that continue the lap; a leg that
+//!    reverses is penalised (`-4 x` the reversal), which is what stops the rat
+//!    turning back into the pack it just outran.
+//! 3. **Dash with intent.** The dash is spent off a body on the rat, off a
+//!    projectile whose closest approach lands within 0.22 s, off a hazard
+//!    firing inside the footprint, out of an encirclement, or off the Cat's
+//!    locked pounce ring — never on cooldown for its own sake.
+//! 4. **Collect XP aggressively.** XP is the whole progression: a gem's pull
+//!    is up to 10 points against ~6 for safety, guarded only by enemies sitting
+//!    on it. The measured A/B is blunt — an expert that avoids the pack kills
+//!    fewer bodies, levels less and dies *earlier*; gem greed is what starts
+//!    the snowball.
+//! 5. **Early survival picks.** Armour, max HP and the first Whiskers stack
+//!    outrank raw damage while the build has fewer than 8 upgrades; a flat
+//!    armour point cuts 98 % of the damage sources in this game (contact).
+//! 6. **Boss counters.** The generic hazard field covers the telegraphs; on
+//!    top of it the Cat's locked pounce ring is sidestepped at the last moment
+//!    and the mower's charge corridor is left early.
 //!
 //! ## Skills
 //!
-//! [`Skill::Expert`] decides every tick with no noise and every counter above.
-//! [`Skill::Casual`] decides every ~0.2 s, adds angular noise, keeps a shorter
-//! threat horizon, weights safety lower, never uses the smart dash and ignores
-//! boss counters. Same seeds ⇒ expert should beat casual measurably more
-//! often; that difference is the difficulty reading the coordinator wants.
+//! An ordered ladder from a strong instrument to a beginner:
+//!
+//! | | Expert | Skilled | Casual |
+//! |---|---|---|---|
+//! | reactions | 0.08 s heading hold, live sensors/dash | 0.25 s | 0.45 s |
+//! | horizon | 0.48 s | 0.22 s | 0.14 s |
+//! | vision | whole simulation | screen + explored minimap | screen only |
+//! | hazard timer read | exact | quantised to 0.2 s | quantised to 0.4 s |
+//! | steering noise | 0 | 0.12 rad | 0.42 rad |
+//! | dash | deliberate | deliberate | panic only |
+//! | boss counters | yes | yes (art telegraphs) | no |
+//! | building | optimal | good (8 % pick noise) | sloppy (35 %) |
+//!
+//! `Skilled` is a competent human: it only knows what is on screen plus the
+//! cells the minimap has already explored (unexplored cells are assumed open,
+//! so it bumps into unseen walls), and it does not read internal timers beyond
+//! what the art telegraphs. `Casual` is a new player: late, noisy, short
+//! sight, no deliberate dash, shaky read of the upgrade cards.
 //!
 //! ## Determinism
 //!
 //! Every random draw comes from the bot's own [`StdRng`], seeded from the run
-//! seed. The simulation's rng is never touched, so the bot only affects a run
-//! through the `move_dir`/`dash` it feeds and the upgrades it picks.
+//! seed, in a fixed order and only where the skill uses randomness (steering
+//! noise, pick jitter, panic dashes). The simulation's rng is never touched,
+//! so the bot affects a run only through the `move_dir`/`dash` it feeds and
+//! the upgrades it picks.
 
 use rand::rngs::StdRng;
 use rand::RngExt;
@@ -52,11 +109,11 @@ use rand::SeedableRng;
 
 use crate::game::bullet::{Bullet, Faction};
 use crate::game::campaign::Keepable;
-use crate::game::collision::SizeClass;
+use crate::game::collision::{cell_of, SizeClass};
 use crate::game::gem::{Gem, Pickup};
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::systems::boss::{Boss, BossProjectile, HazardShape};
-use crate::game::enemy::Enemy;
+use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::PickupKind;
 use crate::game::loadout::{Loadout, PassiveKind, Upgrade};
 use crate::game::weapon::WeaponKind;
@@ -74,9 +131,12 @@ const DIRS: usize = 16;
 /// How well the bot plays; see the module docs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Skill {
-    /// Every tick, no noise, every counter, smart dash.
+    /// The measuring instrument: 0.08 s heading commitment, no noise, every
+    /// counter, full information.
     Expert,
-    /// Slower reactions, noisy steering, shorter horizon, no boss counters.
+    /// A competent human: 0.25 s reactions, screen + explored minimap only.
+    Skilled,
+    /// A new player: late, noisy, short sight, no deliberate dash.
     Casual,
 }
 
@@ -84,7 +144,17 @@ impl Skill {
     pub fn name(self) -> &'static str {
         match self {
             Skill::Expert => "expert",
+            Skill::Skilled => "skilled",
             Skill::Casual => "casual",
+        }
+    }
+
+    /// Ladder position, high to low (used by the ordering tests).
+    pub fn tier(self) -> u8 {
+        match self {
+            Skill::Expert => 3,
+            Skill::Skilled => 2,
+            Skill::Casual => 1,
         }
     }
 
@@ -92,10 +162,22 @@ impl Skill {
     pub fn parse(s: &str) -> Option<Skill> {
         match s.to_ascii_lowercase().as_str() {
             "expert" => Some(Skill::Expert),
+            "skilled" => Some(Skill::Skilled),
             "casual" => Some(Skill::Casual),
             _ => None,
         }
     }
+}
+
+/// How much of the world a skill may read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Vision {
+    /// Enemy positions and timers anywhere within `SCAN_RADIUS`, and the whole
+    /// tile map.
+    Full,
+    /// On-screen bodies only (a rectangle centred on the rat), and only the
+    /// map cells the minimap has explored.
+    Screen,
 }
 
 /// One tick of input the bot wants to feed the simulation.
@@ -138,13 +220,26 @@ struct Params {
     /// Graze the horde: creep at a controlled speed so kills (and the XP
     /// gems they drop) happen within pickup range instead of 60 px behind.
     standoff: bool,
+    /// Keep scanning and dashing every tick while the heading is committed.
+    instant_dash: bool,
+    /// What the skill may read.
+    vision: Vision,
+    /// Quantise hazard warn timers to this bucket (0 = exact).
+    hazard_quantum: f32,
+    /// Relative error applied to upgrade-card values.
+    pick_noise: f32,
 }
 
 impl Params {
     fn for_skill(skill: Skill) -> Params {
         match skill {
             Skill::Expert => Params {
-                reaction: 0.0,
+                // 0.08 s (five ticks) is the shortest commitment that stops
+                // per-tick oscillation. Dash and scanning stay live every tick
+                // (`instant_dash`): freezing those with the heading cost 20 s of
+                // median survival in the A/B, because a bullet-hell dash cannot
+                // wait out a reaction interval.
+                reaction: 0.08,
                 noise: 0.0,
                 safety: 1.0,
                 horizon: 0.30,
@@ -155,9 +250,30 @@ impl Params {
                 crowd: 2.2,
                 momentum: 1.6,
                 standoff: false,
+                instant_dash: true,
+                vision: Vision::Full,
+                hazard_quantum: 0.0,
+                pick_noise: 0.0,
+            },
+            Skill::Skilled => Params {
+                reaction: 0.25,
+                noise: 0.12,
+                safety: 0.88,
+                horizon: 0.22,
+                boss_counters: true,
+                smart_dash: true,
+                trap_aware: true,
+                greed: 5.0,
+                crowd: 1.5,
+                momentum: 1.4,
+                standoff: false,
+                instant_dash: false,
+                vision: Vision::Screen,
+                hazard_quantum: 0.2,
+                pick_noise: 0.08,
             },
             Skill::Casual => Params {
-                reaction: 0.20,
+                reaction: 0.45,
                 noise: 0.42,
                 safety: 0.62,
                 horizon: 0.14,
@@ -168,6 +284,10 @@ impl Params {
                 crowd: 0.8,
                 momentum: 1.0,
                 standoff: false,
+                instant_dash: false,
+                vision: Vision::Screen,
+                hazard_quantum: 0.4,
+                pick_noise: 0.35,
             },
         }
     }
@@ -181,6 +301,7 @@ enum Threat {
         vel: Vec2,
         radius: f32,
         damage: f32,
+        kind: EnemyKind,
     },
     Bullet {
         pos: Vec2,
@@ -258,7 +379,7 @@ impl Bot {
             skill,
             params: Params::for_skill(skill),
             rng: StdRng::seed_from_u64(seed ^ 0xB07_u64),
-            since_decision: 0.0,
+            since_decision: f32::INFINITY,
             held: BotInput::IDLE,
             wander: 0.0,
             orbit_sign: 1.0,
@@ -294,7 +415,7 @@ impl Bot {
         self.wander = self.rng.random::<f32>() * std::f32::consts::TAU;
         self.orbit_sign = if self.rng.random::<bool>() { 1.0 } else { -1.0 };
         self.held = BotInput::IDLE;
-        self.since_decision = 0.0;
+        self.since_decision = f32::INFINITY;
         self.boss_pos = None;
         self.boss_kind = None;
     }
@@ -306,17 +427,30 @@ impl Bot {
     pub fn decide(&mut self, w: &World, dt: f32) -> BotInput {
         self.since_decision += dt;
         let due = self.params.reaction <= 0.0 || self.since_decision >= self.params.reaction;
+        // Expert keeps its sensors and its dash live every tick: only the
+        // movement *heading* is committed for the reaction interval. A human
+        // skill's reaction delay gates everything (that is what the delay is).
+        let instant = !due && self.params.instant_dash;
+        if instant {
+            self.scan(w);
+            let dirs = unit_dirs();
+            let dash = self.wants_dash(w, &dirs);
+            let input = BotInput {
+                move_dir: self.held.move_dir,
+                dash,
+            };
+            self.held = input;
+            return input;
+        }
         if !due {
             return self.held;
         }
-        // Casual's reaction is jittered so its errors are not periodic.
-        if self.params.reaction > 0.0 {
-            self.since_decision = 0.0;
-        }
+        let since = self.since_decision;
+        self.since_decision = 0.0;
         self.decisions += 1;
 
         self.scan(w);
-        self.update_goal(w, dt);
+        self.update_goal(w, since);
 
         let pos = w.player.pos;
         let dirs = unit_dirs();
@@ -418,10 +552,11 @@ impl Bot {
         let mut best_value = f32::NEG_INFINITY;
         for (i, up) in choices.iter().enumerate() {
             let v = upgrade_value(lo, up, hp_frac);
-            // Expert never takes the noise draw, so both skills stay
-            // deterministic for a seed; casual's value read is slightly off.
-            let v = if self.skill == Skill::Casual {
-                v * (0.85 + self.rng.random::<f32>() * 0.3)
+            // The human skills' read of the cards is imperfect; Expert never
+            // takes the draw, so every skill stays deterministic per seed.
+            let v = if self.params.pick_noise > 0.0 {
+                v * (1.0
+                    + (self.rng.random::<f32>() - 0.5) * 2.0 * self.params.pick_noise)
             } else {
                 v
             };
@@ -469,18 +604,96 @@ impl Bot {
 
     // ---- Decision internals ---------------------------------------------
 
+    /// Is `pos` within what this skill may read?
+    fn sees(&self, w: &World, p: Vec2, q: Vec2) -> bool {
+        match self.params.vision {
+            Vision::Full => q.dist_sq(p) <= SCAN_RADIUS * SCAN_RADIUS,
+            Vision::Screen => {
+                let half = w.viewport * 0.5;
+                (q.x - p.x).abs() <= half.x + 10.0 && (q.y - p.y).abs() <= half.y + 10.0
+            }
+        }
+    }
+
+    /// Is a rat-sized circle free of walls, as far as this skill knows? A
+    /// screen-only skill trusts the minimap: explored walls block, unexplored
+    /// cells are assumed open (it discovers a wall by bumping into it).
+    fn clear(&self, w: &World, q: Vec2, r: f32) -> bool {
+        match self.params.vision {
+            Vision::Full => w.level.tiles.circle_clear(q, r, SizeClass::Small),
+            Vision::Screen => explored_clear(w, q, r),
+        }
+    }
+
+    /// Round a hazard's warn timer to the skill's readability.
+    fn quantise_warn(&self, warn_left: f32) -> f32 {
+        let q = self.params.hazard_quantum;
+        if q <= 0.0 || warn_left <= 0.0 {
+            warn_left
+        } else {
+            (warn_left / q).round() * q
+        }
+    }
+
+    /// Walkable runway along `dir`, sampled every 8 px (capped at `max`).
+    fn runway(&self, w: &World, p: Vec2, dir: Vec2, max: f32) -> f32 {
+        let mut travelled = 0.0;
+        while travelled < max {
+            travelled += 8.0;
+            if !self.clear(w, p + dir * travelled, R) {
+                return (travelled - 8.0).max(0.0);
+            }
+        }
+        max
+    }
+
+    /// Distance from `p` to the nearest wall, capped at 120 px.
+    fn edge_gap(&self, w: &World, p: Vec2) -> f32 {
+        let mut d = 0.0;
+        while d < 120.0 {
+            if !self.clear(w, p + Vec2::from_angle(d * 0.3) * d, R) {
+                return d;
+            }
+            d += 12.0;
+        }
+        120.0
+    }
+
+    /// Is the straight line between two points walkable, as far as the skill
+    /// knows the map?
+    fn path_clear(&self, w: &World, a: Vec2, b: Vec2) -> bool {
+        let steps = ((b - a).len() / 8.0).ceil().max(1.0) as i32;
+        for i in 0..=steps {
+            let t = i as f32 / steps as f32;
+            if !self.clear(w, a + (b - a) * t, R) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// How many of the 8 compass neighbours of `q` (20 px out) are walkable.
+    fn openness(&self, w: &World, q: Vec2) -> i32 {
+        let mut n = 0;
+        for d in unit_dirs().iter().step_by(2) {
+            if self.clear(w, q + *d * 20.0, R) {
+                n += 1;
+            }
+        }
+        n
+    }
+
     /// Snapshot every threat near the rat (and the nearby loot).
     fn scan(&mut self, w: &World) {
         self.threats.clear();
         self.gems.clear();
         self.pickups.clear();
         let p = w.player.pos;
-        let reach_sq = SCAN_RADIUS * SCAN_RADIUS;
         self.boss_pos = None;
         self.boss_kind = None;
         for e in w.ecs.iter_entities() {
             if let Some(en) = e.get::<Enemy>() {
-                if !en.alive() || en.pos.dist_sq(p) > reach_sq {
+                if !en.alive() || !self.sees(w, p, en.pos) {
                     continue;
                 }
                 self.threats.push(Threat::Enemy {
@@ -488,9 +701,10 @@ impl Bot {
                     vel: en.vel,
                     radius: en.radius,
                     damage: en.damage,
+                    kind: en.kind,
                 });
             } else if let Some(b) = e.get::<Bullet>() {
-                if b.faction != Faction::Enemy || b.pos.dist_sq(p) > reach_sq {
+                if b.faction != Faction::Enemy || !self.sees(w, p, b.pos) {
                     continue;
                 }
                 self.threats.push(Threat::Bullet {
@@ -508,7 +722,7 @@ impl Bot {
                 // before the neighbourhood filter.
                 self.boss_pos = Some(boss.pos);
                 self.boss_kind = Some(boss.kind);
-                if boss.pos.dist_sq(p) > reach_sq {
+                if !self.sees(w, p, boss.pos) {
                     continue;
                 }
                 self.threats.push(Threat::BossBody {
@@ -522,13 +736,13 @@ impl Bot {
                     }
                     self.threats.push(Threat::Hazard {
                         shape: h.shape,
-                        warn_left: (h.warn - h.elapsed).max(0.0),
+                        warn_left: self.quantise_warn((h.warn - h.elapsed).max(0.0)),
                         active_left: (h.warn + h.active - h.elapsed).max(0.0),
                         damage: h.damage,
                     });
                 }
             } else if let Some(bp) = e.get::<BossProjectile>() {
-                if bp.pos.dist_sq(p) > reach_sq {
+                if !self.sees(w, p, bp.pos) {
                     continue;
                 }
                 self.threats.push(Threat::Projectile {
@@ -538,11 +752,11 @@ impl Bot {
                     damage: bp.damage,
                 });
             } else if let Some(g) = e.get::<Gem>() {
-                if g.pos.dist_sq(p) <= 260.0 * 260.0 {
+                if g.pos.dist_sq(p) <= 260.0 * 260.0 && self.sees(w, p, g.pos) {
                     self.gems.push((g.pos, g.value));
                 }
             } else if let Some(pk) = e.get::<Pickup>() {
-                if pk.pos.dist_sq(p) <= 200.0 * 200.0 {
+                if pk.pos.dist_sq(p) <= 200.0 * 200.0 && self.sees(w, p, pk.pos) {
                     self.pickups.push((pk.pos, pk.kind));
                 }
             }
@@ -553,6 +767,7 @@ impl Bot {
                     trap.state,
                     crate::game::art_traps::StickyTrapState::Idle
                 ) && trap.pos.dist_sq(p) < 90.0 * 90.0
+                    && self.sees(w, p, trap.pos)
                 {
                     self.threats.push(Threat::StickyPad {
                         pos: trap.pos,
@@ -567,7 +782,7 @@ impl Bot {
                         | crate::game::art_traps::MousetrapState::Triggered
                         | crate::game::art_traps::MousetrapState::Snapping
                 );
-                if armed && trap.pos.dist_sq(p) < 70.0 * 70.0 {
+                if armed && trap.pos.dist_sq(p) < 70.0 * 70.0 && self.sees(w, p, trap.pos) {
                     self.threats.push(Threat::Mousetrap {
                         pos: trap.pos,
                         facing: trap.facing,
@@ -587,16 +802,15 @@ impl Bot {
         // Seconds ahead, and how much each sample counts.
         const TIMES: [f32; 3] = [0.12, 0.27, 0.48];
         const WEIGHTS: [f32; 3] = [0.5, 0.32, 0.18];
-        let tiles = &w.level.tiles;
         let mut danger = 0.0f32;
 
         // Walls: standing inside one is fatal to the plan; a short runway is
         // a dead end, and a dead end with a horde behind it is where runs die.
-        if !tiles.circle_clear(p, R + 0.5, SizeClass::Small) {
+        if !self.clear(w, p, R + 0.5) {
             danger += 100.0;
         }
         if moving {
-            let runway = runway(w, p, dir, 140.0);
+            let runway = self.runway(w, p, dir, 140.0);
             danger += (1.0 - runway / 140.0).powi(2) * 9.0;
         }
 
@@ -608,13 +822,13 @@ impl Bot {
         for (i, &t) in TIMES.iter().enumerate() {
             let q = p + dir * (speed * t);
             let wt = WEIGHTS[i];
-            if !tiles.circle_clear(q, R, SizeClass::Small) {
+            if !self.clear(w, q, R) {
                 danger += 80.0 * wt;
             }
-            danger += (DIRS as f32 - openness(w, q) as f32) * 1.1 * wt;
+            danger += (DIRS as f32 - self.openness(w, q) as f32) * 1.1 * wt;
 
             for threat in &self.threats {
-                danger += wt * threat_cost(*threat, q, t, contact_scale);
+                danger += wt * threat_cost(p, *threat, q, t, contact_scale);
             }
         }
 
@@ -638,7 +852,7 @@ impl Bot {
         danger += thin * 0.8;
 
         // Drifting into the arena border funnels a kite into a corner.
-        let edge = edge_gap(w, end);
+        let edge = self.edge_gap(w, end);
         if edge < 90.0 {
             danger += (1.0 - edge / 90.0) * 3.0;
         }
@@ -778,11 +992,15 @@ impl Bot {
                     damage,
                     ..
                 } => {
-                    // Dash to break out before the ring closes: one big body
-                    // on top of the rat, or a tight pack around it.
+                    // Dash to break out before the ring closes: one body on
+                    // the rat (Cat/Brute are the `damage >= 10` kinds), or a
+                    // tight pack around it.
                     if damage >= 10.0 && pos.dist(p) < radius + R + 2.0 {
                         imminent = true;
                     }
+                    // 14 px is ~0.4 s at a Cat's 38 px/s chase, the fastest
+                    // melee body; the count and the `damage >= 10` contact
+                    // test above are what make a Cat on the rat spend the dash.
                     if pos.dist(p) < radius + R + 14.0 {
                         close += 1;
                     }
@@ -790,6 +1008,25 @@ impl Bot {
                 _ => {}
             }
         }
+        // A Cat already in chase range: spend the burst to open the gap.
+        for t in &self.threats {
+            if let Threat::Enemy {
+                pos,
+                vel,
+                kind: EnemyKind::Cat,
+                radius,
+                ..
+            } = *t
+            {
+                let to_rat = p - pos;
+                if to_rat.len() < radius + R + 16.0
+                    && vel.dot(to_rat) > 0.5 * EnemyKind::Cat.speed()
+                {
+                    return true;
+                }
+            }
+        }
+
         // The cat's locked pounce ring: sidestep at the last moment so the
         // jaguar overshoots instead of landing on the rat.
         if self.params.boss_counters {
@@ -898,10 +1135,10 @@ impl Bot {
             let a = self.wander + i as f32 * std::f32::consts::TAU / 16.0;
             let q = (p + Vec2::from_angle(a) * radius)
                 .clamp_box(Vec2::splat(20.0), w.level.arena - Vec2::splat(20.0));
-            if !path_clear(w, p, q) {
+            if !self.path_clear(w, p, q) {
                 continue;
             }
-            let mut score = openness(w, q) as f32 * 0.9;
+            let mut score = self.openness(w, q) as f32 * 0.9;
             // Head away from the crowd centroid.
             if let Some(c) = crowd {
                 let away = (q - c).normalized();
@@ -1018,20 +1255,32 @@ fn on_pad(pos: Vec2, facing: Vec2, q: Vec2) -> bool {
 }
 
 /// Danger of one threat to a candidate position `q` at `t` seconds from now.
-fn threat_cost(threat: Threat, q: Vec2, t: f32, contact_scale: f32) -> f32 {
+fn threat_cost(_p: Vec2, threat: Threat, q: Vec2, t: f32, contact_scale: f32) -> f32 {
     match threat {
         Threat::Enemy {
             pos,
             vel,
             radius,
             damage,
+            kind,
         } => {
+            // Each kind chases at `EnemyKind::speed` px/s (Skitterer 30, Bat
+            // 42, Cat 38, Spitter 22, Brute 16) and the velocity sample
+            // already carries that: `Enemy::steer` smooths toward
+            // `kind.speed() * speed_mult`. Predicting with it is measurably
+            // better than a kind-speed chase model (the A/B lost 60 s of
+            // median survival), so the kind only decides the weight below.
+            let _ = kind;
             let pred = pos + vel * t;
+            // Faster kinds are read a moment earlier: 0.9 x their own speed
+            // (34 px for the 30-38 px/s crawlers and cats, 38 px for the
+            // 42 px/s bat).
+            let reach = 34.0f32.max(kind.speed() * 0.9);
             let near = pred.dist(q) - radius - R;
-            if near > 34.0 {
+            if near > reach {
                 0.0
             } else {
-                let w = (1.0 - (near.max(-34.0) / 34.0)).clamp(0.0, 1.0);
+                let w = (1.0 - (near.max(-reach) / reach)).clamp(0.0, 1.0);
                 w * w * (damage / 6.0).clamp(0.6, 3.0) * 6.0 * contact_scale
             }
         }
@@ -1104,64 +1353,19 @@ fn threat_cost(threat: Threat, q: Vec2, t: f32, contact_scale: f32) -> f32 {
     }
 }
 
-/// How far the rat could walk from `p` along `dir` before a wall stops it
-/// (sampled every 8 px, capped at `max`).
-fn runway(w: &World, p: Vec2, dir: Vec2, max: f32) -> f32 {
-    let mut travelled = 0.0;
-    while travelled < max {
-        travelled += 8.0;
-        if !w
-            .level
-            .tiles
-            .circle_clear(p + dir * travelled, R, SizeClass::Small)
-        {
-            return (travelled - 8.0).max(0.0);
-        }
-    }
-    max
-}
-
-/// Distance from `p` to the nearest wall cell, capped at 120 px.
-fn edge_gap(w: &World, p: Vec2) -> f32 {
-    let mut d = 0.0;
-    while d < 120.0 {
-        if !w.level.tiles.circle_clear(
-            p + Vec2::from_angle(d * 0.3) * d,
-            R,
-            SizeClass::Small,
-        ) {
-            return d;
-        }
-        d += 12.0;
-    }
-    120.0
-}
-
-/// Is the straight line between two points walkable for the rat?
-fn path_clear(w: &World, a: Vec2, b: Vec2) -> bool {
-    let steps = ((b - a).len() / 8.0).ceil().max(1.0) as i32;
-    for i in 0..=steps {
-        let t = i as f32 / steps as f32;
-        let q = a + (b - a) * t;
-        if !w.level.tiles.circle_clear(q, R, SizeClass::Small) {
-            return false;
+/// A screen-only skill's map knowledge: explored walls block; unexplored cells
+/// are assumed open (the bot finds them the way a player does).
+fn explored_clear(w: &World, q: Vec2, r: f32) -> bool {
+    let (x0, y0) = cell_of(q - Vec2::splat(r));
+    let (x1, y1) = cell_of(q + Vec2::splat(r));
+    for cy in y0..=y1 {
+        for cx in x0..=x1 {
+            if w.explored(cx, cy) && !w.level.tiles.get(cx, cy).passable(SizeClass::Small) {
+                return false;
+            }
         }
     }
     true
-}
-
-/// How many of the 8 compass neighbours of `q` (20 px out) are walkable.
-fn openness(w: &World, q: Vec2) -> i32 {
-    let mut n = 0;
-    for d in unit_dirs().iter().step_by(2) {
-        if w.level
-            .tiles
-            .circle_clear(q + *d * 20.0, R, SizeClass::Small)
-        {
-            n += 1;
-        }
-    }
-    n
 }
 
 /// Clamp the throttle vector into the simulation's contract: finite, and no
@@ -1188,57 +1392,74 @@ fn weapon_tier(k: WeaponKind) -> f32 {
     }
 }
 
-/// The value heuristic behind level-up picks:
+/// The value heuristic behind level-up picks, ordered for **early survival**:
 ///
-/// * a **third weapon** is worth a lot (coverage), a fourth+ much less;
-/// * levelling an owned weapon is the strongest single pick (25 % damage per
-///   level on a weapon that already fires);
-/// * damage / fire rate are the best passives, max HP and armour are valued
-///   when hurt or unarmoured, everything else is filler.
+/// * **Armour and max HP first.** 98 % of all damage is enemy contact and a
+///   hit is capped at one enemy's damage per 0.6 s, so a flat armour cut is
+///   worth more than any damage multiplier in the first two minutes.
+///   Whiskers (magnet) is close behind: it is the XP engine, and the run is
+///   decided by whether the snowball starts before the horde closes.
+/// * a **third weapon** is worth a lot (coverage); levelling an owned weapon
+///   is the strongest single offensive pick; a fourth+ weapon is filler.
+/// * damage / fire rate overtake the defensive picks only once the build has
+///   a base (late game), and move speed is a modest utility pick.
 pub fn upgrade_value(lo: &Loadout, up: &Upgrade, hp_frac: f32) -> f32 {
+    let progression: u32 = lo
+        .weapons
+        .iter()
+        .map(|w| w.level.saturating_sub(1) as u32)
+        .sum::<u32>()
+        + lo.passives.iter().map(|(_, n)| *n).sum::<u32>()
+        + lo.weapons.len().saturating_sub(1) as u32;
+    let early = progression < 8;
     match up {
         Upgrade::NewWeapon(k) => {
             let base = weapon_tier(*k);
             if lo.weapons.len() < 3 {
-                base + 4.0
+                base + 5.0
             } else if lo.weapons.len() < 4 {
-                base - 1.0
+                base - 1.5
             } else {
-                base - 3.0
+                base - 3.5
             }
         }
         Upgrade::LevelWeapon(i) => match lo.weapons.get(*i) {
-            Some(w) => weapon_tier(w.kind) + 5.0 - w.level as f32 * 0.4,
+            Some(w) => {
+                let base = weapon_tier(w.kind) + 6.0 - w.level as f32 * 0.4;
+                if early { base + 1.0 } else { base }
+            }
             None => 0.0,
         },
         Upgrade::Passive(p) => match p {
-            PassiveKind::Damage => 7.0 + if lo.stats.damage_mult < 1.6 { 2.0 } else { 0.0 },
-            PassiveKind::FireRate => 6.5,
+            PassiveKind::Armor => match lo.stacks(PassiveKind::Armor) {
+                0 => 10.0,
+                1 | 2 => 8.5,
+                3 | 4 => 6.0,
+                _ => 4.0,
+            },
             PassiveKind::MaxHp => {
-                if hp_frac < 0.6 || lo.stacks(PassiveKind::MaxHp) == 0 {
-                    8.0
+                if lo.stacks(PassiveKind::MaxHp) < 2 || hp_frac < 0.7 {
+                    8.5
                 } else {
-                    3.5
+                    4.5
                 }
             }
-            PassiveKind::Armor => {
-                if lo.stacks(PassiveKind::Armor) < 3 {
-                    6.0
-                } else {
-                    4.0
-                }
-            }
-            PassiveKind::MoveSpeed => 4.5,
-            PassiveKind::Regen => 4.0,
-            // Whiskers is the XP engine: a bigger pickup radius is what turns
-            // kills into levels, so the first stacks are worth more than any
-            // damage pick.
             PassiveKind::Magnet => match lo.stacks(PassiveKind::Magnet) {
-                0 => 11.0,
-                1 => 9.0,
-                2 => 7.0,
+                0 => 10.0,
+                1 => 8.0,
+                2 => 6.0,
                 _ => 3.0,
             },
+            PassiveKind::Regen => {
+                if lo.stacks(PassiveKind::Regen) < 2 { 6.0 } else { 3.5 }
+            }
+            PassiveKind::Damage => {
+                if early { 6.0 } else { 7.5 }
+            }
+            PassiveKind::FireRate => {
+                if early { 5.5 } else { 7.0 }
+            }
+            PassiveKind::MoveSpeed => 4.5,
         },
     }
 }
@@ -1262,31 +1483,110 @@ mod tests {
     use super::*;
     use crate::game::level::Theme;
 
+    fn seeded_bot(skill: Skill, seed: u64) -> Bot {
+        let mut bot = Bot::new(skill, seed);
+        bot.on_new_level(0);
+        bot
+    }
+
     #[test]
     fn decision_is_finite_and_bounded_on_an_empty_floor() {
-        let mut w = World::new(Theme::Sewer, 7);
-        // Strip the map so the test measures the policy, not the layout.
-        w.level.tiles = crate::game::collision::TileMap::new(200, 160, Theme::Sewer, 0);
-        let mut bot = Bot::new(Skill::Expert, 1);
-        for _ in 0..120 {
-            let input = bot.decide(&w, 1.0 / 60.0);
-            assert!(input.move_dir.x.is_finite() && input.move_dir.y.is_finite());
-            assert!(input.move_dir.len() <= 1.0 + 1e-4);
+        for skill in [Skill::Expert, Skill::Skilled, Skill::Casual] {
+            let mut w = World::new(Theme::Sewer, 7);
+            // Strip the map so the test measures the policy, not the layout.
+            w.level.tiles = crate::game::collision::TileMap::new(200, 160, Theme::Sewer, 0);
+            let mut bot = seeded_bot(skill, 1);
+            for _ in 0..240 {
+                let input = bot.decide(&w, 1.0 / 60.0);
+                assert!(
+                    input.move_dir.x.is_finite() && input.move_dir.y.is_finite(),
+                    "{skill:?} produced a non-finite direction"
+                );
+                assert!(
+                    input.move_dir.len() <= 1.0 + 1e-4,
+                    "{skill:?} over-throttled"
+                );
+            }
         }
     }
 
     #[test]
-    fn expert_and_casual_are_deterministic_per_seed() {
+    fn every_skill_is_deterministic_per_seed() {
         let w = World::new(Theme::Kitchen, 11);
-        let mut a = Bot::new(Skill::Expert, 5);
-        let mut b = Bot::new(Skill::Expert, 5);
-        for _ in 0..90 {
-            assert_eq!(a.decide(&w, 1.0 / 60.0), b.decide(&w, 1.0 / 60.0));
+        for skill in [Skill::Expert, Skill::Skilled, Skill::Casual] {
+            let mut a = seeded_bot(skill, 5);
+            let mut b = seeded_bot(skill, 5);
+            for tick in 0..120 {
+                assert_eq!(
+                    a.decide(&w, 1.0 / 60.0),
+                    b.decide(&w, 1.0 / 60.0),
+                    "{skill:?} diverged on tick {tick}"
+                );
+            }
         }
-        let mut c = Bot::new(Skill::Casual, 5);
-        let mut d = Bot::new(Skill::Casual, 5);
-        for _ in 0..90 {
-            assert_eq!(c.decide(&w, 1.0 / 60.0), d.decide(&w, 1.0 / 60.0));
-        }
+    }
+
+    /// The ladder is a property of the parameter table, not a happy accident of
+    /// the map: each rung is strictly slower, noisier, blinder and
+    /// shorter-sighted than the one above it.
+    #[test]
+    fn skills_form_an_ordered_ladder() {
+        let expert = Params::for_skill(Skill::Expert);
+        let skilled = Params::for_skill(Skill::Skilled);
+        let casual = Params::for_skill(Skill::Casual);
+        assert!(Skill::Expert.tier() > Skill::Skilled.tier());
+        assert!(Skill::Skilled.tier() > Skill::Casual.tier());
+        assert!(expert.reaction < skilled.reaction);
+        assert!(skilled.reaction < casual.reaction);
+        assert!(expert.noise <= skilled.noise);
+        assert!(skilled.noise < casual.noise);
+        assert!(expert.safety > skilled.safety);
+        assert!(skilled.safety > casual.safety);
+        assert!(expert.horizon > skilled.horizon);
+        assert!(skilled.horizon > casual.horizon);
+        assert_eq!(expert.vision, Vision::Full);
+        assert_eq!(skilled.vision, Vision::Screen);
+        assert_eq!(casual.vision, Vision::Screen);
+        assert!(expert.greed > skilled.greed);
+        assert!(skilled.greed > casual.greed);
+        assert!(expert.boss_counters && !casual.boss_counters);
+        assert!(expert.smart_dash && !casual.smart_dash);
+        assert!(expert.pick_noise < casual.pick_noise);
+        assert_eq!(Skill::parse("skilled"), Some(Skill::Skilled));
+    }
+
+    /// A screen-only skill cannot see a body that is off screen, even when the
+    /// expert can (the batch viewport is 160x80 px).
+    #[test]
+    fn vision_limits_what_the_lower_skills_scan() {
+        let mut w = World::new(Theme::Sewer, 3);
+        w.level.tiles = crate::game::collision::TileMap::new(200, 160, Theme::Sewer, 0);
+        w.player.pos = w.level.arena * 0.5;
+        w.spawn_enemy(EnemyKind::Cat, w.player.pos + Vec2::new(150.0, 0.0), 1.0);
+
+        let mut expert = seeded_bot(Skill::Expert, 1);
+        expert.scan(&w);
+        assert_eq!(expert.threats.len(), 1, "expert sees the whole simulation");
+
+        let mut skilled = seeded_bot(Skill::Skilled, 1);
+        skilled.scan(&w);
+        assert!(
+            skilled.threats.is_empty(),
+            "skilled only sees on screen (viewport is 160x80)"
+        );
+    }
+
+    /// Early survival first: armour, max HP and the XP magnet must outrank raw
+    /// damage on the first cards.
+    #[test]
+    fn early_picks_favour_survival() {
+        let lo = Loadout::starting();
+        let armor = upgrade_value(&lo, &Upgrade::Passive(PassiveKind::Armor), 1.0);
+        let hp = upgrade_value(&lo, &Upgrade::Passive(PassiveKind::MaxHp), 1.0);
+        let damage = upgrade_value(&lo, &Upgrade::Passive(PassiveKind::Damage), 1.0);
+        let magnet = upgrade_value(&lo, &Upgrade::Passive(PassiveKind::Magnet), 1.0);
+        assert!(armor > damage, "armour {armor} must beat damage {damage}");
+        assert!(hp > damage, "max HP {hp} must beat damage {damage}");
+        assert!(magnet > damage, "magnet {magnet} must beat damage {damage}");
     }
 }
