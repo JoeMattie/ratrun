@@ -475,6 +475,104 @@ fn twin_runs_with_a_boss_match() {
     assert_eq!(a.4, b.4);
 }
 
+// ---- the siege: a rat a large body cannot follow --------------------------
+//
+// A level cannot end until the boss dies, and the level design has pockets no
+// large body can enter (a maze's one-way door, the Sewer's escape rat-hole, a
+// 1-cell squeeze). The verifier's soft-lock (seed 17986931858700579504: Expert,
+// boss alive 1244 s, `Cat(Stalk)` at full HP while the rejoin kept putting it
+// 130 px away behind the same wall) is that shape. These two tests pin the
+// framework's answer: the rejoin never teleports the boss somewhere it cannot
+// walk to the rat, and a walled-off boss tears a body-sized hole and keeps
+// coming.
+
+/// A rat parked in a 2 x 2-cell pocket with a solid wall ring around it, on an
+/// otherwise empty map. No spot on any [`REJOIN_RADII`] ring is both standable
+/// and walkable to the rat, which is the situation the siege exists for.
+fn walled_pocket_world() -> World {
+    let mut w = World::new(Theme::Sewer, 11);
+    open_arena(&mut w);
+    w.clear_enemies();
+    // Ring: cells 30..36 x 8..14; interior 31..35 x 9..13 (64 px, so a boss
+    // that gets in can stand and fight).
+    for y in 8..14 {
+        for x in 30..36 {
+            let interior = (31..35).contains(&x) && (9..13).contains(&y);
+            if !interior {
+                w.level
+                    .tiles
+                    .set(
+                        x,
+                        y,
+                        crate::game::collision::TileKind::Wall(
+                            crate::game::art_walls::WallKind::Solid,
+                        ),
+                    );
+            }
+        }
+    }
+    w.level.tiles.rebuild_masks();
+    w.flow = crate::game::nav::FlowField::new(&w.level.tiles);
+    w.player.pos = Vec2::new(33.0 * 16.0, 11.0 * 16.0);
+    // A big pool so the test measures the hole, not a rat death.
+    w.player.loadout.stats.max_hp = 10_000.0;
+    w.player.hp = 10_000.0;
+    w
+}
+
+#[test]
+fn a_rejoin_never_teleports_the_boss_into_a_wall() {
+    let w = walled_pocket_world();
+    let radius = BossKind::Cat.body_radius();
+    if let Some(spot) = rejoin_spot(&w.level, w.player.pos, radius) {
+        assert!(
+            w.level.tiles.circle_clear(spot, radius, SizeClass::Large),
+            "a rejoin spot must be body-clear ({spot:?})"
+        );
+        // ...and it is only accepted as a *walkable* ring spot when it is one:
+        // the fallback (a rat no large body can reach) is handled by the siege,
+        // whose own test follows.
+        assert!(
+            walkable_line(&w.level, spot, w.player.pos, radius, SizeClass::Large)
+                || spot.dist(w.player.pos) < 220.0,
+            "a far rejoin spot must be walkable to the rat ({spot:?})"
+        );
+    }
+}
+
+#[test]
+fn a_walled_off_boss_smashes_through_and_reaches_the_rat() {
+    let mut w = walled_pocket_world();
+    let start = Vec2::new(21.0 * 16.0, 11.0 * 16.0);
+    spawn_boss_at(&mut w, BossKind::Cat, start, 400_000.0);
+
+    // The real schedule refreshes the large-class flow field toward the rat
+    // every tick; the boss's steering needs it (an empty field is not the
+    // game).
+    let mut broke = false;
+    for _ in 0..(90.0 / DT) as usize {
+        w.begin_tick(DT, Vec2::ZERO, false);
+        let _ = w.ecs.run_system_cached(
+            crate::game::ecs::systems::enemy_move::flow_refresh_system,
+        );
+        let _ = w.ecs.run_system_cached(boss_update_system);
+        w.end_tick();
+        // Any ring wall in the rat's row opening is the boss's hole (which
+        // side it comes from depends on where the flow put it).
+        if (30..36).any(|x| w.level.tiles.get(x, 11).is_open()) {
+            broke = true;
+        }
+    }
+    assert!(broke, "the boss never broke into the pocket");
+    let boss = boss_of(&mut w).expect("boss alive");
+    assert!(
+        boss.pos.dist(w.player.pos) < 90.0,
+        "the boss must walk in through the hole it made (boss {:?}, rat {:?})",
+        boss.pos,
+        w.player.pos
+    );
+}
+
 // ---- the real schedule ----------------------------------------------------
 
 #[test]

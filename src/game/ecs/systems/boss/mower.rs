@@ -217,6 +217,12 @@ impl BossController for MowerController {
 
     fn tick(&self, ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut BossOutput) {
         let before = mower_state(boss);
+        // The rat outside the boss room makes the mower roam (the flow field
+        // routes it out through the door); the flag is refreshed every tick like
+        // the Sweeper's, so a rat that walks back in is fought normally. It used
+        // to be latched at spawn, which is what starved this fight of attacks
+        // (see `tick_patrol`).
+        boss.hunting = !ctx.arena.contains_world(ctx.player_pos);
         // A phase threshold is a set piece: retreat to the dock and recharge.
         // `Boss::phase` only ever increases, so this fires at 0.66 and 0.33
         // and nowhere else.
@@ -306,18 +312,21 @@ fn tick_patrol(ctx: &mut BossContext<'_>, boss: &mut Boss) {
     if to.len_sq() > 0.0 {
         boss.facing = to.normalized();
     }
-    // Off-stage: walk back to its arena through the flow field and never
-    // attack from somewhere the charge cannot fit.
-    if boss.hunting && !boss.arena.contains_world(ctx.player_pos) {
-        move_boss(ctx, boss, ctx.seek(boss), PATROL_SPEED[slot]);
-        boss.elapsed = 0.0;
-        return;
-    }
+    // There is no "off-stage" freeze. This used to hold the mower in `Patrol`
+    // forever (resetting its beat) whenever the *rat* was outside the boss
+    // room's rect — and the rat's 32 px orbit crosses that rect constantly, so
+    // measured on the bot ladder **20 of 21 Expert mower fights landed zero
+    // attacks** and lasted 51-106 s as a stationary punching bag. The arena rect
+    // is not a wall (the mower's own collision is), so the fight simply runs
+    // wherever the two of them are.
     let dist = to.len();
     let dir = if dist < PATROL_BAND[0] {
         -boss.facing
     } else if dist > PATROL_BAND[1] {
-        boss.facing
+        // Chase through the shared steering: the straight bearing when the rat
+        // is in the open, the large-class flow field when a wall is between
+        // (a charge-and-flip boss that cannot find the rat has no fight).
+        ctx.seek(boss)
     } else {
         // Hold mid-range: circle one way for this whole beat.
         boss.facing.perp() * boss.scratch[S_CIRCLE]

@@ -1151,6 +1151,11 @@ mod tests {
         let cat = c.boss();
         let standing = cat.pos + cat.facing * 40.0;
         c.set_player(standing);
+        // The campain's base regen (0.4 HP/s) heals during the 14 ticks this
+        // count runs for (0.09 HP), which used to make the exact-damage
+        // assertion read 21.9 instead of 22. This test is about the swipe's
+        // number, not about regen: switch regen off for the measurement.
+        c.w.player.loadout.stats.regen = 0.0;
         let hp_before = c.player().hp;
         let armor = c.player().loadout.stats.armor;
         assert_eq!(c.count_hits(14), 1, "the swipe must deal damage once");
