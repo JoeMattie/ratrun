@@ -76,6 +76,9 @@ pub const MUTED: Color = Color::Rgb(156, 167, 169);
 pub const EDGE: Color = Color::Rgb(82, 96, 100);
 pub const PLATE: Color = Color::Rgb(19, 24, 27);
 pub const TRACK: Color = Color::Rgb(44, 52, 56);
+/// Golden Swiss cheese yellow — matches `WeaponKind::CheeseSpray`.
+pub const CHEESE_RGB: Rgb = (255, 210, 90);
+pub const CHEESE: Color = Color::Rgb(CHEESE_RGB.0, CHEESE_RGB.1, CHEESE_RGB.2);
 
 /// Painted map markings sit between the kerb highlight and the signal colour.
 pub fn marking(edge: Rgb, accent: Rgb) -> Color {

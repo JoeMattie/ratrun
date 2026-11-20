@@ -9,7 +9,9 @@
 //! game only uses those as discrete presses, so it never relies on their
 //! release events.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
 use crate::math::Vec2;
 
@@ -52,6 +54,12 @@ pub struct InputState {
     /// True when the mouse was the most recent movement input. A movement
     /// keypress flips this back to false so the keyboard reclaims control.
     pub prefer_mouse: bool,
+    /// True while a mouse button (left/right/middle) is currently held down.
+    pub mouse_down: bool,
+    /// True if a mouse button press occurred on this frame.
+    pub mouse_clicked: bool,
+    /// True if any pointer movement, drag, press or release occurred this frame.
+    pub mouse_active: bool,
 }
 
 impl InputState {
@@ -63,12 +71,17 @@ impl InputState {
             mouse_pos: None,
             mouse_events: Vec::new(),
             prefer_mouse: false,
+            mouse_down: false,
+            mouse_clicked: false,
+            mouse_active: false,
         }
     }
 
     pub fn begin_frame(&mut self) {
         self.pressed.clear();
         self.mouse_events.clear();
+        self.mouse_clicked = false;
+        self.mouse_active = false;
     }
 
     /// Decay held-key grace timers (no-op when the protocol's release events
@@ -132,19 +145,33 @@ impl InputState {
             self.mouse_events.push(ev);
         }
         match ev.kind {
-            MouseEventKind::Moved | MouseEventKind::Drag(_) | MouseEventKind::Down(_) => {
+            MouseEventKind::Moved | MouseEventKind::Drag(_) => {
                 self.mouse_pos = Some((ev.column, ev.row));
                 self.prefer_mouse = true;
+                self.mouse_active = true;
+            }
+            MouseEventKind::Down(_) => {
+                self.mouse_pos = Some((ev.column, ev.row));
+                self.prefer_mouse = true;
+                self.mouse_down = true;
+                self.mouse_clicked = true;
+                self.mouse_active = true;
+            }
+            MouseEventKind::Up(_) => {
+                self.mouse_pos = Some((ev.column, ev.row));
+                self.mouse_down = false;
+                self.mouse_active = true;
             }
             _ => {}
         }
     }
 
-    /// Forget every held movement key. Called when the terminal loses focus:
-    /// a release for a key that was down at that moment never arrives, so a
-    /// held direction would otherwise stay down forever.
+    /// Forget every held movement key (and mouse button). Called when the
+    /// terminal loses focus: a release for a key or button that was down at
+    /// that moment never arrives, so held state would otherwise stick forever.
     pub fn release_all(&mut self) {
         self.grace = [0.0; 4];
+        self.mouse_down = false;
     }
 
     fn down(&self, d: Dir) -> bool {
@@ -176,6 +203,15 @@ impl InputState {
         self.pressed
             .iter()
             .any(|e| matches!(e.code, KeyCode::Char(k) if k.eq_ignore_ascii_case(&c)))
+    }
+
+    /// Like [`pressed_char`], but ignores Ctrl/Alt-modified presses (so Ctrl+C
+    /// quitting never trips an unmodified `'c'` toggle).
+    pub fn pressed_unmodified_char(&self, c: char) -> bool {
+        self.pressed.iter().any(|e| {
+            matches!(e.code, KeyCode::Char(k) if k.eq_ignore_ascii_case(&c))
+                && !e.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        })
     }
 }
 
@@ -351,5 +387,35 @@ mod tests {
             assert!(s.just_pressed(code), "press of {code:?} not recorded");
             assert_eq!(s.move_dir(), Vec2::ZERO, "{code:?} held movement");
         }
+    }
+
+    #[test]
+    fn mouse_button_down_up_and_focus_loss() {
+        let mut s = InputState::new(false);
+        assert!(!s.mouse_down && !s.mouse_clicked && !s.mouse_active);
+        s.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 4, 5));
+        assert!(s.mouse_down && s.mouse_clicked && s.mouse_active);
+        s.begin_frame();
+        assert!(s.mouse_down, "button stays held across frames until Up");
+        assert!(!s.mouse_clicked && !s.mouse_active);
+        s.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 4, 5));
+        assert!(!s.mouse_down && s.mouse_active);
+
+        s.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 4, 5));
+        assert!(s.mouse_down);
+        s.release_all();
+        assert!(!s.mouse_down, "focus loss must clear held mouse button");
+    }
+
+    #[test]
+    fn unmodified_char_ignores_ctrl_c() {
+        let mut s = InputState::new(false);
+        s.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(s.pressed_char('c'));
+        assert!(!s.pressed_unmodified_char('c'));
+
+        s.begin_frame();
+        s.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(s.pressed_unmodified_char('c'));
     }
 }

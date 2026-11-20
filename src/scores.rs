@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config;
 use crate::game::campaign::LEVEL_COUNT;
+use crate::render::cursor::CursorSetting;
 use crate::render::minimap::MinimapSize;
 
 pub const MAX_ENTRIES: usize = 10;
@@ -106,6 +107,30 @@ fn deserialize_minimap_size<'de, D: serde::Deserializer<'de>>(
         .unwrap_or(MinimapSize::Normal))
 }
 
+fn serialize_cursor_setting<S: serde::Serializer>(
+    setting: &CursorSetting,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(setting.as_str())
+}
+
+fn deserialize_cursor_setting<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<CursorSetting, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if let Some(b) = value.as_bool() {
+        return Ok(if b {
+            CursorSetting::On
+        } else {
+            CursorSetting::Off
+        });
+    }
+    Ok(value
+        .as_str()
+        .and_then(CursorSetting::parse_setting)
+        .unwrap_or(CursorSetting::On))
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ScoreTable {
     #[serde(default)]
@@ -121,6 +146,14 @@ pub struct ScoreTable {
         deserialize_with = "deserialize_minimap_size"
     )]
     pub minimap_size: MinimapSize,
+    /// Player's preference for the in-game cheese mouse cursor (`on` | `off`).
+    /// Missing or unreadable values fall back to `On`.
+    #[serde(
+        default,
+        serialize_with = "serialize_cursor_setting",
+        deserialize_with = "deserialize_cursor_setting"
+    )]
+    pub cheese_cursor: CursorSetting,
 }
 
 impl ScoreTable {
@@ -442,6 +475,44 @@ mod tests {
             };
             let reloaded = ScoreTable::parse(&t.to_json());
             assert_eq!(reloaded.minimap_size, size);
+        }
+    }
+
+    #[test]
+    fn cheese_cursor_persists_and_falls_back_to_on_when_missing_or_invalid() {
+        // Default / missing field -> On.
+        let missing = ScoreTable::parse(r#"{"entries":[]}"#);
+        assert_eq!(missing.cheese_cursor, CursorSetting::On);
+
+        // Hand-edited booleans also parse cleanly.
+        assert_eq!(
+            ScoreTable::parse(r#"{"cheese_cursor":false}"#).cheese_cursor,
+            CursorSetting::Off
+        );
+        assert_eq!(
+            ScoreTable::parse(r#"{"cheese_cursor":true}"#).cheese_cursor,
+            CursorSetting::On
+        );
+
+        // Unreadable / invalid field values fall back to On without dropping scores.
+        for bad in [
+            r#"{"entries":[{"score":500,"time":10.0,"level":2,"map":"Sewer","won":false}],"cheese_cursor":"gouda"}"#,
+            r#"{"entries":[{"score":500,"time":10.0,"level":2,"map":"Sewer","won":false}],"cheese_cursor":42}"#,
+            r#"{"entries":[{"score":500,"time":10.0,"level":2,"map":"Sewer","won":false}],"cheese_cursor":null}"#,
+        ] {
+            let parsed = ScoreTable::parse(bad);
+            assert_eq!(parsed.cheese_cursor, CursorSetting::On);
+            assert_eq!(parsed.best(), 500);
+        }
+
+        // Valid values round-trip cleanly.
+        for setting in [CursorSetting::On, CursorSetting::Off] {
+            let t = ScoreTable {
+                cheese_cursor: setting,
+                ..Default::default()
+            };
+            let reloaded = ScoreTable::parse(&t.to_json());
+            assert_eq!(reloaded.cheese_cursor, setting);
         }
     }
 }

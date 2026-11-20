@@ -45,6 +45,30 @@ use app::App;
 use input::InputState;
 
 static KITTY_PUSHED: AtomicBool = AtomicBool::new(false);
+static POINTER_SHAPE_SET: AtomicBool = AtomicBool::new(false);
+
+/// OSC 22 pointer shape: slim precision crosshair centered on the hot spot so
+/// the OS arrow does not bury the cheese wedge (Ghostty, Kitty, iTerm2 ≥ 3.5).
+/// Terminals without OSC 22 (WezTerm, Apple Terminal) ignore unknown OSC
+/// sequences terminated with ST (`ESC \`).
+const OSC22_CROSSHAIR: &[u8] = b"\x1b]22;crosshair\x1b\\";
+/// OSC 22 with an empty shape list resets the OS pointer to the terminal default.
+const OSC22_RESET: &[u8] = b"\x1b]22;\x1b\\";
+
+/// Switch the terminal's OS pointer between the slim `crosshair` and its
+/// default shape, emitting escape bytes only on state transitions.
+fn sync_pointer_shape_to(out: &mut impl io::Write, crosshair: bool) -> io::Result<()> {
+    if crosshair {
+        if !POINTER_SHAPE_SET.swap(true, Ordering::SeqCst) {
+            out.write_all(OSC22_CROSSHAIR)?;
+            out.flush()?;
+        }
+    } else if POINTER_SHAPE_SET.swap(false, Ordering::SeqCst) {
+        out.write_all(OSC22_RESET)?;
+        out.flush()?;
+    }
+    Ok(())
+}
 
 /// Restores the terminal on drop so that *every* exit path after raw mode is
 /// enabled — including a `?` error inside setup — leaves the user's terminal
@@ -265,6 +289,10 @@ fn restore_to(out: &mut impl io::Write) -> Result<()> {
     if KITTY_PUSHED.swap(false, Ordering::SeqCst) {
         let _ = execute!(out, PopKeyboardEnhancementFlags);
     }
+    if POINTER_SHAPE_SET.swap(false, Ordering::SeqCst) {
+        let _ = out.write_all(OSC22_RESET);
+        let _ = out.flush();
+    }
     let _ = execute!(out, DisableFocusChange);
     let _ = execute!(out, DisableMouseCapture);
     let _ = execute!(out, LeaveAlternateScreen);
@@ -465,9 +493,15 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, kitty: bool) -> Re
         last = now;
 
         app.update(dt);
+        // Keep the OS pointer unobtrusive while the cheese cursor is active on
+        // terminals that speak OSC 22; skips 16-colour/console terminals and
+        // never runs in `--ai` mode.
+        let mut out = io::stdout();
+        let want_crosshair =
+            app.cursor_visible() && term::color_depth() != term::ColorDepth::Ansi16;
+        let _ = sync_pointer_shape_to(&mut out, want_crosshair);
         // Present the frame atomically: a half-block frame redrawn cell by cell
         // would otherwise tear mid-frame on a fast terminal.
-        let mut out = io::stdout();
         with_synchronized_update(&mut out, || {
             terminal.draw(|f| {
                 app.render(f);
@@ -873,6 +907,41 @@ mod tests {
         assert!(
             finished.load(Ordering::SeqCst),
             "drop must join the reader thread"
+        );
+    }
+
+    #[test]
+    fn pointer_shape_osc22_sets_once_and_restores_on_teardown() {
+        POINTER_SHAPE_SET.store(false, Ordering::SeqCst);
+
+        let mut out = Vec::new();
+        sync_pointer_shape_to(&mut out, true).unwrap();
+        assert_eq!(out, OSC22_CROSSHAIR);
+        assert!(POINTER_SHAPE_SET.load(Ordering::SeqCst));
+
+        // Steady-state frames emit nothing.
+        out.clear();
+        sync_pointer_shape_to(&mut out, true).unwrap();
+        assert!(out.is_empty());
+
+        // Teardown / panic restore resets the pointer shape and clears the flag.
+        let mut restored = Vec::new();
+        restore_to(&mut restored).unwrap();
+        assert!(!POINTER_SHAPE_SET.load(Ordering::SeqCst));
+        assert!(
+            restored
+                .windows(OSC22_RESET.len())
+                .any(|w| w == OSC22_RESET),
+            "restore must emit OSC 22 reset: {:?}",
+            String::from_utf8_lossy(&restored)
+        );
+
+        // Second restore does not re-emit OSC 22 reset.
+        let mut second = Vec::new();
+        restore_to(&mut second).unwrap();
+        assert!(
+            !second.windows(OSC22_RESET.len()).any(|w| w == OSC22_RESET),
+            "restore must be idempotent for OSC 22"
         );
     }
 }

@@ -19,7 +19,7 @@ use crate::math::Vec2;
 use crate::render::campaign as campaign_ui;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette;
-use crate::render::{hud, menu, minimap, minimap_source, overlay};
+use crate::render::{cursor, hud, menu, minimap, minimap_source, overlay};
 use crate::scores::{ScoreEntry, ScoreTable};
 
 use menu::{HitMap, RunSummary, Target};
@@ -184,6 +184,10 @@ pub struct App {
     /// frame once this is warm) and the per-frame marker/label buffers.
     minimap_scratch: minimap::MinimapScratch,
     map_frame: minimap_source::MinimapFrame,
+    /// In-game cheese mouse cursor visibility and animation state.
+    cursor: cursor::CursorState,
+    /// Optional `RATRUN_CURSOR` environment override (resolved once at startup).
+    cursor_env: Option<bool>,
 }
 
 impl App {
@@ -254,6 +258,8 @@ impl App {
             last_map: Rect::new(0, 0, 0, 0),
             minimap_scratch: minimap::MinimapScratch::new(),
             map_frame: minimap_source::MinimapFrame::new(),
+            cursor: cursor::CursorState::default(),
+            cursor_env: cursor::env_override(),
         };
         app.menu_music();
         app
@@ -593,6 +599,11 @@ impl App {
                 a.toggle_mute();
             }
         }
+        // Global cheese-cursor preference toggle ('c'; ignores Ctrl+C).
+        let cursor_toggled = self.input.pressed_unmodified_char('c');
+        if cursor_toggled {
+            self.toggle_cheese_cursor();
+        }
         let previous = self.screen;
         let click = self.mouse_action();
         match self.screen {
@@ -616,6 +627,41 @@ impl App {
             self.hits.clear();
             self.hits.hovered = None;
         }
+        let kb_pressed = !self.input.pressed.is_empty() && !cursor_toggled;
+        self.cursor.update(
+            dt,
+            cursor::CursorInput {
+                mouse_active: self.input.mouse_active,
+                mouse_clicked: self.input.mouse_clicked,
+                kb_pressed,
+                kb_moving: self.input.move_dir() != Vec2::ZERO,
+                prefer_mouse: self.input.prefer_mouse,
+                playing: matches!(self.screen, Screen::Playing),
+            },
+        );
+    }
+
+    /// Whether the cheese cursor feature is enabled (environment override beats
+    /// the persisted `scores.json` setting).
+    pub fn cursor_enabled(&self) -> bool {
+        self.cursor_env
+            .unwrap_or_else(|| self.scores.cheese_cursor.is_on())
+    }
+
+    /// True when the cheese cursor is currently visible on screen (used by
+    /// `main` to switch the OS pointer to a slim OSC 22 crosshair).
+    pub fn cursor_visible(&self) -> bool {
+        self.cursor_enabled() && self.input.mouse_pos.is_some() && self.cursor.is_visible()
+    }
+
+    /// Toggle and persist the cheese cursor preference (in-memory only when
+    /// `self.persist` is false, as in tests).
+    fn toggle_cheese_cursor(&mut self) {
+        self.scores.cheese_cursor = self.scores.cheese_cursor.toggle();
+        if self.persist {
+            self.scores.save();
+        }
+        self.sfx(Sfx::UiMove);
     }
 
     fn update_title(&mut self, click: Option<Target>) {
@@ -1450,6 +1496,37 @@ impl App {
                 }
             }
         }
+        self.draw_cursor(frame);
+    }
+
+    /// Composite the cheese mouse cursor last, on top of every normal-game
+    /// screen, without disturbing `self.hits`.
+    fn draw_cursor(&self, frame: &mut Frame) {
+        if !self.cursor_enabled() {
+            return;
+        }
+        let Some(pos) = self.input.mouse_pos else {
+            return;
+        };
+        let alpha = self.cursor.alpha();
+        if alpha <= 0.02 {
+            return;
+        }
+        let over_target = self
+            .hits
+            .at(pos.0, pos.1)
+            .is_some_and(|t| t != Target::Dash);
+        let view = cursor::CursorView {
+            pos,
+            hover: over_target,
+            held: self.input.mouse_down,
+            click_pulse: self.cursor.click_pulse(),
+            bob_time: self.cursor.bob_time(),
+            alpha,
+            playing_steer: matches!(self.screen, Screen::Playing) && self.input.prefer_mouse,
+        };
+        let area = frame.area();
+        cursor::draw(frame.buffer_mut(), area, view);
     }
 
     // ---- Campaign plates -------------------------------------------------
@@ -2014,6 +2091,10 @@ mod tests {
             h.frame(&[KeyCode::Left, KeyCode::Left]);
             h.click("L story");
             assert!(matches!(h.app.screen, Screen::Story));
+            // On 57×20 `L story` sits at (38, 18), directly over `back` on the
+            // Story footer; moving the pointer away proves the cheese cursor
+            // leaves the underlying label intact for `locate("back")`.
+            h.events(&[], &[(MouseEventKind::Moved, (0, 0))]);
             h.click("back");
             assert!(matches!(h.app.screen, Screen::Title));
             h.click("QUIT");
@@ -4099,6 +4180,487 @@ mod tests {
             KeyCode::Char(' '),
         ] {
             h.frame(&[key]);
+        }
+    }
+
+    // ---- Cheese mouse cursor tests ---------------------------------------
+
+    /// Guard tests that mutate `RATRUN_CURSOR` so parallel tests never race.
+    static CURSOR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Faithful xterm RGB lookup for ANSI-dumping truecolor, 256 and 16-colour
+    /// buffers in the visual verification harness.
+    fn xterm_color_rgb(c: Color) -> (u8, u8, u8) {
+        const CUBE: [u8; 6] = [0, 95, 135, 175, 215, 255];
+        match c {
+            Color::Rgb(r, g, b) => (r, g, b),
+            Color::Reset | Color::Black => (11, 15, 17),
+            Color::Red => (128, 0, 0),
+            Color::Green => (0, 128, 0),
+            Color::Yellow => (128, 128, 0),
+            Color::Blue => (0, 0, 128),
+            Color::Magenta => (128, 0, 128),
+            Color::Cyan => (0, 128, 128),
+            Color::Gray => (192, 192, 192),
+            Color::DarkGray => (128, 128, 128),
+            Color::LightRed => (255, 0, 0),
+            Color::LightGreen => (0, 255, 0),
+            Color::LightYellow => (255, 255, 0),
+            Color::LightBlue => (0, 0, 255),
+            Color::LightMagenta => (255, 0, 255),
+            Color::LightCyan => (0, 255, 255),
+            Color::White => (255, 255, 255),
+            Color::Indexed(idx) => {
+                if idx < 16 {
+                    let base = [
+                        (0, 0, 0),
+                        (128, 0, 0),
+                        (0, 128, 0),
+                        (128, 128, 0),
+                        (0, 0, 128),
+                        (128, 0, 128),
+                        (0, 128, 128),
+                        (192, 192, 192),
+                        (128, 128, 128),
+                        (255, 0, 0),
+                        (0, 255, 0),
+                        (255, 255, 0),
+                        (0, 0, 255),
+                        (255, 0, 255),
+                        (0, 255, 255),
+                        (255, 255, 255),
+                    ];
+                    base[idx as usize]
+                } else if idx < 232 {
+                    let i = (idx - 16) as usize;
+                    (CUBE[i / 36], CUBE[(i / 6) % 6], CUBE[i % 6])
+                } else {
+                    let v = 8 + 10 * (idx - 232);
+                    (v, v, v)
+                }
+            }
+        }
+    }
+
+    fn is_cheese_yellow(c: Color) -> bool {
+        match c {
+            Color::Rgb(r, g, b) => r >= 230 && g >= 195 && b <= 180,
+            Color::LightYellow | Color::Yellow => true,
+            Color::Indexed(idx) => {
+                let (r, g, b) = xterm_color_rgb(Color::Indexed(idx));
+                r >= 210 && g >= 170 && b <= 150
+            }
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn cheese_cursor_appears_on_move_hides_after_keyboard_and_returns() {
+        let _guard = CURSOR_ENV_LOCK.lock().unwrap();
+        let mut h = Harness::new(80, 24);
+        // Before any mouse input, no cheese cursor is drawn.
+        h.frame(&[]);
+        assert!(!h.app.cursor_visible());
+        let before_cell = h.terminal.backend().buffer()[(10, 6)].clone();
+
+        // Mouse moves to (10, 6) -> cheese appears with its hot-spot tip at (10, 6).
+        h.events(&[], &[(MouseEventKind::Moved, (10, 6))]);
+        assert!(h.app.cursor_visible());
+        let tip = &h.terminal.backend().buffer()[(10, 6)];
+        assert_eq!(tip.symbol(), "▀");
+        assert!(
+            is_cheese_yellow(tip.fg),
+            "expected cheese-yellow hot spot at (10, 6), got {:?}",
+            tip.fg
+        );
+        assert_ne!(tip.fg, before_cell.fg);
+
+        // Keyboard-only activity for > FADE_END_SECS hides the cursor completely.
+        h.frame(&[KeyCode::Down]);
+        for _ in 0..75 {
+            h.frame(&[]);
+        }
+        assert!(
+            !h.app.cursor_visible(),
+            "cursor must hide after keyboard-only inactivity"
+        );
+        let after_hide = &h.terminal.backend().buffer()[(10, 6)];
+        assert_eq!(
+            after_hide.symbol(),
+            before_cell.symbol(),
+            "hiding the cursor must leave the underlying cell clean"
+        );
+
+        // Moving the mouse brings it back immediately on that very frame.
+        h.events(&[], &[(MouseEventKind::Moved, (14, 7))]);
+        assert!(h.app.cursor_visible());
+        let returned = &h.terminal.backend().buffer()[(14, 7)];
+        assert_eq!(returned.symbol(), "▀");
+        assert!(is_cheese_yellow(returned.fg));
+    }
+
+    #[test]
+    fn cheese_cursor_clips_at_all_four_edges_and_1x1() {
+        let _guard = CURSOR_ENV_LOCK.lock().unwrap();
+        // 1×1 terminal: no panic, tip painted on (0, 0).
+        let mut tiny = Harness::new(1, 1);
+        tiny.events(&[], &[(MouseEventKind::Moved, (0, 0))]);
+        let cell = &tiny.terminal.backend().buffer()[(0, 0)];
+        assert_eq!(cell.symbol(), "▀");
+        assert!(is_cheese_yellow(cell.fg));
+
+        // All four edges and corners on 80×24.
+        let mut h = Harness::new(80, 24);
+        for &(x, y) in &[(0, 0), (79, 0), (0, 23), (79, 23), (78, 22)] {
+            h.events(&[], &[(MouseEventKind::Moved, (x, y))]);
+            let tip = &h.terminal.backend().buffer()[(x, y)];
+            assert_eq!(tip.symbol(), "▀", "missing tip at edge ({x},{y})");
+            assert!(is_cheese_yellow(tip.fg), "wrong tip colour at ({x},{y})");
+        }
+    }
+
+    #[test]
+    fn cheese_cursor_does_not_disturb_hit_testing() {
+        let _guard = CURSOR_ENV_LOCK.lock().unwrap();
+        let mut h = Harness::new(80, 24);
+        h.frame(&[]);
+        // Find a cell on the START RUN hit target.
+        let mut start_cell = None;
+        'outer: for y in 0..24u16 {
+            for x in 0..80u16 {
+                if h.app.hits.at(x, y) == Some(Target::Start) {
+                    start_cell = Some((x, y));
+                    break 'outer;
+                }
+            }
+        }
+        let (sx, sy) = start_cell.expect("START RUN target must exist on Title");
+
+        // Hover there first: cheese draws at (sx, sy) and hit map still resolves Start.
+        h.events(&[], &[(MouseEventKind::Moved, (sx, sy))]);
+        assert!(h.app.cursor_visible());
+        assert_eq!(h.app.hits.at(sx, sy), Some(Target::Start));
+        assert!(is_cheese_yellow(h.terminal.backend().buffer()[(sx, sy)].fg));
+
+        // Left-clicking at (sx, sy) activates START RUN -> Story!
+        h.events(&[], &[(MouseEventKind::Down(MouseButton::Left), (sx, sy))]);
+        assert_eq!(
+            h.app.screen.name_for_test(),
+            "Story",
+            "clicking under the cheese hot spot must still activate the target"
+        );
+    }
+
+    #[test]
+    fn cheese_cursor_absent_with_env_off_and_in_ai_mode() {
+        let _guard = CURSOR_ENV_LOCK.lock().unwrap();
+        std::env::set_var("RATRUN_CURSOR", "off");
+        let app = App::with_options(false, None, ScoreTable::default(), false, Some(TEST_SEED));
+        std::env::remove_var("RATRUN_CURSOR");
+
+        let mut h = Harness::with_app(app, 80, 24);
+        h.frame(&[]);
+        let before = h.terminal.backend().buffer()[(10, 6)].clone();
+        h.events(&[], &[(MouseEventKind::Moved, (10, 6))]);
+        assert!(
+            !h.app.cursor_visible(),
+            "RATRUN_CURSOR=off must disable the cheese cursor"
+        );
+        assert_eq!(
+            h.terminal.backend().buffer()[(10, 6)].fg,
+            before.fg,
+            "RATRUN_CURSOR=off must not paint over the cell"
+        );
+
+        // `--ai` self-playing wall does not draw the cheese cursor at all.
+        let mut wall = crate::spectate::WallState::new(1);
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut input = InputState::new(false);
+        input.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 10,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        });
+        let area = Rect::new(0, 0, 80, 24);
+        crate::spectate::spectate_keys(&mut wall, &input, area);
+        term.draw(|f| {
+            let a = f.area();
+            crate::spectate::render_wall(f.buffer_mut(), a, &wall);
+        })
+        .unwrap();
+        let wall_cell = &term.backend().buffer()[(10, 6)];
+        assert!(
+            !is_cheese_yellow(wall_cell.fg),
+            "--ai wall must not render a cheese cursor"
+        );
+    }
+
+    #[test]
+    fn cheese_cursor_setting_persists_through_injected_store() {
+        let _guard = CURSOR_ENV_LOCK.lock().unwrap();
+        let mut h = Harness::new(80, 24);
+        assert_eq!(h.app.scores.cheese_cursor, cursor::CursorSetting::On);
+
+        // Move mouse so cursor appears, then press 'c' to turn it off.
+        h.events(&[], &[(MouseEventKind::Moved, (10, 6))]);
+        assert!(h.app.cursor_visible());
+        h.frame(&[KeyCode::Char('c')]);
+        assert_eq!(h.app.scores.cheese_cursor, cursor::CursorSetting::Off);
+        assert!(!h.app.cursor_visible());
+
+        // Persisted JSON round-trips cleanly into a new App with injected store.
+        let saved = h.app.scores.to_json();
+        let reloaded = ScoreTable::parse(&saved);
+        assert_eq!(reloaded.cheese_cursor, cursor::CursorSetting::Off);
+
+        let app2 = App::with_options(false, None, reloaded, false, Some(TEST_SEED));
+        let mut h2 = Harness::with_app(app2, 80, 24);
+        h2.events(&[], &[(MouseEventKind::Moved, (10, 6))]);
+        assert!(
+            !h2.app.cursor_visible(),
+            "reloaded Off preference must keep cursor hidden"
+        );
+
+        // Pressing 'c' again re-enables it.
+        h2.frame(&[KeyCode::Char('c')]);
+        assert_eq!(h2.app.scores.cheese_cursor, cursor::CursorSetting::On);
+        assert!(h2.app.cursor_visible());
+    }
+
+    #[test]
+    fn cheese_cursor_draws_on_every_normal_game_screen() {
+        let _guard = CURSOR_ENV_LOCK.lock().unwrap();
+        let pos = (18u16, 8u16);
+        let screens = [
+            "Title",
+            "SectorSelect",
+            "Story",
+            "MapIntro",
+            "LevelIntro",
+            "Playing",
+            "ExpandedMap",
+            "LevelUp",
+            "Paused",
+            "LevelComplete",
+            "KeepThree",
+            "Victory",
+            "End",
+        ];
+        for name in screens {
+            let mut h = Harness::new(80, 24);
+            h.frame(&[]);
+            match name {
+                "Title" => {}
+                "SectorSelect" => h.app.screen = Screen::SectorSelect,
+                "Story" => h.app.screen = Screen::Story,
+                "MapIntro" => {
+                    h.frame(&[KeyCode::Enter]);
+                    h.frame(&[KeyCode::Enter]);
+                }
+                "LevelIntro" => h.app.start_practice(1),
+                "Playing" => h.enter_playing(),
+                "ExpandedMap" => {
+                    h.enter_playing();
+                    h.frame(&[KeyCode::Tab]);
+                    assert!(h.app.map_open);
+                }
+                "LevelUp" => {
+                    h.enter_playing();
+                    h.app.open_levelup();
+                }
+                "Paused" => {
+                    h.enter_playing();
+                    h.frame(&[KeyCode::Char('p')]);
+                }
+                "LevelComplete" => {
+                    h.enter_playing();
+                    h.grant_keepables();
+                    h.finish_level();
+                }
+                "KeepThree" => {
+                    h.enter_playing();
+                    h.grant_keepables();
+                    h.finish_level();
+                    h.frame(&[KeyCode::Enter]);
+                }
+                "Victory" => {
+                    h.enter_playing();
+                    h.app.campaign.as_mut().unwrap().level = campaign::LEVEL_COUNT - 1;
+                    h.app.world.as_mut().unwrap().level_index = campaign::LEVEL_COUNT - 1;
+                    h.finish_level();
+                }
+                "End" => {
+                    h.enter_playing();
+                    h.app.world.as_mut().unwrap().game_over = true;
+                    h.frame(&[]);
+                }
+                _ => unreachable!(),
+            }
+            h.events(&[], &[(MouseEventKind::Moved, pos)]);
+            let tip = &h.terminal.backend().buffer()[pos];
+            assert_eq!(tip.symbol(), "▀", "cursor missing on screen {name}");
+            assert!(
+                is_cheese_yellow(tip.fg),
+                "cursor hot spot not cheese-yellow on {name}: {:?}",
+                tip.fg
+            );
+        }
+    }
+
+    /// Gated behind `RATRUN_CHEESE_DIR`: dumps ANSI captures of the cheese
+    /// cursor across Title, Gameplay (Sewer + Kitchen + Expanded Map), and
+    /// Level-Up at 80×24 and 120×40 in truecolor, 256-colour, 16-colour and
+    /// safe-glyph modes, plus a states strip.
+    #[test]
+    fn capture_cheese_cursor() {
+        use crate::game::loadout::{PassiveKind, Upgrade};
+        use crate::term::{sanitize_with, ColorDepth, GlyphSet};
+        use std::fmt::Write;
+
+        let Some(dir) = std::env::var_os("RATRUN_CHEESE_DIR") else {
+            return;
+        };
+        let _guard = CURSOR_ENV_LOCK.lock().unwrap();
+        let dir = std::path::Path::new(&dir);
+        std::fs::create_dir_all(dir).unwrap();
+
+        let dump = |buf: &ratatui::buffer::Buffer,
+                    w: u16,
+                    h: u16,
+                    name: &str,
+                    pos: (u16, u16),
+                    glyphs: GlyphSet,
+                    depth: ColorDepth| {
+            let mut copy = buf.clone();
+            sanitize_with(&mut copy, glyphs, depth);
+            let mut ansi = String::new();
+            for y in 0..h {
+                for x in 0..w {
+                    let c = &copy[(x, y)];
+                    let (r, g, b) = xterm_color_rgb(c.fg);
+                    let (br, bg, bb) = xterm_color_rgb(c.bg);
+                    write!(
+                        ansi,
+                        "\x1b[38;2;{r};{g};{b};48;2;{br};{bg};{bb}m{}",
+                        c.symbol()
+                    )
+                    .unwrap();
+                }
+                ansi.push_str("\x1b[0m\n");
+            }
+            let path = dir.join(format!("{w}x{h}-{name}__pos_{}_{}.ansi", pos.0, pos.1));
+            std::fs::write(path, ansi).unwrap();
+        };
+
+        for (w, h) in [(80u16, 24u16), (120, 40)] {
+            // 1. Title screen — cursor hovering on START RUN button.
+            let mut hh = Harness::new(w, h);
+            hh.frame(&[]);
+            let mut start_pos = (w / 2, h / 2);
+            'find_start: for y in 0..h {
+                for x in 0..w {
+                    if hh.app.hits.at(x, y) == Some(Target::Start) {
+                        start_pos = (x + 2, y);
+                        break 'find_start;
+                    }
+                }
+            }
+            hh.events(&[], &[(MouseEventKind::Moved, start_pos)]);
+            let buf = hh.terminal.backend().buffer().clone();
+            dump(&buf, w, h, "title-hover-tc", start_pos, GlyphSet::Unicode, ColorDepth::Truecolor);
+            dump(&buf, w, h, "title-hover-256", start_pos, GlyphSet::Unicode, ColorDepth::Ansi256);
+            dump(&buf, w, h, "title-hover-16", start_pos, GlyphSet::Unicode, ColorDepth::Ansi16);
+            dump(&buf, w, h, "title-hover-safe", start_pos, GlyphSet::Safe, ColorDepth::Ansi256);
+
+            // 2. Gameplay — Sewer + mouse steering + bob + click + held.
+            let mut gp = Harness::new(w, h);
+            gp.enter_playing();
+            if let Some(world) = gp.app.world.as_mut() {
+                for _ in 0..180 {
+                    world.update(1.0 / 60.0, Vec2::new(0.3, -0.1), false);
+                }
+            }
+            let play_pos = (w / 2 + 12, h / 2 - 2);
+            gp.events(&[], &[(MouseEventKind::Moved, play_pos)]);
+            let buf = gp.terminal.backend().buffer().clone();
+            dump(&buf, w, h, "play-tc", play_pos, GlyphSet::Unicode, ColorDepth::Truecolor);
+            dump(&buf, w, h, "play-256", play_pos, GlyphSet::Unicode, ColorDepth::Ansi256);
+            dump(&buf, w, h, "play-16", play_pos, GlyphSet::Unicode, ColorDepth::Ansi16);
+            dump(&buf, w, h, "play-safe", play_pos, GlyphSet::Safe, ColorDepth::Ansi256);
+
+            // Click sparkle + held frame during play (at 120×40).
+            if w == 120 {
+                gp.events(
+                    &[],
+                    &[(MouseEventKind::Down(MouseButton::Left), play_pos)],
+                );
+                let buf_click = gp.terminal.backend().buffer().clone();
+                dump(&buf_click, w, h, "play-click-held-tc", play_pos, GlyphSet::Unicode, ColorDepth::Truecolor);
+
+                // Release button so we capture pure click sparkle without held.
+                gp.events(&[], &[(MouseEventKind::Up(MouseButton::Left), play_pos)]);
+                let buf_spark = gp.terminal.backend().buffer().clone();
+                dump(&buf_spark, w, h, "play-sparkle-tc", play_pos, GlyphSet::Unicode, ColorDepth::Truecolor);
+
+                // Kitchen floor (warm bright floor contrast check; let click pulse finish first).
+                for _ in 0..20 {
+                    gp.frame(&[]);
+                }
+                gp.app.world = Some(World::new_level(1, TEST_SEED, Loadout::starting()));
+                if let Some(world) = gp.app.world.as_mut() {
+                    for _ in 0..120 {
+                        world.update(1.0 / 60.0, Vec2::new(0.2, 0.1), false);
+                    }
+                }
+                gp.events(&[], &[(MouseEventKind::Moved, play_pos)]);
+                let buf_k = gp.terminal.backend().buffer().clone();
+                dump(&buf_k, w, h, "play-kitchen-tc", play_pos, GlyphSet::Unicode, ColorDepth::Truecolor);
+
+                // Expanded minimap overlay check.
+                gp.frame(&[KeyCode::Tab]);
+                let map_pos = (w / 2, h / 2);
+                gp.events(&[], &[(MouseEventKind::Moved, map_pos)]);
+                let buf_m = gp.terminal.backend().buffer().clone();
+                dump(&buf_m, w, h, "play-map-tc", map_pos, GlyphSet::Unicode, ColorDepth::Truecolor);
+            }
+
+            // 3. Level-Up screen — cursor hovering on Upgrade card 0.
+            let mut lu = Harness::new(w, h);
+            lu.enter_playing();
+            if let Some(world) = lu.app.world.as_mut() {
+                for _ in 0..90 {
+                    world.update(1.0 / 60.0, Vec2::new(0.2, 0.0), false);
+                }
+                lu.app.levelup_choices = vec![
+                    Upgrade::NewWeapon(crate::game::weapon::WeaponKind::CheeseSpray),
+                    Upgrade::Passive(PassiveKind::Magnet),
+                    Upgrade::Passive(PassiveKind::Armor),
+                ];
+                lu.app.levelup_desc = lu
+                    .app
+                    .levelup_choices
+                    .iter()
+                    .map(|u| world.player.loadout.describe(u))
+                    .collect();
+                lu.app.screen = Screen::LevelUp;
+            }
+            lu.frame(&[]);
+            let mut card_pos = (w / 2, h / 2);
+            'find_card: for y in 0..h {
+                for x in 0..w {
+                    if lu.app.hits.at(x, y) == Some(Target::Upgrade(0)) {
+                        card_pos = (x + 4, y + 1);
+                        break 'find_card;
+                    }
+                }
+            }
+            lu.events(&[], &[(MouseEventKind::Moved, card_pos)]);
+            let buf = lu.terminal.backend().buffer().clone();
+            dump(&buf, w, h, "levelup-tc", card_pos, GlyphSet::Unicode, ColorDepth::Truecolor);
+            dump(&buf, w, h, "levelup-256", card_pos, GlyphSet::Unicode, ColorDepth::Ansi256);
+            dump(&buf, w, h, "levelup-16", card_pos, GlyphSet::Unicode, ColorDepth::Ansi16);
+            dump(&buf, w, h, "levelup-safe", card_pos, GlyphSet::Safe, ColorDepth::Ansi256);
         }
     }
 }
