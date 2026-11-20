@@ -18,12 +18,37 @@
 //! built in run order (never in completion order), so two identical batches
 //! produce an identical report whatever `--threads` is. `tests::identical_batches_match`
 //! is the regression.
+//!
+//! ## Reading a rate: Wilson intervals and sample size
+//!
+//! Every headline rate carries a **Wilson 95 % interval**
+//! ([`wilson95`]), and the text report prints the sample size a tuning step
+//! actually needs: resolving a 5-point difference between two rates near 50 %
+//! takes ~1 500 runs per arm (95 % confidence, 80 % power, [`runs_to_resolve`]).
+//! A 30-run batch has a ±14-18 point interval, so a 5-point move in it is
+//! noise unless it moves the same direction on the same seeds in a paired
+//! comparison.
+//!
+//! ## Finding defects: `--analyze` and `--cycle-skills`
+//!
+//! `--analyze` runs [`super::anomaly::AnomalyScan`] alongside every run and
+//! lists each class it found with example seeds and the subsystem to read
+//! first (silent player, silent weapons, a boss that takes no damage or never
+//! moves, a rat stuck against geometry, an untouched enemy in weapon range, a
+//! map the rat never leaves, levels/DPS/levels far over the batch median). The
+//! scan only reads the world, so an analysed run is the same run
+//! (`tests::the_anomaly_scan_does_not_change_a_run`).
+//!
+//! `--cycle-skills` rotates `Expert, Skilled, Casual` per run, so one 200-run
+//! batch samples the whole ladder: the right shape for a defect hunt (the
+//! headline rates per skill still come from `--skill` batches).
 
 use std::collections::BTreeMap;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+use super::anomaly::{self, Anomaly, AnomalyAgg, AnomalyKind, AnomalyScan};
 use super::{
     run_to_end, AutoOpts, AutoRun, DeathInfo, LevelStats, Progress, PROGRESS_TIMES,
 };
@@ -49,6 +74,17 @@ pub struct BatchOpts {
     pub practice: bool,
     /// Print a per-5-simulated-second trace of the first run (diagnostics).
     pub trace: bool,
+    /// Run the anomaly scan (see [`super::anomaly`]) and report its classes.
+    /// Costs roughly 10 % of a batch and never changes a run.
+    pub analyze: bool,
+    /// Rotate the skill per run (`Expert, Skilled, Casual, Expert, …`), so one
+    /// batch samples the whole ladder. The headline rates are then over mixed
+    /// skills; per-skill runs still use `--skill`.
+    pub cycle_skills: bool,
+    /// Treat `--seed` as a *run seed*, not a batch base: run `i` uses
+    /// `seed + i`. This is how an anomaly report's `seed` is replayed
+    /// (`--bot-batch 1 --seed-exact <seed> --trace`).
+    pub exact_seed: bool,
 }
 
 impl Default for BatchOpts {
@@ -63,14 +99,23 @@ impl Default for BatchOpts {
             json: false,
             practice: false,
             trace: false,
+            analyze: false,
+            cycle_skills: false,
+            exact_seed: false,
         }
     }
 }
+
+/// The skills `--cycle-skills` rotates through, in ladder order.
+pub const SKILL_CYCLE: [Skill; 3] = [Skill::Expert, Skill::Skilled, Skill::Casual];
 
 /// One run's outcome (what the aggregation sees).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunOutcome {
     pub seed: u64,
+    /// The skill this run played (`--cycle-skills` mixes them).
+    #[serde(default)]
+    pub skill: String,
     pub won: bool,
     pub death: Option<DeathOutcome>,
     pub total_time: f32,
@@ -81,6 +126,9 @@ pub struct RunOutcome {
     /// Fraction of simulated time within `NEAR_ENEMY_PX` of an enemy body.
     pub near_frac: f32,
     pub levels: Vec<LevelOutcome>,
+    /// Anomalies the scan found (`--analyze`; empty otherwise).
+    #[serde(default)]
+    pub anomalies: Vec<Anomaly>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -117,6 +165,12 @@ pub struct LevelOutcome {
     pub progress: Vec<ProgressOutcome>,
     /// Enemies alive at death.
     pub enemies_at_death: Option<u32>,
+    /// Highest player level reached on this level.
+    #[serde(default)]
+    pub max_player_level: u32,
+    /// Peak analytic build DPS on this level.
+    #[serde(default)]
+    pub max_analytic_dps: f32,
 }
 
 /// A progression checkpoint as it appears in a report.
@@ -159,6 +213,8 @@ impl LevelOutcome {
             },
             progress: s.progress.iter().map(progress_outcome).collect(),
             enemies_at_death: s.enemies_at_death,
+            max_player_level: s.max_player_level,
+            max_analytic_dps: s.max_analytic_dps,
         }
     }
 }
@@ -192,6 +248,15 @@ pub struct BatchReport {
     pub runs: usize,
     pub campaign_wins: usize,
     pub win_rate: f32,
+    /// Wilson 95 % interval of `win_rate`, as `[low, high]`.
+    #[serde(default)]
+    pub win_rate_ci: [f32; 2],
+    /// Was the anomaly scan on for this batch?
+    #[serde(default)]
+    pub analysis: bool,
+    /// Anomaly classes found (see [`super::anomaly`]); empty when off.
+    #[serde(default)]
+    pub anomalies: Vec<AnomalyAgg>,
     pub sim_seconds: f64,
     pub wall_seconds: f64,
     pub threads: usize,
@@ -225,12 +290,23 @@ pub struct BatchReport {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunSummary {
     pub seed: u64,
+    #[serde(default)]
+    pub skill: String,
     pub won: bool,
     /// Levels cleared (0-based count) — a campaign win clears 3.
     pub levels_cleared: usize,
     pub total_time: f32,
     pub kills_per_min: f32,
     pub near_frac: f32,
+    /// Total damage taken on the run (all levels).
+    #[serde(default)]
+    pub damage_taken: f32,
+    /// Seconds with a boss alive (all levels).
+    #[serde(default)]
+    pub boss_seconds: f32,
+    /// Highest player level reached in the run.
+    #[serde(default)]
+    pub max_player_level: u32,
     pub death: Option<DeathOutcome>,
 }
 
@@ -243,6 +319,9 @@ pub struct LevelAgg {
     pub reached_boss: usize,
     pub boss_kills: usize,
     pub clear_rate: f32,
+    /// Wilson 95 % interval of `clear_rate`, as `[low, high]`.
+    #[serde(default)]
+    pub clear_rate_ci: [f32; 2],
     /// Death clock on this level: min / p25 / median / p75 / max.
     pub death_time: Percentiles,
     /// Time on the level (all attempted runs).
@@ -312,6 +391,50 @@ impl Percentiles {
     }
 }
 
+/// Wilson score interval for a proportion, 95 % (z = 1.96).
+///
+/// `[low, high]` in 0..1, clamped. With `n == 0` it is the uninformative
+/// `[0, 1]`. A Wilson interval is the right one at these sample sizes: the
+/// normal approximation collapses to a zero-width interval at 0 % and 100 %,
+/// which is exactly where a clear rate lives after a small batch.
+pub fn wilson95(successes: usize, n: usize) -> [f32; 2] {
+    wilson_ci(successes, n, 1.96)
+}
+
+/// Wilson score interval for a proportion at an arbitrary `z`.
+pub fn wilson_ci(successes: usize, n: usize, z: f32) -> [f32; 2] {
+    if n == 0 {
+        return [0.0, 1.0];
+    }
+    let p = successes as f32 / n as f32;
+    let n = n as f32;
+    let z2 = z * z;
+    let denom = 1.0 + z2 / n;
+    let centre = (p + z2 / (2.0 * n)) / denom;
+    let half = (z / denom) * ((p * (1.0 - p) / n + z2 / (4.0 * n * n)).max(0.0)).sqrt();
+    [(centre - half).clamp(0.0, 1.0), (centre + half).clamp(0.0, 1.0)]
+}
+
+/// Runs per arm needed for a 95 % interval half-width of `half_width` around a
+/// rate near `p` (the worst case is `p = 0.5`).
+pub fn runs_for_half_width(p: f32, half_width: f32) -> usize {
+    let p = p.clamp(0.001, 0.999);
+    ((1.96 * 1.96) * p * (1.0 - p) / (half_width * half_width)).ceil() as usize
+}
+
+/// Runs per arm needed to resolve a difference of `margin` (absolute, e.g.
+/// 0.05) between two independent rates near `p`, at 95 % confidence and 80 %
+/// power (the standard two-proportion sample-size formula).
+///
+/// This is the number that matters when judging tuning: a batch of 30 cannot
+/// tell a 5-point move from noise, whatever its direction looks like.
+pub fn runs_to_resolve(p: f32, margin: f32) -> usize {
+    let p = p.clamp(0.001, 0.999);
+    let (z_a, z_b) = (1.96f32, 0.8416f32);
+    let n = 2.0 * p * (1.0 - p) * (z_a + z_b).powi(2) / (margin * margin);
+    n.ceil() as usize
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DamageAgg {
     pub source: String,
@@ -331,6 +454,63 @@ pub fn run_one(seed: u64, opts: AutoOpts, max_sim_seconds: f32) -> RunOutcome {
     let mut run = AutoRun::new(seed, opts);
     run_to_end(&mut run, DT, max_sim_seconds);
     outcome_of(seed, run.stats())
+}
+
+/// Play one run with the anomaly scan watching every tick.
+///
+/// The scan only reads the world, so the run is identical to [`run_one`]; the
+/// step loop is spelled out here because the scan needs a tick after each one.
+pub fn run_one_analyzed(seed: u64, opts: AutoOpts, max_sim_seconds: f32) -> RunOutcome {
+    let mut run = AutoRun::new(seed, opts);
+    let mut scan = AnomalyScan::new(seed);
+    let mut simulated = 0.0f32;
+    while !run.finished() && simulated < max_sim_seconds {
+        run.step(DT);
+        simulated += DT;
+        scan.tick(run.world(), DT);
+    }
+    let anomalies = scan.finish();
+    let mut outcome = outcome_of(seed, run.stats());
+    outcome.anomalies = anomalies;
+    outcome
+}
+
+/// The seed run `index` of this batch plays. `--seed-exact` takes the number
+/// literally (so a reported run seed can be replayed); otherwise the base is a
+/// batch label and every run is hashed off it ([`seed_for`]).
+fn run_seed(opts: &BatchOpts, index: usize) -> u64 {
+    if opts.exact_seed {
+        opts.seed.wrapping_add(index as u64)
+    } else {
+        seed_for(opts.seed, index)
+    }
+}
+
+/// The skill a run plays: `--cycle-skills` rotates the ladder, `--skill` is
+/// fixed, and both record the skill on the outcome.
+fn skill_for(opts: &BatchOpts, index: usize) -> Skill {
+    if opts.cycle_skills {
+        SKILL_CYCLE[index % SKILL_CYCLE.len()]
+    } else {
+        opts.skill
+    }
+}
+
+/// One batch row: the run and the outcome, with the skill recorded.
+fn run_row(opts: &BatchOpts, index: usize) -> RunOutcome {
+    let seed = run_seed(opts, index);
+    let skill = skill_for(opts, index);
+    let auto = AutoOpts {
+        skill,
+        ..auto_opts(opts)
+    };
+    let mut outcome = if opts.analyze {
+        run_one_analyzed(seed, auto, opts.max_sim_seconds)
+    } else {
+        run_one(seed, auto, opts.max_sim_seconds)
+    };
+    outcome.skill = skill.name().to_string();
+    outcome
 }
 
 /// One run's statistics as a report row (shared by every batch entry point).
@@ -353,6 +533,7 @@ fn outcome_of(seed: u64, stats: &super::RunStats) -> RunOutcome {
     });
     RunOutcome {
         seed,
+        skill: String::new(),
         won: stats.won,
         death,
         total_time: stats.total_time,
@@ -365,6 +546,7 @@ fn outcome_of(seed: u64, stats: &super::RunStats) -> RunOutcome {
             0.0
         },
         levels,
+        anomalies: Vec::new(),
     }
 }
 
@@ -373,7 +555,7 @@ pub fn run_batch(opts: &BatchOpts) -> BatchReport {
     let started = Instant::now();
     let mut outcomes = Vec::with_capacity(opts.runs);
     for i in 0..opts.runs {
-        outcomes.push(run_one(seed_for(opts.seed, i), auto_opts(opts), opts.max_sim_seconds));
+        outcomes.push(run_row(opts, i));
     }
     let wall = started.elapsed().as_secs_f64();
     aggregate(opts, outcomes, wall)
@@ -386,25 +568,20 @@ pub fn run_batch_threaded(opts: &BatchOpts) -> BatchReport {
     let mut outcomes: Vec<Option<RunOutcome>> = (0..opts.runs).map(|_| None).collect();
     if threads <= 1 {
         for (i, slot) in outcomes.iter_mut().enumerate() {
-            *slot = Some(run_one(
-                seed_for(opts.seed, i),
-                auto_opts(opts),
-                opts.max_sim_seconds,
-            ));
+            *slot = Some(run_row(opts, i));
         }
     } else {
-        let auto = auto_opts(opts);
-        let max_sim = opts.max_sim_seconds;
-        let base = opts.seed;
+        let opts = opts.clone();
         let runs = opts.runs;
         std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(threads);
             for t in 0..threads {
+                let opts = opts.clone();
                 handles.push(scope.spawn(move || {
                     let mut out = Vec::new();
                     let mut i = t;
                     while i < runs {
-                        out.push((i, run_one(seed_for(base, i), auto, max_sim)));
+                        out.push((i, run_row(&opts, i)));
                         i += threads;
                     }
                     out
@@ -422,7 +599,7 @@ pub fn run_batch_threaded(opts: &BatchOpts) -> BatchReport {
     let outcomes: Vec<RunOutcome> = outcomes
         .into_iter()
         .enumerate()
-        .map(|(i, o)| o.unwrap_or_else(|| run_one(seed_for(opts.seed, i), auto_opts(opts), 0.0)))
+        .map(|(i, o)| o.unwrap_or_else(|| run_row(opts, i)))
         .collect();
     aggregate(opts, outcomes, wall)
 }
@@ -433,8 +610,15 @@ pub fn run_batch_traced(opts: &BatchOpts) -> BatchReport {
     let started = Instant::now();
     let mut outcomes = Vec::with_capacity(opts.runs);
     for i in 0..opts.runs {
-        let seed = seed_for(opts.seed, i);
-        let mut run = AutoRun::new(seed, auto_opts(opts));
+        let seed = run_seed(opts, i);
+        let skill = skill_for(opts, i);
+        let mut run = AutoRun::new(
+            seed,
+            AutoOpts {
+                skill,
+                ..auto_opts(opts)
+            },
+        );
         let mut next_trace = 0.0f32;
         let mut simulated = 0.0f32;
         while !run.finished() && simulated < opts.max_sim_seconds {
@@ -445,7 +629,9 @@ pub fn run_batch_traced(opts: &BatchOpts) -> BatchReport {
                 next_trace += 0.5;
             }
         }
-        outcomes.push(outcome_of(seed, run.stats()));
+        let mut outcome = outcome_of(seed, run.stats());
+        outcome.skill = skill.name().to_string();
+        outcomes.push(outcome);
     }
     let wall = started.elapsed().as_secs_f64();
     aggregate(opts, outcomes, wall)
@@ -504,11 +690,20 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
         }
         run_summaries.push(RunSummary {
             seed: outcome.seed,
+            skill: outcome.skill.clone(),
             won: outcome.won,
             levels_cleared: outcome.levels.iter().filter(|l| l.cleared).count(),
             total_time: outcome.total_time,
             kills_per_min: outcome.kills_per_min,
             near_frac: outcome.near_frac,
+            damage_taken: outcome.levels.iter().map(|l| l.damage_total).sum(),
+            boss_seconds: outcome.levels.iter().map(|l| l.boss_seconds).sum(),
+            max_player_level: outcome
+                .levels
+                .iter()
+                .map(|l| l.max_player_level)
+                .max()
+                .unwrap_or(0),
             death: outcome.death.clone(),
         });
         for level in &outcome.levels {
@@ -523,6 +718,7 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
                         reached_boss: 0,
                         boss_kills: 0,
                         clear_rate: 0.0,
+                        clear_rate_ci: [0.0, 1.0],
                         death_time: Percentiles::default(),
                         time: Percentiles::default(),
                         boss_seconds: Percentiles::default(),
@@ -640,6 +836,7 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
         } else {
             agg.cleared as f32 / agg.attempted as f32
         };
+        agg.clear_rate_ci = wilson95(agg.cleared, agg.attempted);
         agg.death_time = Percentiles::of(death_times);
         agg.time = Percentiles::of(times);
         agg.boss_seconds = Percentiles::of(boss_seconds);
@@ -659,6 +856,98 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
         agg.upgrades = top(upgrades, 12);
         agg.kept = top(kept, 12);
     }
+    // ---- Anomalies ------------------------------------------------------
+    //
+    // The per-tick classes come from the scan; the four batch-level classes
+    // need every run, so they are computed here (the "2x the median level" and
+    // "3x the median level/DPS" tests).
+    let mut found: Vec<Anomaly> = if opts.analyze {
+        outcomes
+            .iter()
+            .flat_map(|o| o.anomalies.iter().cloned())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if opts.analyze {
+        for agg in &levels {
+            // `(seed, level)` pairs, so every batch-level find names the run it
+            // came from and can be replayed with `--seed-exact`.
+            let runs: Vec<(u64, &LevelOutcome)> = outcomes
+                .iter()
+                .flat_map(|o| o.levels.iter().map(move |l| (o.seed, l)))
+                .filter(|(_, l)| l.level == agg.level)
+                .collect();
+            let median_time = agg.time.median;
+            let mut levels_seen: Vec<f32> =
+                runs.iter().map(|(_, l)| l.max_player_level as f32).collect();
+            levels_seen.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let median_level = median_of(&levels_seen);
+            let mut dps_seen: Vec<f32> = runs
+                .iter()
+                .map(|(_, l)| l.max_analytic_dps)
+                .filter(|d| *d > 0.0)
+                .collect();
+            dps_seen.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let median_dps = median_of(&dps_seen);
+            for (seed, run) in runs {
+                if median_time > 0.0
+                    && run.time > median_time * anomaly::LEVEL_MEDIAN_FACTOR
+                    && run.death.is_some()
+                {
+                    found.push(Anomaly {
+                        kind: AnomalyKind::LongLevel,
+                        seed,
+                        level: run.level,
+                        at: run.time,
+                        seconds: run.time,
+                        detail: format!(
+                            "level lasted {:.0} s, {:.1}x the batch median {:.0} s",
+                            run.time,
+                            run.time / median_time,
+                            median_time
+                        ),
+                    });
+                }
+                if median_level > 0.0
+                    && run.max_player_level as f32 > median_level * anomaly::OUTLIER_FACTOR
+                {
+                    found.push(Anomaly {
+                        kind: AnomalyKind::LevelOutlier,
+                        seed,
+                        level: run.level,
+                        at: run.time,
+                        seconds: run.max_player_level as f32,
+                        detail: format!(
+                            "player level {} is {:.1}x the batch median {:.0}",
+                            run.max_player_level,
+                            run.max_player_level as f32 / median_level,
+                            median_level
+                        ),
+                    });
+                }
+                if median_dps > 0.0
+                    && run.max_analytic_dps > median_dps * anomaly::OUTLIER_FACTOR
+                {
+                    found.push(Anomaly {
+                        kind: AnomalyKind::DpsOutlier,
+                        seed,
+                        level: run.level,
+                        at: run.time,
+                        seconds: run.max_analytic_dps,
+                        detail: format!(
+                            "peak build dps {:.0} is {:.1}x the batch median {:.0}",
+                            run.max_analytic_dps,
+                            run.max_analytic_dps / median_dps,
+                            median_dps
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    let anomalies = anomaly::summarise(&found);
+
     levels.sort_by_key(|l| l.level);
     deaths.sort_by(|a, b| {
         a.level
@@ -675,7 +964,11 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
     };
     let threads = opts.threads.max(1);
     BatchReport {
-        skill: opts.skill.name().to_string(),
+        skill: if opts.cycle_skills {
+            "mixed".to_string()
+        } else {
+            opts.skill.name().to_string()
+        },
         practice: opts.practice,
         start_level: opts.start_level,
         base_seed: opts.seed,
@@ -686,6 +979,9 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
         } else {
             campaign_wins as f32 / runs as f32
         },
+        win_rate_ci: wilson95(campaign_wins, runs),
+        analysis: opts.analyze,
+        anomalies,
         sim_seconds,
         wall_seconds,
         threads,
@@ -743,6 +1039,13 @@ fn progress_aggs(buckets: Vec<Vec<ProgressOutcome>>) -> Vec<ProgressAgg> {
             })
         })
         .collect()
+}
+
+fn median_of(sorted: &[f32]) -> f32 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    sorted[sorted.len() / 2]
 }
 
 fn mean(v: &[f32]) -> f32 {
@@ -1180,8 +1483,14 @@ pub fn maybe_run_cli() -> Option<i32> {
 
 const USAGE: &str = "\
 usage: ratrun --bot-batch <N> [--seed <S>] [--level <1-3>] [--practice] \
-[--skill expert|skilled|casual] [--max-sim-seconds <T>] [--threads <K>] [--json] \
-       ratrun --bot-compare <a.json> <b.json> [--json]";
+[--skill expert|skilled|casual] [--cycle-skills] [--seed-exact] \
+[--max-sim-seconds <T>] [--threads <K>] [--analyze] [--json] [--trace] \
+       ratrun --bot-compare <a.json> <b.json> [--json]
+
+  --analyze        also run the anomaly scan (see autoplay::anomaly) and list
+                   every class it finds with example seeds (costs ~10 %)
+  --cycle-skills   rotate Expert, Skilled, Casual per run (mixed-skill batch)
+  --seed-exact     read --seed as a run seed (replay an anomaly's seed)";
 
 /// Parse the batch flags. `Ok(None)` means "the flag was not for us".
 pub fn parse_args(args: &[String]) -> Result<Option<BatchOpts>, String> {
@@ -1234,6 +1543,9 @@ pub fn parse_args(args: &[String]) -> Result<Option<BatchOpts>, String> {
             }
             "--json" => opts.json = true,
             "--trace" => opts.trace = true,
+            "--analyze" => opts.analyze = true,
+            "--cycle-skills" => opts.cycle_skills = true,
+            "--seed-exact" => opts.exact_seed = true,
             other => {
                 if saw {
                     return Err(format!("unknown flag {other:?}"));
@@ -1254,6 +1566,48 @@ pub fn parse_args(args: &[String]) -> Result<Option<BatchOpts>, String> {
 
 fn pct(x: f32) -> String {
     format!("{:.0}%", x * 100.0)
+}
+
+/// A Wilson interval as "low-high" percent.
+fn ci(ci: [f32; 2]) -> String {
+    format!("{:.0}-{:.0}%", ci[0] * 100.0, ci[1] * 100.0)
+}
+
+/// The anomaly-scan section of the text report.
+fn anomaly_section(classes: &[AnomalyAgg], runs: usize) -> String {
+    let mut s = String::new();
+    if classes.is_empty() {
+        s.push_str(&format!(
+            "\nAnomaly scan: no class fired over {runs} analysed runs.\n"
+        ));
+        return s;
+    }
+    let total: usize = classes.iter().map(|c| c.count).collect::<Vec<_>>().iter().sum();
+    s.push_str(&format!(
+        "\nAnomaly scan — {} class(es), {total} finds over {runs} analysed runs:\n",
+        classes.len()
+    ));
+    for c in classes {
+        let seeds: Vec<String> = c.seeds.iter().take(4).map(|s| s.to_string()).collect();
+        s.push_str(&format!(
+            "  {:<18} {:>3} run(s) / {:>3} find(s)   seeds {}\n",
+            c.kind.name(),
+            c.runs,
+            c.count,
+            seeds.join(", ")
+        ));
+        s.push_str(&format!("      owner: {}\n", c.owner));
+        for e in c.examples.iter().take(2) {
+            s.push_str(&format!(
+                "      e.g. seed {} L{} @{:.0}s: {}\n",
+                e.seed,
+                e.level + 1,
+                e.at,
+                e.detail
+            ));
+        }
+    }
+    s
 }
 
 fn secs(x: f32) -> String {
@@ -1357,10 +1711,11 @@ pub fn render_table(r: &BatchReport) -> String {
         r.base_seed
     ));
     s.push_str(&format!(
-        "campaign wins: {}/{} ({})   sim time: {:.0}s in {:.1}s wall on {} thread(s) = {:.1}x sim-seconds per wall-second per thread\n",
+        "campaign wins: {}/{} ({}, 95% CI {})   sim time: {:.0}s in {:.1}s wall on {} thread(s) = {:.1}x sim-seconds per wall-second per thread\n",
         r.campaign_wins,
         r.runs,
         pct(r.win_rate),
+        ci(r.win_rate_ci),
         r.sim_seconds,
         r.wall_seconds,
         r.threads,
@@ -1379,17 +1734,26 @@ pub fn render_table(r: &BatchReport) -> String {
         dist_count(&r.enemies_at_death)
     ));
     s.push_str(&format!("progress: {}\n", progress_line(&r.progress)));
+    // How much of a change is noise at this batch size. A 5-point move is the
+    // unit the owner talks in; at n=30 almost none of it is resolvable.
+    s.push_str(&format!(
+        "sample size: a 95% interval half-width of 5 points needs ~{} runs at p=0.5; \
+resolving a 5-point difference between two arms needs ~{} runs per arm (95% conf, 80% power)\n",
+        runs_for_half_width(0.5, 0.05),
+        runs_to_resolve(0.5, 0.05)
+    ));
     if !r.death_notes.is_empty() {
         s.push_str(&format!("death causes: {}\n", notes_line(&r.death_notes)));
     }
     s.push('\n');
     for l in &r.levels {
         s.push_str(&format!(
-            "Level {} — {}/{} cleared ({}), {} deaths, boss reached {} / killed {}\n",
+            "Level {} — {}/{} cleared ({}, 95% CI {}), {} deaths, boss reached {} / killed {}\n",
             l.level + 1,
             l.cleared,
             l.attempted,
             pct(l.clear_rate),
+            ci(l.clear_rate_ci),
             l.deaths,
             l.reached_boss,
             l.boss_kills
@@ -1468,6 +1832,9 @@ pub fn render_table(r: &BatchReport) -> String {
             .collect();
         s.push_str(&format!("\nCommon picks/carries: {}\n", list.join(", ")));
     }
+    if r.analysis {
+        s.push_str(&anomaly_section(&r.anomalies, r.runs));
+    }
     s
 }
 
@@ -1486,6 +1853,9 @@ mod tests {
             json: false,
             practice: true,
             trace: false,
+            analyze: false,
+            cycle_skills: false,
+            exact_seed: false,
         }
     }
 
@@ -1539,6 +1909,63 @@ mod tests {
         assert_eq!(opts.max_sim_seconds, 120.0);
         assert_eq!(opts.threads, 4);
         assert!(opts.json && opts.practice);
+        assert!(!opts.analyze && !opts.cycle_skills);
+        let args: Vec<String> = "--bot-batch 3 --analyze --cycle-skills"
+            .split(' ')
+            .map(|s| s.to_string())
+            .collect();
+        let opts = parse_args(&args).expect("ok").expect("parsed");
+        assert!(opts.analyze && opts.cycle_skills);
+        assert_eq!(opts.skill, Skill::Expert, "--skill is the fixed default");
+        let args: Vec<String> = "--bot-batch 2 --seed 123 --seed-exact"
+            .split(' ')
+            .map(|s| s.to_string())
+            .collect();
+        let opts = parse_args(&args).expect("ok").expect("parsed");
+        assert!(opts.exact_seed);
+        assert_eq!(run_seed(&opts, 0), 123);
+        assert_eq!(run_seed(&opts, 1), 124);
+    }
+
+    /// The Wilson interval and the sample-size helper agree with the textbook
+    /// numbers (and stay inside 0..1 at the corners).
+    #[test]
+    fn wilson_intervals_and_sample_size_are_sane() {
+        let [lo, hi] = wilson95(5, 10);
+        assert!((lo - 0.236).abs() < 0.01, "low {lo}");
+        assert!((hi - 0.764).abs() < 0.01, "high {hi}");
+        let [lo, hi] = wilson95(0, 10);
+        assert_eq!(lo, 0.0);
+        assert!(hi > 0.2 && hi < 0.4, "0/10 high {hi}");
+        let [lo, hi] = wilson95(10, 10);
+        assert_eq!(hi, 1.0);
+        assert!(lo < 0.8, "10/10 low {lo}");
+        assert_eq!(wilson95(0, 0), [0.0, 1.0]);
+        // 5 points at p = 0.5 is the classic two-proportion case.
+        assert!((1400..1700).contains(&runs_to_resolve(0.5, 0.05)));
+        assert!(runs_to_resolve(0.9, 0.05) < runs_to_resolve(0.5, 0.05));
+        // A single-arm half-width of 5 points at p = 0.5 is 384.
+        assert_eq!(runs_for_half_width(0.5, 0.05), 385);
+    }
+
+    /// The scan is read-only: an analysed run must be the same run.
+    #[test]
+    fn the_anomaly_scan_does_not_change_a_run() {
+        let opts = tiny(Skill::Expert, 2, 21);
+        for i in 0..2 {
+            let seed = seed_for(opts.seed, i);
+            let plain = run_one(seed, AutoOpts::practice(0, Skill::Expert), 40.0);
+            let scanned = run_one_analyzed(seed, AutoOpts::practice(0, Skill::Expert), 40.0);
+            let mut a = serde_json::to_value(&plain).expect("json");
+            let mut b = serde_json::to_value(&scanned).expect("json");
+            if let Some(o) = a.as_object_mut() {
+                o.remove("anomalies");
+            }
+            if let Some(o) = b.as_object_mut() {
+                o.remove("anomalies");
+            }
+            assert_eq!(a, b, "the scan changed run {i}");
+        }
     }
 
     #[test]
@@ -1573,6 +2000,9 @@ mod tests {
             "enemies_at_death",
             "progress",
             "death_notes",
+            "win_rate_ci",
+            "analysis",
+            "anomalies",
         ] {
             assert!(!v[key].is_null(), "report is missing {key}");
         }

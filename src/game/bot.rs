@@ -127,6 +127,13 @@ const R: f32 = PLAYER_RADIUS;
 const SCAN_RADIUS: f32 = 230.0;
 /// Number of compass directions the bot scores each decision.
 const DIRS: usize = 16;
+/// Skin gap (px) inside which a live body forbids a "stand still" decision:
+/// six px past contact. The freeze this breaks happens with bodies already on
+/// the rat, so the trigger is deliberately narrow: a wider one (40 px) was
+/// measured *worse* — pushing the rat to move whenever a body was within 40 px
+/// cost wins in a paired 200-campaign batch, because a brief standstill inside
+/// a pack is part of how the bot kites.
+const FOE_ON_RAT_PX: f32 = 6.0;
 
 /// How well the bot plays; see the module docs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -456,12 +463,29 @@ impl Bot {
         let dirs = unit_dirs();
         let mut best_dir = Vec2::ZERO;
         let mut best_score = self.score(w, pos, Vec2::ZERO, false);
+        let mut best_move = dirs[0];
+        let mut best_move_score = f32::NEG_INFINITY;
         for d in dirs {
             let s = self.score(w, pos, d, true);
+            if s > best_move_score {
+                best_move_score = s;
+                best_move = d;
+            }
             if s > best_score {
                 best_score = s;
                 best_dir = d;
             }
+        }
+        // Standing still is never the answer with a body on the rat. The
+        // danger field scores "stay" without the runway and heading penalties,
+        // so inside a dense pack every heading can look worse than not moving
+        // and the rat freezes while the horde chews through it (measured: 11 s
+        // motionless at HP 115 -> 65 with 100+ bodies alive, run seed
+        // 13414622563986662246; `autoplay::anomaly::AnomalyKind::Stuck`). Take
+        // the best *heading* instead: moving into the thinnest arc is the only
+        // way out, and this only fires while a body is on the rat.
+        if best_dir.len_sq() <= 0.01 && self.body_on_rat(w) {
+            best_dir = best_move;
         }
 
         // Casual steering error: rotate the chosen direction a little.
@@ -939,6 +963,16 @@ impl Bot {
         }
 
         -danger * self.params.safety + bonus
+    }
+
+    /// Is a live body inside `FOE_ON_RAT_PX` of the rat's skin right now?
+    /// (`self.threats` is this decision's snapshot.)
+    fn body_on_rat(&self, w: &World) -> bool {
+        let p = w.player.pos;
+        self.threats.iter().any(|t| match *t {
+            Threat::Enemy { pos, radius, .. } => pos.dist(p) < radius + R + FOE_ON_RAT_PX,
+            _ => false,
+        })
     }
 
     /// Should the dash be spent this tick, and if so, in the best direction?
