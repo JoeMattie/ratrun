@@ -81,6 +81,36 @@ impl EnemyKind {
     }
 }
 
+/// How a campaign level's horde differs from the base kinds.
+///
+/// The base kinds ([`EnemyKind::damage`], [`EnemyKind::speed`]) are the Sewer's
+/// and are owned by the enemy-stats tuning pass; a later level *multiplies*
+/// them here instead of retuning them, so the two cannot fight each other.
+/// [`crate::game::director::enemy_mods_for`] builds these per spawn and ramps
+/// them over the level's clock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EnemyMods {
+    /// Multiplies [`EnemyKind::damage`] (what contact/bullets take off the rat).
+    pub damage: f32,
+    /// Multiplies [`EnemyKind::speed`] (the Lab's swarm is quicker than the
+    /// Sewer's).
+    pub speed: f32,
+}
+
+impl EnemyMods {
+    /// The base kinds, unchanged: campaign level 1.
+    pub const NONE: EnemyMods = EnemyMods {
+        damage: 1.0,
+        speed: 1.0,
+    };
+}
+
+impl Default for EnemyMods {
+    fn default() -> Self {
+        EnemyMods::NONE
+    }
+}
+
 #[derive(Clone)]
 pub struct Enemy {
     /// Monotonic runtime identifier assigned on spawn (0 if constructed outside `World`).
@@ -98,6 +128,9 @@ pub struct Enemy {
     pub fire_cd: f32,
     pub wander: f32,
     pub contact_cd: f32,
+    /// Campaign-level speed multiplier ([`EnemyMods::speed`]); 1.0 for the base
+    /// kinds. Stored on the body because [`Enemy::steer`] reads it every tick.
+    pub speed_scale: f32,
     /// Gait/wing animation phase, advanced by movement.
     pub anim: f32,
     /// Smoothed facing direction for sprite orientation.
@@ -121,9 +154,27 @@ impl Enemy {
             fire_cd: rng.random_range(1.0..2.5),
             wander: rng.random_range(0.0..std::f32::consts::TAU),
             contact_cd: 0.0,
+            speed_scale: 1.0,
             anim: rng.random_range(0.0..std::f32::consts::TAU),
             facing: Vec2::new(1.0, 0.0),
         }
+    }
+
+    /// [`Enemy::spawn`] with a campaign level's [`EnemyMods`] applied.
+    ///
+    /// Draws exactly the same rng values as [`Enemy::spawn`] (it delegates to
+    /// it), so a later level changes numbers, never the rng stream.
+    pub fn spawn_with_mods(
+        kind: EnemyKind,
+        pos: Vec2,
+        hp_mult: f32,
+        mods: EnemyMods,
+        rng: &mut impl Rng,
+    ) -> Self {
+        let mut e = Enemy::spawn(kind, pos, hp_mult, rng);
+        e.damage = kind.damage() * mods.damage;
+        e.speed_scale = mods.speed;
+        e
     }
 
     /// Steer toward the player, routing around walls via the flow field.
@@ -145,7 +196,7 @@ impl Enemy {
         } else {
             direct
         };
-        let speed = self.kind.speed() * speed_mult;
+        let speed = self.kind.speed() * self.speed_scale * speed_mult;
         let desired = match self.kind {
             EnemyKind::Bat => {
                 self.wander += dt * 4.0;

@@ -50,7 +50,7 @@ use serde::{Deserialize, Serialize};
 
 use super::anomaly::{self, Anomaly, AnomalyAgg, AnomalyKind, AnomalyScan};
 use super::{
-    run_to_end, AutoOpts, AutoRun, DeathInfo, LevelStats, Progress, PROGRESS_TIMES,
+    run_to_end, AutoOpts, AutoRun, CarryPreset, DeathInfo, LevelStats, Progress, PROGRESS_TIMES,
 };
 use crate::game::bot::Skill;
 use crate::game::campaign;
@@ -73,6 +73,10 @@ pub struct BatchOpts {
     pub json: bool,
     /// `false` = full campaign from `start_level`, `true` = that level alone.
     pub practice: bool,
+    /// What a measured level starts with. `None` is the real level-1 default;
+    /// `Typical` is the modal three-powerup keep of real campaigns, so a
+    /// `--level 2`/`--level 3` batch measures the level a carried player meets.
+    pub carry: CarryPreset,
     /// Print a per-5-simulated-second trace of the first run (diagnostics).
     pub trace: bool,
     /// Run the anomaly scan (see [`super::anomaly`]) and report its classes.
@@ -99,6 +103,7 @@ impl Default for BatchOpts {
             threads: 1,
             json: false,
             practice: false,
+            carry: CarryPreset::None,
             trace: false,
             analyze: false,
             cycle_skills: false,
@@ -267,6 +272,9 @@ pub struct BatchReport {
     pub skill: String,
     pub practice: bool,
     pub start_level: usize,
+    /// What the measured level started with (`CarryPreset::name`).
+    #[serde(default)]
+    pub carry: String,
     pub base_seed: u64,
     pub runs: usize,
     pub campaign_wins: usize,
@@ -729,6 +737,7 @@ fn auto_opts(opts: &BatchOpts) -> AutoOpts {
         start_level: opts.start_level,
         campaign: !opts.practice,
         skill: opts.skill,
+        carry: opts.carry,
     }
 }
 
@@ -1123,6 +1132,7 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
         },
         practice: opts.practice,
         start_level: opts.start_level,
+        carry: opts.carry.name().to_string(),
         base_seed: opts.seed,
         runs,
         campaign_wins,
@@ -1715,10 +1725,13 @@ pub fn maybe_run_cli() -> Option<i32> {
 
 const USAGE: &str = "\
 usage: ratrun --bot-batch <N> [--seed <S>] [--level <1-3>] [--practice] \
-[--skill expert|skilled|casual] [--cycle-skills] [--seed-exact] \
-[--max-sim-seconds <T>] [--threads <K>] [--analyze] [--json] [--trace] \
+[--carry none|typical] [--skill expert|skilled|casual] [--cycle-skills] \
+[--seed-exact] [--max-sim-seconds <T>] [--threads <K>] [--analyze] [--json] \
+[--trace] \
        ratrun --bot-compare <a.json> <b.json> [--json]
 
+  --carry          start a measured level with a real carried loadout
+                   (none = the level-1 default, typical = the modal keep-three)
   --analyze        also run the anomaly scan (see autoplay::anomaly) and list
                    every class it finds with example seeds (costs ~10 %)
   --cycle-skills   rotate Expert, Skilled, Casual per run (mixed-skill batch)
@@ -1753,6 +1766,11 @@ pub fn parse_args(args: &[String]) -> Result<Option<BatchOpts>, String> {
                 opts.start_level = level - 1;
             }
             "--practice" => opts.practice = true,
+            "--carry" => {
+                let s = value()?;
+                opts.carry =
+                    CarryPreset::parse(s).ok_or_else(|| format!("unknown carry {s:?}"))?;
+            }
             "--skill" => {
                 let s = value()?;
                 opts.skill = Skill::parse(s).ok_or_else(|| format!("unknown skill {s:?}"))?;
@@ -1955,7 +1973,7 @@ fn notes_line(notes: &[(String, usize)]) -> String {
 pub fn render_table(r: &BatchReport) -> String {
     let mut s = String::new();
     s.push_str(&format!(
-        "Rat Run bot batch — {} runs, skill {}, {}, start level {}, seed {}\n",
+        "Rat Run bot batch — {} runs, skill {}, {}, start level {}, carry {}, seed {}\n",
         r.runs,
         r.skill,
         if r.practice {
@@ -1964,6 +1982,7 @@ pub fn render_table(r: &BatchReport) -> String {
             "full campaign"
         },
         r.start_level + 1,
+        r.carry,
         r.base_seed
     ));
     s.push_str(&format!(
@@ -2122,6 +2141,7 @@ mod tests {
             threads: 2,
             json: false,
             practice: true,
+            carry: CarryPreset::None,
             trace: false,
             analyze: false,
             cycle_skills: false,
@@ -2180,6 +2200,29 @@ mod tests {
         assert_eq!(opts.threads, 4);
         assert!(opts.json && opts.practice);
         assert!(!opts.analyze && !opts.cycle_skills);
+        assert_eq!(opts.carry, CarryPreset::None);
+
+        // `--carry` picks the measurement start; `--bot-compare` reads the
+        // report back, so the field has to survive the round trip too.
+        let args: Vec<String> = "--bot-batch 2 --level 2 --practice --carry typical"
+            .split(' ')
+            .map(|s| s.to_string())
+            .collect();
+        let opts = parse_args(&args).expect("ok").expect("parsed");
+        assert_eq!(opts.carry, CarryPreset::Typical);
+        assert_eq!(opts.start_level, 1);
+        assert!(opts.practice);
+        // The preset is a real loadout, not a level-1 start.
+        let lo = CarryPreset::Typical.loadout();
+        assert_eq!(lo.weapons.len(), 3);
+        assert!(lo.weapons.iter().all(|w| w.level == w.kind.max_level()));
+
+        let bad: Vec<String> = "--bot-batch 2 --carry nope"
+            .split(' ')
+            .map(|s| s.to_string())
+            .collect();
+        assert!(parse_args(&bad).is_err());
+
         let args: Vec<String> = "--bot-batch 3 --analyze --cycle-skills"
             .split(' ')
             .map(|s| s.to_string())
