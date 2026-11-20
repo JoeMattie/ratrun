@@ -118,8 +118,24 @@ const ROOM_WAVE_AFTER_PULSES: u32 = 8;
 /// size divided by [`BOSS_HORDE_PULSE_DIV`]: the fight is about the boss, the
 /// horde still trickles in, and the rat's weapons are not spent on bodies it
 /// cannot walk past.
-const BOSS_HORDE_INTERVAL_MULT: f32 = 3.0;
-const BOSS_HORDE_PULSE_DIV: usize = 3;
+///
+/// How thin is tuned by measurement, not taste. The trickle is also the rat's
+/// sustain in the fight: its kills are XP, and a level-up during the boss is
+/// the heal that keeps the run alive (see `loot`/`loadout`), so starving the
+/// chorus turns the fight into a coin flip decided by who runs out of HP
+/// first. Three levels on the same 60-seed sample x 2 seed bases:
+///
+/// | effective spawn | Skilled L1 | Casual L1 | Expert L1 |
+/// |---|---|---|---|
+/// | x1/24 (6.0 / 4) | 37 % | 27 % | 37 % |
+/// | x1/9 (3.0 / 3, old) | 48 % | 23 % | 63 % |
+/// | x1/4 (2.0 / 2, this) | 64 % | 29 % | 75 % |
+///
+/// (30-run batches for the x1/24 row; the other two are 120-run batches — see
+/// the balance log.) 2/2 keeps the fight legible and skill-decided and leaves
+/// the boss's own pool/telegraph as the difficulty lever.
+const BOSS_HORDE_INTERVAL_MULT: f32 = 2.0;
+const BOSS_HORDE_PULSE_DIV: usize = 2;
 /// Only rooms whose centre is this close to the player are used for a room
 /// wave (design change 6 cut this from 1 400 px: a wave that takes fifteen
 /// seconds to arrive is a queue, not pressure).
@@ -811,9 +827,16 @@ pub fn room_wave_point(
 ) -> Option<Vec2> {
     scratch.sync(level);
     scratch.build_approach(level, player.pos);
+    // The chamber the rat is standing in, if any: no wave may be staged in a
+    // room whose rectangle touches it. Levels are generated as merged open
+    // areas now, so two rooms can share floor and a room-wave rectangle can
+    // *contain* the rat even though `room_at` names a different one — the old
+    // "the rat is not inside this rect" test missed that (this is the fix for
+    // the failing `room_waves_stage_enemies_outside_the_players_room`).
+    let player_room = level.room_at(player.pos).map(|r| r.rect);
     let mut count = 0u32;
     for (i, room) in level.rooms.iter().enumerate() {
-        if room_wave_ok(scratch, i, room, player) {
+        if room_wave_ok(scratch, i, room, player, player_room) {
             count += 1;
         }
     }
@@ -823,7 +846,7 @@ pub fn room_wave_point(
     let pick = rng.random_range(0..count);
     let mut seen = 0u32;
     for (i, room) in level.rooms.iter().enumerate() {
-        if !room_wave_ok(scratch, i, room, player) {
+        if !room_wave_ok(scratch, i, room, player, player_room) {
             continue;
         }
         if seen == pick {
@@ -841,9 +864,16 @@ pub fn room_wave_point(
 /// design change — an approach of at most [`APPROACH_CELLS`] path cells so the
 /// wave arrives in seconds instead of queueing behind a wall.
 #[inline]
-fn room_wave_ok(scratch: &SpawnScratch, index: usize, room: &Room, player: &Player) -> bool {
+fn room_wave_ok(
+    scratch: &SpawnScratch,
+    index: usize,
+    room: &Room,
+    player: &Player,
+    player_room: Option<TileRect>,
+) -> bool {
     room_staging_ok(scratch, index, room)
         && !room.rect.contains_world(player.pos)
+        && player_room.is_none_or(|area| !room.rect.intersects(&area))
         && room.center().dist(player.pos) <= ROOM_WAVE_RANGE
         && scratch.room_in_approach(index)
 }
@@ -988,6 +1018,18 @@ fn room_approach_point(
         }
         if scratch.approach_cells(level, p).is_none() {
             continue;
+        }
+        // The point itself must satisfy the staging rule, not just the room it
+        // was sampled in: generated maps are merged open areas, so a point can
+        // land in a *different* room that overlaps the chosen one (possibly the
+        // rat's own, or one whose centre is out of wave range). Rejecting those
+        // keeps "a wave is staged in a room the rat is not in, within
+        // `ROOM_WAVE_RANGE`" true of the actual spawn point.
+        match level.room_at(p) {
+            Some(at)
+                if !at.rect.contains_world(player.pos)
+                    && at.center().dist(player.pos) <= ROOM_WAVE_RANGE => {}
+            _ => continue,
         }
         return Some(p);
     }
