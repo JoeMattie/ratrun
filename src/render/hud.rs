@@ -1363,10 +1363,15 @@ mod tests {
         push_short_name(&mut s, "");
         assert_eq!(s, "");
 
+        // A multi-byte lead character must not be sliced mid-codepoint.
+        // (This used to be the dagger emoji, which is two codepoints — dagger
+        // plus U+FE0F VARIATION SELECTOR-16 — and renders double-width in most
+        // terminals. See `TERMINALS.md`: no emoji or variation selector is left
+        // in the source.)
         s.clear();
-        push_short_name(&mut s, "🗡️ knife");
+        push_short_name(&mut s, "×knife");
         assert_eq!(s.chars().count(), 4);
-        assert!(s.starts_with('🗡'));
+        assert!(s.starts_with('×'));
     }
 
     fn known_world() -> World {

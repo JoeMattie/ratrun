@@ -14,6 +14,7 @@ mod math;
 mod render;
 mod scores;
 mod spectate;
+mod term;
 mod titleart;
 
 mod game;
@@ -64,6 +65,40 @@ fn main() -> Result<()> {
     // Parse before touching the terminal, so a bad flag is a plain error
     // message rather than a screen that flickers into raw mode first.
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Resolve what this terminal can be trusted with before anything is drawn:
+    // colour depth, glyph set and multiplexer. `--caps` prints the answer and
+    // exits without touching the terminal at all.
+    let caps = term::init(&args);
+    if args.iter().any(|a| a == "--caps") {
+        println!("{}", caps.describe());
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--probe") {
+        // Diagnostic used to build TERMINALS.md: report what this terminal says
+        // about itself, then *ask* it for its keyboard protocol and print the
+        // answer. Needs a real TTY, so raw mode is entered for the query and
+        // released before printing. The report goes to stderr because the
+        // query itself is written to stdout: stdout must stay the terminal or
+        // the terminal never sees the question.
+        terminal::enable_raw_mode()?;
+        let probe = term::query_keyboard();
+        let _ = terminal::disable_raw_mode();
+        eprintln!(
+            "{} kitty={} flags={:?} reply={}",
+            caps.describe(),
+            probe.supported(),
+            probe.flags,
+            probe
+                .raw
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        return Ok(());
+    }
+
     let ai = parse_spectate_args(&args)?;
 
     let original = std::panic::take_hook();
@@ -194,7 +229,14 @@ fn setup_terminal() -> Result<(Terminal<CrosstermBackend<io::Stdout>>, bool)> {
         cursor::Hide
     )?;
 
-    let kitty = terminal::supports_keyboard_enhancement().unwrap_or(false);
+    // Ask the terminal whether it speaks the Kitty keyboard protocol. This is
+    // the one startup query that can block: crossterm's own version waits its
+    // full 2 s timeout on a terminal that never answers (and on every terminal
+    // that answers only primary device attributes), which is charged to the
+    // first frame. `term::query_keyboard_enhancement` sends the same two
+    // queries and gives up after 300 ms. Asking is never skipped: tmux and ssh
+    // forward the query, so sniffing the environment would only break them.
+    let kitty = term::query_keyboard_enhancement();
     if kitty {
         execute!(
             stdout,
@@ -426,7 +468,16 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, kitty: bool) -> Re
         // Present the frame atomically: a half-block frame redrawn cell by cell
         // would otherwise tear mid-frame on a fast terminal.
         let mut out = io::stdout();
-        with_synchronized_update(&mut out, || terminal.draw(|f| app.render(f)))?;
+        with_synchronized_update(&mut out, || {
+            terminal.draw(|f| {
+                app.render(f);
+                // Fold the finished frame into what this terminal can draw:
+                // RGB → palette when truecolor is unavailable, and risky glyphs
+                // → safe ones when the terminal mis-sizes them. A no-op when
+                // the terminal supports everything (the default path).
+                term::sanitize(f.buffer_mut());
+            })
+        })?;
 
         let elapsed = frame_start.elapsed();
         if elapsed < target {

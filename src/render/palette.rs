@@ -8,6 +8,17 @@ pub fn to_color(c: Rgb) -> Color {
     Color::Rgb(c.0, c.1, c.2)
 }
 
+/// Hand a colour to the terminal: exact RGB when the terminal takes 24-bit
+/// colour, the nearest xterm palette entry otherwise (see [`crate::term`]).
+///
+/// This is the *output* mapping — the art code keeps working in RGB and the
+/// fold happens once, at the edge. `depth` is resolved once per frame so the
+/// half-block pixel path does not re-read the capability per pixel.
+#[inline]
+pub fn to_term(c: Rgb, depth: crate::term::ColorDepth) -> Color {
+    crate::term::map_rgb_with(depth, c)
+}
+
 pub fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
     let t = t.clamp(0.0, 1.0);
     (
