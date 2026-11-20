@@ -1764,18 +1764,48 @@ mod tests {
 
     #[test]
     fn mower_home_move_is_available_when_the_rat_fights_near_a_wall() {
-        // Property over seeds: with the rat within 48 px of an arena wall and
-        // the mower 30..80 px away, a lane that ends on that wall *a screenful
-        // from the rat* is always on offer — that is the flip the rat can bait.
+        // Property over seeds: with the rat within 48 px of a **solid** arena
+        // wall and the mower 30..80 px away, a lane that ends on that wall *a
+        // screenful from the rat* is always on offer — that is the flip the rat
+        // can bait.
+        //
+        // The wall has to be solid for that to mean anything, and the arena's
+        // wall ring is no longer continuous: the generator punches the arena's
+        // mouth(s) through it as a `WallKind::Doorway` band
+        // (`layout::BOSS_MOUTH_MIN` cells wide). On some seeds one mouth sits at
+        // the arena's mid-height — exactly where this fixture puts the rat — so
+        // the straight lane runs out through the arch instead of into a wall.
+        // That is map geometry, not a gap in the fight: a lane angled far enough
+        // to end on the mouth's jamb would pass beside the rat, and
+        // `probe_lane`'s `attack_fits` side-lane/corridor test rightly refuses
+        // it. So the fixture only asserts the property where the rat is really
+        // beside a wall, and counts the mouth set-ups it skipped.
         let mut near = 0;
         let mut total = 0;
+        let mut at_mouth = 0;
         for seed in 0..8u64 {
             let mut w = lab_world(seed);
             let boss = spawn_mower(&mut w);
             let arena = boss.arena;
             let west = f32::from(arena.x as i16) * TILE_F;
             let y = arena.center_world().y;
+            // The wall ring column beside the arena's interior, and the rows
+            // the chassis actually spans at the rat's height.
+            let wall_x = arena.x - 1;
+            let band = ((y - art_boss_mower::BODY_RADIUS) / TILE_F).floor() as i32
+                ..=((y + art_boss_mower::BODY_RADIUS) / TILE_F).floor() as i32;
+            let solid_wall = band.clone().all(|cy| {
+                matches!(
+                    w.level.tiles.get(wall_x, cy),
+                    TileKind::Wall(WallKind::Solid)
+                )
+            });
             for off_wall in [24.0f32, 48.0] {
+                if !solid_wall {
+                    // The arena mouth (a doorway band, not a wall).
+                    at_mouth += 1;
+                    continue;
+                }
                 let rat = Vec2::new(west + off_wall, y);
                 for step in [30.0f32, 50.0, 80.0] {
                     with_boss(&mut w, |b| b.pos = rat + Vec2::new(step, 0.0));
@@ -1789,7 +1819,13 @@ mod tests {
                 }
             }
         }
-        assert_eq!(near, total, "the flip was on offer in {near}/{total} setups");
+        assert!(total >= 40, "the fixture lost its wall set-ups: {total}");
+        assert_eq!(
+            near, total,
+            "the flip was on offer in {near}/{total} solid-wall setups \
+             ({at_mouth} set-ups were beside the arena mouth, where there is no \
+             wall for a lane to end on)"
+        );
     }
 
     #[test]

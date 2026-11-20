@@ -64,6 +64,33 @@
 //! shared system iterates entities in `SpawnId` order where order matters and
 //! allocates nothing per tick after warm-up (`BossFight::scratch` and the
 //! `Local` output buffer are reused).
+//!
+//! # Spawns and despawns (the `EnemyIndex` validity window)
+//!
+//! Audited, because `enemy_move` publishes a `SpawnId`-ordered `EnemyIndex`
+//! that every combat system walks and `resources::debug_assert_enemy_index`
+//! polices: between `enemy_move::grid_build_system` and the last reader
+//! (`combat::contact_system`), **no `Enemy` entity may be spawned or
+//! despawned**. What the boss half of the schedule does there:
+//!
+//! * [`boss_spawn_system`] runs before the grid build and spawns one `Boss`
+//!   entity — the boss is *not* an `Enemy` (it carries `Boss` + `SpawnId`, and
+//!   `World::boss_hp` has a legacy `EnemyKind::Boss` fallback only for tests).
+//! * [`boss_damage_system`] spawns and despawns nothing; it damages the boss.
+//! * [`boss_update_system`] spawns `BossProjectile` entities (never `Enemy`),
+//!   despawns spent/bounced-out projectiles and the boss at the end of its
+//!   death beat, and **raises [`BossFight::horde_break`]** rather than
+//!   despawning the horde; the removal is `loot::reap_enemies_system`'s, after
+//!   the last index reader.
+//! * [`resolve_hazards`] only *damages* enemies (`hit_enemies` hazards such as
+//!   the mower's ram and the broom's sweep); corpses are removed by the normal
+//!   reap, after the window.
+//! * The three controllers (`cat`, `broom`, `mower`) take no `Commands` at all:
+//!   they move the boss, push hazards and queue projectiles/cues, so they
+//!   cannot spawn or despawn an entity.
+//!
+//! `boss::tests::boss_death_breaks_the_horde_without_invalidating_the_enemy_index`
+//! locks the whole thing down for all three bosses through the real schedule.
 
 use bevy_ecs::prelude::*;
 use rand::rngs::StdRng;
@@ -400,6 +427,23 @@ pub struct BossFight {
     /// Set once when the boss dies; the integrator/P8 reads it or
     /// `RunCounters::level_complete`.
     pub level_complete: bool,
+    /// "The horde breaks this tick": raised by [`boss_update_system`] on the
+    /// tick the boss dies, consumed by `loot::reap_enemies_system`.
+    ///
+    /// The horde break removes every live `Enemy` entity, and enemy removal
+    /// that `SpawnId`-ordered index does not know about is only safe **after**
+    /// the last `EnemyIndex` reader: `boss_update_system` runs before
+    /// `combat::{player_bullet_hits, enemy_bullet_hits, contact}`, which walk
+    /// the index `enemy_move::grid_refresh_system` built this tick (and
+    /// `resources::debug_assert_enemy_index` checks that in debug builds).
+    /// Despawning from here would leave it stale, so the boss only raises the
+    /// flag and the removal happens in the reap slot, next to the Nuke
+    /// re-reap — after the last reader.
+    ///
+    /// The cleared horde is *not* reaped: the break costs no kills, no score
+    /// and no drops, which is what the pre-flag code did by despawning the
+    /// enemies before `loot::reap_enemies_system` ever saw them.
+    pub horde_break: bool,
     /// Reused scratch.
     pub scratch: BossScratch,
 }
@@ -2060,10 +2104,13 @@ pub fn boss_update_system(
             if !boss.death_announced {
                 boss.death_announced = true;
                 shake.amount = shake.amount.max(16.0);
-                // Clear every remaining enemy (the horde breaks and flees).
-                for (enemy_entity, _, _) in enemies.iter_mut() {
-                    commands.entity(enemy_entity).despawn();
-                }
+                // The horde breaks and flees: every remaining enemy is
+                // removed this tick. Raising the flag (instead of despawning
+                // here) keeps enemy removal out of the `EnemyIndex` validity
+                // window — the removal itself is `loot::reap_enemies_system`'s
+                // job, after the last index reader. See
+                // [`BossFight::horde_break`].
+                fight.horde_break = true;
             }
             // The death beat: the per-kind controller queues its last-gasp
             // hazards (the mower's detonation) and its death cues.

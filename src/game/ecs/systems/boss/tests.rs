@@ -236,6 +236,69 @@ fn boss_death_plays_its_beat_then_completes_the_level_once() {
     assert_eq!(completions, 1);
 }
 
+/// The boss's death breaks the horde, and that despawn has to happen **after**
+/// the last `EnemyIndex` reader.
+///
+/// `enemy_move::grid_refresh_system` publishes the `SpawnId`-ordered entity
+/// index that the combat systems walk, and
+/// `resources::debug_assert_enemy_index` (debug builds only) verifies on every
+/// read that the cache still matches the live enemy set. `boss_update_system`
+/// runs inside that window, so the horde break cannot despawn enemies there —
+/// it raises [`BossFight::horde_break`] and `loot::reap_enemies_system`, after
+/// `contact_system`, does the removal. This test drives the whole real tick
+/// schedule (director, horde, boss systems, combat, loot) for each of the three
+/// campaign bosses with a 60-strong horde on the field, kills the boss, and
+/// ticks on: any despawn in the index window would panic here in a debug
+/// build (`cargo test`) and be a silent stale read in release.
+#[test]
+fn boss_death_breaks_the_horde_without_invalidating_the_enemy_index() {
+    for (theme, level) in [(Theme::Sewer, 0usize), (Theme::Kitchen, 1), (Theme::Lab, 2)] {
+        let mut w = World::new(theme, 31);
+        w.level_index = level;
+        spawn_boss(&mut w);
+        let boss = boss_of(&mut w).expect("BossDue spawned the boss");
+        assert_eq!(boss.kind, BossKind::for_level(level));
+        // 60 enemies on the field, spread over the arena so a few of them
+        // stand in the boss's death hazards too.
+        let centre = boss.arena.center_world();
+        for i in 0..60 {
+            let angle = i as f32 * 0.41;
+            let dist = 24.0 + (i % 9) as f32 * 7.0;
+            let pos = centre + Vec2::from_angle(angle) * dist;
+            w.spawn_enemy(EnemyKind::Skitterer, pos, 1.0);
+        }
+        assert!(
+            w.enemy_count() >= 50,
+            "the horde has to be there for the break to be a test: {}",
+            w.enemy_count()
+        );
+        let kills_before = w.kills;
+        let score_before = w.score;
+
+        // Lethal hit, then the real schedule: the death tick starts the dance
+        // and breaks the horde; the next 120 ticks (2 s at 60 Hz) keep every
+        // system — and every `EnemyIndex` reader — running.
+        {
+            let mut query = w.ecs.query::<&mut Boss>();
+            for mut boss in query.iter_mut(&mut w.ecs) {
+                boss.hp = 0.0;
+            }
+        }
+        w.update(DT, Vec2::ZERO, false);
+        assert_eq!(
+            w.enemy_count(),
+            0,
+            "the horde breaks on the tick the boss dies ({theme:?})"
+        );
+        // The break is not a reap: no kills, no score, no drops.
+        assert_eq!(w.kills, kills_before, "the fleeing horde must not count");
+        assert_eq!(w.score, score_before, "the fleeing horde must not score");
+        for _ in 0..120 {
+            w.update(DT, Vec2::ZERO, false);
+        }
+    }
+}
+
 // ---- cues ----------------------------------------------------------------
 
 #[test]

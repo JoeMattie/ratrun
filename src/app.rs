@@ -96,6 +96,16 @@ pub struct App {
     pub should_quit: bool,
     pub input: InputState,
     audio: Option<AudioEngine>,
+    /// The music intensity tier last *requested* from the synth (0 calm menu,
+    /// 1 groove, 2 horde, 3 Boss Overdrive).
+    ///
+    /// This is the app's recording of the request, not extra state: every
+    /// request goes through [`App::request_music_intensity`] (or
+    /// [`App::play_music`]), which stores it here and forwards it to the real
+    /// engine. It exists because `AudioEngine::new()` returns `None` without an
+    /// audio device — which is every test and every headless run — so the tier
+    /// the game state asks for would otherwise be unobservable.
+    music_intensity: u32,
     scores: ScoreTable,
     /// The sector-select cursor (`0..3`); also the sector the title shows, so
     /// the title's material tint and menu music follow it.
@@ -195,6 +205,7 @@ impl App {
             should_quit: false,
             input: InputState::new(kitty),
             audio,
+            music_intensity: 0,
             scores,
             select_idx: 0,
             menu_idx: 0,
@@ -284,8 +295,29 @@ impl App {
 
     fn menu_music(&mut self) {
         let theme = self.theme();
+        self.play_music(theme, 0); // calm: bass only
+    }
+
+    /// Start (or restart) the level's music at `intensity` and record it.
+    fn play_music(&mut self, theme: Theme, intensity: u32) {
+        self.music_intensity = intensity;
         if let Some(a) = self.audio.as_mut() {
-            a.play_music(theme, 0); // calm: bass only
+            a.play_music(theme, intensity);
+        }
+    }
+
+    /// The music intensity tier the game state last asked for (see the
+    /// `music_intensity` field); the app tests read it after a frame to check
+    /// what the synth would have been told.
+    pub fn music_intensity(&self) -> u32 {
+        self.music_intensity
+    }
+
+    /// Ask the synth for an intensity tier and record the request.
+    fn request_music_intensity(&mut self, intensity: u32) {
+        self.music_intensity = intensity;
+        if let Some(a) = self.audio.as_ref() {
+            a.set_intensity(intensity);
         }
     }
 
@@ -457,9 +489,7 @@ impl App {
         } else {
             Screen::LevelIntro
         };
-        if let Some(a) = self.audio.as_mut() {
-            a.play_music(theme, 1);
-        }
+        self.play_music(theme, 1);
     }
 
     /// Another run of the kind just played, skipping the story dossier.
@@ -826,7 +856,15 @@ impl App {
             let enemy_count = w.enemy_count();
             self.hud.telemetry.set_enemy_count(enemy_count);
             self.hud.tick(dt, w, &self.sfx_frame, self.muted);
-            intensity = if boss_alive || enemy_count > 45 {
+            // The synth's fourth tier is the boss fight itself (Boss
+            // Overdrive adds the lead/boss layers): 3 while a boss is alive,
+            // back to the horde rule (2 when the screen is dense, 1 otherwise)
+            // the tick it dies — `boss_hp()` is `None` from the lethal tick, so
+            // the drop lands with the death, and the boss's death sting covers
+            // the transition.
+            intensity = if boss_alive {
+                3
+            } else if enemy_count > 45 {
                 2
             } else {
                 1
@@ -846,9 +884,7 @@ impl App {
             let s = self.sfx_frame[i];
             self.sfx(s);
         }
-        if let Some(a) = self.audio.as_ref() {
-            a.set_intensity(intensity);
-        }
+        self.request_music_intensity(intensity);
         if open_levelup {
             self.open_levelup();
         } else if ended {
@@ -1271,9 +1307,7 @@ impl App {
         }
         self.recorded = true;
         // Music settles, plus a sting.
-        if let Some(a) = self.audio.as_ref() {
-            a.set_intensity(0);
-        }
+        self.request_music_intensity(0);
         let won = self.last_summary.as_ref().is_some_and(|s| s.won);
         match (campaign_won, won) {
             // Same rule as the sector card: the campaign fanfare follows the
@@ -3199,6 +3233,78 @@ mod tests {
         // And the frame still draws with the bearing active.
         hh.frame(&[]);
         assert!(!hh.app.last_minimap.is_empty());
+    }
+
+    /// The synth's tiers as the game state asks for them: 1 groove, 2 horde,
+    /// 3 Boss Overdrive (the fourth tier `MusicSynth` gained), and back to the
+    /// normal rule the tick the boss dies.
+    ///
+    /// The recording seam is [`App::music_intensity`]: `AudioEngine::new()`
+    /// returns `None` without an audio device (every test), so the tier the app
+    /// requests is captured by [`App::request_music_intensity`] instead of by a
+    /// playing sink.
+    #[test]
+    fn music_intensity_rises_to_boss_overdrive_and_falls_back_on_the_kill() {
+        use crate::game::ecs::systems::boss::Boss;
+        use crate::game::enemy::EnemyKind;
+
+        let mut h = Harness::new(120, 40);
+        h.enter_playing();
+        h.frame(&[]);
+        assert_eq!(
+            h.app.music_intensity(),
+            1,
+            "an empty early level is the groove tier"
+        );
+
+        // A dense horde asks for tier 2 (the rule the boss tier replaces).
+        {
+            let w = h.app.world.as_mut().unwrap();
+            let centre = w.player.pos;
+            for i in 0..50 {
+                let a = i as f32 * 0.5;
+                let r = 28.0 + (i % 5) as f32 * 6.0;
+                w.spawn_enemy(EnemyKind::Skitterer, centre + Vec2::from_angle(a) * r, 1.0);
+            }
+        }
+        h.frame(&[]);
+        let horde = h.app.world.as_ref().unwrap().enemy_count();
+        assert!(horde > 45, "the horde has to be dense: {horde}");
+        assert_eq!(h.app.music_intensity(), 2, "a dense horde is tier 2");
+
+        // The director hands off at boss time: the boss is alive, so the app
+        // asks for Boss Overdrive.
+        h.app.world.as_mut().unwrap().elapsed = crate::game::director::BOSS_TIME;
+        h.frame(&[]);
+        assert!(
+            h.app.world.as_ref().unwrap().boss_hp().is_some(),
+            "the director spawned the level's boss"
+        );
+        assert_eq!(
+            h.app.music_intensity(),
+            3,
+            "a live boss asks the synth for Boss Overdrive"
+        );
+
+        // The death tick breaks the horde and drops the tier back to the normal
+        // rule (tier 1 here: the break leaves nothing on the field).
+        {
+            let w = h.app.world.as_mut().unwrap();
+            let mut query = w.ecs.query::<&mut Boss>();
+            for mut boss in query.iter_mut(&mut w.ecs) {
+                boss.hp = 0.0;
+            }
+        }
+        h.frame(&[]);
+        let w = h.app.world.as_ref().unwrap();
+        assert!(w.boss_hp().is_none(), "the boss died on that tick");
+        let left = w.enemy_count();
+        assert!(left <= 45, "the horde broke with the boss: {left} left");
+        assert_eq!(
+            h.app.music_intensity(),
+            1,
+            "the tier returns to the enemy-count rule when the boss dies"
+        );
     }
 
     #[test]

@@ -42,6 +42,20 @@
 //! `SpawnId`-ordered `EnemyIndex` from `enemy_move`: `reap_enemies_system` has
 //! already despawned this tick's corpses through deferred commands, so the
 //! index is stale there — it sorts the live enemies instead (Nukes are rare).
+//!
+//! ## The boss's horde break
+//!
+//! `reap_enemies_system` is also where the boss's death clears the field. The
+//! boss framework raises [`BossFight::horde_break`] on the tick its boss dies
+//! and this system, running after `combat::contact_system` (the last reader of
+//! the `EnemyIndex` that `enemy_move` built this tick), despawns every enemy
+//! and returns before the normal reap. Doing it in the boss system itself would
+//! despawn enemies *inside* the index window and leave every combat reader with
+//! a stale cache (a panic in debug builds via
+//! `resources::debug_assert_enemy_index`). The break is deliberately not a
+//! reap: no kills, no score, no gems or pickups — the fleeing horde costs the
+//! player nothing, exactly as when the framework despawned it itself on the
+//! death tick.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -57,6 +71,7 @@ use crate::game::ecs::resources::{
     LastPickups, LevelIndex, NextSpawnId, NukeTick, PickupScratch, RngRes, RunCounters, SfxQueue,
     Shake, TickInput,
 };
+use crate::game::ecs::systems::boss::BossFight;
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::{Gem, Pickup, PickupKind};
 use crate::game::level::Level;
@@ -158,9 +173,29 @@ pub fn reap_enemies_system(
     mut sfx: ResMut<SfxQueue>,
     mut shake: ResMut<Shake>,
     mut next_id: ResMut<NextSpawnId>,
+    mut fight: ResMut<BossFight>,
     enemies: Query<(Entity, &SpawnId, &Enemy)>,
     mut dead: Local<Vec<(u64, Entity)>>,
 ) {
+    // The boss died this tick: the horde breaks and flees. `boss_update_system`
+    // only raised the flag (it runs *inside* the `EnemyIndex` validity window,
+    // before the combat readers, so it must not despawn enemies); this slot is
+    // the first safe one — it runs after `contact_system`, the last system that
+    // walks the `SpawnId`-ordered index `enemy_move` built this tick, and just
+    // before the gems so the break cannot leave a corpse behind for a later
+    // tick to look at.
+    //
+    // The break is not a reap: the fleeing enemies cost no kills, no score and
+    // drop no gems or pickups, exactly as when the framework despawned them on
+    // the death tick. `SpawnId` order does not matter (no rng draw, no vfx), so
+    // the removal walks the query as it comes.
+    if fight.horde_break {
+        fight.horde_break = false;
+        for (entity, _, _) in enemies.iter() {
+            commands.entity(entity).despawn();
+        }
+        return;
+    }
     reap_dead(
         &mut commands,
         &level,

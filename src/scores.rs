@@ -436,8 +436,10 @@ mod tests {
 
         // Valid values round-trip cleanly.
         for size in [MinimapSize::Normal, MinimapSize::Small, MinimapSize::Hidden] {
-            let mut t = ScoreTable::default();
-            t.minimap_size = size;
+            let t = ScoreTable {
+                minimap_size: size,
+                ..Default::default()
+            };
             let reloaded = ScoreTable::parse(&t.to_json());
             assert_eq!(reloaded.minimap_size, size);
         }
