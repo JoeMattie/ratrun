@@ -127,11 +127,12 @@ use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::systems::projectiles::los_clear;
 use crate::game::ecs::resources::{
-    DamageLedger, EnemyIndex, GridScratch, NeighborScratch, RngRes, Shake, SfxQueue,
+    DamageLedger, EnemyIndex, GridScratch, LevelIndex, NeighborScratch, RngRes, RunCounters, Shake,
+    SfxQueue,
 };
 #[cfg(debug_assertions)]
 use crate::game::ecs::resources::debug_assert_enemy_index;
-use crate::game::enemy::Enemy;
+use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::level::Level;
 use crate::game::particle::damage_number::{DamageNumbers, DamageSource};
 use crate::game::particle::vfx;
@@ -321,6 +322,7 @@ fn contact_one(
     level: &Level,
     enemies: &mut Query<(Entity, &SpawnId, &mut Enemy)>,
     hit_dmg: &mut f32,
+    hit_kind: &mut Option<EnemyKind>,
 ) {
     let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
         return;
@@ -331,7 +333,10 @@ fn contact_one(
         return;
     }
     if e.contact_cd <= 0.0 && collision::circles_overlap(ppos, PLAYER_RADIUS, e.pos, e.radius) {
-        *hit_dmg = hit_dmg.max(e.damage);
+        if e.damage > *hit_dmg {
+            *hit_dmg = e.damage;
+            *hit_kind = Some(e.kind);
+        }
         e.contact_cd = 0.6;
         // Knockback. (Split into two statements: `Mut<Enemy>` cannot
         // read `e.pos` while the same place is mutably borrowed.)
@@ -352,6 +357,8 @@ fn contact_one(
 pub fn contact_system(
     level: Res<Level>,
     mut player: ResMut<Player>,
+    counters: Res<RunCounters>,
+    level_index: Res<LevelIndex>,
     index: Res<EnemyIndex>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
     mut rng: ResMut<RngRes>,
@@ -368,6 +375,7 @@ pub fn contact_system(
         return;
     }
     let mut hit_dmg = 0.0f32;
+    let mut hit_kind: Option<EnemyKind> = None;
     // `EnemyIndex` was rebuilt by `enemy_move::grid_refresh_system` from the
     // post-separation, post-wall positions and nothing has spawned or
     // despawned an enemy since (weapons, bullets and pools only damage), so it
@@ -384,17 +392,49 @@ pub fn contact_system(
             enemies.iter().map(|(entity, id, _)| (id.0, entity)),
         );
         for &entity in index.0.iter() {
-            contact_one(entity, ppos, &level, &mut enemies, &mut hit_dmg);
+            contact_one(
+                entity,
+                ppos,
+                &level,
+                &mut enemies,
+                &mut hit_dmg,
+                &mut hit_kind,
+            );
         }
     } else {
         order.clear();
         order.extend(enemies.iter().map(|(entity, id, _)| (id.0, entity)));
         order.sort_unstable_by_key(|&(id, _)| id);
         for &(_, entity) in order.iter() {
-            contact_one(entity, ppos, &level, &mut enemies, &mut hit_dmg);
+            contact_one(
+                entity,
+                ppos,
+                &level,
+                &mut enemies,
+                &mut hit_dmg,
+                &mut hit_kind,
+            );
         }
     }
     if hit_dmg > 0.0 && player.take_damage(hit_dmg) {
+        // Dev aid (`RATRUN_HIT_TRACE`): one line per landed contact hit, so
+        // "how many hits does a carried rat survive late in a later level" is
+        // measured from a real run instead of inferred from the constants. It
+        // reads no rng and writes only to stderr, so it cannot move a run.
+        if std::env::var_os("RATRUN_HIT_TRACE").is_some_and(|v| v != "0") {
+            let armor = player.loadout.stats.armor;
+            eprintln!(
+                "HIT kind={:?} level={} t={:.2} raw={:.2} applied={:.2} hp={:.1}/{:.1} armor={:.1}",
+                hit_kind.unwrap_or(EnemyKind::Skitterer),
+                level_index.0,
+                counters.elapsed,
+                hit_dmg,
+                (hit_dmg - armor).max(1.0),
+                player.hp,
+                player.max_hp(),
+                armor,
+            );
+        }
         // Contact grace is shorter than the 0.9 s a hazard or a bullet buys.
         // `contact_system` already lands one hit per window (the *worst*
         // touching body's damage, not a sum), so at 0.9 s a pack of forty

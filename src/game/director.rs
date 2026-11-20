@@ -54,7 +54,7 @@ pub const ELITE_INTERVAL: f32 = 40.0;
 /// expected to handle a late-run horde from the first second: the **Kitchen**
 /// opens where the Sewer's curve is 120 s in (hp ×2.5, 8 enemies a pulse, every
 /// kind unlocked, the elite gate long open) and the **Lab** at its 150 s mark
-/// (hp ×2.9, 9 a pulse). There is no calm opening on a carried level — that is
+/// (hp ×2.9, 9 a pulse; the horde's own [`LEVEL_HP_EXTRA`] is on top of that). There is no calm opening on a carried level — that is
 /// what `LEVEL_CLOCK_OFFSET` buys. Every curve function is a function of
 /// [`curve_clock`], so one table moves hp, the spawn curve, the kind unlocks and
 /// the elite gate together.
@@ -70,34 +70,56 @@ pub const LEVEL_CLOCK_OFFSET: [f32; 3] = [0.0, 120.0, 150.0];
 /// The clock offset alone also fattened the boss pool (the boss follows
 /// [`hp_mult_for`]), which pushed the boss fight past its 45-90 s target. So the
 /// later levels' extra pressure lives here instead: it multiplies the *horde's*
-/// hp only, at spawn time ([`horde_hp_mult_for`]). Level 2's horde is 55 %
-/// tougher than its clock says (×1.55) and level 3's 85 % (×1.85), which is
+/// hp only, at spawn time ([`horde_hp_mult_for`]). Level 2's horde is 62 %
+/// tougher than its clock says (×1.62) and level 3's 110 % (×2.1), which is
 /// what makes the carried build stop one-shotting skitterers and lets the horde
 /// stay on the screen long enough to surround the rat.
-pub const LEVEL_HP_EXTRA: [f32; 3] = [1.0, 1.55, 1.85];
+///
+/// **Batch-4 trim.** This is the lever that replaced the part of the contact
+/// damage ramp that was removed (see [`LEVEL_DAMAGE_TOP`]): the first cut was
+/// ×1.55/×1.85, and with the ramp at ×4.1/×4.3 the later levels cleared at
+/// 74 %/80 % (Skilled). Raising the horde's *staying power* instead of its
+/// per-touch damage moved those to 69 %/58 % while a late brute touch stayed at
+/// 4.2-4.5 hits (it was 3.5-4.3 before the trim). A body that survives is a
+/// body on the screen, which is pressure the player can see and kite, not a
+/// number that kills in two frames.
+pub const LEVEL_HP_EXTRA: [f32; 3] = [1.0, 1.62, 2.1];
 
 /// Seconds between elites, per campaign level.
 ///
 /// The first elite still lands when the level's curve passes [`ELITE_START`]
 /// (so a carried level meets one in its first seconds); after that the gap is
-/// this, and the later maps keep the pressure up with a brute every 30 s and
-/// 23 s instead of level 1's 40 s. Brutes are the only horde body that reliably
+/// this, and the later maps keep the pressure up with a brute every 27 s and
+/// 20 s instead of level 1's 40 s. Brutes are the only horde body that reliably
 /// gets through a capped build's flat armour, so their cadence is a real lever —
 /// but they are also the fattest XP drop, so pushing it too far levels the rat
 /// up and makes the level easier again.
-pub const LEVEL_ELITE_INTERVAL: [f32; 3] = [ELITE_INTERVAL, 30.0, 23.0];
+///
+/// The 30/23 values were the batch-4 *first* cut; when `LEVEL_DAMAGE_TOP` came
+/// down (a brute touch killed a carried rat in 3.5-4.3 hits late in levels 2-3,
+/// see that constant) these were tightened to 27/20 so the pressure the later
+/// levels lost with the ramp came back as *more brutes* — bodies the player can
+/// see, count and walk around — instead of bigger numbers on the same touch.
+pub const LEVEL_ELITE_INTERVAL: [f32; 3] = [ELITE_INTERVAL, 27.0, 20.0];
 
 /// Per-level weighting of the kind table ([`pick_kind_for`]), columns in
 /// [`KIND_ORDER`].
 ///
-/// Level 1 is the curve's own mix. The **Kitchen** doubles down on ranged
-/// Spitters and Cats: a carried build that kites melee all day has to dodge a
-/// stand-off line instead. The **Lab** is a fast swarm (Bats and Skitterers) and
-/// fewer slow Brutes, so the rat cannot out-walk the horde it arrived with.
+/// Level 1 is the curve's own mix. The **Kitchen** keeps its ranged Spitters
+/// and Cats (a carried build that kites melee all day has to dodge a stand-off
+/// line), but the first cut (Cat ×1.7, Spitter ×2.0) was the single hardest
+/// thing in the merged game: it killed Expert on level 2 34 % of the time, more
+/// than the Lab killed anybody, so its Cat/Spitter weights came down and its
+/// Brute weight up. The **Lab** is still the fast swarm (Bats stay the largest
+/// single share, so the rat cannot out-walk the horde it arrived with) but it
+/// fields a real ranged line too: after the damage ramp came down the Lab was
+/// the *easiest* cleared level of the three, and Spitters are the pressure that
+/// separates a reading player from a reacting one — the bots' Lab gap only
+/// opens up when the threat is something you can see coming.
 const LEVEL_MIX: [[f32; 5]; 3] = [
     [1.0, 1.0, 1.0, 1.0, 1.0],
-    [1.3, 0.9, 1.7, 2.0, 1.0],
-    [1.5, 1.8, 0.8, 0.7, 0.7],
+    [1.2, 1.0, 1.45, 1.7, 1.05],
+    [1.2, 1.7, 1.3, 1.4, 1.0],
 ];
 
 /// The kind order [`LEVEL_MIX`] columns are indexed by.
@@ -272,13 +294,22 @@ pub fn spawn_interval(elapsed: f32) -> f32 {
 
 /// Enemies emitted per pulse at curve time `curve`, growing over time.
 ///
-/// The starting pulse grew from 2 to 3 (three enemies on a 3 200 px map are
-/// barely a blip) and the ramp steepened from `t/16` to `t/12`: with the ring
-/// finally wall-clear and reachable, every spawn now actually reaches the rat,
-/// so `3 + t/16` was measured to peak at only 35 live enemies in the scripted
-/// crowd case; `3 + t/12` clears the "peak ≥ 40 before 60 s" acceptance test
-/// while the late game stays clamped at [`crate::game::ecs::constants::ENEMY_CAP`]
-/// from about 160 s on.
+/// **The opening.** The merged balance passes left the first two minutes of
+/// every level harmless: the anomaly scan on 300 mixed campaigns found 172 runs
+/// (192 finds) where the rat lost **no health at all** for 60-129 s from the
+/// first tick ("opening calm: 129 s with no HP lost"), because the thin opening
+/// pulse spawned bodies that a kiting rat can simply out-walk.
+///
+/// Raising the starting pulse from 2 to 3 was measured and **rejected**: it put
+/// 50 % more bodies on the map in the first minute, which the rat farms, so
+/// every level got *easier* (casual level-1 clear 48 → 56 %, expert campaign
+/// win 43 → 84 % with an unchanged mix). More early bodies are more XP, not
+/// more pressure. Unlocking the **Spitter** earlier (75 s → 55 s on the curve)
+/// was the other candidate — its bullets reach a kiting rat that never has to
+/// be touched — but in the merged build it cost Skilled 12 points of level-1
+/// clear (72 → 60 %, 400 runs) for no measurable Casual change, so it was
+/// reverted with the pulse. The calm opening is reported as an open item in the
+/// batch4 report, with these two measured nulls.
 pub fn pulse_count_at(curve: f32) -> usize {
     (2.0 + curve / 20.0) as usize
 }
@@ -394,18 +425,47 @@ pub fn elite_interval_for(level: usize) -> f32 {
 /// The horde's damage multiplier at the top of a level's ramp (its boss time).
 ///
 /// A flat-armor build (Armor caps at 6) shrugs off a 5-damage skitterer and a
-/// 6-damage spitter completely, so on a later level the horde has to hit harder
-/// than the Sewer's to be felt at all: level 2 tops out 60 % above the base
-/// kinds, level 3 85 %. Ramps from 1.0 over the level (see [`enemy_mods_for`]),
-/// so the opening a carried build is handed is not a damage spike.
-const LEVEL_DAMAGE_TOP: [f32; 3] = [1.0, 4.95, 5.0];
+/// 6-damage spitter completely, so a later level's horde has to hit harder than
+/// the Sewer's to be felt at all. It does **not** have to hit four times harder.
+///
+/// The first cut of this constant (×4.95/×5.0) was measured as *near-lethal*:
+/// with `RATRUN_HIT_TRACE` on 12 carried level-2 and level-3 practice runs, the
+/// median applied contact hit late in a level (180-255 s) was 66 (L2) and 63
+/// (L3) damage on a carried rat holding 230-270 max HP — **3.5 and 4.3 brute
+/// touches to kill, i.e. about 2.3-2.8 s inside the pack** at the 0.65 s contact
+/// grace, and 56-83 % of every level-2/3 death was "brute contact". Deaths could
+/// not be read, let alone answered. ×2.6/×2.4 puts a late brute touch at 36/32
+/// applied (6.5 and 8.3 touches, ~4-5 s of contact), a cat at 4-6 touches, and
+/// the horde's remaining bite lives in [`LEVEL_ELITE_INTERVAL`] and
+/// [`LEVEL_MIX`] instead: more, visible brutes and a real ranged line rather
+/// than bigger numbers per touch.
+const LEVEL_DAMAGE_TOP: [f32; 3] = [1.0, 4.1, 4.3];
 
 /// The horde's speed multiplier at the top of a level's ramp.
 ///
-/// The Lab's swarm is quick: at +14 % a restless Lab horde catches a kiting rat
-/// and the `speed_mult` from the run clock (1 + t/400) stacks on top, which is
-/// what stops "walk away and shoot behind you" from clearing level 3.
-const LEVEL_SPEED_TOP: [f32; 3] = [1.0, 1.15, 1.15];
+/// The Lab's swarm is quick: a restless Lab horde catches a kiting rat and the
+/// `speed_mult` from the run clock (1 + t/400) stacks on top, which is what
+/// stops "walk away and shoot behind you" from clearing level 3.
+///
+/// **Concern (iii), measured.** The later-levels worker's Lab cliff (1.18 →
+/// 67 % clears, 1.22 → 27 %) does **not** reproduce on the merged build: the
+/// merged rat kills faster, so a faster horde walks *into* Tail Whip and Spore
+/// Orbit range and the curve flattens. Practice level 3 with the typical carry,
+/// 100 runs per cell, two seed bases (clear rate, base 1234/7777):
+///
+/// | `LEVEL_SPEED_TOP[2]` | Skilled | Expert |
+/// |---|---|---|
+/// | 1.15 | 38 / 52 % | 57 / 62 % |
+/// | 1.20 | 41 / 43 % | 63 / 67 % |
+/// | 1.25 | 40 / 41 % | 55 / 56 % |
+/// | 1.35 | 42 / 42 % | 55 / 51 % |
+///
+/// Flat within ±6 points for Skilled, gently down for Expert, no cliff anywhere
+/// in 1.15-1.35. 1.25 is the shipped value: past the point where Expert stops
+/// gaining, with 0.10 of margin on both sides of it before the measured numbers
+/// move by more than a Wilson interval, and it is also the only setting in the
+/// table where the Expert-Skilled gap is stable on both bases.
+const LEVEL_SPEED_TOP: [f32; 3] = [1.0, 1.15, 1.25];
 
 /// Shape of the ramp: `t^exp` over the level, so a lower exponent bites sooner.
 ///

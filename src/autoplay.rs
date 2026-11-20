@@ -1584,24 +1584,28 @@ mod tests {
         }
     }
 
-    /// **Balance regression guard — RE-BASELINE AFTER THE PARALLEL BALANCE
-    /// WORK MERGES.**
+    /// **Balance regression guard — RE-BASELINED after the batch-4 merge.**
     ///
     /// A change that makes the game wildly easier or harder must fail the
     /// suite, not just a batch. Twelve runs (four per skill) of a fixed 120 s
-    /// window cost a few seconds, and every band below is set from the 24-seed
-    /// measurements at commit 8ada8f5 (seed base 4242, practice level 1) with
-    /// room for the five parallel workers to move each number:
+    /// window cost a few seconds. The bands were re-measured on the merged
+    /// build with 24 seeds per skill (seed base 4242, practice level 1,
+    /// `--max-sim-seconds 120`) and now also have a **floor**: the old bands
+    /// were upper bounds only, so the "opening calm" defect (the first 60-129 s
+    /// of a level costing the rat no health on 169 of 300 mixed campaigns) passed
+    /// the guard unnoticed. A mean that collapses toward zero is a regression
+    /// too, and it is the one this test can cheaply see.
     ///
-    /// | measure | measured | band |
-    /// |---|---|---|
-    /// | runs surviving the 120 s window | 12/12 | ≥ 10/12 |
-    /// | damage/run, expert | 15.4 | 0-120 |
-    /// | damage/run, skilled | 28.3 | 0-200 |
-    /// | damage/run, casual | 67.1 | 0-400 |
-    /// | kills/min | ~128 | 40-400 |
-    /// | player level at 60 s | ~3.1 | 1.2-10 |
-    /// | first level-up (median) | 20-25 s | 6-60 s |
+    /// | measure | 8ada8f5 | merged + batch 4 | band |
+    /// |---|---|---|---|
+    /// | runs surviving the 120 s window | 12/12 | 12/12 (24/24 measured) | ≥ 10/12 |
+    /// | damage/run, expert | 15.4 | 9.6 | 3-120 |
+    /// | damage/run, skilled | 28.3 | 24.2 | 8-200 |
+    /// | damage/run, casual | 67.1 | 61.8 | 20-400 |
+    /// | kills/min | ~128 | 131-145 | 60-400 |
+    /// | player level at 60 s | ~3.1 | 3.0-3.5 | 1.5-8 |
+    /// | first level-up (median) | 20-25 s | 20-25 s | 8-50 s |
+    /// | expert vs casual damage | 4.4x | 6.4x | ≥ 1.2x |
     ///
     /// The bands are wide on purpose: they catch a doubled spawn rate, a
     /// doubled weapon, a broken XP curve or a bot that stops working, not a
@@ -1632,14 +1636,26 @@ mod tests {
             all.len()
         );
 
-        let caps = [(Skill::Expert, 120.0), (Skill::Skilled, 200.0), (Skill::Casual, 400.0)];
+        // (skill, floor, ceiling): the floor is the "opening calm" guard, the
+        // ceiling the "the game got much harder" guard. See the doc table.
+        let caps = [
+            (Skill::Expert, 3.0, 120.0),
+            (Skill::Skilled, 8.0, 200.0),
+            (Skill::Casual, 20.0, 400.0),
+        ];
         let mut damage = Vec::new();
-        for ((skill, runs), (_, hp_cap)) in per_skill.iter().zip(caps) {
+        for ((skill, runs), (_, floor, hp_cap)) in per_skill.iter().zip(caps) {
             let dmg = damage_taken(runs);
             let mean = dmg / runs.len() as f32;
             assert!(
                 mean <= hp_cap,
-                "{} took {mean:.0} HP per {CAP:.0} s, band 0-{hp_cap:.0}: the game got much harder",
+                "{} took {mean:.0} HP per {CAP:.0} s, band {floor:.0}-{hp_cap:.0}: the game got much harder",
+                skill.name()
+            );
+            assert!(
+                mean >= floor,
+                "{} took only {mean:.1} HP in {CAP:.0} s (floor {floor:.0}): the opening stopped \
+                 pressing the rat at all",
                 skill.name()
             );
             damage.push(mean);
@@ -1654,8 +1670,8 @@ mod tests {
 
         let k = kills_per_min(&all);
         assert!(
-            (40.0..400.0).contains(&k),
-            "{k:.0} kills/min over the first {CAP:.0} s (band 40-400)"
+            (60.0..400.0).contains(&k),
+            "{k:.0} kills/min over the first {CAP:.0} s (band 60-400)"
         );
         let level_at_60: Vec<f32> = all
             .iter()
@@ -1667,8 +1683,8 @@ mod tests {
         assert!(!level_at_60.is_empty(), "no run reached the 60 s checkpoint");
         let mean_level = level_at_60.iter().sum::<f32>() / level_at_60.len() as f32;
         assert!(
-            (1.2..10.0).contains(&mean_level),
-            "mean player level at 60 s is {mean_level:.1} (band 1.2-10): the XP curve moved"
+            (1.5..8.0).contains(&mean_level),
+            "mean player level at 60 s is {mean_level:.1} (band 1.5-8): the XP curve moved"
         );
         let mut firsts: Vec<f32> = all
             .iter()
@@ -1679,8 +1695,8 @@ mod tests {
         if !firsts.is_empty() {
             let median = firsts[firsts.len() / 2];
             assert!(
-                (6.0..60.0).contains(&median),
-                "first level-up median {median:.1} s (band 6-60 s): the opening moved"
+                (8.0..50.0).contains(&median),
+                "first level-up median {median:.1} s (band 8-50 s): the opening moved"
             );
         }
     }

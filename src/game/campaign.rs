@@ -672,8 +672,10 @@ mod tests {
         assert_eq!(lo.stacks(PassiveKind::MaxHp), 2);
         assert_eq!(lo.stacks(PassiveKind::Damage), 1);
         // The passives were replayed onto fresh stats: full HP at level start.
-        assert_eq!(lo.stats.max_hp, 140.0);
-        assert_eq!(next.player.hp, 140.0);
+        // The base pool is 130 HP (moved 100 → 130 in the early-game balance
+        // pass) and MaxHp is +20 per stack, so two stacks are 130 + 40 = 170.
+        assert_eq!(lo.stats.max_hp, 170.0);
+        assert_eq!(next.player.hp, 170.0);
         // XP/level restart; the carried powerups are the progression.
         assert_eq!(next.player.level, 1);
         assert!(next.keepables().iter().any(|k| k.kind

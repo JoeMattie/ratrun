@@ -265,6 +265,16 @@ fn trace_hash(script_mode: Script, theme: Theme, seed: u64) -> u64 {
 /// list was regenerated once in the integration pass that closed the wave; the
 /// level generator's own follow-up regeneration supersedes it.
 ///
+/// **Regenerated for the batch-4 combined balance pass** (2026-11-21): the
+/// five parallel balance branches were merged (contact grace 0.65 s, boss
+/// siege/rejoin and pools, weapon/XP retune, per-level horde knobs) and then
+/// trimmed (per-level horde hp, damage ramp, elite cadence, mix, Lab speed).
+/// Nobody had regenerated these rows after any of it, so every row had been
+/// stale since before the merge. Only the level-1 curve is exercised by the
+/// scripted cases and it was left exactly where the early-game pass put it, so
+/// the rows below are the values the merged build produces; the level-2/3
+/// constants never appear in a scripted trace.
+///
 /// **Regenerated for the open-world generator** (2026-11-21, levelgen worker):
 /// the layout is no longer rooms hung off 1-2-cell corridors but a sprawl of
 /// great halls and medium rooms merged through 4-10-cell openings (about 52 %
@@ -273,12 +283,12 @@ fn trace_hash(script_mode: Script, theme: Theme, seed: u64) -> u64 {
 /// is the one case whose short script never leaves the start area's old shape.
 /// Regenerated deliberately, in the change that altered the generator.
 const CASES: [(Script, Theme, u64, u64); 6] = [
-    (Script::Wander, Theme::Sewer, 11, 11071988357280468211),
-    (Script::Wander, Theme::Kitchen, 29, 4793531602214586762),
-    (Script::Wander, Theme::Lab, 1234, 6458543673689705465),
-    (Script::Evade, Theme::Sewer, 11, 8282690810494291152),
-    (Script::Evade, Theme::Kitchen, 29, 12758249072391838746),
-    (Script::Evade, Theme::Lab, 1234, 15798741948597978183),
+    (Script::Wander, Theme::Sewer, 11, 9246199617108760716),
+    (Script::Wander, Theme::Kitchen, 29, 15036722764467089788),
+    (Script::Wander, Theme::Lab, 1234, 9316115790742502741),
+    (Script::Evade, Theme::Sewer, 11, 1758388914911814120),
+    (Script::Evade, Theme::Kitchen, 29, 13803285604031543694),
+    (Script::Evade, Theme::Lab, 1234, 11735825699521431248),
 ];
 
 #[test]

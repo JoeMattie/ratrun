@@ -217,12 +217,26 @@ impl BossKind {
     /// the rat fights at 30-60 px where those weapons reach — a kiting rat at
     /// 100+ px lands only the long-range share, which is where the slow tail
     /// comes from.
+    ///
+    /// **Batch-4 re-scale (merged campaign).** With all five balance branches
+    /// in one build the medians moved: 600 campaign runs per skill measured
+    /// level-1/2/3 fights at 57 / 89 / 107 s (median) with a 15-215 s spread,
+    /// and the 45-90 s target was missed at both ends. The clock offsets of the
+    /// later levels (120 s/150 s) raise `hp_mult_for`, so the same scale buys a
+    /// bigger pool on levels 2 and 3 than it did on the later-levels branch
+    /// alone; the Cat's pool was also small enough that a top build killed it
+    /// in 15-18 s. Re-scaled from the merged measurement: Broom 2.45 → 1.95 and
+    /// Mower 2.60 → 2.00 (the later levels' clock offsets inflated their pools
+    /// by ~15 % on top of the scale); the Cat's 1.40 was left alone because the
+    /// level-1 clear rate is Cat-limited and the pool was not the problem there.
+    /// Medians land at 57 / 72 / 80 s (see the batch4 report) with the floor at
+    /// ~26 s.
     #[inline]
     pub fn hp_scale(self) -> f32 {
         match self {
             BossKind::Cat => 1.4,
-            BossKind::Broom => 2.45,
-            BossKind::Mower => 2.6,
+            BossKind::Broom => 1.95,
+            BossKind::Mower => 2.0,
         }
     }
 
@@ -2445,20 +2459,33 @@ pub fn boss_update_system(
         }
 
         // Siege: a boss that is *walled off* (no body-passable straight line to
-        // the rat, and no move it can make) tears a hole and keeps coming. See
-        // [`SIEGE_AFTER_SECS`]. The rejoin above is the first answer (it puts
-        // the boss near when nothing is in the way); this is the answer for a
-        // rat that has kited somewhere a large body cannot follow.
+        // the rat) tears a hole and keeps coming. See [`SIEGE_AFTER_SECS`]. The
+        // rejoin above is the first answer (it puts the boss near when nothing
+        // is in the way); this is the answer for a rat that has kited somewhere
+        // a large body cannot follow.
+        //
         // Only worth smashing when the boss is *at* the wall that separates
         // them: a boss a screen away has a route (the flow field) and must walk
         // it, or the rejoin brings it near first. Without this gate a boss that
         // was left far away spent its whole fight tunnelling a hole every few
         // seconds instead of closing (seen as one 157 s Mower fight where the
         // rat was 1 039 px away for the first two minutes).
+        //
+        // The gate is the *wall*, not `stuck`: a boss pacing at a wall it
+        // cannot pass moves a body-length every few seconds (a 14 px limit
+        // cycle between two standable spots) and a per-window `stuck` test
+        // reads that as progress forever. Measured on a merged-branch Skilled
+        // run (seed 2478788577152286430, level 1): the Cat sat in `Stalk`
+        // 122-173 px from the rat, `fit=false`, no line of sight, shuttling
+        // 14 px every 3 s, for a 345 s fight with **zero** damage into it —
+        // every 0.5 s window that ended in the hop cleared `stuck` and drained
+        // the siege timer. Being walled off and near for four uninterrupted
+        // seconds is the condition the siege was written for, whether or not
+        // the pacing looks like motion.
         let near = to_player.len() < 220.0;
         let walled_off =
             !walkable_line(&level, boss.pos, player.pos, boss.kind.body_radius(), SizeClass::Large);
-        if stuck && near && walled_off {
+        if near && walled_off {
             fight.siege += dt;
             if fight.siege >= SIEGE_AFTER_SECS {
                 if let Some(cell) = smash_target(&level, boss.pos, player.pos) {

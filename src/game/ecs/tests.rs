@@ -158,7 +158,7 @@ fn enemy_index_is_fresh_at_every_reader_for_a_full_run() {
         ticks += 1;
     }
     assert!(w.director.boss_spawned, "run never reached the boss window");
-    assert!(w.elapsed >= director::RUN_SECONDS, "run did not reach 300 s");
+    assert!(w.elapsed >= director::BOSS_TIME, "run never reached the boss time");
     assert!(peak > 40, "crowd never grew (peak {peak}): guard untested");
 }
 

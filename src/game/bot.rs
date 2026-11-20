@@ -902,6 +902,18 @@ impl Bot {
         }
         // Loot attraction. XP is the whole progression, so gems pull hard —
         // but not into a pack that is sitting on them.
+        //
+        // **Tested and rejected (batch 4, concern "Expert's gem greed").** The
+        // later-levels worker read Expert's 42 % campaign win as the bot's
+        // greed (10 vs Skilled's 5) walking it into the pack, so the pull was
+        // scaled by the crowd around the *rat* (`1/(1 + near*0.45)`): 200
+        // paired Expert campaigns on bases 1234 and 7777 went **48 % → 43 %**
+        // win, level-2 clear 77 → 71 %, so the greed was not the cause and the
+        // change was reverted. The death notes say why: Expert's later-level
+        // deaths are "surrounded in the open: brute contact, 20-40 bodies
+        // within 60 px" — it is *already* in the pack when it dies, and a rat
+        // surrounded at contact range has no good heading for greed to spoil.
+        // See the batch4 report for the table.
         if self.params.greed > 0.0 {
             let mut best = 0.0f32;
             for &(gpos, value) in &self.gems {

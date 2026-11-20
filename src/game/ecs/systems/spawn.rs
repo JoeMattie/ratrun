@@ -1675,19 +1675,39 @@ mod tests {
     /// After the hand-off the horde keeps coming at the level's late-curve rate
     /// — the curve froze at `BOSS_TIME` instead of running away — and the cap
     /// still holds.
+    ///
+    /// The boss phase *thins* the pulses (`BOSS_HORDE_INTERVAL_MULT` 2 ×
+    /// `BOSS_HORDE_PULSE_DIV` 2, the balance pass that made the fight about the
+    /// boss), so a 24 s window no longer fills the map: this test protects that
+    /// the horde never *stops*, that the thinning is real, and that the 600 cap
+    /// still holds once the phase runs long enough to fill it.
     #[test]
     fn the_horde_keeps_coming_after_the_boss_is_due() {
         let mut w = World::new(Theme::Sewer, 25);
         director_tick(&mut w, 0.1, director::BOSS_TIME);
         let before = w.enemies().len();
         assert!(before > 0, "no horde arrived on the boss tick");
+        let mut peak = before;
         for k in 1..=120 {
             director_tick(&mut w, 0.2, director::BOSS_TIME + k as f32 * 0.2);
+            peak = peak.max(w.enemies().len());
         }
         assert!(
             w.enemies().len() > before,
             "the horde stopped spawning after the boss was due"
         );
+        assert!(
+            w.enemies().len() < ENEMY_CAP,
+            "the boss-phase trickle filled the map in 24 s: {} bodies",
+            w.enemies().len()
+        );
+        // Given four more minutes of boss phase it still climbs all the way to
+        // the cap and never past it.
+        for k in 1..=1200 {
+            director_tick(&mut w, 0.2, director::BOSS_TIME + 24.0 + k as f32 * 0.2);
+            peak = peak.max(w.enemies().len());
+        }
+        assert_eq!(peak, ENEMY_CAP, "the boss-phase horde never reached the cap");
         assert_eq!(w.enemies().len(), ENEMY_CAP, "the cap slipped");
     }
 

@@ -1482,6 +1482,11 @@ mod tests {
     #[test]
     fn bottom_line_text_matches_reference_and_reuse_is_clean() {
         let mut w = known_world();
+        // The base pool is `Stats::default().max_hp` (130 since the early-game
+        // balance pass); the rail prints current/max, so read both from the
+        // world instead of pinning the 100 HP of the pre-balance build.
+        w.player.hp = w.player.max_hp();
+        let full = w.player.max_hp();
         let mut state = HudState::default();
         let mut terminal = Terminal::new(TestBackend::new(57, 1)).unwrap();
         terminal
@@ -1492,7 +1497,10 @@ mod tests {
             .unwrap();
         let text = row_text(&terminal);
         assert!(text.contains("XP"));
-        assert!(text.contains("♥ 100/100"), "HP missing in {text:?}");
+        assert!(
+            text.contains(&format!("♥ {full:.0}/{full:.0}")),
+            "HP missing in {text:?}"
+        );
         assert!(text.contains("DASH READY"), "dash missing in {text:?}");
 
         // Shrink every number, reusing the same buffers: no stale digits may survive.
@@ -1510,7 +1518,10 @@ mod tests {
             .unwrap();
         let text = row_text(&terminal);
         assert!(text.contains("XP"));
-        assert!(text.contains("♥ 1/100"), "HP not updated in {text:?}");
+        assert!(
+            text.contains(&format!("♥ 1/{full:.0}")),
+            "HP not updated in {text:?}"
+        );
         assert!(text.contains("dash 0.2s"), "dash cd not updated in {text:?}");
     }
 
@@ -1724,46 +1735,73 @@ mod tests {
 
     /// The threat pips read the same curve the director spawns off, so a
     /// campaign level does not start the player at tier 1 of the Sewer's curve.
+    ///
+    /// The two boundaries are the director's own gates, not wall-clock numbers:
+    /// tier 3 opens at `director::ELITE_START` (90 s since the early-game pass)
+    /// and tier 4 at the 120 s brute unlock of the level-0 curve.
     #[test]
     fn the_threat_tier_reads_the_levels_curve_clock() {
         // Sewer: t = 0 is the curve's start.
         assert_eq!(threat_tier(director::curve_clock(0, 0.0), false), 1);
         assert_eq!(threat_tier(director::curve_clock(0, 30.0), false), 2);
-        assert_eq!(threat_tier(director::curve_clock(0, 70.0), false), 3);
+        assert_eq!(
+            threat_tier(director::curve_clock(0, director::ELITE_START - 1.0), false),
+            2
+        );
+        assert_eq!(
+            threat_tier(director::curve_clock(0, director::ELITE_START), false),
+            3
+        );
         assert_eq!(threat_tier(director::curve_clock(0, 130.0), false), 4);
-        // Kitchen opens at level 0's 20 s mark, Lab at its 45 s mark.
-        assert_eq!(threat_tier(director::curve_clock(1, 0.0), false), 2);
-        assert_eq!(threat_tier(director::curve_clock(2, 0.0), false), 2);
-        assert_eq!(threat_tier(director::curve_clock(2, 20.0), false), 3);
+        // The Kitchen opens 120 s into level 0's curve and the Lab at its 150 s
+        // mark (`director::LEVEL_CLOCK_OFFSET`), so a carried level starts at
+        // the top horde tier instead of the Sewer's calm one.
+        assert_eq!(threat_tier(director::curve_clock(1, 0.0), false), 4);
+        assert_eq!(threat_tier(director::curve_clock(2, 0.0), false), 4);
+        assert_eq!(threat_tier(director::curve_clock(1, 0.0), false), 4);
         // The boss phase is the top tier whatever the curve says.
         assert_eq!(threat_tier(director::curve_clock(0, 0.0), true), 5);
     }
 
     /// The elite badge reads the director's curve clock, which each campaign
-    /// level shifts: the first elite is due at 60 s on the Sewer, 40 s on the
-    /// Kitchen and 15 s on the Lab.
+    /// level shifts: the first elite is due when the level's curve reaches
+    /// `director::ELITE_START` (90 s), i.e. at 90 s on the Sewer and
+    /// immediately on the Kitchen and Lab, whose `LEVEL_CLOCK_OFFSET` (120 s and
+    /// 150 s) is already past the gate.
     #[test]
     fn the_elite_badge_follows_the_levels_curve_clock() {
-        // (campaign level, elapsed just before the 5 s elite warning opens)
-        let cases = [(0usize, 52.0f32), (1, 32.0), (2, 7.0)];
-        for (level_index, before) in cases {
+        for (level_index, &offset) in director::LEVEL_CLOCK_OFFSET.iter().enumerate() {
+            let interval = director::elite_interval_for(level_index);
+            let gate_at = (director::ELITE_START - offset).max(0.0);
             let mut w = World::new_level(
                 level_index,
                 7,
                 crate::game::loadout::Loadout::new(WeaponKind::Gnaw),
             );
-            // Well before the gate (curve < 55): no badge.
-            w.elapsed = before;
+            // A whole elite interval away: no badge, even once the gate is open.
+            w.director.elite_timer = interval;
+            w.elapsed = gate_at + 10.0;
             assert!(
                 !elite_badge_due(&w),
                 "level {level_index} announced an elite at {} s",
                 w.elapsed
             );
-            // Inside the 5 s warning window.
-            w.elapsed = before + 3.0;
+            // Before the 5 s gate warning (only the Sewer has room for one).
+            if gate_at >= 5.0 {
+                w.director.elite_timer = interval;
+                w.elapsed = gate_at - 6.0;
+                assert!(
+                    !elite_badge_due(&w),
+                    "level {level_index} announced an elite early at {} s",
+                    w.elapsed
+                );
+            }
+            // Inside the 5 s warning window, with the elite about to fire.
+            w.elapsed = gate_at;
+            w.director.elite_timer = 3.0;
             assert!(
                 elite_badge_due(&w),
-                "level {level_index} missed its elite at {} s",
+                "level {level_index} missed its elite at {} s (interval {interval})",
                 w.elapsed
             );
             // A badge that is due must reach the rail.

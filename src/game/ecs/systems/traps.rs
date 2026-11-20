@@ -1263,13 +1263,17 @@ mod tests {
             assert_eq!(mouse_state(w, 0), MousetrapState::Sprung);
         };
 
+        // The base pool moved 100 → 130 HP in the early-game balance pass
+        // (`Stats::default`), so the check is against the world's own max HP:
+        // what this protects is "exactly one hit's worth, once", not the 100.
         let mut w = open_arena(167);
+        let full = w.player.max_hp();
         let c = centre(&w);
         add_mousetrap(&mut w, c);
         w.player.pos = c + FACING * 4.0; // standing on the kill plate
         snap(&mut w);
         assert!(
-            (w.player.hp - (100.0 - MOUSETRAP_DAMAGE_PLAYER)).abs() < 1e-3,
+            (w.player.hp - (full - MOUSETRAP_DAMAGE_PLAYER)).abs() < 1e-3,
             "hp = {}",
             w.player.hp
         );
@@ -1277,20 +1281,22 @@ mod tests {
         // A rat already inside i-frames is untouched (the art's "dash i-frames
         // or exit the kill zone" counter).
         let mut w = open_arena(173);
+        let full = w.player.max_hp();
         let c = centre(&w);
         add_mousetrap(&mut w, c);
         w.player.pos = c + FACING * 4.0;
         w.player.iframes = 5.0;
         snap(&mut w);
-        assert!((w.player.hp - 100.0).abs() < 1e-3, "hp = {}", w.player.hp);
+        assert!((w.player.hp - full).abs() < 1e-3, "hp = {}", w.player.hp);
 
         // Standing off the rectangle is safe.
         let mut w = open_arena(179);
+        let full = w.player.max_hp();
         let c = centre(&w);
         add_mousetrap(&mut w, c);
         w.player.pos = c + FACING * 4.0 + FACING.perp() * 9.0;
         snap(&mut w);
-        assert!((w.player.hp - 100.0).abs() < 1e-3, "hp = {}", w.player.hp);
+        assert!((w.player.hp - full).abs() < 1e-3, "hp = {}", w.player.hp);
     }
 
     /// The rat can bait the horde through: a trap the rat springs hits the
@@ -1322,8 +1328,10 @@ mod tests {
             w.enemies().iter().all(|e| !e.alive()),
             "80 damage must kill a 6 hp skitterer"
         );
-        // The rat, well behind the cocked bar, was not hit.
-        assert!((w.player.hp - 100.0).abs() < 1e-3, "hp = {}", w.player.hp);
+        // The rat, well behind the cocked bar, was not hit. (The base pool is
+        // 130 HP since the early-game balance pass; compare to the world's max.)
+        let full = w.player.max_hp();
+        assert!((w.player.hp - full).abs() < 1e-3, "hp = {}", w.player.hp);
     }
 
     // ---- Sound + effects -------------------------------------------------
