@@ -105,7 +105,7 @@ use crate::game::art_traps::{
     MOUSETRAP_HIT_PROGRESS_MIN, MOUSETRAP_KILL_HALF_V, MOUSETRAP_KILL_U_MAX, MOUSETRAP_KILL_U_MIN,
 };
 use crate::game::bullet::{Bullet, Faction};
-use crate::game::collision::{self, SizeClass};
+use crate::game::collision::{self, SizeClass, TileKind};
 use crate::game::director;
 use crate::game::ecs::components::{Pool, SpawnId};
 use crate::game::ecs::constants::PLAYER_RADIUS;
@@ -196,26 +196,33 @@ impl BossKind {
     /// present and competes for the weapons' aim, so the boss gets whatever the
     /// nearest-body pick gives it. Retune here and nowhere else.
     ///
-    /// Median dps into the boss (four seeds, targeting wired): level 0 1532,
-    /// level 1 1435, level 2 1989. Only 10-20% of that is aimed (Gnaw / Cheese
-    /// Spray); the rest is the Tail Whip arc (~840), Squeak Nova / Spore Orbit
-    /// (~250) and acid pools (~200), because the rat fights the boss at 30-40
-    /// px where those weapons already reach.
+    /// **How these were measured (b3/b4 balance pass).** The self-playing bot
+    /// on `--bot-batch 30 --seed 900` at all three skills, 126 *completed*
+    /// boss fights, with `RATRUN_BOSS_TRACE` recording the real fight clock
+    /// (spawn to death, including the rat's walk to the arena) and the damage
+    /// actually booked into the boss. Pooled fight length per boss before this
+    /// tuning: Cat median 63 s (p10 52, p90 104), Sweeper 85 s (70/116), Mower
+    /// 84 s (66/117). The scales below are each pool moved by the factor that
+    /// lands the *p90* at ~90 s and the p10 near 45-55 s (the scale is applied
+    /// on top of the art/director pool, so the fight scales with 1/scale).
     ///
-    /// The art/director pools are 14.7k / 11.4k / 12.3k HP, so the *unscaled*
-    /// boss died in 10 s / 8 s / 6 s. These scales give median fights of 72 s /
-    /// 71 s / 62 s, with the slowest seed at 78 s / 75 s / 73 s and the fastest
-    /// at 61 s / 61 s / 55 s (see the measurement's per-level report).
+    /// The residual spread is real and is *build*, not boss: the rat's measured
+    /// damage into a boss runs 78-270 dps at level 1, 220-480 at level 2 and
+    /// 260-610 at level 3, tracking the player's level at the boss (13-31 at
+    /// level 1). A fixed pool cannot do better than a ~2x band against that;
+    /// the early-game workers' XP/passive tuning is what narrows it.
     ///
-    /// The measurement is chaotic — one clip in the horde (`hit_cd` on a shot
-    /// spent on the boss) moved level 2's median 13% — so these are round
-    /// numbers inside the 60-90 s band rather than a fit to the last run.
+    /// Only 10-20% of the damage into a boss is aimed (Gnaw / Cheese Spray);
+    /// the rest is Tail Whip, Squeak Nova / Spore Orbit and acid pools, because
+    /// the rat fights at 30-60 px where those weapons reach — a kiting rat at
+    /// 100+ px lands only the long-range share, which is where the slow tail
+    /// comes from.
     #[inline]
     pub fn hp_scale(self) -> f32 {
         match self {
-            BossKind::Cat => 1.5,
-            BossKind::Broom => 3.2,
-            BossKind::Mower => 3.4,
+            BossKind::Cat => 1.4,
+            BossKind::Broom => 2.45,
+            BossKind::Mower => 2.6,
         }
     }
 
@@ -451,6 +458,20 @@ pub struct BossFight {
     pub horde_break: bool,
     /// Reused scratch.
     pub scratch: BossScratch,
+    /// The boss's position at the start of the current movement window (the
+    /// rejoin's and the siege's "is it actually moving?" probe; see
+    /// [`RELOCATE_AFTER_SECS`]).
+    pub last_pos: Vec2,
+    /// Seconds since [`Self::last_pos`] was sampled.
+    pub since_sample: f32,
+    /// Did the last 0.5 s window move the boss less than 3 px in its neutral
+    /// beat? A per-*tick* test is not enough: a boss wedged on a corner
+    /// oscillates a fraction of a pixel every tick (14 px/s of jitter, no
+    /// progress) and would read as "moving" forever.
+    pub stuck: bool,
+    /// Seconds the boss has been walled off from the rat (see
+    /// [`SIEGE_AFTER_SECS`]). Reset as soon as a wall between them is gone.
+    pub siege: f32,
 }
 
 // ============================================================================
@@ -1325,27 +1346,40 @@ impl<'a> BossContext<'a> {
         self.flow.dir_at(SizeClass::Large, pos).normalized()
     }
 
-    /// Steering direction: hunt via the large-class flow field when hunting,
-    /// otherwise chase the player directly when the line is clear.
+    /// Steering direction: chase the player directly when the line is clear,
+    /// else hunt through the large-class flow field.
+    ///
+    /// A clear line always beats the flow field. The field is cell-granular and
+    /// a cell the boss is standing on can legitimately point into a wall jamb
+    /// (the coarse field is only guaranteed for a body of its own class, and a
+    /// boss hugging a doorway is exactly where the fine window and the cell
+    /// centring disagree). Measured on the bot ladder (seed 900): a roaming
+    /// (`hunting`) jaguar with the rat 130 px away in plain sight stood still in
+    /// `Stalk` for 8-16 s at a time because the flow direction was unwalkable —
+    /// 15 % of one Cat fight and every second of a Casual fight. Only route
+    /// around walls when the straight line genuinely does not fit.
     pub fn seek(&self, boss: &Boss) -> Vec2 {
-        if boss.hunting {
-            let dir = self.flow_dir(boss.pos);
-            if dir.len_sq() > 0.0 {
-                return dir;
-            }
-        }
-        if self.los_clear(boss.pos, self.player_pos, boss.kind.body_radius()) {
-            let to = self.player_pos - boss.pos;
-            if to.len_sq() > 0.0 {
-                return to.normalized();
-            }
+        let radius = boss.kind.body_radius();
+        let to = self.player_pos - boss.pos;
+        let direct = if to.len_sq() > 1e-6 {
+            to.normalized()
+        } else {
+            Vec2::ZERO
+        };
+        if self.los_clear(boss.pos, self.player_pos, radius) {
+            return direct;
         }
         let dir = self.flow_dir(boss.pos);
-        if dir.len_sq() > 0.0 {
-            dir
-        } else {
-            (self.player_pos - boss.pos).normalized()
+        // A flow direction that cannot be stepped (wall-facing cell) would pin
+        // the boss in place; taking the direct bearing instead at least slides
+        // along the obstruction.
+        if dir.len_sq() > 0.0 && self.footprint_fits(boss.pos + dir * 2.0, radius) {
+            return dir;
         }
+        if direct.len_sq() > 0.0 {
+            return direct;
+        }
+        dir
     }
 }
 
@@ -1460,6 +1494,10 @@ pub struct BossOutput {
     pub projectiles: Vec<BossProjectileSpawn>,
     /// Feedback requests for this tick, drained in push order.
     pub cues: Vec<BossCue>,
+    /// Development tracing state (see [`BossTrace`]). It rides in this `Local`
+    /// because the system is already at Bevy's 16-parameter limit for a
+    /// single system; it is inert unless `RATRUN_BOSS_TRACE` is set.
+    pub trace: BossTrace,
 }
 
 impl BossOutput {
@@ -2069,8 +2107,6 @@ pub fn boss_damage_system(
     }
 }
 
-/// Advance the boss: phase, controller, hazards, projectiles, death.
-#[allow(clippy::too_many_arguments)]
 /// Distance (px) beyond which a live boss counts as "not in the fight" for
 /// the rejoin rule below.
 pub const REJOIN_DIST: f32 = 260.0;
@@ -2086,39 +2122,163 @@ pub const REJOIN_DIST: f32 = 260.0;
 /// between; those levels were uncompletable. The boss is only relocated when it
 /// is off screen (or cannot see the rat) and has failed to close for this long,
 /// with a full arrival cue, so a player never sees a pop-in.
-pub const RELOCATE_AFTER_SECS: f32 = 8.0;
-/// Where a rejoin puts the boss: this far from the rat, on a large-clear cell.
-const REJOIN_RADIUS: f32 = 130.0;
+pub const RELOCATE_AFTER_SECS: f32 = 5.0;
+/// Where a rejoin puts the boss, in px from the rat, tried in order.
+///
+/// The ring starts inside the Cat's pounce band (`45..95 px`) on purpose. The
+/// old single 130 px radius put the boss *outside* every one of its own attack
+/// bands: measured on the bot ladder, the one Casual fight that stalled did so
+/// for 16 s while the boss was teleported again and again to exactly 130 px
+/// from a rat that had tucked itself into the Sewer's escape rat-hole — close
+/// enough to see, too far to pounce, and unable to walk in because a rat-hole
+/// is Small-class only. A rejoin is an emergency, so it lands the boss where
+/// it can immediately act; the farther rings are the fallback for a room whose
+/// inner ring is all wall.
+const REJOIN_RADII: [f32; 6] = [95.0, 75.0, 55.0, 130.0, 175.0, 220.0];
 
-/// Where a rejoining boss is put: a large-clear cell roughly
-/// [`REJOIN_RADIUS`] from the rat **with a clear line to him**, nearest bearing
-/// first. The line-of-sight requirement is what makes the move work: the boss
-/// and the rat can be 50 px apart on opposite sides of a wall, which is exactly
-/// the stalemate this exists to break. Falls back to the closest clear cell to
-/// the rat.
+/// Can a large body walk the straight line from `from` to `to`?
+///
+/// [`TileMap::segment_hit`] is a *wall* test, and the art draws rat-holes and
+/// one-way gates as holes in a wall: a line straight through a rat-hole reads
+/// as clear while a 13.5 px body cannot pass. The rejoin must not teleport the
+/// boss into that trap, so this also requires every cell along the line to be
+/// passable for the class.
+fn walkable_line(level: &Level, from: Vec2, to: Vec2, radius: f32, class: SizeClass) -> bool {
+    if level.tiles.segment_hit(from, to, radius).is_some() {
+        return false;
+    }
+    let d = to - from;
+    let steps = (d.len() / 8.0).ceil().max(1.0) as i32;
+    // The rat's own cell is exempt: it may be standing inside a rat-hole, and
+    // standing within pounce/rake reach of a hole is a fight, not a stalemate.
+    for i in 0..steps {
+        let p = from + d * (i as f32 / steps as f32);
+        let (cx, cy) = collision::cell_of(p);
+        if !level.tiles.passable(cx, cy, class) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Where a rejoining boss is put: a large-clear cell within [`REJOIN_RADII`] of
+/// the rat **with a walkable line to him**, nearest bearing first. Both halves
+/// of that test matter: the boss and the rat can be 50 px apart on opposite
+/// sides of a wall (the stalemate this exists to break), and a line through a
+/// rat-hole is not a walk. Falls back to the closest clear cell to the rat.
 fn rejoin_spot(level: &Level, player: Vec2, radius: f32) -> Option<Vec2> {
     let class = SizeClass::Large;
     for step in 0..24 {
         let angle = step as f32 * std::f32::consts::TAU / 24.0;
-        for r in [REJOIN_RADIUS, REJOIN_RADIUS + 40.0, REJOIN_RADIUS + 90.0] {
+        for r in REJOIN_RADII {
             let p = player + Vec2::from_angle(angle) * r;
             if level.tiles.circle_clear(p, radius, class)
-                && level.tiles.segment_hit(player, p, radius).is_none()
+                && walkable_line(level, p, player, radius, class)
             {
                 return Some(p);
             }
         }
     }
-    let p = player + Vec2::new(REJOIN_RADIUS, 0.0);
-    level.tiles.nearest_open_center(p, class, 24)
+    // Nothing reachable on any ring: the rat is somewhere a large body cannot
+    // walk to (a maze pocket, behind a rat-hole). Still bring the boss *near*
+    // it — the siege rule below breaks the last wall — but never into one.
+    let p = player + Vec2::new(REJOIN_RADII[0], 0.0);
+    nearest_body_clear(level, p, radius, class, 24)
 }
 
+/// The nearest cell centre to `p` where a body of `radius` actually fits (a
+/// *body* check, not just a class-passable cell: a 13.5 px radius is 27 px
+/// across and a single passable 16 px cell does not hold it).
+fn nearest_body_clear(
+    level: &Level,
+    p: Vec2,
+    radius: f32,
+    class: SizeClass,
+    max_cells: i32,
+) -> Option<Vec2> {
+    let (pcx, pcy) = collision::cell_of(p);
+    for r in 0..=max_cells {
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx.abs() != r && dy.abs() != r {
+                    continue; // ring only, the inside was already tried
+                }
+                let (cx, cy) = (pcx + dx, pcy + dy);
+                if !level.tiles.passable(cx, cy, class) {
+                    continue;
+                }
+                let centre = Vec2::new((cx as f32 + 0.5) * collision::TILE_F, (cy as f32 + 0.5) * collision::TILE_F);
+                if level.tiles.circle_clear(centre, radius, class) {
+                    return Some(centre);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// How long a boss that is walled off from the rat — the straight line between
+/// them is not body-passable and the boss cannot find a move — may pace before
+/// it starts smashing through.
+///
+/// The rejoin rule guarantees the boss is *near* the rat; it cannot guarantee
+/// it is *reachable*. The level design has pockets no large body can enter: a
+/// maze's one-way door, the Sewer's escape rat-hole, a 1-cell squeeze. When the
+/// rat kites into one, the large-class flow field has **no direction** and the
+/// straight line is a wall, so a boss that only walks could never end the level
+/// (verified: seed 17986931858700579504, Expert — boss alive 1244 s, no damage
+/// on the boss for 1186 s, the Cat in `Stalk` at full HP while the rejoin kept
+/// putting it 130 px away on the far side of a wall). The bosses are the
+/// biggest things on the map: after this long the boss tears a body-width hole
+/// in the wall in its way and keeps coming. It is deterministic (the same seed
+/// breaks the same cell), costs one tile edit, and it is telegraphed by the
+/// boss standing and pacing at the wall first.
+pub const SIEGE_AFTER_SECS: f32 = 4.0;
+
+/// The first wall cell on the straight line from `from` to `to` that a large
+/// body cannot occupy (the cell the boss would have to break).
+fn smash_target(level: &Level, from: Vec2, to: Vec2) -> Option<(i32, i32)> {
+    let d = to - from;
+    if d.len_sq() <= 1.0 {
+        return None;
+    }
+    let steps = (d.len() / 6.0).ceil().max(1.0) as i32;
+    for i in 1..=steps {
+        let p = from + d * (i as f32 / steps as f32);
+        let (cx, cy) = collision::cell_of(p);
+        if !level.tiles.passable(cx, cy, SizeClass::Large) {
+            return Some((cx, cy));
+        }
+    }
+    None
+}
+
+/// Break a boss-sized hole at `at`: the `3 x 3` block of cells centred on it.
+///
+/// A boss is 27 px across (radius 13.5) and a cell is 16 px, so a `2 x 2` hole
+/// (32 px) is only body-width when the body happens to be centred in it — half
+/// the time the body's shoulder is still in a wall and the boss would be stuck
+/// behind the hole it just made. Three cells (48 px) always clear.
+fn smash_wall(level: &mut Level, at: (i32, i32)) {
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            let (cx, cy) = (at.0 + dx, at.1 + dy);
+            if !level.tiles.get(cx, cy).is_open() {
+                level.tiles.set(cx, cy, TileKind::Open);
+            }
+        }
+    }
+    level.tiles.rebuild_masks();
+}
+
+/// Advance the boss: phase, controller, hazards, projectiles, death.
+#[allow(clippy::too_many_arguments)]
 pub fn boss_update_system(
     mut commands: Commands,
     mut fight: ResMut<BossFight>,
     mut counters: ResMut<RunCounters>,
     tick: Res<TickInput>,
-    level: Res<Level>,
+    mut level: ResMut<Level>,
     mut player: ResMut<Player>,
     flow: Res<FlowField>,
     mut particles: ResMut<Particles>,
@@ -2137,7 +2297,13 @@ pub fn boss_update_system(
     let fight = &mut *fight;
     out.clear();
     fight.scratch.dt = dt;
+    out.trace.init();
     for (entity, mut boss) in bosses.iter_mut() {
+        if out.trace.on {
+            out.trace.flow_hint = flow.dir_at(SizeClass::Large, boss.pos).normalized();
+            out.trace
+                .sample(&boss, &player, &level, dt, &fight.scratch.dmg);
+        }
         boss.anim += dt;
         boss.hit_flash = (boss.hit_flash - dt * 8.0).max(0.0);
         boss.hurt = (boss.hurt - dt).max(0.0);
@@ -2214,6 +2380,9 @@ pub fn boss_update_system(
                     fight.level_complete = true;
                     counters.level_complete = true;
                 }
+                if out.trace.on {
+                    out.trace.finish(&boss, &player);
+                }
                 commands.entity(entity).despawn();
             }
             continue;
@@ -2240,7 +2409,21 @@ pub fn boss_update_system(
             .tiles
             .segment_hit(boss.pos, player.pos, boss.kind.body_radius())
             .is_some();
-        if to_player.len() > REJOIN_DIST || no_los {
+        // A boss that is close enough and can see the rat but cannot *move*
+        // (wedged on a wall jamb, or with no attack whose footprint fits where
+        // it stands) is just as stranded as one across the map — that is the
+        // "Broom(Idle) looping at 51 px with a wall in between" case. Its own
+        // neutral beat is when it is supposed to be closing, so a neutral boss
+        // that has not moved for a few ticks counts as out of the fight.
+        fight.since_sample += dt;
+        if fight.since_sample >= 0.5 {
+            let moved = boss.pos.dist(fight.last_pos);
+            fight.stuck = boss.state == boss.kind.initial_state() && moved < 1.5;
+            fight.last_pos = boss.pos;
+            fight.since_sample = 0.0;
+        }
+        let stuck = fight.stuck;
+        if to_player.len() > REJOIN_DIST || no_los || stuck {
             boss.lost += dt;
             if boss.lost >= RELOCATE_AFTER_SECS {
                 if let Some(spot) = rejoin_spot(&level, player.pos, boss.kind.body_radius()) {
@@ -2259,6 +2442,46 @@ pub fn boss_update_system(
             }
         } else {
             boss.lost = 0.0;
+        }
+
+        // Siege: a boss that is *walled off* (no body-passable straight line to
+        // the rat, and no move it can make) tears a hole and keeps coming. See
+        // [`SIEGE_AFTER_SECS`]. The rejoin above is the first answer (it puts
+        // the boss near when nothing is in the way); this is the answer for a
+        // rat that has kited somewhere a large body cannot follow.
+        // Only worth smashing when the boss is *at* the wall that separates
+        // them: a boss a screen away has a route (the flow field) and must walk
+        // it, or the rejoin brings it near first. Without this gate a boss that
+        // was left far away spent its whole fight tunnelling a hole every few
+        // seconds instead of closing (seen as one 157 s Mower fight where the
+        // rat was 1 039 px away for the first two minutes).
+        let near = to_player.len() < 220.0;
+        let walled_off =
+            !walkable_line(&level, boss.pos, player.pos, boss.kind.body_radius(), SizeClass::Large);
+        if stuck && near && walled_off {
+            fight.siege += dt;
+            if fight.siege >= SIEGE_AFTER_SECS {
+                if let Some(cell) = smash_target(&level, boss.pos, player.pos) {
+                    smash_wall(&mut level, cell);
+                    let hole = Vec2::new(
+                        (cell.0 as f32 + 1.0) * collision::TILE_F,
+                        (cell.1 as f32 + 1.0) * collision::TILE_F,
+                    );
+                    let normal = (boss.pos - hole).normalized();
+                    vfx::emit_boss_mower_wall_impact(
+                        &mut particles,
+                        &mut fight.rng.0,
+                        hole,
+                        normal,
+                        true,
+                    );
+                    shake.amount = shake.amount.max(10.0);
+                    sfx.0.push(Sfx::MowerWallClang);
+                }
+                fight.siege = 0.0;
+            }
+        } else {
+            fight.siege = 0.0;
         }
 
         // Controller tick. The block scopes the rng borrow so hazards can
@@ -2364,6 +2587,296 @@ pub fn boss_update_system(
             sfx.0.push(Sfx::Hurt);
             commands.entity(entity).despawn();
         }
+    }
+}
+
+// ============================================================================
+// Debug tracing (`RATRUN_BOSS_TRACE`)
+// ============================================================================
+
+/// Env-gated per-fight diagnostics (development aid only).
+///
+/// `RATRUN_BOSS_TRACE=1 cargo run --release -- --bot-batch 1 --seed N --skill
+/// skilled` prints one line per second of a boss fight — state, distance, hp,
+/// damage into the boss split by source (the [`BossDamageTally`] the damage
+/// system already books) and how long the boss has stood still in its neutral
+/// state — plus a `BOSS-END` summary when it dies. It reads no rng and writes
+/// only to stderr, so it can never change the simulation; leaving it compiled
+/// in costs one `env::var` on the first tick of a run.
+#[derive(Default)]
+pub struct BossTrace {
+    /// `RATRUN_BOSS_TRACE` is set (read once).
+    on: bool,
+    init: bool,
+    /// Running damage-by-source total for this fight.
+    dmg: BossDamageTally,
+    /// Total hp the boss lost this fight (end-hp delta based).
+    lost: f32,
+    last_hp: f32,
+    next_line: f32,
+    /// Seconds spent in the neutral state without moving (see [`Self::sample`]).
+    idle: f32,
+    idle_max: f32,
+    /// Shortest 0.5 s window of movement seen this fight is what `idle` counts;
+    /// these are the window's own anchor.
+    win_t: f32,
+    win_pos: Vec2,
+    /// Distance samples, for the mean stand-off.
+    dist_sum: f32,
+    dist_n: u32,
+    /// State changes, for the summary.
+    state_changes: u32,
+    /// Previous sample, to measure self-movement.
+    last_pos: Vec2,
+    last_state: Option<BossState>,
+    /// Fight clock, accumulated here because `Boss::elapsed` is the *state*
+    /// clock and is reset on every transition.
+    fight_time: f32,
+    /// The boss this trace belongs to (its damage-number id).
+    boss_id: u32,
+    spawned: bool,
+    /// The run ended with this boss alive (the rat died).
+    aborted: bool,
+    /// Lowest player hp seen during the fight (how close it came).
+    php_min: f32,
+    /// Damage dealt into the boss while it was in a punish window (the mower's
+    /// `Flipped` / `Overheat`, the cat's `Hurt`), i.e. how much the boss's own
+    /// counter is worth.
+    punish_dmg: f32,
+    /// Seconds spent in a punish window.
+    punish_secs: f32,
+    /// The large-class flow direction at the boss, copied in by the caller
+    /// (development only).
+    flow_hint: Vec2,
+    /// Signature-counter accounting: `[cat pounces, cat overshoots (the dazed
+    /// beat), broom staggers, mower flips]`.
+    counters: [u32; 4],
+    /// Damage dealt into the boss during the cat's overshoot daze (the window a
+    /// dodged pounce opens).
+    daze_dmg: f32,
+    daze_secs: f32,
+    /// Damage dealt while the mower is on its back (`Flipped`, art: 2x).
+    flip_dmg: f32,
+    flip_secs: f32,
+}
+
+impl BossTrace {
+    /// Read the env var once per process.
+    fn init(&mut self) {
+        if self.init {
+            return;
+        }
+        self.init = true;
+        self.on = std::env::var_os("RATRUN_BOSS_TRACE").is_some_and(|v| v != "0");
+    }
+
+    /// Is this state the kind's neutral/approach beat (the one the boss is
+    /// supposed to *leave* the moment it can attack)?
+    fn neutral(&self, boss: &Boss) -> bool {
+        boss.state == boss.kind.initial_state()
+    }
+
+    /// Is the boss in a window its signature counter opens (the designed
+    /// "punish" beat)? Used only for the trace's counter accounting.
+    fn punish_window(boss: &Boss) -> bool {
+        matches!(
+            boss.state,
+            BossState::Cat(BossCatState::Hurt)
+                | BossState::Broom(BroomBossState::Hurt { .. })
+                | BossState::Mower(MowerState::Flipped | MowerState::Overheat)
+        )
+    }
+
+    /// One tick of tracing. Called before the controller tick, so it reads the
+    /// state and position the previous tick left behind.
+    fn sample(
+        &mut self,
+        boss: &Boss,
+        player: &Player,
+        level: &Level,
+        dt: f32,
+        dmg: &BossDamageTally,
+    ) {
+        if !self.spawned || self.boss_id != boss.id {
+            // First tick of the fight: reset the accumulator.
+            self.spawned = true;
+            self.aborted = false;
+            self.boss_id = boss.id;
+            self.fight_time = 0.0;
+            self.dmg = BossDamageTally::default();
+            self.lost = 0.0;
+            self.next_line = 1.0;
+            self.idle = 0.0;
+            self.idle_max = 0.0;
+            self.dist_sum = 0.0;
+            self.dist_n = 0;
+            self.state_changes = 0;
+            self.counters = [0; 4];
+            self.daze_dmg = 0.0;
+            self.daze_secs = 0.0;
+            self.flip_dmg = 0.0;
+            self.flip_secs = 0.0;
+            self.php_min = player.hp;
+            self.punish_dmg = 0.0;
+            self.punish_secs = 0.0;
+            self.last_hp = boss.hp;
+            self.last_pos = boss.pos;
+            self.win_pos = boss.pos;
+            self.win_t = 0.0;
+            self.last_state = Some(boss.state);
+            eprintln!(
+                "BOSS-SPAWN kind={:?} hp={:.0} lvl={}",
+                boss.kind, boss.max_hp, player.level
+            );
+            return;
+        }
+        if !self.aborted && player.hp <= 0.0 {
+            // The rat died with the boss alive: the fight has no winner, but its
+            // length and the damage booked into the boss are still informative.
+            self.aborted = true;
+            let secs = self.fight_time;
+            eprintln!(
+                "BOSS-ABORT kind={:?} secs={:.1} dealt={:.0} dps={:.0} mean_dist={:.0} \
+                 idle_max={:.1} states={} lvl={} hp_frac={:.2} php_min={:.0} punish_dmg={:.0} punish_secs={:.1}",
+                boss.kind,
+                secs,
+                self.lost,
+                self.lost / secs.max(0.01),
+                self.dist_sum / self.dist_n.max(1) as f32,
+                self.idle_max,
+                self.state_changes,
+                player.level,
+                boss.hp_frac(),
+                self.php_min,
+                self.punish_dmg,
+                self.punish_secs,
+            );
+            return;
+        }
+        // Damage booked this tick (the damage system ran just before us).
+        self.fight_time += dt;
+        self.dmg.add(*dmg);
+        let dealt = (self.last_hp - boss.hp).max(0.0);
+        self.lost += dealt;
+        self.last_hp = boss.hp;
+        self.php_min = self.php_min.min(player.hp);
+        if Self::punish_window(boss) {
+            self.punish_dmg += dealt;
+            self.punish_secs += dt;
+        }
+        if matches!(boss.state, BossState::Cat(BossCatState::Stalk)) && boss.duration < 1.0 {
+            self.daze_dmg += dealt;
+            self.daze_secs += dt;
+        }
+        if matches!(boss.state, BossState::Mower(MowerState::Flipped)) {
+            self.flip_dmg += dealt;
+            self.flip_secs += dt;
+        }
+        self.dist_sum += boss.pos.dist(player.pos);
+        self.dist_n += 1;
+        if self.last_state != Some(boss.state) {
+            self.state_changes += 1;
+            self.last_state = Some(boss.state);
+            // Signature counters: a pounce to dodge (counted on entry), the
+            // 0.7 s dazed beat that a dodged pounce leaves (the cat's own
+            // `Stalk` beat is 1.4-3.5 s, so a short one is the overshoot),
+            // the broom's stubbed-toe stagger, and the mower's wheels-up
+            // window.
+            match boss.state {
+                BossState::Cat(BossCatState::Pounce) => self.counters[0] += 1,
+                BossState::Cat(BossCatState::Stalk) if boss.duration < 1.0 => {
+                    self.counters[1] += 1
+                }
+                BossState::Broom(BroomBossState::Hurt { .. }) => self.counters[2] += 1,
+                BossState::Mower(MowerState::Flipped) => self.counters[3] += 1,
+                _ => {}
+            }
+        }
+        // Idle is measured over 0.5 s windows: a boss wedged on a corner
+        // jitters a fraction of a pixel per tick (a few px/s of noise, no
+        // progress), so a per-tick threshold calls it "moving" forever.
+        self.win_t += dt;
+        if self.win_t >= 0.5 {
+            let window_moved = boss.pos.dist(self.win_pos);
+            self.win_pos = boss.pos;
+            self.win_t = 0.0;
+            if self.neutral(boss) && window_moved < 3.0 {
+                self.idle += 0.5;
+                self.idle_max = self.idle_max.max(self.idle);
+            } else {
+                self.idle = 0.0;
+            }
+        }
+        if self.fight_time >= self.next_line {
+            self.next_line += 1.0;
+            eprintln!(
+                "BOSS t={:.1} kind={:?} state={:?} p={:.2} dist={:.0} hp={:.0}/{:.0} \
+                 dmg={:.0} (aim {:.0} pat {:.0} whip {:.0} pool {:.0}) idle={:.1} lvl={} php={:.0} \
+                 bpos={:.0},{:.0} ppos={:.0},{:.0} los={} fit={} flow={:?} hunt={} inarena={}",
+                self.fight_time,
+                boss.kind,
+                boss.state,
+                boss.progress(),
+                boss.pos.dist(player.pos),
+                boss.hp,
+                boss.max_hp,
+                self.lost,
+                self.dmg.aimed,
+                self.dmg.pattern,
+                self.dmg.whip,
+                self.dmg.pools,
+                self.idle,
+                player.level,
+                player.hp,
+                boss.pos.x,
+                boss.pos.y,
+                player.pos.x,
+                player.pos.y,
+                level
+                    .tiles
+                    .segment_hit(boss.pos, player.pos, boss.kind.body_radius())
+                    .is_none(),
+                level.tiles.circle_clear(
+                    boss.pos + (player.pos - boss.pos).normalized() * 2.0,
+                    boss.kind.body_radius(),
+                    SizeClass::Large,
+                ),
+                self.flow_hint,
+                boss.hunting,
+                boss.arena.contains_world(boss.pos),
+            );
+        }
+    }
+
+    /// The fight ended (the boss died): one summary line.
+    fn finish(&mut self, boss: &Boss, player: &Player) {
+        let secs = self.fight_time;
+        self.spawned = false;
+        eprintln!(
+            "BOSS-END kind={:?} secs={:.1} dealt={:.0} dps={:.0} mean_dist={:.0} \
+             idle_max={:.1} states={} lvl={} hp={:.0} php_min={:.0} punish_dmg={:.0} punish_secs={:.1} \
+             pounce={} overshoot={} stagger={} flip={} daze_dmg={:.0} daze_secs={:.1} flip_dmg={:.0} flip_secs={:.1}",
+            boss.kind,
+            secs,
+            self.lost,
+            self.lost / secs.max(0.01),
+            self.dist_sum / self.dist_n.max(1) as f32,
+            self.idle_max,
+            self.state_changes,
+            player.level,
+            player.hp,
+            self.php_min,
+            self.punish_dmg,
+            self.punish_secs,
+            self.counters[0],
+            self.counters[1],
+            self.counters[2],
+            self.counters[3],
+            self.daze_dmg,
+            self.daze_secs,
+            self.flip_dmg,
+            self.flip_secs,
+        );
     }
 }
 

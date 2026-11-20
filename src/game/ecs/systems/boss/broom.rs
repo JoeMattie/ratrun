@@ -168,8 +168,20 @@ const DUSTPAN_RAKES_REQUIRED: f32 = 2.0;
 
 /// `Hurt` hop (art: `1.20 s`).
 const HURT: f32 = 1.20;
-/// A burst of this fraction of max hp trips the art's heavy stagger.
-const STAGGER_HP_FRAC: f32 = 0.18;
+/// A burst of this fraction of max hp **in one beat** trips the art's heavy
+/// stagger.
+///
+/// The pool it is a fraction of is the campaign boss's, not the art's base: the
+/// anchor resets on every state entry (`enter`), so the burst window is one
+/// beat (1.15-1.65 s), and the rat's measured damage into the Sweeper is
+/// 200-480 dps — a beat is worth 250-700 HP, i.e. 1.0-2.8 % of the ~25 k pool.
+/// At the old `0.18` the threshold was ~4 550 HP in one beat (~3 000 dps): the
+/// hop never once fired on the whole bot ladder (0 of 72 Sweeper fights booked
+/// any damage in `Hurt`), which left the boss's poise/stagger beat dead code.
+/// `0.015` (~380 HP) reads a genuinely heavy burst from the build the campaign
+/// actually produces, and the 6 s cooldown keeps it a reprieve rather than a
+/// stun-lock.
+const STAGGER_HP_FRAC: f32 = 0.015;
 /// Minimum spacing between two hops, so a high-dps build cannot stun-lock
 /// the human out of every attack (the reprieve stays a *reprieve*).
 const STAGGER_COOLDOWN: f32 = 6.0;
