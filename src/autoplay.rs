@@ -263,6 +263,41 @@ pub struct LevelStats {
     pub kept: Vec<String>,
     /// How the rat died here, if it did.
     pub death: Option<DeathInfo>,
+    /// Seconds until the first level-up on this level (`None` if none came).
+    pub first_levelup: Option<f32>,
+    /// Kills booked on this level.
+    pub kills: u32,
+    /// Seconds spent with an enemy body within [`NEAR_ENEMY_PX`].
+    pub near_seconds: f32,
+    /// Player state at the fixed progress checkpoints (see [`PROGRESS_TIMES`]).
+    pub progress: Vec<Progress>,
+    /// Enemies alive when the rat died here.
+    pub enemies_at_death: Option<u32>,
+    /// One-line cause-of-death classification (diagnostic, not a spec).
+    pub death_note: Option<String>,
+}
+
+/// Progress checkpoints the batch reports level/upgrade snapshots at (seconds
+/// on a level's clock).
+pub const PROGRESS_TIMES: [f32; 4] = [60.0, 120.0, 180.0, 240.0];
+
+/// "Within 30 px of an enemy" means the rat's centre is that close to an
+/// enemy's *body* (centre distance minus the enemy's radius).
+pub const NEAR_ENEMY_PX: f32 = 30.0;
+
+/// One checkpoint reading of the run's progression.
+#[derive(Clone, Copy, Debug)]
+pub struct Progress {
+    /// Level-clock time the snapshot was taken at (`PROGRESS_TIMES`).
+    pub at: f32,
+    /// Player XP level.
+    pub player_level: u32,
+    /// How many upgrades have been taken.
+    pub upgrades: u32,
+    /// Kills booked so far on this level.
+    pub kills: u32,
+    /// HP fraction (max HP changes with picks).
+    pub hp_frac: f32,
 }
 
 impl LevelStats {
@@ -312,6 +347,8 @@ pub struct AutoRun {
     stats: RunStats,
     /// Threat attribution scratch for the current tick.
     threats: Vec<(DamageCause, f32, f32)>,
+    /// An enemy body was within `NEAR_ENEMY_PX` before this tick.
+    near_enemy: bool,
     /// Boss fight bookkeeping for the current level.
     boss_alive: bool,
     boss_hp: f32,
@@ -357,6 +394,7 @@ impl AutoRun {
             rng,
             stats,
             threats: Vec::with_capacity(32),
+            near_enemy: false,
             boss_alive: false,
             boss_hp: 0.0,
             boss_damage: 0.0,
@@ -390,6 +428,13 @@ impl AutoRun {
         self.account_tick(dt, hp_before, regen, boss_before);
 
         // Decisions the real App would have made between ticks.
+        if self.world.pending_levelups > 0 && !self.world.game_over {
+            let at = self.world.elapsed;
+            let stats = self.level_stats();
+            if stats.first_levelup.is_none() {
+                stats.first_levelup = Some(at);
+            }
+        }
         while self.world.pending_levelups > 0 && !self.world.game_over {
             self.world.pending_levelups -= 1;
             self.take_upgrade();
@@ -473,11 +518,13 @@ impl AutoRun {
         }
         let cell = crate::game::collision::cell_of(w.player.pos);
         format!(
-            "t={:6.1} lvl={} pos=({:6.1},{:6.1}) cell=({},{}) hp={:5.1}/{:5.1} en={:3} near={:2} min={:5.1} goal={:5.1}px boss={:5.1}px head=({:+.2},{:+.2}) {:?}",
+            "t={:6.1} lvl={} pos=({:6.1},{:6.1}) vel=({:+.1},{:+.1}) cell=({},{}) hp={:5.1}/{:5.1} en={:3} near={:2} min={:5.1} goal={:5.1}px boss={:5.1}px head=({:+.2},{:+.2}) {:?}",
             w.elapsed,
             w.level_index + 1,
             w.player.pos.x,
             w.player.pos.y,
+            w.player.vel.x,
+            w.player.vel.y,
             cell.0,
             cell.1,
             w.player.hp,
@@ -618,8 +665,12 @@ impl AutoRun {
             .map(|t| t.0)
             .unwrap_or(DamageCause::Unknown);
         let death = DeathInfo { level, at, cause };
+        let enemies = self.world.enemy_count() as u32;
+        let note = classify_death(&self.world, cause);
         let stats = self.level_stats();
         stats.death = Some(death);
+        stats.death_note = Some(note);
+        stats.enemies_at_death = Some(enemies);
         stats.time = at;
         let time = self.banked_time + self.world.elapsed;
         self.stats.total_kills = self.banked_kills + self.world.kills;
@@ -663,6 +714,11 @@ impl AutoRun {
         self.stats.total_kills = self.banked_kills + self.world.kills;
         self.stats.total_score = self.banked_score + self.world.score;
 
+        let near = self.near_enemy;
+        let kills = self.world.kills;
+        let player_level = self.world.player.level;
+        let hp_frac = (self.world.player.hp / self.world.player.max_hp().max(1.0))
+            .clamp(0.0, 1.0);
         let pos = self
             .stats
             .levels
@@ -671,9 +727,26 @@ impl AutoRun {
             .unwrap_or(0);
         let stats = &mut self.stats.levels[pos];
         stats.time = elapsed;
+        stats.kills = kills;
+        if near {
+            stats.near_seconds += dt;
+        }
         if let Some(cause) = cause {
             *stats.damage.entry(cause.name()).or_insert(0.0) += lost;
             stats.damage_total += lost;
+        }
+        // Fixed progression checkpoints, in order (one push per crossing).
+        let next_checkpoint = PROGRESS_TIMES.get(stats.progress.len()).copied();
+        if let Some(at) = next_checkpoint {
+            if elapsed >= at {
+                stats.progress.push(Progress {
+                    at,
+                    player_level,
+                    upgrades: stats.upgrades.len() as u32,
+                    kills,
+                    hp_frac,
+                });
+            }
         }
 
         // Boss fight accounting.
@@ -735,6 +808,7 @@ impl AutoRun {
     /// Snapshot everything that could hurt the rat this tick.
     fn snapshot_threats(&mut self) {
         self.threats.clear();
+        self.near_enemy = false;
         let w = &self.world;
         let p = w.player.pos;
         let armor = w.player.loadout.stats.armor;
@@ -747,6 +821,9 @@ impl AutoRun {
                     continue;
                 }
                 let d = en.pos.dist(p);
+                if d - en.radius <= NEAR_ENEMY_PX {
+                    self.near_enemy = true;
+                }
                 if nearest.map(|(_, nd)| d < nd) != Some(false) {
                     nearest = Some((en.kind, d));
                 }
@@ -835,6 +912,137 @@ impl AutoRun {
             }
         }
     }
+}
+
+/// One-line, human-readable classification of a death, for tuning reports:
+/// "surrounded in the open", "cornered", "burst from one enemy kind", "boss
+/// attack by name" or "trap".
+///
+/// This reads the state *at the death tick* (bodies in contact range, the wall
+/// gap, the attributed damage source), so it is a diagnostic, not a spec.
+fn classify_death(w: &World, cause: DamageCause) -> String {
+    match cause {
+        DamageCause::Trap => "trap: mousetrap snap".to_string(),
+        DamageCause::BossContact(kind) => format!("boss: {} body", boss_name(kind)),
+        DamageCause::BossHazard(kind, attack) => {
+            format!("boss: {} {}", boss_name(kind), attack.name())
+        }
+        DamageCause::BossProjectile(kind) => {
+            format!("boss: {} projectile", boss_name(kind))
+        }
+        DamageCause::EnemyBullet => {
+            let (near60, near120) = enemy_density(w);
+            if near60 >= 5 {
+                format!(
+                    "surrounded in the open: spitter burst with {near60} bodies within 60 px"
+                )
+            } else if near120 >= 12 {
+                format!("swarmed: spitter burst, {near120} bodies within 120 px")
+            } else {
+                "burst from spitter bullets".to_string()
+            }
+        }
+        DamageCause::EnemyContact(kind) => {
+            let (near60, near120) = enemy_density(w);
+            let gap = wall_gap(w);
+            let open = open_directions(w);
+            if gap < 22.0 && open <= 3 {
+                format!(
+                    "cornered: {} contact with a wall {gap:.0} px away",
+                    enemy_kind_name(kind)
+                )
+            } else if near60 >= 6 {
+                format!(
+                    "surrounded in the open: {} contact, {near60} bodies within 60 px",
+                    enemy_kind_name(kind)
+                )
+            } else if near120 >= 12 {
+                format!(
+                    "swarmed: {} contact, {near120} bodies within 120 px",
+                    enemy_kind_name(kind)
+                )
+            } else {
+                format!("burst from {} contact", enemy_kind_name(kind))
+            }
+        }
+        DamageCause::Unknown => "unclear: no attacker matched the HP loss".to_string(),
+    }
+}
+
+fn enemy_kind_name(kind: EnemyKind) -> &'static str {
+    match kind {
+        EnemyKind::Skitterer => "skitterer",
+        EnemyKind::Bat => "bat",
+        EnemyKind::Cat => "cat",
+        EnemyKind::Spitter => "spitter",
+        EnemyKind::Brute => "brute",
+        EnemyKind::Boss => "boss",
+    }
+}
+
+fn boss_name(kind: BossKind) -> &'static str {
+    match kind {
+        BossKind::Cat => "jaguar",
+        BossKind::Broom => "broom human",
+        BossKind::Mower => "mower",
+    }
+}
+
+/// `(bodies within 60 px, within 120 px)` of the rat, at death.
+fn enemy_density(w: &World) -> (usize, usize) {
+    let p = w.player.pos;
+    let mut near60 = 0;
+    let mut near120 = 0;
+    for e in w.ecs.iter_entities() {
+        if let Some(en) = e.get::<Enemy>() {
+            if !en.alive() {
+                continue;
+            }
+            let d = en.pos.dist(p);
+            if d <= 60.0 {
+                near60 += 1;
+            }
+            if d <= 120.0 {
+                near120 += 1;
+            }
+        }
+    }
+    (near60, near120)
+}
+
+/// Distance from the rat to the nearest wall, capped at 100 px.
+fn wall_gap(w: &World) -> f32 {
+    use crate::game::collision::SizeClass;
+    let p = w.player.pos;
+    let mut d = 0.0;
+    while d < 100.0 {
+        if !w
+            .level
+            .tiles
+            .circle_clear(p + Vec2::from_angle(d * 0.7) * d, PLAYER_RADIUS, SizeClass::Small)
+        {
+            return d;
+        }
+        d += 4.0;
+    }
+    100.0
+}
+
+/// How many of the 8 compass directions have 28 px of clear runway.
+fn open_directions(w: &World) -> usize {
+    use crate::game::collision::SizeClass;
+    let p = w.player.pos;
+    let mut n = 0;
+    for i in 0..8 {
+        let a = i as f32 * std::f32::consts::TAU / 8.0;
+        if w.level
+            .tiles
+            .circle_clear(p + Vec2::from_angle(a) * 28.0, PLAYER_RADIUS, SizeClass::Small)
+        {
+            n += 1;
+        }
+    }
+    n
 }
 
 /// Analytic single-target-ish DPS of a build: every weapon's per-shot damage
@@ -999,35 +1207,108 @@ mod tests {
     ///
     /// The seeds are the ones the beatability report uses (`batch::seed_for`),
     /// so this test and the report describe the same games.
+    /// The skills are an ordered ladder, not three flavours: on the same
+    /// seeds Expert must out-survive Skilled and Skilled must out-survive
+    /// Casual, by an aggregate margin and on most individual seeds (a ladder
+    /// that only holds on the average is one lucky run away from noise).
+    ///
+    /// **Capped at 240 s on purpose.** The boss arrives at
+    /// `director::BOSS_TIME` = 255 s, and at this commit killing a boss with
+    /// the horde alive still trips the debug `EnemyIndex` guard in
+    /// `ecs/resources.rs` (`boss_update_system` despawns the horde after the
+    /// grid build). Release batches are unaffected; this test stays below the
+    /// boss so it measures survival independently. Raise `CAP` to 1200 s and
+    /// add the clear-rate ordering the day the boss worker's fix merges.
     #[test]
-    fn casual_does_worse_than_expert_on_the_same_seeds() {
-        let seeds: Vec<u64> = (0..8).map(|i| batch::seed_for(900, i)).collect();
-        let score = |skill: Skill| -> (u32, f32) {
-            let mut clears = 0u32;
-            let mut time = 0.0f32;
-            for &seed in &seeds {
-                let mut run = AutoRun::new(seed, AutoOpts::practice(0, skill));
-                // Below `director::BOSS_TIME` (255 s): this test measures
-                // survival, and staying under the boss keeps it independent of
-                // the shared-tree boss-death bug (see the escalation on
-                // `boss_update_system` invalidating `EnemyIndex`).
-                let simulated = run_to_end(&mut run, 1.0 / 60.0, 240.0);
-                time += simulated;
-                if run.stats().won {
-                    clears += 1;
+    fn skills_form_an_ordered_ladder_on_the_same_seeds() {
+        const CAP: f32 = 240.0;
+        const N: usize = 12;
+
+        fn survival(seeds: &[u64], skill: Skill) -> Vec<f32> {
+            let n = seeds.len();
+            let threads = std::thread::available_parallelism()
+                .map(|v| v.get())
+                .unwrap_or(4)
+                .clamp(1, n);
+            let mut out = vec![0.0f32; n];
+            std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(threads);
+                for t in 0..threads {
+                    handles.push(scope.spawn(move || {
+                        let mut v = Vec::new();
+                        let mut i = t;
+                        while i < n {
+                            let mut run =
+                                AutoRun::new(seeds[i], AutoOpts::practice(0, skill));
+                            run_to_end(&mut run, 1.0 / 60.0, CAP);
+                            v.push((i, run.stats().total_time));
+                            i += threads;
+                        }
+                        v
+                    }));
                 }
-            }
-            (clears, time / seeds.len() as f32)
-        };
-        let (expert_clears, expert_time) = score(Skill::Expert);
-        let (casual_clears, casual_time) = score(Skill::Casual);
+                for h in handles {
+                    for (i, time) in h.join().expect("ladder worker panicked") {
+                        out[i] = time;
+                    }
+                }
+            });
+            out
+        }
+
+        fn mean(v: &[f32]) -> f32 {
+            v.iter().sum::<f32>() / v.len() as f32
+        }
+        fn median(v: &[f32]) -> f32 {
+            let mut sorted = v.to_vec();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            sorted[sorted.len() / 2]
+        }
+        fn beats(a: &[f32], b: &[f32]) -> usize {
+            a.iter().zip(b).filter(|(x, y)| x > y).count()
+        }
+
+        let seeds: Vec<u64> = (0..N).map(|i| batch::seed_for(900, i)).collect();
+        let expert = survival(&seeds, Skill::Expert);
+        let skilled = survival(&seeds, Skill::Skilled);
+        let casual = survival(&seeds, Skill::Casual);
+
+        let (em, sm, cm) = (mean(&expert), mean(&skilled), mean(&casual));
+        let (ed, sd, cd) = (median(&expert), median(&skilled), median(&casual));
         assert!(
-            expert_time > casual_time * 1.15,
-            "expert survived {expert_time:.0}s on average, casual {casual_time:.0}s"
+            em > sm * 1.05,
+            "expert mean {em:.0}s must beat skilled {sm:.0}s by 5%"
         );
         assert!(
-            expert_clears >= casual_clears,
-            "expert cleared {expert_clears}, casual {casual_clears}"
+            sm > cm * 1.20,
+            "skilled mean {sm:.0}s must beat casual {cm:.0}s by 20%"
+        );
+        assert!(
+            ed > sd * 1.08,
+            "expert median {ed:.0}s must beat skilled {sd:.0}s by 8%"
+        );
+        assert!(
+            sd > cd * 1.15,
+            "skilled median {sd:.0}s must beat casual {cd:.0}s by 15%"
+        );
+        // Per-seed ordering must hold on most games, not just in aggregate.
+        assert!(
+            beats(&expert, &casual) >= 9,
+            "expert out-survived casual on only {}/{} seeds",
+            beats(&expert, &casual),
+            N
+        );
+        assert!(
+            beats(&skilled, &casual) >= 9,
+            "skilled out-survived casual on only {}/{} seeds",
+            beats(&skilled, &casual),
+            N
+        );
+        assert!(
+            beats(&expert, &skilled) >= 6,
+            "expert out-survived skilled on only {}/{} seeds",
+            beats(&expert, &skilled),
+            N
         );
     }
 
