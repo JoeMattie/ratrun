@@ -7,7 +7,6 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
 
 use super::palette::Rgb;
 
@@ -173,10 +172,16 @@ impl PixelBuffer {
     }
 
     /// Blit the pixel grid into a ratatui buffer region using `▀` cells.
+    ///
+    /// This is the hot path: a 160 × 168-pixel viewport is 13 440 cells, so
+    /// the colour fold for a terminal without 24-bit colour happens here, per
+    /// pixel, through [`palette::to_term`]'s cached lookup. The capability is
+    /// read once per frame, not once per cell.
     pub fn render_to(&self, area: Rect, buf: &mut Buffer) {
         if self.w == 0 || self.h == 0 {
             return;
         }
+        let depth = crate::term::color_depth();
         for cy in 0..area.height {
             let top_y = cy as usize * 2;
             let bot_y = top_y + 1;
@@ -186,8 +191,8 @@ impl PixelBuffer {
                 let bot = self.get(xx, bot_y);
                 if let Some(cell) = buf.cell_mut((area.x + cx, area.y + cy)) {
                     cell.set_symbol("▀");
-                    cell.set_fg(Color::Rgb(top.0, top.1, top.2));
-                    cell.set_bg(Color::Rgb(bot.0, bot.1, bot.2));
+                    cell.set_fg(super::palette::to_term(top, depth));
+                    cell.set_bg(super::palette::to_term(bot, depth));
                 }
             }
         }

@@ -2231,6 +2231,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "image",
+ "libc",
  "rand 0.10.4",
  "rascii_art",
  "ratatui",
