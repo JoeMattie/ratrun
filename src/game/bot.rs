@@ -113,7 +113,7 @@ use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::systems::boss::{Boss, BossProjectile, HazardShape};
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::PickupKind;
-use crate::game::loadout::{Loadout, PassiveKind, Upgrade};
+use crate::game::loadout::{ChestReward, Loadout, PassiveKind, Upgrade};
 use crate::game::weapon::WeaponKind;
 use crate::game::world::World;
 use crate::math::Vec2;
@@ -571,7 +571,15 @@ impl Bot {
     /// Acknowledge every queued chest immediately during autoplay.
     pub fn claim_chests(w: &mut World) {
         if !w.finished() {
-            while w.claim_chest().is_some() {}
+            // The bot takes every chest at once, and applies the fallback
+            // chest's heal exactly like `App::resume_or_open_reward` does (a
+            // treatment run should not leave HP on the table).
+            while let Some(reward) = w.claim_chest() {
+                if let ChestReward::Gold(_) = reward {
+                    let heal = crate::game::loadout::CHEST_HEAL_FRAC * w.player.max_hp();
+                    w.player.heal(heal);
+                }
+            }
         }
     }
 
@@ -1589,52 +1597,100 @@ pub fn upgrade_value(lo: &Loadout, up: &Upgrade, hp_frac: f32) -> f32 {
         Upgrade::LevelWeapon(i) => match lo.weapons.get(*i) {
             Some(w) => {
                 let base = weapon_tier(w.kind) + 6.0 - w.level as f32 * 0.4;
-                if early { base + 1.0 } else { base }
+                let base = if early { base + 1.0 } else { base };
+                // The pick that maxes a weapon whose partner is already owned
+                // makes the next chest an evolution: worth chasing.
+                if completes_evolution(lo, w) {
+                    base + EVOLUTION_VALUE
+                } else {
+                    base
+                }
             }
             None => 0.0,
         },
-        Upgrade::Passive(p) => match p {
-            PassiveKind::Armor => match lo.stacks(PassiveKind::Armor) {
-                0 => 10.0,
-                1 | 2 => 8.5,
-                3 | 4 => 6.0,
-                _ => 4.0,
-            },
-            PassiveKind::MaxHp => {
-                if lo.stacks(PassiveKind::MaxHp) < 2 || hp_frac < 0.7 {
-                    8.5
-                } else {
-                    4.5
-                }
+        // A partner for an owned L4/L5 weapon is an evolution on the next
+        // chest: worth as much as a defensive staple.
+        Upgrade::Passive(p) => {
+            let base = passive_value(lo, *p, hp_frac, early);
+            if lo.priority_partner() == Some(*p) {
+                base + EVOLUTION_VALUE
+            } else {
+                base
             }
-            PassiveKind::Magnet => match lo.stacks(PassiveKind::Magnet) {
-                0 => 10.0,
-                1 => 8.0,
-                2 => 6.0,
-                _ => 3.0,
-            },
-            PassiveKind::Regen => {
-                if lo.stacks(PassiveKind::Regen) < 2 { 6.0 } else { 3.5 }
+        }
+        // Fallback consumables: a bandage is worth what the HP is worth.
+        Upgrade::Bandage => {
+            if hp_frac < 0.5 {
+                7.5
+            } else if hp_frac < 0.8 {
+                5.0
+            } else {
+                1.5
             }
-            PassiveKind::Damage => {
-                if early { 6.0 } else { 7.5 }
-            }
-            PassiveKind::FireRate => {
-                if early { 5.5 } else { 7.0 }
-            }
-            PassiveKind::MoveSpeed => 4.5,
-            // Wave 3. The bot has no opinion about the new passives beyond
-            // "take one early and their ranks later": Spring Heel is escape
-            // (like armour), the reach/zone ones are build multipliers, and
-            // Second Scent is a slow XP trickle.
-            PassiveKind::SpringHeel => {
-                if early { 7.0 } else { 5.0 }
-            }
-            PassiveKind::Counterweight => 5.5,
-            PassiveKind::LongFuse => 5.5,
-            PassiveKind::SecondScent => 5.0,
-            PassiveKind::LensCap => if early { 4.5 } else { 6.0 },
+        }
+        Upgrade::Purse => 3.0,
+    }
+}
+
+/// How much the bot values the pick that completes an evolution (a weapon
+/// reaching L5 with its partner owned, or the partner itself arriving).
+const EVOLUTION_VALUE: f32 = 4.0;
+
+/// Would this level-up make `weapon` evolvable (L5 + partner owned)?
+fn completes_evolution(lo: &Loadout, weapon: &crate::game::weapon::Weapon) -> bool {
+    if weapon.evolved || weapon.level + 1 < weapon.kind.max_level() {
+        return false;
+    }
+    weapon
+        .kind
+        .evolution()
+        .is_some_and(|e| lo.stacks(e.passive) > 0)
+}
+
+/// The passive half of [`upgrade_value`] (split out so the evolution-partner
+/// bonus is one place).
+fn passive_value(lo: &Loadout, p: PassiveKind, hp_frac: f32, early: bool) -> f32 {
+    match p {
+        PassiveKind::Armor => match lo.stacks(PassiveKind::Armor) {
+            0 => 10.0,
+            1 | 2 => 8.5,
+            3 | 4 => 6.0,
+            _ => 4.0,
         },
+        PassiveKind::MaxHp => {
+            if lo.stacks(PassiveKind::MaxHp) < 2 || hp_frac < 0.7 {
+                8.5
+            } else {
+                4.5
+            }
+        }
+        PassiveKind::Magnet => match lo.stacks(PassiveKind::Magnet) {
+            0 => 10.0,
+            1 => 8.0,
+            2 => 6.0,
+            _ => 3.0,
+        },
+        PassiveKind::Regen => {
+            if lo.stacks(PassiveKind::Regen) < 2 { 6.0 } else { 3.5 }
+        }
+        PassiveKind::Damage => {
+            if early { 6.0 } else { 7.5 }
+        }
+        PassiveKind::FireRate => {
+            if early { 5.5 } else { 7.0 }
+        }
+        PassiveKind::MoveSpeed => 4.5,
+        // Wave 3. The bot has no opinion about the new passives beyond
+        // "take one early and their ranks later": Spring Heel is escape
+        // (like armour), the reach/zone ones are build multipliers, and
+        // Second Scent is a slow XP trickle.
+        PassiveKind::SpringHeel => {
+            if early { 7.0 } else { 5.0 }
+        }
+        PassiveKind::Counterweight => 5.5,
+        PassiveKind::LongFuse => 5.5,
+        PassiveKind::SecondScent => 5.0,
+        PassiveKind::LensCap => if early { 4.5 } else { 6.0 },
     }
 }
 
@@ -1643,7 +1699,19 @@ pub fn upgrade_value(lo: &Loadout, up: &Upgrade, hp_frac: f32) -> f32 {
 fn keep_value(lo: &Loadout, k: &Keepable, hp_frac: f32) -> f32 {
     match k.kind {
         crate::game::campaign::KeepKind::Weapon(kind) => {
-            weapon_tier(kind) * (1.0 + 0.18 * k.level as f32)
+            let evolved = lo
+                .weapons
+                .iter()
+                .find(|w| w.kind == kind)
+                .is_some_and(|w| w.evolved);
+            let base = weapon_tier(kind) * (1.0 + 0.18 * k.level as f32);
+            // An earned evolution keeps working without its partner (design
+            // §1 campaign rule), so it is the strongest thing on the manifest.
+            if evolved {
+                base + EVOLUTION_VALUE
+            } else {
+                base
+            }
         }
         crate::game::campaign::KeepKind::Passive(passive) => {
             // A kept passive carries **every** stack (`Keepable.level`), so

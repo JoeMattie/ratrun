@@ -4404,6 +4404,484 @@ pub fn emit_virus_jump(ps: &mut Particles, rng: &mut impl Rng, from: Vec2, to: V
     }
 }
 
+// ===========================================================================
+// Evolutions (WAVE3_DESIGN.md §3)
+// ===========================================================================
+//
+// One look per evolution, matching the design table's "Half-block read"
+// column. The persistent ones (the string, the ring, the channel) are emitted
+// **per tick** by `systems::evolutions` and keep their own budget, so a screen
+// full of effects still degrades gracefully; the one-shot ones fire where the
+// behaviour happens (`weapons.rs`, `projectiles.rs`).
+
+/// Colours shared by the evolution looks (design §3's palette words).
+const MILK_IVORY: Rgb = (255, 248, 224);
+const MILK_HOOK: Rgb = (226, 214, 186);
+const FONDUE_STRING: Rgb = (255, 226, 120);
+const FONDUE_POST: Rgb = (255, 196, 60);
+const ECHO_OUT: Rgb = (206, 168, 255);
+const ECHO_IN: Rgb = (248, 248, 255);
+const FAIRY_MINT: Rgb = (150, 255, 200);
+const FAIRY_CAP: Rgb = (212, 255, 232);
+const DRAIN_BILE: Rgb = (176, 255, 96);
+const DRAIN_DARK: Rgb = (86, 190, 52);
+const RATCHET_PINK: Rgb = (255, 150, 200);
+const RATCHET_HOOK: Rgb = (255, 214, 232);
+const FLYWHEEL_COPPER: Rgb = (255, 178, 92);
+const FLYWHEEL_HOT: Rgb = (255, 236, 176);
+const ROLL_CALL_CYAN: Rgb = (140, 240, 255);
+
+/// **Milk Teeth**: an ivory hook where the dart is, and a dotted thread behind
+/// it (the thread only reads once the dart is coming home).
+pub fn emit_milk_teeth_dart(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    pos: Vec2,
+    phase: crate::game::ecs::components::MilkPhase,
+    _returning: bool,
+) {
+    let hook = match phase {
+        crate::game::ecs::components::MilkPhase::Out => MILK_HOOK,
+        _ => MILK_IVORY,
+    };
+    ps.push(Particle {
+        pos,
+        vel: Vec2::ZERO,
+        life: 0.12,
+        max_life: 0.12,
+        drag: 0.0,
+        gravity: 0.0,
+        ramp: Ramp::Custom(hook, MILK_HOOK),
+        additive: true,
+        shape: Shape::Cross,
+    });
+    // Dotted return thread: one 1 px crumb most ticks, so the line reads as
+    // dots rather than a solid trail.
+    if rng.random::<f32>() < 0.55 && ps.budget_count(1, false) > 0 {
+        let life = rng.random_range(0.20..0.34);
+        ps.push(Particle {
+            pos: pos + Vec2::new(rng.random_range(-0.6..0.6), rng.random_range(-0.6..0.6)),
+            vel: Vec2::ZERO,
+            life,
+            max_life: life,
+            drag: 0.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(MILK_IVORY, MILK_HOOK),
+            additive: true,
+            shape: Shape::Dot,
+        });
+    }
+}
+
+/// **Milk Teeth**: the bite (both legs use it).
+pub fn emit_milk_teeth_bite(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, killed: bool) {
+    let n = ps.budget_count(if killed { 6 } else { 4 }, false);
+    ps.burst_shaped(
+        rng,
+        pos,
+        n,
+        70.0,
+        0.8,
+        Ramp::Custom(MILK_IVORY, MILK_HOOK),
+        0.18,
+        true,
+        Shape::Streak,
+        7.0,
+    );
+}
+
+/// **Milk Teeth**: the thread snapping taut when the lodge lets go.
+pub fn emit_milk_teeth_release(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
+    let n = ps.budget_count(4, false);
+    ps.burst_shaped(
+        rng,
+        pos,
+        n,
+        40.0,
+        0.4,
+        Ramp::Custom(MILK_IVORY, MILK_HOOK),
+        0.16,
+        true,
+        Shape::Dot,
+        4.0,
+    );
+}
+
+/// **Fondue Fork**: two yellow posts and a single sagging cheese line.
+pub fn emit_fondue_string(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    a: Vec2,
+    b: Vec2,
+    life_frac: f32,
+    _dt: f32,
+) {
+    // The posts hold for the whole life of the string.
+    for post in [a, b] {
+        ps.push(Particle {
+            pos: post,
+            vel: Vec2::ZERO,
+            life: 0.10,
+            max_life: 0.10,
+            drag: 0.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(FONDUE_POST, FONDUE_STRING),
+            additive: true,
+            shape: Shape::Blob,
+        });
+    }
+    // The line sags as it cools; two crumbs a tick trace it.
+    let sag = crate::game::ecs::systems::evolutions::STRING_SAG * (1.0 - life_frac);
+    let n = ps.budget_count(2, false);
+    for k in 0..n {
+        let t = if n <= 1 {
+            rng.random_range(0.1..0.9)
+        } else {
+            (k as f32 + rng.random_range(0.0..1.0)) / n as f32
+        };
+        let along = a + (b - a) * t;
+        let life = rng.random_range(0.14..0.26);
+        ps.push(Particle {
+            pos: along + Vec2::new(0.0, sag * (t * (1.0 - t) * 4.0)),
+            vel: Vec2::ZERO,
+            life,
+            max_life: life,
+            drag: 0.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(FONDUE_STRING, FONDUE_POST),
+            additive: true,
+            shape: Shape::Dot,
+        });
+    }
+}
+
+/// **Fondue Fork**: a body cut by the string.
+pub fn emit_fondue_cut(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, killed: bool) {
+    let n = ps.budget_count(if killed { 6 } else { 3 }, false);
+    ps.burst_shaped(
+        rng,
+        pos,
+        n,
+        55.0,
+        0.6,
+        Ramp::Custom(FONDUE_STRING, FONDUE_POST),
+        0.16,
+        true,
+        Shape::Streak,
+        6.0,
+    );
+}
+
+/// **Echo Chamber**: a rejected spoke turning around on the wall — the
+/// outward violet dot becomes a hollow white inward tick.
+pub fn emit_echo_return(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, inward: Vec2) {
+    let dir = if inward.len_sq() > 0.001 {
+        inward.normalized()
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    ps.push(Particle {
+        pos,
+        vel: Vec2::ZERO,
+        life: 0.16,
+        max_life: 0.16,
+        drag: 0.0,
+        gravity: 0.0,
+        ramp: Ramp::Custom(ECHO_IN, ECHO_OUT),
+        additive: true,
+        shape: Shape::Cross,
+    });
+    // The inward tick: a short white streak pair pointing back down the line.
+    let n = ps.budget_count(7, false);
+    ps.cone_shaped(
+        rng,
+        pos,
+        dir,
+        n,
+        75.0,
+        0.35,
+        Ramp::Custom(ECHO_IN, ECHO_OUT),
+        0.24,
+        true,
+        Shape::Streak,
+        4.0,
+    );
+}
+
+/// **Fairy Ring**: mint mushroom caps outlining an empty circle.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_fairy_ring(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    pos: Vec2,
+    radius: f32,
+    satellites: u8,
+    spin: f32,
+    _life_frac: f32,
+    _dt: f32,
+) {
+    let caps = satellites.max(3) as usize;
+    let budget = ps.budget_count(caps.min(3), false);
+    for _ in 0..budget {
+        let a = spin + rng.random_range(0.0..std::f32::consts::TAU);
+        let p = pos + Vec2::from_angle(a) * radius;
+        let life = rng.random_range(0.22..0.36);
+        ps.push(Particle {
+            pos: p,
+            vel: Vec2::ZERO,
+            life,
+            max_life: life,
+            drag: 0.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(FAIRY_CAP, FAIRY_MINT),
+            additive: true,
+            shape: Shape::Blob,
+        });
+    }
+    // A faint spore haze on the ring line itself.
+    if ps.budget_count(1, false) > 0 {
+        let a = rng.random_range(0.0..std::f32::consts::TAU);
+        let life = rng.random_range(0.18..0.30);
+        ps.push(Particle {
+            pos: pos + Vec2::from_angle(a) * (radius + rng.random_range(-1.5..1.5)),
+            vel: Vec2::ZERO,
+            life,
+            max_life: life,
+            drag: 0.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(FAIRY_MINT, (70, 160, 120)),
+            additive: true,
+            shape: Shape::Dot,
+        });
+    }
+}
+
+/// **Fairy Ring**: a body burnt by crossing the ring.
+pub fn emit_fairy_ring_hit(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, killed: bool) {
+    let n = ps.budget_count(if killed { 6 } else { 3 }, false);
+    ps.burst_shaped(
+        rng,
+        pos,
+        n,
+        50.0,
+        0.7,
+        Ramp::Custom(FAIRY_CAP, FAIRY_MINT),
+        0.22,
+        true,
+        Shape::Dot,
+        5.0,
+    );
+}
+
+/// **Ratchet Tail**: the whip's hook and the bright quarter arc the swung body
+/// travels. One shot, where the swing resolves.
+pub fn emit_ratchet_swing(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    rat: Vec2,
+    radius: f32,
+    start_angle: f32,
+    turn: f32,
+) {
+    // The quarter arc, drawn as a handful of bright pips (one per 6 degrees).
+    let steps = 15usize;
+    let budget = ps.budget_count(steps, false);
+    for k in 0..budget {
+        let t = k as f32 / (steps - 1).max(1) as f32;
+        let a = start_angle + turn * t;
+        let p = rat + Vec2::from_angle(a) * radius;
+        let life = 0.26 + 0.14 * t;
+        ps.push(Particle {
+            pos: p,
+            vel: Vec2::from_angle(a + std::f32::consts::FRAC_PI_2) * 24.0,
+            life,
+            max_life: life,
+            drag: 6.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(RATCHET_HOOK, RATCHET_PINK),
+            additive: true,
+            shape: Shape::Blob,
+        });
+    }
+    // The hook itself, at the start of the arc.
+    ps.push(Particle {
+        pos: rat + Vec2::from_angle(start_angle) * radius,
+        vel: Vec2::ZERO,
+        life: 0.22,
+        max_life: 0.22,
+        drag: 0.0,
+        gravity: 0.0,
+        ramp: Ramp::Custom(RATCHET_PINK, RATCHET_HOOK),
+        additive: true,
+        shape: Shape::Cross,
+    });
+    let _ = rng;
+}
+
+/// **Flywheel**: copper pips sliding onto the tail as a sweep catches pellets.
+pub fn emit_flywheel_catch(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, n: usize) {
+    let budget = ps.budget_count(n.max(1), false);
+    ps.burst_shaped(
+        rng,
+        pos,
+        budget,
+        70.0,
+        0.5,
+        Ramp::Custom(FLYWHEEL_HOT, FLYWHEEL_COPPER),
+        0.20,
+        true,
+        Shape::Dot,
+        6.0,
+    );
+}
+
+/// **Flywheel**: the captured pellets flung back out as a copper fan.
+pub fn emit_flywheel_fling(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, dir: Vec2, n: usize) {
+    let face = if dir.len_sq() > 0.001 {
+        dir.normalized()
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    let budget = ps.budget_count((n * 2).max(2), false);
+    ps.cone_shaped(
+        rng,
+        pos,
+        face,
+        budget,
+        140.0,
+        0.55,
+        Ramp::Custom(FLYWHEEL_HOT, FLYWHEEL_COPPER),
+        0.24,
+        true,
+        Shape::Streak,
+        5.0,
+    );
+}
+
+/// **Drain Cleaner**: bile-green chevrons advancing down the stripe, then the
+/// settled bubbles of the runoff.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_drain_channel(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    start: Vec2,
+    dir: Vec2,
+    front: f32,
+    age: f32,
+    _dt: f32,
+) {
+    let face = if dir.len_sq() > 0.001 {
+        dir.normalized()
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    let side = face.perp();
+    let advancing = age <= crate::game::ecs::systems::evolutions::CHANNEL_ADVANCE;
+    let n = ps.budget_count(5, false);
+    for _ in 0..n {
+        let along = if advancing {
+            (front - rng.random_range(0.0..6.0)).max(0.0)
+        } else {
+            rng.random_range(0.0..front.max(1.0))
+        };
+        let p = start + face * along + side * rng.random_range(-2.5..2.5);
+        let life = rng.random_range(0.26..0.40);
+        ps.push(Particle {
+            pos: p,
+            vel: if advancing { face * 55.0 } else { Vec2::ZERO },
+            life,
+            max_life: life,
+            drag: 4.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(DRAIN_BILE, DRAIN_DARK),
+            additive: true,
+            shape: if advancing { Shape::Streak } else { Shape::Dot },
+        });
+    }
+}
+
+/// **Drain Cleaner**: a body caught by the advancing front.
+pub fn emit_drain_hit(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, killed: bool) {
+    let n = ps.budget_count(if killed { 6 } else { 3 }, false);
+    ps.burst_shaped(
+        rng,
+        pos,
+        n,
+        60.0,
+        0.8,
+        Ramp::Custom(DRAIN_BILE, DRAIN_DARK),
+        0.20,
+        true,
+        Shape::Dot,
+        5.0,
+    );
+}
+
+/// **Roll Call**: a cyan quotation mark over a body that the ring tagged.
+pub fn emit_roll_call_tag(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
+    for k in 0..2 {
+        let p = pos + Vec2::new(1.0 + k as f32 * 2.0, -4.0);
+        let life = 0.40;
+        ps.push(Particle {
+            pos: p,
+            vel: Vec2::new(0.0, -8.0),
+            life,
+            max_life: life,
+            drag: 2.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(ROLL_CALL_CYAN, (90, 190, 220)),
+            additive: true,
+            shape: Shape::Dot,
+        });
+    }
+    let _ = rng;
+}
+
+/// **Roll Call**: the tagged body answering (the mark winking shut).
+pub fn emit_roll_call_answer(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
+    let n = ps.budget_count(3, false);
+    ps.burst_shaped(
+        rng,
+        pos,
+        n,
+        30.0,
+        0.4,
+        Ramp::Custom(ROLL_CALL_CYAN, (90, 190, 220)),
+        0.20,
+        true,
+        Shape::Dot,
+        4.0,
+    );
+}
+
+/// **Roll Call**: one answer pulse landing on a body.
+pub fn emit_roll_call_pulse(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, killed: bool) {
+    ps.push(Particle {
+        pos,
+        vel: Vec2::ZERO,
+        life: 0.18,
+        max_life: 0.18,
+        drag: 0.0,
+        gravity: 0.0,
+        ramp: Ramp::Custom(ROLL_CALL_CYAN, (90, 190, 220)),
+        additive: true,
+        shape: Shape::Cross,
+    });
+    let n = ps.budget_count(if killed { 5 } else { 2 }, false);
+    ps.burst_shaped(
+        rng,
+        pos,
+        n,
+        45.0,
+        0.6,
+        Ramp::Custom(ROLL_CALL_CYAN, (90, 190, 220)),
+        0.18,
+        true,
+        Shape::Dot,
+        5.0,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1021,7 +1021,9 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
     for (i, w) in weapons.iter().enumerate() {
         let (tag, lvl) = &mut state.weapon_tags[i];
         tag.clear();
-        push_short_name(tag, w.kind.name());
+        // An evolved weapon shows its chest name (`Milk Teeth`), like the
+        // pause dossier and the keep manifest.
+        push_short_name(tag, w.name());
         lvl.clear();
         if w.is_max() {
             lvl.push('★');
@@ -1465,9 +1467,14 @@ fn draw_loadout_rack(frame: &mut Frame, rack: Rect, world: &World, state: &HudSt
             0.0
         };
 
-        // 1. Small 4×4 half-block icon.
+        // 1. Small 4×4 half-block icon; an evolved weapon wears the gilded
+        // evolved frame (`art_icons::draw_evolved`).
         let icon_rect = Rect::new(x, y0, icon_w, art_icons::SMALL_CELL_H);
-        art_icons::draw(buf, icon_rect, art_icons::weapon(weapon.kind));
+        if weapon.evolved {
+            art_icons::draw_evolved(buf, icon_rect, art_icons::weapon(weapon.kind));
+        } else {
+            art_icons::draw(buf, icon_rect, art_icons::weapon(weapon.kind));
+        }
         x = x.saturating_add(icon_w);
 
         let name_style = if just_fired || charge_flash > 0.0 {

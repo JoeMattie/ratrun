@@ -8,6 +8,7 @@
 pub mod boss;
 pub mod combat;
 pub mod enemy_move;
+pub mod evolutions;
 pub mod fog;
 pub mod fx;
 pub mod gates;

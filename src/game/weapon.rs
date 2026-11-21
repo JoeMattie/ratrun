@@ -365,25 +365,104 @@ impl WeaponKind {
     }
 }
 
+/// One row of the chest-evolution table (`WAVE3_DESIGN.md` §3).
+///
+/// A weapon evolves when a chest is opened while it is at its max level and
+/// the loadout owns **at least one stack** of `passive`. The evolution lives on
+/// the weapon slot (`Weapon::evolved`): it keeps the weapon's kind, timing
+/// family and damage ledger column, and locks once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // The evolution content table will supply display text.
 pub struct Evolution {
+    /// The passive whose first stack opens this evolution.
     pub passive: super::loadout::PassiveKind,
+    /// The chest name (`"Milk Teeth"`), shown wherever the weapon is.
     pub name: &'static str,
+    /// The chest inscription — the flavour line on the chest card.
     pub flavor: &'static str,
+    /// Card text for the evolved attack (chest card and level-up cards).
+    pub attack: &'static str,
 }
 
 impl WeaponKind {
+    /// The evolution this weapon can wear, if any.
+    ///
+    /// Eight rows are live. The four other rows in the design table (Acid
+    /// Rain, Hantavirus, Laser Eyes, Super Dash) return `None` until their
+    /// behaviours exist; their spec text and the hooks they need are stubbed
+    /// in `game::ecs::systems::evolutions` under "the four rows that arrive
+    /// with their weapons".
     pub fn evolution(self) -> Option<Evolution> {
-        #[cfg(test)]
-        if self == WeaponKind::Gnaw {
-            return Some(Evolution {
-                passive: super::loadout::PassiveKind::Damage,
-                name: "Evolved Gnaw",
-                flavor: "Test evolution",
-            });
+        let e = |passive, name, flavor, attack| Some(Evolution { passive, name, flavor, attack });
+        match self {
+            // Milk Teeth — the lead dart lodges, then comes home biting.
+            WeaponKind::Gnaw => e(
+                super::loadout::PassiveKind::Damage,
+                "Milk Teeth",
+                "They always come back in.",
+                "The lead dart lodges for 1 s, then pulls back to you, biting each crossed foe once.",
+            ),
+            // Fondue Fork — the outer two darts plant tines and string a wire.
+            WeaponKind::CheeseSpray => e(
+                super::loadout::PassiveKind::MaxHp,
+                "Fondue Fork",
+                "Dinner is a tripwire.",
+                "The outer two darts plant tines; a cheese string between them cuts crossers for 1.5 s.",
+            ),
+            // Echo Chamber — spokes bounce off walls and come back.
+            WeaponKind::SqueakNova => e(
+                super::loadout::PassiveKind::FireRate,
+                "Echo Chamber",
+                "The walls know the chorus.",
+                "Each spoke that hits a wall returns along its incoming line, hitting once more.",
+            ),
+            // Fairy Ring — every second cast leaves a still, burning ring.
+            WeaponKind::SporeOrbit => e(
+                super::loadout::PassiveKind::Regen,
+                "Fairy Ring",
+                "Something grew where you stood.",
+                "Every second cast leaves its satellites fixed for 3 s; crossing the ring burns.",
+            ),
+            // Ratchet Tail — the whip hooks a body and swings it around.
+            WeaponKind::TailWhip => e(
+                super::loadout::PassiveKind::MoveSpeed,
+                "Ratchet Tail",
+                "Give the room a turn.",
+                "A whip hit hooks the nearest body and swings it 90° into everything it crosses.",
+            ),
+            // Drain Cleaner — the splash becomes a directed corrosive channel.
+            WeaponKind::AcidSpit => e(
+                super::loadout::PassiveKind::Armor,
+                "Drain Cleaner",
+                "Clears hair, grease and witnesses.",
+                "The splash runs 36 px forward as a corrosive channel, then lingers for 2 s.",
+            ),
+            // Flywheel — the thrash catches pellets and flings them back.
+            WeaponKind::TailThrash => e(
+                // `loadout::FLYWHEEL_PARTNER` is Counterweight (design §3).
+                super::loadout::FLYWHEEL_PARTNER,
+                "Flywheel",
+                "Save that for the return trip.",
+                "Each sweep catches up to two hostile pellets; the last sweep flings them forward.",
+            ),
+            // Roll Call — the squeak's tags answer with their own pulses.
+            WeaponKind::SonicSqueak => e(
+                super::loadout::PassiveKind::Magnet,
+                "Roll Call",
+                "Every cage answers.",
+                "Foes the ring stuns or slows answer 0.8 s later with a 9 px pulse of their own.",
+            ),
+            // The four wave-3 weapons' rows (Downspout = Acid Rain + Long Fuse,
+            // Dead Letter = Hantavirus + Second Scent, Carbon Copy = Laser Eyes
+            // + Lens Cap, Ripcord = Super Dash + Spring Heel) are specified in
+            // `game::ecs::systems::evolutions` but their behaviours are NOT
+            // implemented yet. They must stay `None` until they are: a `Some`
+            // row makes the weapon evolvable, and a chest would then spend
+            // itself on a flag that changes nothing.
+            WeaponKind::AcidRain
+            | WeaponKind::Hantavirus
+            | WeaponKind::LaserEyes
+            | WeaponKind::SuperDash => None,
         }
-        None
     }
 }
 /// Laser Eyes: damage per pulse, L1 → L5 (design §4).
@@ -425,6 +504,32 @@ impl Weapon {
     #[inline]
     fn tier(&self) -> usize {
         (self.level.clamp(1, 5) - 1) as usize
+    }
+
+    /// The evolution this weapon wears, if it has one and is evolved.
+    #[inline]
+    pub fn evolution(&self) -> Option<Evolution> {
+        if self.evolved {
+            self.kind.evolution()
+        } else {
+            None
+        }
+    }
+
+    /// Name to show for this weapon: the evolution's chest name once evolved
+    /// (`"Milk Teeth"`), else [`WeaponKind::name`].
+    pub fn name(&self) -> &'static str {
+        self.evolution().map(|e| e.name).unwrap_or(self.kind.name())
+    }
+
+    /// Short mechanical line: the evolved attack's card text once evolved.
+    pub fn desc(&self) -> &'static str {
+        self.evolution().map(|e| e.attack).unwrap_or(self.kind.desc())
+    }
+
+    /// Flavour line: the chest inscription once evolved.
+    pub fn flavor(&self) -> &'static str {
+        self.evolution().map(|e| e.flavor).unwrap_or(self.kind.flavor())
     }
 
     /// Damage scales ~25% per level, except for the wave-3 weapons that ship
@@ -687,6 +792,72 @@ mod tests {
         w.level = 9;
         assert_eq!(w.damage(), 16.0);
         assert_eq!(w.cooldown(), 2.0);
+    }
+
+    /// Every weapon with a live evolution has one chest row, with the partner the
+    /// design table names, and `Weapon::name`/`desc`/`flavor` switch to it once
+    /// the evolved flag is set (and only then).
+    #[test]
+    fn every_weapon_has_its_design_row() {
+        use crate::game::loadout::PassiveKind;
+        let rows = [
+            (WeaponKind::Gnaw, PassiveKind::Damage, "Milk Teeth"),
+            (WeaponKind::CheeseSpray, PassiveKind::MaxHp, "Fondue Fork"),
+            (WeaponKind::SqueakNova, PassiveKind::FireRate, "Echo Chamber"),
+            (WeaponKind::SporeOrbit, PassiveKind::Regen, "Fairy Ring"),
+            (WeaponKind::TailWhip, PassiveKind::MoveSpeed, "Ratchet Tail"),
+            (WeaponKind::AcidSpit, PassiveKind::Armor, "Drain Cleaner"),
+            (WeaponKind::TailThrash, crate::game::loadout::FLYWHEEL_PARTNER, "Flywheel"),
+            (WeaponKind::SonicSqueak, PassiveKind::Magnet, "Roll Call"),
+        ];
+        // The four wave-3 weapons have a specified row but no behaviour yet:
+        // they must not be evolvable until it exists (a chest would spend
+        // itself on a no-op).
+        let pending = [
+            WeaponKind::AcidRain,
+            WeaponKind::Hantavirus,
+            WeaponKind::LaserEyes,
+            WeaponKind::SuperDash,
+        ];
+        assert_eq!(rows.len() + pending.len(), WeaponKind::all().len());
+        for kind in pending {
+            assert!(kind.evolution().is_none(), "{kind:?} is not implemented yet");
+            let mut w = Weapon::new(kind);
+            w.evolved = true;
+            assert_eq!(w.name(), kind.name(), "{kind:?}: no row, no rename");
+        }
+        for (kind, passive, name) in rows {
+            let evo = kind.evolution().unwrap_or_else(|| panic!("{kind:?} has no row"));
+            assert_eq!(evo.passive, passive, "{kind:?} partner");
+            assert_eq!(evo.name, name, "{kind:?} chest name");
+            assert!(evo.flavor.ends_with('.'), "{kind:?} inscription: {}", evo.flavor);
+            assert!(!evo.attack.is_empty());
+
+            let mut w = Weapon::new(kind);
+            assert_eq!(w.name(), kind.name());
+            assert_eq!(w.desc(), kind.desc());
+            assert_eq!(w.flavor(), kind.flavor());
+            w.evolved = true;
+            assert_eq!(w.name(), name);
+            assert_eq!(w.desc(), evo.attack);
+            assert_eq!(w.flavor(), evo.flavor);
+            // The evolution changes behaviour, never the timing family.
+            assert_eq!(w.cooldown(), Weapon::new(kind).cooldown());
+            assert_eq!(w.is_max(), Weapon::new(kind).is_max());
+        }
+    }
+
+    /// Flywheel's partner is Counterweight (design §3), through the one
+    /// constant; Drain Cleaner keeps Thick Hide.
+    #[test]
+    fn flywheel_partner_is_counterweight() {
+        use crate::game::loadout::PassiveKind;
+        assert_eq!(crate::game::loadout::FLYWHEEL_PARTNER, PassiveKind::Counterweight);
+        assert_eq!(
+            WeaponKind::TailThrash.evolution().unwrap().passive,
+            PassiveKind::Counterweight
+        );
+        assert_eq!(WeaponKind::AcidSpit.evolution().unwrap().passive, PassiveKind::Armor);
     }
 
     #[test]

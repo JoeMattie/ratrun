@@ -99,7 +99,10 @@ use crate::game::weapon::{
     SQUEAK_STUN, THRASH_BOSS_KNOCKBACK, THRASH_BURST, THRASH_KNOCKBACK, THRASH_SHAKE,
     THRASH_SWEEP_RATE, THRASH_SWEEPS,
 };
-use crate::game::ecs::components::{Entity, SpawnId};
+use crate::game::ecs::components::{
+    CheeseString, EchoSpoke, Entity, EvolvedShot, FairyRing, MilkTooth, SpawnId,
+};
+use crate::game::ecs::systems::evolutions::{self, FAIRY_SECS, STRING_SECS, TINE_REACH};
 use crate::game::ecs::resources::{
     ActiveFx, DamageLedger, EnemyIndex, MeleeNudge, NextSpawnId, RngRes, SfxQueue, Shake, TickInput,
 };
@@ -199,7 +202,7 @@ pub fn fire_weapons_system(
     }
 
     for i in 0..n {
-        let (kind, wlevel, dmg, cd, projs) = {
+        let (kind, wlevel, dmg, cd, projs, evolved) = {
             let w = &player.loadout.weapons[i];
             (
                 w.kind,
@@ -207,6 +210,7 @@ pub fn fire_weapons_system(
                 w.damage() * dmg_mult,
                 (w.cooldown() / fire_rate).max(0.05),
                 w.level_projectiles(),
+                w.evolved,
             )
         };
         // Active weapons never auto-fire: their `timer` is a charge meter that
@@ -225,6 +229,7 @@ pub fn fire_weapons_system(
             &mut commands,
             kind,
             wlevel,
+            evolved,
             dmg,
             cd,
             projs,
@@ -247,6 +252,7 @@ pub fn fire_weapons_system(
             &mut melee_nudge,
             &scratch.infected,
             &mut scratch.boss_virus,
+            &mut scratch.orbit_parity,
         );
         if fired {
             player.loadout.weapons[i].timer += cd;
@@ -450,6 +456,10 @@ pub struct FireScratch<'w, 's> {
     /// Read-only view of the horde's Hantavirus marks: the tag pick skips
     /// bodies an active chain already owns.
     infected: Query<'w, 's, &'static crate::game::ecs::components::Infection>,
+    /// Epoch-local counter for Fairy Ring's "every second cast" rule: system
+    /// state, so it needs no resource and no facade field (and a fresh world
+    /// starts at zero).
+    orbit_parity: Local<'s, u8>,
 }
 
 /// Nearest-first ordering key: smaller distance, then the regular enemy before
@@ -633,7 +643,7 @@ pub fn active_weapons_system(
             if !charged {
                 continue;
             }
-            let (charge, dmg, reach) = {
+            let (charge, dmg, reach, evolved) = {
                 let w = &player.loadout.weapons[i];
                 (
                     (w.cooldown() / fire_rate).max(0.05),
@@ -645,6 +655,7 @@ pub fn active_weapons_system(
                         WeaponKind::SonicSqueak => stats.splash_radius(w.active_reach()),
                         _ => stats.melee_reach(w.active_reach()),
                     },
+                    w.evolved,
                 )
             };
             player.loadout.weapons[i].timer = charge;
@@ -662,6 +673,9 @@ pub fn active_weapons_system(
                         thrash_done: 0,
                         ..*fx
                     };
+                    fx.thrash_evolved = evolved;
+                    // A fresh burst starts with an empty catch (Flywheel).
+                    fx.clear_caught();
                     shake.amount = shake.amount.max(THRASH_SHAKE);
                     vfx::emit_thrash_start(&mut particles, &mut rng.0, ppos);
                     sfx.0.push(Sfx::ShootThrash);
@@ -676,6 +690,9 @@ pub fn active_weapons_system(
                         squeak_pos: ppos,
                         ..*fx
                     };
+                    fx.squeak_evolved = evolved;
+                    // A fresh ring starts with no tags (Roll Call).
+                    fx.clear_roll_call();
                     shake.amount = shake.amount.max(1.6);
                     vfx::emit_sonic_squeak(&mut particles, &mut rng.0, ppos, reach, SQUEAK_EXPAND);
                     sfx.0.push(Sfx::SonicSqueak);
@@ -698,6 +715,7 @@ pub fn active_weapons_system(
             thrash_sweep(
                 &mut commands,
                 ppos,
+                pface,
                 &level,
                 &mut rng,
                 &mut particles,
@@ -707,7 +725,7 @@ pub fn active_weapons_system(
                 &enemy_bullets,
                 &mut damage_numbers,
                 &mut ledger,
-                &fx,
+                &mut fx,
                 stats.shove_mult,
             );
         }
@@ -736,7 +754,7 @@ pub fn active_weapons_system(
             &mut bosses,
             &mut damage_numbers,
             &mut ledger,
-            &fx,
+            &mut fx,
             stats.shove_mult,
         );
         if fx.squeak_left <= 0.0 {
@@ -751,6 +769,7 @@ pub fn active_weapons_system(
 fn thrash_sweep(
     commands: &mut Commands,
     ppos: Vec2,
+    pface: Vec2,
     level: &Level,
     rng: &mut RngRes,
     particles: &mut Particles,
@@ -760,13 +779,15 @@ fn thrash_sweep(
     enemy_bullets: &Query<(Entity, &SpawnId, &Bullet)>,
     damage_numbers: &mut DamageNumbers,
     ledger: &mut DamageLedger,
-    fx: &ActiveFx,
+    fx: &mut ActiveFx,
     // Counterweight: a weapon's native shove (see `Stats::shove`).
     shove_mult: f32,
 ) {
     let kind = WeaponKind::TailThrash;
     let reach = fx.thrash_reach;
     let dmg = fx.thrash_dmg;
+    let evolved = fx.thrash_evolved;
+    let final_sweep = fx.thrash_done >= THRASH_SWEEPS;
     let mut hits = 0u32;
 
     for &entity in order {
@@ -804,12 +825,34 @@ fn thrash_sweep(
     }
 
     // The arc also thrashes aside every enemy shot inside its reach.
+    let mut caught_this_sweep = 0u8;
     for (entity, _, b) in enemy_bullets.iter() {
         if b.faction != Faction::Enemy {
             continue;
         }
         if b.pos.dist(ppos) <= reach + b.radius {
+            if evolved && caught_this_sweep < evolutions::FLYWHEEL_PER_SWEEP
+                && fx.catch_pellet(b.vel) {
+                    caught_this_sweep += 1;
+                    vfx::emit_flywheel_catch(particles, &mut rng.0, b.pos, caught_this_sweep as usize);
+                }
             commands.entity(entity).despawn();
+        }
+    }
+    // Flywheel: the final sweep flings what the burst caught back out.
+    if evolved && final_sweep {
+        // Queue the fling: the command spawns the pellets with a `SpawnId` when
+        // it applies, so this system keeps its parameter budget.
+        let count = fx.caught;
+        if count > 0 {
+            vfx::emit_flywheel_fling(particles, &mut rng.0, ppos, pface, count as usize);
+            commands.queue(evolutions::FlingPellets {
+                pos: ppos,
+                forward: pface,
+                damage: dmg,
+                count,
+            });
+            fx.clear_caught();
         }
     }
 
@@ -868,7 +911,7 @@ fn squeak_ring(
     bosses: &mut Query<&mut Boss>,
     damage_numbers: &mut DamageNumbers,
     ledger: &mut DamageLedger,
-    fx: &ActiveFx,
+    fx: &mut ActiveFx,
     // Counterweight: the ring's native outward shove.
     shove_mult: f32,
 ) {
@@ -879,7 +922,7 @@ fn squeak_ring(
     let dmg = fx.squeak_dmg;
 
     for &entity in order {
-        let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
+        let Ok((_, sid, mut e)) = enemies.get_mut(entity) else {
             continue;
         };
         if !e.alive() {
@@ -906,6 +949,15 @@ fn squeak_ring(
                 e.slow_for(SQUEAK_ELITE_SLOW, SQUEAK_STUN);
             } else {
                 e.stun_for(SQUEAK_STUN);
+            }
+            // Roll Call: the ring tags everything it stunned or slowed; the
+            // answers fire 0.8 s later (`evolutions::roll_call_system`).
+            if fx.squeak_evolved && fx.tag(entity, sid.0) {
+                if fx.answer_left <= 0.0 {
+                    fx.answer_left = evolutions::ROLL_CALL_DELAY;
+                    fx.answer_damage = dmg * 0.5;
+                }
+                vfx::emit_roll_call_tag(particles, &mut rng.0, pos);
             }
         }
         e.vel += out * SQUEAK_SHOVE * shove_mult;
@@ -963,6 +1015,7 @@ fn fire_one(
     commands: &mut Commands,
     kind: WeaponKind,
     wlevel: u8,
+    evolved: bool,
     dmg: f32,
     cd: f32,
     projs: i32,
@@ -987,6 +1040,7 @@ fn fire_one(
     melee_nudge: &mut MeleeNudge,
     infected: &Query<&crate::game::ecs::components::Infection>,
     boss_virus: &mut crate::game::ecs::resources::BossVirus,
+    orbit_parity: &mut u8,
 ) -> bool {
     let color = kind.color();
     let mut fired = false;
@@ -996,25 +1050,35 @@ fn fire_one(
                 nearest_visible(level, kind, order, enemies, boss_points, ppos, target_scratch)
             {
                 let dir = (epos - ppos).normalized();
-                // One dart, two from level 4 (`Weapon::level_projectiles` is
-                // the level for Gnaw): a fan of ±3° keeps the pair from
-                // stacking into one body at close range while staying
-                // effectively single-target at range.
-                let shots = 1 + projs / 4;
-                for k in 0..shots {
-                    let angle = if shots > 1 {
-                        let spread = (k as f32 - (shots - 1) as f32 / 2.0) * 0.052;
-                        dir.angle() + spread
-                    } else {
-                        dir.angle()
-                    };
-                    let v = Vec2::from_angle(angle) * 120.0;
-                    let mut b = Bullet::new(ppos, v, dmg, Faction::Player, color);
-                    b.size = 1;
-                    // Lens Cap: a ranged weapon's reach is its projectile life.
-                    b.life = stats.ranged_reach(b.life);
-                    b.weapon = Some(kind);
-                    commands.spawn((b, next_id.take()));
+                if evolved {
+                    // Milk Teeth: one dart that lodges and comes home.
+                    // `evolutions::milk_teeth_system` flies it, bites with it
+                    // and books the damage under Gnaw.
+                    commands.spawn((
+                        MilkTooth::new(ppos, dir * evolutions::MILK_SPEED, dmg),
+                        next_id.take(),
+                    ));
+                } else {
+                    // One dart, two from level 4 (`Weapon::level_projectiles` is
+                    // the level for Gnaw): a fan of ±3° keeps the pair from
+                    // stacking into one body at close range while staying
+                    // effectively single-target at range.
+                    let shots = 1 + projs / 4;
+                    for k in 0..shots {
+                        let angle = if shots > 1 {
+                            let spread = (k as f32 - (shots - 1) as f32 / 2.0) * 0.052;
+                            dir.angle() + spread
+                        } else {
+                            dir.angle()
+                        };
+                        let v = Vec2::from_angle(angle) * 120.0;
+                        let mut b = Bullet::new(ppos, v, dmg, Faction::Player, color);
+                        b.size = 1;
+                        // Lens Cap: a ranged weapon's reach is its projectile life.
+                        b.life = stats.ranged_reach(b.life);
+                        b.weapon = Some(kind);
+                        commands.spawn((b, next_id.take()));
+                    }
                 }
                 vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, dir, 0.0);
                 fired = true;
@@ -1034,6 +1098,25 @@ fn fire_one(
                 b.weapon = Some(kind);
                 commands.spawn((b, next_id.take()));
             }
+            if evolved {
+                // Fondue Fork: the two outer darts plant tines (on the first
+                // body they would hit, or at 40 px / the first wall) and a
+                // cheese string runs between the plant points for 1.5 s.
+                // `fondue_string_system` cuts whoever crosses it.
+                // The same two angles the spray's first and last darts use:
+                // `(k - (projs - 1) / 2) * 0.18` for k = 0 and k = projs - 1.
+                let spread = 0.18;
+                let half = (projs - 1) as f32 / 2.0;
+                let outer = (projs >= 2).then_some([base - half * spread, base + half * spread]);
+                if let Some([left, right]) = outer {
+                    let a = fondue_plant(level, ppos, left, order, enemies);
+                    let b = fondue_plant(level, ppos, right, order, enemies);
+                    commands.spawn((
+                        CheeseString::new(a, b, STRING_SECS, dmg),
+                        next_id.take(),
+                    ));
+                }
+            }
             vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, aim, 0.0);
             fired = true;
         }
@@ -1045,7 +1128,13 @@ fn fire_one(
                 // Lens Cap (the nova's ring is made of these darts).
                 b.life = stats.ranged_reach(1.3);
                 b.weapon = Some(kind);
-                commands.spawn((b, next_id.take()));
+                if evolved {
+                    // Echo Chamber: the spoke reflects off its first wall
+                    // (`projectiles::bullets_system`) instead of dying there.
+                    commands.spawn((b, EchoSpoke::default(), next_id.take()));
+                } else {
+                    commands.spawn((b, next_id.take()));
+                }
             }
             vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, pface, 0.0);
             fired = true;
@@ -1092,6 +1181,24 @@ fn fire_one(
                 commands.spawn((b, next_id.take()));
             }
             vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, pface, radius);
+            if evolved {
+                // Fairy Ring: every second cast also leaves its satellites
+                // fixed around the casting point for 3 s. `fairy_ring_system`
+                // burns whoever crosses the band (once per second each).
+                *orbit_parity = orbit_parity.wrapping_add(1);
+                if (*orbit_parity).is_multiple_of(2) {
+                    commands.spawn((
+                        FairyRing::new(
+                            ppos,
+                            radius,
+                            FAIRY_SECS,
+                            projs.clamp(1, u8::MAX as i32) as u8,
+                            dmg,
+                        ),
+                        next_id.take(),
+                    ));
+                }
+            }
             fired = true;
         }
         WeaponKind::TailWhip => {
@@ -1142,6 +1249,21 @@ fn fire_one(
                     );
                 }
             }
+            if evolved {
+                ratchet_swing(
+                    level,
+                    ppos,
+                    pface,
+                    radius,
+                    order,
+                    enemies,
+                    dmg,
+                    rng,
+                    particles,
+                    damage_numbers,
+                    ledger,
+                );
+            }
             vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, pface, radius);
             fired = true;
         }
@@ -1180,7 +1302,18 @@ fn fire_one(
                 life: stats.zone_life(2.6),
                 color: (140, 220, 70),
             });
-            commands.spawn((b, next_id.take()));
+            if evolved {
+                // Drain Cleaner: the landing turns into a directed corrosive
+                // channel instead of a round pool (`projectiles` builds it;
+                // `evolutions::drain_cleaner_system` runs it).
+                commands.spawn((
+                    b,
+                    EvolvedShot { kind, dir: to.normalized() },
+                    next_id.take(),
+                ));
+            } else {
+                commands.spawn((b, next_id.take()));
+            }
             vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, to, 0.0);
             fired = true;
         }
@@ -1258,6 +1391,182 @@ fn fire_one(
         sfx.0.push(sound);
     }
     fired
+}
+
+
+/// Where one **Fondue Fork** tine plants: the first wall, or the first body the
+/// ray would meet, clamped to [`TINE_REACH`]. Bodies are searched in the tick's
+/// `SpawnId` order and the earliest *along the ray* wins, so the pick never
+/// depends on iteration order.
+fn fondue_plant(
+    level: &Level,
+    ppos: Vec2,
+    angle: f32,
+    order: &[Entity],
+    enemies: &Query<(Entity, &SpawnId, &mut Enemy)>,
+) -> Vec2 {
+    let dir = Vec2::from_angle(angle);
+    let far = ppos + dir * TINE_REACH;
+    let mut dist = TINE_REACH;
+    if let Some(t) = level.tiles.segment_hit(ppos, far, 1.0) {
+        dist = (TINE_REACH * t).max(2.0);
+    }
+    for &entity in order {
+        let Ok((_, _, e)) = enemies.get(entity) else {
+            continue;
+        };
+        if !e.alive() {
+            continue;
+        }
+        let rel = e.pos - ppos;
+        let along = rel.dot(dir);
+        if along <= 0.0 || along >= dist {
+            continue;
+        }
+        if (rel - dir * along).len() <= e.radius + 1.0 {
+            dist = along.max(2.0);
+        }
+    }
+    ppos + dir * dist
+}
+
+/// **Ratchet Tail**: hook the nearest ordinary body the whip hit and swing it a
+/// quarter turn around the rat, one base hit into everything the arc crosses.
+/// Heavy bodies (elites, Brutes, the boss) never get hooked — they took the
+/// whip hit and nothing more.
+#[allow(clippy::too_many_arguments)]
+fn ratchet_swing(
+    level: &Level,
+    ppos: Vec2,
+    pface: Vec2,
+    reach: f32,
+    order: &[Entity],
+    enemies: &mut Query<(Entity, &SpawnId, &mut Enemy)>,
+    dmg: f32,
+    rng: &mut RngRes,
+    particles: &mut Particles,
+    damage_numbers: &mut DamageNumbers,
+    ledger: &mut DamageLedger,
+) {
+    let kind = WeaponKind::TailWhip;
+    // 1. The hook: nearest ordinary body inside the arc, ties by `SpawnId`.
+    let mut hook: Option<(Entity, Vec2, f32, f32)> = None; // entity, pos, dist, radius
+    for &entity in order {
+        let Ok((_, _, e)) = enemies.get(entity) else {
+            continue;
+        };
+        if !e.alive() || e.elite || matches!(e.kind, EnemyKind::Brute | EnemyKind::Boss) {
+            continue;
+        }
+        let d = e.pos.dist(ppos);
+        if d > reach + e.radius || d <= 1.0 {
+            continue;
+        }
+        if !los_clear(level, ppos, e.pos, MELEE_LOS_RADIUS) {
+            continue;
+        }
+        if hook.is_none_or(|(_, _, best, _)| d < best) {
+            hook = Some((entity, e.pos, d, e.radius));
+        }
+    }
+    let Some((hooked, from, radius_from_rat, hooked_radius)) = hook else {
+        return;
+    };
+    // 2. Which way round? Sweep into more bodies; an exact tie follows the
+    //    facing side of the hook (and clockwise when that is zero too).
+    let offset = from - ppos;
+    let start_angle = offset.angle();
+    let count_in = |turn: f32| -> u32 {
+        let mut n = 0;
+        for &entity in order {
+            let Ok((_, _, e)) = enemies.get(entity) else {
+                continue;
+            };
+            if entity == hooked || !e.alive() {
+                continue;
+            }
+            let rel = e.pos - ppos;
+            let d = rel.len();
+            if (d - radius_from_rat).abs() > hooked_radius + e.radius + 2.0 {
+                continue;
+            }
+            let mut delta = (rel.angle() - start_angle) % std::f32::consts::TAU;
+            if delta < 0.0 {
+                delta += std::f32::consts::TAU;
+            }
+            let in_arc = if turn >= 0.0 {
+                delta <= turn + 0.12
+            } else {
+                delta >= std::f32::consts::TAU + turn - 0.12
+            };
+            if in_arc {
+                n += 1;
+            }
+        }
+        n
+    };
+    let half_pi = std::f32::consts::FRAC_PI_2;
+    let cw = count_in(-half_pi);
+    let ccw = count_in(half_pi);
+    let cross = offset.x * pface.y - offset.y * pface.x;
+    let turn = if ccw > cw {
+        half_pi
+    } else if cw > ccw || cross < 0.0 {
+        -half_pi
+    } else {
+        half_pi
+    };
+    // 3. The release point must be open floor; a hook that cannot swing just
+    //    keeps the whip hit.
+    let dest = ppos + Vec2::from_angle(start_angle + turn) * radius_from_rat;
+    let class = crate::game::collision::SizeClass::of_enemy(EnemyKind::Skitterer);
+    if !level.tiles.circle_clear(dest, hooked_radius, class) {
+        return;
+    }
+    // 4. One base hit each into everything the quarter arc crosses.
+    for &entity in order {
+        if entity == hooked {
+            continue;
+        }
+        let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
+            continue;
+        };
+        if !e.alive() || e.elite || matches!(e.kind, EnemyKind::Brute | EnemyKind::Boss) {
+            continue;
+        }
+        let rel = e.pos - ppos;
+        let d = rel.len();
+        if (d - radius_from_rat).abs() > hooked_radius + e.radius + 2.0 {
+            continue;
+        }
+        let mut delta = (rel.angle() - start_angle) % std::f32::consts::TAU;
+        if delta < 0.0 {
+            delta += std::f32::consts::TAU;
+        }
+        let in_arc = if turn >= 0.0 {
+            delta <= turn
+        } else {
+            delta >= std::f32::consts::TAU + turn
+        };
+        if !in_arc {
+            continue;
+        }
+        let hp_before = e.hp.max(0.0);
+        e.hurt(dmg);
+        let killed = !e.alive();
+        ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
+        let pos = e.pos;
+        let radius = e.radius;
+        let id = e.id;
+        vfx::emit_tail_whip_hit(particles, &mut rng.0, pos, pos - ppos, killed);
+        damage_numbers.record(id, pos, radius, dmg, killed, DamageSource::TailWhip);
+    }
+    // 5. Release: the body lands a quarter turn around the rat.
+    if let Ok((_, _, mut e)) = enemies.get_mut(hooked) {
+        e.pos = dest;
+        e.vel = Vec2::ZERO;
+    }
+    vfx::emit_ratchet_swing(particles, &mut rng.0, ppos, radius_from_rat, start_angle, turn);
 }
 
 #[cfg(test)]

@@ -34,7 +34,8 @@
 //! | 14 | `combat::player_bullet_hits_system` | `resolve_player_bullets` |
 //! | 15 | `combat::enemy_bullet_hits_system` | `resolve_enemy_hits` |
 //! | 16 | `combat::contact_system` | `resolve_contact` |
-//! | 16b | `weapons_wave3a::hantavirus_death_system` | death-triggered jumps, before the reap |
+//! | 16b | `evolutions::milk_teeth_system` … `roll_call_system` | evolved weapons (new) |
+//! | 16c | `weapons_wave3a::hantavirus_death_system` | death-triggered jumps (sees evolution kills), before the reap |
 //! | 17 | `loot::reap_enemies_system` | `reap_enemies` |
 //! | 18 | `loot::gems_system` | `update_gems` |
 //! | 18b | `loot::treasure_system` | gold and chests |
@@ -82,8 +83,8 @@ use bevy_ecs::prelude::*;
 
 use super::resources::TickInput;
 use super::systems::{
-    boss, combat, enemy_move, fog, fx, gates, loot, player, powerups, projectiles, spawn, traps,
-    weapons, weapons_wave3a, weapons_wave3b,
+    boss, combat, enemy_move, evolutions, fog, fx, gates, loot, player, powerups, projectiles,
+    spawn, traps, weapons, weapons_wave3a, weapons_wave3b,
 };
 
 /// Legacy `self.damage_numbers.update(dt)` (neon merge, `World::update`).
@@ -204,7 +205,18 @@ pub fn build_tick_schedule() -> Schedule {
     // chained so the Nuke re-reap and every deferred drop stay in order.
     schedule.add_systems(
         (
-            // 16b: a Hantavirus host that died this tick (any source) passes
+            // 16b: evolved weapons (`WAVE3_DESIGN.md` §3). They damage bodies, so
+            // they run after contact and before the reap, which is also the
+            // window where `EnemyIndex` is still the live `SpawnId` order (no
+            // enemy has spawned or despawned since the grid build). An
+            // unevolved run walks empty queries here and draws no rng.
+            evolutions::milk_teeth_system,
+            evolutions::fondue_string_system,
+            evolutions::fairy_ring_system,
+            evolutions::drain_cleaner_system,
+            evolutions::roll_call_system,
+            // 16c: a Hantavirus host that died this tick (any source, the
+            // evolved weapons above included) passes
             // its remaining jumps on while the corpse and the `EnemyIndex`
             // order still exist — i.e. after every damage pass and before the
             // reap despawns it.

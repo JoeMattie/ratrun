@@ -1481,7 +1481,19 @@ impl App {
             self.map_open = false;
             self.chest_reward = Some(reward);
             self.screen = Screen::Chest;
-            self.sfx(Sfx::CacheOpen);
+            match reward {
+                // The "nothing left to give" chest pays gold *and* patches the
+                // rat up; the loadout cannot see current HP, so the heal is
+                // applied here (`design §7`).
+                ChestReward::Gold(_) => {
+                    let heal = crate::game::loadout::CHEST_HEAL_FRAC * w.player.max_hp();
+                    w.player.heal(heal);
+                    self.sfx(Sfx::CacheOpen);
+                }
+                // An evolution gets its own fanfare (`Sfx::Evolve`).
+                ChestReward::Evolve { .. } => self.sfx(Sfx::Evolve),
+                _ => self.sfx(Sfx::CacheOpen),
+            }
         } else if std::mem::take(&mut w.pending_shop) {
             self.map_open = false;
             self.screen = Screen::Shop;
@@ -1760,7 +1772,13 @@ impl App {
     fn open_levelup(&mut self) {
         self.map_open = false;
         if let Some(w) = self.world.as_mut() {
-            let choices = w.player.loadout.generate_choices(&mut w.rng);
+            // The bandage fallback is hidden at full health (`design §2`), so
+            // the pool needs the rat's own HP fraction.
+            let hp_frac = (w.player.hp / w.player.max_hp().max(1.0)).clamp(0.0, 1.0);
+            let choices = w
+                .player
+                .loadout
+                .generate_choices_with_hp(&mut w.rng, hp_frac);
             self.levelup_desc = choices
                 .iter()
                 .map(|c| w.player.loadout.describe(c))
@@ -1807,6 +1825,9 @@ impl App {
                 }
                 let heal = w.player.loadout.apply(&up);
                 w.player.heal(heal);
+                if matches!(up, Upgrade::Purse) {
+                    w.gold = w.gold.saturating_add(crate::game::loadout::PURSE_GOLD);
+                }
                 w.pending_levelups = w.pending_levelups.saturating_sub(1);
             }
             self.resume_or_open_reward();
@@ -2937,10 +2958,12 @@ mod tests {
         assert!(matches!(h.app.screen, Screen::Chest));
         let elapsed = h.app.world.as_ref().unwrap().elapsed;
         h.frame(&[KeyCode::Enter]);
-        assert!(h.screen_text().contains("+10 gold"));
+        // Nothing left to rank: the fallback chest pays `CHEST_GOLD` (design
+        // §7) and patches the rat up.
+        assert!(h.screen_text().contains("+24 gold"));
         h.click("Enter / Continue");
         assert!(matches!(h.app.screen, Screen::Shop));
-        assert!(h.screen_text().contains("33 gold"));
+        assert!(h.screen_text().contains("47 gold"));
         assert_eq!(h.app.world.as_ref().unwrap().elapsed, elapsed);
 
         h.frame(&[KeyCode::Esc]);
@@ -3070,6 +3093,125 @@ mod tests {
                 for _ in 0..frames {
                     hh.frame(&[]);
                 }
+            }
+            // ---- Wave 3 evolutions -----------------------------------------
+            // `RATRUN_DUMP=evo0` … `evo7` renders the weapon at that index of
+            // `WeaponKind::all()` fully evolved, mid-effect, over a horde.
+            // `chest-evo` is the evolution chest card; `hud-evo` is the HUD
+            // rack of five evolved weapons wearing the gilded frame.
+            "chest-evo" => {
+                hh.enter_playing();
+                let w = hh.app.world.as_mut().unwrap();
+                let weapon = &mut w.player.loadout.weapons[0];
+                weapon.level = weapon.kind.max_level();
+                w.player.loadout.apply(&Upgrade::Passive(crate::game::loadout::PassiveKind::Damage));
+                let p = w.player.pos;
+                w.spawn_chest(p);
+                hh.frame(&[]);
+            }
+            "hud-evo" => {
+                use crate::game::weapon::WeaponKind;
+                hh.enter_playing();
+                let w = hh.app.world.as_mut().unwrap();
+                w.player.loadout = Loadout::from_parts(
+                    WeaponKind::all()
+                        .into_iter()
+                        .take(5)
+                        .map(|kind| {
+                            let mut weapon = crate::game::weapon::Weapon::new(kind);
+                            weapon.level = kind.max_level();
+                            weapon.evolved = true;
+                            weapon
+                        })
+                        .collect(),
+                    vec![
+                        (crate::game::loadout::PassiveKind::Damage, 2),
+                        (crate::game::loadout::PassiveKind::Armor, 3),
+                    ],
+                );
+                for _ in 0..4 {
+                    hh.frame(&[]);
+                }
+            }
+            t if t.starts_with("evo") => {
+                use crate::game::bullet::{Bullet, Faction};
+                use crate::game::ecs::resources::spawn_with_id;
+                use crate::game::weapon::WeaponKind;
+                use rand::SeedableRng;
+                let index: usize = t
+                    .trim_start_matches("evo")
+                    .parse()
+                    .unwrap_or(0)
+                    .min(WeaponKind::all().len() - 1);
+                let kind = WeaponKind::all()[index];
+                hh.enter_playing();
+                let w = hh.app.world.as_mut().unwrap();
+                w.player.loadout = Loadout::from_parts(
+                    vec![{
+                        let mut weapon = crate::game::weapon::Weapon::new(kind);
+                        weapon.level = kind.max_level();
+                        weapon.evolved = true;
+                        weapon.timer = 0.0;
+                        weapon
+                    }],
+                    Vec::new(),
+                );
+                w.player.dash_cd = 9.0;
+                let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+                let p = w.player.pos;
+                // A ring of bodies through the weapon's reach, tough enough
+                // that none of them dies and clutters the frame with bursts.
+                for i in 0..14 {
+                    let a = i as f32 * 0.45;
+                    let r = 20.0 + (i % 5) as f32 * 10.0;
+                    let at = p + crate::math::Vec2::from_angle(a) * r;
+                    let kind = if i % 7 == 3 {
+                        crate::game::enemy::EnemyKind::Cat
+                    } else {
+                        crate::game::enemy::EnemyKind::Skitterer
+                    };
+                    w.spawn_enemy_with_rng(kind, at, 400.0, &mut rng);
+                }
+                // Hostile pellets for Flywheel to catch.
+                if kind == WeaponKind::TailThrash {
+                    for i in 0..5 {
+                        let at = p + crate::math::Vec2::from_angle(i as f32 * 1.2) * 18.0;
+                        spawn_with_id(
+                            &mut w.ecs,
+                            Bullet::new(at, crate::math::Vec2::new(-30.0, 0.0), 5.0, Faction::Enemy, (255, 120, 90)),
+                        );
+                    }
+                }
+                // Active weapons need the Space press; the others fire on their
+                // own timer.
+                let press = if kind.is_active() {
+                    hh.frame(&[KeyCode::Char(' ')]);
+                    3
+                } else {
+                    hh.frame(&[]);
+                    0
+                };
+                let frames = match kind {
+                    // The burst's final sweep (the fling) resolves around
+                    // frame 38; a handful of frames later the copper fan is
+                    // clear of the rat sprite and the arc is still drawn.
+                    WeaponKind::TailThrash => 42,
+                    WeaponKind::SonicSqueak => 46,
+                    WeaponKind::SporeOrbit => 60,
+                    WeaponKind::AcidSpit => 40,
+                    WeaponKind::SqueakNova => 40,
+                    _ => 10,
+                };
+                for _ in 0..(frames + press) {
+                    hh.frame(&[]);
+                }
+                // Drop the stacked damage digits so the capture reads as the
+                // effect, not as a wall of numbers (one fresh frame records
+                // only its own aggregated hits).
+                if let Some(w) = hh.app.world.as_mut() {
+                    w.damage_numbers.clear();
+                }
+                hh.frame(&[]);
             }
             "treasure" | "chest" => {
                 use crate::game::ecs::resources::spawn_with_id;

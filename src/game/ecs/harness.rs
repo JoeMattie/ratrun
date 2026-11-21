@@ -294,12 +294,12 @@ fn trace_hash(script_mode: Script, theme: Theme, seed: u64) -> u64 {
 /// `weapons::tests::pressing_space_without_active_weapons_changes_nothing`
 /// pins down directly.
 const CASES: [(Script, Theme, u64, u64); 6] = [
-    (Script::Wander, Theme::Sewer, 11, 8720056763801156725),
-    (Script::Wander, Theme::Kitchen, 29, 5952239709169038885),
-    (Script::Wander, Theme::Lab, 1234, 8024277106282548221),
-    (Script::Evade, Theme::Sewer, 11, 5515615556408126355),
-    (Script::Evade, Theme::Kitchen, 29, 17515084477109262352),
-    (Script::Evade, Theme::Lab, 1234, 10343058712856676223),
+    (Script::Wander, Theme::Sewer, 11, 9206137558415526187),
+    (Script::Wander, Theme::Kitchen, 29, 4375342237324829720),
+    (Script::Wander, Theme::Lab, 1234, 14206636994343948580),
+    (Script::Evade, Theme::Sewer, 11, 5528218089795270028),
+    (Script::Evade, Theme::Kitchen, 29, 18098040204174209496),
+    (Script::Evade, Theme::Lab, 1234, 8104476765968248735),
 ];
 
 #[test]
