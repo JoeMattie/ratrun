@@ -153,11 +153,30 @@ pub enum Sfx {
     MagpieCrate,
     /// The last rattle.
     MagpieDeath,
+    // SUBJECT R-01 (the Kitchen's second boss): the first success.
+    /// The self-satisfied chitter of a rat that has already won once.
+    MegaRatChitter,
+    /// The incisors coming up: a wet grinding scrape.
+    MegaRatGnaw,
+    /// The teeth going into a cabinet, and the indignant squeal after it.
+    MegaRatStuck,
+    /// The tail cocked back for the thrash.
+    MegaRatThrash,
+    /// One pass of the tail over the tile.
+    MegaRatThrashSweep,
+    /// The boss-scale sonic squeak.
+    MegaRatSqueak,
+    /// The scrabble-and-screech of the dash.
+    MegaRatDash,
+    /// The call, and the walls answering it.
+    MegaRatCall,
+    /// The first success going down.
+    MegaRatDeath,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 100] = [
+    pub const ALL: [Sfx; 109] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -274,6 +293,16 @@ impl Sfx {
         Sfx::MagpieGust,
         Sfx::MagpieCrate,
         Sfx::MagpieDeath,
+        // SUBJECT R-01 (the Kitchen's second boss).
+        Sfx::MegaRatChitter,
+        Sfx::MegaRatGnaw,
+        Sfx::MegaRatStuck,
+        Sfx::MegaRatThrash,
+        Sfx::MegaRatThrashSweep,
+        Sfx::MegaRatSqueak,
+        Sfx::MegaRatDash,
+        Sfx::MegaRatCall,
+        Sfx::MegaRatDeath,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -379,6 +408,15 @@ impl Sfx {
             Sfx::MagpieGust => "MAGPIE_GUST",
             Sfx::MagpieCrate => "MAGPIE_CRATE",
             Sfx::MagpieDeath => "MAGPIE_DEATH",
+            Sfx::MegaRatChitter => "MEGARAT_CHITTER",
+            Sfx::MegaRatGnaw => "MEGARAT_GNAW",
+            Sfx::MegaRatStuck => "MEGARAT_STUCK",
+            Sfx::MegaRatThrash => "MEGARAT_THRASH",
+            Sfx::MegaRatThrashSweep => "MEGARAT_THRASH_SWEEP",
+            Sfx::MegaRatSqueak => "MEGARAT_SQUEAK",
+            Sfx::MegaRatDash => "MEGARAT_DASH",
+            Sfx::MegaRatCall => "MEGARAT_CALL",
+            Sfx::MegaRatDeath => "MEGARAT_DEATH",
         }
     }
 
@@ -485,6 +523,11 @@ impl Sfx {
             // one sample.
             Sfx::NightBell => 1,
             Sfx::NightCarriage => 3,
+            // The chitter, the scrape and the squeak get pitches so the fight
+            // does not machine-gun one sample; the struck beats are single.
+            Sfx::MegaRatChitter | Sfx::MegaRatGnaw | Sfx::MegaRatSqueak => 3,
+            Sfx::MegaRatThrash | Sfx::MegaRatThrashSweep => 2,
+            Sfx::MegaRatStuck | Sfx::MegaRatDash | Sfx::MegaRatCall | Sfx::MegaRatDeath => 1,
         }
     }
 
@@ -583,6 +626,12 @@ impl Sfx {
             Sfx::MagpieCry | Sfx::MagpieDeath => 3,
             Sfx::ShopEnter | Sfx::Purchase | Sfx::Denied => 1,
             Sfx::MinibossArrive | Sfx::MinibossTell | Sfx::MinibossRetreat => 2,
+            // The first success's own beats: its call and its death are set
+            // pieces, its strikes are as loud as the rat's own.
+            Sfx::MegaRatCall | Sfx::MegaRatDeath | Sfx::MegaRatSqueak => 3,
+            Sfx::MegaRatStuck | Sfx::MegaRatThrash | Sfx::MegaRatThrashSweep => 2,
+            Sfx::MegaRatGnaw | Sfx::MegaRatDash => 1,
+            Sfx::MegaRatChitter => 0,
         }
     }
 
@@ -6947,6 +6996,476 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             });
             m.add_short_tail(0.20, 3600.0);
             m.finish(0.50, 1.3, 2.0, 40.0)
+        }
+
+        // 91. MegaRatChitter: the first success cleaning its own ear — a dry,
+        // self-satisfied triple chitter with a wet little click under it.
+        Sfx::MegaRatChitter => {
+            const PITCH: [f32; 3] = [1.0, 1.14, 0.92];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.34);
+            for k in 0..3 {
+                let at = k as f32 * 0.058;
+                m.add_noise(NoiseLayer {
+                    start_s: at,
+                    dur_s: 0.030,
+                    pink: false,
+                    gain: 0.26 - 0.03 * k as f32,
+                    attack_s: 0.0012,
+                    decay_pow: 2.4,
+                    filter: FilterMode::BandPass,
+                    fc0: 3100.0 * p,
+                    fc1: 2100.0 * p,
+                    q: 3.6,
+                    seed: base_seed ^ (0xE0 + k as u32),
+                    ..Default::default()
+                });
+            }
+            // The throat under it: a low contented hum.
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.20,
+                f0: 148.0 * p,
+                f1: 118.0 * p,
+                pitch_pow: 0.8,
+                wave: Wave::Triangle,
+                gain: 0.20,
+                attack_s: 0.010,
+                decay_pow: 1.5,
+                filter: FilterMode::LowPass,
+                fc0: 700.0,
+                fc1: 420.0,
+                q: 1.0,
+                ..Default::default()
+            });
+            m.add_short_tail(0.10, 4200.0);
+            m.finish(0.30, 1.1, 5.0, 18.0)
+        }
+
+        // 92. MegaRatGnaw: the incisors coming up — a wet grinding scrape with
+        // a rising body behind it, so the tell is audible before the line is.
+        Sfx::MegaRatGnaw => {
+            const PITCH: [f32; 3] = [1.0, 0.94, 1.07];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.36);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.26,
+                pink: false,
+                gain: 0.26,
+                attack_s: 0.02,
+                decay_pow: 1.2,
+                filter: FilterMode::BandPass,
+                fc0: 900.0 * p,
+                fc1: 2600.0 * p,
+                fc_pow: 1.5,
+                q: 2.0,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // Two incisors grinding: a pair of scrapes a beat apart.
+            for k in 0..2 {
+                m.add_noise(NoiseLayer {
+                    start_s: 0.06 + k as f32 * 0.10,
+                    dur_s: 0.09,
+                    pink: true,
+                    gain: 0.22 - 0.05 * k as f32,
+                    attack_s: 0.004,
+                    decay_pow: 1.8,
+                    filter: FilterMode::BandPass,
+                    fc0: 1800.0 + 500.0 * k as f32,
+                    fc1: 1200.0,
+                    q: 2.6,
+                    seed: base_seed ^ (0xF0 + k as u32),
+                    ..Default::default()
+                });
+            }
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.28,
+                f0: 88.0 * p,
+                f1: 132.0 * p,
+                pitch_pow: 1.3,
+                wave: Wave::Saw,
+                gain: 0.16,
+                attack_s: 0.03,
+                decay_pow: 1.2,
+                filter: FilterMode::LowPass,
+                fc0: 420.0,
+                fc1: 900.0,
+                q: 1.2,
+                ..Default::default()
+            });
+            m.add_short_tail(0.12, 3800.0);
+            m.finish(0.34, 1.2, 3.0, 20.0)
+        }
+
+        // 93. MegaRatStuck: the teeth into the cabinet — a cabinet-panel knock
+        // and an indignant squeal right on its heels.
+        Sfx::MegaRatStuck => {
+            let mut m = MixBuf::new(0.52);
+            // The panel: a hollow wooden crack with a long body.
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.014,
+                pink: false,
+                gain: 0.36,
+                attack_s: 0.0008,
+                decay_pow: 2.8,
+                filter: FilterMode::BandPass,
+                fc0: 1900.0,
+                fc1: 1000.0,
+                q: 1.4,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.16,
+                f0: 168.0,
+                f1: 92.0,
+                pitch_pow: 0.8,
+                wave: Wave::Triangle,
+                gain: 0.42,
+                attack_s: 0.001,
+                decay_pow: 1.6,
+                filter: FilterMode::LowPass,
+                fc0: 900.0,
+                fc1: 340.0,
+                q: 1.1,
+                ..Default::default()
+            });
+            // The squeal of a rat that is not used to losing.
+            m.add_osc(OscLayer {
+                start_s: 0.08,
+                dur_s: 0.34,
+                f0: 900.0,
+                f1: 420.0,
+                pitch_pow: 1.4,
+                wave: Wave::Saw,
+                gain: 0.24,
+                attack_s: 0.006,
+                decay_pow: 1.5,
+                filter: FilterMode::BandPass,
+                fc0: 2200.0,
+                fc1: 1100.0,
+                q: 2.4,
+                ..Default::default()
+            });
+            m.add_short_tail(0.14, 4600.0);
+            m.finish(0.48, 1.5, 1.2, 18.0)
+        }
+
+        // 94. MegaRatThrash: the tail cocked back — a long low creak of weight
+        // shifting, no impact yet.
+        Sfx::MegaRatThrash => {
+            const PITCH: [f32; 2] = [1.0, 0.95];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.34);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.30,
+                pink: true,
+                gain: 0.22,
+                attack_s: 0.06,
+                decay_pow: 1.1,
+                filter: FilterMode::BandPass,
+                fc0: 520.0 * p,
+                fc1: 1300.0 * p,
+                fc_pow: 1.4,
+                q: 1.3,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.02,
+                dur_s: 0.28,
+                f0: 62.0 * p,
+                f1: 96.0 * p,
+                pitch_pow: 1.2,
+                wave: Wave::Sine,
+                gain: 0.26,
+                attack_s: 0.05,
+                decay_pow: 1.2,
+                ..Default::default()
+            });
+            m.add_short_tail(0.12, 3000.0);
+            m.finish(0.32, 1.2, 6.0, 22.0)
+        }
+
+        // 95. MegaRatThrashSweep: one pass of the tail over the tile — a wide
+        // whoosh with tile grit dragging under it.
+        Sfx::MegaRatThrashSweep => {
+            const PITCH: [f32; 2] = [1.0, 0.9];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.44);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.26,
+                pink: true,
+                gain: 0.30,
+                attack_s: 0.03,
+                decay_pow: 1.2,
+                filter: FilterMode::BandPass,
+                fc0: 600.0 * p,
+                fc1: 2400.0 * p,
+                fc_pow: 1.6,
+                q: 1.1,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // Grit under the tail.
+            for k in 0..4 {
+                m.add_noise(NoiseLayer {
+                    start_s: 0.02 + k as f32 * 0.045,
+                    dur_s: 0.05,
+                    pink: false,
+                    gain: 0.16 - 0.02 * k as f32,
+                    attack_s: 0.002,
+                    decay_pow: 2.0,
+                    filter: FilterMode::BandPass,
+                    fc0: 2600.0 + 200.0 * k as f32,
+                    fc1: 1600.0,
+                    q: 2.2,
+                    seed: base_seed ^ (0x11 + k as u32),
+                    ..Default::default()
+                });
+            }
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.22,
+                f0: 120.0 * p,
+                f1: 70.0 * p,
+                pitch_pow: 0.9,
+                wave: Wave::Triangle,
+                gain: 0.22,
+                attack_s: 0.01,
+                decay_pow: 1.5,
+                ..Default::default()
+            });
+            m.add_short_tail(0.12, 4200.0);
+            m.finish(0.40, 1.3, 2.0, 22.0)
+        }
+
+        // 96. MegaRatSqueak: the boss's sonic squeak — the player's own weapon
+        // with a room-sized throat behind it: a piercing rising shriek that
+        // breaks into a shatter.
+        Sfx::MegaRatSqueak => {
+            const PITCH: [f32; 3] = [1.0, 0.92, 1.1];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.52);
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.30,
+                f0: 680.0 * p,
+                f1: 1750.0 * p,
+                pitch_pow: 1.8,
+                wave: Wave::Saw,
+                gain: 0.30,
+                attack_s: 0.004,
+                decay_pow: 1.2,
+                filter: FilterMode::BandPass,
+                fc0: 1800.0 * p,
+                fc1: 4200.0 * p,
+                q: 3.0,
+                ..Default::default()
+            });
+            // The shatter as the wavefront leaves the body.
+            m.add_noise(NoiseLayer {
+                start_s: 0.20,
+                dur_s: 0.16,
+                pink: false,
+                gain: 0.24,
+                attack_s: 0.001,
+                decay_pow: 2.2,
+                filter: FilterMode::BandPass,
+                fc0: 3400.0,
+                fc1: 1400.0,
+                q: 1.8,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.36,
+                f0: 240.0 * p,
+                f1: 96.0 * p,
+                pitch_pow: 1.1,
+                wave: Wave::Sine,
+                gain: 0.20,
+                attack_s: 0.006,
+                decay_pow: 1.4,
+                ..Default::default()
+            });
+            m.add_short_tail(0.18, 5200.0);
+            m.finish(0.44, 1.4, 1.4, 26.0)
+        }
+
+        // 97. MegaRatDash: four claws and a lot of mass leaving in one
+        // direction — a scrabble, then the roar of the charge.
+        Sfx::MegaRatDash => {
+            const PITCH: [f32; 2] = [1.0, 0.92];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.42);
+            for k in 0..4 {
+                m.add_noise(NoiseLayer {
+                    start_s: k as f32 * 0.026,
+                    dur_s: 0.040,
+                    pink: false,
+                    gain: 0.24 - 0.03 * k as f32,
+                    attack_s: 0.001,
+                    decay_pow: 2.4,
+                    filter: FilterMode::BandPass,
+                    fc0: 2000.0 * p,
+                    fc1: 1300.0 * p,
+                    q: 1.8,
+                    seed: base_seed ^ (0x21 + k as u32),
+                    ..Default::default()
+                });
+            }
+            m.add_noise(NoiseLayer {
+                start_s: 0.06,
+                dur_s: 0.28,
+                pink: true,
+                gain: 0.24,
+                attack_s: 0.02,
+                decay_pow: 1.2,
+                filter: FilterMode::LowPass,
+                fc0: 900.0 * p,
+                fc1: 320.0 * p,
+                q: 0.9,
+                seed: base_seed ^ 0x2f,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.04,
+                dur_s: 0.26,
+                f0: 150.0 * p,
+                f1: 84.0 * p,
+                pitch_pow: 0.9,
+                wave: Wave::Saw,
+                gain: 0.22,
+                attack_s: 0.010,
+                decay_pow: 1.4,
+                filter: FilterMode::LowPass,
+                fc0: 700.0,
+                fc1: 300.0,
+                q: 1.1,
+                ..Default::default()
+            });
+            m.add_short_tail(0.12, 3800.0);
+            m.finish(0.38, 1.3, 2.0, 22.0)
+        }
+
+        // 98. MegaRatCall: the call — one long rising chitter that breaks into
+        // a chorus of little answering feet on the tile.
+        Sfx::MegaRatCall => {
+            let mut m = MixBuf::new(0.66);
+            // The call itself: three ascending chitters.
+            for k in 0..3 {
+                m.add_osc(OscLayer {
+                    start_s: k as f32 * 0.09,
+                    dur_s: 0.10,
+                    f0: (520.0 + 160.0 * k as f32),
+                    f1: (760.0 + 220.0 * k as f32),
+                    pitch_pow: 1.3,
+                    wave: Wave::Saw,
+                    gain: 0.24,
+                    attack_s: 0.005,
+                    decay_pow: 1.5,
+                    filter: FilterMode::BandPass,
+                    fc0: 1600.0,
+                    fc1: 2800.0,
+                    q: 2.6,
+                    ..Default::default()
+                });
+            }
+            // The answer: many small feet and throats.
+            for k in 0..7 {
+                m.add_noise(NoiseLayer {
+                    start_s: 0.30 + k as f32 * 0.038,
+                    dur_s: 0.030,
+                    pink: false,
+                    gain: 0.16 - 0.015 * k as f32,
+                    attack_s: 0.001,
+                    decay_pow: 2.4,
+                    filter: FilterMode::BandPass,
+                    fc0: 2400.0 + 260.0 * (k % 3) as f32,
+                    fc1: 1700.0,
+                    q: 3.0,
+                    seed: base_seed ^ (0x31 + k as u32),
+                    ..Default::default()
+                });
+            }
+            m.add_short_tail(0.20, 4800.0);
+            m.finish(0.52, 1.4, 1.2, 26.0)
+        }
+
+        // 99. MegaRatDeath: the first success going down — the collar ringing
+        // on the tile, one last long tail drag, and the room going quiet.
+        Sfx::MegaRatDeath => {
+            let mut m = MixBuf::new(0.92);
+            // The last squeal, falling.
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.40,
+                f0: 760.0,
+                f1: 190.0,
+                pitch_pow: 1.5,
+                wave: Wave::Saw,
+                gain: 0.32,
+                attack_s: 0.006,
+                decay_pow: 1.4,
+                filter: FilterMode::BandPass,
+                fc0: 1900.0,
+                fc1: 700.0,
+                q: 2.2,
+                ..Default::default()
+            });
+            // The collar hitting the tile: two bright metallic pings.
+            for k in 0..2 {
+                m.add_osc(OscLayer {
+                    start_s: 0.34 + k as f32 * 0.13,
+                    dur_s: 0.20,
+                    f0: 1520.0 - k as f32 * 90.0,
+                    f1: 1180.0 - k as f32 * 70.0,
+                    pitch_pow: 0.6,
+                    wave: Wave::Sine,
+                    gain: 0.18,
+                    attack_s: 0.001,
+                    decay_pow: 2.6,
+                    ..Default::default()
+                });
+            }
+            // The tail dragging out and stopping.
+            m.add_noise(NoiseLayer {
+                start_s: 0.40,
+                dur_s: 0.36,
+                pink: true,
+                gain: 0.16,
+                attack_s: 0.04,
+                decay_pow: 1.2,
+                filter: FilterMode::LowPass,
+                fc0: 800.0,
+                fc1: 220.0,
+                q: 0.9,
+                seed: base_seed ^ 0x41,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.42,
+                dur_s: 0.40,
+                f0: 92.0,
+                f1: 42.0,
+                pitch_pow: 0.9,
+                wave: Wave::Sine,
+                gain: 0.28,
+                attack_s: 0.01,
+                decay_pow: 1.5,
+                ..Default::default()
+            });
+            m.add_short_tail(0.22, 3400.0);
+            m.finish(0.54, 1.4, 2.0, 44.0)
         }
     }
 }

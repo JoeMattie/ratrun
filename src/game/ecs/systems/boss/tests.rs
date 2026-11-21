@@ -263,7 +263,10 @@ fn every_boss_credits_its_gold_exactly_once_at_the_clear() {
             }
             spawn_boss(&mut w);
             let kind = boss_of(&mut w).expect("the floor's boss").kind;
-            assert_eq!(kind, BossKind::for_theme(theme));
+            // A floor can hold more than one fight (the Kitchen shares with
+            // SUBJECT R-01), and the pick is seed-driven: this asserts the
+            // floor fielded the boss its pool promised for this seed.
+            assert_eq!(kind, BossKind::for_theme_seeded(theme, 9));
             let before = w.gold;
             {
                 let mut query = w.ecs.query::<&mut Boss>();
@@ -309,7 +312,14 @@ fn boss_death_breaks_the_horde_without_invalidating_the_enemy_index() {
         w.level_index = level;
         spawn_boss(&mut w);
         let boss = boss_of(&mut w).expect("BossDue spawned the boss");
-        assert_eq!(boss.kind, BossKind::for_level(level));
+        // The Kitchen's pool can field SUBJECT R-01 on a Kitchen seed; the
+        // break is the shared death path either way, so the assertion follows
+        // the seed rather than the floor's canonical name.
+        assert_eq!(
+            boss.kind,
+            BossKind::for_theme_seeded(theme, 31),
+            "level {level} fields the boss its pool promises"
+        );
         // 60 enemies on the field, spread over the arena so a few of them
         // stand in the boss's death hazards too.
         let centre = boss.arena.center_world();

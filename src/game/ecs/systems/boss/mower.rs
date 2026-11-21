@@ -247,7 +247,8 @@ impl BossController for MowerController {
             | BossState::Broom(_)
             | BossState::Mangle(_)
             | BossState::NightEdition(_)
-            | BossState::Magpie(_) => {}
+            | BossState::Magpie(_)
+            | BossState::MegaRat(_) => {}
         }
 
         // The art owns the multiplier; set it after the transitions so the

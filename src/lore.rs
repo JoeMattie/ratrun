@@ -37,7 +37,9 @@ pub fn map_intro(theme: Theme) -> (&'static str, &'static str) {
         Theme::Kitchen => (
             "LEVEL 2 — THE KITCHENS",
             "Grease, snap-traps, and the stink of bait. Everything here wants \
-             you fed — to something with a bigger mouth.",
+             you fed — to something with a bigger mouth. Nobody agrees who \
+             keeps this kitchen: the caretaker with the broom, or the thing in \
+             the cold room that was the first of us.",
         ),
         Theme::Lab => (
             "LEVEL 3 — THE LAB",
@@ -96,6 +98,19 @@ pub fn victory(theme: Theme) -> &'static str {
         }
     }
 }
+
+/// The Kitchen's second boss, **SUBJECT R-01**: the bar's name and class tag.
+///
+/// The first success: the rat the facility made before it made R-47, kept in
+/// the kitchens ever since, collared and tagged like a trophy. The player is
+/// R-47. The mirror is the whole fight.
+pub const MEGARAT_NAME: &str = "SUBJECT R-01";
+pub const MEGARAT_CLASS: &str = "CLASS-V PROTOTYPE — FIRST SUCCESS";
+
+/// The arrival banner's flavour line for SUBJECT R-01 (the plate's second row
+/// when the terminal has room, and the fight's own epitaph at the clear).
+pub const MEGARAT_ARRIVAL: &str =
+    "It has been in the walls since before your cage. It has won this fight before.";
 
 /// Flavor line for dying.
 pub const DEFEAT: &str =

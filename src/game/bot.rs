@@ -1531,6 +1531,12 @@ impl Bot {
                             crate::game::art_boss_mangle::MangleState::Jam
                                 | crate::game::art_boss_mangle::MangleState::FinalJam
                         )
+                        // A reared-up Megarat and a dragging tail are the same
+                        // read: stand on the exposed weak point, not orbit it.
+                            | BossState::MegaRat(
+                                crate::game::art_boss_megarat::MegaRatState::GnawStuck
+                                    | crate::game::art_boss_megarat::MegaRatState::ThrashRecover
+                            )
                     )
                 })
             });

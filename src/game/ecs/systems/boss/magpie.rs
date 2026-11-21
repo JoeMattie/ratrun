@@ -145,7 +145,8 @@ impl BossController for MagpieController {
             | BossState::Broom(_)
             | BossState::Mower(_)
             | BossState::Mangle(_)
-            | BossState::NightEdition(_) => {}
+            | BossState::NightEdition(_)
+            | BossState::MegaRat(_) => {}
         }
 
         // The art owns the multiplier and the contact rule; apply them after the

@@ -12,7 +12,7 @@ use ratatui::Frame;
 use crate::game::director;
 use crate::game::world::World;
 use crate::render::hud::{
-    boss_codename, HudState, BOSS_HOT, BOSS_ROSE, DANGER, DANGER_DIM, TRAIL_GOLD, WARN_AMBER,
+    boss_plate, HudState, BOSS_HOT, BOSS_ROSE, DANGER, DANGER_DIM, TRAIL_GOLD, WARN_AMBER,
 };
 use crate::render::palette::{self, COAT, EDGE, MUTED, PLATE, TAIL, TRACK};
 
@@ -169,7 +169,7 @@ fn draw_boss_ui(frame: &mut Frame, game: Rect, world: &World, state: &mut HudSta
     // The Sweeper, Turf-Reaper Mk.IV) are used by the warning and the bar.
     // Themes and campaign levels are 1:1 (`campaign::level_theme`), so this is
     // the boss the boss framework spawns for the level.
-    let (codename, class_tag) = boss_codename(world.level.theme);
+    let (codename, class_tag) = boss_plate(world);
 
     // Case 1: pre-boss warning (see `draw_boss_warning`).
     if boss_soon {

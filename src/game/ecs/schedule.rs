@@ -19,6 +19,7 @@
 //! | 4 | `spawn::director_system` | `run_director` |
 //! | 4a | `miniboss::miniboss_system` | named miniboss appointments, retreats and signatures (wave 3); explicitly after 4 and before 4b |
 //! | 4b | `boss::boss_spawn_system` | boss hand-off (reads `BossDue`) |
+//! | 4c | `boss::megarat::boss_summon_system` | a boss's `Call` spawns its rats here, outside the `EnemyIndex` window |
 //! | 5 | `enemy_move::enemy_steering_system` | `update_enemies` steer |
 //! | 6 | `enemy_move::enemy_fire_system` | `update_enemies` fire |
 //! | 7 | `enemy_move::grid_build_system` | first grid build + `max_radius` |
@@ -155,6 +156,12 @@ pub fn build_tick_schedule() -> Schedule {
             enemy_move::flow_refresh_system,
             spawn::director_system,
             boss::boss_spawn_system,
+            // 4c: the called rats. A boss may only add `Enemy` entities at the
+            // head of the tick (its controller has no `Commands`, and the
+            // update slot is inside the `EnemyIndex` window), so the summon a
+            // `Call` queued last tick lands here — before `grid_build_system`
+            // sees the field.
+            boss::megarat::boss_summon_system,
             enemy_move::enemy_steering_system,
             enemy_move::enemy_fire_system,
             enemy_move::grid_build_system,

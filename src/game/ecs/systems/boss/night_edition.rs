@@ -191,7 +191,8 @@ impl BossController for NightEditionController {
             | BossState::Broom(_)
             | BossState::Mower(_)
             | BossState::Mangle(_)
-            | BossState::Magpie(_) => {}
+            | BossState::Magpie(_)
+            | BossState::MegaRat(_) => {}
         }
 
         // The art owns the multiplier and the recovery states' contact rule;

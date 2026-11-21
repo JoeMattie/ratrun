@@ -204,21 +204,31 @@ pub fn weapon_tag(kind: WeaponKind, evolved: bool) -> &'static str {
 /// **Turf-Reaper Mk.IV**. The second element is the arrival banner's flavour
 /// tag and never names a boss.
 pub fn boss_codename(theme: Theme) -> (&'static str, &'static str) {
-    // The bar names the fight the player is *in*, so it follows the boss the
-    // floor actually spawns (`BossKind::for_theme::`, the wave 3 seam). The
-    // Laundry and the Printworks borrow the broom and the mower until their own
-    // bosses land, and then this follows automatically.
-    let level = match crate::game::ecs::systems::boss::BossKind::for_theme(theme) {
-        crate::game::ecs::systems::boss::BossKind::Cat => CampaignLevel::Sewer,
-        crate::game::ecs::systems::boss::BossKind::Broom => CampaignLevel::Kitchen,
-        crate::game::ecs::systems::boss::BossKind::Mower => CampaignLevel::Lab,
-        crate::game::ecs::systems::boss::BossKind::Mangle => CampaignLevel::Laundry,
-        crate::game::ecs::systems::boss::BossKind::NightEdition => CampaignLevel::Printworks,
+    // The floor's *canonical* fight: the first entry of its pool. The bar
+    // itself goes through [`boss_plate`], which follows the live boss (a floor
+    // may field more than one; the Kitchen shares with SUBJECT R-01).
+    boss_kind_codename(crate::game::ecs::systems::boss::BossKind::for_theme(theme))
+}
+
+/// The name plate for one boss kind. Exhaustive over
+/// [`BossKind`](crate::game::ecs::systems::boss::BossKind) on purpose: a new
+/// fight must arrive with its plate.
+pub fn boss_kind_codename(
+    kind: crate::game::ecs::systems::boss::BossKind,
+) -> (&'static str, &'static str) {
+    use crate::game::ecs::systems::boss::BossKind;
+    let level = match kind {
+        BossKind::Cat => CampaignLevel::Sewer,
+        BossKind::Broom => CampaignLevel::Kitchen,
+        BossKind::Mower => CampaignLevel::Lab,
+        BossKind::Mangle => CampaignLevel::Laundry,
+        BossKind::NightEdition => CampaignLevel::Printworks,
         // The getaway ride's own fight is not a campaign floor, so it has no
         // campaign plate to borrow: the bar and the warning name the bird.
-        crate::game::ecs::systems::boss::BossKind::Magpie => {
-            return ("THE MAGPIE", "CLASS-V CORVID THIEF");
-        }
+        BossKind::Magpie => return ("THE MAGPIE", "CLASS-V CORVID THIEF"),
+        // The Kitchen's second fight: the facility's first success. Its plate
+        // is lore (`lore::MEGARAT_NAME` / `lore::MEGARAT_CLASS`).
+        BossKind::MegaRat => return (crate::lore::MEGARAT_NAME, crate::lore::MEGARAT_CLASS),
     };
     let class_tag = match level {
         CampaignLevel::Sewer => "CLASS-V APEX PREDATOR",
@@ -228,6 +238,41 @@ pub fn boss_codename(theme: Theme) -> (&'static str, &'static str) {
         CampaignLevel::Printworks => "OVERNIGHT PRESS — EDITION 1",
     };
     (level.boss_name(), class_tag)
+}
+
+/// The name plate for the fight the player is **in** (or about to be in).
+///
+/// A floor can field more than one boss now (`BossKind::pool_for_theme`), and
+/// the pick is made from the level seed, so a plate keyed on the theme alone
+/// would name the Sweeper while SUBJECT R-01 is on the tile. This reads the
+/// living boss and otherwise answers with the boss the seed will field
+/// ([`BossKind::for_theme_seeded`](crate::game::ecs::systems::boss::BossKind::for_theme_seeded)),
+/// so the pre-boss countdown names the right animal too.
+pub fn boss_plate(world: &World) -> (&'static str, &'static str) {
+    use crate::game::ecs::systems::boss::{Boss, BossKind};
+    let live = world.ecs.iter_entities().find_map(|entity| {
+        let boss = entity.get::<Boss>()?;
+        if boss.dead {
+            None
+        } else {
+            Some(boss.kind)
+        }
+    });
+    match live {
+        Some(kind) => boss_kind_codename(kind),
+        None => {
+            let theme = world.level.theme;
+            let kind = BossKind::for_theme_seeded(theme, world.level.seed);
+            // A single-fight floor (or the seed that fields the original boss)
+            // is the canonical plate, which is the same answer `for_theme`
+            // gives everything else in the UI.
+            if kind == BossKind::for_theme(theme) {
+                boss_codename(theme)
+            } else {
+                boss_kind_codename(kind)
+            }
+        }
+    }
 }
 
 /// Difficulty escalation tier (1..=5) derived purely from the director's

@@ -2287,6 +2287,65 @@ impl LightMap {
                     }
                 }
             }
+            BossState::MegaRat(st) => {
+                use crate::game::art_boss_megarat::MegaRatState;
+                // SUBJECT R-01: hot kitchen fat and cold steel. The key light
+                // tracks its states; the exposed weak point in the two
+                // recoveries gets its own bright beacon, because that is the
+                // one thing the rat has to see across the room.
+                if in_range(bsx, bsy, 74.0) {
+                    let (col, r, int, sc) = match st {
+                        MegaRatState::GnawStuck => ((255, 226, 150), 70.0, 255, 64),
+                        MegaRatState::ThrashRecover => ((255, 210, 132), 68.0, 250, 62),
+                        MegaRatState::GnawWindup
+                        | MegaRatState::GnawLunge
+                        | MegaRatState::DashWindup
+                        | MegaRatState::DashPass => ((255, 148, 92), 62.0, 236, 54),
+                        MegaRatState::ThrashWindup
+                        | MegaRatState::ThrashPass1
+                        | MegaRatState::ThrashGap
+                        | MegaRatState::ThrashPass2 => ((255, 176, 108), 64.0, 238, 56),
+                        MegaRatState::SqueakWindup | MegaRatState::SqueakShout => {
+                            ((178, 234, 255), 70.0, 244, 62)
+                        }
+                        MegaRatState::Call => ((255, 236, 176), 66.0, 236, 58),
+                        MegaRatState::Death => ((216, 200, 196), 64.0, 220, 56),
+                        _ => ((214, 190, 160), 58.0, 204, 48),
+                    };
+                    self.lights.push(PointLight {
+                        x: bsx,
+                        y: bsy,
+                        radius: r,
+                        color: col,
+                        intensity: int,
+                        scatter: sc,
+                        priority: 2,
+                        occlude: false,
+                        hard: false,
+                    });
+                }
+                if matches!(st, MegaRatState::GnawStuck | MegaRatState::ThrashRecover) {
+                    let view = boss.megarat_view();
+                    if let Some((weak, _)) = crate::game::art_boss_megarat::weak_point(&view) {
+                        let wx = weak.x - cam.x;
+                        let wy = weak.y - cam.y;
+                        if in_range(wx, wy, 48.0) {
+                            let pulse = 0.86 + 0.14 * (elapsed * 12.0).sin().abs();
+                            self.lights.push(PointLight {
+                                x: wx,
+                                y: wy,
+                                radius: 46.0,
+                                color: (255, 232, 138),
+                                intensity: (276.0 * pulse) as u16,
+                                scatter: 66,
+                                priority: 3,
+                                occlude: false,
+                                hard: false,
+                            });
+                        }
+                    }
+                }
+            }
             _ => {
                 // Fallback aura for future wave-3 bosses.
                 if in_range(bsx, bsy, 58.0) {
