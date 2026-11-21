@@ -146,13 +146,18 @@ pub enum CampaignLevel {
     Laundry = 3,
     /// Stage three's side route: the printworks.
     Printworks = 4,
+    /// The getaway ride's plate: the flatbed trailer. Not a campaign stage —
+    /// a bonus floor with its own boss (the Magpie) and its own name — but it
+    /// is a floor the player can pick, so the intro, complete and end plates
+    /// must be able to name it.
+    Trailer = 5,
 }
 
 impl CampaignLevel {
     /// The three campaign **stages**, in order: the original route. The side
-    /// route floors are reachable through [`Self::from_theme`] but are not
-    /// extra stages, so the sector-select screen and the progress pips stay
-    /// three steps long.
+    /// route floors and the getaway ride are reachable through
+    /// [`Self::from_theme`] but are not extra stages, so the progress pips
+    /// stay three steps long.
     pub const fn all() -> [CampaignLevel; 3] {
         [
             CampaignLevel::Sewer,
@@ -161,7 +166,8 @@ impl CampaignLevel {
         ]
     }
 
-    /// The plate for a floor the player is on (including the side routes).
+    /// The plate for a floor the player is on, including the side routes and
+    /// the getaway ride.
     pub const fn from_theme(theme: Theme) -> CampaignLevel {
         match theme {
             Theme::Sewer => CampaignLevel::Sewer,
@@ -169,10 +175,7 @@ impl CampaignLevel {
             Theme::Lab => CampaignLevel::Lab,
             Theme::Laundry => CampaignLevel::Laundry,
             Theme::Printworks => CampaignLevel::Printworks,
-            // The getaway ride has no campaign plate of its own: it is a
-            // last-stage practice floor and borrows the Lab's (as its boss
-            // bar does, see `boss::trailer_boss`).
-            Theme::Trailer => CampaignLevel::Lab,
+            Theme::Trailer => CampaignLevel::Trailer,
         }
     }
 
@@ -180,18 +183,44 @@ impl CampaignLevel {
         self as usize
     }
 
-    /// Convert a 0-based campaign level index (`0 => Sewer`, `1 => Kitchen`, `2+ => Lab`).
+    /// The plate for a **campaign stage** index (`0 => Sewer`, `1 => Kitchen`,
+    /// `2+ => Lab` — the original route).
+    ///
+    /// A stage is not a floor: the side routes and the getaway ride have
+    /// plates of their own, so a list of floors must carry themes or floor
+    /// indices, not call this.
     pub const fn from_index(index: usize) -> Self {
         match index {
             0 => CampaignLevel::Sewer,
             1 => CampaignLevel::Kitchen,
-            2 => CampaignLevel::Lab,
-            3 => CampaignLevel::Laundry,
-            _ => CampaignLevel::Printworks,
+            _ => CampaignLevel::Lab,
         }
     }
 
-    /// 1-based campaign level number (`1`, `2`, or `3`).
+    /// The campaign **stage** this floor belongs to (`0`, `1`, `2`), or
+    /// `campaign::LEVEL_COUNT` for the getaway ride, which is not a stage.
+    pub const fn stage(self) -> usize {
+        match self {
+            CampaignLevel::Sewer => 0,
+            CampaignLevel::Kitchen | CampaignLevel::Laundry => 1,
+            CampaignLevel::Lab | CampaignLevel::Printworks => 2,
+            // Not a stage: one past the last, like `campaign::is_getaway_sector`.
+            CampaignLevel::Trailer => crate::game::campaign::LEVEL_COUNT,
+        }
+    }
+
+    /// The 1-based stage number a heading or pip shows (`1..=3`). The getaway
+    /// ride reads as the last stage rather than a fourth one.
+    pub const fn stage_number(self) -> u8 {
+        match self {
+            CampaignLevel::Sewer => 1,
+            CampaignLevel::Kitchen | CampaignLevel::Laundry => 2,
+            CampaignLevel::Lab | CampaignLevel::Printworks | CampaignLevel::Trailer => 3,
+        }
+    }
+
+    /// 1-based campaign level number (`1`, `2`, or `3`; the getaway ride is
+    /// numbered one past the stages on the title's sector row).
     pub const fn number(self) -> u8 {
         match self {
             CampaignLevel::Sewer => 1,
@@ -199,16 +228,19 @@ impl CampaignLevel {
             CampaignLevel::Lab => 3,
             CampaignLevel::Laundry => 2,
             CampaignLevel::Printworks => 3,
+            CampaignLevel::Trailer => 4,
         }
     }
 
+    /// The original route's next stage (the route's actual next floor is the
+    /// campaign's choice — see `CampaignState::theme`). `None` once the run is
+    /// on a final-stage floor: the Lab, the Printworks and the getaway ride
+    /// all end their run.
     pub const fn next(self) -> Option<CampaignLevel> {
         match self {
             CampaignLevel::Sewer => Some(CampaignLevel::Kitchen),
-            CampaignLevel::Kitchen => Some(CampaignLevel::Lab),
-            CampaignLevel::Lab => None,
-            CampaignLevel::Laundry => Some(CampaignLevel::Lab),
-            CampaignLevel::Printworks => Some(CampaignLevel::Printworks),
+            CampaignLevel::Kitchen | CampaignLevel::Laundry => Some(CampaignLevel::Lab),
+            CampaignLevel::Lab | CampaignLevel::Printworks | CampaignLevel::Trailer => None,
         }
     }
 
@@ -219,6 +251,7 @@ impl CampaignLevel {
             CampaignLevel::Lab => "THE LAB",
             CampaignLevel::Laundry => "THE LAUNDRY",
             CampaignLevel::Printworks => "THE PRINTWORKS",
+            CampaignLevel::Trailer => "THE FLATBED",
         }
     }
 
@@ -229,6 +262,7 @@ impl CampaignLevel {
             CampaignLevel::Lab => "Lab",
             CampaignLevel::Laundry => "Laundry",
             CampaignLevel::Printworks => "Printworks",
+            CampaignLevel::Trailer => "Flatbed",
         }
     }
 
@@ -239,6 +273,7 @@ impl CampaignLevel {
             CampaignLevel::Lab => "SECTOR 03",
             CampaignLevel::Laundry => "SECTOR 02B",
             CampaignLevel::Printworks => "SECTOR 03B",
+            CampaignLevel::Trailer => "GETAWAY",
         }
     }
 
@@ -248,10 +283,12 @@ impl CampaignLevel {
             CampaignLevel::Kitchen => "THE SWEEPER",
             CampaignLevel::Lab => "TURF-REAPER MK.IV",
             // The floors' own bosses (`WAVE3_DESIGN.md` §12,
-            // `BossKind::for_theme`): the Laundry fights the Mangle and the
-            // Printworks the Night Edition.
+            // `BossKind::for_theme`): the Laundry fights the Mangle, the
+            // Printworks the Night Edition and the getaway ride the Magpie
+            // (`render::hud::boss_codename` names the same fights).
             CampaignLevel::Laundry => "THE MANGLE",
             CampaignLevel::Printworks => "THE NIGHT EDITION",
+            CampaignLevel::Trailer => "THE MAGPIE",
         }
     }
 
@@ -262,6 +299,7 @@ impl CampaignLevel {
             CampaignLevel::Lab => "TURF-REAPER MK.IV  —  SCRAPPED",
             CampaignLevel::Laundry => "THE MANGLE  —  JAMMED",
             CampaignLevel::Printworks => "THE NIGHT EDITION  —  STOPPED",
+            CampaignLevel::Trailer => "THE MAGPIE  —  SHAKEN OFF",
         }
     }
 
@@ -281,6 +319,9 @@ impl CampaignLevel {
             }
             CampaignLevel::Printworks => {
                 "The last edition rolls off the belt, curls under the street door, and you are out with it."
+            }
+            CampaignLevel::Trailer => {
+                "The magpie's last shriek is carried off down the deck with the road noise. The cab's brake lines pop and the rig starts to drift. The facility is behind you."
             }
         }
     }
@@ -302,6 +343,9 @@ impl CampaignLevel {
             CampaignLevel::Printworks => {
                 "Ink in the seams of your paws and the presses still running overnight. Tomorrow's front page says you were caught."
             }
+            CampaignLevel::Trailer => {
+                "Forty feet of oak deck and a hundred klicks of night, and the road roaring underneath your paws. The cab is forward. So is the magpie: it has been riding the slipstream over the cab since the last weigh station, and it has already decided the cab is its nest."
+            }
         }
     }
 
@@ -313,6 +357,7 @@ impl CampaignLevel {
             CampaignLevel::Lab => (151, 175, 214),
             CampaignLevel::Laundry => (159, 200, 200),
             CampaignLevel::Printworks => (182, 180, 165),
+            CampaignLevel::Trailer => (206, 178, 132),
         }
     }
 
@@ -369,6 +414,11 @@ pub struct LevelCompleteView<'a> {
     pub player_level: u32,
     /// Total upgrades currently owned (shown as a teaser for Keep Three).
     pub owned_upgrades: usize,
+    /// The floor the run goes to next, from the campaign's chosen route
+    /// (`campaign::Route`) — **not** [`CampaignLevel::next`], which only knows
+    /// the original route. `None` when this clear ends the run (a practice
+    /// floor, the getaway ride, a final-stage floor or no campaign in flight).
+    pub next: Option<CampaignLevel>,
     /// Optional override for the per-boss triumph text.
     pub custom_triumph: Option<&'a str>,
     /// Currently hovered mouse action.
@@ -496,9 +546,12 @@ pub struct CampaignVictoryView<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LevelSelectAction {
-    /// Select an unlocked level slot.
-    SelectLevel(CampaignLevel),
-    /// Begin run at the currently selected unlocked level.
+    /// Select the sheet at this **floor** index (an index into
+    /// [`Theme::playable`]). Emitted for every visible slot, locked ones
+    /// included, so a locked floor can be selected and read; only
+    /// [`Self::Start`] refuses to start it.
+    SelectLevel(usize),
+    /// Begin run at the currently selected unlocked floor.
     Start,
     /// Return to title menu.
     Back,
@@ -511,17 +564,37 @@ pub struct LevelBest {
     pub cleared: bool,
 }
 
+/// Room for the floors a host can hand [`LevelSelectView`]: the six playable
+/// floors today plus two spare, so a seventh floor needs no change in the art.
+pub const MAX_LEVEL_SLOTS: usize = 8;
+
+/// One floor's card on the sector select screen.
 #[derive(Clone, Copy, Debug)]
 pub struct LevelSlotView {
+    /// The floor's index into the title's sector row (`Theme::playable()`):
+    /// the slot's identity, and what starting it starts.
+    pub floor: usize,
+    /// The floor's plate: name, accent, boss and emblem.
     pub level: CampaignLevel,
+    /// The campaign stage the floor belongs to (`0..campaign::LEVEL_COUNT`),
+    /// or `campaign::LEVEL_COUNT` for the getaway ride. Drives the `S1`/`S2`/
+    /// `S3`/`GETAWAY` chip and groups the grid.
+    pub stage: usize,
+    /// Is the floor selectable (its stage reachable, or the getaway ride)?
     pub unlocked: bool,
+    /// Best cleared run on this floor, if any. Floors on the same stage have
+    /// separate records.
     pub best: Option<LevelBest>,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct LevelSelectView {
-    pub slots: [LevelSlotView; 3],
-    /// Currently selected slot index (`0..3`).
+pub struct LevelSelectView<'a> {
+    /// Every playable floor, in route order (`Theme::playable()`). A slice so
+    /// a seventh floor needs no change here.
+    pub slots: &'a [LevelSlotView],
+    /// The selected floor's index into `slots` (equivalently, into
+    /// `Theme::playable()`); the screen also matches each slot's `floor`, so
+    /// a differently ordered list still highlights the right one.
     pub selected: usize,
     /// Currently hovered mouse action.
     pub hovered: Option<LevelSelectAction>,
@@ -933,7 +1006,7 @@ fn stamp_header_pips(
     let base = ink(MUTED).bg(PLATE);
     let mut cx = put_str(buf, x, y, " LV ", 4, base);
     let mut nb = StackBuf::<8>::new();
-    let _ = write!(nb, "{}/3 ", current.number());
+    let _ = write!(nb, "{}/3 ", current.stage_number());
     cx = put_str(buf, cx, y, nb.as_str(), 4, heavy(COAT).bg(PLATE));
     for (idx, lvl) in CampaignLevel::all().into_iter().enumerate() {
         let (ch, col) = if (idx as u8) < cleared_count {
@@ -1021,6 +1094,21 @@ fn draw_boss_triumph_emblem(buf: &mut Buffer, area: Rect, level: CampaignLevel, 
                 ("  ▄█▄  ▀▀▀▀▀▀▀▀▀▀  ▄█▄  ", WARN_AMBER),
                 ("  ▐█▌  [  STOP  ]  ▐█▌  ", DANGER),
                 ("═══╧═══╲════════╱═══╧═══", level.accent()),
+            ];
+            for (i, (line, col)) in rows.iter().enumerate() {
+                if y + i as u16 >= area.height {
+                    break;
+                }
+                put_centered(buf, area, y + i as u16, line, ink(*col).bg(PLATE));
+            }
+        }
+        CampaignLevel::Trailer => {
+            // THE MAGPIE: a corvid silhouette banking away over the deck rail,
+            // the rig's marker light still swinging.
+            let rows = [
+                ("   ▄▀▄   ╲   ╱   ▄▀▄   ", WARN_AMBER),
+                ("  ▀▀▀▀▀   ╲ ╱   ▀▀▀▀▀  ", TRAIL_GOLD),
+                ("═══════════╧═══════════", level.accent()),
             ];
             for (i, (line, col)) in rows.iter().enumerate() {
                 if y + i as u16 >= area.height {
@@ -1194,14 +1282,14 @@ pub fn draw_level_complete(
     let btn_row = inner.height.saturating_sub(1);
     if y < btn_row.saturating_sub(1) {
         let mut teaser = StackBuf::<72>::new();
-        match view.level.next() {
+        match view.next {
             Some(next) => {
                 let keep_n = view.owned_upgrades.min(3);
                 if inner.width >= 54 {
                     let _ = write!(
                         teaser,
                         "Next: LEVEL {} — {} · Pack {} of {} to carry",
-                        next.number(),
+                        next.stage_number(),
                         next.name(),
                         keep_n,
                         view.owned_upgrades
@@ -1215,6 +1303,12 @@ pub fn draw_level_complete(
                         view.owned_upgrades
                     );
                 }
+            }
+            None if view.level == CampaignLevel::Trailer => {
+                let _ = write!(teaser, "The getaway is yours — the facility is behind you");
+            }
+            None if view.level.stage() < 2 => {
+                let _ = write!(teaser, "Practice clear — no pack to carry");
             }
             None => {
                 let _ = write!(teaser, "All three containment sectors breached");
@@ -1230,7 +1324,7 @@ pub fn draw_level_complete(
     }
 
     // Primary CTA button.
-    let cta_label = match view.level.next() {
+    let cta_label = match view.next {
         Some(_) => {
             if inner.width >= 38 {
                 " ▸  Enter / click   PACK 3 UPGRADES "
@@ -2252,6 +2346,12 @@ fn level_emblem(level: CampaignLevel) -> [&'static str; 3] {
             "──┤  ├──»───┤  ├──",
             "  ╰──╯      ╰──╯  ",
         ],
+        // The getaway ride: a flatbed deck at speed, cargo lashed down.
+        CampaignLevel::Trailer => [
+            "  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄  ",
+            "──╡▓▓▓▓▓▓▓▓▓▓▓▓╞──",
+            "  ╧═╧═╧═╧═╧═╧═╧═╧  ",
+        ],
     }
 }
 
@@ -2300,7 +2400,7 @@ pub fn draw_level_intro(
         card,
         cap,
         view.level,
-        view.level.number().saturating_sub(1),
+        view.level.stage_number().saturating_sub(1),
     );
 
     if inner.width < 10 || inner.height < 4 {
@@ -2318,9 +2418,19 @@ pub fn draw_level_intro(
         y += 1;
     }
 
-    // Heading: LEVEL N — SECTOR NAME.
+    // Heading: LEVEL N — SECTOR NAME. The getaway ride is not a campaign
+    // stage, so it gets its own heading instead of a false "LEVEL 4".
     let mut heading = StackBuf::<40>::new();
-    let _ = write!(heading, "LEVEL {} — {}", view.level.number(), view.level.name());
+    if view.level == CampaignLevel::Trailer {
+        let _ = write!(heading, "THE GETAWAY — {}", view.level.short_name().to_uppercase());
+    } else {
+        let _ = write!(
+            heading,
+            "LEVEL {} — {}",
+            view.level.stage_number(),
+            view.level.name()
+        );
+    }
     put_centered(buf, inner, y, heading.as_str(), heavy(COAT).bg(PLATE));
     y += if inner.height >= 15 { 2 } else { 1 };
 
@@ -2829,27 +2939,246 @@ pub fn draw_campaign_victory(
 }
 
 // ---------------------------------------------------------------------------
-// 5. Title Level Select (Three Slots: Locked / Unlocked + Best Result)
+// 5. Title Level Select (every floor, in route order: locked / open / best)
 // ---------------------------------------------------------------------------
 
-/// Draw the three-sector Campaign Level Select screen for the title screen.
+/// How many columns a sector-select grid uses at `area`.
 ///
-/// Renders 3 side-by-side sector bay cards on wide viewports (`width >= 76 && height >= 16`)
-/// and 3 stacked horizontal rows on compact viewports (`57x20`).
+/// Three on a wide terminal, two once the cards would be too narrow, one on a
+/// narrow one. The screen's keyboard `Up`/`Down` step by this many slots, so
+/// the host can move through the grid in visual order without duplicating the
+/// geometry (see `app.rs::update_sector_select`).
+pub fn level_select_cols(area: Rect) -> usize {
+    let width = area.width.min(92);
+    if width >= 72 {
+        3
+    } else if width >= 42 {
+        2
+    } else {
+        1
+    }
+}
+
+/// The short stage chip stamped on a slot's border: `S1`, `S2`, `S3` or
+/// `GETAWAY` (the getaway ride is not a campaign stage).
+fn slot_stage_chip(stage: usize) -> StackBuf<8> {
+    let mut b = StackBuf::<8>::new();
+    if stage >= crate::game::campaign::LEVEL_COUNT {
+        let _ = write!(b, "GETAWAY");
+    } else {
+        let _ = write!(b, "S{}", stage + 1);
+    }
+    b
+}
+
+/// The status line on a slot: cleared, open or locked.
+fn slot_status(slot: &LevelSlotView) -> &'static str {
+    if !slot.unlocked {
+        "× LOCKED"
+    } else if slot.best.is_some_and(|b| b.cleared) {
+        "★ CLEARED"
+    } else {
+        "◆ OPEN"
+    }
+}
+
+fn slot_status_style(slot: &LevelSlotView, bg: Color) -> Style {
+    if !slot.unlocked {
+        ink(MUTED).bg(bg)
+    } else if slot.best.is_some_and(|b| b.cleared) {
+        heavy(HEAL_MINT).bg(bg)
+    } else {
+        heavy(slot.level.accent()).bg(bg)
+    }
+}
+
+/// What a locked floor needs before it opens (its stage's reach rule).
+fn slot_unlock_hint(slot: &LevelSlotView) -> &'static str {
+    match slot.stage {
+        0 => "Locked",
+        1 => "Clear the Sewers first",
+        2 => "Clear a stage-two floor first",
+        _ => "Clear the campaign first",
+    }
+}
+
+/// Draw one floor's card into `rect`.
 ///
-/// Locked slots are rendered dimmed and do not emit click targets.
-/// [`LevelSelectAction::Start`] is emitted only when the currently selected slot is unlocked.
+/// Adapts to the grid's card height: a two-row card carries the name and a
+/// combined `BEST <score> · <time>` line, a taller one splits the best across
+/// two rows, and a tall card also shows the floor's emblem and boss codename.
+/// `rect.height < 3` falls back to a single list row (no box to draw).
+fn draw_level_slot(
+    buf: &mut Buffer,
+    rect: Rect,
+    slot: &LevelSlotView,
+    is_sel: bool,
+    border_col: Color,
+    bg: Color,
+    accent: Color,
+) {
+    if rect.width < 4 || rect.height == 0 {
+        return;
+    }
+
+    if rect.height < 3 {
+        // Too short for a box: one list row with the name and its status.
+        fill_rect(buf, rect, ' ', ink(COAT).bg(bg));
+        put_str(
+            buf,
+            rect.x,
+            rect.y,
+            if is_sel { "▸" } else { " " },
+            1,
+            heavy(accent).bg(bg),
+        );
+        let mut line = StackBuf::<48>::new();
+        let _ = write!(line, "{}  {}", slot.level.name(), slot_status(slot));
+        put_str_ellipsis(
+            buf,
+            rect.x + 1,
+            rect.y,
+            line.as_str(),
+            rect.width.saturating_sub(1),
+            if slot.unlocked {
+                heavy(COAT).bg(bg)
+            } else {
+                ink(MUTED).bg(bg)
+            },
+        );
+        return;
+    }
+
+    let chip = slot_stage_chip(slot.stage);
+    let mut tag = StackBuf::<24>::new();
+    let _ = write!(
+        tag,
+        " {}{} {} ",
+        if is_sel { "▸" } else { "·" },
+        if slot.unlocked { "" } else { "×" },
+        chip.as_str()
+    );
+    let ci = sub_box(buf, rect, border_col, bg);
+    put_str(
+        buf,
+        rect.x + 1,
+        rect.y,
+        tag.as_str(),
+        rect.width.saturating_sub(2).min(14),
+        heavy(if slot.unlocked { accent } else { EDGE }).bg(bg),
+    );
+    if ci.height == 0 || ci.width < 6 {
+        return;
+    }
+
+    let h = ci.height;
+    // Status, then the floor's name.
+    let has_status = h >= 3;
+    if has_status {
+        put_centered(buf, ci, 0, slot_status(slot), slot_status_style(slot, bg));
+    }
+    put_centered(
+        buf,
+        ci,
+        u16::from(has_status),
+        slot.level.name(),
+        if slot.unlocked {
+            heavy(COAT).bg(bg)
+        } else {
+            ink(MUTED).bg(bg)
+        },
+    );
+
+    // Tall cards keep the old bay cards' emblem and boss codename.
+    if h >= 11 && ci.width >= 19 {
+        let mut ey = 3u16;
+        for line in level_emblem(slot.level) {
+            put_centered(
+                buf,
+                ci,
+                ey,
+                line,
+                ink(if slot.unlocked { accent } else { EDGE }).bg(bg),
+            );
+            ey += 1;
+        }
+        put_centered(
+            buf,
+            ci,
+            7,
+            if slot.unlocked {
+                slot.level.boss_name()
+            } else {
+                "BOSS CLASSIFIED"
+            },
+            ink(if slot.unlocked { MUTED } else { EDGE }).bg(bg),
+        );
+    }
+
+    // The best result — or, for a locked floor, what opens it.
+    if !slot.unlocked {
+        put_centered(
+            buf,
+            ci,
+            h.saturating_sub(1),
+            slot_unlock_hint(slot),
+            ink(MUTED).bg(bg),
+        );
+        return;
+    }
+    if h >= 4 {
+        if let Some(best) = slot.best {
+            let bt = fmt_time(best.best_time_secs);
+            let mut r1 = StackBuf::<28>::new();
+            let _ = write!(r1, "BEST {}", best.score);
+            put_centered(buf, ci, h - 2, r1.as_str(), heavy(TRAIL_GOLD).bg(bg));
+            let mut r2 = StackBuf::<24>::new();
+            let _ = write!(r2, "TIME {}", bt.as_str());
+            put_centered(buf, ci, h - 1, r2.as_str(), ink(MUTED).bg(bg));
+        } else {
+            put_centered(buf, ci, h - 2, "BEST  —", ink(MUTED).bg(bg));
+            put_centered(buf, ci, h - 1, "No record yet", ink(EDGE).bg(bg));
+        }
+    } else if h >= 2 {
+        // Two content rows: the name and one combined best line.
+        if let Some(best) = slot.best {
+            let bt = fmt_time(best.best_time_secs);
+            let mut line = StackBuf::<40>::new();
+            let _ = write!(line, "BEST {} · {}", best.score, bt.as_str());
+            put_centered(buf, ci, h - 1, line.as_str(), heavy(TRAIL_GOLD).bg(bg));
+        } else {
+            put_centered(buf, ci, h - 1, "BEST  —", ink(MUTED).bg(bg));
+        }
+    }
+}
+
+/// Draw the Campaign Level Select screen: **every** playable floor as its own
+/// slot, in route order (stage one, the two stage-two alternatives, the two
+/// stage-three alternatives, then the getaway ride).
+///
+/// The layout is a grid — three columns on a wide terminal, two on a medium
+/// one, one on a narrow one (see [`level_select_cols`]) — and a window that
+/// scrolls with the selection when the slots do not all fit. Every visible slot
+/// emits [`LevelSelectAction::SelectLevel`] (locked floors included, so they
+/// can be selected and read); [`LevelSelectAction::Start`] is emitted only when
+/// the selected floor is unlocked.
 pub fn draw_level_select(
     f: &mut Frame,
     area: Rect,
-    view: &LevelSelectView,
-) -> HitList<LevelSelectAction, 8> {
+    view: &LevelSelectView<'_>,
+) -> HitList<LevelSelectAction, 16> {
     let mut hits = HitList::new();
-    if area.width < 16 || area.height < 8 {
+    if area.width < 16 || area.height < 8 || view.slots.is_empty() {
         return hits;
     }
 
-    let sel_idx = view.selected.min(2);
+    // Match by floor identity, so a caller that reorders the list still
+    // highlights (and starts) the same floor.
+    let sel_idx = view
+        .slots
+        .iter()
+        .position(|s| s.floor == view.selected)
+        .unwrap_or(0);
     let sel_slot = &view.slots[sel_idx];
     let sel_accent = if sel_slot.unlocked {
         sel_slot.level.accent()
@@ -2857,283 +3186,105 @@ pub fn draw_level_select(
         MUTED
     };
 
-    let side_by_side = area.width >= 76 && area.height >= 16;
-    let pw = if side_by_side {
-        area.width.min(92)
-    } else {
-        area.width.min(68)
-    };
-    let ph = if side_by_side {
-        area.height.min(22)
-    } else {
-        area.height.min(20)
-    };
-    let card = centered_rect(pw, ph, area);
-
+    let card = centered_rect(area.width.min(92), area.height.min(34), area);
     let cleared_n = view
         .slots
         .iter()
         .filter(|s| s.best.is_some_and(|b| b.cleared))
-        .count() as u8;
+        .count();
+
+    let mut cap = StackBuf::<48>::new();
+    if card.width >= 44 {
+        let _ = write!(cap, " CAMPAIGN   /   SELECT SECTOR ");
+    } else {
+        let _ = write!(cap, " SELECT SECTOR ");
+    }
+    let mut stamp = StackBuf::<24>::new();
+    let _ = write!(stamp, " {}/{} CLEARED ", cleared_n, view.slots.len());
 
     let buf = f.buffer_mut();
-    let cap = if card.width >= 42 {
-        " CAMPAIGN   /   SELECT SECTOR "
-    } else {
-        " CAMPAIGN SECTORS "
-    };
-    let inner = panel(buf, card, cap, None, sel_accent);
-    stamp_header_pips(buf, card, cap, sel_slot.level, cleared_n);
-
-    if inner.width < 12 || inner.height < 6 {
+    let inner = panel(buf, card, cap.as_str(), Some(stamp.as_str()), sel_accent);
+    if inner.width < 12 || inner.height < 5 {
         return hits;
     }
 
-    let show_hints = side_by_side && inner.height >= 19;
-    let btn_row = if show_hints {
-        inner.height.saturating_sub(2)
+    // Row budget: an optional subtitle (it explains the unlock rule), the grid,
+    // then the button row and the key hints.
+    let subtitle = inner.height >= 12;
+    let show_hints = inner.height >= 11;
+    let hint_row = inner.height.saturating_sub(1);
+    let btn_row = inner.height - 1 - u16::from(show_hints);
+    let list_top = u16::from(subtitle);
+    let avail_h = btn_row.saturating_sub(list_top);
+    if avail_h < 2 {
+        return hits;
+    }
+    if subtitle {
+        let line = if inner.width >= 70 {
+            "Clear any floor of a stage to open the next · Flatbed always open"
+        } else if inner.width >= 52 {
+            "Clear a stage to open the next · Flatbed always open"
+        } else {
+            "Clear a stage to open the next"
+        };
+        put_centered(buf, inner, 0, line, ink(MUTED).bg(PLATE));
+    }
+
+    // Grid geometry. Everything fits when each row can keep two lines; a
+    // taller terminal spreads the cards instead. When it does not fit, the
+    // window follows the selection (a seventh floor would scroll into view).
+    let cols = level_select_cols(area);
+    let rows_all = view.slots.len().div_ceil(cols);
+    let (visible_rows, card_h) = if rows_all as u16 * 2 <= avail_h {
+        let h = (avail_h / rows_all as u16).clamp(2, 16);
+        (rows_all.min(usize::from(avail_h / h)), h)
     } else {
-        inner.height.saturating_sub(1)
+        let h = 2u16;
+        ((avail_h / h).max(1) as usize).min(rows_all)
+    };
+    let gap = 1u16;
+    let grid_w = inner.width.saturating_sub(2);
+    let gap_total = gap * (cols as u16 - 1);
+    let card_w = (grid_w.saturating_sub(gap_total) / cols as u16)
+        .max(8)
+        .min(grid_w);
+    let used_w = card_w * cols as u16 + gap_total;
+    let grid_x = inner.x + 1 + grid_w.saturating_sub(used_w) / 2;
+    let sel_row = sel_idx / cols;
+    let first_row = if visible_rows >= rows_all {
+        0
+    } else {
+        sel_row
+            .saturating_sub(visible_rows - 1)
+            .min(rows_all - visible_rows)
     };
 
-    if side_by_side {
-        // Subtitle strip.
-        put_centered(
-            buf,
-            inner,
-            0,
-            "Three sectors to the surface. Clear a sector to unlock the next.",
-            ink(MUTED).bg(PLATE),
+    for (i, slot) in view.slots.iter().enumerate() {
+        let row = i / cols;
+        if row < first_row || row >= first_row + visible_rows {
+            continue;
+        }
+        let col = i % cols;
+        let sx = grid_x + col as u16 * (card_w + gap);
+        let sy = inner.y + list_top + (row - first_row) as u16 * card_h;
+        let srect = Rect::new(sx, sy, card_w, card_h);
+        let is_sel = i == sel_idx;
+        let is_hov = view.hovered == Some(LevelSelectAction::SelectLevel(slot.floor));
+        let accent = slot.level.accent();
+        let (border_col, bg) = if !slot.unlocked {
+            (TRACK, PLATE_DIM)
+        } else if is_hov {
+            (TAIL, PLATE_HILITE)
+        } else if is_sel {
+            (accent, PLATE_SUB)
+        } else {
+            (EDGE, PLATE)
+        };
+        draw_level_slot(buf, srect, slot, is_sel, border_col, bg, accent);
+        hits.push(
+            clamp_rect(srect, area),
+            LevelSelectAction::SelectLevel(slot.floor),
         );
-
-        // 3 horizontal bay cards.
-        let top_y = inner.y + 2;
-        let card_h = inner.height.saturating_sub(5).clamp(7, 14);
-        let gap = 2u16;
-        let avail_w = inner.width.saturating_sub(4);
-        let slot_w = avail_w.saturating_sub(gap * 2) / 3;
-        let start_x = inner.x + 2 + (avail_w - (slot_w * 3 + gap * 2)) / 2;
-
-        for (i, slot) in view.slots.iter().enumerate() {
-            let sx = start_x + i as u16 * (slot_w + gap);
-            let srect = Rect::new(sx, top_y, slot_w, card_h);
-            let is_sel = i == sel_idx;
-            let is_hov = view.hovered == Some(LevelSelectAction::SelectLevel(slot.level));
-            let accent = slot.level.accent();
-
-            let (border_col, bg) = if !slot.unlocked {
-                (TRACK, PLATE_DIM)
-            } else if is_hov {
-                (TAIL, PLATE_HILITE)
-            } else if is_sel {
-                (accent, PLATE_SUB)
-            } else {
-                (EDGE, PLATE)
-            };
-
-            let ci = sub_box(buf, srect, border_col, bg);
-
-            // Top-left sector tag on box border.
-            let mut tag = StackBuf::<16>::new();
-            let _ = write!(
-                tag,
-                " {} 0{} ",
-                if is_sel && slot.unlocked { "▸" } else { "·" },
-                slot.level.number()
-            );
-            put_str(
-                buf,
-                srect.x + 2,
-                srect.y,
-                tag.as_str(),
-                10,
-                heavy(if slot.unlocked { accent } else { EDGE }).bg(bg),
-            );
-
-            // Status stamp (CLEARED / OPEN / LOCKED).
-            let (status_txt, status_style) = if !slot.unlocked {
-                ("× LOCKED", ink(MUTED).bg(bg))
-            } else if slot.best.is_some_and(|b| b.cleared) {
-                ("★ CLEARED", heavy(HEAL_MINT).bg(bg))
-            } else {
-                ("◆ OPEN", heavy(accent).bg(bg))
-            };
-            put_centered(buf, ci, 0, status_txt, status_style);
-
-            // Sector name.
-            put_centered(
-                buf,
-                ci,
-                2,
-                slot.level.name(),
-                if slot.unlocked {
-                    heavy(COAT).bg(bg)
-                } else {
-                    ink(MUTED).bg(bg)
-                },
-            );
-
-            // Mini sector emblem when card is tall enough.
-            let mut cy: u16 = 4;
-            if ci.height >= 10 && ci.width >= 19 {
-                for line in level_emblem(slot.level) {
-                    put_centered(
-                        buf,
-                        ci,
-                        cy,
-                        line,
-                        ink(if slot.unlocked { accent } else { EDGE }).bg(bg),
-                    );
-                    cy += 1;
-                }
-                cy += 1;
-            }
-
-            // Boss codename.
-            if cy < ci.height.saturating_sub(2) {
-                let boss_line = if slot.unlocked {
-                    slot.level.boss_name()
-                } else {
-                    "BOSS CLASSIFIED"
-                };
-                put_centered(
-                    buf,
-                    ci,
-                    cy,
-                    boss_line,
-                    ink(if slot.unlocked { MUTED } else { EDGE }).bg(bg),
-                );
-                cy += 1;
-            }
-
-            // Best result or unlock requirement.
-            let best_y = ci.height.saturating_sub(2);
-            if best_y >= cy {
-                hline(buf, ci.x + 1, ci.y + best_y.saturating_sub(1), ci.width.saturating_sub(2), '─', ink(TRACK).bg(bg));
-            }
-            if !slot.unlocked {
-                let req = match slot.level {
-                    CampaignLevel::Sewer => "Locked",
-                    CampaignLevel::Kitchen => "Clear Sewer first",
-                    CampaignLevel::Lab => "Clear Kitchen first",
-                    CampaignLevel::Laundry => "Clear Sewer first",
-                    CampaignLevel::Printworks => "Clear Kitchen first",
-                };
-                put_centered(buf, ci, best_y, req, ink(MUTED).bg(bg));
-            } else if let Some(best) = slot.best {
-                let bt = fmt_time(best.best_time_secs);
-                let mut r1 = StackBuf::<28>::new();
-                let _ = write!(r1, "BEST {}", best.score);
-                put_centered(buf, ci, best_y, r1.as_str(), heavy(TRAIL_GOLD).bg(bg));
-                if best_y + 1 < ci.height {
-                    let mut r2 = StackBuf::<24>::new();
-                    let _ = write!(r2, "TIME {}", bt.as_str());
-                    put_centered(buf, ci, best_y + 1, r2.as_str(), ink(MUTED).bg(bg));
-                }
-            } else {
-                put_centered(buf, ci, best_y, "BEST  —", ink(MUTED).bg(bg));
-                if best_y + 1 < ci.height {
-                    put_centered(buf, ci, best_y + 1, "No record yet", ink(EDGE).bg(bg));
-                }
-            }
-
-            if slot.unlocked {
-                hits.push(clamp_rect(srect, area), LevelSelectAction::SelectLevel(slot.level));
-            }
-        }
-    } else {
-        // ---- COMPACT STACKED ROWS (57x20) ----
-        let row_h: u16 = ((inner.height.saturating_sub(3)) / 3).clamp(2, 4);
-        let start_y = inner.y + u16::from(inner.height >= 16);
-
-        for (i, slot) in view.slots.iter().enumerate() {
-            let ry = start_y + i as u16 * row_h;
-            if ry + row_h > inner.y + btn_row {
-                break;
-            }
-            let rrect = Rect::new(inner.x + 1, ry, inner.width.saturating_sub(2), row_h);
-            let is_sel = i == sel_idx;
-            let is_hov = view.hovered == Some(LevelSelectAction::SelectLevel(slot.level));
-            let accent = slot.level.accent();
-
-            let (border_col, bg) = if !slot.unlocked {
-                (TRACK, PLATE_DIM)
-            } else if is_hov {
-                (TAIL, PLATE_HILITE)
-            } else if is_sel {
-                (accent, PLATE_SUB)
-            } else {
-                (EDGE, PLATE)
-            };
-
-            let ci = if row_h >= 3 {
-                sub_box(buf, rrect, border_col, bg)
-            } else {
-                fill_rect(buf, rrect, ' ', ink(COAT).bg(bg));
-                rrect
-            };
-
-            // Line 1: cursor + number + name + status.
-            let mut cx = ci.x + 1;
-            let cursor_s = if is_sel && slot.unlocked { "▸ " } else { "  " };
-            cx = put_str(buf, cx, ci.y, cursor_s, 2, heavy(accent).bg(bg));
-            let mut nb = StackBuf::<24>::new();
-            let _ = write!(nb, "0{} {}", slot.level.number(), slot.level.name());
-            cx = put_str(
-                buf,
-                cx,
-                ci.y,
-                nb.as_str(),
-                18,
-                if slot.unlocked { heavy(COAT).bg(bg) } else { ink(EDGE).bg(bg) },
-            );
-
-            let (st, st_style) = if !slot.unlocked {
-                ("× LOCKED", ink(MUTED).bg(bg))
-            } else if slot.best.is_some_and(|b| b.cleared) {
-                ("★ CLEARED", heavy(HEAL_MINT).bg(bg))
-            } else {
-                ("◆ OPEN", heavy(accent).bg(bg))
-            };
-            let st_w = st.chars().count() as u16;
-            if ci.right() > cx + st_w + 1 {
-                put_str(buf, ci.right().saturating_sub(st_w + 1), ci.y, st, st_w, st_style);
-            }
-
-            // Line 2 (if height >= 2 inside box): best result or unlock hint.
-            if ci.height >= 2 {
-                let y2 = ci.y + 1;
-                let mut info = StackBuf::<56>::new();
-                if !slot.unlocked {
-                    let req = match slot.level {
-                        CampaignLevel::Sewer => "Locked",
-                        CampaignLevel::Kitchen => "Clear THE SEWERS to unlock",
-                        CampaignLevel::Lab => "Clear THE KITCHENS to unlock",
-                        CampaignLevel::Laundry => "Clear THE SEWERS to unlock",
-                        CampaignLevel::Printworks => "Clear THE KITCHENS to unlock",
-                    };
-                    let _ = write!(info, "  {}", req);
-                    put_str_ellipsis(buf, ci.x + 1, y2, info.as_str(), ci.width.saturating_sub(2), ink(MUTED).bg(bg));
-                } else if let Some(best) = slot.best {
-                    let bt = fmt_time(best.best_time_secs);
-                    let _ = write!(
-                        info,
-                        "  BEST {}  ·  {}  ·  {}",
-                        best.score,
-                        bt.as_str(),
-                        slot.level.boss_name()
-                    );
-                    put_str_ellipsis(buf, ci.x + 1, y2, info.as_str(), ci.width.saturating_sub(2), ink(MUTED).bg(bg));
-                } else {
-                    let _ = write!(info, "  BEST —  ·  Boss: {}", slot.level.boss_name());
-                    put_str_ellipsis(buf, ci.x + 1, y2, info.as_str(), ci.width.saturating_sub(2), ink(MUTED).bg(bg));
-                }
-            }
-
-            if slot.unlocked {
-                hits.push(clamp_rect(rrect, area), LevelSelectAction::SelectLevel(slot.level));
-            }
-        }
     }
 
     // Bottom action bar: Start + Back.
@@ -3146,10 +3297,10 @@ pub fn draw_level_select(
         " ▸ Enter START "
     };
     let back_lbl = " Esc  back ";
-    let gap = 3u16;
+    let btn_gap = 3u16;
     let sw = start_lbl.chars().count() as u16;
     let bw = back_lbl.chars().count() as u16;
-    let total = (sw + gap + bw).min(inner.width);
+    let total = (sw + btn_gap + bw).min(inner.width);
     let bx = inner.x + (inner.width - total) / 2;
 
     let start_state = if !can_start {
@@ -3172,7 +3323,7 @@ pub fn draw_level_select(
         hits.push(start_r, LevelSelectAction::Start);
     }
 
-    let back_x = bx + sw + gap;
+    let back_x = bx + sw + btn_gap;
     if back_x < inner.right() {
         let back_state = if view.hovered == Some(LevelSelectAction::Back) {
             ButtonState::Hovered
@@ -3195,8 +3346,8 @@ pub fn draw_level_select(
         put_centered(
             buf,
             inner,
-            inner.height.saturating_sub(1),
-            "←→ / click select sector   ·   Enter begin   ·   Esc back",
+            hint_row,
+            "Arrows / click select  ·  Enter begin  ·  Esc back",
             ink(MUTED).bg(PLATE),
         );
     }
@@ -3237,7 +3388,7 @@ pub fn draw_campaign_pips(
     if r.width >= 14 {
         cx = put_str(buf, cx, y, "LV ", 3, ink(MUTED).bg(bg));
         let mut nb = StackBuf::<8>::new();
-        let _ = write!(nb, "{}/3  ", view.current.number());
+        let _ = write!(nb, "{}/3  ", view.current.stage_number());
         cx = put_str(buf, cx, y, nb.as_str(), 5, heavy(COAT).bg(bg));
         cx = draw_three_pips(buf, cx, y, r.right(), view.current, view.cleared_count, true, bg);
         if r.width >= 24 {
@@ -3247,7 +3398,7 @@ pub fn draw_campaign_pips(
         }
     } else if r.width >= 9 {
         let mut nb = StackBuf::<8>::new();
-        let _ = write!(nb, "{}/3 ", view.current.number());
+        let _ = write!(nb, "{}/3 ", view.current.stage_number());
         cx = put_str(buf, cx, y, nb.as_str(), 4, heavy(COAT).bg(bg));
         cx = draw_three_pips(buf, cx, y, r.right(), view.current, view.cleared_count, false, bg);
     } else if r.width >= 5 {
@@ -3466,9 +3617,18 @@ mod tests {
         }
     }
 
+    /// Every floor the player can clear has a complete plate: the three
+    /// stages, both side routes and the getaway ride.
+    fn all_floor_plates() -> Vec<CampaignLevel> {
+        Theme::playable()
+            .into_iter()
+            .map(CampaignLevel::from_theme)
+            .collect()
+    }
+
     #[test]
     fn level_complete_all_bosses_and_sizes() {
-        for lvl in CampaignLevel::all() {
+        for lvl in all_floor_plates() {
             let view = LevelCompleteView {
                 level: lvl,
                 time_secs: 252.0,
@@ -3478,6 +3638,7 @@ mod tests {
                 level_score: 3120,
                 player_level: 9,
                 owned_upgrades: 11,
+                next: lvl.next(),
                 custom_triumph: None,
                 hovered: None,
             };
@@ -3787,74 +3948,206 @@ mod tests {
         }
     }
 
+    /// Six sample slots, one per playable floor, in the art's route order:
+    /// the Sewer cleared, the Kitchen open, the side routes and stage three
+    /// locked, the Flatbed always open.
+    fn sample_slots() -> Vec<LevelSlotView> {
+        Theme::playable()
+            .into_iter()
+            .enumerate()
+            .map(|(floor, theme)| {
+                let level = CampaignLevel::from_theme(theme);
+                let stage = if theme.is_trailer() {
+                    crate::game::campaign::LEVEL_COUNT
+                } else {
+                    level.stage()
+                };
+                LevelSlotView {
+                    floor,
+                    level,
+                    stage,
+                    unlocked: theme == Theme::Sewer
+                        || theme == Theme::Kitchen
+                        || theme == Theme::Trailer,
+                    best: match theme {
+                        Theme::Sewer => Some(LevelBest {
+                            score: 6420,
+                            best_time_secs: 252.0,
+                            cleared: true,
+                        }),
+                        Theme::Kitchen => Some(LevelBest {
+                            score: 4180,
+                            best_time_secs: 198.0,
+                            cleared: false,
+                        }),
+                        _ => None,
+                    },
+                }
+            })
+            .collect()
+    }
+
+    fn draw_select_hits(
+        view: &LevelSelectView<'_>,
+        w: u16,
+        h: u16,
+    ) -> (Terminal<TestBackend>, HitList<LevelSelectAction, 16>) {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let mut hits = HitList::new();
+        term.draw(|f| hits = draw_level_select(f, f.area(), view))
+            .unwrap();
+        (term, hits)
+    }
+
+    /// One slot per playable floor: the count and the names come from
+    /// `Theme::playable()`, so a seventh floor would appear without changing
+    /// the screen.
+    #[test]
+    fn level_select_lists_one_slot_per_playable_floor() {
+        let slots = sample_slots();
+        assert_eq!(slots.len(), Theme::playable().len());
+        for (i, slot) in slots.iter().enumerate() {
+            assert_eq!(slot.floor, i, "slots keep the sector row's order");
+            assert_eq!(slot.level, CampaignLevel::from_theme(Theme::playable()[i]));
+        }
+        // The floors on a shared campaign stage are separate slots with their
+        // own names (the old three-slot screen showed the Kitchen twice).
+        let names: Vec<&str> = slots.iter().map(|s| s.level.short_name()).collect();
+        assert_eq!(
+            names,
+            vec!["Sewer", "Kitchen", "Laundry", "Lab", "Printworks", "Flatbed"]
+        );
+        assert_eq!(
+            slots[2].stage, slots[1].stage,
+            "the Kitchen and the Laundry are both stage two"
+        );
+        assert_eq!(
+            slots[5].stage,
+            crate::game::campaign::LEVEL_COUNT,
+            "the getaway ride is not a campaign stage"
+        );
+        assert!(slots[5].unlocked, "the Flatbed is always open");
+    }
+
     #[test]
     fn level_select_locked_unlocked_and_all_sizes() {
+        let slots = sample_slots();
         let view = LevelSelectView {
-            slots: [
-                LevelSlotView {
-                    level: CampaignLevel::Sewer,
-                    unlocked: true,
-                    best: Some(LevelBest {
-                        score: 6420,
-                        best_time_secs: 252.0,
-                        cleared: true,
-                    }),
-                },
-                LevelSlotView {
-                    level: CampaignLevel::Kitchen,
-                    unlocked: true,
-                    best: Some(LevelBest {
-                        score: 4180,
-                        best_time_secs: 198.0,
-                        cleared: false,
-                    }),
-                },
-                LevelSlotView {
-                    level: CampaignLevel::Lab,
-                    unlocked: false,
-                    best: None,
-                },
-            ],
+            slots: &slots,
             selected: 1,
-            hovered: Some(LevelSelectAction::SelectLevel(CampaignLevel::Sewer)),
+            hovered: Some(LevelSelectAction::SelectLevel(0)),
         };
 
         for &(w, h) in &SIZES {
-            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-            let mut hits = HitList::new();
-            term.draw(|f| hits = draw_level_select(f, f.area(), &view))
-                .unwrap();
+            let (term, hits) = draw_select_hits(&view, w, h);
             assert_single_cell_glyphs(&term);
             assert_hits_inside_drawn_controls(&term, &hits);
-            assert!(hits.find(LevelSelectAction::SelectLevel(CampaignLevel::Sewer)).is_some());
-            assert!(hits.find(LevelSelectAction::SelectLevel(CampaignLevel::Kitchen)).is_some());
-            assert!(
-                hits.find(LevelSelectAction::SelectLevel(CampaignLevel::Lab)).is_none(),
-                "locked slot must not emit click target"
-            );
+            // Every floor is a click target — locked ones included, so they can
+            // be selected and read — and each target carries its own floor id.
+            for slot in &slots {
+                assert!(
+                    hits.find(LevelSelectAction::SelectLevel(slot.floor)).is_some(),
+                    "floor {} ({:?}) has no click target at {w}x{h}",
+                    slot.floor,
+                    slot.level
+                );
+            }
             assert!(hits.find(LevelSelectAction::Start).is_some());
             assert!(hits.find(LevelSelectAction::Back).is_some());
             let txt = buffer_text(&term);
-            assert!(txt.contains("CLEARED"));
-            assert!(txt.contains("LOCKED"));
-            assert!(txt.contains("6420"));
+            assert!(txt.contains("CLEARED"), "no cleared status at {w}x{h}");
+            assert!(txt.contains("LOCKED"), "no locked status at {w}x{h}");
+            assert!(txt.contains("6420"), "no best score at {w}x{h}");
+            assert!(txt.contains("GETAWAY"), "no getaway chip at {w}x{h}");
+            // Every floor is named on the screen: six slots, not three.
+            for slot in &slots {
+                assert!(
+                    txt.contains(slot.level.name()),
+                    "{} is missing at {w}x{h}:\n{txt}",
+                    slot.level.name()
+                );
+            }
         }
 
-        // If selected points to a locked slot, Start must not be emitted.
-        let locked_sel = LevelSelectView { selected: 2, ..view };
-        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        let mut hits = HitList::new();
-        term.draw(|f| hits = draw_level_select(f, f.area(), &locked_sel))
-            .unwrap();
-        assert!(hits.find(LevelSelectAction::Start).is_none());
+        // A locked selection cannot start; an unlocked one can.
+        let locked = LevelSelectView {
+            slots: &slots,
+            selected: 3, // the Lab, locked in the sample
+            hovered: None,
+        };
+        let (_, hits) = draw_select_hits(&locked, 80, 24);
+        assert!(
+            hits.find(LevelSelectAction::Start).is_none(),
+            "a locked floor must not offer Start"
+        );
+        let open = LevelSelectView {
+            slots: &slots,
+            selected: 0,
+            hovered: None,
+        };
+        let (_, hits) = draw_select_hits(&open, 80, 24);
+        assert!(hits.find(LevelSelectAction::Start).is_some());
 
         for &(w, h) in &TINY_SIZES {
-            let mut small = Terminal::new(TestBackend::new(w, h)).unwrap();
-            small
-                .draw(|f| {
-                    let _ = draw_level_select(f, f.area(), &view);
-                })
-                .unwrap();
+            let _ = draw_select_hits(&view, w.max(1), h.max(1));
+        }
+    }
+
+    /// The grid's column count is what the host's `Up`/`Down` step by, so it
+    /// is part of the interface.
+    #[test]
+    fn level_select_grid_columns_follow_the_width() {
+        assert_eq!(level_select_cols(Rect::new(0, 0, 120, 40)), 3);
+        assert_eq!(level_select_cols(Rect::new(0, 0, 80, 24)), 3);
+        assert_eq!(level_select_cols(Rect::new(0, 0, 57, 20)), 2);
+        assert_eq!(level_select_cols(Rect::new(0, 0, 30, 12)), 1);
+    }
+
+    /// When the slots do not fit, the window follows the selection: the
+    /// selected floor is always on screen (and clickable), so a seventh floor
+    /// would stay reachable at 57x20.
+    #[test]
+    fn level_select_scrolls_the_window_to_the_selection() {
+        let slots = sample_slots();
+        let last = slots.len() - 1;
+        let view = LevelSelectView {
+            slots: &slots,
+            selected: last,
+            hovered: None,
+        };
+        // 40x10: one column, three visible rows of a six-row list.
+        let (term, hits) = draw_select_hits(&view, 40, 10);
+        let txt = buffer_text(&term);
+        assert!(
+            txt.contains(slots[last].level.name()),
+            "the selected floor scrolled out of view:\n{txt}"
+        );
+        assert!(
+            !txt.contains(slots[0].level.name()),
+            "the window did not scroll at all:\n{txt}"
+        );
+        assert!(
+            hits.find(LevelSelectAction::SelectLevel(last)).is_some(),
+            "the scrolled-in floor must be clickable"
+        );
+        assert!(hits.find(LevelSelectAction::Start).is_some());
+    }
+
+    /// The plates and the boss bar call every fight the same thing, the
+    /// getaway ride's included.
+    #[test]
+    fn every_floor_plate_names_the_same_boss_as_the_bar() {
+        for theme in Theme::playable() {
+            let plate = CampaignLevel::from_theme(theme);
+            assert_eq!(
+                crate::render::hud::boss_codename(theme).0,
+                plate.boss_name(),
+                "{theme:?}: the boss bar and the campaign plate disagree"
+            );
+            assert!(
+                !plate.name().is_empty() && !plate.boss_name().is_empty(),
+                "{theme:?}: a plate is missing its copy"
+            );
         }
     }
 
@@ -3967,35 +4260,7 @@ mod tests {
             hovered: None,
         };
 
-        let select = LevelSelectView {
-            slots: [
-                LevelSlotView {
-                    level: CampaignLevel::Sewer,
-                    unlocked: true,
-                    best: Some(LevelBest {
-                        score: 6420,
-                        best_time_secs: 252.0,
-                        cleared: true,
-                    }),
-                },
-                LevelSlotView {
-                    level: CampaignLevel::Kitchen,
-                    unlocked: true,
-                    best: Some(LevelBest {
-                        score: 4180,
-                        best_time_secs: 198.0,
-                        cleared: false,
-                    }),
-                },
-                LevelSlotView {
-                    level: CampaignLevel::Lab,
-                    unlocked: false,
-                    best: None,
-                },
-            ],
-            selected: 1,
-            hovered: None,
-        };
+        let select_slots = sample_slots();
 
         for &(w, h) in &SIZES {
             let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -4014,6 +4279,7 @@ mod tests {
                     level_score: 3120,
                     player_level: 9,
                     owned_upgrades: 13,
+                    next: lvl.next(),
                     custom_triumph: None,
                     hovered: None,
                 };
@@ -4077,12 +4343,27 @@ mod tests {
             .unwrap();
             dump_terminal(dir, "victory", &term);
 
-            // Level select.
-            term.draw(|f| {
-                let _ = draw_level_select(f, f.area(), &select);
-            })
-            .unwrap();
-            dump_terminal(dir, "select", &term);
+            // Level select, once per floor selected (six captures: every
+            // slot's own highlight, name, best and unlock state).
+            for selected in 0..select_slots.len() {
+                let select = LevelSelectView {
+                    slots: &select_slots,
+                    selected,
+                    hovered: None,
+                };
+                term.draw(|f| {
+                    let _ = draw_level_select(f, f.area(), &select);
+                })
+                .unwrap();
+                dump_terminal(
+                    dir,
+                    &format!(
+                        "select-{selected}-{}",
+                        select_slots[selected].level.short_name().to_lowercase()
+                    ),
+                    &term,
+                );
+            }
         }
 
         // Compact pips showcase strip.

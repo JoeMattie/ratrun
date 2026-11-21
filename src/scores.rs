@@ -7,16 +7,22 @@
 //!   the campaign. Files written by an older build have no campaign fields;
 //!   they load as "reached level 1, campaign not won" (see
 //!   [`ScoreEntry::campaign_level`]).
-//! * `progress` — the per-level bests and clear flags behind the title's
-//!   sector-select. A level unlocks once the previous one has been cleared in
-//!   any run, so the flags must persist independently of the top-ten entries
-//!   (a strong table can drop an old entry, but it never relocks a level).
+//! * `progress` — the **per-floor** bests and clear flags behind the title's
+//!   sector-select. A campaign stage unlocks once the previous stage has been
+//!   cleared on any of its floors, so the flags must persist independently of
+//!   the top-ten entries (a strong table can drop an old entry, but it never
+//!   relocks a floor). Files written before floors were tracked separately
+//!   store one record per campaign *stage*; they migrate to floors on load
+//!   (see [`CampaignProgress::migrate_legacy`]).
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
 use crate::audio;
 use crate::config;
-use crate::game::campaign::LEVEL_COUNT;
+use crate::game::campaign::{self, LEVEL_COUNT};
+use crate::game::level::Theme;
 use crate::render::cursor::CursorSetting;
 use crate::render::lighting::LightingMode;
 use crate::render::minimap::MinimapSize;
@@ -26,10 +32,6 @@ pub const MAX_ENTRIES: usize = 10;
 /// The campaign level an old score file's entries belong to.
 fn default_campaign_level() -> u8 {
     1
-}
-
-fn default_level_bests() -> [LevelBestEntry; LEVEL_COUNT] {
-    [LevelBestEntry::default(); LEVEL_COUNT]
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -57,38 +59,94 @@ pub struct ScoreEntry {
     pub campaign_won: bool,
 }
 
-/// Best results recorded for one campaign level (level-select cards).
+/// Best results recorded for one **floor** (sector-select cards and the bests
+/// the title reads).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LevelBestEntry {
-    /// Has this level been completed in any run?
+    /// Has this floor been completed in any run?
     #[serde(default)]
     pub cleared: bool,
-    /// Highest score earned on this level alone.
+    /// Highest score earned on this floor alone.
     #[serde(default)]
     pub score: u32,
-    /// Fastest completion of this level, in seconds (`0.0` = none yet).
+    /// Fastest completion of this floor, in seconds (`0.0` = none yet).
     #[serde(default)]
     pub time: f32,
 }
 
-/// Persisted per-level progress: clear flags + best results.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CampaignProgress {
-    #[serde(default = "default_level_bests")]
-    pub levels: [LevelBestEntry; LEVEL_COUNT],
-}
-
-impl Default for CampaignProgress {
-    fn default() -> Self {
-        CampaignProgress {
-            levels: default_level_bests(),
+impl LevelBestEntry {
+    /// Fold `other`'s record into this one: any clear counts, the higher score
+    /// wins, the faster positive time wins. Used when a legacy stage record is
+    /// migrated onto the floor it belonged to.
+    fn merge(&mut self, other: LevelBestEntry) {
+        self.cleared |= other.cleared;
+        self.score = self.score.max(other.score);
+        if other.time > 0.0 && (self.time <= 0.0 || other.time < self.time) {
+            self.time = other.time;
         }
+    }
+
+    /// Does this record hold anything at all? (An all-default legacy slot is
+    /// not migrated, so an old file does not fabricate floor records.)
+    fn is_empty(&self) -> bool {
+        !self.cleared && self.score == 0 && self.time <= 0.0
     }
 }
 
+/// Persisted per-floor progress: clear flags + best results.
+///
+/// Keyed by [`Theme::name`] rather than by campaign stage: the Kitchen and the
+/// Laundry are both stage two, and each keeps its own best. Unknown keys in a
+/// hand-edited file are preserved (they round-trip) but never read.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CampaignProgress {
+    /// Per-floor records, keyed by the floor's [`Theme::name`].
+    #[serde(default)]
+    pub floors: BTreeMap<String, LevelBestEntry>,
+    /// Stage-keyed records written by the three-stage build. Loaded into
+    /// [`Self::floors`] by [`Self::migrate_legacy`] and never written back
+    /// (`skip_serializing_if`), so a migrated file is a floors-only file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub levels: Option<[LevelBestEntry; LEVEL_COUNT]>,
+}
+
 impl CampaignProgress {
-    fn get(&self, level: usize) -> Option<&LevelBestEntry> {
-        self.levels.get(level)
+    /// The record stored for `theme`, cleared or not.
+    fn get(&self, theme: Theme) -> Option<&LevelBestEntry> {
+        self.floors.get(theme.name())
+    }
+
+    /// Record a completion on `theme`, keeping the highest score and the
+    /// fastest positive time.
+    fn record(&mut self, theme: Theme, score: u32, time: f32) {
+        let entry = self.floors.entry(theme.name().to_string()).or_default();
+        let fresh = LevelBestEntry {
+            cleared: true,
+            score,
+            time,
+        };
+        entry.merge(fresh);
+        entry.cleared = true;
+    }
+
+    /// Move the old stage-keyed `levels` array onto the floors it belonged to:
+    /// record 0 was the Sewer, 1 the Kitchen, 2 the Lab (the original route;
+    /// `campaign::level_theme` is that same mapping). Idempotent: the legacy
+    /// array is taken, so a second call does nothing.
+    fn migrate_legacy(&mut self) {
+        let Some(levels) = self.levels.take() else {
+            return;
+        };
+        for (index, entry) in levels.iter().enumerate() {
+            if entry.is_empty() {
+                continue;
+            }
+            let theme = campaign::level_theme(index);
+            self.floors
+                .entry(theme.name().to_string())
+                .or_default()
+                .merge(*entry);
+        }
     }
 }
 
@@ -277,6 +335,10 @@ impl ScoreTable {
     }
 
     fn normalize(&mut self) {
+        // A file written before floors were tracked separately carries one
+        // record per campaign stage: fold those onto the floors they belonged
+        // to (Sewer, Kitchen, Lab) before anything reads a record.
+        self.progress.migrate_legacy();
         self.entries.sort_by_key(|e| std::cmp::Reverse(e.score));
         self.entries.truncate(MAX_ENTRIES);
         self.music_volume = audio::snap_percent(self.music_volume);
@@ -323,44 +385,78 @@ impl ScoreTable {
         score > self.best()
     }
 
-    // ---- Campaign progress (sector select) ------------------------------
+    // ---- Floor progress (sector select) ---------------------------------
 
-    /// Has campaign level `level` (0-based) been cleared in any run?
-    pub fn level_cleared(&self, level: usize) -> bool {
-        self.progress.get(level).is_some_and(|l| l.cleared)
+    /// Has `theme` been cleared in any run?
+    pub fn floor_cleared(&self, theme: Theme) -> bool {
+        self.progress.get(theme).is_some_and(|l| l.cleared)
     }
 
-    /// Is level `level` (0-based) selectable? Level 1 is always open; later
-    /// levels unlock once the previous one has been cleared in any run.
-    pub fn level_unlocked(&self, level: usize) -> bool {
-        if level == 0 {
+    /// Is `theme` selectable?
+    ///
+    /// The rule: **a floor unlocks when its campaign stage is reachable.**
+    /// Stage one is always open; a later stage is reachable once every earlier
+    /// stage has been cleared on at least one of its floors (so clearing the
+    /// Laundry opens stage three exactly like clearing the Kitchen does). The
+    /// getaway ride is a bonus practice floor and is always open (it always
+    /// was).
+    pub fn floor_unlocked(&self, theme: Theme) -> bool {
+        if theme == campaign::getaway_theme() {
             return true;
         }
-        level < LEVEL_COUNT && self.level_cleared(level - 1)
+        let stage = campaign::theme_stage(theme);
+        (0..stage).all(|earlier| {
+            campaign::Route::options(earlier)
+                .iter()
+                .any(|floor| self.floor_cleared(*floor))
+        })
     }
 
-    /// Recorded bests for a level, if it has ever been cleared.
+    /// Recorded bests for `theme`, if it has ever been cleared.
+    pub fn floor_best(&self, theme: Theme) -> Option<LevelBestEntry> {
+        self.progress.get(theme).filter(|l| l.cleared).copied()
+    }
+
+    /// Record a floor completion: flag it cleared, keep the highest floor score
+    /// and the fastest time. Floors are independent, so the Laundry's best can
+    /// never overwrite the Kitchen's.
+    pub fn record_floor(&mut self, theme: Theme, score: u32, time: f32) {
+        self.progress.record(theme, score, time);
+    }
+
+    // ---- Legacy stage-indexed view --------------------------------------
+
+    /// Has the original route's stage `level` (0 Sewer, 1 Kitchen, 2 Lab) been
+    /// cleared?
+    ///
+    /// Kept for older call sites: a stage is not a floor, so anything the
+    /// sector select reads should use [`Self::floor_cleared`].
+    pub fn level_cleared(&self, level: usize) -> bool {
+        level < LEVEL_COUNT && self.floor_cleared(campaign::level_theme(level))
+    }
+
+    /// Is the original route's stage `level` selectable? Out-of-range stages
+    /// are never unlocked.
+    pub fn level_unlocked(&self, level: usize) -> bool {
+        level < LEVEL_COUNT && self.floor_unlocked(campaign::level_theme(level))
+    }
+
+    /// Recorded bests for the original route's stage `level`, if cleared.
     pub fn level_best(&self, level: usize) -> Option<LevelBestEntry> {
-        self.progress
-            .get(level)
-            .filter(|l| l.cleared)
-            .copied()
+        if level >= LEVEL_COUNT {
+            return None;
+        }
+        self.floor_best(campaign::level_theme(level))
     }
 
-    /// Record a level completion: flag it cleared, keep the highest level score
-    /// and the fastest time. Out-of-range levels are ignored so a corrupt file
-    /// cannot index past the campaign.
+    /// Record a completion against the original route's stage `level`.
+    /// Out-of-range stages are ignored so a corrupt file cannot index past the
+    /// campaign.
     pub fn record_level(&mut self, level: usize, score: u32, time: f32) {
-        let Some(entry) = self.progress.levels.get_mut(level) else {
+        if level >= LEVEL_COUNT {
             return;
-        };
-        entry.cleared = true;
-        if score > entry.score {
-            entry.score = score;
         }
-        if time > 0.0 && (entry.time <= 0.0 || time < entry.time) {
-            entry.time = time;
-        }
+        self.record_floor(campaign::level_theme(level), score, time);
     }
 }
 
@@ -472,25 +568,33 @@ mod tests {
             assert!(!entry.campaign_won, "no old entry won a campaign");
         }
         assert_eq!(t.entries[0].score, 900);
-        assert_eq!(t.progress.levels[0], LevelBestEntry::default());
-        assert!(t.level_unlocked(0), "level 1 is always open");
-        assert!(!t.level_unlocked(1), "an old file unlocks nothing later");
-        assert!(t.level_best(0).is_none());
+        assert!(t.floor_best(Theme::Sewer).is_none());
+        assert!(t.floor_unlocked(Theme::Sewer), "stage one is always open");
+        assert!(!t.floor_unlocked(Theme::Kitchen), "an old file unlocks nothing later");
     }
 
     #[test]
-    fn level_progress_unlocks_and_round_trips() {
+    fn floor_progress_unlocks_and_round_trips() {
         let mut t = ScoreTable::default();
-        assert!(t.level_unlocked(0));
-        assert!(!t.level_unlocked(1));
-        assert!(!t.level_unlocked(2));
+        assert!(t.floor_unlocked(Theme::Sewer));
+        assert!(!t.floor_unlocked(Theme::Kitchen));
+        assert!(!t.floor_unlocked(Theme::Laundry));
+        assert!(!t.floor_unlocked(Theme::Lab));
+        assert!(!t.floor_unlocked(Theme::Printworks));
+        assert!(
+            t.floor_unlocked(Theme::Trailer),
+            "the getaway ride is a bonus floor and is always open"
+        );
 
-        t.record_level(0, 6420, 252.0);
-        assert!(t.level_cleared(0));
-        assert!(t.level_unlocked(1), "clearing level 1 unlocks level 2");
-        assert!(!t.level_unlocked(2));
+        t.record_floor(Theme::Sewer, 6420, 252.0);
+        assert!(t.floor_cleared(Theme::Sewer));
+        assert!(
+            t.floor_unlocked(Theme::Kitchen) && t.floor_unlocked(Theme::Laundry),
+            "clearing stage one opens both stage-two floors"
+        );
+        assert!(!t.floor_unlocked(Theme::Lab));
         assert_eq!(
-            t.level_best(0),
+            t.floor_best(Theme::Sewer),
             Some(LevelBestEntry {
                 cleared: true,
                 score: 6420,
@@ -499,31 +603,100 @@ mod tests {
         );
 
         // Bests keep the highest score and the fastest time.
-        t.record_level(0, 5000, 260.0);
-        t.record_level(0, 8000, 240.0);
-        let best = t.level_best(0).unwrap();
+        t.record_floor(Theme::Sewer, 5000, 260.0);
+        t.record_floor(Theme::Sewer, 8000, 240.0);
+        let best = t.floor_best(Theme::Sewer).unwrap();
         assert_eq!(best.score, 8000, "a lower score must not replace the best");
         assert_eq!(best.time, 240.0, "a slower time must not replace the best");
 
-        t.record_level(1, 4180, 198.0);
-        assert!(t.level_unlocked(2));
+        // Any floor of the next stage opens the stage after it.
+        t.record_floor(Theme::Laundry, 4180, 198.0);
+        assert!(
+            t.floor_unlocked(Theme::Lab) && t.floor_unlocked(Theme::Printworks),
+            "clearing the Laundry opens stage three"
+        );
 
         // Progress survives a save/load round trip, including the clear flags.
         let back = ScoreTable::parse(&t.to_json());
-        assert!(back.level_unlocked(2));
-        assert_eq!(back.level_best(0), t.level_best(0));
-        assert_eq!(back.level_best(1), t.level_best(1));
+        assert!(back.floor_unlocked(Theme::Lab));
+        assert_eq!(back.floor_best(Theme::Sewer), t.floor_best(Theme::Sewer));
+        assert_eq!(back.floor_best(Theme::Laundry), t.floor_best(Theme::Laundry));
 
-        // Out-of-range levels are ignored rather than panicking.
+        // Out-of-range stage indices are ignored rather than panicking.
         t.record_level(9, 1, 1.0);
         assert!(!t.level_unlocked(9));
     }
 
-    /// A cleared level stays unlocked even when its score entry has been pushed
+    /// Floors on the same campaign stage keep **separate** bests: clearing the
+    /// Laundry must not overwrite the Kitchen's record (the bug the old
+    /// stage-keyed array had).
+    #[test]
+    fn same_stage_floors_do_not_share_bests() {
+        let mut t = ScoreTable::default();
+        t.record_floor(Theme::Kitchen, 4000, 210.0);
+        t.record_floor(Theme::Laundry, 7000, 190.0);
+        assert_eq!(t.floor_best(Theme::Kitchen).map(|b| b.score), Some(4000));
+        assert_eq!(t.floor_best(Theme::Laundry).map(|b| b.score), Some(7000));
+        assert_eq!(t.floor_best(Theme::Kitchen).map(|b| b.time), Some(210.0));
+        assert_eq!(t.floor_best(Theme::Laundry).map(|b| b.time), Some(190.0));
+        // The Lab and the Printworks are the other pair of stage-mates.
+        t.record_floor(Theme::Printworks, 9000, 180.0);
+        assert!(t.floor_best(Theme::Lab).is_none());
+        assert_eq!(t.floor_best(Theme::Printworks).map(|b| b.score), Some(9000));
+    }
+
+    /// A pre-floors score file stores one record per campaign **stage**. It
+    /// loads as three floor records (Sewer, Kitchen, Lab) and unlocks the next
+    /// stage exactly as the old build did.
+    #[test]
+    fn stage_keyed_score_files_migrate_to_floors() {
+        let json = r#"{"entries":[],"progress":{"levels":[
+            {"cleared":true,"score":6420,"time":252.0},
+            {"cleared":true,"score":4180,"time":198.0},
+            {"cleared":false,"score":0,"time":0.0}
+        ]}}"#;
+        let t = ScoreTable::parse(json);
+        assert_eq!(t.floor_best(Theme::Sewer).map(|b| b.score), Some(6420));
+        assert_eq!(t.floor_best(Theme::Kitchen).map(|b| b.score), Some(4180));
+        assert!(t.floor_best(Theme::Lab).is_none(), "stage three was not cleared");
+        assert_eq!(
+            t.floor_best(Theme::Laundry),
+            None,
+            "the old file had no Laundry record, and none is invented"
+        );
+        assert!(t.floor_unlocked(Theme::Lab) && t.floor_unlocked(Theme::Printworks));
+
+        // The next save writes floors only; reloading it changes nothing.
+        let json = t.to_json();
+        assert!(
+            !json.contains("\"levels\""),
+            "a migrated file must not write the legacy array back: {json}"
+        );
+        let back = ScoreTable::parse(&json);
+        assert_eq!(back.floor_best(Theme::Sewer), t.floor_best(Theme::Sewer));
+        assert_eq!(back.floor_best(Theme::Kitchen), t.floor_best(Theme::Kitchen));
+    }
+
+    /// The legacy stage accessors still mean the original route's floors.
+    #[test]
+    fn legacy_stage_accessors_read_the_original_route() {
+        let mut t = ScoreTable::default();
+        t.record_level(0, 1000, 250.0);
+        t.record_level(1, 2000, 200.0);
+        assert_eq!(t.level_best(0).map(|b| b.score), Some(1000));
+        assert_eq!(t.level_best(1).map(|b| b.score), Some(2000));
+        assert!(t.floor_unlocked(Theme::Lab));
+        assert!(!t.level_unlocked(3), "stage 3 does not exist");
+        assert!(t.level_best(3).is_none());
+    }
+
+    /// A cleared floor stays unlocked even when its score entry has been pushed
     /// out of the top ten by later runs.
     #[test]
     fn clearing_survives_the_top_ten_rolling_over() {
         let mut t = ScoreTable::default();
+        // The route needs both earlier stages cleared before stage three opens.
+        t.record_level(0, 100, 210.0);
         t.record_level(1, 100, 200.0);
         for s in 0..(MAX_ENTRIES as u32 + 3) {
             t.insert(e(1000 + s));

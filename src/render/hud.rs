@@ -226,6 +226,10 @@ pub fn boss_codename(theme: Theme) -> (&'static str, &'static str) {
         CampaignLevel::Lab => "MK.IV AUTONOMOUS UNIT",
         CampaignLevel::Laundry => "CLASS-V CUSTODIAN",
         CampaignLevel::Printworks => "OVERNIGHT PRESS — EDITION 1",
+        // Unreachable: the Magpie branch above returns before this tag, but
+        // the getaway ride now has a plate of its own and the match must say
+        // what a corvid is.
+        CampaignLevel::Trailer => "CLASS-V CORVID THIEF",
     };
     (level.boss_name(), class_tag)
 }

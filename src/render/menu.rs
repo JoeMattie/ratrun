@@ -26,13 +26,15 @@ use crate::scores::ScoreTable;
 pub enum Target {
     Start,
     Quit,
-    /// Previous / next *campaign sector* (the title's sector row and the
-    /// level-select screen; the free map selector is gone).
+    /// Previous / next *floor* (the title's sector row and the level-select
+    /// screen; the free map selector is gone).
     PreviousSector,
     NextSector,
     /// The title's sector row: opens the sector-select screen.
     Sectors,
-    /// A sector card on the sector-select screen (`0..3`).
+    /// A floor's card on the sector-select screen: an index into
+    /// `Theme::playable()` (the same order the title row lists), never a
+    /// campaign stage.
     SelectSector(usize),
     /// Start the sector selected on the sector-select screen.
     StartSector,
@@ -1146,6 +1148,10 @@ pub fn draw_end(
     scores: &ScoreTable,
     hits: &mut HitMap,
     sector: u8,
+    // The floor the run was played on: the compact report names it, like the
+    // expanded one does (a practice floor on a shared stage reads LAUNDRY, not
+    // only its stage number).
+    floor: Theme,
     practice: bool,
 ) {
     let (status, accent) = if won && practice {
@@ -1159,7 +1165,8 @@ pub fn draw_end(
         f,
         centered_rect(61, 21, area),
         &format!(
-            " INCIDENT REPORT   /   R-47   /   {} ",
+            " INCIDENT REPORT / {} / {} ",
+            floor.name().to_uppercase(),
             sector_tag(sector, practice)
         ),
         accent,
@@ -1789,6 +1796,7 @@ pub fn draw_end_summary(
             scores,
             hits,
             summary.sector,
+            summary.theme,
             summary.practice,
         );
         return;
