@@ -1986,6 +1986,168 @@ mod tests {
         assert!(hp1 < hp0, "the settled channel never touched the boss ({hp0} -> {hp1})");
     }
 
+    /// Which boss-hitting effect [`boss_hp_lost`] exercises.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum BossHitter {
+        MilkTeeth,
+        DrainCleaner,
+        TailWhip,
+    }
+
+    /// A boss state to force: `(state, duration, elapsed)`.
+    type BossPose = (crate::game::ecs::systems::boss::BossState, f32, f32);
+
+    /// HP one `hitter` takes off a `kind` boss put in `state` (`None`: the
+    /// neutral state `Boss::new` gives), aimed at its first grounded target
+    /// point (the body centre when it has none). Also returns whether the boss
+    /// was damageable through the shared rule every weapon uses — a grounded
+    /// hit shape — so a caller can compare against what a plain bullet could do.
+    fn boss_hp_lost(
+        kind: crate::game::ecs::systems::boss::BossKind,
+        state: Option<BossPose>,
+        mult: f32,
+        hitter: BossHitter,
+    ) -> (f32, bool) {
+        use crate::game::ecs::systems::weapons;
+        let mut w = evolved_world(match hitter {
+            BossHitter::MilkTeeth => WeaponKind::Gnaw,
+            BossHitter::DrainCleaner => WeaponKind::AcidSpit,
+            BossHitter::TailWhip => WeaponKind::TailWhip,
+        });
+        w.player.loadout.weapons[0].evolved = hitter != BossHitter::TailWhip;
+        w.player.loadout.weapons[0].timer = 0.0;
+        let boss = spawn_grounded_boss(&mut w, kind);
+        let (aim, hittable, hp0) = {
+            let mut b = w.ecs.get_mut::<Boss>(boss).unwrap();
+            if let Some((s, duration, elapsed)) = state {
+                b.set_state(s, duration);
+                b.elapsed = elapsed;
+            }
+            b.damage_mult = mult;
+            let points = b.target_points();
+            (points.first().unwrap_or(b.pos), !points.is_empty(), b.hp)
+        };
+        match hitter {
+            BossHitter::MilkTeeth => {
+                let origin = aim + Vec2::new(-40.0, 0.0);
+                w.player.pos = origin;
+                spawn_with_id(
+                    &mut w.ecs,
+                    MilkTooth::new(origin, Vec2::new(MILK_SPEED, 0.0), 3.0, MILK_REACH),
+                );
+                for _ in 0..240 {
+                    run(&mut w, milk_teeth_system);
+                }
+            }
+            BossHitter::DrainCleaner => {
+                spawn_with_id(
+                    &mut w.ecs,
+                    CorrosiveChannel::new(aim, Vec2::new(1.0, 0.0), CHANNEL_LEN, 30.0, 12.0),
+                );
+                for _ in 0..40 {
+                    run(&mut w, drain_cleaner_system);
+                }
+            }
+            BossHitter::TailWhip => {
+                w.player.pos = aim + Vec2::new(-6.0, 0.0);
+                run(&mut w, weapons::fire_weapons_system);
+            }
+        }
+        (hp0 - w.ecs.get::<Boss>(boss).unwrap().hp, hittable)
+    }
+
+    /// **All six bosses**, not just the three the fixes were written against:
+    /// Milk Teeth, the Drain Cleaner and the Tail Whip (whose boss hit moved
+    /// out of `boss_damage_system` into the cast) each damage every boss while
+    /// it is damageable, honour its weak-window multiplier, and pass under a
+    /// boss with no grounded shape exactly as a bullet does.
+    #[test]
+    fn milk_teeth_drain_cleaner_and_whip_damage_all_six_bosses() {
+        use crate::game::art_boss_cat::BossCatState;
+        use crate::game::art_boss_magpie::{self, MagpieState};
+        use crate::game::art_boss_mangle::{self, MangleState};
+        use crate::game::art_boss_night_edition::{self, NightEditionState};
+        use crate::game::ecs::systems::boss::{BossKind, BossState};
+        const HITTERS: [BossHitter; 3] = [
+            BossHitter::MilkTeeth,
+            BossHitter::DrainCleaner,
+            BossHitter::TailWhip,
+        ];
+        // (boss, state, incoming multiplier of that state)
+        let damageable: [(BossKind, Option<BossPose>, f32); 10] = [
+            (BossKind::Cat, None, 1.0),
+            (BossKind::Broom, None, 1.0),
+            (BossKind::Mower, None, 1.0),
+            (BossKind::Mangle, None, 1.0),
+            (BossKind::NightEdition, None, 1.0),
+            (BossKind::Magpie, None, 1.0),
+            // The punish windows, each exposed its own way.
+            (
+                BossKind::Mangle,
+                Some((BossState::Mangle(MangleState::Jam), 1.5, 0.5)),
+                art_boss_mangle::JAM_DAMAGE_MULT,
+            ),
+            // The final jam ungrounds the rollers: only the crank is left.
+            (
+                BossKind::Mangle,
+                Some((
+                    BossState::Mangle(MangleState::FinalJam),
+                    art_boss_mangle::FINAL_JAM,
+                    0.5,
+                )),
+                art_boss_mangle::JAM_DAMAGE_MULT,
+            ),
+            (
+                BossKind::NightEdition,
+                Some((BossState::NightEdition(NightEditionState::BedLowered), 2.0, 0.5)),
+                art_boss_night_edition::WEAK_MULT,
+            ),
+            (
+                BossKind::Magpie,
+                Some((BossState::Magpie(MagpieState::Stuck), 2.0, 0.5)),
+                art_boss_magpie::STUCK_DAMAGE_MULT,
+            ),
+        ];
+        for (kind, state, mult) in damageable {
+            for hitter in HITTERS {
+                let (base, _) = boss_hp_lost(kind, state, 1.0, hitter);
+                let (lost, hittable) = boss_hp_lost(kind, state, mult, hitter);
+                assert!(hittable, "{kind:?} {state:?} should expose a grounded shape");
+                assert!(
+                    lost > 0.0,
+                    "{hitter:?} never hurt {kind:?} in {state:?} ({lost})"
+                );
+                assert!(
+                    (lost - base * mult).abs() <= 1e-3 * base.max(1.0),
+                    "{hitter:?} on {kind:?} {state:?}: {lost} is not x{mult} of {base}"
+                );
+            }
+        }
+        // States a bullet may or may not reach: the three effects must agree
+        // with the shared grounded-shape rule either way. The cat mid-pounce is
+        // over the rat's head; the Magpie's strafe is flown belly-to-the-planks
+        // (`Boss::hit_shapes` keeps it grounded on purpose).
+        let either: [(BossKind, BossPose); 4] = [
+            (BossKind::Cat, (BossState::Cat(BossCatState::Pounce), 0.70, 0.35)),
+            (BossKind::Magpie, (BossState::Magpie(MagpieState::Takeoff), 1.0, 0.5)),
+            (BossKind::Magpie, (BossState::Magpie(MagpieState::StrafePass), 1.0, 0.5)),
+            (BossKind::Magpie, (BossState::Magpie(MagpieState::SnatchDrop), 1.0, 0.5)),
+        ];
+        let mut saw_untouchable = false;
+        for (kind, state) in either {
+            for hitter in HITTERS {
+                let (lost, hittable) = boss_hp_lost(kind, Some(state), 1.0, hitter);
+                assert_eq!(
+                    lost > 0.0,
+                    hittable,
+                    "{hitter:?} on {kind:?} {state:?}: lost {lost}, grounded shape {hittable}"
+                );
+                saw_untouchable |= !hittable;
+            }
+        }
+        assert!(saw_untouchable, "the airborne cat must be out of reach");
+    }
+
     /// **Flywheel** catches pellets in `SpawnId` order, not in query storage
     /// order: the recorded catch directions are the three lowest ids'.
     #[test]

@@ -1278,7 +1278,12 @@ mod tests {
             }
             let mut bot = Bot::new(Skill::Expert, seed);
             bot.on_new_level(0);
-            let limit = 60 * 120;
+            // 300 s. This loop never drains `w.sfx`, and until the whip's boss
+            // hit moved into its cast (`weapons::fire_one`) an undrained
+            // `Sfx::ShootWhip` re-applied the whip to the boss on **every tick**,
+            // so the old 120 s limit was measured on a 60x whip. Honest fights
+            // with this build run 176-193 s.
+            let limit = 60 * 300;
             let mut ticks = 0u32;
             let mut min_hp = w.player.hp;
             while ticks < limit && !w.level_complete && w.player.alive() {

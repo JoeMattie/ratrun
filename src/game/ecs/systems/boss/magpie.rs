@@ -1415,7 +1415,12 @@ mod tests {
             let mut bot = Bot::new(Skill::Expert, seed);
             let mut min_frac = 1.0f32;
             let mut t = 0.0f32;
-            let limit = 150.0;
+            // 600 s. This loop never drains `w.sfx`, and until the whip's boss
+            // hit moved into its cast (`weapons::fire_one`) an undrained
+            // `Sfx::ShootWhip` re-applied the whip to the boss on **every tick**,
+            // so the old 150 s limit was measured on a 60x whip. Honest fights
+            // with the Typical carry (whip, nova, orbit) run 289-381 s.
+            let limit = 600.0;
             while t < limit && !w.finished() {
                 let input = bot.decide(&w, DT);
                 w.update(DT, input.move_dir, input.dash);

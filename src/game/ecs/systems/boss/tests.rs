@@ -248,6 +248,46 @@ fn boss_death_plays_its_beat_then_completes_the_level_once() {
     assert_eq!(w.gold, banked, "the boss's gold is credited once");
 }
 
+/// §6 for **all six bosses**, on a campaign floor and on a practice floor
+/// (`difficulty_override = Some(0)`): the clear credits exactly
+/// [`crate::game::shop::BOSS_GOLD`] to the wallet, once, and leaves no coin on
+/// the floor. The credit lives in the shared death path of
+/// `boss_update_system`, so a boss added later inherits it; this pins that.
+#[test]
+fn every_boss_credits_its_gold_exactly_once_at_the_clear() {
+    for theme in Theme::all() {
+        for practice in [false, true] {
+            let mut w = World::new(theme, 9);
+            if practice {
+                w.difficulty_override = Some(0);
+            }
+            spawn_boss(&mut w);
+            let kind = boss_of(&mut w).expect("the floor's boss").kind;
+            assert_eq!(kind, BossKind::for_theme(theme));
+            let before = w.gold;
+            {
+                let mut query = w.ecs.query::<&mut Boss>();
+                for mut boss in query.iter_mut(&mut w.ecs) {
+                    boss.hp = 0.0;
+                }
+            }
+            let ticks = (kind.death_duration() / DT).ceil() as usize + 120;
+            for _ in 0..ticks {
+                update_boss(&mut w, DT);
+            }
+            assert!(w.level_complete, "{kind:?} practice={practice}: never cleared");
+            assert!(boss_of(&mut w).is_none(), "{kind:?}: the death beat ended");
+            assert_eq!(
+                w.gold - before,
+                crate::game::shop::BOSS_GOLD,
+                "{kind:?} practice={practice}: the clear pays 30 gold exactly once"
+            );
+            let mut coins = w.ecs.query::<&crate::game::gem::Gold>();
+            assert_eq!(coins.iter(&w.ecs).count(), 0, "{kind:?}: no boss coin");
+        }
+    }
+}
+
 /// The boss's death breaks the horde, and that despawn has to happen **after**
 /// the last `EnemyIndex` reader.
 ///
