@@ -226,7 +226,9 @@ pub fn player_bullet_hits_system(
                     continue;
                 }
                 let hp_before = e.hp.max(0.0);
-                e.hurt(b.damage);
+                // Directional armour (the Pillbug's shell) applies to a bullet
+                // hit from `b.pos`, so the recorded number is what landed.
+                let applied = e.hurt_from(b.damage, b.pos);
                 let killed = !e.alive();
                 // Balance instrumentation only (never read by the schedule):
                 // effective damage, so overkill cannot inflate a weapon.
@@ -249,7 +251,7 @@ pub fn player_bullet_hits_system(
                     e.id,
                     e.pos,
                     e.radius,
-                    b.damage,
+                    applied,
                     killed,
                     DamageSource::from_weapon(b.weapon),
                 );

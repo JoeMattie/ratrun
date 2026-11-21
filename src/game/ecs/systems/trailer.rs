@@ -9,8 +9,12 @@
 //!
 //! ## Ordering
 //!
-//! `trailer_system` runs immediately **before** `loot::reap_enemies_system`,
-//! after the rat and the horde have moved and contact damage has landed:
+//! `trailer_system` runs in the slot between contact and the reap, after the
+//! rat and the horde have moved and contact damage has landed. Within that
+//! slot the order is: evolved weapons, `enemy_wave3::wave3_system` (so a Bell
+//! Flea that lands on a hole this tick falls this tick), **this system**,
+//! `weapons_wave3a::hantavirus_death_system` (a fatal fall passes its host's
+//! jumps on), then `loot::reap_enemies_system`:
 //!
 //! * a body that ends the tick over a [`Pit`] has already spent its movement,
 //!   so the fall is measured from the position the player saw;
@@ -18,8 +22,12 @@
 //!   scores exactly like any other kill;
 //! * it is after the last reader of the tick's `EnemyIndex` (it writes
 //!   positions and stun only — never spawns or despawns), so the index stays
-//!   valid for `contact_system` before it. Reaping is what retires the index,
-//!   and that comes next.
+//!   valid for `contact_system` before it and the Hantavirus death jump
+//!   after it. Reaping is what retires the index.
+//! * a Wick Moth flies and never falls; every other kind (a Bell Flea
+//!   teleports to its locked landing point, so it is always on the ground)
+//!   falls by the same rule. A fall has no direction: directional armour does
+//!   not apply to it.
 //!
 //! ## Determinism
 //!
@@ -48,7 +56,7 @@ use crate::game::collision::SizeClass;
 use crate::game::ecs::components::{Entity, SpawnId};
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::resources::{RngRes, RunCounters, SfxQueue, TickInput};
-use crate::game::enemy::Enemy;
+use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::Gem;
 use crate::game::level::{Level, Theme, TrailerDeck};
 use crate::game::particle::vfx;
@@ -135,12 +143,20 @@ pub fn trailer_system(
         let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
             continue;
         };
-        if !e.alive() || deck.pit_at(e.pos).is_none() {
+        // A Wick Moth flies: it crosses the holes and never falls. (A Bell
+        // Flea is on the ground between hops and teleports to its locked
+        // landing point, so it falls exactly when a landing point is a hole,
+        // by the ordinary rule below.)
+        if !e.alive() || e.kind == EnemyKind::WickMoth || deck.pit_at(e.pos).is_none() {
             continue;
         }
         let class = SizeClass::of_radius(e.radius);
         if let Some(safe) = nearest_plank(&level, e.pos, class, ENEMY_RECOVERY_MARGIN) {
+            // A fall has no direction (the unmodified multiplier, whatever a
+            // Pillbug's shell is doing); `note_damage` books the side effects
+            // (a Porter drops its raise).
             e.hp -= e.max_hp * FALL_ENEMY_FRACTION;
+            e.note_damage();
             e.pos = safe;
             e.vel = Vec2::ZERO;
             e.stun = e.stun.max(FALL_ENEMY_STUN);
@@ -363,6 +379,34 @@ mod tests {
         tick(&mut w, 1.0 / 60.0);
         assert!(w.player.hp < hp);
         assert!(w.level.trailer.pit_at(w.player.pos).is_none());
+    }
+
+    /// The wave-3 kinds on the flatbed: a Wick Moth flies over a hole, every
+    /// grounded kind (a Bell Flea standing on its landing point included)
+    /// falls like any other body.
+    #[test]
+    fn a_moth_flies_over_a_hole_and_a_flea_on_one_falls() {
+        use crate::game::enemy::EnemyKind;
+        let mut w = bed_world();
+        let deck = w.level.trailer.deck;
+        let hole = TileRect::new(deck.x + 8, deck.y + 4, 1, 1);
+        w.level
+            .trailer
+            .pits
+            .push(Pit::new(hole, PitKind::BrokenPlank));
+        let moth = w.spawn_enemy(EnemyKind::WickMoth, hole.center_world(), 1.0);
+        let flea = w.spawn_enemy(EnemyKind::BellFlea, hole.center_world(), 1.0);
+        let (moth_hp, flea_hp) = (
+            w.ecs.get::<Enemy>(moth).unwrap().hp,
+            w.ecs.get::<Enemy>(flea).unwrap().hp,
+        );
+        tick(&mut w, 1.0 / 60.0);
+        let m = w.ecs.get::<Enemy>(moth).unwrap();
+        assert_eq!(m.hp, moth_hp, "the moth fell");
+        assert_eq!(m.stun, 0.0, "the moth was stunned by a fall");
+        let f = w.ecs.get::<Enemy>(flea).unwrap();
+        assert!(f.hp < flea_hp, "the flea did not fall");
+        assert!(w.level.trailer.pit_at(f.pos).is_none(), "the flea was left in the hole");
     }
 
     #[test]

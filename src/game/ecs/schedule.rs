@@ -35,9 +35,9 @@
 //! | 15 | `combat::enemy_bullet_hits_system` | `resolve_enemy_hits` |
 //! | 16 | `combat::contact_system` | `resolve_contact` |
 //! | 16b | `evolutions::milk_teeth_system` … `roll_call_system` | evolved weapons (new) |
-//! | 16c | `trailer::trailer_system` | the flatbed's holes, cargo and wind (new; `Theme::Trailer` only); a fall can kill, so it runs before 16d |
-//! | 16d | `weapons_wave3a::hantavirus_death_system` | death-triggered jumps (sees evolution and fall kills), before the reap |
-//! | 16b | `trailer::trailer_system` | the flatbed's holes, cargo and wind (new; `Theme::Trailer` only) |
+//! | 16c | `enemy_wave3::wave3_system` | wave-3 kinds' tells, hazards, wick fuse (new); after every weapon damage pass so a moth any of them killed lights its wick |
+//! | 16d | `trailer::trailer_system` | the flatbed's holes, cargo and wind (new; `Theme::Trailer` only); a fall can kill, so it runs before 16e |
+//! | 16e | `weapons_wave3a::hantavirus_death_system` | death-triggered jumps (sees evolution, wick-burst and fall kills), before the reap |
 //! | 17 | `loot::reap_enemies_system` | `reap_enemies` |
 //! | 18 | `loot::gems_system` | `update_gems` |
 //! | 18b | `loot::treasure_system` | gold and chests |
@@ -85,8 +85,8 @@ use bevy_ecs::prelude::*;
 
 use super::resources::TickInput;
 use super::systems::{
-    boss, combat, enemy_move, evolutions, fog, fx, gates, loot, player, powerups, projectiles,
-    spawn, trailer, traps, weapons, weapons_wave3a, weapons_wave3b,
+    boss, combat, enemy_move, enemy_wave3, evolutions, fog, fx, gates, loot, player, powerups,
+    projectiles, spawn, trailer, traps, weapons, weapons_wave3a, weapons_wave3b,
 };
 
 /// Legacy `self.damage_numbers.update(dt)` (neon merge, `World::update`).
@@ -213,6 +213,18 @@ pub fn build_tick_schedule() -> Schedule {
     // loot path), and it only writes positions/stun — never spawning or
     // despawning — so the `EnemyIndex` that `contact_system` just read stays
     // valid up to the reap. It early-outs on every other theme.
+    //
+    // `enemy_wave3::wave3_system` (row 16c) sits after the evolved weapons and
+    // before the flatbed pass: every *weapon* damage source has run (bullets,
+    // pools, melee, actives, traps, boss hazards and the eight evolutions), so
+    // a Wick Moth any of them killed lights its fuse before the reap takes the
+    // corpse, a Wick burst resolves into this tick's reaping and loot path,
+    // and every warn it starts is visible for a full tick before it can bite.
+    // It spawns and despawns only `Wick`s, never an enemy, so the
+    // `EnemyIndex` window is untouched. The flatbed pass follows it so a Bell
+    // Flea that lands on a hole falls in the same tick (Wick Moths fly and
+    // never fall, so no fall can orphan a wick), and the Hantavirus death
+    // jump is last so it sees burst and fall kills too.
     schedule.add_systems(
         (
             // 16b: evolved weapons (`WAVE3_DESIGN.md` §3). They damage bodies, so
@@ -225,13 +237,16 @@ pub fn build_tick_schedule() -> Schedule {
             evolutions::fairy_ring_system,
             evolutions::drain_cleaner_system,
             evolutions::roll_call_system,
-            // 16c: the flatbed's hazard pass (see the comment above this
+            // 16c: the wave-3 enemies' behaviour tick (see the comment above
+            // this tuple).
+            enemy_wave3::wave3_system,
+            // 16d: the flatbed's hazard pass (see the comment above this
             // tuple). A pit fall takes 35 % of an enemy's max HP and can kill,
             // so it is a damage pass and must precede the Hantavirus death
             // jump below; it never spawns or despawns.
             trailer::trailer_system,
-            // 16d: a Hantavirus host that died this tick (any source, the
-            // evolved weapons and a flatbed fall above included) passes
+            // 16e: a Hantavirus host that died this tick (any source, the
+            // evolved weapons, a Wick burst and a flatbed fall above included) passes
             // its remaining jumps on while the corpse and the `EnemyIndex`
             // order still exist — i.e. after every damage pass and before the
             // reap despawns it.

@@ -425,7 +425,8 @@ pub fn acid_rain_system(
                 continue;
             }
             let hp_before = e.hp.max(0.0);
-            e.hurt(dmg);
+            // Directional armour: the splash arrives from its own centre.
+            let applied = e.hurt_from(dmg, pos);
             let killed = !e.alive();
             ledger.add(WeaponKind::AcidRain, (hp_before - e.hp.max(0.0)).max(0.0));
             let enemy_pos = e.pos;
@@ -435,7 +436,7 @@ pub fn acid_rain_system(
                 enemy_id,
                 enemy_pos,
                 enemy_radius,
-                dmg,
+                applied,
                 killed,
                 DamageSource::Rain,
             );
@@ -597,6 +598,9 @@ pub fn hantavirus_system(
             inf.timer += VIRUS_TICK;
             inf.ticks_left -= 1;
             let hp_before = e.hp.max(0.0);
+            // A contagion tick comes from inside the host: it has no
+            // direction, so directional armour (a curled Pillbug's shell)
+            // neither blunts nor doubles it. Plain `hurt` on purpose.
             e.hurt(inf.dmg);
             let killed = !e.alive();
             ledger.add(

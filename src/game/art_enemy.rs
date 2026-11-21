@@ -314,6 +314,14 @@ fn cull_reach(kind: EnemyKind, r: f32) -> f32 {
         EnemyKind::Spitter => r * 2.2 + 3.0,   // 6.6 * (r/3.0) + 3
         EnemyKind::Brute => r * 1.8 + 2.0,     // 11.7 * (r/6.5) + 2
         EnemyKind::Boss => r * 1.5 + 3.0,      // 21.0 * (r/14.0) + 3
+        // Wave 3. The Flea's landing crosses sit up to 26 px from the body and
+        // the Turnkey's crossbar up to ~70 px behind it (it walks away for the
+        // 2.8 s the bar lives), so those two need a much wider screen bound.
+        EnemyKind::Pillbug => r * 1.9 + 2.0,
+        EnemyKind::BellFlea => r + 34.0,
+        EnemyKind::WickMoth => r * 2.6 + 3.0,
+        EnemyKind::Porter => r * 2.2 + 5.0,
+        EnemyKind::Turnkey => r + 80.0,
     }
 }
 
@@ -444,6 +452,13 @@ pub fn draw_enemy_styled(
         EnemyKind::Spitter => draw_spitter(pb, &fr, e.fire_cd),
         EnemyKind::Brute => draw_brute(pb, &fr, elite),
         EnemyKind::Boss => draw_boss(pb, &fr, e.fire_cd),
+        // Wave 3: placeholder silhouettes (a Neon art pass redraws them), each
+        // one carrying its own tell so the state machine is readable.
+        EnemyKind::Pillbug => draw_pillbug(pb, &fr, e),
+        EnemyKind::BellFlea => draw_bellflea(pb, &fr, e, cam),
+        EnemyKind::WickMoth => draw_wickmoth(pb, &fr, e),
+        EnemyKind::Porter => draw_porter(pb, &fr, e),
+        EnemyKind::Turnkey => draw_turnkey(pb, &fr, e, cam),
     }
 }
 
@@ -456,6 +471,13 @@ fn draw_enemy_lod_frame(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool
         EnemyKind::Spitter => draw_spitter_lod(pb, fr, e.fire_cd),
         EnemyKind::Brute => draw_brute_lod(pb, fr, elite),
         EnemyKind::Boss => draw_boss_lod(pb, fr, e.fire_cd),
+        // The wave-3 placeholders are already cheap: one local-frame body loop
+        // plus its tell, so the crowd path draws the same silhouette.
+        EnemyKind::Pillbug => draw_pillbug(pb, fr, e),
+        EnemyKind::BellFlea => draw_bellflea(pb, fr, e, Vec2::ZERO),
+        EnemyKind::WickMoth => draw_wickmoth(pb, fr, e),
+        EnemyKind::Porter => draw_porter(pb, fr, e),
+        EnemyKind::Turnkey => draw_turnkey(pb, fr, e, Vec2::ZERO),
     }
 }
 
@@ -3387,6 +3409,363 @@ fn draw_boss_lod(pb: &mut PixelBuffer, fr: &Frame, fire_cd: f32) {
         }
     }
     draw_boss_hp_arc(pb, fr, s, pulse);
+}
+
+// ---- Wave 3 placeholders --------------------------------------------------
+//
+// `WAVE3_DESIGN.md` §9 gives each kind one unmistakable silhouette and one
+// visible tell; these are deliberately simple drawings (a Neon art pass
+// redraws them). What they must already do is *read*: shell forward while
+// curled, two crosses before the flea lands, a lifted sugar cube, a dotted
+// line before the bar, a lit tail on the moth, and a burning wick after it.
+
+/// A dotted or solid landmark ring: 8 short ticks around `at`, radius `r`.
+fn cross_mark(pb: &mut PixelBuffer, at: (i32, i32), r: i32, col: Rgb, alpha: f32, ticks: &[bool]) {
+    let mut i = 0;
+    while i < 8 {
+        if ticks[i] {
+            let a = i as f32 * std::f32::consts::TAU / 8.0;
+            let (sa, ca) = fast_sin_cos(a);
+            let x = at.0 + (ca * r as f32).round() as i32;
+            let y = at.1 + (sa * r as f32).round() as i32;
+            blend_px(pb, x, y, col, alpha);
+        }
+        i += 1;
+    }
+}
+
+const ALL_TICKS: [bool; 8] = [true; 8];
+const DOTTED: [bool; 8] = [true, false, true, false, true, false, true, false];
+
+/// Ribbed silver oval; curled it is a tight ring with the shell arc forward.
+fn draw_pillbug(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy) {
+    let s = fr.r * (1.0 / 5.0);
+    let curled = e.w3.curl_t > 0.0;
+    let body = fr.apply_hit(if curled { (214, 220, 232) } else { (176, 184, 200) });
+    let rib = mix_rgb(body, (98, 104, 124), 0.55);
+    let shell = mix_rgb(body, (255, 255, 255), 0.72);
+    let leg = fr.apply_hit((104, 104, 116));
+
+    // Six short legs, only while it walks (a curled pillbug tucks them in).
+    if !curled {
+        for (i, &u_hip) in [1.3f32, 0.0, -1.3].iter().enumerate() {
+            let sw = fast_sin(fr.anim + i as f32 * 2.1) * 0.55 * s;
+            for side in [-1.0f32, 1.0] {
+                let hip = fr.px(u_hip * s, side * 1.5 * s);
+                let foot = fr.px(u_hip * s + sw, side * 3.1 * s);
+                line_blend(pb, hip, foot, leg, 0.8);
+            }
+        }
+    }
+
+    let ru = if curled { 2.6 * s } else { 4.2 * s };
+    let rv = if curled { 2.6 * s } else { 3.0 * s };
+    let Some((x0, x1, y0, y1)) =
+        fr.bbox_oriented_circ(pb, -ru - s, ru + s, rv + s, fr.r + 2.0, (1, 1))
+    else {
+        return;
+    };
+    let inv_ru = 1.0 / ru;
+    let inv_rv = 1.0 / rv;
+    for y in y0..=y1 {
+        let (mut u, mut v) = fr.local(x0, y);
+        for x in x0..=x1 {
+            let nu = u * inv_ru;
+            let nv = v * inv_rv;
+            let r2 = nu * nu + nv * nv;
+            if r2 <= 1.0 {
+                // Ribs across the shell every ~2 px of body length, with a
+                // shaded rim so the oval reads as a shell and not a ring.
+                // Three broad ribs across the shell (a 1 px period is noise at
+                // this size; ~2.6 px reads as ribbing).
+                let ribbed = ((u + 5.2 * s) / (2.6 * s)).floor() as i32 % 2 == 0;
+                let lit = fr.lit(nu, nv);
+                let col = if r2 > 0.80 {
+                    scale_rgb(body, 0.62)
+                } else if ribbed {
+                    if lit > 0.1 { shell } else { body }
+                } else {
+                    rib
+                };
+                pb.plot(x, y, col);
+            }
+            u += fr.f.x;
+            v += fr.p.x;
+        }
+    }
+    // The shell rim: a bright arc on the facing side, the one readable cue for
+    // "this side takes a quarter".
+    for k in 0..11 {
+        let a = -1.0 + k as f32 * (2.0 / 10.0);
+        let (sa, ca) = fast_sin_cos(a);
+        let x = (fr.pos.x + fr.f.x * ca * ru * 0.82 + fr.p.x * sa * rv * 0.82).round() as i32;
+        let y = (fr.pos.y + fr.f.y * ca * ru * 0.82 + fr.p.y * sa * rv * 0.82).round() as i32;
+        blend_px(pb, x, y, shell, 0.95);
+    }
+    if curled {
+        // The tell: the tight ring with a pale gap at the back.
+        let back = fr.px(-2.4 * s, 0.0);
+        blend_px(pb, back.0, back.1, scale_rgb(body, 0.4), 0.9);
+    }
+}
+
+/// Copper tuning fork with two prongs; its landing crosses are the tell.
+fn draw_bellflea(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam: Vec2) {
+    let s = fr.r * 0.5;
+    let copper = fr.apply_hit((214, 138, 78));
+    let copper_hi = mix_rgb(copper, (255, 226, 176), 0.55);
+    let leg = fr.apply_hit((118, 70, 36));
+    let bouncing = e.w3.flea_phase != 0;
+
+    for side in [-1.0f32, 1.0] {
+        let hip = fr.px(-0.4 * s, side * 0.9 * s);
+        let foot = fr.px(-1.6 * s, side * 2.6 * s);
+        line_blend(pb, hip, foot, leg, 0.85);
+    }
+    // Two prongs forward, joined by the fork's handle: a clear "E" profile.
+    for side in [-1.0f32, 1.0] {
+        let a = fr.px(0.2 * s, side * 0.6 * s);
+        let b = fr.px(3.2 * s, side * 1.1 * s);
+        line_blend(pb, a, b, copper, 0.95);
+    }
+    let h0 = fr.px(-1.8 * s, 0.0);
+    let h1 = fr.px(0.2 * s, 0.0);
+    line_blend(pb, h0, h1, copper_hi, 0.9);
+    // Body pip at the join.
+    let body = fr.px(-s, 0.0);
+    blend_px(pb, body.0, body.1, copper_hi, 1.0);
+    blend_px(pb, body.0 + 1, body.1, copper_hi, 1.0);
+
+    // Landing crosses: both are dotted during the tell, and the one it is
+    // standing on goes solid at the moment of impact.
+    if bouncing {
+        let home = e.w3.home - cam;
+        let hop = e.w3.hop_to - cam;
+        let home_px = (home.x.round() as i32, home.y.round() as i32);
+        let hop_px = (hop.x.round() as i32, hop.y.round() as i32);
+        let landed = e.w3.flea_phase == 2;
+        let warm = (238, 198, 126);
+        let cool = (176, 206, 224);
+        cross_mark(
+            pb,
+            home_px,
+            6,
+            if landed { cool } else { warm },
+            if landed { 0.85 } else { 0.55 },
+            &DOTTED,
+        );
+        cross_mark(
+            pb,
+            hop_px,
+            6,
+            warm,
+            if landed { 0.85 } else { 0.55 },
+            if landed { &ALL_TICKS } else { &DOTTED },
+        );
+    }
+}
+
+/// Teardrop body with a lantern tail that brightens as the fuse idea reads.
+fn draw_wickmoth(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy) {
+    let s = fr.r * (1.0 / 2.5);
+    let flap = fast_sin(fr.anim * 1.6);
+    let wing = fr.apply_hit((206, 176, 148));
+    let body = fr.apply_hit((126, 96, 88));
+    let ember = if e.hp > 0.0 {
+        (255, 196, 104)
+    } else {
+        (255, 236, 190)
+    };
+
+    // Two pale wings up, teardrop torso, wick trailing back.
+    for side in [-1.0f32, 1.0] {
+        let root = fr.px(0.2 * s, side * 0.6 * s);
+        let tip = fr.px(-0.9 * s + flap * 0.5, side * (2.6 + 0.5 * flap) * s);
+        line_blend(pb, root, tip, wing, 0.55);
+    }
+    for k in 0..5 {
+        let t = k as f32 * 0.28;
+        let u = (1.6 - t * 1.9) * s;
+        let v = (0.55 - t * 0.35) * s * flap;
+        let p = fr.px(u, v);
+        blend_px(pb, p.0, p.1, body, 1.0);
+        if k < 3 {
+            blend_px(pb, p.0, p.1 + 1, body, 0.8);
+        }
+    }
+    // The lit tail: a three-pixel ember with an additive glow, so the corpse's
+    // fuse reads as coming off *this* bug.
+    let tail = fr.px(-2.2 * s, 0.0);
+    blend_px(pb, tail.0, tail.1, ember, 0.95);
+    blend_px(pb, tail.0, tail.1 - 1, mix_rgb(ember, (255, 255, 240), 0.6), 0.95);
+    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        pb.plot_add(tail.0 + dx, tail.1 + dy, scale_rgb(ember, 0.55));
+    }
+}
+
+/// Beetle under a white sugar cube; the cube lifts while it is raising.
+fn draw_porter(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy) {
+    let s = fr.r * (1.0 / 4.5);
+    let raising = e.w3.raise_t > 0.0;
+    let shell = fr.apply_hit((140, 176, 128));
+    let shell_hi = mix_rgb(shell, (240, 255, 232), 0.45);
+    let leg = fr.apply_hit((84, 100, 72));
+
+    for (i, &u_hip) in [1.2f32, -0.2, -1.5].iter().enumerate() {
+        let sw = fast_sin(fr.anim + i as f32 * 2.0) * 0.5 * s;
+        for side in [-1.0f32, 1.0] {
+            let hip = fr.px(u_hip * s, side * 1.2 * s);
+            let foot = fr.px(u_hip * s + sw, side * 2.8 * s);
+            line_blend(pb, hip, foot, leg, 0.85);
+        }
+    }
+    // Domed shell.
+    let Some((x0, x1, y0, y1)) = fr.bbox_oriented_circ(pb, -2.4 * s, 2.6 * s, 2.1 * s, fr.r + 2.0, (1, 1))
+    else {
+        return;
+    };
+    let inv_u = 1.0 / (2.6 * s);
+    let inv_v = 1.0 / (2.2 * s);
+    let mid_u = 0.1 * s;
+    for y in y0..=y1 {
+        let (mut u, mut v) = fr.local(x0, y);
+        for x in x0..=x1 {
+            let nu = (u - mid_u) * inv_u;
+            let nv = v * inv_v;
+            let r2 = nu * nu + nv * nv;
+            if r2 <= 1.0 {
+                let col = if nv < -0.25 {
+                    shell_hi
+                } else if r2 > 0.7 {
+                    scale_rgb(shell, 0.7)
+                } else {
+                    shell
+                };
+                pb.plot(x, y, col);
+            }
+            u += fr.f.x;
+            v += fr.p.x;
+        }
+    }
+    // The sugar cube: a 2 × 2 block over its back, lifted while raising. It is
+    // placed in *screen* space (the back is always up) rather than on a body
+    // axis, so the "it is holding the cube up" read survives every facing.
+    let lift = if raising { 3.0 } else { 0.0 };
+    let cube = (245, 248, 244);
+    let cube_sh = (196, 204, 196);
+    let c = (
+        fr.pos.x.round() as i32 - 1,
+        fr.pos.y.round() as i32 - 4 - lift as i32,
+    );
+    blend_px(pb, c.0, c.1, cube, 1.0);
+    blend_px(pb, c.0 + 1, c.1, cube, 1.0);
+    blend_px(pb, c.0, c.1 + 1, cube_sh, 1.0);
+    blend_px(pb, c.0 + 1, c.1 + 1, cube_sh, 1.0);
+    if raising {
+        // The tell: the cube glints while it is up.
+        blend_px(pb, c.0 - 1, c.1, cube, 0.6);
+        blend_px(pb, c.0 + 2, c.1, cube, 0.6);
+        blend_px(pb, c.0, c.1 - 1, cube, 0.75);
+        blend_px(pb, c.0 + 1, c.1 - 1, cube, 0.75);
+        blend_px(pb, c.0, c.1 - 2, cube, 0.45);
+        blend_px(pb, c.0 + 1, c.1 - 2, cube, 0.45);
+    }
+}
+
+/// Key-shaped drone: round bow behind, toothed shaft forward, and the
+/// crossbar it has laid across its own path.
+fn draw_turnkey(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam: Vec2) {
+    let s = fr.r * (1.0 / 4.0);
+    let brass = fr.apply_hit((206, 186, 102));
+    let brass_hi = mix_rgb(brass, (255, 248, 200), 0.5);
+    let brass_lo = scale_rgb(brass, 0.62);
+
+    // Bow (the round handle), a ring of eight pixels.
+    let bow = fr.px(-1.8 * s, 0.0);
+    for a in 0..8 {
+        let ang = a as f32 * std::f32::consts::TAU / 8.0;
+        let (sa, ca) = fast_sin_cos(ang);
+        let r = (1.5 * s).round() as i32;
+        let x = bow.0 + (ca * r as f32).round() as i32;
+        let y = bow.1 + (sa * r as f32).round() as i32;
+        blend_px(pb, x, y, if a % 2 == 0 { brass } else { brass_hi }, 0.95);
+    }
+    // Shaft + two teeth.
+    let s0 = fr.px(-0.4 * s, 0.0);
+    let s1 = fr.px(3.0 * s, 0.0);
+    line_blend(pb, s0, s1, brass, 0.95);
+    for &u_t in &[1.5f32, 2.5] {
+        let a = fr.px(u_t * s, 0.0);
+        let b = fr.px(u_t * s, -1.3 * s);
+        line_blend(pb, a, b, brass_lo, 0.9);
+    }
+    // The crossbar: dotted while the tell runs, solid once it is live.
+    if e.w3.bar_t > 0.0 {
+        let centre = e.w3.bar_pos - cam;
+        let d = e.w3.bar_dir;
+        let half = crate::game::ecs::systems::enemy_wave3::CROSSBAR_LEN * 0.5;
+        let a = centre - d * half;
+        let b = centre + d * half;
+        let telling = e.w3.bar_telling();
+        let col = if telling {
+            (238, 214, 132)
+        } else if e.w3.bar_spent {
+            (150, 138, 96)
+        } else {
+            (255, 232, 150)
+        };
+        let steps = 11;
+        for k in 0..=steps {
+            if telling && k % 2 == 0 {
+                continue;
+            }
+            let t = k as f32 / steps as f32;
+            let p = a + (b - a) * t;
+            let px = (p.x.round() as i32, p.y.round() as i32);
+            blend_px(pb, px.0, px.1, col, if telling { 0.6 } else { 0.95 });
+            if !telling {
+                // A live bar is two pixels thick so it reads as a barrier.
+                blend_px(pb, px.0, px.1 + 1, scale_rgb(col, 0.7), 0.8);
+            }
+        }
+    }
+}
+
+/// A dead Wick Moth's burning fuse (its own entity; see `components::Wick`).
+///
+/// `t` is the fuse's remaining fraction: the flame grows and whitens as it runs
+/// down, so the 9 px burst at the end is the one thing the rat must step out of.
+pub fn draw_wick(pb: &mut PixelBuffer, wick: &crate::game::ecs::components::Wick, cam: Vec2) {
+    let pos = wick.pos - cam;
+    let total = crate::game::ecs::systems::enemy_wave3::WICK_FUSE_SECS;
+    let t = if total > 0.0 {
+        (1.0 - wick.fuse / total).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let cx = pos.x.round() as i32;
+    let cy = pos.y.round() as i32;
+    // The stub of the wick.
+    for k in 0..3 {
+        blend_px(pb, cx - k, cy, (108, 84, 60), 0.9);
+    }
+    // A flickering flame that grows: 1 px -> 3 px, orange -> white.
+    let r = 1 + (t * 2.0) as i32;
+    let core = mix_rgb((255, 168, 72), (255, 252, 232), t);
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let d2 = dx * dx + dy * dy;
+            if d2 <= r * r {
+                let a = if d2 >= (r * r) - r { 0.55 } else { 0.95 };
+                blend_px(pb, cx + dx, cy + dy - 1, core, a);
+            }
+        }
+    }
+    // The ring the burst will cover: a warning for the 9 px that are about to
+    // hurt both sides.
+    let burst = crate::game::ecs::systems::enemy_wave3::WICK_BURST_RADIUS as i32;
+    let ticks = if t > 0.5 { &DOTTED } else { &ALL_TICKS };
+    cross_mark(pb, (cx, cy), burst, (255, 208, 132), 0.30 + 0.4 * t, ticks);
 }
 
 #[cfg(test)]

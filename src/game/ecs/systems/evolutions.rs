@@ -212,21 +212,39 @@ fn sorted_order<'a>(
 
 /// Damage one body, book the weapon's ledger column and pop a damage number.
 /// Returns `true` when the hit killed it.
+///
+/// `from` is the world point the hit arrives from, for directional armour
+/// (`Enemy::hurt_from`: a curled Pillbug's shell). Every evolution has one:
+/// the dart's previous position, the nearest point of the filament / ring /
+/// stripe, the tagged body that answered. The number drawn is what landed.
 #[allow(clippy::too_many_arguments)]
 fn hit_body(
     enemy: &mut Enemy,
     damage: f32,
+    from: Vec2,
     kind: WeaponKind,
     ledger: &mut DamageLedger,
     damage_numbers: &mut DamageNumbers,
     source: DamageSource,
 ) -> bool {
     let hp_before = enemy.hp.max(0.0);
-    enemy.hurt(damage);
+    let applied = enemy.hurt_from(damage, from);
     let killed = !enemy.alive();
     ledger.add(kind, (hp_before - enemy.hp.max(0.0)).max(0.0));
-    damage_numbers.record(enemy.id, enemy.pos, enemy.radius, damage, killed, source);
+    damage_numbers.record(enemy.id, enemy.pos, enemy.radius, applied, killed, source);
     killed
+}
+
+/// The point of segment `a -> b` nearest to `p` (where a line-shaped hit
+/// "arrives from" for directional armour).
+fn nearest_on_segment(a: Vec2, b: Vec2, p: Vec2) -> Vec2 {
+    let ab = b - a;
+    let len_sq = ab.len_sq();
+    if len_sq <= 1e-6 {
+        return a;
+    }
+    let t = ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+    a + ab * t
 }
 
 /// If `from -> to` crosses a wall, the truncated end point; else `to`. Also
@@ -301,6 +319,7 @@ pub fn milk_teeth_system(
                             let killed = hit_body(
                                 &mut e,
                                 dart.damage,
+                                from,
                                 kind,
                                 &mut ledger,
                                 &mut damage_numbers,
@@ -362,6 +381,7 @@ pub fn milk_teeth_system(
                         let killed = hit_body(
                             &mut e,
                             dart.damage,
+                            from,
                             kind,
                             &mut ledger,
                             &mut damage_numbers,
@@ -429,6 +449,7 @@ pub fn fondue_string_system(
                 let killed = hit_body(
                     &mut e,
                     line.damage,
+                    nearest_on_segment(line.a, line.b, pos),
                     kind,
                     &mut ledger,
                     &mut damage_numbers,
@@ -491,6 +512,7 @@ pub fn fairy_ring_system(
                 let killed = hit_body(
                     &mut e,
                     ring.damage,
+                    ring.pos + (pos - ring.pos).normalized() * ring.radius,
                     kind,
                     &mut ledger,
                     &mut damage_numbers,
@@ -580,6 +602,7 @@ pub fn drain_cleaner_system(
                     let killed = hit_body(
                         &mut e,
                         ch.front_damage,
+                        pos - ch.dir,
                         kind,
                         &mut ledger,
                         &mut damage_numbers,
@@ -601,7 +624,15 @@ pub fn drain_cleaner_system(
                 }
                 if in_stripe(ch.start, ch.dir, ch.length, e.pos, e.radius) {
                     let hp_before = e.hp.max(0.0);
+                    // Directional armour, as `projectiles::pools_system`
+                    // does it: the runoff arrives from the nearest point of
+                    // the stripe's axis. `note_damage` books the side effects
+                    // (a Porter flinches, a dead Wick Moth lights its fuse)
+                    // without `hurt`'s tint.
+                    let axis_end = ch.start + ch.dir * ch.length;
+                    let tick = tick * e.damage_mult_from(nearest_on_segment(ch.start, axis_end, e.pos));
                     e.hp -= tick;
+                    e.note_damage();
                     let killed = !e.alive();
                     ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
                     e.flash = e.flash.max(0.05);
@@ -703,6 +734,7 @@ pub fn roll_call_system(
             let killed = hit_body(
                 &mut victim,
                 damage,
+                origin,
                 WeaponKind::SonicSqueak,
                 &mut ledger,
                 &mut damage_numbers,

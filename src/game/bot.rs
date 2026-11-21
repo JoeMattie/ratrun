@@ -343,6 +343,17 @@ enum Threat {
         facing: Vec2,
         armed: bool,
     },
+    /// A wave-3 floor hazard: a Bell Flea's landing cross or a dead Wick
+    /// Moth's burst are circles (`dir` is `ZERO`); a Turnkey's crossbar is the
+    /// line `pos ± dir * radius`.
+    WaveHazard {
+        pos: Vec2,
+        radius: f32,
+        dir: Vec2,
+        warn_left: f32,
+        active_left: f32,
+        damage: f32,
+    },
 }
 
 /// The bot: policy state plus its own rng stream.
@@ -744,6 +755,11 @@ impl Bot {
                     damage: en.damage,
                     kind: en.kind,
                 });
+                // Wave 3: the warned attacks that are already on the floor.
+                // The body is a threat of its own above; these are the shapes
+                // its tell has committed to, so the bot can leave them now
+                // instead of walking into them when they bite.
+                self.scan_wave3_enemy(w, en, p);
             } else if let Some(b) = e.get::<Bullet>() {
                 if b.faction != Faction::Enemy || !self.sees(w, p, b.pos) {
                     continue;
@@ -780,6 +796,19 @@ impl Bot {
                         warn_left: self.quantise_warn((h.warn - h.elapsed).max(0.0)),
                         active_left: (h.warn + h.active - h.elapsed).max(0.0),
                         damage: h.damage,
+                    });
+                }
+            } else if let Some(wick) = e.get::<crate::game::ecs::components::Wick>() {
+                // A dead moth's fuse: the burst lands when the fuse runs out,
+                // so it reads exactly like a hazard with `fuse` left to warn.
+                if self.sees(w, p, wick.pos) {
+                    self.threats.push(Threat::WaveHazard {
+                        pos: wick.pos,
+                        radius: crate::game::ecs::systems::enemy_wave3::WICK_BURST_RADIUS,
+                        dir: Vec2::ZERO,
+                        warn_left: wick.fuse,
+                        active_left: wick.fuse + 0.10,
+                        damage: crate::game::ecs::systems::enemy_wave3::WICK_RAT_DAMAGE,
                     });
                 }
             } else if let Some(bp) = e.get::<BossProjectile>() {
@@ -831,6 +860,57 @@ impl Bot {
                     });
                 }
             }
+        }
+    }
+
+    /// Push the floor shapes a wave-3 body's tell has already committed to.
+    fn scan_wave3_enemy(&mut self, w: &World, en: &Enemy, p: Vec2) {
+        use crate::game::ecs::systems::enemy_wave3 as w3;
+        match en.kind {
+            EnemyKind::BellFlea => {
+                if en.w3.flea_phase == 0 {
+                    return;
+                }
+                // Phase 1: both crosses are pending. Phase 2: the first has
+                // landed and the spring back home is pending.
+                let landed = en.w3.flea_phase == 2;
+                let cross = |pos: Vec2, warn: f32| Threat::WaveHazard {
+                    pos,
+                    radius: w3::FLEA_CROSS_RADIUS,
+                    dir: Vec2::ZERO,
+                    warn_left: warn,
+                    active_left: warn + 0.20,
+                    damage: w3::FLEA_CROSS_DAMAGE,
+                };
+                if !landed && self.sees(w, p, en.w3.hop_to) {
+                    self.threats.push(cross(en.w3.hop_to, en.w3.flea_t));
+                }
+                if self.sees(w, p, en.w3.home) {
+                    let warn = if landed { en.w3.flea_t } else { en.w3.flea_t + w3::FLEA_GAP_SECS };
+                    self.threats.push(cross(en.w3.home, warn));
+                }
+            }
+            EnemyKind::Turnkey => {
+                if en.w3.bar_t <= 0.0 || !self.sees(w, p, en.w3.bar_pos) {
+                    return;
+                }
+                let warn_left = if en.w3.bar_telling() {
+                    en.w3.bar_t - w3::CROSSBAR_LIVE_SECS
+                } else if en.w3.bar_spent {
+                    return;
+                } else {
+                    0.0
+                };
+                self.threats.push(Threat::WaveHazard {
+                    pos: en.w3.bar_pos,
+                    radius: w3::CROSSBAR_LEN * 0.5,
+                    dir: en.w3.bar_dir,
+                    warn_left,
+                    active_left: en.w3.bar_t,
+                    damage: w3::CROSSBAR_DAMAGE,
+                });
+            }
+            _ => {}
         }
     }
 
@@ -1501,6 +1581,35 @@ fn threat_cost(_p: Vec2, threat: Threat, q: Vec2, t: f32, contact_scale: f32) ->
                 4.0
             } else {
                 0.0
+            }
+        }
+        Threat::WaveHazard {
+            pos,
+            radius,
+            dir,
+            warn_left,
+            active_left,
+            damage,
+        } => {
+            if active_left <= 0.0 {
+                return 0.0;
+            }
+            let inside = if dir.len_sq() > 0.5 {
+                // A crossbar: the line `pos ± dir * radius`, 1 px thick.
+                let half = dir * radius;
+                crate::game::collision::segment_circle_hit(pos - half, pos + half, 1.0, q, R)
+            } else {
+                pos.dist(q) <= radius + R
+            };
+            if !inside {
+                0.0
+            } else if warn_left > t + 0.12 {
+                // It does not fire inside the lookahead: leave it for later.
+                0.0
+            } else {
+                // A floor hazard that is about to bite is worth more than a
+                // body's contact: it cannot be walked around mid-swing.
+                (damage / 8.0).clamp(0.8, 4.0) * 15.0 * (1.0 - 0.5 * contact_scale)
             }
         }
     }

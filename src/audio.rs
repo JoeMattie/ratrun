@@ -107,11 +107,17 @@ pub enum Sfx {
     Evolve,
     /// The flatbed's suspension over an expansion joint: one soft thud.
     Bump,
+    // Wave 3 ordinary enemies: the warned-attack tick, the flea's landing
+    // double-click, the wick going up and the turnkey's crossbar biting.
+    Warn,
+    FleaHop,
+    WickBurst,
+    Crossbar,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 71] = [
+    pub const ALL: [Sfx; 75] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -193,6 +199,11 @@ impl Sfx {
         Sfx::Infect,
         Sfx::Evolve,
         Sfx::Bump,
+        // Wave 3 enemies.
+        Sfx::Warn,
+        Sfx::FleaHop,
+        Sfx::WickBurst,
+        Sfx::Crossbar,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -269,6 +280,10 @@ impl Sfx {
             Sfx::Infect => "INFECT",
             Sfx::Evolve => "EVOLVE",
             Sfx::Bump => "BUMP",
+            Sfx::Warn => "WARN",
+            Sfx::FleaHop => "FLEA_HOP",
+            Sfx::WickBurst => "WICK_BURST",
+            Sfx::Crossbar => "CROSSBAR",
         }
     }
 
@@ -285,6 +300,7 @@ impl Sfx {
             | Sfx::SonicSqueak
             | Sfx::LaserEyes
             | Sfx::SuperDash
+            | Sfx::FleaHop
             | Sfx::BroomStomp => 4,
             Sfx::Explosion
             | Sfx::Hurt
@@ -297,6 +313,8 @@ impl Sfx {
             | Sfx::TrapTrigger
             | Sfx::TrapSnap
             | Sfx::HoleSqueeze
+            | Sfx::Warn
+            | Sfx::Crossbar
             | Sfx::CatGrowl
             | Sfx::CatPounce
             | Sfx::CatLand
@@ -335,6 +353,7 @@ impl Sfx {
             | Sfx::Lose
             | Sfx::BossDeath
             | Sfx::CacheOpen
+            | Sfx::WickBurst
             | Sfx::CatRoar
             | Sfx::CatDeath
             | Sfx::BroomDefeat
@@ -375,6 +394,7 @@ impl Sfx {
             | Sfx::Magnet
             | Sfx::Pickup
             | Sfx::TrapSnap
+            | Sfx::WickBurst
             | Sfx::GateSlam
             | Sfx::CatCrouch
             | Sfx::CatPounce
@@ -406,6 +426,7 @@ impl Sfx {
             | Sfx::GateOpen
             | Sfx::GateRefuse
             | Sfx::HoleSqueeze
+            | Sfx::Crossbar
             | Sfx::CatGrowl
             | Sfx::BroomHop
             | Sfx::MowerIdle
@@ -418,6 +439,8 @@ impl Sfx {
             Sfx::Gold => 0,
             // Pure feedback: never steals a voice from a hit or a kill.
             Sfx::DashReady | Sfx::DashDenied => 0,
+            // Wave 3 enemy tells: quiet by design.
+            Sfx::Warn | Sfx::FleaHop => 0,
         }
     }
 
@@ -5549,6 +5572,175 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             });
             m.add_short_tail(0.18, 2600.0);
             m.finish(0.42, 1.0, 1.4, 9.0)
+        }
+        // 65. Warn: a wave-3 ordinary enemy starting a warned attack. Two soft
+        // wooden ticks a fifth apart — quiet on purpose, because up to two of
+        // them start near one another every second or two late in a run.
+        Sfx::Warn => {
+            const PITCH: [f32; 3] = [1.0, 1.05, 0.96];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.20);
+            for &(st, f, g) in &[(0.0f32, 660.0f32, 0.34f32), (0.055, 440.0, 0.26)] {
+                m.add_osc(OscLayer {
+                    start_s: st,
+                    dur_s: 0.075,
+                    f0: f * p,
+                    f1: f * 0.86 * p,
+                    pitch_pow: 0.8,
+                    wave: Wave::Triangle,
+                    gain: g,
+                    attack_s: 0.004,
+                    decay_pow: 1.9,
+                    ..Default::default()
+                });
+            }
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.045,
+                pink: false,
+                gain: 0.10,
+                attack_s: 0.002,
+                decay_pow: 2.4,
+                filter: FilterMode::BandPass,
+                fc0: 1800.0 * p,
+                fc1: 900.0 * p,
+                q: 1.6,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_short_tail(0.08, 2600.0);
+            m.finish(0.44, 1.2, 2.2, 24.0)
+        }
+
+        // 66. FleaHop: a landing cross snapping shut — a tiny copper click with
+        // a short spring after it. The second landing is one pitch down.
+        Sfx::FleaHop => {
+            const PITCH: [f32; 4] = [1.0, 1.12, 0.90, 1.06];
+            let p = PITCH[v];
+            let down = if v == 2 { 0.86 } else { 1.0 };
+            let mut m = MixBuf::new(0.16);
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.045,
+                f0: 1450.0 * p * down,
+                f1: 640.0 * p * down,
+                pitch_pow: 1.4,
+                wave: Wave::Pulse(0.35),
+                gain: 0.34,
+                attack_s: 0.001,
+                decay_pow: 2.6,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.008,
+                dur_s: 0.070,
+                pink: false,
+                gain: 0.16,
+                attack_s: 0.001,
+                decay_pow: 2.2,
+                filter: FilterMode::HighPass,
+                fc0: 3200.0 * p,
+                fc1: 1400.0 * p,
+                q: 0.8,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_short_tail(0.06, 3400.0);
+            m.finish(0.42, 1.2, 2.4, 30.0)
+        }
+
+        // 67. WickBurst: the fuse gives up. A hot paper flash, a small dry pop
+        // and a falling ember tail.
+        Sfx::WickBurst => {
+            let mut m = MixBuf::new(0.34);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.080,
+                pink: false,
+                gain: 0.44,
+                attack_s: 0.001,
+                decay_pow: 2.2,
+                filter: FilterMode::HighPass,
+                fc0: 4200.0,
+                fc1: 1500.0,
+                q: 0.7,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.16,
+                f0: 330.0,
+                f1: 96.0,
+                pitch_pow: 0.5,
+                wave: Wave::Sine,
+                gain: 0.54,
+                attack_s: 0.002,
+                decay_pow: 1.4,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.030,
+                dur_s: 0.20,
+                f0: 880.0,
+                f1: 320.0,
+                pitch_pow: 1.2,
+                wave: Wave::Triangle,
+                gain: 0.20,
+                attack_s: 0.004,
+                decay_pow: 1.9,
+                ..Default::default()
+            });
+            m.add_short_tail(0.14, 3000.0);
+            m.finish(0.56, 1.3, 2.6, 34.0)
+        }
+
+        // 68. Crossbar: the turnkey's bar biting the rat. A short brass clack
+        // with a flat metallic body — one per bar, so it has to read.
+        Sfx::Crossbar => {
+            const PITCH: [f32; 3] = [1.0, 1.06, 0.94];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.22);
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.055,
+                f0: 620.0 * p,
+                f1: 410.0 * p,
+                pitch_pow: 1.1,
+                wave: Wave::Pulse(0.35),
+                gain: 0.38,
+                attack_s: 0.001,
+                decay_pow: 2.4,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.010,
+                dur_s: 0.13,
+                f0: 1240.0 * p,
+                f1: 760.0 * p,
+                pitch_pow: 1.3,
+                wave: Wave::Triangle,
+                gain: 0.18,
+                attack_s: 0.003,
+                decay_pow: 2.0,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.050,
+                pink: false,
+                gain: 0.20,
+                attack_s: 0.001,
+                decay_pow: 2.6,
+                filter: FilterMode::BandPass,
+                fc0: 2400.0 * p,
+                fc1: 1100.0 * p,
+                q: 1.2,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_short_tail(0.10, 3200.0);
+            m.finish(0.50, 1.2, 2.4, 28.0)
         }
     }
 }

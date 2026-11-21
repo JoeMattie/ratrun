@@ -239,7 +239,9 @@ fn is_live_mouse(state: MousetrapState) -> bool {
 /// Ground enemies can be glued and can trip a mousetrap; Bats fly over both.
 #[inline]
 fn is_ground(kind: EnemyKind) -> bool {
-    !matches!(kind, EnemyKind::Bat)
+    // The Wick Moth flies (a teardrop with a lit tail) exactly like the Bat, so
+    // glue and mousetraps do not hold it either.
+    !matches!(kind, EnemyKind::Bat | EnemyKind::WickMoth)
 }
 
 /// `(hold seconds, movement multiplier)` for a ground enemy caught by glue.
@@ -367,7 +369,8 @@ fn snap_window(
         if !e.alive() {
             continue;
         }
-        e.hurt(MOUSETRAP_DAMAGE_ENEMY);
+        // Directional armour (the Pillbug's shell) applies to a trap bite too.
+        let applied = e.hurt_from(MOUSETRAP_DAMAGE_ENEMY, pos);
         let killed = !e.alive();
         // Kills go through `loot::reap_enemies_system` later this tick: gem,
         // score, `Sfx::Kill`/`Explosion`, death burst — the normal loot path.
@@ -376,7 +379,7 @@ fn snap_window(
             e.id,
             e.pos,
             e.radius,
-            MOUSETRAP_DAMAGE_ENEMY,
+            applied,
             killed,
             DamageSource::Normal,
         );

@@ -156,6 +156,30 @@ impl Infection {
     }
 }
 
+/// A dead Wick Moth's burning fuse (`WAVE3_DESIGN.md` §9).
+///
+/// The moth's body is reaped with every other corpse, so the fuse is its own
+/// entity: [`crate::game::ecs::systems::enemy_wave3`] spawns one on the tick it
+/// sees a dead moth, burns `fuse` down, and then bursts for 9 to the rat and 20
+/// to every enemy inside 9 px. A moth killed by a burst leaves its own fuse, so
+/// the chain only ends when the moths do.
+#[derive(Component, Clone, Debug)]
+pub struct Wick {
+    pub pos: Vec2,
+    /// Seconds left before the burst.
+    pub fuse: f32,
+}
+
+impl Wick {
+    /// A fresh, fully-fused wick at `pos`.
+    pub fn new(pos: Vec2) -> Self {
+        Wick {
+            pos,
+            fuse: crate::game::ecs::systems::enemy_wave3::WICK_FUSE_SECS,
+        }
+    }
+}
+
 // ---- Component impls for the frozen leaf entity structs ------------------
 
 impl Component for Enemy {

@@ -508,6 +508,9 @@ pub fn pickups_system(
                     };
                     if e.kind != EnemyKind::Boss {
                         e.hp = -1.0;
+                        // A nuke kills a Wick Moth *and* lights its fuse: the
+                        // burst still belongs to the moth, not the pickup.
+                        e.note_damage();
                     } else {
                         e.hurt(200.0);
                         // Neon hook: the boss Nuke damage number.

@@ -158,7 +158,8 @@ fn laser_pulse(
             continue;
         }
         let hp_before = e.hp.max(0.0);
-        e.hurt(dmg);
+        // Directional armour: the beam arrives from the rat's eyes.
+        let applied = e.hurt_from(dmg, origin);
         let killed = !e.alive();
         ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
         let pos = e.pos;
@@ -169,7 +170,7 @@ fn laser_pulse(
             enemy_id,
             pos,
             enemy_radius,
-            dmg,
+            applied,
             killed,
             DamageSource::Normal,
         );
@@ -386,7 +387,11 @@ pub fn super_dash_system(
         }
         track.mark_hit(id.0);
         let hp_before = e.hp.max(0.0);
-        e.hurt(dmg);
+        // Directional armour: the hit arrives along the dash's travel, i.e.
+        // from the point one leg behind the body (a zero-length leg has no
+        // direction and takes the unmodified multiplier).
+        let arrives_from = e.pos - (to - from);
+        let applied = e.hurt_from(dmg, arrives_from);
         let killed = !e.alive();
         ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
         let pos = e.pos;
@@ -400,7 +405,7 @@ pub fn super_dash_system(
             enemy_id,
             pos,
             enemy_radius,
-            dmg,
+            applied,
             killed,
             DamageSource::Normal,
         );

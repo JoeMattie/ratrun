@@ -802,14 +802,18 @@ fn thrash_sweep(
             continue;
         }
         let hp_before = e.hp.max(0.0);
-        e.hurt(dmg);
+        // Directional armour (the Pillbug's shell): the sweep arrives from the
+        // rat, so the recorded number is what actually landed.
+        let applied = e.hurt_from(dmg, ppos);
         let killed = !e.alive();
         ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
         let pos = e.pos;
         let out = (pos - ppos).normalized();
         let enemy_radius = e.radius;
         let enemy_id = e.id;
-        let heavy = matches!(e.kind, EnemyKind::Brute | EnemyKind::Boss);
+        // Brutes, the boss and the wave-3 Pillbug keep their footing (a
+        // curled shell is not something a tail sweep shoves around).
+        let heavy = e.kind.heavy();
         let knock = if heavy { THRASH_BOSS_KNOCKBACK } else { 1.0 };
         e.vel = out * THRASH_KNOCKBACK * knock * shove_mult;
         vfx::emit_thrash_hit(particles, &mut rng.0, pos, out, killed);
@@ -817,7 +821,7 @@ fn thrash_sweep(
             enemy_id,
             pos,
             enemy_radius,
-            dmg,
+            applied,
             killed,
             DamageSource::TailWhip,
         );
@@ -934,7 +938,8 @@ fn squeak_ring(
             continue;
         }
         let hp_before = e.hp.max(0.0);
-        e.hurt(dmg);
+        // The ring arrives from its own origin, so the shell faces it.
+        let applied = e.hurt_from(dmg, origin);
         let killed = !e.alive();
         ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
         let pos = e.pos;
@@ -945,7 +950,7 @@ fn squeak_ring(
         // pinned for the full stun. Wall cover blocks the ring exactly as it
         // blocks the weapons: the arc of a squeak is physical.
         if los_clear(level, origin, pos, MELEE_LOS_RADIUS) {
-            if e.elite || matches!(e.kind, EnemyKind::Brute) {
+            if e.elite || e.kind.heavy() {
                 e.slow_for(SQUEAK_ELITE_SLOW, SQUEAK_STUN);
             } else {
                 e.stun_for(SQUEAK_STUN);
@@ -966,7 +971,7 @@ fn squeak_ring(
             enemy_id,
             pos,
             enemy_radius,
-            dmg,
+            applied,
             killed,
             DamageSource::Normal,
         );
@@ -1216,7 +1221,8 @@ fn fire_one(
                     && los_clear(level, ppos, e.pos, MELEE_LOS_RADIUS)
                 {
                     let hp_before = e.hp.max(0.0);
-                    e.hurt(dmg);
+                    // The whip arrives from the rat: the shell can eat it.
+                    let applied = e.hurt_from(dmg, ppos);
                     let killed = !e.alive();
                     // Balance instrumentation only (see `DamageLedger`).
                     ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
@@ -1243,7 +1249,7 @@ fn fire_one(
                         enemy_id,
                         pos,
                         enemy_radius,
-                        dmg,
+                        applied,
                         killed,
                         DamageSource::TailWhip,
                     );
@@ -1552,14 +1558,16 @@ fn ratchet_swing(
             continue;
         }
         let hp_before = e.hp.max(0.0);
-        e.hurt(dmg);
+        // Directional armour: the swung body arrives from the rat's side,
+        // like the whip itself.
+        let applied = e.hurt_from(dmg, ppos);
         let killed = !e.alive();
         ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
         let pos = e.pos;
         let radius = e.radius;
         let id = e.id;
         vfx::emit_tail_whip_hit(particles, &mut rng.0, pos, pos - ppos, killed);
-        damage_numbers.record(id, pos, radius, dmg, killed, DamageSource::TailWhip);
+        damage_numbers.record(id, pos, radius, applied, killed, DamageSource::TailWhip);
     }
     // 5. Release: the body lands a quarter turn around the rat.
     if let Ok((_, _, mut e)) = enemies.get_mut(hooked) {

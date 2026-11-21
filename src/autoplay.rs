@@ -290,6 +290,11 @@ impl DamageCause {
             DamageCause::EnemyContact(EnemyKind::Spitter) => "spitter contact",
             DamageCause::EnemyContact(EnemyKind::Brute) => "brute contact",
             DamageCause::EnemyContact(EnemyKind::Boss) => "boss contact",
+            DamageCause::EnemyContact(EnemyKind::Pillbug) => "pillbug contact",
+            DamageCause::EnemyContact(EnemyKind::BellFlea) => "bell flea contact",
+            DamageCause::EnemyContact(EnemyKind::WickMoth) => "wick moth contact",
+            DamageCause::EnemyContact(EnemyKind::Porter) => "porter contact",
+            DamageCause::EnemyContact(EnemyKind::Turnkey) => "turnkey contact",
             DamageCause::EnemyBullet => "spitter bullets",
             DamageCause::BossContact(BossKind::Cat) => "jaguar body",
             DamageCause::BossContact(BossKind::Broom) => "broom human body",
@@ -1116,6 +1121,11 @@ fn enemy_kind_name(kind: EnemyKind) -> &'static str {
         EnemyKind::Spitter => "spitter",
         EnemyKind::Brute => "brute",
         EnemyKind::Boss => "boss",
+        EnemyKind::Pillbug => "pillbug",
+        EnemyKind::BellFlea => "bell flea",
+        EnemyKind::WickMoth => "wick moth",
+        EnemyKind::Porter => "porter",
+        EnemyKind::Turnkey => "turnkey",
     }
 }
 
