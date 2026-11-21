@@ -92,14 +92,17 @@ impl Theme {
         }
     }
 
-    /// Every theme a `World` can be built on, campaign themes first and the
-    /// getaway ride last. Tests and the title's sector row use this.
+    /// Every theme a `World` can be built on, in **route order**: stage one,
+    /// the two stage-two alternatives, the two stage-three alternatives, then
+    /// the getaway ride last. Tests, the title's sector row and the sector
+    /// select screen all list this order, so the row's cursor, the select
+    /// screen's grid and a run's `level_index` never disagree.
     pub fn playable() -> [Theme; 6] {
         [
             Theme::Sewer,
             Theme::Kitchen,
-            Theme::Lab,
             Theme::Laundry,
+            Theme::Lab,
             Theme::Printworks,
             Theme::Trailer,
         ]

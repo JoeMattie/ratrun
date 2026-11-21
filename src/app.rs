@@ -153,9 +153,14 @@ pub struct App {
     /// the game state asks for would otherwise be unobservable.
     music_intensity: u32,
     scores: ScoreTable,
-    /// The sector-select cursor (`0..3`); also the sector the title shows, so
-    /// the title's material tint and menu music follow it.
+    /// The floor cursor: an index into `Theme::playable()`, which is the same
+    /// order the title's sector row and the sector-select grid list. Also the
+    /// floor the title shows, so the title's material tint and menu music
+    /// follow it.
     select_idx: usize,
+    /// The sector-select panel's on-screen area last frame. `Up`/`Down` step a
+    /// whole grid row, whose width the art owns (`campaign::level_select_cols`).
+    last_select_area: Rect,
     menu_idx: usize,
     /// The campaign run in flight (`None` on the title and during a practice
     /// run). It owns the carried loadout and the banked totals.
@@ -305,6 +310,7 @@ impl App {
             music_intensity: 0,
             scores,
             select_idx: 0,
+            last_select_area: Rect::new(0, 0, 0, 0),
             menu_idx: 0,
             campaign: None,
             practice: None,
@@ -391,10 +397,10 @@ impl App {
 
     /// The theme of the floor the title/select screen points at.
     ///
-    /// The title's sector row lists every playable floor (`Theme::playable()`:
-    /// the three original stages, the two side-route floors, then the Flatbed
-    /// getaway), so the material tint/menu music follow whichever one is
-    /// selected.
+    /// The title's sector row and the sector-select grid both list every
+    /// playable floor in `Theme::playable()` order (stage one, the two
+    /// stage-two floors, the two stage-three floors, then the Flatbed getaway),
+    /// so one cursor drives the material tint, the menu music and both lists.
     fn theme(&self) -> Theme {
         Theme::playable()[self.floor()]
     }
@@ -404,25 +410,47 @@ impl App {
         self.select_idx.min(Theme::playable().len() - 1)
     }
 
-    /// The **campaign stage** the selected floor belongs to (`0..3`): what the
-    /// sector-select screen and the unlock checks use.
-    fn sector(&self) -> usize {
-        campaign::theme_stage(self.theme())
+    /// The floor a live run is being played on (the title's cursor when no run
+    /// is in flight). Plates drawn during a run must name **this** floor: the
+    /// title's cursor may still sit on whichever floor the run was launched
+    /// from, or on the Flatbed.
+    fn live_theme(&self) -> Theme {
+        self.world
+            .as_ref()
+            .map(|w| w.level.theme)
+            .unwrap_or_else(|| self.theme())
     }
 
-    /// Is the floor the cursor is on selectable? A floor unlocks with its
-    /// campaign stage; the getaway ride is a bonus practice floor and is
-    /// always open.
+    /// Is the floor the cursor is on selectable? Its campaign stage must be
+    /// reachable; the getaway ride is a bonus practice floor and is always
+    /// open.
     fn sector_unlocked(&self) -> bool {
-        self.theme() == campaign::getaway_theme() || self.scores.level_unlocked(self.sector())
+        self.scores.floor_unlocked(self.theme())
     }
 
-    /// Step the floor cursor, wrapping through the whole sector row.
-    fn cycle_sector(&mut self, step: isize) {
+    /// How many cards wide the sector-select grid is at the area it last drew
+    /// in. `Up`/`Down` move a whole visual row; before the first draw (or on a
+    /// terminal that has not sized the screen yet) the grid is a single column.
+    fn select_cols(&self) -> isize {
+        campaign_ui::level_select_cols(self.last_select_area) as isize
+    }
+
+    /// Step the floor cursor by `delta` slots, wrapping through the whole
+    /// sector row. This is the visual order both lists use.
+    fn sector_step(&mut self, delta: isize) {
         let n = Theme::playable().len() as isize;
-        self.select_idx = (self.select_idx as isize + step).rem_euclid(n) as usize;
+        if n == 0 {
+            return;
+        }
+        self.select_idx =
+            (self.floor() as isize + delta).rem_euclid(n) as usize;
         self.menu_music();
         self.sfx(Sfx::UiMove);
+    }
+
+    /// Step the floor cursor one slot.
+    fn cycle_sector(&mut self, step: isize) {
+        self.sector_step(step);
     }
 
     /// Render the RASCII rat logo sized to the title area. The menu and key
@@ -628,7 +656,6 @@ impl App {
     /// sector refuses and stays put.
     fn start_sector(&mut self) {
         let theme = self.theme();
-        let level = campaign::theme_stage(theme);
         if !self.sector_unlocked() {
             self.sfx(Sfx::UiMove);
             return;
@@ -636,9 +663,11 @@ impl App {
         self.sfx(Sfx::UiSelect);
         if theme == campaign::getaway_theme() {
             self.start_getaway();
-        } else if level == 0 {
+        } else if campaign::theme_stage(theme) == 0 {
+            // Stage one is the campaign's front door, exactly as START RUN.
             self.start_run();
         } else {
+            // Any later floor is a labelled practice run on **that** floor.
             self.start_practice(theme);
         }
     }
@@ -831,7 +860,9 @@ impl App {
                             }
                         }
                         Some(Target::SelectSector(i)) => {
-                            self.select_idx = i.min(campaign::LEVEL_COUNT - 1)
+                            // The target carries the **floor** index (into
+                            // `Theme::playable()`), never a campaign stage.
+                            self.select_idx = i.min(Theme::playable().len().saturating_sub(1));
                         }
                         Some(Target::KeepItem(i)) => self.keep_cursor = i,
                         Some(Target::RouteOption(_)) => self.menu_idx = 1,
@@ -1235,14 +1266,10 @@ impl App {
             }
             Some(Target::Sectors) => {
                 self.sfx(Sfx::UiSelect);
-                if self.theme() == campaign::getaway_theme() {
-                    // The getaway ride has no campaign card in the sector
-                    // select: the title row starts it directly.
-                    self.start_sector();
-                } else {
-                    // The sector select opens on the sector the title shows.
-                    self.screen = Screen::SectorSelect;
-                }
+                // The select screen lists every floor — the getaway ride has a
+                // card of its own — so Enter always opens it, on whichever
+                // floor the title's row is pointing at.
+                self.screen = Screen::SectorSelect;
             }
             Some(Target::Options) => {
                 self.sfx(Sfx::UiSelect);
@@ -1254,8 +1281,11 @@ impl App {
         }
     }
 
-    /// Sector select: `←`/`→` move, Enter starts the highlighted sector, Esc
-    /// or the art's Back control returns to the title.
+    /// Sector select: the arrows move through the grid in visual order
+    /// (`Left`/`Right` one floor, `Up`/`Down` one row of
+    /// [`App::select_cols`]), Enter starts the highlighted floor, Esc or the
+    /// art's Back control returns to the title. Locked floors can be selected
+    /// and read; starting one refuses.
     fn update_sector_select(&mut self, click: Option<Target>) {
         if click == Some(Target::Back)
             || self.input.just_pressed(KeyCode::Esc)
@@ -1267,7 +1297,8 @@ impl App {
         }
         match click {
             Some(Target::SelectSector(i)) => {
-                self.select_idx = i.min(campaign::LEVEL_COUNT - 1);
+                // A float index into `Theme::playable()`, never a stage.
+                self.select_idx = i.min(Theme::playable().len().saturating_sub(1));
                 self.menu_music();
                 self.sfx(Sfx::UiMove);
             }
@@ -1275,11 +1306,18 @@ impl App {
             Some(Target::NextSector) => self.cycle_sector(1),
             _ => {}
         }
-        if self.input.just_pressed(KeyCode::Left) || self.input.just_pressed(KeyCode::Up) {
+        if self.input.just_pressed(KeyCode::Left) {
             self.cycle_sector(-1);
         }
-        if self.input.just_pressed(KeyCode::Right) || self.input.just_pressed(KeyCode::Down) {
+        if self.input.just_pressed(KeyCode::Right) {
             self.cycle_sector(1);
+        }
+        let cols = self.select_cols();
+        if self.input.just_pressed(KeyCode::Up) {
+            self.sector_step(-cols);
+        }
+        if self.input.just_pressed(KeyCode::Down) {
+            self.sector_step(cols);
         }
         if click == Some(Target::StartSector) || self.input.just_pressed(KeyCode::Enter) {
             self.start_sector();
@@ -1790,21 +1828,25 @@ impl App {
             return;
         };
         let level = w.level_index.min(campaign::LEVEL_COUNT - 1);
+        let theme = w.level.theme;
+        let getaway = w.level_index >= campaign::LEVEL_COUNT;
         let record = LevelRecord {
             time: w.elapsed,
             kills: w.kills,
             score: w.score,
             player_level: w.player.level,
-            plate: Some(campaign_ui::CampaignLevel::from_theme(w.level.theme)),
+            plate: Some(campaign_ui::CampaignLevel::from_theme(theme)),
         };
         let campaign_won = self.campaign.is_some() && w.campaign_won();
-        // The getaway ride is a practice floor: clearing it must not overwrite
-        // the final campaign sector's record or mark it cleared.
-        let getaway = w.level_index >= campaign::LEVEL_COUNT;
+        // The campaign's per-stage breakdown only takes campaign levels: the
+        // getaway ride is a practice floor and must not overwrite a stage.
         if !getaway {
             self.records[level] = record;
-            self.scores.record_level(level, record.score, record.time);
         }
+        // Bests are banked **per floor**, so the Kitchen and the Laundry (both
+        // stage two) keep separate records, and the getaway ride gets its own
+        // instead of clobbering the final campaign sector's.
+        self.scores.record_floor(theme, record.score, record.time);
         // One card per owned weapon and per passive; counted without building
         // the keepable list twice.
         self.owned_upgrades = w.player.loadout.weapons.len() + w.player.loadout.passives.len();
@@ -1917,11 +1959,29 @@ impl App {
         }
     }
 
+    /// The floor the run goes to after the level in flight, from the
+    /// campaign's chosen route (`campaign::Route`) — **not** a stage index.
+    /// `None` when this clear ends the run: a practice floor, the getaway ride,
+    /// a final-stage floor, or no campaign in flight.
+    fn next_level_plate(&self) -> Option<campaign_ui::CampaignLevel> {
+        let world = self.world.as_ref()?;
+        let camp = self.campaign.as_ref()?;
+        let index = world.level_index;
+        if index >= campaign::LEVEL_COUNT || campaign::is_final_level(index) {
+            return None;
+        }
+        // The route already holds the player's floor choice for the next stage
+        // (`Route::ORIGINAL` until the keep screen changes it).
+        Some(campaign_ui::CampaignLevel::from_theme(
+            camp.route.theme(index + 1),
+        ))
+    }
+
     /// `(selected, required)` straight from the art's own helpers, so the pack
     /// size is decided in one place (`keep_three_required`).
     fn keep_counts(&self) -> (usize, usize) {
         let view = campaign_ui::KeepThreeView {
-            from_level: campaign_ui::CampaignLevel::from_theme(self.theme()),
+            from_level: campaign_ui::CampaignLevel::from_theme(self.live_theme()),
             next_level: self.keep_next_level(),
             gold: self.world.as_ref().map_or(0, |w| w.gold),
             items: &self.keep_entries,
@@ -2372,7 +2432,10 @@ impl App {
                     Screen::MapIntro => menu::draw_map_intro(
                         frame,
                         area,
-                        self.theme(),
+                        // The floor actually being played: the title's cursor
+                        // may sit on another floor (or the Flatbed) when the
+                        // campaign was launched.
+                        self.live_theme(),
                         self.world
                             .as_ref()
                             .map(|w| {
@@ -2538,32 +2601,54 @@ impl App {
 
     // ---- Campaign plates -------------------------------------------------
 
-    /// Sector select: three bay cards fed from the persisted per-level bests,
-    /// with the art's own hover/selection styling and click rectangles.
+    /// Sector select: one card per floor, in route order, fed from the
+    /// persisted **per-floor** bests, with the art's own hover/selection
+    /// styling and click rectangles.
+    ///
+    /// The slot list is built from `Theme::playable()` — never a hard-coded
+    /// count — so a new floor shows up here without touching this function.
+    /// Each slot carries its own floor index, so selecting a slot selects
+    /// exactly that floor: what is highlighted, what the header names and what
+    /// starts are the same theme.
     fn draw_sector_select(&mut self, frame: &mut Frame, area: Rect) {
+        self.last_select_area = area;
         draw_backdrop(frame, area);
         let mut slots = [campaign_ui::LevelSlotView {
+            floor: 0,
             level: campaign_ui::CampaignLevel::Sewer,
+            stage: 0,
             unlocked: true,
             best: None,
-        }; campaign::LEVEL_COUNT];
-        for (i, slot) in slots.iter_mut().enumerate() {
-            slot.level = campaign_ui::CampaignLevel::from_index(i);
-            slot.unlocked = self.scores.level_unlocked(i);
-            slot.best = self.scores.level_best(i).map(|b| campaign_ui::LevelBest {
-                score: b.score,
-                best_time_secs: b.time,
-                cleared: b.cleared,
-            });
+        }; campaign_ui::MAX_LEVEL_SLOTS];
+        let mut count = 0usize;
+        for (floor, theme) in Theme::playable().into_iter().enumerate() {
+            if count >= slots.len() {
+                break;
+            }
+            let stage = if theme.is_trailer() {
+                campaign::LEVEL_COUNT
+            } else {
+                campaign::theme_stage(theme)
+            };
+            slots[count] = campaign_ui::LevelSlotView {
+                floor,
+                level: campaign_ui::CampaignLevel::from_theme(theme),
+                stage,
+                unlocked: self.scores.floor_unlocked(theme),
+                best: self.scores.floor_best(theme).map(|b| campaign_ui::LevelBest {
+                    score: b.score,
+                    best_time_secs: b.time,
+                    cleared: b.cleared,
+                }),
+            };
+            count += 1;
         }
         let view = campaign_ui::LevelSelectView {
-            slots,
-            selected: self.sector().min(campaign::LEVEL_COUNT - 1),
+            slots: &slots[..count],
+            selected: self.floor(),
             hovered: match self.hits.hovered {
-                Some(Target::SelectSector(i)) => {
-                    Some(campaign_ui::LevelSelectAction::SelectLevel(
-                        campaign_ui::CampaignLevel::from_index(i),
-                    ))
+                Some(Target::SelectSector(floor)) => {
+                    Some(campaign_ui::LevelSelectAction::SelectLevel(floor))
                 }
                 Some(Target::StartSector) => Some(campaign_ui::LevelSelectAction::Start),
                 Some(Target::Back) => Some(campaign_ui::LevelSelectAction::Back),
@@ -2573,8 +2658,8 @@ impl App {
         let list = campaign_ui::draw_level_select(frame, area, &view);
         for (rect, action) in list.iter() {
             let target = match action {
-                campaign_ui::LevelSelectAction::SelectLevel(level) => {
-                    Target::SelectSector(level.index())
+                campaign_ui::LevelSelectAction::SelectLevel(floor) => {
+                    Target::SelectSector(floor)
                 }
                 campaign_ui::LevelSelectAction::Start => Target::StartSector,
                 campaign_ui::LevelSelectAction::Back => Target::Back,
@@ -2602,6 +2687,9 @@ impl App {
                     level_score: w.score,
                     player_level: w.player.level,
                     owned_upgrades: self.owned_upgrades,
+                    // The route's next floor, not the original route's stage:
+                    // a run packing for the Printworks says so here.
+                    next: self.next_level_plate(),
                     custom_triumph: None,
                     hovered: (self.hits.hovered == Some(Target::Continue))
                         .then_some(campaign_ui::LevelCompleteAction::Continue),
@@ -2647,7 +2735,7 @@ impl App {
 
         let list = {
             let view = campaign_ui::KeepThreeView {
-                from_level: campaign_ui::CampaignLevel::from_theme(self.theme()),
+                from_level: campaign_ui::CampaignLevel::from_theme(self.live_theme()),
                 next_level: self.keep_next_level(),
                 gold: self.world.as_ref().map_or(0, |w| w.gold),
                 items: &self.keep_entries,
@@ -3139,14 +3227,20 @@ mod tests {
             assert_eq!(h.app.theme(), Theme::Trailer);
             h.click("›");
             assert_eq!(h.app.theme(), Theme::Sewer);
-            // The stage number shown for a side-route floor is its campaign
+            // The row is in route order: stage one, then both stage-two
+            // floors, then both stage-three floors, then the getaway ride.
+            // The stage number a side-route floor shows is its campaign
             // stage's (`Laundry` is stage two), so the row reads `02 Laundry`.
-            for _ in 0..3 {
+            for _ in 0..2 {
                 h.frame(&[KeyCode::Right]);
             }
             assert_eq!(h.app.theme(), Theme::Laundry);
-            assert_eq!(h.app.sector(), 1);
-            for _ in 0..3 {
+            assert_eq!(
+                campaign::theme_stage(h.app.theme()),
+                1,
+                "the Laundry is a stage-two floor"
+            );
+            for _ in 0..2 {
                 h.frame(&[KeyCode::Left]);
             }
             assert_eq!(h.app.theme(), Theme::Sewer);
@@ -3156,12 +3250,12 @@ mod tests {
             assert_eq!(h.app.theme(), Theme::Kitchen);
             h.events(&[], &[(MouseEventKind::ScrollUp, pos)]);
             assert_eq!(h.app.theme(), Theme::Sewer);
-            // A sector that has not been unlocked is marked on the title row.
+            // A floor that has not been unlocked is marked on the title row.
             h.frame(&[KeyCode::Right]);
             h.frame(&[KeyCode::Right]);
             assert!(
-                h.screen_text().contains("Lab ×"),
-                "a locked sector is marked on the title"
+                h.screen_text().contains("Laundry ×"),
+                "a locked floor is marked on the title"
             );
             h.frame(&[KeyCode::Left, KeyCode::Left]);
             h.click("L story");
@@ -3334,16 +3428,34 @@ mod tests {
         }
     }
 
-    /// The sector row lists six floors now (the three stages, the two side
-    /// routes and the Flatbed). Every one of them fits, with its stage number,
-    /// its lock mark and both arrows, at the two sizes the title is laid out
-    /// for (57 x 20 and 80 x 24) and on a full terminal.
+    /// The sector row lists six floors in route order (stage one, the two
+    /// stage-two floors, the two stage-three floors, then the Flatbed). Every
+    /// one of them fits, with its stage number, its lock mark and both arrows,
+    /// at the two sizes the title is laid out for (57 x 20 and 80 x 24) and on
+    /// a full terminal.
     #[test]
     fn the_title_sector_row_fits_all_six_floors() {
         let floors = Theme::playable();
         assert_eq!(floors.len(), 6);
-        assert_eq!(&floors[..5], &Theme::all()[..], "the campaign floors come first");
-        assert_eq!(floors[5], Theme::Trailer);
+        // The row's order is the select screen's order: both stage-two floors,
+        // then both stage-three floors, then the getaway ride.
+        assert_eq!(
+            floors,
+            [
+                Theme::Sewer,
+                Theme::Kitchen,
+                Theme::Laundry,
+                Theme::Lab,
+                Theme::Printworks,
+                Theme::Trailer,
+            ]
+        );
+        for theme in Theme::all() {
+            assert!(
+                floors[..5].contains(&theme),
+                "the campaign floor {theme:?} is missing from the sector row"
+            );
+        }
         for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
             for (i, theme) in floors.into_iter().enumerate() {
                 let mut hh = Harness::new(w, h);
@@ -3384,8 +3496,10 @@ mod tests {
         }
     }
 
-    /// Enter on the sector row starts the getaway ride (its practice floor) and
-    /// the app is on the flatbed's map intro, with the campaign untouched.
+    /// Enter on the title's sector row opens the select screen with the
+    /// Flatbed selected; Enter **there** starts the getaway ride. Every floor
+    /// starts from the one screen, the flatbed included, so it is not a hidden
+    /// special case on the title row.
     #[test]
     fn the_title_sector_row_starts_the_flatbed() {
         let mut hh = Harness::new(80, 24);
@@ -3394,8 +3508,14 @@ mod tests {
         hh.frame(&[]);
         hh.frame(&[KeyCode::Enter]);
         assert!(
+            matches!(hh.app.screen, Screen::SectorSelect),
+            "the sector row must open the select screen, not start anything"
+        );
+        assert!(hh.app.world.is_none(), "opening the screen starts nothing");
+        hh.frame(&[KeyCode::Enter]);
+        assert!(
             matches!(hh.app.screen, Screen::LevelIntro),
-            "Enter on the getaway sector did not start it"
+            "Enter on the Flatbed's card did not start the getaway"
         );
         let w = hh.app.world.as_ref().expect("a world");
         assert_eq!(w.level.theme, Theme::Trailer);
@@ -3899,6 +4019,33 @@ mod tests {
             }
             "story" => {
                 hh.frame(&[KeyCode::Char('l')]);
+            }
+            // The sector-select screen with a chosen floor highlighted.
+            // `RATRUN_DUMP_FLOOR` picks the floor (0 Sewer .. 5 Flatbed); the
+            // table is seeded so the capture shows every status: cleared, open
+            // and locked, with per-floor bests.
+            t if t == "select" || t.starts_with("select-") => {
+                use crate::game::level::Theme;
+                // One clear only: the capture then shows all four states a
+                // card can be in — cleared (the Sewer), open with no record
+                // yet (the Kitchen and the Laundry), locked (stage three) and
+                // the Flatbed's always-open getaway.
+                let mut table = ScoreTable::default();
+                table.record_floor(Theme::Sewer, 6420, 252.0);
+                let app = App::with_options(false, None, table, false, Some(TEST_SEED));
+                hh = Harness::with_app(app, w, h);
+                hh.app.screen = Screen::SectorSelect;
+                let floor = t
+                    .strip_prefix("select-")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .or_else(|| {
+                        std::env::var("RATRUN_DUMP_FLOOR")
+                            .ok()
+                            .and_then(|s| s.parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                hh.app.select_idx = floor.min(Theme::playable().len() - 1);
+                hh.frame(&[]);
             }
             // A named miniboss mid-tell, with its nameplate and the 15:00 clock
             // (wave 3). The appointment is pinned past the live schedule so the
@@ -4408,6 +4555,7 @@ mod tests {
                 hh.app.select_idx = Theme::playable().len() - 1; // the Flatbed
                 hh.app.menu_idx = 1; // the sector row
                 hh.frame(&[]);
+                hh.frame(&[KeyCode::Enter]); // -> the select screen
                 hh.frame(&[KeyCode::Enter]); // -> the getaway ride's intro
                 hh.frame(&[KeyCode::Enter]); // -> Playing
                 {
@@ -7249,13 +7397,15 @@ mod tests {
         assert!(h.app.scores.level_cleared(0));
     }
 
-    /// Sector select reads the injected table: locked/unlocked states, the
-    /// per-level bests, a locked sector refusing to start, a practice run
-    /// labelled as such, and the unlock persisting through the store.
+    /// Sector select reads the injected table **per floor**: locked/unlocked
+    /// states, each floor's own bests, a locked floor refusing to start, a
+    /// practice run labelled as such, and the unlock persisting through the
+    /// store.
     #[test]
     fn sector_select_locks_unlocks_and_persists() {
         let mut table = ScoreTable::default();
-        table.record_level(0, 6420, 252.0); // a previous run cleared the Sewer
+        // A previous run cleared the Sewer on the original route.
+        table.record_floor(Theme::Sewer, 6420, 252.0);
         let app = App::with_options(false, None, table, false, Some(TEST_SEED));
         let mut h = Harness::with_app(app, 120, 40);
         h.frame(&[]);
@@ -7270,31 +7420,51 @@ mod tests {
         );
         h.frame(&[KeyCode::Right]);
         assert!(
-            h.screen_text().contains("03 Lab ×"),
-            "the Lab is still locked on the title row"
+            h.screen_text().contains("02 Laundry") && !h.screen_text().contains("Laundry ×"),
+            "clearing the Sewer opened both stage-two floors"
         );
-        h.frame(&[KeyCode::Left, KeyCode::Left]); // back to sector 1
+        for _ in 0..2 {
+            h.frame(&[KeyCode::Right]); // Laundry -> Lab -> Printworks
+        }
+        assert!(
+            h.screen_text().contains("03 Printworks ×"),
+            "stage three is still locked on the title row"
+        );
+        for _ in 0..4 {
+            h.frame(&[KeyCode::Left]); // back to the Sewer
+        }
         h.frame(&[KeyCode::Enter]);
         assert_eq!(h.app.screen.name_for_test(), "SectorSelect");
         let text = h.screen_text();
         assert!(text.contains("CLEARED"), "Sewer was cleared: {text}");
         assert!(text.contains("OPEN"), "Kitchen is open: {text}");
-        assert!(text.contains("LOCKED"), "Lab is locked: {text}");
+        assert!(text.contains("LOCKED"), "the Lab is locked: {text}");
         assert!(text.contains("BEST 6420"), "the stored best score: {text}");
         assert!(text.contains("04:12"), "the stored best time: {text}");
+        assert!(
+            text.contains("1/6 CLEARED"),
+            "the header counts cleared floors: {text}"
+        );
 
-        // A locked sector refuses to start and leaves the title state alone.
-        h.frame(&[KeyCode::Right, KeyCode::Right]); // Sewer -> Kitchen -> Lab
+        // A locked floor can be selected and read, but Enter refuses to start
+        // it and the select screen stays put. (With only the Sewer cleared,
+        // stage two is open and stage three is not.)
+        for _ in 0..3 {
+            h.frame(&[KeyCode::Right]); // Sewer -> Kitchen -> Laundry -> Lab
+        }
+        assert_eq!(h.app.theme(), Theme::Lab, "the cursor reached the Lab");
         h.frame(&[KeyCode::Enter]);
         assert_eq!(
             h.app.screen.name_for_test(),
             "SectorSelect",
-            "a locked sector must not start"
+            "a locked floor must not start"
         );
         assert!(h.app.world.is_none());
 
-        // Kitchen starts a labelled single-sector practice run.
-        h.frame(&[KeyCode::Left]);
+        // The Kitchen starts a labelled single-floor practice run.
+        for _ in 0..2 {
+            h.frame(&[KeyCode::Left]); // Lab -> Laundry -> Kitchen
+        }
         h.frame(&[KeyCode::Enter]);
         assert_eq!(h.app.screen.name_for_test(), "LevelIntro");
         assert_eq!(h.app.practice, Some(Theme::Kitchen));
@@ -7303,9 +7473,14 @@ mod tests {
             h.screen_text().contains("PRACTICE"),
             "the practice run must be labelled"
         );
+        assert!(
+            h.screen_text().contains("THE KITCHENS"),
+            "the intro plate names the chosen floor"
+        );
         {
             let w = h.app.world.as_ref().unwrap();
             assert_eq!(w.level_index, 1);
+            assert_eq!(w.level.theme, Theme::Kitchen);
             assert_eq!(
                 w.player.loadout.weapons.len(),
                 1,
@@ -7313,17 +7488,17 @@ mod tests {
             );
         }
 
-        // Clearing it records the sector (but never a campaign win).
+        // Clearing it records the floor (but never a campaign win).
         h.frame(&[KeyCode::Enter]);
         assert_eq!(h.app.screen.name_for_test(), "Playing");
 
         // The play screens keep working on a later level: the minimap draws,
         // the level-up cards open, and the pause dossier carries the campaign
-        // pips for the sector in flight.
+        // pips for the stage in flight.
         h.frame(&[]);
         assert!(
             !h.app.last_minimap.is_empty(),
-            "the minimap must draw on level 2"
+            "the minimap must draw on a later floor"
         );
         h.app.world.as_mut().unwrap().pending_levelups = 1;
         h.frame(&[]);
@@ -7334,31 +7509,246 @@ mod tests {
         assert_eq!(h.app.screen.name_for_test(), "Paused");
         assert!(
             paused.contains("2/3"),
-            "the pause dossier must carry the sector pips: {paused}"
+            "the pause dossier must carry the stage pips: {paused}"
         );
         h.frame(&[KeyCode::Esc]);
         assert_eq!(h.app.screen.name_for_test(), "Playing");
         h.finish_level();
         assert_eq!(h.app.screen.name_for_test(), "LevelComplete");
+        assert!(
+            h.screen_text().contains("THE KITCHENS"),
+            "the complete plate names the floor that was played"
+        );
         h.frame(&[KeyCode::Char(' ')]);
         assert_eq!(h.app.screen.name_for_test(), "End");
+        assert!(
+            h.screen_text().contains("KITCHEN"),
+            "the incident report names the floor that was played"
+        );
         let entry = &h.app.scores.entries[0];
         assert_eq!(entry.campaign_level, 2);
-        assert!(entry.won, "a cleared practice sector wins its own plate");
+        assert!(entry.won, "a cleared practice floor wins its own plate");
         assert!(!entry.campaign_won, "but it never wins the campaign");
-        assert!(h.app.scores.level_cleared(1));
+        assert!(h.app.scores.floor_cleared(Theme::Kitchen));
         assert!(
-            h.app.scores.level_unlocked(2),
-            "clearing Kitchen unlocks the Lab"
+            !h.app.scores.floor_cleared(Theme::Laundry),
+            "clearing the Kitchen says nothing about the Laundry"
+        );
+        assert!(
+            h.app.scores.floor_unlocked(Theme::Lab)
+                && h.app.scores.floor_unlocked(Theme::Printworks),
+            "clearing a stage-two floor opens both stage-three floors"
         );
 
         // The unlock survives a save/load through the injected store.
         let reloaded = ScoreTable::parse(&h.app.scores.to_json());
-        assert!(reloaded.level_unlocked(2));
+        assert!(reloaded.floor_unlocked(Theme::Lab));
         assert_eq!(
-            reloaded.level_best(1).map(|b| b.cleared),
+            reloaded.floor_best(Theme::Kitchen).map(|b| b.cleared),
             Some(true),
             "the Kitchen best was persisted"
+        );
+        assert_eq!(
+            reloaded.floor_best(Theme::Sewer).map(|b| b.score),
+            Some(6420),
+            "the old Sewer record is still its own"
+        );
+    }
+
+    /// Every playable floor appears on the sector-select screen as its own
+    /// correctly named slot, in route order, and the slot selected by keyboard,
+    /// mouse and wheel is exactly the floor that starts.
+    #[test]
+    fn sector_select_lists_every_floor_and_selects_it() {
+        let floors = Theme::playable();
+        let mut h = Harness::new(120, 40);
+        h.app.screen = Screen::SectorSelect;
+        let text = h.frame(&[]);
+        for theme in floors {
+            let plate = crate::render::campaign::CampaignLevel::from_theme(theme);
+            assert!(
+                text.contains(plate.name()),
+                "the select screen is missing {:?}: {text}",
+                theme
+            );
+        }
+
+        // Slot count and names follow `Theme::playable()`; the grid shows them
+        // all, so every one has a click target.
+        for (i, theme) in floors.into_iter().enumerate() {
+            let pos = h.locate(
+                crate::render::campaign::CampaignLevel::from_theme(theme).name(),
+            );
+            h.events(&[], &[(MouseEventKind::Moved, pos)]);
+            assert_eq!(
+                h.app.hits.hovered,
+                Some(Target::SelectSector(i)),
+                "hovering {:?} must target its floor",
+                theme
+            );
+            h.events(
+                &[],
+                &[(MouseEventKind::Down(MouseButton::Left), pos)],
+            );
+            assert_eq!(
+                h.app.theme(),
+                theme,
+                "clicking {:?} must select that floor, not a stage's original",
+                theme
+            );
+        }
+
+        // The keyboard walks the grid in visual order: `Left`/`Right` one
+        // floor, `Up`/`Down` a whole row of the grid the art laid out.
+        h.app.select_idx = 0;
+        h.app.screen = Screen::SectorSelect;
+        h.frame(&[]);
+        let cols = crate::render::campaign::level_select_cols(h.app.last_select_area);
+        assert_eq!(cols, 3, "a 120-wide terminal lays the floors out 3 across");
+        h.frame(&[KeyCode::Right]);
+        assert_eq!(h.app.theme(), Theme::Kitchen);
+        h.frame(&[KeyCode::Down]);
+        assert_eq!(h.app.theme(), floors[(1 + cols) % floors.len()]);
+
+        // The wheel steps the same cursor, anywhere on the screen.
+        h.app.select_idx = 0;
+        h.frame(&[]);
+        h.events(&[], &[(MouseEventKind::ScrollDown, (60, 20))]);
+        assert_eq!(h.app.theme(), Theme::Kitchen, "the wheel steps one floor");
+        assert_eq!(h.app.scores.zoom, 1.0, "the select screen never zooms");
+    }
+
+    /// The whole select -> start -> intro -> play -> clear -> report walk for
+    /// **every** floor. The theme picked on the select screen is the theme the
+    /// intro plate names, the HUD floor read-out names, the boss bar names, the
+    /// level-complete plate names and the incident report names: the bug this
+    /// test exists for was a stage-shaped label on a floor-shaped run.
+    #[test]
+    fn every_floor_selects_starts_and_names_the_same_floor() {
+        for (index, theme) in Theme::playable().into_iter().enumerate() {
+            let plate = crate::render::campaign::CampaignLevel::from_theme(theme);
+            // Every floor is open: a stage is reachable once any floor of the
+            // stage before it has been cleared.
+            let mut table = ScoreTable::default();
+            for floor in Theme::all() {
+                table.record_floor(floor, 100, 200.0);
+            }
+            let app = App::with_options(false, None, table, false, Some(TEST_SEED));
+            let mut h = Harness::with_app(app, 100, 32);
+            h.app.screen = Screen::SectorSelect;
+            h.app.select_idx = index;
+            h.frame(&[]);
+            let screen = h.screen_text();
+            assert!(
+                screen.contains(plate.name()),
+                "{theme:?}: the select screen is missing its card:\n{screen}"
+            );
+            // The card the cursor is on is the floor that starts.
+            assert_eq!(
+                h.app.theme(),
+                theme,
+                "{theme:?}: the cursor is not on the selected floor"
+            );
+
+            h.frame(&[KeyCode::Enter]);
+            {
+                let w = h.app.world.as_ref().expect("a world starts");
+                assert_eq!(w.level.theme, theme, "{theme:?}: started the wrong floor");
+            }
+
+            // The intro plate: the campaign's MapIntro for stage one, the
+            // LevelIntro plate for every other floor.
+            let intro = if index == 0 {
+                assert_eq!(
+                    h.app.screen.name_for_test(),
+                    "Story",
+                    "the Sewer starts the campaign"
+                );
+                h.frame(&[KeyCode::Enter]) // dossier -> map intro
+            } else {
+                assert_eq!(
+                    h.app.screen.name_for_test(),
+                    "LevelIntro",
+                    "{theme:?}: a later floor starts a practice run"
+                );
+                h.screen_text()
+            };
+            // The getaway ride's heading is `THE GETAWAY — FLATBED`.
+            let intro_name = if theme == Theme::Trailer {
+                "FLATBED"
+            } else {
+                plate.name()
+            };
+            assert!(
+                intro.contains(intro_name),
+                "{theme:?}: the intro plate must name the floor:\n{intro}"
+            );
+
+            // The HUD's floor read-out names the same floor. Park the clock so
+            // no higher-priority status chip (elite / boss / swarm) owns the
+            // pill the name lives in.
+            h.frame(&[KeyCode::Enter]); // -> Playing
+            assert_eq!(h.app.screen.name_for_test(), "Playing");
+            {
+                let w = h.app.world.as_mut().unwrap();
+                w.elapsed = 0.0;
+                w.director.elite_timer = 999.0;
+            }
+            let playing = h.frame(&[]);
+            let hud_name = theme.name().to_uppercase();
+            assert!(
+                playing.contains(hud_name.as_str()),
+                "{theme:?}: the HUD must name the floor:\n{playing}"
+            );
+
+            // The boss the floor spawns is the boss the campaign plates name.
+            assert_eq!(
+                hud::boss_codename(theme).0,
+                plate.boss_name(),
+                "{theme:?}: the boss bar and the campaign plates disagree"
+            );
+
+            // The clear plate names the floor and the boss.
+            h.finish_level();
+            assert_eq!(h.app.screen.name_for_test(), "LevelComplete");
+            let complete = h.screen_text();
+            assert!(
+                complete.contains(plate.name()),
+                "{theme:?}: the complete plate must name the floor:\n{complete}"
+            );
+            assert!(
+                complete.contains(plate.boss_name()),
+                "{theme:?}: the complete plate must name the boss:\n{complete}"
+            );
+
+            // Stage one's clear continues the campaign; every other floor ends
+            // its run on the incident report, which names the floor too.
+            h.frame(&[KeyCode::Char(' ')]);
+            if index == 0 {
+                assert_eq!(
+                    h.app.screen.name_for_test(),
+                    "KeepThree",
+                    "the campaign continues after the Sewer"
+                );
+            } else {
+                assert_eq!(h.app.screen.name_for_test(), "End");
+                let report = h.screen_text();
+                assert!(
+                    report.contains(hud_name.as_str()),
+                    "{theme:?}: the incident report must name the floor:\n{report}"
+                );
+            }
+        }
+
+        // The campaign's own end screen names the floor it was played on.
+        let mut h = Harness::new(100, 32);
+        h.enter_playing();
+        h.app.world.as_mut().unwrap().game_over = true;
+        let report = h.frame(&[]);
+        assert_eq!(h.app.screen.name_for_test(), "End");
+        assert!(
+            report.contains("SEWER"),
+            "the campaign's end screen must name the floor:\n{report}"
         );
     }
 
@@ -8426,9 +8816,9 @@ mod tests {
         let mut h = Harness::new(120, 40);
         h.frame(&[]);
         let row = h.locate("Sector");
-        let sector_before = h.app.sector();
+        let floor_before = h.app.theme();
         h.events(&[], &[(MouseEventKind::ScrollDown, row)]);
-        assert_ne!(h.app.sector(), sector_before, "the sector row still steps");
+        assert_ne!(h.app.theme(), floor_before, "the sector row still steps");
         assert_eq!(h.app.scores.zoom, 1.0, "the title never zooms");
 
         // Options: the wheel steps the row under the pointer.
