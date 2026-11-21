@@ -667,8 +667,7 @@ pub fn pickups_system(
                 enemy_order.clear();
                 enemy_order.extend(enemies.iter().map(|(entity, id, _)| (id.0, entity)));
                 enemy_order.sort_unstable_by_key(|&(id, _)| id);
-                for j in 0..enemy_order.len() {
-                    let entity = enemy_order[j].1;
+                for &(_, entity) in enemy_order.iter() {
                     let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
                         continue;
                     };

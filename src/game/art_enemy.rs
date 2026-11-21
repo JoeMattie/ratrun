@@ -5279,8 +5279,8 @@ fn draw_lilliputian(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
         }
         _ => {
             // The squad's little flag: a pole and a pale pennant.
-            let base = fr.px(0.8 * s, -1.0 * s);
-            let top = fr.px(1.9 * s, -1.0 * s);
+            let base = fr.px(0.8 * s, -s);
+            let top = fr.px(1.9 * s, -s);
             line_blend(pb, base, top, (128, 110, 82), 0.9);
             let wave = fast_sin(fr.anim * 2.0) * 0.5;
             let flag = fr.px(2.6 * s, -1.4 * s + wave);

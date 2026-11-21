@@ -798,13 +798,10 @@ impl Enemy {
             }
             // The hornet on the ground after a missed dive is the punish
             // window, and it says so with a number.
-            EnemyKind::MurderHornet => {
-                if self.w4.phase == w4::HORNET_PHASE_RECOVER {
+            EnemyKind::MurderHornet
+                if self.w4.phase == w4::HORNET_PHASE_RECOVER => {
                     w4::HORNET_RECOVER_MULT
-                } else {
-                    1.0
                 }
-            }
             _ => 1.0,
         }
     }

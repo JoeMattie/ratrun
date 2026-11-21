@@ -965,7 +965,7 @@ mod tests {
 
         fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
             for chunk in dst.chunks_mut(4) {
-                let w = u32::from(self.try_next_u32().unwrap_or(0));
+                let w = self.try_next_u32().unwrap_or(0);
                 for (i, b) in chunk.iter_mut().enumerate() {
                     *b = (w >> (8 * i)) as u8;
                 }

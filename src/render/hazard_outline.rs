@@ -425,8 +425,7 @@ mod tests {
                         let scale = w.zoom_scale;
                         let mut hits = 0usize;
                         let mut samples = 0usize;
-                        for i in 0..n {
-                            let p = pts[i];
+                        for &p in pts.iter().take(n) {
                             let x = ((p.x - w.cam.x) / scale.x).round() as i32;
                             let y = ((p.y - w.cam.y) / scale.y).round() as i32;
                             samples += 1;
@@ -494,14 +493,14 @@ mod tests {
                 elapsed: 0.4,
             };
             ink_draw(&mut pb, &mut view);
-            let lit = (0..148usize)
+            
+            (0..148usize)
                 .flat_map(|y| (0..160usize).map(move |x| (x, y)))
                 .filter(|&(x, y)| {
                     let (r, g, b) = pb.pixel_at(x, y);
                     u32::from(r) + u32::from(g) + u32::from(b) > 0
                 })
-                .count();
-            lit
+                .count()
         };
         assert_eq!(render(Vec2::new(1.0, 1.0)), 0, "the ink pass stamped the outline at 1x");
         assert!(
