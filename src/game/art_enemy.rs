@@ -317,10 +317,10 @@ fn cull_reach(kind: EnemyKind, r: f32) -> f32 {
         // Wave 3. The Flea's landing crosses sit up to 26 px from the body and
         // the Turnkey's crossbar up to ~70 px behind it (it walks away for the
         // 2.8 s the bar lives), so those two need a much wider screen bound.
-        EnemyKind::Pillbug => r * 1.9 + 2.0,
-        EnemyKind::BellFlea => r + 34.0,
-        EnemyKind::WickMoth => r * 2.6 + 3.0,
-        EnemyKind::Porter => r * 2.2 + 5.0,
+        EnemyKind::Pillbug => r * 2.1 + 3.0,
+        EnemyKind::BellFlea => r + 36.0,
+        EnemyKind::WickMoth => r * 3.0 + 4.0,
+        EnemyKind::Porter => r * 2.4 + 6.0,
         EnemyKind::Turnkey => r + 80.0,
     }
 }
@@ -343,7 +343,7 @@ pub fn draw_enemy_lod(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2, accent: Rgb) {
     let Some(fr) = prepare_frame(pb, e, cam, accent) else {
         return;
     };
-    draw_enemy_lod_frame(pb, &fr, e, e.elite);
+    draw_enemy_lod_frame(pb, &fr, e, cam, e.elite);
 }
 
 /// Crowd-aware entry point: uses full detail up to [`CROWD_LOD_THRESHOLD`]
@@ -441,7 +441,7 @@ pub fn draw_enemy_styled(
     };
     // Automatic LOD for tiny radii below the smallest standard kind (Bat = 2.0).
     if e.radius < 1.8 {
-        draw_enemy_lod_frame(pb, &fr, e, elite);
+        draw_enemy_lod_frame(pb, &fr, e, cam, elite);
         return;
     }
 
@@ -452,18 +452,16 @@ pub fn draw_enemy_styled(
         EnemyKind::Spitter => draw_spitter(pb, &fr, e.fire_cd),
         EnemyKind::Brute => draw_brute(pb, &fr, elite),
         EnemyKind::Boss => draw_boss(pb, &fr, e.fire_cd),
-        // Wave 3: placeholder silhouettes (a Neon art pass redraws them), each
-        // one carrying its own tell so the state machine is readable.
-        EnemyKind::Pillbug => draw_pillbug(pb, &fr, e),
-        EnemyKind::BellFlea => draw_bellflea(pb, &fr, e, cam),
-        EnemyKind::WickMoth => draw_wickmoth(pb, &fr, e),
-        EnemyKind::Porter => draw_porter(pb, &fr, e),
-        EnemyKind::Turnkey => draw_turnkey(pb, &fr, e, cam),
+        EnemyKind::Pillbug => draw_pillbug(pb, &fr, e, elite),
+        EnemyKind::BellFlea => draw_bellflea(pb, &fr, e, cam, elite),
+        EnemyKind::WickMoth => draw_wickmoth(pb, &fr, e, elite),
+        EnemyKind::Porter => draw_porter(pb, &fr, e, elite),
+        EnemyKind::Turnkey => draw_turnkey(pb, &fr, e, cam, elite),
     }
 }
 
 #[inline]
-fn draw_enemy_lod_frame(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
+fn draw_enemy_lod_frame(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam: Vec2, elite: bool) {
     match e.kind {
         EnemyKind::Skitterer => draw_skitterer_lod(pb, fr),
         EnemyKind::Bat => draw_bat_lod(pb, fr),
@@ -471,13 +469,11 @@ fn draw_enemy_lod_frame(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool
         EnemyKind::Spitter => draw_spitter_lod(pb, fr, e.fire_cd),
         EnemyKind::Brute => draw_brute_lod(pb, fr, elite),
         EnemyKind::Boss => draw_boss_lod(pb, fr, e.fire_cd),
-        // The wave-3 placeholders are already cheap: one local-frame body loop
-        // plus its tell, so the crowd path draws the same silhouette.
-        EnemyKind::Pillbug => draw_pillbug(pb, fr, e),
-        EnemyKind::BellFlea => draw_bellflea(pb, fr, e, Vec2::ZERO),
-        EnemyKind::WickMoth => draw_wickmoth(pb, fr, e),
-        EnemyKind::Porter => draw_porter(pb, fr, e),
-        EnemyKind::Turnkey => draw_turnkey(pb, fr, e, Vec2::ZERO),
+        EnemyKind::Pillbug => draw_pillbug_lod(pb, fr, e, elite),
+        EnemyKind::BellFlea => draw_bellflea_lod(pb, fr, e, cam, elite),
+        EnemyKind::WickMoth => draw_wickmoth_lod(pb, fr, e, elite),
+        EnemyKind::Porter => draw_porter_lod(pb, fr, e, elite),
+        EnemyKind::Turnkey => draw_turnkey_lod(pb, fr, e, cam, elite),
     }
 }
 
@@ -3411,62 +3407,413 @@ fn draw_boss_lod(pb: &mut PixelBuffer, fr: &Frame, fire_cd: f32) {
     draw_boss_hp_arc(pb, fr, s, pulse);
 }
 
-// ---- Wave 3 placeholders --------------------------------------------------
+// ============================================================================
+// WAVE 3 ENEMIES (Pillbug, Bell Flea, Wick Moth, Porter, Turnkey)
+// ============================================================================
 //
-// `WAVE3_DESIGN.md` §9 gives each kind one unmistakable silhouette and one
-// visible tell; these are deliberately simple drawings (a Neon art pass
-// redraws them). What they must already do is *read*: shell forward while
-// curled, two crosses before the flea lands, a lifted sugar cube, a dotted
-// line before the bar, a lit tail on the moth, and a burning wick after it.
+// Sculpted SDF silhouettes with top-left directional lighting, dark silhouette
+// rims, drop shadows, animated limbs/wings, gilded elite variants, fast zero-sqrt
+// crowd LOD paths, and unmistakable danger tells (`WAVE3_DESIGN.md` §9).
 
-/// A dotted or solid landmark ring: 8 short ticks around `at`, radius `r`.
-fn cross_mark(pb: &mut PixelBuffer, at: (i32, i32), r: i32, col: Rgb, alpha: f32, ticks: &[bool]) {
-    let mut i = 0;
-    while i < 8 {
-        if ticks[i] {
-            let a = i as f32 * std::f32::consts::TAU / 8.0;
-            let (sa, ca) = fast_sin_cos(a);
-            let x = at.0 + (ca * r as f32).round() as i32;
-            let y = at.1 + (sa * r as f32).round() as i32;
-            blend_px(pb, x, y, col, alpha);
-        }
-        i += 1;
+/// Rotating gilded perimeter aura for elite Wave 3 enemies (matches Brute elite grammar).
+#[inline]
+fn draw_w3_elite_aura(pb: &mut PixelBuffer, fr: &Frame, extra_r: f32) {
+    let pulse = 0.55 + 0.45 * fast_sin(fr.anim * 1.6);
+    let aura_r = fr.r + extra_r;
+    let gold = scale_rgb((255, 210, 78), 0.52 + 0.36 * pulse);
+    for i in 0..8 {
+        let a = i as f32 * (TAU / 8.0) + fr.anim * 0.16;
+        let (sa, ca) = fast_sin_cos(a);
+        let tx = (fr.pos.x + ca * aura_r).round() as i32;
+        let ty = (fr.pos.y + sa * aura_r).round() as i32;
+        blend_px(pb, tx, ty, gold, 0.78);
     }
 }
 
-const ALL_TICKS: [bool; 8] = [true; 8];
-const DOTTED: [bool; 8] = [true, false, true, false, true, false, true, false];
+/// High-contrast `×` landing cross + 6 px impact ring for the Bell Flea.
+#[allow(clippy::too_many_arguments)]
+fn draw_flea_cross(
+    pb: &mut PixelBuffer,
+    at: (i32, i32),
+    r: i32,
+    col: Rgb,
+    hi: Rgb,
+    alpha: f32,
+    solid_ring: bool,
+    pulse: f32,
+) {
+    let (cx, cy) = at;
+    let arm = (r - 2).max(2);
+    // Subtle dark backing under the cross arms so it pops on sunlit planks too.
+    for k in -arm..=arm {
+        darken_px(pb, cx + k, cy + k + 1, 0.42 * alpha);
+        darken_px(pb, cx + k, cy - k + 1, 0.42 * alpha);
+    }
+    // Crisp diagonal `×` cross.
+    for k in -arm..=arm {
+        let edge_fade = if k.abs() == arm { 0.78 } else { 1.0 };
+        let c = if k.abs() <= 1 { hi } else { col };
+        blend_px(pb, cx + k, cy + k, c, alpha * edge_fade);
+        blend_px(pb, cx + k, cy - k, c, alpha * edge_fade);
+    }
+    // Center hot pip.
+    blend_px(pb, cx, cy, hi, (alpha + 0.12).min(1.0));
+    if solid_ring {
+        pb.plot_add(cx, cy, scale_rgb(hi, 0.35 + 0.25 * pulse));
+    }
 
-/// Ribbed silver oval; curled it is a tight ring with the shell arc forward.
-fn draw_pillbug(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy) {
-    let s = fr.r * (1.0 / 5.0);
-    let curled = e.w3.curl_t > 0.0;
-    let body = fr.apply_hit(if curled { (214, 220, 232) } else { (176, 184, 200) });
-    let rib = mix_rgb(body, (98, 104, 124), 0.55);
-    let shell = mix_rgb(body, (255, 255, 255), 0.72);
-    let leg = fr.apply_hit((104, 104, 116));
+    // 6 px impact perimeter ring (16 points: every other when dotted, all when solid).
+    let n = 16;
+    let step = if solid_ring { 1 } else { 2 };
+    let phase = if solid_ring { 0 } else { (pulse > 0.5) as usize };
+    let mut i = phase;
+    while i < n {
+        let a = i as f32 * (TAU / n as f32);
+        let (sa, ca) = fast_sin_cos(a);
+        let x = cx + (ca * r as f32).round() as i32;
+        let y = cy + (sa * r as f32).round() as i32;
+        darken_px(pb, x, y + 1, 0.32 * alpha);
+        blend_px(pb, x, y, if i % 4 == 0 { hi } else { col }, alpha * if solid_ring { 0.95 } else { 0.80 });
+        i += step;
+    }
+}
 
-    // Six short legs, only while it walks (a curled pillbug tucks them in).
-    if !curled {
-        for (i, &u_hip) in [1.3f32, 0.0, -1.3].iter().enumerate() {
-            let sw = fast_sin(fr.anim + i as f32 * 2.1) * 0.55 * s;
-            for side in [-1.0f32, 1.0] {
-                let hip = fr.px(u_hip * s, side * 1.5 * s);
-                let foot = fr.px(u_hip * s + sw, side * 3.1 * s);
-                line_blend(pb, hip, foot, leg, 0.8);
+/// Shared Bell Flea landing crosses + jump trajectory tell (used by both Full & LOD).
+fn draw_bellflea_tells(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam: Vec2) {
+    if e.w3.flea_phase == 0 {
+        return;
+    }
+    let home = e.w3.home - cam;
+    let hop = e.w3.hop_to - cam;
+    let home_px = (home.x.round() as i32, home.y.round() as i32);
+    let hop_px = (hop.x.round() as i32, hop.y.round() as i32);
+    let landed = e.w3.flea_phase == 2;
+    let pulse = 0.5 + 0.5 * fast_sin(fr.anim * 5.2);
+    let r = crate::game::ecs::systems::enemy_wave3::FLEA_CROSS_RADIUS.round() as i32;
+
+    // Dotted trajectory tether between home and hop_to so both crosses read as a pair.
+    let dv = hop - home;
+    let dist = dv.len();
+    if dist > 4.0 {
+        let steps = (dist / 4.0).round() as i32;
+        let line_col = if landed { (182, 214, 236) } else { (236, 176, 98) };
+        for k in 1..steps {
+            if k % 2 == 1 {
+                let t = k as f32 / steps as f32;
+                let p = home + dv * t;
+                blend_px(pb, p.x.round() as i32, p.y.round() as i32, line_col, 0.42);
             }
         }
     }
 
-    let ru = if curled { 2.6 * s } else { 4.2 * s };
-    let rv = if curled { 2.6 * s } else { 3.0 * s };
-    let Some((x0, x1, y0, y1)) =
-        fr.bbox_oriented_circ(pb, -ru - s, ru + s, rv + s, fr.r + 2.0, (1, 1))
+    let hot_col = mix_rgb((255, 134, 62), (255, 224, 128), 0.35 + 0.45 * pulse);
+    let hot_hi = (255, 248, 208);
+    let return_col = (158, 206, 236);
+    let return_hi = (232, 246, 255);
+
+    if landed {
+        // First cross just struck (bright solid chime ring); second cross (home)
+        // is now the active imminent threat pulsing bright amber-red!
+        draw_flea_cross(pb, hop_px, r, (255, 214, 118), hot_hi, 0.92, true, pulse);
+        draw_flea_cross(pb, home_px, r, hot_col, hot_hi, 0.86, false, pulse);
+    } else {
+        // Winding up: hop_to is imminent (hot amber-vermilion), home is the secondary return mark.
+        draw_flea_cross(pb, home_px, r, return_col, return_hi, 0.68, false, pulse);
+        draw_flea_cross(pb, hop_px, r, hot_col, hot_hi, 0.88, false, pulse);
+    }
+}
+
+/// Shared Turnkey crossbar tell & live electrified barrier (used by both Full & LOD).
+fn draw_turnkey_bar(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam: Vec2) {
+    if e.w3.bar_t <= 0.0 {
+        return;
+    }
+    let centre = e.w3.bar_pos - cam;
+    let d = e.w3.bar_dir;
+    let perp = Vec2::new(-d.y, d.x);
+    let half = crate::game::ecs::systems::enemy_wave3::CROSSBAR_LEN * 0.5;
+    let a = centre - d * half;
+    let b = centre + d * half;
+    let telling = e.w3.bar_telling();
+    let spent = e.w3.bar_spent;
+    let pulse = 0.5 + 0.5 * fast_sin(fr.anim * 6.0);
+
+    let steps = (crate::game::ecs::systems::enemy_wave3::CROSSBAR_LEN.round() as i32).max(12);
+    if telling {
+        // Marching dotted warning line: dark contrast backing + alternating bright amber dashes.
+        let tell_col = mix_rgb((248, 178, 72), (255, 236, 152), 0.35 + 0.50 * pulse);
+        let shift = ((fr.anim * 3.5).floor() as i32).rem_euclid(4);
+        for k in 0..=steps {
+            let t = k as f32 / steps as f32;
+            let p = a + (b - a) * t;
+            let px = (p.x.round() as i32, p.y.round() as i32);
+            if (k + shift) % 4 < 2 {
+                darken_px(pb, px.0 + 1, px.1 + 1, 0.48);
+                blend_px(pb, px.0, px.1, tell_col, 0.90);
+            } else {
+                darken_px(pb, px.0, px.1, 0.30);
+            }
+        }
+        // Brass anchor pins at both ends so the exact 22 px span reads immediately.
+        for end in [a, b] {
+            let ex = end.x.round() as i32;
+            let ey = end.y.round() as i32;
+            darken_px(pb, ex + 1, ey + 1, 0.5);
+            pb.plot(ex, ey, (255, 236, 160));
+            blend_px(pb, ex, ey - 1, (196, 154, 68), 0.85);
+        }
+    } else if spent {
+        // Spent crossbar: cooled, dull bronze bar so the player knows it is safe.
+        let cool = (128, 118, 92);
+        let dark = (62, 56, 44);
+        for k in 0..=steps {
+            let t = k as f32 / steps as f32;
+            let p = a + (b - a) * t;
+            let px = (p.x.round() as i32, p.y.round() as i32);
+            blend_px(pb, px.0, px.1, cool, 0.65);
+            blend_px(pb, px.0, px.1 + 1, dark, 0.45);
+        }
+        for end in [a, b] {
+            blend_px(pb, end.x.round() as i32, end.y.round() as i32, dark, 0.8);
+        }
+    } else {
+        // Live crossbar: blazing 3-layer brass/amber hazard rail with white-gold filament!
+        let outer = (232, 134, 42);
+        let core = mix_rgb((255, 212, 88), (255, 250, 218), 0.45 + 0.40 * pulse);
+        let glow = scale_rgb((255, 196, 84), 0.32 + 0.20 * pulse);
+        for k in 0..=steps {
+            let t = k as f32 / steps as f32;
+            let p = a + (b - a) * t;
+            let px = p.x.round() as i32;
+            let py = p.y.round() as i32;
+            let s1 = p + perp * 1.1;
+            let s2 = p - perp * 1.1;
+            darken_px(pb, px + 1, py + 2, 0.52);
+            blend_px(pb, s1.x.round() as i32, s1.y.round() as i32, outer, 0.82);
+            blend_px(pb, s2.x.round() as i32, s2.y.round() as i32, outer, 0.82);
+            pb.plot(px, py, core);
+            if k % 3 == 0 {
+                pb.plot_add(px, py, glow);
+            }
+        }
+        // Gleaming brass lock-pins at both endpoints.
+        for end in [a, b] {
+            let ex = end.x.round() as i32;
+            let ey = end.y.round() as i32;
+            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                blend_px(pb, ex + dx, ey + dy, (214, 152, 54), 0.85);
+            }
+            pb.plot(ex, ey, (255, 252, 232));
+            pb.plot_add(ex, ey, (120, 96, 40));
+        }
+    }
+}
+
+// ============================================================================
+// 7. PILLBUG — Ribbed Silver Armored Isopod (r = 5.0)
+// ============================================================================
+
+fn draw_pillbug(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
+    let s = fr.r * (1.0 / 5.0);
+    let curled = e.w3.curl_t > 0.0;
+
+    if elite {
+        draw_w3_elite_aura(pb, fr, 2.2 * s);
+    }
+
+    let (sh_c, mid_c, hi_c, seam_c, trim_c) = if elite {
+        (
+            (54, 62, 92),
+            (136, 150, 198),
+            (238, 242, 255),
+            (32, 36, 58),
+            (252, 206, 78),
+        )
+    } else {
+        (
+            (62, 68, 82),
+            (158, 168, 186),
+            (242, 248, 255),
+            (40, 44, 56),
+            (218, 232, 252),
+        )
+    };
+    let rim_col = if fr.hit > 0.4 { (160, 168, 190) } else { (0, 0, 0) };
+
+    // 1) Six scuttling chitin legs + twitching front antennae (tucked away when curled!).
+    if !curled {
+        let leg_c = fr.apply_hit(if elite { (128, 108, 72) } else { (86, 92, 106) });
+        let foot_c = fr.apply_hit(if elite { (220, 184, 88) } else { (122, 128, 144) });
+        for (i, &u_hip) in [2.1f32, 0.2, -1.7].iter().enumerate() {
+            let sw = fast_sin(fr.anim * 1.15 + i as f32 * 2.1) * 0.85 * s;
+            for (side, dir) in [(-1.0f32, sw), (1.0, -sw)] {
+                let hip = fr.px(u_hip * s, side * 2.6 * s);
+                let knee = fr.px(u_hip * s + dir * 0.5, side * 3.8 * s);
+                let foot = fr.px(u_hip * s + dir - 0.3 * s, side * 4.5 * s);
+                darken_px(pb, foot.0 + 1, foot.1 + 1, 0.28);
+                line_blend(pb, hip, knee, leg_c, 0.90);
+                line_blend(pb, knee, foot, foot_c, 0.88);
+            }
+        }
+        // Short curved antennae at the front head shield.
+        let ant_sw = fast_sin(fr.anim * 1.8) * 0.35 * s;
+        let ant_c = fr.apply_hit(if elite { trim_c } else { (132, 142, 162) });
+        for side in [-1.0f32, 1.0] {
+            let a0 = fr.px(4.1 * s, side * 1.1 * s);
+            let a1 = fr.px(5.4 * s, side * (2.1 * s + ant_sw));
+            line_blend(pb, a0, a1, ant_c, 0.85);
+        }
+    }
+
+    // 2) Sculpted ribbed carapace (broad articulated oval walking, tight armored sphere curled).
+    let ru = if curled { 3.5 * s } else { 4.7 * s };
+    let rv = if curled { 3.5 * s } else { 3.55 * s };
+    let Some((x0, x1, y0, y1)) = fr.bbox_oriented(pb, -ru - 1.5 * s, ru + 1.8 * s, rv + 1.5 * s, 2, 2)
     else {
         return;
     };
+
+    let body_sdf = EllipseSdf::new(0.0, 0.0, ru, rv);
+    let rim_lim = 0.95 * s;
+    let sh_lim = 0.45 * s;
+    let sh_sq = body_sdf.r2_limit(sh_lim);
     let inv_ru = 1.0 / ru;
     let inv_rv = 1.0 / rv;
+    let du_sh = -1.6 * (fr.f.x + fr.f.y);
+    let dv_sh = -1.6 * (fr.p.x + fr.p.y);
+    let damaged = fr.hp_frac < 0.55;
+    let pulse = 0.5 + 0.5 * fast_sin(fr.anim * 4.5);
+
+    for y in y0..=y1 {
+        let (mut u, mut v) = fr.local(x0, y);
+        for x in x0..=x1 {
+            let d = body_sdf.eval(u, v);
+            let cover = (0.52 - d * 1.18).clamp(0.0, 1.0);
+            if cover > 0.0 {
+                let nu = (u * inv_ru).clamp(-1.0, 1.0);
+                let nv = (v * inv_rv).clamp(-1.0, 1.0);
+                let dome = (1.0 - (nu * nu * 0.55 + nv * nv * 0.65)).clamp(0.0, 1.0);
+                let lit = fr.lit(nu, nv);
+                let mut lum = 0.36 + 0.42 * dome + 0.60 * lit;
+                if lit > 0.38 && dome > 0.32 {
+                    lum += 0.28; // crisp metallic silver sheen
+                }
+
+                // Curved transverse articulated armor ribs (4–5 overlapping plates).
+                let arch_u = u + (v * v) * (if curled { 0.14 } else { 0.08 }) / s.max(0.5);
+                let rib_period = if curled { 2.05 * s } else { 2.15 * s };
+                let phase = ((arch_u + 12.0 * s) / rib_period).fract();
+                let mut col = shade3(sh_c, mid_c, hi_c, lum);
+
+                if phase < 0.22 {
+                    // Recessed overlap groove between armor plates.
+                    col = mix_rgb(col, seam_c, 0.78);
+                } else if phase < 0.42 {
+                    // Beveled specular leading ridge of each steel plate.
+                    let ridge = if elite { trim_c } else { hi_c };
+                    col = mix_rgb(col, ridge, 0.48 * (0.55 + 0.45 * lit).clamp(0.0, 1.0));
+                }
+
+                // Subtle dorsal ridge line + rim plate skirt.
+                if !curled && v.abs() > rv * 0.76 {
+                    col = mix_rgb(col, if elite { trim_c } else { sh_c }, if elite { 0.55 } else { 0.45 });
+                }
+
+                // Curled state visual reads: gleaming frontal 120° deflector shell & vulnerable pink rear!
+                if curled {
+                    if nu > 0.30 {
+                        // Frontal armored shield: gleaming blue-white steel sheen.
+                        let shield_boost = ((nu - 0.30) * 1.4).clamp(0.0, 1.0);
+                        col = mix_rgb(col, (240, 248, 255), shield_boost * (0.48 + 0.16 * pulse));
+                    } else if nu < -0.52 && nv.abs() < 0.62 {
+                        // Exposed vulnerable soft underbelly at the rear (2× damage cue!).
+                        let rear_col = mix_rgb((218, 96, 112), (255, 178, 172), 0.45 + 0.35 * pulse);
+                        col = mix_rgb(col, rear_col, 0.85);
+                    }
+                } else if damaged && ((u + 0.8 * s) - v * 0.7).abs() < 0.35 * s && u < 1.8 * s {
+                    col = (28, 30, 38);
+                }
+
+                let lit_col = fr.apply_hit(col);
+                if cover >= 1.0 {
+                    pb.plot(x, y, lit_col);
+                } else {
+                    let bg = pb.pixel_at(x as usize, y as usize);
+                    let out = mix_rgb(bg, rim_col, 0.68 * (1.0 - cover));
+                    pb.plot(x, y, mix_rgb(out, lit_col, cover));
+                }
+            } else if d < rim_lim {
+                let bg = pb.pixel_at(x as usize, y as usize);
+                pb.plot(x, y, mix_rgb(bg, rim_col, 0.68));
+            } else {
+                let su = u + du_sh;
+                let sv = v + dv_sh;
+                if body_sdf.within_sq(su, sv, sh_sq) {
+                    darken_px(pb, x, y, 0.38);
+                }
+            }
+            u += fr.f.x;
+            v += fr.p.x;
+        }
+    }
+
+    if curled {
+        // Unmistakable frontal 120° deflector shield arc (-60°..+60°) standing 1.2 px proud of the shell.
+        let shield_col = mix_rgb((190, 224, 255), (255, 255, 255), 0.45 + 0.40 * pulse);
+        let arc_r = ru + 1.15 * s;
+        for k in 0..=12 {
+            let a = -1.047 + k as f32 * (2.094 / 12.0); // ±60° = 120° frontal arc
+            let (sa, ca) = fast_sin_cos(a);
+            let pt = fr.px(ca * arc_r, sa * arc_r);
+            darken_px(pb, pt.0 + 1, pt.1 + 1, 0.35);
+            blend_px(pb, pt.0, pt.1, shield_col, 0.95);
+            if k % 3 == 0 {
+                pb.plot_add(pt.0, pt.1, scale_rgb((180, 220, 255), 0.45 + 0.25 * pulse));
+            }
+        }
+        // Subtle pulsing coral vulnerability dot at the exposed rear gap.
+        let rear = fr.px(-ru - 0.5 * s, 0.0);
+        blend_px(pb, rear.0, rear.1, (255, 132, 138), 0.85);
+    } else {
+        // Tiny amber-orange isopod eyes tucked on the front head plate.
+        let eye_col = if fr.hit > 0.7 {
+            (28, 30, 38)
+        } else if elite {
+            (255, 118, 228)
+        } else {
+            (255, 178, 72)
+        };
+        for side in [-1.0f32, 1.0] {
+            let ep = fr.px(3.75 * s, side * 1.25 * s);
+            pb.plot(ep.0, ep.1, eye_col);
+        }
+    }
+}
+
+fn draw_pillbug_lod(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
+    let s = fr.r * (1.0 / 5.0);
+    let curled = e.w3.curl_t > 0.0;
+    if elite {
+        draw_w3_elite_aura(pb, fr, 2.0 * s);
+    }
+    let ru = if curled { 3.5 * s } else { 4.6 * s };
+    let rv = if curled { 3.5 * s } else { 3.45 * s };
+    let Some((x0, x1, y0, y1)) = fr.bbox_oriented(pb, -ru - s, ru + s, rv + s, 1, 1) else {
+        return;
+    };
+    let ramp = if elite {
+        build_ramp4((54, 62, 92), (136, 150, 198), (238, 242, 255), fr)
+    } else {
+        build_ramp4((62, 68, 82), (158, 168, 186), (242, 248, 255), fr)
+    };
+    let seam_col = fr.apply_hit((40, 44, 56));
+    let rear_col = fr.apply_hit((242, 134, 140));
+    let hit_tint = fr.hit > 0.4;
+    let rim_col = if hit_tint { (160, 168, 190) } else { (0, 0, 0) };
+    let inv_ru = 1.0 / ru;
+    let inv_rv = 1.0 / rv;
+    let rib_inv = 1.0 / (2.15 * s);
+
     for y in y0..=y1 {
         let (mut u, mut v) = fr.local(x0, y);
         for x in x0..=x1 {
@@ -3474,267 +3821,808 @@ fn draw_pillbug(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy) {
             let nv = v * inv_rv;
             let r2 = nu * nu + nv * nv;
             if r2 <= 1.0 {
-                // Ribs across the shell every ~2 px of body length, with a
-                // shaded rim so the oval reads as a shell and not a ring.
-                // Three broad ribs across the shell (a 1 px period is noise at
-                // this size; ~2.6 px reads as ribbing).
-                let ribbed = ((u + 5.2 * s) / (2.6 * s)).floor() as i32 % 2 == 0;
-                let lit = fr.lit(nu, nv);
-                let col = if r2 > 0.80 {
-                    scale_rgb(body, 0.62)
-                } else if ribbed {
-                    if lit > 0.1 { shell } else { body }
+                let col = if curled && nu < -0.52 && nv.abs() < 0.62 {
+                    rear_col
+                } else if ((u + 12.0 * s) * rib_inv).fract() < 0.24 {
+                    seam_col
                 } else {
-                    rib
+                    ramp[ramp4_idx(fr.lit(nu, nv), r2)]
                 };
                 pb.plot(x, y, col);
+            } else if r2 <= 1.58 {
+                plot_rim(pb, x, y, rim_col, 0.62, hit_tint);
             }
             u += fr.f.x;
             v += fr.p.x;
         }
     }
-    // The shell rim: a bright arc on the facing side, the one readable cue for
-    // "this side takes a quarter".
-    for k in 0..11 {
-        let a = -1.0 + k as f32 * (2.0 / 10.0);
-        let (sa, ca) = fast_sin_cos(a);
-        let x = (fr.pos.x + fr.f.x * ca * ru * 0.82 + fr.p.x * sa * rv * 0.82).round() as i32;
-        let y = (fr.pos.y + fr.f.y * ca * ru * 0.82 + fr.p.y * sa * rv * 0.82).round() as i32;
-        blend_px(pb, x, y, shell, 0.95);
-    }
     if curled {
-        // The tell: the tight ring with a pale gap at the back.
-        let back = fr.px(-2.4 * s, 0.0);
-        blend_px(pb, back.0, back.1, scale_rgb(body, 0.4), 0.9);
+        let arc_r = ru + 1.0 * s;
+        for k in 0..=8 {
+            let a = -1.047 + k as f32 * (2.094 / 8.0);
+            let (sa, ca) = fast_sin_cos(a);
+            let pt = fr.px(ca * arc_r, sa * arc_r);
+            blend_px(pb, pt.0, pt.1, (224, 240, 255), 0.92);
+        }
     }
 }
 
-/// Copper tuning fork with two prongs; its landing crosses are the tell.
-fn draw_bellflea(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam: Vec2) {
+// ============================================================================
+// 8. BELL FLEA — Copper Tuning-Fork Jumper (r = 2.0)
+// ============================================================================
+
+fn draw_bellflea(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam: Vec2, elite: bool) {
     let s = fr.r * 0.5;
-    let copper = fr.apply_hit((214, 138, 78));
-    let copper_hi = mix_rgb(copper, (255, 226, 176), 0.55);
-    let leg = fr.apply_hit((118, 70, 36));
-    let bouncing = e.w3.flea_phase != 0;
+    let ringing = e.w3.flea_phase != 0;
 
-    for side in [-1.0f32, 1.0] {
-        let hip = fr.px(-0.4 * s, side * 0.9 * s);
-        let foot = fr.px(-1.6 * s, side * 2.6 * s);
-        line_blend(pb, hip, foot, leg, 0.85);
-    }
-    // Two prongs forward, joined by the fork's handle: a clear "E" profile.
-    for side in [-1.0f32, 1.0] {
-        let a = fr.px(0.2 * s, side * 0.6 * s);
-        let b = fr.px(3.2 * s, side * 1.1 * s);
-        line_blend(pb, a, b, copper, 0.95);
-    }
-    let h0 = fr.px(-1.8 * s, 0.0);
-    let h1 = fr.px(0.2 * s, 0.0);
-    line_blend(pb, h0, h1, copper_hi, 0.9);
-    // Body pip at the join.
-    let body = fr.px(-s, 0.0);
-    blend_px(pb, body.0, body.1, copper_hi, 1.0);
-    blend_px(pb, body.0 + 1, body.1, copper_hi, 1.0);
+    // 1) Landing crosses on the floor FIRST so the flea's body sits cleanly over them.
+    draw_bellflea_tells(pb, fr, e, cam);
 
-    // Landing crosses: both are dotted during the tell, and the one it is
-    // standing on goes solid at the moment of impact.
-    if bouncing {
-        let home = e.w3.home - cam;
-        let hop = e.w3.hop_to - cam;
-        let home_px = (home.x.round() as i32, home.y.round() as i32);
-        let hop_px = (hop.x.round() as i32, hop.y.round() as i32);
-        let landed = e.w3.flea_phase == 2;
-        let warm = (238, 198, 126);
-        let cool = (176, 206, 224);
-        cross_mark(
-            pb,
-            home_px,
-            6,
-            if landed { cool } else { warm },
-            if landed { 0.85 } else { 0.55 },
-            &DOTTED,
-        );
-        cross_mark(
-            pb,
-            hop_px,
-            6,
-            warm,
-            if landed { 0.85 } else { 0.55 },
-            if landed { &ALL_TICKS } else { &DOTTED },
-        );
+    if elite {
+        draw_w3_elite_aura(pb, fr, 2.4 * s);
     }
-}
 
-/// Teardrop body with a lantern tail that brightens as the fuse idea reads.
-fn draw_wickmoth(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy) {
-    let s = fr.r * (1.0 / 2.5);
-    let flap = fast_sin(fr.anim * 1.6);
-    let wing = fr.apply_hit((206, 176, 148));
-    let body = fr.apply_hit((126, 96, 88));
-    let ember = if e.hp > 0.0 {
-        (255, 196, 104)
+    let (sh_c, mid_c, hi_c) = if elite {
+        ((104, 48, 38), (236, 152, 82), (255, 244, 190))
     } else {
-        (255, 236, 190)
+        ((94, 48, 22), (218, 134, 68), (255, 226, 168))
+    };
+    let leg_c = fr.apply_hit((112, 62, 30));
+    let leg_hi = fr.apply_hit((192, 118, 60));
+    let rim_col = if fr.hit > 0.4 { (186, 130, 86) } else { (0, 0, 0) };
+
+    // 2) Spring-loaded bent hind legs (coiled tight when winding up, kicked out when landed!).
+    let crouch = match e.w3.flea_phase {
+        1 => 0.55,
+        2 => -0.45,
+        _ => fast_sin(fr.anim * 1.4) * 0.30,
+    };
+    for side in [-1.0f32, 1.0] {
+        let hip = fr.px(-0.7 * s, side * 1.1 * s);
+        let knee = fr.px((-1.7 + crouch * 0.7) * s, side * (2.6 - crouch * 0.4) * s);
+        let foot = fr.px((-2.9 - crouch * 0.6) * s, side * (2.1 + crouch * 0.4) * s);
+        darken_px(pb, knee.0 + 1, knee.1 + 1, 0.34);
+        darken_px(pb, foot.0 + 1, foot.1 + 1, 0.34);
+        line_blend(pb, hip, knee, leg_hi, 0.92);
+        line_blend(pb, knee, foot, leg_c, 0.95);
+    }
+
+    // 3) Sculpted copper tuning-fork body: rear stem + curved yoke + two bold parallel forward tines!
+    let vib = if ringing { fast_sin(fr.anim * 9.0) * 0.25 * s } else { 0.0 };
+    let tine_v = 1.50 * s + vib;
+    let stem_sdf = TaperSdf::new((-2.8 * s, 0.0), (-0.4 * s, 0.0), 0.55 * s, 0.95 * s);
+    let yoke_sdf = EllipseSdf::new(-0.2 * s, 0.0, 1.05 * s, 1.70 * s);
+    let tine_sdf = CapsuleSdf::new(0.1 * s, tine_v, 3.95 * s, tine_v, 0.64 * s);
+    let k_join = 0.45 * s;
+    let inv_k = 1.0 / k_join;
+
+    let body_sd = |u: f32, v: f32| -> f32 {
+        let av = v.abs();
+        let stem = stem_sdf.eval(u, v);
+        let yoke = yoke_sdf.eval(u, v);
+        let tine = tine_sdf.eval(u, av);
+        // Carve a crisp U-notch between the two prongs so the tuning-fork profile reads at 2x zoom-out!
+        let base = smin_inv(stem, yoke, k_join, inv_k);
+        let fork = smin_inv(base, tine, 0.25 * s, 4.0 / s);
+        if u > 0.35 * s && av < tine_v - 0.52 * s {
+            fork.max((tine_v - 0.52 * s) - av)
+        } else {
+            fork
+        }
     };
 
-    // Two pale wings up, teardrop torso, wick trailing back.
-    for side in [-1.0f32, 1.0] {
-        let root = fr.px(0.2 * s, side * 0.6 * s);
-        let tip = fr.px(-0.9 * s + flap * 0.5, side * (2.6 + 0.5 * flap) * s);
-        line_blend(pb, root, tip, wing, 0.55);
-    }
-    for k in 0..5 {
-        let t = k as f32 * 0.28;
-        let u = (1.6 - t * 1.9) * s;
-        let v = (0.55 - t * 0.35) * s * flap;
-        let p = fr.px(u, v);
-        blend_px(pb, p.0, p.1, body, 1.0);
-        if k < 3 {
-            blend_px(pb, p.0, p.1 + 1, body, 0.8);
-        }
-    }
-    // The lit tail: a three-pixel ember with an additive glow, so the corpse's
-    // fuse reads as coming off *this* bug.
-    let tail = fr.px(-2.2 * s, 0.0);
-    blend_px(pb, tail.0, tail.1, ember, 0.95);
-    blend_px(pb, tail.0, tail.1 - 1, mix_rgb(ember, (255, 255, 240), 0.6), 0.95);
-    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-        pb.plot_add(tail.0 + dx, tail.1 + dy, scale_rgb(ember, 0.55));
-    }
-}
-
-/// Beetle under a white sugar cube; the cube lifts while it is raising.
-fn draw_porter(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy) {
-    let s = fr.r * (1.0 / 4.5);
-    let raising = e.w3.raise_t > 0.0;
-    let shell = fr.apply_hit((140, 176, 128));
-    let shell_hi = mix_rgb(shell, (240, 255, 232), 0.45);
-    let leg = fr.apply_hit((84, 100, 72));
-
-    for (i, &u_hip) in [1.2f32, -0.2, -1.5].iter().enumerate() {
-        let sw = fast_sin(fr.anim + i as f32 * 2.0) * 0.5 * s;
-        for side in [-1.0f32, 1.0] {
-            let hip = fr.px(u_hip * s, side * 1.2 * s);
-            let foot = fr.px(u_hip * s + sw, side * 2.8 * s);
-            line_blend(pb, hip, foot, leg, 0.85);
-        }
-    }
-    // Domed shell.
-    let Some((x0, x1, y0, y1)) = fr.bbox_oriented_circ(pb, -2.4 * s, 2.6 * s, 2.1 * s, fr.r + 2.0, (1, 1))
-    else {
+    let Some((x0, x1, y0, y1)) = fr.bbox_oriented(pb, -3.8 * s, 4.7 * s, 2.8 * s, 2, 2) else {
         return;
     };
-    let inv_u = 1.0 / (2.6 * s);
-    let inv_v = 1.0 / (2.2 * s);
-    let mid_u = 0.1 * s;
+    let rim_lim = 0.85 * s;
+    let sh_lim = 0.35 * s;
+    let du_sh = -1.3 * (fr.f.x + fr.f.y);
+    let dv_sh = -1.3 * (fr.p.x + fr.p.y);
+    let inv_nu = 1.0 / (3.4 * s);
+    let inv_nv = 1.0 / (2.0 * s);
+
     for y in y0..=y1 {
         let (mut u, mut v) = fr.local(x0, y);
         for x in x0..=x1 {
-            let nu = (u - mid_u) * inv_u;
-            let nv = v * inv_v;
-            let r2 = nu * nu + nv * nv;
-            if r2 <= 1.0 {
-                let col = if nv < -0.25 {
-                    shell_hi
-                } else if r2 > 0.7 {
-                    scale_rgb(shell, 0.7)
+            let d = body_sd(u, v);
+            let cover = (0.50 - d * 1.22).clamp(0.0, 1.0);
+            if cover > 0.0 {
+                let nu = (u * inv_nu).clamp(-1.0, 1.0);
+                let nv = (v * inv_nv).clamp(-1.0, 1.0);
+                let lit = fr.lit(nu, nv);
+                let ridge = (1.0 - (d / (-0.7 * s)).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+                let mut lum = 0.42 + 0.36 * (1.0 - ridge * 0.5) + 0.60 * lit;
+                if lit > 0.35 {
+                    lum += 0.25;
+                }
+                if u > 2.4 * s {
+                    lum += 0.16; // bright polished copper tips
+                }
+                let col = fr.apply_hit(shade3(sh_c, mid_c, hi_c, lum));
+                if cover >= 1.0 {
+                    pb.plot(x, y, col);
                 } else {
-                    shell
-                };
-                pb.plot(x, y, col);
+                    let bg = pb.pixel_at(x as usize, y as usize);
+                    let out = mix_rgb(bg, rim_col, 0.64 * (1.0 - cover));
+                    pb.plot(x, y, mix_rgb(out, col, cover));
+                }
+            } else if d < rim_lim {
+                let bg = pb.pixel_at(x as usize, y as usize);
+                pb.plot(x, y, mix_rgb(bg, rim_col, 0.64));
+            } else {
+                let su = u + du_sh;
+                let sv = v + dv_sh;
+                if body_sd(su, sv) < sh_lim {
+                    darken_px(pb, x, y, 0.36);
+                }
             }
             u += fr.f.x;
             v += fr.p.x;
         }
     }
-    // The sugar cube: a 2 × 2 block over its back, lifted while raising. It is
-    // placed in *screen* space (the back is always up) rather than on a body
-    // axis, so the "it is holding the cube up" read survives every facing.
-    let lift = if raising { 3.0 } else { 0.0 };
-    let cube = (245, 248, 244);
-    let cube_sh = (196, 204, 196);
-    let c = (
-        fr.pos.x.round() as i32 - 1,
-        fr.pos.y.round() as i32 - 4 - lift as i32,
-    );
-    blend_px(pb, c.0, c.1, cube, 1.0);
-    blend_px(pb, c.0 + 1, c.1, cube, 1.0);
-    blend_px(pb, c.0, c.1 + 1, cube_sh, 1.0);
-    blend_px(pb, c.0 + 1, c.1 + 1, cube_sh, 1.0);
-    if raising {
-        // The tell: the cube glints while it is up.
-        blend_px(pb, c.0 - 1, c.1, cube, 0.6);
-        blend_px(pb, c.0 + 2, c.1, cube, 0.6);
-        blend_px(pb, c.0, c.1 - 1, cube, 0.75);
-        blend_px(pb, c.0 + 1, c.1 - 1, cube, 0.75);
-        blend_px(pb, c.0, c.1 - 2, cube, 0.45);
-        blend_px(pb, c.0 + 1, c.1 - 2, cube, 0.45);
+
+    // 4) Turquoise/white acoustic chime spark humming between the vibrating prongs when ringing!
+    if ringing {
+        let p = 0.5 + 0.5 * fast_sin(fr.anim * 8.0);
+        let chime = fr.px(2.1 * s, 0.0);
+        let ccol = mix_rgb((138, 232, 255), (255, 252, 224), 0.45 + 0.45 * p);
+        pb.plot(chime.0, chime.1, ccol);
+        pb.plot_add(chime.0, chime.1, scale_rgb(ccol, 0.45));
+    } else {
+        // Tiny bright bead eyes on the yoke shoulders.
+        let eye_c = if fr.hit > 0.7 { (36, 20, 14) } else { (118, 242, 234) };
+        for side in [-1.0f32, 1.0] {
+            let ep = fr.px(0.35 * s, side * 1.1 * s);
+            blend_px(pb, ep.0, ep.1, eye_c, 0.85);
+        }
     }
 }
 
-/// Key-shaped drone: round bow behind, toothed shaft forward, and the
-/// crossbar it has laid across its own path.
-fn draw_turnkey(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam: Vec2) {
-    let s = fr.r * (1.0 / 4.0);
-    let brass = fr.apply_hit((206, 186, 102));
-    let brass_hi = mix_rgb(brass, (255, 248, 200), 0.5);
-    let brass_lo = scale_rgb(brass, 0.62);
+fn draw_bellflea_lod(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam: Vec2, elite: bool) {
+    let s = fr.r * 0.5;
+    draw_bellflea_tells(pb, fr, e, cam);
+    if elite {
+        draw_w3_elite_aura(pb, fr, 2.2 * s);
+    }
+    let copper = fr.apply_hit(if elite { (240, 162, 86) } else { (218, 134, 68) });
+    let copper_hi = fr.apply_hit((255, 232, 178));
+    let leg = fr.apply_hit((112, 62, 30));
+    for side in [-1.0f32, 1.0] {
+        let hip = fr.px(-0.8 * s, side * 1.1 * s);
+        let foot = fr.px(-2.4 * s, side * 2.4 * s);
+        line_blend(pb, hip, foot, leg, 0.85);
+        // Two clear forward copper prongs.
+        let p0 = fr.px(0.0, side * 1.35 * s);
+        let p1 = fr.px(3.5 * s, side * 1.35 * s);
+        thick_line(pb, p0, p1, copper_hi, copper);
+    }
+    let h0 = fr.px(-2.6 * s, 0.0);
+    let h1 = fr.px(0.2 * s, 0.0);
+    thick_line(pb, h0, h1, copper_hi, copper);
+}
 
-    // Bow (the round handle), a ring of eight pixels.
-    let bow = fr.px(-1.8 * s, 0.0);
-    for a in 0..8 {
-        let ang = a as f32 * std::f32::consts::TAU / 8.0;
-        let (sa, ca) = fast_sin_cos(ang);
-        let r = (1.5 * s).round() as i32;
-        let x = bow.0 + (ca * r as f32).round() as i32;
-        let y = bow.1 + (sa * r as f32).round() as i32;
-        blend_px(pb, x, y, if a % 2 == 0 { brass } else { brass_hi }, 0.95);
+// ============================================================================
+// 9. WICK MOTH — Teardrop Lantern Moth with Lit Wick Tail (r = 2.5)
+// ============================================================================
+
+fn draw_wickmoth(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
+    let s = fr.r * (1.0 / 2.5);
+    let flap = fast_sin(fr.anim * 2.1); // -1..1
+    let spread = 0.5 + 0.5 * flap;
+    let span = (3.6 + 1.15 * spread) * s;
+
+    if elite {
+        draw_w3_elite_aura(pb, fr, 3.0 * s);
     }
-    // Shaft + two teeth.
-    let s0 = fr.px(-0.4 * s, 0.0);
-    let s1 = fr.px(3.0 * s, 0.0);
-    line_blend(pb, s0, s1, brass, 0.95);
-    for &u_t in &[1.5f32, 2.5] {
-        let a = fr.px(u_t * s, 0.0);
-        let b = fr.px(u_t * s, -1.3 * s);
-        line_blend(pb, a, b, brass_lo, 0.9);
-    }
-    // The crossbar: dotted while the tell runs, solid once it is live.
-    if e.w3.bar_t > 0.0 {
-        let centre = e.w3.bar_pos - cam;
-        let d = e.w3.bar_dir;
-        let half = crate::game::ecs::systems::enemy_wave3::CROSSBAR_LEN * 0.5;
-        let a = centre - d * half;
-        let b = centre + d * half;
-        let telling = e.w3.bar_telling();
-        let col = if telling {
-            (238, 214, 132)
-        } else if e.w3.bar_spent {
-            (150, 138, 96)
-        } else {
-            (255, 232, 150)
-        };
-        let steps = 11;
-        for k in 0..=steps {
-            if telling && k % 2 == 0 {
-                continue;
-            }
-            let t = k as f32 / steps as f32;
-            let p = a + (b - a) * t;
-            let px = (p.x.round() as i32, p.y.round() as i32);
-            blend_px(pb, px.0, px.1, col, if telling { 0.6 } else { 0.95 });
-            if !telling {
-                // A live bar is two pixels thick so it reads as a barrier.
-                blend_px(pb, px.0, px.1 + 1, scale_rgb(col, 0.7), 0.8);
+
+    // 1) Elevated ground shadow shifted down-right (it flies!).
+    let scx = fr.pos.x.round() as i32 + (2.0 * s).round() as i32;
+    let scy = fr.pos.y.round() as i32 + (3.2 * s + 0.35 * flap * s).round() as i32;
+    let srx = (2.4 + 0.6 * spread) * s;
+    let sry = 1.6 * s;
+    let sy0 = (scy - sry.ceil() as i32).max(0);
+    let sy1 = (scy + sry.ceil() as i32).min(pb.h as i32 - 1);
+    let sx0 = (scx - srx.ceil() as i32).max(0);
+    let sx1 = (scx + srx.ceil() as i32).min(pb.w as i32 - 1);
+    let inv_srx = 1.0 / srx;
+    let inv_sry = 1.0 / sry;
+    for y in sy0..=sy1 {
+        let ny = (y - scy) as f32 * inv_sry;
+        for x in sx0..=sx1 {
+            let nx = (x - scx) as f32 * inv_srx;
+            let r2 = nx * nx + ny * ny;
+            if r2 <= 1.0 {
+                darken_px(pb, x, y, 0.32 * (1.0 - r2 * 0.45));
             }
         }
     }
+
+    // 2) Swept parchment/soot moth wings + plump teardrop torso (distinct delta silhouette vs Bat!).
+    let (body_sh, body_mid, body_hi) = if elite {
+        ((64, 24, 34), (154, 62, 68), (242, 168, 126))
+    } else {
+        ((58, 38, 30), (138, 96, 74), (218, 178, 134))
+    };
+    let (wing_sh, wing_mid, wing_hi, spot_c) = if elite {
+        ((72, 24, 36), (176, 86, 76), (252, 212, 134), (255, 224, 102))
+    } else {
+        ((86, 62, 48), (196, 162, 122), (244, 224, 184), (62, 36, 26))
+    };
+    let rim_col = if fr.hit > 0.4 { (186, 150, 118) } else { (0, 0, 0) };
+
+    let torso_sdf = TaperSdf::new((2.1 * s, 0.0), (-2.3 * s, 0.0), 1.05 * s, 0.45 * s);
+    let head_sdf = EllipseSdf::new(2.2 * s, 0.0, 0.85 * s, 0.95 * s);
+    let Some((x0, x1, y0, y1)) = fr.bbox_oriented_circ(
+        pb,
+        -3.6 * s,
+        3.8 * s,
+        span + 1.2 * s,
+        span + 1.8 * s,
+        (0, 0),
+    ) else {
+        return;
+    };
+
+    let w_start = 0.75 * s;
+    let inv_wspan = 1.0 / (span - w_start).max(0.5);
+    let rim_lim = 0.85 * s;
+    let inv_nu = 1.0 / (2.5 * s);
+    let inv_nv = 1.0 / (1.3 * s);
+
+    for y in y0..=y1 {
+        let (mut u, mut v) = fr.local(x0, y);
+        for x in x0..=x1 {
+            let av = v.abs();
+            let d_body = torso_sdf.eval(u, v).min(head_sdf.eval(u, v));
+
+            // Leaf-shaped delta moth wings sweeping back into a warm teardrop silhouette.
+            let (d_wing, wt, w_u_frac) = if av >= w_start * 0.7 && av <= span + 1.0 * s {
+                let t = ((av - w_start) * inv_wspan).clamp(0.0, 1.0);
+                // Swept leading edge + scalloped soft trailing margin.
+                let u_lead = (1.65 - 2.35 * t + 0.55 * flap * t) * s;
+                let chord = (2.95 * (1.0 - t * 0.55) + 0.45 * fast_sin(t * PI)) * s;
+                let u_trail = u_lead - chord;
+                let du_top = u - u_lead;
+                let du_bot = u_trail - u;
+                let dv_tip = av - span;
+                let d = du_top.max(du_bot).max(dv_tip);
+                let uf = ((u - u_trail) / chord.max(0.5)).clamp(0.0, 1.0);
+                (d, t, uf)
+            } else {
+                (10.0, 0.0, 0.0)
+            };
+
+            let d_all = d_body.min(d_wing);
+            if d_all >= rim_lim {
+                u += fr.f.x;
+                v += fr.p.x;
+                continue;
+            }
+            let body_cov = (0.50 - d_body * 1.2).clamp(0.0, 1.0);
+            let wing_cov = (0.48 - d_wing * 1.15).clamp(0.0, 1.0);
+            let cover = body_cov.max(wing_cov);
+
+            if cover <= 0.0 {
+                let bg = pb.pixel_at(x as usize, y as usize);
+                pb.plot(x, y, mix_rgb(bg, rim_col, 0.56));
+            } else if body_cov >= wing_cov {
+                let nu = (u * inv_nu).clamp(-1.0, 1.0);
+                let nv = (v * inv_nv).clamp(-1.0, 1.0);
+                let dome = (1.0 - (nu * nu * 0.4 + nv * nv * 0.7)).clamp(0.0, 1.0);
+                let lum = 0.42 + 0.36 * dome + 0.54 * fr.lit(nu, nv);
+                let mut col = shade3(body_sh, body_mid, body_hi, lum);
+                // Warm ember underglow near the tail root.
+                if u < -1.1 * s {
+                    let g = ((-1.1 * s - u) / (1.5 * s)).clamp(0.0, 1.0);
+                    col = mix_rgb(col, (255, 166, 72), g * 0.65);
+                }
+                let lit_col = fr.apply_hit(col);
+                if body_cov >= 1.0 {
+                    pb.plot(x, y, lit_col);
+                } else {
+                    let bg = pb.pixel_at(x as usize, y as usize);
+                    let out = mix_rgb(bg, rim_col, 0.56 * (1.0 - cover));
+                    pb.plot(x, y, mix_rgb(out, lit_col, body_cov));
+                }
+            } else {
+                let lit = fr.lit(0.25, if v >= 0.0 { 0.6 } else { -0.6 });
+                let mut col = shade3(wing_sh, wing_mid, wing_hi, 0.48 + 0.38 * lit + 0.14 * w_u_frac);
+                // Distinctive moth wing eyespot + warm smoky trailing margin.
+                let spot_d2 = (wt - 0.52) * (wt - 0.52) * 14.0 + (w_u_frac - 0.46) * (w_u_frac - 0.46) * 12.0;
+                if spot_d2 < 0.42 {
+                    col = spot_c;
+                } else if spot_d2 < 0.85 {
+                    col = mix_rgb(col, (255, 198, 108), 0.65);
+                } else if w_u_frac < 0.22 {
+                    col = mix_rgb(col, body_sh, 0.55);
+                }
+                let lit_col = fr.apply_hit(col);
+                let bg = pb.pixel_at(x as usize, y as usize);
+                let out = if cover < 1.0 {
+                    mix_rgb(bg, rim_col, 0.56 * (1.0 - cover))
+                } else {
+                    bg
+                };
+                pb.plot(x, y, mix_rgb(out, lit_col, wing_cov * 0.94));
+            }
+            u += fr.f.x;
+            v += fr.p.x;
+        }
+    }
+
+    // 3) Feathery moth antennae forward.
+    let ant_c = fr.apply_hit((226, 196, 152));
+    for side in [-1.0f32, 1.0] {
+        let a0 = fr.px(2.5 * s, side * 0.5 * s);
+        let a1 = fr.px(3.5 * s, side * 1.4 * s);
+        line_blend(pb, a0, a1, ant_c, 0.78);
+    }
+
+    // 4) Braided wick stub + live flickering flame trailing behind the teardrop tail!
+    let flick = 0.5 + 0.5 * fast_sin(fr.anim * 7.5);
+    let wick_base = fr.px(-2.4 * s, 0.0);
+    let flame_p = fr.px((-3.3 - 0.3 * flick) * s, (fast_sin(fr.anim * 5.2) * 0.35) * s);
+    pb.plot(wick_base.0, wick_base.1, (76, 54, 40));
+
+    let outer_fire = if e.hp > 0.0 {
+        mix_rgb((255, 118, 36), (255, 196, 76), flick)
+    } else {
+        (255, 224, 148)
+    };
+    let core_fire = if elite { (255, 252, 236) } else { (255, 246, 196) };
+    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+        blend_px(pb, flame_p.0 + dx, flame_p.1 + dy, outer_fire, 0.80);
+        pb.plot_add(flame_p.0 + dx, flame_p.1 + dy, scale_rgb(outer_fire, 0.45));
+    }
+    pb.plot(flame_p.0, flame_p.1, core_fire);
+    pb.plot_add(flame_p.0, flame_p.1 - 1, scale_rgb(core_fire, 0.55));
+}
+
+fn draw_wickmoth_lod(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
+    let s = fr.r * (1.0 / 2.5);
+    let flap = fast_sin(fr.anim * 2.1);
+    if elite {
+        draw_w3_elite_aura(pb, fr, 2.8 * s);
+    }
+    let wing_c = fr.apply_hit(if elite { (198, 108, 92) } else { (204, 170, 128) });
+    let body_c = fr.apply_hit(if elite { (154, 62, 68) } else { (138, 96, 74) });
+    let span = (3.4 + 0.9 * (0.5 + 0.5 * flap)) * s;
+    for side in [-1.0f32, 1.0] {
+        let r0 = fr.px(1.2 * s, side * 0.6 * s);
+        let tip = fr.px((-0.7 + 0.5 * flap) * s, side * span);
+        let back = fr.px(-1.6 * s, side * (span * 0.55));
+        thick_line(pb, r0, tip, wing_c, scale_rgb(wing_c, 0.65));
+        line_blend(pb, tip, back, scale_rgb(wing_c, 0.72), 0.85);
+    }
+    let head = fr.px(2.0 * s, 0.0);
+    let tail_r = fr.px(-2.0 * s, 0.0);
+    thick_line(pb, head, tail_r, body_c, scale_rgb(body_c, 0.6));
+    let flame = fr.px(-3.1 * s, 0.0);
+    let ember = if e.hp > 0.0 { (255, 196, 84) } else { (255, 248, 210) };
+    pb.plot(flame.0, flame.1, (255, 248, 214));
+    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+        pb.plot_add(flame.0 + dx, flame.1 + dy, scale_rgb(ember, 0.55));
+    }
+}
+
+// ============================================================================
+// 10. PORTER — Emerald Scarab Beetle Carrying a White Sugar Cube (r = 4.5)
+// ============================================================================
+
+fn draw_porter(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
+    let s = fr.r * (1.0 / 4.5);
+    let raising = e.w3.raise_t > 0.0;
+    let raise_total = crate::game::ecs::systems::enemy_wave3::PORTER_RAISE_SECS;
+    let raise_p = if raising && raise_total > 0.0 {
+        (1.0 - e.w3.raise_t / raise_total).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let pulse = 0.5 + 0.5 * fast_sin(fr.anim * 5.0);
+
+    if elite {
+        draw_w3_elite_aura(pb, fr, 2.3 * s);
+    }
+
+    // Pulsing mint-green healing tell ring on the floor while raising the sugar cube!
+    if raising {
+        let ring_r = (6.8 + 1.8 * raise_p) * s;
+        let heal_c = mix_rgb((118, 238, 174), (242, 255, 246), 0.35 + 0.45 * pulse);
+        for i in 0..16 {
+            if i % 2 == 0 || raise_p > 0.55 {
+                let a = i as f32 * (TAU / 16.0) + fr.anim * 0.4;
+                let (sa, ca) = fast_sin_cos(a);
+                let rx = (fr.pos.x + ca * ring_r).round() as i32;
+                let ry = (fr.pos.y + sa * ring_r).round() as i32;
+                blend_px(pb, rx, ry, heal_c, 0.58 + 0.32 * raise_p);
+            }
+        }
+    }
+
+    let (sh_c, mid_c, hi_c, trim_c) = if elite {
+        ((26, 74, 68), (66, 168, 148), (168, 248, 224), (252, 208, 82))
+    } else {
+        ((38, 66, 36), (112, 164, 96), (196, 238, 170), (62, 92, 52))
+    };
+    let leg_c = fr.apply_hit(if elite { (72, 118, 102) } else { (68, 94, 58) });
+    let leg_hi = fr.apply_hit(if elite { (220, 188, 92) } else { (116, 148, 96) });
+    let rim_col = if fr.hit > 0.4 { (142, 178, 130) } else { (0, 0, 0) };
+
+    // 1) Six sturdy scarab legs scuttling on alternating tripods.
+    for (i, &u_hip) in [1.7f32, -0.3, -2.2].iter().enumerate() {
+        let sw = if raising {
+            0.0
+        } else {
+            fast_sin(fr.anim * 1.1 + i as f32 * 2.0) * 0.75 * s
+        };
+        for (side, dir) in [(-1.0f32, sw), (1.0, -sw)] {
+            let hip = fr.px(u_hip * s, side * 2.5 * s);
+            let knee = fr.px(u_hip * s + dir * 0.5, side * 3.8 * s);
+            let foot = fr.px(u_hip * s + dir - 0.35 * s, side * 4.5 * s);
+            darken_px(pb, foot.0 + 1, foot.1 + 1, 0.30);
+            line_blend(pb, hip, knee, leg_hi, 0.90);
+            line_blend(pb, knee, foot, leg_c, 0.92);
+        }
+    }
+
+    // 2) Sculpted domed scarab carapace (elytra + pronotum collar + head).
+    let elytra_sdf = EllipseSdf::new(-0.7 * s, 0.0, 3.05 * s, 3.25 * s);
+    let pronotum_sdf = EllipseSdf::new(2.05 * s, 0.0, 1.65 * s, 2.55 * s);
+    let k_s = 0.55 * s;
+    let inv_ks = 1.0 / k_s;
+    let body_sd = |u: f32, v: f32| -> f32 {
+        smin_inv(elytra_sdf.eval(u, v), pronotum_sdf.eval(u, v), k_s, inv_ks)
+    };
+
+    let Some((x0, x1, y0, y1)) = fr.bbox_oriented(pb, -4.8 * s, 4.8 * s, 4.4 * s, 2, 2) else {
+        return;
+    };
+    let rim_lim = 0.92 * s;
+    let sh_lim = 0.42 * s;
+    let ely_sh_sq = elytra_sdf.r2_limit(sh_lim);
+    let pro_sh_sq = pronotum_sdf.r2_limit(sh_lim);
+    let du_sh = -1.6 * (fr.f.x + fr.f.y);
+    let dv_sh = -1.6 * (fr.p.x + fr.p.y);
+    let inv_nu = 1.0 / (3.8 * s);
+    let inv_nv = 1.0 / (3.3 * s);
+    let seam_c = (24, 42, 24);
+
+    for y in y0..=y1 {
+        let (mut u, mut v) = fr.local(x0, y);
+        for x in x0..=x1 {
+            let d = body_sd(u, v);
+            let cover = (0.52 - d * 1.18).clamp(0.0, 1.0);
+            if cover > 0.0 {
+                let nu = (u * inv_nu).clamp(-1.0, 1.0);
+                let nv = (v * inv_nv).clamp(-1.0, 1.0);
+                let dome = (1.0 - (nu * nu * 0.52 + nv * nv * 0.68)).clamp(0.0, 1.0);
+                let lit = fr.lit(nu, nv);
+                let mut lum = 0.36 + 0.40 * dome + 0.58 * lit;
+                if lit > 0.42 && dome > 0.35 {
+                    lum += 0.24;
+                }
+                let mut col = shade3(sh_c, mid_c, hi_c, lum);
+                // Pronotum collar + split wing-case seam.
+                if (u - 1.1 * s).abs() < 0.38 * s {
+                    col = mix_rgb(col, seam_c, 0.72);
+                } else if u < 1.0 * s && v.abs() < 0.32 * s {
+                    col = if elite { trim_c } else { mix_rgb(col, seam_c, 0.65) };
+                } else if elite && d > -0.75 * s {
+                    col = mix_rgb(col, trim_c, 0.55);
+                }
+                let lit_col = fr.apply_hit(col);
+                if cover >= 1.0 {
+                    pb.plot(x, y, lit_col);
+                } else {
+                    let bg = pb.pixel_at(x as usize, y as usize);
+                    let out = mix_rgb(bg, rim_col, 0.68 * (1.0 - cover));
+                    pb.plot(x, y, mix_rgb(out, lit_col, cover));
+                }
+            } else if d < rim_lim {
+                let bg = pb.pixel_at(x as usize, y as usize);
+                pb.plot(x, y, mix_rgb(bg, rim_col, 0.68));
+            } else {
+                let su = u + du_sh;
+                let sv = v + dv_sh;
+                if elytra_sdf.within_sq(su, sv, ely_sh_sq) || pronotum_sdf.within_sq(su, sv, pro_sh_sq) {
+                    darken_px(pb, x, y, 0.38);
+                }
+            }
+            u += fr.f.x;
+            v += fr.p.x;
+        }
+    }
+
+    // Small dark-rimmed amber beetle eyes forward.
+    let eye_c = if fr.hit > 0.7 { (22, 34, 22) } else { (255, 206, 94) };
+    for side in [-1.0f32, 1.0] {
+        let ep = fr.px(3.2 * s, side * 1.1 * s);
+        pb.plot(ep.0, ep.1, eye_c);
+    }
+
+    // 3) The iconic white crystalline SUGAR CUBE (4×4 beveled 3D block in screen space so
+    //    "carrying & lifting the sugar cube" reads cleanly at every facing angle!).
+    let lift_px = if raising {
+        (2.5 + 3.2 * raise_p).round() as i32
+    } else {
+        (fast_sin(fr.anim * 1.1).abs() * 0.6).round() as i32
+    };
+    let cx = fr.pos.x.round() as i32 - 2;
+    let cy = fr.pos.y.round() as i32 - 4 - lift_px;
+
+    // Tiny cradling fore-arms reaching up to hold the cube while raised.
+    if raising {
+        let arm_c = fr.apply_hit(if elite { trim_c } else { (92, 134, 78) });
+        line_blend(pb, (cx - 1, fr.pos.y.round() as i32 - 1), (cx - 1, cy + 3), arm_c, 0.9);
+        line_blend(pb, (cx + 4, fr.pos.y.round() as i32 - 1), (cx + 4, cy + 3), arm_c, 0.9);
+    }
+
+    // Contact shadow of the cube onto the beetle's back (softens as cube lifts higher).
+    if !raising {
+        for dx in 0..4 {
+            darken_px(pb, cx + dx + 1, cy + 4, 0.45);
+        }
+    }
+
+    // Dark outline around the sugar cube so pure white pops on sunlit wood planks too!
+    for dx in -1..=4 {
+        darken_px(pb, cx + dx, cy - 1, 0.60);
+        darken_px(pb, cx + dx, cy + 4, 0.60);
+    }
+    for dy in 0..4 {
+        darken_px(pb, cx - 1, cy + dy, 0.60);
+        darken_px(pb, cx + 4, cy + dy, 0.60);
+    }
+
+    let cube_hi = fr.apply_hit(if elite { (255, 252, 232) } else { (255, 255, 252) });
+    let cube_mid = fr.apply_hit(if elite { (246, 238, 206) } else { (236, 244, 238) });
+    let cube_sh = fr.apply_hit((176, 194, 184));
+    let cube_deep = fr.apply_hit((132, 152, 144));
+
+    for dy in 0..4 {
+        for dx in 0..4 {
+            let col = if (dy == 0 && dx < 3) || (dx == 0 && dy < 3) {
+                cube_hi
+            } else if dy == 3 || dx == 3 {
+                if dy == 3 && dx == 3 { cube_deep } else { cube_sh }
+            } else if (dx + dy) == 2 {
+                cube_hi // subtle sugar crystal facet glint
+            } else {
+                cube_mid
+            };
+            pb.plot(cx + dx, cy + dy, col);
+        }
+    }
+
+    // Blazing mint-white healing glint rays around the raised sugar cube!
+    if raising {
+        let ray_c = mix_rgb((176, 255, 210), (255, 255, 250), 0.45 + 0.45 * pulse);
+        let mid_x = cx + 2;
+        let top_y = cy - 1;
+        // Upward healing cross + sparkle bursts above the cube.
+        blend_px(pb, mid_x - 1, top_y, ray_c, 0.92);
+        blend_px(pb, mid_x, top_y, ray_c, 0.92);
+        blend_px(pb, mid_x - 1, top_y - 1, ray_c, 0.78);
+        blend_px(pb, mid_x, top_y - 1, ray_c, 0.78);
+        blend_px(pb, cx - 2, cy + 1, ray_c, 0.70);
+        blend_px(pb, cx + 5, cy + 1, ray_c, 0.70);
+        if raise_p > 0.35 {
+            pb.plot_add(mid_x - 1, top_y - 1, scale_rgb(ray_c, 0.6));
+            pb.plot_add(mid_x, top_y - 1, scale_rgb(ray_c, 0.6));
+            pb.plot_add(cx - 2, cy + 1, scale_rgb(ray_c, 0.45));
+            pb.plot_add(cx + 5, cy + 1, scale_rgb(ray_c, 0.45));
+        }
+    }
+}
+
+fn draw_porter_lod(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
+    let s = fr.r * (1.0 / 4.5);
+    let raising = e.w3.raise_t > 0.0;
+    if elite {
+        draw_w3_elite_aura(pb, fr, 2.0 * s);
+    }
+    let Some((x0, x1, y0, y1)) = fr.bbox_oriented(pb, -4.0 * s, 4.0 * s, 3.8 * s, 1, 1) else {
+        return;
+    };
+    let ramp = if elite {
+        build_ramp4((26, 74, 68), (66, 168, 148), (168, 248, 224), fr)
+    } else {
+        build_ramp4((38, 66, 36), (112, 164, 96), (196, 238, 170), fr)
+    };
+    let hit_tint = fr.hit > 0.4;
+    let rim_col = if hit_tint { (142, 178, 130) } else { (0, 0, 0) };
+    let inv_u = 1.0 / (3.3 * s);
+    let inv_v = 1.0 / (3.1 * s);
+    for y in y0..=y1 {
+        let (mut u, mut v) = fr.local(x0, y);
+        for x in x0..=x1 {
+            let nu = u * inv_u;
+            let nv = v * inv_v;
+            let r2 = nu * nu + nv * nv;
+            if r2 <= 1.0 {
+                pb.plot(x, y, ramp[ramp4_idx(fr.lit(nu, nv), r2)]);
+            } else if r2 <= 1.6 {
+                plot_rim(pb, x, y, rim_col, 0.60, hit_tint);
+            }
+            u += fr.f.x;
+            v += fr.p.x;
+        }
+    }
+    // Crisp 3×3 white sugar cube with dark rim (lifted when raising) so it pops cleanly in LOD.
+    let lift = if raising { 4 } else { 0 };
+    let cx = fr.pos.x.round() as i32 - 1;
+    let cy = fr.pos.y.round() as i32 - 4 - lift;
+    for dx in -1..=3 {
+        darken_px(pb, cx + dx, cy - 1, 0.58);
+        darken_px(pb, cx + dx, cy + 3, 0.58);
+    }
+    for dy in 0..3 {
+        darken_px(pb, cx - 1, cy + dy, 0.58);
+        darken_px(pb, cx + 3, cy + dy, 0.58);
+    }
+    for dy in 0..3 {
+        for dx in 0..3 {
+            let c = if dx == 2 || dy == 2 { (182, 198, 188) } else { (252, 255, 250) };
+            pb.plot(cx + dx, cy + dy, fr.apply_hit(c));
+        }
+    }
+    if raising {
+        pb.plot_add(cx + 1, cy - 1, (160, 245, 200));
+        pb.plot_add(cx - 1, cy + 1, (140, 235, 190));
+        pb.plot_add(cx + 3, cy + 1, (140, 235, 190));
+    }
+}
+
+// ============================================================================
+// 11. TURNKEY — Ornate Brass Skeleton-Key Drone + Crossbar Barrier (r = 4.0)
+// ============================================================================
+
+fn draw_turnkey(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam: Vec2, elite: bool) {
+    let s = fr.r * (1.0 / 4.0);
+
+    // 1) The laid crossbar (dotted tell or blazing live barrier) on the floor first.
+    draw_turnkey_bar(pb, fr, e, cam);
+
+    if elite {
+        draw_w3_elite_aura(pb, fr, 2.5 * s);
+    }
+
+    let (sh_c, mid_c, hi_c) = if elite {
+        ((62, 54, 46), (176, 152, 92), (255, 248, 206))
+    } else {
+        ((88, 66, 26), (208, 174, 82), (255, 246, 188))
+    };
+    let rim_col = if fr.hit > 0.4 { (196, 174, 112) } else { (0, 0, 0) };
+    let hover = fast_sin(fr.anim * 1.9) * 0.45 * s;
+
+    // 2) Sculpted antique brass skeleton key: hollow circular bow, ornate collar, machined shaft,
+    //    and two crisp ward teeth jutting from the bit!
+    let bow_u = -2.2 * s;
+    let bow_r = 1.95 * s;
+    let bow_thick = 0.72 * s;
+    let shaft_sdf = CapsuleSdf::new(-0.35 * s, 0.0, 3.85 * s, 0.0, 0.68 * s);
+    let collar_sdf = EllipseSdf::new(-0.25 * s, 0.0, 0.55 * s, 1.15 * s);
+    let tooth1_sdf = CapsuleSdf::new(1.75 * s, -0.35 * s, 1.75 * s, -2.35 * s, 0.50 * s);
+    let tooth2_sdf = CapsuleSdf::new(3.15 * s, -0.35 * s, 3.15 * s, -2.10 * s, 0.48 * s);
+
+    let key_sd = |u: f32, v: f32| -> (f32, bool) {
+        // Hollow ring SDF for the key bow (so the floor shows right through the handle!).
+        let du = u - bow_u;
+        let d_bow = ((du * du + v * v).sqrt() - bow_r).abs() - bow_thick;
+        let d_shaft = shaft_sdf.eval(u, v).min(collar_sdf.eval(u, v));
+        let d_teeth = tooth1_sdf.eval(u, v).min(tooth2_sdf.eval(u, v));
+        let d_all = d_bow.min(d_shaft).min(d_teeth);
+        (d_all, d_teeth < d_shaft && d_teeth < d_bow)
+    };
+
+    let Some((x0, x1, y0, y1)) = fr.bbox_oriented(pb, -5.4 * s, 5.2 * s, 3.8 * s, 3, 3) else {
+        return;
+    };
+    let rim_lim = 0.85 * s;
+    let sh_lim = 0.38 * s;
+    let du_sh = -(2.0 + hover) * fr.f.x - (2.4 + hover) * fr.f.y;
+    let dv_sh = -(2.0 + hover) * fr.p.x - (2.4 + hover) * fr.p.y;
+    let inv_nu = 1.0 / (4.5 * s);
+    let inv_nv = 1.0 / (2.8 * s);
+
+    for y in y0..=y1 {
+        let (mut u, mut v) = fr.local(x0, y);
+        for x in x0..=x1 {
+            let (d, is_tooth) = key_sd(u, v);
+            let cover = (0.50 - d * 1.22).clamp(0.0, 1.0);
+            if cover > 0.0 {
+                let nu = (u * inv_nu).clamp(-1.0, 1.0);
+                let nv = (v * inv_nv).clamp(-1.0, 1.0);
+                let lit = fr.lit(nu, nv);
+                let bevel = (-d / (0.65 * s)).clamp(0.0, 1.0);
+                let mut lum = 0.34 + 0.42 * bevel + 0.62 * lit;
+                if lit > 0.36 && bevel > 0.4 {
+                    lum += 0.30; // polished brass metallic glint
+                }
+                if is_tooth {
+                    lum *= 0.88; // notched steel/brass ward teeth slightly darker for depth
+                }
+                let mut col = shade3(sh_c, mid_c, hi_c, lum);
+                if elite && (u + 0.25 * s).abs() < 0.45 * s {
+                    col = mix_rgb(col, (255, 118, 228), 0.55);
+                }
+                let lit_col = fr.apply_hit(col);
+                if cover >= 1.0 {
+                    pb.plot(x, y, lit_col);
+                } else {
+                    let bg = pb.pixel_at(x as usize, y as usize);
+                    let out = mix_rgb(bg, rim_col, 0.68 * (1.0 - cover));
+                    pb.plot(x, y, mix_rgb(out, lit_col, cover));
+                }
+            } else if d < rim_lim {
+                let bg = pb.pixel_at(x as usize, y as usize);
+                pb.plot(x, y, mix_rgb(bg, rim_col, 0.68));
+            } else {
+                let su = u + du_sh;
+                let sv = v + dv_sh;
+                if key_sd(su, sv).0 < sh_lim {
+                    darken_px(pb, x, y, 0.36);
+                }
+            }
+            u += fr.f.x;
+            v += fr.p.x;
+        }
+    }
+
+    // 3) Glowing mechanical sensor eye set on the collar (brightens when laying a bar!).
+    let pulse = 0.5 + 0.5 * fast_sin(fr.anim * 4.5);
+    let eye_c = if fr.hit > 0.7 {
+        (42, 32, 18)
+    } else if e.w3.bar_t > 0.0 && !e.w3.bar_spent {
+        mix_rgb((255, 146, 52), (255, 250, 210), 0.4 + 0.5 * pulse)
+    } else if elite {
+        (255, 96, 212)
+    } else {
+        (255, 86, 62)
+    };
+    let ep = fr.px(-0.25 * s, 0.0);
+    pb.plot(ep.0, ep.1, eye_c);
+    if e.w3.bar_t > 0.0 && !e.w3.bar_spent {
+        pb.plot_add(ep.0, ep.1, scale_rgb(eye_c, 0.45));
+    }
+}
+
+fn draw_turnkey_lod(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam: Vec2, elite: bool) {
+    let s = fr.r * (1.0 / 4.0);
+    draw_turnkey_bar(pb, fr, e, cam);
+    if elite {
+        draw_w3_elite_aura(pb, fr, 2.2 * s);
+    }
+    let brass = fr.apply_hit(if elite { (216, 194, 128) } else { (208, 174, 82) });
+    let brass_hi = fr.apply_hit((255, 246, 188));
+    let brass_lo = fr.apply_hit((112, 86, 36));
+    let bow = fr.px(-2.1 * s, 0.0);
+    let r = (1.85 * s).round() as i32;
+    for a in 0..12 {
+        let ang = a as f32 * (TAU / 12.0);
+        let (sa, ca) = fast_sin_cos(ang);
+        let x = bow.0 + (ca * r as f32).round() as i32;
+        let y = bow.1 + (sa * r as f32).round() as i32;
+        darken_px(pb, x + 1, y + 1, 0.40);
+        pb.plot(x, y, if a % 3 == 0 { brass_hi } else { brass });
+    }
+    let s0 = fr.px(-0.3 * s, 0.0);
+    let s1 = fr.px(3.7 * s, 0.0);
+    thick_line(pb, s0, s1, brass_hi, brass);
+    for &u_t in &[1.75f32, 3.1] {
+        let a = fr.px(u_t * s, 0.0);
+        let b = fr.px(u_t * s, -2.1 * s);
+        thick_line(pb, a, b, brass, brass_lo);
+    }
+    let ep = fr.px(-0.25 * s, 0.0);
+    pb.plot(ep.0, ep.1, (255, 96, 68));
 }
 
 /// A dead Wick Moth's burning fuse (its own entity; see `components::Wick`).
 ///
-/// `t` is the fuse's remaining fraction: the flame grows and whitens as it runs
-/// down, so the 9 px burst at the end is the one thing the rat must step out of.
+/// `t` is the fuse's remaining fraction: the braided charred wick sputters, the
+/// flame flashes faster and grows hotter, and the 9 px blast ring tightens into
+/// an unmistakable white-hot warning before detonation.
 pub fn draw_wick(pb: &mut PixelBuffer, wick: &crate::game::ecs::components::Wick, cam: Vec2) {
     let pos = wick.pos - cam;
     let total = crate::game::ecs::systems::enemy_wave3::WICK_FUSE_SECS;
@@ -3745,27 +4633,91 @@ pub fn draw_wick(pb: &mut PixelBuffer, wick: &crate::game::ecs::components::Wick
     };
     let cx = pos.x.round() as i32;
     let cy = pos.y.round() as i32;
-    // The stub of the wick.
-    for k in 0..3 {
-        blend_px(pb, cx - k, cy, (108, 84, 60), 0.9);
+    if cx < -16 || cy < -16 || cx > pb.w as i32 + 16 || cy > pb.h as i32 + 16 {
+        return;
     }
-    // A flickering flame that grows: 1 px -> 3 px, orange -> white.
-    let r = 1 + (t * 2.0) as i32;
-    let core = mix_rgb((255, 168, 72), (255, 252, 232), t);
-    for dy in -r..=r {
-        for dx in -r..=r {
-            let d2 = dx * dx + dy * dy;
-            if d2 <= r * r {
-                let a = if d2 >= (r * r) - r { 0.55 } else { 0.95 };
-                blend_px(pb, cx + dx, cy + dy - 1, core, a);
+
+    // Accelerating strobe pulse as fuse burns down (slow flicker -> urgent flash!).
+    let freq = 10.0 + 26.0 * t * t;
+    let strobe = 0.5 + 0.5 * fast_sin(t * freq * PI);
+    let urgent = t > 0.62;
+
+    // 1) Subtle scorched ground ring under the dead moth's wick.
+    for dy in -2..=2 {
+        for dx in -3..=3 {
+            if dx * dx + dy * dy * 2 <= 9 {
+                darken_px(pb, cx + dx, cy + dy + 1, 0.36);
             }
         }
     }
-    // The ring the burst will cover: a warning for the 9 px that are about to
-    // hurt both sides.
-    let burst = crate::game::ecs::systems::enemy_wave3::WICK_BURST_RADIUS as i32;
-    let ticks = if t > 0.5 { &DOTTED } else { &ALL_TICKS };
-    cross_mark(pb, (cx, cy), burst, (255, 208, 132), 0.30 + 0.4 * t, ticks);
+
+    // 2) The 9 px burst hazard circle (dashed amber early -> solid urgent orange/white late!).
+    let burst = crate::game::ecs::systems::enemy_wave3::WICK_BURST_RADIUS.round() as i32;
+    let ring_col = if urgent {
+        mix_rgb((255, 108, 42), (255, 246, 198), strobe)
+    } else {
+        mix_rgb((255, 168, 68), (255, 224, 132), 0.35 + 0.45 * strobe)
+    };
+    let ring_alpha = 0.52 + 0.42 * t;
+    let n_pts = 24;
+    for i in 0..n_pts {
+        let show = urgent || (i % 2 == 0);
+        if show {
+            let a = i as f32 * (TAU / n_pts as f32);
+            let (sa, ca) = fast_sin_cos(a);
+            let rx = cx + (ca * burst as f32).round() as i32;
+            let ry = cy + (sa * burst as f32).round() as i32;
+            darken_px(pb, rx, ry + 1, 0.35);
+            blend_px(pb, rx, ry, ring_col, ring_alpha);
+        }
+    }
+    // Four inward warning ticks on the cardinal axes so the blast boundary pops at 2x zoom.
+    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        blend_px(pb, cx + dx * (burst - 1), cy + dy * (burst - 1), (255, 236, 176), 0.65 + 0.30 * t);
+    }
+
+    // 3) Charred braided wick cord shortening as the fuse burns down.
+    let cord_len = ((1.0 - t * 0.65) * 4.0).round() as i32;
+    for k in 0..=cord_len {
+        let wx = cx - k;
+        let wy = cy + (k / 2);
+        let c = if k == 0 { (214, 96, 44) } else if k % 2 == 0 { (92, 68, 48) } else { (64, 46, 34) };
+        pb.plot(wx, wy, c);
+    }
+
+    // 4) Layered flickering flame: deep orange halo -> hot gold mid -> blazing white core + sparks!
+    let r = 1 + (t * 2.2 + strobe * 0.5) as i32;
+    let outer = mix_rgb((255, 96, 28), (255, 188, 64), t * 0.6 + strobe * 0.4);
+    let mid = mix_rgb((255, 192, 68), (255, 244, 178), t * 0.7 + strobe * 0.3);
+    let core = (255, 254, 240);
+    let fy = cy - 1;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let d2 = dx * dx + dy * dy;
+            let r2 = r * r;
+            if d2 <= r2 {
+                let c = if d2 <= 1 {
+                    core
+                } else if d2 * 2 <= r2 {
+                    mid
+                } else {
+                    outer
+                };
+                let a = if d2 >= r2 - r { 0.62 } else { 0.96 };
+                blend_px(pb, cx + dx, fy + dy, c, a);
+                if d2 <= 2 {
+                    pb.plot_add(cx + dx, fy + dy, scale_rgb(outer, 0.35 + 0.30 * strobe));
+                }
+            }
+        }
+    }
+    // Sputtering upward spark flecks popping off the burning tip.
+    let sp_y = fy - r - 1 - (strobe > 0.5) as i32;
+    let sp_x = cx + if strobe > 0.5 { 1 } else { -1 };
+    pb.plot_add(sp_x, sp_y, (255, 224, 128));
+    if urgent {
+        pb.plot_add(cx - (sp_x - cx), fy - r, (255, 186, 92));
+    }
 }
 
 #[cfg(test)]
@@ -4573,5 +5525,147 @@ mod tests {
             "600-swarm   : full={full_frame_us:6.1} us/frame, crowd-LOD={crowd_frame_us:6.1} us/frame"
         );
         black_box(pb.pixel_at(80, 84));
+    }
+
+    #[test]
+    fn wave3_enemies_hit_flash_elite_and_lod_work_cleanly() {
+        let w3_kinds = [
+            EnemyKind::Pillbug,
+            EnemyKind::BellFlea,
+            EnemyKind::WickMoth,
+            EnemyKind::Porter,
+            EnemyKind::Turnkey,
+        ];
+        let bg = (16, 22, 20);
+        let acc = (90, 220, 200);
+        for &kind in &w3_kinds {
+            let sum_pb = |e: &Enemy, lod: bool| -> (u64, u64) {
+                let mut pb = PixelBuffer::new(64, 64);
+                pb.clear(bg);
+                if lod {
+                    draw_enemy_lod(&mut pb, e, Vec2::ZERO, acc);
+                } else {
+                    draw_enemy(&mut pb, e, Vec2::ZERO, acc);
+                }
+                let mut sum = 0u64;
+                for y in 0..pb.h {
+                    for x in 0..pb.w {
+                        let c = pb.pixel_at(x, y);
+                        sum += c.0 as u64 + c.1 as u64 + c.2 as u64;
+                    }
+                }
+                (sum, fnv1a_pixels(&pb))
+            };
+            let base = make_enemy(kind, Vec2::new(32.0, 32.0), 0.35);
+            let mut hit = base.clone();
+            hit.flash = 0.12;
+            let mut elite = base.clone();
+            elite.elite = true;
+            let (s_base, h_base) = sum_pb(&base, false);
+            let (s_hit, _) = sum_pb(&hit, false);
+            let (_, h_elite) = sum_pb(&elite, false);
+            let (s_lod, _) = sum_pb(&base, true);
+            let (s_lod_hit, _) = sum_pb(&hit, true);
+            assert!(s_hit > s_base + 80, "{kind:?}: hit flash must brighten");
+            assert!(s_lod_hit > s_lod + 40, "{kind:?}: LOD hit flash must brighten");
+            assert_ne!(h_base, h_elite, "{kind:?}: elite must differ from normal");
+        }
+    }
+
+    /// Full Wave 3 art sheet: Row 1 idle, Row 2 tells, Row 3 elites, Row 4 LOD + 2x zoom-out.
+    /// `RATRUN_DUMP=w3_art3_enemies cargo test dump_wave3_art3_sheet`.
+    #[test]
+    fn dump_wave3_art3_sheet() {
+        if std::env::var("RATRUN_DUMP").as_deref() != Ok("w3_art3_enemies") {
+            return;
+        }
+        use crate::game::ecs::components::Wick;
+        use crate::game::ecs::systems::enemy_wave3::*;
+        let w = 240usize;
+        let h = 160usize;
+        let mut pb = PixelBuffer::new(w, h);
+        let level = Level::new(Theme::Sewer);
+        let cam = Vec2::new(300.0, 300.0);
+        art_floor::draw_floor(&mut pb, &level, cam, 0.0);
+        let acc = level.palette.accent;
+        let kinds = [
+            EnemyKind::Pillbug,
+            EnemyKind::BellFlea,
+            EnemyKind::WickMoth,
+            EnemyKind::Porter,
+            EnemyKind::Turnkey,
+        ];
+        // Row 1 (y=24): Idle facing down-right + rat scale ref.
+        let mut rat = Player::new(Vec2::new(cam.x + 18.0, cam.y + 24.0), WeaponKind::Gnaw);
+        rat.face = Vec2::new(0.4, 0.9).normalized();
+        art_rat::draw_rat(&mut pb, &rat, 0.5, cam);
+        for (i, &kind) in kinds.iter().enumerate() {
+            let mut e = make_enemy(kind, Vec2::new(cam.x + 54.0 + i as f32 * 40.0, cam.y + 24.0), 0.35);
+            e.anim = 0.8 + i as f32 * 0.6;
+            draw_enemy(&mut pb, &e, cam, acc);
+        }
+        // Row 2 (y=66): Tells (curled pillbug, flea crosses, burning wick, raised cube, dotted + live bar).
+        let mut pb_e = make_enemy(EnemyKind::Pillbug, Vec2::new(cam.x + 30.0, cam.y + 66.0), 0.25);
+        pb_e.w3.curl_t = PILLBUG_CURL_SECS * 0.5;
+        draw_enemy(&mut pb, &pb_e, cam, acc);
+
+        let mut fl = make_enemy(EnemyKind::BellFlea, Vec2::new(cam.x + 68.0, cam.y + 66.0), 0.15);
+        fl.w3.flea_phase = 1;
+        fl.w3.home = fl.pos;
+        fl.w3.hop_to = fl.pos + Vec2::new(22.0, 4.0);
+        draw_enemy(&mut pb, &fl, cam, acc);
+
+        draw_wick(&mut pb, &Wick { pos: Vec2::new(cam.x + 124.0, cam.y + 66.0), fuse: WICK_FUSE_SECS * 0.22 }, cam);
+
+        let mut po = make_enemy(EnemyKind::Porter, Vec2::new(cam.x + 158.0, cam.y + 66.0), -0.35);
+        po.w3.raise_t = PORTER_RAISE_SECS * 0.35;
+        draw_enemy(&mut pb, &po, cam, acc);
+
+        let mut tk1 = make_enemy(EnemyKind::Turnkey, Vec2::new(cam.x + 194.0, cam.y + 66.0), 0.0);
+        tk1.w3.bar_pos = tk1.pos;
+        tk1.w3.bar_dir = Vec2::new(0.0, 1.0);
+        tk1.w3.bar_t = CROSSBAR_LIVE_SECS + CROSSBAR_TELL_SECS * 0.5;
+        draw_enemy(&mut pb, &tk1, cam, acc);
+
+        let mut tk2 = make_enemy(EnemyKind::Turnkey, Vec2::new(cam.x + 220.0, cam.y + 66.0), 0.0);
+        tk2.w3.bar_pos = tk2.pos;
+        tk2.w3.bar_dir = Vec2::new(0.0, 1.0);
+        tk2.w3.bar_t = CROSSBAR_LIVE_SECS * 0.5;
+        draw_enemy(&mut pb, &tk2, cam, acc);
+
+        // Row 3 (y=108): Elites (all 5 kinds).
+        for (i, &kind) in kinds.iter().enumerate() {
+            let mut e = make_enemy(kind, Vec2::new(cam.x + 40.0 + i as f32 * 44.0, cam.y + 108.0), -0.4);
+            e.elite = true;
+            e.anim = 1.4 + i as f32 * 0.5;
+            draw_enemy(&mut pb, &e, cam, acc);
+        }
+        // Row 4 (y=142): Left half LOD, Right half 2x zoom-out (downsampled 2:1!).
+        for (i, &kind) in kinds.iter().enumerate() {
+            let e = make_enemy(kind, Vec2::new(cam.x + 20.0 + i as f32 * 22.0, cam.y + 142.0), 0.25);
+            draw_enemy_lod(&mut pb, &e, cam, acc);
+        }
+        let mut hi = PixelBuffer::new(220, 48);
+        art_floor::draw_floor(&mut hi, &level, cam, 0.0);
+        for (i, &kind) in kinds.iter().enumerate() {
+            let e = make_enemy(kind, Vec2::new(cam.x + 22.0 + i as f32 * 42.0, cam.y + 24.0), 0.35);
+            draw_enemy(&mut hi, &e, cam, acc);
+        }
+        for dy in 0..24usize {
+            for dx in 0..110usize {
+                let c = hi.pixel_at(dx * 2, dy * 2);
+                pb.plot((124 + dx) as i32, (130 + dy) as i32, c);
+            }
+        }
+        let mut out = format!("P6\n{} {}\n255\n", w, h).into_bytes();
+        for y in 0..h {
+            for x in 0..w {
+                let c = pb.pixel_at(x, y);
+                out.extend_from_slice(&[c.0, c.1, c.2]);
+            }
+        }
+        let dir = std::env::var_os("RATRUN_DUMP_DIR")
+            .map_or_else(|| std::path::PathBuf::from("/tmp"), std::path::PathBuf::from);
+        std::fs::write(dir.join("ratrun_w3_art3_enemies.ppm"), out).unwrap();
     }
 }

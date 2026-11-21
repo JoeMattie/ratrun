@@ -905,77 +905,231 @@ fn blend_px(pb: &mut PixelBuffer, x: i32, y: i32, c: Rgb, alpha: f32) {
 /// **The mouse-hole shop's marker**: the opening, the bent spoon over it and
 /// the three white whisker scratches on the floor in front.
 ///
-/// Placeholder art (Neon redraws it in wave 2): the read it must keep is
-/// exactly the design's — a dark arch in the masonry with a *bent spoon*
-/// hanging over it, three pale scratches on the fork that lead the eye to it,
-/// and a slow pewter glint so it is not mistaken for a rat-hole. Drawn on the
-/// foreground object layer, over the wall body.
+/// **The mouse-hole shop's marker**: the arched den opening with warm
+/// subterranean glow, the bent pewter spoon nailed over the keystone, and
+/// three chalk-white whisker scratches scored into the floor at the fork.
+///
+/// Drawn on the foreground object layer over the wall body; integrates into
+/// every theme's wall masonry via blended mortar/gnaw rims and grooved floor
+/// shadows so it reads clearly on dark Sewer/Lab stone and sunlit Flatbed deck.
 pub fn draw_shop_hole(pb: &mut PixelBuffer, hole: &ShopHole, cam: Vec2, t: f32) {
     let cx = hole.pos.x - cam.x;
     let cy = hole.pos.y - cam.y;
     if !cx.is_finite() || !cy.is_finite() || cx < -40.0 || cy < -40.0 {
         return;
     }
+    if cx > pb.w as f32 + 40.0 || cy > pb.h as f32 + 40.0 {
+        return;
+    }
     let (x, y) = (cx.round() as i32, cy.round() as i32);
     let (fx, fy) = (hole.facing.x.round() as i32, hole.facing.y.round() as i32);
-    // Horizontal walls (the face looks north/south) sit their opening on the
-    // wall's front face; vertical ones keep it on the tile's centre line.
-    let face_dx = fx;
-    let face_dy = fy;
-    let ox = x + face_dx * 5;
-    let oy = y + face_dy * 5 - 1;
+    // Anchor the arch on the wall face facing the walkable fork.
+    let ox = x + fx * 5;
+    let oy = y + fy * 5 - 1;
 
-    const MOUTH: Rgb = (10, 9, 12);
-    const MOUTH_RIM: Rgb = (58, 52, 60);
-    const SPOON: Rgb = (176, 180, 190);
-    const SPOON_HI: Rgb = (238, 241, 248);
-    const SPOON_DARK: Rgb = (104, 108, 120);
-    const SCRATCH: Rgb = (236, 240, 244);
+    const VOID: Rgb = (8, 7, 11);
+    const DEEP_WARM: Rgb = (58, 34, 18);
+    const CANDLE: Rgb = (196, 126, 56);
+    const CANDLE_HI: Rgb = (246, 198, 122);
+    const GNAW_DARK: Rgb = (26, 22, 26);
+    const GNAW_CHIP: Rgb = (118, 108, 100);
+    const SPOON_LO: Rgb = (88, 94, 108);
+    const SPOON_MID: Rgb = (168, 174, 188);
+    const SPOON_HI: Rgb = (244, 248, 255);
+    const NAIL: Rgb = (52, 46, 44);
+    const SCRATCH_HI: Rgb = (242, 246, 248);
+    const SCRATCH_MID: Rgb = (188, 196, 204);
 
-    // The bent opening: a 9 x 7 arch of black, an inner shadow and a gnawed rim.
-    for dy in -3i32..=3 {
-        let half = if dy.abs() <= 1 { 4 } else if dy.abs() == 2 { 3 } else { 2 };
-        for dx in -half..=half {
-            pb.plot(ox + dx, oy + dy, MOUTH);
+    let candle_pulse = 0.5 + 0.5 * (t * 2.9 + hole.pos.x * 0.07).sin();
+    let glint = 0.5 + 0.5 * (t * 1.65 + hole.pos.y * 0.05).sin();
+
+    // 1) Soft warm subterranean light spill onto the threshold floor in front.
+    let spill_x = ox + fx * 3;
+    let spill_y = oy + fy * 3 + 2;
+    let spill_col = palette::mix(DEEP_WARM, CANDLE, 0.35 + 0.25 * candle_pulse);
+    for dy in -2i32..=3 {
+        for dx in -4i32..=4 {
+            let d2 = dx * dx + dy * dy * 2;
+            if d2 <= 18 {
+                let a = (1.0 - d2 as f32 / 20.0) * (0.20 + 0.08 * candle_pulse);
+                blend_px(pb, spill_x + dx, spill_y + dy, spill_col, a);
+            }
         }
-        pb.plot(ox - half - 1, oy + dy, MOUTH_RIM);
-        pb.plot(ox + half + 1, oy + dy, MOUTH_RIM);
+    }
+
+    // 2) The arched mouse-hole opening (domed top, flat sill bottom, gnawed masonry collar).
+    //    Half-widths per row from top (dy = -4) to sill (dy = +3).
+    const ARCH: [(i32, i32); 8] = [
+        (-4, 1),
+        (-3, 3),
+        (-2, 4),
+        (-1, 4),
+        (0, 4),
+        (1, 4),
+        (2, 4),
+        (3, 4),
+    ];
+    // Outer ambient shadow / gnawed masonry ring.
+    for &(dy, half) in &ARCH {
+        darken_px(pb, ox - half - 2, oy + dy, 0.62);
+        darken_px(pb, ox + half + 2, oy + dy, 0.62);
+        blend_px(pb, ox - half - 1, oy + dy, GNAW_DARK, 0.88);
+        blend_px(pb, ox + half + 1, oy + dy, GNAW_DARK, 0.88);
+        // Scattered gnawed tooth-marks along the outer lip.
+        if dy == -2 || dy == 0 || dy == 2 {
+            blend_px(pb, ox - half - 1, oy + dy, GNAW_CHIP, 0.42);
+            blend_px(pb, ox + half + 1, oy + dy, GNAW_CHIP, 0.32);
+        }
     }
     for dx in -2i32..=2 {
-        pb.plot(ox + dx, oy + 4, MOUTH_RIM);
-        pb.plot(ox + dx, oy - 4, MOUTH_RIM);
+        blend_px(pb, ox + dx, oy - 5, GNAW_DARK, 0.85);
+        darken_px(pb, ox + dx, oy - 6, 0.65);
+    }
+    // Flat threshold sill at dy = +4.
+    for dx in -4i32..=4 {
+        blend_px(pb, ox + dx, oy + 4, GNAW_CHIP, 0.55);
+        darken_px(pb, ox + dx, oy + 5, 0.55);
     }
 
-    // The bent spoon hanging over the opening: handle, elbow, bowl.
-    let glint = 0.5 + 0.5 * (t * 1.7).sin();
-    let glint_col = palette::mix(SPOON, SPOON_HI, 0.25 + 0.55 * glint);
-    let top = oy - 7;
-    for i in 0..6 {
-        pb.plot(ox + 3, top + i, if i == 0 { SPOON_HI } else { SPOON });
+    // Interior tunnel fill: pitch black at the crown, warm den candle glow at the lower recess.
+    for &(dy, half) in &ARCH {
+        for dx in -half..=half {
+            let px = ox + dx;
+            let py = oy + dy;
+            let edge = dx.abs() == half || dy == -4;
+            let col = if dy >= 2 && dx.abs() <= 2 {
+                // Warm candlelit den floor peeking from behind the wall.
+                let k = (1.0 - dx.abs() as f32 * 0.30) * (if dy == 3 { 1.0 } else { 0.55 });
+                let glow = palette::mix(DEEP_WARM, CANDLE, 0.45 + 0.35 * candle_pulse);
+                palette::mix(VOID, glow, k * 0.85)
+            } else if dy == 1 && dx.abs() <= 1 {
+                palette::mix(VOID, DEEP_WARM, 0.55 + 0.25 * candle_pulse)
+            } else if edge {
+                (16, 13, 18)
+            } else {
+                VOID
+            };
+            pb.plot(px, py, col);
+        }
     }
-    // The kink where it was bent over the lip of the wall.
-    pb.plot(ox + 2, top + 5, SPOON);
-    pb.plot(ox + 1, top + 6, SPOON_DARK);
-    // The bowl: a 3 px pewter disc under the elbow.
-    pb.filled_circle(ox, top + 8, 2, SPOON);
-    pb.plot(ox, top + 8, glint_col);
-    pb.plot(ox - 1, top + 9, SPOON_DARK);
+    // Tiny warm lantern ember deep at the sill centre so the hole feels inhabited.
+    let ember = palette::mix(CANDLE, CANDLE_HI, 0.35 + 0.50 * candle_pulse);
+    blend_px(pb, ox, oy + 3, ember, 0.82);
 
-    // Three whisker scratches on the floor at the fork, all pointing at the
-    // opening: the shop's "you can see it from the junction" tell.
-    let (sx, sy) = (ox + face_dx * 4, oy + face_dy * 5 + 2);
-    let side = (face_dy, -face_dx);
-    for (i, spread) in [-3, 0, 3].iter().enumerate() {
-        let bx = sx + side.0 * spread - face_dx;
-        let by = sy + side.1 * spread - face_dy;
-        let len = 3 + i as i32 % 2;
-        pb.line(
-            bx,
-            by,
-            bx + face_dx * len + side.0 * 2,
-            by + face_dy * len + side.1 * 2,
-            SCRATCH,
-        );
+    // 3) The bent pewter spoon hanging over the arch: flared handle, iron nail,
+    //    kinked elbow bent over the wall lip, and a concave gleaming pewter bowl.
+    //    When the hole faces North (fy < 0), keep the spoon handle tucked onto
+    //    the wall masonry to the right so it never crosses the north floor scratches.
+    let glint_col = palette::mix(SPOON_MID, SPOON_HI, 0.35 + 0.65 * glint);
+    if fy < 0 {
+        // North-facing wall: bowl hangs over the arch, kinked handle angles down-right onto masonry.
+        let by = oy - 1;
+        for dy in -1i32..=2 {
+            for dx in -2i32..=2 {
+                if dx * dx + (dy - 1) * (dy - 1) <= 4 {
+                    darken_px(pb, ox + dx + 1, by + dy + 1, 0.42);
+                }
+            }
+        }
+        // Handle pinned into the wall masonry to the right of the arch.
+        pb.plot(ox + 2, by + 1, SPOON_HI);
+        pb.plot(ox + 3, by + 1, SPOON_LO);
+        pb.plot(ox + 4, by + 2, SPOON_MID);
+        pb.plot(ox + 5, by + 2, NAIL);
+        pb.plot(ox + 5, by + 3, SPOON_MID);
+        pb.plot(ox + 6, by + 3, SPOON_HI);
+        pb.plot(ox + 6, by + 4, SPOON_LO);
+        for dy in -1i32..=2 {
+            let hw = if dy == -1 || dy == 2 { 1 } else { 2 };
+            for dx in -hw..=hw {
+                let col = if dy == -1 || dx == -hw {
+                    SPOON_HI
+                } else if dy == 2 || dx == hw {
+                    SPOON_LO
+                } else if dx == 0 && dy == 0 {
+                    glint_col
+                } else {
+                    SPOON_MID
+                };
+                pb.plot(ox + dx, by + dy, col);
+            }
+        }
+        if glint > 0.65 {
+            pb.plot(ox - 1, by, SPOON_HI);
+        }
+    } else {
+        let top = oy - 9;
+        // Drop shadow behind the spoon on the wall.
+        for i in 0..5 {
+            darken_px(pb, ox + 4, top + i + 1, 0.45);
+        }
+        for dy in 0..4 {
+            for dx in -2..=2 {
+                if dx * dx + (dy - 1) * (dy - 1) <= 4 {
+                    darken_px(pb, ox + dx + 1, top + 6 + dy + 1, 0.42);
+                }
+            }
+        }
+        // Flared pewter handle + iron nail pin near top.
+        pb.plot(ox + 3, top, SPOON_HI);
+        pb.plot(ox + 4, top, SPOON_MID);
+        pb.plot(ox + 3, top + 1, SPOON_MID);
+        pb.plot(ox + 4, top + 1, SPOON_LO);
+        pb.plot(ox + 3, top + 2, NAIL); // iron nail holding the spoon
+        pb.plot(ox + 3, top + 3, SPOON_MID);
+        pb.plot(ox + 3, top + 4, SPOON_HI);
+        // Kinked elbow bending left over the keystone of the arch.
+        pb.plot(ox + 2, top + 4, SPOON_MID);
+        pb.plot(ox + 2, top + 5, SPOON_LO);
+        pb.plot(ox + 1, top + 5, SPOON_MID);
+        pb.plot(ox + 1, top + 6, SPOON_HI);
+        // Concave oval spoon bowl (5 x 4 px) hanging just over the dark arch crown.
+        let by = top + 7;
+        for dy in -1i32..=2 {
+            let hw = if dy == -1 || dy == 2 { 1 } else { 2 };
+            for dx in -hw..=hw {
+                let col = if dy == -1 || dx == -hw {
+                    SPOON_HI // top-left metallic rim
+                } else if dy == 2 || dx == hw {
+                    SPOON_LO // shaded lower-right rim
+                } else if dx == 0 && dy == 0 {
+                    glint_col // travelling specular glint inside the bowl
+                } else {
+                    SPOON_MID
+                };
+                pb.plot(ox + dx, by + dy, col);
+            }
+        }
+        // Extra specular sparkle pixel at peak glint.
+        if glint > 0.65 {
+            pb.plot(ox - 1, by, SPOON_HI);
+        }
+    }
+
+    // 4) Three chalk-white whisker scratches scored into the floor at the fork,
+    //    pointing cleanly toward the opening, each with a dark shadow groove so
+    //    they read on both dark Sewer/Lab masonry and sunlit Flatbed planks.
+    let (sx, sy) = (ox + fx * 5, oy + fy * 6 + if fy == 0 { 2 } else { 1 });
+    let side = (fy, -fx);
+    for (i, &spread) in [-3i32, 0, 3].iter().enumerate() {
+        let len = if i == 1 { 6 } else { 5 };
+        // Fan slightly outward away from the mouth like three rat whiskers.
+        let fan = spread / 3;
+        let x0 = sx + side.0 * spread;
+        let y0 = sy + side.1 * spread;
+        for step in 0..len {
+            let px = x0 + fx * step + side.0 * ((step * fan) / 3);
+            let py = y0 + fy * step + side.1 * ((step * fan) / 3);
+            // Recessed dark groove right beside the chalk scratch.
+            darken_px(pb, px + if fx == 0 { 1 } else { 0 }, py + 1, 0.52);
+            let col = if step == 0 || step == len - 1 {
+                SCRATCH_MID
+            } else {
+                SCRATCH_HI
+            };
+            let alpha = if step == len - 1 { 0.72 } else { 0.96 };
+            blend_px(pb, px, py, col, alpha);
+        }
     }
 }
 
@@ -4897,5 +5051,43 @@ mod tests {
             }
         }
         std::fs::write("/tmp/ratrun_boss_thresholds.ppm", out).unwrap();
+    }
+
+    /// Shop hole rendered across all four themes (Sewer, Kitchen, Lab, Trailer).
+    /// `RATRUN_DUMP=shop_holes cargo test dump_shop_holes_all_themes`.
+    #[test]
+    fn dump_shop_holes_all_themes() {
+        if std::env::var("RATRUN_DUMP").as_deref() != Ok("shop_holes") {
+            return;
+        }
+        use crate::game::world::World;
+        let themes = [Theme::Sewer, Theme::Kitchen, Theme::Lab, Theme::Trailer];
+        let tile_w = 120usize;
+        let tile_h = 84usize;
+        let mut out = format!("P6\n{} {}\n255\n", tile_w * 2, tile_h * 2).into_bytes();
+        let mut grid = vec![(0u8, 0u8, 0u8); tile_w * 2 * tile_h * 2];
+        for (idx, theme) in themes.iter().enumerate() {
+            let mut w = World::new(*theme, 1);
+            w.elapsed = 3.2;
+            if let Some(&hole) = w.level.objects.shop_holes.first() {
+                w.player.pos = hole.face() + hole.facing * 20.0
+                    + Vec2::new(-hole.facing.y, hole.facing.x) * 14.0;
+            }
+            let mut pb = PixelBuffer::new(tile_w, tile_h);
+            w.draw(&mut pb);
+            let ox = (idx % 2) * tile_w;
+            let oy = (idx / 2) * tile_h;
+            for y in 0..tile_h {
+                for x in 0..tile_w {
+                    grid[(oy + y) * (tile_w * 2) + (ox + x)] = pb.pixel_at(x, y);
+                }
+            }
+        }
+        for (r, g, b) in grid {
+            out.extend_from_slice(&[r, g, b]);
+        }
+        let dir = std::env::var_os("RATRUN_DUMP_DIR")
+            .map_or_else(|| std::path::PathBuf::from("/tmp"), std::path::PathBuf::from);
+        std::fs::write(dir.join("ratrun_shop_holes_themes.ppm"), out).unwrap();
     }
 }

@@ -942,15 +942,17 @@ pub fn draw_compact(
                 if !in_bounds(source, mcx, mcy) || !source.seen(mcx, mcy) {
                     continue;
                 }
-                let col = palette::mix(SHOP_SPOON_RGB, COAT_RGB, 0.25 + 0.30 * pulse);
-                plot_pixel_in_window(
-                    &mut scratch.pixels,
-                    pw,
-                    ph,
-                    (m.cx - origin_x as f32) * inv_step,
-                    (m.cy - origin_y as f32) * inv_step,
-                    col,
-                );
+                let lx = (m.cx - origin_x as f32) * inv_step;
+                let ly = (m.cy - origin_y as f32) * inv_step;
+                let bowl = palette::mix(SHOP_SPOON_RGB, COAT_RGB, 0.38 + 0.42 * pulse);
+                let handle = palette::mix((142, 150, 168), SHOP_SPOON_RGB, 0.55 + 0.35 * pulse);
+                let warm = palette::mix((214, 148, 72), COAT_RGB, 0.25 * pulse);
+                if !is_small {
+                    // Miniature bent spoon: warm threshold glint, pewter bowl, angled handle.
+                    plot_pixel_in_window(&mut scratch.pixels, pw, ph, lx, ly + 1.0, warm);
+                    plot_pixel_in_window(&mut scratch.pixels, pw, ph, lx + 1.0, ly - 1.0, handle);
+                }
+                plot_pixel_in_window(&mut scratch.pixels, pw, ph, lx, ly, bowl);
             }
             MarkerKind::Pickup(tag) => {
                 if is_small && tag != PickupTag::Chest {
@@ -1437,13 +1439,13 @@ pub fn draw_expanded(
             MarkerKind::Shop => {
                 if in_bounds(source, mcx, mcy) && source.seen(mcx, mcy) {
                     if let Some((tx, ty)) = cell_to_term(m.cx, m.cy) {
-                        // The bent spoon: a pewter hook that brightens slowly.
+                        // The bent spoon: a gleaming pewter bowl + handle that pulses softly.
                         let c = palette::to_color(palette::mix(
                             SHOP_SPOON_RGB,
                             COAT_RGB,
-                            0.20 + 0.30 * fast_pulse,
+                            0.30 + 0.40 * fast_pulse,
                         ));
-                        stamp_glyph(buf, tx, ty, '∿', c, true);
+                        stamp_glyph(buf, tx, ty, '☌', c, true);
                     }
                 }
             }
@@ -1735,7 +1737,7 @@ fn draw_expanded_sidebar(
         ("◈", palette::to_color(BOSS_ROSE_RGB), "Boss", "Boss Arena", false),
         ("◤", palette::to_color(WARN_AMBER_RGB), "Bear", "Arena Bearing", false),
         // The mouse-hole shop's bent spoon (seen once, remembered after).
-        ("∿", palette::to_color(SHOP_SPOON_RGB), "Shop", "Splice Shop", false),
+        ("☌", palette::to_color(SHOP_SPOON_RGB), "Shop", "Splice Shop", false),
     ];
 
     for &(sym, col, short_lbl, long_lbl, maze_only) in entries {

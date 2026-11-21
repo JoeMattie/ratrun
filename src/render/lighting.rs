@@ -860,6 +860,97 @@ impl LightMap {
                     if e2 != e1 {
                         self.bat_eyes.push((e2.0, e2.1, eye_col));
                     }
+                } else if e.kind == EnemyKind::WickMoth {
+                    // Lit lantern tail of the Wick Moth: small flickering ember glow.
+                    let face = if e.facing.len_sq() > 0.01 {
+                        e.facing.normalized()
+                    } else {
+                        Vec2::new(1.0, 0.0)
+                    };
+                    let tail = e.pos - face * (e.radius * 1.25);
+                    let tx = tail.x - cam.x;
+                    let ty = tail.y - cam.y;
+                    let r = 20.0;
+                    if in_range(tx, ty, r) {
+                        let flick = 0.84 + 0.16 * (elapsed * 11.0 + e.anim * 2.0).sin();
+                        self.lights.push(PointLight {
+                            x: tx,
+                            y: ty,
+                            radius: r,
+                            color: (255, 174, 78),
+                            intensity: (145.0 * flick) as u16,
+                            scatter: (30.0 * flick) as u16,
+                            priority: 1,
+                            occlude: false,
+                            hard: false,
+                        });
+                    }
+                } else if e.kind == EnemyKind::Turnkey && e.w3.bar_t > 0.0 && !e.w3.bar_spent {
+                    // Turnkey crossbar: subtle warning pulse while telling, crisp brass glow live.
+                    let bx = e.w3.bar_pos.x - cam.x;
+                    let by = e.w3.bar_pos.y - cam.y;
+                    let telling = e.w3.bar_telling();
+                    let r = if telling { 20.0 } else { 26.0 };
+                    if in_range(bx, by, r) {
+                        let pulse = 0.78 + 0.22 * (elapsed * 9.0 + e.anim).sin();
+                        let base = if telling { 120.0 } else { 185.0 };
+                        self.lights.push(PointLight {
+                            x: bx,
+                            y: by,
+                            radius: r,
+                            color: if telling { (248, 196, 92) } else { (255, 224, 118) },
+                            intensity: (base * pulse) as u16,
+                            scatter: ((if telling { 24.0 } else { 42.0 }) * pulse) as u16,
+                            priority: if telling { 1 } else { 2 },
+                            occlude: false,
+                            hard: false,
+                        });
+                    }
+                } else if e.kind == EnemyKind::Porter && e.w3.raise_t > 0.0 {
+                    // Porter raising its sugar cube: soft mint-white healing beacon.
+                    let r = 22.0;
+                    if in_range(sx, sy - 4.0, r) {
+                        let pulse = 0.75 + 0.25 * (elapsed * 8.0 + e.anim).sin();
+                        self.lights.push(PointLight {
+                            x: sx,
+                            y: sy - 4.0,
+                            radius: r,
+                            color: (186, 255, 214),
+                            intensity: (148.0 * pulse) as u16,
+                            scatter: (32.0 * pulse) as u16,
+                            priority: 1,
+                            occlude: false,
+                            hard: false,
+                        });
+                    }
+                }
+            }
+
+            // Dead Wick Moth's burning fuse: flickering orange->white blast warning light.
+            if let Some(wick) = entity.get::<crate::game::ecs::components::Wick>() {
+                let wx = wick.pos.x - cam.x;
+                let wy = wick.pos.y - cam.y;
+                let total = crate::game::ecs::systems::enemy_wave3::WICK_FUSE_SECS;
+                let t = if total > 0.0 {
+                    (1.0 - wick.fuse / total).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                let r = 22.0 + 14.0 * t;
+                if in_range(wx, wy, r) {
+                    let strobe = 0.72 + 0.28 * (elapsed * (14.0 + 18.0 * t)).sin();
+                    let col = blend_rgb((255, 148, 52), (255, 246, 206), t * 0.75);
+                    self.lights.push(PointLight {
+                        x: wx,
+                        y: wy,
+                        radius: r,
+                        color: col,
+                        intensity: ((168.0 + 62.0 * t) * strobe) as u16,
+                        scatter: ((38.0 + 24.0 * t) * strobe) as u16,
+                        priority: 2,
+                        occlude: false,
+                        hard: false,
+                    });
                 }
             }
 
