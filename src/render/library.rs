@@ -665,6 +665,34 @@ fn draw_boss(art: &mut PixelBuffer, kind: BossKind, accent: Rgb, t: f32) {
             art_boss_magpie::draw_magpie_ground(art, &v, Vec2::ZERO, accent);
             art_boss_magpie::draw_magpie(art, &v, Vec2::ZERO, accent);
         }
+        BossKind::HorseshoeCrab => {
+            use crate::game::art_boss_horseshoe_crab::{self as crab, CrabState, CrabView};
+            // The tail cocked over one shoulder: the tell the fight turns on.
+            let v = CrabView {
+                pos: c,
+                facing,
+                state: CrabState::TelsonTell,
+                progress: cycle,
+                anim,
+                hit_flash: 0.0,
+                hp_frac: 0.8,
+                phase: 1,
+                target,
+                lane_start: c,
+                sweep_side: 1.0,
+            };
+            crab::draw_ground(art, &v, Vec2::ZERO, accent);
+            crab::draw(art, &v, Vec2::ZERO, accent);
+        }
+        BossKind::MegaRat => {
+            use crate::game::art_boss_megarat::{self as megarat, MegaRatState, MegaRatView};
+            let mut v = MegaRatView::new(c, facing, target);
+            v.state = MegaRatState::GnawWindup;
+            v.progress = cycle;
+            v.anim = anim;
+            megarat::draw_megarat_ground(art, &v, Vec2::ZERO, accent);
+            megarat::draw_megarat(art, &v, Vec2::ZERO, accent);
+        }
     }
 }
 

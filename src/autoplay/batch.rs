@@ -2640,13 +2640,12 @@ resolving a 5-point difference between two arms needs ~{} runs per arm (95% conf
             s.push_str("  minibosses:\n");
             for m in &l.minibosses {
                 s.push_str(&format!(
-                    "    {} {:<16} {} of {} killed  length {}  hp {:.0}\n",
+                    "    {} {:<16} {} of {} killed  length {}\n",
                     m.appointment,
                     m.kind,
                     m.killed,
                     m.fights,
-                    dist(&m.seconds),
-                    m.hp_max
+                    dist(&m.seconds)
                 ));
             }
         }

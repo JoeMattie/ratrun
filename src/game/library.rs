@@ -295,6 +295,11 @@ fn enemy_name(k: EnemyKind) -> &'static str {
         EnemyKind::WickMoth => "Wick Moth",
         EnemyKind::Porter => "Porter",
         EnemyKind::Turnkey => "Turnkey",
+        EnemyKind::BigSnake => "Big Snake",
+        EnemyKind::HouseCentipede => "House Centipede",
+        EnemyKind::MurderHornet => "Murder Hornet",
+        EnemyKind::TermiteHorde => "Termite Horde",
+        EnemyKind::Lilliputian => "Lilliputians",
     }
 }
 
@@ -309,6 +314,9 @@ fn boss_name(k: BossKind) -> &'static str {
         BossKind::Mangle => crate::render::hud::boss_codename(Theme::Laundry).0,
         BossKind::NightEdition => crate::render::hud::boss_codename(Theme::Printworks).0,
         BossKind::Magpie => crate::render::hud::boss_codename(Theme::Trailer).0,
+        BossKind::HorseshoeCrab | BossKind::MegaRat => {
+            crate::render::hud::boss_codename_kind(k).0
+        }
     }
 }
 
@@ -416,7 +424,7 @@ pub fn flavour_of(key: Key) -> Option<&'static str> {
 /// The boss's floor (the inverse of [`BossKind::for_theme`]).
 fn boss_theme(k: BossKind) -> Theme {
     for theme in Theme::playable() {
-        if BossKind::for_theme(theme) == k {
+        if BossKind::pool_for_theme(theme).contains(&k) {
             return theme;
         }
     }
@@ -440,6 +448,11 @@ pub fn all_rows() -> Vec<Row> {
         EnemyKind::WickMoth,
         EnemyKind::Porter,
         EnemyKind::Turnkey,
+        EnemyKind::HouseCentipede,
+        EnemyKind::Lilliputian,
+        EnemyKind::TermiteHorde,
+        EnemyKind::MurderHornet,
+        EnemyKind::BigSnake,
         // The legacy generic boss body (tests and the facade can spawn it); the
         // floors' own fights have their own BOSSES rows below.
         EnemyKind::Boss,
@@ -491,6 +504,8 @@ pub fn all_rows() -> Vec<Row> {
         BossKind::Mangle,
         BossKind::NightEdition,
         BossKind::Magpie,
+        BossKind::HorseshoeCrab,
+        BossKind::MegaRat,
     ] {
         let (hint, dossier) = boss_text(k);
         rows.push(Row {
@@ -734,6 +749,36 @@ fn enemy_text(k: EnemyKind) -> (&'static str, &'static str) {
              crossbar across the floor it has just walked, after a dotted tell. Bait the \
              bar onto spent ground, then change lanes.",
         ),
+        EnemyKind::HouseCentipede => (
+            "Sewer · from about 4:00",
+            "Enough feet for a committee. It runs the skirting board, flutters in place \
+             behind a dotted line, and then is somewhere else. Touch it and it bolts for \
+             the nearest wall. Meet it in the open or not at all.",
+        ),
+        EnemyKind::Lilliputian => (
+            "Sewer · from about 5:30",
+            "Ten very small people with a plan. Spears level, archers kneel, and the \
+             rope crew ties you to the floor while they do. The line is thick in front \
+             and thin behind. Thin the squad and what is left runs for the walls.",
+        ),
+        EnemyKind::TermiteHorde => (
+            "Sewer · from about 6:00",
+            "One appetite, many mouths. A single dart only ever takes a nibble out of \
+             it, a hard hit splits it in two, and anything left alone grows back. Bring \
+             something that hits an area, and finish what you start.",
+        ),
+        EnemyKind::MurderHornet => (
+            "Sewer · from about 7:30",
+            "The buzz climbs, a line locks, and it comes down the line. A miss puts it \
+             on the floor for a long second, where it takes half again as much. Step \
+             off the stripe, then turn round.",
+        ),
+        EnemyKind::BigSnake => (
+            "Sewer · from about 8:30",
+            "A corridor that moves. The body divides the room and the head rears along \
+             a marked line before it lunges, then lies stretched out and regrets it. \
+             Go round the tail, or dash across, and bite the head while it rests.",
+        ),
     }
 }
 
@@ -821,6 +866,20 @@ fn boss_text(k: BossKind) -> (&'static str, &'static str) {
              beats its wings against the trailer's own wind. Everything loose on the \
              deck, the rat included, is going tailward.",
         ),
+        BossKind::HorseshoeCrab => (
+            "Sewer · 15:00 — the other boss",
+            "It was here before the pipes were. A dome with a spike behind it: shots \
+             from the front spark off and are wasted. It sweeps the tail, bulldozes a \
+             marked lane into the nearest wall, and digs. Every miss shows you the \
+             gills. Get behind it and stay there.",
+        ),
+        BossKind::MegaRat => (
+            "Kitchen · 15:00 — the other boss",
+            "The facility's first success, collared and tagged, and never let out. It \
+             fights with your kit: the bite, the tail, the squeak, the dash, each one \
+             larger, slower and marked on the floor first. Every move it misses is a \
+             window. It has won this fight before.",
+        ),
     }
 }
 
@@ -896,6 +955,12 @@ fn weapon_text(k: WeaponKind) -> (&'static str, &'static str) {
              three ticks, that jumps to a fresh body the moment its host stops being \
              one.",
         ),
+        WeaponKind::SpikedTail => (
+            "Level-up card · any floor",
+            "The tail grew a point of view. One lash at the nearest body in reach, and \
+             a small burst of spikes where it lands. Walls stop it. It is a tail, not a \
+             bullet.",
+        ),
     }
 }
 
@@ -968,6 +1033,12 @@ fn evolution_text(k: WeaponKind) -> (&'static str, &'static str) {
             "Chest · Hantavirus L5 + Second Scent",
             "A host that dies with jumps left leaves sealed post for two seconds. The \
              first body to touch it resumes the chain. Return to sender.",
+        ),
+        WeaponKind::SpikedTail => (
+            "Chest · Spiked Tail L5 + Counterweight",
+            "The lash hooks, and the recoil drags the catch home, bursting on every \
+             body it crosses on the way. Heavy bodies stay where they are. Whatever it \
+             catches comes home.",
         ),
     }
 }
@@ -1164,9 +1235,10 @@ fn object_text(k: ObjectKind) -> (&'static str, &'static str) {
         ),
         ObjectKind::Mousetrap => (
             "Any floor · the snap on the approach",
-            "A spring-loaded bar on a hair trigger. It does not kill the rat and it kills \
-             nearly everything else: a body on the bar simply stops being a body. Read \
-             the trigger plate and step around it.",
+            "A spring-loaded bar. It does not kill the rat and it kills nearly everything \
+             else: a body on the bar simply stops being a body. The red-barred ones are \
+             filed to a hair trigger: no warning, and a heavier bar. Read the plate and \
+             step around it.",
         ),
         ObjectKind::SteamGrate => (
             "Laundry · the washer aisles",
@@ -1410,6 +1482,11 @@ pub fn enemy_answer(k: EnemyKind) -> &'static str {
         EnemyKind::WickMoth => "the corpse flares — step off the wick",
         EnemyKind::Porter => "raises the cube 0.9 s — hit the carrier",
         EnemyKind::Turnkey => "dotted bar 0.8 s — bait it, then change lanes",
+        EnemyKind::BigSnake => "rears on a marked line — bite the head while it rests",
+        EnemyKind::HouseCentipede => "flutters on a dotted line — step off; it flees when hit",
+        EnemyKind::MurderHornet => "rising buzz, locked line — punish it on the floor",
+        EnemyKind::TermiteHorde => "none — darts only nibble, bring an area hit",
+        EnemyKind::Lilliputian => "spears level, archers kneel — hit the line from behind",
     }
 }
 
@@ -1481,6 +1558,8 @@ fn boss_answer(k: BossKind) -> &'static str {
         BossKind::Mangle => "change sides between bites, hit the crank",
         BossKind::NightEdition => "stand on the blank margin",
         BossKind::Magpie => "cross the wind, not against it",
+        BossKind::HorseshoeCrab => "get behind the dome, hit the gills",
+        BossKind::MegaRat => "leave the marked shape, punish the miss",
     }
 }
 
@@ -1745,11 +1824,23 @@ fn object_facts(k: ObjectKind, f: &mut Facts) {
         ObjectKind::Mousetrap => {
             f.push(
                 "TO THE RAT",
-                format!("{:.0} damage", traps::MOUSETRAP_DAMAGE_PLAYER),
+                format!(
+                    "{:.0}% of max health",
+                    crate::game::art_traps::MOUSETRAP_DAMAGE_PLAYER_SHARE * 100.0
+                ),
             );
             f.push(
                 "TO A BODY",
                 format!("{:.0} damage — a kill", traps::MOUSETRAP_DAMAGE_ENEMY),
+            );
+            // The red-barred hair trigger: no warning beat, a heavier bar.
+            f.push(
+                "RED BAR",
+                format!(
+                    "hair trigger — no delay, {:.0}% / {:.0}",
+                    crate::game::art_traps::MOUSETRAP_DAMAGE_PLAYER_HAIR_SHARE * 100.0,
+                    crate::game::art_traps::MOUSETRAP_DAMAGE_ENEMY_HAIR
+                ),
             );
             f.push(
                 "TRIGGER",
@@ -2183,6 +2274,11 @@ fn enemy_at(i: usize) -> Option<EnemyKind> {
         EnemyKind::WickMoth,
         EnemyKind::Porter,
         EnemyKind::Turnkey,
+        EnemyKind::BigSnake,
+        EnemyKind::HouseCentipede,
+        EnemyKind::MurderHornet,
+        EnemyKind::TermiteHorde,
+        EnemyKind::Lilliputian,
     ]
     .get(i)
     .copied()
@@ -2209,6 +2305,8 @@ fn boss_at(i: usize) -> Option<BossKind> {
         BossKind::Mangle,
         BossKind::NightEdition,
         BossKind::Magpie,
+        BossKind::HorseshoeCrab,
+        BossKind::MegaRat,
     ]
     .get(i)
     .copied()

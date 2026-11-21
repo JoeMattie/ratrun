@@ -1598,7 +1598,7 @@ fn fire_one(
         WeaponKind::SpikedTail => {
             let i = (wlevel.clamp(1, 5) as usize) - 1;
             fired = crate::game::ecs::systems::weapon_spiketail::fire_spiked_tail(
-                &mut commands,
+                commands,
                 level,
                 order,
                 enemies,

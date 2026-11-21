@@ -1771,9 +1771,9 @@ fn plan_rack_with(width: u16, slots_w: usize, slots_p: usize, divider: u16) -> R
         }
     };
     fit(&mut shown_w, &mut shown_p, &mut marker);
-    let tw;
-    let tp;
-    let spare;
+    let mut tw;
+    let mut tp;
+    let mut spare;
     loop {
         let room = width.saturating_sub(4 * (shown_w + shown_p) as u16 + divider + marker);
         let assigned = assign_rack_text(room, shown_w as u16, shown_p as u16);

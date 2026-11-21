@@ -3287,7 +3287,7 @@ pub fn draw_level_select(
         (rows_all.min(usize::from(avail_h / h)), h)
     } else {
         let h = 2u16;
-        ((avail_h / h).max(1) as usize).min(rows_all)
+        (((avail_h / h).max(1) as usize).min(rows_all), h)
     };
     let gap = 1u16;
     let grid_w = inner.width.saturating_sub(2);
@@ -3495,6 +3495,8 @@ fn draw_three_pips(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::loadout::PassiveKind;
+    use crate::game::weapon::WeaponKind;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 

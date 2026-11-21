@@ -2835,7 +2835,7 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();
             terminal
                 .draw(|f| {
-                    draw_pause_with_run(f, f.area(), &w, false, crate::input::DashKey::Ctrl, &mut hits)
+                    draw_pause_with_run(f, f.area(), &w, false, &crate::controls::Controls::default(), &mut hits)
                 })
                 .unwrap();
             let text = screen_text(&terminal);

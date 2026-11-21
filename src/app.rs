@@ -3056,7 +3056,7 @@ impl App {
                         self.sector_unlocked(),
                         &self.scores,
                         &self.rat_art,
-                        self.dash_key(),
+                        &self.input.controls,
                         &mut self.hits,
                     );
                 }
