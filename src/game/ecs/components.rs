@@ -77,6 +77,15 @@ pub struct AcidDrop {
     pub dmg: f32,
     /// Position in the volley (0-based), for deterministic art variety.
     pub index: u8,
+    /// Fired by an evolved **Downspout** volley: the deck of drops is one
+    /// marching gutter rather than one splash per marked foe (design §3).
+    pub evolved: bool,
+    /// Unit direction from the rat to the marked target (the gutter's march
+    /// line); zero for a base volley. The runoff stripe is laid along it.
+    pub dir: Vec2,
+    /// Drops in the volley this drop belongs to, so the last landing knows the
+    /// gutter has finished marching and can leave its runoff.
+    pub volley: u8,
 }
 
 /// Longest Hantavirus chain the visit history can record. The design's largest
@@ -106,6 +115,12 @@ pub struct Infection {
     /// `SpawnId`s this chain has already visited, in visit order.
     pub visits: [u64; MAX_CHAIN],
     pub visited: u8,
+    /// Was this chain tagged by an evolved **Dead Letter** weapon? Only such a
+    /// chain may seal its last jumps into a packet when its host dies.
+    pub can_seal: bool,
+    /// Has this chain already sealed a packet? Design §3: "one packet per
+    /// chain", so a chain that reopens and dies again simply ends.
+    pub sealed: bool,
 }
 
 impl Infection {
@@ -122,6 +137,8 @@ impl Infection {
             dmg,
             visits,
             visited: 1,
+            can_seal: false,
+            sealed: false,
         }
     }
 
@@ -233,19 +250,23 @@ pub struct MilkTooth {
     pub age: f32,
     /// Per-hit damage (the weapon's L5 hit after stats).
     pub damage: f32,
+    /// How far the dart flies before it lodges (Lens Cap stretches it, exactly
+    /// as it stretches the base dart's projectile life).
+    pub reach: f32,
     /// Bodies bitten on the way back, in bite order.
     pub bitten: [Option<u64>; MILK_BITE_CAP],
     pub bitten_n: u8,
 }
 
 impl MilkTooth {
-    pub fn new(pos: Vec2, vel: Vec2, damage: f32) -> Self {
+    pub fn new(pos: Vec2, vel: Vec2, damage: f32, reach: f32) -> Self {
         Self {
             pos,
             vel,
             phase: MilkPhase::Out,
             age: 0.0,
             damage,
+            reach,
             bitten: [None; MILK_BITE_CAP],
             bitten_n: 0,
         }
@@ -395,7 +416,18 @@ pub struct CorrosiveChannel {
     pub front_damage: f32,
     pub hit: [Option<u64>; CHANNEL_HIT_CAP],
     pub hit_n: u8,
+    /// Seconds the settled stripe keeps ticking after the front has run
+    /// (the design's 2 s; **Downspout**'s runoff is a shorter one). Long Fuse
+    /// stretches this at tick time, never at spawn time.
+    pub settle: f32,
+    /// Is this stripe a **Downspout** runoff? A runoff has no advancing front
+    /// (it is already settled when it lands) and draws as a stepped gutter.
+    pub runoff: bool,
 }
+
+/// Seconds a settled corrosive stripe ticks for with [`CorrosiveChannel::new`]
+/// (the Drain Cleaner's 2 s; `evolutions::CHANNEL_SETTLE` is this value).
+pub const CHANNEL_DEFAULT_SETTLE: f32 = 2.0;
 
 impl CorrosiveChannel {
     pub fn new(start: Vec2, dir: Vec2, length: f32, dps: f32, front_damage: f32) -> Self {
@@ -408,6 +440,18 @@ impl CorrosiveChannel {
             front_damage,
             hit: [None; CHANNEL_HIT_CAP],
             hit_n: 0,
+            settle: CHANNEL_DEFAULT_SETTLE,
+            runoff: false,
+        }
+    }
+
+    /// A settled **Downspout** runoff stripe: it burns from the first tick (no
+    /// advancing front) for `settle` seconds.
+    pub fn gutter(start: Vec2, dir: Vec2, length: f32, dps: f32, settle: f32) -> Self {
+        Self {
+            runoff: true,
+            settle,
+            ..Self::new(start, dir, length, dps, 0.0)
         }
     }
 
@@ -431,6 +475,26 @@ impl CorrosiveChannel {
     pub fn centre(&self) -> Vec2 {
         self.start + self.dir * (self.length * 0.5)
     }
+}
+
+/// A sealed **Dead Letter** packet: a Hantavirus chain that ran out of
+/// neighbours when its host died, folded into an envelope and left on the
+/// floor for two seconds.
+///
+/// `evolutions::dead_letter_system` ticks the fuse and hands the chain to the
+/// first eligible foe that steps within reach; when the fuse runs out the
+/// chain is lost. A packet carries the whole chain (its visit history, its
+/// remaining jumps), so reopening it resumes the same walk rather than
+/// starting a new one.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct DeadLetterPacket {
+    pub pos: Vec2,
+    /// Seconds left before the envelope is lost.
+    pub life: f32,
+    /// Life it started with (the art's fade).
+    pub total: f32,
+    /// The chain sealed inside.
+    pub chain: Infection,
 }
 
 /// Queue with `commands.queue(ChestSpawn { pos })` to drop a chest from a system.

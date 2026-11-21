@@ -586,6 +586,36 @@ pub struct LaserFx {
     pub since_pulse: f32,
     /// Full length of the burst in seconds (`0` when idle), set at trigger.
     pub total: f32,
+    /// Was the burst in flight fired by the evolved (**Carbon Copy**) weapon?
+    /// Only such a burst replays the kept sweep and records itself.
+    pub evolved: bool,
+    /// The last **completed** sweep, kept for **Carbon Copy** (design §3: "keep
+    /// one copy"). `None` until the evolved weapon has finished its first
+    /// burst.
+    pub copy: Option<LaserCopy>,
+    /// Seconds left of the afterimage replay (0 = not replaying).
+    pub copy_left: f32,
+    /// Seconds elapsed since the afterimage started replaying.
+    pub copy_age: f32,
+    /// Afterimage pulses already resolved.
+    pub copy_fired: u32,
+}
+
+/// One recorded Laser Eyes sweep: the exact geometry a **Carbon Copy**
+/// afterimage replays on the next sweep (design §3: "Record the facing and
+/// origin of a completed sweep").
+#[derive(Clone, Copy, Debug)]
+pub struct LaserCopy {
+    /// Where the recorded burst fired from.
+    pub origin: Vec2,
+    /// The facing it locked (unit vector).
+    pub facing: Vec2,
+    /// Pulses it made, so the replay is the same fan.
+    pub pulses: u32,
+    /// Beam length it used (already Lens Cap-stretched).
+    pub reach: f32,
+    /// Per-pulse damage it dealt; the afterimage deals half.
+    pub dmg: f32,
 }
 
 impl LaserFx {
@@ -593,6 +623,28 @@ impl LaserFx {
     #[inline]
     pub fn active(&self) -> bool {
         self.left > 0.0
+    }
+
+    /// Is a **Carbon Copy** afterimage replaying right now?
+    #[inline]
+    pub fn copy_active(&self) -> bool {
+        self.copy_left > 0.0
+    }
+
+    /// **Carbon Copy**: the sweep this burst just finished, ready to be kept as
+    /// the next burst's afterimage (`LaserFx::copy`).
+    #[inline]
+    pub fn copy_of_this_sweep(&self) -> Option<LaserCopy> {
+        if self.total <= 0.0 {
+            return None;
+        }
+        Some(LaserCopy {
+            origin: self.origin,
+            facing: self.facing,
+            pulses: self.pulses,
+            reach: self.reach,
+            dmg: self.dmg,
+        })
     }
 
     /// Burst progress in `0..=1`, for the art's fade-out.
@@ -610,6 +662,12 @@ impl LaserFx {
 /// handful of bodies; the fixed history only exists so "once per target per
 /// dash" cannot allocate and cannot loop.
 pub const DASH_HIT_CAP: usize = 48;
+
+/// **Ripcord**: seconds the dash's actual route stays taut after the dash, and
+/// the fixed number of travelled legs it can remember (a 0.16 s dash at 60 fps
+/// is ~10 legs; the cap bounds a large-`dt` or click-dash route).
+pub const RIPCORD_SECS: f32 = 0.6;
+pub const RIPCORD_SEG_CAP: usize = 24;
 
 /// The dash's **actual** travelled segment(s), written by
 /// `systems::player::player_system`'s dash hook and consumed by
@@ -634,6 +692,19 @@ pub struct DashTrack {
     /// `SpawnId`s already hit by the current dash.
     hits: [u64; DASH_HIT_CAP],
     hit_len: usize,
+    /// **Ripcord**'s taut route: the legs this dash actually travelled, kept
+    /// for [`RIPCORD_SECS`] after the dash and then snapped.
+    route: [(Vec2, Vec2); RIPCORD_SEG_CAP],
+    route_len: usize,
+    /// Seconds left before the route snaps (0 = no taut route).
+    pub route_life: f32,
+    /// Where the dash left from: what the cord slides bodies toward.
+    route_start: Vec2,
+    /// `SpawnId`s the cord has already hit (one dash hit each).
+    route_hits: [u64; DASH_HIT_CAP],
+    route_hit_len: usize,
+    /// Has the cord already hurt the boss?
+    pub route_boss_hit: bool,
 }
 
 impl Default for DashTrack {
@@ -644,18 +715,27 @@ impl Default for DashTrack {
             boss_hit: false,
             hits: [0; DASH_HIT_CAP],
             hit_len: 0,
+            route: [(Vec2::ZERO, Vec2::ZERO); RIPCORD_SEG_CAP],
+            route_len: 0,
+            route_life: 0.0,
+            route_start: Vec2::ZERO,
+            route_hits: [0; DASH_HIT_CAP],
+            route_hit_len: 0,
+            route_boss_hit: false,
         }
     }
 }
 
 impl DashTrack {
-    /// A **successful** dash just began: forget the previous dash's hits.
+    /// A **successful** dash just began: forget the previous dash's hits, and
+    /// snap any cord still hanging from the previous dash.
     #[inline]
     pub fn begin(&mut self) {
         self.hit_len = 0;
         self.legs = 0;
         self.boss_hit = false;
         self.segment = None;
+        self.clear_route();
     }
 
     /// Record this tick's movement. `live` is the dash flag the dash owner
@@ -687,6 +767,90 @@ impl DashTrack {
             self.hit_len += 1;
         }
     }
+
+    // ---- Ripcord: the taut route -----------------------------------------
+
+    /// Add this dash leg to the taut route and keep the cord alive for the
+    /// design's [`RIPCORD_SECS`] after the last leg. Past
+    /// [`RIPCORD_SEG_CAP`] legs the route keeps the legs it has (deterministic:
+    /// the cap is reached in travel order).
+    #[inline]
+    pub fn extend_route(&mut self, from: Vec2, to: Vec2) {
+        if self.route_len == 0 {
+            self.route_start = from;
+        }
+        if self.route_len < RIPCORD_SEG_CAP {
+            self.route[self.route_len] = (from, to);
+            self.route_len += 1;
+        }
+        self.route_life = RIPCORD_SECS;
+    }
+
+    /// The travelled legs, in travel order.
+    #[inline]
+    pub fn route(&self) -> &[(Vec2, Vec2)] {
+        &self.route[..self.route_len]
+    }
+
+    /// One leg, copied (so a caller can take `&mut self` again afterwards).
+    #[inline]
+    pub fn route_segment(&self, i: usize) -> (Vec2, Vec2) {
+        self.route[i]
+    }
+
+    /// Legs in the route.
+    #[inline]
+    pub fn route_len(&self) -> usize {
+        self.route_len
+    }
+
+    /// Where the dash left from (the cord's slide target).
+    #[inline]
+    pub fn route_start(&self) -> Vec2 {
+        self.route_start
+    }
+
+    /// Has the cord already hit this body?
+    #[inline]
+    pub fn route_already_hit(&self, id: u64) -> bool {
+        self.route_hits[..self.route_hit_len].contains(&id)
+    }
+
+    /// Remember a cord hit (one dash hit per body per cord, like the dash's
+    /// own history).
+    #[inline]
+    pub fn mark_route_hit(&mut self, id: u64) {
+        if self.route_hit_len < DASH_HIT_CAP && !self.route_already_hit(id) {
+            self.route_hits[self.route_hit_len] = id;
+            self.route_hit_len += 1;
+        }
+    }
+
+    /// Drop the route: the cord has snapped.
+    #[inline]
+    pub fn clear_route(&mut self) {
+        self.route_len = 0;
+        self.route_life = 0.0;
+        self.route_hit_len = 0;
+        self.route_boss_hit = false;
+    }
+}
+
+// ---- Per-run evolution bookkeeping --------------------------------------
+
+/// Evolution state that must survive between ticks but reset with the run.
+///
+/// It lives in the ECS world (not in a system `Local`) on purpose: the schedule
+/// and any `run_system_cached` copy of a system are *different instances* with
+/// their own locals, so a `Local` counter made the same cast sequence depend on
+/// which path fired it — and survived a world reset. A resource inserted by
+/// `World::new_level*` starts at zero with the run, so a replayed level always
+/// counts the same way.
+#[derive(Resource, Default, Debug)]
+pub struct EvoRuntime {
+    /// Spore Orbit casts since the level began: **Fairy Ring** leaves a fixed
+    /// ring on every second one (design §3: "every second orbit cycle").
+    pub fairy_casts: u8,
 }
 
 /// Capacity of the Counterweight melee-nudge log ("once per target per 0.4 s").

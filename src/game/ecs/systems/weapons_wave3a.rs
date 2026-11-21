@@ -68,6 +68,7 @@ use crate::game::ecs::resources::{
     BossVirus, DamageLedger, EnemyIndex, NextSpawnId, RngRes, TickInput,
 };
 use crate::game::ecs::systems::boss::{Boss, BossTargetable};
+use crate::game::ecs::systems::evolutions;
 use crate::game::ecs::systems::projectiles::los_clear;
 use crate::game::enemy::Enemy;
 use crate::game::level::Level;
@@ -224,6 +225,13 @@ fn gather(
 /// Returns `false` when nothing is in range or every candidate is behind cover,
 /// which makes `fire_weapons_system` retry next tick instead of serving a full
 /// cooldown for a volley that marked nothing.
+///
+/// `evolved` is **Downspout** (design §3): the volley no longer marks one foe
+/// per drop. It marks the single nearest visible foe and walks the rest of the
+/// drops back along the marking line, [`evolutions::DOWNSPOUT_STEP`] px apart,
+/// so the splashes march toward the rat as they land. Every drop keeps its own
+/// splash (and its own landing in `acid_rain_system`, which leaves the runoff).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fire_acid_rain(
     commands: &mut Commands,
     level: &Level,
@@ -235,6 +243,7 @@ pub(crate) fn fire_acid_rain(
     dmg: f32,
     drops: u8,
     radius: f32,
+    evolved: bool,
     particles: &mut Particles,
     rng: &mut RngRes,
     next_id: &mut NextSpawnId,
@@ -243,10 +252,13 @@ pub(crate) fn fire_acid_rain(
     let n = gather(order, enemies, boss_points, ppos, range, &mut cand);
 
     let count = (drops as usize).min(MAX_DROPS);
+    // Downspout is one mark walking home; the base volley marks one foe per
+    // drop.
+    let want = if evolved { 1 } else { count };
     let mut marks = [Vec2::ZERO; MAX_DROPS];
     let mut marked = 0usize;
     for c in cand[..n].iter() {
-        if marked >= count {
+        if marked >= want {
             break;
         }
         // A foe behind masonry is not marked: friendly attack geometry stops
@@ -261,10 +273,29 @@ pub(crate) fn fire_acid_rain(
         return false;
     }
 
+    let far = marks[0];
+    let to_far = far - ppos;
+    let dist = to_far.len();
+    // The gutter's march line: from the rat out to the marked body.
+    let gutter_dir = if dist > 0.001 {
+        to_far * (1.0 / dist)
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+
     for i in 0..count {
-        // Spare drops go round-robin over the marked spots: a lone target eats
-        // the whole volley (design §4), a pair splits the extras evenly.
-        let at = marks[i % marked];
+        let at = if evolved {
+            // Step back toward the rat, but never past the rat's own feet: a
+            // drop that lands under the rat would be wasted splash.
+            let back = (evolutions::DOWNSPOUT_STEP * i as f32)
+                .min((dist - radius * 0.5).max(0.0));
+            (far - gutter_dir * back).clamp_box(Vec2::splat(4.0), level.arena - Vec2::splat(4.0))
+        } else {
+            // Spare drops go round-robin over the marked spots: a lone target
+            // eats the whole volley (design §4), a pair splits the extras
+            // evenly.
+            marks[i % marked]
+        };
         commands.spawn((
             AcidDrop {
                 pos: at,
@@ -272,11 +303,26 @@ pub(crate) fn fire_acid_rain(
                 radius,
                 dmg,
                 index: i as u8,
+                evolved,
+                dir: if evolved { gutter_dir } else { Vec2::ZERO },
+                volley: count as u8,
             },
             next_id.take(),
         ));
     }
-    let aim = marks[0] - ppos;
+    if evolved {
+        // The whole staircase is drawn at fire time: the drops walk it, so the
+        // player can read where each one will land before the first hits.
+        vfx::emit_downspout_staircase(
+            particles,
+            &mut rng.0,
+            ppos,
+            far,
+            count,
+            evolutions::DOWNSPOUT_STEP,
+        );
+    }
+    let aim = far - ppos;
     vfx::emit_acid_rain_fire(particles, &mut rng.0, ppos, aim);
     true
 }
@@ -291,6 +337,11 @@ pub(crate) fn fire_acid_rain(
 /// Bodies already carrying an active mark are skipped, so the weapon never
 /// restarts a chain that is mid-flight. Returns `false` when nothing can be
 /// tagged, so the weapon retries next tick.
+/// `evolved` is **Dead Letter** (design §3): a chain tagged by the evolved
+/// weapon may seal its last jumps into a packet when its host dies isolated
+/// (`Infection::can_seal`; the seal itself happens in
+/// `hantavirus_death_system`). Nothing else about the shot changes.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fire_hantavirus(
     commands: &mut Commands,
     level: &Level,
@@ -304,6 +355,7 @@ pub(crate) fn fire_hantavirus(
     dmg: f32,
     jumps: u8,
     reach: f32,
+    evolved: bool,
     particles: &mut Particles,
     rng: &mut RngRes,
 ) -> bool {
@@ -331,9 +383,10 @@ pub(crate) fn fire_hantavirus(
     match target.picked {
         Picked::Enemy(entity) => {
             let id = enemies.get(entity).map(|(_, sid, _)| sid.0).unwrap_or(0);
-            commands
-                .entity(entity)
-                .insert(Infection::new(id, jumps, reach, dmg));
+            let mut mark = Infection::new(id, jumps, reach, dmg);
+            // Dead Letter: only a chain tagged by the evolved weapon can seal.
+            mark.can_seal = evolved;
+            commands.entity(entity).insert(mark);
         }
         Picked::Boss => {
             *boss_virus = BossVirus(Some(Infection::new(BOSS_VISIT, 0, reach, dmg)));
@@ -363,6 +416,7 @@ pub fn acid_rain_system(
     mut drops: Query<(Entity, &SpawnId, &mut AcidDrop)>,
     mut damage_numbers: ResMut<DamageNumbers>,
     mut ledger: ResMut<DamageLedger>,
+    mut next_id: ResMut<NextSpawnId>,
     mut order_scratch: Local<Vec<Entity>>,
     mut due: Local<Vec<(u64, Entity)>>,
 ) {
@@ -410,6 +464,9 @@ pub fn acid_rain_system(
             continue;
         };
         let (pos, radius, dmg) = (d.pos, d.radius, d.dmg);
+        let gutter = d.evolved;
+        let gutter_dir = d.dir;
+        let last_of_volley = d.index + 1 >= d.volley;
         commands.entity(entity).despawn();
 
         // Every enemy inside the splash takes one hit. Walls stop it: a splash
@@ -473,7 +530,42 @@ pub fn acid_rain_system(
             );
         }
 
-        vfx::emit_acid_splash(&mut particles, &mut rng.0, pos, radius);
+        if gutter {
+            // Downspout: the splash still splashes (it is acid), plus one tread
+            // of the staircase flashing where it landed.
+            vfx::emit_acid_splash(&mut particles, &mut rng.0, pos, radius * 0.7);
+            vfx::emit_downspout_step(&mut particles, &mut rng.0, pos, radius);
+        } else {
+            vfx::emit_acid_splash(&mut particles, &mut rng.0, pos, radius);
+        }
+        if gutter && last_of_volley {
+            // The gutter has marched all the way home: the stripe it walked
+            // keeps burning for `RUNOFF_SECS` (Long Fuse stretches it), from
+            // the near end back out toward the marked body. The runoff follows
+            // the pooled wall rule: masonry stops it where it was laid.
+            let span = (evolutions::DOWNSPOUT_STEP * (d.volley.saturating_sub(1)) as f32)
+                .max(evolutions::RUNOFF_MIN_LEN);
+            let open = evolutions::channel_open_len(&level, pos, gutter_dir, span);
+            commands.spawn((
+                crate::game::ecs::components::CorrosiveChannel::gutter(
+                    pos,
+                    gutter_dir,
+                    open,
+                    dmg * evolutions::RUNOFF_DPS,
+                    evolutions::RUNOFF_SECS,
+                ),
+                next_id.take(),
+            ));
+            vfx::emit_downspout_runoff(
+                &mut particles,
+                &mut rng.0,
+                pos,
+                gutter_dir,
+                open,
+                1.0,
+                input.dt,
+            );
+        }
     }
 }
 
@@ -716,6 +808,7 @@ pub fn hantavirus_death_system(
     index: Res<EnemyIndex>,
     mut rng: ResMut<RngRes>,
     mut particles: ResMut<Particles>,
+    mut next_id: ResMut<NextSpawnId>,
     mut enemies: Query<(Entity, &SpawnId, &Enemy, Option<&mut Infection>)>,
     mut order_scratch: Local<Vec<Entity>>,
     mut jumps: Local<Vec<Jump>>,
@@ -792,7 +885,26 @@ pub fn hantavirus_death_system(
             ))
         });
         let Some((id, target)) = best else {
-            continue; // isolated: the chain dies with its host
+            // Isolated. A **Dead Letter** chain does not die with its host: it
+            // folds its remaining jumps into a sealed packet and waits
+            // (`evolutions::dead_letter_system`). One packet per chain — the
+            // flag travels with the reopened chain, so a packet that comes back
+            // and dies isolated again simply ends.
+            if jump.chain.can_seal && !jump.chain.sealed {
+                let mut chain = jump.chain;
+                chain.sealed = true;
+                commands.spawn((
+                    crate::game::ecs::components::DeadLetterPacket {
+                        pos: jump.from,
+                        life: evolutions::DEAD_LETTER_SECS,
+                        total: evolutions::DEAD_LETTER_SECS,
+                        chain,
+                    },
+                    next_id.take(),
+                ));
+                vfx::emit_dead_letter_seal(&mut particles, &mut rng.0, jump.from);
+            }
+            continue;
         };
         let Some(next) = jump.chain.jumped(id) else {
             continue;

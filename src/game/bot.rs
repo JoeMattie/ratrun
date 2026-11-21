@@ -1906,4 +1906,42 @@ mod tests {
         assert!(hp > damage, "max HP {hp} must beat damage {damage}");
         assert!(magnet > damage, "magnet {magnet} must beat damage {damage}");
     }
+
+    /// The bot chases all twelve evolutions, the four wave-3 rows included: the
+    /// partner of an owned L5 weapon is worth more than the same passive
+    /// without a weapon waiting for it, and maxing a weapon whose partner is
+    /// already owned is worth more than the last rank of one whose partner is
+    /// not.
+    #[test]
+    fn the_bot_values_every_evolution_partner_including_the_wave3_rows() {
+        use crate::game::weapon::{Weapon, WeaponKind};
+        for kind in WeaponKind::all() {
+            let evo = kind
+                .evolution()
+                .unwrap_or_else(|| panic!("{kind:?} has no evolution row"));
+            // An L5 weapon with no partner: the partner is the evolution pick.
+            let mut weapon = Weapon::new(kind);
+            weapon.level = kind.max_level();
+            let bare = Loadout::from_parts(vec![weapon.clone()], Vec::new());
+            let with_partner = upgrade_value(&bare, &Upgrade::Passive(evo.passive), 1.0);
+            let without_partner = upgrade_value(&Loadout::starting(), &Upgrade::Passive(evo.passive), 1.0);
+            assert!(
+                with_partner > without_partner,
+                "{kind:?}: the partner of an owned L5 weapon ({with_partner}) must                  outrank the same passive alone ({without_partner})"
+            );
+            // …and the L4 → L5 rank that completes it outranks the same rank
+            // without the partner owned.
+            let mut l4 = Weapon::new(kind);
+            l4.level = kind.max_level() - 1;
+            let completing = Loadout::from_parts(vec![l4.clone()], vec![(evo.passive, 1)]);
+            let plain = Loadout::from_parts(vec![l4], Vec::new());
+            let a = upgrade_value(&completing, &Upgrade::LevelWeapon(0), 1.0);
+            let b = upgrade_value(&plain, &Upgrade::LevelWeapon(0), 1.0);
+            assert!(
+                a > b,
+                "{kind:?}: completing an evolution ({a}) must outrank a bare rank ({b})"
+            );
+            assert_eq!(completing.priority_partner(), None, "{kind:?}: already paired");
+        }
+    }
 }

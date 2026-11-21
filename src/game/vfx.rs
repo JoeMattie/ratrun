@@ -4882,6 +4882,616 @@ pub fn emit_roll_call_pulse(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, k
     );
 }
 
+// ---- Wave 3 evolutions B: Downspout, Dead Letter, Carbon Copy, Ripcord ---
+//
+// The four evolutions that shipped with their weapons. Each one replaces a
+// still-frame silhouette from the design's "Half-block read" column, so the art
+// is a handful of deliberate pixels rather than a burst:
+//
+// - **Downspout**: "slanted drops become a stepped green staircase" — a tread
+//   and a riser per step, laid along the gutter's march line at fire time, then
+//   one flashing tread per landing.
+// - **Dead Letter**: "magenta envelope shuts, then tears open" — a closed
+//   envelope outline held for the 2 s fuse, then a tear.
+// - **Carbon Copy**: "amber eye pair stays behind, beams cross" — the afterimage
+//   wears the *recorded* origin's eye pair for the whole replay and fires dim
+//   amber bars whose gaps make them read as a negative.
+// - **Ripcord**: "white knots pull down a blue cord" — white knots at the
+//   departure point and the far end, a blue cord between them, then a snap.
+
+/// Lime tread (the lit step of a Downspout staircase).
+const DOWNSPOUT_TREAD: Rgb = (214, 255, 120);
+/// The darker riser under a tread.
+const DOWNSPOUT_RISER: Rgb = (108, 196, 56);
+
+/// **Downspout**: the whole staircase, drawn at fire time along the gutter's
+/// march line (`rat` → `far`), one tread + riser per drop. It lives long enough
+/// (0.9 s) to stay up for the whole volley, so the player can read where each
+/// remaining drop will land.
+pub fn emit_downspout_staircase(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    rat: Vec2,
+    far: Vec2,
+    steps: usize,
+    step_px: f32,
+) {
+    let seg = far - rat;
+    let dist = seg.len();
+    if dist < 1.0 {
+        return;
+    }
+    let dir = seg * (1.0 / dist);
+    let side = dir.perp();
+    let steps = steps.max(1);
+    let _ = step_px;
+    for i in 0..steps {
+        // Each tread sits where its drop will land.
+        let back = ((evolutions_step() * i as f32).min((dist - 3.0).max(0.0))).max(0.0);
+        let at = far - dir * back;
+        let budget = ps.budget_count(1, false);
+        if budget == 0 {
+            continue;
+        }
+        // Tread: a 3 px bar across the march line, brighter than the riser.
+        let life = rng.random_range(0.70..0.95);
+        ps.push(Particle {
+            pos: at - side * 0.5,
+            vel: Vec2::ZERO,
+            life,
+            max_life: life,
+            drag: 0.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(DOWNSPOUT_TREAD, DOWNSPOUT_RISER),
+            additive: true,
+            shape: Shape::Blob,
+        });
+        let budget = ps.budget_count(1, false);
+        if budget == 0 {
+            continue;
+        }
+        let life = rng.random_range(0.60..0.85);
+        ps.push(Particle {
+            pos: at + side * 0.5 - dir * 1.5,
+            vel: Vec2::ZERO,
+            life,
+            max_life: life,
+            drag: 0.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(DOWNSPOUT_RISER, (44, 96, 28)),
+            additive: true,
+            shape: Shape::Dot,
+        });
+    }
+}
+
+/// The Downspout step distance, as a plain number (the vfx module does not
+/// depend on the evolution systems' constants at call sites; the value is the
+/// design's "10 px" and `evolutions::DOWNSPOUT_STEP` is the tuning home).
+#[inline]
+fn evolutions_step() -> f32 {
+    10.0
+}
+
+/// **Downspout**: one tread of the staircase landing — a stepped splash (a
+/// bright tread bar plus a short riser) rather than a round acid burst.
+pub fn emit_downspout_step(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, radius: f32) {
+    let half = (radius * 0.6).clamp(2.0, 5.0);
+    for k in -1..=1 {
+        let budget = ps.budget_count(1, false);
+        if budget == 0 {
+            break;
+        }
+        let life = rng.random_range(0.14..0.24);
+        ps.push(Particle {
+            pos: pos + Vec2::new(k as f32 * half, 0.0),
+            vel: Vec2::new(0.0, rng.random_range(8.0..26.0)),
+            life,
+            max_life: life,
+            drag: 5.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(DOWNSPOUT_TREAD, DOWNSPOUT_RISER),
+            additive: true,
+            shape: if k == 0 { Shape::Blob } else { Shape::Dot },
+        });
+    }
+    // The riser: one rising pip under the tread, so the step reads as a step.
+    let budget = ps.budget_count(1, false);
+    if budget > 0 {
+        let life = rng.random_range(0.12..0.20);
+        ps.push(Particle {
+            pos: pos + Vec2::new(0.0, 1.5),
+            vel: Vec2::new(0.0, 18.0),
+            life,
+            max_life: life,
+            drag: 6.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(DOWNSPOUT_RISER, (44, 96, 28)),
+            additive: true,
+            shape: Shape::Dot,
+        });
+    }
+}
+
+/// **Downspout**: the runoff stripe under the finished gutter. Stepped pips walk
+/// along the stripe (never a smooth chevron), fading out over its life.
+pub fn emit_downspout_runoff(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    start: Vec2,
+    dir: Vec2,
+    length: f32,
+    life_frac: f32,
+    _dt: f32,
+) {
+    let face = if dir.len_sq() > 0.001 {
+        dir.normalized()
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    let side = face.perp();
+    let len = length.max(2.0);
+    let n = ps.budget_count(5, false);
+    let bright = 0.35 + 0.65 * life_frac.clamp(0.0, 1.0);
+    for i in 0..n {
+        // Snap the along-distance to a 5 px tread so the pips line up in steps,
+        // and give every other one a tread's width instead of a single pixel:
+        // that is what makes a stripe read as a *staircase* rather than a line.
+        let raw = rng.random_range(0.0..len);
+        let along = (raw / 5.0).floor() * 5.0;
+        let p = start + face * along + side * rng.random_range(-1.0..1.0);
+        let life = rng.random_range(0.20..0.32);
+        ps.push(Particle {
+            pos: p,
+            vel: Vec2::new(0.0, rng.random_range(-6.0..-1.0)),
+            life,
+            max_life: life,
+            drag: 3.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(
+                palette::scale(DOWNSPOUT_TREAD, bright),
+                palette::scale(DOWNSPOUT_RISER, bright),
+            ),
+            additive: true,
+            shape: if i % 2 == 0 { Shape::Blob } else { Shape::Dot },
+        });
+    }
+}
+
+/// Magenta envelope body, and the brighter flap / tear edge.
+const LETTER_MAGENTA: Rgb = (236, 112, 208);
+const LETTER_HOT: Rgb = (255, 196, 246);
+const LETTER_DIM: Rgb = (104, 40, 92);
+
+/// **Dead Letter**: the sealed envelope arriving as a host dies — a shut
+/// envelope: a 7 x 5 outline with the flap folded down over its middle.
+pub fn emit_dead_letter_seal(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
+    let base = safe_pos(pos);
+    ps.push_shockwave(Shockwave {
+        pos: base,
+        start_r: 5.0,
+        end_r: 1.5,
+        life: 0.22,
+        max_life: 0.22,
+        color: LETTER_MAGENTA,
+        core: LETTER_HOT,
+        thick: 1.0,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    let n = ps.budget_count(5, false);
+    ps.burst_shaped(
+        rng,
+        base,
+        n,
+        26.0,
+        2.0,
+        Ramp::Custom(LETTER_MAGENTA, LETTER_DIM),
+        0.22,
+        true,
+        Shape::Dot,
+        6.0,
+    );
+}
+
+/// **Dead Letter**: the sealed envelope held on the floor for its 2 s fuse. The
+/// outline and the closed flap are re-emitted every tick with a short life, so
+/// the envelope stays drawn (and never needs an entity of its own art).
+pub fn emit_dead_letter_sealed(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    pos: Vec2,
+    life_frac: f32,
+) {
+    let base = safe_pos(pos);
+    // The envelope: four corners and the two side middles (the outline), then
+    // the folded flap as a V meeting on the centre line — that V is what makes
+    // a rectangle read as a *shut* envelope at two rows of half-blocks.
+    let outline = [
+        (-4.0, -3.0),
+        (4.0, -3.0),
+        (-4.0, 3.0),
+        (4.0, 3.0),
+        (-4.0, 0.0),
+        (4.0, 0.0),
+        (0.0, 3.0),
+        (-2.0, -1.0),
+        (2.0, -1.0),
+    ];
+    let bright = (0.55 + 0.45 * life_frac).clamp(0.2, 1.0);
+    for (i, (dx, dy)) in outline.iter().enumerate() {
+        if ps.budget_count(1, false) == 0 {
+            break;
+        }
+        let life = rng.random_range(0.10..0.16);
+        ps.push(Particle {
+            pos: base + Vec2::new(*dx, *dy),
+            vel: Vec2::ZERO,
+            life,
+            max_life: life,
+            drag: 0.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(
+                palette::scale(
+                    if i == 4 { LETTER_DIM } else { LETTER_MAGENTA },
+                    bright,
+                ),
+                LETTER_DIM,
+            ),
+            additive: true,
+            shape: if i >= 7 { Shape::Dot } else { Shape::Blob },
+        });
+    }
+    // The shut flap's seam: one hot pip where the V closes.
+    if ps.budget_count(1, false) > 0 {
+        let life = rng.random_range(0.09..0.14);
+        ps.push(Particle {
+            pos: base + Vec2::new(0.0, 0.5),
+            vel: Vec2::ZERO,
+            life,
+            max_life: life,
+            drag: 0.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(palette::scale(LETTER_HOT, bright), LETTER_DIM),
+            additive: true,
+            shape: Shape::Dot,
+        });
+    }
+}
+
+/// **Dead Letter**: the envelope torn open — the flap splits and the chain
+/// leaves.
+pub fn emit_dead_letter_tear(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
+    let base = safe_pos(pos);
+    ps.push_shockwave(Shockwave {
+        pos: base,
+        start_r: 1.5,
+        end_r: 8.0,
+        life: 0.26,
+        max_life: 0.26,
+        color: LETTER_MAGENTA,
+        core: LETTER_HOT,
+        thick: 1.0,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    let n = ps.budget_count(7, false);
+    ps.burst_shaped(
+        rng,
+        base,
+        n,
+        62.0,
+        1.4,
+        Ramp::Custom(LETTER_HOT, LETTER_DIM),
+        0.26,
+        true,
+        Shape::Streak,
+        5.0,
+    );
+}
+
+/// **Dead Letter**: an envelope whose fuse ran out unopened.
+pub fn emit_dead_letter_fizzle(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
+    let n = ps.budget_count(3, false);
+    ps.burst_shaped(
+        rng,
+        safe_pos(pos),
+        n,
+        14.0,
+        1.6,
+        Ramp::Custom(LETTER_DIM, (40, 16, 34)),
+        0.30,
+        true,
+        Shape::Dot,
+        5.0,
+    );
+}
+
+/// Amber of the Carbon Copy afterimage (a step warmer and dimmer than the
+/// live beam, so the copy reads as a negative).
+const COPY_AMBER: Rgb = (236, 168, 48);
+const COPY_DUSK: Rgb = (96, 60, 22);
+
+/// **Carbon Copy**: the afterimage's eye pair, held at the *recorded* origin
+/// for the whole replay, facing the recorded way. Two amber pips on a short
+/// bar: a camera that was left running.
+pub fn emit_carbon_copy_afterimage(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    origin: Vec2,
+    facing: Vec2,
+    pulses: u32,
+) {
+    let base = safe_pos(origin);
+    let f = if facing.len_sq() > 0.01 {
+        facing.normalized()
+    } else {
+        Vec2::new(0.0, -1.0)
+    };
+    let perp = f.perp();
+    for side in [-1.0f32, 1.0] {
+        if ps.budget_count(1, true) == 0 {
+            break;
+        }
+        let life = rng.random_range(0.09..0.16);
+        ps.push(Particle {
+            pos: base + f * 3.0 + perp * side * 1.6,
+            vel: Vec2::ZERO,
+            life,
+            max_life: life,
+            drag: 0.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(COPY_AMBER, COPY_DUSK),
+            additive: true,
+            shape: Shape::Blob,
+        });
+    }
+    // The bar behind the eyes: one dim pip per recorded pulse, so a 5-pulse
+    // copy is visibly the bigger negative.
+    let n = ps.budget_count(pulses.min(5) as usize, false);
+    for i in 0..n {
+        let life = rng.random_range(0.08..0.14);
+        let t = (i as f32 + 1.0) / (n as f32 + 1.0);
+        ps.push(Particle {
+            pos: base + perp * (t - 0.5) * 3.0 - f * 1.0,
+            vel: Vec2::ZERO,
+            life,
+            max_life: life,
+            drag: 0.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(COPY_DUSK, (60, 38, 18)),
+            additive: true,
+            shape: Shape::Dot,
+        });
+    }
+}
+
+/// **Carbon Copy**: one pulse of the replayed sweep. The beam is drawn in
+/// **dashes** (every other pip dropped) so the beams of the copy and the live
+/// sweep cross without either reading as the other.
+pub fn emit_carbon_copy_pulse(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    origin: Vec2,
+    angle: f32,
+    len: f32,
+    hits: u32,
+) {
+    let dir = Vec2::from_angle(angle);
+    let perp = dir.perp();
+    let dots = ps.budget_count(((len * 0.35) as usize).max(3), true);
+    for i in 0..dots {
+        // Skip every other pip: the copy is a negative, not a solid bar.
+        if i % 2 == 1 {
+            continue;
+        }
+        let t = i as f32 / dots.max(1) as f32;
+        let p = origin + dir * (2.0 + len * t);
+        let life = rng.random_range(0.06..0.11);
+        ps.push(Particle {
+            pos: p + perp * rng.random_range(-0.5..0.5),
+            vel: perp * rng.random_range(-6.0..6.0),
+            life,
+            max_life: life,
+            drag: 9.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(COPY_AMBER, COPY_DUSK),
+            additive: true,
+            shape: Shape::Dot,
+        });
+    }
+    if hits > 0 && ps.budget_count(1, false) > 0 {
+        let life = rng.random_range(0.10..0.16);
+        ps.push(Particle {
+            pos: origin + dir * len,
+            vel: Vec2::ZERO,
+            life,
+            max_life: life,
+            drag: 0.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(COPY_AMBER, COPY_DUSK),
+            additive: true,
+            shape: Shape::Cross,
+        });
+    }
+}
+
+/// **Carbon Copy**: a body the afterimage pierced.
+pub fn emit_carbon_copy_hit(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    pos: Vec2,
+    out_dir: Vec2,
+    killed: bool,
+) {
+    let dir = if out_dir.len_sq() > 0.01 {
+        out_dir.normalized()
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    let n = ps.budget_count(if killed { 4 } else { 2 }, false);
+    ps.cone_shaped(
+        rng,
+        pos,
+        dir,
+        n,
+        70.0,
+        0.9,
+        Ramp::Custom(COPY_AMBER, COPY_DUSK),
+        0.16,
+        true,
+        Shape::Dot,
+        6.0,
+    );
+}
+
+/// White knots of the Ripcord cord, and the blue it is made of.
+const RIPCORD_KNOT: Rgb = (245, 250, 255);
+const RIPCORD_CORD: Rgb = (108, 172, 255);
+
+/// **Ripcord**: the taut route, drawn once per segment each tick: a blue cord
+/// with a white knot at the departure point and at the far (arriving) end.
+pub fn emit_ripcord_cord(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    route: &[(Vec2, Vec2)],
+    life_frac: f32,
+    start: Vec2,
+) {
+    if route.is_empty() {
+        return;
+    }
+    let bright = (0.45 + 0.55 * life_frac.clamp(0.0, 1.0)).clamp(0.2, 1.0);
+    // The cord: a pip every ~4 px along each travelled leg.
+    for &(a, b) in route {
+        let seg = b - a;
+        let len = seg.len();
+        if len < 0.5 {
+            continue;
+        }
+        let dir = seg * (1.0 / len);
+        let n = ps.budget_count(((len / 2.5) as usize).max(2), false);
+        for i in 0..n {
+            let t = (i as f32 + 0.5) / n.max(1) as f32;
+            let life = rng.random_range(0.10..0.18);
+            ps.push(Particle {
+                pos: a + seg * t,
+                vel: dir.perp() * rng.random_range(-3.0..3.0),
+                life,
+                max_life: life,
+                drag: 6.0,
+                gravity: 0.0,
+                ramp: Ramp::Custom(
+                    palette::scale(RIPCORD_CORD, bright),
+                    palette::scale((54, 96, 186), bright),
+                ),
+                additive: true,
+                shape: Shape::Dot,
+            });
+        }
+    }
+    // The knots: departure point and the far end of the last leg.
+    let far = route[route.len() - 1].1;
+    for knot in [start, far] {
+        if ps.budget_count(1, false) == 0 {
+            break;
+        }
+        let life = rng.random_range(0.10..0.16);
+        ps.push(Particle {
+            pos: knot,
+            vel: Vec2::ZERO,
+            life,
+            max_life: life,
+            drag: 0.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(RIPCORD_KNOT, RIPCORD_CORD),
+            additive: true,
+            shape: Shape::Cross,
+        });
+        // A knot is a knot: a second white pip beside the cross, so the two
+        // ends of the cord read as hardware rather than as a bright pixel.
+        if ps.budget_count(1, false) > 0 {
+            let life = rng.random_range(0.09..0.14);
+            ps.push(Particle {
+                pos: knot + Vec2::new(1.5, 0.0),
+                vel: Vec2::ZERO,
+                life,
+                max_life: life,
+                drag: 0.0,
+                gravity: 0.0,
+                ramp: Ramp::Custom(RIPCORD_CORD, (28, 52, 96)),
+                additive: true,
+                shape: Shape::Blob,
+            });
+        }
+    }
+}
+
+/// **Ripcord**: a body the taut cord caught and pulled back.
+pub fn emit_ripcord_hit(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, back: Vec2, killed: bool) {
+    let dir = if back.len_sq() > 0.01 {
+        back.normalized()
+    } else {
+        Vec2::new(-1.0, 0.0)
+    };
+    let n = ps.budget_count(if killed { 6 } else { 3 }, false);
+    // The pull: sparks dragged back toward the departure point.
+    ps.cone_shaped(
+        rng,
+        pos,
+        dir,
+        n,
+        if killed { 110.0 } else { 70.0 },
+        0.7,
+        Ramp::Custom(RIPCORD_KNOT, RIPCORD_CORD),
+        0.20,
+        true,
+        Shape::Streak,
+        5.0,
+    );
+}
+
+/// **Ripcord**: the cord snapping — both knots pop and the blue line drops.
+pub fn emit_ripcord_snap(ps: &mut Particles, rng: &mut impl Rng, route: &[(Vec2, Vec2)], start: Vec2) {
+    let Some(&(_, far)) = route.last() else {
+        return;
+    };
+    for knot in [start, far] {
+        let n = ps.budget_count(3, false);
+        ps.burst_shaped(
+            rng,
+            knot,
+            n,
+            44.0,
+            1.2,
+            Ramp::Custom(RIPCORD_KNOT, RIPCORD_CORD),
+            0.20,
+            true,
+            Shape::Streak,
+            5.0,
+        );
+    }
+    // The slack: a few cords falling out of the line.
+    let n = ps.budget_count(route.len().min(6), false);
+    for i in 0..n {
+        let &(a, b) = &route[i.min(route.len() - 1)];
+        let life = rng.random_range(0.16..0.30);
+        ps.push(Particle {
+            pos: a + (b - a) * rng.random_range(0.2..0.8),
+            vel: Vec2::new(rng.random_range(-6.0..6.0), rng.random_range(18.0..44.0)),
+            life,
+            max_life: life,
+            drag: 5.0,
+            gravity: 90.0,
+            ramp: Ramp::Custom(RIPCORD_CORD, (28, 52, 96)),
+            additive: true,
+            shape: Shape::Dot,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
