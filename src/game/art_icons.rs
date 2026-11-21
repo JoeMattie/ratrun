@@ -1830,6 +1830,7 @@ mod tests {
                     cursor: 1,
                     scroll: 0,
                     hovered: None,
+                    splices: &[],
                 };
                 term.draw(|f| {
                     let area = f.area();

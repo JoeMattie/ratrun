@@ -493,6 +493,28 @@ fn draw_slice(
     *y += card_h;
 }
 
+/// Right-aligned `3-10 of 16` chip on a scrolling list's hint row: a Molt
+/// forfeit list holds up to 8 + 8 owned kinds and a replacement list up to
+/// twelve, which a plate this size windows rather than clips. Nothing is drawn
+/// when the whole list fits.
+fn draw_list_range(f: &mut Frame, inner: Rect, row: u16, offset: usize, list_h: u16, total: usize) {
+    let list_h = list_h as usize;
+    if list_h == 0 || total <= list_h {
+        return;
+    }
+    let first = offset + 1;
+    let last = (offset + list_h).min(total);
+    let chip = format!("{first}-{last} of {total} ");
+    let w = chip.chars().count() as u16;
+    // Only where the hint text on the left of the same row cannot reach it: a
+    // narrow plate keeps the windowed list and its cursor with no chip rather
+    // than overlapping two strings.
+    if inner.width >= 64 && w + 4 < inner.width {
+        let x = inner.right().saturating_sub(w + 1);
+        put(f, x, row, w, &chip, ink(MUTED));
+    }
+}
+
 /// One service row (Stitch / Turn the shelf / Molt).
 #[allow(clippy::too_many_arguments)]
 fn draw_service(
@@ -654,6 +676,10 @@ fn draw_molt(f: &mut Frame, r: Rect, world: &World, hole: usize, molt: MoltUi, h
                 ("It forfeits its ranks.", MUTED)
             };
             put(f, inner.x + 1, hint_row, inner.width - 2, line, ink(line_col));
+            // The rack runs to 8 + 8 kinds, more than the plate can list: a
+            // range chip says where in the list the cursor is, so nothing looks
+            // cut off.
+            draw_list_range(f, inner, hint_row, offset, list_h, items.len());
             put(
                 f,
                 inner.x + 1,
@@ -722,6 +748,7 @@ fn draw_molt(f: &mut Frame, r: Rect, world: &World, hole: usize, molt: MoltUi, h
                 None => (format!("{MOLT_PRICE}g for the change"), TRAIL_GOLD),
             };
             put(f, inner.x + 1, hint_row, inner.width - 2, &line, ink(line_col));
+            draw_list_range(f, inner, hint_row, offset, list_h, options.len());
             put(
                 f,
                 inner.x + 1,

@@ -404,7 +404,9 @@ pub fn next_loadout(previous: &Loadout, chosen: &[Keepable]) -> Result<Loadout, 
         }
     }
 
-    let mut carried = Loadout::from_parts(weapons, passives);
+    // The profile's rack caps ride along between levels unchanged: a run that
+    // started on 6 + 6 racks keeps them on every floor it carries into.
+    let mut carried = Loadout::from_parts_with_caps(weapons, passives, previous.caps);
     // Gene splices sit **outside the racks**: they ride along whatever the
     // keep-three choice was, and last until the run ends (`WAVE3_DESIGN` §6).
     if !previous.splices.is_empty() {
@@ -466,9 +468,16 @@ pub struct CampaignState {
 impl CampaignState {
     /// A fresh campaign: level 0, the default loadout, no banked totals.
     pub fn new(run_seed: u64) -> Self {
+        CampaignState::with_caps(run_seed, crate::game::loadout::SlotCaps::DEFAULT)
+    }
+
+    /// A fresh campaign on racks of `caps` slots (the profile's persistent slot
+    /// upgrades, 4 to 8 each side). The caps ride along every carried loadout
+    /// (`next_loadout`), so every floor of the campaign uses them.
+    pub fn with_caps(run_seed: u64, caps: crate::game::loadout::SlotCaps) -> Self {
         CampaignState {
             level: 0,
-            loadout: Loadout::starting(),
+            loadout: Loadout::with_caps(Loadout::START_WEAPON, caps),
             run_seed,
             totals: CampaignTotals::default(),
             route: Route::ORIGINAL,

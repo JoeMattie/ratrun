@@ -6,8 +6,76 @@ use rand::Rng;
 
 use super::weapon::{Evolution, Weapon, WeaponKind};
 
-pub const MAX_WEAPONS: usize = 5;
-pub const MAX_PASSIVES: usize = 5;
+/// Smallest rack a run can be played with (a fresh profile: 4 weapons and 4
+/// passives).
+pub const MIN_SLOTS: usize = 4;
+/// Largest rack the persistent slot upgrades can reach (8 weapons and 8
+/// passives).
+pub const MAX_SLOTS: usize = 8;
+
+/// Hard storage bound for a rack: array sizes and `*Kind::all()` tables use it.
+/// **Not** the cap in force — that is [`Loadout::caps`], anywhere from
+/// [`MIN_SLOTS`] to [`MAX_SLOTS`].
+pub const MAX_WEAPONS: usize = MAX_SLOTS;
+/// See [`MAX_WEAPONS`].
+pub const MAX_PASSIVES: usize = MAX_SLOTS;
+
+/// The slot caps in force for one loadout (the owner's "max weapon/passive
+/// slots" profile stat, 4 up to 8).
+///
+/// Carried as **data on the [`Loadout`]** rather than a global constant, so a
+/// run started from an upgraded profile can hold 6 weapons while a fresh
+/// profile holds 4. Every rack rule (level-up offers, `from_parts`, the Molt
+/// swap, the chest, the bot) reads it through [`Loadout::max_weapons`] /
+/// [`Loadout::max_passives`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlotCaps {
+    pub weapons: usize,
+    pub passives: usize,
+}
+
+impl SlotCaps {
+    /// Smallest cap a slot may hold.
+    pub const MIN: usize = MIN_SLOTS;
+    /// Largest cap a slot may hold.
+    pub const MAX: usize = MAX_SLOTS;
+    /// A fresh profile: four of each.
+    pub const DEFAULT: SlotCaps = SlotCaps {
+        weapons: MIN_SLOTS,
+        passives: MIN_SLOTS,
+    };
+    /// Both caps at the maximum (`8 + 8`).
+    pub const FULL: SlotCaps = SlotCaps {
+        weapons: MAX_SLOTS,
+        passives: MAX_SLOTS,
+    };
+
+    /// Caps clamped into [`SlotCaps::MIN`]`..=`[`SlotCaps::MAX`]. A profile that
+    /// asks for 0 or 99 slots gets the nearest legal rack instead of a panic.
+    pub const fn new(weapons: usize, passives: usize) -> Self {
+        SlotCaps {
+            weapons: clamp_slots(weapons),
+            passives: clamp_slots(passives),
+        }
+    }
+}
+
+impl Default for SlotCaps {
+    fn default() -> Self {
+        SlotCaps::DEFAULT
+    }
+}
+
+/// Clamp one rack cap into the legal range (const, so the tables above work).
+const fn clamp_slots(n: usize) -> usize {
+    if n < MIN_SLOTS {
+        MIN_SLOTS
+    } else if n > MAX_SLOTS {
+        MAX_SLOTS
+    } else {
+        n
+    }
+}
 
 /// Gold a `Purse` level-up card hands over (design §2).
 pub const PURSE_GOLD: u32 = 8;
@@ -445,11 +513,17 @@ pub struct Loadout {
     /// bit-for-bit when every passive is kept.
     pub passives: Vec<(PassiveKind, u32)>,
     pub stats: Stats,
+    /// The rack caps **in force** for this loadout ([`SlotCaps`], 4..=8 each
+    /// side). A profile's persistent slot upgrades are passed in when the run
+    /// starts and carried between campaign levels unchanged. Read it through
+    /// [`Loadout::max_weapons`] / [`Loadout::max_passives`], never as a
+    /// constant.
+    pub caps: SlotCaps,
     /// Owned **gene splices**, in purchase order (`game::shop`).
     ///
     /// Permanent for the run and on neither rack: they are not weapons and not
-    /// passive stacks, so they never count against [`MAX_WEAPONS`] /
-    /// [`MAX_PASSIVES`] and the keep-three screen cannot see them. They ride
+    /// passive stacks, so they never count against [`Loadout::max_weapons`] /
+    /// [`Loadout::max_passives`] and the keep-three screen cannot see them. They ride
     /// along with the loadout between campaign levels
     /// (`campaign::next_loadout`), which is what makes them last until the run
     /// ends. [`Loadout::rebuild_stats`] applies them **after** the passives.
@@ -485,17 +559,44 @@ impl Loadout {
     pub const START_WEAPON: WeaponKind = WeaponKind::Gnaw;
 
     pub fn new(start: WeaponKind) -> Self {
+        Loadout::with_caps(start, SlotCaps::DEFAULT)
+    }
+
+    /// A loadout with explicit rack caps (the profile's slot upgrades). The caps
+    /// are clamped to [`MIN_SLOTS`]`..=`[`MAX_SLOTS`].
+    pub fn with_caps(start: WeaponKind, caps: SlotCaps) -> Self {
         Loadout {
             weapons: vec![Weapon::new(start)],
             passives: Vec::new(),
             stats: Stats::default(),
+            caps: SlotCaps::new(caps.weapons, caps.passives),
             splices: Vec::new(),
         }
     }
 
-    /// The default level-1 loadout ([`Loadout::START_WEAPON`], no passives).
+    /// The default level-1 loadout ([`Loadout::START_WEAPON`], no passives) on a
+    /// fresh profile's racks ([`SlotCaps::DEFAULT`]: 4 + 4).
     pub fn starting() -> Self {
         Loadout::new(Loadout::START_WEAPON)
+    }
+
+    /// How many distinct **weapons** this loadout may hold (`4..=8`).
+    pub fn max_weapons(&self) -> usize {
+        self.caps.weapons
+    }
+
+    /// How many distinct **passives** this loadout may hold (`4..=8`).
+    pub fn max_passives(&self) -> usize {
+        self.caps.passives
+    }
+
+    /// Replace the caps in force (a profile upgrade bought between runs).
+    ///
+    /// Ownership is never dropped: if the new caps are **below** what the
+    /// loadout already holds, everything stays owned and only new kinds stop
+    /// being offered (`new_kind_cards`/`apply` read the caps, nothing truncates).
+    pub fn set_caps(&mut self, caps: SlotCaps) {
+        self.caps = SlotCaps::new(caps.weapons, caps.passives);
     }
 
     /// Rebuild a loadout from carried weapons and passive stacks, replaying the
@@ -505,6 +606,23 @@ impl Loadout {
     /// level's acquisition order) and every stat is derived here, so a carried
     /// loadout is fully described by its parts — no stale numbers cross levels.
     pub fn from_parts(weapons: Vec<Weapon>, passives: Vec<(PassiveKind, u32)>) -> Self {
+        Loadout::from_parts_with_caps(weapons, passives, SlotCaps::DEFAULT)
+    }
+
+    /// [`Loadout::from_parts`] with the caps the carried run was played on: the
+    /// campaign keeps a profile's racks between levels (`caps` rides along
+    /// unchanged).
+    ///
+    /// Everything given is kept, up to the **hard** bound [`MAX_WEAPONS`] /
+    /// [`MAX_PASSIVES`]: a cap that is lower than what the loadout already owns
+    /// never strips a slot the player earned, it only stops new kinds from being
+    /// offered (see [`Loadout::set_caps`]).
+    pub fn from_parts_with_caps(
+        weapons: Vec<Weapon>,
+        passives: Vec<(PassiveKind, u32)>,
+        caps: SlotCaps,
+    ) -> Self {
+        let caps = SlotCaps::new(caps.weapons, caps.passives);
         let mut kept_weapons: Vec<Weapon> = Vec::with_capacity(weapons.len().min(MAX_WEAPONS));
         for weapon in weapons {
             if kept_weapons.len() == MAX_WEAPONS {
@@ -535,6 +653,7 @@ impl Loadout {
             weapons: kept_weapons,
             passives: kept_passives,
             stats,
+            caps,
             splices: Vec::new(),
         }
     }
@@ -608,7 +727,7 @@ impl Loadout {
     /// a passive slot is free (design §2). `None` before L4, when the partner is
     /// already owned, or when the passive rack is full.
     pub fn priority_partner(&self) -> Option<PassiveKind> {
-        if self.passives.len() >= MAX_PASSIVES {
+        if self.passives.len() >= self.max_passives() {
             return None;
         }
         for w in &self.weapons {
@@ -833,14 +952,14 @@ impl Loadout {
     /// Every new kind the build may still open, respecting both caps.
     fn new_kind_cards(&self) -> Vec<Upgrade> {
         let mut out = Vec::new();
-        if self.weapons.len() < MAX_WEAPONS {
+        if self.weapons.len() < self.max_weapons() {
             for kind in WeaponKind::all() {
                 if !self.has(kind) {
                     out.push(Upgrade::NewWeapon(kind));
                 }
             }
         }
-        if self.passives.len() < MAX_PASSIVES {
+        if self.passives.len() < self.max_passives() {
             for kind in PassiveKind::all() {
                 if self.stacks(kind) == 0 {
                     out.push(Upgrade::Passive(kind));
@@ -854,7 +973,7 @@ impl Loadout {
     pub fn apply(&mut self, up: &Upgrade) -> f32 {
         match up {
             Upgrade::NewWeapon(k) => {
-                if self.weapons.len() < MAX_WEAPONS && !self.has(*k) {
+                if self.weapons.len() < self.max_weapons() && !self.has(*k) {
                     self.weapons.push(Weapon::new(*k));
                 }
                 0.0
@@ -873,7 +992,7 @@ impl Loadout {
                     // played as a bandage instead of a dead stack.
                     return BANDAGE_HEAL_FRAC * self.stats.max_hp;
                 }
-                if self.passives.len() >= MAX_PASSIVES && self.stacks(*p) == 0 {
+                if self.passives.len() >= self.max_passives() && self.stacks(*p) == 0 {
                     return 0.0;
                 }
                 self.bump_stack(*p);
@@ -902,30 +1021,38 @@ mod tests {
 
     #[test]
     fn wave3_rebuild_and_choices_respect_both_caps() {
+        // A carried loadout on the widest racks a profile can buy (8 + 8 slots):
+        // twelve kinds come in, eight of each fit, duplicates merge.
         let mut weapons: Vec<_> = WeaponKind::all().into_iter().map(Weapon::new).collect();
         weapons.insert(1, weapons[0].clone());
         let mut passives = vec![(PassiveKind::Armor, 0), (PassiveKind::MaxHp, 1)];
         passives.extend(PassiveKind::all().into_iter().map(|kind| (kind, 1)));
-        let mut lo = Loadout::from_parts(weapons, passives);
-        assert_eq!(lo.weapons.len(), MAX_WEAPONS);
+        let mut lo = Loadout::from_parts_with_caps(weapons, passives, SlotCaps::FULL);
+        assert_eq!(lo.caps, SlotCaps::FULL);
+        assert_eq!(lo.weapons.len(), MAX_SLOTS);
         assert_eq!(lo.weapons[1].kind, WeaponKind::all()[1]);
-        assert_eq!(lo.passives.len(), MAX_PASSIVES);
+        assert_eq!(lo.passives.len(), MAX_SLOTS);
         assert_eq!(lo.stacks(PassiveKind::MaxHp), 2);
         assert_eq!(lo.stats.max_hp, Stats::default().max_hp + 40.0);
-        assert_eq!(lo.stacks(PassiveKind::Armor), 0);
+        assert_eq!(lo.stacks(PassiveKind::Armor), 1);
+        assert_eq!(
+            lo.stacks(PassiveKind::Counterweight),
+            0,
+            "the ninth acquired passive has no rack slot"
+        );
 
         let unavailable_weapon = WeaponKind::all().into_iter().find(|&k| !lo.has(k)).unwrap();
         lo.apply(&Upgrade::NewWeapon(unavailable_weapon));
-        lo.apply(&Upgrade::Passive(PassiveKind::Armor));
-        assert!(!lo.has(unavailable_weapon));
-        assert_eq!(lo.stacks(PassiveKind::Armor), 0);
+        lo.apply(&Upgrade::Passive(PassiveKind::Counterweight));
+        assert!(!lo.has(unavailable_weapon), "a full rack has no new weapon slot");
+        assert_eq!(lo.stacks(PassiveKind::Counterweight), 0);
 
         let mut rng = StdRng::seed_from_u64(15);
         for _ in 0..64 {
             for choice in lo.generate_choices(&mut rng) {
                 match choice {
                     Upgrade::NewWeapon(_) => panic!("a full rack has no new weapon slot"),
-                    Upgrade::LevelWeapon(i) => assert!(i < MAX_WEAPONS),
+                    Upgrade::LevelWeapon(i) => assert!(i < MAX_SLOTS),
                     Upgrade::Passive(kind) => assert!(lo.stacks(kind) > 0),
                     // The consumables leave both racks untouched.
                     Upgrade::Bandage | Upgrade::Purse => {}
@@ -1044,7 +1171,9 @@ mod tests {
     /// Every weapon maxed, every passive at its cap: the pool is empty and the
     /// level-up must still fill the screen with bandages.
     fn exhausted_loadout() -> Loadout {
-        let mut lo = Loadout::starting();
+        // The widest racks a profile can buy: eight owned kinds per side, every
+        // one at its cap, so the level-up pool really is empty.
+        let mut lo = Loadout::with_caps(Loadout::START_WEAPON, SlotCaps::FULL);
         for k in WeaponKind::all() {
             if !lo.has(k) {
                 lo.apply(&Upgrade::NewWeapon(k));
@@ -1136,8 +1265,8 @@ mod tests {
         lo.stats.max_hp = 200.0;
         let heal = lo.apply(&Upgrade::Bandage);
         assert!((heal - 50.0).abs() < 1e-3, "a quarter of max HP, got {heal}");
-        assert_eq!(lo.weapons.len(), MAX_WEAPONS);
-        assert_eq!(lo.passives.len(), MAX_PASSIVES);
+        assert_eq!(lo.weapons.len(), MAX_SLOTS);
+        assert_eq!(lo.passives.len(), MAX_SLOTS);
         assert_eq!(lo.apply(&Upgrade::Purse), 0.0);
     }
 
@@ -1590,5 +1719,170 @@ mod tests {
         assert_eq!(copy.stats.magnet, lo.stats.magnet);
         assert_eq!(copy.stats.regen, lo.stats.regen);
         assert_eq!(copy.stats.armor, lo.stats.armor);
+    }
+
+    /// The rack caps are **data**: a fresh profile plays 4 + 4, the persistent
+    /// slot upgrades reach 8 + 8, and anything a profile asks for outside that
+    /// band is clamped rather than trusted.
+    #[test]
+    fn slot_caps_default_to_four_and_clamp_into_range() {
+        assert_eq!(SlotCaps::default(), SlotCaps::DEFAULT);
+        assert_eq!(SlotCaps::DEFAULT, SlotCaps::new(MIN_SLOTS, MIN_SLOTS));
+        assert_eq!(SlotCaps::FULL, SlotCaps::new(MAX_SLOTS, MAX_SLOTS));
+        assert_eq!(SlotCaps::new(0, 99), SlotCaps::new(4, 8));
+        assert_eq!(SlotCaps::new(6, 7), SlotCaps { weapons: 6, passives: 7 });
+        let lo = Loadout::starting();
+        assert_eq!((lo.max_weapons(), lo.max_passives()), (MIN_SLOTS, MIN_SLOTS));
+        let mut wide = Loadout::with_caps(WeaponKind::Gnaw, SlotCaps::new(8, 8));
+        assert_eq!((wide.max_weapons(), wide.max_passives()), (8, 8));
+        wide.set_caps(SlotCaps::new(3, 12));
+        assert_eq!((wide.max_weapons(), wide.max_passives()), (4, 8));
+    }
+
+    /// Design §2 at every cap a profile can buy: **no ninth kind of either
+    /// category is ever offered**, and a full rack still offers ranks (so a
+    /// level-up is never a dead screen).
+    #[test]
+    fn a_full_rack_never_offers_a_new_kind_and_still_offers_ranks() {
+        for caps in [SlotCaps::new(4, 4), SlotCaps::new(6, 6), SlotCaps::FULL] {
+            let mut lo = Loadout::with_caps(WeaponKind::Gnaw, caps);
+            for kind in WeaponKind::all().into_iter().skip(1).take(caps.weapons - 1) {
+                lo.apply(&Upgrade::NewWeapon(kind));
+            }
+            for kind in PassiveKind::all().into_iter().take(caps.passives) {
+                lo.apply(&Upgrade::Passive(kind));
+            }
+            assert_eq!(lo.weapons.len(), caps.weapons, "rack filled to the cap");
+            assert_eq!(lo.passives.len(), caps.passives);
+            let unowned_weapon = WeaponKind::all().into_iter().find(|&k| !lo.has(k)).unwrap();
+            let unowned_passive = PassiveKind::all()
+                .into_iter()
+                .find(|&k| lo.stacks(k) == 0)
+                .unwrap();
+            // Applying an out-of-rack card is a no-op, not a silent ninth slot.
+            lo.apply(&Upgrade::NewWeapon(unowned_weapon));
+            lo.apply(&Upgrade::Passive(unowned_passive));
+            assert_eq!(lo.weapons.len(), caps.weapons);
+            assert_eq!(lo.passives.len(), caps.passives);
+            assert!(!lo.has(unowned_weapon));
+            assert_eq!(lo.stacks(unowned_passive), 0);
+
+            for seed in 0..40u64 {
+                let mut rng = StdRng::seed_from_u64(seed);
+                let choices = lo.generate_choices_with_hp(&mut rng, 1.0);
+                assert!(!choices.is_empty(), "a full rack still offers a card");
+                let mut ranks = 0;
+                for c in &choices {
+                    match c {
+                        Upgrade::NewWeapon(k) => {
+                            panic!("caps {caps:?}: offered the unowned {k:?}")
+                        }
+                        Upgrade::Passive(p) => {
+                            assert!(
+                                lo.stacks(*p) > 0,
+                                "caps {caps:?}: offered the unowned passive {p:?}"
+                            );
+                            ranks += 1;
+                        }
+                        Upgrade::LevelWeapon(_) => ranks += 1,
+                        Upgrade::Bandage | Upgrade::Purse => {}
+                    }
+                }
+                assert!(
+                    ranks > 0 || lo.rank_up_cards().is_empty(),
+                    "caps {caps:?}: ranks exist but none was dealt: {choices:?}"
+                );
+            }
+        }
+    }
+
+    /// A cap **below** what a carried or test loadout already holds keeps every
+    /// owned slot (nothing is confiscated), offers no new kinds, and never
+    /// panics — the coordinator's rule for a profile that loses an upgrade or a
+    /// campaign carried in on wider racks.
+    #[test]
+    fn a_lower_cap_keeps_owned_slots_and_offers_nothing_new() {
+        let mut lo = Loadout::with_caps(WeaponKind::Gnaw, SlotCaps::FULL);
+        for kind in WeaponKind::all().into_iter().skip(1).take(MAX_SLOTS - 1) {
+            lo.apply(&Upgrade::NewWeapon(kind));
+        }
+        for kind in PassiveKind::all().into_iter().take(MAX_SLOTS) {
+            lo.apply(&Upgrade::Passive(kind));
+        }
+        assert_eq!(lo.weapons.len(), MAX_SLOTS);
+        assert_eq!(lo.passives.len(), MAX_SLOTS);
+        let kept: Vec<WeaponKind> = lo.weapons.iter().map(|w| w.kind).collect();
+
+        lo.set_caps(SlotCaps::new(4, 4));
+        assert_eq!(lo.weapons.len(), MAX_SLOTS, "a lower cap never strips a slot");
+        assert_eq!(lo.passives.len(), MAX_SLOTS);
+        assert_eq!(lo.weapons.iter().map(|w| w.kind).collect::<Vec<_>>(), kept);
+
+        if let Some(unowned) = WeaponKind::all().into_iter().find(|&k| !lo.has(k)) {
+            lo.apply(&Upgrade::NewWeapon(unowned));
+            assert!(!lo.has(unowned), "a lowered cap takes no new weapon");
+        }
+        if let Some(unowned) = PassiveKind::all()
+            .into_iter()
+            .find(|&k| lo.stacks(k) == 0)
+        {
+            lo.apply(&Upgrade::Passive(unowned));
+            assert_eq!(lo.stacks(unowned), 0, "a lowered cap takes no new passive");
+        }
+        assert_eq!(lo.weapons.len(), MAX_SLOTS);
+        assert_eq!(lo.passives.len(), MAX_SLOTS);
+        for seed in 0..20u64 {
+            let mut r = StdRng::seed_from_u64(seed);
+            for c in lo.generate_choices_with_hp(&mut r, 1.0) {
+                match c {
+                    Upgrade::NewWeapon(k) => panic!("no new weapon past a lowered cap: {k:?}"),
+                    Upgrade::Passive(p) => {
+                        assert!(lo.stacks(p) > 0, "no new passive past a lowered cap: {p:?}")
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// The campaign carries the profile's rack caps between levels unchanged, so
+    /// a run started on 6 + 6 racks plays every floor on 6 + 6 (`next_loadout`
+    /// rebuilds the stats from the parts but not the caps).
+    #[test]
+    fn carry_over_keeps_the_caps() {
+        use crate::game::campaign::{self, keepables};
+        let mut lo = Loadout::with_caps(WeaponKind::Gnaw, SlotCaps::new(6, 6));
+        lo.apply(&Upgrade::NewWeapon(WeaponKind::AcidSpit));
+        lo.apply(&Upgrade::Passive(PassiveKind::Damage));
+        let keep: Vec<_> = keepables(&lo).into_iter().take(2).collect();
+        let next = campaign::next_loadout(&lo, &keep).expect("a valid keep");
+        assert_eq!(next.caps, SlotCaps::new(6, 6));
+        assert_eq!(next.weapons.len(), 1);
+        assert_eq!(next.passives.len(), 1);
+        // …and through `from_parts_with_caps` directly.
+        let rebuilt = Loadout::from_parts_with_caps(lo.weapons.clone(), lo.passives.clone(), SlotCaps::new(7, 5));
+        assert_eq!(rebuilt.caps, SlotCaps { weapons: 7, passives: 5 });
+    }
+
+    /// Chests respect the cap in force: they never add a slot, and with both
+    /// racks full at 8 + 8 and everything maxed the chest pays gold instead.
+    #[test]
+    fn chests_respect_eight_slots() {
+        let mut lo = exhausted_loadout();
+        assert_eq!(lo.weapons.len(), MAX_SLOTS);
+        assert_eq!(lo.passives.len(), MAX_SLOTS);
+        while lo.evolvable().is_some() {
+            // Evolutions keep the slot.
+            let before = lo.weapons.len();
+            let reward = open_chest(&mut lo, &mut StdRng::seed_from_u64(2));
+            assert!(matches!(reward, ChestReward::Evolve { .. }));
+            assert_eq!(lo.weapons.len(), before);
+        }
+        assert_eq!(
+            open_chest(&mut lo, &mut StdRng::seed_from_u64(2)),
+            ChestReward::Gold(CHEST_GOLD)
+        );
+        assert_eq!(lo.weapons.len(), MAX_SLOTS);
+        assert_eq!(lo.passives.len(), MAX_SLOTS);
     }
 }
