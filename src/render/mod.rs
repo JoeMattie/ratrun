@@ -4,6 +4,7 @@ pub mod framebuffer;
 pub mod hazard_outline;
 pub mod hud;
 pub mod ink;
+pub mod library;
 pub mod menu;
 pub mod overlay;
 pub mod shop;

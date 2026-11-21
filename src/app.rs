@@ -10,6 +10,7 @@ use ratatui::Frame;
 use crate::audio::{self, AudioEngine, Sfx};
 use crate::game::campaign::{self, CampaignState, KeepKind, Keepable};
 use crate::game::gem::PickupKind;
+use crate::game::library::{self as library_index, Key as LibraryKey};
 use crate::game::level::Theme;
 use crate::game::loadout::{ChestReward, Loadout, PassiveKind, SlotCaps, Upgrade};
 use crate::game::shop;
@@ -19,6 +20,7 @@ use crate::lore;
 use crate::math::Vec2;
 use crate::render::campaign as campaign_ui;
 use crate::render::framebuffer::PixelBuffer;
+use crate::render::library as library_ui;
 use crate::render::palette;
 use crate::render::{cursor, hud, menu, minimap, minimap_source, options, overlay, zoom as view_zoom};
 use crate::render::shop as shop_ui;
@@ -96,6 +98,9 @@ enum Screen {
     End,
     Chest,
     Shop,
+    /// The Library (specimen index): opened from the title's LIBRARY row and
+    /// the pause screen. Reads the persisted discoveries in `scores.library`.
+    Library,
 }
 
 #[cfg(test)]
@@ -119,6 +124,7 @@ impl Screen {
             Screen::End => "End",
             Screen::Chest => "Chest",
             Screen::Shop => "Shop",
+            Screen::Library => "Library",
         }
     }
 }
@@ -279,6 +285,19 @@ pub struct App {
     /// campaign carries it between levels. Tests use it to play on 6 + 6 or
     /// 8 + 8 racks.
     pub slot_caps: SlotCaps,
+    /// The Library screen's own state: tab, cursor, scroll, the card art clock
+    /// and its cached card scenes.
+    library_ui: library_ui::LibraryUi,
+    /// The Library registry (`game::library::all_rows`), built once.
+    library_rows: Vec<library_index::Row>,
+    /// Where Esc leaves the Library (the title, or the pause screen it was
+    /// opened from).
+    library_return: Screen,
+    /// Reused discovery buffer: the keys found since the last frame (the HUD's
+    /// `LIBRARY + …` callouts).
+    library_news: Vec<LibraryKey>,
+    /// Last frame's Library measurement (display lines, visible rows, narrow).
+    library_shape: library_ui::DrawInfo,
 }
 
 impl App {
@@ -373,7 +392,15 @@ impl App {
             cursor: cursor::CursorState::default(),
             cursor_env: cursor::env_override(),
             slot_caps: SlotCaps::DEFAULT,
+            library_ui: library_ui::LibraryUi::default(),
+            library_rows: library_index::all_rows(),
+            library_return: Screen::Title,
+            library_news: Vec::new(),
+            library_shape: library_ui::DrawInfo::default(),
         };
+        // `RATRUN_LIBRARY_ALL=1` unveils the index for screenshots and tests;
+        // it is memory-only and never written back over the score file.
+        app.scores.library.reveal_all_from_env();
         app.push_volumes();
         app.menu_music();
         // The HUD's dash module names the live dash key (CTRL, or SPACE on a
@@ -725,6 +752,10 @@ impl App {
         self.last_minimap = Rect::new(0, 0, 0, 0);
         self.last_map = Rect::new(0, 0, 0, 0);
         self.hud.reset();
+        // Entering a floor is discovering it, and it resets the per-floor
+        // discovery marks (the library's "seen" counts floors, not frames).
+        self.scores.library.begin_floor();
+        self.scores.library.mark_seen(LibraryKey::Floor(theme));
         self.intro_timer = 4.0;
         self.carried_entries = match self.campaign.as_ref() {
             Some(c) if level > 0 => entries_for(&campaign::keepables(&c.loadout)),
@@ -809,6 +840,9 @@ impl App {
                         {
                             self.step_zoom(step)
                         }
+                        // The Library's wheel scrolls the list without moving
+                        // the selection.
+                        Screen::Library => self.scroll_library(step),
                         // The wheel steps whichever options row it is over
                         // (scroll up raises a level, scroll down lowers it).
                         Screen::Options => {
@@ -838,7 +872,8 @@ impl App {
                             self.menu_idx = 1
                         }
                         Some(Target::Options) => self.menu_idx = 2,
-                        Some(Target::Quit) => self.menu_idx = 3,
+                        Some(Target::Library) => self.menu_idx = 3,
+                        Some(Target::Quit) => self.menu_idx = 4,
                         Some(Target::OptionsRow(i)) => {
                             self.options_row = i.min(options::ROW_COUNT - 1)
                         }
@@ -957,6 +992,7 @@ impl App {
             Screen::End => self.update_end(click),
             Screen::Chest => self.update_chest(click),
             Screen::Shop => self.update_shop(click),
+            Screen::Library => self.update_library(click),
         }
         if self.screen != previous {
             self.hits.clear();
@@ -1126,6 +1162,158 @@ impl App {
         self.screen = self.options_return;
     }
 
+    // ---- Library ---------------------------------------------------------
+
+    /// Open the specimen index from the title or the pause screen.
+    fn open_library(&mut self, from: Screen) {
+        self.library_return = if matches!(from, Screen::Paused) {
+            Screen::Paused
+        } else {
+            Screen::Title
+        };
+        // A run in flight is frozen while the index is open: this screen never
+        // calls `World::update`, exactly like the pause plate and the shelf.
+        self.map_open = false;
+        self.library_ui.card_open = false;
+        self.screen = Screen::Library;
+    }
+
+    /// Leave the index for wherever it was opened from.
+    fn close_library(&mut self) {
+        self.sfx(Sfx::UiSelect);
+        self.screen = self.library_return;
+    }
+
+    /// Drain the library's freshly discovered keys into the HUD's callout rail
+    /// (one `LIBRARY + Pillbug` pill per discovery, replacing the oldest slot
+    /// when the rail is full).
+    fn drain_library_news(&mut self) {
+        self.library_news.clear();
+        self.scores.library.drain_news(&mut self.library_news);
+        for i in 0..self.library_news.len() {
+            let key = self.library_news[i];
+            let line = format!("+ {}", library_index::name_of(key));
+            self.hud
+                .push_callout(hud::CalloutKind::Library, "LIBRARY", &line, 2.6);
+        }
+    }
+
+    /// The Library's own count of entries in its current tab.
+    fn library_entries(&self) -> usize {
+        self.library_rows
+            .iter()
+            .filter(|r| r.tab == self.library_ui.tab)
+            .count()
+    }
+
+    /// Mouse wheel on the Library: move the list window, not the selection.
+    fn scroll_library(&mut self, step: isize) {
+        let visible = self.library_shape.visible.max(1);
+        let max = self.library_shape.lines.saturating_sub(visible);
+        let next = (self.library_ui.scroll as isize + step * 3).clamp(0, max as isize);
+        self.library_ui.scroll = next as usize;
+    }
+
+    /// One frame of the Library screen. Every key and pointer action lives
+    /// here (the screen's whole input is this one function).
+    fn update_library(&mut self, click: Option<Target>) {
+        // Tab changes (Tab/E/Q, A/D or the arrows, or a click on the strip).
+        let mut tab_step = 0isize;
+        if let Some(Target::LibraryTab(i)) = click {
+            if let Some(tab) = library_index::Tab::ALL.get(i) {
+                self.library_ui.set_tab(*tab);
+                self.sfx(Sfx::UiMove);
+            }
+        }
+        if self.input.just_pressed(KeyCode::Tab) || self.input.pressed_char('e') {
+            tab_step += 1;
+        }
+        if self.input.pressed_char('q') {
+            tab_step -= 1;
+        }
+        if self.input.just_pressed(KeyCode::Right) || self.input.pressed_char('d') {
+            tab_step += 1;
+        }
+        if self.input.just_pressed(KeyCode::Left) || self.input.pressed_char('a') {
+            tab_step -= 1;
+        }
+        if tab_step != 0 {
+            let tab = self.library_ui.tab.step(tab_step);
+            self.library_ui.set_tab(tab);
+            self.sfx(Sfx::UiMove);
+        }
+
+        let entries = self.library_entries();
+        let mut step = 0isize;
+        if self.input.just_pressed(KeyCode::Up) || self.input.pressed_char('w') {
+            step -= 1;
+        }
+        if self.input.just_pressed(KeyCode::Down) || self.input.pressed_char('s') {
+            step += 1;
+        }
+        if self.input.just_pressed(KeyCode::PageUp) {
+            step -= self.library_shape.visible.max(1) as isize;
+        }
+        if self.input.just_pressed(KeyCode::PageDown) {
+            step += self.library_shape.visible.max(1) as isize;
+        }
+        if let Some(Target::LibraryRow(i)) = click {
+            self.library_ui.cursor = i.min(entries.saturating_sub(1));
+            if self.library_shape.narrow {
+                self.library_ui.card_open = true;
+            }
+            self.sfx(Sfx::UiMove);
+        }
+        if step != 0 {
+            self.library_ui.step_cursor(step, entries);
+            self.sfx(Sfx::UiMove);
+            // A stepped cursor in the narrow list re-opens nothing.
+        }
+
+        // Back: Esc leaves the card first, then the screen.
+        let back = click == Some(Target::Back)
+            || self.input.just_pressed(KeyCode::Esc)
+            || self.input.just_pressed(KeyCode::Backspace);
+        if click == Some(Target::LibraryCard) {
+            self.library_ui.card_open = false;
+            self.sfx(Sfx::UiMove);
+            return;
+        }
+        if back {
+            if self.library_ui.card_open {
+                self.library_ui.card_open = false;
+                self.sfx(Sfx::UiMove);
+            } else {
+                self.close_library();
+            }
+            return;
+        }
+        // Enter opens the card on the narrow layout; on the wide one the card
+        // is already on screen.
+        if self.input.just_pressed(KeyCode::Enter) {
+            if self.library_shape.narrow {
+                self.library_ui.card_open = true;
+                self.sfx(Sfx::UiSelect);
+            } else {
+                self.sfx(Sfx::UiSelect);
+            }
+        }
+        // Reading an entry clears its NEW mark.
+        let card_visible = !self.library_shape.narrow || self.library_ui.card_open;
+        if card_visible {
+            let cursor = self.library_ui.cursor;
+            if let Some(row) = self
+                .library_rows
+                .iter()
+                .filter(|r| r.tab == self.library_ui.tab)
+                .nth(cursor)
+            {
+                let key = row.key;
+                self.scores.library.view(key);
+            }
+        }
+    }
+
     /// Options screen: Up/Down choose a row, Left/Right change it, Enter on
     /// Back or Esc leaves. Mouse actions arrive as targets from `mouse_action`.
     fn update_options(&mut self, click: Option<Target>) {
@@ -1274,6 +1462,10 @@ impl App {
             Some(Target::Options) => {
                 self.sfx(Sfx::UiSelect);
                 self.open_options(Screen::Title);
+            }
+            Some(Target::Library) => {
+                self.sfx(Sfx::UiSelect);
+                self.open_library(Screen::Title);
             }
             Some(Target::NextSector) => self.cycle_sector(1),
             Some(Target::PreviousSector) => self.cycle_sector(-1),
@@ -1552,6 +1744,8 @@ impl App {
                 if pk == PickupKind::Heal {
                     self.heals_picked += 1;
                 }
+                // Collecting a find catalogues it.
+                self.scores.library.note_collected(pk);
             }
             let boss_hp = w.boss_hp();
             let boss_alive = boss_hp.is_some();
@@ -1591,8 +1785,20 @@ impl App {
             let s = self.sfx_frame[i];
             self.sfx(s);
         }
+        // The Library's sighting pass. Read-only over the world (no rng, no
+        // simulation writes) and gated by a per-category early-out, so a run
+        // that has met everything costs a handful of bitset tests.
+        if let Some(w) = self.world.as_ref() {
+            self.scores.library.survey(w);
+        }
+        self.drain_library_news();
         self.request_music_intensity(intensity);
         if ended {
+            // Book the loss against the nearest body (the simulation keeps no
+            // damage source; the card says so).
+            if let Some(w) = self.world.as_ref() {
+                self.scores.library.note_death(w);
+            }
             self.finalize();
             self.screen = Screen::End;
         } else if level_done {
@@ -1621,8 +1827,12 @@ impl App {
                     w.player.heal(heal);
                     self.sfx(Sfx::CacheOpen);
                 }
-                // An evolution gets its own fanfare (`Sfx::Evolve`).
-                ChestReward::Evolve { .. } => self.sfx(Sfx::Evolve),
+                // An evolution gets its own fanfare (`Sfx::Evolve`), and the
+                // chest is where the player meets it.
+                ChestReward::Evolve { kind, .. } => {
+                    self.scores.library.mark_seen(LibraryKey::Evolution(kind));
+                    self.sfx(Sfx::Evolve);
+                }
                 _ => self.sfx(Sfx::CacheOpen),
             }
         } else if std::mem::take(&mut w.pending_shop) {
@@ -2195,6 +2405,10 @@ impl App {
                 .map(|c| w.player.loadout.describe(c))
                 .collect();
             self.levelup_choices = choices;
+            for i in 0..self.levelup_choices.len() {
+                let up = self.levelup_choices[i].clone();
+                self.scores.library.note_offered(&up);
+            }
             self.levelup_idx = 0;
             self.screen = Screen::LevelUp;
         }
@@ -2249,6 +2463,11 @@ impl App {
         if click == Some(Target::Options) || self.input.pressed_char('o') {
             self.sfx(Sfx::UiSelect);
             self.open_options(Screen::Paused);
+            return;
+        }
+        if click == Some(Target::Library) || self.input.pressed_char('l') {
+            self.sfx(Sfx::UiSelect);
+            self.open_library(Screen::Paused);
             return;
         }
         if click == Some(Target::Resume)
@@ -2421,6 +2640,37 @@ impl App {
                     &mut self.hits,
                 );
                 menu::draw_story(frame, area, self.story_time, &mut self.hits);
+            }
+            Screen::Library => {
+                // The index opens over whatever the player came from: the
+                // frozen play field behind a paused run, or the title.
+                if self.library_return == Screen::Paused && self.world.is_some() {
+                    self.draw_game(frame, area);
+                } else {
+                    self.ensure_rat_art(area);
+                    menu::draw_title(
+                        frame,
+                        area,
+                        self.theme(),
+                        self.menu_idx,
+                        self.floor(),
+                        self.sector_unlocked(),
+                        &self.scores,
+                        &self.rat_art,
+                        self.dash_key(),
+                        &mut self.hits,
+                    );
+                }
+                let accent = menu::material(self.theme());
+                self.library_shape = library_ui::draw(
+                    frame,
+                    area,
+                    &self.library_rows,
+                    &self.scores.library,
+                    accent,
+                    &mut self.library_ui,
+                    &mut self.hits,
+                );
             }
             Screen::LevelIntro => self.draw_level_intro(frame, area),
             Screen::LevelComplete => self.draw_level_complete(frame, area),
@@ -4930,6 +5180,44 @@ mod tests {
                 if let Some(w) = hh.app.world.as_mut() {
                     w.damage_numbers.clear();
                 }
+                hh.frame(&[]);
+            }
+            // The Library: `library` opens on the BESTIARY with a mix of
+            // discovered and locked rows; `library-arsenal`, `library-field`,
+            // `library-floors` and `library-boss` are the other tabs and the
+            // first floor boss's card. Size with `RATRUN_DUMP_SIZE`.
+            t if t == "library" || t.starts_with("library-") => {
+                let rows = hh.app.library_rows.clone();
+                {
+                    let lib = &mut hh.app.scores.library;
+                    for (i, row) in rows.iter().enumerate() {
+                        if i % 3 != 2 {
+                            lib.mark_seen(row.key);
+                            // Weapons, passives and splices read as fully
+                            // catalogued once owned; a card capture wants the
+                            // dossier, not the "not yet carried" plate.
+                            if matches!(
+                                row.key,
+                                library_index::Key::Weapon(_)
+                                    | library_index::Key::Passive(_)
+                                    | library_index::Key::Splice(_)
+                            ) {
+                                lib.bump(row.key, library_index::Counter::Owned, 1);
+                            }
+                        }
+                    }
+                }
+                let (tab, cursor) = match t.strip_prefix("library-").unwrap_or("") {
+                    "arsenal" => (library_index::Tab::Arsenal, 1),
+                    "field" => (library_index::Tab::FieldGuide, 2),
+                    "floors" => (library_index::Tab::Floors, 0),
+                    "boss" => (library_index::Tab::Bestiary, 22),
+                    _ => (library_index::Tab::Bestiary, 0),
+                };
+                hh.app.open_library(Screen::Title);
+                hh.app.library_ui.set_tab(tab);
+                hh.app.library_ui.cursor = cursor;
+                hh.frame(&[]);
                 hh.frame(&[]);
             }
             "levelup" => {
@@ -9129,5 +9417,178 @@ mod tests {
         let mut h = Harness::new(80, 24);
         title_to_options(&mut h);
         assert!(!h.frame(&[]).contains("LIGHTING"));
+    }
+
+    // ---- The Library (specimen index) -----------------------------------
+
+    /// Open the index from the title's LIBRARY row.
+    fn open_library_from_title(h: &mut Harness) -> String {
+        h.frame(&[]);
+        h.click("LIBRARY");
+        assert_eq!(h.app.screen.name_for_test(), "Library");
+        h.frame(&[])
+    }
+
+    #[test]
+    fn the_library_opens_from_the_title_and_backs_out_to_it() {
+        let mut h = Harness::new(80, 24);
+        let text = open_library_from_title(&mut h);
+        assert!(text.contains("BESTIARY"), "no tab strip:\n{text}");
+        assert!(text.contains("LIBRARY"), "no panel title:\n{text}");
+        // Esc backs out to where the player came from.
+        h.frame(&[KeyCode::Esc]);
+        assert_eq!(h.app.screen.name_for_test(), "Title");
+    }
+
+    #[test]
+    fn the_library_opens_from_the_pause_screen_and_returns_there() {
+        for (w, hgt) in [(80u16, 24u16), (57, 20)] {
+            let mut h = Harness::new(w, hgt);
+            h.enter_playing();
+            h.frame(&[KeyCode::Esc]);
+            assert_eq!(h.app.screen.name_for_test(), "Paused");
+            // The chip is on the plate at 80x24; the `L` key works at both.
+            let text = h.frame(&[KeyCode::Char('l')]);
+            assert_eq!(
+                h.app.screen.name_for_test(),
+                "Library",
+                "{w}x{hgt} did not open the library:\n{text}"
+            );
+            h.frame(&[KeyCode::Esc]);
+            assert_eq!(h.app.screen.name_for_test(), "Paused");
+            // The run was frozen: the world did not advance while the index
+            // was open.
+            let before = h.app.world.as_ref().unwrap().elapsed;
+            h.frame(&[KeyCode::Char('l')]);
+            for _ in 0..10 {
+                h.frame(&[KeyCode::Down]);
+            }
+            assert_eq!(h.app.world.as_ref().unwrap().elapsed, before);
+        }
+    }
+
+    #[test]
+    fn the_library_navigates_by_keyboard_on_every_tab() {
+        let mut h = Harness::new(80, 24);
+        open_library_from_title(&mut h);
+        for tab in ["ARSENAL", "FIELD GUIDE", "FLOORS", "BESTIARY"] {
+            let text = h.frame(&[KeyCode::Right]);
+            assert!(
+                text.contains(&format!("[{tab}")),
+                "Right did not land on {tab}:\n{text}"
+            );
+            // Up/Down walk the list of the selected tab.
+            for _ in 0..3 {
+                h.frame(&[KeyCode::Down]);
+            }
+            for _ in 0..3 {
+                h.frame(&[KeyCode::Up]);
+            }
+        }
+        // Tab/E/Q also change tabs.
+        h.frame(&[KeyCode::Tab]);
+        assert_eq!(h.app.library_ui.tab.index(), 1);
+        h.frame(&[KeyCode::Char('q')]);
+        assert_eq!(h.app.library_ui.tab.index(), 0);
+    }
+
+    #[test]
+    fn the_library_navigates_by_mouse() {
+        let mut h = Harness::new(80, 24);
+        open_library_from_title(&mut h);
+        // Click the ARSENAL tab (unselected, so it is drawn without brackets)
+        // and then a row under it.
+        let (x, y) = h.locate("ARSENAL");
+        h.events(&[], &[(MouseEventKind::Down(MouseButton::Left), (x + 1, y))]);
+        assert_eq!(h.app.library_ui.tab.index(), 1);
+        // The second Arsenal row (Gnaw is the first): the pointer selects it.
+        let (rx, ry) = h.locate("Cheese Spray");
+        h.events(&[], &[(MouseEventKind::Down(MouseButton::Left), (rx, ry))]);
+        assert_eq!(h.app.library_ui.cursor, 1);
+    }
+
+    #[test]
+    fn a_new_discovery_is_marked_and_clears_when_viewed() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        // Spawn a pillbug in the rat's own sight bubble and tick.
+        {
+            use crate::game::enemy::EnemyKind;
+            let w = h.app.world.as_mut().unwrap();
+            let p = w.player.pos;
+            w.spawn_enemy(EnemyKind::Pillbug, p + Vec2::new(14.0, 0.0), 1.0);
+        }
+        h.frame(&[]);
+        let key = LibraryKey::Enemy(crate::game::enemy::EnemyKind::Pillbug);
+        assert!(
+            h.app.scores.library.is_seen(key),
+            "an on-screen body was not discovered"
+        );
+        assert!(
+            h.app.scores.library.is_new(key),
+            "a fresh discovery must be NEW"
+        );
+        // The HUD announced it.
+        assert!(
+            h.app
+                .hud
+                .callouts
+                .iter()
+                .any(|c| c.active && c.tag == "LIBRARY"),
+            "no LIBRARY callout"
+        );
+        // Open the index and put the cursor on the pillbug: viewing clears NEW.
+        h.app.open_library(Screen::Paused);
+        h.app.library_ui.set_tab(library_index::Tab::Bestiary);
+        let rows = h.app.library_rows.clone();
+        let idx = rows
+            .iter()
+            .filter(|r| r.tab == library_index::Tab::Bestiary)
+            .position(|r| r.key == key)
+            .expect("the pillbug row");
+        h.app.library_ui.cursor = idx;
+        h.frame(&[]);
+        assert!(
+            !h.app.scores.library.is_new(key),
+            "viewing the card must clear NEW"
+        );
+    }
+
+    #[test]
+    fn nothing_is_discovered_outside_play() {
+        let mut h = Harness::new(80, 24);
+        h.frame(&[]); // title
+        let rows = h.app.library_rows.clone();
+        let (seen, _) = h.app.scores.library.counts(&rows, library_index::Tab::Floors);
+        assert_eq!(seen, 0, "the title discovered a floor");
+        h.enter_playing();
+        // Entering the floor counts it.
+        let seen_floor = h.app.scores.library.is_seen(LibraryKey::Floor(Theme::Sewer));
+        assert!(seen_floor, "entering the Sewer did not catalog it");
+        // No discovery happens while a card or the pause plate is open: those
+        // screens never call the survey.
+        let before = h.app.scores.library.counts(&rows, library_index::Tab::Bestiary);
+        h.frame(&[KeyCode::Esc]);
+        for _ in 0..5 {
+            h.frame(&[]);
+        }
+        let after = h.app.scores.library.counts(&rows, library_index::Tab::Bestiary);
+        assert_eq!(before, after, "the paused world discovered something");
+    }
+
+    #[test]
+    fn the_discovery_never_touches_the_score_file_in_tests() {
+        // A test App is constructed with `persist: false`; the library lives in
+        // the injected `ScoreTable`, so nothing reaches the real data dir.
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        for _ in 0..30 {
+            h.frame(&[]);
+        }
+        let json = h.app.scores.to_json();
+        assert!(
+            json.contains("library"),
+            "the library must serialise with the score table"
+        );
     }
 }

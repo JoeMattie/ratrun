@@ -28,6 +28,7 @@ pub mod fog;
 pub mod gem;
 pub mod hazards;
 pub mod level;
+pub mod library;
 pub mod levelgen;
 pub mod loadout;
 pub mod nav;
