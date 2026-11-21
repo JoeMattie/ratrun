@@ -619,6 +619,29 @@ impl World {
             .map(|e| (e.hp.max(0.0), e.max_hp))
     }
 
+    /// Is a chest lying unopened on the floor?
+    ///
+    /// The HUD's one-shot chest hint (`render::hud::HudState`) asks this so a
+    /// new player learns that the crate is collected by touch. `&self` and
+    /// allocation-free, like the other HUD accessors; it early-outs on the first
+    /// chest found and is only ever asked until the hint has fired.
+    pub fn chest_on_floor(&self) -> bool {
+        self.ecs
+            .iter_entities()
+            .any(|entity| entity.get::<Chest>().is_some())
+    }
+
+    /// Distance from the rat to the nearest mouse-hole shop's face, if the
+    /// level has any (the HUD's one-shot shop hint).
+    pub fn nearest_shop_hole(&self) -> Option<f32> {
+        self.level
+            .objects
+            .shop_holes
+            .iter()
+            .map(|hole| hole.face().dist(self.player.pos))
+            .min_by(f32::total_cmp)
+    }
+
     /// Current fight phase of the living boss (`1..=3`, 1 = healthiest).
     ///
     /// The boss framework derives it from the remaining HP fraction with the
@@ -1226,7 +1249,39 @@ impl World {
         // they keep their 3×5 / 4×6 pixel size at every zoom instead of
         // blurring into mush when zoomed out.
         self.damage_numbers
-            .draw_scaled(pb, self.cam, self.zoom_scale);
+            .draw_scaled_clear_of(
+                pb,
+                self.cam,
+                self.zoom_scale,
+                // Ordinary hit digits are suppressed inside the rat's own
+                // footprint (`DAMAGE_CLEAR_RADIUS`): the irreversible decision
+                // is where to step next, so the pellet beside the rat outranks
+                // the number explaining the last hit. Kills and big ticks still
+                // print (see `DamageNumbers::draw_scaled_clear_of`).
+                Some((self.player.pos, DAMAGE_CLEAR_RADIUS)),
+            );
+
+        // Screen-space ink: hostile marks, the rat and the loot language keep a
+        // minimum on-screen size at every zoom, and are stamped after the
+        // resample so nothing averages them away. Drawn last (over the damage
+        // digits) because a pellet that kills the player outranks the number
+        // that explains the last hit (see [`crate::render::ink`]).
+        self.draw_ink(pb);
+    }
+
+    /// The last pass of the frame: [`crate::render::ink::draw`] with the view
+    /// this draw used. Render-only; no rng, no simulation state.
+    fn draw_ink(&mut self, pb: &mut PixelBuffer) {
+        let mut view = crate::render::ink::InkView {
+            ecs: &mut self.ecs,
+            level: &self.level,
+            player: &self.player,
+            cam: self.cam,
+            scale: self.zoom_scale,
+            size: (pb.w as i32, pb.h as i32),
+            elapsed: self.elapsed,
+        };
+        crate::render::ink::draw(pb, &mut view);
     }
 
     /// Ease the rendered zoom toward the setting (about
@@ -1297,9 +1352,6 @@ impl World {
         // Boss ground layer: floor telegraphs and drop shadows, after the
         // stains and before props/entities (the art's "Ground" layer).
         self.draw_boss_ground(pb, cam);
-        // Named-miniboss telegraphs share that ground layer (wave 3).
-        self.draw_miniboss_ground(pb, cam);
-
         // Wall ground layer: contact shadows and floor thresholds, under
         // everything that stands on the floor.
         self.draw_wall_layer(pb, cam, WallLayer::Ground);
@@ -1468,27 +1520,20 @@ impl World {
             }
         }
 
-        // Wave 3: a dead Wick Moth's burning fuse, on the floor under
-        // everything else (its 9 px burst is a ground hazard the rat steps out
-        // of). Culled on the wick and on the burst's own radius.
-        {
-            let mut query = self.ecs.query::<(&SpawnId, &crate::game::ecs::components::Wick)>();
-            for (_, wick) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
-                let s = self.w2s(wick.pos, cam);
-                if !on_screen(s, 12.0, viewport) {
-                    continue;
-                }
-                art_enemy::draw_wick(pb, wick, cam);
-            }
-        }
-
         // Boss bodies in the entity pass (airborne ones go over the player).
         self.draw_boss_body(pb, cam, false);
 
-        // Bullets.
+        // Friendly bullets (the rat's own). Hostile pellets are *not* drawn
+        // here: they are the thing that can kill the player, so they belong to
+        // the hostile layer at the very end of the frame (see
+        // [`Self::draw_hostile_layer`]) — above overhangs, smoke, friendly
+        // sparks and the lighting pass.
         {
             let mut query = self.ecs.query::<(&SpawnId, &Bullet)>();
             for (_, b) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                if b.faction == Faction::Enemy {
+                    continue;
+                }
                 let s = self.w2s(b.pos, cam);
                 if b.lob.is_some() {
                     // Lobbed acid: bright core plus a fading drip trail behind it.
@@ -1500,26 +1545,8 @@ impl World {
                 } else {
                     pb.plot_add(s.0, s.1, b.color);
                 }
-                // Pocket Watch (`systems::powerups`): a hostile pellet that is
-                // crawling drags a short grey-blue tail, so "the pellets are
-                // slow" is legible without reading the numbers. Three pixels
-                // behind the shot is long enough to see at 40 % travel speed
-                // (a slow pellet only moves half a pixel a frame).
-                if self.player.buffs.slow_bullets > 0.0
-                    && b.faction == Faction::Enemy
-                    && b.vel.len_sq() > 0.1
-                {
-                    let back = b.pos - b.vel.normalized() * 3.0;
-                    let tail = self.w2s(back, cam);
-                    pb.plot_add(tail.0, tail.1, (112, 122, 148));
-                    let mid = self.w2s(b.pos - b.vel.normalized() * 1.5, cam);
-                    pb.plot_add(mid.0, mid.1, (80, 88, 108));
-                }
             }
         }
-
-        // Boss-owned projectiles (blade discs, shrapnel) in the bullet pass.
-        self.draw_boss_projectiles(pb, cam);
 
         // Player rat.
         self.draw_player(pb, cam);
@@ -1543,9 +1570,79 @@ impl World {
         // Particles and shockwaves on top.
         self.particles.draw(pb, cam);
 
-        // Hantavirus pips over the particles: a status pip the player is counting
-        // down must never be covered by a particle burst. (Damage numbers are
-        // stamped in screen space by `draw`, after the resample.)
+        // Per-frame 2D lighting pass over the *world-resolution* pixels, with
+        // the camera the layers above were drawn with — so it runs here, before
+        // `draw` resamples the scene onto the screen, and lights line up with
+        // their sprites at every zoom. Floating damage numbers are text sized
+        // and belong to screen space: `draw` stamps them after the resample, so
+        // they never scale and are never darkened by the ambient.
+        self.apply_lighting(pb, cam);
+
+        // Hostile information wins the frame: pellets, telegraphs, tells and
+        // status pips are drawn **after** the lighting pass (so they are
+        // self-lit) and after every friendly effect (so a burst can never hide
+        // the thing that is about to hurt the player). Screen-space minimum
+        // sizes for the zoomed-out view live in `render::ink`.
+        self.draw_hostile_layer(pb, cam);
+    }
+
+    /// Everything that can hurt the player and every countdown attached to it,
+    /// composited last and unlit (see `WAVE3 review`, "Reading a crowded
+    /// floor"). Split out of [`Self::draw_scene`] so the layer order is a
+    /// single call site: floor/loot/actors first, lighting, then this.
+    fn draw_hostile_layer(&mut self, pb: &mut PixelBuffer, cam: Vec2) {
+        let viewport = self.viewport;
+
+        // Wave 3: a dead Wick Moth's burning fuse. Its 9 px burst is a ground
+        // hazard the rat steps out of, so the ring is a warning, not decor.
+        {
+            let mut query = self.ecs.query::<(&SpawnId, &crate::game::ecs::components::Wick)>();
+            for (_, wick) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let s = self.w2s(wick.pos, cam);
+                if !on_screen(s, 12.0, viewport) {
+                    continue;
+                }
+                art_enemy::draw_wick(pb, wick, cam);
+            }
+        }
+
+        // Enemy bullets: the same sprite as before, now over the smoke and the
+        // ambient. Pocket Watch's crawling pellet keeps its grey-blue tail so
+        // "the pellets are slow" is legible without reading the numbers.
+        {
+            let mut query = self.ecs.query::<(&SpawnId, &Bullet)>();
+            for (_, b) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                if b.faction != Faction::Enemy {
+                    continue;
+                }
+                let s = self.w2s(b.pos, cam);
+                if b.lob.is_some() {
+                    pb.filled_circle(s.0, s.1, 1, palette::scale(b.color, 1.2));
+                    let trail = self.w2s(b.prev_pos, cam);
+                    pb.plot_add(trail.0, trail.1, palette::scale(b.color, 0.5));
+                } else if b.size >= 2 {
+                    pb.filled_circle(s.0, s.1, 1, b.color);
+                } else {
+                    pb.plot_add(s.0, s.1, b.color);
+                }
+                if self.player.buffs.slow_bullets > 0.0 && b.vel.len_sq() > 0.1 {
+                    let back = b.pos - b.vel.normalized() * 3.0;
+                    let tail = self.w2s(back, cam);
+                    pb.plot_add(tail.0, tail.1, (112, 122, 148));
+                    let mid = self.w2s(b.pos - b.vel.normalized() * 1.5, cam);
+                    pb.plot_add(mid.0, mid.1, (80, 88, 108));
+                }
+            }
+        }
+
+        // Boss-owned projectiles (blade discs, shrapnel).
+        self.draw_boss_projectiles(pb, cam);
+
+        // Named-miniboss telegraphs: the tell under the body, over the floor.
+        self.draw_miniboss_ground(pb, cam);
+
+        // Hantavirus pips: a status pip the player is counting down must never
+        // be covered by a particle burst.
         {
             let mut query = self.ecs.query::<(&SpawnId, &Enemy, &Infection)>();
             for (_, e, inf) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
@@ -1556,14 +1653,6 @@ impl World {
                 art_wave3a::draw_infection_pips(pb, s, e.radius, inf.ticks_left);
             }
         }
-
-        // Per-frame 2D lighting pass over the *world-resolution* pixels, with
-        // the camera the layers above were drawn with — so it runs here, before
-        // `draw` resamples the scene onto the screen, and lights line up with
-        // their sprites at every zoom. Floating damage numbers are text sized
-        // and belong to screen space: `draw` stamps them after the resample, so
-        // they never scale and are never darkened by the ambient.
-        self.apply_lighting(pb, cam);
     }
 
     /// Render-only smoke pass; never mutates simulation state or `self.rng`.
@@ -1998,6 +2087,11 @@ enum WallLayer {
     /// Lintels that go over the entities (doors, rat-holes).
     Overhang,
 }
+
+/// World-pixel radius around the rat inside which **ordinary** hit digits are
+/// clipped, so a crowded fight cannot bury the pellets next to the player
+/// (`WAVE3 review`, punch list 5). Kill and big-hit digits are never clipped.
+const DAMAGE_CLEAR_RADIUS: f32 = 26.0;
 
 /// Extra cells to draw around the viewport: wall art casts shadows up to 4 px
 /// south/east and the overhang layer reaches a few pixels up.
@@ -2760,9 +2854,13 @@ mod zoom_tests {
         for y in 0..pb.h {
             for x in 0..pb.w {
                 let (r, g, b) = pb.pixel_at(x, y);
-                // A box-filtered 1-px gem is diluted by its 2 × 2 box, so the
-                // test asks for "purple survives", not "purple is bright".
-                if r > 40 && g < 32 && b > 40 {
+                // A box-filtered 1-px gem is diluted by its 2 × 2 box, and the
+                // ink pass then stamps the tier's diamond over it (brightened
+                // toward white), so the test asks for "purple survives" — a red
+                // and blue clearly above green — not "purple is exactly the
+                // gem's colour".
+                let (r, g, b) = (i32::from(r), i32::from(g), i32::from(b));
+                if r > 40 && b > 40 && r > g + 40 && b > g + 40 {
                     return true;
                 }
             }
@@ -2802,6 +2900,10 @@ mod zoom_tests {
         let mut w = World::new(Theme::Sewer, 5);
         let mut pb = screen();
         let mut bare = screen();
+        // A **kill** hit, which is never clipped: an ordinary tick inside
+        // `DAMAGE_CLEAR_RADIUS` is deliberately suppressed now (the pellet
+        // beside the rat outranks the number explaining the last hit), and this
+        // test is about the glyph's size, so it uses one that always prints.
         let at = w.player.pos;
 
         let mut covered = Vec::new();
@@ -2815,7 +2917,7 @@ mod zoom_tests {
                 at,
                 3.0,
                 12.0,
-                false,
+                true,
                 crate::game::particle::damage_number::DamageSource::Normal,
             );
             w.draw(&mut pb);
@@ -2878,5 +2980,150 @@ mod zoom_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod hostile_layer_tests {
+    //! **Hostile information wins the frame** (`WAVE3 review`, punch list 5).
+    //!
+    //! The enemy pellets, the wick's burst ring and the named-miniboss
+    //! telegraphs are drawn after the lighting pass and after every friendly
+    //! effect, so a smoke bank, a spark burst or a dark corner can never hide
+    //! the thing that is about to hurt the player.
+
+    use super::*;
+    use crate::game::bullet::Bullet;
+    use crate::game::ecs::components::Wick;
+    use crate::game::level::Theme;
+
+    const VIEW: (usize, usize) = (120, 120);
+
+    fn frame(w: &mut World) -> PixelBuffer {
+        let mut pb = PixelBuffer::new(VIEW.0, VIEW.1);
+        w.draw(&mut pb);
+        pb
+    }
+
+    fn lum(pb: &PixelBuffer, x: i32, y: i32) -> u32 {
+        if x < 0 || y < 0 || x as usize >= pb.w || y as usize >= pb.h {
+            return 0;
+        }
+        let (r, g, b) = pb.pixel_at(x as usize, y as usize);
+        u32::from(r) + u32::from(g) + u32::from(b)
+    }
+
+    /// An enemy pellet 60 px from the rat is **exactly the same pixels with
+    /// lighting Full, Soft and Off**: it is self-lit, not part of the shaded
+    /// scene. (Before the split it was drawn under the light pass and went
+    /// near-black in an unlit corner.)
+    #[test]
+    fn enemy_pellets_are_not_darkened_by_lighting() {
+        let mut frames = Vec::new();
+        for mode in [LightingMode::Full, LightingMode::Soft, LightingMode::Off] {
+            let mut w = World::new(Theme::Sewer, 7);
+            w.player.pos = w.level.start;
+            w.lighting = mode;
+            w.smoke_enabled = false;
+            let p = w.player.pos + Vec2::new(30.0, 0.0);
+            w.spawn_bullet(Bullet::new(
+                p,
+                Vec2::ZERO,
+                4.0,
+                Faction::Enemy,
+                (255, 130, 170),
+            ));
+            let pb = frame(&mut w);
+            let s = w.w2s(p, w.cam);
+            frames.push((s, pb));
+        }
+        let (s, full) = &frames[0];
+        let (_, soft) = &frames[1];
+        let (_, off) = &frames[2];
+        let pellet: u32 = (-1..=1)
+            .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
+            .map(|(dx, dy)| lum(off, s.0 + dx, s.1 + dy))
+            .max()
+            .unwrap_or(0);
+        assert!(pellet > 300, "the pellet is not bright even unlit: {pellet}");
+        for (name, other) in [("full", full), ("soft", soft)] {
+            // The pellet is additive over whatever floor is beneath it, so a lit
+            // floor can only make it *brighter*. Lighting must never take
+            // brightness away from it: that is what "self-lit" means.
+            assert!(
+                lum(other, s.0, s.1) >= lum(off, s.0, s.1),
+                "lighting {name} darkened the pellet: {} < {}",
+                lum(other, s.0, s.1),
+                lum(off, s.0, s.1)
+            );
+            assert!(
+                lum(other, s.0, s.1) > 400,
+                "lighting {name} left the pellet dim: {}",
+                lum(other, s.0, s.1)
+            );
+        }
+        // …and the pass really was lighting the scene: somewhere in the frame
+        // Full is darker than Off. (This proves the pellet above is not simply
+        // "unlit everywhere", which would make the assertion meaningless.)
+        let dimmed = (0..VIEW.1 as i32)
+            .step_by(3)
+            .flat_map(|y| (0..VIEW.0 as i32).step_by(3).map(move |x| (x, y)))
+            .any(|(x, y)| lum(full, x, y) + 20 < lum(off, x, y));
+        assert!(dimmed, "the ambient did not shade anything: this test proves nothing");
+    }
+
+    /// A wick's burst ring lands over a full field of particles, smoke and
+    /// overhangs: its ring pixels are still the drawn warning colour rather
+    /// than whatever the effect layer painted there.
+    #[test]
+    fn the_wick_ring_is_drawn_over_friendly_effects() {
+        let mut w = World::new(Theme::Sewer, 7);
+        w.player.pos = w.level.start;
+        w.lighting = LightingMode::Full;
+        w.smoke_enabled = true;
+        let p = w.player.pos + Vec2::new(44.0, 10.0);
+        crate::game::ecs::resources::spawn_with_id(&mut w.ecs, Wick::new(p));
+        // A friendly burst right on top of the ring: the layer order is what
+        // this test is about, so the sparks are the worst case.
+        w.particles.push_shockwave(crate::game::particle::Shockwave {
+            pos: p,
+            start_r: 2.0,
+            end_r: 20.0,
+            life: 0.2,
+            max_life: 0.2,
+            color: (255, 255, 255),
+            core: (255, 255, 255),
+            thick: 2.0,
+            additive: true,
+            arc_dir: None,
+            arc_half_angle: 0.0,
+        });
+        let pb = frame(&mut w);
+        let s = w.w2s(p, w.cam);
+        let ring = crate::game::ecs::systems::enemy_wave3::WICK_BURST_RADIUS as i32;
+        // Some pixel on the ring is a warm warning colour (r > b), not a spark
+        // white and not the shaded floor.
+        let mut found = false;
+        for dy in -ring..=ring {
+            for dx in -ring..=ring {
+                if dx * dx + dy * dy > (ring + 1) * (ring + 1) {
+                    continue;
+                }
+                let Ok((r, g, b)) = pixel(&pb, s.0 + dx, s.1 + dy) else {
+                    continue;
+                };
+                if r > 200 && g > 140 && b < 180 && r > b + 40 {
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "the wick's warning ring is buried under the effects");
+    }
+
+    fn pixel(pb: &PixelBuffer, x: i32, y: i32) -> Result<(u8, u8, u8), ()> {
+        if x < 0 || y < 0 || x as usize >= pb.w || y as usize >= pb.h {
+            return Err(());
+        }
+        Ok(pb.pixel_at(x as usize, y as usize))
     }
 }

@@ -18,7 +18,7 @@ use crate::lore;
 use crate::render::campaign::{
     campaign_pips_width, draw_campaign_pips, CampaignLevel, CampaignProgressView,
 };
-use crate::render::hud::{weapon_glyph, HEAL_MINT, TRAIL_GOLD, WARN_AMBER};
+use crate::render::hud::{weapon_glyph, HEAL_MINT, TRAIL_GOLD};
 use crate::render::palette::{self, mix, to_color, COAT, EDGE, MUTED, PLATE, TAIL, TRACK};
 use crate::scores::ScoreTable;
 
@@ -424,36 +424,49 @@ pub fn draw_title(
     );
     if r.height >= 12 {
         let wide = r.width >= 72;
+        // The controls legend is laid out as a block of lines, most important
+        // first, from the bottom up: the plate takes as many as it has rows for
+        // and never drops the first one. Every live control for the mode is
+        // named there (see `DashKey::title_legend_lines`), which is what the
+        // review asked for: the old one-liner lost the click's second job, zoom,
+        // `N`, `C` and options.
+        let lines = dash_key.title_legend_lines(r.width >= 96);
+        let room = if r.height >= 18 {
+            4
+        } else if r.height >= 17 {
+            3
+        } else if r.height >= 15 {
+            2
+        } else {
+            1
+        };
+        let mut n = lines.len().min(room);
+        while n > 1 && r.height.saturating_sub(2 + n as u16) < 8 {
+            n -= 1;
+        }
         if r.height >= 16 {
-            let rail = band(r, r.height - 4, 1);
+            let rail_row = r.height.saturating_sub(2 + n as u16);
             f.render_widget(
                 Block::new()
                     .borders(ratatui::widgets::Borders::TOP)
                     .border_style(ink(TRACK)),
-                rail,
+                band(r, rail_row, 1),
             );
             if wide {
-                f.buffer_mut()
-                    .set_string(r.x + 2, rail.y, " CONTROLS ", ink(MUTED));
-            }
-            // Volume quick keys get their own line when there is room between
-            // the rail and the control legend.
-            if r.width >= 54 {
-                center(
-                    f,
-                    r,
-                    r.height - 3,
-                    Line::from(vec![
-                        label("VOLUME   ", accent),
-                        Span::styled("[ ] music  ·  - = effects  ·  O options", ink(COAT)),
-                    ]),
+                f.buffer_mut().set_string(
+                    r.x + 2,
+                    r.y + rail_row,
+                    " CONTROLS ",
+                    ink(MUTED),
                 );
             }
         }
         // The dash key is named from the live input mode: Ctrl where the
         // terminal reports a lone modifier press, Space where it cannot (see
         // `input::DashKey`).
-        center(f, r, r.height - 2, label(dash_key.title_legend(wide), MUTED));
+        for (i, line) in lines.iter().take(n).enumerate() {
+            center(f, r, r.height - 2 - i as u16, label(line, MUTED));
+        }
         controls(
             f,
             band(r, r.height - 1, 1),
@@ -759,12 +772,135 @@ pub fn draw_pause(f: &mut Frame, area: Rect, dash_key: DashKey, hits: &mut HitMa
     }
 }
 
+/// The short-terminal pause plate: banner, clock and the **full loadout** as
+/// two half-block icon rows, then the controls legend.
+///
+/// Reached from [`draw_pause_with_run`] when the terminal is too small for the
+/// 58×18 dossier (the review's 57×20 case). It carries the same information the
+/// dossier does in the space available — weapon icons with their rank, passive
+/// icons with their stack count, an evolved weapon marked in gold — so the
+/// loadout never disappears just because the terminal is short.
+pub fn draw_pause_compact(
+    f: &mut Frame,
+    area: Rect,
+    world: &World,
+    muted: bool,
+    dash_key: DashKey,
+    hits: &mut HitMap,
+) {
+    let w = area.width.saturating_sub(2).min(56);
+    // Rows: banner, clock, rule, then two icon rows for the weapons and two for
+    // the passives, two legend lines and the controls row — 11 inner rows.
+    let h = area.height.saturating_sub(2).min(13);
+    let r = panel(f, centered_rect(w, h, area), " RUN CONTROL ", MUTED);
+    if r.height < 8 || r.width < 30 {
+        draw_pause(f, area, dash_key, hits);
+        return;
+    }
+    center(f, r, 0, Span::styled("━━━  ▌▌  PAUSED  ━━━", heavy(TAIL)));
+    let clock_text = if world.boss_time_reached() {
+        let fought = (world.elapsed - crate::game::director::BOSS_TIME).max(0.0) as u32;
+        format!("BOSS FIGHT +{:02}:{:02}", fought / 60, fought % 60)
+    } else {
+        let rem = world.time_left().max(0.0) as u32;
+        format!("{:02}:{:02} to boss  ·  Lv {}", rem / 60, rem % 60, world.player.level)
+    };
+    center(f, r, 1, label(&clock_text, COAT));
+    let rule = "─".repeat(usize::from(r.width));
+    f.render_widget(Line::styled(rule.as_str(), ink(TRACK)), band(r, 2, 1));
+
+    // Two icon rows: weapons on the first pair, passives on the second. The
+    // icon is 4×2 cells, so a slot is icon + one rank/stack cell.
+    let icon_w = crate::game::art_icons::SMALL_CELL_W;
+    let icon_h = crate::game::art_icons::SMALL_CELL_H;
+    let pitch = icon_w + 1;
+    let buf = f.buffer_mut();
+    let mut x = r.x;
+    for w in world.player.loadout.weapons.iter().take(5) {
+        if x + icon_w + 1 > r.right() {
+            break;
+        }
+        let icon = crate::game::art_icons::weapon(w.kind);
+        crate::game::art_icons::draw(buf, Rect::new(x, r.y + 4, icon_w, icon_h), icon);
+        let (rank, style) = if w.evolved {
+            ('◆', heavy(TRAIL_GOLD))
+        } else if w.is_max() {
+            ('★', heavy(TRAIL_GOLD))
+        } else {
+            let digit = char::from(b'0' + w.level.min(9));
+            (digit, ink(MUTED))
+        };
+        let mut tbuf = [0u8; 4];
+        buf.set_stringn(
+            x + icon_w,
+            r.y + 4 + icon_h - 1,
+            rank.encode_utf8(&mut tbuf),
+            1,
+            style,
+        );
+        x += pitch;
+    }
+    let mut x = r.x;
+    for &(kind, stacks) in world.player.loadout.passives.iter().take(5) {
+        if x + icon_w + 1 > r.right() {
+            break;
+        }
+        let icon = crate::game::art_icons::passive(kind);
+        crate::game::art_icons::draw(buf, Rect::new(x, r.y + 6, icon_w, icon_h), icon);
+        let capped = stacks >= kind.max_stacks();
+        let digit = char::from(b'0' + (stacks.min(9) as u8));
+        let mut tbuf = [0u8; 4];
+        buf.set_stringn(
+            x + icon_w,
+            r.y + 6 + icon_h - 1,
+            digit.encode_utf8(&mut tbuf),
+            1,
+            if capped { heavy(TRAIL_GOLD) } else { ink(COAT) },
+        );
+        x += pitch;
+    }
+
+    // Legend + controls, bottom-up: both legend lines fit, then the controls
+    // row with the mute chip (`M unmute` while muted), so the legend is never
+    // replaced by the audio state on a short terminal either.
+    let legend = dash_key.pause_legend_lines(false);
+    for (i, line) in legend.iter().take(2).enumerate() {
+        let row = r.height.saturating_sub(2 + i as u16);
+        center(f, r, row, label(line, MUTED));
+    }
+    controls(
+        f,
+        band(r, r.height.saturating_sub(1), 1),
+        hits,
+        &[
+            (" Esc resume ", Some(Target::Resume)),
+            (" ", None),
+            (" O opts ", Some(Target::Options)),
+            (" ", None),
+            (if muted { " M unmute " } else { " M mute " }, None),
+            (" ", None),
+            (" Q to menu ", Some(Target::Menu)),
+        ],
+    );
+}
+
 /// The chest card. An evolution gets the full plate: the evolved icon in its
 /// gilded frame, the chest name, the pair it took, the inscription and the new
 /// attack (design §3/§7). Everything else is a one-line rank-up or payout.
 pub fn draw_chest(f: &mut Frame, area: Rect, reward: ChestReward, hits: &mut HitMap) {
     let tall = area.height >= 19 && area.width >= 62;
-    let (w, h) = if tall { (62, 14) } else { (46, 9) };
+    // The compact card is one row taller than it used to be: the evolved
+    // attack used to be a single clipped line (the review's "compact chest text
+    // is a single clipped attack line"), and a wrapped pair of rows needs the
+    // room. A really short terminal still gets the one-liner.
+    let roomy = area.height >= 12;
+    let (w, h) = if tall {
+        (62, 14)
+    } else if roomy {
+        (46, 10)
+    } else {
+        (46, 9)
+    };
     let r = panel(f, centered_rect(w, h, area), " CHEST OPENED ", TRAIL_GOLD);
     // `panel` returns the inner rect, so the last row of it is the control row.
     let last = r.height.saturating_sub(1);
@@ -795,7 +931,18 @@ pub fn draw_chest(f: &mut Frame, area: Rect, reward: ChestReward, hits: &mut Hit
                 center(f, r, 0, Span::styled(evo.name.to_uppercase(), heavy(TRAIL_GOLD)));
                 center(f, r, 1, label(&partner, MUTED));
                 center(f, r, 2, label(&inscription, COAT));
-                center(f, r, 3, label(evo.attack, MUTED));
+                if roomy {
+                    // Two wrapped rows instead of one clipped line.
+                    f.render_widget(
+                        Paragraph::new(evo.attack)
+                            .alignment(ratatui::layout::Alignment::Center)
+                            .wrap(Wrap { trim: true })
+                            .style(ink(MUTED)),
+                        Rect::new(r.x + 1, r.y + 3, r.width.saturating_sub(2), 2),
+                    );
+                } else {
+                    center(f, r, 3, label(evo.attack, MUTED));
+                }
             }
         }
         ChestReward::WeaponLevel { kind, level } => {
@@ -1179,7 +1326,16 @@ pub fn draw_pause_with_run(
     hits: &mut HitMap,
 ) {
     if area.width < 58 || area.height < 21 {
-        draw_pause(f, area, dash_key, hits);
+        // A short terminal still gets the **loadout**: the review's compact
+        // plate dropped the inventory entirely ("The short pause plate also
+        // drops the inventory"), which left a 57×20 player with no way to see
+        // what they were carrying. Below that even the compact plate needs a
+        // bare legend.
+        if area.width >= 40 && area.height >= 14 {
+            draw_pause_compact(f, area, world, muted, dash_key, hits);
+        } else {
+            draw_pause(f, area, dash_key, hits);
+        }
         return;
     }
 
@@ -1315,7 +1471,9 @@ pub fn draw_pause_with_run(
                         heavy(TRAIL_GOLD),
                     );
                 } else if w.kind.is_active() {
-                    let tag = if w.timer <= 0.0 { "READY" } else { "ACTIVE" };
+                    // Name the key as well as the state: the review found the
+                    // pause plate omitting the active-weapon trigger entirely.
+                    let tag = if w.timer <= 0.0 { "SPACE READY" } else { "LOCKED" };
                     buf.set_stringn(
                         px_end + 1,
                         y + 1,
@@ -1414,37 +1572,37 @@ pub fn draw_pause_with_run(
         }
     }
 
-    let mute_label = if muted {
-        "M unmute  ·  audio muted"
-    } else {
-        dash_key.pause_legend()
-    };
-    center(
-        f,
-        r,
-        r.height.saturating_sub(3),
-        label(mute_label, if muted { WARN_AMBER } else { MUTED }),
-    );
-    // Volume quick keys, on their own line above the controls when the panel
-    // is tall enough to carry it.
-    if r.height >= 16 {
-        center(
-            f,
-            r,
-            r.height.saturating_sub(2),
-            label("[ ] music  ·  - = effects  ·  O options", MUTED),
-        );
+    // The controls legend stays on screen **while muted**: a muted player is
+    // exactly the one who needs to find `M`, the volume keys and the active
+    // trigger again. The audio state is a chip on the controls row instead of a
+    // replacement for the whole legend (the review's "pause omits the active
+    // trigger … mute replaces its controls legend with audio status").
+    let legend = dash_key.pause_legend_lines(icon_dossier);
+    let rows = if r.height >= 16 { 2 } else { 1 };
+    for (i, line) in legend.iter().take(rows).enumerate() {
+        let row = r.height.saturating_sub(2 + i as u16);
+        center(f, r, row, label(line, MUTED));
     }
+    let mute_chip = if muted { " M unmute " } else { " M mute " };
+    // The clickable chip says just `Resume`: the legend above already names
+    // `Esc/P`, and a duplicated label makes the chip's hit target ambiguous.
+    let (resume, opts, quit) = if icon_dossier {
+        (" Resume ", " O options ", " Q to menu ")
+    } else {
+        (" Resume ", " O opts ", " Q menu ")
+    };
     controls(
         f,
         band(r, r.height.saturating_sub(1), 1),
         hits,
         &[
-            (" Esc/P resume ", Some(Target::Resume)),
-            ("   ", None),
-            (" O options ", Some(Target::Options)),
-            ("   ", None),
-            (" Q to menu ", Some(Target::Menu)),
+            (resume, Some(Target::Resume)),
+            (" ", None),
+            (opts, Some(Target::Options)),
+            (" ", None),
+            (mute_chip, None),
+            (" ", None),
+            (quit, Some(Target::Menu)),
         ],
     );
 }
@@ -1784,8 +1942,15 @@ mod tests {
         let wt = screen_text(&wide);
         assert!(wt.contains("ARSENAL"), "dossier arsenal missing");
         assert!(wt.contains("BIOMETRICS"), "dossier biometrics missing");
-        assert!(wt.contains("audio muted"), "mute indicator missing");
-        assert!(wt.contains("Esc/P resume"));
+        // The mute state is a chip on the controls row, not a replacement for
+        // the legend.
+        assert!(wt.contains("M unmute"), "the way back out of mute is missing");
+        assert!(
+            wt.contains("WASD/mouse move"),
+            "the controls legend vanished while muted"
+        );
+        assert!(wt.contains("[ ] music"), "the volume keys vanished while muted");
+        assert!(wt.contains("Esc/P unpause"));
 
         // Compact fallback must not panic and keeps controls.
         hits.clear();
@@ -1795,7 +1960,9 @@ mod tests {
             .unwrap();
         let ct = screen_text(&compact);
         assert!(ct.contains("PAUSED"));
-        assert!(ct.contains("Esc/P resume"));
+        // The short plate names the same controls in its own wording.
+        assert!(ct.contains("Esc/P unpause"));
+        assert!(ct.contains("M mute"));
     }
 
     /// The pause rail counts down to the boss and, once the boss fight is on,
@@ -1980,6 +2147,77 @@ mod tests {
             assert!(text.contains("ARSENAL"));
             assert!(text.contains("PASSIVES"));
             assert!(text.contains("BIOMETRICS"));
+        }
+    }
+
+    /// The review's short-pause complaint: "the short pause plate also drops the
+    /// inventory". The compact plate now carries the full loadout as icon rows,
+    /// and the controls legend survives every size — muted or not.
+    #[test]
+    fn the_short_pause_plate_keeps_the_loadout_and_the_legend() {
+        let mut w = World::new(Theme::Sewer, 7);
+        for kind in [
+            WeaponKind::CheeseSpray,
+            WeaponKind::TailThrash,
+            WeaponKind::AcidRain,
+            WeaponKind::LaserEyes,
+        ] {
+            w.player.loadout.apply(&Upgrade::NewWeapon(kind));
+        }
+        for pk in [
+            PassiveKind::MaxHp,
+            PassiveKind::Armor,
+            PassiveKind::SpringHeel,
+        ] {
+            w.player.loadout.apply(&Upgrade::Passive(pk));
+        }
+        for (tw, th) in [(57u16, 20u16), (50, 16)] {
+            for muted in [false, true] {
+                let mut hits = HitMap::default();
+                let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();
+                terminal
+                    .draw(|f| {
+                        draw_pause_with_run(
+                            f,
+                            f.area(),
+                            &w,
+                            muted,
+                            crate::input::DashKey::Ctrl,
+                            &mut hits,
+                        )
+                    })
+                    .unwrap();
+                let text = screen_text(&terminal);
+                let half_blocks = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .filter(|c| matches!(c.symbol(), "▀" | "▄"))
+                    .count();
+                assert!(
+                    half_blocks >= 56,
+                    "{tw}x{th} muted={muted}: the compact plate lost the loadout \
+                     ({half_blocks} icon cells): {text}"
+                );
+                assert!(text.contains("PAUSED"), "{tw}x{th}: no banner");
+                assert!(
+                    text.contains("WASD") && text.contains("dash") && text.contains("actives"),
+                    "{tw}x{th} muted={muted}: the controls legend is gone: {text}"
+                );
+                assert!(
+                    text.contains("click dash"),
+                    "{tw}x{th} muted={muted}: the click's two jobs are not named: {text}"
+                );
+                if muted {
+                    assert!(
+                        text.contains("M unmute"),
+                        "{tw}x{th}: the mute chip does not offer the way back: {text}"
+                    );
+                } else {
+                    assert!(text.contains("M mute"), "{tw}x{th}: no mute key: {text}");
+                }
+            }
         }
     }
 }

@@ -362,12 +362,41 @@ impl DamageNumbers {
     /// are text-sized read-outs, not world sprites, so a zoomed-out frame keeps
     /// its damage numbers legible instead of box-filtering them into mush.
     pub fn draw_scaled(&self, pb: &mut PixelBuffer, cam: Vec2, scale: Vec2) {
+        self.draw_scaled_clear_of(pb, cam, scale, None);
+    }
+
+    /// [`draw_scaled`](Self::draw_scaled), but ordinary hit digits whose centre
+    /// is inside `focus` (the rat, in world pixels) are clipped.
+    ///
+    /// The review's crowded-floor capture is a wall of orange digits sitting
+    /// exactly on the rat, hiding the pellets that are about to hit it: "clip
+    /// or suppress ordinary hit digits inside the immediate warning/rat
+    /// footprint. Keep clipped health or boss-critical damage feedback." So a
+    /// kill, a big tick and a Nuke always print; a routine 3-damage tick beside
+    /// the rat does not (it still prints from the *body* it hit, which is
+    /// where the read-out belongs anyway, and every digit further out stays).
+    pub fn draw_scaled_clear_of(
+        &self,
+        pb: &mut PixelBuffer,
+        cam: Vec2,
+        scale: Vec2,
+        focus: Option<(Vec2, f32)>,
+    ) {
         if pb.w == 0 || pb.h == 0 || self.items.is_empty() {
             return;
         }
         let (sx, sy) = (scale.x.max(0.01), scale.y.max(0.01));
         let bw = pb.w as i32;
         let bh = pb.h as i32;
+        // The clear radius is a *world* radius converted to the screen grid, so
+        // it covers the same patch of floor at every zoom.
+        let clear = focus.map(|(p, r)| {
+            (
+                ((p.x - cam.x) / sx).round() as i32,
+                ((p.y - cam.y) / sy).round() as i32,
+                (r / sx.max(sy)).round().max(4.0) as i32,
+            )
+        });
 
         // Draw normal hits first, then big/kill hits on top so big moments
         // never get buried under small ticks.
@@ -385,6 +414,17 @@ impl DamageNumbers {
                 let cy = ((it.pos.y - cam.y) / sy).round() as i32 - (it.pop * 1.6).round() as i32;
                 if cx < -18 || cx > bw + 18 || cy < -10 || cy > bh + 10 {
                     continue;
+                }
+                // Ordinary ticks inside the rat's own footprint are the noise
+                // the review photographed. Kills, big ticks and Nukes survive:
+                // the player still sees what a big hit did.
+                if let Some((fx, fy, fr)) = clear {
+                    if !high {
+                        let (dx, dy) = (cx - fx, cy - fy);
+                        if dx * dx + dy * dy <= fr * fr {
+                            continue;
+                        }
+                    }
                 }
 
                 let age_frac = 1.0 - (it.life / it.max_life.max(0.01)).clamp(0.0, 1.0);
