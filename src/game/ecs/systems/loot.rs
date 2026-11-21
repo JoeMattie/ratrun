@@ -138,7 +138,7 @@ fn reap_dead(
     );
     dead.sort_unstable_by_key(|&(id, _)| id);
 
-    for &(_, entity) in dead.iter() {
+    for &(id, entity) in dead.iter() {
         let Ok((_, _, e)) = enemies.get(entity) else {
             continue;
         };
@@ -183,16 +183,12 @@ fn reap_dead(
             };
             commands.spawn((pickup, next_id.take()));
         }
-        // Use the opposite end of the pickup roll for gold. XP value gives
-        // rarer enemy kinds a better chance with no additional RNG draw.
-        let gold = if e.kind == EnemyKind::Boss {
-            20
-        } else if e.elite {
-            5
-        } else {
-            let chance = (1 + e.kind.xp().min(11)) as f32 * 0.01;
-            u32::from(loot_roll >= 1.0 - chance)
-        };
+        // Gold: the design's chance x value table (`shop::gold_for`), rolled
+        // from a **gold-only** seeded stream keyed by the floor seed and the
+        // victim's `SpawnId` — never from the simulation's rng, so adding gold
+        // cannot shift the pickup roll above (one coin per eligible kill,
+        // carrying its whole value).
+        let gold = crate::game::shop::gold_for(level.seed, id, e.kind, e.elite);
         if gold > 0 {
             commands.spawn((Gold::new(e.pos, gold), next_id.take()));
         }
@@ -292,9 +288,11 @@ pub fn gems_system(
     mut rng: ResMut<RngRes>,
     mut particles: ResMut<Particles>,
     mut sfx: ResMut<SfxQueue>,
-    // Wave 3: Second Scent scales gem XP and banks the fraction
-    // (`resources::XpBank`); with no stacks the multiplier is 1.0 and the bank
-    // stays empty, so the numbers are exactly the legacy ones.
+    // Wave 3: the one gem-XP bank. Second Scent (a passive stat) and
+    // Blackboard Belly (a gene splice) multiply together, and the combined
+    // fraction is banked once (`resources::XpBank`); with neither the
+    // multiplier is exactly 1.0 and the bank stays empty, so the numbers are
+    // the legacy ones.
     mut xp_bank: ResMut<XpBank>,
     mut gems: Query<(Entity, &SpawnId, &mut Gem)>,
     mut ordered: Local<Vec<(u64, Entity)>>,
@@ -302,7 +300,10 @@ pub fn gems_system(
     let dt = input.dt;
     let ppos = player.pos;
     let magnet = player.loadout.stats.magnet;
-    let xp_mult = player.loadout.stats.xp_mult;
+    // Splice multipliers apply after passive stats (`WAVE3_DESIGN.md` §6):
+    // four stacks of Second Scent and the splice are x1.4 * x1.25 = x1.75.
+    let xp_mult =
+        player.loadout.stats.xp_mult * crate::game::shop::gem_xp_mult(&player.loadout.splices);
     let mut gained = 0u32;
     let collect_r = PLAYER_RADIUS + 3.0;
 
@@ -343,16 +344,18 @@ pub fn gems_system(
         }
     }
     if gained > 0 {
-        let p = player.pos;
-        // Neon hook: replaces the 4-particle inline gem burst.
-        vfx::emit_gem_collect(&mut particles, &mut rng.0, p, gained);
-        sfx.0.push(Sfx::Gem);
-        // w3-weapons-b: Second Scent (identity without it, see `XpBank`).
-        let gained = if xp_mult > 1.0 {
+        // Second Scent x Blackboard Belly, banked once: the fraction carries
+        // to the next collection, so a 1 XP gem still pays its share in the
+        // end (identity without either, see `XpBank`).
+        let gained = if xp_mult != 1.0 {
             xp_bank.grant(gained, xp_mult)
         } else {
             gained
         };
+        let p = player.pos;
+        // Neon hook: replaces the 4-particle inline gem burst.
+        vfx::emit_gem_collect(&mut particles, &mut rng.0, p, gained);
+        sfx.0.push(Sfx::Gem);
         let ups = player.add_xp(gained);
         if ups > 0 {
             // Neon hook: triumphant level-up burst, before the sting.
@@ -377,6 +380,9 @@ pub fn treasure_system(
     let dt = input.dt;
     let ppos = player.pos;
     let magnet = player.loadout.stats.magnet;
+    // Gene splices: Hoard Gland pays +50% per coin. With no splice the
+    // multiplier is exactly 1.0 and every value passes through unchanged.
+    let coin_mult = crate::game::shop::coin_mult(&player.loadout.splices);
     let coin_radius = PLAYER_RADIUS + 3.0;
     let chest_radius = PLAYER_RADIUS + 4.0;
     let mut gained = 0u32;
@@ -400,7 +406,7 @@ pub fn treasure_system(
             }
             coin.pos += vel * dt;
             if coin.pos.dist_sq(ppos) < coin_radius * coin_radius {
-                gained = gained.saturating_add(coin.value);
+                gained = gained.saturating_add(crate::game::shop::scaled(coin.value, coin_mult));
                 commands.entity(entity).despawn();
             }
         } else if let Ok((_, _, chest)) = chests.get(entity) {
@@ -469,7 +475,9 @@ pub fn pickups_system(
         last_pickups.0.push(k);
         match k {
             PickupKind::Heal => {
-                let h = player.max_hp() * 0.35;
+                let h = player.max_hp()
+                    * 0.35
+                    * crate::game::shop::heal_mult(&player.loadout.splices);
                 player.heal(h);
                 // Neon hooks: heal burst + its own sting (was `Sfx::Pickup`).
                 let p = player.pos;
@@ -1157,7 +1165,48 @@ mod tests {
         let mut gold = w.ecs.query::<(&SpawnId, &Gold)>();
         let drops: Vec<_> = gold.iter(&w.ecs).sort_by_key::<&SpawnId, _>(|id| id.0)
             .map(|(_, coin)| coin.value).collect();
-        assert_eq!(drops, [5, 20]);
+        // Elite 5, full boss 30 (`WAVE3_DESIGN` §6's table), in SpawnId order.
+        assert_eq!(drops, [crate::game::shop::ELITE_GOLD, crate::game::shop::BOSS_GOLD]);
+    }
+
+    /// One gem-XP bank for both bonuses: Second Scent (a passive) and
+    /// Blackboard Belly (a splice) stack as a product, and the fraction is
+    /// banked once, so nothing is lost to rounding and nothing is paid twice.
+    #[test]
+    fn second_scent_and_blackboard_belly_share_one_xp_bank() {
+        use crate::game::loadout::{PassiveKind, Upgrade};
+        use crate::game::shop::SpliceKind;
+        let collect = |stacks: u32, belly: bool, gems: u32| {
+            let mut w = World::new(Theme::Sewer, 51);
+            w.clear_enemies();
+            w.player.xp_to_next = 1_000_000;
+            for _ in 0..stacks {
+                w.player.loadout.apply(&Upgrade::Passive(PassiveKind::SecondScent));
+            }
+            if belly {
+                w.player.loadout.splices.push(SpliceKind::BlackboardBelly);
+                w.player.loadout.rebuild_stats();
+            }
+            for _ in 0..gems {
+                let p = w.player.pos;
+                w.spawn_gem(Gem::new(p, 1));
+                w.begin_tick(DT, Vec2::ZERO, false);
+                w.ecs.run_system_cached(gems_system).expect("gems run");
+                w.end_tick();
+            }
+            (w.player.xp, w.ecs.resource::<XpBank>().0)
+        };
+        assert_eq!(collect(0, false, 40), (40, 0.0), "no bonus: identity, bank untouched");
+        assert_eq!(collect(4, false, 40).0, 56, "Second Scent alone: x1.4");
+        assert_eq!(collect(0, true, 40).0, 50, "Blackboard Belly alone: x1.25");
+        // Together: x1.4 * x1.25 = x1.75, exactly, over forty 1-XP gems.
+        let (xp, bank) = collect(4, true, 40);
+        assert_eq!(xp, 70, "the two bonuses multiply");
+        assert!(bank < 1.0, "at most a fraction is ever held back: {bank}");
+        // The fraction really carries: 3 gems at x1.75 are 5.25 -> 5 paid.
+        let (xp, bank) = collect(4, true, 3);
+        assert_eq!(xp, 5);
+        assert!((bank - 0.25).abs() < 1e-3, "banked {bank}");
     }
 
     #[test]

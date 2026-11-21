@@ -113,11 +113,15 @@ pub enum Sfx {
     FleaHop,
     WickBurst,
     Crossbar,
+    // The mouse-hole gene-splice shop.
+    ShopEnter,
+    Purchase,
+    Denied,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 75] = [
+    pub const ALL: [Sfx; 78] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -204,6 +208,10 @@ impl Sfx {
         Sfx::FleaHop,
         Sfx::WickBurst,
         Sfx::Crossbar,
+        // The mouse-hole gene-splice shop.
+        Sfx::ShopEnter,
+        Sfx::Purchase,
+        Sfx::Denied,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -284,6 +292,9 @@ impl Sfx {
             Sfx::FleaHop => "FLEA_HOP",
             Sfx::WickBurst => "WICK_BURST",
             Sfx::Crossbar => "CROSSBAR",
+            Sfx::ShopEnter => "SHOP_ENTER",
+            Sfx::Purchase => "PURCHASE",
+            Sfx::Denied => "DENIED",
         }
     }
 
@@ -364,6 +375,9 @@ impl Sfx {
             | Sfx::DashDenied
             | Sfx::Evolve => 1,
             Sfx::Gold => 2,
+            Sfx::ShopEnter => 2,
+            Sfx::Purchase => 2,
+            Sfx::Denied => 2,
         }
     }
 
@@ -441,6 +455,7 @@ impl Sfx {
             Sfx::DashReady | Sfx::DashDenied => 0,
             // Wave 3 enemy tells: quiet by design.
             Sfx::Warn | Sfx::FleaHop => 0,
+            Sfx::ShopEnter | Sfx::Purchase | Sfx::Denied => 1,
         }
     }
 
@@ -5741,6 +5756,83 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             });
             m.add_short_tail(0.10, 3200.0);
             m.finish(0.50, 1.2, 2.4, 28.0)
+        }
+        // The mouse-hole shop: the spoon lifting off the wall (a wooden creak
+        // and a metal tink), a completed purchase (two clean rising coins) and
+        // a refusal (one flat wet thud).
+        Sfx::ShopEnter => {
+            let mut m = MixBuf::new(0.30);
+            let p = [1.0, 0.94][v];
+            // Wooden scrape: a low, short, band-passed noise burst.
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.12,
+                pink: true,
+                gain: 0.24,
+                attack_s: 0.004,
+                decay_pow: 2.0,
+                filter: FilterMode::BandPass,
+                fc0: 520.0 * p,
+                fc1: 300.0 * p,
+                q: 1.4,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // The bent spoon's metal settling.
+            for (start_s, f, gain) in [(0.05, 1450.0, 0.20), (0.11, 2180.0, 0.14)] {
+                m.add_osc(OscLayer {
+                    start_s,
+                    dur_s: 0.16,
+                    f0: f * p,
+                    f1: f * p * 0.98,
+                    wave: Wave::Triangle,
+                    gain,
+                    attack_s: 0.002,
+                    decay_pow: 2.6,
+                    ..Default::default()
+                });
+            }
+            m.add_short_tail(0.10, 4200.0);
+            m.finish(0.42, 1.1, 2.2, 14.0)
+        }
+        Sfx::Purchase => {
+            let mut m = MixBuf::new(0.16);
+            let pitch = [1.0, 1.04][v];
+            for (start_s, f, gain) in [(0.0, 1046.5, 0.34), (0.055, 1568.0, 0.38)] {
+                m.add_osc(OscLayer {
+                    start_s,
+                    dur_s: 0.08,
+                    f0: f * pitch,
+                    f1: f * pitch,
+                    wave: Wave::Sine,
+                    gain,
+                    attack_s: 0.0015,
+                    decay_pow: 2.0,
+                    ..Default::default()
+                });
+            }
+            m.finish(0.42, 1.0, 2.0, 10.0)
+        }
+        Sfx::Denied => {
+            let mut m = MixBuf::new(0.12);
+            let p = [1.0, 0.92][v];
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.10,
+                f0: 190.0 * p,
+                f1: 96.0 * p,
+                pitch_pow: 0.7,
+                wave: Wave::Pulse(0.42),
+                gain: 0.26,
+                attack_s: 0.001,
+                decay_pow: 2.4,
+                filter: FilterMode::LowPass,
+                fc0: 900.0,
+                fc1: 380.0,
+                q: 1.1,
+                ..Default::default()
+            });
+            m.finish(0.34, 0.9, 2.0, 8.0)
         }
     }
 }

@@ -490,6 +490,50 @@ pub struct RatHoleRecord {
     pub approach: Cardinal,
 }
 
+/// What a **mouse-hole shop** is for (the two placement roles the design
+/// asks for).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShopHoleRole {
+    /// The first hole: 16–40 walking cells from the spawn, on the face of a
+    /// wall that looks onto a fork on the way to an ordinary room.
+    #[default]
+    Fork,
+    /// The second hole: on a different approach toward the boss arena.
+    Approach,
+}
+
+/// One mouse-hole shop in a structural wall face (`WAVE3_DESIGN.md` §6).
+///
+/// A shop hole is **carved into a wall cell**: the cell stays solid, so the rat
+/// and the horde never walk into it (neither can get stuck on it) and the map's
+/// passability is unchanged. The rat touches the face from the public floor and
+/// the shop opens over the paused world.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShopHole {
+    /// Index in [`LevelObjects::shop_holes`] (the shelf's seed key).
+    pub index: usize,
+    /// The wall cell the hole is cut into.
+    pub cell: (i32, i32),
+    /// Centre of the hole in world pixels (the wall cell's centre).
+    pub pos: Vec2,
+    /// Unit direction from the wall cell into the public floor: the face the
+    /// rat walks up to and the direction the art's spoon points.
+    pub facing: Vec2,
+    /// The same direction as a cardinal (the wall art's convention).
+    pub approach: Cardinal,
+    /// The floor cell in front of the face (the threshold's cell).
+    pub mouth: (i32, i32),
+    /// Why the generator placed it where it did.
+    pub role: ShopHoleRole,
+}
+
+impl ShopHole {
+    /// The threshold point the rat touches: the wall face, in world pixels.
+    pub fn face(&self) -> Vec2 {
+        self.pos + self.facing * (crate::game::collision::TILE_F * 0.5)
+    }
+}
+
 /// The generator's record for one trap: what it was placed for and which way
 /// the routes arrive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -521,6 +565,10 @@ pub struct LevelObjects {
     pub mousetrap_records: Vec<TrapRecord>,
     /// Generator record for each entry of [`Self::rat_holes`], same index.
     pub rat_hole_records: Vec<RatHoleRecord>,
+    /// The two mouse-hole shops, in placement order (index 0 is the fork
+    /// hole, index 1 the boss-approach one). The shelf's seed keys on the
+    /// index, so a hole's stock is stable across a visit.
+    pub shop_holes: Vec<ShopHole>,
 }
 
 impl LevelObjects {

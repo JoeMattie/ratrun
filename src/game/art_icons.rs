@@ -822,6 +822,28 @@ pub fn passive(kind: PassiveKind) -> &'static Icon {
     }
 }
 
+/// Look up the icon for a gene splice (`game::shop::SpliceKind`).
+///
+/// The ten splices have no art of their own yet, so each borrows the authored
+/// icon of the stat it sells (a placeholder the wave-2 art pass replaces); the
+/// mapping is stable so a splice keeps one silhouette on the shelf and in the
+/// HUD.
+pub fn splice(kind: crate::game::shop::SpliceKind) -> &'static Icon {
+    use crate::game::shop::SpliceKind;
+    match kind {
+        SpliceKind::GlassIncisors => &DAMAGE,
+        SpliceKind::BoilerHeart => &REGEN,
+        SpliceKind::HollowBones => &MOVE_SPEED,
+        SpliceKind::DoubleLid => &DASH_COOLDOWN,
+        SpliceKind::HoardGland => &GOLD_COIN,
+        SpliceKind::CopperNerves => &DASH_COOLDOWN,
+        SpliceKind::NightShift => &FIRE_RATE,
+        SpliceKind::BlackboardBelly => &MAGNET,
+        SpliceKind::BallastSac => &ARMOR,
+        SpliceKind::LongFingers => &MAGNET,
+    }
+}
+
 /// The neutral fallback icon for not-yet-authored items.
 #[inline]
 pub const fn placeholder() -> &'static Icon {

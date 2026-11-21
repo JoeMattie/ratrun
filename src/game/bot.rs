@@ -382,6 +382,9 @@ pub struct Bot {
     pickups: Vec<(Vec2, PickupKind)>,
     /// Level the policy was reset for (keeps goal state per level).
     level: usize,
+    /// Seconds before the rat may set off to another mouse-hole shop (a visit
+    /// should not turn into a loop between two holes).
+    shop_cd: f32,
     /// Boss seen this level, for the counter rules.
     boss_pos: Option<Vec2>,
     boss_kind: Option<crate::game::ecs::systems::boss::BossKind>,
@@ -407,6 +410,7 @@ impl Bot {
             gems: Vec::with_capacity(64),
             pickups: Vec::with_capacity(8),
             level: 0,
+            shop_cd: 0.0,
             boss_pos: None,
             boss_kind: None,
             decisions: 0,
@@ -616,6 +620,71 @@ impl Bot {
             }
         }
         best
+    }
+
+    /// Visit the open mouse-hole shop: buy what is worth buying, then leave.
+    ///
+    /// The bot never stalls on the shelf — every branch ends in
+    /// [`World::leave_shop`] — and it buys in a fixed order, so a seeded run
+    /// stays deterministic. What it wants, in order:
+    ///
+    /// 1. a **Stitch** when it is under two thirds health (the heal that gets it
+    ///    through the next fight);
+    /// 2. the first affordable splice on the shelf while a socket is free,
+    ///    skipping a max-HP bargain when the rat is hurt and skipping a
+    ///    Blandboard Belly style healing cut when it has no healing to cut.
+    ///
+    /// Returns the number of purchases (tests read it).
+    pub fn shop_visit(&mut self, w: &mut World) -> u32 {
+        if !w.pending_shop || w.finished() {
+            return 0;
+        }
+        let hole = w.pending_shop_hole;
+        w.open_shop(hole);
+        let mut bought = 0u32;
+        for _ in 0..4 {
+            let Some(item) = self.shop_choice(w, hole) else {
+                break;
+            };
+            match crate::game::shop::buy(w, hole, item) {
+                crate::game::shop::Purchase::Bought { .. } => bought += 1,
+                crate::game::shop::Purchase::Denied(_) => break,
+            }
+        }
+        w.leave_shop();
+        self.shop_cd = SHOP_COOLDOWN_SECS;
+        bought
+    }
+
+    /// The one thing the bot would buy next at `hole`, if anything.
+    fn shop_choice(&self, w: &World, hole: usize) -> Option<crate::game::shop::ShopItem> {
+        use crate::game::shop::{self, Deny, ShopItem};
+        let stock = w.shop.get(hole)?;
+        let hp_frac = (w.player.hp / w.player.max_hp().max(1.0)).clamp(0.0, 1.0);
+        if hp_frac < 0.66 && shop::deny_reason(w, hole, ShopItem::Stitch).is_none() {
+            return Some(ShopItem::Stitch);
+        }
+        if w.player.loadout.splices.len() >= shop::MAX_SPLICES {
+            return None;
+        }
+        for slot in 0..shop::STOCK_SIZE {
+            let Some(kind) = stock.slot(slot) else {
+                continue;
+            };
+            if shop::deny_reason(w, hole, ShopItem::Splice(slot)).is_some() {
+                continue;
+            }
+            // A max-HP bargain on a hurt rat, or a healing cut with nothing to
+            // heal, is a bad trade: skip it and look at the next hook.
+            let cuts_hp = kind == shop::SpliceKind::GlassIncisors
+                || kind == shop::SpliceKind::LongFingers;
+            if cuts_hp && hp_frac < 0.6 {
+                continue;
+            }
+            let _ = Deny::Gold;
+            return Some(ShopItem::Splice(slot));
+        }
+        None
     }
 
     /// Pick up to `KEEP_COUNT` entries to carry into the next level, by the
@@ -1355,6 +1424,22 @@ impl Bot {
             return;
         }
 
+        // A mouse-hole shop the purse can actually use pulls the leg: walking
+        // past a shelf the build could buy from is leaving gold on the floor.
+        // Never during a boss fight (the orbit above owns that) and never twice
+        // in a row off the same visit.
+        if self.shop_cd <= 0.0 {
+            if let Some(face) = w.shop_goal_point() {
+                if p.dist(face) < SHOP_SEEK_RADIUS {
+                    self.goal = face;
+                    self.goal_timer = 1.4;
+                    return;
+                }
+            }
+        } else {
+            self.shop_cd = (self.shop_cd - dt.max(0.0)).max(0.0);
+        }
+
         // Otherwise run a long leg toward open ground away from the crowd.
         // Waypoints are far enough that the rat keeps a sustained heading
         // (kiting laps), not a 110 px circle that walks straight back into
@@ -1434,6 +1519,11 @@ impl Bot {
         }
     }
 }
+
+/// How far the bot will walk to a mouse-hole shop the purse can use.
+const SHOP_SEEK_RADIUS: f32 = 320.0;
+/// Seconds after a visit before the next shop leg may be planned.
+const SHOP_COOLDOWN_SECS: f32 = 9.0;
 
 /// What the boss counter wants the rat to do right now.
 enum BossCounter {
@@ -1861,6 +1951,64 @@ mod tests {
         let mut bot = Bot::new(skill, seed);
         bot.on_new_level(0);
         bot
+    }
+
+    /// Gold in the purse and a shelf within reach: the bot's waypoint moves to
+    /// the hole's face (it walks to the shop instead of kiting past it).
+    #[test]
+    fn the_bot_walks_to_a_shop_it_can_afford() {
+        let mut w = World::new(Theme::Sewer, 11);
+        w.gold = 200;
+        let hole = w.level.objects.shop_holes[0];
+        let face = hole.face();
+        // A stride off the face: the threshold has not fired, but the hole is
+        // in reach of the shop seek.
+        let side = Vec2::new(-hole.facing.y, hole.facing.x);
+        w.player.pos = face + hole.facing * 120.0 + side * 40.0;
+        let mut bot = seeded_bot(Skill::Expert, 3);
+        let _ = bot.decide(&w, 1.0 / 60.0);
+        let (goal, _) = bot.debug_goal();
+        assert!(
+            goal.dist(face) < 1.5,
+            "the waypoint is the hole's face ({goal:?} vs {face:?})"
+        );
+
+        // No gold: no shop leg, the rat goes back to kiting open floor.
+        w.gold = 0;
+        let mut bot = seeded_bot(Skill::Expert, 3);
+        let _ = bot.decide(&w, 1.0 / 60.0);
+        let (goal, _) = bot.debug_goal();
+        assert!(goal.dist(face) > 1.5, "a broke rat does not detour");
+    }
+
+    /// The bot buys at the open shelf and leaves it: it never stalls, and it
+    /// comes back off the cooldown rather than pacing between two holes.
+    #[test]
+    fn the_bot_buys_at_the_shelf_and_leaves_it() {
+        let mut w = World::new(Theme::Sewer, 12);
+        w.gold = 300;
+        w.player.hp = w.player.max_hp() * 0.4;
+        // The threshold system's contract: the flag plus the hole index.
+        w.pending_shop = true;
+        w.pending_shop_hole = 0;
+        let mut bot = seeded_bot(Skill::Expert, 4);
+        let bought = bot.shop_visit(&mut w);
+        assert!(bought > 0, "a rich, hurt rat buys something");
+        assert!(!w.pending_shop, "the bot always leaves the shelf");
+        assert_eq!(
+            w.player.loadout.splices.len(),
+            bought.min(crate::game::shop::MAX_SPLICES as u32) as usize,
+            "it spliced something in"
+        );
+        // A second visit inside the cooldown does not plan another leg.
+        let hole = w.level.objects.shop_holes[0];
+        w.player.pos = hole.face() + hole.facing * 60.0;
+        let _ = bot.decide(&w, 1.0 / 60.0);
+        let (goal, _) = bot.debug_goal();
+        assert!(
+            goal.dist(hole.face()) > 1.5,
+            "the shop cooldown keeps the rat off the shelf"
+        );
     }
 
     #[test]

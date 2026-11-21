@@ -93,6 +93,9 @@ pub struct RunCounters {
     pub gold: u32,
     pub pending_chests: u32,
     pub pending_shop: bool,
+    /// Which shop hole opened the screen (`LevelObjects::shop_holes` index),
+    /// so the App can open that hole's own shelf. `0` when none is open.
+    pub pending_shop_hole: usize,
     pub pending_levelups: u32,
     pub game_over: bool,
     pub won: bool,

@@ -67,6 +67,8 @@ const BOSS_ROSE_RGB: Rgb = (236, 76, 128);
 const BOSS_HOT_RGB: Rgb = (255, 118, 88);
 const WARN_AMBER_RGB: Rgb = (248, 178, 86);
 const CACHE_GOLD_RGB: Rgb = (252, 224, 128);
+/// The mouse-hole shop's spoon (pewter, so it never reads as treasure gold).
+const SHOP_SPOON_RGB: Rgb = (196, 202, 214);
 const CLAIMED_MINT_RGB: Rgb = (126, 224, 152);
 const MAGNET_ICE_RGB: Rgb = (128, 206, 250);
 const RAT_HOLE_LINKED_RGB: Rgb = (252, 148, 78);
@@ -361,6 +363,10 @@ pub enum MarkerKind {
     Pickup(PickupTag),
     /// Start room origin marker (expanded map).
     Start,
+    /// A mouse-hole shop's spoon: drawn once the hole has been **seen** (and
+    /// remembered for the rest of the run — the fog's `seen` bit is the
+    /// memory). Shown in both modes.
+    Shop,
 }
 
 /// A point-of-interest blip in map cell coordinates.
@@ -931,6 +937,21 @@ pub fn draw_compact(
                     col,
                 );
             }
+            MarkerKind::Shop => {
+                let (mcx, mcy) = (m.cx.floor() as i32, m.cy.floor() as i32);
+                if !in_bounds(source, mcx, mcy) || !source.seen(mcx, mcy) {
+                    continue;
+                }
+                let col = palette::mix(SHOP_SPOON_RGB, COAT_RGB, 0.25 + 0.30 * pulse);
+                plot_pixel_in_window(
+                    &mut scratch.pixels,
+                    pw,
+                    ph,
+                    (m.cx - origin_x as f32) * inv_step,
+                    (m.cy - origin_y as f32) * inv_step,
+                    col,
+                );
+            }
             MarkerKind::Pickup(tag) => {
                 if is_small && tag != PickupTag::Chest {
                     continue;
@@ -1413,6 +1434,19 @@ pub fn draw_expanded(
                     }
                 }
             }
+            MarkerKind::Shop => {
+                if in_bounds(source, mcx, mcy) && source.seen(mcx, mcy) {
+                    if let Some((tx, ty)) = cell_to_term(m.cx, m.cy) {
+                        // The bent spoon: a pewter hook that brightens slowly.
+                        let c = palette::to_color(palette::mix(
+                            SHOP_SPOON_RGB,
+                            COAT_RGB,
+                            0.20 + 0.30 * fast_pulse,
+                        ));
+                        stamp_glyph(buf, tx, ty, '∿', c, true);
+                    }
+                }
+            }
             MarkerKind::MazeCacheHollow => {
                 if in_bounds(source, mcx, mcy) && source.seen(mcx, mcy) {
                     caches_unclaimed += 1;
@@ -1700,6 +1734,8 @@ fn draw_expanded_sidebar(
         ("◆", palette::to_color(CLAIMED_MINT_RGB), "Done", "Claimed Cache", true),
         ("◈", palette::to_color(BOSS_ROSE_RGB), "Boss", "Boss Arena", false),
         ("◤", palette::to_color(WARN_AMBER_RGB), "Bear", "Arena Bearing", false),
+        // The mouse-hole shop's bent spoon (seen once, remembered after).
+        ("∿", palette::to_color(SHOP_SPOON_RGB), "Shop", "Splice Shop", false),
     ];
 
     for &(sym, col, short_lbl, long_lbl, maze_only) in entries {

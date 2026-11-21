@@ -173,19 +173,30 @@ impl Player {
     /// counts as spent) and still opens the normal post-hit immunity window, so
     /// the rat cannot be hit twice by the same boss beat: the cap buys one
     /// hit, not one tick of invulnerability.
+    ///
+    /// Two gene splices are read here, because they are about the *hit* rather
+    /// than a stat: Hollow Bones adds +3 incoming damage **before** armor, and
+    /// Double Lid adds 0.22 s to the post-hit immunity. A rat with no splices
+    /// takes exactly the legacy numbers.
+    ///
+    /// Order: i-frames first, then the shield, then the splices. A hit the
+    /// Bottle Cap blocks deals no damage at all, so Hollow Bones adds nothing
+    /// to it; Double Lid lengthens the immunity window either way, because
+    /// the window opens on a blocked hit too.
     pub fn take_damage(&mut self, raw: f32) -> bool {
         if self.iframes > 0.0 {
             return false;
         }
         if self.buffs.shield > 0.0 {
             self.buffs.shield = 0.0;
-            self.iframes = 0.9;
+            self.iframes = 0.9 + super::shop::iframe_extra(&self.loadout.splices);
             self.hurt_flash = 0.25;
             return true;
         }
+        let raw = raw + super::shop::incoming_extra(&self.loadout.splices);
         let dmg = (raw - self.loadout.stats.armor).max(1.0);
         self.hp -= dmg;
-        self.iframes = 0.9;
+        self.iframes = 0.9 + super::shop::iframe_extra(&self.loadout.splices);
         self.hurt_flash = 0.25;
         true
     }
@@ -220,6 +231,50 @@ mod tests {
         let mut p = Player::new(Vec2::ZERO, WeaponKind::Gnaw);
         assert!(p.take_damage(10.0));
         assert!(!p.take_damage(10.0)); // still invulnerable
+    }
+
+    /// The hit funnel's order with a Bottle Cap, Hollow Bones and Double Lid
+    /// all in play: i-frames, then the shield, then the splices.
+    #[test]
+    fn shield_then_hollow_bones_with_double_lid_either_way() {
+        use crate::game::shop::SpliceKind;
+        let spliced = || {
+            let mut p = Player::new(Vec2::ZERO, WeaponKind::Gnaw);
+            p.loadout.splices = vec![SpliceKind::HollowBones, SpliceKind::DoubleLid];
+            p.loadout.rebuild_stats();
+            p
+        };
+        let long = 0.9 + crate::game::shop::iframe_extra(&spliced().loadout.splices);
+        assert!((long - 1.12).abs() < 1e-6);
+
+        // A shielded hit: consumed, no damage at all (so no Hollow Bones +3),
+        // and the Double Lid window opens all the same.
+        let mut p = spliced();
+        p.buffs.shield = 12.0;
+        let hp = p.hp;
+        assert!(p.take_damage(10.0), "a blocked hit is still consumed");
+        assert_eq!(p.hp, hp, "the cap blocked it: Hollow Bones adds nothing");
+        assert_eq!(p.buffs.shield, 0.0, "one charge, one hit");
+        assert_eq!(p.iframes, long, "Double Lid lengthens a blocked hit's window");
+        // Inside the window nothing lands and nothing is spent.
+        assert!(!p.take_damage(10.0));
+        assert_eq!(p.hp, hp);
+
+        // The next, unshielded hit: +3 before armor, same long window.
+        p.iframes = 0.0;
+        assert!(p.take_damage(10.0));
+        assert_eq!(p.hp, hp - 13.0, "Hollow Bones: +3 incoming before armor");
+        assert_eq!(p.iframes, long);
+
+        // No splices: the cap's window and the hit are the legacy numbers.
+        let mut plain = Player::new(Vec2::ZERO, WeaponKind::Gnaw);
+        plain.buffs.shield = 12.0;
+        assert!(plain.take_damage(10.0));
+        assert_eq!(plain.iframes, 0.9);
+        plain.iframes = 0.0;
+        let hp = plain.hp;
+        assert!(plain.take_damage(10.0));
+        assert_eq!(plain.hp, hp - 10.0);
     }
 
     /// Cumulative XP to reach a level, matching [`Player::add_xp`]'s integer

@@ -60,6 +60,9 @@
 //! `enemy_move::flow_refresh_system` so they read the rat's post-move position
 //! and write only `Level::objects`, `player.iframes`/`pending_levelups`,
 //! `Fog::maze_claimed` and the `GateRuntime` scratch.
+//! `shop::threshold_system` (the mouse-hole shops) is chained right after
+//! `gates::door_system` in that same group: it reads the rat's post-move
+//! position, draws no rng, and only raises `pending_shop` + the hole index.
 //!
 //! The chain is split into two tuples because `IntoScheduleConfigs` is
 //! implemented for tuples up to 20 elements. Each tuple is `.chain()`ed, so
@@ -86,7 +89,7 @@ use bevy_ecs::prelude::*;
 use super::resources::TickInput;
 use super::systems::{
     boss, combat, enemy_move, enemy_wave3, evolutions, fog, fx, gates, loot, player, powerups,
-    projectiles, spawn, trailer, traps, weapons, weapons_wave3a, weapons_wave3b,
+    projectiles, shop, spawn, trailer, traps, weapons, weapons_wave3a, weapons_wave3b,
 };
 
 /// Legacy `self.damage_numbers.update(dt)` (neon merge, `World::update`).
@@ -197,6 +200,10 @@ pub fn build_tick_schedule() -> Schedule {
             gates::passage_system,
             gates::cache_system,
             gates::door_system,
+            // 5b: the mouse-hole shops' thresholds. Same slot and the same
+            // reasons as the gates: it reads the rat's post-move position and
+            // draws no rng (it only raises the pending flag + the hole index).
+            shop::threshold_system,
         )
             .chain()
             .after(fog::reveal_system)

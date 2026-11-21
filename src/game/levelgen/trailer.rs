@@ -103,8 +103,22 @@ pub fn generate(mut tiles: TileMap, rng: &mut StdRng, seed: u64) -> Level {
             .all(|(cx, cy)| matches!(tiles.get(cx, cy), TileKind::Open))
     });
 
+    // The mouse-hole shops (no rng, tiles untouched). On the flatbed a hole
+    // is cut into cargo standing on the bed — never the rock outside the
+    // rails, which is open air — and its threshold must be deck the rat can
+    // stand on and walk to: not a hole in the planks nor beside one, not in a
+    // sliding crate's lane, and reachable from the tailgate without crossing
+    // a hole. A bed with fewer than two such faces carries fewer shops.
+    let dry = dry_deck(&tiles, &deck, validate_cell(design.start));
+    let cols = tiles.cols();
+    let shop_holes = placement::place_shop_holes_where(&tiles, &design, &mazes, &|cell, mouth| {
+        deck.deck.contains(cell.0, cell.1)
+            && dry[(mouth.1 * cols + mouth.0) as usize]
+            && shop_threshold_clear(&deck, mouth)
+    });
+
     tiles.rebuild_masks();
-    let objects = objects_from(&tiles, &mazes, &holes, &traps);
+    let objects = objects_from(&tiles, &mazes, &holes, &traps, &shop_holes);
     let nav = NavGrid::from_tiles(&tiles, SizeClass::Large);
     Level {
         theme,
@@ -121,6 +135,65 @@ pub fn generate(mut tiles: TileMap, rng: &mut StdRng, seed: u64) -> Level {
         boss: design.boss.clone(),
         trailer: deck,
     }
+}
+
+/// The cell containing world position `p`.
+fn validate_cell(p: Vec2) -> (i32, i32) {
+    (
+        (p.x / crate::game::collision::TILE_F).floor() as i32,
+        (p.y / crate::game::collision::TILE_F).floor() as i32,
+    )
+}
+
+/// Open deck cells reachable from `start` on foot **without stepping on a
+/// hole**: a 4-connected flood over open cells that are in no [`Pit`]. Row
+/// major, `cols` wide.
+fn dry_deck(tiles: &TileMap, deck: &TrailerDeck, start: (i32, i32)) -> Vec<bool> {
+    let (cols, rows) = (tiles.cols(), tiles.rows());
+    let in_pit = |cx: i32, cy: i32| deck.pits.iter().any(|pit| pit.rect.contains(cx, cy));
+    let walkable = |cx: i32, cy: i32| {
+        cx >= 0
+            && cy >= 0
+            && cx < cols
+            && cy < rows
+            && matches!(tiles.get(cx, cy), TileKind::Open)
+            && !in_pit(cx, cy)
+    };
+    let mut seen = vec![false; (cols * rows) as usize];
+    let mut stack = Vec::new();
+    if walkable(start.0, start.1) {
+        seen[(start.1 * cols + start.0) as usize] = true;
+        stack.push(start);
+    }
+    while let Some((cx, cy)) = stack.pop() {
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let (nx, ny) = (cx + dx, cy + dy);
+            if walkable(nx, ny) && !seen[(ny * cols + nx) as usize] {
+                seen[(ny * cols + nx) as usize] = true;
+                stack.push((nx, ny));
+            }
+        }
+    }
+    seen
+}
+
+/// Is a shop threshold at `mouth` clear of the bed's hazards? No hole in the
+/// planks on it or on any of its eight neighbours, and no sliding crate's
+/// lane (its box swept from rest to the end of its straps) over the cell.
+pub(super) fn shop_threshold_clear(deck: &TrailerDeck, mouth: (i32, i32)) -> bool {
+    let near = TileRect::new(mouth.0 - 1, mouth.1 - 1, 3, 3);
+    if deck.pits.iter().any(|pit| pit.rect.intersects(&near)) {
+        return false;
+    }
+    let t = crate::game::collision::TILE_F;
+    let (x0, y0) = (mouth.0 as f32 * t, mouth.1 as f32 * t);
+    let (x1, y1) = (x0 + t, y0 + t);
+    !deck.slides.iter().any(|slide| {
+        let end = slide.rest + slide.dir * slide.travel;
+        let (lo_x, hi_x) = (slide.rest.x.min(end.x) - slide.half.x, slide.rest.x.max(end.x) + slide.half.x);
+        let (lo_y, hi_y) = (slide.rest.y.min(end.y) - slide.half.y, slide.rest.y.max(end.y) + slide.half.y);
+        x0 < hi_x && x1 > lo_x && y0 < hi_y && y1 > lo_y
+    })
 }
 
 /// Carve every cell of `rect` open (out-of-bounds writes are ignored).

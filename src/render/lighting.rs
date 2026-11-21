@@ -1000,6 +1000,26 @@ impl LightMap {
             }
         }
 
+        // A mouse-hole shop: a small steady candle-warm pool on its threshold.
+        for hole in &scene.level.objects.shop_holes {
+            let at = hole.face();
+            let (sx, sy) = (at.x - cam.x, at.y - cam.y);
+            let r = 22.0;
+            if in_range(sx, sy, r) {
+                self.lights.push(PointLight {
+                    x: sx,
+                    y: sy,
+                    radius: r,
+                    color: (255, 196, 120),
+                    intensity: 130,
+                    scatter: 28,
+                    priority: 1,
+                    occlude: false,
+                    hard: false,
+                });
+            }
+        }
+
         // Unopened maze reward pedestals emit a warm golden treasure glint.
         for reward in &scene.level.objects.rewards {
             if reward.state == MazeRewardState::Opened {

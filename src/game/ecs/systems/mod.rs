@@ -17,6 +17,7 @@ pub mod loot;
 pub mod player;
 pub mod powerups;
 pub mod projectiles;
+pub mod shop;
 pub mod spawn;
 pub mod trailer;
 pub mod traps;

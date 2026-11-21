@@ -4,6 +4,7 @@ pub mod framebuffer;
 pub mod hud;
 pub mod menu;
 pub mod overlay;
+pub mod shop;
 pub mod palette;
 pub mod minimap;
 pub mod minimap_source;
