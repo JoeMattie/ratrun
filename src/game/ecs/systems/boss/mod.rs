@@ -97,6 +97,7 @@ use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
 use crate::audio::Sfx;
+use crate::game::gem::Gold;
 use crate::game::art_boss_broom::{self, BroomBossState, BroomBossView};
 use crate::game::art_boss_cat::{self, BossCatState, BossCatView};
 use crate::game::art_boss_mower::{self, MowerState, MowerView};
@@ -2376,6 +2377,7 @@ pub fn boss_update_system(
         if boss.dead {
             if !boss.death_announced {
                 boss.death_announced = true;
+                commands.spawn((Gold::new(boss.pos, 20), next_spawn_id.take()));
                 shake.amount = shake.amount.max(16.0);
                 // The horde breaks and flees: every remaining enemy is
                 // removed this tick. Raising the flag (instead of despawning

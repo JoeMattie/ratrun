@@ -88,11 +88,12 @@ pub enum Sfx {
     // Active (Space-triggered) weapons.
     ShootThrash,
     SonicSqueak,
+    Gold,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 61] = [
+    pub const ALL: [Sfx; 62] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -160,6 +161,7 @@ impl Sfx {
         // Active (Space-triggered) weapons.
         Sfx::ShootThrash,
         Sfx::SonicSqueak,
+        Sfx::Gold,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -226,6 +228,7 @@ impl Sfx {
             Sfx::CampaignVictory => "CAMPAIGN_WIN",
             Sfx::ShootThrash => "THRASH",
             Sfx::SonicSqueak => "SQUEAK",
+            Sfx::Gold => "GOLD",
         }
     }
 
@@ -292,6 +295,7 @@ impl Sfx {
             | Sfx::MowerDeath
             | Sfx::LevelComplete
             | Sfx::CampaignVictory => 1,
+            Sfx::Gold => 2,
         }
     }
 
@@ -355,6 +359,7 @@ impl Sfx {
             | Sfx::MowerFlipped
             | Sfx::MowerDockHum => 1,
             Sfx::Shoot | Sfx::ShootSpray | Sfx::Hit | Sfx::Gem | Sfx::UiMove => 0,
+            Sfx::Gold => 0,
         }
     }
 
@@ -5027,6 +5032,24 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             });
             m.add_short_tail(0.12, 5200.0);
             m.finish(0.50, 1.2, 2.4, 26.0)
+        }
+        Sfx::Gold => {
+            let mut m = MixBuf::new(0.10);
+            let pitch = [1.0, 1.12][v];
+            for (start_s, f, gain) in [(0.0, 1568.0, 0.32), (0.022, 2349.0, 0.44)] {
+                m.add_osc(OscLayer {
+                    start_s,
+                    dur_s: 0.065,
+                    f0: f * pitch,
+                    f1: f * pitch,
+                    wave: Wave::Sine,
+                    gain,
+                    attack_s: 0.0015,
+                    decay_pow: 2.2,
+                    ..Default::default()
+                });
+            }
+            m.finish(0.36, 1.0, 2.0, 10.0)
         }
     }
 }

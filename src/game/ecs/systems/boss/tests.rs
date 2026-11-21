@@ -211,6 +211,8 @@ fn boss_death_plays_its_beat_then_completes_the_level_once() {
         "the level completes after the death state, not on the lethal tick"
     );
     assert!(!w.ecs.resource::<BossFight>().level_complete);
+    let mut gold = w.ecs.query::<&crate::game::gem::Gold>();
+    assert_eq!(gold.single(&w.ecs).unwrap().value, 20);
 
     // Every tick of the beat keeps the boss (and never re-raises anything).
     let ticks = (art_boss_cat::DEATH_DURATION / DT).ceil() as usize + 2;
@@ -234,6 +236,7 @@ fn boss_death_plays_its_beat_then_completes_the_level_once() {
     update_boss(&mut w, DT);
     assert!(w.level_complete);
     assert_eq!(completions, 1);
+    assert_eq!(gold.iter(&w.ecs).count(), 1);
 }
 
 /// The boss's death breaks the horde, and that despawn has to happen **after**
@@ -903,6 +906,7 @@ fn tail_whip_damages_the_boss() {
         kind: WeaponKind::TailWhip,
         level: 8,
         timer: 0.0,
+        evolved: false,
     }];
     let ppos = w.player.pos;
     spawn_boss_at(&mut w, BossKind::Cat, ppos + Vec2::new(45.0, 0.0), 5000.0);

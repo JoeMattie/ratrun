@@ -261,6 +261,7 @@ pub fn next_loadout(previous: &Loadout, chosen: &[Keepable]) -> Result<Loadout, 
         {
             let mut carried = Weapon::new(w.kind);
             carried.level = entry.level.clamp(1, w.kind.max_level());
+            carried.evolved = w.evolved;
             weapons.push(carried);
         }
     }
@@ -294,6 +295,8 @@ pub struct CampaignTotals {
     pub score: u32,
     pub kills: u32,
     pub elapsed: f32,
+    /// Spendable balance at the end of the most recently completed level.
+    pub gold: u32,
 }
 
 impl CampaignTotals {
@@ -302,6 +305,7 @@ impl CampaignTotals {
         self.score += world.score;
         self.kills += world.kills;
         self.elapsed += world.elapsed;
+        self.gold = world.gold;
     }
 }
 
@@ -523,6 +527,29 @@ mod tests {
     }
 
     #[test]
+    fn wave3_campaign_carries_remaining_gold_and_evolved_weapons() {
+        let mut campaign = CampaignState::new(42);
+        let mut sewer = campaign.world();
+        sewer.gold = 37;
+        assert!(!sewer.spend_gold(38));
+        assert!(sewer.spend_gold(7));
+        let loadout = &mut sewer.player.loadout;
+        loadout.weapons[0].level = WeaponKind::Gnaw.max_level();
+        loadout.apply(&super::super::loadout::Upgrade::Passive(PassiveKind::Damage));
+        loadout.evolve(0);
+        let keep = sewer.keepables();
+        sewer.mark_level_complete();
+        campaign.complete_level(&sewer, &keep[..1]).unwrap();
+        let mut kitchen = campaign.world();
+        assert_eq!(kitchen.gold, 30);
+        assert!(kitchen.player.loadout.weapons[0].evolved);
+        assert!(kitchen.spend_gold(30));
+        kitchen.mark_level_complete();
+        campaign.complete_level(&kitchen, &[]).unwrap();
+        assert_eq!(campaign.world().gold, 0);
+    }
+
+    #[test]
     fn carry_over_produces_exactly_the_chosen_upgrades_at_their_levels() {
         let lo = rich_loadout();
         let chosen = vec![
@@ -724,7 +751,8 @@ mod tests {
             CampaignTotals {
                 score: 120,
                 kills: 7,
-                elapsed: 302.5
+                elapsed: 302.5,
+                gold: 0,
             }
         );
 

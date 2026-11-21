@@ -1153,6 +1153,7 @@ mod tests {
             kind,
             level: 1,
             timer: 0.0,
+            evolved: false,
         }];
     }
 
@@ -1515,6 +1516,7 @@ mod tests {
             kind,
             level: 1,
             timer: charge,
+            evolved: false,
         }];
     }
 
@@ -1884,6 +1886,7 @@ mod tests {
                 kind,
                 level: 1,
                 timer: 0.0,
+                evolved: false,
             })
             .collect();
         assert_eq!(w.player.loadout.weapons.len(), 2);
@@ -1960,6 +1963,7 @@ mod tests {
                     kind,
                     level: 1,
                     timer: 0.0,
+                    evolved: false,
                 });
                 let _ = idx;
             }
@@ -2019,6 +2023,7 @@ mod tests {
                 kind,
                 level: 1,
                 timer: 0.0,
+                evolved: false,
             })
             .collect();
         build_enemy_index(&mut w);

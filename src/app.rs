@@ -11,7 +11,7 @@ use crate::audio::{self, AudioEngine, Sfx};
 use crate::game::campaign::{self, CampaignState, KeepKind, Keepable};
 use crate::game::gem::PickupKind;
 use crate::game::level::Theme;
-use crate::game::loadout::{Loadout, PassiveKind, Upgrade};
+use crate::game::loadout::{ChestReward, Loadout, PassiveKind, Upgrade};
 use crate::game::world::World;
 use crate::input::InputState;
 use crate::lore;
@@ -92,6 +92,8 @@ enum Screen {
     Victory,
     /// Defeat, or the end of a single-sector practice run.
     End,
+    Chest,
+    Shop,
 }
 
 #[cfg(test)]
@@ -113,6 +115,8 @@ impl Screen {
             Screen::KeepThree => "KeepThree",
             Screen::Victory => "Victory",
             Screen::End => "End",
+            Screen::Chest => "Chest",
+            Screen::Shop => "Shop",
         }
     }
 }
@@ -173,6 +177,7 @@ pub struct App {
     owned_upgrades: usize,
     world: Option<World>,
     levelup_choices: Vec<Upgrade>,
+    chest_reward: Option<ChestReward>,
     levelup_desc: Vec<(String, String, String)>,
     levelup_idx: usize,
     intro_timer: f32,
@@ -292,6 +297,7 @@ impl App {
             owned_upgrades: 0,
             world: None,
             levelup_choices: Vec::new(),
+            chest_reward: None,
             levelup_desc: Vec::new(),
             levelup_idx: 0,
             intro_timer: 0.0,
@@ -762,6 +768,8 @@ impl App {
             Screen::KeepThree => self.update_keep_three(click),
             Screen::Victory => self.update_victory(click),
             Screen::End => self.update_end(click),
+            Screen::Chest => self.update_chest(click),
+            Screen::Shop => self.update_shop(),
         }
         if self.screen != previous {
             self.hits.clear();
@@ -1227,7 +1235,6 @@ impl App {
         }
         let move_dir = self.resolve_move_dir();
         let dash = click == Some(Target::Dash) || self.input.just_pressed(KeyCode::Char(' '));
-        let mut open_levelup = false;
         let mut ended = false;
         let mut level_done = false;
         let mut intensity = 1u32;
@@ -1285,8 +1292,6 @@ impl App {
                 ended = true;
             } else if w.level_complete() || w.campaign_won() {
                 level_done = true;
-            } else if w.pending_levelups > 0 {
-                open_levelup = true;
             }
         }
         for i in 0..self.sfx_frame.len() {
@@ -1294,13 +1299,46 @@ impl App {
             self.sfx(s);
         }
         self.request_music_intensity(intensity);
-        if open_levelup {
-            self.open_levelup();
-        } else if ended {
+        if ended {
             self.finalize();
             self.screen = Screen::End;
         } else if level_done {
             self.on_level_complete();
+        } else {
+            self.resume_or_open_reward();
+        }
+    }
+
+    fn resume_or_open_reward(&mut self) {
+        let Some(w) = self.world.as_mut() else {
+            return;
+        };
+        if w.pending_levelups > 0 {
+            self.open_levelup();
+        } else if let Some(reward) = w.claim_chest() {
+            self.map_open = false;
+            self.chest_reward = Some(reward);
+            self.screen = Screen::Chest;
+            self.sfx(Sfx::CacheOpen);
+        } else if std::mem::take(&mut w.pending_shop) {
+            self.map_open = false;
+            self.screen = Screen::Shop;
+        } else {
+            self.screen = Screen::Playing;
+        }
+    }
+
+    fn update_chest(&mut self, click: Option<Target>) {
+        if self.input.just_pressed(KeyCode::Enter) || click == Some(Target::Continue) {
+            self.chest_reward = None;
+            self.sfx(Sfx::UiSelect);
+            self.resume_or_open_reward();
+        }
+    }
+
+    fn update_shop(&mut self) {
+        if self.input.just_pressed(KeyCode::Esc) || self.input.just_pressed(KeyCode::Enter) {
+            self.resume_or_open_reward();
         }
     }
 
@@ -1393,6 +1431,7 @@ impl App {
         let view = campaign_ui::KeepThreeView {
             from_level: campaign_ui::CampaignLevel::from_index(self.keep_from_level()),
             next_level: campaign_ui::CampaignLevel::from_index(self.keep_from_level() + 1),
+            gold: self.world.as_ref().map_or(0, |w| w.gold),
             items: &self.keep_entries,
             selected: &self.keep_selected,
             max_keep: campaign::KEEP_COUNT,
@@ -1608,11 +1647,7 @@ impl App {
                 w.player.heal(heal);
                 w.pending_levelups = w.pending_levelups.saturating_sub(1);
             }
-            if w.pending_levelups > 0 {
-                self.open_levelup();
-            } else {
-                self.screen = Screen::Playing;
-            }
+            self.resume_or_open_reward();
         }
     }
 
@@ -1660,6 +1695,7 @@ impl App {
             won: self.run_won(w),
             theme: w.level.theme,
             combat_score: w.total_score(),
+            gold: w.gold,
             bonus_time: (time as u32) * 5,
             bonus_level: w.player.level * 100,
             bonus_win: if campaign_won { 5000 } else { 0 },
@@ -1884,6 +1920,18 @@ impl App {
                     }
                 }
             }
+            Screen::Chest => {
+                self.draw_game(frame, area);
+                if let Some(reward) = self.chest_reward {
+                    menu::draw_chest(frame, area, reward, &mut self.hits);
+                }
+            }
+            Screen::Shop => {
+                self.draw_game(frame, area);
+                if let Some(w) = self.world.as_ref() {
+                    menu::draw_shop(frame, area, w.gold);
+                }
+            }
         }
         self.draw_cursor(frame);
     }
@@ -1989,6 +2037,7 @@ impl App {
                     time_secs: w.elapsed,
                     kills: w.kills,
                     score_so_far: w.total_score(),
+                    gold: w.gold,
                     level_score: w.score,
                     player_level: w.player.level,
                     owned_upgrades: self.owned_upgrades,
@@ -2015,6 +2064,7 @@ impl App {
                     level: campaign_ui::CampaignLevel::from_index(w.level_index),
                     flavor: practice.then_some(PRACTICE_BLURB),
                     carried: &self.carried_entries,
+                    gold: w.gold,
                     score_so_far: w.total_score(),
                     hovered: (self.hits.hovered == Some(Target::Begin))
                         .then_some(campaign_ui::LevelIntroAction::Begin),
@@ -2038,6 +2088,7 @@ impl App {
             let view = campaign_ui::KeepThreeView {
                 from_level: campaign_ui::CampaignLevel::from_index(from),
                 next_level: campaign_ui::CampaignLevel::from_index(from + 1),
+                gold: self.world.as_ref().map_or(0, |w| w.gold),
                 items: &self.keep_entries,
                 selected: &self.keep_selected,
                 max_keep: campaign::KEEP_COUNT,
@@ -2101,6 +2152,7 @@ impl App {
                 final_score: self.last_score,
                 total_time_secs: total_time,
                 total_kills,
+                gold: self.world.as_ref().map_or(0, |w| w.gold),
                 new_best: self.new_best,
                 levels,
                 final_loadout: &self.victory_loadout,
@@ -2661,9 +2713,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn wave3_chests_support_keyboard_and_mouse_and_then_open_the_shop() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        let w = h.app.world.as_mut().unwrap();
+        let weapon = &mut w.player.loadout.weapons[0];
+        weapon.level = weapon.kind.max_level() - 1;
+        let pos = w.player.pos;
+        w.spawn_chest(pos);
+        w.spawn_chest(pos);
+        w.pending_shop = true;
+        w.gold = 23;
+
+        assert!(h.frame(&[]).contains("reached Lv"));
+        assert!(matches!(h.app.screen, Screen::Chest));
+        let elapsed = h.app.world.as_ref().unwrap().elapsed;
+        h.frame(&[KeyCode::Enter]);
+        assert!(h.screen_text().contains("+10 gold"));
+        h.click("Enter / Continue");
+        assert!(matches!(h.app.screen, Screen::Shop));
+        assert!(h.screen_text().contains("33 gold"));
+        assert_eq!(h.app.world.as_ref().unwrap().elapsed, elapsed);
+
+        h.frame(&[KeyCode::Esc]);
+        assert!(matches!(h.app.screen, Screen::Playing));
+        h.app.world.as_mut().unwrap().pending_shop = true;
+        h.frame(&[]);
+        assert!(matches!(h.app.screen, Screen::Shop));
+        h.frame(&[KeyCode::Enter]);
+        assert!(matches!(h.app.screen, Screen::Playing));
+    }
+
     /// Render a real frame and dump it as a PPM (each cell → 1×2 pixels:
     /// fg on top, bg below). Gated behind RATRUN_DUMP (value selects the
-    /// screen: play|story|levelup) so it's a manual screenshot tool.
+    /// screen: play|story|levelup|treasure|chest) so it's a manual screenshot tool.
     #[test]
     fn dump_frame_ppm() {
         let target = match std::env::var("RATRUN_DUMP") {
@@ -2733,6 +2817,21 @@ mod tests {
                     hh.frame(&[]);
                 }
             }
+            "treasure" | "chest" => {
+                use crate::game::ecs::resources::spawn_with_id;
+                use crate::game::gem::Gold;
+                hh.enter_playing();
+                let w = hh.app.world.as_mut().unwrap();
+                w.gold = 23;
+                let p = w.player.pos;
+                w.spawn_chest(p + Vec2::new(20.0, -9.0));
+                spawn_with_id(&mut w.ecs, Gold::new(p + Vec2::new(16.0, -9.0), 1));
+                spawn_with_id(&mut w.ecs, Gold::new(p + Vec2::new(14.0, -13.0), 1));
+                if target == "chest" {
+                    w.spawn_chest(p);
+                }
+                hh.frame(&[]);
+            }
             "levelup" => {
                 hh.frame(&[KeyCode::Enter]); // -> Story
                 hh.frame(&[KeyCode::Enter]); // dossier -> MapIntro
@@ -2770,6 +2869,21 @@ mod tests {
         }
 
         let buf = hh.terminal.backend().buffer().clone();
+        if let Some(dir) = std::env::var_os("RATRUN_DUMP_DIR") {
+            use std::fmt::Write;
+            let dir = std::path::PathBuf::from(dir);
+            let mut ansi = String::new();
+            for y in 0..h {
+                for x in 0..w {
+                    let cell = &buf[(x, y)];
+                    let (r, g, b) = color_rgb(cell.fg);
+                    let (br, bg, bb) = color_rgb(cell.bg);
+                    let _ = write!(ansi, "\x1b[38;2;{r};{g};{b};48;2;{br};{bg};{bb}m{}", cell.symbol());
+                }
+                ansi.push_str("\x1b[0m\n");
+            }
+            std::fs::write(dir.join(format!("{w}x{h}-{target}.ansi")), ansi).unwrap();
+        }
         let (iw, ih) = (w as usize, h as usize * 2);
         let mut px = vec![0u8; iw * ih * 3];
         for cy in 0..h {
@@ -2788,7 +2902,9 @@ mod tests {
         }
         let mut out = format!("P6\n{} {}\n255\n", iw, ih).into_bytes();
         out.extend_from_slice(&px);
-        std::fs::write(format!("/tmp/ratrun_{}.ppm", target), out).unwrap();
+        let dir = std::env::var_os("RATRUN_DUMP_DIR")
+            .map_or_else(|| std::path::PathBuf::from("/tmp"), std::path::PathBuf::from);
+        std::fs::write(dir.join(format!("ratrun_{target}.ppm")), out).unwrap();
     }
 
     /// Space is one press with two jobs: it dashes (unchanged) and releases any

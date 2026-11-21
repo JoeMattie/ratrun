@@ -73,7 +73,7 @@ use crate::game::ecs::resources::{
 };
 use crate::game::ecs::systems::boss::BossFight;
 use crate::game::enemy::{Enemy, EnemyKind};
-use crate::game::gem::{Gem, Pickup, PickupKind};
+use crate::game::gem::{Chest, Gem, Gold, Pickup, PickupKind};
 use crate::game::level::Level;
 use crate::game::particle::Particles;
 use crate::game::player::Player;
@@ -146,7 +146,8 @@ fn reap_dead(
         } else {
             0.012
         };
-        if rng.random::<f32>() < drop_chance {
+        let loot_roll = rng.random::<f32>();
+        if loot_roll < drop_chance {
             let kind = match rng.random_range(0..3) {
                 0 => PickupKind::Heal,
                 1 => PickupKind::Magnet,
@@ -158,6 +159,19 @@ fn reap_dead(
                 bob: 0.0,
             };
             commands.spawn((pickup, next_id.take()));
+        }
+        // Use the opposite end of the pickup roll for gold. XP value gives
+        // rarer enemy kinds a better chance with no additional RNG draw.
+        let gold = if e.kind == EnemyKind::Boss {
+            20
+        } else if e.elite {
+            5
+        } else {
+            let chance = (1 + e.kind.xp().min(11)) as f32 * 0.01;
+            u32::from(loot_roll >= 1.0 - chance)
+        };
+        if gold > 0 {
+            commands.spawn((Gold::new(e.pos, gold), next_id.take()));
         }
         counters.kills += 1;
         counters.score += e.kind.xp() * 10;
@@ -315,6 +329,59 @@ pub fn gems_system(
     }
 }
 
+/// Pull coins in with the pickup magnet and collect chests on contact.
+pub fn treasure_system(
+    mut commands: Commands,
+    input: Res<TickInput>,
+    player: Res<Player>,
+    mut counters: ResMut<RunCounters>,
+    mut sfx: ResMut<SfxQueue>,
+    mut gold: Query<(Entity, &SpawnId, &mut Gold)>,
+    chests: Query<(Entity, &SpawnId, &Chest)>,
+    mut ordered: Local<Vec<(u64, Entity)>>,
+) {
+    let dt = input.dt;
+    let ppos = player.pos;
+    let magnet = player.loadout.stats.magnet;
+    let coin_radius = PLAYER_RADIUS + 3.0;
+    let chest_radius = PLAYER_RADIUS + 4.0;
+    let mut gained = 0u32;
+
+    // Gold and chests share the scratch buffer and are handled in spawn order.
+    ordered.clear();
+    ordered.extend(gold.iter().map(|(entity, id, _)| (id.0, entity)));
+    ordered.extend(chests.iter().map(|(entity, id, _)| (id.0, entity)));
+    ordered.sort_unstable_by_key(|&(id, _)| id);
+    for &(_, entity) in ordered.iter() {
+        if let Ok((_, _, mut coin)) = gold.get_mut(entity) {
+            let to = ppos - coin.pos;
+            let dist = to.len();
+            let mut vel = coin.vel;
+            if coin.magnetized || dist < magnet {
+                coin.magnetized = true;
+                let closeness = (1.0 - dist / magnet.max(1.0)).clamp(0.0, 1.0);
+                let desired = to.normalized() * (90.0 + closeness * 150.0);
+                vel += (desired - vel) * (12.0 * dt).min(1.0);
+                coin.vel = vel;
+            }
+            coin.pos += vel * dt;
+            if coin.pos.dist_sq(ppos) < coin_radius * coin_radius {
+                gained = gained.saturating_add(coin.value);
+                commands.entity(entity).despawn();
+            }
+        } else if let Ok((_, _, chest)) = chests.get(entity) {
+            if chest.pos.dist_sq(ppos) < chest_radius * chest_radius {
+                counters.pending_chests = counters.pending_chests.saturating_add(1);
+                commands.entity(entity).despawn();
+            }
+        }
+    }
+    if gained > 0 {
+        counters.gold = counters.gold.saturating_add(gained);
+        sfx.0.push(Sfx::Gold);
+    }
+}
+
 /// Legacy `World::update_pickups` , merged with the neon hooks.
 ///
 /// Returns true in legacy when a Nuke was applied this tick; the ECS version
@@ -334,6 +401,7 @@ pub fn pickups_system(
     mut pickups: Query<(Entity, &SpawnId, &mut Pickup)>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
     mut gems: Query<&mut Gem>,
+    mut gold: Query<&mut Gold>,
     mut ordered: Local<Vec<(u64, Entity)>>,
 ) {
     let dt = input.dt;
@@ -377,6 +445,9 @@ pub fn pickups_system(
             PickupKind::Magnet => {
                 for mut g in gems.iter_mut() {
                     g.magnetized = true;
+                }
+                for mut coin in gold.iter_mut() {
+                    coin.magnetized = true;
                 }
                 // Neon hooks: magnet ring + its own sting (was `Sfx::Pickup`).
                 let p = player.pos;
@@ -462,7 +533,7 @@ pub fn outcome_system(
 mod tests {
     use super::*;
     use crate::game::director;
-    use crate::game::ecs::resources::PickupScratch;
+    use crate::game::ecs::resources::{spawn_with_id, PickupScratch};
     use crate::game::level::Theme;
     use crate::game::loadout::Loadout;
     use crate::game::world::World;
@@ -470,7 +541,7 @@ mod tests {
 
     const DT: f32 = 1.0 / 60.0;
 
-    /// `begin_tick` + the four (g) systems in schedule order, leaving the ECS
+    /// `begin_tick` + the loot systems in schedule order, leaving the ECS
     /// world live so hook state can be inspected before `end_tick`.
     fn run_loot_chain_raw(w: &mut World, dt: f32) {
         w.begin_tick(dt, Vec2::ZERO, false);
@@ -478,6 +549,7 @@ mod tests {
             .run_system_cached(reap_enemies_system)
             .expect("reap runs");
         w.ecs.run_system_cached(gems_system).expect("gems run");
+        w.ecs.run_system_cached(treasure_system).expect("treasure runs");
         w.ecs
             .run_system_cached(pickups_system)
             .expect("pickups run");
@@ -996,6 +1068,63 @@ mod tests {
         assert!(!w.ecs.resource::<LevelIndex>().is_final());
         assert_eq!(w.ecs.resource::<LevelIndex>().levels_remaining(), 1);
         w.end_tick();
+    }
+
+    #[test]
+    fn wave3_elites_and_legacy_bosses_drop_gold_in_spawn_order() {
+        let mut w = World::new(Theme::Sewer, 11);
+        let pos = w.player.pos + Vec2::new(200.0, 0.0);
+        let elite = w.spawn_enemy(EnemyKind::Brute, pos, 1.0);
+        let mut enemy = w.ecs.get_mut::<Enemy>(elite).unwrap();
+        enemy.elite = true;
+        enemy.hp = 0.0;
+        let boss = w.spawn_enemy(EnemyKind::Boss, pos, 1.0);
+        w.ecs.get_mut::<Enemy>(boss).unwrap().hp = 0.0;
+        run_loot_chain(&mut w, DT);
+        let mut gold = w.ecs.query::<(&SpawnId, &Gold)>();
+        let drops: Vec<_> = gold.iter(&w.ecs).sort_by_key::<&SpawnId, _>(|id| id.0)
+            .map(|(_, coin)| coin.value).collect();
+        assert_eq!(drops, [5, 20]);
+    }
+
+    #[test]
+    fn wave3_gold_uses_touch_and_magnet_while_chests_require_contact() {
+        let mut w = World::new(Theme::Sewer, 11);
+        let pos = w.player.pos;
+        let nearby = pos + Vec2::new(15.0, 0.0);
+        let touch = Gold::new(pos, 2);
+        spawn_with_id(&mut w.ecs, touch);
+        let coin = spawn_with_id(&mut w.ecs, Gold::new(nearby, 4));
+        let chest = w.spawn_chest(nearby);
+        w.spawn_chest(pos);
+        w.pending_shop = true;
+        run_loot_chain(&mut w, DT);
+        assert_eq!(w.gold, 2);
+        assert_eq!(w.pending_chests, 1);
+        assert!(w.pending_shop);
+        assert!(w.sfx.contains(&Sfx::Gold));
+        assert!(w.ecs.get::<Gold>(coin).unwrap().magnetized);
+
+        for _ in 0..60 {
+            run_loot_chain(&mut w, DT);
+        }
+        assert_eq!(w.gold, 6);
+        assert!(w.ecs.get::<Gold>(coin).is_none());
+        assert_eq!(w.pending_chests, 1);
+        assert_eq!(w.ecs.get::<Chest>(chest).unwrap().pos, nearby);
+    }
+
+    #[test]
+    fn wave3_queued_chest_spawns_with_an_id_and_collects_on_contact() {
+        let mut w = World::new(Theme::Sewer, 11);
+        let pos = w.player.pos;
+        w.ecs.commands().queue(crate::game::ecs::components::ChestSpawn { pos });
+        w.ecs.flush();
+        let mut chests = w.ecs.query::<(&SpawnId, &Chest)>();
+        assert_eq!(chests.iter(&w.ecs).count(), 1);
+        run_loot_chain(&mut w, DT);
+        assert_eq!(w.pending_chests, 1);
+        assert_eq!(chests.iter(&w.ecs).count(), 0);
     }
 
     #[test]

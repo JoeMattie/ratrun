@@ -1,5 +1,7 @@
 //! XP gems and rare pickups dropped by enemies.
 
+use bevy_ecs::prelude::Component;
+
 use crate::math::Vec2;
 use crate::render::palette::Rgb;
 
@@ -61,4 +63,23 @@ pub struct Pickup {
     pub pos: Vec2,
     pub kind: PickupKind,
     pub bob: f32,
+}
+
+#[derive(Component)]
+pub struct Gold {
+    pub pos: Vec2,
+    pub vel: Vec2,
+    pub value: u32,
+    pub magnetized: bool,
+}
+
+impl Gold {
+    pub fn new(pos: Vec2, value: u32) -> Self {
+        Self { pos, vel: Vec2::ZERO, value, magnetized: false }
+    }
+}
+
+#[derive(Component)]
+pub struct Chest {
+    pub pos: Vec2,
 }

@@ -2,9 +2,30 @@
 //! upgrade-choice generation / application.
 
 use rand::seq::SliceRandom;
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 use super::weapon::{Weapon, WeaponKind};
+
+pub const MAX_WEAPONS: usize = 5;
+pub const MAX_PASSIVES: usize = 5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChestReward {
+    WeaponLevel { kind: WeaponKind, level: u8 },
+    Gold(u32),
+}
+
+pub fn open_chest(loadout: &mut Loadout, rng: &mut impl Rng) -> ChestReward {
+    let eligible = loadout.weapons.iter().filter(|w| !w.is_max()).count();
+    let pick = match eligible {
+        0 => return ChestReward::Gold(10),
+        1 => 0,
+        n => rng.random_range(0..n),
+    };
+    let weapon = loadout.weapons.iter_mut().filter(|w| !w.is_max()).nth(pick).unwrap();
+    weapon.level += 1;
+    ChestReward::WeaponLevel { kind: weapon.kind, level: weapon.level }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PassiveKind {
@@ -239,19 +260,54 @@ impl Loadout {
     /// level's acquisition order) and every stat is derived here, so a carried
     /// loadout is fully described by its parts — no stale numbers cross levels.
     pub fn from_parts(weapons: Vec<Weapon>, passives: Vec<(PassiveKind, u32)>) -> Self {
+        let mut kept_weapons: Vec<Weapon> = Vec::with_capacity(weapons.len().min(MAX_WEAPONS));
+        for weapon in weapons {
+            if kept_weapons.len() == MAX_WEAPONS {
+                break;
+            }
+            if !kept_weapons.iter().any(|w| w.kind == weapon.kind) {
+                kept_weapons.push(weapon);
+            }
+        }
+
+        let mut kept_passives: Vec<(PassiveKind, u32)> =
+            Vec::with_capacity(passives.len().min(MAX_PASSIVES));
+        for (kind, stacks) in passives.into_iter().filter(|&(_, stacks)| stacks > 0) {
+            if let Some((_, count)) = kept_passives.iter_mut().find(|(p, _)| *p == kind) {
+                *count = count.saturating_add(stacks).min(kind.max_stacks());
+            } else if kept_passives.len() < MAX_PASSIVES {
+                kept_passives.push((kind, stacks.min(kind.max_stacks())));
+            }
+        }
+
         let mut stats = Stats::default();
-        for &(kind, stacks) in &passives {
-            // Defensive: the cap is a property of the passive, so a carried
-            // record can never buy more than it here either.
-            for _ in 0..stacks.min(kind.max_stacks()) {
+        for &(kind, stacks) in &kept_passives {
+            for _ in 0..stacks {
                 apply_passive_stack(&mut stats, kind);
             }
         }
         Loadout {
-            weapons,
-            passives,
+            weapons: kept_weapons,
+            passives: kept_passives,
             stats,
         }
+    }
+
+    #[allow(dead_code)] // Used by the upcoming evolution chest reward.
+    pub fn evolvable(&self) -> Option<usize> {
+        self.weapons.iter().position(|weapon| self.can_evolve(weapon))
+    }
+
+    #[allow(dead_code)] // Used by the upcoming evolution chest reward.
+    pub fn evolve(&mut self, idx: usize) {
+        if self.weapons.get(idx).is_some_and(|w| self.can_evolve(w)) {
+            self.weapons[idx].evolved = true;
+        }
+    }
+
+    fn can_evolve(&self, weapon: &Weapon) -> bool {
+        !weapon.evolved && weapon.is_max()
+            && weapon.kind.evolution().is_some_and(|e| self.stacks(e.passive) > 0)
     }
 
     pub fn has(&self, k: WeaponKind) -> bool {
@@ -324,8 +380,8 @@ impl Loadout {
                 pool.push(Upgrade::LevelWeapon(i));
             }
         }
-        // Offer new weapons (cap loadout at 6 distinct).
-        if self.weapons.len() < 6 {
+        // Offer new weapons while a slot is open.
+        if self.weapons.len() < MAX_WEAPONS {
             for k in WeaponKind::all() {
                 if !self.has(k) {
                     pool.push(Upgrade::NewWeapon(k));
@@ -337,7 +393,11 @@ impl Loadout {
         // below instead of competing with a real upgrade.
         let mut capped: Vec<Upgrade> = Vec::new();
         for p in PassiveKind::all() {
-            if self.stacks(p) >= p.max_stacks() {
+            let stacks = self.stacks(p);
+            if stacks == 0 && self.passives.len() >= MAX_PASSIVES {
+                continue;
+            }
+            if stacks >= p.max_stacks() {
                 capped.push(Upgrade::Passive(p));
             } else {
                 pool.push(Upgrade::Passive(p));
@@ -362,7 +422,7 @@ impl Loadout {
     pub fn apply(&mut self, up: &Upgrade) -> f32 {
         match up {
             Upgrade::NewWeapon(k) => {
-                if !self.has(*k) {
+                if self.weapons.len() < MAX_WEAPONS && !self.has(*k) {
                     self.weapons.push(Weapon::new(*k));
                 }
                 0.0
@@ -382,6 +442,9 @@ impl Loadout {
                     // played as a bandage instead of a dead stack.
                     return BANDAGE_HEAL_FRAC * self.stats.max_hp;
                 }
+                if self.passives.len() >= MAX_PASSIVES && self.stacks(*p) == 0 {
+                    return 0.0;
+                }
                 self.bump_stack(*p);
                 apply_passive_stack(&mut self.stats, *p)
             }
@@ -394,6 +457,72 @@ mod tests {
     use super::*;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
+
+    #[test]
+    fn wave3_rebuild_and_choices_respect_both_caps() {
+        let mut weapons: Vec<_> = WeaponKind::all().into_iter().map(Weapon::new).collect();
+        weapons.insert(1, weapons[0].clone());
+        let mut passives = vec![(PassiveKind::Armor, 0), (PassiveKind::MaxHp, 1)];
+        passives.extend(PassiveKind::all().into_iter().map(|kind| (kind, 1)));
+        let mut lo = Loadout::from_parts(weapons, passives);
+        assert_eq!(lo.weapons.len(), MAX_WEAPONS);
+        assert_eq!(lo.weapons[1].kind, WeaponKind::all()[1]);
+        assert_eq!(lo.passives.len(), MAX_PASSIVES);
+        assert_eq!(lo.stacks(PassiveKind::MaxHp), 2);
+        assert_eq!(lo.stats.max_hp, Stats::default().max_hp + 40.0);
+        assert_eq!(lo.stacks(PassiveKind::Armor), 0);
+
+        let unavailable_weapon = WeaponKind::all().into_iter().find(|&k| !lo.has(k)).unwrap();
+        lo.apply(&Upgrade::NewWeapon(unavailable_weapon));
+        lo.apply(&Upgrade::Passive(PassiveKind::Armor));
+        assert!(!lo.has(unavailable_weapon));
+        assert_eq!(lo.stacks(PassiveKind::Armor), 0);
+
+        let mut rng = StdRng::seed_from_u64(15);
+        for _ in 0..64 {
+            for choice in lo.generate_choices(&mut rng) {
+                match choice {
+                    Upgrade::NewWeapon(_) => panic!("a full rack has no new weapon slot"),
+                    Upgrade::LevelWeapon(i) => assert!(i < MAX_WEAPONS),
+                    Upgrade::Passive(kind) => assert!(lo.stacks(kind) > 0),
+                }
+            }
+        }
+        lo.apply(&Upgrade::Passive(PassiveKind::MaxHp));
+        lo.apply(&Upgrade::LevelWeapon(0));
+        assert_eq!(lo.stacks(PassiveKind::MaxHp), 3);
+        assert_eq!(lo.weapons[0].level, 2);
+    }
+
+    #[test]
+    fn wave3_chest_levels_only_an_eligible_owned_weapon() {
+        let mut rng = StdRng::seed_from_u64(18);
+        let mut lo = exhausted_loadout();
+        lo.weapons[1].level -= 1;
+        assert_eq!(
+            open_chest(&mut lo, &mut rng),
+            ChestReward::WeaponLevel { kind: lo.weapons[1].kind, level: lo.weapons[1].level }
+        );
+        assert!(lo.weapons.iter().all(Weapon::is_max));
+        let mut untouched = StdRng::seed_from_u64(18);
+        assert_eq!(open_chest(&mut lo, &mut rng), ChestReward::Gold(10));
+        assert_eq!(rng.random::<u64>(), untouched.random::<u64>());
+    }
+
+    #[test]
+    fn wave3_evolution_requires_max_level_and_a_matching_passive() {
+        let mut lo = Loadout::starting();
+        lo.evolve(0);
+        assert!(!lo.weapons[0].evolved);
+        lo.weapons[0].level = lo.weapons[0].kind.max_level();
+        assert_eq!(lo.evolvable(), None);
+        lo.apply(&Upgrade::Passive(PassiveKind::Damage));
+        assert_eq!(lo.evolvable(), Some(0));
+        lo.evolve(usize::MAX);
+        lo.evolve(0);
+        assert!(lo.weapons[0].evolved);
+        assert_eq!(lo.evolvable(), None);
+    }
 
     #[test]
     fn choices_are_valid_and_capped() {
@@ -488,9 +617,9 @@ mod tests {
         // A bandage is still worth picking: it heals, it is not a dead stack.
         let mut lo = lo;
         lo.stats.max_hp = 200.0;
-        let heal = lo.apply(&Upgrade::Passive(PassiveKind::Armor));
+        let heal = lo.apply(&Upgrade::Passive(PassiveKind::Magnet));
         assert!(heal > 0.0, "a capped pick must heal");
-        assert_eq!(lo.stacks(PassiveKind::Armor), PassiveKind::Armor.max_stacks());
+        assert_eq!(lo.stacks(PassiveKind::Magnet), PassiveKind::Magnet.max_stacks());
     }
 
     #[test]
