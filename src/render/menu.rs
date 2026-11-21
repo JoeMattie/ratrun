@@ -8,7 +8,7 @@ use ratatui::Frame;
 use crate::game::{
     campaign,
     level::Theme,
-    loadout::{Loadout, Upgrade},
+    loadout::{ChestReward, Loadout, Upgrade},
     weapon::WeaponKind,
     world::World,
 };
@@ -653,12 +653,29 @@ pub fn draw_pause(f: &mut Frame, area: Rect, hits: &mut HitMap) {
     }
 }
 
+pub fn draw_chest(f: &mut Frame, area: Rect, reward: ChestReward, hits: &mut HitMap) {
+    let r = panel(f, centered_rect(42, 8, area), " CHEST OPENED ", TRAIL_GOLD);
+    let text = match reward {
+        ChestReward::WeaponLevel { kind, level } => format!("{} reached Lv {level}", kind.name()),
+        ChestReward::Gold(value) => format!("+{value} gold"),
+    };
+    center(f, r, 2, Span::styled(text, heavy(COAT)));
+    controls(f, band(r, 5, 1), hits, &[(" Enter / Continue ", Some(Target::Continue))]);
+}
+
+pub fn draw_shop(f: &mut Frame, area: Rect, gold: u32) {
+    let r = panel(f, centered_rect(42, 8, area), " SHOP ", TRAIL_GOLD);
+    center(f, r, 2, Span::styled(format!("{gold} gold"), heavy(TRAIL_GOLD)));
+    center(f, r, 5, label("Esc / Enter to leave", MUTED));
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn draw_end(
     f: &mut Frame,
     area: Rect,
     won: bool,
     score: u32,
+    gold: u32,
     time: f32,
     level: u32,
     kills: u32,
@@ -706,6 +723,7 @@ pub fn draw_end(
         Line::from(vec![
             label("SCORE   ", accent),
             Span::styled(score.to_string(), heavy(COAT)),
+            Span::styled(format!("   ·   GOLD {gold}"), heavy(TRAIL_GOLD)),
         ]),
     );
     let seconds = time as u32;
@@ -770,6 +788,7 @@ pub struct RunSummary {
     pub won: bool,
     pub theme: Theme,
     pub combat_score: u32,
+    pub gold: u32,
     pub bonus_time: u32,
     pub bonus_level: u32,
     pub bonus_win: u32,
@@ -1141,6 +1160,7 @@ pub fn draw_end_summary(
             area,
             summary.won,
             summary.final_score,
+            summary.gold,
             summary.time,
             summary.level,
             summary.kills,
@@ -1196,6 +1216,7 @@ pub fn draw_end_summary(
             heavy(PLATE).bg(TRAIL_GOLD),
         ));
     }
+    header_spans.push(Span::styled(format!("   GOLD {}", summary.gold), heavy(TRAIL_GOLD)));
     center(f, r, y_stamp, Line::from(header_spans));
 
     // Lore line.
@@ -1503,6 +1524,7 @@ mod tests {
             won: true,
             theme: Theme::Lab,
             combat_score: 2400,
+            gold: 24,
             bonus_time: 1500,
             bonus_level: 900,
             bonus_win: 5000,

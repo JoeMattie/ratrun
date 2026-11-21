@@ -32,6 +32,7 @@
 //! | 16 | `combat::contact_system` | `resolve_contact` |
 //! | 17 | `loot::reap_enemies_system` | `reap_enemies` |
 //! | 18 | `loot::gems_system` | `update_gems` |
+//! | 18b | `loot::treasure_system` | gold and chests |
 //! | 19 | `loot::pickups_system` | `update_pickups` |
 //! | 20 | `loot::nuke_reap_system` | the nested re-reap after a Nuke |
 //! | 21 | `fx::particles_system` | `particles.update(dt)` |
@@ -158,6 +159,7 @@ pub fn build_tick_schedule() -> Schedule {
         (
             loot::reap_enemies_system,
             loot::gems_system,
+            loot::treasure_system,
             loot::pickups_system,
             loot::nuke_reap_system,
             fx::particles_system,

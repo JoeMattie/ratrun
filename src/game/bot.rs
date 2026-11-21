@@ -3,9 +3,8 @@
 //! The bot is deliberately **not** a fair opponent: it reads the simulation
 //! (enemy positions and velocities, enemy bullets, every telegraphed boss
 //! hazard with its remaining warn time, boss state, trap pads, the tile map)
-//! and plays it like a strong human. It never touches the simulation's own
-//! rng: it feeds `move_dir`/`dash` into [`World::update`] and picks upgrades,
-//! and nothing else.
+//! and plays it like a strong human. It feeds `move_dir`/`dash` into [`World::update`] and picks upgrades,
+//! and claims chest rewards through the same path as the App.
 //!
 //! ## The planning model
 //!
@@ -99,9 +98,8 @@
 //!
 //! Every random draw comes from the bot's own [`StdRng`], seeded from the run
 //! seed, in a fixed order and only where the skill uses randomness (steering
-//! noise, pick jitter, panic dashes). The simulation's rng is never touched,
-//! so the bot affects a run only through the `move_dir`/`dash` it feeds and
-//! the upgrades it picks.
+//! noise, pick jitter, panic dashes). Chest rewards are rolled by the World
+//! when claimed, using the same stream as the App.
 
 use rand::rngs::StdRng;
 use rand::RngExt;
@@ -567,6 +565,13 @@ impl Bot {
             0.5
         } else {
             0.35
+        }
+    }
+
+    /// Acknowledge every queued chest immediately during autoplay.
+    pub fn claim_chests(w: &mut World) {
+        if !w.finished() {
+            while w.claim_chest().is_some() {}
         }
     }
 

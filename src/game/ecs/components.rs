@@ -15,7 +15,7 @@ use bevy_ecs::component::{Component, Mutable, StorageType};
 
 use crate::game::bullet::Bullet;
 use crate::game::enemy::Enemy;
-use crate::game::gem::{Gem, Pickup};
+use crate::game::gem::{Chest, Gem, Pickup};
 use crate::math::Vec2;
 use crate::render::palette::Rgb;
 
@@ -74,4 +74,23 @@ impl Component for Gem {
 impl Component for Pickup {
     const STORAGE_TYPE: StorageType = StorageType::Table;
     type Mutability = Mutable;
+}
+
+/// Queue with `commands.queue(ChestSpawn { pos })` to drop a chest from a system.
+pub struct ChestSpawn {
+    pub pos: Vec2,
+}
+
+impl ChestSpawn {
+    pub fn spawn(self, ecs: &mut bevy_ecs::world::World) -> Entity {
+        super::resources::spawn_with_id(ecs, Chest { pos: self.pos })
+    }
+}
+
+impl bevy_ecs::system::Command for ChestSpawn {
+    type Out = ();
+
+    fn apply(self, ecs: &mut bevy_ecs::world::World) {
+        self.spawn(ecs);
+    }
 }

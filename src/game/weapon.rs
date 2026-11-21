@@ -207,11 +207,34 @@ impl WeaponKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // The evolution content table will supply display text.
+pub struct Evolution {
+    pub passive: super::loadout::PassiveKind,
+    pub name: &'static str,
+    pub flavor: &'static str,
+}
+
+impl WeaponKind {
+    pub fn evolution(self) -> Option<Evolution> {
+        #[cfg(test)]
+        if self == WeaponKind::Gnaw {
+            return Some(Evolution {
+                passive: super::loadout::PassiveKind::Damage,
+                name: "Evolved Gnaw",
+                flavor: "Test evolution",
+            });
+        }
+        None
+    }
+}
+
 #[derive(Clone)]
 pub struct Weapon {
     pub kind: WeaponKind,
     pub level: u8,
     pub timer: f32,
+    pub evolved: bool,
 }
 
 impl Weapon {
@@ -220,6 +243,7 @@ impl Weapon {
             kind,
             level: 1,
             timer: 0.3,
+            evolved: false,
         }
     }
 

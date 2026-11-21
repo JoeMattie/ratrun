@@ -42,6 +42,8 @@ use crate::game::ecs::resources::BossDue;
 /// counts down from.
 pub const RUN_SECONDS: f32 = 300.0;
 pub const BOSS_TIME: f32 = RUN_SECONDS - 45.0;
+#[allow(dead_code)] // Empty until the miniboss director is wired.
+pub const MINIBOSS_TIMES: &[f32] = &[];
 /// Elites (buffed brutes) only start spawning once the *curve* clock passes
 /// this — the world's elite branch gates on the same instant.
 pub const ELITE_START: f32 = 90.0;

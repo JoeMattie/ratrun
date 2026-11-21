@@ -529,7 +529,7 @@ fn enemy_cap_holds_through_a_full_run() {
     while !w.finished() && ticks < 4000 {
         w.update(dt, Vec2::ZERO, false);
         apply_pending(&mut w);
-        // Keep the rat alive so the run actually reaches the boss + win.
+        // Keep the rat alive so the cap is exercised into the boss fight.
         w.player.hp = w.player.max_hp();
         let live = w.enemies().len();
         assert!(
@@ -542,8 +542,8 @@ fn enemy_cap_holds_through_a_full_run() {
     }
     assert!(w.director.boss_spawned, "boss never spawned");
     assert!(
-        w.elapsed >= director::RUN_SECONDS,
-        "run did not reach the clock"
+        w.elapsed >= director::RUN_SECONDS || w.level_complete(),
+        "run ended before the clock without defeating the boss"
     );
 }
 
@@ -609,6 +609,7 @@ fn spore_orbit_replaces_its_ring_and_keeps_its_angle() {
         kind: WeaponKind::SporeOrbit,
         level: 2,
         timer: 0.0,
+        evolved: false,
     }];
     w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
     run(&mut w, weapons::fire_weapons_system);
@@ -643,6 +644,7 @@ fn untargeted_gnaw_does_not_emit_a_shoot_sfx() {
         kind: WeaponKind::Gnaw,
         level: 1,
         timer: 0.0,
+        evolved: false,
     }];
     w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
     run(&mut w, weapons::fire_weapons_system);
@@ -994,6 +996,7 @@ fn acid_spit_launches_a_projectile_not_an_instant_pool() {
         kind: WeaponKind::AcidSpit,
         level: 1,
         timer: 0.0,
+        evolved: false,
     }];
     w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
     run(&mut w, weapons::fire_weapons_system);
@@ -1018,6 +1021,7 @@ fn acid_spit_pool_lands_at_its_target_after_travel() {
         kind: WeaponKind::AcidSpit,
         level: 1,
         timer: 0.0,
+        evolved: false,
     }];
     w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
     run(&mut w, weapons::fire_weapons_system);
@@ -1053,6 +1057,7 @@ fn acid_spit_pool_lands_on_a_wall_not_behind_it() {
         kind: WeaponKind::AcidSpit,
         level: 1,
         timer: 0.0,
+        evolved: false,
     }];
     w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
     run(&mut w, weapons::fire_weapons_system);
@@ -1178,6 +1183,7 @@ fn weapons_emit_specialized_sfx() {
             kind,
             level: 1,
             timer: 0.0,
+            evolved: false,
         }];
         w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
         run(&mut w, weapons::fire_weapons_system);

@@ -237,6 +237,7 @@ pub struct HudState {
     kills: String,
     streak_buf: String,
     score: String,
+    gold: String,
     /// `(tag, level)` text per weapon slot, reused across frames.
     weapon_tags: Vec<(String, String)>,
     /// Per weapon slot: is an **active** weapon fully charged? (`true` for the
@@ -309,6 +310,7 @@ impl Default for HudState {
             kills: String::with_capacity(8),
             streak_buf: String::with_capacity(8),
             score: String::with_capacity(12),
+            gold: String::with_capacity(12),
             weapon_tags: Vec::with_capacity(8),
             active_ready: Vec::with_capacity(8),
             active_flash: Vec::with_capacity(8),
@@ -858,6 +860,10 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
         let _ = write!(b, "{}", world.score);
     });
 
+    refill(&mut state.gold, |b| {
+        let _ = write!(b, "{}", world.gold);
+    });
+
     // Weapon tags: reused `(tag, level)` buffers per slot.
     let weapons = &world.player.loadout.weapons;
     while state.weapon_tags.len() < weapons.len() {
@@ -1026,6 +1032,8 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
 
     put(if compact { " Score " } else { "  Score " }, muted);
     put(&state.score, value);
+    put(if area.width < 68 { " ◉" } else { "  Gold " }, muted);
+    put(&state.gold, Style::default().fg(TRAIL_GOLD).add_modifier(Modifier::BOLD));
 
     // 4. Weapon rack with icons, level, firing flare, and live cooldown pip.
     put(if compact { " │" } else { "  │" }, Style::default().fg(EDGE));

@@ -323,6 +323,7 @@ pub enum PickupTag {
     Heal,
     Magnet,
     Nuke,
+    Chest,
 }
 
 /// Category of a minimap landmark or entity blip.
@@ -921,7 +922,7 @@ pub fn draw_compact(
                 );
             }
             MarkerKind::Pickup(tag) => {
-                if is_small {
+                if is_small && tag != PickupTag::Chest {
                     continue;
                 }
                 let (mcx, mcy) = (m.cx.floor() as i32, m.cy.floor() as i32);
@@ -932,6 +933,7 @@ pub fn draw_compact(
                     PickupTag::Heal => CLAIMED_MINT_RGB,
                     PickupTag::Magnet => MAGNET_ICE_RGB,
                     PickupTag::Nuke => BOSS_HOT_RGB,
+                    PickupTag::Chest => (255, 204, 83),
                 };
                 plot_pixel_in_window(
                     &mut scratch.pixels,
@@ -1372,8 +1374,10 @@ pub fn draw_expanded(
                             PickupTag::Heal => palette::to_color(CLAIMED_MINT_RGB),
                             PickupTag::Magnet => palette::to_color(MAGNET_ICE_RGB),
                             PickupTag::Nuke => palette::to_color(BOSS_HOT_RGB),
+                            PickupTag::Chest => palette::to_color((255, 204, 83)),
                         };
-                        stamp_glyph(buf, tx, ty, '•', c, true);
+                        let glyph = if tag == PickupTag::Chest { '◆' } else { '•' };
+                        stamp_glyph(buf, tx, ty, glyph, c, true);
                     }
                 }
             }

@@ -538,6 +538,7 @@ impl AutoRun {
             self.world.pending_levelups -= 1;
             self.take_upgrade();
         }
+        Bot::claim_chests(&mut self.world);
         if self.world.game_over {
             self.finish_death();
             return;
@@ -1305,6 +1306,20 @@ pub fn run_to_end(run: &mut AutoRun, dt: f32, max_seconds: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::game::loadout::Upgrade;
+
+    #[test]
+    fn wave3_autoplay_collects_and_opens_chests_in_a_single_step() {
+        let mut run = AutoRun::new(3, AutoOpts::practice(0, Skill::Expert));
+        let w = run.world_mut();
+        let pos = w.player.pos;
+        w.spawn_chest(pos);
+        w.spawn_chest(pos);
+        run.step(1.0 / 60.0);
+        assert_eq!(run.world().pending_chests, 0);
+        assert_eq!(run.world().player.loadout.weapons[0].level, 3);
+        run.step(1.0 / 60.0);
+        assert_eq!(run.ticks, 2);
+    }
 
     #[test]
     fn a_run_steps_without_audio_and_without_sfx() {

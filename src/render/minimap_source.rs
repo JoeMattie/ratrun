@@ -23,7 +23,7 @@ use ratatui::layout::Rect;
 
 use crate::game::art_walls::{Cardinal, WallAxis, WallKind};
 use crate::game::collision::{cell_of, TileKind, TILE_F};
-use crate::game::gem::PickupKind;
+use crate::game::gem::{Chest, Pickup, PickupKind};
 use crate::game::level::{Level, RoomKind, Theme};
 use crate::game::world::World;
 use crate::render::minimap::{
@@ -173,11 +173,29 @@ impl MinimapFrame {
             });
         }
 
-        // Floor pickups on explored ground, in `SpawnId`-independent order (the
-        // art only needs the positions; ties do not matter for a blip).
+        // Mark chests first so a crowded map always has room for them.
         let mut pickups = 0;
         for entity in world.ecs.iter_entities() {
-            let Some(pickup) = entity.get::<crate::game::gem::Pickup>() else {
+            if let Some(chest) = entity.get::<Chest>() {
+                let (cx, cy) = cell_of(chest.pos);
+                if fog.is_seen(cx, cy) {
+                    self.markers.push(MapMarker {
+                        cx: cx as f32,
+                        cy: cy as f32,
+                        kind: MarkerKind::Pickup(PickupTag::Chest),
+                    });
+                    pickups += 1;
+                    if pickups >= MAX_PICKUP_MARKERS {
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Floor pickups on explored ground, in `SpawnId`-independent order (the
+        // art only needs the positions; ties do not matter for a blip).
+        for entity in world.ecs.iter_entities() {
+            let Some(pickup) = entity.get::<Pickup>() else {
                 continue;
             };
             let (cx, cy) = cell_of(pickup.pos);

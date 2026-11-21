@@ -304,6 +304,7 @@ pub struct LevelCompleteView<'a> {
     pub kills: u32,
     /// Cumulative campaign score so far (including this level).
     pub score_so_far: u32,
+    pub gold: u32,
     /// Score earned on this level alone.
     pub level_score: u32,
     /// Player level reached by the end of this stage.
@@ -339,6 +340,7 @@ pub struct KeepThreeView<'a> {
     pub from_level: CampaignLevel,
     /// Next sector the player is packing for.
     pub next_level: CampaignLevel,
+    pub gold: u32,
     /// All upgrades owned at the end of `from_level` (up to ~13 entries or more).
     pub items: &'a [UpgradeEntry<'a>],
     /// Parallel selection flags (`selected.get(i).copied().unwrap_or(false)`).
@@ -372,6 +374,7 @@ pub struct LevelIntroView<'a> {
     pub carried: &'a [UpgradeEntry<'a>],
     /// Cumulative campaign score entering this level.
     pub score_so_far: u32,
+    pub gold: u32,
     /// Currently hovered mouse action.
     pub hovered: Option<LevelIntroAction>,
 }
@@ -401,6 +404,7 @@ pub struct CampaignVictoryView<'a> {
     pub final_score: u32,
     pub total_time_secs: f32,
     pub total_kills: u32,
+    pub gold: u32,
     pub new_best: bool,
     pub levels: [LevelBreakdown; 3],
     /// Final upgrades carried out the front door (rendered when space permits).
@@ -1024,7 +1028,7 @@ pub fn draw_level_complete(
     // Level stats strip: Time, Kills, Score so far (plus Level Score / Rat Lv on wider layouts).
     let tbuf = fmt_time(view.time_secs);
     if inner.width >= 54 && y + 3 < inner.height {
-        let cols = 3u16;
+        let cols = 4u16;
         let col_w = inner.width.saturating_sub(4) / cols;
         let x0 = inner.x + 2;
 
@@ -1033,17 +1037,21 @@ pub fn draw_level_complete(
         let mut score_b = StackBuf::<24>::new();
         let _ = write!(score_b, "{}", view.score_so_far);
 
-        let stat_items: [(&str, &str, Color); 3] = [
+        let mut gold_b = StackBuf::<16>::new();
+        let _ = write!(gold_b, "{}", view.gold);
+
+        let stat_items: [(&str, &str, Color); 4] = [
             ("TIME", tbuf.as_str(), COAT),
             ("KILLS", kills_b.as_str(), COAT),
             ("SCORE SO FAR", score_b.as_str(), TRAIL_GOLD),
+            ("GOLD", gold_b.as_str(), TRAIL_GOLD),
         ];
         for (i, (lbl, val, vcol)) in stat_items.iter().enumerate() {
             let cx = x0 + i as u16 * col_w;
             let cell = Rect::new(cx, inner.y + y, col_w, 2);
             put_centered(buf, cell, 0, lbl, ink(MUTED).bg(PLATE));
             put_centered(buf, cell, 1, val, heavy(*vcol).bg(PLATE));
-            if i < 2 {
+            if i + 1 < stat_items.len() {
                 vline(buf, cx + col_w.saturating_sub(1), inner.y + y, 2, '│', ink(TRACK).bg(PLATE));
             }
         }
@@ -1070,10 +1078,11 @@ pub fn draw_level_complete(
         let mut line = StackBuf::<64>::new();
         let _ = write!(
             line,
-            "{}  ·  {} kills  ·  Score {}",
+            "{} · {} kills · Score {} · Gold {}",
             tbuf.as_str(),
             view.kills,
-            view.score_so_far
+            view.score_so_far,
+            view.gold
         );
         put_centered(buf, inner, y, line.as_str(), heavy(COAT).bg(PLATE));
         y += 1;
@@ -1423,6 +1432,8 @@ pub fn draw_keep_three(
     } else {
         let _ = write!(cap, " PACK {} OF {} ", required, view.items.len());
     }
+
+    let _ = write!(cap, " · GOLD {} ", view.gold);
 
     let buf = f.buffer_mut();
     let inner = panel(
@@ -2138,9 +2149,12 @@ pub fn draw_level_intro(
         if inner.width >= 24 {
             put_str(buf, lx, inner.y + y, lbl, 12, heavy(accent).bg(PLATE));
         }
-        if view.score_so_far > 0 && inner.width >= 44 {
-            let mut sb = StackBuf::<24>::new();
-            let _ = write!(sb, " SCORE {} ", view.score_so_far);
+        if inner.width >= 28 {
+            let mut sb = StackBuf::<40>::new();
+            if view.score_so_far > 0 && inner.width >= 52 {
+                let _ = write!(sb, " SCORE {} ·", view.score_so_far);
+            }
+            let _ = write!(sb, " GOLD {} ", view.gold);
             let sw = sb.as_str().chars().count() as u16;
             put_str(
                 buf,
@@ -2384,26 +2398,29 @@ pub fn draw_campaign_victory(
         y += 1;
 
         let ttime = fmt_time(view.total_time_secs);
-        if inner.width >= 52 {
+        if inner.width >= 62 {
             let mut sb = StackBuf::<16>::new();
             let _ = write!(sb, "{}", view.final_score);
             let mut kb = StackBuf::<16>::new();
             let _ = write!(kb, "{}", view.total_kills);
-            let cols = 4u16;
+            let mut gold_b = StackBuf::<16>::new();
+            let _ = write!(gold_b, "{}", view.gold);
+            let cols = 5u16;
             let cw = inner.width.saturating_sub(4) / cols;
             let x0 = inner.x + 2;
-            let totals: [(&str, &str, Color); 4] = [
+            let totals: [(&str, &str, Color); 5] = [
                 ("FINAL SCORE", sb.as_str(), TRAIL_GOLD),
                 ("TOTAL TIME", ttime.as_str(), COAT),
                 ("TOTAL KILLS", kb.as_str(), COAT),
                 ("SECTORS", "3 / 3", HEAL_MINT),
+                ("GOLD", gold_b.as_str(), TRAIL_GOLD),
             ];
             for (i, (k, v, vc)) in totals.iter().enumerate() {
                 let cx = x0 + i as u16 * cw;
                 let cell = Rect::new(cx, inner.y + y, cw, 2);
                 put_centered(buf, cell, 0, k, ink(MUTED).bg(PLATE));
                 put_centered(buf, cell, 1, v, heavy(*vc).bg(PLATE));
-                if i < 3 {
+                if i + 1 < totals.len() {
                     vline(buf, cx + cw.saturating_sub(1), inner.y + y, 2, '│', ink(TRACK).bg(PLATE));
                 }
             }
@@ -2412,10 +2429,11 @@ pub fn draw_campaign_victory(
             let mut line = StackBuf::<64>::new();
             let _ = write!(
                 line,
-                "FINAL {}  ·  {}  ·  {} kills",
+                "FINAL {} · {} · {} kills · 3 / 3 · Gold {}",
                 view.final_score,
                 ttime.as_str(),
-                view.total_kills
+                view.total_kills,
+                view.gold
             );
             put_centered(buf, inner, y, line.as_str(), heavy(TRAIL_GOLD).bg(PLATE));
             y += 1;
@@ -3226,6 +3244,7 @@ mod tests {
                 time_secs: 252.0,
                 kills: 284,
                 score_so_far: 6420,
+                gold: 24,
                 level_score: 3120,
                 player_level: 9,
                 owned_upgrades: 11,
@@ -3283,6 +3302,7 @@ mod tests {
                 let view = KeepThreeView {
                     from_level: CampaignLevel::Sewer,
                     next_level: CampaignLevel::Kitchen,
+                    gold: 24,
                     items: &items,
                     selected: sel,
                     max_keep: 3,
@@ -3325,6 +3345,7 @@ mod tests {
             let top_view = KeepThreeView {
                 from_level: CampaignLevel::Sewer,
                 next_level: CampaignLevel::Kitchen,
+                gold: 24,
                 items: &items,
                 selected: &sel,
                 max_keep: 3,
@@ -3359,6 +3380,7 @@ mod tests {
         let few_view = KeepThreeView {
             from_level: CampaignLevel::Sewer,
             next_level: CampaignLevel::Kitchen,
+            gold: 24,
             items: few,
             selected: &sel_two,
             max_keep: 3,
@@ -3406,6 +3428,7 @@ mod tests {
             let wide_view = KeepThreeView {
                 from_level: CampaignLevel::Kitchen,
                 next_level: CampaignLevel::Lab,
+                gold: 24,
                 items: &many,
                 selected: &many_sel,
                 max_keep: 3,
@@ -3434,6 +3457,7 @@ mod tests {
                 flavor: None,
                 carried: &carried,
                 score_so_far: 6420,
+                gold: 24,
                 hovered: None,
             };
             for &(w, h) in &SIZES {
@@ -3471,6 +3495,7 @@ mod tests {
             final_score: 24860,
             total_time_secs: 764.0,
             total_kills: 942,
+            gold: 24,
             new_best: true,
             levels: [
                 LevelBreakdown {
@@ -3677,6 +3702,7 @@ mod tests {
             final_score: 24860,
             total_time_secs: 764.0,
             total_kills: 942,
+            gold: 24,
             new_best: true,
             levels: [
                 LevelBreakdown {
@@ -3750,6 +3776,7 @@ mod tests {
                     time_secs: 252.0,
                     kills: 284,
                     score_so_far: 6420,
+                    gold: 24,
                     level_score: 3120,
                     player_level: 9,
                     owned_upgrades: 13,
@@ -3776,6 +3803,7 @@ mod tests {
                 let k3 = KeepThreeView {
                     from_level: CampaignLevel::Sewer,
                     next_level: CampaignLevel::Kitchen,
+                    gold: 24,
                     items: &items,
                     selected: sel,
                     max_keep: 3,
@@ -3797,6 +3825,7 @@ mod tests {
                     flavor: None,
                     carried: &carried,
                     score_so_far: 6420,
+                    gold: 24,
                     hovered: None,
                 };
                 term.draw(|f| {

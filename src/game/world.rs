@@ -66,7 +66,7 @@ use super::collision::{SpatialGrid, TileKind, TileMap};
 use super::director::{self, Director};
 pub use super::ecs::components::Pool;
 use super::fog::{Fog, MazeMarker};
-use super::ecs::components::SpawnId;
+use super::ecs::components::{ChestSpawn, SpawnId};
 use super::ecs::constants::{GRID_CELL, PARTICLE_CAP};
 use super::ecs::resources::{
     collect_sorted, spawn_with_id, swap_in, swap_out, ActiveFx, BossDue, EnemyIndex, GridScratch,
@@ -79,10 +79,10 @@ use super::ecs::systems::boss::{
 };
 use super::ecs::systems::gates::{GateRuntime, MazeEvent};
 use super::enemy::{Enemy, EnemyKind};
-use super::gem::{Gem, Pickup, PickupKind};
+use super::gem::{Chest, Gem, Gold, Pickup, PickupKind};
 use super::art_traps::MazeRewardState;
 use super::level::{Level, RoomKind, Theme};
-use super::loadout::Loadout;
+use super::loadout::{self, ChestReward, Loadout};
 use super::nav::{FlowField, NavBudget};
 use super::particle::damage_number::{DamageNumbers, DEFAULT_CAP as DAMAGE_NUMBER_CAP};
 use super::particle::Particles;
@@ -125,6 +125,9 @@ pub struct World {
     pub elapsed: f32,
     pub kills: u32,
     pub score: u32,
+    pub gold: u32,
+    pub pending_chests: u32,
+    pub pending_shop: bool,
     pub shake: f32,
     pub shake_ofs: Vec2,
     pub pending_levelups: u32,
@@ -282,6 +285,9 @@ impl World {
             elapsed: 0.0,
             kills: 0,
             score: 0,
+            gold: carried_totals.gold,
+            pending_chests: 0,
+            pending_shop: false,
             shake: 0.0,
             shake_ofs: Vec2::ZERO,
             pending_levelups: 0,
@@ -335,6 +341,29 @@ impl World {
     /// boss or the player dies)?
     pub fn boss_time_reached(&self) -> bool {
         self.elapsed >= director::BOSS_TIME
+    }
+
+    /// Spend from the run's wallet. A failed purchase leaves the balance intact.
+    #[allow(dead_code)] // The shop will call this for purchases.
+    pub fn spend_gold(&mut self, n: u32) -> bool {
+        let Some(balance) = self.gold.checked_sub(n) else {
+            return false;
+        };
+        self.gold = balance;
+        true
+    }
+
+    /// Resolve one queued chest, including any gold granted by the reward.
+    pub fn claim_chest(&mut self) -> Option<ChestReward> {
+        if self.pending_chests == 0 {
+            return None;
+        }
+        self.pending_chests -= 1;
+        let reward = loadout::open_chest(&mut self.player.loadout, &mut self.rng);
+        if let ChestReward::Gold(value) = reward {
+            self.gold = self.gold.saturating_add(value);
+        }
+        Some(reward)
     }
 
     // ---- Campaign accessors --------------------------------------------
@@ -687,6 +716,9 @@ impl World {
             elapsed: self.elapsed,
             kills: self.kills,
             score: self.score,
+            gold: self.gold,
+            pending_chests: self.pending_chests,
+            pending_shop: self.pending_shop,
             pending_levelups: self.pending_levelups,
             game_over: self.game_over,
             won: self.won,
@@ -762,6 +794,9 @@ impl World {
         self.elapsed = counters.elapsed;
         self.kills = counters.kills;
         self.score = counters.score;
+        self.gold = counters.gold;
+        self.pending_chests = counters.pending_chests;
+        self.pending_shop = counters.pending_shop;
         self.pending_levelups = counters.pending_levelups;
         self.game_over = counters.game_over;
         self.won = counters.won;
@@ -808,6 +843,12 @@ impl World {
 
     pub fn spawn_bullet(&mut self, bullet: Bullet) -> Entity {
         spawn_with_id(&mut self.ecs, bullet)
+    }
+
+    /// Inject a chest between ticks. Systems use `ChestSpawn` through Commands.
+    #[allow(dead_code)]
+    pub fn spawn_chest(&mut self, pos: Vec2) -> Entity {
+        ChestSpawn { pos }.spawn(&mut self.ecs)
     }
 
     pub fn spawn_gem(&mut self, gem: Gem) -> Entity {
@@ -978,6 +1019,33 @@ impl World {
                 pb.plot(s.0, s.1, g.color);
                 pb.plot_add(s.0 + 1, s.1, palette::scale(g.color, 0.5));
                 pb.plot_add(s.0, s.1 + 1, palette::scale(g.color, 0.5));
+            }
+        }
+
+        // Coins and chests sit above gems and below the pickup halos.
+        {
+            let mut query = self.ecs.query::<(&SpawnId, &Gold)>();
+            for (_, gold) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let (x, y) = self.w2s(gold.pos, cam);
+                if on_screen((x, y), 3.0, viewport) {
+                    pb.filled_circle(x, y, 2, (160, 83, 23));
+                    pb.filled_circle(x, y - 1, 1, (255, 184, 45));
+                    pb.plot(x, y - 2, (255, 241, 153));
+                }
+            }
+        }
+        {
+            let mut query = self.ecs.query::<(&SpawnId, &Chest)>();
+            for (_, chest) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let (x, y) = self.w2s(chest.pos, cam);
+                if on_screen((x, y), 5.0, viewport) {
+                    pb.rect_fill(x - 4, y - 3, 9, 7, (58, 29, 23));
+                    pb.rect_fill(x - 3, y - 3, 7, 2, (192, 115, 56));
+                    pb.rect_fill(x - 3, y, 7, 3, (138, 67, 38));
+                    pb.plot(x - 3, y - 1, (236, 153, 54));
+                    pb.plot(x + 3, y - 1, (236, 153, 54));
+                    pb.rect_fill(x, y - 1, 2, 2, (255, 204, 83));
+                }
             }
         }
 
