@@ -360,14 +360,18 @@ pub struct LevelStats {
     /// Effective damage dealt to enemies, by weapon (`WeaponKind::all()`
     /// index). Read from the simulation's `DamageLedger`, which no system
     /// reads back: pure balance instrumentation.
-    pub dealt: [f32; 6],
+    pub dealt: [f32; 8],
     /// Damage dealt to this level's boss, by weapon (`WeaponKind::all()`
     /// index). The boss is not an `Enemy`, so this comes from the boss fight's
     /// own per-tick source tally: acid pools and Tail Whip are exact, aimed
     /// bullets (Gnaw / Cheese Spray) and pattern bullets (Squeak Nova / Spore
     /// Orbit) are split in proportion to those weapons' analytic dps (see
     /// [`boss_weapon_split`]).
-    pub boss_dealt: [f32; 6],
+    pub boss_dealt: [f32; 8],
+    /// Running totals of [`DamageLedger::boss`] already booked into
+    /// `boss_dealt`. The ledger is cumulative for the level while the report is
+    /// incremental, so each tick attributes the delta.
+    pub ledger_boss_seen: [f32; 8],
 }
 
 /// Progress checkpoints the batch reports level/upgrade snapshots at (seconds
@@ -1173,6 +1177,20 @@ pub fn analytic_dps(lo: &Loadout) -> f32 {
 /// else are not weapon damage and are skipped, which is why the boss column
 /// can sum to slightly less than the fight's real damage.
 fn attribute_boss_damage(world: &World, boss_alive: bool, stats: &mut LevelStats) {
+    // Weapons that damage the boss *outside* `boss_damage_system` book their own
+    // boss column in the ledger (the two active weapons: a thrash sweep and a
+    // squeak ring call `Boss::take_damage` themselves). Attribute the delta
+    // since the last tick before the tally below is read; a lethal hit still
+    // lands because the flag is the *pre-tick* boss state.
+    let ledger = world.ecs.resource::<DamageLedger>().boss;
+    for kind in WeaponKind::all() {
+        let i = kind.index();
+        let now = ledger[i];
+        if now > stats.ledger_boss_seen[i] {
+            stats.boss_dealt[i] += now - stats.ledger_boss_seen[i];
+            stats.ledger_boss_seen[i] = now;
+        }
+    }
     if !boss_alive {
         return;
     }

@@ -135,6 +135,14 @@ pub struct Enemy {
     pub anim: f32,
     /// Smoothed facing direction for sprite orientation.
     pub facing: Vec2,
+    /// Seconds of hard stun left (0 = free). A stunned body does not steer, its
+    /// velocity bleeds off and it cannot fire (the Sonic Squeak ring).
+    pub stun: f32,
+    /// Movement multiplier while `slow_t > 0` (1.0 = unaffected). Elites and the
+    /// boss are slowed instead of stunned.
+    pub slow_mult: f32,
+    /// Seconds of slow left.
+    pub slow_t: f32,
 }
 
 impl Enemy {
@@ -157,7 +165,70 @@ impl Enemy {
             speed_scale: 1.0,
             anim: rng.random_range(0.0..std::f32::consts::TAU),
             facing: Vec2::new(1.0, 0.0),
+            // No extra rng draws: a freshly spawned body is neither stunned nor
+            // slowed, so adding these fields cannot move the rng stream.
+            stun: 0.0,
+            slow_mult: 1.0,
+            slow_t: 0.0,
         }
+    }
+
+    /// Decay the crowd-control timers and stop a stunned body dead.
+    ///
+    /// Returns `true` while the body is stunned (the caller must skip
+    /// steering). At the defaults (`stun == 0`, `slow_t == 0`) this only
+    /// performs the two timer comparisons, so an ordinary enemy's tick is
+    /// unchanged.
+    fn tick_control(&mut self, dt: f32) -> bool {
+        if self.stun > 0.0 {
+            self.stun = (self.stun - dt).max(0.0);
+            self.vel = self.vel * (1.0 - (12.0 * dt).min(1.0));
+            self.pos += self.vel * dt;
+            if self.flash > 0.0 {
+                self.flash -= dt;
+            }
+            if self.contact_cd > 0.0 {
+                self.contact_cd -= dt;
+            }
+            return true;
+        }
+        if self.slow_t > 0.0 {
+            self.slow_t = (self.slow_t - dt).max(0.0);
+            if self.slow_t <= 0.0 {
+                self.slow_mult = 1.0;
+            }
+        }
+        false
+    }
+
+    /// Stun the body for `secs` (keeps the longer of the two).
+    #[inline]
+    pub fn stun_for(&mut self, secs: f32) {
+        if secs > 0.0 {
+            self.stun = self.stun.max(secs);
+        }
+    }
+
+    /// Slow the body to `mult` of its speed for `secs` (keeps the stronger of
+    /// the two effects; the slow lifts when its timer runs out).
+    #[inline]
+    pub fn slow_for(&mut self, mult: f32, secs: f32) {
+        if secs > 0.0 {
+            let mult = mult.clamp(0.05, 1.0);
+            if self.slow_t <= 0.0 || mult < self.slow_mult {
+                self.slow_mult = mult;
+            }
+            self.slow_t = self.slow_t.max(secs);
+        }
+    }
+
+    /// Clear every crowd-control effect (used by tests and by a boss's death
+    /// break, so nothing is left frozen after the horde flees).
+    #[inline]
+    pub fn clear_control(&mut self) {
+        self.stun = 0.0;
+        self.slow_mult = 1.0;
+        self.slow_t = 0.0;
     }
 
     /// [`Enemy::spawn`] with a campaign level's [`EnemyMods`] applied.
@@ -182,6 +253,15 @@ impl Enemy {
     /// inside the goal cell / off-grid, in which case we head straight at the
     /// player).
     pub fn steer(&mut self, target: Vec2, flow_dir: Vec2, dt: f32, speed_mult: f32) {
+        // Crowd control (the Sonic Squeak's ring): a stunned body does not steer
+        // and its momentum bleeds off fast, so it stops dead instead of sliding
+        // past the rat. The slow is a straight multiplier on the per-kind speed
+        // below. Both are no-ops at their defaults (0 / 1.0), so the existing
+        // simulation is byte-for-byte unchanged.
+        if self.tick_control(dt) {
+            return;
+        }
+
         let to = target - self.pos;
         let dist = to.len();
         let direct = to.normalized();
@@ -196,7 +276,7 @@ impl Enemy {
         } else {
             direct
         };
-        let speed = self.kind.speed() * self.speed_scale * speed_mult;
+        let speed = self.kind.speed() * self.speed_scale * speed_mult * self.slow_mult;
         let desired = match self.kind {
             EnemyKind::Bat => {
                 self.wander += dt * 4.0;

@@ -441,7 +441,9 @@ impl Bot {
         if instant {
             self.scan(w);
             let dirs = unit_dirs();
-            let dash = self.wants_dash(w, &dirs);
+            // One press is both the dash and the active-weapon release, so the
+            // bot presses when either wants it.
+            let dash = self.wants_dash(w, &dirs) || self.wants_active(w);
             let input = BotInput {
                 move_dir: self.held.move_dir,
                 dash,
@@ -497,7 +499,7 @@ impl Bot {
         if best_dir.len_sq() > 0.25 {
             self.heading = best_dir;
         }
-        let dash = self.wants_dash(w, &dirs);
+        let dash = self.wants_dash(w, &dirs) || self.wants_active(w);
         // Grazing throttle: full speed only to break away, a creep when the
         // pack is close, so the weapons keep killing *next to* the rat and the
         // gems they drop land inside the magnet radius.
@@ -1107,6 +1109,68 @@ impl Bot {
         best > f32::NEG_INFINITY
     }
 
+    /// Should the Space press be spent on a charged **active** weapon?
+    ///
+    /// The same press dashes, and `wants_dash` already covers the escapes, so
+    /// this only asks the other half of the question: is there a reason to
+    /// *thrash* right now? Two reasons:
+    ///
+    /// * **A crowd in reach.** Three or more bodies inside the longest charged
+    ///   weapon's reach is what the area weapons are for; waiting for more only
+    ///   wastes the charge.
+    /// * **Cornered.** Under half health with a heavy body (`damage >= 9`) on
+    ///   the rat, a charged panic button is worth spending even on one body,
+    ///   because the stun/knockback is the escape.
+    ///
+    /// Pure read of the bot's own threat snapshot, so it draws no rng and
+    /// cannot change a run except through the `dash` input it returns.
+    fn wants_active(&self, w: &World) -> bool {
+        // Keep the dash for escapes: the Space press dashes too, so while the
+        // dash is ready it belongs to `wants_dash`, and every press made here is
+        // free in dash terms (the dash is already charging).
+        //
+        // A bot that does **not** spend its dash deliberately (Casual: human
+        // reaction, no `smart_dash`, a 5 % panic dash under 35 % HP) has nothing
+        // to save it for, so it mashes Space like a human would — its press
+        // spends the panic dash, and the i-frames that come with it are the
+        // point. Without this, six of Casual's hundred campaigns picked an
+        // active weapon it could never fire (measured: level-1 clear 47 % → 23 %,
+        // the picks crowding out Armour and Fat Reserves).
+        if w.player.dash_cd <= 0.0 && self.params.smart_dash {
+            return false;
+        }
+        let p = w.player.pos;
+        let mut reach = 0.0f32;
+        for weapon in &w.player.loadout.weapons {
+            if weapon.kind.is_active() && weapon.timer <= 0.0 {
+                reach = reach.max(weapon.active_reach());
+            }
+        }
+        if reach <= 0.0 {
+            return false;
+        }
+        let mut in_reach = 0u32;
+        let mut heavy_on_rat = false;
+        for t in &self.threats {
+            if let Threat::Enemy {
+                pos,
+                radius,
+                damage,
+                ..
+            } = *t
+            {
+                if pos.dist(p) > reach + radius {
+                    continue;
+                }
+                in_reach += 1;
+                if damage >= 9.0 && pos.dist(p) < radius + R + 10.0 {
+                    heavy_on_rat = true;
+                }
+            }
+        }
+        in_reach >= 3 || (heavy_on_rat && w.player.hp < w.player.max_hp() * 0.5)
+    }
+
     /// Distance from the rat's skin to the nearest enemy's skin.
     fn nearest_gap(&self, w: &World) -> Option<f32> {
         let p = w.player.pos;
@@ -1440,6 +1504,11 @@ fn weapon_tier(k: WeaponKind) -> f32 {
         WeaponKind::SporeOrbit => 8.0,
         WeaponKind::TailWhip => 9.0,
         WeaponKind::AcidSpit => 8.0,
+        // The active weapons are a panic button (area + crowd control) rather
+        // than a damage stream, so they rank above the passives early and lose
+        // to a maxed weapon later: `upgrade_value` adds +6 per level pick.
+        WeaponKind::TailThrash => 9.5,
+        WeaponKind::SonicSqueak => 9.0,
     }
 }
 
@@ -1565,6 +1634,75 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The bot spends a charged active weapon on a crowd — and keeps its dash
+    /// for an escape, because the Space press is shared.
+    #[test]
+    fn the_bot_fires_a_charged_active_on_a_crowd_without_wasting_its_dash() {
+        use crate::game::weapon::{Weapon, WeaponKind};
+        use crate::game::enemy::EnemyKind;
+
+        let crowd = |active: bool, enemies: usize| -> World {
+            let mut w = World::new(Theme::Sewer, 31);
+            w.level.tiles = crate::game::collision::TileMap::new(200, 160, Theme::Sewer, 0);
+            w.clear_enemies();
+            let p = w.player.pos;
+            // Skitterers 30 px out: in the thrash's reach, but not `close`
+            // enough (19.5 px) or heavy enough to make `wants_dash` fire.
+            for i in 0..enemies {
+                let a = i as f32 * 1.4;
+                w.spawn_enemy(EnemyKind::Skitterer, p + Vec2::from_angle(a) * 30.0, 1.0);
+            }
+            let mut weapon = Weapon::new(WeaponKind::TailThrash);
+            weapon.timer = if active { 0.0 } else { 5.0 };
+            w.player.loadout.weapons.push(weapon);
+            w
+        };
+
+        // Charged, four bodies in reach, dash charging: press.
+        let mut w = crowd(true, 4);
+        w.player.dash_cd = 1.0;
+        let mut bot = seeded_bot(Skill::Expert, 3);
+        assert!(
+            bot.decide(&w, 1.0 / 60.0).dash,
+            "the bot should spend a charged active on a crowd"
+        );
+
+        // Charged but the dash is ready: the press belongs to the escape.
+        let mut w = crowd(true, 4);
+        w.player.dash_cd = 0.0;
+        let mut bot = seeded_bot(Skill::Expert, 3);
+        assert!(
+            !bot.decide(&w, 1.0 / 60.0).dash,
+            "the bot must not burn a ready dash on a calm crowd"
+        );
+
+        // Charging, or only one body: nothing to press.
+        let mut w = crowd(false, 4);
+        w.player.dash_cd = 1.0;
+        let mut bot = seeded_bot(Skill::Expert, 3);
+        assert!(!bot.decide(&w, 1.0 / 60.0).dash, "uncharged weapon fired");
+
+        let mut w = crowd(true, 1);
+        w.player.dash_cd = 1.0;
+        let mut bot = seeded_bot(Skill::Expert, 3);
+        assert!(
+            !bot.decide(&w, 1.0 / 60.0).dash,
+            "one body is not worth a charge"
+        );
+
+        // Cornered: hurt, one heavy body on the rat → spend the panic button.
+        let mut w = crowd(true, 0);
+        let p = w.player.pos;
+        w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(6.0, 0.0), 1.0);
+        w.player.dash_cd = 1.0;
+        w.player.hp = w.player.max_hp() * 0.3;
+        let mut bot = seeded_bot(Skill::Expert, 3);
+        assert!(
+            bot.decide(&w, 1.0 / 60.0).dash,
+            "a cornered bot should spend a charged active"
+        );
     }
 
     #[test]

@@ -282,12 +282,23 @@ fn trace_hash(script_mode: Script, theme: Theme, seed: u64) -> u64 {
 /// a different level. Five of six traces moved; `Evade/Kitchen/29` did not, which
 /// is the one case whose short script never leaves the start area's old shape.
 /// Regenerated deliberately, in the change that altered the generator.
+///
+/// **Regenerated for the two active weapons** (2026-11-20, "active weapons"
+/// worker): `WeaponKind::TailThrash` and `WeaponKind::SonicSqueak` join the
+/// level-up pool, so every scripted run's upgrade shuffle draws a different
+/// card sequence, and the cases that pick one fire it on the script's dash
+/// ticks (`script` presses Space every 157 ticks). Five of six traces moved;
+/// `Evade/Lab/1234` did not, which is the one case whose 60 s never takes a
+/// card that changes the fight. The weapons themselves are rng-neutral: the
+/// active pass draws nothing unless a charged weapon is actually spent, which
+/// `weapons::tests::pressing_space_without_active_weapons_changes_nothing`
+/// pins down directly.
 const CASES: [(Script, Theme, u64, u64); 6] = [
-    (Script::Wander, Theme::Sewer, 11, 9246199617108760716),
-    (Script::Wander, Theme::Kitchen, 29, 15036722764467089788),
-    (Script::Wander, Theme::Lab, 1234, 9316115790742502741),
-    (Script::Evade, Theme::Sewer, 11, 1758388914911814120),
-    (Script::Evade, Theme::Kitchen, 29, 13803285604031543694),
+    (Script::Wander, Theme::Sewer, 11, 12932269707065591085),
+    (Script::Wander, Theme::Kitchen, 29, 3165715698561077862),
+    (Script::Wander, Theme::Lab, 1234, 15223454858069299009),
+    (Script::Evade, Theme::Sewer, 11, 12037375121375801552),
+    (Script::Evade, Theme::Kitchen, 29, 4706391476980409671),
     (Script::Evade, Theme::Lab, 1234, 11735825699521431248),
 ];
 

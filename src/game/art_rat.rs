@@ -259,6 +259,88 @@ pub fn draw_rat(pb: &mut PixelBuffer, player: &Player, elapsed: f32, cam: Vec2) 
     draw_face(pb, &pose, elapsed, tint, cam);
 }
 
+/// The **Tail Thrash** arc: the rat's tail stretched into a long whipping arc
+/// that sweeps around it.
+///
+/// `visual` is `(angle, reach, brightness)` from `World::thrash_visual`: the
+/// sweep angle in world radians, the arc's radius in px, and a 0..1 fade that
+/// snaps the arc on with the trigger's screen shake and lingers out as the
+/// burst winds down. The arc is drawn as a tapering whip: a bright leading edge
+/// at `angle` with two dimmer ``ghost`` arcs trailing behind it (where the tip
+/// just was), so a still frame reads as motion rather than a hoop.
+pub fn draw_tail_thrash(
+    pb: &mut PixelBuffer,
+    player: &Player,
+    visual: Option<(f32, f32, f32)>,
+    cam: Vec2,
+) {
+    let Some((angle, reach, fade)) = visual else {
+        return;
+    };
+    let fade = fade.clamp(0.0, 1.0);
+    if fade <= 0.0 || reach <= 1.0 {
+        return;
+    }
+    let origin = w2s(player.pos, cam);
+    // Three passes: the live leading edge and two ghosts behind it (where the
+    // tip just was), so one frame reads as motion, not as a hoop.
+    for pass in 0..3 {
+        let lead = -(pass as f32) * 0.17;
+        let atten = if pass == 0 { 1.0 } else { 0.34 / pass as f32 };
+        let steps = (reach * 1.3) as i32;
+        for i in 0..steps.max(2) {
+            let t = i as f32 / steps.max(2) as f32;
+            // Radius from the rat's rump (4 px) out to the full reach.
+            let r = 4.0 + (reach - 4.0) * t;
+            // The arc lags behind the leading edge as it unwinds from the root,
+            // which is what makes a still frame look like a whip in motion.
+            let a = angle + lead - t * 0.42;
+            let p = Vec2::from_angle(a);
+            let nx = -p.y;
+            let ny = p.x;
+            let bx = origin.0 + (p.x * r).round() as i32;
+            let by = origin.1 + (p.y * r).round() as i32;
+            let weight = atten * fade * (0.32 + 0.68 * t);
+            let hot = if pass == 0 {
+                // Near-white at the tip, tail-rose at the root.
+                (
+                    (205.0 + 50.0 * t) as u8,
+                    (95.0 + 145.0 * t) as u8,
+                    (120.0 + 110.0 * t) as u8,
+                )
+            } else {
+                TAIL_BASE
+            };
+            // Core plus a two-step band each side: the whip has mass, and a
+            // 1-px line disappears against a busy floor. The 1.8x gain keeps
+            // the additive blend above the floor's own dark tones (a raw
+            // weight reads brown on the Sewer's stone).
+            let glow = (weight * 1.8).min(1.4);
+            plot_add(pb, bx, by, scale(hot, glow));
+            for (k, gain) in [(1.0f32, 0.6f32), (2.0, 0.26)] {
+                plot_add(
+                    pb,
+                    origin.0 + (p.x * r + nx * k).round() as i32,
+                    origin.1 + (p.y * r + ny * k).round() as i32,
+                    scale(hot, glow * gain),
+                );
+                plot_add(
+                    pb,
+                    origin.0 + (p.x * r - nx * k).round() as i32,
+                    origin.1 + (p.y * r - ny * k).round() as i32,
+                    scale(hot, glow * gain),
+                );
+            }
+        }
+    }
+}
+
+/// Additive plot with bounds check (the arc can sweep past the viewport).
+#[inline]
+fn plot_add(pb: &mut PixelBuffer, x: i32, y: i32, c: Rgb) {
+    pb.plot_add(x, y, c);
+}
+
 /// Speed lines peeling off the haunches during a dash.
 fn draw_dash_streaks(pb: &mut PixelBuffer, pose: &Pose, cam: Vec2) {
     for side in [-1.0f32, 1.0] {

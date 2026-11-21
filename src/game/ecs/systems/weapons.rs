@@ -91,15 +91,20 @@ use bevy_ecs::prelude::*;
 
 use crate::audio::Sfx;
 use crate::game::bullet::{Bullet, Faction, Lob, Orbit};
+use crate::game::weapon::{
+    SQUEAK_BOSS_SLOW, SQUEAK_BOSS_SLOW_SECS, SQUEAK_ELITE_SLOW, SQUEAK_EXPAND, SQUEAK_SHOVE,
+    SQUEAK_STUN, THRASH_BOSS_KNOCKBACK, THRASH_BURST, THRASH_KNOCKBACK, THRASH_SHAKE,
+    THRASH_SWEEP_RATE, THRASH_SWEEPS,
+};
 use crate::game::ecs::components::{Entity, SpawnId};
 use crate::game::ecs::resources::{
-    DamageLedger, EnemyIndex, NextSpawnId, RngRes, SfxQueue, TickInput,
+    ActiveFx, DamageLedger, EnemyIndex, NextSpawnId, RngRes, SfxQueue, Shake, TickInput,
 };
 use crate::game::ecs::systems::boss::{Boss, BossTargetable};
 use crate::game::ecs::systems::projectiles::los_clear;
 #[cfg(debug_assertions)]
 use crate::game::ecs::resources::debug_assert_enemy_index;
-use crate::game::enemy::Enemy;
+use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::level::Level;
 use crate::game::particle::damage_number::{DamageNumbers, DamageSource};
 use crate::game::particle::{vfx, Particles};
@@ -194,6 +199,13 @@ pub fn fire_weapons_system(
                 w.level_projectiles(),
             )
         };
+        // Active weapons never auto-fire: their `timer` is a charge meter that
+        // `active_weapons_system` counts down and the player spends. Skipping
+        // them here also leaves their timer strictly to that system, so neither
+        // can double-tick it.
+        if kind.is_active() {
+            continue;
+        }
         player.loadout.weapons[i].timer -= dt;
         if player.loadout.weapons[i].timer > 0.0 {
             continue;
@@ -288,7 +300,13 @@ fn target_range(kind: WeaponKind) -> f32 {
         WeaponKind::CheeseSpray => 154.0,
         // A lob slower than this is a lost volley: 200 px is 1.8 s of flight.
         WeaponKind::AcidSpit => 200.0,
-        WeaponKind::SqueakNova | WeaponKind::SporeOrbit | WeaponKind::TailWhip => 0.0,
+        // An active weapon never aims: it hits its own reach (the thrash arc,
+        // the squeak ring) and is fired by the player, not by a cooldown.
+        WeaponKind::SqueakNova
+        | WeaponKind::SporeOrbit
+        | WeaponKind::TailWhip
+        | WeaponKind::TailThrash
+        | WeaponKind::SonicSqueak => 0.0,
     }
 }
 
@@ -455,6 +473,415 @@ fn nearest_visible(
         }
     }
     None
+}
+
+// ---- Active (player-triggered) weapons ------------------------------------
+
+/// Player-triggered weapons: charge, the Space release, and the two live
+/// effects (the thrash burst and the squeak ring).
+///
+/// Runs immediately after [`fire_weapons_system`] (schedule point 11b), where
+/// the cached [`EnemyIndex`] is guaranteed to be the live `SpawnId` order and
+/// nothing has been reaped yet, so the sweeps damage and the buffer rules are
+/// the same as every other weapon's. It owns the whole behaviour of the two
+/// active weapons: `fire_weapons_system` skips them entirely.
+///
+/// Two halves, in order:
+///
+/// 1. **Charge and release.** Each active weapon's `Weapon::timer` is its charge
+///    meter; it counts down here (level and the Frenzy passive shorten it
+///    through `Weapon::cooldown`, exactly like every other weapon).
+///    `TickInput::active` is the Space/click press: every weapon whose meter has
+///    reached zero is spent. A press with nothing charged does nothing, and an
+///    active still fires when the dash is on cooldown (the dash is the
+///    `player_system`'s business, not this system's).
+/// 2. **Live effects.** A Tail Thrash burst sweeps three times over
+///    `THRASH_BURST` seconds: each sweep hurts every enemy in the arc, deletes
+///    enemy bullets inside it, knocks survivors outward and re-damages the boss.
+///    A Sonic Squeak ring expands over `SQUEAK_EXPAND` seconds and hits every
+///    enemy once as its front passes (the `prev..now` band), stunning regulars,
+///    slowing elites and briefly slowing the boss.
+///
+/// Determinism: the enemy walk uses the same stable order the other weapons use
+/// and every per-enemy rng draw happens inside [`vfx`] calls that already draw
+/// in `SpawnId` order, so a replay of the same inputs lands the same hits in the
+/// same order. Nothing here draws rng unless a weapon is actually spent.
+#[allow(clippy::too_many_arguments)]
+pub fn active_weapons_system(
+    mut commands: Commands,
+    input: Res<TickInput>,
+    mut player: ResMut<Player>,
+    level: Res<Level>,
+    mut rng: ResMut<RngRes>,
+    mut particles: ResMut<Particles>,
+    mut sfx: ResMut<SfxQueue>,
+    index: Res<EnemyIndex>,
+    mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
+    mut bosses: Query<&mut Boss>,
+    enemy_bullets: Query<(Entity, &SpawnId, &Bullet)>,
+    mut damage_numbers: ResMut<DamageNumbers>,
+    mut ledger: ResMut<DamageLedger>,
+    mut shake: ResMut<Shake>,
+    mut fx: ResMut<ActiveFx>,
+    mut fallback: Local<Vec<Entity>>,
+) {
+    let dt = input.dt;
+    let ppos = player.pos;
+    let pface = player.face;
+    let fire_rate = player.loadout.stats.fire_rate_mult.max(0.1);
+    let dmg_mult = player.loadout.stats.damage_mult;
+
+    // One stable enemy order for the tick, exactly like `fire_weapons_system`:
+    // `EnemyIndex` is rebuilt immediately before that system and nothing has
+    // spawned or despawned an enemy since, so it is the live `SpawnId` order.
+    // A narrow single-system test that never ran the grid is detected by the
+    // length check and gets a sorted reused scratch instead (never once per
+    // sweep).
+    let enemy_count = enemies.iter().len();
+    let order: &[Entity] = if index.0.len() == enemy_count {
+        #[cfg(debug_assertions)]
+        debug_assert_enemy_index(
+            &index.0,
+            enemies.iter().map(|(entity, id, _)| (id.0, entity)),
+        );
+        &index.0
+    } else {
+        fallback.clear();
+        fallback.extend(enemies.iter().map(|(entity, _, _)| entity));
+        fallback.sort_by_key(|&entity| {
+            enemies
+                .get(entity)
+                .map(|(_, id, _)| id.0)
+                .unwrap_or(u64::MAX)
+        });
+        fallback.as_slice()
+    };
+
+    // 1a. Charge every active weapon.
+    for w in player.loadout.weapons.iter_mut() {
+        if w.kind.is_active() && w.timer > 0.0 {
+            w.timer = (w.timer - dt).max(0.0);
+        }
+    }
+
+    // 1b. The Space press spends every fully charged active weapon.
+    if input.active {
+        for i in 0..player.loadout.weapons.len() {
+            let (kind, charged) = {
+                let w = &player.loadout.weapons[i];
+                (w.kind, w.kind.is_active() && w.timer <= 0.0)
+            };
+            if !charged {
+                continue;
+            }
+            let (charge, dmg, reach) = {
+                let w = &player.loadout.weapons[i];
+                (
+                    (w.cooldown() / fire_rate).max(0.05),
+                    w.damage() * dmg_mult,
+                    w.active_reach(),
+                )
+            };
+            player.loadout.weapons[i].timer = charge;
+            match kind {
+                WeaponKind::TailThrash => {
+                    *fx = ActiveFx {
+                        thrash_left: THRASH_BURST,
+                        thrash_total: THRASH_BURST,
+                        thrash_age: 0.0,
+                        // Start the arc behind the rat (the tail's home) and
+                        // sweep forward from there.
+                        thrash_angle: pface.angle() + std::f32::consts::PI,
+                        thrash_reach: reach,
+                        thrash_dmg: dmg,
+                        thrash_done: 0,
+                        ..*fx
+                    };
+                    shake.amount = shake.amount.max(THRASH_SHAKE);
+                    vfx::emit_thrash_start(&mut particles, &mut rng.0, ppos);
+                    sfx.0.push(Sfx::ShootThrash);
+                }
+                WeaponKind::SonicSqueak => {
+                    *fx = ActiveFx {
+                        squeak_left: SQUEAK_EXPAND,
+                        squeak_prev_r: 0.0,
+                        squeak_r: 0.0,
+                        squeak_max_r: reach,
+                        squeak_dmg: dmg,
+                        squeak_pos: ppos,
+                        ..*fx
+                    };
+                    shake.amount = shake.amount.max(1.6);
+                    vfx::emit_sonic_squeak(&mut particles, &mut rng.0, ppos, reach, SQUEAK_EXPAND);
+                    sfx.0.push(Sfx::SonicSqueak);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // 2a. The thrash burst: sweep the arc and resolve one sweep per tick at
+    // most. At 60 fps the sweep interval is 1/3 s, so a tick never owes two.
+    if fx.thrash_left > 0.0 {
+        let total = fx.thrash_total.max(1e-4);
+        fx.thrash_age += dt;
+        fx.thrash_angle = (fx.thrash_angle + THRASH_SWEEP_RATE * dt) % std::f32::consts::TAU;
+        let interval = total / THRASH_SWEEPS as f32;
+        let due = ((fx.thrash_age / interval) as u32 + 1).min(THRASH_SWEEPS);
+        if due > fx.thrash_done {
+            fx.thrash_done = due;
+            thrash_sweep(
+                &mut commands,
+                ppos,
+                &level,
+                &mut rng,
+                &mut particles,
+                order,
+                &mut enemies,
+                &mut bosses,
+                &enemy_bullets,
+                &mut damage_numbers,
+                &mut ledger,
+                &fx,
+            );
+        }
+        fx.thrash_left = (fx.thrash_left - dt).max(0.0);
+        if fx.thrash_left <= 0.0 {
+            fx.thrash_total = 0.0;
+            fx.thrash_age = 0.0;
+            fx.thrash_done = 0;
+        }
+    }
+
+    // 2b. The squeak ring: expand it and hit everything its front passes.
+    if fx.squeak_left > 0.0 {
+        fx.squeak_left = (fx.squeak_left - dt).max(0.0);
+        let prev = fx.squeak_r;
+        let step = fx.squeak_max_r / SQUEAK_EXPAND * dt.min(SQUEAK_EXPAND);
+        let now = (prev + step).min(fx.squeak_max_r);
+        fx.squeak_prev_r = prev;
+        fx.squeak_r = now;
+        squeak_ring(
+            &level,
+            &mut rng,
+            &mut particles,
+            order,
+            &mut enemies,
+            &mut bosses,
+            &mut damage_numbers,
+            &mut ledger,
+            &fx,
+        );
+        if fx.squeak_left <= 0.0 {
+            fx.squeak_r = 0.0;
+            fx.squeak_prev_r = 0.0;
+        }
+    }
+}
+
+/// Resolve one thrash sweep: damage, knockback, bullet deletion, boss damage.
+#[allow(clippy::too_many_arguments)]
+fn thrash_sweep(
+    commands: &mut Commands,
+    ppos: Vec2,
+    level: &Level,
+    rng: &mut RngRes,
+    particles: &mut Particles,
+    order: &[Entity],
+    enemies: &mut Query<(Entity, &SpawnId, &mut Enemy)>,
+    bosses: &mut Query<&mut Boss>,
+    enemy_bullets: &Query<(Entity, &SpawnId, &Bullet)>,
+    damage_numbers: &mut DamageNumbers,
+    ledger: &mut DamageLedger,
+    fx: &ActiveFx,
+) {
+    let kind = WeaponKind::TailThrash;
+    let reach = fx.thrash_reach;
+    let dmg = fx.thrash_dmg;
+    let mut hits = 0u32;
+
+    for &entity in order {
+        let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
+            continue;
+        };
+        if !e.alive() || e.pos.dist(ppos) > reach + e.radius {
+            continue;
+        }
+        // The arc is a melee sweep: it does not reach through a maze wall.
+        if !los_clear(level, ppos, e.pos, MELEE_LOS_RADIUS) {
+            continue;
+        }
+        let hp_before = e.hp.max(0.0);
+        e.hurt(dmg);
+        let killed = !e.alive();
+        ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
+        let pos = e.pos;
+        let out = (pos - ppos).normalized();
+        let enemy_radius = e.radius;
+        let enemy_id = e.id;
+        let heavy = matches!(e.kind, EnemyKind::Brute | EnemyKind::Boss);
+        let knock = if heavy { THRASH_BOSS_KNOCKBACK } else { 1.0 };
+        e.vel = out * THRASH_KNOCKBACK * knock;
+        vfx::emit_thrash_hit(particles, &mut rng.0, pos, out, killed);
+        damage_numbers.record(
+            enemy_id,
+            pos,
+            enemy_radius,
+            dmg,
+            killed,
+            DamageSource::TailWhip,
+        );
+        hits += 1;
+    }
+
+    // The arc also thrashes aside every enemy shot inside its reach.
+    for (entity, _, b) in enemy_bullets.iter() {
+        if b.faction != Faction::Enemy {
+            continue;
+        }
+        if b.pos.dist(ppos) <= reach + b.radius {
+            commands.entity(entity).despawn();
+        }
+    }
+
+    // A heavy body takes the damage with little knockback (it has no velocity
+    // to speak of; `boss.slow_for` is the squeak's business, not the thrash's).
+    for mut boss in bosses.iter_mut() {
+        if boss.dead {
+            continue;
+        }
+        let shapes = boss.hit_shapes();
+        if shapes.iter().next().is_none() {
+            continue;
+        }
+        if !shapes.circle_hits_grounded(ppos, reach)
+            || level.tiles.segment_hit(ppos, boss.pos, 1.0).is_some()
+        {
+            continue;
+        }
+        let amount = dmg * boss.damage_mult;
+        if !boss.take_damage(amount) {
+            continue;
+        }
+        ledger.add_boss(kind, amount);
+        let killed = boss.hp <= 0.0;
+        vfx::emit_thrash_hit(particles, &mut rng.0, boss.pos, boss.pos - ppos, killed);
+        damage_numbers.record(
+            boss.id,
+            boss.pos,
+            boss.kind.body_radius(),
+            amount,
+            killed,
+            DamageSource::TailWhip,
+        );
+        hits += 1;
+    }
+
+    // One arc flare + a spray of sparks along the drawn sweep, per sweep.
+    vfx::emit_thrash_sweep(
+        particles,
+        &mut rng.0,
+        ppos,
+        fx.thrash_angle,
+        reach,
+        hits > 0,
+    );
+}
+
+/// Resolve one tick of the squeak ring: everything the front passed.
+#[allow(clippy::too_many_arguments)]
+fn squeak_ring(
+    level: &Level,
+    rng: &mut RngRes,
+    particles: &mut Particles,
+    order: &[Entity],
+    enemies: &mut Query<(Entity, &SpawnId, &mut Enemy)>,
+    bosses: &mut Query<&mut Boss>,
+    damage_numbers: &mut DamageNumbers,
+    ledger: &mut DamageLedger,
+    fx: &ActiveFx,
+) {
+    let kind = WeaponKind::SonicSqueak;
+    let origin = fx.squeak_pos;
+    let prev = fx.squeak_prev_r;
+    let now = fx.squeak_r;
+    let dmg = fx.squeak_dmg;
+
+    for &entity in order {
+        let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
+            continue;
+        };
+        if !e.alive() {
+            continue;
+        }
+        // Hit once, as the ring's front passes the body's near edge.
+        let edge = e.pos.dist(origin) - e.radius;
+        if edge > now || edge <= prev {
+            continue;
+        }
+        let hp_before = e.hp.max(0.0);
+        e.hurt(dmg);
+        let killed = !e.alive();
+        ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
+        let pos = e.pos;
+        let out = (pos - origin).normalized();
+        let enemy_radius = e.radius;
+        let enemy_id = e.id;
+        // Elites keep their footing (slowed, not stunned); everything else is
+        // pinned for the full stun. Wall cover blocks the ring exactly as it
+        // blocks the weapons: the arc of a squeak is physical.
+        if los_clear(level, origin, pos, MELEE_LOS_RADIUS) {
+            if e.elite || matches!(e.kind, EnemyKind::Brute) {
+                e.slow_for(SQUEAK_ELITE_SLOW, SQUEAK_STUN);
+            } else {
+                e.stun_for(SQUEAK_STUN);
+            }
+        }
+        e.vel += out * SQUEAK_SHOVE;
+        vfx::emit_squeak_hit(particles, &mut rng.0, pos, out, killed);
+        damage_numbers.record(
+            enemy_id,
+            pos,
+            enemy_radius,
+            dmg,
+            killed,
+            DamageSource::Normal,
+        );
+    }
+
+    // The boss is too big to stun: it takes the hit and is slowed briefly.
+    for mut boss in bosses.iter_mut() {
+        if boss.dead {
+            continue;
+        }
+        let shapes = boss.hit_shapes();
+        if shapes.iter().next().is_none() {
+            continue;
+        }
+        let edge = boss.pos.dist(origin) - boss.kind.body_radius();
+        if edge > now || edge <= prev {
+            continue;
+        }
+        if level.tiles.segment_hit(origin, boss.pos, 1.0).is_some() {
+            continue;
+        }
+        let amount = dmg * boss.damage_mult;
+        if !boss.take_damage(amount) {
+            continue;
+        }
+        boss.slow_for(SQUEAK_BOSS_SLOW, SQUEAK_BOSS_SLOW_SECS);
+        ledger.add_boss(kind, amount);
+        let killed = boss.hp <= 0.0;
+        vfx::emit_squeak_hit(particles, &mut rng.0, boss.pos, boss.pos - origin, killed);
+        damage_numbers.record(
+            boss.id,
+            boss.pos,
+            boss.kind.body_radius(),
+            amount,
+            killed,
+            DamageSource::Normal,
+        );
+    }
 }
 
 /// Legacy `World::fire_one`, with the neon-branch VFX/damage-number hooks.
@@ -646,6 +1073,10 @@ fn fire_one(
             vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, to, 0.0);
             fired = true;
         }
+        // Active weapons are player-triggered: `fire_weapons_system` skips
+        // them and `active_weapons_system` owns everything they do, so this arm
+        // is unreachable by construction.
+        WeaponKind::TailThrash | WeaponKind::SonicSqueak => {}
     }
     // Only announce a shot when the weapon actually produced something
     // (Gnaw with no target in range fires nothing).
@@ -657,6 +1088,9 @@ fn fire_one(
             WeaponKind::SporeOrbit => Sfx::ShootOrbit,
             WeaponKind::TailWhip => Sfx::ShootWhip,
             WeaponKind::AcidSpit => Sfx::ShootAcid,
+            // Announced by `active_weapons_system` instead.
+            WeaponKind::TailThrash => Sfx::ShootThrash,
+            WeaponKind::SonicSqueak => Sfx::SonicSqueak,
         };
         sfx.0.push(sound);
     }
@@ -1053,6 +1487,496 @@ mod tests {
             "tail-whip hit VFX missing"
         );
         assert_eq!(shockwaves, 1, "tail-whip pulse ring missing");
+    }
+
+    // ---- Active (player-triggered) weapons --------------------------------
+
+    use super::{active_weapons_system, fire_weapons_system as fire_auto};
+    use crate::game::bullet::Faction;
+    use crate::game::ecs::resources::TickInput;
+    use crate::game::weapon::{SQUEAK_STUN, THRASH_BURST};
+
+    /// Drive one tick of the active-weapon system (`press` = the Space press).
+    fn tick_active(w: &mut World, press: bool) -> bool {
+        tick_active_with(w, press, 1.0 / 60.0)
+    }
+
+    fn tick_active_with(w: &mut World, press: bool, dt: f32) -> bool {
+        w.begin_tick(dt, Vec2::ZERO, press);
+        w.ecs.run_system_cached(active_weapons_system).unwrap();
+        w.end_tick();
+        w.active_fx().thrash_active() || w.active_fx().squeak_active()
+    }
+
+    /// Own `kind` as the only weapon, with `charge` seconds left before it is
+    /// ready (0 = fully charged).
+    fn arm_active(w: &mut World, kind: WeaponKind, charge: f32) {
+        w.player.loadout.weapons = vec![Weapon {
+            kind,
+            level: 1,
+            timer: charge,
+        }];
+    }
+
+    /// A charge meter is spent by one press and refills on its own; a press with
+    /// nothing charged does nothing.
+    #[test]
+    fn active_charge_fills_spends_and_does_nothing_until_full() {
+        let mut w = World::new(Theme::Sewer, 21);
+        w.clear_enemies();
+        w.clear_bullets();
+        w.sfx.clear();
+        arm_active(&mut w, WeaponKind::TailThrash, 0.0);
+
+        // Pressing with a full meter starts the burst and spends the charge.
+        assert!(tick_active(&mut w, true), "a charged thrash did not fire");
+        assert!(w.active_fx().thrash_active());
+        let spent = w.player.loadout.weapons[0].timer;
+        assert!(
+            (spent - WeaponKind::TailThrash.base_cooldown()).abs() < 1e-4,
+            "the burst must cost a full {:.1}s charge, got {spent}",
+            WeaponKind::TailThrash.base_cooldown()
+        );
+        assert_eq!(
+            w.sfx.iter().filter(|s| **s == Sfx::ShootThrash).count(),
+            1,
+            "one thrash sfx per trigger"
+        );
+
+        // It runs its full burst and then goes idle by itself.
+        let mut ticks = 0;
+        while w.active_fx().thrash_active() {
+            tick_active(&mut w, false);
+            ticks += 1;
+            assert!(ticks < 200, "the thrash burst never ended");
+        }
+        assert!(
+            (ticks as f32 / 60.0 - THRASH_BURST).abs() < 0.05,
+            "burst lasted {:.2}s of ticks",
+            ticks as f32 / 60.0
+        );
+
+        // Not charged: a press is a no-op. The meter keeps filling by `dt` (and
+        // only by `dt`): a press must never *reset* or spend it.
+        let before = w.player.loadout.weapons[0].timer;
+        assert!(before > 1.0, "the charge should still be filling");
+        assert!(!tick_active(&mut w, true), "an uncharged weapon fired");
+        let after = w.player.loadout.weapons[0].timer;
+        assert!(
+            (before - after - 1.0 / 60.0).abs() < 1e-4,
+            "a press with nothing charged moved the charge {before} -> {after}"
+        );
+
+        // …and the meter does fill: 1 s of ticks takes exactly 1 s off it.
+        let start = w.player.loadout.weapons[0].timer;
+        for _ in 0..60 {
+            tick_active(&mut w, false);
+        }
+        let left = w.player.loadout.weapons[0].timer;
+        assert!(
+            (start - 1.0 - left).abs() < 0.05,
+            "charge went {start} -> {left} in one second"
+        );
+    }
+
+    /// An active weapon never auto-fires, and `fire_weapons_system` leaves its
+    /// charge meter alone (only the active system ticks it).
+    #[test]
+    fn active_weapons_do_not_auto_fire() {
+        let mut w = World::new(Theme::Sewer, 22);
+        w.clear_enemies();
+        w.clear_bullets();
+        let ppos = w.player.pos;
+        let enemy = w.spawn_enemy(EnemyKind::Cat, ppos + Vec2::new(12.0, 0.0), 1.0);
+        arm_active(&mut w, WeaponKind::TailThrash, 0.0);
+        let hp_before = w.ecs.get::<Enemy>(enemy).unwrap().hp;
+
+        w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+        w.ecs.run_system_cached(fire_auto).unwrap();
+        w.end_tick();
+
+        assert!(
+            w.ecs.get::<Enemy>(enemy).unwrap().hp == hp_before,
+            "the thrash fired itself"
+        );
+        assert!(w.bullets().is_empty(), "an active weapon spawned a bullet");
+        assert_eq!(w.player.loadout.weapons[0].timer, 0.0);
+        assert!(!w.active_fx().thrash_active());
+    }
+
+    /// One thrash sweep damages and knocks back everything in the reach, deletes
+    /// enemy bullets inside it, and leaves bodies outside it alone.
+    #[test]
+    fn thrash_hurts_knocks_back_and_deletes_enemy_bullets() {
+        let mut w = World::new(Theme::Sewer, 23);
+        w.clear_enemies();
+        w.clear_bullets();
+        w.clear_pools();
+        let ppos = w.player.pos;
+        let near = w.spawn_enemy(EnemyKind::Skitterer, ppos + Vec2::new(20.0, 0.0), 1.0);
+        let far = w.spawn_enemy(EnemyKind::Skitterer, ppos + Vec2::new(200.0, 0.0), 1.0);
+        let mut shot = Bullet::new(
+            ppos + Vec2::new(0.0, 24.0),
+            Vec2::new(0.0, 10.0),
+            4.0,
+            Faction::Enemy,
+            (255, 120, 160),
+        );
+        shot.life = 2.0;
+        w.spawn_bullet(shot);
+        let mut outside = Bullet::new(
+            ppos + Vec2::new(0.0, 130.0),
+            Vec2::new(0.0, 10.0),
+            4.0,
+            Faction::Enemy,
+            (255, 120, 160),
+        );
+        outside.life = 2.0;
+        w.spawn_bullet(outside);
+        arm_active(&mut w, WeaponKind::TailThrash, 0.0);
+        let hp_before = w.ecs.get::<Enemy>(near).unwrap().hp;
+
+        tick_active(&mut w, true);
+
+        let near_enemy = w.ecs.get::<Enemy>(near).unwrap();
+        let dealt = hp_before - near_enemy.hp;
+        assert!(
+            (dealt - WeaponKind::TailThrash.base_damage()).abs() < 1e-4,
+            "first sweep dealt {dealt}"
+        );
+        assert!(
+            near_enemy.vel.x > 100.0,
+            "the sweep must knock the body outward, got {:?}",
+            near_enemy.vel
+        );
+        assert_eq!(
+            w.ecs.get::<Enemy>(far).unwrap().hp,
+            EnemyKind::Skitterer.base_hp(),
+            "the thrash reached a body outside its arc"
+        );
+        assert_eq!(
+            w.bullets().len(),
+            1,
+            "only the shot inside the arc may be thrashed aside"
+        );
+        assert_eq!(
+            w.sfx.iter().filter(|s| **s == Sfx::ShootThrash).count(),
+            1
+        );
+        assert!(
+            !w.particles.shockwaves.is_empty(),
+            "a sweep must draw its arc shockwave"
+        );
+    }
+
+    /// The burst sweeps three times, so a body that stays inside the arc takes
+    /// three times the per-sweep damage over its full length.
+    #[test]
+    fn a_full_thrash_burst_sweeps_three_times() {
+        let mut w = World::new(Theme::Sewer, 24);
+        w.clear_enemies();
+        w.clear_bullets();
+        let ppos = w.player.pos;
+        // A huge hp pool so the 78 damage of a L1 burst cannot kill it.
+        let tank = w.spawn_enemy(EnemyKind::Brute, ppos + Vec2::new(24.0, 0.0), 40.0);
+        arm_active(&mut w, WeaponKind::TailThrash, 0.0);
+        let hp_before = w.ecs.get::<Enemy>(tank).unwrap().hp;
+
+        tick_active(&mut w, true);
+        while w.active_fx().thrash_active() {
+            tick_active(&mut w, false);
+        }
+
+        let dealt = hp_before - w.ecs.get::<Enemy>(tank).unwrap().hp;
+        // Knockback pushes the body outward, but a Brute is heavy and the reach
+        // is 60 px, so it stays inside the arc for all three sweeps.
+        let expect = WeaponKind::TailThrash.base_damage() * 3.0;
+        assert!(
+            (dealt - expect).abs() < 1e-3,
+            "a full burst dealt {dealt}, expected {expect}"
+        );
+    }
+
+    /// The squeak ring stuns regular enemies, slows elites, shoves outward and
+    /// never hits a body twice.
+    #[test]
+    fn squeak_stuns_regulars_slows_elites_and_hits_each_body_once() {
+        let mut w = World::new(Theme::Sewer, 25);
+        w.clear_enemies();
+        w.clear_bullets();
+        let ppos = w.player.pos;
+        let bug = w.spawn_enemy(EnemyKind::Skitterer, ppos + Vec2::new(30.0, 0.0), 1.0);
+        let elite = w.spawn_enemy(EnemyKind::Brute, ppos + Vec2::new(-40.0, 0.0), 20.0);
+        w.ecs.get_mut::<Enemy>(elite).unwrap().elite = true;
+        let far = w.spawn_enemy(EnemyKind::Skitterer, ppos + Vec2::new(0.0, 400.0), 1.0);
+        arm_active(&mut w, WeaponKind::SonicSqueak, 0.0);
+        let bug_hp = w.ecs.get::<Enemy>(bug).unwrap().hp;
+        let elite_hp = w.ecs.get::<Enemy>(elite).unwrap().hp;
+
+        tick_active(&mut w, true);
+        // Mid-expansion the drawn ring is exposed to the renderer.
+        tick_active(&mut w, false);
+        let (origin, radius) = w
+            .squeak_visual()
+            .expect("the squeak ring must be drawn while it expands");
+        assert_eq!(origin, ppos, "the ring is centred on the rat");
+        assert!(radius > 0.0 && radius < 90.0, "ring radius {radius}");
+        // Run the ring out to its final radius.
+        let mut ticks = 0;
+        while w.active_fx().squeak_active() {
+            tick_active(&mut w, false);
+            ticks += 1;
+            assert!(ticks < 100, "the squeak ring never finished");
+        }
+
+        let bug = w.ecs.get::<Enemy>(bug).unwrap();
+        assert!(bug.hp < bug_hp, "the ring missed the regular enemy");
+        assert!(
+            (bug_hp - bug.hp - WeaponKind::SonicSqueak.base_damage()).abs() < 1e-4,
+            "the ring must hit a body exactly once, dealt {}",
+            bug_hp - bug.hp
+        );
+        assert!(
+            (bug.stun - SQUEAK_STUN).abs() < 0.1,
+            "a skitterer should be stunned for ~{SQUEAK_STUN}s, got {}",
+            bug.stun
+        );
+
+        let elite = w.ecs.get::<Enemy>(elite).unwrap();
+        assert!(elite.hp < elite_hp, "the ring missed the elite");
+        assert_eq!(elite.stun, 0.0, "an elite must be slowed, not stunned");
+        assert!(
+            elite.slow_t > 0.0 && elite.slow_mult < 0.9,
+            "an elite should be slowed, got slow_t {} mult {}",
+            elite.slow_t,
+            elite.slow_mult
+        );
+
+        assert_eq!(
+            w.ecs.get::<Enemy>(far).unwrap().hp,
+            EnemyKind::Skitterer.base_hp(),
+            "the ring reached past its radius"
+        );
+        assert!(
+            !w.particles.shockwaves.is_empty(),
+            "the squeak must draw its expanding ring"
+        );
+    }
+
+    /// Boss rules: the thrash damages it with little knockback, the squeak
+    /// damages and only briefly slows it (never stuns).
+    #[test]
+    fn active_weapons_damage_the_boss_but_barely_control_it() {
+        let mut w = World::new(Theme::Sewer, 26);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        w.clear_pools();
+        let at = w.player.pos + Vec2::new(24.0, 0.0);
+        spawn_boss_at(&mut w, BossKind::Cat, at);
+        let boss_hp = |w: &mut World| {
+            let mut q = w.ecs.query::<&Boss>();
+            q.iter(&w.ecs).next().map(|b| b.hp).expect("boss alive")
+        };
+        arm_active(&mut w, WeaponKind::TailThrash, 0.0);
+        let hp_before = boss_hp(&mut w);
+
+        tick_active(&mut w, true);
+        let after_thrash = boss_hp(&mut w);
+        assert!(
+            after_thrash < hp_before,
+            "the thrash sweep missed the boss"
+        );
+
+        // The squeak: damage plus a brief slow, no stun.
+        arm_active(&mut w, WeaponKind::SonicSqueak, 0.0);
+        w.player.loadout.weapons[0].level = 3;
+        tick_active(&mut w, true);
+        let mut ticks = 0;
+        while w.active_fx().squeak_active() {
+            tick_active(&mut w, false);
+            ticks += 1;
+            assert!(ticks < 100);
+        }
+        let mut q = w.ecs.query::<&Boss>();
+        let boss = q.iter(&w.ecs).next().expect("boss alive");
+        assert!(
+            boss.hp < after_thrash,
+            "the squeak ring missed the boss"
+        );
+        assert!(
+            boss.slow_t > 0.0 && boss.slow_mult() < 1.0,
+            "the boss should be briefly slowed (slow_t {})",
+            boss.slow_t
+        );
+        assert!(
+            boss.slow_t <= crate::game::weapon::SQUEAK_BOSS_SLOW_SECS,
+            "the boss slow must be brief, got {}s",
+            boss.slow_t
+        );
+    }
+
+    /// The Space press is shared with the dash: a dash on cooldown still
+    /// releases a charged active weapon, and the press does not spend the dash.
+    #[test]
+    fn space_with_the_dash_charging_still_fires_an_active_weapon() {
+        let mut w = World::new(Theme::Sewer, 27);
+        w.clear_enemies();
+        w.clear_bullets();
+        w.player.dash_cd = 1.0;
+        w.player.dash_active = 0.0;
+        arm_active(&mut w, WeaponKind::TailThrash, 0.0);
+
+        // The press: `begin_tick(.., dash = true)` reaches both systems.
+        w.begin_tick(1.0 / 60.0, Vec2::ZERO, true);
+        w.ecs
+            .run_system_cached(crate::game::ecs::systems::player::player_system)
+            .unwrap();
+        w.ecs.run_system_cached(active_weapons_system).unwrap();
+        w.end_tick();
+
+        assert!(
+            w.active_fx().thrash_active(),
+            "a charged active must fire even with the dash on cooldown"
+        );
+        assert_eq!(w.player.dash_active, 0.0, "the dash was on cooldown");
+        assert!(w.player.dash_cd > 0.5, "the dash cooldown was not spent");
+    }
+
+    /// Reach and charge scale with the weapon's level.
+    #[test]
+    fn active_reach_and_charge_scale_with_level() {
+        let reach_at = |level: u8, kind: WeaponKind| -> (f32, f32) {
+            let mut w = World::new(Theme::Sewer, 28);
+            w.clear_enemies();
+            arm_active(&mut w, kind, 0.0);
+            w.player.loadout.weapons[0].level = level;
+            tick_active(&mut w, true);
+            let fx = w.active_fx();
+            if kind == WeaponKind::TailThrash {
+                (fx.thrash_reach, w.player.loadout.weapons[0].timer)
+            } else {
+                (fx.squeak_max_r, w.player.loadout.weapons[0].timer)
+            }
+        };
+        for kind in [WeaponKind::TailThrash, WeaponKind::SonicSqueak] {
+            let (r1, c1) = reach_at(1, kind);
+            let (r5, c5) = reach_at(5, kind);
+            assert!(r5 > r1, "{kind:?} reach did not grow with level");
+            assert!(c5 < c1, "{kind:?} charge time did not shrink with level");
+        }
+        assert_eq!(reach_at(1, WeaponKind::TailThrash).0, 60.0);
+        assert_eq!(reach_at(5, WeaponKind::TailThrash).0, 84.0);
+        assert_eq!(reach_at(1, WeaponKind::SonicSqueak).0, 90.0);
+        assert_eq!(reach_at(5, WeaponKind::SonicSqueak).0, 130.0);
+    }
+
+    /// Both actives charged and one press: both fire.
+    #[test]
+    fn one_press_spends_every_charged_active() {
+        let mut w = World::new(Theme::Sewer, 29);
+        w.clear_enemies();
+        w.clear_bullets();
+        w.player.loadout.weapons = WeaponKind::all()
+            .iter()
+            .filter(|k| k.is_active())
+            .map(|&kind| Weapon {
+                kind,
+                level: 1,
+                timer: 0.0,
+            })
+            .collect();
+        assert_eq!(w.player.loadout.weapons.len(), 2);
+
+        tick_active(&mut w, true);
+
+        let fx = w.active_fx();
+        assert!(fx.thrash_active(), "the thrash did not fire");
+        assert!(fx.squeak_active(), "the squeak did not fire");
+        assert!(
+            w.player.loadout.weapons.iter().all(|w| w.timer > 1.0),
+            "every fired weapon must pay its charge"
+        );
+    }
+
+    /// A run that never owns an active weapon draws no extra rng and changes
+    /// nothing, however often Space is pressed: the active pass is a pure
+    /// lookup over the loadout until a weapon is actually charged.
+    #[test]
+    fn pressing_space_without_active_weapons_changes_nothing() {
+        let run = |press: bool| -> Vec<(f32, f32, f32)> {
+            let mut w = World::new(Theme::Sewer, 777);
+            w.clear_enemies();
+            w.clear_bullets();
+            let p = w.player.pos;
+            let mut rng = StdRng::seed_from_u64(5);
+            for i in 0..40 {
+                let a = i as f32 * 0.5;
+                let pos = (p + Vec2::from_angle(a) * (20.0 + (i % 8) as f32 * 12.0))
+                    .clamp_box(Vec2::splat(8.0), w.level.arena);
+                w.spawn_enemy_with_rng(EnemyKind::Skitterer, pos, 3.0, &mut rng);
+            }
+            for _ in 0..180 {
+                w.begin_tick(1.0 / 60.0, Vec2::new(1.0, 0.0), false);
+                if press {
+                    // The Space half only; the dash is not spent.
+                    w.ecs.resource_mut::<TickInput>().active = true;
+                }
+                w.ecs.run_system_cached(active_weapons_system).unwrap();
+                w.ecs.run_system_cached(fire_auto).unwrap();
+                w.end_tick();
+            }
+            w.enemies()
+                .into_iter()
+                .map(|e| (e.pos.x, e.pos.y, e.hp))
+                .collect()
+        };
+        assert_eq!(
+            run(false),
+            run(true),
+            "pressing Space with no active weapon owned moved the sim"
+        );
+    }
+
+    /// Same seed, same presses: the two active weapons land identical damage,
+    /// crowd control and effect state.
+    #[test]
+    fn active_weapons_are_deterministic() {
+        let run = || -> Vec<(f32, f32, f32)> {
+            let mut w = World::new(Theme::Kitchen, 424242);
+            w.clear_enemies();
+            w.clear_bullets();
+            let ppos = w.player.pos;
+            let mut rng = StdRng::seed_from_u64(9);
+            for i in 0..24 {
+                let a = i as f32 * 0.7;
+                let pos = (ppos + Vec2::from_angle(a) * (14.0 + i as f32 * 3.0))
+                    .clamp_box(Vec2::splat(8.0), w.level.arena);
+                w.spawn_enemy_with_rng(EnemyKind::Skitterer, pos, 6.0, &mut rng);
+            }
+            for kind in [WeaponKind::TailThrash, WeaponKind::SonicSqueak] {
+                let idx = w.player.loadout.weapons.len();
+                w.player.loadout.weapons.push(Weapon {
+                    kind,
+                    level: 1,
+                    timer: 0.0,
+                });
+                let _ = idx;
+            }
+            for tick in 0..240u32 {
+                // One press at the start, then let the effects play out.
+                tick_active(&mut w, tick == 0);
+            }
+            let mut out = Vec::new();
+            for e in w.enemies() {
+                out.push((e.pos.x, e.pos.y, e.hp));
+            }
+            out
+        };
+        let a = run();
+        let b = run();
+        assert_eq!(a.len(), b.len(), "same seed spawned different hordes");
+        assert_eq!(a, b, "the active weapons desynchronised the run");
     }
 
     // ---- Per-tick cost (reported in the change that added line of sight) --

@@ -383,9 +383,9 @@ pub fn draw_title(
             r.height - 2,
             label(
                 if wide {
-                    "WASD/arrows/mouse move · Space/click dash · right click pause · M mute"
+                    "WASD/arrows/mouse move · Space/click dash+active · right click pause · M mute"
                 } else {
-                    "WASD/↑↓←→/mouse · Space/click dash · RMB pause · M mute"
+                    "WASD/arrows · Space dash+active · RMB pause · M mute"
                 },
                 MUTED,
             ),

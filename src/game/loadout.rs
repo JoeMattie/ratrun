@@ -509,6 +509,51 @@ mod tests {
         assert!(lo.has(WeaponKind::TailWhip));
     }
 
+    /// The two player-triggered weapons come out of the normal 1-of-3 pool and
+    /// their cards say how to fire them ("ACTIVE: press SPACE").
+    #[test]
+    fn active_weapons_are_offered_and_their_cards_teach_the_space_key() {
+        let lo = Loadout::starting();
+        for kind in [WeaponKind::TailThrash, WeaponKind::SonicSqueak] {
+            assert!(kind.is_active());
+            let (title, desc, flavor) = lo.describe(&Upgrade::NewWeapon(kind));
+            assert!(title.contains(kind.name()), "card title {title:?}");
+            assert!(
+                desc.contains("ACTIVE: press SPACE"),
+                "{kind:?}'s card must teach the trigger: {desc:?}"
+            );
+            assert!(!flavor.is_empty());
+        }
+        // The pool really offers them (not just `describe`).
+        let mut offered = [false; 2];
+        for seed in 0..400 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            for c in lo.generate_choices(&mut rng) {
+                if let Upgrade::NewWeapon(kind) = c {
+                    for (i, k) in [WeaponKind::TailThrash, WeaponKind::SonicSqueak]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        if k == kind {
+                            offered[i] = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            offered == [true, true],
+            "an active weapon was never offered: {offered:?}"
+        );
+        // And they level like every other weapon.
+        let mut lo = Loadout::starting();
+        lo.apply(&Upgrade::NewWeapon(WeaponKind::TailThrash));
+        let idx = lo.weapons.iter().position(|w| w.kind == WeaponKind::TailThrash).unwrap();
+        lo.apply(&Upgrade::LevelWeapon(idx));
+        assert_eq!(lo.weapons[idx].level, 2);
+        assert!(lo.weapons[idx].active_reach() > 60.0);
+    }
+
     #[test]
     fn leveling_weapon_respects_max() {
         let mut lo = Loadout::new(WeaponKind::Gnaw);
