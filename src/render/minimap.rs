@@ -343,6 +343,8 @@ pub enum PickupTag {
 pub enum MarkerKind {
     /// Active boss entity (pulsing rose blip; shown in compact & expanded).
     Boss,
+    /// Living named miniboss (wave 3): an amber threat blip.
+    Miniboss,
     /// Discovered boss arena anchor (shown on expanded map once seen).
     BossArena,
     /// Bearing toward the undiscovered boss arena placed on the fog boundary
@@ -983,6 +985,14 @@ pub fn draw_compact(
                     edge_boss = Some((m.cx - view.player_cell.0, m.cy - view.player_cell.1));
                 }
             }
+            MarkerKind::Miniboss => {
+                let lx = (m.cx - origin_x as f32) * inv_step;
+                let ly = (m.cy - origin_y as f32) * inv_step;
+                let col = palette::mix(WARN_AMBER_RGB, BOSS_HOT_RGB, fast_pulse);
+                if !plot_pixel_in_window(&mut scratch.pixels, pw, ph, lx, ly, col) {
+                    edge_boss = Some((m.cx - view.player_cell.0, m.cy - view.player_cell.1));
+                }
+            }
             MarkerKind::ArenaBearing => {
                 let lx = (m.cx - origin_x as f32) * inv_step;
                 let ly = (m.cy - origin_y as f32) * inv_step;
@@ -1477,6 +1487,13 @@ pub fn draw_expanded(
             }
             MarkerKind::Boss => {
                 boss_active = true;
+            }
+            MarkerKind::Miniboss => {
+                if in_bounds(source, mcx, mcy) && source.seen(mcx, mcy) {
+                    if let Some((tx, ty)) = cell_to_term(m.cx, m.cy) {
+                        stamp_glyph(buf, tx, ty, '✸', palette::to_color(WARN_AMBER_RGB), true);
+                    }
+                }
             }
         }
     }

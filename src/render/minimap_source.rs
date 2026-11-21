@@ -109,6 +109,15 @@ impl MinimapFrame {
                 kind: MarkerKind::Boss,
             });
         }
+        // The living named miniboss: its own amber blip (wave 3).
+        if let Some(pos) = world.miniboss_marker() {
+            let (cx, cy) = cell_of(pos);
+            self.markers.push(MapMarker {
+                cx: cx as f32,
+                cy: cy as f32,
+                kind: MarkerKind::Miniboss,
+            });
+        }
 
         // Boss arena: only once part of it has been seen. The anchor is the
         // first explored cell of the arena (the art skips a marker/label whose

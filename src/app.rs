@@ -3516,6 +3516,64 @@ mod tests {
         assert_eq!(carried.difficulty_override, None);
     }
 
+    /// A practice run on a later sector really plays level 0's curve: the
+    /// horde it spawns at t = 100 s carries level 0's hp and damage
+    /// multipliers, not the sector's own.
+    #[test]
+    fn practice_run_spawns_the_first_levels_enemy_stats() {
+        use crate::game::director;
+        use crate::game::enemy::EnemyKind;
+        // 100 s is inside every stage's opening grace for hp (the damage ramp
+        // already differs there); 600 s is where the stages' hp differs too.
+        for t in [100.0f32, 600.0] {
+            for sector in 1..crate::game::campaign::LEVEL_COUNT {
+                let mut hh = Harness::new(80, 24);
+                hh.app.start_practice(sector);
+                let w = hh.app.world.as_mut().unwrap();
+                assert_eq!(w.level_index(), sector);
+                // Jump the clock and let one pulse through; the rat cannot die.
+                w.elapsed = t;
+                w.player.hp = 1.0e9;
+                w.player.iframes = 1.0e9;
+                w.director.spawn_timer = 0.0;
+                w.director.elite_timer = 1.0e9;
+                let mut spawned = Vec::new();
+                for _ in 0..240 {
+                    w.update(1.0 / 60.0, crate::math::Vec2::ZERO, false);
+                    // Named minibosses carry appointment stats, not the curve's.
+                    spawned = w.enemies().into_iter().filter(|e| !e.named).collect();
+                    if !spawned.is_empty() {
+                        break;
+                    }
+                }
+                assert!(!spawned.is_empty(), "sector {sector}: nothing spawned at {t} s");
+                let now = w.elapsed;
+                let hp0 = director::horde_hp_mult_for(0, now);
+                let mods0 = director::enemy_mods_for(0, now);
+                assert_eq!(mods0.damage, 1.0, "level 0 has no damage ramp");
+                // The sector's own curve is measurably different, so the
+                // assertions below can tell the two apart.
+                assert!(director::enemy_mods_for(sector, now).damage > 1.005);
+                for e in &spawned {
+                    let rel = e.max_hp / e.kind.base_hp();
+                    assert!(
+                        (rel - hp0).abs() < 0.01,
+                        "sector {sector} at {t} s: {:?} hp mult {rel}, level 0's is {hp0}",
+                        e.kind
+                    );
+                    let base: f32 = EnemyKind::damage(e.kind);
+                    assert!(
+                        (e.damage - base * mods0.damage).abs() < 1e-3,
+                        "sector {sector} at {t} s: {:?} damage {} is not level 0's {}",
+                        e.kind,
+                        e.damage,
+                        base * mods0.damage
+                    );
+                }
+            }
+        }
+    }
+
     /// Render a real frame and dump it as a PPM (each cell → 1×2 pixels:
     /// fg on top, bg below). Gated behind RATRUN_DUMP (value selects the
     /// screen: play|story|levelup|treasure|chest) so it's a manual screenshot tool.
@@ -3576,6 +3634,39 @@ mod tests {
             }
             "story" => {
                 hh.frame(&[KeyCode::Char('l')]);
+            }
+            // A named miniboss mid-tell, with its nameplate and the 15:00 clock
+            // (wave 3). The appointment is pinned past the live schedule so the
+            // test body is not immediately retreated.
+            t if t == "miniboss" || t.starts_with("miniboss-") => {
+                hh.enter_playing();
+                use crate::game::ecs::systems::miniboss::{
+                    Miniboss, MinibossKind, MinibossState,
+                };
+                let which = match t.strip_prefix("miniboss-").unwrap_or("corkscrew") {
+                    "snip" => MinibossKind::SisterSnip,
+                    "bobbin" => MinibossKind::Bobbin,
+                    "bell" => MinibossKind::BellDiver,
+                    "foreman" => MinibossKind::Foreman,
+                    "milk" => MinibossKind::MilkCarton,
+                    _ => MinibossKind::Corkscrew,
+                };
+                let w = hh.app.world.as_mut().unwrap();
+                w.elapsed = 186.0;
+                w.ecs
+                    .resource_mut::<crate::game::ecs::systems::miniboss::MinibossSchedule>()
+                    .next = 1;
+                let p = w.player.pos;
+                let pos = p + Vec2::new(48.0, 0.0);
+                let e = w.spawn_miniboss(which, 0, pos);
+                {
+                    let mut mb = w.ecs.get_mut::<Miniboss>(e).unwrap();
+                    mb.state = MinibossState::Tell;
+                    mb.timer = 0.25;
+                    mb.origin = pos;
+                    mb.aim = (p - pos).normalized();
+                }
+                hh.frame(&[]);
             }
             // The two player-triggered weapons, mid-effect, over a real horde:
             // `RATRUN_DUMP=thrash` catches the tail arc a few frames into its

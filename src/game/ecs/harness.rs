@@ -294,12 +294,12 @@ fn trace_hash(script_mode: Script, theme: Theme, seed: u64) -> u64 {
 /// `weapons::tests::pressing_space_without_active_weapons_changes_nothing`
 /// pins down directly.
 const CASES: [(Script, Theme, u64, u64); 6] = [
-    (Script::Wander, Theme::Sewer, 11, 2549154157550500772),
-    (Script::Wander, Theme::Kitchen, 29, 9362152289744513561),
-    (Script::Wander, Theme::Lab, 1234, 12720693431335239454),
-    (Script::Evade, Theme::Sewer, 11, 9942253058135604956),
-    (Script::Evade, Theme::Kitchen, 29, 9351799366380081141),
-    (Script::Evade, Theme::Lab, 1234, 17564447361494193217),
+    (Script::Wander, Theme::Sewer, 11, 5746752991163880937),
+    (Script::Wander, Theme::Kitchen, 29, 7846659115104949610),
+    (Script::Wander, Theme::Lab, 1234, 4530738605580125554),
+    (Script::Evade, Theme::Sewer, 11, 14544662130699174509),
+    (Script::Evade, Theme::Kitchen, 29, 12893660204553364186),
+    (Script::Evade, Theme::Lab, 1234, 18057423521044793719),
 ];
 
 #[test]
@@ -365,8 +365,12 @@ fn scripted_crowd_reaches_the_cap_curve() {
             break;
         }
     }
+    // The 15-minute curve opens at 0.8→1.5 bodies/s, so 60 s of the Evade
+    // script (which kills as it flees) holds a smaller peak than the old
+    // 300 s curve did. The trace is still non-vacuous as long as the crowd
+    // and a second kind appear.
     assert!(
-        peak >= 15,
+        peak >= 8,
         "crowd never grew (peak {peak}): the trace cases would be vacuous"
     );
     assert!(

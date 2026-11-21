@@ -15,6 +15,7 @@
 //! | 2 | `fog::reveal_system` | fog of war (minimap; new, writes only `Fog`) |
 //! | 3 | `enemy_move::flow_refresh_system` | flow refresh |
 //! | 4 | `spawn::director_system` | `run_director` |
+//! | 4a | `miniboss::miniboss_system` | named miniboss appointments, retreats and signatures (wave 3); explicitly after 4 and before 4b |
 //! | 4b | `boss::boss_spawn_system` | boss hand-off (reads `BossDue`) |
 //! | 5 | `enemy_move::enemy_steering_system` | `update_enemies` steer |
 //! | 6 | `enemy_move::enemy_fire_system` | `update_enemies` fire |
@@ -38,11 +39,11 @@
 //! | 16c | `enemy_wave3::wave3_system` | wave-3 kinds' tells, hazards, wick fuse (new); after every weapon damage pass so a moth any of them killed lights its wick |
 //! | 16d | `trailer::trailer_system` | the flatbed's holes, cargo and wind (new; `Theme::Trailer` only); a fall can kill, so it runs before 16e |
 //! | 16e | `weapons_wave3a::hantavirus_death_system` | death-triggered jumps (sees evolution, wick-burst and fall kills), before the reap |
-//! | 17 | `loot::reap_enemies_system` | `reap_enemies` |
+//! | 17 | `loot::reap_enemies_system` | `reap_enemies`; a named miniboss's chest + gold drop here (`miniboss::drop_loot`) |
 //! | 18 | `loot::gems_system` | `update_gems` |
 //! | 18b | `loot::treasure_system` | gold and chests |
 //! | 19 | `loot::pickups_system` | `update_pickups` |
-//! | 20 | `loot::nuke_reap_system` | the nested re-reap after a Nuke |
+//! | 20 | `loot::nuke_reap_system` | the nested re-reap after a Nuke (same miniboss drop, so a nuked miniboss still leaves its chest) |
 //! | 21 | `fx::particles_system` | `particles.update(dt)` |
 //! | 22 | `damage_numbers_system` | `damage_numbers.update(dt)` (neon merge) |
 //! | 23 | `fx::shake_system` | shake decay + jitter |
@@ -88,8 +89,8 @@ use bevy_ecs::prelude::*;
 
 use super::resources::TickInput;
 use super::systems::{
-    boss, combat, enemy_move, enemy_wave3, evolutions, fog, fx, gates, loot, player, powerups,
-    projectiles, shop, spawn, trailer, traps, weapons, weapons_wave3a, weapons_wave3b,
+    boss, combat, enemy_move, enemy_wave3, evolutions, fog, fx, gates, loot, miniboss, player,
+    powerups, projectiles, shop, spawn, trailer, traps, weapons, weapons_wave3a, weapons_wave3b,
 };
 
 /// Legacy `self.damage_numbers.update(dt)` (neon merge, `World::update`).
@@ -189,6 +190,23 @@ pub fn build_tick_schedule() -> Schedule {
             .chain()
             .after(weapons::active_weapons_system)
             .before(weapons_wave3a::acid_rain_system),
+    );
+
+    // 4a: named miniboss appointments: spawn/retreat and the signature state
+    // machine. It runs right after the director (so its spawn lands before the
+    // grid build) and before the boss hand-off, in its own explicitly ordered
+    // step because the first tuple is kept for the legacy chain.
+    //
+    // There is no separate miniboss system in the contact→reap chain: a
+    // miniboss is an ordinary `Enemy` body, so every damage pass between
+    // `contact_system` and `reap_enemies_system` (evolutions, the wave-3
+    // enemies, the flatbed, the Hantavirus death jump) treats it as one, and
+    // its chest is dropped by the reap itself (rows 17 and 20). That is what
+    // makes the chest path-independent: whatever killed it, it is reaped.
+    schedule.add_systems(
+        miniboss::miniboss_system
+            .after(spawn::director_system)
+            .before(boss::boss_spawn_system),
     );
 
     // The interactive-object runtime (gates.rs): rat-holes + centring, the

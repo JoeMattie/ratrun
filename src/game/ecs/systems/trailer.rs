@@ -147,7 +147,11 @@ pub fn trailer_system(
         // Flea is on the ground between hops and teleports to its locked
         // landing point, so it falls exactly when a landing point is a hole,
         // by the ordinary rule below.)
-        if !e.alive() || e.kind == EnemyKind::WickMoth || deck.pit_at(e.pos).is_none() {
+        //
+        // A named miniboss does not fall either: a pit must never kill it (no
+        // rat earned that chest) or strand it across the deck, so it treads
+        // the holes like the moth flies them.
+        if !e.alive() || e.named || e.kind == EnemyKind::WickMoth || deck.pit_at(e.pos).is_none() {
             continue;
         }
         let class = SizeClass::of_radius(e.radius);

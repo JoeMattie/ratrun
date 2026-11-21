@@ -14,6 +14,7 @@ pub mod fog;
 pub mod fx;
 pub mod gates;
 pub mod loot;
+pub mod miniboss;
 pub mod player;
 pub mod powerups;
 pub mod projectiles;

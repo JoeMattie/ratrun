@@ -310,8 +310,9 @@ pub fn wave3_system(
             continue;
         }
         // The porter's casebook: any wounded body on the horde's side (the boss
-        // aside), not only the wave-3 kinds.
-        if e.hp < e.max_hp {
+        // aside), not only the wave-3 kinds. A named miniboss is not an
+        // "ordinary ally" (§9), so a Porter never tops up an appointment.
+        if e.hp < e.max_hp && !e.named {
             scratch.allies.push(AllySnap {
                 id: self_id,
                 pos: e.pos,

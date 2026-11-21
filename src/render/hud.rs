@@ -186,7 +186,7 @@ pub fn boss_codename(theme: Theme) -> (&'static str, &'static str) {
 pub fn threat_tier(curve: f32, boss: bool) -> u8 {
     if boss {
         5
-    } else if curve >= 120.0 {
+    } else if curve >= 540.0 {
         4
     } else if curve >= director::ELITE_START {
         3
@@ -332,6 +332,8 @@ pub struct HudState {
     // Overlay retained buffers (accessed by `overlay.rs`).
     pub(crate) boss_hp_text: String,
     pub(crate) boss_banner: String,
+    /// Nameplate text for the living named miniboss (wave 3).
+    pub(crate) miniboss_text: String,
 
     // Smooth visual state & feedback timers.
     pub clock: f32,
@@ -403,6 +405,7 @@ impl Default for HudState {
             buffs: String::with_capacity(24),
             boss_hp_text: String::with_capacity(24),
             boss_banner: String::with_capacity(48),
+            miniboss_text: String::with_capacity(48),
             clock: 0.0,
             hp_trail: 1.0,
             hp_trail_hold: 0.0,
@@ -2111,7 +2114,7 @@ mod tests {
 
     fn known_world() -> World {
         let mut w = World::new(Theme::Sewer, 7);
-        w.elapsed = 65.0; // boss at 255 s → 190 s left in the build-up
+        w.elapsed = 65.0; // boss at 900 s → 13:55 left in the build-up
         w.player.level = 3;
         w.kills = 42;
         w.score = 1234;
@@ -2154,7 +2157,7 @@ mod tests {
             .unwrap();
 
         let text = row_text(&terminal);
-        assert!(text.contains("03:10"), "missing countdown in {text:?}");
+        assert!(text.contains("13:55"), "missing countdown in {text:?}");
         assert!(text.contains("Lv3"), "missing level in {text:?}");
         assert!(text.contains("KO 42"), "missing kills in {text:?}");
         assert!(text.contains("Score 1234"), "missing score in {text:?}");
@@ -2239,7 +2242,7 @@ mod tests {
             "the pips overprinted a 57-column rail: {text:?}"
         );
         assert!(
-            text.contains("04:15"),
+            text.contains("15:00"),
             "the clock lost its slot: {text:?}"
         );
     }
@@ -2708,7 +2711,7 @@ mod tests {
     fn the_countdown_targets_the_boss_time_and_goes_urgent_at_thirty_seconds() {
         // The intended contract: 255 s of build-up, the last 30 s urgent, then
         // the boss-fight state (a count-up) forever after.
-        assert_eq!(director::BOSS_TIME, 255.0, "the boss time moved");
+        assert_eq!(director::BOSS_TIME, 900.0, "the boss time moved");
         assert_eq!(BOSS_URGENT_SECS, 30.0);
         let mut w = known_world();
         let mut state = HudState::default();
@@ -2802,13 +2805,11 @@ mod tests {
             threat_tier(director::curve_clock(0, director::ELITE_START), false),
             3
         );
-        assert_eq!(threat_tier(director::curve_clock(0, 130.0), false), 4);
-        // The Kitchen opens 120 s into level 0's curve and the Lab at its 150 s
-        // mark (`director::LEVEL_CLOCK_OFFSET`), so a carried level starts at
-        // the top horde tier instead of the Sewer's calm one.
-        assert_eq!(threat_tier(director::curve_clock(1, 0.0), false), 4);
-        assert_eq!(threat_tier(director::curve_clock(2, 0.0), false), 4);
-        assert_eq!(threat_tier(director::curve_clock(1, 0.0), false), 4);
+        assert_eq!(threat_tier(director::curve_clock(0, 540.0), false), 4);
+        // Every stage opens with the same grace (wave-3 re-base): a carried
+        // level starts on the calm opening tier, not a mid-run one.
+        assert_eq!(threat_tier(director::curve_clock(1, 0.0), false), 1);
+        assert_eq!(threat_tier(director::curve_clock(2, 0.0), false), 1);
         // The boss phase is the top tier whatever the curve says.
         assert_eq!(threat_tier(director::curve_clock(0, 0.0), true), 5);
     }

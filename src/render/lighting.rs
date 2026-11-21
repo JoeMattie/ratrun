@@ -33,6 +33,7 @@ use crate::game::bullet::{Bullet, Faction};
 use crate::game::collision::{TileKind, TILE_F};
 use crate::game::ecs::components::Pool;
 use crate::game::ecs::systems::boss::{Boss, BossProjectile, BossProjectileKind, BossState};
+use crate::game::ecs::systems::miniboss::{Miniboss, MinibossState};
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::{Gem, Pickup};
 use crate::game::level::{Level, PropKind, Theme};
@@ -869,6 +870,33 @@ impl LightMap {
                     boss_phase = Some(boss.phase.max(1));
                 }
                 self.gather_boss_lights(boss, cam, vw, vh, elapsed);
+            }
+
+            // Named minibosses: the signature's telegraph is self-lit exactly
+            // like a boss hazard (amber while it warns, red while it bites), so
+            // the tell reads in a dark room.
+            if let Some(mb) = entity.get::<Miniboss>() {
+                let alive = entity.get::<Enemy>().is_some_and(|e| e.alive());
+                if let (true, Some(shape)) = (alive, mb.telegraph()) {
+                    let c = shape.center();
+                    let sx = c.x - cam.x;
+                    let sy = c.y - cam.y;
+                    let active = mb.state == MinibossState::Active;
+                    let r = if active { 46.0 } else { 36.0 };
+                    if in_range(sx, sy, r) {
+                        self.lights.push(PointLight {
+                            x: sx,
+                            y: sy,
+                            radius: r,
+                            color: if active { (255, 92, 66) } else { (255, 195, 76) },
+                            intensity: if active { 260 } else { 205 },
+                            scatter: if active { 68 } else { 44 },
+                            priority: 3,
+                            occlude: false,
+                            hard: false,
+                        });
+                    }
+                }
             }
         }
 

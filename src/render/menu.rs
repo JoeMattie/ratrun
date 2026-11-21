@@ -1776,12 +1776,12 @@ mod tests {
         let mut hits = HitMap::default();
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
 
-        w.elapsed = 65.0; // 255 s boss time → 03:10 to go
+        w.elapsed = 65.0; // 900 s boss time → 13:55 to go
         terminal
             .draw(|f| draw_pause_with_run(f, f.area(), &w, true, DashKey::Space, &mut hits))
             .unwrap();
         let text = screen_text(&terminal);
-        assert!(text.contains("03:10 to boss"), "no build-up clock: {text}");
+        assert!(text.contains("13:55 to boss"), "no build-up clock: {text}");
 
         w.elapsed = crate::game::director::BOSS_TIME + 42.0;
         terminal

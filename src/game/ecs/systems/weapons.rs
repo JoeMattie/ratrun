@@ -1461,7 +1461,10 @@ fn ratchet_swing(
         let Ok((_, _, e)) = enemies.get(entity) else {
             continue;
         };
-        if !e.alive() || e.elite || matches!(e.kind, EnemyKind::Brute | EnemyKind::Boss) {
+        // Heavy targets take the whip hit only (§3): elites, named
+        // minibosses and every `EnemyKind::heavy()` body, a Pillbug included
+        // (curled or not, it is never hooked or swung into).
+        if !e.alive() || e.elite || e.named || e.kind.heavy() {
             continue;
         }
         let d = e.pos.dist(ppos);
@@ -1537,7 +1540,7 @@ fn ratchet_swing(
         let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
             continue;
         };
-        if !e.alive() || e.elite || matches!(e.kind, EnemyKind::Brute | EnemyKind::Boss) {
+        if !e.alive() || e.elite || e.named || e.kind.heavy() {
             continue;
         }
         let rel = e.pos - ppos;

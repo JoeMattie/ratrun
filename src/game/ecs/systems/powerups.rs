@@ -115,6 +115,13 @@ pub fn decoy_lures(elite: bool, kind: EnemyKind) -> bool {
     !elite && kind != EnemyKind::Boss
 }
 
+/// [`decoy_lures`] for a live body: a named miniboss (an ordinary-kind body
+/// with `Enemy::named`) keeps the rat as its target exactly like an elite.
+#[inline]
+pub fn decoy_lures_body(e: &crate::game::enemy::Enemy) -> bool {
+    !e.named && decoy_lures(e.elite, e.kind)
+}
+
 /// Spawn a live key at `pos` (the Wind-up Mouse's floor decoy).
 ///
 /// Systems spawn this through `Commands` from `loot::pickups_system`; tests and

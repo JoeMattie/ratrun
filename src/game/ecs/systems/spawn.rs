@@ -76,6 +76,7 @@ use crate::game::ecs::constants::ENEMY_CAP;
 use crate::game::ecs::resources::{
     BossDue, DifficultyLevel, LevelIndex, NextEnemyId, NextSpawnId, RngRes, RunCounters, TickInput, Viewport,
 };
+use crate::game::ecs::systems::miniboss::MinibossSchedule;
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::level::{Level, MazeSection, Room, RoomKind, TileRect};
 use crate::game::player::Player;
@@ -211,6 +212,7 @@ pub fn director_system(
     level_index: Res<LevelIndex>,
     difficulty: Res<DifficultyLevel>,
     mut director: ResMut<Director>,
+    schedule: Res<MinibossSchedule>,
     mut boss_due: ResMut<BossDue>,
     mut rng: ResMut<RngRes>,
     mut next_id: ResMut<NextSpawnId>,
@@ -231,12 +233,14 @@ pub fn director_system(
     let mods = director::enemy_mods_for(difficulty.0, elapsed);
     // Keep one slot reserved for the level's boss until it is due, so the live
     // count stays `<= ENEMY_CAP` for the whole level: the boss framework spends
-    // the reservation on the boss itself.
-    let cap = if director.boss_spawned {
+    // the reservation on the boss itself. A living miniboss also has its own
+    // reserved slot, separate from the horde's budget.
+    let cap = (if director.boss_spawned {
         ENEMY_CAP
     } else {
         ENEMY_CAP - 1
-    };
+    })
+    .saturating_sub(schedule.active as usize);
     // Legacy `self.enemies.len()` is the *live* length, which grows with every
     // push inside the pulse. `Commands` defers those pushes, so mirror the
     // growth locally: live count + spawns queued by this system.
@@ -254,23 +258,25 @@ pub fn director_system(
 
     director.spawn_timer -= dt;
     if director.spawn_timer <= 0.0 {
-        // Boss phase: a thinner horde (see `BOSS_HORDE_INTERVAL_MULT`).
+        // After the boss arrives the ordinary horde falls to the design's
+        // cleanup pace (1 body/s, live budget 35); during the build-up it uses
+        // the §1 curve. A miniboss arrival also halves the rate for 20 s, and
+        // its death suppresses fresh spawns for 8 s.
         let boss_phase = director.boss_spawned;
-        director.spawn_timer = director::spawn_interval_at(curve)
-            * if boss_phase {
-                BOSS_HORDE_INTERVAL_MULT
-            } else {
-                1.0
-            };
-        let count = if boss_phase {
-            (director::pulse_count_at(curve) / BOSS_HORDE_PULSE_DIV).max(1)
-        } else {
-            director::pulse_count_at(curve)
-        };
+        let grace = schedule.spawn_interval_mult(elapsed);
+        director.spawn_timer = director::horde_interval(elapsed, boss_phase) * grace;
+        let count = director::horde_pulse(elapsed, boss_phase);
+        let budget = director::horde_live_budget(elapsed, boss_phase);
+        let live = enemies.iter().count();
+        if schedule.suppress(elapsed) {
+            // Quiet after the death: hold every fresh spawn, but keep the
+            // boss hand-off alive.
+            director::raise_boss_due(&mut director, &mut boss_due, elapsed, level_index.0);
+            return;
+        }
         // Horde hp: the level's curve *and* its `LEVEL_HP_EXTRA` (the boss's
         // pool stays on `hp_mult_for`, so this cannot stretch a boss fight).
         let mult = director::horde_hp_mult_for(difficulty.0, elapsed);
-        let live = enemies.iter().count();
         // One pulse in `ROOM_WAVE_EVERY` brings its first enemy in through a
         // doorway of a room the player is not in, so the horde arrives instead
         // of all of it materialising on the ring.
@@ -294,7 +300,7 @@ pub fn director_system(
             None
         };
         for i in 0..count {
-            if live + queued >= cap {
+            if live + queued >= cap || live + queued >= budget {
                 break;
             }
             let kind = director::pick_kind_for(difficulty.0, elapsed, &mut rng.0);
@@ -327,9 +333,17 @@ pub fn director_system(
     // Periodic elite brute. Skip it instead of taking the boss's slot, and skip
     // outright when no safe point exists.
     director.elite_timer -= dt;
-    if director.elite_timer <= 0.0 && curve > director::ELITE_START {
-        director.elite_timer = director::elite_interval_for(difficulty.0);
-        if enemies.iter().count() + queued < cap {
+    //
+    // An elite never arrives within `ELITE_APPOINTMENT_GAP` of a miniboss
+    // appointment (one named threat at a time): a due elite waits, with its
+    // timer left spent and no rng drawn, and fires when the window closes.
+    if director.elite_timer <= 0.0
+        && curve > director::ELITE_START
+        && !director::near_appointment(elapsed)
+    {
+        director.elite_timer = director::elite_interval_at(curve);
+        let elites = enemies.iter().filter(|e| e.elite).count();
+        if enemies.iter().count() + queued < cap && elites < 3 {
             if let Some(pos) = spawn_point_reachable(
                 &mut rng.0,
                 &level,
@@ -1583,11 +1597,13 @@ mod tests {
             w.spawn_enemy(EnemyKind::Skitterer, centre, 1.0);
         }
         assert_eq!(w.enemies().len(), ENEMY_CAP - 4);
-        // Force a pulse this tick; at 100 s it asks for 6 enemies but only 3
-        // slots exist (one is reserved for the boss).
+        // Force a pulse this tick. At 100 s the live body budget is 42 and the
+        // map already holds far more than that, so the director must add
+        // nothing — and it must never overshoot the cap either.
         w.director.spawn_timer = 0.0;
         director_tick(&mut w, 0.1, 100.0);
-        assert_eq!(w.enemies().len(), ENEMY_CAP - 1);
+        assert_eq!(w.enemies().len(), ENEMY_CAP - 4, "an overspent pulse spawned");
+        assert!(w.enemies().len() < ENEMY_CAP);
         assert!(!w.director.boss_spawned);
     }
 
@@ -1598,32 +1614,21 @@ mod tests {
         let mut w = World::new(Theme::Sewer, 17);
         let dt = 0.1;
         let mut elapsed = 0.0;
-        loop {
+        while elapsed + dt < director::BOSS_TIME {
             elapsed += dt;
-            assert!(elapsed < director::BOSS_TIME);
             director_tick(&mut w, dt, elapsed);
             assert!(
                 w.enemies().len() < ENEMY_CAP,
                 "cap exceeded at {elapsed:.1}s: {}",
                 w.enemies().len()
             );
-            assert!(!w.director.boss_spawned);
-            if w.enemies().len() == ENEMY_CAP - 1 {
-                break;
-            }
+            assert!(!w.director.boss_spawned, "the boss came early");
         }
-        // The hand-off tick still spawns against the reserved cap (the boss is
-        // not due yet when the pulse runs) and releases the slot for the boss.
+        // At the boss time the hand-off releases the slot for the boss itself.
         director_tick(&mut w, dt, director::BOSS_TIME);
         assert!(w.director.boss_spawned);
         assert!(w.ecs.resource::<BossDue>().is_pending());
         assert!(w.enemies().len() <= ENEMY_CAP);
-        // From the next tick on, the horde may use the last slot; the boss
-        // framework spends its own reservation (a 600-body cap with the boss is
-        // still 600 bodies, one of them the boss).
-        w.director.spawn_timer = 0.0;
-        director_tick(&mut w, 0.5, director::BOSS_TIME + 0.5);
-        assert_eq!(w.enemies().len(), ENEMY_CAP);
     }
 
     /// The boss is handed over, not spawned: at `BOSS_TIME` the director raises
@@ -1698,18 +1703,21 @@ mod tests {
             "the horde stopped spawning after the boss was due"
         );
         assert!(
-            w.enemies().len() < ENEMY_CAP,
-            "the boss-phase trickle filled the map in 24 s: {} bodies",
+            w.enemies().len() <= director::CLEANUP_LIVE_BUDGET,
+            "the boss-phase trickle exceeded the cleanup budget: {} bodies",
             w.enemies().len()
         );
-        // Given four more minutes of boss phase it still climbs all the way to
-        // the cap and never past it.
+        // Given four more minutes of boss phase it reaches the cleanup budget
+        // and never past it, and the 600-body cap is never touched.
         for k in 1..=1200 {
             director_tick(&mut w, 0.2, director::BOSS_TIME + 24.0 + k as f32 * 0.2);
             peak = peak.max(w.enemies().len());
         }
-        assert_eq!(peak, ENEMY_CAP, "the boss-phase horde never reached the cap");
-        assert_eq!(w.enemies().len(), ENEMY_CAP, "the cap slipped");
+        assert_eq!(
+            peak, director::CLEANUP_LIVE_BUDGET,
+            "the boss-phase horde never reached the cleanup budget"
+        );
+        assert!(w.enemies().len() <= ENEMY_CAP, "the cap slipped");
     }
 
     /// Elites are gated on `elapsed > ELITE_START` (strictly greater), spawn a
@@ -1722,16 +1730,60 @@ mod tests {
         director_tick(&mut w, 0.0, director::ELITE_START);
         assert!(!w.enemies().iter().any(|e| e.kind == EnemyKind::Brute));
 
+        // Past the gate but inside the first appointment's window: the due
+        // elite is held (one named threat at a time), and its timer stays
+        // spent so it fires the moment the window closes.
         director_tick(&mut w, 0.1, director::ELITE_START + 0.1);
+        assert!(director::near_appointment(director::ELITE_START + 0.1));
+        assert!(!w.enemies().iter().any(|e| e.elite), "an elite shared the miniboss's arrival");
+        assert!(w.director.elite_timer <= 0.0, "a held elite must stay due");
+
+        let open = director::MINIBOSS_TIMES[0] + director::ELITE_APPOINTMENT_GAP + 0.1;
+        assert!(!director::near_appointment(open));
+        director_tick(&mut w, 0.1, open);
         let enemies = w.enemies();
         let brute = enemies
             .iter()
-            .find(|e| e.kind == EnemyKind::Brute)
-            .expect("an elite brute must spawn once the gate opens");
-        assert_eq!(w.director.elite_timer, director::ELITE_INTERVAL);
-        let expected =
-            EnemyKind::Brute.base_hp() * director::hp_mult(director::ELITE_START + 0.1) * 1.6;
+            .find(|e| e.elite)
+            .expect("an elite brute must spawn once the appointment window closes");
+        assert_eq!(brute.kind, EnemyKind::Brute);
+        assert_eq!(
+            w.director.elite_timer,
+            director::elite_interval_at(director::curve_clock(0, open))
+        );
+        let expected = EnemyKind::Brute.base_hp() * director::hp_mult(open) * 1.6;
         assert!((brute.max_hp - expected).abs() < 1e-3, "hp = {}", brute.hp);
+    }
+
+    /// No elite spawns within `ELITE_APPOINTMENT_GAP` of any appointment, on
+    /// either side, however long its timer has been spent.
+    #[test]
+    fn no_elite_spawns_inside_an_appointment_window() {
+        for &at in director::MINIBOSS_TIMES {
+            for offset in [-19.9f32, -10.0, 0.0, 10.0, 19.9] {
+                // Skip instants before the elite gate itself.
+                if at + offset <= director::ELITE_START {
+                    continue;
+                }
+                let mut w = World::new(Theme::Sewer, 29);
+                w.director.elite_timer = 0.0;
+                // Keep the ordinary pulse out of the picture.
+                w.director.spawn_timer = 1.0e6;
+                director_tick(&mut w, 0.1, at + offset);
+                assert!(
+                    !w.enemies().iter().any(|e| e.elite),
+                    "an elite spawned {offset:+} s from the {at} s appointment"
+                );
+            }
+            let mut w = World::new(Theme::Sewer, 29);
+            w.director.elite_timer = 0.0;
+            w.director.spawn_timer = 1.0e6;
+            director_tick(&mut w, 0.1, at + director::ELITE_APPOINTMENT_GAP + 0.5);
+            assert!(
+                w.enemies().iter().any(|e| e.elite),
+                "the held elite never arrived after the {at} s appointment"
+            );
+        }
     }
 
     /// The elite branch never takes the boss's reserved slot.
@@ -1743,7 +1795,8 @@ mod tests {
             w.spawn_enemy(EnemyKind::Skitterer, centre, 1.0);
         }
         w.director.elite_timer = 0.0;
-        director_tick(&mut w, 0.1, director::ELITE_START + 1.0);
+        let open = director::MINIBOSS_TIMES[0] + director::ELITE_APPOINTMENT_GAP + 1.0;
+        director_tick(&mut w, 0.1, open);
         assert_eq!(w.enemies().len(), ENEMY_CAP - 1, "elite took the boss slot");
         assert!(!w.enemies().iter().any(|e| e.kind == EnemyKind::Brute));
     }
@@ -1790,7 +1843,7 @@ mod tests {
         assert_eq!(a.level.arena, b.level.arena);
         let dt = 0.5;
         let mut elapsed = 0.0;
-        for _ in 0..620 {
+        for _ in 0..1900 {
             elapsed += dt;
             director_tick(&mut a, dt, elapsed);
             director_tick(&mut b, dt, elapsed);
@@ -1828,7 +1881,7 @@ mod tests {
         let mut w = World::new(Theme::Sewer, 47);
         let dt = 0.25;
         let mut elapsed = 0.0;
-        for _ in 0..240 {
+        for _ in 0..400 {
             elapsed += dt;
             director_tick(&mut w, dt, elapsed);
         }
@@ -2115,12 +2168,12 @@ mod tests {
         assert!(hits > 0, "no room wave ever found a staging room");
     }
 
-    /// The pacing curve fills a map ten times larger: at least 40 live enemies
-    /// before 60 s, and the whole 600-enemy cap by the end of the run. Driven
-    /// through the real director only (nobody moves or dies), so it is exact
-    /// and cheap.
+    /// The pacing curve follows §1's live budget: the first minute stays under
+    /// its 18-body opening budget, the horde grows to the late 165-body budget
+    /// by the boss time, and the 600-body cap is never touched. Driven through
+    /// the real director only (nobody moves or dies), so it is exact and cheap.
     #[test]
-    fn the_pacing_curve_reaches_forty_early_and_the_cap_late() {
+    fn the_pacing_curve_stays_on_the_live_budget() {
         let mut w = World::new(Theme::Lab, 9);
         let dt = 0.1;
         let mut elapsed = 0.0;
@@ -2136,10 +2189,18 @@ mod tests {
             peak = peak.max(live);
         }
         assert!(
-            early_peak >= 40,
+            early_peak <= director::live_budget_at(59.9),
+            "the opening exceeded its live budget: {early_peak}"
+        );
+        assert!(
+            early_peak >= 12,
             "only {early_peak} enemies before 60 s: the horde never builds"
         );
-        assert_eq!(peak, ENEMY_CAP, "the curve never fills the 600-enemy cap");
+        assert!(
+            (120..=165).contains(&peak),
+            "the late horde did not reach its budget: peak {peak}"
+        );
+        assert!(peak < ENEMY_CAP, "the 600-body cap was touched: {peak}");
         assert!(w.director.boss_spawned, "the boss slot never filled");
         assert!(w.director.pulses > 100, "too few pulses: {}", w.director.pulses);
     }
@@ -2682,10 +2743,10 @@ mod tests {
         for level in 0..crate::game::campaign::LEVEL_COUNT {
             let mut w = World::new_level(level, 7, Loadout::starting());
             w.director.spawn_timer = 0.0;
-            director_tick(&mut w, 0.1, 30.0);
+            director_tick(&mut w, 0.1, 300.0);
             let enemies = w.enemies();
             assert!(!enemies.is_empty(), "level {level} spawned nothing");
-            let expected = director::horde_hp_mult_for(level, 30.0);
+            let expected = director::horde_hp_mult_for(level, 300.0);
             for e in enemies.iter().filter(|e| !e.elite) {
                 // (The elite branch stacks its own 1.6x on top of the curve.)
                 let base = e.max_hp / expected;

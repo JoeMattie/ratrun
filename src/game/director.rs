@@ -1,35 +1,49 @@
 //! Time-based spawn director. Replaces fixed waves with a difficulty curve:
 //! spawn rate, enemy HP, and the enemy mix all escalate with the run clock.
 //!
+//! ## Fifteen minutes on the floor (wave 3)
+//!
+//! A level is a **fifteen-minute** build-up followed by its themed boss
+//! (`WAVE3_DESIGN.md` §1). The clock reads 15:00 down to BOSS; the boss arrives
+//! at [`BOSS_TIME`] and the level ends when it or the rat dies. Four named
+//! minibosses arrive at [`MINIBOSS_TIMES`] (3:00, 6:00, 9:00, 12:00) and each
+//! leaves a chest; see `systems::miniboss`.
+//!
+//! Every curve function reads [`curve_clock`], so enemy hp, the spawn rate, the
+//! kind unlocks, the elite cadence and the live budget all move together. The
+//! tables are the design doc's §1 rows, piecewise-linear between row endpoints:
+//!
+//! | Clock | Bodies/s | Live budget | Elite chance |
+//! |---|---:|---:|---:|
+//! | 0–1 | 0.8→1.5 | 18 | 0 |
+//! | 1–3 | 1.5→3 | 42 | 0 |
+//! | 3–6 | 3→5 | 72 | 0→1 % |
+//! | 6–9 | 5→7 | 105 | 1→2 % |
+//! | 9–12 | 7→9 | 135 | 2→3 % |
+//! | 12–15 | 9→11 | 165 | 3→4 % |
+//! | 15+ | 1 (cleanup) | 35 | 0 |
+//!
 //! ## Campaign levels
 //!
 //! The three maps are a campaign in order (Sewer → Kitchen → Lab — see
 //! [`crate::game::campaign`]) and the director takes the campaign level index
-//! every system tick (`resources::LevelIndex`). The level shifts the whole
-//! difficulty curve with [`LEVEL_CLOCK_OFFSET`]: level 2 opens where level 1's
-//! curve would be at 120 s and level 3 where it would be at 150 s, so the calm
-//! opening of the Sewer is gone and the player meets a mid- to late-run horde
-//! from the first second. Every curve function reads [`curve_clock`], so enemy
-//! hp, the spawn rate, the kind unlocks and the elite gate all move together.
-//!
-//! On top of the clock the later levels differ *in kind*, not only in size:
-//! [`LEVEL_HP_EXTRA`] makes their horde tougher than the clock alone implies
-//! (without inflating the boss, whose pool still follows [`hp_mult_for`]),
-//! [`LEVEL_MIX`] fields a different enemy mix per theme (ranged Spitters in the
-//! Kitchen, fast swarms in the Lab) and [`LEVEL_ELITE_INTERVAL`] brings elites
-//! more often. Those three are the per-level knobs; the level-1 curve itself
-//! ([`hp_mult_at`], [`spawn_interval_at`], [`pulse_count_at`], [`ELITE_START`])
-//! is shared by all levels and stays where it is.
+//! every system tick (`resources::LevelIndex`). The owner found the later
+//! levels far too hard on the old 300 s curves, so the wave-3 re-base is
+//! deliberately gentle: **no clock offset** (every stage opens with the same
+//! grace) and only +5 % / +10 % ordinary hp after 3:00 ([`LEVEL_HP_EXTRA`]).
+//! The per-level difference now lives in kind ([`LEVEL_MIX`]), elite cadence
+//! ([`LEVEL_ELITE_INTERVAL`]) and a small damage/speed ramp
+//! ([`enemy_mods_for`]).
 //!
 //! ## The boss
 //!
 //! The director no longer spawns a boss from the spawn ring. At [`BOSS_TIME`]
 //! it raises the `BossDue` signal ([`raise_boss_due`]) and the boss framework
 //! spawns the themed boss in its arena. The 25 s warning before [`BOSS_TIME`]
-//! is unchanged (`render::overlay::BOSS_WARNING_SECS`). The run clock keeps
-//! running, but [`curve_clock`] freezes at [`BOSS_TIME`], so the horde keeps
-//! arriving at the level's late-curve rate for as long as the boss fight lasts:
-//! the level ends when the boss or the rat dies, not when the clock does.
+//! is unchanged (`render::overlay::BOSS_WARNING_SECS`). Once the boss is on the
+//! floor the ordinary horde falls to **cleanup pace** (1 body/s, Skitterer/Bat,
+//! live budget 35) — the design's last row — while the curve clock freezes so
+//! the boss's own pool cannot run away.
 
 use rand::{Rng, RngExt};
 
@@ -40,52 +54,57 @@ use crate::game::ecs::resources::BossDue;
 /// this is the build-up, not a win condition: survival no longer ends a level,
 /// the boss fight does (see the module docs). Kept as the pacing anchor the HUD
 /// counts down from.
-pub const RUN_SECONDS: f32 = 300.0;
-pub const BOSS_TIME: f32 = RUN_SECONDS - 45.0;
-#[allow(dead_code)] // Empty until the miniboss director is wired.
-pub const MINIBOSS_TIMES: &[f32] = &[];
+pub const RUN_SECONDS: f32 = 900.0;
+/// The boss arrives at the end of the fifteen-minute build-up.
+pub const BOSS_TIME: f32 = RUN_SECONDS;
+/// Named miniboss appointments (§8): 3:00, 6:00, 9:00, 12:00.
+pub const MINIBOSS_TIMES: &[f32] = &[180.0, 360.0, 540.0, 720.0];
 /// Elites (buffed brutes) only start spawning once the *curve* clock passes
 /// this — the world's elite branch gates on the same instant.
-pub const ELITE_START: f32 = 90.0;
+pub const ELITE_START: f32 = 180.0;
 /// Gap between elites once they start, and the value the timer is reset to.
+/// Kept for the level-1 row; the running system uses [`elite_interval_at`],
+/// which follows the design's elite-chance column.
 pub const ELITE_INTERVAL: f32 = 40.0;
+
+/// Seconds either side of a miniboss appointment in which no elite may spawn.
+///
+/// Design intent (§8): a build faces **one named threat at a time**. The elite
+/// gate ([`ELITE_START`]) opens on the very second the first miniboss arrives,
+/// so without this window the first elite and the first appointment would land
+/// together. The director holds a due elite (its timer stays spent, no rng is
+/// drawn) and spawns it on the first tick after the window closes.
+pub const ELITE_APPOINTMENT_GAP: f32 = 20.0;
+
+/// Is the run clock inside [`ELITE_APPOINTMENT_GAP`] of a miniboss appointment?
+#[inline]
+pub fn near_appointment(elapsed: f32) -> bool {
+    MINIBOSS_TIMES
+        .iter()
+        .any(|at| (elapsed - at).abs() < ELITE_APPOINTMENT_GAP)
+}
 
 /// How far along level 0's curve each campaign level opens, in seconds.
 ///
-/// The player keeps three upgrades between levels, so a level-2 player is
-/// expected to handle a late-run horde from the first second: the **Kitchen**
-/// opens where the Sewer's curve is 120 s in (hp ×2.5, 8 enemies a pulse, every
-/// kind unlocked, the elite gate long open) and the **Lab** at its 150 s mark
-/// (hp ×2.9, 9 a pulse; the horde's own [`LEVEL_HP_EXTRA`] is on top of that). There is no calm opening on a carried level — that is
-/// what `LEVEL_CLOCK_OFFSET` buys. Every curve function is a function of
-/// [`curve_clock`], so one table moves hp, the spawn curve, the kind unlocks and
-/// the elite gate together.
-///
-/// The offset also raises the *boss* pool (the boss reads [`hp_mult_for`]), so
-/// it is kept modest on purpose: the rest of the later levels' pressure lives in
-/// [`LEVEL_HP_EXTRA`], [`LEVEL_ELITE_INTERVAL`], [`LEVEL_MIX`] and
-/// [`enemy_mods_for`], which the boss does not read.
-pub const LEVEL_CLOCK_OFFSET: [f32; 3] = [0.0, 120.0, 150.0];
+/// **Wave-3 re-base.** The old 300 s curves opened the Kitchen 120 s in and the
+/// Lab 150 s in, which the owner measured as far too hard on a 15-minute level.
+/// Every stage now opens with the same grace (`0.0`): the later stages differ by
+/// kind, elite cadence and a shallow damage/speed ramp, not by a head start.
+/// [`curve_clock`] still adds the offset, so a future tuning pass can bias a
+/// single stage without touching the tables.
+pub const LEVEL_CLOCK_OFFSET: [f32; 3] = [0.0, 0.0, 0.0];
 
-/// Extra horde toughness per campaign level, on top of the clock.
+/// Extra ordinary-horde toughness per campaign level, after the grace window.
 ///
-/// The clock offset alone also fattened the boss pool (the boss follows
-/// [`hp_mult_for`]), which pushed the boss fight past its 45-90 s target. So the
-/// later levels' extra pressure lives here instead: it multiplies the *horde's*
-/// hp only, at spawn time ([`horde_hp_mult_for`]). Level 2's horde is 62 %
-/// tougher than its clock says (×1.62) and level 3's 110 % (×2.1), which is
-/// what makes the carried build stop one-shotting skitterers and lets the horde
-/// stay on the screen long enough to surround the rat.
-///
-/// **Batch-4 trim.** This is the lever that replaced the part of the contact
-/// damage ramp that was removed (see [`LEVEL_DAMAGE_TOP`]): the first cut was
-/// ×1.55/×1.85, and with the ramp at ×4.1/×4.3 the later levels cleared at
-/// 74 %/80 % (Skilled). Raising the horde's *staying power* instead of its
-/// per-touch damage moved those to 69 %/58 % while a late brute touch stayed at
-/// 4.2-4.5 hits (it was 3.5-4.3 before the trim). A body that survives is a
-/// body on the screen, which is pressure the player can see and kite, not a
-/// number that kills in two frames.
-pub const LEVEL_HP_EXTRA: [f32; 3] = [1.0, 1.62, 2.1];
+/// §1: "Stages two/three add 5/10 % ordinary HP after 3:00, with the same
+/// opening grace." The multiplier is 1.0 until [`LEVEL_HP_EXTRA_AFTER`] on the
+/// run clock, then ramps linearly to the row's value by [`BOSS_TIME`], so the
+/// opening minutes of every stage are identical and the extra bite arrives
+/// during the build-up. It multiplies the *horde's* hp only, at spawn time
+/// ([`horde_hp_mult_for`]); the boss pool stays on [`hp_mult_for`].
+pub const LEVEL_HP_EXTRA: [f32; 3] = [1.0, 1.05, 1.10];
+/// Run-clock second after which a later stage's extra hp starts to apply.
+pub const LEVEL_HP_EXTRA_AFTER: f32 = 180.0;
 
 /// Seconds between elites, per campaign level.
 ///
@@ -97,11 +116,10 @@ pub const LEVEL_HP_EXTRA: [f32; 3] = [1.0, 1.62, 2.1];
 /// but they are also the fattest XP drop, so pushing it too far levels the rat
 /// up and makes the level easier again.
 ///
-/// The 30/23 values were the batch-4 *first* cut; when `LEVEL_DAMAGE_TOP` came
-/// down (a brute touch killed a carried rat in 3.5-4.3 hits late in levels 2-3,
-/// see that constant) these were tightened to 27/20 so the pressure the later
-/// levels lost with the ramp came back as *more brutes* — bodies the player can
-/// see, count and walk around — instead of bigger numbers on the same touch.
+/// The later stages keep the horde's bite in *bodies* rather than numbers: more
+/// elites and a different kind mix. These are the base intervals the running
+/// system uses when the curve's elite chance is zero; [`elite_interval_at`]
+/// follows the §1 elite-chance column instead.
 pub const LEVEL_ELITE_INTERVAL: [f32; 3] = [ELITE_INTERVAL, 27.0, 20.0];
 
 /// Per-level weighting of the kind table ([`pick_kind_for`]), columns in
@@ -251,10 +269,32 @@ pub fn raise_boss_due(director: &mut Director, due: &mut BossDue, elapsed: f32, 
     true
 }
 
+/// Boss-pool scale for the fifteen-minute build-up.
+///
+/// The §1 XP curve is deliberately cheap (a surviving player carries a
+/// near-complete build to 15:00), so the unchanged boss pools would die in
+/// seconds. The pool still follows the curve ([`hp_mult_for`]) but this scale
+/// keeps the fight inside its 45-80 s target. Measured with the bot: the pool
+/// needs to roughly double the old 300 s build's, because the new XP curve
+/// carries a near-complete build to 15:00.
+pub const BOSS_POOL_SCALE: f32 = 4.0;
+
+/// The boss's hp multiplier for a campaign level: the curve times
+/// [`BOSS_POOL_SCALE`] (the horde's own extra is deliberately excluded).
+#[inline]
+pub fn boss_hp_mult_for(level: usize, elapsed: f32) -> f32 {
+    hp_mult_for(level, elapsed) * BOSS_POOL_SCALE
+}
+
 /// How tough enemies are right now (HP multiplier) on the curve clock.
+///
+/// §1: "Keep ordinary HP scaling shallow (×1 at start to ×2 at 15:00)." The
+/// curve is linear over the fifteen minutes, so a skitterer that took one hit
+/// at 0:00 takes two at the boss. Later campaign stages add their own
+/// [`LEVEL_HP_EXTRA`] on top after the grace window.
 #[inline]
 pub fn hp_mult_at(curve: f32) -> f32 {
-    1.0 + curve / 80.0
+    1.0 + curve / RUN_SECONDS
 }
 
 /// [`hp_mult_at`] for a campaign level and the real run clock.
@@ -270,15 +310,101 @@ pub fn hp_mult(elapsed: f32) -> f32 {
     hp_mult_at(curve_clock(0, elapsed))
 }
 
-/// Seconds between spawn pulses at curve time `curve`, shrinking over time
-/// (floor 0.20 s).
+// ---- §1 pacing tables -----------------------------------------------------
+//
+// The design's §1 rows, as piecewise-linear knots. `curve` is the curve clock
+// (seconds). The rate table is the design's "Bodies/s" column; the budget table
+// is its "Live budget" column; the elite table is its "Elite chance per
+// ordinary spawn" column. Interpolate between row endpoints; the last row is
+// the boss-phase cleanup pace.
+
+/// Ordinary bodies attempted per second, by curve clock. Row endpoints are the
+/// §1 table's "Bodies/s" column.
+const BODIES_PER_SECOND: [(f32, f32); 7] = [
+    (0.0, 0.8),
+    (60.0, 1.5),
+    (180.0, 3.0),
+    (360.0, 5.0),
+    (540.0, 7.0),
+    (720.0, 9.0),
+    (900.0, 11.0),
+];
+
+/// Live ordinary-enemy budget by curve clock (the §1 "Live budget" column).
+/// A step table: each row holds from its clock until the next row's clock.
+const LIVE_BUDGET: [(f32, usize); 7] = [
+    (0.0, 18),
+    (60.0, 42),
+    (180.0, 72),
+    (360.0, 105),
+    (540.0, 135),
+    (720.0, 165),
+    (900.0, 165),
+];
+
+/// Elite chance per ordinary spawn by curve clock (the §1 column), as a
+/// fraction. Linear within a row.
+const ELITE_CHANCE: [(f32, f32); 7] = [
+    (0.0, 0.0),
+    (180.0, 0.0),
+    (360.0, 0.01),
+    (540.0, 0.02),
+    (720.0, 0.03),
+    (900.0, 0.04),
+    (900.0, 0.04),
+];
+
+/// Linear interpolation over a `(clock, value)` knot table. Clamps to the ends.
+#[inline]
+fn lerp_table(table: &[(f32, f32)], curve: f32) -> f32 {
+    let first = table[0];
+    if curve <= first.0 {
+        return first.1;
+    }
+    for w in table.windows(2) {
+        let (t0, v0) = w[0];
+        let (t1, v1) = w[1];
+        if curve <= t1 {
+            let span = (t1 - t0).max(1e-6);
+            return v0 + (v1 - v0) * ((curve - t0) / span).clamp(0.0, 1.0);
+        }
+    }
+    table[table.len() - 1].1
+}
+
+/// Ordinary bodies attempted per second at curve time `curve` (§1 table).
+#[inline]
+pub fn bodies_per_second_at(curve: f32) -> f32 {
+    lerp_table(&BODIES_PER_SECOND, curve)
+}
+
+/// Live ordinary-enemy budget at curve time `curve` (§1 table, step function).
+#[inline]
+pub fn live_budget_at(curve: f32) -> usize {
+    let mut budget = LIVE_BUDGET[0].1;
+    for &(t, b) in LIVE_BUDGET.iter() {
+        if curve >= t {
+            budget = b;
+        }
+    }
+    budget
+}
+
+/// Elite chance per ordinary spawn at curve time `curve` (fraction).
+#[inline]
+pub fn elite_chance_at(curve: f32) -> f32 {
+    lerp_table(&ELITE_CHANCE, curve)
+}
+
+/// Seconds between spawn pulses at curve time `curve`.
 ///
-/// The floor came down from 0.28 s and the pulse grew (see [`pulse_count_at`])
-/// for the ten-times-larger map: the horde has to fill 3200 × 2560 px instead
-/// of 1020 × 800, so the late game needs a noticeably higher spawn rate to keep
-/// the screen busy while the player kites across it.
+/// The pulse interval is the scheduling quantum; the pulse *size* is derived
+/// from the §1 rate table so the two together attempt
+/// [`bodies_per_second_at`] bodies per second. The interval shortens over the
+/// level (floor 0.35 s) so a late pulse is a handful of bodies rather than a
+/// wall of them.
 pub fn spawn_interval_at(curve: f32) -> f32 {
-    (1.7 - curve / 330.0).max(0.50)
+    (1.6 - curve / 900.0).max(0.35)
 }
 
 /// [`spawn_interval_at`] for a campaign level and the real run clock.
@@ -288,32 +414,17 @@ pub fn spawn_interval_for(level: usize, elapsed: f32) -> f32 {
 }
 
 /// The director's actual pulse interval at the real run clock (level 0), i.e.
-/// frozen at [`BOSS_TIME`]. The 0.20 s floor lives in [`spawn_interval_at`].
+/// frozen at [`BOSS_TIME`].
 #[inline]
 pub fn spawn_interval(elapsed: f32) -> f32 {
     spawn_interval_at(curve_clock(0, elapsed))
 }
 
-/// Enemies emitted per pulse at curve time `curve`, growing over time.
-///
-/// **The opening.** The merged balance passes left the first two minutes of
-/// every level harmless: the anomaly scan on 300 mixed campaigns found 172 runs
-/// (192 finds) where the rat lost **no health at all** for 60-129 s from the
-/// first tick ("opening calm: 129 s with no HP lost"), because the thin opening
-/// pulse spawned bodies that a kiting rat can simply out-walk.
-///
-/// Raising the starting pulse from 2 to 3 was measured and **rejected**: it put
-/// 50 % more bodies on the map in the first minute, which the rat farms, so
-/// every level got *easier* (casual level-1 clear 48 → 56 %, expert campaign
-/// win 43 → 84 % with an unchanged mix). More early bodies are more XP, not
-/// more pressure. Unlocking the **Spitter** earlier (75 s → 55 s on the curve)
-/// was the other candidate — its bullets reach a kiting rat that never has to
-/// be touched — but in the merged build it cost Skilled 12 points of level-1
-/// clear (72 → 60 %, 400 runs) for no measurable Casual change, so it was
-/// reverted with the pulse. The calm opening is reported as an open item in the
-/// batch4 report, with these two measured nulls.
+/// Enemies emitted per pulse at curve time `curve`, derived from the §1 rate
+/// table: `rate × interval`, rounded up so a pulse is never empty.
 pub fn pulse_count_at(curve: f32) -> usize {
-    (2.0 + curve / 20.0) as usize
+    let n = (bodies_per_second_at(curve) * spawn_interval_at(curve)).round();
+    (n as usize).max(1)
 }
 
 /// [`pulse_count_at`] for a campaign level and the real run clock.
@@ -346,14 +457,53 @@ pub fn spawn_rate(elapsed: f32) -> f32 {
     spawn_rate_at(curve_clock(0, elapsed))
 }
 
+/// The boss-phase cleanup pace (§1 last row): 1 body/s, 35 live, no elites.
+pub const CLEANUP_BODIES_PER_SECOND: f32 = 1.0;
+pub const CLEANUP_LIVE_BUDGET: usize = 35;
+/// Seconds between cleanup pulses.
+pub const CLEANUP_INTERVAL: f32 = 1.0;
+/// Bodies per cleanup pulse.
+pub const CLEANUP_PULSE: usize = 1;
+
+/// The pulse interval the running director uses: the curve's interval during
+/// the build-up, the cleanup pace once the boss is on the floor.
+#[inline]
+pub fn horde_interval(elapsed: f32, boss_phase: bool) -> f32 {
+    if boss_phase {
+        CLEANUP_INTERVAL
+    } else {
+        spawn_interval(elapsed)
+    }
+}
+
+/// The pulse size the running director uses (see [`horde_interval`]).
+#[inline]
+pub fn horde_pulse(elapsed: f32, boss_phase: bool) -> usize {
+    if boss_phase {
+        CLEANUP_PULSE
+    } else {
+        pulse_count(elapsed)
+    }
+}
+
+/// The live ordinary-enemy budget the running director uses.
+#[inline]
+pub fn horde_live_budget(elapsed: f32, boss_phase: bool) -> usize {
+    if boss_phase {
+        CLEANUP_LIVE_BUDGET
+    } else {
+        live_budget_at(curve_clock(0, elapsed))
+    }
+}
+
 /// Kinds that unlock over time: (unlock time, kind, weight). Kept in table
 /// order so the weighted roll keeps its historical result for a given rng
-/// state.
+/// state. Times are the §1 "First appearances" column for the five base kinds.
 const UNLOCKS: [(f32, EnemyKind, f32); 4] = [
-    (20.0, EnemyKind::Bat, 4.0),
-    (45.0, EnemyKind::Cat, 3.0),
-    (75.0, EnemyKind::Spitter, 2.0),
-    (120.0, EnemyKind::Brute, 1.5),
+    (45.0, EnemyKind::Bat, 4.0),
+    (75.0, EnemyKind::Cat, 3.0),
+    (215.0, EnemyKind::Spitter, 2.0),
+    (395.0, EnemyKind::Brute, 1.5),
 ];
 
 // ---- Wave 3 kinds ---------------------------------------------------------
@@ -452,8 +602,8 @@ pub fn pick_kind_at(curve: f32, rng: &mut impl Rng) -> EnemyKind {
 ///
 /// The roll is a single `random_range` over the summed weights and the table is
 /// walked in its historical order (skitterer first, then bat/cat/spitter/brute
-/// as they unlock), so the number and order of rng draws is unchanged: only the
-/// weights differ, and only for levels above 0.
+/// as they unlock, then the wave-3 kinds), so the number and order of rng draws
+/// is unchanged: only the weights differ, and only for levels above 0.
 pub fn pick_kind_mixed(curve: f32, level: usize, rng: &mut impl Rng) -> EnemyKind {
     let mix = &LEVEL_MIX[level_slot(level)];
     // One slot per possible kind, on the stack: this runs on every spawn roll
@@ -512,92 +662,91 @@ pub fn pick_kind_mixed(curve: f32, level: usize, rng: &mut impl Rng) -> EnemyKin
     }
     EnemyKind::Skitterer
 }
-
-/// [`pick_kind_at`] for a campaign level and the real run clock.
 #[inline]
 pub fn pick_kind_for(level: usize, elapsed: f32, rng: &mut impl Rng) -> EnemyKind {
     pick_kind_mixed(curve_clock(level, elapsed), level, rng)
 }
 
 /// The horde's hp multiplier on a campaign level: the curve, times the level's
-/// [`LEVEL_HP_EXTRA`]. The boss deliberately does **not** use this — its pool
-/// stays on [`hp_mult_for`], so a level's clock offset cannot stretch the boss
-/// fight past its target.
+/// [`LEVEL_HP_EXTRA`] after its grace window. The boss deliberately does **not**
+/// use this — its pool stays on [`hp_mult_for`].
 #[inline]
 pub fn horde_hp_mult_for(level: usize, elapsed: f32) -> f32 {
-    hp_mult_for(level, elapsed) * LEVEL_HP_EXTRA[level_slot(level)]
+    hp_mult_for(level, elapsed) * level_hp_extra(level, elapsed)
 }
 
 /// [`horde_hp_mult_for`] at an explicit curve time (tests, tuning).
 #[inline]
 pub fn horde_hp_mult_at(curve: f32, level: usize) -> f32 {
-    hp_mult_at(curve) * LEVEL_HP_EXTRA[level_slot(level)]
+    hp_mult_at(curve) * level_hp_extra_at(curve, level)
 }
 
-/// Seconds the elite timer is reset to on a campaign level.
+/// A campaign level's ordinary-hp multiplier at the real run clock: 1.0 during
+/// the opening grace, then a linear ramp to [`LEVEL_HP_EXTRA`] by the boss time.
+#[inline]
+pub fn level_hp_extra(level: usize, elapsed: f32) -> f32 {
+    level_hp_extra_at(elapsed.min(BOSS_TIME), level)
+}
+
+/// [`level_hp_extra`] at an explicit curve time.
+#[inline]
+pub fn level_hp_extra_at(curve: f32, level: usize) -> f32 {
+    let top = LEVEL_HP_EXTRA[level_slot(level)];
+    if top <= 1.0 {
+        return 1.0;
+    }
+    let t = ((curve - LEVEL_HP_EXTRA_AFTER) / (BOSS_TIME - LEVEL_HP_EXTRA_AFTER)).clamp(0.0, 1.0);
+    1.0 + (top - 1.0) * t
+}
+
+/// Seconds the elite timer is reset to on a campaign level (the base row; the
+/// running system prefers [`elite_interval_at`]).
 #[inline]
 pub fn elite_interval_for(level: usize) -> f32 {
     LEVEL_ELITE_INTERVAL[level_slot(level)]
 }
 
+/// Seconds between elite spawns at curve time `curve`, derived from the §1
+/// elite-chance column and the body rate.
+///
+/// The design expresses the elite cadence as a chance per ordinary spawn. The
+/// running director keeps the base's timer (`elite_timer` / `elite_interval`)
+/// rather than adding an rng draw per body, and derives the interval that
+/// produces the same rate: `1 / (chance × bodies/s)`. The 6 s floor keeps the
+/// "elites at three" cap the limiter instead of flooding the floor; before
+/// 3:00 the chance is zero, so the interval is infinite (no elites).
+#[inline]
+pub fn elite_interval_at(curve: f32) -> f32 {
+    let chance = elite_chance_at(curve);
+    if chance <= 0.0 {
+        // No elites yet: retry in a minute rather than never arming the timer.
+        return 60.0;
+    }
+    (1.0 / (chance * bodies_per_second_at(curve).max(0.1))).max(6.0)
+}
+
 /// The horde's damage multiplier at the top of a level's ramp (its boss time).
 ///
-/// A flat-armor build (Armor caps at 6) shrugs off a 5-damage skitterer and a
-/// 6-damage spitter completely, so a later level's horde has to hit harder than
-/// the Sewer's to be felt at all. It does **not** have to hit four times harder.
-///
-/// The first cut of this constant (×4.95/×5.0) was measured as *near-lethal*:
-/// with `RATRUN_HIT_TRACE` on 12 carried level-2 and level-3 practice runs, the
-/// median applied contact hit late in a level (180-255 s) was 66 (L2) and 63
-/// (L3) damage on a carried rat holding 230-270 max HP — **3.5 and 4.3 brute
-/// touches to kill, i.e. about 2.3-2.8 s inside the pack** at the 0.65 s contact
-/// grace, and 56-83 % of every level-2/3 death was "brute contact". Deaths could
-/// not be read, let alone answered. ×2.6/×2.4 puts a late brute touch at 36/32
-/// applied (6.5 and 8.3 touches, ~4-5 s of contact), a cat at 4-6 touches, and
-/// the horde's remaining bite lives in [`LEVEL_ELITE_INTERVAL`] and
-/// [`LEVEL_MIX`] instead: more, visible brutes and a real ranged line rather
-/// than bigger numbers per touch.
-const LEVEL_DAMAGE_TOP: [f32; 3] = [1.0, 4.1, 4.3];
+/// **Wave-3 re-base.** The old 300 s curves reached ×4.1/×4.3, which the owner
+/// measured as near-lethal on a 15-minute level. The shallow ramp keeps the
+/// later stages readable: contact damage is the base kind's, plus a small
+/// per-stage ramp. The horde's bite lives in [`LEVEL_ELITE_INTERVAL`] and
+/// [`LEVEL_MIX`] (more visible brutes, a real ranged line) instead.
+const LEVEL_DAMAGE_TOP: [f32; 3] = [1.0, 1.12, 1.20];
 
-/// The horde's speed multiplier at the top of a level's ramp.
-///
-/// The Lab's swarm is quick: a restless Lab horde catches a kiting rat and the
-/// `speed_mult` from the run clock (1 + t/400) stacks on top, which is what
-/// stops "walk away and shoot behind you" from clearing level 3.
-///
-/// **Concern (iii), measured.** The later-levels worker's Lab cliff (1.18 →
-/// 67 % clears, 1.22 → 27 %) does **not** reproduce on the merged build: the
-/// merged rat kills faster, so a faster horde walks *into* Tail Whip and Spore
-/// Orbit range and the curve flattens. Practice level 3 with the typical carry,
-/// 100 runs per cell, two seed bases (clear rate, base 1234/7777):
-///
-/// | `LEVEL_SPEED_TOP[2]` | Skilled | Expert |
-/// |---|---|---|
-/// | 1.15 | 38 / 52 % | 57 / 62 % |
-/// | 1.20 | 41 / 43 % | 63 / 67 % |
-/// | 1.25 | 40 / 41 % | 55 / 56 % |
-/// | 1.35 | 42 / 42 % | 55 / 51 % |
-///
-/// Flat within ±6 points for Skilled, gently down for Expert, no cliff anywhere
-/// in 1.15-1.35. 1.25 is the shipped value: past the point where Expert stops
-/// gaining, with 0.10 of margin on both sides of it before the measured numbers
-/// move by more than a Wilson interval, and it is also the only setting in the
-/// table where the Expert-Skilled gap is stable on both bases.
-const LEVEL_SPEED_TOP: [f32; 3] = [1.0, 1.15, 1.25];
+/// The horde's speed multiplier at the top of a level's ramp. The Lab's swarm
+/// stays the quickest, but only just: a faster horde walks into melee-range
+/// weapons on the merged build, so the measured cliff lives well above this.
+const LEVEL_SPEED_TOP: [f32; 3] = [1.0, 1.05, 1.10];
 
 /// Shape of the ramp: `t^exp` over the level, so a lower exponent bites sooner.
-///
-/// Keep a later level's exponent `<=` the one before it: a slower ramp only
-/// stays "harder at every instant" if its top is strictly higher, and the
-/// levels' tops are within a couple of percent of each other.
 const LEVEL_RAMP_EXP: [f32; 3] = [1.0, 1.0, 1.0];
 
 /// How a campaign level's horde differs from the base kinds right now.
 ///
 /// Both multipliers ramp linearly from 1.0 at the level's own start to
-/// [`LEVEL_DAMAGE_TOP`]/[`LEVEL_SPEED_TOP`] at its [`BOSS_TIME`]: the later
-/// levels' extra bite arrives *during* the level, which is when a carried build
-/// has rebuilt its passive caps. Level 1 is exactly `EnemyMods::NONE`.
+/// [`LEVEL_DAMAGE_TOP`]/[`LEVEL_SPEED_TOP`] at its [`BOSS_TIME`]. Level 1 is
+/// exactly `EnemyMods::NONE`.
 pub fn enemy_mods_for(level: usize, elapsed: f32) -> crate::game::enemy::EnemyMods {
     use crate::game::enemy::EnemyMods;
     let slot = level_slot(level);
@@ -607,7 +756,6 @@ pub fn enemy_mods_for(level: usize, elapsed: f32) -> crate::game::enemy::EnemyMo
         speed: 1.0 + (LEVEL_SPEED_TOP[slot] - 1.0) * t,
     }
 }
-
 /// Weighted pick of an enemy kind appropriate to the current time (level 0),
 /// i.e. frozen at [`BOSS_TIME`] like the running system.
 pub fn pick_kind(elapsed: f32, rng: &mut impl Rng) -> EnemyKind {
@@ -649,7 +797,7 @@ mod tests {
         let mut seen: Vec<EnemyKind> = Vec::new();
         let mut rng = StdRng::seed_from_u64(9);
         for _ in 0..2000 {
-            let k = pick_kind(200.0, &mut rng);
+            let k = pick_kind(600.0, &mut rng);
             if !seen.contains(&k) {
                 seen.push(k);
             }
@@ -681,7 +829,7 @@ mod tests {
     /// what this test is about is the shape, not the number.
     #[test]
     fn the_curve_fills_a_map_ten_times_larger() {
-        assert!(pulse_count(0.0) >= 2);
+        assert!(pulse_count(0.0) >= 1);
         // The floor lives in the raw curve; the running curve freezes at the
         // boss time and never gets there.
         let floor = spawn_interval_at(1_000_000.0);
@@ -708,6 +856,47 @@ mod tests {
         assert!(spawn_rate(0.0) < 3.0, "early rate {}", spawn_rate(0.0));
     }
 
+    /// The §1 table's boundary values, re-expressed over fifteen minutes.
+    #[test]
+    fn the_wave3_curve_boundaries_match_the_design_table() {
+        // Bodies/s.
+        for (t, v) in [
+            (0.0, 0.8),
+            (60.0, 1.5),
+            (180.0, 3.0),
+            (360.0, 5.0),
+            (540.0, 7.0),
+            (720.0, 9.0),
+            (900.0, 11.0),
+        ] {
+            assert!(
+                (bodies_per_second_at(t) - v).abs() < 1e-4,
+                "bodies/s at {t}s is {}, not {v}",
+                bodies_per_second_at(t)
+            );
+        }
+        // Live budget.
+        for (t, v) in [(0.0, 18), (60.0, 42), (180.0, 72), (360.0, 105), (540.0, 135), (720.0, 165)] {
+            assert_eq!(live_budget_at(t), v, "live budget at {t}s");
+        }
+        // Elite chance per ordinary spawn.
+        for (t, v) in [(180.0, 0.0), (360.0, 0.01), (540.0, 0.02), (720.0, 0.03), (900.0, 0.04)] {
+            assert!(
+                (elite_chance_at(t) - v).abs() < 1e-6,
+                "elite chance at {t}s is {}, not {v}",
+                elite_chance_at(t)
+            );
+        }
+        // Ordinary hp: ×1 at the start, ×2 at 15:00.
+        assert!((hp_mult_at(0.0) - 1.0).abs() < 1e-6);
+        assert!((hp_mult_at(RUN_SECONDS) - 2.0).abs() < 1e-6);
+        // The five base kinds' unlock times.
+        assert_eq!(UNLOCKS[0].0, 45.0);
+        assert_eq!(UNLOCKS[1].0, 75.0);
+        assert_eq!(UNLOCKS[2].0, 215.0);
+        assert_eq!(UNLOCKS[3].0, 395.0);
+    }
+
     /// The first elite lands on the curve gate on every campaign level, and
     /// then on the fixed real-time interval.
     #[test]
@@ -723,7 +912,7 @@ mod tests {
             let mut elapsed = 0.0;
             let mut first: Option<f32> = None;
             let mut second: Option<f32> = None;
-            while elapsed < 200.0 {
+            while elapsed < 400.0 {
                 elapsed += dt;
                 d.elite_timer -= dt;
                 if d.elite_timer <= 0.0 && curve_clock(level, elapsed) > ELITE_START {
@@ -759,13 +948,13 @@ mod tests {
         for t in [0.0f32, 30.0, 60.0, 120.0, 200.0, 255.0, 400.0] {
             for level in 1..LEVEL_COUNT {
                 assert!(
-                    curve_clock(level, t) > curve_clock(level - 1, t),
-                    "the curve clock did not advance from level {} at {t}s",
+                    curve_clock(level, t) >= curve_clock(level - 1, t),
+                    "the curve clock went backwards from level {} at {t}s",
                     level - 1
                 );
                 assert!(
-                    hp_mult_for(level, t) > hp_mult_for(level - 1, t) + 1e-4,
-                    "hp did not scale from level {} at {t}s",
+                    hp_mult_for(level, t) >= hp_mult_for(level - 1, t),
+                    "hp went backwards from level {} at {t}s",
                     level - 1
                 );
                 assert!(
@@ -866,13 +1055,16 @@ mod tests {
                 curve_clock(level, BOSS_TIME + 600.0)
             );
             assert_eq!(
-                spawn_rate_for(level, 400.0),
+                spawn_rate_for(level, BOSS_TIME + 600.0),
                 spawn_rate_for(level, BOSS_TIME)
             );
-            assert_eq!(hp_mult_for(level, 400.0), hp_mult_for(level, BOSS_TIME));
+            assert_eq!(
+                hp_mult_for(level, BOSS_TIME + 600.0),
+                hp_mult_for(level, BOSS_TIME)
+            );
         }
         let mut prev = f32::NEG_INFINITY;
-        for t in [0.0f32, 1.0, 60.0, 254.0, BOSS_TIME, 300.0, 1000.0] {
+        for t in [0.0f32, 1.0, 60.0, 254.0, BOSS_TIME, BOSS_TIME + 1.0, 1000.0] {
             let c = curve_clock(1, t);
             assert!(c >= prev, "the curve clock went backwards at {t}s");
             prev = c;
@@ -910,10 +1102,12 @@ mod tests {
     fn later_levels_are_strictly_harder() {
         for t in [0.0f32, 30.0, 120.0, 200.0, BOSS_TIME] {
             for level in 1..LEVEL_COUNT {
-                assert!(
-                    horde_hp_mult_for(level, t) > horde_hp_mult_for(level - 1, t),
-                    "level {level} horde is not tougher at {t}s"
-                );
+                let expected = if t < LEVEL_HP_EXTRA_AFTER {
+                    horde_hp_mult_for(level, t) >= horde_hp_mult_for(level - 1, t)
+                } else {
+                    horde_hp_mult_for(level, t) > horde_hp_mult_for(level - 1, t)
+                };
+                assert!(expected, "level {level} horde hp is wrong at {t}s");
                 assert!(
                     elite_interval_for(level) <= elite_interval_for(level - 1),
                     "level {level} fields elites less often"
@@ -934,17 +1128,23 @@ mod tests {
         }
     }
 
-    /// The boss pool follows the level's clock and nothing else: the horde's
-    /// `LEVEL_HP_EXTRA` must not leak into it (that is what keeps the boss fight
-    /// inside its 45-90 s target on the later maps).
+    /// The boss pool follows the level's clock and the 15-minute scale and
+    /// nothing else: the horde's `LEVEL_HP_EXTRA` must not leak into it (that
+    /// is what keeps the boss fight inside its 45-80 s target on the later
+    /// maps).
     #[test]
     fn the_boss_pool_ignores_the_horde_extra() {
         for level in 1..LEVEL_COUNT {
-            let pool = hp_mult_for(level, BOSS_TIME);
+            let pool = boss_hp_mult_for(level, BOSS_TIME);
             let horde = horde_hp_mult_for(level, BOSS_TIME);
             assert!(
-                horde > pool + 1e-3,
-                "level {level}: horde hp {horde} is not above the boss pool {pool}"
+                (pool - hp_mult_for(level, BOSS_TIME) * BOSS_POOL_SCALE).abs() < 1e-4,
+                "level {level}: boss pool {pool} is not the curve times the scale"
+            );
+            assert!(
+                (horde - hp_mult_for(level, BOSS_TIME) * level_hp_extra_at(BOSS_TIME, level)).abs()
+                    < 1e-4,
+                "level {level}: horde hp {horde} is not the curve times its extra"
             );
         }
     }
@@ -999,11 +1199,27 @@ mod tests {
         }
     }
 
-    /// The five wave-3 kinds unlock at one third of their fifteen-minute design
-    /// times in the current 5-minute build (`WAVE3_TIME_SCALE`), in the §1
-    /// order, and never before their own instant.
+    /// With the fifteen-minute timeline (`RUN_SECONDS = 900`) the five wave-3
+    /// kinds unlock at exactly the design's minutes — Pillbug 2:00, Bell Flea
+    /// 4:30, Wick Moth 7:15, Porter 8:15, Turnkey 9:45 — in the §1 order, and
+    /// never before their own instant.
     #[test]
     fn the_wave3_kinds_unlock_in_design_order() {
+        assert_eq!(RUN_SECONDS, 900.0);
+        assert_eq!(WAVE3_TIME_SCALE, 1.0, "the design clock is the run clock now");
+        // 2:00, 4:30, 7:15, 8:15, 9:45.
+        assert_eq!(wave3_unlock_time(EnemyKind::Pillbug), Some(2.0 * 60.0));
+        assert_eq!(wave3_unlock_time(EnemyKind::BellFlea), Some(4.0 * 60.0 + 30.0));
+        assert_eq!(wave3_unlock_time(EnemyKind::WickMoth), Some(7.0 * 60.0 + 15.0));
+        assert_eq!(wave3_unlock_time(EnemyKind::Porter), Some(8.0 * 60.0 + 15.0));
+        assert_eq!(wave3_unlock_time(EnemyKind::Turnkey), Some(9.0 * 60.0 + 45.0));
+        // The featured rotation starts with the Turnkey's unlock (9:45) and
+        // turns every 30 s.
+        assert_eq!(wave3_featured(584.0), None);
+        assert_eq!(wave3_featured(586.0), Some(EnemyKind::WickMoth));
+        assert_eq!(wave3_featured(616.0), Some(EnemyKind::Porter));
+        assert_eq!(wave3_featured(646.0), Some(EnemyKind::Turnkey));
+        assert_eq!(wave3_featured(676.0), Some(EnemyKind::WickMoth));
         let expected = [
             (EnemyKind::Pillbug, 120.0),
             (EnemyKind::BellFlea, 270.0),
@@ -1020,8 +1236,8 @@ mod tests {
                 design_at * WAVE3_TIME_SCALE
             );
             assert!(
-                (at - design_at / 3.0).abs() < 1e-3,
-                "{kind:?}: in a 5-minute build the design clock is one third"
+                (at - design_at).abs() < 1e-3,
+                "{kind:?}: on the 15-minute clock the unlock is the design's own minute"
             );
             assert!(at > prev, "{kind:?} unlocked out of order");
             prev = at;
@@ -1063,7 +1279,10 @@ mod tests {
         use rand::rngs::StdRng;
         use rand::SeedableRng;
         for level in 0..LEVEL_COUNT {
-            for curve in [150.0f32, 200.0, 250.0, BOSS_TIME] {
+            // Design-clock instants with at least three wave-3 kinds on the
+            // table (7:30, 10:00, 12:30 and the boss time), where the raw
+            // weights overshoot and the cap is what limits them.
+            for curve in [450.0f32, 600.0, 750.0, BOSS_TIME] {
                 let mut rng = StdRng::seed_from_u64(4242);
                 let mut wave3 = 0usize;
                 let total = 40_000usize;
@@ -1084,6 +1303,17 @@ mod tests {
                     "level {level} at {curve}s: wave-3 share {share} is too rare to matter"
                 );
             }
+        }
+        // With only the Pillbug unlocked (2:00 to 4:30) the share sits under the
+        // cap on its raw weight alone; the cap must still hold there.
+        for level in 0..LEVEL_COUNT {
+            let mut rng = StdRng::seed_from_u64(4242);
+            let total = 40_000usize;
+            let wave3 = (0..total)
+                .filter(|_| pick_kind_mixed(250.0, level, &mut rng).is_wave3())
+                .count();
+            let share = wave3 as f32 / total as f32;
+            assert!(share > 0.0 && share <= WAVE3_SHARE_CAP + 0.012, "level {level}: {share}");
         }
         // Early on, before any of them unlock, the roll is the historical one:
         // not one wave-3 body and exactly the same rng stream as a table without

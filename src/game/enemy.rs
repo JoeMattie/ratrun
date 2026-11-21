@@ -279,6 +279,11 @@ pub struct Enemy {
     pub kind: EnemyKind,
     /// True for periodic elite Brutes spawned by the director.
     pub elite: bool,
+    /// A named miniboss body (`systems::miniboss`): it also carries the
+    /// `Miniboss` component, but the flag lets the many `&Enemy` readers (the
+    /// decoy lure, the Porter's casebook, the flatbed's pits) recognise it
+    /// without another query. False for every director-spawned body.
+    pub named: bool,
     pub pos: Vec2,
     pub vel: Vec2,
     pub hp: f32,
@@ -315,6 +320,7 @@ impl Enemy {
             id: 0,
             kind,
             elite: false,
+            named: false,
             pos,
             vel: Vec2::ZERO,
             hp,

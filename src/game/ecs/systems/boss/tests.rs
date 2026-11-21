@@ -1311,7 +1311,7 @@ fn measure_campaign_boss_dps() {
         v.sort_by(f32::total_cmp);
         let median = (v[1] + v[2]) * 0.5;
         let kind = BossKind::for_level(level);
-        let pool = kind.base_hp() * director::hp_mult_for(level, director::BOSS_TIME);
+        let pool = kind.base_hp() * director::boss_hp_mult_for(level, director::BOSS_TIME);
         println!(
             "level {level}: median dps {median:.1}  spread {:.1}..{:.1}  pool {pool:.0} hp  \
              scale@60s {:.2}@75s {:.2}@90s {:.2}  current {:.2} -> {:.0}s",
