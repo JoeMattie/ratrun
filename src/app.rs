@@ -19,7 +19,6 @@ use crate::lore;
 use crate::math::Vec2;
 use crate::render::campaign as campaign_ui;
 use crate::render::framebuffer::PixelBuffer;
-use crate::render::lighting::{self, LightingMode};
 use crate::render::palette;
 use crate::render::{cursor, hud, menu, minimap, minimap_source, options, overlay, zoom as view_zoom};
 use crate::render::shop as shop_ui;
@@ -266,10 +265,6 @@ pub struct App {
     cursor: cursor::CursorState,
     /// Optional `RATRUN_CURSOR` environment override (resolved once at startup).
     cursor_env: Option<bool>,
-    /// Live lighting quality mode (`Full` / `Soft` / `Off`).
-    lighting: LightingMode,
-    /// Optional `RATRUN_LIGHTING` environment override (resolved once at startup).
-    lighting_env: Option<LightingMode>,
 }
 
 impl App {
@@ -293,10 +288,6 @@ impl App {
         let effects_env = env_volume(SFX_VOLUME_ENV);
         let music_volume = audio::snap_percent(music_env.unwrap_or(scores.music_volume));
         let effects_volume = audio::snap_percent(effects_env.unwrap_or(scores.effects_volume));
-        let lighting_env = lighting::env_override();
-        let lighting = lighting_env
-            .or(scores.lighting)
-            .unwrap_or_else(|| LightingMode::default_for_depth(crate::term::color_depth()));
         let mut app = App {
             screen: Screen::Title,
             should_quit: false,
@@ -365,8 +356,6 @@ impl App {
             map_frame: minimap_source::MinimapFrame::new(),
             cursor: cursor::CursorState::default(),
             cursor_env: cursor::env_override(),
-            lighting,
-            lighting_env,
         };
         app.push_volumes();
         app.menu_music();
@@ -958,27 +947,6 @@ impl App {
         self.sfx(Sfx::UiMove);
     }
 
-    /// Active lighting mode (`RATRUN_LIGHTING` > persisted preference > terminal colour depth).
-    pub fn lighting_mode(&self) -> LightingMode {
-        self.lighting
-    }
-
-    /// Update and persist the lighting preference (unless pinned by `RATRUN_LIGHTING`).
-    fn set_lighting_mode(&mut self, mode: LightingMode) {
-        self.lighting = mode;
-        if self.lighting_env.is_none() {
-            self.scores.lighting = Some(mode);
-            if self.persist {
-                self.scores.save();
-            }
-        }
-        if let Some(w) = self.world.as_mut() {
-            w.lighting = mode;
-            w.smoke_enabled = mode != LightingMode::Off;
-        }
-        self.sfx(Sfx::UiMove);
-    }
-
     // ---- Volume ---------------------------------------------------------
 
     /// The live music level (`0..=100`, steps of 5).
@@ -1175,10 +1143,6 @@ impl App {
             options::MUTE_ROW => {
                 self.toggle_mute();
             }
-            options::LIGHTING_ROW => {
-                let next = options::step_lighting(self.lighting, dir as i32);
-                self.set_lighting_mode(next);
-            }
             options::ZOOM_ROW => {
                 // Right widens the view (a bigger number), left zooms in.
                 self.set_zoom(view_zoom::step(self.scores.zoom, dir));
@@ -1195,7 +1159,7 @@ impl App {
             options::MUSIC_ROW | options::EFFECTS_ROW => self.adjust_option(row, -step),
             // Scroll down widens the view, exactly like the wheel over the
             // playfield does mid-run.
-            options::MINIMAP_ROW | options::LIGHTING_ROW | options::ZOOM_ROW => {
+            options::MINIMAP_ROW | options::ZOOM_ROW => {
                 self.adjust_option(row, step)
             }
             _ => self.adjust_option(row, 1),
@@ -2533,7 +2497,6 @@ impl App {
             zoom: self.effective_zoom(),
             row: self.options_row,
             accent: options::accent_from(menu::material(self.theme())),
-            lighting: self.lighting,
         };
         options::draw(frame, area, &view, &mut self.hits);
     }
@@ -2763,8 +2726,6 @@ impl App {
                 // reallocates it.
                 self.pixels
                     .resize(game.width as usize, game.height as usize * 2);
-                w.lighting = self.lighting;
-                w.smoke_enabled = self.lighting != LightingMode::Off;
                 w.draw(&mut self.pixels);
                 self.pixels.render_to(game, frame.buffer_mut());
             }
@@ -5695,7 +5656,6 @@ mod tests {
         for (w, h) in [(80u16, 24u16), (120, 40)] {
             let mut hh = Harness::new(w, h);
             hh.enter_playing();
-            hh.app.lighting = LightingMode::Full;
             {
                 use rand::SeedableRng;
                 let _ = rand::rngs::StdRng::seed_from_u64(1);
@@ -7973,12 +7933,7 @@ mod tests {
         h.frame(&[KeyCode::Right]);
         assert!(!h.app.muted());
         h.frame(&[KeyCode::Down]);
-        assert_eq!(h.app.options_row, options::LIGHTING_ROW);
-        let lighting_before = h.app.lighting_mode();
-        h.frame(&[KeyCode::Right]);
-        assert_ne!(h.app.lighting_mode(), lighting_before);
         // The zoom row steps the view ladder (Right widens, Left pulls in).
-        h.frame(&[KeyCode::Down]);
         assert_eq!(h.app.options_row, options::ZOOM_ROW);
         h.frame(&[KeyCode::Right]);
         assert_eq!(h.app.effective_zoom(), 1.25);
@@ -8474,48 +8429,9 @@ mod tests {
     }
 
     #[test]
-    fn options_lighting_row_steps_persists_and_respects_env_override() {
-        let _guard = VOLUME_ENV_LOCK.lock().unwrap();
-        std::env::remove_var(lighting::LIGHTING_ENV);
-
+    fn options_do_not_offer_a_lighting_setting() {
         let mut h = Harness::new(80, 24);
         title_to_options(&mut h);
-        let text = h.frame(&[]);
-        assert!(text.contains("LIGHTING"), "options screen missing LIGHTING row:\n{text}");
-        assert!(text.contains("FULL"), "default truecolor lighting should show FULL:\n{text}");
-        assert_eq!(h.app.lighting_mode(), LightingMode::Full);
-
-        // Navigate down to LIGHTING_ROW and step Full -> Soft -> Off -> Full.
-        for _ in 0..options::LIGHTING_ROW {
-            h.frame(&[KeyCode::Down]);
-        }
-        assert_eq!(h.app.options_row, options::LIGHTING_ROW);
-        h.frame(&[KeyCode::Right]);
-        assert_eq!(h.app.lighting_mode(), LightingMode::Soft);
-        assert_eq!(h.app.scores.lighting, Some(LightingMode::Soft));
-
-        // Round-trip through ScoreTable JSON.
-        let reloaded = ScoreTable::parse(&h.app.scores.to_json());
-        assert_eq!(reloaded.lighting, Some(LightingMode::Soft));
-        let app2 = App::with_options(false, None, reloaded.clone(), false, Some(TEST_SEED));
-        assert_eq!(app2.lighting_mode(), LightingMode::Soft);
-
-        // RATRUN_LIGHTING overrides persisted value without clobbering saved preference.
-        std::env::set_var(lighting::LIGHTING_ENV, "off");
-        let app_env = App::with_options(false, None, reloaded, false, Some(TEST_SEED));
-        std::env::remove_var(lighting::LIGHTING_ENV);
-        assert_eq!(app_env.lighting_mode(), LightingMode::Off);
-        let mut h_env = Harness::with_app(app_env, 80, 24);
-        title_to_options(&mut h_env);
-        for _ in 0..options::LIGHTING_ROW {
-            h_env.frame(&[KeyCode::Down]);
-        }
-        h_env.frame(&[KeyCode::Right]);
-        assert_eq!(h_env.app.lighting_mode(), LightingMode::Full);
-        assert_eq!(
-            h_env.app.scores.lighting,
-            Some(LightingMode::Soft),
-            "env-pinned lighting must not overwrite the saved preference"
-        );
+        assert!(!h.frame(&[]).contains("LIGHTING"));
     }
 }

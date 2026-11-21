@@ -18,7 +18,6 @@ use crate::audio;
 use crate::config;
 use crate::game::campaign::LEVEL_COUNT;
 use crate::render::cursor::CursorSetting;
-use crate::render::lighting::LightingMode;
 use crate::render::minimap::MinimapSize;
 
 pub const MAX_ENTRIES: usize = 10;
@@ -153,23 +152,6 @@ fn default_volume() -> u8 {
     100
 }
 
-fn serialize_lighting_mode<S: serde::Serializer>(
-    mode: &Option<LightingMode>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    match mode {
-        Some(m) => serializer.serialize_str(m.as_str()),
-        None => serializer.serialize_none(),
-    }
-}
-
-fn deserialize_lighting_mode<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<LightingMode>, D::Error> {
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(value.as_str().and_then(LightingMode::parse_setting))
-}
-
 /// The unzoomed view: what every build before the mouse wheel shipped had.
 fn default_zoom() -> f32 {
     crate::render::zoom::DEFAULT
@@ -219,15 +201,6 @@ pub struct ScoreTable {
     /// Effects level, 0..=100 in steps of 5. Missing ⇒ `100`.
     #[serde(default = "default_volume", deserialize_with = "deserialize_volume")]
     pub effects_volume: u8,
-    /// Player's preferred lighting mode (`full` | `soft` | `off`).
-    /// `None` (missing or unreadable in old files) defers to the terminal colour depth.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_lighting_mode",
-        deserialize_with = "deserialize_lighting_mode"
-    )]
-    pub lighting: Option<LightingMode>,
     /// View zoom preference: how much world the playfield shows (`1.0` =
     /// unzoomed, `2.0` = twice the world, `0.5` = half). Missing or unreadable
     /// values load as `1.0`, the view every old build had.
@@ -247,7 +220,6 @@ impl Default for ScoreTable {
             cheese_cursor: CursorSetting::default(),
             music_volume: default_volume(),
             effects_volume: default_volume(),
-            lighting: None,
             zoom: default_zoom(),
         }
     }
@@ -691,30 +663,14 @@ mod tests {
     }
 
     #[test]
-    fn lighting_persists_and_old_files_load_as_auto_without_dropping_scores() {
-        // An old file written before lighting existed loads as `None` (auto by color depth).
-        let missing = ScoreTable::parse(r#"{"entries":[]}"#);
-        assert_eq!(missing.lighting, None);
-
-        // Invalid values fall back to `None` without losing high scores.
-        for bad in [
-            r#"{"entries":[{"score":500,"time":10.0,"level":2,"map":"Sewer","won":false}],"lighting":"blinding"}"#,
-            r#"{"entries":[{"score":500,"time":10.0,"level":2,"map":"Sewer","won":false}],"lighting":42}"#,
-            r#"{"entries":[{"score":500,"time":10.0,"level":2,"map":"Sewer","won":false}],"lighting":null}"#,
-        ] {
-            let parsed = ScoreTable::parse(bad);
-            assert_eq!(parsed.lighting, None);
+    fn old_lighting_fields_load_without_dropping_scores() {
+        for value in [r#""off""#, r#""soft""#, r#""full""#, "42", "null"] {
+            let json = format!(
+                r#"{{"entries":[{{"score":500,"time":10.0,"level":2,"map":"Sewer","won":false}}],"lighting":{value}}}"#
+            );
+            let parsed = ScoreTable::parse(&json);
             assert_eq!(parsed.best(), 500);
-        }
-
-        // Valid values round-trip cleanly.
-        for mode in [LightingMode::Full, LightingMode::Soft, LightingMode::Off] {
-            let t = ScoreTable {
-                lighting: Some(mode),
-                ..Default::default()
-            };
-            let reloaded = ScoreTable::parse(&t.to_json());
-            assert_eq!(reloaded.lighting, Some(mode));
+            assert!(!parsed.to_json().contains("lighting"));
         }
     }
 }

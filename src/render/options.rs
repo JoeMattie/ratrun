@@ -15,7 +15,6 @@ use ratatui::Frame;
 
 use crate::audio::{self, VOLUME_STEP};
 use crate::render::cursor::CursorSetting;
-use crate::render::lighting::LightingMode;
 use crate::render::menu::{heavy, ink, panel, HitMap, Target};
 use crate::render::minimap::MinimapSize;
 use crate::render::palette::{mix, to_color, COAT, EDGE, MUTED, PLATE, TRACK};
@@ -26,11 +25,10 @@ pub const EFFECTS_ROW: usize = 1;
 pub const MINIMAP_ROW: usize = 2;
 pub const CURSOR_ROW: usize = 3;
 pub const MUTE_ROW: usize = 4;
-pub const LIGHTING_ROW: usize = 5;
-pub const ZOOM_ROW: usize = 6;
-pub const BACK_ROW: usize = 7;
+pub const ZOOM_ROW: usize = 5;
+pub const BACK_ROW: usize = 6;
 /// How many rows the screen has.
-pub const ROW_COUNT: usize = 8;
+pub const ROW_COUNT: usize = 7;
 
 /// Slider identity used by [`Target::OptionsBar`]: the value the track edits.
 pub const MUSIC_BAR: usize = 0;
@@ -54,7 +52,6 @@ pub enum Row {
     Mute,
     Zoom,
     Back,
-    Lighting,
 }
 
 /// The screen's rows in order; index with the constants above.
@@ -64,7 +61,6 @@ pub const ROWS: [Row; ROW_COUNT] = [
     Row::Minimap,
     Row::Cursor,
     Row::Mute,
-    Row::Lighting,
     Row::Zoom,
     Row::Back,
 ];
@@ -80,7 +76,6 @@ impl Row {
             Row::Mute => "MUTE",
             Row::Zoom => "ZOOM",
             Row::Back => "BACK",
-            Row::Lighting => "LIGHTING",
         }
     }
 
@@ -109,7 +104,6 @@ pub struct OptionsView {
     pub row: usize,
     /// Accent for the panel edge and the sliders (theme or level material).
     pub accent: Color,
-    pub lighting: LightingMode,
 }
 
 /// Rows and slider tracks for one terminal area.
@@ -192,11 +186,6 @@ pub fn step_cursor(current: CursorSetting, _dir: i32) -> CursorSetting {
     current.toggle()
 }
 
-/// Step the lighting preference (`Full → Soft → Off → Full`).
-pub fn step_lighting(current: LightingMode, dir: i32) -> LightingMode {
-    current.step(dir)
-}
-
 fn value_text(view: &OptionsView, row: Row) -> String {
     match row {
         Row::Minimap => view.minimap.as_str().to_uppercase(),
@@ -222,7 +211,6 @@ fn value_text(view: &OptionsView, row: Row) -> String {
         Row::Music => String::new(),
         Row::Effects => String::new(),
         Row::Back => String::new(),
-        Row::Lighting => view.lighting.as_str().to_uppercase(),
     }
 }
 
@@ -458,7 +446,6 @@ mod tests {
             zoom: 1.0,
             row,
             accent: Color::Rgb(144, 184, 173),
-            lighting: LightingMode::Full,
         }
     }
 
@@ -483,11 +470,10 @@ mod tests {
             let v = view(MUSIC_ROW);
             let (text, hits) = frame(w, h, &v);
             for label in [
-                "MUSIC", "EFFECTS", "MINIMAP", "CURSOR", "MUTE", "LIGHTING", "ZOOM", "BACK",
+                "MUSIC", "EFFECTS", "MINIMAP", "CURSOR", "MUTE", "ZOOM", "BACK",
             ] {
                 assert!(text.contains(label), "{w}x{h} is missing {label}:\n{text}");
             }
-            assert!(text.contains("FULL"), "lighting value missing at {w}x{h}");
             assert!(text.contains("60%"), "{w}x{h} missing the music read-out");
             assert!(text.contains("85%"), "{w}x{h} missing the effects read-out");
             assert!(text.contains("SMALL"), "minimap value missing at {w}x{h}");
@@ -548,14 +534,10 @@ mod tests {
         assert_eq!(step_minimap(MinimapSize::Normal, -1), MinimapSize::Hidden);
         assert_eq!(step_cursor(CursorSetting::On, 1), CursorSetting::Off);
         assert_eq!(step_cursor(CursorSetting::Off, -1), CursorSetting::On);
-        assert_eq!(step_lighting(LightingMode::Full, 1), LightingMode::Soft);
-        assert_eq!(step_lighting(LightingMode::Soft, 1), LightingMode::Off);
-        assert_eq!(step_lighting(LightingMode::Off, 1), LightingMode::Full);
-        assert_eq!(step_lighting(LightingMode::Full, -1), LightingMode::Off);
         for (i, row) in ROWS.iter().enumerate() {
             assert_eq!(
                 row.bar(),
-                [0, 1, 2, 3, 4, 5, 6, 7].get(i).and_then(|_| row.bar())
+                [0, 1, 2, 3, 4, 5, 6].get(i).and_then(|_| row.bar())
             );
         }
         assert_eq!(Row::Music.bar(), Some(MUSIC_BAR));

@@ -1,4 +1,4 @@
-//! Soft, drifting, alpha-blended smoke & haze layer (render-only).
+//! Brief, alpha-blended smoke from combat and machinery (render-only).
 //!
 //! Distinct from [`crate::game::particle::Particles`] (crisp pixel sparks,
 //! streaks and shockwaves): every [`SmokePuff`] is a soft radial-falloff cloud
@@ -12,7 +12,7 @@
 //! - Uses a fixed-capacity inline ring buffer (`[SmokePuff; SMOKE_CAP]`) and
 //!   its own tiny deterministic hash/PRNG (`u64` state seeded from level seed
 //!   + theme), so zero heap allocations occur per frame.
-//! - Turning smoke or lighting on/off leaves simulation state bit-identical.
+//! - Smoke and lighting quality never alter simulation state.
 
 use bevy_ecs::world::World as EcsWorld;
 
@@ -20,7 +20,7 @@ use crate::game::art_boss_broom::BroomBossState;
 use crate::game::art_boss_mower::MowerState;
 use crate::game::ecs::components::Pool;
 use crate::game::ecs::systems::boss::{Boss, BossKind, BossState};
-use crate::game::level::{Level, PropKind, Theme};
+use crate::game::level::{Level, Theme};
 use crate::game::particle::Particles;
 use crate::game::player::Player;
 use crate::math::Vec2;
@@ -43,12 +43,10 @@ pub enum SmokeKind {
     AcidFume,
     /// Chugging engine exhaust or dark oil smoke from the mower boss.
     Exhaust,
-    /// Pale rising steam from theme vents (valves, grates, stoves, cryo tanks).
+    /// Brief pale steam from active machinery.
     Steam,
     /// Ground-tinted dust kick from dashing or Tail Thrash sweeps.
     Dust,
-    /// Broad, translucent drifting ambient mist (sewer water troughs & puddles).
-    Haze,
 }
 
 /// One soft alpha-blended cloud puff in world-pixel space.
@@ -110,7 +108,7 @@ impl SmokePuff {
         let fade_in = match self.kind {
             SmokeKind::Blast => 0.55 + 0.45 * (t / 0.10).min(1.0),
             SmokeKind::Dust | SmokeKind::Exhaust => 0.35 + 0.65 * (t / 0.12).min(1.0),
-            SmokeKind::AcidFume | SmokeKind::Steam | SmokeKind::Haze => (t / 0.18).min(1.0),
+            SmokeKind::AcidFume | SmokeKind::Steam => (t / 0.18).min(1.0),
         };
         let fade_out = (1.0 - t) * (1.0 - t * 0.42);
         (self.alpha * fade_in * fade_out).clamp(0.0, 1.0)
@@ -141,7 +139,6 @@ pub struct SmokeLayer {
     prev_boss_phase: u8,
     prev_boss_phase_change: bool,
     emit_accum: f32,
-    haze_accum: f32,
     seen_sw: [u64; SEEN_SW_CAP],
     seen_sw_head: usize,
 }
@@ -170,7 +167,6 @@ impl SmokeLayer {
             prev_boss_phase: 0,
             prev_boss_phase_change: false,
             emit_accum: 0.0,
-            haze_accum: 0.0,
             seen_sw: [0; SEEN_SW_CAP],
             seen_sw_head: 0,
         }
@@ -213,18 +209,15 @@ impl SmokeLayer {
                 SmokeKind::Dust => 3.6,
                 SmokeKind::Exhaust => 1.8,
                 SmokeKind::AcidFume | SmokeKind::Steam => 1.1,
-                SmokeKind::Haze => 0.35,
             };
             let damp = (1.0 - drag * dt).max(0.0);
             p.vel = p.vel * damp;
             // Gentle upward buoyancy + deterministic wispy horizontal curl.
             let sway = ((p.life * 3.8 + (p.seed as f32) * 0.17).sin()) * match p.kind {
-                SmokeKind::Haze => 2.5,
                 SmokeKind::Steam | SmokeKind::AcidFume => 5.5,
                 _ => 3.5,
             };
             let rise = match p.kind {
-                SmokeKind::Haze => -0.8,
                 SmokeKind::Dust => -2.0,
                 SmokeKind::Blast => -5.5,
                 SmokeKind::Exhaust => -7.0,
@@ -258,11 +251,7 @@ impl SmokeLayer {
             self.step(dt);
         }
 
-        let density = match scene.mode {
-            LightingMode::Full => 1.0f32,
-            LightingMode::Soft => 0.62,
-            LightingMode::Off => 0.85,
-        };
+        let density = if scene.mode == LightingMode::Compact { 0.43 } else { 0.65 };
 
         // 1. Observe fresh shockwaves (explosions, big deaths, nukes).
         self.observe_shockwaves(scene, pb.w as f32, pb.h as f32, density);
@@ -291,15 +280,6 @@ impl SmokeLayer {
                 self.emit_accum -= steps as f32 * 0.09;
                 for _ in 0..steps {
                     self.emit_continuous(scene, pb.w as f32, pb.h as f32, density);
-                }
-            }
-
-            // Slow ambient haze (sewer mist near water).
-            if scene.level.theme == Theme::Sewer {
-                self.haze_accum += dt;
-                if self.haze_accum >= 0.28 {
-                    self.haze_accum = 0.0;
-                    self.emit_sewer_mist(scene, pb.w as f32, pb.h as f32, density);
                 }
             }
         }
@@ -358,7 +338,7 @@ impl SmokeLayer {
                 r1,
                 life,
                 max_life: life,
-                alpha: if is_nuke { 0.58 } else { 0.54 },
+                alpha: if is_nuke { 0.38 } else { 0.34 },
                 color,
                 kind: SmokeKind::Blast,
                 seed,
@@ -475,7 +455,7 @@ impl SmokeLayer {
                 r1,
                 life,
                 max_life: life,
-                alpha: 0.42,
+                alpha: 0.28,
                 color: base,
                 kind: SmokeKind::Blast,
                 seed,
@@ -514,7 +494,7 @@ impl SmokeLayer {
     }
 
     /// Continuous emitters: acid pool fumes, mower exhaust/steam, boss phase
-    /// transitions, and themed steam vents.
+    /// transitions, and exhaust.
     fn emit_continuous(&mut self, scene: &SmokeScene<'_>, vw: f32, vh: f32, density: f32) {
         let cam = scene.cam;
         let visible = |p: Vec2, m: f32| -> bool {
@@ -599,7 +579,7 @@ impl SmokeLayer {
                                         r1,
                                         life,
                                         max_life: life,
-                                        alpha: 0.42,
+                                        alpha: 0.28,
                                         color: (206, 218, 224),
                                         kind: SmokeKind::Steam,
                                         seed,
@@ -631,7 +611,7 @@ impl SmokeLayer {
                                         r1,
                                         life,
                                         max_life: life,
-                                        alpha: 0.44,
+                                        alpha: 0.26,
                                         color: (94, 96, 104),
                                         kind: SmokeKind::Exhaust,
                                         seed,
@@ -659,7 +639,7 @@ impl SmokeLayer {
                                         r1,
                                         life,
                                         max_life: life,
-                                        alpha: 0.46,
+                                        alpha: 0.28,
                                         color: (146, 156, 168),
                                         kind: SmokeKind::Exhaust,
                                         seed,
@@ -673,107 +653,6 @@ impl SmokeLayer {
                 }
             }
         }
-
-        // Theme steam vents from visible props (valves, grates, kitchen stoves, lab tanks).
-        for prop in &scene.level.props {
-            let c = prop.rect.center();
-            if !visible(c, 22.0) {
-                continue;
-            }
-            #[allow(unreachable_patterns)]
-            let vent: Option<(f32, Rgb, f32)> = match (scene.level.theme, prop.kind) {
-                (Theme::Sewer, PropKind::Valve) => Some((0.26, (172, 208, 202), 0.34)),
-                (Theme::Sewer, PropKind::Grate) => Some((0.24, (140, 198, 186), 0.32)),
-                (Theme::Kitchen, PropKind::Counter) => Some((0.28, (232, 222, 208), 0.32)),
-                (Theme::Lab, PropKind::Tank) => Some((0.24, (166, 232, 240), 0.34)),
-                (_, PropKind::Valve | PropKind::Grate) => Some((0.20, (186, 198, 204), 0.28)),
-                _ => None,
-            };
-            if let Some((chance, color, alpha)) = vent {
-                if self.rand_f32() < chance * density {
-                    let life = self.rand_range(0.95, 1.65);
-                    let seed = (self.next_u64() & 0xFFFF) as u16;
-                    let puff_pos = c
-                        + Vec2::new(
-                            self.rand_range(-prop.rect.w * 0.25, prop.rect.w * 0.25),
-                            self.rand_range(-prop.rect.h * 0.2, 2.0),
-                        );
-                    let vel = Vec2::new(self.rand_range(-3.0, 3.0), self.rand_range(-9.0, -4.0));
-                    let r0 = self.rand_range(2.0, 2.8);
-                    let r1 = self.rand_range(5.6, 8.6);
-                    let puff = SmokePuff {
-                        pos: puff_pos,
-                        vel,
-                        r0,
-                        r1,
-                        life,
-                        max_life: life,
-                        alpha,
-                        color,
-                        kind: SmokeKind::Steam,
-                        seed,
-                        alive: true,
-                    };
-                    self.push(puff);
-                }
-            }
-        }
-    }
-
-    /// Slow ambient sewer mist drifting over visible water troughs (`y = row * 143 + 56`)
-    /// and low puddles (`art_floor.rs` geometry).
-    fn emit_sewer_mist(&mut self, scene: &SmokeScene<'_>, vw: f32, vh: f32, density: f32) {
-        if self.rand_f32() > 0.72 * density {
-            return;
-        }
-        let cam = scene.cam;
-        // Pick a visible water trough row (`y = row * 143 + 56`) if one crosses the screen,
-        // otherwise pick a damp puddle spot in view.
-        let y0 = cam.y;
-        let y1 = cam.y + vh;
-        let first_row = ((y0 - 56.0) / 143.0).ceil() as i32;
-        let last_row = ((y1 - 56.0) / 143.0).floor() as i32;
-
-        let pos = if first_row <= last_row {
-            let span = (last_row - first_row + 1) as u64;
-            let row = first_row + (self.next_u64() % span) as i32;
-            Vec2::new(
-                cam.x + self.rand_range(8.0, (vw - 8.0).max(9.0)),
-                (row * 143 + 59) as f32 + self.rand_range(-5.0, 5.0),
-            )
-        } else {
-            // Damp puddle haze anywhere on open floor inside the viewport.
-            Vec2::new(
-                cam.x + self.rand_range(10.0, (vw - 10.0).max(11.0)),
-                cam.y + self.rand_range(10.0, (vh - 10.0).max(11.0)),
-            )
-        };
-
-        // Keep mist on open floor, not on top of solid wall caps.
-        let (tx, ty) = crate::game::collision::cell_of(pos);
-        if !scene.level.tiles.get(tx, ty).is_open() {
-            return;
-        }
-
-        let life = self.rand_range(2.4, 3.8);
-        let seed = (self.next_u64() & 0xFFFF) as u16;
-        let vel = Vec2::new(self.rand_range(3.0, 8.0), self.rand_range(-1.5, 0.5));
-        let r0 = self.rand_range(5.5, 8.0);
-        let r1 = self.rand_range(11.0, 15.5);
-        let puff = SmokePuff {
-            pos,
-            vel,
-            r0,
-            r1,
-            life,
-            max_life: life,
-            alpha: 0.24,
-            color: (126, 178, 172),
-            kind: SmokeKind::Haze,
-            seed,
-            alive: true,
-        };
-        self.push(puff);
     }
 
     /// Alpha-blend all active visible puffs onto `pb` using fast integer math.
@@ -1049,6 +928,11 @@ mod tests {
 
     #[test]
     fn combined_smoke_and_lighting_timings() {
+        // Optional wall-clock measurement. The lighting suite measures CPU
+        // time and checks the draw budget without scheduler contention.
+        if std::env::var_os("RATRUN_SMOKE_TIMINGS").is_none() {
+            return;
+        }
         let mut world = World::new(Theme::Sewer, 123);
         world.lighting = LightingMode::Full;
         world.smoke_enabled = true;
