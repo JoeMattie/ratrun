@@ -159,6 +159,14 @@ pub struct World {
     /// SFX events emitted this tick; drained by the app after `update`.
     pub sfx: Vec<Sfx>,
 
+    // ---- Render-only caches ----------------------------------------------
+    /// When (`elapsed`) the Tail Thrash's charge first topped out, so the art
+    /// can flash once as the tail becomes ready and then settle into its idle
+    /// pulse. `NEG_INFINITY` = not ready. Never simulated, never round-tripped,
+    /// never read by the schedule: the tail is drawn from `player.loadout` and
+    /// only the *crossing* needs remembering (`art_rat::tail_ready_flash`).
+    tail_ready_at: f32,
+
     // ---- Facade round-trip placeholders ----------------------------------
     rng_spare: Option<StdRng>,
     level_spare: Option<Level>,
@@ -312,6 +320,7 @@ impl World {
             cam: Vec2::ZERO,
             viewport: Vec2::new(160.0, 80.0),
             sfx: Vec::new(),
+            tail_ready_at: f32::NEG_INFINITY,
 
             // Unused twin of each round-tripped value. `swap_in` leaves the
             // facade holding this while the real value lives in the ECS
@@ -1212,13 +1221,22 @@ impl World {
         &mut self.smoke
     }
 
-    fn draw_player(&self, pb: &mut PixelBuffer, cam: Vec2) {
+    fn draw_player(&mut self, pb: &mut PixelBuffer, cam: Vec2) {
         // The Tail Thrash's long tail rides *under* the rat, so the body stays
         // readable mid-sweep and the arc reads as coming out of its rump.
         if self.thrash_visual().is_some() {
             art_rat::draw_tail_thrash(pb, &self.player, self.thrash_visual(), cam);
         }
-        art_rat::draw_rat(pb, &self.player, self.elapsed, cam);
+        // The tail is the Tail Thrash's charge meter (see `art_rat::TailCharge`):
+        // the charge itself is read off the weapon, but the one-off "just
+        // charged" flash needs the crossing remembered between frames, and this
+        // is the only place that has a frame stream.
+        let flash = art_rat::tail_ready_flash(
+            art_rat::tail_charge(&self.player),
+            self.elapsed,
+            &mut self.tail_ready_at,
+        );
+        art_rat::draw_rat_flash(pb, &self.player, self.elapsed, cam, flash);
     }
 
     /// Boss ground layer: floor telegraphs and drop shadows, drawn after the
