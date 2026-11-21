@@ -34,9 +34,10 @@ use crate::game::art_walls::WallKind;
 use crate::game::bullet::{Bullet, Faction};
 use crate::game::collision::{TileKind, TILE_F};
 use crate::game::ecs::components::{
-    AcidDrop, CheeseString, CorrosiveChannel, EchoSpoke, FairyRing, Infection, MilkTooth, Pool,
+    AcidDrop, CheeseString, CorrosiveChannel, DeadLetterPacket, EchoSpoke, FairyRing, Infection,
+    MilkTooth, Pool,
 };
-use crate::game::ecs::resources::{ActiveFx, LaserFx};
+use crate::game::ecs::resources::{ActiveFx, DashTrack, LaserFx};
 use crate::game::ecs::systems::boss::{Boss, BossProjectile, BossProjectileKind, BossState};
 use crate::game::ecs::systems::miniboss::{Miniboss, MinibossState};
 use crate::game::ecs::systems::powerups::Decoy;
@@ -679,6 +680,64 @@ impl LightMap {
                     }
                 }
             }
+            // Carbon Copy: warm amber glow at the recorded eye pair + stepped
+            // copper-amber pools along the replaying backward sweep.
+            if lfx.copy_active() {
+                if let Some(copy) = lfx.copy {
+                    let cf = if copy.facing.len_sq() > 1e-4 {
+                        copy.facing.normalized()
+                    } else {
+                        Vec2::new(0.0, -1.0)
+                    };
+                    let eye = copy.origin + cf * 2.6;
+                    let ex = eye.x - cam.x;
+                    let ey = eye.y - cam.y;
+                    let pulse = 0.80 + 0.20 * (elapsed * 18.0).sin().abs();
+                    if in_range(ex, ey, 30.0) {
+                        self.lights.push(PointLight {
+                            x: ex,
+                            y: ey,
+                            radius: 28.0,
+                            color: (255, 192, 58),
+                            intensity: (190.0 * pulse) as u16,
+                            scatter: (48.0 * pulse) as u16,
+                            priority: 3,
+                            occlude: false,
+                            hard: false,
+                        });
+                    }
+                    let pulses = copy.pulses.max(1);
+                    let last_idx = lfx.copy_fired.saturating_sub(1).min(pulses - 1);
+                    let rev = (pulses - 1).saturating_sub(last_idx);
+                    let span = crate::game::weapon::LASER_SWEEP_HALF * 2.0;
+                    let t = if pulses <= 1 {
+                        0.5
+                    } else {
+                        rev as f32 / (pulses - 1) as f32
+                    };
+                    let ang = cf.y.atan2(cf.x) + (t - 0.5) * span;
+                    let dir = Vec2::from_angle(ang);
+                    let reach = copy.reach.clamp(12.0, 120.0);
+                    for &frac in &[0.42f32, 0.82] {
+                        let p = copy.origin + dir * (reach * frac);
+                        let sx = p.x - cam.x;
+                        let sy = p.y - cam.y;
+                        if in_range(sx, sy, 26.0) {
+                            self.lights.push(PointLight {
+                                x: sx,
+                                y: sy,
+                                radius: 24.0,
+                                color: (242, 154, 44),
+                                intensity: (162.0 * pulse) as u16,
+                                scatter: (42.0 * pulse) as u16,
+                                priority: 2,
+                                occlude: false,
+                                hard: false,
+                            });
+                        }
+                    }
+                }
+            }
         }
 
         // 2c. Roll Call active tags: electric-cyan glow on tagged hosts.
@@ -705,6 +764,41 @@ impl LightMap {
                             intensity: (110.0 + 70.0 * prog) as u16,
                             scatter: (28.0 + 22.0 * prog) as u16,
                             priority: 1,
+                            occlude: false,
+                            hard: false,
+                        });
+                    }
+                }
+            }
+        }
+
+        // 2d. Ripcord taut cord: cobalt-blue glow along the dash route + crisp
+        //     ice-white highlights at the two white knots.
+        if let Some(track) = scene.ecs.get_resource::<DashTrack>() {
+            let route = track.route();
+            if track.route_life > 0.0 && !route.is_empty() {
+                let k = (track.route_life / crate::game::ecs::resources::RIPCORD_SECS)
+                    .clamp(0.25, 1.0);
+                let start = track.route_start();
+                let far = route[route.len() - 1].1;
+                let mid_seg = route[route.len() / 2];
+                let mid = (mid_seg.0 + mid_seg.1) * 0.5;
+                for (p, col, r, int, sc) in [
+                    (start, (148, 212, 255), 22.0, 155.0, 32.0),
+                    (mid, (44, 134, 255), 28.0, 178.0, 38.0),
+                    (far, (148, 212, 255), 22.0, 155.0, 32.0),
+                ] {
+                    let sx = p.x - cam.x;
+                    let sy = p.y - cam.y;
+                    if in_range(sx, sy, r) {
+                        self.lights.push(PointLight {
+                            x: sx,
+                            y: sy,
+                            radius: r,
+                            color: col,
+                            intensity: (int * k) as u16,
+                            scatter: (sc * k) as u16,
+                            priority: 2,
                             occlude: false,
                             hard: false,
                         });
@@ -892,6 +986,7 @@ impl LightMap {
                         BossProjectileKind::GrassShrapnel => (170, 255, 110),
                         BossProjectileKind::SonicFang => (255, 115, 185),
                         BossProjectileKind::DustpanShard => (255, 210, 120),
+                        BossProjectileKind::RolledTowel => (252, 128, 108),
                         _ => scene.level.palette.accent,
                     };
                     self.lights.push(PointLight {
@@ -1265,32 +1360,79 @@ impl LightMap {
                 }
             }
 
-            // Drain Cleaner channel: bile-green glow at the advancing front & midpoint.
+            // Drain Cleaner channel / Downspout stepped runoff: caustic green glow.
             if let Some(ch) = entity.get::<CorrosiveChannel>() {
-                let total = crate::game::ecs::systems::evolutions::CHANNEL_ADVANCE
-                    + crate::game::ecs::systems::evolutions::CHANNEL_SETTLE;
-                let k = ((total - ch.age) / 0.5).clamp(0.2, 1.0);
-                let open_len = ch.length
-                    * (ch.age / crate::game::ecs::systems::evolutions::CHANNEL_ADVANCE)
-                        .clamp(0.0, 1.0);
-                let front = ch.start + ch.dir * open_len;
-                let mid = ch.start + ch.dir * (open_len * 0.5);
-                for p in [mid, front] {
-                    let sx = p.x - cam.x;
-                    let sy = p.y - cam.y;
-                    if in_range(sx, sy, 26.0) {
-                        self.lights.push(PointLight {
-                            x: sx,
-                            y: sy,
-                            radius: 26.0,
-                            color: (166, 255, 72),
-                            intensity: (165.0 * k) as u16,
-                            scatter: (44.0 * k) as u16,
-                            priority: 1,
-                            occlude: false,
-                            hard: false,
-                        });
+                if ch.runoff {
+                    let total = ch.settle.max(0.05);
+                    let k = ((total - ch.age) / 0.35).clamp(0.25, 1.0);
+                    let end = ch.start + ch.dir * ch.length;
+                    let mid = ch.start + ch.dir * (ch.length * 0.5);
+                    for p in [ch.start, mid, end] {
+                        let sx = p.x - cam.x;
+                        let sy = p.y - cam.y;
+                        if in_range(sx, sy, 28.0) {
+                            self.lights.push(PointLight {
+                                x: sx,
+                                y: sy,
+                                radius: 26.0,
+                                color: (176, 255, 92),
+                                intensity: (175.0 * k) as u16,
+                                scatter: (46.0 * k) as u16,
+                                priority: 2,
+                                occlude: false,
+                                hard: false,
+                            });
+                        }
                     }
+                } else {
+                    let total = crate::game::ecs::systems::evolutions::CHANNEL_ADVANCE
+                        + crate::game::ecs::systems::evolutions::CHANNEL_SETTLE;
+                    let k = ((total - ch.age) / 0.5).clamp(0.2, 1.0);
+                    let open_len = ch.length
+                        * (ch.age / crate::game::ecs::systems::evolutions::CHANNEL_ADVANCE)
+                            .clamp(0.0, 1.0);
+                    let front = ch.start + ch.dir * open_len;
+                    let mid = ch.start + ch.dir * (open_len * 0.5);
+                    for p in [mid, front] {
+                        let sx = p.x - cam.x;
+                        let sy = p.y - cam.y;
+                        if in_range(sx, sy, 26.0) {
+                            self.lights.push(PointLight {
+                                x: sx,
+                                y: sy,
+                                radius: 26.0,
+                                color: (166, 255, 72),
+                                intensity: (165.0 * k) as u16,
+                                scatter: (44.0 * k) as u16,
+                                priority: 1,
+                                occlude: false,
+                                hard: false,
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Dead Letter sealed envelope: pulsing vivid magenta wax-seal beacon.
+            if let Some(pkt) = entity.get::<DeadLetterPacket>() {
+                let sx = pkt.pos.x - cam.x;
+                let sy = pkt.pos.y - cam.y;
+                let r = 26.0;
+                if in_range(sx, sy, r) {
+                    let lf = (pkt.life / pkt.total.max(1e-4)).clamp(0.0, 1.0);
+                    let pulse = 0.78 + 0.22 * (elapsed * (6.0 + 10.0 * (1.0 - lf))).sin().abs();
+                    let k = (0.45 + 0.55 * lf) * pulse;
+                    self.lights.push(PointLight {
+                        x: sx,
+                        y: sy,
+                        radius: r,
+                        color: (242, 88, 210),
+                        intensity: (188.0 * k) as u16,
+                        scatter: (48.0 * k) as u16,
+                        priority: 2,
+                        occlude: false,
+                        hard: false,
+                    });
                 }
             }
 
@@ -1734,16 +1876,23 @@ impl LightMap {
                 }
             }
             BossState::Mangle(st) => {
-                // The wringer sits under a warm laundry-bay lamp; the tells
-                // themselves are self-lit by the hazard pass below.
-                if in_range(bsx, bsy, 46.0) {
+                // The wringer sits under a steamy laundry-bay lamp; phase 3
+                // shifts warmer/hotter as the torn belt and cracked housing glow.
+                if in_range(bsx, bsy, 54.0) {
+                    let body_col = if boss.phase >= 3 {
+                        (242, 186, 152)
+                    } else if boss.phase >= 2 {
+                        (222, 224, 210)
+                    } else {
+                        (204, 232, 228)
+                    };
                     self.lights.push(PointLight {
                         x: bsx,
                         y: bsy,
-                        radius: 44.0,
-                        color: (198, 226, 222),
-                        intensity: 180,
-                        scatter: 36,
+                        radius: 50.0,
+                        color: body_col,
+                        intensity: 196,
+                        scatter: 42,
                         priority: 2,
                         occlude: false,
                         hard: false,
@@ -1751,23 +1900,21 @@ impl LightMap {
                 }
                 match st {
                     MangleState::Intake { .. } => {
-                        // The nip pulls light with it: a red-hot throat.
+                        // The nip pulls light with it: amber warning ramping to a red-hot bite throat.
                         let view = boss.mangle_view();
                         let nip = crate::game::art_boss_mangle::nip_pos(&view);
                         let sx = nip.x - cam.x;
                         let sy = nip.y - cam.y;
-                        if in_range(sx, sy, 46.0) {
+                        let biting = progress * boss.duration >= 1.1;
+                        let pulse = 0.85 + 0.15 * (elapsed * 14.0).sin().abs();
+                        if in_range(sx, sy, 50.0) {
                             self.lights.push(PointLight {
                                 x: sx,
                                 y: sy,
-                                radius: 44.0,
-                                color: if progress * boss.duration >= 1.1 {
-                                    (255, 96, 64)
-                                } else {
-                                    (255, 196, 78)
-                                },
-                                intensity: 245,
-                                scatter: 60,
+                                radius: if biting { 48.0 } else { 44.0 },
+                                color: if biting { (255, 88, 56) } else { (255, 198, 78) },
+                                intensity: ((if biting { 268.0 } else { 240.0 }) * pulse) as u16,
+                                scatter: if biting { 68 } else { 56 },
                                 priority: 3,
                                 occlude: false,
                                 hard: false,
@@ -1777,14 +1924,14 @@ impl LightMap {
                     MangleState::WringOut => {
                         let sx = boss.target.x - cam.x;
                         let sy = boss.target.y - cam.y;
-                        if in_range(sx, sy, 42.0) {
+                        if in_range(sx, sy, 46.0) {
                             self.lights.push(PointLight {
                                 x: sx,
                                 y: sy,
-                                radius: 40.0,
-                                color: (255, 192, 98),
-                                intensity: 225,
-                                scatter: 54,
+                                radius: 44.0,
+                                color: (255, 184, 96),
+                                intensity: 235,
+                                scatter: 56,
                                 priority: 3,
                                 occlude: false,
                                 hard: false,
@@ -1792,34 +1939,35 @@ impl LightMap {
                         }
                     }
                     MangleState::Jam | MangleState::FinalJam => {
-                        // The exposed crank glows gold: the punish window reads
-                        // in a dark room.
+                        // The exposed crank glows bright pulsing gold: the punish
+                        // window reads unmistakably in a dim laundry bay.
                         let view = boss.mangle_view();
                         let crank = crate::game::art_boss_mangle::crank_pos(&view);
                         let sx = crank.x - cam.x;
                         let sy = crank.y - cam.y;
-                        if in_range(sx, sy, 40.0) {
+                        let pulse = 0.86 + 0.14 * (elapsed * 11.0).sin().abs();
+                        if in_range(sx, sy, 46.0) {
                             self.lights.push(PointLight {
                                 x: sx,
                                 y: sy,
-                                radius: 38.0,
-                                color: (255, 216, 112),
-                                intensity: 255,
-                                scatter: 62,
+                                radius: 44.0,
+                                color: (255, 224, 114),
+                                intensity: (272.0 * pulse) as u16,
+                                scatter: 70,
                                 priority: 3,
                                 occlude: false,
                                 hard: false,
                             });
                         }
                     }
-                    MangleState::PhaseShift | MangleState::Death if in_range(bsx, bsy, 78.0) => {
+                    MangleState::PhaseShift | MangleState::Death if in_range(bsx, bsy, 80.0) => {
                         self.lights.push(PointLight {
                             x: bsx,
                             y: bsy,
-                            radius: 74.0,
-                            color: (255, 198, 120),
-                            intensity: 275,
-                            scatter: 80,
+                            radius: 76.0,
+                            color: (255, 196, 112),
+                            intensity: 280,
+                            scatter: 82,
                             priority: 3,
                             occlude: false,
                             hard: false,
@@ -1829,16 +1977,21 @@ impl LightMap {
                 }
             }
             BossState::NightEdition(st) => {
-                // The press works under its own cold compositor's lamp; the
-                // hazards themselves are self-lit by the hazard pass below.
-                if in_range(bsx, bsy, 48.0) {
+                // Cold compositor's desk lamp over the cast-iron press, warming
+                // slightly as Phase 3 pushes the rollers into smoky overload.
+                if in_range(bsx, bsy, 54.0) {
+                    let body_col = if boss.phase >= 3 {
+                        (236, 206, 186)
+                    } else {
+                        (212, 226, 242)
+                    };
                     self.lights.push(PointLight {
                         x: bsx,
                         y: bsy,
-                        radius: 46.0,
-                        color: (214, 222, 236),
-                        intensity: 180,
-                        scatter: 36,
+                        radius: 50.0,
+                        color: body_col,
+                        intensity: 196,
+                        scatter: 42,
                         priority: 2,
                         occlude: false,
                         hard: false,
@@ -1861,26 +2014,27 @@ impl LightMap {
                         });
                     }
                 };
-                // Amber while the tell runs, red for its last 30 %: the same
-                // warning ramp the other bosses' tells use.
                 let warn = if progress >= 0.7 {
-                    (255, 96, 64)
+                    (255, 92, 62)
                 } else {
-                    (255, 196, 78)
+                    (255, 198, 78)
                 };
                 match st {
                     NightEditionState::PageTell | NightEditionState::PageStamp => {
-                        // The sheet's inked part lights up where it will land.
                         let (ink, _) = crate::game::art_boss_night_edition::inked_rect(
                             boss.target,
                             boss.swipe_side,
                         );
                         let color = if matches!(st, NightEditionState::PageStamp) {
-                            (255, 96, 64)
+                            (255, 88, 60)
                         } else {
                             warn
                         };
-                        tell(ink, 40.0, color, 240);
+                        tell(ink, 44.0, color, 248);
+                        // Subtle cool-cyan safe-margin lift on the opposite side of the target
+                        // so the blank margin reads cleanly in the dark press hall.
+                        let safe = boss.target + (boss.target - ink) * 1.15;
+                        tell(safe, 28.0, (124, 224, 242), 145);
                     }
                     NightEditionState::MisprintTell | NightEditionState::MisprintStamp => {
                         let rects = crate::game::art_boss_night_edition::misprint_rects(
@@ -1888,54 +2042,53 @@ impl LightMap {
                             boss.swipe_side,
                         );
                         let color = if matches!(st, NightEditionState::MisprintStamp) {
-                            (255, 96, 64)
+                            (255, 88, 60)
                         } else {
                             warn
                         };
                         for (ink, _) in rects {
-                            tell(ink, 40.0, color, 235);
+                            tell(ink, 42.0, color, 240);
                         }
                     }
                     NightEditionState::CarriageTell => {
-                        // The bell's spark at the rule's near end.
-                        tell(boss.pounce_origin, 38.0, warn, 245);
+                        // Gleaming brass bell flash at the dotted rule's near end.
+                        tell(boss.pounce_origin, 42.0, (255, 218, 96), 255);
                     }
                     NightEditionState::CarriageSweep => {
-                        tell(boss.pos, 44.0, (255, 96, 64), 250);
+                        tell(boss.pos, 48.0, (255, 96, 62), 260);
                     }
                     NightEditionState::BedLowered | NightEditionState::Ribbon => {
-                        // The exposed weak point glows gold: the punish window
-                        // reads in a dark room.
+                        // Pulsing bright gold-white beacon on the exposed bed or silk ribbon.
                         let view = boss.night_edition_view();
                         if let Some(weak) = crate::game::art_boss_night_edition::weak_point(&view)
                         {
-                            tell(weak, 38.0, (255, 216, 112), 255);
+                            let pulse = 0.86 + 0.14 * (elapsed * 12.0).sin().abs();
+                            tell(weak, 44.0, (255, 228, 122), (274.0 * pulse) as u16);
                         }
                     }
                     NightEditionState::PhaseTurn | NightEditionState::Wreck => {
-                        tell(boss.pos, 74.0, (255, 198, 120), 275);
+                        tell(boss.pos, 76.0, (255, 202, 122), 280);
                     }
                     NightEditionState::Roll => {}
                 }
             }
             BossState::Magpie(st) => {
                 use crate::game::art_boss_magpie::MagpieState;
-                // The bird is self-lit: a magpie's iridescence catches the last
-                // of the light even on a dark flatbed, and the boss has to read
-                // against the planks (which are the brightest thing on this
-                // floor). Cool blue-white on the body, hot amber on the marked
-                // point whenever a tell is committed.
-                if in_range(bsx, bsy, 62.0) {
+                // Iridescent corvid key-light so the black-and-white plumage
+                // and peacock wing sheen pop sharply over the wooden flatbed.
+                if in_range(bsx, bsy, 68.0) {
                     let (col, r, int, sc) = match st {
-                        MagpieState::Stuck => ((255, 214, 132), 62.0, 250, 58),
+                        MagpieState::Stuck => ((255, 218, 134), 64.0, 255, 62),
                         MagpieState::Peck | MagpieState::PeckWindup => {
-                            ((255, 158, 92), 56.0, 220, 48)
+                            ((255, 162, 94), 58.0, 226, 50)
                         }
                         MagpieState::Gust | MagpieState::GustWindup => {
-                            ((176, 214, 255), 66.0, 230, 62)
+                            ((178, 222, 255), 72.0, 242, 66)
                         }
-                        MagpieState::Death => ((196, 206, 226), 58.0, 210, 52),
-                        _ => ((150, 190, 232), 52.0, 186, 40),
+                        MagpieState::StrafePass => ((196, 228, 255), 62.0, 228, 56),
+                        MagpieState::Death => ((206, 216, 236), 64.0, 224, 58),
+                        _ if boss.phase >= 3 => ((174, 186, 255), 56.0, 204, 46),
+                        _ => ((156, 206, 236), 56.0, 198, 44),
                     };
                     self.lights.push(PointLight {
                         x: bsx,
@@ -1949,9 +2102,7 @@ impl LightMap {
                         hard: false,
                     });
                 }
-                // The marked point of a committed attack stays lit, so the rat
-                // can find the square it has to leave (or bite) even at the
-                // edge of the viewport.
+                // Marked strike point / buried-head punish window stays vividly lit.
                 if matches!(
                     st,
                     MagpieState::PeckWindup
@@ -1963,15 +2114,21 @@ impl LightMap {
                 ) {
                     let tsx = boss.target.x - cam.x;
                     let tsy = boss.target.y - cam.y;
-                    if in_range(tsx, tsy, 40.0) {
-                        let hot = matches!(st, MagpieState::Peck | MagpieState::Stuck);
+                    if in_range(tsx, tsy, 46.0) {
+                        let pulse = 0.86 + 0.14 * (elapsed * 12.0).sin().abs();
+                        let (r, col, int, sc) = match st {
+                            MagpieState::Stuck => (44.0, (255, 228, 118), (272.0 * pulse) as u16, 66),
+                            MagpieState::Peck => (42.0, (255, 108, 72), 255, 58),
+                            MagpieState::SnatchDrop => (40.0, (255, 148, 78), 232, 52),
+                            _ => (36.0, (255, 188, 92), 205, 48),
+                        };
                         self.lights.push(PointLight {
                             x: tsx,
                             y: tsy,
-                            radius: if hot { 40.0 } else { 34.0 },
-                            color: if hot { (255, 226, 156) } else { (255, 168, 96) },
-                            intensity: if hot { 235 } else { 180 },
-                            scatter: 44,
+                            radius: r,
+                            color: col,
+                            intensity: int,
+                            scatter: sc,
                             priority: 3,
                             occlude: false,
                             hard: false,

@@ -526,6 +526,12 @@ pub fn state_contacts(state: NightEditionState) -> bool {
 // Pixel helpers (zero allocation)
 // ============================================================================
 
+const OUTLINE_INK: Rgb = (8, 8, 12);
+const LEAD_SH: Rgb = (46, 48, 58);
+const LEAD_MID: Rgb = (106, 112, 128);
+const LEAD_HI: Rgb = (182, 190, 206);
+const BRASS_SHADOW: Rgb = (96, 66, 20);
+
 #[derive(Clone, Copy)]
 struct Frame {
     pos: Vec2,
@@ -538,6 +544,7 @@ struct Frame {
     prog: f32,
     anim: f32,
     accent: Rgb,
+    damage_tier: u8,
 }
 
 impl Frame {
@@ -560,6 +567,14 @@ impl Frame {
             1.0
         };
         let anim = if view.anim.is_finite() { view.anim } else { 0.0 };
+        let phase = view.phase.max(1);
+        let damage_tier = if phase >= 3 || hp <= 0.30 {
+            3
+        } else if phase >= 2 || hp <= 0.65 {
+            2
+        } else {
+            1
+        };
         Self {
             pos: view.pos - cam,
             f,
@@ -571,6 +586,7 @@ impl Frame {
             prog,
             anim,
             accent,
+            damage_tier,
         }
     }
 
@@ -590,6 +606,12 @@ impl Frame {
     fn lit(&self, nu: f32, nv: f32) -> f32 {
         nu * self.fl + nv * self.pl
     }
+}
+
+#[inline]
+fn smoothstep(t: f32) -> f32 {
+    let x = t.clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
 }
 
 #[inline]
@@ -633,14 +655,14 @@ fn bbox_rect(pb: &PixelBuffer, center: Vec2, half: Vec2, pad: f32) -> Option<(i3
 
 #[inline]
 fn blend_px(pb: &mut PixelBuffer, x: i32, y: i32, c: Rgb, a: f32) {
-    if a <= 0.0 || x < 0 || y < 0 {
+    if a <= 0.004 || x < 0 || y < 0 {
         return;
     }
     let (ux, uy) = (x as usize, y as usize);
     if ux >= pb.w || uy >= pb.h {
         return;
     }
-    if a >= 0.999 {
+    if a >= 0.995 {
         pb.plot(x, y, c);
     } else {
         let bg = pb.pixel_at(ux, uy);
@@ -650,7 +672,7 @@ fn blend_px(pb: &mut PixelBuffer, x: i32, y: i32, c: Rgb, a: f32) {
 
 #[inline]
 fn darken_px(pb: &mut PixelBuffer, x: i32, y: i32, amount: f32) {
-    if amount <= 0.0 || x < 0 || y < 0 {
+    if amount <= 0.004 || x < 0 || y < 0 {
         return;
     }
     let (ux, uy) = (x as usize, y as usize);
@@ -664,24 +686,24 @@ fn darken_px(pb: &mut PixelBuffer, x: i32, y: i32, amount: f32) {
 #[inline]
 fn shade3(shadow: Rgb, mid: Rgb, hi: Rgb, lum: f32) -> Rgb {
     let l = lum.clamp(0.0, 1.15);
-    if l < 0.62 {
-        mix(shadow, mid, l / 0.62)
+    if l < 0.56 {
+        mix(shadow, mid, l / 0.56)
     } else {
-        mix(mid, hi, (l - 0.62) / 0.53)
+        mix(mid, hi, (l - 0.56) / 0.59)
     }
 }
 
 #[inline]
 fn apply_hit(c: Rgb, hit: f32) -> Rgb {
-    if hit <= 0.0 {
+    if hit <= 0.01 {
         return c;
     }
     let flash = if hit > 0.55 {
-        (255, 246, 222)
+        (255, 248, 224)
     } else {
-        (255, 214, 168)
+        (255, 212, 158)
     };
-    mix(c, flash, (0.18 + hit * 0.40).min(0.60))
+    mix(c, flash, (0.24 + hit * 0.46).min(0.70))
 }
 
 /// Deterministic grit hash in `0..1`.
@@ -713,7 +735,7 @@ fn draw_line_styled(
     dash_period: i32,
     phase: i32,
 ) {
-    if !a.x.is_finite() || !b.x.is_finite() || pb.w == 0 || pb.h == 0 {
+    if !a.x.is_finite() || !b.x.is_finite() || pb.w == 0 || pb.h == 0 || alpha <= 0.004 {
         return;
     }
     let ax = a.x.round() as i32;
@@ -727,7 +749,7 @@ fn draw_line_styled(
     let mut err = dx + dy;
     let (mut x, mut y) = (ax, ay);
     let mut step = 0i32;
-    let max_steps = (dx - dy + 2).min(320);
+    let max_steps = (dx - dy + 2).min(360);
     while step <= max_steps {
         let on = dash_period <= 0 || ((step + phase).rem_euclid(dash_period) < dash_on);
         if on {
@@ -758,7 +780,7 @@ fn draw_ring_styled(
     dash_mod: i32,
     phase: f32,
 ) {
-    if radius < 1.0 || pb.w == 0 || pb.h == 0 {
+    if radius < 1.0 || pb.w == 0 || pb.h == 0 || alpha <= 0.004 {
         return;
     }
     if bbox_around(pb, center, radius + 2.0).is_none() {
@@ -800,7 +822,7 @@ fn fill_rect(pb: &mut PixelBuffer, center: Vec2, half: Vec2, c: Rgb, alpha: f32)
     }
 }
 
-/// The outline of an axis-aligned rectangle, with optional corner ticks.
+/// The outline of an axis-aligned rectangle.
 fn outline_rect(pb: &mut PixelBuffer, center: Vec2, half: Vec2, c: Rgb, alpha: f32, dashed: bool) {
     let x0 = (center.x - half.x).round() as i32;
     let x1 = (center.x + half.x).round() as i32;
@@ -821,23 +843,89 @@ fn outline_rect(pb: &mut PixelBuffer, center: Vec2, half: Vec2, c: Rgb, alpha: f
     }
 }
 
+/// Draw an oriented newspaper broadsheet page (for fluttering/tumbling sheets).
+fn draw_oriented_sheet(
+    pb: &mut PixelBuffer,
+    center: Vec2,
+    ang: f32,
+    hu: f32,
+    hv: f32,
+    alpha: f32,
+) {
+    if alpha <= 0.02 {
+        return;
+    }
+    let f = Vec2::from_angle(ang);
+    let p = f.perp();
+    let Some((x0, x1, y0, y1)) = bbox_around(pb, center, hu.max(hv) + 2.5) else {
+        return;
+    };
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let dx = x as f32 - center.x;
+            let dy = y as f32 - center.y;
+            let u = dx * f.x + dy * f.y;
+            let v = dx * p.x + dy * p.y;
+            let d = sd_rbox(u, v, hu, hv, 0.4);
+            if d > 0.9 {
+                continue;
+            }
+            if d > 0.0 {
+                blend_px(pb, x, y, OUTLINE_INK, 0.55 * alpha * (1.0 - d / 0.9));
+                continue;
+            }
+            let lit = (u / hu.max(1.0)) * f.dot(LIGHT) + (v / hv.max(1.0)) * p.dot(LIGHT);
+            let mut col = shade3(PAPER_SHADOW, PAPER_MID, PAPER_SPEC, 0.62 + 0.35 * lit);
+            // Tiny dark headline & column stripes so it reads as a printed newspaper!
+            if u < -hu * 0.35 && u > -hu * 0.72 && v.abs() < hv * 0.75 {
+                col = INK_MID;
+            } else if u > -hu * 0.15 && ((u * 1.4).floor() as i32) % 2 == 0 && v.abs() < hv * 0.72 {
+                col = mix(col, INK_MID, 0.48);
+            }
+            blend_px(pb, x, y, col, alpha);
+        }
+    }
+}
+
+/// Cel-shaded smoke puff for damaged press bearings / wreck.
+fn draw_smoke_puff(pb: &mut PixelBuffer, center: Vec2, r: f32, alpha: f32) {
+    if r <= 0.6 || alpha <= 0.02 {
+        return;
+    }
+    let Some((x0, x1, y0, y1)) = bbox_around(pb, center, r + 1.2) else {
+        return;
+    };
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let dx = x as f32 - center.x;
+            let dy = y as f32 - center.y;
+            let d = (dx * dx + dy * dy).sqrt();
+            if d > r {
+                continue;
+            }
+            let lit = (dx / r) * LIGHT.x + (dy / r) * LIGHT.y;
+            let col = shade3((26, 24, 34), (66, 62, 78), (126, 122, 140), 0.45 + 0.55 * lit);
+            blend_px(pb, x, y, col, alpha * (1.0 - (d / r).powi(2) * 0.4));
+        }
+    }
+}
+
 // ============================================================================
 // Ground layer
 // ============================================================================
 
-/// Draw the Night Edition's floor layer: shadow, page and rule telegraphs,
-/// recovery markers, the pose-change ring and the wreck's ink pool.
+/// Draw the Night Edition's floor layer: press bed plinth, shadow, page and
+/// rule telegraphs, recovery markers, pose-change sheets and wreck ink flood.
 pub fn draw_ground(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, accent: Rgb) {
     let fr = Frame::from_view(view, cam, accent);
     draw_press_bed(pb, view.bed - cam, accent);
-    draw_shadow(pb, &fr);
 
     match view.state {
         NightEditionState::PageTell | NightEditionState::PageStamp => {
-            draw_page(pb, view, cam, fr.prog);
+            draw_page(pb, view, cam, fr.prog, fr.anim);
         }
         NightEditionState::MisprintTell | NightEditionState::MisprintStamp => {
-            draw_misprint(pb, view, cam, fr.prog);
+            draw_misprint(pb, view, cam, fr.prog, fr.anim);
         }
         NightEditionState::CarriageTell
         | NightEditionState::CarriageSweep
@@ -849,21 +937,30 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, acc
         }
         NightEditionState::PhaseTurn => {
             let t = fr.prog;
-            let r = (14.0 + 26.0 * t).clamp(0.0, 40.0);
+            let r = (14.0 + 28.0 * t).clamp(0.0, 44.0);
             draw_ring_styled(
                 pb,
                 fr.pos,
                 r,
-                mix(PAPER_SPEC, CYAN_HI, 0.4),
-                (1.0 - t).clamp(0.0, 1.0) * 0.75,
+                mix(PAPER_SPEC, CYAN_HI, 0.45),
+                (1.0 - t).clamp(0.0, 1.0) * 0.85,
                 3,
-                fr.anim * 2.0,
+                fr.anim * 2.2,
             );
-            // Stripped sheets flutter out of the frame.
+            draw_ring_styled(
+                pb,
+                fr.pos,
+                r * 0.65,
+                RIBBON_HI,
+                (1.0 - t).clamp(0.0, 1.0) * 0.55,
+                0,
+                0.0,
+            );
+            // Stripped printed newsprint pages flutter outward as the new roll loads!
             for i in 0..4 {
-                let a = i as f32 * TAU / 4.0 + 0.4;
-                let p = fr.pos + Vec2::from_angle(a) * (10.0 + 22.0 * t);
-                fill_rect(pb, p, Vec2::new(4.0, 3.0), PAPER_MID, 0.55 * (1.0 - t));
+                let a = i as f32 * TAU / 4.0 + 0.45 + t * 0.8;
+                let p = fr.pos + Vec2::from_angle(a) * (10.0 + 24.0 * t);
+                draw_oriented_sheet(pb, p, a + t * 2.5, 4.4, 3.2, 0.82 * (1.0 - t));
             }
         }
         NightEditionState::Wreck => {
@@ -871,13 +968,12 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, acc
         }
         _ => {}
     }
+
+    draw_shadow(pb, &fr, view.state);
 }
 
-/// The arena's press bed: a recessed stone plinth with a type-block border,
-/// registration crosses and its own dried-ink stains. This is the Night
-/// Edition's arena dressing (the Printworks no longer borrows the Lab's steel
-/// bumpers and charging dock); it is ground layer only and collides with
-/// nothing.
+/// The arena's press bed: recessed stone plinth with a type-block border,
+/// cyan registration crosses and dried-ink press ghosting.
 fn draw_press_bed(pb: &mut PixelBuffer, c: Vec2, accent: Rgb) {
     let half = PRESS_BED_HALF;
     let Some((x0, x1, y0, y1)) = bbox_rect(pb, c, half, 3.0) else {
@@ -892,217 +988,258 @@ fn draw_press_bed(pb: &mut PixelBuffer, c: Vec2, accent: Rgb) {
             }
             let edge = (half.x - dx).min(half.y - dy);
             if edge < 0.0 {
-                // The plinth's lip: a dark bevel catching the accent colour.
-                darken_px(pb, x, y, 0.30 + 0.10 * (edge + 2.5).clamp(0.0, 1.0));
-                blend_px(pb, x, y, mix(IRON_SHADOW, accent, 0.30), 0.22);
+                darken_px(pb, x, y, 0.34 + 0.10 * (edge + 2.5).clamp(0.0, 1.0));
+                blend_px(pb, x, y, mix(IRON_SHADOW, accent, 0.25), 0.20);
                 continue;
             }
             if edge < 3.0 {
-                // A border of type blocks: alternating newsprint and charcoal
-                // ticks, the printworks' own masonry.
-                let block = ((dx / 6.0) as i32 + (dy / 6.0) as i32) % 2 == 0;
+                let block = ((dx / 5.0) as i32 + (dy / 5.0) as i32) % 2 == 0;
                 let col = if block { IRON_MID } else { IRON_SHADOW };
-                blend_px(pb, x, y, col, 0.42);
+                blend_px(pb, x, y, col, 0.46);
                 if block && hash01(x / 2, y / 2) > 0.72 {
                     blend_px(pb, x, y, PAPER_SHADOW, 0.22);
                 }
                 continue;
             }
-            // The bed surface: stone, with an old impression still legible.
             let grit = hash01(x, y);
-            let col = mix(IRON_SHADOW, IRON_MID, 0.35 + 0.25 * grit);
-            blend_px(pb, x, y, col, 0.30);
-            let in_print = dx < half.x * 0.62 && dy < half.y * 0.62;
+            let col = mix(IRON_SHADOW, IRON_MID, 0.32 + 0.22 * grit);
+            blend_px(pb, x, y, col, 0.32);
+            let in_print = dx < half.x * 0.65 && dy < half.y * 0.65;
             if in_print {
                 let glyph = hash01(x / 3 + 17, y / 3 + 5);
                 if glyph > 0.66 {
-                    blend_px(pb, x, y, INK_MID, 0.20);
+                    blend_px(pb, x, y, INK_MID, 0.24);
                 } else if glyph > 0.58 {
-                    blend_px(pb, x, y, PAPER_SHADOW, 0.12);
+                    blend_px(pb, x, y, PAPER_SHADOW, 0.14);
                 }
             }
         }
     }
-    // Registration crosses at the four corners of the print area.
+    // Crisp registration target crosses at the four corners of the press bed.
     for (sx, sy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
-        let p = c + Vec2::new(sx * (half.x - 6.0), sy * (half.y - 6.0));
-        blend_px(pb, p.x.round() as i32, p.y.round() as i32, CYAN_MID, 0.55);
+        let p = c + Vec2::new(sx * (half.x - 5.5), sy * (half.y - 5.5));
+        let px = p.x.round() as i32;
+        let py = p.y.round() as i32;
+        blend_px(pb, px, py, CYAN_HI, 0.65);
         for k in 1..=2 {
-            blend_px(pb, p.x.round() as i32 + k, p.y.round() as i32, CYAN_MID, 0.35);
-            blend_px(pb, p.x.round() as i32 - k, p.y.round() as i32, CYAN_MID, 0.35);
-            blend_px(pb, p.x.round() as i32, p.y.round() as i32 + k, CYAN_MID, 0.35);
-            blend_px(pb, p.x.round() as i32, p.y.round() as i32 - k, CYAN_MID, 0.35);
+            blend_px(pb, px + k, py, CYAN_MID, 0.45);
+            blend_px(pb, px - k, py, CYAN_MID, 0.45);
+            blend_px(pb, px, py + k, CYAN_MID, 0.45);
+            blend_px(pb, px, py - k, CYAN_MID, 0.45);
         }
     }
 }
 
-fn draw_shadow(pb: &mut PixelBuffer, fr: &Frame) {
-    let c = fr.pos + Vec2::new(2.5, 3.5);
-    let Some((x0, x1, y0, y1)) = bbox_around(pb, c, BODY_RADIUS + 3.0) else {
+fn draw_shadow(pb: &mut PixelBuffer, fr: &Frame, state: NightEditionState) {
+    let alpha_scale = if state == NightEditionState::Wreck {
+        (1.0 - fr.prog * 0.45).clamp(0.35, 1.0)
+    } else {
+        1.0
+    };
+    let c = fr.pos + Vec2::new(2.6, 3.6);
+    let Some((x0, x1, y0, y1)) = bbox_around(pb, c, BODY_RADIUS + 5.0) else {
         return;
     };
     for y in y0..=y1 {
         for x in x0..=x1 {
-            let (u, v) = fr.local(x, y);
-            let d = sd_rbox(u - 2.5, v - 3.5, BODY_HALF_LEN + 1.0, BODY_HALF_WIDTH + 1.0, 3.0);
-            if d <= 1.5 {
-                darken_px(pb, x, y, 0.42 * (1.0 - (d.max(0.0) / 1.5)));
+            let dx = x as f32 - c.x;
+            let dy = y as f32 - c.y;
+            let u = dx * fr.f.x + dy * fr.f.y;
+            let v = dx * fr.p.x + dy * fr.p.y;
+            let d = sd_rbox(u, v, BODY_HALF_LEN + 0.8, BODY_HALF_WIDTH + 0.8, 2.8);
+            if d <= 1.8 {
+                darken_px(pb, x, y, 0.48 * (1.0 - (d.max(0.0) / 1.8)) * alpha_scale);
             }
         }
     }
 }
 
-/// The page tell and the impression.
-fn draw_page(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, prog: f32) {
+/// The page tell and the impression: unmistakable inked danger zone vs bright cyan safe margin.
+fn draw_page(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, prog: f32, anim: f32) {
     let page = view.page - cam;
     let side = view.side();
     let stamping = view.state == NightEditionState::PageStamp;
-    // The page is drawn while the tell runs and for the first beat of the
-    // impression (the sheet is still on the bed when the type comes down).
     let (ink, ink_half) = inked_rect(page, side);
     let (blank, blank_half) = margin_rect(page, side);
-    let pulse = 0.5 + 0.5 * (prog * 9.0).sin();
+    let pulse = 0.5 + 0.5 * (anim * 11.0).sin();
 
-    // Sheet stock under the ink: a light newsprint wash so the page reads on a
-    // dark floor.
-    if bbox_rect(pb, page, PAGE_HALF, 2.0).is_some() {
-        let alpha = if stamping { 0.32 } else { 0.20 + 0.10 * pulse };
+    // Newsprint sheet stock underneath.
+    if bbox_rect(pb, page, PAGE_HALF, 3.0).is_some() {
+        let alpha = if stamping { 0.42 } else { 0.24 + 0.12 * pulse };
         fill_rect(pb, page, PAGE_HALF, PAPER_MID, alpha);
     }
-    // The blank margin, marked as the safe side in registration cyan.
-    let safe_alpha = if stamping { 0.85 } else { 0.45 + 0.35 * pulse };
-    fill_rect(pb, blank, blank_half, SAFE_CYAN, 0.14 + 0.10 * pulse);
-    outline_rect(pb, blank, blank_half, SAFE_CYAN, safe_alpha, false);
-    // A chevron on the safe side, pointing out of the ink.
-    let tip = blank - Vec2::new(side * (blank_half.x - 1.0), 0.0);
-    let tail = tip + Vec2::new(side * 6.0, 0.0);
-    draw_line_styled(pb, tail + Vec2::new(0.0, -4.0), tip, SAFE_CYAN, safe_alpha, 0, 0, 0);
-    draw_line_styled(pb, tail + Vec2::new(0.0, 4.0), tip, SAFE_CYAN, safe_alpha, 0, 0, 0);
 
-    // The inked area: hatched type that floods dark as the impression nears.
-    let flood = if stamping { 1.0 } else { prog * 0.85 };
-    fill_rect(pb, ink, ink_half, INK_SHADOW, 0.24 + 0.55 * flood);
-    // Reversed letters: a blocky type grid, deterministic.
+    // 1) INKED DANGER AREA (24 x 30 px): floods dark purple-crimson as the stamp nears!
+    let flood = if stamping { 1.0 } else { smoothstep(prog) * 0.90 };
+    let danger_fill = mix(INK_SHADOW, (124, 24, 38), if stamping { 0.55 } else { flood * 0.45 });
+    fill_rect(pb, ink, ink_half, danger_fill, 0.34 + 0.48 * flood);
+
+    // Rising vertical ink-charge bar sweeping across the inked zone during PageTell!
+    if !stamping {
+        let fill_h = ink_half.y * 2.0 * prog;
+        let bar_y = (ink.y - ink_half.y) + fill_h;
+        draw_line_styled(
+            pb,
+            Vec2::new(ink.x - ink_half.x, bar_y),
+            Vec2::new(ink.x + ink_half.x, bar_y),
+            mix(TELL_AMBER, DANGER_RED, prog),
+            0.85,
+            0,
+            0,
+            0,
+        );
+    }
+
+    // Crisp newspaper headline banner + reversed type columns inside the inked zone!
     let x0 = (ink.x - ink_half.x).round() as i32;
     let x1 = (ink.x + ink_half.x).round() as i32;
     let y0 = (ink.y - ink_half.y).round() as i32;
     let y1 = (ink.y + ink_half.y).round() as i32;
-    let mut ty = y0 + 2;
-    while ty < y1 - 1 {
+    // Bold headline bar across the top of the page.
+    let head_col = mix(PAPER_SPEC, DANGER_RED, if stamping { 0.45 } else { prog * 0.35 });
+    fill_rect(
+        pb,
+        Vec2::new(ink.x, ink.y - ink_half.y + 4.0),
+        Vec2::new(ink_half.x - 2.5, 1.5),
+        head_col,
+        0.48 + 0.38 * flood,
+    );
+    // Newspaper text lines below the headline.
+    let mut ty = y0 + 8;
+    while ty < y1 - 2 {
         let mut tx = x0 + 2;
-        while tx < x1 - 1 {
+        while tx < x1 - 2 {
             let glyph = hash01(tx / 3, ty / 3);
-            let lit = mix(INK_HI, PAPER_SPEC, 0.25 + 0.30 * flood);
-            if glyph > 0.42 {
-                blend_px(pb, tx, ty, lit, 0.35 + 0.45 * flood);
-                if glyph > 0.72 {
-                    blend_px(pb, tx + 1, ty, lit, 0.30 + 0.40 * flood);
-                }
-                if glyph > 0.88 {
-                    blend_px(pb, tx, ty + 1, lit, 0.28 + 0.36 * flood);
+            if glyph > 0.38 {
+                let lit = mix(INK_HI, PAPER_HI, 0.35 + 0.35 * flood);
+                blend_px(pb, tx, ty, lit, 0.40 + 0.45 * flood);
+                if glyph > 0.68 {
+                    blend_px(pb, tx + 1, ty, lit, 0.35 + 0.40 * flood);
                 }
             }
             tx += 3;
         }
         ty += 3;
     }
-    // Page edge + crop marks.
+
+    // Crisp danger border around the inked area.
+    let ink_border = if stamping {
+        (255, 236, 206)
+    } else {
+        mix(TELL_AMBER, DANGER_RED, prog)
+    };
+    outline_rect(pb, ink, ink_half, ink_border, 0.72 + 0.24 * pulse, false);
+
+    // 2) BLANK SAFE MARGIN (12 x 30 px): clean crisp newsprint-white + bright registration cyan!
+    let safe_alpha = if stamping { 0.92 } else { 0.65 + 0.30 * pulse };
+    fill_rect(pb, blank, blank_half, mix(PAPER_HI, SAFE_CYAN, 0.42), 0.24 + 0.12 * pulse);
+    outline_rect(pb, blank, blank_half, SAFE_CYAN, safe_alpha, false);
+    // Animated safe-zone chevron pointing cleanly INTO the blank margin!
+    let bob = (anim * 8.0).sin() * 1.0;
+    let tip = blank + Vec2::new(side * (2.5 + bob), 0.0);
+    let tail = tip - Vec2::new(side * 4.5, 0.0);
+    for &dy in &[-4.0f32, 4.0] {
+        draw_line_styled(pb, tail + Vec2::new(0.0, dy), tip, PAPER_SPEC, safe_alpha, 0, 0, 0);
+        draw_line_styled(pb, tail + Vec2::new(0.0, dy) - Vec2::new(side, 0.0), tip - Vec2::new(side, 0.0), SAFE_CYAN, safe_alpha, 0, 0, 0);
+    }
+
+    // Printer's corner crop marks around the full 36 x 30 sheet.
     let edge = if stamping { PAPER_SPEC } else { PAPER_HI };
-    outline_rect(pb, page, PAGE_HALF, edge, 0.55 + 0.35 * pulse, false);
     for (sx, sy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
         let corner = page + Vec2::new(sx * PAGE_HALF.x, sy * PAGE_HALF.y);
-        let out_x = Vec2::new(sx * 4.0, 0.0);
-        let out_y = Vec2::new(0.0, sy * 4.0);
-        draw_line_styled(pb, corner - out_x, corner + out_x, edge, 0.6, 0, 0, 0);
-        draw_line_styled(pb, corner - out_y, corner + out_y, edge, 0.6, 0, 0, 0);
+        draw_line_styled(pb, corner - Vec2::new(sx * 3.5, 0.0), corner + Vec2::new(sx * 3.5, 0.0), edge, 0.75, 0, 0, 0);
+        draw_line_styled(pb, corner - Vec2::new(0.0, sy * 3.5), corner + Vec2::new(0.0, sy * 3.5), edge, 0.75, 0, 0, 0);
     }
-    // Impression flash.
+
+    // Dramatic impression slam flash + ink-splat burst!
     if stamping {
-        let flash = (1.0 - prog).clamp(0.0, 1.0);
-        fill_rect(pb, ink, ink_half, DANGER_RED, 0.30 * flash);
-        outline_rect(pb, ink, ink_half, (255, 236, 210), 0.85 * flash, false);
+        let flash = (1.0 - prog).powi(2).clamp(0.0, 1.0);
+        fill_rect(pb, ink, ink_half, DANGER_RED, 0.45 * flash);
+        outline_rect(pb, ink, ink_half, (255, 246, 224), 0.95 * flash, false);
+        for k in 0..8 {
+            let a = k as f32 / 8.0 * TAU + 0.2;
+            let dir = Vec2::from_angle(a);
+            let p0 = ink + Vec2::new(dir.x * ink_half.x, dir.y * ink_half.y);
+            let p1 = p0 + dir * (4.0 + 7.0 * prog);
+            draw_line_styled(pb, p0, p1, mix(INK_FRESH, DANGER_RED, 0.5), 0.75 * flash, 0, 0, 0);
+        }
     }
 }
 
-/// The phase-3 misprint: two sheets and the stripe that stays clear.
-fn draw_misprint(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, prog: f32) {
+/// The phase-3 misprint: two offset sheets (Beat 1 crimson-white, Beat 2 amber) and the
+/// unmistakable shared 12 px clear registration-cyan margin on top.
+fn draw_misprint(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, prog: f32, anim: f32) {
     let page = view.page - cam;
     let side = view.side();
     let stamping = view.state == NightEditionState::MisprintStamp;
-    let pulse = 0.5 + 0.5 * (prog * 9.0).sin();
+    let pulse = 0.5 + 0.5 * (anim * 11.0).sin();
     let rects = misprint_rects(page, side);
 
-    // Both sheets first (sheet stock + a flooded ink area each), then the one
-    // stripe that stays clear on top of them: the safe lane is the read that
-    // matters, so nothing may cover it.
     for (i, (ink, ink_half)) in rects.iter().enumerate() {
         let second = i == 1;
-        fill_rect(pb, *ink, *ink_half, PAPER_SHADOW, 0.14 + 0.10 * pulse);
+        fill_rect(pb, *ink, *ink_half, PAPER_SHADOW, 0.16 + 0.08 * pulse);
         let flood = if stamping {
             1.0
         } else {
-            prog * 0.55 + if second { 0.0 } else { 0.12 }
+            prog * 0.60 + if second { 0.0 } else { 0.18 }
         };
-        fill_rect(pb, *ink, *ink_half, INK_SHADOW, 0.40 + 0.5 * flood);
-        // A blocky type grid, so the printed half reads as print.
+        let fill_col = if second {
+            mix(INK_SHADOW, (120, 62, 22), 0.35)
+        } else {
+            mix(INK_SHADOW, (124, 24, 42), 0.42)
+        };
+        fill_rect(pb, *ink, *ink_half, fill_col, 0.38 + 0.46 * flood);
+
         let x0 = (ink.x - ink_half.x).round() as i32;
         let x1 = (ink.x + ink_half.x).round() as i32;
         let y0 = (ink.y - ink_half.y).round() as i32;
         let y1 = (ink.y + ink_half.y).round() as i32;
-        let mut ty = y0 + 2;
-        while ty < y1 - 1 {
+        let mut ty = y0 + 3;
+        while ty < y1 - 2 {
             let mut tx = x0 + 2;
-            while tx < x1 - 1 {
-                if hash01(tx / 3, ty / 3) > 0.45 {
-                    blend_px(pb, tx, ty, mix(INK_HI, PAPER_SPEC, 0.3 + 0.3 * flood), 0.4);
+            while tx < x1 - 2 {
+                if hash01(tx / 3 + i as i32 * 5, ty / 3) > 0.42 {
+                    blend_px(pb, tx, ty, mix(INK_HI, PAPER_SPEC, 0.35 + 0.30 * flood), 0.46);
                 }
                 tx += 3;
             }
             ty += 3;
         }
-        // The first sheet's border is white, the second's amber: the order is
-        // authored, not a coin flip.
-        let edge = if second { TELL_AMBER } else { PAPER_SPEC };
-        outline_rect(pb, *ink, *ink_half, edge, 0.55 + 0.2 * pulse, true);
+        let edge = if second { TELL_AMBER } else { mix(PAPER_SPEC, DANGER_RED, prog * 0.65) };
+        outline_rect(pb, *ink, *ink_half, edge, 0.72 + 0.20 * pulse, second);
     }
 
-    // The shared clear stripe: solid cyan edge to edge, with a chevron pointing
-    // into it from the press's side.
+    // Shared 12 px clear margin drawn BOLDLY on top so the safe lane is unmistakable!
     let (blank, blank_half) = margin_rect(page, side);
-    fill_rect(pb, blank, blank_half, SAFE_CYAN, 0.12 + 0.06 * pulse);
-    let strip_alpha = 0.65 + 0.30 * pulse;
+    fill_rect(pb, blank, blank_half, mix(PAPER_SPEC, SAFE_CYAN, 0.45), 0.26 + 0.12 * pulse);
+    let strip_alpha = 0.78 + 0.20 * pulse;
     outline_rect(pb, blank, blank_half, SAFE_CYAN, strip_alpha, false);
-    let tip = blank - Vec2::new(side * (blank_half.x - 0.5), 0.0);
-    let tail = tip + Vec2::new(side * 5.0, 0.0);
-    for dy in [-2.0f32, 2.0] {
-        draw_line_styled(
-            pb,
-            tail + Vec2::new(0.0, dy),
-            tip,
-            SAFE_CYAN,
-            strip_alpha,
-            0,
-            0,
-            0,
-        );
+    // Double safe chevrons vertically stacked inside the shared safe stripe.
+    for &cy in &[-6.0f32, 6.0] {
+        let tip = blank + Vec2::new(side * 2.5, cy);
+        let tail = tip - Vec2::new(side * 4.5, 0.0);
+        draw_line_styled(pb, tail + Vec2::new(0.0, -3.0), tip, PAPER_SPEC, strip_alpha, 0, 0, 0);
+        draw_line_styled(pb, tail + Vec2::new(0.0, 3.0), tip, PAPER_SPEC, strip_alpha, 0, 0, 0);
     }
-    let stripe_tick = mix(SAFE_CYAN, PAPER_SPEC, 0.35);
-    fill_rect(pb, blank, Vec2::new(blank_half.x, 1.0), stripe_tick, 0.5);
+
     if stamping {
-        // Each impression flashes on its own beat.
         let first = (prog * 1.9).min(1.0);
         let second = ((prog - 0.45) * 1.9).clamp(0.0, 1.0);
         for (i, (ink, ink_half)) in rects.iter().enumerate() {
-            let f = if i == 0 { 1.0 - first } else { 1.0 - second };
-            if f > 0.0 {
-                fill_rect(pb, *ink, *ink_half, DANGER_RED, 0.28 * f);
-                outline_rect(pb, *ink, *ink_half, (255, 236, 210), 0.8 * f, false);
+            let f = if i == 0 {
+                (1.0 - first).powi(2)
+            } else {
+                (1.0 - second).powi(2)
+            };
+            if f > 0.01 {
+                fill_rect(pb, *ink, *ink_half, DANGER_RED, 0.44 * f);
+                outline_rect(pb, *ink, *ink_half, (255, 244, 218), 0.92 * f, false);
             }
         }
     }
 }
 
-/// The carriage rule, its running smear and the exposed-ribbon window.
+/// The carriage rule (`54 × 8`), ringing brass bell, wet ink smear, and exposed ribbon bracket.
 fn draw_rule(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, fr: &Frame) {
     let from = view.rule_from - cam;
     let to = view.rule_to - cam;
@@ -1115,90 +1252,106 @@ fn draw_rule(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, fr: &Fram
     };
     let perp = Vec2::new(-u.y, u.x);
     let sweeping = view.state == NightEditionState::CarriageSweep;
+    let telling = view.state == NightEditionState::CarriageTell;
     let prog = fr.prog;
+    let pulse = 0.5 + 0.5 * (fr.anim * 12.0).sin();
 
-    // The 8 px band: a rule of dotted type on the floor.
-    let band_alpha = if sweeping { 0.42 } else { 0.30 };
-    let rail = if sweeping { DANGER_RED } else { PAPER_HI };
-    for side in [-1.0f32, 1.0] {
-        let off = perp * (RULE_HALF_WIDTH - 0.5) * side;
-        draw_line_styled(pb, from + off, to + off, rail, band_alpha + 0.25, 1, 3, 0);
+    // Subtle darkened danger carpet inside the 8 px rule band so it reads on bright floors too!
+    let band_steps = (len.ceil() as i32).min(120);
+    let band_col = if sweeping { DANGER_RED } else { TELL_AMBER };
+    for i in 0..=band_steps {
+        let p = from + u * (i as f32);
+        for k in -(RULE_HALF_WIDTH as i32 - 1)..=(RULE_HALF_WIDTH as i32 - 1) {
+            let q = p + perp * k as f32;
+            blend_px(pb, q.x.round() as i32, q.y.round() as i32, band_col, if sweeping { 0.22 } else { 0.11 + 0.06 * pulse });
+        }
     }
-    // The dotted centre rule.
+
+    // Crisp outer dotted rails.
+    let rail = if sweeping {
+        mix(DANGER_RED, PAPER_SPEC, 0.25)
+    } else {
+        mix(PAPER_HI, TELL_AMBER, 0.45 + 0.35 * prog)
+    };
+    for side in [-1.0f32, 1.0] {
+        let off = perp * (RULE_HALF_WIDTH - 0.3) * side;
+        draw_line_styled(pb, from + off, to + off, rail, 0.85, 2, 4, -(fr.anim * 18.0) as i32);
+    }
+    // Centre printer's dotted rule.
     draw_line_styled(
         pb,
         from,
         to,
-        if sweeping { DANGER_RED } else { TELL_AMBER },
-        0.55,
+        if sweeping { (255, 232, 198) } else { TELL_AMBER },
+        0.72,
         1,
-        2,
+        3,
         0,
     );
-    // Marching chevrons toward the stop end (the cue that it runs *away* from
-    // where the rat stands).
-    let march = (fr.anim * 22.0) % 12.0;
+
+    // Marching directional chevrons along the rule toward the brass stop.
+    let march = (fr.anim * (if sweeping { 36.0 } else { 22.0 })) % 11.0;
     let mut d = march;
     while d < len - 4.0 {
         let p = from + u * d;
-        draw_line_styled(pb, p - perp * 2.0 + u, p + u * 2.5, TELL_AMBER, 0.55, 0, 0, 0);
-        draw_line_styled(pb, p + perp * 2.0 + u, p + u * 2.5, TELL_AMBER, 0.55, 0, 0, 0);
-        d += 12.0;
+        let col = if sweeping { (255, 236, 200) } else { TELL_AMBER };
+        draw_line_styled(pb, p - perp * 2.5 - u * 1.2, p + u * 2.2, col, 0.80, 0, 0, 0);
+        draw_line_styled(pb, p + perp * 2.5 - u * 1.2, p + u * 2.2, col, 0.80, 0, 0, 0);
+        d += 11.0;
     }
-    // Brass stop bracket at the far end.
+
+    // Chunky brass stop bracket at the far end (`rule_to`).
     let bracket = if sweeping { DANGER_RED } else { BRASS_HI };
+    draw_line_styled(pb, to - perp * (RULE_HALF_WIDTH + 2.5), to + perp * (RULE_HALF_WIDTH + 2.5), OUTLINE_INK, 0.8, 0, 0, 0);
+    draw_line_styled(pb, to - perp * (RULE_HALF_WIDTH + 2.0), to + perp * (RULE_HALF_WIDTH + 2.0), bracket, 0.95, 0, 0, 0);
     for side in [-1.0f32, 1.0] {
         let p = to + perp * (RULE_HALF_WIDTH + 2.0) * side;
-        draw_line_styled(pb, p - u * 3.0, p + u * 3.0, bracket, 0.85, 0, 0, 0);
-        draw_line_styled(pb, p + u * 3.0, to + u * 3.0, bracket, 0.45, 1, 2, 0);
+        draw_line_styled(pb, p - u * 3.5, p + u * 1.0, bracket, 0.92, 0, 0, 0);
     }
-    // The bell at the near end of the rule, offset clear of the platen so the
-    // player can see where the rule starts.
-    let bell = from - u * 4.0 + perp * (RULE_HALF_WIDTH + 7.0);
-    draw_ring_styled(pb, bell, 3.5, BRASS_HI, 0.75, 0, fr.anim * 3.0);
-    fill_rect(pb, bell, Vec2::splat(1.5), BRASS_MID, 0.9);
-    draw_line_styled(pb, bell, from + perp * RULE_HALF_WIDTH, BRASS_MID, 0.5, 1, 2, 0);
+
+    // Gleaming brass bell at the near end + ringing acoustic arcs during CarriageTell!
+    let bell = from - u * 3.5 + perp * (RULE_HALF_WIDTH + 7.5);
+    fill_rect(pb, bell, Vec2::splat(2.4), OUTLINE_INK, 0.82);
+    fill_rect(pb, bell, Vec2::splat(1.8), BRASS_MID, 0.96);
+    blend_px(pb, (bell.x - 0.7).round() as i32, (bell.y - 0.7).round() as i32, BRASS_HI, 0.98);
+    draw_ring_styled(pb, bell, 3.6, BRASS_HI, 0.85, 0, fr.anim * 3.0);
+    if telling {
+        // Expanding golden bell chime rings!
+        let chime = (fr.anim * 3.2).fract();
+        draw_ring_styled(pb, bell, 4.5 + chime * 7.5, BRASS_HI, (1.0 - chime) * 0.85, 0, 0.0);
+    }
 
     if sweeping {
-        // Wet ink smear along the swept part of the rule.
+        // Wet glossy purple-black ink smear laid down behind the racing carriage!
         let swept = from + u * (len * prog);
         for side in [-1.0f32, 1.0] {
-            let off = perp * (RULE_HALF_WIDTH - 2.0) * side;
-            draw_line_styled(
-                pb,
-                from + off,
-                swept + off,
-                mix(INK_MID, INK_FRESH, 0.5),
-                0.42,
-                2,
-                5,
-                0,
-            );
+            let off = perp * (RULE_HALF_WIDTH - 1.6) * side;
+            draw_line_styled(pb, from + off, swept + off, INK_FRESH, 0.65, 3, 5, 0);
         }
-        // The carriage's own pressure smear right under it.
-        fill_rect(pb, swept, Vec2::new(3.0, RULE_HALF_WIDTH), INK_SHADOW, 0.35);
+        draw_line_styled(pb, from, swept, INK_SHADOW, 0.60, 0, 0, 0);
     }
 
-    // The ribbon window: a cyan bracket around the exposed ribbon.
+    // Exposed Ribbon weak-point ground reticle at the stopped carriage end!
     if view.state == NightEditionState::Ribbon {
         let rib = fr.place(RIBBON_OFFSET, 0.0);
-        let pulse = 0.5 + 0.5 * (fr.anim * 7.0).sin();
-        draw_ring_styled(pb, rib, RIBBON_WINDOW_RADIUS + 2.0, SAFE_CYAN, 0.35 + 0.3 * pulse, 2, 0.0);
-        for side in [-1.0f32, 1.0] {
-            let p = rib + fr.p * (RIBBON_WINDOW_RADIUS + 1.0) * side;
-            draw_line_styled(pb, p, p + fr.f * 4.0, SAFE_CYAN, 0.5 + 0.3 * pulse, 0, 0, 0);
+        let r = RIBBON_WINDOW_RADIUS + 2.2 + 1.2 * pulse;
+        draw_ring_styled(pb, rib, r, SAFE_CYAN, 0.65 + 0.30 * pulse, 2, fr.anim * 1.8);
+        for i in 0..4 {
+            let a = fr.anim * 1.4 + i as f32 * std::f32::consts::FRAC_PI_2;
+            let d_v = Vec2::from_angle(a);
+            draw_line_styled(pb, rib + d_v * (r + 2.8), rib + d_v * (r - 0.6), PAPER_SPEC, 0.88, 0, 0, 0);
         }
     }
 }
 
-/// The lowered bed's hot-ink pool (the punish marker).
+/// The lowered type bed's glowing fresh-ink punish ring!
 fn draw_bed_glow(pb: &mut PixelBuffer, fr: &Frame) {
-    let pulse = 0.5 + 0.5 * (fr.anim * 6.0).sin();
+    let pulse = 0.5 + 0.5 * (fr.anim * 8.0).sin();
     let c = fr.pos;
-    let Some((x0, x1, y0, y1)) = bbox_around(pb, c, BED_GLOW_RADIUS + 2.0) else {
+    let Some((x0, x1, y0, y1)) = bbox_around(pb, c, BED_GLOW_RADIUS + 4.0) else {
         return;
     };
-    let inv = 1.0 / BED_GLOW_RADIUS.max(1.0);
+    let inv = 1.0 / (BED_GLOW_RADIUS + 2.0);
     for y in y0..=y1 {
         for x in x0..=x1 {
             let (u, v) = fr.local(x, y);
@@ -1206,44 +1359,55 @@ fn draw_bed_glow(pb: &mut PixelBuffer, fr: &Frame) {
             if d > 1.0 {
                 continue;
             }
-            let a = (1.0 - d).powi(2) * (0.24 + 0.16 * pulse);
-            blend_px(pb, x, y, mix(INK_FRESH, CYAN_HI, 0.35), a);
+            let a = (1.0 - d).powi(2) * (0.28 + 0.18 * pulse);
+            blend_px(pb, x, y, mix(RIBBON_HI, CYAN_HI, 0.45), a);
         }
     }
-    draw_ring_styled(pb, c, BED_GLOW_RADIUS, SAFE_CYAN, 0.25 + 0.25 * pulse, 2, fr.anim);
+    let r = BED_GLOW_RADIUS + 1.8 + 1.4 * pulse;
+    draw_ring_styled(pb, c, r, SAFE_CYAN, 0.60 + 0.32 * pulse, 2, fr.anim * 1.6);
 }
 
+/// Wreck ground layer: spreading glossy ink flood + the last broadsheet rolling out under the street door!
 fn draw_wreck_ground(pb: &mut PixelBuffer, fr: &Frame) {
     let t = fr.prog;
-    // The ink flood.
-    let r = 8.0 + 26.0 * t.min(0.85);
+    let r = 9.0 + 27.0 * smoothstep((t / 0.85).min(1.0));
     let c = fr.pos + Vec2::new(0.0, 2.0);
-    let Some((x0, x1, y0, y1)) = bbox_around(pb, c, r + 2.0) else {
-        return;
-    };
-    for y in y0..=y1 {
-        for x in x0..=x1 {
-            let dx = x as f32 - c.x;
-            let dy = (y as f32 - c.y) * 1.35;
-            let d = (dx * dx + dy * dy).sqrt() / r.max(1.0);
-            if d > 1.0 {
-                continue;
-            }
-            let a = (1.0 - d).powi(2) * 0.55;
-            blend_px(pb, x, y, INK_SHADOW, a);
-            if d > 0.82 {
-                blend_px(pb, x, y, INK_MID, a * 0.6);
+    if let Some((x0, x1, y0, y1)) = bbox_around(pb, c, r + 3.0) {
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let dx = x as f32 - c.x;
+                let dy = (y as f32 - c.y) * 1.25;
+                let wobble = (dx.atan2(dy) * 5.0).sin() * 2.2;
+                let d = ((dx * dx + dy * dy).sqrt() + wobble) / r.max(1.0);
+                if d > 1.0 {
+                    continue;
+                }
+                let a = (1.0 - d.powi(3)) * 0.72;
+                let col = if d > 0.80 {
+                    INK_MID
+                } else if d < 0.35 && dx < 0.0 && dy < 0.0 {
+                    mix(INK_SHADOW, INK_FRESH, 0.35)
+                } else {
+                    INK_SHADOW
+                };
+                blend_px(pb, x, y, col, a);
             }
         }
     }
-    // The last sheet rolling out under the street door.
-    if t > 0.35 {
-        let k = ((t - 0.35) / 0.65).clamp(0.0, 1.0);
-        let roll = fr.pos + fr.f * (8.0 + 34.0 * k) + Vec2::new(0.0, 4.0);
-        let half = Vec2::new(5.0 + 2.0 * k, 3.0);
-        fill_rect(pb, roll, half, PAPER_HI, 0.85);
-        outline_rect(pb, roll, half, PAPER_SHADOW, 0.6, false);
-        draw_line_styled(pb, roll - half, roll + half, PAPER_SHADOW, 0.4, 0, 0, 0);
+    // THE LAST SHEET: tears loose and unrolls dramatically forward out from under the wrecked press!
+    if t > 0.28 {
+        let k = smoothstep(((t - 0.28) / 0.72).clamp(0.0, 1.0));
+        let start = fr.place(6.0, 1.5);
+        let tip = fr.place(12.0 + 38.0 * k, 3.0 + (k * 4.0).sin() * 2.5);
+        // Unrolled paper trail behind the rolling scroll cylinder!
+        let mid = (start + tip) * 0.5;
+        let len = (tip - start).len() * 0.5;
+        draw_oriented_sheet(pb, mid, fr.f.angle(), len.max(4.0), 4.6, 0.90);
+        // Curled white paper roll leading edge!
+        let perp = fr.p;
+        draw_line_styled(pb, tip - perp * 4.8, tip + perp * 4.8, OUTLINE_INK, 0.85, 0, 0, 0);
+        draw_line_styled(pb, tip - fr.f - perp * 4.6, tip - fr.f + perp * 4.6, PAPER_SPEC, 0.96, 0, 0, 0);
+        draw_line_styled(pb, tip - fr.f * 2.0 - perp * 4.6, tip - fr.f * 2.0 + perp * 4.6, PAPER_SHADOW, 0.75, 0, 0, 0);
     }
 }
 
@@ -1251,135 +1415,257 @@ fn draw_wreck_ground(pb: &mut PixelBuffer, fr: &Frame) {
 // Entity layer
 // ============================================================================
 
-/// Draw the Night Edition's body (and its death beat).
+/// Draw the Night Edition's body (and its multi-stage wreck collapse).
 pub fn draw(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, accent: Rgb) {
-    let fr = Frame::from_view(view, cam, accent);
+    let mut fr = Frame::from_view(view, cam, accent);
     let state = view.state;
-    // The press squashes onto the page during the impression and the wreck
-    // sinks into the floor.
-    let (squash, lift) = match state {
-        NightEditionState::PageStamp => (1.0 - 0.10 * fr.prog, 0.0),
-        NightEditionState::MisprintStamp => (1.0 - 0.08 * fr.prog, 0.0),
-        NightEditionState::Wreck => (1.0 - 0.35 * fr.prog, 6.0 * fr.prog),
-        NightEditionState::Ribbon => (1.0, -1.0),
-        _ => (1.0, 0.0),
-    };
-    let _ = lift;
 
-    draw_slab(pb, &fr, view, squash);
+    // Expressive anticipation, squash-and-stretch, and recoil per state!
+    let (squash, shift_u, shake) = match state {
+        NightEditionState::Roll => {
+            let sway = (fr.anim * 5.2).sin() * 0.7;
+            (1.0, (fr.anim * 5.2).cos().abs() * 0.4, fr.p * sway)
+        }
+        NightEditionState::PageTell | NightEditionState::MisprintTell => {
+            // Platen rears up slightly in anticipation, trembling before the slam!
+            let lift = smoothstep(fr.prog);
+            let vib = (fr.anim * 36.0).sin() * 0.55 * fr.prog;
+            (1.0 + 0.06 * lift, -1.6 * lift, fr.p * vib)
+        }
+        NightEditionState::PageStamp | NightEditionState::MisprintStamp => {
+            // Heavy downward slam squash + impact rebound!
+            let slam = (1.0 - fr.prog).powi(2);
+            (1.0 - 0.14 * slam, 1.8 * slam, fr.f * (0.9 * slam))
+        }
+        NightEditionState::CarriageTell => {
+            let vib = (fr.anim * 44.0).sin() * 0.7 * fr.prog;
+            (1.0, -1.2 * fr.prog, fr.p * vib)
+        }
+        NightEditionState::CarriageSweep => (1.05, 1.0, Vec2::ZERO),
+        NightEditionState::BedLowered => (0.96, 0.0, Vec2::ZERO),
+        NightEditionState::Ribbon => (1.0, -0.8, Vec2::ZERO),
+        NightEditionState::PhaseTurn => {
+            let sh = (fr.anim * 48.0).sin() * 1.4 * (1.0 - fr.prog);
+            (1.0, 0.0, fr.p * sh)
+        }
+        NightEditionState::Wreck => {
+            let sh = if fr.prog < 0.35 {
+                (fr.anim * 60.0).sin() * 1.8 * (1.0 - fr.prog / 0.35)
+            } else {
+                0.0
+            };
+            (1.0 - 0.22 * smoothstep(fr.prog), 0.0, fr.p * sh)
+        }
+    };
+    fr.pos += fr.f * shift_u + shake;
+
+    // 1) Two bright vintage typewriter keys striding out from the flanks!
     draw_keys(pb, &fr, view);
+
+    // 2) Heavy cast-iron platen slab with crisp dark outline, bevels, corner bolts & damage cracks.
+    draw_slab(pb, &fr, view, squash);
+
+    // 3) Recessed square movable type bed (oriented cleanly in local space!).
     draw_type_bed(pb, &fr, view);
+
+    // 4) Clamped newsprint broadsheet (oriented cleanly in local space!).
     draw_sheet(pb, &fr, view);
-    if matches!(
-        state,
-        NightEditionState::CarriageTell | NightEditionState::CarriageSweep | NightEditionState::Ribbon
-    ) {
-        draw_carriage(pb, &fr, view);
-    }
+
+    // 5) Brushed-steel carriage rail & sliding clamp (always subtly visible as hardware;
+    //    highlighted & animated during CarriageTell / CarriageSweep / Ribbon!).
+    draw_carriage(pb, &fr, view);
+
+    // 6) Spoked brass-and-crimson ink-ribbon spools + lifted silk ribbon weak point!
     draw_ribbon(pb, &fr, view);
+
+    // 6b) Unmistakable golden weak-point reticle & ticks when BedLowered or Ribbon exposes ×1.5!
+    if matches!(state, NightEditionState::BedLowered | NightEditionState::Ribbon) {
+        if let Some(wp) = weak_point(view) {
+            let wc = wp - cam;
+            let pulse = 0.5 + 0.5 * (fr.anim * 12.0).sin();
+            let rad = if state == NightEditionState::BedLowered { 8.5 } else { 7.5 } + pulse * 1.2;
+            draw_ring_styled(pb, wc, rad + 0.9, OUTLINE_INK, 0.55, 0, fr.anim);
+            draw_ring_styled(pb, wc, rad, mix(BRASS_HI, TELL_AMBER, 0.45), 0.78 + 0.20 * pulse, 2, fr.anim * 1.4);
+            for k in 0..4 {
+                let a = k as f32 * std::f32::consts::FRAC_PI_2 + fr.anim * 1.5;
+                let dir = Vec2::from_angle(a);
+                let p0 = wc + dir * (rad + 2.8);
+                let p1 = wc + dir * (rad - 1.0);
+                draw_line_styled(pb, p0, p1, PAPER_SPEC, 0.92, 0, 0, 0);
+            }
+        }
+    }
+
+    // 7) Damage smoke wisps (Phase 2/3) & hit-flash sparks.
+    if fr.damage_tier >= 2 && state != NightEditionState::Wreck {
+        draw_damage_smoke(pb, &fr);
+    }
+    if fr.hit > 0.10 {
+        draw_hit_sparks(pb, &fr);
+    }
+
+    // 8) Wreck debris: exploding newspaper sheets, lead type slugs & ink burst!
     if state == NightEditionState::Wreck {
         draw_wreck_body(pb, &fr);
+    } else {
+        draw_hp_arc(pb, &fr);
     }
-    draw_hp_arc(pb, &fr);
 }
 
-fn slab_colour(fr: &Frame, depth: f32) -> Rgb {
-    let lum = 0.42 + 0.46 * fr.lit(0.0, 0.0) + 0.10 * (1.0 - depth);
-    apply_hit(shade3(IRON_SHADOW, IRON_MID, IRON_HI, lum), fr.hit)
-}
-
-/// The cast-iron platen: rim, recessed face, rivets and phase damage.
+/// The cast-iron platen: dark outline, chamfered rim, recessed chase, brass corner bolts & phase cracks.
 fn draw_slab(pb: &mut PixelBuffer, fr: &Frame, view: &NightEditionView, squash: f32) {
     let hu = BODY_HALF_LEN * squash;
-    let Some((x0, x1, y0, y1)) = bbox_around(pb, fr.pos, BODY_RADIUS + 3.0) else {
+    let hv = BODY_HALF_WIDTH;
+    let wreck_split = if view.state == NightEditionState::Wreck {
+        smoothstep(((fr.prog - 0.25) / 0.55).clamp(0.0, 1.0))
+    } else {
+        0.0
+    };
+    let alpha = if view.state == NightEditionState::Wreck && fr.prog > 0.72 {
+        1.0 - smoothstep(((fr.prog - 0.72) / 0.28).clamp(0.0, 1.0)) * 0.45
+    } else {
+        1.0
+    };
+    let Some((x0, x1, y0, y1)) = bbox_around(pb, fr.pos, BODY_RADIUS + 6.0) else {
         return;
     };
-    let phase = view.phase.max(1);
+    let pulse = 0.5 + 0.5 * (fr.anim * 10.0).sin();
+    let phase2 = fr.damage_tier >= 2;
+    let phase3 = fr.damage_tier >= 3;
+    let rim_col = if fr.hit > 0.45 { (54, 34, 24) } else { OUTLINE_INK };
+
     for y in y0..=y1 {
         for x in x0..=x1 {
-            let (u, v) = fr.local(x, y);
-            let d = sd_rbox(u, v, hu, BODY_HALF_WIDTH, 2.4);
-            if d > 1.4 {
+            let (u_raw, v_raw) = fr.local(x, y);
+            // In Wreck, the platen splits diagonally into two buckling halves!
+            let split_gap = wreck_split * 3.2;
+            let diag = u_raw * 0.7 + v_raw * 0.7;
+            if split_gap > 0.4 && diag.abs() < split_gap * 0.55 {
                 continue;
             }
-            if d > 0.0 {
-                // Dark rim + the light from the top-left.
-                let lit = fr.lit(u / hu.max(1.0), v / BODY_HALF_WIDTH);
-                let col = if lit > 0.25 { IRON_HI } else { IRON_SHADOW };
-                blend_px(pb, x, y, apply_hit(col, fr.hit), 0.55 * (1.0 - d / 1.4));
+            let shift = if diag >= 0.0 { split_gap * 0.45 } else { -split_gap * 0.45 };
+            let u = u_raw - shift;
+            let v = v_raw - shift;
+
+            let d = sd_rbox(u, v, hu, hv, 2.2);
+            let cover = (0.55 - d * 1.25).clamp(0.0, 1.0);
+            if cover <= 0.0 {
+                if d < 1.15 {
+                    blend_px(pb, x, y, rim_col, 0.84 * alpha);
+                }
                 continue;
             }
-            // The rim band, then the recessed top face.
-            let rim = d > -2.6;
-            let lum = if rim {
-                0.58 + 0.44 * fr.lit(u.signum() * 0.6, v.signum() * 0.6)
+
+            let nu = (u / hu.max(1.0)).clamp(-1.0, 1.0);
+            let nv = (v / hv).clamp(-1.0, 1.0);
+            let lit = fr.lit(nu, nv);
+            let outer_rim = d > -2.8;
+            let bevel = if outer_rim {
+                if lit > 0.15 { 0.26 } else { -0.20 }
             } else {
-                0.38 + 0.36 * fr.lit(u / hu.max(1.0), v / BODY_HALF_WIDTH) - 0.10
+                -0.14
             };
-            let mut col = apply_hit(shade3(IRON_SHADOW, IRON_MID, IRON_HI, lum), fr.hit);
-            if rim && hash01(x / 3, y / 3) > 0.86 {
-                col = mix(col, IRON_SPEC, 0.5);
+            let mut col = shade3(IRON_SHADOW, IRON_MID, IRON_HI, 0.42 + 0.52 * lit + bevel);
+            // Machined top-left specular sheen on the cast-iron bevel!
+            if outer_rim && d > -1.35 && lit > 0.35 {
+                col = mix(col, IRON_SPEC, 0.52);
             }
-            blend_px(pb, x, y, col, 1.0);
+            // Embossed side grip ribs on the iron rim.
+            if outer_rim && (u.abs() < hu - 4.0) && (v.abs() > hv - 2.3) && ((u * 1.6).sin() > 0.4) {
+                col = mix(col, IRON_SHADOW, 0.42);
+            }
+            // Recessed inner chase seam line.
+            if (d + 2.8).abs() < 0.48 {
+                col = mix(col, OUTLINE_INK, 0.72);
+            }
+            // Gleaming brass hex bolts at all four platen corners!
+            if (u.abs() - (hu - 2.4)).abs() < 1.1 && (v.abs() - (hv - 2.4)).abs() < 1.1 {
+                let b_d = ((u.abs() - (hu - 2.4)).powi(2) + (v.abs() - (hv - 2.4)).powi(2)).sqrt();
+                if b_d < 1.05 {
+                    col = shade3(BRASS_SHADOW, BRASS_MID, BRASS_HI, 0.65 + 0.40 * lit);
+                }
+            }
+            // Tiny registration-cyan alignment ticks centered on each edge of the platen!
+            if (u.abs() > hu - 2.4 && v.abs() < 0.7) || (v.abs() > hv - 2.4 && u.abs() < 0.7) {
+                col = mix(col, CYAN_HI, 0.72);
+            }
+
+            // Phase 2/3 jagged cast-iron cracks & leaking ink!
+            if phase2 {
+                let c1 = ((u + 4.5) - (v + 3.0) * 0.7 + (v * 1.5).sin() * 0.4).abs();
+                if u < -1.0 && v < 4.0 && c1 < 0.65 {
+                    col = INK_SHADOW;
+                }
+            }
+            if phase3 {
+                let c2 = ((u - 2.5) + (v - 1.0) * 0.85 + (u * 1.3).cos() * 0.45).abs();
+                if c2 < 0.75 {
+                    col = mix(INK_SHADOW, mix(INK_FRESH, CYAN_HI, pulse), 0.70);
+                } else if c2 < 1.5 {
+                    col = mix(col, INK_MID, 0.52);
+                }
+            }
+
+            let final_col = apply_hit(col, fr.hit * 0.45);
+            if cover < 1.0 {
+                let bg = pb.pixel_at(x as usize, y as usize);
+                let rimmed = mix(bg, rim_col, 0.84 * alpha);
+                pb.plot(x, y, mix(rimmed, final_col, cover * alpha));
+            } else {
+                blend_px(pb, x, y, final_col, alpha);
+            }
         }
-    }
-    // Face plate seam and rivets.
-    let seam = mix(IRON_SHADOW, IRON_HI, 0.25);
-    for side in [-1.0f32, 1.0] {
-        let a = fr.place(-hu + 2.0, side * (BODY_HALF_WIDTH - 2.0));
-        let b = fr.place(hu - 2.0, side * (BODY_HALF_WIDTH - 2.0));
-        draw_line_styled(pb, a, b, seam, 0.55, 0, 0, 0);
-        for k in [-1.0f32, 1.0] {
-            let rivet = fr.place(k * (hu - 2.5), side * (BODY_HALF_WIDTH - 2.5));
-            fill_rect(pb, rivet, Vec2::splat(1.2), IRON_SPEC, 0.75);
-        }
-    }
-    // Phase damage: phase 2 cracks the rim and spills ink, phase 3 splits the
-    // frame open.
-    if phase >= 2 {
-        for i in 0..5 {
-            let a = fr.place(-hu + 1.0 + i as f32 * 4.0, -BODY_HALF_WIDTH + 3.0);
-            let b = a + fr.f * (2.5 + hash01(i, 7) * 3.0) + fr.p * (2.0 + hash01(i, 11) * 2.0);
-            draw_line_styled(pb, a, b, IRON_SHADOW, 0.8, 0, 0, 0);
-        }
-        // Ink runs down the front face.
-        for i in 0..3 {
-            let a = fr.place(hu - 3.0, -6.0 + i as f32 * 6.0);
-            draw_line_styled(pb, a, a + fr.f * (3.0 + hash01(i, 3) * 3.0), INK_MID, 0.6, 2, 4, 0);
-        }
-    }
-    if phase >= 3 {
-        // A gash across the frame, glowing with fresh ink.
-        let a = fr.place(-6.0, -BODY_HALF_WIDTH + 2.0);
-        let b = fr.place(9.0, BODY_HALF_WIDTH - 3.0);
-        draw_line_styled(pb, a, b, INK_SHADOW, 0.9, 0, 0, 0);
-        draw_line_styled(pb, a + fr.f, b + fr.f, INK_FRESH, 0.6, 1, 3, 0);
-        let sparkle = fr.place(6.0, 4.0);
-        let pulse = 0.5 + 0.5 * (fr.anim * 9.0).sin();
-        fill_rect(pb, sparkle, Vec2::splat(1.2), mix(INK_FRESH, CYAN_HI, pulse), 0.8);
     }
 }
 
-/// The two ivory typewriter keys it walks on, bobbing out of phase.
+/// The two bright vintage typewriter keys it strides on (brass bezel, glossy ivory cap, key legend)!
 fn draw_keys(pb: &mut PixelBuffer, fr: &Frame, view: &NightEditionView) {
-    let walking = !matches!(
+    let walking = matches!(
         view.state,
-        NightEditionState::Ribbon
-            | NightEditionState::PhaseTurn
-            | NightEditionState::Wreck
-            | NightEditionState::BedLowered
+        NightEditionState::Roll | NightEditionState::PageTell | NightEditionState::MisprintTell
     );
-    for (i, side) in [-1.0f32, 1.0].iter().enumerate() {
-        let bob = if walking {
-            (fr.anim * 6.0 + i as f32 * std::f32::consts::PI).sin() * 1.1
+    let wreck = view.state == NightEditionState::Wreck;
+    let alpha = if wreck && fr.prog > 0.75 {
+        1.0 - smoothstep(((fr.prog - 0.75) / 0.25).clamp(0.0, 1.0)) * 0.5
+    } else {
+        1.0
+    };
+
+    for (i, &side) in [-1.0f32, 1.0].iter().enumerate() {
+        let phase = fr.anim * 5.2 + i as f32 * std::f32::consts::PI;
+        let stride = if walking { phase.sin() * 2.8 } else { 0.0 };
+        let lift = if walking { phase.cos().max(0.0) * 1.6 } else { 0.0 };
+        let splay = if matches!(view.state, NightEditionState::BedLowered | NightEditionState::Ribbon) {
+            1.6
+        } else if wreck {
+            2.4 * smoothstep(fr.prog)
         } else {
             0.0
         };
-        let c = fr.place(-2.0 + bob * 0.4, side * (BODY_HALF_WIDTH + 1.6));
-        // The key's brass stem and its ivory cap.
-        let stem = c - fr.p * (*side) * 2.5;
-        draw_line_styled(pb, stem, c, BRASS_MID, 0.85, 0, 0, 0);
-        let Some((x0, x1, y0, y1)) = bbox_around(pb, c, 4.0) else {
+
+        let c = fr.place(-1.2 + stride, side * (BODY_HALF_WIDTH + 3.0 + splay))
+            + Vec2::new(0.0, -lift);
+
+        // Angled brass key-lever arm connecting the platen underbody to the keycap!
+        let anchor = fr.place(-2.2, side * (BODY_HALF_WIDTH - 1.5));
+        draw_line_styled(pb, anchor + Vec2::new(0.0, 1.0), c + Vec2::new(0.0, 1.0), OUTLINE_INK, 0.8 * alpha, 0, 0, 0);
+        draw_line_styled(pb, anchor, c, BRASS_MID, 0.95 * alpha, 0, 0, 0);
+
+        // Contact shadow beneath each stepping keycap.
+        let sh = c + Vec2::new(1.0, 2.2 + lift * 0.7);
+        if let Some((x0, x1, y0, y1)) = bbox_around(pb, sh, 4.5) {
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let d = ((x as f32 - sh.x).powi(2) + (y as f32 - sh.y).powi(2)).sqrt();
+                    if d < 4.0 {
+                        darken_px(pb, x, y, 0.34 * (1.0 - d / 4.0) * alpha);
+                    }
+                }
+            }
+        }
+
+        // Vintage round typewriter key: dark outer rim -> metallic brass bezel -> glossy ivory cap -> stamped legend!
+        let Some((x0, x1, y0, y1)) = bbox_around(pb, c, 5.2) else {
             continue;
         };
         for y in y0..=y1 {
@@ -1387,312 +1673,455 @@ fn draw_keys(pb: &mut PixelBuffer, fr: &Frame, view: &NightEditionView) {
                 let dx = x as f32 - c.x;
                 let dy = y as f32 - c.y;
                 let d = (dx * dx + dy * dy).sqrt();
-                if d > 3.4 {
+                if d > 4.6 {
                     continue;
                 }
-                let lum = 0.55 + 0.45 * (-dx * 0.55 - dy * 0.83);
-                let col = apply_hit(shade3(IVORY_SHADOW, IVORY_MID, IVORY_HI, lum), fr.hit);
-                blend_px(pb, x, y, col, 1.0);
-                if d > 2.8 {
-                    blend_px(pb, x, y, IRON_SHADOW, 0.35);
+                if d > 3.85 {
+                    blend_px(pb, x, y, OUTLINE_INK, 0.85 * alpha * (1.0 - (d - 3.85) / 0.75));
+                    continue;
                 }
+                let lit = (-dx * 0.55 - dy * 0.83) / 3.8;
+                let col = if d > 2.95 {
+                    // Gleaming metallic brass/chrome typewriter key bezel ring!
+                    shade3(BRASS_SHADOW, BRASS_MID, BRASS_HI, 0.55 + 0.55 * lit)
+                } else {
+                    // Concave bright ivory keycap with crisp top-left glint!
+                    let dome = (1.0 - (d / 2.95).powi(2) * 0.45).clamp(0.0, 1.0);
+                    let mut kcol = shade3(IVORY_SHADOW, IVORY_MID, IVORY_HI, 0.50 + 0.30 * dome + 0.45 * lit);
+                    if d < 2.2 && lit > 0.35 {
+                        kcol = (255, 254, 246);
+                    }
+                    kcol
+                };
+                blend_px(pb, x, y, apply_hit(col, fr.hit * 0.45), alpha);
             }
         }
-        fill_rect(pb, c + Vec2::new(-0.8, -0.8), Vec2::splat(0.9), IVORY_HI, 0.9);
+        // Crisp dark stamped typewriter key legend right on the center of each ivory key!
+        let cx = c.x.round() as i32;
+        let cy = c.y.round() as i32;
+        if i == 0 {
+            // 'N' / bold letter glyph
+            blend_px(pb, cx - 1, cy - 1, INK_SHADOW, 0.88 * alpha);
+            blend_px(pb, cx - 1, cy, INK_SHADOW, 0.88 * alpha);
+            blend_px(pb, cx - 1, cy + 1, INK_SHADOW, 0.88 * alpha);
+            blend_px(pb, cx, cy, INK_SHADOW, 0.88 * alpha);
+            blend_px(pb, cx + 1, cy - 1, INK_SHADOW, 0.88 * alpha);
+            blend_px(pb, cx + 1, cy, INK_SHADOW, 0.88 * alpha);
+            blend_px(pb, cx + 1, cy + 1, INK_SHADOW, 0.88 * alpha);
+        } else {
+            // 'E' / bold letter glyph
+            blend_px(pb, cx - 1, cy - 1, INK_SHADOW, 0.88 * alpha);
+            blend_px(pb, cx, cy - 1, INK_SHADOW, 0.88 * alpha);
+            blend_px(pb, cx + 1, cy - 1, INK_SHADOW, 0.88 * alpha);
+            blend_px(pb, cx - 1, cy, INK_SHADOW, 0.88 * alpha);
+            blend_px(pb, cx, cy, INK_SHADOW, 0.88 * alpha);
+            blend_px(pb, cx - 1, cy + 1, INK_SHADOW, 0.88 * alpha);
+            blend_px(pb, cx, cy + 1, INK_SHADOW, 0.88 * alpha);
+            blend_px(pb, cx + 1, cy + 1, INK_SHADOW, 0.88 * alpha);
+        }
     }
 }
 
-/// The recessed type bed, its reversed letters, and the exposed weak point.
+/// The recessed square movable type bed — rendered completely in oriented local `(u, v)` space!
 fn draw_type_bed(pb: &mut PixelBuffer, fr: &Frame, view: &NightEditionView) {
-    let exposed = matches!(
+    let bed_exposed = view.state == NightEditionState::BedLowered;
+    let any_exposed = matches!(
         view.state,
         NightEditionState::BedLowered | NightEditionState::Ribbon
     );
-    let pulse = 0.5 + 0.5 * (fr.anim * (if exposed { 7.0 } else { 2.4 })).sin();
+    let pulse = 0.5 + 0.5 * (fr.anim * (if any_exposed { 9.0 } else { 2.6 })).sin();
     let half = BED_HALF;
-    let Some((x0, x1, y0, y1)) = bbox_around(pb, fr.pos, half.x.max(half.y) + 2.0) else {
+    let Some((x0, x1, y0, y1)) = bbox_around(pb, fr.pos, half.x.max(half.y) + 4.0) else {
         return;
     };
+
     for y in y0..=y1 {
         for x in x0..=x1 {
             let (u, v) = fr.local(x, y);
-            let d = sd_rbox(u, v, half.x, half.y, 1.2);
-            if d > 0.8 {
+            let d = sd_rbox(u, v, half.x, half.y, 1.0);
+            if d > 1.0 {
                 continue;
             }
             if d > 0.0 {
-                // The bed's inner lip catches the light.
-                blend_px(pb, x, y, IRON_HI, 0.5 * (1.0 - d / 0.8));
+                // Machined inner chase lip; glows hot cyan-magenta when BedLowered!
+                let lip_col = if bed_exposed {
+                    mix(CYAN_HI, PAPER_SPEC, 0.35 + 0.35 * pulse)
+                } else {
+                    IRON_HI
+                };
+                blend_px(pb, x, y, lip_col, (if bed_exposed { 0.92 } else { 0.55 }) * (1.0 - d));
                 continue;
             }
-            let deep = if exposed { 0.0 } else { 0.22 };
-            let base = mix(INK_SHADOW, INK_MID, 0.20 + 0.10 * pulse - deep);
-            blend_px(pb, x, y, apply_hit(base, fr.hit * 0.5), 1.0);
-        }
-    }
-    // Reversed letters: a 5 × 4 grid of type blocks.
-    for gy in 0..4 {
-        for gx in 0..5 {
-            let u = -6.0 + gx as f32 * 3.0;
-            let v = -5.4 + gy as f32 * 3.6;
-            let c = fr.place(u, v);
-            let on = hash01(gx, gy) > 0.28;
-            if !on {
-                continue;
-            }
-            let col = if exposed {
-                mix(INK_FRESH, CYAN_HI, 0.25 + 0.35 * pulse)
+            // Dark recessed ink-stained chase well.
+            let lit = fr.lit(u / half.x, v / half.y);
+            let mut col = if bed_exposed {
+                mix(INK_MID, mix(INK_FRESH, CYAN_MID, 0.35), 0.35 + 0.30 * pulse)
             } else {
-                mix(INK_MID, INK_HI, 0.45)
+                mix(INK_SHADOW, INK_MID, 0.22 + 0.14 * lit)
             };
-            fill_rect(pb, c, Vec2::new(1.0, 1.2), col, if exposed { 0.95 } else { 0.8 });
-            if hash01(gx + 9, gy + 4) > 0.6 {
-                fill_rect(pb, c + Vec2::new(1.0, 0.0), Vec2::new(0.5, 1.2), col, 0.7);
+
+            // Movable lead-alloy type slugs laid in newspaper columns (oriented in `(u, v)`!).
+            let in_margin = u.abs() < half.x - 1.2 && v.abs() < half.y - 1.2;
+            if in_margin {
+                // Brass column divider rule right down the middle (`v ≈ 0`)!
+                if v.abs() < 0.45 && u > -half.x + 4.0 {
+                    col = shade3(BRASS_SHADOW, BRASS_MID, BRASS_HI, 0.65 + 0.30 * lit);
+                } else if u < -half.x + 3.4 && u > -half.x + 1.4 {
+                    // Bold raised lead headline slug bar across the top of the bed!
+                    let seg = ((v * 1.4).floor() as i32) & 1 == 0;
+                    if seg {
+                        col = if bed_exposed {
+                            mix(CYAN_HI, PAPER_SPEC, 0.45 + 0.35 * pulse)
+                        } else {
+                            shade3(LEAD_SH, LEAD_MID, LEAD_HI, 0.60 + 0.35 * lit)
+                        };
+                    }
+                } else {
+                    // Rows of lead type blocks!
+                    let row_i = ((u + half.x) / 2.6).floor() as i32;
+                    let col_i = ((v + half.y) / 2.2).floor() as i32;
+                    let row_f = ((u + half.x) / 2.6).fract();
+                    let col_f = ((v + half.y) / 2.2).fract();
+                    if row_f > 0.22 && row_f < 0.80 && col_f > 0.18 && col_f < 0.84
+                        && hash01(col_i + 3, row_i + 7) > 0.22
+                    {
+                        col = if bed_exposed {
+                            mix(RIBBON_HI, CYAN_HI, 0.35 + 0.45 * pulse)
+                        } else {
+                            shade3(LEAD_SH, LEAD_MID, LEAD_HI, 0.50 + 0.40 * lit)
+                        };
+                    }
+                }
             }
+
+            blend_px(pb, x, y, apply_hit(col, fr.hit * 0.45), 1.0);
         }
     }
-    // The lowered bed's hot-ink rim: the weak point reads at a glance, with a
-    // reticle on its four corners so "hit this" is unmistakable.
-    if exposed {
-        let rim = if view.state == NightEditionState::Ribbon {
-            SAFE_CYAN
-        } else {
-            mix(INK_FRESH, CYAN_HI, 0.4 + 0.35 * pulse)
-        };
-        outline_rect(
-            pb,
-            fr.pos,
-            half + Vec2::splat(0.5),
-            mix(rim, PAPER_SPEC, 0.35),
-            0.7 + 0.3 * pulse,
-            false,
-        );
+
+    // Properly oriented weak-point reticle & corner brackets when the bed is lowered (×1.5)!
+    if bed_exposed {
+        let rim = mix(SAFE_CYAN, PAPER_SPEC, 0.35 + 0.35 * pulse);
         for (su, sv) in [(-1.0f32, -1.0f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
-            let corner = fr.place(su * (half.x + 2.5), sv * (half.y + 2.5));
-            let along_u = corner - fr.f * (su * 3.0);
-            let along_v = corner - fr.p * (sv * 3.0);
-            draw_line_styled(pb, along_u, corner, PAPER_SPEC, 0.85, 0, 0, 0);
-            draw_line_styled(pb, along_v, corner, PAPER_SPEC, 0.85, 0, 0, 0);
+            let corner = fr.place(su * (half.x + 2.2), sv * (half.y + 2.2));
+            let along_u = corner - fr.f * (su * 4.2);
+            let along_v = corner - fr.p * (sv * 4.2);
+            draw_line_styled(pb, along_u, corner, rim, 0.95, 0, 0, 0);
+            draw_line_styled(pb, along_v, corner, rim, 0.95, 0, 0, 0);
         }
         draw_ring_styled(
             pb,
             fr.pos,
             BED_GLOW_RADIUS * 0.72,
             rim,
-            0.30 + 0.25 * pulse,
+            0.48 + 0.35 * pulse,
             3,
-            fr.anim * 2.0,
+            fr.anim * 2.4,
         );
-    } else if view.phase >= 3 {
-        // The split bed: a bright fracture through the type.
-        let a = fr.place(-7.0, -5.0);
-        let b = fr.place(7.0, 5.0);
-        draw_line_styled(pb, a, b, INK_FRESH, 0.55, 1, 4, 0);
+    } else if fr.damage_tier >= 3 {
+        // Phase-3 fracture across the lead type bed glowing with fresh ink!
+        let a = fr.place(-7.2, -5.2);
+        let b = fr.place(7.2, 5.2);
+        draw_line_styled(pb, a, b, INK_SHADOW, 0.90, 0, 0, 0);
+        draw_line_styled(pb, a + fr.f, b + fr.f, mix(INK_FRESH, CYAN_HI, pulse), 0.75, 1, 3, 0);
     }
 }
 
-/// The newsprint sheet clamped in the press: this is what makes the silhouette
-/// read as a printing press rather than a slab. Stripped while the bed is open
-/// (the recovery windows), and fed in during the phase-turn pose change.
+/// The clamped newsprint broadsheet — rendered cleanly in oriented local `(u, v)` space!
 fn draw_sheet(pb: &mut PixelBuffer, fr: &Frame, view: &NightEditionView) {
-    // The sheet is off the bed whenever the bed is the target, and sliding back
-    // in during the phase-turn re-feed.
-    let (present, slide) = match view.state {
+    let (present, slide, flutter) = match view.state {
         NightEditionState::BedLowered | NightEditionState::Ribbon | NightEditionState::Wreck => {
-            (false, 0.0)
+            (false, 0.0, 0.0)
         }
-        NightEditionState::PhaseTurn => (true, -6.0 * (1.0 - fr.prog)),
-        _ => (true, 0.0),
+        NightEditionState::PhaseTurn => (true, -7.5 * (1.0 - smoothstep(fr.prog)), 0.0),
+        NightEditionState::PageTell | NightEditionState::MisprintTell => {
+            (true, 1.2 * fr.prog, (fr.anim * 22.0).sin() * 0.6)
+        }
+        _ => (true, 0.0, 0.0),
     };
     if !present {
         return;
     }
-    let centre = fr.place(-1.8 + slide, 0.0);
-    let half = Vec2::new(5.2, 8.2);
-    let Some((x0, x1, y0, y1)) = bbox_rect(pb, centre, half, 2.0) else {
+
+    let su_c = -0.8 + slide;
+    let hu: f32 = 6.2;
+    let hv: f32 = 7.4;
+    let center = fr.place(su_c, 0.0);
+    let Some((x0, x1, y0, y1)) = bbox_around(pb, center, hu.max(hv) + 3.0) else {
         return;
     };
+    let tattered = fr.damage_tier >= 3;
+
     for y in y0..=y1 {
         for x in x0..=x1 {
-            let du = (x as f32 - centre.x).abs();
-            let dv = (y as f32 - centre.y).abs();
-            if du > half.x || dv > half.y {
+            let (u_all, v) = fr.local(x, y);
+            let u = u_all - su_c;
+            // Serrated torn-off leading edge at `+hu` + slight anticipation flutter.
+            let tooth = ((v * 1.8).sin() * 0.45) + flutter * ((u + hu) / (2.0 * hu)).clamp(0.0, 1.0);
+            if u < -hu || u > hu + tooth || v.abs() > hv {
                 continue;
             }
-            // Serrated leading edge (the sheet is torn from a roll).
-            if du > half.x - 1.0 && (y % 3 == 0) {
+            // Phase 3: torn-off corner on the broadsheet!
+            if tattered && u > 2.2 && v > 3.2 && (u + v) > 7.8 {
                 continue;
             }
-            let lum = 0.48 + 0.42 * fr.lit(-du, -dv);
-            let col = apply_hit(shade3(PAPER_SHADOW, PAPER_MID, PAPER_HI, lum), fr.hit * 0.4);
-            blend_px(pb, x, y, col, 0.92);
+            let edge_d = (hu - u).min(u + hu).min(hv - v.abs());
+            if edge_d < 0.55 {
+                blend_px(pb, x, y, OUTLINE_INK, 0.65);
+                continue;
+            }
+            let lit = fr.lit(u / hu, v / hv);
+            let mut col = shade3(PAPER_SHADOW, PAPER_MID, PAPER_SPEC, 0.64 + 0.38 * lit);
+
+            // Bold newspaper masthead banner near the clamped rear (`u ≈ -4.2`).
+            if u > -4.8 && u < -3.3 && v.abs() < 5.6 {
+                col = INK_SHADOW;
+            } else if u > -2.5 && u < 4.5 && v.abs() < 5.6 {
+                // Two tidy columns of printed newsprint text lines!
+                let in_gutter = v.abs() < 0.75;
+                let line_row = ((u + 2.5) * 1.15).fract() < 0.50;
+                if !in_gutter && line_row && hash01((v * 2.0) as i32, (u * 2.0) as i32) > 0.18 {
+                    col = mix(col, INK_MID, 0.68);
+                }
+            }
+            // Tiny registration-cyan printer's mark in the bottom-right corner of the sheet!
+            if (u - 4.8).abs() < 0.8 && (v + 5.2).abs() < 0.8 {
+                col = CYAN_HI;
+            }
+            blend_px(pb, x, y, apply_hit(col, fr.hit * 0.35), 0.96);
         }
     }
-    // The impression already on it, and the two brass clamps.
-    let line = mix(INK_MID, PAPER_SHADOW, 0.4);
-    for i in 0..4 {
-        let a = fr.place(-5.0 + slide, -5.4 + i as f32 * 3.2);
-        draw_line_styled(pb, a, a + fr.p * 4.5, line, 0.4, 1, 2, 0);
-    }
-    for side in [-1.0f32, 1.0] {
-        let clamp = fr.place(-6.0 + slide, side * 6.0);
-        fill_rect(pb, clamp, Vec2::splat(1.4), BRASS_MID, 0.95);
-        fill_rect(pb, clamp + fr.f, Vec2::splat(0.8), BRASS_HI, 0.8);
+
+    // Two gleaming brass paper-bail clamps holding the sheet down!
+    for &side in &[-1.0f32, 1.0] {
+        let clamp = fr.place(su_c - hu + 0.6, side * 5.2);
+        fill_rect(pb, clamp, Vec2::splat(1.8), OUTLINE_INK, 0.82);
+        fill_rect(pb, clamp, Vec2::splat(1.3), BRASS_MID, 0.96);
+        blend_px(pb, clamp.x.round() as i32, clamp.y.round() as i32, BRASS_HI, 0.95);
     }
 }
 
-/// The steel carriage rail, its clamp, and the running carriage block.
+/// The brushed-steel carriage rail, brass end-caps, and sliding carriage clamp.
 fn draw_carriage(pb: &mut PixelBuffer, fr: &Frame, view: &NightEditionView) {
-    let rail_u = -BODY_HALF_LEN + 3.0;
-    let rail_half = BODY_HALF_WIDTH + 2.5;
+    let rail_u = -BODY_HALF_LEN + 2.4;
+    let rail_half = BODY_HALF_WIDTH + 2.8;
     let a = fr.place(rail_u, -rail_half);
     let b = fr.place(rail_u, rail_half);
-    draw_line_styled(pb, a, b, IRON_SPEC, 0.9, 0, 0, 0);
-    draw_line_styled(pb, a + fr.f, b + fr.f, IRON_SHADOW, 0.7, 0, 0, 0);
-    // End blocks.
-    for side in [-1.0f32, 1.0] {
-        fill_rect(
-            pb,
-            fr.place(rail_u, side * rail_half),
-            Vec2::splat(1.8),
-            BRASS_MID,
-            0.9,
-        );
+
+    // Steel rail with dark outline & bright specular top edge!
+    draw_line_styled(pb, a - fr.f, b - fr.f, OUTLINE_INK, 0.88, 0, 0, 0);
+    draw_line_styled(pb, a, b, IRON_SPEC, 0.96, 0, 0, 0);
+    draw_line_styled(pb, a + fr.f, b + fr.f, IRON_SHADOW, 0.82, 0, 0, 0);
+
+    // Brass end-stop knobs at both ends of the rail.
+    for &side in &[-1.0f32, 1.0] {
+        let end = fr.place(rail_u, side * rail_half);
+        fill_rect(pb, end, Vec2::splat(2.1), OUTLINE_INK, 0.85);
+        fill_rect(pb, end, Vec2::splat(1.5), BRASS_MID, 0.96);
+        blend_px(pb, (end.x - 0.5).round() as i32, (end.y - 0.5).round() as i32, BRASS_HI, 0.95);
     }
-    // The clamp: slides along the rail through the tell, locks for the sweep.
+
     let sweep = view.state == NightEditionState::CarriageSweep;
+    let telling = view.state == NightEditionState::CarriageTell;
     let ribbon = view.state == NightEditionState::Ribbon;
     let slide = if sweep {
         0.0
     } else if ribbon {
-        rail_half - 3.0
+        rail_half - 3.4
+    } else if telling {
+        (fr.prog * 8.0).sin() * (rail_half - 4.0)
     } else {
-        // Sweeping across the rail as the bell rings.
-        (fr.prog * 5.0).sin() * (rail_half - 4.0)
+        (fr.anim * 1.4).sin() * (rail_half - 6.0) * 0.45
     };
+
     let clamp = fr.place(rail_u, slide);
-    fill_rect(pb, clamp, Vec2::new(2.2, 3.0), IRON_HI, 1.0);
-    fill_rect(pb, clamp + fr.f * 1.5, Vec2::new(1.0, 2.2), if sweep { DANGER_RED } else { BRASS_HI }, 0.95);
-    // Rails glow red while it runs.
+    fill_rect(pb, clamp, Vec2::new(2.6, 3.0), OUTLINE_INK, 0.85);
+    fill_rect(pb, clamp, Vec2::new(1.9, 2.3), IRON_HI, 0.98);
+    let lamp = if sweep {
+        DANGER_RED
+    } else if telling {
+        TELL_AMBER
+    } else if ribbon {
+        SAFE_CYAN
+    } else {
+        BRASS_HI
+    };
+    fill_rect(pb, clamp + fr.f * 1.1, Vec2::new(0.9, 1.6), lamp, 0.96);
+
     if sweep {
-        for side in [-1.0f32, 1.0] {
+        for &side in &[-1.0f32, 1.0] {
             let p = fr.place(rail_u, side * rail_half);
-            draw_ring_styled(pb, p, 3.0, DANGER_RED, 0.6, 0, fr.anim * 6.0);
+            draw_ring_styled(pb, p, 3.4, DANGER_RED, 0.78, 0, fr.anim * 8.0);
         }
     }
 }
 
-/// The ink ribbon: two spools, the band, and the lifted window.
+/// Spoked brass-and-crimson ink-ribbon spools + the lifted silk ribbon weak point!
 fn draw_ribbon(pb: &mut PixelBuffer, fr: &Frame, view: &NightEditionView) {
     let exposed = view.state == NightEditionState::Ribbon;
-    let pulse = 0.5 + 0.5 * (fr.anim * 8.0).sin();
-    // Spools at the rear corners of the slab.
-    for side in [-1.0f32, 1.0] {
-        let c = fr.place(-6.5, side * (BODY_HALF_WIDTH - 3.5));
-        let Some((x0, x1, y0, y1)) = bbox_around(pb, c, 3.5) else {
+    let pulse = 0.5 + 0.5 * (fr.anim * 9.5).sin();
+
+    // Two detailed spoked ink-ribbon spools at the rear corners of the platen!
+    for &side in &[-1.0f32, 1.0] {
+        let c = fr.place(-7.2, side * (BODY_HALF_WIDTH - 3.4));
+        let Some((x0, x1, y0, y1)) = bbox_around(pb, c, 4.4) else {
             continue;
         };
+        let spin = fr.anim * if exposed { 6.0 } else { 1.4 } * side;
         for y in y0..=y1 {
             for x in x0..=x1 {
                 let dx = x as f32 - c.x;
                 let dy = y as f32 - c.y;
                 let d = (dx * dx + dy * dy).sqrt();
-                if d > 3.0 {
+                if d > 3.9 {
                     continue;
                 }
-                let lum = 0.5 + 0.5 * (-dx * 0.55 - dy * 0.83);
-                blend_px(
-                    pb,
-                    x,
-                    y,
-                    shade3(RIBBON_SHADOW, RIBBON_MID, RIBBON_HI, lum),
-                    1.0,
-                );
-                if d > 2.3 {
-                    blend_px(pb, x, y, IRON_SHADOW, 0.5);
+                if d > 3.2 {
+                    blend_px(pb, x, y, OUTLINE_INK, 0.82 * (1.0 - (d - 3.2) / 0.7));
+                    continue;
                 }
+                let lit = (-dx * 0.55 - dy * 0.83) / 3.2;
+                let col = if d > 2.45 {
+                    // Metallic brass spool flange rim!
+                    shade3(BRASS_SHADOW, BRASS_MID, BRASS_HI, 0.55 + 0.50 * lit)
+                } else if d < 1.05 {
+                    // Bright central brass spindle pin!
+                    BRASS_HI
+                } else {
+                    // Wound crimson-magenta ink ribbon + rotating metallic spokes!
+                    let ang = dy.atan2(dx) + spin;
+                    if (ang * 3.0).sin().abs() > 0.84 {
+                        IRON_SPEC
+                    } else {
+                        shade3(RIBBON_SHADOW, RIBBON_MID, RIBBON_HI, 0.52 + 0.50 * lit)
+                    }
+                };
+                blend_px(pb, x, y, apply_hit(col, fr.hit * 0.35), 1.0);
             }
         }
     }
-    // The ribbon band across the front face.
-    let u = if exposed { RIBBON_OFFSET } else { BODY_HALF_LEN - 4.0 };
-    let a = fr.place(u, -(BODY_HALF_WIDTH - 5.0));
-    let b = fr.place(u, BODY_HALF_WIDTH - 5.0);
+
+    // The ink ribbon band across the front face (`u = RIBBON_OFFSET` when exposed!).
+    let u = if exposed { RIBBON_OFFSET } else { BODY_HALF_LEN - 3.6 };
+    let half_w = BODY_HALF_WIDTH - 4.4;
+    let a = fr.place(u, -half_w);
+    let b = fr.place(u, half_w);
     if exposed {
-        // Lifted out of the spools: a wide, bright magenta band with its two
-        // curled ends and a glint that runs its length.
-        let col = mix(RIBBON_HI, SAFE_CYAN, 0.20 + 0.22 * pulse);
-        for k in [-1.0f32, 1.0] {
-            let off = fr.f * k;
-            draw_line_styled(pb, a + off, b + off, col, 0.9, 0, 0, 0);
-            let end = fr.place(u + k * 2.0, 0.0);
-            let left = fr.place(u + k * 2.0, -(BODY_HALF_WIDTH - 5.0));
-            let right = fr.place(u + k * 2.0, BODY_HALF_WIDTH - 5.0);
-            draw_line_styled(pb, left, end - fr.p * 2.0, RIBBON_SHADOW, 0.6, 1, 2, 0);
-            draw_line_styled(pb, right, end + fr.p * 2.0, RIBBON_SHADOW, 0.6, 1, 2, 0);
+        // Lifted wide billowing crimson-magenta silk ribbon with cyan-white sheen & dark outline!
+        let col = mix(RIBBON_HI, SAFE_CYAN, 0.16 + 0.20 * pulse);
+        draw_line_styled(pb, a - fr.f * 2.0, b - fr.f * 2.0, OUTLINE_INK, 0.85, 0, 0, 0);
+        draw_line_styled(pb, a + fr.f * 2.0, b + fr.f * 2.0, OUTLINE_INK, 0.85, 0, 0, 0);
+        draw_line_styled(pb, a - fr.f, b - fr.f, RIBBON_MID, 0.96, 0, 0, 0);
+        draw_line_styled(pb, a, b, col, 0.98, 0, 0, 0);
+        draw_line_styled(pb, a + fr.f, b + fr.f, mix(col, PAPER_SPEC, 0.35), 0.94, 0, 0, 0);
+        // Traveling bright silk specular highlight running along the exposed ribbon!
+        let glint = fr.place(u, (fr.anim * 4.5).sin() * (half_w - 2.0));
+        fill_rect(pb, glint, Vec2::new(1.5, 2.2), (255, 246, 250), 0.96);
+        // Crisp cyan weak-point side arrows pointing at the ribbon!
+        for &side in &[-1.0f32, 1.0] {
+            let p = fr.place(u, side * (half_w + 3.2));
+            draw_line_styled(pb, p, p - fr.p * (side * 2.5), SAFE_CYAN, 0.92, 0, 0, 0);
         }
-        let glint = fr.place(u, (pulse * 2.0 - 1.0) * (BODY_HALF_WIDTH - 6.0));
-        fill_rect(pb, glint, Vec2::new(1.4, 2.6), (255, 236, 240), 0.95);
-        // Spool hubs wind down as the ribbon pays out.
-        draw_line_styled(pb, a, b, mix(RIBBON_HI, PAPER_SPEC, 0.4), 0.35 + 0.3 * pulse, 1, 3, 0);
     } else {
-        draw_line_styled(pb, a, b, RIBBON_MID, 0.6, 0, 0, 0);
+        draw_line_styled(pb, a, b, RIBBON_SHADOW, 0.72, 0, 0, 0);
+        draw_line_styled(pb, a + fr.f * 0.6, b + fr.f * 0.6, RIBBON_MID, 0.75, 0, 0, 0);
     }
 }
 
+/// Dark smoky wisps from overheated carriage bearings in Phase 2/3.
+fn draw_damage_smoke(pb: &mut PixelBuffer, fr: &Frame) {
+    let count = if fr.damage_tier >= 3 { 4 } else { 2 };
+    let origin = fr.place(-8.0, 6.0);
+    for i in 0..count {
+        let t = (fr.anim * 0.9 + i as f32 / count as f32).fract();
+        let p = origin + Vec2::new((t * 5.0 + i as f32).sin() * 2.2 + t * 3.0, -2.0 - t * 11.0);
+        draw_smoke_puff(pb, p, 1.5 + t * 2.0, (1.0 - t) * 0.72);
+    }
+}
+
+/// Crisp metallic & cyan registration sparks when struck!
+fn draw_hit_sparks(pb: &mut PixelBuffer, fr: &Frame) {
+    let seed = (fr.anim * 24.0) as i32;
+    for k in 0..6 {
+        let a = k as f32 / 6.0 * TAU + hash01(seed + k * 7, 19) * 0.5;
+        let dir = Vec2::from_angle(a);
+        let p0 = fr.pos + dir * 11.5;
+        let p1 = fr.pos + dir * (15.0 + fr.hit * 4.5);
+        let col = if k % 2 == 0 { PAPER_SPEC } else { CYAN_HI };
+        draw_line_styled(pb, p0, p1, col, 0.90 * fr.hit, 0, 0, 0);
+    }
+}
+
+/// Multi-stage death wreck: exploding broadsheets, scattered lead type blocks & smoke!
 fn draw_wreck_body(pb: &mut PixelBuffer, fr: &Frame) {
     let t = fr.prog;
-    // Sheets tearing loose and tumbling away from the frame.
+    // Initial crimson-magenta ink shockwave burst!
+    if t < 0.36 {
+        let k = 1.0 - t / 0.36;
+        draw_ring_styled(pb, fr.pos, 9.0 + (1.0 - k) * 20.0, RIBBON_HI, 0.85 * k, 0, fr.anim);
+        draw_ring_styled(pb, fr.pos, 6.0 + (1.0 - k) * 14.0, PAPER_SPEC, 0.65 * k, 2, fr.anim);
+    }
+    // Six printed newspaper broadsheets tearing loose and tumbling outward!
     for i in 0..6 {
-        let a = i as f32 * TAU / 6.0 + 0.3;
-        let k = (t - i as f32 * 0.05).clamp(0.0, 1.0);
-        if k <= 0.0 {
+        let a = i as f32 * TAU / 6.0 + 0.35;
+        let k = smoothstep(((t - i as f32 * 0.04) / 0.78).clamp(0.0, 1.0));
+        if k <= 0.01 {
             continue;
         }
-        let p = fr.pos + Vec2::from_angle(a) * (10.0 + 30.0 * k);
-        let spin = k * 6.0;
-        let half = Vec2::new(4.0, 3.0);
-        let c = p + Vec2::new(spin.cos() * 2.0, spin.sin() * 2.0);
-        fill_rect(pb, c, half, PAPER_MID, 0.85 * (1.0 - 0.5 * k));
-        outline_rect(pb, c, half, PAPER_SHADOW, 0.55 * (1.0 - 0.5 * k), false);
+        let lift = (k * std::f32::consts::PI).sin() * 6.0;
+        let p = fr.pos + Vec2::from_angle(a) * (9.0 + 28.0 * k) + Vec2::new(0.0, -lift);
+        draw_oriented_sheet(pb, p, a + k * 4.5, 4.2, 3.0, 0.90 * (1.0 - 0.45 * k));
     }
-    // Type blocks scattering from the split bed.
-    for i in 0..8 {
-        let a = i as f32 * 0.9 + 0.15;
-        let k = (t * 1.3 - i as f32 * 0.04).clamp(0.0, 1.0);
-        if k <= 0.0 {
+    // Gleaming metallic lead type blocks & brass springs scattering out of the split bed!
+    for i in 0..10 {
+        let a = i as f32 * 0.65 + 0.2;
+        let k = ((t * 1.25) - i as f32 * 0.03).clamp(0.0, 1.0);
+        if k <= 0.01 {
             continue;
         }
-        let p = fr.pos + Vec2::from_angle(a) * (8.0 + 20.0 * k);
-        fill_rect(pb, p, Vec2::splat(1.0), INK_HI, 0.8 * (1.0 - 0.4 * k));
+        let p = fr.pos + Vec2::from_angle(a) * (7.0 + 22.0 * k);
+        let col = if i % 3 == 0 { BRASS_HI } else { LEAD_HI };
+        fill_rect(pb, p, Vec2::splat(1.0), OUTLINE_INK, 0.75 * (1.0 - 0.4 * k));
+        blend_px(pb, p.x.round() as i32, p.y.round() as i32, col, 0.95 * (1.0 - 0.35 * k));
     }
-    // A last ink burst at the frame.
-    if t < 0.35 {
-        let k = 1.0 - t / 0.35;
-        draw_ring_styled(pb, fr.pos, 10.0 + 16.0 * (1.0 - k), RIBBON_HI, 0.5 * k, 2, fr.anim);
+    // Rising smoke column from the wrecked press!
+    for i in 0..4 {
+        let st = (t * 0.8 + i as f32 * 0.24).min(1.0);
+        let p = fr.pos + Vec2::new(((i as f32) - 1.5) * 3.0 + st * 2.5, -2.0 - st * 12.0);
+        draw_smoke_puff(pb, p, 2.2 + st * 2.4, (1.0 - st * 0.65) * 0.82);
     }
 }
 
-/// The radial HP arc under the body (the HUD bar's own read, in the world).
+/// Clean radial segmented Boss HP arc around the platen (3-phase markers at 30% and 65%).
 fn draw_hp_arc(pb: &mut PixelBuffer, fr: &Frame) {
     if fr.hp <= 0.0 {
         return;
     }
-    let r = BODY_RADIUS + 5.0;
+    let r = BODY_RADIUS + 6.5;
     let steps = 48;
     let lit = (fr.hp * steps as f32).round() as i32;
-    let col = if fr.hp > 0.6 {
-        mix(CYAN_MID, CYAN_HI, 0.6)
-    } else if fr.hp > 0.3 {
+    let col = if fr.hp > 0.65 {
+        CYAN_HI
+    } else if fr.hp > 0.30 {
         TELL_AMBER
     } else {
         DANGER_RED
     };
-    for i in 0..lit {
-        let a = -std::f32::consts::FRAC_PI_2 + i as f32 / steps as f32 * TAU;
+    for i in 0..steps {
+        let frac = i as f32 / steps as f32;
+        let a = -std::f32::consts::FRAC_PI_2 + frac * TAU;
         let x = (fr.pos.x + a.cos() * r).round() as i32;
         let y = (fr.pos.y + a.sin() * r).round() as i32;
-        blend_px(pb, x, y, col, 0.55);
+        if (frac - 0.30).abs() < 0.015 || (frac - 0.65).abs() < 0.015 {
+            blend_px(pb, x, y, OUTLINE_INK, 0.90);
+            continue;
+        }
+        darken_px(pb, x, y + 1, 0.38);
+        if i < lit {
+            let lead = i + 1 == lit;
+            blend_px(pb, x, y, if lead { PAPER_SPEC } else { col }, if lead { 0.95 } else { 0.78 });
+        } else {
+            blend_px(pb, x, y, IRON_SHADOW, 0.45);
+        }
     }
 }
 
@@ -1843,5 +2272,79 @@ mod tests {
             out.push(px.2);
         }
         out
+    }
+
+    /// Gated behind `RATRUN_NIGHT_WORLD=<dir>`: renders every Night Edition
+    /// state through the real `World::draw(Theme::Printworks)` stack with both
+    /// `LightingMode::Full` and `LightingMode::Off`. Inert unless set.
+    #[test]
+    fn night_edition_world_gallery() {
+        use crate::game::ecs::components::SpawnId;
+        use crate::game::ecs::systems::boss::{Boss, BossKind, BossState};
+        use crate::game::level::{MAP_COLS, MAP_ROWS, Theme, TileRect};
+        use crate::game::world::World;
+        use crate::render::lighting::LightingMode;
+
+        let Ok(dir) = std::env::var("RATRUN_NIGHT_WORLD") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let _ = std::fs::create_dir_all(&dir);
+
+        let shots: &[(&str, NightEditionState, f32, u8, f32)] = &[
+            ("w_01_roll", NightEditionState::Roll, 0.35, 1, 0.95),
+            ("w_02_page_tell", NightEditionState::PageTell, 0.65, 1, 0.88),
+            ("w_03_page_stamp", NightEditionState::PageStamp, 0.25, 1, 0.85),
+            ("w_04_bed_lowered", NightEditionState::BedLowered, 0.45, 1, 0.78),
+            ("w_05_carriage_tell", NightEditionState::CarriageTell, 0.60, 2, 0.52),
+            ("w_06_carriage_sweep", NightEditionState::CarriageSweep, 0.55, 2, 0.48),
+            ("w_07_ribbon", NightEditionState::Ribbon, 0.45, 2, 0.45),
+            ("w_08_misprint_tell", NightEditionState::MisprintTell, 0.65, 3, 0.24),
+            ("w_09_misprint_stamp", NightEditionState::MisprintStamp, 0.35, 3, 0.22),
+            ("w_10_phase_turn", NightEditionState::PhaseTurn, 0.45, 2, 0.60),
+            ("w_11_wreck", NightEditionState::Wreck, 0.58, 3, 0.0),
+        ];
+
+        for &(name, state, prog, phase, hp) in shots {
+            let mut w = World::new(Theme::Printworks, 7);
+            w.viewport = Vec2::new(176.0, 108.0);
+            w.lighting = LightingMode::Full;
+            w.smoke_enabled = true;
+            let anchor = w.player.pos;
+            let pos = anchor - Vec2::new(26.0, 4.0);
+            let arena = w
+                .level
+                .boss_room()
+                .map(|r| r.rect)
+                .unwrap_or(TileRect::new(0, 0, MAP_COLS, MAP_ROWS));
+            let mut boss = Boss::new(BossKind::NightEdition, pos, 3000.0, arena, pos, false);
+            boss.facing = Vec2::new(1.0, 0.15).normalized();
+            boss.phase = phase;
+            boss.hp = boss.max_hp * hp;
+            boss.state = BossState::NightEdition(state);
+            boss.duration = 1.4;
+            boss.elapsed = 1.4 * prog;
+            boss.anim = 2.1;
+            boss.swipe_side = 1.0;
+            boss.pounce_origin = pos - Vec2::new(6.0, 0.0);
+            boss.target = match state {
+                NightEditionState::CarriageTell
+                | NightEditionState::CarriageSweep
+                | NightEditionState::Ribbon => pos + Vec2::new(RULE_LEN - 6.0, 0.0),
+                _ => anchor,
+            };
+            w.ecs.spawn((boss, SpawnId(9001)));
+
+            let mut pb = PixelBuffer::new(176, 108);
+            w.draw(&mut pb);
+            w.elapsed = 30.08;
+            w.draw(&mut pb);
+            let _ = std::fs::write(dir.join(format!("{name}.ppm")), to_ppm(&pb));
+
+            w.lighting = LightingMode::Off;
+            w.smoke_enabled = false;
+            w.draw(&mut pb);
+            let _ = std::fs::write(dir.join(format!("{name}_off.ppm")), to_ppm(&pb));
+        }
     }
 }

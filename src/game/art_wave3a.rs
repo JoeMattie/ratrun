@@ -54,25 +54,67 @@ pub fn draw_acid_drop(pb: &mut PixelBuffer, d: &AcidDrop, s: (i32, i32)) {
     let dim = 0.58 + 0.42 * fall;
     let phase = d.index as i32;
 
-    // 1. Dashed target ring with subtle dark floor etch so it reads on bright floors.
-    let steps = (ring_r * 8).max(16);
-    for i in 0..steps {
-        // 2-on, 1-off dashed cadence shifted by volley index so stacked drops separate.
-        if (i + phase * 2).rem_euclid(3) == 2 {
-            continue;
+    // 1. Mark: Downspout (`d.evolved`) uses a crisp stepped green stair-tread
+    //    target frame instead of a generic round ring so the volley reads as a
+    //    stepped staircase before, during, and after impact.
+    if d.evolved {
+        let hw = ring_r.clamp(3, 8);
+        let dark_riser: Rgb = (22, 68, 22);
+        let tread_mid: Rgb = (132, 242, 54);
+        let tread_hi: Rgb = (224, 255, 134);
+        // Recessed riser shadow directly underneath the stair tread.
+        for dx in -hw..=hw {
+            blend_px(pb, s.0 + dx, s.1 + 1, dark_riser, 0.72 * dim);
+            blend_px(pb, s.0 + dx, s.1 + 2, dark_riser, 0.52 * dim);
         }
-        let a = i as f32 / steps as f32 * std::f32::consts::TAU;
-        let dx = (a.cos() * ring_r as f32).round() as i32;
-        let dy = (a.sin() * ring_r as f32).round() as i32;
-        shade_px(pb, s.0 + dx, s.1 + dy, 0.28);
-        pb.plot_add(s.0 + dx, s.1 + dy, palette::scale(STROKE, 0.55 + 0.35 * dim));
-    }
-    // Four inward cardinal reticle ticks so the mark reads as a locked strike zone.
-    let tick_col = palette::scale(CORE, 0.45 + 0.40 * fall);
-    for &(tx, ty) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
-        pb.plot_add(s.0 + tx * (ring_r - 1), s.1 + ty * (ring_r - 1), tick_col);
-        if ring_r >= 6 {
-            pb.plot_add(s.0 + tx * (ring_r - 2), s.1 + ty * (ring_r - 2), palette::scale(STROKE, 0.55));
+        // Bright horizontal stair tread bar across the landing mark.
+        for dx in -hw..=hw {
+            let edge = dx.abs() == hw;
+            let col = if edge { tread_mid } else { tread_hi };
+            blend_px(pb, s.0 + dx, s.1 - 1, palette::scale(col, 0.72 + 0.28 * fall), 0.90);
+            blend_px(pb, s.0 + dx, s.1, palette::scale(tread_mid, 0.65 + 0.35 * fall), 0.85);
+        }
+        // Upper step lip offset slightly back to give a two-step staircase silhouette.
+        let top_hw = (hw - 1).max(2);
+        for dx in -top_hw..=top_hw {
+            blend_px(
+                pb,
+                s.0 + dx,
+                s.1 - 3,
+                palette::scale(STROKE, 0.55 + 0.40 * fall),
+                0.78,
+            );
+            blend_px(pb, s.0 + dx, s.1 - 2, dark_riser, 0.55 * dim);
+        }
+        // Crisp corner stair-stringer ticks.
+        for &(tx, ty) in &[(-hw - 1, -1), (hw + 1, -1), (-hw - 1, 1), (hw + 1, 1)] {
+            pb.plot_add(s.0 + tx, s.1 + ty, palette::scale(CORE, 0.45 + 0.45 * fall));
+        }
+    } else {
+        // Dashed target ring with subtle dark floor etch so it reads on bright floors.
+        let steps = (ring_r * 8).max(16);
+        for i in 0..steps {
+            // 2-on, 1-off dashed cadence shifted by volley index so stacked drops separate.
+            if (i + phase * 2).rem_euclid(3) == 2 {
+                continue;
+            }
+            let a = i as f32 / steps as f32 * std::f32::consts::TAU;
+            let dx = (a.cos() * ring_r as f32).round() as i32;
+            let dy = (a.sin() * ring_r as f32).round() as i32;
+            shade_px(pb, s.0 + dx, s.1 + dy, 0.28);
+            pb.plot_add(s.0 + dx, s.1 + dy, palette::scale(STROKE, 0.55 + 0.35 * dim));
+        }
+        // Four inward cardinal reticle ticks so the mark reads as a locked strike zone.
+        let tick_col = palette::scale(CORE, 0.45 + 0.40 * fall);
+        for &(tx, ty) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            pb.plot_add(s.0 + tx * (ring_r - 1), s.1 + ty * (ring_r - 1), tick_col);
+            if ring_r >= 6 {
+                pb.plot_add(
+                    s.0 + tx * (ring_r - 2),
+                    s.1 + ty * (ring_r - 2),
+                    palette::scale(STROKE, 0.55),
+                );
+            }
         }
     }
 
@@ -486,6 +528,79 @@ pub fn draw_corrosive_channel(
     cam: Vec2,
     elapsed: f32,
 ) {
+    let dir = if ch.dir.len_sq() > 1e-4 {
+        ch.dir.normalized()
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    let side = dir.perp();
+
+    // Downspout runoff (`ch.runoff == true`): settled immediately for `ch.settle`
+    // seconds and drawn as a crisp stepped green staircase (alternating bright
+    // lime treads and deep dark-emerald risers framed by wet-stone stringers)
+    // with animated runoff cascading down the steps.
+    if ch.runoff {
+        let total = ch.settle.max(0.05);
+        let fade = ((total - ch.age) / 0.35).clamp(0.0, 1.0);
+        if fade <= 0.01 {
+            return;
+        }
+        let stringer: Rgb = (10, 32, 12);
+        let riser_dark: Rgb = (14, 46, 16);
+        let riser_mid: Rgb = (46, 134, 34);
+        let tread_mid: Rgb = (148, 246, 62);
+        let tread_hi: Rgb = (232, 255, 138);
+        let foam: Rgb = (250, 255, 218);
+
+        let steps_px = ch.length.ceil() as i32;
+        let step_stride = 6i32;
+        // Animated caustic runoff wave cascading step-by-step down the gutter.
+        let cascade = ((elapsed * 18.0) as i32).rem_euclid(step_stride);
+
+        for along in 0..=steps_px {
+            let af = along as f32;
+            let phase = along.rem_euclid(step_stride);
+            let is_lip = phase == 0;
+            let is_tread = phase == 1 || phase == 2;
+            let is_cascade = phase == cascade;
+            // Notched stair silhouette: wide lit horizontal treads (`±5`), narrow
+            // jet-dark vertical risers (`±3`) so every step reads cleanly at 1x!
+            let width = if is_lip || is_tread { 5i32 } else { 3i32 };
+
+            for w in -width..=width {
+                let p = w2s(ch.start + dir * af + side * w as f32, cam);
+                if w.abs() == width {
+                    // Crisp dark stair-stringer side border.
+                    blend_px(pb, p.0, p.1, stringer, 0.88 * fade);
+                } else if is_lip {
+                    // Blazing leading stair-tread nose.
+                    let col = if is_cascade && w.abs() <= 1 {
+                        foam
+                    } else if w.abs() <= 3 {
+                        tread_hi
+                    } else {
+                        tread_mid
+                    };
+                    blend_px(pb, p.0, p.1, col, 0.96 * fade);
+                } else if is_tread {
+                    // Flat lit lime step tread with crisp edge shading.
+                    let col = if phase == 1 { tread_mid } else { riser_mid };
+                    blend_px(pb, p.0, p.1, col, (0.86 - 0.06 * w.abs() as f32) * fade);
+                    if is_cascade && w.abs() <= 1 {
+                        pb.plot_add(p.0, p.1, palette::scale(tread_hi, 0.45 * fade));
+                    }
+                } else {
+                    // Deep recessed vertical stair riser shadow between treads.
+                    blend_px(pb, p.0, p.1, riser_dark, 0.92 * fade);
+                    if is_cascade && w == 0 {
+                        pb.plot_add(p.0, p.1, palette::scale(tread_mid, 0.40 * fade));
+                    }
+                }
+            }
+        }
+        return;
+    }
+
     let total = CHANNEL_ADVANCE + CHANNEL_SETTLE;
     let fade = ((total - ch.age) / 0.42).clamp(0.0, 1.0);
     if fade <= 0.01 {
@@ -493,12 +608,6 @@ pub fn draw_corrosive_channel(
     }
     let advancing = ch.age <= CHANNEL_ADVANCE;
     let open_len = ch.length * (ch.age / CHANNEL_ADVANCE).clamp(0.0, 1.0);
-    let dir = if ch.dir.len_sq() > 1e-4 {
-        ch.dir.normalized()
-    } else {
-        Vec2::new(1.0, 0.0)
-    };
-    let side = dir.perp();
 
     let trough_dark: Rgb = (24, 58, 18);
     let bile_fill: Rgb = (96, 214, 42);
