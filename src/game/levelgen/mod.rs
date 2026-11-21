@@ -1,6 +1,6 @@
 //! Procedural level generation.
 //!
-//! Five stages, run in this order, each owning one concern (the file-ownership
+//! Layout and placement stages run in this order (the file-ownership
 //! table with signatures is in `CONTENT_PLAN.md` §2):
 //!
 //! 1. [`layout::build_layout`] — rooms, corridors, open halls, the boss arena
@@ -26,9 +26,10 @@
 //!
 //! ## Determinism
 //!
-//! One [`StdRng`] seeded from `(theme, run seed, attempt)` drives every stage
-//! in order, and nothing iterates a hash map, so a seed always yields the same
-//! map. The generator never reads the clock, the player or the ECS world.
+//! One [`StdRng`] seeded from `(theme, run seed, attempt)` drives gameplay
+//! placements in order. Fixtures and ambient emitters read the finished tiles
+//! and use a separate, salted RNG. There are no clocks or hash-map iteration
+//! in generation.
 //!
 //! ## Cost
 //!
@@ -57,6 +58,7 @@
 
 pub mod hazards;
 pub mod layout;
+mod lights;
 pub mod maze;
 /// The flatbed trailer's own generator (see the module docs).
 pub mod trailer;
@@ -129,6 +131,8 @@ pub struct StageTimings {
     pub masks: u64,
     pub objects: u64,
     pub nav: u64,
+    /// Render-only fixtures and ambient emitter placement.
+    pub lights: u64,
 }
 
 impl StageTimings {
@@ -146,6 +150,7 @@ impl StageTimings {
             masks: self.masks.min(other.masks),
             objects: self.objects.min(other.objects),
             nav: self.nav.min(other.nav),
+            lights: self.lights.min(other.lights),
         }
     }
 
@@ -160,6 +165,7 @@ impl StageTimings {
             + self.masks
             + self.objects
             + self.nav
+            + self.lights
     }
 }
 
@@ -200,7 +206,9 @@ fn generate_stages(
     // The flatbed is its own world: a long, narrow bed of planks rather than a
     // sprawl of rooms, so it owns the whole pipeline (see `trailer.rs`).
     if theme == Theme::Trailer {
-        return trailer::generate(tiles, &mut rng, seed);
+        let mut level = trailer::generate(tiles, &mut rng, seed);
+        stage!(lights, lights::place(&mut level, attempt));
+        return level;
     }
 
     let design = stage!(layout, layout::build_layout(&mut tiles, &mut rng, theme));
@@ -237,7 +245,7 @@ fn generate_stages(
         objects_from(&tiles, &mazes, &holes, &traps, &shop_holes, &floor_hazards)
     );
     let nav = stage!(nav, NavGrid::from_tiles(&tiles, SizeClass::Large));
-    Level {
+    let mut level = Level {
         theme,
         seed,
         arena: tiles.world_size(),
@@ -251,7 +259,9 @@ fn generate_stages(
         objects,
         boss: design.boss.clone(),
         trailer: crate::game::level::TrailerDeck::default(),
-    }
+    };
+    stage!(lights, lights::place(&mut level, attempt));
+    level
 }
 
 /// Build the runtime [`LevelObjects`] from the generator's placements: the

@@ -58,7 +58,7 @@ use rand::{Rng, SeedableRng};
 use crate::audio::Sfx;
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
-use crate::render::lighting::{LightMap, LightScene, LightingMode};
+use crate::render::lighting::{draw_ambience, draw_fixtures, LightMap, LightScene, LightingMode};
 use crate::render::palette;
 use crate::render::zoom;
 
@@ -88,7 +88,7 @@ use super::ecs::systems::gates::{GateRuntime, MazeEvent};
 use super::enemy::{Enemy, EnemyKind};
 use super::gem::{Chest, Gem, Gold, Pickup, PickupKind};
 use super::art_traps::MazeRewardState;
-use super::level::{Level, RoomKind, Theme};
+use super::level::{Level, PropKind, RoomKind, Theme};
 use super::loadout::{self, ChestReward, Loadout};
 use super::nav::{FlowField, NavBudget};
 use super::particle::damage_number::{DamageNumbers, DEFAULT_CAP as DAMAGE_NUMBER_CAP};
@@ -212,6 +212,7 @@ pub struct World {
 
     // ---- Render-only lighting & smoke (never touched by the sim) ---------
     pub lighting: LightingMode,
+    pub(crate) lighting_depth: crate::term::ColorDepth,
     pub smoke_enabled: bool,
     light_map: LightMap,
     smoke: SmokeLayer,
@@ -401,8 +402,8 @@ impl World {
             fog_spare: Some(fog_spare),
 
             lighting: LightingMode::default_for_depth(crate::term::color_depth()),
-            smoke_enabled: LightingMode::default_for_depth(crate::term::color_depth())
-                != LightingMode::Off,
+            lighting_depth: crate::term::color_depth(),
+            smoke_enabled: true,
             light_map: LightMap::new(),
             smoke: SmokeLayer::new(seed, theme),
         }
@@ -1349,6 +1350,7 @@ impl World {
         };
         cam += self.shake_ofs;
         self.cam = cam;
+        self.light_map.begin_frame();
 
         pb.clear(self.level.palette.bg);
 
@@ -1388,7 +1390,16 @@ impl World {
                 continue;
             }
             art_props::draw_prop(pb, p, cam, &self.level.palette);
+            if matches!(p.kind, PropKind::Console | PropKind::Tank) {
+                let (mx, my) = self.w2s(p.rect.center(), cam);
+                self.light_map.mark_emissive_rect(pb, mx - 2, my - 3, 5, 2);
+            }
         }
+
+        let ambience_started = std::time::Instant::now();
+        draw_fixtures(&mut self.light_map, pb, &self.level.objects.lights, self.level.theme, cam, self.elapsed);
+        draw_ambience(&mut self.light_map, pb, &self.level.objects.emitters, cam, self.elapsed, self.player.pos);
+        let ambience_cost = ambience_started.elapsed();
 
         // Acid pools, in `SpawnId` order (overlapping sprites must draw in
         // spawn order, exactly like the legacy `Vec`).
@@ -1408,6 +1419,7 @@ impl World {
                         }
                     }
                 }
+                self.light_map.mark_emissive_rect(pb, s.0, s.1, 1, 1);
             }
         }
 
@@ -1444,6 +1456,7 @@ impl World {
                     continue;
                 }
                 art_wave3a::draw_acid_drop(pb, d, s);
+                self.light_map.mark_emissive_rect(pb, s.0, s.1, 1, 1);
             }
         }
 
@@ -1458,6 +1471,7 @@ impl World {
                 pb.plot(s.0, s.1, g.color);
                 pb.plot_add(s.0 + 1, s.1, palette::scale(g.color, 0.5));
                 pb.plot_add(s.0, s.1 + 1, palette::scale(g.color, 0.5));
+                self.light_map.mark_emissive_rect(pb, s.0, s.1, 1, 1);
             }
         }
 
@@ -1477,6 +1491,7 @@ impl World {
                 let s = self.w2s(chest.pos, cam);
                 if on_screen(s, 12.0, viewport) {
                     art_floor::draw_chest(pb, s, self.elapsed);
+                    self.light_map.mark_emissive_rect(pb, s.0 - 1, s.1 - 1, 3, 2);
                 }
             }
         }
@@ -1549,9 +1564,17 @@ impl World {
                 if !on_screen(s, e.radius * 3.0 + 8.0, viewport) {
                     continue;
                 }
+                let points = [(s.0, s.1), (s.0 + 1, s.1), (s.0 - 1, s.1), (s.0, s.1 - 1)];
+                let before = points.map(|(x, y)| pb.pixel_at(x as usize, y as usize));
                 match mb {
                     Some(mb) => art_miniboss::draw(pb, e, mb, cam, accent),
                     None => art_enemy::draw_enemy_crowd(pb, e, cam, accent, visible),
+                }
+                for ((x, y), floor) in points.into_iter().zip(before) {
+                    let body = pb.pixel_at(x as usize, y as usize);
+                    if body != floor {
+                        self.light_map.mark_readable(pb, x, y);
+                    }
                 }
             }
         }
@@ -1594,6 +1617,7 @@ impl World {
                 } else {
                     pb.plot_add(s.0, s.1, b.color);
                 }
+                self.light_map.mark_emissive_rect(pb, s.0, s.1, 1, 1);
             }
         }
 
@@ -1635,7 +1659,7 @@ impl World {
         self.draw_boss_thresholds(pb, cam, WallLayer::Overhang);
         self.draw_object_layer(pb, cam, true);
 
-        // Soft alpha-blended smoke & ambient haze (render-only, under bright sparks).
+        // Brief smoke from combat and moving machinery, under bright sparks.
         if self.smoke_enabled {
             self.draw_smoke(pb, cam);
         }
@@ -1716,7 +1740,7 @@ impl World {
         // their sprites at every zoom. Floating damage numbers are text sized
         // and belong to screen space: `draw` stamps them after the resample, so
         // they never scale and are never darkened by the ambient.
-        self.apply_lighting(pb, cam);
+        self.apply_lighting(pb, cam, ambience_cost);
 
         // Hostile information wins the frame: pellets, telegraphs, tells and
         // status pips are drawn **after** the lighting pass (so they are
@@ -1852,13 +1876,14 @@ impl World {
             thrash,
             cam,
             elapsed: self.elapsed,
-            mode: self.lighting,
+            mode: self.light_map.quality(self.lighting),
         };
         self.smoke.sync_and_draw(pb, &scene);
     }
 
     /// Render-only lighting pass; never mutates simulation state or `self.rng`.
-    fn apply_lighting(&mut self, pb: &mut PixelBuffer, cam: Vec2) {
+    fn apply_lighting(&mut self, pb: &mut PixelBuffer, cam: Vec2, ambience_cost: std::time::Duration) {
+        #[cfg(test)]
         if self.lighting == LightingMode::Off {
             return;
         }
@@ -1873,9 +1898,12 @@ impl World {
             squeak,
             cam,
             elapsed: self.elapsed,
-            mode: self.lighting,
+            mode: self.light_map.quality(self.lighting),
+            depth: self.lighting_depth,
         };
+        let started = std::time::Instant::now();
         self.light_map.apply_scene(pb, &scene);
+        self.light_map.observe_cost(scene.mode, started.elapsed() + ambience_cost, pb.w * pb.h);
     }
 
     /// Access the render-only smoke layer (tests and screenshot captures).
@@ -1905,12 +1933,16 @@ impl World {
         // the charge itself is read off the weapon, but the one-off "just
         // charged" flash needs the crossing remembered between frames, and this
         // is the only place that has a frame stream.
+        let charge = art_rat::tail_charge(&self.player);
         let flash = art_rat::tail_ready_flash(
-            art_rat::tail_charge(&self.player),
+            charge,
             self.elapsed,
             &mut self.tail_ready_at,
         );
         art_rat::draw_rat_flash(pb, &self.player, self.elapsed, cam, flash);
+        if charge.is_some_and(|charge| charge.ready) {
+            self.light_map.mark_emissive_highlights(pb, self.w2s(self.player.pos, cam), 15);
+        }
         // Bottle Cap active charge: crisp rotating white-tin rim around the rat.
         if self.player.buffs.shield > 0.0 {
             art_wave3a::draw_bottle_cap_rim(pb, self.player.pos, self.elapsed, cam);
@@ -1919,6 +1951,7 @@ impl World {
         // over the rat so the eyes read as the source.
         if let Some(beam) = self.laser_visual() {
             art_rat::draw_laser_eyes(pb, &self.player, beam, cam);
+            self.light_map.mark_emissive_highlights(pb, self.w2s(self.player.pos, cam), 9);
         }
     }
 
@@ -1997,6 +2030,7 @@ impl World {
                 // The falling crate is a hazard: `draw_hostile_layer` owns it.
                 BossArtView::Magpie(v) => art_boss_magpie::draw_magpie(pb, &v, cam, accent),
             }
+            self.light_map.mark_emissive_highlights(pb, self.w2s(boss.pos, cam), 19);
         }
     }
 
@@ -2191,7 +2225,7 @@ impl World {
     /// Traps, doors, rat-holes and maze rewards: `foreground == false` draws
     /// the ground layer (before entities), `true` the overlay layer (after
     /// them). Culled to the view.
-    fn draw_object_layer(&self, pb: &mut PixelBuffer, cam: Vec2, foreground: bool) {
+    fn draw_object_layer(&mut self, pb: &mut PixelBuffer, cam: Vec2, foreground: bool) {
         let accent = self.level.palette.accent;
         let vp = self.viewport;
         let anim = self.elapsed;
@@ -2250,6 +2284,11 @@ impl World {
         // wall body, so the bent spoon and the whisker scratches read.
         if foreground {
             self.draw_shop_holes(pb, cam);
+            for hole in &objects.shop_holes {
+                if on_screen(self.w2s(hole.pos, cam), 24.0, vp) {
+                    self.light_map.mark_emissive_highlights(pb, self.w2s(hole.face(), cam), 6);
+                }
+            }
         }
         for reward in &objects.rewards {
             if !on_screen(self.w2s(reward.pos, cam), 22.0, vp) {
@@ -2259,6 +2298,9 @@ impl World {
             view.anim = anim;
             if foreground {
                 art_traps::draw_maze_reward(pb, &view, cam, accent);
+                if view.state != MazeRewardState::Opened {
+                    self.light_map.mark_emissive_highlights(pb, self.w2s(view.pos, cam), 7);
+                }
             } else {
                 art_traps::draw_maze_reward_ground(pb, &view, cam, accent);
             }
@@ -3236,7 +3278,7 @@ mod hostile_layer_tests {
     #[test]
     fn enemy_pellets_are_not_darkened_by_lighting() {
         let mut frames = Vec::new();
-        for mode in [LightingMode::Full, LightingMode::Soft, LightingMode::Off] {
+        for mode in [LightingMode::Full, LightingMode::Hard, LightingMode::Off] {
             let mut w = World::new(Theme::Sewer, 7);
             w.player.pos = w.level.start;
             w.lighting = mode;

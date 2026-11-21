@@ -1266,7 +1266,7 @@ fn worker_loop(
                 let drawn = contained(|| {
                     if pw > 0 && ph > 0 {
                         let world = active.world_mut();
-                        world.lighting = crate::render::lighting::LightingMode::Off;
+                        world.lighting = crate::render::lighting::LightingMode::Compact;
                         world.smoke_enabled = false;
                         world.draw(&mut pixels);
                         downsample_into(&pixels, scale, buf.area, &mut buf);

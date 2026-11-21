@@ -640,8 +640,66 @@ pub struct TrapRecord {
     pub approach: Cardinal,
 }
 
-/// Every non-wall object placed on the map. Mutated by the simulation (trap
-/// and door systems, later phase) and read by the renderer.
+/// Lighting-only room treatment. A zone never affects visibility or traversal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LightZoneKind {
+    Corridor,
+    Room,
+    Start,
+    Arena,
+    Blackout,
+    Maze,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LightZone {
+    pub rect: TileRect,
+    pub kind: LightZoneKind,
+}
+
+/// Walkable, cosmetic fixtures. The renderer supplies theme art and response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LightFixtureKind {
+    Pendant,
+    Passage,
+    Arena,
+    Broken,
+    Sun,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightFixture {
+    pub pos: Vec2,
+    pub kind: LightFixtureKind,
+    pub radius: f32,
+    pub seed: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmitterKind {
+    Fire,
+    Steam,
+    Drip,
+    Cable,
+    Dust,
+    Fog,
+    Exhaust,
+    Pilot,
+    Fumes,
+    Insects,
+}
+
+/// Ambient effects are evaluated from seed and elapsed time by the renderer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AmbientEmitter {
+    pub kind: EmitterKind,
+    pub pos: Vec2,
+    pub rate: f32,
+    pub intensity: f32,
+    pub seed: u32,
+}
+
+/// Every non-wall object placed on the map.
 #[derive(Clone, Debug, Default)]
 pub struct LevelObjects {
     pub sticky_traps: Vec<StickyTrapView>,
@@ -667,6 +725,9 @@ pub struct LevelObjects {
     /// Ink pads (Printworks): permanent walkable stains that slow ground
     /// movement. See [`super::hazards`].
     pub ink_pads: Vec<super::hazards::InkPad>,
+    pub lights: Vec<LightFixture>,
+    pub light_zones: Vec<LightZone>,
+    pub emitters: Vec<AmbientEmitter>,
 }
 
 impl LevelObjects {
@@ -740,6 +801,8 @@ impl LevelObjects {
             + self.rewards.len()
             + self.steam_grates.len()
             + self.ink_pads.len()
+            + self.lights.len()
+            + self.emitters.len()
     }
 
     pub fn is_empty(&self) -> bool {
