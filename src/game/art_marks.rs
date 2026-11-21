@@ -589,9 +589,10 @@ pub fn draw_boss_arena_floor(pb: &mut PixelBuffer, arena: TileRect, theme: Theme
     }
 }
 
-/// The Laundry's arena floor: indigo porcelain tile over denim seams, a brass
-/// drain ring at the centre (the floor's own landmark) and two pale wash lanes
-/// left and right — the design's "Boss floor has two open side lanes".
+/// The Laundry's arena floor: indigo glazed porcelain tile over faded-denim
+/// seams, twin porcelain-trimmed open side lanes ("Boss floor has two open side
+/// lanes"), and a grand spoked brass drainage ring with bolted mounting lugs at
+/// the centre. Every pixel stays strictly under the floor layer's contrast cap.
 #[allow(clippy::too_many_arguments)]
 fn boss_laundry_floor(
     pb: &mut PixelBuffer,
@@ -603,8 +604,8 @@ fn boss_laundry_floor(
     cam_x: i32,
     cam_y: i32,
 ) {
-    const SEAM: Rgb = (52, 72, 96);
-    const TILE_BODY: [Rgb; 3] = [(30, 34, 52), (35, 40, 61), (27, 31, 49)];
+    const SEAM: Rgb = (42, 58, 80);
+    const TILE_BODY: [Rgb; 3] = [(28, 32, 50), (33, 38, 58), (25, 29, 46)];
     for sy in clip.y0..clip.y1 {
         for sx in clip.x0..clip.x1 {
             let wx = sx + cam_x - ax0;
@@ -616,69 +617,65 @@ fn boss_laundry_floor(
             let c = if lx == 0 || ly == 0 {
                 SEAM
             } else if lx == 1 || ly == 1 {
-                mix(body, (179, 199, 195), 0.20)
+                mix(body, (148, 170, 170), 0.18)
             } else if lx == TILE - 1 || ly == TILE - 1 {
-                mix(body, SEAM, 0.45)
+                mix(body, SEAM, 0.48)
             } else {
                 body
             };
-            blend_clip(pb, clip, sx, sy, c, 0.90);
+            blend_clip(pb, clip, sx, sy, c, 0.92);
         }
     }
 
-    // Two porcelain wash lanes (one cell + a lane of pale tile either side).
+    // Two porcelain-trimmed open side lanes left and right of The Mangle's pit.
     let lane_w = TILE * 3;
     let inset = (ax1 - ax0) / 5;
+    let lane_h = ((ay1 - ay0) - 4 * TILE).max(0);
     for (x0, x1) in [
         (ax0 + inset, ax0 + inset + lane_w),
         (ax1 - inset - lane_w, ax1 - inset),
     ] {
         let sx0 = x0 - cam_x;
         let sy0 = ay0 + 2 * TILE - cam_y;
-        rect_blend_clip(
-            pb,
-            clip,
-            sx0,
-            sy0,
-            x1 - x0,
-            (ay1 - ay0) - 4 * TILE,
-            (179, 199, 195),
-            0.055,
-        );
+        rect_blend_clip(pb, clip, sx0, sy0, x1 - x0, lane_h, (132, 152, 154), 0.10);
+        // Crisp recessed brass/porcelain guide rails bordering each safe side lane.
+        rect_blend_clip(pb, clip, sx0, sy0, 2, lane_h, (112, 92, 52), 0.34);
+        rect_blend_clip(pb, clip, x1 - 2 - cam_x, sy0, 2, lane_h, (112, 92, 52), 0.34);
         for k in 0..3 {
-            rect_blend_clip(pb, clip, sx0 + k * TILE, sy0, 1, (ay1 - ay0) - 4 * TILE, SEAM, 0.35);
-            rect_blend_clip(
-                pb,
-                clip,
-                sx1_of(x1, k) - cam_x,
-                sy0,
-                1,
-                (ay1 - ay0) - 4 * TILE,
-                SEAM,
-                0.35,
-            );
+            rect_blend_clip(pb, clip, sx0 + k * TILE, sy0, 1, lane_h, SEAM, 0.36);
+            rect_blend_clip(pb, clip, sx1_of(x1, k) - cam_x, sy0, 1, lane_h, SEAM, 0.36);
         }
     }
 
-    // The brass drain: a ring of brass with iron spokes at the centre.
+    // Grand central spoked brass floor drain ring with bolted cardinal lugs.
     let (cx, cy) = ((ax0 + ax1) / 2 - cam_x, (ay0 + ay1) / 2 - cam_y);
     let r = (TILE * 2) as f32;
-    for dy in -(r as i32)..=(r as i32) {
-        for dx in -(r as i32)..=(r as i32) {
+    let ir = r as i32 + 3;
+    for dy in -ir..=ir {
+        for dx in -ir..=ir {
             let d = ((dx * dx + dy * dy) as f32).sqrt();
-            if d > r {
+            let on_lug = (dx.abs() <= 3 && (dy.abs() >= ir - 3 && dy.abs() <= ir))
+                || (dy.abs() <= 3 && (dx.abs() >= ir - 3 && dx.abs() <= ir));
+            if d > r && !on_lug {
                 continue;
             }
-            let c = if d > r - 1.6 {
-                (132, 106, 58) // brass rim, kept under the floor layer's contrast cap
-            } else if d > r - 3.0 {
-                (60, 44, 24) // recessed shadow under the rim
-            } else if (dx + dy).rem_euclid(6) == 0 && d > 2.0 {
-                (82, 80, 74) // iron spoke
+            let c = if on_lug && d > r - 0.5 {
+                (108, 86, 46)
+            } else if d > r - 2.0 {
+                // Beveled outer brass collar (lit top-left, shaded bottom-right).
+                if dx + dy < 0 { (114, 92, 50) } else { (78, 62, 34) }
+            } else if d > r - 3.6 {
+                (28, 26, 32) // deep recessed rim groove
+            } else if (d - r * 0.50).abs() < 1.3 || d < 4.2 {
+                // Inner brass strainer hub & concentric stabilizer ring.
+                (94, 76, 44)
+            } else if dx.abs() <= 1 || dy.abs() <= 1 || (dx - dy).abs() <= 1 || (dx + dy).abs() <= 1 {
+                // 8 radial iron/brass spokes across the dark drain throat.
+                (66, 68, 72)
             } else {
-                (18, 22, 34) // throat
+                (14, 18, 30) // deep wet drain throat
             };
-            blend_clip(pb, clip, cx + dx, cy + dy, c, 0.62);
+            blend_clip(pb, clip, cx + dx, cy + dy, c, 0.72);
         }
     }
 }
@@ -688,31 +685,39 @@ fn sx1_of(x1: i32, k: i32) -> i32 {
     x1 - (k + 1) * TILE
 }
 
-/// One 4x4-cell block of the Laundry arena: a stack of folded towels, a
-/// clothespin's shadow and a wet pink wash streak.
+/// One 4x4-cell block of the Laundry arena: folded towel ridges, mangle roller
+/// track scuffs and faint pink ruined-wash streaks (all under contrast cap).
 fn boss_laundry_block(pb: &mut PixelBuffer, clip: ClipRect, sx: i32, sy: i32, bx: i32, by: i32) {
     let h = hash2(bx + 41, by + 17);
-    // Every tone here stays under the floor layer's 110-channel contrast cap:
-    // entities and telegraphs are drawn over this.
-    let towel: Rgb = (136, 144, 140);
-    let towel_lo: Rgb = (104, 112, 110);
-    let wash_pink: Rgb = (140, 84, 104);
-    // A folded towel: three pale bands with a shadowed fold line.
-    let (ox, oy) = (sx + 6 + (h & 7) as i32, sy + 8 + ((h >> 4) & 7) as i32);
-    rect_blend_clip(pb, clip, ox, oy, 14, 3, towel, 0.24);
-    rect_blend_clip(pb, clip, ox + 1, oy + 3, 12, 2, towel_lo, 0.20);
-    rect_blend_clip(pb, clip, ox, oy + 5, 13, 2, towel, 0.18);
-    // The pink wash streak every third block.
-    if (h >> 9) & 3 == 0 {
-        for k in 0..10 {
-            blend_clip(pb, clip, ox + 2 + k, oy + 9 + k / 4, wash_pink, 0.18);
+    let towel: Rgb = (102, 114, 116);
+    let towel_lo: Rgb = (72, 84, 92);
+    let wash_pink: Rgb = (118, 68, 90);
+    let track: Rgb = (18, 22, 36);
+
+    let (ox, oy) = (sx + 8 + (h & 11) as i32, sy + 10 + ((h >> 4) & 11) as i32);
+    // Faint mangle-wheel track marks running vertically down the arena bay.
+    rect_blend_clip(pb, clip, sx + 12, sy + 4, 2, 56, track, 0.28);
+    rect_blend_clip(pb, clip, sx + 50, sy + 4, 2, 56, track, 0.28);
+
+    // Subtle folded damp cloth mat impression on alternating blocks.
+    if (h & 1) == 0 {
+        rect_blend_clip(pb, clip, ox, oy, 14, 3, towel, 0.26);
+        rect_blend_clip(pb, clip, ox + 1, oy + 3, 12, 2, towel_lo, 0.24);
+        rect_blend_clip(pb, clip, ox, oy + 5, 13, 2, towel, 0.20);
+    }
+    // Ruined-pink wash streak every third block.
+    if (h >> 9).is_multiple_of(3) {
+        for k in 0..12 {
+            blend_clip(pb, clip, ox + 1 + k, oy + 9 + (k / 4), wash_pink, 0.22);
+            blend_clip(pb, clip, ox + 2 + k, oy + 10 + (k / 4), wash_pink, 0.14);
         }
     }
 }
 
-/// The Printworks' arena floor: a newsprint page under the press bed — a pale
-/// sheet inset from the arena wall, ruled with dried-ink text lines and
-/// registration crosses in cyan at all four corner marks.
+/// The Printworks' arena floor: a monumental broadsheet newsprint page laid
+/// across the press bed — charcoal press-hall margin, bold dried-ink masthead
+/// with an inlaid floor clock dial, three ruled newsprint columns, and crisp
+/// cyan registration crosshairs at corners and midpoints (strictly under cap).
 #[allow(clippy::too_many_arguments)]
 fn boss_printworks_floor(
     pb: &mut PixelBuffer,
@@ -724,86 +729,123 @@ fn boss_printworks_floor(
     cam_x: i32,
     cam_y: i32,
 ) {
-    let sheet: Rgb = (176, 174, 160);
-    let ink: Rgb = (85, 64, 100);
-    let cyan: Rgb = (78, 148, 152);
-    // The press-hall floor under the sheet: a dim charcoal deck, so the arena
-    // never shows the brighter newsprint sheets of the floor layer through it.
+    let sheet: Rgb = (138, 136, 124);
+    let ink: Rgb = (74, 54, 90);
+    let ink_dark: Rgb = (46, 34, 58);
+    let cyan: Rgb = (68, 132, 136);
+    let brass: Rgb = (108, 90, 52);
+
+    // Dim charcoal press-bed deck underneath the broadsheet.
     for sy in clip.y0..clip.y1 {
         for sx in clip.x0..clip.x1 {
             let wx = sx + cam_x - ax0;
             let wy = sy + cam_y - ay0;
             let h = hash2(wx.div_euclid(20) + 3, wy.div_euclid(20) + 9);
-            let deck = if h & 1 == 0 { (28, 29, 36) } else { (25, 26, 33) };
-            blend_clip(pb, clip, sx, sy, deck, 0.90);
+            let deck = if h & 1 == 0 { (26, 27, 34) } else { (23, 24, 30) };
+            blend_clip(pb, clip, sx, sy, deck, 0.92);
         }
     }
-    // The page itself, with a charcoal margin all round.
+
+    // The broadsheet page itself, inset from the arena perimeter.
     let margin = 3 * TILE;
     let sx = ax0 + margin - cam_x;
     let sy = ay0 + margin - cam_y;
-    let sw = (ax1 - ax0) - 2 * margin;
-    let sh = (ay1 - ay0) - 2 * margin;
-    rect_blend_clip(pb, clip, sx, sy, sw, sh, sheet, 0.055);
-    rect_blend_clip(pb, clip, sx, sy, sw, 1, ink, 0.20);
-    rect_blend_clip(pb, clip, sx, sy + sh - 1, sw, 1, ink, 0.20);
-    // Masthead band and ruled text columns.
-    rect_blend_clip(pb, clip, sx + 8, sy + 8, sw - 16, 3, ink, 0.30);
-    for row in 0..((sh - 30) / 9).max(0) {
-        let y = sy + 16 + row * 9;
-        let short = (row * 7) % 13;
-        if (row + 1) % 4 == 0 {
-            rect_blend_clip(pb, clip, sx + 8, y, sw - 16, 1, ink, 0.12);
-        } else {
-            rect_blend_clip(pb, clip, sx + 8, y, sw - 16 - short * 3, 1, ink, 0.20);
-            rect_blend_clip(pb, clip, sx + 8, y + 2, sw - 26 - short * 2, 1, ink, 0.13);
+    let sw = ((ax1 - ax0) - 2 * margin).max(0);
+    let sh = ((ay1 - ay0) - 2 * margin).max(0);
+    rect_blend_clip(pb, clip, sx, sy, sw, sh, sheet, 0.10);
+    rect_blend_clip(pb, clip, sx, sy, sw, 1, ink, 0.34);
+    rect_blend_clip(pb, clip, sx, sy + sh - 1, sw, 1, ink, 0.34);
+    rect_blend_clip(pb, clip, sx, sy, 1, sh, ink, 0.24);
+    rect_blend_clip(pb, clip, sx + sw - 1, sy, 1, sh, ink, 0.24);
+
+    // Bold masthead header + twin decorative newspaper rules.
+    rect_blend_clip(pb, clip, sx + 10, sy + 7, (sw - 20).max(0), 4, ink_dark, 0.42);
+    rect_blend_clip(pb, clip, sx + 10, sy + 13, (sw - 20).max(0), 1, ink, 0.28);
+
+    // Three-column ruled broadsheet text layout separated by subtle column gutters.
+    let inner_w = (sw - 24).max(0);
+    let col_w = (inner_w - 12) / 3;
+    if col_w > 8 {
+        for c in 0..3 {
+            let cx = sx + 12 + c * (col_w + 6);
+            if c > 0 {
+                rect_blend_clip(pb, clip, cx - 3, sy + 18, 1, (sh - 28).max(0), ink, 0.22);
+            }
+            for row in 0..((sh - 34) / 8).max(0) {
+                let y = sy + 20 + row * 8;
+                let short = ((row * 7 + c * 5) % 9) * 2;
+                rect_blend_clip(pb, clip, cx, y, (col_w - short).max(4), 1, ink, 0.24);
+                rect_blend_clip(pb, clip, cx, y + 2, (col_w - short - 4).max(3), 1, ink, 0.16);
+            }
         }
     }
-    // Registration crosses at the four corner marks.
+
+    // Subtle flush inlaid Press Clock dial medallion centred on the arena floor.
+    let (mcx, mcy) = (sx + sw / 2, sy + sh / 2);
+    let cr = 18i32;
+    for dy in -cr..=cr {
+        for dx in -cr..=cr {
+            let d = ((dx * dx + dy * dy) as f32).sqrt();
+            if d > cr as f32 + 0.5 {
+                continue;
+            }
+            if (d - cr as f32).abs() <= 1.2 {
+                blend_clip(pb, clip, mcx + dx, mcy + dy, brass, 0.36);
+            } else if (d - (cr as f32 - 3.0)).abs() <= 0.7 && (dx.abs() <= 1 || dy.abs() <= 1) {
+                blend_clip(pb, clip, mcx + dx, mcy + dy, brass, 0.34);
+            }
+        }
+    }
+    // Clock hands pointing just before midnight (The Night Edition).
+    for k in 0..10 {
+        blend_clip(pb, clip, mcx - k / 2, mcy - k, ink, 0.42);
+    }
+    for k in 0..13 {
+        blend_clip(pb, clip, mcx + k / 4, mcy - k, cyan, 0.34);
+    }
+
+    // Registration cyan crosshairs at the four corners and four edge midpoints.
     for (cx, cy) in [
         (sx + 5, sy + 5),
         (sx + sw - 6, sy + 5),
         (sx + 5, sy + sh - 6),
         (sx + sw - 6, sy + sh - 6),
+        (sx + sw / 2, sy + 3),
+        (sx + sw / 2, sy + sh - 4),
     ] {
-        // Two passes overlap at the cross centre, so each one is kept dim: the
-        // floor layer's contrast cap applies to the doubled pixel too.
-        rect_blend_clip(pb, clip, cx - 3, cy, 7, 1, cyan, 0.26);
-        rect_blend_clip(pb, clip, cx, cy - 3, 1, 7, cyan, 0.26);
+        rect_blend_clip(pb, clip, cx - 3, cy, 7, 1, cyan, 0.30);
+        rect_blend_clip(pb, clip, cx, cy - 3, 1, 7, cyan, 0.30);
     }
 }
 
-/// One 4x4-cell block of the Printworks arena: a slab of set type (a reversed
-/// capital standing proud) and a wet ink drag.
+/// One 4x4-cell block of the Printworks arena: a flush recessed cast-lead
+/// reversed capital sort (`Ǝ`, `Я`, `И`, `ꟼ`) and a faint dried-ink roller drag.
 fn boss_printworks_block(pb: &mut PixelBuffer, clip: ClipRect, sx: i32, sy: i32, bx: i32, by: i32) {
+    const MINI_REVERSED: [[u8; 5]; 4] = [
+        [0b11111, 0b00001, 0b01111, 0b00001, 0b11111], // Ǝ
+        [0b01111, 0b10001, 0b01111, 0b00101, 0b01001], // Я
+        [0b10001, 0b10011, 0b10101, 0b11001, 0b10001], // И
+        [0b01111, 0b10001, 0b01111, 0b00001, 0b00001], // ꟼ
+    ];
     let h = hash2(bx + 23, by + 71);
-    let lead: Rgb = (96, 98, 106);
-    let lead_hi: Rgb = (132, 134, 142);
-    let ink: Rgb = (85, 64, 100);
-    // A type block lying on the page.
-    let (ox, oy) = (sx + 8 + (h & 15) as i32, sy + 10 + ((h >> 5) & 15) as i32);
-    rect_blend_clip(pb, clip, ox, oy, 16, 10, lead, 0.18);
-    rect_blend_clip(pb, clip, ox, oy, 16, 1, lead_hi, 0.22);
-    rect_blend_clip(pb, clip, ox, oy + 9, 16, 1, ink, 0.22);
-    // The reversed letter: E or L, mirrored, in raised lead.
-    let bar = 3;
-    for ly in 0..6 {
-        for lx in 0..8 {
-            let mlx = 7 - lx;
-            let on = if (h >> 9) & 1 == 0 {
-                ly == 0 || ly == 5 || ly == 2 || mlx < bar
-            } else {
-                mlx < bar || ly == 5
-            };
-            if on {
-                blend_clip(pb, clip, ox + 4 + lx, oy + 2 + ly, lead_hi, 0.20);
+    let lead: Rgb = (84, 86, 94);
+    let lead_hi: Rgb = (108, 110, 116);
+    let ink: Rgb = (74, 54, 90);
+    let (ox, oy) = (sx + 10 + (h & 15) as i32, sy + 12 + ((h >> 5) & 15) as i32);
+    rect_blend_clip(pb, clip, ox, oy, 14, 11, lead, 0.16);
+    rect_blend_clip(pb, clip, ox, oy, 14, 1, lead_hi, 0.22);
+    rect_blend_clip(pb, clip, ox, oy + 10, 14, 1, ink, 0.24);
+    let glyph = MINI_REVERSED[((h >> 9) & 3) as usize];
+    for (gy, &bits) in glyph.iter().enumerate() {
+        for gx in 0..5 {
+            if ((bits >> (4 - gx)) & 1) != 0 {
+                blend_clip(pb, clip, ox + 4 + gx, oy + 3 + gy as i32, lead_hi, 0.24);
             }
         }
     }
-    // Wet ink dragged off the block.
     if (h >> 13) & 3 == 0 {
         for k in 0..12 {
-            blend_clip(pb, clip, ox + 18 + k, oy + 12 + k / 5, ink, 0.18);
+            blend_clip(pb, clip, ox + 16 + k, oy + 12 + k / 5, ink, 0.20);
         }
     }
 }
@@ -1326,9 +1368,8 @@ pub fn draw_hall_landmark(
         Theme::Sewer => landmark_sewer(pb, clip, cx, cy, variant % HALL_LANDMARK_VARIANTS),
         Theme::Kitchen => landmark_kitchen(pb, clip, cx, cy, variant % HALL_LANDMARK_VARIANTS),
         Theme::Lab => landmark_lab(pb, clip, cx, cy, variant),
-        // A brass drain at each junction is exactly the Laundry's landmark.
-        Theme::Laundry => landmark_sewer(pb, clip, cx, cy, variant % HALL_LANDMARK_VARIANTS),
-        Theme::Printworks => landmark_lab(pb, clip, cx, cy, variant),
+        Theme::Laundry => landmark_laundry(pb, clip, cx, cy, variant % HALL_LANDMARK_VARIANTS),
+        Theme::Printworks => landmark_printworks(pb, clip, cx, cy, variant % HALL_LANDMARK_VARIANTS),
         // The bed's own art (straps, bolt heads, scuffed plank ends) is the
         // landmark; a painted floor decal would read as tiling on a truck.
         Theme::Trailer => {}
@@ -2118,6 +2159,257 @@ fn landmark_lab(pb: &mut PixelBuffer, clip: ClipRect, cx: i32, cy: i32, variant:
     draw_stencil_digit(pb, clip, cx - 5, cy - 3, ones, pad_dark, 0.35, variant as i32 + 7);
     draw_stencil_digit(pb, clip, cx - 13, cy - 4, tens, stencil_ink, 0.68, variant as i32);
     draw_stencil_digit(pb, clip, cx - 6, cy - 4, ones, stencil_ink, 0.68, variant as i32 + 7);
+}
+
+// ---- Laundry Hall Landmarks: Brass Junction Drains & Folding-Bay Mats ------
+
+fn landmark_laundry(pb: &mut PixelBuffer, clip: ClipRect, cx: i32, cy: i32, variant: u8) {
+    let throat: Rgb = (12, 16, 28);
+    let brass_lo: Rgb = (96, 76, 38);
+    let brass_mid: Rgb = (146, 118, 60);
+    let brass_hi: Rgb = (188, 156, 86);
+    let porc: Rgb = (138, 158, 158);
+    let denim: Rgb = (56, 84, 102);
+    let denim_dk: Rgb = (30, 42, 60);
+    let pink: Rgb = (164, 96, 126);
+    let copper_sh: Rgb = (44, 34, 28);
+    let copper_mid: Rgb = (102, 74, 48);
+    let copper_hi: Rgb = (146, 110, 70);
+    let c = Vec2::new(cx as f32, cy as f32);
+
+    match variant {
+        0 => {
+            // Variant 0: Recessed octagonal brass junction floor drain + soapy halo.
+            for dy in -12i32..=12 {
+                for dx in -12i32..=12 {
+                    let ad = dx.abs() + dy.abs();
+                    let md = dx.abs().max(dy.abs());
+                    if md > 11 || ad > 16 {
+                        continue;
+                    }
+                    let col = if md >= 10 || ad >= 15 {
+                        if dx + dy < 0 { brass_hi } else { brass_lo }
+                    } else if md == 9
+                        || ad == 14
+                        || md <= 2
+                        || dx == 0
+                        || dy == 0
+                        || (dx.abs() == dy.abs() && md <= 7)
+                    {
+                        brass_mid
+                    } else {
+                        throat
+                    };
+                    blend_clip(pb, clip, cx + dx, cy + dy, col, 0.86);
+                }
+            }
+            // Subtle soapy condensation rim around the brass drain.
+            rect_blend_clip(pb, clip, cx - 15, cy - 13, 30, 1, porc, 0.26);
+            rect_blend_clip(pb, clip, cx - 15, cy + 13, 30, 1, denim, 0.24);
+        }
+        1 => {
+            // Variant 1: Twin slotted brass floor trench drains + porcelain mosaic frame.
+            rect_blend_clip(pb, clip, cx - 18, cy - 11, 36, 22, denim_dk, 0.56);
+            rect_blend_clip(pb, clip, cx - 18, cy - 11, 36, 1, porc, 0.42);
+            rect_blend_clip(pb, clip, cx - 18, cy + 10, 36, 1, porc, 0.30);
+            for &ox in &[-14, 3] {
+                rect_blend_clip(pb, clip, cx + ox, cy - 7, 12, 14, brass_lo, 0.88);
+                rect_blend_clip(pb, clip, cx + ox, cy - 7, 12, 1, brass_hi, 0.88);
+                rect_blend_clip(pb, clip, cx + ox + 1, cy - 5, 10, 10, throat, 0.90);
+                for k in 0..4 {
+                    rect_blend_clip(pb, clip, cx + ox + 2 + k * 2, cy - 5, 1, 10, brass_mid, 0.86);
+                }
+            }
+        }
+        2 => {
+            // Variant 2: Folding-bay ribbed faded-denim rubber mat + fallen pink towel corner.
+            rect_blend_clip(pb, clip, cx - 18, cy - 10, 26, 20, denim_dk, 0.82);
+            rect_blend_clip(pb, clip, cx - 18, cy - 10, 26, 1, porc, 0.66);
+            rect_blend_clip(pb, clip, cx - 18, cy - 10, 1, 20, porc, 0.56);
+            for ry in (cy - 7..=cy + 7).step_by(3) {
+                rect_blend_clip(pb, clip, cx - 15, ry, 20, 1, denim, 0.72);
+            }
+            // Folded pink-wash cloth edge on the right of the mat.
+            rect_blend_clip(pb, clip, cx + 10, cy - 5, 8, 10, pink, 0.58);
+            rect_blend_clip(pb, clip, cx + 10, cy - 5, 8, 2, porc, 0.52);
+            rect_blend_clip(pb, clip, cx + 10, cy + 1, 8, 1, denim_dk, 0.48);
+        }
+        3 => {
+            // Variant 3: Round spoked brass sump drain + recessed copper hot/cold pipe bend.
+            let p0 = c + Vec2::new(-14.0, -7.0);
+            let p1 = c + Vec2::new(6.0, -7.0);
+            let p2 = c + Vec2::new(13.0, 5.0);
+            draw_recessed_pipe_seg(pb, clip, p0, p1, 2.8, copper_sh, copper_mid, copper_hi);
+            draw_recessed_pipe_seg(pb, clip, p1, p2, 2.8, copper_sh, copper_mid, copper_hi);
+            draw_flush_round_grate(pb, clip, cx - 7, cy + 4, 8, brass_mid, brass_hi, brass_lo);
+        }
+        4 => {
+            // Variant 4: Brass floor cleanout plate + soapy pink-tinted wash puddle.
+            for dy in -7i32..=7 {
+                for dx in -10i32..=10 {
+                    let e = (dx as f32 / 10.0).powi(2) + (dy as f32 / 7.0).powi(2);
+                    if e < 1.0 {
+                        let col = if e > 0.78 { porc } else { pink };
+                        blend_clip(pb, clip, cx - 7 + dx, cy + 2 + dy, col, 0.36 * (1.0 - e * 0.4));
+                    }
+                }
+            }
+            rect_blend_clip(pb, clip, cx + 4, cy - 7, 13, 13, brass_lo, 0.88);
+            rect_blend_clip(pb, clip, cx + 5, cy - 6, 11, 11, brass_mid, 0.82);
+            rect_blend_clip(pb, clip, cx + 5, cy - 6, 11, 1, brass_hi, 0.88);
+            // Cross valve slot on the cleanout cap.
+            rect_blend_clip(pb, clip, cx + 10, cy - 4, 1, 7, throat, 0.84);
+            rect_blend_clip(pb, clip, cx + 7, cy - 1, 7, 1, throat, 0.84);
+        }
+        _ => {
+            // Variant 5: Porcelain-and-indigo diamond mosaic surrounding a central brass drain.
+            for dy in -12i32..=12 {
+                for dx in -16i32..=16 {
+                    let d = dx.abs() * 3 + dy.abs() * 4;
+                    if d > 48 {
+                        continue;
+                    }
+                    let c = if d > 42 {
+                        porc
+                    } else if d > 30 {
+                        if ((dx + dy) & 2) == 0 { denim } else { denim_dk }
+                    } else {
+                        continue;
+                    };
+                    blend_clip(pb, clip, cx + dx, cy + dy, c, 0.56);
+                }
+            }
+            draw_flush_round_grate(pb, clip, cx, cy, 7, brass_mid, brass_hi, brass_lo);
+        }
+    }
+}
+
+// ---- Printworks Hall Landmarks: Press Clocks, Broadsheets & Registration ---
+
+fn landmark_printworks(pb: &mut PixelBuffer, clip: ClipRect, cx: i32, cy: i32, variant: u8) {
+    let plate_dk: Rgb = (16, 17, 23);
+    let iron: Rgb = (52, 54, 64);
+    let iron_hi: Rgb = (96, 98, 110);
+    let paper: Rgb = (128, 126, 114);
+    let paper_hi: Rgb = (156, 154, 140);
+    let ink: Rgb = (78, 58, 96);
+    let ink_dk: Rgb = (42, 30, 54);
+    let cyan: Rgb = (74, 146, 150);
+    let brass: Rgb = (146, 120, 62);
+    let brass_hi: Rgb = (186, 156, 86);
+
+    match variant {
+        0 => {
+            // Variant 0: Inlaid brass press-bed clock floor medallion + cyan crop corners.
+            for dy in -11i32..=11 {
+                for dx in -11i32..=11 {
+                    let d = ((dx * dx + dy * dy) as f32).sqrt();
+                    if d > 10.6 {
+                        continue;
+                    }
+                    let c = if d > 8.8 {
+                        if dx + dy < 0 { brass_hi } else { brass }
+                    } else if d > 7.8 {
+                        plate_dk
+                    } else {
+                        mix(plate_dk, paper, 0.28)
+                    };
+                    blend_clip(pb, clip, cx + dx, cy + dy, c, 0.80);
+                }
+            }
+            // Clock ticks + hands pointing just before midnight.
+            for &(tx, ty) in &[(0, -6), (0, 6), (-6, 0), (6, 0)] {
+                blend_clip(pb, clip, cx + tx, cy + ty, brass_hi, 0.78);
+            }
+            for k in 0..5 {
+                blend_clip(pb, clip, cx - k / 2, cy - k, paper_hi, 0.76);
+                blend_clip(pb, clip, cx + k / 3, cy - k - 1, cyan, 0.72);
+            }
+            // Four cyan registration L-crops around the dial.
+            for &(sx, sy) in &[(-1, -1), (1, -1), (-1, 1), (1, 1)] {
+                let kx = cx + sx * 15;
+                let ky = cy + sy * 11;
+                for s in 0..4 {
+                    blend_clip(pb, clip, kx - sx * s, ky, cyan, 0.62);
+                    blend_clip(pb, clip, kx, ky - sy * s, cyan, 0.62);
+                }
+            }
+        }
+        1 => {
+            // Variant 1: Dropped broadsheet proof sheet with masthead, columns & ink smudge.
+            rect_blend_clip(pb, clip, cx - 15, cy - 10, 30, 20, plate_dk, 0.45);
+            rect_blend_clip(pb, clip, cx - 14, cy - 11, 28, 20, paper, 0.56);
+            rect_blend_clip(pb, clip, cx - 14, cy - 11, 26, 1, paper_hi, 0.64);
+            rect_blend_clip(pb, clip, cx - 12, cy - 8, 24, 2, ink_dk, 0.72);
+            for row in 0..4 {
+                let y = cy - 4 + row * 3;
+                rect_blend_clip(pb, clip, cx - 12, y, 10 - (row & 1) * 2, 1, ink, 0.62);
+                rect_blend_clip(pb, clip, cx + 1, y, 10 - ((row + 1) & 1) * 2, 1, ink, 0.62);
+            }
+            rect_blend_clip(pb, clip, cx + 9, cy + 6, 3, 1, cyan, 0.72);
+            // Dried-ink thumbprint smudge on bottom-left corner.
+            rect_blend_clip(pb, clip, cx - 13, cy + 4, 5, 4, ink_dk, 0.54);
+        }
+        2 => {
+            // Variant 2: Cast-iron galley-tray floor plate with reversed lead letters (Я Ǝ).
+            rect_blend_clip(pb, clip, cx - 18, cy - 10, 36, 20, plate_dk, 0.74);
+            rect_blend_clip(pb, clip, cx - 17, cy - 9, 34, 18, iron, 0.62);
+            rect_blend_clip(pb, clip, cx - 17, cy - 9, 34, 1, iron_hi, 0.66);
+            rect_blend_clip(pb, clip, cx - 16, cy + 7, 32, 1, brass, 0.64);
+            const GLYPHS: [[u8; 5]; 2] = [
+                [0b01111, 0b10001, 0b01111, 0b00101, 0b01001], // Я
+                [0b11111, 0b00001, 0b01111, 0b00001, 0b11111], // Ǝ
+            ];
+            for (idx, glyph) in GLYPHS.iter().enumerate() {
+                let gx0 = cx - 11 + idx as i32 * 12;
+                for (ry, &bits) in glyph.iter().enumerate() {
+                    for rx in 0..5 {
+                        if ((bits >> (4 - rx)) & 1) != 0 {
+                            blend_clip(pb, clip, gx0 + rx * 2, cy - 5 + ry as i32 * 2, paper_hi, 0.64);
+                            blend_clip(pb, clip, gx0 + rx * 2 + 1, cy - 5 + ry as i32 * 2, iron_hi, 0.56);
+                        }
+                    }
+                }
+            }
+        }
+        3 => {
+            // Variant 3: CMYK-style registration calibration strip + crosshair reticle.
+            rect_blend_clip(pb, clip, cx - 18, cy - 9, 36, 18, plate_dk, 0.58);
+            for (i, col) in [cyan, ink, brass, paper_hi].iter().enumerate() {
+                let bx = cx - 15 + i as i32 * 6;
+                rect_blend_clip(pb, clip, bx, cy - 5, 4, 10, *col, 0.62);
+            }
+            // Registration crosshair target on the right.
+            let tx = cx + 12;
+            rect_blend_clip(pb, clip, tx - 4, cy, 9, 1, cyan, 0.68);
+            rect_blend_clip(pb, clip, tx, cy - 4, 1, 9, cyan, 0.68);
+            for &(dx, dy) in &[(-2, -2), (2, -2), (-2, 2), (2, 2)] {
+                blend_clip(pb, clip, tx + dx, cy + dy, paper_hi, 0.58);
+            }
+        }
+        4 => {
+            // Variant 4: Parallel press-roller ink tracks + brass pica-ruler ticks.
+            rect_blend_clip(pb, clip, cx - 18, cy - 8, 36, 3, ink_dk, 0.62);
+            rect_blend_clip(pb, clip, cx - 18, cy + 5, 36, 3, ink_dk, 0.62);
+            for tx in (cx - 16..=cx + 16).step_by(4) {
+                rect_blend_clip(pb, clip, tx, cy - 3, 1, 2, brass, 0.58);
+                rect_blend_clip(pb, clip, tx, cy + 2, 1, 2, brass, 0.58);
+            }
+            rect_blend_clip(pb, clip, cx - 16, cy, 32, 1, cyan, 0.42);
+        }
+        _ => {
+            // Variant 5: Riveted cast-iron press inspection hatch + dried-ink corner blotch.
+            rect_blend_clip(pb, clip, cx - 16, cy - 10, 32, 20, plate_dk, 0.72);
+            rect_blend_clip(pb, clip, cx - 15, cy - 9, 30, 18, iron, 0.56);
+            rect_blend_clip(pb, clip, cx - 15, cy - 9, 30, 1, iron_hi, 0.62);
+            for &(rx, ry) in &[(-13, -7), (12, -7), (-13, 6), (12, 6)] {
+                blend_clip(pb, clip, cx + rx, cy + ry, brass_hi, 0.70);
+            }
+            rect_blend_clip(pb, clip, cx - 10, cy - 4, 20, 1, cyan, 0.52);
+            rect_blend_clip(pb, clip, cx - 10, cy + 3, 20, 1, cyan, 0.52);
+            rect_blend_clip(pb, clip, cx + 4, cy - 2, 8, 4, ink, 0.58);
+        }
+    }
 }
 
 // ============================================================================

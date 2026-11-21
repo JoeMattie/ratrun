@@ -1403,14 +1403,61 @@ impl LightMap {
                         false,
                     ))
                 }
+                // Laundry washers: soft aqua-porcelain drum-door glow tumbling
+                // out of the twin glass portholes onto the wet tile floor.
+                // `occlude: false` so the prop's own solid tiles never carve a
+                // hard grid cutout across the washer face.
+                PropKind::Washer => {
+                    let tumble = 0.88 + 0.12 * (elapsed * 2.6 + (h & 31) as f32).sin();
+                    Some((
+                        46.0,
+                        (154, 224, 232),
+                        (134.0 * tumble) as u16,
+                        (34.0 * tumble) as u16,
+                        false,
+                    ))
+                }
+                // Printworks press islands: warm illuminated Press Clock pool
+                // over the press bed (twin cyan registration lamp added below).
+                // `occlude: false` so the press's own solid tiles never slice
+                // through the clock's warm halo.
+                PropKind::PressIsland => {
+                    let pulse = 0.94 + 0.06 * (elapsed * 1.6 + (h & 31) as f32).sin();
+                    Some((
+                        50.0,
+                        (252, 224, 162),
+                        (142.0 * pulse) as u16,
+                        (36.0 * pulse) as u16,
+                        false,
+                    ))
+                }
+                // Printworks display type blocks: cool cyan registration-table lamp
+                // on alternating blocks so press halls have crisp pools of light.
+                PropKind::TypeBlock if (h & 1) == 0 => {
+                    let pulse = 0.92 + 0.08 * (elapsed * 2.1 + (h & 31) as f32).sin();
+                    Some((
+                        36.0,
+                        (88, 204, 212),
+                        (112.0 * pulse) as u16,
+                        (28.0 * pulse) as u16,
+                        false,
+                    ))
+                }
                 _ => None,
             };
 
             if let Some((radius, color, intensity, scatter, occlude)) = spec {
-                if in_range(sx, sy, radius) {
+                let (lx, ly) = match prop.kind {
+                    // Spill washer light slightly forward from the front porthole doors.
+                    PropKind::Washer => (sx, sy + 6.0),
+                    // Center press-clock light over the upper press-bed dial.
+                    PropKind::PressIsland => (sx - 2.0, sy - 6.0),
+                    _ => (sx, sy),
+                };
+                if in_range(lx, ly, radius) {
                     self.lights.push(PointLight {
-                        x: sx,
-                        y: sy,
+                        x: lx,
+                        y: ly,
                         radius,
                         color,
                         intensity,
@@ -1420,6 +1467,110 @@ impl LightMap {
                         hard: hard_pools,
                     });
                 }
+            }
+
+            // Secondary registration-cyan lamp on the front-right control rail
+            // of every Printworks PressIsland.
+            if prop.kind == PropKind::PressIsland {
+                let rx = prop.rect.x + prop.rect.w - 9.0 - cam.x;
+                let ry = prop.rect.y + prop.rect.h - 6.0 - cam.y;
+                let r = 34.0;
+                if in_range(rx, ry, r) {
+                    let blink = 0.84 + 0.16 * (elapsed * 3.4 + (h & 15) as f32).sin();
+                    self.lights.push(PointLight {
+                        x: rx,
+                        y: ry,
+                        radius: r,
+                        color: (84, 218, 224),
+                        intensity: (132.0 * blink) as u16,
+                        scatter: (34.0 * blink) as u16,
+                        priority: 1,
+                        occlude: false,
+                        hard: true,
+                    });
+                }
+            }
+        }
+
+        // Laundry steam grates: boiler under-vent glow while resting, pale
+        // steam catching light as the three warning puffs rise, and a bright
+        // luminous column glow during the active scalding plume.
+        for grate in &scene.level.objects.steam_grates {
+            let sx = grate.pos.x - cam.x;
+            let sy = grate.pos.y - cam.y;
+            if grate.plume() {
+                let r = 48.0;
+                let ly = sy - 10.0;
+                if in_range(sx, ly, r) {
+                    let flicker = 0.88 + 0.12 * (elapsed * 14.0 + grate.pos.x * 0.1).sin();
+                    self.lights.push(PointLight {
+                        x: sx,
+                        y: ly,
+                        radius: r,
+                        color: (226, 246, 255),
+                        intensity: (215.0 * flicker) as u16,
+                        scatter: (62.0 * flicker) as u16,
+                        priority: 2,
+                        occlude: false,
+                        hard: false,
+                    });
+                }
+            } else if grate.warning() {
+                let t = grate.phase.progress(grate.timer);
+                let r = 28.0 + 12.0 * t;
+                let ly = sy - 4.0 - 6.0 * t;
+                if in_range(sx, ly, r) {
+                    let pulse = 0.78 + 0.22 * (t * std::f32::consts::TAU * 3.0).sin();
+                    self.lights.push(PointLight {
+                        x: sx,
+                        y: ly,
+                        radius: r,
+                        color: (238, 230, 206),
+                        intensity: ((136.0 + 48.0 * t) * pulse) as u16,
+                        scatter: ((32.0 + 18.0 * t) * pulse) as u16,
+                        priority: 2,
+                        occlude: false,
+                        hard: false,
+                    });
+                }
+            } else {
+                let r = 20.0;
+                if in_range(sx, sy, r) {
+                    let breath = 0.85 + 0.15 * (elapsed * 1.8 + grate.pos.x * 0.09).sin();
+                    self.lights.push(PointLight {
+                        x: sx,
+                        y: sy,
+                        radius: r,
+                        color: (186, 152, 98),
+                        intensity: (82.0 * breath) as u16,
+                        scatter: (18.0 * breath) as u16,
+                        priority: 0,
+                        occlude: false,
+                        hard: false,
+                    });
+                }
+            }
+        }
+
+        // Printworks ink pads: subtle wet registration-cyan & plum catchlight
+        // so sticky ink pools glint visibly before the rat steps in them.
+        for pad in &scene.level.objects.ink_pads {
+            let sx = pad.pos.x - cam.x;
+            let sy = pad.pos.y - cam.y;
+            let r = (pad.half.x.max(pad.half.y) + 16.0).clamp(22.0, 36.0);
+            if in_range(sx, sy, r) {
+                let sheen = 0.86 + 0.14 * (elapsed * 1.4 + (pad.seed & 31) as f32).sin();
+                self.lights.push(PointLight {
+                    x: sx,
+                    y: sy,
+                    radius: r,
+                    color: (116, 146, 178),
+                    intensity: (96.0 * sheen) as u16,
+                    scatter: (22.0 * sheen) as u16,
+                    priority: 0,
+                    occlude: false,
+                    hard: false,
+                });
             }
         }
 
