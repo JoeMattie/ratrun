@@ -37,7 +37,7 @@
 //!
 //! | Object         | Footprint (`u × v`, world px) | Blocks Movement? |
 //! |----------------|-------------------------------|------------------|
-//! | Sticky Trap    | `18.0 × 14.0` (pad `14 × 10`) | No (walkable floor hazard; Bats fly over) |
+//! | Sticky Trap    | `36.0 × 28.0` (pad `30 × 22`) | No (walkable floor hazard; Bats fly over) |
 //! | Mousetrap      | `18.0 × 11.0`                 | No (walkable floor hazard; Bats fly over) |
 //! | One-Way Door   | `10.0 × 24.0` (gap `18.0`)    | Jambs always solid; passage open to player from `-facing`, solid from `+facing` and solid to enemies |
 //! | Rat-Hole       | `14.0 × 22.0` (gap `8.0`)     | Cheeks always solid; gap passable if `radius <= 3.2`, solid if `radius > 3.2` |
@@ -65,9 +65,9 @@ const LIGHT: Vec2 = Vec2 { x: -0.55, y: -0.83 };
 // ============================================================================
 
 /// Full outer cardboard tray footprint of a sticky trap (`u` length × `v` width).
-pub const STICKY_TRAP_SIZE: Vec2 = Vec2 { x: 18.0, y: 14.0 };
-/// Active adhesive inner pad half-extents (`|u| <= 7.0`, `|v| <= 5.0`).
-pub const STICKY_TRAP_PAD_HALF: Vec2 = Vec2 { x: 7.0, y: 5.0 };
+pub const STICKY_TRAP_SIZE: Vec2 = Vec2 { x: 36.0, y: 28.0 };
+/// Active adhesive inner pad half-extents (`|u| <= 15.0`, `|v| <= 11.0`).
+pub const STICKY_TRAP_PAD_HALF: Vec2 = Vec2 { x: 15.0, y: 11.0 };
 /// Sticky traps never block movement; they apply a heavy slow/root on entry.
 pub const STICKY_TRAP_BLOCKS_MOVEMENT: bool = false;
 /// Movement speed multiplier applied while trapped in `StickyTrapState::Stuck`.
@@ -184,7 +184,7 @@ pub enum StickyTrapState {
     /// - **Warning**: High-contrast ivory cardboard tray rim with ochre corner
     ///   markings and a continuously drifting diagonal specular sheen (`anim`)
     ///   across the amber adhesive pool.
-    /// - **Active area**: Oriented rectangle `|u| <= 7.0`, `|v| <= 5.0` relative
+    /// - **Active area**: Oriented rectangle `|u| <= 15.0`, `|v| <= 11.0` relative
     ///   to `pos` and `facing` (`STICKY_TRAP_PAD_HALF`). Does NOT block movement.
     /// - **Damage**: `0`.
     /// - **Counter**: Walk around it, or **Dash** directly across it (an active
@@ -227,7 +227,7 @@ pub enum StickyTrapState {
 pub struct StickyTrapView {
     /// World-space center of the glue board.
     pub pos: Vec2,
-    /// Unit direction along the board's long (`18px`) axis.
+    /// Unit direction along the board's long (`36px`) axis.
     pub facing: Vec2,
     /// Current trap state.
     pub state: StickyTrapState,
@@ -941,9 +941,11 @@ fn draw_metal_bar(
 
 /// **Ground layer** for a sticky trap (draw after floor/stains, BEFORE entities).
 ///
-/// Renders the grounded drop shadow, folded cardboard tray with pest-warning
-/// corner ticks, the amber adhesive pool (glossy drifting sheen in `Idle`,
-/// disturbed ripples & base tracks in `Stuck`, matte dusty torn glue in `Used`).
+/// Renders the grounded drop shadow, folded `36 × 28` cardboard tray with
+/// pest-warning corner brackets, fold score notches, and curled corner, the
+/// `30 × 22` amber adhesive pool (glossy drifting sheen + trapped debris in
+/// `Idle`, disturbed ripples, base glue bridges & a caught struggling bug in
+/// `Stuck`, matte dusty torn glue & peeled dog-ear flap in `Used`).
 pub fn draw_sticky_trap_ground(
     pb: &mut PixelBuffer,
     view: &StickyTrapView,
@@ -951,14 +953,14 @@ pub fn draw_sticky_trap_ground(
     _accent: Rgb,
 ) {
     let fr = Frame::new(view.pos, view.facing, cam);
-    let Some((x0, x1, y0, y1)) = fr.bbox_pb(pb, 16.0) else {
+    let Some((x0, x1, y0, y1)) = fr.bbox_pb(pb, 28.0) else {
         return;
     };
 
-    let hx = STICKY_TRAP_SIZE.x * 0.5; // 9.0
-    let hy = STICKY_TRAP_SIZE.y * 0.5; // 7.0
-    let px = STICKY_TRAP_PAD_HALF.x; // 7.0
-    let py = STICKY_TRAP_PAD_HALF.y; // 5.0
+    let hx = STICKY_TRAP_SIZE.x * 0.5; // 18.0
+    let hy = STICKY_TRAP_SIZE.y * 0.5; // 14.0
+    let px = STICKY_TRAP_PAD_HALF.x; // 15.0
+    let py = STICKY_TRAP_PAD_HALF.y; // 11.0
     let prog = clamp01(view.progress);
 
     let (tray_base, tray_hi, tray_lo, outline) = match view.state {
@@ -967,66 +969,87 @@ pub fn draw_sticky_trap_ground(
     };
 
     let (glue_dark, glue_mid, glue_hi) = match view.state {
-        StickyTrapState::Idle => ((124, 90, 38), (186, 146, 66), (254, 246, 206)),
-        StickyTrapState::Stuck => ((92, 60, 22), (154, 114, 44), (242, 224, 168)),
+        StickyTrapState::Idle => ((120, 86, 34), (188, 148, 64), (254, 246, 206)),
+        StickyTrapState::Stuck => ((92, 60, 22), (156, 116, 44), (244, 226, 168)),
         StickyTrapState::Used => ((64, 56, 46), (92, 82, 68), (124, 114, 98)),
     };
 
     // Victim pull direction in local coordinates (used to furrow the glue in Stuck).
     let pull_world = view.victim_pos - view.pos;
-    let pull_u = pull_world.dot(fr.f);
-    let pull_v = pull_world.dot(fr.p);
+    let pull_u = pull_world.dot(fr.f).clamp(-px * 0.75, px * 0.75);
+    let pull_v = pull_world.dot(fr.p).clamp(-py * 0.75, py * 0.75);
 
     // Slow drifting diagonal gloss band across the fresh adhesive.
-    let sheen_phase = (view.anim * 1.35).sin() * 4.8;
+    let sheen_phase = (view.anim * 1.35).sin() * 9.5;
     let seed = hash2(view.pos.x.round() as i32, view.pos.y.round() as i32);
+    let swirl_phase = (seed & 15) as f32 * 0.4;
+
+    // Corner curl geometry: crisp tactile dog-ear on Idle/Stuck (strictly on the
+    // outer cardboard lip, never cutting into the active `px × py` glue pad), and
+    // a dramatic torn/peeled flap when Used.
+    let curl_cut = if view.state == StickyTrapState::Used {
+        hx + hy - 8.2
+    } else {
+        hx + hy - 3.3
+    };
+    let flap_cut = if view.state == StickyTrapState::Used {
+        hx + hy - 12.8
+    } else {
+        hx + hy - 5.4
+    };
 
     for y in y0..=y1 {
         for x in x0..=x1 {
             let (u, v) = fr.local(x, y);
 
-            // Visibly peeled/bent corner flap when Used!
-            let peeled_corner = view.state == StickyTrapState::Used && u + v > (hx + hy - 4.4);
+            // Peeled / curled-up corner at (+u, +v).
+            let peeled_corner = u + v > curl_cut && u > 0.0 && v > 0.0;
             if peeled_corner {
-                // Dark floor shadow under the curled-up cardboard dog-ear.
-                if sd_box(u, v, hx, hy) <= 0.3 {
-                    darken_px(pb, x, y, 0.45);
+                // Dark floor shadow cast beneath the lifted cardboard dog-ear.
+                if sd_box(u, v, hx, hy) <= 0.4 {
+                    darken_px(pb, x, y, 0.46);
                 }
                 continue;
             }
 
             let d_outer = sd_box(u, v, hx, hy);
-            if d_outer > 2.2 {
+            if d_outer > 2.6 {
                 continue;
             }
 
             // Soft contact shadow cast down-right.
             if d_outer > 0.75 {
-                let (su, sv) = fr.local_f(x as f32 - 1.3, y as f32 - 1.3);
+                let (su, sv) = fr.local_f(x as f32 - 1.6, y as f32 - 1.6);
                 let ds = sd_box(su, sv, hx, hy);
-                if ds <= 0.35 {
+                if ds <= 0.4 && !(su + sv > curl_cut && su > 0.0 && sv > 0.0) {
                     darken_px(pb, x, y, 0.42);
                 }
                 continue;
             }
 
             // Crisp dark outer silhouette rim.
-            if d_outer > -0.25 {
-                blend_px(pb, x, y, outline, 0.90);
+            if d_outer > -0.45 {
+                blend_px(pb, x, y, outline, 0.92);
                 continue;
             }
 
-            // Curled-back underside triangle right next to the peeled corner in Used!
-            if view.state == StickyTrapState::Used
-                && u + v > (hx + hy - 6.6)
-                && u > hx - 4.2
-                && v > hy - 4.2
-            {
-                let crease = (u + v - (hx + hy - 6.6)).abs() < 0.75;
+            // Curled-back pale cardboard underside triangle next to the lifted corner.
+            let in_flap = if view.state == StickyTrapState::Used {
+                u + v > flap_cut && u > hx - 8.0 && v > hy - 8.0
+            } else {
+                u + v > flap_cut && u > hx - 3.6 && v > hy - 3.6 && sd_box(u, v, px, py) > 0.0
+            };
+            if in_flap {
+                let crease = (u + v - flap_cut).abs() < 0.75;
+                let outer_fold = (curl_cut - (u + v)) < 0.75;
                 let flap_col = if crease {
-                    (58, 50, 42)
-                } else {
+                    (58, 50, 40)
+                } else if outer_fold {
+                    outline
+                } else if view.state == StickyTrapState::Used {
                     (168, 156, 134)
+                } else {
+                    (228, 218, 192)
                 };
                 pb.plot(x, y, flap_col);
                 continue;
@@ -1034,97 +1057,132 @@ pub fn draw_sticky_trap_ground(
 
             let d_pad = sd_box(u, v, px, py);
             if d_pad > 0.0 {
-                // Folded cardboard tray lip.
+                // Folded cardboard tray lip (3.0 px wide around the glue pool).
                 let edge_lit = if u < -px || v < -py {
-                    fr.lit(if u < -px { -1.0 } else { 0.0 }, if v < -py { -1.0 } else { 0.0 })
+                    fr.lit(
+                        if u < -px { -1.0 } else { 0.0 },
+                        if v < -py { -1.0 } else { 0.0 },
+                    )
                 } else {
-                    fr.lit(if u > px { 1.0 } else { 0.0 }, if v > py { 1.0 } else { 0.0 })
+                    fr.lit(
+                        if u > px { 1.0 } else { 0.0 },
+                        if v > py { 1.0 } else { 0.0 },
+                    )
                 };
-                let mut col = shade3(tray_lo, tray_base, tray_hi, 0.68 + 0.35 * edge_lit);
+                let paper_grain =
+                    hash_f32(u.round() as i32 + (seed as i32 & 15), v.round() as i32);
+                let mut col = shade3(
+                    tray_lo,
+                    tray_base,
+                    tray_hi,
+                    0.66 + 0.34 * edge_lit + (paper_grain - 0.5) * 0.08,
+                );
 
-                // Subtle pest-warning ochre/crimson corner tabs on the tray border.
-                let corner = u.abs() > hx - 2.3 && v.abs() > hy - 2.2;
-                if corner {
+                // Crisp pest-warning ochre/terracotta corner L-brackets.
+                let corner_l = (u.abs() > hx - 5.2 && v.abs() > hy - 2.3)
+                    || (u.abs() > hx - 2.3 && v.abs() > hy - 4.6);
+                // Industrial fold-score / printed label dashes centered on long edges.
+                let fold_dash = u.abs() < 4.2
+                    && v.abs() > py + 0.9
+                    && v.abs() < hy - 1.1
+                    && ((u + 5.0).floor() as i32) % 2 == 0;
+                // Side grip-tab ticks on short edges.
+                let side_tick = v.abs() < 2.2 && u.abs() > px + 1.0 && u.abs() < hx - 1.0;
+
+                if d_pad < 0.85 {
+                    // Crisp inner tray wall crease shadow framing the glue pool.
+                    col = scale(col, 0.56);
+                } else if corner_l {
                     let warn = if view.state == StickyTrapState::Used {
                         (104, 78, 52)
                     } else {
-                        (182, 92, 46)
+                        (186, 86, 42)
                     };
-                    col = mix(col, warn, 0.72);
-                } else if (u.abs() - (px + 0.4)).abs() < 0.45 && v.abs() <= py + 0.4
-                    || (v.abs() - (py + 0.4)).abs() < 0.45 && u.abs() <= px + 0.4
-                {
-                    // Inner tray crease shadow
-                    col = scale(col, 0.62);
+                    col = mix(col, warn, 0.78);
+                } else if fold_dash || side_tick {
+                    col = scale(col, 0.72);
                 }
 
                 pb.plot(x, y, col);
                 continue;
             }
 
-            // Inside the adhesive glue pool!
-            let iu = (u * 1.4).round() as i32;
-            let iv = (v * 1.4).round() as i32;
+            // Inside the active `30 × 22` adhesive glue pool!
+            let iu = (u * 1.25).round() as i32;
+            let iv = (v * 1.25).round() as i32;
             let grain = hash_f32(iu + (seed as i32 & 31), iv + ((seed >> 5) as i32 & 31));
 
-            // Meniscus edge darkness where glue pools against the tray walls.
-            let edge_depth = (-d_pad / 1.8).clamp(0.0, 1.0);
-            let top_left_ao = if u < -px + 1.2 || v < -py + 1.2 {
+            // Meniscus edge darkness where thick glue pools against the tray walls.
+            let edge_depth = (-d_pad / 2.6).clamp(0.0, 1.0);
+            let top_left_ao = if u < -px + 1.7 || v < -py + 1.7 {
                 0.76
             } else {
                 1.0
             };
-            let lum_base = (0.48 + 0.30 * edge_depth + 0.14 * fr.lit(u / px, v / py)) * top_left_ao;
+            // Subtle viscous amber honey swirl across the larger pool.
+            let swirl = ((u * 0.24 + v * 0.17 + swirl_phase).sin()
+                * (u * 0.13 - v * 0.22).cos())
+                * 0.06;
+            let lum_base =
+                (0.46 + 0.30 * edge_depth + 0.14 * fr.lit(u / px, v / py) + swirl) * top_left_ao;
 
             let mut col = match view.state {
                 StickyTrapState::Idle => {
                     let mut c = shade3(glue_dark, glue_mid, glue_hi, lum_base);
                     // Wet diagonal specular sheen drifting smoothly across the glossy glue.
-                    let diag = (u * 0.72 + v * 0.85) - sheen_phase;
-                    let band1 = (1.0 - (diag.abs() / 1.55)).clamp(0.0, 1.0);
-                    let band2 = (1.0 - ((diag + 3.4).abs() / 0.85)).clamp(0.0, 1.0) * 0.45;
+                    let diag = (u * 0.68 + v * 0.88) - sheen_phase;
+                    let band1 = (1.0 - (diag.abs() / 2.55)).clamp(0.0, 1.0);
+                    let band2 = (1.0 - ((diag + 5.8).abs() / 1.35)).clamp(0.0, 1.0) * 0.48;
                     let spec = (band1 * band1 + band2).clamp(0.0, 1.0);
-                    c = mix(c, glue_hi, spec * 0.78);
-                    if band1 > 0.76 && edge_depth > 0.35 {
-                        c = mix(c, (255, 255, 246), 0.82);
+                    c = mix(c, glue_hi, spec * 0.76);
+                    if band1 > 0.74 && edge_depth > 0.30 {
+                        c = mix(c, (255, 255, 246), 0.84);
                     }
-                    // Syrupy curved meniscus highlight tucked cleanly inside the top-left pool corner.
-                    let near_tl = u < -px + 2.2 && v < -py + 2.2;
-                    let on_curve = u > -px + 0.8 && v > -py + 0.8;
-                    if near_tl && on_curve && (u + px < 1.7 || v + py < 1.7) {
-                        c = mix(c, (255, 252, 232), 0.56);
+                    // Syrupy curved meniscus highlight tucked cleanly inside the top-left corner.
+                    let near_tl = u < -px + 4.4 && v < -py + 3.8;
+                    let on_curve = u > -px + 1.0 && v > -py + 1.0;
+                    if near_tl && on_curve && (u + px < 2.1 || v + py < 2.0) {
+                        c = mix(c, (255, 252, 232), 0.58);
                     }
-                    // Tiny trapped air bubble highlights in the amber glue.
-                    if grain > 0.94 && edge_depth > 0.4 {
-                        c = mix(c, (255, 248, 220), 0.58);
+                    // Tiny trapped air bubble specular highlights in the amber glue.
+                    if grain > 0.962 && edge_depth > 0.35 {
+                        c = mix(c, (255, 250, 224), 0.65);
                     }
                     c
                 }
                 StickyTrapState::Stuck => {
                     // Disturbed, churned caramel-amber ripples pulling toward victim_pos!
-                    let du = u - pull_u * 0.25;
-                    let dv = v - pull_v * 0.25;
+                    let du = u - pull_u * 0.32;
+                    let dv = v - pull_v * 0.32;
                     let dist = (du * du + dv * dv).sqrt();
-                    let ripple = (dist * 2.2 - prog * 6.0).sin() * 0.5 + 0.5;
-                    let mut c = shade3(glue_dark, glue_mid, glue_hi, lum_base * 0.88 + 0.20 * ripple);
+                    let ripple = (dist * 1.45 - prog * 6.5).sin() * 0.5 + 0.5;
+                    let mut c =
+                        shade3(glue_dark, glue_mid, glue_hi, lum_base * 0.88 + 0.22 * ripple);
                     // Deep stressed paw/foot trough right where the victim churned the adhesive.
-                    if dist < 2.8 {
+                    if dist < 4.2 {
                         c = scale(c, 0.64);
                     }
                     // Wet golden ridge around the churn crater.
-                    if (dist - 3.3).abs() < 0.75 {
-                        c = mix(c, glue_hi, 0.58);
+                    if (dist - 4.9).abs() < 1.05 {
+                        c = mix(c, glue_hi, 0.60);
                     }
+                    // Subtle secondary wet highlight streak near the far rim.
+                    let diag = (u * 0.68 + v * 0.88) - sheen_phase * 0.5;
+                    let gl = (1.0 - (diag.abs() / 1.8)).clamp(0.0, 1.0);
+                    c = mix(c, glue_hi, gl * gl * 0.28);
                     c
                 }
                 StickyTrapState::Used => {
                     // Matte, torn, dusty glue residue — zero bright wet gloss.
                     let mut c = shade3(glue_dark, glue_mid, glue_hi, lum_base * 0.84);
-                    // Diagonal ripped-up cardboard scar across the middle.
-                    let rip = ((u * 0.55 - v * 0.75).abs() < 1.35) && grain > 0.38;
+                    // Wide diagonal ripped-up fibrous cardboard scar across the middle.
+                    let rip = ((u * 0.46 - v * 0.72).abs() < 2.65) && grain > 0.34;
+                    let scuff = ((u * 0.32 + v * 0.55 - 1.5).abs() < 1.4) && grain > 0.52;
                     if rip {
-                        c = mix(c, (158, 146, 126), 0.64);
-                    } else if grain < 0.16 {
+                        c = mix(c, (158, 146, 126), 0.68);
+                    } else if scuff {
+                        c = mix(c, (136, 124, 106), 0.45);
+                    } else if grain < 0.14 {
                         c = scale(c, 0.58);
                     }
                     c
@@ -1132,41 +1190,209 @@ pub fn draw_sticky_trap_ground(
             };
 
             // Slight wet rim highlight on bottom-right inner wall (bounced light).
-            if view.state != StickyTrapState::Used && (u > px - 1.1 || v > py - 1.1) {
-                col = mix(col, glue_hi, 0.26);
+            if view.state != StickyTrapState::Used && (u > px - 1.4 || v > py - 1.4) {
+                col = mix(col, glue_hi, 0.28);
             }
 
             pb.plot(x, y, col);
         }
     }
 
-    // In Used state, add 2 tiny dried snapped glue stub tags on the rim.
+    // Embedded stuck debris on the bigger 30×22 glue canvas (lint fiber, specks,
+    // tiny dead gnat) — gives every board grounded floor texture.
+    draw_sticky_debris(pb, &fr, seed, view.state);
+
+    // Caught bug detail: squirming glazed beetle in Stuck, matte dried remains in Used.
+    if view.state != StickyTrapState::Idle {
+        // Place the caught bug in a corner pocket opposite the victim's pull so it
+        // stays cleanly visible beside the strands and struggling victim.
+        let bug_u = if view.state == StickyTrapState::Stuck && pull_u < -1.5 {
+            9.2
+        } else {
+            -9.2
+        };
+        let bug_v = if view.state == StickyTrapState::Stuck && pull_v < -1.0 {
+            5.8
+        } else {
+            -5.8
+        };
+        draw_caught_bug(pb, &fr, bug_u, bug_v, view.anim, view.state);
+    }
+
+    // In Used state, add dried snapped glue stub tags along the ripped adhesive scar.
     if view.state == StickyTrapState::Used {
-        for &(su, sv) in &[(-2.2, -2.5), (1.8, 1.6)] {
+        for &(su, sv, du, dv) in &[
+            (-6.5, -4.2, 3.2, -1.4),
+            (1.5, 2.8, 3.0, -1.6),
+            (-1.2, 5.4, 2.6, 1.2),
+            (6.8, -3.5, -2.4, -1.5),
+        ] {
             let a = fr.place(su, sv);
-            let b = fr.place(su + 2.2, sv - 1.1);
-            draw_strand_curve(pb, a, b, 0.6, 0.7, (148, 138, 118), (48, 42, 34), 0.78);
+            let b = fr.place(su + du, sv + dv);
+            draw_strand_curve(pb, a, b, 0.7, 0.75, (148, 138, 118), (48, 42, 34), 0.80);
         }
     }
 
     // In Stuck state, draw rich shadowed base glue strings bridging off the board
-    // over the dark floor toward the struggling victim.
+    // over the dark floor toward the struggling victim (routed clear of the caught bug).
     if view.state == StickyTrapState::Stuck {
         let vp = sticky_effective_victim(view, &fr);
         let fade = (1.0 - (prog - 0.85).max(0.0) / 0.15).clamp(0.0, 1.0);
-        for &(au, av, sag) in &[(-4.8, -3.6, 1.6), (-4.2, 3.6, -1.5), (1.5, 0.0, 0.8)] {
+        let su = if pull_u < -1.5 { -1.0 } else { 1.0 };
+        let sv = if pull_v < -1.0 { -1.0 } else { 1.0 };
+        for &(au, av, sag) in &[
+            (-9.2 * su, 6.8 * sv, -1.9),
+            (-3.2 * su, -6.8 * sv, 1.7),
+            (3.2 * su, 6.4 * sv, -1.3),
+            (6.0 * su, -4.8 * sv, 1.1),
+        ] {
             let anchor = fr.place(au, av);
             draw_strand_curve(
                 pb,
                 anchor,
                 vp,
                 sag * (1.0 - prog * 0.45),
-                1.35,
+                1.45,
                 (238, 220, 152),
                 (58, 38, 14),
                 0.90 * fade,
             );
         }
+    }
+}
+
+/// Draw subtle embedded floor debris (stray lint fiber, tiny crumbs, micro gnat
+/// speck) trapped inside the `30 × 22` glue pool, strictly within `STICKY_TRAP_PAD_HALF`.
+fn draw_sticky_debris(pb: &mut PixelBuffer, fr: &Frame, seed: u32, state: StickyTrapState) {
+    let used = state == StickyTrapState::Used;
+    let crumb_dark: Rgb = if used { (46, 40, 34) } else { (68, 44, 18) };
+    let crumb_mid: Rgb = if used { (76, 68, 56) } else { (104, 72, 30) };
+    let lint_col: Rgb = if used { (148, 138, 120) } else { (236, 214, 158) };
+    let glint_col: Rgb = (255, 244, 198);
+
+    // Slight deterministic per-board mirror/offset so boards don't look stamped identically.
+    let su = if seed & 1 == 0 { 1.0 } else { -1.0 };
+    let sv = if seed & 2 == 0 { 1.0 } else { -1.0 };
+
+    // 1. Curled pale lint hair embedded in the glue.
+    let (lu, lv) = (su * 7.8, sv * 5.2);
+    for &(du, dv) in &[(0.0, 0.0), (1.0, 0.6), (2.0, 0.3), (2.7, -0.5)] {
+        let (x, y) = fr.px(lu + du * su * 0.85, lv + dv * sv * 0.85);
+        blend_px(pb, x, y, lint_col, if used { 0.55 } else { 0.68 });
+    }
+
+    // 2. Submerged dark crumbs / grit specks with a tiny amber meniscus highlight.
+    for &(cu, cv) in &[
+        (-10.2 * su, 5.8 * sv),
+        (10.6 * su, -4.8 * sv),
+        (-3.4 * su, -7.6 * sv),
+    ] {
+        let (x, y) = fr.px(cu, cv);
+        blend_px(pb, x, y, crumb_dark, 0.78);
+        let (x2, y2) = fr.px(cu + 0.9, cv + 0.5);
+        blend_px(pb, x2, y2, crumb_mid, 0.62);
+        if !used {
+            let (gx, gy) = fr.px(cu - 0.8, cv - 0.8);
+            blend_px(pb, gx, gy, glint_col, 0.52);
+        }
+    }
+
+    // 3. Tiny stray gnat speck tucked near the outer edge of the pad.
+    let (gu, gv) = (9.6 * su, 6.8 * sv);
+    let (gx, gy) = fr.px(gu, gv);
+    blend_px(pb, gx, gy, crumb_dark, 0.82);
+    let (wx, wy) = fr.px(gu + 0.9, gv - 0.7);
+    blend_px(pb, wx, wy, lint_col, if used { 0.35 } else { 0.58 });
+}
+
+/// Draw a small trapped beetle/roach stuck in the glue board (glazed & twitching
+/// in `Stuck`, dusty & motionless in `Used`).
+fn draw_caught_bug(
+    pb: &mut PixelBuffer,
+    fr: &Frame,
+    bu: f32,
+    bv: f32,
+    anim: f32,
+    state: StickyTrapState,
+) {
+    let used = state == StickyTrapState::Used;
+    // Slight diagonal orientation relative to the board so it looks organically trapped.
+    let angle = 0.42f32;
+    let (ca, sa) = (angle.cos(), angle.sin());
+    let to_board = |lx: f32, ly: f32| -> (f32, f32) { (bu + lx * ca - ly * sa, bv + lx * sa + ly * ca) };
+
+    // Wet golden glue meniscus ringing the trapped bug in Stuck.
+    if !used {
+        for &(du, dv) in &[
+            (-3.2, -1.6),
+            (-3.2, 1.6),
+            (3.2, -1.5),
+            (3.2, 1.5),
+            (0.0, -2.8),
+            (0.0, 2.8),
+        ] {
+            let (u, v) = to_board(du, dv);
+            let (x, y) = fr.px(u, v);
+            blend_px(pb, x, y, (246, 214, 120), 0.52);
+        }
+    }
+
+    // 6 tiny legs (3 per side), subtly twitching in Stuck.
+    let leg_col: Rgb = if used { (42, 36, 30) } else { (44, 24, 14) };
+    let twitch = if used { 0.0 } else { (anim * 18.0).sin() * 0.45 };
+    for side in [-1.0f32, 1.0f32] {
+        for (i, &lx_base) in [-1.6f32, 0.0, 1.5].iter().enumerate() {
+            let phase = if i % 2 == 0 { twitch } else { -twitch };
+            let (u1, v1) = to_board(lx_base, side * 1.9);
+            let (u2, v2) = to_board(lx_base + phase * 1.1, side * 3.1);
+            let (x1, y1) = fr.px(u1, v1);
+            let (x2, y2) = fr.px(u2, v2);
+            blend_px(pb, x1, y1, leg_col, 0.88);
+            blend_px(pb, x2, y2, leg_col, 0.74);
+        }
+    }
+
+    // Oval dark mahogany carapace + head.
+    let shell_rim: Rgb = if used { (34, 30, 26) } else { (32, 18, 10) };
+    let shell_mid: Rgb = if used { (66, 58, 48) } else { (84, 42, 22) };
+    let shell_hi: Rgb = if used { (94, 86, 74) } else { (142, 82, 38) };
+
+    for ly_i in -2..=2 {
+        for lx_i in -3..=3 {
+            let lx = lx_i as f32;
+            let ly = ly_i as f32;
+            let ell = (lx / 2.7) * (lx / 2.7) + (ly / 1.85) * (ly / 1.85);
+            if ell > 1.0 {
+                continue;
+            }
+            let (u, v) = to_board(lx, ly);
+            let (x, y) = fr.px(u, v);
+            let col = if ell > 0.62 {
+                shell_rim
+            } else if lx < 0.0 && ly < 0.2 {
+                shell_hi
+            } else {
+                shell_mid
+            };
+            blend_px(pb, x, y, col, if used { 0.85 } else { 0.96 });
+        }
+    }
+
+    // Tiny head + 2 feelers at +lx end.
+    let (hu, hv) = to_board(2.9, 0.0);
+    let (hx_p, hy_p) = fr.px(hu, hv);
+    blend_px(pb, hx_p, hy_p, shell_rim, 0.94);
+    for side in [-0.9f32, 0.9f32] {
+        let (au, av) = to_board(3.9, side + twitch * 0.5);
+        let (ax, ay) = fr.px(au, av);
+        blend_px(pb, ax, ay, leg_col, 0.72);
+    }
+
+    // Glossy amber-white glue glaze highlight on the bug's back when Stuck.
+    if !used {
+        let (su, sv) = to_board(-0.6, -0.5);
+        let (sx, sy) = fr.px(su, sv);
+        blend_px(pb, sx, sy, (255, 248, 214), 0.90);
     }
 }
 
@@ -1179,8 +1405,8 @@ fn sticky_effective_victim(view: &StickyTrapView, fr: &Frame) -> Vec2 {
         fr.pos + d
     } else {
         // Fallback struggling pull along +facing if caller didn't offset victim_pos.
-        let stretch = 4.0 + prog * 9.0;
-        let wobble = (view.anim * 16.0).sin() * 1.4;
+        let stretch = 7.0 + prog * 13.0;
+        let wobble = (view.anim * 16.0).sin() * 1.8;
         fr.place(stretch, wobble)
     }
 }
@@ -1188,9 +1414,9 @@ fn sticky_effective_victim(view: &StickyTrapView, fr: &Frame) -> Vec2 {
 /// **Foreground / overlay layer** for a sticky trap (draw AFTER entities).
 ///
 /// In `StickyTrapState::Stuck`, draws high-contrast glistening amber-ivory
-/// taffy strands stretching from board anchors across the dark floor onto the
-/// struggling victim's flanks, complete with dark amber shadow rims and glossy
-/// stretched droplets that thin and snap near `progress -> 1.0`.
+/// taffy strands stretching from board anchors across the `30 × 22` glue pool
+/// onto the struggling victim's flanks, complete with dark amber shadow rims
+/// and glossy stretched droplets that thin and snap near `progress -> 1.0`.
 /// No-op in `Idle` and `Used` (fast early-out).
 pub fn draw_sticky_trap(
     pb: &mut PixelBuffer,
@@ -1202,7 +1428,7 @@ pub fn draw_sticky_trap(
         return;
     }
     let fr = Frame::new(view.pos, view.facing, cam);
-    if fr.bbox_pb(pb, 32.0).is_none() {
+    if fr.bbox_pb(pb, 48.0).is_none() {
         return;
     }
 
@@ -1218,25 +1444,31 @@ pub fn draw_sticky_trap(
     let strand_mid: Rgb = (242, 214, 128);
     let strand_rim: Rgb = (52, 34, 12);
 
-    // 5 taut foreground strands anchored across the glue pool -> victim flanks/paws.
-    let anchors: [(f32, f32, f32, f32); 5] = [
-        (-5.2, -3.6, -0.82, 0.76),
-        (-4.5, 3.8, 0.80, 0.84),
-        (0.8, -3.5, -0.50, 0.90),
-        (1.2, 3.4, 0.55, 0.96),
-        (4.5, 0.0, 0.05, 1.00),
+    // 6 taut foreground strands anchored across the 30×22 glue pool -> victim flanks/paws,
+    // routed clear of the caught bug's corner pocket so both read cleanly.
+    let pull_u = (view.victim_pos - view.pos).dot(fr.f);
+    let pull_v = (view.victim_pos - view.pos).dot(fr.p);
+    let su = if pull_u < -1.5 { -1.0 } else { 1.0 };
+    let sv = if pull_v < -1.0 { -1.0 } else { 1.0 };
+    let anchors: [(f32, f32, f32, f32); 6] = [
+        (-9.4 * su, 7.0 * sv, 0.84 * sv, 0.72),
+        (-3.6 * su, -7.6 * sv, -0.78 * sv, 0.78),
+        (-1.2 * su, 7.6 * sv, 0.62 * sv, 0.84),
+        (3.8 * su, -6.8 * sv, -0.52 * sv, 0.90),
+        (6.8 * su, 5.4 * sv, 0.40 * sv, 0.95),
+        (9.2 * su, -sv, -0.15 * sv, 1.00),
     ];
 
     for (idx, &(au, av, flank_k, snap_at)) in anchors.iter().enumerate() {
         let a = fr.place(au, av);
         let quiver = (view.anim * (19.0 + idx as f32 * 5.0) + idx as f32 * 1.9).sin()
-            * (0.55 + 0.95 * prog);
+            * (0.65 + 1.05 * prog);
         // Anchor onto the victim's trailing haunches/flanks so its face stays readable!
         let target = vp + side * (flank_k * vr * 0.72) - dir * (vr * 0.52);
 
         if prog < snap_at {
             let tension = (prog / snap_at).clamp(0.0, 1.0);
-            let width = (1.55 - 0.72 * tension).max(0.65);
+            let width = (1.60 - 0.72 * tension).max(0.68);
             let col = mix(strand_mid, strand_hi, 0.55 + 0.45 * tension);
             // Crisp shadowed taffy filament
             draw_strand_curve(pb, a, target, quiver, width, col, strand_rim, 0.96);
@@ -2692,6 +2924,363 @@ mod tests {
         ));
     }
 
+    /// Verify that the drawn sticky board's outer cardboard tray and active
+    /// amber glue pool agree with `STICKY_TRAP_SIZE` and `STICKY_TRAP_PAD_HALF`
+    /// in all four cardinal facings.
+    #[test]
+    fn sticky_pad_matches_drawn_glue() {
+        let bg: Rgb = (10, 12, 18);
+        let accent: Rgb = (120, 220, 255);
+        let hx = STICKY_TRAP_SIZE.x * 0.5;
+        let hy = STICKY_TRAP_SIZE.y * 0.5;
+        let px = STICKY_TRAP_PAD_HALF.x;
+        let py = STICKY_TRAP_PAD_HALF.y;
+        assert!(px > 0.0 && px < hx);
+        assert!(py > 0.0 && py < hy);
+
+        let center = Vec2::new(60.0, 60.0);
+        for facing in [
+            Vec2::new(1.0, 0.0),
+            Vec2::new(-1.0, 0.0),
+            Vec2::new(0.0, 1.0),
+            Vec2::new(0.0, -1.0),
+        ] {
+            let mut pb = PixelBuffer::new(120, 120);
+            pb.clear(bg);
+            let view = StickyTrapView {
+                pos: center,
+                facing,
+                state: StickyTrapState::Idle,
+                progress: 0.0,
+                anim: 0.0,
+                victim_pos: center,
+                victim_radius: 3.0,
+            };
+            draw_sticky_trap_ground(&mut pb, &view, Vec2::ZERO, accent);
+
+            let f = facing.normalized();
+            let p = f.perp();
+            let sample = |u: f32, v: f32| -> Rgb {
+                let q = center + f * u + p * v;
+                pb.pixel_at(q.x.round() as usize, q.y.round() as usize)
+            };
+
+            // Inside the active glue pad near all 4 edges: warm amber glue (R > G > B, strong R-B).
+            for &(u, v) in &[
+                (px - 1.5, 0.0),
+                (-(px - 1.5), 0.0),
+                (0.0, py - 1.5),
+                (0.0, -(py - 1.5)),
+            ] {
+                let c = sample(u, v);
+                assert_ne!(c, bg, "facing {facing:?} ({u},{v}) should draw glue, got bg");
+                assert!(
+                    c.0 > c.2 + 40,
+                    "facing {facing:?} ({u},{v}) should be warm amber glue, got {c:?}"
+                );
+            }
+
+            // Cardboard tray rim just outside the glue pad: drawn, paler/less saturated than glue.
+            for &(u, v) in &[
+                (px + 1.5, 0.0),
+                (-(px + 1.5), 0.0),
+                (0.0, py + 1.5),
+                (0.0, -(py + 1.5)),
+            ] {
+                let c = sample(u, v);
+                assert_ne!(c, bg, "facing {facing:?} ({u},{v}) should draw tray rim, got bg");
+                assert!(
+                    c.2 >= 60,
+                    "facing {facing:?} ({u},{v}) should be ivory cardboard rim, got {c:?}"
+                );
+            }
+
+            // Strictly outside the board + shadow: untouched background.
+            for &(u, v) in &[
+                (hx + 4.0, 0.0),
+                (-(hx + 4.0), 0.0),
+                (0.0, hy + 4.0),
+                (0.0, -(hy + 4.0)),
+            ] {
+                assert_eq!(
+                    sample(u, v),
+                    bg,
+                    "facing {facing:?} ({u},{v}) should be clear background"
+                );
+            }
+        }
+    }
+
+    /// Dedicated sticky-trap visual sheet: `RATRUN_DUMP=sticky cargo test dump_sticky_sheet`
+    /// writes `/tmp/ratrun_sticky.ppm` showing all 4 cardinal facings across
+    /// Idle, Stuck (with Rat, with Brute, and solo), and Used states on real
+    /// themed floors, plus scale reference.
+    #[test]
+    fn dump_sticky_sheet() {
+        if std::env::var("RATRUN_DUMP").as_deref() != Ok("sticky") {
+            return;
+        }
+        const CELL_W: usize = 72;
+        const CELL_H: usize = 64;
+        const COLS: usize = 5;
+        const ROWS: usize = 4;
+        let w = CELL_W * COLS;
+        let h = CELL_H * ROWS;
+        let mut out = format!("P6\n{} {}\n255\n", w, h * 3).into_bytes();
+
+        let make_rat = |pos: Vec2, face: Vec2| {
+            let mut p = Player::new(pos, WeaponKind::Gnaw);
+            p.face = face;
+            p.vel = face * 40.0;
+            p
+        };
+        let make_brute = |pos: Vec2, face: Vec2| {
+            let mut rng = StdRng::seed_from_u64(42);
+            let mut e = Enemy::spawn(EnemyKind::Brute, pos, 1.0, &mut rng);
+            e.facing = face;
+            e.anim = 1.2;
+            e
+        };
+
+        let facings = [
+            Vec2::new(1.0, 0.0),  // East
+            Vec2::new(-1.0, 0.0), // West
+            Vec2::new(0.0, 1.0),  // South
+            Vec2::new(0.0, -1.0), // North
+        ];
+
+        for theme in [Theme::Sewer, Theme::Kitchen, Theme::Lab] {
+            let level = Level::new(theme);
+            let accent = level.palette.accent;
+            let cam = Vec2::new(260.0, 260.0);
+            let mut pb = PixelBuffer::new(w, h);
+            draw_floor(&mut pb, &level, cam, 1.2);
+
+            let cell_center = |row: usize, col: usize| -> Vec2 {
+                cam + Vec2::new(
+                    (col * CELL_W + CELL_W / 2) as f32,
+                    (row * CELL_H + CELL_H / 2) as f32,
+                )
+            };
+
+            for (row, &facing) in facings.iter().enumerate() {
+                // Col 0: Idle (fresh)
+                let c0 = cell_center(row, 0);
+                let v0 = StickyTrapView {
+                    pos: c0,
+                    facing,
+                    state: StickyTrapState::Idle,
+                    progress: 0.0,
+                    anim: 0.35 + row as f32 * 0.4,
+                    victim_pos: c0,
+                    victim_radius: 3.0,
+                };
+                draw_sticky_trap_ground(&mut pb, &v0, cam, accent);
+                draw_sticky_trap(&mut pb, &v0, cam, accent);
+
+                // Col 1: Stuck (occupied, caught bug + rat pulling)
+                let c1 = cell_center(row, 1);
+                let rat_pos = c1 + facing * 8.5 + facing.perp() * 2.5;
+                let v1 = StickyTrapView {
+                    pos: c1,
+                    facing,
+                    state: StickyTrapState::Stuck,
+                    progress: 0.42,
+                    anim: 1.4,
+                    victim_pos: rat_pos,
+                    victim_radius: 3.0,
+                };
+                draw_sticky_trap_ground(&mut pb, &v1, cam, accent);
+                let p = make_rat(rat_pos, facing);
+                draw_rat(&mut pb, &p, 0.7, cam);
+                draw_sticky_trap(&mut pb, &v1, cam, accent);
+
+                // Col 2: Stuck (rat stretching hard near edge)
+                let c2 = cell_center(row, 2);
+                let rat_pos2 = c2 + facing * 17.5 - facing.perp() * 3.0;
+                let v2 = StickyTrapView {
+                    pos: c2,
+                    facing,
+                    state: StickyTrapState::Stuck,
+                    progress: 0.76,
+                    anim: 2.5,
+                    victim_pos: rat_pos2,
+                    victim_radius: 3.0,
+                };
+                draw_sticky_trap_ground(&mut pb, &v2, cam, accent);
+                let p2 = make_rat(rat_pos2, facing);
+                draw_rat(&mut pb, &p2, 1.1, cam);
+                draw_sticky_trap(&mut pb, &v2, cam, accent);
+
+                // Col 3: Stuck (Brute pinned)
+                let c3 = cell_center(row, 3);
+                let brute_pos = c3 + facing * 13.0 + facing.perp() * 2.0;
+                let v3 = StickyTrapView {
+                    pos: c3,
+                    facing,
+                    state: StickyTrapState::Stuck,
+                    progress: 0.55,
+                    anim: 1.9,
+                    victim_pos: brute_pos,
+                    victim_radius: 6.5,
+                };
+                draw_sticky_trap_ground(&mut pb, &v3, cam, accent);
+                let b = make_brute(brute_pos, facing);
+                draw_enemy(&mut pb, &b, cam, accent);
+                draw_sticky_trap(&mut pb, &v3, cam, accent);
+
+                // Col 4: Used (spent)
+                let c4 = cell_center(row, 4);
+                let v4 = StickyTrapView {
+                    pos: c4,
+                    facing,
+                    state: StickyTrapState::Used,
+                    progress: 1.0,
+                    anim: 0.0,
+                    victim_pos: c4,
+                    victim_radius: 3.0,
+                };
+                draw_sticky_trap_ground(&mut pb, &v4, cam, accent);
+                draw_sticky_trap(&mut pb, &v4, cam, accent);
+            }
+
+            for y in 0..pb.h {
+                for x in 0..pb.w {
+                    let c = pb.pixel_at(x, y);
+                    out.extend_from_slice(&[c.0, c.1, c.2]);
+                }
+            }
+        }
+        std::fs::write("/tmp/ratrun_sticky.ppm", out).unwrap();
+    }
+
+    /// In-level visual capture: `RATRUN_DUMP=sticky_level cargo test dump_sticky_in_level`
+    /// writes `/tmp/ratrun_sticky_level.ppm` showing real generated `36 × 28`
+    /// sticky traps in a real `World::draw` frame (walls, props, rat, enemies),
+    /// covering every state (`Idle`, `Stuck` with rat/Brute, `Used`) and all four
+    /// cardinal facings across Sewer, Kitchen, and Lab.
+    #[test]
+    fn dump_sticky_in_level() {
+        if std::env::var("RATRUN_DUMP").as_deref() != Ok("sticky_level") {
+            return;
+        }
+        use crate::game::world::World;
+
+        const VW: usize = 160;
+        const VH: usize = 120;
+        const COLS: usize = 4;
+        const ROWS: usize = 3;
+        let total_w = VW * COLS;
+        let total_h = VH * ROWS;
+        let mut sheet = vec![0u8; total_w * total_h * 3];
+
+        let blit = |sheet: &mut [u8], pb: &PixelBuffer, row: usize, col: usize| {
+            for y in 0..VH {
+                for x in 0..VW {
+                    let c = pb.pixel_at(x, y);
+                    let gx = col * VW + x;
+                    let gy = row * VH + y;
+                    let idx = (gy * total_w + gx) * 3;
+                    sheet[idx] = c.0;
+                    sheet[idx + 1] = c.1;
+                    sheet[idx + 2] = c.2;
+                }
+            }
+        };
+
+        // Row 0..3 = Sewer, Kitchen, Lab.
+        // Col 0 = real generated Idle board (East/natural facing) with rat beside it.
+        // Col 1 = real generated board forced West facing, Stuck with rat pulling.
+        // Col 2 = real generated board forced South facing, Stuck with Brute pinned.
+        // Col 3 = real generated board forced North facing, Used (spent).
+        let themes = [Theme::Sewer, Theme::Kitchen, Theme::Lab];
+        for (row, &theme) in themes.iter().enumerate() {
+            let mut w = World::new(theme, 7 + row as u64);
+            let trap_idx = 0usize;
+            assert!(
+                !w.level.objects.sticky_traps.is_empty(),
+                "{theme:?} must have sticky traps"
+            );
+            let trap_pos = w.level.objects.sticky_traps[trap_idx].pos;
+            w.elapsed = 1.4;
+
+            // Col 0: Idle (East)
+            w.level.objects.sticky_traps[trap_idx] = StickyTrapView {
+                pos: trap_pos,
+                facing: Vec2::new(1.0, 0.0),
+                state: StickyTrapState::Idle,
+                progress: 0.0,
+                anim: 0.4,
+                victim_pos: trap_pos,
+                victim_radius: 3.0,
+            };
+            w.player.pos = trap_pos + Vec2::new(-28.0, 4.0);
+            w.player.face = Vec2::new(1.0, 0.0);
+            let mut pb = PixelBuffer::new(VW, VH);
+            w.draw(&mut pb);
+            blit(&mut sheet, &pb, row, 0);
+
+            // Col 1: Stuck with Rat (West)
+            let rat_stuck_pos = trap_pos + Vec2::new(-11.0, 2.5);
+            w.level.objects.sticky_traps[trap_idx] = StickyTrapView {
+                pos: trap_pos,
+                facing: Vec2::new(-1.0, 0.0),
+                state: StickyTrapState::Stuck,
+                progress: 0.55,
+                anim: 1.8,
+                victim_pos: rat_stuck_pos,
+                victim_radius: 3.0,
+            };
+            w.player.pos = rat_stuck_pos;
+            w.player.face = Vec2::new(-1.0, 0.0);
+            let mut pb = PixelBuffer::new(VW, VH);
+            w.draw(&mut pb);
+            blit(&mut sheet, &pb, row, 1);
+
+            // Col 2: Stuck with Brute (South)
+            let brute_pos = trap_pos + Vec2::new(2.0, 12.0);
+            let mut rng = StdRng::seed_from_u64(42);
+            w.spawn_enemy_with_rng(EnemyKind::Brute, brute_pos, 1.0, &mut rng);
+            w.level.objects.sticky_traps[trap_idx] = StickyTrapView {
+                pos: trap_pos,
+                facing: Vec2::new(0.0, 1.0),
+                state: StickyTrapState::Stuck,
+                progress: 0.48,
+                anim: 2.1,
+                victim_pos: brute_pos,
+                victim_radius: 6.5,
+            };
+            w.player.pos = trap_pos + Vec2::new(-26.0, -6.0);
+            w.player.face = Vec2::new(1.0, 0.2);
+            let mut pb = PixelBuffer::new(VW, VH);
+            w.draw(&mut pb);
+            blit(&mut sheet, &pb, row, 2);
+
+            // Col 3: Used / spent (North)
+            let mut w_used = World::new(theme, 7 + row as u64);
+            let trap_pos_u = w_used.level.objects.sticky_traps[0].pos;
+            w_used.elapsed = 2.0;
+            w_used.level.objects.sticky_traps[0] = StickyTrapView {
+                pos: trap_pos_u,
+                facing: Vec2::new(0.0, -1.0),
+                state: StickyTrapState::Used,
+                progress: 1.0,
+                anim: 0.0,
+                victim_pos: trap_pos_u,
+                victim_radius: 3.0,
+            };
+            w_used.player.pos = trap_pos_u + Vec2::new(26.0, -4.0);
+            w_used.player.face = Vec2::new(-1.0, 0.0);
+            let mut pb = PixelBuffer::new(VW, VH);
+            w_used.draw(&mut pb);
+            blit(&mut sheet, &pb, row, 3);
+        }
+
+        let mut out = format!("P6\n{} {}\n255\n", total_w, total_h).into_bytes();
+        out.extend_from_slice(&sheet);
+        std::fs::write("/tmp/ratrun_sticky_level.ppm", out).unwrap();
+    }
+
     /// Visual sheet test: `RATRUN_DUMP=traps cargo test dump_traps_sheet`
     /// writes `/tmp/ratrun_traps.ppm` showing all 5 interactive objects across
     /// every state, multiple progress values and facings, over all three themes'
@@ -2701,8 +3290,8 @@ mod tests {
         if std::env::var("RATRUN_DUMP").as_deref() != Ok("traps") {
             return;
         }
-        const CELL_W: usize = 50;
-        const CELL_H: usize = 36;
+        const CELL_W: usize = 64;
+        const CELL_H: usize = 48;
         const COLS: usize = 7;
         const ROWS: usize = 5;
         let w = CELL_W * COLS;

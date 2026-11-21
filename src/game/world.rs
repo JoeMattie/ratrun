@@ -1325,8 +1325,9 @@ impl World {
         let anim = self.elapsed;
         let objects = &self.level.objects;
 
+        let sticky_margin = if foreground { 48.0 } else { 28.0 };
         for view in &objects.sticky_traps {
-            if !on_screen(self.w2s(view.pos, cam), 16.0, vp) {
+            if !on_screen(self.w2s(view.pos, cam), sticky_margin, vp) {
                 continue;
             }
             let mut view = *view;

@@ -348,16 +348,22 @@ fn minimap_axis(axis: WallAxis) -> MinimapAxis {
 }
 
 fn trap_at(level: &Level, p: crate::math::Vec2) -> bool {
-    level
+    let sticky_hx = crate::game::art_traps::STICKY_TRAP_SIZE.x * 0.5;
+    let sticky_hy = crate::game::art_traps::STICKY_TRAP_SIZE.y * 0.5;
+    level.objects.sticky_traps.iter().any(|t| {
+        crate::game::art_traps::local_box_contains(
+            t.pos,
+            t.facing,
+            p,
+            -sticky_hx,
+            sticky_hx,
+            sticky_hy,
+        )
+    }) || level
         .objects
-        .sticky_traps
+        .mousetraps
         .iter()
         .any(|t| (t.pos - p).len() < TILE_F)
-        || level
-            .objects
-            .mousetraps
-            .iter()
-            .any(|t| (t.pos - p).len() < TILE_F)
 }
 
 /// First explored cell of a rectangle, scanning rows then columns (stable).
@@ -497,6 +503,10 @@ mod tests {
         trap.pos = TileMap::tile_rect(6, 6).center();
         level.objects.sticky_traps.push(trap);
         assert_eq!(minimap_cell(&level, 6, 6), MinimapCell::Trap);
+        // Bigger 36×28 horizontal board spans its long-axis neighbor cells too,
+        // while staying 1 cell thick along its short (28 px) axis.
+        assert_eq!(minimap_cell(&level, 5, 6), MinimapCell::Trap);
+        assert_eq!(minimap_cell(&level, 7, 6), MinimapCell::Trap);
         assert_eq!(minimap_cell(&level, 6, 7), MinimapCell::Floor);
         level.rooms.push(crate::game::level::Room::new(
             crate::game::level::TileRect::new(20, 20, 6, 6),

@@ -1353,7 +1353,7 @@ fn bullet_danger(pos: Vec2, vel: Vec2, radius: f32, damage: f32, q: Vec2, horizo
 }
 
 /// Is `q` on the glue pad of the board at `pos`/`facing`? (Art's oriented
-/// rectangle `|u| <= 7.0`, `|v| <= 5.0`.)
+/// rectangle `STICKY_TRAP_PAD_HALF`.)
 fn on_pad(pos: Vec2, facing: Vec2, q: Vec2) -> bool {
     let d = q - pos;
     let f = if facing.len_sq() > 0.0 {
@@ -1361,7 +1361,8 @@ fn on_pad(pos: Vec2, facing: Vec2, q: Vec2) -> bool {
     } else {
         Vec2::new(1.0, 0.0)
     };
-    d.dot(f).abs() <= 7.0 + R && d.dot(f.perp()).abs() <= 5.0 + R
+    let pad = crate::game::art_traps::STICKY_TRAP_PAD_HALF;
+    d.dot(f).abs() <= pad.x + R && d.dot(f.perp()).abs() <= pad.y + R
 }
 
 /// Danger of one threat to a candidate position `q` at `t` seconds from now.

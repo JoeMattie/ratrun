@@ -123,6 +123,10 @@ const MAX_FALLBACK_TRIES: usize = 10;
 
 /// Trap budget on one map (encounters included).
 const MAX_TRAPS: usize = 24;
+/// Fair cap on sticky glue boards per map: each `36 × 28` board covers roughly
+/// four times the floor area of the old `18 × 14` pad, so thinning the sticky
+/// count keeps rooms and wide lanes routable without crowding.
+const MAX_STICKY_TRAPS: usize = 8;
 /// How many of [`MAX_TRAPS`] may be spent on room-mouth encounters.
 const MAX_ENCOUNTER_TRAPS: usize = 4;
 /// Encounter traps sit this deep inside a room (cells from the doorway cell).
@@ -995,7 +999,295 @@ pub fn place_traps(
         };
         place_incidental(tiles, layout, mazes, rng, &mut field, MAX_TRAPS);
     }
+
+    // 3. Enforce the bigger `36 × 28` sticky-trap footprint clearance,
+    //    >= 2-tile-wide bypass, and fair count without altering any mousetrap.
+    refine_sticky_traps(tiles, layout, mazes, &keep_clear, &protected, &mut traps);
     traps
+}
+
+/// Refine sticky-trap placements for the larger `36 × 28` glue board while
+/// leaving every mousetrap (`TrapKind::Snap`) completely untouched.
+///
+/// Every surviving sticky trap is guaranteed to:
+/// - keep its full `3 × 3` tile footprint (`48 × 48` px, strictly enclosing the
+///   `36 × 28` board in every cardinal facing) on `TileKind::Open` floor,
+///   outside the start room, the entire boss arena, and every maze;
+/// - stay clear of spawn, doorways, one-way doors, rat-holes, and other traps
+///   (>= 4 tiles from mousetraps, >= 6 tiles from other sticky traps);
+/// - leave a clear bypass lane at least two tiles wide around its footprint so
+///   it never fills a corridor's width or pinches a passage.
+///
+/// A sticky trap that fails at its raw cell is nudged deterministically to the
+/// nearest valid cell within 3 tiles (or dropped if the space is too narrow,
+/// thinning tight corridors automatically) and capped at [`MAX_STICKY_TRAPS`].
+fn refine_sticky_traps(
+    tiles: &TileMap,
+    layout: &Layout,
+    mazes: &[MazeSection],
+    keep_clear: &TileRect,
+    protected: &[(i32, i32)],
+    traps: &mut Vec<TrapPlacement>,
+) {
+    let snap_cells: Vec<(i32, i32)> = traps
+        .iter()
+        .filter(|t| t.kind == TrapKind::Snap)
+        .map(|t| validate::cell_of(t.pos))
+        .collect();
+
+    let mut accepted_sticky: Vec<(i32, i32)> = Vec::new();
+    let mut out: Vec<TrapPlacement> = Vec::with_capacity(traps.len());
+
+    for trap in traps.drain(..) {
+        if trap.kind != TrapKind::Sticky {
+            out.push(trap);
+            continue;
+        }
+        if accepted_sticky.len() >= MAX_STICKY_TRAPS {
+            continue;
+        }
+        let origin = validate::cell_of(trap.pos);
+        let chosen = if sticky_cell_ok(
+            tiles,
+            layout,
+            mazes,
+            keep_clear,
+            protected,
+            &snap_cells,
+            &accepted_sticky,
+            origin,
+            trap.encounter,
+        ) {
+            Some(origin)
+        } else {
+            find_nearby_sticky_cell(
+                tiles,
+                layout,
+                mazes,
+                keep_clear,
+                protected,
+                &snap_cells,
+                &accepted_sticky,
+                origin,
+                trap.approach,
+                trap.encounter,
+            )
+        };
+
+        if let Some(cell) = chosen {
+            let mut placed = trap;
+            placed.pos = TileMap::tile_rect(cell.0, cell.1).center();
+            accepted_sticky.push(cell);
+            out.push(placed);
+        }
+    }
+
+    *traps = out;
+}
+
+/// Deterministic local nudge (radius `1..=3` tiles) when a raw sticky-trap cell
+/// does not have enough clearance for the `36 × 28` board.
+#[allow(clippy::too_many_arguments)]
+fn find_nearby_sticky_cell(
+    tiles: &TileMap,
+    layout: &Layout,
+    mazes: &[MazeSection],
+    keep_clear: &TileRect,
+    protected: &[(i32, i32)],
+    snap_cells: &[(i32, i32)],
+    accepted_sticky: &[(i32, i32)],
+    origin: (i32, i32),
+    approach: Cardinal,
+    encounter: bool,
+) -> Option<(i32, i32)> {
+    // For a room-mouth encounter, prefer stepping 1..=2 tiles deeper into the
+    // room (opposite `approach`) so the board clears the doorway threshold.
+    if encounter {
+        let inward = cardinal_vec(opposite(approach));
+        let (ix, iy) = (inward.x as i32, inward.y as i32);
+        for step in 1..=2 {
+            let c = (origin.0 + ix * step, origin.1 + iy * step);
+            if sticky_cell_ok(
+                tiles,
+                layout,
+                mazes,
+                keep_clear,
+                protected,
+                snap_cells,
+                accepted_sticky,
+                c,
+                true,
+            ) {
+                return Some(c);
+            }
+        }
+    }
+
+    // Expanding Manhattan rings up to Chebyshev radius 3, fixed row-major order.
+    for dist in 1..=6i32 {
+        for dy in -3..=3i32 {
+            for dx in -3..=3i32 {
+                if dx.abs() + dy.abs() != dist {
+                    continue;
+                }
+                let c = (origin.0 + dx, origin.1 + dy);
+                if sticky_cell_ok(
+                    tiles,
+                    layout,
+                    mazes,
+                    keep_clear,
+                    protected,
+                    snap_cells,
+                    accepted_sticky,
+                    c,
+                    encounter,
+                ) {
+                    return Some(c);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Full clearance and bypass-width check for a `36 × 28` sticky glue board
+/// centered at `cell`.
+#[allow(clippy::too_many_arguments)]
+fn sticky_cell_ok(
+    tiles: &TileMap,
+    layout: &Layout,
+    mazes: &[MazeSection],
+    keep_clear: &TileRect,
+    protected: &[(i32, i32)],
+    snap_cells: &[(i32, i32)],
+    accepted_sticky: &[(i32, i32)],
+    cell: (i32, i32),
+    encounter: bool,
+) -> bool {
+    let (cx, cy) = cell;
+    let pos = TileMap::tile_rect(cx, cy).center();
+    // Keep even the outer corner of the 36×28 board well away from spawn.
+    if (pos - layout.start).len() <= 7.5 * crate::game::collision::TILE_F {
+        return false;
+    }
+    if !encounter && keep_clear.contains(cx, cy) {
+        return false;
+    }
+
+    // 1. Full `3 × 3` footprint (48 × 48 px, strictly enclosing 36 × 28 in all
+    //    cardinal facings) must be open floor, clear of start room, boss arena,
+    //    and every maze.
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            let (tx, ty) = (cx + dx, cy + dy);
+            if !tiles.in_bounds(tx, ty) || !tiles.get(tx, ty).is_open() {
+                return false;
+            }
+            if layout.start_room.contains(tx, ty) || layout.boss_arena.contains(tx, ty) {
+                return false;
+            }
+            if mazes.iter().any(|maze| maze.bounds.contains(tx, ty)) {
+                return false;
+            }
+        }
+    }
+
+    // 2. Keep doorways, one-way doors, and rat-holes at least one full clear
+    //    tile beyond the 3 × 3 footprint (no threshold traps).
+    for dy in -2..=2 {
+        for dx in -2..=2 {
+            if matches!(
+                tiles.get(cx + dx, cy + dy),
+                TileKind::Wall(
+                    WallKind::Doorway { .. }
+                        | WallKind::OneWayDoor { .. }
+                        | WallKind::RatHole { .. }
+                )
+            ) {
+                return false;
+            }
+        }
+    }
+
+    // 3. Clearance from maze portals/rewards and all other traps.
+    if protected
+        .iter()
+        .any(|&(px, py)| (px - cx).abs() <= 3 && (py - cy).abs() <= 3)
+    {
+        return false;
+    }
+    if snap_cells
+        .iter()
+        .any(|&(tx, ty)| (tx - cx).abs() <= 3 && (ty - cy).abs() <= 3)
+    {
+        return false;
+    }
+    if accepted_sticky
+        .iter()
+        .any(|&(sx, sy)| (sx - cx).abs() <= 5 && (sy - cy).abs() <= 5)
+    {
+        return false;
+    }
+
+    // 4. Bypass width >= 2 tiles around the 3 × 3 footprint.
+    sticky_bypass_ok(tiles, accepted_sticky, cell)
+}
+
+/// Does a `3 × 3` sticky-board footprint centered at `cell` leave a clear way
+/// around it at least two tiles wide (never filling a corridor's width)?
+pub(crate) fn sticky_bypass_ok(
+    tiles: &TileMap,
+    other_sticky: &[(i32, i32)],
+    cell: (i32, i32),
+) -> bool {
+    let (cx, cy) = cell;
+    let cell_free = |x: i32, y: i32| -> bool {
+        tiles.in_bounds(x, y)
+            && tiles.get(x, y).is_open()
+            && other_sticky
+                .iter()
+                .all(|&(sx, sy)| (sx - x).abs() > 1 || (sy - y).abs() > 1)
+    };
+    let rect_free = |x0: i32, x1: i32, y0: i32, y1: i32| -> bool {
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                if !cell_free(x, y) {
+                    return false;
+                }
+            }
+        }
+        true
+    };
+
+    // The 3×3 board footprint itself must sit on free open floor.
+    if !rect_free(cx - 1, cx + 1, cy - 1, cy + 1) {
+        return false;
+    }
+
+    // Full 2-tile-wide straight bypass strips along each side of the 3×3 footprint.
+    let bypass_n = rect_free(cx - 2, cx + 2, cy - 3, cy - 2);
+    let bypass_s = rect_free(cx - 2, cx + 2, cy + 2, cy + 3);
+    let bypass_w = rect_free(cx - 3, cx - 2, cy - 2, cy + 2);
+    let bypass_e = rect_free(cx + 2, cx + 3, cy - 2, cy + 2);
+
+    if !(bypass_n || bypass_s || bypass_w || bypass_e) {
+        return false;
+    }
+
+    // Any axis with open approaches on both sides of the board MUST have a
+    // >= 2-tile-wide perpendicular bypass lane around the footprint.
+    let open_n = (cx - 1..=cx + 1).any(|x| cell_free(x, cy - 2));
+    let open_s = (cx - 1..=cx + 1).any(|x| cell_free(x, cy + 2));
+    let open_w = (cy - 1..=cy + 1).any(|y| cell_free(cx - 2, y));
+    let open_e = (cy - 1..=cy + 1).any(|y| cell_free(cx + 2, y));
+
+    if open_n && open_s && !(bypass_w || bypass_e) {
+        return false;
+    }
+    if open_w && open_e && !(bypass_n || bypass_s) {
+        return false;
+    }
+    true
 }
 
 /// The shared state of the trap scatter: cells to keep clear and the lists a
@@ -2511,5 +2803,170 @@ mod tests {
             useful.iter().all(|n| *n >= 1),
             "a map grew no useful hole at all: {useful:?}"
         );
+    }
+
+    /// Every `36 × 28` sticky trap across 200 seeds per theme must respect all
+    /// footprint and bypass invariants: no overlap with walls, props, doorways,
+    /// one-way doors, rat-holes, start room, boss arena, mazes, or other traps,
+    /// and always a clear bypass lane at least two tiles wide.
+    #[test]
+    fn sticky_trap_placement_invariants_over_200_seeds_per_theme() {
+        use crate::game::art_traps::{MOUSETRAP_SIZE, STICKY_TRAP_SIZE};
+        use crate::game::collision::TILE_F;
+
+        let half_extents = |size: Vec2, facing: Vec2| -> (f32, f32) {
+            if facing.x.abs() >= facing.y.abs() {
+                (size.x * 0.5, size.y * 0.5)
+            } else {
+                (size.y * 0.5, size.x * 0.5)
+            }
+        };
+
+        for theme in Theme::all() {
+            let mut counts: Vec<usize> = Vec::with_capacity(200);
+            for seed in 0..200u64 {
+                let level = generate_once(theme, seed, 0);
+                let stickies = &level.objects.sticky_traps;
+                let mice = &level.objects.mousetraps;
+                counts.push(stickies.len());
+                assert!(
+                    stickies.len() <= MAX_STICKY_TRAPS,
+                    "{theme:?} seed {seed}: {} sticky traps exceeds cap {MAX_STICKY_TRAPS}",
+                    stickies.len()
+                );
+
+                let sticky_cells: Vec<(i32, i32)> =
+                    stickies.iter().map(|t| validate::cell_of(t.pos)).collect();
+                let start_rect = level.start_room().expect("start room").rect;
+                let boss_rect = level.boss_room().expect("boss room").rect;
+
+                for (i, trap) in stickies.iter().enumerate() {
+                    let (cx, cy) = sticky_cells[i];
+                    let (hx, hy) = half_extents(STICKY_TRAP_SIZE, trap.facing);
+
+                    // World-space AABB of the 36×28 board must stay strictly on open floor
+                    // and outside start room, boss arena, and mazes.
+                    let x0 = ((trap.pos.x - hx) / TILE_F).floor() as i32;
+                    let x1 = ((trap.pos.x + hx) / TILE_F).floor() as i32;
+                    let y0 = ((trap.pos.y - hy) / TILE_F).floor() as i32;
+                    let y1 = ((trap.pos.y + hy) / TILE_F).floor() as i32;
+                    for ty in y0..=y1 {
+                        for tx in x0..=x1 {
+                            assert!(
+                                level.tiles.get(tx, ty).is_open(),
+                                "{theme:?} seed {seed}: sticky trap at {:?} overlaps non-open cell ({tx},{ty}) = {:?}",
+                                trap.pos,
+                                level.tiles.get(tx, ty)
+                            );
+                            assert!(
+                                !start_rect.contains(tx, ty),
+                                "{theme:?} seed {seed}: sticky trap overlaps start room at ({tx},{ty})"
+                            );
+                            assert!(
+                                !boss_rect.contains(tx, ty),
+                                "{theme:?} seed {seed}: sticky trap overlaps boss arena at ({tx},{ty})"
+                            );
+                            for maze in &level.mazes {
+                                assert!(
+                                    !maze.bounds.contains(tx, ty),
+                                    "{theme:?} seed {seed}: sticky trap overlaps maze at ({tx},{ty})"
+                                );
+                            }
+                        }
+                    }
+
+                    // No doorway, one-way door, or rat-hole within ±2 tiles of center.
+                    for dy in -2..=2 {
+                        for dx in -2..=2 {
+                            assert!(
+                                !matches!(
+                                    level.tiles.get(cx + dx, cy + dy),
+                                    TileKind::Wall(
+                                        WallKind::Doorway { .. }
+                                            | WallKind::OneWayDoor { .. }
+                                            | WallKind::RatHole { .. }
+                                    )
+                                ),
+                                "{theme:?} seed {seed}: sticky trap at ({cx},{cy}) sits beside door/hole at ({},{})",
+                                cx + dx,
+                                cy + dy
+                            );
+                        }
+                    }
+
+                    // No world-space overlap with any other sticky trap or mousetrap.
+                    for (j, other) in stickies.iter().enumerate() {
+                        if i == j {
+                            continue;
+                        }
+                        let (ohx, ohy) = half_extents(STICKY_TRAP_SIZE, other.facing);
+                        let dx = (trap.pos.x - other.pos.x).abs();
+                        let dy = (trap.pos.y - other.pos.y).abs();
+                        assert!(
+                            dx >= hx + ohx + 32.0 || dy >= hy + ohy + 32.0,
+                            "{theme:?} seed {seed}: sticky traps {i} and {j} are too close ({dx:.1}, {dy:.1})"
+                        );
+                    }
+                    for other in mice {
+                        let (mhx, mhy) = half_extents(MOUSETRAP_SIZE, other.facing);
+                        let dx = (trap.pos.x - other.pos.x).abs();
+                        let dy = (trap.pos.y - other.pos.y).abs();
+                        assert!(
+                            dx >= hx + mhx + 16.0 || dy >= hy + mhy + 16.0,
+                            "{theme:?} seed {seed}: sticky trap overlaps or crowds mousetrap ({dx:.1}, {dy:.1})"
+                        );
+                    }
+
+                    // Always leaves a clear bypass lane at least two tiles wide.
+                    let others: Vec<(i32, i32)> = sticky_cells
+                        .iter()
+                        .enumerate()
+                        .filter(|&(j, _)| j != i)
+                        .map(|(_, &c)| c)
+                        .collect();
+                    assert!(
+                        sticky_bypass_ok(&level.tiles, &others, (cx, cy)),
+                        "{theme:?} seed {seed}: sticky trap at ({cx},{cy}) lacks a >=2-tile bypass"
+                    );
+                }
+            }
+            let min = counts.iter().copied().min().unwrap_or(0);
+            let max = counts.iter().copied().max().unwrap_or(0);
+            let med = median(&mut counts);
+            println!("{theme:?} sticky traps over 200 seeds: min {min}, median {med}, max {max}");
+            assert!(
+                med >= 2.0,
+                "{theme:?}: median sticky trap count too low ({med})"
+            );
+        }
+    }
+
+    /// A `36 × 28` sticky trap must never fit in a 4-tile-wide corridor, and in
+    /// a 5-tile-wide corridor it may only sit on one edge leaving a 2-tile lane.
+    #[test]
+    fn sticky_bypass_rejects_narrow_corridors_and_allows_five_tile_flank() {
+        let theme = Theme::Sewer;
+        let mut tiles = TileMap::new(40, 30, theme, 1);
+        tiles.fill_cells(0, 0, 40, 30, TileKind::Wall(WallKind::Solid));
+        // 4-tile-tall East-West corridor at y = 6..10
+        tiles.fill_cells(2, 6, 36, 4, TileKind::Open);
+        // 5-tile-tall East-West corridor at y = 16..21
+        tiles.fill_cells(2, 16, 36, 5, TileKind::Open);
+
+        // No center in the 4-tile corridor leaves a 2-tile bypass.
+        for cy in 6..10 {
+            assert!(
+                !sticky_bypass_ok(&tiles, &[], (20, cy)),
+                "4-tile corridor must reject sticky center y={cy}"
+            );
+        }
+
+        // In the 5-tile corridor (y = 16..=20):
+        // cy = 17 (footprint 16..=18) leaves South bypass 19..=20 (2 tiles) -> OK!
+        assert!(sticky_bypass_ok(&tiles, &[], (20, 17)));
+        // cy = 18 (footprint 17..=19) leaves 1 tile North + 1 tile South -> REJECT!
+        assert!(!sticky_bypass_ok(&tiles, &[], (20, 18)));
+        // cy = 19 (footprint 18..=20) leaves North bypass 16..=17 (2 tiles) -> OK!
+        assert!(sticky_bypass_ok(&tiles, &[], (20, 19)));
     }
 }
