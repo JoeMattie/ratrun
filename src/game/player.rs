@@ -85,15 +85,49 @@ pub struct Player {
     pub decoy_at: Option<Vec2>,
 }
 
+/// First card's cost, in XP. Six XP is the design's "first card in 12-20 s"
+/// anchor: the opening horde hands that over in about fifteen seconds.
+pub const XP_BASE: f64 = 6.0;
+
+/// Growth ratio of the geometric XP curve.
+///
+/// The wave-3 balance pass replaced the flat-plus-linear curve (`6, 8, 10, …,
+/// capped at 100`) with a geometric one on the owner's direction: *"the game is
+/// too linear, more XP needed to get higher level"*. With the flat cap the
+/// measured economy (≈14 800 XP collected on a fifteen-minute level) reached
+/// player level ~150, which left the build complete by minute six and made the
+/// boss pools trivial. At 1.10 the same economy buys ~55 picks by 14:00 and
+/// ~57 by the boss: the design's 50-56 band, with the pace visibly slowing
+/// (level 20 costs 37 XP, level 40 costs 247, level 50 costs 640) and no flat
+/// cap.
+///
+/// Fitted against the measured per-checkpoint XP curve of the pre-change batch
+/// (skilled, 8 campaigns: 24 XP at 1:00, 100 at 2:00, 257 at 3:00, 1 613 at
+/// 6:00, 4 556 at 9:00, 8 946 at 12:00, 12 307 at 14:00). See
+/// `scratchpad/w3/balance/LOG.md`.
+pub const XP_GROWTH: f64 = 1.10;
+
 /// XP needed to go from `level` to `level + 1`.
 ///
-/// **Wave-3 §1 XP budget.** The first card costs 6 XP, then +2 per card, capped
-/// at 100. The curve is deliberately cheap in the teaching stretch and flat
-/// late: `WAVE3_DESIGN.md` §1 anchors the build milestones at 2,250 cumulative
-/// XP through pick 45 and 2,944 through pick 52 (both matched exactly by this
-/// integer curve). A surviving player should see 50-56 picks by 14:00.
+/// `round(XP_BASE * XP_GROWTH^(level-1))`, with no cap. The curve is cheap in
+/// the teaching band (6, 7, 7, 8, 9, 10 …) so the first cards land within a
+/// minute, and grows geometrically from there, so each later level takes
+/// noticeably longer than the one before it.
 pub fn xp_for_level(level: u32) -> u32 {
-    (6 + level.saturating_sub(1) * 2).min(100)
+    let n = level.max(1).saturating_sub(1) as i32;
+    let cost = XP_BASE * XP_GROWTH.powi(n);
+    cost.round().clamp(1.0, u32::MAX as f64) as u32
+}
+
+/// Cumulative XP banked to reach `level` from level 1 (the sum of every card's
+/// cost up to but not including `level`), matching [`Player::add_xp`]'s integer
+/// arithmetic exactly.
+///
+/// This is the balance pass's measuring stick: a run's total XP income is
+/// `xp_to_reach(player.level) + player.xp`, so the batch report can plot the
+/// economy against the cost curve without adding a counter to the simulation.
+pub fn xp_to_reach(level: u32) -> u32 {
+    (1..level.max(1)).map(xp_for_level).sum()
 }
 
 impl Player {
@@ -255,22 +289,24 @@ mod tests {
         assert_eq!(plain.hp, hp - 10.0);
     }
 
-    /// Cumulative XP to reach a level, matching [`Player::add_xp`]'s integer
-    /// arithmetic exactly (so the documented totals cannot drift).
-    fn xp_to_reach(level: u32) -> u32 {
-        (1..level).map(xp_for_level).sum()
-    }
-
     #[test]
-    fn xp_curve_matches_the_wave3_budget() {
-        // §1: first card 6 XP, +2 per card, cap 100.
+    fn xp_curve_is_geometric_and_uncapped() {
+        // First card 6 XP, then ×1.10 per card, rounded, with no flat cap.
         assert_eq!(xp_for_level(1), 6);
-        assert_eq!(xp_for_level(2), 8);
-        assert_eq!(xp_for_level(48), 100);
-        assert_eq!(xp_for_level(80), 100);
-        // Cumulative anchors: pick 45 costs 2,250 and pick 52 costs 2,944.
-        assert_eq!(xp_to_reach(46), 2250);
-        assert_eq!(xp_to_reach(53), 2944);
+        assert_eq!(xp_for_level(2), 7);
+        assert_eq!(xp_for_level(3), 7);
+        assert_eq!(xp_for_level(10), 14);
+        assert_eq!(xp_for_level(20), 37);
+        assert_eq!(xp_for_level(30), 95);
+        assert_eq!(xp_for_level(40), 247);
+        assert_eq!(xp_for_level(50), 640);
+        // Cumulative anchors: the design's 50-56 pick band by 14:00 needs
+        // ≈3.9k-11.3k collected XP, which the measured economy supplies.
+        assert_eq!(xp_to_reach(45), 3919);
+        assert_eq!(xp_to_reach(50), 6346);
+        assert_eq!(xp_to_reach(55), 10254);
+        // No cap: the cost keeps growing past the old 100 ceiling.
+        assert!(xp_for_level(60) > xp_for_level(50));
     }
 
     #[test]

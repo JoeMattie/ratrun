@@ -56,7 +56,7 @@ use crate::game::art_boss_mower::MowerState;
 use crate::game::art_boss_night_edition::NightEditionState;
 use crate::game::ecs::resources::DamageLedger;
 use crate::game::ecs::systems::boss::{Boss, BossFight, BossKind, BossProjectile, BossState};
-use crate::game::ecs::systems::miniboss::Miniboss;
+use crate::game::ecs::systems::miniboss::{Miniboss, MinibossSchedule};
 use crate::game::weapon::WeaponKind;
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::level::Theme;
@@ -518,11 +518,76 @@ pub struct LevelStats {
     /// `boss_dealt`. The ledger is cumulative for the level while the report is
     /// incremental, so each tick attributes the delta.
     pub ledger_boss_seen: [f32; crate::game::weapon::WEAPON_SLOTS],
+
+    // ---- wave 3 balance columns -----------------------------------------
+    //
+    // Everything below exists so the balance pass can see the economy and the
+    // named fights instead of inferring them. None of it changes the run.
+    /// Running totals of [`DamageLedger::dealt`] already booked into the
+    /// per-evolution split. The base ledger is cumulative for the level.
+    pub ledger_seen: [f32; crate::game::weapon::WEAPON_SLOTS],
+    /// Gold picked up on this level (positive deltas of `World.gold`).
+    pub gold_collected: u32,
+    /// Gold spent in the gene-splice shop on this level.
+    pub gold_spent: u32,
+    /// Purchases made at the gene-splice shop on this level.
+    pub shop_purchases: u32,
+    /// Named miniboss fights on this level, in appointment order.
+    pub minibosses: Vec<MinibossFight>,
+    /// The boss fought on this level (its `BossKind` name), if one appeared.
+    pub boss_kind: Option<&'static str>,
+    /// Seconds each weapon kind was owned on this level (uptime by kind).
+    pub weapon_uptime: BTreeMap<&'static str, f32>,
+    /// Damage each evolved weapon dealt on this level, keyed by evolution
+    /// name. The base ledger credits an evolution to its original kind, so this
+    /// is the evolved slice of that kind's damage.
+    pub evolution_dealt: BTreeMap<&'static str, f32>,
+    /// Seconds each evolution was active on this level.
+    pub evolution_uptime: BTreeMap<&'static str, f32>,
+    /// Cumulative XP collected on this level (`xp_to_reach(level) + xp`), the
+    /// number the geometric cost curve is fitted against.
+    pub xp_total: u32,
+}
+
+/// One named miniboss fight on a level (the wave 3 appointment system).
+///
+/// A miniboss either dies (dropping a chest) or retreats at the next
+/// appointment; `killed` says which. `spawned_at`/`ended_at` are on the
+/// level's clock so the report can show the fight length per appointment.
+#[derive(Clone, Copy, Debug)]
+pub struct MinibossFight {
+    /// 0-based appointment (3:00, 6:00, 9:00, 12:00).
+    pub appointment: u8,
+    /// The named miniboss's display name.
+    pub kind: &'static str,
+    /// Level-clock time the body first appeared.
+    pub spawned_at: f32,
+    /// Level-clock time it left the field (0 while still alive).
+    pub ended_at: f32,
+    /// Maximum HP it spawned with.
+    pub hp_max: f32,
+    /// Did the rat kill it (chest paid) or did it retreat?
+    pub killed: bool,
+}
+
+impl MinibossFight {
+    /// Seconds the fight lasted (`ended_at - spawned_at`), 0 while alive.
+    pub fn length(&self) -> f32 {
+        if self.ended_at > 0.0 {
+            (self.ended_at - self.spawned_at).max(0.0)
+        } else {
+            0.0
+        }
+    }
 }
 
 /// Progress checkpoints the batch reports level/upgrade snapshots at (seconds
 /// on a level's clock).
-pub const PROGRESS_TIMES: [f32; 4] = [60.0, 120.0, 180.0, 240.0];
+///
+/// Wave 3 lengthened a level to fifteen minutes, so the old four-minute window
+/// stopped before the build had taken shape. The knots now follow the design's
+/// own milestone table (`WAVE3_DESIGN.md` §1): 1, 2, 3, 6, 9, 12 and 14 minutes.
+pub const PROGRESS_TIMES: [f32; 7] = [60.0, 120.0, 180.0, 360.0, 540.0, 720.0, 840.0];
 
 /// "Within 30 px of an enemy" means the rat's centre is that close to an
 /// enemy's *body* (centre distance minus the enemy's radius).
@@ -541,6 +606,16 @@ pub struct Progress {
     pub kills: u32,
     /// HP fraction (max HP changes with picks).
     pub hp_frac: f32,
+    /// Distinct weapon kinds owned at this checkpoint.
+    pub weapons: u8,
+    /// Distinct passive kinds owned at this checkpoint.
+    pub passives: u8,
+    /// Gold on hand at this checkpoint.
+    pub gold: u32,
+    /// Gold collected so far on this level.
+    pub gold_collected: u32,
+    /// Cumulative XP collected so far on this level.
+    pub xp: u32,
 }
 
 impl LevelStats {
@@ -603,6 +678,13 @@ pub struct AutoRun {
     died: bool,
     won: bool,
     ticks: u64,
+    /// The miniboss fight currently open (started, not yet ended).
+    mb_open: Option<MinibossFight>,
+    /// Last tick's `MinibossSchedule::grace_suppress_until`, so a rise means a
+    /// miniboss was killed (the retreat path does not touch it).
+    prev_grace_suppress: f32,
+    /// Last tick's gold balance, for collected/spent deltas.
+    prev_gold: u32,
 }
 
 impl AutoRun {
@@ -653,6 +735,7 @@ impl AutoRun {
         };
         let mut stats = RunStats::default();
         stats.levels.push(LevelStats::new(start_level));
+        let start_gold = world.gold;
         let mut bot = Bot::new(opts.skill, run_seed);
         bot.on_new_level(start_level);
         let mut rng = StdRng::seed_from_u64(run_seed ^ 0x000A_0700_u64);
@@ -676,6 +759,9 @@ impl AutoRun {
             died: false,
             won: false,
             ticks: 0,
+            mb_open: None,
+            prev_grace_suppress: 0.0,
+            prev_gold: start_gold,
         }
     }
 
@@ -716,7 +802,8 @@ impl AutoRun {
         // what is worth buying and leave, so a self-playing run never stalls on
         // a menu it cannot see.
         if self.world.pending_shop && !self.world.finished() {
-            self.bot.shop_visit(&mut self.world);
+            let bought = self.bot.shop_visit(&mut self.world);
+            self.level_stats().shop_purchases += bought;
         }
         if self.world.game_over {
             self.finish_death();
@@ -866,6 +953,7 @@ impl AutoRun {
         // Completing a level *is* killing its boss; record it even if the
         // boss's death tick and the completion flag landed on different ticks.
         let dealt = self.boss_damage;
+        self.close_open_miniboss();
         {
             let stats = self.level_stats();
             stats.reached_boss = true;
@@ -911,6 +999,7 @@ impl AutoRun {
                     self.stats.levels.push(LevelStats::new(next));
                     self.bot.on_new_level(next);
                     self.reset_boss_book();
+                    self.start_level_tracking();
                     level_finished = false;
                 }
                 None => {
@@ -946,6 +1035,7 @@ impl AutoRun {
         let death = DeathInfo { level, at, cause };
         let enemies = self.world.enemy_count() as u32;
         let note = classify_death(&self.world, cause);
+        self.close_open_miniboss();
         let stats = self.level_stats();
         stats.death = Some(death);
         stats.death_note = Some(note);
@@ -963,6 +1053,24 @@ impl AutoRun {
         self.boss_alive = false;
         self.boss_hp = 0.0;
         self.boss_damage = 0.0;
+    }
+
+    /// Reset the per-level economy/miniboss trackers when a new level starts.
+    fn start_level_tracking(&mut self) {
+        self.mb_open = None;
+        self.prev_grace_suppress = 0.0;
+        self.prev_gold = self.world.gold;
+    }
+
+    /// Close a miniboss fight still open when the level ends (survived, not
+    /// killed: the boss hand-off or the rat's death ended the level first).
+    fn close_open_miniboss(&mut self) {
+        if let Some(mut open) = self.mb_open.take() {
+            open.ended_at = self.world.elapsed;
+            open.killed = false;
+            let stats = self.level_stats();
+            stats.minibosses.push(open);
+        }
     }
 
     /// Book the tick's damage, boss time and boss damage.
@@ -996,6 +1104,8 @@ impl AutoRun {
         let near = self.near_enemy;
         let kills = self.world.kills;
         let player_level = self.world.player.level;
+        let xp_total = crate::game::player::xp_to_reach(player_level)
+            .saturating_add(self.world.player.xp);
         let hp_frac = (self.world.player.hp / self.world.player.max_hp().max(1.0))
             .clamp(0.0, 1.0);
         let pos = self
@@ -1007,6 +1117,7 @@ impl AutoRun {
         let stats = &mut self.stats.levels[pos];
         stats.time = elapsed;
         stats.kills = kills;
+        stats.xp_total = stats.xp_total.max(xp_total);
         stats.max_player_level = stats.max_player_level.max(player_level);
         stats.max_analytic_dps = stats.max_analytic_dps.max(dps_now);
         if near {
@@ -1020,12 +1131,19 @@ impl AutoRun {
         let next_checkpoint = PROGRESS_TIMES.get(stats.progress.len()).copied();
         if let Some(at) = next_checkpoint {
             if elapsed >= at {
+                let weapons = self.world.player.loadout.weapons.len() as u8;
+                let passives = self.world.player.loadout.passives.len() as u8;
                 stats.progress.push(Progress {
                     at,
                     player_level,
                     upgrades: stats.upgrades.len() as u32,
                     kills,
                     hp_frac,
+                    weapons,
+                    passives,
+                    gold: self.world.gold,
+                    gold_collected: stats.gold_collected,
+                    xp: xp_total,
                 });
             }
         }
@@ -1062,6 +1180,102 @@ impl AutoRun {
                 self.boss_alive = false;
             }
             (None, None) => {}
+        }
+
+        // ---- wave 3 balance columns -------------------------------------
+        // Gold income: `World.gold` only moves on a collection (up) or a shop
+        // purchase (down), so the deltas are the whole economy.
+        let gold_now = self.world.gold;
+        if gold_now > self.prev_gold {
+            stats.gold_collected += gold_now - self.prev_gold;
+        } else if gold_now < self.prev_gold {
+            stats.gold_spent += self.prev_gold - gold_now;
+        }
+        self.prev_gold = gold_now;
+
+        // Named miniboss fights: open one when a body appears, close it when
+        // the body leaves. A rise in `grace_suppress_until` means the death
+        // path ran (the retreat path leaves it alone).
+        let grace = self
+            .world
+            .ecs
+            .resource::<MinibossSchedule>()
+            .grace_suppress_until;
+        let mb = living_miniboss_info(&self.world);
+        match (self.mb_open, mb) {
+            (None, Some((appointment, kind, hp_max))) => {
+                self.mb_open = Some(MinibossFight {
+                    appointment,
+                    kind,
+                    spawned_at: elapsed,
+                    ended_at: 0.0,
+                    hp_max,
+                    killed: false,
+                });
+            }
+            (Some(open), Some((appointment, kind, hp_max))) => {
+                if appointment != open.appointment {
+                    // The previous one left as the next arrived: a retreat.
+                    let mut closed = open;
+                    closed.ended_at = elapsed;
+                    stats.minibosses.push(closed);
+                    self.mb_open = Some(MinibossFight {
+                        appointment,
+                        kind,
+                        spawned_at: elapsed,
+                        ended_at: 0.0,
+                        hp_max,
+                        killed: false,
+                    });
+                }
+            }
+            (Some(open), None) => {
+                let mut closed = open;
+                closed.ended_at = elapsed;
+                closed.killed = grace > self.prev_grace_suppress + 0.01;
+                stats.minibosses.push(closed);
+                self.mb_open = None;
+            }
+            (None, None) => {}
+        }
+        self.prev_grace_suppress = grace;
+
+        // Per-weapon uptime and per-evolution damage/uptime. An evolution
+        // credits damage to its original weapon kind, so the per-kind ledger
+        // delta is split by whether the kind is evolved this tick.
+        for w in &self.world.player.loadout.weapons {
+            let name = w.kind.name();
+            *stats.weapon_uptime.entry(name).or_insert(0.0) += dt;
+            if w.evolved {
+                if let Some(ev) = w.kind.evolution() {
+                    *stats.evolution_uptime.entry(ev.name).or_insert(0.0) += dt;
+                }
+            }
+        }
+        let ledger = self.world.ecs.resource::<DamageLedger>().dealt;
+        for kind in WeaponKind::all() {
+            let i = kind.index();
+            let delta = ledger[i] - stats.ledger_seen[i];
+            if delta > 0.0 {
+                if let Some(w) = self
+                    .world
+                    .player
+                    .loadout
+                    .weapons
+                    .iter()
+                    .find(|w| w.kind == kind)
+                {
+                    if w.evolved {
+                        if let Some(ev) = kind.evolution() {
+                            *stats.evolution_dealt.entry(ev.name).or_insert(0.0) += delta;
+                        }
+                    }
+                }
+            }
+            stats.ledger_seen[i] = ledger[i];
+        }
+        if stats.boss_kind.is_none() {
+            stats.boss_kind = living_boss_name(&self.world);
         }
 
         // Balance instrumentation: per-weapon damage actually dealt. The
@@ -1330,6 +1544,34 @@ fn boss_name(kind: BossKind) -> &'static str {
         BossKind::HorseshoeCrab => "horseshoe crab",
         BossKind::MegaRat => "subject r-01",
     }
+}
+
+/// The living named miniboss's `(appointment, name, max_hp)`, if one is up.
+///
+/// Only one appointment is alive at a time, so the first match is the fight.
+fn living_miniboss_info(w: &World) -> Option<(u8, &'static str, f32)> {
+    w.ecs.iter_entities().find_map(|entity| {
+        let e = entity.get::<Enemy>()?;
+        if !e.alive() {
+            return None;
+        }
+        let mb = entity.get::<Miniboss>()?;
+        if mb.chest_dropped {
+            return None;
+        }
+        Some((mb.appointment as u8, mb.kind.name(), e.max_hp))
+    })
+}
+
+/// The living boss's display name (`BossKind` via [`boss_name`]), if one is up.
+fn living_boss_name(w: &World) -> Option<&'static str> {
+    w.ecs.iter_entities().find_map(|entity| {
+        let b = entity.get::<Boss>()?;
+        if b.dead {
+            return None;
+        }
+        Some(boss_name(b.kind))
+    })
 }
 
 /// `(bodies within 60 px, within 120 px)` of the rat, at death.

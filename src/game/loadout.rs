@@ -1,6 +1,8 @@
 //! Player loadout: owned weapons, passive stats, and the level-up
 //! upgrade-choice generation / application.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use rand::seq::SliceRandom;
 use rand::Rng;
 
@@ -75,6 +77,58 @@ const fn clamp_slots(n: usize) -> usize {
     } else {
         n
     }
+}
+
+/// Process-wide slot-cap override for the balance pass (`0` = use the
+/// constants above).
+///
+/// The shipped caps are the two constants; the meta-progression layer will make
+/// them per-run values. The wave-3 balance pass has to measure a **fresh**
+/// profile (4 + 4 kinds) against a **maxed** one (8 + 8) without rebuilding, so
+/// every "may this build hold another kind?" check goes through [`slot_caps`].
+/// Only the batch CLI (`--bot-batch … --caps 4:4`) sets this; a normal game
+/// never touches it and reads the constants.
+static CAP_OVERRIDE: AtomicU32 = AtomicU32::new(0);
+
+/// The distinct-kind caps this build is held to: `(weapons, passives)`.
+///
+/// Reads [`CAP_OVERRIDE`] when a batch set one, else [`MAX_WEAPONS`] /
+/// [`MAX_PASSIVES`]. Call this instead of the constants in every cap check.
+#[inline]
+pub fn slot_caps() -> (usize, usize) {
+    let v = CAP_OVERRIDE.load(Ordering::Relaxed);
+    if v == 0 {
+        (MAX_WEAPONS, MAX_PASSIVES)
+    } else {
+        (((v >> 8) & 0xFF) as usize, (v & 0xFF) as usize)
+    }
+}
+
+/// The batch override as rack caps, clamped into the legal `4..=8`, or `None`
+/// when no batch set one (the normal game: [`Loadout::caps`] decides).
+#[inline]
+fn cap_override() -> Option<(usize, usize)> {
+    let v = CAP_OVERRIDE.load(Ordering::Relaxed);
+    if v == 0 {
+        None
+    } else {
+        Some((
+            clamp_slots(((v >> 8) & 0xFF) as usize),
+            clamp_slots((v & 0xFF) as usize),
+        ))
+    }
+}
+
+/// Override [`slot_caps`] process-wide (batch measurement only).
+///
+/// Both caps are clamped to `1..=255` so a typo cannot produce a zero-slot
+/// build. Returns the previous `(weapons, passives)` so a caller can restore it.
+pub fn set_slot_caps(weapons: usize, passives: usize) -> (usize, usize) {
+    let prev = slot_caps();
+    let w = weapons.clamp(1, 255) as u32;
+    let p = passives.clamp(1, 255) as u32;
+    CAP_OVERRIDE.store((w << 8) | p, Ordering::Relaxed);
+    prev
 }
 
 /// Gold a `Purse` level-up card hands over (design §2).
@@ -582,12 +636,13 @@ impl Loadout {
 
     /// How many distinct **weapons** this loadout may hold (`4..=8`).
     pub fn max_weapons(&self) -> usize {
-        self.caps.weapons
+        // The bot batch's `--caps W:P` measures a profile without rebuilding.
+        cap_override().map_or(self.caps.weapons, |(w, _)| w)
     }
 
     /// How many distinct **passives** this loadout may hold (`4..=8`).
     pub fn max_passives(&self) -> usize {
-        self.caps.passives
+        cap_override().map_or(self.caps.passives, |(_, p)| p)
     }
 
     /// Replace the caps in force (a profile upgrade bought between runs).

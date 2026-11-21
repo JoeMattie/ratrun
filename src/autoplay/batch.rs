@@ -99,6 +99,11 @@ pub struct BatchOpts {
     /// "printworks" reach the two side routes the batch could not otherwise
     /// measure at all (`--level 2` is always the Kitchen, `--level 3` the Lab).
     pub route: Option<crate::game::level::Theme>,
+    /// Distinct-kind slot caps for this batch (`--caps 4:4`): a fresh profile
+    /// runs 4 weapons + 4 passives, a maxed meta profile 8 + 8. `None` leaves
+    /// the shipped constants in force. Set process-wide for the whole batch
+    /// (see [`crate::game::loadout::set_slot_caps`]).
+    pub caps: Option<(usize, usize)>,
 }
 
 impl Default for BatchOpts {
@@ -118,6 +123,7 @@ impl Default for BatchOpts {
             cycle_skills: false,
             exact_seed: false,
             route: None,
+            caps: None,
         }
     }
 }
@@ -198,6 +204,49 @@ pub struct LevelOutcome {
     /// Peak analytic build DPS on this level.
     #[serde(default)]
     pub max_analytic_dps: f32,
+    /// Gold collected on this level (drops + chests).
+    #[serde(default)]
+    pub gold_collected: u32,
+    /// Gold spent on this level (shop purchases).
+    #[serde(default)]
+    pub gold_spent: u32,
+    /// Shop purchases made on this level.
+    #[serde(default)]
+    pub shop_purchases: u32,
+    /// Cumulative XP collected on this level.
+    #[serde(default)]
+    pub xp_total: u32,
+    /// The named miniboss fights on this level, in appointment order.
+    #[serde(default)]
+    pub minibosses: Vec<MinibossOutcome>,
+    /// The boss fought on this level (display name), if one appeared.
+    #[serde(default)]
+    pub boss_kind: Option<String>,
+    /// Seconds each weapon kind was owned on this level.
+    #[serde(default)]
+    pub weapon_uptime: BTreeMap<String, f32>,
+    /// Damage each evolution dealt on this level.
+    #[serde(default)]
+    pub evolution_dealt: BTreeMap<String, f32>,
+    /// Seconds each evolution was owned on this level.
+    #[serde(default)]
+    pub evolution_uptime: BTreeMap<String, f32>,
+}
+
+/// One named miniboss fight as it appears in a report.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MinibossOutcome {
+    pub appointment: u8,
+    pub kind: String,
+    pub spawned_at: f32,
+    pub ended_at: f32,
+    pub length: f32,
+    pub killed: bool,
+    /// Maximum HP it spawned with (the appointment's pool, before the run's
+    /// own scaling). Lets the report say whether a 2 s fight means the pool is
+    /// too small or the rat's build is too strong.
+    #[serde(default)]
+    pub hp_max: f32,
 }
 
 /// A progression checkpoint as it appears in a report.
@@ -208,6 +257,17 @@ pub struct ProgressOutcome {
     pub upgrades: u32,
     pub kills: u32,
     pub hp_frac: f32,
+    #[serde(default)]
+    pub weapons: u8,
+    #[serde(default)]
+    pub passives: u8,
+    #[serde(default)]
+    pub gold: u32,
+    #[serde(default)]
+    pub gold_collected: u32,
+    /// Cumulative XP collected by this checkpoint.
+    #[serde(default)]
+    pub xp: u32,
 }
 
 impl LevelOutcome {
@@ -245,6 +305,39 @@ impl LevelOutcome {
             boss_dealt: weapon_damage_map(&s.boss_dealt),
             max_player_level: s.max_player_level,
             max_analytic_dps: s.max_analytic_dps,
+            gold_collected: s.gold_collected,
+            gold_spent: s.gold_spent,
+            shop_purchases: s.shop_purchases,
+            xp_total: s.xp_total,
+            minibosses: s
+                .minibosses
+                .iter()
+                .map(|m| MinibossOutcome {
+                    appointment: m.appointment,
+                    kind: m.kind.to_string(),
+                    spawned_at: m.spawned_at,
+                    ended_at: m.ended_at,
+                    length: m.length(),
+                    killed: m.killed,
+                    hp_max: m.hp_max,
+                })
+                .collect(),
+            boss_kind: s.boss_kind.map(|s| s.to_string()),
+            weapon_uptime: s
+                .weapon_uptime
+                .iter()
+                .map(|(k, v)| (k.to_string(), *v))
+                .collect(),
+            evolution_dealt: s
+                .evolution_dealt
+                .iter()
+                .map(|(k, v)| (k.to_string(), *v))
+                .collect(),
+            evolution_uptime: s
+                .evolution_uptime
+                .iter()
+                .map(|(k, v)| (k.to_string(), *v))
+                .collect(),
         }
     }
 }
@@ -264,6 +357,11 @@ fn progress_outcome(p: &Progress) -> ProgressOutcome {
         upgrades: p.upgrades,
         kills: p.kills,
         hp_frac: p.hp_frac,
+        weapons: p.weapons,
+        passives: p.passives,
+        gold: p.gold,
+        gold_collected: p.gold_collected,
+        xp: p.xp,
     }
 }
 
@@ -331,6 +429,87 @@ pub struct BatchReport {
     /// reasonable pick", which used to be guesswork.
     #[serde(default)]
     pub weapons: Vec<WeaponAgg>,
+    /// Per-evolution damage share and uptime (wave 3 balance column).
+    #[serde(default)]
+    pub evolutions: Vec<EvolutionAgg>,
+    /// Named miniboss fights, one row per appointment/kind.
+    #[serde(default)]
+    pub minibosses: Vec<MinibossAgg>,
+    /// Boss fight lengths, one row per boss kind.
+    #[serde(default)]
+    pub bosses: Vec<BossAgg>,
+    /// The gold economy: income, spend and purchases per level.
+    #[serde(default)]
+    pub gold: GoldAgg,
+    /// Deaths bucketed by minute on the level.
+    #[serde(default)]
+    pub death_minutes: Vec<DeathMinute>,
+}
+
+/// One evolution's balance row: how much damage it dealt and how long it was
+/// owned, against the base weapon's own numbers.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct EvolutionAgg {
+    pub name: String,
+    /// Levels on which the evolution was owned.
+    pub owned: usize,
+    /// Mean seconds the evolution was active per level that owned it.
+    pub uptime: f32,
+    /// Damage dealt, summed over the batch.
+    pub dealt: f32,
+    /// Mean damage per level that owned it.
+    pub dealt_per_level: f32,
+    /// Share of all weapon damage dealt in the batch.
+    pub share: f32,
+}
+
+/// One named miniboss's fight summary.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MinibossAgg {
+    pub appointment: u8,
+    pub kind: String,
+    /// Fights the batch saw.
+    pub fights: usize,
+    /// Fights the rat won (the chest was paid).
+    pub killed: usize,
+    /// Fight length in seconds, for the fights that ended.
+    pub seconds: Percentiles,
+}
+
+/// One boss's fight summary.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct BossAgg {
+    pub boss: String,
+    pub fights: usize,
+    pub defeated: usize,
+    pub seconds: Percentiles,
+    pub dps: f32,
+}
+
+/// The gold economy per level.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct GoldAgg {
+    /// Levels that reported gold.
+    pub levels: usize,
+    /// Mean gold collected per level.
+    pub collected: f32,
+    /// Mean gold spent per level.
+    pub spent: f32,
+    /// Mean shop purchases per level.
+    pub purchases: f32,
+    /// Mean gold on hand at the 3:00 checkpoint (the design's 20-45 band).
+    pub at_3m: f32,
+    /// Mean gold collected by the 3:00 checkpoint.
+    pub collected_at_3m: f32,
+}
+
+/// Deaths bucketed by minute on the level.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DeathMinute {
+    pub minute: u32,
+    pub deaths: usize,
+    /// The most common causes in this minute, most common first.
+    pub causes: Vec<(String, usize)>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -399,6 +578,18 @@ pub struct LevelAgg {
     /// Per-weapon damage share / pick rate / win correlation on this level.
     #[serde(default)]
     pub weapons: Vec<WeaponAgg>,
+    /// Named miniboss fights on this level, one row per appointment/kind.
+    #[serde(default)]
+    pub minibosses: Vec<MinibossAgg>,
+    /// Mean cumulative XP collected on this level.
+    #[serde(default)]
+    pub mean_xp: f32,
+    /// The gold economy on this level.
+    #[serde(default)]
+    pub gold: GoldAgg,
+    /// Deaths on this level bucketed by minute.
+    #[serde(default)]
+    pub death_minutes: Vec<DeathMinute>,
 }
 
 /// A progression checkpoint aggregated over runs.
@@ -410,6 +601,17 @@ pub struct ProgressAgg {
     pub mean_upgrades: f32,
     pub mean_kills: f32,
     pub mean_hp_frac: f32,
+    /// Mean cumulative XP collected at this checkpoint.
+    #[serde(default)]
+    pub mean_xp: f32,
+    /// Mean distinct weapons / passives owned at this checkpoint.
+    #[serde(default)]
+    pub mean_weapons: f32,
+    #[serde(default)]
+    pub mean_passives: f32,
+    /// Mean gold on hand at this checkpoint.
+    #[serde(default)]
+    pub mean_gold: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -775,6 +977,22 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
     let mut w_picks: BTreeMap<String, usize> = BTreeMap::new();
     let mut w_taken: BTreeMap<String, usize> = BTreeMap::new();
     let mut w_won: BTreeMap<String, usize> = BTreeMap::new();
+    // Wave 3 balance columns: evolutions, named fights, gold, death minutes.
+    let mut evo_owned: BTreeMap<String, usize> = BTreeMap::new();
+    let mut evo_uptime: BTreeMap<String, f32> = BTreeMap::new();
+    let mut evo_dealt: BTreeMap<String, f32> = BTreeMap::new();
+    let mut mb_fights: BTreeMap<(u8, String), Vec<f32>> = BTreeMap::new();
+    let mut mb_killed: BTreeMap<(u8, String), usize> = BTreeMap::new();
+    let mut boss_fights: BTreeMap<String, Vec<f32>> = BTreeMap::new();
+    let mut boss_defeated: BTreeMap<String, usize> = BTreeMap::new();
+    let mut boss_dps: BTreeMap<String, Vec<f32>> = BTreeMap::new();
+    let mut gold_levels = 0usize;
+    let mut gold_collected = 0f32;
+    let mut gold_spent = 0f32;
+    let mut gold_purchases = 0f32;
+    let mut gold_at_3m: Vec<f32> = Vec::new();
+    let mut gold_collected_at_3m: Vec<f32> = Vec::new();
+    let mut death_minutes: BTreeMap<u32, BTreeMap<String, usize>> = BTreeMap::new();
 
     for outcome in &outcomes {
         if outcome.won {
@@ -838,6 +1056,10 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
                         upgrades: Vec::new(),
                         kept: Vec::new(),
                         weapons: Vec::new(),
+                        minibosses: Vec::new(),
+                        mean_xp: 0.0,
+                        gold: GoldAgg::default(),
+                        death_minutes: Vec::new(),
                     });
                     levels.last_mut().expect("just pushed")
                 }
@@ -891,6 +1113,52 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
                     }
                 }
             }
+            // Wave 3 balance columns.
+            for (name, secs) in &level.evolution_uptime {
+                *evo_owned.entry(name.clone()).or_insert(0) += 1;
+                *evo_uptime.entry(name.clone()).or_insert(0.0) += *secs;
+            }
+            for (name, dealt) in &level.evolution_dealt {
+                *evo_dealt.entry(name.clone()).or_insert(0.0) += *dealt;
+            }
+            for mb in &level.minibosses {
+                let key = (mb.appointment, mb.kind.clone());
+                mb_fights.entry(key.clone()).or_default().push(mb.length);
+                if mb.killed {
+                    *mb_killed.entry(key).or_insert(0) += 1;
+                }
+            }
+            if let Some(boss) = &level.boss_kind {
+                if level.reached_boss {
+                    boss_fights
+                        .entry(boss.clone())
+                        .or_default()
+                        .push(level.boss_seconds);
+                    boss_dps
+                        .entry(boss.clone())
+                        .or_default()
+                        .push(level.boss_dps);
+                    if level.boss_defeated {
+                        *boss_defeated.entry(boss.clone()).or_insert(0) += 1;
+                    }
+                }
+            }
+            gold_levels += 1;
+            gold_collected += level.gold_collected as f32;
+            gold_spent += level.gold_spent as f32;
+            gold_purchases += level.shop_purchases as f32;
+            if let Some(p) = level.progress.iter().find(|p| (p.at - 180.0).abs() < 0.01) {
+                gold_at_3m.push(p.gold as f32);
+                gold_collected_at_3m.push(p.gold_collected as f32);
+            }
+            if let Some(d) = &level.death {
+                let minute = (d.at / 60.0).floor() as u32;
+                *death_minutes
+                    .entry(minute)
+                    .or_default()
+                    .entry(d.cause.clone())
+                    .or_insert(0) += 1;
+            }
         }
         // The last level reached carries this run's final kept set.
         if let Some(last) = outcome.levels.last() {
@@ -925,8 +1193,20 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
         let mut w_picks: BTreeMap<String, usize> = BTreeMap::new();
         let mut w_taken: BTreeMap<String, usize> = BTreeMap::new();
         let mut w_cleared: BTreeMap<String, usize> = BTreeMap::new();
+        // Wave 3 balance columns for this level: named fights, gold, deaths.
+        let mut mb_fights: BTreeMap<(u8, String), Vec<f32>> = BTreeMap::new();
+        let mut mb_killed: BTreeMap<(u8, String), usize> = BTreeMap::new();
+        let mut gold_levels = 0usize;
+        let mut gold_collected = 0f32;
+        let mut gold_spent = 0f32;
+        let mut gold_purchases = 0f32;
+        let mut gold_at_3m: Vec<f32> = Vec::new();
+        let mut gold_collected_at_3m: Vec<f32> = Vec::new();
+        let mut death_minutes: BTreeMap<u32, BTreeMap<String, usize>> = BTreeMap::new();
+        let mut xp_seen: Vec<f32> = Vec::new();
         for outcome in &outcomes {
             for level in outcome.levels.iter().filter(|l| l.level == agg.level) {
+                xp_seen.push(level.xp_total as f32);
                 times.push(level.time);
                 if level.time > 0.0 {
                     kill_rates.push(level.kills as f32 / (level.time / 60.0));
@@ -991,6 +1271,30 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
                         }
                     }
                 }
+                // Wave 3 balance columns.
+                for mb in &level.minibosses {
+                    let key = (mb.appointment, mb.kind.clone());
+                    mb_fights.entry(key.clone()).or_default().push(mb.length);
+                    if mb.killed {
+                        *mb_killed.entry(key).or_insert(0) += 1;
+                    }
+                }
+                gold_levels += 1;
+                gold_collected += level.gold_collected as f32;
+                gold_spent += level.gold_spent as f32;
+                gold_purchases += level.shop_purchases as f32;
+                if let Some(p) = level.progress.iter().find(|p| (p.at - 180.0).abs() < 0.01) {
+                    gold_at_3m.push(p.gold as f32);
+                    gold_collected_at_3m.push(p.gold_collected as f32);
+                }
+                if let Some(d) = &level.death {
+                    let minute = (d.at / 60.0).floor() as u32;
+                    *death_minutes
+                        .entry(minute)
+                        .or_default()
+                        .entry(d.cause.clone())
+                        .or_insert(0) += 1;
+                }
             }
         }
         agg.clear_rate = if agg.attempted == 0 {
@@ -1027,6 +1331,17 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
             agg.attempted,
             agg.cleared,
         );
+        agg.minibosses = miniboss_aggs(&mb_fights, &mb_killed);
+        agg.mean_xp = mean(&xp_seen);
+        agg.gold = GoldAgg {
+            levels: gold_levels,
+            collected: mean_or_zero(&gold_collected, gold_levels),
+            spent: mean_or_zero(&gold_spent, gold_levels),
+            purchases: mean_or_zero(&gold_purchases, gold_levels),
+            at_3m: mean(&gold_at_3m),
+            collected_at_3m: mean(&gold_collected_at_3m),
+        };
+        agg.death_minutes = death_minute_aggs(&death_minutes);
     }
     // ---- Anomalies ------------------------------------------------------
     //
@@ -1186,7 +1501,126 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
             runs,
             campaign_wins,
         ),
+        evolutions: evolution_aggs(&evo_owned, &evo_uptime, &evo_dealt, &w_dealt),
+        minibosses: miniboss_aggs(&mb_fights, &mb_killed),
+        bosses: boss_aggs(&boss_fights, &boss_defeated, &boss_dps),
+        gold: GoldAgg {
+            levels: gold_levels,
+            collected: mean_or_zero(&gold_collected, gold_levels),
+            spent: mean_or_zero(&gold_spent, gold_levels),
+            purchases: mean_or_zero(&gold_purchases, gold_levels),
+            at_3m: mean(&gold_at_3m),
+            collected_at_3m: mean(&gold_collected_at_3m),
+        },
+        death_minutes: death_minute_aggs(&death_minutes),
     }
+}
+
+/// Mean of a slice, or 0 when empty.
+fn mean_or_zero(total: &f32, n: usize) -> f32 {
+    if n == 0 {
+        0.0
+    } else {
+        *total / n as f32
+    }
+}
+
+/// Build the per-evolution rows.
+fn evolution_aggs(
+    owned: &BTreeMap<String, usize>,
+    uptime: &BTreeMap<String, f32>,
+    dealt: &BTreeMap<String, f32>,
+    base_dealt: &BTreeMap<String, f32>,
+) -> Vec<EvolutionAgg> {
+    let total: f32 = base_dealt.values().sum();
+    let mut out: Vec<EvolutionAgg> = owned
+        .iter()
+        .map(|(name, n)| {
+            let d = dealt.get(name).copied().unwrap_or(0.0);
+            let u = uptime.get(name).copied().unwrap_or(0.0);
+            EvolutionAgg {
+                name: name.clone(),
+                owned: *n,
+                uptime: if *n > 0 { u / *n as f32 } else { 0.0 },
+                dealt: d,
+                dealt_per_level: if *n > 0 { d / *n as f32 } else { 0.0 },
+                share: if total > 0.0 { d / total } else { 0.0 },
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.dealt
+            .partial_cmp(&a.dealt)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    out
+}
+
+/// Build the named-miniboss rows.
+fn miniboss_aggs(
+    fights: &BTreeMap<(u8, String), Vec<f32>>,
+    killed: &BTreeMap<(u8, String), usize>,
+) -> Vec<MinibossAgg> {
+    let mut out: Vec<MinibossAgg> = fights
+        .iter()
+        .map(|((appointment, kind), seconds)| MinibossAgg {
+            appointment: *appointment,
+            kind: kind.clone(),
+            fights: seconds.len(),
+            killed: killed
+                .get(&(*appointment, kind.clone()))
+                .copied()
+                .unwrap_or(0),
+            seconds: Percentiles::of(seconds.clone()),
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.appointment
+            .cmp(&b.appointment)
+            .then_with(|| a.kind.cmp(&b.kind))
+    });
+    out
+}
+
+/// Build the per-boss rows.
+fn boss_aggs(
+    fights: &BTreeMap<String, Vec<f32>>,
+    defeated: &BTreeMap<String, usize>,
+    dps: &BTreeMap<String, Vec<f32>>,
+) -> Vec<BossAgg> {
+    let mut out: Vec<BossAgg> = fights
+        .iter()
+        .map(|(boss, seconds)| BossAgg {
+            boss: boss.clone(),
+            fights: seconds.len(),
+            defeated: defeated.get(boss).copied().unwrap_or(0),
+            seconds: Percentiles::of(seconds.clone()),
+            dps: mean(dps.get(boss).map(|v| v.as_slice()).unwrap_or(&[])),
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.fights
+            .cmp(&a.fights)
+            .then_with(|| a.boss.cmp(&b.boss))
+    });
+    out
+}
+
+/// Build the death-by-minute rows.
+fn death_minute_aggs(map: &BTreeMap<u32, BTreeMap<String, usize>>) -> Vec<DeathMinute> {
+    map.iter()
+        .map(|(minute, causes)| {
+            let mut v: Vec<(String, usize)> = causes.iter().map(|(k, n)| (k.clone(), *n)).collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            v.truncate(3);
+            DeathMinute {
+                minute: *minute,
+                deaths: causes.values().sum(),
+                causes: v,
+            }
+        })
+        .collect()
 }
 
 /// Build one [`WeaponAgg`] row per weapon from the per-weapon accumulators.
@@ -1289,6 +1723,10 @@ fn progress_aggs(buckets: Vec<Vec<ProgressOutcome>>) -> Vec<ProgressAgg> {
                 mean_upgrades: v.iter().map(|p| p.upgrades as f32).sum::<f32>() / n,
                 mean_kills: v.iter().map(|p| p.kills as f32).sum::<f32>() / n,
                 mean_hp_frac: v.iter().map(|p| p.hp_frac).sum::<f32>() / n,
+                mean_xp: v.iter().map(|p| p.xp as f32).sum::<f32>() / n,
+                mean_weapons: v.iter().map(|p| p.weapons as f32).sum::<f32>() / n,
+                mean_passives: v.iter().map(|p| p.passives as f32).sum::<f32>() / n,
+                mean_gold: v.iter().map(|p| p.gold as f32).sum::<f32>() / n,
             })
         })
         .collect()
@@ -1657,6 +2095,28 @@ pub fn render_comparison(c: &CompareReport) -> String {
     s
 }
 
+/// `ratrun --bot-render saved.json`: print the text table for a saved report.
+///
+/// The batch writes JSON so a run is never replayed just to read a different
+/// column; this renders that JSON with the same code the live batch uses.
+fn run_render_cli(args: &[String], pos: usize) -> i32 {
+    let Some(path) = args.get(pos + 1) else {
+        eprintln!("ratrun --bot-render: needs a saved batch JSON file");
+        eprintln!("{USAGE}");
+        return 2;
+    };
+    match load_report(path) {
+        Ok(r) => {
+            print!("{}", render_table(&r));
+            0
+        }
+        Err(e) => {
+            eprintln!("ratrun --bot-render: {e}");
+            2
+        }
+    }
+}
+
 /// `ratrun --bot-compare a.json b.json [--json]`.
 fn run_compare_cli(args: &[String], pos: usize) -> i32 {
     let json = args.iter().any(|a| a == "--json");
@@ -1706,6 +2166,10 @@ pub fn maybe_run_cli() -> Option<i32> {
     if let Some(pos) = args.iter().position(|a| a == "--bot-compare") {
         return Some(run_compare_cli(&args, pos));
     }
+    // `--bot-render saved.json` re-render a saved report without replaying it.
+    if let Some(pos) = args.iter().position(|a| a == "--bot-render") {
+        return Some(run_render_cli(&args, pos));
+    }
     if !args.iter().any(|a| a == "--bot-batch") {
         return None;
     }
@@ -1718,6 +2182,9 @@ pub fn maybe_run_cli() -> Option<i32> {
             return Some(2);
         }
     };
+    if let Some((w, p)) = opts.caps {
+        crate::game::loadout::set_slot_caps(w, p);
+    }
     let report = if opts.trace {
         run_batch_traced(&opts)
     } else {
@@ -1739,8 +2206,9 @@ usage: ratrun --bot-batch <N> [--seed <S>] [--level <1-3>] [--practice] \
 [--carry none|typical] [--route sewer|kitchen|lab|laundry|printworks] \
 [--skill expert|skilled|casual] [--cycle-skills] \
 [--seed-exact] [--max-sim-seconds <T>] [--threads <K>] [--analyze] [--json] \
-[--trace] \
-       ratrun --bot-compare <a.json> <b.json> [--json]
+[--trace] [--caps <W:P>] \
+       ratrun --bot-compare <a.json> <b.json> [--json] \
+       ratrun --bot-render <a.json>
 
   --carry          start a measured level with a real carried loadout
                    (none = the level-1 default, typical = the modal keep-three)
@@ -1749,7 +2217,27 @@ usage: ratrun --bot-batch <N> [--seed <S>] [--level <1-3>] [--practice] \
   --cycle-skills   rotate Expert, Skilled, Casual per run (mixed-skill batch)
   --route          play --level on this floor instead of the original route's
                    (laundry / printworks are the two side routes)
-  --seed-exact     read --seed as a run seed (replay an anomaly's seed)";
+  --seed-exact     read --seed as a run seed (replay an anomaly's seed)
+  --caps W:P       distinct-kind slot caps (4:4 fresh profile, 8:8 maxed)
+  --bot-render F   print the text table for a saved --json report";
+
+/// Parse a `--caps` argument: `W:P` distinct-kind caps (e.g. `4:4` for a fresh
+/// profile, `8:8` for a maxed meta profile).
+pub fn parse_caps(s: &str) -> Result<(usize, usize), String> {
+    let (w, p) = s
+        .split_once(':')
+        .ok_or_else(|| format!("--caps needs W:P, got {s:?}"))?;
+    let w: usize = w
+        .parse()
+        .map_err(|_| format!("--caps weapon count is not a number: {w:?}"))?;
+    let p: usize = p
+        .parse()
+        .map_err(|_| format!("--caps passive count is not a number: {p:?}"))?;
+    if w == 0 || p == 0 {
+        return Err("--caps needs both counts at least 1".into());
+    }
+    Ok((w, p))
+}
 
 /// Parse a `--route` argument: the five campaign floors (and the flatbed).
 pub fn parse_route(s: &str) -> Result<crate::game::level::Theme, String> {
@@ -1827,6 +2315,10 @@ pub fn parse_args(args: &[String]) -> Result<Option<BatchOpts>, String> {
             "--route" => {
                 let s = value()?;
                 opts.route = Some(parse_route(s)?);
+            }
+            "--caps" => {
+                let s = value()?;
+                opts.caps = Some(parse_caps(s)?);
             }
             other => {
                 if saw {
@@ -1996,8 +2488,15 @@ fn progress_line(p: &[ProgressAgg]) -> String {
     p.iter()
         .map(|g| {
             format!(
-                "@{:.0}s lv{:.1}/{} upgrades/{} kills",
-                g.at, g.mean_player_level, g.mean_upgrades, g.mean_kills
+                "@{:.0}s lv{:.1} xp{:.0} {:.1}up w{:.1} p{:.1} gold{:.0} /{} kills",
+                g.at,
+                g.mean_player_level,
+                g.mean_xp,
+                g.mean_upgrades,
+                g.mean_weapons,
+                g.mean_passives,
+                g.mean_gold,
+                g.mean_kills
             )
         })
         .collect::<Vec<_>>()
@@ -2100,6 +2599,9 @@ resolving a 5-point difference between two arms needs ~{} runs per arm (95% conf
         if !l.progress.is_empty() {
             s.push_str(&format!("  progress:        {}\n", progress_line(&l.progress)));
         }
+        if l.mean_xp > 0.0 {
+            s.push_str(&format!("  xp collected:    {:.0}\n", l.mean_xp));
+        }
         if !l.death_notes.is_empty() {
             s.push_str(&format!("  death causes:    {}\n", notes_line(&l.death_notes)));
         }
@@ -2131,10 +2633,131 @@ resolving a 5-point difference between two arms needs ~{} runs per arm (95% conf
             s.push_str(&format!("  carried on:      {}\n", list.join(", ")));
         }
         s.push('\n');
+        // The per-level economy/miniboss tables are only meaningful when the
+        // report carries them (JSON from a newer batch); older reports have
+        // empty lists and skip the sections.
+        if !l.minibosses.is_empty() {
+            s.push_str("  minibosses:\n");
+            for m in &l.minibosses {
+                s.push_str(&format!(
+                    "    {} {:<16} {} of {} killed  length {}  hp {:.0}\n",
+                    m.appointment,
+                    m.kind,
+                    m.killed,
+                    m.fights,
+                    dist(&m.seconds),
+                    m.hp_max
+                ));
+            }
+        }
+        if l.gold.levels > 0 {
+            s.push_str(&format!(
+                "  gold: {:.0} collected, {:.0} spent, {:.2} purchase(s), {:.0} on hand at 3:00\n",
+                l.gold.collected, l.gold.spent, l.gold.purchases, l.gold.at_3m
+            ));
+        }
+        if !l.death_minutes.is_empty() {
+            s.push_str("  deaths by minute:\n");
+            for m in &l.death_minutes {
+                let causes: Vec<String> = m
+                    .causes
+                    .iter()
+                    .map(|(c, n)| format!("{c} x{n}"))
+                    .collect();
+                s.push_str(&format!(
+                    "    {:>2}:00  {:>3} death(s)  {}\n",
+                    m.minute,
+                    m.deaths,
+                    causes.join(", ")
+                ));
+            }
+        }
     }
     if !r.weapons.is_empty() {
         s.push_str("Weapons (all levels: damage share / boss share / pick rate / campaign win rate with vs without):\n");
         s.push_str(&weapon_lines(&r.weapons, "  ", false));
+        s.push('\n');
+    }
+    if !r.evolutions.is_empty() {
+        s.push_str("Evolutions (damage share / uptime per owned level / damage per level):\n");
+        for e in &r.evolutions {
+            s.push_str(&format!(
+                "  {:<16} dmg {:>8.0} {:>5}   owned {:>3}   uptime {:>6}   dmg/level {:>8.0}\n",
+                e.name,
+                e.dealt,
+                pct(e.share),
+                e.owned,
+                secs(e.uptime),
+                e.dealt_per_level
+            ));
+        }
+        s.push('\n');
+    }
+    if !r.minibosses.is_empty() {
+        s.push_str("Minibosses (fights / killed / fight length):\n");
+        for m in &r.minibosses {
+            s.push_str(&format!(
+                "  {:<2} {:<16} fights {:>3}  killed {:>3} ({})  length {}\n",
+                m.appointment,
+                m.kind,
+                m.fights,
+                m.killed,
+                pct(if m.fights > 0 {
+                    m.killed as f32 / m.fights as f32
+                } else {
+                    0.0
+                }),
+                dist(&m.seconds)
+            ));
+        }
+        s.push('\n');
+    }
+    if !r.bosses.is_empty() {
+        s.push_str("Bosses (fights / killed / fight length / dps into boss):\n");
+        for b in &r.bosses {
+            s.push_str(&format!(
+                "  {:<16} fights {:>3}  killed {:>3} ({})  length {}  dps {:.0}\n",
+                b.boss,
+                b.fights,
+                b.defeated,
+                pct(if b.fights > 0 {
+                    b.defeated as f32 / b.fights as f32
+                } else {
+                    0.0
+                }),
+                dist(&b.seconds),
+                b.dps
+            ));
+        }
+        s.push('\n');
+    }
+    if r.gold.levels > 0 {
+        s.push_str(&format!(
+            "Gold: {:.1} collected/level, {:.1} spent/level, {:.2} purchases/level, {:.1} on hand at 3:00 ({:.1} collected by 3:00)\n",
+            r.gold.collected,
+            r.gold.spent,
+            r.gold.purchases,
+            r.gold.at_3m,
+            r.gold.collected_at_3m
+        ));
+        s.push('\n');
+    }
+    if !r.death_minutes.is_empty() {
+        s.push_str("Deaths by minute:\n");
+        for m in &r.death_minutes {
+            let causes: Vec<String> = m
+                .causes
+                .iter()
+                .map(|(c, n)| format!("{c} x{n}"))
+                .collect();
+            s.push_str(&format!(
+                "  {:>2}:00-{:>2}:59  {:>3} death(s)  {}\n",
+                m.minute,
+                m.minute,
+                m.deaths,
+                causes.join(", ")
+            ));
+        }
         s.push('\n');
     }
     s.push_str("Damage taken by source (all levels, per run):\n");
@@ -2192,6 +2815,7 @@ mod tests {
             cycle_skills: false,
             exact_seed: false,
             route: None,
+            caps: None,
         }
     }
 
