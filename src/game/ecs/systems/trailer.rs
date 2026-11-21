@@ -166,7 +166,11 @@ pub fn trailer_system(
         // A named miniboss does not fall either: a pit must never kill it (no
         // rat earned that chest) or strand it across the deck, so it treads
         // the holes like the moth flies them.
-        if !e.alive() || e.named || e.kind == EnemyKind::WickMoth || deck.pit_at(e.pos).is_none() {
+        if !e.alive()
+            || e.named
+            || matches!(e.kind, EnemyKind::WickMoth | EnemyKind::MurderHornet)
+            || deck.pit_at(e.pos).is_none()
+        {
             continue;
         }
         let class = SizeClass::of_radius(e.radius);

@@ -1658,6 +1658,173 @@ pub fn emit_enemy_death(
                 kind: StainKind::Splat,
             });
         }
+        // ---- Wave 4 ----------------------------------------------------
+        EnemyKind::BigSnake => {
+            // A long body coming apart: heavy olive scales and a slow dark
+            // pool under every coil.
+            let scales = ps.budget_count(14, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                scales,
+                58.0,
+                radius * 0.7,
+                Ramp::Custom((150, 176, 96), (58, 72, 36)),
+                0.62,
+                false,
+                Shape::Blob,
+                3.4,
+            );
+            let gore = ps.budget_count(8, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                gore,
+                42.0,
+                radius * 0.8,
+                Ramp::Blood(ichor),
+                0.70,
+                false,
+                Shape::Dot,
+                3.0,
+            );
+            ps.push_stain(Stain {
+                pos,
+                radius: radius * 1.1,
+                color: stain_col,
+                life: 11.0,
+                max_life: 11.0,
+                seed: rng.random::<u16>(),
+                kind: StainKind::Splat,
+            });
+        }
+        EnemyKind::HouseCentipede => {
+            // Pale chitin legs scattering in every direction at once.
+            let legs = ps.budget_count(10, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                legs,
+                110.0,
+                1.0,
+                Ramp::Custom((224, 206, 168), (108, 92, 70)),
+                0.30,
+                false,
+                Shape::Streak,
+                5.0,
+            );
+            let goo = ps.budget_count(4, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                goo,
+                36.0,
+                radius * 0.5,
+                Ramp::Blood(ichor),
+                0.34,
+                false,
+                Shape::Dot,
+                3.0,
+            );
+        }
+        EnemyKind::MurderHornet => {
+            // A hot stripe tearing apart, with a short angry spark shower.
+            let shell = ps.budget_count(9, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                shell,
+                74.0,
+                radius * 0.6,
+                Ramp::Custom((238, 168, 52), (112, 64, 20)),
+                0.42,
+                false,
+                Shape::Blob,
+                3.0,
+            );
+            let sparks = ps.budget_count(6, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                sparks,
+                104.0,
+                1.5,
+                Ramp::Spark,
+                0.26,
+                true,
+                Shape::Dot,
+                4.0,
+            );
+        }
+        EnemyKind::TermiteHorde => {
+            // Thousands of tiny bodies going still: a broad pale dust cloud
+            // rather than a single corpse.
+            let termites = ps.budget_count(16, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                termites,
+                62.0,
+                radius * 2.2,
+                Ramp::Custom((222, 206, 168), (120, 104, 78)),
+                0.55,
+                false,
+                Shape::Dot,
+                2.0,
+            );
+            let dust = ps.budget_count(6, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                dust,
+                28.0,
+                radius * 1.6,
+                Ramp::Smoke,
+                0.70,
+                false,
+                Shape::Puff,
+                2.6,
+            );
+            ps.push_stain(Stain {
+                pos,
+                radius: radius * 1.4,
+                color: (46, 40, 30),
+                life: 9.0,
+                max_life: 9.0,
+                seed: rng.random::<u16>(),
+                kind: StainKind::Splat,
+            });
+        }
+        EnemyKind::Lilliputian => {
+            // One tiny person, gone: a puff of coat-white lint and a dropped
+            // spear point.
+            let puff = ps.budget_count(5, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                puff,
+                44.0,
+                1.0,
+                Ramp::Custom((232, 238, 246), (120, 128, 144)),
+                0.30,
+                false,
+                Shape::Dot,
+                2.0,
+            );
+            let chips = ps.budget_count(3, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                chips,
+                66.0,
+                0.8,
+                Ramp::Spark,
+                0.22,
+                true,
+                Shape::Dot,
+                3.0,
+            );
+        }
     }
 }
 
@@ -5414,6 +5581,139 @@ pub fn emit_wave3_burst(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
         seed: rng.random::<u16>(),
         kind: StainKind::Scorch,
     });
+}
+
+// ---- Wave-4 ordinary enemies ---------------------------------------------
+
+/// A wave-4 body committing to its warned attack.
+///
+/// The snake gets a long low bar along its lunge line, the centipede a short
+/// fast double-tick and the hornet a tightening ring — three shapes so the
+/// tell is legible without reading the sprite. The floor line itself is drawn
+/// by `art_enemy::draw_wave4_tells` in the hostile layer; this is the motion
+/// cue.
+pub fn emit_wave4_tell(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    pos: Vec2,
+    dir: Vec2,
+    kind: crate::game::enemy::EnemyKind,
+) {
+    use crate::game::enemy::EnemyKind;
+    let col = crate::render::palette::scale(kind.color(), 1.15);
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 1.5,
+        end_r: match kind {
+            EnemyKind::BigSnake => 12.0,
+            EnemyKind::MurderHornet => 10.0,
+            _ => 6.0,
+        },
+        life: 0.22,
+        max_life: 0.22,
+        color: col,
+        core: (255, 250, 238),
+        thick: 1.0,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    let n = ps.budget_count(4, false);
+    ps.cone_shaped(
+        rng,
+        pos,
+        dir,
+        n,
+        match kind {
+            EnemyKind::BigSnake => 46.0,
+            EnemyKind::MurderHornet => 30.0,
+            _ => 22.0,
+        },
+        0.50,
+        Ramp::Custom(col, crate::render::palette::scale(col, 0.4)),
+        0.24,
+        false,
+        Shape::Streak,
+        3.0,
+    );
+}
+
+/// A termite horde splitting in two: pale crumbs flying apart sideways.
+pub fn emit_horde_split(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
+    let crumbs = ps.budget_count(12, false);
+    ps.burst_shaped(
+        rng,
+        pos,
+        crumbs,
+        74.0,
+        2.0,
+        Ramp::Custom((226, 208, 168), (108, 92, 66)),
+        0.42,
+        false,
+        Shape::Dot,
+        2.4,
+    );
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 2.0,
+        end_r: 13.0,
+        life: 0.22,
+        max_life: 0.22,
+        color: (206, 190, 150),
+        core: (250, 244, 226),
+        thick: 1.0,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+}
+
+/// One mouthful of crumbs off a glue board the horde is eating through
+/// (render-only: the trap's hold is untouched).
+pub fn emit_horde_chew(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
+    let crumbs = ps.budget_count(3, false);
+    ps.burst_shaped(
+        rng,
+        pos,
+        crumbs,
+        26.0,
+        1.4,
+        Ramp::Custom((226, 208, 168), (120, 104, 78)),
+        0.26,
+        false,
+        Shape::Dot,
+        1.6,
+    );
+}
+
+/// A tier-1 horde gathering itself back into a large one.
+pub fn emit_horde_reform(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 11.0,
+        end_r: 2.0,
+        life: 0.30,
+        max_life: 0.30,
+        color: (232, 216, 176),
+        core: (255, 252, 240),
+        thick: 1.2,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    let crumbs = ps.budget_count(6, false);
+    ps.burst_shaped(
+        rng,
+        pos,
+        crumbs,
+        18.0,
+        2.4,
+        Ramp::Custom((226, 208, 168), (140, 122, 92)),
+        0.34,
+        false,
+        Shape::Dot,
+        2.0,
+    );
 }
 
 // ---- Named minibosses (wave 3) -------------------------------------------

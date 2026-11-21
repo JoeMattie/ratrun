@@ -77,7 +77,10 @@ pub struct InkSlow(pub f32);
 /// direction, so directional armour never applies to it.
 #[inline]
 pub fn is_ground(kind: EnemyKind) -> bool {
-    !matches!(kind, EnemyKind::Bat | EnemyKind::WickMoth)
+    !matches!(
+        kind,
+        EnemyKind::Bat | EnemyKind::WickMoth | EnemyKind::MurderHornet
+    )
 }
 
 /// Apply the rat's ink slow exactly like the trap glue does: shorten this

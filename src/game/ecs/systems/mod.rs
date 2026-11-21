@@ -10,6 +10,7 @@ pub mod combat;
 pub mod enemy_move;
 pub mod evolutions;
 pub mod enemy_wave3;
+pub mod enemy_wave4;
 pub mod fog;
 pub mod fx;
 pub mod gates;

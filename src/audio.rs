@@ -183,11 +183,18 @@ pub enum Sfx {
     CrabDeath,
     /// A shot deflecting off the carapace: a bright, dead metallic ping.
     CrabShell,
+    // Wave-4 ordinary enemies (appended for the wave-4 batch).
+    /// The big snake's coil releasing: a low hiss into a floor thump.
+    SnakeStrike,
+    /// The house centipede's dart: a fast dry chitter.
+    CentipedeDart,
+    /// The murder hornet's rising buzz (charge and dive).
+    HornetBuzz,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 115] = [
+    pub const ALL: [Sfx; 118] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -321,6 +328,9 @@ impl Sfx {
         Sfx::CrabFlip,
         Sfx::CrabDeath,
         Sfx::CrabShell,
+        Sfx::SnakeStrike,
+        Sfx::CentipedeDart,
+        Sfx::HornetBuzz,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -441,6 +451,9 @@ impl Sfx {
             Sfx::CrabFlip => "CRAB_FLIP",
             Sfx::CrabDeath => "CRAB_DEATH",
             Sfx::CrabShell => "CRAB_SHELL",
+            Sfx::SnakeStrike => "SNAKE_STRIKE",
+            Sfx::CentipedeDart => "CENTIPEDE_DART",
+            Sfx::HornetBuzz => "HORNET_BUZZ",
         }
     }
 
@@ -541,7 +554,10 @@ impl Sfx {
             | Sfx::MangleTowel
             | Sfx::MangleJam
             | Sfx::MangleShift
-            | Sfx::MangleDeath => 1,
+            | Sfx::MangleDeath
+            | Sfx::SnakeStrike
+            | Sfx::CentipedeDart
+            | Sfx::HornetBuzz => 1,
             // The bell always rings the same; the press's clack and the
             // carriage each get three pitches so a fight does not machine-gun
             // one sample.
@@ -653,6 +669,10 @@ impl Sfx {
             Sfx::DashReady | Sfx::DashDenied => 0,
             // Wave 3 enemy tells: quiet by design.
             Sfx::Warn | Sfx::FleaHop => 0,
+            // Wave-4 enemy tells: the snake and centipede commit quietly; the
+            // hornet's buzz is its warning, so it sits with the told attacks.
+            Sfx::SnakeStrike | Sfx::CentipedeDart => 0,
+            Sfx::HornetBuzz => 1,
             // The bird's own call and its death rattle are set pieces.
             Sfx::MagpieCry | Sfx::MagpieDeath => 3,
             Sfx::ShopEnter | Sfx::Purchase | Sfx::Denied => 1,
@@ -6319,6 +6339,104 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
                 ..Default::default()
             });
             m.finish(0.38, 1.2, 1.5, 18.0)
+        }
+
+        // Wave-4 ordinary enemies (appended for the wave-4 batch).
+        //
+        // A. SnakeStrike: the coil letting go. A low band-passed hiss that
+        // ends in a wooden floor thump — the sound of a body committing.
+        Sfx::SnakeStrike => {
+            let mut m = MixBuf::new(0.34);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.18,
+                pink: true,
+                gain: 0.26,
+                attack_s: 0.020,
+                decay_pow: 1.6,
+                filter: FilterMode::BandPass,
+                fc0: 900.0,
+                fc1: 220.0,
+                q: 1.4,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.10,
+                dur_s: 0.16,
+                f0: 150.0,
+                f1: 62.0,
+                pitch_pow: 1.4,
+                wave: Wave::Sine,
+                gain: 0.34,
+                attack_s: 0.002,
+                decay_pow: 2.0,
+                ..Default::default()
+            });
+            m.add_short_tail(0.12, 1500.0);
+            m.finish(0.40, 1.1, 2.0, 20.0)
+        }
+        // B. CentipedeDart: a fast dry chitter — three tiny noise ticks on a
+        // rising band.
+        Sfx::CentipedeDart => {
+            let mut m = MixBuf::new(0.22);
+            for (i, st) in [0.0f32, 0.045, 0.10].iter().enumerate() {
+                m.add_noise(NoiseLayer {
+                    start_s: *st,
+                    dur_s: 0.028,
+                    pink: false,
+                    gain: 0.24,
+                    attack_s: 0.0008,
+                    decay_pow: 2.8,
+                    filter: FilterMode::BandPass,
+                    fc0: 2600.0 + i as f32 * 700.0,
+                    fc1: 1900.0,
+                    q: 2.0,
+                    seed: base_seed ^ (0x33 * (i as u32 + 1)),
+                    ..Default::default()
+                });
+            }
+            m.add_short_tail(0.10, 3800.0);
+            m.finish(0.42, 1.2, 2.4, 30.0)
+        }
+        // C. HornetBuzz: the rising buzz — a saw through a wobble, opening up
+        // as it climbs. The warning is the pitch, not the volume.
+        Sfx::HornetBuzz => {
+            let mut m = MixBuf::new(0.30);
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.26,
+                f0: 180.0,
+                f1: 320.0,
+                pitch_pow: 1.2,
+                wave: Wave::Saw,
+                gain: 0.20,
+                attack_s: 0.03,
+                decay_pow: 1.2,
+                filter: FilterMode::BandPass,
+                fc0: 900.0,
+                fc1: 1600.0,
+                q: 2.2,
+                vib_hz: 38.0,
+                vib_depth: 0.28,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.24,
+                pink: false,
+                gain: 0.10,
+                attack_s: 0.04,
+                decay_pow: 1.4,
+                filter: FilterMode::BandPass,
+                fc0: 1100.0,
+                fc1: 1700.0,
+                q: 1.6,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_short_tail(0.08, 2600.0);
+            m.finish(0.40, 1.1, 2.0, 18.0)
         }
 
         // 69. MangleTowel: the rolled towel shot down the rail — a soft

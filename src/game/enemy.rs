@@ -22,6 +22,18 @@ pub enum EnemyKind {
     Porter,
     /// Wave 3: a key-shaped drone that lays crossbars across its own path.
     Turnkey,
+    /// Wave 4: a long multi-segment body that cuts the room in half and lunges.
+    BigSnake,
+    /// Wave 4: a very fast wall-hugging scuttler that darts and flees when hit.
+    HouseCentipede,
+    /// Wave 4: a flyer that hovers on a rising buzz, dives in a locked line and
+    /// must recover on the ground.
+    MurderHornet,
+    /// Wave 4: a seething swarm with one HP pool, a per-hit damage cap, splits
+    /// and regrowth.
+    TermiteHorde,
+    /// Wave 4: a tiny human squad member (spear, archer, rope crew, leader).
+    Lilliputian,
 }
 
 impl EnemyKind {
@@ -39,6 +51,12 @@ impl EnemyKind {
             EnemyKind::WickMoth => 12.0,
             EnemyKind::Porter => 26.0,
             EnemyKind::Turnkey => 22.0,
+            // Wave 4.
+            EnemyKind::BigSnake => 80.0,
+            EnemyKind::HouseCentipede => 7.0,
+            EnemyKind::MurderHornet => 14.0,
+            EnemyKind::TermiteHorde => 64.0,
+            EnemyKind::Lilliputian => 3.0,
         }
     }
     pub fn speed(self) -> f32 {
@@ -54,6 +72,13 @@ impl EnemyKind {
             EnemyKind::WickMoth => 28.0,
             EnemyKind::Porter => 20.0,
             EnemyKind::Turnkey => 24.0,
+            // Wave 4. The centipede is the fastest body in the game; the thing
+            // that keeps it fair is that it always stops for its flutter.
+            EnemyKind::BigSnake => 26.0,
+            EnemyKind::HouseCentipede => 54.0,
+            EnemyKind::MurderHornet => 32.0,
+            EnemyKind::TermiteHorde => 26.0,
+            EnemyKind::Lilliputian => 22.0,
         }
     }
     /// Collision radius, which also picks the navigation size class
@@ -77,6 +102,13 @@ impl EnemyKind {
             EnemyKind::WickMoth => 2.5,
             EnemyKind::Porter => 4.5,
             EnemyKind::Turnkey => 4.0,
+            // Wave 4. The snake is the only Large one (it cannot use a
+            // rat-hole); the centipede, hornet and horde are rat-sized.
+            EnemyKind::BigSnake => 6.0,
+            EnemyKind::HouseCentipede => 2.4,
+            EnemyKind::MurderHornet => 2.6,
+            EnemyKind::TermiteHorde => 3.2,
+            EnemyKind::Lilliputian => 2.0,
         }
     }
     pub fn damage(self) -> f32 {
@@ -92,6 +124,13 @@ impl EnemyKind {
             EnemyKind::WickMoth => 4.0,
             EnemyKind::Porter => 6.0,
             EnemyKind::Turnkey => 6.0,
+            // Wave 4. The horde's contact is deliberately light: it is a
+            // damage check, not a brawler.
+            EnemyKind::BigSnake => 8.0,
+            EnemyKind::HouseCentipede => 5.0,
+            EnemyKind::MurderHornet => 6.0,
+            EnemyKind::TermiteHorde => 3.0,
+            EnemyKind::Lilliputian => 3.0,
         }
     }
     pub fn xp(self) -> u32 {
@@ -107,6 +146,12 @@ impl EnemyKind {
             EnemyKind::WickMoth => 3,
             EnemyKind::Porter => 5,
             EnemyKind::Turnkey => 4,
+            // Wave 4.
+            EnemyKind::BigSnake => 12,
+            EnemyKind::HouseCentipede => 2,
+            EnemyKind::MurderHornet => 4,
+            EnemyKind::TermiteHorde => 3,
+            EnemyKind::Lilliputian => 1,
         }
     }
     pub fn color(self) -> Rgb {
@@ -124,6 +169,14 @@ impl EnemyKind {
             EnemyKind::WickMoth => (232, 168, 104),
             EnemyKind::Porter => (140, 176, 128),
             EnemyKind::Turnkey => (206, 186, 102),
+            // Wave 4: olive scales, pale chitin, a hot hazard stripe and a
+            // termite cream.
+            EnemyKind::BigSnake => (118, 146, 78),
+            EnemyKind::HouseCentipede => (198, 176, 138),
+            EnemyKind::MurderHornet => (214, 148, 40),
+            EnemyKind::TermiteHorde => (206, 190, 150),
+            // Facility staff, shrunk: the pale lab-coat grey-blue of the walls.
+            EnemyKind::Lilliputian => (198, 206, 216),
         }
     }
     /// Spitters fire enemy bullets; others are melee.
@@ -147,10 +200,34 @@ impl EnemyKind {
         )
     }
 
+    /// One of the four kinds the wave-4 batch added (`enemy_wave4`).
+    #[inline]
+    pub fn is_wave4(self) -> bool {
+        matches!(
+            self,
+            EnemyKind::BigSnake
+                | EnemyKind::HouseCentipede
+                | EnemyKind::MurderHornet
+                | EnemyKind::TermiteHorde
+                | EnemyKind::Lilliputian
+        )
+    }
+
     /// A body that cannot be shoved around by an ordinary melee hit.
+    ///
+    /// Wave 4: the snake's mass and the horde's thousands of mouths are
+    /// immovable for the same reason the Pillbug is — a `heavy()` body takes
+    /// the whip hit but is never swung.
     #[inline]
     pub fn heavy(self) -> bool {
-        matches!(self, EnemyKind::Brute | EnemyKind::Boss | EnemyKind::Pillbug)
+        matches!(
+            self,
+            EnemyKind::Brute
+                | EnemyKind::Boss
+                | EnemyKind::Pillbug
+                | EnemyKind::BigSnake
+                | EnemyKind::TermiteHorde
+        )
     }
 }
 
@@ -242,6 +319,116 @@ impl W3 {
     }
 }
 
+// ---- Wave-4 behaviour state ----------------------------------------------
+
+/// Body points the big snake draws and collides with, head first.
+pub const SNAKE_MAX_SEGMENTS: usize = 7;
+
+/// Per-body scratch for the four wave-4 behaviours (`systems::enemy_wave4`).
+///
+/// The same contract as [`W3`]: only storage. Every field is zero/`ZERO` for
+/// every other kind, so a body's tick is unchanged and [`W4::holds`] is never
+/// true for the ten older kinds. `phase`, `t`, `cd` and `dir` are shared
+/// between the three state machines because only one of them ever runs on a
+/// given body.
+#[derive(Clone, Copy, Debug)]
+pub struct W4 {
+    /// 1 once `enemy_wave4` has seeded this body's timers.
+    pub armed: u8,
+    /// Seconds since the current warned tell started (0 = this tick).
+    pub warn_age: f32,
+    /// Kind-specific phase (see the constants in `enemy_wave4`).
+    pub phase: u8,
+    /// Seconds left in the current phase.
+    pub t: f32,
+    /// Seconds until the next warned attack.
+    pub cd: f32,
+    /// The locked attack direction (lunge, dart, dive).
+    pub dir: Vec2,
+    /// The snake's head-first body points (world space, `trail[0]` = head).
+    pub trail: [Vec2; SNAKE_MAX_SEGMENTS],
+    /// How far the current lunge has travelled (px).
+    pub traveled: f32,
+    /// One-bit latch for the current phase (the hornet's dive jab).
+    pub spent: u8,
+    /// How many of [`W4::trail`] are live (0 until the first simulated tick).
+    pub trail_len: u8,
+    /// Centipede: seconds of fleeing left after a hit.
+    pub flee_t: f32,
+    /// Horde: size tier (2 large, 1 medium, 0 small).
+    pub tier: u8,
+    /// Horde: seconds since the last damage (regrowth clock).
+    pub regrow_t: f32,
+    /// Horde: set by `Enemy::apply_damage` when a hard hit should split it.
+    pub split_pending: u8,
+    /// Horde: 1 once this body has already split (a body splits at most once).
+    pub splits: u8,
+    /// Horde: seconds until the next chewing crumb.
+    pub chew_t: f32,
+    /// Lilliputian: role (0 leader, 1 spear, 2 archer, 3 rope).
+    pub role: u8,
+    /// Lilliputian: place in the squad, so the spear line forms up in order.
+    pub slot: u8,
+    /// Lilliputian: the squad's id (its leader's `SpawnId`), so a squad can
+    /// count itself for the panic rule and a panicked straggler can join
+    /// another squad.
+    pub squad: u32,
+    /// Lilliputian: the largest this body's squad has ever been, so a squad
+    /// that *started* small (a test, or a half squad) does not instantly break.
+    pub squad_peak: u16,
+}
+
+impl Default for W4 {
+    fn default() -> Self {
+        W4 {
+            armed: 0,
+            warn_age: 0.0,
+            phase: 0,
+            t: 0.0,
+            cd: 0.0,
+            dir: Vec2::ZERO,
+            trail: [Vec2::ZERO; SNAKE_MAX_SEGMENTS],
+            traveled: 0.0,
+            spent: 0,
+            trail_len: 0,
+            flee_t: 0.0,
+            tier: 0,
+            regrow_t: 0.0,
+            split_pending: 0,
+            splits: 0,
+            chew_t: 0.0,
+            role: 0,
+            slot: 0,
+            squad: 0,
+            squad_peak: 0,
+        }
+    }
+}
+
+impl W4 {
+    /// The body is held in place this tick (its behaviour owns its position).
+    ///
+    /// The snake and the hornet always move themselves (a slither or a hover
+    /// is not a straight chase); the centipede only while it flutters or
+    /// darts. The horde is an ordinary flow-field chaser.
+    #[inline]
+    pub fn holds(&self, kind: EnemyKind) -> bool {
+        match kind {
+            // Every wave-4 body with a state machine owns its own position for
+            // the whole tick: the snake slithers S-curves, the hornet orbits,
+            // the centipede scuttles along walls and the lilliputian walks in
+            // formation. `enemy_wave4` reads the glue/ink components itself and
+            // folds them into the speed (see `speed_mult` in that module), so
+            // holding here does not make a body immune to a trap.
+            EnemyKind::BigSnake
+            | EnemyKind::HouseCentipede
+            | EnemyKind::MurderHornet
+            | EnemyKind::Lilliputian => true,
+            _ => false,
+        }
+    }
+}
+
 /// How a campaign level's horde differs from the base kinds.
 ///
 /// The base kinds ([`EnemyKind::damage`], [`EnemyKind::speed`]) are the Sewer's
@@ -311,6 +498,8 @@ pub struct Enemy {
     pub slow_t: f32,
     /// Wave-3 behaviour state (all zero for the six base kinds).
     pub w3: W3,
+    /// Wave-4 behaviour state (all zero for the ten older kinds).
+    pub w4: W4,
 }
 
 impl Enemy {
@@ -343,6 +532,9 @@ impl Enemy {
             // behaviour system on the body's first simulated tick, never from
             // the rng.
             w3: W3::default(),
+            // Same rule for wave 4 (the snake's trail is seeded from its spawn
+            // point on the first simulated tick).
+            w4: W4::default(),
         }
     }
 
@@ -428,11 +620,12 @@ impl Enemy {
     pub fn steer(&mut self, target: Vec2, flow_dir: Vec2, dt: f32, speed_mult: f32) {
         // A wave-3 body in the middle of its own tell or hop is held in place:
         // its behaviour owns the position this tick (a curled Pillbug, a Bell
-        // Flea between its two crosses, a Porter raising the cube). The timers,
-        // the flash and the contact grace still advance, so the body keeps
-        // taking damage and its own state machine keeps running. Dead cheap for
-        // the base kinds: `holds()` is false.
-        if self.w3.holds() {
+        // Flea between its two crosses, a Porter raising the cube). Wave 4's
+        // snake, hornet and darting centipede are the same. The timers, the
+        // flash and the contact grace still advance, so the body keeps taking
+        // damage and its own state machine keeps running. Dead cheap for the
+        // older kinds: both `holds()` are false.
+        if self.w3.holds() || self.w4.holds(self.kind) {
             self.vel = self.vel * (1.0 - (12.0 * dt).min(1.0));
             if self.flash > 0.0 {
                 self.flash -= dt;
@@ -510,18 +703,45 @@ impl Enemy {
     }
 
     pub fn hurt(&mut self, dmg: f32) {
+        self.apply_damage(dmg);
+    }
+
+    /// Land `dmg` after the kind's own incoming-damage rule and return what was
+    /// actually taken (so `hurt_from`'s caller can draw and record the truth).
+    ///
+    /// The Termite Horde is the one body with a rule of its own
+    /// ([`crate::game::ecs::systems::enemy_wave4::HORDE_HIT_CAP`]): one hit can
+    /// remove at most a capped fraction of its pool, so a single-target dart
+    /// only chips the swarm while a many-hit area volley (`rain`, a nova, a
+    /// thrash sweep, a pool's continuous ticks) still tears through it. The
+    /// same pass spots a hard enough hit and raises the split flag the wave-4
+    /// system turns into a second, smaller horde.
+    ///
+    /// Every other kind is a plain `hp -= dmg` with the historical flash and
+    /// side effects, so nothing about the older bodies changes.
+    fn apply_damage(&mut self, dmg: f32) -> f32 {
+        use crate::game::ecs::systems::enemy_wave4 as w4;
+        let mut dmg = dmg.max(0.0);
+        if self.kind == EnemyKind::TermiteHorde {
+            if self.hp > 0.0
+                && self.w4.tier >= w4::HORDE_SPLIT_TIER
+                && dmg >= self.max_hp * w4::HORDE_SPLIT_FRACTION
+            {
+                self.w4.split_pending = 1;
+            }
+            dmg = dmg.min(self.max_hp * w4::HORDE_HIT_CAP);
+        }
         self.hp -= dmg;
         self.flash = 0.12;
         self.note_damage();
+        dmg
     }
 
     /// `hurt` for a hit that arrives **from** a point in world space, with the
     /// kind's directional armour applied ([`Enemy::damage_mult_from`]). Returns
     /// the damage actually taken, which is what a caller should draw and record.
     pub fn hurt_from(&mut self, dmg: f32, from: Vec2) -> f32 {
-        let applied = dmg * self.damage_mult_from(from);
-        self.hurt(applied);
-        applied
+        self.apply_damage(dmg * self.damage_mult_from(from))
     }
 
     /// The Pillbug's shell: while it is curled, a hit arriving from its frontal
@@ -533,22 +753,59 @@ impl Enemy {
     /// [`Enemy::facing`], which the curl locks when the tell starts.
     #[inline]
     pub fn damage_mult_from(&self, from: Vec2) -> f32 {
-        if self.kind != EnemyKind::Pillbug || self.w3.curl_t <= 0.0 {
-            return 1.0;
-        }
-        let to_hit = from - self.pos;
-        if to_hit.len_sq() <= 1e-6 {
-            return 1.0;
-        }
-        let f = self.facing;
-        if f.len_sq() <= 1e-6 {
-            return 1.0;
-        }
-        // cos(half of 120°) = 0.5, so `dot >= 0.5` is the shell's cone.
-        if to_hit.normalized().dot(f.normalized()) >= 0.5 {
-            crate::game::ecs::systems::enemy_wave3::PILLBUG_FRONT_MULT
-        } else {
-            crate::game::ecs::systems::enemy_wave3::PILLBUG_REAR_MULT
+        use crate::game::ecs::systems::enemy_wave4 as w4;
+        match self.kind {
+            EnemyKind::Pillbug => {
+                if self.w3.curl_t <= 0.0 {
+                    return 1.0;
+                }
+                let to_hit = from - self.pos;
+                if to_hit.len_sq() <= 1e-6 {
+                    return 1.0;
+                }
+                let f = self.facing;
+                if f.len_sq() <= 1e-6 {
+                    return 1.0;
+                }
+                // cos(half of 120°) = 0.5, so `dot >= 0.5` is the shell's cone.
+                if to_hit.normalized().dot(f.normalized()) >= 0.5 {
+                    crate::game::ecs::systems::enemy_wave3::PILLBUG_FRONT_MULT
+                } else {
+                    crate::game::ecs::systems::enemy_wave3::PILLBUG_REAR_MULT
+                }
+            }
+            // The snake's head is the soft part: every hit on it lands harder
+            // than the same hit on the scale-armoured body.
+            EnemyKind::BigSnake => {
+                if from.dist_sq(self.pos) <= w4::SNAKE_HEAD_SWEET_SPOT * w4::SNAKE_HEAD_SWEET_SPOT {
+                    w4::SNAKE_HEAD_MULT
+                } else {
+                    1.0
+                }
+            }
+            // The spear line: a wall of tiny shields and levelled points in
+            // front, nothing at all behind.
+            EnemyKind::Lilliputian => {
+                let to_hit = from - self.pos;
+                if to_hit.len_sq() <= 1e-6 || self.facing.len_sq() <= 1e-6 {
+                    return 1.0;
+                }
+                if to_hit.normalized().dot(self.facing.normalized()) >= 0.4 {
+                    w4::LILLI_FRONT_MULT
+                } else {
+                    w4::LILLI_REAR_MULT
+                }
+            }
+            // The hornet on the ground after a missed dive is the punish
+            // window, and it says so with a number.
+            EnemyKind::MurderHornet => {
+                if self.w4.phase == w4::HORNET_PHASE_RECOVER {
+                    w4::HORNET_RECOVER_MULT
+                } else {
+                    1.0
+                }
+            }
+            _ => 1.0,
         }
     }
 
@@ -570,6 +827,29 @@ impl Enemy {
         // A Wick Moth that dies lights its own fuse, whatever killed it.
         if self.kind == EnemyKind::WickMoth && self.hp <= 0.0 && self.w3.wick_t == 0.0 {
             self.w3.wick_t = crate::game::ecs::systems::enemy_wave3::WICK_FUSE_SECS;
+        }
+        // A centipede bolts for the nearest wall the moment anything touches
+        // it: that is the whole "hard to pin down" clause, and it is booked
+        // here so every damage source (a pool tick, a boss hazard, a trap) makes
+        // it run, not just bullets.
+        if self.kind == EnemyKind::HouseCentipede && self.hp > 0.0 {
+            self.w4.flee_t = self.w4.flee_t.max(
+                crate::game::ecs::systems::enemy_wave4::CENTIPEDE_FLEE_SECS,
+            );
+        }
+        // Any hit on the horde restarts its regrowth clock.
+        if self.kind == EnemyKind::TermiteHorde {
+            self.w4.regrow_t = 0.0;
+        }
+        // A hit on a rope carrier drops its rope: killing the crew is one of
+        // the two ways out of a knot (the other is the dash).
+        if self.kind == EnemyKind::Lilliputian
+            && self.w4.role == crate::game::ecs::systems::enemy_wave4::LILLI_ROLE_ROPE
+            && (self.w4.phase == crate::game::ecs::systems::enemy_wave4::LILLI_PHASE_TELL
+                || self.w4.phase == crate::game::ecs::systems::enemy_wave4::LILLI_PHASE_ACTION)
+        {
+            self.w4.phase = crate::game::ecs::systems::enemy_wave4::LILLI_PHASE_WALK;
+            self.w4.t = 0.0;
         }
     }
 
