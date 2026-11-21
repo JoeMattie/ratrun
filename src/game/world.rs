@@ -169,7 +169,14 @@ pub struct World {
     /// show cumulative numbers (`total_score`/`total_kills`/`total_time`).
     pub carried: CampaignTotals,
     pub cam: Vec2,
+    /// The **simulation's** logical viewport: the unzoomed screen size, set by
+    /// the App on resize (and by a headless caller explicitly). Never written
+    /// by drawing — `render_viewport` is the renderer's own copy — so a run that
+    /// is drawn every frame and one that is never drawn simulate identically.
     pub viewport: Vec2,
+    /// The world rectangle the last [`World::draw`] covered (the zoomed buffer),
+    /// used for culling only. Render state: nothing in the simulation reads it.
+    pub render_viewport: Vec2,
     /// Mouse-wheel zoom setting: **how much world the view shows** relative to
     /// the unzoomed view (`1.0` = today's view, `2.0` = twice the width and
     /// height of world, `0.5` = half). Render-only — see [`crate::render::zoom`]
@@ -378,6 +385,7 @@ impl World {
             carried: carried_totals,
             cam: Vec2::ZERO,
             viewport: Vec2::new(160.0, 80.0),
+            render_viewport: Vec2::new(160.0, 80.0),
             zoom: zoom::DEFAULT,
             zoom_view: zoom::DEFAULT,
             zoom_scale: Vec2::new(1.0, 1.0),
@@ -1226,15 +1234,18 @@ impl World {
     /// the rectangle `screen × zoom` around the camera — at world resolution
     /// into a scratch buffer when zooming out — and resampled onto the screen
     /// grid (box filter when zooming out, nearest neighbour when zooming in,
-    /// and an exact copy at 1:1). [`World::viewport`] is reset to the unzoomed
-    /// screen size afterwards, so the simulation still sees the view it always
-    /// saw. Damage numbers are glyph-sized, so they are stamped in screen space
-    /// after the resample and never scale.
+    /// and an exact copy at 1:1). Damage numbers are glyph-sized, so they are
+    /// stamped in screen space after the resample and never scale.
+    ///
+    /// **Drawing never writes [`World::viewport`].** The simulation's logical
+    /// viewport is session input (the App sets it on a terminal resize, a
+    /// headless caller sets it once), so two same-seed runs cannot diverge
+    /// because one of them drew a resized framebuffer and the other did not.
     pub fn draw(&mut self, pb: &mut PixelBuffer) {
         let (sw, sh) = (pb.w, pb.h);
         if sw == 0 || sh == 0 {
             // A degenerate terminal renders nothing (and must not panic).
-            self.viewport = Vec2::new(sw as f32, sh as f32);
+            self.render_viewport = Vec2::new(sw as f32, sh as f32);
             self.zoom_scale = Vec2::new(1.0, 1.0);
             return;
         }
@@ -1256,9 +1267,9 @@ impl World {
             self.zoom_scale = Vec2::new(ww as f32 / sw as f32, wh as f32 / sh as f32);
             self.world_buf = Some(buf);
         }
-        // The logical viewport is the *simulation's*: unzoomed, whatever the
-        // renderer covered.
-        self.viewport = Vec2::new(sw as f32, sh as f32);
+        // The renderer's own viewport, unzoomed: the simulation's `viewport`
+        // is not touched here (see the doc comment above).
+        self.render_viewport = Vec2::new(sw as f32, sh as f32);
 
         // Screen-space pass: floating damage numbers are text-sized glyphs, so
         // they keep their 3×5 / 4×6 pixel size at every zoom instead of
@@ -1328,12 +1339,12 @@ impl World {
     }
 
     /// Draw the world itself into `pb` (whose size *is* the world rectangle it
-    /// must cover), setting [`World::cam`] and [`World::viewport`] for it.
+    /// must cover), setting [`World::cam`] and [`World::render_viewport`] for it.
     fn draw_scene(&mut self, pb: &mut PixelBuffer) {
         let vw = pb.w as f32;
         let vh = pb.h as f32;
         let viewport = Vec2::new(vw, vh);
-        self.viewport = viewport;
+        self.render_viewport = viewport;
         let arena = self.level.arena;
 
         // Camera follows the player, clamped to arena (centered if smaller).
@@ -1755,7 +1766,7 @@ impl World {
     /// floor"). Split out of [`Self::draw_scene`] so the layer order is a
     /// single call site: floor/loot/actors first, lighting, then this.
     fn draw_hostile_layer(&mut self, pb: &mut PixelBuffer, cam: Vec2) {
-        let viewport = self.viewport;
+        let viewport = self.render_viewport;
 
         // Wave 3: a dead Wick Moth's burning fuse. Its 9 px burst is a ground
         // hazard the rat steps out of, so the ring is a warning, not decor.
@@ -1847,6 +1858,29 @@ impl World {
 
         // Boss-owned projectiles (blade discs, shrapnel).
         self.draw_boss_projectiles(pb, cam);
+
+        // Boss **floor telegraphs**, outlined from their own shape data: every
+        // hazard a live boss has queued gets a dashed warn outline in the boss's
+        // warning colour, and a solid brighter one while it is active. Drawn
+        // here (after the lighting pass) so the most dangerous marks on the
+        // floor are self-lit; the bosses' own ground art stays underneath.
+        {
+            let mut query = self.ecs.query::<&Boss>();
+            for boss in query.iter(&self.ecs) {
+                if boss.dead || boss.hazards.is_empty() {
+                    continue;
+                }
+                if !on_screen(self.w2s(boss.pos, cam), boss.kind.cull_margin(), viewport)
+                    && !boss.hazards.iter().any(|h| {
+                        !h.is_expired()
+                            && on_screen(self.w2s(h.shape.center(), cam), 64.0, viewport)
+                    })
+                {
+                    continue;
+                }
+                crate::render::hazard_outline::draw_ground(pb, boss, cam, self.elapsed);
+            }
+        }
 
         // Named-miniboss telegraphs: the tell under the body, over the floor.
         self.draw_miniboss_ground(pb, cam);
@@ -1969,8 +2003,9 @@ impl World {
         let mut query = self.ecs.query::<&Boss>();
         for boss in query.iter(&self.ecs) {
             let margin = boss.kind.cull_margin();
-            let body_visible = on_screen(self.w2s(boss.pos, cam), margin, self.viewport);
-            let target_visible = on_screen(self.w2s(boss.target, cam), margin, self.viewport);
+            let margin_vp = self.render_viewport;
+            let body_visible = on_screen(self.w2s(boss.pos, cam), margin, margin_vp);
+            let target_visible = on_screen(self.w2s(boss.target, cam), margin, margin_vp);
             if !body_visible && !target_visible {
                 continue;
             }
@@ -2002,7 +2037,7 @@ impl World {
             if !e.alive() {
                 continue;
             }
-            if !on_screen(self.w2s(e.pos, cam), 90.0, self.viewport) {
+            if !on_screen(self.w2s(e.pos, cam), 90.0, self.render_viewport) {
                 continue;
             }
             art_miniboss::draw_telegraph(pb, mb, cam, accent);
@@ -2018,7 +2053,7 @@ impl World {
             if boss.is_airborne() != airborne_only {
                 continue;
             }
-            if !on_screen(self.w2s(boss.pos, cam), boss.kind.cull_margin(), self.viewport) {
+            if !on_screen(self.w2s(boss.pos, cam), boss.kind.cull_margin(), self.render_viewport) {
                 continue;
             }
             match boss.view() {
@@ -2039,7 +2074,7 @@ impl World {
         let accent = self.level.palette.accent;
         let mut query = self.ecs.query::<(&SpawnId, &BossProjectile)>();
         for (_, p) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
-            if !on_screen(self.w2s(p.pos, cam), p.radius + 4.0, self.viewport) {
+            if !on_screen(self.w2s(p.pos, cam), p.radius + 4.0, self.render_viewport) {
                 continue;
             }
             match p.kind {
@@ -2067,7 +2102,7 @@ impl World {
     /// and the whole method allocates nothing.
     fn draw_floor_marks(&self, pb: &mut PixelBuffer, cam: Vec2) {
         let level = &self.level;
-        let vp = self.viewport;
+        let vp = self.render_viewport;
         let theme = level.theme;
 
         // 1. Boss arena: the repeating 4 × 4-cell motif, strictly inside the
@@ -2204,7 +2239,7 @@ impl World {
         let (x0, y0, x1, y1) = self
             .level
             .tiles
-            .visible_range(cam, self.viewport, WALL_DRAW_MARGIN);
+            .visible_range(cam, self.render_viewport, WALL_DRAW_MARGIN);
         for cy in y0..=y1 {
             for cx in x0..=x1 {
                 if !self.level.tiles.get(cx, cy).is_wall() {
@@ -2227,7 +2262,7 @@ impl World {
     /// them). Culled to the view.
     fn draw_object_layer(&mut self, pb: &mut PixelBuffer, cam: Vec2, foreground: bool) {
         let accent = self.level.palette.accent;
-        let vp = self.viewport;
+        let vp = self.render_viewport;
         let anim = self.elapsed;
         let objects = &self.level.objects;
 
@@ -2311,7 +2346,7 @@ impl World {
     /// the opening, the bent spoon and the three whisker scratches.
     fn draw_shop_holes(&self, pb: &mut PixelBuffer, cam: Vec2) {
         for hole in &self.level.objects.shop_holes {
-            if !on_screen(self.w2s(hole.pos, cam), 24.0, self.viewport) {
+            if !on_screen(self.w2s(hole.pos, cam), 24.0, self.render_viewport) {
                 continue;
             }
             art_walls::draw_shop_hole(pb, hole, cam, self.elapsed);
@@ -3389,5 +3424,89 @@ mod hostile_layer_tests {
             return Err(());
         }
         Ok(pb.pixel_at(x as usize, y as usize))
+    }
+}
+
+#[cfg(test)]
+mod viewport_tests {
+    //! **The simulation's viewport is session input, never a render output.**
+    //!
+    //! The viewport decides the spawn ring and offscreen placement, so a
+    //! framebuffer resize during a draw used to let "was this frame drawn?"
+    //! reach the simulation. Drawing now writes only `render_viewport`; the App
+    //! sets `World::viewport` on a terminal resize and a headless run sets it
+    //! once — and the two runs below must agree tick for tick.
+
+    use super::*;
+    use crate::game::level::Theme;
+
+    /// Everything a viewport change could reach, in `SpawnId` order.
+    fn trace(w: &mut World) -> String {
+        let mut out = format!(
+            "t={:.4} kills={} score={} gold={} pos=({:.3},{:.3}) hp={:.3} vp=({:.1},{:.1})",
+            w.elapsed,
+            w.kills,
+            w.score,
+            w.gold,
+            w.player.pos.x,
+            w.player.pos.y,
+            w.player.hp,
+            w.viewport.x,
+            w.viewport.y
+        );
+        for e in w.enemies() {
+            out.push_str(&format!(
+                " |e {:?} {:.3} {:.3} {:.3} {}",
+                e.kind,
+                e.pos.x,
+                e.pos.y,
+                e.hp,
+                e.id
+            ));
+        }
+        for b in w.bullets() {
+            out.push_str(&format!(" |b {:.3} {:.3}", b.pos.x, b.pos.y));
+        }
+        out
+    }
+
+    /// A run drawn **every frame** into a framebuffer of a different size is
+    /// identical to the same run never drawn at all — and the drawn run's
+    /// simulation viewport is still the 160×148 the caller set.
+    #[test]
+    fn a_drawn_frame_never_reaches_the_simulation() {
+        let mut drawn = World::new(Theme::Sewer, 4242);
+        let mut headless = World::new(Theme::Sewer, 4242);
+        drawn.viewport = Vec2::new(160.0, 148.0);
+        headless.viewport = drawn.viewport;
+        // Deliberately a *different* size from the simulation viewport (and
+        // twice, at a zoom, so `draw` covers both render paths).
+        let mut pb = PixelBuffer::new(200, 120);
+        for tick in 0..360 {
+            let dir = Vec2::new(1.0, if tick % 60 < 30 { 0.6 } else { -0.6 }).normalized();
+            drawn.update(1.0 / 60.0, dir, false);
+            headless.update(1.0 / 60.0, dir, false);
+            if tick % 90 == 0 {
+                drawn.set_zoom_instant(if drawn.zoom > 1.0 { 1.0 } else { 2.0 });
+            }
+            drawn.tick_zoom(1.0 / 60.0);
+            drawn.draw(&mut pb);
+            assert_eq!(
+                drawn.viewport, headless.viewport,
+                "drawing moved the simulation's viewport on tick {tick}"
+            );
+            assert_eq!(
+                drawn.render_viewport,
+                Vec2::new(pb.w as f32, pb.h as f32),
+                "the renderer's own viewport still tracks the frame it drew"
+            );
+        }
+        assert_eq!(
+            trace(&mut drawn),
+            trace(&mut headless),
+            "a drawn run diverged from the same run never drawn"
+        );
+        // Both runs actually simulated something worth comparing.
+        assert!(drawn.elapsed > 5.9);
     }
 }

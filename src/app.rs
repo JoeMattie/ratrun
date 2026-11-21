@@ -2557,6 +2557,9 @@ impl App {
                     // The plate names the floor actually played, so a side
                     // route reads THE LAUNDRY / THE PRINTWORKS here.
                     level: campaign_ui::CampaignLevel::from_theme(w.level.theme),
+                    // The flatbed has no campaign plate: its own stamp comes
+                    // from the theme (the Magpie, not the Lab's mower).
+                    theme: Some(w.level.theme),
                     time_secs: w.elapsed,
                     kills: w.kills,
                     score_so_far: w.total_score(),
@@ -2726,6 +2729,11 @@ impl App {
                 // reallocates it.
                 self.pixels
                     .resize(game.width as usize, game.height as usize * 2);
+                // The **simulation's** logical viewport is session input, set
+                // here on a resize (the viewport drives spawn rings and offscreen
+                // placement), never by `World::draw`. So a run drawn at a
+                // resized terminal and one that never drew simulate the same.
+                w.viewport = Vec2::new(game.width as f32, (game.height * 2) as f32);
                 w.draw(&mut self.pixels);
                 self.pixels.render_to(game, frame.buffer_mut());
             }

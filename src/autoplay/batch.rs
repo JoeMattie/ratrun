@@ -1841,6 +1841,19 @@ pub fn parse_args(args: &[String]) -> Result<Option<BatchOpts>, String> {
     if opts.runs == 0 {
         return Err("N must be at least 1".into());
     }
+    // The getaway ride is not a campaign step: `choose_route` only picks the
+    // *next* level's fork, so a campaign run that asked for the flatbed used to
+    // print a flatbed-looking run and silently play the original route. Refuse
+    // it instead, and keep `--practice --route flatbed` (a real practice floor).
+    if opts.route == Some(crate::game::level::Theme::Trailer)
+        && !opts.practice
+        && !campaign::is_getaway_sector(opts.start_level)
+    {
+        return Err(
+            "--route flatbed/trailer is a practice floor: add --practice (or --level 4 for the getaway ride)"
+                .into(),
+        );
+    }
     Ok(Some(opts))
 }
 
@@ -2212,6 +2225,32 @@ mod tests {
         practice.route = Some(Theme::Printworks);
         let run = AutoRun::new(7, auto_opts(&practice));
         assert_eq!(run.world().level.theme, Theme::Printworks);
+    }
+
+    /// `--route flatbed` on a **campaign** run is an error: the getaway ride is
+    /// not a campaign fork, so the flag used to be accepted and then silently
+    /// ignored (the campaign played its own route instead).
+    #[test]
+    fn the_route_flag_refuses_the_flatbed_on_a_campaign_level() {
+        let args = |extra: &[&str]| -> Vec<String> {
+            let mut v = vec!["--bot-batch".to_string(), "1".to_string()];
+            v.extend(extra.iter().map(|s| s.to_string()));
+            v
+        };
+        // Campaign (no --practice): refused.
+        let err = parse_args(&args(&["--level", "2", "--route", "trailer"]))
+            .expect_err("a campaign run cannot be routed to the flatbed");
+        assert!(err.contains("practice"), "unhelpful error: {err}");
+        let err = parse_args(&args(&["--route", "flatbed"])).expect_err("same either name");
+        assert!(err.contains("practice"), "unhelpful error: {err}");
+        // Practice is exactly what it is for.
+        let opts = parse_args(&args(&["--level", "2", "--practice", "--route", "flatbed"]))
+            .expect("practice parses")
+            .expect("our flag");
+        assert_eq!(opts.route, Some(crate::game::level::Theme::Trailer));
+        // And the getaway ride needs no route at all.
+        let opts = parse_args(&args(&["--level", "4"])).expect("getaway parses").expect("ours");
+        assert_eq!(opts.route, None);
     }
 
     #[test]

@@ -622,6 +622,11 @@ pub fn lane_segment(view: &MagpieView) -> (Vec2, Vec2) {
 // Pose
 // ============================================================================
 
+/// Most a flying bird may lift off the deck while it is still drawn over its
+/// own (grounded) hit shapes: the body radius is ~7 px, so a few pixels of lift
+/// keeps the sprite on the circles the rat can actually hit.
+const HIT_LIFT_MAX: f32 = 3.0;
+
 #[derive(Clone, Copy)]
 struct Pose {
     /// Screen-space visual body centre (already lifted by flight altitude & lunge lean).
@@ -912,11 +917,19 @@ impl Pose {
         } else {
             Vec2::ZERO
         };
-        let head = head_world - cam + Vec2::new(0.0, -altitude) + slump;
+        // **The bird is drawn where its hit shapes are.** Its shapes stay on
+        // the deck in every state (`Boss::hit_shapes`: "a ground-only build
+        // must always be able to fight it"), so the sprite may only lift as far
+        // as those deck circles still reach — otherwise the rat was shooting
+        // the planks a dozen pixels under a floating bird. The flight still
+        // reads: the shadow shrinks and softens with the full `altitude`
+        // (below), the wings spread and the body leans.
+        let lift = altitude.min(HIT_LIFT_MAX);
+        let head = head_world - cam + Vec2::new(0.0, -lift) + slump;
 
         // Visual body centre: during Peck/Stuck, lean the torso forward so the neck stays
         // anatomically fierce (~13-17 px from chest to buried head) instead of stretching across the deck!
-        let mut body = ground + jitter + Vec2::new(0.0, -altitude);
+        let mut body = ground + jitter + Vec2::new(0.0, -lift);
         if buried {
             let to_head = head - body;
             let d = to_head.len();
@@ -2288,6 +2301,59 @@ pub fn draw_magpie_crate(pb: &mut PixelBuffer, view: &MagpieView, cam: Vec2) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The bird is drawn where it can be hit, in every state.** Its hit
+    /// shapes are the deck circles in `Boss::hit_shapes` (the design's "a
+    /// ground-only build must always be able to fight it"), so a flying state
+    /// must not lift the sprite out of them: the rat was shooting planks a
+    /// dozen pixels under a floating bird.
+    #[test]
+    fn every_magpie_state_draws_its_body_over_its_hit_shapes() {
+        let states = [
+            MagpieState::Perch,
+            MagpieState::Ruffle,
+            MagpieState::PeckWindup,
+            MagpieState::Peck,
+            MagpieState::Stuck,
+            MagpieState::Takeoff,
+            MagpieState::StrafeWindup,
+            MagpieState::StrafePass,
+            MagpieState::SnatchDrop,
+            MagpieState::Land,
+            MagpieState::GustWindup,
+            MagpieState::Gust,
+            MagpieState::Death,
+        ];
+        for state in states {
+            for prog in [0.15f32, 0.55, 0.9] {
+                let mut view = MagpieView::new(
+                    Vec2::new(46.0, 58.0),
+                    Vec2::new(1.0, 0.0),
+                    Vec2::new(104.0, 66.0),
+                );
+                view.state = state;
+                view.progress = prog;
+                view.anim = 0.7 + prog * 3.0;
+                view.hunting = false;
+                let pose = Pose::from_view(&view, Vec2::ZERO, (206, 150, 70));
+                let circles = body_hit_circles(&view);
+                let reach = circles.iter().map(|(c, r)| c.dist(pose.body) - r).fold(
+                    f32::MAX,
+                    f32::min,
+                );
+                assert!(
+                    reach <= 0.0,
+                    "{state:?} at {prog}: the body is drawn {reach:.1}px outside every hit circle"
+                );
+                // The lift is small enough to keep the whole sprite on deck.
+                assert!(
+                    pose.ground.y - pose.body.y <= HIT_LIFT_MAX + 0.01,
+                    "{state:?} at {prog}: drawn {}px above the deck",
+                    pose.ground.y - pose.body.y
+                );
+            }
+        }
+    }
 
     /// Development aid: `RATRUN_MAGPIE_SHEET=1 cargo test magpie_sheet`
     /// writes a contact sheet of every state of the fight to

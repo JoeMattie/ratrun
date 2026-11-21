@@ -903,9 +903,29 @@ impl DashTrack {
 /// counts the same way.
 #[derive(Resource, Default, Debug)]
 pub struct EvoRuntime {
-    /// Spore Orbit casts since the level began: **Fairy Ring** leaves a fixed
-    /// ring on every second one (design §3: "every second orbit cycle").
+    /// Spore Orbit casts of the **current weapon instance**: **Fairy Ring**
+    /// leaves a fixed ring on every second one (design §3: "every second orbit
+    /// cycle").
     pub fairy_casts: u8,
+    /// Which Spore Orbit instance `fairy_casts` belongs to (kind + level +
+    /// evolved as one key). A recast from a *different* instance — the shop's
+    /// Molt, or dropping and re-acquiring the weapon — restarts the parity at
+    /// zero, so a new orbit never inherits half of the old one's cycle.
+    pub fairy_key: u32,
+}
+
+impl EvoRuntime {
+    /// Count one Spore Orbit cast for the instance identified by `key` and
+    /// return the new count. A key change starts the parity again.
+    #[inline]
+    pub fn count_fairy_cast(&mut self, key: u32) -> u8 {
+        if self.fairy_key != key {
+            self.fairy_key = key;
+            self.fairy_casts = 0;
+        }
+        self.fairy_casts = self.fairy_casts.wrapping_add(1);
+        self.fairy_casts
+    }
 }
 
 /// Capacity of the Counterweight melee-nudge log ("once per target per 0.4 s").

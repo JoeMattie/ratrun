@@ -558,3 +558,38 @@ impl bevy_ecs::system::Command for ChestSpawn {
         self.spawn(ecs);
     }
 }
+
+/// One **Fondue Fork** tine in flight: the evolved cheese spray's two outer
+/// darts are real projectiles (`evolutions::fondue_tines_system`), not a
+/// cast-time ray, so the string plants where they actually land.
+///
+/// The base spray's darts are `Bullet`s; a tine is deliberately its own
+/// component because its life ends at a *plant point* rather than in a despawn,
+/// and because two tines of one cast have to agree on where their string goes.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct FondueTine {
+    pub pos: Vec2,
+    pub prev: Vec2,
+    pub vel: Vec2,
+    /// One dart's damage (the tine hits the first body it crosses).
+    pub damage: f32,
+    /// Flight left in px (Lens Cap stretches it).
+    pub reach: f32,
+    /// Which end of the string this tine plants (0 = the first outer dart,
+    /// 1 = the second).
+    pub slot: u8,
+    /// `SpawnId` of the [`FondueCast`] this tine belongs to.
+    pub cast: u64,
+}
+
+/// A **Fondue Fork** cast: two tines in flight and the string they plant when
+/// both have settled. Spawned by `weapons::fire_one`, resolved here.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct FondueCast {
+    /// Plant points, one per tine, filled as they land.
+    pub ends: [Option<Vec2>; 2],
+    /// What the finished string cuts for.
+    pub damage: f32,
+    /// Seconds the cast may wait for its tines (they always settle by reach).
+    pub wait: f32,
+}
