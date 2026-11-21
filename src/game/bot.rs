@@ -2134,8 +2134,7 @@ fn threat_cost(_p: Vec2, threat: Threat, q: Vec2, t: f32, contact_scale: f32) ->
             };
             let d = q - pos;
             let (u, v) = (d.dot(f), d.dot(f.perp()));
-            let in_kill = u >= MOUSETRAP_KILL_U_MIN - R
-                && u <= MOUSETRAP_KILL_U_MAX + R
+            let in_kill = (MOUSETRAP_KILL_U_MIN - R..=MOUSETRAP_KILL_U_MAX + R).contains(&u)
                 && v.abs() <= MOUSETRAP_KILL_HALF_V + R;
             if armed && in_kill {
                 // The bar bites anywhere in its rect; a hair-trigger trap lands
