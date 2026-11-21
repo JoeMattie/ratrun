@@ -92,12 +92,35 @@ const THRASH_GLOW: Rgb = (255, 178, 92);
 const THRASH_HOT: Rgb = (255, 246, 214);
 const THRASH_HALO: Rgb = (255, 138, 56);
 
+// --- Spiked Tail palette ---------------------------------------------------
+// The weapon is steel (`WeaponKind::SpikedTail::color`), the one weapon colour
+// in the game without a hue: the spikes read apart from the tail's own rose and
+// from the thrash's amber even when all three are on screen at once.
+const SPIKE_STEEL: Rgb = (206, 214, 226);
+const SPIKE_HOT: Rgb = (255, 255, 255);
+
 /// Half-size of the box of pixels rasterised around the player.
 const REACH: i32 = 10;
 
 #[inline]
 fn w2s(p: Vec2, cam: Vec2) -> (i32, i32) {
     ((p.x - cam.x).round() as i32, (p.y - cam.y).round() as i32)
+}
+
+/// Shortest-arc interpolation between two angles (`t = 0` → `a`, `1` → `b`).
+///
+/// Used to swing the tail from its resting curl onto a lash's target line: the
+/// shortest way round, so a whip aimed just past the rat's back does not take
+/// the long way about the screen.
+#[inline]
+fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
+    let mut d = (b - a) % std::f32::consts::TAU;
+    if d > std::f32::consts::PI {
+        d -= std::f32::consts::TAU;
+    } else if d < -std::f32::consts::PI {
+        d += std::f32::consts::TAU;
+    }
+    a + d * t.clamp(0.0, 1.0)
 }
 
 /// Body half-width at spine station `u` (0 outside the body).
@@ -329,6 +352,36 @@ pub fn draw_rat(pb: &mut PixelBuffer, player: &Player, elapsed: f32, cam: Vec2) 
     draw_rat_flash(pb, player, elapsed, cam, 0.0);
 }
 
+/// The **Spiked Tail**'s lash, as the art needs it.
+///
+/// Purely derived from the sim's `Lash` component and the run clock (see
+/// `World::lash_visual`), so no layer of the renderer ever reads or writes
+/// simulation state, and nothing here draws rng. Every field is at its
+/// no-op default when no lash is in flight.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LashVisual {
+    /// Rump -> impact point, unit (ZERO for a degenerate shot).
+    pub dir: Vec2,
+    /// Rump -> impact point, px. The tail's drawn length out at full extension.
+    pub dist: f32,
+    /// `0..=1` how far the chain has snapped out of its curl (`0` = the tail
+    /// the rat has always had).
+    pub ext: f32,
+    /// `0..=1` how far the spikes stand out along the chain.
+    pub bristle: f32,
+    /// `0..=1` the white-hot flash at the tip just after the crack.
+    pub flash: f32,
+    /// `0..=1` the snap's smear (ghost chains beside the live one).
+    pub smear: f32,
+    /// `0..=1` the impact star: 1 on the crack, fading out.
+    pub star: f32,
+    /// The burst radius the star is drawn at (px).
+    pub radius: f32,
+    /// The impact point in world space (the star stays where the tail landed,
+    /// even while the chain recoils or the rat walks away).
+    pub point: Vec2,
+}
+
 /// [`draw_rat`], plus the Tail Thrash's one-off "just charged" flash
 /// (`0.0..=1.0`, see [`tail_ready_flash`]).
 ///
@@ -343,6 +396,27 @@ pub fn draw_rat_flash(
     cam: Vec2,
     tail_flash: f32,
 ) {
+    draw_rat_lashed(pb, player, elapsed, cam, tail_flash, None);
+}
+
+/// [`draw_rat_flash`], plus the **Spiked Tail**'s lash: the tail bristles with
+/// spikes (on the real chain, so the weapon is the tail the rat already has)
+/// and then snaps straight out at the target, with the impact star where it
+/// lands.
+///
+/// The two tail-weapon visuals coexist: the Tail Thrash's charge owns the
+/// tail's *colour and glow* (it is a charge meter), the Spiked Tail's lash owns
+/// its *silhouette* (spike length, thickening, the snap). A rat that owns both
+/// therefore reads as a glowing tail growing spikes before a lash — which is
+/// exactly what it is, and neither effect has to be suppressed.
+pub fn draw_rat_lashed(
+    pb: &mut PixelBuffer,
+    player: &Player,
+    elapsed: f32,
+    cam: Vec2,
+    tail_flash: f32,
+    lash: Option<LashVisual>,
+) {
     let pose = pose_of(player, elapsed);
     let tint = tint_of(player, elapsed);
 
@@ -353,7 +427,7 @@ pub fn draw_rat_flash(
     if let Some(t) = tail.as_mut() {
         t.flash = tail_flash.clamp(0.0, 1.0);
     }
-    draw_tail(pb, &pose, player.vel, elapsed, tint, cam, tail);
+    draw_tail(pb, &pose, player.vel, elapsed, tint, cam, tail, lash);
     draw_feet(pb, &pose, tint, cam);
     draw_body(pb, &pose, tint, cam);
     draw_face(pb, &pose, elapsed, tint, cam);
@@ -740,6 +814,7 @@ fn draw_dash_streaks(pb: &mut PixelBuffer, pose: &Pose, cam: Vec2) {
 /// A longer tail keeps the at-rest step and simply uses more points, so it
 /// follows the same curl and sway (both are functions of the normalised
 /// distance along the tail) and stays hooked to the rump.
+#[allow(clippy::too_many_arguments)]
 fn draw_tail(
     pb: &mut PixelBuffer,
     pose: &Pose,
@@ -748,6 +823,7 @@ fn draw_tail(
     tint: Tint,
     cam: Vec2,
     tail: Option<TailCharge>,
+    lash: Option<LashVisual>,
 ) {
     let m = pose.moving;
     // Signed angle from the facing to the velocity: non-zero only mid-turn.
@@ -759,11 +835,22 @@ fn draw_tail(
         0.0
     };
     let whip = 1.0 - 0.85 * pose.dash;
+    // The lash's straightening, and the spikes standing out along the chain
+    // (both zero for a rat that does not own the Spiked Tail, so every term
+    // below leaves the tail exactly the tail it always was).
+    let snap = lash.map_or(0.0, |l| l.ext.clamp(0.0, 1.0));
+    let bristle = lash.map_or(0.0, |l| l.bristle.clamp(0.0, 1.0));
+    let lash_angle = lash.map_or(0.0, |l| l.dir.angle());
     // Length: the charge meter. With nothing to grow the chain keeps exactly
     // the at-rest tail's `TAIL_STEPS` points and step (so an uncharged tail is
     // the tail it has always been, to the pixel); a longer tail adds points at
-    // the same spacing, which keeps the curve's shape as it stretches.
-    let len = tail.map_or(TAIL_LEN, |t| t.tail_len()) + 3.0 * pose.dash;
+    // the same spacing, which keeps the curve's shape as it stretches. A lash
+    // stretches it all the way out to its target instead.
+    let rest_len = tail.map_or(TAIL_LEN, |t| t.tail_len()) + 3.0 * pose.dash;
+    let len = match lash {
+        Some(l) if snap > 0.0 => (rest_len + (l.dist - rest_len) * snap).max(TAIL_LEN * 0.6),
+        _ => rest_len,
+    };
     let rest_step = (TAIL_LEN + 3.0 * pose.dash) / TAIL_STEPS as f32;
     let steps = ((len / rest_step).round() as usize).clamp(TAIL_STEPS, TAIL_MAX_STEPS);
     let step = len / steps as f32;
@@ -776,7 +863,15 @@ fn draw_tail(
         let idle = 1.75 * s.powf(1.3) + 0.24 * (elapsed * 1.7 - s * 2.2).sin();
         let run = 0.22 * s + 0.6 * s * (elapsed * 13.0 - s * 5.5).sin() * whip;
         let theta = lag * s + idle * (1.0 - m) + run * m;
-        p += back.rotate(theta) * step;
+        let mut dir = back.rotate(theta);
+        if snap > 0.0 {
+            // A thrown whip leaves the rump pointing *back* and curls onto its
+            // target over the first quarter of its length, so the tail never
+            // has to pass through the rat to reach something in front of it.
+            let bend = (s / 0.26).min(1.0) * snap;
+            dir = Vec2::from_angle(lerp_angle(dir.angle(), lash_angle, bend));
+        }
+        p += dir * step;
         *slot = w2s(p, cam);
     }
     let pts = &pts[..steps];
@@ -828,8 +923,9 @@ fn draw_tail(
 
         // Width: the whip is thin at the rump and thickens toward the tip, so
         // growing the tail is visible from across a busy screen, not just at
-        // the last pixel.
-        let band = charge * (0.10 + 0.95 * s * s);
+        // the last pixel. The Spiked Tail's bristle thickens it too — a tail
+        // that has just grown spikes is a *thicker* tail, thrash charge or not.
+        let band = charge * (0.10 + 0.95 * s * s) + bristle * 0.85 * (0.35 + 0.65 * s);
         let kmax = band.round() as i32;
         if kmax <= 0 {
             continue;
@@ -855,6 +951,113 @@ fn draw_tail(
             n += 1;
             blend(pb, x + dx, y + dy, tint.apply(edge), a);
             blend(pb, x - dx, y - dy, tint.apply(edge), a);
+        }
+    }
+
+    // The spikes: drawn *on the real chain* (every third point, alternating
+    // sides, short at the rump and long at the tip), so the weapon reads as the
+    // tail the rat already has growing a weapon, not as a second tail sprite.
+    if bristle > 0.0 {
+        for i in (1..steps).step_by(3) {
+            let s = i as f32 / (steps - 1) as f32;
+            let (x, y) = pts[i];
+            let (ax, ay) = pts[i - 1];
+            let d = Vec2::new((x - ax) as f32, (y - ay) as f32);
+            if d.len_sq() <= 1e-4 {
+                continue;
+            }
+            let d = d.normalized();
+            let (nx, ny) = (-d.y, d.x);
+            let side = if (i / 3) % 2 == 0 { 1.0 } else { -1.0 };
+            let spike_len = (1.0 + (0.8 + 2.2 * s) * bristle).round().max(1.0) as i32;
+            for k in 1..=spike_len {
+                let px = x + (nx * side * k as f32).round() as i32;
+                let py = y + (ny * side * k as f32).round() as i32;
+                let hot = k == spike_len;
+                let c = if hot { SPIKE_HOT } else { SPIKE_STEEL };
+                blend(pb, px, py, tint.apply(c), a);
+                // A one-pixel under-shadow keeps the steel off a busy floor.
+                if hot && !tint.ghost {
+                    darken(pb, px + 1, py + 1, 0.22);
+                }
+            }
+        }
+    }
+
+    // The lash's own extras. None of this touches the tail a rat without the
+    // Spiked Tail owns: with `lash == None` every term above and below is zero.
+    if let Some(l) = lash {
+        let (tx, ty) = pts[steps - 1];
+        let root = w2s(pose.place(-3.2, 0.0), cam);
+        // The smear: two ghost chains just behind the live one, only in the
+        // frames the tail is actually travelling. Cheap (six plots each) and it
+        // is what makes a still frame read as *speed* rather than a long tail.
+        if l.smear > 0.0 && snap > 0.45 {
+            let v = Vec2::new((tx - root.0) as f32, (ty - root.1) as f32);
+            for (k, ghost) in [(1i32, 0.10f32), (2, 0.20)] {
+                let atten = 0.55 * l.smear.clamp(0.0, 1.0) / k as f32;
+                for side in [-1.0f32, 1.0] {
+                    let r = v.rotate(ghost * side);
+                    for step in 0..4 {
+                        let t = 0.45 + 0.18 * step as f32;
+                        let px = root.0 + (r.x * t).round() as i32;
+                        let py = root.1 + (r.y * t).round() as i32;
+                        plot_add(pb, px, py, scale(SPIKE_STEEL, atten));
+                    }
+                }
+            }
+        }
+        // The white tip flash on the crack frame.
+        if l.flash > 0.0 && snap > 0.25 {
+            let g = l.flash.clamp(0.0, 1.0) * a;
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    plot_add(pb, tx + dx, ty + dy, scale(SPIKE_HOT, 0.5 * g));
+                }
+            }
+            for i in 0..8 {
+                let ang = i as f32 * std::f32::consts::TAU / 8.0;
+                let r = 1.0 + 4.0 * g;
+                plot_add(
+                    pb,
+                    tx + (ang.cos() * r).round() as i32,
+                    ty + (ang.sin() * r).round() as i32,
+                    scale(SPIKE_HOT, 0.45 * g),
+                );
+            }
+        }
+        // The impact star: six spikes and a dashed ring at the burst radius, so
+        // the small AoE is legible in the one frame the tail lands in. It stays
+        // where the tail landed while the chain recoils.
+        if l.star > 0.0 && l.radius > 0.5 {
+            let g = l.star.clamp(0.0, 1.0);
+            let c = w2s(l.point, cam);
+            let r = l.radius.max(1.5);
+            for i in 0..6 {
+                let ang = i as f32 * std::f32::consts::TAU / 6.0 + 0.26;
+                for (k, fade) in [(1.0f32, 1.0f32), (0.62, 0.5)] {
+                    let reach = r * k;
+                    plot_add(
+                        pb,
+                        c.0 + (ang.cos() * reach).round() as i32,
+                        c.1 + (ang.sin() * reach).round() as i32,
+                        scale(SPIKE_HOT, g * fade * 0.9),
+                    );
+                }
+            }
+            let dashes = ((r * 1.4) as i32).max(6);
+            for i in 0..dashes {
+                if i % 2 == 1 {
+                    continue;
+                }
+                let ang = i as f32 / dashes as f32 * std::f32::consts::TAU + 0.12;
+                plot_add(
+                    pb,
+                    c.0 + (ang.cos() * r).round() as i32,
+                    c.1 + (ang.sin() * r).round() as i32,
+                    scale(SPIKE_STEEL, g * 0.8),
+                );
+            }
         }
     }
 

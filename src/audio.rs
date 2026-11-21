@@ -153,11 +153,16 @@ pub enum Sfx {
     MagpieCrate,
     /// The last rattle.
     MagpieDeath,
+    // ---- The Spiked Tail Whip (wave 3, w3-spiketail) ----
+    /// The lash: a rising air swish that lasts exactly `LASH_WINDUP`, then a
+    /// hard whip-crack. Announced when the tail starts bristling, so the crack
+    /// in the sample lands on the frame the tail does.
+    Lash,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 100] = [
+    pub const ALL: [Sfx; 101] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -274,6 +279,7 @@ impl Sfx {
         Sfx::MagpieGust,
         Sfx::MagpieCrate,
         Sfx::MagpieDeath,
+        Sfx::Lash,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -379,6 +385,7 @@ impl Sfx {
             Sfx::MagpieGust => "MAGPIE_GUST",
             Sfx::MagpieCrate => "MAGPIE_CRATE",
             Sfx::MagpieDeath => "MAGPIE_DEATH",
+            Sfx::Lash => "LASH",
         }
     }
 
@@ -485,6 +492,8 @@ impl Sfx {
             // one sample.
             Sfx::NightBell => 1,
             Sfx::NightCarriage => 3,
+            // The crack is one sharp event; pitch variants would only smear it.
+            Sfx::Lash => 1,
         }
     }
 
@@ -583,6 +592,8 @@ impl Sfx {
             Sfx::MagpieCry | Sfx::MagpieDeath => 3,
             Sfx::ShopEnter | Sfx::Purchase | Sfx::Denied => 1,
             Sfx::MinibossArrive | Sfx::MinibossTell | Sfx::MinibossRetreat => 2,
+            // A weapon shot: it must not steal a voice from a hurt or a kill.
+            Sfx::Lash => 1,
         }
     }
 
@@ -6947,6 +6958,83 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             });
             m.add_short_tail(0.20, 3600.0);
             m.finish(0.50, 1.3, 2.0, 40.0)
+        }
+
+        // 91. Lash: the Spiked Tail. A rising air swish that lasts the whole
+        // wind-up, then a hard whip-crack with a weighted tip and a spike ping
+        // or two off the end. Deliberately shorter and drier than `ShootWhip`
+        // (the radial Tail Whip's meaty swing): this one is one strike, not a
+        // sweep, and the two can be on screen together.
+        Sfx::Lash => {
+            let mut m = MixBuf::new(0.34);
+            // The wind-up: air being cut, band narrowing upward. 115 ms is
+            // `weapon::LASH_WINDUP` in audio form, so the crack below lands on
+            // the frame the tail lands on.
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.114,
+                pink: true,
+                gain: 0.40,
+                attack_s: 0.012,
+                decay_pow: 0.70,
+                filter: FilterMode::BandPass,
+                fc0: 420.0,
+                fc1: 3000.0,
+                fc_pow: 1.25,
+                q: 3.0,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // The crack: bright and tight, no tail of its own.
+            m.add_noise(NoiseLayer {
+                start_s: 0.112,
+                dur_s: 0.038,
+                pink: false,
+                gain: 0.86,
+                attack_s: 0.0006,
+                decay_pow: 2.8,
+                filter: FilterMode::BandPass,
+                fc0: 3400.0,
+                fc1: 900.0,
+                q: 1.2,
+                seed: base_seed ^ 0x5A5A,
+                ..Default::default()
+            });
+            // The mass behind it: a weighted tip snapping down.
+            m.add_osc(OscLayer {
+                start_s: 0.112,
+                dur_s: 0.072,
+                f0: 900.0,
+                f1: 180.0,
+                pitch_pow: 0.38,
+                wave: Wave::Saw,
+                gain: 0.55,
+                attack_s: 0.001,
+                decay_pow: 2.0,
+                filter: FilterMode::LowPass,
+                fc0: 3600.0,
+                fc1: 700.0,
+                q: 1.3,
+                ..Default::default()
+            });
+            // Spikes ringing off the tip (the shards are a level-4 flourish on
+            // top; the ping belongs to the weapon's own crack either way).
+            for &(st, f) in &[(0.150f32, 2650.0f32), (0.184, 3180.0)] {
+                m.add_osc(OscLayer {
+                    start_s: st,
+                    dur_s: 0.044,
+                    f0: f,
+                    f1: f * 0.72,
+                    pitch_pow: 1.0,
+                    wave: Wave::Triangle,
+                    gain: 0.15,
+                    attack_s: 0.001,
+                    decay_pow: 2.4,
+                    ..Default::default()
+                });
+            }
+            m.add_short_tail(0.11, 2600.0);
+            m.finish(0.46, 1.5, 0.8, 12.0)
         }
     }
 }

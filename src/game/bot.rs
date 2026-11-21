@@ -1942,6 +1942,10 @@ fn weapon_tier(k: WeaponKind) -> f32 {
         // pay off, so it ranks below the direct damage weapons.
         WeaponKind::AcidRain => 8.5,
         WeaponKind::Hantavirus => 7.5,
+        // The Spiked Tail is the build's heavy single target with a little
+        // area on top: better than the spraying weapons into a Brute or a
+        // miniboss, worse than a real crowd clearer.
+        WeaponKind::SpikedTail => 8.6,
     }
 }
 

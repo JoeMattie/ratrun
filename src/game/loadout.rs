@@ -1515,9 +1515,9 @@ mod tests {
     /// either rack cap or deals a duplicate / illegal card.
     #[test]
     fn all_twelve_weapons_and_passives_are_offerable_within_the_caps() {
-        assert_eq!(WeaponKind::all().len(), 12);
+        assert_eq!(WeaponKind::all().len(), crate::game::weapon::WEAPON_SLOTS);
         assert_eq!(PassiveKind::all().len(), 12);
-        let mut weapons_seen = [false; 12];
+        let mut weapons_seen = [false; crate::game::weapon::WEAPON_SLOTS];
         let mut passives_seen = [false; 12];
         for seed in 0..600u64 {
             let mut rng = StdRng::seed_from_u64(seed);

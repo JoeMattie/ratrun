@@ -919,6 +919,76 @@ impl World {
         })
     }
 
+    /// The Spiked Tail's lash to draw this frame, if one is in flight.
+    ///
+    /// Every field is the sim's own clock (`components::Lash::timer`) turned
+    /// into draw weights with the same `weapon::LASH_*` constants the damage
+    /// schedule uses, so the crack the player sees and the crack that lands can
+    /// never drift apart. No frame cache, no rng, nothing written.
+    pub fn lash_visual(&mut self) -> Option<art_rat::LashVisual> {
+        use crate::game::ecs::components::Lash;
+        use crate::game::weapon::{LASH_RECOIL_AT, LASH_TOTAL, LASH_WINDUP};
+        let mut q = self
+            .ecs
+            .query::<(Entity, &crate::game::ecs::components::SpawnId, &Lash)>();
+        let mut live: Option<(u64, Lash)> = None;
+        for (_, id, lash) in q.iter(&self.ecs) {
+            if live.is_none_or(|(best, _)| id.0 < best) {
+                live = Some((id.0, *lash));
+            }
+        }
+        let (_, lash) = live?;
+        let total = LASH_TOTAL.max(1e-4);
+        let t = (lash.timer / total).clamp(0.0, 1.0);
+        let wind = LASH_WINDUP / total;
+        let recoil = LASH_RECOIL_AT / total;
+        // The snap out is the fastest thing in the game's animation set: three
+        // frames. Everything after it is the beat it holds and the reel back.
+        let snap_t = (0.045 / total).max(1e-3);
+        let ease_out = |u: f32| -> f32 {
+            let u = u.clamp(0.0, 1.0);
+            1.0 - (1.0 - u) * (1.0 - u)
+        };
+        let ext = if t < wind {
+            0.0
+        } else if t < wind + snap_t {
+            ease_out((t - wind) / snap_t)
+        } else if t < recoil {
+            1.0
+        } else {
+            let u = ((t - recoil) / (1.0 - recoil).max(1e-4)).clamp(0.0, 1.0);
+            1.0 - u * u
+        };
+        let after = |window: f32| -> f32 {
+            if !lash.struck || t < wind {
+                0.0
+            } else {
+                (1.0 - (t - wind) / (window / total).max(1e-4)).clamp(0.0, 1.0)
+            }
+        };
+        let bristle = if t < wind {
+            (t / wind.max(1e-4)).clamp(0.0, 1.0)
+        } else {
+            (1.0 - (t - 0.85).max(0.0) / 0.15).clamp(0.0, 1.0)
+        };
+        let to_target = lash.target - lash.origin;
+        Some(art_rat::LashVisual {
+            dir: if to_target.len_sq() > 1e-4 {
+                to_target.normalized()
+            } else {
+                Vec2::new(1.0, 0.0)
+            },
+            dist: to_target.len(),
+            ext,
+            bristle,
+            flash: after(0.10),
+            smear: after(0.07),
+            star: after(0.18),
+            radius: lash.radius,
+            point: lash.target,
+        })
+    }
+
     /// The drawn squeak ring: `(origin, radius)` while one is expanding.
     pub fn squeak_visual(&self) -> Option<(Vec2, f32)> {
         let fx = self.ecs.resource::<ActiveFx>();
@@ -1905,12 +1975,16 @@ impl World {
         // the charge itself is read off the weapon, but the one-off "just
         // charged" flash needs the crossing remembered between frames, and this
         // is the only place that has a frame stream.
+        // The Spiked Tail's lash rides on that same tail: the bristle and the
+        // snap are drawn by `art_rat` on the rat's real chain, so the weapon is
+        // visibly the rat's own tail and not a second sprite.
+        let lash = self.lash_visual();
         let flash = art_rat::tail_ready_flash(
             art_rat::tail_charge(&self.player),
             self.elapsed,
             &mut self.tail_ready_at,
         );
-        art_rat::draw_rat_flash(pb, &self.player, self.elapsed, cam, flash);
+        art_rat::draw_rat_lashed(pb, &self.player, self.elapsed, cam, flash, lash);
         // Bottle Cap active charge: crisp rotating white-tin rim around the rat.
         if self.player.buffs.shield > 0.0 {
             art_wave3a::draw_bottle_cap_rim(pb, self.player.pos, self.elapsed, cam);

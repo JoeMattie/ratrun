@@ -301,6 +301,10 @@ pub fn emit_weapon_fire(
         // feedback is the tag on the body.
         WeaponKind::AcidRain => emit_acid_rain_fire(ps, rng, pos, aim),
         WeaponKind::Hantavirus => emit_virus_tag(ps, rng, pos),
+        // The Spiked Tail's whole wind-up tell is the drawn tail bristling
+        // (`art_rat`), which is the weapon's identity: a puff here would only
+        // confuse it. Its crack has its own emitter.
+        WeaponKind::SpikedTail => {}
     }
 }
 
@@ -495,6 +499,9 @@ pub fn emit_weapon_hit(
         Some(WeaponKind::SuperDash) => {
             emit_super_dash_comb(ps, rng, pos, pos + reflect * 12.0, 4.0)
         }
+        // A spike shard striking a body: the same spiked star the crack draws,
+        // tightened to a shard.
+        Some(WeaponKind::SpikedTail) => emit_lash_shard_hit(ps, rng, pos, reflect, killed),
     }
 }
 
@@ -6631,6 +6638,214 @@ pub fn emit_boss_magpie_death(ps: &mut Particles, rng: &mut impl Rng, at: Vec2, 
         seed: rng.random::<u16>(),
         kind: StainKind::Splat,
     });
+}
+
+// ---- The Spiked Tail Whip (wave 3, w3-spiketail) --------------------------
+
+/// The weapon's own colour (`WeaponKind::SpikedTail::color`) and the white-hot
+/// flash at the tip of the crack.
+const LASH_STEEL: Rgb = (206, 214, 226);
+const LASH_HOT: Rgb = (255, 255, 255);
+const LASH_DARK: Rgb = (84, 90, 106);
+
+/// The crack: a white flash at the tip, a star of eight spikes out of it, a
+/// ring at the burst radius (so the small AoE is legible in one still) and a
+/// short spray of grit along the lash.
+///
+/// `dir` is the rat-to-impact direction, so the grit flies on past the hit the
+/// way a whip's own tip does.
+pub fn emit_lash_impact(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    pos: Vec2,
+    dir: Vec2,
+    radius: f32,
+    killed: bool,
+) {
+    let base = safe_pos(pos);
+    let dir = if dir.len_sq() > 0.01 {
+        dir.normalized()
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    let radius = safe_clamp(radius, 2.0, 40.0, 8.0);
+    // The tip flash: one crisp cross, gone in a tenth of a second.
+    ps.push(Particle {
+        pos: base,
+        vel: Vec2::ZERO,
+        life: 0.12,
+        max_life: 0.12,
+        drag: 0.0,
+        gravity: 0.0,
+        ramp: Ramp::Custom(LASH_HOT, LASH_STEEL),
+        additive: true,
+        shape: Shape::Cross,
+    });
+    // Eight spikes out of the impact, longest along the swing.
+    let spikes = ps.budget_count(if killed { 9 } else { 7 }, false);
+    let swing = dir.angle();
+    for i in 0..spikes {
+        let a = swing + std::f32::consts::TAU * i as f32 / spikes as f32
+            + rng.random_range(-0.14..0.14);
+        let speed = rng.random_range(48.0..104.0);
+        let life = rng.random_range(0.15..0.26);
+        ps.push(Particle {
+            pos: base,
+            vel: Vec2::from_angle(a) * speed,
+            life,
+            max_life: life,
+            drag: 7.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(LASH_HOT, LASH_DARK),
+            additive: true,
+            shape: Shape::Streak,
+        });
+    }
+    // The burst, drawn at its real radius: a tight steel ring.
+    ps.push_shockwave(Shockwave {
+        pos: base,
+        start_r: (radius * 0.35).max(1.5),
+        end_r: radius,
+        life: 0.17,
+        max_life: 0.17,
+        color: LASH_STEEL,
+        core: LASH_HOT,
+        thick: 1.2,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    let grit = ps.budget_count(5, false);
+    ps.cone_shaped(
+        rng,
+        base,
+        dir,
+        grit,
+        58.0,
+        0.85,
+        Ramp::Custom((222, 226, 236), LASH_DARK),
+        0.22,
+        true,
+        Shape::Dot,
+        4.4,
+    );
+}
+
+/// The spike shards breaking off the tail and flying on: a short steel spray
+/// in the fan the shards themselves take, so the projectile and its tell are
+/// one shape.
+pub fn emit_lash_shards(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    pos: Vec2,
+    dir: Vec2,
+    count: usize,
+) {
+    let base = safe_pos(pos);
+    let dir = if dir.len_sq() > 0.01 {
+        dir.normalized()
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    let n = ps.budget_count(count.saturating_mul(2), false);
+    ps.cone_shaped(
+        rng,
+        base,
+        dir,
+        n,
+        120.0,
+        0.30,
+        Ramp::Custom(LASH_HOT, LASH_STEEL),
+        0.20,
+        true,
+        Shape::Streak,
+        2.4,
+    );
+}
+
+/// One **Barbed Wire** reel: the barbed line from the caught body back to the
+/// rat, sparking where it crossed something (`crossed` bodies).
+pub fn emit_lash_drag(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    from: Vec2,
+    to: Vec2,
+    crossed: u32,
+) {
+    let a = safe_pos(from);
+    let b = safe_pos(to);
+    let span = b - a;
+    let len = span.len();
+    if len < 0.5 {
+        return;
+    }
+    let dir = span * (1.0 / len);
+    let perp = dir.perp();
+    // The wire: a dashed steel thread, so a still frame reads as a hook line.
+    let dashes = (len as usize / 3).clamp(2, 18);
+    for i in 0..dashes {
+        let t = (i as f32 + 0.5) / dashes as f32;
+        let p = a + span * t;
+        let life = rng.random_range(0.12..0.20);
+        ps.push(Particle {
+            pos: p + perp * rng.random_range(-0.8..0.8),
+            vel: -dir * rng.random_range(10.0..30.0),
+            life,
+            max_life: life,
+            drag: 6.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(LASH_HOT, LASH_DARK),
+            additive: true,
+            shape: Shape::Dot,
+        });
+    }
+    // A spark for every body the drag swept.
+    let sparks = ps.budget_count(crossed.min(6) as usize * 2, false);
+    for _ in 0..sparks {
+        let t = rng.random_range(0.0..1.0);
+        let life = rng.random_range(0.10..0.20);
+        ps.push(Particle {
+            pos: a + span * t,
+            vel: perp * rng.random_range(-46.0..46.0) + dir * rng.random_range(-20.0..20.0),
+            life,
+            max_life: life,
+            drag: 6.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(LASH_HOT, LASH_STEEL),
+            additive: true,
+            shape: Shape::Streak,
+        });
+    }
+}
+
+/// A spike shard biting a body: a small, tight version of the crack's star.
+pub fn emit_lash_shard_hit(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    pos: Vec2,
+    reflect: Vec2,
+    killed: bool,
+) {
+    let base = safe_pos(pos);
+    let dir = if reflect.len_sq() > 0.01 {
+        reflect.normalized()
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    let n = ps.budget_count(if killed { 6 } else { 4 }, false);
+    ps.cone_shaped(
+        rng,
+        base,
+        dir,
+        n,
+        62.0,
+        0.7,
+        Ramp::Custom(LASH_HOT, LASH_STEEL),
+        0.18,
+        true,
+        Shape::Streak,
+        5.4,
+    );
 }
 
 #[cfg(test)]

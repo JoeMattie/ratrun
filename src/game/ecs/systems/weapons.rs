@@ -360,6 +360,10 @@ fn target_range(kind: WeaponKind) -> f32 {
         // (`RAIN_RANGE`, `VIRUS_RANGE`), the same cap and the same tie order.
         WeaponKind::AcidRain => crate::game::weapon::RAIN_RANGE,
         WeaponKind::Hantavirus => crate::game::weapon::VIRUS_RANGE,
+        // The lash picks through `weapon_spiketail::pick_lash_target` (it
+        // needs the *entity*, not just a point, so the impact can follow the
+        // body); this is the longest reach any level of it has.
+        WeaponKind::SpikedTail => crate::game::weapon::LASH_REACH[4],
     }
 }
 
@@ -1501,6 +1505,34 @@ fn fire_one(
                 next_id,
             );
         }
+        // The Spiked Tail (wave 3, `weapon_spiketail`): pick one body in reach
+        // with a clear line and spawn the lash that will crack at it. The
+        // wind-up and the hit are the system's job, so this arm only snapshots
+        // the level's numbers — **with the passive hooks the weapon claims**:
+        // Lens Cap stretches a melee weapon's reach, Long Fuse widens a splash,
+        // Counterweight its native shove.
+        //
+        // Aim hook: an aimed (mouse/gamepad) build passes its aim point to
+        // `fire_spiked_tail` in place of the `None` this call hands the target
+        // pick — that argument is the only change the aim branch needs here.
+        WeaponKind::SpikedTail => {
+            let i = (wlevel.clamp(1, 5) as usize) - 1;
+            fired = crate::game::ecs::systems::weapon_spiketail::fire_spiked_tail(
+                &mut commands,
+                level,
+                order,
+                enemies,
+                boss_points,
+                ppos,
+                stats.melee_reach(crate::game::weapon::LASH_REACH[i]),
+                stats.splash_radius(crate::game::weapon::LASH_RADIUS[i]),
+                dmg,
+                stats.shove(crate::game::weapon::LASH_SHOVE),
+                crate::game::weapon::LASH_SHARDS[i],
+                evolved,
+                next_id,
+            );
+        }
         WeaponKind::Hantavirus => {
             let i = (wlevel.clamp(1, 5) as usize) - 1;
             fired = crate::game::ecs::systems::weapons_wave3a::fire_hantavirus(
@@ -1542,6 +1574,13 @@ fn fire_one(
             WeaponKind::SuperDash => Sfx::SuperDash,
             WeaponKind::AcidRain => Sfx::ShootRain,
             WeaponKind::Hantavirus => Sfx::Infect,
+            // The whip-crack. Announce it at the *bristle*, because the sample
+            // itself spends `LASH_WINDUP` on a rising swish before its crack;
+            // that puts the snap under the frame the tail actually lands on
+            // (see `LASH_WINDUP` in `weapon.rs`), and keeps a consumed `Sfx`
+            // out of the simulation — whether the caller drains audio can
+            // never change a body's HP.
+            WeaponKind::SpikedTail => Sfx::Lash,
         };
         sfx.0.push(sound);
     }

@@ -29,3 +29,6 @@ pub mod weapons;
 // the weapons it fires.
 pub mod weapons_wave3b;
 pub mod weapons_wave3a;
+// The Spiked Tail Whip's lash (wave 3, w3-spiketail): its own file so the
+// wind-up/crack/recoil beat stays in one place.
+pub mod weapon_spiketail;

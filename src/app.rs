@@ -4267,6 +4267,85 @@ mod tests {
                     hh.frame(&[]);
                 }
             }
+            // The Spiked Tail's lash, in the beats the weapon is built out of:
+            // `spiketail-bristle` (the tail thickening and sprouting spikes
+            // before the crack), `spiketail-crack` (the tail at full extension,
+            // a beat after it landed) and `spiketail-burst` (the impact star,
+            // the burst and the damage numbers). `barbedwire` is the evolved
+            // weapon mid-reel, with the catch dragged through the pack.
+            // `RATRUN_DUMP_ZOOM=0.5` takes the same frame at 2x.
+            t if t.starts_with("spiketail") || t == "barbedwire" => {
+                use crate::game::weapon::WeaponKind;
+                use rand::SeedableRng;
+                hh.enter_playing();
+                let evolved = t == "barbedwire";
+                let frames = match t {
+                    "spiketail-bristle" => 5,
+                    "spiketail-burst" => 14,
+                    // The reel starts at LASH_RECOIL_AT (0.20 s); a few frames
+                    // later the caught body is standing at the rat's feet.
+                    "barbedwire" => 17,
+                    _ => 9,
+                };
+                let mut rng = rand::rngs::StdRng::seed_from_u64(31);
+                {
+                    let w = hh.app.world.as_mut().unwrap();
+                    w.player.loadout = Loadout::from_parts(
+                        vec![{
+                            let mut weapon =
+                                crate::game::weapon::Weapon::new(WeaponKind::SpikedTail);
+                            weapon.level = if evolved { 5 } else { 4 };
+                            weapon.evolved = evolved;
+                            weapon.timer = 0.0;
+                            weapon
+                        }],
+                        Vec::new(),
+                    );
+                    w.player.face = crate::math::Vec2::new(1.0, 0.0);
+                    w.player.iframes = 60.0;
+                    // The crack kills things; a level-up card would cover it.
+                    w.player.xp_to_next = 99_999;
+                    w.clear_enemies();
+                    let p = w.player.pos;
+                    // A tough knot east of the rat: one body to lash (nearest,
+                    // so the tail points at it) and a small crowd inside the
+                    // burst radius of where it stands.
+                    for (off, kind) in [
+                        ((30.0f32, 0.0f32), crate::game::enemy::EnemyKind::Brute),
+                        ((32.0, 7.0), crate::game::enemy::EnemyKind::Skitterer),
+                        ((28.0, -7.0), crate::game::enemy::EnemyKind::Skitterer),
+                        // On the line home: what an evolved lash drags across.
+                        ((18.0, 1.0), crate::game::enemy::EnemyKind::Skitterer),
+                        ((10.0, -2.0), crate::game::enemy::EnemyKind::Skitterer),
+                        // Flavour off the line, so the burst's edge is visible.
+                        ((38.0, 14.0), crate::game::enemy::EnemyKind::Skitterer),
+                    ] {
+                        w.spawn_enemy_with_rng(
+                            kind,
+                            p + crate::math::Vec2::new(off.0, off.1),
+                            400.0,
+                            &mut rng,
+                        );
+                    }
+                    if let Some(zoom) = std::env::var("RATRUN_DUMP_ZOOM")
+                        .ok()
+                        .and_then(|v| v.parse::<f32>().ok())
+                    {
+                        w.set_zoom_instant(zoom);
+                    }
+                }
+                for _ in 0..frames {
+                    hh.frame(&[]);
+                }
+                if t == "spiketail-bristle" || t == "spiketail-crack" {
+                    // Nothing has landed yet / the numbers would sit on the
+                    // tail: the still is about the tail.
+                    if let Some(w) = hh.app.world.as_mut() {
+                        w.damage_numbers.clear();
+                    }
+                    hh.frame(&[]);
+                }
+            }
             // Wave 3 weapons A, mid-effect: `RATRUN_DUMP=rain` catches a volley
             // in the air (every mark locked, the lead drop's strokes coming
             // down), `RATRUN_DUMP=virus` a chain two ticks into its first host
