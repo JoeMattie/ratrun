@@ -1341,12 +1341,15 @@ impl World {
         self.zoom_view = self.zoom;
     }
 
-    /// The world rectangle the renderer covered last frame: the logical
-    /// viewport times the eased zoom. Screen-space overlays frame *this* (the
+    /// The world rectangle the renderer covered last frame: the drawn frame's
+    /// size ([`World::render_viewport`]) times the eased zoom. Screen-space overlays frame *this* (the
     /// boss compass, the minimap's view brackets), while the simulation keeps
     /// using the unzoomed [`World::viewport`].
     pub fn view_span(&self) -> Vec2 {
-        self.viewport * self.zoom_view.clamp(zoom::MIN, zoom::MAX)
+        // The renderer's own viewport (the frame it last drew), not the
+        // simulation's: the two are the same size in the App, but a spectate
+        // tile draws a smaller frame than the run's logical viewport.
+        self.render_viewport * self.zoom_view.clamp(zoom::MIN, zoom::MAX)
     }
 
     /// Draw the world itself into `pb` (whose size *is* the world rectangle it
@@ -3000,12 +3003,18 @@ mod zoom_tests {
 
     /// **The determinism promise.** The same seed and the same inputs play out
     /// identically at z = 0.5, 1 and 2, however many frames each is drawn —
-    /// zoom lives in the renderer and never reaches the simulation.
+    /// and when no frame is drawn at all. Zoom lives in the renderer and never
+    /// reaches the simulation; the simulation's viewport is session input,
+    /// set here the way the App sets it on a resize.
     #[test]
     fn the_same_seed_plays_out_identically_at_every_zoom() {
+        let logical = Vec2::new(SCREEN.0 as f32, SCREEN.1 as f32);
         let mut prints = Vec::new();
         let mut hashes = Vec::new();
-        for z in [zoom::MIN, 1.0, zoom::MAX] {
+        // `None` is the headless run: same viewport, never drawn.
+        for z in [Some(zoom::MIN), Some(1.0), Some(zoom::MAX), None] {
+            let drawn = z.is_some();
+            let z = z.unwrap_or(1.0);
             let mut w = World::new(Theme::Sewer, 11);
             // Lighting and smoke are render-only too: keep them on (whatever
             // the terminal's colour depth says) so the promise covers them.
@@ -3014,6 +3023,8 @@ mod zoom_tests {
             w.set_zoom_instant(z);
             assert_eq!(w.zoom_view, z, "the world renders at the requested zoom");
             assert_eq!(w.viewport, Vec2::new(160.0, 80.0), "the fresh viewport");
+            // What `App::render` does on a resize, before the first tick.
+            w.viewport = logical;
             let mut pb = screen();
             for tick in 0..900u32 {
                 // The same scripted weave at every zoom.
@@ -3025,11 +3036,16 @@ mod zoom_tests {
                 };
                 w.update(1.0 / 60.0, dir, tick % 120 == 0);
                 w.tick_zoom(1.0 / 60.0);
-                w.draw(&mut pb);
+                if drawn {
+                    w.draw(&mut pb);
+                    assert_eq!(
+                        w.render_viewport, logical,
+                        "the renderer's viewport is the *unzoomed* frame"
+                    );
+                }
                 assert_eq!(
-                    w.viewport,
-                    Vec2::new(SCREEN.0 as f32, SCREEN.1 as f32),
-                    "the draw must hand the simulation the *unzoomed* viewport"
+                    w.viewport, logical,
+                    "neither a draw nor a zoom may move the simulation's viewport"
                 );
             }
             prints.push(fingerprint(&mut w));
@@ -3037,6 +3053,7 @@ mod zoom_tests {
         }
         assert_eq!(prints[0], prints[1], "z = 0.5 diverged from the reference run");
         assert_eq!(prints[1], prints[2], "z = 2 diverged from the reference run");
+        assert_eq!(prints[1], prints[3], "a run never drawn diverged from the drawn one");
         assert_ne!(hashes[0], hashes[1], "z = 0.5 must render a different frame");
         assert_ne!(hashes[1], hashes[2], "z = 2 must render a different frame");
     }
@@ -3151,15 +3168,18 @@ mod zoom_tests {
     #[test]
     fn the_rendered_span_is_the_viewport_times_the_zoom() {
         let mut w = World::new(Theme::Kitchen, 4);
+        let logical = Vec2::new(SCREEN.0 as f32, SCREEN.1 as f32);
+        // The App sets the simulation's viewport on a resize; `draw` does not.
+        w.viewport = logical;
         let mut pb = screen();
         for z in zoom::STEPS {
             w.set_zoom_instant(z);
             w.draw(&mut pb);
             let span = w.view_span();
+            assert_eq!(w.viewport, logical, "the logical viewport never scales");
             assert_eq!(
-                w.viewport,
-                Vec2::new(SCREEN.0 as f32, SCREEN.1 as f32),
-                "the logical viewport never scales"
+                w.render_viewport, logical,
+                "the renderer's viewport is the unzoomed frame at every zoom"
             );
             assert!((span.x - SCREEN.0 as f32 * z).abs() < 0.01);
             assert!((span.y - SCREEN.1 as f32 * z).abs() < 0.01);
@@ -3227,9 +3247,14 @@ mod zoom_tests {
                 let mut w = World::new(Theme::Sewer, 2);
                 w.set_zoom_instant(z);
                 let mut pb = PixelBuffer::new(sw, sh);
+                let before = w.viewport;
+                assert!(before.x > 0.0 && before.y > 0.0, "a fresh world has a real viewport");
                 w.draw(&mut pb);
                 assert_eq!((pb.w, pb.h), (sw, sh));
-                assert_eq!(w.viewport, Vec2::new(sw as f32, sh as f32));
+                // The renderer tracks the (degenerate) frame; the simulation's
+                // viewport is not the renderer's to move.
+                assert_eq!(w.render_viewport, Vec2::new(sw as f32, sh as f32));
+                assert_eq!(w.viewport, before);
             }
         }
         // Mid-transition (a fractional zoom, the eased frame between rungs).
