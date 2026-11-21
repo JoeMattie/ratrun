@@ -264,6 +264,10 @@ pub struct CursorView {
     pub alpha: f32,
     /// True while steering the rat with the mouse in `Playing`.
     pub playing_steer: bool,
+    /// Draw a **reticle** instead of the cheese wedge: the Mouse aim scheme
+    /// points with the pointer, so the cursor is a crosshair (still cheese
+    /// coloured, still the same hot spot and fade). Classic keeps the cheese.
+    pub reticle: bool,
 }
 
 /// Build the `6 × 4` half-block pixel grid for the current cursor state.
@@ -418,6 +422,44 @@ pub fn draw(buf: &mut Buffer, area: Rect, view: CursorView) {
     draw_with_depth(buf, area, view, crate::term::color_depth());
 }
 
+/// The Mouse aim reticle: a cheese-coloured crosshair centred on the mouse
+/// cell, with a gap in the middle so the aim point itself stays readable and a
+/// bright centre pip. Three cells tall and five wide at most; clipped at every
+/// edge and allocation-free. A click pulse squeezes the arms inwards.
+fn draw_reticle(buf: &mut Buffer, area: Rect, view: CursorView, depth: ColorDepth) {
+    let alpha = view.alpha.clamp(0.0, 1.0);
+    let tone = if view.hover { HOVER_GLEAM } else { CHEESE_HI };
+    let arm = if view.click_pulse > 0.5 { 1 } else { 2 };
+    let (x, y) = view.pos;
+    let right = area.x.saturating_add(area.width);
+    let bottom = area.y.saturating_add(area.height);
+    let mut put = |cx: u16, cy: u16, glyph: &str, rgb: Rgb| {
+        if cx < area.x || cx >= right || cy < area.y || cy >= bottom {
+            return;
+        }
+        if let Some(cell) = buf.cell_mut((cx, cy)) {
+            cell.set_char(glyph.chars().next().unwrap_or('+'))
+                .set_fg(crate::render::palette::to_color(palette::mix(
+                    rgb,
+                    match depth {
+                        ColorDepth::Ansi16 => (255, 255, 255),
+                        _ => rgb,
+                    },
+                    alpha,
+                )))
+                .set_style(Modifier::empty());
+        }
+    };
+    // Horizontal arms with a gap, then a vertical bar through the centre.
+    for d in 1..=arm {
+        put(x.saturating_sub(d), y, "─", tone);
+        put(x.saturating_add(d), y, "─", tone);
+    }
+    put(x, y.saturating_sub(1), "│", tone);
+    put(x, y.saturating_add(1), "│", tone);
+    put(x, y, "•", if view.held { HOVER_GLEAM } else { CHEESE_TIP });
+}
+
 /// Like [`draw`], with an explicit [`ColorDepth`] for deterministic testing.
 pub fn draw_with_depth(buf: &mut Buffer, area: Rect, view: CursorView, depth: ColorDepth) {
     let alpha = view.alpha.clamp(0.0, 1.0);
@@ -428,6 +470,10 @@ pub fn draw_with_depth(buf: &mut Buffer, area: Rect, view: CursorView, depth: Co
     let (origin_x, origin_y) = view.pos;
     let right = area.x.saturating_add(area.width);
     let bottom = area.y.saturating_add(area.height);
+    if view.reticle {
+        draw_reticle(buf, area, view, depth);
+        return;
+    }
     let grid = build_sprite(view);
 
     for dy in 0..HEIGHT {
@@ -530,6 +576,7 @@ mod tests {
             bob_time: 0.0,
             alpha: 1.0,
             playing_steer: false,
+            reticle: false,
         }
     }
 

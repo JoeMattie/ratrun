@@ -13,7 +13,7 @@ use crate::game::{
     weapon::WeaponKind,
     world::World,
 };
-use crate::input::DashKey;
+use crate::controls::{Action, Controls};
 use crate::lore;
 use crate::render::campaign::{
     campaign_pips_width, draw_campaign_pips, CampaignLevel, CampaignProgressView,
@@ -75,12 +75,18 @@ pub enum Target {
     ShopCancel,
     /// Keep screen: pick route floor `i` (`0..2`) for the next campaign level.
     RouteOption(usize),
+    /// Controls screen: a table row (scheme, an action, reset).
+    ControlsRow(usize),
+    /// Controls screen: the reset-to-defaults row.
+    ControlsReset,
+    /// Controls screen: the back row.
+    ControlsBack,
 }
 
 /// How many interactive rectangles one screen can register. The campaign
 /// screens are the widest: the keep-three manifest registers one row per owned
 /// upgrade (the art's own `HitList` holds 32) plus its confirm button.
-const HIT_CAPACITY: usize = 40;
+const HIT_CAPACITY: usize = 48;
 
 /// Only the currently displayed layer is interactive. More specific targets
 /// registered last (the map's back arrow) take precedence over their parent.
@@ -310,7 +316,7 @@ pub fn draw_title(
     sector_unlocked: bool,
     scores: &ScoreTable,
     rat: &[String],
-    dash_key: DashKey,
+    controls_src: &Controls,
     hits: &mut HitMap,
 ) {
     let tone = material(theme);
@@ -426,11 +432,11 @@ pub fn draw_title(
         let wide = r.width >= 72;
         // The controls legend is laid out as a block of lines, most important
         // first, from the bottom up: the plate takes as many as it has rows for
-        // and never drops the first one. Every live control for the mode is
-        // named there (see `DashKey::title_legend_lines`), which is what the
-        // review asked for: the old one-liner lost the click's second job, zoom,
-        // `N`, `C` and options.
-        let lines = dash_key.title_legend_lines(r.width >= 96);
+        // and never drops the first one. Every live control is named there and
+        // the lines carry the **current** bindings (see
+        // `controls::Controls::title_legend_lines`), so a remapped key shows
+        // here at once.
+        let lines = controls_src.title_legend_lines(r.width >= 96);
         let room = if r.height >= 18 {
             4
         } else if r.height >= 17 {
@@ -738,7 +744,7 @@ pub fn draw_map_intro(f: &mut Frame, area: Rect, theme: Theme, accent: Color, hi
     );
 }
 
-pub fn draw_pause(f: &mut Frame, area: Rect, dash_key: DashKey, hits: &mut HitMap) {
+pub fn draw_pause(f: &mut Frame, area: Rect, controls_src: &Controls, hits: &mut HitMap) {
     let r = panel(f, centered_rect(46, 8, area), " RUN CONTROL ", MUTED);
     center(f, r, 1, Span::styled("━━━  ▌▌  ━━━", heavy(TAIL)));
     center(f, r, 2, Span::styled("PAUSED", heavy(COAT)));
@@ -762,10 +768,10 @@ pub fn draw_pause(f: &mut Frame, area: Rect, dash_key: DashKey, hits: &mut HitMa
             r,
             6,
             label(
-                match dash_key {
-                    DashKey::Ctrl => "[ ] music · - = fx · Ctrl dash",
-                    DashKey::Space => "[ ] music · - = fx · Space dash",
-                },
+                &format!(
+                    "[ ] music · - = fx · {} dash",
+                    controls_src.live_dash_label()
+                ),
                 MUTED,
             ),
         );
@@ -785,7 +791,7 @@ pub fn draw_pause_compact(
     area: Rect,
     world: &World,
     muted: bool,
-    dash_key: DashKey,
+    controls_src: &Controls,
     hits: &mut HitMap,
 ) {
     let w = area.width.saturating_sub(2).min(56);
@@ -794,7 +800,7 @@ pub fn draw_pause_compact(
     let h = area.height.saturating_sub(2).min(13);
     let r = panel(f, centered_rect(w, h, area), " RUN CONTROL ", MUTED);
     if r.height < 8 || r.width < 30 {
-        draw_pause(f, area, dash_key, hits);
+        draw_pause(f, area, controls_src, hits);
         return;
     }
     center(f, r, 0, Span::styled("━━━  ▌▌  PAUSED  ━━━", heavy(TAIL)));
@@ -863,11 +869,17 @@ pub fn draw_pause_compact(
     // Legend + controls, bottom-up: both legend lines fit, then the controls
     // row with the mute chip (`M unmute` while muted), so the legend is never
     // replaced by the audio state on a short terminal either.
-    let legend = dash_key.pause_legend_lines(false);
+    let legend = controls_src.pause_legend_lines(false);
     for (i, line) in legend.iter().take(2).enumerate() {
         let row = r.height.saturating_sub(2 + i as u16);
         center(f, r, row, label(line, MUTED));
     }
+    let mute_label = controls_src.action_label(Action::Mute);
+    let mute_txt = if muted {
+        format!(" {mute_label} unmute ")
+    } else {
+        format!(" {mute_label} mute ")
+    };
     controls(
         f,
         band(r, r.height.saturating_sub(1), 1),
@@ -877,7 +889,7 @@ pub fn draw_pause_compact(
             (" ", None),
             (" O opts ", Some(Target::Options)),
             (" ", None),
-            (if muted { " M unmute " } else { " M mute " }, None),
+            (mute_txt.as_str(), None),
             (" ", None),
             (" Q to menu ", Some(Target::Menu)),
         ],
@@ -1477,7 +1489,7 @@ pub fn draw_pause_with_run(
     area: Rect,
     world: &World,
     muted: bool,
-    dash_key: DashKey,
+    controls_src: &Controls,
     hits: &mut HitMap,
 ) {
     if area.width < 58 || area.height < 21 {
@@ -1487,9 +1499,9 @@ pub fn draw_pause_with_run(
         // what they were carrying. Below that even the compact plate needs a
         // bare legend.
         if area.width >= 40 && area.height >= 14 {
-            draw_pause_compact(f, area, world, muted, dash_key, hits);
+            draw_pause_compact(f, area, world, muted, controls_src, hits);
         } else {
-            draw_pause(f, area, dash_key, hits);
+            draw_pause(f, area, controls_src, hits);
         }
         return;
     }
@@ -1732,13 +1744,18 @@ pub fn draw_pause_with_run(
     // trigger again. The audio state is a chip on the controls row instead of a
     // replacement for the whole legend (the review's "pause omits the active
     // trigger … mute replaces its controls legend with audio status").
-    let legend = dash_key.pause_legend_lines(icon_dossier);
+    let legend = controls_src.pause_legend_lines(icon_dossier);
     let rows = if r.height >= 16 { 2 } else { 1 };
     for (i, line) in legend.iter().take(rows).enumerate() {
         let row = r.height.saturating_sub(2 + i as u16);
         center(f, r, row, label(line, MUTED));
     }
-    let mute_chip = if muted { " M unmute " } else { " M mute " };
+    let mute_label = controls_src.action_label(Action::Mute);
+    let mute_chip = if muted {
+        format!(" {mute_label} unmute ")
+    } else {
+        format!(" {mute_label} mute ")
+    };
     // The clickable chip says just `Resume`: the legend above already names
     // `Esc/P`, and a duplicated label makes the chip's hit target ambiguous.
     let (resume, opts, quit) = if icon_dossier {
@@ -1755,7 +1772,7 @@ pub fn draw_pause_with_run(
             (" ", None),
             (opts, Some(Target::Options)),
             (" ", None),
-            (mute_chip, None),
+            (mute_chip.as_str(), None),
             (" ", None),
             (quit, Some(Target::Menu)),
         ],
@@ -2092,7 +2109,7 @@ mod tests {
         let mut hits = HitMap::default();
 
         let mut wide = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        wide.draw(|f| draw_pause_with_run(f, f.area(), &w, true, DashKey::Space, &mut hits))
+        wide.draw(|f| draw_pause_with_run(f, f.area(), &w, true, &Controls::default(), &mut hits))
             .unwrap();
         let wt = screen_text(&wide);
         assert!(wt.contains("ARSENAL"), "dossier arsenal missing");
@@ -2111,7 +2128,7 @@ mod tests {
         hits.clear();
         let mut compact = Terminal::new(TestBackend::new(57, 20)).unwrap();
         compact
-            .draw(|f| draw_pause_with_run(f, f.area(), &w, false, DashKey::Space, &mut hits))
+            .draw(|f| draw_pause_with_run(f, f.area(), &w, false, &Controls::default(), &mut hits))
             .unwrap();
         let ct = screen_text(&compact);
         assert!(ct.contains("PAUSED"));
@@ -2130,14 +2147,14 @@ mod tests {
 
         w.elapsed = 65.0; // 900 s boss time → 13:55 to go
         terminal
-            .draw(|f| draw_pause_with_run(f, f.area(), &w, true, DashKey::Space, &mut hits))
+            .draw(|f| draw_pause_with_run(f, f.area(), &w, true, &Controls::default(), &mut hits))
             .unwrap();
         let text = screen_text(&terminal);
         assert!(text.contains("13:55 to boss"), "no build-up clock: {text}");
 
         w.elapsed = crate::game::director::BOSS_TIME + 42.0;
         terminal
-            .draw(|f| draw_pause_with_run(f, f.area(), &w, true, DashKey::Space, &mut hits))
+            .draw(|f| draw_pause_with_run(f, f.area(), &w, true, &Controls::default(), &mut hits))
             .unwrap();
         let text = screen_text(&terminal);
         assert!(
@@ -2286,7 +2303,7 @@ mod tests {
             let mut hits = HitMap::default();
             let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();
             terminal
-                .draw(|f| draw_pause_with_run(f, f.area(), &w, false, crate::input::DashKey::Space, &mut hits))
+                .draw(|f| draw_pause_with_run(f, f.area(), &w, false, &Controls::default(), &mut hits))
                 .unwrap();
             let buf = terminal.backend().buffer();
             let half_blocks = buf
@@ -2337,7 +2354,11 @@ mod tests {
                             f.area(),
                             &w,
                             muted,
-                            crate::input::DashKey::Ctrl,
+                            &{
+                                let mut c = Controls::default();
+                                c.set_lone_ctrl_hint(true);
+                                c
+                            },
                             &mut hits,
                         )
                     })

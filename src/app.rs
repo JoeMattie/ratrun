@@ -1,7 +1,7 @@
 //! Top-level application state machine: menus, the active run, and the
 //! transitions between them.
 
-use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::widgets::Block;
@@ -14,6 +14,8 @@ use crate::game::level::Theme;
 use crate::game::loadout::{ChestReward, Loadout, PassiveKind, Upgrade};
 use crate::game::shop;
 use crate::game::world::World;
+use crate::controls::{self, Action, Binding, Device, KeyBind, MouseBind, Scheme, ACTIONS};
+use crate::gamepad::PadPoller;
 use crate::input::{DashKey, InputState};
 use crate::lore;
 use crate::math::Vec2;
@@ -21,7 +23,10 @@ use crate::render::campaign as campaign_ui;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::lighting::{self, LightingMode};
 use crate::render::palette;
-use crate::render::{cursor, hud, menu, minimap, minimap_source, options, overlay, zoom as view_zoom};
+use crate::render::{
+    controls as render_controls, cursor, hud, menu, minimap, minimap_source, options, overlay,
+    zoom as view_zoom,
+};
 use crate::render::shop as shop_ui;
 use crate::scores::{ScoreEntry, ScoreTable};
 
@@ -97,6 +102,8 @@ enum Screen {
     End,
     Chest,
     Shop,
+    /// The remappable-controls screen (opened from Options).
+    Controls,
 }
 
 #[cfg(test)]
@@ -120,6 +127,7 @@ impl Screen {
             Screen::End => "End",
             Screen::Chest => "Chest",
             Screen::Shop => "Shop",
+            Screen::Controls => "Controls",
         }
     }
 }
@@ -270,6 +278,20 @@ pub struct App {
     lighting: LightingMode,
     /// Optional `RATRUN_LIGHTING` environment override (resolved once at startup).
     lighting_env: Option<LightingMode>,
+    /// Gamepad poller (a no-op without the feature or a pad).
+    pad_poller: PadPoller,
+    /// Controls screen: the selected action row (`0..ACTION_COUNT` + 2 chrome
+    /// rows: SCHEME, RESET, BACK).
+    controls_row: usize,
+    /// Controls screen: a binding capture is armed for this action.
+    bind_capture: Option<Action>,
+    /// Controls screen: the last note (a conflict swap, a refused key, …).
+    controls_note: String,
+    /// Where Esc/Back on the Controls screen returns to (`Options`).
+    controls_from_options: bool,
+    /// First visible Controls row and how many rows fit (updated by the draw).
+    controls_scroll: usize,
+    controls_visible: usize,
 }
 
 impl App {
@@ -367,7 +389,19 @@ impl App {
             cursor_env: cursor::env_override(),
             lighting,
             lighting_env,
+            pad_poller: PadPoller::new(),
+            controls_row: 0,
+            bind_capture: None,
+            controls_note: String::new(),
+            controls_from_options: true,
+            controls_scroll: 0,
+            controls_visible: 16,
         };
+        // Controls are persisted beside the other preferences (an old file
+        // loads the defaults).
+        let controls = crate::scores::controls_from_file(&app.scores.controls);
+        app.input.set_controls(controls);
+        app.sync_control_labels();
         app.push_volumes();
         app.menu_music();
         // The HUD's dash module names the live dash key (CTRL, or SPACE on a
@@ -381,7 +415,68 @@ impl App {
     /// the protocol query but ignores report-all-keys keeps the Space mapping.
     pub fn set_lone_ctrl(&mut self, on: bool) {
         self.input.set_lone_ctrl(on);
-        self.hud.dash_key = self.dash_key();
+        self.sync_control_labels();
+    }
+
+    /// Push the current bindings into the HUD (dash module and the charged
+    /// actives' token) and refresh the cached legends.
+    fn sync_control_labels(&mut self) {
+        self.input.refresh_controls();
+        self.input.hud_labels_changed = false;
+        self.hud.dash_key = self.input.dash_key();
+        self.hud.dash_name = self.input.controls.live_dash_label().to_string();
+        self.hud.active_name = self.input.controls.active_label().to_string();
+    }
+
+    /// The legend source the menus draw (the live bindings).
+    pub fn controls(&self) -> &controls::Controls {
+        &self.input.controls
+    }
+
+    /// Poll the gamepad once per frame (a no-op without the feature or a pad).
+    fn poll_pad(&mut self) {
+        if !self.input.focused {
+            return;
+        }
+        let deadzone = self.input.controls.deadzone;
+        let any = self.pad_poller.poll(&mut self.input.pad, deadzone);
+        if (any || self.input.pad.active()) && self.input.pad.connected() {
+            self.input.last_device = Device::Pad;
+            self.input.controls.note_device(Device::Pad);
+            self.input.prefer_mouse = false;
+        } else if self.input.last_device != Device::Pad {
+            self.input.controls.note_device(self.input.last_device);
+        }
+    }
+
+    /// Persist the control configuration (in-memory only when `persist` is
+    /// false, as in tests).
+    fn save_controls(&mut self) {
+        self.scores.controls = crate::scores::controls_to_file(&self.input.controls);
+        if self.persist {
+            self.scores.save();
+        }
+        self.sync_control_labels();
+    }
+
+    /// The world-space aim point, or `None` for auto-aim.
+    ///
+    /// * Mouse aim: the pointer, mapped through the same viewport + zoom as
+    ///   the renderer (so the reticle is exact at 0.5x, 1x and 2x).
+    /// * Gamepad: the right stick, when deflected, a fixed distance in front
+    ///   of the rat.
+    /// * Classic: never (weapons auto-aim; the pointer steers).
+    pub fn aim_point(&self) -> Option<Vec2> {
+        match self.input.controls.scheme() {
+            Scheme::MouseAim => self.mouse_world(),
+            Scheme::Gamepad => {
+                let stick = self.input.pad.aim_vec(self.input.controls.deadzone)?;
+                self.world
+                    .as_ref()
+                    .and_then(|w| controls::pad_aim_point(w.player.pos, stick))
+            }
+            Scheme::Classic => None,
+        }
     }
 
     /// The key that dashes in this input mode (see `input::DashKey`).
@@ -527,7 +622,10 @@ impl App {
     /// The throttle vector fed to the world: keyboard unit vector, or — when
     /// the mouse was the last input — toward the cursor, easing to a stop.
     fn resolve_move_dir(&self) -> Vec2 {
-        if self.input.prefer_mouse {
+        // Mouse aim: the pointer aims, so it never steers — WASD/arrows and
+        // the pad stick are the only movement. Classic and Gamepad keep the
+        // steering pointer.
+        if self.input.controls.mouse_steers() && self.input.prefer_mouse {
             if let (Some(target), Some(w)) = (self.mouse_world(), self.world.as_ref()) {
                 let to = target - w.player.pos;
                 let d = to.len();
@@ -786,7 +884,9 @@ impl App {
                         _ => {}
                     }
                 }
-                MouseEventKind::Down(MouseButton::Right) if target == Some(Target::Dash) => {
+                MouseEventKind::Down(MouseButton::Right)
+                    if target == Some(Target::Dash) && !self.input.controls.mouse_aims() =>
+                {
                     return Some(Target::Pause)
                 }
                 MouseEventKind::Moved
@@ -839,16 +939,23 @@ impl App {
     }
 
     pub fn update(&mut self, dt: f32) {
+        // The pad is polled before the frame's input is consumed, so a button
+        // pressed this frame is an action this frame.
+        self.poll_pad();
         self.input.tick(dt);
+        if self.input.hud_labels_changed {
+            self.sync_control_labels();
+        }
+        self.input.controls.note_device(self.input.last_device);
         // Deferred stings first: a queued fanfare lands after the sound that
         // caused it (see `queue_sting`).
         self.tick_stings(dt);
         // Global mute toggle.
-        if self.input.pressed_char('m') {
+        if self.input.action_pressed(Action::Mute) {
             self.toggle_mute();
         }
         // Global cheese-cursor preference toggle ('c'; ignores Ctrl+C).
-        let cursor_toggled = self.input.pressed_unmodified_char('c');
+        let cursor_toggled = self.input.action_pressed(Action::ToggleCursor);
         if cursor_toggled {
             self.toggle_cheese_cursor();
         }
@@ -857,19 +964,19 @@ impl App {
         // effects (both in 5% steps). Discrete presses only, so holding a key
         // never runs the level away.
         let mut volume_changed = false;
-        if self.input.pressed_char('[') {
+        if self.input.action_pressed(Action::MusicDown) {
             self.set_music_volume(options::step_volume(self.music_volume, -1));
             volume_changed = true;
         }
-        if self.input.pressed_char(']') {
+        if self.input.action_pressed(Action::MusicUp) {
             self.set_music_volume(options::step_volume(self.music_volume, 1));
             volume_changed = true;
         }
-        if self.input.pressed_char('-') {
+        if self.input.action_pressed(Action::EffectsDown) {
             self.set_effects_volume(options::step_volume(self.effects_volume, -1), true);
             volume_changed = true;
         }
-        if self.input.pressed_char('=') {
+        if self.input.action_pressed(Action::EffectsUp) {
             self.set_effects_volume(options::step_volume(self.effects_volume, 1), true);
             volume_changed = true;
         }
@@ -889,7 +996,7 @@ impl App {
             w.tick_zoom(dt);
         }
         // Options: the title row and the pause legend open it; nothing else does.
-        if !volume_changed && self.input.pressed_char('o') {
+        if !volume_changed && self.input.action_pressed(Action::Options) {
             let from = self.screen;
             if matches!(from, Screen::Title | Screen::Paused) {
                 self.open_options(from);
@@ -916,6 +1023,7 @@ impl App {
             Screen::End => self.update_end(click),
             Screen::Chest => self.update_chest(click),
             Screen::Shop => self.update_shop(click),
+            Screen::Controls => self.update_controls(click),
         }
         if self.screen != previous {
             self.hits.clear();
@@ -1125,27 +1233,27 @@ impl App {
             }
             _ => {}
         }
-        if self.input.just_pressed(KeyCode::Esc) {
+        if self.input.back_pressed() {
             self.close_options();
             return;
         }
-        if self.input.just_pressed(KeyCode::Up) {
+        if self.input.nav_pressed(0, -1) {
             self.options_row = (row + options::ROW_COUNT - 1) % options::ROW_COUNT;
             self.sfx(Sfx::UiMove);
         }
-        if self.input.just_pressed(KeyCode::Down) {
+        if self.input.nav_pressed(0, 1) {
             self.options_row = (row + 1) % options::ROW_COUNT;
             self.sfx(Sfx::UiMove);
         }
         let row = self.options_row;
-        if self.input.just_pressed(KeyCode::Left) {
+        if self.input.nav_pressed(-1, 0) {
             self.adjust_option(row, -1);
         }
-        if self.input.just_pressed(KeyCode::Right) {
+        if self.input.nav_pressed(1, 0) {
             self.adjust_option(row, 1);
         }
         if row == options::BACK_ROW
-            && (self.input.just_pressed(KeyCode::Enter) || chosen.is_some())
+            && (self.input.confirm_pressed() || chosen.is_some())
         {
             self.close_options();
             return;
@@ -1183,8 +1291,245 @@ impl App {
                 // Right widens the view (a bigger number), left zooms in.
                 self.set_zoom(view_zoom::step(self.scores.zoom, dir));
             }
+            options::SCHEME_ROW => {
+                let next = self.input.controls.scheme().step(dir as i32);
+                self.set_scheme(next);
+            }
+            options::CONTROLS_ROW => {
+                if dir != 0 {
+                    self.open_controls();
+                }
+            }
+            options::DEADZONE_ROW => {
+                let cur = self.input.controls.deadzone;
+                let next = (cur + dir as f32 * 0.05).clamp(0.05, 0.9);
+                self.input.controls.deadzone = next;
+                self.save_controls();
+                self.sfx(Sfx::UiMove);
+            }
+            options::RUMBLE_ROW => {
+                self.input.controls.rumble = !self.input.controls.rumble;
+                self.save_controls();
+                self.sfx(Sfx::UiMove);
+            }
             _ => {}
         }
+    }
+
+    /// Change the control scheme live (persisted beside the preferences).
+    fn set_scheme(&mut self, scheme: Scheme) {
+        if self.input.controls.scheme() == scheme {
+            return;
+        }
+        self.input.controls.set_scheme(scheme);
+        self.input.pad.set_focused(self.input.focused);
+        self.save_controls();
+        self.sfx(Sfx::UiSelect);
+    }
+
+    /// Open the Controls screen from Options.
+    fn open_controls(&mut self) {
+        self.controls_row = render_controls::SCHEME_ROW;
+        self.controls_scroll = 0;
+        self.controls_note.clear();
+        self.bind_capture = None;
+        self.controls_from_options = true;
+        self.screen = Screen::Controls;
+        self.sfx(Sfx::UiSelect);
+    }
+
+    /// Leave the Controls screen for Options (which remembers where *it* came
+    /// from, so the title/pause round trip still works).
+    fn close_controls(&mut self) {
+        self.bind_capture = None;
+        self.screen = Screen::Options;
+        self.sfx(Sfx::UiSelect);
+    }
+
+    /// One frame of the Controls screen.
+    ///
+    /// While a capture is armed the next key, mouse press or pad button becomes
+    /// the binding; Esc cancels, Enter on a row arms the capture, Delete or
+    /// Backspace unbinds it, R resets the active scheme.
+    fn update_controls(&mut self, click: Option<Target>) {
+        // A pointer click on a row selects it (and arms its capture).
+        if let Some(Target::ControlsRow(row)) = click {
+            self.controls_row = row.min(render_controls::ROW_COUNT - 1);
+            self.activate_controls_row();
+            return;
+        }
+        if click == Some(Target::ControlsReset) {
+            self.controls_row = render_controls::RESET_ROW;
+            self.reset_controls_scheme();
+            return;
+        }
+        if click == Some(Target::ControlsBack) {
+            self.controls_row = render_controls::BACK_ROW;
+            self.close_controls();
+            return;
+        }
+
+        // ---- Capture mode ------------------------------------------------
+        if let Some(action) = self.bind_capture {
+            // Esc cancels without binding anything (checked before the general
+            // Back action, which is the same key).
+            if self.input.just_pressed(KeyCode::Esc) {
+                self.bind_capture = None;
+                self.controls_note = "cancelled".into();
+                self.sfx(Sfx::UiMove);
+                return;
+            }
+            // A pad button.
+            if let Some(pb) = self.input.pad.pressed_button() {
+                self.apply_pad_binding(action, pb);
+                return;
+            }
+            // A mouse press (find it first: the borrow must end before the
+            // mutable bind call).
+            let mouse_bind = self.input.mouse_events.iter().find_map(|ev| match ev.kind {
+                MouseEventKind::Down(MouseButton::Left) => Some(MouseBind::Left),
+                MouseEventKind::Down(MouseButton::Right) => Some(MouseBind::Right),
+                MouseEventKind::Down(MouseButton::Middle) => Some(MouseBind::Middle),
+                MouseEventKind::ScrollUp => Some(MouseBind::WheelUp),
+                MouseEventKind::ScrollDown => Some(MouseBind::WheelDown),
+                _ => None,
+            });
+            if let Some(m) = mouse_bind {
+                self.apply_kbm_binding(action, Binding::Mouse(m));
+                return;
+            }
+            // A key. A lone modifier is not in `pressed`; ask for the tap.
+            if let Some(k) = self.input.modifier_tap() {
+                self.apply_kbm_binding(action, Binding::Key(k));
+                return;
+            }
+            let events: Vec<KeyEvent> = self.input.pressed.clone();
+            let mut refused: Option<String> = None;
+            for ev in events.iter() {
+                match KeyBind::from_event(ev) {
+                    Ok(k) => {
+                        self.apply_kbm_binding(action, Binding::Key(k));
+                        return;
+                    }
+                    Err(u) => refused = Some(u.note().to_string()),
+                }
+            }
+            if let Some(note) = refused {
+                self.controls_note = note;
+                self.sfx(Sfx::DashDenied);
+            }
+            return;
+        }
+
+        // ---- Normal navigation ------------------------------------------
+        let n = render_controls::ROW_COUNT;
+        if self.input.nav_pressed(0, -1) {
+            self.controls_row = (self.controls_row + n - 1) % n;
+            self.sfx(Sfx::UiMove);
+        }
+        if self.input.nav_pressed(0, 1) {
+            self.controls_row = (self.controls_row + 1) % n;
+            self.sfx(Sfx::UiMove);
+        }
+        if self.input.back_pressed() {
+            self.close_controls();
+            return;
+        }
+        let row = self.controls_row.min(n - 1);
+        if row == render_controls::SCHEME_ROW {
+            if self.input.nav_pressed(-1, 0) {
+                let next = self.input.controls.scheme().step(-1);
+                self.set_scheme(next);
+            }
+            if self.input.nav_pressed(1, 0) {
+                let next = self.input.controls.scheme().step(1);
+                self.set_scheme(next);
+            }
+        }
+        if self.input.pressed_char('r') {
+            self.reset_controls_scheme();
+            return;
+        }
+        if self.input.confirm_pressed() {
+            self.activate_controls_row();
+        }
+        if (self.input.pressed_unmodified_char('x')
+            || self.input.just_pressed(KeyCode::Delete)
+            || self.input.just_pressed(KeyCode::Backspace))
+            && (1..render_controls::RESET_ROW).contains(&row)
+        {
+            let action = ACTIONS[row - 1];
+            self.input.controls.unbind_active_kbm(action);
+            self.save_controls();
+            self.controls_note = format!("{} unbound", action.label());
+        }
+        // Keep the cursor inside the visible window.
+        if self.controls_visible > 0 {
+            if row < self.controls_scroll {
+                self.controls_scroll = row;
+            } else if row >= self.controls_scroll + self.controls_visible {
+                self.controls_scroll = row + 1 - self.controls_visible;
+            }
+        }
+    }
+
+    /// Enter/A on the selected Controls row.
+    fn activate_controls_row(&mut self) {
+        let row = self.controls_row;
+        if row == render_controls::SCHEME_ROW {
+            let next = self.input.controls.scheme().step(1);
+            self.set_scheme(next);
+            return;
+        }
+        if row == render_controls::RESET_ROW {
+            self.reset_controls_scheme();
+            return;
+        }
+        if row == render_controls::BACK_ROW {
+            self.close_controls();
+            return;
+        }
+        let action = ACTIONS[row - 1];
+        self.bind_capture = Some(action);
+        self.controls_note = format!("press the new binding for {}", action.label());
+        self.sfx(Sfx::UiMove);
+    }
+
+    fn reset_controls_scheme(&mut self) {
+        self.input.controls.reset_active();
+        self.save_controls();
+        self.controls_note = format!(
+            "{} reset to its defaults",
+            self.input.controls.scheme().name()
+        );
+        self.sfx(Sfx::UiSelect);
+    }
+
+    /// Bind a keyboard/mouse input to `action`, reporting a conflict swap.
+    fn apply_kbm_binding(&mut self, action: Action, b: Binding) {
+        let swapped = self.input.controls.bind_active_kbm(action, b);
+        self.bind_capture = None;
+        self.save_controls();
+        self.controls_note = match swapped {
+            Some(other) => format!("{} ↔ {} (swapped)", action.label(), other.label()),
+            None => format!("{} = {}", action.label(), b.label()),
+        };
+        self.sfx(Sfx::UiSelect);
+    }
+
+    /// Bind a pad button to `action`, reporting a conflict swap.
+    fn apply_pad_binding(&mut self, action: Action, b: crate::controls::PadBind) {
+        let swapped = self
+            .input
+            .controls
+            .bind_active_pad(action, Binding::Pad(b));
+        self.bind_capture = None;
+        self.save_controls();
+        self.controls_note = match swapped {
+            Some(other) => format!("{} ↔ {} (swapped)", action.label(), other.label()),
+            None => format!("{} = {}", action.label(), b.label()),
+        };
+        self.sfx(Sfx::UiSelect);
     }
 
     /// Step one options row from a mouse-wheel delta (`step > 0` is scroll
@@ -1219,22 +1564,22 @@ impl App {
         } else if self.input.pressed_char('l') {
             Some(Target::Story)
         } else {
-            if self.input.just_pressed(KeyCode::Up) {
+            if self.input.nav_pressed(0, -1) {
                 self.menu_idx = (self.menu_idx + TITLE_ROWS - 1) % TITLE_ROWS;
                 self.sfx(Sfx::UiMove);
             }
-            if self.input.just_pressed(KeyCode::Down) {
+            if self.input.nav_pressed(0, 1) {
                 self.menu_idx = (self.menu_idx + 1) % TITLE_ROWS;
                 self.sfx(Sfx::UiMove);
             }
-            if self.input.just_pressed(KeyCode::Left) {
+            if self.input.nav_pressed(-1, 0) {
                 self.cycle_sector(-1);
             }
-            if self.input.just_pressed(KeyCode::Right) {
+            if self.input.nav_pressed(1, 0) {
                 self.cycle_sector(1);
             }
             self.input
-                .just_pressed(KeyCode::Enter)
+                .confirm_pressed()
                 .then(|| TITLE_ACTIONS[self.menu_idx])
         };
         match action {
@@ -1273,7 +1618,7 @@ impl App {
     /// or the art's Back control returns to the title.
     fn update_sector_select(&mut self, click: Option<Target>) {
         if click == Some(Target::Back)
-            || self.input.just_pressed(KeyCode::Esc)
+            || self.input.back_pressed()
             || self.input.pressed_char('q')
         {
             self.sfx(Sfx::UiSelect);
@@ -1290,21 +1635,21 @@ impl App {
             Some(Target::NextSector) => self.cycle_sector(1),
             _ => {}
         }
-        if self.input.just_pressed(KeyCode::Left) || self.input.just_pressed(KeyCode::Up) {
+        if self.input.nav_pressed(-1, 0) || self.input.nav_pressed(0, -1) {
             self.cycle_sector(-1);
         }
-        if self.input.just_pressed(KeyCode::Right) || self.input.just_pressed(KeyCode::Down) {
+        if self.input.nav_pressed(1, 0) || self.input.nav_pressed(0, 1) {
             self.cycle_sector(1);
         }
-        if click == Some(Target::StartSector) || self.input.just_pressed(KeyCode::Enter) {
+        if click == Some(Target::StartSector) || self.input.confirm_pressed() {
             self.start_sector();
         }
     }
 
     fn update_story(&mut self, click: Option<Target>) {
         if click == Some(Target::Back)
-            || self.input.just_pressed(KeyCode::Enter)
-            || self.input.just_pressed(KeyCode::Esc)
+            || self.input.confirm_pressed()
+            || self.input.back_pressed()
             || self.input.pressed_char('q')
         {
             self.sfx(Sfx::UiSelect);
@@ -1328,7 +1673,7 @@ impl App {
         self.intro_timer -= dt;
         if click == Some(Target::Begin)
             || self.intro_timer <= 0.0
-            || self.input.just_pressed(KeyCode::Enter)
+            || self.input.confirm_pressed()
             || self.input.just_pressed(KeyCode::Char(' '))
         {
             self.screen = Screen::Playing;
@@ -1338,7 +1683,7 @@ impl App {
     /// Levels 2 and 3's intro plate: Enter/Space/click drops into the level.
     fn update_levelintro(&mut self, click: Option<Target>) {
         if click == Some(Target::Begin)
-            || self.input.just_pressed(KeyCode::Enter)
+            || self.input.confirm_pressed()
             || self.input.just_pressed(KeyCode::Char(' '))
         {
             self.sfx(Sfx::UiMove);
@@ -1452,27 +1797,53 @@ impl App {
         // simulation keeps running either way.
         // Keyboard zoom for players without a wheel: `Z` pulls in, `X` widens
         // (the same ladder the wheel steps). Discrete presses only.
-        if self.input.just_pressed(KeyCode::Char('z')) {
+        if self.input.action_pressed(Action::ZoomIn) {
             self.step_zoom(-1);
         }
-        if self.input.just_pressed(KeyCode::Char('x')) {
+        if self.input.action_pressed(Action::ZoomOut) {
             self.step_zoom(1);
         }
+        // Middle click (or the bound key / R3) resets the view to 1.0x, but
+        // only over the playfield: the minimap, HUD rails and the expanded map
+        // have their own jobs, and a menu never trains a zoom.
+        let middle_over_field = self.input.mouse_events.iter().any(|e| {
+            e.kind == MouseEventKind::Down(MouseButton::Middle)
+                && !self.map_open
+                && self.over_playfield(e.column, e.row)
+        });
+        if self.input.action_pressed(Action::ResetZoom) && !self.map_open {
+            // A mouse reset only counts over the playfield (the minimap, the
+            // HUD rails and the expanded map each have their own job); a
+            // rebound key or pad button works anywhere on the field.
+            let mouse_bound = self
+                .input
+                .controls
+                .active()
+                .kbm_slots(Action::ResetZoom)
+                .iter()
+                .any(|b| matches!(b, Binding::Mouse(_)));
+            if !mouse_bound || middle_over_field {
+                self.set_zoom(1.0);
+            }
+        }
         let mut esc_used = false;
-        if self.input.just_pressed(KeyCode::Tab) || click == Some(Target::Minimap) {
+        if self.input.action_pressed(Action::Map) || click == Some(Target::Minimap) {
             self.map_open = !self.map_open;
             self.sfx(Sfx::UiMove);
-        } else if self.map_open && self.input.just_pressed(KeyCode::Esc) {
+        } else if self.map_open && self.input.action_pressed(Action::Back) {
             self.map_open = false;
             esc_used = true;
             self.sfx(Sfx::UiMove);
         }
-        if self.input.pressed_char('n') {
+        if self.input.action_pressed(Action::MinimapSize) {
             self.cycle_minimap_size();
         }
+        // Esc is both the pause key and the map's close key, so the map's own
+        // close this frame wins: closing the map never pauses.
         if click == Some(Target::Pause)
-            || (self.input.just_pressed(KeyCode::Esc) && !esc_used)
-            || self.input.pressed_char('p')
+            || (!esc_used
+                && (self.input.action_pressed(Action::Back)
+                    || self.input.action_pressed(Action::Pause)))
         {
             self.map_open = false;
             self.screen = Screen::Paused;
@@ -1496,15 +1867,30 @@ impl App {
             .world
             .as_ref()
             .is_none_or(|w| w.player.dash_cd <= 0.0);
-        let click = click_dash && dash_ready;
-        let dash = click_dash || self.input.dash_pressed();
-        let active = click || self.input.active_pressed();
+        // Classic/Gamepad: a click is dash + (ready) actives, as it always was.
+        // Mouse aim: the clicks are split — LMB fires the actives, RMB dashes —
+        // so a left click never spends the dash and a right click never spends
+        // a charge.
+        let (dash, active) = if self.input.controls.mouse_aims() {
+            (
+                self.input.action_pressed(Action::Dash),
+                click_dash || self.input.action_pressed(Action::FireActives),
+            )
+        } else {
+            let click = click_dash && dash_ready;
+            (
+                click_dash || self.input.dash_pressed(),
+                click || self.input.active_pressed(),
+            )
+        };
         let mut ended = false;
         let mut level_done = false;
         let mut intensity = 1u32;
+        // The reticle is read before the world is borrowed (it needs `&self`).
+        let aim = self.aim_point();
         if let Some(w) = self.world.as_mut() {
             let hp_before = w.player.hp;
-            w.update_with(dt, move_dir, dash, active);
+            w.update_with_aim(dt, move_dir, dash, active, aim);
             // Drain SFX into a reused buffer, de-duplicated per frame so a
             // 16-shot nova is one sound.
             self.sfx_frame.clear();
@@ -1611,7 +1997,7 @@ impl App {
     }
 
     fn update_chest(&mut self, click: Option<Target>) {
-        if self.input.just_pressed(KeyCode::Enter) || click == Some(Target::Continue) {
+        if self.input.confirm_pressed() || click == Some(Target::Continue) {
             self.chest_reward = None;
             self.sfx(Sfx::UiSelect);
             self.resume_or_open_reward();
@@ -1637,19 +2023,19 @@ impl App {
             self.activate_shop_row();
             return;
         }
-        if click == Some(Target::ShopLeave) || self.input.just_pressed(KeyCode::Esc) {
+        if click == Some(Target::ShopLeave) || self.input.back_pressed() {
             self.close_shop();
             return;
         }
-        if self.input.just_pressed(KeyCode::Up) || self.input.pressed_char('k') {
+        if self.input.nav_pressed(0, -1) || self.input.pressed_char('k') {
             self.shop_row = (self.shop_row + shop::ROW_COUNT - 1) % shop::ROW_COUNT;
             self.sfx(Sfx::UiMove);
         }
-        if self.input.just_pressed(KeyCode::Down) || self.input.pressed_char('j') {
+        if self.input.nav_pressed(0, 1) || self.input.pressed_char('j') {
             self.shop_row = (self.shop_row + 1) % shop::ROW_COUNT;
             self.sfx(Sfx::UiMove);
         }
-        if self.input.just_pressed(KeyCode::Enter) {
+        if self.input.confirm_pressed() {
             self.activate_shop_row();
         }
         if self.input.pressed_char('m') {
@@ -1709,7 +2095,7 @@ impl App {
             self.confirm_molt();
             return;
         }
-        if click == Some(Target::ShopCancel) || self.input.just_pressed(KeyCode::Esc) {
+        if click == Some(Target::ShopCancel) || self.input.back_pressed() {
             // Free cancel: nothing is spent until the second selection.
             self.shop_molt = None;
             self.sfx(Sfx::UiMove);
@@ -1717,18 +2103,18 @@ impl App {
         }
         let cursor = molt.cursor();
         let mut next = cursor;
-        if self.input.just_pressed(KeyCode::Up) || self.input.pressed_char('k') {
+        if self.input.nav_pressed(0, -1) || self.input.pressed_char('k') {
             next = (cursor + len.max(1) - 1) % len.max(1);
             self.sfx(Sfx::UiMove);
         }
-        if self.input.just_pressed(KeyCode::Down) || self.input.pressed_char('j') {
+        if self.input.nav_pressed(0, 1) || self.input.pressed_char('j') {
             next = (cursor + 1) % len.max(1);
             self.sfx(Sfx::UiMove);
         }
         if next != cursor {
             self.shop_molt = Some(molt.with_cursor(next));
         }
-        if self.input.just_pressed(KeyCode::Enter) {
+        if self.input.confirm_pressed() {
             let _ = hole;
             self.confirm_molt();
         }
@@ -1842,7 +2228,7 @@ impl App {
     /// practice run.
     fn update_levelcomplete(&mut self, click: Option<Target>) {
         if click == Some(Target::Continue)
-            || self.input.just_pressed(KeyCode::Enter)
+            || self.input.confirm_pressed()
             || self.input.just_pressed(KeyCode::Char(' '))
         {
             self.sfx(Sfx::UiSelect);
@@ -1973,11 +2359,11 @@ impl App {
             }
         }
         if n > 0 {
-            if self.input.just_pressed(KeyCode::Up) || self.input.just_pressed(KeyCode::Left) {
+            if self.input.nav_pressed(0, -1) || self.input.nav_pressed(-1, 0) {
                 self.keep_cursor = (self.keep_cursor + n - 1) % n;
                 self.sfx(Sfx::UiMove);
             }
-            if self.input.just_pressed(KeyCode::Down) || self.input.just_pressed(KeyCode::Right) {
+            if self.input.nav_pressed(0, 1) || self.input.nav_pressed(1, 0) {
                 self.keep_cursor = (self.keep_cursor + 1) % n;
                 self.sfx(Sfx::UiMove);
             }
@@ -2035,7 +2421,7 @@ impl App {
         }
 
         let confirm = click == Some(Target::KeepConfirm)
-            || self.input.just_pressed(KeyCode::Enter);
+            || self.input.confirm_pressed();
         if confirm {
             let (selected, required) = self.keep_counts();
             if selected == required {
@@ -2080,8 +2466,8 @@ impl App {
     /// Campaign victory plate: Enter/click on the focused action, arrows/Tab
     /// move the focus, Q returns to the title.
     fn update_victory(&mut self, click: Option<Target>) {
-        if self.input.just_pressed(KeyCode::Left)
-            || self.input.just_pressed(KeyCode::Right)
+        if self.input.nav_pressed(-1, 0)
+            || self.input.nav_pressed(1, 0)
             || self.input.just_pressed(KeyCode::Tab)
         {
             self.victory_focus = match self.victory_focus {
@@ -2095,7 +2481,7 @@ impl App {
             self.sfx(Sfx::UiMove);
         }
         let activated = click.or_else(|| {
-            self.input.just_pressed(KeyCode::Enter).then_some({
+            self.input.confirm_pressed().then_some({
                 match self.victory_focus {
                     campaign_ui::CampaignVictoryAction::PlayAgain => Target::Restart,
                     campaign_ui::CampaignVictoryAction::Menu => Target::Menu,
@@ -2140,11 +2526,11 @@ impl App {
 
     fn update_levelup(&mut self, click: Option<Target>) {
         let n = self.levelup_choices.len().max(1);
-        if self.input.just_pressed(KeyCode::Up) || self.input.just_pressed(KeyCode::Left) {
+        if self.input.nav_pressed(0, -1) || self.input.nav_pressed(-1, 0) {
             self.levelup_idx = (self.levelup_idx + n - 1) % n;
             self.sfx(Sfx::UiMove);
         }
-        if self.input.just_pressed(KeyCode::Down) || self.input.just_pressed(KeyCode::Right) {
+        if self.input.nav_pressed(0, 1) || self.input.nav_pressed(1, 0) {
             self.levelup_idx = (self.levelup_idx + 1) % n;
             self.sfx(Sfx::UiMove);
         }
@@ -2154,7 +2540,7 @@ impl App {
                 pick = Some(i);
             }
         }
-        if self.input.just_pressed(KeyCode::Enter) {
+        if self.input.confirm_pressed() {
             pick = Some(self.levelup_idx);
         }
         if let Some(Target::Upgrade(i)) = click {
@@ -2190,21 +2576,21 @@ impl App {
             return;
         }
         if click == Some(Target::Resume)
-            || self.input.just_pressed(KeyCode::Esc)
-            || self.input.pressed_char('p')
+            || self.input.back_pressed()
+            || self.input.action_pressed(Action::Pause)
         {
             self.screen = Screen::Playing;
         }
-        if click == Some(Target::Menu) || self.input.pressed_char('q') {
+        if click == Some(Target::Menu) || self.input.pressed_char('q') || self.input.pad_back() {
             self.back_to_title();
         }
     }
 
     fn update_end(&mut self, click: Option<Target>) {
-        if click == Some(Target::Restart) || self.input.just_pressed(KeyCode::Enter) {
+        if click == Some(Target::Restart) || self.input.confirm_pressed() {
             self.retry();
         }
-        if click == Some(Target::Menu) || self.input.pressed_char('q') {
+        if click == Some(Target::Menu) || self.input.pressed_char('q') || self.input.pad_back() {
             self.back_to_title();
         }
     }
@@ -2308,16 +2694,19 @@ impl App {
         match self.screen {
             Screen::Title => {
                 self.ensure_rat_art(area);
+                let theme = self.theme();
+                let floor = self.floor();
+                let unlocked = self.sector_unlocked();
                 menu::draw_title(
                     frame,
                     area,
-                    self.theme(),
+                    theme,
                     self.menu_idx,
-                    self.floor(),
-                    self.sector_unlocked(),
+                    floor,
+                    unlocked,
                     &self.scores,
                     &self.rat_art,
-                    self.dash_key(),
+                    &self.input.controls,
                     &mut self.hits,
                 );
             }
@@ -2329,16 +2718,19 @@ impl App {
                     self.draw_game(frame, area);
                 } else {
                     self.ensure_rat_art(area);
+                    let theme = self.theme();
+                    let floor = self.floor();
+                    let unlocked = self.sector_unlocked();
                     menu::draw_title(
                         frame,
                         area,
-                        self.theme(),
+                        theme,
                         self.menu_idx,
-                        self.floor(),
-                        self.sector_unlocked(),
+                        floor,
+                        unlocked,
                         &self.scores,
                         &self.rat_art,
-                        self.dash_key(),
+                        &self.input.controls,
                         &mut self.hits,
                     );
                 }
@@ -2346,16 +2738,19 @@ impl App {
             }
             Screen::Story => {
                 self.ensure_rat_art(area);
+                let theme = self.theme();
+                let floor = self.floor();
+                let unlocked = self.sector_unlocked();
                 menu::draw_title(
                     frame,
                     area,
-                    self.theme(),
+                    theme,
                     self.menu_idx,
-                    self.floor(),
-                    self.sector_unlocked(),
+                    floor,
+                    unlocked,
                     &self.scores,
                     &self.rat_art,
-                    self.dash_key(),
+                    &self.input.controls,
                     &mut self.hits,
                 );
                 menu::draw_story(frame, area, self.story_time, &mut self.hits);
@@ -2389,11 +2784,11 @@ impl App {
                                 area,
                                 w,
                                 self.muted,
-                                self.dash_key(),
+                                &self.input.controls,
                                 &mut self.hits,
                             );
                         } else {
-                            menu::draw_pause(frame, area, self.dash_key(), &mut self.hits);
+                            menu::draw_pause(frame, area, &self.input.controls, &mut self.hits);
                         }
                     }
                     Screen::LevelUp => {
@@ -2462,6 +2857,29 @@ impl App {
                     }
                 }
             }
+            Screen::Controls => {
+                if self.options_return == Screen::Paused {
+                    self.draw_game(frame, area);
+                } else {
+                    self.ensure_rat_art(area);
+                    let theme = self.theme();
+                    let floor = self.floor();
+                    let unlocked = self.sector_unlocked();
+                    menu::draw_title(
+                        frame,
+                        area,
+                        theme,
+                        self.menu_idx,
+                        floor,
+                        unlocked,
+                        &self.scores,
+                        &self.rat_art,
+                        &self.input.controls,
+                        &mut self.hits,
+                    );
+                }
+                self.draw_controls(frame, area);
+            }
             Screen::Chest => {
                 self.draw_game(frame, area);
                 if let Some(reward) = self.chest_reward {
@@ -2511,6 +2929,7 @@ impl App {
             bob_time: self.cursor.bob_time(),
             alpha,
             playing_steer: matches!(self.screen, Screen::Playing) && self.input.prefer_mouse,
+            reticle: self.input.controls.mouse_aims(),
         };
         let area = frame.area();
         cursor::draw(frame.buffer_mut(), area, view);
@@ -2528,8 +2947,38 @@ impl App {
             row: self.options_row,
             accent: options::accent_from(menu::material(self.theme())),
             lighting: self.lighting,
+            scheme: self.input.controls.scheme(),
+            deadzone: self.input.controls.deadzone,
+            rumble: self.input.controls.rumble,
         };
         options::draw(frame, area, &view, &mut self.hits);
+    }
+
+    /// Draw the Controls plate over whatever opened Options.
+    fn draw_controls(&mut self, frame: &mut Frame, area: Rect) {
+        let note = if self.controls_note.is_empty() {
+            if self.input.lone_ctrl {
+                "Ctrl and Shift can be bound on this terminal · Cmd/Fn cannot"
+            } else {
+                "this terminal does not report lone modifiers — Ctrl/Shift binds will not work"
+            }
+        } else {
+            self.controls_note.as_str()
+        };
+        let scroll = self.controls_scroll;
+        let lay = render_controls::layout(area, scroll);
+        self.controls_visible = lay.visible;
+        let view = render_controls::ControlsView {
+            scheme: self.input.controls.scheme(),
+            controls: &self.input.controls,
+            row: self.controls_row,
+            scroll: self.controls_scroll,
+            capturing: self.bind_capture,
+            note,
+            accent: render_controls::accent_from(menu::material(self.theme())),
+            lone_ctrl: self.input.lone_ctrl,
+        };
+        render_controls::draw(frame, area, &view, &mut self.hits);
     }
 
     // ---- Campaign plates -------------------------------------------------
@@ -7970,6 +8419,25 @@ mod tests {
         assert_eq!(h.app.effective_zoom(), 1.25);
         h.frame(&[KeyCode::Left]);
         assert_eq!(h.app.effective_zoom(), 1.0);
+        // Wave 3 controls rows sit between zoom and back.
+        h.frame(&[KeyCode::Down]);
+        assert_eq!(h.app.options_row, options::SCHEME_ROW);
+        h.frame(&[KeyCode::Right]);
+        assert_eq!(h.app.input.controls.scheme(), Scheme::MouseAim);
+        h.app.input.controls.set_scheme(Scheme::Classic);
+        h.frame(&[KeyCode::Down]);
+        assert_eq!(h.app.options_row, options::CONTROLS_ROW);
+        h.frame(&[KeyCode::Down]);
+        assert_eq!(h.app.options_row, options::DEADZONE_ROW);
+        let dz = h.app.input.controls.deadzone;
+        h.frame(&[KeyCode::Right]);
+        assert!(h.app.input.controls.deadzone > dz);
+        h.frame(&[KeyCode::Left]);
+        h.frame(&[KeyCode::Down]);
+        assert_eq!(h.app.options_row, options::RUMBLE_ROW);
+        let rumble = h.app.input.controls.rumble;
+        h.frame(&[KeyCode::Right]);
+        assert_ne!(h.app.input.controls.rumble, rumble);
         // Enter on the Back row leaves the screen.
         h.frame(&[KeyCode::Down]);
         assert_eq!(h.app.options_row, options::BACK_ROW);

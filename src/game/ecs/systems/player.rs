@@ -89,6 +89,12 @@ pub fn player_system(
     if move_dir.len_sq() > 0.01 {
         player.face = move_dir.normalized();
     }
+    // Wave 3 controls: while aiming, the rat faces the reticle (its dash and
+    // every facing-based effect follow the pointer, not the walk). With no
+    // aim (`World::update`, the bot, the goldens) this changes nothing.
+    if let Some(d) = input.aim.map(|p| p - player.pos).filter(|v| v.len_sq() > 4.0) {
+        player.face = d.normalized();
+    }
 
     // Dash (legacy 189-199). `was_charging` is read here, before the trigger,
     // so the ready tick below is the tick the *old* cooldown ran out (a dash

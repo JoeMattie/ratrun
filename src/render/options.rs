@@ -28,9 +28,14 @@ pub const CURSOR_ROW: usize = 3;
 pub const MUTE_ROW: usize = 4;
 pub const LIGHTING_ROW: usize = 5;
 pub const ZOOM_ROW: usize = 6;
-pub const BACK_ROW: usize = 7;
+// Wave 3 controls (appended; the rows above keep their indices).
+pub const SCHEME_ROW: usize = 7;
+pub const CONTROLS_ROW: usize = 8;
+pub const DEADZONE_ROW: usize = 9;
+pub const RUMBLE_ROW: usize = 10;
+pub const BACK_ROW: usize = 11;
 /// How many rows the screen has.
-pub const ROW_COUNT: usize = 8;
+pub const ROW_COUNT: usize = 12;
 
 /// Slider identity used by [`Target::OptionsBar`]: the value the track edits.
 pub const MUSIC_BAR: usize = 0;
@@ -38,11 +43,11 @@ pub const EFFECTS_BAR: usize = 1;
 
 /// Preferred panel size; clamped to the terminal.
 pub const PANEL_W: u16 = 58;
-pub const PANEL_H: u16 = 16;
+pub const PANEL_H: u16 = 21;
 /// Width of the label column inside a row ("MUSIC", "EFFECTS", …).
 const LABEL_W: u16 = 10;
 /// Keyboard hint under the rows.
-const LEGEND: &str = "↑↓ row · ←→ adjust · wheel · Esc back";
+const LEGEND: &str = "↑↓ row · ←→ adjust · wheel · Enter open · Esc back";
 
 /// What one row of the screen is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +60,11 @@ pub enum Row {
     Zoom,
     Back,
     Lighting,
+    /// Wave 3 controls, appended at the end of the enum.
+    Scheme,
+    Controls,
+    Deadzone,
+    Rumble,
 }
 
 /// The screen's rows in order; index with the constants above.
@@ -66,6 +76,10 @@ pub const ROWS: [Row; ROW_COUNT] = [
     Row::Mute,
     Row::Lighting,
     Row::Zoom,
+    Row::Scheme,
+    Row::Controls,
+    Row::Deadzone,
+    Row::Rumble,
     Row::Back,
 ];
 
@@ -81,6 +95,10 @@ impl Row {
             Row::Zoom => "ZOOM",
             Row::Back => "BACK",
             Row::Lighting => "LIGHTING",
+            Row::Scheme => "SCHEME",
+            Row::Controls => "CONTROLS",
+            Row::Deadzone => "DEADZONE",
+            Row::Rumble => "RUMBLE",
         }
     }
 
@@ -110,6 +128,12 @@ pub struct OptionsView {
     /// Accent for the panel edge and the sliders (theme or level material).
     pub accent: Color,
     pub lighting: LightingMode,
+    /// Selected control scheme (wave 3).
+    pub scheme: crate::controls::Scheme,
+    /// Gamepad stick dead zone, 0.05..=0.90 (wave 3).
+    pub deadzone: f32,
+    /// Rumble on hits, off by default (wave 3; needs a force-feedback pad).
+    pub rumble: bool,
 }
 
 /// Rows and slider tracks for one terminal area.
@@ -223,6 +247,16 @@ fn value_text(view: &OptionsView, row: Row) -> String {
         Row::Effects => String::new(),
         Row::Back => String::new(),
         Row::Lighting => view.lighting.as_str().to_uppercase(),
+        Row::Scheme => view.scheme.name().to_string(),
+        Row::Controls => "OPEN ›".to_string(),
+        Row::Deadzone => format!("{:.2}", view.deadzone),
+        Row::Rumble => {
+            if view.rumble {
+                "ON".to_string()
+            } else {
+                "OFF".to_string()
+            }
+        }
     }
 }
 
@@ -459,6 +493,9 @@ mod tests {
             row,
             accent: Color::Rgb(144, 184, 173),
             lighting: LightingMode::Full,
+            scheme: crate::controls::Scheme::Classic,
+            deadzone: 0.2,
+            rumble: false,
         }
     }
 

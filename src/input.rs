@@ -26,6 +26,8 @@ use crossterm::event::{
     MouseEventKind,
 };
 
+use crate::controls::{Action, Binding, Controls, Device, KeyBind, MouseBind};
+use crate::gamepad::{PadEvent, PadState};
 use crate::math::Vec2;
 
 /// Which key dashes, which is what the HUD and the legends have to name.
@@ -161,6 +163,21 @@ fn records_press(ev: KeyEvent) -> bool {
 
 pub struct InputState {
     grace: [f32; 4],
+    /// Scheme + remappable bindings. The legends, the HUD labels and every
+    /// action lookup read this, so a rebinding takes effect on the next frame.
+    pub controls: Controls,
+    /// Gamepad state fed by `gamepad::PadPoller` (or injected by a test).
+    pub pad: PadState,
+    /// Does the terminal have focus? Pad input is dropped while it does not.
+    pub focused: bool,
+    /// Which device drove the last input; the legends follow it.
+    pub last_device: Device,
+    /// Lone-modifier taps this frame (`[Ctrl, Shift, Alt]`), the only way a
+    /// modifier binding can fire without polluting the menu `pressed` list.
+    mod_taps: [bool; 3],
+    /// Set when a rebinding or a scheme change has been applied, so the app can
+    /// push fresh labels into the HUD once.
+    pub hud_labels_changed: bool,
     pub kitty: bool,
     /// True when the terminal reports a **lone** Ctrl press (Kitty protocol
     /// with `REPORT_ALL_KEYS_AS_ESCAPE_CODES`). Seeded from the protocol query
@@ -193,6 +210,12 @@ impl InputState {
     pub fn new(kitty: bool) -> Self {
         InputState {
             grace: [0.0; 4],
+            controls: Controls::default(),
+            pad: PadState::new(),
+            focused: true,
+            last_device: Device::Keyboard,
+            mod_taps: [false; 3],
+            hud_labels_changed: false,
             kitty,
             // Optimistic default: a protocol-speaking terminal is assumed to
             // honour the all-keys flag. `main` downgrades it to `false` when
@@ -216,12 +239,57 @@ impl InputState {
         self.mouse_clicked = false;
         self.mouse_active = false;
         self.dash_tap = false;
+        self.mod_taps = [false; 3];
+        self.pad.begin_frame();
+    }
+
+    /// Advance the pad's repeat clock (called from `tick`). Split out so a test
+    /// can drive a pad without a frame clock.
+    pub fn tick_pad(&mut self, dt: f32) {
+        let deadzone = self.controls.deadzone;
+        self.pad.step(dt, deadzone);
+    }
+
+    /// Inject one pad event (the seam tests use; `main` feeds these from gilrs).
+    pub fn pad_event(&mut self, ev: PadEvent) {
+        self.pad.apply(ev);
+        if self.pad.active() {
+            self.last_device = Device::Pad;
+            self.prefer_mouse = false;
+        }
+    }
+
+    /// Terminal focus reporting. Losing focus drops every held key, mouse
+    /// button and pad button (their releases never arrive).
+    pub fn set_focused(&mut self, focused: bool) {
+        let was = self.focused;
+        self.focused = focused;
+        self.pad.set_focused(focused);
+        if was && !focused {
+            self.release_all();
+        }
+    }
+
+    /// Swap the control configuration (scheme change, load, rebinding) and keep
+    /// the terminal's lone-modifier answer in the legends.
+    pub fn set_controls(&mut self, controls: Controls) {
+        self.controls = controls;
+        self.controls.set_lone_ctrl_hint(self.lone_ctrl);
+        self.hud_labels_changed = true;
+    }
+
+    /// A rebinding happened: rebuild the cached legends and tell the HUD its
+    /// labels are stale.
+    pub fn refresh_controls(&mut self) {
+        self.controls.set_lone_ctrl_hint(self.lone_ctrl);
+        self.hud_labels_changed = true;
     }
 
     /// Force the dash mapping (the fallback used when the terminal answers the
     /// protocol query but ignores the all-keys flag).
     pub fn set_lone_ctrl(&mut self, on: bool) {
         self.lone_ctrl = on;
+        self.controls.set_lone_ctrl_hint(on);
     }
 
     /// The key that dashes in this mode.
@@ -238,18 +306,23 @@ impl InputState {
     /// With lone-Ctrl reporting that is a Ctrl tap; without it, Space (which
     /// then cannot be split from the active-weapon release).
     pub fn dash_pressed(&self) -> bool {
-        if self.lone_ctrl {
-            self.dash_tap
-        } else {
-            self.just_pressed(KeyCode::Char(' '))
+        // The binding is the answer; on a terminal without lone-modifier
+        // reporting a Ctrl binding falls back to Space (which then also fires
+        // the actives, exactly the pre-Ctrl mapping).
+        let bound = self.controls.active().get(Action::Dash);
+        if !self.lone_ctrl && bound == Binding::Key(KeyBind::Ctrl) {
+            return self.action_pressed(Action::Dash) || self.just_pressed(KeyCode::Char(' '));
         }
+        self.action_pressed(Action::Dash)
     }
 
     /// Was the active-weapon release asked for this frame? Always Space: in the
     /// Ctrl mode that is Space's only job, and without lone-Ctrl reporting
     /// Space dashes at the same time (the press is shared, as it always was).
     pub fn active_pressed(&self) -> bool {
-        self.just_pressed(KeyCode::Char(' '))
+        // Keyboard and pad only: a mouse click is routed through the hit map,
+        // where the app decides whether it also dashes.
+        self.action_kbm_or_pad(Action::FireActives)
     }
 
     /// Decay held-key grace timers (no-op when the protocol's release events
@@ -260,6 +333,7 @@ impl InputState {
                 *g = (*g - dt).max(0.0);
             }
         }
+        self.tick_pad(dt);
     }
 
     /// Track a lone modifier press. Returns `true` when the event was only a
@@ -269,13 +343,28 @@ impl InputState {
     /// recorded in `pressed`: every menu, the options keys and the "any key"
     /// paths would otherwise see Ctrl as a plain keystroke.
     fn handle_modifier(&mut self, ev: KeyEvent) -> bool {
-        if !is_ctrl(ev.code) {
-            return false;
+        let slot = match ev.code {
+            KeyCode::Modifier(
+                ModifierKeyCode::LeftControl | ModifierKeyCode::RightControl,
+            ) => 0,
+            KeyCode::Modifier(ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift) => 1,
+            KeyCode::Modifier(ModifierKeyCode::LeftAlt | ModifierKeyCode::RightAlt) => 2,
+            _ => return false,
+        };
+        if slot != 0 {
+            // Shift/Alt are bindable (Controls screen) but never menu keys.
+            if ev.kind == KeyEventKind::Press {
+                self.mod_taps[slot] = true;
+                self.last_device = Device::Keyboard;
+            }
+            return true;
         }
         match ev.kind {
             KeyEventKind::Press => {
                 self.ctrl_down = true;
                 self.dash_tap = true;
+                self.mod_taps[0] = true;
+                self.last_device = Device::Keyboard;
             }
             // Some terminals auto-repeat a held modifier. Swallow it: a held
             // Ctrl must not machine-gun dashes.
@@ -285,17 +374,39 @@ impl InputState {
         true
     }
 
+    /// Which movement direction a key event asks for: the current scheme's
+    /// movement bindings first, then the arrow keys (which always move, since
+    /// they also steer the menus).
+    fn movement_dir_for(&self, ev: &KeyEvent) -> Option<Dir> {
+        let b = self.controls.active();
+        for (action, dir) in [
+            (Action::MoveUp, Dir::Up),
+            (Action::MoveDown, Dir::Down),
+            (Action::MoveLeft, Dir::Left),
+            (Action::MoveRight, Dir::Right),
+        ] {
+            if b.kbm_slots(action)
+                .iter()
+                .any(|slot| matches!(slot, Binding::Key(k) if k.matches_movement(ev)))
+            {
+                return Some(dir);
+            }
+        }
+        match ev.code {
+            KeyCode::Up => Some(Dir::Up),
+            KeyCode::Down => Some(Dir::Down),
+            KeyCode::Left => Some(Dir::Left),
+            KeyCode::Right => Some(Dir::Right),
+            _ => None,
+        }
+    }
+
     pub fn handle_key(&mut self, ev: KeyEvent) {
         if self.handle_modifier(ev) {
             return;
         }
-        let dir = match ev.code {
-            KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('W') => Some(Dir::Up),
-            KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('S') => Some(Dir::Down),
-            KeyCode::Left | KeyCode::Char('a') | KeyCode::Char('A') => Some(Dir::Left),
-            KeyCode::Right | KeyCode::Char('d') | KeyCode::Char('D') => Some(Dir::Right),
-            _ => None,
-        };
+        self.last_device = Device::Keyboard;
+        let dir = self.movement_dir_for(&ev);
 
         match ev.kind {
             KeyEventKind::Press | KeyEventKind::Repeat => {
@@ -328,11 +439,15 @@ impl InputState {
     }
 
     pub fn handle_mouse(&mut self, ev: MouseEvent) {
+        if !matches!(ev.kind, MouseEventKind::Up(_)) {
+            self.last_device = Device::Mouse;
+        }
         let moved = self.mouse_pos != Some((ev.column, ev.row));
         if matches!(
             ev.kind,
-            MouseEventKind::Down(MouseButton::Left | MouseButton::Right)
-                | MouseEventKind::ScrollUp
+            MouseEventKind::Down(
+                MouseButton::Left | MouseButton::Right | MouseButton::Middle
+            ) | MouseEventKind::ScrollUp
                 | MouseEventKind::ScrollDown
         ) || (moved && matches!(ev.kind, MouseEventKind::Moved | MouseEventKind::Drag(_)))
         {
@@ -368,6 +483,7 @@ impl InputState {
         self.mouse_down = false;
         // A Ctrl held across a focus change never reports its release either.
         self.ctrl_down = false;
+        self.pad.set_focused(false);
     }
 
     fn down(&self, d: Dir) -> bool {
@@ -388,8 +504,159 @@ impl InputState {
         if self.down(Dir::Right) {
             v.x += 1.0;
         }
+        // Keyboard directions are digital (a diagonal is unit length), the pad
+        // adds its analog throttle; the sum is clamped so a diagonal is never
+        // faster than a cardinal.
+        let pad = self.pad.move_vec(self.controls.deadzone);
+        if pad != Vec2::ZERO {
+            return (v + pad).clamp_len(1.0);
+        }
         v.normalized()
     }
+
+    // ---- Actions ---------------------------------------------------------
+
+    /// The lone modifier tapped this frame, if any (the Controls screen's
+    /// rebinding needs it: a modifier press never enters `pressed`).
+    pub fn modifier_tap(&self) -> Option<KeyBind> {
+        match self.mod_taps {
+            [true, _, _] => Some(KeyBind::Ctrl),
+            [_, true, _] => Some(KeyBind::Shift),
+            [_, _, true] => Some(KeyBind::Alt),
+            _ => None,
+        }
+    }
+
+    /// Was `a` tapped by a keyboard key or a pad button this frame?
+    pub fn action_kbm_or_pad(&self, a: Action) -> bool {
+        let b = self.controls.active();
+        for slot in b.kbm_slots(a) {
+            match slot {
+                Binding::Key(k) if self.key_tapped(k) => return true,
+                Binding::Pad(p) if self.pad.button_pressed(p) => return true,
+                _ => {}
+            }
+        }
+        // Pad bindings live in their own slot, not in the keyboard/mouse pair.
+        if let Binding::Pad(p) = b.pad_of(a) {
+            if self.pad.button_pressed(p) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Was `a` tapped this frame by any device, mouse included?
+    pub fn action_pressed(&self, a: Action) -> bool {
+        if self.action_kbm_or_pad(a) {
+            return true;
+        }
+        self.controls
+            .active()
+            .kbm_slots(a)
+            .iter()
+            .any(|slot| matches!(slot, Binding::Mouse(m) if self.mouse_tapped(*m)))
+    }
+
+    /// Was `a`'s key or pad button held down this frame? (Movement, and the
+    /// options screen's held adjust.)
+    pub fn action_held(&self, a: Action) -> bool {
+        let b = self.controls.active();
+        for slot in b.kbm_slots(a) {
+            match slot {
+                Binding::Key(k) => {
+                    if self
+                        .pressed
+                        .iter()
+                        .any(|e| k.matches(e) && e.kind != KeyEventKind::Release)
+                    {
+                        return true;
+                    }
+                }
+                Binding::Pad(p) if self.pad.button_down(p) => return true,
+                _ => {}
+            }
+        }
+        if let Binding::Pad(p) = b.pad_of(a) {
+            if self.pad.button_down(p) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn key_tapped(&self, k: KeyBind) -> bool {
+        // A lone-modifier binding can only fire where the terminal reports lone
+        // modifiers (the Kitty protocol's report-all-keys flag). On any other
+        // terminal Ctrl still dashes through the legacy Space fallback, which
+        // `dash_pressed` handles; the Controls screen says so.
+        match k {
+            KeyBind::Ctrl => self.lone_ctrl && self.mod_taps[0],
+            KeyBind::Shift => self.lone_ctrl && self.mod_taps[1],
+            KeyBind::Alt => self.lone_ctrl && self.mod_taps[2],
+            _ => self.pressed.iter().any(|e| k.matches(e)),
+        }
+    }
+
+    /// Pad B only (the pause/end screens' "back to the menu": the keyboard's
+    /// Esc is resume there, so the two cannot share one predicate).
+    pub fn pad_back(&self) -> bool {
+        self.pad.button_pressed(crate::controls::PadBind::East)
+    }
+
+    /// Did a mouse press this frame match `m`?
+    pub fn mouse_tapped(&self, m: MouseBind) -> bool {
+        self.mouse_events.iter().any(|e| match (m, e.kind) {
+            (MouseBind::WheelUp, MouseEventKind::ScrollUp) => true,
+            (MouseBind::WheelDown, MouseEventKind::ScrollDown) => true,
+            (_, MouseEventKind::Down(b)) => m.button() == Some(b),
+            _ => false,
+        })
+    }
+
+    /// A discrete menu-navigation step towards `(dx, dy)`: an arrow key, a
+    /// movement binding, or the pad's d-pad/stick with its repeat clock.
+    pub fn nav_pressed(&self, dx: i32, dy: i32) -> bool {
+        if self.pad.nav_step() == Some((dx, dy)) {
+            return true;
+        }
+        let want = match (dx, dy) {
+            (0, -1) => KeyCode::Up,
+            (0, 1) => KeyCode::Down,
+            (-1, 0) => KeyCode::Left,
+            (1, 0) => KeyCode::Right,
+            _ => return false,
+        };
+        if self.just_pressed(want) {
+            return true;
+        }
+        let action = match (dx, dy) {
+            (0, -1) => Action::MoveUp,
+            (0, 1) => Action::MoveDown,
+            (-1, 0) => Action::MoveLeft,
+            (1, 0) => Action::MoveRight,
+            _ => return false,
+        };
+        self.action_kbm_or_pad(action)
+    }
+
+    /// Enter / pad A.
+    pub fn confirm_pressed(&self) -> bool {
+        self.action_pressed(Action::Confirm)
+    }
+
+    /// Esc / pad B.
+    pub fn back_pressed(&self) -> bool {
+        self.action_pressed(Action::Back)
+    }
+
+    /// Any of the four menu directions this frame, as `(dx, dy)`.
+    pub fn nav_any(&self) -> Option<(i32, i32)> {
+        [(0, -1), (0, 1), (-1, 0), (1, 0)]
+            .into_iter()
+            .find(|&d| self.nav_pressed(d.0, d.1))
+    }
+
 
     pub fn just_pressed(&self, code: KeyCode) -> bool {
         self.pressed.iter().any(|e| e.code == code)

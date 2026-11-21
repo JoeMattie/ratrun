@@ -1,4 +1,5 @@
 pub mod campaign;
+pub mod controls;
 pub mod cursor;
 pub mod framebuffer;
 pub mod hud;

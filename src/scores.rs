@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::audio;
 use crate::config;
+use crate::controls::{Controls, SavedControls, SavedScheme};
 use crate::game::campaign::LEVEL_COUNT;
 use crate::render::cursor::CursorSetting;
 use crate::render::lighting::LightingMode;
@@ -190,6 +191,74 @@ fn deserialize_zoom<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result
 }
 
 
+/// The saved form of one scheme's bindings (see [`crate::controls`]). A
+/// missing or short list falls back to that entry's default, so a hand-edited
+/// or old file can never lose the whole control table.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SavedSchemeFile {
+    #[serde(default)]
+    pub kbm: Vec<String>,
+    #[serde(default)]
+    pub alt: Vec<String>,
+    #[serde(default)]
+    pub pad: Vec<String>,
+}
+
+/// The persisted control configuration: scheme, per-scheme bindings and the
+/// pad tuning. Missing (an old `scores.json`) loads the defaults.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ControlsFile {
+    #[serde(default)]
+    pub scheme: String,
+    #[serde(default)]
+    pub schemes: Vec<Option<SavedSchemeFile>>,
+    #[serde(default)]
+    pub deadzone: f32,
+    #[serde(default)]
+    pub rumble: bool,
+}
+
+/// Load the control configuration from its file form.
+pub fn controls_from_file(file: &ControlsFile) -> Controls {
+    let mut saved = SavedControls {
+        scheme: file.scheme.clone(),
+        schemes: [None, None, None],
+        deadzone: file.deadzone,
+        rumble: file.rumble,
+    };
+    for (i, slot) in saved.schemes.iter_mut().enumerate() {
+        if let Some(s) = file.schemes.get(i).and_then(|o| o.as_ref()) {
+            *slot = Some(SavedScheme {
+                kbm: s.kbm.clone(),
+                alt: s.alt.clone(),
+                pad: s.pad.clone(),
+            });
+        }
+    }
+    Controls::from_saved(&saved)
+}
+
+/// The file form of a control configuration.
+pub fn controls_to_file(controls: &Controls) -> ControlsFile {
+    let saved = controls.to_saved();
+    ControlsFile {
+        scheme: saved.scheme.clone(),
+        schemes: saved
+            .schemes
+            .iter()
+            .map(|s| {
+                s.as_ref().map(|s| SavedSchemeFile {
+                    kbm: s.kbm.clone(),
+                    alt: s.alt.clone(),
+                    pad: s.pad.clone(),
+                })
+            })
+            .collect(),
+        deadzone: saved.deadzone,
+        rumble: saved.rumble,
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScoreTable {
     #[serde(default)]
@@ -233,6 +302,10 @@ pub struct ScoreTable {
     /// values load as `1.0`, the view every old build had.
     #[serde(default = "default_zoom", deserialize_with = "deserialize_zoom")]
     pub zoom: f32,
+    /// Control scheme, remappable bindings and the pad tuning. Missing or
+    /// unreadable fields load their defaults, so an old file keeps working.
+    #[serde(default)]
+    pub controls: ControlsFile,
 }
 
 impl Default for ScoreTable {
@@ -249,6 +322,7 @@ impl Default for ScoreTable {
             effects_volume: default_volume(),
             lighting: None,
             zoom: default_zoom(),
+            controls: ControlsFile::default(),
         }
     }
 }
@@ -282,6 +356,10 @@ impl ScoreTable {
         self.music_volume = audio::snap_percent(self.music_volume);
         self.effects_volume = audio::snap_percent(self.effects_volume);
         self.zoom = crate::render::zoom::snap(self.zoom);
+        if !(self.controls.deadzone.is_finite() && self.controls.deadzone > 0.0) {
+            self.controls.deadzone = crate::controls::DEFAULT_DEADZONE;
+        }
+        self.controls.deadzone = self.controls.deadzone.clamp(0.05, 0.9);
     }
 
     pub fn save(&self) {
