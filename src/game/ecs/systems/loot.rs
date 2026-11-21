@@ -82,6 +82,14 @@ use crate::game::particle::vfx;
 use crate::game::ecs::systems::powerups;
 
 /// Weights of the rare-pickup table, in `WAVE3_DESIGN.md` §10 order:
+/// Share of a **named** miniboss's max HP a Nuke takes instead of killing it.
+///
+/// A Nuke clears the ordinary horde outright; an appointment is a fight the rat
+/// was promised (with a chest on the other side of it), so the pickup deals one
+/// big fixed chunk — roughly a third of its pool, the same share at every
+/// appointment — and the rat still has to finish the body.
+pub const NUKE_NAMED_CHUNK: f32 = 0.35;
+
 /// Heal 32, Magnet 18, Nuke 8, Bottle Cap 14, Wind-up Mouse 10, Pocket Watch 9,
 /// Clean Socks 9. The **chance** of a drop is unchanged (ordinary 1.2 %, big
 /// 12 %, boss 100 %); this table only decides *which* find a successful roll
@@ -410,6 +418,10 @@ pub fn treasure_system(
     mut gold: Query<(Entity, &SpawnId, &mut Gold)>,
     chests: Query<(Entity, &SpawnId, &Chest)>,
     mut ordered: Local<Vec<(u64, Entity)>>,
+    // Hoard Gland's banked half-gold (see `shop::coin_payout`): a `Local`, so
+    // it rides across ticks until the floor ends (a new level builds a new
+    // schedule and starts empty).
+    mut half_bank: Local<u32>,
 ) {
     let dt = input.dt;
     let ppos = player.pos;
@@ -440,7 +452,11 @@ pub fn treasure_system(
             }
             coin.pos += vel * dt;
             if coin.pos.dist_sq(ppos) < coin_radius * coin_radius {
-                gained = gained.saturating_add(crate::game::shop::scaled(coin.value, coin_mult));
+                gained = gained.saturating_add(crate::game::shop::coin_payout(
+                    coin.value,
+                    coin_mult,
+                    &mut half_bank,
+                ));
                 commands.entity(entity).despawn();
             }
         } else if let Ok((_, _, chest)) = chests.get(entity) {
@@ -548,7 +564,25 @@ pub fn pickups_system(
                     let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
                         continue;
                     };
-                    if e.kind != EnemyKind::Boss {
+                    if e.named {
+                        // A named miniboss is not one-shot fodder: a Nuke
+                        // deals one large fixed chunk of its max HP instead of
+                        // killing it, so an appointment is never skipped (and
+                        // its chest is never paid by a pickup). `max_hp` is the
+                        // appointment's own pool, so the chunk is the same
+                        // share at every appointment.
+                        let chunk = e.max_hp * NUKE_NAMED_CHUNK;
+                        e.hurt(chunk);
+                        e.note_damage();
+                        damage_numbers.record(
+                            e.id,
+                            e.pos,
+                            e.radius,
+                            chunk,
+                            !e.alive(),
+                            DamageSource::Nuke,
+                        );
+                    } else if e.kind != EnemyKind::Boss {
                         e.hp = -1.0;
                         // A nuke kills a Wick Moth *and* lights its fuse: the
                         // burst still belongs to the moth, not the pickup.
@@ -699,6 +733,41 @@ mod tests {
         assert_eq!(w.gems()[0].value, 1);
         assert_eq!(w.gems()[0].pos, pos, "the gem drops at the corpse");
         assert!(w.sfx.contains(&Sfx::Kill));
+    }
+
+    /// A Nuke clears the ordinary horde but only *chunks* a named miniboss
+    /// (35 % of its pool): an appointment is a promised fight with a chest on
+    /// the other side, not a pickup that skips it.
+    #[test]
+    fn a_nuke_chunks_a_miniboss_instead_of_killing_it() {
+        use crate::game::ecs::systems::miniboss::MinibossKind;
+        let mut w = World::new(Theme::Sewer, 53);
+        let ppos = w.player.pos;
+        let mini = w.spawn_miniboss(MinibossKind::Corkscrew, 0, ppos);
+        let fodder = w.spawn_enemy(EnemyKind::Skitterer, ppos, 1.0);
+        let hp0 = w.ecs.get::<Enemy>(mini).unwrap().hp;
+        let max = w.ecs.get::<Enemy>(mini).unwrap().max_hp;
+        w.spawn_pickup(Pickup {
+            pos: ppos,
+            kind: PickupKind::Nuke,
+            bob: 0.0,
+        });
+        run_loot_chain(&mut w, DT);
+        let hp1 = w.ecs.get::<Enemy>(mini).map(|e| e.hp).unwrap_or(-1.0);
+        assert!(
+            hp1 > 0.0,
+            "a Nuke must not one-shot a named miniboss ({hp0} -> {hp1})"
+        );
+        assert!(
+            (hp0 - hp1 - max * 0.35).abs() < 0.5,
+            "the chunk should be 35 % of the pool: took {}",
+            hp0 - hp1
+        );
+        // The ordinary horde is still cleared outright.
+        assert!(
+            w.ecs.get::<Enemy>(fodder).map(|e| e.hp <= 0.0).unwrap_or(true),
+            "ordinary fodder still dies to the Nuke"
+        );
     }
 
     #[test]

@@ -963,6 +963,74 @@ mod tests {
         assert_eq!(campaign.world().level.theme, Theme::Kitchen);
     }
 
+    /// **Splices carry over cleanly** (`WAVE3_DESIGN` §6: they last until the
+    /// campaign ends, occupy no rack slot and are applied after the passives).
+    ///
+    /// Two things have to hold on the next floor: the stats are exactly what a
+    /// from-scratch rebuild of the carried loadout gives (no doubled or lost
+    /// splice multiplier), and HP is clamped to the new max — Glass Incisors
+    /// and Long Fingers both *lower* the pool, so a rat that walked in with a
+    /// full bar must not carry the old, larger number into the next level.
+    #[test]
+    fn carried_splices_rebuild_the_same_stats_and_clamp_hp() {
+        use crate::game::shop::SpliceKind;
+        let mut campaign = CampaignState::new(67);
+        let mut world = campaign.world();
+        let mut rich = rich_loadout();
+        // Buy the two max-HP penalties and a damage multiplier.
+        rich.splices = vec![
+            SpliceKind::GlassIncisors,
+            SpliceKind::LongFingers,
+            SpliceKind::HoardGland,
+        ];
+        rich.rebuild_stats();
+        world.player.loadout = rich.clone();
+        let hp_before = world.player.max_hp();
+        // Walk in with a full health bar at the old cap.
+        world.player.hp = hp_before;
+
+        let chosen = vec![
+            entry(&rich, KeepKind::Weapon(WeaponKind::Gnaw)),
+            entry(&rich, KeepKind::Passive(PassiveKind::MaxHp)),
+        ];
+        world.mark_level_complete();
+        campaign.complete_level(&world, &chosen).expect("valid keep");
+        let next = campaign.world();
+        let lo = &next.player.loadout;
+
+        // The same loadout rebuilt from scratch gives the same stats.
+        let mut rebuilt = Loadout::from_parts(
+            lo.weapons.clone(),
+            lo.passives.clone(),
+        );
+        rebuilt.splices = lo.splices.clone();
+        rebuilt.rebuild_stats();
+        assert_eq!(lo.stats.max_hp, rebuilt.stats.max_hp, "max HP");
+        assert_eq!(lo.stats.damage_mult, rebuilt.stats.damage_mult, "damage");
+        assert_eq!(lo.stats.magnet, rebuilt.stats.magnet, "pickup radius");
+        assert_eq!(lo.stats.dash_cd, rebuilt.stats.dash_cd, "dash cooldown");
+        // HP starts at the *new* (smaller) pool, never above it.
+        assert!(
+            next.player.hp <= next.player.max_hp() + 1e-3,
+            "carried HP {} over the new cap {}",
+            next.player.hp,
+            next.player.max_hp()
+        );
+        assert_eq!(next.player.hp, next.player.max_hp(), "a new level starts full");
+        // The two HP-penalty splices are still in the carried stats: the pool
+        // is smaller than the same loadout with no splices.
+        let mut plain = rebuilt.clone();
+        plain.splices.clear();
+        plain.rebuild_stats();
+        assert!(
+            next.player.max_hp() < plain.stats.max_hp,
+            "the carried max-HP penalties were lost ({} vs {})",
+            next.player.max_hp(),
+            plain.stats.max_hp
+        );
+        let _ = hp_before;
+    }
+
     /// Carry-over end to end: finish a level with a rich loadout, keep three
     /// powerups, and start the next level with exactly those at their levels.
     #[test]

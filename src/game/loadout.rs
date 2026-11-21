@@ -353,6 +353,20 @@ const BANDAGE_HEAL_FRAC: f32 = 0.25;
 /// uses it for a live level-up and [`Loadout::from_parts`] replays it when a
 /// carried loadout is rebuilt for the next campaign level, so the two can never
 /// drift apart.
+/// Health a passive stack heals when it is granted, for the callers that grant
+/// stacks outside the level-up card (a chest's free rank).
+///
+/// `apply_passive_stack` returns this as its result; the level-up path heals
+/// the player with it, while the chest path used to drop it — a maxed rack plus
+/// an eligible Fat Reserves rank gave +20 max HP and no health.
+#[inline]
+pub fn passive_stack_heal(p: PassiveKind) -> f32 {
+    match p {
+        PassiveKind::MaxHp => 20.0,
+        _ => 0.0,
+    }
+}
+
 fn apply_passive_stack(stats: &mut Stats, p: PassiveKind) -> f32 {
     match p {
         PassiveKind::MaxHp => {

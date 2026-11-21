@@ -88,20 +88,31 @@ pub use crate::game::shop::MINIBOSS_GOLD;
 pub const CONE_HALF_ANGLE: f32 = std::f32::consts::FRAC_PI_8; // 22.5°
 /// Length of the cone.
 pub const CONE_LEN: f32 = 36.0;
-/// Length of the trench.
-pub const TRENCH_LEN: f32 = 40.0;
-/// Half-width of the trench.
-pub const TRENCH_HALF: f32 = 4.0;
-/// Length of the swinging cord.
-pub const CORD_LEN: f32 = 48.0;
+/// Length of the trench: the design's "dotted 48 × 10 px trench" (§8).
+pub const TRENCH_LEN: f32 = 48.0;
+/// Half-width of the trench (10 px across).
+pub const TRENCH_HALF: f32 = 5.0;
+/// Length of the swinging cord: the design's "44 px cord to a fixed spool".
+pub const CORD_LEN: f32 = 44.0;
 /// Half-thickness of the cord.
 pub const CORD_HALF: f32 = 3.0;
-/// Radius of the Bell Diver's ring.
-pub const RING_RADIUS: f32 = 32.0;
+/// Radius of the Bell Diver's ring: the design's "ring expands to 44 px at
+/// 36 px/s" (§8).
+pub const RING_RADIUS: f32 = 44.0;
 /// Half-thickness of the ring.
 pub const RING_HALF: f32 = 5.0;
 /// Half-angle of the ring's gap (a 60° gap).
 pub const RING_GAP_HALF: f32 = std::f32::consts::FRAC_PI_6; // 30°
+
+/// How far the Bell Diver's gap sits from its locked aim, as a quarter turn.
+///
+/// §8 gives the ring a **fixed** 60° gap and tells the rat to "line up with its
+/// chipped rim". The gap used to be centred on `mb.aim`, i.e. aimed at the rat:
+/// the one safe sector was always the one the rat was standing in, so the
+/// signature never had to be dodged. Offsetting it a quarter turn keeps it a
+/// fixed, readable feature of the ring (never the rat's own line) while staying
+/// derivable from the aim that was locked at tell start.
+pub const RING_GAP_TURN: f32 = std::f32::consts::FRAC_PI_2;
 /// Half-size of a Foreman stamp (12 px square).
 pub const STAMP_HALF: f32 = 6.0;
 /// Spacing between the three stamps.
@@ -183,7 +194,9 @@ impl MinibossKind {
                 origin: mb.origin,
                 radius: RING_RADIUS,
                 half: RING_HALF,
-                gap_dir: mb.aim,
+                // A fixed gap a quarter turn off the locked aim, never aimed at
+                // the rat (see `RING_GAP_TURN`).
+                gap_dir: mb.aim.rotate(RING_GAP_TURN),
                 gap_half: RING_GAP_HALF,
             },
             MinibossKind::Foreman => MinibossShape::Stamps {
@@ -233,7 +246,7 @@ impl MinibossKind {
                 origin: mb.origin,
                 radius: RING_RADIUS * p,
                 half: RING_HALF,
-                gap_dir: mb.aim,
+                gap_dir: mb.aim.rotate(RING_GAP_TURN),
                 gap_half: RING_GAP_HALF,
             },
             MinibossKind::Foreman => {
@@ -432,6 +445,14 @@ impl Miniboss {
         }
     }
 
+    /// Is the signature holding the body in place this tick? (`enemy_steering`
+    /// skips the walk for a body whose own state machine owns its position,
+    /// which lets the miniboss be *slowed* — an elite-grade body — instead of
+    /// stunned, so no crowd control is cancelled by the appointment.)
+    pub fn holds(&self) -> bool {
+        matches!(self.state, MinibossState::Tell | MinibossState::Active)
+    }
+
     /// The telegraph outline currently drawn, if any.
     pub fn telegraph(&self) -> Option<MinibossShape> {
         match self.state {
@@ -613,7 +634,8 @@ pub fn miniboss_system(
         match mb.state {
             MinibossState::Approach => {
                 // Let the ordinary steering walk it in; just watch the range.
-                e.stun = 0.0;
+                // Nothing here touches `stun`/`slow_mult`: crowd control (the
+                // Sonic Squeak's ring) is the rat's, not the appointment's.
                 if e.pos.dist(ppos) <= ENGAGE_RANGE {
                     begin_tell(
                         &mut mb,
@@ -627,7 +649,10 @@ pub fn miniboss_system(
                 }
             }
             MinibossState::Tell => {
-                e.stun = 1.0; // hold position
+                // Held in place by `enemy_steering_system` (`Miniboss::holds`),
+                // not by a stun: a miniboss is an elite-grade body and takes
+                // **slows**, so a Sonic Squeak ring must slow it exactly like
+                // it slows an elite instead of being cancelled here.
                 e.vel = Vec2::ZERO;
                 if mb.timer >= TELL_TIME {
                     mb.state = MinibossState::Active;
@@ -636,7 +661,6 @@ pub fn miniboss_system(
                 }
             }
             MinibossState::Active => {
-                e.stun = 1.0;
                 e.vel = Vec2::ZERO;
                 if !mb.active_cued {
                     mb.active_cued = true;
@@ -664,14 +688,12 @@ pub fn miniboss_system(
             }
             MinibossState::Recover => {
                 // Exposed: the rat can hit it freely.
-                e.stun = 0.0;
                 if mb.timer >= RECOVER_TIME {
                     mb.state = MinibossState::Cooldown;
                     mb.timer = 0.0;
                 }
             }
             MinibossState::Cooldown => {
-                e.stun = 0.0;
                 if mb.timer >= SIGNATURE_GAP - RECOVER_TIME {
                     mb.state = MinibossState::Approach;
                     mb.timer = 0.0;
@@ -904,6 +926,57 @@ mod tests {
         m
     }
 
+    /// §8's four geometry rows: "a dotted 48 × 10 px trench", "a 44 px cord",
+    /// "a ring expands to 44 px", "a fixed 60° gap".
+    #[test]
+    fn signatures_match_the_design_geometry() {
+        assert_eq!((TRENCH_LEN, TRENCH_HALF * 2.0), (48.0, 10.0), "trench 48 x 10");
+        assert_eq!(CORD_LEN, 44.0, "cord 44 px");
+        assert_eq!(RING_RADIUS, 44.0, "ring radius 44 px");
+        assert!((RING_GAP_HALF * 2.0).to_degrees() - 60.0 < 1e-3, "60 degree gap");
+    }
+
+    /// The Bell Diver's gap is **fixed** (a quarter turn off the locked aim),
+    /// not aimed at the rat: a rat standing on the tell's own line is not
+    /// automatically in the safe sector.
+    #[test]
+    fn the_ring_gap_is_not_aimed_at_the_rat() {
+        let m = mb(MinibossKind::BellDiver, Vec2::ZERO, Vec2::new(1.0, 0.0));
+        let shape = m.kind.telegraph(&m);
+        // On the rim, on the locked aim line (where a rat standing on the
+        // tell's own line would be): outside the gap, so the ring bites.
+        let aim_rim = Vec2::new(1.0, 0.0) * RING_RADIUS;
+        assert!(
+            shape.contains(aim_rim, 0.0),
+            "the rat's own line must not be the bell's gap"
+        );
+        // The fixed gap (a quarter turn off the aim) is the escape.
+        let gap_rim = Vec2::from_angle(RING_GAP_TURN) * RING_RADIUS;
+        assert!(
+            !shape.contains(gap_rim, 0.0),
+            "the fixed gap sector is the escape"
+        );
+    }
+
+    /// A signature holds the body without a `stun`, so the Sonic Squeak's
+    /// control is not cancelled: the state machine sets `vel = 0` and reports
+    /// `holds()`, and the crowd-control timers are the rat's business.
+    #[test]
+    fn a_signature_holds_the_body_without_stunning_it() {
+        use crate::game::ecs::systems::miniboss::MinibossState;
+        let mut m = Miniboss::new(MinibossKind::Corkscrew, 0);
+        m.state = MinibossState::Tell;
+        assert!(m.holds());
+        m.state = MinibossState::Active;
+        assert!(m.holds());
+        m.state = MinibossState::Recover;
+        assert!(!m.holds());
+        m.state = MinibossState::Approach;
+        assert!(!m.holds());
+        m.state = MinibossState::Cooldown;
+        assert!(!m.holds());
+    }
+
     #[test]
     fn trench_hit_shape_is_exact() {
         let m = mb(MinibossKind::Corkscrew, Vec2::ZERO, Vec2::new(1.0, 0.0));
@@ -1086,10 +1159,11 @@ mod tests {
         assert!(gems.iter(&w.ecs).any(|g| g.value == appointment_xp(0)));
     }
 
-    /// A Nuke kills between the reap and its own re-reap: the chest still
-    /// drops, once, with the gold.
+    /// A Nuke **chunks** a named miniboss (35 % of its pool) instead of
+    /// killing it — and when the rat then finishes it, the chest still drops
+    /// exactly once, with the gold.
     #[test]
-    fn a_nuked_miniboss_still_leaves_one_chest_and_twelve_gold() {
+    fn a_nuked_miniboss_chunks_and_then_leaves_one_chest() {
         use crate::game::ecs::systems::miniboss::MinibossKind as K;
         use crate::game::gem::{Pickup, PickupKind};
         use crate::game::level::Theme;
@@ -1102,10 +1176,23 @@ mod tests {
         w.director.elite_timer = 1.0e6;
         let p = w.player.pos;
         let e = w.spawn_miniboss(K::BellDiver, 1, p + Vec2::new(60.0, 0.0));
+        let hp0 = w.ecs.get::<Enemy>(e).unwrap().hp;
+        let max = w.ecs.get::<Enemy>(e).unwrap().max_hp;
         w.spawn_pickup(Pickup { pos: p, kind: PickupKind::Nuke, bob: 0.0 });
         w.update(1.0 / 60.0, Vec2::ZERO, false);
-        assert!(w.ecs.get::<Enemy>(e).is_none(), "the Nuke did not kill the miniboss");
-        assert_eq!(chests(&mut w), 1, "a nuked miniboss must leave exactly one chest");
+        let hp1 = w.ecs.get::<Enemy>(e).map(|x| x.hp).unwrap_or(-1.0);
+        assert!(hp1 > 0.0, "a Nuke must not one-shot an appointment ({hp0} -> {hp1})");
+        assert!(
+            (hp0 - hp1 - max * 0.35).abs() < 0.5,
+            "the chunk should be 35 % of the pool"
+        );
+        assert!(chests(&mut w) == 0, "a surviving miniboss pays nothing yet");
+        // Finish the fight: the chest and its gold land once.
+        w.ecs.get_mut::<Enemy>(e).unwrap().hp = 0.0;
+        for _ in 0..2 {
+            w.update(1.0 / 60.0, Vec2::ZERO, false);
+        }
+        assert_eq!(chests(&mut w), 1, "the finished appointment leaves exactly one chest");
         assert_eq!(gold_values(&mut w), vec![MINIBOSS_GOLD]);
         for _ in 0..30 {
             w.update(1.0 / 60.0, Vec2::ZERO, false);

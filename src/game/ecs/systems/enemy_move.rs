@@ -123,6 +123,12 @@ pub fn flow_refresh_system(mut flow: ResMut<FlowField>, level: Res<Level>, playe
 /// `spitter_holds_fire_until_the_line_to_the_rat_is_clear` asserts the two agree.
 const ENEMY_SHOT_RADIUS: f32 = 2.0;
 
+/// How hard a ground body is pushed away from a hole on the flatbed, relative
+/// to the one-unit steering/flow direction it would otherwise take. 1.0 means
+/// the hole wins whenever the route and the hole disagree, which is what makes
+/// the horde walk around a broken plank instead of into it.
+const PIT_AVOID_PUSH: f32 = 1.0;
+
 /// Legacy `World::update_enemies`: steering + arena clamp, in
 /// `SpawnId` order.
 ///
@@ -144,10 +150,17 @@ pub fn enemy_steering_system(
     slow: Query<&crate::game::ecs::systems::traps::TrapSlow>,
     decoys: Query<(&SpawnId, &crate::game::ecs::systems::powerups::Decoy)>,
     ink: Query<&crate::game::ecs::systems::hazards::InkSlow>,
+    // A named miniboss owns its own position during a signature (tell and
+    // active window): see `miniboss::Miniboss::holds`.
+    minibosses: Query<&crate::game::ecs::systems::miniboss::Miniboss>,
 ) {
     let dt = input.dt;
     let ppos = player.pos;
-    let speed_mult = 1.0 + counters.elapsed / 400.0;
+    // The horde's own speed ramp: ×1.0 → ×1.5 over the fifteen minutes on stage
+    // one, frozen at the boss, times the per-stage `EnemyMods::speed` already
+    // baked into every body at spawn (see `director::horde_speed_mult` — the
+    // legacy `1.0 + elapsed / 400.0` reached ×3.25 by the boss on a 900 s level).
+    let speed_mult = crate::game::director::horde_speed_mult(counters.elapsed);
     // The Wind-up Mouse's key, if one is spinning (at most one at a time). The
     // lure is a straight line at the key, not a second flow field: it only
     // reaches `WINDUP_MOUSE_RADIUS` (48 px, three tiles), it is refused when a
@@ -175,6 +188,17 @@ pub fn enemy_steering_system(
             .expect("ordered enemy must still be alive");
         // One field per size class: a rat-sized enemy may take a rat-hole, a
         // Cat or a Brute must route around it.
+        // A miniboss mid-tell/mid-signature stands still: its state machine
+        // owns the body's position, and it is held here (not by a `stun`) so a
+        // Sonic Squeak ring still slows it exactly like it slows an elite.
+        if minibosses.get(entity).is_ok_and(|mb| mb.holds()) {
+            e.vel = e.vel * (1.0 - (12.0 * dt).min(1.0));
+            e.contact_cd = (e.contact_cd - dt).max(0.0);
+            if e.flash > 0.0 {
+                e.flash -= dt;
+            }
+            continue;
+        }
         let mut flow_dir = flow.dir_at(SizeClass::of_enemy(e.kind), e.pos);
         // `traps::TrapSlow` is the per-enemy movement multiplier a sticky board
         // inserts while it holds this enemy (absent = unaffected).
@@ -211,6 +235,18 @@ pub fn enemy_steering_system(
         // permanent floor stain, kept as its own component so a glue board and
         // a pad can slow the same body without either system clobbering the
         // other's bookkeeping.
+        // The flatbed's holes are lethal to a pursuer (35 % of its max HP), so
+        // a ground body treats them like a wall: a local push straight away
+        // from the nearest hole it is about to step into. Every other theme
+        // skips this (the deck is empty) and the check is one small scan over
+        // the trailer's three-to-five pits.
+        if !level.trailer.is_empty() {
+            if let Some(away) = level.trailer.pit_avoid(e.pos, e.radius) {
+                let push = flow_dir + away * PIT_AVOID_PUSH;
+                flow_dir = if push.len_sq() > 1e-6 { push.normalized() } else { away };
+                target = e.pos + flow_dir * 32.0;
+            }
+        }
         let ink = ink.get(entity).map_or(1.0, |s| s.0);
         e.steer(target, flow_dir, dt, speed_mult * glue * ink);
         // Keep enemies inside the arena.

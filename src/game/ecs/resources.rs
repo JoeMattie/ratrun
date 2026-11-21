@@ -672,6 +672,12 @@ pub const DASH_HIT_CAP: usize = 48;
 pub const RIPCORD_SECS: f32 = 0.6;
 pub const RIPCORD_SEG_CAP: usize = 24;
 
+/// Dash legs one tick can record. The dash moves in sub-steps shorter than the
+/// player radius (`player::PLAYER_SUBSTEP`), so a normal tick is one or two
+/// legs and this cap only bounds a huge `dt`; past it the last leg is extended
+/// to the tick's end so the recorded path still reaches the rat's real position.
+pub const DASH_TICK_SEG_CAP: usize = 8;
+
 /// The dash's **actual** travelled segment(s), written by
 /// `systems::player::player_system`'s dash hook and consumed by
 /// `weapons_wave3b::super_dash_system`.
@@ -684,8 +690,17 @@ pub const RIPCORD_SEG_CAP: usize = 24;
 /// segment, so neither buys a hit.
 #[derive(Resource)]
 pub struct DashTrack {
-    /// `Some((from, to))` while this tick's movement happened during a dash.
+    /// `Some((from, to))` while this tick's movement happened during a dash
+    /// **and actually moved the rat**. A dash pressed straight into a wall
+    /// resolves to its starting point and records nothing, so a degenerate
+    /// (zero-length) sweep can never damage a body standing next to the rat.
     pub segment: Option<(Vec2, Vec2)>,
+    /// This tick's dash movement as the sub-steps that really happened, in
+    /// travel order (`seg_len` of them). One chord cannot cut a corner the
+    /// rat's collision-resolved path took around it, so the dash hit tests
+    /// each real leg.
+    pub segs: [(Vec2, Vec2); DASH_TICK_SEG_CAP],
+    pub seg_len: usize,
     /// How many dash legs have been travelled in the current dash (the weapon
     /// uses `== 1` for its one sound per dash).
     pub legs: u32,
@@ -714,6 +729,8 @@ impl Default for DashTrack {
     fn default() -> Self {
         Self {
             segment: None,
+            segs: [(Vec2::ZERO, Vec2::ZERO); DASH_TICK_SEG_CAP],
+            seg_len: 0,
             legs: 0,
             boss_hit: false,
             hits: [0; DASH_HIT_CAP],
@@ -738,20 +755,55 @@ impl DashTrack {
         self.legs = 0;
         self.boss_hit = false;
         self.segment = None;
+        self.seg_len = 0;
         self.clear_route();
     }
 
     /// Record this tick's movement. `live` is the dash flag the dash owner
     /// computed *before* it decayed `player.dash_active`, so the last dash tick
-    /// still counts.
+    /// still counts; `frame_start` is where the rat stood at the top of the
+    /// tick.
+    ///
+    /// A dash that moved **nothing** (pressed flush into a wall, so the
+    /// sub-step resolution put the rat back where it started) records no
+    /// segment at all: it is a refused dash in every way that matters, and the
+    /// zero-length "sweep" it used to record was a valid circle overlap on the
+    /// rat's own position.
     #[inline]
-    pub fn record(&mut self, from: Vec2, to: Vec2, live: bool) {
-        if live {
-            self.segment = Some((from, to));
+    pub fn record(&mut self, frame_start: Vec2, to: Vec2, live: bool) {
+        if live && frame_start.dist_sq(to) > 0.000_1 {
+            self.segment = Some((frame_start, to));
             self.legs = self.legs.saturating_add(1);
         } else {
+            // Not dashing (or the dash moved nothing): this tick has no legs,
+            // and the sub-steps pushed during the move are dropped with it.
             self.segment = None;
+            self.seg_len = 0;
         }
+    }
+
+    /// Record one collision-resolved sub-step of this tick's dash movement.
+    /// Zero-length legs are dropped (they can hit nothing anyway).
+    #[inline]
+    pub fn push_leg(&mut self, from: Vec2, to: Vec2) {
+        if from.dist_sq(to) <= 0.000_1 {
+            return;
+        }
+        if self.seg_len < DASH_TICK_SEG_CAP {
+            self.segs[self.seg_len] = (from, to);
+            self.seg_len += 1;
+        } else {
+            // Past the cap the path keeps its first legs and the last one is
+            // stretched to the rat's real position (the cap is only reachable
+            // with an enormous `dt`).
+            self.segs[DASH_TICK_SEG_CAP - 1].1 = to;
+        }
+    }
+
+    /// This tick's recorded dash legs, in travel order.
+    #[inline]
+    pub fn legs_now(&self) -> &[(Vec2, Vec2)] {
+        &self.segs[..self.seg_len]
     }
 
     /// Has the current dash already hit this body?

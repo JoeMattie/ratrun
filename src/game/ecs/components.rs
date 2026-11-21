@@ -280,6 +280,9 @@ pub struct MilkTooth {
     /// Bodies bitten on the way back, in bite order.
     pub bitten: [Option<u64>; MILK_BITE_CAP],
     pub bitten_n: u8,
+    /// Has the return thread already bitten the boss (`Boss` is not an
+    /// `Enemy`, so it needs its own flag: one boss hit per return).
+    pub boss_bitten: bool,
 }
 
 impl MilkTooth {
@@ -293,6 +296,7 @@ impl MilkTooth {
             reach,
             bitten: [None; MILK_BITE_CAP],
             bitten_n: 0,
+            boss_bitten: false,
         }
     }
 
@@ -301,16 +305,22 @@ impl MilkTooth {
         self.bitten[..self.bitten_n as usize].contains(&Some(id))
     }
 
-    /// Record a bite; returns false when the history is full (the bite still
-    /// lands — the cap bounds the memory, not the damage).
+    /// Record a bite. Returns `false` when this body must **not** be hit: it
+    /// was already bitten, or the fixed history is full.
+    ///
+    /// The cap bounds the memory, so a successful record is a precondition of
+    /// the damage: otherwise a 17th body in the same thread would be bitten on
+    /// every tick it stayed inside the sweep (a once-per-target effect turning
+    /// into damage over time).
     pub fn remember_bite(&mut self, id: u64) -> bool {
         if self.has_bitten(id) {
             return false;
         }
-        if (self.bitten_n as usize) < MILK_BITE_CAP {
-            self.bitten[self.bitten_n as usize] = Some(id);
-            self.bitten_n += 1;
+        if (self.bitten_n as usize) >= MILK_BITE_CAP {
+            return false;
         }
+        self.bitten[self.bitten_n as usize] = Some(id);
+        self.bitten_n += 1;
         true
     }
 }
@@ -337,11 +347,17 @@ impl CheeseString {
         self.cut[..self.cut_n as usize].contains(&Some(id))
     }
 
-    pub fn remember_cut(&mut self, id: u64) {
-        if (self.cut_n as usize) < STRING_CUT_CAP {
-            self.cut[self.cut_n as usize] = Some(id);
-            self.cut_n += 1;
+    /// Record a cut. Returns `false` when this body must **not** be hit (it
+    /// was already cut, or the fixed history is full): a successful record is
+    /// a precondition of the damage, so a 25th body standing in the same string
+    /// cannot be cut once per tick for the string's whole life.
+    pub fn remember_cut(&mut self, id: u64) -> bool {
+        if self.has_cut(id) || (self.cut_n as usize) >= STRING_CUT_CAP {
+            return false;
         }
+        self.cut[self.cut_n as usize] = Some(id);
+        self.cut_n += 1;
+        true
     }
 }
 
@@ -384,33 +400,26 @@ impl FairyRing {
         0.0
     }
 
-    /// Start (or restart) `id`'s cooldown. When the table is full the entry
-    /// with the least time left is recycled, so a long ring keeps hurting the
-    /// bodies that stay in it.
-    pub fn cool(&mut self, id: u64, secs: f32) {
-        let mut free: Option<usize> = None;
-        let mut weakest: Option<(usize, f32)> = None;
+    /// Start (or restart) `id`'s cooldown. Returns `false` when the fixed table
+    /// is full of **other** live cooldowns, i.e. this body cannot be tracked:
+    /// the caller then skips the hit, because evicting a live cooldown would let
+    /// the evicted body be hit again on the next tick (the same body, twice per
+    /// second, for a `FAIRY_TRACK_CAP`+1-binding ring).
+    pub fn cool(&mut self, id: u64, secs: f32) -> bool {
         for (i, slot) in self.cooled.iter().enumerate() {
             match slot {
                 Some((held, left)) if *held == id => {
                     self.cooled[i] = Some((id, secs.max(*left)));
-                    return;
+                    return true;
                 }
-                Some((_, left)) => {
-                    if weakest.is_none_or(|(_, best)| *left < best) {
-                        weakest = Some((i, *left));
-                    }
-                }
+                Some(_) => {}
                 None => {
-                    free = Some(i);
-                    break;
+                    self.cooled[i] = Some((id, secs));
+                    return true;
                 }
             }
         }
-        let slot = free.or(weakest.map(|(i, _)| i));
-        if let Some(i) = slot {
-            self.cooled[i] = Some((id, secs));
-        }
+        false
     }
 
     pub fn tick_cooldowns(&mut self, dt: f32) {
@@ -447,6 +456,9 @@ pub struct CorrosiveChannel {
     /// Is this stripe a **Downspout** runoff? A runoff has no advancing front
     /// (it is already settled when it lands) and draws as a stepped gutter.
     pub runoff: bool,
+    /// Has the advancing front already hit the full boss? (The boss is not an
+    /// `Enemy`, so it needs its own once-per-channel flag.)
+    pub boss_hit: bool,
 }
 
 /// Seconds a settled corrosive stripe ticks for with [`CorrosiveChannel::new`]
@@ -466,6 +478,7 @@ impl CorrosiveChannel {
             hit_n: 0,
             settle: CHANNEL_DEFAULT_SETTLE,
             runoff: false,
+            boss_hit: false,
         }
     }
 
@@ -483,11 +496,17 @@ impl CorrosiveChannel {
         self.hit[..self.hit_n as usize].contains(&Some(id))
     }
 
-    pub fn remember_hit(&mut self, id: u64) {
-        if (self.hit_n as usize) < CHANNEL_HIT_CAP {
-            self.hit[self.hit_n as usize] = Some(id);
-            self.hit_n += 1;
+    /// Record a front hit. Returns `false` when this body must **not** be hit
+    /// (already hit, or the fixed history is full): a successful record is a
+    /// precondition of the damage, so a body past the cap cannot be hit again
+    /// every tick while the front is still advancing.
+    pub fn remember_hit(&mut self, id: u64) -> bool {
+        if self.has_hit(id) || (self.hit_n as usize) >= CHANNEL_HIT_CAP {
+            return false;
         }
+        self.hit[self.hit_n as usize] = Some(id);
+        self.hit_n += 1;
+        true
     }
 
     /// Far end of the stripe, clamped to the wall it stopped at.

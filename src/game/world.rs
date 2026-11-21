@@ -509,8 +509,18 @@ impl World {
         }
         self.pending_chests -= 1;
         let reward = loadout::open_chest(&mut self.player.loadout, &mut self.rng);
-        if let ChestReward::Gold(value) = reward {
-            self.gold = self.gold.saturating_add(value);
+        match reward {
+            ChestReward::Gold(value) => self.gold = self.gold.saturating_add(value),
+            // A Fat Reserves rank raises the cap **and** heals, exactly as the
+            // level-up card does (`passive_stack_heal`); the chest used to
+            // discard that heal.
+            ChestReward::PassiveLevel { kind, .. } => {
+                let heal = loadout::passive_stack_heal(kind);
+                if heal > 0.0 {
+                    self.player.heal(heal);
+                }
+            }
+            _ => {}
         }
         Some(reward)
     }

@@ -146,6 +146,10 @@ pub fn player_system(
     let lo = Vec2::splat(PLAYER_RADIUS);
     let hi = Vec2::new(arena.x - PLAYER_RADIUS, arena.y - PLAYER_RADIUS);
     for _ in 0..steps {
+        // Where this sub-step started, so the dash records the legs that
+        // really happened (a sub-step a wall pushes back on is no movement and
+        // no leg).
+        let leg_from = player.pos;
         player.pos += step;
         player.pos = player.pos.clamp_box(lo, hi);
         // One tile-grid query per sub-step: the cells around the rat, never
@@ -156,6 +160,9 @@ pub fn player_system(
         player.pos = level
             .tiles
             .resolve_circle(player.pos, PLAYER_RADIUS, SizeClass::Small, Some(vel));
+        if dashing {
+            dash_track.push_leg(leg_from, player.pos);
+        }
     }
 
     // ---- w3-weapons-b hook 2/2 (see above): the travelled segment, exactly

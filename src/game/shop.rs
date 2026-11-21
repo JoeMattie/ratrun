@@ -307,6 +307,26 @@ pub fn coin_mult(splices: &[SpliceKind]) -> f32 {
     }
 }
 
+/// One coin's payout through [`coin_mult`], banking the half-gold.
+///
+/// The design's Hoard Gland is "+50% coin value (**bank halves**)" (§6): a
+/// 1-gold coin cannot pay 1.5, and rounding it (`scaled`) paid **2** — a +100 %
+/// bonus on the commonest coin in the game and a strictly better deal than the
+/// design's own 60-gold break-even. This banks the odd half instead: each coin
+/// adds its value in half-gold, whole pairs are paid out, and the remainder
+/// rides to the next coin. Over a floor the rat collects +50 % and no more,
+/// with the running total never below what plain rounding would have paid
+/// after two coins.
+pub fn coin_payout(value: u32, mult: f32, half_bank: &mut u32) -> u32 {
+    if mult != 1.5 {
+        return scaled(value, mult);
+    }
+    *half_bank = half_bank.saturating_add(value);
+    let bonus = *half_bank / 2;
+    *half_bank %= 2;
+    value.saturating_add(bonus)
+}
+
 /// Gem XP multiplier (Blackboard Belly: `×1.25`).
 ///
 /// `loot::gems_system` multiplies this onto `Stats::xp_mult` (Second Scent)
@@ -1011,6 +1031,34 @@ pub fn molt(
         stock.molted = true;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod coin_tests {
+    use super::*;
+
+    /// Hoard Gland is "+50% coin value (**bank halves**)": a 1-gold coin pays 1
+    /// and banks the half, so a second one pays 2 — +50% over the floor, never
+    /// the +100% that rounding 1.5 up paid per coin.
+    #[test]
+    fn hoard_gland_banks_halves() {
+        let mut bank = 0u32;
+        let first = coin_payout(1, 1.5, &mut bank);
+        let second = coin_payout(1, 1.5, &mut bank);
+        assert_eq!((first, second), (1, 2), "two 1-gold coins pay three gold");
+        // A 3-gold coin and a second one: 4 paid + 2 banked bonus = +50 %.
+        let mut bank = 0u32;
+        assert_eq!(coin_payout(3, 1.5, &mut bank), 4);
+        assert_eq!(coin_payout(3, 1.5, &mut bank), 5);
+        // The long run converges on exactly +50 %.
+        let mut bank = 0u32;
+        let paid: u32 = (0..100).map(|_| coin_payout(1, 1.5, &mut bank)).sum();
+        assert_eq!(paid, 150, "100 one-gold coins must pay 150");
+        // No splice: untouched.
+        let mut bank = 0u32;
+        assert_eq!(coin_payout(3, 1.0, &mut bank), 3);
+        assert_eq!(bank, 0);
+    }
 }
 
 #[cfg(test)]

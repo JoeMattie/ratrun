@@ -45,6 +45,53 @@ fn secs(s: f32) -> usize {
     (s / DT).ceil() as usize
 }
 
+/// A lured tell aims at the **key**, not the rat: a decoyed Pillbug curls at
+/// the key (its shell faces it), a decoyed Bell Flea hops at it, and a decoyed
+/// Turnkey lays its crossbar across the line to it.
+#[test]
+fn lured_tells_aim_at_the_wind_up_mouse() {
+    use crate::game::ecs::systems::powerups::spawn_decoy;
+    let mut w = World::new(Theme::Sewer, 77);
+    open_floor(&mut w);
+    w.clear_enemies();
+    let rat = w.player.pos;
+    // The key sits well away from the rat, and both are inside every tell's
+    // range of the body.
+    let key = rat + Vec2::new(0.0, 20.0);
+    spawn_decoy(&mut w, key);
+    let bug = w.spawn_enemy(EnemyKind::Pillbug, rat + Vec2::new(0.0, 28.0), 1.0);
+    put(&mut w, bug, |e| {
+        e.w3.curl_cd = 0.0;
+        e.w3.armed = 1;
+    });
+    tick(&mut w);
+    let e = state(&w, bug);
+    assert!(e.w3.curl_t > 0.0, "the pillbug must start its curl");
+    let to_key = (key - e.pos).normalized();
+    assert!(
+        e.facing.dot(to_key) > 0.9,
+        "the lured shell faces the key ({:?} vs {:?})",
+        e.facing,
+        to_key
+    );
+
+    // The flea hops toward the key, not toward the rat.
+    let flea = w.spawn_enemy(EnemyKind::BellFlea, rat + Vec2::new(0.0, 30.0), 1.0);
+    put(&mut w, flea, |e| {
+        e.w3.flea_cd = 0.0;
+        e.w3.armed = 1;
+    });
+    tick(&mut w);
+    let f = state(&w, flea);
+    assert!(f.w3.flea_phase == 1, "the flea must start its tell");
+    let hop_dir = (f.w3.hop_to - f.w3.home).normalized();
+    let to_key = (key - f.w3.home).normalized();
+    assert!(
+        hop_dir.dot(to_key) > 0.9,
+        "the lured hop goes at the key ({hop_dir:?} vs {to_key:?})"
+    );
+}
+
 fn put<F: FnOnce(&mut Enemy)>(w: &mut World, entity: Entity, f: F) {
     let mut e = w.ecs.get_mut::<Enemy>(entity).unwrap();
     f(&mut e);

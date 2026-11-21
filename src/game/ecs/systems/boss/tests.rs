@@ -211,8 +211,11 @@ fn boss_death_plays_its_beat_then_completes_the_level_once() {
         "the level completes after the death state, not on the lethal tick"
     );
     assert!(!w.ecs.resource::<BossFight>().level_complete);
+    // §6: the boss's 30 gold is credited to the wallet at the clear, not
+    // dropped as a coin at its body (which a ranged kill outside magnet range
+    // could lose entirely). Nothing is on the floor yet.
     let mut gold = w.ecs.query::<&crate::game::gem::Gold>();
-    assert_eq!(gold.single(&w.ecs).unwrap().value, 20);
+    assert_eq!(gold.iter(&w.ecs).count(), 0, "the boss drops no coin now");
 
     // Every tick of the beat keeps the boss (and never re-raises anything).
     let ticks = (art_boss_cat::DEATH_DURATION / DT).ceil() as usize + 2;
@@ -228,15 +231,21 @@ fn boss_death_plays_its_beat_then_completes_the_level_once() {
     assert_eq!(completions, 1, "the signal must rise exactly once");
     assert!(w.ecs.resource::<BossFight>().level_complete);
     assert!(
+        w.gold >= crate::game::shop::BOSS_GOLD,
+        "the boss's gold must be in the wallet at the clear ({})",
+        w.gold
+    );
+    assert!(
         boss_of(&mut w).is_none(),
         "the death state despawns the boss when it ends"
     );
 
-    // And it stays risen.
+    // And it stays risen (and the wallet credit is not paid twice).
+    let banked = w.gold;
     update_boss(&mut w, DT);
     assert!(w.level_complete);
     assert_eq!(completions, 1);
-    assert_eq!(gold.iter(&w.ecs).count(), 1);
+    assert_eq!(w.gold, banked, "the boss's gold is credited once");
 }
 
 /// The boss's death breaks the horde, and that despawn has to happen **after**

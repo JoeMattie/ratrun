@@ -94,6 +94,42 @@ pub fn near_appointment(elapsed: f32) -> bool {
 /// single stage without touching the tables.
 pub const LEVEL_CLOCK_OFFSET: [f32; 3] = [0.0, 0.0, 0.0];
 
+/// The horde's movement multiplier from the run clock, before the per-stage
+/// ramp ([`enemy_mods_for`]).
+///
+/// The legacy curve was `1.0 + elapsed / 400.0`, which on a fifteen-minute
+/// level reached **×3.25 at the boss** (and already ×1.75 at 5:00): a horde that
+/// outruns the rat late in the floor, which the design's §1 says it must not do
+/// ("speed and contact damage at base on stage one").
+///
+/// Picked: the legacy ramp for its first five minutes, then **frozen** —
+/// ×1.0 at 0:00, ×1.75 from [`HORDE_SPEED_RAMP_END`] (5:00) to the boss, i.e.
+/// the horde at 15:00 moves at exactly the speed the old build's 5:00 horde
+/// did (and the old 15:00 value of ×3.25 is gone). Freezing it at the boss is
+/// automatic: the ramp's clock stops being read at 5:00.
+///
+/// The per-stage part (`+0 / +5 / +10 %`) is [`enemy_mods_for`]'s `speed`, baked
+/// into every enemy at spawn time, so the two multiply: stage three's top is
+/// ×1.65.
+pub const HORDE_SPEED_TOP: f32 = 1.75;
+
+/// Run-clock second the speed ramp reaches [`HORDE_SPEED_TOP`] and stops
+/// (5:00 — the old curve's own value at that moment).
+pub const HORDE_SPEED_RAMP_END: f32 = 300.0;
+
+/// [`HORDE_SPEED_TOP`] as a function of the run clock.
+///
+/// The first five minutes are exactly the legacy ramp
+/// (`1.0 + elapsed / 400.0`), then it **freezes** at ×1.75 for the rest of the
+/// fifteen-minute level: the horde never gets faster than the old build's 5:00
+/// horde, and the boss phase inherits that frozen value. (The per-stage
+/// `+0 / +5 / +10 %` from [`enemy_mods_for`] multiplies on top, baked in at
+/// spawn, so stage three's ceiling is ×1.925.)
+#[inline]
+pub fn horde_speed_mult(elapsed: f32) -> f32 {
+    1.0 + elapsed.min(HORDE_SPEED_RAMP_END) / 400.0
+}
+
 /// Extra ordinary-horde toughness per campaign level, after the grace window.
 ///
 /// §1: "Stages two/three add 5/10 % ordinary HP after 3:00, with the same

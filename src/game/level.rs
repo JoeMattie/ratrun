@@ -833,6 +833,52 @@ impl TrailerDeck {
         self.pits.iter().find(|pit| pit.contains_world(p))
     }
 
+    /// Steering push away from a hole the body is about to walk into.
+    ///
+    /// The flatbed's holes are the one hazard that can *kill* a pursuer (35 % of
+    /// its max HP), so a ground body has to treat them like walls. The flow
+    /// field is built from the tile grid and does not know about the deck's
+    /// pits, and rebuilding a per-level mask for the trailer's few holes is not
+    /// worth its own field, so this is the cheap local rule: a body whose own
+    /// cell is a hole (or whose step is one tile from one) is pushed straight
+    /// away from the nearest hole's centre. One linear scan over the deck's
+    /// 3-5 pits, and only on the flatbed.
+    ///
+    /// Returns `None` on every other theme (the caller checks
+    /// [`TrailerDeck::is_empty`] first) and for a body clear of every hole.
+    pub fn pit_avoid(&self, p: Vec2, radius: f32) -> Option<Vec2> {
+        let mut best: Option<(f32, Vec2)> = None;
+        for pit in &self.pits {
+            let c = pit.rect.center_world();
+            // Distance to the hole's inflated cell rectangle, not to its centre:
+            // a hole is a square of deck, so a body a few pixels off its lip is
+            // already "about to walk in".
+            let half = Vec2::new(
+                pit.rect.w as f32 * crate::game::collision::TILE_F * 0.5,
+                pit.rect.h as f32 * crate::game::collision::TILE_F * 0.5,
+            );
+            let d = Vec2::new(
+                (p.x - c.x).abs() - half.x,
+                (p.y - c.y).abs() - half.y,
+            );
+            let gap = d.x.max(d.y).max(0.0) - radius;
+            if gap > crate::game::collision::TILE_F {
+                continue;
+            }
+            if best.is_none_or(|(bg, _)| gap < bg) {
+                best = Some((gap, c));
+            }
+        }
+        best.map(|(_, c)| {
+            let away = p - c;
+            if away.len_sq() > 1e-4 {
+                away.normalized()
+            } else {
+                Vec2::new(1.0, 0.0)
+            }
+        })
+    }
+
     /// Is `p` on an exposed stretch where the slipstream pulls toward the
     /// tailgate?
     pub fn windy_at(&self, p: Vec2) -> bool {
