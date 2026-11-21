@@ -1019,15 +1019,19 @@ fn arm_weapon(w: &mut World, kind: crate::game::weapon::WeaponKind, evolved: boo
 /// Directional armour reaches every damage source the other wave-3 branches
 /// added: Acid Rain, Laser Eyes, Super Dash and the evolutions' own hit paths
 /// (Milk Teeth, Fondue string, Fairy Ring, Drain Cleaner front and runoff,
-/// Roll Call, Ratchet swing). Echo Chamber spokes and Flywheel pellets are
-/// `Bullet`s, so `a_bullet_obeys_the_shell` is their witness. A Hantavirus
-/// tick has no direction and takes the unmodified multiplier.
+/// Roll Call, Ratchet swing) and the last four evolutions (a Downspout tread
+/// and its runoff from the gutter's axis, a Carbon Copy beam from its recorded
+/// origin, a Ripcord snap along the cord toward the departure point). Echo
+/// Chamber spokes and Flywheel pellets are `Bullet`s, so
+/// `a_bullet_obeys_the_shell` is their witness. A Hantavirus tick has no
+/// direction and takes the unmodified multiplier, and so does the tick of a
+/// chain a Dead Letter packet resumed.
 #[test]
 fn the_shell_reaches_every_later_damage_source() {
     use crate::game::ecs::components::{
-        AcidDrop, CheeseString, CorrosiveChannel, FairyRing, Infection,
+        AcidDrop, CheeseString, CorrosiveChannel, DeadLetterPacket, FairyRing, Infection,
     };
-    use crate::game::ecs::resources::{spawn_with_id, ActiveFx};
+    use crate::game::ecs::resources::{spawn_with_id, ActiveFx, DashTrack, LaserCopy, LaserFx};
     use crate::game::ecs::systems::{evolutions as evo, weapons, weapons_wave3a, weapons_wave3b};
     use crate::game::weapon::WeaponKind;
 
@@ -1048,6 +1052,9 @@ fn the_shell_reaches_every_later_damage_source() {
                     radius: 12.0,
                     dmg: 10.0,
                     index: 0,
+                    dir: Vec2::ZERO,
+                    evolved: false,
+                    volley: 1,
                 },
             );
         },
@@ -1176,6 +1183,107 @@ fn the_shell_reaches_every_later_damage_source() {
             fx.answer_damage = 4.0;
         },
         |w| run(w, evo::roll_call_system),
+    );
+    // ---- The last four evolutions --------------------------------------
+    // Downspout: a tread arrives from the gutter's axis (the march line
+    // through the drop), not from the splash centre. The bug sits 3 px south
+    // of an eastward gutter, so the hit arrives from the north.
+    shell_case(
+        "downspout tread",
+        Vec2::new(20.0, 3.0),
+        Vec2::new(0.0, -1.0),
+        true,
+        |w, p, _| {
+            spawn_with_id(
+                &mut w.ecs,
+                AcidDrop {
+                    pos: p + Vec2::new(15.0, 0.0),
+                    delay: 0.0,
+                    radius: 12.0,
+                    dmg: 10.0,
+                    index: 0,
+                    dir: Vec2::new(1.0, 0.0),
+                    evolved: true,
+                    // Not the last of its volley: no runoff yet, tread only.
+                    volley: 3,
+                },
+            );
+        },
+        |w| run(w, weapons_wave3a::acid_rain_system),
+    );
+    // Downspout: the burning runoff, from the nearest point of the gutter.
+    shell_case(
+        "downspout runoff",
+        Vec2::new(20.0, 3.0),
+        Vec2::new(0.0, -1.0),
+        true,
+        |w, p, _| {
+            spawn_with_id(
+                &mut w.ecs,
+                CorrosiveChannel::gutter(p, Vec2::new(1.0, 0.0), evo::CHANNEL_LEN, 30.0, 1.0),
+            );
+        },
+        |w| run(w, evo::drain_cleaner_system),
+    );
+    // Carbon Copy: the afterimage fires from its *recorded* origin, not from
+    // the rat. The bug is north of the rat (outside the live fan, which faces
+    // east) and the copy looks south at it from further north.
+    shell_case(
+        "carbon copy beam",
+        Vec2::new(0.0, 30.0),
+        Vec2::new(0.0, 1.0),
+        true,
+        |w, p, _| {
+            arm_weapon(w, WeaponKind::LaserEyes, true);
+            w.ecs.resource_mut::<LaserFx>().copy = Some(LaserCopy {
+                origin: p + Vec2::new(0.0, 60.0),
+                facing: Vec2::new(0.0, -1.0),
+                pulses: 3,
+                reach: 40.0,
+                dmg: 10.0,
+            });
+        },
+        |w| run(w, weapons_wave3b::laser_eyes_system),
+    );
+    // Ripcord: the snap travels along the cord toward the departure point
+    // (west of the bug), so it strikes the bug from the east.
+    shell_case(
+        "ripcord snap",
+        Vec2::new(20.0, 0.0),
+        Vec2::new(1.0, 0.0),
+        true,
+        |w, p, _| {
+            arm_weapon(w, WeaponKind::SuperDash, true);
+            let mut track = w.ecs.resource_mut::<DashTrack>();
+            track.segment = None;
+            track.extend_route(p + Vec2::new(-12.0, 0.0), p + Vec2::new(44.0, 0.0));
+        },
+        |w| run(w, evo::ripcord_system),
+    );
+    // Dead Letter: the packet's chain resumes on the bug and ticks it like any
+    // Hantavirus mark: no direction.
+    shell_case(
+        "dead letter tick",
+        ahead,
+        west,
+        false,
+        |w, p, _| {
+            // A chain sealed by some other (dead) host, one jump left.
+            let chain = Infection::new(u64::MAX - 7, 1, 40.0, 5.0);
+            spawn_with_id(
+                &mut w.ecs,
+                DeadLetterPacket {
+                    pos: p + ahead + Vec2::new(2.0, 0.0),
+                    life: evo::DEAD_LETTER_SECS,
+                    total: evo::DEAD_LETTER_SECS,
+                    chain,
+                },
+            );
+        },
+        |w| {
+            run(w, evo::dead_letter_system);
+            run(w, weapons_wave3a::hantavirus_system);
+        },
     );
     shell_case(
         "ratchet swing",

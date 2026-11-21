@@ -37,7 +37,7 @@
 //! | 14 | `combat::player_bullet_hits_system` | `resolve_player_bullets` |
 //! | 15 | `combat::enemy_bullet_hits_system` | `resolve_enemy_hits` |
 //! | 16 | `combat::contact_system` | `resolve_contact` |
-//! | 16b | `evolutions::milk_teeth_system` … `roll_call_system` | evolved weapons (new) |
+//! | 16b | `evolutions::milk_teeth_system` … `roll_call_system`, `dead_letter_system`, `ripcord_system` | evolved weapons (new) |
 //! | 16c | `enemy_wave3::wave3_system` | wave-3 kinds' tells, hazards, wick fuse (new); after every weapon damage pass so a moth any of them killed lights its wick |
 //! | 16d | `trailer::trailer_system` | the flatbed's holes, cargo and wind (new; `Theme::Trailer` only); a fall can kill, so it runs before 16e |
 //! | 16e | `weapons_wave3a::hantavirus_death_system` | death-triggered jumps (sees evolution, wick-burst and fall kills), before the reap |
@@ -285,6 +285,12 @@ pub fn build_tick_schedule() -> Schedule {
             evolutions::fairy_ring_system,
             evolutions::drain_cleaner_system,
             evolutions::roll_call_system,
+            // Dead Letter's sealed packets (2 s fuse, opens on the first
+            // eligible foe) and Ripcord's taut dash route. Both read the same
+            // live `EnemyIndex` order and are before `hantavirus_death_system`,
+            // so a packet opened this tick can hand its chain on this tick.
+            evolutions::dead_letter_system,
+            evolutions::ripcord_system,
             // 16c: the wave-3 enemies' behaviour tick (see the comment above
             // this tuple).
             enemy_wave3::wave3_system,

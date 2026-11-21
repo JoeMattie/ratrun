@@ -1505,25 +1505,39 @@ mod tests {
     }
 
     /// Molt on the wave's edges: an evolved weapon is forfeited with its ranks
-    /// and its evolution (and the list says so), and each of the four weapons
-    /// with no evolution row can be forfeited and taken like any other.
+    /// and its evolution (and the list says so), and each of the four wave-3
+    /// weapons can be taken in its place and forfeited again like any other.
+    ///
+    /// All twelve weapons evolve now (the last four rows landed with
+    /// Downspout, Dead Letter, Carbon Copy and Ripcord), so "no evolution row"
+    /// is no longer a case: the test pins that, and keeps exercising the swap
+    /// against the four newest kinds.
     #[test]
-    fn molt_handles_evolved_and_unevolvable_weapons_within_the_caps() {
+    fn molt_handles_evolved_weapons_and_the_wave3_kinds_within_the_caps() {
         use crate::game::loadout::MAX_WEAPONS;
         use crate::game::weapon::Weapon;
-        let unevolvable: Vec<WeaponKind> = WeaponKind::all()
+        assert!(
+            WeaponKind::all().into_iter().all(|k| k.evolution().is_some()),
+            "every weapon has an evolution row"
+        );
+        let wave3 = [
+            WeaponKind::AcidRain,
+            WeaponKind::Hantavirus,
+            WeaponKind::LaserEyes,
+            WeaponKind::SuperDash,
+        ];
+        let rack_kinds: Vec<WeaponKind> = WeaponKind::all()
             .into_iter()
-            .filter(|k| k.evolution().is_none())
+            .filter(|k| !wave3.contains(k))
+            .take(MAX_WEAPONS)
             .collect();
-        assert_eq!(unevolvable.len(), 4, "the four wave-3 weapons");
 
-        for (n, &new) in unevolvable.iter().enumerate() {
+        for (n, &new) in wave3.iter().enumerate() {
             // A full rack of five evolvable weapons, the first one evolved.
             let mut w = shop_world(60 + n as u64, 200);
-            let rack: Vec<Weapon> = WeaponKind::all()
-                .into_iter()
-                .filter(|k| k.evolution().is_some())
-                .take(MAX_WEAPONS)
+            let rack: Vec<Weapon> = rack_kinds
+                .iter()
+                .copied()
                 .map(|kind| {
                     let mut weapon = Weapon::new(kind);
                     weapon.level = kind.max_level();
@@ -1547,7 +1561,7 @@ mod tests {
             assert!(!lo.weapons[0].evolved, "the evolution was forfeited");
             assert_eq!(format!("{:?}", lo.stats), from_scratch(lo));
 
-            // …and at the next hole the un-evolvable weapon is forfeitable too.
+            // …and at the next hole the new weapon is forfeitable too.
             w.open_shop(1);
             let back = molt_options(&w, OwnedKind::Weapon(0))[0];
             assert!(molt(&mut w, 1, OwnedKind::Weapon(0), back).is_ok());

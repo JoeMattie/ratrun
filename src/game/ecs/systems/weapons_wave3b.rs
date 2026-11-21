@@ -120,12 +120,18 @@ pub fn pulse_angle_offset(index: u32, pulses: u32) -> f32 {
 /// Resolve one Laser Eyes pulse: pierce every exposed body along the ray, then
 /// the boss's grounded hit shapes. Returns `(hits, beam length after the wall
 /// stop)`.
+///
+/// `ghost` is a **Carbon Copy** afterimage pulse: same geometry and the same
+/// ledger column, half the recorded damage (the caller passes it), amber
+/// dashed art instead of the live beam, and no sound — the copy is a negative,
+/// and two rasps per pulse would read as one louder weapon.
 #[allow(clippy::too_many_arguments)]
 fn laser_pulse(
     origin: Vec2,
     dir: Vec2,
     nominal: f32,
     dmg: f32,
+    ghost: bool,
     level: &Level,
     rng: &mut RngRes,
     particles: &mut Particles,
@@ -165,7 +171,11 @@ fn laser_pulse(
         let pos = e.pos;
         let enemy_radius = e.radius;
         let enemy_id = e.id;
-        vfx::emit_laser_hit(particles, &mut rng.0, pos, pos - origin, killed);
+        if ghost {
+            vfx::emit_carbon_copy_hit(particles, &mut rng.0, pos, pos - origin, killed);
+        } else {
+            vfx::emit_laser_hit(particles, &mut rng.0, pos, pos - origin, killed);
+        }
         damage_numbers.record(
             enemy_id,
             pos,
@@ -196,7 +206,11 @@ fn laser_pulse(
         }
         ledger.add_boss(kind, amount);
         let killed = boss.hp <= 0.0;
-        vfx::emit_laser_hit(particles, &mut rng.0, boss.pos, boss.pos - origin, killed);
+        if ghost {
+            vfx::emit_carbon_copy_hit(particles, &mut rng.0, boss.pos, boss.pos - origin, killed);
+        } else {
+            vfx::emit_laser_hit(particles, &mut rng.0, boss.pos, boss.pos - origin, killed);
+        }
         damage_numbers.record(
             boss.id,
             boss.pos,
@@ -208,9 +222,15 @@ fn laser_pulse(
         hits += 1;
     }
 
-    vfx::emit_laser_pulse(particles, &mut rng.0, origin, dir.angle(), len, hits);
-    // One zap per pulse: a burst is a short rattle of fire, not one shot.
-    sfx.0.push(Sfx::LaserEyes);
+    if ghost {
+        vfx::emit_carbon_copy_pulse(particles, &mut rng.0, origin, dir.angle(), len, hits);
+    } else {
+        vfx::emit_laser_pulse(particles, &mut rng.0, origin, dir.angle(), len, hits);
+    }
+    if !ghost {
+        // One zap per pulse: a burst is a short rattle of fire, not one shot.
+        sfx.0.push(Sfx::LaserEyes);
+    }
     (hits, len)
 }
 
@@ -247,7 +267,7 @@ pub fn laser_eyes_system(
 
     // 1. Charge (and trigger). Only one burst is in flight at a time, and a
     // burst is always shorter than its cycle, so a retrigger cannot overlap.
-    let mut trigger: Option<(u32, f32, f32)> = None; // (pulses, reach, dmg)
+    let mut trigger: Option<(u32, f32, f32, bool)> = None; // (pulses, reach, dmg, evolved)
     for w in player.loadout.weapons.iter_mut() {
         if w.kind != WeaponKind::LaserEyes {
             continue;
@@ -262,9 +282,10 @@ pub fn laser_eyes_system(
             w.laser_pulses().max(1),
             reach_mult * w.laser_reach(),
             w.damage() * dmg_mult,
+            w.evolved,
         ));
     }
-    if let Some((pulses, reach, dmg)) = trigger {
+    if let Some((pulses, reach, dmg, evolved)) = trigger {
         let facing = if player.face.len_sq() > 1e-4 {
             player.face.normalized()
         } else {
@@ -272,6 +293,14 @@ pub fn laser_eyes_system(
         };
         let origin = player.pos;
         let total = (pulses - 1) as f32 * LASER_PULSE_INTERVAL + LASER_TAIL;
+        // Carbon Copy: the sweep recorded at the end of the *previous* burst
+        // replays now, backwards, from its own origin and facing. One copy is
+        // kept, and a copy is never itself recorded (only a real sweep is).
+        let recorded = if evolved { fx.copy } else { None };
+        let copy_total = match recorded {
+            Some(copy) => (copy.pulses - 1) as f32 * LASER_PULSE_INTERVAL + LASER_TAIL,
+            None => 0.0,
+        };
         *fx = LaserFx {
             left: total,
             total,
@@ -285,9 +314,19 @@ pub fn laser_eyes_system(
             angle: facing.angle() + pulse_angle_offset(0, pulses),
             beam: 0.0,
             since_pulse: 0.0,
+            evolved,
+            copy: recorded,
+            copy_left: copy_total,
+            copy_age: 0.0,
+            copy_fired: 0,
         };
         shake.amount = shake.amount.max(0.9);
         vfx::emit_laser_muzzle(&mut particles, &mut rng.0, origin, facing);
+        if let Some(copy) = recorded {
+            // The negative's camera: an amber eye pair left where the recorded
+            // sweep fired from.
+            vfx::emit_carbon_copy_afterimage(&mut particles, &mut rng.0, copy.origin, copy.facing, copy.pulses);
+        }
     }
 
     // 2. Resolve this tick's pulses. `age` decides how many are owed; at 60 fps
@@ -308,6 +347,7 @@ pub fn laser_eyes_system(
                 dir,
                 fx.reach,
                 fx.dmg,
+                false,
                 &level,
                 &mut rng,
                 &mut particles,
@@ -325,10 +365,62 @@ pub fn laser_eyes_system(
         }
     }
 
+    // 3. The Carbon Copy afterimage on the same cadence, in **reverse**: its
+    // first pulse is the recorded sweep's last angle, so the two fans cross.
+    if fx.copy_active() {
+        let copy = fx.copy;
+        if let Some(copy) = copy {
+            fx.copy_age += dt;
+            let copy_due = ((fx.copy_age / LASER_PULSE_INTERVAL) as u32 + 1).min(copy.pulses);
+            if copy_due > fx.copy_fired {
+                let order: &[Entity] = stable_order(&index, &enemies, &mut fallback);
+                while fx.copy_fired < copy_due {
+                    // Backwards: the recorded sweep ran pulse 0 → n-1, so the
+                    // copy runs n-1 → 0.
+                    let slot = copy.pulses - 1 - fx.copy_fired;
+                    let offset = pulse_angle_offset(slot, copy.pulses);
+                    let dir = Vec2::from_angle(copy.facing.angle() + offset);
+                    laser_pulse(
+                        copy.origin,
+                        dir,
+                        copy.reach,
+                        copy.dmg * crate::game::ecs::systems::evolutions::CARBON_COPY_DAMAGE,
+                        true,
+                        &level,
+                        &mut rng,
+                        &mut particles,
+                        order,
+                        &mut enemies,
+                        &mut bosses,
+                        &mut damage_numbers,
+                        &mut ledger,
+                        &mut sfx,
+                    );
+                    fx.copy_fired += 1;
+                }
+                vfx::emit_carbon_copy_afterimage(
+                    &mut particles,
+                    &mut rng.0,
+                    copy.origin,
+                    copy.facing,
+                    copy.pulses,
+                );
+            }
+            fx.copy_left = (fx.copy_left - dt).max(0.0);
+        }
+    }
+
     fx.left = (fx.left - dt).max(0.0);
     if fx.left <= 0.0 {
-        // Done: the next trigger starts from a clean slate.
-        *fx = LaserFx::default();
+        // Done. A completed sweep is what the next burst's afterimage replays
+        // (Carbon Copy keeps exactly one); everything else starts clean.
+        // `fx.evolved` is the burst's own flag (the trigger tick is long gone
+        // by the time it completes).
+        let recorded = if fx.evolved { fx.copy_of_this_sweep() } else { None };
+        *fx = LaserFx {
+            copy: recorded,
+            ..LaserFx::default()
+        };
     }
 }
 
@@ -371,6 +463,12 @@ pub fn super_dash_system(
     // One sound for the whole dash, on its first leg.
     if track.legs == 1 {
         sfx.0.push(Sfx::SuperDash);
+    }
+    // Ripcord: the real travelled leg is kept for 0.6 s after the dash, so the
+    // evolution damages the route the rat actually took (a dash stopped by a
+    // wall records its short leg, exactly like the dash hit does).
+    if w.evolved {
+        track.extend_route(from, to);
     }
     vfx::emit_super_dash_comb(&mut particles, &mut rng.0, from, to, radius);
 

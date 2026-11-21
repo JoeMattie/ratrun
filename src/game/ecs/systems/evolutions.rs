@@ -15,6 +15,10 @@
 //! | Drain Cleaner (Acid Spit) | [`CorrosiveChannel`] built where the lob lands, ticked here |
 //! | Flywheel (Tail Thrash) | caught/flung inside `active_weapons_system` (`ActiveFx`) |
 //! | Roll Call (Sonic Squeak) | tags set in `squeak_ring`, answered in [`roll_call_system`] |
+//! | Downspout (Acid Rain) | drops placed in `fire_acid_rain`, landed in `acid_rain_system`, runoff is a [`CorrosiveChannel`] `gutter` |
+//! | Dead Letter (Hantavirus) | [`DeadLetterPacket`] sealed by `hantavirus_death_system`, reopened in [`dead_letter_system`] |
+//! | Carbon Copy (Laser Eyes) | `LaserFx::copy` recorded/replayed by `laser_eyes_system` |
+//! | Ripcord (Super Dash) | the taut route in `DashTrack`, ticked by [`ripcord_system`] |
 //!
 //! Rules the whole file keeps:
 //! - **Damage credits the original weapon** in `DamageLedger` (Flywheel books
@@ -36,50 +40,39 @@
 //!   the whip hit only"), so the hook and the swing skip elites, Brutes and
 //!   boss bodies. The other evolutions hit whatever their geometry covers.
 //!
-//! ## The four rows that arrive with their weapons
+//! ## The four wave-3 rows (and what each one is, exactly)
 //!
-//! **State after the wave-3 integration:** all four weapons and all four
-//! partner passives now exist, but none of these behaviours is implemented.
-//! `WeaponKind::evolution()` therefore returns `None` for Acid Rain,
-//! Hantavirus, Laser Eyes and Super Dash (asserted by
-//! `weapon::tests::every_weapon_has_its_design_row`), so no chest can evolve
-//! them, no card shows a partner note for them and `Weapon::evolved` stays
-//! false. To land a row: implement the behaviour behind `Weapon::evolved`, add
-//! the `Some(Evolution { .. })` arm in `game/weapon.rs`, move the kind out of
-//! that test's `pending` list, and chain any new system in slot 16b of
-//! `schedule.rs` (before `hantavirus_death_system`). The row text is the
-//! contract from `WAVE3_DESIGN.md` §3, copied here so the follow-up worker does
-//! not have to go looking.
+//! All twelve design rows are live; these four arrived with their weapons.
+//! Each keeps the weapon's timing family, credits `DamageLedger` to the base
+//! weapon and draws no rng in a run that does not wear it.
 //!
-//! - **Downspout** — `Acid Rain + Long Fuse` (`PassiveKind::LongFuse`).
-//!   "Replace separate splashes with a marching gutter. Strike the first marked
-//!   target, then step each remaining drop 10 px toward the rat along the same
-//!   line. Leave 1 s of burning runoff." Hook: `weapons_wave3a::fire_acid_rain`
-//!   (called from `weapons::fire_one`'s Acid Rain arm, which already has
-//!   `evolved` in scope) decides the `AcidDrop` positions; the landing is
-//!   `weapons_wave3a::acid_rain_system`. The runoff can reuse
-//!   [`CorrosiveChannel`]. Inscription: "The leak has found the stairs."
-//! - **Dead Letter** — `Hantavirus + Second Scent` (`PassiveKind::SecondScent`).
-//!   "A host dying with jumps left leaves a sealed packet for 2 s. The first
-//!   eligible foe within 10 px opens it and resumes the chain. One packet per
-//!   chain." Hook: the chain state is the `Infection` component (plus the
-//!   `BossVirus` resource); `weapons_wave3a::hantavirus_death_system` is where
-//!   a dying host hands its jumps on, so the packet is spawned there when no
-//!   neighbour is in reach, and a small system here ticks its 2 s fuse.
-//!   Inscription: "Return to sender."
-//! - **Carbon Copy** — `Laser Eyes + Lens Cap` (`PassiveKind::LensCap`).
-//!   "Record the facing and origin of a completed sweep. On the next sweep a
-//!   fixed afterimage at that spot repeats it backwards for half damage. Keep
-//!   one copy." Hook: `weapons_wave3b::laser_eyes_system` and its `LaserFx`
-//!   resource — store one `(origin, facing, pulses)` slot there and replay the
-//!   mirrored sweep at half damage. Inscription: "The camera kept a negative."
-//! - **Ripcord** — `Super Dash + Spring Heel` (`PassiveKind::SpringHeel`).
-//!   "After the dash, its actual route stays taut for 0.6 s, then snaps.
-//!   Enemies on it take one dash hit and slide 8 px toward the departure point.
-//!   Bosses take damage only." Hook: `weapons_wave3b::super_dash_system` and
-//!   its `DashTrack` resource already hold the travelled segments; keep them
-//!   with a 0.6 s fuse (distance-to-segment test, one hit per body, plus an
-//!   8 px slide toward the start). Inscription: "The tail was the fuse."
+//! - **Downspout** — `Acid Rain + Long Fuse`. "Replace separate splashes with a
+//!   marching gutter. Strike the first marked target, then step each remaining
+//!   drop 10 px toward the rat along the same line. Leave 1 s of burning
+//!   runoff." `weapons_wave3a::fire_acid_rain` marks **one** foe and walks the
+//!   rest of the volley back along the marking line ([`DOWNSPOUT_STEP`] apart);
+//!   every drop still splashes on landing, and the last landing leaves a
+//!   [`CorrosiveChannel::gutter`] stripe spanning the walk for
+//!   [`RUNOFF_SECS`] (×Long Fuse). Its art is a stepped green staircase.
+//! - **Dead Letter** — `Hantavirus + Second Scent`. "A host dying with jumps
+//!   left leaves a sealed packet for 2 s. The first eligible foe within 10 px
+//!   opens it and resumes the chain. One packet per chain."
+//!   `weapons_wave3a::hantavirus_death_system` seals the envelope when a dying
+//!   host finds no neighbour in reach; [`dead_letter_system`] ticks the fuse and
+//!   hands the chain to the first eligible body ([`Infection::can_seal`] is set
+//!   by the tag, [`Infection::sealed`] enforces one packet per chain).
+//! - **Carbon Copy** — `Laser Eyes + Lens Cap`. "Record the facing and origin of
+//!   a completed sweep. On the next sweep a fixed afterimage at that spot
+//!   repeats it backwards for half damage. Keep one copy." `LaserFx` keeps the
+//!   recorded sweep and the replay state; `weapons_wave3b::laser_eyes_system`
+//!   fires the afterimage's pulses in reverse order at
+//!   [`CARBON_COPY_DAMAGE`] × the recorded damage.
+//! - **Ripcord** — `Super Dash + Spring Heel`. "After the dash, its actual route
+//!   stays taut for 0.6 s, then snaps. Enemies on it take one dash hit and slide
+//!   8 px toward the departure point. Bosses take damage only." `super_dash_system`
+//!   records each travelled leg into `DashTrack`; [`ripcord_system`] runs the
+//!   taut window ([`RIPCORD_SECS`]): one dash hit and an [`RIPCORD_SLIDE`] px
+//!   pull toward the departure point per body, damage only on boss hit shapes.
 
 // Systems mirror the legacy signature style (one resource per argument); the
 // file is the evolution module's whole schedule section.
@@ -89,11 +82,15 @@ use bevy_ecs::prelude::*;
 
 use crate::game::bullet::Faction;
 use crate::game::ecs::components::{
-    CheeseString, CorrosiveChannel, FairyRing, MilkPhase, MilkTooth, SpawnId,
+    CheeseString, CorrosiveChannel, DeadLetterPacket, FairyRing, Infection, MilkPhase, MilkTooth,
+    SpawnId,
 };
 use crate::game::ecs::resources::{
-    ActiveFx, DamageLedger, EnemyIndex, RngRes, TickInput, FLYWHEEL_CAP, ROLL_CALL_TAG_CAP,
+    ActiveFx, DamageLedger, DashTrack, EnemyIndex, RngRes, TickInput, FLYWHEEL_CAP,
+    RIPCORD_SECS, ROLL_CALL_TAG_CAP,
 };
+use crate::game::ecs::systems::boss::Boss;
+use crate::game::ecs::systems::projectiles::los_clear;
 #[cfg(debug_assertions)]
 use crate::game::ecs::resources::debug_assert_enemy_index;
 use crate::game::enemy::Enemy;
@@ -140,8 +137,9 @@ pub const FAIRY_RADIUS: f32 = 26.0;
 
 /// Seconds the Drain Cleaner's splash takes to run the whole stripe.
 pub const CHANNEL_ADVANCE: f32 = 0.6;
-/// Seconds the settled stripe keeps ticking after that.
-pub const CHANNEL_SETTLE: f32 = 2.0;
+/// Seconds the settled stripe keeps ticking after that (Long Fuse stretches it
+/// per tick, never at spawn time).
+pub const CHANNEL_SETTLE: f32 = crate::game::ecs::components::CHANNEL_DEFAULT_SETTLE;
 /// Total stripe length and half width ("a 36 × 6 px corrosive channel").
 pub const CHANNEL_LEN: f32 = 36.0;
 pub const CHANNEL_HALF_W: f32 = 3.0;
@@ -157,6 +155,31 @@ pub const ROLL_CALL_MAX_ANSWERS: u8 = 3;
 pub const FLYWHEEL_PER_SWEEP: u8 = 2;
 /// Speed a flung pellet leaves the tail at.
 pub const FLYWHEEL_FLING_SPEED: f32 = 150.0;
+
+/// **Downspout**: how far each drop steps back toward the rat (design §3).
+pub const DOWNSPOUT_STEP: f32 = 10.0;
+/// **Downspout**: seconds the gutter's runoff keeps burning (×Long Fuse).
+pub const RUNOFF_SECS: f32 = 1.0;
+/// **Downspout**: runoff damage per second, as a multiple of one splash. One
+/// second of runoff is worth ~1.6 splashes, split into the stripe's ticks.
+pub const RUNOFF_DPS: f32 = 1.6;
+/// **Downspout**: shortest runoff stripe worth laying (a two-drop gutter).
+pub const RUNOFF_MIN_LEN: f32 = 4.0;
+
+/// **Dead Letter**: seconds a sealed packet waits on the floor (design §3).
+pub const DEAD_LETTER_SECS: f32 = 2.0;
+/// **Dead Letter**: how close a foe must come to tear the envelope open.
+pub const DEAD_LETTER_REACH: f32 = 10.0;
+/// Line-of-sight radius for the packet's open test (the same friendly-geometry
+/// radius the virus chain uses for its jumps).
+pub const DEAD_LETTER_LOS_RADIUS: f32 = 1.0;
+
+/// **Carbon Copy**: the afterimage deals this fraction of the recorded pulse.
+pub const CARBON_COPY_DAMAGE: f32 = 0.5;
+
+/// **Ripcord**: how far the taut route pulls a body back toward the departure
+/// point (design §3: "slide 8 px toward the departure point").
+pub const RIPCORD_SLIDE: f32 = 8.0;
 
 // ---- Stable enemy order ---------------------------------------------------
 
@@ -332,7 +355,7 @@ pub fn milk_teeth_system(
                     dart.phase = MilkPhase::Lodged;
                     dart.age = 0.0;
                     dart.vel = Vec2::ZERO;
-                } else if stopped || dart.age * MILK_SPEED >= MILK_REACH {
+                } else if stopped || dart.age * MILK_SPEED >= dart.reach {
                     dart.pos = end;
                     dart.phase = MilkPhase::Lodged;
                     dart.age = 0.0;
@@ -541,14 +564,20 @@ pub fn fairy_ring_system(
 
 // ---- Drain Cleaner --------------------------------------------------------
 
-/// Truncate a channel at the first wall along its direction ("stop at
-/// masonry"). Called where the splash lands (`projectiles::bullets_system`).
-pub fn channel_length(level: &Level, start: Vec2, dir: Vec2) -> f32 {
-    let end = start + dir * CHANNEL_LEN;
+/// Truncate a stripe of `nominal` px at the first wall along its direction
+/// ("stop at masonry").
+pub fn channel_open_len(level: &Level, start: Vec2, dir: Vec2, nominal: f32) -> f32 {
+    let end = start + dir * nominal;
     match level.tiles.segment_hit(start, end, CHANNEL_HALF_W) {
-        Some(t) => (CHANNEL_LEN * t).max(4.0),
-        None => CHANNEL_LEN,
+        Some(t) => (nominal * t).max(4.0),
+        None => nominal,
     }
+}
+
+/// Truncate a Drain Cleaner channel at the first wall along its direction ("stop
+/// at masonry"). Called where the splash lands (`projectiles::bullets_system`).
+pub fn channel_length(level: &Level, start: Vec2, dir: Vec2) -> f32 {
+    channel_open_len(level, start, dir, CHANNEL_LEN)
 }
 
 /// Is `pos` inside the stripe open after `open_len` px?
@@ -563,6 +592,8 @@ fn in_stripe(start: Vec2, dir: Vec2, open_len: f32, pos: Vec2, radius: f32) -> b
 pub fn drain_cleaner_system(
     mut commands: Commands,
     input: Res<TickInput>,
+    level: Res<Level>,
+    player: Res<Player>,
     index: Res<EnemyIndex>,
     mut rng: ResMut<RngRes>,
     mut particles: ResMut<Particles>,
@@ -576,6 +607,11 @@ pub fn drain_cleaner_system(
     let dt = input.dt;
     let order = enemy_order(&index, &enemies, &mut fallback);
     let kind = WeaponKind::AcidSpit;
+    // The wave-3 passive hooks the *unevolved* Acid Spit already honours, read
+    // here so the evolved stripe honours them the same way: Lens Cap stretches
+    // the 36 px stripe (then masonry truncates it again), Long Fuse stretches
+    // the settled 2 s (and, for a Downspout runoff, its 1 s).
+    let stats = player.loadout.stats;
 
     channel_order.clear();
     channel_order.extend(channels.iter().map(|(entity, id, _)| (id.0, entity)));
@@ -586,10 +622,16 @@ pub fn drain_cleaner_system(
             continue;
         };
         ch.age += dt;
-        if ch.age <= CHANNEL_ADVANCE {
+        // A Downspout gutter is Acid Rain's own runoff: its damage is credited
+        // to the original weapon (§3), not to Acid Spit.
+        let kind = if ch.runoff { WeaponKind::AcidRain } else { kind };
+        let open = channel_open_len(&level, ch.start, ch.dir, stats.ranged_reach(ch.length));
+        let advance = if ch.runoff { 0.0 } else { CHANNEL_ADVANCE };
+        let settle = stats.zone_life(ch.settle);
+        if ch.age <= advance {
             // The splash is still running: everything the open stripe covers
             // takes one front hit, once per body.
-            let open_len = ch.length * (ch.age / CHANNEL_ADVANCE).clamp(0.0, 1.0);
+            let open_len = open * (ch.age / advance).clamp(0.0, 1.0);
             for &enemy in order.iter() {
                 let Ok((_, id, mut e)) = enemies.get_mut(enemy) else {
                     continue;
@@ -622,7 +664,7 @@ pub fn drain_cleaner_system(
                 if !e.alive() {
                     continue;
                 }
-                if in_stripe(ch.start, ch.dir, ch.length, e.pos, e.radius) {
+                if in_stripe(ch.start, ch.dir, open, e.pos, e.radius) {
                     let hp_before = e.hp.max(0.0);
                     // Directional armour, as `projectiles::pools_system`
                     // does it: the runoff arrives from the nearest point of
@@ -647,18 +689,297 @@ pub fn drain_cleaner_system(
                 }
             }
         }
-        let front = ch.length * (ch.age / CHANNEL_ADVANCE).clamp(0.0, 1.0);
-        vfx::emit_drain_channel(
-            &mut particles,
-            &mut rng.0,
-            ch.start,
-            ch.dir,
-            front,
-            ch.age,
-            dt,
-        );
-        if ch.age >= CHANNEL_ADVANCE + CHANNEL_SETTLE {
+        let front = if advance > 0.0 {
+            open * (ch.age / advance).clamp(0.0, 1.0)
+        } else {
+            open
+        };
+        if ch.runoff {
+            // Downspout: the stripe is a stepped green gutter, already settled.
+            let life_frac = 1.0 - (ch.age / settle.max(1e-4)).clamp(0.0, 1.0);
+            vfx::emit_downspout_runoff(
+                &mut particles,
+                &mut rng.0,
+                ch.start,
+                ch.dir,
+                front,
+                life_frac,
+                dt,
+            );
+        } else {
+            vfx::emit_drain_channel(
+                &mut particles,
+                &mut rng.0,
+                ch.start,
+                ch.dir,
+                front,
+                ch.age,
+                dt,
+            );
+        }
+        if ch.age >= advance + settle {
             commands.entity(entity).despawn();
+        }
+    }
+}
+
+// ---- Dead Letter ----------------------------------------------------------
+
+/// Tick every sealed **Dead Letter** packet: count the fuse down, draw the
+/// envelope, and let the first eligible foe that steps within
+/// [`DEAD_LETTER_REACH`] tear it open and resume the chain inside.
+///
+/// Eligibility is the chain's own rule (alive, not already visited by this
+/// chain, no active mark, a clear line), which is why a reopened chain can
+/// never walk the same body twice. Packets are walked in `SpawnId` order and a
+/// body an earlier packet claimed this tick is skipped, so two envelopes in one
+/// spot cannot both open on the same body.
+pub fn dead_letter_system(
+    mut commands: Commands,
+    input: Res<TickInput>,
+    level: Res<Level>,
+    index: Res<EnemyIndex>,
+    mut rng: ResMut<RngRes>,
+    mut particles: ResMut<Particles>,
+    enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
+    infected: Query<&Infection>,
+    mut packets: Query<(Entity, &SpawnId, &mut DeadLetterPacket)>,
+    mut fallback: Local<Vec<Entity>>,
+    mut packet_order: Local<Vec<(u64, Entity)>>,
+    mut claimed: Local<Vec<Entity>>,
+) {
+    // Cheap early out: no envelope on the floor, no rng, no walk.
+    if packets.is_empty() {
+        return;
+    }
+    let dt = input.dt;
+    let order = enemy_order(&index, &enemies, &mut fallback);
+
+    packet_order.clear();
+    packet_order.extend(packets.iter().map(|(entity, id, _)| (id.0, entity)));
+    packet_order.sort_unstable_by_key(|&(id, _)| id);
+    claimed.clear();
+
+    for &(_, entity) in packet_order.iter() {
+        let Ok((_, _, mut packet)) = packets.get_mut(entity) else {
+            continue;
+        };
+        packet.life -= dt;
+        let pos = packet.pos;
+        if packet.life <= 0.0 {
+            // Unopened: the chain is lost with the envelope.
+            commands.entity(entity).despawn();
+            vfx::emit_dead_letter_fizzle(&mut particles, &mut rng.0, pos);
+            continue;
+        }
+        let life_frac = (packet.life / packet.total.max(1e-4)).clamp(0.0, 1.0);
+        vfx::emit_dead_letter_sealed(&mut particles, &mut rng.0, pos, life_frac);
+
+        // The first eligible foe within reach opens it (enemy order, so the
+        // nearest-in-`SpawnId` body wins a tie).
+        let chain = packet.chain;
+        let mut opener: Option<(u64, Entity)> = None;
+        for &host in order.iter() {
+            let Ok((_, id, e)) = enemies.get(host) else {
+                continue;
+            };
+            if !e.alive() || claimed.contains(&host) || e.pos.dist(pos) > DEAD_LETTER_REACH {
+                continue;
+            }
+            if infected.get(host).is_ok_and(|i| i.active()) || chain.has_visited(id.0) {
+                continue;
+            }
+            if !los_clear(&level, pos, e.pos, DEAD_LETTER_LOS_RADIUS) {
+                continue;
+            }
+            opener = Some((id.0, host));
+            break;
+        }
+        let Some((id, target)) = opener else {
+            continue;
+        };
+        let Some(next) = chain.jumped(id) else {
+            // Fixed history full: the chain ends rather than allocate.
+            commands.entity(entity).despawn();
+            vfx::emit_dead_letter_tear(&mut particles, &mut rng.0, pos);
+            continue;
+        };
+        commands.entity(target).insert(next);
+        claimed.push(target);
+        commands.entity(entity).despawn();
+        let to = enemies
+            .get(target)
+            .map(|(_, _, e)| e.pos)
+            .unwrap_or(pos);
+        vfx::emit_dead_letter_tear(&mut particles, &mut rng.0, pos);
+        vfx::emit_virus_jump(&mut particles, &mut rng.0, pos, to);
+    }
+}
+
+// ---- Ripcord -------------------------------------------------------------
+
+/// Run a **Ripcord** cord: the route a finished dash travelled stays taut for
+/// [`RIPCORD_SECS`], damaging every body on it once and dragging it
+/// [`RIPCORD_SLIDE`] px back toward where the dash left from; then it snaps.
+///
+/// The cord is only built while the weapon is owned *and* evolved
+/// (`weapons_wave3b::super_dash_system` records the legs), so a run without the
+/// evolution reaches the early return below: no walk, no rng, no value written.
+/// Damage uses the dash's own numbers (the weapon's per-level hit after stats)
+/// and books `SuperDash` in the ledger. Bosses take the damage only — the slide
+/// is what the cord does to bodies it can drag, and a boss cannot be dragged.
+pub fn ripcord_system(
+    level: Res<Level>,
+    player: Res<Player>,
+    input: Res<TickInput>,
+    index: Res<EnemyIndex>,
+    mut rng: ResMut<RngRes>,
+    mut particles: ResMut<Particles>,
+    mut damage_numbers: ResMut<DamageNumbers>,
+    mut ledger: ResMut<DamageLedger>,
+    mut track: ResMut<DashTrack>,
+    mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
+    mut bosses: Query<&mut Boss>,
+    mut fallback: Local<Vec<Entity>>,
+) {
+    if track.route_life <= 0.0 || track.route_len() == 0 {
+        return;
+    }
+    // The cord is the evolution of a weapon the player must still hold.
+    let Some(weapon) = player
+        .loadout
+        .weapons
+        .iter()
+        .find(|w| w.kind == WeaponKind::SuperDash && w.evolved)
+    else {
+        track.clear_route();
+        return;
+    };
+    let dt = input.dt;
+    let radius = weapon.dash_radius();
+    let dmg = weapon.damage() * player.loadout.stats.damage_mult;
+    let kind = WeaponKind::SuperDash;
+    let taut = track.segment.is_none();
+    let start = track.route_start();
+    let legs = track.route_len();
+
+    if taut {
+        let order = enemy_order(&index, &enemies, &mut fallback);
+        for &entity in order.iter() {
+            let Ok((_, id, mut e)) = enemies.get_mut(entity) else {
+                continue;
+            };
+            if !e.alive() || track.route_already_hit(id.0) {
+                continue;
+            }
+            let mut on_route = false;
+            for i in 0..legs {
+                let (a, b) = track.route_segment(i);
+                if crate::game::collision::segment_circle_hit(a, b, radius, e.pos, e.radius) {
+                    on_route = true;
+                    break;
+                }
+            }
+            if !on_route {
+                continue;
+            }
+            track.mark_route_hit(id.0);
+            let pos = e.pos;
+            let back = start - pos;
+            // Directional armour: the snap travels along the cord toward the
+            // departure point, so it strikes a body from the side away from
+            // it (a Pillbug curled with its shell to the far end of the dash
+            // takes the quarter, one with its back to it takes the double).
+            let from = if back.len_sq() > 0.25 {
+                pos - back.normalized() * (e.radius + 1.0)
+            } else {
+                pos
+            };
+            let killed = hit_body(
+                &mut e,
+                dmg,
+                from,
+                kind,
+                &mut ledger,
+                &mut damage_numbers,
+                DamageSource::Normal,
+            );
+            // The cord pulls the body back toward where the dash started, on
+            // legal floor (a wall is not where a rat's tail can drag you).
+            // "Bosses take damage only" (§3) covers every body a cord cannot
+            // drag: the legacy boss kind and a named miniboss keep their feet.
+            let dragged = !e.named && e.kind != crate::game::enemy::EnemyKind::Boss;
+            if dragged && back.len_sq() > 0.25 {
+                let shifted = pos + back.normalized() * RIPCORD_SLIDE;
+                e.pos = level.tiles.resolve_circle(
+                    shifted,
+                    e.radius,
+                    crate::game::collision::SizeClass::Small,
+                    None,
+                );
+            }
+            vfx::emit_ripcord_hit(&mut particles, &mut rng.0, pos, back, killed);
+        }
+
+        // Bosses take the damage only (design §3).
+        if !track.route_boss_hit {
+            for mut boss in bosses.iter_mut() {
+                if boss.dead {
+                    continue;
+                }
+                let shapes = boss.hit_shapes();
+                if shapes.iter().next().is_none() {
+                    continue;
+                }
+                let mut touched = false;
+                for i in 0..legs {
+                    let (a, b) = track.route_segment(i);
+                    if shapes.segment_hits_grounded(a, b, radius) {
+                        touched = true;
+                        break;
+                    }
+                }
+                if !touched {
+                    continue;
+                }
+                // The flag only matters on the first boss the cord meets, and
+                // there is one boss per fight.
+                track.route_boss_hit = true;
+                let amount = dmg * boss.damage_mult;
+                if !boss.take_damage(amount) {
+                    continue;
+                }
+                ledger.add_boss(kind, amount);
+                let killed = boss.hp <= 0.0;
+                vfx::emit_ripcord_hit(
+                    &mut particles,
+                    &mut rng.0,
+                    boss.pos,
+                    boss.pos - start,
+                    killed,
+                );
+                damage_numbers.record(
+                    boss.id,
+                    boss.pos,
+                    boss.kind.body_radius(),
+                    amount,
+                    killed,
+                    DamageSource::Normal,
+                );
+            }
+        }
+    }
+
+    // Draw the cord while it is taut, then let the fuse run out. The legs are
+    // the dash's own route, so the cord is exactly what was travelled.
+    let frac = (track.route_life / RIPCORD_SECS).clamp(0.0, 1.0);
+    vfx::emit_ripcord_cord(&mut particles, &mut rng.0, track.route(), frac, start);
+    if taut {
+        track.route_life -= dt;
+        if track.route_life <= 0.0 {
+            // The fuse burns out: the cord snaps back to the rat's tail.
+            vfx::emit_ripcord_snap(&mut particles, &mut rng.0, track.route(), start);
+            track.clear_route();
         }
     }
 }
@@ -808,9 +1129,10 @@ mod tests {
     use crate::game::bullet::Bullet;
     use crate::game::collision::TileKind;
     use crate::game::ecs::components::{
-        EchoSpoke, CHANNEL_HIT_CAP, FAIRY_TRACK_CAP, MILK_BITE_CAP, STRING_CUT_CAP,
+        AcidDrop, EchoSpoke, CHANNEL_HIT_CAP, FAIRY_TRACK_CAP, MILK_BITE_CAP, STRING_CUT_CAP,
     };
-    use crate::game::ecs::resources::spawn_with_id;
+    use crate::game::ecs::resources::{spawn_with_id, EvoRuntime, LaserFx};
+    use crate::game::weapon::LASER_SWEEP_HALF;
     use crate::game::enemy::EnemyKind;
     use crate::game::level::Theme;
     use crate::game::loadout::Loadout;
@@ -1221,6 +1543,523 @@ mod tests {
         assert_eq!(w.active_fx().tag_n, 0, "the tags are spent");
     }
 
+    // ---- The four wave-3 evolutions ------------------------------------
+
+    /// Every live Acid Rain drop, in `SpawnId` (volley) order.
+    fn rain_drops(w: &mut World) -> Vec<AcidDrop> {
+        let mut q = w.ecs.query::<(&SpawnId, &AcidDrop)>();
+        let mut v: Vec<(u64, AcidDrop)> = q.iter(&w.ecs).map(|(id, d)| (id.0, *d)).collect();
+        v.sort_unstable_by_key(|&(id, _)| id);
+        v.into_iter().map(|(_, d)| d).collect()
+    }
+
+    /// Every sealed Dead Letter packet's position, in `SpawnId` order.
+    fn letters(w: &mut World) -> Vec<Vec2> {
+        let mut q = w.ecs.query::<(&SpawnId, &DeadLetterPacket)>();
+        let mut v: Vec<(u64, Vec2)> = q.iter(&w.ecs).map(|(id, l)| (id.0, l.pos)).collect();
+        v.sort_unstable_by_key(|&(id, _)| id);
+        v.into_iter().map(|(_, p)| p).collect()
+    }
+
+    fn mark_of(w: &World, entity: Entity) -> Option<Infection> {
+        w.ecs.get::<Infection>(entity).copied()
+    }
+
+    /// **Downspout**: the volley marks one foe and then *walks* the rest of its
+    /// drops back along the marking line, 10 px at a time; the last landing
+    /// leaves 1 s of burning runoff.
+    #[test]
+    fn downspout_marches_its_gutter_home_and_leaves_runoff() {
+        use crate::game::ecs::systems::{weapons, weapons_wave3a};
+        let mut w = evolved_world(WeaponKind::AcidRain);
+        // L3: three drops.
+        w.player.loadout.weapons[0].level = 3;
+        let origin = w.player.pos;
+        let body = w.spawn_enemy(EnemyKind::Brute, origin + Vec2::new(24.0, 0.0), 400.0);
+        let hp0 = hp_of(&w, body);
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.player.loadout.weapons[0].timer = 0.0;
+        run(&mut w, weapons::fire_weapons_system);
+
+        let drops = rain_drops(&mut w);
+        assert_eq!(drops.len(), 3, "L3 fires three drops");
+        assert!(drops.iter().all(|d| d.evolved), "the gutter is an evolved volley");
+        // One mark, then steps of 10 px back toward the rat along the same line.
+        let offsets: Vec<f32> = drops.iter().map(|d| d.pos.x - origin.x).collect();
+        assert!((offsets[0] - 24.0).abs() < 1.0, "the mark is the target: {offsets:?}");
+        for pair in offsets.windows(2) {
+            let step = pair[0] - pair[1];
+            assert!(
+                (step - DOWNSPOUT_STEP).abs() < 1e-3 || pair[1] <= 4.0 + 1e-3,
+                "each drop steps 10 px home: {offsets:?}"
+            );
+        }
+        assert!(offsets[2] < offsets[0], "the gutter marches toward the rat");
+
+        // Land them all: every drop splashes, then the gutter's runoff appears.
+        let mut saw_runoff = false;
+        for _ in 0..60 {
+            run(&mut w, weapons_wave3a::acid_rain_system);
+            if !saw_runoff {
+                let mut q = w.ecs.query::<&CorrosiveChannel>();
+                if let Some(ch) = q.iter(&w.ecs).next() {
+                    assert!(ch.runoff, "the gutter's stripe is a runoff, not a channel");
+                    assert!((ch.settle - RUNOFF_SECS).abs() < 1e-5);
+                    assert!((ch.length - 20.0).abs() < 1.0, "spans the walk: {}", ch.length);
+                    assert!((ch.dir.x - 1.0).abs() < 1e-4, "laid along the march line");
+                    saw_runoff = true;
+                }
+            }
+        }
+        assert!(saw_runoff, "the finished gutter must leave a runoff");
+        let burnt = hp_of(&w, body);
+        assert!(burnt < hp0, "the gutter's splashes hit the marked body");
+
+        // The runoff keeps burning the stripe for ~1 s, then dries out.
+        for _ in 0..20 {
+            run(&mut w, drain_cleaner_system);
+        }
+        assert!(hp_of(&w, body) < burnt, "the runoff burns what stands on it");
+        let mut gone = false;
+        for tick in 0..90 {
+            run(&mut w, drain_cleaner_system);
+            if w.ecs.query::<&CorrosiveChannel>().iter(&w.ecs).count() == 0 {
+                assert!(tick > 20, "the runoff cannot dry instantly");
+                gone = true;
+                break;
+            }
+        }
+        assert!(gone, "1 s of runoff and no more");
+    }
+
+    /// **Dead Letter**: a chain whose host dies isolated seals into a packet;
+    /// the first foe to step within 10 px reopens it and walks on; one packet
+    /// per chain, so the reopened chain that dies isolated simply ends.
+    #[test]
+    fn dead_letter_seals_an_isolated_chain_and_reopens_it_once() {
+        use crate::game::ecs::systems::{weapons, weapons_wave3a};
+        let mut w = evolved_world(WeaponKind::Hantavirus);
+        w.player.loadout.weapons[0].level = 3; // 2 jumps, 18 px reach
+        let origin = w.player.pos;
+        let host = w.spawn_enemy(EnemyKind::Brute, origin + Vec2::new(12.0, 0.0), 400.0);
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.player.loadout.weapons[0].timer = 0.0;
+        run(&mut w, weapons::fire_weapons_system);
+        let mark = mark_of(&w, host).expect("the evolved tag plants a chain");
+        assert!(mark.can_seal, "an evolved tag may seal");
+        assert_eq!(mark.jumps_left, 2);
+
+        // Killed with jumps left and nobody in reach: it seals instead of dying.
+        w.ecs.get_mut::<Enemy>(host).unwrap().hp = 0.0;
+        run(&mut w, weapons_wave3a::hantavirus_death_system);
+        let packets = letters(&mut w);
+        assert_eq!(packets.len(), 1, "the isolated chain must seal a packet");
+        assert!(
+            packets[0].dist(origin + Vec2::new(12.0, 0.0)) < 0.5,
+            "the envelope lies where the host died"
+        );
+
+        // A body steps up to the envelope: it tears open and the chain resumes.
+        let opener = w.spawn_enemy(EnemyKind::Brute, packets[0] + Vec2::new(5.0, 0.0), 400.0);
+        run(&mut w, dead_letter_system);
+        assert!(letters(&mut w).is_empty(), "the packet is spent on opening");
+        let resumed = mark_of(&w, opener).expect("the chain resumes on the opener");
+        assert_eq!(resumed.ticks_left, crate::game::weapon::VIRUS_TICKS);
+        assert_eq!(resumed.jumps_left, 1, "the reopen spent one jump");
+        assert!(resumed.has_visited(mark.visits[0]), "the walk keeps its history");
+
+        // That host dies isolated too: the chain has already sealed once.
+        w.ecs.get_mut::<Enemy>(opener).unwrap().hp = 0.0;
+        run(&mut w, weapons_wave3a::hantavirus_death_system);
+        assert!(
+            letters(&mut w).is_empty(),
+            "design §3: one packet per chain"
+        );
+    }
+
+    /// A packet nobody opens is lost after its 2 s fuse (and draws no packet
+    /// art afterwards).
+    #[test]
+    fn dead_letter_packets_expire_after_their_fuse() {
+        use crate::game::ecs::systems::{weapons, weapons_wave3a};
+        let mut w = evolved_world(WeaponKind::Hantavirus);
+        let origin = w.player.pos;
+        let host = w.spawn_enemy(EnemyKind::Brute, origin + Vec2::new(12.0, 0.0), 400.0);
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.player.loadout.weapons[0].timer = 0.0;
+        run(&mut w, weapons::fire_weapons_system);
+        w.ecs.get_mut::<Enemy>(host).unwrap().hp = 0.0;
+        run(&mut w, weapons_wave3a::hantavirus_death_system);
+        assert_eq!(letters(&mut w).len(), 1);
+        // Nobody comes: hold the fuse.
+        let ticks = (DEAD_LETTER_SECS * 60.0) as usize;
+        for _ in 0..ticks / 2 {
+            run(&mut w, dead_letter_system);
+        }
+        assert_eq!(letters(&mut w).len(), 1, "the envelope still waits");
+        for _ in 0..ticks {
+            run(&mut w, dead_letter_system);
+        }
+        assert!(letters(&mut w).is_empty(), "an unopened packet is lost");
+        assert_eq!(
+            w.ecs.query::<&Infection>().iter(&w.ecs).filter(|i| i.active()).count(),
+            0,
+            "no chain came back from the lost envelope"
+        );
+    }
+
+    /// **Carbon Copy**: the previous sweep replays from its own origin, in
+    /// reverse, at half damage — and only one copy is kept.
+    #[test]
+    fn carbon_copy_replays_the_last_sweep_backwards_at_half_damage() {
+        use crate::game::ecs::systems::weapons_wave3b;
+        let mut w = evolved_world(WeaponKind::LaserEyes); // L5: 5 pulses, 54 px, 10 dmg
+        let origin = w.player.pos;
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.player.loadout.weapons[0].timer = 0.0;
+        // Burst 1: nobody in the sweep, so it only records the geometry.
+        let mut ticks = 0;
+        loop {
+            run(&mut w, weapons_wave3b::laser_eyes_system);
+            ticks += 1;
+            let fx = *w.ecs.resource::<LaserFx>();
+            if ticks > 1 && !fx.active() {
+                break;
+            }
+            assert!(ticks < 120, "the burst never ended");
+        }
+        let recorded = w.ecs.resource::<LaserFx>().copy.expect("a completed sweep is kept");
+        assert!((recorded.origin.x - origin.x).abs() < 1e-4);
+        assert!((recorded.facing.x - 1.0).abs() < 1e-4);
+
+        // The rat turns and walks away; the afterimage stays where it fired from.
+        w.player.pos = origin + Vec2::new(0.0, 30.0);
+        w.player.face = Vec2::new(0.0, 1.0);
+        // Two bodies on the recorded fan's outer edges, 40 px from its origin
+        // (only the matching pulse can reach either).
+        let a = w.spawn_enemy(
+            EnemyKind::Cat,
+            origin + Vec2::from_angle(LASER_SWEEP_HALF) * 40.0,
+            400.0,
+        );
+        let b = w.spawn_enemy(
+            EnemyKind::Cat,
+            origin + Vec2::from_angle(-LASER_SWEEP_HALF) * 40.0,
+            400.0,
+        );
+        let (a0, b0) = (hp_of(&w, a), hp_of(&w, b));
+        w.player.loadout.weapons[0].timer = 0.0;
+        let mut a_tick: Option<usize> = None;
+        let mut b_tick: Option<usize> = None;
+        for tick in 0..120 {
+            run(&mut w, weapons_wave3b::laser_eyes_system);
+            if a_tick.is_none() && hp_of(&w, a) < a0 {
+                a_tick = Some(tick);
+            }
+            if b_tick.is_none() && hp_of(&w, b) < b0 {
+                b_tick = Some(tick);
+            }
+            if tick > 2 && !w.ecs.resource::<LaserFx>().active() {
+                break;
+            }
+        }
+        // Half of one 10-damage pulse.
+        let half = 10.0 * CARBON_COPY_DAMAGE;
+        assert!((a0 - hp_of(&w, a) - half).abs() < 0.01, "the copy deals half: {}", a0 - hp_of(&w, a));
+        assert!((b0 - hp_of(&w, b) - half).abs() < 0.01, "the copy deals half: {}", b0 - hp_of(&w, b));
+        // Backwards: the recorded sweep ran -35° → +35°, so the copy catches the
+        // +35° body first.
+        let (a_tick, b_tick) = (a_tick.expect("the +35° body is hit"), b_tick.expect("the -35° body is hit"));
+        assert!(a_tick < b_tick, "the afterimage replays the sweep in reverse: {a_tick} vs {b_tick}");
+
+        // One copy, and it is the sweep that just finished.
+        let kept = w.ecs.resource::<LaserFx>().copy.expect("still one copy");
+        assert!(
+            (kept.origin.y - w.player.pos.y).abs() < 1e-4 && (kept.facing.y - 1.0).abs() < 1e-4,
+            "the newest completed sweep replaces the old negative"
+        );
+    }
+
+    /// **Ripcord**: the dash's real route stays taut for 0.6 s; each body on it
+    /// takes one dash hit and slides 8 px toward the departure point; the boss
+    /// takes damage only; then the cord snaps and stops hurting.
+    #[test]
+    fn ripcord_holds_the_route_taut_then_snaps_with_its_slide_and_boss_rule() {
+        use crate::game::ecs::systems::boss::{Boss, BossKind};
+        use crate::game::ecs::systems::player;
+        use crate::game::ecs::systems::weapons_wave3b;
+        let mut w = evolved_world(WeaponKind::SuperDash); // L5: 38 dmg, 6 px radius
+        let origin = w.player.pos;
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.player.vel = Vec2::new(58.0, 0.0);
+        w.player.dash_cd = 0.0;
+        let body = w.spawn_enemy(EnemyKind::Brute, origin + Vec2::new(10.0, 2.0), 400.0);
+        let hp0 = hp_of(&w, body);
+
+        let dash_tick = |w: &mut World, dash: bool, move_dir: Vec2| {
+            w.begin_tick(DT, move_dir, dash);
+            w.ecs.run_system_cached(player::player_system).unwrap();
+            w.ecs.run_system_cached(weapons_wave3b::super_dash_system).unwrap();
+            w.ecs.run_system_cached(ripcord_system).unwrap();
+            w.end_tick();
+        };
+
+        // The dash itself.
+        dash_tick(&mut w, true, Vec2::new(1.0, 0.0));
+        assert!(w.player.dash_active > 0.0, "the dash did not start");
+        assert!(hp_of(&w, body) < hp0, "the dash hits what it crosses");
+        let after_dash = hp_of(&w, body);
+        // Walk out the rest of the dash (it never hits the same body twice).
+        let mut guard = 0;
+        while w.player.dash_active > 0.0 && guard < 40 {
+            dash_tick(&mut w, false, Vec2::new(1.0, 0.0));
+            guard += 1;
+        }
+        assert_eq!(hp_of(&w, body), after_dash, "one dash hit per body");
+        assert_eq!(w.player.dash_active, 0.0, "the dash is over");
+        // The tick that ended the dash still recorded its last leg, so the cord
+        // is taut from the next tick on.
+
+        // The cord: one more dash hit, and the body is dragged back toward the
+        // departure point.
+        let before_cord = hp_of(&w, body);
+        let pos_before = w.ecs.get::<Enemy>(body).unwrap().pos;
+        dash_tick(&mut w, false, Vec2::ZERO);
+        assert!(hp_of(&w, body) < before_cord, "the taut route is a dash hit");
+        let pos_after = w.ecs.get::<Enemy>(body).unwrap().pos;
+        let pulled = pos_before - pos_after;
+        assert!(pulled.x > 0.5, "the cord slides the body back toward the start: {pulled:?}");
+        assert!(
+            pulled.len() <= RIPCORD_SLIDE + 0.5,
+            "8 px at most: {}",
+            pulled.len()
+        );
+
+        // The boss takes the damage and does not move.
+        let at = w.ecs.resource::<DashTrack>().route()[0];
+        let mid = at.0 + (at.1 - at.0) * 0.5;
+        let arena = w.level.boss_room().map(|r| r.rect).unwrap_or_else(|| {
+            crate::game::level::TileRect::new(0, 0, 10, 10)
+        });
+        let boss_hp = 5000.0;
+        let boss = Boss::new(BossKind::Cat, mid, boss_hp, arena, mid, false);
+        let boss_entity = w.ecs.spawn((boss, SpawnId(999))).id();
+        let boss_pos = w.ecs.get::<Boss>(boss_entity).unwrap().pos;
+        // A fresh cord for the boss (the body's cord already spent itself on the
+        // boss flag? no: the flag is per cord, so use the live one).
+        dash_tick(&mut w, false, Vec2::ZERO);
+        let boss_hp_now = w.ecs.get::<Boss>(boss_entity).unwrap().hp;
+        assert!(boss_hp_now < boss_hp, "the cord must hurt the boss");
+        assert_eq!(
+            w.ecs.get::<Boss>(boss_entity).unwrap().pos,
+            boss_pos,
+            "bosses take damage only — no slide"
+        );
+        assert!(w.ecs.resource::<DashTrack>().route_boss_hit, "once per cord");
+        dash_tick(&mut w, false, Vec2::ZERO);
+        assert_eq!(
+            w.ecs.get::<Boss>(boss_entity).unwrap().hp,
+            boss_hp_now,
+            "the boss takes one cord hit, not one per tick"
+        );
+
+        // 0.6 s after the dash, the cord snaps: nothing on the old route is hit.
+        let mut snapped = false;
+        for _ in 0..(RIPCORD_SECS * 60.0) as usize + 6 {
+            dash_tick(&mut w, false, Vec2::ZERO);
+            if w.ecs.resource::<DashTrack>().route().is_empty() {
+                snapped = true;
+                break;
+            }
+        }
+        assert!(snapped, "the cord must snap after 0.6 s");
+        let inside = w.spawn_enemy(EnemyKind::Brute, mid, 400.0);
+        let inside_hp = hp_of(&w, inside);
+        dash_tick(&mut w, false, Vec2::ZERO);
+        assert_eq!(hp_of(&w, inside), inside_hp, "a snapped cord hurts nobody");
+        assert_eq!(
+            w.ecs.get::<Boss>(boss_entity).unwrap().hp,
+            boss_hp_now,
+            "and the boss is free too"
+        );
+    }
+
+    /// The evolved forms honour the same passive hooks the base weapons do:
+    /// Lens Cap (reach) and Long Fuse (zone lifetime, splash radius). Each pair
+    /// is measured bare and with every stack, so a fixed constant cannot pass.
+    #[test]
+    fn evolved_reaches_and_zone_lives_follow_lens_cap_and_long_fuse() {
+        use crate::game::ecs::systems::weapons;
+        use crate::game::loadout::{PassiveKind, Upgrade};
+        let stack = |w: &mut World, p: PassiveKind| {
+            for _ in 0..p.max_stacks() {
+                w.player.loadout.apply(&Upgrade::Passive(p));
+            }
+        };
+
+        // Milk Teeth: the dart's flight is the base reach under Lens Cap.
+        for lens in [false, true] {
+            let mut w = evolved_world(WeaponKind::Gnaw);
+            if lens {
+                stack(&mut w, PassiveKind::LensCap);
+            }
+            let want = w.player.loadout.stats.ranged_reach(MILK_REACH);
+            w.spawn_enemy(EnemyKind::Brute, w.player.pos + Vec2::new(20.0, 0.0), 400.0);
+            w.player.loadout.weapons[0].timer = 0.0;
+            run(&mut w, weapons::fire_weapons_system);
+            let mut q = w.ecs.query::<&MilkTooth>();
+            let dart = q.iter(&w.ecs).next().expect("the evolved Gnaw throws one dart");
+            assert!((dart.reach - want).abs() < 1e-5, "milk reach {lens}: {}", dart.reach);
+            assert_eq!(lens, want > MILK_REACH, "only Lens Cap stretches it");
+        }
+
+        // Fondue Fork: the tines plant inside the base reach under Lens Cap.
+        for lens in [false, true] {
+            let mut w = evolved_world(WeaponKind::CheeseSpray);
+            if lens {
+                stack(&mut w, PassiveKind::LensCap);
+            }
+            let want = w.player.loadout.stats.ranged_reach(TINE_REACH);
+            w.spawn_enemy(EnemyKind::Brute, w.player.pos + Vec2::new(30.0, 0.0), 400.0);
+            w.player.face = Vec2::new(1.0, 0.0);
+            w.player.loadout.weapons[0].timer = 0.0;
+            run(&mut w, weapons::fire_weapons_system);
+            let mut q = w.ecs.query::<&CheeseString>();
+            let line = q.iter(&w.ecs).next().expect("a string is planted").clone();
+            let reach = line.a.dist(w.player.pos).max(line.b.dist(w.player.pos));
+            assert!(reach <= want + 0.5, "fondue reach {lens}: {reach} > {want}");
+            assert_eq!(lens, want > TINE_REACH, "only Lens Cap stretches it");
+        }
+
+        // Fairy Ring: Lens Cap widens the ring, Long Fuse keeps it alive.
+        for (lens, fuse) in [(false, false), (true, true)] {
+            let mut w = evolved_world(WeaponKind::SporeOrbit);
+            if lens {
+                stack(&mut w, PassiveKind::LensCap);
+                stack(&mut w, PassiveKind::LongFuse);
+            }
+            let stats = w.player.loadout.stats;
+            let want_r = stats.melee_reach(FAIRY_RADIUS);
+            let want_life = stats.zone_life(FAIRY_SECS);
+            w.player.loadout.weapons[0].timer = 0.0;
+            run(&mut w, weapons::fire_weapons_system);
+            w.player.loadout.weapons[0].timer = 0.0;
+            run(&mut w, weapons::fire_weapons_system);
+            let mut q = w.ecs.query::<&FairyRing>();
+            let ring = q.iter(&w.ecs).next().expect("the second cast leaves a ring").clone();
+            assert!((ring.radius - want_r).abs() < 1e-4, "fairy radius: {}", ring.radius);
+            assert!((ring.total - want_life).abs() < 1e-4, "fairy life: {}", ring.total);
+            if fuse {
+                assert!(ring.total > FAIRY_SECS, "Long Fuse must stretch it");
+            }
+        }
+
+        // Drain Cleaner: Lens Cap stretches the stripe (then masonry truncates
+        // it) and Long Fuse stretches its settled phase — read through the
+        // behaviour, not the stored numbers.
+        for (lens, fuse) in [(false, false), (true, true)] {
+            let mut w = evolved_world(WeaponKind::AcidSpit);
+            if lens {
+                stack(&mut w, PassiveKind::LensCap);
+                stack(&mut w, PassiveKind::LongFuse);
+            }
+            let origin = w.player.pos;
+            let dir = Vec2::new(1.0, 0.0);
+            let reach = w.player.loadout.stats.ranged_reach(CHANNEL_LEN);
+            // A body past the base 36 px stripe (the stripe's test tolerates a
+            // body's own radius): dry bare, burnt stretched.
+            let past = w.spawn_enemy(EnemyKind::Skitterer, origin + Vec2::new(41.0, 0.0), 400.0);
+            let past_hp = hp_of(&w, past);
+            spawn_with_id(
+                &mut w.ecs,
+                CorrosiveChannel::new(origin, dir, CHANNEL_LEN, 20.0, 20.0),
+            );
+            let mut life = 0.0f32;
+            for _ in 0..40 {
+                run(&mut w, drain_cleaner_system);
+                life += DT;
+            }
+            if reach > CHANNEL_LEN {
+                assert!(hp_of(&w, past) < past_hp, "Lens Cap must stretch the stripe");
+            } else {
+                assert_eq!(hp_of(&w, past), past_hp, "36 px is the bare stripe");
+            }
+            // The settled phase lasts a Long Fuse-stretched 2 s.
+            while w.ecs.query::<&CorrosiveChannel>().iter(&w.ecs).count() > 0 && life < 6.0 {
+                run(&mut w, drain_cleaner_system);
+                life += DT;
+            }
+            let want = w.player.loadout.stats.zone_life(CHANNEL_SETTLE);
+            assert!(
+                (life - (CHANNEL_ADVANCE + want)).abs() < 0.15,
+                "channel life {life:.2}s, wanted about {:.2}s (long fuse = {fuse})",
+                CHANNEL_ADVANCE + want
+            );
+        }
+    }
+
+    /// Fairy Ring's "every second cast" parity is per **run**, not per system
+    /// instance: the schedule and a cached single-system call share it, and a
+    /// fresh world starts at zero.
+    #[test]
+    fn fairy_ring_parity_is_a_per_run_resource() {
+        use crate::game::ecs::systems::weapons;
+        let mut w = evolved_world(WeaponKind::SporeOrbit);
+        assert_eq!(w.ecs.resource::<EvoRuntime>().fairy_casts, 0, "a run starts at zero");
+        let rings = |w: &mut World| w.ecs.query::<&FairyRing>().iter(&w.ecs).count();
+
+        w.player.loadout.weapons[0].timer = 0.0;
+        run(&mut w, weapons::fire_weapons_system);
+        assert_eq!(w.ecs.resource::<EvoRuntime>().fairy_casts, 1);
+        assert_eq!(rings(&mut w), 0, "the odd cast leaves no ring");
+
+        // The second cast goes through the full schedule: the shared counter
+        // must see the first cast made through the cached system.
+        w.player.loadout.weapons[0].timer = 0.0;
+        w.update(DT, Vec2::ZERO, false);
+        assert_eq!(w.ecs.resource::<EvoRuntime>().fairy_casts, 2);
+        assert_eq!(rings(&mut w), 1, "every second cast leaves its ring");
+
+        // …and a new run counts from zero again (the ring would otherwise land
+        // on the wrong parity for the rest of a replayed level).
+        let mut fresh = evolved_world(WeaponKind::SporeOrbit);
+        assert_eq!(fresh.ecs.resource::<EvoRuntime>().fairy_casts, 0);
+        fresh.player.loadout.weapons[0].timer = 0.0;
+        run(&mut fresh, weapons::fire_weapons_system);
+        assert_eq!(rings(&mut fresh), 0, "the first cast of a run leaves no ring");
+    }
+
+    /// A chest evolves each of the four wave-3 rows (and the card names it).
+    #[test]
+    fn a_chest_evolves_the_four_new_rows() {
+        use crate::game::loadout::{open_chest, ChestReward, PassiveKind};
+        use rand::SeedableRng;
+        let rows = [
+            (WeaponKind::AcidRain, PassiveKind::LongFuse, "Downspout"),
+            (WeaponKind::Hantavirus, PassiveKind::SecondScent, "Dead Letter"),
+            (WeaponKind::LaserEyes, PassiveKind::LensCap, "Carbon Copy"),
+            (WeaponKind::SuperDash, PassiveKind::SpringHeel, "Ripcord"),
+        ];
+        for (kind, partner, name) in rows {
+            let mut weapon = Weapon::new(kind);
+            weapon.level = kind.max_level();
+            let mut lo = Loadout::from_parts(vec![weapon], vec![(partner, 1)]);
+            let mut rng = rand::rngs::StdRng::seed_from_u64(9);
+            match open_chest(&mut lo, &mut rng) {
+                ChestReward::Evolve { slot, kind: got, evo, partner_stacks } => {
+                    assert_eq!(slot, 0);
+                    assert_eq!(got, kind);
+                    assert_eq!(evo.name, name);
+                    assert_eq!(evo.passive, partner);
+                    assert_eq!(partner_stacks, 1);
+                }
+                other => panic!("{kind:?}: expected an evolution, got {other:?}"),
+            }
+            assert!(lo.weapons[0].evolved, "{kind:?} must be flagged evolved");
+            assert_eq!(lo.weapons[0].name(), name, "{kind:?} wears the chest name");
+        }
+    }
+
     /// Twin-run determinism with each evolution active: two worlds built from
     /// the same seed and the same evolved weapon must agree tick for tick on a
     /// full state fold (positions, hp, spawn order, particles, xp, kills).
@@ -1291,7 +2130,7 @@ mod tests {
     /// horde.
     #[test]
     fn evolution_histories_are_bounded() {
-        let mut dart = MilkTooth::new(Vec2::ZERO, Vec2::ZERO, 1.0);
+        let mut dart = MilkTooth::new(Vec2::ZERO, Vec2::ZERO, 1.0, MILK_REACH);
         for id in 0..(MILK_BITE_CAP as u64 + 8) {
             dart.remember_bite(id);
         }
@@ -1320,5 +2159,77 @@ mod tests {
         }
         assert_eq!(channel.hit_n as usize, CHANNEL_HIT_CAP);
     }
-}
+    /// "Bosses take damage only" covers a named miniboss too: the cord hurts
+    /// it once and never drags it, while an ordinary body on the same cord is
+    /// pulled toward the departure point.
+    #[test]
+    fn ripcord_hurts_a_miniboss_without_sliding_it() {
+        use crate::game::ecs::resources::DashTrack;
+        use crate::game::ecs::systems::miniboss::MinibossKind;
+        use crate::game::loadout::Loadout;
+        use crate::game::weapon::Weapon;
+        let mut w = World::new(Theme::Sewer, 31);
+        w.clear_enemies();
+        let p = w.player.pos;
+        let mut weapon = Weapon::new(WeaponKind::SuperDash);
+        weapon.level = WeaponKind::SuperDash.max_level();
+        weapon.evolved = true;
+        w.player.loadout = Loadout::from_parts(vec![weapon], Vec::new());
+        let boss_at = p + Vec2::new(20.0, 0.0);
+        let body_at = p + Vec2::new(34.0, 0.0);
+        let boss = w.spawn_miniboss(MinibossKind::Corkscrew, 3, boss_at);
+        let body = w.spawn_enemy(EnemyKind::Skitterer, body_at, 400.0);
+        let (boss_hp, body_hp) = (
+            w.ecs.get::<Enemy>(boss).unwrap().hp,
+            w.ecs.get::<Enemy>(body).unwrap().hp,
+        );
+        {
+            let mut track = w.ecs.resource_mut::<DashTrack>();
+            track.segment = None;
+            track.extend_route(p + Vec2::new(-10.0, 0.0), p + Vec2::new(48.0, 0.0));
+        }
+        w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+        w.ecs.run_system_cached(ripcord_system).expect("ripcord");
+        w.end_tick();
+        let b = w.ecs.get::<Enemy>(boss).unwrap();
+        assert!(b.hp < boss_hp, "the cord did not hurt the miniboss");
+        assert_eq!(b.pos, boss_at, "the cord dragged a miniboss");
+        let e = w.ecs.get::<Enemy>(body).unwrap();
+        assert!(e.hp < body_hp, "the cord did not hurt the ordinary body");
+        assert!(
+            e.pos.x < body_at.x - RIPCORD_SLIDE * 0.5,
+            "an ordinary body was not dragged toward the departure point: {:?}",
+            e.pos
+        );
+    }
 
+    /// A Dead Letter packet opens on the first eligible foe, and a named
+    /// miniboss is one: the chain resumes on it and ticks it.
+    #[test]
+    fn a_miniboss_can_open_a_dead_letter_packet() {
+        use crate::game::ecs::components::{DeadLetterPacket, Infection};
+        use crate::game::ecs::resources::spawn_with_id;
+        use crate::game::ecs::systems::miniboss::MinibossKind;
+        let mut w = World::new(Theme::Sewer, 33);
+        w.clear_enemies();
+        let p = w.player.pos;
+        let at = p + Vec2::new(40.0, 0.0);
+        let boss = w.spawn_miniboss(MinibossKind::BellDiver, 1, at);
+        let packet = spawn_with_id(
+            &mut w.ecs,
+            DeadLetterPacket {
+                pos: at + Vec2::new(DEAD_LETTER_REACH - 2.0, 0.0),
+                life: DEAD_LETTER_SECS,
+                total: DEAD_LETTER_SECS,
+                chain: Infection::new(u64::MAX - 3, 2, 30.0, 6.0),
+            },
+        );
+        w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+        w.ecs.run_system_cached(dead_letter_system).expect("dead letter");
+        w.end_tick();
+        assert!(w.ecs.get::<DeadLetterPacket>(packet).is_none(), "the packet stayed sealed");
+        let mark = w.ecs.get::<Infection>(boss).expect("the chain resumed on the miniboss");
+        assert_eq!(mark.jumps_left, 1, "opening a packet spends one jump");
+        assert!(mark.active());
+    }
+}

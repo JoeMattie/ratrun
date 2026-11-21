@@ -102,7 +102,7 @@ use crate::game::weapon::{
 use crate::game::ecs::components::{
     CheeseString, EchoSpoke, Entity, EvolvedShot, FairyRing, MilkTooth, SpawnId,
 };
-use crate::game::ecs::systems::evolutions::{self, FAIRY_SECS, STRING_SECS, TINE_REACH};
+use crate::game::ecs::systems::evolutions::{self, STRING_SECS};
 use crate::game::ecs::resources::{
     ActiveFx, DamageLedger, EnemyIndex, MeleeNudge, NextSpawnId, RngRes, SfxQueue, Shake, TickInput,
 };
@@ -252,7 +252,7 @@ pub fn fire_weapons_system(
             &mut melee_nudge,
             &scratch.infected,
             &mut scratch.boss_virus,
-            &mut scratch.orbit_parity,
+            &mut scratch.evo.fairy_casts,
         );
         if fired {
             player.loadout.weapons[i].timer += cd;
@@ -456,10 +456,13 @@ pub struct FireScratch<'w, 's> {
     /// Read-only view of the horde's Hantavirus marks: the tag pick skips
     /// bodies an active chain already owns.
     infected: Query<'w, 's, &'static crate::game::ecs::components::Infection>,
-    /// Epoch-local counter for Fairy Ring's "every second cast" rule: system
-    /// state, so it needs no resource and no facade field (and a fresh world
-    /// starts at zero).
-    orbit_parity: Local<'s, u8>,
+    /// Per-run evolution bookkeeping (**Fairy Ring**'s "every second cast"
+    /// counter). A resource, not a `Local`: the schedule's copy of this system
+    /// and any `run_system_cached` copy are different instances with their own
+    /// locals, so a `Local` counter made the cast sequence depend on which path
+    /// fired it — and survived a world reset. `World::new_level*` inserts it, so
+    /// it starts at zero with the run.
+    evo: ResMut<'w, crate::game::ecs::resources::EvoRuntime>,
 }
 
 /// Nearest-first ordering key: smaller distance, then the regular enemy before
@@ -1045,7 +1048,7 @@ fn fire_one(
     melee_nudge: &mut MeleeNudge,
     infected: &Query<&crate::game::ecs::components::Infection>,
     boss_virus: &mut crate::game::ecs::resources::BossVirus,
-    orbit_parity: &mut u8,
+    fairy_casts: &mut u8,
 ) -> bool {
     let color = kind.color();
     let mut fired = false;
@@ -1059,8 +1062,15 @@ fn fire_one(
                     // Milk Teeth: one dart that lodges and comes home.
                     // `evolutions::milk_teeth_system` flies it, bites with it
                     // and books the damage under Gnaw.
+                    // Milk Teeth's flight is a ranged reach: Lens Cap
+                    // stretches it exactly as it stretches a dart's life.
                     commands.spawn((
-                        MilkTooth::new(ppos, dir * evolutions::MILK_SPEED, dmg),
+                        MilkTooth::new(
+                            ppos,
+                            dir * evolutions::MILK_SPEED,
+                            dmg,
+                            stats.ranged_reach(evolutions::MILK_REACH),
+                        ),
                         next_id.take(),
                     ));
                 } else {
@@ -1114,8 +1124,10 @@ fn fire_one(
                 let half = (projs - 1) as f32 / 2.0;
                 let outer = (projs >= 2).then_some([base - half * spread, base + half * spread]);
                 if let Some([left, right]) = outer {
-                    let a = fondue_plant(level, ppos, left, order, enemies);
-                    let b = fondue_plant(level, ppos, right, order, enemies);
+                    // Lens Cap stretches how far a tine can plant.
+                    let tine = stats.ranged_reach(evolutions::TINE_REACH);
+                    let a = fondue_plant(level, ppos, left, order, enemies, tine);
+                    let b = fondue_plant(level, ppos, right, order, enemies, tine);
                     commands.spawn((
                         CheeseString::new(a, b, STRING_SECS, dmg),
                         next_id.take(),
@@ -1146,7 +1158,7 @@ fn fire_one(
         }
         WeaponKind::SporeOrbit => {
             // Lens Cap widens the ring, Long Fuse keeps it alive longer.
-            let radius = stats.melee_reach(26.0);
+            let radius = stats.melee_reach(evolutions::FAIRY_RADIUS);
             // Carry the ring's current angle forward, then drop the old ring
             // before spawning its replacement so two never stack. One pass:
             // remember the lowest-`SpawnId` orbit angle (legacy `find_map`
@@ -1190,13 +1202,14 @@ fn fire_one(
                 // Fairy Ring: every second cast also leaves its satellites
                 // fixed around the casting point for 3 s. `fairy_ring_system`
                 // burns whoever crosses the band (once per second each).
-                *orbit_parity = orbit_parity.wrapping_add(1);
-                if (*orbit_parity).is_multiple_of(2) {
+                *fairy_casts = fairy_casts.wrapping_add(1);
+                if (*fairy_casts).is_multiple_of(2) {
                     commands.spawn((
                         FairyRing::new(
                             ppos,
                             radius,
-                            FAIRY_SECS,
+                            // A fixed ring is a lingering friendly zone.
+                            stats.zone_life(evolutions::FAIRY_SECS),
                             projs.clamp(1, u8::MAX as i32) as u8,
                             dmg,
                         ),
@@ -1348,6 +1361,8 @@ fn fire_one(
                 dmg,
                 crate::game::weapon::RAIN_DROPS[i],
                 stats.splash_radius(crate::game::weapon::RAIN_RADIUS[i]),
+                // `Weapon::evolved`: Downspout's marching gutter.
+                evolved,
                 particles,
                 rng,
                 next_id,
@@ -1370,6 +1385,7 @@ fn fire_one(
                 dmg,
                 crate::game::weapon::VIRUS_JUMPS[i],
                 stats.ranged_reach(crate::game::weapon::VIRUS_REACH[i]),
+                evolved,
                 particles,
                 rng,
             );
@@ -1410,12 +1426,13 @@ fn fondue_plant(
     angle: f32,
     order: &[Entity],
     enemies: &Query<(Entity, &SpawnId, &mut Enemy)>,
+    reach: f32,
 ) -> Vec2 {
     let dir = Vec2::from_angle(angle);
-    let far = ppos + dir * TINE_REACH;
-    let mut dist = TINE_REACH;
+    let far = ppos + dir * reach;
+    let mut dist = reach;
     if let Some(t) = level.tiles.segment_hit(ppos, far, 1.0) {
-        dist = (TINE_REACH * t).max(2.0);
+        dist = (reach * t).max(2.0);
     }
     for &entity in order {
         let Ok((_, _, e)) = enemies.get(entity) else {

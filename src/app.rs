@@ -4426,6 +4426,191 @@ mod tests {
                     hh.frame(&[]);
                 }
             }
+            // The four wave-3 evolutions. Each capture sets up the evolved
+            // weapon at max rank over bodies tough enough to survive it, then
+            // runs exactly as many real frames as the effect needs — so the
+            // still shows the *behaviour* (a marching gutter, a sealed
+            // envelope, an afterimage, a taut cord), not a number going up.
+            "downspout" | "deadletter" | "deadletter-tear" | "carboncopy" | "ripcord" => {
+                use crate::game::weapon::WeaponKind;
+                use rand::SeedableRng;
+                hh.enter_playing();
+                let (kind, frames) = match target.as_str() {
+                    // ~0.57 s: every drop of the gutter has marched home and
+                    // the runoff is lit.
+                    "downspout" => (WeaponKind::AcidRain, 44),
+                    // ~0.9 s: the host's death burst has cleared and only the
+                    // sealed envelope is left on the floor.
+                    "deadletter" | "deadletter-tear" => (WeaponKind::Hantavirus, 52),
+                    "carboncopy" => (WeaponKind::LaserEyes, 4),
+                    _ => (WeaponKind::SuperDash, 5),
+                };
+                let mut rng = rand::rngs::StdRng::seed_from_u64(23);
+                {
+                    let w = hh.app.world.as_mut().unwrap();
+                    w.player.loadout = Loadout::from_parts(
+                        vec![{
+                            let mut weapon = crate::game::weapon::Weapon::new(kind);
+                            weapon.level = kind.max_level();
+                            weapon.evolved = true;
+                            weapon.timer = 0.0;
+                            weapon
+                        }],
+                        Vec::new(),
+                    );
+                    w.player.face = crate::math::Vec2::new(1.0, 0.0);
+                    w.player.iframes = 40.0;
+                    // The captures kill things; a level-up card would cover the
+                    // effect, so the XP curve is out of reach.
+                    w.player.xp_to_next = 99_999;
+                    let p = w.player.pos;
+                    match kind {
+                        // A pack for the gutter to walk home from: the marked
+                        // body and the near ones the runoff covers.
+                        // A tight knot of bodies east of the rat, so the
+                        // gutter walks one clean line home from the mark.
+                        WeaponKind::AcidRain => {
+                            for (i, off) in [
+                                (40.0, -5.0),
+                                (42.0, 5.0),
+                                (46.0, 0.0),
+                                (34.0, -9.0),
+                                (34.0, 9.0),
+                            ]
+                            .into_iter()
+                            .enumerate()
+                            {
+                                let _ = i;
+                                w.spawn_enemy_with_rng(
+                                    crate::game::enemy::EnemyKind::Brute,
+                                    p + crate::math::Vec2::new(off.0, off.1),
+                                    400.0,
+                                    &mut rng,
+                                );
+                            }
+                        }
+                        // One host that dies with jumps left and nobody within
+                        // its transfer reach: the chain seals instead of ending.
+                        WeaponKind::Hantavirus => {
+                            w.clear_enemies();
+                            let host = w.spawn_enemy_with_rng(
+                                crate::game::enemy::EnemyKind::Brute,
+                                p + crate::math::Vec2::new(22.0, 0.0),
+                                400.0,
+                                &mut rng,
+                            );
+                            // The virus tick kills it (hp 1 after the tag lands).
+                            w.ecs.get_mut::<crate::game::enemy::Enemy>(host).unwrap().hp = 1.0;
+                            // `deadletter-tear` adds its body *after* the fuse
+                            // is up (below), so the tear is not buried under
+                            // the host's death burst.
+                        }
+                        // Two bodies per bar of the fan: enough to show what
+                        // each beam crosses, open enough to see the beams.
+                        WeaponKind::LaserEyes => {
+                            for i in 0..6 {
+                                let a = -0.5 + (i % 3) as f32 * 0.5;
+                                let r = 26.0 + (i / 3) as f32 * 14.0;
+                                w.spawn_enemy_with_rng(
+                                    crate::game::enemy::EnemyKind::Cat,
+                                    p + crate::math::Vec2::from_angle(a) * r,
+                                    400.0,
+                                    &mut rng,
+                                );
+                            }
+                        }
+                        // A line to cross (the dash's own hits) plus flankers
+                        // for the cord's slide.
+                        _ => {
+                            for i in 0..6 {
+                                w.spawn_enemy_with_rng(
+                                    crate::game::enemy::EnemyKind::Brute,
+                                    p + crate::math::Vec2::new(8.0 + i as f32 * 6.0, 0.0),
+                                    400.0,
+                                    &mut rng,
+                                );
+                            }
+                            for i in 0..3 {
+                                w.spawn_enemy_with_rng(
+                                    crate::game::enemy::EnemyKind::Cat,
+                                    p + crate::math::Vec2::new(14.0 + i as f32 * 8.0, 7.0),
+                                    400.0,
+                                    &mut rng,
+                                );
+                            }
+                        }
+                    }
+                }
+                if kind == WeaponKind::LaserEyes {
+                    // Burst one records the sweep (0.52 s at L5); then the rat
+                    // steps aside and burst two replays the negative from the
+                    // old spot while its own beams cross them.
+                    for _ in 0..40 {
+                        hh.frame(&[]);
+                    }
+                    {
+                        let w = hh.app.world.as_mut().unwrap();
+                        w.player.pos += crate::math::Vec2::new(0.0, 12.0);
+                        w.player.loadout.weapons[0].timer = 0.0;
+                        // Re-centre the fan on the new muzzle line.
+                        w.clear_enemies();
+                        let p = w.player.pos;
+                        for i in 0..6 {
+                            let a = -0.5 + (i % 3) as f32 * 0.5;
+                            let r = 26.0 + (i / 3) as f32 * 14.0;
+                            w.spawn_enemy_with_rng(
+                                crate::game::enemy::EnemyKind::Cat,
+                                p + crate::math::Vec2::from_angle(a) * r,
+                                400.0,
+                                &mut rng,
+                            );
+                        }
+                    }
+                    for _ in 0..frames {
+                        hh.frame(&[]);
+                    }
+                } else if kind == WeaponKind::SuperDash {
+                    // Space dashes: the cord is taut for 0.6 s after the dash
+                    // ends, and the capture is a few frames into that window.
+                    hh.frame(&[KeyCode::Char(' ')]);
+                    for _ in 0..10 {
+                        hh.frame(&[]);
+                    }
+                    for _ in 0..frames {
+                        hh.frame(&[]);
+                    }
+                } else if kind == WeaponKind::Hantavirus {
+                    // The tick lands at 0.35 s (21 frames); the seal follows on
+                    // the same schedule pass.
+                    for _ in 0..frames {
+                        hh.frame(&[]);
+                    }
+                    if target == "deadletter-tear" {
+                        // A body steps onto the envelope: the flap tears open.
+                        let at = hh.app.world.as_ref().unwrap().player.pos
+                            + crate::math::Vec2::new(22.0, 2.0);
+                        hh.app.world.as_mut().unwrap().spawn_enemy(
+                            crate::game::enemy::EnemyKind::Skitterer,
+                            at,
+                            400.0,
+                        );
+                        for _ in 0..4 {
+                            hh.frame(&[]);
+                        }
+                    } else {
+                        // The envelope alone, no damage digits over it.
+                        hh.frame(&[]);
+                    }
+                } else {
+                    for _ in 0..frames {
+                        hh.frame(&[]);
+                    }
+                }
+                if let Some(w) = hh.app.world.as_mut() {
+                    w.damage_numbers.clear();
+                }
+                hh.frame(&[]);
+            }
             "levelup" => {
                 hh.frame(&[KeyCode::Enter]); // -> Story
                 hh.frame(&[KeyCode::Enter]); // dossier -> MapIntro

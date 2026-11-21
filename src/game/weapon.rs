@@ -386,11 +386,10 @@ pub struct Evolution {
 impl WeaponKind {
     /// The evolution this weapon can wear, if any.
     ///
-    /// Eight rows are live. The four other rows in the design table (Acid
-    /// Rain, Hantavirus, Laser Eyes, Super Dash) return `None` until their
-    /// behaviours exist; their spec text and the hooks they need are stubbed
-    /// in `game::ecs::systems::evolutions` under "the four rows that arrive
-    /// with their weapons".
+    /// All twelve design rows are live (`WAVE3_DESIGN.md` §3): the eight the
+    /// first evolution pass shipped, plus the four the wave-3 weapons brought
+    /// with them (Downspout, Dead Letter, Carbon Copy, Ripcord), whose
+    /// behaviours live in `game::ecs::systems::evolutions`.
     pub fn evolution(self) -> Option<Evolution> {
         let e = |passive, name, flavor, attack| Some(Evolution { passive, name, flavor, attack });
         match self {
@@ -451,17 +450,34 @@ impl WeaponKind {
                 "Every cage answers.",
                 "Foes the ring stuns or slows answer 0.8 s later with a 9 px pulse of their own.",
             ),
-            // The four wave-3 weapons' rows (Downspout = Acid Rain + Long Fuse,
-            // Dead Letter = Hantavirus + Second Scent, Carbon Copy = Laser Eyes
-            // + Lens Cap, Ripcord = Super Dash + Spring Heel) are specified in
-            // `game::ecs::systems::evolutions` but their behaviours are NOT
-            // implemented yet. They must stay `None` until they are: a `Some`
-            // row makes the weapon evolvable, and a chest would then spend
-            // itself on a flag that changes nothing.
-            WeaponKind::AcidRain
-            | WeaponKind::Hantavirus
-            | WeaponKind::LaserEyes
-            | WeaponKind::SuperDash => None,
+            // Downspout — the volley becomes one marching gutter of drops.
+            WeaponKind::AcidRain => e(
+                super::loadout::PassiveKind::LongFuse,
+                "Downspout",
+                "The leak has found the stairs.",
+                "One mark, then each drop steps 10 px back toward you along the same line, leaving 1 s of runoff.",
+            ),
+            // Dead Letter — a dying host seals its last jumps into a packet.
+            WeaponKind::Hantavirus => e(
+                super::loadout::PassiveKind::SecondScent,
+                "Dead Letter",
+                "Return to sender.",
+                "A host that dies with jumps left leaves a sealed packet for 2 s; the first foe to touch it resumes the chain.",
+            ),
+            // Carbon Copy — the previous sweep repeats itself backwards.
+            WeaponKind::LaserEyes => e(
+                super::loadout::PassiveKind::LensCap,
+                "Carbon Copy",
+                "The camera kept a negative.",
+                "Each completed sweep is recorded; the next one replays the old sweep backwards at half damage.",
+            ),
+            // Ripcord — the dash's route stays taut and then snaps.
+            WeaponKind::SuperDash => e(
+                super::loadout::PassiveKind::SpringHeel,
+                "Ripcord",
+                "The tail was the fuse.",
+                "After a dash its route stays taut for 0.6 s: bodies on it take a dash hit and slide 8 px back.",
+            ),
         }
     }
 }
@@ -809,23 +825,14 @@ mod tests {
             (WeaponKind::AcidSpit, PassiveKind::Armor, "Drain Cleaner"),
             (WeaponKind::TailThrash, crate::game::loadout::FLYWHEEL_PARTNER, "Flywheel"),
             (WeaponKind::SonicSqueak, PassiveKind::Magnet, "Roll Call"),
+            // The four wave-3 weapons' rows (their behaviours shipped with the
+            // weapons; see `systems::evolutions`).
+            (WeaponKind::AcidRain, PassiveKind::LongFuse, "Downspout"),
+            (WeaponKind::Hantavirus, PassiveKind::SecondScent, "Dead Letter"),
+            (WeaponKind::LaserEyes, PassiveKind::LensCap, "Carbon Copy"),
+            (WeaponKind::SuperDash, PassiveKind::SpringHeel, "Ripcord"),
         ];
-        // The four wave-3 weapons have a specified row but no behaviour yet:
-        // they must not be evolvable until it exists (a chest would spend
-        // itself on a no-op).
-        let pending = [
-            WeaponKind::AcidRain,
-            WeaponKind::Hantavirus,
-            WeaponKind::LaserEyes,
-            WeaponKind::SuperDash,
-        ];
-        assert_eq!(rows.len() + pending.len(), WeaponKind::all().len());
-        for kind in pending {
-            assert!(kind.evolution().is_none(), "{kind:?} is not implemented yet");
-            let mut w = Weapon::new(kind);
-            w.evolved = true;
-            assert_eq!(w.name(), kind.name(), "{kind:?}: no row, no rename");
-        }
+        assert_eq!(rows.len(), WeaponKind::all().len(), "every kind needs a row");
         for (kind, passive, name) in rows {
             let evo = kind.evolution().unwrap_or_else(|| panic!("{kind:?} has no row"));
             assert_eq!(evo.passive, passive, "{kind:?} partner");

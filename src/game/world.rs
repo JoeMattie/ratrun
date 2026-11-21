@@ -72,7 +72,8 @@ use super::ecs::components::{AcidDrop, ChestSpawn, Infection, SpawnId};
 use super::ecs::constants::{GRID_CELL, PARTICLE_CAP};
 use super::ecs::resources::{
     collect_sorted, spawn_with_id, swap_in, swap_out, ActiveFx, BossDue, BossVirus, DamageLedger,
-    DashTrack, DifficultyLevel, EnemyIndex, GridScratch, LaserFx, LastPickups, LevelIndex,
+    DashTrack, DifficultyLevel, EnemyIndex, EvoRuntime, GridScratch, LaserFx, LastPickups,
+    LevelIndex,
     MeleeNudge, NeighborScratch, NextEnemyId, NextSpawnId, NukeTick, PickupScratch, RngRes,
     RunCounters, SfxQueue, Shake, TickInput, Viewport, XpBank,
 };
@@ -310,6 +311,10 @@ impl World {
         // with a full nudge budget and an empty bank.
         ecs.insert_resource(MeleeNudge::default());
         ecs.insert_resource(XpBank::default());
+        // Per-run evolution bookkeeping (Fairy Ring's cast parity): a resource,
+        // not a system `Local`, so it starts at zero with every level and the
+        // schedule and any `run_system_cached` copy of the firing pass agree.
+        ecs.insert_resource(EvoRuntime::default());
         // Wave 3 weapons A: the Hantavirus mark on the boss (a boss is not an
         // `Enemy`, so its mark cannot be a component on it). Permanent scratch,
         // like `ActiveFx`; a fresh level starts unmarked.
