@@ -245,6 +245,34 @@ pub const TAIL_WHIP: Icon = {
     }
 };
 
+/// `WeaponKind::SpikedTail` — a steel tail rising out of the floor into a knob
+/// of bone-white spikes (the lash's "spikes out, then the crack").
+pub const SPIKED_TAIL: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'W', (255, 255, 255)), // spike tip, white-hot
+        (b'S', (206, 214, 226)), // steel body (WeaponKind::SpikedTail)
+        (b'G', (150, 160, 178)), // steel shade
+        (b'D', (92, 100, 118)),  // shadow at the rump
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"....W.W.",
+                b"...WSWSW",
+                b"..SSSSSS",
+                b"..GSSSG.",
+                b".SSSG...",
+                b"SSSG....",
+                b"DSG.....",
+                b"DG......",
+            ],
+            PAL,
+        ),
+        small: grid4([b"..SW", b".SSW", b"SSS.", b"DG.."], PAL),
+        accent: (206, 214, 226),
+    }
+};
+
 /// `WeaponKind::AcidSpit` — dripping toxic lime glob over a bubbling pool.
 pub const ACID_SPIT: Icon = {
     const PAL: &[(u8, Rgb)] = &[
@@ -911,6 +939,7 @@ pub fn weapon(kind: WeaponKind) -> &'static Icon {
         WeaponKind::SuperDash => &SUPER_DASH,
         WeaponKind::AcidRain => &ACID_RAIN,
         WeaponKind::Hantavirus => &HANTAVIRUS,
+        WeaponKind::SpikedTail => &SPIKED_TAIL,
     }
 }
 
@@ -985,6 +1014,7 @@ pub fn by_name(name: &str) -> &'static Icon {
         "Hantavirus" => &HANTAVIRUS,
         "Laser Eyes" => &LASER_EYES,
         "Super Dash" => &SUPER_DASH,
+        "Spiked Tail" => &SPIKED_TAIL,
         "Fat Reserves" => &MAX_HP,
         "Quick Paws" => &MOVE_SPEED,
         "Sharp Teeth" => &DAMAGE,
@@ -1241,6 +1271,7 @@ mod tests {
             ("GoldCoin", &GOLD_COIN),
             ("Chest", &CHEST),
             ("EvolvedFrame", &EVOLVED_FRAME),
+            ("SpikedTail", &SPIKED_TAIL),
             ("Placeholder", &PLACEHOLDER),
         ]
     }

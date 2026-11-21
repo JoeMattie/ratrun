@@ -28,6 +28,7 @@
 //! | 10 | `enemy_move::grid_refresh_system` | second grid build |
 //! | 11 | `weapons::fire_weapons_system` | `fire_weapons` |
 //! | 11b | `weapons::active_weapons_system` | the two Space-triggered weapons (new) |
+//! | 11b2 | `weapon_spiketail::spiked_tail_system` | the Spiked Tail's wind-up, crack and recoil (wave 3) |
 //! | 11c | `weapons_wave3b::{laser_eyes,super_dash,melee_nudge}_system` | wave 3's self-driving weapons (new) |
 //! | 11d | `weapons_wave3a::acid_rain_system` | Acid Rain's locked drops landing (wave 3) |
 //! | 11e | `weapons_wave3a::hantavirus_system` | Hantavirus ticks + third-tick jumps (wave 3) |
@@ -86,7 +87,8 @@ use bevy_ecs::prelude::*;
 use super::resources::TickInput;
 use super::systems::{
     boss, combat, enemy_move, enemy_wave3, enemy_wave4, evolutions, fog, fx, gates, hazards, loot,
-    miniboss, player, powerups, projectiles, shop, spawn, trailer, traps, weapons, weapons_wave3a,
+    miniboss, player, powerups, projectiles, shop, spawn, trailer, traps, weapon_spiketail, weapons,
+    weapons_wave3a,
     weapons_wave3b,
 };
 
@@ -213,6 +215,20 @@ pub fn build_tick_schedule() -> Schedule {
             .chain()
             .after(weapons::active_weapons_system)
             .before(weapons_wave3a::acid_rain_system),
+    );
+
+    // 11b2: the Spiked Tail's lash (wave 3, w3-spiketail). Chained right after
+    // the auto-fire pass that spawns the lash and before `bullets_system`: the
+    // cached `EnemyIndex` order is still the live one there (nothing spawned or
+    // despawned since `grid_refresh`), so the crack's burst walks the same
+    // order every other weapon does, its damage lands before
+    // `player_bullet_hits`/`reap_enemies` in the same tick, and a spike shard a
+    // crack breaks off is moved by `bullets_system` on the tick it was born.
+    // An unevolved run with no lash in flight returns immediately (no rng).
+    schedule.add_systems(
+        weapon_spiketail::spiked_tail_system
+            .after(weapons::active_weapons_system)
+            .before(weapons_wave3b::laser_eyes_system),
     );
 
     // 4a: named miniboss appointments: spawn/retreat and the signature state

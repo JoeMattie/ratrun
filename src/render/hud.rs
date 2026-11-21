@@ -150,6 +150,8 @@ pub fn weapon_glyph(kind: WeaponKind) -> char {
         // Hantavirus.
         WeaponKind::AcidRain => '↓',
         WeaponKind::Hantavirus => '✚',
+        // A spiked tail: the asterisk that is also an eight-spiked star.
+        WeaponKind::SpikedTail => '✳',
     }
 }
 
@@ -177,6 +179,7 @@ pub fn weapon_tag(kind: WeaponKind, evolved: bool) -> &'static str {
             WeaponKind::SuperDash => "RIP",
             WeaponKind::AcidRain => "ACID",
             WeaponKind::Hantavirus => "DEAD",
+            WeaponKind::SpikedTail => "WIRE",
         };
     }
     match kind {
@@ -192,6 +195,9 @@ pub fn weapon_tag(kind: WeaponKind, evolved: bool) -> &'static str {
         WeaponKind::SuperDash => "DASH",
         WeaponKind::AcidRain => "RAIN",
         WeaponKind::Hantavirus => "VIR",
+        // The barbed tail ("BARB" would collide with SPIT's first two letters
+        // in a two-letter rack; the tag is identity, not an abbreviation).
+        WeaponKind::SpikedTail => "BARB",
     }
 }
 
@@ -3489,7 +3495,11 @@ mod tests {
                 seen.push((tag, head));
             }
         }
-        assert_eq!(seen.len(), 24, "twelve weapons and twelve evolutions");
+        assert_eq!(
+            seen.len(),
+            2 * WeaponKind::all().len(),
+            "every weapon and every evolution needs its own tag"
+        );
     }
 
     /// The full-rack HUD the review photographed, at the three sizes it named.

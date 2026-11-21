@@ -59,9 +59,9 @@ pub const LASER_TAIL: f32 = 0.12;
 ///
 /// Must equal `WeaponKind::all().len()` (a test asserts it): the arrays are
 /// indexed by [`WeaponKind::index`], so a new kind has to raise this and the
-/// arrays in one place. Wave 3 added Laser Eyes, Super Dash, Acid Rain and
-/// Hantavirus.
-pub const WEAPON_SLOTS: usize = 12;
+/// arrays in one place. Wave 3 added Laser Eyes, Super Dash, Acid Rain,
+/// Hantavirus and the Spiked Tail.
+pub const WEAPON_SLOTS: usize = 13;
 
 // ---- Wave 3 weapons A: Acid Rain and Hantavirus --------------------------
 //
@@ -107,6 +107,56 @@ pub const VIRUS_JUMPS: [u8; 5] = [1, 2, 2, 3, 4];
 /// Reach of a transfer, L1 → L5.
 pub const VIRUS_REACH: [f32; 5] = [14.0, 14.0, 18.0, 18.0, 22.0];
 
+// ---- The Spiked Tail Whip (wave 3, w3-spiketail) -------------------------
+//
+// The same table rule as the other wave-3 weapons: the design fixes the five
+// numbers per row, so `Weapon::damage`/`cooldown` read these instead of the
+// generic 25 %-per-level curve.
+//
+// The lash is a two-beat animation, and the sim runs on the same clock the art
+// does (one set of constants, so the crack and the damage cannot drift apart):
+//
+// ```text
+// fire ── LASH_WINDUP ── LASH_RECOIL_AT ────────── LASH_TOTAL ──> (despawn)
+//        bristle         CRACK + burst   Barbed Wire drag, then recoil
+// ```
+/// Seconds from the shot to the crack: the tail thickens and sprouts spikes.
+/// `Sfx::Lash` spends exactly this long on its rising swish before the crack.
+pub const LASH_WINDUP: f32 = 0.12;
+/// Seconds from the shot to the start of the recoil — where an evolved
+/// **Barbed Wire** lash drags its catch home.
+pub const LASH_RECOIL_AT: f32 = 0.20;
+/// How long a lash entity lives (bristle, crack, a beat of extension, recoil).
+pub const LASH_TOTAL: f32 = 0.34;
+/// Per-crack damage, L1 → L5 (the primary body takes all of it).
+pub const LASH_DAMAGE: [f32; 5] = [22.0, 27.0, 33.0, 38.0, 44.0];
+/// Cycle length, L1 → L5.
+pub const LASH_CYCLE: [f32; 5] = [1.3, 1.19, 1.08, 0.96, 0.85];
+/// Reach of the lash (rat to impact point), L1 → L5. Lens Cap stretches it.
+pub const LASH_REACH: [f32; 5] = [44.0, 49.0, 54.0, 59.0, 64.0];
+/// Radius of the burst at the impact point, L1 → L5. Long Fuse widens it.
+pub const LASH_RADIUS: [f32; 5] = [10.0, 11.5, 13.0, 14.5, 16.0];
+/// Spare spike shards that break off the tail and fly on, L1 → L5 (design:
+/// an optional flourish from level 4, two or three shards).
+pub const LASH_SHARDS: [u8; 5] = [0, 0, 0, 2, 3];
+/// What one shard is worth, as a fraction of the level's lash damage.
+pub const LASH_SHARD_FRAC: f32 = 0.22;
+/// The burst at the impact point is worth this much of the lash hit.
+pub const LASH_BURST_FRAC: f32 = 0.4;
+/// Seconds the primary body is staggered by the crack.
+pub const LASH_STAGGER: f32 = 0.16;
+/// Knockback velocity (px/s) the crack hands the primary body, before
+/// Counterweight's `Stats::shove` multiplier (the lash has a native shove, so
+/// Counterweight's +2 px nudge does not apply — its card says so).
+pub const LASH_SHOVE: f32 = 120.0;
+/// Heavy bodies are dragged and shoved this much less (the thrash's boss rule).
+pub const LASH_HEAVY_SCALE: f32 = 0.15;
+/// Screen shake on the crack frame.
+pub const LASH_SHAKE: f32 = 2.4;
+/// Where an evolved Barbed Wire drag drops its catch: this far from the rat,
+/// so a dragged body lands at its feet instead of inside it.
+pub const LASH_DRAG_GAP: f32 = 9.0;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WeaponKind {
     Gnaw,        // homing dart at nearest enemy
@@ -121,6 +171,7 @@ pub enum WeaponKind {
     SuperDash,   // DASH: the dash itself is the attack (passive-triggered)
     AcidRain,    // marks floor spots, staggered drops, splash damage
     Hantavirus,  // tagging infection that jumps down a pack
+    SpikedTail,  // single-target lash: spikes out, small burst at the hit
 }
 
 impl WeaponKind {
@@ -138,6 +189,7 @@ impl WeaponKind {
             WeaponKind::SuperDash,
             WeaponKind::AcidRain,
             WeaponKind::Hantavirus,
+            WeaponKind::SpikedTail,
         ]
     }
 
@@ -184,6 +236,7 @@ impl WeaponKind {
             WeaponKind::SuperDash => 9,
             WeaponKind::AcidRain => 10,
             WeaponKind::Hantavirus => 11,
+            WeaponKind::SpikedTail => 12,
         }
     }
 
@@ -201,6 +254,7 @@ impl WeaponKind {
             WeaponKind::SuperDash => "Super Dash",
             WeaponKind::AcidRain => "Acid Rain",
             WeaponKind::Hantavirus => "Hantavirus",
+            WeaponKind::SpikedTail => "Spiked Tail",
         }
     }
 
@@ -223,6 +277,7 @@ impl WeaponKind {
             WeaponKind::SuperDash => "DASH: every dash wounds everything it crosses.",
             WeaponKind::AcidRain => "Marks the floor; staggered drops splash everything nearby.",
             WeaponKind::Hantavirus => "Tags a foe for three ticks; the mark jumps on when it dies.",
+            WeaponKind::SpikedTail => "Lashes one foe, then bursts at the hit.",
         }
     }
 
@@ -240,6 +295,7 @@ impl WeaponKind {
             WeaponKind::SuperDash => "Exit wound, entrance wound, exit.",
             WeaponKind::AcidRain => "There was a ceiling here once.",
             WeaponKind::Hantavirus => "Somebody passed a note in Block C.",
+            WeaponKind::SpikedTail => "The tail grew a point of view.",
         }
     }
 
@@ -259,6 +315,9 @@ impl WeaponKind {
             // two acids read apart; plum is unused by any other weapon.
             WeaponKind::AcidRain => (198, 255, 72),
             WeaponKind::Hantavirus => (206, 106, 190),
+            // Steel: the one weapon colour in the game with no hue in it, so a
+            // barbed tail reads apart from the two rose/orange tail weapons.
+            WeaponKind::SpikedTail => (206, 214, 226),
         }
     }
 
@@ -287,6 +346,7 @@ impl WeaponKind {
             WeaponKind::SuperDash => 2.0,
             WeaponKind::AcidRain => RAIN_CYCLE[0],
             WeaponKind::Hantavirus => VIRUS_CYCLE[0],
+            WeaponKind::SpikedTail => LASH_CYCLE[0],
         }
     }
 
@@ -337,6 +397,7 @@ impl WeaponKind {
             // numbers the tables start from.
             WeaponKind::AcidRain => RAIN_DAMAGE[0],
             WeaponKind::Hantavirus => VIRUS_DAMAGE[0],
+            WeaponKind::SpikedTail => LASH_DAMAGE[0],
         }
     }
 
@@ -349,6 +410,7 @@ impl WeaponKind {
             WeaponKind::SuperDash => Some(DASH_DAMAGE),
             WeaponKind::AcidRain => Some(RAIN_DAMAGE),
             WeaponKind::Hantavirus => Some(VIRUS_DAMAGE),
+            WeaponKind::SpikedTail => Some(LASH_DAMAGE),
             _ => None,
         }
     }
@@ -360,6 +422,7 @@ impl WeaponKind {
             WeaponKind::LaserEyes => Some(LASER_CYCLE),
             WeaponKind::AcidRain => Some(RAIN_CYCLE),
             WeaponKind::Hantavirus => Some(VIRUS_CYCLE),
+            WeaponKind::SpikedTail => Some(LASH_CYCLE),
             _ => None,
         }
     }
@@ -477,6 +540,16 @@ impl WeaponKind {
                 "Ripcord",
                 "The tail was the fuse.",
                 "After a dash its route stays taut for 0.6 s: bodies on it take a dash hit and slide 8 px back.",
+            ),
+            // Barbed Wire — the lash hooks, and the recoil reels the catch in.
+            // Partner: Counterweight, the passive that is literally a weight
+            // tied to the tip of a weapon (every other passive already partners
+            // exactly one weapon; this is the one whose card the reel *is*).
+            WeaponKind::SpikedTail => e(
+                super::loadout::PassiveKind::Counterweight,
+                "Barbed Wire",
+                "Whatever it catches comes home.",
+                "The lash hooks; the recoil drags its catch home, bursting every body it crosses.",
             ),
         }
     }
@@ -618,6 +691,35 @@ impl Weapon {
     #[inline]
     pub fn virus_reach(&self) -> f32 {
         VIRUS_REACH[self.tier()]
+    }
+
+    /// Spiked Tail: reach of the lash in px, before Lens Cap
+    /// (`Stats::melee_reach` — a tail is a melee weapon).
+    #[inline]
+    pub fn lash_reach(&self) -> f32 {
+        match self.kind {
+            WeaponKind::SpikedTail => LASH_REACH[self.tier()],
+            _ => 0.0,
+        }
+    }
+
+    /// Spiked Tail: radius of the burst at the impact point, before Long Fuse
+    /// (`Stats::splash_radius`).
+    #[inline]
+    pub fn lash_radius(&self) -> f32 {
+        match self.kind {
+            WeaponKind::SpikedTail => LASH_RADIUS[self.tier()],
+            _ => 0.0,
+        }
+    }
+
+    /// Spiked Tail: spike shards that break off at the impact (0 until L4).
+    #[inline]
+    pub fn lash_shards(&self) -> u8 {
+        match self.kind {
+            WeaponKind::SpikedTail => LASH_SHARDS[self.tier()],
+            _ => 0,
+        }
     }
 
     /// Reach in px of an active weapon's effect: the thrash arc's radius or the
@@ -831,6 +933,8 @@ mod tests {
             (WeaponKind::Hantavirus, PassiveKind::SecondScent, "Dead Letter"),
             (WeaponKind::LaserEyes, PassiveKind::LensCap, "Carbon Copy"),
             (WeaponKind::SuperDash, PassiveKind::SpringHeel, "Ripcord"),
+            // The spiked tail hooks with Counterweight (the weight on the tip).
+            (WeaponKind::SpikedTail, PassiveKind::Counterweight, "Barbed Wire"),
         ];
         assert_eq!(rows.len(), WeaponKind::all().len(), "every kind needs a row");
         for (kind, passive, name) in rows {
@@ -910,6 +1014,44 @@ mod tests {
             assert_eq!(w.damage(), dmg, "dash L{level} damage");
             assert_eq!(w.dash_radius(), radius, "dash L{level} radius");
         }
+    }
+
+    /// The Spiked Tail's five-entry rows, straight from the design brief: it
+    /// auto-fires (no charge gauge), its reach grows 44 → 64 px, its burst
+    /// 10 → 16 px, its cycle 1.3 → 0.85 s, and the spike shards only exist
+    /// from level 4.
+    #[test]
+    fn spiked_tail_matches_its_design_tables() {
+        assert_eq!(WEAPON_SLOTS, 13);
+        let expect = [
+            (1u8, 22.0f32, 1.3f32, 44.0f32, 10.0f32, 0u8),
+            (2, 27.0, 1.19, 49.0, 11.5, 0),
+            (3, 33.0, 1.08, 54.0, 13.0, 0),
+            (4, 38.0, 0.96, 59.0, 14.5, 2),
+            (5, 44.0, 0.85, 64.0, 16.0, 3),
+        ];
+        for (level, dmg, cycle, reach, radius, shards) in expect {
+            let mut w = Weapon::new(WeaponKind::SpikedTail);
+            w.level = level;
+            assert_eq!(w.damage(), dmg, "lash L{level} damage");
+            assert_eq!(w.cooldown(), cycle, "lash L{level} cycle");
+            assert_eq!(w.lash_reach(), reach, "lash L{level} reach");
+            assert_eq!(w.lash_radius(), radius, "lash L{level} burst radius");
+            assert_eq!(w.lash_shards(), shards, "lash L{level} shards");
+        }
+        // Level 1 is the base, and the classic generic paths still agree.
+        let w = Weapon::new(WeaponKind::SpikedTail);
+        assert_eq!(w.damage(), WeaponKind::SpikedTail.base_damage());
+        assert_eq!(w.cooldown(), WeaponKind::SpikedTail.base_cooldown());
+        // It is an ordinary auto-firing weapon: no charge gauge, no Space.
+        assert!(!WeaponKind::SpikedTail.is_active());
+        assert!(!WeaponKind::SpikedTail.fires_outside_fire_one());
+        assert_eq!(w.active_reach(), 0.0);
+        // A corrupt save past the cap must not index out of the table.
+        let mut w = Weapon::new(WeaponKind::SpikedTail);
+        w.level = 9;
+        assert_eq!(w.damage(), 44.0);
+        assert_eq!(w.lash_reach(), 64.0);
     }
 
     /// Neither wave-3 weapon is a Space-triggered *active*: Super Dash must

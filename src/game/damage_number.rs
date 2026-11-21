@@ -52,6 +52,8 @@ pub enum DamageSource {
     Rain,
     /// Hantavirus's damage ticks (plum).
     Virus,
+    /// The Spiked Tail's lash and its burst (steel-white).
+    Lash,
 }
 
 impl DamageSource {
@@ -60,6 +62,8 @@ impl DamageSource {
             Some(WeaponKind::AcidSpit) => DamageSource::Acid,
             Some(WeaponKind::SporeOrbit) => DamageSource::Orbit,
             Some(WeaponKind::TailWhip) => DamageSource::TailWhip,
+            // The lash and the spike shards it breaks off read as one weapon.
+            Some(WeaponKind::SpikedTail) => DamageSource::Lash,
             _ => DamageSource::Normal,
         }
     }
@@ -498,6 +502,15 @@ fn damage_color(it: &DamageNumber) -> Rgb {
             (215, 255, 120)
         } else {
             (168, 248, 108)
+        };
+    }
+    if it.source == DamageSource::Lash {
+        // Cold steel, brighter the heavier the hit, so a lash reads apart from
+        // the tail pink of Tail Whip and the amber of Tail Thrash.
+        return if it.total_dmg >= 18.0 {
+            (246, 250, 255)
+        } else {
+            (198, 212, 232)
         };
     }
     if it.total_dmg >= 25.0 {

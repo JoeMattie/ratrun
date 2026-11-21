@@ -593,3 +593,57 @@ pub struct FondueCast {
     /// Seconds the cast may wait for its tines (they always settle by reach).
     pub wait: f32,
 }
+
+// ---- The Spiked Tail Whip (wave 3, w3-spiketail) -------------------------
+
+/// Which body a lash is aimed at. A boss is not an `Enemy`, so it cannot be
+/// named by an `Entity` here: it is found again at the crack through its hit
+/// shapes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LashTarget {
+    /// A regular enemy body (named minibosses included; they are `Enemy`s).
+    Enemy(Entity),
+    /// One of the boss's grounded hit points, locked when the lash fired.
+    Boss,
+}
+
+/// One Spiked Tail lash in flight: the crack the tail is winding up to.
+///
+/// Spawned by `weapons::fire_one` at the moment the weapon fires, so the tail
+/// is already bristling on that frame. `systems::weapon_spiketail` follows the
+/// body for the [`crate::game::weapon::LASH_WINDUP`] seconds of wind-up, lands
+/// the crack (primary hit + small burst), and — for an evolved **Barbed Wire**
+/// lash — drags its catch home on the recoil. Pure data: every number that
+/// matters is snapshotted here, so the strike reads nothing from the loadout
+/// (a level-up card opened mid-lash cannot change the hit that was paid for).
+#[derive(Component, Clone, Copy, Debug)]
+pub struct Lash {
+    /// The tail's root: the rat's position, followed every tick until the
+    /// crack, so the whip starts at the rump it is actually attached to.
+    pub origin: Vec2,
+    /// The impact point. Follows the target body while it lives (a lash that
+    /// misses a walking body reads as broken), and stays put once it is gone.
+    pub target: Vec2,
+    /// The body the full lash damage lands on, if it was an enemy.
+    pub primary: Option<LashTarget>,
+    /// Was the locked impact point a boss hit shape? Then the boss takes the
+    /// full lash damage there (and can still take the burst once, below).
+    pub boss: bool,
+    /// Reach (rat to impact) and burst radius, stats applied at fire time.
+    pub reach: f32,
+    pub radius: f32,
+    /// Full lash damage and the primary's shove velocity (Counterweight
+    /// applied); the burst is `LASH_BURST_FRAC` of `dmg`.
+    pub dmg: f32,
+    pub shove: f32,
+    /// Spike shards that break off at the crack (0 below level 4).
+    pub shards: u8,
+    /// Fired by an evolved **Barbed Wire** lash: the recoil drags the catch.
+    pub evolved: bool,
+    /// Seconds since the fire (0 → `LASH_TOTAL`).
+    pub timer: f32,
+    /// The crack has landed.
+    pub struck: bool,
+    /// The recoil drag (Barbed Wire) has resolved.
+    pub dragged: bool,
+}
