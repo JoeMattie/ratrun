@@ -7,3 +7,4 @@ pub mod overlay;
 pub mod palette;
 pub mod minimap;
 pub mod minimap_source;
+pub mod options;
