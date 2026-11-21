@@ -3085,7 +3085,20 @@ mod tests {
             .find(|t| t.encounter)
             .expect("a fanned-out room mouth grows an encounter trap");
         let cell = validate::cell_of(encounter.pos);
-        assert_eq!(cell, (9, 16), "one cell inside the doorway");
+        // On the arriving lane's own row, at the room mouth. The site is one
+        // or two cells in (`ENCOUNTER_DEPTHS`); the bigger wave-3 boards then
+        // settle up to two cells further in when their footprint needs the
+        // room (`refine_snap_traps` / `refine_sticky_traps` keep a 3 x 3 clear
+        // of the doorway), so the mouth is at most four cells behind it.
+        assert_eq!(cell.1, 16, "on the doorway's row, facing down the lane");
+        let depth = cell.0 - 7;
+        assert!(
+            (1..=4).contains(&depth),
+            "the encounter sits at the room mouth, not {depth} cells in"
+        );
+        // This layout's own answer, pinned: a site two cells in, moved one
+        // further so the board's footprint clears the doorway jamb.
+        assert_eq!(cell, (10, 16));
         assert_eq!(encounter.approach, Cardinal::West);
         if encounter.kind == TrapKind::Snap {
             assert_eq!(encounter.facing, Vec2::new(-1.0, 0.0));

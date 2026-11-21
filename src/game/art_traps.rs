@@ -1495,8 +1495,9 @@ pub fn draw_sticky_trap_ground(
 
     // Torn glue scars: one per victim that pulled free, a ragged hole ringed
     // with dried strands (drawn after the pool so they read over it).
-    for k in 0..(view.tear_n as usize).min(STICKY_TRAP_TEARS) {
-        draw_sticky_tear(pb, &fr, view.tears[k], seed, k as i32);
+    let tears = (view.tear_n as usize).min(STICKY_TRAP_TEARS);
+    for (k, tear) in view.tears.iter().take(tears).enumerate() {
+        draw_sticky_tear(pb, &fr, *tear, seed, k as i32);
     }
 
     // The load: one glue mound per stuck body, sized and tinted by its kind, at
@@ -1536,10 +1537,7 @@ pub fn draw_sticky_trap_ground(
     // caught bug). One bundle per slot, in slot order, so the drawing has no
     // tie to break.
     if view.state == StickyTrapState::Stuck {
-        for slot in 0..STICKY_TRAP_SLOTS {
-            let Some(victim) = view.victims[slot] else {
-                continue;
-            };
+        for victim in view.victims.iter().take(STICKY_TRAP_SLOTS).flatten().copied() {
             let vp = sticky_victim_screen(&fr, &victim);
             let vprog = clamp01(victim.progress);
             let fade = (1.0 - (vprog - 0.85).max(0.0) / 0.15).clamp(0.0, 1.0);
@@ -3946,7 +3944,7 @@ mod tests {
                 let a = k as f32 * 1.9 + 0.4;
                 v.add_tear(c + Vec2::new(a.cos() * 7.0, a.sin() * 5.0));
             }
-            for k in 0..n.min(STICKY_TRAP_SLOTS) {
+            for (k, slot) in v.victims.iter_mut().take(n.min(STICKY_TRAP_SLOTS)).enumerate() {
                 // The sim's own slot spread, near enough for a sheet.
                 let inset = Vec2::new(
                     STICKY_TRAP_PAD_HALF.x - 2.5,
@@ -3954,7 +3952,7 @@ mod tests {
                 );
                 let a = k as f32 * 2.399;
                 let at = c + Vec2::new(a.cos() * inset.x * 0.7, a.sin() * inset.y * 0.7);
-                v.victims[k] = Some(StickyVictimView {
+                *slot = Some(StickyVictimView {
                     pos: at,
                     radius: 2.5,
                     kind: StickyVictimKind::Small,

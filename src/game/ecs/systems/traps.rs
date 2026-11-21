@@ -1681,9 +1681,19 @@ mod tests {
         assert_eq!(held_on(&mut w, 0, EnemyKind::Skitterer), 1);
         assert!(!has_slow(&mut w, brute), "the released Brute lost its slow");
         assert_eq!(board(&w, 0).load, 1);
+        // The freed Brute walks off (nothing moves a body in this narrow
+        // harness): one left standing on the pad past the release grace is
+        // fair game for a second catch, which is not what this test times.
+        if let Ok(mut e) = w.ecs.query::<&mut Enemy>().get_mut(&mut w.ecs, brute) {
+            e.pos = c + Vec2::new(0.0, 80.0);
+        }
 
-        // The Skitterer follows on its own (longer) clock.
-        for _ in 0..(STICKY_TRAP_HOLD_SMALL_ENEMY_SECS / DT).ceil() as usize + 2 {
+        // The Skitterer follows on its own (longer) clock: the rest of its
+        // 2.5 s, measured from the same catch. (Not a second full hold: it is
+        // still standing on the pad, and the release grace would have run out.)
+        let rest = STICKY_TRAP_HOLD_SMALL_ENEMY_SECS - STICKY_TRAP_HOLD_BRUTE_SECS;
+        assert!(rest > 0.0 && rest < STICKY_TRAP_RELEASE_GRACE_SECS);
+        for _ in 0..(rest / DT).ceil() as usize + 2 {
             traps_tick(&mut w, Vec2::ZERO, false);
         }
         assert_eq!(board(&w, 0).load, 0);
@@ -1874,11 +1884,13 @@ mod tests {
         let c = centre(&w);
         add_board(&mut w, c);
         w.player.pos = c + Vec2::new(10.0, 0.0);
+        // Three 2-unit bodies (6 of the board's 8 units, with the rat's own 2
+        // beside them): three 4-unit Brutes would not all fit on one board.
         for off in [-5.0f32, 0.0, 5.0] {
-            add_enemy(&mut w, EnemyKind::Brute, c + Vec2::new(0.0, off), 20.0);
+            add_enemy(&mut w, EnemyKind::Cat, c + Vec2::new(0.0, off), 20.0);
         }
         traps_tick(&mut w, Vec2::ZERO, false);
-        assert_eq!(held_on(&mut w, 0, EnemyKind::Brute), 3);
+        assert_eq!(held_on(&mut w, 0, EnemyKind::Cat), 3);
         w.spawn_pickup(Pickup {
             pos: w.player.pos,
             kind: PickupKind::Nuke,
@@ -1931,6 +1943,10 @@ mod tests {
             &w.level.tiles,
             crate::game::collision::SizeClass::Large,
         );
+        // The flow field keeps its own masks of the grid it was built for: a
+        // replaced map needs a new one, or the horde routes round the
+        // generated level's walls instead of down this corridor.
+        w.flow = crate::game::nav::FlowField::new(&w.level.tiles);
 
         let rat = crate::game::collision::TileMap::tile_rect(x1 - 4, cy).center();
         let board_at = crate::game::collision::TileMap::tile_rect(x0 + 14, cy).center();
@@ -1951,22 +1967,33 @@ mod tests {
         assert_eq!(held_on(&mut w, 0, EnemyKind::Skitterer), 4);
 
         let start: Vec<f32> = followers.iter().map(|e| enemy_of(&mut w, *e).pos.x).collect();
-        for _ in 0..360 {
+        // Twenty seconds: long enough for every follower to reach the board,
+        // be caught or slowed in its turn (the board has budget for all ten
+        // bodies) and walk out the far side. Getting *onto* the pad is not
+        // getting past it.
+        for _ in 0..1200 {
             w.begin_tick(DT, Vec2::ZERO, false);
             w.ecs.run_system_cached(traps_system).unwrap();
             w.ecs.run_system_cached(enemy_move::flow_refresh_system).unwrap();
             w.ecs
                 .run_system_cached(enemy_move::enemy_steering_system)
                 .unwrap();
+            // The real movement chain, not steering alone: separation is the
+            // only thing that could make a pinned crowd push the horde back,
+            // and the wall resolve is what makes the corridor a corridor.
+            w.ecs.run_system_cached(enemy_move::grid_build_system).unwrap();
+            w.ecs.run_system_cached(enemy_move::separation_system).unwrap();
+            w.ecs.run_system_cached(enemy_move::wall_resolve_system).unwrap();
             w.end_tick();
         }
         let rat_x = rat.x;
         let mut passed = 0usize;
         for (e, s) in followers.iter().zip(start) {
             if let Ok(en) = w.ecs.query::<&Enemy>().get(&w.ecs, *e) {
-                // Past the crowd, or through it and on the way to the rat:
-                // either way the board is not a wall.
-                if en.pos.x > board_at.x + 6.0 || (en.pos.x > s + 18.0 && en.pos.x < rat_x) {
+                // Out the far side of the pad and on the way to the rat: the
+                // board and its crowd are not a wall.
+                let _ = s;
+                if en.pos.x > board_at.x + STICKY_TRAP_PAD_HALF.x + 6.0 && en.pos.x < rat_x + 16.0 {
                     passed += 1;
                 }
             } else {

@@ -314,10 +314,15 @@ fn the_hornet_charges_dives_jabs_and_must_recover() {
         HORNET_RECOVER_MULT
     );
     let hp = grounded.hp;
+    // A hit it survives (the hornet is a 14 HP body, and a dead one has no
+    // recovery left to time).
+    let chip = 4.0;
+    assert!(chip * HORNET_RECOVER_MULT < hp, "the probe hit must not kill it");
     put(&mut w, hornet, |e| {
-        e.hurt_from(10.0, e.pos + Vec2::new(0.0, 20.0));
+        e.hurt_from(chip, e.pos + Vec2::new(0.0, 20.0));
     });
-    assert!((state(&w, hornet).hp - (hp - 10.0 * HORNET_RECOVER_MULT)).abs() < 1e-3);
+    assert!((state(&w, hornet).hp - (hp - chip * HORNET_RECOVER_MULT)).abs() < 1e-3);
+    assert!(state(&w, hornet).alive());
 
     // It stays down for the full recovery, then hovers again.
     ticks(&mut w, secs(HORNET_RECOVER_SECS) + 2);
@@ -1048,11 +1053,11 @@ fn the_wave4_stats_and_timings_match_the_design_table() {
         assert_eq!(SizeClass::of_enemy(small), SizeClass::Small, "{small:?}");
     }
     // Timings used by the report's design table.
-    assert!(SNAKE_TELL_SECS >= 0.6, "the lunge tell must be readable");
-    assert!(CENTIPEDE_FLUTTER_SECS >= 0.25);
-    assert!(HORNET_TELL_SECS >= 0.5);
-    assert!(ROPE_TIE_SECS >= 0.8, "the knot must be visible for a beat");
-    assert!(HORNET_RECOVER_SECS >= 1.0, "the punish window must pay");
+    const { assert!(SNAKE_TELL_SECS >= 0.6, "the lunge tell must be readable") };
+    const { assert!(CENTIPEDE_FLUTTER_SECS >= 0.25) };
+    const { assert!(HORNET_TELL_SECS >= 0.5) };
+    const { assert!(ROPE_TIE_SECS >= 0.8, "the knot must be visible for a beat") };
+    const { assert!(HORNET_RECOVER_SECS >= 1.0, "the punish window must pay") };
 }
 
 #[test]
