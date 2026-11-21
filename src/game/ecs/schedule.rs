@@ -76,7 +76,8 @@ use bevy_ecs::prelude::*;
 
 use super::resources::TickInput;
 use super::systems::{
-    boss, combat, enemy_move, fog, fx, gates, loot, player, projectiles, spawn, traps, weapons,
+    boss, combat, enemy_move, fog, fx, gates, hazards, loot, player, projectiles, spawn, traps,
+    weapons,
 };
 
 /// Legacy `self.damage_numbers.update(dt)` (neon merge, `World::update`).
@@ -103,6 +104,18 @@ pub fn build_tick_schedule() -> Schedule {
     // lands before `loot::reap_enemies_system`, so trap kills take the normal
     // loot path. Trap state lives in `level.objects` (see `traps.rs`).
     schedule.add_systems(traps::traps_system.before(player::player_system));
+
+    // 0b: the wave 3 floor hazards (steam grates, ink pads). Next to the traps
+    // for the same reasons: the rat's ink slow is folded into this tick's
+    // `TickInput` before `player_system` derives its movement, the pursuers'
+    // `InkSlow` component is multiplied in by `enemy_steering_system`, and a
+    // plume's damage lands before `reap_enemies`, so a scalded kill takes the
+    // normal loot path.
+    schedule.add_systems(
+        hazards::hazards_system
+            .after(traps::traps_system)
+            .before(player::player_system),
+    );
 
     // 1-15: everything up to and including contact damage.
     schedule.add_systems(

@@ -17,6 +17,7 @@ pub mod ecs;
 pub mod enemy;
 pub mod fog;
 pub mod gem;
+pub mod hazards;
 pub mod level;
 pub mod levelgen;
 pub mod loadout;

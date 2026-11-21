@@ -44,6 +44,16 @@ pub fn map_intro(theme: Theme) -> (&'static str, &'static str) {
             "Where you were made. The lights hum a number that used to be your \
              name. End it here. Walk out the front door.",
         ),
+        Theme::Laundry => (
+            "LEVEL 2 — THE LAUNDRY",
+            "Indigo tile, steam between the machines, and a hundred doors that \
+             will not open. The whites come out pink down here.",
+        ),
+        Theme::Printworks => (
+            "LEVEL 3 — THE PRINTWORKS",
+            "Ink in the seams of your paws and the presses still running \
+             overnight. Tomorrow's front page says you were caught.",
+        ),
     }
 }
 
@@ -61,6 +71,14 @@ pub fn victory(theme: Theme) -> &'static str {
         Theme::Lab => {
             "Every alarm flatlines at once. The blast door you were born behind \
              finally swings outward — and you are already gone."
+        }
+        Theme::Laundry => {
+            "For the first time in thirty years, the laundry stops. The drum \
+             ticks as it cools, and the service stair beyond it is unlatched."
+        }
+        Theme::Printworks => {
+            "Correction: subject still at large. The last edition rolls off the \
+             belt, curls under the street door, and you are out with it."
         }
     }
 }

@@ -623,6 +623,52 @@ const PAL_KITCHEN: WallPalette = WallPalette {
     thresh_hi: (178, 146, 86),
 };
 
+const PAL_LAUNDRY: WallPalette = WallPalette {
+    outline: (12, 15, 24),
+    top_base: (58, 92, 108),   // faded denim #426779, lifted for the coping
+    top_alt: (48, 80, 96),
+    top_hi: (150, 186, 186),
+    top_lo: (28, 44, 58),
+    cornice: (179, 199, 195),  // porcelain #B3C7C3
+    front_base: (52, 78, 94),
+    front_alt: (74, 110, 126),
+    front_dark: (24, 32, 46),
+    mortar: (34, 38, 59),      // indigo tile #22263B
+    trim_hi: (196, 214, 208),  // glazed porcelain trim
+    trim_lo: (26, 34, 48),
+    detail_a: (176, 142, 72),  // brass drain fittings
+    detail_b: (150, 172, 174), // chrome drum bezel
+    detail_c: (216, 126, 164), // the pink of a ruined white wash
+    maze_top: (70, 104, 120),
+    maze_hi: (186, 206, 202),
+    maze_front: (38, 48, 66),
+    thresh_base: (32, 38, 56),
+    thresh_hi: (170, 190, 186),
+};
+
+const PAL_PRINTWORKS: WallPalette = WallPalette {
+    outline: (12, 12, 16),
+    top_base: (150, 148, 136),  // newsprint #B6B4A5 in shadow
+    top_alt: (136, 134, 122),
+    top_hi: (196, 194, 182),
+    top_lo: (92, 92, 84),
+    cornice: (182, 180, 165),
+    front_base: (108, 106, 96),
+    front_alt: (146, 144, 132),
+    front_dark: (34, 35, 42),   // charcoal #22232A
+    mortar: (30, 30, 38),
+    trim_hi: (206, 204, 190),
+    trim_lo: (40, 40, 48),
+    detail_a: (85, 64, 100),    // dried ink #554064
+    detail_b: (78, 148, 152),   // registration cyan #4E9498
+    detail_c: (120, 90, 132),   // wet ink highlight
+    maze_top: (94, 92, 100),
+    maze_hi: (182, 180, 168),
+    maze_front: (48, 48, 56),
+    thresh_base: (36, 36, 44),
+    thresh_hi: (150, 148, 136),
+};
+
 const PAL_LAB: WallPalette = WallPalette {
     outline: (12, 15, 24),
     top_base: (52, 62, 88),
@@ -652,6 +698,153 @@ const fn theme_palette(theme: Theme) -> &'static WallPalette {
         Theme::Sewer => &PAL_SEWER,
         Theme::Kitchen => &PAL_KITCHEN,
         Theme::Lab => &PAL_LAB,
+        Theme::Laundry => &PAL_LAUNDRY,
+        Theme::Printworks => &PAL_PRINTWORKS,
+    }
+}
+
+/// The theme whose wall **carving** a floor reuses.
+///
+/// The wave 3 side routes share the existing material systems until their own
+/// art pass: the Laundry reuses the Kitchen's boarded porcelain (white goods
+/// and painted board) and the Printworks reuses the Sewer's block courses
+/// (a type wall is brick, reversed). Their own [`theme_palette`] entry makes
+/// them read apart at a glance, and their floors, props and hazards are bespoke.
+#[inline]
+const fn wall_style(theme: Theme) -> Theme {
+    match theme {
+        Theme::Laundry => Theme::Kitchen,
+        Theme::Printworks => Theme::Sewer,
+        other => other,
+    }
+}
+
+// ---- Wave 3 wall materials (palette-driven) -------------------------------
+//
+// The two side routes get their own materials rather than a donor's LUT: the
+// Laundry's walls are ribbed washboard porcelain over a denim body, the
+// Printworks' are newsprint type-block courses with printed ink rules and the
+// registration cyan. Both are built from the theme's own [`WallPalette`], so
+// they cannot inherit the Sewer's green bricks or the Kitchen's oak.
+
+/// The Laundry's top face: a vertical washboard rib every four pixels, a denim
+/// seam every eight and a brass rivet where ribs meet a seam row.
+#[inline]
+fn laundry_top(wx: i32, wy: i32, _cell_h: u32) -> Rgb {
+    let p = &PAL_LAUNDRY;
+    let col = wx.div_euclid(8);
+    let row = wy.div_euclid(8);
+    let n = hash3(col, row, 0x31a7);
+    let base = if n & 1 == 0 { p.top_base } else { p.top_alt };
+    let rib = wx.rem_euclid(4);
+    if wy.rem_euclid(8) == 0 {
+        p.mortar
+    } else if rib == 0 {
+        mix_c(p.top_hi, p.cornice, 0.30)
+    } else if rib == 3 {
+        mix_c(base, p.top_lo, 0.45)
+    } else if rib == 1 && wy.rem_euclid(8) == 2 && n & 3 == 0 {
+        p.detail_a
+    } else {
+        base
+    }
+}
+
+/// The Laundry's south face: porcelain ribs, a brass kick strip and a shadowed
+/// skirting course.
+#[inline]
+fn laundry_front(wx: i32, fy: i32) -> Rgb {
+    let p = &PAL_LAUNDRY;
+    let rib = wx.rem_euclid(5);
+    let body = if rib == 0 {
+        p.front_dark
+    } else if rib == 1 {
+        p.front_alt
+    } else {
+        p.front_base
+    };
+    match fy {
+        0 => mix_c(p.front_alt, p.top_hi, 0.35),
+        1 if rib == 2 => mix_c(body, p.cornice, 0.16),
+        3 => p.detail_a,
+        4 => p.front_dark,
+        _ => body,
+    }
+}
+
+/// The Printworks' top face: a 9 x 5-cell type block course, ink mortar, a
+/// reversed-letter pip on some blocks and a cyan registration tick every other
+/// column.
+#[inline]
+fn printworks_top(wx: i32, wy: i32, _cell_h: u32) -> Rgb {
+    let p = &PAL_PRINTWORKS;
+    let bx = wx.div_euclid(9);
+    let by = wy.div_euclid(5);
+    let lx = wx.rem_euclid(9);
+    let ly = wy.rem_euclid(5);
+    let n = hash3(bx, by, 0x5511);
+    let base = if n & 1 == 0 { p.top_base } else { p.top_alt };
+    if lx == 0 || ly == 0 {
+        p.mortar
+    } else if ly == 1 {
+        mix_c(base, p.top_hi, 0.55)
+    } else if (n >> 3) & 7 == 0 && (3..=5).contains(&lx) && (2..=3).contains(&ly) {
+        p.mortar // the reversed letter's face, standing proud
+    } else if (bx & 1) == 1 && ly == 4 && lx == 7 {
+        p.detail_b // registration cyan
+    } else if ly == 4 {
+        mix_c(base, p.top_lo, 0.35)
+    } else {
+        base
+    }
+}
+
+/// The Printworks' south face: charcoal panel, one printed ink rule across the
+/// middle and cyan registration ticks at the block joints.
+#[inline]
+fn printworks_front(wx: i32, fy: i32) -> Rgb {
+    let p = &PAL_PRINTWORKS;
+    let rule = wx.rem_euclid(8) == 0;
+    match fy {
+        0 => mix_c(p.front_alt, p.top_hi, 0.30),
+        2 => mix_c(p.front_dark, p.detail_a, 0.55),
+        3 => p.mortar,
+        4 => p.front_dark,
+        _ if rule => mix_c(p.front_base, p.detail_b, 0.30),
+        _ => p.front_base,
+    }
+}
+
+/// Fill a solid cell's whole 16 x 16 area with the theme's top material (the
+/// wave 3 themes' "fully surrounded wall" case).
+fn draw_wave3_solid_interior(
+    pb: &mut PixelBuffer,
+    sx: i32,
+    sy: i32,
+    view: &WallCellView,
+    laundry: bool,
+) {
+    let (wx0, wy0) = view.world_origin();
+    let cell_h = hash3(view.cell_x, view.cell_y, view.seed);
+    let bh = pb.h as i32;
+    let bw = pb.w as i32;
+    for ly in 0..CELL_SIZE {
+        let py = sy + ly;
+        if py < 0 || py >= bh {
+            continue;
+        }
+        for lx in 0..CELL_SIZE {
+            let px = sx + lx;
+            if px < 0 || px >= bw {
+                continue;
+            }
+            let c = if laundry {
+                laundry_top(wx0 + lx, wy0 + ly, cell_h)
+            } else {
+                printworks_top(wx0 + lx, wy0 + ly, cell_h)
+            };
+            pb.plot(px, py, c);
+        }
     }
 }
 
@@ -1109,7 +1302,7 @@ fn draw_doorway_ground(
                     } else if ly == 12 {
                         palette::scale(pal.thresh_base, 0.72)
                     } else {
-                        match theme {
+                        match wall_style(theme) {
                             Theme::Sewer => {
                                 // Iron drainage grate bars across threshold
                                 if (lx % 3) == 0 {
@@ -1142,6 +1335,8 @@ fn draw_doorway_ground(
                                     pal.thresh_base
                                 }
                             }
+                            // `wall_style` never returns the side-route themes: they borrow a donor.
+                            Theme::Laundry | Theme::Printworks => unreachable!(),
                         }
                     };
                     blend_px(pb, px, py, c, 0.90);
@@ -1189,7 +1384,7 @@ fn draw_doorway_ground(
                     } else if lx == 11 {
                         palette::scale(pal.thresh_base, 0.72)
                     } else {
-                        match theme {
+                        match wall_style(theme) {
                             Theme::Sewer => {
                                 if (ly % 3) == 0 {
                                     pal.outline
@@ -1217,6 +1412,8 @@ fn draw_doorway_ground(
                                     pal.thresh_base
                                 }
                             }
+                            // `wall_style` never returns the side-route themes: they borrow a donor.
+                            Theme::Laundry | Theme::Printworks => unreachable!(),
                         }
                     };
                     blend_px(pb, px, py, c, 0.90);
@@ -1780,6 +1977,16 @@ fn fill_top_row(
                 }
             }
         }
+        Theme::Laundry => {
+            for lx in x_start..x_end {
+                row_px[lx as usize] = laundry_top(wx0 + lx, wy, cell_h);
+            }
+        }
+        Theme::Printworks => {
+            for lx in x_start..x_end {
+                row_px[lx as usize] = printworks_top(wx0 + lx, wy, cell_h);
+            }
+        }
     }
 }
 
@@ -1939,6 +2146,16 @@ fn fill_front_row(
                 }
             }
         }
+        Theme::Laundry => {
+            for lx in x_start..x_end {
+                row_px[lx as usize] = laundry_front(wx0 + lx, fy);
+            }
+        }
+        Theme::Printworks => {
+            for lx in x_start..x_end {
+                row_px[lx as usize] = printworks_front(wx0 + lx, fy);
+            }
+        }
     }
 }
 
@@ -1971,6 +2188,10 @@ fn draw_solid_cell(
                 draw_sewer_solid_interior(pb, sx, sy, view, cell_h);
             }
             Theme::Kitchen => draw_kitchen_solid_interior(pb, sx, sy, view),
+            // The side routes fill a buried cell with their own material, so a
+            // wall mass never inherits a donor's bricks.
+            Theme::Laundry => draw_wave3_solid_interior(pb, sx, sy, view, true),
+            Theme::Printworks => draw_wave3_solid_interior(pb, sx, sy, view, false),
         }
         return;
     }
@@ -2245,6 +2466,8 @@ fn sample_top_material(
                 LAB_TOP_LUT.base[bi]
             }
         }
+        Theme::Laundry => laundry_top(wx, wy, cell_h),
+        Theme::Printworks => printworks_top(wx, wy, cell_h),
     }
 }
 
@@ -2265,7 +2488,7 @@ fn draw_front_accents(
     let has_w = view.mask.has(NeighborMask::W);
     let has_e = view.mask.has(NeighborMask::E);
 
-    match view.theme {
+    match wall_style(view.theme) {
         Theme::Sewer => {
             // Continuous bolted iron pipe-run spanning cohesive 2-cell bays
             if (bay_h & 3) == 2 && has_w && has_e {
@@ -2328,6 +2551,8 @@ fn draw_front_accents(
                 pb.plot(sx + 8, front_y + 1, pip);
             }
         }
+        // `wall_style` never returns the side-route themes: they borrow a donor.
+        Theme::Laundry | Theme::Printworks => unreachable!(),
     }
 }
 
@@ -2491,7 +2716,7 @@ fn draw_maze_cell(
             }
 
             if top {
-                let mut c = match view.theme {
+                let mut c = match wall_style(view.theme) {
                     Theme::Sewer => {
                         // Riveted weathered iron-slat culvert divider with rust flecks
                         let mut b = if (wx + wy) % 6 == 0 {
@@ -2530,6 +2755,8 @@ fn draw_maze_cell(
                             lab_top_base
                         }
                     }
+                    // `wall_style` never returns the side-route themes: they borrow a donor.
+                    Theme::Laundry | Theme::Printworks => unreachable!(),
                 };
 
                 let lit_n = !in_maze_top_ext(lx, ly - 2, m) && !in_maze_any(lx, ly - 2, m);
@@ -2548,7 +2775,7 @@ fn draw_maze_cell(
             } else {
                 // 5 px tall maze partition south front face (`fy in 0..4`, `fy == 4` is outline)
                 let fy = ly - y_front_start;
-                let mut c = match view.theme {
+                let mut c = match wall_style(view.theme) {
                     Theme::Sewer => {
                         let mut b = if (wx & 3) == 0 {
                             sewer_front_rib
@@ -2583,6 +2810,8 @@ fn draw_maze_cell(
                             lab_front_mid
                         }
                     }
+                    // `wall_style` never returns the side-route themes: they borrow a donor.
+                    Theme::Laundry | Theme::Printworks => unreachable!(),
                 };
                 if fy == 0 {
                     c = scale_c(c, 0.60);
@@ -2791,10 +3020,12 @@ fn draw_jamb_pillar_v(
         }
     }
     let pip_x = if is_left { x } else { x + 1 };
-    let pip_col = match theme {
+    let pip_col = match wall_style(theme) {
         Theme::Lab => palette::scale(accent, 0.90),
         Theme::Kitchen => pal.detail_a,
         Theme::Sewer => pal.trim_hi,
+        // `wall_style` never returns the side-route themes: they borrow a donor.
+        Theme::Laundry | Theme::Printworks => unreachable!(),
     };
     pb.plot(pip_x, y + TOP_FACE_H - 2, pip_col);
 }
@@ -2839,10 +3070,12 @@ fn draw_jamb_pillar_h(
         }
     }
     let pip_y = y + 1;
-    let pip_col = match theme {
+    let pip_col = match wall_style(theme) {
         Theme::Lab => palette::scale(accent, 0.90),
         Theme::Kitchen => pal.detail_a,
         Theme::Sewer => pal.trim_hi,
+        // `wall_style` never returns the side-route themes: they borrow a donor.
+        Theme::Laundry | Theme::Printworks => unreachable!(),
     };
     pb.plot(x + 3, pip_y, pip_col);
     pb.plot(x + CELL_SIZE - 4, pip_y, pip_col);
@@ -2860,10 +3093,12 @@ fn draw_oneway_gate(
     let t = view.open_progress.clamp(0.0, 1.0);
     let swing = t * 1.28; // swings up to ~73° in `dir`
     let stop_pip: Rgb = (206, 74, 64);
-    let leaf_col = match view.theme {
+    let leaf_col = match wall_style(view.theme) {
         Theme::Sewer => pal.detail_b,
         Theme::Kitchen => pal.maze_top,
         Theme::Lab => pal.maze_top,
+        // `wall_style` never returns the side-route themes: they borrow a donor.
+        Theme::Laundry | Theme::Printworks => unreachable!(),
     };
     let leaf_hi = pal.trim_hi;
 
@@ -3227,7 +3462,7 @@ pub fn draw_boss_threshold_ground(
     let pal = theme_palette(view.cell.theme);
     let (u0, u1, du_off) = boss_opening_span(view.cell.mask, view.inward);
 
-    match view.cell.theme {
+    match wall_style(view.cell.theme) {
         Theme::Sewer => {
             draw_boss_threshold_sewer(pb, sx, sy, view.inward, u0, u1, du_off, view.cell.seed, pal);
         }
@@ -3248,6 +3483,8 @@ pub fn draw_boss_threshold_ground(
                 accent,
             );
         }
+        // `wall_style` never returns the side-route themes: they borrow a donor.
+        Theme::Laundry | Theme::Printworks => unreachable!(),
     }
 }
 
@@ -3273,7 +3510,7 @@ pub fn draw_boss_threshold_overhang(
     let pal = theme_palette(view.cell.theme);
     let (u0, u1, du_off) = boss_opening_span(view.cell.mask, view.inward);
 
-    match view.cell.theme {
+    match wall_style(view.cell.theme) {
         Theme::Sewer => {
             // Three bold chipped jaguar claw-notches across the overhead stone lintel
             let chip_hi: Rgb = (162, 190, 174);
@@ -3332,6 +3569,8 @@ pub fn draw_boss_threshold_overhang(
                 }
             }
         }
+        // `wall_style` never returns the side-route themes: they borrow a donor.
+        Theme::Laundry | Theme::Printworks => unreachable!(),
     }
 }
 
@@ -4542,8 +4781,8 @@ mod tests {
         let right_edge = buf[0].x;
         assert_eq!(right_edge - left_edge, 30.0);
 
-        // Render all 3 themes × all 4 inward directions × edge cameras with zero panics
-        let mut theme_hashes = [0u64; 3];
+        // Render every theme × all 4 inward directions × edge cameras with zero panics
+        let mut theme_hashes = [0u64; 5];
         for (ti, theme) in Theme::all().into_iter().enumerate() {
             let accent = crate::game::level::Palette::for_theme(theme).accent;
             let bg = crate::game::level::Palette::for_theme(theme).bg;
@@ -4628,9 +4867,16 @@ mod tests {
                 }
             }
         }
-        assert_ne!(theme_hashes[0], theme_hashes[1]);
-        assert_ne!(theme_hashes[1], theme_hashes[2]);
-        assert_ne!(theme_hashes[0], theme_hashes[2]);
+        // Every floor's boss threshold is visibly its own (the wave 3 floors
+        // added two more, so the pairwise check covers all five).
+        for i in 0..theme_hashes.len() {
+            for j in i + 1..theme_hashes.len() {
+                assert_ne!(
+                    theme_hashes[i], theme_hashes[j],
+                    "boss thresholds {i} and {j} are identical"
+                );
+            }
+        }
     }
 
     /// Visual sheet: `RATRUN_DUMP=boss_thresholds cargo test dump_boss_thresholds_sheet`

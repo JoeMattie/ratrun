@@ -47,11 +47,36 @@ pub enum Theme {
     Sewer,
     Kitchen,
     Lab,
+    /// Wave 3 side route, stage two: the laundry floor with its washer aisles,
+    /// folding bays and steam grates (`WAVE3_DESIGN.md` §11).
+    Laundry,
+    /// Wave 3 side route, stage three: the printworks with its offset press
+    /// islands, paper lanes and ink pads (`WAVE3_DESIGN.md` §11).
+    Printworks,
 }
 
 impl Theme {
-    pub fn all() -> [Theme; 3] {
-        [Theme::Sewer, Theme::Kitchen, Theme::Lab]
+    /// Every theme in facility order: the campaign's three stages first (the
+    /// original route), then the two side-route floors.
+    pub fn all() -> [Theme; 5] {
+        [
+            Theme::Sewer,
+            Theme::Kitchen,
+            Theme::Lab,
+            Theme::Laundry,
+            Theme::Printworks,
+        ]
+    }
+
+    /// The campaign stage (0, 1 or 2) a theme belongs to: the Sewer is stage
+    /// one, the Kitchen and the Laundry are both stage two, the Lab and the
+    /// Printworks are both stage three.
+    pub fn stage(self) -> usize {
+        match self {
+            Theme::Sewer => 0,
+            Theme::Kitchen | Theme::Laundry => 1,
+            Theme::Lab | Theme::Printworks => 2,
+        }
     }
 
     pub fn name(self) -> &'static str {
@@ -59,6 +84,8 @@ impl Theme {
             Theme::Sewer => "Sewer",
             Theme::Kitchen => "Kitchen",
             Theme::Lab => "Lab",
+            Theme::Laundry => "Laundry",
+            Theme::Printworks => "Printworks",
         }
     }
 }
@@ -194,6 +221,26 @@ impl Palette {
                 accent: (120, 220, 255),
                 blood: (90, 200, 255),
             },
+            // Indigo tile #22263B over faded denim #426779, porcelain #B3C7C3
+            // highlights and the pink of a ruined white wash.
+            Theme::Laundry => Palette {
+                bg: (0x22, 0x26, 0x3B),
+                bg_alt: (0x2A, 0x2F, 0x48),
+                wall: (0x42, 0x67, 0x79),
+                wall_edge: (0xB3, 0xC7, 0xC3),
+                accent: (0x9F, 0xD8, 0xD4),
+                blood: (0xD8, 0x7E, 0xA6),
+            },
+            // Newsprint grey #B6B4A5 against charcoal #22232A, dried ink
+            // #554064 and registration cyan #4E9498.
+            Theme::Printworks => Palette {
+                bg: (0x22, 0x23, 0x2A),
+                bg_alt: (0x2C, 0x2D, 0x36),
+                wall: (0x96, 0x94, 0x88),
+                wall_edge: (0xB6, 0xB4, 0xA5),
+                accent: (0x4E, 0x94, 0x98),
+                blood: (0x55, 0x40, 0x64),
+            },
         }
     }
 }
@@ -214,6 +261,18 @@ pub enum PropKind {
     Console,
     Tank,
     Barrier,
+    /// A round-porthole washer (Laundry): a long white box you hop over.
+    Washer,
+    /// A rolled towel on end (Laundry).
+    TowelRoll,
+    /// A giant wooden clothespin leaning on the wall (Laundry).
+    Clothespin,
+    /// An offset press island (Printworks): a squat inked machine.
+    PressIsland,
+    /// A standing paper reel (Printworks).
+    PaperReel,
+    /// A reversed type block (Printworks): a lead letter, mirrored.
+    TypeBlock,
 }
 
 impl PropKind {
@@ -230,6 +289,12 @@ impl PropKind {
             PropKind::Console => (46.0, 18.0),
             PropKind::Tank => (24.0, 24.0),
             PropKind::Barrier => (16.0, 66.0),
+            PropKind::Washer => (58.0, 30.0),
+            PropKind::TowelRoll => (26.0, 26.0),
+            PropKind::Clothespin => (16.0, 34.0),
+            PropKind::PressIsland => (74.0, 46.0),
+            PropKind::PaperReel => (26.0, 34.0),
+            PropKind::TypeBlock => (30.0, 30.0),
         }
     }
 
@@ -281,6 +346,24 @@ pub fn theme_props(theme: Theme) -> &'static [PropKind] {
             PropKind::Tank,
             PropKind::Barrier,
             PropKind::Crate,
+        ],
+        // Washer banks and laundry trolleys; the clothespin is the tall one.
+        Theme::Laundry => &[
+            PropKind::Washer,
+            PropKind::Washer,
+            PropKind::TowelRoll,
+            PropKind::Clothespin,
+            PropKind::Washer,
+            PropKind::TowelRoll,
+        ],
+        // Press beds, paper reels and loose type: the print floor's furniture.
+        Theme::Printworks => &[
+            PropKind::PressIsland,
+            PropKind::PaperReel,
+            PropKind::TypeBlock,
+            PropKind::PressIsland,
+            PropKind::PaperReel,
+            PropKind::TypeBlock,
         ],
     }
 }
@@ -457,6 +540,12 @@ pub struct LevelObjects {
     pub mousetrap_records: Vec<TrapRecord>,
     /// Generator record for each entry of [`Self::rat_holes`], same index.
     pub rat_hole_records: Vec<RatHoleRecord>,
+    /// Steam grates (Laundry): walkable floor vents with a warn/plume cycle.
+    /// See [`super::hazards`].
+    pub steam_grates: Vec<super::hazards::SteamGrate>,
+    /// Ink pads (Printworks): permanent walkable stains that slow ground
+    /// movement. See [`super::hazards`].
+    pub ink_pads: Vec<super::hazards::InkPad>,
 }
 
 impl LevelObjects {
@@ -528,6 +617,8 @@ impl LevelObjects {
             + self.one_way_doors.len()
             + self.rat_holes.len()
             + self.rewards.len()
+            + self.steam_grates.len()
+            + self.ink_pads.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -765,6 +856,8 @@ pub fn level_seed(theme: Theme, seed: u64, attempt: u32) -> u64 {
         Theme::Sewer => 0x9e37_79b9_7f4a_7c15u64,
         Theme::Kitchen => 0xc2b2_ae3d_27d4_eb4fu64,
         Theme::Lab => 0x1656_67b1_9e37_79f9u64,
+        Theme::Laundry => 0x41c6_4f0a_b4e8_d2c7u64,
+        Theme::Printworks => 0x8f2d_9e55_1c73_a6b1u64,
     };
     let mut h = seed ^ t ^ ((attempt as u64) << 32);
     // splitmix64 finaliser: plenty to decorrelate neighbouring seeds.

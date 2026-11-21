@@ -11,6 +11,7 @@ pub mod enemy_move;
 pub mod fog;
 pub mod fx;
 pub mod gates;
+pub mod hazards;
 pub mod loot;
 pub mod player;
 pub mod projectiles;

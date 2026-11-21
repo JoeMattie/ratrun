@@ -108,15 +108,21 @@ pub fn weapon_glyph(kind: WeaponKind) -> char {
 /// **Turf-Reaper Mk.IV**. The second element is the arrival banner's flavour
 /// tag and never names a boss.
 pub fn boss_codename(theme: Theme) -> (&'static str, &'static str) {
-    let level = match theme {
-        Theme::Sewer => CampaignLevel::Sewer,
-        Theme::Kitchen => CampaignLevel::Kitchen,
-        Theme::Lab => CampaignLevel::Lab,
+    // The bar names the fight the player is *in*, so it follows the boss the
+    // floor actually spawns (`BossKind::for_theme::`, the wave 3 seam). The
+    // Laundry and the Printworks borrow the broom and the mower until their own
+    // bosses land, and then this follows automatically.
+    let level = match crate::game::ecs::systems::boss::BossKind::for_theme(theme) {
+        crate::game::ecs::systems::boss::BossKind::Cat => CampaignLevel::Sewer,
+        crate::game::ecs::systems::boss::BossKind::Broom => CampaignLevel::Kitchen,
+        crate::game::ecs::systems::boss::BossKind::Mower => CampaignLevel::Lab,
     };
     let class_tag = match level {
         CampaignLevel::Sewer => "CLASS-V APEX PREDATOR",
         CampaignLevel::Kitchen => "CLASS-V CUSTODIAN",
         CampaignLevel::Lab => "MK.IV AUTONOMOUS UNIT",
+        CampaignLevel::Laundry => "CLASS-V CUSTODIAN",
+        CampaignLevel::Printworks => "MK.IV AUTONOMOUS UNIT",
     };
     (level.boss_name(), class_tag)
 }

@@ -30,6 +30,12 @@ pub fn draw_prop(pb: &mut PixelBuffer, prop: &Prop, cam: Vec2, pal: &Palette) {
         PropKind::Counter => counter(pb, x, y, w, h, seed, pal),
         PropKind::Console => console(pb, x, y, w, h, seed, pal),
         PropKind::Tank => tank(pb, x, y, w, h, seed, pal),
+        PropKind::Washer => washer(pb, x, y, w, h, seed, pal),
+        PropKind::TowelRoll => towel_roll(pb, x, y, w, h, seed, pal),
+        PropKind::Clothespin => clothespin(pb, x, y, w, h, seed, pal),
+        PropKind::PressIsland => press_island(pb, x, y, w, h, seed, pal),
+        PropKind::PaperReel => paper_reel(pb, x, y, w, h, seed, pal),
+        PropKind::TypeBlock => type_block(pb, x, y, w, h, seed, pal),
     }
 }
 
@@ -1971,4 +1977,424 @@ fn tank(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, seed: u32, pal: &P
     pb.plot_add(gx - 2, cy_c, palette::scale(pal.accent, 0.10));
     pb.plot_add(gx, cy_c, palette::scale(pal.accent, 0.14));
     pb.plot_add(gx + 2, cy_c, palette::scale(pal.accent, 0.09));
+}
+
+// ---- 12. Laundry props: washer, towel roll, clothespin ----------------------
+
+/// A front-loading washer: a porcelain-white cabinet with a dark porthole, a
+/// detergent drawer and the little feet that make it read as a machine rather
+/// than a crate. 58 × 30 px.
+fn washer(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, seed: u32, pal: &Palette) {
+    shadow_rect(pb, x + 1, y, (w - 2).max(1), h);
+
+    let casing = (176, 190, 190);
+    let casing_hi = (214, 226, 224);
+    let casing_lo = (108, 124, 128);
+    let chrome = (150, 164, 168);
+    let chrome_hi = (226, 236, 236);
+    let glass = ambient_shade((18, 24, 34), pal, 0.35);
+    let outline = ambient_shade((16, 20, 26), pal, 0.30);
+
+    let front_h = 7.min(h / 3);
+    let top_h = (h - front_h).max(8);
+
+    // Top face: porcelain with a soft sheen and the drum's dark recess.
+    for ly in 0..top_h {
+        for lx in 0..w {
+            let px = x + lx;
+            let py = y + ly;
+            if lx == 0 || lx == w - 1 || ly == 0 || py == y + h - 1 {
+                pb.plot(px, py, outline);
+                continue;
+            }
+            let g = 1.10 - 0.20 * (lx as f32 / w.max(1) as f32 + ly as f32 / top_h.max(1) as f32) * 0.5;
+            let mut c = palette::scale(casing, g);
+            if ly == 1 {
+                c = casing_hi;
+            } else if ly == top_h - 1 {
+                c = casing_lo;
+            }
+            pb.plot(px, py, c);
+        }
+    }
+
+    // The porthole on the top face, offset toward the left third.
+    let cx = x + w / 3;
+    let cy = y + top_h / 2;
+    let r = (top_h.min(w) as f32 * 0.34).clamp(4.0, 9.0);
+    for dy in -(r as i32) - 1..=(r as i32) + 1 {
+        for dx in -(r as i32) - 1..=(r as i32) + 1 {
+            let nx = dx as f32 / r;
+            let ny = dy as f32 / r * 1.08;
+            let d = (nx * nx + ny * ny).sqrt();
+            let px = cx + dx;
+            let py = cy + dy;
+            if d > 1.16 {
+                continue;
+            }
+            if d > 0.94 {
+                // Chrome bezel
+                pb.plot(px, py, if nx + ny < -0.4 { chrome_hi } else { chrome });
+            } else if d > 0.34 {
+                let sheen = (-nx * 0.6 - ny * 0.7).clamp(-1.0, 1.0);
+                pb.plot(px, py, palette::mix(glass, chrome, 0.10 + sheen.max(0.0) * 0.30));
+            } else {
+                // The drum's throat and a hint of grey wash water.
+                pb.plot(px, py, palette::mix(glass, pal.blood, 0.16));
+            }
+        }
+    }
+    // Handle pip and detergent drawer on the right of the top.
+    pb.rect_fill(x + w - 12, y + 3, 7, 2, chrome);
+    pb.plot(x + w - 12, y + 3, chrome_hi);
+    pb.rect_fill(x + w - 5, y + 2, 2, 4, palette::scale(chrome, 0.72));
+
+    // Front face: kick plate, soap drawer seam, a lint of hair in the corner.
+    for dy in 0..front_h {
+        let py = y + top_h + dy;
+        for lx in 0..w {
+            let px = x + lx;
+            if lx == 0 || lx == w - 1 || py == y + h - 1 {
+                pb.plot(px, py, outline);
+                continue;
+            }
+            let g = if dy == 0 { 0.58 } else { 1.02 - 0.22 * (lx as f32 / w.max(1) as f32) };
+            let mut c = palette::scale(casing_lo, g);
+            if lp_dash(lx, seed) {
+                c = palette::mix(c, casing_hi, 0.24);
+            }
+            pb.plot(px, py, c);
+        }
+    }
+    // Feet.
+    pb.rect_fill(x + 2, y + h - 2, 3, 2, ambient_shade((30, 34, 40), pal, 0.2));
+    pb.rect_fill(x + w - 5, y + h - 2, 3, 2, ambient_shade((24, 28, 34), pal, 0.2));
+}
+
+/// A single narrow dash pattern so the front seam reads as a stamped vent.
+#[inline]
+fn lp_dash(lx: i32, seed: u32) -> bool {
+    let phase = (seed as i32 & 3) + lx;
+    phase.rem_euclid(6) < 2
+}
+
+/// A rolled towel standing on end: cream cylinder, spiral coil on the cap and a
+/// coloured band in the laundry's own palette. 26 × 26 px.
+fn towel_roll(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, seed: u32, pal: &Palette) {
+    shadow_ellipse(pb, x as f32 + w as f32 * 0.55, y as f32 + h as f32 * 0.94, w as f32 * 0.52, 4.0, 0.5);
+    let cloth = (206, 208, 200);
+    let cloth_lo = (150, 152, 148);
+    let cloth_hi = (238, 238, 230);
+    let band = palette::mix(cloth, pal.blood, 0.30);
+    let outline = ambient_shade((18, 20, 26), pal, 0.3);
+    let cx = x + w / 2;
+    let rx = (w as f32 * 0.42).max(3.0);
+    let cap_cy = y as f32 + rx * 0.9;
+    let body_top = y + (rx * 0.9) as i32;
+    let body_bot = y + h - 3;
+    for py in body_top..=body_bot {
+        let t = (py - body_top) as f32 / (body_bot - body_top).max(1) as f32;
+        let rx_row = rx * (1.0 - 0.05 * t);
+        for px in (cx - rx_row as i32)..=(cx + rx_row as i32) {
+            let nx = (px as f32 + 0.5 - cx as f32) / rx_row.max(1.0);
+            let shade = 1.0 - 0.34 * (nx * 0.6 + 0.5).max(0.0);
+            let mut c = palette::scale(cloth, shade);
+            // Rolled bands every third row.
+            if (py - body_top).rem_euclid(4) == 0 {
+                c = palette::mix(c, cloth_lo, 0.35);
+            }
+            if (py as f32 - (body_top as f32 + 6.0)).abs() < 1.5 {
+                c = band;
+            }
+            pb.plot(px, py, c);
+            if nx.abs() > 0.88 {
+                pb.plot(px, py, outline);
+            }
+        }
+    }
+    // Spiral coil on the cap.
+    for (i, (dx, dy)) in [(0, 0), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1), (2, 0), (2, 1), (2, 2), (1, 2), (0, 2)]
+        .into_iter()
+        .enumerate()
+    {
+        let c = if i % 2 == 0 { cloth_hi } else { cloth_lo };
+        pb.plot(cx + dx, cap_cy as i32 + dy, c);
+    }
+    // A loose thread end, seeded so rolls in a bank differ.
+    let tail = 1 + (seed as i32 & 3);
+    for k in 0..tail {
+        pb.plot(cx + 2 + k, body_bot - 1 - k % 2, cloth_hi);
+    }
+}
+
+/// A giant wooden clothespin leaning in the corner: two tapered legs, a spring
+/// band, and the split that makes it read as a peg. 16 × 34 px.
+fn clothespin(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, seed: u32, pal: &Palette) {
+    shadow_rect(pb, x + 1, y, (w - 2).max(1), h);
+    let wood = (182, 148, 96);
+    let wood_hi = (218, 186, 132);
+    let wood_lo = (118, 92, 56);
+    let spring = (140, 148, 158);
+    let outline = ambient_shade((26, 18, 10), pal, 0.32);
+    let split = w / 2;
+    for ly in 0..h {
+        let t = ly as f32 / h.max(1) as f32;
+        // The peg is wider at the head and tapers to the pinch at the bottom.
+        let inset = (t * (w as f32 * 0.22)) as i32;
+        for lx in inset..(w - inset).max(inset + 1) {
+            let px = x + lx;
+            let py = y + ly;
+            let g = 1.08 - 0.26 * (lx as f32 / w.max(1) as f32);
+            let mut c = palette::scale(wood, g);
+            if lx <= inset + 1 {
+                c = wood_hi;
+            } else if lx >= w - inset - 2 {
+                c = wood_lo;
+            }
+            // The pinch gap between the two halves.
+            if (lx - split).abs() <= 0 && ly > h / 5 && ly < h - h / 8 {
+                c = outline;
+            }
+            pb.plot(px, py, c);
+        }
+    }
+    // Spring band: two bright rings low on the peg.
+    let ring_y = y + h * 3 / 5;
+    pb.rect_fill(x + 2, ring_y, w - 4, 2, spring);
+    pb.rect_fill(x + 2, ring_y + 3, w - 4, 1, palette::scale(spring, 0.7));
+    pb.plot(x + 3, ring_y, (214, 222, 230));
+    // A gum-ring of old starch at the head.
+    let gum = mix_hint(wood, pal.blood, 0.22);
+    pb.rect_fill(x + split - 1, y + 2, 2, 3, gum);
+    let _ = seed;
+}
+
+#[inline]
+fn mix_hint(a: Rgb, b: Rgb, t: f32) -> Rgb {
+    palette::mix(a, b, t)
+}
+
+// ---- 13. Printworks props: press island, paper reel, type block ------------
+
+/// An offset press island: a dark cast-iron bed with a bright cylinder roller,
+/// an ink drum and a paper tongue running out of the nip. 74 × 46 px.
+fn press_island(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, seed: u32, pal: &Palette) {
+    shadow_rect(pb, x, y, w, h);
+    let iron = (58, 62, 72);
+    let iron_hi = (104, 110, 122);
+    let iron_lo = (30, 32, 40);
+    let roller = (168, 174, 182);
+    let roller_hi = (228, 232, 238);
+    let ink = pal.blood;
+    let paper = palette::mix((200, 198, 186), pal.bg_alt, 0.18);
+    let outline = ambient_shade((10, 11, 16), pal, 0.3);
+    let front_h = (h / 3).max(6);
+    let top_h = h - front_h;
+
+    // Bed top with a bolted frame.
+    for ly in 0..top_h {
+        for lx in 0..w {
+            let px = x + lx;
+            let py = y + ly;
+            if lx == 0 || lx == w - 1 || ly == 0 {
+                pb.plot(px, py, outline);
+                continue;
+            }
+            let g = 1.06 - 0.22 * (ly as f32 / top_h.max(1) as f32);
+            let mut c = palette::scale(iron, g);
+            if lx % 9 == 0 {
+                c = palette::mix(c, iron_lo, 0.5);
+            }
+            if lx % 9 == 4 && ly % 7 == 3 {
+                c = iron_hi; // bolt heads
+            }
+            pb.plot(px, py, c);
+        }
+    }
+
+    // The cylinder: a bright horizontal roller across the upper third.
+    let roll_y = y + 3;
+    let roll_h = (top_h / 3).max(3);
+    for dy in 0..roll_h {
+        for lx in 2..w - 2 {
+            let ny = (dy as f32 + 0.5) / roll_h as f32 - 0.5;
+            let c = if ny < -0.22 {
+                roller_hi
+            } else if ny < 0.2 {
+                roller
+            } else {
+                palette::scale(roller, 0.62)
+            };
+            pb.plot(x + lx, roll_y + dy, c);
+        }
+    }
+
+    // Ink drum on the left, paper tongue out of the nip to the right.
+    let drum_cx = x + w / 5;
+    let drum_cy = y + top_h / 2 + 2;
+    for dy in -4i32..=4 {
+        for dx in -4i32..=4 {
+            if dx * dx + dy * dy <= 16 {
+                let d = ((dx * dx + dy * dy) as f32).sqrt();
+                let c = if d > 3.2 {
+                    palette::scale(ink, 0.6)
+                } else if dx + dy < -2 {
+                    palette::mix(ink, (210, 210, 220), 0.18)
+                } else {
+                    ink
+                };
+                pb.plot(drum_cx + dx, drum_cy + dy, c);
+            }
+        }
+    }
+    let tongue_x = x + w / 2;
+    let tongue_y = y + top_h - 5;
+    for k in 0..(w / 3) {
+        pb.plot(tongue_x + k, tongue_y + (k / 6), paper);
+        pb.plot(tongue_x + k, tongue_y + 1 + (k / 6), palette::scale(paper, 0.82));
+    }
+    // A printed rule already on the tongue.
+    for k in 0..(w / 4) {
+        pb.plot(tongue_x + 2 + k, tongue_y, palette::scale(ink, 0.9));
+    }
+
+    // Front face: legs and the drive housing.
+    for dy in 0..front_h {
+        let py = y + top_h + dy;
+        for lx in 0..w {
+            let px = x + lx;
+            if lx == 0 || lx == w - 1 || py == y + h - 1 {
+                pb.plot(px, py, outline);
+                continue;
+            }
+            let g = if dy == 0 { 0.55 } else { 0.92 - 0.22 * (lx as f32 / w.max(1) as f32) };
+            let mut c = palette::scale(iron_lo, g);
+            if lx > w / 3 && lx < w / 3 + 10 && dy > 1 {
+                c = palette::scale(iron, g + 0.25);
+            }
+            pb.plot(px, py, c);
+        }
+    }
+    // The little brass plate every machine in this building has.
+    let plate = palette::mix(iron_hi, (198, 168, 92), 0.55);
+    pb.rect_fill(x + 4, y + h - 4, 6, 2, plate);
+    let _ = seed;
+}
+
+/// A standing paper reel: a pale disc of newsprint on a dark stand, with the
+/// loose edge peeling down. 26 × 34 px.
+fn paper_reel(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, seed: u32, pal: &Palette) {
+    shadow_rect(pb, x + 1, y, (w - 2).max(1), h);
+    let paper = palette::mix((206, 204, 190), pal.bg_alt, 0.10);
+    let paper_lo = palette::scale(paper, 0.78);
+    let paper_hi = (238, 236, 226);
+    let stand = ambient_shade((42, 44, 52), pal, 0.25);
+    let outline = ambient_shade((12, 13, 18), pal, 0.3);
+    let cx = x + w / 2;
+    let cy = y + w / 2 + 1;
+    let r = (w as f32 * 0.46).max(4.0);
+    for dy in -(r as i32) - 1..=(r as i32) + 1 {
+        for dx in -(r as i32) - 1..=(r as i32) + 1 {
+            let d = (((dx * dx + dy * dy) as f32).sqrt()) / r;
+            if d > 1.06 {
+                continue;
+            }
+            let c = if d > 0.92 {
+                outline
+            } else if d > 0.52 {
+                let ring = ((d * 7.0) as i32) & 1 == 0;
+                if ring {
+                    paper
+                } else {
+                    paper_lo
+                }
+            } else if d > 0.18 {
+                paper_hi
+            } else {
+                // The core's dark hole.
+                palette::scale(stand, 0.6)
+            };
+            pb.plot(cx + dx, cy + dy, c);
+        }
+    }
+    // The loose edge peels off the bottom of the reel and curls on the floor.
+    let peel = 2 + (seed as i32 % 3);
+    for k in 0..peel {
+        let py = cy + r as i32 - 1 + k;
+        let wide = 6 - k;
+        for lx in 0..wide {
+            pb.plot(cx - 3 + lx, py, if k == 0 { paper_hi } else { paper });
+        }
+    }
+    // Stand legs.
+    pb.rect_fill(cx - 1, cy + r as i32, 2, h - (cy + r as i32 - y), stand);
+    pb.rect_fill(cx - 5, y + h - 3, 10, 2, stand);
+    pb.plot(cx - 5, y + h - 3, palette::scale(stand, 1.5));
+}
+
+/// A loose piece of type: a lead block with a reversed capital standing proud of
+/// its top face. 30 × 30 px.
+fn type_block(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, seed: u32, pal: &Palette) {
+    shadow_rect(pb, x, y, w, h);
+    let lead = (112, 116, 126);
+    let lead_hi = (168, 172, 182);
+    let lead_lo = (56, 58, 68);
+    let outline = ambient_shade((10, 11, 15), pal, 0.3);
+    let front_h = (h / 4).max(4);
+    let top_h = h - front_h;
+    for ly in 0..top_h {
+        for lx in 0..w {
+            let px = x + lx;
+            let py = y + ly;
+            if lx == 0 || lx == w - 1 || ly == 0 {
+                pb.plot(px, py, outline);
+                continue;
+            }
+            let g = 1.08 - 0.20 * (lx as f32 / w.max(1) as f32 + ly as f32 / top_h.max(1) as f32) * 0.5;
+            let edge = lx == 1 || ly == 1;
+            pb.plot(px, py, if edge { lead_hi } else { palette::scale(lead, g) });
+        }
+    }
+    // The letter: mirrored, so it reads as type rather than paint.
+    // Two of four seeded glyphs: an E and an L (flipped horizontally).
+    let gx = x + 4;
+    let gy = y + 3;
+    let gw = (w - 8).max(5);
+    let gh = (top_h - 6).max(5);
+    let bar = (gw / 3).max(2);
+    let glyph = seed % 2;
+    let mirror = |lx: i32, glyph_w: i32| glyph_w - 1 - lx;
+    for ly in 0..gh {
+        for lx in 0..gw {
+            let mlx = mirror(lx, gw);
+            let on = if glyph == 0 {
+                // E
+                ly == 0
+                    || ly == gh - 1
+                    || ly == gh / 2
+                    || mlx < bar
+            } else {
+                // L
+                mlx < bar || ly == gh - 1
+            };
+            if on {
+                pb.plot(gx + lx, gy + ly, lead_hi);
+                pb.plot(gx + lx, gy + ly + 1, lead_lo);
+            }
+        }
+    }
+    // Front face with the printer's nick.
+    for dy in 0..front_h {
+        let py = y + top_h + dy;
+        for lx in 0..w {
+            let px = x + lx;
+            if lx == 0 || lx == w - 1 || py == y + h - 1 {
+                pb.plot(px, py, outline);
+                continue;
+            }
+            let g = if dy == 0 { 0.55 } else { 0.9 - 0.2 * (lx as f32 / w.max(1) as f32) };
+            pb.plot(px, py, palette::scale(lead_lo, g));
+        }
+    }
+    pb.plot(x + 2, y + h - 2, pal.accent);
 }

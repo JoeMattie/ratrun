@@ -42,7 +42,12 @@ pub fn draw_floor(pb: &mut PixelBuffer, level: &Level, cam: Vec2, elapsed: f32) 
         Theme::Sewer => sewer(&mut floor, &level.palette, elapsed),
         Theme::Kitchen => kitchen(&mut floor, &level.palette),
         Theme::Lab => lab(&mut floor, &level.palette),
+        Theme::Laundry => laundry(&mut floor, &level.palette, elapsed),
+        Theme::Printworks => printworks(&mut floor, &level.palette, elapsed),
     }
+    // The wave 3 floor hazards sit on the floor layer: they are walkable, so
+    // they must read as paint and grate plates, never as obstacles.
+    hazards(&mut floor, level, elapsed);
     kerb(&mut floor, level, width, height);
 }
 
@@ -312,6 +317,196 @@ fn lab(floor: &mut Floor<'_>, pal: &Palette) {
     }
 }
 
+/// The Laundry floor: indigo square tile laid over faded denim grout, with a
+/// porcelain scuff in most tiles and a brass drain plate where four tiles meet.
+/// The drains glint slowly so the floor reads as wet without any per-frame
+/// randomness.
+fn laundry(floor: &mut Floor<'_>, pal: &Palette, elapsed: f32) {
+    const TILE: i32 = 16;
+    let grout = mix(pal.bg, pal.wall, 0.30);
+    let glaze = [
+        mix(pal.bg, pal.bg_alt, 0.55),
+        mix(pal.bg, pal.bg_alt, 0.22),
+    ];
+    let porcelain = mix(pal.bg_alt, pal.wall_edge, 0.38);
+    let brass = mix(pal.bg, (122, 96, 46), 0.60);
+    for row in floor.rows(TILE, 0) {
+        for col in floor.columns(TILE, 0) {
+            let (x, y) = (col * TILE, row * TILE);
+            let n = hash(col + 73, row + 41);
+            let body = mix(glaze[((col + row) & 1) as usize], grout, (n & 3) as f32 * 0.06);
+            floor.fill(x, y, TILE, TILE, grout);
+            floor.fill(x + 1, y + 1, TILE - 2, TILE - 2, body);
+            // Bevel: porcelain catches the light on the top-left, denim in the
+            // shadowed bottom-right.
+            floor.fill(x + 1, y + 1, TILE - 2, 1, mix(body, pal.wall_edge, 0.22));
+            floor.fill(x + 1, y + TILE - 2, TILE - 2, 1, mix(body, grout, 0.45));
+            if n & 7 == 0 {
+                // A scuff of porcelain where a trolley wheel has ground the glaze.
+                let sx = x + 3 + (n >> 6 & 7) as i32;
+                let sy = y + 3 + (n >> 10 & 7) as i32;
+                floor.fill(sx, sy, 4 + (n >> 13 & 3) as i32, 1, mix(body, porcelain, 0.42));
+                floor.fill(sx + 2, sy + 2, 3, 1, mix(body, porcelain, 0.24));
+            } else if n & 15 == 5 {
+                // Lint in the seam: a pale dashed line.
+                for k in 0..4 {
+                    floor.fill(x + 2 + k * 3, y + TILE - 3, 2, 1, mix(body, porcelain, 0.30));
+                }
+            }
+            // Brass drain plate at every fourth tile junction.
+            if col.rem_euclid(4) == 0 && row.rem_euclid(4) == 0 {
+                // Brass drain plate. Every colour here stays under the floor
+                // layer's contrast cap (110): the entities above it have to pop.
+                let shimmer = ((elapsed * 0.6 + (n >> 16 & 31) as f32).sin() + 1.0) * 0.5;
+                let glow = mix(brass, (104, 92, 62), 0.30 + 0.25 * shimmer);
+                floor.fill(x + 4, y + 4, 8, 8, mix(brass, grout, 0.35));
+                for bx in 0..3 {
+                    floor.fill(x + 5 + bx * 2, y + 6, 1, 5, glow);
+                }
+                floor.fill(x + 5, y + 5, 6, 1, mix(glow, pal.wall_edge, 0.16));
+            }
+        }
+    }
+}
+
+/// The Printworks floor: charcoal slab with the paler seams of a press hall,
+/// sheets of newsprint that slid off the belt (pale, with a printed rule), and
+/// registration marks in cyan at every press bed.
+fn printworks(floor: &mut Floor<'_>, pal: &Palette, elapsed: f32) {
+    const W: i32 = 38;
+    const H: i32 = 26;
+    let seam = mix(pal.bg, (0, 0, 0), 0.45);
+    let slab = mix(pal.bg, pal.bg_alt, 0.55);
+    let newsprint = mix(pal.bg, pal.wall_edge, 0.68);
+    let ink = pal.blood;
+    let cyan = pal.accent;
+    for row in floor.rows(H, 0) {
+        for col in floor.columns(W, 0) {
+            let (x, y) = (col * W, row * H);
+            let n = hash(col + 19, row + 61);
+            let body = mix(slab, seam, (n & 3) as f32 * 0.05);
+            floor.fill(x, y, W, H, seam);
+            floor.fill(x + 1, y + 1, W - 2, H - 2, body);
+            floor.fill(x + 1, y + 1, W - 2, 1, mix(body, pal.wall, 0.16));
+            floor.fill(x + 1, y + H - 2, W - 2, 1, mix(body, seam, 0.55));
+            // Ink smears: two dark drags in one direction, always low contrast.
+            if n & 3 == 1 {
+                let sx = x + 4 + (n >> 5 & 7) as i32;
+                let sy = y + 5 + (n >> 9 & 7) as i32;
+                floor.fill(sx, sy, 9, 2, mix(body, ink, 0.24));
+                floor.fill(sx + 3, sy + 3, 5, 1, mix(body, ink, 0.16));
+            }
+            // A sheet of newsprint slid off the belt: pale, with a printed rule
+            // and a registration tick in the corner.
+            if n & 7 == 2 {
+                let sx = x + 6 + (n >> 12 & 3) as i32;
+                let sy = y + 4 + (n >> 15 & 3) as i32;
+                let sw = 14 + (n >> 17 & 3) as i32;
+                let sh = 9 + (n >> 19 & 3) as i32;
+                floor.fill(sx, sy, sw, sh, mix(body, newsprint, 0.80));
+                floor.fill(sx, sy, sw, 1, mix(newsprint, body, 0.30));
+                // Two grey text rules and the masthead band.
+                floor.fill(sx + 2, sy + 2, sw - 5, 1, mix(body, ink, 0.35));
+                floor.fill(sx + 2, sy + 4, sw - 8, 1, mix(body, ink, 0.24));
+                floor.fill(sx + 2, sy + 6, sw - 6, 1, mix(body, ink, 0.20));
+                floor.fill(sx + sw - 4, sy + sh - 3, 2, 1, mix(cyan, body, 0.35));
+            }
+            // Registration cross at the press-bed corners of the hall.
+            if col.rem_euclid(5) == 2 && row.rem_euclid(4) == 2 {
+                let pulse = 0.45 + 0.15 * ((elapsed * 0.8 + n as f32).sin());
+                floor.fill(x + W / 2 - 3, y + H / 2, 6, 1, mix(body, cyan, pulse));
+                floor.fill(x + W / 2, y + H / 2 - 3, 1, 6, mix(body, cyan, pulse));
+                floor.fill(x + W / 2, y + H / 2, 1, 1, mix(cyan, pal.wall_edge, 0.45));
+            }
+        }
+    }
+}
+
+/// Steam grates and ink pads: the two floors' own hazards.
+///
+/// The grate plate is always visible (so the lane reads before it vents), the
+/// three pale puffs are the 1 s tell and the plume is a pale column over the
+/// plate. Ink pads are a dark stipple with a wet cyan rim — permanent, because
+/// the slow is permanent.
+fn hazards(floor: &mut Floor<'_>, level: &Level, elapsed: f32) {
+    let pal = &level.palette;
+    let on_screen = |f: &Floor<'_>, x: i32, y: i32, w: i32, h: i32| {
+        x + w > f.x.start && x < f.x.end && y + h > f.y.start && y < f.y.end
+    };
+
+    for pad in &level.objects.ink_pads {
+        let (x0, y0) = ((pad.pos.x - pad.half.x) as i32, (pad.pos.y - pad.half.y) as i32);
+        let (w, h) = ((pad.half.x * 2.0) as i32, (pad.half.y * 2.0) as i32);
+        if !on_screen(floor, x0, y0, w, h) {
+            continue;
+        }
+        let stain = mix(pal.bg, pal.blood, 0.46);
+        let deep = mix(stain, (0, 0, 0), 0.42);
+        floor.fill(x0 + 1, y0 + 1, w - 2, h - 2, stain);
+        // Stipple: short seeded dashes, so two pads never look alike.
+        let mut seed = pad.seed;
+        for ry in 1..h - 1 {
+            for rx in 1..w - 1 {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let bit = (seed >> 24) as u8;
+                if bit.is_multiple_of(5) {
+                    floor.fill(x0 + rx, y0 + ry, 1, 1, deep);
+                } else if bit.is_multiple_of(11) {
+                    floor.fill(x0 + rx, y0 + ry, 2, 1, mix(stain, pal.accent, 0.22));
+                }
+            }
+        }
+        // The wet rim: a cyan-lit top edge and a couple of drips.
+        floor.fill(x0 + 1, y0, w - 2, 1, mix(stain, pal.accent, 0.42));
+        floor.fill(x0, y0 + 2, 1, h - 4, mix(stain, pal.accent, 0.24));
+        let drip = 1 + (pad.seed as i32 & 3);
+        for k in 0..drip {
+            floor.fill(x0 + 2 + k * 3, y0 + h - 1, 1, 1 + k % 2, deep);
+        }
+    }
+
+    for grate in &level.objects.steam_grates {
+        let (cx, cy) = (grate.pos.x as i32, grate.pos.y as i32);
+        if !on_screen(floor, cx - 8, cy - 8, 16, 16) {
+            continue;
+        }
+        // Plate: a recessed iron square with three slots.
+        let plate = mix(pal.bg, pal.wall, 0.30);
+        let slot = mix(plate, (0, 0, 0), 0.55);
+        floor.fill(cx - 6, cy - 6, 12, 12, plate);
+        floor.fill(cx - 6, cy - 6, 12, 1, mix(plate, pal.wall_edge, 0.28));
+        floor.fill(cx - 6, cy + 5, 12, 1, slot);
+        for k in 0..3 {
+            floor.fill(cx - 4, cy - 3 + k * 3, 8, 1, slot);
+        }
+        let puff = mix(pal.bg_alt, pal.wall_edge, 0.72);
+        if grate.warning() {
+            // Three pale puffs: the 1 s tell.
+            let t = grate.phase.progress(grate.timer);
+            let rise = (t * 18.0) as i32;
+            for k in 0..3 {
+                let r = 2 + k;
+                let px = cx - r;
+                let py = cy - 4 - rise + k * 3;
+                floor.fill(px, py, r * 2, r, mix(puff, pal.bg, 0.18 + 0.2 * k as f32));
+            }
+        } else if grate.plume() {
+            // The scalding column: pale body, bright core, a rim at the base.
+            let t = grate.phase.progress(grate.timer);
+            let height = 18 + (t * 8.0) as i32;
+            let body = mix(pal.wall_edge, pal.bg_alt, 0.24);
+            let core = mix(body, (255, 255, 255), 0.30);
+            floor.fill(cx - 6, cy - height, 12, height, body);
+            floor.fill(cx - 4, cy - height + 2, 8, height - 4, mix(core, body, 0.35));
+            floor.fill(cx - 2, cy - height + 3, 4, height - 8, core);
+            floor.fill(cx - 7, cy - 1, 14, 1, mix(body, pal.accent, 0.40));
+            // The fast shimmer of escaping steam.
+            let s = ((elapsed * 9.0 + cx as f32).sin() * 0.5 + 0.5) * 4.0;
+            floor.fill(cx - 5 + s as i32, cy - height + 4, 2, height - 8, mix(core, body, 0.25));
+        }
+    }
+}
+
 fn kerb(floor: &mut Floor<'_>, level: &Level, width: i32, height: i32) {
     let pal = &level.palette;
     let shade = scale(pal.bg, 0.54);
@@ -338,6 +533,14 @@ fn kerb(floor: &mut Floor<'_>, level: &Level, width: i32, height: i32) {
         Theme::Lab => {
             let warning = mix(face, (103, 80, 37), 0.48);
             (32, 13, warning, mix(warning, bevel, 0.45))
+        }
+        Theme::Laundry => {
+            let porcelain = mix(face, pal.wall_edge, 0.46);
+            (16, 0, porcelain, mix(porcelain, bevel, 0.45))
+        }
+        Theme::Printworks => {
+            let cyan = mix(face, pal.accent, 0.52);
+            (38, 19, cyan, mix(cyan, bevel, 0.40))
         }
     };
     for edge in [2, height - 4] {

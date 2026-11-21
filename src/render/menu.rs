@@ -63,6 +63,8 @@ pub enum Target {
     OptionsBar(usize),
     /// The options screen's Back row: returns to wherever the player came from.
     OptionsBack,
+    /// Keep screen: pick route floor `i` (`0..2`) for the next campaign level.
+    RouteOption(usize),
 }
 
 /// How many interactive rectangles one screen can register. The campaign
@@ -207,6 +209,8 @@ pub(crate) fn material(theme: Theme) -> palette::Rgb {
         Theme::Sewer => (144, 184, 173),
         Theme::Kitchen => (213, 173, 122),
         Theme::Lab => (151, 175, 214),
+        Theme::Laundry => (159, 200, 200),
+        Theme::Printworks => (182, 180, 165),
     }
 }
 
@@ -334,8 +338,11 @@ pub fn draw_title(
     let mut y = rat_h + art_gap + logo_h;
     center(f, body, y, label(lore::TITLE_BLURB, MUTED));
     y += 1 + gap;
-    let menu = centered_rect(30, body.height, body);
-    let sector_label = "Sector   ";
+    // 32 columns: the sector row lists all five floors now, and
+    // `Sector ‹ 03 Printworks × ›` plus the ` ▸  ` pointer is 30 cells — it did
+    // not fit the old 30-column band at 57x20.
+    let menu = centered_rect(32, body.height, body);
+    let sector_label = "Sector ";
     let sector_text = sector_name(sector, sector_unlocked);
     let sector_row = format!("{sector_label}‹ {sector_text} ›");
     for (i, text) in ["START RUN", sector_row.as_str(), "OPTIONS", "QUIT"]
@@ -603,6 +610,17 @@ pub fn draw_map_intro(f: &mut Frame, area: Rect, theme: Theme, accent: Color, hi
             "  ╭──╮      ╭──╮  ",
             "──┤  ├──»───┤  ├──",
             "  ╰──╯      ╰──╯  ",
+        ],
+        // A washer drum and a press roller: the two side-route floors.
+        Theme::Laundry => [
+            "  ╭───────╮  ╭──╮ ",
+            "──┤ ▓▓▓▓▓ ├──┤░░├─",
+            "  ╰───────╯  ╰──╯ ",
+        ],
+        Theme::Printworks => [
+            "  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄  ",
+            "──█▓▓▓▓▓▓▓▓▓▓▓▓█──",
+            "  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀  ",
         ],
     };
     for (i, s) in emblem.iter().enumerate() {

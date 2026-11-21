@@ -369,6 +369,11 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
         Theme::Sewer => 0.42,
         Theme::Kitchen => 0.56,
         Theme::Lab => 0.50,
+        // The Laundry is halls and aisles, not warrens: big open bays to line
+        // with washers. The Printworks is press-hall floor: slightly more than
+        // half halls, so the press islands have room to be offset in.
+        Theme::Laundry => 0.58,
+        Theme::Printworks => 0.52,
     };
     let target = OPEN_TARGET.0 + rng.random_range(0..=4) as f64 * 0.01;
     let target_cells = (cols * rows) as f64 * target;
@@ -672,6 +677,14 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
     // ---- 6. cover and texture -------------------------------------------
     let partitions = scatter_cover(tiles, rng, &areas, &maze_slots, start_cell);
 
+    // ---- 6b. the floor's own geometry (wave 3 side routes) ---------------
+    // The Laundry's washer aisles and the Printworks' press islands are the
+    // character of those floors (`WAVE3_DESIGN.md` §11). They are painted here,
+    // after the generic cover and before the connectivity repair, so a bad
+    // arrangement is stitched back rather than shipped. Every other theme
+    // draws no rng here and is byte-for-byte unchanged.
+    theme_layout(tiles, rng, &areas, &maze_slots, start_cell, theme);
+
     // ---- 7. connectivity repair ------------------------------------------
     // The sprawl is connected by construction. This pass proves it, and
     // stitches anything an area's own geometry left orphaned, so the promise is
@@ -699,8 +712,9 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
     // named area has a route at least [`WIDE_ENOUGH`] cells wide. A map that
     // fails it (a merge neck, a bumper, a partition too near a mouth) gets one
     // wide corridor, so the promise is structural and not a hope.
+    let skip_boss = matches!(theme, Theme::Laundry | Theme::Printworks);
     for _ in 0..MAX_WIDENINGS {
-        let Some(rect) = narrow_area(tiles, &areas, start_cell, &maze_slots) else {
+        let Some(rect) = narrow_area(tiles, &areas, start_cell, &maze_slots, skip_boss) else {
             break;
         };
         let partner = nearest_other(tiles, &areas, rect);
@@ -1318,13 +1332,20 @@ fn narrow_area(
     areas: &[Area],
     start: (i32, i32),
     slots: &[TileRect],
+    skip_boss: bool,
 ) -> Option<TileRect> {
     let best = widest_paths(tiles, start);
     let cols = tiles.cols();
     let index = |cx: i32, cy: i32| (cy * cols + cx) as usize;
     let mut worst: Option<(i32, TileRect)> = None;
     for area in areas {
-        if matches!(area.kind, RoomKind::Boss) && area.rect.area() < BOSS_ARENA_CELLS {
+        // The boss arena is furnished for its fight (the Lab's bumpers, the
+        // mower's dock); a wide repair corridor carved into it would cut the
+        // very furniture the fight needs. The wave 3 floors opt out entirely
+        // (`skip_boss`), because their halls hold more floor furniture than the
+        // original themes' and the arena came out narrowest too often. The
+        // original three themes keep the historical behaviour byte for byte.
+        if area.kind == RoomKind::Boss && (skip_boss || area.rect.area() < BOSS_ARENA_CELLS) {
             continue;
         }
         let mut floor = 0;
@@ -1606,6 +1627,219 @@ fn scatter_cover(
     partitions
 }
 
+// ============================================================================
+// Theme floor geometry (wave 3 side routes)
+// ============================================================================
+
+/// Paint the theme's own floor geometry into the open areas.
+///
+/// * **Laundry** — paired washer banks around aisles, with a folding bay beside
+///   every pair: a 10-cell pattern of `bank(2) aisle(3) bank(2) bay(3)`, the
+///   banks pierced by a cross-aisle every 6–9 cells and both ends two cells
+///   short of the hall so every aisle loops.
+/// * **Printworks** — offset press islands on a 10 × 7-cell grid (a 7 × 4-cell
+///   island in a 3-cell paper lane), every other row shifted half a period so
+///   the lanes wind, and two stair-step diagonal shortcuts cut through each
+///   island row.
+///
+/// Every other theme returns before drawing a single rng number, which is what
+/// keeps the Sewer/Kitchen/Lab maps identical to the pinned trace.
+fn theme_layout(
+    tiles: &mut TileMap,
+    rng: &mut StdRng,
+    areas: &[Area],
+    slots: &[TileRect],
+    start_cell: (i32, i32),
+    theme: Theme,
+) {
+    match theme {
+        Theme::Laundry => laundry_floor(tiles, rng, areas, slots, start_cell),
+        Theme::Printworks => printworks_floor(tiles, rng, areas, slots, start_cell),
+        _ => {}
+    }
+}
+
+/// The cells a theme pass must never paint: everywhere an anchor, a route or a
+/// reservation lives.
+fn theme_guard(areas: &[Area], slots: &[TileRect], start_cell: (i32, i32)) -> Vec<TileRect> {
+    let mut guard: Vec<TileRect> = areas
+        .iter()
+        .map(|area| core_3x3(area.rect).inflate(2))
+        .collect();
+    guard.push(TileRect::new(start_cell.0 - 2, start_cell.1 - 2, 5, 5));
+    for slot in slots {
+        guard.push(slot.inflate(2));
+    }
+    guard
+}
+
+/// May this run of cells be turned into theme furniture? It must be open floor,
+/// off every guard, and wholly inside the area it belongs to.
+fn theme_run_ok(tiles: &TileMap, rect: TileRect, guard: &[TileRect]) -> bool {
+    if rect.w <= 0 || rect.h <= 0 {
+        return false;
+    }
+    if guard.iter().any(|g| g.intersects(&rect)) {
+        return false;
+    }
+    rect.cells().all(|(cx, cy)| tiles.get(cx, cy).is_open())
+}
+
+/// Laundry: paired washer banks around three-cell aisles, a folding bay beside
+/// every pair, cross-aisles every 6–9 cells and both aisle ends open.
+fn laundry_floor(
+    tiles: &mut TileMap,
+    rng: &mut StdRng,
+    areas: &[Area],
+    slots: &[TileRect],
+    start_cell: (i32, i32),
+) {
+    let guard = theme_guard(areas, slots, start_cell);
+    for area in areas {
+        if area.kind == RoomKind::Boss {
+            continue;
+        }
+        let rect = area.rect;
+        // Three cells clear of the ring: an opening lives on the ring, and the
+        // cell inside it has to stay walkable.
+        let inner = rect.inflate(-3);
+        if inner.w < 14 || inner.h < 12 || inner.area() < 320 {
+            continue;
+        }
+        // Sink the aisles a little: one or two cells of random margin so two
+        // halls of the same size do not line up.
+        let margin = rng.random_range(0..=2);
+        let top = inner.y + margin;
+        let bottom = inner.bottom() - margin;
+        if bottom - top < 8 {
+            continue;
+        }
+        // 10-cell pattern: bank(2) aisle(3) bank(2) bay(3).
+        let mut x = inner.x;
+        while x + 4 <= inner.right() {
+            let bank = TileRect::new(x, top, 2, bottom - top);
+            // Cross-aisle every 6–9 cells: the banks are what makes an aisle
+            // long, and a cross-aisle is what keeps a long one looping.
+            let mut openings: Vec<(i32, i32)> = Vec::new();
+            let mut y = top;
+            while y < bottom {
+                let run = rng.random_range(6..=9);
+                let gap = rng.random_range(1..=2);
+                y += run;
+                if y + gap < bottom {
+                    openings.push((y, gap));
+                }
+                y += gap;
+            }
+            let cells: Vec<(i32, i32)> = bank
+                .cells()
+                .filter(|&(_, cy)| {
+                    !openings
+                        .iter()
+                        .any(|&(oy, oh)| cy >= oy && cy < oy + oh)
+                })
+                .collect();
+            // A bank is only painted when every cell it covers is free floor:
+            // a bank is furniture, not a repair.
+            let blocked = cells.iter().any(|&(cx, cy)| {
+                !tiles.get(cx, cy).is_open()
+                    || guard.iter().any(|g| g.contains(cx, cy))
+            });
+            if !blocked && cells.len() > 6 {
+                for (cx, cy) in cells {
+                    tiles.set(cx, cy, SOLID);
+                }
+            }
+            // bank(2) + aisle(3) + bank(2) + bay(3) = 10.
+            x += 10;
+        }
+    }
+}
+
+/// Printworks: offset press islands on a 10 × 7-cell grid with three-cell paper
+/// lanes, staggered every other row, and stair-step diagonal shortcuts cut
+/// through two islands per row.
+fn printworks_floor(
+    tiles: &mut TileMap,
+    rng: &mut StdRng,
+    areas: &[Area],
+    slots: &[TileRect],
+    start_cell: (i32, i32),
+) {
+    const IW: i32 = 7;
+    const IH: i32 = 4;
+    const LANE: i32 = 3;
+    let guard = theme_guard(areas, slots, start_cell);
+    for area in areas {
+        if area.kind == RoomKind::Boss {
+            continue;
+        }
+        let rect = area.rect;
+        let inner = rect.inflate(-3);
+        if inner.w < 16 || inner.h < 14 || inner.area() < 340 {
+            continue;
+        }
+        let phase = rng.random_range(0..=1) * ((IW + LANE) / 2);
+        let mut islands: Vec<TileRect> = Vec::new();
+        let mut row = 0;
+        let mut y = inner.y;
+        while y + IH <= inner.bottom() {
+            // Offset press islands: every other row slides half a period, so
+            // the lanes have to wind around them.
+            let shift = if row % 2 == 0 { 0 } else { phase.max(2) };
+            let mut x = inner.x - shift;
+            while x + IW <= inner.right() {
+                let island = TileRect::new(x.max(inner.x), y, IW, IH);
+                if island.right() <= inner.right()
+                    && theme_run_ok(tiles, island, &guard)
+                {
+                    for (cx, cy) in island.cells() {
+                        tiles.set(cx, cy, SOLID);
+                    }
+                    islands.push(island);
+                }
+                x += IW + LANE;
+            }
+            row += 1;
+            y += IH + LANE;
+        }
+        // Two stair-step shortcuts per island row (design: "at least two
+        // diagonal stair-step shortcuts through each long pair of lanes"): a
+        // one-cell diagonal cut from the north lane to the south lane.
+        let mut per_row: Vec<usize> = Vec::new();
+        for (index, island) in islands.iter().enumerate() {
+            let r = (island.y - inner.y) / (IH + LANE);
+            if let Some(slot) = per_row.get_mut(r as usize) {
+                if *slot < 2 {
+                    *slot += 1;
+                    carve_stair(tiles, *island, (index % 2) as u8);
+                }
+            } else {
+                per_row.resize(r as usize + 1, 0);
+                per_row[r as usize] = 1;
+                carve_stair(tiles, *island, (index % 2) as u8);
+            }
+        }
+    }
+}
+
+/// Cut a one-cell diagonal staircase through an island, leaving a cell of press
+/// either side of the cut so it reads as a shortcut rather than a hole.
+fn carve_stair(tiles: &mut TileMap, island: TileRect, variant: u8) {
+    let steps = island.h.min(island.w - 2).max(2);
+    for k in 0..steps {
+        let cx = if variant == 0 {
+            island.x + 1 + k
+        } else {
+            island.right() - 2 - k
+        };
+        let cy = island.y + k;
+        if island.contains(cx, cy) {
+            tiles.set(cx, cy, TileKind::Open);
+        }
+    }
+}
+
 /// Is any cell of `rect` on the reached patch? (`validate::reaches_rect`
 /// without the "big room" shrink — corridors and rings are thin rects.)
 fn reached(seen: &[bool], tiles: &TileMap, rect: TileRect) -> bool {
@@ -1843,7 +2077,11 @@ pub fn furnish(tiles: &mut TileMap, layout: &Layout, rng: &mut StdRng, theme: Th
     // route to one or two cells, open a wide corridor so the owner's "no
     // required route through a passage narrower than 3 cells" still holds on
     // the finished map.
-    widen_pinched_areas(tiles, layout);
+    widen_pinched_areas(
+        tiles,
+        layout,
+        matches!(theme, Theme::Laundry | Theme::Printworks),
+    );
     // A widening corridor may have cut through a prop's own cells: that prop is
     // no longer there, so it is not reported (the grid is the truth the art and
     // the collision both read).
@@ -1863,7 +2101,7 @@ pub fn furnish(tiles: &mut TileMap, layout: &Layout, rng: &mut StdRng, theme: Th
 
 /// Carve up to [`MAX_WIDENINGS`] wide links into any area that furnishing left
 /// behind a narrow seam.
-fn widen_pinched_areas(tiles: &mut TileMap, layout: &Layout) {
+fn widen_pinched_areas(tiles: &mut TileMap, layout: &Layout, skip_boss: bool) {
     let field = TileRect::new(
         BORDER,
         BORDER,
@@ -1884,7 +2122,7 @@ fn widen_pinched_areas(tiles: &mut TileMap, layout: &Layout) {
         (layout.start.y / TILE_F) as i32,
     );
     for _ in 0..MAX_WIDENINGS {
-        let Some(rect) = narrow_area(tiles, &areas, start, &layout.maze_slots) else {
+        let Some(rect) = narrow_area(tiles, &areas, start, &layout.maze_slots, skip_boss) else {
             break;
         };
         let Some(partner) = nearest_other(tiles, &areas, rect) else {
@@ -1916,6 +2154,11 @@ pub fn boss_floor_cells(theme: Theme) -> (i32, i32) {
         Theme::Sewer => (6, 5),
         Theme::Kitchen => (6, 5),
         Theme::Lab => (4, BUMPER_LEN),
+        // Laundry borrows the broom's arena (a clear 96 x 80 px pocket).
+        Theme::Laundry => (6, 5),
+        // Printworks borrows the mower's: it needs the two bumpers and the dock
+        // until the Night Edition lands.
+        Theme::Printworks => (4, BUMPER_LEN),
     }
 }
 
@@ -1939,7 +2182,7 @@ fn furnish_arena(tiles: &mut TileMap, theme: Theme, arena: TileRect, field: Tile
         ..BossArena::default()
     };
     match theme {
-        Theme::Lab => furnish_lab(tiles, arena, floor, &mouths, &mut boss),
+        Theme::Lab => furnish_lab(tiles, arena, floor, &mouths, &mut boss, false),
         Theme::Sewer => {
             boss.escape_hole = carve_escape_hole(tiles, arena, &mouths, field);
         }
@@ -1947,6 +2190,11 @@ fn furnish_arena(tiles: &mut TileMap, theme: Theme, arena: TileRect, field: Tile
         // the perimeter), enforced by `furnish_arena_perimeter` and the
         // validator: nothing else has to be placed inside the arena.
         Theme::Kitchen => {}
+        // Wave 3 routes, same mapping as `BossKind::for_theme`: the Laundry's
+        // boss is the broom (a clear pocket) and the Printworks' is the mower
+        // (bumpers and a dock), until the Mangle and the Night Edition land.
+        Theme::Laundry => {}
+        Theme::Printworks => furnish_lab(tiles, arena, floor, &mouths, &mut boss, true),
     }
     boss
 }
@@ -1977,6 +2225,7 @@ fn furnish_lab(
     floor: TileRect,
     mouths: &[(i32, i32)],
     boss: &mut BossArena,
+    sweep: bool,
 ) {
     let bars = [
         TileRect::new(floor.x - 1, floor.y, 1, BUMPER_LEN),
@@ -1991,7 +2240,7 @@ fn furnish_lab(
         tiles.fill_cells(bar.x, bar.y, bar.w, bar.h, SOLID);
         boss.bumpers.push(bar);
     }
-    if let Some((cell, pos)) = lab_dock(tiles, arena, floor, mouths) {
+    if let Some((cell, pos)) = lab_dock(tiles, arena, floor, mouths, sweep) {
         boss.dock = Some(pos);
         boss.dock_cell = Some(cell);
     }
@@ -2029,6 +2278,7 @@ fn lab_dock(
     arena: TileRect,
     floor: TileRect,
     mouths: &[(i32, i32)],
+    sweep: bool,
 ) -> Option<((i32, i32), Vec2)> {
     let mid_x = arena.x + arena.w / 2;
     let mid_y = arena.y + arena.h / 2;
@@ -2066,6 +2316,49 @@ fn lab_dock(
         }
         if best.is_none_or(|(bg, _, _)| gap > bg) {
             best = Some((gap, (cx, cy), pos));
+        }
+    }
+    if best.is_none() && sweep {
+        // The wave 3 floors (`sweep`) never ship an arena without its dock: if a
+        // corridor happens to open one of the four wall midpoints, the whole
+        // perimeter band is searched in a deterministic order for any cell that
+        // satisfies the same constraints. The original three themes keep the
+        // four-candidate behaviour byte for byte.
+        let band = ARENA_PERIMETER_CELLS;
+        for cy in (arena.y + 1)..(arena.bottom() - 1) {
+            for cx in (arena.x + 1)..(arena.right() - 1) {
+                let on_band = cx < arena.x + band
+                    || cx >= arena.right() - band
+                    || cy < arena.y + band
+                    || cy >= arena.bottom() - band;
+                if !on_band || floor.contains(cx, cy) {
+                    continue;
+                }
+                if !tiles.get(cx, cy).is_open() {
+                    continue;
+                }
+                let pos = TileMap::tile_rect(cx, cy).center();
+                let pad = Rectf::new(
+                    pos.x - crate::game::art_boss_mower::DOCK_HALF_SIZE.x,
+                    pos.y - crate::game::art_boss_mower::DOCK_HALF_SIZE.y,
+                    2.0 * crate::game::art_boss_mower::DOCK_HALF_SIZE.x,
+                    2.0 * crate::game::art_boss_mower::DOCK_HALF_SIZE.y,
+                );
+                if !tiles.rect_clear(pad, crate::game::collision::SizeClass::Large) {
+                    continue;
+                }
+                let gap = mouths
+                    .iter()
+                    .map(|&(mx, my)| (mx - cx).abs().max((my - cy).abs()))
+                    .min()
+                    .unwrap_or(i32::MAX);
+                if gap < DOCK_MOUTH_CLEAR {
+                    continue;
+                }
+                if best.is_none_or(|(bg, _, _)| gap > bg) {
+                    best = Some((gap, (cx, cy), pos));
+                }
+            }
         }
     }
     best.map(|(_, cell, pos)| (cell, pos))
@@ -2262,6 +2555,14 @@ fn furnish_arena_perimeter(
         // The Lab's furniture is its bumpers and dock; nothing else competes
         // with the charge lanes.
         Theme::Lab => return,
+        // The Laundry dresses its arena with linen trolleys and white goods.
+        Theme::Laundry => &[
+            crate::game::level::PropKind::TowelRoll,
+            crate::game::level::PropKind::Washer,
+        ],
+        // The Printworks borrows the mower's arena: nothing may compete with
+        // its charge lanes.
+        Theme::Printworks => return,
     };
     let arena = layout.boss_arena;
     if arena.w < 8 || arena.h < 8 {
@@ -2496,6 +2797,7 @@ fn in_field(rect: TileRect, cols: i32, rows: i32) -> bool {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::game::collision::SizeClass;
     use crate::game::level::{level_rng, MAP_COLS, MAP_ROWS, MAP_SIZE};

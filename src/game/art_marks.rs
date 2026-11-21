@@ -339,6 +339,10 @@ pub fn draw_gnaw_mark(
         Theme::Sewer => ((5, 9, 8), (112, 126, 114), (164, 176, 162)),
         Theme::Kitchen => ((10, 7, 5), (144, 120, 96), (186, 162, 134)),
         Theme::Lab => ((5, 6, 12), (116, 128, 152), (170, 182, 204)),
+        // Porcelain dust off indigo tile.
+        Theme::Laundry => ((9, 10, 18), (150, 170, 172), (196, 210, 206)),
+        // Newsprint scrapings and dried ink.
+        Theme::Printworks => ((10, 10, 13), (150, 148, 136), (188, 186, 172)),
     };
 
     let place = |u: f32, v: f32| origin + f * u + p * v;
@@ -542,6 +546,14 @@ pub fn draw_boss_arena_floor(pb: &mut PixelBuffer, arena: TileRect, theme: Theme
             boss_lab_mown_stripes(pb, clip, ax0, cam_x);
             boss_arena_perimeter(pb, clip, ax0, ay0, ax1, ay1, cam_x, cam_y, (72, 86, 62), 0.32);
         }
+        Theme::Laundry => {
+            boss_laundry_floor(pb, clip, ax0, ay0, ax1, ay1, cam_x, cam_y);
+            boss_arena_perimeter(pb, clip, ax0, ay0, ax1, ay1, cam_x, cam_y, (74, 110, 126), 0.32);
+        }
+        Theme::Printworks => {
+            boss_printworks_floor(pb, clip, ax0, ay0, ax1, ay1, cam_x, cam_y);
+            boss_arena_perimeter(pb, clip, ax0, ay0, ax1, ay1, cam_x, cam_y, (85, 64, 100), 0.34);
+        }
     }
 
     // Iterate every 4×4-cell block overlapping the visible arena slice.
@@ -563,7 +575,228 @@ pub fn draw_boss_arena_floor(pb: &mut PixelBuffer, arena: TileRect, theme: Theme
                 Theme::Sewer => boss_sewer_block(pb, clip, sx, sy, bx, by),
                 Theme::Kitchen => boss_kitchen_block(pb, clip, sx, sy, bx, by),
                 Theme::Lab => boss_lab_block(pb, clip, sx, sy, bx, by),
+                Theme::Laundry => boss_laundry_block(pb, clip, sx, sy, bx, by),
+                Theme::Printworks => boss_printworks_block(pb, clip, sx, sy, bx, by),
             }
+        }
+    }
+}
+
+/// The Laundry's arena floor: indigo porcelain tile over denim seams, a brass
+/// drain ring at the centre (the floor's own landmark) and two pale wash lanes
+/// left and right — the design's "Boss floor has two open side lanes".
+#[allow(clippy::too_many_arguments)]
+fn boss_laundry_floor(
+    pb: &mut PixelBuffer,
+    clip: ClipRect,
+    ax0: i32,
+    ay0: i32,
+    ax1: i32,
+    ay1: i32,
+    cam_x: i32,
+    cam_y: i32,
+) {
+    const SEAM: Rgb = (52, 72, 96);
+    const TILE_BODY: [Rgb; 3] = [(30, 34, 52), (35, 40, 61), (27, 31, 49)];
+    for sy in clip.y0..clip.y1 {
+        for sx in clip.x0..clip.x1 {
+            let wx = sx + cam_x - ax0;
+            let wy = sy + cam_y - ay0;
+            let (cx, cy) = (wx.div_euclid(TILE), wy.div_euclid(TILE));
+            let (lx, ly) = (wx.rem_euclid(TILE), wy.rem_euclid(TILE));
+            let h = hash2(cx + 7, cy + 31);
+            let body = TILE_BODY[(h & 3) as usize % 3];
+            let c = if lx == 0 || ly == 0 {
+                SEAM
+            } else if lx == 1 || ly == 1 {
+                mix(body, (179, 199, 195), 0.20)
+            } else if lx == TILE - 1 || ly == TILE - 1 {
+                mix(body, SEAM, 0.45)
+            } else {
+                body
+            };
+            blend_clip(pb, clip, sx, sy, c, 0.90);
+        }
+    }
+
+    // Two porcelain wash lanes (one cell + a lane of pale tile either side).
+    let lane_w = TILE * 3;
+    let inset = (ax1 - ax0) / 5;
+    for (x0, x1) in [
+        (ax0 + inset, ax0 + inset + lane_w),
+        (ax1 - inset - lane_w, ax1 - inset),
+    ] {
+        let sx0 = x0 - cam_x;
+        let sy0 = ay0 + 2 * TILE - cam_y;
+        rect_blend_clip(
+            pb,
+            clip,
+            sx0,
+            sy0,
+            x1 - x0,
+            (ay1 - ay0) - 4 * TILE,
+            (179, 199, 195),
+            0.055,
+        );
+        for k in 0..3 {
+            rect_blend_clip(pb, clip, sx0 + k * TILE, sy0, 1, (ay1 - ay0) - 4 * TILE, SEAM, 0.35);
+            rect_blend_clip(
+                pb,
+                clip,
+                sx1_of(x1, k) - cam_x,
+                sy0,
+                1,
+                (ay1 - ay0) - 4 * TILE,
+                SEAM,
+                0.35,
+            );
+        }
+    }
+
+    // The brass drain: a ring of brass with iron spokes at the centre.
+    let (cx, cy) = ((ax0 + ax1) / 2 - cam_x, (ay0 + ay1) / 2 - cam_y);
+    let r = (TILE * 2) as f32;
+    for dy in -(r as i32)..=(r as i32) {
+        for dx in -(r as i32)..=(r as i32) {
+            let d = ((dx * dx + dy * dy) as f32).sqrt();
+            if d > r {
+                continue;
+            }
+            let c = if d > r - 1.6 {
+                (132, 106, 58) // brass rim, kept under the floor layer's contrast cap
+            } else if d > r - 3.0 {
+                (60, 44, 24) // recessed shadow under the rim
+            } else if (dx + dy).rem_euclid(6) == 0 && d > 2.0 {
+                (82, 80, 74) // iron spoke
+            } else {
+                (18, 22, 34) // throat
+            };
+            blend_clip(pb, clip, cx + dx, cy + dy, c, 0.62);
+        }
+    }
+}
+
+#[inline]
+fn sx1_of(x1: i32, k: i32) -> i32 {
+    x1 - (k + 1) * TILE
+}
+
+/// One 4x4-cell block of the Laundry arena: a stack of folded towels, a
+/// clothespin's shadow and a wet pink wash streak.
+fn boss_laundry_block(pb: &mut PixelBuffer, clip: ClipRect, sx: i32, sy: i32, bx: i32, by: i32) {
+    let h = hash2(bx + 41, by + 17);
+    // Every tone here stays under the floor layer's 110-channel contrast cap:
+    // entities and telegraphs are drawn over this.
+    let towel: Rgb = (136, 144, 140);
+    let towel_lo: Rgb = (104, 112, 110);
+    let wash_pink: Rgb = (140, 84, 104);
+    // A folded towel: three pale bands with a shadowed fold line.
+    let (ox, oy) = (sx + 6 + (h & 7) as i32, sy + 8 + ((h >> 4) & 7) as i32);
+    rect_blend_clip(pb, clip, ox, oy, 14, 3, towel, 0.24);
+    rect_blend_clip(pb, clip, ox + 1, oy + 3, 12, 2, towel_lo, 0.20);
+    rect_blend_clip(pb, clip, ox, oy + 5, 13, 2, towel, 0.18);
+    // The pink wash streak every third block.
+    if (h >> 9) & 3 == 0 {
+        for k in 0..10 {
+            blend_clip(pb, clip, ox + 2 + k, oy + 9 + k / 4, wash_pink, 0.18);
+        }
+    }
+}
+
+/// The Printworks' arena floor: a newsprint page under the press bed — a pale
+/// sheet inset from the arena wall, ruled with dried-ink text lines and
+/// registration crosses in cyan at all four corner marks.
+#[allow(clippy::too_many_arguments)]
+fn boss_printworks_floor(
+    pb: &mut PixelBuffer,
+    clip: ClipRect,
+    ax0: i32,
+    ay0: i32,
+    ax1: i32,
+    ay1: i32,
+    cam_x: i32,
+    cam_y: i32,
+) {
+    let sheet: Rgb = (176, 174, 160);
+    let ink: Rgb = (85, 64, 100);
+    let cyan: Rgb = (78, 148, 152);
+    // The press-hall floor under the sheet: a dim charcoal deck, so the arena
+    // never shows the brighter newsprint sheets of the floor layer through it.
+    for sy in clip.y0..clip.y1 {
+        for sx in clip.x0..clip.x1 {
+            let wx = sx + cam_x - ax0;
+            let wy = sy + cam_y - ay0;
+            let h = hash2(wx.div_euclid(20) + 3, wy.div_euclid(20) + 9);
+            let deck = if h & 1 == 0 { (28, 29, 36) } else { (25, 26, 33) };
+            blend_clip(pb, clip, sx, sy, deck, 0.90);
+        }
+    }
+    // The page itself, with a charcoal margin all round.
+    let margin = 3 * TILE;
+    let sx = ax0 + margin - cam_x;
+    let sy = ay0 + margin - cam_y;
+    let sw = (ax1 - ax0) - 2 * margin;
+    let sh = (ay1 - ay0) - 2 * margin;
+    rect_blend_clip(pb, clip, sx, sy, sw, sh, sheet, 0.055);
+    rect_blend_clip(pb, clip, sx, sy, sw, 1, ink, 0.20);
+    rect_blend_clip(pb, clip, sx, sy + sh - 1, sw, 1, ink, 0.20);
+    // Masthead band and ruled text columns.
+    rect_blend_clip(pb, clip, sx + 8, sy + 8, sw - 16, 3, ink, 0.30);
+    for row in 0..((sh - 30) / 9).max(0) {
+        let y = sy + 16 + row * 9;
+        let short = (row * 7) % 13;
+        if (row + 1) % 4 == 0 {
+            rect_blend_clip(pb, clip, sx + 8, y, sw - 16, 1, ink, 0.12);
+        } else {
+            rect_blend_clip(pb, clip, sx + 8, y, sw - 16 - short * 3, 1, ink, 0.20);
+            rect_blend_clip(pb, clip, sx + 8, y + 2, sw - 26 - short * 2, 1, ink, 0.13);
+        }
+    }
+    // Registration crosses at the four corner marks.
+    for (cx, cy) in [
+        (sx + 5, sy + 5),
+        (sx + sw - 6, sy + 5),
+        (sx + 5, sy + sh - 6),
+        (sx + sw - 6, sy + sh - 6),
+    ] {
+        // Two passes overlap at the cross centre, so each one is kept dim: the
+        // floor layer's contrast cap applies to the doubled pixel too.
+        rect_blend_clip(pb, clip, cx - 3, cy, 7, 1, cyan, 0.26);
+        rect_blend_clip(pb, clip, cx, cy - 3, 1, 7, cyan, 0.26);
+    }
+}
+
+/// One 4x4-cell block of the Printworks arena: a slab of set type (a reversed
+/// capital standing proud) and a wet ink drag.
+fn boss_printworks_block(pb: &mut PixelBuffer, clip: ClipRect, sx: i32, sy: i32, bx: i32, by: i32) {
+    let h = hash2(bx + 23, by + 71);
+    let lead: Rgb = (96, 98, 106);
+    let lead_hi: Rgb = (132, 134, 142);
+    let ink: Rgb = (85, 64, 100);
+    // A type block lying on the page.
+    let (ox, oy) = (sx + 8 + (h & 15) as i32, sy + 10 + ((h >> 5) & 15) as i32);
+    rect_blend_clip(pb, clip, ox, oy, 16, 10, lead, 0.18);
+    rect_blend_clip(pb, clip, ox, oy, 16, 1, lead_hi, 0.22);
+    rect_blend_clip(pb, clip, ox, oy + 9, 16, 1, ink, 0.22);
+    // The reversed letter: E or L, mirrored, in raised lead.
+    let bar = 3;
+    for ly in 0..6 {
+        for lx in 0..8 {
+            let mlx = 7 - lx;
+            let on = if (h >> 9) & 1 == 0 {
+                ly == 0 || ly == 5 || ly == 2 || mlx < bar
+            } else {
+                mlx < bar || ly == 5
+            };
+            if on {
+                blend_clip(pb, clip, ox + 4 + lx, oy + 2 + ly, lead_hi, 0.20);
+            }
+        }
+    }
+    // Wet ink dragged off the block.
+    if (h >> 13) & 3 == 0 {
+        for k in 0..12 {
+            blend_clip(pb, clip, ox + 18 + k, oy + 12 + k / 5, ink, 0.18);
         }
     }
 }
@@ -1086,6 +1319,9 @@ pub fn draw_hall_landmark(
         Theme::Sewer => landmark_sewer(pb, clip, cx, cy, variant % HALL_LANDMARK_VARIANTS),
         Theme::Kitchen => landmark_kitchen(pb, clip, cx, cy, variant % HALL_LANDMARK_VARIANTS),
         Theme::Lab => landmark_lab(pb, clip, cx, cy, variant),
+        // A brass drain at each junction is exactly the Laundry's landmark.
+        Theme::Laundry => landmark_sewer(pb, clip, cx, cy, variant % HALL_LANDMARK_VARIANTS),
+        Theme::Printworks => landmark_lab(pb, clip, cx, cy, variant),
     }
 }
 

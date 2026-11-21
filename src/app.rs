@@ -149,8 +149,12 @@ pub struct App {
     /// The campaign run in flight (`None` on the title and during a practice
     /// run). It owns the carried loadout and the banked totals.
     campaign: Option<CampaignState>,
-    /// A single-sector practice run: the level index it plays alone.
-    practice: Option<usize>,
+    /// A single-sector practice run: the floor it plays alone. The campaign
+    /// stage it belongs to is [`crate::game::campaign::theme_stage`].
+    practice: Option<Theme>,
+    /// The floor chosen for the level being packed on the keep screen (the
+    /// route choice, `WAVE3_DESIGN.md` §1). Reset when the manifest opens.
+    keep_route: Option<Theme>,
     /// Per-level numbers banked as each level completes (victory breakdown).
     records: [LevelRecord; campaign::LEVEL_COUNT],
     /// Keep-three manifest: what the finished level offered, in the art's
@@ -279,6 +283,7 @@ impl App {
             menu_idx: 0,
             campaign: None,
             practice: None,
+            keep_route: None,
             records: [LevelRecord::default(); campaign::LEVEL_COUNT],
             keep_items: Vec::new(),
             keep_entries: Vec::new(),
@@ -338,19 +343,30 @@ impl App {
         app
     }
 
-    /// The theme of the sector the title/select screen points at.
+    /// The theme of the floor the title/select screen points at.
+    ///
+    /// The title's sector row lists all five floors (`Theme::all()`: the three
+    /// campaign stages, then the two side-route floors), so the row fits five
+    /// sectors and the material tint/menu music follow whichever one is
+    /// selected.
     fn theme(&self) -> Theme {
-        campaign::level_theme(self.select_idx)
+        Theme::all()[self.floor() % Theme::all().len()]
     }
 
-    /// The sector-select cursor, clamped into the campaign.
+    /// The title's floor cursor (`0..5`), clamped to the five floors.
+    fn floor(&self) -> usize {
+        self.select_idx.min(Theme::all().len() - 1)
+    }
+
+    /// The **campaign stage** the selected floor belongs to (`0..3`): what the
+    /// sector-select screen and the unlock checks use.
     fn sector(&self) -> usize {
-        self.select_idx.min(campaign::LEVEL_COUNT - 1)
+        campaign::theme_stage(self.theme())
     }
 
-    /// Step the sector cursor, wrapping through the three levels.
+    /// Step the floor cursor, wrapping through all five floors.
     fn cycle_sector(&mut self, step: isize) {
-        let n = campaign::LEVEL_COUNT as isize;
+        let n = Theme::all().len() as isize;
         self.select_idx = (self.select_idx as isize + step).rem_euclid(n) as usize;
         self.menu_music();
         self.sfx(Sfx::UiMove);
@@ -503,17 +519,28 @@ impl App {
     /// Begin a **practice run**: one later sector, alone, on the default
     /// loadout, carrying nothing in and nothing out. It still records the
     /// sector clear (so the next one unlocks) but never a campaign win.
-    fn start_practice(&mut self, level: usize) {
-        let level = level.clamp(1, campaign::LEVEL_COUNT - 1);
-        let seed = campaign::level_seed(self.seed(), level);
+    fn start_practice(&mut self, theme: Theme) {
+        let level = campaign::theme_stage(theme).clamp(1, campaign::LEVEL_COUNT - 1);
+        // A practice run is a side-route floor too, so it uses the same seeded
+        // derivation a campaign on that route does.
+        let seed = campaign::level_seed_on(self.seed(), level, theme);
         self.campaign = None;
-        self.practice = Some(level);
+        self.practice = Some(theme);
         self.records = [LevelRecord::default(); campaign::LEVEL_COUNT];
         self.keep_items.clear();
         self.keep_entries.clear();
         self.keep_selected.clear();
         self.victory_loadout.clear();
-        let world = World::new_level(level, seed, Loadout::starting());
+        // The theme is the floor the player picked, not the stage's original
+        // one: `new_level` derives the theme from the level index, so a side
+        // route needs the explicit constructor.
+        let world = World::new_level_with_theme(
+            level,
+            theme,
+            seed,
+            Loadout::starting(),
+            campaign::CampaignTotals::default(),
+        );
         self.enter_world(world, false);
     }
 
@@ -521,7 +548,8 @@ impl App {
     /// from the beginning, a later sector is a labelled practice run. A locked
     /// sector refuses and stays put.
     fn start_sector(&mut self) {
-        let level = self.sector();
+        let theme = self.theme();
+        let level = campaign::theme_stage(theme);
         if !self.scores.level_unlocked(level) {
             self.sfx(Sfx::UiMove);
             return;
@@ -530,7 +558,7 @@ impl App {
         if level == 0 {
             self.start_run();
         } else {
-            self.start_practice(level);
+            self.start_practice(theme);
         }
     }
 
@@ -574,7 +602,7 @@ impl App {
     /// Another run of the kind just played, skipping the story dossier.
     fn retry(&mut self) {
         match self.practice {
-            Some(level) => self.start_practice(level),
+            Some(theme) => self.start_practice(theme),
             None => self.start_campaign(false),
         }
     }
@@ -680,6 +708,7 @@ impl App {
                             self.select_idx = i.min(campaign::LEVEL_COUNT - 1)
                         }
                         Some(Target::KeepItem(i)) => self.keep_cursor = i,
+                        Some(Target::RouteOption(_)) => self.menu_idx = 1,
                         Some(Target::Upgrade(idx)) => self.levelup_idx = idx,
                         _ => {}
                     }
@@ -1384,21 +1413,59 @@ impl App {
         self.keep_selected = vec![false; self.keep_items.len()];
         self.keep_cursor = 0;
         self.keep_scroll = 0;
+        // The route choice starts on whatever the campaign is currently set to
+        // (the original route until the player picks otherwise).
+        self.keep_route = self
+            .campaign
+            .as_ref()
+            .filter(|camp| camp.next_options().len() > 1)
+            // The keep screen is choosing for the *next* stage.
+            .map(|camp| camp.route.theme(camp.level + 1));
         self.screen = Screen::KeepThree;
+    }
+
+    /// The keep screen's route chips: the two floors the next level can be
+    /// played on, original route first. `[None, None]` when the next stage has
+    /// no choice.
+    fn keep_route_chips(&self) -> [Option<campaign_ui::RouteChip<'static>>; 2] {
+        let mut chips = [None, None];
+        let Some(camp) = self.campaign.as_ref() else {
+            return chips;
+        };
+        let options = camp.next_options();
+        if options.len() < 2 {
+            return chips;
+        }
+        for (i, theme) in options.iter().enumerate().take(2) {
+            chips[i] = Some(campaign_ui::RouteChip {
+                name: theme.name(),
+                chosen: self.keep_route == Some(*theme),
+            });
+        }
+        chips
+    }
+
+    /// The keep screen's `next_level` plate: the floor the route chose.
+    fn keep_next_level(&self) -> campaign_ui::CampaignLevel {
+        match self.keep_route {
+            Some(theme) => campaign_ui::CampaignLevel::from_theme(theme),
+            None => campaign_ui::CampaignLevel::from_index(self.keep_from_level() + 1),
+        }
     }
 
     /// `(selected, required)` straight from the art's own helpers, so the pack
     /// size is decided in one place (`keep_three_required`).
     fn keep_counts(&self) -> (usize, usize) {
         let view = campaign_ui::KeepThreeView {
-            from_level: campaign_ui::CampaignLevel::from_index(self.keep_from_level()),
-            next_level: campaign_ui::CampaignLevel::from_index(self.keep_from_level() + 1),
+            from_level: campaign_ui::CampaignLevel::from_theme(self.theme()),
+            next_level: self.keep_next_level(),
             items: &self.keep_entries,
             selected: &self.keep_selected,
             max_keep: campaign::KEEP_COUNT,
             cursor: self.keep_cursor,
             scroll: self.keep_scroll,
             hovered: None,
+            route: self.keep_route_chips(),
         };
         (
             campaign_ui::keep_three_selected_count(&view),
@@ -1477,6 +1544,32 @@ impl App {
             }
         }
 
+        // The route choice: Tab cycles it, and the header chips are clickable.
+        let mut route_pick: Option<usize> = match click {
+            Some(Target::RouteOption(i)) => Some(i),
+            _ => None,
+        };
+        if self.input.just_pressed(KeyCode::Tab) && self.keep_route_chips()[1].is_some() {
+            // Tab swaps to the other floor: the original route is chip 0, so a
+            // chosen chip 0 means picking chip 1 and vice versa.
+            route_pick = Some(if self.keep_route_chips()[0].is_some_and(|c| c.chosen) {
+                1
+            } else {
+                0
+            });
+        }
+        if let Some(i) = route_pick {
+            let options: &[Theme] = self
+                .campaign
+                .as_ref()
+                .map(|camp| camp.next_options())
+                .unwrap_or(&[]);
+            if let Some(theme) = options.get(i).copied() {
+                self.keep_route = Some(theme);
+                self.sfx(Sfx::UiMove);
+            }
+        }
+
         let confirm = click == Some(Target::KeepConfirm)
             || self.input.just_pressed(KeyCode::Enter);
         if confirm {
@@ -1502,6 +1595,11 @@ impl App {
             .collect();
         let mut next = None;
         if let (Some(camp), Some(w)) = (self.campaign.as_mut(), self.world.as_ref()) {
+            // The route is chosen on this screen, so it has to be recorded
+            // before the next level's world is built.
+            if let Some(route) = self.keep_route {
+                camp.choose_route(route);
+            }
             if camp.complete_level(w, &chosen).is_ok() {
                 next = Some(camp.world());
             }
@@ -1745,7 +1843,7 @@ impl App {
                     area,
                     self.theme(),
                     self.menu_idx,
-                    self.sector(),
+                    self.floor(),
                     self.scores.level_unlocked(self.sector()),
                     &self.scores,
                     &self.rat_art,
@@ -1765,7 +1863,7 @@ impl App {
                         area,
                         self.theme(),
                         self.menu_idx,
-                        self.sector(),
+                        self.floor(),
                         self.scores.level_unlocked(self.sector()),
                         &self.scores,
                         &self.rat_art,
@@ -1781,7 +1879,7 @@ impl App {
                     area,
                     self.theme(),
                     self.menu_idx,
-                    self.sector(),
+                    self.floor(),
                     self.scores.level_unlocked(self.sector()),
                     &self.scores,
                     &self.rat_art,
@@ -1985,7 +2083,9 @@ impl App {
         let list = match self.world.as_ref() {
             Some(w) => {
                 let view = campaign_ui::LevelCompleteView {
-                    level: campaign_ui::CampaignLevel::from_index(w.level_index),
+                    // The plate names the floor actually played, so a side
+                    // route reads THE LAUNDRY / THE PRINTWORKS here.
+                    level: campaign_ui::CampaignLevel::from_theme(w.level.theme),
                     time_secs: w.elapsed,
                     kills: w.kills,
                     score_so_far: w.total_score(),
@@ -2012,7 +2112,7 @@ impl App {
         let list = match self.world.as_ref() {
             Some(w) => {
                 let view = campaign_ui::LevelIntroView {
-                    level: campaign_ui::CampaignLevel::from_index(w.level_index),
+                    level: campaign_ui::CampaignLevel::from_theme(w.level.theme),
                     flavor: practice.then_some(PRACTICE_BLURB),
                     carried: &self.carried_entries,
                     score_so_far: w.total_score(),
@@ -2033,11 +2133,11 @@ impl App {
     /// count is packed).
     fn draw_keep_three(&mut self, frame: &mut Frame, area: Rect) {
         draw_backdrop(frame, area);
-        let from = self.keep_from_level();
+
         let list = {
             let view = campaign_ui::KeepThreeView {
-                from_level: campaign_ui::CampaignLevel::from_index(from),
-                next_level: campaign_ui::CampaignLevel::from_index(from + 1),
+                from_level: campaign_ui::CampaignLevel::from_theme(self.theme()),
+                next_level: self.keep_next_level(),
                 items: &self.keep_entries,
                 selected: &self.keep_selected,
                 max_keep: campaign::KEEP_COUNT,
@@ -2052,8 +2152,12 @@ impl App {
                     Some(Target::KeepScrollDown) => {
                         Some(campaign_ui::KeepThreeAction::ScrollDown)
                     }
+                    Some(Target::RouteOption(i)) => {
+                        Some(campaign_ui::KeepThreeAction::Route(i as u8))
+                    }
                     _ => None,
                 },
+                route: self.keep_route_chips(),
             };
             campaign_ui::draw_keep_three(frame, area, &view)
         };
@@ -2063,6 +2167,7 @@ impl App {
                 campaign_ui::KeepThreeAction::ScrollUp => Target::KeepScrollUp,
                 campaign_ui::KeepThreeAction::ScrollDown => Target::KeepScrollDown,
                 campaign_ui::KeepThreeAction::Confirm => Target::KeepConfirm,
+                campaign_ui::KeepThreeAction::Route(i) => Target::RouteOption(i as usize),
             };
             self.hits.add(rect, target);
         }
@@ -2473,10 +2578,23 @@ mod tests {
             let row = h.locate("Sewer");
             h.events(&[], &[(MouseEventKind::Moved, row)]);
             assert_eq!(h.app.menu_idx, 1, "the sector row is menu row 2");
-            // The arrows step the campaign sector (wrapping through all three).
+            // The arrows step the sector row, which now lists all five floors
+            // (the three campaign stages, then the two side-route floors),
+            // wrapping at both ends.
             h.click("‹");
-            assert_eq!(h.app.theme(), Theme::Lab);
+            assert_eq!(h.app.theme(), Theme::Printworks);
             h.click("›");
+            assert_eq!(h.app.theme(), Theme::Sewer);
+            // The stage number shown for a side-route floor is its campaign
+            // stage's (`Laundry` is stage two), so the row reads `02 Laundry`.
+            for _ in 0..3 {
+                h.frame(&[KeyCode::Right]);
+            }
+            assert_eq!(h.app.theme(), Theme::Laundry);
+            assert_eq!(h.app.sector(), 1);
+            for _ in 0..3 {
+                h.frame(&[KeyCode::Left]);
+            }
             assert_eq!(h.app.theme(), Theme::Sewer);
             // The wheel over the sector row steps it too.
             let pos = h.locate("Sewer");
@@ -2730,6 +2848,78 @@ mod tests {
                 hh.frame(&[KeyCode::Char(' ')]);
                 let frames = if target == "thrash" { 5 } else { 4 };
                 for _ in 0..frames {
+                    hh.frame(&[]);
+                }
+            }
+            // The two wave 3 floors, mid-run: a practice run on that floor,
+            // walked for a few seconds so the horde, the hazards and the props
+            // are all on screen.
+            "laundry" | "printworks" => {
+                let theme = if target == "laundry" {
+                    Theme::Laundry
+                } else {
+                    Theme::Printworks
+                };
+                hh.app.start_practice(theme);
+                hh.frame(&[KeyCode::Enter]); // intro -> Playing
+                // Park the rat in the middle of the nearest great hall with the
+                // horde cleared: the floor, the theme's own furniture and the
+                // props are what this capture is about.
+                {
+                    let w = hh.app.world.as_mut().unwrap();
+                    w.clear_enemies();
+                    let hall = w
+                        .level
+                        .rooms_of(crate::game::level::RoomKind::Hall)
+                        .map(|room| room.rect)
+                        .find(|rect| rect.area() > 600);
+                    if let Some(rect) = hall {
+                        w.player.pos = rect.center_world();
+                    }
+                    w.elapsed = 3.5;
+                }
+                for _ in 0..90 {
+                    hh.frame(&[]);
+                }
+            }
+            // Art captures: park the rat beside a hazard (or in the boss arena)
+            // with the horde cleared, so the floor, the props and the hazard
+            // read at 1:1.
+            "laundry-hazard" | "printworks-hazard" | "laundry-arena" | "printworks-arena" => {
+                let theme = if target.starts_with("laundry") {
+                    Theme::Laundry
+                } else {
+                    Theme::Printworks
+                };
+                hh.app.start_practice(theme);
+                hh.frame(&[KeyCode::Enter]); // intro -> Playing
+                {
+                    let w = hh.app.world.as_mut().unwrap();
+                    w.clear_enemies();
+                    w.level.objects.sticky_traps.clear();
+                    w.level.objects.mousetraps.clear();
+                    let spot = if target.ends_with("arena") {
+                        w.level.boss_room().map(|room| room.center())
+                    } else if theme == Theme::Laundry {
+                        w.level
+                            .objects
+                            .steam_grates
+                            .first()
+                            .map(|g| g.pos + crate::math::Vec2::new(0.0, 18.0))
+                    } else {
+                        w.level
+                            .objects
+                            .ink_pads
+                            .first()
+                            .map(|p| p.pos + crate::math::Vec2::new(0.0, 18.0))
+                    };
+                    if let Some(spot) = spot {
+                        w.player.pos = spot;
+                    }
+                    // A few seconds on the clock so the grate is mid-cycle.
+                    w.elapsed = 3.5;
+                }
+                for _ in 0..90 {
                     hh.frame(&[]);
                 }
             }
@@ -3206,7 +3396,7 @@ mod tests {
                     }
                     "LevelIntro" => {
                         // A practice run of Kitchen opens on its intro plate.
-                        hh.app.start_practice(1);
+                        hh.app.start_practice(Theme::Kitchen);
                     }
                     "Playing" => hh.enter_playing(),
                     "LevelUp" => {
@@ -4370,6 +4560,77 @@ mod tests {
         assert_eq!(h.app.screen.name_for_test(), "LevelIntro");
     }
 
+    /// The keep screen offers the next stage's route (Kitchen or Laundry),
+    /// keyboard and mouse both pick it, and the chosen floor is the one that
+    /// loads — deterministically, from the run seed and the floor.
+    #[test]
+    fn keep_screen_route_choice_is_keyboard_mouse_and_carried() {
+        let left = MouseEventKind::Down(MouseButton::Left);
+        for size in [(120, 40), (80, 24), (57, 20)] {
+            let mut h = Harness::new(size.0, size.1);
+            h.enter_playing();
+            h.grant_keepables();
+            h.finish_level();
+            h.frame(&[KeyCode::Enter]);
+            assert_eq!(h.app.screen.name_for_test(), "KeepThree");
+            // Both floors are on the plate, and the original route starts
+            // chosen (the design's "original route is the first choice").
+            let text = h.screen_text();
+            assert!(text.contains("Kitchen"), "{size:?}: no Kitchen chip");
+            assert!(text.contains("Laundry"), "{size:?}: no Laundry chip");
+            let run_seed = h.app.campaign.as_ref().unwrap().run_seed;
+            // Tab switches to the side route.
+            h.frame(&[KeyCode::Tab]);
+            assert_eq!(h.app.keep_route, Some(Theme::Laundry));
+            h.frame(&[KeyCode::Tab]);
+            assert_eq!(h.app.keep_route, Some(Theme::Kitchen));
+            // Clicking the Laundry chip picks it without packing anything.
+            h.click("Laundry");
+            assert_eq!(h.app.keep_route, Some(Theme::Laundry));
+            // Confirm the pack and the Laundry is the floor that loads.
+            let mut packed = 0;
+            while packed < 3 {
+                h.frame(&[KeyCode::Char(' ')]);
+                packed += 1;
+                h.frame(&[KeyCode::Down]);
+            }
+            h.frame(&[KeyCode::Enter]);
+            let w = h.app.world.as_ref().expect("next level");
+            assert_eq!(w.level.theme, Theme::Laundry, "{size:?}: wrong floor");
+            assert_eq!(
+                w.level.seed,
+                campaign::level_seed_on(run_seed, 1, Theme::Laundry),
+                "the map seed must follow the chosen route"
+            );
+            let _ = left;
+        }
+    }
+
+    /// The last keep screen (stage two → three) offers the Lab or the
+    /// Printworks, and the Printworks is a completable final floor.
+    #[test]
+    fn the_last_keep_screen_offers_the_printworks() {
+        let mut h = Harness::new(120, 40);
+        h.enter_playing();
+        // Jump to stage two, played on the Laundry, and clear it.
+        {
+            let camp = h.app.campaign.as_mut().unwrap();
+            camp.level = 1;
+            camp.choose_route(Theme::Laundry);
+            let w = camp.world();
+            h.app.world = Some(w);
+        }
+        h.grant_keepables();
+        h.finish_level();
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "KeepThree");
+        let text = h.screen_text();
+        assert!(text.contains("Lab"), "no Lab chip");
+        assert!(text.contains("Printworks"), "no Printworks chip");
+        h.click("Printworks");
+        assert_eq!(h.app.keep_route, Some(Theme::Printworks));
+    }
+
     /// Keep-three by mouse: hovering picks the cursor, clicking the card rows
     /// toggles them, the confirm button is absent (and inert) until the pack is
     /// full, and clicking it advances.
@@ -4512,7 +4773,7 @@ mod tests {
         h.frame(&[KeyCode::Left]);
         h.frame(&[KeyCode::Enter]);
         assert_eq!(h.app.screen.name_for_test(), "LevelIntro");
-        assert_eq!(h.app.practice, Some(1));
+        assert_eq!(h.app.practice, Some(Theme::Kitchen));
         assert!(h.app.campaign.is_none());
         assert!(
             h.screen_text().contains("PRACTICE"),
@@ -4594,7 +4855,7 @@ mod tests {
                 h.frame(&[]);
                 match screen {
                     "SectorSelect" => h.app.screen = Screen::SectorSelect,
-                    "LevelIntro" => h.app.start_practice(1),
+                    "LevelIntro" => h.app.start_practice(Theme::Kitchen),
                     "Victory" => {
                         h.enter_playing();
                         h.app.campaign.as_mut().unwrap().level = 2;
@@ -4670,9 +4931,9 @@ mod tests {
         // on the end plate — never `CampaignVictory`.
         let mut h = Harness::new(120, 40);
         h.frame(&[]);
-        h.app.start_practice(1);
+        h.app.start_practice(Theme::Kitchen);
         assert_eq!(h.app.screen.name_for_test(), "LevelIntro");
-        assert_eq!(h.app.practice, Some(1));
+        assert_eq!(h.app.practice, Some(Theme::Kitchen));
         h.frame(&[KeyCode::Enter]);
         assert_eq!(h.app.screen.name_for_test(), "Playing");
         h.finish_level();
@@ -4993,7 +5254,7 @@ mod tests {
                     h.frame(&[KeyCode::Enter]);
                     h.frame(&[KeyCode::Enter]);
                 }
-                "LevelIntro" => h.app.start_practice(1),
+                "LevelIntro" => h.app.start_practice(Theme::Kitchen),
                 "Playing" => h.enter_playing(),
                 "ExpandedMap" => {
                     h.enter_playing();

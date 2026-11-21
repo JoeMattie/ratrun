@@ -142,6 +142,7 @@ pub fn enemy_steering_system(
     mut order: Local<Vec<(u64, Entity)>>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
     slow: Query<&crate::game::ecs::systems::traps::TrapSlow>,
+    ink: Query<&crate::game::ecs::systems::hazards::InkSlow>,
 ) {
     let dt = input.dt;
     let ppos = player.pos;
@@ -163,7 +164,12 @@ pub fn enemy_steering_system(
         // `traps::TrapSlow` is the per-enemy movement multiplier a sticky board
         // inserts while it holds this enemy (absent = unaffected).
         let glue = slow.get(entity).map_or(1.0, |s| s.0);
-        e.steer(ppos, flow_dir, dt, speed_mult * glue);
+        // `hazards::InkSlow` is the Printworks' ink pad: the same idea for a
+        // permanent floor stain, kept as its own component so a glue board and
+        // a pad can slow the same body without either system clobbering the
+        // other's bookkeeping.
+        let ink = ink.get(entity).map_or(1.0, |s| s.0);
+        e.steer(ppos, flow_dir, dt, speed_mult * glue * ink);
         // Keep enemies inside the arena.
         e.pos = e
             .pos
