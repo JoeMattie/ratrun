@@ -75,12 +75,24 @@ pub enum Target {
     ShopCancel,
     /// Keep screen: pick route floor `i` (`0..2`) for the next campaign level.
     RouteOption(usize),
+    /// The title's LIBRARY row (and the pause screen's library chip): opens the
+    /// specimen index (`Screen::Library`).
+    Library,
+    /// A tab on the Library screen (`0..4`, the [`crate::game::library::Tab`]
+    /// order).
+    LibraryTab(usize),
+    /// An entry row in the Library list: the index **within the current tab**
+    /// (group headers are not targets).
+    LibraryRow(usize),
+    /// The narrow Library layout's "back to the list" chip (the card replaces
+    /// the list below 70 columns).
+    LibraryCard,
 }
 
 /// How many interactive rectangles one screen can register. The campaign
 /// screens are the widest: the keep-three manifest registers one row per owned
 /// upgrade (the art's own `HitList` holds 32) plus its confirm button.
-const HIT_CAPACITY: usize = 40;
+const HIT_CAPACITY: usize = 48;
 
 /// Only the currently displayed layer is interactive. More specific targets
 /// registered last (the map's back arrow) take precedence over their parent.
@@ -241,7 +253,7 @@ pub(crate) fn material(theme: Theme) -> palette::Rgb {
 }
 
 pub fn title_art_width(area: Rect) -> Option<u32> {
-    let rows = area.height.saturating_sub(23);
+    let rows = area.height.saturating_sub(24);
     (rows >= 6 && area.width >= 54)
         .then(|| (u32::from(rows) * 4).min(60).min(u32::from(area.width) - 8))
 }
@@ -330,7 +342,7 @@ pub fn draw_title(
     let rat_h = (rat.len() as u16).min(r.height.saturating_sub(logo_h + 11));
     let gap = u16::from(r.height >= 17);
     let art_gap = u16::from(rat_h > 0);
-    let body_h = rat_h + art_gap + logo_h + 7 + gap * 2;
+    let body_h = rat_h + art_gap + logo_h + 8 + gap * 2;
     let body = band(r, r.height.saturating_sub(body_h + 3) / 2, body_h);
     if rat_h > 0 {
         let width = title_art_width(area).unwrap_or(0) as u16;
@@ -372,9 +384,15 @@ pub fn draw_title(
     let sector_label = "Sector ";
     let sector_text = sector_name(sector, sector_unlocked);
     let sector_row = format!("{sector_label}‹ {sector_text} ›");
-    for (i, text) in ["START RUN", sector_row.as_str(), "OPTIONS", "QUIT"]
-        .into_iter()
-        .enumerate()
+    for (i, text) in [
+        "START RUN",
+        sector_row.as_str(),
+        "OPTIONS",
+        "LIBRARY",
+        "QUIT",
+    ]
+    .into_iter()
+    .enumerate()
     {
         let selected = i == choice;
         let style = if selected {
@@ -389,7 +407,13 @@ pub fn draw_title(
         let rr = band(menu, y + i as u16, 1);
         hits.add(
             rr,
-            [Target::Start, Target::Sectors, Target::Options, Target::Quit][i],
+            [
+                Target::Start,
+                Target::Sectors,
+                Target::Options,
+                Target::Library,
+                Target::Quit,
+            ][i],
         );
         let prefix = if selected { " ▸  " } else { "    " };
         if i == 1 {
@@ -412,7 +436,7 @@ pub fn draw_title(
             rr,
         );
     }
-    y += 4 + gap;
+    y += 5 + gap;
     center(
         f,
         body,
@@ -431,11 +455,13 @@ pub fn draw_title(
         // review asked for: the old one-liner lost the click's second job, zoom,
         // `N`, `C` and options.
         let lines = dash_key.title_legend_lines(r.width >= 96);
-        let room = if r.height >= 18 {
+        // One row less than the old ladder: the title carries five menu rows
+        // now (the LIBRARY row), so the legend keeps clear of the BEST line.
+        let room = if r.height >= 19 {
             4
-        } else if r.height >= 17 {
+        } else if r.height >= 18 {
             3
-        } else if r.height >= 15 {
+        } else if r.height >= 16 {
             2
         } else {
             1
@@ -763,8 +789,8 @@ pub fn draw_pause(f: &mut Frame, area: Rect, dash_key: DashKey, hits: &mut HitMa
             6,
             label(
                 match dash_key {
-                    DashKey::Ctrl => "[ ] music · - = fx · Ctrl dash",
-                    DashKey::Space => "[ ] music · - = fx · Space dash",
+                    DashKey::Ctrl => "[ ] music · - = fx · Ctrl dash · L library",
+                    DashKey::Space => "[ ] music · - = fx · Space dash · L library",
                 },
                 MUTED,
             ),
@@ -876,6 +902,8 @@ pub fn draw_pause_compact(
             (" Esc resume ", Some(Target::Resume)),
             (" ", None),
             (" O opts ", Some(Target::Options)),
+            (" ", None),
+            (" L lib ", Some(Target::Library)),
             (" ", None),
             (if muted { " M unmute " } else { " M mute " }, None),
             (" ", None),
@@ -1754,6 +1782,8 @@ pub fn draw_pause_with_run(
             (resume, Some(Target::Resume)),
             (" ", None),
             (opts, Some(Target::Options)),
+            (" ", None),
+            (" L library ", Some(Target::Library)),
             (" ", None),
             (mute_chip, None),
             (" ", None),

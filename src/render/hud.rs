@@ -277,6 +277,8 @@ pub enum CalloutKind {
     ActivesHint,
     ChestHint,
     ShopHint,
+    /// A new Library entry was discovered (the `LIBRARY + Pillbug` callout).
+    Library,
 }
 
 impl CalloutKind {
@@ -298,6 +300,7 @@ impl CalloutKind {
             CalloutKind::ActivesHint => WARN_AMBER,
             CalloutKind::ChestHint => TRAIL_GOLD,
             CalloutKind::ShopHint => GATE_STEEL,
+            CalloutKind::Library => TRAIL_GOLD,
         }
     }
 }

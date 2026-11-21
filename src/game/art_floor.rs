@@ -55,7 +55,7 @@ pub fn draw_floor(pb: &mut PixelBuffer, level: &Level, cam: Vec2, elapsed: f32) 
     }
     // The wave 3 floor hazards sit on the floor layer: they are walkable, so
     // they must read as paint and grate plates, never as obstacles.
-    hazards(&mut floor, level, elapsed);
+    hazards(&mut floor, &level.palette, &level.objects, elapsed);
     kerb(&mut floor, level, width, height);
 }
 
@@ -607,13 +607,17 @@ fn printworks(floor: &mut Floor<'_>, pal: &Palette, elapsed: f32) {
 ///   slots even while resting, three distinct rising billowy puffs + a pulsing
 ///   1-tile floor border during the 1 s warning, and a boiling white-hot steam
 ///   column during the 0.7 s active plume.
-fn hazards(floor: &mut Floor<'_>, level: &Level, elapsed: f32) {
-    let pal = &level.palette;
+fn hazards(
+    floor: &mut Floor<'_>,
+    pal: &Palette,
+    objects: &super::level::LevelObjects,
+    elapsed: f32,
+) {
     let on_screen = |f: &Floor<'_>, x: i32, y: i32, w: i32, h: i32| {
         x + w > f.x.start && x < f.x.end && y + h > f.y.start && y < f.y.end
     };
 
-    for pad in &level.objects.ink_pads {
+    for pad in &objects.ink_pads {
         let (x0, y0) = ((pad.pos.x - pad.half.x) as i32, (pad.pos.y - pad.half.y) as i32);
         let (w, h) = ((pad.half.x * 2.0) as i32, (pad.half.y * 2.0) as i32);
         if !on_screen(floor, x0 - 2, y0 - 2, w + 4, h + 4) {
@@ -701,7 +705,7 @@ fn hazards(floor: &mut Floor<'_>, level: &Level, elapsed: f32) {
         }
     }
 
-    for grate in &level.objects.steam_grates {
+    for grate in &objects.steam_grates {
         let (cx, cy) = (grate.pos.x as i32, grate.pos.y as i32);
         if !on_screen(floor, cx - 10, cy - 36, 20, 46) {
             continue;
@@ -926,6 +930,32 @@ fn shade_floor(pb: &mut PixelBuffer, x: i32, y: i32, amount: f32) {
     }
     let cur = pb.pixel_at(x as usize, y as usize);
     pb.plot(x, y, scale(cur, 1.0 - amount));
+}
+
+/// Draw **only** the walkable floor hazards of `objects` onto `pb`.
+///
+/// The Library's hazard cards use this with a hand-built [`LevelObjects`]
+/// fixture (one grate, one ink pad), so the steam plume and the ink stipple on
+/// a card are the same art the floor paints — no second illustration to drift.
+/// `cam` is the world position of the buffer's top-left pixel.
+pub fn draw_hazards(
+    pb: &mut PixelBuffer,
+    theme: Theme,
+    objects: &super::level::LevelObjects,
+    cam: Vec2,
+    elapsed: f32,
+) {
+    let (cam_x, cam_y) = (cam.x.round() as i32, cam.y.round() as i32);
+    let x = cam_x..cam_x + pb.w as i32;
+    let y = cam_y..cam_y + pb.h as i32;
+    let mut floor = Floor {
+        pb,
+        cam_x,
+        cam_y,
+        x,
+        y,
+    };
+    hazards(&mut floor, &Palette::for_theme(theme), objects, elapsed);
 }
 
 /// Draw one floor pickup at screen position `s` (already `w2s`-mapped).

@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::audio;
 use crate::config;
 use crate::game::campaign::LEVEL_COUNT;
+use crate::game::library::Library;
 use crate::render::cursor::CursorSetting;
 use crate::render::lighting::LightingMode;
 use crate::render::minimap::MinimapSize;
@@ -233,6 +234,13 @@ pub struct ScoreTable {
     /// values load as `1.0`, the view every old build had.
     #[serde(default = "default_zoom", deserialize_with = "deserialize_zoom")]
     pub zoom: f32,
+    /// The Library's discoveries and lifetime counters (the LIBRARY screen's
+    /// `seen` bitsets and per-kind records). Missing in any file written
+    /// before the screen existed, which loads as "nothing discovered yet".
+    /// [`crate::game::library::Library`] serialises as its sparse
+    /// [`crate::game::library::LibrarySave`] form.
+    #[serde(default)]
+    pub library: Library,
 }
 
 impl Default for ScoreTable {
@@ -249,6 +257,7 @@ impl Default for ScoreTable {
             effects_volume: default_volume(),
             lighting: None,
             zoom: default_zoom(),
+            library: Library::default(),
         }
     }
 }

@@ -3,6 +3,7 @@ pub mod cursor;
 pub mod framebuffer;
 pub mod hud;
 pub mod ink;
+pub mod library;
 pub mod menu;
 pub mod overlay;
 pub mod shop;
