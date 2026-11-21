@@ -665,6 +665,121 @@ pub const DASH_COOLDOWN: Icon = {
     }
 };
 
+/// `PassiveKind::Counterweight` — heavy copper washer tied with knotted twine.
+pub const COUNTERWEIGHT: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'K', (246, 234, 206)), // knotted hemp twine highlight
+        (b'T', (176, 152, 118)), // twine shade
+        (b'W', (255, 224, 152)), // sunlit copper bevel (LightYellow/Yellow in 16c)
+        (b'C', (234, 136, 52)),  // hammered copper body
+        (b'B', (158, 72, 24)),   // bronze mid-shadow
+        (b'D', (98, 42, 14)),    // deep bronze underside
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"....KKT.",
+                b"..WWCK..",
+                b".WWCCKB.",
+                b".WC..CB.",
+                b".WC..CB.",
+                b".WCCBBB.",
+                b"..BDDD..",
+                b"........",
+            ],
+            PAL,
+        ),
+        small: grid4([b".WKK", b"WC.B", b"WC.B", b".BDD"], PAL),
+        accent: (236, 154, 78),
+    }
+};
+
+/// `PassiveKind::LongFuse` — coiled braided fuse burning with a bright star spark.
+pub const LONG_FUSE: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'W', (255, 254, 214)), // white-hot spark core
+        (b'Y', (255, 212, 62)),  // golden spark rays (LightYellow in 16c)
+        (b'O', (244, 112, 34)),  // ember orange flare
+        (b'R', (198, 48, 28)),   // burning coal neck (Red in 16c)
+        (b'H', (206, 174, 118)), // lit braided hemp cord
+        (b'D', (122, 92, 52)),   // shaded cord coil
+    ];
+    Icon {
+        large: grid8(
+            [
+                b".....Y..",
+                b"....YWY.",
+                b".....OY.",
+                b"..HHHR..",
+                b".HD..DH.",
+                b".HDHHHD.",
+                b"..DDDD..",
+                b"........",
+            ],
+            PAL,
+        ),
+        small: grid4([b"..YW", b".HRO", b"HD.D", b".DD."], PAL),
+        accent: (255, 168, 72),
+    }
+};
+
+/// `PassiveKind::SecondScent` — twin rising aqua scent wisps above stacked golden crumbs.
+pub const SECOND_SCENT: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'W', (234, 255, 252)), // bright scent mist tip
+        (b'S', (92, 236, 224)),  // vibrant aqua scent ribbon (LightCyan in 16c)
+        (b'T', (38, 152, 160)),  // trailing teal wisp (Cyan in 16c)
+        (b'G', (255, 222, 88)),  // upper golden crumb (LightYellow in 16c)
+        (b'C', (226, 156, 36)),  // lower second crumb (Yellow in 16c)
+        (b'B', (146, 88, 22)),   // crumb underside shade
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"..W...W.",
+                b".TS..TS.",
+                b"..ST..ST",
+                b".TS..TS.",
+                b"..GG....",
+                b".GGCB...",
+                b"..CCCBB.",
+                b"...BBB..",
+            ],
+            PAL,
+        ),
+        small: grid4([b"W..W", b".S.S", b".GC.", b"CBB."], PAL),
+        accent: (104, 236, 226),
+    }
+};
+
+/// `PassiveKind::LensCap` — cut green-glass bottle-bottom magnifying lens.
+pub const LENS_CAP: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'W', (242, 255, 255)), // crisp glass specular glare
+        (b'S', (196, 218, 224)), // cut-glass silver bevel rim
+        (b'L', (122, 242, 212)), // sunlit seafoam bottle glass (LightCyan/LightGreen in 16c)
+        (b'G', (42, 168, 146)),  // mid bottle-green glass (Cyan/Green in 16c)
+        (b'D', (22, 92, 92)),    // thick bottle-base rim shadow
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"..SSSS..",
+                b".SLLGGS.",
+                b"SLWWLGDD",
+                b"SLWLLGDD",
+                b"SLLGGLDD",
+                b".DGGWDD.",
+                b"..DDDD..",
+                b"........",
+            ],
+            PAL,
+        ),
+        small: grid4([b".SS.", b"SWLD", b"SLGD", b".DD."], PAL),
+        accent: (122, 232, 214),
+    }
+};
+
 /// Currency icon: **Gold Coin** — minted gleaming gold disc with bronze rim.
 pub const GOLD_COIN: Icon = {
     const PAL: &[(u8, Rgb)] = &[
@@ -817,7 +932,10 @@ pub fn passive(kind: PassiveKind) -> &'static Icon {
         PassiveKind::Armor => &ARMOR,
         // Spring Heel is the dash-cooldown passive the icon pass pre-drew.
         PassiveKind::SpringHeel => &DASH_COOLDOWN,
-        // Counterweight, Long Fuse, Second Scent and Lens Cap have no art yet.
+        PassiveKind::Counterweight => &COUNTERWEIGHT,
+        PassiveKind::LongFuse => &LONG_FUSE,
+        PassiveKind::SecondScent => &SECOND_SCENT,
+        PassiveKind::LensCap => &LENS_CAP,
         _ => &PLACEHOLDER,
     }
 }
@@ -853,6 +971,10 @@ pub fn by_name(name: &str) -> &'static Icon {
         "Resilience" => &REGEN,
         "Thick Hide" => &ARMOR,
         "Dash Cooldown" | "Spring Heel" => &DASH_COOLDOWN,
+        "Counterweight" => &COUNTERWEIGHT,
+        "Long Fuse" => &LONG_FUSE,
+        "Second Scent" => &SECOND_SCENT,
+        "Lens Cap" => &LENS_CAP,
         _ => &PLACEHOLDER,
     }
 }
@@ -1090,6 +1212,10 @@ mod tests {
             ("LaserEyes", &LASER_EYES),
             ("SuperDash", &SUPER_DASH),
             ("DashCooldown", &DASH_COOLDOWN),
+            ("Counterweight", &COUNTERWEIGHT),
+            ("LongFuse", &LONG_FUSE),
+            ("SecondScent", &SECOND_SCENT),
+            ("LensCap", &LENS_CAP),
             ("GoldCoin", &GOLD_COIN),
             ("Chest", &CHEST),
             ("EvolvedFrame", &EVOLVED_FRAME),
@@ -1114,19 +1240,9 @@ mod tests {
         }
         for kind in PassiveKind::all() {
             let ic = passive(kind);
-            // Four wave 3 passives have no art yet and deliberately keep the
-            // placeholder; drop them from this list as their icons land.
-            let unpainted = matches!(
-                kind,
-                PassiveKind::Counterweight
-                    | PassiveKind::LongFuse
-                    | PassiveKind::SecondScent
-                    | PassiveKind::LensCap
-            );
-            assert_eq!(
-                std::ptr::eq(ic, placeholder()) || ic == placeholder(),
-                unpainted,
-                "passive {kind:?}: placeholder state is not the expected one"
+            assert!(
+                !std::ptr::eq(ic, placeholder()) && ic != placeholder(),
+                "passive {kind:?} returned placeholder"
             );
             assert_eq!(
                 by_name(kind.name()),
