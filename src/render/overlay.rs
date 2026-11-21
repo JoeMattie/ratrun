@@ -415,12 +415,9 @@ fn draw_boss_ui(frame: &mut Frame, game: Rect, world: &World, state: &mut HudSta
     0
 }
 
-/// How close to the next miniboss appointment the warning banner opens.
-pub const MINIBOSS_WARNING_SECS: f32 = 20.0;
-
 /// The named-miniboss nameplate (wave 3). While one is alive it draws a short
-/// name and a compact HP bar under the boss chrome; when none is alive but the
-/// next appointment is within [`MINIBOSS_WARNING_SECS`] it draws the warning.
+/// name and a compact HP bar under the boss chrome; nothing is shown before it
+/// arrives.
 /// Returns the number of rows reserved at the top of `game`.
 fn draw_miniboss_ui(
     frame: &mut Frame,
@@ -473,32 +470,8 @@ fn draw_miniboss_ui(
         }
         return 2;
     }
-    // No miniboss: warn when the next appointment is close.
-    if let Some(at) = world.next_miniboss_time() {
-        let rem = at - world.elapsed;
-        if rem > 0.0 && rem <= MINIBOSS_WARNING_SECS {
-            let pulse = 0.5 + 0.5 * (state.clock * 9.0).sin();
-            state.miniboss_text.clear();
-            let _ = write!(
-                state.miniboss_text,
-                " ◆ APPOINTMENT IN {:02}s ",
-                rem.ceil().max(1.0) as u32
-            );
-            let tw = (state.miniboss_text.chars().count() as u16).min(game.width);
-            let tx = game.x + (game.width - tw) / 2;
-            let fg = if pulse > 0.5 { PLATE } else { WARN_AMBER };
-            let bg = if pulse > 0.5 { WARN_AMBER } else { PLATE };
-            let buf = frame.buffer_mut();
-            buf.set_stringn(
-                tx,
-                y,
-                &state.miniboss_text,
-                tw as usize,
-                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
-            );
-            return 1;
-        }
-    }
+    // No countdown before a miniboss: it simply arrives (its entrance, its
+    // arrival sting and then this nameplate are the announcement).
     0
 }
 
