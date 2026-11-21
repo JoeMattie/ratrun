@@ -2687,8 +2687,6 @@ mod tests {
             // expansion. Both are taken in a live `Playing` frame (HUD and all).
             "thrash" | "squeak" => {
                 hh.enter_playing();
-                let before = hh.app.world.as_mut().unwrap().active_fx();
-                let _ = before;
                 {
                     use crate::game::weapon::WeaponKind;
                     use rand::SeedableRng;
