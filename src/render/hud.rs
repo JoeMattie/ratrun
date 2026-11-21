@@ -29,6 +29,11 @@ pub const MAX_CALLOUTS: usize = 3;
 /// How long a volume quick-key read-out stays in the status pill slot.
 pub const VOLUME_FLASH_SECS: f32 = 1.6;
 
+/// How long the "ZOOM 1.5x" read-out stays in the status pill slot: long enough
+/// to read after one wheel notch, short enough to stop covering the ambient
+/// status while the player scrolls a few rungs.
+pub const ZOOM_FLASH_SECS: f32 = 1.4;
+
 /// Which of the two independent channels a read-out is about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VolumeChannel {
@@ -344,6 +349,10 @@ pub struct HudState {
     /// Transient "MUSIC 60%" read-out after a volume quick key, drawn in the
     /// top rail's status-pill slot for [`VOLUME_FLASH_SECS`].
     pub volume_flash: Option<(VolumeChannel, u8, f32)>,
+    /// Transient "ZOOM 1.5x" read-out after a wheel notch or a `Z`/`X` press:
+    /// `(zoom setting, seconds left)`. Drawn in the same status-pill slot for
+    /// [`ZOOM_FLASH_SECS`], because a zoom change has no other tell.
+    pub zoom_flash: Option<(f32, f32)>,
 
     /// Fixed-size callout slots (zero allocation on steady-state pushes).
     pub callouts: [CalloutSlot; MAX_CALLOUTS],
@@ -403,6 +412,7 @@ impl Default for HudState {
             streak_kills: 0,
             streak_timer: 0.0,
             volume_flash: None,
+            zoom_flash: None,
             callouts: Default::default(),
             telemetry: HudTelemetry::default(),
             maze_claimed_bits: 0,
@@ -442,6 +452,7 @@ impl HudState {
         self.streak_kills = 0;
         self.streak_timer = 0.0;
         self.volume_flash = None;
+        self.zoom_flash = None;
         for slot in &mut self.callouts {
             slot.active = false;
             slot.timer = 0.0;
@@ -600,6 +611,23 @@ impl HudState {
         }
     }
 
+    /// Show a brief "ZOOM 1.5x" read-out after the zoom setting changed.
+    pub fn notify_zoom(&mut self, zoom: f32) {
+        self.zoom_flash = Some((crate::render::zoom::snap(zoom), ZOOM_FLASH_SECS));
+    }
+
+    /// Age the zoom read-out (called next to [`Self::tick_volume_flash`] on
+    /// every screen, and by [`Self::tick`] during play).
+    pub fn tick_zoom_flash(&mut self, dt: f32) {
+        if let Some((zoom, left)) = self.zoom_flash {
+            self.zoom_flash = if left - dt.max(0.0) > 0.0 {
+                Some((zoom, left - dt.max(0.0)))
+            } else {
+                None
+            };
+        }
+    }
+
     /// Track the charge state of every **active** weapon slot (see
     /// [`WeaponKind::is_active`](crate::game::weapon::WeaponKind::is_active)).
     ///
@@ -637,6 +665,7 @@ impl HudState {
         self.clock += dt;
         self.telemetry.muted = muted;
         self.tick_volume_flash(dt);
+        self.tick_zoom_flash(dt);
 
         let hp_ratio = (world.player.hp.max(0.0) / world.player.max_hp().max(1.0)).clamp(0.0, 1.0);
         if !self.initialized {
@@ -997,6 +1026,10 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
         let flashing = state.volume_flash;
         if let Some((channel, pct, _)) = flashing {
             let _ = write!(b, " {} {}% ", channel.tag(), pct);
+        } else if let Some((zoom, _)) = state.zoom_flash {
+            b.push_str(" ZOOM ");
+            crate::render::zoom::format_into(b, zoom);
+            b.push(' ');
         } else if boss_phase {
             if boss_alive {
                 b.push_str(" ◆ APEX ACTIVE ");
@@ -1336,7 +1369,7 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
         } else {
             Style::default().fg(EDGE).bg(PLATE)
         };
-        let style = if state.volume_flash.is_some() {
+        let style = if state.volume_flash.is_some() || state.zoom_flash.is_some() {
             Style::default()
                 .fg(TRAIL_GOLD)
                 .bg(PLATE)
@@ -2106,6 +2139,36 @@ mod tests {
         assert!(text.contains("KO 42"), "missing kills in {text:?}");
         assert!(text.contains("Score 1234"), "missing score in {text:?}");
         assert!(text.contains("▸Gnaw2"), "missing icon + weapon in {text:?}");
+    }
+
+    /// A zoom change flashes its setting in the status pill slot (the wheel and
+    /// the `Z`/`X` keys have no other tell), and the read-out ages out again.
+    #[test]
+    fn a_zoom_change_flashes_its_setting_in_the_status_pill() {
+        let w = known_world();
+        let mut state = HudState {
+            zoom_flash: None,
+            ..HudState::default()
+        };
+        state.notify_zoom(1.5);
+        let mut terminal = Terminal::new(TestBackend::new(120, 1)).unwrap();
+        terminal
+            .draw(|f| draw_top(f, f.area(), &w, &mut state))
+            .unwrap();
+        let text = row_text(&terminal);
+        assert!(
+            text.contains("ZOOM 1.5x"),
+            "the zoom read-out is missing: {text:?}"
+        );
+        // Whole rungs read as whole numbers, and the flash is transient.
+        state.notify_zoom(2.0);
+        let mut terminal = Terminal::new(TestBackend::new(120, 1)).unwrap();
+        terminal
+            .draw(|f| draw_top(f, f.area(), &w, &mut state))
+            .unwrap();
+        assert!(row_text(&terminal).contains("ZOOM 2x"));
+        state.tick_zoom_flash(ZOOM_FLASH_SECS + 0.01);
+        assert!(state.zoom_flash.is_none(), "the read-out ages out");
     }
 
     /// The campaign pips are stamped into the top rail's right end (the art's

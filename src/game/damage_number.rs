@@ -349,9 +349,19 @@ impl DamageNumbers {
     }
 
     pub fn draw(&self, pb: &mut PixelBuffer, cam: Vec2) {
+        self.draw_scaled(pb, cam, Vec2::new(1.0, 1.0));
+    }
+
+    /// Draw into a **screen-space** buffer: `scale` is the world-pixels per
+    /// screen-pixel ratio of the last render (`World::zoom_scale`, `1,1`
+    /// unzoomed). Positions scale with the view but the glyphs do not — these
+    /// are text-sized read-outs, not world sprites, so a zoomed-out frame keeps
+    /// its damage numbers legible instead of box-filtering them into mush.
+    pub fn draw_scaled(&self, pb: &mut PixelBuffer, cam: Vec2, scale: Vec2) {
         if pb.w == 0 || pb.h == 0 || self.items.is_empty() {
             return;
         }
+        let (sx, sy) = (scale.x.max(0.01), scale.y.max(0.01));
         let bw = pb.w as i32;
         let bh = pb.h as i32;
 
@@ -367,8 +377,8 @@ impl DamageNumbers {
                 if high != draw_priority {
                     continue;
                 }
-                let cx = (it.pos.x - cam.x).round() as i32;
-                let cy = (it.pos.y - cam.y).round() as i32 - (it.pop * 1.6).round() as i32;
+                let cx = ((it.pos.x - cam.x) / sx).round() as i32;
+                let cy = ((it.pos.y - cam.y) / sy).round() as i32 - (it.pop * 1.6).round() as i32;
                 if cx < -18 || cx > bw + 18 || cy < -10 || cy > bh + 10 {
                     continue;
                 }

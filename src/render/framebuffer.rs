@@ -38,6 +38,63 @@ impl PixelBuffer {
         self.px.resize(w * h, (0, 0, 0));
     }
 
+    /// Resample this buffer into `dst` (the zoomed render → the screen grid).
+    ///
+    /// The source covers exactly the same world rectangle the destination will
+    /// show, so each destination pixel owns the source box
+    /// `[x·sx, (x+1)·sx) × [y·sy, (y+1)·sy)`:
+    ///
+    /// * **zoomed out** (`self.w > dst.w`) the box spans several source
+    ///   pixels, and the average of all of them is written — a box filter, so
+    ///   thin things (bullets, the rat's tail, wall edges) dim rather than
+    ///   vanish;
+    /// * **zoomed in** (`self.w < dst.w`) the box is a single source pixel,
+    ///   which is copied — nearest neighbour, so pixels stay crisp;
+    /// * **1:1** this is an exact copy.
+    ///
+    /// Integer arithmetic throughout, so a 1:1 frame is bit-identical to the
+    /// source and nothing depends on float rounding.
+    pub fn resample_to(&self, dst: &mut PixelBuffer) {
+        if dst.w == 0 || dst.h == 0 {
+            return;
+        }
+        if self.w == 0 || self.h == 0 {
+            dst.clear((0, 0, 0));
+            return;
+        }
+        for y in 0..dst.h {
+            let y0 = y * self.h / dst.h;
+            let y1 = ((y + 1) * self.h).div_ceil(dst.h).max(y0 + 1).min(self.h);
+            let row = y * dst.w;
+            for x in 0..dst.w {
+                let x0 = x * self.w / dst.w;
+                let x1 = ((x + 1) * self.w).div_ceil(dst.w).max(x0 + 1).min(self.w);
+                if x1 - x0 == 1 && y1 - y0 == 1 {
+                    // Nearest neighbour (zoomed in): keep the pixel exact.
+                    dst.px[row + x] = self.px[y0 * self.w + x0];
+                    continue;
+                }
+                // Box filter (zoomed out): average the covered source box.
+                let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
+                for sy in y0..y1 {
+                    let srow = sy * self.w;
+                    for sx in x0..x1 {
+                        let c = self.px[srow + sx];
+                        r += u32::from(c.0);
+                        g += u32::from(c.1);
+                        b += u32::from(c.2);
+                    }
+                }
+                let n = ((x1 - x0) * (y1 - y0)) as u32;
+                dst.px[row + x] = (
+                    ((r + n / 2) / n) as u8,
+                    ((g + n / 2) / n) as u8,
+                    ((b + n / 2) / n) as u8,
+                );
+            }
+        }
+    }
+
     pub fn clear(&mut self, c: Rgb) {
         for p in self.px.iter_mut() {
             *p = c;
@@ -234,6 +291,78 @@ mod tests {
         pb.rect_fill(-50, -50, 10, 10, (1, 2, 3));
         pb.rect_fill(90, 90, 10, 10, (1, 2, 3));
         assert_eq!(pb.pixel_at(0, 0), (9, 9, 9));
+    }
+
+    #[test]
+    fn resample_is_exact_at_one_to_one() {
+        let mut src = PixelBuffer::new(4, 3);
+        for y in 0..3 {
+            for x in 0..4 {
+                src.plot(x, y, ((x * 10) as u8, (y * 10) as u8, 7));
+            }
+        }
+        let mut dst = PixelBuffer::new(4, 3);
+        src.resample_to(&mut dst);
+        for y in 0..3 {
+            for x in 0..4 {
+                assert_eq!(dst.pixel_at(x, y), src.pixel_at(x, y));
+            }
+        }
+    }
+
+    #[test]
+    fn resample_box_filters_when_zooming_out() {
+        // Four opaque pixels (two white, two black) fold into one mid-grey:
+        // a single bright bullet in a 2 × 2 box stays visible instead of
+        // vanishing (or staying white and glaring).
+        let mut src = PixelBuffer::new(4, 2);
+        src.plot(0, 0, (255, 255, 255));
+        src.plot(1, 0, (0, 0, 0));
+        src.plot(0, 1, (0, 0, 0));
+        src.plot(1, 1, (0, 0, 0));
+        src.plot(2, 0, (255, 0, 0));
+        src.plot(3, 0, (255, 0, 0));
+        src.plot(2, 1, (255, 0, 0));
+        src.plot(3, 1, (255, 0, 0));
+        let mut dst = PixelBuffer::new(2, 1);
+        src.resample_to(&mut dst);
+        let left = dst.pixel_at(0, 0);
+        assert!(left.0 > 55 && left.0 < 72, "one lit pixel of four averages to ~64: {left:?}");
+        assert_eq!(dst.pixel_at(1, 0), (255, 0, 0), "a solid block stays solid");
+    }
+
+    #[test]
+    fn resample_samples_nearest_when_zooming_in() {
+        // Zooming in maps several destination pixels onto one source pixel and
+        // copies it, so pixels stay crisp (no blur across the block edge).
+        let mut src = PixelBuffer::new(2, 1);
+        src.plot(0, 0, (200, 0, 0));
+        src.plot(1, 0, (0, 200, 0));
+        let mut dst = PixelBuffer::new(4, 2);
+        src.resample_to(&mut dst);
+        assert_eq!(dst.pixel_at(0, 0), (200, 0, 0));
+        assert_eq!(dst.pixel_at(1, 0), (200, 0, 0));
+        assert_eq!(dst.pixel_at(2, 0), (0, 200, 0));
+        assert_eq!(dst.pixel_at(3, 1), (0, 200, 0));
+    }
+
+    #[test]
+    fn resample_survives_degenerate_sizes() {
+        let mut dst = PixelBuffer::new(0, 0);
+        PixelBuffer::new(3, 3).resample_to(&mut dst);
+        assert_eq!((dst.w, dst.h), (0, 0));
+        let mut dst = PixelBuffer::new(4, 2);
+        dst.clear((9, 9, 9));
+        PixelBuffer::new(0, 0).resample_to(&mut dst);
+        assert_eq!(dst.pixel_at(0, 0), (0, 0, 0), "an empty source blanks the frame");
+        // Both directions, tiny → huge and huge → tiny, never panics.
+        for (sw, sh, dw, dh) in [(1usize, 1usize, 5usize, 3usize), (9, 7, 1, 1), (1, 1, 1, 1)] {
+            let mut src = PixelBuffer::new(sw, sh);
+            src.plot(0, 0, (255, 128, 0));
+            let mut dst = PixelBuffer::new(dw, dh);
+            src.resample_to(&mut dst);
+            assert_eq!((dst.w, dst.h), (dw, dh));
+        }
     }
 
     #[test]

@@ -170,6 +170,25 @@ fn deserialize_lighting_mode<'de, D: serde::Deserializer<'de>>(
     Ok(value.as_str().and_then(LightingMode::parse_setting))
 }
 
+/// The unzoomed view: what every build before the mouse wheel shipped had.
+fn default_zoom() -> f32 {
+    crate::render::zoom::DEFAULT
+}
+
+/// A zoom preference, tolerant of hand-edited files: a number (or a numeric
+/// string) is clamped onto the ladder and snapped to its nearest rung; anything
+/// else — including a missing field in an old file — loads unzoomed.
+fn deserialize_zoom<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let raw = value
+        .as_f64()
+        .map(|n| n as f32)
+        .or_else(|| value.as_str().and_then(|s| s.trim().parse::<f32>().ok()));
+    Ok(raw
+        .map(crate::render::zoom::snap)
+        .unwrap_or_else(default_zoom))
+}
+
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScoreTable {
@@ -209,6 +228,11 @@ pub struct ScoreTable {
         deserialize_with = "deserialize_lighting_mode"
     )]
     pub lighting: Option<LightingMode>,
+    /// View zoom preference: how much world the playfield shows (`1.0` =
+    /// unzoomed, `2.0` = twice the world, `0.5` = half). Missing or unreadable
+    /// values load as `1.0`, the view every old build had.
+    #[serde(default = "default_zoom", deserialize_with = "deserialize_zoom")]
+    pub zoom: f32,
 }
 
 impl Default for ScoreTable {
@@ -224,6 +248,7 @@ impl Default for ScoreTable {
             music_volume: default_volume(),
             effects_volume: default_volume(),
             lighting: None,
+            zoom: default_zoom(),
         }
     }
 }
@@ -256,6 +281,7 @@ impl ScoreTable {
         self.entries.truncate(MAX_ENTRIES);
         self.music_volume = audio::snap_percent(self.music_volume);
         self.effects_volume = audio::snap_percent(self.effects_volume);
+        self.zoom = crate::render::zoom::snap(self.zoom);
     }
 
     pub fn save(&self) {
@@ -587,6 +613,43 @@ mod tests {
         let back = ScoreTable::parse(&t.to_json());
         assert_eq!((back.music_volume, back.effects_volume), (35, 80));
         assert_eq!(back.best(), 500);
+    }
+
+    #[test]
+    fn zoom_persists_and_old_files_load_unzoomed() {
+        // A file written before the wheel existed has no zoom field.
+        let missing = ScoreTable::parse(r#"{"entries":[]}"#);
+        assert_eq!(missing.zoom, 1.0, "old files play at the reference view");
+        assert_eq!(ScoreTable::default().zoom, crate::render::zoom::DEFAULT);
+
+        // Every rung round-trips; hand-edited values are clamped onto the
+        // ladder without dropping the scores beside them.
+        for zoom in crate::render::zoom::STEPS {
+            let t = ScoreTable {
+                zoom,
+                ..Default::default()
+            };
+            assert_eq!(ScoreTable::parse(&t.to_json()).zoom, zoom);
+        }
+        let edited = ScoreTable::parse(
+            r#"{"entries":[{"score":700,"time":10.0,"level":2,"map":"Sewer","won":false}],
+                "zoom":1.6}"#,
+        );
+        assert_eq!(edited.zoom, 1.5, "1.6 snaps to the nearest rung");
+        assert_eq!(edited.best(), 700);
+        for (raw, want) in [
+            ("0.1", 0.5),
+            ("99", 2.0),
+            ("\"0.75\"", 0.75),
+            ("-1", 0.5),
+            ("0.9", 1.0),
+            ("null", 1.0),
+            ("true", 1.0),
+            ("{}", 1.0),
+        ] {
+            let json = format!(r#"{{"zoom":{raw}}}"#);
+            assert_eq!(ScoreTable::parse(&json).zoom, want, "zoom = {raw}");
+        }
     }
 
     #[test]

@@ -246,6 +246,10 @@ impl MinimapFrame {
         };
         let cols = world.level.tiles.cols().max(1);
         let rows = world.level.tiles.rows().max(1);
+        // The brackets frame the *rendered* span (logical viewport × the
+        // mouse-wheel zoom), so zooming out widens the rectangle on the radar
+        // exactly as it widens what the player sees.
+        let span = world.view_span();
         let seen = world.fog().seen_count();
         let pct = ((seen * 100) / (cols as usize * rows as usize)).min(100) as u8;
         let maze_discovered = world
@@ -268,8 +272,8 @@ impl MinimapFrame {
             viewport_cells: minimap::CellRect {
                 x: world.cam.x / TILE_F,
                 y: world.cam.y / TILE_F,
-                w: world.viewport.x / TILE_F,
-                h: world.viewport.y / TILE_F,
+                w: span.x / TILE_F,
+                h: span.y / TILE_F,
             },
             markers: &self.markers,
             labels: &self.labels,
