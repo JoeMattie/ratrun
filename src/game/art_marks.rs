@@ -339,6 +339,7 @@ pub fn draw_gnaw_mark(
         Theme::Sewer => ((5, 9, 8), (112, 126, 114), (164, 176, 162)),
         Theme::Kitchen => ((10, 7, 5), (144, 120, 96), (186, 162, 134)),
         Theme::Lab => ((5, 6, 12), (116, 128, 152), (170, 182, 204)),
+        Theme::Trailer => ((6, 4, 2), (150, 124, 92), (196, 172, 134)),
     };
 
     let place = |u: f32, v: f32| origin + f * u + p * v;
@@ -542,6 +543,11 @@ pub fn draw_boss_arena_floor(pb: &mut PixelBuffer, arena: TileRect, theme: Theme
             boss_lab_mown_stripes(pb, clip, ax0, cam_x);
             boss_arena_perimeter(pb, clip, ax0, ay0, ax1, ay1, cam_x, cam_y, (72, 86, 62), 0.32);
         }
+        // The cab hold is steel plate: only the threshold frame, no mown
+        // pattern under a trailer's deck.
+        Theme::Trailer => {
+            boss_arena_perimeter(pb, clip, ax0, ay0, ax1, ay1, cam_x, cam_y, (96, 72, 44), 0.30);
+        }
     }
 
     // Iterate every 4×4-cell block overlapping the visible arena slice.
@@ -563,6 +569,7 @@ pub fn draw_boss_arena_floor(pb: &mut PixelBuffer, arena: TileRect, theme: Theme
                 Theme::Sewer => boss_sewer_block(pb, clip, sx, sy, bx, by),
                 Theme::Kitchen => boss_kitchen_block(pb, clip, sx, sy, bx, by),
                 Theme::Lab => boss_lab_block(pb, clip, sx, sy, bx, by),
+                Theme::Trailer => {}
             }
         }
     }
@@ -1086,6 +1093,9 @@ pub fn draw_hall_landmark(
         Theme::Sewer => landmark_sewer(pb, clip, cx, cy, variant % HALL_LANDMARK_VARIANTS),
         Theme::Kitchen => landmark_kitchen(pb, clip, cx, cy, variant % HALL_LANDMARK_VARIANTS),
         Theme::Lab => landmark_lab(pb, clip, cx, cy, variant),
+        // The bed's own art (straps, bolt heads, scuffed plank ends) is the
+        // landmark; a painted floor decal would read as tiling on a truck.
+        Theme::Trailer => {}
     }
 }
 

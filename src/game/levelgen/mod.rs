@@ -57,6 +57,8 @@
 
 pub mod layout;
 pub mod maze;
+/// The flatbed trailer's own generator (see the module docs).
+pub mod trailer;
 /// Measurement only (`cfg(test)`): the open-world numbers, the map dump and
 /// the survival probe. See the module docs for the environment variables.
 #[cfg(test)]
@@ -187,6 +189,12 @@ fn generate_stages(
     let art_seed = level_seed(theme, seed, attempt) as u32;
     let mut tiles = TileMap::new(MAP_COLS, MAP_ROWS, theme, art_seed);
 
+    // The flatbed is its own world: a long, narrow bed of planks rather than a
+    // sprawl of rooms, so it owns the whole pipeline (see `trailer.rs`).
+    if theme == Theme::Trailer {
+        return trailer::generate(tiles, &mut rng, seed);
+    }
+
     let design = stage!(layout, layout::build_layout(&mut tiles, &mut rng, theme));
     let props = stage!(furnish, layout::furnish(&mut tiles, &design, &mut rng, theme));
     let mazes = stage!(mazes, maze::carve_mazes(&mut tiles, &design, &mut rng, theme));
@@ -216,12 +224,13 @@ fn generate_stages(
         mazes: mazes.clone(),
         objects,
         boss: design.boss.clone(),
+        trailer: crate::game::level::TrailerDeck::default(),
     }
 }
 
 /// Build the runtime [`LevelObjects`] from the generator's placements: the
 /// art modules' own view structs, initialised to their idle states.
-fn objects_from(
+pub(super) fn objects_from(
     tiles: &TileMap,
     mazes: &[MazeSection],
     holes: &[placement::RatHolePlacement],

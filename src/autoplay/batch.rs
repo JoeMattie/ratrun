@@ -1760,8 +1760,8 @@ pub fn parse_args(args: &[String]) -> Result<Option<BatchOpts>, String> {
             }
             "--level" => {
                 let level = value()?.parse::<usize>().map_err(|_| "level must be 1-3")?;
-                if !(1..=campaign::LEVEL_COUNT).contains(&level) {
-                    return Err(format!("level must be 1-{}", campaign::LEVEL_COUNT));
+                if !(1..=campaign::SECTOR_COUNT).contains(&level) {
+                    return Err(format!("level must be 1-{}", campaign::SECTOR_COUNT));
                 }
                 opts.start_level = level - 1;
             }

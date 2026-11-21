@@ -340,17 +340,24 @@ impl App {
 
     /// The theme of the sector the title/select screen points at.
     fn theme(&self) -> Theme {
-        campaign::level_theme(self.select_idx)
+        campaign::sector_theme(self.sector())
     }
 
-    /// The sector-select cursor, clamped into the campaign.
+    /// The sector-select cursor, clamped into the sector row (the three
+    /// campaign sectors and the getaway ride).
     fn sector(&self) -> usize {
-        self.select_idx.min(campaign::LEVEL_COUNT - 1)
+        self.select_idx.min(campaign::SECTOR_COUNT - 1)
     }
 
-    /// Step the sector cursor, wrapping through the three levels.
+    /// Is the sector the cursor is on selectable? The campaign sectors unlock
+    /// in order; the getaway ride is a bonus practice floor and is always open.
+    fn sector_unlocked(&self) -> bool {
+        campaign::is_getaway_sector(self.sector()) || self.scores.level_unlocked(self.sector())
+    }
+
+    /// Step the sector cursor, wrapping through the sector row.
     fn cycle_sector(&mut self, step: isize) {
-        let n = campaign::LEVEL_COUNT as isize;
+        let n = campaign::SECTOR_COUNT as isize;
         self.select_idx = (self.select_idx as isize + step).rem_euclid(n) as usize;
         self.menu_music();
         self.sfx(Sfx::UiMove);
@@ -522,16 +529,42 @@ impl App {
     /// sector refuses and stays put.
     fn start_sector(&mut self) {
         let level = self.sector();
-        if !self.scores.level_unlocked(level) {
+        if !self.sector_unlocked() {
             self.sfx(Sfx::UiMove);
             return;
         }
         self.sfx(Sfx::UiSelect);
-        if level == 0 {
+        if campaign::is_getaway_sector(level) {
+            self.start_getaway(level);
+        } else if level == 0 {
             self.start_run();
         } else {
             self.start_practice(level);
         }
+    }
+
+    /// Begin the **getaway ride**: the flatbed, alone, on the default loadout.
+    ///
+    /// A practice run like a later sector, but on its own theme: the trailer is
+    /// the final stage's third route option, not a campaign step
+    /// (`campaign::getaway_theme`).
+    fn start_getaway(&mut self, sector: usize) {
+        let seed = campaign::level_seed(self.seed(), sector);
+        self.campaign = None;
+        self.practice = Some(sector);
+        self.records = [LevelRecord::default(); campaign::LEVEL_COUNT];
+        self.keep_items.clear();
+        self.keep_entries.clear();
+        self.keep_selected.clear();
+        self.victory_loadout.clear();
+        let world = World::new_level_with_theme(
+            sector,
+            campaign::getaway_theme(),
+            seed,
+            Loadout::starting(),
+            campaign::CampaignTotals::default(),
+        );
+        self.enter_world(world, false);
     }
 
     /// Hand a freshly built level to the app: reset the per-level telemetry,
@@ -574,6 +607,7 @@ impl App {
     /// Another run of the kind just played, skipping the story dossier.
     fn retry(&mut self) {
         match self.practice {
+            Some(level) if campaign::is_getaway_sector(level) => self.start_getaway(level),
             Some(level) => self.start_practice(level),
             None => self.start_campaign(false),
         }
@@ -1062,9 +1096,15 @@ impl App {
                 self.start_run();
             }
             Some(Target::Sectors) => {
-                // The sector select opens on the sector the title shows.
                 self.sfx(Sfx::UiSelect);
-                self.screen = Screen::SectorSelect;
+                if campaign::is_getaway_sector(self.sector()) {
+                    // The getaway ride has no campaign card in the sector
+                    // select: the title row starts it directly.
+                    self.start_sector();
+                } else {
+                    // The sector select opens on the sector the title shows.
+                    self.screen = Screen::SectorSelect;
+                }
             }
             Some(Target::Options) => {
                 self.sfx(Sfx::UiSelect);
@@ -1320,14 +1360,19 @@ impl App {
             player_level: w.player.level,
         };
         let campaign_won = self.campaign.is_some() && w.campaign_won();
-        self.records[level] = record;
+        // The getaway ride is a practice floor: clearing it must not overwrite
+        // the final campaign sector's record or mark it cleared.
+        let getaway = w.level_index >= campaign::LEVEL_COUNT;
+        if !getaway {
+            self.records[level] = record;
+            self.scores.record_level(level, record.score, record.time);
+        }
         // One card per owned weapon and per passive; counted without building
         // the keepable list twice.
         self.owned_upgrades = w.player.loadout.weapons.len() + w.player.loadout.passives.len();
         if campaign_won {
             self.victory_loadout = entries_for(&w.keepables());
         }
-        self.scores.record_level(level, record.score, record.time);
         if self.persist {
             // The clear (and the unlock it grants) is durable even if the
             // player quits right after it.
@@ -1746,7 +1791,7 @@ impl App {
                     self.theme(),
                     self.menu_idx,
                     self.sector(),
-                    self.scores.level_unlocked(self.sector()),
+                    self.sector_unlocked(),
                     &self.scores,
                     &self.rat_art,
                     &mut self.hits,
@@ -1766,7 +1811,7 @@ impl App {
                         self.theme(),
                         self.menu_idx,
                         self.sector(),
-                        self.scores.level_unlocked(self.sector()),
+                        self.sector_unlocked(),
                         &self.scores,
                         &self.rat_art,
                         &mut self.hits,
@@ -1782,7 +1827,7 @@ impl App {
                     self.theme(),
                     self.menu_idx,
                     self.sector(),
-                    self.scores.level_unlocked(self.sector()),
+                    self.sector_unlocked(),
                     &self.scores,
                     &self.rat_art,
                     &mut self.hits,
@@ -1954,7 +1999,7 @@ impl App {
         }
         let view = campaign_ui::LevelSelectView {
             slots,
-            selected: self.sector(),
+            selected: self.sector().min(campaign::LEVEL_COUNT - 1),
             hovered: match self.hits.hovered {
                 Some(Target::SelectSector(i)) => {
                     Some(campaign_ui::LevelSelectAction::SelectLevel(
@@ -2473,9 +2518,10 @@ mod tests {
             let row = h.locate("Sewer");
             h.events(&[], &[(MouseEventKind::Moved, row)]);
             assert_eq!(h.app.menu_idx, 1, "the sector row is menu row 2");
-            // The arrows step the campaign sector (wrapping through all three).
+            // The arrows step the sector row (wrapping through all four: the
+            // three campaign sectors and the getaway ride).
             h.click("‹");
-            assert_eq!(h.app.theme(), Theme::Lab);
+            assert_eq!(h.app.theme(), Theme::Trailer);
             h.click("›");
             assert_eq!(h.app.theme(), Theme::Sewer);
             // The wheel over the sector row steps it too.
@@ -2633,6 +2679,58 @@ mod tests {
         assert!(text.contains("QUIT"));
     }
 
+    /// The getaway ride is the sector row's fourth entry, and it fits at the
+    /// two sizes the art is laid out for (57 × 20 and 80 × 24) as well as a
+    /// full terminal: the label and both arrows are on screen unclipped.
+    #[test]
+    fn the_title_sector_row_names_the_getaway_ride() {
+        for (w, h) in [(57u16, 20u16), (80, 24), (80, 40)] {
+            let mut hh = Harness::new(w, h);
+            hh.app.select_idx = crate::game::campaign::LEVEL_COUNT;
+            let text = hh.frame(&[]);
+            assert!(
+                text.contains("Flatbed"),
+                "{w}x{h}: the sector row does not name the getaway ride:\n{text}"
+            );
+            assert!(
+                text.contains("04") || text.contains("Sector"),
+                "{w}x{h}: the sector row lost its label:\n{text}"
+            );
+            assert!(
+                text.contains('‹') && text.contains('›'),
+                "{w}x{h}: the sector row lost its arrows (clipped?):\n{text}"
+            );
+            // No `×`: the getaway ride is always open.
+            assert!(
+                !text.contains("Flatbed ×"),
+                "{w}x{h}: the getaway ride is shown locked"
+            );
+        }
+    }
+
+    /// Enter on the sector row starts the getaway ride (its practice floor) and
+    /// the app is on the flatbed's map intro, with the campaign untouched.
+    #[test]
+    fn the_title_sector_row_starts_the_flatbed() {
+        let mut hh = Harness::new(80, 24);
+        hh.app.select_idx = crate::game::campaign::LEVEL_COUNT;
+        hh.app.menu_idx = 1; // the sector row
+        hh.frame(&[]);
+        hh.frame(&[KeyCode::Enter]);
+        assert!(
+            matches!(hh.app.screen, Screen::LevelIntro),
+            "Enter on the getaway sector did not start it"
+        );
+        let w = hh.app.world.as_ref().expect("a world");
+        assert_eq!(w.level.theme, Theme::Trailer);
+        assert_eq!(w.level_index, crate::game::campaign::LEVEL_COUNT);
+        assert!(hh.app.campaign.is_none(), "the getaway ride is a practice run");
+        // Its map intro card is the flatbed's lore, not a campaign sector's.
+        let text = hh.frame(&[KeyCode::Enter]); // intro -> playing
+        assert!(matches!(hh.app.screen, Screen::Playing));
+        assert!(!text.is_empty());
+    }
+
     #[test]
     fn quit_from_title() {
         let mut h = Harness::new(80, 40);
@@ -2730,6 +2828,72 @@ mod tests {
                 hh.frame(&[KeyCode::Char(' ')]);
                 let frames = if target == "thrash" { 5 } else { 4 };
                 for _ in 0..frames {
+                    hh.frame(&[]);
+                }
+            }
+            // The getaway ride: start the trailer's practice sector from the
+            // title's sector row and dump the deck at the tailgate. `trailer2`
+            // / `trailer3` are the same frame a few ticks later, so the road
+            // under the planks visibly moves between them.
+            "trailer" | "trailer2" | "trailer3" | "trailerrail" | "trailerhole"
+            | "trailercargo" => {
+                hh.app.select_idx = crate::game::campaign::LEVEL_COUNT;
+                hh.app.menu_idx = 1; // the sector row
+                hh.frame(&[]);
+                hh.frame(&[KeyCode::Enter]); // -> the getaway ride's intro
+                hh.frame(&[KeyCode::Enter]); // -> Playing
+                {
+                    let w = hh.app.world.as_mut().unwrap();
+                    let deck = w.level.trailer.deck;
+                    match target.as_str() {
+                        // At the north rail: the side rail, the road over the
+                        // edge and the verge beyond it.
+                        "trailerrail" => {
+                            w.player.pos = crate::math::Vec2::new(
+                                deck.x as f32 * 16.0 + 200.0,
+                                deck.y as f32 * 16.0 + 20.0,
+                            );
+                        }
+                        // At the first hole, so the road shows through a plank.
+                        "trailerhole" => {
+                            if let Some(pit) = w.level.trailer.pits.first() {
+                                let c = pit.center_world();
+                                w.player.pos = crate::math::Vec2::new(c.x - 40.0, c.y - 10.0);
+                            }
+                        }
+                        // Beside the south end of the first cargo stack, so
+                        // the stack's front face and contact shadow show.
+                        "trailercargo" => {
+                            let mut cx = deck.x + 24;
+                            while cx < deck.right() {
+                                if w.level.tiles.is_full_solid(cx, deck.y + 4) {
+                                    break;
+                                }
+                                cx += 1;
+                            }
+                            let mut ey = deck.y + 4;
+                            while ey < deck.bottom() - 1
+                                && w.level.tiles.is_full_solid(cx, ey + 1)
+                            {
+                                ey += 1;
+                            }
+                            w.player.pos = crate::math::Vec2::new(
+                                cx as f32 * 16.0 + 8.0,
+                                (ey as f32 + 1.0) * 16.0 + 22.0,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                // `trailer` and `trailer2` are the same bump phase (the deck is
+                // not mid-dip), so a diff between them is the road and only the
+                // road; `trailer3` is caught on the joint itself, one pixel low.
+                let ticks = match target.as_str() {
+                    "trailer2" => 6,
+                    "trailer3" => 1,
+                    _ => 4,
+                };
+                for _ in 0..ticks {
                     hh.frame(&[]);
                 }
             }

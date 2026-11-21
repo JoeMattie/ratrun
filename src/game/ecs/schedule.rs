@@ -30,6 +30,7 @@
 //! | 14 | `combat::player_bullet_hits_system` | `resolve_player_bullets` |
 //! | 15 | `combat::enemy_bullet_hits_system` | `resolve_enemy_hits` |
 //! | 16 | `combat::contact_system` | `resolve_contact` |
+//! | 16b | `trailer::trailer_system` | the flatbed's holes, cargo and wind (new; `Theme::Trailer` only) |
 //! | 17 | `loot::reap_enemies_system` | `reap_enemies` |
 //! | 18 | `loot::gems_system` | `update_gems` |
 //! | 19 | `loot::pickups_system` | `update_pickups` |
@@ -76,7 +77,8 @@ use bevy_ecs::prelude::*;
 
 use super::resources::TickInput;
 use super::systems::{
-    boss, combat, enemy_move, fog, fx, gates, loot, player, projectiles, spawn, traps, weapons,
+    boss, combat, enemy_move, fog, fx, gates, loot, player, projectiles, spawn, trailer, traps,
+    weapons,
 };
 
 /// Legacy `self.damage_numbers.update(dt)` (neon merge, `World::update`).
@@ -154,8 +156,16 @@ pub fn build_tick_schedule() -> Schedule {
 
     // 16-22: reaping through the outcome. Ordered after contact; internally
     // chained so the Nuke re-reap and every deferred drop stay in order.
+    //
+    // `trailer::trailer_system` is the flatbed's hazard pass (holes, sliding
+    // cargo, slipstream). It runs right before the reaper: fall damage lands
+    // in the same tick as contact damage (so a fatal fall takes the normal
+    // loot path), and it only writes positions/stun — never spawning or
+    // despawning — so the `EnemyIndex` that `contact_system` just read stays
+    // valid up to the reap. It early-outs on every other theme.
     schedule.add_systems(
         (
+            trailer::trailer_system,
             loot::reap_enemies_system,
             loot::gems_system,
             loot::pickups_system,

@@ -6,6 +6,7 @@ pub mod art_floor;
 pub mod art_marks;
 pub mod art_props;
 pub mod art_rat;
+pub mod art_trailer;
 pub mod art_traps;
 pub mod art_walls;
 pub mod bot;

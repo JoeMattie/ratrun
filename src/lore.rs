@@ -44,6 +44,12 @@ pub fn map_intro(theme: Theme) -> (&'static str, &'static str) {
             "Where you were made. The lights hum a number that used to be your \
              name. End it here. Walk out the front door.",
         ),
+        Theme::Trailer => (
+            "THE GETAWAY — FLATBED",
+            "Forty feet of oak deck and a hundred klicks of night, and the road \
+             roaring underneath your paws. The cab is forward. Whatever else is \
+             riding in this load wants the cab too.",
+        ),
     }
 }
 
@@ -61,6 +67,11 @@ pub fn victory(theme: Theme) -> &'static str {
         Theme::Lab => {
             "Every alarm flatlines at once. The blast door you were born behind \
              finally swings outward — and you are already gone."
+        }
+        Theme::Trailer => {
+            "The cab's brake lines pop and the rig starts to drift. You leave it \
+             on the hard shoulder, drop off the tailgate, and the asphalt is still \
+             warm. The facility is behind you — all of it, at last."
         }
     }
 }

@@ -30,6 +30,15 @@ pub fn draw_prop(pb: &mut PixelBuffer, prop: &Prop, cam: Vec2, pal: &Palette) {
         PropKind::Counter => counter(pb, x, y, w, h, seed, pal),
         PropKind::Console => console(pb, x, y, w, h, seed, pal),
         PropKind::Tank => tank(pb, x, y, w, h, seed, pal),
+        // The flatbed's cargo is its own art module (planks, tarps, straps).
+        PropKind::Pallet
+        | PropKind::TarpLump
+        | PropKind::Tyre
+        | PropKind::Toolbox
+        | PropKind::PipeStack
+        | PropKind::ChainCoil => {
+            crate::game::art_trailer::draw_cargo(pb, prop.kind, x, y, w, h, seed, pal)
+        }
     }
 }
 

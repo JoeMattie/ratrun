@@ -369,6 +369,9 @@ pub fn build_layout(tiles: &mut TileMap, rng: &mut StdRng, theme: Theme) -> Layo
         Theme::Sewer => 0.42,
         Theme::Kitchen => 0.56,
         Theme::Lab => 0.50,
+        // The flatbed has its own generator; this is only reached by tests
+        // that exercise `build_layout` directly on every theme.
+        Theme::Trailer => 0.50,
     };
     let target = OPEN_TARGET.0 + rng.random_range(0..=4) as f64 * 0.01;
     let target_cells = (cols * rows) as f64 * target;
@@ -1916,6 +1919,7 @@ pub fn boss_floor_cells(theme: Theme) -> (i32, i32) {
         Theme::Sewer => (6, 5),
         Theme::Kitchen => (6, 5),
         Theme::Lab => (4, BUMPER_LEN),
+        Theme::Trailer => (6, 5),
     }
 }
 
@@ -1947,6 +1951,8 @@ fn furnish_arena(tiles: &mut TileMap, theme: Theme, arena: TileRect, field: Tile
         // the perimeter), enforced by `furnish_arena_perimeter` and the
         // validator: nothing else has to be placed inside the arena.
         Theme::Kitchen => {}
+        // The flatbed's cab hold is empty plate.
+        Theme::Trailer => {}
     }
     boss
 }
@@ -2262,6 +2268,8 @@ fn furnish_arena_perimeter(
         // The Lab's furniture is its bumpers and dock; nothing else competes
         // with the charge lanes.
         Theme::Lab => return,
+        // The flatbed furnishes its deck from its own generator.
+        Theme::Trailer => return,
     };
     let arena = layout.boss_arena;
     if arena.w < 8 || arena.h < 8 {
