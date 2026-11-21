@@ -284,6 +284,18 @@ impl ActiveFx {
     }
 }
 
+// ---- Wave 3 weapons A ----------------------------------------------------
+
+/// The Hantavirus mark currently on the boss, if any.
+///
+/// The boss is not an `Enemy`, so it cannot carry the `components::Infection`
+/// component the horde uses; this resource is that mark's home instead. One
+/// mark at a time, no jumps (design §4: "A boss can take ticks"), cleared when
+/// its last tick lands or the boss dies. Permanent scratch: inserted by
+/// `World::new`, never round-tripped (no facade field holds it between ticks).
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct BossVirus(pub Option<crate::game::ecs::components::Infection>);
+
 /// Shared neighbour scratch buffer (legacy `World::neigh`).
 #[derive(Resource, Default)]
 pub struct NeighborScratch(pub Vec<u32>);

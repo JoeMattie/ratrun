@@ -296,6 +296,11 @@ pub fn emit_weapon_fire(
         // itself, so the weapon prompt is the comb in `emit_super_dash_comb`.
         WeaponKind::LaserEyes => emit_laser_muzzle(ps, rng, pos, dir),
         WeaponKind::SuperDash => {}
+        // Wave 3 weapons A: Acid Rain's cast is its own emitter (it has to
+        // read as rain from above), and Hantavirus fires no projectile — its
+        // feedback is the tag on the body.
+        WeaponKind::AcidRain => emit_acid_rain_fire(ps, rng, pos, aim),
+        WeaponKind::Hantavirus => emit_virus_tag(ps, rng, pos),
     }
 }
 
@@ -437,6 +442,25 @@ pub fn emit_weapon_hit(
         }
         Some(WeaponKind::TailThrash) => emit_thrash_hit(ps, rng, pos, reflect, killed),
         Some(WeaponKind::SonicSqueak) => emit_squeak_hit(ps, rng, pos, reflect, killed),
+        // Wave 3 weapons A hit through their own systems (a splash / a tick),
+        // never through a projectile impact; kept here so the match stays
+        // exhaustive and a direct call still reads right.
+        Some(WeaponKind::AcidRain) => {
+            let n = ps.budget_count(4, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                n,
+                52.0,
+                1.4,
+                Ramp::Acid,
+                0.28,
+                true,
+                Shape::Dot,
+                4.6,
+            );
+        }
+        Some(WeaponKind::Hantavirus) => emit_virus_tick(ps, rng, pos, killed),
         Some(WeaponKind::AcidSpit) => {
             let globs = ps.budget_count(3, false);
             ps.burst_shaped(
@@ -4239,6 +4263,143 @@ pub fn emit_buff_expire(ps: &mut Particles, pos: Vec2, kind: PickupKind) {
             ramp: Ramp::Custom(color, (60, 62, 66)),
             additive: false,
             shape: Shape::Puff,
+        });
+    }
+}
+
+// ---- Wave 3 weapons A: Acid Rain and Hantavirus --------------------------
+
+/// Acid Rain's cast: the rat spits upward and a thin drizzle answers, so the
+/// volley reads as *arriving from the ceiling* rather than leaving the rat.
+///
+/// The marks themselves are drawn (`game::art_wave3a`), not particles: they
+/// have to stay pinned to a floor spot for the whole wind-up.
+pub fn emit_acid_rain_fire(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, aim: Vec2) {
+    let base = safe_pos(pos);
+    let dir = if aim.len_sq() > 0.01 {
+        aim.normalized()
+    } else {
+        Vec2::new(0.0, -1.0)
+    };
+    // The spit: a short upward-retro cone of lime mist.
+    let n = ps.budget_count(4, false);
+    ps.cone_shaped(
+        rng,
+        base - dir * 1.5,
+        -dir,
+        n,
+        38.0,
+        0.55,
+        Ramp::Acid,
+        0.22,
+        false,
+        Shape::Dot,
+        4.6,
+    );
+    // A ceiling drip ring just above the rat's head: the tell that the rain is
+    // coming down, not across.
+    ps.push_shockwave(Shockwave {
+        pos: base + Vec2::new(0.0, -9.0),
+        start_r: 1.5,
+        end_r: 5.0,
+        life: 0.20,
+        max_life: 0.20,
+        color: (198, 255, 72),
+        core: (240, 255, 190),
+        thick: 1.0,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+}
+
+/// Hantavirus's tag: a plum ring snaps around the chosen body and three pips
+/// blink on above it (the countdown the art then keeps drawing).
+pub fn emit_virus_tag(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
+    let base = safe_pos(pos);
+    ps.push_shockwave(Shockwave {
+        pos: base,
+        start_r: 2.0,
+        end_r: 7.5,
+        life: 0.24,
+        max_life: 0.24,
+        color: (206, 106, 190),
+        core: (246, 208, 246),
+        thick: 1.2,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    let n = ps.budget_count(6, false);
+    ps.burst_shaped(
+        rng,
+        base,
+        n,
+        34.0,
+        1.4,
+        Ramp::Custom((246, 208, 246), (120, 40, 110)),
+        0.30,
+        true,
+        Shape::Dot,
+        4.0,
+    );
+}
+
+/// One Hantavirus damage tick: a small plum pop on the host. The kill variant
+/// is brighter and rolls a little further (it is what a player sees when a
+/// chain finishes a body).
+pub fn emit_virus_tick(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, killed: bool) {
+    let base = safe_pos(pos);
+    ps.push(Particle {
+        pos: base,
+        vel: Vec2::ZERO,
+        life: 0.12,
+        max_life: 0.12,
+        drag: 0.0,
+        gravity: 0.0,
+        ramp: Ramp::Custom((246, 208, 246), (140, 52, 128)),
+        additive: true,
+        shape: Shape::Cross,
+    });
+    let n = ps.budget_count(if killed { 7 } else { 4 }, false);
+    ps.burst_shaped(
+        rng,
+        base,
+        n,
+        if killed { 58.0 } else { 36.0 },
+        1.5,
+        Ramp::Custom((246, 208, 246), (120, 40, 110)),
+        if killed { 0.34 } else { 0.24 },
+        true,
+        Shape::Dot,
+        4.4,
+    );
+}
+
+/// The chain leaving one host for the next: a short plum trail along the
+/// transfer line, so a jump is always visible on screen (nothing teleports
+/// silently).
+pub fn emit_virus_jump(ps: &mut Particles, rng: &mut impl Rng, from: Vec2, to: Vec2) {
+    let from = safe_pos(from);
+    let to = safe_pos(to);
+    let seg = to - from;
+    let len = seg.len();
+    let dir = if len > 0.5 { seg.normalized() } else { Vec2::new(1.0, 0.0) };
+    let n = ps.budget_count(8, false);
+    for i in 0..n {
+        let t = (i as f32 + rng.random_range(0.0..0.6)) / n.max(1) as f32;
+        let life = rng.random_range(0.16..0.28);
+        let jitter = dir.perp() * rng.random_range(-1.6..1.6);
+        ps.push(Particle {
+            pos: from + seg * t + jitter,
+            vel: dir * rng.random_range(16.0..34.0) + jitter * 6.0,
+            life,
+            max_life: life,
+            drag: 6.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom((246, 208, 246), (120, 40, 110)),
+            additive: true,
+            shape: Shape::Streak,
         });
     }
 }

@@ -68,13 +68,13 @@ use super::collision::{SpatialGrid, TileKind, TileMap};
 use super::director::{self, Director};
 pub use super::ecs::components::Pool;
 use super::fog::{Fog, MazeMarker};
-use super::ecs::components::{ChestSpawn, SpawnId};
+use super::ecs::components::{AcidDrop, ChestSpawn, Infection, SpawnId};
 use super::ecs::constants::{GRID_CELL, PARTICLE_CAP};
 use super::ecs::resources::{
-    collect_sorted, spawn_with_id, swap_in, swap_out, ActiveFx, BossDue, DamageLedger, DashTrack,
-    DifficultyLevel, EnemyIndex, GridScratch, LaserFx, LastPickups, LevelIndex, MeleeNudge,
-    NeighborScratch, NextEnemyId, NextSpawnId, NukeTick, PickupScratch, RngRes, RunCounters,
-    SfxQueue, Shake, TickInput, Viewport, XpBank,
+    collect_sorted, spawn_with_id, swap_in, swap_out, ActiveFx, BossDue, BossVirus, DamageLedger,
+    DashTrack, DifficultyLevel, EnemyIndex, GridScratch, LaserFx, LastPickups, LevelIndex,
+    MeleeNudge, NeighborScratch, NextEnemyId, NextSpawnId, NukeTick, PickupScratch, RngRes,
+    RunCounters, SfxQueue, Shake, TickInput, Viewport, XpBank,
 };
 use super::ecs::schedule::{build_settle_schedule, build_tick_schedule};
 use super::ecs::systems::boss::{
@@ -95,7 +95,7 @@ use super::weapon::WeaponKind;
 use super::art_walls::{Cardinal, WallKind};
 use super::{
     art_boss_broom, art_boss_cat, art_boss_mower, art_enemy, art_floor, art_marks, art_props,
-    art_rat, art_traps, art_walls,
+    art_rat, art_traps, art_walls, art_wave3a,
 };
 
 pub struct World {
@@ -303,6 +303,10 @@ impl World {
         // with a full nudge budget and an empty bank.
         ecs.insert_resource(MeleeNudge::default());
         ecs.insert_resource(XpBank::default());
+        // Wave 3 weapons A: the Hantavirus mark on the boss (a boss is not an
+        // `Enemy`, so its mark cannot be a component on it). Permanent scratch,
+        // like `ActiveFx`; a fresh level starts unmarked.
+        ecs.insert_resource(BossVirus::default());
         ecs.insert_resource(SpatialGrid::new(level.arena, GRID_CELL));
         // The director's boss hand-off (raised at `director::BOSS_TIME`, taken
         // by the boss framework). Permanent, like `NukeTick`.
@@ -1193,6 +1197,21 @@ impl World {
             }
         }
 
+        // Acid Rain's locked drops, over the pools and under everything that
+        // stands on the floor: the mark must sit *on* the ground the splash
+        // will cover, and the falling strokes read better with bodies in front
+        // of them (the design keeps hostile warnings above friendly effects).
+        {
+            let mut query = self.ecs.query::<(&SpawnId, &AcidDrop)>();
+            for (_, d) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let s = self.w2s(d.pos, cam);
+                if !on_screen(s, d.radius + 14.0, viewport) {
+                    continue;
+                }
+                art_wave3a::draw_acid_drop(pb, d, s);
+            }
+        }
+
         // Gems.
         {
             let mut query = self.ecs.query::<(&SpawnId, &Gem)>();
@@ -1356,6 +1375,20 @@ impl World {
 
         // Particles and shockwaves on top.
         self.particles.draw(pb, cam);
+
+        // Hantavirus pips over the particles: a status pip the player is counting
+        // down must never be covered by a particle burst. (Damage numbers are
+        // stamped in screen space by `draw`, after the resample.)
+        {
+            let mut query = self.ecs.query::<(&SpawnId, &Enemy, &Infection)>();
+            for (_, e, inf) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let s = self.w2s(e.pos, cam);
+                if !on_screen(s, e.radius * 3.0 + 10.0, viewport) {
+                    continue;
+                }
+                art_wave3a::draw_infection_pips(pb, s, e.radius, inf.ticks_left);
+            }
+        }
 
         // Per-frame 2D lighting pass over the *world-resolution* pixels, with
         // the camera the layers above were drawn with — so it runs here, before

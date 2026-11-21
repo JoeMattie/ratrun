@@ -199,10 +199,11 @@ pub fn fire_weapons_system(
     }
 
     for i in 0..n {
-        let (kind, dmg, cd, projs) = {
+        let (kind, wlevel, dmg, cd, projs) = {
             let w = &player.loadout.weapons[i];
             (
                 w.kind,
+                w.level,
                 w.damage() * dmg_mult,
                 (w.cooldown() / fire_rate).max(0.05),
                 w.level_projectiles(),
@@ -223,6 +224,7 @@ pub fn fire_weapons_system(
         let fired = fire_one(
             &mut commands,
             kind,
+            wlevel,
             dmg,
             cd,
             projs,
@@ -243,6 +245,8 @@ pub fn fire_weapons_system(
             &boss_points,
             &stats,
             &mut melee_nudge,
+            &scratch.infected,
+            &mut scratch.boss_virus,
         );
         if fired {
             player.loadout.weapons[i].timer += cd;
@@ -323,6 +327,12 @@ fn target_range(kind: WeaponKind) -> f32 {
         // target pick) and Super Dash has no target at all — both are owned by
         // `weapons_wave3b`, which never asks this function.
         WeaponKind::LaserEyes | WeaponKind::SuperDash => 0.0,
+        // Wave 3 weapons A mark/tag bodies with their own picks (they need the
+        // *entities* and several marks per volley, which `nearest_visible`
+        // deliberately does not return). `weapons_wave3a` uses the same reach
+        // (`RAIN_RANGE`, `VIRUS_RANGE`), the same cap and the same tie order.
+        WeaponKind::AcidRain => crate::game::weapon::RAIN_RANGE,
+        WeaponKind::Hantavirus => crate::game::weapon::VIRUS_RANGE,
     }
 }
 
@@ -430,10 +440,16 @@ pub struct Candidate {
 /// slot without this). Fields are plain `Local`s, so the per-tick behaviour is
 /// unchanged: each buffer is reused across ticks.
 #[derive(bevy_ecs::system::SystemParam)]
-pub struct FireScratch<'s> {
+pub struct FireScratch<'w, 's> {
     fallback_order: Local<'s, Vec<Entity>>,
     orbit_scratch: Local<'s, Vec<Entity>>,
     target_scratch: Local<'s, Vec<Candidate>>,
+    /// Wave 3 weapons A: the boss's Hantavirus mark. A boss is not an `Enemy`,
+    /// so its mark cannot be a component on it (`weapons_wave3a`).
+    boss_virus: ResMut<'w, crate::game::ecs::resources::BossVirus>,
+    /// Read-only view of the horde's Hantavirus marks: the tag pick skips
+    /// bodies an active chain already owns.
+    infected: Query<'w, 's, &'static crate::game::ecs::components::Infection>,
 }
 
 /// Nearest-first ordering key: smaller distance, then the regular enemy before
@@ -946,6 +962,7 @@ fn squeak_ring(
 fn fire_one(
     commands: &mut Commands,
     kind: WeaponKind,
+    wlevel: u8,
     dmg: f32,
     cd: f32,
     projs: i32,
@@ -968,6 +985,8 @@ fn fire_one(
     // radius, Counterweight's shove) and the per-body melee-nudge log it needs.
     stats: &crate::game::loadout::Stats,
     melee_nudge: &mut MeleeNudge,
+    infected: &Query<&crate::game::ecs::components::Infection>,
+    boss_virus: &mut crate::game::ecs::resources::BossVirus,
 ) -> bool {
     let color = kind.color();
     let mut fired = false;
@@ -1173,6 +1192,49 @@ fn fire_one(
         // `fire_weapons_system` too: `weapons_wave3b` owns the laser burst and
         // the dash hit, so this arm is unreachable by construction.
         WeaponKind::LaserEyes | WeaponKind::SuperDash => {}
+        // Wave 3 weapons A (see `weapons_wave3a`): the volley locks its marks
+        // and spawns its drops here; the tag plants one `Infection`.
+        WeaponKind::AcidRain => {
+            let i = (wlevel.clamp(1, 5) as usize) - 1;
+            fired = crate::game::ecs::systems::weapons_wave3a::fire_acid_rain(
+                commands,
+                level,
+                order,
+                enemies,
+                boss_points,
+                ppos,
+                // Lens Cap stretches the marking reach (a ranged weapon);
+                // Long Fuse widens the splash.
+                stats.ranged_reach(crate::game::weapon::RAIN_RANGE),
+                dmg,
+                crate::game::weapon::RAIN_DROPS[i],
+                stats.splash_radius(crate::game::weapon::RAIN_RADIUS[i]),
+                particles,
+                rng,
+                next_id,
+            );
+        }
+        WeaponKind::Hantavirus => {
+            let i = (wlevel.clamp(1, 5) as usize) - 1;
+            fired = crate::game::ecs::systems::weapons_wave3a::fire_hantavirus(
+                commands,
+                level,
+                order,
+                enemies,
+                infected,
+                boss_points,
+                boss_virus,
+                ppos,
+                // Lens Cap stretches both the tag reach and the jump reach
+                // the chain carries with it.
+                stats.ranged_reach(crate::game::weapon::VIRUS_RANGE),
+                dmg,
+                crate::game::weapon::VIRUS_JUMPS[i],
+                stats.ranged_reach(crate::game::weapon::VIRUS_REACH[i]),
+                particles,
+                rng,
+            );
+        }
     }
     // Only announce a shot when the weapon actually produced something
     // (Gnaw with no target in range fires nothing).
@@ -1190,6 +1252,8 @@ fn fire_one(
             // Announced by `weapons_wave3b` instead.
             WeaponKind::LaserEyes => Sfx::LaserEyes,
             WeaponKind::SuperDash => Sfx::SuperDash,
+            WeaponKind::AcidRain => Sfx::ShootRain,
+            WeaponKind::Hantavirus => Sfx::Infect,
         };
         sfx.0.push(sound);
     }

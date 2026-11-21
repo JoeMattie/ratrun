@@ -780,11 +780,8 @@ pub const PLACEHOLDER: Icon = {
 
 /// Look up the icon for a weapon.
 ///
-/// Every weapon present at wave-3 start is matched explicitly (verified by
-/// unit tests); the trailing wildcard arm exists strictly so sibling wave-3
-/// branches that append new `WeaponKind` variants compile immediately with
-/// [`placeholder`] until their art constant is wired in.
-#[allow(unreachable_patterns)]
+/// Every weapon is matched explicitly (no wildcard): a new `WeaponKind`
+/// must pick its icon here to compile.
 pub fn weapon(kind: WeaponKind) -> &'static Icon {
     match kind {
         WeaponKind::Gnaw => &GNAW,
@@ -797,7 +794,8 @@ pub fn weapon(kind: WeaponKind) -> &'static Icon {
         WeaponKind::SonicSqueak => &SONIC_SQUEAK,
         WeaponKind::LaserEyes => &LASER_EYES,
         WeaponKind::SuperDash => &SUPER_DASH,
-        _ => &PLACEHOLDER,
+        WeaponKind::AcidRain => &ACID_RAIN,
+        WeaponKind::Hantavirus => &HANTAVIRUS,
     }
 }
 

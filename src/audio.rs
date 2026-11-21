@@ -100,11 +100,14 @@ pub enum Sfx {
     // cutting whoosh.
     LaserEyes,
     SuperDash,
+    // Wave 3 weapons A.
+    ShootRain,
+    Infect,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 67] = [
+    pub const ALL: [Sfx; 69] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -181,6 +184,9 @@ impl Sfx {
         // Wave 3 self-driving weapons.
         Sfx::LaserEyes,
         Sfx::SuperDash,
+        // Wave 3 weapons A.
+        Sfx::ShootRain,
+        Sfx::Infect,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -253,6 +259,8 @@ impl Sfx {
             Sfx::PocketFind => "POCKET_FIND",
             Sfx::LaserEyes => "LASER",
             Sfx::SuperDash => "SUPER_DASH",
+            Sfx::ShootRain => "RAIN",
+            Sfx::Infect => "INFECT",
         }
     }
 
@@ -293,7 +301,8 @@ impl Sfx {
             | Sfx::MowerScan
             | Sfx::MowerCharge
             | Sfx::MowerWallClang
-            | Sfx::MowerFlipped => 3,
+            | Sfx::MowerFlipped
+            | Sfx::ShootRain => 3,
             Sfx::Pickup
             | Sfx::UiSelect
             | Sfx::Heal
@@ -309,7 +318,8 @@ impl Sfx {
             | Sfx::MowerBladeSpin
             | Sfx::MowerOverheat
             | Sfx::MowerDockHum
-            | Sfx::PocketFind => 2,
+            | Sfx::PocketFind
+            | Sfx::Infect => 2,
             Sfx::LevelUp
             | Sfx::Boss
             | Sfx::Win
@@ -370,7 +380,8 @@ impl Sfx {
             | Sfx::MowerWallClang
             | Sfx::MowerBladeSpin
             | Sfx::MowerOverheat
-            | Sfx::PocketFind => 2,
+            | Sfx::PocketFind
+            | Sfx::Infect => 2,
             Sfx::Kill
             | Sfx::Dash
             | Sfx::ShootNova
@@ -389,7 +400,8 @@ impl Sfx {
             | Sfx::MowerIdle
             | Sfx::MowerScan
             | Sfx::MowerFlipped
-            | Sfx::MowerDockHum => 1,
+            | Sfx::MowerDockHum
+            | Sfx::ShootRain => 1,
             Sfx::Shoot | Sfx::ShootSpray | Sfx::Hit | Sfx::Gem | Sfx::UiMove => 0,
             Sfx::Gold => 0,
             // Pure feedback: never steals a voice from a hit or a kill.
@@ -5320,6 +5332,91 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             });
             m.add_short_tail(0.10, 4400.0);
             m.finish(0.42, 1.3, 1.2, 22.0)
+        }
+
+
+        // 62. ShootRain: the ceiling lets go. A soft, airy high hiss with three
+        // lazy water blips falling through it — drizzle, not a downpour.
+        Sfx::ShootRain => {
+            const PITCH: [f32; 3] = [1.0, 0.94, 1.07];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.30);
+            // The spatter bed: high-passed noise, quiet and wide.
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.26,
+                pink: true,
+                gain: 0.30,
+                attack_s: 0.018,
+                decay_pow: 1.2,
+                filter: FilterMode::HighPass,
+                fc0: 2600.0 * p,
+                fc1: 4200.0 * p,
+                q: 0.7,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // Three droplets landing, each a short falling sine blip.
+            for &(st, f0, f1, g) in &[
+                (0.040f32, 1180.0f32, 520.0f32, 0.40f32),
+                (0.105, 940.0, 430.0, 0.32),
+                (0.165, 1320.0, 610.0, 0.24),
+            ] {
+                m.add_osc(OscLayer {
+                    start_s: st,
+                    dur_s: 0.070,
+                    f0: f0 * p,
+                    f1: f1 * p,
+                    pitch_pow: 1.4,
+                    wave: Wave::Sine,
+                    gain: g,
+                    attack_s: 0.002,
+                    decay_pow: 2.1,
+                    ..Default::default()
+                });
+            }
+            m.add_short_tail(0.16, 3800.0);
+            m.finish(0.30, 1.3, 1.8, 16.0)
+        }
+
+        // 63. Infect: a wet, low *tick* with a queasy upward buzz behind it —
+        // the sound of a note being passed along a packed carriage.
+        Sfx::Infect => {
+            const PITCH: [f32; 2] = [1.0, 0.91];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.36);
+            // The tag: a short damp thump.
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.10,
+                f0: 260.0 * p,
+                f1: 120.0 * p,
+                pitch_pow: 0.9,
+                wave: Wave::Triangle,
+                gain: 0.62,
+                attack_s: 0.002,
+                decay_pow: 1.9,
+                ..Default::default()
+            });
+            // The queasy buzz: narrow band-passed noise sliding up a little.
+            m.add_noise(NoiseLayer {
+                start_s: 0.012,
+                dur_s: 0.15,
+                pink: true,
+                gain: 0.42,
+                attack_s: 0.010,
+                decay_pow: 1.3,
+                filter: FilterMode::BandPass,
+                fc0: 420.0 * p,
+                fc1: 780.0 * p,
+                fc_pow: 0.8,
+                q: 3.4,
+                trem_hz: 22.0,
+                trem_depth: 0.5,
+                seed: base_seed ^ 0x00A5,
+            });
+            m.add_short_tail(0.12, 2600.0);
+            m.finish(0.42, 1.25, 1.9, 14.0)
         }
     }
 }

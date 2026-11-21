@@ -48,6 +48,10 @@ pub enum DamageSource {
     Orbit,
     TailWhip,
     Nuke,
+    /// Acid Rain's splash (lime, one big number per drop).
+    Rain,
+    /// Hantavirus's damage ticks (plum).
+    Virus,
 }
 
 impl DamageSource {
@@ -431,6 +435,22 @@ fn damage_color(it: &DamageNumber) -> Rgb {
             (255, 130, 150)
         } else {
             (255, 118, 148)
+        };
+    }
+    if it.source == DamageSource::Rain {
+        // Lime, but hotter and whiter than Acid Spit's pool ticks so a rain
+        // splash is not mistaken for a lingering pool.
+        return if it.total_dmg >= 20.0 {
+            (232, 255, 150)
+        } else {
+            (198, 255, 96)
+        };
+    }
+    if it.source == DamageSource::Virus {
+        return if it.total_dmg >= 15.0 {
+            (246, 208, 246)
+        } else {
+            (214, 130, 206)
         };
     }
     if it.source == DamageSource::Acid {

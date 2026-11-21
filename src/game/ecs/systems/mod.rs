@@ -22,3 +22,4 @@ pub mod weapons;
 // melee-nudge clock. Split out of `weapons` so the auto-fire file stays about
 // the weapons it fires.
 pub mod weapons_wave3b;
+pub mod weapons_wave3a;

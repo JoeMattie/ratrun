@@ -146,6 +146,10 @@ pub fn weapon_glyph(kind: WeaponKind) -> char {
         // Wave 3: the beam is an eye, the dash weapon a double arrow.
         WeaponKind::LaserEyes => '◎',
         WeaponKind::SuperDash => '⇶',
+        // Wave 3: a falling drop for Acid Rain, a cross (the tag) for
+        // Hantavirus.
+        WeaponKind::AcidRain => '↓',
+        WeaponKind::Hantavirus => '✚',
     }
 }
 
