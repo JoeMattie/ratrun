@@ -155,6 +155,20 @@ impl AutoOpts {
         }
     }
 
+    /// The getaway ride: the flatbed level alone, as a practice floor.
+    ///
+    /// It is not a campaign step (`campaign::getaway_theme`), so this is the
+    /// only way the batch harness plays it: `start_level` is the sector after
+    /// the last campaign level.
+    pub fn getaway(skill: Skill) -> AutoOpts {
+        AutoOpts {
+            start_level: campaign::LEVEL_COUNT,
+            campaign: false,
+            skill,
+            carry: CarryPreset::None,
+        }
+    }
+
     /// One level alone, starting with `carry` (see [`CarryPreset`]).
     pub fn practice_with(level: usize, skill: Skill, carry: CarryPreset) -> AutoOpts {
         AutoOpts {
@@ -462,9 +476,24 @@ pub struct AutoRun {
 impl AutoRun {
     /// A fresh, seeded run.
     pub fn new(run_seed: u64, opts: AutoOpts) -> AutoRun {
-        let start_level = opts.start_level.min(campaign::LEVEL_COUNT - 1);
+        // The sector row's last entry is the getaway ride, which is always a
+        // practice floor (it is not a campaign step).
+        let start_level = opts.start_level.min(campaign::SECTOR_COUNT - 1);
+        let getaway = campaign::is_getaway_sector(start_level);
         let start_loadout = opts.carry.loadout();
-        let (campaign, world) = if opts.campaign {
+        let (campaign, world) = if getaway {
+            (None, {
+                let mut world = World::new_level_with_theme(
+                    start_level,
+                    campaign::getaway_theme(),
+                    campaign::level_seed(run_seed, start_level),
+                    start_loadout,
+                    campaign::CampaignTotals::default(),
+                );
+                world.carried = campaign::CampaignTotals::default();
+                world
+            })
+        } else if opts.campaign {
             let mut state = CampaignState::new(run_seed);
             state.level = start_level;
             state.loadout = start_loadout;
@@ -1305,6 +1334,7 @@ pub fn run_to_end(run: &mut AutoRun, dt: f32, max_seconds: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::level::Theme;
     use crate::game::loadout::Upgrade;
 
     #[test]
@@ -1329,6 +1359,26 @@ mod tests {
             assert!(run.world().sfx.is_empty(), "autoplay must discard sfx");
             assert!(!matches!(run.status(), AutoStatus::Playing { .. }) || !run.finished());
         }
+    }
+
+    /// The getaway ride is on the autoplay theme list as the sector after the
+    /// last campaign level: a flatbed practice floor, not a campaign step.
+    #[test]
+    fn the_getaway_ride_runs_on_the_flatbed() {
+        let mut run = AutoRun::new(7, AutoOpts::getaway(Skill::Expert));
+        assert_eq!(run.world().level.theme, Theme::Trailer);
+        assert_eq!(run.world().level_index, campaign::LEVEL_COUNT);
+        assert!(!run.opts().campaign, "the getaway is a practice floor");
+        for _ in 0..900 {
+            run.step(1.0 / 60.0);
+            assert_eq!(
+                run.world().level.theme,
+                Theme::Trailer,
+                "the getaway run left the flatbed"
+            );
+        }
+        assert!(run.world().elapsed > 5.0);
+        assert!(!run.finished(), "the getaway ride ended before its boss");
     }
 
     #[test]

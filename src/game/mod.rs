@@ -7,6 +7,7 @@ pub mod art_icons;
 pub mod art_marks;
 pub mod art_props;
 pub mod art_rat;
+pub mod art_trailer;
 pub mod art_traps;
 pub mod art_walls;
 pub mod art_wave3a;

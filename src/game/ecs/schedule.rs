@@ -35,7 +35,9 @@
 //! | 15 | `combat::enemy_bullet_hits_system` | `resolve_enemy_hits` |
 //! | 16 | `combat::contact_system` | `resolve_contact` |
 //! | 16b | `evolutions::milk_teeth_system` … `roll_call_system` | evolved weapons (new) |
-//! | 16c | `weapons_wave3a::hantavirus_death_system` | death-triggered jumps (sees evolution kills), before the reap |
+//! | 16c | `trailer::trailer_system` | the flatbed's holes, cargo and wind (new; `Theme::Trailer` only); a fall can kill, so it runs before 16d |
+//! | 16d | `weapons_wave3a::hantavirus_death_system` | death-triggered jumps (sees evolution and fall kills), before the reap |
+//! | 16b | `trailer::trailer_system` | the flatbed's holes, cargo and wind (new; `Theme::Trailer` only) |
 //! | 17 | `loot::reap_enemies_system` | `reap_enemies` |
 //! | 18 | `loot::gems_system` | `update_gems` |
 //! | 18b | `loot::treasure_system` | gold and chests |
@@ -84,7 +86,7 @@ use bevy_ecs::prelude::*;
 use super::resources::TickInput;
 use super::systems::{
     boss, combat, enemy_move, evolutions, fog, fx, gates, loot, player, powerups, projectiles,
-    spawn, traps, weapons, weapons_wave3a, weapons_wave3b,
+    spawn, trailer, traps, weapons, weapons_wave3a, weapons_wave3b,
 };
 
 /// Legacy `self.damage_numbers.update(dt)` (neon merge, `World::update`).
@@ -203,6 +205,14 @@ pub fn build_tick_schedule() -> Schedule {
 
     // 16-22: reaping through the outcome. Ordered after contact; internally
     // chained so the Nuke re-reap and every deferred drop stay in order.
+    //
+    // `trailer::trailer_system` is the flatbed's hazard pass (holes, sliding
+    // cargo, slipstream). It runs after the evolved weapons and before the
+    // Hantavirus death jump and the reaper: fall damage lands
+    // in the same tick as contact damage (so a fatal fall takes the normal
+    // loot path), and it only writes positions/stun — never spawning or
+    // despawning — so the `EnemyIndex` that `contact_system` just read stays
+    // valid up to the reap. It early-outs on every other theme.
     schedule.add_systems(
         (
             // 16b: evolved weapons (`WAVE3_DESIGN.md` §3). They damage bodies, so
@@ -215,8 +225,13 @@ pub fn build_tick_schedule() -> Schedule {
             evolutions::fairy_ring_system,
             evolutions::drain_cleaner_system,
             evolutions::roll_call_system,
-            // 16c: a Hantavirus host that died this tick (any source, the
-            // evolved weapons above included) passes
+            // 16c: the flatbed's hazard pass (see the comment above this
+            // tuple). A pit fall takes 35 % of an enemy's max HP and can kill,
+            // so it is a damage pass and must precede the Hantavirus death
+            // jump below; it never spawns or despawns.
+            trailer::trailer_system,
+            // 16d: a Hantavirus host that died this tick (any source, the
+            // evolved weapons and a flatbed fall above included) passes
             // its remaining jumps on while the corpse and the `EnemyIndex`
             // order still exist — i.e. after every damage pass and before the
             // reap despawns it.

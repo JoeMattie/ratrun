@@ -659,7 +659,9 @@ impl Bot {
     /// cells are assumed open (it discovers a wall by bumping into it).
     fn clear(&self, w: &World, q: Vec2, r: f32) -> bool {
         match self.params.vision {
-            Vision::Full => w.level.tiles.circle_clear(q, r, SizeClass::Small),
+            Vision::Full => {
+                w.level.tiles.circle_clear(q, r, SizeClass::Small) && pit_clear(w, q, r)
+            }
             Vision::Screen => explored_clear(w, q, r),
         }
     }
@@ -1516,7 +1518,22 @@ fn explored_clear(w: &World, q: Vec2, r: f32) -> bool {
             }
         }
     }
-    true
+    pit_clear(w, q, r)
+}
+
+/// The flatbed's holes are open floor to the tile grid, so the bot has to read
+/// the deck's hazard list itself: it never plans a waypoint, a runway or a dash
+/// through a broken plank or a missing rail section. Every other theme has an
+/// empty list, so this is one length check there.
+fn pit_clear(w: &World, q: Vec2, r: f32) -> bool {
+    if w.level.trailer.pits.is_empty() {
+        return true;
+    }
+    let m = r + 2.0;
+    !w.level.trailer.pits.iter().any(|pit| {
+        let rect = pit.rect.to_world();
+        q.x + m > rect.x && q.x - m < rect.right() && q.y + m > rect.y && q.y - m < rect.bottom()
+    })
 }
 
 /// Clamp the throttle vector into the simulation's contract: finite, and no
@@ -1905,5 +1922,70 @@ mod tests {
         assert!(armor > damage, "armour {armor} must beat damage {damage}");
         assert!(hp > damage, "max HP {hp} must beat damage {damage}");
         assert!(magnet > damage, "magnet {magnet} must beat damage {damage}");
+    }
+
+    /// The flatbed: the bot crosses the whole deck and kills the boss without
+    /// ever standing over a broken plank or a missing rail section.
+    ///
+    /// The clock is wound forward to just before the boss so the test measures
+    /// the floor and the fight, not four minutes of build-up; `pit_clear` is
+    /// what keeps every waypoint, runway and dash off the holes.
+    #[test]
+    fn the_bot_never_stands_on_a_hole_and_clears_the_flatbed() {
+        use crate::game::weapon::WeaponKind;
+        let mut w = World::new(Theme::Trailer, 41);
+        {
+            let lo = &mut w.player.loadout;
+            for kind in [
+                WeaponKind::CheeseSpray,
+                WeaponKind::SqueakNova,
+                WeaponKind::SporeOrbit,
+                WeaponKind::TailWhip,
+            ] {
+                if !lo.has(kind) {
+                    lo.apply(&Upgrade::NewWeapon(kind));
+                }
+            }
+            for _ in 0..8 {
+                for i in 1..lo.weapons.len() {
+                    lo.apply(&Upgrade::LevelWeapon(i));
+                }
+            }
+            for passive in [
+                PassiveKind::MaxHp,
+                PassiveKind::Armor,
+                PassiveKind::Damage,
+                PassiveKind::Regen,
+            ] {
+                for _ in 0..4 {
+                    lo.apply(&Upgrade::Passive(passive));
+                }
+            }
+        }
+        w.player.hp = w.player.max_hp();
+        w.elapsed = crate::game::director::BOSS_TIME - 6.0;
+        let mut bot = seeded_bot(Skill::Expert, 9);
+        let dt = 1.0 / 60.0;
+        let mut ticks = 0u32;
+        let limit = 60 * 150;
+        while ticks < limit && !w.level_complete && w.player.alive() {
+            let input = bot.decide(&w, dt);
+            w.update(dt, input.move_dir, input.dash);
+            assert!(
+                w.level.trailer.pit_at(w.player.pos).is_none(),
+                "the bot stepped into a hole at t={:.1}",
+                w.elapsed
+            );
+            ticks += 1;
+        }
+        assert!(
+            w.player.alive(),
+            "the bot died on the flatbed after {ticks} ticks"
+        );
+        assert!(
+            w.level_complete,
+            "the bot did not clear the flatbed's boss in {ticks} ticks ({:.0} s)",
+            ticks as f32 * dt
+        );
     }
 }

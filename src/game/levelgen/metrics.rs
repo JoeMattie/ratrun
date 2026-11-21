@@ -614,6 +614,32 @@ pub fn dump_ppm(level: &Level, path: &str, scale: i32) -> std::io::Result<()> {
     let cols = level.tiles.cols();
     let rows = level.tiles.rows();
     let mut rgb = vec![[24u8, 20, 28]; (cols * rows) as usize];
+    // The flatbed's own hazards first (they sit under the rooms/walls pass):
+    // holes you fall through, the slipstream stretches, sliding cargo.
+    for pit in &level.trailer.pits {
+        let colour = match pit.kind {
+            crate::game::level::PitKind::BrokenPlank => [10, 10, 14],
+            crate::game::level::PitKind::RailGap => [40, 40, 48],
+        };
+        for (cx, cy) in pit.rect.cells() {
+            if cx >= 0 && cy >= 0 && cx < cols && cy < rows {
+                rgb[(cy * cols + cx) as usize] = colour;
+            }
+        }
+    }
+    for zone in &level.trailer.wind {
+        for (cx, cy) in zone.cells() {
+            if cx >= 0 && cy >= 0 && cx < cols && cy < rows {
+                rgb[(cy * cols + cx) as usize] = [96, 168, 220];
+            }
+        }
+    }
+    for slide in &level.trailer.slides {
+        let (cx, cy) = validate::cell_of(slide.rest);
+        if cx >= 0 && cy >= 0 && cx < cols && cy < rows {
+            rgb[(cy * cols + cx) as usize] = [214, 128, 64];
+        }
+    }
     let inside = |rect: crate::game::level::TileRect| -> Vec<(i32, i32)> {
         rect.cells()
             .filter(|&(cx, cy)| cx >= 0 && cy >= 0 && cx < cols && cy < rows)
@@ -954,7 +980,7 @@ mod stats {
         };
         let per_theme = env_seeds("RATRUN_MAP_SEEDS", 6);
         std::fs::create_dir_all(&dir).unwrap();
-        for theme in Theme::all() {
+        for theme in Theme::playable() {
             for seed in 0..per_theme {
                 let level = generate_once(theme, seed, 0);
                 let path = format!("{dir}/{theme:?}-{seed:02}.ppm");

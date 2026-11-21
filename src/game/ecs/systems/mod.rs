@@ -17,6 +17,7 @@ pub mod player;
 pub mod powerups;
 pub mod projectiles;
 pub mod spawn;
+pub mod trailer;
 pub mod traps;
 pub mod weapons;
 // Wave 3's self-driving weapons (Laser Eyes, Super Dash) and Counterweight's

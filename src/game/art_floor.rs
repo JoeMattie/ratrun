@@ -31,6 +31,13 @@ pub fn draw_floor(pb: &mut PixelBuffer, level: &Level, cam: Vec2, elapsed: f32) 
     if x.end - x.start != pb.w as i32 || y.end - y.start != pb.h as i32 {
         pb.clear(scale(level.palette.bg, 0.44));
     }
+    // The flatbed's deck is its own layer: planks, the road through their
+    // gaps, the rails and the verge. It owns its clipping so the bike-lane
+    // `kerb` below never paints over the road.
+    if level.theme == Theme::Trailer {
+        crate::game::art_trailer::draw_floor(pb, level, cam, elapsed, &x, &y);
+        return;
+    }
     let mut floor = Floor {
         pb,
         cam_x,
@@ -42,6 +49,7 @@ pub fn draw_floor(pb: &mut PixelBuffer, level: &Level, cam: Vec2, elapsed: f32) 
         Theme::Sewer => sewer(&mut floor, &level.palette, elapsed),
         Theme::Kitchen => kitchen(&mut floor, &level.palette),
         Theme::Lab => lab(&mut floor, &level.palette),
+        Theme::Trailer => unreachable!("the flatbed draws its own floor"),
     }
     kerb(&mut floor, level, width, height);
 }
@@ -339,6 +347,7 @@ fn kerb(floor: &mut Floor<'_>, level: &Level, width: i32, height: i32) {
             let warning = mix(face, (103, 80, 37), 0.48);
             (32, 13, warning, mix(warning, bevel, 0.45))
         }
+        Theme::Trailer => unreachable!("the flatbed draws its own border"),
     };
     for edge in [2, height - 4] {
         if edge < floor.y.start - 1 || edge >= floor.y.end {

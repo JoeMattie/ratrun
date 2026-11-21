@@ -196,6 +196,11 @@ pub(crate) fn panel(f: &mut Frame, r: Rect, caption: &str, edge: Color) -> Rect 
 /// The title's sector-row text: the campaign level number, its short name and
 /// a `×` when the level has not been unlocked yet.
 fn sector_name(sector: usize, unlocked: bool) -> String {
+    // The row's last sector is the getaway ride: the flatbed level, which is a
+    // route option rather than a campaign step (see `campaign::getaway_theme`).
+    if crate::game::campaign::is_getaway_sector(sector) {
+        return format!("{:02} {}", sector + 1, Theme::Trailer.name());
+    }
     let level = crate::render::campaign::CampaignLevel::from_index(sector);
     if unlocked {
         format!("{:02} {}", level.number(), level.short_name())
@@ -209,6 +214,7 @@ pub(crate) fn material(theme: Theme) -> palette::Rgb {
         Theme::Sewer => (144, 184, 173),
         Theme::Kitchen => (213, 173, 122),
         Theme::Lab => (151, 175, 214),
+        Theme::Trailer => (206, 178, 132),
     }
 }
 
@@ -649,6 +655,11 @@ pub fn draw_map_intro(f: &mut Frame, area: Rect, theme: Theme, accent: Color, hi
             "  ╭──╮      ╭──╮  ",
             "──┤  ├──»───┤  ├──",
             "  ╰──╯      ╰──╯  ",
+        ],
+        Theme::Trailer => [
+            " ▚▚▚▚▚▚▚▚▚▚▚▚▚▚▚▚ ",
+            " ███▄▄███▄▄███▄▄██ ",
+            "══╧══╧══╧══╧══╧══╧═",
         ],
     };
     for (i, s) in emblem.iter().enumerate() {

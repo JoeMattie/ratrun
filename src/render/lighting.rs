@@ -214,6 +214,13 @@ pub fn theme_ambient(theme: Theme) -> ThemeAmbient {
             hard_pools: true,
             rat_tint: (224, 244, 255),
         },
+        // Open daylight on the road: bright and slightly warm, so the flatbed
+        // reads as outdoors and the light pass only shades it gently.
+        Theme::Trailer => ThemeAmbient {
+            mul: [236, 226, 204],
+            hard_pools: false,
+            rat_tint: (255, 248, 230),
+        },
         // Sensible default for future themes (e.g. Laundry, Printworks).
         _ => ThemeAmbient {
             mul: [148, 152, 162],
@@ -1750,7 +1757,7 @@ mod tests {
 
     #[test]
     fn ambient_floors_never_drop_below_readable_minimum() {
-        for theme in Theme::all() {
+        for theme in Theme::playable() {
             for mode in [LightingMode::Full, LightingMode::Soft, LightingMode::Off] {
                 let floor = mode.min_ambient_q8();
                 for boss_phase in [None, Some(1), Some(2), Some(3)] {
@@ -1772,6 +1779,13 @@ mod tests {
         assert!(kitchen[0] > kitchen[2], "kitchen is warm");
         assert!(lab[2] > lab[0], "lab is cold blue");
         assert!(theme_ambient(Theme::Lab).hard_pools);
+        // The flatbed is outdoors: brighter than every indoor theme on every
+        // channel, and warm (red above blue).
+        let road = theme_ambient(Theme::Trailer).mul;
+        for indoor in [sewer, kitchen, lab] {
+            assert!((0..3).all(|c| road[c] > indoor[c]), "the road is daylight");
+        }
+        assert!(road[0] > road[2], "daylight is slightly warm");
     }
 
     #[test]

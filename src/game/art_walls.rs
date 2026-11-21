@@ -652,6 +652,10 @@ const fn theme_palette(theme: Theme) -> &'static WallPalette {
         Theme::Sewer => &PAL_SEWER,
         Theme::Kitchen => &PAL_KITCHEN,
         Theme::Lab => &PAL_LAB,
+        // The flatbed never reaches the wall interior art (it dispatches to
+        // `art_trailer` before this), but the palette must still exist for the
+        // shared helpers.
+        Theme::Trailer => &PAL_KITCHEN,
     }
 }
 
@@ -899,6 +903,10 @@ fn blend_px(pb: &mut PixelBuffer, x: i32, y: i32, c: Rgb, alpha: f32) {
 /// Call right after `art_floor::draw_floor` and floor stains, **before**
 /// entities, traps, pickups, and [`draw_wall_cell`]. Zero heap allocation.
 pub fn draw_wall_ground(pb: &mut PixelBuffer, view: &WallCellView, cam: Vec2, accent: Rgb) {
+    // The getaway ride's own layers (cargo, rails, the road over the side).
+    if view.theme == Theme::Trailer {
+        return crate::game::art_trailer::draw_wall_ground(pb, view, cam, accent);
+    }
     if matches!(view.kind, WallKind::Solid)
         && view.mask.has(NeighborMask::S)
         && view.mask.has(NeighborMask::E)
@@ -1142,6 +1150,7 @@ fn draw_doorway_ground(
                                     pal.thresh_base
                                 }
                             }
+                            _ => pal.thresh_base,
                         }
                     };
                     blend_px(pb, px, py, c, 0.90);
@@ -1217,6 +1226,7 @@ fn draw_doorway_ground(
                                     pal.thresh_base
                                 }
                             }
+                            _ => pal.thresh_base,
                         }
                     };
                     blend_px(pb, px, py, c, 0.90);
@@ -1310,6 +1320,10 @@ fn draw_oneway_chevron(
 ///
 /// Call after [`draw_wall_ground`] and floor decals. Zero heap allocation.
 pub fn draw_wall_cell(pb: &mut PixelBuffer, view: &WallCellView, cam: Vec2, accent: Rgb) {
+    // The getaway ride's own layers (cargo, rails, the road over the side).
+    if view.theme == Theme::Trailer {
+        return crate::game::art_trailer::draw_wall_cell(pb, view, cam, accent);
+    }
     let (sx, sy) = cell_screen_origin(view, cam);
     if culled(pb, sx, sy) {
         return;
@@ -1780,6 +1794,11 @@ fn fill_top_row(
                 }
             }
         }
+        _ => {
+            for lx in x_start..x_end {
+                row_px[lx as usize] = (96, 72, 44);
+            }
+        }
     }
 }
 
@@ -1939,6 +1958,11 @@ fn fill_front_row(
                 }
             }
         }
+        _ => {
+            for lx in x_start..x_end {
+                row_px[lx as usize] = pal.front_base;
+            }
+        }
     }
 }
 
@@ -1971,6 +1995,7 @@ fn draw_solid_cell(
                 draw_sewer_solid_interior(pb, sx, sy, view, cell_h);
             }
             Theme::Kitchen => draw_kitchen_solid_interior(pb, sx, sy, view),
+            _ => {}
         }
         return;
     }
@@ -2245,6 +2270,7 @@ fn sample_top_material(
                 LAB_TOP_LUT.base[bi]
             }
         }
+        _ => (96, 72, 44),
     }
 }
 
@@ -2328,6 +2354,7 @@ fn draw_front_accents(
                 pb.plot(sx + 8, front_y + 1, pip);
             }
         }
+        _ => {}
     }
 }
 
@@ -2530,6 +2557,7 @@ fn draw_maze_cell(
                             lab_top_base
                         }
                     }
+                    _ => kitchen_top_hi,
                 };
 
                 let lit_n = !in_maze_top_ext(lx, ly - 2, m) && !in_maze_any(lx, ly - 2, m);
@@ -2583,6 +2611,7 @@ fn draw_maze_cell(
                             lab_front_mid
                         }
                     }
+                    _ => kitchen_front_hi,
                 };
                 if fy == 0 {
                     c = scale_c(c, 0.60);
@@ -2795,6 +2824,7 @@ fn draw_jamb_pillar_v(
         Theme::Lab => palette::scale(accent, 0.90),
         Theme::Kitchen => pal.detail_a,
         Theme::Sewer => pal.trim_hi,
+        _ => pal.detail_a,
     };
     pb.plot(pip_x, y + TOP_FACE_H - 2, pip_col);
 }
@@ -2843,6 +2873,7 @@ fn draw_jamb_pillar_h(
         Theme::Lab => palette::scale(accent, 0.90),
         Theme::Kitchen => pal.detail_a,
         Theme::Sewer => pal.trim_hi,
+        _ => pal.detail_a,
     };
     pb.plot(x + 3, pip_y, pip_col);
     pb.plot(x + CELL_SIZE - 4, pip_y, pip_col);
@@ -2864,6 +2895,7 @@ fn draw_oneway_gate(
         Theme::Sewer => pal.detail_b,
         Theme::Kitchen => pal.maze_top,
         Theme::Lab => pal.maze_top,
+        Theme::Trailer => pal.maze_top,
     };
     let leaf_hi = pal.trim_hi;
 
@@ -3005,6 +3037,10 @@ fn draw_gate_leaf(
 /// Call **after** drawing entities and **before** HUD/particles. No-op for
 /// `Solid`, `Maze`, and `Vertical` doorways. Zero heap allocation.
 pub fn draw_wall_overhang(pb: &mut PixelBuffer, view: &WallCellView, cam: Vec2, _accent: Rgb) {
+    // The getaway ride's own layers (cargo, rails, the road over the side).
+    if view.theme == Theme::Trailer {
+        return crate::game::art_trailer::draw_wall_overhang(pb, view, cam, _accent);
+    }
     if matches!(
         view.kind,
         WallKind::Solid
@@ -3248,6 +3284,7 @@ pub fn draw_boss_threshold_ground(
                 accent,
             );
         }
+        _ => {}
     }
 }
 
@@ -3332,6 +3369,7 @@ pub fn draw_boss_threshold_overhang(
                 }
             }
         }
+        _ => {}
     }
 }
 

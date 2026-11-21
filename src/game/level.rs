@@ -47,11 +47,28 @@ pub enum Theme {
     Sewer,
     Kitchen,
     Lab,
+    /// The getaway ride: the bed of a long flatbed trailer running down a
+    /// road. Its own generator (`levelgen::trailer`) builds the bed, the cargo
+    /// that shapes it and the hazards; `art_trailer` owns the planks, the road
+    /// seen through their gaps, the rails and the cargo art.
+    Trailer,
 }
 
 impl Theme {
+    /// The campaign's themes, in campaign order: the three shipped sectors.
+    ///
+    /// [`Theme::Trailer`] is deliberately **not** a campaign step: it is the
+    /// getaway ride, an extra route for the final stage (see
+    /// [`crate::game::campaign::sector_theme`]). Lists that build or draw every
+    /// theme the engine can render use [`Theme::playable`] instead.
     pub fn all() -> [Theme; 3] {
         [Theme::Sewer, Theme::Kitchen, Theme::Lab]
+    }
+
+    /// Every theme a `World` can be built on, campaign themes first and the
+    /// getaway ride last. Tests and the title's sector row use this.
+    pub fn playable() -> [Theme; 4] {
+        [Theme::Sewer, Theme::Kitchen, Theme::Lab, Theme::Trailer]
     }
 
     pub fn name(self) -> &'static str {
@@ -59,7 +76,14 @@ impl Theme {
             Theme::Sewer => "Sewer",
             Theme::Kitchen => "Kitchen",
             Theme::Lab => "Lab",
+            Theme::Trailer => "Flatbed",
         }
+    }
+
+    /// The campaign theme a level index plays, when it is not the getaway
+    /// ride (see [`crate::game::campaign::sector_theme`]).
+    pub fn is_trailer(self) -> bool {
+        matches!(self, Theme::Trailer)
     }
 }
 
@@ -92,7 +116,7 @@ impl Rectf {
 
 /// A rectangle of grid cells (`x, y` are cell coordinates; `w, h` are cell
 /// counts). Rooms, maze sections and generator reservations all use it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TileRect {
     pub x: i32,
     pub y: i32,
@@ -194,6 +218,17 @@ impl Palette {
                 accent: (120, 220, 255),
                 blood: (90, 200, 255),
             },
+            // Weathered oak over hot asphalt at dusk: warm browns for the
+            // planks and the tarps, a stale amber for the lane markings, and a
+            // rust red for what the road does to the horde.
+            Theme::Trailer => Palette {
+                bg: (38, 29, 21),
+                bg_alt: (52, 39, 27),
+                wall: (92, 68, 42),
+                wall_edge: (168, 132, 86),
+                accent: (226, 178, 84),
+                blood: (150, 66, 48),
+            },
         }
     }
 }
@@ -214,6 +249,19 @@ pub enum PropKind {
     Console,
     Tank,
     Barrier,
+    // ---- Flatbed cargo (the trailer's load) ------------------------------
+    /// A stack of slats on bearers (32 × 24 px): a low, walk-round obstacle.
+    Pallet,
+    /// A tarped machine shape (24 × 24 px).
+    TarpLump,
+    /// A stacked spare tyre (18 × 18 px).
+    Tyre,
+    /// A steel toolbox (20 × 12 px).
+    Toolbox,
+    /// A strap-bound stack of pipes (40 × 18 px).
+    PipeStack,
+    /// A coiled chain on a hook (16 × 16 px).
+    ChainCoil,
 }
 
 impl PropKind {
@@ -230,6 +278,12 @@ impl PropKind {
             PropKind::Console => (46.0, 18.0),
             PropKind::Tank => (24.0, 24.0),
             PropKind::Barrier => (16.0, 66.0),
+            PropKind::Pallet => (32.0, 24.0),
+            PropKind::TarpLump => (24.0, 24.0),
+            PropKind::Tyre => (18.0, 18.0),
+            PropKind::Toolbox => (20.0, 12.0),
+            PropKind::PipeStack => (40.0, 18.0),
+            PropKind::ChainCoil => (16.0, 16.0),
         }
     }
 
@@ -281,6 +335,16 @@ pub fn theme_props(theme: Theme) -> &'static [PropKind] {
             PropKind::Tank,
             PropKind::Barrier,
             PropKind::Crate,
+        ],
+        Theme::Trailer => &[
+            PropKind::Crate,
+            PropKind::Crate,
+            PropKind::Pallet,
+            PropKind::TarpLump,
+            PropKind::Tyre,
+            PropKind::Toolbox,
+            PropKind::PipeStack,
+            PropKind::ChainCoil,
         ],
     }
 }
@@ -535,6 +599,130 @@ impl LevelObjects {
     }
 }
 
+// ---- The flatbed -----------------------------------------------------------
+//
+// The trailer level is the one theme whose *hazards are the layout*: a long,
+// narrow bed of oak planks with the road running underneath it, cargo strapped
+// down in lanes, holes where planks have gone, and gaps where a rail section is
+// missing. Only `Theme::Trailer` fills this in; every other theme leaves it
+// empty (`TrailerDeck::is_empty`).
+//
+// Like `LevelObjects`, the data is plain `Copy` records the renderer reads, so
+// the drawn holes and the simulated falls cannot disagree.
+
+/// Why a cell is a hole you can fall through.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PitKind {
+    /// A run of planks has gone: the road is visible through the deck.
+    #[default]
+    BrokenPlank,
+    /// A missing rail section on the bed's open edge.
+    RailGap,
+}
+
+/// One fall hazard: the cells a body can drop through.
+#[derive(Clone, Copy, Debug)]
+pub struct Pit {
+    pub rect: TileRect,
+    pub kind: PitKind,
+}
+
+impl Pit {
+    pub fn new(rect: TileRect, kind: PitKind) -> Pit {
+        Pit { rect, kind }
+    }
+
+    pub fn center_world(&self) -> Vec2 {
+        self.rect.center_world()
+    }
+
+    pub fn contains_world(&self, p: Vec2) -> bool {
+        self.rect.contains_world(p)
+    }
+}
+
+/// A crate on ratchet straps that shifts along the deck whenever the trailer
+/// hits an expansion joint. The position is a pure function of the run clock
+/// ([`TrailerDeck::slide_offset`]), so the sim and the art read the same
+/// motion with no per-tick state.
+#[derive(Clone, Copy, Debug)]
+pub struct SlidingCargo {
+    /// Resting centre in world pixels (the crate is drawn here at rest).
+    pub rest: Vec2,
+    /// Slide axis (unit, along the bed) and travel in pixels.
+    pub dir: Vec2,
+    pub travel: f32,
+    /// Cycle phase offset in seconds, so two crates do not slide together.
+    pub phase: f32,
+    /// Half-extent of the crate's box on the deck.
+    pub half: Vec2,
+    /// Seconds the cycle spends creaking before it shifts (the tell).
+    pub warn: f32,
+}
+
+/// The flatbed's own layout data. Empty on every other theme.
+#[derive(Clone, Debug, Default)]
+pub struct TrailerDeck {
+    /// The walkable bed, in cells.
+    pub deck: TileRect,
+    /// Where the rat drops onto the tailgate (== `Level::start`).
+    pub tailgate: Vec2,
+    /// Cells a body can fall through (broken planks and missing rail sections).
+    pub pits: Vec<Pit>,
+    /// Stretches where the slipstream drags light things toward the tailgate.
+    pub wind: Vec<TileRect>,
+    /// Cargo that walks along its straps on every bump.
+    pub slides: Vec<SlidingCargo>,
+}
+
+impl TrailerDeck {
+    pub fn is_empty(&self) -> bool {
+        self.deck.area() == 0
+    }
+
+    /// The pit containing world position `p`, if any.
+    pub fn pit_at(&self, p: Vec2) -> Option<&Pit> {
+        self.pits.iter().find(|pit| pit.contains_world(p))
+    }
+
+    /// Is `p` on an exposed stretch where the slipstream pulls toward the
+    /// tailgate?
+    pub fn windy_at(&self, p: Vec2) -> bool {
+        self.wind.iter().any(|w| w.contains_world(p))
+    }
+
+    /// One crate's slide offset along `slide.dir`, in pixels, at run clock
+    /// `elapsed`.
+    ///
+    /// The cycle is [`SLIDE_PERIOD`] long: a short creak (`slide.warn`), a
+    /// [`SLIDE_TRAVEL_SECS`] shift out along the straps, a hold, then the
+    /// straps pull it back. Render-only: no rng and no per-tick state.
+    pub fn slide_offset(slide: &SlidingCargo, elapsed: f32) -> f32 {
+        let t = (elapsed + slide.phase).rem_euclid(SLIDE_PERIOD);
+        let shift = slide.warn + SLIDE_TRAVEL_SECS;
+        if t < slide.warn {
+            0.0
+        } else if t < shift {
+            // Out: a smooth shove over the travel window.
+            let u = (t - slide.warn) / SLIDE_TRAVEL_SECS;
+            slide.travel * (u * u * (3.0 - 2.0 * u))
+        } else if t < shift + SLIDE_HOLD_SECS {
+            slide.travel
+        } else {
+            // Back: the straps win.
+            let u = (t - shift - SLIDE_HOLD_SECS) / (SLIDE_PERIOD - shift - SLIDE_HOLD_SECS);
+            slide.travel * (1.0 - u * u * (3.0 - 2.0 * u))
+        }
+    }
+}
+
+/// One full slide cycle, in seconds (creak + shove + hold + return).
+pub const SLIDE_PERIOD: f32 = 7.5;
+/// How long the crate takes to walk out along its straps.
+pub const SLIDE_TRAVEL_SECS: f32 = 0.9;
+/// How long it sits at the end of its straps before returning.
+pub const SLIDE_HOLD_SECS: f32 = 1.6;
+
 // ---- The level -------------------------------------------------------------
 
 #[derive(bevy_ecs::resource::Resource)]
@@ -569,6 +757,9 @@ pub struct Level {
     /// What the boss arena furnishes for its fight (the central clear floor,
     /// the Lab's bumpers and charging dock, the Sewer's escape rat-hole).
     pub boss: BossArena,
+    /// The flatbed's bed, pits, wind stretches and sliding cargo. Empty on
+    /// every theme but [`Theme::Trailer`].
+    pub trailer: TrailerDeck,
 }
 
 /// The fight furniture inside the boss arena, exported by the generator so the
@@ -669,6 +860,7 @@ impl Level {
             mazes: Vec::new(),
             objects: LevelObjects::default(),
             boss: BossArena::default(),
+            trailer: TrailerDeck::default(),
         }
     }
 
@@ -756,6 +948,11 @@ impl Level {
     pub fn is_open_floor(&self, rect: Rectf) -> bool {
         self.tiles.rect_clear(rect, SizeClass::Small)
     }
+
+    /// The fall hazard containing `p`, on the trailer level.
+    pub fn pit_at(&self, p: Vec2) -> Option<&Pit> {
+        self.trailer.pit_at(p)
+    }
 }
 
 /// Deterministic seed for a level: mixes the run seed with the theme so the
@@ -765,6 +962,7 @@ pub fn level_seed(theme: Theme, seed: u64, attempt: u32) -> u64 {
         Theme::Sewer => 0x9e37_79b9_7f4a_7c15u64,
         Theme::Kitchen => 0xc2b2_ae3d_27d4_eb4fu64,
         Theme::Lab => 0x1656_67b1_9e37_79f9u64,
+        Theme::Trailer => 0x2f1d_4b8c_9a63_0d57u64,
     };
     let mut h = seed ^ t ^ ((attempt as u64) << 32);
     // splitmix64 finaliser: plenty to decorrelate neighbouring seeds.

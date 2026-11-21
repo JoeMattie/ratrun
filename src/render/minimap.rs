@@ -210,6 +210,16 @@ impl MinimapPalette {
         accent: (120, 220, 255),
         blood: (90, 200, 255),
     };
+
+    /// The flatbed: warm oak over an asphalt night, with lane-marking amber.
+    pub const TRAILER: Self = Self {
+        bg: (38, 29, 21),
+        bg_alt: (52, 39, 27),
+        wall: (92, 68, 42),
+        wall_edge: (168, 132, 86),
+        accent: (226, 178, 84),
+        blood: (150, 66, 48),
+    };
 }
 
 /// Display mode for the minimap widget.

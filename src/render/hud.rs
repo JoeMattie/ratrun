@@ -166,6 +166,8 @@ pub fn boss_codename(theme: Theme) -> (&'static str, &'static str) {
         Theme::Sewer => CampaignLevel::Sewer,
         Theme::Kitchen => CampaignLevel::Kitchen,
         Theme::Lab => CampaignLevel::Lab,
+        // The getaway ride borrows the Lab's mower (see `boss::trailer_boss`).
+        Theme::Trailer => CampaignLevel::Lab,
     };
     let class_tag = match level {
         CampaignLevel::Sewer => "CLASS-V APEX PREDATOR",

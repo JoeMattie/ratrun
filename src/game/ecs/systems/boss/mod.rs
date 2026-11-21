@@ -143,6 +143,15 @@ pub enum BossKind {
     Mower,
 }
 
+/// The boss the getaway ride fields until it gets a fight of its own.
+///
+/// The trailer is a machine on wheels with a road to hide in, so the Lab's
+/// TURF-REAPER MK.IV reads best of the three shipped fights; `w3-bosses` owns
+/// the real chase and only has to change this one function.
+pub fn trailer_boss() -> BossKind {
+    BossKind::Mower
+}
+
 impl BossKind {
     /// The boss for a campaign theme.
     #[inline]
@@ -151,6 +160,7 @@ impl BossKind {
             Theme::Sewer => BossKind::Cat,
             Theme::Kitchen => BossKind::Broom,
             Theme::Lab => BossKind::Mower,
+            Theme::Trailer => trailer_boss(),
         }
     }
 

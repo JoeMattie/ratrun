@@ -45,6 +45,34 @@ pub const KEEP_COUNT: usize = 3;
 /// The weapon a level falls back to when the kept powerups include none.
 pub const STARTING_WEAPON: WeaponKind = Loadout::START_WEAPON;
 
+/// The **getaway ride**: the flatbed trailer level.
+///
+/// It is the third route option for the final stage of the campaign (the
+/// "Lab" slot): `w3-levels` builds the route choice, and this is the theme it
+/// offers alongside the Lab and the other final-stage route. It is not a
+/// campaign *step*, so it is not in [`Theme::all`].
+pub fn getaway_theme() -> Theme {
+    Theme::Trailer
+}
+
+/// How many sectors the title's sector row and the sector-select screen offer:
+/// the three campaign sectors plus the getaway ride.
+pub const SECTOR_COUNT: usize = LEVEL_COUNT + 1;
+
+/// Is `sector` the getaway ride rather than a campaign level?
+pub fn is_getaway_sector(sector: usize) -> bool {
+    sector == LEVEL_COUNT
+}
+
+/// The theme the title's sector row shows for `sector`.
+pub fn sector_theme(sector: usize) -> Theme {
+    if is_getaway_sector(sector) {
+        getaway_theme()
+    } else {
+        level_theme(sector)
+    }
+}
+
 /// The theme of campaign level `index` (0 Sewer, 1 Kitchen, 2 Lab).
 ///
 /// Out-of-range indices wrap, so a caller cannot index past the campaign; the

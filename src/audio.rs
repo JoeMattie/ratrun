@@ -105,11 +105,13 @@ pub enum Sfx {
     Infect,
     // Chest evolution fanfare (appended for wave 3).
     Evolve,
+    /// The flatbed's suspension over an expansion joint: one soft thud.
+    Bump,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 70] = [
+    pub const ALL: [Sfx; 71] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -190,6 +192,7 @@ impl Sfx {
         Sfx::ShootRain,
         Sfx::Infect,
         Sfx::Evolve,
+        Sfx::Bump,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -265,6 +268,7 @@ impl Sfx {
             Sfx::ShootRain => "RAIN",
             Sfx::Infect => "INFECT",
             Sfx::Evolve => "EVOLVE",
+            Sfx::Bump => "BUMP",
         }
     }
 
@@ -306,7 +310,8 @@ impl Sfx {
             | Sfx::MowerCharge
             | Sfx::MowerWallClang
             | Sfx::MowerFlipped
-            | Sfx::ShootRain => 3,
+            | Sfx::ShootRain
+            | Sfx::Bump => 3,
             Sfx::Pickup
             | Sfx::UiSelect
             | Sfx::Heal
@@ -407,7 +412,8 @@ impl Sfx {
             | Sfx::MowerScan
             | Sfx::MowerFlipped
             | Sfx::MowerDockHum
-            | Sfx::ShootRain => 1,
+            | Sfx::ShootRain
+            | Sfx::Bump => 1,
             Sfx::Shoot | Sfx::ShootSpray | Sfx::Hit | Sfx::Gem | Sfx::UiMove => 0,
             Sfx::Gold => 0,
             // Pure feedback: never steals a voice from a hit or a kill.
@@ -5493,6 +5499,57 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             });
             m.finish(0.44, 1.6, 3.0, 18.0)
         }
+        // Expansion joint: the trailer's springs bottoming out, once.
+        Sfx::Bump => {
+            const PITCH: [f32; 3] = [1.0, 0.94, 1.06];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.30);
+            // The body: a soft sine drop with no click at all.
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.180,
+                f0: 132.0 * p,
+                f1: 58.0 * p,
+                pitch_pow: 0.55,
+                wave: Wave::Sine,
+                gain: 0.62,
+                attack_s: 0.006,
+                decay_pow: 1.7,
+                ..Default::default()
+            });
+            // The chassis: a low, filtered knock under it.
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.070,
+                pink: true,
+                gain: 0.30,
+                attack_s: 0.002,
+                decay_pow: 2.1,
+                filter: FilterMode::LowPass,
+                fc0: 420.0 * p,
+                fc1: 180.0 * p,
+                q: 1.1,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // A whisper of the boards settling a beat later.
+            m.add_noise(NoiseLayer {
+                start_s: 0.035,
+                dur_s: 0.090,
+                pink: true,
+                gain: 0.10,
+                attack_s: 0.006,
+                decay_pow: 1.6,
+                filter: FilterMode::BandPass,
+                fc0: 900.0,
+                fc1: 500.0,
+                q: 1.8,
+                seed: base_seed ^ 0x55,
+                ..Default::default()
+            });
+            m.add_short_tail(0.18, 2600.0);
+            m.finish(0.42, 1.0, 1.4, 9.0)
+        }
     }
 }
 
@@ -6333,6 +6390,125 @@ const LAB_SECTIONS: [Section4; NUM_SECTIONS] = [
     },
 ];
 
+// ---- Theme 4: FLATBED — E Mixolydian (132 BPM) ---------------------------
+// Mood: a diesel engine at cruise, kilometre markers, and the urge not to look
+// back. The bass pulses in eighths like tyres over expansion joints; the lead
+// turns over like a dashed lane line; the snare lands on the seam every half
+// bar. Written by hand, like the three campaign tracks.
+// Semitones from E: E=0, F#=2, G#=4, A=5, B=7, C#=9, D=10, E'=12.
+
+const FB_E: ChordSlot = chord("E", 4, 7, 12);
+const FB_A: ChordSlot = chord("A", 5, 9, 12);
+const FB_B: ChordSlot = chord("B", 7, 11, 14);
+const FB_CSM: ChordSlot = chord("C#m", 9, 12, 16);
+
+/// The engine: an eighth-note pulse with an octave lift on the third beat.
+const FB_BASS: [i8; SECTION_STEPS] = [
+    0, R, 0, R, 0, R, 7, R, 0, R, 0, R, 12, R, 7, R,
+    0, R, 0, R, 0, R, 7, R, 0, R, 0, R, 5, R, 3, R,
+    0, R, 0, R, 0, R, 7, R, 0, R, 0, R, 12, R, 7, R,
+    5, R, 5, R, 3, R, 3, R, 0, R, 7, R, 0, R, 0, R,
+];
+
+/// The lane line: a two-bar motif that turns over instead of resolving.
+const FB_LEAD: [i8; SECTION_STEPS] = [
+    12, H, 12, R, 14, H, 12, R, 9, H, 9, R, 7, H, 5, R,
+    7, H, 7, R, 9, H, 7, R, 4, H, 4, R, 2, H, 0, R,
+    12, H, 12, R, 14, H, 16, R, 14, H, 12, R, 9, H, 7, R,
+    5, H, 5, R, 7, H, 9, R, 7, H, H, R, 0, R, 0, R,
+];
+
+/// A held fifth: the drone of a loaded trailer.
+const FB_COUNTER: [i8; SECTION_STEPS] = [
+    7, R, 7, R, 7, R, 7, R, 7, R, 7, R, 7, R, 7, R,
+    5, R, 5, R, 5, R, 5, R, 5, R, 5, R, 5, R, 5, R,
+    7, R, 7, R, 7, R, 7, R, 7, R, 7, R, 7, R, 7, R,
+    4, R, 4, R, 2, R, 2, R, 0, R, 0, R, 0, R, 0, R,
+];
+
+/// The road's rhythm: a kick on every beat, a hat between, the snare on 2/4.
+const FB_DRUMS: [u8; SECTION_STEPS] = [
+    KICK, HAT, 0, HAT, SNARE, HAT, KICK, HAT, KICK, HAT, 0, HAT, SNARE, HAT, OHAT, HAT,
+    KICK, HAT, 0, HAT, SNARE, HAT, KICK, HAT, KICK, HAT, KICK, HAT, SNARE, HAT, OHAT, HAT,
+    KICK, HAT, 0, HAT, SNARE, HAT, KICK, HAT, KICK, HAT, 0, HAT, SNARE, HAT, OHAT, HAT,
+    KICK, HAT, 0, HAT, SNARE, HAT, KICK, HAT, KICK, BKICK, SNARE, BSNARE, KICK, SNARE | OHAT, OHAT, HAT,
+];
+
+const TRAILER_SECTIONS: [Section4; NUM_SECTIONS] = [
+    Section4 {
+        name: "IGNITION",
+        chords: [FB_E, FB_E, FB_A, FB_A, FB_E, FB_E, FB_B, FB_B],
+        bass: FB_BASS,
+        lead: FB_LEAD,
+        counter: FB_COUNTER,
+        drums: FB_DRUMS,
+        boss_drive: true,
+    },
+    Section4 {
+        name: "A1",
+        chords: [FB_E, FB_E, FB_A, FB_A, FB_E, FB_E, FB_B, FB_B],
+        bass: FB_BASS,
+        lead: FB_LEAD,
+        counter: FB_COUNTER,
+        drums: FB_DRUMS,
+        boss_drive: true,
+    },
+    Section4 {
+        name: "A2",
+        chords: [FB_E, FB_A, FB_B, FB_A, FB_E, FB_A, FB_B, FB_B],
+        bass: FB_BASS,
+        lead: FB_LEAD,
+        counter: FB_COUNTER,
+        drums: FB_DRUMS,
+        boss_drive: true,
+    },
+    Section4 {
+        name: "B1",
+        chords: [FB_A, FB_A, FB_B, FB_B, FB_E, FB_E, FB_CSM, FB_CSM],
+        bass: FB_BASS,
+        lead: FB_LEAD,
+        counter: FB_COUNTER,
+        drums: FB_DRUMS,
+        boss_drive: true,
+    },
+    Section4 {
+        name: "A1b",
+        chords: [FB_E, FB_E, FB_A, FB_A, FB_E, FB_E, FB_B, FB_B],
+        bass: FB_BASS,
+        lead: FB_LEAD,
+        counter: FB_COUNTER,
+        drums: FB_DRUMS,
+        boss_drive: true,
+    },
+    Section4 {
+        name: "A2b",
+        chords: [FB_E, FB_A, FB_B, FB_A, FB_E, FB_A, FB_B, FB_B],
+        bass: FB_BASS,
+        lead: FB_LEAD,
+        counter: FB_COUNTER,
+        drums: FB_DRUMS,
+        boss_drive: true,
+    },
+    Section4 {
+        name: "B2",
+        chords: [FB_A, FB_A, FB_B, FB_B, FB_E, FB_E, FB_CSM, FB_CSM],
+        bass: FB_BASS,
+        lead: FB_LEAD,
+        counter: FB_COUNTER,
+        drums: FB_DRUMS,
+        boss_drive: true,
+    },
+    Section4 {
+        name: "OUTRO",
+        chords: [FB_E, FB_E, FB_E, FB_E, FB_B, FB_B, FB_E, FB_E],
+        bass: FB_BASS,
+        lead: FB_LEAD,
+        counter: FB_COUNTER,
+        drums: FB_DRUMS,
+        boss_drive: true,
+    },
+];
+
 fn track_for(theme: Theme) -> TrackCfg {
     match theme {
         Theme::Sewer => TrackCfg {
@@ -6373,6 +6549,20 @@ fn track_for(theme: Theme) -> TrackCfg {
             chord_pulse_mix: 0.44,
             chord_lp: 1650.0,
             sections: &LAB_SECTIONS,
+        },
+        // The getaway ride: faster than the Lab, warmer than the Kitchen.
+        Theme::Trailer => TrackCfg {
+            key_name: "E Mixolydian",
+            root: 164.81, // E3
+            bpm: 132.0,
+            lead_duty: 0.34,
+            lead_lp: 3050.0,
+            counter_duty: 0.50,
+            counter_lp: 1500.0,
+            chord_pulse_duty: 0.30,
+            chord_pulse_mix: 0.36,
+            chord_lp: 1750.0,
+            sections: &TRAILER_SECTIONS,
         },
     }
 }
