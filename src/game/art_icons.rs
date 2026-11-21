@@ -1671,6 +1671,7 @@ mod tests {
                 let view = campaign::KeepThreeView {
                     from_level: campaign::CampaignLevel::Sewer,
                     next_level: campaign::CampaignLevel::Kitchen,
+                    gold: 12,
                     items: &items,
                     selected: &sel,
                     max_keep: 3,
