@@ -116,10 +116,12 @@ pub const STICKY_SLOW_BOSS: f32 = 0.4;
 
 /// Squared "could this point still be on the pad?" prefilter radius.
 ///
-/// The pad's half-diagonal is `sqrt(7² + 5²) ≈ 8.6 px`; anything farther from
-/// the board centre than this cannot be inside the oriented rectangle, so the
-/// cheap distance test rejects almost every enemy before the exact one.
-const PAD_REACH_SQ: f32 = 81.0;
+/// Derived directly from [`STICKY_TRAP_PAD_HALF`] (`sqrt(15² + 11²) ≈ 18.6 px`,
+/// padded by 1 px per axis for float margin); anything farther from the board
+/// centre than this cannot be inside the oriented rectangle, so the cheap
+/// distance test rejects almost every enemy before the exact one.
+const PAD_REACH_SQ: f32 = (STICKY_TRAP_PAD_HALF.x + 1.0) * (STICKY_TRAP_PAD_HALF.x + 1.0)
+    + (STICKY_TRAP_PAD_HALF.y + 1.0) * (STICKY_TRAP_PAD_HALF.y + 1.0);
 
 /// Per-enemy movement multiplier applied by a trap (absent = `1.0`).
 ///
@@ -254,7 +256,7 @@ fn enemy_hold(kind: EnemyKind) -> (f32, f32) {
 }
 
 /// Is `p` on the glue pad of the board at `pos`/`facing`? (Art `Idle`:
-/// oriented rectangle `|u| <= 7.0`, `|v| <= 5.0`.)
+/// oriented rectangle `|u| <= STICKY_TRAP_PAD_HALF.x`, `|v| <= STICKY_TRAP_PAD_HALF.y`.)
 #[inline]
 fn on_pad(pos: Vec2, facing: Vec2, p: Vec2) -> bool {
     local_box_contains(
@@ -1075,6 +1077,106 @@ mod tests {
             (0.18..0.23).contains(&ratio),
             "glued {glued} px vs free {free} px = {ratio:.3}"
         );
+    }
+
+    /// Catch behaviour at the new `30 × 22` pad edges and corners in all four
+    /// cardinal facings, for both the player rat and ground enemies (proving
+    /// `PAD_REACH_SQ` never rejects a corner inside `STICKY_TRAP_PAD_HALF`).
+    #[test]
+    fn sticky_pad_catches_at_new_edges_in_all_four_facings() {
+        let px = STICKY_TRAP_PAD_HALF.x;
+        let py = STICKY_TRAP_PAD_HALF.y;
+        let facings = [
+            Vec2::new(1.0, 0.0),
+            Vec2::new(-1.0, 0.0),
+            Vec2::new(0.0, 1.0),
+            Vec2::new(0.0, -1.0),
+        ];
+
+        for facing in facings {
+            let f = facing.normalized();
+            let p = f.perp();
+
+            // Inside all 4 edges + all 4 corners (including corners past the old 81.0 reach^2).
+            let inside_offsets = [
+                f * (px - 0.25),
+                -f * (px - 0.25),
+                p * (py - 0.25),
+                -p * (py - 0.25),
+                f * (px - 0.25) + p * (py - 0.25),
+                -f * (px - 0.25) - p * (py - 0.25),
+            ];
+            for off in inside_offsets {
+                // Player catch
+                let mut w = open_arena(301);
+                let c = centre(&w);
+                w.level
+                    .objects
+                    .sticky_traps
+                    .push(StickyTrapView::new(c, facing));
+                w.player.pos = c + off;
+                traps_tick(&mut w, Vec2::ZERO, false);
+                assert_eq!(
+                    board_state(&w, 0),
+                    StickyTrapState::Stuck,
+                    "player should stick at offset {off:?} for facing {facing:?}"
+                );
+
+                // Enemy catch (exercises PAD_REACH_SQ prefilter + on_pad)
+                let mut w = open_arena(302);
+                let c = centre(&w);
+                w.level
+                    .objects
+                    .sticky_traps
+                    .push(StickyTrapView::new(c, facing));
+                w.player.pos = c + Vec2::new(300.0, 0.0);
+                add_enemy(&mut w, EnemyKind::Skitterer, c + off, 1.0);
+                traps_tick(&mut w, Vec2::ZERO, false);
+                assert_eq!(
+                    board_state(&w, 0),
+                    StickyTrapState::Stuck,
+                    "enemy should stick at offset {off:?} for facing {facing:?}"
+                );
+            }
+
+            // Just outside the glue pad (on the cardboard rim): must NOT catch.
+            let outside_offsets = [
+                f * (px + 0.25),
+                -f * (px + 0.25),
+                p * (py + 0.25),
+                -p * (py + 0.25),
+            ];
+            for off in outside_offsets {
+                let mut w = open_arena(303);
+                let c = centre(&w);
+                w.level
+                    .objects
+                    .sticky_traps
+                    .push(StickyTrapView::new(c, facing));
+                w.player.pos = c + off;
+                traps_tick(&mut w, Vec2::ZERO, false);
+                assert_eq!(
+                    board_state(&w, 0),
+                    StickyTrapState::Idle,
+                    "player should NOT stick outside pad at {off:?} for facing {facing:?}"
+                );
+
+                let mut w = open_arena(304);
+                let c = centre(&w);
+                w.level
+                    .objects
+                    .sticky_traps
+                    .push(StickyTrapView::new(c, facing));
+                w.player.pos = c + Vec2::new(300.0, 0.0);
+                add_enemy(&mut w, EnemyKind::Skitterer, c + off, 1.0);
+                traps_tick(&mut w, Vec2::ZERO, false);
+                assert_eq!(
+                    board_state(&w, 0),
+                    StickyTrapState::Idle,
+                    "enemy should NOT stick outside pad at {off:?} for facing {facing:?}"
+                );
+            }
+        }
     }
 
     // ---- Mousetraps ------------------------------------------------------
