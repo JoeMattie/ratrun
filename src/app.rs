@@ -519,7 +519,10 @@ impl App {
         self.keep_entries.clear();
         self.keep_selected.clear();
         self.victory_loadout.clear();
-        let world = World::new_level(level, seed, Loadout::starting());
+        let mut world = World::new_level(level, seed, Loadout::starting());
+        // No carried build: play this sector's map and boss on the first
+        // level's difficulty curve instead of the campaign's late-run one.
+        world.difficulty_override = Some(0);
         self.enter_world(world, false);
     }
 
@@ -2743,6 +2746,19 @@ mod tests {
         assert!(matches!(h.app.screen, Screen::Shop));
         h.frame(&[KeyCode::Enter]);
         assert!(matches!(h.app.screen, Screen::Playing));
+    }
+
+    /// A practice run starts a later sector with no carried build, so it must
+    /// play on the first level's difficulty curve; a campaign level keeps its own.
+    #[test]
+    fn practice_run_uses_the_first_levels_difficulty() {
+        let mut hh = Harness::new(80, 24);
+        hh.app.start_practice(1);
+        let w = hh.app.world.as_ref().unwrap();
+        assert_eq!(w.level_index(), 1, "still the Kitchen's map and boss");
+        assert_eq!(w.difficulty_override, Some(0));
+        let carried = World::new_level(1, 7, Loadout::starting());
+        assert_eq!(carried.difficulty_override, None);
     }
 
     /// Render a real frame and dump it as a PPM (each cell → 1×2 pixels:

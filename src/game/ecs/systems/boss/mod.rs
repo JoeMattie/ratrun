@@ -111,7 +111,7 @@ use crate::game::director;
 use crate::game::ecs::components::{Pool, SpawnId};
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::resources::{
-    BossDue, LevelIndex, NextEnemyId, NextSpawnId, RunCounters, Shake, SfxQueue, TickInput,
+    BossDue, DifficultyLevel, LevelIndex, NextEnemyId, NextSpawnId, RunCounters, Shake, SfxQueue, TickInput,
 };
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::level::{Level, Theme, TileRect};
@@ -1887,6 +1887,7 @@ pub fn boss_spawn_system(
     mut next_spawn_id: ResMut<NextSpawnId>,
     level: Res<Level>,
     level_index: Res<LevelIndex>,
+    difficulty: Res<DifficultyLevel>,
     player: Res<Player>,
     bosses: Query<&Boss>,
     mut particles: ResMut<Particles>,
@@ -1923,7 +1924,7 @@ pub fn boss_spawn_system(
     // The director's curve freezes at BOSS_TIME; the boss spawns then.
     let hp = kind.base_hp()
         * kind.hp_scale()
-        * director::hp_mult_for(level_index.0, director::BOSS_TIME);
+        * director::hp_mult_for(difficulty.0, director::BOSS_TIME);
     let mut boss = Boss::new(kind, pos, hp, arena, dock, hunting);
     boss.id = next_enemy_id.take();
     boss.facing = (player.pos - pos).normalized();

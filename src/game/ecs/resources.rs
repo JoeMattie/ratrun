@@ -112,6 +112,15 @@ pub struct RunCounters {
 #[derive(Resource, Clone, Copy, Debug, Default)]
 pub struct LevelIndex(pub usize);
 
+/// Which row of the director's per-level difficulty tables this run plays on.
+///
+/// Equal to [`LevelIndex`] in a campaign, where the rat arrives with a carried
+/// build. A practice run starts a later sector on the bare starting loadout, so
+/// it plays that sector's map and boss on the first level's curve (`0`): the
+/// later rows assume a carried build and open on a late-run horde.
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct DifficultyLevel(pub usize);
+
 impl LevelIndex {
     /// Is this the campaign's last level (its completion wins the run)?
     #[inline]

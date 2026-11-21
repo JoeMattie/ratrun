@@ -70,7 +70,7 @@ use super::ecs::components::{ChestSpawn, SpawnId};
 use super::ecs::constants::{GRID_CELL, PARTICLE_CAP};
 use super::ecs::resources::{
     collect_sorted, spawn_with_id, swap_in, swap_out, ActiveFx, BossDue, EnemyIndex, GridScratch,
-    LastPickups, DamageLedger, LevelIndex, NeighborScratch, NextEnemyId, NextSpawnId, NukeTick,
+    LastPickups, DamageLedger, DifficultyLevel, LevelIndex, NeighborScratch, NextEnemyId, NextSpawnId, NukeTick,
     PickupScratch, RngRes, RunCounters, SfxQueue, Shake, TickInput, Viewport,
 };
 use super::ecs::schedule::{build_settle_schedule, build_tick_schedule};
@@ -142,6 +142,10 @@ pub struct World {
     /// Which campaign level this world simulates: 0 Sewer, 1 Kitchen, 2 Lab.
     /// See [`crate::game::campaign`].
     pub level_index: usize,
+    /// Overrides the row of the director's difficulty tables in use (see
+    /// [`DifficultyLevel`]); `None` follows `level_index`. A practice run sets
+    /// `Some(0)`.
+    pub difficulty_override: Option<usize>,
     /// The level's boss died ⇒ the level is complete (`RunCounters`
     /// `level_complete` round-trips here).
     pub level_complete: bool,
@@ -294,6 +298,7 @@ impl World {
             game_over: false,
             won: false,
             level_index,
+            difficulty_override: None,
             level_complete: false,
             carried: carried_totals,
             cam: Vec2::ZERO,
@@ -712,6 +717,9 @@ impl World {
         self.ecs.insert_resource(Viewport(self.viewport));
         self.ecs.insert_resource(NukeTick(false));
         self.ecs.insert_resource(LevelIndex(self.level_index));
+        self.ecs.insert_resource(DifficultyLevel(
+            self.difficulty_override.unwrap_or(self.level_index),
+        ));
         self.ecs.insert_resource(RunCounters {
             elapsed: self.elapsed,
             kills: self.kills,

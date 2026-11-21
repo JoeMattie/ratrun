@@ -74,7 +74,7 @@ use crate::game::collision::{SizeClass, TileMap};
 use crate::game::director::{self, Director};
 use crate::game::ecs::constants::ENEMY_CAP;
 use crate::game::ecs::resources::{
-    BossDue, LevelIndex, NextEnemyId, NextSpawnId, RngRes, RunCounters, TickInput, Viewport,
+    BossDue, DifficultyLevel, LevelIndex, NextEnemyId, NextSpawnId, RngRes, RunCounters, TickInput, Viewport,
 };
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::level::{Level, MazeSection, Room, RoomKind, TileRect};
@@ -209,6 +209,7 @@ pub fn director_system(
     level: Res<Level>,
     player: Res<Player>,
     level_index: Res<LevelIndex>,
+    difficulty: Res<DifficultyLevel>,
     mut director: ResMut<Director>,
     mut boss_due: ResMut<BossDue>,
     mut rng: ResMut<RngRes>,
@@ -224,10 +225,10 @@ pub fn director_system(
     // The campaign level shifts the whole curve (`director::curve_clock`), which
     // also freezes at the boss time, so the horde keeps its late-curve rate for
     // as long as the boss fight lasts.
-    let curve = director::curve_clock(level_index.0, elapsed);
+    let curve = director::curve_clock(difficulty.0, elapsed);
     // The level's own horde modifiers: damage and speed ramp over the level
     // (`director::enemy_mods_for`); level 1 is exactly `EnemyMods::NONE`.
-    let mods = director::enemy_mods_for(level_index.0, elapsed);
+    let mods = director::enemy_mods_for(difficulty.0, elapsed);
     // Keep one slot reserved for the level's boss until it is due, so the live
     // count stays `<= ENEMY_CAP` for the whole level: the boss framework spends
     // the reservation on the boss itself.
@@ -268,7 +269,7 @@ pub fn director_system(
         };
         // Horde hp: the level's curve *and* its `LEVEL_HP_EXTRA` (the boss's
         // pool stays on `hp_mult_for`, so this cannot stretch a boss fight).
-        let mult = director::horde_hp_mult_for(level_index.0, elapsed);
+        let mult = director::horde_hp_mult_for(difficulty.0, elapsed);
         let live = enemies.iter().count();
         // One pulse in `ROOM_WAVE_EVERY` brings its first enemy in through a
         // doorway of a room the player is not in, so the horde arrives instead
@@ -296,7 +297,7 @@ pub fn director_system(
             if live + queued >= cap {
                 break;
             }
-            let kind = director::pick_kind_for(level_index.0, elapsed, &mut rng.0);
+            let kind = director::pick_kind_for(difficulty.0, elapsed, &mut rng.0);
             let Some(pos) = spawn_pulse_point(
                 &mut rng.0,
                 &level,
@@ -327,7 +328,7 @@ pub fn director_system(
     // outright when no safe point exists.
     director.elite_timer -= dt;
     if director.elite_timer <= 0.0 && curve > director::ELITE_START {
-        director.elite_timer = director::elite_interval_for(level_index.0);
+        director.elite_timer = director::elite_interval_for(difficulty.0);
         if enemies.iter().count() + queued < cap {
             if let Some(pos) = spawn_point_reachable(
                 &mut rng.0,
@@ -336,7 +337,7 @@ pub fn director_system(
                 viewport.0,
                 &mut scratch,
             ) {
-                let mult = director::horde_hp_mult_for(level_index.0, elapsed) * 1.6;
+                let mult = director::horde_hp_mult_for(difficulty.0, elapsed) * 1.6;
                 let mut enemy =
                     Enemy::spawn_with_mods(EnemyKind::Brute, pos, mult, mods, &mut rng.0);
                 enemy.id = next_enemy_id.take();
