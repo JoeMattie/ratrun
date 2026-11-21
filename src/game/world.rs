@@ -68,7 +68,10 @@ use super::collision::{SpatialGrid, TileKind, TileMap};
 use super::director::{self, Director};
 pub use super::ecs::components::Pool;
 use super::fog::{Fog, MazeMarker};
-use super::ecs::components::{AcidDrop, ChestSpawn, Infection, SpawnId};
+use super::ecs::components::{
+    AcidDrop, CheeseString, ChestSpawn, CorrosiveChannel, EchoSpoke, FairyRing, Infection,
+    MilkTooth, SpawnId,
+};
 use super::ecs::constants::{GRID_CELL, PARTICLE_CAP};
 use super::ecs::resources::{
     collect_sorted, spawn_with_id, swap_in, swap_out, ActiveFx, BossDue, BossVirus, DamageLedger,
@@ -1345,6 +1348,27 @@ impl World {
             }
         }
 
+        // Wave-3 evolved ground effects (Drain Cleaner channels & Fairy Rings),
+        // under entities so bodies & tells read cleanly on top.
+        {
+            let mut query = self.ecs.query::<(&SpawnId, &CorrosiveChannel)>();
+            for (_, ch) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let mid = self.w2s(ch.centre(), cam);
+                if on_screen(mid, ch.length * 0.5 + 8.0, viewport) {
+                    art_wave3a::draw_corrosive_channel(pb, ch, cam, self.elapsed);
+                }
+            }
+        }
+        {
+            let mut query = self.ecs.query::<(&SpawnId, &FairyRing)>();
+            for (_, ring) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let s = self.w2s(ring.pos, cam);
+                if on_screen(s, ring.radius + 8.0, viewport) {
+                    art_wave3a::draw_fairy_ring(pb, ring, cam, self.elapsed);
+                }
+            }
+        }
+
         // Acid Rain's locked drops, over the pools and under everything that
         // stands on the floor: the mark must sit *on* the ground the splash
         // will cover, and the falling strokes read better with bodies in front
@@ -1377,26 +1401,19 @@ impl World {
         // Coins and chests sit above gems and below the pickup halos.
         {
             let mut query = self.ecs.query::<(&SpawnId, &Gold)>();
-            for (_, gold) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
-                let (x, y) = self.w2s(gold.pos, cam);
-                if on_screen((x, y), 3.0, viewport) {
-                    pb.filled_circle(x, y, 2, (160, 83, 23));
-                    pb.filled_circle(x, y - 1, 1, (255, 184, 45));
-                    pb.plot(x, y - 2, (255, 241, 153));
+            for (sid, gold) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let s = self.w2s(gold.pos, cam);
+                if on_screen(s, 5.0, viewport) {
+                    art_floor::draw_gold_coin(pb, s, gold.value, self.elapsed, sid.0 as f32 * 1.37);
                 }
             }
         }
         {
             let mut query = self.ecs.query::<(&SpawnId, &Chest)>();
             for (_, chest) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
-                let (x, y) = self.w2s(chest.pos, cam);
-                if on_screen((x, y), 5.0, viewport) {
-                    pb.rect_fill(x - 4, y - 3, 9, 7, (58, 29, 23));
-                    pb.rect_fill(x - 3, y - 3, 7, 2, (192, 115, 56));
-                    pb.rect_fill(x - 3, y, 7, 3, (138, 67, 38));
-                    pb.plot(x - 3, y - 1, (236, 153, 54));
-                    pb.plot(x + 3, y - 1, (236, 153, 54));
-                    pb.rect_fill(x, y - 1, 2, 2, (255, 204, 83));
+                let s = self.w2s(chest.pos, cam);
+                if on_screen(s, 12.0, viewport) {
+                    art_floor::draw_chest(pb, s, self.elapsed);
                 }
             }
         }
@@ -1408,24 +1425,32 @@ impl World {
                 let s = self.w2s(p.pos, cam);
                 let pulse = 0.5 + 0.5 * (p.bob.sin() * 0.5 + 0.5); // 0.5..1.0
                 let base = p.kind.color();
-                let gr = (7.0 + pulse * 4.0) as i32;
+                let is_pocket = matches!(
+                    p.kind,
+                    PickupKind::BottleCap
+                        | PickupKind::WindupMouse
+                        | PickupKind::PocketWatch
+                        | PickupKind::CleanSocks
+                );
+                let gr = (if is_pocket { 6.0 } else { 7.0 } + pulse * 3.5) as i32;
                 let grf = gr as f32;
                 if !on_screen(s, grf + 2.0, viewport) {
                     continue;
                 }
+                let halo_gain = if is_pocket { 0.36 } else { 0.70 };
                 for dy in -gr..=gr {
                     for dx in -gr..=gr {
                         let d = ((dx * dx + dy * dy) as f32).sqrt();
                         if d <= grf {
                             let fall = (1.0 - d / grf).powi(2);
-                            pb.plot_add(s.0 + dx, s.1 + dy, palette::scale(base, fall * pulse * 0.7));
+                            pb.plot_add(
+                                s.0 + dx,
+                                s.1 + dy,
+                                palette::scale(base, fall * pulse * halo_gain),
+                            );
                         }
                     }
                 }
-                // The sprite (a globe for the three legacy finds, a two-tone
-                // placeholder for the wave-3 pocket finds) sits on top of the
-                // halo; `art_floor::draw_pickup` is the one place that knows
-                // what each kind looks like.
                 art_floor::draw_pickup(pb, p.kind, s, p.bob);
             }
         }
@@ -1487,10 +1512,44 @@ impl World {
 
         // Bullets.
         {
-            let mut query = self.ecs.query::<(&SpawnId, &Bullet)>();
-            for (_, b) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+            let mut query = self.ecs.query::<(&SpawnId, &Bullet, Option<&EchoSpoke>)>();
+            for (_, b, echo) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
                 let s = self.w2s(b.pos, cam);
-                if b.lob.is_some() {
+                // Pocket Watch (`systems::powerups`): a slowed hostile pellet
+                // drags a short dark chrono tail (design §10) drawn behind the head.
+                if self.player.buffs.slow_bullets > 0.0
+                    && b.faction == Faction::Enemy
+                    && b.vel.len_sq() > 0.1
+                {
+                    let dir = b.vel.normalized();
+                    let perp = dir.perp();
+                    for &(dist, dark_col, rim_a) in &[
+                        (1.5f32, (28, 36, 62), 0.35f32),
+                        (2.8, (22, 28, 52), 0.22),
+                        (4.2, (18, 22, 42), 0.10),
+                    ] {
+                        let tp = self.w2s(b.pos - dir * dist, cam);
+                        pb.plot(tp.0, tp.1, dark_col);
+                        let r1 = self.w2s(b.pos - dir * dist + perp * 0.9, cam);
+                        if r1 != tp {
+                            pb.plot_add(r1.0, r1.1, palette::scale((110, 174, 218), rim_a));
+                        }
+                    }
+                }
+                if let Some(spoke) = echo {
+                    art_wave3a::draw_echo_spoke(pb, s, b.vel, spoke.reflected);
+                } else if b.weapon == Some(WeaponKind::TailThrash) && b.faction == Faction::Player {
+                    art_wave3a::draw_flywheel_dart(pb, s, b.vel);
+                } else if b.orbit.is_some()
+                    && self
+                        .player
+                        .loadout
+                        .weapons
+                        .iter()
+                        .any(|w| w.kind == WeaponKind::SporeOrbit && w.evolved)
+                {
+                    art_wave3a::draw_evolved_spore_orbiter(pb, s, self.elapsed);
+                } else if b.lob.is_some() {
                     // Lobbed acid: bright core plus a fading drip trail behind it.
                     pb.filled_circle(s.0, s.1, 1, palette::scale(b.color, 1.2));
                     let trail = self.w2s(b.prev_pos, cam);
@@ -1500,20 +1559,29 @@ impl World {
                 } else {
                     pb.plot_add(s.0, s.1, b.color);
                 }
-                // Pocket Watch (`systems::powerups`): a hostile pellet that is
-                // crawling drags a short grey-blue tail, so "the pellets are
-                // slow" is legible without reading the numbers. Three pixels
-                // behind the shot is long enough to see at 40 % travel speed
-                // (a slow pellet only moves half a pixel a frame).
-                if self.player.buffs.slow_bullets > 0.0
-                    && b.faction == Faction::Enemy
-                    && b.vel.len_sq() > 0.1
-                {
-                    let back = b.pos - b.vel.normalized() * 3.0;
-                    let tail = self.w2s(back, cam);
-                    pb.plot_add(tail.0, tail.1, (112, 122, 148));
-                    let mid = self.w2s(b.pos - b.vel.normalized() * 1.5, cam);
-                    pb.plot_add(mid.0, mid.1, (80, 88, 108));
+            }
+        }
+
+        // Fondue Fork strings & Milk Teeth darts (drawn over enemies so the
+        // yellow posts, sagging cheese line, ivory hook & dotted thread stay crisp).
+        {
+            let mut query = self.ecs.query::<(&SpawnId, &CheeseString)>();
+            for (_, line) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let mid = self.w2s((line.a + line.b) * 0.5, cam);
+                let margin = line.a.dist(line.b) * 0.5 + 10.0;
+                if on_screen(mid, margin, viewport) {
+                    art_wave3a::draw_cheese_string(pb, line, cam, self.elapsed);
+                }
+            }
+        }
+        {
+            let ppos = self.player.pos;
+            let mut query = self.ecs.query::<(&SpawnId, &MilkTooth)>();
+            for (_, dart) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let s = self.w2s(dart.pos, cam);
+                let ps = self.w2s(ppos, cam);
+                if on_screen(s, 10.0, viewport) || on_screen(ps, 10.0, viewport) {
+                    art_wave3a::draw_milk_tooth(pb, dart, ppos, cam);
                 }
             }
         }
@@ -1543,6 +1611,47 @@ impl World {
         // Particles and shockwaves on top.
         self.particles.draw(pb, cam);
 
+        // Super Dash blue-white kinetic comb over the swept corridor (above
+        // enemy hit-flashes so the comb teeth visibly cut through crossed bodies).
+        if self.player.dash_active > 0.0 {
+            if let Some(w) = self
+                .player
+                .loadout
+                .weapons
+                .iter()
+                .find(|w| w.kind == WeaponKind::SuperDash)
+            {
+                let track = self.ecs.resource::<DashTrack>();
+                let dir = if let Some((from, to)) = track.segment {
+                    let seg = to - from;
+                    if seg.len_sq() > 1e-4 {
+                        seg.normalized()
+                    } else {
+                        self.player.face
+                    }
+                } else if self.player.vel.len_sq() > 1.0 {
+                    self.player.vel.normalized()
+                } else {
+                    self.player.face
+                };
+                let step_len = track
+                    .segment
+                    .map_or(5.0, |(a, b)| a.dist(b))
+                    .clamp(3.0, 8.0);
+                let comb_len = (track.legs.max(1) as f32 * step_len).clamp(10.0, 26.0);
+                let dash_frac = (self.player.dash_active / 0.16).clamp(0.0, 1.0);
+                art_wave3a::draw_super_dash_comb(
+                    pb,
+                    self.player.pos,
+                    dir,
+                    comb_len,
+                    w.dash_radius(),
+                    dash_frac,
+                    cam,
+                );
+            }
+        }
+
         // Hantavirus pips over the particles: a status pip the player is counting
         // down must never be covered by a particle burst. (Damage numbers are
         // stamped in screen space by `draw`, after the resample.)
@@ -1554,6 +1663,32 @@ impl World {
                     continue;
                 }
                 art_wave3a::draw_infection_pips(pb, s, e.radius, inf.ticks_left);
+            }
+        }
+
+        // Roll Call (evolved Sonic Squeak): cyan quotation marks winking shut in
+        // sequence over every tagged body until the 0.8 s answer pulses fire.
+        {
+            let fx = *self.ecs.resource::<ActiveFx>();
+            if fx.answer_left > 0.0 && fx.tag_n > 0 {
+                let progress = 1.0
+                    - (fx.answer_left / crate::game::ecs::systems::evolutions::ROLL_CALL_DELAY)
+                        .clamp(0.0, 1.0);
+                for (slot, maybe_entity) in fx.tags.iter().enumerate().take(fx.tag_n as usize) {
+                    let Some(entity) = *maybe_entity else {
+                        continue;
+                    };
+                    let Some(e) = self.ecs.get::<Enemy>(entity) else {
+                        continue;
+                    };
+                    if !e.alive() {
+                        continue;
+                    }
+                    let s = self.w2s(e.pos, cam);
+                    if on_screen(s, e.radius + 10.0, viewport) {
+                        art_wave3a::draw_roll_call_quote(pb, s, e.radius, progress, slot);
+                    }
+                }
             }
         }
 
@@ -1611,8 +1746,20 @@ impl World {
     fn draw_player(&mut self, pb: &mut PixelBuffer, cam: Vec2) {
         // The Tail Thrash's long tail rides *under* the rat, so the body stays
         // readable mid-sweep and the arc reads as coming out of its rump.
-        if self.thrash_visual().is_some() {
-            art_rat::draw_tail_thrash(pb, &self.player, self.thrash_visual(), cam);
+        if let Some((angle, reach, fade)) = self.thrash_visual() {
+            art_rat::draw_tail_thrash(pb, &self.player, Some((angle, reach, fade)), cam);
+            let fx = *self.ecs.resource::<ActiveFx>();
+            if fx.thrash_evolved {
+                art_wave3a::draw_flywheel_pips(
+                    pb,
+                    self.player.pos,
+                    angle,
+                    reach,
+                    fade,
+                    fx.caught,
+                    cam,
+                );
+            }
         }
         // The tail is the Tail Thrash's charge meter (see `art_rat::TailCharge`):
         // the charge itself is read off the weapon, but the one-off "just
@@ -1624,6 +1771,10 @@ impl World {
             &mut self.tail_ready_at,
         );
         art_rat::draw_rat_flash(pb, &self.player, self.elapsed, cam, flash);
+        // Bottle Cap active charge: crisp rotating white-tin rim around the rat.
+        if self.player.buffs.shield > 0.0 {
+            art_wave3a::draw_bottle_cap_rim(pb, self.player.pos, self.elapsed, cam);
+        }
         // Wave 3: Laser Eyes' twin muzzle dots and its blinking beam, drawn
         // over the rat so the eyes read as the source.
         if let Some(beam) = self.laser_visual() {

@@ -852,8 +852,8 @@ pub fn emit_laser_hit(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, out_dir
 }
 
 /// The Super Dash's **comb**: the travelled segment, drawn as a blue-white cord
-/// with perpendicular teeth through every body it crosses (one emitter call per
-/// tick of the dash, so the comb is the dash's actual route).
+/// with crisp perpendicular comb teeth through every body it crosses (one
+/// emitter call per tick of the dash, so the comb is the dash's actual route).
 pub fn emit_super_dash_comb(
     ps: &mut Particles,
     rng: &mut impl Rng,
@@ -869,38 +869,78 @@ pub fn emit_super_dash_comb(
         Vec2::new(1.0, 0.0)
     };
     let perp = dir.perp();
+    const COMB_WHITE: Rgb = (248, 254, 255);
+    const COMB_CYAN: Rgb = (104, 218, 255);
+    const COMB_ICE: Rgb = (74, 152, 238);
+
+    // Leading cyan-white bow wave chevron at the nose of the travelled segment
+    // (rng-free, keeps determinism identical).
+    if len > 1.5 {
+        ps.push_shockwave(Shockwave {
+            pos: to,
+            start_r: (radius * 0.55).max(2.0),
+            end_r: radius + 4.5,
+            life: 0.14,
+            max_life: 0.14,
+            color: COMB_CYAN,
+            core: COMB_WHITE,
+            thick: 1.5,
+            additive: true,
+            arc_dir: Some(dir),
+            arc_half_angle: 1.05,
+        });
+    }
+
+    // Crisp velocity-aligned white-cyan spine cord (exact legacy rng count).
     let spine = ps.budget_count((len * 1.4) as usize + 2, true);
     for i in 0..spine {
         let t = i as f32 / spine.max(1) as f32;
         let life = rng.random_range(0.10..0.20);
+        let lat = rng.random_range(-14.0..14.0);
         ps.push(Particle {
             pos: from + seg * t,
-            vel: perp * rng.random_range(-14.0..14.0),
+            vel: dir * 24.0 + perp * (lat * 0.25),
             life,
             max_life: life,
-            drag: 8.0,
+            drag: 10.0,
             gravity: 0.0,
-            ramp: Ramp::Dash,
+            ramp: Ramp::Custom(COMB_WHITE, COMB_CYAN),
             additive: true,
-            shape: Shape::Dot,
+            shape: Shape::Streak,
         });
     }
-    // The teeth: short perpendicular barbs, one every ~3 px, so a still frame
-    // reads as a comb rather than a line.
+    // Structured perpendicular comb teeth raking cleanly out to `radius` on
+    // both sides (exact legacy rng count, sharper perpendicular streak geometry).
     let teeth = ps.budget_count((len / 3.0) as usize, true);
     for i in 0..teeth {
         let t = i as f32 / teeth.max(1) as f32;
         let side = if i % 2 == 0 { 1.0 } else { -1.0 };
         let life = rng.random_range(0.10..0.18);
         let reach = radius * rng.random_range(0.55..1.0);
+        let spd = rng.random_range(16.0..40.0);
+        // Anchor tooth near the spine and rake it straight out perpendicular
+        // (slightly swept back like supersonic comb barbs).
         ps.push(Particle {
-            pos: from + seg * t + perp * side * reach,
-            vel: perp * side * rng.random_range(16.0..40.0),
-            life,
-            max_life: life,
+            pos: from + seg * t + perp * side * (reach * 0.55),
+            vel: perp * side * (spd * 1.35) - dir * 10.0,
+            life: life * 1.15,
+            max_life: life * 1.15,
+            drag: 8.5,
+            gravity: 0.0,
+            ramp: Ramp::Custom(COMB_WHITE, COMB_ICE),
+            additive: true,
+            shape: Shape::Streak,
+        });
+        // Deterministic opposite-side twin tooth so the comb reads symmetrically
+        // across the whole swept width even on short 1-tick segments.
+        ps.push(Particle {
+            pos: from + seg * t - perp * side * (radius * 0.65),
+            vel: -perp * side * 34.0 - dir * 8.0,
+            life: 0.16,
+            max_life: 0.16,
             drag: 9.0,
             gravity: 0.0,
-            ramp: Ramp::Custom(LASER_CORE, (128, 176, 224)),
+            ramp: Ramp::Custom(COMB_WHITE, COMB_CYAN),
             additive: true,
             shape: Shape::Streak,
         });
@@ -4390,23 +4430,40 @@ pub fn emit_shield_rim(ps: &mut Particles, pos: Vec2, clock: f32) {
 /// Two little heel prints behind a rat wearing Clean Socks.
 ///
 /// Deterministic: one pair per `SOCK_PRINT_SPACING` px walked, placed either
-/// side of the rat's facing, fading white to grey. Long-lived (0.7 s) so the
-/// trail reads as a trail.
+/// side of the rat's facing, fading white to cool grey. Each footprint has a
+/// heel dot and a small forward toe dot so the trail reads unmistakably as
+/// little white sock prints.
 pub fn emit_sock_print(ps: &mut Particles, pos: Vec2, facing: Vec2) {
-    let side = if facing.len_sq() > 1e-4 {
-        facing.normalized().perp()
+    let dir = if facing.len_sq() > 1e-4 {
+        facing.normalized()
     } else {
-        Vec2::new(1.0, 0.0)
+        Vec2::new(0.0, -1.0)
     };
-    for k in [-1.0f32, 1.0] {
+    let side = dir.perp();
+    for (idx, k) in [-1.0f32, 1.0].into_iter().enumerate() {
+        let stagger = if idx == 0 { -0.8 } else { 0.8 };
+        let base = pos + side * (k * 2.1) + dir * stagger;
+        // Heel pad.
         ps.push(Particle {
-            pos: pos + side * (k * 2.0),
+            pos: base,
             vel: Vec2::ZERO,
-            life: 0.70,
-            max_life: 0.70,
+            life: 0.78,
+            max_life: 0.78,
             drag: 0.0,
             gravity: 0.0,
-            ramp: Ramp::Custom((248, 248, 242), (120, 130, 134)),
+            ramp: Ramp::Custom((252, 252, 248), (118, 128, 138)),
+            additive: false,
+            shape: Shape::Dot,
+        });
+        // Forefoot / toe print just ahead of the heel.
+        ps.push(Particle {
+            pos: base + dir * 1.4,
+            vel: Vec2::ZERO,
+            life: 0.68,
+            max_life: 0.68,
+            drag: 0.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom((244, 246, 248), (112, 122, 134)),
             additive: false,
             shape: Shape::Dot,
         });
@@ -4667,6 +4724,19 @@ pub fn emit_milk_teeth_bite(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, k
 
 /// **Milk Teeth**: the thread snapping taut when the lodge lets go.
 pub fn emit_milk_teeth_release(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 1.5,
+        end_r: 7.5,
+        life: 0.16,
+        max_life: 0.16,
+        color: MILK_HOOK,
+        core: MILK_IVORY,
+        thick: 1.2,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
     let n = ps.budget_count(4, false);
     ps.burst_shaped(
         rng,
@@ -4682,7 +4752,10 @@ pub fn emit_milk_teeth_release(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2
     );
 }
 
-/// **Fondue Fork**: two yellow posts and a single sagging cheese line.
+/// **Fondue Fork**: subtle sizzling cheese shimmer along the sagging string
+/// (the solid yellow posts and continuous sagging cheese line are rendered
+/// directly by `art_wave3a::draw_cheese_string`, so these stay crisp flecks
+/// rather than blurring out the tines).
 pub fn emit_fondue_string(
     ps: &mut Particles,
     rng: &mut impl Rng,
@@ -4691,21 +4764,21 @@ pub fn emit_fondue_string(
     life_frac: f32,
     _dt: f32,
 ) {
-    // The posts hold for the whole life of the string.
+    // Subtle shimmer glints on the planted posts (kept compact so the posts stay sharp).
     for post in [a, b] {
         ps.push(Particle {
-            pos: post,
+            pos: post + Vec2::new(0.0, -3.5),
             vel: Vec2::ZERO,
-            life: 0.10,
-            max_life: 0.10,
+            life: 0.08,
+            max_life: 0.08,
             drag: 0.0,
             gravity: 0.0,
             ramp: Ramp::Custom(FONDUE_POST, FONDUE_STRING),
             additive: true,
-            shape: Shape::Blob,
+            shape: Shape::Dot,
         });
     }
-    // The line sags as it cools; two crumbs a tick trace it.
+    // Exact same rng draws as legacy; subtle golden crumbs along the sagging line.
     let sag = crate::game::ecs::systems::evolutions::STRING_SAG * (1.0 - life_frac);
     let n = ps.budget_count(2, false);
     for k in 0..n {
@@ -4732,6 +4805,17 @@ pub fn emit_fondue_string(
 
 /// **Fondue Fork**: a body cut by the string.
 pub fn emit_fondue_cut(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, killed: bool) {
+    ps.push(Particle {
+        pos,
+        vel: Vec2::ZERO,
+        life: 0.14,
+        max_life: 0.14,
+        drag: 0.0,
+        gravity: 0.0,
+        ramp: Ramp::Custom((255, 252, 206), FONDUE_POST),
+        additive: true,
+        shape: Shape::Cross,
+    });
     let n = ps.budget_count(if killed { 6 } else { 3 }, false);
     ps.burst_shaped(
         rng,
@@ -4755,6 +4839,20 @@ pub fn emit_echo_return(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, inwar
     } else {
         Vec2::new(1.0, 0.0)
     };
+    // Crisp wall-bounce echo arc opening inward along the return line.
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 1.5,
+        end_r: 9.5,
+        life: 0.22,
+        max_life: 0.22,
+        color: ECHO_OUT,
+        core: ECHO_IN,
+        thick: 1.4,
+        additive: true,
+        arc_dir: Some(dir),
+        arc_half_angle: 0.92,
+    });
     ps.push(Particle {
         pos,
         vel: Vec2::ZERO,
@@ -4848,8 +4946,7 @@ pub fn emit_fairy_ring_hit(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, ki
     );
 }
 
-/// **Ratchet Tail**: the whip's hook and the bright quarter arc the swung body
-/// travels. One shot, where the swing resolves.
+/// **Ratchet Tail**: pink hook, one brown body slung along a bright quarter arc.
 pub fn emit_ratchet_swing(
     ps: &mut Particles,
     rng: &mut impl Rng,
@@ -4858,43 +4955,108 @@ pub fn emit_ratchet_swing(
     start_angle: f32,
     turn: f32,
 ) {
-    // The quarter arc, drawn as a handful of bright pips (one per 6 degrees).
-    let steps = 15usize;
-    let budget = ps.budget_count(steps, false);
-    for k in 0..budget {
-        let t = k as f32 / (steps - 1).max(1) as f32;
-        let a = start_angle + turn * t;
-        let p = rat + Vec2::from_angle(a) * radius;
-        let life = 0.26 + 0.14 * t;
+    let mid_dir = Vec2::from_angle(start_angle + turn * 0.5);
+    let sign = if turn >= 0.0 { 1.0 } else { -1.0 };
+    // 1. Bright hot-pink quarter-arc shockwave carving the 90-degree sweep.
+    ps.push_shockwave(Shockwave {
+        pos: rat,
+        start_r: (radius - 1.5).max(3.0),
+        end_r: radius + 2.2,
+        life: 0.30,
+        max_life: 0.30,
+        color: RATCHET_PINK,
+        core: (255, 248, 254),
+        thick: 2.0,
+        additive: true,
+        arc_dir: Some(mid_dir),
+        arc_half_angle: (turn.abs() * 0.54).max(0.45),
+    });
+
+    // 2. Curved pink hook at the start of the arc (`start_angle`).
+    let hook_dir = Vec2::from_angle(start_angle);
+    let hook_tan = Vec2::from_angle(start_angle + sign * std::f32::consts::FRAC_PI_2);
+    let hook_pos = rat + hook_dir * radius;
+    ps.push(Particle {
+        pos: hook_pos,
+        vel: Vec2::ZERO,
+        life: 0.28,
+        max_life: 0.28,
+        drag: 0.0,
+        gravity: 0.0,
+        ramp: Ramp::Custom((255, 248, 254), RATCHET_PINK),
+        additive: true,
+        shape: Shape::Cross,
+    });
+    for &(r_off, t_off) in &[(-2.0f32, 0.0f32), (0.0, 2.0), (1.8, 1.5), (2.2, -0.5)] {
         ps.push(Particle {
-            pos: p,
-            vel: Vec2::from_angle(a + std::f32::consts::FRAC_PI_2) * 24.0,
-            life,
-            max_life: life,
-            drag: 6.0,
+            pos: hook_pos + hook_dir * r_off + hook_tan * t_off,
+            vel: hook_tan * 14.0,
+            life: 0.24,
+            max_life: 0.24,
+            drag: 7.0,
             gravity: 0.0,
             ramp: Ramp::Custom(RATCHET_HOOK, RATCHET_PINK),
             additive: true,
             shape: Shape::Blob,
         });
     }
-    // The hook itself, at the start of the arc.
-    ps.push(Particle {
-        pos: rat + Vec2::from_angle(start_angle) * radius,
-        vel: Vec2::ZERO,
-        life: 0.22,
-        max_life: 0.22,
-        drag: 0.0,
-        gravity: 0.0,
-        ramp: Ramp::Custom(RATCHET_PINK, RATCHET_HOOK),
-        additive: true,
-        shape: Shape::Cross,
-    });
+
+    // 3. The quarter arc + brown swung-body motion trail riding along it.
+    let brown_hi: Rgb = (196, 134, 78);
+    let brown_lo: Rgb = (104, 62, 32);
+    let steps = 15usize;
+    let budget = ps.budget_count(steps, false);
+    for k in 0..budget {
+        let t = k as f32 / (steps - 1).max(1) as f32;
+        let a = start_angle + turn * t;
+        let p = rat + Vec2::from_angle(a) * radius;
+        let tan = Vec2::from_angle(a + sign * std::f32::consts::FRAC_PI_2);
+        let life = 0.24 + 0.16 * t;
+        // Bright pink leading arc streak.
+        ps.push(Particle {
+            pos: p,
+            vel: tan * 32.0,
+            life,
+            max_life: life,
+            drag: 6.5,
+            gravity: 0.0,
+            ramp: Ramp::Custom(RATCHET_HOOK, RATCHET_PINK),
+            additive: true,
+            shape: Shape::Streak,
+        });
+        // Every 3rd step: warm brown body-afterimage riding the quarter arc!
+        if k % 3 == 1 {
+            ps.push(Particle {
+                pos: p,
+                vel: tan * 18.0,
+                life: 0.22 + 0.14 * t,
+                max_life: 0.22 + 0.14 * t,
+                drag: 7.0,
+                gravity: 0.0,
+                ramp: Ramp::Custom(brown_hi, brown_lo),
+                additive: false,
+                shape: Shape::Blob,
+            });
+        }
+    }
     let _ = rng;
 }
 
 /// **Flywheel**: copper pips sliding onto the tail as a sweep catches pellets.
 pub fn emit_flywheel_catch(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, n: usize) {
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 1.5,
+        end_r: 7.5,
+        life: 0.16,
+        max_life: 0.16,
+        color: FLYWHEEL_COPPER,
+        core: FLYWHEEL_HOT,
+        thick: 1.2,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
     let budget = ps.budget_count(n.max(1), false);
     ps.burst_shaped(
         rng,
@@ -4910,13 +5072,27 @@ pub fn emit_flywheel_catch(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, n:
     );
 }
 
-/// **Flywheel**: the captured pellets flung back out as a copper fan.
+/// **Flywheel**: the captured pellets flung back out as a gleaming copper fan.
 pub fn emit_flywheel_fling(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, dir: Vec2, n: usize) {
     let face = if dir.len_sq() > 0.001 {
         dir.normalized()
     } else {
         Vec2::new(1.0, 0.0)
     };
+    // Bold directional copper fan shockwave opening forward from the rat.
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 4.0,
+        end_r: 22.0,
+        life: 0.24,
+        max_life: 0.24,
+        color: FLYWHEEL_COPPER,
+        core: FLYWHEEL_HOT,
+        thick: 2.0,
+        additive: true,
+        arc_dir: Some(face),
+        arc_half_angle: 0.68,
+    });
     let budget = ps.budget_count((n * 2).max(2), false);
     ps.cone_shaped(
         rng,
@@ -5012,8 +5188,21 @@ pub fn emit_roll_call_tag(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
     let _ = rng;
 }
 
-/// **Roll Call**: the tagged body answering (the mark winking shut).
+/// **Roll Call**: the tagged body answering (the mark winking shut into a 9-px cyan pulse).
 pub fn emit_roll_call_answer(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 4.5,
+        end_r: crate::game::ecs::systems::evolutions::ROLL_CALL_RADIUS + 2.5,
+        life: 0.28,
+        max_life: 0.28,
+        color: (68, 232, 255),
+        core: (238, 255, 255),
+        thick: 1.8,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
     let n = ps.budget_count(3, false);
     ps.burst_shaped(
         rng,

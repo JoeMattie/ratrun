@@ -759,15 +759,57 @@ pub fn draw_pause(f: &mut Frame, area: Rect, dash_key: DashKey, hits: &mut HitMa
     }
 }
 
-/// The chest card. An evolution gets the full plate: the evolved icon in its
-/// gilded frame, the chest name, the pair it took, the inscription and the new
-/// attack (design §3/§7). Everything else is a one-line rank-up or payout.
+/// Paint symmetric golden opening-flourish rays flanking a centered showcase box.
+fn draw_chest_rays(f: &mut Frame, r: Rect, icon_x: u16, icon_w: u16, mid_y: u16) {
+    let gold = Color::Rgb(255, 214, 78);
+    let warm = Color::Rgb(218, 152, 46);
+    let dim = Color::Rgb(138, 96, 36);
+    let buf = f.buffer_mut();
+
+    let left_avail = icon_x.saturating_sub(r.x + 1);
+    let right_x = icon_x + icon_w + 1;
+    let right_avail = r.right().saturating_sub(right_x + 1);
+
+    let put = |buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, s: &str, c: Color| {
+        if y >= r.y && y < r.bottom() && x >= r.x && x < r.right() {
+            let max_w = usize::from(r.right().saturating_sub(x));
+            buf.set_stringn(x, y, s, max_w, ink(c));
+        }
+    };
+
+    if left_avail >= 11 && right_avail >= 11 {
+        let lx = icon_x - 11;
+        put(buf, lx + 2, mid_y.saturating_sub(1), "·  ✦  ───", warm);
+        put(buf, lx, mid_y, "═══ ◈ ━━━", gold);
+        put(buf, lx + 2, mid_y + 1, "·  ✦  ───", dim);
+
+        put(buf, right_x, mid_y.saturating_sub(1), "───  ✦  ·", warm);
+        put(buf, right_x, mid_y, "━━━ ◈ ═══", gold);
+        put(buf, right_x, mid_y + 1, "───  ✦  ·", dim);
+    } else if left_avail >= 6 && right_avail >= 6 {
+        let lx = icon_x - 6;
+        put(buf, lx, mid_y, "· ✦ ━━", gold);
+        put(buf, right_x, mid_y, "━━ ✦ ·", gold);
+    }
+}
+
+/// The chest card. Opens with a gilded sunburst flourish framing the showcase
+/// icon: evolutions receive the full royal plate (`10×5` gilded icon, chest
+/// name, recipe, inscription and new attack); rank-ups and gold payouts center
+/// the large `8×4` icon inside matching golden opening rays.
 pub fn draw_chest(f: &mut Frame, area: Rect, reward: ChestReward, hits: &mut HitMap) {
     let tall = area.height >= 19 && area.width >= 62;
-    let (w, h) = if tall { (62, 14) } else { (46, 9) };
+    let is_evolve = matches!(reward, ChestReward::Evolve { .. });
+    let (w, h) = if tall {
+        if is_evolve { (64, 16) } else { (54, 13) }
+    } else {
+        (46, 10)
+    };
     let r = panel(f, centered_rect(w, h, area), " CHEST OPENED ", TRAIL_GOLD);
-    // `panel` returns the inner rect, so the last row of it is the control row.
     let last = r.height.saturating_sub(1);
+    let gold_hi = Color::Rgb(255, 224, 96);
+    let gold_dim = Color::Rgb(168, 122, 48);
+
     match reward {
         ChestReward::Evolve { kind, evo, partner_stacks, .. } => {
             let partner = format!(
@@ -778,12 +820,38 @@ pub fn draw_chest(f: &mut Frame, area: Rect, reward: ChestReward, hits: &mut Hit
             );
             let inscription = format!("\u{201c}{}\u{201d}", evo.flavor);
             if tall {
-                let icon_area = Rect::new(r.x + (r.width.saturating_sub(10)) / 2, r.y, 10, 5);
+                center(
+                    f,
+                    r,
+                    0,
+                    Line::from(vec![
+                        label("·  ✦  ━━━  ", gold_dim),
+                        Span::styled("◈  EVOLUTION UNLOCKED  ◈", heavy(gold_hi)),
+                        label("  ━━━  ✦  ·", gold_dim),
+                    ]),
+                );
+                let icon_x = r.x + (r.width.saturating_sub(10)) / 2;
+                let icon_area = Rect::new(icon_x, r.y + 1, 10, 5);
+                draw_chest_rays(f, r, icon_x, 10, r.y + 3);
                 art_icons::draw_evolved(f.buffer_mut(), icon_area, art_icons::weapon(kind));
-                center(f, r, 5, Span::styled(evo.name.to_uppercase(), heavy(TRAIL_GOLD)));
-                center(f, r, 6, label(&partner, MUTED));
-                center(f, r, 7, label(&inscription, COAT));
-                let body = Rect::new(r.x + 3, r.y + 8, r.width.saturating_sub(6), 3);
+                center(
+                    f,
+                    r,
+                    6,
+                    Line::from(vec![
+                        label("◆  ", WARN_AMBER),
+                        Span::styled(evo.name.to_uppercase(), heavy(TRAIL_GOLD)),
+                        label("  ◆", WARN_AMBER),
+                    ]),
+                );
+                center(f, r, 7, label(&partner, WARN_AMBER));
+                center(
+                    f,
+                    r,
+                    8,
+                    Span::styled(inscription, ink(COAT).add_modifier(Modifier::ITALIC)),
+                );
+                let body = Rect::new(r.x + 3, r.y + 9, r.width.saturating_sub(6), 3);
                 f.render_widget(
                     Paragraph::new(evo.attack)
                         .alignment(ratatui::layout::Alignment::Center)
@@ -791,39 +859,133 @@ pub fn draw_chest(f: &mut Frame, area: Rect, reward: ChestReward, hits: &mut Hit
                         .style(ink(COAT)),
                     body,
                 );
+                if last >= 13 {
+                    center(f, r, 12, label("─────────── ✦ ───────────", gold_dim));
+                }
             } else {
-                center(f, r, 0, Span::styled(evo.name.to_uppercase(), heavy(TRAIL_GOLD)));
-                center(f, r, 1, label(&partner, MUTED));
-                center(f, r, 2, label(&inscription, COAT));
-                center(f, r, 3, label(evo.attack, MUTED));
+                center(f, r, 0, label("✦ ━━━  EVOLUTION  ━━━ ✦", gold_hi));
+                center(f, r, 1, Span::styled(evo.name.to_uppercase(), heavy(TRAIL_GOLD)));
+                center(f, r, 2, label(&partner, MUTED));
+                center(f, r, 3, label(&inscription, COAT));
+                center(f, r, 4, label(evo.attack, MUTED));
             }
         }
         ChestReward::WeaponLevel { kind, level } => {
-            art_icons::draw(
-                f.buffer_mut(),
-                Rect::new(r.x + 2, r.y + 2, 4, 2),
-                art_icons::weapon(kind),
-            );
-            center(f, r, 2, Span::styled(format!("{} reached Lv {level}", kind.name()), heavy(COAT)));
-            center(f, r, 3, label("The lock fits your teeth.", MUTED));
+            let title = format!("{} reached Lv {level}", kind.name());
+            let note = "The lock fits your teeth.";
+            let icon = art_icons::weapon(kind);
+            if tall {
+                center(
+                    f,
+                    r,
+                    0,
+                    Line::from(vec![
+                        label("·  ✦  ━━━  ", gold_dim),
+                        Span::styled("◈  TREASURE CLAIMED  ◈", heavy(gold_hi)),
+                        label("  ━━━  ✦  ·", gold_dim),
+                    ]),
+                );
+                let icon_x = r.x + (r.width.saturating_sub(art_icons::LARGE_CELL_W)) / 2;
+                let icon_area = Rect::new(
+                    icon_x,
+                    r.y + 2,
+                    art_icons::LARGE_CELL_W,
+                    art_icons::LARGE_CELL_H,
+                );
+                draw_chest_rays(f, r, icon_x, art_icons::LARGE_CELL_W, r.y + 3);
+                art_icons::draw_large(f.buffer_mut(), icon_area, icon);
+                center(f, r, 6, Span::styled(title, heavy(COAT)));
+                center(
+                    f,
+                    r,
+                    7,
+                    Span::styled(note, ink(MUTED).add_modifier(Modifier::ITALIC)),
+                );
+                center(f, r, 8, label("──────── ✦ ────────", gold_dim));
+            } else {
+                center(f, r, 0, label("✦ ━━━  TREASURE  ━━━ ✦", gold_hi));
+                art_icons::draw_small(f.buffer_mut(), Rect::new(r.x + 2, r.y + 2, 4, 2), icon);
+                center(f, r, 2, Span::styled(title, heavy(COAT)));
+                center(f, r, 3, label(note, MUTED));
+            }
         }
         ChestReward::PassiveLevel { kind, stacks } => {
-            art_icons::draw(
-                f.buffer_mut(),
-                Rect::new(r.x + 2, r.y + 2, 4, 2),
-                art_icons::passive(kind),
-            );
-            center(f, r, 2, Span::styled(format!("{} x{stacks}", kind.name()), heavy(COAT)));
-            center(f, r, 3, label("Filed under spare parts.", MUTED));
+            let title = format!("{} x{stacks}", kind.name());
+            let note = "Filed under spare parts.";
+            let icon = art_icons::passive(kind);
+            if tall {
+                center(
+                    f,
+                    r,
+                    0,
+                    Line::from(vec![
+                        label("·  ✦  ━━━  ", gold_dim),
+                        Span::styled("◈  TREASURE CLAIMED  ◈", heavy(gold_hi)),
+                        label("  ━━━  ✦  ·", gold_dim),
+                    ]),
+                );
+                let icon_x = r.x + (r.width.saturating_sub(art_icons::LARGE_CELL_W)) / 2;
+                let icon_area = Rect::new(
+                    icon_x,
+                    r.y + 2,
+                    art_icons::LARGE_CELL_W,
+                    art_icons::LARGE_CELL_H,
+                );
+                draw_chest_rays(f, r, icon_x, art_icons::LARGE_CELL_W, r.y + 3);
+                art_icons::draw_large(f.buffer_mut(), icon_area, icon);
+                center(f, r, 6, Span::styled(title, heavy(COAT)));
+                center(
+                    f,
+                    r,
+                    7,
+                    Span::styled(note, ink(MUTED).add_modifier(Modifier::ITALIC)),
+                );
+                center(f, r, 8, label("──────── ✦ ────────", gold_dim));
+            } else {
+                center(f, r, 0, label("✦ ━━━  TREASURE  ━━━ ✦", gold_hi));
+                art_icons::draw_small(f.buffer_mut(), Rect::new(r.x + 2, r.y + 2, 4, 2), icon);
+                center(f, r, 2, Span::styled(title, heavy(COAT)));
+                center(f, r, 3, label(note, MUTED));
+            }
         }
         ChestReward::Gold(value) => {
-            art_icons::draw(
-                f.buffer_mut(),
-                Rect::new(r.x + 2, r.y + 2, 4, 2),
-                &art_icons::GOLD_COIN,
-            );
-            center(f, r, 2, Span::styled(format!("+{value} gold"), heavy(TRAIL_GOLD)));
-            center(f, r, 3, label("Someone left lunch money.", MUTED));
+            let title = format!("+{value} gold");
+            let note = "Someone left lunch money.";
+            let icon = &art_icons::GOLD_COIN;
+            if tall {
+                center(
+                    f,
+                    r,
+                    0,
+                    Line::from(vec![
+                        label("·  ✦  ━━━  ", gold_dim),
+                        Span::styled("◈  TREASURE CLAIMED  ◈", heavy(gold_hi)),
+                        label("  ━━━  ✦  ·", gold_dim),
+                    ]),
+                );
+                let icon_x = r.x + (r.width.saturating_sub(art_icons::LARGE_CELL_W)) / 2;
+                let icon_area = Rect::new(
+                    icon_x,
+                    r.y + 2,
+                    art_icons::LARGE_CELL_W,
+                    art_icons::LARGE_CELL_H,
+                );
+                draw_chest_rays(f, r, icon_x, art_icons::LARGE_CELL_W, r.y + 3);
+                art_icons::draw_large(f.buffer_mut(), icon_area, icon);
+                center(f, r, 6, Span::styled(title, heavy(TRAIL_GOLD)));
+                center(
+                    f,
+                    r,
+                    7,
+                    Span::styled(note, ink(MUTED).add_modifier(Modifier::ITALIC)),
+                );
+                center(f, r, 8, label("──────── ✦ ────────", gold_dim));
+            } else {
+                center(f, r, 0, label("✦ ━━━  TREASURE  ━━━ ✦", gold_hi));
+                art_icons::draw_small(f.buffer_mut(), Rect::new(r.x + 2, r.y + 2, 4, 2), icon);
+                center(f, r, 2, Span::styled(title, heavy(TRAIL_GOLD)));
+                center(f, r, 3, label(note, MUTED));
+            }
         }
     }
     controls(f, band(r, last, 1), hits, &[(" Enter / Continue ", Some(Target::Continue))]);

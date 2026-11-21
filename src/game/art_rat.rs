@@ -539,42 +539,92 @@ pub fn draw_laser_eyes(pb: &mut PixelBuffer, player: &Player, beam: LaserBeam, c
     };
     let perp = face.perp();
     let eye_u = 3.4;
-    let hot = (255, 238, 196);
-    let amber = (255, 176, 52);
+    let hot: Rgb = (255, 252, 224);
+    let amber: Rgb = (255, 182, 42);
+    let orange: Rgb = (242, 108, 22);
 
-    // Twin muzzle dots on the eyes.
+    // 1. Twin amber muzzle dots on the eyes (always live through the whole burst,
+    //    brightening when a pulse fires and glowing warm amber in dark intervals).
     let m = beam.muzzle.clamp(0.0, 1.0);
-    for side in [-1.0f32, 1.0] {
-        let e = w2s(player.pos + face * eye_u + perp * side * 0.85, cam);
-        pb.plot(e.0, e.1, scale(hot, 0.55 + 0.45 * m));
-        // A one-pixel halo so a dark phase still shows two bright pupils.
-        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-            plot_add(pb, e.0 + dx, e.1 + dy, scale(amber, 0.30 * m));
+    let eye_l = player.pos + face * eye_u + perp * -0.85;
+    let eye_r = player.pos + face * eye_u + perp * 0.85;
+    for eye_w in [eye_l, eye_r] {
+        let e = w2s(eye_w, cam);
+        pb.plot(e.0, e.1, mix(amber, hot, 0.45 + 0.55 * m));
+        for &(dx, dy) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            plot_add(pb, e.0 + dx, e.1 + dy, scale(amber, 0.35 + 0.45 * m));
+        }
+        if m > 0.65 {
+            for &(dx, dy) in &[(1, 1), (-1, 1), (1, -1), (-1, -1)] {
+                plot_add(pb, e.0 + dx, e.1 + dy, scale(orange, 0.38 * m));
+            }
         }
     }
 
-    // The blinking bar.
+    // 2. The blinking optical beam (pure additive — never overwrites floor with muddy dark brown).
     let b = beam.brightness.clamp(0.0, 1.0);
     if b <= 0.02 || beam.len <= 1.0 {
         return;
     }
     let dir = Vec2::from_angle(beam.angle);
     let perp_b = dir.perp();
-    let start = player.pos + face * (eye_u - 0.5);
+    let start = player.pos + face * eye_u;
+    let fuse_dist = beam.len.min(5.5);
+    let fuse_pt = start + dir * fuse_dist;
     let end = start + dir * beam.len;
-    let s = w2s(start, cam);
-    let e = w2s(end, cam);
-    // Core: a hard white line, then two amber shoulders, both additive so the
-    // floor's own dark tones survive underneath.
-    pb.line(s.0, s.1, e.0, e.1, scale(hot, b));
-    for (k, gain) in [(1.0f32, 0.55f32), (2.0, 0.22)] {
-        let o = perp_b * k;
-        let a = w2s(start + o, cam);
-        let c = w2s(end + o, cam);
-        let a2 = w2s(start - o, cam);
-        let c2 = w2s(end - o, cam);
-        pb.line(a.0, a.1, c.0, c.1, scale(amber, b * gain));
-        pb.line(a2.0, a2.1, c2.0, c2.1, scale(amber, b * gain));
+
+    // 2a. Twin converging filaments from each eye into the fused beam neck.
+    for eye_w in [eye_l, eye_r] {
+        let steps = 6i32;
+        for i in 1..=steps {
+            let t = i as f32 / steps as f32;
+            let p = eye_w + (fuse_pt - eye_w) * t;
+            let s = w2s(p, cam);
+            plot_add(pb, s.0, s.1, scale(hot, 0.72 * b));
+            plot_add(pb, s.0, s.1 + 1, scale(amber, 0.30 * b));
+        }
+    }
+
+    // 2b. Main optical beam: white-hot core + golden-amber sheath + soft orange corona.
+    let steps = (beam.len * 1.4).ceil().max(2.0) as i32;
+    let mut last_core = (i32::MIN, i32::MIN);
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let dist = t * beam.len;
+        let p = start + dir * dist;
+        let sc = w2s(p, cam);
+        if sc == last_core {
+            continue;
+        }
+        last_core = sc;
+        // Subtle standing-wave intensity shimmer along the ray.
+        let node = 0.85 + 0.15 * (dist * 0.7).sin().abs();
+        let gain = b * node;
+        // Core pixel: crisp white-gold blend lifted brightly above any floor.
+        blend(pb, sc.0, sc.1, hot, (0.78 * gain).clamp(0.0, 0.95));
+        plot_add(pb, sc.0, sc.1, scale(hot, 0.45 * gain));
+        // Golden-amber inner shoulders (±1 px).
+        for side in [-1.0f32, 1.0] {
+            let s1 = w2s(p + perp_b * side, cam);
+            if s1 != sc {
+                plot_add(pb, s1.0, s1.1, scale(amber, 0.78 * gain));
+            }
+            let s2 = w2s(p + perp_b * (side * 2.0), cam);
+            if s2 != s1 && s2 != sc {
+                plot_add(pb, s2.0, s2.1, scale(orange, 0.34 * gain));
+            }
+        }
+    }
+
+    // 2c. Focal scorch starburst where the beam terminates (wall stop or max reach).
+    let se = w2s(end, cam);
+    blend(pb, se.0, se.1, hot, (0.90 * b).clamp(0.0, 1.0));
+    for &(dx, dy) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        plot_add(pb, se.0 + dx, se.1 + dy, scale(hot, 0.70 * b));
+        plot_add(pb, se.0 + dx * 2, se.1 + dy * 2, scale(amber, 0.42 * b));
+    }
+    for &(dx, dy) in &[(1, 1), (-1, 1), (1, -1), (-1, -1)] {
+        plot_add(pb, se.0 + dx, se.1 + dy, scale(amber, 0.55 * b));
     }
 }
 

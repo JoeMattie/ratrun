@@ -578,22 +578,30 @@ fn kerb(floor: &mut Floor<'_>, level: &Level, width: i32, height: i32) {
     }
 }
 
-// ---- Floor finds: pickups and the Wind-up Mouse's key --------------------
+// ---- Floor finds: pickups, the Wind-up Mouse decoy, gold & chests --------
 //
-// Placeholder two-tone sprites for the wave-3 pocket finds (WAVE3_DESIGN §10):
-// a tin dome with a white rim (Bottle Cap), a brass key that visibly turns
-// (Wind-up Mouse), a pocket-watch face with a stem and a moving hand (Pocket
-// Watch) and a little white sock with a grey sole (Clean Socks). Each is five
-// to eight pixels across, so it reads at half-block resolution. The Neon art
-// pass replaces these; the layer order and the call site do not change.
+// Solid two-tone pixel sprites with top-left directional lighting and dark
+// contour rims so every floor find reads instantly at half-block resolution,
+// with lighting Full, Soft, or Off, and in 256 / 16 colours.
 //
 // The three legacy finds keep exactly the sprite they had in `World::draw` (a
 // 5 px disc with a white core and the pulsing halo drawn by the caller).
 
+/// Subtle floor shadow helper (darkens existing pixel in bounds).
+#[inline]
+fn shade_floor(pb: &mut PixelBuffer, x: i32, y: i32, amount: f32) {
+    if x < 0 || y < 0 || x as usize >= pb.w || y as usize >= pb.h {
+        return;
+    }
+    let cur = pb.pixel_at(x as usize, y as usize);
+    pb.plot(x, y, scale(cur, 1.0 - amount));
+}
+
 /// Draw one floor pickup at screen position `s` (already `w2s`-mapped).
 ///
 /// `bob` is the pickup's animation phase (`Pickup::bob`); it drives the halo
-/// pulse for the legacy disc and the key's spin for the Wind-up Mouse.
+/// pulse for the legacy disc, the clock hands on the Pocket Watch, and the
+/// turning butterfly key on the Wind-up Mouse.
 pub fn draw_pickup(pb: &mut PixelBuffer, kind: crate::game::gem::PickupKind, s: (i32, i32), bob: f32) {
     use crate::game::gem::PickupKind;
     let pulse = 0.5 + 0.5 * (bob.sin() * 0.5 + 0.5);
@@ -603,84 +611,506 @@ pub fn draw_pickup(pb: &mut PixelBuffer, kind: crate::game::gem::PickupKind, s: 
             pb.filled_circle(s.0, s.1, 2, scale(base, 0.7 + pulse * 0.3));
             pb.plot(s.0, s.1, (255, 255, 255));
         }
-        PickupKind::BottleCap => {
-            // Tin dome, white rim, two dark crimps at the base.
-            let tin = scale(base, 0.75 + pulse * 0.25);
-            pb.filled_circle(s.0, s.1 - 1, 2, tin);
-            pb.ring(s.0, s.1 - 1, 3, (250, 248, 240));
-            pb.plot(s.0 - 2, s.1 + 2, (128, 124, 116));
-            pb.plot(s.0 + 2, s.1 + 2, (128, 124, 116));
-            pb.plot(s.0 - 1, s.1 - 2, (255, 255, 250));
+        PickupKind::BottleCap => draw_bottle_cap(pb, s, pulse),
+        PickupKind::WindupMouse => draw_windup_pickup(pb, s, bob),
+        PickupKind::PocketWatch => draw_pocket_watch(pb, s, bob),
+        PickupKind::CleanSocks => draw_clean_socks(pb, s, pulse),
+    }
+}
+
+/// Fluted tin bottle cap with a visibly corrugated toothed rim, metallic
+/// blue-steel dome shading and a bold vintage crimson cap stripe.
+fn draw_bottle_cap(pb: &mut PixelBuffer, s: (i32, i32), pulse: f32) {
+    let (cx, cy) = s;
+    // Soft ground contact shadow shifted down-right.
+    for dx in -2..=3 {
+        shade_floor(pb, cx + dx, cy + 4, 0.44);
+    }
+    shade_floor(pb, cx + 4, cy + 2, 0.32);
+    shade_floor(pb, cx + 4, cy + 3, 0.36);
+
+    let rim_dark: Rgb = (28, 34, 46);
+    let crimp_hi: Rgb = (252, 250, 242);
+    let crimp_lo: Rgb = (108, 120, 138);
+    let dome_hi: Rgb = (242, 246, 252);
+    let dome_mid: Rgb = (178, 190, 208);
+    let dome_lo: Rgb = (114, 128, 148);
+    let crest: Rgb = (224, 58, 72);
+    let crest_hi: Rgb = (255, 126, 132);
+    let crest_lo: Rgb = (162, 34, 48);
+
+    // 1. Dark contour rim around the inner dome + projecting crimp notches.
+    pb.filled_circle(cx, cy, 3, rim_dark);
+    for &(tx, ty) in &[
+        (0, -4), (2, -3), (4, -1), (4, 1), (2, 3), (0, 4),
+        (-2, 3), (-4, 1), (-4, -1), (-2, -3),
+    ] {
+        pb.plot(cx + tx, cy + ty, rim_dark);
+    }
+
+    // 2. Serrated outer crimp teeth (alternating protruding tin flanges & dark gaps).
+    for &(tx, ty, lit) in &[
+        (0, -3, true), (2, -3, true), (3, -2, true), (3, 0, false),
+        (3, 2, false), (2, 3, false), (0, 3, false), (-2, 3, false),
+        (-3, 2, false), (-3, 0, true), (-3, -2, true), (-2, -3, true),
+    ] {
+        pb.plot(cx + tx, cy + ty, if lit { crimp_hi } else { crimp_lo });
+    }
+    // Crisp white inner rim ring highlight.
+    for &(rx, ry) in &[(-2, -2), (-1, -3), (1, -3), (-3, -1), (2, -2)] {
+        pb.plot(cx + rx, cy + ry, crimp_hi);
+    }
+
+    // 3. Domed brushed-steel tin crown with top-left shading.
+    for dy in -2..=2i32 {
+        for dx in -2..=2i32 {
+            if dx * dx + dy * dy <= 5 {
+                let col = if dx + dy <= -2 {
+                    dome_hi
+                } else if dx + dy >= 2 {
+                    dome_lo
+                } else {
+                    dome_mid
+                };
+                pb.plot(cx + dx, cy + dy, col);
+            }
         }
-        PickupKind::WindupMouse => draw_windup_key(pb, s, bob, base),
-        PickupKind::PocketWatch => {
-            // Cool clock face: a rim, a white dial and a stem at 12 o'clock.
-            pb.ring(s.0, s.1, 2, scale(base, 0.55));
-            pb.filled_circle(s.0, s.1, 1, (236, 246, 250));
-            pb.plot(s.0, s.1 - 4, (208, 200, 176));
-            pb.plot(s.0, s.1 - 3, (208, 200, 176));
-            // The hand turns once per bob cycle.
-            let a = bob * 0.5 - std::f32::consts::FRAC_PI_2;
-            let hand = Vec2::from_angle(a) * 1.6;
-            pb.plot(s.0 + hand.x.round() as i32, s.1 + hand.y.round() as i32, (48, 62, 74));
+    }
+
+    // 4. Bold vintage crimson soda-cap stripe across the dome + specular glint.
+    pb.plot(cx - 2, cy, crest_hi);
+    pb.plot(cx - 1, cy, crest_hi);
+    pb.plot(cx, cy, crest);
+    pb.plot(cx + 1, cy, crest);
+    pb.plot(cx + 2, cy, crest_lo);
+    pb.plot(cx - 1, cy - 1, dome_hi);
+    pb.plot(cx - 1, cy - 2, crimp_hi);
+    if pulse > 0.72 {
+        pb.plot_add(cx - 2, cy - 2, (70, 74, 80));
+    }
+}
+
+/// Spinning brass butterfly wind-up key: two symmetric oval finger-wings on a
+/// vertical shaft that foreshorten smoothly as `angle` turns (`cos(angle)`).
+fn draw_butterfly_key(pb: &mut PixelBuffer, s: (i32, i32), angle: f32, big: bool) {
+    let (cx, cy) = s;
+    let out: Rgb = (46, 30, 14);
+    let hi: Rgb = (255, 246, 194);
+    let brass: Rgb = (242, 194, 78);
+    let bronze: Rgb = (164, 106, 28);
+
+    let c = angle.cos();
+    let span_f = if big { 4.2 } else { 3.3 };
+    let span = (c.abs() * span_f).round() as i32;
+    let top_y = cy - if big { 4 } else { 3 };
+    let mid_y = cy - if big { 2 } else { 1 };
+
+    // Vertical brass pin & collar.
+    for y in (top_y - 1)..=(cy + 1) {
+        pb.plot(cx - 1, y, out);
+        pb.plot(cx + 1, y, out);
+    }
+    for y in top_y..=cy {
+        pb.plot(cx, y, if y <= mid_y { hi } else { brass });
+    }
+    pb.plot(cx, cy + 1, bronze);
+
+    if span <= 0 {
+        // Edge-on flash: bright specular glinting spine.
+        for y in top_y..=mid_y {
+            pb.plot(cx, y, hi);
         }
-        PickupKind::CleanSocks => {
-            // A little white sock: leg up the left, foot to the right, grey sole.
-            let white = scale(base, 0.85 + pulse * 0.15);
-            for dy in -3..=0 {
-                pb.plot(s.0 - 1, s.1 + dy, white);
-                pb.plot(s.0, s.1 + dy, scale(white, 0.82));
+        pb.plot_add(cx, top_y - 1, (140, 120, 60));
+        return;
+    }
+
+    // Twin butterfly wing loops on left and right of the stem.
+    for side in [-1i32, 1] {
+        let lit_side = (side < 0) == (c >= 0.0);
+        let top_col = if lit_side { hi } else { brass };
+        let bot_col = if lit_side { brass } else { bronze };
+        // Dark contour around each wing so it reads cleanly against bright halos.
+        for dx in 1..=(span + 1) {
+            pb.plot(cx + side * dx, top_y - 1, out);
+            pb.plot(cx + side * dx, mid_y + 1, out);
+        }
+        for y in top_y..=mid_y {
+            pb.plot(cx + side * (span + 1), y, out);
+        }
+        // Top & bottom curved brass rims of the bow loop.
+        for dx in 1..=span {
+            pb.plot(cx + side * dx, top_y, top_col);
+            pb.plot(cx + side * dx, mid_y, bot_col);
+        }
+        // Outer tip connecting top and bottom.
+        for y in top_y..=mid_y {
+            pb.plot(cx + side * span, y, if y == top_y { top_col } else { bot_col });
+        }
+        // Hollow eyelet inside the loop when wide enough.
+        if span >= 2 && mid_y - top_y >= 2 {
+            for dx in 1..span {
+                pb.plot(cx + side * dx, top_y + 1, out);
             }
-            for dx in -1..=2 {
-                pb.plot(s.0 + dx, s.1 + 1, white);
-            }
-            for dx in -1..=2 {
-                pb.plot(s.0 + dx, s.1 + 2, scale(white, 0.6));
-            }
-            pb.plot(s.0 + 2, s.1, scale(white, 0.82));
         }
     }
 }
 
-/// The Wind-up Mouse's brass key on the floor: a bow, a shaft and two teeth,
-/// turning about the shaft's end (`angle` = the pickup's `bob`).
-fn draw_windup_key(pb: &mut PixelBuffer, s: (i32, i32), angle: f32, brass: Rgb) {
-    let d = Vec2::from_angle(angle);
-    let side = d.perp();
-    let bright = scale(brass, 1.0);
-    let dark = scale(brass, 0.55);
-    for k in 0..4 {
-        let at = d * k as f32;
-        pb.plot(s.0 + at.x.round() as i32, s.1 + at.y.round() as i32, bright);
-        // A shaded underside reads as brass rather than a flat line.
-        pb.plot(
-            s.0 + (at.x + side.x * 0.6).round() as i32,
-            s.1 + (at.y + side.y * 0.6).round() as i32,
-            dark,
-        );
+/// Floor pickup for the Wind-up Mouse: a small tin clockwork cog base topped
+/// by a gleaming spinning brass butterfly key.
+fn draw_windup_pickup(pb: &mut PixelBuffer, s: (i32, i32), bob: f32) {
+    let (cx, cy) = s;
+    for dx in -2..=3 {
+        shade_floor(pb, cx + dx, cy + 3, 0.42);
     }
-    // Bow (the loop you hold).
-    let bow = d * -2.0;
-    let bc = (s.0 + bow.x.round() as i32, s.1 + bow.y.round() as i32);
-    pb.plot(bc.0, bc.1, bright);
-    pb.plot(bc.0 + 1, bc.1, dark);
-    pb.plot(bc.0 - 1, bc.1, dark);
-    pb.plot(bc.0, bc.1 + 1, dark);
-    // Teeth at the tip.
-    for k in [3.0f32, 4.0] {
-        let at = d * k + side * 1.0;
-        pb.plot(s.0 + at.x.round() as i32, s.1 + at.y.round() as i32, bright);
+    // Small tin clockwork base under the brass key so it has grounded weight.
+    let out: Rgb = (34, 34, 42);
+    let tin_hi: Rgb = (206, 212, 224);
+    let tin_lo: Rgb = (122, 130, 144);
+    pb.rect_fill(cx - 2, cy, 5, 3, out);
+    pb.plot(cx - 1, cy + 1, tin_hi);
+    pb.plot(cx, cy + 1, tin_hi);
+    pb.plot(cx + 1, cy + 1, tin_lo);
+    // Little pink nose pip on the clockwork mouse base.
+    pb.plot(cx + 2, cy + 1, (248, 142, 168));
+    draw_butterfly_key(pb, (cx, cy), bob * 1.4, false);
+}
+
+/// Ornate gold-rimmed Pocket Watch with bail loop, crisp pale dial, and twin
+/// dark hands rotating smoothly around a brass pin.
+fn draw_pocket_watch(pb: &mut PixelBuffer, s: (i32, i32), bob: f32) {
+    let (cx, cy) = s;
+    for dx in -2..=3 {
+        shade_floor(pb, cx + dx, cy + 4, 0.44);
     }
+
+    let out: Rgb = (30, 36, 48);
+    let gold_hi: Rgb = (255, 232, 138);
+    let gold_mid: Rgb = (218, 168, 62);
+    let gold_lo: Rgb = (126, 90, 34);
+    let dial: Rgb = (232, 246, 255);
+    let tick: Rgb = (138, 164, 186);
+    let hand_col: Rgb = (28, 40, 58);
+
+    // 1. Crown stem & open chain bail loop at 12 o'clock.
+    pb.plot(cx - 1, cy - 5, gold_hi);
+    pb.plot(cx, cy - 5, gold_hi);
+    pb.plot(cx + 1, cy - 5, gold_mid);
+    pb.plot(cx - 1, cy - 4, gold_mid);
+    pb.plot(cx + 1, cy - 4, gold_lo);
+    pb.plot(cx, cy - 4, out);
+    pb.plot(cx, cy - 3, gold_hi);
+
+    // 2. Dark outer casing contour.
+    pb.filled_circle(cx, cy + 1, 3, out);
+    pb.filled_circle(cx, cy, 3, out);
+    // 3. Beveled golden outer ring.
+    for dy in -3..=3i32 {
+        for dx in -3..=3i32 {
+            let d2 = dx * dx + dy * dy;
+            if (6..=9).contains(&d2) {
+                let col = if dx + dy <= -2 {
+                    gold_hi
+                } else if dx + dy >= 2 {
+                    gold_lo
+                } else {
+                    gold_mid
+                };
+                pb.plot(cx + dx, cy + dy, col);
+            }
+        }
+    }
+
+    // 4. Crisp pale ice-white dial face with subtle cardinal hour ticks.
+    pb.filled_circle(cx, cy, 2, dial);
+    pb.plot(cx, cy - 2, tick);
+    pb.plot(cx, cy + 2, tick);
+    pb.plot(cx - 2, cy, tick);
+    pb.plot(cx + 2, cy, tick);
+
+    // 5. Twin hands: minute hand sweeps briskly, hour hand drifts behind it.
+    let a_min = bob * 0.9 - std::f32::consts::FRAC_PI_2;
+    let a_hr = bob * 0.22 - std::f32::consts::FRAC_PI_2 + 1.1;
+    let m1 = Vec2::from_angle(a_min);
+    let h1 = Vec2::from_angle(a_hr);
+    pb.plot(cx + (m1.x * 1.1).round() as i32, cy + (m1.y * 1.1).round() as i32, hand_col);
+    pb.plot(cx + (m1.x * 2.0).round() as i32, cy + (m1.y * 2.0).round() as i32, hand_col);
+    pb.plot(cx + (h1.x * 1.2).round() as i32, cy + (h1.y * 1.2).round() as i32, hand_col);
+    // Center brass pivot pin.
+    pb.plot(cx, cy, gold_mid);
+}
+
+/// Crisp white athletic tube sock with red & sky-blue varsity cuff stripes,
+/// reinforced grey heel and toe cap, and an unmistakable L-shaped foot profile.
+fn draw_clean_socks(pb: &mut PixelBuffer, s: (i32, i32), pulse: f32) {
+    let (cx, cy) = s;
+    for dx in -3..=4 {
+        shade_floor(pb, cx + dx, cy + 4, 0.44);
+    }
+
+    let out: Rgb = (30, 36, 48);
+    let hi: Rgb = (254, 254, 250);
+    let mid: Rgb = (218, 224, 234);
+    let grey_hi: Rgb = (156, 166, 182);
+    let grey_lo: Rgb = (108, 118, 134);
+    let red: Rgb = (232, 66, 86);
+    let blue: Rgb = (72, 174, 246);
+
+    // 1. Clean L-shaped contour outline (vertical leg left, rounded foot right).
+    pb.rect_fill(cx - 3, cy - 5, 5, 9, out);
+    pb.rect_fill(cx - 3, cy, 7, 4, out);
+    pb.plot(cx + 4, cy + 1, out);
+    pb.plot(cx + 4, cy + 2, out);
+    if pulse > 0.78 {
+        pb.plot_add(cx - 2, cy - 4, (36, 36, 40));
+    }
+    pb.plot(cx - 2, cy - 4, hi);
+    pb.plot(cx - 1, cy - 4, hi);
+    pb.plot(cx, cy - 4, mid);
+    // Twin varsity stripes near the cuff.
+    pb.plot(cx - 2, cy - 3, red);
+    pb.plot(cx - 1, cy - 3, red);
+    pb.plot(cx, cy - 3, scale(red, 0.78));
+    pb.plot(cx - 2, cy - 2, blue);
+    pb.plot(cx - 1, cy - 2, blue);
+    pb.plot(cx, cy - 2, scale(blue, 0.78));
+    // Lower tube ankle.
+    pb.plot(cx - 2, cy - 1, hi);
+    pb.plot(cx - 1, cy - 1, hi);
+    pb.plot(cx, cy - 1, mid);
+    // Arch & upper foot extending cleanly to the right.
+    pb.plot(cx - 2, cy, grey_hi);
+    pb.plot(cx - 1, cy, hi);
+    pb.plot(cx, cy, hi);
+    pb.plot(cx + 1, cy, mid);
+    // Main foot & reinforced grey heel + toe cap.
+    pb.plot(cx - 2, cy + 1, grey_hi);
+    pb.plot(cx - 1, cy + 1, grey_lo);
+    pb.plot(cx, cy + 1, hi);
+    pb.plot(cx + 1, cy + 1, hi);
+    pb.plot(cx + 2, cy + 1, grey_hi);
+    pb.plot(cx + 3, cy + 1, grey_hi);
+    // Grey sole along the bottom.
+    pb.plot(cx - 2, cy + 2, grey_lo);
+    pb.plot(cx - 1, cy + 2, grey_lo);
+    pb.plot(cx, cy + 2, grey_hi);
+    pb.plot(cx + 1, cy + 2, grey_hi);
+    pb.plot(cx + 2, cy + 2, grey_lo);
+    pb.plot(cx + 3, cy + 2, grey_lo);
 }
 
 /// The stationary decoy key a Wind-up Mouse drops (`systems::powerups::Decoy`).
 ///
-/// Bigger than a floor pickup's key (it is the thing the horde is walking at)
-/// and drawn with a soft shadow so it reads against the floor.
+/// Drawn as a chunky tin wind-up toy mouse with a prominent spinning brass
+/// butterfly key on its back and soft pulsing golden lure ripples on the floor.
 pub fn draw_decoy(pb: &mut PixelBuffer, s: (i32, i32), angle: f32) {
-    pb.filled_circle(s.0, s.1 + 3, 3, scale((10, 10, 12), 0.5));
-    draw_windup_key(pb, s, angle, (240, 200, 110));
-    pb.plot(s.0, s.1 - 1, (255, 246, 210));
+    let (cx, cy) = s;
+    // 1. Expanding pulsing brass lure ripples on the floor (two staggered rings).
+    for k in 0..2 {
+        let phase = (angle * 0.28 + k as f32 * 0.5).fract();
+        let r = (4.0 + phase * 10.0).round() as i32;
+        let fade = (1.0 - phase) * 0.55;
+        let col = scale((244, 196, 86), fade);
+        let steps = (r * 6).max(12);
+        for i in (0..steps).step_by(2) {
+            let a = i as f32 / steps as f32 * std::f32::consts::TAU + angle * 0.2;
+            let rx = cx + (a.cos() * r as f32).round() as i32;
+            let ry = cy + (a.sin() * r as f32).round() as i32;
+            pb.plot_add(rx, ry, col);
+        }
+    }
+
+    // 2. Grounded contact shadow.
+    for dx in -3..=4 {
+        shade_floor(pb, cx + dx, cy + 3, 0.48);
+    }
+
+    // 3. Tin clockwork toy mouse body (facing right with pink nose & wire tail).
+    let out: Rgb = (32, 34, 42);
+    let tin_hi: Rgb = (224, 230, 238);
+    let tin_mid: Rgb = (164, 174, 188);
+    let tin_lo: Rgb = (102, 112, 126);
+    let ear: Rgb = (240, 152, 176);
+
+    // Curled wire tail on left.
+    pb.plot(cx - 4, cy + 1, tin_lo);
+    pb.plot(cx - 5, cy, tin_mid);
+    // Body contour + tin shell.
+    pb.rect_fill(cx - 3, cy - 1, 7, 4, out);
+    pb.rect_fill(cx - 2, cy, 5, 2, tin_mid);
+    pb.plot(cx - 2, cy, tin_hi);
+    pb.plot(cx - 1, cy, tin_hi);
+    pb.plot(cx, cy, tin_hi);
+    pb.plot(cx + 1, cy + 1, tin_lo);
+    pb.plot(cx + 2, cy + 1, tin_lo);
+    // Ears + eye + pink nose.
+    pb.plot(cx + 1, cy - 1, ear);
+    pb.plot(cx + 2, cy, (24, 20, 28));
+    pb.plot(cx + 3, cy + 1, (255, 132, 162));
+
+    // 4. Big spinning brass butterfly key rising off the mouse's back.
+    draw_butterfly_key(pb, (cx - 1, cy - 1), angle * 1.4, true);
+}
+
+/// Draw a floor Gold coin with minted bevel shading and a distinct animated
+/// square glint (design §6: "distinct square glint", never confused with round
+/// XP gems or pickups).
+pub fn draw_gold_coin(pb: &mut PixelBuffer, s: (i32, i32), value: u32, elapsed: f32, phase: f32) {
+    let (cx, cy) = s;
+    let out: Rgb = (88, 48, 14);
+    let bronze: Rgb = (176, 106, 22);
+    let gold: Rgb = (248, 186, 40);
+    let hi: Rgb = (255, 234, 118);
+    let glint_col: Rgb = (255, 254, 222);
+
+    // Subtle ground contact shadow.
+    shade_floor(pb, cx, cy + 3, 0.36);
+    shade_floor(pb, cx + 1, cy + 3, 0.36);
+
+    // High-value coins (elite / miniboss drops) show a second coin peeking behind.
+    if value >= 5 {
+        pb.rect_fill(cx, cy - 1, 4, 4, out);
+        pb.plot(cx + 1, cy, gold);
+        pb.plot(cx + 2, cy, bronze);
+        pb.plot(cx + 1, cy + 1, bronze);
+        pb.plot(cx + 2, cy + 1, bronze);
+    }
+
+    // Crisp minted coin silhouette (4x4 beveled disc).
+    pb.plot(cx - 1, cy - 2, out);
+    pb.plot(cx, cy - 2, out);
+    pb.plot(cx + 1, cy - 2, out);
+    pb.plot(cx - 2, cy - 1, out);
+    pb.plot(cx + 2, cy - 1, out);
+    pb.plot(cx - 2, cy, out);
+    pb.plot(cx + 2, cy, out);
+    pb.plot(cx - 2, cy + 1, out);
+    pb.plot(cx + 2, cy + 1, out);
+    pb.plot(cx - 1, cy + 2, out);
+    pb.plot(cx, cy + 2, out);
+    pb.plot(cx + 1, cy + 2, out);
+
+    // Gold body with top-left specular bevel & inner stamped sheen.
+    pb.plot(cx - 1, cy - 1, hi);
+    pb.plot(cx, cy - 1, hi);
+    pb.plot(cx + 1, cy - 1, gold);
+    pb.plot(cx - 1, cy, hi);
+    pb.plot(cx, cy, gold);
+    pb.plot(cx + 1, cy, bronze);
+    pb.plot(cx - 1, cy + 1, gold);
+    pb.plot(cx, cy + 1, bronze);
+    pb.plot(cx + 1, cy + 1, bronze);
+
+    // Distinct square glint: sharp crisp 2x2 / framed square flash.
+    let wave = ((elapsed * 3.6 + phase).sin() * 0.5 + 0.5).powi(3);
+    if wave > 0.38 {
+        let k = ((wave - 0.38) / 0.62).clamp(0.0, 1.0);
+        // Crisp 2x2 square glint on the top-left corner of the coin.
+        pb.plot(cx - 1, cy - 1, mix(hi, glint_col, k));
+        pb.plot(cx, cy - 1, mix(hi, glint_col, k * 0.85));
+        pb.plot(cx - 1, cy, mix(hi, glint_col, k * 0.85));
+        pb.plot(cx, cy, mix(gold, glint_col, k * 0.65));
+        // Subtle outer square corner glints when peaking.
+        if k > 0.55 {
+            let g = scale(glint_col, (k - 0.55) * 1.3);
+            pb.plot_add(cx - 2, cy - 2, g);
+            pb.plot_add(cx + 1, cy - 2, g);
+            pb.plot_add(cx - 2, cy + 1, g);
+        }
+    }
+}
+
+/// Draw a floor Miniboss Chest: an inviting mahogany-and-brass treasure chest
+/// with a pulsing warm golden aura, arched lid, glowing seam, lockplate clasp,
+/// and periodic corner glint stars.
+pub fn draw_chest(pb: &mut PixelBuffer, s: (i32, i32), elapsed: f32) {
+    let (cx, cy) = s;
+    let pulse = 0.72 + 0.28 * (elapsed * 3.4).sin();
+
+    // 1. Inviting warm golden floor aura so the chest draws the eye across the room.
+    let gr = 10i32;
+    let grf = gr as f32;
+    for dy in -gr..=gr {
+        for dx in -gr..=gr {
+            let d = ((dx * dx + dy * dy) as f32).sqrt();
+            if d <= grf {
+                let fall = (1.0 - d / grf).powi(2);
+                pb.plot_add(cx + dx, cy + dy, scale((255, 204, 72), fall * pulse * 0.42));
+            }
+        }
+    }
+
+    // 2. Grounded contact shadow shifted down-right.
+    for dx in -5..=6 {
+        shade_floor(pb, cx + dx, cy + 4, 0.52);
+    }
+    for dy in -2..=3 {
+        shade_floor(pb, cx + 6, cy + dy, 0.34);
+    }
+
+    let out: Rgb = (34, 18, 14);
+    let wood_hi: Rgb = (206, 118, 50);
+    let wood_mid: Rgb = (158, 78, 34);
+    let wood_lo: Rgb = (104, 46, 22);
+    let brass_hi: Rgb = (255, 226, 102);
+    let brass_mid: Rgb = (218, 150, 34);
+    let brass_lo: Rgb = (138, 84, 18);
+    let glow_seam: Rgb = scale((255, 232, 128), 0.75 + 0.25 * pulse);
+    let clasp_hi: Rgb = (255, 252, 206);
+
+    // 3. Arched outer silhouette (11x9 px).
+    pb.rect_fill(cx - 4, cy - 4, 9, 1, out);
+    pb.rect_fill(cx - 5, cy - 3, 11, 7, out);
+
+    // 4. Mahogany domed lid (y = -3..-1) & lower chest body (y = 1..2).
+    pb.rect_fill(cx - 4, cy - 3, 9, 1, wood_hi);
+    pb.rect_fill(cx - 4, cy - 2, 9, 2, wood_mid);
+    pb.rect_fill(cx - 4, cy + 1, 9, 2, wood_lo);
+    // Warm top-left light on the front planks.
+    pb.rect_fill(cx - 4, cy + 1, 4, 1, wood_mid);
+
+    // 5. Glowing golden seam between lid and base (treasure waiting inside!).
+    for dx in -4..=4 {
+        pb.plot(cx + dx, cy, if dx.abs() <= 2 { glow_seam } else { scale(glow_seam, 0.55) });
+    }
+
+    // 6. Twin vertical beveled brass strapping bands.
+    for bx in [cx - 3, cx + 3] {
+        pb.plot(bx, cy - 3, brass_hi);
+        pb.plot(bx, cy - 2, brass_mid);
+        pb.plot(bx, cy - 1, brass_mid);
+        pb.plot(bx, cy, brass_hi);
+        pb.plot(bx, cy + 1, brass_mid);
+        pb.plot(bx, cy + 2, brass_lo);
+    }
+    // Corner brass studs on the lid corners.
+    pb.plot(cx - 4, cy - 3, brass_hi);
+    pb.plot(cx + 4, cy - 3, brass_mid);
+
+    // 7. Central gleaming golden lockplate / clasp with dark keyhole.
+    pb.rect_fill(cx - 1, cy - 1, 3, 3, brass_mid);
+    pb.plot(cx - 1, cy - 1, clasp_hi);
+    pb.plot(cx, cy - 1, clasp_hi);
+    pb.plot(cx + 1, cy - 1, brass_hi);
+    pb.plot(cx, cy, out); // keyhole
+    pb.plot(cx, cy + 1, brass_hi);
+    pb.plot(cx + 1, cy + 1, brass_lo);
+
+    // 8. Periodic corner sparkle star (`+`) dancing between top-left & top-right.
+    let star_phase = (elapsed * 2.1).rem_euclid(2.0);
+    let (sx, sy, local) = if star_phase < 1.0 {
+        (cx - 4, cy - 4, star_phase)
+    } else {
+        (cx + 4, cy - 4, star_phase - 1.0)
+    };
+    let spark = (1.0 - (local * 2.0 - 1.0).abs()).powi(2);
+    if spark > 0.25 {
+        let c = scale(clasp_hi, spark);
+        pb.plot_add(sx, sy, c);
+        pb.plot_add(sx - 1, sy, scale(c, 0.6));
+        pb.plot_add(sx + 1, sy, scale(c, 0.6));
+        pb.plot_add(sx, sy - 1, scale(c, 0.6));
+        pb.plot_add(sx, sy + 1, scale(c, 0.6));
+    }
 }
 
 #[cfg(test)]

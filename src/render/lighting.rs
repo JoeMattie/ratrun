@@ -31,11 +31,15 @@ use crate::game::art_traps::MazeRewardState;
 use crate::game::art_walls::WallKind;
 use crate::game::bullet::{Bullet, Faction};
 use crate::game::collision::{TileKind, TILE_F};
-use crate::game::ecs::components::Pool;
+use crate::game::ecs::components::{
+    AcidDrop, CheeseString, CorrosiveChannel, EchoSpoke, FairyRing, Infection, MilkTooth, Pool,
+};
+use crate::game::ecs::resources::{ActiveFx, LaserFx};
 use crate::game::ecs::systems::boss::{Boss, BossProjectile, BossProjectileKind, BossState};
 use crate::game::ecs::systems::miniboss::{Miniboss, MinibossState};
+use crate::game::ecs::systems::powerups::Decoy;
 use crate::game::enemy::{Enemy, EnemyKind};
-use crate::game::gem::{Gem, Pickup};
+use crate::game::gem::{Chest, Gem, Gold, Pickup};
 use crate::game::level::{Level, PropKind, Theme};
 use crate::game::particle::Particles;
 use crate::game::player::Player;
@@ -620,6 +624,93 @@ impl LightMap {
             }
         }
 
+        // 2b. Laser Eyes: amber muzzle glow + stepped amber beam pools when lit.
+        if let Some(lfx) = scene.ecs.get_resource::<LaserFx>() {
+            if lfx.active() {
+                let lit = (1.0
+                    - lfx.since_pulse / (0.5 * crate::game::weapon::LASER_PULSE_INTERVAL))
+                    .clamp(0.0, 1.0);
+                let fade = 1.0 - (lfx.progress() - 0.85).max(0.0) / 0.15;
+                let b = (lit * fade).clamp(0.0, 1.0);
+                let face = if scene.player.face.len_sq() > 1e-4 {
+                    scene.player.face.normalized()
+                } else {
+                    Vec2::new(0.0, -1.0)
+                };
+                let muzzle = scene.player.pos + face * 3.4;
+                let mx = muzzle.x - cam.x;
+                let my = muzzle.y - cam.y;
+                if in_range(mx, my, 30.0) {
+                    let m = 0.55 + 0.45 * b;
+                    self.lights.push(PointLight {
+                        x: mx,
+                        y: my,
+                        radius: 28.0,
+                        color: (255, 196, 74),
+                        intensity: (175.0 * m) as u16,
+                        scatter: (44.0 * m) as u16,
+                        priority: 3,
+                        occlude: false,
+                        hard: false,
+                    });
+                }
+                if b > 0.05 && lfx.beam > 2.0 {
+                    let dir = Vec2::from_angle(lfx.angle);
+                    for &frac in &[0.38f32, 0.72, 1.0] {
+                        let p = muzzle + dir * (lfx.beam * frac);
+                        let sx = p.x - cam.x;
+                        let sy = p.y - cam.y;
+                        let r = if frac >= 0.99 { 30.0 } else { 26.0 };
+                        if in_range(sx, sy, r) {
+                            self.lights.push(PointLight {
+                                x: sx,
+                                y: sy,
+                                radius: r,
+                                color: (255, 178, 48),
+                                intensity: (195.0 * b) as u16,
+                                scatter: (54.0 * b) as u16,
+                                priority: 2,
+                                occlude: false,
+                                hard: false,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2c. Roll Call active tags: electric-cyan glow on tagged hosts.
+        if let Some(afx) = scene.ecs.get_resource::<ActiveFx>() {
+            if afx.answer_left > 0.0 && afx.tag_n > 0 {
+                let prog = 1.0
+                    - (afx.answer_left / crate::game::ecs::systems::evolutions::ROLL_CALL_DELAY)
+                        .clamp(0.0, 1.0);
+                for ent in afx.tags.iter().take(afx.tag_n as usize).flatten().copied() {
+                    let Some(e) = scene.ecs.get::<Enemy>(ent) else {
+                        continue;
+                    };
+                    if !e.alive() {
+                        continue;
+                    }
+                    let sx = e.pos.x - cam.x;
+                    let sy = e.pos.y - cam.y;
+                    if in_range(sx, sy, 20.0) {
+                        self.lights.push(PointLight {
+                            x: sx,
+                            y: sy,
+                            radius: 18.0,
+                            color: (108, 238, 255),
+                            intensity: (110.0 + 70.0 * prog) as u16,
+                            scatter: (28.0 + 22.0 * prog) as u16,
+                            priority: 1,
+                            occlude: false,
+                            hard: false,
+                        });
+                    }
+                }
+            }
+        }
+
         // 3. Shockwaves (explosions, nukes, brute/boss deaths, TailWhip, SqueakNova, acid splashes).
         for sw in &scene.particles.shockwaves {
             let age = 1.0 - (sw.life / sw.max_life.max(1e-4)).clamp(0.0, 1.0);
@@ -900,6 +991,230 @@ impl LightMap {
                             intensity: if active { 260 } else { 205 },
                             scatter: if active { 68 } else { 44 },
                             priority: 3,
+                            occlude: false,
+                            hard: false,
+                        });
+                    }
+                }
+            }
+
+            // ---- Wave 3 lights: chests, gold, decoy, acid rain, virus, evolutions ----
+
+            // Miniboss chest: warm golden beacon that draws the player from across the room.
+            if let Some(ch) = entity.get::<Chest>() {
+                let sx = ch.pos.x - cam.x;
+                let sy = ch.pos.y - cam.y;
+                let r = 44.0;
+                if in_range(sx, sy, r) {
+                    let pulse = 0.84 + 0.16 * (elapsed * 3.4).sin();
+                    self.lights.push(PointLight {
+                        x: sx,
+                        y: sy,
+                        radius: r,
+                        color: (255, 214, 78),
+                        intensity: (210.0 * pulse) as u16,
+                        scatter: (54.0 * pulse) as u16,
+                        priority: 2,
+                        occlude: false,
+                        hard: false,
+                    });
+                }
+            }
+
+            // Gold coins: small warm golden glint.
+            if let Some(gold) = entity.get::<Gold>() {
+                let sx = gold.pos.x - cam.x;
+                let sy = gold.pos.y - cam.y;
+                let big = gold.value >= 5;
+                let r = if big { 17.0 } else { 13.0 };
+                if in_range(sx, sy, r) {
+                    self.lights.push(PointLight {
+                        x: sx,
+                        y: sy,
+                        radius: r,
+                        color: (255, 206, 68),
+                        intensity: if big { 132 } else { 94 },
+                        scatter: if big { 28 } else { 18 },
+                        priority: 0,
+                        occlude: false,
+                        hard: false,
+                    });
+                }
+            }
+
+            // Wind-up Mouse floor decoy: warm pulsing brass lure beacon.
+            if let Some(decoy) = entity.get::<Decoy>() {
+                let sx = decoy.pos.x - cam.x;
+                let sy = decoy.pos.y - cam.y;
+                let r = 36.0;
+                if in_range(sx, sy, r) {
+                    let pulse = 0.78 + 0.22 * (elapsed * 5.2).sin();
+                    self.lights.push(PointLight {
+                        x: sx,
+                        y: sy,
+                        radius: r,
+                        color: (244, 196, 86),
+                        intensity: (185.0 * pulse) as u16,
+                        scatter: (44.0 * pulse) as u16,
+                        priority: 2,
+                        occlude: false,
+                        hard: false,
+                    });
+                }
+            }
+
+            // Acid Rain drops: caustic green ground glow intensifying during fall.
+            if let Some(drop) = entity.get::<AcidDrop>() {
+                let sx = drop.pos.x - cam.x;
+                let sy = drop.pos.y - cam.y;
+                let fall = ((crate::game::weapon::RAIN_FALL - drop.delay)
+                    / crate::game::weapon::RAIN_FALL)
+                    .clamp(0.0, 1.0);
+                let r = drop.radius * 1.9 + 10.0;
+                if in_range(sx, sy, r) {
+                    self.lights.push(PointLight {
+                        x: sx,
+                        y: sy,
+                        radius: r,
+                        color: (168, 255, 62),
+                        intensity: (110.0 + 105.0 * fall) as u16,
+                        scatter: (26.0 + 36.0 * fall) as u16,
+                        priority: if fall > 0.5 { 2 } else { 1 },
+                        occlude: false,
+                        hard: false,
+                    });
+                }
+            }
+
+            // Hantavirus infected hosts: sickly plum-magenta glow.
+            if let (Some(e), Some(inf)) = (entity.get::<Enemy>(), entity.get::<Infection>()) {
+                if e.alive() && inf.active() {
+                    let sx = e.pos.x - cam.x;
+                    let sy = e.pos.y - cam.y;
+                    let r = 20.0;
+                    if in_range(sx, sy, r) {
+                        self.lights.push(PointLight {
+                            x: sx,
+                            y: sy,
+                            radius: r,
+                            color: (224, 92, 206),
+                            intensity: 135,
+                            scatter: 34,
+                            priority: 1,
+                            occlude: false,
+                            hard: false,
+                        });
+                    }
+                }
+            }
+
+            // Milk Teeth dart: warm ivory glint.
+            if let Some(dart) = entity.get::<MilkTooth>() {
+                let sx = dart.pos.x - cam.x;
+                let sy = dart.pos.y - cam.y;
+                let r = 18.0;
+                if in_range(sx, sy, r) {
+                    self.lights.push(PointLight {
+                        x: sx,
+                        y: sy,
+                        radius: r,
+                        color: (255, 244, 206),
+                        intensity: 145,
+                        scatter: 32,
+                        priority: 1,
+                        occlude: false,
+                        hard: false,
+                    });
+                }
+            }
+
+            // Fondue Fork string: warm melted-cheddar glow at midpoint.
+            if let Some(line) = entity.get::<CheeseString>() {
+                let mid = (line.a + line.b) * 0.5;
+                let sx = mid.x - cam.x;
+                let sy = mid.y - cam.y;
+                let r = (line.a.dist(line.b) * 0.65 + 14.0).clamp(18.0, 42.0);
+                if in_range(sx, sy, r) {
+                    let k = (line.life / line.total.max(1e-4)).clamp(0.2, 1.0);
+                    self.lights.push(PointLight {
+                        x: sx,
+                        y: sy,
+                        radius: r,
+                        color: (255, 212, 74),
+                        intensity: (155.0 * k) as u16,
+                        scatter: (38.0 * k) as u16,
+                        priority: 1,
+                        occlude: false,
+                        hard: false,
+                    });
+                }
+            }
+
+            // Fairy Ring: bioluminescent mint aura around the mushroom circle.
+            if let Some(ring) = entity.get::<FairyRing>() {
+                let sx = ring.pos.x - cam.x;
+                let sy = ring.pos.y - cam.y;
+                let r = ring.radius + 16.0;
+                if in_range(sx, sy, r) {
+                    let k = (ring.life / ring.total.max(1e-4)).clamp(0.25, 1.0);
+                    let pulse = 0.88 + 0.12 * (elapsed * 4.0).sin();
+                    self.lights.push(PointLight {
+                        x: sx,
+                        y: sy,
+                        radius: r,
+                        color: (114, 255, 182),
+                        intensity: (168.0 * k * pulse) as u16,
+                        scatter: (40.0 * k * pulse) as u16,
+                        priority: 1,
+                        occlude: false,
+                        hard: false,
+                    });
+                }
+            }
+
+            // Drain Cleaner channel: bile-green glow at the advancing front & midpoint.
+            if let Some(ch) = entity.get::<CorrosiveChannel>() {
+                let total = crate::game::ecs::systems::evolutions::CHANNEL_ADVANCE
+                    + crate::game::ecs::systems::evolutions::CHANNEL_SETTLE;
+                let k = ((total - ch.age) / 0.5).clamp(0.2, 1.0);
+                let open_len = ch.length
+                    * (ch.age / crate::game::ecs::systems::evolutions::CHANNEL_ADVANCE)
+                        .clamp(0.0, 1.0);
+                let front = ch.start + ch.dir * open_len;
+                let mid = ch.start + ch.dir * (open_len * 0.5);
+                for p in [mid, front] {
+                    let sx = p.x - cam.x;
+                    let sy = p.y - cam.y;
+                    if in_range(sx, sy, 26.0) {
+                        self.lights.push(PointLight {
+                            x: sx,
+                            y: sy,
+                            radius: 26.0,
+                            color: (166, 255, 72),
+                            intensity: (165.0 * k) as u16,
+                            scatter: (44.0 * k) as u16,
+                            priority: 1,
+                            occlude: false,
+                            hard: false,
+                        });
+                    }
+                }
+            }
+
+            // Echo Chamber reflected inward spoke: crisp lavender-white glint.
+            if let (Some(b), Some(spoke)) = (entity.get::<Bullet>(), entity.get::<EchoSpoke>()) {
+                if spoke.reflected {
+                    let sx = b.pos.x - cam.x;
+                    let sy = b.pos.y - cam.y;
+                    if in_range(sx, sy, 18.0) {
+                        self.lights.push(PointLight {
+                            x: sx,
+                            y: sy,
+                            radius: 18.0,
+                            color: (238, 224, 255),
+                            intensity: 155,
+                            scatter: 38,
+                            priority: 1,
                             occlude: false,
                             hard: false,
                         });
