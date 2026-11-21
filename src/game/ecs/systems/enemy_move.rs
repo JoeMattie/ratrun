@@ -201,7 +201,8 @@ pub fn enemy_fire_system(
     let color = level.palette.accent;
     pending.clear();
     for (id, mut e) in enemies.iter_mut() {
-        if !e.kind.ranged() {
+        // A stunned body (the Sonic Squeak ring) cannot squeeze the trigger.
+        if !e.kind.ranged() || e.stun > 0.0 {
             continue;
         }
         e.fire_cd -= dt;

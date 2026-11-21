@@ -92,6 +92,10 @@ pub fn weapon_glyph(kind: WeaponKind) -> char {
         WeaponKind::SporeOrbit => '◎',
         WeaponKind::TailWhip => '◈',
         WeaponKind::AcidSpit => '♦',
+        // The two player-triggered weapons read as "charged things": a bolt for
+        // the thrash, a ring for the squeak.
+        WeaponKind::TailThrash => 'ϟ',
+        WeaponKind::SonicSqueak => '◯',
     }
 }
 
@@ -235,6 +239,12 @@ pub struct HudState {
     score: String,
     /// `(tag, level)` text per weapon slot, reused across frames.
     weapon_tags: Vec<(String, String)>,
+    /// Per weapon slot: is an **active** weapon fully charged? (`true` for the
+    /// auto-firing weapons, which have no charge state to show.)
+    active_ready: Vec<bool>,
+    /// Per weapon slot: the "just became ready" flash timer, so a charged
+    /// active weapon pops once instead of silently turning on.
+    active_flash: Vec<f32>,
     right_badge: String,
 
     // Bottom bar retained buffers.
@@ -299,7 +309,9 @@ impl Default for HudState {
             kills: String::with_capacity(8),
             streak_buf: String::with_capacity(8),
             score: String::with_capacity(12),
-            weapon_tags: Vec::with_capacity(6),
+            weapon_tags: Vec::with_capacity(8),
+            active_ready: Vec::with_capacity(8),
+            active_flash: Vec::with_capacity(8),
             right_badge: String::with_capacity(24),
             hp: String::with_capacity(16),
             xp_label: String::with_capacity(12),
@@ -358,6 +370,8 @@ impl HudState {
         self.prev_boss_alive = false;
         self.prev_boss_ratio = 1.0;
         self.escalation_stage = 0;
+        self.active_ready.clear();
+        self.active_flash.clear();
         self.next_kill_milestone = 50;
         self.streak_kills = 0;
         self.streak_timer = 0.0;
@@ -500,6 +514,32 @@ impl HudState {
         }
     }
 
+    /// Track the charge state of every **active** weapon slot (see
+    /// [`WeaponKind::is_active`](crate::game::weapon::WeaponKind::is_active)).
+    ///
+    /// An active weapon's `Weapon::timer` counts *down* to zero as its charge
+    /// fills, so "ready" is `timer <= 0`. Auto-firing weapons have no such
+    /// state and are always reported ready (their pip keeps using the plain
+    /// cooldown fraction).
+    fn sync_active_ready(&mut self, world: &World, dt: f32) {
+        let weapons = &world.player.loadout.weapons;
+        while self.active_ready.len() < weapons.len() {
+            self.active_ready.push(true);
+            self.active_flash.push(0.0);
+        }
+        self.active_ready.truncate(weapons.len());
+        self.active_flash.truncate(weapons.len());
+        for (i, w) in weapons.iter().enumerate() {
+            let ready = !w.kind.is_active() || w.timer <= 0.0;
+            if ready && !self.active_ready[i] && world.elapsed > 0.2 {
+                self.active_flash[i] = 0.55;
+            }
+            self.active_ready[i] = ready;
+            self.active_flash[i] = (self.active_flash[i] - dt).max(0.0);
+        }
+    }
+
+    /// Notify the HUD that the player just equipped an upgrade from the level-up screen.
     pub fn notify_upgrade(&mut self, title: &str) {
         self.level_flash = 0.9;
         self.push_callout(CalloutKind::Upgrade, "EQUIPPED", title, 2.5);
@@ -584,6 +624,11 @@ impl HudState {
             self.dash_ready_flash = 0.45;
         }
         self.dash_ready_flash = (self.dash_ready_flash - dt).max(0.0);
+
+        // 3b. Active-weapon charge: remember each slot's readiness so a weapon
+        // that just finished charging flashes once (the Space release is the
+        // player's own cue to spend it).
+        self.sync_active_ready(world, dt);
 
         // 4. Level-up flash.
         if world.player.level > self.prev_level {
@@ -881,6 +926,12 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
     let tight = area.width < 64;
     let show_threat = area.width >= 96;
     let show_cd_pip = area.width >= 82 || (area.width >= 68 && weapons.len() <= 4);
+    // Active weapons get a charge cell and a READY token that names the key.
+    // Below 68 columns there is no spare cell at all (a 3-weapon rack at 57 is
+    // exactly full), so the ready state is carried by the slot's own highlight
+    // instead — zero columns, same information.
+    let show_active_gauge = area.width >= 68;
+    let ready_token = if area.width >= 80 { "SPACE" } else { "SPC" };
     let show_icons = !tight || weapons.len() <= 3;
     let show_streak = area.width >= 92 && !state.streak_buf.is_empty();
 
@@ -979,7 +1030,7 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
     // 4. Weapon rack with icons, level, firing flare, and live cooldown pip.
     put(if compact { " │" } else { "  │" }, Style::default().fg(EDGE));
     let fire_rate = world.player.loadout.stats.fire_rate_mult.max(0.1);
-    for ((tag, lvl), weapon) in state.weapon_tags.iter().zip(weapons) {
+    for (i, ((tag, lvl), weapon)) in state.weapon_tags.iter().zip(weapons).enumerate() {
         let eff_cd = (weapon.cooldown() / fire_rate).max(0.05);
         let ready = (1.0 - weapon.timer / eff_cd).clamp(0.0, 1.0);
         // Immediately after firing, `timer` resets near `eff_cd` (`ready` near 0):
@@ -987,7 +1038,15 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
         let just_fired = ready < 0.12 && world.elapsed > 0.25;
         let base_rgb = weapon.kind.color();
         let w_col = palette::to_color(base_rgb);
-        let icon_style = if just_fired {
+        // Active weapons: is this one fully charged, and did it just finish?
+        let active = weapon.kind.is_active();
+        let charged = active && state.active_ready.get(i).copied().unwrap_or(false);
+        let charge_flash = if active {
+            state.active_flash.get(i).copied().unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        let icon_style = if just_fired || charge_flash > 0.0 {
             Style::default().fg(COAT).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(w_col)
@@ -996,6 +1055,15 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
             Style::default()
                 .fg(palette::to_color(palette::mix(base_rgb, (255, 255, 255), 0.35)))
                 .add_modifier(Modifier::BOLD)
+        } else if charged && !show_active_gauge {
+            // No room for the READY token: light the whole slot instead, so a
+            // charged weapon still reads as "spend me" on a small terminal.
+            Style::default()
+                .fg(COAT)
+                .bg(TRACK)
+                .add_modifier(Modifier::BOLD)
+        } else if charged {
+            Style::default().fg(w_col).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(w_col)
         };
@@ -1015,12 +1083,40 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
         put(&tag[..end], w_style);
         let lvl_style = if weapon.is_max() {
             Style::default().fg(TRAIL_GOLD).add_modifier(Modifier::BOLD)
+        } else if charged && !show_active_gauge {
+            Style::default().fg(COAT).bg(TRACK)
         } else {
             muted
         };
         put(lvl, lvl_style);
 
-        if show_cd_pip {
+        // 4a. Active weapons: a one-cell charge gauge and a READY token that
+        // names the key. A fully charged weapon shows the solid pip in its own
+        // colour, and white-hot for half a second the moment it finishes.
+        if active && show_active_gauge {
+            let pip_ch = if charged { '█' } else { cooldown_pip(ready) };
+            let pip_fg = if charge_flash > 0.0 {
+                COAT
+            } else if charged {
+                w_col
+            } else {
+                palette::to_color(palette::mix((82, 94, 100), base_rgb, 0.35 + ready * 0.65))
+            };
+            let mut pbuf = [0u8; 4];
+            let p = pip_ch.encode_utf8(&mut pbuf);
+            put(p, Style::default().fg(pip_fg).bg(TRACK));
+            if charged {
+                let token_style = if charge_flash > 0.0 {
+                    Style::default()
+                        .fg(PLATE)
+                        .bg(COAT)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(w_col).add_modifier(Modifier::BOLD)
+                };
+                put(ready_token, token_style);
+            }
+        } else if !active && show_cd_pip {
             let pip_ch = cooldown_pip(ready);
             let pip_fg = if ready >= 0.88 {
                 w_col
@@ -1607,6 +1703,151 @@ mod tests {
             first.contains('♥') && first.contains("DASH READY"),
             "bottom bars should still render: {first:?}"
         );
+    }
+
+    /// A world whose loadout is the starter weapon plus both active weapons,
+    /// with `charge` seconds left on each active's meter (0 = ready).
+    fn active_loadout_world(charge: f32) -> World {
+        let mut w = known_world();
+        w.player.loadout.weapons = vec![Weapon::new(WeaponKind::Gnaw)];
+        for kind in [WeaponKind::TailThrash, WeaponKind::SonicSqueak] {
+            let mut weapon = Weapon::new(kind);
+            weapon.level = 2;
+            weapon.timer = charge;
+            w.player.loadout.weapons.push(weapon);
+        }
+        w
+    }
+
+    /// Draw the top rail at `(w, h)` and return its text plus the state.
+    fn draw_top_rail(w: &World, width: u16, height: u16) -> (String, HudState) {
+        let mut state = HudState::default();
+        // Twice: the first tick initialises the frame-to-frame deltas (and so
+        // never reaches the charge sync).
+        state.tick(1.0 / 60.0, w, &[], false);
+        state.tick(1.0 / 60.0, w, &[], false);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, f.area().width, 1);
+                draw_top(f, area, w, &mut state);
+            })
+            .unwrap();
+        let mut text = String::new();
+        let buf = terminal.backend().buffer();
+        for x in 0..width {
+            text.push_str(buf[(x, 0)].symbol());
+        }
+        (text, state)
+    }
+
+    /// The active weapons show a compact charge gauge, and a fully charged one
+    /// shows a READY state that names its key ("SPACE", or the shorter "SPC" on
+    /// a 57-column rail) plus a one-shot flash when it finishes charging.
+    #[test]
+    fn active_weapons_show_a_charge_bar_and_a_ready_key() {
+        // Charging: a partial pip (wide rail), no READY token.
+        let charging = active_loadout_world(5.0);
+        let (text, state) = draw_top_rail(&charging, 80, 24);
+        assert!(
+            !text.contains("SPACE"),
+            "a charging weapon must not show SPACE: {text:?}"
+        );
+        assert!(
+            !state.active_ready[1] && !state.active_ready[2],
+            "actives with 5s left reported ready"
+        );
+        assert!(
+            text.contains('▄') || text.contains('▂') || text.contains('▃'),
+            "80x24: no charge gauge for the actives: {text:?}"
+        );
+        assert!(
+            !text.contains('█'),
+            "80x24: a half-charged weapon showed a full pip: {text:?}"
+        );
+
+        // Charged: SPACE appears once per active slot and the pip is full.
+        let ready = active_loadout_world(0.0);
+        let (text, state) = draw_top_rail(&ready, 80, 24);
+        assert!(
+            state.active_ready[1] && state.active_ready[2],
+            "charged actives did not report ready"
+        );
+        assert_eq!(
+            text.matches("SPACE").count(),
+            2,
+            "80x24: expected SPACE once per charged active: {text:?}"
+        );
+        assert!(
+            text.contains('█'),
+            "80x24: a charged weapon should show the full pip: {text:?}"
+        );
+
+        // 57x20 has no spare column anywhere (a 3-weapon rack is exactly full),
+        // so the ready state is the slot's highlight (TRACK background + coat
+        // white) instead of a token, and the charging state has no highlight.
+        let (charging_text, charging_state) = draw_top_rail(&charging, 57, 20);
+        let (ready_text, ready_state) = draw_top_rail(&ready, 57, 20);
+        assert!(
+            !charging_text.contains("SPC") && !ready_text.contains("SPC"),
+            "57x20 must not try to spell the key: {ready_text:?}"
+        );
+        assert!(!charging_state.active_ready[1] && ready_state.active_ready[1]);
+        assert_eq!(
+            track_cells(&charging_text, &charging),
+            0,
+            "57x20: a charging slot must not look ready: {charging_text:?}"
+        );
+        assert!(
+            track_cells(&ready_text, &ready) >= 4,
+            "57x20: charged actives must highlight their slot: {ready_text:?}"
+        );
+    }
+
+    /// How many cells of the top rail are painted on a `TRACK` background?
+    ///
+    /// That is the narrow-layout "this active weapon is charged" highlight (and
+    /// the charge pip on wide layouts), so it is the style-level proof the test
+    /// above needs at 57 columns, where no token fits.
+    fn track_cells(_text: &str, w: &World) -> usize {
+        let mut state = HudState::default();
+        state.tick(1.0 / 60.0, w, &[], false);
+        state.tick(1.0 / 60.0, w, &[], false);
+        let mut terminal = Terminal::new(TestBackend::new(57, 1)).unwrap();
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, f.area().width, 1);
+                draw_top(f, area, w, &mut state);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        (0..57).filter(|&x| buf[(x, 0)].bg == TRACK).count()
+    }
+
+    /// Becoming ready flashes the slot once (the HUD's own "spend me" cue).
+    #[test]
+    fn a_weapon_that_just_charged_flashes_once() {
+        let mut w = active_loadout_world(0.2);
+        let mut state = HudState::default();
+        state.tick(1.0 / 60.0, &w, &[], false);
+        state.tick(1.0 / 60.0, &w, &[], false);
+        assert!(state.active_flash[1] == 0.0, "nothing has charged yet");
+
+        // Fill the meter: the next tick sees the transition and flashes.
+        w.player.loadout.weapons[1].timer = 0.0;
+        w.player.loadout.weapons[2].timer = 0.0;
+        state.tick(1.0 / 60.0, &w, &[], false);
+        assert!(state.active_ready[1] && state.active_ready[2]);
+        assert!(
+            state.active_flash[1] > 0.0 && state.active_flash[2] > 0.0,
+            "a weapon that just became ready must flash"
+        );
+
+        // …and the flash decays away again.
+        for _ in 0..60 {
+            state.tick(1.0 / 60.0, &w, &[], false);
+        }
+        assert_eq!(state.active_flash[1], 0.0, "the ready flash never expired");
     }
 
     #[test]

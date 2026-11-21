@@ -85,11 +85,14 @@ pub enum Sfx {
     // Campaign progression fanfares.
     LevelComplete,
     CampaignVictory,
+    // Active (Space-triggered) weapons.
+    ShootThrash,
+    SonicSqueak,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 59] = [
+    pub const ALL: [Sfx; 61] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -154,6 +157,9 @@ impl Sfx {
         // Campaign progression fanfares.
         Sfx::LevelComplete,
         Sfx::CampaignVictory,
+        // Active (Space-triggered) weapons.
+        Sfx::ShootThrash,
+        Sfx::SonicSqueak,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -218,6 +224,8 @@ impl Sfx {
             Sfx::MowerDeath => "MOWER_DEATH",
             Sfx::LevelComplete => "LVL_COMPLETE",
             Sfx::CampaignVictory => "CAMPAIGN_WIN",
+            Sfx::ShootThrash => "THRASH",
+            Sfx::SonicSqueak => "SQUEAK",
         }
     }
 
@@ -226,7 +234,13 @@ impl Sfx {
         match self {
             Sfx::Gem => 8, // rising pentatonic combo ladder
             Sfx::Hit | Sfx::Kill => 5,
-            Sfx::Shoot | Sfx::Dash | Sfx::ShootSpray | Sfx::ShootWhip | Sfx::BroomStomp => 4,
+            Sfx::Shoot
+            | Sfx::Dash
+            | Sfx::ShootSpray
+            | Sfx::ShootWhip
+            | Sfx::ShootThrash
+            | Sfx::SonicSqueak
+            | Sfx::BroomStomp => 4,
             Sfx::Explosion
             | Sfx::Hurt
             | Sfx::UiMove
@@ -298,6 +312,8 @@ impl Sfx {
             | Sfx::CampaignVictory => 3,
             Sfx::Hurt
             | Sfx::Nuke
+            | Sfx::ShootThrash
+            | Sfx::SonicSqueak
             | Sfx::Explosion
             | Sfx::Heal
             | Sfx::Magnet
@@ -4876,6 +4892,141 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             }
             m.add_short_tail(0.26, 3600.0);
             m.finish(0.72, 1.35, 2.5, 65.0)
+        }
+
+        // 60. ShootThrash: the panic button. A rising wind-up whoosh into a heavy
+        // bone-deep thump, then a long leathery tail-swish as the storm runs on.
+        Sfx::ShootThrash => {
+            const PITCH: [f32; 4] = [1.0, 0.94, 1.06, 0.98];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.52);
+            // 90 ms wind-up: the tail coiling (bandpass sweeping upward).
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.090,
+                pink: true,
+                gain: 0.58,
+                attack_s: 0.020,
+                decay_pow: 0.8,
+                filter: FilterMode::BandPass,
+                fc0: 220.0 * p,
+                fc1: 1500.0 * p,
+                fc_pow: 1.6,
+                q: 1.8,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // The release: a sub-heavy thump with body (the tail hitting air).
+            m.add_osc(OscLayer {
+                start_s: 0.082,
+                dur_s: 0.22,
+                f0: 150.0 * p,
+                f1: 44.0 * p,
+                pitch_pow: 0.42,
+                wave: Wave::Sine,
+                gain: 0.92,
+                attack_s: 0.002,
+                decay_pow: 1.35,
+                ..Default::default()
+            });
+            // The crack itself: broadband snap right on the release.
+            m.add_noise(NoiseLayer {
+                start_s: 0.082,
+                dur_s: 0.060,
+                pink: false,
+                gain: 0.70,
+                attack_s: 0.0006,
+                decay_pow: 2.4,
+                filter: FilterMode::BandPass,
+                fc0: 2100.0 * p,
+                fc1: 700.0 * p,
+                q: 1.1,
+                seed: base_seed ^ 0x22AA,
+                ..Default::default()
+            });
+            // Sustained swish under the burst (the repeated revolutions).
+            m.add_noise(NoiseLayer {
+                start_s: 0.140,
+                dur_s: 0.34,
+                pink: true,
+                gain: 0.34,
+                attack_s: 0.030,
+                decay_pow: 1.2,
+                filter: FilterMode::BandPass,
+                fc0: 900.0 * p,
+                fc1: 380.0 * p,
+                fc_pow: 1.3,
+                q: 1.6,
+                seed: base_seed ^ 0x5151,
+                ..Default::default()
+            });
+            m.add_short_tail(0.18, 2400.0);
+            m.finish(0.55, 1.4, 2.2, 38.0)
+        }
+
+        // 61. SonicSqueak: a high, piercing rat squeak (two fast slides) over a
+        // thin glassy shimmer as the ring leaves the body.
+        Sfx::SonicSqueak => {
+            const PITCH: [f32; 4] = [1.0, 1.12, 0.90, 1.06];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.34);
+            // The squeak: a near-sine chirp sliding up then down, thin and high.
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.150,
+                f0: 2100.0 * p,
+                f1: 2950.0 * p,
+                pitch_pow: 0.75,
+                wave: Wave::Sine,
+                gain: 0.52,
+                attack_s: 0.004,
+                decay_pow: 1.5,
+                vib_hz: 46.0,
+                vib_depth: 0.030,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.014,
+                dur_s: 0.170,
+                f0: 3100.0 * p,
+                f1: 1750.0 * p,
+                pitch_pow: 1.1,
+                wave: Wave::Triangle,
+                gain: 0.24,
+                attack_s: 0.006,
+                decay_pow: 1.8,
+                ..Default::default()
+            });
+            // Air/ring: a whisper of high-passed noise as the wavefront expands.
+            m.add_noise(NoiseLayer {
+                start_s: 0.010,
+                dur_s: 0.20,
+                pink: false,
+                gain: 0.22,
+                attack_s: 0.010,
+                decay_pow: 1.6,
+                filter: FilterMode::HighPass,
+                fc0: 3600.0 * p,
+                fc1: 2200.0 * p,
+                q: 0.9,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // A low thump so the ring has weight on the floor.
+            m.add_osc(OscLayer {
+                start_s: 0.006,
+                dur_s: 0.16,
+                f0: 210.0 * p,
+                f1: 96.0 * p,
+                pitch_pow: 0.6,
+                wave: Wave::Sine,
+                gain: 0.30,
+                attack_s: 0.003,
+                decay_pow: 1.5,
+                ..Default::default()
+            });
+            m.add_short_tail(0.12, 5200.0);
+            m.finish(0.50, 1.2, 2.4, 26.0)
         }
     }
 }

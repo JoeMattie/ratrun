@@ -287,6 +287,10 @@ pub fn emit_weapon_fire(
                 5.0,
             );
         }
+        // The active weapons have their own emitters (they are not fired by
+        // `fire_one`); reached only if a test asks `emit_weapon_fire` directly.
+        WeaponKind::TailThrash => emit_thrash_start(ps, rng, pos),
+        WeaponKind::SonicSqueak => emit_sonic_squeak(ps, rng, pos, radius.max(20.0), 0.3),
     }
 }
 
@@ -426,6 +430,8 @@ pub fn emit_weapon_hit(
         Some(WeaponKind::TailWhip) => {
             emit_tail_whip_hit(ps, rng, pos, reflect, killed);
         }
+        Some(WeaponKind::TailThrash) => emit_thrash_hit(ps, rng, pos, reflect, killed),
+        Some(WeaponKind::SonicSqueak) => emit_squeak_hit(ps, rng, pos, reflect, killed),
         Some(WeaponKind::AcidSpit) => {
             let globs = ps.budget_count(3, false);
             ps.burst_shaped(
@@ -494,6 +500,209 @@ pub fn emit_tail_whip_hit(
         true,
         Shape::Streak,
         5.2,
+    );
+}
+
+// ---- Active weapons (the two Space-triggered ones) -------------------------
+
+/// Colors of the Tail Thrash arc: hot amber core fading to rose (the drawn tail
+/// in `art_rat` uses the same family so the vfx and the arc read as one thing).
+pub const THRASH_CORE: Rgb = (255, 244, 214);
+pub const THRASH_MID: Rgb = (255, 168, 92);
+pub const THRASH_EDGE: Rgb = (232, 82, 128);
+
+/// The trigger frame of a Tail Thrash: a heavy ring of dust and a flash.
+pub fn emit_thrash_start(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 2.0,
+        end_r: 26.0,
+        life: 0.22,
+        max_life: 0.22,
+        color: THRASH_MID,
+        core: THRASH_CORE,
+        thick: 2.5,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    let n = ps.budget_count(14, false);
+    ps.burst_shaped(
+        rng,
+        pos,
+        n,
+        96.0,
+        1.6,
+        Ramp::Tail,
+        0.26,
+        true,
+        Shape::Streak,
+        6.0,
+    );
+    ps.push(Particle {
+        pos,
+        vel: Vec2::ZERO,
+        life: 0.18,
+        max_life: 0.18,
+        drag: 0.0,
+        gravity: 0.0,
+        ramp: Ramp::Custom(THRASH_CORE, THRASH_EDGE),
+        additive: true,
+        shape: Shape::Cross,
+    });
+}
+
+/// One resolved sweep of the thrash: a long directional arc along the drawn
+/// sweep angle plus sparks kicked out along the whole reach.
+pub fn emit_thrash_sweep(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    pos: Vec2,
+    angle: f32,
+    reach: f32,
+    hit: bool,
+) {
+    let dir = Vec2::from_angle(angle);
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: reach * 0.55,
+        end_r: reach,
+        life: 0.20,
+        max_life: 0.20,
+        color: THRASH_MID,
+        core: THRASH_CORE,
+        thick: if hit { 2.5 } else { 1.5 },
+        additive: true,
+        arc_dir: Some(dir),
+        arc_half_angle: 1.15,
+    });
+    // Sparks ride the arc so the sweep reads as a *sweep*, not a pulse.
+    let n = ps.budget_count(if hit { 9 } else { 5 }, false);
+    for k in 0..n {
+        let side = k as f32 / n.max(1) as f32 - 0.5;
+        let a = angle + side * 2.2;
+        let out = Vec2::from_angle(a);
+        let life = rng.random_range(0.16..0.28);
+        ps.push(Particle {
+            pos: pos + out * reach * rng.random_range(0.72..1.0),
+            vel: Vec2::from_angle(a + std::f32::consts::FRAC_PI_2) * rng.random_range(50.0..110.0)
+                + out * 24.0,
+            life,
+            max_life: life,
+            drag: 5.5,
+            gravity: 0.0,
+            ramp: Ramp::Custom(THRASH_CORE, THRASH_MID),
+            additive: true,
+            shape: Shape::Streak,
+        });
+    }
+}
+
+/// Impact flash on a body the thrash sweep clipped.
+pub fn emit_thrash_hit(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, out_dir: Vec2, killed: bool) {
+    let dir = if out_dir.len_sq() > 0.01 {
+        out_dir.normalized()
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    ps.push(Particle {
+        pos,
+        vel: Vec2::ZERO,
+        life: 0.18,
+        max_life: 0.18,
+        drag: 0.0,
+        gravity: 0.0,
+        ramp: Ramp::Custom(THRASH_CORE, THRASH_MID),
+        additive: true,
+        shape: Shape::Cross,
+    });
+    let n = ps.budget_count(if killed { 8 } else { 5 }, false);
+    ps.cone_shaped(
+        rng,
+        pos,
+        dir,
+        n,
+        120.0,
+        1.05,
+        Ramp::Tail,
+        0.22,
+        true,
+        Shape::Streak,
+        6.5,
+    );
+}
+
+/// The Sonic Squeak's expanding ring, drawn by the shockwave buffer itself so
+/// the art and the damage band agree on the radius.
+pub fn emit_sonic_squeak(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    pos: Vec2,
+    radius: f32,
+    dur: f32,
+) {
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 3.0,
+        end_r: radius,
+        life: dur,
+        max_life: dur,
+        color: (150, 236, 255),
+        core: (245, 254, 255),
+        thick: 2.0,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    // A second, slower ring gives the wavefront some thickness.
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 2.0,
+        end_r: radius * 0.86,
+        life: dur * 1.25,
+        max_life: dur * 1.25,
+        color: (110, 196, 240),
+        core: (210, 246, 255),
+        thick: 1.5,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    let n = ps.budget_count(12, false);
+    ps.burst_shaped(
+        rng,
+        pos,
+        n,
+        70.0,
+        1.2,
+        Ramp::Custom((245, 254, 255), (120, 210, 245)),
+        0.26,
+        true,
+        Shape::Dot,
+        5.0,
+    );
+}
+
+/// Impact flash on a body the squeak ring passed.
+pub fn emit_squeak_hit(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, out_dir: Vec2, killed: bool) {
+    let dir = if out_dir.len_sq() > 0.01 {
+        out_dir.normalized()
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    let n = ps.budget_count(if killed { 6 } else { 3 }, false);
+    ps.cone_shaped(
+        rng,
+        pos,
+        dir,
+        n,
+        60.0,
+        1.1,
+        Ramp::Custom((230, 250, 255), (105, 190, 235)),
+        0.20,
+        true,
+        Shape::Dot,
+        4.6,
     );
 }
 

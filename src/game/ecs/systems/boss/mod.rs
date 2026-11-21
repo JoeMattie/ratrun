@@ -986,6 +986,11 @@ pub struct Boss {
     /// sets the state's own number with [`Boss::set_contact_damage`] (broom
     /// `Hurt` = 6 bump, mower `Docking` = 12).
     pub contact_damage: f32,
+    /// Seconds of movement slow left (the Sonic Squeak's ring is the only
+    /// source): `move_boss` multiplies every controller's speed by
+    /// [`Boss::slow_mult`], so a briefly slowed boss keeps its whole state
+    /// machine and only loses ground speed.
+    pub slow_t: f32,
     pub dead: bool,
     pub death_announced: bool,
     pub arena: TileRect,
@@ -1032,6 +1037,7 @@ impl Boss {
             damage_mult: 1.0,
             contact_cd: 0.0,
             contact_damage: kind.contact_damage(),
+            slow_t: 0.0,
             dead: false,
             death_announced: false,
             arena,
@@ -1045,6 +1051,28 @@ impl Boss {
             flags: 0,
             lost: 0.0,
             hazards: Vec::with_capacity(16),
+        }
+    }
+
+    /// Movement multiplier from the current slow (1.0 when free).
+    ///
+    /// An active weapon's crowd control is deliberately weaker on a boss than
+    /// on the horde: `SonicSqueak` calls [`Boss::slow_for`] with a 0.5 multiplier
+    /// for 0.8 s, which reads as a stagger, never as a stun-lock.
+    #[inline]
+    pub fn slow_mult(&self) -> f32 {
+        if self.slow_t > 0.0 {
+            0.5
+        } else {
+            1.0
+        }
+    }
+
+    /// Slow the boss's movement for `secs` (keeps the longer window).
+    #[inline]
+    pub fn slow_for(&mut self, _mult: f32, secs: f32) {
+        if secs > 0.0 {
+            self.slow_t = self.slow_t.max(secs);
         }
     }
 
@@ -1557,7 +1585,10 @@ pub trait BossController: Send + Sync {
 /// Move a large body toward `dir` at `speed`, sliding along walls. Returns
 /// true when the full step fit.
 pub fn move_boss(ctx: &BossContext<'_>, boss: &mut Boss, dir: Vec2, speed: f32) -> bool {
-    let step = dir.normalized() * (speed * ctx.dt);
+    // The Sonic Squeak's brief slow: every controller moves through here, so one
+    // multiplier covers the cat's stalk, the broom's steps and the mower's
+    // charge without touching any state machine.
+    let step = dir.normalized() * (speed * boss.slow_mult() * ctx.dt);
     if step.len_sq() <= 0.0 {
         return false;
     }
@@ -2323,6 +2354,7 @@ pub fn boss_update_system(
         boss.hurt = (boss.hurt - dt).max(0.0);
         boss.invuln = (boss.invuln - dt).max(0.0);
         boss.contact_cd = (boss.contact_cd - dt).max(0.0);
+        boss.slow_t = (boss.slow_t - dt).max(0.0);
         boss.elapsed += dt;
 
         // Lethal hit: the damage system runs before this one, so the death

@@ -69,9 +69,9 @@ use super::fog::{Fog, MazeMarker};
 use super::ecs::components::SpawnId;
 use super::ecs::constants::{GRID_CELL, PARTICLE_CAP};
 use super::ecs::resources::{
-    collect_sorted, spawn_with_id, swap_in, swap_out, BossDue, EnemyIndex, GridScratch, LastPickups,
-    DamageLedger, LevelIndex, NeighborScratch, NextEnemyId, NextSpawnId, NukeTick, PickupScratch,
-    RngRes, RunCounters, SfxQueue, Shake, TickInput, Viewport,
+    collect_sorted, spawn_with_id, swap_in, swap_out, ActiveFx, BossDue, EnemyIndex, GridScratch,
+    LastPickups, DamageLedger, LevelIndex, NeighborScratch, NextEnemyId, NextSpawnId, NukeTick,
+    PickupScratch, RngRes, RunCounters, SfxQueue, Shake, TickInput, Viewport,
 };
 use super::ecs::schedule::{build_settle_schedule, build_tick_schedule};
 use super::ecs::systems::boss::{
@@ -244,6 +244,11 @@ impl World {
         // Per-weapon damage bookkeeping for the batch harness (never read by
         // the schedule; fresh per level, like the counters below).
         ecs.insert_resource(DamageLedger::default());
+        // Live state of the two player-triggered weapons (charge bursts and the
+        // squeak ring). Permanent scratch: it is written only by
+        // `weapons::active_weapons_system` and read between ticks by the draw
+        // pass and the HUD, and a fresh `World` starts with both idle.
+        ecs.insert_resource(ActiveFx::default());
         ecs.insert_resource(SpatialGrid::new(level.arena, GRID_CELL));
         // The director's boss hand-off (raised at `director::BOSS_TIME`, taken
         // by the boss framework). Permanent, like `NukeTick`.
@@ -610,6 +615,38 @@ impl World {
         collect_sorted(&mut self.ecs)
     }
 
+    /// Live state of the two Space-triggered weapons, as of the last tick.
+    ///
+    /// The resource lives permanently in the ECS world (it is not a facade
+    /// field), so this copies it out only when asked — the draw pass asks once
+    /// per frame (`thrash_visual`/`squeak_visual`), and tests ask directly.
+    pub fn active_fx(&self) -> ActiveFx {
+        *self.ecs.resource::<ActiveFx>()
+    }
+
+    /// The tail-thrash arc to draw this frame: `(angle, reach, brightness)`,
+    /// `None` when no burst is playing. `brightness` fades across the burst.
+    pub fn thrash_visual(&self) -> Option<(f32, f32, f32)> {
+        let fx = self.ecs.resource::<ActiveFx>();
+        if !fx.thrash_active() {
+            return None;
+        }
+        // Fade in over the first tenth of the burst, out over the last quarter,
+        // so the arc snaps on with the shake and lingers as it winds down.
+        let t = fx.thrash_progress();
+        let fade = (t / 0.08).min(1.0) * ((1.0 - t) / 0.28).clamp(0.0, 1.0);
+        Some((fx.thrash_angle, fx.thrash_reach, fade))
+    }
+
+    /// The drawn squeak ring: `(origin, radius)` while one is expanding.
+    pub fn squeak_visual(&self) -> Option<(Vec2, f32)> {
+        let fx = self.ecs.resource::<ActiveFx>();
+        if !fx.squeak_active() {
+            return None;
+        }
+        Some((fx.squeak_pos, fx.squeak_r))
+    }
+
     pub fn update(&mut self, dt: f32, move_dir: Vec2, dash: bool) {
         // Neon merge: the HUD reads only this tick's pickups.
         self.last_pickups.clear();
@@ -633,7 +670,16 @@ impl World {
     /// Called by `update`, and exposed for narrow single-system tests:
     /// `begin_tick` → `ecs.run_system_cached(system)` → `end_tick`.
     pub fn begin_tick(&mut self, dt: f32, move_dir: Vec2, dash: bool) {
-        self.ecs.insert_resource(TickInput { dt, move_dir, dash });
+        // One Space/click press is both the dash and the active-weapon release:
+        // `TickInput::active` mirrors `dash` here, and `player_system` /
+        // `active_weapons_system` each decide whether *they* can spend it (a
+        // dash on cooldown still fires a charged weapon, and vice versa).
+        self.ecs.insert_resource(TickInput {
+            dt,
+            move_dir,
+            dash,
+            active: dash,
+        });
         self.ecs.insert_resource(Viewport(self.viewport));
         self.ecs.insert_resource(NukeTick(false));
         self.ecs.insert_resource(LevelIndex(self.level_index));
@@ -1027,6 +1073,11 @@ impl World {
     }
 
     fn draw_player(&self, pb: &mut PixelBuffer, cam: Vec2) {
+        // The Tail Thrash's long tail rides *under* the rat, so the body stays
+        // readable mid-sweep and the arc reads as coming out of its rump.
+        if self.thrash_visual().is_some() {
+            art_rat::draw_tail_thrash(pb, &self.player, self.thrash_visual(), cam);
+        }
         art_rat::draw_rat(pb, &self.player, self.elapsed, cam);
     }
 

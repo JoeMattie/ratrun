@@ -2681,6 +2681,60 @@ mod tests {
             "story" => {
                 hh.frame(&[KeyCode::Char('l')]);
             }
+            // The two player-triggered weapons, mid-effect, over a real horde:
+            // `RATRUN_DUMP=thrash` catches the tail arc a few frames into its
+            // burst, `RATRUN_DUMP=squeak` the ring a few frames into its
+            // expansion. Both are taken in a live `Playing` frame (HUD and all).
+            "thrash" | "squeak" => {
+                hh.enter_playing();
+                let before = hh.app.world.as_mut().unwrap().active_fx();
+                let _ = before;
+                {
+                    use crate::game::weapon::WeaponKind;
+                    use rand::SeedableRng;
+                    let w = hh.app.world.as_mut().unwrap();
+                    // Only the weapon this capture is about, so the other
+                    // one's ring/arc does not clutter the frame.
+                    let kind = if target == "thrash" {
+                        WeaponKind::TailThrash
+                    } else {
+                        WeaponKind::SonicSqueak
+                    };
+                    if !w.player.loadout.has(kind) {
+                        w.player.loadout.apply(&Upgrade::NewWeapon(kind));
+                    }
+                    // Both weapons charged and dash unavailable, so the press
+                    // releases the actives and nothing else.
+                    for weapon in w.player.loadout.weapons.iter_mut() {
+                        if weapon.kind.is_active() {
+                            weapon.level = 3;
+                            weapon.timer = 0.0;
+                        }
+                    }
+                    w.player.dash_cd = 5.0;
+                    let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+                    let p = w.player.pos;
+                    // Tough enough to survive the effect (so the capture shows
+                    // the arc/ring over bodies, not an empty floor) and spread
+                    // through the whole reach.
+                    for i in 0..34 {
+                        let a = i as f32 * 0.21;
+                        let r = 16.0 + (i % 6) as f32 * 11.0;
+                        let at = p + crate::math::Vec2::from_angle(a) * r;
+                        let kind = if i % 7 == 3 {
+                            crate::game::enemy::EnemyKind::Cat
+                        } else {
+                            crate::game::enemy::EnemyKind::Skitterer
+                        };
+                        w.spawn_enemy_with_rng(kind, at, 40.0, &mut rng);
+                    }
+                }
+                hh.frame(&[KeyCode::Char(' ')]);
+                let frames = if target == "thrash" { 5 } else { 4 };
+                for _ in 0..frames {
+                    hh.frame(&[]);
+                }
+            }
             "levelup" => {
                 hh.frame(&[KeyCode::Enter]); // -> Story
                 hh.frame(&[KeyCode::Enter]); // dossier -> MapIntro
@@ -2737,6 +2791,81 @@ mod tests {
         let mut out = format!("P6\n{} {}\n255\n", iw, ih).into_bytes();
         out.extend_from_slice(&px);
         std::fs::write(format!("/tmp/ratrun_{}.ppm", target), out).unwrap();
+    }
+
+    /// Space is one press with two jobs: it dashes (unchanged) and releases any
+    /// charged active weapon — even while the dash is on cooldown.
+    #[test]
+    fn space_dashes_and_releases_a_charged_active_weapon() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        {
+            use crate::game::enemy::EnemyKind;
+            use crate::game::weapon::WeaponKind;
+            let w = h.app.world.as_mut().unwrap();
+            w.player.loadout.apply(&Upgrade::NewWeapon(WeaponKind::TailThrash));
+            for weapon in w.player.loadout.weapons.iter_mut() {
+                if weapon.kind.is_active() {
+                    weapon.timer = 0.0;
+                }
+            }
+            let p = w.player.pos;
+            w.spawn_enemy(EnemyKind::Skitterer, p + crate::math::Vec2::new(14.0, 0.0), 8.0);
+        }
+        // Plain Space: the dash fires and the active weapon is released.
+        h.frame(&[KeyCode::Char(' ')]);
+        {
+            let w = h.app.world.as_ref().unwrap();
+            assert!(w.player.dash_cd > 0.0, "Space must still dash");
+            assert!(
+                w.active_fx().thrash_active(),
+                "Space must also release the charged active weapon"
+            );
+        }
+
+        // With the dash on cooldown the press still releases the weapon: charge
+        // it again and press while `dash_cd` is running.
+        {
+            let w = h.app.world.as_mut().unwrap();
+            for weapon in w.player.loadout.weapons.iter_mut() {
+                if weapon.kind.is_active() {
+                    weapon.timer = 0.0;
+                }
+            }
+            w.player.dash_cd = 3.0;
+            w.player.dash_active = 0.0;
+        }
+        h.frame(&[KeyCode::Char(' ')]);
+        let w = h.app.world.as_ref().unwrap();
+        assert!(
+            w.active_fx().thrash_active(),
+            "a charged active must fire while the dash is charging"
+        );
+        assert_eq!(w.player.dash_active, 0.0, "the dash was on cooldown");
+
+        // A mouse dash (left click on the field) is the same press.
+        {
+            let w = h.app.world.as_mut().unwrap();
+            for weapon in w.player.loadout.weapons.iter_mut() {
+                if weapon.kind.is_active() {
+                    weapon.timer = 0.0;
+                }
+            }
+            w.player.dash_cd = 3.0;
+            w.player.dash_active = 0.0;
+            // Let the previous burst finish so the new one is unambiguous.
+            let mut fx = w.ecs.resource_mut::<crate::game::ecs::resources::ActiveFx>();
+            fx.thrash_left = 0.0;
+        }
+        let field = h.locate("▀");
+        h.events(
+            &[],
+            &[(MouseEventKind::Down(MouseButton::Left), field)],
+        );
+        assert!(
+            h.app.world.as_ref().unwrap().active_fx().thrash_active(),
+            "a click-dash must release a charged active weapon too"
+        );
     }
 
     #[test]

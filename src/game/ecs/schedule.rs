@@ -22,6 +22,7 @@
 //! | 9 | `enemy_move::wall_resolve_system` | `resolve_enemy_walls` |
 //! | 10 | `enemy_move::grid_refresh_system` | second grid build |
 //! | 11 | `weapons::fire_weapons_system` | `fire_weapons` |
+//! | 11b | `weapons::active_weapons_system` | the two Space-triggered weapons (new) |
 //! | 12 | `projectiles::bullets_system` | `update_bullets` |
 //! | 13 | `projectiles::pools_system` | `update_pools` |
 //! | 13b | `boss::boss_damage_system` | player damage → boss hit shapes |
@@ -118,6 +119,13 @@ pub fn build_tick_schedule() -> Schedule {
             enemy_move::wall_resolve_system,
             enemy_move::grid_refresh_system,
             weapons::fire_weapons_system,
+            // 11b: the player-triggered weapons. Right after the auto-fire pass
+            // and before the projectile sweep, so it sees the same cached
+            // `EnemyIndex` order (nothing spawned or reaped since
+            // `grid_refresh`), its bullet deletions are applied before
+            // `bullets_system` moves them, and a sweep's damage lands before
+            // `player_bullet_hits`/`reap_enemies` in the same tick.
+            weapons::active_weapons_system,
             projectiles::bullets_system,
             projectiles::pools_system,
             boss::boss_damage_system,

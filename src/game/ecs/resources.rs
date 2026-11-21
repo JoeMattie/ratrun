@@ -45,6 +45,12 @@ pub struct TickInput {
     pub dt: f32,
     pub move_dir: Vec2,
     pub dash: bool,
+    /// The same Space/click press as `dash`, read by the **active weapons**
+    /// (`weapons::active_weapons_system`): one press dashes *and* releases every
+    /// fully charged active weapon. It is a separate field so a test (or a
+    /// future input) can fire an active weapon while the dash is charging.
+    /// `World::begin_tick` mirrors `dash` into it.
+    pub active: bool,
 }
 
 /// Viewport size as of the last `World::draw` (spawn ring radius depends on
@@ -144,7 +150,16 @@ pub struct Shake {
 #[derive(Resource, Default, Clone, Copy, Debug)]
 pub struct DamageLedger {
     /// Effective damage dealt to every enemy, by weapon index.
-    pub dealt: [f32; 6],
+    pub dealt: [f32; 8],
+    /// Effective damage dealt to **the boss**, by weapon index.
+    ///
+    /// Only weapons that damage the boss outside `boss_damage_system` need to
+    /// book here (the two active weapons do: a thrash sweep and a squeak ring
+    /// call `Boss::take_damage` directly). The boss fight's own source tally
+    /// cannot carry them — `boss_damage_system` resets that tally after this
+    /// one runs — so the batch harness reads this column instead. Also pure
+    /// instrumentation: nothing in the schedule reads it back.
+    pub boss: [f32; 8],
 }
 
 impl DamageLedger {
@@ -156,6 +171,15 @@ impl DamageLedger {
             return;
         }
         self.dealt[kind.index()] += amount;
+    }
+
+    /// Book `amount` effective boss damage from `kind` (see [`DamageLedger::boss`]).
+    #[inline]
+    pub fn add_boss(&mut self, kind: crate::game::weapon::WeaponKind, amount: f32) {
+        if amount <= 0.0 {
+            return;
+        }
+        self.boss[kind.index()] += amount;
     }
 }
 
@@ -173,6 +197,75 @@ impl NextSpawnId {
         let id = self.0;
         self.0 += 1;
         SpawnId(id)
+    }
+}
+
+// ---- Active (player-triggered) weapons -----------------------------------
+
+/// Live state of the two **active** weapons (`WeaponKind::TailThrash`,
+/// `WeaponKind::SonicSqueak`).
+///
+/// An active weapon's `Weapon::timer` is its charge meter (the same field every
+/// auto-firing weapon uses as a cooldown), so nothing here decides *when* a
+/// weapon may fire — only what the already-spent trigger is doing this tick.
+/// One burst of each kind can be in flight at a time; a re-trigger (only
+/// possible after a full charge) restarts it.
+///
+/// Permanent scratch: inserted by `World::new` and reset with the run, never
+/// round-tripped (no facade field holds it between ticks; `World::draw` reads
+/// the thrash arc through `World::thrash_visual` while it sits idle in the ECS
+/// world, and the HUD reads each weapon's charge off the loadout instead). The
+/// fields are a pure function of the trigger tick and `dt`, so a replay with
+/// the same inputs draws the same rng and lands the same damage.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct ActiveFx {
+    /// Seconds left of the tail-thrash burst (0 = idle).
+    pub thrash_left: f32,
+    /// Duration of the current burst (art progress; 0 when idle).
+    pub thrash_total: f32,
+    /// Seconds elapsed in the current burst (drives the sweep schedule).
+    pub thrash_age: f32,
+    /// The drawn sweep angle in radians (world space).
+    pub thrash_angle: f32,
+    /// Reach (px) and per-sweep damage of the current burst.
+    pub thrash_reach: f32,
+    pub thrash_dmg: f32,
+    /// Sweeps already resolved in this burst.
+    pub thrash_done: u32,
+    /// Seconds left of the squeak ring's expansion (0 = idle).
+    pub squeak_left: f32,
+    /// Ring radius last tick and now; the damage band is `prev..now`, which is
+    /// what makes each enemy get hit exactly once per ring.
+    pub squeak_prev_r: f32,
+    pub squeak_r: f32,
+    /// Final radius and per-enemy damage of the current ring.
+    pub squeak_max_r: f32,
+    pub squeak_dmg: f32,
+    /// Ring origin (the rat's position on the trigger tick).
+    pub squeak_pos: Vec2,
+}
+
+impl ActiveFx {
+    /// Is a tail-thrash burst playing right now?
+    #[inline]
+    pub fn thrash_active(&self) -> bool {
+        self.thrash_left > 0.0
+    }
+
+    /// Is a squeak ring still expanding?
+    #[inline]
+    pub fn squeak_active(&self) -> bool {
+        self.squeak_left > 0.0
+    }
+
+    /// Burst progress in `0..=1` (1 when idle), for the art's fade.
+    #[inline]
+    pub fn thrash_progress(&self) -> f32 {
+        if self.thrash_total <= 0.0 {
+            1.0
+        } else {
+            (self.thrash_age / self.thrash_total).clamp(0.0, 1.0)
+        }
     }
 }
 
