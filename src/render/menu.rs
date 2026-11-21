@@ -486,6 +486,11 @@ pub fn draw_levelup(
             Some(Upgrade::NewWeapon(k)) => ("NEW WEAPON", art_icons::weapon(*k)),
             Some(Upgrade::LevelWeapon(_)) => ("WEAPON", art_icons::placeholder()),
             Some(Upgrade::Passive(p)) => ("PASSIVE", art_icons::passive(*p)),
+            // Fallback consumables (`WAVE3_DESIGN.md` §2).
+            Some(Upgrade::Bandage) => ("BANDAGE", art_icons::passive(
+                crate::game::loadout::PassiveKind::Regen,
+            )),
+            Some(Upgrade::Purse) => ("PURSE", &art_icons::GOLD_COIN),
             None => ("", art_icons::placeholder()),
         };
         let name = format!(
@@ -701,14 +706,74 @@ pub fn draw_pause(f: &mut Frame, area: Rect, hits: &mut HitMap) {
     }
 }
 
+/// The chest card. An evolution gets the full plate: the evolved icon in its
+/// gilded frame, the chest name, the pair it took, the inscription and the new
+/// attack (design §3/§7). Everything else is a one-line rank-up or payout.
 pub fn draw_chest(f: &mut Frame, area: Rect, reward: ChestReward, hits: &mut HitMap) {
-    let r = panel(f, centered_rect(42, 8, area), " CHEST OPENED ", TRAIL_GOLD);
-    let text = match reward {
-        ChestReward::WeaponLevel { kind, level } => format!("{} reached Lv {level}", kind.name()),
-        ChestReward::Gold(value) => format!("+{value} gold"),
-    };
-    center(f, r, 2, Span::styled(text, heavy(COAT)));
-    controls(f, band(r, 5, 1), hits, &[(" Enter / Continue ", Some(Target::Continue))]);
+    let tall = area.height >= 19 && area.width >= 62;
+    let (w, h) = if tall { (62, 14) } else { (46, 9) };
+    let r = panel(f, centered_rect(w, h, area), " CHEST OPENED ", TRAIL_GOLD);
+    // `panel` returns the inner rect, so the last row of it is the control row.
+    let last = r.height.saturating_sub(1);
+    match reward {
+        ChestReward::Evolve { kind, evo, partner_stacks, .. } => {
+            let partner = format!(
+                "{}  +  {} x{}",
+                kind.name(),
+                evo.passive.name(),
+                partner_stacks.max(1)
+            );
+            let inscription = format!("\u{201c}{}\u{201d}", evo.flavor);
+            if tall {
+                let icon_area = Rect::new(r.x + (r.width.saturating_sub(10)) / 2, r.y, 10, 5);
+                art_icons::draw_evolved(f.buffer_mut(), icon_area, art_icons::weapon(kind));
+                center(f, r, 5, Span::styled(evo.name.to_uppercase(), heavy(TRAIL_GOLD)));
+                center(f, r, 6, label(&partner, MUTED));
+                center(f, r, 7, label(&inscription, COAT));
+                let body = Rect::new(r.x + 3, r.y + 8, r.width.saturating_sub(6), 3);
+                f.render_widget(
+                    Paragraph::new(evo.attack)
+                        .alignment(ratatui::layout::Alignment::Center)
+                        .wrap(Wrap { trim: true })
+                        .style(ink(COAT)),
+                    body,
+                );
+            } else {
+                center(f, r, 0, Span::styled(evo.name.to_uppercase(), heavy(TRAIL_GOLD)));
+                center(f, r, 1, label(&partner, MUTED));
+                center(f, r, 2, label(&inscription, COAT));
+                center(f, r, 3, label(evo.attack, MUTED));
+            }
+        }
+        ChestReward::WeaponLevel { kind, level } => {
+            art_icons::draw(
+                f.buffer_mut(),
+                Rect::new(r.x + 2, r.y + 2, 4, 2),
+                art_icons::weapon(kind),
+            );
+            center(f, r, 2, Span::styled(format!("{} reached Lv {level}", kind.name()), heavy(COAT)));
+            center(f, r, 3, label("The lock fits your teeth.", MUTED));
+        }
+        ChestReward::PassiveLevel { kind, stacks } => {
+            art_icons::draw(
+                f.buffer_mut(),
+                Rect::new(r.x + 2, r.y + 2, 4, 2),
+                art_icons::passive(kind),
+            );
+            center(f, r, 2, Span::styled(format!("{} x{stacks}", kind.name()), heavy(COAT)));
+            center(f, r, 3, label("Filed under spare parts.", MUTED));
+        }
+        ChestReward::Gold(value) => {
+            art_icons::draw(
+                f.buffer_mut(),
+                Rect::new(r.x + 2, r.y + 2, 4, 2),
+                &art_icons::GOLD_COIN,
+            );
+            center(f, r, 2, Span::styled(format!("+{value} gold"), heavy(TRAIL_GOLD)));
+            center(f, r, 3, label("Someone left lunch money.", MUTED));
+        }
+    }
+    controls(f, band(r, last, 1), hits, &[(" Enter / Continue ", Some(Target::Continue))]);
 }
 
 pub fn draw_shop(f: &mut Frame, area: Rect, gold: u32) {
@@ -954,6 +1019,15 @@ pub fn draw_levelup_with_loadout(
                 }
             }
             Some(Upgrade::Passive(p)) => ("PASSIVE", HEAL_MINT, None, art_icons::passive(*p)),
+            // Fallback consumables (`WAVE3_DESIGN.md` §2): they read as
+            // supplies, not gear, and neither touches a rack slot.
+            Some(Upgrade::Bandage) => (
+                "SUPPLY",
+                HEAL_MINT,
+                None,
+                art_icons::passive(crate::game::loadout::PassiveKind::Regen),
+            ),
+            Some(Upgrade::Purse) => ("SUPPLY", TRAIL_GOLD, None, &art_icons::GOLD_COIN),
             None => ("", MUTED, None, art_icons::placeholder()),
         };
 
@@ -1160,15 +1234,29 @@ pub fn draw_pause_with_run(
                     art_icons::SMALL_CELL_W,
                     art_icons::SMALL_CELL_H,
                 );
-                art_icons::draw(buf, icon_rect, art_icons::weapon(w.kind));
+                if w.evolved {
+                    art_icons::draw_evolved(buf, icon_rect, art_icons::weapon(w.kind));
+                } else {
+                    art_icons::draw(buf, icon_rect, art_icons::weapon(w.kind));
+                }
                 let tx = inner.x + art_icons::SMALL_CELL_W + 2;
                 let max_tw = (inner.x + left_w.saturating_sub(2)).saturating_sub(tx) as usize;
                 let wcol = to_color(w.kind.color());
-                buf.set_stringn(tx, y, w.kind.name(), max_tw, heavy(COAT));
+                // The chest name once evolved, so the pause screen lists
+                // evolutions by the name the player earned.
+                buf.set_stringn(tx, y, w.name(), max_tw, heavy(COAT));
                 let pips = weapon_pips(w.level, w.kind.max_level());
                 let pip_col = if w.is_max() { TRAIL_GOLD } else { wcol };
                 let (px_end, _) = buf.set_stringn(tx, y + 1, &pips, max_tw, ink(pip_col));
-                if w.is_max() {
+                if w.evolved {
+                    buf.set_stringn(
+                        px_end + 1,
+                        y + 1,
+                        "EVO",
+                        max_tw.saturating_sub(6),
+                        heavy(TRAIL_GOLD),
+                    );
+                } else if w.is_max() {
                     buf.set_stringn(
                         px_end + 1,
                         y + 1,
@@ -1205,7 +1293,7 @@ pub fn draw_pause_with_run(
                 let g = weapon_glyph(w.kind).encode_utf8(&mut gbuf);
                 let wcol = to_color(w.kind.color());
                 (gx, _) = buf.set_stringn(gx, y, g, 2, heavy(wcol));
-                (gx, _) = buf.set_stringn(gx + 1, y, w.kind.name(), 13, ink(COAT));
+                (gx, _) = buf.set_stringn(gx + 1, y, w.name(), 13, ink(COAT));
                 let pips = weapon_pips(w.level, w.kind.max_level());
                 let pip_col = if w.is_max() { TRAIL_GOLD } else { wcol };
                 let px = (inner.x + left_w).saturating_sub(7);

@@ -89,11 +89,13 @@ pub enum Sfx {
     ShootThrash,
     SonicSqueak,
     Gold,
+    // Chest evolution fanfare (appended for wave 3).
+    Evolve,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 62] = [
+    pub const ALL: [Sfx; 63] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -162,6 +164,7 @@ impl Sfx {
         Sfx::ShootThrash,
         Sfx::SonicSqueak,
         Sfx::Gold,
+        Sfx::Evolve,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -229,6 +232,7 @@ impl Sfx {
             Sfx::ShootThrash => "THRASH",
             Sfx::SonicSqueak => "SQUEAK",
             Sfx::Gold => "GOLD",
+            Sfx::Evolve => "EVOLVE",
         }
     }
 
@@ -294,7 +298,8 @@ impl Sfx {
             | Sfx::BroomDefeat
             | Sfx::MowerDeath
             | Sfx::LevelComplete
-            | Sfx::CampaignVictory => 1,
+            | Sfx::CampaignVictory
+            | Sfx::Evolve => 1,
             Sfx::Gold => 2,
         }
     }
@@ -313,7 +318,8 @@ impl Sfx {
             | Sfx::BroomDefeat
             | Sfx::MowerDeath
             | Sfx::LevelComplete
-            | Sfx::CampaignVictory => 3,
+            | Sfx::CampaignVictory
+            | Sfx::Evolve => 3,
             Sfx::Hurt
             | Sfx::Nuke
             | Sfx::ShootThrash
@@ -5050,6 +5056,75 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
                 });
             }
             m.finish(0.36, 1.0, 2.0, 10.0)
+        }
+
+        // Evolve: the chest fanfare. A gilded lock turning (two bright brass
+        // clicks) under a rising D-major fourth that blooms into an open
+        // fifth — the one sound in the game that says a weapon *changed*,
+        // so it is longer and higher than `CacheOpen`'s G-Lydian flourish.
+        Sfx::Evolve => {
+            let mut m = MixBuf::new(0.860);
+            // The lock: two brass clicks a fifth apart.
+            for (start_s, c) in [(0.0, 1180.0), (0.070, 1760.0)] {
+                m.add_fm(FmLayer {
+                    start_s,
+                    dur_s: 0.040,
+                    c0: c,
+                    c1: c * 0.78,
+                    pitch_pow: 0.45,
+                    mod_ratio: 2.01,
+                    mod_index0: 2.1,
+                    mod_index1: 0.12,
+                    mod_pow: 2.2,
+                    gain: 0.42,
+                    attack_s: 0.001,
+                    decay_pow: 2.4,
+                    ..Default::default()
+                });
+            }
+            // The climb: D5 - F#5 - A5 - D6, then a held A6 crown.
+            let notes: [(f32, f32, f32); 5] = [
+                (0.120, 587.33, 0.20),
+                (0.210, 739.99, 0.20),
+                (0.300, 880.00, 0.22),
+                (0.390, 1174.66, 0.30),
+                (0.510, 1760.00, 0.34),
+            ];
+            for (i, &(st, f, dur)) in notes.iter().enumerate() {
+                let last = i == 4;
+                m.add_fm(FmLayer {
+                    start_s: st,
+                    dur_s: dur,
+                    c0: f,
+                    c1: f * 1.002,
+                    pitch_pow: 0.4,
+                    mod_ratio: 2.0,
+                    mod_index0: if last { 1.8 } else { 1.2 },
+                    mod_index1: 0.05,
+                    mod_pow: 2.3,
+                    gain: if last { 0.50 } else { 0.40 },
+                    attack_s: 0.002,
+                    decay_pow: if last { 1.3 } else { 1.8 },
+                    filter: FilterMode::LowPass,
+                    fc0: 6400.0,
+                    fc1: 2600.0,
+                    ..Default::default()
+                });
+            }
+            // A low body note so the fanfare has weight under the bells.
+            m.add_osc(OscLayer {
+                start_s: 0.120,
+                dur_s: 0.620,
+                f0: 146.83,
+                f1: 146.83,
+                pitch_pow: 0.5,
+                wave: Wave::Triangle,
+                gain: 0.26,
+                attack_s: 0.020,
+                decay_pow: 1.4,
+                ..Default::default()
+            });
+            m.finish(0.44, 1.6, 3.0, 18.0)
         }
     }
 }

@@ -255,9 +255,80 @@ pub struct ActiveFx {
     pub squeak_dmg: f32,
     /// Ring origin (the rat's position on the trigger tick).
     pub squeak_pos: Vec2,
+
+    // ---- Evolutions (WAVE3_DESIGN.md §3) --------------------------------
+    //
+    // The two active weapons' evolutions need cross-tick state that the firing
+    // systems write and the evolution systems read, so it rides along here
+    // (this resource is already permanent scratch). Nothing below is touched
+    // unless the weapon is evolved.
+
+    /// The burst's weapon was evolved when it was spent (**Flywheel**).
+    pub thrash_evolved: bool,
+    /// The ring's weapon was evolved when it was spent (**Roll Call**).
+    pub squeak_evolved: bool,
+    /// **Flywheel**: hostile pellets caught by the current thrash burst, with
+    /// the direction each was travelling when the arc took it.
+    pub caught: u8,
+    pub caught_dirs: [Vec2; FLYWHEEL_CAP],
+    /// **Roll Call**: bodies the ring stunned or slowed, their `SpawnId`s (the
+    /// handle can go stale, the id identifies it), and the answer timer.
+    pub tags: [Option<Entity>; ROLL_CALL_TAG_CAP],
+    pub tag_ids: [Option<u64>; ROLL_CALL_TAG_CAP],
+    pub tag_n: u8,
+    /// Seconds until the tags answer (0 = nothing pending).
+    pub answer_left: f32,
+    /// Half the squeak's per-hit damage, fixed when the tags were collected.
+    pub answer_damage: f32,
 }
 
+/// Bodies one **Roll Call** squeak may tag (and answer with) per ring.
+pub const ROLL_CALL_TAG_CAP: usize = 12;
+/// Hostile pellets one **Flywheel** thrash burst may hold (two per sweep, three
+/// sweeps, plus slack).
+pub const FLYWHEEL_CAP: usize = 6;
+
 impl ActiveFx {
+    /// Forget everything tied to one squeak ring.
+    pub fn clear_roll_call(&mut self) {
+        self.tags = [None; ROLL_CALL_TAG_CAP];
+        self.tag_ids = [None; ROLL_CALL_TAG_CAP];
+        self.tag_n = 0;
+        self.answer_left = 0.0;
+        self.answer_damage = 0.0;
+    }
+
+    /// Record one Roll Call tag. Returns false when the ring already tagged
+    /// that body (or the table is full).
+    pub fn tag(&mut self, entity: Entity, id: u64) -> bool {
+        if self.tag_ids[..self.tag_n as usize].contains(&Some(id)) {
+            return false;
+        }
+        if (self.tag_n as usize) >= ROLL_CALL_TAG_CAP {
+            return false;
+        }
+        self.tags[self.tag_n as usize] = Some(entity);
+        self.tag_ids[self.tag_n as usize] = Some(id);
+        self.tag_n += 1;
+        true
+    }
+
+    /// Throw every caught Flywheel pellet away (burst over).
+    pub fn clear_caught(&mut self) {
+        self.caught = 0;
+        self.caught_dirs = [Vec2::ZERO; FLYWHEEL_CAP];
+    }
+
+    /// Catch one pellet's direction; returns false when the burst is holding
+    /// its maximum.
+    pub fn catch_pellet(&mut self, dir: Vec2) -> bool {
+        if (self.caught as usize) >= FLYWHEEL_CAP {
+            return false;
+        }
+        self.caught_dirs[self.caught as usize] = dir;
+        self.caught += 1;
+        true
+    }
     /// Is a tail-thrash burst playing right now?
     #[inline]
     pub fn thrash_active(&self) -> bool {

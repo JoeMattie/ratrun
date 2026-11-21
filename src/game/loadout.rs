@@ -2,29 +2,92 @@
 //! upgrade-choice generation / application.
 
 use rand::seq::SliceRandom;
-use rand::{Rng, RngExt};
+use rand::Rng;
 
-use super::weapon::{Weapon, WeaponKind};
+use super::weapon::{Evolution, Weapon, WeaponKind};
 
 pub const MAX_WEAPONS: usize = 5;
 pub const MAX_PASSIVES: usize = 5;
 
+/// Gold a `Purse` level-up card hands over (design §2).
+pub const PURSE_GOLD: u32 = 8;
+/// Gold a chest hands over when there is nothing left to upgrade (design §7).
+pub const CHEST_GOLD: u32 = 24;
+/// Fraction of max HP a chest also heals in that case (the caller applies it:
+/// the loadout cannot see the current HP).
+pub const CHEST_HEAL_FRAC: f32 = 0.25;
+/// Weapon level from which the level-up pool starts pushing the evolution
+/// partner at the player (`"an owned L4/L5 weapon"`, design §2).
+pub const PARTNER_PRIORITY_LEVEL: u8 = 4;
+
+/// TEMPORARY: `Counterweight` — Flywheel's partner in the design table — lands
+/// on the `w3-weapons-b` branch, which is not in this base. Until it merges,
+/// Flywheel is keyed to `Armor` (Thick Hide, the passive `Counterweight` is
+/// appended next to). **This is the one constant to flip.** Nothing about
+/// Flywheel's *behaviour* reads its partner: the passive only gates the chest,
+/// so flipping this finishes the row.
+pub const FLYWHEEL_PARTNER: PassiveKind = PassiveKind::Armor;
+
+/// What one opened chest did. The loadout has already been changed when
+/// [`open_chest`] returns; the reward is the card the App shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChestReward {
     WeaponLevel { kind: WeaponKind, level: u8 },
+    /// The earliest eligible weapon in rack order evolved. Carries everything
+    /// the chest card needs: the slot, the weapon (for its icon), the table row
+    /// (chest name, inscription, partner, new attack) and how many stacks of
+    /// the partner the build owns.
+    Evolve {
+        slot: usize,
+        kind: WeaponKind,
+        evo: Evolution,
+        partner_stacks: u32,
+    },
+    /// The free rank went to a passive instead (no unfinished weapon): the
+    /// card shows the passive and its new stack count.
+    PassiveLevel { kind: PassiveKind, stacks: u32 },
+    /// Nothing left to upgrade: gold (and the caller heals
+    /// [`CHEST_HEAL_FRAC`] of max HP).
     Gold(u32),
 }
 
-pub fn open_chest(loadout: &mut Loadout, rng: &mut impl Rng) -> ChestReward {
-    let eligible = loadout.weapons.iter().filter(|w| !w.is_max()).count();
-    let pick = match eligible {
-        0 => return ChestReward::Gold(10),
-        1 => 0,
-        n => rng.random_range(0..n),
-    };
-    let weapon = loadout.weapons.iter_mut().filter(|w| !w.is_max()).nth(pick).unwrap();
-    weapon.level += 1;
-    ChestReward::WeaponLevel { kind: weapon.kind, level: weapon.level }
+/// Open one chest (design §7). Fully determined: no rng draw, so an unevolved
+/// run never moves the rng stream by visiting a chest.
+///
+/// 1. Evolve the **earliest** eligible weapon in rack order (L5 + at least one
+///    stack of its partner, not already evolved).
+/// 2. Else grant one free rank: the highest-rank unfinished weapon, then the
+///    highest-stack unfinished passive; ties in rack order.
+/// 3. Else [`CHEST_GOLD`] gold and a heal the caller applies.
+///
+/// `_rng` is kept in the signature the wave-0 contract fixed; the table above
+/// needs no draw.
+pub fn open_chest(loadout: &mut Loadout, _rng: &mut impl Rng) -> ChestReward {
+    if let Some(slot) = loadout.evolvable() {
+        loadout.evolve(slot);
+        let weapon = &loadout.weapons[slot];
+        let evo = weapon
+            .kind
+            .evolution()
+            .expect("an evolvable weapon has an evolution row");
+        return ChestReward::Evolve {
+            slot,
+            kind: weapon.kind,
+            evo,
+            partner_stacks: loadout.stacks(evo.passive),
+        };
+    }
+    if let Some(slot) = loadout.unfinished_weapon() {
+        let weapon = &mut loadout.weapons[slot];
+        weapon.level += 1;
+        return ChestReward::WeaponLevel { kind: weapon.kind, level: weapon.level };
+    }
+    if let Some(kind) = loadout.unfinished_passive() {
+        loadout.bump_stack(kind);
+        let _ = apply_passive_stack(&mut loadout.stats, kind);
+        return ChestReward::PassiveLevel { kind, stacks: loadout.stacks(kind) };
+    }
+    ChestReward::Gold(CHEST_GOLD)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -145,15 +208,21 @@ impl Default for Stats {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Upgrade {
     NewWeapon(WeaponKind),
     LevelWeapon(usize),
     Passive(PassiveKind),
+    /// Fallback card, at most one per level-up: restores a quarter of max HP.
+    /// Leaves every rack slot untouched (design §2).
+    Bandage,
+    /// Fallback card, at most one per level-up: [`PURSE_GOLD`] gold. Leaves
+    /// every rack slot untouched.
+    Purse,
 }
 
-/// Fraction of max HP a capped passive restores when it is played as a
-/// bandage (see [`PassiveKind::max_stacks`]).
+/// Fraction of max HP a bandage card (and a capped passive played as one)
+/// restores.
 const BANDAGE_HEAL_FRAC: f32 = 0.25;
 
 /// Apply one stack of `p` to `stats`, returning the HP the pick heals.
@@ -293,12 +362,14 @@ impl Loadout {
         }
     }
 
-    #[allow(dead_code)] // Used by the upcoming evolution chest reward.
+    /// Index of the earliest weapon in rack order that a chest could evolve
+    /// (L5, has a table row, partner passive owned, not already evolved).
     pub fn evolvable(&self) -> Option<usize> {
         self.weapons.iter().position(|weapon| self.can_evolve(weapon))
     }
 
-    #[allow(dead_code)] // Used by the upcoming evolution chest reward.
+    /// Evolve the weapon at `idx` if it is eligible. The evolved flag locks: a
+    /// second call for the same slot does nothing.
     pub fn evolve(&mut self, idx: usize) {
         if self.weapons.get(idx).is_some_and(|w| self.can_evolve(w)) {
             self.weapons[idx].evolved = true;
@@ -308,6 +379,78 @@ impl Loadout {
     fn can_evolve(&self, weapon: &Weapon) -> bool {
         !weapon.evolved && weapon.is_max()
             && weapon.kind.evolution().is_some_and(|e| self.stacks(e.passive) > 0)
+    }
+
+    /// Highest-rank unfinished weapon, ties by rack order (chest rule 2).
+    fn unfinished_weapon(&self) -> Option<usize> {
+        let mut best: Option<(usize, u8)> = None;
+        for (i, w) in self.weapons.iter().enumerate() {
+            if w.is_max() {
+                continue;
+            }
+            if best.is_none_or(|(_, level)| w.level > level) {
+                best = Some((i, w.level));
+            }
+        }
+        best.map(|(i, _)| i)
+    }
+
+    /// Highest-stack unfinished owned passive, ties by (pick) order.
+    fn unfinished_passive(&self) -> Option<PassiveKind> {
+        let mut best: Option<(PassiveKind, u32)> = None;
+        for &(kind, stacks) in &self.passives {
+            if stacks >= kind.max_stacks() {
+                continue;
+            }
+            if best.is_none_or(|(_, held)| stacks > held) {
+                best = Some((kind, stacks));
+            }
+        }
+        best.map(|(kind, _)| kind)
+    }
+
+    /// The unowned evolution partner the level-up pool should push first: the
+    /// partner of the earliest owned L4/L5 weapon that is not evolved yet, when
+    /// a passive slot is free (design §2). `None` before L4, when the partner is
+    /// already owned, or when the passive rack is full.
+    pub fn priority_partner(&self) -> Option<PassiveKind> {
+        if self.passives.len() >= MAX_PASSIVES {
+            return None;
+        }
+        for w in &self.weapons {
+            if w.evolved || w.level < PARTNER_PRIORITY_LEVEL {
+                continue;
+            }
+            if let Some(evo) = w.kind.evolution() {
+                if self.stacks(evo.passive) == 0 {
+                    return Some(evo.passive);
+                }
+            }
+        }
+        None
+    }
+
+    /// `"  · Milk Teeth needs Sharp Teeth (owned ×2)."` — the partner line a
+    /// weapon card carries, empty for a weapon with no row or one already
+    /// evolved.
+    fn partner_note(&self, weapon: &Weapon) -> String {
+        let Some(evo) = weapon.kind.evolution() else {
+            return String::new();
+        };
+        if weapon.evolved {
+            return String::new();
+        }
+        let stacks = self.stacks(evo.passive);
+        let owned = match stacks {
+            0 => "unowned".to_string(),
+            1 => "owned".to_string(),
+            n => format!("owned ×{n}"),
+        };
+        if weapon.is_max() && stacks > 0 {
+            format!("  · {} READY with {}.", evo.name, evo.passive.name())
+        } else {
+            format!("  · {} needs {} ({}).", evo.name, evo.passive.name(), owned)
+        }
     }
 
     pub fn has(&self, k: WeaponKind) -> bool {
@@ -335,19 +478,37 @@ impl Loadout {
     /// Title, mechanical description, and flavor line for an upgrade card.
     pub fn describe(&self, up: &Upgrade) -> (String, String, String) {
         match up {
-            Upgrade::NewWeapon(k) => (
-                format!("{} (NEW)", k.name()),
-                k.desc().to_string(),
-                k.flavor().to_string(),
-            ),
-            Upgrade::LevelWeapon(i) => {
-                let w = &self.weapons[*i];
+            Upgrade::NewWeapon(k) => {
+                // A brand-new weapon has no `Weapon` yet; borrow a level-1 one
+                // for the partner line.
+                let probe = Weapon::new(*k);
                 (
-                    format!("{} Lv{}→{}", w.kind.name(), w.level, w.level + 1),
-                    w.kind.desc().to_string(),
-                    w.kind.flavor().to_string(),
+                    format!("{} (NEW)", k.name()),
+                    format!("{}{}", k.desc(), self.partner_note(&probe)),
+                    k.flavor().to_string(),
                 )
             }
+            Upgrade::LevelWeapon(i) => {
+                let Some(w) = self.weapons.get(*i) else {
+                    return ("Weapon".to_string(), String::new(), String::new());
+                };
+                let next = (w.level + 1).min(w.kind.max_level());
+                (
+                    format!("{} Lv{}→{}", w.name(), w.level, next),
+                    format!("{}{}", w.desc(), self.partner_note(w)),
+                    w.flavor().to_string(),
+                )
+            }
+            Upgrade::Bandage => (
+                "Bandage".to_string(),
+                format!("Restores {:.0}% of max HP.", BANDAGE_HEAL_FRAC * 100.0),
+                "Clean enough. Mostly.".to_string(),
+            ),
+            Upgrade::Purse => (
+                "Purse".to_string(),
+                format!("+{PURSE_GOLD} gold."),
+                "Found in the lining.".to_string(),
+            ),
             Upgrade::Passive(p) => {
                 if self.stacks(*p) >= p.max_stacks() {
                     (
@@ -370,52 +531,129 @@ impl Loadout {
         }
     }
 
-    /// Build up to three distinct level-up choices.
+    /// Build up to three distinct level-up choices at **unknown health**.
+    ///
+    /// This is the entry point the harnesses and older tests use; it assumes a
+    /// damaged rat (`hp_frac = 0.5`) so the bandage fallback still exists. The
+    /// App calls [`Loadout::generate_choices_with_hp`] with the real fraction,
+    /// which is what hides the bandage at full health (design §2).
     pub fn generate_choices(&self, rng: &mut impl Rng) -> Vec<Upgrade> {
-        let mut pool: Vec<Upgrade> = Vec::new();
+        self.generate_choices_with_hp(rng, 0.5)
+    }
 
-        // Level up existing weapons that aren't maxed.
-        for (i, w) in self.weapons.iter().enumerate() {
-            if !w.is_max() {
-                pool.push(Upgrade::LevelWeapon(i));
-            }
+    /// Build up to three distinct level-up choices (design §2).
+    ///
+    /// Slot 1 is an owned rank-up, slot 2 a new kind (an unowned evolution
+    /// partner for an owned L4/L5 weapon first), slot 3 any other legal card.
+    /// Competing candidates inside a slot are broken by the seeded draw. Live
+    /// cards are exhausted before the fallbacks: at most one [`Upgrade::Bandage`]
+    /// (hidden at full health) and one [`Upgrade::Purse`], so a full build at
+    /// full health is offered just the purse — or, if even that is spent
+    /// (a purse is always legal), nothing else. Fewer than three cards is a
+    /// legal, deliberate answer.
+    pub fn generate_choices_with_hp(&self, rng: &mut impl Rng, hp_frac: f32) -> Vec<Upgrade> {
+        let mut choices: Vec<Upgrade> = Vec::with_capacity(3);
+
+        // 1. One owned rank-up (a weapon level or a stack in an owned passive).
+        let mut rank_ups = self.rank_up_cards();
+        rank_ups.shuffle(rng);
+        if !rank_ups.is_empty() {
+            choices.push(rank_ups.pop().expect("checked non-empty"));
         }
-        // Offer new weapons while a slot is open.
-        if self.weapons.len() < MAX_WEAPONS {
-            for k in WeaponKind::all() {
-                if !self.has(k) {
-                    pool.push(Upgrade::NewWeapon(k));
+
+        // 2. One new kind. The first level-up always includes a second weapon;
+        //    after that the evolution partner of an owned L4/L5 weapon is
+        //    pushed to the front of the queue.
+        let mut new_kinds = self.new_kind_cards();
+        let mut promoted: Option<Upgrade> = None;
+        if self.weapons.len() < 2 {
+            let mut fresh: Vec<WeaponKind> = new_kinds
+                .iter()
+                .filter_map(|c| match c {
+                    Upgrade::NewWeapon(k) => Some(*k),
+                    _ => None,
+                })
+                .collect();
+            fresh.shuffle(rng);
+            if let Some(kind) = fresh.first().copied() {
+                if let Some(pos) = new_kinds.iter().position(|c| matches!(c, Upgrade::NewWeapon(k) if *k == kind))
+                {
+                    promoted = Some(new_kinds.remove(pos));
                 }
             }
         }
-        // Passives that are still under their cap. A capped passive is not a
-        // choice a player would ever want, so it is held back for the fallback
-        // below instead of competing with a real upgrade.
-        let mut capped: Vec<Upgrade> = Vec::new();
-        for p in PassiveKind::all() {
-            let stacks = self.stacks(p);
-            if stacks == 0 && self.passives.len() >= MAX_PASSIVES {
-                continue;
-            }
-            if stacks >= p.max_stacks() {
-                capped.push(Upgrade::Passive(p));
-            } else {
-                pool.push(Upgrade::Passive(p));
+        if promoted.is_none() {
+            if let Some(partner) = self.priority_partner() {
+                if let Some(pos) = new_kinds
+                    .iter()
+                    .position(|c| matches!(c, Upgrade::Passive(p) if *p == partner))
+                {
+                    promoted = Some(new_kinds.remove(pos));
+                }
             }
         }
-        // Every live card is preferred to a capped one. Only when the live pool
-        // cannot fill the screen do the capped passives come back, as
-        // bandages — and only as many as are needed. (Adding all of them to
-        // the pool and shuffling, as this did, let bandages crowd out live
-        // cards: with one passive left to cap, a level-up could offer three
-        // heals instead of the weapon level-up.)
-        pool.shuffle(rng);
-        let mut choices: Vec<Upgrade> = pool.into_iter().take(3).collect();
+        let mut second = promoted;
+        if second.is_none() {
+            new_kinds.shuffle(rng);
+            second = new_kinds.pop();
+        }
+        if let Some(card) = second {
+            choices.push(card);
+        }
+
+        // 3. One other legal card: any live card not already dealt.
+        let mut rest: Vec<Upgrade> = rank_ups;
+        rest.extend(new_kinds);
+        rest.shuffle(rng);
+        if let Some(card) = rest.pop() {
+            choices.push(card);
+        }
+
+        // Fallbacks fill only the spare places, in this order.
+        if choices.len() < 3 && hp_frac < 1.0 {
+            choices.push(Upgrade::Bandage);
+        }
         if choices.len() < 3 {
-            capped.shuffle(rng);
-            choices.extend(capped.into_iter().take(3 - choices.len()));
+            choices.push(Upgrade::Purse);
         }
         choices
+    }
+
+    /// Every live rank-up on an owned kind (weapons under their max, owned
+    /// passives under their cap). Empty at a fully maxed build.
+    fn rank_up_cards(&self) -> Vec<Upgrade> {
+        let mut out = Vec::new();
+        for (i, w) in self.weapons.iter().enumerate() {
+            if !w.is_max() {
+                out.push(Upgrade::LevelWeapon(i));
+            }
+        }
+        for &(kind, stacks) in &self.passives {
+            if stacks < kind.max_stacks() {
+                out.push(Upgrade::Passive(kind));
+            }
+        }
+        out
+    }
+
+    /// Every new kind the build may still open, respecting both caps.
+    fn new_kind_cards(&self) -> Vec<Upgrade> {
+        let mut out = Vec::new();
+        if self.weapons.len() < MAX_WEAPONS {
+            for kind in WeaponKind::all() {
+                if !self.has(kind) {
+                    out.push(Upgrade::NewWeapon(kind));
+                }
+            }
+        }
+        if self.passives.len() < MAX_PASSIVES {
+            for kind in PassiveKind::all() {
+                if self.stacks(kind) == 0 {
+                    out.push(Upgrade::Passive(kind));
+                }
+            }
+        }
+        out
     }
 
     /// Apply an upgrade. Returns extra HP to grant (heal-on-pick effects).
@@ -438,7 +676,6 @@ impl Loadout {
             Upgrade::Passive(p) => {
                 if self.stacks(*p) >= p.max_stacks() {
                     // Every card must stay useful: a passive at its cap is
-                    // offered (only once the rest of the pool is thin) and
                     // played as a bandage instead of a dead stack.
                     return BANDAGE_HEAL_FRAC * self.stats.max_hp;
                 }
@@ -448,6 +685,11 @@ impl Loadout {
                 self.bump_stack(*p);
                 apply_passive_stack(&mut self.stats, *p)
             }
+            // Consumables leave every rack slot untouched.
+            Upgrade::Bandage => BANDAGE_HEAL_FRAC * self.stats.max_hp,
+            // Gold is credited by the caller (`App::apply_levelup`), which owns
+            // the wallet; the loadout has no gold field.
+            Upgrade::Purse => 0.0,
         }
     }
 }
@@ -456,7 +698,7 @@ impl Loadout {
 mod tests {
     use super::*;
     use rand::rngs::StdRng;
-    use rand::SeedableRng;
+    use rand::{RngExt, SeedableRng};
 
     #[test]
     fn wave3_rebuild_and_choices_respect_both_caps() {
@@ -485,6 +727,8 @@ mod tests {
                     Upgrade::NewWeapon(_) => panic!("a full rack has no new weapon slot"),
                     Upgrade::LevelWeapon(i) => assert!(i < MAX_WEAPONS),
                     Upgrade::Passive(kind) => assert!(lo.stacks(kind) > 0),
+                    // The consumables leave both racks untouched.
+                    Upgrade::Bandage | Upgrade::Purse => {}
                 }
             }
         }
@@ -495,17 +739,82 @@ mod tests {
     }
 
     #[test]
-    fn wave3_chest_levels_only_an_eligible_owned_weapon() {
+    fn wave3_chest_evolves_then_ranks_then_pays_gold() {
+        // --- Case 1: every eligible weapon could evolve; rack order decides.
+        let mut lo = Loadout::starting();
+        lo.apply(&Upgrade::NewWeapon(WeaponKind::CheeseSpray));
+        lo.apply(&Upgrade::Passive(PassiveKind::Damage)); // Gnaw's partner
+        lo.apply(&Upgrade::Passive(PassiveKind::MaxHp)); // Cheese Spray's
+        for i in 0..lo.weapons.len() {
+            while !lo.weapons[i].is_max() {
+                lo.apply(&Upgrade::LevelWeapon(i));
+            }
+        }
         let mut rng = StdRng::seed_from_u64(18);
-        let mut lo = exhausted_loadout();
-        lo.weapons[1].level -= 1;
-        assert_eq!(
-            open_chest(&mut lo, &mut rng),
-            ChestReward::WeaponLevel { kind: lo.weapons[1].kind, level: lo.weapons[1].level }
-        );
-        assert!(lo.weapons.iter().all(Weapon::is_max));
         let mut untouched = StdRng::seed_from_u64(18);
-        assert_eq!(open_chest(&mut lo, &mut rng), ChestReward::Gold(10));
+        match open_chest(&mut lo, &mut rng) {
+            ChestReward::Evolve { slot, kind, evo, partner_stacks } => {
+                assert_eq!(slot, 0, "the earliest rack slot evolves first");
+                assert_eq!(kind, WeaponKind::Gnaw);
+                assert_eq!(evo.name, "Milk Teeth");
+                assert_eq!(evo.passive, PassiveKind::Damage);
+                assert_eq!(partner_stacks, 1);
+            }
+            other => panic!("expected an evolution, got {other:?}"),
+        }
+        assert!(lo.weapons[0].evolved);
+        assert!(!lo.weapons[1].evolved);
+        // The second chest takes the next eligible weapon in rack order.
+        assert!(matches!(
+            open_chest(&mut lo, &mut rng),
+            ChestReward::Evolve { slot: 1, kind: WeaponKind::CheeseSpray, .. }
+        ));
+        // Both cases drew no rng at all.
+        assert_eq!(rng.random::<u64>(), untouched.random::<u64>());
+
+        // --- Case 2: no evolution left, so one free rank: the highest-rank
+        // unfinished weapon first (ties by rack order), then the passive.
+        let mut lo = Loadout::starting();
+        lo.apply(&Upgrade::Passive(PassiveKind::Damage));
+        lo.weapons[0].level = 3;
+        match open_chest(&mut lo, &mut rng) {
+            ChestReward::WeaponLevel { kind, level } => {
+                assert_eq!(kind, WeaponKind::Gnaw);
+                assert_eq!(level, 4);
+            }
+            other => panic!("expected a weapon rank, got {other:?}"),
+        }
+        // Gnaw L5 + Sharp Teeth would evolve, so the rank branch needs the
+        // partner left behind (the campaign carry-over case) or no evolution at
+        // all. Build the latter: an unpaired L5 weapon and no evolution rows.
+        lo.passives.clear();
+        lo.apply(&Upgrade::Passive(PassiveKind::Armor));
+        lo.apply(&Upgrade::Passive(PassiveKind::Armor));
+        lo.apply(&Upgrade::Passive(PassiveKind::Regen));
+        lo.weapons[0].level = 3;
+        assert!(lo.evolvable().is_none(), "Gnaw has no partner here: {lo:?}");
+        assert!(matches!(
+            open_chest(&mut lo, &mut rng),
+            ChestReward::WeaponLevel { kind: WeaponKind::Gnaw, level: 4 }
+        ));
+        lo.weapons[0].level = lo.weapons[0].kind.max_level();
+        match open_chest(&mut lo, &mut rng) {
+            ChestReward::PassiveLevel { kind, stacks } => {
+                // Thick Hide has the most stacks, so it takes the rank.
+                assert_eq!(kind, PassiveKind::Armor);
+                assert_eq!(stacks, 3);
+            }
+            other => panic!("expected a passive rank, got {other:?}"),
+        }
+
+        // --- Case 3: nothing left to rank: gold, and no rng draw either.
+        let mut maxed = exhausted_loadout();
+        // The exhausted loadout owns every partner, so every weapon could still
+        // evolve; spend those chests first and then measure the fallback.
+        while maxed.evolvable().is_some() {
+            assert!(matches!(open_chest(&mut maxed, &mut rng), ChestReward::Evolve { .. }));
+        }
+        assert_eq!(open_chest(&mut maxed, &mut rng), ChestReward::Gold(CHEST_GOLD));
         assert_eq!(rng.random::<u64>(), untouched.random::<u64>());
     }
 
@@ -582,44 +891,158 @@ mod tests {
         for seed in 0..50 {
             let mut rng = StdRng::seed_from_u64(seed);
             let choices = lo.generate_choices(&mut rng);
-            assert_eq!(choices.len(), 3, "a level-up always offers three cards");
+            assert_eq!(choices.len(), 3, "one live card + the two consumables");
             let live = choices
                 .iter()
                 .filter(|c| matches!(c, Upgrade::Passive(PassiveKind::Damage)))
                 .count();
             assert_eq!(live, 1, "the one live card must always be offered");
-            // …and the other two are bandages, not more capped passives than
-            // the screen needs.
+            // …and the spare places are the two consumables, never a second
+            // card of the same consumable.
+            let mut bandages = 0;
+            let mut purses = 0;
             for c in choices.iter().filter(|c| !matches!(c, Upgrade::Passive(PassiveKind::Damage))) {
-                assert!(lo.describe(c).0.ends_with("(capped)"));
+                match c {
+                    Upgrade::Bandage => bandages += 1,
+                    Upgrade::Purse => purses += 1,
+                    other => panic!("a capped passive was dealt: {other:?}"),
+                }
+            }
+            assert_eq!((bandages, purses), (1, 1));
+        }
+    }
+
+    /// A maxed build has no live cards: at most one bandage (never at full
+    /// health) plus the purse, and just the purse when the rat is untouched.
+    #[test]
+    fn an_exhausted_pool_offers_consumables_not_dead_stacks() {
+        let lo = exhausted_loadout();
+        for seed in 0..50 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let choices = lo.generate_choices_with_hp(&mut rng, 0.4);
+            assert_eq!(choices.len(), 2, "a bandage and a purse: {choices:?}");
+            assert!(matches!(choices[0], Upgrade::Bandage));
+            assert!(matches!(choices[1], Upgrade::Purse));
+            let full = lo.generate_choices_with_hp(&mut rng, 1.0);
+            assert_eq!(full.len(), 1, "at full health only the purse: {full:?}");
+            assert!(matches!(full[0], Upgrade::Purse));
+            // Neither consumes a rack slot.
+            for c in choices.iter().chain(full.iter()) {
+                assert!(matches!(c, Upgrade::Bandage | Upgrade::Purse));
+            }
+        }
+        // A bandage is worth picking: it heals, it is not a dead stack.
+        let mut lo = lo;
+        lo.stats.max_hp = 200.0;
+        let heal = lo.apply(&Upgrade::Bandage);
+        assert!((heal - 50.0).abs() < 1e-3, "a quarter of max HP, got {heal}");
+        assert_eq!(lo.weapons.len(), MAX_WEAPONS);
+        assert_eq!(lo.passives.len(), MAX_PASSIVES);
+        assert_eq!(lo.apply(&Upgrade::Purse), 0.0);
+    }
+
+    /// Design §2 in one test: one owned rank-up, one new kind, one other; the
+    /// unowned partner of an owned L4 weapon takes the new-kind slot; caps are
+    /// respected past the rack limits; the first level-up always offers a
+    /// second weapon.
+    #[test]
+    fn offer_slots_follow_the_design_rules() {
+        // A fresh build: rank-up (Gnaw) + a new weapon + a third legal card.
+        let lo = Loadout::starting();
+        for seed in 0..40 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let choices = lo.generate_choices_with_hp(&mut rng, 1.0);
+            assert_eq!(choices.len(), 3);
+            assert!(
+                matches!(choices[0], Upgrade::LevelWeapon(0)),
+                "slot 1 is the owned rank-up: {choices:?}"
+            );
+            assert!(
+                matches!(choices[1], Upgrade::NewWeapon(_)),
+                "the first level-up includes a second weapon: {choices:?}"
+            );
+        }
+
+        // Gnaw at L4 with no Sharp Teeth: the partner takes the new-kind slot
+        // (once a second weapon exists, so the first-level-up rule is spent).
+        let mut lo = Loadout::starting();
+        lo.apply(&Upgrade::NewWeapon(WeaponKind::TailWhip));
+        lo.weapons[0].level = PARTNER_PRIORITY_LEVEL;
+        for seed in 0..40 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let choices = lo.generate_choices_with_hp(&mut rng, 1.0);
+            assert!(
+                matches!(choices[1], Upgrade::Passive(PassiveKind::Damage)),
+                "the evolution partner must be pushed: {choices:?}"
+            );
+            // It is offered once, never twice.
+            assert_eq!(
+                choices
+                    .iter()
+                    .filter(|c| matches!(c, Upgrade::Passive(PassiveKind::Damage)))
+                    .count(),
+                1
+            );
+        }
+        // Below L4 nothing is prioritised: Sharp Teeth is just one of the new
+        // kinds and the draw decides.
+        let mut early = Loadout::starting();
+        early.apply(&Upgrade::NewWeapon(WeaponKind::TailWhip));
+        early.weapons[0].level = PARTNER_PRIORITY_LEVEL - 1;
+        let mut saw_partner = false;
+        for seed in 0..40 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            for c in early.generate_choices_with_hp(&mut rng, 1.0) {
+                if matches!(c, Upgrade::Passive(PassiveKind::Damage)) {
+                    saw_partner = true;
+                }
+            }
+        }
+        assert!(saw_partner, "an unprioritised partner is still a legal card");
+
+        // A full weapon rack never offers another weapon…
+        let mut full = Loadout::starting();
+        for k in WeaponKind::all().into_iter().take(MAX_WEAPONS) {
+            full.apply(&Upgrade::NewWeapon(k));
+        }
+        // …and a full passive rack never offers a new passive.
+        for p in PassiveKind::all() {
+            full.apply(&Upgrade::Passive(p));
+        }
+        for seed in 0..40 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            for c in full.generate_choices_with_hp(&mut rng, 1.0) {
+                match c {
+                    Upgrade::NewWeapon(k) => panic!("{k:?} offered past the weapon cap"),
+                    Upgrade::Passive(p) => {
+                        assert!(full.stacks(p) > 0, "{p:?} offered past the passive cap")
+                    }
+                    _ => {}
+                }
             }
         }
     }
 
+    /// Weapon cards name the evolution partner and mark whether it is owned.
     #[test]
-    fn an_exhausted_pool_fills_three_bandages() {
-        let lo = exhausted_loadout();
-        for seed in 0..50 {
-            let mut rng = StdRng::seed_from_u64(seed);
-            let choices = lo.generate_choices(&mut rng);
-            assert_eq!(choices.len(), 3, "a level-up always offers three cards");
-            for c in &choices {
-                assert!(
-                    matches!(c, Upgrade::Passive(_)),
-                    "no weapon card can be live once every weapon is maxed"
-                );
-                assert!(
-                    lo.describe(c).0.ends_with("(capped)"),
-                    "the only remaining cards are bandages"
-                );
-            }
-        }
-        // A bandage is still worth picking: it heals, it is not a dead stack.
-        let mut lo = lo;
-        lo.stats.max_hp = 200.0;
-        let heal = lo.apply(&Upgrade::Passive(PassiveKind::Magnet));
-        assert!(heal > 0.0, "a capped pick must heal");
-        assert_eq!(lo.stacks(PassiveKind::Magnet), PassiveKind::Magnet.max_stacks());
+    fn weapon_cards_name_the_partner_and_the_owned_mark() {
+        let mut lo = Loadout::starting();
+        lo.weapons[0].level = lo.weapons[0].kind.max_level();
+        let (_, desc, _) = lo.describe(&Upgrade::LevelWeapon(0));
+        assert!(desc.contains("Milk Teeth"), "{desc}");
+        assert!(desc.contains("Sharp Teeth"), "{desc}");
+        assert!(desc.contains("unowned"), "{desc}");
+        lo.apply(&Upgrade::Passive(PassiveKind::Damage));
+        let (_, desc, _) = lo.describe(&Upgrade::LevelWeapon(0));
+        assert!(desc.contains("READY"), "a maxed weapon with its partner is ready: {desc}");
+        let (_, desc, _) = lo.describe(&Upgrade::NewWeapon(WeaponKind::CheeseSpray));
+        assert!(desc.contains("Fondue Fork") && desc.contains("Fat Reserves"), "{desc}");
+        // The evolved weapon's own card, once evolved, is the new attack.
+        lo.evolve(0);
+        let (title, desc, flavor) = lo.describe(&Upgrade::LevelWeapon(0));
+        assert_eq!(title, "Milk Teeth Lv5→5");
+        assert_eq!(desc, lo.weapons[0].kind.evolution().unwrap().attack);
+        assert_eq!(flavor, "They always come back in.");
     }
 
     #[test]

@@ -191,12 +191,14 @@ impl std::fmt::Display for KeepError {
 pub fn keepables(loadout: &Loadout) -> Vec<Keepable> {
     let mut out = Vec::with_capacity(loadout.weapons.len() + loadout.passives.len());
     for w in &loadout.weapons {
+        // An earned evolution keeps its chest name, inscription and attack on
+        // the keep manifest: it is what the player is choosing to carry.
         out.push(Keepable {
             kind: KeepKind::Weapon(w.kind),
             level: w.level,
-            name: w.kind.name(),
-            flavor: w.kind.flavor(),
-            desc: w.kind.desc(),
+            name: w.name(),
+            flavor: w.flavor(),
+            desc: w.desc(),
         });
     }
     for &(p, stacks) in &loadout.passives {
@@ -524,6 +526,44 @@ mod tests {
         // Exactly three distinct owned entries is fine, and so is none.
         assert_eq!(validate_keep(&lo, &list[..3]), Ok(()));
         assert_eq!(validate_keep(&lo, &[]), Ok(()));
+    }
+
+    /// A carried evolution keeps working **without its partner**: the passive
+    /// only opens the chest, the behaviour is the weapon's own `evolved` flag
+    /// (the evolution systems never read the passive rack — see
+    /// `game::ecs::systems::evolutions`, whose tests fire every evolved weapon
+    /// from exactly this partnerless loadout).
+    #[test]
+    fn wave3_a_kept_evolution_works_without_its_partner() {
+        let mut campaign = CampaignState::new(11);
+        let mut sewer = campaign.world();
+        {
+            let loadout = &mut sewer.player.loadout;
+            loadout.weapons[0].level = WeaponKind::Gnaw.max_level();
+            loadout.apply(&super::super::loadout::Upgrade::Passive(PassiveKind::Damage));
+            loadout.evolve(0);
+            assert!(loadout.weapons[0].evolved);
+        }
+        let keep = sewer.keepables();
+        assert_eq!(keep[0].name, "Milk Teeth", "the manifest shows the chest name");
+        sewer.mark_level_complete();
+        campaign.complete_level(&sewer, &keep[..1]).unwrap();
+
+        let kitchen = campaign.world();
+        let loadout = &kitchen.player.loadout;
+        let weapon = &loadout.weapons[0];
+        assert!(weapon.evolved, "the evolved flag is carried");
+        assert_eq!(weapon.name(), "Milk Teeth");
+        assert_eq!(weapon.desc(), WeaponKind::Gnaw.evolution().unwrap().attack);
+        assert_eq!(
+            loadout.stacks(PassiveKind::Damage),
+            0,
+            "the partner stayed behind"
+        );
+        assert!(
+            loadout.evolvable().is_none(),
+            "without a partner the chest cannot re-evolve the slot"
+        );
     }
 
     #[test]

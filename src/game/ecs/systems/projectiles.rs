@@ -97,7 +97,9 @@ use bevy_ecs::prelude::*;
 use crate::game::bullet::Bullet;
 use bevy_ecs::entity::Entity;
 
-use crate::game::ecs::components::{Pool, SpawnId};
+use crate::game::ecs::components::{
+    CorrosiveChannel, EchoSpoke, EvolvedShot, Pool, SpawnId,
+};
 use crate::game::ecs::resources::{EnemyIndex, NextSpawnId, RngRes, TickInput};
 #[cfg(debug_assertions)]
 use crate::game::ecs::resources::debug_assert_enemy_index;
@@ -185,6 +187,9 @@ fn emit_wall_impact(
     );
 }
 
+// The query carries the two evolution markers a bullet may wear; splitting it
+// would cost a second query per tick for no clarity.
+#[allow(clippy::type_complexity)]
 pub fn bullets_system(
     mut commands: Commands,
     input: Res<TickInput>,
@@ -194,7 +199,7 @@ pub fn bullets_system(
     mut particles: ResMut<Particles>,
     mut next_id: ResMut<NextSpawnId>,
     mut order: Local<OrderScratch>,
-    mut bullets: Query<(Entity, &SpawnId, &mut Bullet)>,
+    mut bullets: Query<(Entity, &SpawnId, &mut Bullet, Option<&mut EchoSpoke>, Option<&EvolvedShot>)>,
 ) {
     let dt = input.dt;
     let ppos = player.pos;
@@ -203,11 +208,11 @@ pub fn bullets_system(
     // `SpawnId` order == legacy `Vec<Bullet>` order (spawn order), and the
     // per-bullet rng draws below depend on it.
     order.clear();
-    order.extend(bullets.iter().map(|(entity, id, _)| (id.0, entity)));
+    order.extend(bullets.iter().map(|(entity, id, ..)| (id.0, entity)));
     order.sort_unstable_by_key(|(id, _)| *id);
 
     for &(_, entity) in order.iter() {
-        let Ok((_, _, mut b)) = bullets.get_mut(entity) else {
+        let Ok((_, _, mut b, mut echo, evolved_shot)) = bullets.get_mut(entity) else {
             continue;
         };
 
@@ -246,10 +251,37 @@ pub fn bullets_system(
             let step = b.pos - b.prev_pos;
             if let Some(t) = wall_hit(&level, b.prev_pos, b.pos, b.radius) {
                 b.pos = b.prev_pos + step * t;
-                hit_wall = true;
-                if !spent {
+                // Echo Chamber: a spoke's first wall contact turns it around
+                // along its incoming line instead of consuming it. One
+                // reflection per spoke; the second wall stops it as usual.
+                let reflect = match echo.as_deref_mut() {
+                    Some(spoke) if !spoke.reflected => {
+                        spoke.reflected = true;
+                        true
+                    }
+                    _ => false,
+                };
+                if reflect {
                     let vel = b.vel;
-                    emit_wall_impact(&mut particles, &mut rng.0, b.pos, vel, b.weapon);
+                    let inward = if vel.len_sq() > 0.001 {
+                        -vel.normalized()
+                    } else {
+                        Vec2::new(1.0, 0.0)
+                    };
+                    // Step back off the wall face so next tick's sweep does
+                    // not see the wall at t = 0 and eat the return leg.
+                    let radius = b.radius;
+                    b.pos -= vel.normalized() * (radius + 1.0);
+                    b.vel = -vel;
+                    if !spent {
+                        vfx::emit_echo_return(&mut particles, &mut rng.0, b.pos, -inward);
+                    }
+                } else {
+                    hit_wall = true;
+                    if !spent {
+                        let vel = b.vel;
+                        emit_wall_impact(&mut particles, &mut rng.0, b.pos, vel, b.weapon);
+                    }
                 }
             }
         }
@@ -271,17 +303,41 @@ pub fn bullets_system(
                 land = Some(b.pos);
             }
             if let Some(p) = land {
-                commands.spawn((
-                    Pool {
-                        pos: p,
-                        radius: lob.radius,
-                        dps: lob.dps,
-                        life: lob.life,
-                        color: lob.color,
-                    },
-                    next_id.take(),
-                ));
-                vfx::emit_acid_splash(&mut particles, &mut rng.0, p, lob.radius);
+                match evolved_shot {
+                    // Drain Cleaner: the splash becomes a directed corrosive
+                    // channel instead of a round pool. It stops at masonry
+                    // (`evolutions::channel_length`) and is run by
+                    // `evolutions::drain_cleaner_system`.
+                    Some(shot) => {
+                        let dir = if shot.dir.len_sq() > 0.001 {
+                            shot.dir.normalized()
+                        } else {
+                            Vec2::new(1.0, 0.0)
+                        };
+                        let length = crate::game::ecs::systems::evolutions::channel_length(
+                            &level, p, dir,
+                        );
+                        commands.spawn((
+                            CorrosiveChannel::new(p, dir, length, lob.dps, b.damage),
+                            next_id.take(),
+                        ));
+                        vfx::emit_acid_splash(&mut particles, &mut rng.0, p, lob.radius * 0.6);
+                        let _ = shot.kind;
+                    }
+                    None => {
+                        commands.spawn((
+                            Pool {
+                                pos: p,
+                                radius: lob.radius,
+                                dps: lob.dps,
+                                life: lob.life,
+                                color: lob.color,
+                            },
+                            next_id.take(),
+                        ));
+                        vfx::emit_acid_splash(&mut particles, &mut rng.0, p, lob.radius);
+                    }
+                }
                 b.life = 0.0;
             } else {
                 vfx::emit_acid_drip(&mut particles, &mut rng.0, b.pos, dt);
