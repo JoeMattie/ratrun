@@ -26,3 +26,4 @@ pub mod particle;
 pub mod player;
 pub mod weapon;
 pub mod world;
+pub mod smoke;
