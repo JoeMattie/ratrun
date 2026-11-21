@@ -1678,12 +1678,15 @@ fn ratchet_swing(
             }
             // Only a body the hook can actually reach counts toward the
             // swing's direction (it samples the same cover rule as the hit).
+            // The signed sweep to this body, held inside the quarter turn (the
+            // `in_arc` test above admits a 0.12 rad overshoot): `[0, turn]`
+            // counter-clockwise, `[turn, 0]` clockwise.
             let swing = if turn >= 0.0 {
-                delta
+                delta.min(turn)
             } else {
-                delta - std::f32::consts::TAU
+                (delta - std::f32::consts::TAU).max(turn)
             };
-            if !arc_clear(swing.clamp(turn, 0.0)) {
+            if !arc_clear(swing) {
                 continue;
             }
             n += 1;
