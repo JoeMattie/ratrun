@@ -103,6 +103,34 @@ impl PickupKind {
             PickupKind::CleanSocks => "CLEAN SOCKS",
         }
     }
+
+    /// Every pickup kind, in enum order. The console's `pickup` command and
+    /// its Tab completion read this table rather than a retyped list.
+    pub fn all() -> [PickupKind; 7] {
+        [
+            PickupKind::Heal,
+            PickupKind::Magnet,
+            PickupKind::Nuke,
+            PickupKind::BottleCap,
+            PickupKind::WindupMouse,
+            PickupKind::PocketWatch,
+            PickupKind::CleanSocks,
+        ]
+    }
+
+    /// The enum-variant name in lowercase, so the console's `pickup` command
+    /// accepts both `heal` and the display label `medkit`.
+    pub fn name(self) -> &'static str {
+        match self {
+            PickupKind::Heal => "heal",
+            PickupKind::Magnet => "magnet",
+            PickupKind::Nuke => "nuke",
+            PickupKind::BottleCap => "bottlecap",
+            PickupKind::WindupMouse => "windupmouse",
+            PickupKind::PocketWatch => "pocketwatch",
+            PickupKind::CleanSocks => "cleansocks",
+        }
+    }
 }
 
 #[derive(Clone)]

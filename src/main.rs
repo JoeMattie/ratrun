@@ -8,6 +8,7 @@ mod app;
 mod autoplay;
 mod audio;
 mod config;
+mod console;
 mod input;
 mod lore;
 mod math;

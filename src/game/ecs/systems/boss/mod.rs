@@ -120,7 +120,8 @@ use crate::game::director;
 use crate::game::ecs::components::{Pool, SpawnId};
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::resources::{
-    BossDue, DifficultyLevel, NextEnemyId, NextSpawnId, RunCounters, Shake, SfxQueue, TickInput,
+    BossDue, BossOverride, DifficultyLevel, NextEnemyId, NextSpawnId, RunCounters, Shake, SfxQueue,
+    TickInput,
 };
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::level::{Level, Rectf, Theme, TileRect};
@@ -483,6 +484,31 @@ impl BossKind {
             BossKind::Mangle => &mangle::MangleController,
             BossKind::NightEdition => &night_edition::NightEditionController,
             BossKind::Magpie => &magpie::MagpieController,
+        }
+    }
+
+    /// Every boss, in enum order. The console's `boss` command and its Tab
+    /// completion read this table rather than a retyped list.
+    pub fn all() -> [BossKind; 6] {
+        [
+            BossKind::Cat,
+            BossKind::Broom,
+            BossKind::Mower,
+            BossKind::Mangle,
+            BossKind::NightEdition,
+            BossKind::Magpie,
+        ]
+    }
+
+    /// Lowercase display name used by the console and diagnostics.
+    pub fn name(self) -> &'static str {
+        match self {
+            BossKind::Cat => "cat",
+            BossKind::Broom => "broom",
+            BossKind::Mower => "mower",
+            BossKind::Mangle => "mangle",
+            BossKind::NightEdition => "nightedition",
+            BossKind::Magpie => "magpie",
         }
     }
 }
@@ -2441,6 +2467,8 @@ pub fn boss_spawn_system(
     mut fight: ResMut<BossFight>,
     mut next_enemy_id: ResMut<NextEnemyId>,
     mut next_spawn_id: ResMut<NextSpawnId>,
+    // Console `boss <kind>`: one-shot override of the floor's boss.
+    mut override_kind: ResMut<BossOverride>,
     level: Res<Level>,
     difficulty: Res<DifficultyLevel>,
     player: Res<Player>,
@@ -2455,8 +2483,9 @@ pub fn boss_spawn_system(
     // The theme is authoritative: the side-route floors play at a campaign
     // stage index, and the Laundry and the Printworks field their own bosses
     // (the Mangle, the Night Edition), so the theme is the only thing that can
-    // name a floor's boss.
-    let kind = BossKind::for_theme(level.theme);
+    // name a floor's boss. The console's `boss <kind>` override takes priority
+    // for one spawn, then clears.
+    let kind = override_kind.0.take().unwrap_or_else(|| BossKind::for_theme(level.theme));
     let arena = level
         .boss_room()
         .map(|r| r.rect)

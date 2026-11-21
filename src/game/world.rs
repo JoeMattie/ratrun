@@ -72,31 +72,31 @@ use super::ecs::components::{
     AcidDrop, CheeseString, ChestSpawn, CorrosiveChannel, EchoSpoke, FairyRing, Infection,
     MilkTooth, SpawnId,
 };
-use super::ecs::constants::{GRID_CELL, PARTICLE_CAP};
+use super::ecs::constants::{GRID_CELL, PARTICLE_CAP, PLAYER_RADIUS};
 use super::ecs::resources::{
-    collect_sorted, spawn_with_id, swap_in, swap_out, ActiveFx, BossDue, BossVirus, DamageLedger,
-    DashTrack, DifficultyLevel, EnemyIndex, EvoRuntime, GridScratch, LaserFx, LastPickups,
-    LevelIndex,
-    MeleeNudge, NeighborScratch, NextEnemyId, NextSpawnId, NukeTick, PickupScratch, RngRes,
-    RunCounters, SfxQueue, Shake, TickInput, Viewport, XpBank,
+    collect_sorted, spawn_with_id, swap_in, swap_out, ActiveFx, BossDue, BossOverride, BossVirus,
+    Cvars, DamageLedger, DashTrack, DebugFlags, DifficultyLevel, EnemyIndex, EvoRuntime, GridScratch,
+    LaserFx, LastPickups, LevelIndex, MeleeNudge, NeighborScratch, NextEnemyId, NextSpawnId,
+    NukeTick, PickupScratch, RngRes, RunCounters, SfxQueue, Shake, TickInput, Viewport, XpBank,
 };
 use super::ecs::schedule::{build_settle_schedule, build_tick_schedule};
 use super::ecs::systems::boss::{
-    Boss, BossArtView, BossFight, BossProjectile, BossProjectileKind, BossTargetable,
+    Boss, BossArtView, BossFight, BossHitShape, BossKind, BossProjectile, BossProjectileKind,
+    BossTargetable,
 };
 use super::ecs::systems::gates::{GateRuntime, MazeEvent};
 use super::enemy::{Enemy, EnemyKind};
 use super::gem::{Chest, Gem, Gold, Pickup, PickupKind};
 use super::art_traps::MazeRewardState;
 use super::level::{Level, RoomKind, Theme};
-use super::loadout::{self, ChestReward, Loadout};
+use super::loadout::{self, ChestReward, Loadout, PassiveKind};
 use super::nav::{FlowField, NavBudget};
 use super::particle::damage_number::{DamageNumbers, DEFAULT_CAP as DAMAGE_NUMBER_CAP};
 use super::particle::Particles;
 use super::player::Player;
-use super::shop::ShopBook;
+use super::shop::{ShopBook, SpliceKind};
 use super::smoke::{SmokeLayer, SmokeScene};
-use super::weapon::WeaponKind;
+use super::weapon::{Weapon, WeaponKind};
 use super::art_walls::{Cardinal, WallKind};
 use super::{
     art_boss_broom, art_boss_cat, art_boss_magpie, art_boss_mangle, art_boss_mower,
@@ -129,6 +129,20 @@ pub struct World {
     last_pickups: Vec<PickupKind>,
     pub director: Director,
     pub flow: FlowField,
+    /// Console tunables (`set`/`get`). Authoritative between ticks; copied
+    /// into the [`Cvars`] resource in `begin_tick`, so a command set between
+    /// ticks reaches the next tick.
+    pub cvars: Cvars,
+    /// Console debug switches. Copied into [`DebugFlags`] in `begin_tick`.
+    pub freeze: bool,
+    pub peace: bool,
+    /// Console `noclip on`: the rat walks through walls.
+    pub noclip: bool,
+    /// Render-only: draw collision shapes over the world (console `hitboxes`).
+    pub hitboxes: bool,
+    /// Console-only: the next boss spawn uses this kind instead of the floor's
+    /// (`boss <kind>`). Taken by `boss_spawn_system` on the next spawn.
+    pub boss_override: Option<BossKind>,
     /// Explored map cells (fog of war). Revealed by
     /// `ecs::systems::fog::reveal_system`; read by the minimap between ticks.
     pub fog: Fog,
@@ -330,6 +344,11 @@ impl World {
         // The boss fight's own state (private rng stream, damage-number id,
         // reusable scratch). Permanent, like `BossDue`; a spawn re-seeds it.
         ecs.insert_resource(BossFight::default());
+        // Console debug switches and live tunables. Neutral defaults; the
+        // facade fields are copied in by `begin_tick`.
+        ecs.insert_resource(DebugFlags::default());
+        ecs.insert_resource(Cvars::default());
+        ecs.insert_resource(BossOverride::default());
         // Named miniboss appointments + spawn grace (wave 3).
         ecs.insert_resource(super::ecs::systems::miniboss::MinibossSchedule::default());
         // Floor-trap side table (glue victims + mousetrap hit bookkeeping);
@@ -357,6 +376,12 @@ impl World {
             last_pickups: Vec::new(),
             director: Director::default(),
             flow,
+            cvars: Cvars::default(),
+            freeze: false,
+            peace: false,
+            noclip: false,
+            hitboxes: false,
+            boss_override: None,
             fog,
             elapsed: 0.0,
             kills: 0,
@@ -983,6 +1008,13 @@ impl World {
         self.ecs.insert_resource(DifficultyLevel(
             self.difficulty_override.unwrap_or(self.level_index),
         ));
+        self.ecs.insert_resource(DebugFlags {
+            freeze: self.freeze,
+            peace: self.peace,
+            noclip: self.noclip,
+        });
+        self.ecs.insert_resource(self.cvars);
+        self.ecs.insert_resource(BossOverride(self.boss_override));
         self.ecs.insert_resource(RunCounters {
             elapsed: self.elapsed,
             kills: self.kills,
@@ -1074,6 +1106,13 @@ impl World {
         self.game_over = counters.game_over;
         self.won = counters.won;
         self.level_complete = counters.level_complete;
+
+        // The console's boss override is consumed by `boss_spawn_system`; sync
+        // its post-tick value back so a one-shot override does not linger.
+        self.boss_override = self
+            .ecs
+            .get_resource::<BossOverride>()
+            .map_or(None, |o| o.0);
 
         let shake = self
             .ecs
@@ -1189,6 +1228,234 @@ impl World {
         for entity in entities {
             let _ = self.ecs.despawn(entity);
         }
+    }
+
+    // ---- Console admin helpers (w3-console) ------------------------------
+    //
+    // Thin wrappers the console's command handlers call. They all run
+    // **between ticks** (the facade is authoritative there), so they never
+    // touch the ECS mid-tick. The read-only ones only read; the mutating ones
+    // are only reached after the console has flagged the run as CONSOLE USED.
+
+    /// Live bullet count for the `where`/`perf` readouts.
+    pub fn bullet_count(&self) -> usize {
+        self.ecs
+            .iter_entities()
+            .filter(|e| e.contains::<Bullet>())
+            .count()
+    }
+
+    /// Boss-arena centre in world pixels, or the map centre as a fallback.
+    pub fn boss_arena_center(&self) -> Vec2 {
+        self.level
+            .boss_room()
+            .map(|r| r.rect.center_world())
+            .unwrap_or_else(|| self.level.arena * 0.5)
+    }
+
+    /// The first shop hole's threshold point, if the floor has one.
+    pub fn shop_point(&self) -> Option<Vec2> {
+        self.level.objects.shop_holes.first().map(|h| h.face())
+    }
+
+    /// A chest's world position, if one is on the floor.
+    pub fn chest_point(&mut self) -> Option<Vec2> {
+        let mut q = self.ecs.query::<&Chest>();
+        q.iter(&self.ecs).next().map(|c| c.pos)
+    }
+
+    /// A maze's entry cell in world pixels, if the floor has one.
+    pub fn maze_point(&self) -> Option<Vec2> {
+        self.level.mazes.first().map(|m| {
+            crate::game::collision::TileMap::tile_rect(m.entry.0, m.entry.1).center()
+        })
+    }
+
+    /// Human-readable name of the room containing `pos`.
+    pub fn room_name_at(&self, pos: Vec2) -> &'static str {
+        match self.level.room_at(pos).map(|r| r.kind) {
+            Some(RoomKind::Start) => "start",
+            Some(RoomKind::Boss) => "boss arena",
+            Some(RoomKind::Hall) => "hall",
+            Some(RoomKind::Room) => "room",
+            Some(RoomKind::Corridor) => "corridor",
+            Some(RoomKind::Maze) => "maze",
+            None => "open floor",
+        }
+    }
+
+    /// Console `reveal`: mark every cell explored so the whole map shows.
+    pub fn reveal_map(&mut self) {
+        self.fog.reveal_all(&self.level);
+    }
+
+    /// Console `give weapon <name> [level]`: add or level a weapon.
+    pub fn give_weapon(&mut self, kind: WeaponKind, level: u8) -> bool {
+        if let Some(w) = self.player.loadout.weapons.iter_mut().find(|w| w.kind == kind) {
+            w.level = level.max(1);
+            return true;
+        }
+        if self.player.loadout.weapons.len() >= loadout::MAX_WEAPONS {
+            return false;
+        }
+        let mut w = Weapon::new(kind);
+        w.level = level.max(1);
+        self.player.loadout.weapons.push(w);
+        true
+    }
+
+    /// Console `give passive <name> [stacks]`: add stacks to a passive.
+    pub fn give_passive(&mut self, kind: PassiveKind, stacks: u32) -> bool {
+        let cap = kind.max_stacks();
+        if let Some((_, held)) = self.player.loadout.passives.iter_mut().find(|(p, _)| *p == kind) {
+            *held = (*held + stacks).min(cap);
+            self.player.loadout.rebuild_stats();
+            return true;
+        }
+        if self.player.loadout.passives.len() >= loadout::MAX_PASSIVES {
+            return false;
+        }
+        self.player.loadout.passives.push((kind, stacks.min(cap)));
+        self.player.loadout.rebuild_stats();
+        true
+    }
+
+    /// Console `splice <name>`: add a gene splice.
+    pub fn give_splice(&mut self, kind: SpliceKind) {
+        if !self.player.loadout.splices.contains(&kind) {
+            self.player.loadout.splices.push(kind);
+            self.player.loadout.rebuild_stats();
+        }
+    }
+
+    /// Console `evolve <weapon>`: mark one weapon evolved.
+    pub fn evolve_weapon(&mut self, kind: WeaponKind) -> bool {
+        if let Some(idx) = self.player.loadout.weapons.iter().position(|w| w.kind == kind) {
+            self.player.loadout.evolve(idx);
+            self.player.loadout.weapons[idx].evolved = true;
+            return true;
+        }
+        false
+    }
+
+    /// Console `evolve all`: evolve every eligible weapon. Returns how many.
+    pub fn evolve_all(&mut self) -> usize {
+        let mut n = 0;
+        for i in 0..self.player.loadout.weapons.len() {
+            let kind = self.player.loadout.weapons[i].kind;
+            if self.evolve_weapon(kind) {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Console `level <weapon> <n>`: set a weapon's level.
+    pub fn set_weapon_level(&mut self, kind: WeaponKind, level: u8) -> bool {
+        if let Some(w) = self.player.loadout.weapons.iter_mut().find(|w| w.kind == kind) {
+            w.level = level.max(1);
+            return true;
+        }
+        false
+    }
+
+    /// Console `remove <weapon|passive>`: drop one from the loadout.
+    pub fn remove_weapon(&mut self, kind: WeaponKind) -> bool {
+        let before = self.player.loadout.weapons.len();
+        self.player.loadout.weapons.retain(|w| w.kind != kind);
+        self.player.loadout.weapons.len() != before
+    }
+
+    pub fn remove_passive(&mut self, kind: PassiveKind) -> bool {
+        let before = self.player.loadout.passives.len();
+        self.player.loadout.passives.retain(|(p, _)| *p != kind);
+        if self.player.loadout.passives.len() != before {
+            self.player.loadout.rebuild_stats();
+            return true;
+        }
+        false
+    }
+
+    /// Console `loadout`: one line per owned weapon and passive.
+    pub fn loadout_summary(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for w in &self.player.loadout.weapons {
+            let evo = if w.evolved { " (evolved)" } else { "" };
+            out.push(format!("weapon: {} lv{}{}", w.kind.name(), w.level, evo));
+        }
+        for &(p, stacks) in &self.player.loadout.passives {
+            out.push(format!("passive: {} x{}", p.name(), stacks));
+        }
+        for &s in &self.player.loadout.splices {
+            out.push(format!("splice: {}", s.name()));
+        }
+        out
+    }
+
+    /// Console `xp <n>`: bank XP through the normal level-up path.
+    pub fn grant_xp(&mut self, amount: u32) {
+        self.player.add_xp(amount);
+    }
+
+    /// Console `chest [n]`: drop a chest near the rat.
+    pub fn spawn_chest_near(&mut self, pos: Vec2, offset: f32) {
+        let p = pos + Vec2::new(offset * 18.0, 0.0);
+        ChestSpawn { pos: p }.spawn(&mut self.ecs);
+    }
+
+    /// Console `pickup <kind> [n]`: drop a pickup near the rat.
+    pub fn spawn_pickup_near(&mut self, kind: PickupKind, pos: Vec2, offset: f32) {
+        let p = pos + Vec2::new(offset * 18.0, 0.0);
+        self.spawn_pickup(Pickup {
+            pos: p,
+            kind,
+            bob: 0.0,
+        });
+    }
+
+    /// Console `spawn <enemy> [count] [elite]`: spawn a horde body.
+    pub fn spawn_enemy_near(&mut self, kind: EnemyKind, pos: Vec2, offset: f32, elite: bool) -> Entity {
+        let p = pos + Vec2::new(offset * 22.0, 0.0);
+        let e = self.spawn_enemy(kind, p, 1.0);
+        if elite {
+            if let Some(mut enemy) = self.ecs.get_mut::<Enemy>(e) {
+                enemy.elite = true;
+            }
+        }
+        e
+    }
+
+    /// Console `miniboss [kind]`: appoint a named miniboss near the rat.
+    pub fn spawn_miniboss_near(
+        &mut self,
+        kind: super::ecs::systems::miniboss::MinibossKind,
+        pos: Vec2,
+    ) -> Entity {
+        self.spawn_miniboss(kind, 0, pos)
+    }
+
+    /// Console `boss [kind]`: start the floor's boss fight now.
+    pub fn force_boss(&mut self, kind: BossKind) {
+        self.boss_override = Some(kind);
+        self.ecs.resource_mut::<BossDue>().due = true;
+    }
+
+    /// Console `magnet`: pull every gem toward the rat.
+    pub fn magnetize_all_gems(&mut self) -> usize {
+        let mut q = self.ecs.query::<&mut Gem>();
+        let mut n = 0;
+        for mut gem in q.iter_mut(&mut self.ecs) {
+            gem.magnetized = true;
+            n += 1;
+        }
+        n
+    }
+
+    /// Console `nuke`: reap every live enemy. Returns how many.
+    pub fn nuke_all(&mut self) -> usize {
+        let n = self.enemy_count();
+        self.clear_enemies();
+        n
     }
 
     // ---- Legacy helper hooks used by the ported tests --------------------
@@ -1724,6 +1991,94 @@ impl World {
         // the thing that is about to hurt the player). Screen-space minimum
         // sizes for the zoomed-out view live in `render::ink`.
         self.draw_hostile_layer(pb, cam);
+
+        // Developer overlay, dead last: the console's `hitboxes on` outlines the
+        // collision shapes the simulation actually uses. Nothing may hide it.
+        if self.hitboxes {
+            self.draw_hitboxes(pb, cam);
+        }
+    }
+
+    /// Render-only debug overlay (console `hitboxes on`): outline the collision
+    /// shapes the simulation actually uses, in screen space so they stay
+    /// legible at every zoom. Drawn last, over the hostile layer, because it is
+    /// a developer tool: nothing may hide it. Never touches the simulation.
+    fn draw_hitboxes(&mut self, pb: &mut PixelBuffer, cam: Vec2) {
+        let viewport = self.viewport;
+        const PLAYER: (u8, u8, u8) = (90, 255, 220);
+        const ENEMY: (u8, u8, u8) = (255, 90, 200);
+        const HOSTILE: (u8, u8, u8) = (255, 120, 60);
+        const BOSS: (u8, u8, u8) = (255, 220, 60);
+
+        // The rat: the exact circle `resolve_circle` and contact damage use.
+        {
+            let s = self.w2s(self.player.pos, cam);
+            pb.ring(s.0, s.1, PLAYER_RADIUS.round() as i32, PLAYER);
+        }
+
+        // Enemies and minibosses.
+        {
+            let mut query = self.ecs.query::<(&SpawnId, &Enemy)>();
+            for (_, e) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let s = self.w2s(e.pos, cam);
+                if !on_screen(s, e.radius + 3.0, viewport) {
+                    continue;
+                }
+                pb.ring(s.0, s.1, e.radius.round().max(1.0) as i32, ENEMY);
+            }
+        }
+
+        // Bullets, both factions.
+        {
+            let mut query = self.ecs.query::<(&SpawnId, &Bullet)>();
+            for (_, b) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let s = self.w2s(b.pos, cam);
+                if !on_screen(s, b.radius + 2.0, viewport) {
+                    continue;
+                }
+                pb.ring(s.0, s.1, b.radius.round().max(1.0) as i32, HOSTILE);
+            }
+        }
+
+        // Boss hit shapes: the art's own footprint, so a `boss <kind>` spawn can
+        // be checked against what the weapons actually hit.
+        {
+            let mut query = self.ecs.query::<&Boss>();
+            for boss in query.iter(&self.ecs) {
+                for shape in boss.hit_shapes().iter() {
+                    match *shape {
+                        BossHitShape::Circle { center, radius, .. } => {
+                            let s = self.w2s(center, cam);
+                            if on_screen(s, radius + 3.0, viewport) {
+                                pb.ring(s.0, s.1, radius.round().max(1.0) as i32, BOSS);
+                            }
+                        }
+                        BossHitShape::Box {
+                            center,
+                            facing,
+                            half,
+                            half_perp,
+                            ..
+                        } => {
+                            // Four corners of the oriented box, joined.
+                            let u = facing * half;
+                            let v = facing.perp() * half_perp;
+                            let pts = [
+                                self.w2s(center + u + v, cam),
+                                self.w2s(center + u - v, cam),
+                                self.w2s(center - u - v, cam),
+                                self.w2s(center - u + v, cam),
+                            ];
+                            for i in 0..4 {
+                                let a = pts[i];
+                                let b = pts[(i + 1) % 4];
+                                pb.line(a.0, a.1, b.0, b.1, BOSS);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Everything that can hurt the player and every countdown attached to it,

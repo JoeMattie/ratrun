@@ -152,6 +152,41 @@ impl EnemyKind {
     pub fn heavy(self) -> bool {
         matches!(self, EnemyKind::Brute | EnemyKind::Boss | EnemyKind::Pillbug)
     }
+
+    /// Every kind, in enum order. The console's `spawn` command and its Tab
+    /// completion read this table rather than a retyped list.
+    pub fn all() -> [EnemyKind; 11] {
+        [
+            EnemyKind::Skitterer,
+            EnemyKind::Bat,
+            EnemyKind::Cat,
+            EnemyKind::Spitter,
+            EnemyKind::Brute,
+            EnemyKind::Boss,
+            EnemyKind::Pillbug,
+            EnemyKind::BellFlea,
+            EnemyKind::WickMoth,
+            EnemyKind::Porter,
+            EnemyKind::Turnkey,
+        ]
+    }
+
+    /// Lowercase display name used by the console and diagnostics.
+    pub fn name(self) -> &'static str {
+        match self {
+            EnemyKind::Skitterer => "skitterer",
+            EnemyKind::Bat => "bat",
+            EnemyKind::Cat => "cat",
+            EnemyKind::Spitter => "spitter",
+            EnemyKind::Brute => "brute",
+            EnemyKind::Boss => "boss",
+            EnemyKind::Pillbug => "pillbug",
+            EnemyKind::BellFlea => "bellflea",
+            EnemyKind::WickMoth => "wickmoth",
+            EnemyKind::Porter => "porter",
+            EnemyKind::Turnkey => "turnkey",
+        }
+    }
 }
 
 // ---- Wave-3 behaviour state ----------------------------------------------

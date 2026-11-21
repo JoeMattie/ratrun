@@ -33,6 +33,7 @@ use crate::game::gem::PickupKind;
 use crate::math::Vec2;
 
 use super::components::SpawnId;
+use super::systems::boss::BossKind;
 
 // ---- Per-tick input ------------------------------------------------------
 
@@ -386,6 +387,66 @@ pub struct PickupScratch(pub Vec<(PickupKind, Vec2)>);
 /// `loot::nuke_reap_system`. Reset to `false` by `World::begin_tick`.
 #[derive(Resource, Default)]
 pub struct NukeTick(pub bool);
+
+// ---- Console debug flags and live tunables -------------------------------
+//
+// The w3-console's admin commands need two small permanent resources:
+//
+// * [`DebugFlags`] — the freeze/peace switches. Read by the director (peace)
+//   and the enemy steering pass (freeze). Defaults are neutral, so a run that
+//   never opens the console is bit-identical.
+// * [`Cvars`] — the four live tunables the `set`/`get` commands expose. Every
+//   field's default is the value the code used before the console existed, so
+//   a default `Cvars` is a no-op.
+//
+// Both are inserted by `World::new` and refreshed from the facade in
+// `begin_tick`, so a console command between ticks reaches the next tick.
+
+/// Debug switches toggled by the console's `freeze`, `peace` and `noclip`
+/// commands. `god` lives on [`Player`](crate::game::player::Player) instead, so
+/// it is the single funnel in `Player::take_damage`.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DebugFlags {
+    /// The horde holds still (velocity steering is skipped).
+    pub freeze: bool,
+    /// The director stops spawning (the boss hand-off still runs).
+    pub peace: bool,
+    /// The rat walks through walls (`player_system` skips tile collision).
+    pub noclip: bool,
+}
+
+/// Live tunables the console's `set`/`get` commands read and write.
+///
+/// Defaults are the pre-console constants, so a default `Cvars` changes no
+/// number and no rng draw. A zero `enemy_cap` means "use the built-in cap".
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct Cvars {
+    /// Override the horde cap (`0` = the built-in `ENEMY_CAP`).
+    pub enemy_cap: usize,
+    /// Multiplier on the director's spawn interval (higher = faster).
+    pub spawn_rate: f32,
+    /// Multiplier on gem XP.
+    pub xp_mult: f32,
+    /// Multiplier on player weapon damage.
+    pub damage_mult: f32,
+}
+
+impl Default for Cvars {
+    fn default() -> Self {
+        Cvars {
+            enemy_cap: 0,
+            spawn_rate: 1.0,
+            xp_mult: 1.0,
+            damage_mult: 1.0,
+        }
+    }
+}
+
+/// Console-only: the next boss spawn uses this kind instead of the floor's
+/// (`boss <kind>`). `boss_spawn_system` takes it and clears it; the facade
+/// field is synced back in `end_tick`.
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct BossOverride(pub Option<BossKind>);
 
 /// Derived broadphase data shared between the grid build, separation and the
 /// bullet-vs-enemy pass (legacy recomputed `max_radius` inline).

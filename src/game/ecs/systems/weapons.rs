@@ -104,7 +104,8 @@ use crate::game::ecs::components::{
 };
 use crate::game::ecs::systems::evolutions::{self, STRING_SECS};
 use crate::game::ecs::resources::{
-    ActiveFx, DamageLedger, EnemyIndex, MeleeNudge, NextSpawnId, RngRes, SfxQueue, Shake, TickInput,
+    ActiveFx, Cvars, DamageLedger, EnemyIndex, MeleeNudge, NextSpawnId, RngRes, SfxQueue, Shake,
+    TickInput,
 };
 use crate::game::ecs::systems::boss::{Boss, BossTargetable};
 use crate::game::ecs::systems::projectiles::los_clear;
@@ -142,7 +143,7 @@ pub fn fire_weapons_system(
     let ppos = player.pos;
     let pface = player.face;
     let fire_rate = player.loadout.stats.fire_rate_mult;
-    let dmg_mult = player.loadout.stats.damage_mult;
+    let dmg_mult = player.loadout.stats.damage_mult * scratch.cvars.damage_mult.max(0.0);
     // Wave 3: the passive hooks (Lens Cap, Long Fuse, Counterweight) are a copy
     // of the stat block, so `fire_one` can read them while the loop still
     // mutates weapon timers.
@@ -498,6 +499,10 @@ pub struct FireScratch<'w, 's> {
     /// moved something (`moved`).
     grid: ResMut<'w, crate::game::collision::SpatialGrid>,
     moved: Local<'s, bool>,
+    /// Console tunable: `set damage_mult N` (read-only here, default 1.0 leaves
+    /// the numbers alone). Bundled into this scratch because the system is at
+    /// bevy's 16-parameter cap and the console's extra slot would overflow it.
+    cvars: Res<'w, Cvars>,
 }
 
 /// The active-weapons pass's two reused buffers.

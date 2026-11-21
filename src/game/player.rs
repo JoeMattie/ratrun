@@ -83,6 +83,12 @@ pub struct Player {
     /// consumed by `powerups_system`, which owns the decoy entity's lifecycle
     /// (spawn, move on a repeat find, expire). `None` means "no request".
     pub decoy_at: Option<Vec2>,
+    /// Console `god on`: every damage source is ignored. Set between ticks by
+    /// the console; read in [`Player::take_damage`] so it is the single funnel.
+    pub god: bool,
+    /// Console `speed x`: a multiplier on the rat's move speed. Defaults to
+    /// `1.0` (no change); `player_system` multiplies it into the throttle.
+    pub speed_mult: f32,
 }
 
 /// XP needed to go from `level` to `level + 1`.
@@ -116,6 +122,8 @@ impl Player {
             dash_denied: 0.0,
             buffs: Buffs::default(),
             decoy_at: None,
+            god: false,
+            speed_mult: 1.0,
         }
     }
 
@@ -162,6 +170,9 @@ impl Player {
     /// to it; Double Lid lengthens the immunity window either way, because
     /// the window opens on a blocked hit too.
     pub fn take_damage(&mut self, raw: f32) -> bool {
+        if self.god {
+            return false;
+        }
         if self.iframes > 0.0 {
             return false;
         }

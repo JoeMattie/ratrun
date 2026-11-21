@@ -68,8 +68,8 @@ use crate::game::particle::damage_number::{DamageNumbers, DamageSource};
 use crate::game::ecs::components::{Entity, SpawnId};
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::resources::{
-    LastPickups, LevelIndex, NextSpawnId, NukeTick, PickupScratch, RngRes, RunCounters, SfxQueue,
-    Shake, TickInput, XpBank,
+    Cvars, LastPickups, LevelIndex, NextSpawnId, NukeTick, PickupScratch, RngRes, RunCounters,
+    SfxQueue, Shake, TickInput, XpBank,
 };
 use crate::game::ecs::systems::boss::BossFight;
 use crate::game::ecs::systems::miniboss::{self, Miniboss, MinibossSchedule};
@@ -336,6 +336,8 @@ pub fn gems_system(
     // multiplier is exactly 1.0 and the bank stays empty, so the numbers are
     // the legacy ones.
     mut xp_bank: ResMut<XpBank>,
+    // Console tunable: `set xp_mult N`. Default 1.0 leaves the numbers alone.
+    cvars: Res<Cvars>,
     mut gems: Query<(Entity, &SpawnId, &mut Gem)>,
     mut ordered: Local<Vec<(u64, Entity)>>,
 ) {
@@ -344,8 +346,11 @@ pub fn gems_system(
     let magnet = player.loadout.stats.magnet;
     // Splice multipliers apply after passive stats (`WAVE3_DESIGN.md` §6):
     // four stacks of Second Scent and the splice are x1.4 * x1.25 = x1.75.
-    let xp_mult =
-        player.loadout.stats.xp_mult * crate::game::shop::gem_xp_mult(&player.loadout.splices);
+    // The console's `xp_mult` multiplies on top (a positive floor keeps the
+    // bank well-defined; the default 1.0 is a no-op).
+    let xp_mult = player.loadout.stats.xp_mult
+        * crate::game::shop::gem_xp_mult(&player.loadout.splices)
+        * cvars.xp_mult.max(0.0);
     let mut gained = 0u32;
     let collect_r = PLAYER_RADIUS + 3.0;
 

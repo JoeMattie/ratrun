@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 description = "Rat Run — a terminal bullet-hell horde survivor built with ratatui"
 
+[features]
+# The admin drop-down console. On by default in this development build; a
+# release build can `--no-default-features` to compile it out entirely.
+# `RATRUN_CONSOLE=0` also disables it at runtime.
+default = ["console"]
+console = []
+
 [dependencies]
 ratatui = "0.30"
 crossterm = "0.29"

@@ -138,6 +138,38 @@ struct LevelRecord {
     plate: Option<campaign_ui::CampaignLevel>,
 }
 
+/// Rolling frame/tick timings for the console's `perf` overlay. Cheap to
+/// update every frame (a smoothed average), read only by the HUD when the
+/// overlay is on.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct PerfStats {
+    /// Smoothed frame time in milliseconds.
+    pub frame_ms: f32,
+    /// Smoothed simulation tick time in milliseconds.
+    pub tick_ms: f32,
+    /// Entity counts captured on the last frame.
+    pub enemies: usize,
+    pub bullets: usize,
+    pub particles: usize,
+}
+
+impl PerfStats {
+    /// Fold one frame's raw timings into the rolling averages.
+    pub fn record(&mut self, frame_ms: f32, tick_ms: f32) {
+        const ALPHA: f32 = 0.1;
+        if self.frame_ms == 0.0 {
+            self.frame_ms = frame_ms;
+        } else {
+            self.frame_ms += (frame_ms - self.frame_ms) * ALPHA;
+        }
+        if self.tick_ms == 0.0 {
+            self.tick_ms = tick_ms;
+        } else {
+            self.tick_ms += (tick_ms - self.tick_ms) * ALPHA;
+        }
+    }
+}
+
 pub struct App {
     screen: Screen,
     pub should_quit: bool,
@@ -270,6 +302,24 @@ pub struct App {
     lighting: LightingMode,
     /// Optional `RATRUN_LIGHTING` environment override (resolved once at startup).
     lighting_env: Option<LightingMode>,
+    /// The Quake-style drop-down console's presentation state. Present but
+    /// closed in every run; only touched when the player presses the backtick.
+    pub console: crate::console::Console,
+    /// Set the first time any state-changing console command runs in this run.
+    /// A flagged run saves no high score, campaign record, or library counter.
+    pub console_cheat: bool,
+    /// Console `pause on`: the game stays paused even with the console closed.
+    pub console_paused: bool,
+    /// Console `timescale x`: a multiplier on the simulation dt (clamped
+    /// 0.1..=8). Default 1.0 leaves the game untouched.
+    pub timescale: f32,
+    /// Console `perf on`: draw the frame/tick/entity overlay.
+    pub perf_on: bool,
+    /// Rolling frame + tick timings for the perf overlay.
+    pub perf: PerfStats,
+    /// Console `fps/perf`: set when the run began from a practice floor
+    /// (`floor <name>`), so `restart` knows what to replay.
+    pub console_floor: Option<Theme>,
 }
 
 impl App {
@@ -367,6 +417,13 @@ impl App {
             cursor_env: cursor::env_override(),
             lighting,
             lighting_env,
+            console: crate::console::Console::new(),
+            console_cheat: false,
+            console_paused: false,
+            timescale: 1.0,
+            perf_on: false,
+            perf: PerfStats::default(),
+            console_floor: None,
         };
         app.push_volumes();
         app.menu_music();
@@ -567,6 +624,9 @@ impl App {
         let seed = self.seed();
         self.campaign = Some(CampaignState::new(seed));
         self.practice = None;
+        // A brand-new run starts clean: console cheats live in the world (and
+        // the carried loadout), so a fresh world carries no taint.
+        self.console_cheat = false;
         self.records = [LevelRecord::default(); campaign::LEVEL_COUNT];
         self.keep_items.clear();
         self.keep_entries.clear();
@@ -593,6 +653,7 @@ impl App {
         let seed = campaign::level_seed_on(self.seed(), level, theme);
         self.campaign = None;
         self.practice = Some(theme);
+        self.console_cheat = false;
         self.records = [LevelRecord::default(); campaign::LEVEL_COUNT];
         self.keep_items.clear();
         self.keep_entries.clear();
@@ -646,6 +707,7 @@ impl App {
         let seed = campaign::level_seed(self.seed(), sector);
         self.campaign = None;
         self.practice = Some(campaign::getaway_theme());
+        self.console_cheat = false;
         self.records = [LevelRecord::default(); campaign::LEVEL_COUNT];
         self.keep_items.clear();
         self.keep_entries.clear();
@@ -843,6 +905,41 @@ impl App {
         // Deferred stings first: a queued fanfare lands after the sound that
         // caused it (see `queue_sting`).
         self.tick_stings(dt);
+        // The drop-down console: the backtick/tilde key toggles it from the
+        // title or any screen with a run. While it is open it swallows every
+        // keystroke and the game is paused; closing resumes exactly where play
+        // was. The toggle key itself is never typed into the prompt.
+        if self.console_enabled() {
+            let backtick = self.input.just_pressed(KeyCode::Char('`'))
+                || self.input.just_pressed(KeyCode::Char('~'));
+            if backtick {
+                if self.console.open {
+                    self.console.close();
+                } else if matches!(self.screen, Screen::Title) || self.world.is_some() {
+                    self.console.open();
+                }
+                // The toggle key is consumed: nothing leaks to the game.
+                self.input.pressed.clear();
+                self.console.tick(dt);
+                return;
+            }
+            if self.console.open {
+                let keys: Vec<crossterm::event::KeyEvent> = self.input.pressed.clone();
+                for key in keys {
+                    self.handle_console_key(key);
+                }
+                self.console.tick(dt);
+                // Swallow the frame's input so no key leaks to the game.
+                self.input.pressed.clear();
+                return;
+            }
+            self.console.tick(dt);
+        }
+        // Console `pause`: the game stays frozen even with the console closed.
+        if self.console_paused {
+            self.input.pressed.clear();
+            return;
+        }
         // Global mute toggle.
         if self.input.pressed_char('m') {
             self.toggle_mute();
@@ -977,6 +1074,186 @@ impl App {
             w.smoke_enabled = mode != LightingMode::Off;
         }
         self.sfx(Sfx::UiMove);
+    }
+
+    // ---- Console (w3-console) -------------------------------------------
+    //
+    // The Quake-style drop-down console is a debug/admin surface. It is on by
+    // default in this development build; a release build can hide it with the
+    // `console` cargo feature (on by default) and `RATRUN_CONSOLE=0` disables
+    // it at runtime. The `--ai` and `--bot-batch` modes never build an `App`
+    // interactive loop, so the console is inherently inactive there.
+
+    /// Whether the console may be opened in this process.
+    pub fn console_enabled(&self) -> bool {
+        if !cfg!(feature = "console") {
+            return false;
+        }
+        match std::env::var("RATRUN_CONSOLE") {
+            Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"),
+            Err(_) => true,
+        }
+    }
+
+    /// Mark this run as console-tainted: no high score, no campaign record, no
+    /// library counters are saved from it. Read-only commands never call this.
+    pub fn console_flag_cheat(&mut self) {
+        self.console_cheat = true;
+    }
+
+    /// Push one output line into the console's scrollback.
+    pub fn console_line(&mut self, text: impl Into<String>, kind: crate::console::LineKind) {
+        self.console.push(crate::console::Line::new(text, kind));
+    }
+
+    /// Empty the console's scrollback (the `clear` command).
+    pub fn console_clear(&mut self) {
+        self.console.output.clear();
+        self.console.dirty = true;
+    }
+
+    /// The active world, for a command handler's read/write.
+    pub fn world_mut(&mut self) -> Option<&mut World> {
+        self.world.as_mut()
+    }
+
+    /// The active world, read-only.
+    pub fn world_ref(&self) -> Option<&World> {
+        self.world.as_ref()
+    }
+
+    /// Set the lighting mode from the console (`lights on|off|soft`).
+    pub fn set_lighting(&mut self, mode: LightingMode) {
+        self.set_lighting_mode(mode);
+    }
+
+    /// Play a sound effect from the console's `sfx` command.
+    pub fn play_sfx(&self, sfx: Sfx) {
+        self.sfx(sfx);
+    }
+
+    /// Set the music intensity tier from the console's `music` command.
+    pub fn set_music_intensity(&mut self, intensity: u32) {
+        self.request_music_intensity(intensity);
+    }
+
+    /// Toggle the perf overlay (`fps`/`perf`).
+    pub fn set_fps(&mut self, on: bool) {
+        self.perf_on = on;
+    }
+
+    /// Is the perf overlay on?
+    pub fn fps_enabled(&self) -> bool {
+        self.perf_on
+    }
+
+    /// Set the simulation time scale, clamped to `0.1..=8.0`.
+    pub fn set_timescale(&mut self, x: f32) {
+        self.timescale = x.clamp(0.1, 8.0);
+    }
+
+    /// Toggle the persistent pause (`pause`). Returns the new paused state.
+    pub fn toggle_console_pause(&mut self) -> bool {
+        self.console_paused = !self.console_paused;
+        self.console_paused
+    }
+
+    /// Advance `n` fixed ticks while paused (`step n`).
+    pub fn step_ticks(&mut self, n: usize) {
+        const DT: f32 = 1.0 / 60.0;
+        for _ in 0..n {
+            if let Some(w) = self.world.as_mut() {
+                w.update_with(DT, Vec2::ZERO, false, false);
+            }
+        }
+    }
+
+    /// Start a practice run on `theme` (`floor <name>`).
+    pub fn start_floor(&mut self, theme: Theme) -> Result<(), String> {
+        self.console_floor = Some(theme);
+        self.start_practice(theme);
+        Ok(())
+    }
+
+    /// Start a campaign at `stage` (0-based), optionally on `route`.
+    pub fn start_campaign_at(&mut self, stage: usize, route: Option<Theme>) -> Result<(), String> {
+        let seed = self.seed();
+        let mut campaign = CampaignState::new(seed);
+        campaign.level = stage.min(campaign::LEVEL_COUNT - 1);
+        if let Some(theme) = route {
+            campaign.route.choose(campaign.level, theme);
+        }
+        self.campaign = Some(campaign);
+        self.practice = None;
+        self.console_floor = None;
+        self.records = [LevelRecord::default(); campaign::LEVEL_COUNT];
+        self.keep_items.clear();
+        self.keep_entries.clear();
+        self.keep_selected.clear();
+        self.victory_loadout.clear();
+        self.console_cheat = false;
+        let world = self
+            .campaign
+            .as_ref()
+            .map(|c| c.world())
+            .ok_or_else(|| "campaign could not start".to_string())?;
+        self.enter_world(world, false);
+        Ok(())
+    }
+
+    /// The seed of the current run (the level's seed, or 0 with no run).
+    pub fn current_seed(&self) -> u64 {
+        self.world.as_ref().map(|w| w.level.seed).unwrap_or(0)
+    }
+
+    /// Pin the seed for the next run (`seed <n>`).
+    pub fn set_next_seed(&mut self, seed: u64) {
+        self.fixed_seed = Some(seed);
+    }
+
+    /// Restart the current run from the top (`restart`).
+    pub fn restart_run(&mut self) -> Result<(), String> {
+        if let Some(theme) = self.practice {
+            self.start_practice(theme);
+            Ok(())
+        } else if self.campaign.is_some() {
+            self.start_campaign(false);
+            Ok(())
+        } else {
+            Err("no run in progress".to_string())
+        }
+    }
+
+    /// Route one key press to the console and run whatever it asks for.
+    fn handle_console_key(&mut self, key: crossterm::event::KeyEvent) {
+        let rows = self.last_game.height.max(20) as usize;
+        match self.console.handle_key(key, rows) {
+            Some(crate::console::ConsoleAction::Close) => {
+                self.console.close();
+            }
+            Some(crate::console::ConsoleAction::Complete) => {
+                if self.console.comp_idx.is_some() {
+                    // A list is already up: Tab accepts the selected candidate
+                    // and advances to the next one (the usual Quake cycling).
+                    self.console.accept_completion();
+                } else {
+                    crate::console::begin_completion(&mut self.console);
+                }
+            }
+            Some(crate::console::ConsoleAction::Execute(line)) => {
+                // The Enter handler already echoed the line into the scrollback.
+                match crate::console::run_command(self, &line) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        self.console.push(crate::console::Line::new(
+                            format!("error: {e}"),
+                            crate::console::LineKind::Error,
+                        ));
+                    }
+                }
+            }
+            None => {}
+        }
     }
 
     // ---- Volume ---------------------------------------------------------
@@ -1484,6 +1761,11 @@ impl App {
         if self.map_open {
             return;
         }
+        // Console `pause on`: the world holds still until `pause off`. The
+        // console is still reachable (backtick) to resume or `step`.
+        if self.console_paused {
+            return;
+        }
         let move_dir = self.resolve_move_dir();
         // Ctrl dashes and Space fires the charged active weapons on a terminal
         // that reports a lone Ctrl press; on one that cannot, Space keeps doing
@@ -1510,7 +1792,9 @@ impl App {
         let mut intensity = 1u32;
         if let Some(w) = self.world.as_mut() {
             let hp_before = w.player.hp;
-            w.update_with(dt, move_dir, dash, active);
+            // Console `timescale x` scales the simulation step; default 1.0.
+            let sim_dt = dt * self.timescale;
+            w.update_with(sim_dt, move_dir, dash, active);
             // Drain SFX into a reused buffer, de-duplicated per frame so a
             // 16-shot nova is one sound.
             self.sfx_frame.clear();
@@ -1818,7 +2102,12 @@ impl App {
         let getaway = w.level_index >= campaign::LEVEL_COUNT;
         if !getaway {
             self.records[level] = record;
-            self.scores.record_level(level, record.score, record.time);
+            // A CONSOLE USED run never banks a durable campaign record: the
+            // cheats make the sector clear meaningless. The in-memory record
+            // above still feeds the card and the victory breakdown.
+            if !self.console_cheat {
+                self.scores.record_level(level, record.score, record.time);
+            }
         }
         // One card per owned weapon and per passive; counted without building
         // the keepable list twice.
@@ -1826,7 +2115,7 @@ impl App {
         if campaign_won {
             self.victory_loadout = entries_for(&w.keepables());
         }
-        if self.persist {
+        if self.persist && !self.console_cheat {
             // The clear (and the unlock it grants) is durable even if the
             // player quits right after it.
             self.scores.save();
@@ -2257,6 +2546,7 @@ impl App {
             armor: w.player.loadout.stats.armor,
             sector: (w.level_index + 1).clamp(1, campaign::LEVEL_COUNT) as u8,
             practice: self.practice.is_some(),
+            console_used: self.console_cheat,
         }
     }
 
@@ -2277,20 +2567,28 @@ impl App {
             let sector = (w.level_index + 1).clamp(1, campaign::LEVEL_COUNT) as u8;
             self.last_score = final_score;
             self.last_summary = Some(self.build_summary(w, final_score));
-            // "New high score" means it beat the table's best, computed before
-            // this run's entry is inserted (an under-full table is no free pass).
-            self.new_best = self.scores.is_high_score(final_score);
-            self.scores.insert(ScoreEntry {
-                score: final_score,
-                time,
-                level: w.player.level,
-                map: w.level.theme.name().to_string(),
-                won,
-                campaign_level: sector,
-                campaign_won,
-            });
-            if self.persist {
-                self.scores.save();
+            // A CONSOLE USED run never reaches the score table or the campaign
+            // records: the cheats make the score meaningless. The summary still
+            // shows the numbers, labelled as tainted.
+            if self.console_cheat {
+                self.new_best = false;
+            } else {
+                // "New high score" means it beat the table's best, computed
+                // before this run's entry is inserted (an under-full table is
+                // no free pass).
+                self.new_best = self.scores.is_high_score(final_score);
+                self.scores.insert(ScoreEntry {
+                    score: final_score,
+                    time,
+                    level: w.player.level,
+                    map: w.level.theme.name().to_string(),
+                    won,
+                    campaign_level: sector,
+                    campaign_won,
+                });
+                if self.persist {
+                    self.scores.save();
+                }
             }
         }
         self.recorded = true;
@@ -2489,7 +2787,50 @@ impl App {
                 }
             }
         }
+        // The perf overlay sits on top of the game, below the console.
+        if self.perf_on {
+            self.draw_perf(frame, area);
+        }
+        // The console's slide overlay sits above every screen, below the cursor.
+        if self.console.anim > 0.001 {
+            crate::render::console::draw(frame, area, &self.console);
+        }
         self.draw_cursor(frame);
+    }
+
+    /// Draw the console's `perf` overlay: frame time, tick time and entity
+    /// counts in the top-right corner. Read-only presentation state.
+    fn draw_perf(&self, frame: &mut Frame, area: Rect) {
+        let Some(w) = self.world.as_ref() else {
+            return;
+        };
+        let lines = [
+            format!("frame {:.1}ms", self.perf.frame_ms),
+            format!("tick  {:.1}ms", self.perf.tick_ms),
+            format!("enemies {}", w.enemy_count()),
+            format!("bullets {}", w.bullet_count()),
+            format!("fps {:.0}", if self.perf.frame_ms > 0.0 { 1000.0 / self.perf.frame_ms } else { 0.0 }),
+        ];
+        let width = 16u16.min(area.width);
+        let height = lines.len() as u16;
+        if area.width < width + 2 || area.height < height + 2 {
+            return;
+        }
+        let x = area.right().saturating_sub(width);
+        let y = area.y;
+        let buf = frame.buffer_mut();
+        for (i, line) in lines.iter().enumerate() {
+            let row = y + i as u16;
+            buf.set_stringn(
+                x,
+                row,
+                line,
+                width as usize,
+                Style::default()
+                    .bg(Color::Rgb(12, 16, 18))
+                    .fg(Color::Rgb(210, 220, 220)),
+            );
+        }
     }
 
     /// Composite the cheese mouse cursor last, on top of every normal-game
@@ -2781,6 +3122,23 @@ impl App {
             }
             hud::draw_top(frame, top, w, &mut self.hud);
             hud::draw_bottom(frame, bottom, w, &mut self.hud);
+            // Persistent CONSOLE USED tag in the top rail's right corner.
+            if self.console_cheat {
+                let label = " CONSOLE USED ";
+                let lw = label.len() as u16;
+                if top.width > lw {
+                    let bx = top.right().saturating_sub(lw);
+                    frame.buffer_mut().set_stringn(
+                        bx,
+                        top.y,
+                        label,
+                        lw as usize,
+                        Style::default()
+                            .bg(Color::Rgb(120, 20, 20))
+                            .fg(Color::Rgb(255, 200, 200)),
+                    );
+                }
+            }
         }
 
         // Minimap over the play field, under the pause / level-up panels (which
@@ -8516,6 +8874,49 @@ mod tests {
             h_env.app.scores.lighting,
             Some(LightingMode::Soft),
             "env-pinned lighting must not overwrite the saved preference"
+        );
+    }
+
+    /// The console pauses the run: opening it freezes the sim, keys typed while
+    /// it is open go to the prompt (never the game), and closing resumes on the
+    /// next frame from exactly where the pause began.
+    #[test]
+    fn console_pauses_and_resumes_exactly() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        h.frame(&[]);
+        let before = h.app.world.as_ref().unwrap().elapsed;
+
+        // Backtick opens the panel; the key never reaches the prompt.
+        h.frame(&[KeyCode::Char('`')]);
+        assert!(h.app.console.open);
+        assert!(
+            h.app.console.input.is_empty(),
+            "the backtick was typed into the prompt"
+        );
+
+        // Typing while open edits the prompt, not the game.
+        h.frame(&[KeyCode::Char('g'), KeyCode::Char('o'), KeyCode::Char('d')]);
+        assert_eq!(h.app.console.input, "god");
+        for _ in 0..3 {
+            h.frame(&[]);
+        }
+        assert_eq!(
+            h.app.world.as_ref().unwrap().elapsed,
+            before,
+            "the open console must freeze the simulation"
+        );
+
+        // Backtick closes; the next frame resumes from the same tick.
+        h.frame(&[KeyCode::Char('`')]);
+        assert!(!h.app.console.open);
+        h.frame(&[]);
+        let after = h.app.world.as_ref().unwrap().elapsed;
+        assert!(
+            (after - before - 1.0 / 60.0).abs() < 1e-4,
+            "resume advanced {:.6}s, expected {:.6}s",
+            after - before,
+            1.0 / 60.0
         );
     }
 }
