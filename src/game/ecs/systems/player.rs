@@ -62,6 +62,13 @@ use crate::game::particle::{vfx, Particles};
 use crate::game::player::Player;
 use crate::math::Vec2;
 
+/// How long the on-rat gauge and the HUD's dash module stay lit once the dash
+/// is back.
+const DASH_READY_SECS: f32 = 0.35;
+/// How long a refused dash shakes the gauge and turns the HUD module red. Also
+/// the throttle on the refused blip (see `player_system`).
+pub const DASH_DENIED_SECS: f32 = 0.16;
+
 pub fn player_system(
     input: Res<TickInput>,
     mut player: ResMut<Player>,
@@ -80,7 +87,10 @@ pub fn player_system(
         player.face = move_dir.normalized();
     }
 
-    // Dash (legacy 189-199).
+    // Dash (legacy 189-199). `was_charging` is read here, before the trigger,
+    // so the ready tick below is the tick the *old* cooldown ran out (a dash
+    // that starts now must not also announce itself as ready).
+    let was_charging = player.dash_cd > 0.0;
     if dash && player.dash_cd <= 0.0 {
         player.dash_active = 0.16;
         player.dash_cd = stats.dash_cd;
@@ -89,6 +99,12 @@ pub fn player_system(
         let face = player.face;
         vfx::emit_dash_start(&mut particles, &mut rng.0, pos, face);
         sfx.0.push(Sfx::Dash);
+    } else if dash && player.dash_denied <= 0.0 {
+        // Asked for a dash that is not ready: never silent. The timer throttles
+        // the feedback so a held (auto-repeating) key gives one refused blip
+        // and one gauge shake per 0.16 s instead of machine-gunning them.
+        player.dash_denied = DASH_DENIED_SECS;
+        sfx.0.push(Sfx::DashDenied);
     }
 
     let dashing = player.dash_active > 0.0;
@@ -146,6 +162,14 @@ pub fn player_system(
     player.dash_active = (player.dash_active - dt).max(0.0);
     player.iframes = (player.iframes - dt).max(0.0);
     player.hurt_flash = (player.hurt_flash - dt).max(0.0);
+    // Pure-visual dash feedback timers (no sim reads them, no rng involved).
+    player.dash_ready_flash = (player.dash_ready_flash - dt).max(0.0);
+    player.dash_denied = (player.dash_denied - dt).max(0.0);
+    if was_charging && player.dash_cd <= 0.0 {
+        // The dash is back: the gauge pops bright and a quiet tick lands.
+        player.dash_ready_flash = DASH_READY_SECS;
+        sfx.0.push(Sfx::DashReady);
+    }
     if stats.regen > 0.0 {
         player.heal(stats.regen * dt);
     }
@@ -154,6 +178,7 @@ pub fn player_system(
 #[cfg(test)]
 mod tests {
     use super::player_system;
+    use super::DASH_DENIED_SECS;
     use crate::audio::Sfx;
     use crate::game::art_walls::WallKind;
     use crate::game::collision::{TileKind, TileMap};
@@ -336,6 +361,124 @@ mod tests {
         w.end_tick();
 
         assert!((w.player.hp - 50.5).abs() < 1e-4, "hp = {}", w.player.hp);
+    }
+
+    /// Run one tick of the player system with the given dash press.
+    fn tick(w: &mut World, dash: bool) {
+        w.begin_tick(1.0 / 60.0, Vec2::ZERO, dash);
+        w.ecs
+            .run_system_cached(player_system)
+            .expect("player system must run");
+        w.end_tick();
+    }
+
+    /// The dash coming back is announced exactly once: a quiet `Sfx::DashReady`
+    /// on the tick the cooldown reaches zero, plus the gauge's pop timer. The
+    /// ticks after it stay silent.
+    #[test]
+    fn the_dash_ready_tick_is_announced_once_and_quietly() {
+        let mut w = World::new(Theme::Sewer, 29);
+        open_map(&mut w);
+        w.player.pos = w.level.arena * 0.5;
+        w.player.dash_cd = 0.01;
+        w.player.dash_ready_flash = 0.0;
+        w.sfx.clear();
+
+        tick(&mut w, false);
+        assert_eq!(
+            w.sfx.iter().filter(|s| **s == Sfx::DashReady).count(),
+            1,
+            "the ready tick must tick once: {:?}",
+            w.sfx
+        );
+        assert!(w.player.dash_ready_flash > 0.0, "no gauge pop on the ready tick");
+        // The cue is wired into the synth cache (and a refused dash too).
+        assert!(Sfx::ALL.contains(&Sfx::DashReady) && Sfx::ALL.contains(&Sfx::DashDenied));
+        assert_eq!(Sfx::DashReady.variant_count(), 1);
+
+        // Nothing re-announces the same cooldown.
+        w.sfx.clear();
+        for _ in 0..6 {
+            tick(&mut w, false);
+        }
+        assert!(!w.sfx.contains(&Sfx::DashReady), "re-announced: {:?}", w.sfx);
+    }
+
+    /// A dash press the cooldown refuses is never silent, never dashes, and the
+    /// feedback is throttled so a held key cannot machine-gun it.
+    #[test]
+    fn a_refused_dash_shakes_blips_and_does_not_dash() {
+        let mut w = World::new(Theme::Sewer, 31);
+        open_map(&mut w);
+        w.player.pos = w.level.arena * 0.5;
+        w.player.dash_cd = 1.0;
+        w.player.dash_active = 0.0;
+        w.player.dash_denied = 0.0;
+        w.sfx.clear();
+
+        tick(&mut w, true);
+        assert!(w.player.dash_denied > 0.0, "no shake for the refused press");
+        assert_eq!(w.player.dash_active, 0.0, "a refused press dashed anyway");
+        assert!(w.player.dash_cd > 1.0 - 0.02, "the cooldown was reset");
+        assert_eq!(
+            w.sfx.iter().filter(|s| **s == Sfx::DashDenied).count(),
+            1,
+            "no refused blip: {:?}",
+            w.sfx
+        );
+
+        // Held key (auto-repeat): silent while the shake is still running.
+        w.sfx.clear();
+        tick(&mut w, true);
+        assert!(!w.sfx.contains(&Sfx::DashDenied), "blip machine-gunned");
+        // ...and it speaks again once the throttle window has passed.
+        w.sfx.clear();
+        for _ in 0..(DASH_DENIED_SECS * 60.0) as u32 + 2 {
+            tick(&mut w, true);
+        }
+        assert!(
+            w.sfx.contains(&Sfx::DashDenied),
+            "the throttle never re-opened: {:?}",
+            w.sfx
+        );
+    }
+
+    /// The dash feedback (gauge pop, refused shake, their sounds) is pure visual
+    /// state: setting it draws no rng and moves nothing the sim reads.
+    #[test]
+    fn dash_feedback_draws_no_rng_and_moves_nothing() {
+        fn run(poke: bool) -> (u64, u64, u64, usize, u64) {
+            let mut w = World::new(Theme::Sewer, 77);
+            open_map(&mut w);
+            w.player.pos = w.level.arena * 0.5;
+            for tick in 0..240u32 {
+                if poke {
+                    w.player.dash_ready_flash = 0.35;
+                    w.player.dash_denied = DASH_DENIED_SECS;
+                }
+                let dash = tick % 37 == 0;
+                w.update(1.0 / 60.0, Vec2::new(1.0, 0.0), dash);
+            }
+            let mut enemies = 0u64;
+            for e in w.enemies() {
+                enemies = enemies
+                    .wrapping_mul(31)
+                    .wrapping_add(e.pos.x.to_bits() as u64)
+                    .wrapping_add(e.pos.y.to_bits() as u64);
+            }
+            (
+                w.player.pos.x.to_bits() as u64,
+                w.player.pos.y.to_bits() as u64,
+                w.player.dash_cd.to_bits() as u64,
+                w.particles.len(),
+                enemies,
+            )
+        }
+        assert_eq!(
+            run(false),
+            run(true),
+            "the dash feedback timers moved the simulation"
+        );
     }
 
     /// Neon hook #1: a successful dash runs `vfx::emit_dash_start`, which

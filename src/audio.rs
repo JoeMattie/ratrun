@@ -88,11 +88,14 @@ pub enum Sfx {
     // Active (Space-triggered) weapons.
     ShootThrash,
     SonicSqueak,
+    // Dash-cooldown feedback (the on-rat gauge + the HUD's dash module).
+    DashReady,
+    DashDenied,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 61] = [
+    pub const ALL: [Sfx; 63] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -160,6 +163,9 @@ impl Sfx {
         // Active (Space-triggered) weapons.
         Sfx::ShootThrash,
         Sfx::SonicSqueak,
+        // Dash-cooldown feedback.
+        Sfx::DashReady,
+        Sfx::DashDenied,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -226,6 +232,8 @@ impl Sfx {
             Sfx::CampaignVictory => "CAMPAIGN_WIN",
             Sfx::ShootThrash => "THRASH",
             Sfx::SonicSqueak => "SQUEAK",
+            Sfx::DashReady => "DASH_READY",
+            Sfx::DashDenied => "DASH_DENIED",
         }
     }
 
@@ -291,7 +299,9 @@ impl Sfx {
             | Sfx::BroomDefeat
             | Sfx::MowerDeath
             | Sfx::LevelComplete
-            | Sfx::CampaignVictory => 1,
+            | Sfx::CampaignVictory
+            | Sfx::DashReady
+            | Sfx::DashDenied => 1,
         }
     }
 
@@ -355,6 +365,8 @@ impl Sfx {
             | Sfx::MowerFlipped
             | Sfx::MowerDockHum => 1,
             Sfx::Shoot | Sfx::ShootSpray | Sfx::Hit | Sfx::Gem | Sfx::UiMove => 0,
+            // Pure feedback: never steals a voice from a hit or a kill.
+            Sfx::DashReady | Sfx::DashDenied => 0,
         }
     }
 
@@ -5027,6 +5039,76 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             });
             m.add_short_tail(0.12, 5200.0);
             m.finish(0.50, 1.2, 2.4, 26.0)
+        }
+
+        // 62. DashReady: the dash is back. Deliberately tiny — a quiet two-note
+        // upward tick (a glassy "ready" chirp) that sits under the horde.
+        Sfx::DashReady => {
+            let mut m = MixBuf::new(0.052);
+            // First pip: soft triangle at the sixth above the dash swoosh.
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.030,
+                f0: 1180.0,
+                f1: 1320.0,
+                pitch_pow: 0.6,
+                wave: Wave::Triangle,
+                gain: 0.42,
+                attack_s: 0.0012,
+                decay_pow: 2.1,
+                ..Default::default()
+            });
+            // Second pip, a fifth up: the "back in the air" lift.
+            m.add_osc(OscLayer {
+                start_s: 0.018,
+                dur_s: 0.034,
+                f0: 1760.0,
+                f1: 1980.0,
+                pitch_pow: 0.5,
+                wave: Wave::Sine,
+                gain: 0.38,
+                attack_s: 0.0012,
+                decay_pow: 2.2,
+                ..Default::default()
+            });
+            m.add_short_tail(0.05, 4200.0);
+            m.finish(0.20, 1.1, 1.0, 8.0)
+        }
+
+        // 63. DashDenied: a dash asked for while the cooldown is still running.
+        // A soft, dull "not yet" thud — quiet enough to hear on every refuse and
+        // never mistaken for damage.
+        Sfx::DashDenied => {
+            let mut m = MixBuf::new(0.070);
+            // Dull downward blip (no bright edge: this is a refusal, not an hit).
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.062,
+                f0: 340.0,
+                f1: 190.0,
+                pitch_pow: 0.9,
+                wave: Wave::Sine,
+                gain: 0.55,
+                attack_s: 0.002,
+                decay_pow: 1.9,
+                ..Default::default()
+            });
+            // A whisper of low-passed air so it reads as a tap on a dead key.
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.022,
+                pink: true,
+                gain: 0.26,
+                attack_s: 0.001,
+                decay_pow: 2.4,
+                filter: FilterMode::LowPass,
+                fc0: 520.0,
+                fc1: 260.0,
+                q: 1.0,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.finish(0.22, 1.2, 1.0, 10.0)
         }
     }
 }

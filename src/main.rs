@@ -148,12 +148,12 @@ fn main() -> Result<()> {
     terminal::enable_raw_mode()?;
     let _guard = TerminalGuard;
 
-    let (mut terminal, kitty) = setup_terminal()?;
+    let (mut terminal, keys) = setup_terminal()?;
     match ai {
         // `ratrun --ai [N]`: the self-playing wall. No `AudioEngine` is ever
         // constructed on this path (spectate.rs has no audio code at all).
-        Some(opts) => spectate::run(&mut terminal, kitty, opts),
-        None => run(&mut terminal, kitty),
+        Some(opts) => spectate::run(&mut terminal, keys.kitty, opts),
+        None => run(&mut terminal, keys),
     }
 }
 
@@ -238,10 +238,22 @@ fn parse_spectate_args(args: &[String]) -> Result<Option<spectate::AiOpts>> {
     Ok(ai_seen.then_some(opts))
 }
 
+/// What the startup keyboard query learned.
+///
+/// `kitty` is "the protocol answers at all" — held movement keys get release
+/// events. `lone_ctrl` is the narrower "a bare Ctrl press reports", which is
+/// only true when the terminal honours `REPORT_ALL_KEYS_AS_ESCAPE_CODES`; it
+/// decides whether Ctrl dashes or Space keeps doing both jobs.
+#[derive(Clone, Copy, Debug, Default)]
+struct KeyboardMode {
+    kitty: bool,
+    lone_ctrl: bool,
+}
+
 /// Set up the alternate screen, mouse + focus reporting and the Kitty keyboard
 /// protocol flags (Ghostty, Kitty and others report them).
 /// Raw mode is enabled by `main` (which owns the restore guard).
-fn setup_terminal() -> Result<(Terminal<CrosstermBackend<io::Stdout>>, bool)> {
+fn setup_terminal() -> Result<(Terminal<CrosstermBackend<io::Stdout>>, KeyboardMode)> {
     let mut stdout = io::stdout();
     execute!(
         stdout,
@@ -261,17 +273,37 @@ fn setup_terminal() -> Result<(Terminal<CrosstermBackend<io::Stdout>>, bool)> {
     // queries and gives up after 300 ms. Asking is never skipped: tmux and ssh
     // forward the query, so sniffing the environment would only break them.
     let kitty = term::query_keyboard_enhancement();
+    let mut lone_ctrl = false;
     if kitty {
+        // `REPORT_EVENT_TYPES` buys the held-key releases; report-all-keys is
+        // what makes a *lone modifier* press report at all, which is the only
+        // way a bare Ctrl can be the dash key (`input::DashKey`).
         execute!(
             stdout,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+            )
         )?;
         KITTY_PUSHED.store(true, Ordering::SeqCst);
+        // The protocol's query answers with the flags currently in effect, so
+        // asking again proves the enhancement stuck. A terminal that answers
+        // the first query yet ignores the push (or never answers the second)
+        // leaves `lone_ctrl` false, and Ctrl-dash falls back to Space-dash —
+        // the game stays playable instead of losing its only dash key.
+        lone_ctrl = term::query_keyboard()
+            .flags
+            .is_some_and(|f| {
+                f & u32::from(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES.bits()) != 0
+            });
     }
 
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
-    Ok((terminal, kitty))
+    Ok((
+        terminal,
+        KeyboardMode { kitty, lone_ctrl },
+    ))
 }
 
 fn restore_terminal() -> Result<()> {
@@ -462,9 +494,13 @@ pub(crate) fn drain_input(
     Ok(quit)
 }
 
-fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, kitty: bool) -> Result<()> {
+fn run(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    keys: KeyboardMode,
+) -> Result<()> {
     let audio = audio::AudioEngine::new();
-    let mut app = App::new(kitty, audio);
+    let mut app = App::new(keys.kitty, audio);
+    app.set_lone_ctrl(keys.lone_ctrl);
     let target = Duration::from_micros(16_667); // ~60 FPS
     let mut last = Instant::now();
 

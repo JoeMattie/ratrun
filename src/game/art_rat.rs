@@ -257,6 +257,109 @@ pub fn draw_rat(pb: &mut PixelBuffer, player: &Player, elapsed: f32, cam: Vec2) 
     draw_feet(pb, &pose, tint, cam);
     draw_body(pb, &pose, tint, cam);
     draw_face(pb, &pose, elapsed, tint, cam);
+    // Under the rat, so it never hides the body: the dash cooldown read-out.
+    draw_dash_gauge(pb, player, elapsed, cam);
+}
+
+// ---- Dash gauge ------------------------------------------------------------
+
+/// How many pips the gauge has, how far out it sits (px) and the screen arc it
+/// spans (radians, `0` = due right, `PI/2` = straight down: the arc under the
+/// rat). Screen-space, so it does not spin with the facing.
+const GAUGE_PIPS: i32 = 7;
+const GAUGE_RADIUS: f32 = 10.0;
+// Left-to-right on screen so the refill reads like the HUD's charge bar.
+const GAUGE_ARC: (f32, f32) = (0.70, 0.30);
+
+const PIP_EMPTY: Rgb = (86, 62, 84);
+const PIP_CHARGING: Rgb = (236, 172, 108);
+const PIP_READY: Rgb = (255, 246, 214);
+const PIP_DENIED: Rgb = (238, 74, 84);
+
+/// The dash cooldown, attached to the rat: a shallow arc of five pips under it
+/// that fills back up as the cooldown runs out.
+///
+/// States, all of them impossible to miss without any extra clutter:
+/// - **recharging**: pips fill left to right in warm amber (partly-lit pips are
+///   drawn at fractional brightness, so it reads as a smooth refill);
+/// - **ready** (`dash_ready_flash` running): the whole arc pops near-white and
+///   grows a one-pixel halo for a third of a second;
+/// - **dashing**: the arc flashes bright as it drains;
+/// - **refused** (`dash_denied` running): the arc turns red and jitters one
+///   pixel side to side, so a press that could not be spent is never silent
+///   (the matching `Sfx::DashDenied` blip comes from `player_system`).
+///
+/// Purely visual: no rng is drawn here (the jitter is keyed to the run clock),
+/// so the draw pass stays deterministic.
+pub fn draw_dash_gauge(pb: &mut PixelBuffer, player: &Player, elapsed: f32, cam: Vec2) {
+    let max = player.loadout.stats.dash_cd.max(0.1);
+    let ready = player.dash_cd <= 0.0;
+    let dashing = player.dash_active > 0.0;
+    let fill = if ready || dashing {
+        1.0
+    } else {
+        (1.0 - player.dash_cd / max).clamp(0.0, 1.0)
+    };
+    let ready_pop = player.dash_ready_flash > 0.0;
+    let denied = player.dash_denied > 0.0 && !ready;
+    let centre = w2s(player.pos, cam);
+    // A refused press shakes the gauge one pixel side to side at ~25 Hz.
+    let shake = if denied {
+        if (elapsed * 50.0) as i32 % 2 == 0 {
+            1
+        } else {
+            -1
+        }
+    } else {
+        0
+    };
+
+    for i in 0..GAUGE_PIPS {
+        let t = if GAUGE_PIPS > 1 {
+            i as f32 / (GAUGE_PIPS - 1) as f32
+        } else {
+            0.5
+        };
+        let a = GAUGE_ARC.0 + (GAUGE_ARC.1 - GAUGE_ARC.0) * t;
+        let dir = Vec2::from_angle(std::f32::consts::PI * a);
+        let x = centre.0 + (dir.x * GAUGE_RADIUS).round() as i32 + shake;
+        let y = centre.1 + (dir.y * GAUGE_RADIUS).round() as i32;
+        // 0..1 how full this pip is: fractional for the one the cooldown is
+        // currently filling, so the refill rolls instead of stepping.
+        let level = (fill * GAUGE_PIPS as f32 - i as f32).clamp(0.0, 1.0);
+        let (color, lit) = if denied {
+            (PIP_DENIED, 0.55)
+        } else if ready || dashing {
+            (PIP_READY, 1.0)
+        } else {
+            (PIP_CHARGING, level)
+        };
+        if lit > 0.0 {
+            // Two pixels tall: one is a speck, two read as a pip at a glance.
+            blend(pb, x, y, color, 0.35 + 0.65 * lit);
+            blend(pb, x, y + 1, color, 0.25 + 0.55 * lit);
+        } else {
+            // Empty socket: a dim pip so the gauge's length is always readable.
+            blend(pb, x, y, PIP_EMPTY, 0.7);
+            blend(pb, x, y + 1, PIP_EMPTY, 0.5);
+        }
+        // The ready pop: a halo ring around each pip for the flash.
+        if ready_pop {
+            let halo = (255, 238, 196);
+            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                blend(pb, x + dx, y + dy, halo, 0.35);
+            }
+        }
+    }
+    // While dashing the arc leaves a hot streak behind it: a single bright pixel
+    // each side keeps the drain visible without adding particles.
+    if dashing {
+        let a = std::f32::consts::PI * 0.5;
+        let dir = Vec2::from_angle(a);
+        let x = centre.0 + (dir.x * (GAUGE_RADIUS + 1.0)).round() as i32;
+        let y = centre.1 + (dir.y * (GAUGE_RADIUS + 1.0)).round() as i32;
+        pb.plot_add(x, y, (120, 120, 130));
+    }
 }
 
 /// The **Tail Thrash** arc: the rat's tail stretched into a long whipping arc

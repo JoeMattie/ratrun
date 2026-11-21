@@ -14,6 +14,7 @@ use crate::game::gem::PickupKind;
 use crate::game::level::Theme;
 use crate::game::weapon::WeaponKind;
 use crate::game::world::World;
+use crate::input::DashKey;
 use crate::math::Vec2;
 use crate::render::campaign::{
     campaign_pips_width, draw_campaign_pips, CampaignLevel, CampaignProgressView,
@@ -251,6 +252,13 @@ pub struct HudState {
     hp: String,
     xp_label: String,
     dash: String,
+    /// The dash module's state word (`READY` / `WAIT` / `3.4s` / `DASHING`),
+    /// written after the module's charge bar.
+    dash_status: String,
+
+    /// Which key the dash module names (`CTRL`, or `SPACE` on a terminal that
+    /// cannot report a lone modifier press). Set from `App::dash_key`.
+    pub dash_key: DashKey,
 
     // Overlay retained buffers (accessed by `overlay.rs`).
     pub(crate) boss_hp_text: String,
@@ -316,6 +324,8 @@ impl Default for HudState {
             hp: String::with_capacity(16),
             xp_label: String::with_capacity(12),
             dash: String::with_capacity(16),
+            dash_status: String::with_capacity(8),
+            dash_key: DashKey::Space,
             boss_hp_text: String::with_capacity(24),
             boss_banner: String::with_capacity(48),
             clock: 0.0,
@@ -1259,26 +1269,36 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
         }
     });
 
-    // Dash readiness + charge meter text.
+    // Dash module: a labelled charge bar that always shows its state. The key
+    // is printed in the label because the binding depends on the terminal
+    // (CTRL where a lone modifier press reports, SPACE where it cannot).
     let dashing = world.player.dash_active > 0.0;
     let dash_ready = world.player.dash_cd <= 0.0;
     let dash_max_cd = world.player.loadout.stats.dash_cd.max(0.1);
-    let dash_fill = if dashing {
+    let dash_fill = if dash_ready || dashing {
         1.0
     } else {
         (1.0 - world.player.dash_cd / dash_max_cd).clamp(0.0, 1.0)
     };
+    // A press that could not be spent (the cooldown is still running): the
+    // module goes red for a beat so a refused dash is never silent.
+    let dash_denied = !dash_ready && world.player.dash_denied > 0.0;
     refill(&mut state.dash, |b| {
-        if dashing {
-            b.push_str("» DASHING «");
-        } else if dash_ready {
-            if area.width < 48 {
-                b.push_str("▸ DASH");
-            } else {
-                b.push_str("▸ DASH READY");
-            }
+        if area.width >= 44 {
+            let _ = write!(b, "{} DASH", state.dash_key.name());
         } else {
-            let _ = write!(b, "dash {:.1}s", world.player.dash_cd);
+            b.push_str("DASH");
+        }
+    });
+    refill(&mut state.dash_status, |b| {
+        if dashing {
+            b.push_str("DASHING");
+        } else if dash_ready {
+            b.push_str("READY");
+        } else if dash_denied {
+            b.push_str("WAIT");
+        } else {
+            let _ = write!(b, "{:.1}s", world.player.dash_cd);
         }
     });
 
@@ -1303,14 +1323,25 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
         ))
     };
 
-    // Reserve dash module width: `│ ` divider + label + optional 5-cell mini charge bar.
+    // Reserve dash module width: `│ ` divider, key+DASH label, an eighth-cell
+    // charge bar (always drawn: the refill is the point) and the state badge.
     let show_sep = area.width >= 52;
     let sep_w: u16 = if show_sep { 2 } else { 0 };
-    let show_dash_bar = !dash_ready && !dashing && area.width >= 76;
-    let dash_bar_w: u16 = if show_dash_bar { 6 } else { 0 };
+    let bar_w: u16 = if area.width >= 88 {
+        8
+    } else if area.width >= 72 {
+        6
+    } else if area.width >= 52 {
+        4
+    } else {
+        0
+    };
+    let bar_block: u16 = if bar_w > 0 { bar_w + 2 } else { 0 };
     let dash_text_w = state.dash.chars().count() as u16;
-    let pad_w: u16 = if dash_ready || dashing { 2 } else { 1 };
-    let dash_width = (sep_w + dash_text_w + dash_bar_w + pad_w).min(area.width);
+    // Pad the state word to a steady width so READY ⇄ 3.4s does not shove the
+    // HP/XP divider around (only DASHING, which is 0.16 s, is wider).
+    let status_w = (state.dash_status.chars().count() as u16).max(5);
+    let dash_width = (sep_w + dash_text_w + bar_block + status_w + 2).min(area.width);
     let meters = area.width.saturating_sub(dash_width);
     let left = (meters / 2 + 3).min(meters);
 
@@ -1345,7 +1376,7 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
         xp_color,
     );
 
-    // 3. Dash module: crisp divider, then text label, then optional recharge gauge.
+    // 3. Dash module: divider, key label, charge bar, state badge.
     let dash_rect = Rect::new(area.right() - dash_width, area.y, dash_width, 1);
     let buf = frame.buffer_mut();
     buf.set_style(dash_rect, Style::default().bg(PLATE));
@@ -1357,48 +1388,63 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
             .set_bg(PLATE);
         dx = dx.saturating_add(2);
     }
-    let dash_style = if dashing {
+    // The label: muted while recharging, bright when the dash is back, red on a
+    // refused press.
+    let label_style = if dash_denied {
+        Style::default().fg(DANGER).bg(PLATE).add_modifier(Modifier::BOLD)
+    } else if dash_ready || dashing {
+        Style::default().fg(COAT).bg(PLATE).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(MUTED).bg(PLATE)
+    };
+    // The badge is the loud part: an accent plate for READY (flashing to near
+    // white when it first comes back), danger red for a refused press, and a
+    // plain amber countdown while it recharges.
+    let badge_style = if dash_ready {
+        // Either the HUD's own edge detection or the sim's `dash_ready_flash`
+        // (which also drives the on-rat gauge) lights the just-became-ready pop.
+        let bg = if state.dash_ready_flash > 0.0 || world.player.dash_ready_flash > 0.0 {
+            COAT
+        } else {
+            accent
+        };
+        Style::default().fg(PLATE).bg(bg).add_modifier(Modifier::BOLD)
+    } else if dash_denied {
+        Style::default()
+            .fg(PLATE)
+            .bg(DANGER)
+            .add_modifier(Modifier::BOLD)
+    } else if dashing {
         Style::default()
             .fg(PLATE)
             .bg(COAT)
             .add_modifier(Modifier::BOLD)
-    } else if dash_ready {
-        if state.dash_ready_flash > 0.0 {
-            Style::default()
-                .fg(PLATE)
-                .bg(accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(COAT)
-                .bg(TRACK)
-                .add_modifier(Modifier::BOLD)
-        }
     } else {
-        Style::default().fg(MUTED).bg(PLATE)
+        Style::default().fg(WARN_AMBER).bg(PLATE)
+    };
+    let bar_color = if dash_ready {
+        accent
+    } else if dash_denied {
+        DANGER_DIM
+    } else {
+        WARN_AMBER
     };
     let avail = dash_rect.right().saturating_sub(dx) as usize;
     if avail > 0 {
-        if dash_ready || dashing {
-            buf.set_stringn(dx, dash_rect.y, " ", avail, dash_style);
-            let (end, _) = buf.set_stringn(
-                dx.saturating_add(1),
-                dash_rect.y,
-                &state.dash,
-                avail.saturating_sub(1),
-                dash_style,
-            );
+        let (mut end, _) = buf.set_stringn(dx, dash_rect.y, &state.dash, avail, label_style);
+        if bar_w > 0 && end + bar_w < dash_rect.right() {
+            let bx = end.saturating_add(1);
+            draw_mini_bar(buf, bx, dash_rect.y, bar_w, dash_fill, bar_color);
+            end = bx + bar_w;
+        }
+        let sx = end.saturating_add(1).min(dash_rect.right());
+        let room = dash_rect.right().saturating_sub(sx) as usize;
+        if room > 0 {
+            let (end, _) = buf.set_stringn(sx, dash_rect.y, &state.dash_status, room, badge_style);
             if end < dash_rect.right() {
-                buf[(end, dash_rect.y)].set_char(' ').set_style(dash_style);
-            }
-        } else {
-            let (end, _) = buf.set_stringn(dx, dash_rect.y, &state.dash, avail, dash_style);
-            if show_dash_bar {
-                let bx = end.saturating_add(1);
-                let bw = dash_rect.right().saturating_sub(bx + 1).min(5);
-                if bw > 0 {
-                    draw_mini_bar(buf, bx, dash_rect.y, bw, dash_fill, accent);
-                }
+                buf[(end, dash_rect.y)]
+                    .set_char(' ')
+                    .set_style(Style::default().bg(PLATE));
             }
         }
     }
@@ -1654,7 +1700,14 @@ mod tests {
             text.contains(&format!("♥ {full:.0}/{full:.0}")),
             "HP missing in {text:?}"
         );
-        assert!(text.contains("DASH READY"), "dash missing in {text:?}");
+        assert!(
+            text.contains("SPACE DASH") && text.contains("READY"),
+            "the ready dash module is missing or unnamed: {text:?}"
+        );
+        assert!(
+            text.contains('█'),
+            "a ready dash must show a full charge bar: {text:?}"
+        );
 
         // Shrink every number, reusing the same buffers: no stale digits may survive.
         w.player.hp = 1.0;
@@ -1675,7 +1728,14 @@ mod tests {
             text.contains(&format!("♥ 1/{full:.0}")),
             "HP not updated in {text:?}"
         );
-        assert!(text.contains("dash 0.2s"), "dash cd not updated in {text:?}");
+        assert!(
+            text.contains("0.2s"),
+            "dash cd not updated in {text:?}"
+        );
+        assert!(
+            !text.contains("READY"),
+            "the module still claims READY while charging: {text:?}"
+        );
     }
 
     #[test]
@@ -1700,9 +1760,91 @@ mod tests {
         let second = draw(&mut state);
         assert_eq!(first, second, "reused buffers must render identically");
         assert!(
-            first.contains('♥') && first.contains("DASH READY"),
+            first.contains('♥') && first.contains("SPACE DASH") && first.contains("READY"),
             "bottom bars should still render: {first:?}"
         );
+    }
+
+    /// The colours the bottom rail paints: `(backgrounds, foregrounds)`.
+    fn rail_colors(terminal: &Terminal<TestBackend>) -> (Vec<Color>, Vec<Color>) {
+        let cells = &terminal.backend().buffer().content;
+        (
+            cells.iter().map(|c| c.bg).collect(),
+            cells.iter().map(|c| c.fg).collect(),
+        )
+    }
+
+    /// The dash module must be unmissable at every size the game supports: it
+    /// names the live key, it draws a charge bar that fills, and recharging /
+    /// READY / refused are different colours and different words.
+    #[test]
+    fn the_dash_module_reads_ready_charging_and_refused_at_every_size() {
+        let mut state = HudState::default();
+        for key in [DashKey::Ctrl, DashKey::Space] {
+            state.dash_key = key;
+            for (cols, rows) in [(80u16, 24u16), (120, 40), (57, 20)] {
+                let mut w = known_world();
+                let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap();
+                let mut draw = |w: &World, state: &mut HudState| {
+                    terminal
+                        .draw(|f| {
+                            let row = Rect::new(0, rows - 1, f.area().width, 1);
+                            draw_bottom(f, row, w, state);
+                        })
+                        .unwrap();
+                    let buf = terminal.backend().buffer();
+                    let row: String = (0..cols)
+                        .map(|x| buf[(x, rows - 1)].symbol())
+                        .collect();
+                    let (bgs, fgs) = rail_colors(&terminal);
+                    (row, bgs, fgs)
+                };
+
+                // 1. READY: the key, the word, a full bar and the accent badge.
+                w.player.dash_cd = 0.0;
+                state.dash_ready_flash = 0.0;
+                let (text, bgs, _) = draw(&w, &mut state);
+                let accent = palette::marking(w.level.palette.wall_edge, w.level.palette.accent);
+                assert!(
+                    text.contains(&format!("{} DASH", key.name())),
+                    "{cols}x{rows}: the ready module does not name the key: {text:?}"
+                );
+                assert!(text.contains("READY"), "{cols}x{rows}: no READY: {text:?}");
+                assert!(text.contains('█'), "{cols}x{rows}: the ready bar is not full: {text:?}");
+                assert!(
+                    bgs.contains(&accent),
+                    "{cols}x{rows}: no accent badge for READY: {text:?}"
+                );
+
+                // 2. Mid-cooldown: a countdown, a partly filled amber bar and no
+                //    ready badge anywhere.
+                w.player.dash_cd = 1.0;
+                let (text, bgs, fgs) = draw(&w, &mut state);
+                assert!(text.contains("1.0s"), "{cols}x{rows}: no countdown: {text:?}");
+                assert!(!text.contains("READY"), "{cols}x{rows}: still READY: {text:?}");
+                assert!(!bgs.contains(&accent), "{cols}x{rows}: accent left on the bar");
+                assert!(
+                    fgs.contains(&WARN_AMBER),
+                    "{cols}x{rows}: the charge bar is not amber: {text:?}"
+                );
+                assert_ne!(
+                    text.matches('█').count() + text.matches('▉').count(),
+                    0,
+                    "{cols}x{rows}: the charge bar never fills: {text:?}"
+                );
+
+                // 3. A refused press: the same module in danger red with WAIT, so
+                //    a failed dash is impossible to miss.
+                w.player.dash_denied = 0.16;
+                let (text, bgs, _) = draw(&w, &mut state);
+                assert!(text.contains("WAIT"), "{cols}x{rows}: no refused state: {text:?}");
+                assert!(
+                    bgs.contains(&DANGER),
+                    "{cols}x{rows}: the refused badge is not red: {text:?}"
+                );
+                w.player.dash_denied = 0.0;
+            }
+        }
     }
 
     /// A world whose loadout is the starter weapon plus both active weapons,
