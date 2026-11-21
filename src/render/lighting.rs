@@ -39,7 +39,7 @@ use crate::game::ecs::components::{
 };
 use crate::game::ecs::resources::{ActiveFx, DashTrack, LaserFx};
 use crate::game::ecs::systems::boss::{Boss, BossProjectile, BossProjectileKind, BossState};
-use crate::game::ecs::systems::miniboss::{Miniboss, MinibossState};
+use crate::game::ecs::systems::miniboss::{Miniboss, MinibossKind, MinibossState};
 use crate::game::ecs::systems::powerups::Decoy;
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::{Chest, Gem, Gold, Pickup};
@@ -1159,29 +1159,75 @@ impl LightMap {
                 self.gather_boss_lights(boss, cam, vw, vh, elapsed);
             }
 
-            // Named minibosses: the signature's telegraph is self-lit exactly
-            // like a boss hazard (amber while it warns, red while it bites), so
-            // the tell reads in a dark room.
+            // Named minibosses: character-tinted presence & state glow on the
+            // body plus self-lit telegraph light so arrival, wind-up, strike
+            // and exposed recovery all read clearly in dark rooms.
             if let Some(mb) = entity.get::<Miniboss>() {
-                let alive = entity.get::<Enemy>().is_some_and(|e| e.alive());
-                if let (true, Some(shape)) = (alive, mb.telegraph()) {
-                    let c = shape.center();
-                    let sx = c.x - cam.x;
-                    let sy = c.y - cam.y;
-                    let active = mb.state == MinibossState::Active;
-                    let r = if active { 46.0 } else { 36.0 };
-                    if in_range(sx, sy, r) {
-                        self.lights.push(PointLight {
-                            x: sx,
-                            y: sy,
-                            radius: r,
-                            color: if active { (255, 92, 66) } else { (255, 195, 76) },
-                            intensity: if active { 260 } else { 205 },
-                            scatter: if active { 68 } else { 44 },
-                            priority: 3,
-                            occlude: false,
-                            hard: false,
-                        });
+                if let Some(e) = entity.get::<Enemy>() {
+                    if e.alive() {
+                        let ex = e.pos.x - cam.x;
+                        let ey = e.pos.y - cam.y;
+                        let kind_col: Rgb = match mb.kind {
+                            MinibossKind::Corkscrew => (255, 202, 96),
+                            MinibossKind::SisterSnip => (208, 224, 255),
+                            MinibossKind::Bobbin => (255, 118, 168),
+                            MinibossKind::BellDiver => (114, 242, 218),
+                            MinibossKind::Foreman => (255, 134, 86),
+                            MinibossKind::MilkCarton => (238, 248, 196),
+                        };
+                        let pulse = 0.84 + 0.16 * (elapsed * 7.0).sin();
+                        let entrance =
+                            !mb.tell_cued && mb.origin == Vec2::ZERO && mb.timer < 1.15;
+                        let (b_col, b_r, b_int, b_scat) = match mb.state {
+                            MinibossState::Tell => (
+                                (255, 206, 86),
+                                36.0,
+                                (195.0 * pulse) as u16,
+                                (46.0 * pulse) as u16,
+                            ),
+                            MinibossState::Active => ((255, 102, 74), 42.0, 235, 60),
+                            MinibossState::Recover => (
+                                (136, 255, 196),
+                                34.0,
+                                (190.0 * pulse) as u16,
+                                (48.0 * pulse) as u16,
+                            ),
+                            _ if entrance => (kind_col, 38.0, 210, 54),
+                            _ => (kind_col, 30.0, 150, 30),
+                        };
+                        if in_range(ex, ey, b_r) {
+                            self.lights.push(PointLight {
+                                x: ex,
+                                y: ey,
+                                radius: b_r,
+                                color: b_col,
+                                intensity: b_int,
+                                scatter: b_scat,
+                                priority: 3,
+                                occlude: false,
+                                hard: false,
+                            });
+                        }
+                        if let Some(shape) = mb.telegraph() {
+                            let c = shape.center();
+                            let sx = c.x - cam.x;
+                            let sy = c.y - cam.y;
+                            let active = mb.state == MinibossState::Active;
+                            let r = if active { 48.0 } else { 38.0 };
+                            if in_range(sx, sy, r) {
+                                self.lights.push(PointLight {
+                                    x: sx,
+                                    y: sy,
+                                    radius: r,
+                                    color: if active { (255, 92, 66) } else { (255, 195, 76) },
+                                    intensity: if active { 260 } else { 205 },
+                                    scatter: if active { 68 } else { 44 },
+                                    priority: 3,
+                                    occlude: false,
+                                    hard: false,
+                                });
+                            }
+                        }
                     }
                 }
             }
