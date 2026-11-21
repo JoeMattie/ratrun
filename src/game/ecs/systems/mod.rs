@@ -18,3 +18,7 @@ pub mod projectiles;
 pub mod spawn;
 pub mod traps;
 pub mod weapons;
+// Wave 3's self-driving weapons (Laser Eyes, Super Dash) and Counterweight's
+// melee-nudge clock. Split out of `weapons` so the auto-fire file stays about
+// the weapons it fires.
+pub mod weapons_wave3b;

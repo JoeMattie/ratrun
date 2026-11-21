@@ -69,7 +69,7 @@ use crate::game::ecs::components::{Entity, SpawnId};
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::resources::{
     LastPickups, LevelIndex, NextSpawnId, NukeTick, PickupScratch, RngRes, RunCounters, SfxQueue,
-    Shake, TickInput,
+    Shake, TickInput, XpBank,
 };
 use crate::game::ecs::systems::boss::BossFight;
 use crate::game::enemy::{Enemy, EnemyKind};
@@ -292,12 +292,17 @@ pub fn gems_system(
     mut rng: ResMut<RngRes>,
     mut particles: ResMut<Particles>,
     mut sfx: ResMut<SfxQueue>,
+    // Wave 3: Second Scent scales gem XP and banks the fraction
+    // (`resources::XpBank`); with no stacks the multiplier is 1.0 and the bank
+    // stays empty, so the numbers are exactly the legacy ones.
+    mut xp_bank: ResMut<XpBank>,
     mut gems: Query<(Entity, &SpawnId, &mut Gem)>,
     mut ordered: Local<Vec<(u64, Entity)>>,
 ) {
     let dt = input.dt;
     let ppos = player.pos;
     let magnet = player.loadout.stats.magnet;
+    let xp_mult = player.loadout.stats.xp_mult;
     let mut gained = 0u32;
     let collect_r = PLAYER_RADIUS + 3.0;
 
@@ -342,6 +347,12 @@ pub fn gems_system(
         // Neon hook: replaces the 4-particle inline gem burst.
         vfx::emit_gem_collect(&mut particles, &mut rng.0, p, gained);
         sfx.0.push(Sfx::Gem);
+        // w3-weapons-b: Second Scent (identity without it, see `XpBank`).
+        let gained = if xp_mult > 1.0 {
+            xp_bank.grant(gained, xp_mult)
+        } else {
+            gained
+        };
         let ups = player.add_xp(gained);
         if ups > 0 {
             // Neon hook: triumphant level-up burst, before the sting.

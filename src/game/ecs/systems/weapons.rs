@@ -91,6 +91,9 @@ use bevy_ecs::prelude::*;
 
 use crate::audio::Sfx;
 use crate::game::bullet::{Bullet, Faction, Lob, Orbit};
+// Wave 3: Counterweight's melee nudge keeps its body on legal floor.
+use crate::game::collision::SizeClass;
+use crate::game::ecs::systems::weapons_wave3b::MELEE_NUDGE_COOLDOWN;
 use crate::game::weapon::{
     SQUEAK_BOSS_SLOW, SQUEAK_BOSS_SLOW_SECS, SQUEAK_ELITE_SLOW, SQUEAK_EXPAND, SQUEAK_SHOVE,
     SQUEAK_STUN, THRASH_BOSS_KNOCKBACK, THRASH_BURST, THRASH_KNOCKBACK, THRASH_SHAKE,
@@ -98,7 +101,7 @@ use crate::game::weapon::{
 };
 use crate::game::ecs::components::{Entity, SpawnId};
 use crate::game::ecs::resources::{
-    ActiveFx, DamageLedger, EnemyIndex, NextSpawnId, RngRes, SfxQueue, Shake, TickInput,
+    ActiveFx, DamageLedger, EnemyIndex, MeleeNudge, NextSpawnId, RngRes, SfxQueue, Shake, TickInput,
 };
 use crate::game::ecs::systems::boss::{Boss, BossTargetable};
 use crate::game::ecs::systems::projectiles::los_clear;
@@ -127,6 +130,8 @@ pub fn fire_weapons_system(
     bullets: Query<(Entity, &SpawnId, &Bullet)>,
     mut damage_numbers: ResMut<DamageNumbers>,
     mut ledger: ResMut<DamageLedger>,
+    // Wave 3: Counterweight's "once per target per 0.4 s" melee-nudge log.
+    mut melee_nudge: ResMut<MeleeNudge>,
     mut scratch: FireScratch,
 ) {
     let dt = input.dt;
@@ -135,6 +140,10 @@ pub fn fire_weapons_system(
     let pface = player.face;
     let fire_rate = player.loadout.stats.fire_rate_mult;
     let dmg_mult = player.loadout.stats.damage_mult;
+    // Wave 3: the passive hooks (Lens Cap, Long Fuse, Counterweight) are a copy
+    // of the stat block, so `fire_one` can read them while the loop still
+    // mutates weapon timers.
+    let stats = player.loadout.stats;
     let n = player.loadout.weapons.len();
 
     // One stable enemy order for the whole tick. `EnemyIndex` is rebuilt by
@@ -202,8 +211,9 @@ pub fn fire_weapons_system(
         // Active weapons never auto-fire: their `timer` is a charge meter that
         // `active_weapons_system` counts down and the player spends. Skipping
         // them here also leaves their timer strictly to that system, so neither
-        // can double-tick it.
-        if kind.is_active() {
+        // can double-tick it. Wave 3's Laser Eyes (a burst) and Super Dash (the
+        // dash itself) are owned by `weapons_wave3b` for the same reason.
+        if kind.is_active() || kind.fires_outside_fire_one() {
             continue;
         }
         player.loadout.weapons[i].timer -= dt;
@@ -231,6 +241,8 @@ pub fn fire_weapons_system(
             &mut scratch.orbit_scratch,
             &mut scratch.target_scratch,
             &boss_points,
+            &stats,
+            &mut melee_nudge,
         );
         if fired {
             player.loadout.weapons[i].timer += cd;
@@ -307,7 +319,74 @@ fn target_range(kind: WeaponKind) -> f32 {
         | WeaponKind::TailWhip
         | WeaponKind::TailThrash
         | WeaponKind::SonicSqueak => 0.0,
+        // Wave 3: Laser Eyes aims with the rat's locked facing (a sweep, not a
+        // target pick) and Super Dash has no target at all — both are owned by
+        // `weapons_wave3b`, which never asks this function.
+        WeaponKind::LaserEyes | WeaponKind::SuperDash => 0.0,
     }
+}
+
+/// The same pick as [`nearest_visible`], with the reach supplied by the caller
+/// so a passive (Lens Cap's ranged reach) can stretch it without every caller
+/// knowing about stats.
+#[allow(clippy::too_many_arguments)]
+fn nearest_visible_within(
+    level: &Level,
+    kind: WeaponKind,
+    range: f32,
+    order: &[Entity],
+    enemies: &Query<(Entity, &SpawnId, &mut Enemy)>,
+    boss_points: &BossTargetable,
+    from: Vec2,
+    scratch: &mut Vec<Candidate>,
+) -> Option<Vec2> {
+    let range_sq = range * range;
+    let radius = target_los_radius(kind);
+    scratch.clear();
+    for &entity in order {
+        let Ok((_, id, e)) = enemies.get(entity) else {
+            continue;
+        };
+        if !e.alive() {
+            continue;
+        }
+        let dist_sq = e.pos.dist_sq(from);
+        if dist_sq.is_nan() || dist_sq > range_sq {
+            continue;
+        }
+        push_candidate(
+            scratch,
+            Candidate {
+                dist_sq,
+                rank: RANK_ENEMY,
+                id: id.0,
+                entity,
+                pos: e.pos,
+            },
+        );
+    }
+    for (index, point) in boss_points.iter().enumerate() {
+        let dist_sq = point.dist_sq(from);
+        if dist_sq.is_nan() || dist_sq > range_sq {
+            continue;
+        }
+        push_candidate(
+            scratch,
+            Candidate {
+                dist_sq,
+                rank: RANK_BOSS,
+                id: index as u64,
+                entity: Entity::PLACEHOLDER,
+                pos: point,
+            },
+        );
+    }
+    for c in scratch.iter() {
+        if los_clear(level, from, c.pos, radius) {
+            return Some(c.pos);
+        }
+    }
+    None
 }
 
 /// Radius a line-of-sight query uses for `kind`, i.e. the projectile's own
@@ -422,57 +501,18 @@ fn nearest_visible(
     from: Vec2,
     scratch: &mut Vec<Candidate>,
 ) -> Option<Vec2> {
-    let range = target_range(kind);
-    let range_sq = range * range;
-    let radius = target_los_radius(kind);
-    scratch.clear();
-    for &entity in order {
-        let Ok((_, id, e)) = enemies.get(entity) else {
-            continue;
-        };
-        if !e.alive() {
-            continue;
-        }
-        let dist_sq = e.pos.dist_sq(from);
-        // A NaN position is never a real target: reject it here instead of
-        // letting it sort last and win the range check.
-        if dist_sq.is_nan() || dist_sq > range_sq {
-            continue;
-        }
-        push_candidate(
-            scratch,
-            Candidate {
-                dist_sq,
-                rank: RANK_ENEMY,
-                id: id.0,
-                entity,
-                pos: e.pos,
-            },
-        );
-    }
-    // The boss's grounded hit-shape centres, as plain bodies in the same queue.
-    for (index, point) in boss_points.iter().enumerate() {
-        let dist_sq = point.dist_sq(from);
-        if dist_sq.is_nan() || dist_sq > range_sq {
-            continue;
-        }
-        push_candidate(
-            scratch,
-            Candidate {
-                dist_sq,
-                rank: RANK_BOSS,
-                id: index as u64,
-                entity: Entity::PLACEHOLDER,
-                pos: point,
-            },
-        );
-    }
-    for c in scratch.iter() {
-        if los_clear(level, from, c.pos, radius) {
-            return Some(c.pos);
-        }
-    }
-    None
+    // A NaN position is never a real target: `nearest_visible_within` rejects
+    // it there instead of letting it sort last and win the range check.
+    nearest_visible_within(
+        level,
+        kind,
+        target_range(kind),
+        order,
+        enemies,
+        boss_points,
+        from,
+        scratch,
+    )
 }
 
 // ---- Active (player-triggered) weapons ------------------------------------
@@ -530,6 +570,9 @@ pub fn active_weapons_system(
     let pface = player.face;
     let fire_rate = player.loadout.stats.fire_rate_mult.max(0.1);
     let dmg_mult = player.loadout.stats.damage_mult;
+    // Wave 3: copy the passive hooks out before the loadout is borrowed mutably
+    // (`Stats` is `Copy`).
+    let stats = player.loadout.stats;
 
     // One stable enemy order for the tick, exactly like `fire_weapons_system`:
     // `EnemyIndex` is rebuilt immediately before that system and nothing has
@@ -579,7 +622,13 @@ pub fn active_weapons_system(
                 (
                     (w.cooldown() / fire_rate).max(0.05),
                     w.damage() * dmg_mult,
-                    w.active_reach(),
+                    // Wave 3 passive hooks: the thrash is a melee arc (Lens
+                    // Cap's melee reach), the squeak is a radial ring (Long
+                    // Fuse's splash radius).
+                    match w.kind {
+                        WeaponKind::SonicSqueak => stats.splash_radius(w.active_reach()),
+                        _ => stats.melee_reach(w.active_reach()),
+                    },
                 )
             };
             player.loadout.weapons[i].timer = charge;
@@ -643,6 +692,7 @@ pub fn active_weapons_system(
                 &mut damage_numbers,
                 &mut ledger,
                 &fx,
+                stats.shove_mult,
             );
         }
         fx.thrash_left = (fx.thrash_left - dt).max(0.0);
@@ -671,6 +721,7 @@ pub fn active_weapons_system(
             &mut damage_numbers,
             &mut ledger,
             &fx,
+            stats.shove_mult,
         );
         if fx.squeak_left <= 0.0 {
             fx.squeak_r = 0.0;
@@ -694,6 +745,8 @@ fn thrash_sweep(
     damage_numbers: &mut DamageNumbers,
     ledger: &mut DamageLedger,
     fx: &ActiveFx,
+    // Counterweight: a weapon's native shove (see `Stats::shove`).
+    shove_mult: f32,
 ) {
     let kind = WeaponKind::TailThrash;
     let reach = fx.thrash_reach;
@@ -721,7 +774,7 @@ fn thrash_sweep(
         let enemy_id = e.id;
         let heavy = matches!(e.kind, EnemyKind::Brute | EnemyKind::Boss);
         let knock = if heavy { THRASH_BOSS_KNOCKBACK } else { 1.0 };
-        e.vel = out * THRASH_KNOCKBACK * knock;
+        e.vel = out * THRASH_KNOCKBACK * knock * shove_mult;
         vfx::emit_thrash_hit(particles, &mut rng.0, pos, out, killed);
         damage_numbers.record(
             enemy_id,
@@ -800,6 +853,8 @@ fn squeak_ring(
     damage_numbers: &mut DamageNumbers,
     ledger: &mut DamageLedger,
     fx: &ActiveFx,
+    // Counterweight: the ring's native outward shove.
+    shove_mult: f32,
 ) {
     let kind = WeaponKind::SonicSqueak;
     let origin = fx.squeak_pos;
@@ -837,7 +892,7 @@ fn squeak_ring(
                 e.stun_for(SQUEAK_STUN);
             }
         }
-        e.vel += out * SQUEAK_SHOVE;
+        e.vel += out * SQUEAK_SHOVE * shove_mult;
         vfx::emit_squeak_hit(particles, &mut rng.0, pos, out, killed);
         damage_numbers.record(
             enemy_id,
@@ -909,6 +964,10 @@ fn fire_one(
     orbit_scratch: &mut Vec<Entity>,
     target_scratch: &mut Vec<Candidate>,
     boss_points: &BossTargetable,
+    // Wave 3 passive hooks (Lens Cap's reach, Long Fuse's zone life and splash
+    // radius, Counterweight's shove) and the per-body melee-nudge log it needs.
+    stats: &crate::game::loadout::Stats,
+    melee_nudge: &mut MeleeNudge,
 ) -> bool {
     let color = kind.color();
     let mut fired = false;
@@ -933,6 +992,8 @@ fn fire_one(
                     let v = Vec2::from_angle(angle) * 120.0;
                     let mut b = Bullet::new(ppos, v, dmg, Faction::Player, color);
                     b.size = 1;
+                    // Lens Cap: a ranged weapon's reach is its projectile life.
+                    b.life = stats.ranged_reach(b.life);
                     b.weapon = Some(kind);
                     commands.spawn((b, next_id.take()));
                 }
@@ -949,7 +1010,8 @@ fn fire_one(
                 let spread = (k as f32 - (projs - 1) as f32 / 2.0) * 0.18;
                 let v = Vec2::from_angle(base + spread) * 110.0;
                 let mut b = Bullet::new(ppos, v, dmg, Faction::Player, color);
-                b.life = 1.4;
+                // Lens Cap.
+                b.life = stats.ranged_reach(1.4);
                 b.weapon = Some(kind);
                 commands.spawn((b, next_id.take()));
             }
@@ -961,7 +1023,8 @@ fn fire_one(
                 let a = k as f32 / projs as f32 * std::f32::consts::TAU;
                 let v = Vec2::from_angle(a) * 95.0;
                 let mut b = Bullet::new(ppos, v, dmg, Faction::Player, color);
-                b.life = 1.3;
+                // Lens Cap (the nova's ring is made of these darts).
+                b.life = stats.ranged_reach(1.3);
                 b.weapon = Some(kind);
                 commands.spawn((b, next_id.take()));
             }
@@ -969,7 +1032,8 @@ fn fire_one(
             fired = true;
         }
         WeaponKind::SporeOrbit => {
-            let radius = 26.0;
+            // Lens Cap widens the ring, Long Fuse keeps it alive longer.
+            let radius = stats.melee_reach(26.0);
             // Carry the ring's current angle forward, then drop the old ring
             // before spawning its replacement so two never stack. One pass:
             // remember the lowest-`SpawnId` orbit angle (legacy `find_map`
@@ -992,7 +1056,8 @@ fn fire_one(
             for k in 0..projs {
                 let angle = base + k as f32 / projs as f32 * std::f32::consts::TAU;
                 let mut b = Bullet::new(ppos, Vec2::ZERO, dmg, Faction::Player, color);
-                b.life = cd;
+                // Long Fuse: an orbiter is a lingering friendly zone.
+                b.life = stats.zone_life(cd);
                 b.pierce = 999;
                 b.size = 2;
                 // A 4 px spore body against a 3-7 px enemy is a wider ring
@@ -1011,7 +1076,8 @@ fn fire_one(
             fired = true;
         }
         WeaponKind::TailWhip => {
-            let radius = 26.0 + projs as f32 * 3.0;
+            // Lens Cap's melee reach.
+            let radius = stats.melee_reach(26.0 + projs as f32 * 3.0);
             for &entity in order {
                 let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
                     continue;
@@ -1031,6 +1097,21 @@ fn fire_one(
                     let pos = e.pos;
                     let enemy_radius = e.radius;
                     let enemy_id = e.id;
+                    // Counterweight: +2 px of outward shove per stack on a
+                    // melee hit that has no native knockback (the whip), once
+                    // per body per 0.4 s. `resolve_circle` keeps the nudge on
+                    // legal floor instead of pushing a body into a wall.
+                    if stats.shove_px > 0.0 && melee_nudge.ready(enemy_id as u64) {
+                        let out = (pos - ppos).normalized();
+                        melee_nudge.mark(enemy_id as u64, MELEE_NUDGE_COOLDOWN);
+                        let shifted = pos + out * stats.shove_px;
+                        e.pos = level.tiles.resolve_circle(
+                            shifted,
+                            e.radius,
+                            SizeClass::Small,
+                            None,
+                        );
+                    }
                     vfx::emit_tail_whip_hit(particles, &mut rng.0, pos, pos - ppos, killed);
                     damage_numbers.record(
                         enemy_id,
@@ -1047,9 +1128,19 @@ fn fire_one(
         }
         WeaponKind::AcidSpit => {
             // Lob a projectile: it does no damage in flight and only becomes a
-            // pool once it lands (target, wall, or timeout).
-            let target = nearest_visible(level, kind, order, enemies, boss_points, ppos, target_scratch)
-                .unwrap_or(ppos + pface * 50.0)
+            // pool once it lands (target, wall, or timeout). Lens Cap stretches
+            // the lob's reach the same way it stretches a dart's life.
+            let target = nearest_visible_within(
+                level,
+                kind,
+                stats.ranged_reach(target_range(kind)),
+                order,
+                enemies,
+                boss_points,
+                ppos,
+                target_scratch,
+            )
+            .unwrap_or(ppos + pface * 50.0)
                 .clamp_box(Vec2::splat(4.0), level.arena - Vec2::splat(4.0));
             let to = target - ppos;
             let speed = 110.0;
@@ -1060,13 +1151,14 @@ fn fire_one(
             b.weapon = Some(kind);
             b.lob = Some(Lob {
                 target,
-                radius: 12.0 + projs as f32 * 1.5,
+                // Long Fuse: splash radius; its `life` below is the pool's life.
+                radius: stats.splash_radius(12.0 + projs as f32 * 1.5),
                 // 4.0 was the strongest weapon in both measured columns; the
                 // per-weapon report now puts Acid Spit at ~29% of all damage
                 // and of boss damage, above the 20-25% band. 3.3 takes ~6%
                 // more off the pool without touching the lob/land feel.
                 dps: dmg * 3.3,
-                life: 2.6,
+                life: stats.zone_life(2.6),
                 color: (140, 220, 70),
             });
             commands.spawn((b, next_id.take()));
@@ -1077,6 +1169,10 @@ fn fire_one(
         // them and `active_weapons_system` owns everything they do, so this arm
         // is unreachable by construction.
         WeaponKind::TailThrash | WeaponKind::SonicSqueak => {}
+        // Wave 3's two self-driving weapons are skipped by
+        // `fire_weapons_system` too: `weapons_wave3b` owns the laser burst and
+        // the dash hit, so this arm is unreachable by construction.
+        WeaponKind::LaserEyes | WeaponKind::SuperDash => {}
     }
     // Only announce a shot when the weapon actually produced something
     // (Gnaw with no target in range fires nothing).
@@ -1091,6 +1187,9 @@ fn fire_one(
             // Announced by `active_weapons_system` instead.
             WeaponKind::TailThrash => Sfx::ShootThrash,
             WeaponKind::SonicSqueak => Sfx::SonicSqueak,
+            // Announced by `weapons_wave3b` instead.
+            WeaponKind::LaserEyes => Sfx::LaserEyes,
+            WeaponKind::SuperDash => Sfx::SuperDash,
         };
         sfx.0.push(sound);
     }

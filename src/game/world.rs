@@ -71,9 +71,10 @@ use super::fog::{Fog, MazeMarker};
 use super::ecs::components::{ChestSpawn, SpawnId};
 use super::ecs::constants::{GRID_CELL, PARTICLE_CAP};
 use super::ecs::resources::{
-    collect_sorted, spawn_with_id, swap_in, swap_out, ActiveFx, BossDue, EnemyIndex, GridScratch,
-    LastPickups, DamageLedger, DifficultyLevel, LevelIndex, NeighborScratch, NextEnemyId, NextSpawnId, NukeTick,
-    PickupScratch, RngRes, RunCounters, SfxQueue, Shake, TickInput, Viewport,
+    collect_sorted, spawn_with_id, swap_in, swap_out, ActiveFx, BossDue, DamageLedger, DashTrack,
+    DifficultyLevel, EnemyIndex, GridScratch, LaserFx, LastPickups, LevelIndex, MeleeNudge,
+    NeighborScratch, NextEnemyId, NextSpawnId, NukeTick, PickupScratch, RngRes, RunCounters,
+    SfxQueue, Shake, TickInput, Viewport, XpBank,
 };
 use super::ecs::schedule::{build_settle_schedule, build_tick_schedule};
 use super::ecs::systems::boss::{
@@ -292,6 +293,16 @@ impl World {
         // `weapons::active_weapons_system` and read between ticks by the draw
         // pass and the HUD, and a fresh `World` starts with both idle.
         ecs.insert_resource(ActiveFx::default());
+        // Wave 3: Laser Eyes' live burst and Super Dash's dash bookkeeping.
+        // Permanent scratch, like `ActiveFx`: written by their systems, read by
+        // `World::draw` (the beam) and by tests between ticks.
+        ecs.insert_resource(LaserFx::default());
+        ecs.insert_resource(DashTrack::default());
+        // Counterweight's per-body melee-nudge cooldowns and Second Scent's
+        // fractional XP bank. Both are per-run scratch; a new level starts
+        // with a full nudge budget and an empty bank.
+        ecs.insert_resource(MeleeNudge::default());
+        ecs.insert_resource(XpBank::default());
         ecs.insert_resource(SpatialGrid::new(level.arena, GRID_CELL));
         // The director's boss hand-off (raised at `director::BOSS_TIME`, taken
         // by the boss framework). Permanent, like `NukeTick`.
@@ -717,6 +728,32 @@ impl World {
         let t = fx.thrash_progress();
         let fade = (t / 0.08).min(1.0) * ((1.0 - t) / 0.28).clamp(0.0, 1.0);
         Some((fx.thrash_angle, fx.thrash_reach, fade))
+    }
+
+    /// The Laser Eyes beam to draw this frame, if its bar is lit.
+    ///
+    /// `brightness` blinks: the pulses are 0.10 s apart, so the bar is lit for
+    /// the first part of each interval and dark for the rest ("a blinking bar
+    /// leaves dark intervals"). The twin muzzle dots stay on for the whole
+    /// burst (see `art_rat::draw_laser_eyes`), so the rat visibly *has* eyes.
+    pub fn laser_visual(&self) -> Option<art_rat::LaserBeam> {
+        let fx = self.ecs.resource::<LaserFx>();
+        if !fx.active() {
+            return None;
+        }
+        // Lit for the first half of each interval, then dark: that half-on,
+        // half-off cadence is the blink.
+        let lit = (1.0 - fx.since_pulse / (0.5 * crate::game::weapon::LASER_PULSE_INTERVAL))
+            .clamp(0.0, 1.0);
+        let fade = 1.0 - (fx.progress() - 0.85).max(0.0) / 0.15;
+        Some(art_rat::LaserBeam {
+            origin: fx.origin,
+            angle: fx.angle,
+            len: fx.beam,
+            // A hard blink, so the dark interval is real.
+            brightness: lit * fade,
+            muzzle: 0.55 + 0.45 * lit,
+        })
     }
 
     /// The drawn squeak ring: `(origin, radius)` while one is expanding.
@@ -1387,6 +1424,11 @@ impl World {
             &mut self.tail_ready_at,
         );
         art_rat::draw_rat_flash(pb, &self.player, self.elapsed, cam, flash);
+        // Wave 3: Laser Eyes' twin muzzle dots and its blinking beam, drawn
+        // over the rat so the eyes read as the source.
+        if let Some(beam) = self.laser_visual() {
+            art_rat::draw_laser_eyes(pb, &self.player, beam, cam);
+        }
     }
 
     /// Boss ground layer: floor telegraphs and drop shadows, drawn after the

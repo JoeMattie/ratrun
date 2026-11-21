@@ -117,7 +117,11 @@ fn passive_short_tag(kind: PassiveKind) -> &'static str {
         PassiveKind::Magnet => "MAG",
         PassiveKind::Regen => "REG",
         PassiveKind::Armor => "ARM",
-        _ => "PAS",
+        PassiveKind::SpringHeel => "DSH",
+        PassiveKind::Counterweight => "SHV",
+        PassiveKind::LongFuse => "FUS",
+        PassiveKind::SecondScent => "XP",
+        PassiveKind::LensCap => "LNS",
     }
 }
 /// Wave 3 pocket finds: tin, brass, clock-case blue and laundry white.
@@ -139,6 +143,9 @@ pub fn weapon_glyph(kind: WeaponKind) -> char {
         // the thrash, a ring for the squeak.
         WeaponKind::TailThrash => 'ϟ',
         WeaponKind::SonicSqueak => '◯',
+        // Wave 3: the beam is an eye, the dash weapon a double arrow.
+        WeaponKind::LaserEyes => '◎',
+        WeaponKind::SuperDash => '⇶',
     }
 }
 
@@ -2318,6 +2325,50 @@ mod tests {
             cells.iter().map(|c| c.bg).collect(),
             cells.iter().map(|c| c.fg).collect(),
         )
+    }
+
+    /// Spring Heel shortens the cooldown the dash module reports: the countdown
+    /// a real dash starts from, and the bar's full scale.
+    #[test]
+    fn spring_heel_stacks_shorten_the_cooldown_the_dash_module_reports() {
+        use crate::game::loadout::{PassiveKind, Upgrade};
+        let (cols, rows) = (120u16, 40u16);
+        let render = |w: &World| {
+            let mut state = HudState::default();
+            let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap();
+            terminal
+                .draw(|f| {
+                    let row = Rect::new(0, rows - 1, f.area().width, 1);
+                    draw_bottom(f, row, w, &mut state);
+                })
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            (0..cols).map(|x| buf[(x, rows - 1)].symbol()).collect::<String>()
+        };
+        let mut plain = known_world();
+        let mut heeled = known_world();
+        for _ in 0..PassiveKind::SpringHeel.max_stacks() {
+            heeled.player.loadout.apply(&Upgrade::Passive(PassiveKind::SpringHeel));
+        }
+        // A real dash: the countdown starts from the stat the passive changed.
+        for w in [&mut plain, &mut heeled] {
+            w.player.dash_cd = 0.0;
+            w.update(1.0 / 60.0, crate::math::Vec2::new(1.0, 0.0), true);
+            assert!(w.player.dash_active > 0.0, "setup: the dash did not start");
+            w.player.dash_active = 0.0;
+        }
+        let (a, b) = (render(&plain), render(&heeled));
+        assert!(a.contains("2.0s"), "base cooldown is not 2.0 s: {a:?}");
+        assert!(b.contains("1.1s"), "five Spring Heels must read 1.1 s: {b:?}");
+        // The same seconds remaining are a smaller share of a shorter cooldown.
+        plain.player.dash_cd = 0.9;
+        heeled.player.dash_cd = 0.9;
+        let full = |t: &str| t.matches('█').count();
+        let (a, b) = (render(&plain), render(&heeled));
+        assert!(
+            full(&b) < full(&a),
+            "the bar's scale ignores Spring Heel: {a:?} vs {b:?}"
+        );
     }
 
     /// The dash module must be unmissable at every size the game supports: it

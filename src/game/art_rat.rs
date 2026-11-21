@@ -505,6 +505,79 @@ pub fn draw_dash_gauge(pb: &mut PixelBuffer, player: &Player, elapsed: f32, cam:
     }
 }
 
+/// One frame of the **Laser Eyes** read, from `World::laser_visual`:
+/// where the beam starts, which way it points, how long it is after the wall
+/// stop, and how bright the bar and the muzzle dots are right now.
+#[derive(Clone, Copy, Debug)]
+pub struct LaserBeam {
+    /// World position the beam leaves from (the rat's eye line).
+    pub origin: Vec2,
+    /// World angle of the pulse being drawn (radians).
+    pub angle: f32,
+    /// Beam length in px, already stopped by a wall.
+    pub len: f32,
+    /// 0..1: the bar blinks (lit just after a pulse, dark before the next).
+    pub brightness: f32,
+    /// 0..1: the twin muzzle dots stay on for the whole burst, dimmed in the
+    /// dark interval so the source is never lost.
+    pub muzzle: f32,
+}
+
+/// Laser Eyes' **twin amber muzzle dots** and its **blinking beam**.
+///
+/// The dots sit on the rat's eyes (the same local `(3.4, ±0.85)`
+/// [`draw_face`] plots), so the beam visibly leaves the rat rather than the
+/// floor, and they stay lit through the dark interval while the bar blinks —
+/// that alternation is what reads as "laser eyes" in one half-block frame.
+/// The bar is drawn additively in three passes (a white core and two amber
+/// shoulders) because a 1-px line disappears against a busy floor.
+pub fn draw_laser_eyes(pb: &mut PixelBuffer, player: &Player, beam: LaserBeam, cam: Vec2) {
+    let face = if player.face.len_sq() > 1e-4 {
+        player.face.normalized()
+    } else {
+        Vec2::new(0.0, -1.0)
+    };
+    let perp = face.perp();
+    let eye_u = 3.4;
+    let hot = (255, 238, 196);
+    let amber = (255, 176, 52);
+
+    // Twin muzzle dots on the eyes.
+    let m = beam.muzzle.clamp(0.0, 1.0);
+    for side in [-1.0f32, 1.0] {
+        let e = w2s(player.pos + face * eye_u + perp * side * 0.85, cam);
+        pb.plot(e.0, e.1, scale(hot, 0.55 + 0.45 * m));
+        // A one-pixel halo so a dark phase still shows two bright pupils.
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            plot_add(pb, e.0 + dx, e.1 + dy, scale(amber, 0.30 * m));
+        }
+    }
+
+    // The blinking bar.
+    let b = beam.brightness.clamp(0.0, 1.0);
+    if b <= 0.02 || beam.len <= 1.0 {
+        return;
+    }
+    let dir = Vec2::from_angle(beam.angle);
+    let perp_b = dir.perp();
+    let start = player.pos + face * (eye_u - 0.5);
+    let end = start + dir * beam.len;
+    let s = w2s(start, cam);
+    let e = w2s(end, cam);
+    // Core: a hard white line, then two amber shoulders, both additive so the
+    // floor's own dark tones survive underneath.
+    pb.line(s.0, s.1, e.0, e.1, scale(hot, b));
+    for (k, gain) in [(1.0f32, 0.55f32), (2.0, 0.22)] {
+        let o = perp_b * k;
+        let a = w2s(start + o, cam);
+        let c = w2s(end + o, cam);
+        let a2 = w2s(start - o, cam);
+        let c2 = w2s(end - o, cam);
+        pb.line(a.0, a.1, c.0, c.1, scale(amber, b * gain));
+        pb.line(a2.0, a2.1, c2.0, c2.1, scale(amber, b * gain));
+    }
+}
+
 /// The **Tail Thrash** arc: the rat's tail stretched into a long whipping arc
 /// that sweeps around it.
 ///

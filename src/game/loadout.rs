@@ -36,10 +36,16 @@ pub enum PassiveKind {
     Magnet,
     Regen,
     Armor,
+    // ---- wave 3 (design §5) ----
+    SpringHeel,
+    Counterweight,
+    LongFuse,
+    SecondScent,
+    LensCap,
 }
 
 impl PassiveKind {
-    pub fn all() -> [PassiveKind; 7] {
+    pub fn all() -> [PassiveKind; 12] {
         [
             PassiveKind::MaxHp,
             PassiveKind::MoveSpeed,
@@ -48,7 +54,26 @@ impl PassiveKind {
             PassiveKind::Magnet,
             PassiveKind::Regen,
             PassiveKind::Armor,
+            PassiveKind::SpringHeel,
+            PassiveKind::Counterweight,
+            PassiveKind::LongFuse,
+            PassiveKind::SecondScent,
+            PassiveKind::LensCap,
         ]
+    }
+
+    /// Can this passive's partner weapon evolve (design §3)? The wave-0
+    /// evolution table is filled by `w3-evolutions`; the wave-3 passives are
+    /// all evolution partners, the original seven are not.
+    pub fn is_wave3(self) -> bool {
+        matches!(
+            self,
+            PassiveKind::SpringHeel
+                | PassiveKind::Counterweight
+                | PassiveKind::LongFuse
+                | PassiveKind::SecondScent
+                | PassiveKind::LensCap
+        )
     }
     pub fn name(self) -> &'static str {
         match self {
@@ -59,6 +84,11 @@ impl PassiveKind {
             PassiveKind::Magnet => "Whiskers",
             PassiveKind::Regen => "Resilience",
             PassiveKind::Armor => "Thick Hide",
+            PassiveKind::SpringHeel => "Spring Heel",
+            PassiveKind::Counterweight => "Counterweight",
+            PassiveKind::LongFuse => "Long Fuse",
+            PassiveKind::SecondScent => "Second Scent",
+            PassiveKind::LensCap => "Lens Cap",
         }
     }
     pub fn desc(self) -> &'static str {
@@ -70,6 +100,11 @@ impl PassiveKind {
             PassiveKind::Magnet => "+30% pickup radius.",
             PassiveKind::Regen => "+0.5 HP/s regen.",
             PassiveKind::Armor => "+1 armor (flat dmg cut).",
+            PassiveKind::SpringHeel => "-0.18s base dash cooldown.",
+            PassiveKind::Counterweight => "+15% weapon shove, +2px melee shove.",
+            PassiveKind::LongFuse => "+12% zone life, +4% splash radius.",
+            PassiveKind::SecondScent => "+10% gem XP (fractions banked).",
+            PassiveKind::LensCap => "+8% ranged reach, +4% melee reach.",
         }
     }
 
@@ -102,6 +137,15 @@ impl PassiveKind {
             PassiveKind::Magnet => 4,
             PassiveKind::Regen => 6,
             PassiveKind::Armor => 6,
+            // Wave 3 (design §5). The dash cooldown cap takes the base 2.0 s
+            // down to 1.1 s; Counterweight tops out at +60% shove / +8 px;
+            // Long Fuse at +48% zone life / +16% splash; Second Scent at
+            // +40% XP; Lens Cap at +32% ranged / +16% melee reach.
+            PassiveKind::SpringHeel => 5,
+            PassiveKind::Counterweight => 4,
+            PassiveKind::LongFuse => 4,
+            PassiveKind::SecondScent => 4,
+            PassiveKind::LensCap => 4,
         }
     }
 
@@ -114,11 +158,16 @@ impl PassiveKind {
             PassiveKind::Magnet => "Feel the room before you enter it.",
             PassiveKind::Regen => "Bred to survive worse than this.",
             PassiveKind::Armor => "Scar tissue, all the way down.",
+            PassiveKind::SpringHeel => "Smuggled out one spring at a time.",
+            PassiveKind::Counterweight => "A washer tied to the tip.",
+            PassiveKind::LongFuse => "Let it simmer.",
+            PassiveKind::SecondScent => "There's a second crumb under the first.",
+            PassiveKind::LensCap => "Cut from the bottom of a bottle.",
         }
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Stats {
     pub max_hp: f32,
     pub move_speed: f32,
@@ -128,6 +177,34 @@ pub struct Stats {
     pub regen: f32,
     pub armor: f32,
     pub dash_cd: f32,
+
+    // ---- wave 3 passive hooks --------------------------------------------
+    //
+    // These are the *named hooks* other weapons read (they are the only thing
+    // a wave-3 passive changes), so a weapon added later can join in with one
+    // call instead of knowing which passive bought it:
+    //
+    // - `reach_mult` / `melee_reach_mult`: Lens Cap (ranged vs melee/ring).
+    // - `zone_life_mult`: Long Fuse's lingering zones and orbiters.
+    // - `splash_mult`: Long Fuse's splash / radial radii.
+    // - `shove_mult` / `shove_px`: Counterweight's native shove multiplier and
+    //   its extra nudge on melee hits that have no shove of their own.
+    // - `xp_mult`: Second Scent, read by the gem pickup pass.
+    /// Lens Cap: multiplier for a ranged weapon's reach (projectile life).
+    pub reach_mult: f32,
+    /// Lens Cap: multiplier for a melee/ring weapon's radius.
+    pub melee_reach_mult: f32,
+    /// Long Fuse: multiplier for a friendly lingering zone's / orbiter's life.
+    pub zone_life_mult: f32,
+    /// Long Fuse: multiplier for a splash / radial radius.
+    pub splash_mult: f32,
+    /// Counterweight: multiplier for a weapon's native shove (knockback).
+    pub shove_mult: f32,
+    /// Counterweight: extra px of outward shove on an ordinary melee hit that
+    /// has no native knockback (once per target per 0.4 s).
+    pub shove_px: f32,
+    /// Second Scent: multiplier for collected gem XP (fractions are banked).
+    pub xp_mult: f32,
 }
 
 impl Default for Stats {
@@ -141,7 +218,48 @@ impl Default for Stats {
             regen: 0.4,
             armor: 0.0,
             dash_cd: 2.0,
+            reach_mult: 1.0,
+            melee_reach_mult: 1.0,
+            zone_life_mult: 1.0,
+            splash_mult: 1.0,
+            shove_mult: 1.0,
+            shove_px: 0.0,
+            xp_mult: 1.0,
         }
+    }
+}
+
+/// The passive hooks a weapon reads, applied as tiny helpers so a use site is
+/// `stats.ranged_reach(base)` and never re-derives the arithmetic.
+///
+/// Every one of these is `base x multiplier` with a 1.0 default, so a run with
+/// no wave-3 passive computes exactly the number it did before (no rounding
+/// drift, no extra rng).
+impl Stats {
+    /// Lens Cap: a ranged weapon's reach (projectile life / lob distance).
+    #[inline]
+    pub fn ranged_reach(&self, base: f32) -> f32 {
+        base * self.reach_mult
+    }
+    /// Lens Cap: a melee or ring weapon's radius.
+    #[inline]
+    pub fn melee_reach(&self, base: f32) -> f32 {
+        base * self.melee_reach_mult
+    }
+    /// Long Fuse: a friendly lingering zone's or orbiter's lifetime.
+    #[inline]
+    pub fn zone_life(&self, base: f32) -> f32 {
+        base * self.zone_life_mult
+    }
+    /// Long Fuse: a splash or radial effect's radius.
+    #[inline]
+    pub fn splash_radius(&self, base: f32) -> f32 {
+        base * self.splash_mult
+    }
+    /// Counterweight: a weapon's native shove (knockback / ring push).
+    #[inline]
+    pub fn shove(&self, base: f32) -> f32 {
+        base * self.shove_mult
     }
 }
 
@@ -190,6 +308,36 @@ fn apply_passive_stack(stats: &mut Stats, p: PassiveKind) -> f32 {
         }
         PassiveKind::Armor => {
             stats.armor += 1.0;
+            0.0
+        }
+        // ---- wave 3 (design §5): each stack is a flat step on a base value,
+        // so the capped totals are 1.1 s dash (2.0 - 5 x 0.18), x1.6 shove /
+        // +8 px (4 x 0.15 / 4 x 2), x1.48 zone life / x1.16 splash (4 x 0.12 /
+        // 4 x 0.04), x1.4 XP (4 x 0.10) and x1.32 ranged / x1.16 melee reach
+        // (4 x 0.08 / 4 x 0.04).
+        PassiveKind::SpringHeel => {
+            // The design's floor is the shop's 0.7 s; this guard only exists so
+            // a future source of dash-cooldown reduction can never reach zero.
+            stats.dash_cd = (stats.dash_cd - 0.18).max(0.35);
+            0.0
+        }
+        PassiveKind::Counterweight => {
+            stats.shove_mult += 0.15;
+            stats.shove_px += 2.0;
+            0.0
+        }
+        PassiveKind::LongFuse => {
+            stats.zone_life_mult += 0.12;
+            stats.splash_mult += 0.04;
+            0.0
+        }
+        PassiveKind::SecondScent => {
+            stats.xp_mult += 0.10;
+            0.0
+        }
+        PassiveKind::LensCap => {
+            stats.reach_mult += 0.08;
+            stats.melee_reach_mult += 0.04;
             0.0
         }
     }
@@ -708,6 +856,183 @@ mod tests {
         );
         assert_eq!(lo.stats.armor, 2.0);
         assert_eq!(lo.stats.damage_mult, 1.15);
+    }
+
+    /// Wave 3's five passives: every stack is a visible step, every cap holds,
+    /// and the capped total is the number the design quotes.
+    #[test]
+    fn wave3_passives_step_and_cap() {
+        // Caps from the design's table (§5).
+        let caps = [
+            (PassiveKind::SpringHeel, 5u32),
+            (PassiveKind::Counterweight, 4),
+            (PassiveKind::LongFuse, 4),
+            (PassiveKind::SecondScent, 4),
+            (PassiveKind::LensCap, 4),
+        ];
+        for (kind, cap) in caps {
+            assert_eq!(kind.max_stacks(), cap, "{kind:?} cap");
+            assert!(kind.is_wave3(), "{kind:?} must be marked wave 3");
+            assert!(!kind.name().is_empty() && !kind.desc().is_empty());
+            assert!(!kind.flavor().is_empty());
+        }
+        assert_eq!(PassiveKind::all().len(), 12, "seven originals + five new");
+        for p in PassiveKind::all() {
+            assert_eq!(p.is_wave3(), !matches!(
+                p,
+                PassiveKind::MaxHp
+                    | PassiveKind::MoveSpeed
+                    | PassiveKind::Damage
+                    | PassiveKind::FireRate
+                    | PassiveKind::Magnet
+                    | PassiveKind::Regen
+                    | PassiveKind::Armor
+            ));
+        }
+
+        // Spring Heel: -0.18 s of base dash cooldown per stack, capped at 1.1 s.
+        let mut lo = Loadout::starting();
+        let mut prev = lo.stats.dash_cd;
+        for stack in 1..=PassiveKind::SpringHeel.max_stacks() {
+            lo.apply(&Upgrade::Passive(PassiveKind::SpringHeel));
+            let expect = 2.0 - 0.18 * stack as f32;
+            assert!(
+                (lo.stats.dash_cd - expect).abs() < 1e-6,
+                "Spring Heel x{stack}: {} != {expect}",
+                lo.stats.dash_cd
+            );
+            assert!(lo.stats.dash_cd < prev, "stack {stack} must be faster");
+            prev = lo.stats.dash_cd;
+        }
+        assert!((lo.stats.dash_cd - 1.1).abs() < 1e-6, "capped at 2.0 - 0.9");
+        // One more stack is a bandage, not a stack: the cap is the cap.
+        let heal = lo.apply(&Upgrade::Passive(PassiveKind::SpringHeel));
+        assert!(heal > 0.0, "a capped pick must heal instead");
+        assert_eq!(lo.stacks(PassiveKind::SpringHeel), 5);
+        assert!((lo.stats.dash_cd - 1.1).abs() < 1e-6);
+
+        // Counterweight: +15% shove and +2 px melee nudge per stack.
+        let mut lo = Loadout::starting();
+        for stack in 1..=PassiveKind::Counterweight.max_stacks() {
+            lo.apply(&Upgrade::Passive(PassiveKind::Counterweight));
+            assert!((lo.stats.shove_mult - (1.0 + 0.15 * stack as f32)).abs() < 1e-6);
+            assert!((lo.stats.shove_px - 2.0 * stack as f32).abs() < 1e-6);
+        }
+        assert!((lo.stats.shove_mult - 1.6).abs() < 1e-6, "capped at x1.6");
+        assert!((lo.stats.shove_px - 8.0).abs() < 1e-6, "capped at +8 px");
+        assert!((lo.stats.shove(100.0) - 160.0).abs() < 1e-4);
+
+        // Long Fuse: +12% zone life and +4% splash radius per stack.
+        let mut lo = Loadout::starting();
+        for stack in 1..=PassiveKind::LongFuse.max_stacks() {
+            lo.apply(&Upgrade::Passive(PassiveKind::LongFuse));
+            assert!((lo.stats.zone_life_mult - (1.0 + 0.12 * stack as f32)).abs() < 1e-6);
+            assert!((lo.stats.splash_mult - (1.0 + 0.04 * stack as f32)).abs() < 1e-6);
+        }
+        assert!((lo.stats.zone_life(2.0) - 2.96).abs() < 1e-5, "capped +48%");
+        assert!((lo.stats.splash_radius(10.0) - 11.6).abs() < 1e-5, "capped +16%");
+
+        // Second Scent: +10% gem XP per stack, capped at +40%.
+        let mut lo = Loadout::starting();
+        for stack in 1..=PassiveKind::SecondScent.max_stacks() {
+            lo.apply(&Upgrade::Passive(PassiveKind::SecondScent));
+            assert!((lo.stats.xp_mult - (1.0 + 0.10 * stack as f32)).abs() < 1e-6);
+        }
+        assert!((lo.stats.xp_mult - 1.4).abs() < 1e-5, "capped at +40%");
+
+        // Lens Cap: +8% ranged and +4% melee reach per stack.
+        let mut lo = Loadout::starting();
+        for stack in 1..=PassiveKind::LensCap.max_stacks() {
+            lo.apply(&Upgrade::Passive(PassiveKind::LensCap));
+            assert!((lo.stats.reach_mult - (1.0 + 0.08 * stack as f32)).abs() < 1e-6);
+            assert!((lo.stats.melee_reach_mult - (1.0 + 0.04 * stack as f32)).abs() < 1e-6);
+        }
+        assert!((lo.stats.ranged_reach(100.0) - 132.0).abs() < 1e-4, "+32% ranged");
+        assert!((lo.stats.melee_reach(100.0) - 116.0).abs() < 1e-4, "+16% melee");
+
+        // The hooks are identity without a wave-3 passive: a run that never
+        // picks one computes the same numbers it did before.
+        let plain = Stats::default();
+        for base in [0.0f32, 1.0, 26.0, 154.0] {
+            assert_eq!(plain.ranged_reach(base), base);
+            assert_eq!(plain.melee_reach(base), base);
+            assert_eq!(plain.zone_life(base), base);
+            assert_eq!(plain.splash_radius(base), base);
+            assert_eq!(plain.shove(base), base);
+        }
+        assert_eq!(plain.shove_px, 0.0);
+        assert_eq!(plain.xp_mult, 1.0);
+    }
+
+    /// Campaign carry-over: `from_parts` replays every wave-3 stack onto a
+    /// fresh `Stats`, so a kept Spring Heel still dashes at 1.1 s next floor.
+    #[test]
+    fn from_parts_replays_wave3_passives() {
+        let mut lo = Loadout::starting();
+        lo.apply(&Upgrade::NewWeapon(WeaponKind::LaserEyes));
+        lo.apply(&Upgrade::NewWeapon(WeaponKind::SuperDash));
+        for p in [
+            PassiveKind::SpringHeel,
+            PassiveKind::SpringHeel,
+            PassiveKind::Counterweight,
+            PassiveKind::LongFuse,
+            PassiveKind::LongFuse,
+            PassiveKind::SecondScent,
+            PassiveKind::LensCap,
+            PassiveKind::LensCap,
+        ] {
+            lo.apply(&Upgrade::Passive(p));
+        }
+        let copy = Loadout::from_parts(lo.weapons.clone(), lo.passives.clone());
+        assert_eq!(copy.passives, lo.passives);
+        assert_eq!(copy.weapons.len(), lo.weapons.len());
+        assert_eq!(copy.stats.dash_cd, lo.stats.dash_cd);
+        assert_eq!(copy.stats.shove_mult, lo.stats.shove_mult);
+        assert_eq!(copy.stats.shove_px, lo.stats.shove_px);
+        assert_eq!(copy.stats.zone_life_mult, lo.stats.zone_life_mult);
+        assert_eq!(copy.stats.splash_mult, lo.stats.splash_mult);
+        assert_eq!(copy.stats.reach_mult, lo.stats.reach_mult);
+        assert_eq!(copy.stats.melee_reach_mult, lo.stats.melee_reach_mult);
+        assert_eq!(copy.stats.xp_mult, lo.stats.xp_mult);
+        // …and the carry cannot buy past a cap, even if the record says so.
+        let over = Loadout::from_parts(
+            lo.weapons.clone(),
+            vec![(PassiveKind::SpringHeel, 99), (PassiveKind::LensCap, 99)],
+        );
+        assert!((over.stats.dash_cd - 1.1).abs() < 1e-6);
+        assert!((over.stats.reach_mult - 1.32).abs() < 1e-5);
+    }
+
+    /// Both wave-3 weapons reach the level-up pool like every other kind, and
+    /// their cards say what they do and how they are triggered.
+    #[test]
+    fn wave3_weapons_are_offered_on_cards() {
+        let lo = Loadout::starting();
+        for kind in [WeaponKind::LaserEyes, WeaponKind::SuperDash] {
+            let (title, desc, flavor) = lo.describe(&Upgrade::NewWeapon(kind));
+            assert!(title.contains(kind.name()), "card title {title:?}");
+            assert!(!desc.is_empty() && !flavor.is_empty());
+            assert!(!kind.is_active(), "{kind:?} has no charge gauge");
+        }
+        // The dash weapon teaches the dash trigger, not Space-the-charge.
+        assert!(WeaponKind::SuperDash.desc().contains("DASH"));
+        let mut offered = [false; 2];
+        for seed in 0..800 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            for c in lo.generate_choices(&mut rng) {
+                if let Upgrade::NewWeapon(kind) = c {
+                    for (i, k) in [WeaponKind::LaserEyes, WeaponKind::SuperDash]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        if k == kind {
+                            offered[i] = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(offered, [true, true], "a wave-3 weapon was never offered");
     }
 
     /// A loadout rebuilt from its own parts must reproduce its stats exactly:

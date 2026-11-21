@@ -56,7 +56,7 @@ use bevy_ecs::prelude::*;
 use crate::audio::Sfx;
 use crate::game::collision::SizeClass;
 use crate::game::ecs::constants::{PLAYER_RADIUS, PLAYER_SUBSTEP};
-use crate::game::ecs::resources::{RngRes, SfxQueue, TickInput};
+use crate::game::ecs::resources::{DashTrack, RngRes, SfxQueue, TickInput};
 use crate::game::level::Level;
 use crate::game::particle::{vfx, Particles};
 use crate::game::player::Player;
@@ -76,13 +76,16 @@ pub fn player_system(
     mut particles: ResMut<Particles>,
     mut rng: ResMut<RngRes>,
     mut sfx: ResMut<SfxQueue>,
+    // w3-weapons-b: the dash owner's record of what the dash actually did, so
+    // the Super Dash weapon never has to guess (see the hooks below).
+    mut dash_track: ResMut<DashTrack>,
 ) {
     let dt = input.dt;
     let move_dir = input.move_dir;
     let dash = input.dash;
 
     // Legacy 184: a snapshot, not a borrow, exactly like the legacy clone.
-    let stats = player.loadout.stats.clone();
+    let stats = player.loadout.stats;
     if move_dir.len_sq() > 0.01 {
         player.face = move_dir.normalized();
     }
@@ -99,6 +102,10 @@ pub fn player_system(
         let face = player.face;
         vfx::emit_dash_start(&mut particles, &mut rng.0, pos, face);
         sfx.0.push(Sfx::Dash);
+        // ---- w3-weapons-b hook 1/2: a *successful* dash just began --------
+        // Only this branch (a live press with the cooldown ready) reaches here,
+        // so a blocked or cooling dash buys no Super Dash hit by construction.
+        dash_track.begin();
     } else if dash && player.dash_denied <= 0.0 {
         // Asked for a dash that is not ready: never silent. The timer throttles
         // the feedback so a held (auto-repeating) key gives one refused blip
@@ -106,6 +113,10 @@ pub fn player_system(
         player.dash_denied = DASH_DENIED_SECS;
         sfx.0.push(Sfx::DashDenied);
     }
+    // ---- w3-weapons-b hook 2/2: record the segment this tick travels -------
+    // `dashing` is the pre-decay flag, so the dash's last tick still counts and
+    // the tick after it records nothing.
+    let w3b_from = player.pos;
 
     let dashing = player.dash_active > 0.0;
     let dash_boost = if dashing { 3.2 } else { 1.0 };
@@ -146,6 +157,11 @@ pub fn player_system(
             .tiles
             .resolve_circle(player.pos, PLAYER_RADIUS, SizeClass::Small, Some(vel));
     }
+
+    // ---- w3-weapons-b hook 2/2 (see above): the travelled segment, exactly
+    // as the sub-step move actually moved the rat (a dash stopped by a wall
+    // records a short segment, which is why a blocked dash hits nothing).
+    dash_track.record(w3b_from, player.pos, dashing);
 
     // Continuous dash motion trail (neon hook: after the sub-step move and
     // before the timers; `dashing` is the pre-decay flag, exactly as legacy

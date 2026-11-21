@@ -2443,6 +2443,12 @@ fn passive_badge(passive: PassiveKind) -> (char, palette::Rgb) {
         PassiveKind::Magnet => ('◇', (176, 140, 240)),
         PassiveKind::Regen => ('=', (126, 224, 152)),
         PassiveKind::Armor => ('#', (150, 190, 200)),
+        // Wave 3 passives. Placeholder badges until the icon pass lands.
+        PassiveKind::SpringHeel => ('^', (200, 220, 236)),
+        PassiveKind::Counterweight => ('o', (198, 168, 128)),
+        PassiveKind::LongFuse => ('!', (246, 196, 106)),
+        PassiveKind::SecondScent => ('?', (176, 220, 196)),
+        PassiveKind::LensCap => ('c', (208, 216, 160)),
     }
 }
 
@@ -3152,6 +3158,84 @@ mod tests {
                         hh.frame(&[KeyCode::Right]);
                     }
                 } else {
+                    hh.frame(&[]);
+                }
+            }
+            // Wave 3's two self-driving weapons, over a real horde:
+            // `RATRUN_DUMP=laser` catches a Laser Eyes burst mid-sweep (beam
+            // lit), `RATRUN_DUMP=superdash` the comb a few frames into a dash.
+            "laser" | "superdash" => {
+                hh.enter_playing();
+                let is_laser = target == "laser";
+                {
+                    use crate::game::weapon::WeaponKind;
+                    use rand::SeedableRng;
+                    let w = hh.app.world.as_mut().unwrap();
+                    let kind = if is_laser {
+                        WeaponKind::LaserEyes
+                    } else {
+                        WeaponKind::SuperDash
+                    };
+                    w.player.loadout.weapons.clear();
+                    w.player.loadout.apply(&Upgrade::NewWeapon(kind));
+                    // Max rank: the widest beam (5 pulses) and the widest swept
+                    // radius, so the still frame shows the shape at its fullest.
+                    for weapon in w.player.loadout.weapons.iter_mut() {
+                        weapon.level = kind.max_level();
+                        weapon.timer = 0.0;
+                    }
+                    w.player.face = crate::math::Vec2::new(1.0, 0.0);
+                    w.player.dash_cd = 0.0;
+                    // Untouchable, so the capture is the weapon and not the
+                    // rat's hurt flash.
+                    w.player.iframes = 30.0;
+                    let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+                    let p = w.player.pos;
+                    if is_laser {
+                        // A loose fan in front: bodies at three distances, so
+                        // the sweep's 3-5 bars are each visible crossing one.
+                        for i in 0..12 {
+                            let a = -0.45 + (i % 6) as f32 * 0.18;
+                            let r = 18.0 + (i / 6) as f32 * 10.0;
+                            let at = p + crate::math::Vec2::from_angle(a) * r;
+                            w.spawn_enemy_with_rng(
+                                crate::game::enemy::EnemyKind::Cat,
+                                at,
+                                40.0,
+                                &mut rng,
+                            );
+                        }
+                    } else {
+                        // A line to cross: the dash's whole point is the bodies
+                        // it passes through.
+                        for i in 0..5 {
+                            let at = p + crate::math::Vec2::new(7.0 + i as f32 * 5.0, 0.0);
+                            w.spawn_enemy_with_rng(
+                                crate::game::enemy::EnemyKind::Brute,
+                                at,
+                                40.0,
+                                &mut rng,
+                            );
+                        }
+                        // …plus two flankers, so the comb's teeth have an edge.
+                        for i in 0..2 {
+                            let at = p + crate::math::Vec2::new(12.0 + i as f32 * 6.0, 9.0);
+                            w.spawn_enemy_with_rng(
+                                crate::game::enemy::EnemyKind::Cat,
+                                at,
+                                40.0,
+                                &mut rng,
+                            );
+                        }
+                    }
+                }
+                // One frame to trigger, then a couple more into the effect.
+                hh.frame(&[KeyCode::Char(' ')]);
+                // The laser's bar is only the *current* pulse: a few more frames
+                // let the earlier pulses' trails still glow, so the still shows
+                // the sweep as a fan.
+                let frames = if is_laser { 7 } else { 3 };
+                for _ in 0..frames {
                     hh.frame(&[]);
                 }
             }

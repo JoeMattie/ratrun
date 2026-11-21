@@ -24,6 +24,7 @@
 //! | 10 | `enemy_move::grid_refresh_system` | second grid build |
 //! | 11 | `weapons::fire_weapons_system` | `fire_weapons` |
 //! | 11b | `weapons::active_weapons_system` | the two Space-triggered weapons (new) |
+//! | 11c | `weapons_wave3b::{laser_eyes,super_dash,melee_nudge}_system` | wave 3's self-driving weapons (new) |
 //! | 12 | `projectiles::bullets_system` | `update_bullets` |
 //! | 13 | `projectiles::pools_system` | `update_pools` |
 //! | 13b | `boss::boss_damage_system` | player damage → boss hit shapes |
@@ -79,7 +80,7 @@ use bevy_ecs::prelude::*;
 use super::resources::TickInput;
 use super::systems::{
     boss, combat, enemy_move, fog, fx, gates, loot, player, powerups, projectiles, spawn, traps,
-    weapons,
+    weapons, weapons_wave3b,
 };
 
 /// Legacy `self.damage_numbers.update(dt)` (neon merge, `World::update`).
@@ -144,6 +145,23 @@ pub fn build_tick_schedule() -> Schedule {
             combat::contact_system,
         )
             .chain(),
+    );
+
+    // 11c: wave 3's self-driving weapons (Laser Eyes' burst, Super Dash's dash
+    // hit) and Counterweight's nudge clock. Chained right after the active
+    // weapons and before `bullets_system`: the cached `EnemyIndex` order is
+    // still valid there (nothing spawned or reaped since `grid_refresh`), the
+    // damage lands before `player_bullet_hits`/`reap_enemies` in the same tick,
+    // and both systems read this tick's player position.
+    schedule.add_systems(
+        (
+            weapons_wave3b::laser_eyes_system,
+            weapons_wave3b::super_dash_system,
+            weapons_wave3b::melee_nudge_system,
+        )
+            .chain()
+            .after(weapons::active_weapons_system)
+            .before(projectiles::bullets_system),
     );
 
     // The interactive-object runtime (gates.rs): rat-holes + centring, the

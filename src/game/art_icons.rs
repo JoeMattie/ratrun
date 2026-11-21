@@ -795,6 +795,8 @@ pub fn weapon(kind: WeaponKind) -> &'static Icon {
         WeaponKind::AcidSpit => &ACID_SPIT,
         WeaponKind::TailThrash => &TAIL_THRASH,
         WeaponKind::SonicSqueak => &SONIC_SQUEAK,
+        WeaponKind::LaserEyes => &LASER_EYES,
+        WeaponKind::SuperDash => &SUPER_DASH,
         _ => &PLACEHOLDER,
     }
 }
@@ -815,6 +817,9 @@ pub fn passive(kind: PassiveKind) -> &'static Icon {
         PassiveKind::Magnet => &MAGNET,
         PassiveKind::Regen => &REGEN,
         PassiveKind::Armor => &ARMOR,
+        // Spring Heel is the dash-cooldown passive the icon pass pre-drew.
+        PassiveKind::SpringHeel => &DASH_COOLDOWN,
+        // Counterweight, Long Fuse, Second Scent and Lens Cap have no art yet.
         _ => &PLACEHOLDER,
     }
 }
@@ -849,7 +854,7 @@ pub fn by_name(name: &str) -> &'static Icon {
         "Whiskers" => &MAGNET,
         "Resilience" => &REGEN,
         "Thick Hide" => &ARMOR,
-        "Dash Cooldown" => &DASH_COOLDOWN,
+        "Dash Cooldown" | "Spring Heel" => &DASH_COOLDOWN,
         _ => &PLACEHOLDER,
     }
 }
@@ -1111,9 +1116,19 @@ mod tests {
         }
         for kind in PassiveKind::all() {
             let ic = passive(kind);
-            assert!(
-                !std::ptr::eq(ic, placeholder()) && ic != placeholder(),
-                "passive {kind:?} returned placeholder"
+            // Four wave 3 passives have no art yet and deliberately keep the
+            // placeholder; drop them from this list as their icons land.
+            let unpainted = matches!(
+                kind,
+                PassiveKind::Counterweight
+                    | PassiveKind::LongFuse
+                    | PassiveKind::SecondScent
+                    | PassiveKind::LensCap
+            );
+            assert_eq!(
+                std::ptr::eq(ic, placeholder()) || ic == placeholder(),
+                unpainted,
+                "passive {kind:?}: placeholder state is not the expected one"
             );
             assert_eq!(
                 by_name(kind.name()),
