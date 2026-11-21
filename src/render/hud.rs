@@ -170,6 +170,7 @@ pub fn boss_codename(theme: Theme) -> (&'static str, &'static str) {
         crate::game::ecs::systems::boss::BossKind::Cat => CampaignLevel::Sewer,
         crate::game::ecs::systems::boss::BossKind::Broom => CampaignLevel::Kitchen,
         crate::game::ecs::systems::boss::BossKind::Mower => CampaignLevel::Lab,
+        crate::game::ecs::systems::boss::BossKind::Mangle => CampaignLevel::Laundry,
     };
     let class_tag = match level {
         CampaignLevel::Sewer => "CLASS-V APEX PREDATOR",

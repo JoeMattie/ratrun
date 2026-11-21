@@ -7,6 +7,7 @@
 //! | 0 | Sewer | Jungle Cat (Apex Jaguar) | [`crate::game::art_boss_cat`] |
 //! | 1 | Kitchen | The Sweeper (broom) | [`crate::game::art_boss_broom`] |
 //! | 2 | Lab | TURF-REAPER MK.IV (mower) | [`crate::game::art_boss_mower`] |
+//! | 3 | Laundry | The Mangle (wringer) | [`crate::game::art_boss_mangle`] |
 //!
 //! The art files are the gameplay spec: their view structs, state enums,
 //! per-state timings/damage and hit-shape helpers (`body_hit_circles`,
@@ -99,6 +100,7 @@ use rand::{RngExt, SeedableRng};
 use crate::audio::Sfx;
 use crate::game::gem::Gold;
 use crate::game::art_boss_broom::{self, BroomBossState, BroomBossView};
+use crate::game::art_boss_mangle::{self, MangleState, MangleView};
 use crate::game::art_boss_cat::{self, BossCatState, BossCatView};
 use crate::game::art_boss_mower::{self, MowerState, MowerView};
 use crate::game::art_traps::{
@@ -111,7 +113,7 @@ use crate::game::director;
 use crate::game::ecs::components::{Pool, SpawnId};
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::resources::{
-    BossDue, DifficultyLevel, LevelIndex, NextEnemyId, NextSpawnId, RunCounters, Shake, SfxQueue, TickInput,
+    BossDue, DifficultyLevel, NextEnemyId, NextSpawnId, RunCounters, Shake, SfxQueue, TickInput,
 };
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::level::{Level, Theme, TileRect};
@@ -126,6 +128,7 @@ use crate::render::palette::Rgb;
 
 pub mod broom;
 pub mod cat;
+pub mod mangle;
 pub mod mower;
 
 // ============================================================================
@@ -141,6 +144,8 @@ pub enum BossKind {
     Broom,
     /// Lab — TURF-REAPER MK.IV (mower).
     Mower,
+    /// Laundry — The Mangle (cast-iron wringer).
+    Mangle,
 }
 
 /// The boss the getaway ride fields until it gets a fight of its own.
@@ -167,7 +172,7 @@ impl BossKind {
             Theme::Sewer => BossKind::Cat,
             Theme::Kitchen => BossKind::Broom,
             Theme::Lab => BossKind::Mower,
-            Theme::Laundry => BossKind::Broom,
+            Theme::Laundry => BossKind::Mangle,
             Theme::Printworks => BossKind::Mower,
             Theme::Trailer => trailer_boss(),
         }
@@ -190,6 +195,7 @@ impl BossKind {
             BossKind::Cat => art_boss_cat::BOSS_BASE_HP,
             BossKind::Broom => 1600.0,
             BossKind::Mower => 1600.0,
+            BossKind::Mangle => art_boss_mangle::BOSS_BASE_HP,
         }
     }
 
@@ -200,6 +206,7 @@ impl BossKind {
             BossKind::Cat => art_boss_cat::BODY_RADIUS,
             BossKind::Broom => art_boss_broom::STANCE_HALF_WIDTH + art_boss_broom::FOOT_HIT_RADIUS,
             BossKind::Mower => art_boss_mower::BODY_RADIUS,
+            BossKind::Mangle => art_boss_mangle::BODY_RADIUS,
         }
     }
 
@@ -257,6 +264,13 @@ impl BossKind {
             BossKind::Cat => 1.4,
             BossKind::Broom => 1.95,
             BossKind::Mower => 2.0,
+            // The Laundry is a stage-two floor. Measured with the same
+            // near-complete bot build that fights the Sweeper and the Mower,
+            // the Mangle at 1.95 died in 19 s against their 33 s / 26 s: its
+            // jam windows are a 1.5x damage window for a third of every
+            // rotation, so the raw pool has to be larger to buy the same
+            // fight. 3.35 lands it beside the Sweeper (see the report).
+            BossKind::Mangle => 3.35,
         }
     }
 
@@ -272,6 +286,7 @@ impl BossKind {
             BossKind::Cat => 13.0,
             BossKind::Broom => 10.0,
             BossKind::Mower => 14.0,
+            BossKind::Mangle => art_boss_mangle::CONTACT_DAMAGE,
         }
     }
 
@@ -282,6 +297,7 @@ impl BossKind {
             BossKind::Cat => art_boss_cat::DEATH_DURATION,
             BossKind::Broom => 2.40,
             BossKind::Mower => 3.4,
+            BossKind::Mangle => art_boss_mangle::DEATH_DURATION,
         }
     }
 
@@ -312,6 +328,16 @@ impl BossKind {
                     1
                 }
             }
+            // The Mangle's design thresholds: above 60 %, 60-25 %, below 25 %.
+            BossKind::Mangle => {
+                if hp_frac <= 0.25 {
+                    3
+                } else if hp_frac <= 0.60 {
+                    2
+                } else {
+                    1
+                }
+            }
         }
     }
 
@@ -322,6 +348,7 @@ impl BossKind {
             BossKind::Cat => BossState::Cat(BossCatState::Stalk),
             BossKind::Broom => BossState::Broom(BroomBossState::Idle),
             BossKind::Mower => BossState::Mower(MowerState::Patrol),
+            BossKind::Mangle => BossState::Mangle(MangleState::Idle),
         }
     }
 
@@ -332,6 +359,7 @@ impl BossKind {
             BossKind::Cat => 2.6,
             BossKind::Broom => 0.55,
             BossKind::Mower => 1.80,
+            BossKind::Mangle => art_boss_mangle::IDLE_P1,
         }
     }
 
@@ -342,6 +370,7 @@ impl BossKind {
             BossKind::Cat => BossState::Cat(BossCatState::Death),
             BossKind::Broom => BossState::Broom(BroomBossState::Defeat),
             BossKind::Mower => BossState::Mower(MowerState::Dying),
+            BossKind::Mangle => BossState::Mangle(MangleState::Death),
         }
     }
 
@@ -352,6 +381,7 @@ impl BossKind {
             BossKind::Cat => 0x9E37_79B9_7F4A_7C15,
             BossKind::Broom => 0xC2B2_AE3D_27D4_EB4F,
             BossKind::Mower => 0x1656_67B1_9E37_79F9,
+            BossKind::Mangle => 0xD1B5_4A32_7F6C_1E09,
         }
     }
 
@@ -362,6 +392,7 @@ impl BossKind {
             BossKind::Cat => art_boss_cat::BODY_LENGTH + art_boss_cat::TAIL_LENGTH,
             BossKind::Broom => art_boss_broom::CULL_MARGIN,
             BossKind::Mower => art_boss_mower::BODY_RADIUS + 20.0,
+            BossKind::Mangle => art_boss_mangle::CULL_MARGIN,
         }
     }
 
@@ -372,6 +403,7 @@ impl BossKind {
             BossKind::Cat => &cat::CatController,
             BossKind::Broom => &broom::BroomController,
             BossKind::Mower => &mower::MowerController,
+            BossKind::Mangle => &mangle::MangleController,
         }
     }
 }
@@ -518,6 +550,7 @@ pub enum BossState {
     Cat(BossCatState),
     Broom(BroomBossState),
     Mower(MowerState),
+    Mangle(MangleState),
 }
 
 /// One art-defined hit shape. Bosses are hit through these, not a single circle.
@@ -702,6 +735,7 @@ pub enum BossArtView {
     Cat(BossCatView),
     Broom(BroomBossView),
     Mower(MowerView),
+    Mangle(MangleView),
 }
 
 // ============================================================================
@@ -835,6 +869,11 @@ pub struct BossHazard {
     pub hit_enemies: bool,
     pub fired: bool,
     pub fired_enemies: bool,
+    /// A sustained conveyor push in px/s applied to the player every active
+    /// tick it stands inside (the Mangle's intake pull). Unlike `knockback` it
+    /// is not radial from the shape's centre: it is a fixed world direction, so
+    /// a lane can feed toward the machine. Only used by damage-free hazards.
+    pub drag: Vec2,
 }
 
 impl BossHazard {
@@ -852,6 +891,7 @@ impl BossHazard {
             hit_enemies: false,
             fired: false,
             fired_enemies: false,
+            drag: Vec2::ZERO,
         }
     }
 
@@ -866,6 +906,13 @@ impl BossHazard {
     #[inline]
     pub fn with_knockback(mut self, knockback: f32) -> Self {
         self.knockback = knockback;
+        self
+    }
+
+    /// Add a sustained conveyor drag (px/s, world direction).
+    #[inline]
+    pub fn with_drag(mut self, drag: Vec2) -> Self {
+        self.drag = drag;
         self
     }
 
@@ -897,6 +944,8 @@ pub enum BossProjectileKind {
     SonicFang,
     /// Broom dustpan shard.
     DustpanShard,
+    /// The Mangle's rolled towel (a 56 px rail).
+    RolledTowel,
 }
 
 impl BossProjectileKind {
@@ -908,6 +957,7 @@ impl BossProjectileKind {
             BossProjectileKind::GrassShrapnel => art_boss_mower::SHRAPNEL_RADIUS,
             BossProjectileKind::SonicFang => 2.5,
             BossProjectileKind::DustpanShard => 2.0,
+            BossProjectileKind::RolledTowel => art_boss_mangle::TOWEL_RADIUS,
         }
     }
 
@@ -919,6 +969,7 @@ impl BossProjectileKind {
             BossProjectileKind::GrassShrapnel => 9.0,
             BossProjectileKind::SonicFang => 12.0,
             BossProjectileKind::DustpanShard => 10.0,
+            BossProjectileKind::RolledTowel => art_boss_mangle::TOWEL_DAMAGE,
         }
     }
 
@@ -1232,6 +1283,30 @@ impl Boss {
                 };
                 BossHitShapes::from_slice(&[shape])
             }
+            BossKind::Mangle => {
+                // The frame box + both rollers, and the loose crank at the
+                // right cheek (the ×1.5 weak point). The final jam lifts the
+                // rollers off the floor's ground weapons, so the crank is the
+                // only thing left to hit — exactly the design's "strike the
+                // dropped crank".
+                let view = self.mangle_view();
+                let shapes = art_boss_mangle::hit_shapes(&view);
+                let out: [BossHitShape; 2] = [
+                    BossHitShape::Box {
+                        center: shapes[0].center,
+                        facing: shapes[0].facing,
+                        half: shapes[0].half,
+                        half_perp: shapes[0].half_perp,
+                        grounded: shapes[0].grounded,
+                    },
+                    BossHitShape::Circle {
+                        center: shapes[1].center,
+                        radius: shapes[1].radius,
+                        grounded: shapes[1].grounded,
+                    },
+                ];
+                BossHitShapes::from_slice(&out)
+            }
         }
     }
 
@@ -1263,6 +1338,7 @@ impl Boss {
             BossKind::Cat => BossArtView::Cat(self.cat_view()),
             BossKind::Broom => BossArtView::Broom(self.broom_view()),
             BossKind::Mower => BossArtView::Mower(self.mower_view()),
+            BossKind::Mangle => BossArtView::Mangle(self.mangle_view()),
         }
     }
 
@@ -1284,6 +1360,13 @@ impl Boss {
         match self.state {
             BossState::Mower(s) => s,
             _ => MowerState::Patrol,
+        }
+    }
+
+    fn mangle_state(&self) -> MangleState {
+        match self.state {
+            BossState::Mangle(s) => s,
+            _ => MangleState::Idle,
         }
     }
 
@@ -1329,6 +1412,20 @@ impl Boss {
             trail_start: self.pounce_origin,
             dock_pos: self.dock,
             bounce_count: self.bounce_count,
+        }
+    }
+
+    pub(crate) fn mangle_view(&self) -> MangleView {
+        MangleView {
+            pos: self.pos,
+            facing: self.facing,
+            state: self.mangle_state(),
+            progress: self.progress(),
+            anim: self.anim,
+            hit_flash: self.hit_flash,
+            hp_frac: self.hp_frac(),
+            target: self.target,
+            phase: self.phase,
         }
     }
 }
@@ -1509,6 +1606,22 @@ pub enum BossCue {
     MowerDock,
     /// The meltdown detonation in `Dying`.
     MowerDeath,
+
+    // ---- The Mangle (Laundry) ----
+    /// `Intake` entry: the rollers turn backwards and the lane outlines.
+    MangleRollers,
+    /// The single 16-damage bite crosses the nip.
+    MangleBite,
+    /// A ratchet click of the wring-out's crank (two under the 0.9 s tell).
+    MangleCrank,
+    /// The rolled towel leaves the nip.
+    MangleTowel,
+    /// `Jam` / `FinalJam` entry: the nip stuffs and the crank drops.
+    MangleJam,
+    /// `PhaseShift` entry: the frame shudders into its new pace.
+    MangleShift,
+    /// The springs pop in the death beat.
+    MangleDeath,
 }
 
 impl BossCue {
@@ -1544,6 +1657,13 @@ impl BossCue {
             BossCue::MowerOverheat => Sfx::MowerOverheat,
             BossCue::MowerDock => Sfx::MowerDockHum,
             BossCue::MowerDeath => Sfx::MowerDeath,
+            BossCue::MangleRollers => Sfx::MangleRollers,
+            BossCue::MangleBite => Sfx::MangleBite,
+            BossCue::MangleCrank => Sfx::MangleCrank,
+            BossCue::MangleTowel => Sfx::MangleTowel,
+            BossCue::MangleJam => Sfx::MangleJam,
+            BossCue::MangleShift => Sfx::MangleShift,
+            BossCue::MangleDeath => Sfx::MangleDeath,
         }
     }
 }
@@ -1654,13 +1774,18 @@ pub fn resolve_hazards(
         }
         if hazard.hit_player && !hazard.fired && hazard.shape.contains(player.pos, PLAYER_RADIUS) {
             if hazard.damage <= 0.0 {
-                // Push-only hazard (the cat's damage-free outer roar ring):
-                // the knockback is a sustained shove in px/s, applied every
-                // active tick the rat is inside the shape. Nothing is "hit",
-                // so no damage, no i-frames and no hurt vfx are spent.
-                if hazard.knockback > 0.0 {
+                // Push-only hazard (the cat's damage-free outer roar ring and
+                // the Mangle's intake lane): the knockback is a sustained shove
+                // in px/s, applied every active tick the rat is inside the
+                // shape, and `drag` is a fixed-direction conveyor on top of it.
+                // Nothing is "hit", so no damage, no i-frames and no hurt vfx
+                // are spent.
+                if hazard.knockback > 0.0 || hazard.drag.len_sq() > 0.0 {
                     let dir = (player.pos - hazard.shape.center()).normalized();
-                    player.pos += dir * hazard.knockback * dt;
+                    if hazard.knockback > 0.0 {
+                        player.pos += dir * hazard.knockback * dt;
+                    }
+                    player.pos += hazard.drag * dt;
                 }
             } else if player.take_damage(hazard.damage) {
                 player_hit = true;
@@ -1888,6 +2013,65 @@ fn emit_cues(
             BossCue::MowerDeath => {
                 vfx::emit_boss_mower_death(particles, rng, boss.pos);
             }
+
+            // ---- mangle -------------------------------------------------
+            BossCue::MangleRollers => {
+                // The backwards whirr's visible half: a vent of steam off the
+                // frame and a puff at the nip.
+                let view = boss.mangle_view();
+                vfx::emit_boss_mower_overheat_steam(
+                    particles,
+                    rng,
+                    boss.pos,
+                    boss.facing,
+                    0.12,
+                );
+                vfx::emit_weapon_hit(
+                    particles,
+                    rng,
+                    art_boss_mangle::nip_pos(&view),
+                    Vec2::ZERO,
+                    None,
+                    EnemyKind::Boss,
+                    false,
+                );
+            }
+            BossCue::MangleBite => {
+                // The nip's metal clang: the mower's wall-impact sparks are
+                // exactly a hard steel bite.
+                let view = boss.mangle_view();
+                let nip = art_boss_mangle::nip_pos(&view);
+                vfx::emit_boss_mower_wall_impact(particles, rng, nip, -boss.facing, true);
+            }
+            BossCue::MangleCrank => {
+                let view = boss.mangle_view();
+                vfx::emit_weapon_hit(
+                    particles,
+                    rng,
+                    art_boss_mangle::crank_pos(&view),
+                    Vec2::ZERO,
+                    None,
+                    EnemyKind::Boss,
+                    false,
+                );
+            }
+            BossCue::MangleTowel => {
+                let view = boss.mangle_view();
+                let nip = art_boss_mangle::nip_pos(&view);
+                vfx::emit_boss_mower_charge_trail(particles, rng, nip, boss.facing, false, 0.12);
+            }
+            BossCue::MangleJam | BossCue::MangleShift => {
+                vfx::emit_boss_mower_overheat_steam(
+                    particles,
+                    rng,
+                    boss.pos,
+                    boss.facing,
+                    0.16,
+                );
+            }
+            BossCue::MangleDeath => {
+                vfx::emit_boss_mower_death(particles, rng, boss.pos);
+            }
         }
     }
 }
@@ -1907,7 +2091,6 @@ pub fn boss_spawn_system(
     mut next_enemy_id: ResMut<NextEnemyId>,
     mut next_spawn_id: ResMut<NextSpawnId>,
     level: Res<Level>,
-    level_index: Res<LevelIndex>,
     difficulty: Res<DifficultyLevel>,
     player: Res<Player>,
     bosses: Query<&Boss>,
@@ -1918,7 +2101,9 @@ pub fn boss_spawn_system(
     if !due.take() || !bosses.is_empty() {
         return;
     }
-    let kind = BossKind::for_level(level_index.0);
+    // The floor's own boss: the side-route floors play at a campaign stage
+    // index, so the theme is the only thing that can name their boss.
+    let kind = BossKind::for_theme(level.theme);
     let arena = level
         .boss_room()
         .map(|r| r.rect)

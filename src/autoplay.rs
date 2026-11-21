@@ -258,6 +258,8 @@ pub enum BossAttack {
     Charge,
     Ricochet,
     Blade,
+    Intake,
+    Towel,
     Other,
 }
 
@@ -275,6 +277,8 @@ impl BossAttack {
             BossAttack::Charge => "charge",
             BossAttack::Ricochet => "ricochet",
             BossAttack::Blade => "blade",
+            BossAttack::Intake => "intake",
+            BossAttack::Towel => "towel",
             BossAttack::Other => "other",
         }
     }
@@ -299,6 +303,7 @@ impl DamageCause {
             DamageCause::BossContact(BossKind::Cat) => "jaguar body",
             DamageCause::BossContact(BossKind::Broom) => "broom human body",
             DamageCause::BossContact(BossKind::Mower) => "mower body",
+            DamageCause::BossContact(BossKind::Mangle) => "mangle frame",
             DamageCause::BossHazard(BossKind::Cat, a) => match a {
                 BossAttack::Pounce => "jaguar pounce",
                 BossAttack::Swipe => "jaguar swipe",
@@ -322,6 +327,12 @@ impl DamageCause {
             DamageCause::BossProjectile(BossKind::Cat) => "sonic fang",
             DamageCause::BossProjectile(BossKind::Broom) => "dustpan shard",
             DamageCause::BossProjectile(BossKind::Mower) => "blade disc",
+            DamageCause::BossHazard(BossKind::Mangle, a) => match a {
+                BossAttack::Intake => "mangle bite",
+                BossAttack::Towel => "rolled towel",
+                _ => "mangle hazard",
+            },
+            DamageCause::BossProjectile(BossKind::Mangle) => "rolled towel",
             DamageCause::Trap => "mousetrap",
             DamageCause::Unknown => "unknown",
         }
@@ -1140,6 +1151,7 @@ fn boss_name(kind: BossKind) -> &'static str {
         BossKind::Cat => "jaguar",
         BossKind::Broom => "broom human",
         BossKind::Mower => "mower",
+        BossKind::Mangle => "mangle",
     }
 }
 
@@ -1309,6 +1321,11 @@ fn boss_attack(state: &BossState) -> BossAttack {
             MowerState::Charge | MowerState::ChargeWindup => BossAttack::Charge,
             MowerState::Ricochet => BossAttack::Ricochet,
             MowerState::FlingBlades => BossAttack::Blade,
+            _ => BossAttack::Other,
+        },
+        BossState::Mangle(s) => match s {
+            crate::game::art_boss_mangle::MangleState::Intake { .. } => BossAttack::Intake,
+            crate::game::art_boss_mangle::MangleState::WringOut => BossAttack::Towel,
             _ => BossAttack::Other,
         },
     }

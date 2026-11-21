@@ -26,6 +26,7 @@ use bevy_ecs::world::World as EcsWorld;
 
 use crate::game::art_boss_broom::BroomBossState;
 use crate::game::art_boss_cat::BossCatState;
+use crate::game::art_boss_mangle::MangleState;
 use crate::game::art_boss_mower::MowerState;
 use crate::game::art_traps::MazeRewardState;
 use crate::game::art_walls::WallKind;
@@ -1723,6 +1724,101 @@ impl LightMap {
                             color: (255, 195, 105),
                             intensity: 270,
                             scatter: 78,
+                            priority: 3,
+                            occlude: false,
+                            hard: false,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            BossState::Mangle(st) => {
+                // The wringer sits under a warm laundry-bay lamp; the tells
+                // themselves are self-lit by the hazard pass below.
+                if in_range(bsx, bsy, 46.0) {
+                    self.lights.push(PointLight {
+                        x: bsx,
+                        y: bsy,
+                        radius: 44.0,
+                        color: (198, 226, 222),
+                        intensity: 180,
+                        scatter: 36,
+                        priority: 2,
+                        occlude: false,
+                        hard: false,
+                    });
+                }
+                match st {
+                    MangleState::Intake { .. } => {
+                        // The nip pulls light with it: a red-hot throat.
+                        let view = boss.mangle_view();
+                        let nip = crate::game::art_boss_mangle::nip_pos(&view);
+                        let sx = nip.x - cam.x;
+                        let sy = nip.y - cam.y;
+                        if in_range(sx, sy, 46.0) {
+                            self.lights.push(PointLight {
+                                x: sx,
+                                y: sy,
+                                radius: 44.0,
+                                color: if progress * boss.duration >= 1.1 {
+                                    (255, 96, 64)
+                                } else {
+                                    (255, 196, 78)
+                                },
+                                intensity: 245,
+                                scatter: 60,
+                                priority: 3,
+                                occlude: false,
+                                hard: false,
+                            });
+                        }
+                    }
+                    MangleState::WringOut => {
+                        let sx = boss.target.x - cam.x;
+                        let sy = boss.target.y - cam.y;
+                        if in_range(sx, sy, 42.0) {
+                            self.lights.push(PointLight {
+                                x: sx,
+                                y: sy,
+                                radius: 40.0,
+                                color: (255, 192, 98),
+                                intensity: 225,
+                                scatter: 54,
+                                priority: 3,
+                                occlude: false,
+                                hard: false,
+                            });
+                        }
+                    }
+                    MangleState::Jam | MangleState::FinalJam => {
+                        // The exposed crank glows gold: the punish window reads
+                        // in a dark room.
+                        let view = boss.mangle_view();
+                        let crank = crate::game::art_boss_mangle::crank_pos(&view);
+                        let sx = crank.x - cam.x;
+                        let sy = crank.y - cam.y;
+                        if in_range(sx, sy, 40.0) {
+                            self.lights.push(PointLight {
+                                x: sx,
+                                y: sy,
+                                radius: 38.0,
+                                color: (255, 216, 112),
+                                intensity: 255,
+                                scatter: 62,
+                                priority: 3,
+                                occlude: false,
+                                hard: false,
+                            });
+                        }
+                    }
+                    MangleState::PhaseShift | MangleState::Death if in_range(bsx, bsy, 78.0) => {
+                        self.lights.push(PointLight {
+                            x: bsx,
+                            y: bsy,
+                            radius: 74.0,
+                            color: (255, 198, 120),
+                            intensity: 275,
+                            scatter: 80,
                             priority: 3,
                             occlude: false,
                             hard: false,

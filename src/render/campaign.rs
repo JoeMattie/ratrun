@@ -988,12 +988,12 @@ fn draw_boss_triumph_emblem(buf: &mut Buffer, area: Rect, level: CampaignLevel, 
             }
         }
         CampaignLevel::Laundry => {
-            // Placeholder: the Laundry's fight is the borrowed broom until the
-            // Mangle lands, so its triumph plate is the broom's.
+            // The Mangle stopped dead: two striped rollers in an iron frame,
+            // the loose crank hanging out on its side.
             let rows = [
-                ("    ╲   ╭───╮   ▄▀▀▀▄   ", WARN_AMBER),
-                ("     ╲  │▓▓▓│  ▐█████▌  ", TRAIL_GOLD),
-                ("══════╲═╧═┴═╧═══▀▀▀▀▀═══", level.accent()),
+                ("  ╭─┬─┬─╮    ╭─╮  ", WARN_AMBER),
+                ("  │▓│▓│▓│    │◉│  ", TRAIL_GOLD),
+                ("══╧═╧═╧═╧════╧═╧══", level.accent()),
             ];
             for (i, (line, col)) in rows.iter().enumerate() {
                 if y + i as u16 >= area.height {
@@ -2241,13 +2241,12 @@ fn level_emblem(level: CampaignLevel) -> [&'static str; 3] {
             "──┤  ├──»───┤  ├──",
             "  ╰──╯      ╰──╯  ",
         ],
-        // The side route floors share the borrowed boss's bay until their own
-        // art lands: the Laundry gets the broom's bay, the Printworks the
-        // mower's.
+        // The side route floors: the Mangle's roller bay; the Printworks still
+        // borrows the mower's until the Night Edition lands.
         CampaignLevel::Laundry => [
-            " ▄▄▄   ▄▄▄   ▄▄▄ ",
-            " ▀█▀   ▀█▀   ▀█▀ ",
-            "══╧═════╧═════╧══",
+            "  ╭─┬─┬─╮  ╭─╮  ",
+            "  │▓│▓│▓│  │◉│  ",
+            "══╧═╧═╧═╧══╧═╧══",
         ],
         CampaignLevel::Printworks => [
             "  ╭──╮      ╭──╮  ",

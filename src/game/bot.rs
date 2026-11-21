@@ -110,7 +110,7 @@ use crate::game::campaign::Keepable;
 use crate::game::collision::{cell_of, SizeClass};
 use crate::game::gem::{Gem, Pickup};
 use crate::game::ecs::constants::PLAYER_RADIUS;
-use crate::game::ecs::systems::boss::{Boss, BossProjectile, HazardShape};
+use crate::game::ecs::systems::boss::{Boss, BossProjectile, BossState, HazardShape};
 use crate::game::ecs::systems::miniboss::{Miniboss, MinibossShape, MinibossState};
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::PickupKind;
@@ -917,6 +917,33 @@ impl Bot {
                         damage: h.damage,
                     });
                 }
+                // The Mangle's intake lane is a damage-free conveyor: the
+                // generic hazard field cannot score it (0 damage), so the rat
+                // would stand in it and be fed into the bite. Give the lane the
+                // whole block's worth of danger until the nip has fired, so the
+                // bot steps out or across during the tell.
+                if let BossState::Mangle(mstate) = boss.state {
+                    if matches!(
+                        mstate,
+                        crate::game::art_boss_mangle::MangleState::Intake { .. }
+                    ) {
+                        let view = boss.mangle_view();
+                        let lane = crate::game::art_boss_mangle::intake_lane(&view);
+                        let (tell, pull) = crate::game::art_boss_mangle::intake_windows(boss.phase);
+                        let to_bite = (tell + pull - boss.elapsed).max(0.0);
+                        self.threats.push(Threat::Hazard {
+                            shape: HazardShape::Rect {
+                                center: lane.center,
+                                facing: lane.facing,
+                                half: lane.half,
+                                half_perp: lane.half_perp,
+                            },
+                            warn_left: self.quantise_warn(to_bite),
+                            active_left: to_bite + crate::game::art_boss_mangle::BITE_WINDOW,
+                            damage: crate::game::art_boss_mangle::BITE_DAMAGE,
+                        });
+                    }
+                }
             } else if let Some(wick) = e.get::<crate::game::ecs::components::Wick>() {
                 // A dead moth's fuse: the burst lands when the fuse runs out,
                 // so it reads exactly like a hazard with `fuse` left to warn.
@@ -1489,7 +1516,20 @@ impl Bot {
             let ang = (p - bpos).angle() + self.orbit_sign * 1.1;
             // Close enough for the short-range weapons (Tail Whip, Squeak
             // Nova, acid pools) to be on the boss, out to the body's reach.
-            let ring = 32.0;
+            // Punish time is closer: a jammed Mangle is harmless, so the rat
+            // walks in onto the exposed crank instead of orbiting wide.
+            let jamming = w.ecs.iter_entities().any(|e| {
+                e.get::<Boss>().is_some_and(|b| {
+                    matches!(
+                        b.state,
+                        BossState::Mangle(
+                            crate::game::art_boss_mangle::MangleState::Jam
+                                | crate::game::art_boss_mangle::MangleState::FinalJam
+                        )
+                    )
+                })
+            });
+            let ring = if jamming { 20.0 } else { 32.0 };
             self.goal =
                 (bpos + Vec2::from_angle(ang) * ring).clamp_box(Vec2::splat(20.0), w.level.arena - Vec2::splat(20.0));
             return;
