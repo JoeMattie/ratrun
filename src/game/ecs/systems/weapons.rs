@@ -138,6 +138,8 @@ pub fn fire_weapons_system(
     mut scratch: FireScratch,
 ) {
     let dt = input.dt;
+    // The reticle (wave 3 controls): `None` = auto-aim exactly as before.
+    let aim = input.aim;
     // Legacy: snapshot the player state and the two multipliers.
     let ppos = player.pos;
     let pface = player.face;
@@ -255,6 +257,7 @@ pub fn fire_weapons_system(
             &mut scratch.boss_virus,
             &mut scratch.evo,
             &mut scratch.moved,
+            aim,
         );
         if fired {
             player.loadout.weapons[i].timer += cd;
@@ -365,6 +368,19 @@ fn target_range(kind: WeaponKind) -> f32 {
         // body); this is the longest reach any level of it has.
         WeaponKind::SpikedTail => crate::game::weapon::LASH_REACH[4],
     }
+}
+
+/// Half-angle of Gnaw's homing cone around an aim direction: within this cone
+/// of the reticle the nearest reachable body steals the shot, outside it the
+/// dart flies straight. Mild on purpose — aiming must feel direct, not sticky.
+const AIM_CONE_COS: f32 = 0.9397; // cos(20°)
+
+/// The aim direction from an aim **point** (world pixels), or `None` when
+/// there is no aim or the reticle sits on the rat.
+fn aim_dir(ppos: Vec2, aim: Option<Vec2>) -> Option<Vec2> {
+    aim.map(|p| p - ppos)
+        .filter(|v| v.len_sq() > 4.0)
+        .map(|v| v.normalized())
 }
 
 /// The same pick as [`nearest_visible`], with the reach supplied by the caller
@@ -1136,6 +1152,9 @@ fn fire_one(
     // Set when this shot moved a body: the grid has to be re-filed before the
     // projectile/contact passes read it (see `FireScratch::grid`).
     moved: &mut bool,
+    // The reticle in world pixels (`None` = auto-aim). The per-weapon table is
+    // in the module docs on `TickInput::aim`; each arm below applies it.
+    aim: Option<Vec2>,
 ) -> bool {
     let color = kind.color();
     let mut fired = false;
@@ -1145,7 +1164,11 @@ fn fire_one(
             // weapon is the range it will consider: a dart that flies further
             // must also be allowed to pick a target that far away.
             let range = stats.ranged_reach(target_range(kind));
-            if let Some(epos) = nearest_visible_within(
+            let aimed = aim_dir(ppos, aim);
+            // Aimed: the dart flies along the reticle, homing only on a body
+            // inside a narrow cone of it (and firing even with nothing there).
+            // Auto-aim: exactly the legacy nearest-visible pick.
+            let pick = nearest_visible_within(
                 level,
                 kind,
                 range,
@@ -1154,8 +1177,12 @@ fn fire_one(
                 boss_points,
                 ppos,
                 target_scratch,
-            ) {
-                let dir = (epos - ppos).normalized();
+            )
+            .filter(|epos| match aimed {
+                Some(d) => (*epos - ppos).normalized().dot(d) >= AIM_CONE_COS,
+                None => true,
+            });
+            if let Some(dir) = pick.map(|epos| (epos - ppos).normalized()).or(aimed) {
                 // One dart, two from level 4 (`Weapon::level_projectiles` is
                 // the level for Gnaw): a fan of ±3° keeps the pair from
                 // stacking into one body at close range while staying
@@ -1202,10 +1229,14 @@ fn fire_one(
             }
         }
         WeaponKind::CheeseSpray => {
-            let aim = nearest_visible(level, kind, order, enemies, boss_points, ppos, target_scratch)
-                .map(|p| (p - ppos).normalized())
-                .unwrap_or(pface);
-            let base = aim.angle();
+            // Aimed: the fan is centred on the reticle. Auto-aim: the fan
+            // centres on the nearest visible body, as before.
+            let spray_dir = aim_dir(ppos, aim).unwrap_or_else(|| {
+                nearest_visible(level, kind, order, enemies, boss_points, ppos, target_scratch)
+                    .map(|p| (p - ppos).normalized())
+                    .unwrap_or(pface)
+            });
+            let base = spray_dir.angle();
             // Fondue Fork: the spray's two **outer** darts are paired tine
             // projectiles (they fly, hit and plant like a dart — no duplicated
             // cast-time ray), and the string is created when both have settled.
@@ -1254,7 +1285,7 @@ fn fire_one(
                 b.weapon = Some(kind);
                 commands.spawn((b, next_id.take()));
             }
-            vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, aim, 0.0);
+            vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, spray_dir, 0.0);
             fired = true;
         }
         WeaponKind::SqueakNova => {
@@ -1461,18 +1492,33 @@ fn fire_one(
             // Lob a projectile: it does no damage in flight and only becomes a
             // pool once it lands (target, wall, or timeout). Lens Cap stretches
             // the lob's reach the same way it stretches a dart's life.
-            let target = nearest_visible_within(
-                level,
-                kind,
-                stats.ranged_reach(target_range(kind)),
-                order,
-                enemies,
-                boss_points,
-                ppos,
-                target_scratch,
-            )
-            .unwrap_or(ppos + pface * 50.0)
-                .clamp_box(Vec2::splat(4.0), level.arena - Vec2::splat(4.0));
+            let reach = stats.ranged_reach(target_range(kind));
+            let target = match aim_dir(ppos, aim) {
+                // Aimed: lob to the reticle, clamped to the weapon's range and
+                // to a clear line (a lobbed pool behind a wall would be wasted,
+                // so a blocked aim falls back to the facing lob).
+                Some(d) => {
+                    let wanted = (aim.unwrap_or(ppos) - ppos).len().min(reach);
+                    let at = ppos + d * wanted;
+                    if los_clear(level, ppos, at, 2.0) {
+                        at
+                    } else {
+                        ppos + pface * 50.0
+                    }
+                }
+                None => nearest_visible_within(
+                    level,
+                    kind,
+                    reach,
+                    order,
+                    enemies,
+                    boss_points,
+                    ppos,
+                    target_scratch,
+                )
+                .unwrap_or(ppos + pface * 50.0),
+            }
+            .clamp_box(Vec2::splat(4.0), level.arena - Vec2::splat(4.0));
             let to = target - ppos;
             let speed = 110.0;
             let mut b = Bullet::new(ppos, to.normalized() * speed, dmg, Faction::Player, color);
@@ -1537,6 +1583,7 @@ fn fire_one(
                 particles,
                 rng,
                 next_id,
+                aim,
             );
         }
         // The Spiked Tail (wave 3, `weapon_spiketail`): pick one body in reach
@@ -1546,9 +1593,8 @@ fn fire_one(
         // Lens Cap stretches a melee weapon's reach, Long Fuse widens a splash,
         // Counterweight its native shove.
         //
-        // Aim hook: an aimed (mouse/gamepad) build passes its aim point to
-        // `fire_spiked_tail` in place of the `None` this call hands the target
-        // pick — that argument is the only change the aim branch needs here.
+        // Aimed (mouse/gamepad): the aim point goes to the target pick, which
+        // then takes the eligible body nearest the reticle. `None` is auto-aim.
         WeaponKind::SpikedTail => {
             let i = (wlevel.clamp(1, 5) as usize) - 1;
             fired = crate::game::ecs::systems::weapon_spiketail::fire_spiked_tail(
@@ -1565,6 +1611,7 @@ fn fire_one(
                 crate::game::weapon::LASH_SHARDS[i],
                 evolved,
                 next_id,
+                aim,
             );
         }
         WeaponKind::Hantavirus => {
@@ -1587,6 +1634,7 @@ fn fire_one(
                 evolved,
                 particles,
                 rng,
+                aim,
             );
         }
     }
@@ -1828,6 +1876,7 @@ mod tests {
     use crate::game::ecs::components::{Entity, SpawnId};
     use crate::game::ecs::resources::EnemyIndex;
     use crate::game::enemy::{Enemy, EnemyKind};
+    use crate::game::ecs::components::{CheeseString, EvolvedShot, MilkTooth};
     use crate::game::level::{MAP_COLS, MAP_ROWS, Theme, TileRect};
     use crate::game::particle::Particles;
     use crate::game::particle::damage_number::DamageNumbers;
@@ -1876,6 +1925,190 @@ mod tests {
         w.begin_tick(dt, Vec2::ZERO, false);
         w.ecs.run_system_cached(fire_weapons_system).unwrap();
         w.end_tick();
+    }
+
+    /// Run the weapon pass with a reticle (wave 3 controls).
+    fn run_weapons_aim(w: &mut World, dt: f32, aim: Option<Vec2>) {
+        w.begin_tick_with_aim(dt, Vec2::ZERO, false, false, aim);
+        w.ecs.run_system_cached(fire_weapons_system).unwrap();
+        w.end_tick();
+    }
+
+    /// **Gnaw, aimed**: with a reticle the dart flies along it — even into an
+    /// empty corridor (no more "dud with no target") — and its mild homing only
+    /// claims bodies inside a narrow cone of the aim.
+    #[test]
+    fn gnaw_fires_along_the_aim_and_homes_only_inside_the_cone() {
+        // Nothing in reach: the dart still goes where the player pointed.
+        let mut w = World::new(Theme::Sewer, 21);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        arm(&mut w, WeaponKind::Gnaw);
+        let p = w.player.pos;
+        run_weapons_aim(&mut w, 1.0 / 60.0, Some(p + Vec2::new(200.0, 0.0)));
+        assert_eq!(w.bullets().len(), 1, "an aimed Gnaw always fires");
+        let v = w.bullets()[0].vel;
+        assert!(
+            (v.x - 120.0).abs() < 1e-2 && v.y.abs() < 1e-2,
+            "the dart did not fly along the reticle: {v:?}"
+        );
+
+        // A body inside the cone steals the shot (homing)...
+        let mut w = World::new(Theme::Sewer, 22);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        arm(&mut w, WeaponKind::Gnaw);
+        let p = w.player.pos;
+        // ~11° off the aim, in front of the rat.
+        let near = p + Vec2::new(120.0, 24.0);
+        w.spawn_enemy(EnemyKind::Skitterer, near, 20.0);
+        run_weapons_aim(&mut w, 1.0 / 60.0, Some(p + Vec2::new(200.0, 0.0)));
+        let v = w.bullets()[0].vel.normalized();
+        let to_enemy = (near - p).normalized();
+        assert!(
+            v.dot(to_enemy) > 0.99,
+            "the dart ignored the in-cone body: {v:?}"
+        );
+
+        // ...but a body far off the aim does not.
+        let mut w = World::new(Theme::Sewer, 23);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        arm(&mut w, WeaponKind::Gnaw);
+        let p = w.player.pos;
+        w.spawn_enemy(EnemyKind::Skitterer, p + Vec2::new(0.0, 60.0), 20.0);
+        run_weapons_aim(&mut w, 1.0 / 60.0, Some(p + Vec2::new(200.0, 0.0)));
+        let v = w.bullets()[0].vel.normalized();
+        assert!(v.x > 0.99, "the dart left the reticle for an off-cone body: {v:?}");
+    }
+
+    /// **Cheese Spray, aimed**: the fan is centred on the reticle, not on the
+    /// nearest body (which sits to the side here).
+    #[test]
+    fn cheese_spray_fans_around_the_aim() {
+        let mut w = World::new(Theme::Sewer, 24);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        arm(&mut w, WeaponKind::CheeseSpray);
+        w.player.loadout.weapons[0].level = 3;
+        let p = w.player.pos;
+        w.spawn_enemy(EnemyKind::Skitterer, p + Vec2::new(0.0, 60.0), 20.0);
+        run_weapons_aim(&mut w, 1.0 / 60.0, Some(p + Vec2::new(200.0, 0.0)));
+        let spray = w.bullets();
+        assert!(!spray.is_empty(), "the spray fired nothing");
+        let mean: Vec2 = spray.iter().fold(Vec2::ZERO, |a, b| a + b.vel.normalized());
+        let mean = mean.normalized();
+        assert!(
+            mean.x > 0.99,
+            "the fan centred on the body instead of the reticle: {mean:?}"
+        );
+    }
+
+    /// **Acid Spit, aimed**: the lob lands where the reticle is, clamped to the
+    /// weapon's reach (and never beyond it).
+    #[test]
+    fn acid_spit_lobs_to_the_aim_point_clamped_to_reach() {
+        let mut w = World::new(Theme::Sewer, 25);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        arm(&mut w, WeaponKind::AcidSpit);
+        let p = w.player.pos;
+        let near = p + Vec2::new(0.0, -60.0);
+        run_weapons_aim(&mut w, 1.0 / 60.0, Some(near));
+        let b = &w.bullets()[0];
+        let lob = b.lob.expect("an Acid Spit lob");
+        assert!(
+            (lob.target - near).len() < 1.0,
+            "the lob did not land on the reticle: {:?} vs {near:?}",
+            lob.target
+        );
+
+        // Far past the reach: clamped to it, still along the aim.
+        let mut w = World::new(Theme::Sewer, 26);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        arm(&mut w, WeaponKind::AcidSpit);
+        let p = w.player.pos;
+        run_weapons_aim(&mut w, 1.0 / 60.0, Some(p + Vec2::new(4000.0, 0.0)));
+        let target = w.bullets()[0].lob.expect("a lob").target;
+        let d = (target - p).len();
+        assert!(d < 4000.0 && d > 100.0, "aim range was not clamped: {d}");
+        assert!((target.y - p.y).abs() < 1.0, "the clamped lob left the aim line");
+    }
+
+    /// **Milk Teeth, aimed**: the evolved lead tooth follows the reticle too.
+    #[test]
+    fn milk_teeth_follows_the_aim() {
+        let mut w = World::new(Theme::Sewer, 27);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        arm(&mut w, WeaponKind::Gnaw);
+        w.player.loadout.weapons[0].level = 5;
+        w.player.loadout.weapons[0].evolved = true;
+        let p = w.player.pos;
+        run_weapons_aim(&mut w, 1.0 / 60.0, Some(p + Vec2::new(0.0, 150.0)));
+        let mut q = w.ecs.query::<(&MilkTooth, &SpawnId)>();
+        let tooth = q
+            .iter(&w.ecs)
+            .min_by_key(|(_, id)| id.0)
+            .map(|(t, _)| t.vel)
+            .expect("the lead tooth");
+        assert!(tooth.y > 0.0 && tooth.x.abs() < 1e-3, "tooth flew {tooth:?}");
+    }
+
+    /// **Fondue Fork, aimed**: the two tines straddle the reticle, so the
+    /// string plants across the aim line rather than across the old facing.
+    #[test]
+    fn fondue_fork_tines_straddle_the_aim() {
+        let mut w = World::new(Theme::Sewer, 28);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        arm(&mut w, WeaponKind::CheeseSpray);
+        w.player.loadout.weapons[0].level = 5;
+        w.player.loadout.weapons[0].evolved = true;
+        let p = w.player.pos;
+        run_weapons_aim(&mut w, 1.0 / 60.0, Some(p + Vec2::new(0.0, 160.0)));
+        let mut q = w.ecs.query::<&CheeseString>();
+        let string = q.iter(&w.ecs).next().expect("the fork's string");
+        // Both plant points are on the aim's forward side (+y) and straddle it.
+        assert!(string.a.y > p.y && string.b.y > p.y, "tines behind the aim");
+        let straddles = (string.a.x - p.x) * (string.b.x - p.x) < 0.0;
+        assert!(
+            straddles,
+            "tines did not straddle the aim: {:?} {:?}",
+            string.a,
+            string.b
+        );
+    }
+
+    /// **Drain Cleaner, aimed**: the channel's direction is the lob's, and the
+    /// lob is the reticle's.
+    #[test]
+    fn drain_cleaner_channel_follows_the_aim() {
+        let mut w = World::new(Theme::Sewer, 29);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        arm(&mut w, WeaponKind::AcidSpit);
+        w.player.loadout.weapons[0].level = 5;
+        w.player.loadout.weapons[0].evolved = true;
+        let p = w.player.pos;
+        run_weapons_aim(&mut w, 1.0 / 60.0, Some(p + Vec2::new(-120.0, 0.0)));
+        let mut q = w.ecs.query::<&EvolvedShot>();
+        let shot = q.iter(&w.ecs).next().expect("the evolved channel");
+        assert!(
+            shot.dir.x < -0.99,
+            "the channel did not follow the reticle: {:?}",
+            shot.dir
+        );
     }
 
     /// **Milk Teeth** evolves the **lead** dart: the level-5 pair keeps its

@@ -291,10 +291,17 @@ pub fn laser_eyes_system(
         ));
     }
     if let Some((pulses, reach, dmg, evolved)) = trigger {
-        let facing = if player.face.len_sq() > 1e-4 {
-            player.face.normalized()
-        } else {
-            Vec2::new(0.0, -1.0)
+        // An aim point turns the sweep to the reticle instead of the facing
+        // (wave 3 controls); with no aim this is exactly the locked `face`.
+        let aimed = input
+            .aim
+            .map(|p| p - player.pos)
+            .filter(|v| v.len_sq() > 4.0)
+            .map(|v| v.normalized());
+        let facing = match aimed {
+            Some(d) => d,
+            None if player.face.len_sq() > 1e-4 => player.face.normalized(),
+            None => Vec2::new(0.0, -1.0),
         };
         let origin = player.pos;
         let total = (pulses - 1) as f32 * LASER_PULSE_INTERVAL + LASER_TAIL;

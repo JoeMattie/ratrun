@@ -1041,11 +1041,46 @@ impl World {
     /// Ctrl press (Ctrl dashes, Space only fires the actives). The bot and the
     /// harness keep using `update`, where one press is both.
     pub fn update_with(&mut self, dt: f32, move_dir: Vec2, dash: bool, active: bool) {
+        // No aim: auto-aim exactly as before (the bot, the harness and every
+        // pre-wave-3 caller).
+        self.update_with_aim(dt, move_dir, dash, active, None);
+    }
+
+    /// [`update_with`](Self::update_with) plus an **aim point** in world
+    /// pixels (`None` = auto-aim). Aim is input, so two runs with the same seed
+    /// and the same recorded aim reproduce exactly (`ecs/tests` has the
+    /// twin-run proof).
+    pub fn update_with_aim(
+        &mut self,
+        dt: f32,
+        move_dir: Vec2,
+        dash: bool,
+        active: bool,
+        aim: Option<Vec2>,
+    ) {
+        self.update_with_charge(dt, move_dir, dash, active, aim, 0.0);
+    }
+
+    /// [`update_with_aim`](Self::update_with_aim) plus the Super Dash charge
+    /// (`0.0` = a plain tap-dash, which is what every pre-wave-3 caller gets).
+    ///
+    /// The bot uses this to fire a charged dash (`game::bot`): the signature of
+    /// `update`/`update_with` stays exactly as it was, so the goldens and every
+    /// older test are byte-identical.
+    pub fn update_with_charge(
+        &mut self,
+        dt: f32,
+        move_dir: Vec2,
+        dash: bool,
+        active: bool,
+        aim: Option<Vec2>,
+        charge: f32,
+    ) {
         // Neon merge: the HUD reads only this tick's pickups.
         self.last_pickups.clear();
         if self.finished() {
             // Keep particles settling for a beat, but freeze the sim.
-            self.begin_tick_with(dt, move_dir, dash, active);
+            self.begin_tick_full(dt, move_dir, dash, active, aim, charge);
             self.settle_schedule.run(&mut self.ecs);
             self.end_tick();
             return;
@@ -1053,7 +1088,7 @@ impl World {
         // Legacy `update` line 123.
         self.elapsed += dt;
 
-        self.begin_tick_with(dt, move_dir, dash, active);
+        self.begin_tick_full(dt, move_dir, dash, active, aim, charge);
         self.schedule.run(&mut self.ecs);
         self.end_tick();
     }
@@ -1073,11 +1108,53 @@ impl World {
     /// [`begin_tick`](Self::begin_tick) with the two presses told apart (see
     /// [`update_with`](Self::update_with)).
     pub fn begin_tick_with(&mut self, dt: f32, move_dir: Vec2, dash: bool, active: bool) {
+        self.begin_tick_full(dt, move_dir, dash, active, None, 0.0);
+    }
+
+    /// [`begin_tick_with`](Self::begin_tick_with) plus the aim point.
+    pub fn begin_tick_with_aim(
+        &mut self,
+        dt: f32,
+        move_dir: Vec2,
+        dash: bool,
+        active: bool,
+        aim: Option<Vec2>,
+    ) {
+        self.begin_tick_full(dt, move_dir, dash, active, aim, 0.0);
+    }
+
+    /// [`begin_tick_with_aim`](Self::begin_tick_with_aim) plus the dash charge
+    /// (single-system tests of the charged Super Dash).
+    pub fn begin_tick_charged(
+        &mut self,
+        dt: f32,
+        move_dir: Vec2,
+        dash: bool,
+        active: bool,
+        aim: Option<Vec2>,
+        charge: f32,
+    ) {
+        self.begin_tick_full(dt, move_dir, dash, active, aim, charge);
+    }
+
+    fn begin_tick_full(
+        &mut self,
+        dt: f32,
+        move_dir: Vec2,
+        dash: bool,
+        active: bool,
+        aim: Option<Vec2>,
+        charge: f32,
+    ) {
         self.ecs.insert_resource(TickInput {
             dt,
             move_dir,
             dash,
             active,
+            aim,
+            dash_down: false,
+            dash_released: false,
+            charge: charge.clamp(0.0, 1.0),
         });
         self.ecs.insert_resource(Viewport(self.viewport));
         self.ecs.insert_resource(NukeTick(false));

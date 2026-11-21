@@ -272,9 +272,12 @@ pub(crate) fn fire_spiked_tail(
     shards: u8,
     evolved: bool,
     next_id: &mut NextSpawnId,
+    aim: Option<Vec2>,
 ) -> bool {
-    // The aim hook: an aimed lash passes `Some(aim_point)` here.
-    let Some(pick) = pick_lash_target(level, order, enemies, boss_points, ppos, reach, None) else {
+    // The aim hook: `None` is auto-fire (nearest the rat); an aimed scheme
+    // hands its reticle point through and the lash takes the eligible body
+    // nearest it.
+    let Some(pick) = pick_lash_target(level, order, enemies, boss_points, ppos, reach, aim) else {
         return false;
     };
     commands.spawn((

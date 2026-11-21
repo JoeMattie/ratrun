@@ -1502,3 +1502,139 @@ fn e_id(w: &World, entity: Entity) -> u32 {
 }
 
 
+
+// ---- Wave 3 controls: aiming is input ------------------------------------
+
+/// A seeded run that **aims** must replay exactly.
+///
+/// Aim is input like `move_dir`/`dash`, so the same seed and the same scripted
+/// aim trace must produce the same run tick for tick. The digests cover the
+/// rat's position/facing, every body's position and hp (in `SpawnId` order),
+/// the projectile count and the score — everything the aim touches.
+#[test]
+fn the_same_seed_and_aim_replays_the_same_fight() {
+    use std::hash::{Hash, Hasher};
+
+    fn digest(seed: u64) -> u64 {
+        use crate::game::weapon::WeaponKind;
+        let mut w = World::new(Theme::Kitchen, seed);
+        w.player.pos = Vec2::new(100.0, 100.0);
+        w.clear_enemies();
+        w.player.loadout.weapons.clear();
+        for kind in [
+            WeaponKind::Gnaw,
+            WeaponKind::CheeseSpray,
+            WeaponKind::AcidSpit,
+            WeaponKind::AcidRain,
+            WeaponKind::Hantavirus,
+        ] {
+            w.player.loadout.weapons.push(crate::game::weapon::Weapon {
+                kind,
+                level: 3,
+                timer: 0.0,
+                evolved: false,
+            });
+        }
+        // A ring of bodies so aiming actually changes which one is picked.
+        for i in 0..8u32 {
+            let a = i as f32 * std::f32::consts::TAU / 8.0;
+            let p = w.player.pos + Vec2::from_angle(a) * (28.0 + i as f32 * 3.0);
+            w.spawn_enemy(EnemyKind::Skitterer, p, 40.0);
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for tick in 0..420u32 {
+            // A scripted reticle: a slow sweep across the ring, so a different
+            // aim picks a different body on a different tick.
+            let a = tick as f32 * 0.031;
+            let aim = w.player.pos + Vec2::from_angle(a) * 70.0;
+            let move_dir = if tick % 90 < 45 {
+                Vec2::new(1.0, 0.0)
+            } else {
+                Vec2::new(0.0, 1.0)
+            };
+            w.update_with_aim(1.0 / 60.0, move_dir, false, false, Some(aim));
+            w.player.pos = w.player.pos.clamp_box(
+                Vec2::splat(24.0),
+                w.level.arena - Vec2::splat(24.0),
+            );
+            if w.pending_levelups > 0 {
+                let c = w.player.loadout.generate_choices(&mut w.rng);
+                if let Some(u) = c.first() {
+                    w.player.loadout.apply(u);
+                }
+                w.pending_levelups = 0;
+            }
+            w.player.pos.x.to_bits().hash(&mut hasher);
+            w.player.pos.y.to_bits().hash(&mut hasher);
+            w.player.face.x.to_bits().hash(&mut hasher);
+            w.player.face.y.to_bits().hash(&mut hasher);
+            for e in w.enemies() {
+                e.pos.x.to_bits().hash(&mut hasher);
+                e.pos.y.to_bits().hash(&mut hasher);
+                e.hp.to_bits().hash(&mut hasher);
+            }
+            w.bullets().len().hash(&mut hasher);
+            w.score.hash(&mut hasher);
+            w.kills.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    for seed in [5u64, 77, 90210] {
+        assert_eq!(
+            digest(seed),
+            digest(seed),
+            "the same seed and the same scripted aim diverged (seed {seed})"
+        );
+    }
+}
+
+/// Aim changes the fight (or the twin-run would be vacuous): the same seed with
+/// two different aim scripts must not produce the same trace.
+#[test]
+fn a_different_aim_changes_the_run() {
+    fn trace(aim_step: f32) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut w = World::new(Theme::Kitchen, 5);
+        w.clear_enemies();
+        w.player.loadout.weapons.clear();
+        w.player.loadout.weapons.push(crate::game::weapon::Weapon {
+            kind: crate::game::weapon::WeaponKind::Gnaw,
+            level: 5,
+            timer: 0.0,
+            evolved: false,
+        });
+        for i in 0..8u32 {
+            let a = i as f32 * std::f32::consts::TAU / 8.0;
+            let p = w.player.pos + Vec2::from_angle(a) * 40.0;
+            w.spawn_enemy(EnemyKind::Skitterer, p, 60.0);
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for tick in 0..180u32 {
+            let a = tick as f32 * aim_step;
+            let aim = w.player.pos + Vec2::from_angle(a) * 60.0;
+            w.update_with_aim(1.0 / 60.0, Vec2::ZERO, false, false, Some(aim));
+            for e in w.enemies() {
+                e.hp.to_bits().hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+    assert_ne!(trace(0.01), trace(1.4), "aim did not change the fight");
+}
+
+/// `World::update`/`update_with` keep passing `None`, so the auto-aim path is
+/// byte-identical to the pre-wave-3 sim (the goldens depend on it).
+#[test]
+fn no_aim_is_the_auto_aim_path() {
+    let mut a = World::new(Theme::Sewer, 3);
+    let mut b = World::new(Theme::Sewer, 3);
+    for _ in 0..120 {
+        a.update(1.0 / 60.0, Vec2::new(1.0, 0.0), false);
+        b.update_with_aim(1.0 / 60.0, Vec2::new(1.0, 0.0), false, false, None);
+    }
+    assert_eq!(a.player.pos, b.player.pos);
+    assert_eq!(a.player.face, b.player.face);
+    assert_eq!(a.score, b.score);
+    assert_eq!(a.enemies().len(), b.enemies().len());
+}

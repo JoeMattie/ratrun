@@ -454,8 +454,14 @@ pub struct HudState {
     dash_status: String,
 
     /// Which key the dash module names (`CTRL`, or `SPACE` on a terminal that
-    /// cannot report a lone modifier press). Set from `App::dash_key`.
+    /// cannot report a lone modifier press). Set from `App::dash_key`; the
+    /// live, remappable label is `dash_name`.
     pub dash_key: DashKey,
+    /// The live dash binding's label, set from the Controls table so a
+    /// rebinding shows on the HUD at once.
+    pub dash_name: String,
+    /// The live active-weapon binding's label (the `SPACE READY` token).
+    pub active_name: String,
     /// The wave-3 pocket-find strip: `B12 M5 P4 S6` — one chip per active
     /// timed buff, refilled in `tick` so the draw path allocates nothing.
     buffs: String,
@@ -544,6 +550,8 @@ impl Default for HudState {
             dash: String::with_capacity(16),
             dash_status: String::with_capacity(8),
             dash_key: DashKey::Space,
+            dash_name: "SPACE".to_string(),
+            active_name: "SPACE".to_string(),
             buffs: String::with_capacity(48),
             wide_chips: false,
             boss_hp_text: String::with_capacity(24),
@@ -838,11 +846,11 @@ impl HudState {
             if let Some(i) = charged {
                 if self.active_ready.get(i).copied().unwrap_or(false) {
                     self.taught_actives = true;
-                    let msg = match self.dash_key {
-                        DashKey::Ctrl => "WEAPON CHARGED · PRESS SPACE",
-                        DashKey::Space => "WEAPON CHARGED · SPACE FIRES",
-                    };
-                    self.push_callout(CalloutKind::ActivesHint, "SPACE", msg, 3.6);
+                    // The tag is the live binding (SPACE unless remapped), so
+                    // the lesson names the key the player actually has.
+                    let tag = self.active_name.clone();
+                    let msg = format!("WEAPON CHARGED · PRESS {tag}");
+                    self.push_callout(CalloutKind::ActivesHint, &tag, &msg, 3.6);
                 }
             }
         }
@@ -1321,7 +1329,11 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
     // exactly full), so the ready state is carried by the slot's own highlight
     // instead — zero columns, same information.
     let show_active_gauge = area.width >= 68;
-    let ready_token = if area.width >= 80 { "SPACE" } else { "SPC" };
+    let ready_token = if area.width >= 80 {
+        state.active_name.as_str()
+    } else {
+        "SPC"
+    };
     let show_icons = !tight || weapons.len() <= 3;
     let show_streak = (if has_rack { area.width >= 68 } else { area.width >= 92 })
         && !state.streak_buf.is_empty();
@@ -1941,7 +1953,17 @@ fn draw_loadout_rack(frame: &mut Frame, rack: Rect, world: &World, state: &HudSt
                     .bg(TRACK)
                     .add_modifier(Modifier::BOLD)
             };
-            let tok = if bar_room >= 5 { "SPACE" } else { "SPC" };
+            // The live binding's label where it fits, else three letters of
+            // it (`SPACE` -> `SPC`, the abbreviation the HUD has always used).
+            let name = state.active_name.as_str();
+            let tok = if name.chars().count() <= bar_room as usize {
+                name
+            } else if name == "SPACE" {
+                "SPC"
+            } else {
+                let cut = name.char_indices().nth(3).map_or(name.len(), |(k, _)| k);
+                &name[..cut]
+            };
             buf.set_stringn(tx + 1, y1, tok, bar_room as usize, tok_style);
         } else if bar_room > 0 {
             draw_mini_bar(buf, tx + 1, y1, bar_room.min(4), ready, w_col);
@@ -2170,7 +2192,7 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
     let dash_denied = !dash_ready && world.player.dash_denied > 0.0;
     refill(&mut state.dash, |b| {
         if area.width >= 44 {
-            let _ = write!(b, "{} DASH", state.dash_key.name());
+            let _ = write!(b, "{} DASH", state.dash_name);
         } else {
             b.push_str("DASH");
         }
@@ -2772,6 +2794,7 @@ mod tests {
         let mut state = HudState::default();
         for key in [DashKey::Ctrl, DashKey::Space] {
             state.dash_key = key;
+            state.dash_name = key.name().to_string();
             for (cols, rows) in [(80u16, 24u16), (120, 40), (57, 20)] {
                 let mut w = known_world();
                 let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap();

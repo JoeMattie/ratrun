@@ -33,13 +33,42 @@ You are a rat. The horde wants you dead. Your weapons fire on their own — you 
 
 ## Controls
 
+Three schemes, chosen in **Options → SCHEME** (saved beside the other
+preferences) and remappable in **Options → CONTROLS**:
+
+| Scheme | Aim | Move | Dash | Fire actives |
+| --- | --- | --- | --- | --- |
+| **Classic** | nearest enemy (auto) | `WASD` / arrows, or the pointer steers | `Ctrl` or left click | `Space` or left click |
+| **Mouse aim** | the pointer | `WASD` / arrows | right click (`Ctrl` too) | left click (`Space` too) |
+| **Gamepad** | right stick when deflected | left stick / d-pad | `RB` | `X` |
+
+A left click in Classic is the whole "do the thing" gesture (dash + actives);
+in Mouse aim the clicks split so a left click never spends the dash. On a
+terminal without lone-modifier reporting, the `Ctrl` dash falls back to `Space`
+and the legends say so.
+
+Shared keys in every scheme:
+
 | Key | Action |
 | --- | --- |
-| `WASD` / arrows | Move |
-| `Space` | Dash |
-| `1` / `2` / `3`, `←/→`, `Enter` | Pick an upgrade on level-up |
+| `Tab` | Toggle the expanded map |
+| `N` | Cycle the minimap size |
+| `Z` / `X` | Zoom in / out (the wheel works too) |
+| Middle click / `R3` | Reset the zoom to 1.0× |
+| `C` | Toggle the pointer |
+| `M` | Mute |
+| `O` | Options |
 | `Esc` / `P` | Pause |
-| `Q` | Quit to menu |
+| `1` / `2` / `3`, `←/→`, `Enter` | Pick an upgrade on level-up |
+
+Gamepad: the d-pad or left stick moves, the right stick aims when deflected,
+`RB` dashes, `X` fires the charged actives, `Start` pauses, `View` opens the
+map, `Y` flips the pointer, `LB` mutes, `RT`/`LT` zoom, `R3` resets the zoom
+and `L3` cycles the minimap. The pad is read only while the terminal has focus.
+
+Every binding can be changed on the **Controls** screen: pick a row, press a
+key, pad button or mouse button, and a conflict swaps the two actions. `R`
+resets the active scheme to its defaults.
 
 ## Rendering
 

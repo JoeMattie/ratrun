@@ -164,11 +164,18 @@ fn push_candidate(out: &mut [Candidate; CANDIDATES], n: &mut usize, c: Candidate
 /// then the boss's grounded points), nearest first. No line test yet: the
 /// caller walks the list and spends one tile query per candidate until it has
 /// what it needs, exactly like `weapons::nearest_visible`.
+///
+/// `rank_from` is the point the ordering is measured from: the rat for
+/// auto-aim, and the **reticle** when the player aims (the wave 3 controls:
+/// "marks prefer the enemies nearest the aimed point"), so an aimed Acid Rain
+/// volley lands where the player is pointing. The reach test always measures
+/// from the rat, because that is where the weapon fires from.
 fn gather(
     order: &[Entity],
     enemies: &Query<(Entity, &SpawnId, &mut Enemy)>,
     boss_points: &BossTargetable,
     from: Vec2,
+    rank_from: Vec2,
     range: f32,
     out: &mut [Candidate; CANDIDATES],
 ) -> usize {
@@ -181,8 +188,11 @@ fn gather(
         if !e.alive() {
             continue;
         }
-        let dist_sq = e.pos.dist_sq(from);
-        if dist_sq.is_nan() || dist_sq > range_sq {
+        if e.pos.dist_sq(from) > range_sq {
+            continue;
+        }
+        let dist_sq = e.pos.dist_sq(rank_from);
+        if dist_sq.is_nan() {
             continue;
         }
         push_candidate(
@@ -198,8 +208,11 @@ fn gather(
         );
     }
     for (index, point) in boss_points.iter().enumerate() {
-        let dist_sq = point.dist_sq(from);
-        if dist_sq.is_nan() || dist_sq > range_sq {
+        if point.dist_sq(from) > range_sq {
+            continue;
+        }
+        let dist_sq = point.dist_sq(rank_from);
+        if dist_sq.is_nan() {
             continue;
         }
         push_candidate(
@@ -247,9 +260,20 @@ pub(crate) fn fire_acid_rain(
     particles: &mut Particles,
     rng: &mut RngRes,
     next_id: &mut NextSpawnId,
+    // Wave 3 controls: the reticle in world pixels; marks are ranked from it
+    // (and the reach still measured from the rat).
+    aim: Option<Vec2>,
 ) -> bool {
     let mut cand = [EMPTY_CANDIDATE; CANDIDATES];
-    let n = gather(order, enemies, boss_points, ppos, range, &mut cand);
+    let n = gather(
+        order,
+        enemies,
+        boss_points,
+        ppos,
+        aim.unwrap_or(ppos),
+        range,
+        &mut cand,
+    );
 
     let count = (drops as usize).min(MAX_DROPS);
     // Downspout is one mark walking home; the base volley marks one foe per
@@ -358,9 +382,20 @@ pub(crate) fn fire_hantavirus(
     evolved: bool,
     particles: &mut Particles,
     rng: &mut RngRes,
+    // Wave 3 controls: tag the eligible body nearest the reticle, still within
+    // the weapon's reach from the rat.
+    aim: Option<Vec2>,
 ) -> bool {
     let mut cand = [EMPTY_CANDIDATE; CANDIDATES];
-    let n = gather(order, enemies, boss_points, ppos, range, &mut cand);
+    let n = gather(
+        order,
+        enemies,
+        boss_points,
+        ppos,
+        aim.unwrap_or(ppos),
+        range,
+        &mut cand,
+    );
     let mut hit = None;
     let boss_marked = boss_virus.0.is_some_and(|i| i.active());
     for c in cand[..n].iter() {

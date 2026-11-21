@@ -54,6 +54,27 @@ pub struct TickInput {
     /// this field (`World::begin_tick_with`). A test can fire an active weapon
     /// while the dash is charging either way.
     pub active: bool,
+    /// Where the pointer (or the right stick) is aiming, in **world pixels**,
+    /// or `None` for auto-aim.
+    ///
+    /// Input, never a simulation decision: `World::update` and
+    /// `World::update_with` pass `None`, so the bot, the harness goldens and
+    /// every pre-wave-3 test are byte-identical. The App passes the reticle's
+    /// world position in the Mouse aim / Gamepad schemes (see
+    /// `App::aim_point`). Each aiming weapon reads it in the way that suits it
+    /// — a direction for Gnaw, Spray and the laser, a point for the lobbed and
+    /// marking weapons — documented per weapon in `weapons::fire_one`.
+    pub aim: Option<Vec2>,
+    /// Is the dash input **held down** this tick? (Wave-3 Super Dash charge.)
+    /// The App fills it from the live bindings; `World::update` leaves it
+    /// false, so the bot/harness path is unchanged.
+    pub dash_down: bool,
+    /// Did the dash input go **up** this tick? (The release edge.)
+    pub dash_released: bool,
+    /// Charge meter at the moment the dash was released, `0.0` (a tap) to
+    /// `1.0` (full). Only non-zero when the Super Dash weapon is owned and the
+    /// dash was held; `0.0` everywhere else, including `World::update`.
+    pub charge: f32,
 }
 
 /// Viewport size as of the last `World::draw` (spawn ring radius depends on
