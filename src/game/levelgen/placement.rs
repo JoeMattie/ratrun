@@ -129,6 +129,10 @@ const MAX_TRAPS: usize = 24;
 /// four times the floor area of the old `18 × 14` pad, so thinning the sticky
 /// count keeps rooms and wide lanes routable without crowding.
 const MAX_STICKY_TRAPS: usize = 8;
+/// Fair cap on snap mousetraps per map: wave 3 doubled the board to
+/// `40 × 24`, so a snapped trap needs a `3 × 3`-cell footprint and a two-tile
+/// bypass of its own. Thinning the count keeps every lane routable.
+const MAX_SNAP_TRAPS: usize = 8;
 /// How many of [`MAX_TRAPS`] may be spent on room-mouth encounters.
 const MAX_ENCOUNTER_TRAPS: usize = 4;
 /// Encounter traps sit this deep inside a room (cells from the doorway cell).
@@ -1240,10 +1244,339 @@ pub fn place_traps(
         place_incidental(tiles, layout, mazes, rng, &mut field, MAX_TRAPS);
     }
 
-    // 3. Enforce the bigger `36 × 28` sticky-trap footprint clearance,
-    //    >= 2-tile-wide bypass, and fair count without altering any mousetrap.
+    // 3. Enforce the `40 × 24` snap-trap footprint clearance, the >= 2-tile
+    //    bypass and the fair snap count first, so the sticky pass below can
+    //    read the settled mousetrap cells.
+    refine_snap_traps(tiles, layout, mazes, &keep_clear, &protected, &mut traps);
+
+    // 4. Then the bigger `36 × 28` sticky-trap footprint clearance, the
+    //    >= 2-tile-wide bypass, and the fair sticky count.
     refine_sticky_traps(tiles, layout, mazes, &keep_clear, &protected, &mut traps);
     traps
+}
+
+/// Deterministic per-trap spec for a mousetrap: its bar kind and its bait.
+///
+/// **Level data**, chosen once at generation and carried in the art view, never
+/// rolled at runtime: the player reads a chest, a good pickup or a red-painted
+/// bar from a distance and decides whether the trap is worth committing to.
+///
+/// The stream is a hash of the level's spec seed and the trap's own cell, so it
+/// draws nothing at all from the layout/maze/hole/trap rng and cannot move any
+/// other placement (or the map pin's rng sequence).
+pub fn snap_spec(
+    spec_seed: u64,
+    pos: Vec2,
+) -> (
+    crate::game::art_traps::MousetrapKind,
+    crate::game::art_traps::TrapBait,
+) {
+    use crate::game::art_traps::{MousetrapKind, TrapBait};
+    use crate::game::gem::PickupKind;
+
+    // 1 in 6 chests, ~1 in 24 plain cheese, the rest a good pickup.
+    const CHEST_ROLL: u64 = 20;
+    const CHEESE_ROLL: u64 = 5;
+    const ROLLS: u64 = 120;
+
+    let cell = validate::cell_of(pos);
+    let h = splitmix64(
+        spec_seed
+            ^ (cell.0 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (cell.1 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F),
+    );
+    let roll = h % ROLLS;
+    let bait = if roll < CHEST_ROLL {
+        TrapBait::Chest
+    } else if roll < CHEST_ROLL + CHEESE_ROLL {
+        TrapBait::Cheese
+    } else {
+        // The valuable finds only (no common filler): Magnet, Nuke, Bottle Cap,
+        // Pocket Watch and a big Heal, weighted by how much the run wants them.
+        const GOOD: [(PickupKind, u64); 5] = [
+            (PickupKind::Magnet, 3),
+            (PickupKind::Nuke, 2),
+            (PickupKind::BottleCap, 3),
+            (PickupKind::PocketWatch, 3),
+            (PickupKind::Heal, 2),
+        ];
+        let total: u64 = GOOD.iter().map(|(_, w)| *w).sum();
+        let pick = splitmix64(h ^ 0x51ED_2701_9E37_79B9) % total;
+        let mut acc = 0;
+        let mut chosen = PickupKind::Magnet;
+        for (kind, weight) in GOOD {
+            acc += weight;
+            if pick < acc {
+                chosen = kind;
+                break;
+            }
+        }
+        TrapBait::Pickup(chosen)
+    };
+    // Hair trigger: always under a chest, ~12 % of the pickup baits and ~5 % of
+    // the cheese ones, i.e. about one trap in four overall — weighted toward
+    // the better baits, exactly as the risk reads on the floor.
+    let hair_roll = splitmix64(h ^ 0xD1B5_4A32_D192_ED03) % 100;
+    let hair = match bait {
+        TrapBait::Chest => true,
+        TrapBait::Pickup(_) => hair_roll < 12,
+        TrapBait::Cheese => hair_roll < 5,
+    };
+    let kind = if hair {
+        MousetrapKind::HairTrigger
+    } else {
+        MousetrapKind::Ordinary
+    };
+    (kind, bait)
+}
+
+/// One round of the splitmix64 finaliser (the generator's own deterministic
+/// mixing for the per-trap spec stream).
+#[inline]
+fn splitmix64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Drop any trap (of either kind) that ended up crowding a mouse-hole shop.
+///
+/// Shops are placed after the traps (they draw no rng, so their order is free),
+/// and a `40 × 24` snap trap or a `36 × 28` board across a shop threshold would
+/// make the shelf hard to reach. The trap lists are pruned instead, which is
+/// deterministic and only ever removes a trap.
+pub fn drop_traps_crowding_shops(
+    traps: &mut Vec<TrapPlacement>,
+    shops: &[ShopHolePlacement],
+) {
+    if shops.is_empty() {
+        return;
+    }
+    traps.retain(|trap| {
+        let cell = validate::cell_of(trap.pos);
+        !shops.iter().any(|shop| {
+            (cell.0 - shop.mouth.0).abs() <= 2 && (cell.1 - shop.mouth.1).abs() <= 2
+        })
+    });
+}
+
+/// Refine snap-trap placements for the doubled `40 × 24` board.
+///
+/// Every surviving mousetrap is guaranteed to:
+/// - keep its full `3 × 3` cell footprint (`48 × 48` px, strictly enclosing the
+///   `40 × 24` baseboard in every cardinal facing) on `TileKind::Open` floor,
+///   outside the start room, the entire boss arena, and every maze;
+/// - stay clear of spawn, doorways, one-way doors, rat-holes, maze portals and
+///   other traps (>= 4 cells from every other trap, so a snap bar and a glue
+///   board can never share floor);
+/// - leave a clear bypass lane at least two tiles wide around its footprint, so
+///   a bigger trap never fills a corridor's width.
+///
+/// A snap trap that fails at its raw cell is nudged deterministically to the
+/// nearest valid cell within 3 tiles (or dropped when the space is too narrow,
+/// thinning tight corridors automatically) and capped at [`MAX_SNAP_TRAPS`].
+fn refine_snap_traps(
+    tiles: &TileMap,
+    layout: &Layout,
+    mazes: &[MazeSection],
+    keep_clear: &TileRect,
+    protected: &[(i32, i32)],
+    traps: &mut Vec<TrapPlacement>,
+) {
+    // Cells of every trap that is not a snap: sticky boards are refined *after*
+    // this pass and read the settled snap cells, so their raw cells are all
+    // this pass has to keep away from.
+    let others: Vec<(i32, i32)> = traps
+        .iter()
+        .filter(|t| t.kind != TrapKind::Snap)
+        .map(|t| validate::cell_of(t.pos))
+        .collect();
+
+    let mut accepted: Vec<(i32, i32)> = Vec::new();
+    let mut out: Vec<TrapPlacement> = Vec::with_capacity(traps.len());
+
+    for trap in traps.drain(..) {
+        if trap.kind != TrapKind::Snap {
+            out.push(trap);
+            continue;
+        }
+        if accepted.len() >= MAX_SNAP_TRAPS {
+            continue;
+        }
+        let origin = validate::cell_of(trap.pos);
+        let chosen = if snap_cell_ok(
+            tiles,
+            layout,
+            mazes,
+            keep_clear,
+            protected,
+            &others,
+            &accepted,
+            origin,
+            trap.encounter,
+        ) {
+            Some(origin)
+        } else {
+            find_nearby_snap_cell(
+                tiles,
+                layout,
+                mazes,
+                keep_clear,
+                protected,
+                &others,
+                &accepted,
+                origin,
+                trap.approach,
+                trap.encounter,
+            )
+        };
+        if let Some(cell) = chosen {
+            let mut placed = trap;
+            placed.pos = TileMap::tile_rect(cell.0, cell.1).center();
+            accepted.push(cell);
+            out.push(placed);
+        }
+    }
+
+    *traps = out;
+}
+
+/// Deterministic local nudge (radius `1..=3` tiles) when a raw snap-trap cell
+/// does not have enough clearance for the `40 × 24` baseboard.
+#[allow(clippy::too_many_arguments)]
+fn find_nearby_snap_cell(
+    tiles: &TileMap,
+    layout: &Layout,
+    mazes: &[MazeSection],
+    keep_clear: &TileRect,
+    protected: &[(i32, i32)],
+    others: &[(i32, i32)],
+    accepted: &[(i32, i32)],
+    origin: (i32, i32),
+    approach: Cardinal,
+    encounter: bool,
+) -> Option<(i32, i32)> {
+    if encounter {
+        let inward = cardinal_vec(opposite(approach));
+        let (ix, iy) = (inward.x as i32, inward.y as i32);
+        for step in 1..=2 {
+            let c = (origin.0 + ix * step, origin.1 + iy * step);
+            if snap_cell_ok(
+                tiles,
+                layout,
+                mazes,
+                keep_clear,
+                protected,
+                others,
+                accepted,
+                c,
+                true,
+            ) {
+                return Some(c);
+            }
+        }
+    }
+    for dist in 1..=6i32 {
+        for dy in -3..=3i32 {
+            for dx in -3..=3i32 {
+                if dx.abs() + dy.abs() != dist {
+                    continue;
+                }
+                let c = (origin.0 + dx, origin.1 + dy);
+                if snap_cell_ok(
+                    tiles,
+                    layout,
+                    mazes,
+                    keep_clear,
+                    protected,
+                    others,
+                    accepted,
+                    c,
+                    encounter,
+                ) {
+                    return Some(c);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Full clearance and bypass-width check for a `40 × 24` snap trap centered at
+/// `cell`.
+#[allow(clippy::too_many_arguments)]
+fn snap_cell_ok(
+    tiles: &TileMap,
+    layout: &Layout,
+    mazes: &[MazeSection],
+    keep_clear: &TileRect,
+    protected: &[(i32, i32)],
+    others: &[(i32, i32)],
+    accepted: &[(i32, i32)],
+    cell: (i32, i32),
+    encounter: bool,
+) -> bool {
+    let (cx, cy) = cell;
+    let pos = TileMap::tile_rect(cx, cy).center();
+    if (pos - layout.start).len() <= 7.5 * crate::game::collision::TILE_F {
+        return false;
+    }
+    if !encounter && keep_clear.contains(cx, cy) {
+        return false;
+    }
+
+    // 1. Full 3 × 3 footprint (48 × 48 px) on open floor, outside the start
+    //    room, the boss arena and every maze.
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            let (tx, ty) = (cx + dx, cy + dy);
+            if !tiles.in_bounds(tx, ty) || !tiles.get(tx, ty).is_open() {
+                return false;
+            }
+            if layout.start_room.contains(tx, ty) || layout.boss_arena.contains(tx, ty) {
+                return false;
+            }
+            if mazes.iter().any(|maze| maze.bounds.contains(tx, ty)) {
+                return false;
+            }
+        }
+    }
+
+    // 2. No threshold within one clear tile of the footprint.
+    for dy in -2..=2 {
+        for dx in -2..=2 {
+            if matches!(
+                tiles.get(cx + dx, cy + dy),
+                TileKind::Wall(
+                    WallKind::Doorway { .. }
+                        | WallKind::OneWayDoor { .. }
+                        | WallKind::RatHole { .. }
+                )
+            ) {
+                return false;
+            }
+        }
+    }
+
+    // 3. Clearance from maze portals/rewards and every other trap (>= 4 cells:
+    //    a 40 px bar next to a 36 px board still leaves walking room).
+    if protected
+        .iter()
+        .any(|&(px, py)| (px - cx).abs() <= 3 && (py - cy).abs() <= 3)
+    {
+        return false;
+    }
+    if others
+        .iter()
+        .chain(accepted.iter())
+        .any(|&(tx, ty)| (tx - cx).abs() <= 3 && (ty - cy).abs() <= 3)
+    {
+        return false;
+    }
+
+    // 4. Bypass width >= 2 tiles around the 3 × 3 footprint.
+    sticky_bypass_ok(tiles, accepted, cell)
 }
 
 /// Refine sticky-trap placements for the larger `36 × 28` glue board while

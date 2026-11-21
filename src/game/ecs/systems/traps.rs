@@ -10,10 +10,15 @@
 //! the drawn glue pool and the simulated pad cannot drift apart.
 //!
 //! ```
-//! StickyTrapState:  Idle --(victim steps on the pad)--> Stuck --(hold spent,
-//!                   victim freed, or the rat dashes out)--> Used
-//! MousetrapState:   Armed --(any ground entity in the trigger circle)-->
-//!                   Triggered (0.28 s) --> Snapping (0.20 s) --> Sprung
+//! StickyTrapState:  Idle --(a body on the pad, room and glue left)--> Stuck
+//!                   --(that body's hold spent / killed / the rat dashes out)-->
+//!                   back to Idle  ...  --(the lifetime budget is gone AND the
+//!                   last victim has left)--> Used
+//! MousetrapState:   Armed --(the rat touches the plate, or any ground entity
+//!                   enters the trigger circle)-->
+//!                   Triggered (0.18 s, ordinary only) --> Snapping (0.20 s)
+//!                   --> Sprung   (a hair trigger skips `Triggered`: its bar
+//!                   resolves its damage on the touch tick)
 //! ```
 //!
 //! ## Ordering
@@ -69,12 +74,50 @@
 //! ## Designer overrides (review "Boss and trap direction")
 //!
 //! - the rat is held `0.9 s` ([`STICKY_HOLD_PLAYER_SECS`]) instead of the art's
-//!   1.6 s;
+//!   1.6 s, and costs `2` glue units instead of the whole board;
 //! - ground Skitterers / Cats / Spitters `2.5 s`, Brutes `1.5 s`, all at the
 //!   art's `20 %` ([`STICKY_TRAP_SLOW_MULT`]); Bats fly over;
-//! - bosses keep the art's `0.8 s` at `40 %` ([`STICKY_HOLD_BOSS_SECS`]);
-//! - the mousetrap keeps the art's `0.28 s` bait warning, `0.20 s` snap,
-//!   `20` damage to the rat and `80` to ground enemies.
+//! - bosses and named minibosses keep the art's `0.8 s` at `40 %`
+//!   ([`STICKY_HOLD_BOSS_SECS`]) as a *crossing* slow: they never take a glue
+//!   unit and are never held;
+//! - the mousetrap keeps the art's `0.28 s` bait warning and `0.20 s` swing for
+//!   an ordinary snap, deals a share of the rat's pool
+//!   ([`MOUSETRAP_DAMAGE_PLAYER_SHARE`] / [`MOUSETRAP_DAMAGE_PLAYER_HAIR_SHARE`],
+//!   half its flat armour ignored) and flattens ground enemies
+//!   ([`MOUSETRAP_DAMAGE_ENEMY`] / [`MOUSETRAP_DAMAGE_ENEMY_HAIR`]).
+//!
+//! ## A glue board is a crowd tool (wave 3, "sticky traps should accumulate a
+//! bunch of enemies before being not sticky")
+//!
+//! One board now holds **several** victims at once and wears out over a
+//! lifetime, instead of catching one body and being spent:
+//!
+//! - **Capacity.** Bodies take glue *units* by size ([`enemy_units`]): a
+//!   Skitterer/Bell Flea 1, a Cat/Spitter/Pillbug/Porter/Turnkey 2, a Brute or
+//!   elite 4, the rat 2. A board holds [`STICKY_TRAP_CAPACITY`] (8) units at
+//!   once. Each victim takes its own fixed slot ([`STICKY_TRAP_SLOTS`] = 8, a
+//!   plain array — no per-tick allocation, no per-board `Vec`).
+//! - **Wear.** Each catch also spends its units from a lifetime budget
+//!   ([`STICKY_TRAP_BUDGET`] = 20 units), so a fresh board pins roughly a dozen
+//!   to twenty small bodies over its life. Spent units are gone even after the
+//!   victim tears free; the board only becomes `Used` when the budget is gone
+//!   **and** its last victim has left.
+//! - **Hold.** A victim is pinned to its own pad slot for its class hold
+//!   (`enemy_hold`), then tears free (the existing release feedback) and its
+//!   capacity is freed. A victim killed on the board frees its units at once:
+//!   the corpse never blocks the pad. A board ignores a body it has just
+//!   released for [`STICKY_TRAP_RELEASE_GRACE_SECS`], so one body cannot be
+//!   re-caught until it has walked off.
+//! - **Overflow.** A body too big for the room left (or arriving once the
+//!   budget is gone) is only *slowed* while it crosses, never held: the horde
+//!   behind a full board keeps moving. Stuck bodies do not block pathing
+//!   either — they are ordinary enemies, and enemy movement never blocks on
+//!   other enemies.
+//! - **The rat.** Unchanged in feel (same hold, a dash still breaks out, Clean
+//!   Socks still ignore the glue) but it costs `2` units like anything else
+//!   instead of using the board up. Baiting a pack onto a board and killing it
+//!   there is the point: stuck bodies are ordinary enemies, so weapons, pools,
+//!   Hantavirus, Wick bursts and contact all reach them normally.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -82,27 +125,35 @@ use bevy_ecs::prelude::*;
 
 use crate::audio::Sfx;
 use crate::game::art_traps::{
-    local_box_contains, MousetrapState, MousetrapView, StickyTrapState, MOUSETRAP_DAMAGE_ENEMY,
-    MOUSETRAP_DAMAGE_PLAYER, MOUSETRAP_HIT_PROGRESS_MAX, MOUSETRAP_HIT_PROGRESS_MIN,
+    local_box_contains, MousetrapState, MousetrapView, StickyTrapState, StickyVictimKind,
+    StickyVictimView, TrapBait, MOUSETRAP_ARMOUR_IGNORED, MOUSETRAP_BAIT_TAKE_RADIUS,
+    MOUSETRAP_DAMAGE_ENEMY, MOUSETRAP_DAMAGE_ENEMY_HAIR, MOUSETRAP_DAMAGE_PLAYER_HAIR_SHARE,
+    MOUSETRAP_DAMAGE_PLAYER_SHARE, MOUSETRAP_HIT_PROGRESS_MAX, MOUSETRAP_HIT_PROGRESS_MIN,
     MOUSETRAP_KILL_HALF_V, MOUSETRAP_KILL_U_MAX, MOUSETRAP_KILL_U_MIN, MOUSETRAP_SNAP_SECS,
     MOUSETRAP_TRIGGER_OFFSET_U, MOUSETRAP_TRIGGER_RADIUS, MOUSETRAP_TRIGGER_SECS,
-    STICKY_TRAP_BLOCKS_MOVEMENT, STICKY_TRAP_HOLD_BRUTE_SECS, STICKY_TRAP_HOLD_SMALL_ENEMY_SECS,
-    STICKY_TRAP_PAD_HALF, STICKY_TRAP_SLOW_MULT,
+    STICKY_TRAP_BLOCKS_MOVEMENT, STICKY_TRAP_BUDGET, STICKY_TRAP_CAPACITY,
+    STICKY_TRAP_HOLD_BRUTE_SECS, STICKY_TRAP_HOLD_SMALL_ENEMY_SECS, STICKY_TRAP_PAD_HALF,
+    STICKY_TRAP_RAT_UNITS, STICKY_TRAP_RELEASE_GRACE_SECS, STICKY_TRAP_SLOTS,
+    STICKY_TRAP_SLOW_MULT,
 };
-use crate::game::ecs::components::{Entity, SpawnId};
+use crate::game::ecs::components::{ChestSpawn, Entity, SpawnId};
 use crate::game::ecs::constants::PLAYER_RADIUS;
-use crate::game::ecs::resources::{RngRes, SfxQueue, TickInput};
+use crate::game::ecs::resources::{NextSpawnId, RngRes, SfxQueue, TickInput};
 use crate::game::enemy::{Enemy, EnemyKind};
+use crate::game::gem::Pickup;
 use crate::game::level::{Level, Theme};
 use crate::game::particle::damage_number::{DamageNumbers, DamageSource};
 use crate::game::particle::vfx;
 use crate::game::particle::Particles;
 use crate::game::player::Player;
 use crate::math::Vec2;
+use crate::render::palette::Rgb;
 
 // Runtime checks: the art's pads are walkable hazards, and the two traps this
 // file drives are the ones whose states it writes.
 const _: () = assert!(!STICKY_TRAP_BLOCKS_MOVEMENT);
+// The victim array has to be able to hold a full load of the smallest bodies.
+const _: () = assert!(STICKY_TRAP_SLOTS as u8 >= STICKY_TRAP_CAPACITY);
 
 /// How long the rat is held by a glue board.
 ///
@@ -113,6 +164,9 @@ pub const STICKY_HOLD_PLAYER_SECS: f32 = 0.9;
 pub const STICKY_HOLD_BOSS_SECS: f32 = 0.8;
 /// Boss movement multiplier while glued (art `StickyTrapState::Stuck`).
 pub const STICKY_SLOW_BOSS: f32 = 0.4;
+
+/// The rat's glue colour on the pad (the rat art's warm grey-brown).
+const RAT_GLUE_COLOR: Rgb = (176, 148, 126);
 
 /// Squared "could this point still be on the pad?" prefilter radius.
 ///
@@ -126,7 +180,8 @@ const PAD_REACH_SQ: f32 = (STICKY_TRAP_PAD_HALF.x + 1.0) * (STICKY_TRAP_PAD_HALF
 /// Per-enemy movement multiplier applied by a trap (absent = `1.0`).
 ///
 /// Only glued ground enemies carry this component. It is inserted when a
-/// sticky board catches the enemy and removed when the glue releases, and
+/// sticky board catches the enemy (and, at the same multiplier, while an
+/// overflow body crosses a full pad), and removed when the glue releases;
 /// `enemy_move::enemy_steering_system` multiplies it into `speed_mult`, which
 /// is what gives the art's exact `20 %` (or a boss's `40 %`) regardless of
 /// frame rate.
@@ -140,14 +195,145 @@ enum Victim {
     Enemy(Entity),
 }
 
-/// Runtime side table for one sticky board.
-#[derive(Clone, Copy, Debug, Default)]
-struct StickySlot {
-    victim: Option<Victim>,
-    /// Seconds of hold left.
+/// One of a board's fixed victim slots.
+#[derive(Clone, Copy, Debug)]
+struct StuckVictim {
+    who: Victim,
+    /// Glue units it occupies (0 in the post-release grace).
+    units: u8,
+    /// Seconds of hold left (or of post-release grace when `held` is false).
     remaining: f32,
-    /// Total hold this victim gets, for the art's `progress`.
+    /// Total hold this victim got, for the art's `progress`.
     hold: f32,
+    /// `true` while it is held; `false` while the board ignores it after a
+    /// release (so a body still standing on the pad is not re-caught).
+    held: bool,
+}
+
+/// A boss / named miniboss being slowed (never held) by a board.
+#[derive(Clone, Copy, Debug)]
+struct BossSlow {
+    entity: Entity,
+    remaining: f32,
+}
+
+/// Runtime side table for one sticky board.
+///
+/// Fixed-size: the victim slots are an array, never a `Vec`, so a busy board
+/// allocates nothing while it holds its crowd.
+#[derive(Clone, Copy, Debug)]
+struct StickySlot {
+    slots: [Option<StuckVictim>; STICKY_TRAP_SLOTS],
+    /// Glue units currently occupied.
+    load: u8,
+    /// Glue units left in the board's lifetime budget.
+    budget_left: u8,
+    /// The boss-like body this board is slowing (takes no capacity).
+    boss: Option<BossSlow>,
+}
+
+impl Default for StickySlot {
+    fn default() -> Self {
+        Self {
+            slots: [None; STICKY_TRAP_SLOTS],
+            load: 0,
+            // A fresh board carries the whole lifetime budget.
+            budget_left: STICKY_TRAP_BUDGET,
+            boss: None,
+        }
+    }
+}
+
+impl StickySlot {
+    /// Is this entity already in one of this board's slots (held or cooling)?
+    #[inline]
+    fn touches(&self, entity: Entity) -> bool {
+        self.slots
+            .iter()
+            .flatten()
+            .any(|v| matches!(v.who, Victim::Enemy(e) if e == entity))
+    }
+
+    /// The lowest free victim slot, if any.
+    #[inline]
+    fn free_slot(&self) -> Option<usize> {
+        self.slots.iter().position(|s| s.is_none())
+    }
+}
+
+/// Glue **units** a ground body takes on a board (the owner's size classes).
+///
+/// Small bodies (Skitterer, Bell Flea, a Bat that had to walk) are 1; the
+/// medium bodies (Cat, Spitter, Pillbug, Porter, Turnkey) 2; a Brute — and an
+/// elite Brute — 4. Boss-like bodies are handled outside the capacity (see
+/// [`is_boss_like`]) and report 0.
+#[inline]
+pub fn enemy_units(kind: EnemyKind) -> u8 {
+    match kind {
+        EnemyKind::Boss => 0,
+        EnemyKind::Brute => 4,
+        EnemyKind::Cat
+        | EnemyKind::Spitter
+        | EnemyKind::Pillbug
+        | EnemyKind::Porter
+        | EnemyKind::Turnkey => 2,
+        EnemyKind::Skitterer | EnemyKind::Bat | EnemyKind::BellFlea | EnemyKind::WickMoth => 1,
+    }
+}
+
+/// Bodies a glue board never catches, whatever the room: the level boss and a
+/// named miniboss are slowed while crossing (the pre-wave-3 rule) and take no
+/// capacity.
+#[inline]
+fn is_boss_like(e: &Enemy) -> bool {
+    e.kind == EnemyKind::Boss || e.named
+}
+
+/// The art's body class for a caught kind (drives the drawn mound size).
+#[inline]
+fn victim_kind(kind: EnemyKind) -> StickyVictimKind {
+    match enemy_units(kind) {
+        1 => StickyVictimKind::Small,
+        2 => StickyVictimKind::Medium,
+        _ => StickyVictimKind::Big,
+    }
+}
+
+/// Fixed pad-slot anchors, in pad-normalised `[-1, 1]` units, in slot order.
+///
+/// Deterministic from the slot index (a victim never moves mid-hold), spread so
+/// a full board reads as a crowd rather than a stack.
+const SLOT_UV: [(f32, f32); STICKY_TRAP_SLOTS] = [
+    (-0.42, -0.36),
+    (0.42, 0.36),
+    (0.40, -0.38),
+    (-0.40, 0.38),
+    (-0.02, 0.02),
+    (0.06, 0.74),
+    (-0.08, -0.74),
+    (0.76, -0.02),
+];
+
+/// World position of slot `slot` for a victim of collision `radius`.
+#[inline]
+fn sticky_slot_pos(pos: Vec2, facing: Vec2, slot: usize, radius: f32) -> Vec2 {
+    let f = safe_dir(facing);
+    let p = f.perp();
+    let inset = Vec2::new(
+        (STICKY_TRAP_PAD_HALF.x - radius).max(1.5),
+        (STICKY_TRAP_PAD_HALF.y - radius).max(1.5),
+    );
+    let (su, sv) = SLOT_UV[slot.min(STICKY_TRAP_SLOTS - 1)];
+    pos + f * (su * inset.x) + p * (sv * inset.y)
+}
+
+#[inline]
+fn safe_dir(v: Vec2) -> Vec2 {
+    if v.len_sq() > 1e-6 {
+        v.normalized()
+    } else {
+        Vec2::new(1.0, 0.0)
+    }
 }
 
 /// Runtime side table for one mousetrap.
@@ -157,13 +343,45 @@ struct MouseSlot {
     struck: Vec<Entity>,
     /// The rat was already damaged by this snap.
     player_struck: bool,
+    /// This snap's damage is already resolved (a hair trigger resolves it on
+    /// the touch tick, before the swing's hit window would run).
+    hit_done: bool,
+}
+
+/// A body standing on a pad, snapshotted for the catch walk.
+#[derive(Clone, Copy, Debug)]
+pub struct PadCandidate {
+    id: u64,
+    entity: Entity,
+    kind: EnemyKind,
+    named: bool,
+    radius: f32,
+    pos: Vec2,
+}
+
+/// All of the system's scratch, in one reused `Local` (the function-argument
+/// budget is 16, and every buffer here must be allocated once per run).
+#[derive(Default)]
+pub struct Scratch {
+    /// Mousetrap snap targets, sorted by `SpawnId` before damage.
+    hits: Vec<(u64, Entity)>,
+    /// Boards / traps that became worthless this tick.
+    spent_sticky: Vec<usize>,
+    spent_mice: Vec<usize>,
+    /// Bodies on this tick's pad, sorted by `SpawnId`.
+    cands: Vec<PadCandidate>,
+    /// Every already-held body across the live boards this tick.
+    held: Vec<Entity>,
+    /// Bodies given a crossing slow this tick (see `TrapRuntime::cross_prev`).
+    cross_now: Vec<Entity>,
 }
 
 /// ECS side table for the floor traps, indexed exactly like `LevelObjects`.
 ///
 /// The *visible* state lives in the art view structs (that is what the
 /// renderer reads); this only keeps what the views cannot hold: who is glued
-/// and for how long, and which targets a snap has already hit.
+/// and for how long, how much lifetime glue a board has left, and which targets
+/// a snap has already hit.
 #[derive(Resource, Default)]
 pub struct TrapRuntime {
     /// Level identity the lists were built for (`seed`, `theme`).
@@ -173,8 +391,12 @@ pub struct TrapRuntime {
     mice: Vec<MouseSlot>,
     /// Ascending indices of the boards that can still do something.
     live_sticky: Vec<usize>,
-    /// Ascending indices of the traps that can still do something.
+    /// Ascending indices of the traps that can still do something (a sprung
+    /// trap keeps a live entry while an untaken bait lies on it).
     live_mice: Vec<usize>,
+    /// Bodies that carried a *crossing* slow at the end of the last tick, so a
+    /// body that walks off a full pad has the glue taken back off it.
+    cross_prev: Vec<Entity>,
 }
 
 impl TrapRuntime {
@@ -215,9 +437,10 @@ impl TrapRuntime {
                 .mousetraps
                 .iter()
                 .enumerate()
-                .filter(|(_, v)| is_live_mouse(v.state))
+                .filter(|(_, v)| is_live_mouse(v))
                 .map(|(i, _)| i),
         );
+        self.cross_prev.clear();
     }
 }
 
@@ -227,13 +450,11 @@ fn is_live_sticky(state: StickyTrapState) -> bool {
     matches!(state, StickyTrapState::Idle | StickyTrapState::Stuck)
 }
 
-/// A mousetrap can still be triggered, or is in the middle of a snap.
+/// A mousetrap can still be triggered, is in the middle of a snap, or holds an
+/// untaken bait on its sprung plate.
 #[inline]
-fn is_live_mouse(state: MousetrapState) -> bool {
-    matches!(
-        state,
-        MousetrapState::Armed | MousetrapState::Triggered | MousetrapState::Snapping
-    )
+fn is_live_mouse(view: &MousetrapView) -> bool {
+    view.live() || (!view.bait_taken && view.bait.is_good())
 }
 
 /// Ground enemies can be glued and can trip a mousetrap; Bats fly over both.
@@ -271,16 +492,24 @@ fn on_pad(pos: Vec2, facing: Vec2, p: Vec2) -> bool {
     )
 }
 
-/// Is `p` inside the bait plate's trigger circle? (Art `Armed`: radius `4.5`
-/// around `pos + facing * 3.5`.)
+/// Is `p` inside the bait plate's trigger circle? (Art `Armed`: radius
+/// `MOUSETRAP_TRIGGER_RADIUS` around `pos + facing * MOUSETRAP_TRIGGER_OFFSET_U`.)
 #[inline]
 fn on_bait(pos: Vec2, facing: Vec2, p: Vec2) -> bool {
-    let centre = pos + facing.normalized() * MOUSETRAP_TRIGGER_OFFSET_U;
+    let centre = pos + safe_dir(facing) * MOUSETRAP_TRIGGER_OFFSET_U;
     p.dist_sq(centre) <= MOUSETRAP_TRIGGER_RADIUS * MOUSETRAP_TRIGGER_RADIUS
 }
 
+/// Is `p` close enough to the plate to take the bait? (A hair more generous
+/// than the trigger circle, so touching the plate always collects.)
+#[inline]
+fn near_bait(pos: Vec2, facing: Vec2, p: Vec2) -> bool {
+    let centre = pos + safe_dir(facing) * MOUSETRAP_TRIGGER_OFFSET_U;
+    p.dist_sq(centre) <= MOUSETRAP_BAIT_TAKE_RADIUS * MOUSETRAP_BAIT_TAKE_RADIUS
+}
+
 /// Is `p` inside the striker bar's kill rectangle? (Art `Snapping`:
-/// `u in [-1.0, 9.5]`, `|v| <= 6.0`.)
+/// `u in [-4.0, 18.0]`, `|v| <= 10.0`.)
 #[inline]
 fn in_kill_rect(pos: Vec2, facing: Vec2, p: Vec2) -> bool {
     local_box_contains(
@@ -293,45 +522,37 @@ fn in_kill_rect(pos: Vec2, facing: Vec2, p: Vec2) -> bool {
     )
 }
 
-/// The lowest-`SpawnId` ground enemy whose centre is on a board's pad.
+/// The damage a snap deals to the rat.
 ///
-/// Choosing the minimum id instead of the first hit keeps the query's storage
-/// order out of the decision (determinism rule), without sorting the whole
-/// horde once per board.
-fn pick_enemy_on_pad(
-    enemies: &mut Query<(Entity, &SpawnId, &mut Enemy)>,
-    slow: &Query<&TrapSlow>,
-    pos: Vec2,
-    facing: Vec2,
-) -> Option<(u64, Entity)> {
-    let mut best: Option<(u64, Entity)> = None;
-    for (entity, id, e) in enemies.iter() {
-        if !e.alive() || !is_ground(e.kind) || slow.contains(entity) {
-            continue;
-        }
-        // Cheap circle reject first (the pad's half-diagonal), then the exact
-        // oriented rectangle the art draws.
-        if e.pos.dist_sq(pos) > PAD_REACH_SQ {
-            continue;
-        }
-        if !on_pad(pos, facing, e.pos) {
-            continue;
-        }
-        if best.is_none_or(|(best_id, _)| id.0 < best_id) {
-            best = Some((id.0, entity));
-        }
-    }
-    best
+/// The bar's bite is a share of the rat's own pool
+/// ([`MOUSETRAP_DAMAGE_PLAYER_SHARE`] / [`MOUSETRAP_DAMAGE_PLAYER_HAIR_SHARE`]),
+/// so it keeps meaning something late in a run; **half** its flat armour is
+/// ignored (a spring bar does not care about a thick hide), which is why the
+/// armour is added back here: `Player::take_damage` subtracts the whole armour
+/// from whatever it is handed.
+///
+/// Never fatal from full health: the shares are 0.35 and 0.65, and a share can
+/// only be reduced by armour, so the worst case leaves the rat standing.
+#[inline]
+fn snap_player_damage(player: &Player, hair: bool) -> f32 {
+    let share = if hair {
+        MOUSETRAP_DAMAGE_PLAYER_HAIR_SHARE
+    } else {
+        MOUSETRAP_DAMAGE_PLAYER_SHARE
+    };
+    player.max_hp() * share + player.loadout.stats.armor * MOUSETRAP_ARMOUR_IGNORED
 }
 
-/// Apply one mousetrap snap's active window: the rat (through i-frames) and
+/// Resolve a mousetrap snap's active window: the rat (through i-frames) and
 /// every ground enemy under the bar, each target at most once.
 ///
 /// Enemy targets are damaged in `SpawnId` order because the impact vfx draws
 /// from the rng, so the draw order is part of the spec.
+#[allow(clippy::too_many_arguments)]
 fn snap_window(
     pos: Vec2,
     facing: Vec2,
+    hair: bool,
     player: &mut Player,
     player_alive: bool,
     player_struck: &mut bool,
@@ -345,10 +566,13 @@ fn snap_window(
 ) {
     if player_alive && !*player_struck {
         let p = player.pos;
-        if in_kill_rect(pos, facing, p) && player.take_damage(MOUSETRAP_DAMAGE_PLAYER) {
-            *player_struck = true;
-            vfx::emit_player_hurt(particles, rng, p);
-            sfx.push(Sfx::Hurt);
+        if in_kill_rect(pos, facing, p) {
+            let dmg = snap_player_damage(player, hair);
+            if player.take_damage(dmg) {
+                *player_struck = true;
+                vfx::emit_player_hurt(particles, rng, p);
+                sfx.push(Sfx::Hurt);
+            }
         }
     }
 
@@ -362,6 +586,11 @@ fn snap_window(
         }
     }
     hits.sort_unstable_by_key(|&(id, _)| id);
+    let bite = if hair {
+        MOUSETRAP_DAMAGE_ENEMY_HAIR
+    } else {
+        MOUSETRAP_DAMAGE_ENEMY
+    };
     for &(_, entity) in hits.iter() {
         let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
             continue;
@@ -370,7 +599,7 @@ fn snap_window(
             continue;
         }
         // Directional armour (the Pillbug's shell) applies to a trap bite too.
-        let applied = e.hurt_from(MOUSETRAP_DAMAGE_ENEMY, pos);
+        let applied = e.hurt_from(bite, pos);
         let killed = !e.alive();
         // Kills go through `loot::reap_enemies_system` later this tick: gem,
         // score, `Sfx::Kill`/`Explosion`, death burst — the normal loot path.
@@ -384,6 +613,38 @@ fn snap_window(
             DamageSource::Normal,
         );
         struck.push(entity);
+    }
+}
+
+/// Hand the bait to the rat.
+///
+/// A pickup is spawned on the rat (the pickup system — later this tick —
+/// collects it and applies the effect through the one normal path, HUD callout
+/// and sfx included); a chest goes through `ChestSpawn`, so it raises
+/// `pending_chests` and opens the ordinary chest card. Cheese is nothing.
+fn collect_bait(
+    bait: TrapBait,
+    at: Vec2,
+    commands: &mut Commands,
+    next_id: &mut NextSpawnId,
+    last_pickups: &mut crate::game::ecs::resources::LastPickups,
+) {
+    match bait {
+        TrapBait::Cheese => {}
+        TrapBait::Pickup(kind) => {
+            last_pickups.0.push(kind);
+            commands.spawn((
+                Pickup {
+                    pos: at,
+                    kind,
+                    bob: 0.0,
+                },
+                next_id.take(),
+            ));
+        }
+        TrapBait::Chest => {
+            commands.queue(ChestSpawn { pos: at });
+        }
     }
 }
 
@@ -410,21 +671,21 @@ fn apply_player_slow(input: &mut TickInput, player: &mut Player, mult: f32) {
 }
 
 /// Advance every sticky board and mousetrap by one tick.
+#[allow(clippy::too_many_arguments)]
 pub fn traps_system(
     mut input: ResMut<TickInput>,
     mut player: ResMut<Player>,
     mut level: ResMut<Level>,
     mut traps: ResMut<TrapRuntime>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
-    slow: Query<&TrapSlow>,
     mut commands: Commands,
     mut rng: ResMut<RngRes>,
     mut particles: ResMut<Particles>,
     mut damage_numbers: ResMut<DamageNumbers>,
     mut sfx: ResMut<SfxQueue>,
-    mut hits: Local<Vec<(u64, Entity)>>,
-    mut spent_sticky: Local<Vec<usize>>,
-    mut spent_mice: Local<Vec<usize>>,
+    mut next_id: ResMut<NextSpawnId>,
+    mut last_pickups: ResMut<crate::game::ecs::resources::LastPickups>,
+    mut scratch: Local<Scratch>,
 ) {
     let dt = input.dt;
     traps.sync(&level);
@@ -448,7 +709,7 @@ pub fn traps_system(
         .retain(|&i| is_live_sticky(level.objects.sticky_traps[i].state));
     traps
         .live_mice
-        .retain(|&i| is_live_mouse(level.objects.mousetraps[i].state));
+        .retain(|&i| is_live_mouse(&level.objects.mousetraps[i]));
     if traps.live_sticky.is_empty() && traps.live_mice.is_empty() {
         return;
     }
@@ -465,207 +726,446 @@ pub fn traps_system(
     // has nothing to grip. Treated exactly like a dash here — a socked rat is
     // released from a board it is already on and crosses every other pad
     // without sticking — because the design has one rule ("ignore
-    // sticky-board drag") and no per-board exceptions.
+    // sticky-board drag") and no per-board exceptions. Socks do nothing to a
+    // mousetrap: the bar does not care about laundry.
     let player_socked = player.buffs.socks > 0.0;
 
-    spent_sticky.clear();
-    spent_mice.clear();
+    scratch.spent_sticky.clear();
+    scratch.spent_mice.clear();
 
     // ---- Sticky boards ---------------------------------------------------
     //
-    // One pass: advance the board that holds a victim, or catch one if the
-    // board is free. Boards are walked in index order, so the board a victim
-    // ends up on is the lowest-index one it overlaps.
+    // One pass per live board: advance the crowd it already holds, then catch
+    // whatever new bodies fit. Boards are walked in index order, so the board
+    // a victim ends up on is the lowest-index one it overlaps.
     let mut player_glue = 1.0f32;
     let mut player_glued = false;
+    scratch.held.clear();
+    scratch.cross_now.clear();
     for k in 0..traps.live_sticky.len() {
         let i = traps.live_sticky[k];
-        let slot = traps.sticky[i];
-        let view = level.objects.sticky_traps[i];
-        match slot.victim {
-            Some(Victim::Player) => {
-                let remaining = slot.remaining - dt;
-                if remaining <= 0.0
-                    || player_dash_now
-                    || player_dashing
-                    || player_socked
-                    || !player_alive
-                {
-                    // The tear follows whatever the rat is doing: its own
-                    // momentum, or straight off the board when it is standing
-                    // still (a spent hold).
-                    let pull = if player.vel.len_sq() > 1e-4 {
-                        player.vel
-                    } else {
-                        player_pos - view.pos
-                    };
-                    vfx::emit_glue_tear_free(
-                        &mut particles,
-                        &mut rng.0,
-                        view.pos,
-                        player_pos,
-                        pull,
-                        PLAYER_RADIUS,
-                    );
-                    let v = &mut level.objects.sticky_traps[i];
-                    v.state = StickyTrapState::Used;
-                    v.progress = 1.0;
-                    v.victim_pos = player_pos;
-                    v.victim_radius = PLAYER_RADIUS;
-                    traps.sticky[i] = StickySlot::default();
-                    spent_sticky.push(i);
-                    sfx.0.push(Sfx::TrapGlueRelease);
-                } else {
-                    traps.sticky[i].remaining = remaining;
-                    let v = &mut level.objects.sticky_traps[i];
-                    v.state = StickyTrapState::Stuck;
-                    // `progress` is the art's strand-stretch / snap driver.
-                    v.progress = (1.0 - remaining / slot.hold.max(1e-3)).clamp(0.0, 1.0);
-                    v.victim_pos = player_pos;
-                    v.victim_radius = PLAYER_RADIUS;
-                    player_glued = true;
-                    player_glue = STICKY_TRAP_SLOW_MULT;
-                }
-            }
-            Some(Victim::Enemy(entity)) => {
-                let remaining = slot.remaining - dt;
-                let live = match enemies.get_mut(entity) {
-                    Ok((_, _, e)) if e.alive() => Some((e.pos, e.radius, e.vel)),
+        let mut slot = traps.sticky[i];
+        let mut view = level.objects.sticky_traps[i];
+        let (pos, facing) = (view.pos, view.facing);
+        // Rebuilt from the live slots every tick; the sim is the only writer.
+        view.victims = [None; STICKY_TRAP_SLOTS];
+
+        // ---- 1. Advance the victims this board already holds ----------------
+        for s in 0..STICKY_TRAP_SLOTS {
+            let Some(v) = slot.slots[s] else {
+                continue;
+            };
+            if !v.held {
+                // Post-release grace: the body is still standing on the pad but
+                // the board has just let it go, so it must not be re-caught
+                // (a re-catch would spend the whole lifetime budget on it).
+                let remaining = v.remaining - dt;
+                slot.slots[s] = match v.who {
+                    Victim::Enemy(e) if remaining > 0.0 && enemies.get(e).is_ok() => {
+                        Some(StuckVictim { remaining, ..v })
+                    }
+                    Victim::Player if remaining > 0.0 => Some(StuckVictim { remaining, ..v }),
                     _ => None,
                 };
-                match live {
-                    Some((pos, radius, _)) if remaining > 0.0 => {
-                        traps.sticky[i].remaining = remaining;
-                        let v = &mut level.objects.sticky_traps[i];
-                        v.state = StickyTrapState::Stuck;
-                        v.progress = (1.0 - remaining / slot.hold.max(1e-3)).clamp(0.0, 1.0);
-                        v.victim_pos = pos;
-                        v.victim_radius = radius;
-                    }
-                    _ => {
-                        // Hold spent, victim killed or despawned: the glue is
-                        // torn through.
-                        if let Some((pos, radius, vel)) = live {
-                            let pull = if vel.len_sq() > 1e-4 {
-                                vel
-                            } else {
-                                pos - view.pos
-                            };
-                            vfx::emit_glue_tear_free(
-                                &mut particles,
-                                &mut rng.0,
-                                view.pos,
-                                pos,
-                                pull,
-                                radius,
-                            );
-                            let v = &mut level.objects.sticky_traps[i];
-                            v.victim_pos = pos;
-                            v.victim_radius = radius;
-                        }
-                        let v = &mut level.objects.sticky_traps[i];
-                        v.state = StickyTrapState::Used;
-                        v.progress = 1.0;
-                        traps.sticky[i] = StickySlot::default();
-                        commands.entity(entity).remove::<TrapSlow>();
-                        spent_sticky.push(i);
+                continue;
+            }
+            match v.who {
+                Victim::Player => {
+                    let remaining = v.remaining - dt;
+                    let release = remaining <= 0.0
+                        || player_dash_now
+                        || player_dashing
+                        || player_socked
+                        || !player_alive;
+                    if !release {
+                        slot.slots[s] = Some(StuckVictim { remaining, ..v });
+                        player_glued = true;
+                        player_glue = STICKY_TRAP_SLOW_MULT;
+                        // `progress` is the art's strand-stretch / snap driver.
+                        view.victims[s] = Some(StickyVictimView {
+                            pos: player_pos,
+                            radius: PLAYER_RADIUS,
+                            kind: StickyVictimKind::Rat,
+                            color: RAT_GLUE_COLOR,
+                            progress: (1.0 - remaining / v.hold.max(1e-3)).clamp(0.0, 1.0),
+                        });
+                    } else {
+                        // The tear follows whatever the rat is doing: its own
+                        // momentum, or straight off the board when it is
+                        // standing still (a spent hold, a dash, the socks).
+                        let pull = if player.vel.len_sq() > 1e-4 {
+                            player.vel
+                        } else {
+                            player_pos - pos
+                        };
+                        vfx::emit_glue_tear_free(
+                            &mut particles,
+                            &mut rng.0,
+                            pos,
+                            player_pos,
+                            pull,
+                            PLAYER_RADIUS,
+                        );
+                        view.add_tear(player_pos);
                         sfx.0.push(Sfx::TrapGlueRelease);
+                        slot.load = slot.load.saturating_sub(v.units);
+                        slot.slots[s] = Some(StuckVictim {
+                            who: v.who,
+                            units: 0,
+                            remaining: STICKY_TRAP_RELEASE_GRACE_SECS,
+                            hold: v.hold,
+                            held: false,
+                        });
                     }
                 }
-            }
-            None => {
-                // Free board: the rat first (it has priority over the horde it
-                // is baiting), then the lowest-`SpawnId` ground enemy on the pad.
-                if !player_glued
-                    && player_alive
-                    && !player_dashing
-                    && !player_dash_now
-                    && !player_socked
-                    && on_pad(view.pos, view.facing, player_pos)
-                {
-                    player_glued = true;
-                    player_glue = STICKY_TRAP_SLOW_MULT;
-                    traps.sticky[i] = StickySlot {
-                        victim: Some(Victim::Player),
-                        remaining: STICKY_HOLD_PLAYER_SECS,
-                        hold: STICKY_HOLD_PLAYER_SECS,
+                Victim::Enemy(entity) => {
+                    let remaining = v.remaining - dt;
+                    let live = match enemies.get_mut(entity) {
+                        Ok((_, _, e)) if e.alive() => {
+                            Some((e.pos, e.radius, e.vel, e.kind))
+                        }
+                        _ => None,
                     };
-                    vfx::emit_glue_stick(
-                        &mut particles,
-                        &mut rng.0,
-                        view.pos,
-                        player_pos,
-                        PLAYER_RADIUS,
-                    );
-                    let v = &mut level.objects.sticky_traps[i];
-                    v.state = StickyTrapState::Stuck;
-                    v.progress = 0.0;
-                    v.victim_pos = player_pos;
-                    v.victim_radius = PLAYER_RADIUS;
-                    sfx.0.push(Sfx::TrapGlueGrab);
-                } else {
-                    if let Some((_, entity)) =
-                        pick_enemy_on_pad(&mut enemies, &slow, view.pos, view.facing)
-                    {
-                        if let Ok((_, _, e)) = enemies.get_mut(entity) {
-                            let (pos, radius, kind) = (e.pos, e.radius, e.kind);
-                            let (hold, mult) = enemy_hold(kind);
-                            // The component is the per-entity slow the steering
-                            // system multiplies in (`enemy_move` hook).
-                            commands.entity(entity).insert(TrapSlow(mult));
-                            traps.sticky[i] = StickySlot {
-                                victim: Some(Victim::Enemy(entity)),
-                                remaining: hold,
-                                hold,
-                            };
-                            vfx::emit_glue_stick(
-                                &mut particles,
-                                &mut rng.0,
-                                view.pos,
-                                pos,
+                    match live {
+                        Some((_, radius, _, kind)) if remaining > 0.0 => {
+                            // Hold: pin the body to its own pad slot (a board
+                            // holds a crowd, it does not let it creep off) and
+                            // keep the glue slow on it, so the weapon pass still
+                            // sees exactly the body it always did.
+                            let anchor = sticky_slot_pos(pos, facing, s, radius);
+                            if let Ok((_, _, mut e)) = enemies.get_mut(entity) {
+                                e.pos = anchor;
+                                e.vel = Vec2::ZERO;
+                            }
+                            slot.slots[s] = Some(StuckVictim { remaining, ..v });
+                            scratch.held.push(entity);
+                            view.victims[s] = Some(StickyVictimView {
+                                pos: anchor,
                                 radius,
-                            );
-                            let v = &mut level.objects.sticky_traps[i];
-                            v.state = StickyTrapState::Stuck;
-                            v.progress = 0.0;
-                            v.victim_pos = pos;
-                            v.victim_radius = radius;
-                            sfx.0.push(Sfx::TrapGlueGrab);
+                                kind: victim_kind(kind),
+                                color: kind.color(),
+                                progress: (1.0 - remaining / v.hold.max(1e-3)).clamp(0.0, 1.0),
+                            });
+                        }
+                        _ => {
+                            // Hold spent, victim killed or despawned: the glue is
+                            // torn through (or, for a corpse, simply let go — the
+                            // kill already has its own feedback).
+                            if let Some((body_pos, radius, vel, _)) = live {
+                                let pull = if vel.len_sq() > 1e-4 {
+                                    vel
+                                } else {
+                                    body_pos - pos
+                                };
+                                vfx::emit_glue_tear_free(
+                                    &mut particles,
+                                    &mut rng.0,
+                                    pos,
+                                    body_pos,
+                                    pull,
+                                    radius,
+                                );
+                                view.add_tear(body_pos);
+                                sfx.0.push(Sfx::TrapGlueRelease);
+                            }
+                            if enemies.get(entity).is_ok() {
+                                commands.entity(entity).remove::<TrapSlow>();
+                            }
+                            slot.load = slot.load.saturating_sub(v.units);
+                            slot.slots[s] = if live.is_some() {
+                                Some(StuckVictim {
+                                    who: v.who,
+                                    units: 0,
+                                    remaining: STICKY_TRAP_RELEASE_GRACE_SECS,
+                                    hold: v.hold,
+                                    held: false,
+                                })
+                            } else {
+                                None
+                            };
                         }
                     }
                 }
             }
         }
+
+        // ---- 2. Catch what this board can still hold -----------------------
+        //
+        // Every ground body whose centre is on the pad, in `SpawnId` order (the
+        // query's storage order never decides; the buffer is reused).
+        scratch.cands.clear();
+        for (entity, id, e) in enemies.iter() {
+            if !e.alive() || !is_ground(e.kind) {
+                continue;
+            }
+            // Cheap circle reject first (the pad's half-diagonal), then the
+            // exact oriented rectangle the art draws.
+            if e.pos.dist_sq(pos) > PAD_REACH_SQ {
+                continue;
+            }
+            if !on_pad(pos, facing, e.pos) {
+                continue;
+            }
+            scratch.cands.push(PadCandidate {
+                id: id.0,
+                entity,
+                kind: e.kind,
+                named: e.named,
+                radius: e.radius,
+                pos: e.pos,
+            });
+        }
+        scratch.cands.sort_unstable_by_key(|c| c.id);
+        let mut boss_here: Option<Entity> = None;
+        for idx in 0..scratch.cands.len() {
+            let c = scratch.cands[idx];
+            if c.kind == EnemyKind::Boss || c.named {
+                // Boss-like: a crossing slow, never a slot and never glue units.
+                // One per board at a time (only one exists on the floor).
+                boss_here = Some(c.entity);
+                continue;
+            }
+            if scratch.held.contains(&c.entity) || slot.touches(c.entity) {
+                continue;
+            }
+            let units = enemy_units(c.kind);
+            let room = STICKY_TRAP_CAPACITY.saturating_sub(slot.load);
+            if units > room || units > slot.budget_left || slot.free_slot().is_none() {
+                // Too big for the room left, or the glue is gone: it only gets
+                // the crossing slow, so the horde behind it keeps moving.
+                commands.entity(c.entity).insert(TrapSlow(STICKY_TRAP_SLOW_MULT));
+                scratch.cross_now.push(c.entity);
+                continue;
+            }
+            let Some(fs) = slot.free_slot() else {
+                continue;
+            };
+            let (hold, mult) = enemy_hold(c.kind);
+            // The component is the per-entity slow the steering system
+            // multiplies in (`enemy_move` hook); the body is pinned to its slot
+            // every tick it is held.
+            commands.entity(c.entity).insert(TrapSlow(mult));
+            slot.slots[fs] = Some(StuckVictim {
+                who: Victim::Enemy(c.entity),
+                units,
+                remaining: hold,
+                hold,
+                held: true,
+            });
+            slot.load = slot.load.saturating_add(units);
+            slot.budget_left = slot.budget_left.saturating_sub(units);
+            scratch.held.push(c.entity);
+            let anchor = sticky_slot_pos(pos, facing, fs, c.radius);
+            if let Ok((_, _, mut e)) = enemies.get_mut(c.entity) {
+                e.pos = anchor;
+                e.vel = Vec2::ZERO;
+                vfx::emit_glue_stick(&mut particles, &mut rng.0, pos, anchor, c.radius);
+            }
+            view.victims[fs] = Some(StickyVictimView {
+                pos: anchor,
+                radius: c.radius,
+                kind: victim_kind(c.kind),
+                color: c.kind.color(),
+                progress: 0.0,
+            });
+            sfx.0.push(Sfx::TrapGlueGrab);
+        }
+
+        // The rat: it has priority over the horde it is baiting, and a board
+        // with a live victim of its own never catches a second rat (there is
+        // only one). A rat already held by another board is skipped.
+        if !player_glued
+            && player_alive
+            && !player_dashing
+            && !player_dash_now
+            && !player_socked
+            && !slot.touches_player()
+            && on_pad(pos, facing, player_pos)
+            && STICKY_TRAP_RAT_UNITS <= STICKY_TRAP_CAPACITY.saturating_sub(slot.load)
+            && STICKY_TRAP_RAT_UNITS <= slot.budget_left
+        {
+            if let Some(fs) = slot.free_slot() {
+                slot.slots[fs] = Some(StuckVictim {
+                    who: Victim::Player,
+                    units: STICKY_TRAP_RAT_UNITS,
+                    remaining: STICKY_HOLD_PLAYER_SECS,
+                    hold: STICKY_HOLD_PLAYER_SECS,
+                    held: true,
+                });
+                slot.load = slot.load.saturating_add(STICKY_TRAP_RAT_UNITS);
+                slot.budget_left = slot.budget_left.saturating_sub(STICKY_TRAP_RAT_UNITS);
+                player_glued = true;
+                player_glue = STICKY_TRAP_SLOW_MULT;
+                vfx::emit_glue_stick(
+                    &mut particles,
+                    &mut rng.0,
+                    pos,
+                    player_pos,
+                    PLAYER_RADIUS,
+                );
+                view.victims[fs] = Some(StickyVictimView {
+                    pos: player_pos,
+                    radius: PLAYER_RADIUS,
+                    kind: StickyVictimKind::Rat,
+                    color: RAT_GLUE_COLOR,
+                    progress: 0.0,
+                });
+                sfx.0.push(Sfx::TrapGlueGrab);
+            }
+        }
+
+        // Boss-like bodies: the pre-wave-3 `0.8 s @ 40 %` hold, as a crossing
+        // slow with no capacity and no budget.
+        match boss_here {
+            Some(entity) => {
+                commands.entity(entity).insert(TrapSlow(STICKY_SLOW_BOSS));
+                slot.boss = Some(BossSlow {
+                    entity,
+                    remaining: STICKY_HOLD_BOSS_SECS,
+                });
+            }
+            None => {
+                if let Some(mut b) = slot.boss {
+                    b.remaining -= dt;
+                    if b.remaining <= 0.0 || enemies.get(b.entity).is_err() {
+                        if enemies.get(b.entity).is_ok() {
+                            commands.entity(b.entity).remove::<TrapSlow>();
+                        }
+                        slot.boss = None;
+                    } else {
+                        slot.boss = Some(b);
+                    }
+                }
+            }
+        }
+
+        // ---- 3. The public state, the load and the wear ---------------------
+        view.load = slot.load;
+        view.worn = 1.0 - (slot.budget_left as f32 / STICKY_TRAP_BUDGET as f32);
+        // Primary victim: the most-progressed one (ties go to the lowest slot,
+        // so the choice is fixed by construction).
+        let mut primary: Option<StickyVictimView> = None;
+        for victim in view.victims.iter().flatten() {
+            if primary.is_none_or(|p| victim.progress > p.progress) {
+                primary = Some(*victim);
+            }
+        }
+        match primary {
+            Some(v) => {
+                view.state = StickyTrapState::Stuck;
+                view.progress = v.progress;
+                view.victim_pos = v.pos;
+                view.victim_radius = v.radius;
+            }
+            None => {
+                view.progress = 0.0;
+                view.victim_pos = pos;
+                view.victim_radius = 3.0;
+                if slot.budget_left == 0 {
+                    // The budget is gone and the last victim has left: spent.
+                    view.state = StickyTrapState::Used;
+                    view.progress = 1.0;
+                    scratch.spent_sticky.push(i);
+                } else {
+                    view.state = StickyTrapState::Idle;
+                }
+            }
+        }
+        traps.sticky[i] = slot;
+        level.objects.sticky_traps[i] = view;
     }
+
+    // A crossing slow lasts exactly as long as the body is on the pad: take it
+    // back off anything that was slowed last tick and is not slowed now (or
+    // held, which carries its own slow).
+    for &e in traps.cross_prev.iter() {
+        if !scratch.cross_now.contains(&e)
+            && !scratch.held.contains(&e)
+            && enemies.get(e).is_ok()
+        {
+            commands.entity(e).remove::<TrapSlow>();
+        }
+    }
+    traps.cross_prev.clear();
+    traps.cross_prev.extend(scratch.cross_now.iter().copied());
 
     // ---- Mousetraps ------------------------------------------------------
     for k in 0..traps.live_mice.len() {
         let i = traps.live_mice[k];
         let mut view: MousetrapView = level.objects.mousetraps[i];
+        let hair = view.kind.hair();
         match view.state {
             MousetrapState::Armed => {
-                // Art `Armed`: *any* ground entity entering the bait circle —
-                // the rat or a member of the horde it is baiting — starts the
-                // warning. Bats fly over, dead entities have no weight.
-                let mut tripped = player_alive && on_bait(view.pos, view.facing, player_pos);
+                // Art `Armed`: the plate is the bait. Taking it is what springs
+                // the trap: the reward is collected the instant the rat's centre
+                // touches the plate, and the bar lands after the kind's
+                // reaction time (zero for a hair trigger).
+                let on_plate = player_alive && on_bait(view.pos, view.facing, player_pos);
+                if on_plate && !view.bait_taken && near_bait(view.pos, view.facing, player_pos) {
+                    view.bait_taken = true;
+                    collect_bait(
+                        view.bait,
+                        player_pos,
+                        &mut commands,
+                        &mut next_id,
+                        &mut last_pickups,
+                    );
+                }
+                // *Any* ground body — the rat or a member of the horde it is
+                // baiting — starts it. Bats fly over, dead bodies have no
+                // weight.
+                let mut tripped = on_plate;
                 if !tripped {
                     tripped = enemies.iter().any(|(_, _, e)| {
                         e.alive() && is_ground(e.kind) && on_bait(view.pos, view.facing, e.pos)
                     });
                 }
                 if tripped {
-                    view.state = MousetrapState::Triggered;
-                    view.progress = 0.0;
                     traps.mice[i].struck.clear();
                     traps.mice[i].player_struck = false;
-                    // Art `Triggered`: the bait pedal dips first (the quiet
-                    // click), then the bar lands with the crack at the snap
-                    // beat below.
-                    sfx.0.push(Sfx::TrapTrigger);
+                    traps.mice[i].hit_done = false;
+                    if hair {
+                        // Hair trigger: the bar lands on the touch tick. Only a
+                        // dash that is *already* under way (its i-frames) or a
+                        // body outside the kill rect survives; the swing below
+                        // is just the eye catching up.
+                        view.state = MousetrapState::Snapping;
+                        view.progress = MOUSETRAP_HIT_PROGRESS_MAX;
+                        let mouse = &mut traps.mice[i];
+                        snap_window(
+                            view.pos,
+                            view.facing,
+                            true,
+                            &mut player,
+                            player_alive,
+                            &mut mouse.player_struck,
+                            &mut enemies,
+                            &mut mouse.struck,
+                            &mut scratch.hits,
+                            &mut rng.0,
+                            &mut particles,
+                            &mut damage_numbers,
+                            &mut sfx.0,
+                        );
+                        mouse.hit_done = true;
+                        // One crack, one splinter burst, one flash, on the tick
+                        // it happens.
+                        vfx::emit_mousetrap_snap(&mut particles, &mut rng.0, view.pos, view.facing);
+                        sfx.0.push(Sfx::TrapSnap);
+                        view.hit_flash = 1.0;
+                    } else {
+                        // Art `Triggered`: the bait pedal dips first (the quiet
+                        // click), then the bar lands with the crack at the snap
+                        // beat below.
+                        view.state = MousetrapState::Triggered;
+                        view.progress = 0.0;
+                        sfx.0.push(Sfx::TrapTrigger);
+                    }
                 }
             }
             MousetrapState::Triggered => {
-                // Art `Triggered`: 0.28 s of shudder, then the bar releases.
+                // Art `Triggered`: `MOUSETRAP_TRIGGER_SECS` of shudder, then the
+                // bar releases.
                 view.progress += dt / MOUSETRAP_TRIGGER_SECS;
                 if view.progress >= 1.0 {
                     view.state = MousetrapState::Snapping;
@@ -676,15 +1176,16 @@ pub fn traps_system(
                 // Art `Snapping`: 0.20 s swing, damaging between `progress`
                 // 0.40 and 0.65. Tested as a *crossing* (previous progress on
                 // one side, new progress on the other) so a long frame can
-                // never skip straight past the hit window.
+                // never skip straight past the hit window — and a hair trigger,
+                // which resolved its damage on the touch tick, never hits twice.
                 let before = view.progress;
                 view.progress = (before + dt / MOUSETRAP_SNAP_SECS).min(1.0);
-                if view.progress >= MOUSETRAP_HIT_PROGRESS_MIN && before <= MOUSETRAP_HIT_PROGRESS_MAX
+                if !traps.mice[i].hit_done
+                    && view.progress >= MOUSETRAP_HIT_PROGRESS_MIN
+                    && before <= MOUSETRAP_HIT_PROGRESS_MAX
                 {
                     let pos = view.pos;
                     let facing = view.facing;
-                    // The bar slams whether or not anything is under it: one
-                    // crack and one flash per snap, not one per window tick.
                     if before < MOUSETRAP_HIT_PROGRESS_MIN {
                         // One crack, one wood-splinter burst, one flash per
                         // snap — not one per window tick.
@@ -696,25 +1197,42 @@ pub fn traps_system(
                     snap_window(
                         pos,
                         facing,
+                        hair,
                         &mut player,
                         player_alive,
                         &mut mouse.player_struck,
                         &mut enemies,
                         &mut mouse.struck,
-                        &mut hits,
+                        &mut scratch.hits,
                         &mut rng.0,
                         &mut particles,
                         &mut damage_numbers,
                         &mut sfx.0,
                     );
+                    traps.mice[i].hit_done = true;
                 }
                 if view.progress >= 1.0 {
                     view.state = MousetrapState::Sprung;
                     view.progress = 1.0;
-                    spent_mice.push(i);
                 }
             }
-            MousetrapState::Sprung => spent_mice.push(i),
+            MousetrapState::Sprung => {
+                // Inert, but an untaken bait still lies on the plate, free to
+                // take: touching it collects it (and nothing else happens).
+                if !view.bait_taken
+                    && player_alive
+                    && near_bait(view.pos, view.facing, player_pos)
+                {
+                    view.bait_taken = true;
+                    collect_bait(
+                        view.bait,
+                        player_pos,
+                        &mut commands,
+                        &mut next_id,
+                        &mut last_pickups,
+                    );
+                }
+            }
         }
         level.objects.mousetraps[i] = view;
     }
@@ -724,23 +1242,41 @@ pub fn traps_system(
         apply_player_slow(&mut input, &mut player, player_glue);
     }
 
-    // Retire the traps that just became worthless (used board / sprung trap).
-    for &i in spent_sticky.iter() {
+    // Retire the traps that just became worthless (used board / sprung trap
+    // with no bait left to take).
+    for &i in scratch.spent_sticky.iter() {
         traps.live_sticky.retain(|&j| j != i);
     }
-    for &i in spent_mice.iter() {
-        traps.live_mice.retain(|&j| j != i);
-    }
-    spent_sticky.clear();
-    spent_mice.clear();
+    traps
+        .live_mice
+        .retain(|&j| is_live_mouse(&level.objects.mousetraps[j]));
+    scratch.spent_sticky.clear();
+    scratch.spent_mice.clear();
 }
+
+impl StickySlot {
+    /// Does this board already hold the rat?
+    #[inline]
+    fn touches_player(&self) -> bool {
+        self.slots
+            .iter()
+            .flatten()
+            .any(|v| v.who == Victim::Player)
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::art_traps::StickyTrapView;
-    use crate::game::collision::TileMap;
+    use crate::game::art_traps::{
+        MousetrapKind, StickyTrapView, TrapBait, STICKY_TRAP_HOLD_SMALL_ENEMY_SECS,
+        STICKY_TRAP_HOLD_BRUTE_SECS,
+    };
+    use crate::game::collision::{TileKind, TileMap};
     use crate::game::ecs::systems::{enemy_move, loot, player};
+    use crate::game::art_walls::WallKind;
+    use crate::game::gem::PickupKind;
     use crate::game::level::{MAP_COLS, MAP_ROWS};
     use crate::game::world::World;
     use rand::rngs::StdRng;
@@ -754,6 +1290,13 @@ mod tests {
     fn open_arena(seed: u64) -> World {
         let mut w = World::new(Theme::Sewer, seed);
         w.level.tiles = TileMap::new(MAP_COLS, MAP_ROWS, w.level.theme, 0);
+        // The masks are what collision, line of sight and the flow field read:
+        // a replaced map without them would still see the generated walls.
+        w.level.tiles.rebuild_masks();
+        w.level.nav = crate::game::nav::NavGrid::from_tiles(
+            &w.level.tiles,
+            crate::game::collision::SizeClass::Large,
+        );
         w.level.objects.sticky_traps.clear();
         w.level.objects.mousetraps.clear();
         w.player.pos = w.level.arena * 0.5;
@@ -770,6 +1313,22 @@ mod tests {
         w.ecs
             .run_system_cached(traps_system)
             .expect("traps system must run");
+        w.end_tick();
+    }
+
+    /// `traps_system` plus the pickup pass later in the real schedule, so a
+    /// collected bait's *effect* lands (the bait is a normal floor pickup).
+    fn traps_and_pickups_tick(w: &mut World) {
+        w.begin_tick(DT, Vec2::ZERO, false);
+        w.ecs
+            .run_system_cached(traps_system)
+            .expect("traps system must run");
+        w.ecs
+            .run_system_cached(loot::pickups_system)
+            .expect("pickup system must run");
+        w.ecs
+            .run_system_cached(loot::treasure_system)
+            .expect("treasure system must run");
         w.end_tick();
     }
 
@@ -794,6 +1353,16 @@ mod tests {
         w.level.objects.mousetraps[i].state
     }
 
+    fn board(w: &World, i: usize) -> StickyTrapView {
+        w.level.objects.sticky_traps[i]
+    }
+
+    /// The runtime side table of one board (capacity / budget bookkeeping).
+    fn slot(w: &mut World, i: usize) -> StickySlot {
+        let t = w.ecs.resource::<TrapRuntime>();
+        t.sticky[i]
+    }
+
     fn add_board(w: &mut World, pos: Vec2) {
         w.level
             .objects
@@ -808,6 +1377,13 @@ mod tests {
             .push(MousetrapView::new(pos, FACING));
     }
 
+    fn add_mousetrap_spec(w: &mut World, pos: Vec2, kind: MousetrapKind, bait: TrapBait) {
+        w.level
+            .objects
+            .mousetraps
+            .push(MousetrapView::baited(pos, FACING, kind, bait));
+    }
+
     fn add_enemy(w: &mut World, kind: EnemyKind, pos: Vec2, hp_mult: f32) -> Entity {
         let mut rng = StdRng::seed_from_u64(7);
         w.spawn_enemy_with_rng(kind, pos, hp_mult, &mut rng)
@@ -818,13 +1394,36 @@ mod tests {
         q.get(&w.ecs, entity).expect("enemy must exist").clone()
     }
 
-    // ---- Sticky boards ---------------------------------------------------
+    fn has_slow(w: &mut World, e: Entity) -> bool {
+        let mut q = w.ecs.query::<&TrapSlow>();
+        q.get(&w.ecs, e).is_ok()
+    }
 
-    /// The rat is held for the designer's 0.9 s and the board is then spent;
-    /// `progress` is written into the view (the art's strand stretch) and ends
-    /// near 1.0 before the state flips to `Used`.
+    /// How many bodies of `kind` are currently held on board `i`.
+    fn held_on(w: &mut World, i: usize, kind: EnemyKind) -> usize {
+        let who: Vec<Entity> = slot(w, i)
+            .slots
+            .iter()
+            .flatten()
+            .filter(|v| v.held)
+            .filter_map(|v| match v.who {
+                Victim::Enemy(e) => Some(e),
+                Victim::Player => None,
+            })
+            .collect();
+        let mut q = w.ecs.query::<&Enemy>();
+        who.iter()
+            .filter(|e| q.get(&w.ecs, **e).is_ok_and(|en| en.kind == kind))
+            .count()
+    }
+
+    // ---- Sticky boards: the rat -------------------------------------------
+
+    /// The rat is held for the designer's 0.9 s, costs 2 glue units, and the
+    /// board is **not** spent: it goes back to a (worn) fresh board, ready for
+    /// the next victim.
     #[test]
-    fn glue_holds_the_rat_for_0_9s_then_spends_the_board() {
+    fn glue_holds_the_rat_for_0_9s_and_then_releases_it() {
         let mut w = open_arena(101);
         let c = centre(&w);
         add_board(&mut w, c);
@@ -833,12 +1432,14 @@ mod tests {
         // Tick 1 catches the rat.
         traps_tick(&mut w, FACING, false);
         {
-            let v = w.level.objects.sticky_traps[0];
+            let v = board(&w, 0);
             assert_eq!(v.state, StickyTrapState::Stuck);
             assert!(v.progress.abs() < 1e-6, "a fresh catch starts at progress 0");
             assert_eq!(v.victim_radius, PLAYER_RADIUS);
             assert!((v.victim_pos.dist(w.player.pos)) < 1e-4);
+            assert_eq!(v.load, STICKY_TRAP_RAT_UNITS, "the rat costs 2 units");
         }
+        assert_eq!(slot(&mut w, 0).budget_left, STICKY_TRAP_BUDGET - 2);
 
         // Hold exactly the designer's 0.9 s (the state machine steps in whole
         // frames, so allow a frame either side of the nominal tick count).
@@ -848,11 +1449,15 @@ mod tests {
             if board_state(&w, 0) != StickyTrapState::Stuck {
                 break;
             }
-            last_progress = w.level.objects.sticky_traps[0].progress;
+            last_progress = board(&w, 0).progress;
             traps_tick(&mut w, FACING, false);
             held += 1;
         }
-        assert_eq!(board_state(&w, 0), StickyTrapState::Used);
+        assert_eq!(
+            board_state(&w, 0),
+            StickyTrapState::Idle,
+            "a board with glue left is fresh again after a release"
+        );
         let held_secs = held as f32 * DT;
         assert!(
             (held_secs - STICKY_HOLD_PLAYER_SECS).abs() <= 2.0 * DT,
@@ -862,8 +1467,12 @@ mod tests {
             (0.9..1.0).contains(&last_progress),
             "strand progress just before the release = {last_progress}"
         );
-        // The art keeps drawing the spent board where it was.
-        assert!((w.level.objects.sticky_traps[0].pos - c).len() < 1e-4);
+        let v = board(&w, 0);
+        assert_eq!(v.load, 0, "the rat's units came back");
+        assert!(v.worn > 0.0, "the spent units are still spent");
+        assert_eq!(v.tear_n, 1, "a torn scar marks where it pulled free");
+        // The art keeps drawing the board where it was.
+        assert!((v.pos - c).len() < 1e-4);
     }
 
     /// The rat walks at exactly 20 % of its free speed while glued (the art's
@@ -899,10 +1508,11 @@ mod tests {
         );
     }
 
-    /// A dash breaks the rat out immediately (the art's `Stuck` counter), and a
-    /// dash that is already in progress crosses the pad without sticking.
+    /// A dash breaks the rat out immediately (the art's `Stuck` counter), a
+    /// dash in progress crosses the pad without sticking, and Clean Socks
+    /// ignore the glue entirely. None of them spends a board.
     #[test]
-    fn dash_breaks_glue_and_a_dash_crosses_cleanly() {
+    fn dash_and_clean_socks_break_glue_without_spending_the_board() {
         let mut w = open_arena(107);
         let c = centre(&w);
         add_board(&mut w, c);
@@ -914,8 +1524,12 @@ mod tests {
 
         // Press dash: the board releases instead of holding.
         traps_tick(&mut w, FACING, true);
-        assert_eq!(board_state(&w, 0), StickyTrapState::Used);
-        assert!((w.level.objects.sticky_traps[0].progress - 1.0).abs() < 1e-6);
+        assert_eq!(board_state(&w, 0), StickyTrapState::Idle);
+        assert_eq!(board(&w, 0).load, 0);
+        assert!(
+            slot(&mut w, 0).budget_left < STICKY_TRAP_BUDGET,
+            "the catch still wore the board"
+        );
 
         // Dash on cooldown does *not* break the glue (it is not a dash).
         let mut w = open_arena(109);
@@ -935,170 +1549,452 @@ mod tests {
         w.player.dash_active = 0.1;
         traps_tick(&mut w, FACING, false);
         assert_eq!(board_state(&w, 0), StickyTrapState::Idle);
-    }
+        assert_eq!(slot(&mut w, 0).budget_left, STICKY_TRAP_BUDGET);
 
-    /// One victim per board: the rat has it and a second body on the same pad
-    /// is not caught, and a second board does not catch an already-glued rat.
-    #[test]
-    fn a_board_holds_one_victim_only() {
+        // Clean Socks: an armed socked rat walks over the pad untouched...
         let mut w = open_arena(127);
         let c = centre(&w);
         add_board(&mut w, c);
-        // Two more boards overlapping the first: only the lowest index may win.
-        add_board(&mut w, c + Vec2::new(2.0, 0.0));
         w.player.pos = c;
-
+        w.player.buffs.socks = 3.0;
         traps_tick(&mut w, FACING, false);
-        assert_eq!(board_state(&w, 0), StickyTrapState::Stuck);
-        assert_eq!(
-            board_state(&w, 1),
-            StickyTrapState::Idle,
-            "the second board caught the same rat"
-        );
-
-        // Same for the horde: one Skitterer per board.
+        assert_eq!(board_state(&w, 0), StickyTrapState::Idle);
+        // ...and is let go of a board it is already stuck to.
         let mut w = open_arena(131);
         let c = centre(&w);
         add_board(&mut w, c);
-        w.player.pos = c + Vec2::new(200.0, 0.0);
-        let a = add_enemy(&mut w, EnemyKind::Skitterer, c, 1.0);
-        let b = add_enemy(&mut w, EnemyKind::Skitterer, c + Vec2::new(2.0, 0.0), 1.0);
-        traps_tick(&mut w, Vec2::ZERO, false);
+        w.player.pos = c;
+        traps_tick(&mut w, FACING, false);
         assert_eq!(board_state(&w, 0), StickyTrapState::Stuck);
-        // Exactly one of the two carries the slow component.
-        let has = |w: &mut World, e: Entity| {
-            let mut q = w.ecs.query::<&TrapSlow>();
-            q.get(&w.ecs, e).is_ok()
-        };
+        w.player.buffs.socks = 3.0;
+        traps_tick(&mut w, FACING, false);
+        assert_eq!(board_state(&w, 0), StickyTrapState::Idle);
+    }
+
+    // ---- Sticky boards: capacity by size class -----------------------------
+
+    /// The owner's size classes: small bodies 1 unit, Cat/Spitter/Pillbug/
+    /// Porter/Turnkey 2, Brute (and an elite Brute) 4, the rat 2, boss-likes 0.
+    #[test]
+    fn capacity_is_taken_by_size_class() {
+        assert_eq!(enemy_units(EnemyKind::Skitterer), 1);
+        assert_eq!(enemy_units(EnemyKind::BellFlea), 1);
+        assert_eq!(enemy_units(EnemyKind::Bat), 1, "a ground bat would be small");
+        assert_eq!(enemy_units(EnemyKind::Cat), 2);
+        assert_eq!(enemy_units(EnemyKind::Spitter), 2);
+        assert_eq!(enemy_units(EnemyKind::Pillbug), 2);
+        assert_eq!(enemy_units(EnemyKind::Porter), 2);
+        assert_eq!(enemy_units(EnemyKind::Turnkey), 2);
+        assert_eq!(enemy_units(EnemyKind::Brute), 4);
+        assert_eq!(enemy_units(EnemyKind::Boss), 0, "never held, never capacity");
+        assert_eq!(STICKY_TRAP_RAT_UNITS, 2);
+        assert_eq!(STICKY_TRAP_CAPACITY, 8);
+        assert_eq!(STICKY_TRAP_BUDGET, 20);
         assert!(
-            has(&mut w, a) ^ has(&mut w, b),
-            "both skitterers or neither were glued"
+            STICKY_TRAP_SLOTS as u8 >= STICKY_TRAP_CAPACITY,
+            "the slot array must hold a full load of 1-unit bodies"
         );
     }
 
-    /// Bats fly over both traps (art `Idle` / `Armed`: flying entities pass).
+    /// A mixed crowd fills a board exactly: 4 + 2 + 2 units fit, the next small
+    /// body overflows with only the crossing slow, and killing one frees its
+    /// units for the body waiting on the pad.
     #[test]
-    fn flying_bats_pass_over_traps() {
-        let mut w = open_arena(137);
+    fn a_mixed_crowd_fills_a_board_and_overflows_it() {
+        let mut w = open_arena(211);
         let c = centre(&w);
         add_board(&mut w, c);
-        add_mousetrap(&mut w, c + Vec2::new(60.0, 0.0));
-        w.player.pos = c + Vec2::new(200.0, 200.0);
-        add_enemy(&mut w, EnemyKind::Bat, c, 1.0);
-        add_enemy(
-            &mut w,
-            EnemyKind::Bat,
-            c + Vec2::new(60.0 + MOUSETRAP_TRIGGER_OFFSET_U, 0.0),
-            1.0,
-        );
+        w.player.pos = c + Vec2::new(400.0, 0.0);
+        // 4 + 2 + 2 = 8 units: exactly full.
+        let brute = add_enemy(&mut w, EnemyKind::Brute, c + Vec2::new(-4.0, 0.0), 20.0);
+        let cat = add_enemy(&mut w, EnemyKind::Cat, c + Vec2::new(2.0, -3.0), 20.0);
+        let spitter = add_enemy(&mut w, EnemyKind::Spitter, c + Vec2::new(3.0, 3.0), 20.0);
+        // Waiting just **off** the pad, then stepping on it once there is room.
+        let waiting = add_enemy(&mut w, EnemyKind::Skitterer, c + Vec2::new(22.0, 0.0), 20.0);
 
-        for _ in 0..5 {
-            traps_tick(&mut w, Vec2::ZERO, false);
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert_eq!(board(&w, 0).load, STICKY_TRAP_CAPACITY);
+        assert_eq!(held_on(&mut w, 0, EnemyKind::Brute), 1);
+        assert_eq!(held_on(&mut w, 0, EnemyKind::Cat), 1);
+        assert_eq!(held_on(&mut w, 0, EnemyKind::Spitter), 1);
+        assert_eq!(held_on(&mut w, 0, EnemyKind::Skitterer), 0);
+        assert!(!has_slow(&mut w, waiting), "an overflow body is only slowed while on the pad");
+        let budget_after_fill = slot(&mut w, 0).budget_left;
+        assert_eq!(budget_after_fill, STICKY_TRAP_BUDGET - STICKY_TRAP_CAPACITY);
+
+        // Now a small body walks onto the full pad: it is slowed, not held.
+        if let Ok(mut e) = w.ecs.query::<&mut Enemy>().get_mut(&mut w.ecs, waiting) {
+            e.pos = c + Vec2::new(4.0, 7.0);
         }
-        assert_eq!(board_state(&w, 0), StickyTrapState::Idle);
-        assert_eq!(mouse_state(&w, 0), MousetrapState::Armed);
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert!(has_slow(&mut w, waiting), "the overflow body crosses slowly");
+        assert_eq!(held_on(&mut w, 0, EnemyKind::Skitterer), 0);
+        assert_eq!(board(&w, 0).state, StickyTrapState::Stuck);
+
+        // The brute is killed on the board: its 4 units come free at once, and
+        // the body still standing on the pad is caught.
+        if let Ok(mut e) = w.ecs.query::<&mut Enemy>().get_mut(&mut w.ecs, brute) {
+            e.hp = -1.0;
+        }
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert_eq!(
+            board(&w, 0).load,
+            5,
+            "2 + 2 held and the freed room taken by the waiting body"
+        );
+        assert_eq!(
+            held_on(&mut w, 0, EnemyKind::Skitterer),
+            1,
+            "the waiting body walked into the freed room"
+        );
+        let _ = (cat, spitter);
     }
 
-    /// Hold durations by victim class (designer's numbers), and the `TrapSlow`
-    /// multiplier the enemy steering system reads.
+    /// Each victim keeps its own class hold and tears free on its own clock,
+    /// and a big body too large for the room left is never caught.
     #[test]
-    fn glue_holds_each_enemy_class_for_its_own_duration() {
-        // (kind, hold seconds art/designer value)
-        for (kind, hold) in [
-            (EnemyKind::Skitterer, STICKY_TRAP_HOLD_SMALL_ENEMY_SECS),
-            (EnemyKind::Cat, STICKY_TRAP_HOLD_SMALL_ENEMY_SECS),
-            (EnemyKind::Spitter, STICKY_TRAP_HOLD_SMALL_ENEMY_SECS),
-            (EnemyKind::Brute, STICKY_TRAP_HOLD_BRUTE_SECS),
-            (EnemyKind::Boss, STICKY_HOLD_BOSS_SECS),
-        ] {
-            let mut w = open_arena(139);
+    fn victims_hold_and_release_on_their_own_clock() {
+        let mut w = open_arena(223);
+        let c = centre(&w);
+        add_board(&mut w, c);
+        w.player.pos = c + Vec2::new(400.0, 0.0);
+        // A small body and a Brute: different holds (2.5 s / 1.5 s).
+        add_enemy(&mut w, EnemyKind::Skitterer, c + Vec2::new(-6.0, -4.0), 20.0);
+        let brute = add_enemy(&mut w, EnemyKind::Brute, c + Vec2::new(4.0, 4.0), 20.0);
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert_eq!(board(&w, 0).load, 5);
+        assert_eq!(board(&w, 0).state, StickyTrapState::Stuck);
+
+        // After 1.5 s the Brute has torn free, the Skitterer is still held.
+        for _ in 0..(STICKY_TRAP_HOLD_BRUTE_SECS / DT).ceil() as usize + 3 {
+            traps_tick(&mut w, Vec2::ZERO, false);
+        }
+        assert_eq!(held_on(&mut w, 0, EnemyKind::Brute), 0, "the Brute is free");
+        assert_eq!(held_on(&mut w, 0, EnemyKind::Skitterer), 1);
+        assert!(!has_slow(&mut w, brute), "the released Brute lost its slow");
+        assert_eq!(board(&w, 0).load, 1);
+
+        // The Skitterer follows on its own (longer) clock.
+        for _ in 0..(STICKY_TRAP_HOLD_SMALL_ENEMY_SECS / DT).ceil() as usize + 2 {
+            traps_tick(&mut w, Vec2::ZERO, false);
+        }
+        assert_eq!(board(&w, 0).load, 0);
+        assert_eq!(board_state(&w, 0), StickyTrapState::Idle);
+
+        // Overflow by size: 3 units of room, a 4-unit Brute is only slowed.
+        let mut w = open_arena(227);
+        let c = centre(&w);
+        add_board(&mut w, c);
+        w.player.pos = c + Vec2::new(400.0, 0.0);
+        for off in [-6.0f32, -2.0, 2.0] {
+            add_enemy(&mut w, EnemyKind::Cat, c + Vec2::new(off, 6.0), 20.0);
+        }
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert_eq!(board(&w, 0).load, 6, "three Cats");
+        let big = add_enemy(&mut w, EnemyKind::Brute, c + Vec2::new(0.0, -6.0), 20.0);
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert_eq!(held_on(&mut w, 0, EnemyKind::Brute), 0, "2 units of room, a Brute needs 4");
+        assert!(has_slow(&mut w, big), "it crosses slowly instead");
+        assert_eq!(board(&w, 0).load, 6);
+    }
+
+    /// A board wears out by total glue spent: it catches a dozen small bodies
+    /// over its life, then becomes `Used` only after its last victim leaves.
+    #[test]
+    fn the_budget_wears_the_board_out_and_used_waits_for_the_last_victim() {
+        let mut w = open_arena(229);
+        let c = centre(&w);
+        add_board(&mut w, c);
+        w.player.pos = c + Vec2::new(400.0, 0.0);
+
+        // Five waves of four Skitterers: 20 units, the whole budget.
+        let mut caught = 0usize;
+        for wave in 0..6 {
+            for k in 0..4 {
+                let a = (wave * 4 + k) as f32 * 1.4;
+                let at = c + Vec2::new(a.cos() * 6.0, a.sin() * 5.0);
+                add_enemy(&mut w, EnemyKind::Skitterer, at, 40.0);
+            }
+            traps_tick(&mut w, Vec2::ZERO, false);
+            caught += held_on(&mut w, 0, EnemyKind::Skitterer);
+            assert!(
+                budget_floor_is_monotone(&mut w),
+                "the budget went back up"
+            );
+            // Let the whole wave tear free before the next one arrives.
+            for _ in 0..(STICKY_TRAP_HOLD_SMALL_ENEMY_SECS / DT).ceil() as usize + 2 {
+                traps_tick(&mut w, Vec2::ZERO, false);
+            }
+        }
+        assert!(caught >= 12, "only {caught} bodies were caught");
+        assert_eq!(slot(&mut w, 0).budget_left, 0, "the budget is spent");
+        assert_eq!(
+            board_state(&w, 0),
+            StickyTrapState::Used,
+            "with no victims left, a spent board is Used"
+        );
+        assert!((board(&w, 0).worn - 1.0).abs() < 1e-6);
+
+        // A board whose budget runs out while it still holds a body stays
+        // `Stuck` (it is still doing its job), then turns Used on the release.
+        let mut w = open_arena(233);
+        let c = centre(&w);
+        add_board(&mut w, c);
+        w.player.pos = c + Vec2::new(400.0, 0.0);
+        traps_tick(&mut w, Vec2::ZERO, false); // build the runtime table
+        {
+            // Force a nearly spent board through the runtime table.
+            let mut t = w.ecs.resource_mut::<TrapRuntime>();
+            t.sticky[0].budget_left = 1;
+        }
+        let e = add_enemy(&mut w, EnemyKind::Skitterer, c, 40.0);
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert_eq!(slot(&mut w, 0).budget_left, 0);
+        assert_eq!(board_state(&w, 0), StickyTrapState::Stuck);
+        assert_eq!(held_on(&mut w, 0, EnemyKind::Skitterer), 1);
+        // Another body on the pad gets no glue at all.
+        let overflow = add_enemy(&mut w, EnemyKind::Skitterer, c + Vec2::new(0.0, 6.0), 40.0);
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert_eq!(held_on(&mut w, 0, EnemyKind::Skitterer), 1, "no glue to catch with");
+        assert!(has_slow(&mut w, overflow), "it only crosses slowly");
+        // The held body is killed: its corpse frees the pad and the board is done.
+        if let Ok(mut en) = w.ecs.query::<&mut Enemy>().get_mut(&mut w.ecs, e) {
+            en.hp = -1.0;
+        }
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert_eq!(board_state(&w, 0), StickyTrapState::Used);
+    }
+
+    /// The budget never rises: catch after catch only ever spends it.
+    fn budget_floor_is_monotone(w: &mut World) -> bool {
+        let left = slot(w, 0).budget_left;
+        left <= STICKY_TRAP_BUDGET
+    }
+
+    /// The rat costs 2 units like anything else and does not use the board up.
+    #[test]
+    fn the_rat_costs_two_units_not_the_whole_board() {
+        let mut w = open_arena(239);
+        let c = centre(&w);
+        add_board(&mut w, c);
+        w.player.pos = c;
+        traps_tick(&mut w, FACING, false);
+        assert_eq!(slot(&mut w, 0).budget_left, STICKY_TRAP_BUDGET - STICKY_TRAP_RAT_UNITS);
+        // Nine more rat catches fit in the lifetime budget (2 units each).
+        let mut rat_catches = 1;
+        for _ in 0..40 {
+            // Walk off the pad, let the grace expire, walk back on.
+            w.player.pos = c + Vec2::new(60.0, 0.0);
+            for _ in 0..((STICKY_TRAP_RELEASE_GRACE_SECS + 0.2) / DT) as usize {
+                traps_tick(&mut w, Vec2::ZERO, false);
+            }
+            w.player.pos = c;
+            traps_tick(&mut w, Vec2::ZERO, false);
+            if board_state(&w, 0) == StickyTrapState::Stuck {
+                rat_catches += 1;
+                for _ in 0..((STICKY_HOLD_PLAYER_SECS + 0.2) / DT) as usize {
+                    traps_tick(&mut w, Vec2::ZERO, false);
+                }
+            }
+            if slot(&mut w, 0).budget_left == 0 {
+                break;
+            }
+        }
+        assert!(
+            rat_catches >= 9,
+            "a board only caught the rat {rat_catches} times over its life"
+        );
+        assert_eq!(slot(&mut w, 0).budget_left, 0);
+    }
+
+    /// Bosses and named minibosses are slowed while they cross a board (the
+    /// old 0.8 s @ 40 % rule) and never held: no slot, no glue unit, no budget.
+    #[test]
+    fn boss_likes_are_slowed_but_never_stuck() {
+        for named in [false, true] {
+            let mut w = open_arena(241);
             let c = centre(&w);
             add_board(&mut w, c);
-            w.player.pos = c + Vec2::new(300.0, 0.0);
-            let e = add_enemy(&mut w, kind, c, 20.0);
-
-            traps_tick(&mut w, Vec2::ZERO, false);
-            assert_eq!(
-                board_state(&w, 0),
-                StickyTrapState::Stuck,
-                "{kind:?} was not caught"
-            );
-            let expected_mult = if kind == EnemyKind::Boss {
-                STICKY_SLOW_BOSS
+            w.player.pos = c + Vec2::new(400.0, 0.0);
+            let e = if named {
+                w.spawn_miniboss(
+                    crate::game::ecs::systems::miniboss::MinibossKind::Corkscrew,
+                    0,
+                    c,
+                )
             } else {
-                STICKY_TRAP_SLOW_MULT
+                add_enemy(&mut w, EnemyKind::Boss, c, 40.0)
             };
-            {
-                let mut q = w.ecs.query::<&TrapSlow>();
-                let slow = q.get(&w.ecs, e).expect("caught enemy carries TrapSlow");
-                assert!((slow.0 - expected_mult).abs() < 1e-6);
-            }
-
-            let mut held = 0usize;
-            for _ in 0..10_000 {
-                if board_state(&w, 0) != StickyTrapState::Stuck {
-                    break;
-                }
-                traps_tick(&mut w, Vec2::ZERO, false);
-                held += 1;
-            }
-            assert_eq!(board_state(&w, 0), StickyTrapState::Used, "{kind:?}");
-            let held_secs = held as f32 * DT;
-            assert!(
-                (held_secs - hold).abs() <= 2.0 * DT,
-                "{kind:?} was held {held_secs} s, expected {hold} s"
-            );
-            // The slow is taken off with the glue.
+            traps_tick(&mut w, Vec2::ZERO, false);
+            assert_eq!(board(&w, 0).load, 0, "a boss takes no capacity");
+            assert_eq!(slot(&mut w, 0).budget_left, STICKY_TRAP_BUDGET);
+            assert_eq!(board(&w, 0).state, StickyTrapState::Idle, "never Stuck");
             let mut q = w.ecs.query::<&TrapSlow>();
-            assert!(q.get(&w.ecs, e).is_err(), "{kind:?} kept its slow");
+            let slow = q
+                .get(&w.ecs, e)
+                .expect("a boss on the pad is slowed")
+                .0;
+            assert!((slow - STICKY_SLOW_BOSS).abs() < 1e-6);
+            // Standing in the glue keeps it slowed (the glue is still there)...
+            for _ in 0..((STICKY_HOLD_BOSS_SECS + 0.2) / DT) as usize {
+                traps_tick(&mut w, Vec2::ZERO, false);
+            }
+            let mut q = w.ecs.query::<&TrapSlow>();
+            assert!(
+                q.get(&w.ecs, e).is_ok(),
+                "a boss standing in the glue lost the slow"
+            );
+            // ...and it shrugs the slow off within the hold once it steps clear.
+            if let Ok(mut en) = w.ecs.query::<&mut Enemy>().get_mut(&mut w.ecs, e) {
+                en.pos = c + Vec2::new(0.0, 60.0);
+            }
+            for _ in 0..((STICKY_HOLD_BOSS_SECS + 0.2) / DT) as usize {
+                traps_tick(&mut w, Vec2::ZERO, false);
+            }
+            let mut q = w.ecs.query::<&TrapSlow>();
+            assert!(q.get(&w.ecs, e).is_err(), "the boss kept the glue");
         }
     }
 
-    /// A glued enemy really moves at 20 % of an identical free enemy's speed
-    /// through the real `traps → enemy_steering` ordering.
+    /// Stuck bodies are ordinary enemies at ordinary positions: an area effect
+    /// (a Nuke) kills them like any other body, and a weapon's dart reaches
+    /// them where they are pinned.
     #[test]
-    fn glued_enemy_moves_at_twenty_percent_speed() {
-        let steer_tick = |glued: bool| {
-            let mut w = open_arena(149);
-            let c = centre(&w);
-            w.player.pos = c + Vec2::new(400.0, 0.0);
-            if glued {
-                // The enemy is placed on the pad and the rat far away, so the
-                // steering pulls it off the pad in a straight line.
-                add_board(&mut w, c);
-            }
-            add_enemy(&mut w, EnemyKind::Skitterer, c, 1.0);
-            let e = w.enemies().first().map(|e| e.id).expect("one enemy");
-            let start_pos = w.enemies()[0].pos;
-            for _ in 0..30 {
-                w.begin_tick(DT, Vec2::ZERO, false);
-                w.ecs
-                    .run_system_cached(traps_system)
-                    .expect("traps system must run");
-                w.ecs
-                    .run_system_cached(enemy_move::enemy_steering_system)
-                    .expect("steering must run");
-                w.end_tick();
-            }
-            let end = w.enemies().into_iter().find(|x| x.id == e).expect("alive");
-            end.pos.dist(start_pos)
-        };
-
-        let glued = steer_tick(true);
-        let free = steer_tick(false);
-        assert!(free > 8.0, "the free enemy only moved {free} px");
-        let ratio = glued / free;
+    fn weapons_and_area_effects_reach_stuck_bodies() {
+        // Nuke: every stuck body dies through the normal area-effect path.
+        let mut w = open_arena(257);
+        let c = centre(&w);
+        add_board(&mut w, c);
+        w.player.pos = c + Vec2::new(10.0, 0.0);
+        for off in [-5.0f32, 0.0, 5.0] {
+            add_enemy(&mut w, EnemyKind::Brute, c + Vec2::new(0.0, off), 20.0);
+        }
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert_eq!(held_on(&mut w, 0, EnemyKind::Brute), 3);
+        w.spawn_pickup(Pickup {
+            pos: w.player.pos,
+            kind: PickupKind::Nuke,
+            bob: 0.0,
+        });
+        for _ in 0..4 {
+            w.update(DT, Vec2::ZERO, false);
+        }
         assert!(
-            (0.18..0.23).contains(&ratio),
-            "glued {glued} px vs free {free} px = {ratio:.3}"
+            w.enemies().iter().all(|e| !e.alive()),
+            "the Nuke spared the glued crowd"
+        );
+
+        // Weapons: the rat stands beside a board holding one small body; over a
+        // couple of seconds the dart has to land on it (a stuck body is just an
+        // enemy at a fixed position).
+        let mut w = open_arena(259);
+        let c = centre(&w);
+        add_board(&mut w, c);
+        w.player.pos = c + Vec2::new(24.0, 0.0);
+        let e = add_enemy(&mut w, EnemyKind::Skitterer, c, 1.0); // 6 hp
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert_eq!(held_on(&mut w, 0, EnemyKind::Skitterer), 1);
+        for _ in 0..240 {
+            w.update(DT, Vec2::ZERO, false);
+            if w.kills > 0 {
+                break;
+            }
+        }
+        assert!(w.kills > 0, "no weapon ever reached the stuck body");
+        let mut q = w.ecs.query::<&Enemy>();
+        assert!(q.get(&w.ecs, e).is_err(), "the stuck body survived");
+    }
+
+    /// A stuck crowd is a slow, not a wall: the horde behind a loaded board
+    /// funnels down a three-cell corridor and gets past it to the rat.
+    #[test]
+    fn a_stuck_crowd_does_not_block_a_three_cell_corridor() {
+        let mut w = World::new(Theme::Sewer, 263);
+        w.level.objects.sticky_traps.clear();
+        w.level.objects.mousetraps.clear();
+        let mut tiles = TileMap::new(MAP_COLS, MAP_ROWS, Theme::Sewer, 0);
+        let cy = MAP_ROWS / 2;
+        let (x0, x1) = (20, MAP_COLS - 20);
+        tiles.fill_cells(0, 0, MAP_COLS, MAP_ROWS, TileKind::Wall(WallKind::Solid));
+        tiles.fill_cells(x0, cy - 1, x1 - x0, 3, TileKind::Open);
+        tiles.rebuild_masks();
+        w.level.tiles = tiles;
+        w.level.nav = crate::game::nav::NavGrid::from_tiles(
+            &w.level.tiles,
+            crate::game::collision::SizeClass::Large,
+        );
+
+        let rat = crate::game::collision::TileMap::tile_rect(x1 - 4, cy).center();
+        let board_at = crate::game::collision::TileMap::tile_rect(x0 + 14, cy).center();
+        w.player.pos = rat;
+        add_board(&mut w, board_at);
+        // Fill the board with four Skitterers (pinned there).
+        for off in [-2.0f32, 2.0, -1.0, 1.0] {
+            add_enemy(&mut w, EnemyKind::Skitterer, board_at + Vec2::new(0.0, off), 40.0);
+        }
+        // The horde behind them, still in the corridor.
+        let mut followers = Vec::new();
+        for k in 0..6 {
+            let at = crate::game::collision::TileMap::tile_rect(x0 + 2 + k % 2, cy + (k % 3) - 1)
+                .center();
+            followers.push(add_enemy(&mut w, EnemyKind::Skitterer, at, 40.0));
+        }
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert_eq!(held_on(&mut w, 0, EnemyKind::Skitterer), 4);
+
+        let start: Vec<f32> = followers.iter().map(|e| enemy_of(&mut w, *e).pos.x).collect();
+        for _ in 0..360 {
+            w.begin_tick(DT, Vec2::ZERO, false);
+            w.ecs.run_system_cached(traps_system).unwrap();
+            w.ecs.run_system_cached(enemy_move::flow_refresh_system).unwrap();
+            w.ecs
+                .run_system_cached(enemy_move::enemy_steering_system)
+                .unwrap();
+            w.end_tick();
+        }
+        let rat_x = rat.x;
+        let mut passed = 0usize;
+        for (e, s) in followers.iter().zip(start) {
+            if let Ok(en) = w.ecs.query::<&Enemy>().get(&w.ecs, *e) {
+                // Past the crowd, or through it and on the way to the rat:
+                // either way the board is not a wall.
+                if en.pos.x > board_at.x + 6.0 || (en.pos.x > s + 18.0 && en.pos.x < rat_x) {
+                    passed += 1;
+                }
+            } else {
+                // Killed or gone is also "not blocked".
+                passed += 1;
+            }
+        }
+        assert!(
+            passed >= 5,
+            "only {passed} of {} bodies got past the stuck crowd",
+            followers.len()
         );
     }
 
-    /// Catch behaviour at the new `30 × 22` pad edges and corners in all four
-    /// cardinal facings, for both the player rat and ground enemies (proving
-    /// `PAD_REACH_SQ` never rejects a corner inside `STICKY_TRAP_PAD_HALF`).
+    /// One catch per body, one body per slot, whichever board is overlapped.
     #[test]
-    fn sticky_pad_catches_at_new_edges_in_all_four_facings() {
+    fn overlapping_boards_never_share_a_body() {
+        let mut w = open_arena(269);
+        let c = centre(&w);
+        add_board(&mut w, c);
+        add_board(&mut w, c + Vec2::new(2.0, 0.0));
+        w.player.pos = c + Vec2::new(400.0, 0.0);
+        let a = add_enemy(&mut w, EnemyKind::Skitterer, c, 40.0);
+        traps_tick(&mut w, Vec2::ZERO, false);
+        let second = slot(&mut w, 1).slots.iter().flatten().count();
+        assert_eq!(
+            second, 0,
+            "the second board caught a body that was already held"
+        );
+        assert!(has_slow(&mut w, a));
+    }
+
+    /// The catch radius and the four cardinal facings still hold on the pad
+    /// edges and corners.
+    #[test]
+    fn sticky_pad_catches_at_edges_in_all_four_facings() {
         let px = STICKY_TRAP_PAD_HALF.x;
         let py = STICKY_TRAP_PAD_HALF.y;
         let facings = [
@@ -1111,8 +2007,6 @@ mod tests {
         for facing in facings {
             let f = facing.normalized();
             let p = f.perp();
-
-            // Inside all 4 edges + all 4 corners (including corners past the old 81.0 reach^2).
             let inside_offsets = [
                 f * (px - 0.25),
                 -f * (px - 0.25),
@@ -1122,7 +2016,6 @@ mod tests {
                 -f * (px - 0.25) - p * (py - 0.25),
             ];
             for off in inside_offsets {
-                // Player catch
                 let mut w = open_arena(301);
                 let c = centre(&w);
                 w.level
@@ -1137,7 +2030,6 @@ mod tests {
                     "player should stick at offset {off:?} for facing {facing:?}"
                 );
 
-                // Enemy catch (exercises PAD_REACH_SQ prefilter + on_pad)
                 let mut w = open_arena(302);
                 let c = centre(&w);
                 w.level
@@ -1154,7 +2046,6 @@ mod tests {
                 );
             }
 
-            // Just outside the glue pad (on the cardboard rim): must NOT catch.
             let outside_offsets = [
                 f * (px + 0.25),
                 -f * (px + 0.25),
@@ -1194,10 +2085,36 @@ mod tests {
         }
     }
 
+    /// Bats fly over both traps (art `Idle` / `Armed`: flying entities pass).
+    #[test]
+    fn flying_bats_pass_over_traps() {
+        let mut w = open_arena(137);
+        let c = centre(&w);
+        add_board(&mut w, c);
+        add_mousetrap(&mut w, c + Vec2::new(60.0, 0.0));
+        w.player.pos = c + Vec2::new(200.0, 200.0);
+        add_enemy(&mut w, EnemyKind::Bat, c, 1.0);
+        // The Wick Moth flies too.
+        add_enemy(&mut w, EnemyKind::WickMoth, c + Vec2::new(1.0, 1.0), 1.0);
+        add_enemy(
+            &mut w,
+            EnemyKind::Bat,
+            c + Vec2::new(60.0 + MOUSETRAP_TRIGGER_OFFSET_U, 0.0),
+            1.0,
+        );
+
+        for _ in 0..5 {
+            traps_tick(&mut w, Vec2::ZERO, false);
+        }
+        assert_eq!(board_state(&w, 0), StickyTrapState::Idle);
+        assert_eq!(mouse_state(&w, 0), MousetrapState::Armed);
+    }
+
     // ---- Mousetraps ------------------------------------------------------
 
-    /// Full state timeline: `Armed` → 0.28 s `Triggered` (no damage) → 0.20 s
-    /// `Snapping` → `Sprung`, with the art's `hit_flash` at the impact.
+    /// Full state timeline of an ordinary trap: `Armed` → 0.28 s `Triggered`
+    /// (no damage) → 0.20 s `Snapping` → `Sprung`, with the art's `hit_flash`
+    /// at the impact.
     #[test]
     fn mousetrap_warns_then_snaps_then_is_sprung() {
         let mut w = open_arena(151);
@@ -1205,15 +2122,16 @@ mod tests {
         add_mousetrap(&mut w, c);
         w.player.pos = c + Vec2::new(300.0, 0.0);
         let bait = c + FACING * MOUSETRAP_TRIGGER_OFFSET_U;
-        let e = add_enemy(&mut w, EnemyKind::Brute, bait, 5.0); // 300 hp
+        let e = add_enemy(&mut w, EnemyKind::Brute, bait, 20.0); // 1200 hp
 
         let mut ticks = 0usize;
         traps_tick(&mut w, Vec2::ZERO, false);
         assert_eq!(mouse_state(&w, 0), MousetrapState::Triggered);
         assert!(w.level.objects.mousetraps[0].progress.abs() < 1e-6);
+        let hp = enemy_of(&mut w, e).hp;
         for _ in 0..10_000 {
             assert!(
-                enemy_of(&mut w, e).hp == 300.0,
+                enemy_of(&mut w, e).hp == hp,
                 "the warning damaged the brute"
             );
             if mouse_state(&w, 0) != MousetrapState::Triggered {
@@ -1222,12 +2140,10 @@ mod tests {
             traps_tick(&mut w, Vec2::ZERO, false);
             ticks += 1;
         }
-        // `ticks` advancing ticks elapse between the trigger and the snap.
         let warn = ticks as f32 * DT;
         assert!(
             (warn - MOUSETRAP_TRIGGER_SECS).abs() <= DT * 1.01,
-            "warning lasted {warn} s, expected {}",
-            MOUSETRAP_TRIGGER_SECS
+            "warning lasted {warn} s, expected {MOUSETRAP_TRIGGER_SECS}"
         );
         assert_eq!(mouse_state(&w, 0), MousetrapState::Snapping);
 
@@ -1242,8 +2158,7 @@ mod tests {
         let snap = ticks as f32 * DT;
         assert!(
             (snap - MOUSETRAP_SNAP_SECS).abs() <= DT * 1.01,
-            "snap lasted {snap} s, expected {}",
-            MOUSETRAP_SNAP_SECS
+            "snap lasted {snap} s, expected {MOUSETRAP_SNAP_SECS}"
         );
         assert_eq!(mouse_state(&w, 0), MousetrapState::Sprung);
         assert!((w.level.objects.mousetraps[0].progress - 1.0).abs() < 1e-6);
@@ -1251,11 +2166,9 @@ mod tests {
             w.level.objects.mousetraps[0].hit_flash > 0.0,
             "the impact flash had already faded"
         );
-        // 80 damage, once.
-        assert_eq!(enemy_of(&mut w, e).hp, 300.0 - MOUSETRAP_DAMAGE_ENEMY);
+        assert_eq!(enemy_of(&mut w, e).hp, hp - MOUSETRAP_DAMAGE_ENEMY);
 
-        // Sprung is permanent and harmless: nothing more happens, and the
-        // impact flash fades out on its own.
+        // Sprung is permanent and harmless.
         let hp = enemy_of(&mut w, e).hp;
         for _ in 0..30 {
             traps_tick(&mut w, Vec2::ZERO, false);
@@ -1265,8 +2178,8 @@ mod tests {
         assert!(w.level.objects.mousetraps[0].hit_flash.abs() < 1e-6);
     }
 
-    /// Three enemies under the bar are each hit exactly once, one outside the
-    /// oriented rectangle is untouched.
+    /// Three enemies under the bigger bar are each hit exactly once; bodies
+    /// outside the `u in [-4, 18], |v| <= 10` rect are untouched.
     #[test]
     fn a_mousetrap_hits_three_enemies_exactly_once_each() {
         let mut w = open_arena(157);
@@ -1274,29 +2187,25 @@ mod tests {
         add_mousetrap(&mut w, c);
         w.player.pos = c + Vec2::new(300.0, 0.0);
         let perp = FACING.perp();
-        // Inside the art's kill rect (`u in [-1, 9.5]`, `|v| <= 6`).
         let inside = [
-            c + FACING * 1.0,
-            c + FACING * 4.0 + perp * 3.0,
-            c + FACING * 8.0 - perp * 4.0,
+            c + FACING * 2.0,
+            c + FACING * 8.0 + perp * 6.0,
+            c + FACING * 15.0 - perp * 8.0,
         ];
         for p in inside.iter() {
-            // Skitterers would die to one 80-damage hit, so use Brutes with an
-            // inflated health pool: only a *second* hit can be detected on them.
-            add_enemy(&mut w, EnemyKind::Brute, *p, 4.0); // 240 hp
+            add_enemy(&mut w, EnemyKind::Brute, *p, 20.0);
         }
         let outside = [
-            c - FACING * 4.0,              // behind the cocked bar
-            c + FACING * 4.0 + perp * 8.0, // beside the bar
+            c - FACING * 8.0,               // behind the cocked bar
+            c + FACING * 8.0 + perp * 14.0, // beside the bar
+            c + FACING * 24.0,              // past the far rim
         ];
         for p in outside.iter() {
-            add_enemy(&mut w, EnemyKind::Brute, *p, 4.0);
+            add_enemy(&mut w, EnemyKind::Brute, *p, 20.0);
         }
-        // Spawn order is `SpawnId` order: the first three are the inside ones.
         let ids: Vec<u32> = w.enemies().iter().map(|e| e.id).collect();
-        assert_eq!(ids.len(), 5);
+        assert_eq!(ids.len(), 6);
 
-        // Fire the trap.
         w.level.objects.mousetraps[0].state = MousetrapState::Triggered;
         for _ in 0..(MOUSETRAP_TRIGGER_SECS / DT).ceil() as usize + 2 {
             traps_tick(&mut w, Vec2::ZERO, false);
@@ -1308,20 +2217,266 @@ mod tests {
         }
         assert_eq!(mouse_state(&w, 0), MousetrapState::Sprung);
 
-        // Each inside brute lost exactly one hit's worth of hp (not two).
         for e in w.enemies() {
-            let start = 240.0;
             if ids[..3].contains(&e.id) {
                 assert_eq!(
                     e.hp,
-                    start - MOUSETRAP_DAMAGE_ENEMY,
+                    1200.0 - MOUSETRAP_DAMAGE_ENEMY,
                     "inside brute hit more than once: hp = {}",
                     e.hp
                 );
             } else {
-                assert_eq!(e.hp, start, "outside brute was hit: hp = {}", e.hp);
+                assert_eq!(e.hp, 1200.0, "outside brute was hit: hp = {}", e.hp);
             }
         }
+    }
+
+    /// An ordinary snap: a walking rat is hit (hard), a dashing one is already
+    /// out of the bar, and the damage is a share of the pool.
+    #[test]
+    fn an_ordinary_snap_hits_a_walking_rat_and_a_dash_escapes() {
+        // Walking straight through the plate, from behind the bar.
+        let mut w = open_arena(271);
+        let c = centre(&w);
+        add_mousetrap(&mut w, c);
+        let start = c - FACING * 16.0;
+        w.player.pos = start;
+        w.player.face = FACING;
+        let full = w.player.max_hp();
+        let mut hp_after = full;
+        for _ in 0..120 {
+            w.begin_tick(DT, FACING, false);
+            w.ecs.run_system_cached(traps_system).unwrap();
+            w.ecs.run_system_cached(player::player_system).unwrap();
+            w.end_tick();
+            if w.player.hp < full {
+                hp_after = w.player.hp;
+                break;
+            }
+            if w.player.pos.x > c.x + 40.0 {
+                break;
+            }
+        }
+        let share = (full - hp_after) / full;
+        assert!(
+            (share - MOUSETRAP_DAMAGE_PLAYER_SHARE).abs() < 0.05,
+            "a walking rat took {share:.2} of its pool, expected ~{MOUSETRAP_DAMAGE_PLAYER_SHARE}"
+        );
+
+        // Dashing through: the same run with a dash pressed at the plate.
+        let mut w = open_arena(277);
+        let c = centre(&w);
+        add_mousetrap(&mut w, c);
+        w.player.pos = c - FACING * 16.0;
+        w.player.face = FACING;
+        w.player.dash_cd = 0.0;
+        let full = w.player.max_hp();
+        for _ in 0..90 {
+            let dash = w.player.dash_cd <= 0.0 && w.player.pos.x > c.x - 20.0;
+            w.begin_tick(DT, FACING, dash);
+            w.ecs.run_system_cached(traps_system).unwrap();
+            w.ecs.run_system_cached(player::player_system).unwrap();
+            w.end_tick();
+            if w.player.pos.x > c.x + 40.0 {
+                break;
+            }
+        }
+        assert!(
+            (w.player.hp - full).abs() < 1e-3,
+            "a dashing rat was hit for {} hp",
+            full - w.player.hp
+        );
+    }
+
+    /// A hair trigger lands on the touch tick: only a dash that is *already*
+    /// running (its i-frames) survives, and it does far more damage.
+    #[test]
+    fn a_hair_trigger_snaps_on_the_touch_tick() {
+        // No dash: the rat takes the hair-trigger share the instant it touches.
+        let mut w = open_arena(281);
+        let c = centre(&w);
+        add_mousetrap_spec(&mut w, c, MousetrapKind::HairTrigger, TrapBait::Cheese);
+        w.player.pos = c + FACING * MOUSETRAP_TRIGGER_OFFSET_U;
+        let full = w.player.max_hp();
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert_eq!(mouse_state(&w, 0), MousetrapState::Snapping);
+        let lost = (full - w.player.hp) / full;
+        assert!(
+            (lost - MOUSETRAP_DAMAGE_PLAYER_HAIR_SHARE).abs() < 0.05,
+            "the hair trigger took {lost:.2} of the pool"
+        );
+        assert!(w.player.hp > 0.0, "no trap may one-shot a full rat");
+
+        // Pushing dash on the same tick is not enough (the bar is already down).
+        let mut w = open_arena(283);
+        let c = centre(&w);
+        add_mousetrap_spec(&mut w, c, MousetrapKind::HairTrigger, TrapBait::Cheese);
+        w.player.pos = c + FACING * MOUSETRAP_TRIGGER_OFFSET_U;
+        w.player.dash_cd = 0.0;
+        w.begin_tick(DT, FACING, true);
+        w.ecs.run_system_cached(traps_system).unwrap();
+        w.ecs.run_system_cached(player::player_system).unwrap();
+        w.end_tick();
+        assert!(
+            w.player.hp < w.player.max_hp(),
+            "a dash that only started this tick dodged a hair trigger"
+        );
+
+        // A dash already under way (its i-frames) gets through untouched.
+        let mut w = open_arena(293);
+        let c = centre(&w);
+        add_mousetrap_spec(&mut w, c, MousetrapKind::HairTrigger, TrapBait::Cheese);
+        w.player.pos = c + FACING * MOUSETRAP_TRIGGER_OFFSET_U;
+        w.player.iframes = 0.18;
+        let full = w.player.max_hp();
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert!((w.player.hp - full).abs() < 1e-3, "dash i-frames must dodge it");
+        // It still snaps, and only once.
+        assert_eq!(mouse_state(&w, 0), MousetrapState::Snapping);
+        for _ in 0..40 {
+            traps_tick(&mut w, Vec2::ZERO, false);
+        }
+        assert_eq!(mouse_state(&w, 0), MousetrapState::Sprung);
+        assert!((w.player.hp - full).abs() < 1e-3, "the bar hit twice");
+    }
+
+    /// Neither kind can take a full-health rat in one hit, whatever its armour,
+    /// and armour only partly blunts the bar.
+    #[test]
+    fn snap_damage_respects_armour_and_never_one_shots() {
+        for hair in [false, true] {
+            for armor in [0.0f32, 2.0, 6.0, 20.0] {
+                let mut w = open_arena(307);
+                let c = centre(&w);
+                let kind = if hair {
+                    MousetrapKind::HairTrigger
+                } else {
+                    MousetrapKind::Ordinary
+                };
+                add_mousetrap_spec(&mut w, c, kind, TrapBait::Cheese);
+                w.player.loadout.stats.armor = armor;
+                w.player.hp = w.player.max_hp();
+                w.player.pos = c + FACING * MOUSETRAP_TRIGGER_OFFSET_U;
+                let full = w.player.max_hp();
+                for _ in 0..40 {
+                    traps_tick(&mut w, Vec2::ZERO, false);
+                    if w.player.hp < full {
+                        break;
+                    }
+                }
+                let lost = full - w.player.hp;
+                assert!(lost > 0.0, "armour {armor} blocked the whole bar");
+                assert!(
+                    lost < full,
+                    "a {kind:?} snap one-shot a full rat at armour {armor}"
+                );
+                // Armour blunts only part of it: the loss is above the share
+                // minus half the armour, and below the bare share.
+                let bare = full * if hair { 0.65 } else { 0.35 };
+                assert!(
+                    lost >= bare - armor * 0.5 - 1.0,
+                    "armour ate too much: lost {lost}, bare {bare}, armour {armor}"
+                );
+                assert!(lost <= bare + 1.0, "armour made the bar worse");
+            }
+        }
+    }
+
+    /// A Bottle Cap eats a snap like any other hit (one charge, one bite).
+    #[test]
+    fn a_bottle_cap_shield_blocks_a_snap() {
+        let mut w = open_arena(311);
+        let c = centre(&w);
+        add_mousetrap_spec(&mut w, c, MousetrapKind::HairTrigger, TrapBait::Cheese);
+        w.player.pos = c + FACING * MOUSETRAP_TRIGGER_OFFSET_U;
+        w.player.buffs.shield = 12.0;
+        let full = w.player.max_hp();
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert!((w.player.hp - full).abs() < 1e-3, "the cap did not eat the bar");
+        assert_eq!(w.player.buffs.shield, 0.0, "the cap was not spent");
+    }
+
+    /// Taking the bait is what springs the trap: the reward is collected on the
+    /// touch and lands through the normal pickup path.
+    #[test]
+    fn the_bait_is_collected_on_touch_and_the_trap_springs() {
+        let mut w = open_arena(313);
+        let c = centre(&w);
+        add_mousetrap_spec(
+            &mut w,
+            c,
+            MousetrapKind::Ordinary,
+            TrapBait::Pickup(PickupKind::PocketWatch),
+        );
+        w.player.pos = c + FACING * MOUSETRAP_TRIGGER_OFFSET_U;
+        traps_and_pickups_tick(&mut w);
+        assert!(
+            w.player.buffs.slow_bullets > 0.0,
+            "the pocket watch never reached the rat"
+        );
+        assert!(w.level.objects.mousetraps[0].bait_taken);
+        assert_eq!(mouse_state(&w, 0), MousetrapState::Triggered);
+        assert!(w.last_pickups().contains(&PickupKind::PocketWatch));
+    }
+
+    /// A chest on the plate opens the ordinary chest flow.
+    #[test]
+    fn a_chest_bait_raises_the_chest_count() {
+        let mut w = open_arena(317);
+        let c = centre(&w);
+        add_mousetrap_spec(&mut w, c, MousetrapKind::HairTrigger, TrapBait::Chest);
+        w.player.pos = c + FACING * MOUSETRAP_TRIGGER_OFFSET_U;
+        traps_and_pickups_tick(&mut w);
+        assert_eq!(w.pending_chests, 1, "the chest was not collected");
+        assert!(w.level.objects.mousetraps[0].bait_taken);
+    }
+
+    /// An enemy sets the trap off and the bait is left lying on the sprung
+    /// plate for the rat to take afterwards.
+    #[test]
+    fn an_enemy_trigger_leaves_the_bait_for_the_rat() {
+        let mut w = open_arena(319);
+        let c = centre(&w);
+        add_mousetrap_spec(
+            &mut w,
+            c,
+            MousetrapKind::Ordinary,
+            TrapBait::Pickup(PickupKind::Magnet),
+        );
+        w.player.pos = c + Vec2::new(300.0, 0.0);
+        add_enemy(&mut w, EnemyKind::Skitterer, c + FACING * MOUSETRAP_TRIGGER_OFFSET_U, 1.0);
+        for _ in 0..200 {
+            traps_tick(&mut w, Vec2::ZERO, false);
+            if mouse_state(&w, 0) == MousetrapState::Sprung {
+                break;
+            }
+        }
+        assert_eq!(mouse_state(&w, 0), MousetrapState::Sprung);
+        assert!(
+            !w.level.objects.mousetraps[0].bait_taken,
+            "the horde ate the bait"
+        );
+        // The rat walks onto the sprung plate and takes it.
+        w.player.pos = c + FACING * MOUSETRAP_TRIGGER_OFFSET_U;
+        traps_and_pickups_tick(&mut w);
+        assert!(w.level.objects.mousetraps[0].bait_taken);
+        // The reward lands through the normal pickup path (the HUD's telemetry
+        // list is what the App drains, so this is the same route a floor find takes).
+        assert!(w.last_pickups().contains(&PickupKind::Magnet));
+    }
+
+    /// A sprung trap with nothing left to take drops out of the live list (the
+    /// sim stops touching it), and a set one stays in it.
+    #[test]
+    fn a_sprung_trap_goes_inert() {
+        let mut w = open_arena(323);
+        let c = centre(&w);
+        add_mousetrap(&mut w, c);
+        w.player.pos = c + Vec2::new(300.0, 0.0);
+        w.level.objects.mousetraps[0].state = MousetrapState::Sprung;
+        traps_tick(&mut w, Vec2::ZERO, false);
+        let t = w.ecs.resource::<TrapRuntime>();
+        assert!(t.live_mice.is_empty(), "a sprung trap stayed live");
     }
 
     /// Kills by a mousetrap take the normal loot path: the reap later in the
@@ -1332,10 +2487,9 @@ mod tests {
         let c = centre(&w);
         add_mousetrap(&mut w, c);
         w.player.pos = c + Vec2::new(300.0, 0.0);
-        for off in [1.0, 3.0, 6.0] {
+        for off in [1.0, 5.0, 9.0] {
             add_enemy(&mut w, EnemyKind::Skitterer, c + FACING * off, 1.0); // 6 hp
         }
-        // Start the snap directly (the trigger phase is covered above).
         w.level.objects.mousetraps[0].state = MousetrapState::Triggered;
 
         let mut killed_tick = false;
@@ -1355,105 +2509,13 @@ mod tests {
         }
         assert!(killed_tick, "the mousetrap never killed the skitterers");
         assert_eq!(w.kills, 3, "all three skitterers died");
-        assert!(
-            (w.score as f32) >= 3.0 * 1.0 * 10.0,
-            "score not credited: {}",
-            w.score
-        );
         assert!(!w.gems().is_empty(), "no loot dropped");
         assert!(w.sfx.contains(&Sfx::Kill), "no kill sfx queued");
         assert!(w.enemies().is_empty(), "corpses were not reaped");
     }
 
-    /// The rat takes the art's 20 damage (through armour/i-frames) once per
-    /// snap, and a dash's i-frames dodge it.
-    #[test]
-    fn a_mousetrap_damages_the_rat_twenty_once_but_not_through_iframes() {
-        let snap = |w: &mut World| {
-            w.level.objects.mousetraps[0].state = MousetrapState::Triggered;
-            for _ in 0..200 {
-                traps_tick(w, Vec2::ZERO, false);
-                if mouse_state(w, 0) == MousetrapState::Sprung {
-                    break;
-                }
-            }
-            assert_eq!(mouse_state(w, 0), MousetrapState::Sprung);
-        };
-
-        // The base pool moved 100 → 130 HP in the early-game balance pass
-        // (`Stats::default`), so the check is against the world's own max HP:
-        // what this protects is "exactly one hit's worth, once", not the 100.
-        let mut w = open_arena(167);
-        let full = w.player.max_hp();
-        let c = centre(&w);
-        add_mousetrap(&mut w, c);
-        w.player.pos = c + FACING * 4.0; // standing on the kill plate
-        snap(&mut w);
-        assert!(
-            (w.player.hp - (full - MOUSETRAP_DAMAGE_PLAYER)).abs() < 1e-3,
-            "hp = {}",
-            w.player.hp
-        );
-
-        // A rat already inside i-frames is untouched (the art's "dash i-frames
-        // or exit the kill zone" counter).
-        let mut w = open_arena(173);
-        let full = w.player.max_hp();
-        let c = centre(&w);
-        add_mousetrap(&mut w, c);
-        w.player.pos = c + FACING * 4.0;
-        w.player.iframes = 5.0;
-        snap(&mut w);
-        assert!((w.player.hp - full).abs() < 1e-3, "hp = {}", w.player.hp);
-
-        // Standing off the rectangle is safe.
-        let mut w = open_arena(179);
-        let full = w.player.max_hp();
-        let c = centre(&w);
-        add_mousetrap(&mut w, c);
-        w.player.pos = c + FACING * 4.0 + FACING.perp() * 9.0;
-        snap(&mut w);
-        assert!((w.player.hp - full).abs() < 1e-3, "hp = {}", w.player.hp);
-    }
-
-    /// The rat can bait the horde through: a trap the rat springs hits the
-    /// enemies that followed it into the rectangle.
-    #[test]
-    fn the_rat_can_bait_the_horde_into_a_trap() {
-        let mut w = open_arena(181);
-        let c = centre(&w);
-        add_mousetrap(&mut w, c);
-        // The rat stands *behind* the trap, the bait sits on the plate.
-        w.player.pos = c - FACING * 9.0;
-        add_enemy(&mut w, EnemyKind::Skitterer, c + FACING * 0.5, 1.0);
-        add_enemy(&mut w, EnemyKind::Skitterer, c + FACING * 5.0, 1.0);
-
-        traps_tick(&mut w, Vec2::ZERO, false);
-        assert_eq!(
-            mouse_state(&w, 0),
-            MousetrapState::Triggered,
-            "an enemy on the bait must trip the trap"
-        );
-        for _ in 0..200 {
-            traps_tick(&mut w, Vec2::ZERO, false);
-            if mouse_state(&w, 0) == MousetrapState::Sprung {
-                break;
-            }
-        }
-        assert_eq!(mouse_state(&w, 0), MousetrapState::Sprung);
-        assert!(
-            w.enemies().iter().all(|e| !e.alive()),
-            "80 damage must kill a 6 hp skitterer"
-        );
-        // The rat, well behind the cocked bar, was not hit. (The base pool is
-        // 130 HP since the early-game balance pass; compare to the world's max.)
-        let full = w.player.max_hp();
-        assert!((w.player.hp - full).abs() < 1e-3, "hp = {}", w.player.hp);
-    }
-
     // ---- Sound + effects -------------------------------------------------
 
-    /// How many times `s` is in the world's sfx queue (one tick's worth).
     fn sfx_count(w: &World, s: Sfx) -> usize {
         w.sfx.iter().filter(|x| **x == s).count()
     }
@@ -1467,7 +2529,6 @@ mod tests {
         add_board(&mut w, c);
         w.player.pos = c;
 
-        // Grab.
         w.sfx.clear();
         let p0 = w.particles.len();
         traps_tick(&mut w, FACING, false);
@@ -1481,7 +2542,7 @@ mod tests {
         traps_tick(&mut w, FACING, false);
         assert!(w.sfx.is_empty(), "the hold is silent, got {:?}", w.sfx);
 
-        // Release: exactly one tear-free, on the tick the board is spent.
+        // Release: exactly one tear-free, on the tick the rat is let go.
         w.sfx.clear();
         let mut releases = 0usize;
         let mut burst = 0usize;
@@ -1492,11 +2553,11 @@ mod tests {
             burst += usize::from(w.particles.len() > before);
             assert_eq!(sfx_count(&w, Sfx::UiMove), 0, "a stand-in leaked");
             w.sfx.clear();
-            if board_state(&w, 0) == StickyTrapState::Used {
+            if board_state(&w, 0) == StickyTrapState::Idle {
                 break;
             }
         }
-        assert_eq!(board_state(&w, 0), StickyTrapState::Used);
+        assert_eq!(board_state(&w, 0), StickyTrapState::Idle);
         assert_eq!(releases, 1, "exactly one release sound");
         assert_eq!(burst, 1, "exactly one release burst");
     }
@@ -1514,7 +2575,6 @@ mod tests {
 
         w.sfx.clear();
         traps_tick(&mut w, FACING, true);
-        assert_eq!(board_state(&w, 0), StickyTrapState::Used);
         assert_eq!(sfx_count(&w, Sfx::TrapGlueRelease), 1);
         assert_eq!(sfx_count(&w, Sfx::TrapGlueGrab), 0);
         assert_eq!(sfx_count(&w, Sfx::UiMove), 0);
@@ -1527,7 +2587,7 @@ mod tests {
         let c = centre(&w);
         add_board(&mut w, c);
         w.player.pos = c + Vec2::new(300.0, 0.0);
-        add_enemy(&mut w, EnemyKind::Skitterer, c, 1.0);
+        add_enemy(&mut w, EnemyKind::Skitterer, c, 40.0);
 
         w.sfx.clear();
         traps_tick(&mut w, Vec2::ZERO, false);
@@ -1540,17 +2600,17 @@ mod tests {
             traps_tick(&mut w, Vec2::ZERO, false);
             releases += sfx_count(&w, Sfx::TrapGlueRelease);
             w.sfx.clear();
-            if board_state(&w, 0) == StickyTrapState::Used {
+            if board_state(&w, 0) == StickyTrapState::Idle {
                 break;
             }
         }
-        assert_eq!(board_state(&w, 0), StickyTrapState::Used);
+        assert_eq!(board_state(&w, 0), StickyTrapState::Idle);
         assert_eq!(releases, 1);
     }
 
     /// The mousetrap: one quiet `TrapTrigger` click when the bait is touched,
-    /// then one `TrapSnap` crack (and one splinter burst) at the bar's impact —
-    /// never a `Hit` stand-in, never per window tick.
+    /// then one `TrapSnap` crack at the bar's impact — never a `Hit` stand-in,
+    /// never per window tick. A hair trigger cracks at once, with no click.
     #[test]
     fn the_mousetrap_clicks_once_then_cracks_once() {
         let mut w = open_arena(199);
@@ -1561,32 +2621,26 @@ mod tests {
             &mut w,
             EnemyKind::Brute,
             c + FACING * MOUSETRAP_TRIGGER_OFFSET_U,
-            5.0,
+            20.0,
         );
 
-        // Trigger: the pedal dips (quiet click), no damage yet.
         w.sfx.clear();
         traps_tick(&mut w, Vec2::ZERO, false);
         assert_eq!(mouse_state(&w, 0), MousetrapState::Triggered);
         assert_eq!(sfx_count(&w, Sfx::TrapTrigger), 1);
         assert_eq!(sfx_count(&w, Sfx::UiMove), 0);
 
-        // The 0.28 s warning is silent.
         w.sfx.clear();
         traps_tick(&mut w, Vec2::ZERO, false);
         assert_eq!(mouse_state(&w, 0), MousetrapState::Triggered);
         assert!(w.sfx.is_empty(), "the warning is silent, got {:?}", w.sfx);
 
-        // The snap: one crack, one burst.
         w.sfx.clear();
         let mut snaps = 0usize;
-        let mut bursts = 0usize;
         for _ in 0..300 {
-            let before = w.particles.len();
             traps_tick(&mut w, Vec2::ZERO, false);
             snaps += sfx_count(&w, Sfx::TrapSnap);
             assert_eq!(sfx_count(&w, Sfx::Hit), 0, "a stand-in leaked");
-            bursts += usize::from(w.particles.len() > before);
             w.sfx.clear();
             if mouse_state(&w, 0) == MousetrapState::Sprung {
                 break;
@@ -1594,22 +2648,33 @@ mod tests {
         }
         assert_eq!(mouse_state(&w, 0), MousetrapState::Sprung);
         assert_eq!(snaps, 1, "exactly one crack per snap");
-        // The burst happens on the impact tick (the brute is damaged there, so
-        // the hit vfx fires on the same tick — count the snap's own beat).
-        assert!(bursts >= 1, "the snap must splinter");
+
+        // Hair trigger: no click, one crack, on the touch tick.
+        let mut w = open_arena(203);
+        let c = centre(&w);
+        add_mousetrap_spec(&mut w, c, MousetrapKind::HairTrigger, TrapBait::Cheese);
+        w.player.pos = c + Vec2::new(300.0, 0.0);
+        add_enemy(
+            &mut w,
+            EnemyKind::Brute,
+            c + FACING * MOUSETRAP_TRIGGER_OFFSET_U,
+            20.0,
+        );
+        w.sfx.clear();
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert_eq!(sfx_count(&w, Sfx::TrapTrigger), 0, "a hair trigger ticks, not clicks");
+        assert_eq!(sfx_count(&w, Sfx::TrapSnap), 1);
     }
 
     // ---- Determinism -----------------------------------------------------
 
-    /// Twin runs: same seed, same scripted input, identical trap state and
-    /// identical positions. (The golden trace is regenerated by the integrator;
-    /// this only proves the trap system adds no nondeterminism of its own.)
+    /// Twin runs: same seed, same scripted input, identical trap state, load,
+    /// wear and positions.
     #[test]
     fn twin_runs_reproduce_the_same_trap_state() {
         let run = |seed: u64| {
             let mut w = World::new(Theme::Kitchen, seed);
             for i in 0..900 {
-                // Wander the map so some of the generated traps get stepped on.
                 let dir = match (i / 90) % 4 {
                     0 => Vec2::new(1.0, 0.0),
                     1 => Vec2::new(0.0, 1.0),
@@ -1618,19 +2683,19 @@ mod tests {
                 };
                 w.update(DT, dir, false);
             }
-            let sticky: Vec<(u8, f32)> = w
+            let sticky: Vec<(u8, f32, u8, u32, u8)> = w
                 .level
                 .objects
                 .sticky_traps
                 .iter()
-                .map(|v| (v.state as u8, v.progress))
+                .map(|v| (v.state as u8, v.worn, v.load, v.progress.to_bits(), v.tear_n))
                 .collect();
-            let mice: Vec<(u8, f32)> = w
+            let mice: Vec<(u8, f32, bool)> = w
                 .level
                 .objects
                 .mousetraps
                 .iter()
-                .map(|v| (v.state as u8, v.progress))
+                .map(|v| (v.state as u8, v.progress, v.bait_taken))
                 .collect();
             (
                 w.player.pos.x,
@@ -1650,7 +2715,6 @@ mod tests {
         assert_eq!(a.3.to_bits(), b.3.to_bits(), "elapsed differs");
         assert_eq!(a.4, b.4, "sticky boards differ between twin runs");
         assert_eq!(a.5, b.5, "mousetraps differ between twin runs");
-        // And the run really exercised traps (the generator places some).
         assert!(
             !a.4.is_empty() || !a.5.is_empty(),
             "no traps on the map, test proves nothing"

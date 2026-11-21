@@ -133,6 +133,9 @@ pub enum MinimapCell {
     BossFloor,
     /// Floor trap (sticky or snap) once seen.
     Trap,
+    /// A **hair-trigger** snap trap once seen: the same floor mark in the
+    /// warning red, because its risk is one a player wants on the map.
+    TrapHair,
 }
 
 /// Read-only world & fog-of-war data source implemented by the simulation.
@@ -831,7 +834,9 @@ pub fn draw_compact(
                         match source.cell_at(cx, cy) {
                             MinimapCell::Unknown => {}
                             // Traps drop out in Small so amber stays exclusive to the bearing.
-                            MinimapCell::Floor | MinimapCell::Trap => floor_n += 1,
+                            MinimapCell::Floor
+                            | MinimapCell::Trap
+                            | MinimapCell::TrapHair => floor_n += 1,
                             MinimapCell::BossFloor => boss_floor_n += 1,
                             MinimapCell::Wall => wall_n += 1,
                             MinimapCell::MazeWall => maze_n += 1,
@@ -1290,7 +1295,7 @@ pub fn draw_expanded(
                                 hole_near_n += 1;
                             }
                         }
-                        MinimapCell::Trap => trap_n += 1,
+                        MinimapCell::Trap | MinimapCell::TrapHair => trap_n += 1,
                     }
                 }
             }
@@ -2050,6 +2055,7 @@ fn classify_compact_cell(
             }
         }
         MinimapCell::Trap => (palette::mix(theme.floor_live, WARN_AMBER_RGB, 0.42), KIND_FLOOR),
+        MinimapCell::TrapHair => (palette::mix(theme.floor_live, (236, 66, 52), 0.50), KIND_FLOOR),
     }
 }
 

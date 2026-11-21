@@ -42,7 +42,10 @@ use rand::rngs::StdRng;
 use rand::RngExt;
 use rand::SeedableRng;
 
-use crate::game::art_traps::{MousetrapState, MOUSETRAP_DAMAGE_PLAYER, MOUSETRAP_TRIGGER_OFFSET_U, MOUSETRAP_TRIGGER_RADIUS};
+use crate::game::art_traps::{
+    MousetrapKind, MousetrapState, MOUSETRAP_DAMAGE_PLAYER_HAIR_SHARE, MOUSETRAP_DAMAGE_PLAYER_SHARE,
+    MOUSETRAP_TRIGGER_OFFSET_U, MOUSETRAP_TRIGGER_RADIUS,
+};
 use crate::game::bot::{Bot, Skill};
 use crate::game::bullet::{Bullet, Faction};
 use crate::game::campaign::{self, CampaignState, Keepable};
@@ -1055,6 +1058,7 @@ impl AutoRun {
         let w = &self.world;
         let p = w.player.pos;
         let armor = w.player.loadout.stats.armor;
+        let max_hp = w.player.max_hp();
         // Fallback cause when nothing was in contact range: the nearest enemy
         // is still the likeliest author of an unexplained HP drop.
         let mut nearest: Option<(EnemyKind, f32)> = None;
@@ -1162,9 +1166,17 @@ impl AutoRun {
             let trigger = trap.pos + trap.facing * MOUSETRAP_TRIGGER_OFFSET_U;
             let d = trigger.dist(p);
             if d < MOUSETRAP_TRIGGER_RADIUS + R + 4.0 {
+                // The snap's damage is a share of the rat's pool (wave 3), so
+                // the attribution compares against the same share it would
+                // really deal — a hair-trigger bar is the bigger loss.
+                let share = if trap.kind == MousetrapKind::HairTrigger {
+                    MOUSETRAP_DAMAGE_PLAYER_HAIR_SHARE
+                } else {
+                    MOUSETRAP_DAMAGE_PLAYER_SHARE
+                };
                 self.threats.push((
                     DamageCause::Trap,
-                    (MOUSETRAP_DAMAGE_PLAYER - armor).max(1.0),
+                    (max_hp * share - armor * 0.5).max(1.0),
                     d,
                 ));
             }

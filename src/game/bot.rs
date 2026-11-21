@@ -342,9 +342,16 @@ enum Threat {
         radius: f32,
         damage: f32,
     },
+    /// A **live** glue board (a spent one is plain floor). Wave 3: a board is a
+    /// crowd tool, so the threat carries the load: a board the rat steps on
+    /// holds it, but a leg that drags the chase over one is an asset.
     StickyPad {
         pos: Vec2,
         facing: Vec2,
+        /// Glue units currently held (0 on a fresh board).
+        load: u8,
+        /// Beacons of the horde already pinned to it.
+        stuck: u8,
     },
     /// A steam grate: a 1 s warn, then a 0.7 s one-tile plume for 8.
     Steam {
@@ -358,10 +365,16 @@ enum Threat {
         pos: Vec2,
         half: Vec2,
     },
+    /// A set (or mid-snap) snap trap, or a sprung one still holding a bait.
     Mousetrap {
         pos: Vec2,
         facing: Vec2,
+        /// The bar is still up (or coming down): the kill rect bites.
         armed: bool,
+        /// Hair trigger: no reaction window at all, never entered on purpose.
+        hair: bool,
+        /// A good bait still sits on the plate.
+        bait_good: bool,
     },
     /// A wave-3 floor hazard: a Bell Flea's landing cross or a dead Wick
     /// Moth's burst are circles (`dir` is `ZERO`); a Turnkey's crossbar is the
@@ -536,7 +549,17 @@ impl Bot {
         if best_dir.len_sq() > 0.25 {
             self.heading = best_dir;
         }
-        let dash = self.wants_dash(w, &dirs) || self.wants_active(w);
+        // Escape first (that is what the dash is for); otherwise, with the dash
+        // charged, take a good bait off an ordinary trap by dashing *through*
+        // its plate — the i-frames carry the rat over and out of the bar.
+        let escape = self.wants_dash(w, &dirs) || self.wants_active(w);
+        let (best_dir, dash) = if escape {
+            (best_dir, true)
+        } else if let Some(dir) = self.bait_dash(w) {
+            (dir, true)
+        } else {
+            (best_dir, false)
+        };
         // Grazing throttle: full speed only to break away, a creep when the
         // pack is close, so the weapons keep killing *next to* the rat and the
         // gems they drop land inside the magnet radius.
@@ -984,30 +1007,36 @@ impl Bot {
         }
         if self.params.trap_aware {
             for trap in &w.level.objects.sticky_traps {
-                if matches!(
+                // A live board catches the rat whatever it is carrying (a
+                // spent/Used one is harmless floor and drops out of the model).
+                let live = matches!(
                     trap.state,
                     crate::game::art_traps::StickyTrapState::Idle
-                ) && trap.pos.dist_sq(p) < 90.0 * 90.0
-                    && self.sees(w, p, trap.pos)
-                {
+                        | crate::game::art_traps::StickyTrapState::Stuck
+                );
+                if live && trap.pos.dist_sq(p) < 90.0 * 90.0 && self.sees(w, p, trap.pos) {
                     self.threats.push(Threat::StickyPad {
                         pos: trap.pos,
                         facing: trap.facing,
+                        load: trap.load,
+                        stuck: trap.victims.iter().flatten().count() as u8,
                     });
                 }
             }
             for trap in &w.level.objects.mousetraps {
-                let armed = matches!(
-                    trap.state,
-                    crate::game::art_traps::MousetrapState::Armed
-                        | crate::game::art_traps::MousetrapState::Triggered
-                        | crate::game::art_traps::MousetrapState::Snapping
-                );
-                if armed && trap.pos.dist_sq(p) < 70.0 * 70.0 && self.sees(w, p, trap.pos) {
+                let armed = trap.live();
+                // A sprung trap is inert, but its bait is still free to take.
+                let keeps_bait = !trap.bait_taken && trap.bait.is_good();
+                if (armed || keeps_bait)
+                    && trap.pos.dist_sq(p) < 90.0 * 90.0
+                    && self.sees(w, p, trap.pos)
+                {
                     self.threats.push(Threat::Mousetrap {
                         pos: trap.pos,
                         facing: trap.facing,
                         armed,
+                        hair: trap.kind.hair(),
+                        bait_good: keeps_bait,
                     });
                 }
             }
@@ -1599,6 +1628,12 @@ impl Bot {
                 }
             }
             score += (nearest / 120.0).min(1.4);
+            // Under pressure, a leg that crosses a trap is worth choosing: a
+            // live glue board pins the pack behind the rat, and an ordinary
+            // snap trap's bar flattens a Brute when one is in the chase.
+            if crowd.is_some() {
+                score += 1.6 * self.trap_crossing_bonus(w, p, q);
+            }
             if score > best_score {
                 best_score = score;
                 best = q;
@@ -1614,6 +1649,104 @@ impl Bot {
         };
         self.wander = (self.wander + 0.55 * self.orbit_sign)
             .rem_euclid(std::f32::consts::TAU);
+    }
+
+    /// How strongly a leg from `p` to `q` crosses a trap worth kiting the horde
+    /// over: a live glue board (pins the pack) or an **ordinary** snap trap when
+    /// a heavy body is in the chase (its bar kills a Brute). A hair-trigger trap
+    /// is never an asset, and a spent trap is nothing.
+    fn trap_crossing_bonus(&self, w: &World, p: Vec2, q: Vec2) -> f32 {
+        use crate::game::art_traps::{
+            MousetrapState, StickyTrapState, MOUSETRAP_KILL_HALF_V, MOUSETRAP_KILL_U_MAX,
+            MOUSETRAP_KILL_U_MIN,
+        };
+        let heavy_chasing = self.threats.iter().any(|t| {
+            matches!(
+                t,
+                Threat::Enemy { pos, kind, .. }
+                    if matches!(kind, EnemyKind::Brute | EnemyKind::Boss)
+                        && pos.dist(p) < 90.0
+            )
+        });
+        let mut best = 0.0f32;
+        for k in 1..=5 {
+            let s = p + (q - p) * (k as f32 / 5.0);
+            for trap in &w.level.objects.sticky_traps {
+                if matches!(trap.state, StickyTrapState::Idle | StickyTrapState::Stuck)
+                    && on_pad(trap.pos, trap.facing, s)
+                {
+                    best = best.max(1.0);
+                }
+            }
+            if heavy_chasing {
+                for trap in &w.level.objects.mousetraps {
+                    if trap.state != MousetrapState::Armed || trap.kind.hair() {
+                        continue;
+                    }
+                    if crate::game::art_traps::local_box_contains(
+                        trap.pos,
+                        trap.facing,
+                        s,
+                        MOUSETRAP_KILL_U_MIN,
+                        MOUSETRAP_KILL_U_MAX,
+                        MOUSETRAP_KILL_HALF_V,
+                    ) {
+                        best = best.max(0.8);
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// The direction to spend a charged dash through an **ordinary** trap's
+    /// plate for a good bait, if one is a dash away and the way is not suicidal.
+    ///
+    /// Never a hair trigger: only a dash that is *already* under way survives
+    /// one, and the bot does not plan those (it avoids their rect entirely in
+    /// the danger field).
+    fn bait_dash(&self, w: &World) -> Option<Vec2> {
+        use crate::game::art_traps::MOUSETRAP_TRIGGER_OFFSET_U;
+        if w.player.dash_cd > 0.0 {
+            return None;
+        }
+        let p = w.player.pos;
+        let mut best: Option<(f32, Vec2)> = None;
+        for t in &self.threats {
+            let Threat::Mousetrap {
+                pos,
+                facing,
+                armed,
+                hair,
+                bait_good,
+            } = *t
+            else {
+                continue;
+            };
+            if !armed || hair || !bait_good {
+                continue;
+            }
+            let f = if facing.len_sq() > 0.0 {
+                facing.normalized()
+            } else {
+                Vec2::new(1.0, 0.0)
+            };
+            let plate = pos + f * MOUSETRAP_TRIGGER_OFFSET_U;
+            let to = plate - p;
+            let d = to.len();
+            if !(6.0..=34.0).contains(&d) {
+                continue;
+            }
+            let dir = to.normalized();
+            // Do not spend the escape dash into a wall of bodies.
+            if self.score(w, p, dir, false) > 10.0 {
+                continue;
+            }
+            if best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, dir));
+            }
+        }
+        best.map(|(_, dir)| dir)
     }
 
     /// How many enemies sit within `reach` of `point`.
@@ -1795,12 +1928,23 @@ fn threat_cost(_p: Vec2, threat: Threat, q: Vec2, t: f32, contact_scale: f32) ->
                 (damage / 10.0).clamp(0.8, 4.0) * 16.0
             }
         }
-        Threat::StickyPad { pos, facing } => {
-            if on_pad(pos, facing, q) {
-                3.0
-            } else {
-                0.0
+        Threat::StickyPad {
+            pos,
+            facing,
+            load,
+            stuck,
+        } => {
+            if !on_pad(pos, facing, q) {
+                return 0.0;
             }
+            // Standing on a live board is a 0.9 s hold for the rat; crossing it
+            // is fine. The cost is the same either way per sample, but a board
+            // the horde is already stuck to is worth *less* as a hazard to the
+            // rat's eye — nothing else will be caught on it — and a crowded
+            // board is where the weapons want the rat to be, so the penalty is
+            // nudged down with the load (`kite across the glue`).
+            let crowded = (stuck as f32 * 0.25 + load as f32 * 0.05).min(1.0);
+            3.0 - 1.0 * crowded
         }
         Threat::Steam {
             pos,
@@ -1831,10 +1975,47 @@ fn threat_cost(_p: Vec2, threat: Threat, q: Vec2, t: f32, contact_scale: f32) ->
                 0.0
             }
         }
-        Threat::Mousetrap { pos, facing, armed } => {
-            let trigger = pos + facing * 3.5;
-            if armed && trigger.dist(q) < 4.5 + R {
-                4.0
+        Threat::Mousetrap {
+            pos,
+            facing,
+            armed,
+            hair,
+            ..
+        } => {
+            use crate::game::art_traps::{
+                MOUSETRAP_KILL_HALF_V, MOUSETRAP_KILL_U_MAX, MOUSETRAP_KILL_U_MIN,
+                MOUSETRAP_TRIGGER_OFFSET_U, MOUSETRAP_TRIGGER_RADIUS,
+            };
+            let f = if facing.len_sq() > 0.0 {
+                facing.normalized()
+            } else {
+                Vec2::new(1.0, 0.0)
+            };
+            let d = q - pos;
+            let (u, v) = (d.dot(f), d.dot(f.perp()));
+            let in_kill = u >= MOUSETRAP_KILL_U_MIN - R
+                && u <= MOUSETRAP_KILL_U_MAX + R
+                && v.abs() <= MOUSETRAP_KILL_HALF_V + R;
+            if armed && in_kill {
+                // The bar bites anywhere in its rect; a hair-trigger trap lands
+                // on the touch tick, so it is never worth entering (a dash that
+                // is *already* running is the only way through, and the bot
+                // does not plan those).
+                if hair {
+                    40.0
+                } else {
+                    10.0
+                }
+            } else if armed && (q - pos - f * MOUSETRAP_TRIGGER_OFFSET_U).len()
+                < MOUSETRAP_TRIGGER_RADIUS + R
+            {
+                // Touching the plate springs it; the window is short but the
+                // bar is only dangerous inside its rect.
+                if hair {
+                    30.0
+                } else {
+                    6.0
+                }
             } else {
                 0.0
             }
