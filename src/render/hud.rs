@@ -241,6 +241,41 @@ pub fn boss_codename_kind(kind: crate::game::ecs::systems::boss::BossKind) -> (&
     (level.boss_name(), class_tag)
 }
 
+/// The name plate for the fight the player is **in** (or about to be in).
+///
+/// A floor can field more than one boss now (`BossKind::pool_for_theme`), and
+/// the pick is made from the level seed, so a plate keyed on the theme alone
+/// would name the Sweeper while SUBJECT R-01 is on the tile. This reads the
+/// living boss and otherwise answers with the boss the seed will field
+/// ([`BossKind::for_theme_seeded`](crate::game::ecs::systems::boss::BossKind::for_theme_seeded)),
+/// so the pre-boss countdown names the right animal too.
+pub fn boss_plate(world: &World) -> (&'static str, &'static str) {
+    use crate::game::ecs::systems::boss::{Boss, BossKind};
+    let live = world.ecs.iter_entities().find_map(|entity| {
+        let boss = entity.get::<Boss>()?;
+        if boss.dead {
+            None
+        } else {
+            Some(boss.kind)
+        }
+    });
+    match live {
+        Some(kind) => boss_kind_codename(kind),
+        None => {
+            let theme = world.level.theme;
+            let kind = BossKind::for_theme_seeded(theme, world.level.seed);
+            // A single-fight floor (or the seed that fields the original boss)
+            // is the canonical plate, which is the same answer `for_theme`
+            // gives everything else in the UI.
+            if kind == BossKind::for_theme(theme) {
+                boss_codename(theme)
+            } else {
+                boss_kind_codename(kind)
+            }
+        }
+    }
+}
+
 /// Difficulty escalation tier (1..=5) derived purely from the director's
 /// *curve* clock (see [`crate::game::director::curve_clock`]).
 ///

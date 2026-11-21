@@ -295,6 +295,11 @@ pub enum BossAttack {
     Bulldoze,
     Burrow,
     Legs,
+    // SUBJECT R-01 (the Kitchen's second boss, appended for wave 3).
+    Gnaw,
+    Thrash,
+    Squeak,
+    Dash,
 }
 
 impl BossAttack {
@@ -324,6 +329,10 @@ impl BossAttack {
             BossAttack::Bulldoze => "bulldoze",
             BossAttack::Burrow => "burrow",
             BossAttack::Legs => "thrashing legs",
+            BossAttack::Gnaw => "gnaw lunge",
+            BossAttack::Thrash => "tail thrash",
+            BossAttack::Squeak => "sonic squeak",
+            BossAttack::Dash => "dash",
         }
     }
 }
@@ -409,6 +418,16 @@ impl DamageCause {
             },
             // It fires nothing; the arm exists so the label never lies.
             DamageCause::BossProjectile(BossKind::HorseshoeCrab) => "horseshoe crab",
+            DamageCause::BossContact(BossKind::MegaRat) => "subject r-01's body",
+            DamageCause::BossHazard(BossKind::MegaRat, a) => match a {
+                BossAttack::Gnaw => "subject r-01's gnaw",
+                BossAttack::Thrash => "subject r-01's tail thrash",
+                BossAttack::Squeak => "subject r-01's squeak",
+                BossAttack::Dash => "subject r-01's dash",
+                _ => "subject r-01's hazard",
+            },
+            // It fires no projectiles; the arm exists so the label never lies.
+            DamageCause::BossProjectile(BossKind::MegaRat) => "subject r-01",
             DamageCause::Trap => "mousetrap",
             DamageCause::MinibossSignature(kind) => {
             // The batch's damage-by-source column used to lump every
@@ -1294,6 +1313,7 @@ fn boss_name(kind: BossKind) -> &'static str {
         BossKind::NightEdition => "the night edition",
         BossKind::Magpie => "magpie",
         BossKind::HorseshoeCrab => "horseshoe crab",
+        BossKind::MegaRat => "subject r-01",
     }
 }
 
@@ -1479,6 +1499,22 @@ fn boss_attack(state: &BossState) -> BossAttack {
             NightEditionState::CarriageTell
             | NightEditionState::CarriageSweep
             | NightEditionState::Ribbon => BossAttack::Carriage,
+            _ => BossAttack::Other,
+        },
+        BossState::MegaRat(s) => match s {
+            crate::game::art_boss_megarat::MegaRatState::GnawWindup
+            | crate::game::art_boss_megarat::MegaRatState::GnawLunge
+            | crate::game::art_boss_megarat::MegaRatState::GnawStuck => BossAttack::Gnaw,
+            crate::game::art_boss_megarat::MegaRatState::ThrashWindup
+            | crate::game::art_boss_megarat::MegaRatState::ThrashPass1
+            | crate::game::art_boss_megarat::MegaRatState::ThrashGap
+            | crate::game::art_boss_megarat::MegaRatState::ThrashPass2
+            | crate::game::art_boss_megarat::MegaRatState::ThrashRecover => BossAttack::Thrash,
+            crate::game::art_boss_megarat::MegaRatState::SqueakWindup
+            | crate::game::art_boss_megarat::MegaRatState::SqueakShout => BossAttack::Squeak,
+            crate::game::art_boss_megarat::MegaRatState::DashWindup
+            | crate::game::art_boss_megarat::MegaRatState::DashPass
+            | crate::game::art_boss_megarat::MegaRatState::DashSkid => BossAttack::Dash,
             _ => BossAttack::Other,
         },
         BossState::Magpie(s) => match s {

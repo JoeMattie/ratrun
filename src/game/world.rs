@@ -2072,6 +2072,9 @@ impl World {
                 BossArtView::HorseshoeCrab(v) => {
                     art_boss_horseshoe_crab::draw_ground(pb, &v, cam, accent)
                 }
+                BossArtView::MegaRat(v) => {
+                    art_boss_megarat::draw_megarat_ground(pb, &v, cam, accent);
+                }
             }
         }
     }
@@ -2116,6 +2119,7 @@ impl World {
                 BossArtView::HorseshoeCrab(v) => {
                     art_boss_horseshoe_crab::draw(pb, &v, cam, accent)
                 }
+                BossArtView::MegaRat(v) => art_boss_megarat::draw_megarat(pb, &v, cam, accent),
             }
             self.light_map.mark_emissive_highlights(pb, self.w2s(boss.pos, cam), 19);
         }

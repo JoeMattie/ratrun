@@ -6,7 +6,7 @@
 //! |-------|-------|------|-----------|
 //! | 0 | Sewer | Jungle Cat (Apex Jaguar) | [`crate::game::art_boss_cat`] |
 //! | 0 | Sewer | The Horseshoe (horseshoe crab) | [`crate::game::art_boss_horseshoe_crab`] |
-//! | 1 | Kitchen | The Sweeper (broom) | [`crate::game::art_boss_broom`] |
+//! | 1 | Kitchen | The Sweeper (broom) / SUBJECT R-01 (megarat) | [`crate::game::art_boss_broom`], [`crate::game::art_boss_megarat`] |
 //! | 2 | Lab | TURF-REAPER MK.IV (mower) | [`crate::game::art_boss_mower`] |
 //! | 3 | Laundry | The Mangle (wringer) | [`crate::game::art_boss_mangle`] |
 //! | 4 | Printworks | THE NIGHT EDITION (press) | [`crate::game::art_boss_night_edition`] |
@@ -112,6 +112,7 @@ use crate::game::art_boss_horseshoe_crab::{self, CrabState, CrabView};
 use crate::game::art_boss_mangle::{self, MangleState, MangleView};
 use crate::game::art_boss_cat::{self, BossCatState, BossCatView};
 use crate::game::art_boss_magpie::{self, MagpieState, MagpieView};
+use crate::game::art_boss_megarat::{self, MegaRatState, MegaRatView};
 use crate::game::art_boss_mower::{self, MowerState, MowerView};
 use crate::game::art_boss_night_edition::{self, NightEditionState, NightEditionView};
 use crate::game::art_traps::{
@@ -142,6 +143,7 @@ pub mod cat;
 pub mod horseshoe_crab;
 pub mod magpie;
 pub mod mangle;
+pub mod megarat;
 pub mod mower;
 pub mod night_edition;
 
@@ -166,6 +168,12 @@ pub enum BossKind {
     Magpie,
     /// Sewer pool mate of the Jungle Cat — The Horseshoe (horseshoe crab).
     HorseshoeCrab,
+    /// Kitchen's second fight — SUBJECT R-01, the Megarat.
+    ///
+    /// The facility's first success: a rat the size of the room, collared and
+    /// tagged, that fights with twisted copies of the player's own kit. See
+    /// [`megarat`] and [`crate::game::art_boss_megarat`].
+    MegaRat,
 }
 
 /// The boss the getaway ride fields: **The Magpie**.
@@ -199,6 +207,11 @@ impl BossKind {
     /// latter with its own arena in `levelgen::layout::furnish_arena`. Nothing
     /// else maps themes to bosses (the flatbed's own arm goes through
     /// [`trailer_boss`]).
+    ///
+    /// The *spawn* no longer calls this: a floor may field more than one boss,
+    /// so `boss_spawn_system` goes through [`BossKind::for_theme_seeded`] and
+    /// this stays the floor's canonical name for the HUD, the campaign screens
+    /// and the flatbed's arm.
     #[inline]
     pub fn for_theme(theme: Theme) -> Self {
         // The floor's *original* boss: the pinned choice, and what every caller
@@ -251,6 +264,48 @@ impl BossKind {
         pool[(h % pool.len() as u64) as usize]
     }
 
+    /// **Every boss a floor can field**, in the order they are tried: the first
+    /// entry is the floor's original boss and the name `for_theme` answers.
+    ///
+    /// A floor with one fight lists one kind. The Kitchen is the first floor
+    /// with a second one: the Sweeper shares its kitchen with SUBJECT R-01, the
+    /// facility's first success (see [`megarat`]). Parallel boss workers add
+    /// their kinds here — the integrator unions the lists.
+    #[inline]
+    pub fn pool_for_theme(theme: Theme) -> &'static [BossKind] {
+        match theme {
+            Theme::Kitchen => &[BossKind::Broom, BossKind::MegaRat],
+            Theme::Sewer => &[BossKind::Cat],
+            Theme::Lab => &[BossKind::Mower],
+            Theme::Laundry => &[BossKind::Mangle],
+            Theme::Printworks => &[BossKind::NightEdition],
+            Theme::Trailer => &[BossKind::Magpie],
+        }
+    }
+
+    /// The boss a floor fields for a run seed: one pick from
+    /// [`BossKind::pool_for_theme`], deterministic in the level seed.
+    ///
+    /// The pick is a splitmix-style hash of `(seed, theme)` rather than a plain
+    /// `seed % len`: the level seeds are run seeds (sequential per batch), so a
+    /// modulo would alternate floors instead of mixing them. A one-entry pool
+    /// never hashes at all, so every floor that has not gained a second fight
+    /// is byte-identical to the pre-pool build.
+    #[inline]
+    pub fn for_theme_seeded(theme: Theme, seed: u64) -> Self {
+        let pool = Self::pool_for_theme(theme);
+        if pool.len() <= 1 {
+            return pool[0];
+        }
+        let mut h = seed ^ (theme as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        h ^= h >> 30;
+        h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        h ^= h >> 27;
+        h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+        h ^= h >> 31;
+        pool[(h % pool.len() as u64) as usize]
+    }
+
     /// The boss for a campaign level slot (0 Sewer, 1 Kitchen, 2 Lab).
     #[inline]
     pub fn for_level(level: usize) -> Self {
@@ -272,6 +327,7 @@ impl BossKind {
             BossKind::NightEdition => art_boss_night_edition::BOSS_BASE_HP,
             BossKind::Magpie => art_boss_magpie::BOSS_BASE_HP,
             BossKind::HorseshoeCrab => art_boss_horseshoe_crab::BOSS_BASE_HP,
+            BossKind::MegaRat => art_boss_megarat::BOSS_BASE_HP,
         }
     }
 
@@ -286,6 +342,7 @@ impl BossKind {
             BossKind::NightEdition => art_boss_night_edition::BODY_RADIUS,
             BossKind::Magpie => art_boss_magpie::BODY_RADIUS,
             BossKind::HorseshoeCrab => art_boss_horseshoe_crab::BODY_RADIUS,
+            BossKind::MegaRat => art_boss_megarat::BODY_RADIUS,
         }
     }
 
@@ -383,6 +440,18 @@ impl BossKind {
             // loses half its damage); `0.70` lands it in the 45-80 s band at
             // ~64 s. A balance pass owns the final number.
             BossKind::HorseshoeCrab => 0.70,
+            // SUBJECT R-01 is the Kitchen's *second* fight and the mirror
+            // fight: every rotation spends a third of its time in a punish
+            // window (a ×1.35 belly, a ×1.25 tail base) and it calls three
+            // rats at each phase change, so part of the rat's fire goes into
+            // the room instead of the boss. Assumed band (the merged-campaign
+            // numbers this file quotes for the Sweeper and the Mangle): a
+            // near-complete build lands 250-600 dps into a boss, so
+            // 1,600 × 2.6 × the framework's ×8 lands ~33 k and a 55-80 s fight
+            // once the windows are spent. Provisional: the balance pass owns
+            // the final number. Measured with
+            // `megarat::tests::a_bot_kills_the_megarat_on_the_real_arena`.
+            BossKind::MegaRat => 2.6,
         }
     }
 
@@ -403,6 +472,7 @@ impl BossKind {
             BossKind::NightEdition => art_boss_night_edition::CONTACT_DAMAGE,
             BossKind::Magpie => art_boss_magpie::CONTACT_DAMAGE,
             BossKind::HorseshoeCrab => art_boss_horseshoe_crab::CONTACT_DAMAGE,
+            BossKind::MegaRat => art_boss_megarat::CONTACT_DAMAGE,
         }
     }
 
@@ -417,6 +487,7 @@ impl BossKind {
             BossKind::NightEdition => art_boss_night_edition::DEATH_DURATION,
             BossKind::Magpie => art_boss_magpie::DEATH_DURATION,
             BossKind::HorseshoeCrab => art_boss_horseshoe_crab::DEATH_DURATION,
+            BossKind::MegaRat => art_boss_megarat::DEATH_DURATION,
         }
     }
 
@@ -468,6 +539,15 @@ impl BossKind {
                     1
                 }
             }
+            BossKind::MegaRat => {
+                if hp_frac <= art_boss_megarat::PHASE3_HP_FRAC {
+                    3
+                } else if hp_frac <= art_boss_megarat::PHASE2_HP_FRAC {
+                    2
+                } else {
+                    1
+                }
+            }
             BossKind::Magpie => {
                 if hp_frac <= art_boss_magpie::PHASE3_HP_FRAC {
                     3
@@ -500,6 +580,7 @@ impl BossKind {
             BossKind::NightEdition => BossState::NightEdition(NightEditionState::Roll),
             BossKind::Magpie => BossState::Magpie(MagpieState::Perch),
             BossKind::HorseshoeCrab => BossState::HorseshoeCrab(CrabState::Dome),
+            BossKind::MegaRat => BossState::MegaRat(MegaRatState::Groom),
         }
     }
 
@@ -515,6 +596,7 @@ impl BossKind {
             BossKind::NightEdition => 1.8,
             BossKind::Magpie => art_boss_magpie::PERCH_DURATION[0],
             BossKind::HorseshoeCrab => art_boss_horseshoe_crab::DOME_DURATION[0],
+            BossKind::MegaRat => art_boss_megarat::GROOM_DURATION[0],
         }
     }
 
@@ -529,6 +611,7 @@ impl BossKind {
             BossKind::NightEdition => BossState::NightEdition(NightEditionState::Wreck),
             BossKind::Magpie => BossState::Magpie(MagpieState::Death),
             BossKind::HorseshoeCrab => BossState::HorseshoeCrab(CrabState::Death),
+            BossKind::MegaRat => BossState::MegaRat(MegaRatState::Death),
         }
     }
 
@@ -543,6 +626,7 @@ impl BossKind {
             BossKind::NightEdition => 0x7B1D_3C4F_9A2E_5D68,
             BossKind::Magpie => 0x7C15_9E37_A1B2_C3D4,
             BossKind::HorseshoeCrab => 0x51ED_270B_9C4D_0A6F,
+            BossKind::MegaRat => 0x3F2A_8D71_C6B4_05E9,
         }
     }
 
@@ -557,6 +641,7 @@ impl BossKind {
             BossKind::NightEdition => art_boss_night_edition::CULL_MARGIN,
             BossKind::Magpie => art_boss_magpie::CULL_MARGIN,
             BossKind::HorseshoeCrab => art_boss_horseshoe_crab::CULL_MARGIN,
+            BossKind::MegaRat => art_boss_megarat::CULL_MARGIN,
         }
     }
 
@@ -571,6 +656,7 @@ impl BossKind {
             BossKind::NightEdition => &night_edition::NightEditionController,
             BossKind::Magpie => &magpie::MagpieController,
             BossKind::HorseshoeCrab => &horseshoe_crab::HorseshoeCrabController,
+            BossKind::MegaRat => &megarat::MegaRatController,
         }
     }
 }
@@ -722,6 +808,7 @@ pub enum BossState {
     Magpie(MagpieState),
     /// Sewer pool mate: the horseshoe crab.
     HorseshoeCrab(CrabState),
+    MegaRat(MegaRatState),
 }
 
 /// One art-defined hit shape. Bosses are hit through these, not a single circle.
@@ -927,6 +1014,7 @@ pub enum BossArtView {
     NightEdition(NightEditionView),
     Magpie(MagpieView),
     HorseshoeCrab(CrabView),
+    MegaRat(MegaRatView),
 }
 
 // ============================================================================
@@ -1284,6 +1372,17 @@ pub struct Boss {
     pub scratch: [f32; 6],
     /// Per-controller flag word (state-local one-shots).
     pub flags: u32,
+    /// Pending call: how many ordinary bodies a boss has asked for (`0` = no
+    /// call). Consumed by [`megarat::boss_summon_system`] at the head of the
+    /// next tick, which is the only place a boss may spawn an `Enemy` — the
+    /// controller cannot (`BossController::tick` has no `Commands`) and the
+    /// update slot is inside the `EnemyIndex` window. A boss that never calls
+    /// leaves it at zero and pays one branch a tick.
+    pub call_count: u8,
+    /// Where the call answers from (the boss's position on the beat).
+    pub call_at: Vec2,
+    /// What kind the call sends.
+    pub call_kind: EnemyKind,
     /// Seconds the boss has been too far away to fight (see
     /// [`BossKind::REJOIN_DIST`] and [`RELOCATE_AFTER_SECS`]): the framework
     /// walks an off-screen, stranded boss back into the fight.
@@ -1324,6 +1423,9 @@ impl Boss {
             bounce_count: 0,
             scratch: [0.0; 6],
             flags: 0,
+            call_count: 0,
+            call_at: pos,
+            call_kind: EnemyKind::Skitterer,
             lost: 0.0,
             hazards: Vec::with_capacity(16),
         }
@@ -1608,6 +1710,41 @@ impl Boss {
                 art_boss_horseshoe_crab::incoming_multiplier(&self.crab_view(), dir, at)
             }
             _ => 1.0,
+            BossKind::MegaRat => {
+                // Tail root, haunch and head, all grounded (it never leaves the
+                // floor). In the two recovery windows the exposed weak point
+                // **replaces** the tail root: a boss carries three hit shapes,
+                // so the belly / tail base *is* the third one — which also
+                // makes it the first auto-aim target point, so the rat's own
+                // weapons reach for the window the moment it opens.
+                let view = self.megarat_view();
+                let circles = art_boss_megarat::body_hit_circles(&view);
+                let mut shapes: [BossHitShape; 3] = [
+                    BossHitShape::Circle {
+                        center: circles[0].0,
+                        radius: circles[0].1,
+                        grounded: true,
+                    },
+                    BossHitShape::Circle {
+                        center: circles[1].0,
+                        radius: circles[1].1,
+                        grounded: true,
+                    },
+                    BossHitShape::Circle {
+                        center: circles[2].0,
+                        radius: circles[2].1,
+                        grounded: true,
+                    },
+                ];
+                if let Some((at, radius)) = art_boss_megarat::weak_point(&view) {
+                    shapes[0] = BossHitShape::Circle {
+                        center: at,
+                        radius,
+                        grounded: true,
+                    };
+                }
+                BossHitShapes::from_slice(&shapes)
+            }
         }
     }
 
@@ -1643,6 +1780,7 @@ impl Boss {
             BossKind::NightEdition => BossArtView::NightEdition(self.night_edition_view()),
             BossKind::Magpie => BossArtView::Magpie(self.magpie_view()),
             BossKind::HorseshoeCrab => BossArtView::HorseshoeCrab(self.crab_view()),
+            BossKind::MegaRat => BossArtView::MegaRat(self.megarat_view()),
         }
     }
 
@@ -1746,6 +1884,37 @@ impl Boss {
             lane_start: self.pounce_origin,
             sweep: self.scratch[magpie::S_LANE_DIR],
             hunting: self.hunting,
+        }
+    }
+
+    fn megarat_state(&self) -> MegaRatState {
+        match self.state {
+            BossState::MegaRat(s) => s,
+            _ => MegaRatState::Groom,
+        }
+    }
+
+    /// The Megarat's view. The framework hands it two of the controller's own
+    /// scratch slots (the thrash's first-pass side and the dash cooldown) so the
+    /// art can draw the arc's pass order and the read-the-gauge pip without the
+    /// art knowing anything else about the fight.
+    pub(crate) fn megarat_view(&self) -> MegaRatView {
+        MegaRatView {
+            pos: self.pos,
+            facing: self.facing,
+            state: self.megarat_state(),
+            progress: self.progress(),
+            anim: self.anim,
+            hit_flash: self.hit_flash,
+            hp_frac: self.hp_frac(),
+            target: self.target,
+            lane_start: self.pounce_origin,
+            sweep: self.scratch[megarat::S_SIDE],
+            phase: self.phase,
+            hunting: self.hunting,
+            dash_cd: (self.scratch[megarat::S_DASH_CD] / art_boss_megarat::DASH_COOLDOWN)
+                .clamp(0.0, 1.0),
+            walled: self.scratch[megarat::S_WALLED] > 0.5,
         }
     }
 
@@ -2057,6 +2226,26 @@ pub enum BossCue {
     CrabFlip,
     /// The `Death` beat.
     CrabDeath,
+    // ---- SUBJECT R-01 (Kitchen's second fight) ----
+    /// `Groom` entry: the self-satisfied chitter of a rat that has won before.
+    MegaRatChitter,
+    /// `GnawWindup` entry: the incisors coming up, a wet grinding scrape.
+    MegaRatGnaw,
+    /// `GnawStuck` entry: the teeth going into the cabinet and the indignant
+    /// squeal that follows.
+    MegaRatStuck,
+    /// `ThrashWindup` entry: the tail cocked back.
+    MegaRatThrash,
+    /// One pass of the tail across its half of the arc.
+    MegaRatThrashSweep,
+    /// `SqueakShout` entry: the boss-scale sonic squeak.
+    MegaRatSqueak,
+    /// `DashPass` entry: the scrabble-and-screech of the charge.
+    MegaRatDash,
+    /// `Call` (and the rats answering it at the summon beat).
+    MegaRatCall,
+    /// The `Death` beat: the first success going down.
+    MegaRatDeath,
 }
 
 impl BossCue {
@@ -2134,6 +2323,17 @@ impl BossCue {
             BossCue::CrabEmerge => Sfx::CrabEmerge,
             BossCue::CrabFlip => Sfx::CrabFlip,
             BossCue::CrabDeath => Sfx::CrabDeath,
+            BossCue::MegaRatChitter => Sfx::MegaRatChitter,
+            BossCue::MegaRatGnaw => Sfx::MegaRatGnaw,
+            BossCue::MegaRatStuck => Sfx::MegaRatStuck,
+            BossCue::MegaRatThrash => Sfx::MegaRatThrash,
+            // The sweep is the rasp of the tail over the floor: the same voice
+            // as the cocked-back tell, pitched by its own sample.
+            BossCue::MegaRatThrashSweep => Sfx::MegaRatThrashSweep,
+            BossCue::MegaRatSqueak => Sfx::MegaRatSqueak,
+            BossCue::MegaRatDash => Sfx::MegaRatDash,
+            BossCue::MegaRatCall => Sfx::MegaRatCall,
+            BossCue::MegaRatDeath => Sfx::MegaRatDeath,
         }
     }
 }
@@ -2688,6 +2888,59 @@ fn emit_cues(
             BossCue::CrabDeath => {
                 let blood = (44, 92, 190);
                 vfx::emit_boss_magpie_death(particles, rng, boss.pos, boss.facing, blood);
+            }
+            // ---- SUBJECT R-01 -------------------------------------------
+            // The rat's own feedback, at boss scale: paw dust for the chitter
+            // and the incisors coming up, the human's slam for the teeth going
+            // into the cabinet, the player's own Tail Thrash for the passes,
+            // the player's own Sonic Squeak for the shout, the player's own
+            // dash for the charge. The mirror is the point: the rat has seen
+            // every one of these effects come off its own body.
+            BossCue::MegaRatChitter | BossCue::MegaRatGnaw => {
+                vfx::emit_boss_cat_skid(particles, rng, boss.pos, boss.facing, 0.12);
+            }
+            BossCue::MegaRatStuck => {
+                vfx::emit_boss_broom_stomp(
+                    particles,
+                    rng,
+                    boss.target,
+                    art_boss_megarat::GNAW_ACTIVE_HALF_WIDTH + 4.0,
+                    boss.phase >= 2,
+                );
+            }
+            BossCue::MegaRatThrash => {
+                vfx::emit_boss_cat_skid(particles, rng, boss.pos, boss.facing, 0.16);
+            }
+            BossCue::MegaRatThrashSweep => {
+                let view = boss.megarat_view();
+                let side = if view.sweep < 0.0 { -1.0 } else { 1.0 };
+                vfx::emit_thrash_sweep(
+                    particles,
+                    rng,
+                    boss.pos,
+                    view.facing.angle() + side * art_boss_megarat::THRASH_HALF_ARC * 0.5,
+                    art_boss_megarat::THRASH_OUTER,
+                    true,
+                );
+            }
+            BossCue::MegaRatSqueak => {
+                vfx::emit_sonic_squeak(
+                    particles,
+                    rng,
+                    boss.pos,
+                    art_boss_megarat::SQUEAK_OUTER,
+                    art_boss_megarat::SQUEAK_ACTIVE,
+                );
+            }
+            BossCue::MegaRatDash => {
+                vfx::emit_dash_start(particles, rng, boss.pos, boss.facing);
+            }
+            BossCue::MegaRatCall => {
+                vfx::emit_boss_spawn(particles, rng, boss.pos, level_blood());
+            }
+            BossCue::MegaRatDeath => {
+                let blood = level_blood();
+                vfx::emit_boss_cat_death(particles, rng, boss.pos, boss.facing, blood);
             }
         }
     }
@@ -3595,6 +3848,10 @@ impl BossTrace {
                 | BossState::Magpie(MagpieState::Stuck)
                 | BossState::HorseshoeCrab(
                     CrabState::Wedged | CrabState::Flipped | CrabState::Recover
+                )
+                | BossState::MegaRat(
+                    art_boss_megarat::MegaRatState::GnawStuck
+                        | art_boss_megarat::MegaRatState::ThrashRecover
                 )
         )
     }
