@@ -67,13 +67,6 @@
 //! `gates::door_system` in that same group: it reads the rat's post-move
 //! position, draws no rng, and only raises `pending_shop` + the hole index.
 //!
-//! The chain is split into two tuples because `IntoScheduleConfigs` is
-//! implemented for tuples up to 20 elements. Each tuple is `.chain()`ed, so
-//! Bevy inserts `ApplyDeferred` between consecutive systems whose predecessor
-//! uses `Commands`. The second group is explicitly `.after(contact_system)`;
-//! it starts with reaping, so the reaped→gem ordering is itself chained and
-//! deferred spawns are visible to `gems_system`.
-//!
 //! `elapsed += dt` is applied by `World::update` before
 //! `begin_tick`; the per-tick `NukeTick` reset happens in `World::begin_tick`,
 //!
@@ -280,8 +273,16 @@ pub fn build_tick_schedule() -> Schedule {
             // window where `EnemyIndex` is still the live `SpawnId` order (no
             // enemy has spawned or despawned since the grid build). An
             // unevolved run walks empty queries here and draws no rng.
-            evolutions::milk_teeth_system,
-            evolutions::fondue_string_system,
+            // The three Fondue/Milk systems are one nested chain so the outer
+            // tuple stays inside `IntoScheduleConfigs`' 20-element limit: the
+            // tines fly before their string is ticked, so a cast that settles
+            // this tick already has a string this tick.
+            (
+                evolutions::milk_teeth_system,
+                evolutions::fondue_tines_system,
+                evolutions::fondue_string_system,
+            )
+                .chain(),
             evolutions::fairy_ring_system,
             evolutions::drain_cleaner_system,
             evolutions::roll_call_system,

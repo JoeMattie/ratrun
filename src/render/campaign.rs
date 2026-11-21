@@ -356,6 +356,11 @@ pub enum LevelCompleteAction {
 #[derive(Clone, Copy, Debug)]
 pub struct LevelCompleteView<'a> {
     pub level: CampaignLevel,
+    /// The floor actually played, when it is not a campaign plate: the Flatbed
+    /// borrows the Lab's level (it is a practice floor, not a campaign step),
+    /// and its boss is the Magpie — so the triumph stamp needs the theme to
+    /// stop reading "TURF-REAPER MK.IV — SCRAPPED" on the getaway ride.
+    pub theme: Option<Theme>,
     /// Time spent on this level in seconds.
     pub time_secs: f32,
     /// Kills scored on this level.
@@ -1078,12 +1083,17 @@ pub fn draw_level_complete(
 
     let mut y: u16 = if inner.height >= 19 { 1 } else { 0 };
 
-    // Triumph status pill (boss-specific verdict).
+    // Triumph status pill (boss-specific verdict). The getaway ride has its
+    // own: its boss is the Magpie, not the Lab's mower.
+    let verdict = match view.theme {
+        Some(Theme::Trailer) => "THE MAGPIE  —  BLOWN OFF",
+        _ => view.level.boss_verdict(),
+    };
     let mut badge = StackBuf::<64>::new();
     if inner.width >= 42 {
-        let _ = write!(badge, " ▰▰  {}  ▰▰ ", view.level.boss_verdict());
+        let _ = write!(badge, " ▰▰  {verdict}  ▰▰ ");
     } else {
-        let _ = write!(badge, " ▸ {} ", view.level.boss_verdict());
+        let _ = write!(badge, " ▸ {verdict} ");
     }
     put_centered(
         buf,
@@ -3471,6 +3481,7 @@ mod tests {
         for lvl in CampaignLevel::all() {
             let view = LevelCompleteView {
                 level: lvl,
+                theme: None,
                 time_secs: 252.0,
                 kills: 284,
                 score_so_far: 6420,
@@ -4007,6 +4018,7 @@ mod tests {
                 }
                 let lc = LevelCompleteView {
                     level: lvl,
+                    theme: None,
                     time_secs: 252.0,
                     kills: 284,
                     score_so_far: 6420,

@@ -898,17 +898,146 @@ mod tests {
             "the table roll consumed a different number of draws"
         );
 
-        // The legacy table width and the new one leave the stream in the same
-        // place (rand's `UniformInt` rejection never had to retry for 0..100).
-        let mut old = Rng::seed_from_u64(9);
-        let mut new = Rng::seed_from_u64(9);
-        let _ = old.random_range(0..3u32);
-        let _ = new.random_range(0..loot::PICKUP_WEIGHT_TOTAL);
+        // The legacy three-way table and the new weighted one leave the stream
+        // in the same place **for every seed**: one 32-bit word each, never a
+        // value-dependent second word (see the test below).
+        for seed in 0..1024u64 {
+            let mut old = Rng::seed_from_u64(seed);
+            let mut new = Rng::seed_from_u64(seed);
+            let _ = old.random_range(0..3u32);
+            let _ = loot::roll_pickup_kind(&mut new);
+            assert_eq!(
+                old.random::<u64>(),
+                new.random::<u64>(),
+                "the wider pickup table changed how much rng a drop consumes (seed {seed})"
+            );
+        }
+    }
+
+    /// A counting generator: the sampler's draw **count** is a spec value, so
+    /// the test counts the words instead of comparing one seed's tail.
+    struct CountRng {
+        inner: rand::rngs::StdRng,
+        words: usize,
+    }
+
+    impl CountRng {
+        fn seeded(seed: u64) -> Self {
+            Self {
+                inner: <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(seed),
+                words: 0,
+            }
+        }
+    }
+
+    /// A scripted generator: yields the words the test hands it, so an
+    /// adversarial first word can be posed exactly (the review's
+    /// `128849018`, whose multiply-high low limb is `2^32 - 88`).
+    struct ScriptRng {
+        words: Vec<u32>,
+        at: usize,
+    }
+
+    impl ScriptRng {
+        fn new(words: &[u32]) -> Self {
+            Self {
+                words: words.to_vec(),
+                at: 0,
+            }
+        }
+    }
+
+    impl rand::TryRng for ScriptRng {
+        type Error = std::convert::Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            let w = self.words.get(self.at).copied().unwrap_or(0);
+            self.at += 1;
+            Ok(w)
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            let lo = u64::from(self.words.get(self.at).copied().unwrap_or(0));
+            let hi = u64::from(self.words.get(self.at + 1).copied().unwrap_or(0));
+            self.at += 2;
+            Ok(lo | (hi << 32))
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            for chunk in dst.chunks_mut(4) {
+                let w = u32::from(self.try_next_u32().unwrap_or(0));
+                for (i, b) in chunk.iter_mut().enumerate() {
+                    *b = (w >> (8 * i)) as u8;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl rand::TryRng for CountRng {
+        type Error = std::convert::Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            self.words += 1;
+            Ok(rand::Rng::next_u32(&mut self.inner))
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            self.words += 2;
+            Ok(rand::Rng::next_u64(&mut self.inner))
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            self.words += dst.len().div_ceil(4);
+            rand::Rng::fill_bytes(&mut self.inner, dst);
+            Ok(())
+        }
+    }
+
+    /// **The pickup roll spends exactly one word for every seed and every
+    /// value.** `random_range(0..100)` does not: its multiply-high sampler
+    /// takes a second word when the low product limb lands short, which is the
+    /// review's "the new pickup range can consume an extra RNG sample even on
+    /// a legacy result".
+    #[test]
+    fn a_pickup_roll_spends_exactly_one_word_whatever_the_value() {
+        use rand::RngExt;
+
+        for seed in 0..4096u64 {
+            let mut r = CountRng::seeded(seed);
+            let _ = loot::roll_pickup_kind(&mut r);
+            assert_eq!(r.words, 1, "the pickup roll spent {} words (seed {seed})", r.words);
+
+            // The legacy width: one word, as the table's doc says.
+            let mut legacy = CountRng::seeded(seed);
+            let _ = legacy.random_range(0..3u32);
+            assert_eq!(legacy.words, 1, "the legacy table did not take one word");
+        }
+
+        // The ranged sample's extra word, posed exactly: `wmul(128849018, 100)`
+        // has the low limb `2^32 - 88`, which is inside the rejection band of a
+        // width-100 range, so `random_range` draws a **second** word and —
+        // being insensitive to it — returns the same kind the first word would
+        // have. That value-dependent draw is what the fixed sampler removes.
+        let adversarial = 128_849_018u32;
+        let mut wide = ScriptRng::new(&[adversarial, adversarial]);
+        let kind = loot::roll_pickup_kind(&mut wide);
+        assert_eq!(wide.at, 1, "the fixed sampler asked for a second word");
+
+        let mut ranged = ScriptRng::new(&[adversarial, adversarial]);
+        let _ = ranged.random_range(0..loot::PICKUP_WEIGHT_TOTAL);
         assert_eq!(
-            old.random::<u64>(),
-            new.random::<u64>(),
-            "the wider pickup table changed how much rng a drop consumes"
+            ranged.at, 2,
+            "the ranged sampler no longer shows the extra draw this fix avoids"
         );
+        // Same answer either way, so the change is stream-only.
+        assert_eq!(kind, loot::roll_pickup_kind_from_word(adversarial));
+        assert_eq!(kind, PickupKind::Heal, "the adversarial word is still a Heal");
+        // Every bucket is reachable from a word, so the table still pays every
+        // kind (the distribution test above pins the weights).
+        for word in [0u32, u32::MAX / 2, u32::MAX] {
+            let _ = loot::roll_pickup_kind_from_word(word);
+        }
     }
 
     // ---- Effect captures (manual, `RATRUN_FX_DUMP=1`) -------------------

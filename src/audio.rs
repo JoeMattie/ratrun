@@ -153,11 +153,19 @@ pub enum Sfx {
     MagpieCrate,
     /// The last rattle.
     MagpieDeath,
+    // Per-effect variations for the cues that used to share one sample: the
+    // Night Edition's page, bed and phase turn, its own wreck (not the mower's
+    // death) and the Magpie's gather before a gust.
+    NightPage,
+    NightBed,
+    NightTurn,
+    NightWreck,
+    MagpieGustGather,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 100] = [
+    pub const ALL: [Sfx; 105] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -274,6 +282,12 @@ impl Sfx {
         Sfx::MagpieGust,
         Sfx::MagpieCrate,
         Sfx::MagpieDeath,
+        // Appended: the Night Edition's own cues and the Magpie's gather.
+        Sfx::NightPage,
+        Sfx::NightBed,
+        Sfx::NightTurn,
+        Sfx::NightWreck,
+        Sfx::MagpieGustGather,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -379,6 +393,11 @@ impl Sfx {
             Sfx::MagpieGust => "MAGPIE_GUST",
             Sfx::MagpieCrate => "MAGPIE_CRATE",
             Sfx::MagpieDeath => "MAGPIE_DEATH",
+            Sfx::NightPage => "NIGHT_PAGE",
+            Sfx::NightBed => "NIGHT_BED",
+            Sfx::NightTurn => "NIGHT_TURN",
+            Sfx::NightWreck => "NIGHT_WRECK",
+            Sfx::MagpieGustGather => "MAGPIE_GATHER",
         }
     }
 
@@ -485,6 +504,12 @@ impl Sfx {
             // one sample.
             Sfx::NightBell => 1,
             Sfx::NightCarriage => 3,
+            // The cues that used to share one sample now have their own, and a
+            // couple of pitches each so a fight does not machine-gun one.
+            Sfx::NightPage => 2,
+            Sfx::NightBed => 2,
+            Sfx::MagpieGustGather => 2,
+            Sfx::NightTurn | Sfx::NightWreck => 1,
         }
     }
 
@@ -583,6 +608,11 @@ impl Sfx {
             Sfx::MagpieCry | Sfx::MagpieDeath => 3,
             Sfx::ShopEnter | Sfx::Purchase | Sfx::Denied => 1,
             Sfx::MinibossArrive | Sfx::MinibossTell | Sfx::MinibossRetreat => 2,
+            // The press's own machinery: as audible as the clack it replaces,
+            // and the wreck outranks it.
+            Sfx::NightPage | Sfx::NightBed | Sfx::NightTurn => 2,
+            Sfx::NightWreck => 3,
+            Sfx::MagpieGustGather => 1,
         }
     }
 
@@ -6947,6 +6977,220 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             });
             m.add_short_tail(0.20, 3600.0);
             m.finish(0.50, 1.3, 2.0, 40.0)
+        }
+
+        // ---- the cues that used to borrow another effect's sample ----------
+        //
+        // 91. NightPage: the sheet feeding onto the platen — a dry paper rush
+        // with a light carriage tick at the end. (It was the stamp's own clack,
+        // so "a page is coming" and "the page has landed" sounded identical.)
+        Sfx::NightPage => {
+            const PITCH: [f32; 2] = [1.0, 0.92];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.24);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.18,
+                pink: true,
+                gain: 0.20,
+                attack_s: 0.02,
+                decay_pow: 1.6,
+                filter: FilterMode::BandPass,
+                fc0: 1700.0 * p,
+                fc1: 3000.0 * p,
+                q: 1.1,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // The sheet's leading edge knocking the guides.
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.05,
+                f0: 620.0 * p,
+                f1: 470.0 * p,
+                pitch_pow: 0.7,
+                wave: Wave::Triangle,
+                gain: 0.12,
+                attack_s: 0.002,
+                decay_pow: 2.6,
+                ..Default::default()
+            });
+            m.add_short_tail(0.07, 5200.0);
+            m.finish(0.22, 1.0, 3.0, 26.0)
+        }
+
+        // 92. NightBed: the type bed lowering — a felted servo drop that ends
+        // on the damp cloth, not on the iron clack.
+        Sfx::NightBed => {
+            const PITCH: [f32; 2] = [1.0, 1.07];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.30);
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.24,
+                f0: 96.0 * p,
+                f1: 58.0 * p,
+                pitch_pow: 0.8,
+                wave: Wave::Sine,
+                gain: 0.55,
+                attack_s: 0.012,
+                decay_pow: 1.4,
+                ..Default::default()
+            });
+            // The felt pad taking the weight.
+            m.add_noise(NoiseLayer {
+                start_s: 0.10,
+                dur_s: 0.14,
+                pink: true,
+                gain: 0.16,
+                attack_s: 0.02,
+                decay_pow: 1.9,
+                filter: FilterMode::LowPass,
+                fc0: 620.0 * p,
+                fc1: 240.0 * p,
+                q: 0.7,
+                seed: base_seed ^ 0x11,
+                ..Default::default()
+            });
+            m.add_short_tail(0.08, 1800.0);
+            m.finish(0.30, 1.1, 1.6, 24.0)
+        }
+
+        // 93. NightTurn: the press re-seating for the next phase — one heavy
+        // ratchet step plus a short rising servo squeak. (It was the mower's
+        // dock hum, which read as a *different machine* in the room.)
+        Sfx::NightTurn => {
+            let mut m = MixBuf::new(0.40);
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.14,
+                f0: 150.0,
+                f1: 84.0,
+                pitch_pow: 0.6,
+                wave: Wave::Triangle,
+                gain: 0.42,
+                attack_s: 0.002,
+                decay_pow: 1.7,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.05,
+                pink: false,
+                gain: 0.22,
+                attack_s: 0.001,
+                decay_pow: 2.6,
+                filter: FilterMode::BandPass,
+                fc0: 3200.0,
+                fc1: 1800.0,
+                q: 1.6,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // The servo winding over the new setting.
+            m.add_osc(OscLayer {
+                start_s: 0.12,
+                dur_s: 0.22,
+                f0: 420.0,
+                f1: 690.0,
+                pitch_pow: 1.1,
+                wave: Wave::Saw,
+                gain: 0.12,
+                attack_s: 0.03,
+                decay_pow: 1.3,
+                filter: FilterMode::BandPass,
+                fc0: 1400.0,
+                fc1: 2400.0,
+                q: 2.0,
+                ..Default::default()
+            });
+            m.add_short_tail(0.09, 4200.0);
+            m.finish(0.34, 1.2, 1.2, 22.0)
+        }
+
+        // 94. NightWreck: the press tearing itself apart — its own death, not
+        // the mower's short-circuit crackle. A long collapsing structure with
+        // paper and steel in the debris.
+        Sfx::NightWreck => {
+            let mut m = MixBuf::new(1.05);
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.62,
+                f0: 92.0,
+                f1: 30.0,
+                pitch_pow: 0.55,
+                wave: Wave::Saw,
+                gain: 0.50,
+                attack_s: 0.004,
+                decay_pow: 1.2,
+                filter: FilterMode::LowPass,
+                fc0: 900.0,
+                fc1: 220.0,
+                q: 0.9,
+                ..Default::default()
+            });
+            for k in 0..7 {
+                let t = k as f32 * 0.115;
+                m.add_noise(NoiseLayer {
+                    start_s: t,
+                    dur_s: 0.16,
+                    pink: k % 2 == 0,
+                    gain: 0.24 - 0.02 * k as f32,
+                    attack_s: 0.004,
+                    decay_pow: 1.5 + 0.15 * k as f32,
+                    filter: if k % 3 == 0 {
+                        FilterMode::LowPass
+                    } else {
+                        FilterMode::BandPass
+                    },
+                    fc0: 2600.0 - 180.0 * k as f32,
+                    fc1: 700.0,
+                    q: 1.2,
+                    seed: base_seed ^ (0xA5 + k as u32),
+                    ..Default::default()
+                });
+            }
+            m.add_short_tail(0.24, 3200.0);
+            m.finish(0.62, 1.35, 1.8, 46.0)
+        }
+
+        // 95. MagpieGustGather: the bird drawing breath before the gust — a
+        // reversed swell (slow attack, rising band) that stops dead. (The
+        // gather and the gust were the same whoosh, so the tell had no sound of
+        // its own.)
+        Sfx::MagpieGustGather => {
+            const PITCH: [f32; 2] = [1.0, 0.88];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.32);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.26,
+                pink: true,
+                gain: 0.30,
+                attack_s: 0.22,
+                decay_pow: 6.0,
+                filter: FilterMode::BandPass,
+                fc0: 260.0 * p,
+                fc1: 2100.0 * p,
+                fc_pow: 2.2,
+                q: 1.5,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.24,
+                f0: 150.0 * p,
+                f1: 300.0 * p,
+                pitch_pow: 1.4,
+                wave: Wave::Sine,
+                gain: 0.09,
+                attack_s: 0.20,
+                decay_pow: 5.0,
+                ..Default::default()
+            });
+            m.add_short_tail(0.03, 2600.0);
+            m.finish(0.26, 1.05, 9.0, 22.0)
         }
     }
 }

@@ -100,11 +100,28 @@ pub const PICKUP_WEIGHT_TOTAL: u32 = 100;
 /// Roll the rare-pickup kind for one successful drop.
 ///
 /// The bucket bounds are the design's cumulative weights, so the table reads
-/// top-to-bottom as the document does. One draw, exactly like the legacy
-/// `random_range(0..3)`.
+/// top-to-bottom as the document does.
+///
+/// **Exactly one 32-bit word, whatever the value.** A ranged integer sample is
+/// not a fixed cost: `rand`'s pinned `sample_single_inclusive` computes a
+/// multiply-high and can spend a *second* word depending on the low product
+/// limb, so `random_range(0..100)` consumed two words for some seeds and one
+/// for others (the legacy three-way table always took one). The bucket is
+/// therefore derived from one raw word with the same multiply-high — no retry,
+/// no rejection, no value-dependent stream position.
 #[inline]
-pub fn roll_pickup_kind(rng: &mut StdRng) -> PickupKind {
-    match rng.random_range(0..PICKUP_WEIGHT_TOTAL) {
+pub fn roll_pickup_kind(rng: &mut impl rand::Rng) -> PickupKind {
+    roll_pickup_kind_from_word(rng.next_u32())
+}
+
+/// The bucket one 32-bit word lands in (the table's cumulative weights).
+#[inline]
+pub fn roll_pickup_kind_from_word(word: u32) -> PickupKind {
+    // Lemire's multiply-high: uniform over `0..PICKUP_WEIGHT_TOTAL` with no
+    // rejection loop, so the draw count is fixed.
+    let bucket =
+        ((u64::from(word) * u64::from(PICKUP_WEIGHT_TOTAL)) >> 32) as u32;
+    match bucket {
         0..=31 => PickupKind::Heal,
         32..=49 => PickupKind::Magnet,
         50..=57 => PickupKind::Nuke,
@@ -113,6 +130,62 @@ pub fn roll_pickup_kind(rng: &mut StdRng) -> PickupKind {
         82..=90 => PickupKind::PocketWatch,
         _ => PickupKind::CleanSocks,
     }
+}
+
+/// A persistent `SpawnId`-ordered list of drops.
+///
+/// The three drop passes used to rebuild their list from the query and sort it
+/// **every tick**, so a long floor paid `n log n` per tick on every gem, coin
+/// and pocket find still lying around, however few of them were near the rat.
+/// The order is kept instead: entries whose entity is gone are retained away
+/// (order is preserved), and the new drops are appended after a sort of *just
+/// those*. A new drop's `SpawnId` is always higher than every existing one,
+/// because `NextSpawnId` only ever increases.
+#[derive(Default)]
+pub struct SpawnOrdered {
+    entries: Vec<(u64, Entity)>,
+    /// Highest `SpawnId` ever merged. `None` until the first drop arrives, so
+    /// the very first `SpawnId` (0) is not mistaken for "already known".
+    high: Option<u64>,
+    fresh: Vec<(u64, Entity)>,
+}
+
+impl SpawnOrdered {
+    /// Drop the entries whose entity is gone (collected or despawned).
+    fn retain_live(&mut self, mut exists: impl FnMut(Entity) -> bool) {
+        self.entries.retain(|&(_, entity)| exists(entity));
+    }
+
+    /// Merge this tick's new drops into the ordered list. `live` is the query's
+    /// whole set; only ids above the high-water mark are new, and there are
+    /// usually none, so the ordering work is normally two profile-free passes.
+    fn merge(&mut self, live: impl Iterator<Item = (u64, Entity)>) {
+        self.fresh.clear();
+        for (id, entity) in live {
+            if self.high.is_none_or(|high| id > high) {
+                self.fresh.push((id, entity));
+                self.high = Some(self.high.map_or(id, |high| high.max(id)));
+            }
+        }
+        if self.fresh.is_empty() {
+            return;
+        }
+        self.fresh.sort_unstable_by_key(|&(id, _)| id);
+        self.entries.append(&mut self.fresh);
+    }
+
+    /// The ordered entries this tick.
+    fn as_slice(&self) -> &[(u64, Entity)] {
+        &self.entries
+    }
+}
+
+/// `pickups_system`'s one `Local`: the kept drop order plus the Nuke's own
+/// enemy scratch (a system may only take sixteen params).
+#[derive(Default)]
+pub struct PickupOrder {
+    order: SpawnOrdered,
+    enemies: Vec<(u64, Entity)>,
 }
 
 /// Legacy `World::reap_enemies`  shared by the normal reap and
@@ -260,8 +333,32 @@ pub fn reap_enemies_system(
     // the removal walks the query as it comes.
     if fight.horde_break {
         fight.horde_break = false;
-        for (entity, _, _) in enemies.iter() {
-            commands.entity(entity).despawn();
+        // The horde that is still standing breaks and flees (no kills, no
+        // score, no drops, as before). The bodies that **died on the death
+        // tick** are not part of that break: they are ordinary corpses and owe
+        // their gem, their pickup roll and their gold, which is exactly what
+        // `reap_dead` pays. Returning before it (the old shape) silently ate
+        // the loot of everything a boss-hazard, weapon or trap killed on the
+        // tick the boss went down — corpses, and nothing else, since `reap_dead`
+        // only ever looks at `!alive()` bodies.
+        reap_dead(
+            &mut commands,
+            &level,
+            &mut counters,
+            &mut rng.0,
+            &mut particles,
+            &mut sfx.0,
+            &mut shake,
+            &mut next_id,
+            &enemies,
+            &mut minibosses,
+            &mut appointments,
+            &mut dead,
+        );
+        for (entity, _, e) in enemies.iter() {
+            if e.alive() {
+                commands.entity(entity).despawn();
+            }
         }
         return;
     }
@@ -337,7 +434,7 @@ pub fn gems_system(
     // the legacy ones.
     mut xp_bank: ResMut<XpBank>,
     mut gems: Query<(Entity, &SpawnId, &mut Gem)>,
-    mut ordered: Local<Vec<(u64, Entity)>>,
+    mut ordered: Local<SpawnOrdered>,
 ) {
     let dt = input.dt;
     let ppos = player.pos;
@@ -349,14 +446,16 @@ pub fn gems_system(
     let mut gained = 0u32;
     let collect_r = PLAYER_RADIUS + 3.0;
 
-    // One `SpawnId` sort per tick into the reused buffer (the gem trail vfx
-    // draws rng per gem, so the walk order is part of the spec).
-    ordered.clear();
-    ordered.extend(gems.iter().map(|(entity, id, _)| (id.0, entity)));
-    ordered.sort_unstable_by_key(|&(id, _)| id);
+    // `SpawnId` order (the gem trail vfx draws rng per gem, so the walk order
+    // is part of the spec), kept up to date instead of re-sorted every tick:
+    // see [`SpawnOrdered`].
+    ordered.retain_live(|entity| gems.get(entity).is_ok());
+    ordered.merge(gems.iter().map(|(entity, id, _)| (id.0, entity)));
+    let ordered_len = ordered.as_slice().len();
+    let ordered_entity = |i: usize| ordered.as_slice()[i].1;
 
-    for i in 0..ordered.len() {
-        let entity = ordered[i].1;
+    for i in 0..ordered_len {
+        let entity = ordered_entity(i);
         let Ok((_, _, mut g)) = gems.get_mut(entity) else {
             continue;
         };
@@ -417,7 +516,7 @@ pub fn treasure_system(
     mut sfx: ResMut<SfxQueue>,
     mut gold: Query<(Entity, &SpawnId, &mut Gold)>,
     chests: Query<(Entity, &SpawnId, &Chest)>,
-    mut ordered: Local<Vec<(u64, Entity)>>,
+    mut ordered: Local<SpawnOrdered>,
     // Hoard Gland's banked half-gold (see `shop::coin_payout`): a `Local`, so
     // it rides across ticks until the floor ends (a new level builds a new
     // schedule and starts empty).
@@ -433,12 +532,15 @@ pub fn treasure_system(
     let chest_radius = PLAYER_RADIUS + 4.0;
     let mut gained = 0u32;
 
-    // Gold and chests share the scratch buffer and are handled in spawn order.
-    ordered.clear();
-    ordered.extend(gold.iter().map(|(entity, id, _)| (id.0, entity)));
-    ordered.extend(chests.iter().map(|(entity, id, _)| (id.0, entity)));
-    ordered.sort_unstable_by_key(|&(id, _)| id);
-    for &(_, entity) in ordered.iter() {
+    // Gold and chests share one buffer and are handled in spawn order, kept
+    // current rather than re-sorted (`SpawnOrdered`).
+    ordered.retain_live(|entity| gold.get(entity).is_ok() || chests.get(entity).is_ok());
+    ordered.merge(
+        gold.iter()
+            .map(|(entity, id, _)| (id.0, entity))
+            .chain(chests.iter().map(|(entity, id, _)| (id.0, entity))),
+    );
+    for &(_, entity) in ordered.as_slice() {
         if let Ok((_, _, mut coin)) = gold.get_mut(entity) {
             let to = ppos - coin.pos;
             let dist = to.len();
@@ -487,27 +589,33 @@ pub fn pickups_system(
     mut nuke: ResMut<NukeTick>,
     mut last_pickups: ResMut<LastPickups>,
     mut damage_numbers: ResMut<DamageNumbers>,
-    mut scratch: ResMut<PickupScratch>,
+    mut scratch_pickups: ResMut<PickupScratch>,
     mut pickups: Query<(Entity, &SpawnId, &mut Pickup)>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
     mut gems: Query<&mut Gem>,
     mut gold: Query<&mut Gold>,
-    mut ordered: Local<Vec<(u64, Entity)>>,
+    // One `Local` (a system may take at most 16 params, and this one already
+    // has fifteen): the drop order and the Nuke's enemy scratch.
+    mut scratch: Local<PickupOrder>,
 ) {
     let dt = input.dt;
     let ppos = player.pos;
+    let PickupOrder { order, enemies: enemy_order } = &mut *scratch;
+    let ordered = order;
     // Legacy `std::mem::take(&mut self.pickup_scratch)` — the buffer (and its
     // allocation) is kept on the world and reused, never reallocated.
-    let collected = &mut scratch.0;
+    let collected = &mut scratch_pickups.0;
     collected.clear();
 
-    // One `SpawnId` sort per tick into the reused buffer (the ambient pickup
-    // vfx draws rng per waiting pickup, so the walk order is part of the spec).
-    ordered.clear();
-    ordered.extend(pickups.iter().map(|(entity, id, _)| (id.0, entity)));
-    ordered.sort_unstable_by_key(|&(id, _)| id);
-    for i in 0..ordered.len() {
-        let entity = ordered[i].1;
+    // `SpawnId` order (the ambient pickup vfx draws rng per waiting pickup, so
+    // the walk order is part of the spec), kept current rather than re-sorted
+    // every tick (`SpawnOrdered`).
+    ordered.retain_live(|entity| pickups.get(entity).is_ok());
+    ordered.merge(pickups.iter().map(|(entity, id, _)| (id.0, entity)));
+    let ordered_len = ordered.as_slice().len();
+    let ordered_entity = |i: usize| ordered.as_slice()[i].1;
+    for i in 0..ordered_len {
+        let entity = ordered_entity(i);
         let Ok((_, _, mut p)) = pickups.get_mut(entity) else {
             continue;
         };
@@ -556,11 +664,11 @@ pub fn pickups_system(
                 // stale at this point in the schedule (and the deferred
                 // despawns make its length disagree with the live set).
                 // Nukes are rare, so one sort into the reused buffer is free.
-                ordered.clear();
-                ordered.extend(enemies.iter().map(|(entity, id, _)| (id.0, entity)));
-                ordered.sort_unstable_by_key(|&(id, _)| id);
-                for j in 0..ordered.len() {
-                    let entity = ordered[j].1;
+                enemy_order.clear();
+                enemy_order.extend(enemies.iter().map(|(entity, id, _)| (id.0, entity)));
+                enemy_order.sort_unstable_by_key(|&(id, _)| id);
+                for j in 0..enemy_order.len() {
+                    let entity = enemy_order[j].1;
                     let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
                         continue;
                     };

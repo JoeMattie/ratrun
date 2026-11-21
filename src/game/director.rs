@@ -110,7 +110,7 @@ pub const LEVEL_CLOCK_OFFSET: [f32; 3] = [0.0, 0.0, 0.0];
 ///
 /// The per-stage part (`+0 / +5 / +10 %`) is [`enemy_mods_for`]'s `speed`, baked
 /// into every enemy at spawn time, so the two multiply: stage three's top is
-/// ×1.65.
+/// ×1.925.
 pub const HORDE_SPEED_TOP: f32 = 1.75;
 
 /// Run-clock second the speed ramp reaches [`HORDE_SPEED_TOP`] and stops

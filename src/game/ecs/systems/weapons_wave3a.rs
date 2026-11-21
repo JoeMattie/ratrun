@@ -646,6 +646,11 @@ pub fn hantavirus_system(
     mut rng: ResMut<RngRes>,
     mut particles: ResMut<Particles>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy, Option<&mut Infection>)>,
+    // The marked bodies alone: an archetype walk over the infection component
+    // (`With`, so the access stays disjoint from the `&mut Infection` above),
+    // not a scan of the horde (the review's "both virus passes scan ordinary
+    // entities even when no chain exists").
+    marks: Query<(Entity, &SpawnId), With<Infection>>,
     mut bosses: Query<&mut Boss>,
     mut boss_virus: ResMut<BossVirus>,
     mut damage_numbers: ResMut<DamageNumbers>,
@@ -653,8 +658,9 @@ pub fn hantavirus_system(
     mut order_scratch: Local<Vec<Entity>>,
     mut jumps: Local<Vec<Jump>>,
     mut pending: Local<Vec<(u64, Entity)>>,
+    mut marked: Local<Vec<(u64, Entity)>>,
 ) {
-    if enemies.is_empty() && boss_virus.0.is_none() {
+    if marks.is_empty() && boss_virus.0.is_none() {
         return; // no mark anywhere: no work, no rng
     }
     let dt = input.dt;
@@ -682,9 +688,14 @@ pub fn hantavirus_system(
         order_scratch.as_slice()
     };
 
-    // 1. Tick every living host. A corpse is left to the death-transfer system
-    // (it runs after this tick's contact damage has been resolved).
-    for &host in order {
+    // 1. Tick every living host, in `SpawnId` order, walking **the marks**
+    // only. A corpse is left to the death-transfer system (it runs after this
+    // tick's contact damage has been resolved).
+    marked.clear();
+    marked.extend(marks.iter().map(|(entity, id)| (id.0, entity)));
+    marked.sort_unstable_by_key(|&(id, _)| id);
+    // `pending` is this pass's scratch until the transfer phase clears it.
+    for &(_, host) in marked.iter() {
         let Ok((_, _, mut e, inf)) = enemies.get_mut(host) else {
             continue;
         };
@@ -720,10 +731,17 @@ pub fn hantavirus_system(
                 DamageSource::Virus,
             );
             vfx::emit_virus_tick(&mut particles, &mut rng.0, pos, killed);
-            // Third tick: the chain leaves for a fresh body (whether or not
-            // this tick killed the host — "on third tick or death"). Spending
-            // `jumps_left` here is what keeps the death system from
-            // transferring the same chain a second time.
+            // A tick that kills the host ends the loop here: the remaining
+            // ticks of a multi-tick step belong to nobody, and the death pass
+            // (which runs later this tick on the corpse) plays the chain's
+            // unused jumps. Ticking the corpse further used to apply up to two
+            // more ticks of damage to a body that was already dead.
+            if killed {
+                break;
+            }
+            // Third tick: the chain leaves for a fresh body ("on third tick or
+            // death"). Spending `jumps_left` here is what keeps the death
+            // system from transferring the same chain a second time.
             if inf.ticks_left == 0 {
                 if inf.jumps_left > 0 {
                     jumps.push(Jump {
@@ -735,7 +753,18 @@ pub fn hantavirus_system(
                 inf.jumps_left = 0;
             }
         }
+        // A mark with nothing left to give (all ticks spent, no jump owed) is
+        // **removed** from the body instead of riding along with it as dormant
+        // state for the rest of the floor.
+        if inf.ticks_left == 0 && inf.jumps_left == 0 {
+            let id = enemies.get(host).map(|(_, sid, _, _)| sid.0).unwrap_or(u64::MAX);
+            pending.push((id, host));
+        }
     }
+    for &(_, host) in pending.iter() {
+        commands.entity(host).remove::<Infection>();
+    }
+    pending.clear();
 
     // 2. Tick the boss's mark (a boss takes ticks, never transfers).
     if let Some(mut inf) = boss_virus.0 {
@@ -823,19 +852,15 @@ pub fn hantavirus_death_system(
     mut particles: ResMut<Particles>,
     mut next_id: ResMut<NextSpawnId>,
     mut enemies: Query<(Entity, &SpawnId, &Enemy, Option<&mut Infection>)>,
+    // Are there any marks at all? A `With` filter reads no data, so this stays
+    // disjoint from the `Option<&mut Infection>` above — and it is the cheap
+    // early out: no chain on the floor means no horde scan, no rng, nothing.
+    marks: Query<(), With<Infection>>,
     mut order_scratch: Local<Vec<Entity>>,
     mut jumps: Local<Vec<Jump>>,
     mut pending: Local<Vec<(u64, Entity)>>,
 ) {
-    // Cheap early out (no rng draws when no chain is on a corpse).
-    let mut any = false;
-    for (_, _, e, inf) in enemies.iter() {
-        if !e.alive() && inf.is_some_and(|i| i.active() && i.jumps_left > 0) {
-            any = true;
-            break;
-        }
-    }
-    if !any {
+    if marks.is_empty() {
         return;
     }
     jumps.clear();
@@ -1296,9 +1321,10 @@ mod tests {
                 "L{level}: expected {} over three ticks, got {lost}",
                 3.0 * dmg
             );
-            let inf = mark_of(&w, host).expect("the mark is spent, not removed");
-            assert_eq!(inf.ticks_left, 0);
-            assert!(infections(&mut w).len() == 1, "isolated: no jump");
+            // A spent mark is **removed** from the body, not left dormant: a
+            // floor full of spent marks made every later pass walk them.
+            assert!(mark_of(&w, host).is_none(), "the spent mark is removed");
+            assert!(infections(&mut w).is_empty(), "isolated: no jump, no mark");
         }
     }
 
@@ -1323,11 +1349,13 @@ mod tests {
         assert!((hp(&w, b) - (60.0 - 3.0 * dmg)).abs() < 1e-4, "b's ticks");
         assert!((hp(&w, c) - (60.0 - 3.0 * dmg)).abs() < 1e-4, "c's ticks");
         // Four jumps at L5, three bodies: the chain ended on `c` with jumps
-        // left, because every neighbour was already in its history.
-        let end = mark_of(&w, c).unwrap();
-        assert_eq!(end.ticks_left, 0);
-        assert!(infections(&mut w).len() == 3, "no body was tagged twice");
-        assert_eq!(end.visited, 3);
+        // left, because every neighbour was already in its history. Every mark
+        // it left is spent and therefore gone.
+        assert!(mark_of(&w, c).is_none(), "the chain's last mark is spent");
+        assert!(
+            infections(&mut w).is_empty(),
+            "no body keeps a dormant mark (and none was tagged twice)"
+        );
     }
 
     /// A body that already carries an active mark is skipped: another chain
@@ -1430,6 +1458,77 @@ mod tests {
         assert!(!spent.active() && spent.jumps_left == 0, "the corpse is spent");
     }
 
+    /// **A long step never over-ticks a corpse.** A public `World::update` step
+    /// that owes three tick windows used to keep damaging a host it had already
+    /// killed (the loop only checked `ticks_left`), so a corpse took two extra
+    /// ticks of contagion damage before the reap.
+    #[test]
+    fn a_multi_tick_step_does_not_over_tick_a_corpse() {
+        let mut w = arena(78, WeaponKind::Hantavirus, 5);
+        let p = w.player.pos;
+        let host = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(10.0, 0.0), 0.05);
+        let victim = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(20.0, 0.0), 1.0);
+        let _ = victim;
+        assert!(run_fire(&mut w));
+        let start = hp(&w, host);
+        // One step worth three tick windows (0.35 s each).
+        run_virus(&mut w, 1.05);
+        assert!(!w.ecs.get::<Enemy>(host).unwrap().alive(), "the host should die");
+        let inf = mark_of(&w, host).expect("the corpse keeps its chain for the death pass");
+        assert!(
+            inf.ticks_left >= 1,
+            "the corpse was ticked {} extra times inside one step",
+            inf.ticks_left
+        );
+        // The one tick that landed is the table's own per-tick damage (7 at
+        // level 5), and it is far more than the host's 3 HP — which is exactly
+        // why the step must stop at the corpse instead of spending the other
+        // two windows on it.
+        assert!(VIRUS_DAMAGE[4] >= start, "the fixture host must die to one tick");
+    }
+
+    /// **A clear body behind a pile of covered ones is still found.** The
+    /// candidate scratch is filled with the nearest twelve before any line test,
+    /// so twelve occluded closer bodies used to make the weapon retry forever
+    /// while a perfectly clear target stood just beyond them.
+    #[test]
+    fn a_clear_body_behind_twelve_covered_ones_is_still_tagged() {
+        let mut w = arena(79, WeaponKind::Hantavirus, 5);
+        let p = w.player.pos;
+        // A solid wall column between the rat and everything beyond it, so the
+        // nearer bodies are all behind cover.
+        let cy = (p.y / 16.0).floor() as i32;
+        let cx = (p.x / 16.0).floor() as i32 + 2;
+        for dy in -3..=3 {
+            w.level.tiles.set(
+                cx,
+                cy + dy,
+                TileKind::Wall(crate::game::art_walls::WallKind::Solid),
+            );
+        }
+        w.level.tiles.rebuild_masks();
+        let wall_x = cx as f32 * 16.0;
+        // Twelve bodies *behind* the wall (covered) at increasing distance…
+        for i in 0..12 {
+            let d = 4.0 + i as f32 * 3.0;
+            w.spawn_enemy(EnemyKind::Skitterer, Vec2::new(wall_x + d, p.y), 1.0);
+        }
+        // …and one on the rat's own side, in the open and inside the weapon's
+        // 56 px range.
+        let clear = Vec2::new(p.x - 46.0, p.y);
+        let target = w.spawn_enemy(EnemyKind::Brute, clear, 1.0);
+        // The wall makes the covered twelve unreachable but they are *nearer*
+        // in a straight line, so they fill the nearest-first scratch.
+        assert!(
+            run_fire(&mut w),
+            "the clear body beyond the covered pile was never tagged"
+        );
+        assert!(
+            mark_of(&w, target).is_some(),
+            "the tag went to a covered body, or nowhere"
+        );
+    }
+
     /// A host with no jumps left, or no fresh neighbour, simply ends: no mark
     /// moves and nothing panics.
     #[test]
@@ -1456,8 +1555,10 @@ mod tests {
             run_virus(&mut w, 1.0 / 60.0);
             t += 1.0 / 60.0;
         }
-        // `a` finished its ticks and already jumped to `b`, so `a` is spent: a
-        // death now must not start a second chain.
+        // `a` finished its ticks and already jumped to `b`, so `a` is spent —
+        // and a spent mark is removed, so a death now cannot start a second
+        // chain from it.
+        assert!(mark_of(&w, a).is_none(), "the spent mark is removed");
         w.ecs.get_mut::<Enemy>(a).unwrap().hp = 0.0;
         let b_mark = mark_of(&w, b).unwrap();
         run_virus_death(&mut w);
@@ -1466,7 +1567,7 @@ mod tests {
             b_mark.ticks_left,
             "no second tag on the neighbour"
         );
-        assert_eq!(infections(&mut w).len(), 2);
+        assert_eq!(infections(&mut w).len(), 1, "only the live chain's mark");
     }
 
     // ---- Ownership / determinism ---------------------------------------

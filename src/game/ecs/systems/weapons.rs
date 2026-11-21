@@ -100,9 +100,9 @@ use crate::game::weapon::{
     THRASH_SWEEP_RATE, THRASH_SWEEPS,
 };
 use crate::game::ecs::components::{
-    CheeseString, EchoSpoke, Entity, EvolvedShot, FairyRing, MilkTooth, SpawnId,
+    EchoSpoke, Entity, EvolvedShot, FairyRing, MilkTooth, SpawnId,
 };
-use crate::game::ecs::systems::evolutions::{self, STRING_SECS};
+use crate::game::ecs::systems::evolutions;
 use crate::game::ecs::resources::{
     ActiveFx, DamageLedger, EnemyIndex, MeleeNudge, NextSpawnId, RngRes, SfxQueue, Shake, TickInput,
 };
@@ -253,7 +253,7 @@ pub fn fire_weapons_system(
             &mut melee_nudge,
             &scratch.infected,
             &mut scratch.boss_virus,
-            &mut scratch.evo.fairy_casts,
+            &mut scratch.evo,
             &mut scratch.moved,
         );
         if fired {
@@ -705,9 +705,13 @@ pub fn active_weapons_system(
                     w.damage() * dmg_mult,
                     // Wave 3 passive hooks: the thrash is a melee arc (Lens
                     // Cap's melee reach), the squeak is a radial ring (Long
-                    // Fuse's splash radius).
+                    // Fuse's splash radius **and** Lens Cap's ring reach: the
+                    // squeak is a ring, and leaving that hook out made the
+                    // passive silently do nothing for this weapon).
                     match w.kind {
-                        WeaponKind::SonicSqueak => stats.splash_radius(w.active_reach()),
+                        WeaponKind::SonicSqueak => {
+                            stats.melee_reach(stats.splash_radius(w.active_reach()))
+                        }
                         _ => stats.melee_reach(w.active_reach()),
                     },
                     w.evolved,
@@ -1123,7 +1127,8 @@ fn fire_one(
     melee_nudge: &mut MeleeNudge,
     infected: &Query<&crate::game::ecs::components::Infection>,
     boss_virus: &mut crate::game::ecs::resources::BossVirus,
-    fairy_casts: &mut u8,
+    // Per-instance **Fairy Ring** parity (see `EvoRuntime::count_fairy_cast`).
+    evo: &mut crate::game::ecs::resources::EvoRuntime,
     // Set when this shot moved a body: the grid has to be re-filed before the
     // projectile/contact passes read it (see `FireScratch::grid`).
     moved: &mut bool,
@@ -1197,35 +1202,53 @@ fn fire_one(
                 .map(|p| (p - ppos).normalized())
                 .unwrap_or(pface);
             let base = aim.angle();
+            // Fondue Fork: the spray's two **outer** darts are paired tine
+            // projectiles (they fly, hit and plant like a dart — no duplicated
+            // cast-time ray), and the string is created when both have settled.
+            // The inner darts stay ordinary darts.
+            let spread = 0.18;
+            let half = (projs - 1) as f32 / 2.0;
+            let tines = evolved && projs >= 2;
+            if tines {
+                let cast = next_id.take().0;
+                commands.spawn((
+                    crate::game::ecs::components::FondueCast {
+                        ends: [None; 2],
+                        damage: dmg,
+                        wait: evolutions::TINE_FLIGHT_MAX,
+                    },
+                    SpawnId(cast),
+                ));
+                // Lens Cap stretches how far a tine can plant.
+                let reach = stats.ranged_reach(evolutions::TINE_REACH);
+                for (slot, k) in [(0u8, 0i32), (1, projs - 1)] {
+                    let angle = base + (k as f32 - half) * spread;
+                    let vel = Vec2::from_angle(angle) * evolutions::TINE_SPEED;
+                    commands.spawn((
+                        crate::game::ecs::components::FondueTine {
+                            pos: ppos,
+                            prev: ppos,
+                            vel,
+                            damage: dmg,
+                            reach,
+                            slot,
+                            cast,
+                        },
+                        next_id.take(),
+                    ));
+                }
+            }
             for k in 0..projs {
-                let spread = (k as f32 - (projs - 1) as f32 / 2.0) * 0.18;
+                if tines && (k == 0 || k == projs - 1) {
+                    continue;
+                }
+                let spread = (k as f32 - (projs - 1) as f32 / 2.0) * spread;
                 let v = Vec2::from_angle(base + spread) * 110.0;
                 let mut b = Bullet::new(ppos, v, dmg, Faction::Player, color);
                 // Lens Cap.
                 b.life = stats.ranged_reach(1.4);
                 b.weapon = Some(kind);
                 commands.spawn((b, next_id.take()));
-            }
-            if evolved {
-                // Fondue Fork: the two outer darts plant tines (on the first
-                // body they would hit, or at 40 px / the first wall) and a
-                // cheese string runs between the plant points for 1.5 s.
-                // `fondue_string_system` cuts whoever crosses it.
-                // The same two angles the spray's first and last darts use:
-                // `(k - (projs - 1) / 2) * 0.18` for k = 0 and k = projs - 1.
-                let spread = 0.18;
-                let half = (projs - 1) as f32 / 2.0;
-                let outer = (projs >= 2).then_some([base - half * spread, base + half * spread]);
-                if let Some([left, right]) = outer {
-                    // Lens Cap stretches how far a tine can plant.
-                    let tine = stats.ranged_reach(evolutions::TINE_REACH);
-                    let a = fondue_plant(level, ppos, left, order, enemies, tine);
-                    let b = fondue_plant(level, ppos, right, order, enemies, tine);
-                    commands.spawn((
-                        CheeseString::new(a, b, STRING_SECS, dmg),
-                        next_id.take(),
-                    ));
-                }
             }
             vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, aim, 0.0);
             fired = true;
@@ -1257,25 +1280,32 @@ fn fire_one(
             // remember the lowest-`SpawnId` orbit angle (legacy `find_map`
             // over stable `SpawnId` order) and collect the old ring for
             // deferred despawn without sorting the bullet query.
-            let mut carry: Option<(u64, f32)> = None;
+            let mut carry: Option<(u64, f32, f32)> = None;
             orbit_scratch.clear();
             for (entity, id, b) in bullets.iter() {
                 if let Some(o) = b.orbit {
                     orbit_scratch.push(entity);
-                    if carry.is_none_or(|(best, _)| id.0 < best) {
-                        carry = Some((id.0, o.angle));
+                    if carry.is_none_or(|(best, _, _)| id.0 < best) {
+                        carry = Some((id.0, o.angle, b.life));
                     }
                 }
             }
-            let base = carry.map(|(_, angle)| angle).unwrap_or(0.0);
+            let base = carry.map(|(_, angle, _)| angle).unwrap_or(0.0);
             for &entity in orbit_scratch.iter() {
                 commands.entity(entity).despawn();
             }
+            // Long Fuse: an orbiter is a lingering friendly zone, and a recast
+            // may **never** cut that life short. The old ring is still dropped
+            // (two rings would stack damage), but the replacement inherits any
+            // remaining Long Fuse life instead of erasing it — without the
+            // passive the leftover is ~0 and the legacy "drop and respawn" is
+            // unchanged.
+            let zone = stats.zone_life(cd);
+            let ring_life = zone.max(carry.map(|(_, _, life)| life).unwrap_or(0.0));
             for k in 0..projs {
                 let angle = base + k as f32 / projs as f32 * std::f32::consts::TAU;
                 let mut b = Bullet::new(ppos, Vec2::ZERO, dmg, Faction::Player, color);
-                // Long Fuse: an orbiter is a lingering friendly zone.
-                b.life = stats.zone_life(cd);
+                b.life = ring_life;
                 b.pierce = 999;
                 b.size = 2;
                 // A 4 px spore body against a 3-7 px enemy is a wider ring
@@ -1295,8 +1325,12 @@ fn fire_one(
                 // Fairy Ring: every second cast also leaves its satellites
                 // fixed around the casting point for 3 s. `fairy_ring_system`
                 // burns whoever crosses the band (once per second each).
-                *fairy_casts = fairy_casts.wrapping_add(1);
-                if (*fairy_casts).is_multiple_of(2) {
+                // The parity is scoped to **this weapon instance** (kind +
+                // level + evolved), never to the world: a Molt or a dropped
+                // and re-acquired orbit starts its own count.
+                let key = (kind as u32) ^ ((wlevel as u32) << 8) ^ ((evolved as u32) << 16);
+                let casts = evo.count_fairy_cast(key);
+                if casts.is_multiple_of(2) {
                     commands.spawn((
                         FairyRing::new(
                             ppos,
@@ -1549,43 +1583,6 @@ fn fire_one(
 }
 
 
-/// Where one **Fondue Fork** tine plants: the first wall, or the first body the
-/// ray would meet, clamped to [`TINE_REACH`]. Bodies are searched in the tick's
-/// `SpawnId` order and the earliest *along the ray* wins, so the pick never
-/// depends on iteration order.
-fn fondue_plant(
-    level: &Level,
-    ppos: Vec2,
-    angle: f32,
-    order: &[Entity],
-    enemies: &Query<(Entity, &SpawnId, &mut Enemy)>,
-    reach: f32,
-) -> Vec2 {
-    let dir = Vec2::from_angle(angle);
-    let far = ppos + dir * reach;
-    let mut dist = reach;
-    if let Some(t) = level.tiles.segment_hit(ppos, far, 1.0) {
-        dist = (reach * t).max(2.0);
-    }
-    for &entity in order {
-        let Ok((_, _, e)) = enemies.get(entity) else {
-            continue;
-        };
-        if !e.alive() {
-            continue;
-        }
-        let rel = e.pos - ppos;
-        let along = rel.dot(dir);
-        if along <= 0.0 || along >= dist {
-            continue;
-        }
-        if (rel - dir * along).len() <= e.radius + 1.0 {
-            dist = along.max(2.0);
-        }
-    }
-    ppos + dir * dist
-}
-
 /// **Ratchet Tail**: hook the nearest ordinary body the whip hit and swing it a
 /// quarter turn around the rat, one base hit into everything the arc crosses.
 /// Heavy bodies (elites, Brutes, the boss) never get hooked — they took the
@@ -1635,6 +1632,24 @@ fn ratchet_swing(
     //    facing side of the hook (and clockwise when that is zero too).
     let offset = from - ppos;
     let start_angle = offset.angle();
+    // The swung body travels the arc at `radius_from_rat`; a body behind
+    // masonry is not on the arc's path even when both endpoints of the quarter
+    // turn are open floor (the review's "a 90° arc can cross a blocked
+    // intermediate point"). Sampled at 8 samples per quarter turn — a 1 px
+    // tile test per sample, and only for the handful of bodies that already
+    // matched the radius band.
+    let arc_clear = |delta: f32| -> bool {
+        let steps = ((delta.abs() / (std::f32::consts::FRAC_PI_2 / 8.0)).ceil() as u32).max(1);
+        (0..=steps).all(|i| {
+            let a = start_angle + delta * (i as f32 / steps as f32);
+            los_clear(
+                level,
+                ppos,
+                ppos + Vec2::from_angle(a) * radius_from_rat,
+                MELEE_LOS_RADIUS,
+            )
+        })
+    };
     let count_in = |turn: f32| -> u32 {
         let mut n = 0;
         for &entity in order {
@@ -1658,9 +1673,20 @@ fn ratchet_swing(
             } else {
                 delta >= std::f32::consts::TAU + turn - 0.12
             };
-            if in_arc {
-                n += 1;
+            if !in_arc {
+                continue;
             }
+            // Only a body the hook can actually reach counts toward the
+            // swing's direction (it samples the same cover rule as the hit).
+            let swing = if turn >= 0.0 {
+                delta
+            } else {
+                delta - std::f32::consts::TAU
+            };
+            if !arc_clear(swing.clamp(turn, 0.0)) {
+                continue;
+            }
+            n += 1;
         }
         n
     };
@@ -1708,6 +1734,17 @@ fn ratchet_swing(
             delta >= std::f32::consts::TAU + turn
         };
         if !in_arc {
+            continue;
+        }
+        // The hook has to reach this body: sample the sub-arc it travels to
+        // get there against the tile map. Both endpoints being open is not
+        // enough — a corner in the middle of the quarter turn is cover.
+        let swing = if turn >= 0.0 {
+            delta
+        } else {
+            delta - std::f32::consts::TAU
+        };
+        if !arc_clear(swing) {
             continue;
         }
         let hp_before = e.hp.max(0.0);
@@ -2635,6 +2672,66 @@ mod tests {
         assert_eq!(reach_at(5, WeaponKind::TailThrash).0, 84.0);
         assert_eq!(reach_at(1, WeaponKind::SonicSqueak).0, 90.0);
         assert_eq!(reach_at(5, WeaponKind::SonicSqueak).0, 130.0);
+    }
+
+    /// **Sonic Squeak reads Lens Cap's ring reach as well as Long Fuse's
+    /// radius.** It used to apply only the splash hook, so one of the two
+    /// passives silently did nothing for the weapon it was listed against.
+    #[test]
+    fn sonic_squeak_ring_reads_lens_cap_and_long_fuse() {
+        use crate::game::loadout::{PassiveKind, Upgrade};
+        let ring_at = |passives: &[PassiveKind]| -> f32 {
+            let mut w = World::new(Theme::Sewer, 29);
+            w.clear_enemies();
+            arm_active(&mut w, WeaponKind::SonicSqueak, 0.0);
+            for &p in passives {
+                w.player.loadout.apply(&Upgrade::Passive(p));
+            }
+            tick_active(&mut w, true);
+            w.active_fx().squeak_max_r
+        };
+        let base = ring_at(&[]);
+        let fuse = ring_at(&[PassiveKind::LongFuse]);
+        let lens = ring_at(&[PassiveKind::LensCap]);
+        let both = ring_at(&[PassiveKind::LongFuse, PassiveKind::LensCap]);
+        assert!(fuse > base, "Long Fuse must widen the ring ({fuse} vs {base})");
+        assert!(lens > base, "Lens Cap must widen the ring ({lens} vs {base})");
+        assert!(
+            both > fuse.max(lens),
+            "both hooks multiply: {both} vs fuse {fuse} / lens {lens}"
+        );
+    }
+
+    /// A recast **never erases the orbiters' Long Fuse life**: the old ring is
+    /// still dropped (two rings would stack damage), but the replacement keeps
+    /// any remaining life instead of resetting it to the shorter base.
+    #[test]
+    fn a_recast_does_not_erase_the_orbiters_long_fuse_life() {
+        let mut w = World::new(Theme::Sewer, 30);
+        w.clear_enemies();
+        arm(&mut w, WeaponKind::SporeOrbit);
+        w.player.loadout.weapons[0].timer = 0.0;
+        run_weapons(&mut w, 1.0 / 60.0);
+        // Pretend the live ring already carries a long residual (Long Fuse).
+        {
+            let mut q = w.ecs.query::<(bevy_ecs::entity::Entity, &mut Bullet)>();
+            for (_, mut b) in q.iter_mut(&mut w.ecs) {
+                if b.orbit.is_some() {
+                    b.life = 2.5;
+                }
+            }
+        }
+        w.player.loadout.weapons[0].timer = 0.0;
+        run_weapons(&mut w, 1.0 / 60.0);
+        let mut q = w.ecs.query::<&Bullet>();
+        let lives: Vec<f32> = q.iter(&w.ecs).filter(|b| b.orbit.is_some()).map(|b| b.life).collect();
+        assert!(!lives.is_empty(), "the recast must still leave an orbit ring");
+        for life in lives {
+            assert!(
+                life >= 2.5,
+                "the recast cut the ring's remaining Long Fuse life to {life}"
+            );
+        }
     }
 
     /// Both actives charged and one press: both fire.

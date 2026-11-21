@@ -1,6 +1,7 @@
 pub mod campaign;
 pub mod cursor;
 pub mod framebuffer;
+pub mod hazard_outline;
 pub mod hud;
 pub mod ink;
 pub mod menu;

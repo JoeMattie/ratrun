@@ -54,6 +54,11 @@ use crate::game::ecs::resources::debug_assert_enemy_index;
 /// How often Counterweight may nudge the same body (design §5).
 pub const MELEE_NUDGE_COOLDOWN: f32 = 0.4;
 
+/// **Super Dash**'s native drag: px/s of velocity added to every body the
+/// dash's legs cross (Counterweight's `Stats::shove` multiplies it like every
+/// other weapon's native shove).
+pub const SUPER_DASH_SHOVE: f32 = 40.0;
+
 /// The tick's stable `SpawnId` enemy order.
 ///
 /// Prefers the cached [`EnemyIndex`] (identical order, no sort) and falls back
@@ -457,7 +462,12 @@ pub fn super_dash_system(
         return;
     };
     let radius = w.dash_radius();
-    let dmg = w.damage() * player.loadout.stats.damage_mult;
+    let stats = player.loadout.stats;
+    let dmg = w.damage() * stats.damage_mult;
+    // Counterweight scales the dash's native drag too: it is a shove, so the
+    // passive that raises every weapon's shove has to reach it (it used to be
+    // a hard-coded 40 px/s the passive could not touch).
+    let shove = stats.shove(SUPER_DASH_SHOVE);
     let kind = WeaponKind::SuperDash;
     // The legs the rat actually travelled this tick (collision-resolved
     // sub-steps). A chord across them could cut a corner a wall put in the
@@ -513,7 +523,7 @@ pub fn super_dash_system(
         let enemy_id = e.id;
         // The dash drags what it crosses along with it: the ride is the point.
         let out = (pos - from).normalized();
-        e.vel += out * 40.0;
+        e.vel += out * shove;
         vfx::emit_super_dash_hit(&mut particles, &mut rng.0, pos, pos - from, killed);
         damage_numbers.record(
             enemy_id,

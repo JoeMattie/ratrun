@@ -82,11 +82,12 @@ use bevy_ecs::prelude::*;
 
 use crate::game::bullet::Faction;
 use crate::game::ecs::components::{
-    CheeseString, CorrosiveChannel, DeadLetterPacket, FairyRing, Infection, MilkPhase, MilkTooth,
+    CheeseString, CorrosiveChannel, DeadLetterPacket, FairyRing, FondueCast, FondueTine, Infection,
+    MilkPhase, MilkTooth,
     SpawnId,
 };
 use crate::game::ecs::resources::{
-    ActiveFx, DamageLedger, DashTrack, EnemyIndex, RngRes, TickInput, FLYWHEEL_CAP,
+    ActiveFx, DamageLedger, DashTrack, EnemyIndex, NextSpawnId, RngRes, TickInput, FLYWHEEL_CAP,
     RIPCORD_SECS,
 };
 use crate::game::ecs::systems::boss::{Boss, BossHitShapes};
@@ -127,6 +128,13 @@ pub const STRING_SECS: f32 = 1.5;
 pub const STRING_RADIUS: f32 = 1.0;
 /// The tines plant on a hit or at this distance.
 pub const TINE_REACH: f32 = 40.0;
+/// A tine flies at the cheese spray's own dart speed.
+pub const TINE_SPEED: f32 = 110.0;
+/// Collision radius of a tine (the dab on the end of the fork).
+pub const TINE_RADIUS: f32 = 1.5;
+/// Longest a cast waits for its tines before the string is given up on (they
+/// always settle by their reach, so this is a safety net, not a timer).
+pub const TINE_FLIGHT_MAX: f32 = 3.0;
 /// Radius of the ring the Fondue tines are planted at (matches the spray's
 /// spread geometry only for the visual sag).
 pub const STRING_SAG: f32 = 1.5;
@@ -155,6 +163,9 @@ pub const ROLL_CALL_DELAY: f32 = 0.8;
 pub const ROLL_CALL_RADIUS: f32 = 9.0;
 /// Answers that may hit the same body.
 pub const ROLL_CALL_MAX_ANSWERS: u8 = 3;
+/// Line-of-sight radius for one answer's shout (a 9 px ring, so a body behind a
+/// wall is not in earshot even when it is close to the answer).
+pub const ROLL_CALL_LOS_RADIUS: f32 = 1.0;
 /// Distinct bodies one Roll Call ring can keep an answer tally for. Fixed (no
 /// per-tick allocation); a body past the cap gets no answer rather than more
 /// than three.
@@ -189,6 +200,45 @@ pub const CARBON_COPY_DAMAGE: f32 = 0.5;
 /// **Ripcord**: how far the taut route pulls a body back toward the departure
 /// point (design §3: "slide 8 px toward the departure point").
 pub const RIPCORD_SLIDE: f32 = 8.0;
+
+/// Key-space tag for the full boss inside the evolved effects' fixed per-body
+/// tables (`FairyRing::cooled`, `CheeseString::cut`). `SpawnId`s are small and
+/// monotonic, so the high bit keeps a boss id from ever colliding with one.
+pub const BOSS_EFFECT_KEY: u64 = 1 << 63;
+
+/// One evolved effect's hit on the full boss: the boss's own damage multiplier,
+/// the ledger column of the base weapon, the damage number and a `true` when the
+/// hit landed.
+///
+/// The boss is not an `Enemy`, so every evolved effect that can reach it has to
+/// go through [`Boss::hit_shapes`] (exactly like Milk Teeth and the Drain
+/// Cleaner) and [`Boss::take_damage`]; without this, a chest could turn a
+/// boss-capable build into a zero-damage one.
+#[allow(clippy::too_many_arguments)]
+fn damage_boss(
+    boss: &mut Boss,
+    damage: f32,
+    kind: WeaponKind,
+    source: DamageSource,
+    ledger: &mut DamageLedger,
+    damage_numbers: &mut DamageNumbers,
+) -> bool {
+    let amount = damage * boss.damage_mult;
+    if !boss.take_damage(amount) {
+        return false;
+    }
+    ledger.add_boss(kind, amount);
+    let killed = boss.hp <= 0.0;
+    damage_numbers.record(
+        boss.id,
+        boss.pos,
+        boss.kind.body_radius(),
+        amount,
+        killed,
+        source,
+    );
+    true
+}
 
 // ---- Stable enemy order ---------------------------------------------------
 
@@ -537,6 +587,191 @@ pub fn milk_teeth_system(
 
 // ---- Fondue Fork ----------------------------------------------------------
 
+/// Fly every **Fondue Fork** tine and plant the string when both have settled.
+///
+/// A tine is a real projectile: it crosses the floor, hits the **first body it
+/// meets** (one dart's damage, exactly what that outer dart always dealt) and
+/// plants on its near edge, or plants at the first wall / at its Lens
+/// Cap-stretched reach. The cast becomes the string that
+/// [`fondue_string_system`] cuts with only once *both* tines have settled, so a
+/// body that walks into an outer dart's path after the cast still moves its end
+/// of the string — the review's "the ordinary outer bullets fly and deal damage
+/// after the string already appears from a cast-time ray".
+pub fn fondue_tines_system(
+    mut commands: Commands,
+    input: Res<TickInput>,
+    level: Res<Level>,
+    index: Res<EnemyIndex>,
+    mut rng: ResMut<RngRes>,
+    mut particles: ResMut<Particles>,
+    mut damage_numbers: ResMut<DamageNumbers>,
+    mut ledger: ResMut<DamageLedger>,
+    mut next_id: ResMut<NextSpawnId>,
+    mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
+    mut bosses: Query<&mut Boss>,
+    mut tines: Query<(Entity, &SpawnId, &mut FondueTine)>,
+    mut casts: Query<(Entity, &SpawnId, &mut FondueCast)>,
+    mut fallback: Local<Vec<Entity>>,
+    // (cast `SpawnId`, slot, plant point) in tine `SpawnId` order.
+    mut settled: Local<Vec<(u64, u8, Vec2)>>,
+    mut order_scratch: Local<Vec<(u64, Entity)>>,
+) {
+    if tines.is_empty() && casts.is_empty() {
+        return; // an unevolved spray (or none at all): no work, no rng
+    }
+    let dt = input.dt;
+    let kind = WeaponKind::CheeseSpray;
+    let order = enemy_order(&index, &enemies, &mut fallback);
+
+    settled.clear();
+    order_scratch.clear();
+    order_scratch.extend(tines.iter().map(|(entity, id, _)| (id.0, entity)));
+    order_scratch.sort_unstable_by_key(|&(id, _)| id);
+
+    for &(_, entity) in order_scratch.iter() {
+        let Ok((_, _, mut tine)) = tines.get_mut(entity) else {
+            continue;
+        };
+        let from = tine.pos;
+        let step = tine.vel * dt;
+        let to = from + step;
+        let (end, stopped) = wall_or(&level, from, to, TINE_RADIUS);
+        let reach_step = step.len().min((end - from).len().max(0.0));
+        let dir = if step.len() > 1e-4 {
+            step * (1.0 / step.len())
+        } else {
+            Vec2::new(1.0, 0.0)
+        };
+        let limit = if stopped { (end - from).len() } else { reach_step };
+
+        // The first body along this flight (nearest along the ray, ties by
+        // `SpawnId` because `order` is the stable order).
+        let mut body: Option<(f32, Vec2, Entity)> = None;
+        for &candidate in order.iter() {
+            let Ok((_, _, e)) = enemies.get(candidate) else {
+                continue;
+            };
+            if !e.alive() {
+                continue;
+            }
+            let rel = e.pos - from;
+            let along = rel.dot(dir);
+            if along <= 0.0 || along > limit + e.radius {
+                continue;
+            }
+            if (rel - dir * along).len() > e.radius + TINE_RADIUS {
+                continue;
+            }
+            if body.is_none_or(|(best, _, _)| along < best) {
+                let plant = from + dir * (along - e.radius).max(0.0);
+                body = Some((along, plant, candidate));
+            }
+        }
+
+        let mut planted: Option<Vec2> = None;
+        if let Some((_, plant, candidate)) = body {
+            if let Ok((_, _, mut e)) = enemies.get_mut(candidate) {
+                if e.alive() {
+                    let pos = e.pos;
+                    let killed = hit_body(
+                        &mut e,
+                        tine.damage,
+                        from,
+                        kind,
+                        &mut ledger,
+                        &mut damage_numbers,
+                        DamageSource::Normal,
+                    );
+                    vfx::emit_fondue_cut(&mut particles, &mut rng.0, pos, killed);
+                }
+            }
+            planted = Some(plant);
+        } else {
+            // The full boss is a body too: its grounded shapes take the dart
+            // (an outer dart was an ordinary player bullet before, and those
+            // damage bosses).
+            let mut boss_hit: Option<Vec2> = None;
+            for mut boss in bosses.iter_mut() {
+                if boss.dead {
+                    continue;
+                }
+                let shapes = boss.hit_shapes();
+                if shapes.iter().next().is_none()
+                    || !shapes.segment_hits_grounded(from, end, TINE_RADIUS)
+                {
+                    continue;
+                }
+                let amount = tine.damage * boss.damage_mult;
+                if !boss.take_damage(amount) {
+                    continue;
+                }
+                ledger.add_boss(kind, amount);
+                let killed = boss.hp <= 0.0;
+                vfx::emit_fondue_cut(&mut particles, &mut rng.0, boss.pos, killed);
+                damage_numbers.record(
+                    boss.id,
+                    boss.pos,
+                    boss.kind.body_radius(),
+                    amount,
+                    killed,
+                    DamageSource::Normal,
+                );
+                boss_hit = Some(boss.pos);
+                break;
+            }
+            if let Some(at) = boss_hit {
+                let rel = at - from;
+                let along = rel.dot(dir).clamp(0.0, limit);
+                planted = Some(from + dir * along);
+            }
+        }
+
+        // Advance, then settle on a body, a wall, or the end of the reach.
+        if planted.is_none() {
+            tine.prev = from;
+            tine.pos = end;
+            tine.reach = (tine.reach - reach_step).max(0.0);
+            if stopped {
+                planted = Some(end);
+            } else if tine.reach <= 0.0 {
+                planted = Some(tine.pos);
+            }
+        }
+        if let Some(plant) = planted {
+            settled.push((tine.cast, tine.slot, plant));
+            commands.entity(entity).despawn();
+        }
+    }
+
+    // Apply the plants to their casts, in cast `SpawnId` order.
+    order_scratch.clear();
+    order_scratch.extend(casts.iter().map(|(entity, id, _)| (id.0, entity)));
+    order_scratch.sort_unstable_by_key(|&(id, _)| id);
+    for &(cast_id, entity) in order_scratch.iter() {
+        let Ok((_, _, mut cast)) = casts.get_mut(entity) else {
+            continue;
+        };
+        for &(id, slot, plant) in settled.iter() {
+            if id == cast_id {
+                cast.ends[slot as usize % 2] = Some(plant);
+            }
+        }
+        let done = cast.ends[0].is_some() && cast.ends[1].is_some();
+        if done {
+            let (a, b) = (cast.ends[0].unwrap_or(Vec2::ZERO), cast.ends[1].unwrap_or(Vec2::ZERO));
+            let dmg = cast.damage;
+            commands.entity(entity).despawn();
+            let string = CheeseString::new(a, b, STRING_SECS, dmg);
+            commands.spawn((string, next_id.take()));
+            continue;
+        }
+        cast.wait -= dt;
+        if cast.wait <= 0.0 {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
 /// Ticks every **Fondue Fork** string: it sags, cuts each crosser once, dies.
 pub fn fondue_string_system(
     mut commands: Commands,
@@ -547,6 +782,7 @@ pub fn fondue_string_system(
     mut damage_numbers: ResMut<DamageNumbers>,
     mut ledger: ResMut<DamageLedger>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
+    mut bosses: Query<&mut Boss>,
     mut strings: Query<(Entity, &SpawnId, &mut CheeseString)>,
     mut fallback: Local<Vec<Entity>>,
     mut string_order: Local<Vec<(u64, Entity)>>,
@@ -597,6 +833,38 @@ pub fn fondue_string_system(
                 vfx::emit_fondue_cut(&mut particles, &mut rng.0, pos, killed);
             }
         }
+        // The filament cuts the full boss too (its hit shapes, one cut ever
+        // per body, exactly like the ordinary bodies above).
+        for mut boss in bosses.iter_mut() {
+            if boss.dead {
+                continue;
+            }
+            let key = BOSS_EFFECT_KEY | u64::from(boss.id);
+            if line.has_cut(key) {
+                continue;
+            }
+            let shapes = boss.hit_shapes();
+            if shapes.iter().next().is_none()
+                || !shapes.segment_hits_grounded(line.a, line.b, STRING_RADIUS)
+            {
+                continue;
+            }
+            if !line.remember_cut(key) {
+                continue;
+            }
+            let at = boss.pos;
+            if damage_boss(
+                &mut boss,
+                line.damage,
+                kind,
+                DamageSource::Normal,
+                &mut ledger,
+                &mut damage_numbers,
+            ) {
+                let killed = boss.hp <= 0.0;
+                vfx::emit_fondue_cut(&mut particles, &mut rng.0, at, killed);
+            }
+        }
         let life_frac = (line.life / line.total.max(1e-4)).clamp(0.0, 1.0);
         vfx::emit_fondue_string(&mut particles, &mut rng.0, line.a, line.b, life_frac, dt);
         if line.life <= 0.0 {
@@ -617,6 +885,7 @@ pub fn fairy_ring_system(
     mut damage_numbers: ResMut<DamageNumbers>,
     mut ledger: ResMut<DamageLedger>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
+    mut bosses: Query<&mut Boss>,
     mut rings: Query<(Entity, &SpawnId, &mut FairyRing)>,
     mut fallback: Local<Vec<Entity>>,
     mut ring_order: Local<Vec<(u64, Entity)>>,
@@ -664,6 +933,38 @@ pub fn fairy_ring_system(
                     DamageSource::Orbit,
                 );
                 vfx::emit_fairy_ring_hit(&mut particles, &mut rng.0, pos, killed);
+            }
+        }
+        // The band burns the full boss too, on the same one-hit-per-second
+        // cooldown (the boss id is tagged into the same fixed table).
+        for mut boss in bosses.iter_mut() {
+            if boss.dead {
+                continue;
+            }
+            let key = BOSS_EFFECT_KEY | u64::from(boss.id);
+            if ring.cooldown(key) > 0.0 {
+                continue;
+            }
+            let shapes = boss.hit_shapes();
+            if shapes.iter().next().is_none()
+                || !shapes.ring_hits_grounded(ring.pos, ring.radius, FAIRY_BAND)
+            {
+                continue;
+            }
+            if !ring.cool(key, FAIRY_HIT_COOLDOWN) {
+                continue;
+            }
+            let at = boss.pos;
+            if damage_boss(
+                &mut boss,
+                ring.damage,
+                kind,
+                DamageSource::Orbit,
+                &mut ledger,
+                &mut damage_numbers,
+            ) {
+                let killed = boss.hp <= 0.0;
+                vfx::emit_fairy_ring_hit(&mut particles, &mut rng.0, at, killed);
             }
         }
         let life_frac = (ring.life / ring.total.max(1e-4)).clamp(0.0, 1.0);
@@ -1124,7 +1425,10 @@ pub fn ripcord_system(
             // drag: the legacy boss kind and a named miniboss keep their feet.
             let dragged = !e.named && e.kind != crate::game::enemy::EnemyKind::Boss;
             if dragged && back.len_sq() > 0.25 {
-                let shifted = pos + back.normalized() * RIPCORD_SLIDE;
+                // Counterweight: the cord's slide is a weapon's native shove,
+                // so the passive that raises every shove raises this one too.
+                let shifted =
+                    pos + back.normalized() * player.loadout.stats.shove(RIPCORD_SLIDE);
                 e.pos = level.tiles.resolve_circle(
                     shifted,
                     e.radius,
@@ -1204,6 +1508,7 @@ pub fn ripcord_system(
 /// maximum into the same victim.
 pub fn roll_call_system(
     input: Res<TickInput>,
+    level: Res<Level>,
     index: Res<EnemyIndex>,
     mut rng: ResMut<RngRes>,
     mut particles: ResMut<Particles>,
@@ -1211,6 +1516,7 @@ pub fn roll_call_system(
     mut ledger: ResMut<DamageLedger>,
     mut evo: ResMut<ActiveFx>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
+    mut bosses: Query<&mut Boss>,
     mut fallback: Local<Vec<Entity>>,
 ) {
     if evo.answer_left <= 0.0 {
@@ -1227,6 +1533,9 @@ pub fn roll_call_system(
     // more bodies than the ring tagged). A body the tally cannot hold gets no
     // answer at all, so a 13th victim can never take every answer in the room.
     let mut answers: [Option<(u64, u8)>; ROLL_CALL_VICTIM_CAP] = [None; ROLL_CALL_VICTIM_CAP];
+    // The full boss answers too, capped like every victim (its own tally: it is
+    // not in the `SpawnId` space the table is keyed by).
+    let mut boss_answers = 0u8;
     let tag_n = evo.tag_n as usize;
     for slot in 0..tag_n {
         let Some((Some(entity), Some(id))) = Some((evo.tags[slot], evo.tag_ids[slot])) else {
@@ -1245,6 +1554,19 @@ pub fn roll_call_system(
                 continue;
             };
             if !victim.alive() || victim.pos.dist(origin) > ROLL_CALL_RADIUS + victim.radius {
+                continue;
+            }
+            // An answer is a shout that travels: masonry stops it. The pulse is
+            // a 9 px ring, so a 1 px line is the honest width for "can the
+            // answer reach this body" (the same radius the whip and the virus
+            // jump use). Without it a thin wall between the answering body and
+            // a nearby victim was damage straight through cover.
+            if !crate::game::ecs::systems::projectiles::los_clear(
+                &level,
+                origin,
+                victim.pos,
+                ROLL_CALL_LOS_RADIUS,
+            ) {
                 continue;
             }
             // The cap counts answers per body across the whole ring.
@@ -1288,6 +1610,38 @@ pub fn roll_call_system(
             );
             vfx::emit_roll_call_pulse(&mut particles, &mut rng.0, pos, killed);
             let _ = id;
+        }
+        // One answer per emitter into the full boss, through its hit shapes
+        // and with the same masonry rule as the victims above.
+        if boss_answers < ROLL_CALL_MAX_ANSWERS {
+            for mut boss in bosses.iter_mut() {
+                if boss.dead {
+                    continue;
+                }
+                let shapes = boss.hit_shapes();
+                if shapes.iter().next().is_none()
+                    || !shapes.circle_hits_grounded(origin, ROLL_CALL_RADIUS)
+                {
+                    continue;
+                }
+                if !los_clear(&level, origin, boss.pos, ROLL_CALL_LOS_RADIUS) {
+                    continue;
+                }
+                let at = boss.pos;
+                if damage_boss(
+                    &mut boss,
+                    damage,
+                    WeaponKind::SonicSqueak,
+                    DamageSource::Normal,
+                    &mut ledger,
+                    &mut damage_numbers,
+                ) {
+                    boss_answers += 1;
+                    let killed = boss.hp <= 0.0;
+                    vfx::emit_roll_call_pulse(&mut particles, &mut rng.0, at, killed);
+                }
+                break; // one boss per answer
+            }
         }
     }
     evo.clear_roll_call();
@@ -1504,21 +1858,49 @@ mod tests {
 
     /// The Fondue Fork's tines really are planted by the firing arm: the two
     /// outer darts' angles give a string with both ends within the tine reach
-    /// of the rat and one on each side of the aim.
+    /// The Fondue Fork's tines really are planted by the firing arm: the two
+    /// outer darts fly as tines (they are *not* cast-time rays) and the string
+    /// only appears once both have settled, with both ends within the tine
+    /// reach of the rat and one on each side of the aim.
     #[test]
-    fn cheese_spray_plants_a_string_between_its_outer_darts() {
+    fn cheese_spray_tines_land_before_the_string_appears() {
         use crate::game::ecs::systems::weapons;
         let mut w = evolved_world(WeaponKind::CheeseSpray);
         let origin = w.player.pos;
-        let body = w.spawn_enemy(EnemyKind::Brute, origin + Vec2::new(30.0, 0.0), 400.0);
         w.player.face = Vec2::new(1.0, 0.0);
         w.player.loadout.weapons[0].timer = 0.0;
         run(&mut w, weapons::fire_weapons_system);
-        let mut q = w.ecs.query::<&CheeseString>();
-        let line = q.iter(&w.ecs).next().expect("a string is planted").clone();
+        // The string is not a cast-time ray any more: the tines are still in
+        // the air on the tick the spray fires.
+        {
+            let mut q = w.ecs.query::<&CheeseString>();
+            assert_eq!(
+                q.iter(&w.ecs).count(),
+                0,
+                "the string appeared before its tines had flown"
+            );
+        }
+        {
+            let mut q = w.ecs.query::<&FondueTine>();
+            assert_eq!(q.iter(&w.ecs).count(), 2, "the two outer darts are tines");
+        }
+        let mut ticks = 0;
+        let line = loop {
+            run(&mut w, fondue_tines_system);
+            ticks += 1;
+            let mut q = w.ecs.query::<&CheeseString>();
+            if let Some(line) = q.iter(&w.ecs).next() {
+                break line.clone();
+            }
+            assert!(ticks < 120, "the tines never planted a string");
+        };
+        // A tine flies at 110 px/s and plants at its 40 px reach, so the pair
+        // needs a handful of ticks — never the firing tick.
+        assert!(ticks > 1, "the string cannot be planted at cast time");
         for end in [line.a, line.b] {
             let d = end.dist(origin);
             assert!(d <= TINE_REACH + 0.5, "a tine planted past its reach: {d}");
+            assert!((d - TINE_REACH).abs() < 1.0, "an unblocked tine plants at its reach: {d}");
         }
         // The two ends straddle the aim (east), so the string crosses it.
         assert!(
@@ -1527,9 +1909,50 @@ mod tests {
             line.a,
             line.b
         );
-        let _ = body;
     }
 
+    /// A body that steps into an outer tine's path **after the cast** is what
+    /// plants that end of the string (the review's sketch): the tine hits the
+    /// real collision, not a ray drawn at fire time.
+    #[test]
+    fn a_late_body_moves_the_tine_and_its_end_of_the_string() {
+        use crate::game::ecs::systems::weapons;
+        let mut w = evolved_world(WeaponKind::CheeseSpray);
+        let origin = w.player.pos;
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.player.loadout.weapons[0].timer = 0.0;
+        run(&mut w, weapons::fire_weapons_system);
+        // One tick of flight, then park a sturdy body on the left tine's line
+        // (base is east, the outer darts at ±half·0.18 rad from it).
+        run(&mut w, fondue_tines_system);
+        let half = (w.player.loadout.weapons[0].level_projectiles() as f32 - 1.0) * 0.5;
+        let angle = -half * 0.18;
+        let cross = origin + Vec2::from_angle(angle) * 14.0;
+        let body = w.spawn_enemy(EnemyKind::Brute, cross, 400.0);
+        let hp_before = w.ecs.get::<Enemy>(body).map(|e| e.hp).unwrap_or(0.0);
+        let mut ticks = 0;
+        while ticks < 60 {
+            run(&mut w, fondue_tines_system);
+            ticks += 1;
+            let mut q = w.ecs.query::<&CheeseString>();
+            if q.iter(&w.ecs).next().is_some() {
+                break;
+            }
+        }
+        let hp_after = w.ecs.get::<Enemy>(body).map(|e| e.hp).unwrap_or(0.0);
+        assert!(
+            hp_after < hp_before,
+            "the tine crossed the late body without hitting it ({hp_before} -> {hp_after})"
+        );
+        let mut q = w.ecs.query::<&CheeseString>();
+        let line = q.iter(&w.ecs).next().expect("the pair still plants a string").clone();
+        // One end landed on the body, short of the nominal 40 px reach.
+        let short = line.a.dist(origin).min(line.b.dist(origin));
+        assert!(
+            short < TINE_REACH - 4.0,
+            "no end planted on the late body (nearest end {short} px)"
+        );
+    }
     /// Echo Chamber: a nova spoke that hits a wall reflects once and comes back
     /// down its own line, damaging on the return leg.
     #[test]
@@ -1937,6 +2360,47 @@ mod tests {
         assert!(answers > 0.0, "the answer pulses must still land");
     }
 
+    /// **Roll Call's answers stop at masonry.** A victim nine pixels away
+    /// behind a thin wall was in "earshot" of the old distance-only test.
+    #[test]
+    fn roll_call_answers_do_not_cross_a_wall() {
+        let mut w = evolved_world(WeaponKind::SonicSqueak);
+        let origin = w.player.pos;
+        // A one-cell solid partition just east of the answering caller.
+        let cx = (origin.x / 16.0).floor() as i32 + 1;
+        let cy = (origin.y / 16.0).floor() as i32;
+        for dy in -3..=3 {
+            w.level.tiles.set(
+                cx,
+                cy + dy,
+                TileKind::Wall(crate::game::art_walls::WallKind::Solid),
+            );
+        }
+        w.level.tiles.rebuild_masks();
+        let wall_x = (cx as f32) * 16.0;
+        // The caller sits west of the wall; the victim east of it, close enough
+        // for the pulse's radius but on the far side of the partition.
+        let caller = w.spawn_enemy(EnemyKind::Brute, Vec2::new(wall_x - 4.0, origin.y), 900.0);
+        let victim = w.spawn_enemy(EnemyKind::Brute, Vec2::new(wall_x + 4.0, origin.y), 900.0);
+        let before = hp_of(&w, victim);
+        let id = w.ecs.get::<SpawnId>(caller).unwrap().0;
+        {
+            let mut fx = w.ecs.resource_mut::<ActiveFx>();
+            fx.clear_roll_call();
+            assert!(fx.tag(caller, id), "tag");
+            fx.answer_left = ROLL_CALL_DELAY;
+            fx.answer_damage = 3.0;
+        }
+        for _ in 0..70 {
+            run(&mut w, roll_call_system);
+        }
+        assert_eq!(
+            before,
+            hp_of(&w, victim),
+            "the answer went through the wall"
+        );
+    }
+
     /// **Milk Teeth** bites the full boss (a chest must not turn a
     /// boss-capable build into a zero-damage one): the outbound dart lodges in
     /// its hit shape and the return thread bites it once.
@@ -1992,6 +2456,12 @@ mod tests {
         MilkTeeth,
         DrainCleaner,
         TailWhip,
+        /// **Fairy Ring**: the fixed band (one hit per second).
+        FairyRing,
+        /// **Fondue Fork**: the filament between the tines.
+        FondueString,
+        /// **Roll Call**: one answer pulse.
+        RollCall,
     }
 
     /// A boss state to force: `(state, duration, elapsed)`.
@@ -2013,6 +2483,9 @@ mod tests {
             BossHitter::MilkTeeth => WeaponKind::Gnaw,
             BossHitter::DrainCleaner => WeaponKind::AcidSpit,
             BossHitter::TailWhip => WeaponKind::TailWhip,
+            BossHitter::FairyRing => WeaponKind::SporeOrbit,
+            BossHitter::FondueString => WeaponKind::CheeseSpray,
+            BossHitter::RollCall => WeaponKind::SonicSqueak,
         });
         w.player.loadout.weapons[0].evolved = hitter != BossHitter::TailWhip;
         w.player.loadout.weapons[0].timer = 0.0;
@@ -2052,15 +2525,57 @@ mod tests {
                 w.player.pos = aim + Vec2::new(-6.0, 0.0);
                 run(&mut w, weapons::fire_weapons_system);
             }
+            BossHitter::FairyRing => {
+                // A ring whose band passes through the boss's first grounded
+                // point: the satellites' own circle cuts it once a second.
+                spawn_with_id(
+                    &mut w.ecs,
+                    FairyRing::new(aim, 4.0, FAIRY_SECS, 4, 7.0),
+                );
+                for _ in 0..6 {
+                    run(&mut w, fairy_ring_system);
+                }
+            }
+            BossHitter::FondueString => {
+                spawn_with_id(
+                    &mut w.ecs,
+                    CheeseString::new(
+                        aim + Vec2::new(-12.0, -12.0),
+                        aim + Vec2::new(12.0, 12.0),
+                        STRING_SECS,
+                        7.0,
+                    ),
+                );
+                for _ in 0..4 {
+                    run(&mut w, fondue_string_system);
+                }
+            }
+            BossHitter::RollCall => {
+                // One tagged neighbour inside the answer pulse's 9 px: its
+                // answer is the hit.
+                let caller = w.spawn_enemy(EnemyKind::Brute, aim + Vec2::new(4.0, 0.0), 900.0);
+                let id = w.ecs.get::<SpawnId>(caller).unwrap().0;
+                {
+                    let mut fx = w.ecs.resource_mut::<ActiveFx>();
+                    fx.clear_roll_call();
+                    assert!(fx.tag(caller, id), "tag");
+                    fx.answer_left = ROLL_CALL_DELAY;
+                    fx.answer_damage = 7.0;
+                }
+                for _ in 0..80 {
+                    run(&mut w, roll_call_system);
+                }
+            }
         }
         (hp0 - w.ecs.get::<Boss>(boss).unwrap().hp, hittable)
     }
 
     /// **All six bosses**, not just the three the fixes were written against:
-    /// Milk Teeth, the Drain Cleaner and the Tail Whip (whose boss hit moved
-    /// out of `boss_damage_system` into the cast) each damage every boss while
-    /// it is damageable, honour its weak-window multiplier, and pass under a
-    /// boss with no grounded shape exactly as a bullet does.
+    /// Milk Teeth, the Drain Cleaner, the Tail Whip (whose boss hit moved out of
+    /// `boss_damage_system` into the cast), the Fairy Ring, the Fondue string
+    /// and Roll Call each damage every boss while it is damageable, honour its
+    /// weak-window multiplier, and pass under a boss with no grounded shape
+    /// exactly as a bullet does.
     #[test]
     fn milk_teeth_drain_cleaner_and_whip_damage_all_six_bosses() {
         use crate::game::art_boss_cat::BossCatState;
@@ -2068,10 +2583,15 @@ mod tests {
         use crate::game::art_boss_mangle::{self, MangleState};
         use crate::game::art_boss_night_edition::{self, NightEditionState};
         use crate::game::ecs::systems::boss::{BossKind, BossState};
-        const HITTERS: [BossHitter; 3] = [
+        const HITTERS: [BossHitter; 6] = [
             BossHitter::MilkTeeth,
             BossHitter::DrainCleaner,
             BossHitter::TailWhip,
+            // The three effects the integrator flagged: a chest evolution must
+            // not skip the full boss (they had no boss query at all).
+            BossHitter::FairyRing,
+            BossHitter::FondueString,
+            BossHitter::RollCall,
         ];
         // (boss, state, incoming multiplier of that state)
         let damageable: [(BossKind, Option<BossPose>, f32); 10] = [
@@ -2570,6 +3090,10 @@ mod tests {
             w.player.face = Vec2::new(1.0, 0.0);
             w.player.loadout.weapons[0].timer = 0.0;
             run(&mut w, weapons::fire_weapons_system);
+            // The tines fly: run them out until the pair plants its string.
+            for _ in 0..90 {
+                run(&mut w, fondue_tines_system);
+            }
             let mut q = w.ecs.query::<&CheeseString>();
             let line = q.iter(&w.ecs).next().expect("a string is planted").clone();
             let reach = line.a.dist(w.player.pos).max(line.b.dist(w.player.pos));

@@ -761,6 +761,23 @@ impl BossHitShapes {
             .any(|s| s.grounded() && s.overlaps_circle(point, radius))
     }
 
+    /// Does any grounded shape sit on the **ring band** of `radius` around
+    /// `center`? The band is `band` px wide either side (a Fairy Ring's drawn
+    /// circle plus its slack), sampled around the circle so a large box is
+    /// still caught by the samples inside it.
+    #[inline]
+    pub fn ring_hits_grounded(&self, center: Vec2, radius: f32, band: f32) -> bool {
+        let steps = ((radius * 1.5).ceil() as u32).max(12);
+        self.iter().any(|shape| {
+            shape.grounded()
+                && (0..steps).any(|i| {
+                    let a = i as f32 / steps as f32 * std::f32::consts::TAU;
+                    let p = center + Vec2::from_angle(a) * radius.max(0.0);
+                    shape.overlaps_circle(p, band)
+                })
+        })
+    }
+
     /// Is any shape hit by a circle (including lifted ones)?
     #[inline]
     pub fn circle_hits_any(&self, point: Vec2, radius: f32) -> bool {
@@ -1895,24 +1912,29 @@ impl BossCue {
             BossCue::MangleJam => Sfx::MangleJam,
             BossCue::MangleShift => Sfx::MangleShift,
             BossCue::MangleDeath => Sfx::MangleDeath,
-            BossCue::NightPage => Sfx::NightStamp,
+            // Each of the press's three beats has its own short variation: the
+            // sheet feeding in, the platen's clack, the bed coming down.
+            BossCue::NightPage => Sfx::NightPage,
             BossCue::NightStamp => Sfx::NightStamp,
-            BossCue::NightBed => Sfx::NightStamp,
+            BossCue::NightBed => Sfx::NightBed,
             BossCue::NightMisprint => Sfx::NightBell,
             BossCue::NightBell => Sfx::NightBell,
             BossCue::NightCarriage => Sfx::NightCarriage,
             // The ribbon window is a mechanical reveal, exactly the chest-open
             // sting's shape.
             BossCue::NightRibbon => Sfx::CacheOpen,
-            // Re-seating machinery: the dock's servo hum.
-            BossCue::NightTurn => Sfx::MowerDockHum,
-            BossCue::NightWreck => Sfx::MowerDeath,
+            // Re-seating machinery and the wreck are the press's own sounds
+            // (they were the mower's dock hum and death, i.e. another machine).
+            BossCue::NightTurn => Sfx::NightTurn,
+            BossCue::NightWreck => Sfx::NightWreck,
             BossCue::MagpieCry => Sfx::MagpieCry,
             BossCue::MagpieRuffle => Sfx::MagpieRattle,
             BossCue::MagpieWindup => Sfx::MagpieWindup,
             BossCue::MagpieStuck => Sfx::MagpieStuck,
             BossCue::MagpieTakeoff => Sfx::MagpieTakeoff,
-            BossCue::MagpieGustGather => Sfx::MagpieGust,
+            // The gather is a breath in, the gust is the wing-beat out: two
+            // effects, not one.
+            BossCue::MagpieGustGather => Sfx::MagpieGustGather,
             BossCue::MagpieGust => Sfx::MagpieGust,
             BossCue::MagpieCrate => Sfx::MagpieCrate,
             BossCue::MagpieDeath => Sfx::MagpieDeath,
@@ -2521,7 +2543,6 @@ pub fn boss_spawn_system(
 pub fn boss_damage_system(
     tick: Res<TickInput>,
     level: Res<Level>,
-    _player: Res<Player>,
     mut fight: ResMut<BossFight>,
     mut bosses: Query<&mut Boss>,
     mut bullets: Query<(Entity, &SpawnId, &mut Bullet)>,

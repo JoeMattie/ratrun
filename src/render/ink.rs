@@ -293,6 +293,22 @@ fn draw_hostile(pb: &mut PixelBuffer, v: &mut InkView, unit: f32) {
         }
     }
 
+    // 5b. Boss **floor telegraphs**: the same outline the world pass just drew,
+    //     re-stamped with a minimum screen thickness so the crisp resampler
+    //     cannot thin a 1 px rim to nothing. Only reached when `zoomed_out`, so
+    //     nothing is doubled at 1x (see `render::hazard_outline`).
+    {
+        let mut q = v.ecs.query::<&crate::game::ecs::systems::boss::Boss>();
+        for boss in q.iter(&*v.ecs) {
+            if boss.dead || boss.hazards.is_empty() {
+                continue;
+            }
+            crate::render::hazard_outline::draw_ink(
+                pb, boss, v.cam, v.scale, unit, v.elapsed,
+            );
+        }
+    }
+
     // 6. Infection pips: a Hantavirus host's countdown.
     {
         let mut q = v.ecs.query::<(&Enemy, &Infection)>();
