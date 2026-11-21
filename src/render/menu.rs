@@ -476,9 +476,9 @@ pub fn draw_title(
             &[
                 (
                     if wide {
-                        "↑↓ select · ←→/wheel map · Enter confirm or click · "
+                        "↑↓ select · ←→/wheel sector · Enter confirm or click · "
                     } else {
-                        "↑↓ select · ←→ map · Enter/click · "
+                        "↑↓ select · ←→ sector · Enter/click · "
                     },
                     None,
                 ),
@@ -556,10 +556,12 @@ pub fn draw_levelup(
         }
         let text_rect = draw_card_icon(f.buffer_mut(), inner, icon);
         f.render_widget(
-            Paragraph::new(vec![
-                Line::styled(desc.as_str(), ink(COAT)),
-                Line::styled(flavor.as_str(), ink(MUTED).add_modifier(Modifier::ITALIC)),
-            ]),
+            Paragraph::new(levelup_card_lines(
+                desc.as_str(),
+                flavor.as_str(),
+                text_rect.width,
+                text_rect.height,
+            )),
             text_rect,
         );
     }
@@ -572,6 +574,45 @@ pub fn draw_levelup(
             MUTED,
         ),
     );
+}
+
+/// Format `(desc, flavor)` for a level-up card's `text_rect` without mid-word clipping:
+/// on 3-row cards (`80×24+`), the `" · "` evolution partner note sits cleanly on row 3;
+/// on 2-row compact cards (`57×20`), a partner note wider than `width` is omitted so
+/// no half-word fragment (`" · Milk Tee"`) dangles off the right edge.
+fn levelup_card_lines<'a>(
+    desc: &'a str,
+    flavor: &'a str,
+    width: u16,
+    height: u16,
+) -> Vec<Line<'a>> {
+    if let Some((main, partner)) = desc.split_once(" · ") {
+        if height >= 3 {
+            let p_col = if partner.contains("READY") {
+                TRAIL_GOLD
+            } else {
+                MUTED
+            };
+            return vec![
+                Line::styled(main, ink(COAT)),
+                Line::styled(flavor, ink(MUTED).add_modifier(Modifier::ITALIC)),
+                Line::styled(partner, ink(p_col)),
+            ];
+        }
+        let top = if desc.chars().count() <= usize::from(width) {
+            desc
+        } else {
+            main
+        };
+        return vec![
+            Line::styled(top, ink(COAT)),
+            Line::styled(flavor, ink(MUTED).add_modifier(Modifier::ITALIC)),
+        ];
+    }
+    vec![
+        Line::styled(desc, ink(COAT)),
+        Line::styled(flavor, ink(MUTED).add_modifier(Modifier::ITALIC)),
+    ]
 }
 
 /// Blit a large (`8×4` cells) or small (`4×2` cells) icon on the left side of a
@@ -1180,7 +1221,7 @@ pub fn draw_chest(
         }
         ChestReward::WeaponLevel { kind, level } => {
             let title = format!("{} reached Lv {level}", kind.name());
-            let note = "The lock fits your teeth.";
+            let note = "Filed under spare parts.";
             let icon = art_icons::weapon(kind);
             if tall {
                 center(
@@ -1329,7 +1370,7 @@ pub fn draw_end(
     let (status, accent) = if won && practice {
         ("SECTOR CLEARED", Color::Rgb(169, 210, 186))
     } else if won {
-        ("YOU SURVIVED!", Color::Rgb(169, 210, 186))
+        ("YOU SURVIVED", Color::Rgb(169, 210, 186))
     } else {
         ("YOU DIED", TAIL)
     };
@@ -1599,10 +1640,12 @@ pub fn draw_levelup_with_loadout(
 
         let text_rect = draw_card_icon(f.buffer_mut(), inner, icon);
         f.render_widget(
-            Paragraph::new(vec![
-                Line::styled(desc.as_str(), ink(COAT)),
-                Line::styled(flavor.as_str(), ink(MUTED).add_modifier(Modifier::ITALIC)),
-            ]),
+            Paragraph::new(levelup_card_lines(
+                desc.as_str(),
+                flavor.as_str(),
+                text_rect.width,
+                text_rect.height,
+            )),
             text_rect,
         );
     }
@@ -1800,7 +1843,7 @@ pub fn draw_pause_with_run(
                 } else if w.kind.is_active() {
                     // Name the key as well as the state: the review found the
                     // pause plate omitting the active-weapon trigger entirely.
-                    let tag = if w.timer <= 0.0 { "SPACE READY" } else { "LOCKED" };
+                    let tag = if w.timer <= 0.0 { "SPACE READY" } else { "CHARGING" };
                     buf.set_stringn(
                         px_end + 1,
                         y + 1,
@@ -2098,7 +2141,7 @@ pub fn draw_end_summary(
     let (status, accent) = if summary.won && summary.practice {
         ("SECTOR CLEARED", Color::Rgb(169, 210, 186))
     } else if summary.won {
-        ("YOU SURVIVED!", Color::Rgb(169, 210, 186))
+        ("YOU SURVIVED", Color::Rgb(169, 210, 186))
     } else {
         ("YOU DIED", TAIL)
     };
@@ -2271,7 +2314,7 @@ pub fn draw_end_summary(
             if i > 0 {
                 wspans.push(label("  ", MUTED));
             }
-            let short: String = kind.name().chars().take(4).collect();
+            let short = crate::render::hud::weapon_tag(kind, false);
             let is_max = lvl >= kind.max_level();
             wspans.push(Span::styled(
                 format!("{}{short}", weapon_glyph(kind)),
@@ -2489,13 +2532,13 @@ mod tests {
         })
         .unwrap();
         let bt = screen_text(&big);
-        assert!(bt.contains("YOU SURVIVED!"));
+        assert!(bt.contains("YOU SURVIVED"));
         assert!(bt.contains("SECTOR 3/3"), "the header names the sector reached");
         assert!(bt.contains("APEX NEUTRALIZED"));
         assert!(bt.contains("SCORE BREAKDOWN"));
         assert!(bt.contains("COMBAT METRICS"));
         assert!(bt.contains("NEW HIGH SCORE"));
-        assert!(bt.contains("▸Gnaw★"));
+        assert!(bt.contains("▸GN★"));
 
         // A practice clear is labelled, and its status line says so.
         let mut practice = summary.clone();

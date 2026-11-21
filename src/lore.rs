@@ -30,38 +30,36 @@ pub const INTRO: &[&str] = &[
 pub fn map_intro(theme: Theme) -> (&'static str, &'static str) {
     match theme {
         Theme::Sewer => (
-            "LEVEL 1 — THE SEWERS",
+            "SECTOR 01 — THE SEWERS",
             "Cold pipes and colder things. The drainage threads under the whole \
              facility. Follow the current up and out.",
         ),
         Theme::Kitchen => (
-            "LEVEL 2 — THE KITCHENS",
+            "SECTOR 02 — THE KITCHENS",
             "Grease, snap-traps, and the stink of bait. Everything here wants \
              you fed — to something with a bigger mouth. Nobody agrees who \
              keeps this kitchen: the caretaker with the broom, or the thing in \
              the cold room that was the first of us.",
         ),
         Theme::Lab => (
-            "LEVEL 3 — THE LAB",
+            "SECTOR 03 — THE LAB",
             "Where you were made. The lights hum a number that used to be your \
              name. End it here. Walk out the front door.",
         ),
         Theme::Laundry => (
-            "LEVEL 2 — THE LAUNDRY",
+            "SECTOR 02B — THE LAUNDRY",
             "Indigo tile, steam between the machines, and a hundred doors that \
              will not open. The whites come out pink down here.",
         ),
         Theme::Printworks => (
-            "LEVEL 3 — THE PRINTWORKS",
+            "SECTOR 03B — THE PRINTWORKS",
             "Ink in the seams of your paws and the presses still running \
              overnight. Tomorrow's front page says you were caught.",
         ),
         Theme::Trailer => (
-            "THE GETAWAY — FLATBED",
-            "Forty feet of oak deck and a hundred klicks of night, and the road \
-             roaring underneath your paws. The cab is forward. So is the magpie: \
-             it has been riding the slipstream over the cab since the last weigh \
-             station, and it has already decided the cab is its nest.",
+            "THE GETAWAY — THE FLATBED",
+            "Forty feet of wet deck doing eighty into the dark. The cab is \
+             forward. So is the magpie, and it thinks the rig is its nest.",
         ),
     }
 }
@@ -74,27 +72,24 @@ pub fn victory(theme: Theme) -> &'static str {
              You climb toward it, whiskers first."
         }
         Theme::Kitchen => {
-            "The pilot lights gutter out one by one. A back door, propped on a \
-             mop handle, opens onto a sliver of night. You take it."
+            "The pilot lights gutter out one by one. A back door propped on a \
+             mop handle opens onto the night air."
         }
         Theme::Lab => {
             "Every alarm flatlines at once. The blast door you were born behind \
-             finally swings outward — and you are already gone."
+             swings outward — and you are already gone."
         }
         Theme::Laundry => {
-            "For the first time in thirty years, the laundry stops. The drum \
-             ticks as it cools, and the service stair beyond it is unlatched."
+            "After thirty years, the laundry stops. The iron drum ticks as it \
+             cools; the service stair stands unlatched."
         }
         Theme::Printworks => {
-            "Correction: subject still at large. The last edition rolls off the \
-             belt, curls under the street door, and you are out with it."
+            "Correction: subject still at large. The final edition curls under \
+             the street door, and you are out with it."
         }
         Theme::Trailer => {
-            "The magpie's last shriek is carried off down the deck with a \
-             hundredweight of road noise. The cab's brake lines pop and the rig \
-             starts to drift. You leave it on the hard shoulder, drop off the \
-             tailgate, and the asphalt is still warm. The facility is behind you \
-             — all of it, at last."
+            "The magpie drops astern in the road roar. At the next shoulder \
+             you hop the tailgate onto warm, open asphalt."
         }
     }
 }

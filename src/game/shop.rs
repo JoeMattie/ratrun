@@ -198,12 +198,12 @@ impl SpliceKind {
         match self {
             SpliceKind::GlassIncisors => "-18% max HP",
             SpliceKind::BoilerHeart => "-10% move speed",
-            SpliceKind::HollowBones => "+3 incoming damage before armor",
+            SpliceKind::HollowBones => "+3 hit damage before armor",
             SpliceKind::DoubleLid => "-12% fire rate",
             SpliceKind::HoardGland => "-10% weapon damage",
             SpliceKind::CopperNerves => "-25% pickup radius",
-            SpliceKind::NightShift => "halve passive HP/s",
-            SpliceKind::BlackboardBelly => "-25% healing from items and shop",
+            SpliceKind::NightShift => "-50% passive HP/s regen",
+            SpliceKind::BlackboardBelly => "-25% item and shop healing",
             SpliceKind::BallastSac => "+15% dash cooldown",
             SpliceKind::LongFingers => "-10% max HP",
         }
@@ -666,14 +666,14 @@ impl Deny {
     pub fn reason(self) -> &'static str {
         match self {
             Deny::Gold => "not enough gold",
-            Deny::Sockets => "both sockets full",
+            Deny::Sockets => "max 2 splices",
             Deny::Owned => "already spliced in",
             Deny::Sold => "sold",
             Deny::Stitched => "already stitched",
             Deny::FullHp => "at full health",
             Deny::NoTurns => "shelf turned twice",
             Deny::Molted => "already molted",
-            Deny::NoChoice => "no eligible kind",
+            Deny::NoChoice => "nothing to swap",
             Deny::Closed => "the shop is closed",
         }
     }

@@ -67,8 +67,8 @@ fn env_volume(name: &str) -> Option<u8> {
 }
 
 /// The level-intro label for a single-sector practice run.
-const PRACTICE_BLURB: &str = "PRACTICE RUN — this sector alone, on the default loadout. \
-     Clearing it opens the next sector, but it is not a campaign win.";
+const PRACTICE_BLURB: &str = "PRACTICE RUN — single sector, starting with Gnaw Lv1. \
+     Clearing it unlocks the next sector without advancing the campaign.";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
@@ -2970,20 +2970,20 @@ fn entries_for(items: &[Keepable]) -> Vec<campaign_ui::UpgradeEntry<'static>> {
 }
 
 /// The expanded map's own legend rail comes from `render/minimap.rs`; this adds
-/// the one promise that rail does not state: opening the map does not pause the
-/// run. Drawn on the first free row under the modal, and skipped when the
-/// terminal has no room for it.
+/// the one rule that rail does not state: opening the map pauses the world.
+/// Drawn on the first free row under the modal, and skipped when the terminal
+/// has no room for it.
 fn draw_map_legend(frame: &mut Frame, game: Rect, panel: Rect) {
     let y = panel.bottom();
     if y >= game.bottom() || game.height == 0 {
         return;
     }
     let text = if game.width >= 72 {
-        " TAB/Esc close · N radar size · click the map · the run keeps running "
+        " Tab/Esc close · N minimap size · click to close · game paused "
     } else if game.width >= 60 {
-        " TAB/Esc close · N size · click map · the run keeps running "
+        " Tab/Esc close · N size · click to close · game paused "
     } else {
-        " TAB/Esc close · N size · run continues "
+        " Tab/Esc close · N size · game paused "
     };
     let width = text.chars().count() as u16;
     if width >= game.width {
@@ -3669,8 +3669,8 @@ mod tests {
             assert!(text.contains("GENE SPLICE SHELF"), "{w}x{hgt}: no title");
             assert!(text.contains("GOLD 200"), "{w}x{hgt}: no purse");
             assert!(
-                text.contains("SPLICE SOCKETS 0/2"),
-                "{w}x{hgt}: no sockets"
+                text.contains("SPLICES 0/2"),
+                "{w}x{hgt}: no splices counter"
             );
             // Both sides of the first bargain are shown before payment.
             let first = shelf(&h, 0);
@@ -3693,7 +3693,7 @@ mod tests {
             let w0 = h.app.world.as_ref().unwrap();
             assert_eq!(w0.gold, 200 - bought.price(), "{w}x{hgt}: paid the price");
             assert!(w0.player.loadout.splices.contains(&bought));
-            assert!(h.screen_text().contains("SPLICE SOCKETS 1/2"));
+            assert!(h.screen_text().contains("SPLICES 1/2"));
 
             // The second socket, then the third purchase is refused with the
             // shelf's own reason (and the purse does not move).
@@ -3711,7 +3711,7 @@ mod tests {
                 "{w}x{hgt}: nothing is charged for a refused row"
             );
             assert!(
-                h.screen_text().contains("both sockets full")
+                h.screen_text().contains("max 2 splices")
                     || h.screen_text().contains("sold"),
                 "{w}x{hgt}: the refusal has a reason"
             );
@@ -6447,12 +6447,12 @@ mod tests {
             "the expanded map is not bigger than the compact one"
         );
         // The art's modal carries its own legend rail (and a `[TAB] CLOSE`
-        // hint); the promise that the run keeps going is one line under it.
+        // hint); the pause notice sits one line under it.
         assert!(hh.map_text().contains("CLOSE"), "no art close hint");
         let screen = hh.screen_text();
         assert!(
-            screen.contains("the run keeps running"),
-            "the expanded map does not say the run keeps running"
+            screen.contains("game paused"),
+            "the expanded map does not say game paused"
         );
 
         hh.frame(&[KeyCode::Tab]);

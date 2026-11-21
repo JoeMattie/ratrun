@@ -1249,7 +1249,7 @@ pub fn draw_level_complete(
         let stat_items: [(&str, &str, Color); 4] = [
             ("TIME", tbuf.as_str(), COAT),
             ("KILLS", kills_b.as_str(), COAT),
-            ("SCORE SO FAR", score_b.as_str(), TRAIL_GOLD),
+            ("RUN SCORE", score_b.as_str(), TRAIL_GOLD),
             ("GOLD", gold_b.as_str(), TRAIL_GOLD),
         ];
         for (i, (lbl, val, vcol)) in stat_items.iter().enumerate() {
@@ -1267,13 +1267,13 @@ pub fn draw_level_complete(
             if inner.width >= 60 {
                 let _ = write!(
                     sub,
-                    "Stage score +{}   ·   Subject Lv {}   ·   {} upgrades owned",
+                    "Sector score +{}   ·   Subject Lv {}   ·   {} upgrades owned",
                     view.level_score, view.player_level, view.owned_upgrades
                 );
             } else {
                 let _ = write!(
                     sub,
-                    "Stage +{}  ·  Lv {}  ·  {} upgrades",
+                    "Sector +{}  ·  Lv {}  ·  {} upgrades",
                     view.level_score, view.player_level, view.owned_upgrades
                 );
             }
@@ -2271,7 +2271,7 @@ pub fn draw_keep_three(
             );
         }
         // The key hint rides the bottom border, where nothing else is drawn.
-        let hint = "TAB route";
+        let hint = "Tab route";
         let hw = hint.chars().count() as u16;
         let hx = layout.panel_rect.right().saturating_sub(hw + 2);
         put_str(
@@ -2894,7 +2894,16 @@ pub fn draw_campaign_victory(
             }
             let mut tok = StackBuf::<16>::new();
             let _ = tok.write_char(it.glyph);
+            let mut prefix = ['\0'; 5];
+            let mut n = 0usize;
             for ch in it.name.chars().take(5) {
+                prefix[n] = ch;
+                n += 1;
+            }
+            while n > 0 && prefix[n - 1] == ' ' {
+                n -= 1;
+            }
+            for &ch in &prefix[..n] {
                 let _ = tok.write_char(ch);
             }
             match it.category {
