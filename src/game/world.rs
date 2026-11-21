@@ -233,6 +233,18 @@ impl World {
         )
     }
 
+    /// Level 0 on racks of `caps` slots (the profile's persistent slot upgrades,
+    /// 4 to 8 each side). Every other knob is [`World::new`]'s.
+    pub fn new_with_caps(theme: Theme, seed: u64, caps: loadout::SlotCaps) -> World {
+        World::new_level_with_theme(
+            0,
+            theme,
+            seed,
+            Loadout::with_caps(Loadout::START_WEAPON, caps),
+            CampaignTotals::default(),
+        )
+    }
+
     /// Start campaign level `level_index` from `seed`, carrying `carried` in.
     ///
     /// The theme comes from the level index (0 Sewer, 1 Kitchen, 2 Lab) and the

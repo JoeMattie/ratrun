@@ -11,7 +11,7 @@ use crate::audio::{self, AudioEngine, Sfx};
 use crate::game::campaign::{self, CampaignState, KeepKind, Keepable};
 use crate::game::gem::PickupKind;
 use crate::game::level::Theme;
-use crate::game::loadout::{ChestReward, Loadout, PassiveKind, Upgrade};
+use crate::game::loadout::{ChestReward, Loadout, PassiveKind, SlotCaps, Upgrade};
 use crate::game::shop;
 use crate::game::world::World;
 use crate::input::{DashKey, InputState};
@@ -174,6 +174,9 @@ pub struct App {
     keep_items: Vec<Keepable>,
     keep_entries: Vec<campaign_ui::UpgradeEntry<'static>>,
     keep_selected: Vec<bool>,
+    /// The gene splices in the rat when the manifest opened (they ride along
+    /// whatever the pack choice is; the screen accounts for them).
+    keep_splices: Vec<&'static str>,
     keep_cursor: usize,
     keep_scroll: usize,
     /// How many manifest rows the last rendered frame could show (the art's
@@ -270,6 +273,12 @@ pub struct App {
     lighting: LightingMode,
     /// Optional `RATRUN_LIGHTING` environment override (resolved once at startup).
     lighting_env: Option<LightingMode>,
+    /// Rack caps the next run starts with (the profile's persistent slot
+    /// upgrades, `loadout::MIN_SLOTS..=MAX_SLOTS`; a fresh profile is 4 + 4).
+    /// The persistent upgrade shop sets it through [`App::set_slot_caps`]; the
+    /// campaign carries it between levels. Tests use it to play on 6 + 6 or
+    /// 8 + 8 racks.
+    pub slot_caps: SlotCaps,
 }
 
 impl App {
@@ -313,6 +322,7 @@ impl App {
             keep_items: Vec::new(),
             keep_entries: Vec::new(),
             keep_selected: Vec::new(),
+            keep_splices: Vec::new(),
             keep_cursor: 0,
             keep_scroll: 0,
             keep_visible_rows: 8,
@@ -367,6 +377,7 @@ impl App {
             cursor_env: cursor::env_override(),
             lighting,
             lighting_env,
+            slot_caps: SlotCaps::DEFAULT,
         };
         app.push_volumes();
         app.menu_music();
@@ -563,14 +574,22 @@ impl App {
         self.start_campaign(true);
     }
 
+    /// Set the rack caps the next run starts with (the persistent slot
+    /// upgrades bought between runs). Ownership already on a carried loadout is
+    /// never dropped by a lower cap; see [`Loadout::set_caps`].
+    pub fn set_slot_caps(&mut self, caps: SlotCaps) {
+        self.slot_caps = SlotCaps::new(caps.weapons, caps.passives);
+    }
+
     fn start_campaign(&mut self, via_story: bool) {
         let seed = self.seed();
-        self.campaign = Some(CampaignState::new(seed));
+        self.campaign = Some(CampaignState::with_caps(seed, self.slot_caps));
         self.practice = None;
         self.records = [LevelRecord::default(); campaign::LEVEL_COUNT];
         self.keep_items.clear();
         self.keep_entries.clear();
         self.keep_selected.clear();
+        self.keep_splices.clear();
         self.victory_loadout.clear();
         let Some(world) = self.campaign.as_ref().map(|c| c.world()) else {
             return;
@@ -597,6 +616,7 @@ impl App {
         self.keep_items.clear();
         self.keep_entries.clear();
         self.keep_selected.clear();
+        self.keep_splices.clear();
         self.victory_loadout.clear();
         // The theme is the floor the player picked, not the stage's original
         // one: `new_level` derives the theme from the level index, so a side
@@ -605,7 +625,7 @@ impl App {
             level,
             theme,
             seed,
-            Loadout::starting(),
+            Loadout::with_caps(Loadout::START_WEAPON, self.slot_caps),
             campaign::CampaignTotals::default(),
         );
         // No carried build: play this sector's map and boss on the first
@@ -650,12 +670,13 @@ impl App {
         self.keep_items.clear();
         self.keep_entries.clear();
         self.keep_selected.clear();
+        self.keep_splices.clear();
         self.victory_loadout.clear();
         let world = World::new_level_with_theme(
             sector,
             campaign::getaway_theme(),
             seed,
-            Loadout::starting(),
+            Loadout::with_caps(Loadout::START_WEAPON, self.slot_caps),
             campaign::CampaignTotals::default(),
         );
         self.enter_world(world, false);
@@ -1878,6 +1899,16 @@ impl App {
             return;
         }
         self.keep_entries = entries_for(&items);
+        self.keep_splices = match self.world.as_ref() {
+            Some(w) => w
+                .player
+                .loadout
+                .splices
+                .iter()
+                .map(|kind| kind.name())
+                .collect(),
+            None => Vec::new(),
+        };
         self.keep_items = items;
         self.keep_selected = vec![false; self.keep_items.len()];
         self.keep_cursor = 0;
@@ -1936,6 +1967,7 @@ impl App {
             scroll: self.keep_scroll,
             hovered: None,
             route: self.keep_route_chips(),
+            splices: &self.keep_splices,
         };
         (
             campaign_ui::keep_three_selected_count(&view),
@@ -2470,8 +2502,11 @@ impl App {
             }
             Screen::Chest => {
                 self.draw_game(frame, area);
-                if let Some(reward) = self.chest_reward {
-                    menu::draw_chest(frame, area, reward, &mut self.hits);
+                if let Some((reward, loadout)) = self
+                    .chest_reward
+                    .zip(self.world.as_ref().map(|w| &w.player.loadout))
+                {
+                    menu::draw_chest(frame, area, reward, loadout, &mut self.hits);
                 }
             }
             Screen::Shop => {
@@ -2669,6 +2704,7 @@ impl App {
                     _ => None,
                 },
                 route: self.keep_route_chips(),
+                splices: &self.keep_splices,
             };
             campaign_ui::draw_keep_three(frame, area, &view)
         };
@@ -5492,6 +5528,189 @@ mod tests {
         assert_eq!(summary.final_score, h.app.last_score);
         assert!(end_text.contains("SCORE BREAKDOWN"));
         assert!(end_text.contains("COMBAT METRICS"));
+    }
+
+    /// Gated behind `RATRUN_SLOTS_DIR`: the **8 + 8** capture set — play, pause,
+    /// level-up, keep-three and the shop's Molt with a full sixteen-slot rack,
+    /// at the three sizes the review uses. Decode with the scratchpad's
+    /// `view.py`:
+    ///
+    /// ```sh
+    /// RATRUN_SLOTS_DIR=/tmp/slots8 cargo test capture_slots8_frames -- --nocapture
+    /// ```
+    ///
+    /// The rack caps are set to `SlotCaps::FULL` here; a fresh profile plays
+    /// 4 + 4 and the same screens are covered by `capture_ux_frames`.
+    #[test]
+    fn capture_slots8_frames() {
+        use crate::game::loadout::{SlotCaps, Upgrade};
+        use crate::game::weapon::{Weapon, WeaponKind};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use std::fmt::Write as _;
+
+        /// Serialise one terminal frame as ANSI + plain text (`view.py` reads
+        /// the ANSI). A free fn, so it never holds a borrow of the harness.
+        fn dump_term(
+            terminal: &Terminal<TestBackend>,
+            w: u16,
+            h: u16,
+            dir: &std::path::Path,
+            tag: &str,
+        ) {
+            let buf = terminal.backend().buffer();
+            let mut out = String::new();
+            let mut plain = String::new();
+            for y in 0..h {
+                for x in 0..w {
+                    let c = &buf[(x, y)];
+                    let (r, g, b) = color_rgb(c.fg);
+                    let (br, bg, bb) = color_rgb(c.bg);
+                    let _ = write!(
+                        out,
+                        "\x1b[38;2;{r};{g};{b};48;2;{br};{bg};{bb}m{}",
+                        c.symbol()
+                    );
+                    plain.push_str(c.symbol());
+                }
+                out.push_str("\x1b[0m\n");
+                plain.push('\n');
+            }
+            std::fs::write(dir.join(format!("{w}x{h}-{tag}.ansi")), out).unwrap();
+            std::fs::write(dir.join(format!("{w}x{h}-{tag}.txt")), plain).unwrap();
+        }
+
+        let Some(dir) = std::env::var_os("RATRUN_SLOTS_DIR") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let mut hh = Harness::new(w, h);
+            hh.enter_playing();
+            {
+                let world = hh.app.world.as_mut().unwrap();
+                world.player.loadout.set_caps(SlotCaps::FULL);
+                world.player.loadout.weapons.clear();
+                world.player.loadout.passives.clear();
+                let kinds = [
+                    WeaponKind::TailWhip,
+                    WeaponKind::TailThrash,
+                    WeaponKind::AcidRain,
+                    WeaponKind::Gnaw,
+                    WeaponKind::LaserEyes,
+                    WeaponKind::CheeseSpray,
+                    WeaponKind::Hantavirus,
+                    WeaponKind::SonicSqueak,
+                ];
+                for (i, kind) in kinds.iter().enumerate() {
+                    let mut weapon = Weapon::new(*kind);
+                    weapon.level = match i {
+                        0 | 3 | 5 => kind.max_level(),
+                        1 => 4,
+                        _ => 2,
+                    };
+                    weapon.evolved = i == 0 || i == 3 || i == 5;
+                    if kind.is_active() && i % 2 == 1 {
+                        weapon.timer = 0.0; // charged and waiting
+                    }
+                    world.player.loadout.weapons.push(weapon);
+                }
+                for pk in crate::game::loadout::PassiveKind::all().into_iter().take(8) {
+                    world.player.loadout.apply(&Upgrade::Passive(pk));
+                    world.player.loadout.apply(&Upgrade::Passive(pk));
+                }
+                world.player.buffs.shield = 12.0;
+                world.player.buffs.socks = 6.0;
+                world.player.buffs.decoy = 4.0;
+                world.player.buffs.slow_bullets = 3.0;
+                world.gold = 47;
+                world.score = 3420;
+                world.kills = 248;
+                world.player.level = 9;
+                world.elapsed = 65.0;
+                world.player.hp = 84.0;
+                world.player.dash_cd = 0.9;
+                world.player.xp = world.player.xp_to_next / 2;
+            }
+            for _ in 0..4 {
+                hh.frame(&[]);
+            }
+            hh.app.screen = Screen::Playing;
+            hh.app.hud.zoom_flash = None;
+            hh.frame(&[]);
+            dump_term(&hh.terminal, w, h, &dir, "full8-play");
+
+            // The pause plate: the icon dossier, or the compact rack plate at
+            // 57×20.
+            hh.app.screen = Screen::Paused;
+            hh.frame(&[]);
+            dump_term(&hh.terminal, w, h, &dir, "full8-pause");
+
+            // The level-up cards and their ARSENAL strip.
+            {
+                let (choices, desc) = {
+                    let world = hh.app.world.as_ref().unwrap();
+                    let choices = vec![
+                        Upgrade::LevelWeapon(1),
+                        Upgrade::Passive(crate::game::loadout::PassiveKind::Armor),
+                        Upgrade::Purse,
+                    ];
+                    let desc: Vec<(String, String, String)> = choices
+                        .iter()
+                        .map(|u| world.player.loadout.describe(u))
+                        .collect();
+                    (choices, desc)
+                };
+                hh.app.levelup_desc = desc;
+                hh.app.levelup_choices = choices;
+                hh.app.levelup_idx = 0;
+            }
+            hh.app.screen = Screen::LevelUp;
+            hh.frame(&[]);
+            dump_term(&hh.terminal, w, h, &dir, "full8-levelup");
+
+            // Keep-three: the sixteen-entry manifest plus the splices that ride
+            // along.
+            {
+                let (items, entries, splices) = {
+                    let world = hh.app.world.as_ref().unwrap();
+                    let items = world.keepables();
+                    let entries = super::entries_for(&items);
+                    let splices: Vec<&'static str> = world
+                        .player
+                        .loadout
+                        .splices
+                        .iter()
+                        .map(|kind| kind.name())
+                        .collect();
+                    (items, entries, splices)
+                };
+                hh.app.keep_selected = vec![false; entries.len()];
+                hh.app.keep_entries = entries;
+                hh.app.keep_items = items;
+                hh.app.keep_splices = splices;
+                hh.app.keep_cursor = 0;
+                hh.app.keep_scroll = 0;
+                hh.app.keep_route = None;
+            }
+            hh.app.screen = Screen::KeepThree;
+            hh.frame(&[]);
+            dump_term(&hh.terminal, w, h, &dir, "full8-keep");
+
+            // The shop's Molt list over a sixteen-kind rack.
+            {
+                let world = hh.app.world.as_mut().unwrap();
+                world.gold = 200;
+                world.open_shop(0);
+            }
+            hh.app.shop_row = 5;
+            hh.app.shop_molt = Some(shop_ui::MoltUi::Forfeit { cursor: 7 });
+            hh.app.screen = Screen::Shop;
+            hh.frame(&[]);
+            dump_term(&hh.terminal, w, h, &dir, "full8-molt");
+        }
     }
 
     /// Gated behind `RATRUN_UX_DIR`: the wave-3 readability capture set.

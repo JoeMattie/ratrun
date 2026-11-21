@@ -18,7 +18,7 @@ use crate::lore;
 use crate::render::campaign::{
     campaign_pips_width, draw_campaign_pips, CampaignLevel, CampaignProgressView,
 };
-use crate::render::hud::{weapon_glyph, HEAL_MINT, TRAIL_GOLD, WARN_AMBER};
+use crate::render::hud::{weapon_glyph, weapon_tag, HEAL_MINT, TRAIL_GOLD, WARN_AMBER};
 use crate::render::palette::{self, mix, to_color, COAT, EDGE, MUTED, PLATE, TAIL, TRACK};
 use crate::scores::ScoreTable;
 
@@ -789,11 +789,17 @@ pub fn draw_pause_compact(
     hits: &mut HitMap,
 ) {
     let w = area.width.saturating_sub(2).min(56);
-    // Rows: banner, clock, rule, then two icon rows for the weapons and two for
-    // the passives, two legend lines and the controls row — 11 inner rows.
-    let h = area.height.saturating_sub(2).min(13);
+    // Rows: banner, clock, rule, a weapon icon pair + its tag row, a passive
+    // icon pair + its tag row, one spare row, two legend lines and the controls
+    // row — 13 inner rows.
+    //
+    // The tag rows are what makes the short plate the reference for **names**: a
+    // full 8 + 8 rack cannot carry a name beside every icon here, so each band
+    // is followed by one compact line (`GN2 CSP1 ASP3 …` / `HP3 DMG2 …`) naming
+    // every kind in the rack, rank and stack included.
+    let h = area.height.saturating_sub(2).min(15);
     let r = panel(f, centered_rect(w, h, area), " RUN CONTROL ", MUTED);
-    if r.height < 8 || r.width < 30 {
+    if r.height < 9 || r.width < 30 {
         draw_pause(f, area, dash_key, hits);
         return;
     }
@@ -809,55 +815,136 @@ pub fn draw_pause_compact(
     let rule = "─".repeat(usize::from(r.width));
     f.render_widget(Line::styled(rule.as_str(), ink(TRACK)), band(r, 2, 1));
 
-    // Two icon rows: weapons on the first pair, passives on the second. The
-    // icon is 4×2 cells, so a slot is icon + one rank/stack cell.
+    // The two racks: an icon band plus its tag row. The icon is 4×2 cells, so a
+    // slot is icon + one rank/stack cell; an empty bay up to the loadout's caps
+    // keeps its footprint as a dim dot, and a `+N` marker stands for anything
+    // the width cannot show (nothing is silently cut).
     let icon_w = crate::game::art_icons::SMALL_CELL_W;
     let icon_h = crate::game::art_icons::SMALL_CELL_H;
     let pitch = icon_w + 1;
+    let loadout = &world.player.loadout;
     let buf = f.buffer_mut();
-    let mut x = r.x;
-    for w in world.player.loadout.weapons.iter().take(5) {
-        if x + icon_w + 1 > r.right() {
-            break;
+    let fits = usize::from(r.width / pitch).max(1);
+    let slots_w = loadout.weapons.len().max(loadout.max_weapons());
+    let slots_p = loadout.passives.len().max(loadout.max_passives());
+    let marker_w: u16 = if slots_w + slots_p > fits { 2 } else { 0 };
+    let room = usize::from(r.width.saturating_sub(marker_w)) / pitch as usize;
+    let show_w = slots_w.min(room);
+    let show_p = slots_p.min(room.saturating_sub(show_w));
+
+    let weapon_y = r.y + 3;
+    let weapon_tag_y = weapon_y + icon_h;
+    let passive_y = weapon_tag_y + 1;
+    let passive_tag_y = passive_y + icon_h;
+    let x = r.x;
+    if passive_tag_y < r.bottom().saturating_sub(2) {
+        for i in 0..show_w {
+            let icon_x = x + i as u16 * pitch;
+            match loadout.weapons.get(i) {
+                Some(w) => {
+                    let icon = crate::game::art_icons::weapon(w.kind);
+                    let rect = Rect::new(icon_x, weapon_y, icon_w, icon_h);
+                    if w.evolved {
+                        crate::game::art_icons::draw_evolved(buf, rect, icon);
+                    } else {
+                        crate::game::art_icons::draw(buf, rect, icon);
+                    }
+                    let (rank, style) = if w.evolved {
+                        ('◆', heavy(TRAIL_GOLD))
+                    } else if w.is_max() {
+                        ('★', heavy(TRAIL_GOLD))
+                    } else {
+                        (char::from(b'0' + w.level.min(9)), ink(MUTED))
+                    };
+                    let mut tbuf = [0u8; 4];
+                    buf.set_stringn(
+                        icon_x + icon_w,
+                        weapon_y + icon_h - 1,
+                        rank.encode_utf8(&mut tbuf),
+                        1,
+                        style,
+                    );
+                    let tag = crate::render::hud::weapon_tag(w.kind, w.evolved);
+                    let head: String = tag.chars().take(2).collect();
+                    let line = format!(
+                        "{}{}",
+                        head,
+                        if w.is_max() {
+                            "*".to_string()
+                        } else {
+                            w.level.min(9).to_string()
+                        }
+                    );
+                    buf.set_stringn(
+                        icon_x,
+                        weapon_tag_y,
+                        &line,
+                        pitch as usize,
+                        if w.is_max() || w.evolved {
+                            heavy(TRAIL_GOLD)
+                        } else {
+                            ink(to_color(w.kind.color()))
+                        },
+                    );
+                }
+                None => {
+                    // An unlocked bay nobody has filled yet.
+                    buf.set_stringn(icon_x + 1, weapon_y + icon_h - 1, "··", 2, ink(TRACK));
+                    buf.set_stringn(icon_x, weapon_tag_y, "··", pitch as usize, ink(TRACK));
+                }
+            }
         }
-        let icon = crate::game::art_icons::weapon(w.kind);
-        crate::game::art_icons::draw(buf, Rect::new(x, r.y + 4, icon_w, icon_h), icon);
-        let (rank, style) = if w.evolved {
-            ('◆', heavy(TRAIL_GOLD))
-        } else if w.is_max() {
-            ('★', heavy(TRAIL_GOLD))
-        } else {
-            let digit = char::from(b'0' + w.level.min(9));
-            (digit, ink(MUTED))
-        };
-        let mut tbuf = [0u8; 4];
-        buf.set_stringn(
-            x + icon_w,
-            r.y + 4 + icon_h - 1,
-            rank.encode_utf8(&mut tbuf),
-            1,
-            style,
-        );
-        x += pitch;
-    }
-    let mut x = r.x;
-    for &(kind, stacks) in world.player.loadout.passives.iter().take(5) {
-        if x + icon_w + 1 > r.right() {
-            break;
+
+        for i in 0..show_p {
+            let icon_x = x + i as u16 * pitch;
+            match loadout.passives.get(i) {
+                Some(&(kind, stacks)) => {
+                    let icon = crate::game::art_icons::passive(kind);
+                    crate::game::art_icons::draw(
+                        buf,
+                        Rect::new(icon_x, passive_y, icon_w, icon_h),
+                        icon,
+                    );
+                    let capped = stacks >= kind.max_stacks();
+                    let digit = char::from(b'0' + (stacks.min(9) as u8));
+                    let mut tbuf = [0u8; 4];
+                    buf.set_stringn(
+                        icon_x + icon_w,
+                        passive_y + icon_h - 1,
+                        digit.encode_utf8(&mut tbuf),
+                        1,
+                        if capped { heavy(TRAIL_GOLD) } else { ink(COAT) },
+                    );
+                    let tag = crate::render::hud::passive_short_tag(kind);
+                    let line = format!("{}{}", tag, stacks.min(9));
+                    buf.set_stringn(
+                        icon_x,
+                        passive_tag_y,
+                        &line,
+                        pitch as usize,
+                        if capped {
+                            heavy(TRAIL_GOLD)
+                        } else {
+                            ink(to_color(icon.accent))
+                        },
+                    );
+                }
+                None => {
+                    buf.set_stringn(icon_x + 1, passive_y + icon_h - 1, "··", 2, ink(TRACK));
+                    buf.set_stringn(icon_x, passive_tag_y, "··", pitch as usize, ink(TRACK));
+                }
+            }
         }
-        let icon = crate::game::art_icons::passive(kind);
-        crate::game::art_icons::draw(buf, Rect::new(x, r.y + 6, icon_w, icon_h), icon);
-        let capped = stacks >= kind.max_stacks();
-        let digit = char::from(b'0' + (stacks.min(9) as u8));
-        let mut tbuf = [0u8; 4];
-        buf.set_stringn(
-            x + icon_w,
-            r.y + 6 + icon_h - 1,
-            digit.encode_utf8(&mut tbuf),
-            1,
-            if capped { heavy(TRAIL_GOLD) } else { ink(COAT) },
-        );
-        x += pitch;
+
+        // `+N` for the bays this plate could not show (a full 8 + 8 rack at a
+        // narrow width).
+        let hidden = slots_w + slots_p - show_w - show_p;
+        if hidden > 0 && marker_w > 0 {
+            let s = format!("+{hidden}");
+            let mx = r.right().saturating_sub(marker_w);
+            buf.set_stringn(mx, weapon_y, &s, marker_w as usize, heavy(WARN_AMBER));
+            buf.set_stringn(mx, passive_y, &s, marker_w as usize, heavy(WARN_AMBER));
+        }
     }
 
     // Legend + controls, bottom-up: both legend lines fit, then the controls
@@ -918,11 +1005,90 @@ fn draw_chest_rays(f: &mut Frame, r: Rect, icon_x: u16, icon_w: u16, mid_y: u16)
     }
 }
 
+/// One line naming the whole build — `ARSENAL ▸GN2 ▸CSP3 │ HP3 DMG2 …` — for
+/// the level-up cards' footer strip and the chest card.
+///
+/// The racks run to 8 + 8, so the line measures itself against `limit` cells:
+/// as many chips as fit, then a `+N` marker for the rest. Nothing is silently
+/// clipped, at any width. (Owned `String`s: this is a menu, not the HUD.)
+fn loadout_strip(loadout: &Loadout, limit: usize) -> Vec<Span<'static>> {
+    let mut chips: Vec<(String, Color, bool)> =
+        Vec::with_capacity(loadout.weapons.len() + loadout.passives.len());
+    for w in &loadout.weapons {
+        let tag = weapon_tag(w.kind, w.evolved);
+        let head: String = tag.chars().take(2).collect();
+        let lvl = if w.is_max() || w.evolved {
+            "★".to_string()
+        } else {
+            w.level.to_string()
+        };
+        chips.push((
+            format!("{}{head}{lvl}", weapon_glyph(w.kind)),
+            to_color(w.kind.color()),
+            w.is_max() || w.evolved,
+        ));
+    }
+    let weapons = chips.len();
+    for &(pk, stacks) in &loadout.passives {
+        let tag = crate::render::hud::passive_short_tag(pk);
+        let head: String = tag.chars().take(2).collect();
+        chips.push((format!("{head}{stacks}"), HEAL_MINT, stacks >= pk.max_stacks()));
+    }
+    // One space between chips, a `│` between the racks, two cells kept back for
+    // the `+N` marker as soon as anything is dropped.
+    let mut used = "ARSENAL ".len();
+    let mut drawn = 0usize;
+    for (i, (text, _, _)) in chips.iter().enumerate() {
+        let gutter = if i == 0 {
+            0
+        } else if i == weapons {
+            2
+        } else {
+            1
+        };
+        let more = if i + 1 < chips.len() { 2 } else { 0 };
+        if used + text.chars().count() + gutter + more > limit {
+            break;
+        }
+        used += text.chars().count() + gutter;
+        drawn = i + 1;
+    }
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(drawn * 2 + 3);
+    spans.push(label("ARSENAL ", MUTED));
+    for (i, (text, col, maxed)) in chips.into_iter().take(drawn).enumerate() {
+        if i == weapons && i > 0 {
+            spans.push(label(" │ ", MUTED));
+        } else if i > 0 {
+            spans.push(label(" ", MUTED));
+        }
+        spans.push(Span::styled(
+            text,
+            if maxed {
+                heavy(TRAIL_GOLD)
+            } else {
+                ink(col)
+            },
+        ));
+    }
+    if drawn < weapons + loadout.passives.len() {
+        let rest = weapons + loadout.passives.len() - drawn;
+        spans.push(label(" ", MUTED));
+        spans.push(Span::styled(format!("+{rest}"), heavy(WARN_AMBER)));
+    }
+    spans
+}
+
 /// The chest card. Opens with a gilded sunburst flourish framing the showcase
 /// icon: evolutions receive the full royal plate (`10×5` gilded icon, chest
 /// name, recipe, inscription and new attack); rank-ups and gold payouts center
 /// the large `8×4` icon inside matching golden opening rays.
-pub fn draw_chest(f: &mut Frame, area: Rect, reward: ChestReward, hits: &mut HitMap) {
+pub fn draw_chest(
+    f: &mut Frame,
+    area: Rect,
+    reward: ChestReward,
+    loadout: &Loadout,
+    hits: &mut HitMap,
+) {
     let tall = area.height >= 19 && area.width >= 62;
     let is_evolve = matches!(reward, ChestReward::Evolve { .. });
     // On the compact card the evolved attack wraps onto two rows when the
@@ -1127,6 +1293,12 @@ pub fn draw_chest(f: &mut Frame, area: Rect, reward: ChestReward, hits: &mut Hit
                 center(f, r, 3, label(note, MUTED));
             }
         }
+    }
+    // The build the reward lands in, above the controls: 8 + 8 racks measure
+    // themselves into the card and a `+N` marker covers what does not fit.
+    if last >= 4 {
+        let spans = loadout_strip(loadout, r.width.saturating_sub(2) as usize);
+        center(f, r, last.saturating_sub(2), Line::from(spans));
     }
     controls(f, band(r, last, 1), hits, &[(" Enter / Continue ", Some(Target::Continue))]);
 }
@@ -1428,34 +1600,13 @@ pub fn draw_levelup_with_loadout(
         );
     }
 
-    // Current loadout strip so build decisions are informed right on the card screen.
+    // Current loadout strip so build decisions are informed right on the card
+    // screen: every owned weapon (glyph + tag + rank) and passive (tag + stack),
+    // as many as the panel can hold; the rack caps run to 8 + 8, so the strip
+    // measures itself and ends in a `+N` marker rather than clipping a name.
     if show_loadout && r.height >= 4 {
         let strip_y = r.height.saturating_sub(if large_cards && !airy { 2 } else { 3 });
-        let mut spans: Vec<Span<'_>> = Vec::with_capacity(loadout.weapons.len() * 3 + 4);
-        spans.push(label("ARSENAL ", MUTED));
-        for (i, w) in loadout.weapons.iter().enumerate() {
-            if i > 0 {
-                spans.push(label("  ", MUTED));
-            }
-            let short: String = w.kind.name().chars().take(4).collect();
-            let lvl = if w.is_max() {
-                "★".to_string()
-            } else {
-                w.level.to_string()
-            };
-            spans.push(Span::styled(
-                format!("{}{short}", weapon_glyph(w.kind)),
-                ink(to_color(w.kind.color())),
-            ));
-            spans.push(Span::styled(
-                lvl,
-                if w.is_max() {
-                    heavy(TRAIL_GOLD)
-                } else {
-                    ink(MUTED)
-                },
-            ));
-        }
+        let spans = loadout_strip(loadout, r.width.saturating_sub(4) as usize);
         center(f, r, strip_y, Line::from(spans));
     }
 
@@ -1582,26 +1733,40 @@ pub fn draw_pause_with_run(
                 .set_bg(PLATE);
         }
 
-        // Left: up to 5 weapons with 4×4 half-block icons (2 rows each).
-        if world.player.loadout.weapons.is_empty() {
+        // Left: the weapon rack, icon + name + rank pips per entry (2 rows
+        // each). One column holds `rows_avail / 2` slots; a full 8-slot rack on
+        // a 22-row card needs two, so the columns split the rack and nothing is
+        // dropped. A slot the build owns but the plate cannot show is counted
+        // in a `+N` line.
+        let loadout = &world.player.loadout;
+        let slots_w = loadout.weapons.len().max(loadout.max_weapons());
+        let max_slots = (rows_avail / 2) as usize;
+        if loadout.weapons.is_empty() && slots_w == 0 {
             buf.set_stringn(inner.x, inner.y + body_row, "none", left_w as usize, ink(MUTED));
         } else {
-            let max_slots = (rows_avail / 2) as usize;
-            for (idx, w) in world.player.loadout.weapons.iter().take(max_slots).enumerate() {
-                let y = inner.y + body_row + (idx as u16) * 2;
-                let icon_rect = Rect::new(
-                    inner.x,
-                    y,
-                    art_icons::SMALL_CELL_W,
-                    art_icons::SMALL_CELL_H,
-                );
+            let per_col = max_slots.max(1);
+            let cols = if slots_w <= per_col { 1 } else { 2 };
+            let col_w = left_w / cols as u16;
+            let shown = slots_w.min(per_col * cols);
+            for idx in 0..shown {
+                let col = (idx / per_col) as u16;
+                let row = (idx % per_col) as u16;
+                let ex = inner.x + col * col_w;
+                let y = inner.y + body_row + row * 2;
+                let Some(w) = loadout.weapons.get(idx) else {
+                    // An unlocked bay with nothing in it yet.
+                    buf.set_stringn(ex + 1, y + 1, "··", 2, ink(TRACK));
+                    buf.set_stringn(ex + 4, y, "open slot", col_w.saturating_sub(5) as usize, ink(TRACK));
+                    continue;
+                };
+                let icon_rect = Rect::new(ex, y, art_icons::SMALL_CELL_W, art_icons::SMALL_CELL_H);
                 if w.evolved {
                     art_icons::draw_evolved(buf, icon_rect, art_icons::weapon(w.kind));
                 } else {
                     art_icons::draw(buf, icon_rect, art_icons::weapon(w.kind));
                 }
-                let tx = inner.x + art_icons::SMALL_CELL_W + 2;
-                let max_tw = (inner.x + left_w.saturating_sub(2)).saturating_sub(tx) as usize;
+                let tx = ex + art_icons::SMALL_CELL_W + 2;
+                let max_tw = (ex + col_w.saturating_sub(1)).saturating_sub(tx) as usize;
                 let wcol = to_color(w.kind.color());
                 // The chest name once evolved, so the pause screen lists
                 // evolutions by the name the player earned.
@@ -1638,33 +1803,159 @@ pub fn draw_pause_with_run(
                     );
                 }
             }
+            let hidden = slots_w.saturating_sub(shown);
+            if hidden > 0 {
+                let y = inner.y + body_row + (shown as u16).min(per_col as u16 * 2);
+                if y < body_bottom {
+                    buf.set_stringn(
+                        inner.x,
+                        y,
+                        &format!("+{hidden} more"),
+                        left_w as usize,
+                        ink(WARN_AMBER),
+                    );
+                }
+            }
+        }
+
+        // Right: the passive rack. Two entries per row when the plate is wide
+        // enough for the names, icons and `×N` on one line; a full 8-passive
+        // rack becomes 4 + 4 on two lines and no passive is dropped.
+        let slots_p = loadout.passives.len().max(loadout.max_passives());
+        let pass_hdr_y = inner.y + body_row + 7;
+        let pass_icon_y = pass_hdr_y + 1;
+        if pass_icon_y + art_icons::SMALL_CELL_H <= body_bottom + 2 {
+            buf.set_stringn(right_x, pass_hdr_y, "PASSIVES", right_w as usize, heavy(accent));
+            if loadout.passives.is_empty() && slots_p == 0 {
+                buf.set_stringn(right_x, pass_icon_y, "none", right_w as usize, ink(MUTED));
+            } else {
+                let icon_w = art_icons::SMALL_CELL_W;
+                let stack_w = 3;
+                let per_row = (right_w / (icon_w + stack_w + 1)).max(1) as usize;
+                let col_w = right_w / per_row as u16;
+                for idx in 0..slots_p {
+                    let row = (idx / per_row) as u16;
+                    let col = (idx % per_row) as u16;
+                    let y = pass_icon_y + row * art_icons::SMALL_CELL_H;
+                    if y + art_icons::SMALL_CELL_H > body_bottom + 2 {
+                        // No room for a further icon row: count the rest.
+                        let rest = slots_p - idx;
+                        if rest > 0 {
+                            buf.set_stringn(
+                                right_x,
+                                pass_icon_y + art_icons::SMALL_CELL_H,
+                                &format!("+{rest}"),
+                                right_w as usize,
+                                ink(WARN_AMBER),
+                            );
+                        }
+                        break;
+                    }
+                    let px = right_x + col * col_w;
+                    match loadout.passives.get(idx) {
+                        Some(&(pk, stacks)) => {
+                            let ic = art_icons::passive(pk);
+                            art_icons::draw(
+                                buf,
+                                Rect::new(px, y, icon_w, art_icons::SMALL_CELL_H),
+                                ic,
+                            );
+                            let capped = stacks >= pk.max_stacks();
+                            let stk = format!("×{stacks}");
+                            buf.set_stringn(
+                                px + icon_w,
+                                y,
+                                &stk,
+                                stack_w as usize,
+                                if capped { heavy(TRAIL_GOLD) } else { ink(to_color(ic.accent)) },
+                            );
+                            let tag = crate::render::hud::passive_short_tag(pk);
+                            let tx = px + icon_w + stack_w;
+                            buf.set_stringn(
+                                tx,
+                                y,
+                                tag,
+                                (col_w.saturating_sub(icon_w + stack_w)).min(3) as usize,
+                                ink(MUTED),
+                            );
+                        }
+                        None => {
+                            buf.set_stringn(px + 1, y + 1, "··", 2, ink(TRACK));
+                        }
+                    }
+                }
+            }
         }
     } else {
-        for row in 0..6u16 {
+        // The narrow dossier (58×18): a text list, no icons. Every weapon and
+        // passive is still named; a rack longer than the card is counted in a
+        // `+N more` line instead of being cut.
+        let rows = usize::from(body_bottom.saturating_sub(inner.y + body_row));
+        let n_w = world.player.loadout.weapons.len();
+        let n_p = world.player.loadout.passives.len();
+        let pass_line = usize::from(rows > 1 && n_p > 0);
+        let list_rows = rows.saturating_sub(pass_line);
+        let shown = n_w.min(if n_w > list_rows { list_rows.saturating_sub(1) } else { list_rows });
+        for row in 0..shown as u16 {
             let y = inner.y + body_row + row;
-            if y >= body_bottom {
-                break;
-            }
             buf[(inner.x + left_w.saturating_sub(1), y)]
                 .set_char('│')
                 .set_fg(TRACK)
                 .set_bg(PLATE);
-
-            if let Some(w) = world.player.loadout.weapons.get(row as usize) {
-                let mut gx = inner.x;
-                let mut gbuf = [0u8; 4];
-                let g = weapon_glyph(w.kind).encode_utf8(&mut gbuf);
-                let wcol = to_color(w.kind.color());
-                (gx, _) = buf.set_stringn(gx, y, g, 2, heavy(wcol));
-                (gx, _) = buf.set_stringn(gx + 1, y, w.name(), 13, ink(COAT));
-                let pips = weapon_pips(w.level, w.kind.max_level());
-                let pip_col = if w.is_max() { TRAIL_GOLD } else { wcol };
-                let px = (inner.x + left_w).saturating_sub(7);
-                if px > gx {
-                    buf.set_stringn(px, y, &pips, 5, ink(pip_col));
+            if row == 0 {
+                buf.set_stringn(right_x, y, "BIOMETRICS", right_w as usize, heavy(accent));
+            }
+            let w = &world.player.loadout.weapons[row as usize];
+            let mut gbuf = [0u8; 4];
+            let g = weapon_glyph(w.kind).encode_utf8(&mut gbuf);
+            let wcol = to_color(w.kind.color());
+            let (gx, _) = buf.set_stringn(inner.x, y, g, 2, heavy(wcol));
+            let (gx, _) = buf.set_stringn(gx + 1, y, w.name(), 13, ink(COAT));
+            let pips = weapon_pips(w.level, w.kind.max_level());
+            let pip_col = if w.is_max() { TRAIL_GOLD } else { wcol };
+            let px = (inner.x + left_w).saturating_sub(7);
+            if px > gx {
+                buf.set_stringn(px, y, &pips, 5, ink(pip_col));
+            }
+        }
+        if n_w == 0 {
+            buf.set_stringn(inner.x, inner.y + body_row, "none", left_w as usize, ink(MUTED));
+            buf.set_stringn(right_x, inner.y + body_row, "BIOMETRICS", right_w as usize, heavy(accent));
+        } else if n_w > shown {
+            let y = inner.y + body_row + shown as u16;
+            buf.set_stringn(
+                inner.x,
+                y,
+                &format!("+{} more", n_w - shown),
+                left_w as usize,
+                ink(WARN_AMBER),
+            );
+        }
+        if pass_line > 0 {
+            let y = inner.y + body_row + (rows as u16 - 1);
+            if y < body_bottom {
+                buf.set_stringn(inner.x, y, "PASSIVES", left_w as usize, heavy(accent));
+                let mut px = inner.x + 9;
+                let mut counted = 0usize;
+                for &(pk, stacks) in &world.player.loadout.passives {
+                    let chip = format!("{}×{stacks} ", crate::render::hud::passive_short_tag(pk));
+                    if px + chip.chars().count() as u16 + 3 > inner.x + inner.width {
+                        break;
+                    }
+                    let capped = stacks >= pk.max_stacks();
+                    buf.set_stringn(
+                        px,
+                        y,
+                        &chip,
+                        chip.chars().count(),
+                        if capped { heavy(TRAIL_GOLD) } else { ink(COAT) },
+                    );
+                    px += chip.chars().count() as u16;
+                    counted += 1;
                 }
-            } else if row == 0 {
-                buf.set_stringn(inner.x, y, "none", left_w as usize, ink(MUTED));
+                if counted < n_p {
+                    buf.set_stringn(px, y, &format!("+{}", n_p - counted), left_w as usize, ink(WARN_AMBER));
+                }
             }
         }
     }
@@ -2373,6 +2664,203 @@ mod tests {
                     assert!(text.contains("M mute"), "{tw}x{th}: no mute key: {text}");
                 }
             }
+        }
+    }
+
+    /// A world carrying a **full 8 + 8 rack** in the state the review will
+    /// photograph: two charged active weapons, three evolved, every passive at
+    /// a stack, gold in the purse, running pocket finds and the dash on
+    /// cooldown.
+    fn full_rack_world() -> World {
+        use crate::game::loadout::{SlotCaps, Upgrade};
+        let mut w = World::new(Theme::Sewer, 7);
+        w.player.loadout.set_caps(SlotCaps::FULL);
+        w.player.loadout.weapons.clear();
+        w.player.loadout.passives.clear();
+        let kinds = [
+            WeaponKind::TailWhip,
+            WeaponKind::TailThrash,
+            WeaponKind::AcidRain,
+            WeaponKind::Gnaw,
+            WeaponKind::LaserEyes,
+            WeaponKind::CheeseSpray,
+            WeaponKind::Hantavirus,
+            WeaponKind::SonicSqueak,
+        ];
+        for (i, kind) in kinds.iter().enumerate() {
+            let mut weapon = Weapon::new(*kind);
+            weapon.level = match i {
+                0 => kind.max_level(),
+                3 => kind.max_level(),
+                5 => kind.max_level(),
+                1 => 4,
+                _ => 2,
+            };
+            // Three evolved, two charged actives.
+            weapon.evolved = i == 0 || i == 3 || i == 5;
+            if kind.is_active() && i % 2 == 1 {
+                weapon.timer = 0.0;
+            }
+            w.player.loadout.weapons.push(weapon);
+        }
+        for kind in PassiveKind::all().into_iter().take(8) {
+            w.player.loadout.apply(&Upgrade::Passive(kind));
+            w.player.loadout.apply(&Upgrade::Passive(kind));
+        }
+        w.player.buffs.shield = 12.0;
+        w.player.buffs.socks = 6.0;
+        w.player.buffs.decoy = 4.0;
+        w.player.buffs.slow_bullets = 3.0;
+        w.gold = 47;
+        w.score = 3420;
+        w.kills = 248;
+        w.player.level = 9;
+        w.elapsed = 65.0;
+        w.player.hp = 84.0;
+        w.player.dash_cd = 0.9;
+        w
+    }
+
+    /// The **pause** screens with a full 8 + 8 rack: the icon dossier on the
+    /// two sizes that get it, and the short plate at 57×20, where each band is
+    /// followed by its tag row so every kind is still named. Nothing clips and
+    /// nothing panics.
+    #[test]
+    fn the_pause_screens_lay_out_a_full_rack_at_57_80_and_120() {
+        let w = full_rack_world();
+        for (tw, th) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let mut hits = HitMap::default();
+            let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();
+            terminal
+                .draw(|f| {
+                    draw_pause_with_run(f, f.area(), &w, false, crate::input::DashKey::Ctrl, &mut hits)
+                })
+                .unwrap();
+            let text = screen_text(&terminal);
+            assert!(text.contains("PAUSED"), "{tw}x{th}: no banner: {text}");
+            if tw >= 80 {
+                // The dossier: both rack headers, the biometrics and the
+                // evolution marks of the three chest weapons.
+                assert!(text.contains("ARSENAL"), "{tw}x{th}: no arsenal: {text}");
+                assert!(text.contains("PASSIVES"), "{tw}x{th}: no passive tray: {text}");
+                assert!(text.contains("BIOMETRICS"), "{tw}x{th}: no biometrics: {text}");
+                assert!(text.contains("EVO"), "{tw}x{th}: evolved weapons unmarked: {text}");
+                // Weapon names, not only icons: the two tails must both read.
+                assert!(text.contains("Tail"), "{tw}x{th}: no weapon names: {text}");
+            } else {
+                // The short plate carries both racks as icon bands plus their
+                // tag rows: the icons must actually be there.
+                let icons = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .filter(|c| matches!(c.symbol(), "▀" | "▄"))
+                    .count();
+                assert!(
+                    icons >= 32,
+                    "{tw}x{th}: the short plate lost the racks ({icons} icon cells): {text}"
+                );
+                assert!(text.contains("Lv 9"), "{tw}x{th}: no clock line: {text}");
+            }
+        }
+    }
+
+    /// The level-up cards' ARSENAL strip with a full 8 + 8 rack: it measures
+    /// itself and ends in a `+N` marker rather than clipping a name, and a
+    /// small rack never grows one.
+    #[test]
+    fn the_arsenal_strip_measures_a_full_rack_and_marks_the_rest() {
+        use crate::game::loadout::Upgrade;
+        let w = full_rack_world();
+        let choices: Vec<(String, String, String)> = vec![
+            ("Card".to_string(), "desc".to_string(), "flavor".to_string()),
+            ("Card".to_string(), "desc".to_string(), "flavor".to_string()),
+            ("Card".to_string(), "desc".to_string(), "flavor".to_string()),
+        ];
+        let upgrades = vec![
+            Upgrade::LevelWeapon(0),
+            Upgrade::Passive(PassiveKind::Armor),
+            Upgrade::Purse,
+        ];
+        for (tw, th) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let mut hits = HitMap::default();
+            let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();
+            terminal
+                .draw(|f| {
+                    draw_levelup_with_loadout(
+                        f,
+                        f.area(),
+                        5,
+                        &choices,
+                        &upgrades,
+                        &w.player.loadout,
+                        1,
+                        &mut hits,
+                    )
+                })
+                .unwrap();
+            let text = screen_text(&terminal);
+            assert!(text.contains("LEVEL UP"), "{tw}x{th}: no level-up card");
+            if tw >= 60 {
+                assert!(text.contains("ARSENAL"), "{tw}x{th}: strip missing: {text}");
+                // 8 + 8 chips are more than one strip can carry: the remainder
+                // is counted.
+                assert!(
+                    text.contains('+'),
+                    "{tw}x{th}: a full rack was clipped without a marker: {text}"
+                );
+            }
+        }
+        // A small build fits with no marker at all.
+        let mut small = World::new(Theme::Sewer, 7);
+        small.player.loadout.apply(&Upgrade::NewWeapon(WeaponKind::AcidSpit));
+        small.player.loadout.apply(&Upgrade::Passive(PassiveKind::Armor));
+        let mut hits = HitMap::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| {
+                draw_levelup_with_loadout(
+                    f,
+                    f.area(),
+                    2,
+                    &choices,
+                    &upgrades,
+                    &small.player.loadout,
+                    0,
+                    &mut hits,
+                )
+            })
+            .unwrap();
+        let text = screen_text(&terminal);
+        assert!(text.contains("ARSENAL"), "no strip: {text}");
+        assert!(!text.contains("+2"), "a two-item rack needs no marker: {text}");
+    }
+
+    /// The chest card with a full 8 + 8 rack: the reward keeps the card and the
+    /// loadout strip under it measures itself (a `+N` marker past the edge).
+    #[test]
+    fn the_chest_card_lays_out_a_full_rack_at_57_80_and_120() {
+        use crate::game::loadout::ChestReward;
+        use crate::game::weapon::WeaponKind;
+        let w = full_rack_world();
+        let reward = ChestReward::WeaponLevel {
+            kind: WeaponKind::Gnaw,
+            level: 4,
+        };
+        for (tw, th) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let mut hits = HitMap::default();
+            let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();
+            terminal
+                .draw(|f| draw_chest(f, f.area(), reward, &w.player.loadout, &mut hits))
+                .unwrap();
+            let text = screen_text(&terminal);
+            assert!(text.contains("CHEST OPENED"), "{tw}x{th}: no chest card: {text}");
+            assert!(text.contains("ARSENAL"), "{tw}x{th}: no loadout strip: {text}");
+            assert!(
+                hits.rect_for(Target::Continue).is_some(),
+                "{tw}x{th}: no continue target"
+            );
         }
     }
 }

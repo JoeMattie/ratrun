@@ -426,6 +426,12 @@ pub struct KeepThreeView<'a> {
     /// or `[None, None]` when the next level has no choice (stage one, or the
     /// campaign is over).
     pub route: [Option<RouteChip<'a>>; 2],
+    /// The **gene splices** in the rat, by name (`shop::SpliceKind::name`).
+    ///
+    /// Splices occupy neither rack (`WAVE3_DESIGN` §6) so they are not
+    /// selectable rows, but the manifest still accounts for them: they ride
+    /// along whatever the pack choice was, and the screen says so.
+    pub splices: &'a [&'static str],
 }
 
 // ---------------------------------------------------------------------------
@@ -1614,14 +1620,18 @@ pub fn draw_keep_three(
             view.items.len()
         );
         put_str(buf, left_x, inner.y, lhdr.as_str(), left_w, heavy(COAT).bg(PLATE));
-        put_str(
-            buf,
-            left_x,
-            inner.y + 1,
-            "Only what fits in your pack comes through the vent.",
-            left_w,
-            ink(MUTED).bg(PLATE),
-        );
+        // The subtitle also accounts for the gene splices: they occupy neither
+        // rack, so they are not selectable rows, but they ride along whatever
+        // the pack choice is (`WAVE3_DESIGN` §6).
+        let mut sub = StackBuf::<96>::new();
+        let _ = write!(sub, "Only what fits in your pack comes through the vent.");
+        if !view.splices.is_empty() {
+            let _ = write!(sub, "  ·  Splices ride along:");
+            for (i, name) in view.splices.iter().enumerate() {
+                let _ = write!(sub, "{}{}", if i == 0 { " " } else { ", " }, name);
+            }
+        }
+        put_str_ellipsis(buf, left_x, inner.y + 1, sub.as_str(), left_w, ink(MUTED).bg(PLATE));
         hline(buf, left_x, inner.y + 2, left_w, '─', ink(TRACK).bg(PLATE));
 
         // Scrollbar reserve on right side of left pane when overflowing.
@@ -1894,9 +1904,15 @@ pub fn draw_keep_three(
             );
         }
         let leaving = view.items.len().saturating_sub(selected_count);
-        let mut lmsg = StackBuf::<40>::new();
+        let mut lmsg = StackBuf::<44>::new();
         if compact {
             let _ = write!(lmsg, "  ·  {} left behind", leaving);
+            // The compact plate has no narrative row: the gene splices (which
+            // ride along without a slot, `WAVE3_DESIGN` §6) get their count
+            // here instead.
+            if !view.splices.is_empty() {
+                let _ = write!(lmsg, "  ·  SPLICE {}", view.splices.len());
+            }
         } else {
             let _ = write!(
                 lmsg,
@@ -1932,12 +1948,24 @@ pub fn draw_keep_three(
         }
 
         if !compact {
-            // Subtle narrative reminder.
+            // Subtle narrative reminder, plus the splices that ride along
+            // without a slot (`WAVE3_DESIGN` §6).
+            let mut hint = StackBuf::<96>::new();
+            let _ = write!(
+                hint,
+                "Choose what fits through the vent. Unselected gear stays behind."
+            );
+            if !view.splices.is_empty() {
+                let _ = write!(hint, "  ·  Splices ride along:");
+                for (i, name) in view.splices.iter().enumerate() {
+                    let _ = write!(hint, "{}{}", if i == 0 { " " } else { ", " }, name);
+                }
+            }
             put_str_ellipsis(
                 buf,
                 inner.x + 1,
                 y,
-                "Choose what fits through the vent. Unselected gear stays behind.",
+                hint.as_str(),
                 inner.width.saturating_sub(2),
                 ink(MUTED).bg(PLATE),
             );
@@ -3544,6 +3572,7 @@ mod tests {
                         Some(KeepThreeAction::ToggleItem(1))
                     },
                     route: [None, None],
+                    splices: &[],
                 };
                 assert_eq!(keep_three_can_confirm(&view), *expect_confirm);
 
@@ -3584,6 +3613,7 @@ mod tests {
                 scroll: 0,
                 hovered: None,
                 route: [None, None],
+                splices: &[],
             };
             let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
             let mut hits = HitList::new();
@@ -3620,6 +3650,7 @@ mod tests {
             scroll: 0,
             hovered: None,
             route: [None, None],
+            splices: &[],
         };
         assert!(keep_three_can_confirm(&few_view));
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -3669,6 +3700,7 @@ mod tests {
                 scroll: 2,
                 hovered: Some(KeepThreeAction::ScrollUp),
                 route: [None, None],
+                splices: &[],
             };
             wide_term
                 .draw(|f| hits = draw_keep_three(f, f.area(), &wide_view))
@@ -4045,6 +4077,7 @@ mod tests {
                     scroll,
                     hovered: hov,
                     route: [None, None],
+                    splices: &[],
                 };
                 term.draw(|f| {
                     let _ = draw_keep_three(f, f.area(), &k3);
@@ -4110,5 +4143,80 @@ mod tests {
             })
             .unwrap();
         dump_terminal(dir, "pips", &pips_term);
+    }
+
+    /// The keep-three manifest at the **widest possible rack** (16 owned
+    /// upgrades: 8 weapons + 8 passives) plus the gene splices that ride along
+    /// without a slot. The list windows with its scrollbar (nothing is cut), the
+    /// header counts every entry, and the splices are accounted for on the
+    /// narrative row (two-pane / medium) or in the header chip (57×20).
+    #[test]
+    fn the_manifest_lays_out_a_sixteen_entry_rack_and_the_splices() {
+        let mut items: Vec<UpgradeEntry<'static>> = Vec::with_capacity(16);
+        for (i, kind) in WeaponKind::all().into_iter().take(8).enumerate() {
+            items.push(UpgradeEntry {
+                name: kind.name(),
+                glyph: crate::render::hud::weapon_glyph(kind),
+                color: kind.color(),
+                category: UpgradeCategory::Weapon {
+                    level: 1 + (i as u8 % kind.max_level()),
+                    max_level: kind.max_level(),
+                },
+                detail: kind.desc(),
+            });
+        }
+        for (i, kind) in PassiveKind::all().into_iter().take(8).enumerate() {
+            items.push(UpgradeEntry {
+                name: kind.name(),
+                glyph: '◆',
+                color: (200, 180, 140),
+                category: UpgradeCategory::Passive {
+                    // Every passive cap is well under a byte.
+                    stacks: 1 + (i as u8 % kind.max_stacks() as u8),
+                },
+                detail: kind.desc(),
+            });
+        }
+        assert_eq!(items.len(), 16);
+        let selected: Vec<bool> = vec![false; items.len()];
+        let splices: [&'static str; 2] = ["Glass Incisors", "Boiler Heart"];
+
+        for (tw, th) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let view = KeepThreeView {
+                from_level: CampaignLevel::Sewer,
+                next_level: CampaignLevel::Kitchen,
+                gold: 61,
+                items: &items,
+                selected: &selected,
+                max_keep: 3,
+                cursor: 0,
+                scroll: 0,
+                hovered: None,
+                route: [None, None],
+                splices: &splices,
+            };
+            let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();
+            let mut hits = HitList::new();
+            terminal
+                .draw(|f| hits = draw_keep_three(f, f.area(), &view))
+                .unwrap();
+            let text = buffer_text(&terminal);
+            assert!(
+                text.contains("16 OWNED") || text.contains("PACK"),
+                "{tw}x{th}: the manifest does not count its entries: {text}"
+            );
+            // The splices are accounted for at every size.
+            if tw >= 120 {
+                assert!(text.contains("Splices"), "{tw}x{th}: splices unaccounted: {text}");
+            } else if tw >= 80 {
+                assert!(text.contains("Spl"), "{tw}x{th}: splices unaccounted: {text}");
+            } else {
+                assert!(text.contains("SPLICE 2"), "{tw}x{th}: splices unaccounted: {text}");
+            }
+            // The pack choices still work, and the manifest windows on the list.
+            assert!(hits.find(KeepThreeAction::ToggleItem(0)).is_some(), "{tw}x{th}: no rows");
+            let vis = keep_three_visible_rows(Rect::new(0, 0, tw, th));
+            assert!(vis < items.len(), "{tw}x{th}: expected a windowed list, vis={vis}");
+        }
     }
 }

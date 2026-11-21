@@ -1474,7 +1474,7 @@ mod tests {
     #[test]
     fn stats_always_equal_a_from_scratch_rebuild() {
         use crate::game::campaign::{self, keepables};
-        use crate::game::loadout::{ChestReward, MAX_PASSIVES, MAX_WEAPONS};
+        use crate::game::loadout::{ChestReward, SlotCaps, MAX_PASSIVES, MAX_WEAPONS};
 
         let all = PassiveKind::all();
         // Three racks of five cover all twelve passives; the first and the
@@ -1486,6 +1486,9 @@ mod tests {
         ];
         for (n, rack) in racks.iter().enumerate() {
             let mut w = shop_world(40 + n as u64, 1000);
+            // This test exercises the widest racks (a five-kind passive rack has
+            // to fit), so it plays on an 8 + 8 profile.
+            w.player.loadout.set_caps(SlotCaps::FULL);
             let check = |w: &World, when: &str| {
                 let lo = &w.player.loadout;
                 assert_eq!(
@@ -1516,7 +1519,11 @@ mod tests {
             let last = OwnedKind::Passive(w.player.loadout.passives.len() - 1);
             let pick = molt_options(&w, last)[0];
             assert!(molt(&mut w, 0, last, pick).is_ok());
-            assert_eq!(w.player.loadout.passives.len(), MAX_PASSIVES, "a Molt is a swap");
+            assert_eq!(
+                w.player.loadout.passives.len(),
+                rack.len(),
+                "a Molt is a swap"
+            );
             check(&w, "after a Molt");
 
             // Chests: an evolution when the partner is on the rack, then free
@@ -1831,5 +1838,52 @@ mod tests {
         assert!(seen.contains(&ShopItem::Leave));
         // `loadout::MAX_PASSIVES`-style sanity: the sink keeps the shelf usable.
         let _ = loadout::MAX_WEAPONS;
+    }
+
+    /// The Molt is a swap, so it works on **any** cap: a rack that is full at
+    /// that profile's cap (4 slots on a fresh profile, 8 on a fully upgraded
+    /// one) still offers a replacement, and the rack never grows past the cap.
+    #[test]
+    fn molt_respects_the_cap_in_force() {
+        use crate::game::loadout::{SlotCaps, MAX_SLOTS};
+        for (caps, filled) in [
+            (SlotCaps::new(4, 4), 4usize),
+            (SlotCaps::new(6, 6), 6),
+            (SlotCaps::FULL, MAX_SLOTS),
+        ] {
+            let mut w = shop_world(90 + filled as u64, 200);
+            w.player.loadout = Loadout::with_caps(WeaponKind::Gnaw, caps);
+            // Fill both racks to the cap: the first `filled` kinds of each.
+            for kind in WeaponKind::all().into_iter().skip(1).take(filled - 1) {
+                w.player.loadout.apply(&Upgrade::NewWeapon(kind));
+            }
+            for kind in PassiveKind::all().into_iter().take(filled) {
+                w.player.loadout.apply(&Upgrade::Passive(kind));
+            }
+            assert_eq!(w.player.loadout.weapons.len(), filled.min(WeaponKind::all().len()));
+            assert_eq!(w.player.loadout.passives.len(), filled);
+            assert_eq!(w.player.loadout.weapons.len(), w.player.loadout.max_weapons());
+            assert_eq!(w.player.loadout.passives.len(), w.player.loadout.max_passives());
+
+            let owned = molt_owned(&w);
+            assert_eq!(owned.len(), w.player.loadout.weapons.len() + filled);
+            // Every replacement candidate is a kind the rat does not own.
+            let options = molt_options(&w, OwnedKind::Weapon(0));
+            assert!(!options.is_empty(), "a full rack still swaps at caps {caps:?}");
+            let new = options[0];
+            assert!(molt(&mut w, 0, OwnedKind::Weapon(0), new).is_ok());
+            assert_eq!(
+                w.player.loadout.weapons.len(),
+                filled.min(WeaponKind::all().len()),
+                "a Molt is a swap at caps {caps:?}"
+            );
+            let options = molt_options(&w, OwnedKind::Passive(0));
+            assert!(!options.is_empty());
+            let new = options[0];
+            assert!(molt(&mut w, 0, OwnedKind::Passive(0), new).is_err(), "once per hole");
+            w.open_shop(1);
+            assert!(molt(&mut w, 1, OwnedKind::Passive(0), new).is_ok());
+            assert_eq!(w.player.loadout.passives.len(), filled, "a swap keeps the cap");
+        }
     }
 }

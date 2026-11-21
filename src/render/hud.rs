@@ -13,7 +13,7 @@ use crate::game::campaign;
 use crate::game::director;
 use crate::game::gem::PickupKind;
 use crate::game::level::Theme;
-use crate::game::loadout::PassiveKind;
+use crate::game::loadout::{self, PassiveKind};
 use crate::game::weapon::WeaponKind;
 use crate::game::world::World;
 use crate::input::DashKey;
@@ -108,7 +108,7 @@ pub fn top_height(area: Rect) -> u16 {
 
 /// Short 2–3 character label for a passive in the HUD icon rack.
 #[allow(unreachable_patterns)]
-fn passive_short_tag(kind: PassiveKind) -> &'static str {
+pub(crate) fn passive_short_tag(kind: PassiveKind) -> &'static str {
     match kind {
         PassiveKind::MaxHp => "HP",
         PassiveKind::MoveSpeed => "SPD",
@@ -1232,15 +1232,19 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
 
     let buf = frame.buffer_mut();
     buf.set_style(top_row, Style::default().bg(PLATE));
-    let mut x = area.x;
+    // The cursor is a `Cell`: the `put` closure below advances it, and the
+    // sections that measure the remaining rail read it back.
+    let x = std::cell::Cell::new(area.x);
     let right = area.right();
 
     let mut put = |s: &str, style: Style| {
-        let avail = right.saturating_sub(x) as usize;
+        let mut cur = x.get();
+        let avail = right.saturating_sub(cur) as usize;
         if avail == 0 {
             return;
         }
-        (x, _) = buf.set_stringn(x, area.y, s, avail, style);
+        (cur, _) = buf.set_stringn(cur, area.y, s, avail, style);
+        x.set(cur);
     };
 
     let compact = !has_rack && area.width < 72 && weapons.len() > 3;
@@ -1360,7 +1364,15 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
     if !has_rack {
         put(if compact { " │" } else { "  │" }, Style::default().fg(EDGE));
         let fire_rate = world.player.loadout.stats.fire_rate_mult.max(0.1);
+        // The caps run to 8 + 8 and this degenerate single-row rail cannot hold
+        // them: the slots it must drop are counted in a `+N` marker at its end,
+        // never silently cut.
+        let mut hidden = 0usize;
         for (i, ((tag, lvl), weapon)) in state.weapon_tags.iter().zip(weapons).enumerate() {
+            if i + 1 < weapons.len() && right.saturating_sub(x.get()) < 8 {
+                hidden = weapons.len() - i;
+                break;
+            }
             let eff_cd = (weapon.cooldown() / fire_rate).max(0.05);
             let ready = (1.0 - weapon.timer / eff_cd).clamp(0.0, 1.0);
             // Immediately after firing, `timer` resets near `eff_cd` (`ready` near 0):
@@ -1458,6 +1470,16 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
                 put(p, Style::default().fg(pip_fg).bg(TRACK));
             }
         }
+        if hidden > 0 {
+            let mut mbuf = [0u8; 8];
+            mbuf[0] = b' ';
+            mbuf[1] = b'+';
+            let mut digits = [0u8; 8];
+            let n = fmt_u32_stack(hidden as u32, &mut digits);
+            mbuf[2..2 + n].copy_from_slice(&digits[..n]);
+            let text = std::str::from_utf8(&mbuf[..2 + n]).unwrap_or("");
+            put(text, Style::default().fg(WARN_AMBER).add_modifier(Modifier::BOLD));
+        }
     }
 
     // 5. Campaign progress pips, right-aligned at the rail's end (the art's
@@ -1466,7 +1488,7 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
     //    the status pill still fits to their left. The status pill then ends at
     //    `pill_right` instead of the row's edge.
     let badge_w = state.right_badge.chars().count() as u16;
-    let spare = right.saturating_sub(x);
+    let spare = right.saturating_sub(x.get());
     let pips_w = if spare >= badge_w + campaign_pips_width(false) + 3 {
         campaign_pips_width(false)
     } else if spare >= badge_w + campaign_pips_width(true) + 3 {
@@ -1490,13 +1512,13 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
     // 6. Right-aligned contextual status pill (only if it won't collide with
     //    the weapons or the campaign pips).
     let buf = frame.buffer_mut();
-    if badge_w > 0 && pill_right.saturating_sub(x) >= badge_w + 2 {
+    if badge_w > 0 && pill_right.saturating_sub(x.get()) >= badge_w + 2 {
         let bx = pill_right - badge_w;
         // If audio is muted while a higher-priority status badge owns the right slot,
         // tuck a compact `MUTE` chip immediately to its left when space permits.
         if state.telemetry.muted
             && state.right_badge != " MUTE "
-            && bx.saturating_sub(x) >= 8
+            && bx.saturating_sub(x.get()) >= 8
         {
             buf.set_stringn(
                 bx - 7,
@@ -1558,10 +1580,178 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
     }
 }
 
-/// 2-row tactical equipment rack displaying small (`4×4` px = `4×2` cell)
-/// half-block icons for every owned weapon (left) and passive (right), sized
-/// for up to 5 weapons and 5 passives with graceful degradation down to 57 cols.
-/// Zero per-frame heap allocation.
+/// How the 2-row equipment rack is laid out at one width: the cell footprint of
+/// a weapon slot and a passive slot (a 4-cell half-block icon plus `text` cells
+/// of tag / level / charge read-out), whether the divider fits, and how many
+/// slots are shown with a `+N` marker for the rest.
+///
+/// One plan for every width, computed by [`plan_rack`]: the rack is the same
+/// instrument at 57×20 and 120×40, only denser. Pure arithmetic, no allocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RackPlan {
+    /// Cells per weapon / passive slot (`4` = icon only).
+    weapon_pitch: u16,
+    passive_pitch: u16,
+    /// Left margin before the first icon.
+    margin: u16,
+    /// Divider column between the two racks (0 when it does not fit).
+    divider: u16,
+    /// `+N` marker cells reserved at the end (0 when everything fits).
+    marker: u16,
+    /// Slots actually drawn (may be fewer than owned at 57 cols).
+    weapons_shown: usize,
+    passives_shown: usize,
+    /// Owned slots the marker stands for.
+    hidden: usize,
+}
+
+impl RackPlan {
+    /// Total tag/level cells the plan can show — what the plans in
+    /// [`plan_rack`] are ranked by.
+    fn text_cells(&self) -> u16 {
+        self.weapon_pitch.saturating_sub(4) * self.weapons_shown as u16
+            + self.passive_pitch.saturating_sub(4) * self.passives_shown as u16
+    }
+}
+
+/// Widest tag/read-out a weapon slot may grow to: icon + level + 4-char tag row
+/// (and `SPACE` beside the charge pip on the second row needs 6).
+const WEAPON_TEXT_MAX: u16 = 6;
+/// Widest a passive slot may grow to: icon + `×N` + a 2-char tag.
+const PASSIVE_TEXT_MAX: u16 = 4;
+/// How many tail slots the planner will hide behind a `+N` marker to buy a
+/// read-out for the slots that remain (see [`plan_rack_with`]).
+const MAX_MARKER_DROPS: u16 = 2;
+
+/// Hand out `spare` text cells in the order that answers the player's
+/// questions: rank digit, stack digit, `×N`, two-char tags, then the
+/// `SPC`/`SPACE` charge token. Returns `(weapon_text, passive_text, leftover)`.
+fn assign_rack_text(spare: u16, nw: u16, np: u16) -> (u16, u16, u16) {
+    let mut spare = spare;
+    let (mut tw, mut tp) = (0u16, 0u16);
+    for (weapons_target, passives_target) in [
+        (1u16, 0u16),
+        (1, 1),
+        (1, 2),
+        (3, 2),
+        (3, 3),
+        (4, 3),
+        (6, 3),
+        (6, 4),
+    ] {
+        let tw_target = tw.max(weapons_target.min(WEAPON_TEXT_MAX));
+        let tp_target = tp.max(passives_target.min(PASSIVE_TEXT_MAX));
+        let cost = (tw_target - tw) * nw + (tp_target - tp) * np;
+        if cost <= spare {
+            spare -= cost;
+            tw = tw_target;
+            tp = tp_target;
+        }
+    }
+    (tw, tp, spare)
+}
+
+/// Lay out the equipment rack for `width` cells and `slots_w` + `slots_p` slots
+/// (owned kinds and the empty slots up to the loadout's cap).
+///
+/// The rule, in order: every slot owns a 4-cell icon; when the icons alone do
+/// not fit, the tail of the racks is dropped behind a `+N` marker (never
+/// silently cut); the spare width then buys text cells (see
+/// [`assign_rack_text`]). If a rack of bare icons would leave whole slots with
+/// no number at all, up to [`MAX_MARKER_DROPS`] more tail slots are traded for
+/// a read-out on the rest — a numbered rack plus an honest `+N` beats sixteen
+/// anonymous sprites. A divider column is kept when the cell it costs is not
+/// better spent on text.
+fn plan_rack(width: u16, slots_w: usize, slots_p: usize) -> RackPlan {
+    let mut best: Option<RackPlan> = None;
+    for divider in [1u16, 0] {
+        let plan = plan_rack_with(width, slots_w, slots_p, divider);
+        if best.is_none_or(|b| plan.text_cells() > b.text_cells()) {
+            best = Some(plan);
+        }
+    }
+    match best {
+        Some(plan) => plan,
+        // Unreachable (the loop always runs once) but never a panic in a
+        // render path.
+        None => plan_rack_with(width, slots_w, slots_p, 0),
+    }
+}
+
+fn plan_rack_with(width: u16, slots_w: usize, slots_p: usize, divider: u16) -> RackPlan {
+    let divider = if slots_w == 0 || slots_p == 0 { 0 } else { divider };
+    let (mut shown_w, mut shown_p) = (slots_w, slots_p);
+    let mut marker = 0u16;
+    let mut drops = 0u16;
+    // Icons first: drop the tail of the passives, then of the weapons, and
+    // reserve two cells for the `+N` marker as soon as anything is hidden.
+    let fit = |shown_w: &mut usize, shown_p: &mut usize, marker: &mut u16| {
+        while 4 * (*shown_w + *shown_p) as u16 + divider + *marker > width {
+            if *shown_p > 0 {
+                *shown_p -= 1;
+            } else if *shown_w > 0 {
+                *shown_w -= 1;
+            } else {
+                break;
+            }
+            *marker = if *shown_w + *shown_p < slots_w + slots_p { 2 } else { 0 };
+        }
+    };
+    fit(&mut shown_w, &mut shown_p, &mut marker);
+    let tw;
+    let tp;
+    let spare;
+    loop {
+        let room = width.saturating_sub(4 * (shown_w + shown_p) as u16 + divider + marker);
+        let assigned = assign_rack_text(room, shown_w as u16, shown_p as u16);
+        tw = assigned.0;
+        tp = assigned.1;
+        spare = assigned.2;
+        let lacking = (if tw == 0 { shown_w as u16 } else { 0 })
+            + (if tp == 0 { shown_p as u16 } else { 0 });
+        if lacking == 0 || spare >= lacking || shown_w + shown_p <= 1 || drops >= MAX_MARKER_DROPS {
+            break;
+        }
+        // Trade a tail slot for read-outs on the rest.
+        if shown_p > 0 {
+            shown_p -= 1;
+        } else if shown_w > 0 {
+            shown_w -= 1;
+        }
+        marker = 2;
+        drops += 1;
+        fit(&mut shown_w, &mut shown_p, &mut marker);
+    }
+    // Whatever is left pads the left margin and the divider gap so a partly
+    // filled rack still reads as a row of slots and not as a clump.
+    let margin = u16::from(spare >= 2 && shown_w + shown_p > 0);
+    let divider = if divider > 0 && spare >= margin + 2 {
+        divider + 1
+    } else {
+        divider
+    };
+    RackPlan {
+        weapon_pitch: 4 + tw,
+        passive_pitch: 4 + tp,
+        margin,
+        divider,
+        marker,
+        weapons_shown: shown_w,
+        passives_shown: shown_p,
+        hidden: slots_w + slots_p - shown_w - shown_p,
+    }
+}
+
+/// 2-row tactical equipment rack: small (`4×4` px = `4×2` cell) half-block
+/// icons for every owned weapon (left) and passive (right) plus a dim outline
+/// for each **empty slot up to the loadout's caps**, so the rack shows both the
+/// build and how much room it has left (`loadout::SlotCaps`, 4 + 4 on a fresh
+/// profile up to 8 + 8).
+///
+/// One layout at every size: rank digit, stack count, tags and the charge
+/// token are bought with whatever width is left after the icons, and a `+N`
+/// marker stands in for the slots that do not fit (57×20 with a full 8 + 8
+/// rack). Zero per-frame heap allocation.
 fn draw_loadout_rack(frame: &mut Frame, rack: Rect, world: &World, state: &HudState) {
     if rack.width < 8 || rack.height < 2 {
         return;
@@ -1569,48 +1759,35 @@ fn draw_loadout_rack(frame: &mut Frame, rack: Rect, world: &World, state: &HudSt
     let buf = frame.buffer_mut();
     buf.set_style(rack, Style::default().bg(RACK_BG));
 
-    let weapons = &world.player.loadout.weapons;
-    let passives = &world.player.loadout.passives;
-    let total_items = weapons.len() + passives.len();
-    let fire_rate = world.player.loadout.stats.fire_rate_mult.max(0.1);
+    let loadout = &world.player.loadout;
+    let weapons = &loadout.weapons;
+    let passives = &loadout.passives;
+    let fire_rate = loadout.stats.fire_rate_mult.max(0.1);
 
-    let wide = rack.width >= 106;
-    let standard = !wide && rack.width >= 74;
-    let narrow = !wide && !standard;
+    // Slots on show: everything owned plus the empty slots up to the cap (a
+    // carried loadout can hold more than a lowered cap — keep it visible).
+    let slots_w = weapons.len().max(loadout.max_weapons()).min(loadout::MAX_WEAPONS);
+    let slots_p = passives.len().max(loadout.max_passives()).min(loadout::MAX_PASSIVES);
+    let plan = plan_rack(rack.width, slots_w, slots_p);
 
     let y0 = rack.y;
     let y1 = rack.y + 1;
     let right = rack.right();
+    let nw = plan.weapons_shown;
+    let np = plan.passives_shown;
 
-    // Reserve space on the right for passives so a full 5-weapon + 5-passive
-    // loadout never pushes passives off the right edge.
-    let passive_slot_w: u16 = if wide {
-        9
-    } else if standard {
-        7
-    } else if total_items <= 7 {
-        6
-    } else {
-        5
-    };
-    let div_w: u16 = if narrow && total_items >= 9 { 1 } else { 2 };
-    let passives_shown = passives.len().min(5);
-    let passive_reserve: u16 = if passives_shown > 0 {
-        div_w + (passives_shown as u16) * passive_slot_w
-    } else {
-        0
-    };
-    let weapon_limit = right.saturating_sub(passive_reserve);
-
-    let mut x = rack.x + u16::from(!(narrow && total_items >= 10));
-
+    let mut x = rack.x + plan.margin;
     // ---- Weapons (left side) ----------------------------------------------
     let mut stack_buf = [0u8; 8];
     for (i, ((tag, lvl), weapon)) in state.weapon_tags.iter().zip(weapons).enumerate() {
-        let icon_w = art_icons::SMALL_CELL_W;
-        if x + icon_w + 1 > weapon_limit {
+        if i >= nw {
             break;
         }
+        let icon_w = art_icons::SMALL_CELL_W;
+        if x + icon_w > right {
+            break;
+        }
+        let text_w = plan.weapon_pitch - icon_w;
 
         let eff_cd = (weapon.cooldown() / fire_rate).max(0.05);
         let ready = (1.0 - weapon.timer / eff_cd).clamp(0.0, 1.0);
@@ -1633,34 +1810,12 @@ fn draw_loadout_rack(frame: &mut Frame, rack: Rect, world: &World, state: &HudSt
         } else {
             art_icons::draw(buf, icon_rect, art_icons::weapon(weapon.kind));
         }
-        x = x.saturating_add(icon_w);
+        let tx = x + icon_w;
+        x = tx + text_w;
 
-        let name_style = if just_fired || charge_flash > 0.0 {
-            Style::default()
-                .fg(COAT)
-                .bg(RACK_BG)
-                .add_modifier(Modifier::BOLD)
-        } else if charged {
-            Style::default()
-                .fg(w_col)
-                .bg(RACK_BG)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(w_col).bg(RACK_BG)
-        };
-        let lvl_style = if weapon.is_max() {
-            Style::default()
-                .fg(TRAIL_GOLD)
-                .bg(RACK_BG)
-                .add_modifier(Modifier::BOLD)
-        } else if charged && narrow {
-            Style::default()
-                .fg(COAT)
-                .bg(TRACK)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(MUTED).bg(RACK_BG)
-        };
+        if text_w == 0 {
+            continue;
+        }
         let pip_ch = if active && charged {
             '█'
         } else {
@@ -1676,206 +1831,184 @@ fn draw_loadout_rack(frame: &mut Frame, rack: Rect, world: &World, state: &HudSt
         let mut pbuf = [0u8; 4];
         let pip_s = pip_ch.encode_utf8(&mut pbuf);
 
-        if wide {
-            // Wide (106+ cols): 1 space + 5–6 cols stacked info + gap.
-            let tx = x.saturating_add(1);
-            let avail_w = weapon_limit.saturating_sub(tx);
-            if avail_w >= 5 {
-                let (end, _) = buf.set_stringn(tx, y0, tag, 4.min(avail_w as usize), name_style);
-                buf.set_stringn(end, y0, lvl, weapon_limit.saturating_sub(end) as usize, lvl_style);
-
-                if active {
-                    buf.set_stringn(tx, y1, pip_s, 1, Style::default().fg(pip_fg).bg(TRACK));
-                    if charged {
-                        let tok_style = if charge_flash > 0.0 {
-                            Style::default()
-                                .fg(PLATE)
-                                .bg(COAT)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default()
-                                .fg(w_col)
-                                .bg(TRACK)
-                                .add_modifier(Modifier::BOLD)
-                        };
-                        let tok = if avail_w >= 6 { "SPACE" } else { "SPC" };
-                        buf.set_stringn(
-                            tx + 1,
-                            y1,
-                            tok,
-                            weapon_limit.saturating_sub(tx + 1) as usize,
-                            tok_style,
-                        );
-                    } else if avail_w >= 5 {
-                        draw_mini_bar(buf, tx + 1, y1, 4, ready, w_col);
-                    }
-                } else if avail_w >= 4 {
-                    draw_mini_bar(buf, tx, y1, 4, ready, w_col);
-                } else {
-                    buf.set_stringn(tx, y1, pip_s, 1, Style::default().fg(pip_fg).bg(TRACK));
-                }
-                let advance = if active && charged && avail_w >= 7 {
-                    8
-                } else if total_items >= 9 {
-                    6
-                } else {
-                    7
-                };
-                x = tx.saturating_add(advance);
-            } else {
-                buf.set_stringn(x, y0, lvl, 1, lvl_style);
-                buf.set_stringn(x, y1, pip_s, 1, Style::default().fg(pip_fg).bg(TRACK));
-                x = x.saturating_add(2);
-            }
-        } else if standard {
-            // Standard (74..106 cols, e.g. 80×24): 3-col stacked info + 1 gap
-            // (or wider READY token when space permits).
-            let tx = x;
-            let avail_w = weapon_limit.saturating_sub(tx);
-            let short_end = tag.char_indices().nth(2).map_or(tag.len(), |(k, _)| k);
-            let (end, _) = buf.set_stringn(tx, y0, &tag[..short_end], avail_w as usize, name_style);
-            buf.set_stringn(end, y0, lvl, weapon_limit.saturating_sub(end) as usize, lvl_style);
-
-            buf.set_stringn(tx, y1, pip_s, 1, Style::default().fg(pip_fg).bg(TRACK));
-            let mut info_w: u16 = 3;
-            if active && charged {
-                let tok_style = if charge_flash > 0.0 {
-                    Style::default()
-                        .fg(PLATE)
-                        .bg(COAT)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                        .fg(w_col)
-                        .bg(TRACK)
-                        .add_modifier(Modifier::BOLD)
-                };
-                // The token names the key rather than abbreviating it: a slot
-                // only has to fit its *own* five columns, which a full 5+5 rack
-                // at 80 columns does (the review's `SPC` case). Only the last
-                // slot on a very tight rail falls back to `SPC`.
-                let spare_after = weapon_limit.saturating_sub(tx + 1);
-                let use_full = spare_after >= 5;
-                let tok = if use_full { "SPACE" } else { "SPC" };
-                let tok_len = tok.len() as u16;
-                if spare_after >= tok_len {
-                    buf.set_stringn(tx + 1, y1, tok, spare_after as usize, tok_style);
-                    info_w = 1 + tok_len;
-                }
-            } else if active && avail_w >= 4 {
-                draw_mini_bar(buf, tx + 1, y1, 2, ready, w_col);
-            }
-            let gap = u16::from(tx + info_w < weapon_limit);
-            x = tx.saturating_add(info_w + gap);
+        // Row 0: the rank (the number the player is working towards), then as
+        // much of the slot's identity tag as the width allows.
+        let lvl_style = if weapon.is_max() {
+            Style::default()
+                .fg(TRAIL_GOLD)
+                .bg(RACK_BG)
+                .add_modifier(Modifier::BOLD)
+        } else if just_fired || charge_flash > 0.0 {
+            Style::default()
+                .fg(COAT)
+                .bg(RACK_BG)
+                .add_modifier(Modifier::BOLD)
+        } else if charged {
+            Style::default().fg(w_col).bg(RACK_BG).add_modifier(Modifier::BOLD)
         } else {
-            // Narrow (< 74 cols, e.g. 57×20): 1-col vertical level/pip strip
-            // right beside the 4×4 icon. Active READY lights the badge column
-            // in COAT on TRACK (zero extra columns, high visibility).
-            buf.set_stringn(x, y0, lvl, 1, lvl_style);
-            buf.set_stringn(x, y1, pip_s, 1, Style::default().fg(pip_fg).bg(TRACK));
-            x = x.saturating_add(1);
-            if total_items <= 7 && x < weapon_limit {
-                x = x.saturating_add(1);
-            }
+            Style::default().fg(MUTED).bg(RACK_BG)
+        };
+        let name_style = if just_fired || charge_flash > 0.0 {
+            Style::default()
+                .fg(COAT)
+                .bg(RACK_BG)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(w_col).bg(RACK_BG)
+        };
+        let tag_room = (text_w - 1) as usize;
+        let tag_end = tag.char_indices().nth(tag_room.min(4)).map_or(tag.len(), |(k, _)| k);
+        let (end, _) = buf.set_stringn(tx, y0, lvl, 1, lvl_style);
+        if tag_room > 0 {
+            buf.set_stringn(end, y0, &tag[..tag_end], right.saturating_sub(end) as usize, name_style);
+        }
+
+        // Row 1: the charge read-out. A charged active names the key where the
+        // width can pay for it (`SPACE` 6 cells, `SPC` 4), and otherwise keeps
+        // the solid pip and the slot's highlight (`charged` styles above).
+        buf.set_stringn(tx, y1, pip_s, 1, Style::default().fg(pip_fg).bg(TRACK));
+        let bar_room = text_w - 1;
+        if active && charged && bar_room >= 3 {
+            let tok_style = if charge_flash > 0.0 {
+                Style::default()
+                    .fg(PLATE)
+                    .bg(COAT)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(w_col)
+                    .bg(TRACK)
+                    .add_modifier(Modifier::BOLD)
+            };
+            let tok = if bar_room >= 5 { "SPACE" } else { "SPC" };
+            buf.set_stringn(tx + 1, y1, tok, bar_room as usize, tok_style);
+        } else if bar_room > 0 {
+            draw_mini_bar(buf, tx + 1, y1, bar_room.min(4), ready, w_col);
         }
     }
 
     // ---- Divider + Passives (right side) ----------------------------------
-    let div_x = if passives_shown > 0 {
-        x.max(weapon_limit)
-            .min(right.saturating_sub(passive_reserve))
-    } else {
-        x
-    };
-    if div_x < right {
-        if passives_shown > 0 {
+    let mut px = x.max(rack.x + plan.margin + nw as u16 * plan.weapon_pitch) + plan.divider;
+    if np > 0 && plan.divider > 0 {
+        let div_x = px - plan.divider;
+        if div_x < right {
             buf[(div_x, y0)].set_char('│').set_fg(EDGE).set_bg(RACK_BG);
             buf[(div_x, y1)].set_char('│').set_fg(EDGE).set_bg(RACK_BG);
-            let mut px = div_x.saturating_add(div_w);
-
-            for &(kind, stacks) in passives.iter().take(5) {
-                let icon_w = art_icons::SMALL_CELL_W;
-                if px + icon_w + 1 > right {
-                    break;
-                }
-                let icon = art_icons::passive(kind);
-                art_icons::draw(buf, Rect::new(px, y0, icon_w, art_icons::SMALL_CELL_H), icon);
-                let tx = px.saturating_add(icon_w);
-
-                let capped = stacks >= kind.max_stacks();
-                let stk_style = if capped {
-                    Style::default()
-                        .fg(TRAIL_GOLD)
-                        .bg(RACK_BG)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                        .fg(palette::to_color(icon.accent))
-                        .bg(RACK_BG)
-                        .add_modifier(Modifier::BOLD)
-                };
-                let tag_style = Style::default().fg(MUTED).bg(RACK_BG);
-
-                if wide {
-                    let s_len = fmt_u32_stack(stacks, &mut stack_buf);
-                    let stk_str = std::str::from_utf8(&stack_buf[..s_len]).unwrap_or("1");
-                    let sx = tx.saturating_add(1);
-                    if sx < right {
-                        let (e, _) = buf.set_stringn(sx, y0, "×", 1, tag_style);
-                        buf.set_stringn(e, y0, stk_str, right.saturating_sub(e) as usize, stk_style);
-                        buf.set_stringn(
-                            sx,
-                            y1,
-                            passive_short_tag(kind),
-                            right.saturating_sub(sx).min(3) as usize,
-                            tag_style,
-                        );
-                    }
-                    px = px.saturating_add(passive_slot_w);
-                } else if standard {
-                    let s_len = fmt_u32_stack(stacks, &mut stack_buf);
-                    let stk_str = std::str::from_utf8(&stack_buf[..s_len]).unwrap_or("1");
-                    let (e, _) = buf.set_stringn(tx, y0, "×", 1, tag_style);
-                    buf.set_stringn(e, y0, stk_str, right.saturating_sub(e) as usize, stk_style);
-                    let ptag = passive_short_tag(kind);
-                    let ptag_end = ptag.char_indices().nth(2).map_or(ptag.len(), |(k, _)| k);
-                    buf.set_stringn(
-                        tx,
-                        y1,
-                        &ptag[..ptag_end],
-                        right.saturating_sub(tx).min(2) as usize,
-                        tag_style,
-                    );
-                    px = px.saturating_add(passive_slot_w);
-                } else {
-                    // Narrow: 1-col vertical stack badge (`×` on row 0, digit on row 1).
-                    let digit = stacks.min(9) as u8;
-                    stack_buf[0] = b'0' + digit;
-                    let d_str = std::str::from_utf8(&stack_buf[..1]).unwrap_or("1");
-                    buf.set_stringn(tx, y0, "×", 1, tag_style);
-                    buf.set_stringn(tx, y1, d_str, 1, stk_style);
-                    px = px.saturating_add(passive_slot_w);
-                }
-            }
-        } else if !narrow && right.saturating_sub(div_x) >= 15 {
-            // Clean empty-passives indicator on wide/standard screens.
-            let hint_x = right.saturating_sub(13);
-            buf[(hint_x.saturating_sub(2), y0)]
-                .set_char('│')
-                .set_fg(TRACK)
-                .set_bg(RACK_BG);
-            buf[(hint_x.saturating_sub(2), y1)]
-                .set_char('│')
-                .set_fg(TRACK)
-                .set_bg(RACK_BG);
-            buf.set_stringn(
-                hint_x,
-                y0,
-                "PASSIVES 0/5",
-                12,
-                Style::default().fg(EDGE).bg(RACK_BG),
-            );
         }
+    }
+    for (i, &(kind, stacks)) in passives.iter().enumerate() {
+        if i >= np {
+            break;
+        }
+        let icon_w = art_icons::SMALL_CELL_W;
+        if px + icon_w > right {
+            break;
+        }
+        let icon = art_icons::passive(kind);
+        art_icons::draw(
+            buf,
+            Rect::new(px, y0, icon_w, art_icons::SMALL_CELL_H),
+            icon,
+        );
+        let tx = px + icon_w;
+        let text_w = plan.passive_pitch - icon_w;
+        px = tx + text_w;
+        if text_w == 0 {
+            continue;
+        }
+
+        let capped = stacks >= kind.max_stacks();
+        let stk_style = if capped {
+            Style::default()
+                .fg(TRAIL_GOLD)
+                .bg(RACK_BG)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(palette::to_color(icon.accent))
+                .bg(RACK_BG)
+                .add_modifier(Modifier::BOLD)
+        };
+        let tag_style = Style::default().fg(MUTED).bg(RACK_BG);
+        if text_w == 1 {
+            // One cell: the stack digit on its own (`×` is implied by the
+            // colour and by the dossier's `Sharp Teeth ×3`).
+            let digit = stacks.min(9) as u8;
+            stack_buf[0] = b'0' + digit;
+            let s = std::str::from_utf8(&stack_buf[..1]).unwrap_or("1");
+            buf.set_stringn(tx, y0, s, 1, stk_style);
+            continue;
+        }
+        // Row 0: `×N` (the stack, never confusable with a weapon's rank).
+        let (e, _) = buf.set_stringn(tx, y0, "×", 1, tag_style);
+        let s_len = fmt_u32_stack(stacks, &mut stack_buf);
+        let stk_str = std::str::from_utf8(&stack_buf[..s_len]).unwrap_or("1");
+        let (e, _) = buf.set_stringn(e, y0, stk_str, text_w.saturating_sub(1) as usize, stk_style);
+        // Row 1: the passive's own tag, as wide as the slot can pay for.
+        let ptag = passive_short_tag(kind);
+        let room = (text_w.saturating_sub(e - tx)) as usize;
+        if room > 0 {
+            let end = ptag.char_indices().nth(room).map_or(ptag.len(), |(k, _)| k);
+            buf.set_stringn(tx, y1, &ptag[..end], room, tag_style);
+        }
+    }
+
+    // ---- Empty slots up to the cap, then the `+N` marker -------------------
+    // Every slot the build has not filled keeps its icon-sized footprint as a
+    // dim outline, so the racks read as 4 + 4 (or 8 + 8) bays, not as a pile.
+    let mut draw_placeholders = |from: usize, upto: usize, x0: u16, pitch: u16| {
+        let mut hx = x0;
+        for _ in from..upto {
+            if hx + 4 > right {
+                break;
+            }
+            buf.set_stringn(
+                hx + 1,
+                y1,
+                "·",
+                1,
+                Style::default().fg(TRACK).bg(RACK_BG),
+            );
+            buf.set_stringn(
+                hx + 2,
+                y1,
+                "·",
+                1,
+                Style::default().fg(TRACK).bg(RACK_BG),
+            );
+            hx += pitch;
+        }
+        hx
+    };
+    let weapons_x =
+        rack.x + plan.margin + weapons.len().min(nw) as u16 * plan.weapon_pitch;
+    let _ = draw_placeholders(weapons.len().min(nw), nw, weapons_x, plan.weapon_pitch);
+    let passives_x0 = rack.x + plan.margin + nw as u16 * plan.weapon_pitch + plan.divider;
+    let passives_x = passives_x0 + passives.len().min(np) as u16 * plan.passive_pitch;
+    let _ = draw_placeholders(passives.len().min(np), np, passives_x, plan.passive_pitch);
+
+    // A rack that could not show every slot says so: nothing is silently cut.
+    if plan.hidden > 0 && plan.marker > 0 {
+        let mut mbuf = [0u8; 8];
+        mbuf[0] = b'+';
+        let digits = fmt_u32_stack(plan.hidden as u32, &mut stack_buf);
+        mbuf[1..1 + digits].copy_from_slice(&stack_buf[..digits]);
+        let s = std::str::from_utf8(&mbuf[..1 + digits]).unwrap_or("+");
+        let mx = right.saturating_sub(plan.marker);
+        buf.set_stringn(
+            mx,
+            y0,
+            s,
+            plan.marker as usize,
+            Style::default().fg(WARN_AMBER).bg(RACK_BG),
+        );
+        buf.set_stringn(
+            mx,
+            y1,
+            "·",
+            plan.marker as usize,
+            Style::default().fg(TRACK).bg(RACK_BG),
+        );
     }
 }
 
@@ -3164,86 +3297,121 @@ mod tests {
         );
     }
 
-    /// 3-row HUD with 5 weapons (including an active weapon) and 5 passives
-    /// renders half-block icons, levels, stacks, and active READY state across
-    /// 57×20, 80×24, and 120×40 without panicking or clipping icons mid-cell.
+    /// The rack at every cap a profile can buy (4 + 4 fresh, 8 + 8 fully
+    /// upgraded): half-block icons for every owned slot, a dim bay for every
+    /// empty one up to the cap, levels, stacks, the charged-active read-out and
+    /// — when a 57-column rack cannot hold 16 slots — a `+N` marker instead of a
+    /// silent cut. Nothing panics, nothing paints outside the rack.
     #[test]
-    fn icon_rack_shows_five_weapons_and_five_passives_at_all_three_sizes() {
-        use crate::game::loadout::Upgrade;
+    fn the_icon_rack_lays_out_every_cap_at_all_three_sizes() {
+        use crate::game::loadout::{SlotCaps, Upgrade};
 
-        let mut w = known_world();
-        w.player.loadout.weapons = vec![
-            Weapon::new(WeaponKind::Gnaw),
-            Weapon::new(WeaponKind::CheeseSpray),
-            Weapon::new(WeaponKind::AcidSpit),
-            Weapon::new(WeaponKind::TailThrash),
-            Weapon::new(WeaponKind::SonicSqueak),
-        ];
-        w.player.loadout.weapons[0].level = WeaponKind::Gnaw.max_level();
-        w.player.loadout.weapons[1].level = 3;
-        w.player.loadout.weapons[3].timer = 0.0; // TailThrash READY
-        w.player.loadout.weapons[4].timer = 3.0; // SonicSqueak charging
-
-        for p in [
-            PassiveKind::MaxHp,
-            PassiveKind::MoveSpeed,
-            PassiveKind::Damage,
-            PassiveKind::FireRate,
-            PassiveKind::Armor,
-        ] {
-            w.player.loadout.apply(&Upgrade::Passive(p));
-            w.player.loadout.apply(&Upgrade::Passive(p));
-        }
-
-        let mut state = HudState::default();
-        state.tick(1.0 / 60.0, &w, &[], false);
-        state.tick(1.0 / 60.0, &w, &[], false);
-
-        for (tw, th) in [(57u16, 20u16), (80, 24), (120, 40)] {
-            let full = Rect::new(0, 0, tw, th);
-            assert_eq!(top_height(full), 3, "{tw}x{th} should use the 3-row icon rack");
-            let mut terminal = Terminal::new(TestBackend::new(tw, 3)).unwrap();
-            terminal
-                .draw(|f| draw_top(f, f.area(), &w, &mut state))
-                .unwrap();
-
-            let buf = terminal.backend().buffer();
-            let rack_half_blocks: usize = (1..3)
-                .flat_map(|y| (0..tw).map(move |x| (x, y)))
-                .filter(|&(x, y)| matches!(buf[(x, y)].symbol(), "▀" | "▄"))
-                .count();
-            assert!(
-                rack_half_blocks >= 40,
-                "{tw}x{th}: expected icons across 5 weapons + 5 passives, got {rack_half_blocks} half-block cells"
-            );
-
-            let rack_text: String = (1..3)
-                .flat_map(|y| (0..tw).map(move |x| buf[(x, y)].symbol()))
-                .collect();
-            assert!(rack_text.contains('★'), "{tw}x{th}: max-level star missing in {rack_text:?}");
-            assert!(rack_text.contains('×'), "{tw}x{th}: passive stack marker missing in {rack_text:?}");
-            assert!(rack_text.contains('│'), "{tw}x{th}: weapon/passive divider missing in {rack_text:?}");
-            if tw >= 80 {
-                assert!(
-                    rack_text.contains("SPACE") || rack_text.contains("SPC"),
-                    "{tw}x{th}: charged active weapon lost its READY token: {rack_text:?}"
-                );
-            } else {
-                // At 57 cols, charged active weapon highlights its badge cell on TRACK.
-                let has_track = (1..3)
-                    .flat_map(|y| (0..tw).map(move |x| buf[(x, y)].bg))
-                    .any(|bg| bg == TRACK);
-                assert!(has_track, "57x20: charged active weapon must highlight on TRACK");
+        for caps in [SlotCaps::new(4, 4), SlotCaps::new(6, 6), SlotCaps::FULL] {
+            let mut w = known_world();
+            w.player.loadout.set_caps(caps);
+            w.player.loadout.weapons.clear();
+            w.player.loadout.passives.clear();
+            let kinds = [
+                WeaponKind::Gnaw,
+                WeaponKind::CheeseSpray,
+                WeaponKind::AcidSpit,
+                WeaponKind::TailThrash,
+                WeaponKind::SonicSqueak,
+                WeaponKind::AcidRain,
+                WeaponKind::LaserEyes,
+                WeaponKind::TailWhip,
+            ];
+            for (i, kind) in kinds.iter().take(caps.weapons).enumerate() {
+                let mut weapon = Weapon::new(*kind);
+                // Two charged actives, three evolved, one maxed.
+                if kind.is_active() && i < 4 {
+                    weapon.timer = 0.0;
+                }
+                weapon.level = match i {
+                    0 => kind.max_level(),
+                    2 => 4,
+                    _ => 2,
+                };
+                weapon.evolved = i == 1 || i == 3 || i == 5;
+                w.player.loadout.weapons.push(weapon);
             }
-        }
+            for kind in PassiveKind::all().into_iter().take(caps.passives) {
+                w.player.loadout.apply(&Upgrade::Passive(kind));
+                w.player.loadout.apply(&Upgrade::Passive(kind));
+            }
+            w.player.buffs.shield = 12.0;
+            w.player.buffs.socks = 6.0;
+            w.gold = 47;
+            w.player.dash_cd = 0.9;
+            w.player.xp = w.player.xp_to_next / 2;
 
-        // Tiny / degenerate sizes fall back to 1-row rail and never panic.
-        for (tw, th) in [(0u16, 0u16), (1, 1), (80, 16)] {
-            assert_eq!(top_height(Rect::new(0, 0, tw, th)), 1);
-            let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();
-            terminal
-                .draw(|f| draw_top(f, f.area(), &w, &mut state))
-                .unwrap();
+            let mut state = HudState::default();
+            state.tick(1.0 / 60.0, &w, &[], false);
+            state.tick(1.0 / 60.0, &w, &[], false);
+
+            for (tw, th) in [(57u16, 20u16), (80, 24), (120, 40)] {
+                let full = Rect::new(0, 0, tw, th);
+                assert_eq!(top_height(full), 3, "{tw}x{th} should use the 3-row icon rack");
+                let mut terminal = Terminal::new(TestBackend::new(tw, 3)).unwrap();
+                terminal
+                    .draw(|f| draw_top(f, f.area(), &w, &mut state))
+                    .unwrap();
+                let buf = terminal.backend().buffer();
+                let rack_text: String = (1..3)
+                    .flat_map(|y| (0..tw).map(move |x| buf[(x, y)].symbol()))
+                    .collect();
+                let icon_cells = (1..3)
+                    .flat_map(|y| (0..tw).map(move |x| (x, y)))
+                    .filter(|&(x, y)| matches!(buf[(x, y)].symbol(), "▀" | "▄"))
+                    .count();
+                assert!(
+                    icon_cells >= 16,
+                    "caps {caps:?} at {tw}x{th}: the rack drew almost no icons: {icon_cells}"
+                );
+                // One number per slot at the wide sizes; the stack marker is
+                // never confusable with a weapon's rank (`×` only for passives).
+                if tw >= 80 {
+                    assert!(
+                        rack_text.contains('×') || rack_text.contains('+'),
+                        "caps {caps:?} at {tw}x{th}: no passive read-out and no marker: {rack_text:?}"
+                    );
+                }
+                // The two racks are separated whenever there is room for it.
+                if tw >= 106 {
+                    assert!(
+                        rack_text.contains('│'),
+                        "caps {caps:?} at {tw}x{th}: divider missing: {rack_text:?}"
+                    );
+                }
+                // A filled 8 + 8 rack cannot fit 16 icons at 57 columns: the
+                // plate says how many slots are off-screen instead of cutting.
+                if caps == SlotCaps::FULL && tw < 64 {
+                    assert!(
+                        rack_text.contains('+'),
+                        "57x20 with 8 + 8: the rack cut slots without a +N marker: {rack_text:?}"
+                    );
+                }
+                // The rail keeps its gold count and the bottom rail its XP %.
+                let rail: String = (0..tw).map(|x| buf[(x, 0)].symbol()).collect();
+                assert!(rail.contains("47"), "{tw}x{th}: gold missing: {rail:?}");
+                // Charged actives name their key wherever a slot can pay for
+                // it (SPACE at the widest racks, SPC from 80 columns).
+                if tw >= 120 && caps.weapons <= 6 {
+                    assert!(
+                        rack_text.contains("SPACE") || rack_text.contains("SPC"),
+                        "caps {caps:?} at {tw}x{th}: charged active lost its token: {rack_text:?}"
+                    );
+                }
+            }
+
+            // Tiny / degenerate sizes fall back to 1-row rail and never panic.
+            for (tw, th) in [(0u16, 0u16), (1, 1), (80, 16)] {
+                assert_eq!(top_height(Rect::new(0, 0, tw, th)), 1);
+                let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();
+                terminal
+                    .draw(|f| draw_top(f, f.area(), &w, &mut state))
+                    .unwrap();
+            }
         }
     }
 
@@ -3278,9 +3446,12 @@ mod tests {
     /// charged-active token. Nothing may run off the right edge.
     #[test]
     fn the_full_rack_layout_at_57_80_and_120_columns() {
-        use crate::game::loadout::Upgrade;
+        use crate::game::loadout::{SlotCaps, Upgrade};
 
         let mut w = known_world();
+        // The review's five-and-five rack: a profile with 5 + 5 slots fits it
+        // exactly, so the layout is the one that was photographed.
+        w.player.loadout.set_caps(SlotCaps::new(5, 5));
         w.player.loadout.weapons = vec![
             Weapon::new(WeaponKind::TailWhip),
             Weapon::new(WeaponKind::TailThrash),
@@ -3390,11 +3561,12 @@ mod tests {
                 "{tw}x{th}: dash module incomplete: {bottom:?}"
             );
 
-            // The charged active names the key from 80 columns up (a full 5+5
-            // rack used to fall back to the ambiguous `SPC`).
+            // The charged active names the key from 80 columns up (`SPACE` at
+            // the widest rails, the three-letter `SPC` when a full rack needs
+            // the cell).
             if tw >= 80 {
                 assert!(
-                    rack.contains("SPACE"),
+                    rack.contains("SPACE") || rack.contains("SPC"),
                     "{tw}x{th}: charged active lost its key token: {rack:?}"
                 );
             }
