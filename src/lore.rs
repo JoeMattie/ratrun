@@ -57,8 +57,9 @@ pub fn map_intro(theme: Theme) -> (&'static str, &'static str) {
         Theme::Trailer => (
             "THE GETAWAY — FLATBED",
             "Forty feet of oak deck and a hundred klicks of night, and the road \
-             roaring underneath your paws. The cab is forward. Whatever else is \
-             riding in this load wants the cab too.",
+             roaring underneath your paws. The cab is forward. So is the magpie: \
+             it has been riding the slipstream over the cab since the last weigh \
+             station, and it has already decided the cab is its nest.",
         ),
     }
 }
@@ -87,9 +88,11 @@ pub fn victory(theme: Theme) -> &'static str {
              belt, curls under the street door, and you are out with it."
         }
         Theme::Trailer => {
-            "The cab's brake lines pop and the rig starts to drift. You leave it \
-             on the hard shoulder, drop off the tailgate, and the asphalt is still \
-             warm. The facility is behind you — all of it, at last."
+            "The magpie's last shriek is carried off down the deck with a \
+             hundredweight of road noise. The cab's brake lines pop and the rig \
+             starts to drift. You leave it on the hard shoulder, drop off the \
+             tailgate, and the asphalt is still warm. The facility is behind you \
+             — all of it, at last."
         }
     }
 }

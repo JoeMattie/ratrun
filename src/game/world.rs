@@ -96,8 +96,8 @@ use super::smoke::{SmokeLayer, SmokeScene};
 use super::weapon::WeaponKind;
 use super::art_walls::{Cardinal, WallKind};
 use super::{
-    art_boss_broom, art_boss_cat, art_boss_mower, art_enemy, art_floor, art_marks, art_miniboss,
-    art_props, art_rat, art_traps, art_walls, art_wave3a,
+    art_boss_broom, art_boss_cat, art_boss_magpie, art_boss_mower, art_enemy, art_floor, art_marks,
+    art_miniboss, art_props, art_rat, art_traps, art_walls, art_wave3a,
 };
 
 pub struct World {
@@ -1657,6 +1657,9 @@ impl World {
                     art_boss_mower::draw_dock_pad(pb, v.dock_pos, v.anim, 0.0, cam, accent);
                     art_boss_mower::draw_mower_ground(pb, &v, cam, accent);
                 }
+                BossArtView::Magpie(v) => {
+                    art_boss_magpie::draw_magpie_ground(pb, &v, cam, accent);
+                }
             }
         }
     }
@@ -1694,6 +1697,10 @@ impl World {
                 BossArtView::Cat(v) => art_boss_cat::draw_boss_cat(pb, &v, cam, accent),
                 BossArtView::Broom(v) => art_boss_broom::draw(pb, &v, cam, accent),
                 BossArtView::Mower(v) => art_boss_mower::draw_mower(pb, &v, cam, accent),
+                BossArtView::Magpie(v) => {
+                    art_boss_magpie::draw_magpie(pb, &v, cam, accent);
+                    art_boss_magpie::draw_magpie_crate(pb, &v, cam);
+                }
             }
         }
     }

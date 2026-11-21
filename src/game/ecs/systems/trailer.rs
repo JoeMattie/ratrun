@@ -44,6 +44,7 @@
 //! | sliding cargo | 10 damage and a shove along the strapping | not touched (the crate is at rat height) |
 //! | slipstream | — | small bodies (radius ≤ 3.5 px: the bat, skitterer, spitter) are dragged tailward at 9 px/s |
 //! | expansion joint | one `Sfx::Bump` every [`crate::game::art_trailer::BUMP_PERIOD`] s (the art's own one-pixel dip) | — |
+//! | the Magpie's gust (phase 3) | the bird's own push-only hazard shoves the rat; this pass adds the *wind* half of it | gems and small bodies outside a `wind` stretch are dragged tailward too, at [`GUST_WIND_GEMS`] / [`GUST_WIND_ENEMIES`] px/s |
 //!
 //! The slipstream moves gems too, and stops at the deck edge: a gem must never
 //! be blown onto the road (it would be unreachable).
@@ -56,6 +57,8 @@ use crate::game::collision::SizeClass;
 use crate::game::ecs::components::{Entity, SpawnId};
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::resources::{RngRes, RunCounters, SfxQueue, TickInput};
+use crate::game::art_boss_magpie;
+use crate::game::ecs::systems::boss::{Boss, BossKind, BossState};
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::Gem;
 use crate::game::level::{Level, Theme, TrailerDeck};
@@ -87,6 +90,12 @@ const RECOVERY_RADIUS: i32 = 7;
 /// ejected body is not standing on the lip of the hole it just fell into.
 const ENEMY_RECOVERY_MARGIN: i32 = 2;
 
+/// How far the Magpie's wing-beat drags a gem that the deck's own slipstream
+/// was not already moving, in px/s.
+pub const GUST_WIND_GEMS: f32 = 44.0;
+/// The same for light bodies (a bird's wing-beat is nothing to a brute).
+pub const GUST_WIND_ENEMIES: f32 = 22.0;
+
 /// The flatbed's per-tick hazard pass. See the module docs for the order.
 #[allow(clippy::too_many_arguments)]
 pub fn trailer_system(
@@ -99,6 +108,7 @@ pub fn trailer_system(
     mut sfx: ResMut<SfxQueue>,
     mut particles: ResMut<Particles>,
     mut rng: ResMut<RngRes>,
+    bosses: Query<&Boss>,
     mut order: Local<Vec<(u64, Entity)>>,
     mut bump: Local<u32>,
 ) {
@@ -195,6 +205,43 @@ pub fn trailer_system(
                     sfx.0.push(Sfx::Hurt);
                 }
                 break;
+            }
+        }
+    }
+
+    // ---- the magpie's wing-beat -----------------------------------------
+    //
+    // Phase 3's gusts are the deck's own slipstream, stirred: the rat is shoved
+    // by the bird's push-only hazard (which the boss owns), and this is what the
+    // same wing-beat does to everything lying loose on the planks. Read from the
+    // boss component — a pure function of its state and progress — so there is
+    // no new resource, no rng and no allocation, and nothing here runs before
+    // the rat's own hazard has already been resolved.
+    if dt > 0.0 && !deck.is_empty() {
+        let gusting = bosses.iter().any(|boss| {
+            !boss.dead
+                && boss.kind == BossKind::Magpie
+                && matches!(boss.state, BossState::Magpie(state)
+                    if art_boss_magpie::gust_pulse_active(state, boss.progress()))
+        });
+        if gusting {
+            for mut gem in gems.iter_mut() {
+                let to = gem.pos + Vec2::new(-GUST_WIND_GEMS * dt, 0.0);
+                if slipstream_floor(&level, to) {
+                    gem.pos = to;
+                }
+            }
+            for &(_, entity) in order.iter() {
+                let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
+                    continue;
+                };
+                if !e.alive() || e.radius > WIND_MAX_RADIUS || e.stun > 0.0 {
+                    continue;
+                }
+                let to = e.pos + Vec2::new(-GUST_WIND_ENEMIES * dt, 0.0);
+                if slipstream_floor(&level, to) {
+                    e.pos = to;
+                }
             }
         }
     }

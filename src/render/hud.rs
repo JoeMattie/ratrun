@@ -170,6 +170,11 @@ pub fn boss_codename(theme: Theme) -> (&'static str, &'static str) {
         crate::game::ecs::systems::boss::BossKind::Cat => CampaignLevel::Sewer,
         crate::game::ecs::systems::boss::BossKind::Broom => CampaignLevel::Kitchen,
         crate::game::ecs::systems::boss::BossKind::Mower => CampaignLevel::Lab,
+        // The getaway ride's own fight is not a campaign floor, so it has no
+        // campaign plate to borrow: the bar and the warning name the bird.
+        crate::game::ecs::systems::boss::BossKind::Magpie => {
+            return ("THE MAGPIE", "CLASS-V CORVID THIEF");
+        }
     };
     let class_tag = match level {
         CampaignLevel::Sewer => "CLASS-V APEX PREDATOR",

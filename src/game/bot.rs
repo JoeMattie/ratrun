@@ -907,7 +907,12 @@ impl Bot {
                     damage: boss.contact_damage.max(boss.kind.contact_damage()),
                 });
                 for h in &boss.hazards {
-                    if h.is_expired() || !h.hit_player {
+                    // A damage-free hazard is a *shove*, not a hit: the
+                    // Magpie's wing-beat gusts are push-only, and treating one
+                    // as lethal made the bot break its orbit and step into the
+                    // gust's own line to get away from it. The pushing still
+                    // moves the rat; there is nothing to dodge.
+                    if h.is_expired() || !h.hit_player || h.damage <= 0.0 {
                         continue;
                     }
                     self.threats.push(Threat::Hazard {

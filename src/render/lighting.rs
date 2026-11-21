@@ -1325,6 +1325,67 @@ impl LightMap {
                     _ => {}
                 }
             }
+            BossState::Magpie(st) => {
+                use crate::game::art_boss_magpie::MagpieState;
+                // The bird is self-lit: a magpie's iridescence catches the last
+                // of the light even on a dark flatbed, and the boss has to read
+                // against the planks (which are the brightest thing on this
+                // floor). Cool blue-white on the body, hot amber on the marked
+                // point whenever a tell is committed.
+                if in_range(bsx, bsy, 62.0) {
+                    let (col, r, int, sc) = match st {
+                        MagpieState::Stuck => ((255, 214, 132), 62.0, 250, 58),
+                        MagpieState::Peck | MagpieState::PeckWindup => {
+                            ((255, 158, 92), 56.0, 220, 48)
+                        }
+                        MagpieState::Gust | MagpieState::GustWindup => {
+                            ((176, 214, 255), 66.0, 230, 62)
+                        }
+                        MagpieState::Death => ((196, 206, 226), 58.0, 210, 52),
+                        _ => ((150, 190, 232), 52.0, 186, 40),
+                    };
+                    self.lights.push(PointLight {
+                        x: bsx,
+                        y: bsy,
+                        radius: r,
+                        color: col,
+                        intensity: int,
+                        scatter: sc,
+                        priority: 2,
+                        occlude: false,
+                        hard: false,
+                    });
+                }
+                // The marked point of a committed attack stays lit, so the rat
+                // can find the square it has to leave (or bite) even at the
+                // edge of the viewport.
+                if matches!(
+                    st,
+                    MagpieState::PeckWindup
+                        | MagpieState::Peck
+                        | MagpieState::Stuck
+                        | MagpieState::StrafeWindup
+                        | MagpieState::StrafePass
+                        | MagpieState::SnatchDrop
+                ) {
+                    let tsx = boss.target.x - cam.x;
+                    let tsy = boss.target.y - cam.y;
+                    if in_range(tsx, tsy, 40.0) {
+                        let hot = matches!(st, MagpieState::Peck | MagpieState::Stuck);
+                        self.lights.push(PointLight {
+                            x: tsx,
+                            y: tsy,
+                            radius: if hot { 40.0 } else { 34.0 },
+                            color: if hot { (255, 226, 156) } else { (255, 168, 96) },
+                            intensity: if hot { 235 } else { 180 },
+                            scatter: 44,
+                            priority: 3,
+                            occlude: false,
+                            hard: false,
+                        });
+                    }
+                }
+            }
             _ => {
                 // Fallback aura for future wave-3 bosses.
                 if in_range(bsx, bsy, 58.0) {

@@ -259,6 +259,11 @@ pub enum BossAttack {
     Ricochet,
     Blade,
     Other,
+    // The Flatbed's Magpie (appended for wave 3).
+    Peck,
+    Strafe,
+    Crate,
+    Gust,
 }
 
 impl BossAttack {
@@ -276,6 +281,10 @@ impl BossAttack {
             BossAttack::Ricochet => "ricochet",
             BossAttack::Blade => "blade",
             BossAttack::Other => "other",
+            BossAttack::Peck => "deck peck",
+            BossAttack::Strafe => "strafe pass",
+            BossAttack::Crate => "dropped crate",
+            BossAttack::Gust => "wing gust",
         }
     }
 }
@@ -322,6 +331,15 @@ impl DamageCause {
             DamageCause::BossProjectile(BossKind::Cat) => "sonic fang",
             DamageCause::BossProjectile(BossKind::Broom) => "dustpan shard",
             DamageCause::BossProjectile(BossKind::Mower) => "blade disc",
+            DamageCause::BossContact(BossKind::Magpie) => "magpie body",
+            DamageCause::BossHazard(BossKind::Magpie, a) => match a {
+                BossAttack::Peck => "magpie peck",
+                BossAttack::Strafe => "magpie strafe",
+                BossAttack::Crate => "dropped crate",
+                BossAttack::Gust => "magpie gust",
+                _ => "magpie hazard",
+            },
+            DamageCause::BossProjectile(BossKind::Magpie) => "magpie feather",
             DamageCause::Trap => "mousetrap",
             DamageCause::Unknown => "unknown",
         }
@@ -1140,6 +1158,7 @@ fn boss_name(kind: BossKind) -> &'static str {
         BossKind::Cat => "jaguar",
         BossKind::Broom => "broom human",
         BossKind::Mower => "mower",
+        BossKind::Magpie => "magpie",
     }
 }
 
@@ -1309,6 +1328,16 @@ fn boss_attack(state: &BossState) -> BossAttack {
             MowerState::Charge | MowerState::ChargeWindup => BossAttack::Charge,
             MowerState::Ricochet => BossAttack::Ricochet,
             MowerState::FlingBlades => BossAttack::Blade,
+            _ => BossAttack::Other,
+        },
+        BossState::Magpie(s) => match s {
+            crate::game::art_boss_magpie::MagpieState::PeckWindup
+            | crate::game::art_boss_magpie::MagpieState::Peck
+            | crate::game::art_boss_magpie::MagpieState::Stuck => BossAttack::Peck,
+            crate::game::art_boss_magpie::MagpieState::StrafeWindup
+            | crate::game::art_boss_magpie::MagpieState::StrafePass => BossAttack::Strafe,
+            crate::game::art_boss_magpie::MagpieState::SnatchDrop => BossAttack::Crate,
+            crate::game::art_boss_magpie::MagpieState::Gust => BossAttack::Gust,
             _ => BossAttack::Other,
         },
     }
