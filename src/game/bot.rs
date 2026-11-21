@@ -957,6 +957,33 @@ impl Bot {
                     }
                 }
                 PickupKind::Magnet => 4.0,
+                // Wave 3 pocket finds (WAVE3_DESIGN §10). The bot values them
+                // by what they buy a surviving rat: a free hit absorbed is
+                // worth most when the rat is not already full, the key splits
+                // a pack, the watch buys four seconds of standing still to
+                // shoot, and the socks are a dash refill with a bonus.
+                PickupKind::BottleCap => {
+                    if hp_frac < 0.85 {
+                        6.0
+                    } else {
+                        3.5
+                    }
+                }
+                PickupKind::WindupMouse => {
+                    if w.enemy_count() > 8 {
+                        6.5
+                    } else {
+                        3.0
+                    }
+                }
+                PickupKind::PocketWatch => {
+                    if w.enemy_count() > 12 {
+                        5.5
+                    } else {
+                        3.5
+                    }
+                }
+                PickupKind::CleanSocks => 3.5,
             };
             bonus += want * (1.0 - d / 190.0) * dir.dot((ppos - p).normalized());
         }

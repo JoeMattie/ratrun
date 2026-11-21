@@ -188,6 +188,11 @@ impl MinimapFrame {
                 PickupKind::Heal => PickupTag::Heal,
                 PickupKind::Magnet => PickupTag::Magnet,
                 PickupKind::Nuke => PickupTag::Nuke,
+                // The wave-3 pocket finds share the two "good for you" blip
+                // colours: a defensive find reads mint, a utility find ice.
+                // (A dedicated tag waits for the Neon minimap pass.)
+                PickupKind::BottleCap | PickupKind::CleanSocks => PickupTag::Heal,
+                PickupKind::WindupMouse | PickupKind::PocketWatch => PickupTag::Magnet,
             };
             self.markers.push(MapMarker {
                 cx: cx as f32,

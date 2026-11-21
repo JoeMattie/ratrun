@@ -88,11 +88,15 @@ pub enum Sfx {
     // Active (Space-triggered) weapons.
     ShootThrash,
     SonicSqueak,
+    // Wave 3 pocket finds (Bottle Cap, Wind-up Mouse, Pocket Watch, Clean
+    // Socks). One shared "found something" sting: the HUD callout names the
+    // pickup, and four near-identical metallic chimes would only add noise.
+    PocketFind,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 61] = [
+    pub const ALL: [Sfx; 62] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -160,6 +164,8 @@ impl Sfx {
         // Active (Space-triggered) weapons.
         Sfx::ShootThrash,
         Sfx::SonicSqueak,
+        // Wave 3 pocket finds.
+        Sfx::PocketFind,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -226,6 +232,7 @@ impl Sfx {
             Sfx::CampaignVictory => "CAMPAIGN_WIN",
             Sfx::ShootThrash => "THRASH",
             Sfx::SonicSqueak => "SQUEAK",
+            Sfx::PocketFind => "POCKET_FIND",
         }
     }
 
@@ -279,7 +286,8 @@ impl Sfx {
             | Sfx::MowerLockOn
             | Sfx::MowerBladeSpin
             | Sfx::MowerOverheat
-            | Sfx::MowerDockHum => 2,
+            | Sfx::MowerDockHum
+            | Sfx::PocketFind => 2,
             Sfx::LevelUp
             | Sfx::Boss
             | Sfx::Win
@@ -334,7 +342,8 @@ impl Sfx {
             | Sfx::MowerCharge
             | Sfx::MowerWallClang
             | Sfx::MowerBladeSpin
-            | Sfx::MowerOverheat => 2,
+            | Sfx::MowerOverheat
+            | Sfx::PocketFind => 2,
             Sfx::Kill
             | Sfx::Dash
             | Sfx::ShootNova
@@ -5027,6 +5036,61 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             });
             m.add_short_tail(0.12, 5200.0);
             m.finish(0.50, 1.2, 2.4, 26.0)
+        }
+
+        // 62. PocketFind: a small tin pop and a bright two-note "found it"
+        // figure — the sting that says a rare find went into the pocket. Short,
+        // metallic and rising, so it never reads as damage or as a level-up.
+        Sfx::PocketFind => {
+            const PITCH: [f32; 2] = [1.0, 1.04];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.42);
+            // The tin pop: a short band-passed crack as the lid comes off.
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.030,
+                pink: false,
+                gain: 0.55,
+                attack_s: 0.001,
+                decay_pow: 2.2,
+                filter: FilterMode::BandPass,
+                fc0: 2600.0 * p,
+                fc1: 1200.0 * p,
+                q: 1.3,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // Two clean triangle notes, a fifth apart (C6 then G6).
+            for (i, f) in [1046.50f32, 1567.98].iter().enumerate() {
+                m.add_osc(OscLayer {
+                    start_s: 0.028 + i as f32 * 0.085,
+                    dur_s: 0.16,
+                    f0: f * p,
+                    f1: f * p,
+                    wave: Wave::Triangle,
+                    gain: 0.34,
+                    attack_s: 0.005,
+                    decay_pow: 1.7,
+                    vib_hz: 6.0,
+                    vib_depth: 0.004,
+                    ..Default::default()
+                });
+            }
+            // A little body thump so the find has weight on the floor.
+            m.add_osc(OscLayer {
+                start_s: 0.010,
+                dur_s: 0.14,
+                f0: 196.0 * p,
+                f1: 96.0 * p,
+                pitch_pow: 0.6,
+                wave: Wave::Sine,
+                gain: 0.26,
+                attack_s: 0.003,
+                decay_pow: 1.6,
+                ..Default::default()
+            });
+            m.add_short_tail(0.09, 4200.0);
+            m.finish(0.55, 1.2, 2.0, 22.0)
         }
     }
 }

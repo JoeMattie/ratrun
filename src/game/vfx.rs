@@ -1396,6 +1396,11 @@ pub fn emit_pickup_ambient(
             PickupKind::Heal => Ramp::Heal,
             PickupKind::Magnet => Ramp::Magnet,
             PickupKind::Nuke => Ramp::Fire,
+            // Wave 3 pocket finds: tin, brass, clock-blue, laundry-white.
+            PickupKind::BottleCap => Ramp::Custom((248, 244, 226), (128, 126, 118)),
+            PickupKind::WindupMouse => Ramp::Gold,
+            PickupKind::PocketWatch => Ramp::Custom((198, 236, 250), (58, 96, 128)),
+            PickupKind::CleanSocks => Ramp::Custom((250, 250, 246), (150, 156, 158)),
         };
         let a = rng.random_range(0.0..std::f32::consts::TAU);
         let d = rng.random_range(2.5..5.5);
@@ -3869,6 +3874,156 @@ pub fn emit_boss_mower_death(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) 
         seed: rng.random::<u16>(),
         kind: StainKind::Scorch,
     });
+}
+
+// ---- Wave 3 pocket finds (WAVE3_DESIGN §10) ------------------------------
+
+/// The burst for a collected Bottle Cap / Wind-up Mouse / Pocket Watch / Clean
+/// Socks.
+///
+/// Each find has its own two-tone read on the rat: a tin-white ring for the
+/// cap, a brass key-spark fan for the mouse, a slow blue ripple for the watch
+/// and a bright laundry puff for the socks. Only the particles are rng-driven;
+/// the ring is fixed, so the collection always reads the same.
+///
+/// Runs exactly once per find (from `loot::pickups_system`), which is why it
+/// may draw rng freely: a run that never collects one of these pickups never
+/// calls it.
+pub fn emit_pickup_find(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, kind: PickupKind) {
+    let (ring, core, ramp, sparks, spark_speed) = match kind {
+        PickupKind::BottleCap => (
+            (238, 236, 220),
+            (255, 255, 250),
+            Ramp::Custom((255, 252, 240), (140, 138, 128)),
+            12usize,
+            74.0f32,
+        ),
+        PickupKind::WindupMouse => (
+            (232, 190, 96),
+            (255, 246, 210),
+            Ramp::Gold,
+            14,
+            88.0,
+        ),
+        PickupKind::PocketWatch => (
+            (150, 210, 226),
+            (240, 252, 255),
+            Ramp::Custom((214, 244, 255), (60, 100, 132)),
+            10,
+            52.0,
+        ),
+        PickupKind::CleanSocks => (
+            (242, 242, 234),
+            (255, 255, 255),
+            Ramp::Custom((252, 252, 246), (150, 158, 160)),
+            12,
+            64.0,
+        ),
+        // Not a pocket find: fall back to the heal burst's gentle read.
+        _ => (
+            (126, 224, 152),
+            (240, 255, 244),
+            Ramp::Heal,
+            10,
+            60.0,
+        ),
+    };
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 2.0,
+        end_r: 18.0,
+        life: 0.30,
+        max_life: 0.30,
+        color: ring,
+        core,
+        thick: 1.4,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    let n = ps.budget_count(sparks, true);
+    ps.burst_shaped(rng, pos, n, spark_speed, 2.2, ramp, 0.36, true, Shape::Streak, 3.4);
+}
+
+/// The tin-white rim that marks a live Bottle Cap charge.
+///
+/// Called every tick the charge is up, so it is deliberately **rng-free**: four
+/// fixed highlights on a 7.5 px ring, turning once every two seconds, each with
+/// a very short life so only the current tick's ring is on screen. Nothing here
+/// depends on particle load beyond the hero budget, so the cue cannot flicker
+/// out mid-fight.
+pub fn emit_shield_rim(ps: &mut Particles, pos: Vec2, clock: f32) {
+    let n = ps.budget_count(4, true);
+    for i in 0..n {
+        let a = clock * std::f32::consts::PI + i as f32 / 4.0 * std::f32::consts::TAU;
+        let at = pos + Vec2::from_angle(a) * 7.5;
+        ps.push(Particle {
+            pos: at,
+            vel: Vec2::ZERO,
+            life: 0.10,
+            max_life: 0.10,
+            drag: 0.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom((255, 255, 250), (170, 176, 178)),
+            additive: true,
+            shape: Shape::Dot,
+        });
+    }
+}
+
+/// Two little heel prints behind a rat wearing Clean Socks.
+///
+/// Deterministic: one pair per `SOCK_PRINT_SPACING` px walked, placed either
+/// side of the rat's facing, fading white to grey. Long-lived (0.7 s) so the
+/// trail reads as a trail.
+pub fn emit_sock_print(ps: &mut Particles, pos: Vec2, facing: Vec2) {
+    let side = if facing.len_sq() > 1e-4 {
+        facing.normalized().perp()
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    for k in [-1.0f32, 1.0] {
+        ps.push(Particle {
+            pos: pos + side * (k * 2.0),
+            vel: Vec2::ZERO,
+            life: 0.70,
+            max_life: 0.70,
+            drag: 0.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom((248, 248, 242), (120, 130, 134)),
+            additive: false,
+            shape: Shape::Dot,
+        });
+    }
+}
+
+/// The quiet fizzle when a timed find runs out (or the key winds down).
+///
+/// rng-free on purpose: expiry has to be the same beat every time, and it can
+/// happen on any tick of any run, so it must not perturb the draws.
+pub fn emit_buff_expire(ps: &mut Particles, pos: Vec2, kind: PickupKind) {
+    let (color, count) = match kind {
+        PickupKind::BottleCap => ((232, 226, 206), 5),
+        PickupKind::WindupMouse => ((232, 190, 96), 6),
+        PickupKind::PocketWatch => ((150, 210, 226), 5),
+        PickupKind::CleanSocks => ((240, 240, 232), 5),
+        _ => ((190, 190, 190), 4),
+    };
+    let n = ps.budget_count(count, false);
+    for i in 0..n {
+        let a = i as f32 / n.max(1) as f32 * std::f32::consts::TAU;
+        ps.push(Particle {
+            pos: pos + Vec2::from_angle(a) * 4.0,
+            vel: Vec2::from_angle(a) * 9.0,
+            life: 0.22,
+            max_life: 0.22,
+            drag: 4.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(color, (60, 62, 66)),
+            additive: false,
+            shape: Shape::Puff,
+        });
+    }
 }
 
 #[cfg(test)]

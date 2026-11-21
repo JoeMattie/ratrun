@@ -82,6 +82,11 @@ pub const MAGNET_ICE: Color = Color::Rgb(128, 206, 250);
 pub const TRAIL_GOLD: Color = Color::Rgb(248, 214, 152);
 /// Cold steel for the one-way gate slamming shut behind the rat.
 pub const GATE_STEEL: Color = Color::Rgb(176, 204, 220);
+/// Wave 3 pocket finds: tin, brass, clock-case blue and laundry white.
+pub const BOTTLE_TIN: Color = Color::Rgb(232, 226, 206);
+pub const BRASS_KEY: Color = Color::Rgb(232, 190, 96);
+pub const WATCH_ICE: Color = Color::Rgb(150, 210, 226);
+pub const SOCK_WHITE: Color = Color::Rgb(240, 240, 232);
 
 /// Distinct single-cell geometric glyph for each weapon kind.
 pub fn weapon_glyph(kind: WeaponKind) -> char {
@@ -155,6 +160,12 @@ pub enum CalloutKind {
     MazeCache,
     /// A maze's one-way gate slammed shut behind the rat.
     GateSlam,
+    // Wave 3 pocket finds (WAVE3_DESIGN §10), appended so the legacy kinds
+    // keep their order.
+    BottleCap,
+    WindupMouse,
+    PocketWatch,
+    CleanSocks,
 }
 
 impl CalloutKind {
@@ -169,6 +180,10 @@ impl CalloutKind {
             CalloutKind::BossSlain => HEAL_MINT,
             CalloutKind::MazeCache => TRAIL_GOLD,
             CalloutKind::GateSlam => GATE_STEEL,
+            CalloutKind::BottleCap => BOTTLE_TIN,
+            CalloutKind::WindupMouse => BRASS_KEY,
+            CalloutKind::PocketWatch => WATCH_ICE,
+            CalloutKind::CleanSocks => SOCK_WHITE,
         }
     }
 }
@@ -251,6 +266,9 @@ pub struct HudState {
     hp: String,
     xp_label: String,
     dash: String,
+    /// The wave-3 pocket-find strip: `B12 M5 P4 S6` — one chip per active
+    /// timed buff, refilled in `tick` so the draw path allocates nothing.
+    buffs: String,
 
     // Overlay retained buffers (accessed by `overlay.rs`).
     pub(crate) boss_hp_text: String,
@@ -316,6 +334,7 @@ impl Default for HudState {
             hp: String::with_capacity(16),
             xp_label: String::with_capacity(12),
             dash: String::with_capacity(16),
+            buffs: String::with_capacity(24),
             boss_hp_text: String::with_capacity(24),
             boss_banner: String::with_capacity(48),
             clock: 0.0,
@@ -372,6 +391,9 @@ impl HudState {
         self.escalation_stage = 0;
         self.active_ready.clear();
         self.active_flash.clear();
+        // A run that ends with a pocket find still running must not leave its
+        // chip on the next run's strip.
+        self.buffs.clear();
         self.next_kill_milestone = 50;
         self.streak_kills = 0;
         self.streak_timer = 0.0;
@@ -427,6 +449,26 @@ impl HudState {
             }
             PickupKind::Nuke => {
                 self.push_callout(CalloutKind::Nuke, "+PURGE", "SECTOR CLEARED", 2.8);
+            }
+            // Wave 3 pocket finds (WAVE3_DESIGN §10). The callout names the
+            // find and its rule; the timed chip on the buff strip counts it
+            // down.
+            PickupKind::BottleCap => {
+                self.push_callout(CalloutKind::BottleCap, "+BOTTLE CAP", "GOOD FOR ONE BOOT", 2.4);
+            }
+            PickupKind::WindupMouse => {
+                self.push_callout(
+                    CalloutKind::WindupMouse,
+                    "+WIND-UP MOUSE",
+                    "CHEAPEST MEMBER OF THE TEAM",
+                    2.4,
+                );
+            }
+            PickupKind::PocketWatch => {
+                self.push_callout(CalloutKind::PocketWatch, "+POCKET WATCH", "BORROW FOUR SECONDS", 2.4);
+            }
+            PickupKind::CleanSocks => {
+                self.push_callout(CalloutKind::CleanSocks, "+CLEAN SOCKS", "DASH READY", 2.2);
             }
         }
     }
@@ -651,6 +693,30 @@ impl HudState {
                 self.notify_pickup(PickupKind::Magnet);
             }
         }
+
+        // 5b. Wave 3 pocket finds: one chip per running timer, with the whole
+        //     seconds it has left (`B12 M5 P4 S6`). Refilled here (not in the
+        //     draw path) so the strip reuses its buffer every frame.
+        refill(&mut self.buffs, |b| {
+            let buffs = &world.player.buffs;
+            let mut any = false;
+            for (kind, left) in [
+                (PickupKind::BottleCap, buffs.shield),
+                (PickupKind::WindupMouse, buffs.decoy),
+                (PickupKind::PocketWatch, buffs.slow_bullets),
+                (PickupKind::CleanSocks, buffs.socks),
+            ] {
+                if left <= 0.0 {
+                    continue;
+                }
+                if any {
+                    b.push(' ');
+                }
+                let secs = left.ceil().max(1.0) as u32;
+                let _ = write!(b, "{}{:02}", kind.buff_tag(), secs.min(99));
+                any = true;
+            }
+        });
 
         // 6. Maze cache claims and one-way gate slams (latched, see
         //    `notify_maze_feed`).
@@ -1402,6 +1468,35 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
             }
         }
     }
+
+    draw_buff_strip(frame, area, &state.buffs);
+}
+
+/// The wave-3 pocket-find strip: `B12 M05 P04 S06`.
+///
+/// One chip per active timed buff, smallest-first in the design's order, drawn
+/// on the row directly above the bottom rail and hugging its left edge. That
+/// row belongs to the pixel viewport, so the strip is only ever a short
+/// left-aligned run of cells: the low-health pill owns the centre and the
+/// damage brackets own the edges, and an empty string (no buff running) writes
+/// nothing at all. Zero allocation — the text is the retained `HudState::buffs`
+/// buffer.
+pub(crate) fn draw_buff_strip(frame: &mut Frame, area: Rect, text: &str) {
+    if text.is_empty() || area.y == 0 || area.width < 12 {
+        return;
+    }
+    let w = (text.chars().count() as u16).min(area.width.saturating_sub(2));
+    if w == 0 {
+        return;
+    }
+    let buf = frame.buffer_mut();
+    buf.set_stringn(
+        area.x + 1,
+        area.y - 1,
+        text,
+        w as usize,
+        Style::default().fg(BRASS_KEY).bg(PLATE),
+    );
 }
 
 /// Draw a compact eighth-cell bar directly into `buf` with no label.
@@ -2153,6 +2248,62 @@ mod tests {
             state.callouts.iter().any(|c| c.active && c.tag == "GATE SLAM"),
             "the gate slam produced no callout"
         );
+    }
+
+    /// The wave-3 pocket-find strip: one `tag+seconds` chip per running timer on
+    /// the row above the bottom rail, at both the small (57x20) and the normal
+    /// (80x24) terminal size, and nothing at all when no buff is running.
+    #[test]
+    fn the_buff_strip_lists_running_pocket_finds_at_57x20_and_80x24() {
+        fn strip(w: &World, width: u16, height: u16, state: &mut HudState) -> String {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|f| {
+                    let area = f.area();
+                    let bottom = Rect::new(0, area.height - 1, area.width, 1);
+                    draw_bottom(f, bottom, w, state);
+                })
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            let y = height - 2;
+            let mut text = String::new();
+            for x in 0..width {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text
+        }
+
+        for (width, height) in [(57u16, 20u16), (80u16, 24u16)] {
+            let mut w = known_world();
+            w.player.buffs = crate::game::player::Buffs {
+                shield: 11.2,
+                decoy: 4.4,
+                slow_bullets: 3.2,
+                socks: 5.9,
+            };
+            let mut state = HudState::default();
+            state.tick(1.0 / 60.0, &w, &[], false);
+            state.tick(1.0 / 60.0, &w, &[], false);
+            let text = strip(&w, width, height, &mut state);
+            for chip in ["B12", "M05", "P04", "S06"] {
+                assert!(
+                    text.contains(chip),
+                    "{width}x{height}: no {chip} chip on the buff strip: {text:?}"
+                );
+            }
+
+            // A run with no pocket find writes no strip at all.
+            let mut plain = known_world();
+            plain.player.buffs = crate::game::player::Buffs::default();
+            let mut state = HudState::default();
+            state.tick(1.0 / 60.0, &plain, &[], false);
+            state.tick(1.0 / 60.0, &plain, &[], false);
+            let text = strip(&plain, width, height, &mut state);
+            assert!(
+                !text.contains("B12") && !text.contains("S06"),
+                "{width}x{height}: an idle run drew a buff chip: {text:?}"
+            );
+        }
     }
 
     /// A claim made during a tick the HUD never saw (the reward view is already

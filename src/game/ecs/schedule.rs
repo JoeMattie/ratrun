@@ -10,6 +10,7 @@
 //!
 //! | # | system | legacy step |
 //! |---|--------|-------------|
+//! | -1 | `powerups::powerups_system` | wave-3 pocket-find timers (new) |
 //! | 1 | `player::player_system` | `update_player` |
 //! | 2 | `fog::reveal_system` | fog of war (minimap; new, writes only `Fog`) |
 //! | 3 | `enemy_move::flow_refresh_system` | flow refresh |
@@ -76,7 +77,8 @@ use bevy_ecs::prelude::*;
 
 use super::resources::TickInput;
 use super::systems::{
-    boss, combat, enemy_move, fog, fx, gates, loot, player, projectiles, spawn, traps, weapons,
+    boss, combat, enemy_move, fog, fx, gates, loot, player, powerups, projectiles, spawn, traps,
+    weapons,
 };
 
 /// Legacy `self.damage_numbers.update(dt)` (neon merge, `World::update`).
@@ -103,6 +105,12 @@ pub fn build_tick_schedule() -> Schedule {
     // lands before `loot::reap_enemies_system`, so trap kills take the normal
     // loot path. Trap state lives in `level.objects` (see `traps.rs`).
     schedule.add_systems(traps::traps_system.before(player::player_system));
+
+    // -1: the wave-3 pocket finds' timers. Before the traps (Clean Socks must
+    // already be aged when a glue board looks for a victim), before the player
+    // (a Pocket Watch has to cover the whole tick) and before everything that
+    // reads a buff. A run without one of these pickups returns immediately.
+    schedule.add_systems(powerups::powerups_system.before(traps::traps_system));
 
     // 1-15: everything up to and including contact damage.
     schedule.add_systems(

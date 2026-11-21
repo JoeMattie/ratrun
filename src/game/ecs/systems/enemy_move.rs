@@ -142,10 +142,25 @@ pub fn enemy_steering_system(
     mut order: Local<Vec<(u64, Entity)>>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
     slow: Query<&crate::game::ecs::systems::traps::TrapSlow>,
+    decoys: Query<(&SpawnId, &crate::game::ecs::systems::powerups::Decoy)>,
 ) {
     let dt = input.dt;
     let ppos = player.pos;
     let speed_mult = 1.0 + counters.elapsed / 400.0;
+    // The Wind-up Mouse's key, if one is spinning (at most one at a time). The
+    // lure is a straight line at the key, not a second flow field: it only
+    // reaches `WINDUP_MOUSE_RADIUS` (48 px, three tiles), it is refused when a
+    // wall crosses that line, and it costs one cheap sector query per body
+    // inside the radius. Recomputing a field per enemy would cost far more
+    // than the trick is worth, and a key that pulls the whole map would make
+    // the maze partitions meaningless.
+    // The highest `SpawnId` wins if a second key ever exists (only one can by
+    // construction), so the query's storage order never decides the lure.
+    let decoy = decoys
+        .iter()
+        .filter(|(_, d)| d.live())
+        .max_by_key(|(id, _)| id.0)
+        .map(|(_, d)| d.pos);
 
     // Legacy indexed `self.enemies[i]`; here that is `SpawnId` order. Unique
     // ids, so an unstable sort is the same order.
@@ -159,11 +174,39 @@ pub fn enemy_steering_system(
             .expect("ordered enemy must still be alive");
         // One field per size class: a rat-sized enemy may take a rat-hole, a
         // Cat or a Brute must route around it.
-        let flow_dir = flow.dir_at(SizeClass::of_enemy(e.kind), e.pos);
+        let mut flow_dir = flow.dir_at(SizeClass::of_enemy(e.kind), e.pos);
         // `traps::TrapSlow` is the per-enemy movement multiplier a sticky board
         // inserts while it holds this enemy (absent = unaffected).
         let glue = slow.get(entity).map_or(1.0, |s| s.0);
-        e.steer(ppos, flow_dir, dt, speed_mult * glue);
+        // ---- Wind-up Mouse lure (`systems::powerups`) --------------------
+        // An ordinary body inside the key's radius that can *walk* to it (no
+        // wall across the line) chases the key instead of the rat; elites and
+        // the boss keep their target, so the key is a crowd tool and not a
+        // boss exploit. The line test is the mover's own radius, the same
+        // question `los_clear` answers for shots and pounces.
+        let mut target = ppos;
+        if let Some(key) = decoy {
+            if crate::game::ecs::systems::powerups::decoy_lures(e.elite, e.kind)
+                && e.pos.dist_sq(key)
+                    <= crate::game::ecs::systems::powerups::WINDUP_MOUSE_RADIUS.powi(2)
+                && crate::game::ecs::systems::projectiles::los_clear(
+                    &level, e.pos, key, e.radius,
+                )
+            {
+                // Spitters keep a stand-off from whatever they chase, so hand
+                // steering a point well past the key along the same line: the
+                // body then walks up to the key instead of backing away from it.
+                target = match e.kind {
+                    EnemyKind::Spitter => key + (key - e.pos).normalized() * 130.0,
+                    _ => key,
+                };
+                let dir = (key - e.pos).normalized();
+                if dir.len_sq() > 0.0 {
+                    flow_dir = dir;
+                }
+            }
+        }
+        e.steer(target, flow_dir, dt, speed_mult * glue);
         // Keep enemies inside the arena.
         e.pos = e
             .pos

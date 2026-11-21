@@ -274,8 +274,12 @@ impl ActiveFx {
 pub struct NeighborScratch(pub Vec<u32>);
 
 /// Reused pickup-collection scratch (legacy `World::pickup_scratch`).
+///
+/// Each entry is the kind collected **and** the pickup's floor position: the
+/// wave-3 Wind-up Mouse leaves its brass key where the mouse was lying, so the
+/// collection pass has to carry the spot as well as the kind.
 #[derive(Resource, Default)]
-pub struct PickupScratch(pub Vec<PickupKind>);
+pub struct PickupScratch(pub Vec<(PickupKind, Vec2)>);
 
 /// Set by `loot::pickups_system` when a Nuke lands this tick; consumed by
 /// `loot::nuke_reap_system`. Reset to `false` by `World::begin_tick`.
