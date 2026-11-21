@@ -6107,6 +6107,224 @@ pub fn emit_ripcord_snap(ps: &mut Particles, rng: &mut impl Rng, route: &[(Vec2,
     }
 }
 
+// ---- The Magpie (Flatbed) --------------------------------------------------
+
+/// **The Magpie**: the bill going into the planks.
+///
+/// A wedge of splinters thrown back along the strike plus a low wood-dust puff
+/// at the point — the same read as the peck's ground telegraph resolving.
+pub fn emit_boss_magpie_peck(ps: &mut Particles, rng: &mut impl Rng, at: Vec2, dir: Vec2) {
+    let at = safe_pos(at);
+    let dir = safe_dir(dir, Vec2::new(1.0, 0.0));
+    // Splinters: hard, bright, thrown back at the bill.
+    let n = ps.budget_count(14, true);
+    ps.cone_shaped(
+        rng,
+        at,
+        -dir,
+        n,
+        120.0,
+        0.75,
+        Ramp::Custom((214, 178, 118), (86, 60, 34)),
+        0.42,
+        true,
+        Shape::Streak,
+        2.2,
+    );
+    // Dust and plank crumbs.
+    let dust = ps.budget_count(10, false);
+    ps.burst_shaped(
+        rng,
+        at,
+        dust,
+        46.0,
+        2.0,
+        Ramp::Custom((198, 178, 148), (96, 84, 70)),
+        0.55,
+        false,
+        Shape::Puff,
+        2.6,
+    );
+    ps.push_stain(Stain {
+        pos: at,
+        radius: 3.2,
+        color: (86, 66, 44),
+        life: 7.0,
+        max_life: 7.0,
+        seed: rng.random::<u16>(),
+        kind: StainKind::Crack,
+    });
+}
+
+/// **The Magpie**: one wing-beat.
+///
+/// `dt` is the burst's own budget, not the tick: the caller passes how much of
+/// the pulse it wants to spend (the shipped controller uses one burst per
+/// pulse), so the count is rate-independent.
+pub fn emit_boss_magpie_gust(ps: &mut Particles, rng: &mut impl Rng, at: Vec2, dt: f32) {
+    let at = safe_pos(at);
+    let dt = safe_dt(dt).max(0.02);
+    // The wash: pale grit dragged tailward, in a wide fan.
+    let n = ps.budget_count((dt * 190.0).clamp(6.0, 26.0) as usize, false);
+    ps.cone_shaped(
+        rng,
+        at,
+        crate::game::art_boss_magpie::GUST_AXIS,
+        n,
+        128.0,
+        0.85,
+        Ramp::Custom((232, 240, 250), (120, 140, 162)),
+        dt * 2.4,
+        false,
+        Shape::Streak,
+        1.4,
+    );
+    // Two or three long white feathers shed by the beat.
+    if rng.random::<f32>() < (dt * 8.0).min(0.5) {
+        let n = ps.budget_count(2, false);
+        for _ in 0..n {
+            let side = if rng.random::<bool>() { 1.0 } else { -1.0 };
+            let pos = at + Vec2::new(rng.random_range(-8.0..8.0), side * rng.random_range(2.0..8.0));
+            let life = rng.random_range(0.35..0.6);
+            ps.push(Particle {
+                pos,
+                vel: crate::game::art_boss_magpie::GUST_AXIS * rng.random_range(40.0..80.0)
+                    + Vec2::new(0.0, rng.random_range(-16.0..16.0)),
+                life,
+                max_life: life,
+                drag: 3.0,
+                gravity: 0.0,
+                ramp: Ramp::Custom((244, 244, 240), (140, 146, 152)),
+                additive: false,
+                shape: Shape::Streak,
+            });
+        }
+    }
+}
+
+/// **The Magpie**: the dropped crate bursting on the deck.
+pub fn emit_boss_magpie_crate(ps: &mut Particles, rng: &mut impl Rng, at: Vec2) {
+    let at = safe_pos(at);
+    // The impact ring.
+    ps.push_shockwave(Shockwave {
+        pos: at,
+        start_r: 2.0,
+        end_r: 22.0,
+        life: 0.30,
+        max_life: 0.30,
+        color: (222, 196, 150),
+        core: (255, 244, 224),
+        thick: 1.6,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    // Staves and straps.
+    let n = ps.budget_count(16, true);
+    ps.burst_shaped(
+        rng,
+        at,
+        n,
+        150.0,
+        5.0,
+        Ramp::Custom((186, 138, 82), (74, 54, 32)),
+        0.50,
+        true,
+        Shape::Streak,
+        3.0,
+    );
+    // The burst's dust.
+    let dust = ps.budget_count(12, false);
+    ps.burst_shaped(
+        rng,
+        at,
+        dust,
+        58.0,
+        2.4,
+        Ramp::Custom((208, 190, 164), (96, 88, 78)),
+        0.70,
+        false,
+        Shape::Puff,
+        2.4,
+    );
+    ps.push_stain(Stain {
+        pos: at,
+        radius: 4.0,
+        color: (78, 60, 40),
+        life: 9.0,
+        max_life: 9.0,
+        seed: rng.random::<u16>(),
+        kind: StainKind::Dent,
+    });
+}
+
+/// **The Magpie**: the death beat. The bird molts where it falls.
+pub fn emit_boss_magpie_death(ps: &mut Particles, rng: &mut impl Rng, at: Vec2, facing: Vec2, blood: Rgb) {
+    let at = safe_pos(at);
+    let facing = safe_dir(facing, Vec2::new(1.0, 0.0));
+    ps.push_shockwave(Shockwave {
+        pos: at,
+        start_r: 3.0,
+        end_r: 34.0,
+        life: 0.60,
+        max_life: 0.60,
+        color: (196, 208, 226),
+        core: (250, 252, 255),
+        thick: 2.0,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    // Iridescent feathers, thrown wide.
+    let n = ps.budget_count(22, true);
+    for i in 0..n {
+        let palette = [
+            (30, 34, 48),
+            (232, 232, 238),
+            (52, 108, 128),
+            (74, 44, 108),
+        ];
+        let start = palette[i % palette.len()];
+        let life = rng.random_range(0.35..0.85);
+        let a = rng.random_range(0.0f32..std::f32::consts::TAU);
+        let speed = rng.random_range(30.0..140.0);
+        ps.push(Particle {
+            pos: at + facing * rng.random_range(-6.0..6.0),
+            vel: Vec2::new(a.cos(), a.sin() * 0.8) * speed,
+            life,
+            max_life: life,
+            drag: 3.4,
+            gravity: 26.0,
+            ramp: Ramp::Custom(start, (90, 88, 84)),
+            additive: false,
+            shape: if i % 3 == 0 { Shape::Blob } else { Shape::Streak },
+        });
+    }
+    // The body's own shadow and blood where it lands.
+    let dust = ps.budget_count(10, false);
+    ps.burst_shaped(
+        rng,
+        at,
+        dust,
+        52.0,
+        1.8,
+        Ramp::Custom((190, 184, 176), (84, 80, 78)),
+        0.65,
+        false,
+        Shape::Puff,
+        2.2,
+    );
+    ps.push_stain(Stain {
+        pos: at,
+        radius: 4.6,
+        color: blood,
+        life: 12.0,
+        max_life: 12.0,
+        seed: rng.random::<u16>(),
+        kind: StainKind::Splat,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

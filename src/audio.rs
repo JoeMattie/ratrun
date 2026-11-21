@@ -136,11 +136,28 @@ pub enum Sfx {
     NightBell,
     NightStamp,
     NightCarriage,
+    // The Flatbed's boss: The Magpie (the getaway ride).
+    /// The bird's corvid rattle as it settles on the cargo.
+    MagpieCry,
+    /// The phase-change shake: feathers going up and resettling.
+    MagpieRattle,
+    /// The head coming back over the beak line.
+    MagpieWindup,
+    /// The bill going into the plank (a wooden knock and a squawk).
+    MagpieStuck,
+    /// Two hard wing-beats off the deck.
+    MagpieTakeoff,
+    /// One wing-beat gust: a wide low wash of wind.
+    MagpieGust,
+    /// The dropped crate bursting.
+    MagpieCrate,
+    /// The last rattle.
+    MagpieDeath,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 92] = [
+    pub const ALL: [Sfx; 100] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -248,6 +265,15 @@ impl Sfx {
         Sfx::NightBell,
         Sfx::NightStamp,
         Sfx::NightCarriage,
+        // The Magpie (Flatbed).
+        Sfx::MagpieCry,
+        Sfx::MagpieRattle,
+        Sfx::MagpieWindup,
+        Sfx::MagpieStuck,
+        Sfx::MagpieTakeoff,
+        Sfx::MagpieGust,
+        Sfx::MagpieCrate,
+        Sfx::MagpieDeath,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -345,6 +371,14 @@ impl Sfx {
             Sfx::NightBell => "NIGHT_BELL",
             Sfx::NightStamp => "NIGHT_STAMP",
             Sfx::NightCarriage => "NIGHT_CARRIAGE",
+            Sfx::MagpieCry => "MAGPIE_CRY",
+            Sfx::MagpieRattle => "MAGPIE_RATTLE",
+            Sfx::MagpieWindup => "MAGPIE_WINDUP",
+            Sfx::MagpieStuck => "MAGPIE_STUCK",
+            Sfx::MagpieTakeoff => "MAGPIE_TAKEOFF",
+            Sfx::MagpieGust => "MAGPIE_GUST",
+            Sfx::MagpieCrate => "MAGPIE_CRATE",
+            Sfx::MagpieDeath => "MAGPIE_DEATH",
         }
     }
 
@@ -392,7 +426,10 @@ impl Sfx {
             | Sfx::ShootRain
             | Sfx::Bump
             | Sfx::SteamHiss
-            | Sfx::NightStamp => 3,
+            | Sfx::NightStamp
+            | Sfx::MagpieCry
+            | Sfx::MagpieWindup
+            | Sfx::MagpieGust => 3,
             Sfx::Pickup
             | Sfx::UiSelect
             | Sfx::Heal
@@ -409,7 +446,9 @@ impl Sfx {
             | Sfx::MowerOverheat
             | Sfx::MowerDockHum
             | Sfx::PocketFind
-            | Sfx::Infect => 2,
+            | Sfx::Infect
+            | Sfx::MagpieTakeoff
+            | Sfx::MagpieCrate => 2,
             Sfx::LevelUp
             | Sfx::Boss
             | Sfx::Win
@@ -425,7 +464,10 @@ impl Sfx {
             | Sfx::CampaignVictory
             | Sfx::DashReady
             | Sfx::DashDenied
-            | Sfx::Evolve => 1,
+            | Sfx::Evolve
+            | Sfx::MagpieRattle
+            | Sfx::MagpieStuck
+            | Sfx::MagpieDeath => 1,
             Sfx::Gold => 2,
             Sfx::ShopEnter => 2,
             Sfx::Purchase => 2,
@@ -498,7 +540,9 @@ impl Sfx {
             | Sfx::MangleJam
             | Sfx::MangleShift
             | Sfx::Infect
-            | Sfx::NightStamp => 2,
+            | Sfx::NightStamp
+            | Sfx::MagpieStuck
+            | Sfx::MagpieCrate => 2,
             Sfx::Kill
             | Sfx::Dash
             | Sfx::ShootNova
@@ -524,13 +568,19 @@ impl Sfx {
             | Sfx::MangleCrank
             | Sfx::MangleTowel
             | Sfx::SteamHiss
-            | Sfx::NightCarriage => 1,
+            | Sfx::NightCarriage
+            | Sfx::MagpieGust
+            | Sfx::MagpieWindup
+            | Sfx::MagpieTakeoff
+            | Sfx::MagpieRattle => 1,
             Sfx::Shoot | Sfx::ShootSpray | Sfx::Hit | Sfx::Gem | Sfx::UiMove => 0,
             Sfx::Gold => 0,
             // Pure feedback: never steals a voice from a hit or a kill.
             Sfx::DashReady | Sfx::DashDenied => 0,
             // Wave 3 enemy tells: quiet by design.
             Sfx::Warn | Sfx::FleaHop => 0,
+            // The bird's own call and its death rattle are set pieces.
+            Sfx::MagpieCry | Sfx::MagpieDeath => 3,
             Sfx::ShopEnter | Sfx::Purchase | Sfx::Denied => 1,
             Sfx::MinibossArrive | Sfx::MinibossTell | Sfx::MinibossRetreat => 2,
         }
@@ -6547,6 +6597,356 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             });
             m.add_short_tail(0.13, 3400.0);
             m.finish(0.34, 1.3, 1.4, 24.0)
+        }
+
+        // 83. MagpieCry: a corvid rattle — a harsh, nasal, two-part squawk.
+        Sfx::MagpieCry => {
+            const PITCH: [f32; 3] = [1.0, 0.88, 1.12];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.34);
+            // The nasal band: a saw through a tight band-pass, pitched low.
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.11,
+                f0: 620.0 * p,
+                f1: 430.0 * p,
+                pitch_pow: 0.5,
+                wave: Wave::Saw,
+                gain: 0.42,
+                attack_s: 0.004,
+                decay_pow: 1.1,
+                filter: FilterMode::BandPass,
+                fc0: 1500.0 * p,
+                fc1: 950.0 * p,
+                q: 2.4,
+                ..Default::default()
+            });
+            // The rattle: three quick ticks after the call.
+            for k in 0..3 {
+                let at = 0.12 + k as f32 * 0.052;
+                m.add_noise(NoiseLayer {
+                    start_s: at,
+                    dur_s: 0.038,
+                    pink: false,
+                    gain: 0.30 - 0.06 * k as f32,
+                    attack_s: 0.0015,
+                    decay_pow: 2.2,
+                    filter: FilterMode::BandPass,
+                    fc0: 2400.0 * p,
+                    fc1: 1800.0 * p,
+                    q: 3.2,
+                    seed: base_seed ^ (0xA1 + k as u32),
+                    ..Default::default()
+                });
+            }
+            m.add_short_tail(0.10, 5200.0);
+            m.finish(0.40, 1.5, 1.6, 16.0)
+        }
+
+        // 84. MagpieRattle: the phase-change shake — feathers and a dry clatter.
+        Sfx::MagpieRattle => {
+            let mut m = MixBuf::new(0.42);
+            for k in 0..7 {
+                let at = k as f32 * 0.045;
+                m.add_noise(NoiseLayer {
+                    start_s: at,
+                    dur_s: 0.055,
+                    pink: true,
+                    gain: 0.24 - 0.02 * k as f32,
+                    attack_s: 0.002,
+                    decay_pow: 2.0,
+                    filter: FilterMode::BandPass,
+                    fc0: 1700.0 + 220.0 * k as f32,
+                    fc1: 900.0,
+                    q: 1.6,
+                    seed: base_seed ^ (0x70 + k as u32),
+                    ..Default::default()
+                });
+            }
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.16,
+                f0: 380.0,
+                f1: 220.0,
+                pitch_pow: 0.6,
+                wave: Wave::Triangle,
+                gain: 0.20,
+                attack_s: 0.004,
+                decay_pow: 1.6,
+                ..Default::default()
+            });
+            m.add_short_tail(0.12, 4200.0);
+            m.finish(0.36, 1.2, 2.0, 20.0)
+        }
+
+        // 85. MagpieWindup: an intake of breath and a rising head.
+        Sfx::MagpieWindup => {
+            const PITCH: [f32; 3] = [1.0, 0.94, 1.08];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.30);
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.22,
+                f0: 190.0 * p,
+                f1: 470.0 * p,
+                pitch_pow: 1.6,
+                wave: Wave::Triangle,
+                gain: 0.30,
+                attack_s: 0.03,
+                decay_pow: 1.2,
+                filter: FilterMode::LowPass,
+                fc0: 900.0,
+                fc1: 2600.0,
+                q: 1.1,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.22,
+                pink: true,
+                gain: 0.10,
+                attack_s: 0.05,
+                decay_pow: 1.1,
+                filter: FilterMode::BandPass,
+                fc0: 600.0,
+                fc1: 1800.0,
+                q: 1.2,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.finish(0.30, 1.1, 6.0, 20.0)
+        }
+
+        // 86. MagpieStuck: the bill into the plank — a wooden knock, then a
+        // trapped squawk.
+        Sfx::MagpieStuck => {
+            let mut m = MixBuf::new(0.48);
+            // Knock: a hard transient over a short wooden body.
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.012,
+                pink: false,
+                gain: 0.34,
+                attack_s: 0.0008,
+                decay_pow: 2.8,
+                filter: FilterMode::BandPass,
+                fc0: 2200.0,
+                fc1: 1200.0,
+                q: 1.6,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.10,
+                f0: 210.0,
+                f1: 130.0,
+                pitch_pow: 0.7,
+                wave: Wave::Sine,
+                gain: 0.46,
+                attack_s: 0.001,
+                decay_pow: 1.8,
+                ..Default::default()
+            });
+            // The squawk of a bird that cannot get its bill back.
+            m.add_osc(OscLayer {
+                start_s: 0.06,
+                dur_s: 0.30,
+                f0: 520.0,
+                f1: 300.0,
+                pitch_pow: 0.8,
+                wave: Wave::Saw,
+                gain: 0.24,
+                attack_s: 0.006,
+                decay_pow: 1.4,
+                filter: FilterMode::BandPass,
+                fc0: 1400.0,
+                fc1: 800.0,
+                q: 2.0,
+                ..Default::default()
+            });
+            m.add_short_tail(0.12, 4800.0);
+            m.finish(0.44, 1.4, 1.2, 18.0)
+        }
+
+        // 87. MagpieTakeoff: two hard wing-beats off the deck.
+        Sfx::MagpieTakeoff => {
+            const PITCH: [f32; 2] = [1.0, 0.92];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.40);
+            for k in 0..2 {
+                let at = k as f32 * 0.13;
+                m.add_noise(NoiseLayer {
+                    start_s: at,
+                    dur_s: 0.13,
+                    pink: true,
+                    gain: 0.34 - 0.06 * k as f32,
+                    attack_s: 0.006,
+                    decay_pow: 1.8,
+                    filter: FilterMode::LowPass,
+                    fc0: 900.0 * p,
+                    fc1: 380.0 * p,
+                    q: 0.9,
+                    seed: base_seed ^ (0xB0 + k as u32),
+                    ..Default::default()
+                });
+                m.add_osc(OscLayer {
+                    start_s: at,
+                    dur_s: 0.12,
+                    f0: 96.0 * p,
+                    f1: 62.0 * p,
+                    pitch_pow: 0.8,
+                    wave: Wave::Sine,
+                    gain: 0.30,
+                    attack_s: 0.002,
+                    decay_pow: 1.5,
+                    ..Default::default()
+                });
+            }
+            m.add_short_tail(0.14, 3600.0);
+            m.finish(0.42, 1.3, 2.0, 22.0)
+        }
+
+        // 88. MagpieGust: one wing-beat of wind — a wide, low, breathy wash.
+        Sfx::MagpieGust => {
+            const PITCH: [f32; 3] = [1.0, 0.9, 1.1];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.46);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.34,
+                pink: true,
+                gain: 0.34,
+                attack_s: 0.05,
+                decay_pow: 1.3,
+                filter: FilterMode::LowPass,
+                fc0: 420.0 * p,
+                fc1: 1500.0 * p,
+                fc_pow: 1.4,
+                q: 0.8,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // A little whistle in the gust's throat.
+            m.add_osc(OscLayer {
+                start_s: 0.03,
+                dur_s: 0.26,
+                f0: 320.0 * p,
+                f1: 190.0 * p,
+                pitch_pow: 0.9,
+                wave: Wave::Sine,
+                gain: 0.10,
+                attack_s: 0.04,
+                decay_pow: 1.4,
+                ..Default::default()
+            });
+            m.add_short_tail(0.12, 3000.0);
+            m.finish(0.34, 1.1, 8.0, 26.0)
+        }
+
+        // 89. MagpieCrate: the dropped crate bursting on the deck.
+        Sfx::MagpieCrate => {
+            const PITCH: [f32; 2] = [1.0, 0.9];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.46);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.016,
+                pink: false,
+                gain: 0.34,
+                attack_s: 0.0008,
+                decay_pow: 2.6,
+                filter: FilterMode::BandPass,
+                fc0: 2600.0 * p,
+                fc1: 1500.0 * p,
+                q: 1.3,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.13,
+                f0: 170.0 * p,
+                f1: 92.0 * p,
+                pitch_pow: 0.8,
+                wave: Wave::Sine,
+                gain: 0.44,
+                attack_s: 0.001,
+                decay_pow: 1.7,
+                ..Default::default()
+            });
+            // Splintering staves.
+            for k in 0..4 {
+                m.add_noise(NoiseLayer {
+                    start_s: 0.02 + k as f32 * 0.026,
+                    dur_s: 0.06,
+                    pink: false,
+                    gain: 0.20 - 0.03 * k as f32,
+                    attack_s: 0.001,
+                    decay_pow: 2.2,
+                    filter: FilterMode::BandPass,
+                    fc0: 1900.0 + 260.0 * k as f32,
+                    fc1: 1100.0,
+                    q: 1.7,
+                    seed: base_seed ^ (0xC0 + k as u32),
+                    ..Default::default()
+                });
+            }
+            m.add_short_tail(0.14, 4400.0);
+            m.finish(0.46, 1.5, 1.0, 18.0)
+        }
+
+        // 90. MagpieDeath: the last rattle — a falling squawk into a feathery
+        // flutter.
+        Sfx::MagpieDeath => {
+            let mut m = MixBuf::new(0.86);
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.34,
+                f0: 560.0,
+                f1: 210.0,
+                pitch_pow: 1.2,
+                wave: Wave::Saw,
+                gain: 0.34,
+                attack_s: 0.005,
+                decay_pow: 1.5,
+                filter: FilterMode::BandPass,
+                fc0: 1500.0,
+                fc1: 700.0,
+                q: 2.2,
+                ..Default::default()
+            });
+            // Wings and feathers settling.
+            for k in 0..6 {
+                m.add_noise(NoiseLayer {
+                    start_s: 0.24 + k as f32 * 0.075,
+                    dur_s: 0.07,
+                    pink: true,
+                    gain: 0.16 - 0.02 * k as f32,
+                    attack_s: 0.006,
+                    decay_pow: 1.8,
+                    filter: FilterMode::LowPass,
+                    fc0: 1200.0,
+                    fc1: 500.0,
+                    q: 0.9,
+                    seed: base_seed ^ (0xD0 + k as u32),
+                    ..Default::default()
+                });
+            }
+            m.add_osc(OscLayer {
+                start_s: 0.20,
+                dur_s: 0.34,
+                f0: 120.0,
+                f1: 60.0,
+                pitch_pow: 0.9,
+                wave: Wave::Sine,
+                gain: 0.26,
+                attack_s: 0.01,
+                decay_pow: 1.6,
+                ..Default::default()
+            });
+            m.add_short_tail(0.20, 3600.0);
+            m.finish(0.50, 1.3, 2.0, 40.0)
         }
     }
 }

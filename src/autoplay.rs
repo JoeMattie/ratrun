@@ -265,6 +265,11 @@ pub enum BossAttack {
     // THE NIGHT EDITION (Printworks).
     PageStamp,
     Carriage,
+    // The Flatbed's Magpie (appended for wave 3).
+    Peck,
+    Strafe,
+    Crate,
+    Gust,
 }
 
 impl BossAttack {
@@ -286,6 +291,10 @@ impl BossAttack {
             BossAttack::Other => "other",
             BossAttack::PageStamp => "page stamp",
             BossAttack::Carriage => "carriage return",
+            BossAttack::Peck => "deck peck",
+            BossAttack::Strafe => "strafe pass",
+            BossAttack::Crate => "dropped crate",
+            BossAttack::Gust => "wing gust",
         }
     }
 }
@@ -347,6 +356,15 @@ impl DamageCause {
             },
             // It fires no projectiles; the arm exists so the label never lies.
             DamageCause::BossProjectile(BossKind::NightEdition) => "the night edition",
+            DamageCause::BossContact(BossKind::Magpie) => "magpie body",
+            DamageCause::BossHazard(BossKind::Magpie, a) => match a {
+                BossAttack::Peck => "magpie peck",
+                BossAttack::Strafe => "magpie strafe",
+                BossAttack::Crate => "dropped crate",
+                BossAttack::Gust => "magpie gust",
+                _ => "magpie hazard",
+            },
+            DamageCause::BossProjectile(BossKind::Magpie) => "magpie feather",
             DamageCause::Trap => "mousetrap",
             DamageCause::Unknown => "unknown",
         }
@@ -1054,8 +1072,9 @@ impl AutoRun {
                 let d = segment_point_dist(bp.prev, bp.pos, p);
                 if d < bp.radius + R + 2.0 {
                     // The projectile knows its kind; the boss that fired it is
-                    // the campaign level's boss.
-                    let kind = BossKind::for_level(w.level_index);
+                    // the floor's boss, which the theme names (the side-route
+                    // floors and the flatbed play at a campaign stage index).
+                    let kind = BossKind::for_theme(w.level.theme);
                     self.threats.push((
                         DamageCause::BossProjectile(kind),
                         (bp.damage - armor).max(1.0),
@@ -1167,6 +1186,7 @@ fn boss_name(kind: BossKind) -> &'static str {
         BossKind::Mower => "mower",
         BossKind::Mangle => "mangle",
         BossKind::NightEdition => "the night edition",
+        BossKind::Magpie => "magpie",
     }
 }
 
@@ -1352,6 +1372,16 @@ fn boss_attack(state: &BossState) -> BossAttack {
             NightEditionState::CarriageTell
             | NightEditionState::CarriageSweep
             | NightEditionState::Ribbon => BossAttack::Carriage,
+            _ => BossAttack::Other,
+        },
+        BossState::Magpie(s) => match s {
+            crate::game::art_boss_magpie::MagpieState::PeckWindup
+            | crate::game::art_boss_magpie::MagpieState::Peck
+            | crate::game::art_boss_magpie::MagpieState::Stuck => BossAttack::Peck,
+            crate::game::art_boss_magpie::MagpieState::StrafeWindup
+            | crate::game::art_boss_magpie::MagpieState::StrafePass => BossAttack::Strafe,
+            crate::game::art_boss_magpie::MagpieState::SnatchDrop => BossAttack::Crate,
+            crate::game::art_boss_magpie::MagpieState::Gust => BossAttack::Gust,
             _ => BossAttack::Other,
         },
     }

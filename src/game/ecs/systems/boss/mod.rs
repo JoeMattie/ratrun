@@ -1,6 +1,6 @@
 //! Boss fight framework (P7).
 //!
-//! One shared tick system drives the three themed campaign bosses:
+//! One shared tick system drives the themed bosses:
 //!
 //! | level | theme | boss | art module |
 //! |-------|-------|------|-----------|
@@ -8,6 +8,12 @@
 //! | 1 | Kitchen | The Sweeper (broom) | [`crate::game::art_boss_broom`] |
 //! | 2 | Lab | TURF-REAPER MK.IV (mower) | [`crate::game::art_boss_mower`] |
 //! | 3 | Laundry | The Mangle (wringer) | [`crate::game::art_boss_mangle`] |
+//! | 4 | Printworks | THE NIGHT EDITION (press) | [`crate::game::art_boss_night_edition`] |
+//! | — (getaway) | Flatbed | The Magpie (bird) | [`crate::game::art_boss_magpie`] |
+//!
+//! Every floor's boss comes from [`BossKind::for_theme`] (the side-route floors
+//! and the getaway ride play at a campaign stage index, so `for_level` cannot
+//! name their fights); the flatbed's arm goes through [`trailer_boss`].
 //!
 //! The art files are the gameplay spec: their view structs, state enums,
 //! per-state timings/damage and hit-shape helpers (`body_hit_circles`,
@@ -102,6 +108,7 @@ use crate::game::gem::Gold;
 use crate::game::art_boss_broom::{self, BroomBossState, BroomBossView};
 use crate::game::art_boss_mangle::{self, MangleState, MangleView};
 use crate::game::art_boss_cat::{self, BossCatState, BossCatView};
+use crate::game::art_boss_magpie::{self, MagpieState, MagpieView};
 use crate::game::art_boss_mower::{self, MowerState, MowerView};
 use crate::game::art_boss_night_edition::{self, NightEditionState, NightEditionView};
 use crate::game::art_traps::{
@@ -129,6 +136,7 @@ use crate::render::palette::Rgb;
 
 pub mod broom;
 pub mod cat;
+pub mod magpie;
 pub mod mangle;
 pub mod mower;
 pub mod night_edition;
@@ -150,15 +158,18 @@ pub enum BossKind {
     Mangle,
     /// Printworks — THE NIGHT EDITION (the walking offset press).
     NightEdition,
+    /// The Flatbed (getaway ride) — The Magpie.
+    Magpie,
 }
 
-/// The boss the getaway ride fields until it gets a fight of its own.
+/// The boss the getaway ride fields: **The Magpie**.
 ///
-/// The trailer is a machine on wheels with a road to hide in, so the Lab's
-/// TURF-REAPER MK.IV reads best of the three shipped fights; `w3-bosses` owns
-/// the real chase and only has to change this one function.
+/// The flatbed's own fight (see [`magpie`] and [`crate::game::art_boss_magpie`]):
+/// a magpie riding the slipstream over the cab hold, pecking, strafing the deck
+/// and beating its wings against the trailer's own wind. Before the flatbed had
+/// a fight of its own this borrowed the Lab's mower.
 pub fn trailer_boss() -> BossKind {
-    BossKind::Mower
+    BossKind::Magpie
 }
 
 impl BossKind {
@@ -169,7 +180,8 @@ impl BossKind {
     /// with its own fight fields it and every other floor meets the same boss
     /// `for_level` gives. The Laundry fields the Mangle and the Printworks the
     /// Night Edition, the latter with its own arena in
-    /// `levelgen::layout::furnish_arena`. Nothing else maps themes to bosses.
+    /// `levelgen::layout::furnish_arena`. Nothing else maps themes to bosses
+    /// (the flatbed's own arm goes through [`trailer_boss`]).
     #[inline]
     pub fn for_theme(theme: Theme) -> Self {
         match theme {
@@ -201,6 +213,7 @@ impl BossKind {
             BossKind::Mower => 1600.0,
             BossKind::Mangle => art_boss_mangle::BOSS_BASE_HP,
             BossKind::NightEdition => art_boss_night_edition::BOSS_BASE_HP,
+            BossKind::Magpie => art_boss_magpie::BOSS_BASE_HP,
         }
     }
 
@@ -213,6 +226,7 @@ impl BossKind {
             BossKind::Mower => art_boss_mower::BODY_RADIUS,
             BossKind::Mangle => art_boss_mangle::BODY_RADIUS,
             BossKind::NightEdition => art_boss_night_edition::BODY_RADIUS,
+            BossKind::Magpie => art_boss_magpie::BODY_RADIUS,
         }
     }
 
@@ -289,6 +303,16 @@ impl BossKind {
             // dodging every tell (0–1 avoidable hits per fight over 40 s). A
             // balance pass owns the final number.
             BossKind::NightEdition => 2.0,
+            // Measured with `magpie::tests::a_bot_kills_the_magpie_on_the_real_deck`
+            // (the same method the campaign bosses were tuned with, applied to
+            // the flatbed: the Expert bot with a carried build, spawn to death
+            // on the real deck, five seeds). At `2.0` the bird died in 23.4 s
+            // (mean), i.e. the bot lands ~1.1 k dps into it — the flatbed is a
+            // 15-minute practice floor reached with a full build and a small,
+            // always-reachable body, so it takes a much bigger pool than the
+            // campaign fights to hold its 45-80 s beat. `4.6` lands the mean at
+            // ~54 s; see the shipped measurement in the test.
+            BossKind::Magpie => 4.6,
         }
     }
 
@@ -307,6 +331,7 @@ impl BossKind {
             BossKind::Mangle => art_boss_mangle::CONTACT_DAMAGE,
             // The design's own number for this fight (`§12`: body contact 8).
             BossKind::NightEdition => art_boss_night_edition::CONTACT_DAMAGE,
+            BossKind::Magpie => art_boss_magpie::CONTACT_DAMAGE,
         }
     }
 
@@ -319,6 +344,7 @@ impl BossKind {
             BossKind::Mower => 3.4,
             BossKind::Mangle => art_boss_mangle::DEATH_DURATION,
             BossKind::NightEdition => art_boss_night_edition::DEATH_DURATION,
+            BossKind::Magpie => art_boss_magpie::DEATH_DURATION,
         }
     }
 
@@ -370,6 +396,15 @@ impl BossKind {
                     1
                 }
             }
+            BossKind::Magpie => {
+                if hp_frac <= art_boss_magpie::PHASE3_HP_FRAC {
+                    3
+                } else if hp_frac <= art_boss_magpie::PHASE2_HP_FRAC {
+                    2
+                } else {
+                    1
+                }
+            }
         }
     }
 
@@ -382,6 +417,7 @@ impl BossKind {
             BossKind::Mower => BossState::Mower(MowerState::Patrol),
             BossKind::Mangle => BossState::Mangle(MangleState::Idle),
             BossKind::NightEdition => BossState::NightEdition(NightEditionState::Roll),
+            BossKind::Magpie => BossState::Magpie(MagpieState::Perch),
         }
     }
 
@@ -395,6 +431,7 @@ impl BossKind {
             BossKind::Mangle => art_boss_mangle::IDLE_P1,
             // The first walk beat is the phase-1 one (`night_edition::ROLL_DURATION[0]`).
             BossKind::NightEdition => 1.8,
+            BossKind::Magpie => art_boss_magpie::PERCH_DURATION[0],
         }
     }
 
@@ -407,6 +444,7 @@ impl BossKind {
             BossKind::Mower => BossState::Mower(MowerState::Dying),
             BossKind::Mangle => BossState::Mangle(MangleState::Death),
             BossKind::NightEdition => BossState::NightEdition(NightEditionState::Wreck),
+            BossKind::Magpie => BossState::Magpie(MagpieState::Death),
         }
     }
 
@@ -419,6 +457,7 @@ impl BossKind {
             BossKind::Mower => 0x1656_67B1_9E37_79F9,
             BossKind::Mangle => 0xD1B5_4A32_7F6C_1E09,
             BossKind::NightEdition => 0x7B1D_3C4F_9A2E_5D68,
+            BossKind::Magpie => 0x7C15_9E37_A1B2_C3D4,
         }
     }
 
@@ -431,6 +470,7 @@ impl BossKind {
             BossKind::Mower => art_boss_mower::BODY_RADIUS + 20.0,
             BossKind::Mangle => art_boss_mangle::CULL_MARGIN,
             BossKind::NightEdition => art_boss_night_edition::CULL_MARGIN,
+            BossKind::Magpie => art_boss_magpie::CULL_MARGIN,
         }
     }
 
@@ -443,6 +483,7 @@ impl BossKind {
             BossKind::Mower => &mower::MowerController,
             BossKind::Mangle => &mangle::MangleController,
             BossKind::NightEdition => &night_edition::NightEditionController,
+            BossKind::Magpie => &magpie::MagpieController,
         }
     }
 }
@@ -591,6 +632,7 @@ pub enum BossState {
     Mower(MowerState),
     Mangle(MangleState),
     NightEdition(NightEditionState),
+    Magpie(MagpieState),
 }
 
 /// One art-defined hit shape. Bosses are hit through these, not a single circle.
@@ -777,6 +819,7 @@ pub enum BossArtView {
     Mower(MowerView),
     Mangle(MangleView),
     NightEdition(NightEditionView),
+    Magpie(MagpieView),
 }
 
 // ============================================================================
@@ -1378,6 +1421,33 @@ impl Boss {
                 }
                 BossHitShapes::from_slice(&shapes[..len])
             }
+            BossKind::Magpie => {
+                // The bird flies *low* (belly to the planks, claws trailing), so
+                // all three circles stay grounded even through a strafing pass:
+                // a ground-only build must always be able to fight it. While the
+                // bill is buried the head circle is parked at the strike point,
+                // which is what makes the punish window reachable.
+                let view = self.magpie_view();
+                let circles = art_boss_magpie::body_hit_circles(&view);
+                let shapes: [BossHitShape; 3] = [
+                    BossHitShape::Circle {
+                        center: circles[0].0,
+                        radius: circles[0].1,
+                        grounded: true,
+                    },
+                    BossHitShape::Circle {
+                        center: circles[1].0,
+                        radius: circles[1].1,
+                        grounded: true,
+                    },
+                    BossHitShape::Circle {
+                        center: circles[2].0,
+                        radius: circles[2].1,
+                        grounded: true,
+                    },
+                ];
+                BossHitShapes::from_slice(&shapes)
+            }
         }
     }
 
@@ -1411,6 +1481,7 @@ impl Boss {
             BossKind::Mower => BossArtView::Mower(self.mower_view()),
             BossKind::Mangle => BossArtView::Mangle(self.mangle_view()),
             BossKind::NightEdition => BossArtView::NightEdition(self.night_edition_view()),
+            BossKind::Magpie => BossArtView::Magpie(self.magpie_view()),
         }
     }
 
@@ -1442,6 +1513,13 @@ impl Boss {
         }
     }
 
+    fn magpie_state(&self) -> MagpieState {
+        match self.state {
+            BossState::Magpie(s) => s,
+            _ => MagpieState::Perch,
+        }
+    }
+
     fn cat_view(&self) -> BossCatView {
         BossCatView {
             pos: self.pos,
@@ -1468,6 +1546,22 @@ impl Boss {
             hp_frac: self.hp_frac(),
             target: self.target,
             enraged: self.phase >= 2,
+        }
+    }
+
+    fn magpie_view(&self) -> MagpieView {
+        MagpieView {
+            pos: self.pos,
+            facing: self.facing,
+            state: self.magpie_state(),
+            progress: self.progress(),
+            anim: self.anim,
+            hit_flash: self.hit_flash,
+            hp_frac: self.hp_frac(),
+            target: self.target,
+            lane_start: self.pounce_origin,
+            sweep: self.scratch[magpie::S_LANE_DIR],
+            hunting: self.hunting,
         }
     }
 
@@ -1741,6 +1835,25 @@ pub enum BossCue {
     NightTurn,
     /// `Wreck` entry: the press tears itself apart.
     NightWreck,
+    // ---- The Magpie (Flatbed) ----
+    /// `Perch` entry: the bird's corvid rattle as it settles on the cargo.
+    MagpieCry,
+    /// `Ruffle` entry (phase change): the feathers going up.
+    MagpieRuffle,
+    /// `PeckWindup` entry: the head comes back over the line.
+    MagpieWindup,
+    /// `Stuck` entry: the bill goes into the plank.
+    MagpieStuck,
+    /// `Takeoff` entry: two hard wing-beats off the deck.
+    MagpieTakeoff,
+    /// `GustWindup` entry: the wings drawing back and the wind starting.
+    MagpieGustGather,
+    /// One wing-beat gust pulse.
+    MagpieGust,
+    /// The dropped crate bursting on the deck.
+    MagpieCrate,
+    /// The `Death` beat: the last rattle.
+    MagpieDeath,
 }
 
 impl BossCue {
@@ -1795,6 +1908,15 @@ impl BossCue {
             // Re-seating machinery: the dock's servo hum.
             BossCue::NightTurn => Sfx::MowerDockHum,
             BossCue::NightWreck => Sfx::MowerDeath,
+            BossCue::MagpieCry => Sfx::MagpieCry,
+            BossCue::MagpieRuffle => Sfx::MagpieRattle,
+            BossCue::MagpieWindup => Sfx::MagpieWindup,
+            BossCue::MagpieStuck => Sfx::MagpieStuck,
+            BossCue::MagpieTakeoff => Sfx::MagpieTakeoff,
+            BossCue::MagpieGustGather => Sfx::MagpieGust,
+            BossCue::MagpieGust => Sfx::MagpieGust,
+            BossCue::MagpieCrate => Sfx::MagpieCrate,
+            BossCue::MagpieDeath => Sfx::MagpieDeath,
         }
     }
 }
@@ -2269,8 +2391,41 @@ fn emit_cues(
             BossCue::NightWreck => {
                 vfx::emit_boss_mower_death(particles, rng, boss.pos);
             }
+            // ---- magpie ------------------------------------------------
+            // The cry and the wind-up are both a feather-and-dust kick off the
+            // deck under the bird (the art draws the bill and the streaks).
+            BossCue::MagpieCry
+            | BossCue::MagpieRuffle
+            | BossCue::MagpieWindup
+            | BossCue::MagpieTakeoff => {
+                vfx::emit_boss_cat_skid(particles, rng, boss.pos, boss.facing, 0.14);
+            }
+            BossCue::MagpieStuck => {
+                // Bill into the plank: a splinter burst at the strike point.
+                vfx::emit_boss_magpie_peck(particles, rng, boss.target, boss.facing);
+            }
+            BossCue::MagpieGustGather => {
+                vfx::emit_boss_magpie_gust(particles, rng, boss.pos, 0.10);
+            }
+            BossCue::MagpieGust => {
+                vfx::emit_boss_magpie_gust(particles, rng, boss.pos, 0.16);
+            }
+            BossCue::MagpieCrate => {
+                vfx::emit_boss_magpie_crate(particles, rng, boss.target);
+            }
+            BossCue::MagpieDeath => {
+                let blood = level_blood();
+                vfx::emit_boss_magpie_death(particles, rng, boss.pos, boss.facing, blood);
+            }
         }
     }
+}
+
+/// The death splatter colour for a boss cue (the framework's caller passes the
+/// palette's blood through `emit_cues`'s `blood` argument).
+#[inline]
+fn level_blood() -> Rgb {
+    (150, 30, 40)
 }
 
 // ============================================================================
@@ -3152,6 +3307,7 @@ impl BossTrace {
                 | BossState::Broom(BroomBossState::Hurt { .. })
                 | BossState::Mower(MowerState::Flipped | MowerState::Overheat)
                 | BossState::NightEdition(NightEditionState::BedLowered | NightEditionState::Ribbon)
+                | BossState::Magpie(MagpieState::Stuck)
         )
     }
 
