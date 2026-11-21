@@ -431,42 +431,51 @@ pub fn towel_pos(view: &MangleView, t: f32) -> Vec2 {
 /// Top-left directional light shared with the rest of the art.
 const LIGHT: Vec2 = Vec2 { x: -0.55, y: -0.83 };
 
-// Cast iron + polished cheeks.
-const IRON_SH: Rgb = (24, 28, 34);
-const IRON_MID: Rgb = (66, 76, 88);
-const IRON_HI: Rgb = (140, 154, 168);
-const IRON_SPEC: Rgb = (206, 220, 232);
-// Porcelain enamel badge + paint.
-const ENAMEL_SH: Rgb = (94, 118, 116);
-const ENAMEL_MID: Rgb = (150, 172, 168);
-const ENAMEL_HI: Rgb = (206, 224, 220);
-// Candy-striped roller rubber.
-const ROLLER_CREAM: Rgb = (198, 186, 158);
-const ROLLER_DIM: Rgb = (126, 116, 96);
-const ROLLER_RED: Rgb = (168, 42, 46);
-const ROLLER_RED_HI: Rgb = (226, 84, 74);
-// Brass screw + crank + wooden handle.
-const BRASS_SH: Rgb = (104, 70, 22);
-const BRASS_MID: Rgb = (196, 146, 54);
-const BRASS_HI: Rgb = (250, 216, 116);
-const WOOD_SH: Rgb = (76, 44, 22);
-const WOOD_MID: Rgb = (158, 104, 54);
-const WOOD_HI: Rgb = (226, 172, 112);
-// Towel / lint.
-const TOWEL_SH: Rgb = (138, 128, 112);
-const TOWEL_MID: Rgb = (216, 208, 188);
-const TOWEL_HI: Rgb = (250, 246, 232);
-// Torn drive belt + springs.
-const BELT_SH: Rgb = (22, 22, 26);
-const BELT_MID: Rgb = (58, 58, 66);
-const BELT_HI: Rgb = (104, 104, 116);
-const SPRING_COL: Rgb = (186, 194, 206);
-// Telegraphs and jam cues.
-const WARN_AMBER: Rgb = (255, 186, 64);
-const WARN_RED: Rgb = (255, 72, 62);
-const WARN_HOT: Rgb = (255, 240, 190);
-const JAM_GOLD: Rgb = (255, 210, 96);
-const STEAM_COL: Rgb = (196, 214, 212);
+// Heavy Victorian cast iron + machined steel cheeks.
+const IRON_OUTLINE: Rgb = (8, 10, 14);
+const IRON_SH: Rgb = (24, 30, 40);
+const IRON_MID: Rgb = (62, 74, 92);
+const IRON_HI: Rgb = (134, 150, 170);
+const IRON_SPEC: Rgb = (218, 232, 246);
+// Vintage mint-porcelain enamel badge + trim.
+const ENAMEL_SH: Rgb = (68, 106, 106);
+const ENAMEL_MID: Rgb = (144, 186, 180);
+const ENAMEL_HI: Rgb = (220, 244, 238);
+// Glossy candy-striped wringer rubber rollers.
+const ROLLER_DIM: Rgb = (130, 118, 94);
+const ROLLER_CREAM: Rgb = (224, 212, 184);
+const ROLLER_CREAM_HI: Rgb = (255, 250, 234);
+const ROLLER_RED_SH: Rgb = (118, 20, 28);
+const ROLLER_RED: Rgb = (196, 38, 44);
+const ROLLER_RED_HI: Rgb = (248, 98, 86);
+// Turned brass screw, gears, rivets & mahogany crank handle.
+const BRASS_SH: Rgb = (96, 62, 18);
+const BRASS_MID: Rgb = (206, 152, 48);
+const BRASS_HI: Rgb = (255, 228, 126);
+const WOOD_SH: Rgb = (68, 34, 16);
+const WOOD_MID: Rgb = (156, 92, 42);
+const WOOD_HI: Rgb = (228, 166, 102);
+// Crumpled laundry towel / suds.
+const TOWEL_SH: Rgb = (126, 118, 106);
+const TOWEL_MID: Rgb = (218, 212, 194);
+const TOWEL_HI: Rgb = (252, 249, 238);
+const TOWEL_STRIPE: Rgb = (182, 58, 66);
+// Torn rubber drive belt + coiled springs.
+const BELT_SH: Rgb = (18, 20, 26);
+const BELT_MID: Rgb = (52, 56, 68);
+const BELT_HI: Rgb = (106, 114, 130);
+const SPRING_SH: Rgb = (108, 118, 134);
+const SPRING_COL: Rgb = (204, 214, 228);
+const SPRING_HI: Rgb = (246, 250, 255);
+// Telegraphs, weak-point gold, steam & heat.
+const WARN_AMBER: Rgb = (255, 186, 56);
+const WARN_RED: Rgb = (255, 68, 56);
+const WARN_HOT: Rgb = (255, 244, 196);
+const JAM_GOLD: Rgb = (255, 216, 84);
+const HEAT_GLOW: Rgb = (255, 112, 48);
+const STEAM_SH: Rgb = (122, 140, 154);
+const STEAM_MID: Rgb = (196, 214, 224);
+const STEAM_HI: Rgb = (248, 252, 255);
 
 // ============================================================================
 // Internal Pose (Zero Allocation)
@@ -477,28 +486,40 @@ struct Pose {
     pos: Vec2,
     f: Vec2,
     p: Vec2,
-    /// Roller stripe phase in world px along the feed axis (negative = feeding).
+    /// Roller stripe phase in world px along the roller axis.
     roll: f32,
-    /// Roller spin speed (visual only).
+    /// Roller spin speed & direction (<0 backwards tell, >0 feeding).
     spin: f32,
-    /// Crank arm angle (radians around the hub in the local frame).
+    /// Crank arm angle (radians around the hub in local frame).
     crank_angle: f32,
     /// 0..1 how far the crank has swung out of its seat (jam/death).
     crank_loose: f32,
-    /// 0..1 how far the drive belt has slipped off (phase 3).
+    /// 0..1 how far the drive belt has slipped/torn off (phase 3).
     belt_slip: f32,
-    /// 0..1 frame sag (jam/death).
+    /// 0..1 frame sag/slump (jam/death).
     sag: f32,
+    /// Forward/back anticipation lean along `f` (px).
+    lean: f32,
+    /// Waddle rock along `p` (px).
+    rock: f32,
     /// Screen-pixel shudder offset.
     shake: Vec2,
     /// 0..1 crank weak-point glow.
     glow: f32,
     /// 0..1 towel jam spill (a cloth bulge at the nip).
     towel: f32,
-    /// 0..1 steam wisp density.
+    /// 0..1 wring-out cloth peek before ejection.
+    wring_bulge: f32,
+    /// 0..1 steam plume density.
     steam: f32,
+    /// 0..1 roller slack tilt (FinalJam / Death).
+    slack: f32,
     /// Body opacity.
     alpha: f32,
+    /// 0..1 death progression.
+    death: f32,
+    /// Effective visual damage tier (1..=3).
+    damage_tier: u8,
     /// Roller grounding (final jam / death).
     rollers_grounded: bool,
 }
@@ -516,42 +537,66 @@ fn compute_pose(view: &MangleView) -> Pose {
         0.0
     };
     let anim = if view.anim.is_finite() { view.anim } else { 0.0 };
+    let hp = if view.hp_frac.is_finite() {
+        view.hp_frac.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
     let f = unit_facing(view);
     let perp = f.perp();
     let phase = view.phase.max(1);
+    let damage_tier = if phase >= 3 || hp <= 0.25 {
+        3
+    } else if phase >= 2 || hp <= 0.60 {
+        2
+    } else {
+        1
+    };
 
     let mut pose = Pose {
         pos: view.pos,
         f,
         p: perp,
-        roll: anim * 1.6,
+        roll: anim * 1.8,
         spin: 1.6,
-        crank_angle: -FRAC_PI_2 + (anim * 1.6).sin() * 0.12,
+        crank_angle: -FRAC_PI_2 + (anim * 2.2).sin() * 0.16,
         crank_loose: 0.0,
         belt_slip: 0.0,
         sag: 0.0,
+        lean: 0.0,
+        rock: 0.0,
         shake: Vec2::ZERO,
         glow: 0.0,
         towel: 0.0,
-        steam: 0.0,
+        wring_bulge: 0.0,
+        steam: if damage_tier >= 3 {
+            0.35
+        } else if damage_tier == 2 {
+            0.16
+        } else {
+            0.0
+        },
+        slack: 0.0,
         alpha: 1.0,
+        death: 0.0,
+        damage_tier,
         rollers_grounded: true,
     };
 
-    // A torn belt hangs loose in the last quarter (and after the fight).
-    if phase >= 3 || matches!(view.state, MangleState::Death) {
-        pose.belt_slip = 0.85;
+    // Torn belt hangs loose in phase 3 and death.
+    if damage_tier >= 3 || matches!(view.state, MangleState::Death) {
+        pose.belt_slip = 0.88;
     }
 
     match view.state {
         MangleState::Idle => {
-            // Waddling on the little iron feet; the rollers tick over.
-            let step = (anim * 2.2).sin();
-            pose.shake = perp * (step * 0.45) + f * (step.abs() * 0.3);
+            // Heavy waddling gait on the four little iron feet; rollers lazily tick over.
+            let gait = anim * (2.6 + (phase as f32 - 1.0) * 0.5);
+            let step = gait.sin();
+            pose.rock = step * 0.85;
+            pose.lean = step.abs() * 0.45;
             pose.roll = anim * 2.4;
-            if phase >= 2 {
-                pose.steam = 0.10;
-            }
+            pose.crank_angle = -FRAC_PI_2 + step * 0.22;
         }
         MangleState::Intake { .. } => {
             let (tell, pull) = intake_windows(phase);
@@ -559,100 +604,122 @@ fn compute_pose(view: &MangleView) -> Pose {
             let tell_p = (tell / total).clamp(0.0, 1.0);
             let pull_p = ((tell + pull) / total).clamp(0.0, 1.0);
             if p < tell_p {
-                // Backwards: the stripes crawl out of the nip as the lane locks.
+                // Anticipation: frame leans back on its heels, rollers spin BACKWARDS.
                 let t = if tell_p > 0.0 { p / tell_p } else { 1.0 };
-                pose.roll = 10.0 - t * 18.0;
-                pose.spin = -1.0;
-                pose.shake = perp * ((anim * 26.0).sin() * 0.4 * t);
-                pose.steam = 0.05 + 0.10 * t;
+                let ease = smoothstep(t);
+                pose.roll = 12.0 - t * 22.0;
+                pose.spin = -1.8;
+                pose.lean = -1.6 * ease;
+                pose.shake = perp * ((anim * 32.0).sin() * 0.55 * t);
+                pose.crank_angle = -FRAC_PI_2 + t * 1.4;
+                pose.steam = pose.steam.max(0.18 + 0.25 * t);
             } else if p < pull_p {
-                // Feeding: fast stripes into the nip, the frame leans in.
+                // Pull: frame lunges forward hungrily, rollers whirl inward at high RPM!
                 let t = ((p - tell_p) / (pull_p - tell_p).max(1e-4)).clamp(0.0, 1.0);
-                pose.roll = -(anim * 26.0) - t * 6.0;
-                pose.spin = 3.0;
-                pose.shake = f * (0.35 + 0.4 * (anim * 30.0).sin().abs());
-                pose.steam = 0.10;
+                pose.roll = -(anim * 30.0) - t * 8.0;
+                pose.spin = 3.8;
+                pose.lean = 1.5 + 0.5 * t;
+                pose.shake = f * (0.4 + 0.55 * (anim * 38.0).sin().abs())
+                    + perp * ((anim * 28.0).sin() * 0.35);
+                pose.crank_angle = -FRAC_PI_2 - anim * 14.0;
+                pose.steam = pose.steam.max(0.28);
             } else {
-                // The nip clenches: a short, heavy jolt.
+                // Bite clench: violent forward snap + recoil!
+                let bt = ((p - pull_p) / (1.0 - pull_p).max(1e-4)).clamp(0.0, 1.0);
+                let snap = (1.0 - bt).powi(2);
                 pose.roll = 0.0;
                 pose.spin = 0.0;
-                pose.shake = f * (0.9 * (1.0 - p).max(0.0));
+                pose.lean = 2.6 * snap - 0.5 * bt;
+                pose.shake = f * (1.2 * snap);
+                pose.steam = pose.steam.max(0.45 * snap);
             }
         }
         MangleState::WringOut => {
-            let tell_p = (WRING_TELL / (WRING_TELL + WRING_TRAVEL + WRING_RECOVER)).clamp(0.0, 1.0);
-            let travel_p =
-                ((WRING_TELL + WRING_TRAVEL) / (WRING_TELL + WRING_TRAVEL + WRING_RECOVER))
-                    .clamp(0.0, 1.0);
+            let total = WRING_TELL + WRING_TRAVEL + WRING_RECOVER;
+            let tell_p = (WRING_TELL / total).clamp(0.0, 1.0);
+            let travel_p = ((WRING_TELL + WRING_TRAVEL) / total).clamp(0.0, 1.0);
             if p < tell_p {
                 let t = if tell_p > 0.0 { p / tell_p } else { 1.0 };
-                // Two ratchet clicks at 0.45 s and 0.90 s.
+                // Two heavy mechanical ratchet clicks at t = 0.5 and t = 1.0.
                 let clicks = (t * 2.0).floor();
                 let within = (t * 2.0).fract();
-                pose.crank_angle = -FRAC_PI_2 - clicks * (FRAC_PI_2 * 0.8) - within * 0.10;
-                pose.shake = f * ((anim * 18.0).sin() * 0.25 * (1.0 - within));
-                pose.roll = -t * 5.0;
-                pose.spin = 0.6;
+                let recoil = (1.0 - (within * 4.0).min(1.0)).powi(2);
+                pose.crank_angle =
+                    -FRAC_PI_2 - clicks * (FRAC_PI_2 * 0.88) - smoothstep(within) * 0.22;
+                pose.lean = -1.2 * t + 0.65 * recoil;
+                pose.shake = perp * ((anim * 24.0).sin() * 0.45 * recoil);
+                pose.roll = -t * 6.5;
+                pose.spin = 0.8;
+                pose.wring_bulge = smoothstep(t);
             } else if p < travel_p {
-                pose.crank_angle = -FRAC_PI_2 - 2.0 * (FRAC_PI_2 * 0.8);
-                pose.roll = -(anim * 20.0);
-                pose.spin = 2.4;
-                pose.shake = f * 0.3;
+                let t = ((p - tell_p) / (travel_p - tell_p).max(1e-4)).clamp(0.0, 1.0);
+                pose.crank_angle = -FRAC_PI_2 - 2.0 * (FRAC_PI_2 * 0.88) - t * 0.6;
+                pose.lean = 1.8 * (1.0 - t).powi(2);
+                pose.roll = -(anim * 24.0);
+                pose.spin = 2.8;
+                pose.shake = f * (0.65 * (1.0 - t));
+                pose.wring_bulge = (1.0 - t * 3.0).max(0.0);
             } else {
+                let t = ((p - travel_p) / (1.0 - travel_p).max(1e-4)).clamp(0.0, 1.0);
                 pose.crank_loose = 0.35;
-                pose.glow = 0.55;
+                pose.glow = 0.55 + 0.20 * (1.0 - t);
+                pose.sag = 0.12;
             }
         }
         MangleState::Jam => {
             pose.towel = 1.0;
             pose.crank_loose = 1.0;
-            pose.sag = 0.25;
-            pose.steam = 0.7;
+            pose.sag = 0.34;
+            pose.steam = 0.85;
             pose.glow = 1.0;
-            pose.roll = (anim * 0.8).sin() * 1.2 - 1.0;
-            pose.spin = 0.2;
-            pose.shake = perp * ((anim * 34.0).sin() * 0.5);
+            pose.roll = (anim * 1.2).sin() * 1.2 - 1.0;
+            pose.spin = 0.15;
+            pose.shake = perp * ((anim * 38.0).sin() * 0.65);
         }
         MangleState::FinalJam => {
             pose.towel = 1.0;
             pose.crank_loose = 1.0;
-            pose.sag = 0.55;
+            pose.sag = 0.62;
+            pose.slack = 1.0;
             pose.belt_slip = 1.0;
-            pose.steam = 0.9;
+            pose.steam = 1.0;
             pose.glow = 1.0;
-            pose.roll = (anim * 0.5).sin() * 2.0;
-            pose.spin = 0.1;
-            pose.shake = perp * ((anim * 40.0).sin() * 0.7);
+            pose.roll = (anim * 0.7).sin() * 2.2;
+            pose.spin = 0.05;
+            pose.shake = perp * ((anim * 44.0).sin() * 0.85);
             pose.rollers_grounded = false;
         }
         MangleState::PhaseShift => {
-            // A heavy shudder, then the machine settles into its new pace.
             let t = smoothstep(p.min(0.55) / 0.55);
             let fade = 1.0 - smoothstep(((p - 0.55) / 0.45).clamp(0.0, 1.0));
-            pose.shake = perp * ((anim * 46.0).sin() * 1.6 * fade);
-            pose.sag = 0.20 * t;
-            pose.steam = 0.55 * fade;
+            pose.shake = perp * ((anim * 52.0).sin() * 1.8 * fade)
+                + f * ((anim * 41.0).cos() * 0.8 * fade);
+            pose.sag = 0.28 * t;
+            pose.steam = 0.90 * fade + 0.25;
             pose.crank_loose = 0.5 * t;
-            pose.roll = -t * 4.0;
+            pose.roll = -t * 5.0;
             pose.spin = 0.4;
-            pose.glow = 0.4 * t;
+            pose.glow = 0.45 * t;
         }
         MangleState::Death => {
             let t = p.clamp(0.0, 1.0);
-            pose.towel = 1.0 - smoothstep(((t - 0.2) / 0.5).clamp(0.0, 1.0));
+            pose.death = t;
+            pose.towel = (1.0 - smoothstep(((t - 0.25) / 0.45).clamp(0.0, 1.0))).max(0.25);
             pose.crank_loose = 1.0;
-            pose.sag = 0.9 * smoothstep((t / 0.6).clamp(0.0, 1.0));
+            pose.sag = 0.95 * smoothstep((t / 0.55).clamp(0.0, 1.0));
+            pose.slack = smoothstep((t / 0.45).clamp(0.0, 1.0));
             pose.belt_slip = 1.0;
-            pose.steam = 0.8 * (1.0 - t);
-            pose.glow = 1.0 - smoothstep((t / 0.35).clamp(0.0, 1.0));
-            pose.spin = (1.0 - t) * 1.2;
+            pose.steam = (1.0 - t * 0.65).clamp(0.2, 1.0);
+            pose.glow = 1.0 - smoothstep((t / 0.30).clamp(0.0, 1.0));
+            pose.spin = (1.0 - t).powi(2) * 1.4;
             pose.roll = anim * pose.spin;
-            pose.shake = f * ((anim * 30.0).sin() * 0.9 * (1.0 - t));
+            pose.shake = f * ((anim * 42.0).sin() * 1.4 * (1.0 - t))
+                + perp * ((anim * 35.0).cos() * 1.1 * (1.0 - t));
             pose.rollers_grounded = false;
-            pose.alpha = if t < 0.55 {
+            pose.alpha = if t < 0.62 {
                 1.0
             } else {
-                1.0 - smoothstep(((t - 0.55) / 0.45).clamp(0.0, 1.0))
+                1.0 - smoothstep(((t - 0.62) / 0.38).clamp(0.0, 1.0))
             };
         }
     }
@@ -740,10 +807,10 @@ fn darken_px(pb: &mut PixelBuffer, x: i32, y: i32, amount: f32) {
 #[inline]
 fn shade3(sh: Rgb, mid: Rgb, hi: Rgb, lum: f32) -> Rgb {
     let l = lum.clamp(0.0, 1.15);
-    if l < 0.62 {
-        mix(sh, mid, l / 0.62)
+    if l < 0.56 {
+        mix(sh, mid, l / 0.56)
     } else {
-        mix(mid, hi, (l - 0.62) / 0.53)
+        mix(mid, hi, (l - 0.56) / 0.59)
     }
 }
 
@@ -754,8 +821,8 @@ fn apply_hit(c: Rgb, hit: f32) -> Rgb {
         return c;
     }
     let lum = (c.0 as f32 * 0.30 + c.1 as f32 * 0.59 + c.2 as f32 * 0.11) / 255.0;
-    let flash = mix((235, 162, 92), (255, 248, 224), (0.35 + lum * 0.65).clamp(0.0, 1.0));
-    mix(c, flash, (0.24 + hit * 0.48).min(0.72))
+    let flash = mix((238, 168, 92), (255, 248, 224), (0.35 + lum * 0.65).clamp(0.0, 1.0));
+    mix(c, flash, (0.28 + hit * 0.50).min(0.76))
 }
 
 #[inline]
@@ -786,7 +853,7 @@ fn sd_segment(u: f32, v: f32, au: f32, av: f32, bu: f32, bv: f32, r: f32) -> f32
     (dx * dx + dy * dy).sqrt() - r
 }
 
-/// Deterministic hash in `0..1` for floor dressing.
+/// Deterministic hash in `0..1` for floor dressing and damage detail.
 #[inline]
 fn hash01(ix: i32, iy: i32) -> f32 {
     let mut h = (ix as u32).wrapping_mul(0x9E37_79B1) ^ (iy as u32).wrapping_mul(0x85EB_CA77);
@@ -796,7 +863,7 @@ fn hash01(ix: i32, iy: i32) -> f32 {
     (h & 0xFFFF) as f32 / 65535.0
 }
 
-/// Screen-space dashed line (world-space endpoints converted by the caller).
+/// Screen-space dashed line with optional dark contrast backing.
 fn line_dashed(pb: &mut PixelBuffer, a: Vec2, b: Vec2, col: Rgb, alpha: f32, dash: f32, phase: f32) {
     let d = b - a;
     let len = d.len();
@@ -804,7 +871,7 @@ fn line_dashed(pb: &mut PixelBuffer, a: Vec2, b: Vec2, col: Rgb, alpha: f32, das
         return;
     }
     let dir = d * (1.0 / len);
-    let period = dash * 1.7;
+    let period = dash * 1.65;
     let mut t = phase.rem_euclid(period) - period;
     while t < len {
         let s0 = t.max(0.0);
@@ -812,10 +879,23 @@ fn line_dashed(pb: &mut PixelBuffer, a: Vec2, b: Vec2, col: Rgb, alpha: f32, das
         let mut s = s0;
         while s < s1 {
             let q = a + dir * s;
-            blend_px(pb, q.x.round() as i32, q.y.round() as i32, col, alpha);
-            s += 0.8;
+            let x = q.x.round() as i32;
+            let y = q.y.round() as i32;
+            darken_px(pb, x, y + 1, 0.25 * alpha);
+            blend_px(pb, x, y, col, alpha);
+            s += 0.75;
         }
         t += period;
+    }
+}
+
+fn line_solid(pb: &mut PixelBuffer, a: Vec2, b: Vec2, col: Rgb, alpha: f32) {
+    let d = b - a;
+    let steps = (d.len() * 1.5).ceil().max(1.0) as i32;
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let q = a + d * t;
+        blend_px(pb, q.x.round() as i32, q.y.round() as i32, col, alpha);
     }
 }
 
@@ -827,20 +907,22 @@ fn ring(
     alpha: f32,
     thickness: f32,
 ) {
-    if radius <= 0.0 {
+    if radius <= 0.0 || alpha <= 0.005 {
         return;
     }
-    let Some((x0, x1, y0, y1)) = bbox(pb, center, radius + 1.5, radius + 1.5) else {
+    let Some((x0, x1, y0, y1)) = bbox(pb, center, radius + thickness + 1.0, radius + thickness + 1.0)
+    else {
         return;
     };
+    let half_t = (thickness * 0.5).max(0.5);
     for y in y0..=y1 {
         for x in x0..=x1 {
             let dx = x as f32 - center.x;
             let dy = y as f32 - center.y;
             let d = (dx * dx + dy * dy).sqrt();
             let band = (d - radius).abs();
-            if band <= thickness * 0.5 {
-                let a = alpha * (1.0 - (band / (thickness * 0.5 + 1e-3)).clamp(0.0, 1.0));
+            if band <= half_t {
+                let a = alpha * (1.0 - (band / (half_t + 1e-3)).clamp(0.0, 1.0));
                 blend_px(pb, x, y, col, a);
             }
         }
@@ -848,6 +930,9 @@ fn ring(
 }
 
 fn fill_disc(pb: &mut PixelBuffer, center: Vec2, radius: f32, col: Rgb, alpha: f32) {
+    if radius <= 0.0 || alpha <= 0.005 {
+        return;
+    }
     let Some((x0, x1, y0, y1)) = bbox(pb, center, radius + 1.0, radius + 1.0) else {
         return;
     };
@@ -857,10 +942,68 @@ fn fill_disc(pb: &mut PixelBuffer, center: Vec2, radius: f32, col: Rgb, alpha: f
             let dy = y as f32 - center.y;
             let d = (dx * dx + dy * dy).sqrt();
             if d <= radius {
-                let a = alpha * (1.0 - (d / radius).powi(2) * 0.4);
+                let a = alpha * (1.0 - (d / radius).powi(2) * 0.38);
                 blend_px(pb, x, y, col, a);
             }
         }
+    }
+}
+
+/// Cel-shaded steam puff with top-left directional highlight and dark rim.
+fn draw_steam_puff(pb: &mut PixelBuffer, center: Vec2, r: f32, alpha: f32) {
+    if r <= 0.6 || alpha <= 0.02 {
+        return;
+    }
+    let Some((x0, x1, y0, y1)) = bbox(pb, center, r + 1.5, r + 1.5) else {
+        return;
+    };
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let dx = x as f32 - center.x;
+            let dy = y as f32 - center.y;
+            let d = (dx * dx + dy * dy).sqrt();
+            if d > r + 0.9 {
+                continue;
+            }
+            if d > r {
+                darken_px(pb, x, y, 0.28 * alpha * (1.0 - (d - r) / 0.9));
+                continue;
+            }
+            let nx = dx / r;
+            let ny = dy / r;
+            let lit = nx * LIGHT.x + ny * LIGHT.y;
+            let dome = (1.0 - (d / r).powi(2) * 0.55).clamp(0.0, 1.0);
+            let col = shade3(STEAM_SH, STEAM_MID, STEAM_HI, 0.45 + 0.35 * dome + 0.48 * lit);
+            blend_px(pb, x, y, col, alpha * (1.0 - (d / r).powi(3) * 0.25));
+        }
+    }
+}
+
+/// Draw a visible helical coil spring on the floor or popping off the machine.
+fn draw_coil_spring(pb: &mut PixelBuffer, a: Vec2, b: Vec2, loops: i32, width: f32, alpha: f32) {
+    let seg = b - a;
+    let len = seg.len();
+    if len < 1.0 || alpha <= 0.02 {
+        return;
+    }
+    let dir = seg * (1.0 / len);
+    let perp = dir.perp();
+    let steps = (len * 2.5).ceil().max(6.0) as i32;
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let wave = (t * loops as f32 * TAU).sin();
+        let q = a + seg * t + perp * (wave * width);
+        let x = q.x.round() as i32;
+        let y = q.y.round() as i32;
+        darken_px(pb, x, y + 1, 0.48 * alpha);
+        let col = if wave < -0.2 {
+            SPRING_HI
+        } else if wave > 0.3 {
+            SPRING_SH
+        } else {
+            SPRING_COL
+        };
+        blend_px(pb, x, y, col, alpha);
     }
 }
 
@@ -878,24 +1021,18 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &MangleView, cam: Vec2, accent: R
     }
     let pose = compute_pose(view);
     let p = view.progress.clamp(0.0, 1.0);
-    let pulse = 0.5 + 0.5 * (view.anim * 9.0).sin();
+    let pulse = 0.5 + 0.5 * (view.anim * 9.5).sin();
     let c = w2s(pose.pos, cam);
 
-    // 1) The intake mat: the machine's own dressing (a faded rubber mat with a
-    //    porcelain rim) — the Laundry's arena furniture, drawn under everything.
+    // 1) Faded ribbed rubber laundry mat under the machine.
     draw_intake_mat(pb, &pose, cam);
 
-    // 2) Loose suds and lint around the feet: floor dressing, deterministic.
+    // 2) Deterministic soap suds and floor lint around the mat.
     draw_floor_lint(pb, c, view.anim, pose.alpha);
 
-    // 3) Diegetic ground HP arc.
-    if !matches!(view.state, MangleState::Death) && view.hp_frac > 0.0 {
-        draw_hp_arc(pb, c + Vec2::new(0.0, 16.5), view.hp_frac, view.phase, pulse);
-    }
-
-    // 4) State telegraphs and impacts.
+    // 3) State telegraphs and impact flashes.
     match view.state {
-        MangleState::Intake { .. } => {
+        MangleState::Intake { second } => {
             let (tell, pull) = intake_windows(view.phase);
             let total = intake_duration(view.phase);
             let tell_s = tell;
@@ -904,11 +1041,11 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &MangleView, cam: Vec2, accent: R
             let bite = bite_strip(view);
             if (p * total) < tell_s {
                 let t = ((p * total) / tell_s).clamp(0.0, 1.0);
-                draw_intake_lane(pb, &lane, cam, t, 0.0, -1.0, pulse);
+                draw_intake_lane(pb, &lane, cam, t, 0.0, -view.anim * 10.0, pulse, second);
                 draw_bite_tell(pb, &bite, cam, t, 0.0, pulse);
             } else if (p * total) < pull_s {
                 let t = (((p * total) - tell_s) / pull).clamp(0.0, 1.0);
-                draw_intake_lane(pb, &lane, cam, 1.0, t, view.anim * 26.0, pulse);
+                draw_intake_lane(pb, &lane, cam, 1.0, t, view.anim * 34.0, pulse, second);
                 draw_bite_tell(pb, &bite, cam, 1.0, t, pulse);
             } else {
                 let t = (((p * total) - pull_s) / (BITE_WINDOW + INTAKE_SETTLE)).clamp(0.0, 1.0);
@@ -923,21 +1060,21 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &MangleView, cam: Vec2, accent: R
             let now = p * total;
             if now < tell_s {
                 let t = (now / tell_s).clamp(0.0, 1.0);
-                draw_wring_rail(pb, &lane, cam, t, 0.0, pulse);
+                draw_wring_rail(pb, &lane, cam, t, 0.0, pulse, view.anim);
                 draw_crank_clicks(pb, &pose, cam, t, pulse);
             } else if now < travel_s {
                 let t = ((now - tell_s) / WRING_TRAVEL).clamp(0.0, 1.0);
-                draw_wring_rail(pb, &lane, cam, 1.0, t, pulse);
+                draw_wring_rail(pb, &lane, cam, 1.0, t, pulse, view.anim);
                 draw_crank_clicks(pb, &pose, cam, 1.0, pulse);
             } else {
                 let t = ((now - travel_s) / WRING_RECOVER).clamp(0.0, 1.0);
-                draw_wring_rail(pb, &lane, cam, 1.0 - t * 0.6, 1.0, pulse);
+                draw_wring_rail(pb, &lane, cam, 1.0 - t * 0.65, 1.0, pulse, view.anim);
                 draw_crank_gather(pb, &pose, cam, t, pulse);
             }
         }
         MangleState::Jam | MangleState::FinalJam => {
-            draw_crank_gather(pb, &pose, cam, p, pulse);
             draw_towel_puddle(pb, &pose, cam, pulse);
+            draw_crank_gather(pb, &pose, cam, p, pulse);
             if matches!(view.state, MangleState::FinalJam) {
                 draw_spring_ticks(pb, &pose, cam, p, pulse);
             }
@@ -945,38 +1082,45 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &MangleView, cam: Vec2, accent: R
         MangleState::PhaseShift => {
             let t = (p / 0.55).clamp(0.0, 1.0);
             if p < 0.55 {
-                ring(pb, c, 16.0 + t * 14.0, WARN_AMBER, 0.55 * (1.0 - t * 0.5), 1.2);
-                ring(pb, c, 22.0, WARN_RED, 0.30 + 0.25 * pulse, 1.0);
+                ring(pb, c, 15.0 + t * 18.0, WARN_AMBER, 0.72 * (1.0 - t * 0.4), 1.8);
+                ring(pb, c, 23.0 - t * 4.0, WARN_RED, 0.40 + 0.35 * pulse, 1.3);
             } else {
                 let k = 1.0 - ((p - 0.55) / 0.45).clamp(0.0, 1.0);
-                ring(pb, c, 16.0 + k * 10.0, WARN_HOT, 0.35 * k, 1.0);
+                ring(pb, c, 18.0 + (1.0 - k) * 14.0, WARN_HOT, 0.55 * k, 1.4);
             }
-            // A rubber-belt slap on the floor beside the cheek.
-            let cheek = c + pose.p * 15.0;
-            for i in 0..3 {
-                let q = cheek + Vec2::new(0.0, i as f32 * 2.4);
-                blend_px(pb, q.x.round() as i32, q.y.round() as i32, WARN_AMBER, 0.35);
+            // Rubber belt slap sparks beside the cheek.
+            let cheek = c + pose.p * 15.5;
+            for i in -1..=1 {
+                let q = cheek + pose.f * (i as f32 * 2.5);
+                line_solid(pb, q, q + pose.p * 3.5, WARN_AMBER, 0.55);
             }
         }
         MangleState::Death => {
             let t = p.clamp(0.0, 1.0);
+            // Spreading wet suds & rust-water puddle beneath the dying machine.
+            let puddle_r = 12.0 + 14.0 * smoothstep(t * 1.4);
+            fill_disc(pb, c + Vec2::new(0.0, 2.0), puddle_r, (32, 48, 62), 0.42 * (1.0 - t * 0.35));
+            ring(pb, c + Vec2::new(0.0, 2.0), puddle_r * 0.92, ENAMEL_MID, 0.28 * (1.0 - t * 0.5), 1.2);
             if t < 0.45 {
-                ring(pb, c, 12.0 + t * 30.0, WARN_RED, 0.50 * (1.0 - t / 0.45), 1.4);
+                let bt = t / 0.45;
+                ring(pb, c, 12.0 + bt * 30.0, WARN_RED, 0.72 * (1.0 - bt), 1.8);
+                ring(pb, c, 8.0 + bt * 20.0, WARN_HOT, 0.55 * (1.0 - bt), 1.2);
             }
-            // The popped springs ping across the floor.
+            // Four popped helical springs pinging outward across the floor!
             for i in 0..4 {
-                let a = -PI * 0.15 + i as f32 * 0.55;
-                let r = 6.0 + t * (22.0 + i as f32 * 3.0);
-                let q = c + Vec2::from_angle(a) * r;
-                let x = q.x.round() as i32;
-                let y = q.y.round() as i32;
-                blend_px(pb, x, y, SPRING_COL, 0.65 * (1.0 - t));
+                let a = -0.35 + i as f32 * 1.45;
+                let dir = Vec2::from_angle(a);
+                let dist = 9.0 + smoothstep((t * 1.35).min(1.0)) * (16.0 + i as f32 * 2.8);
+                let bounce = ((t * 4.5 + i as f32).sin().abs()) * 3.5 * (1.0 - t);
+                let base = c + dir * dist + Vec2::new(0.0, -bounce);
+                let tip = base + Vec2::from_angle(a + t * 5.0) * 5.2;
+                draw_coil_spring(pb, base, tip, 3, 1.3, (1.0 - t * 0.65).clamp(0.0, 1.0));
             }
         }
         MangleState::Idle => {}
     }
 
-    // 5) Drop shadow under the frame, and the iron feet's own shadows.
+    // 4) Grounded drop shadow under frame and iron feet.
     draw_frame_shadow(pb, &pose, cam);
     if matches!(
         view.state,
@@ -985,10 +1129,14 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &MangleView, cam: Vec2, accent: R
         draw_foot_prints(pb, &pose, cam, view.anim, pose.alpha);
     }
 
-    // 6) Arena rim tint: a faint porcelain edge around the mat, tying the boss
-    //    to the Laundry's floor.
+    // 5) Centered, clean diegetic ground HP arc (matches Mower & Broom bosses).
+    if !matches!(view.state, MangleState::Death) && view.hp_frac > 0.0 {
+        draw_hp_arc(pb, c, view.hp_frac, view.phase, pulse);
+    }
+
+    // Subtle porcelain rim tying the mat to the Laundry palette.
     let rim = mix(view_hint_palette(accent), accent, 0.35);
-    ring(pb, c, 21.0, rim, 0.10, 0.8);
+    ring(pb, c, 22.0, rim, 0.09, 0.9);
 }
 
 #[inline]
@@ -996,10 +1144,10 @@ fn view_hint_palette(accent: Rgb) -> Rgb {
     mix(accent, ENAMEL_MID, 0.5)
 }
 
-/// The faded rubber intake mat the machine lives on.
+/// The faded ribbed rubber mat beneath the machine.
 fn draw_intake_mat(pb: &mut PixelBuffer, pose: &Pose, cam: Vec2) {
     let c = w2s(pose.pos, cam) + Vec2::new(0.0, 1.0);
-    let Some((x0, x1, y0, y1)) = bbox(pb, c, 22.0, 20.0) else {
+    let Some((x0, x1, y0, y1)) = bbox(pb, c, 21.0, 19.0) else {
         return;
     };
     for y in y0..=y1 {
@@ -1008,16 +1156,13 @@ fn draw_intake_mat(pb: &mut PixelBuffer, pose: &Pose, cam: Vec2) {
             let dy = y as f32 - c.y;
             let u = dx * pose.f.x + dy * pose.f.y;
             let v = dx * pose.p.x + dy * pose.p.y;
-            let d = sd_rbox(u, v, 0.0, 0.0, 15.0, 12.5, 4.0);
+            let d = sd_rbox(u, v, -1.0, 0.0, 14.5, 13.5, 3.5);
             if d < 1.2 {
-                let a = (0.18 * (1.0 - (d.max(0.0) / 1.2))).clamp(0.0, 0.18);
+                let a = (0.24 * (1.0 - (d.max(0.0) / 1.2))).clamp(0.0, 0.24) * pose.alpha;
                 darken_px(pb, x, y, a);
             }
-            // Ribbed rubber grooves.
-            if d < -1.0 && (u * 1.2).sin().abs() > 0.88 {
-                let a = 0.10 * pose.alpha;
-                let bg = pb.pixel_at(x as usize, y as usize);
-                pb.plot(x, y, mix(bg, IRON_SH, a));
+            if d < -0.8 && (u * 1.35).sin() > 0.72 {
+                blend_px(pb, x, y, IRON_SH, 0.14 * pose.alpha);
             }
         }
     }
@@ -1028,51 +1173,56 @@ fn draw_floor_lint(pb: &mut PixelBuffer, c: Vec2, anim: f32, alpha: f32) {
     if alpha <= 0.02 {
         return;
     }
-    for i in 0..9 {
+    for i in 0..8 {
         let hx = hash01(i * 31 + 7, i * 17 + 3);
         let hy = hash01(i * 13 + 5, i * 29 + 11);
-        let a = (0.10 + 0.14 * hx) * alpha;
-        let r = 1.2 + 1.8 * hy;
-        let drift = (anim * 0.4 + hx * TAU).sin() * 1.2;
-        let q = c + Vec2::new((hx - 0.5) * 36.0 + drift, (hy - 0.5) * 30.0 + 6.0);
-        fill_disc(pb, q, r, ENAMEL_MID, a);
+        let a = (0.12 + 0.14 * hx) * alpha;
+        let r = 1.1 + 1.4 * hy;
+        let drift = (anim * 0.45 + hx * TAU).sin() * 1.0;
+        let q = c + Vec2::new((hx - 0.5) * 34.0 + drift, (hy - 0.5) * 28.0 + 3.0);
+        fill_disc(pb, q, r, ENAMEL_HI, a);
     }
 }
 
+/// Clean, centered segmented 3-phase ground HP arc around the Mangle.
 fn draw_hp_arc(pb: &mut PixelBuffer, c: Vec2, hp: f32, phase: u8, pulse: f32) {
-    let col = if phase >= 3 {
-        mix(WARN_RED, WARN_HOT, 0.25 + pulse * 0.2)
-    } else if phase == 2 {
+    let col = if phase >= 3 || hp <= 0.25 {
+        mix(WARN_RED, WARN_HOT, 0.25 + pulse * 0.25)
+    } else if phase == 2 || hp <= 0.60 {
         mix(WARN_AMBER, WARN_RED, 0.35)
     } else {
-        mix(ENAMEL_MID, WARN_AMBER, 0.5)
+        mix(ENAMEL_HI, JAM_GOLD, 0.45)
     };
-    let r = 17.5;
-    let a0 = -PI * 0.78;
-    let span = PI * 1.56;
-    // Segment ticks: 20 segments, the lit ones show the remaining pool.
-    let segs = 20;
-    for i in 0..segs {
-        let frac = i as f32 / segs as f32;
-        let lit = frac < hp;
+    let r = 18.5;
+    let a0 = PI * 0.18;
+    let span = PI * 0.64;
+    let steps = 42;
+    let lit_n = (hp.clamp(0.0, 1.0) * steps as f32).round() as i32;
+    for i in 0..=steps {
+        let frac = i as f32 / steps as f32;
         let a = a0 + span * frac;
         let q = c + Vec2::from_angle(a) * r;
         let x = q.x.round() as i32;
         let y = q.y.round() as i32;
-        if lit {
-            blend_px(pb, x, y, col, 0.85);
-            if lit && frac + 1.0 / segs as f32 > hp {
-                // The last sliver pulses.
-                blend_px(pb, x, y, WARN_HOT, 0.35 + 0.35 * pulse);
-            }
+        // Phase-threshold tick marks at 25% and 60% HP.
+        let is_tick = (frac - 0.25).abs() < 0.018 || (frac - 0.60).abs() < 0.018;
+        if is_tick {
+            blend_px(pb, x, y, IRON_OUTLINE, 0.90);
+            continue;
+        }
+        darken_px(pb, x, y + 1, 0.42);
+        if i <= lit_n {
+            let lead = i == lit_n;
+            blend_px(pb, x, y, if lead { WARN_HOT } else { col }, if lead { 0.95 } else { 0.86 });
         } else {
             blend_px(pb, x, y, IRON_SH, 0.55);
         }
     }
 }
 
-/// The intake lane: dashed outline, chevrons crawling toward the nip, and a
-/// feed-direction highlight during the pull.
+/// The intake lane: high-contrast dashed rails, scrolling suction chevrons, and
+/// live pull wind-streaks toward the nip.
+#[allow(clippy::too_many_arguments)]
 fn draw_intake_lane(
     pb: &mut PixelBuffer,
     lane: &MangleLane,
@@ -1081,18 +1231,46 @@ fn draw_intake_lane(
     pull: f32,
     scroll: f32,
     pulse: f32,
+    second: bool,
 ) {
     let f = lane.facing;
     let p = f.perp();
     let near = w2s(lane.center - f * lane.half, cam);
     let far = w2s(lane.center + f * lane.half, cam);
     let col = if pull > 0.0 {
-        mix(WARN_RED, WARN_HOT, 0.30 + 0.25 * pulse)
+        mix(WARN_RED, WARN_HOT, 0.25 + 0.30 * pulse)
+    } else if second {
+        mix(WARN_RED, WARN_AMBER, 0.45 + 0.20 * pulse)
     } else {
-        mix(WARN_AMBER, WARN_RED, fill * 0.45)
+        mix(WARN_AMBER, WARN_RED, fill * 0.55)
     };
-    let edge = 0.28 + 0.42 * fill + 0.20 * pull;
-    // Outline (two rails + the far mouth).
+    let fill_col = if pull > 0.0 { WARN_RED } else { WARN_AMBER };
+
+    // Faint tinted conveyor carpet inside the exact `22 x 40` footprint.
+    let Some((x0, x1, y0, y1)) = bbox(
+        pb,
+        w2s(lane.center, cam),
+        lane.half.max(lane.half_perp) + 3.0,
+        lane.half.max(lane.half_perp) + 3.0,
+    ) else {
+        return;
+    };
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let s = Vec2::new(x as f32, y as f32) + cam;
+            if lane.contains(s, 0.0) {
+                let d = s - lane.center;
+                let u = d.dot(f);
+                // Stronger danger tint closer to the nip (-u).
+                let near_nip = (1.0 - ((u + lane.half) / (lane.half * 2.0)).clamp(0.0, 1.0)) * 0.10;
+                let a = 0.11 + 0.12 * fill + 0.11 * pull + near_nip;
+                blend_px(pb, x, y, fill_col, a);
+            }
+        }
+    }
+
+    // Crisp side rails & far mouth lip.
+    let edge = 0.48 + 0.38 * fill + 0.14 * pull;
     line_dashed(pb, near + p * lane.half_perp, far + p * lane.half_perp, col, edge, 4.0, scroll);
     line_dashed(pb, near - p * lane.half_perp, far - p * lane.half_perp, col, edge, 4.0, scroll);
     line_dashed(
@@ -1100,46 +1278,36 @@ fn draw_intake_lane(
         far - p * lane.half_perp,
         far + p * lane.half_perp,
         col,
-        edge * 0.9,
+        edge * 0.92,
         3.0,
         0.0,
     );
-    // Faint lane fill.
-    let Some((x0, x1, y0, y1)) = bbox(pb, w2s(lane.center, cam), lane.half + 2.0, lane.half_perp + 2.0)
-    else {
-        return;
-    };
-    for y in y0..=y1 {
-        for x in x0..=x1 {
-            let s = Vec2::new(x as f32, y as f32) + cam;
-            if lane.contains(s, 0.0) {
-                let a = 0.10 + 0.14 * fill + 0.08 * pull;
-                blend_px(pb, x, y, col, a);
-            }
-        }
-    }
-    // Chevrons: five arrows, scrolling toward the nip during the pull.
+
+    // Marching suction chevrons pointing INWARD toward the nip (-f).
     let rows = 5;
     for i in 0..rows {
         let base = (i as f32 + 0.5) / rows as f32;
         let t = if pull > 0.0 {
-            (base + scroll * 0.03).rem_euclid(1.0)
+            (base - scroll * 0.025).rem_euclid(1.0)
         } else {
-            base
+            (base + scroll * 0.012).rem_euclid(1.0)
         };
         let u = -lane.half + t * lane.half * 2.0;
         let q = w2s(lane.center + f * u, cam);
-        // Chevron pointing toward the nip (-f).
-        let tip = q - f * 3.0;
-        let a1 = q - f * 0.2 + p * 3.2;
-        let a2 = q - f * 0.2 - p * 3.2;
-        let a = (0.40 + 0.34 * fill) * (1.0 - pull * 0.10);
-        draw_arrow(pb, tip, a1, a2, col, a);
-        // The conveyor's rungs across the lane.
-        let rail = w2s(lane.center + f * u, cam);
+        let tip = q - f * 3.4;
+        let a1 = q + f * 0.4 + p * 4.4;
+        let a2 = q + f * 0.4 - p * 4.4;
+        let a = (0.45 + 0.38 * fill) * (0.85 + 0.15 * pulse);
+        draw_arrow(pb, tip, a1, a2, if pull > 0.0 { WARN_HOT } else { col }, a);
+    }
+
+    // Active suction wind streaks dragging toward the nip during pull!
+    if pull > 0.0 {
         for k in -2..=2 {
-            let r = rail + p * (k as f32 * 3.0);
-            blend_px(pb, r.x.round() as i32, r.y.round() as i32, col, a * 0.5);
+            let phase = (scroll * 0.035 + (k + 2) as f32 * 0.23).fract();
+            let u = lane.half - phase * (lane.half * 1.8);
+            let q = w2s(lane.center + f * u + p * (k as f32 * 3.6), cam);
+            line_solid(pb, q, q - f * 5.5, WARN_HOT, 0.55 * (1.0 - (phase - 0.5).abs() * 1.8).max(0.0));
         }
     }
 }
@@ -1147,7 +1315,7 @@ fn draw_intake_lane(
 fn draw_arrow(pb: &mut PixelBuffer, tip: Vec2, a: Vec2, b: Vec2, col: Rgb, alpha: f32) {
     for (from, to) in [(a, tip), (tip, b)] {
         let d = to - from;
-        let steps = d.len().ceil().max(1.0) as i32;
+        let steps = (d.len() * 1.4).ceil().max(1.0) as i32;
         for i in 0..=steps {
             let t = i as f32 / steps as f32;
             let q = from + d * t;
@@ -1156,39 +1324,48 @@ fn draw_arrow(pb: &mut PixelBuffer, tip: Vec2, a: Vec2, b: Vec2, col: Rgb, alpha
     }
 }
 
-/// The bite strip: a pale warning wash that snaps to a white flash.
+/// The bite strip: crimson danger zone across the last 8 px with gleaming jaw-teeth ticks.
 fn draw_bite_tell(pb: &mut PixelBuffer, bite: &MangleLane, cam: Vec2, tell: f32, pull: f32, pulse: f32) {
     let f = bite.facing;
     let p = f.perp();
     let c = w2s(bite.center, cam);
-    let Some((x0, x1, y0, y1)) = bbox(pb, c, bite.half + 2.0, bite.half_perp + 1.0) else {
+    let Some((x0, x1, y0, y1)) = bbox(
+        pb,
+        c,
+        bite.half.max(bite.half_perp) + 3.0,
+        bite.half.max(bite.half_perp) + 3.0,
+    ) else {
         return;
     };
     for y in y0..=y1 {
         for x in x0..=x1 {
             let s = Vec2::new(x as f32, y as f32) + cam;
             if bite.contains(s, 0.0) {
-                let base = 0.18 + 0.24 * tell + 0.12 * pull;
-                let flicker = if pull > 0.0 {
-                    0.12 * pulse * pull
-                } else {
-                    0.06 * pulse * tell
-                };
-                blend_px(pb, x, y, WARN_RED, base + flicker);
+                let d = s - bite.center;
+                let u = d.dot(f);
+                let v = d.dot(p);
+                let stripe = ((u + v) * 0.85).sin() > 0.2;
+                let base = 0.22 + 0.22 * tell + 0.16 * pull + if stripe { 0.08 } else { 0.0 };
+                let flicker = (0.08 + 0.12 * pull) * pulse;
+                blend_px(pb, x, y, WARN_RED, (base + flicker).min(0.68));
             }
         }
     }
-    // The nip's teeth ticks across the strip.
+    // Crisp far boundary of the 8-px bite strip so the lethal line is unmistakable.
+    let far = w2s(bite.center + f * bite.half, cam);
+    line_solid(
+        pb,
+        far - p * bite.half_perp,
+        far + p * bite.half_perp,
+        mix(WARN_RED, WARN_HOT, 0.35 + 0.35 * pull),
+        0.55 + 0.35 * pull,
+    );
+    // Gleaming nip jaw-teeth ticks along the front edge.
     let near = w2s(bite.center - f * bite.half, cam);
     for k in -4..=4 {
-        let q = near + p * (k as f32 * 2.6);
-        blend_px(
-            pb,
-            q.x.round() as i32,
-            q.y.round() as i32,
-            WARN_HOT,
-            0.20 + 0.45 * pull,
-        );
+        let q = near + p * (k as f32 * 2.4);
+        let tip = q + f * (1.2 + 1.4 * pull);
+        line_solid(pb, q, tip, WARN_HOT, 0.35 + 0.55 * pull);
     }
 }
 
@@ -1196,29 +1373,42 @@ fn draw_bite_flash(pb: &mut PixelBuffer, bite: &MangleLane, cam: Vec2, t: f32) {
     let f = bite.facing;
     let p = f.perp();
     let c = w2s(bite.center, cam);
-    let a = (1.0 - t).clamp(0.0, 1.0);
-    let Some((x0, x1, y0, y1)) = bbox(pb, c, bite.half + 3.0, bite.half_perp + 2.0) else {
+    let a = (1.0 - t).powi(2).clamp(0.0, 1.0);
+    let Some((x0, x1, y0, y1)) = bbox(
+        pb,
+        c,
+        bite.half.max(bite.half_perp) + 4.0,
+        bite.half.max(bite.half_perp) + 4.0,
+    ) else {
         return;
     };
     for y in y0..=y1 {
         for x in x0..=x1 {
             let s = Vec2::new(x as f32, y as f32) + cam;
             if bite.contains(s, 0.0) {
-                blend_px(pb, x, y, WARN_HOT, 0.55 * a);
+                blend_px(pb, x, y, WARN_HOT, 0.72 * a);
             }
         }
     }
-    // Spark teeth along the nip.
+    // Blazing metallic clench sparks bursting across the bite strip!
     let near = w2s(bite.center - f * bite.half, cam);
     for k in -5..=5 {
-        let jitter = hash01(k, (t * 30.0) as i32) * 1.6;
-        let q = near + p * (k as f32 * 2.2) - f * jitter;
-        blend_px(pb, q.x.round() as i32, q.y.round() as i32, WARN_HOT, 0.85 * a);
+        let jitter = hash01(k + 13, (t * 24.0) as i32) * 3.5;
+        let q = near + p * (k as f32 * 2.1) + f * (t * 6.5 + jitter);
+        line_solid(pb, q, q + f * 2.5, WARN_HOT, 0.92 * a);
     }
 }
 
-/// The wring-out rail: two dashed rails and a scrolling roller tread.
-fn draw_wring_rail(pb: &mut PixelBuffer, lane: &MangleLane, cam: Vec2, fill: f32, travel: f32, pulse: f32) {
+/// The wring-out rail: crisp `56 × 10` bowling-lane rails, forward chevrons & brass stop.
+fn draw_wring_rail(
+    pb: &mut PixelBuffer,
+    lane: &MangleLane,
+    cam: Vec2,
+    fill: f32,
+    travel: f32,
+    pulse: f32,
+    anim: f32,
+) {
     let f = lane.facing;
     let p = f.perp();
     let near = w2s(lane.center - f * lane.half, cam);
@@ -1226,90 +1416,110 @@ fn draw_wring_rail(pb: &mut PixelBuffer, lane: &MangleLane, cam: Vec2, fill: f32
     let col = if travel > 0.0 {
         mix(WARN_HOT, WARN_AMBER, 0.25)
     } else {
-        mix(WARN_AMBER, WARN_RED, fill * 0.35)
+        mix(WARN_AMBER, WARN_RED, fill * 0.45)
     };
-    let a = 0.26 + 0.36 * fill + 0.20 * travel;
-    line_dashed(pb, near + p * lane.half_perp, far + p * lane.half_perp, col, a, 3.0, 0.0);
-    line_dashed(pb, near - p * lane.half_perp, far - p * lane.half_perp, col, a, 3.0, 0.0);
-    // Rungs across the rail, scrolling outward as the towel travels.
-    let rungs = 7;
-    for i in 0..rungs {
-        let base = (i as f32 + 0.5) / rungs as f32;
-        let t = if travel > 0.0 {
-            (base + travel).rem_euclid(1.0)
-        } else {
-            base
-        };
+    // Subtle dark-tinted lane wash so the 10 px rail pops clearly on both lit and unlit floors.
+    let Some((x0, x1, y0, y1)) = bbox(
+        pb,
+        w2s(lane.center, cam),
+        lane.half.max(lane.half_perp) + 3.0,
+        lane.half.max(lane.half_perp) + 3.0,
+    ) else {
+        return;
+    };
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let s = Vec2::new(x as f32, y as f32) + cam;
+            if lane.contains(s, 0.0) {
+                blend_px(pb, x, y, col, 0.09 + 0.11 * fill + 0.08 * travel);
+            }
+        }
+    }
+
+    let a = 0.42 + 0.36 * fill + 0.18 * travel;
+    let scroll = if travel > 0.0 { -anim * 34.0 } else { -anim * 12.0 };
+    line_dashed(pb, near + p * lane.half_perp, far + p * lane.half_perp, col, a, 3.5, scroll);
+    line_dashed(pb, near - p * lane.half_perp, far - p * lane.half_perp, col, a, 3.5, scroll);
+
+    // Outward-pointing chevrons along the rail showing launch direction (+f).
+    let chevrons = 6;
+    for i in 0..chevrons {
+        let base = (i as f32 + 0.5) / chevrons as f32;
+        let t = (base + anim * (if travel > 0.0 { 1.4 } else { 0.45 })).fract();
         let u = -lane.half + t * lane.half * 2.0;
         let q = w2s(lane.center + f * u, cam);
-        for k in -1..=1 {
-            let r = q + p * (k as f32 * 2.4);
-            blend_px(
-                pb,
-                r.x.round() as i32,
-                r.y.round() as i32,
-                col,
-                (0.18 + 0.30 * fill) * (0.6 + 0.4 * pulse),
-            );
-        }
+        let tip = q + f * 2.8;
+        let a1 = q - f * 0.6 + p * 2.8;
+        let a2 = q - f * 0.6 - p * 2.8;
+        draw_arrow(pb, tip, a1, a2, col, (0.35 + 0.38 * fill) * (0.7 + 0.3 * pulse));
     }
-    // End stop.
+
+    // Far end bumper stop.
     let stop = w2s(lane.center + f * lane.half, cam);
-    fill_disc(pb, stop, 1.8, col, 0.35 + 0.25 * fill);
+    line_solid(pb, stop - p * lane.half_perp, stop + p * lane.half_perp, WARN_HOT, 0.50 + 0.35 * fill);
+    fill_disc(pb, stop, 1.8, col, 0.55 + 0.30 * fill);
 }
 
-/// Two concentric ratchet rings on the crank: the tell's two clicks.
+/// Two crisp brass ratchet click rings + radial click ticks around the crank during WringOut tell.
 fn draw_crank_clicks(pb: &mut PixelBuffer, pose: &Pose, cam: Vec2, t: f32, pulse: f32) {
     let c = w2s(crank_pos_from_pose(pose), cam);
-    for (i, at) in [0.5f32, 1.0f32].iter().enumerate() {
-        let d = (t - at).abs();
-        if d < 0.35 {
-            let k = 1.0 - d / 0.35;
-            ring(pb, c, 6.0 + i as f32 * 3.0 + d * 6.0, JAM_GOLD, 0.55 * k, 1.0);
+    for (i, at) in [0.46f32, 0.92f32].iter().enumerate() {
+        let d = t - at;
+        if (0.0..0.38).contains(&d) {
+            let k = 1.0 - d / 0.38;
+            let r = 4.5 + i as f32 * 2.5 + d * 18.0;
+            ring(pb, c, r, WARN_HOT, 0.80 * k, 1.4);
+            for s in 0..4 {
+                let a = s as f32 * FRAC_PI_2 + 0.4;
+                let dir = Vec2::from_angle(a);
+                line_solid(pb, c + dir * (r - 1.5), c + dir * (r + 2.2), JAM_GOLD, 0.72 * k);
+            }
         }
     }
-    ring(pb, c, 4.6, WARN_AMBER, 0.25 + 0.25 * pulse, 0.9);
+    ring(pb, c, 5.0, WARN_AMBER, 0.35 + 0.30 * pulse, 1.1);
 }
 
-/// The exposed crank's gather ring: "hit here".
+/// Unmistakable golden weak-point gather ring & rotating corner brackets on the dropped crank!
 fn draw_crank_gather(pb: &mut PixelBuffer, pose: &Pose, cam: Vec2, t: f32, pulse: f32) {
     let c = w2s(crank_pos_from_pose(pose), cam);
-    let r = 7.0 + pulse * 2.2;
-    ring(pb, c, r, JAM_GOLD, 0.45 + 0.30 * pulse, 1.2);
-    ring(pb, c, 3.6, WARN_HOT, 0.55, 1.0);
-    // Four inward ticks, a weak-point reticle.
-    let spin = t * TAU * 0.7;
+    let r = 6.8 + pulse * 1.8;
+    // Soft warm gold glow pool beneath the crank.
+    fill_disc(pb, c, r + 2.0, JAM_GOLD, 0.16 + 0.12 * pulse);
+    ring(pb, c, r, JAM_GOLD, 0.65 + 0.30 * pulse, 1.5);
+    ring(pb, c, 4.2, WARN_HOT, 0.72, 1.1);
+    // Four rotating inward reticle chevrons ("HIT HERE x1.5").
+    let spin = t * TAU * 0.8;
     for i in 0..4 {
         let a = spin + i as f32 * FRAC_PI_2;
-        let from = c + Vec2::from_angle(a) * (r + 2.5);
-        let to = c + Vec2::from_angle(a) * (r - 1.0);
-        draw_arrow(pb, to, from, from, JAM_GOLD, 0.5);
+        let dir = Vec2::from_angle(a);
+        let from = c + dir * (r + 3.2);
+        let to = c + dir * (r - 0.6);
+        line_solid(pb, from, to, WARN_HOT, 0.82);
     }
 }
 
-/// The towel jam's spill on the floor under the nip.
+/// Soapy towel puddle spilling onto the floor under a jammed nip.
 fn draw_towel_puddle(pb: &mut PixelBuffer, pose: &Pose, cam: Vec2, pulse: f32) {
     if pose.towel <= 0.02 {
         return;
     }
     let nip = w2s(nip_pos_from_pose(pose), cam);
     for i in 0..5 {
-        let side = (i as f32 - 2.0) * 2.2;
-        let q = nip + pose.f * (1.8 + i as f32 * 1.1) + pose.p * side;
-        fill_disc(pb, q, 1.6 + 0.5 * pulse, TOWEL_MID, 0.24 * pose.towel);
+        let side = (i as f32 - 2.0) * 2.6;
+        let q = nip + pose.f * (2.5 + (i % 2) as f32 * 2.2) + pose.p * side;
+        fill_disc(pb, q, 2.0 + 0.4 * pulse, ENAMEL_MID, 0.26 * pose.towel);
     }
 }
 
-/// The springs' ticks: the final jam spits short cable arcs.
+/// Exposed springing coils popping out beside the dropped crank in FinalJam.
 fn draw_spring_ticks(pb: &mut PixelBuffer, pose: &Pose, cam: Vec2, p: f32, pulse: f32) {
     let c = w2s(crank_pos_from_pose(pose), cam);
     for i in 0..3 {
-        let a = -FRAC_PI_2 + (i as f32 - 1.0) * 0.5 + (p * 6.0).sin() * 0.12;
-        let from = c + Vec2::from_angle(a) * 3.0;
-        let mid = c + Vec2::from_angle(a + 0.35) * 6.5;
-        let to = c + Vec2::from_angle(a + 0.15) * 9.0;
-        draw_arrow(pb, mid, from, from, SPRING_COL, 0.30 + 0.30 * pulse);
-        draw_arrow(pb, to, mid, mid, SPRING_COL, 0.28 + 0.25 * pulse);
+        let a = -0.7 + i as f32 * 0.75 + (p * 10.0).sin() * 0.16;
+        let dir = Vec2::from_angle(a);
+        let from = c + dir * 2.5;
+        let to = c + dir * (9.5 + 1.8 * pulse);
+        draw_coil_spring(pb, from, to, 3, 1.2, 0.72 + 0.25 * pulse);
     }
 }
 
@@ -1317,8 +1527,8 @@ fn draw_frame_shadow(pb: &mut PixelBuffer, pose: &Pose, cam: Vec2) {
     if pose.alpha <= 0.02 {
         return;
     }
-    let c = w2s(pose.pos, cam) + Vec2::new(2.0, 2.6);
-    let Some((x0, x1, y0, y1)) = bbox(pb, c, 16.0, 15.0) else {
+    let c = w2s(pose.pos, cam) + Vec2::new(2.2, 3.0);
+    let Some((x0, x1, y0, y1)) = bbox(pb, c, 19.0, 18.0) else {
         return;
     };
     for y in y0..=y1 {
@@ -1327,29 +1537,42 @@ fn draw_frame_shadow(pb: &mut PixelBuffer, pose: &Pose, cam: Vec2) {
             let dy = y as f32 - c.y;
             let u = dx * pose.f.x + dy * pose.f.y;
             let v = dx * pose.p.x + dy * pose.p.y;
-            let d = sd_rbox(u, v, -BODY_CENTRE_BACK, 0.0, BODY_HALF_LEN, ROLLER_HALF_WIDTH + 1.2, 2.4);
-            if d < 1.4 {
-                let a = (0.32 * (1.0 - (d.max(0.0) / 1.4))).clamp(0.0, 0.32) * pose.alpha;
+            let d = sd_rbox(
+                u,
+                v,
+                -BODY_CENTRE_BACK,
+                0.0,
+                BODY_HALF_LEN + 0.6,
+                ROLLER_HALF_WIDTH + 2.0,
+                2.8,
+            );
+            if d < 1.8 {
+                let a = (0.42 * (1.0 - (d.max(0.0) / 1.8))).clamp(0.0, 0.42) * pose.alpha;
                 darken_px(pb, x, y, a);
             }
         }
     }
 }
 
-/// Little iron-feet prints: the waddle's footfalls.
+/// Little iron-feet contact prints on the floor during waddle / death.
 fn draw_foot_prints(pb: &mut PixelBuffer, pose: &Pose, cam: Vec2, anim: f32, alpha: f32) {
     if alpha <= 0.02 {
         return;
     }
-    for side in [-1.0f32, 1.0] {
-        let step = (anim * 2.2 + if side < 0.0 { PI } else { 0.0 }).sin();
-        let lift = step.max(0.0);
-        let q = w2s(
-            pose.pos - pose.f * (BODY_CENTRE_BACK + BODY_HALF_LEN - 1.0) + pose.p * (side * 9.0),
-            cam,
-        ) + Vec2::new(0.0, 3.0 + lift * 1.6);
-        let a = (0.22 - lift * 0.12) * alpha;
-        fill_disc(pb, q, 2.6 - lift * 0.6, IRON_SH, a);
+    for (i, &(u_off, side)) in [
+        (-(BODY_CENTRE_BACK + BODY_HALF_LEN - 0.5), -1.0f32),
+        (-(BODY_CENTRE_BACK + BODY_HALF_LEN - 0.5), 1.0),
+        (5.5, -1.0),
+        (5.5, 1.0),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let phase = if (i == 0) || (i == 3) { 0.0 } else { PI };
+        let lift = (anim * 2.6 + phase).sin().max(0.0);
+        let q = w2s(pose.pos + pose.f * u_off + pose.p * (side * 10.6), cam)
+            + Vec2::new(1.0, 2.2 + lift * 1.0);
+        fill_disc(pb, q, 2.5 - lift * 0.5, IRON_OUTLINE, (0.30 - lift * 0.14) * alpha);
     }
 }
 
@@ -1363,7 +1586,7 @@ fn crank_pos_from_pose(pose: &Pose) -> Vec2 {
 }
 
 // ============================================================================
-// Public Entry Point 2: Entity Layer (Frame, Rollers, Crank, Towel, Belt)
+// Public Entry Point 2: Entity Layer (Feet, Frame, Rollers, Screw, Crank, Belt)
 // ============================================================================
 
 /// Draw The Mangle.
@@ -1380,195 +1603,324 @@ pub fn draw(pb: &mut PixelBuffer, view: &MangleView, cam: Vec2, _accent: Rgb) {
     let hit = view.hit_flash.clamp(0.0, 1.0);
     let f = pose.f;
     let p = pose.p;
-    let base = w2s(pose.pos, cam) + pose.shake;
+    let base = w2s(pose.pos, cam) + pose.shake + f * pose.lean + p * pose.rock;
     let fl = f.dot(LIGHT);
     let pl = p.dot(LIGHT);
+    let pulse = 0.5 + 0.5 * (view.anim * 9.5).sin();
+    let rim_col = if hit > 0.45 { (56, 36, 22) } else { IRON_OUTLINE };
 
-    // 1) The iron feet first (they sit under the frame).
-    for side in [-1.0f32, 1.0] {
-        let step = (view.anim * 2.2 + if side < 0.0 { PI } else { 0.0 }).sin();
-        let lift = step.max(0.0) * if matches!(view.state, MangleState::Idle) { 1.0 } else { 0.35 };
-        draw_iron_foot(pb, base, f, p, side, lift, hit, pose.alpha);
+    // 1) Four chunky cast-iron feet peeking cleanly out under the corners so the
+    //    waddling posture reads immediately in every facing!
+    let waddle_scale = if matches!(view.state, MangleState::Idle) {
+        1.0
+    } else if matches!(view.state, MangleState::Death) {
+        0.0
+    } else {
+        0.25
+    };
+    for (idx, &(u_foot, side)) in [
+        (-(BODY_CENTRE_BACK + BODY_HALF_LEN + 0.4), -1.0f32),
+        (-(BODY_CENTRE_BACK + BODY_HALF_LEN + 0.4), 1.0),
+        (5.8, -1.0),
+        (5.8, 1.0),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let phase = if idx == 0 || idx == 3 { 0.0 } else { PI };
+        let step = (view.anim * 2.6 + phase).sin();
+        let lift = step.max(0.0) * waddle_scale;
+        let stride = step * 1.4 * waddle_scale;
+        draw_iron_foot(pb, base, f, p, u_foot + stride, side, lift, hit, pose.alpha);
     }
 
-    // 2) Frame + rollers + screw in one local-space pass.
-    let Some((x0, x1, y0, y1)) = bbox(pb, base, 20.0, 19.0) else {
+    // 2) Cast-iron frame, cheeks, recessed roller well, two glossy candy-striped
+    //    rollers, meshed brass gears, porcelain maker's badge, tension springs &
+    //    threaded brass wringer screw — all with crisp dark exterior outline!
+    let Some((x0, x1, y0, y1)) = bbox(pb, base, 21.0, 21.0) else {
         return;
     };
+    let phase2 = pose.damage_tier >= 2;
+    let phase3 = pose.damage_tier >= 3;
+    let screw_skew = if phase3 { 0.08 } else { 0.0 } + pose.death * 0.25;
+
     for y in y0..=y1 {
         for x in x0..=x1 {
             let dx = x as f32 - base.x;
             let dy = y as f32 - base.y;
             let v = dx * p.x + dy * p.y;
-            // The frame shears as it sags (a broken machine slumps).
-            let u = dx * f.x + dy * f.y - v * 0.05 * pose.sag;
+            // Frame shears slightly when sagging into a jam or death collapse.
+            let u = dx * f.x + dy * f.y - v * 0.06 * pose.sag;
 
-            // The frame: cast iron with a porcelain-enamel badge on the back.
-            let d_frame = sd_rbox(
+            // Main cast-iron body box + protruding ornate curved side cheek ears.
+            let d_body = sd_rbox(
                 u,
                 v,
                 -BODY_CENTRE_BACK,
                 0.0,
                 BODY_HALF_LEN,
-                ROLLER_HALF_WIDTH + 1.6,
+                ROLLER_HALF_WIDTH + 1.8,
                 2.2,
             );
-            if d_frame > 0.9 {
+            let d_cheek_l = sd_rbox(u, v, -0.8, -(ROLLER_HALF_WIDTH + 1.6), 7.8, 1.7, 1.1);
+            let d_cheek_r = sd_rbox(u, v, -0.8, ROLLER_HALF_WIDTH + 1.6, 7.8, 1.7, 1.1);
+            let d_frame = d_body.min(d_cheek_l).min(d_cheek_r);
+
+            let cover = (0.55 - d_frame * 1.25).clamp(0.0, 1.0);
+            if cover <= 0.0 {
+                if d_frame < 1.15 {
+                    blend_px(pb, x, y, rim_col, 0.80 * pose.alpha);
+                }
                 continue;
             }
-            let rim = (1.0 - (d_frame.max(0.0) / 0.9)).clamp(0.0, 1.0);
-            let lum = 0.44 + 0.26 * (u / 9.0).clamp(-1.0, 1.0) * fl
-                + 0.30 * (v / 12.0).clamp(-1.0, 1.0) * pl
-                + 0.10 * rim;
-            let mut col = shade3(IRON_SH, IRON_MID, IRON_HI, lum);
 
-            // The roller well: a dark recess across the front half.
-            let d_well = sd_rbox(u, v, 3.1, 0.0, 3.4, ROLLER_HALF_WIDTH + 0.2, 1.2);
-            if d_well < 0.0 {
-                let recess = shade3(IRON_SH, (40, 46, 52), IRON_MID, 0.24 + 0.18 * rim);
-                col = mix(col, recess, 0.85);
+            let nu = ((u + BODY_CENTRE_BACK) / BODY_HALF_LEN).clamp(-1.0, 1.0);
+            let nv = (v / (ROLLER_HALF_WIDTH + 2.0)).clamp(-1.0, 1.0);
+            let lit = nu * fl + nv * pl;
+            let dome = (1.0 - (nu * nu * 0.35 + nv * nv * 0.45)).clamp(0.0, 1.0);
+
+            // Base cast-iron housing with beveled outer rim!
+            let bevel = if d_frame > -1.35 {
+                if lit > 0.12 { 0.24 } else { -0.22 }
+            } else {
+                0.0
+            };
+            let mut col = shade3(IRON_SH, IRON_MID, IRON_HI, 0.40 + 0.26 * dome + 0.52 * lit + bevel);
+            if d_frame > -1.2 && lit > 0.45 {
+                col = mix(col, IRON_SPEC, 0.36);
             }
 
-            // Two candy-striped rollers, turning (the stripe phase is `roll`).
-            for (idx, ru) in [1.4f32, 4.7f32].iter().enumerate() {
-                let d = sd_segment(
+            // Recessed roller well across the front half (`u ∈ [-1.8, 7.3]`).
+            let d_well = sd_rbox(u, v, 2.75, 0.0, 4.55, ROLLER_HALF_WIDTH + 0.15, 0.9);
+            if d_well < 0.0 {
+                col = (12, 16, 22);
+                // Meshed brass end-gears glimpsed at the cheek ends of the roller well!
+                if v.abs() > ROLLER_HALF_WIDTH - 1.3 {
+                    let gear_tooth = ((u * 2.4 + pose.roll * 1.2).sin()) * 0.5 + 0.5;
+                    col = shade3(BRASS_SH, BRASS_MID, BRASS_HI, 0.35 + 0.55 * gear_tooth);
+                }
+            }
+
+            // Two thick glossy candy-striped wringer rollers!
+            // In FinalJam / Death, rollers tilt crookedly (slack).
+            let roller_tilt = v * 0.055 * pose.slack;
+            for (idx, &ru_base) in [0.75f32, 4.85f32].iter().enumerate() {
+                let ru = ru_base + if idx == 0 { roller_tilt } else { -roller_tilt };
+                let d_r = sd_segment(
                     u,
                     v,
-                    *ru,
-                    -ROLLER_HALF_WIDTH,
-                    *ru,
-                    ROLLER_HALF_WIDTH,
-                    2.0,
+                    ru,
+                    -(ROLLER_HALF_WIDTH - 0.5),
+                    ru,
+                    ROLLER_HALF_WIDTH - 0.5,
+                    2.05,
                 );
-                if d < 1.0 {
-                    let cover = (1.0 - (d.max(0.0) / 1.0)).clamp(0.0, 1.0);
-                    let spin_dir = if pose.spin < 0.0 { -1.0 } else { 1.0 };
-                    // Candy stripes spiral around the roller: phase runs along
-                    // its length (v) with a slight twist across the face (u).
-                    let phase = (v * 0.95 + (u - *ru) * 0.55) + pose.roll * spin_dir;
-                    let band = (phase * 0.75).floor();
-                    let stripe = (band as i32) & 1 == 0;
-                    let lit = 0.62 + 0.30 * (if stripe { 0.6 } else { 0.0 })
-                        + 0.20 * (v / 11.0).clamp(-1.0, 1.0) * pl
-                        + 0.14 * rim;
-                    let base_col = if stripe {
-                        shade3(ROLLER_RED, ROLLER_RED_HI, (255, 168, 150), lit)
+                if d_r < 0.55 {
+                    let r_cover = (0.55 - d_r).clamp(0.0, 1.0);
+                    // Cylindrical cross-section normal across the roller's width (`u - ru`).
+                    let cyl_u = ((u - ru) / 2.05).clamp(-1.0, 1.0);
+                    let cyl_z = (1.0 - cyl_u * cyl_u).max(0.0).sqrt();
+                    let cyl_lit = cyl_u * fl * 0.72 + nv * pl * 0.28 + cyl_z * 0.42;
+
+                    // Spiral barber-pole candy stripes: opposite rollers counter-rotate!
+                    let spin_sign = if idx == 0 { 1.0 } else { -1.0 };
+                    let phase = v * 0.82 + (u - ru) * 0.65 * spin_sign + pose.roll * spin_sign;
+                    let stripe_wave = (phase * 1.05).sin();
+                    let is_red = stripe_wave > 0.05;
+
+                    let mut rcol = if is_red {
+                        shade3(ROLLER_RED_SH, ROLLER_RED, ROLLER_RED_HI, 0.42 + 0.68 * cyl_lit)
                     } else {
-                        shade3(ROLLER_DIM, ROLLER_CREAM, TOWEL_HI, lit)
+                        shade3(ROLLER_DIM, ROLLER_CREAM, ROLLER_CREAM_HI, 0.42 + 0.68 * cyl_lit)
                     };
-                    // The roller's cylindrical shading across its width.
-                    let cap = (1.0 - (d.max(0.0) / 0.95).powi(2) * 0.35).clamp(0.0, 1.0);
-                    col = mix(col, scale(base_col, 0.94 + 0.10 * cap), cover);
-                    let _ = idx;
+                    // Crisp glossy rubber specular line along the sunlit ridge of each roller!
+                    if cyl_z > 0.88 && cyl_lit > 0.38 {
+                        rcol = mix(rcol, ROLLER_CREAM_HI, 0.52);
+                    }
+                    // Phase 2/3 rubber scuffs & nicks on the rollers!
+                    if phase2 && ((v + 3.5).abs() < 1.1 && idx == 1 || (v - 4.2).abs() < 0.9 && idx == 0) {
+                        rcol = mix(rcol, IRON_SH, 0.52);
+                    }
+                    // Dark outline along the roller seam edge.
+                    if d_r > -0.15 {
+                        rcol = mix(rcol, IRON_OUTLINE, 0.55);
+                    }
+                    col = mix(col, rcol, r_cover);
                 }
             }
 
-            // The nip line between the rollers.
-            if (u - 3.05).abs() < 0.45 && v.abs() <= ROLLER_HALF_WIDTH {
-                col = mix(col, (10, 12, 14), 0.82);
+            // Deep dark nip crevice between the two rollers (with white reverse glint on Intake tell).
+            let nip_u = 2.80;
+            if (u - nip_u).abs() < 0.48 && v.abs() <= ROLLER_HALF_WIDTH - 0.4 {
+                col = if pose.spin < -0.5 && ((v + view.anim * 12.0).sin() > 0.45) {
+                    mix(WARN_AMBER, WARN_HOT, 0.5)
+                } else {
+                    (8, 10, 14)
+                };
             }
 
-            // The feed lip: a bright steel comb of teeth where the bite lands.
-            if (u - 6.9).abs() < 0.75 && v.abs() <= ROLLER_HALF_WIDTH {
-                let tooth = ((v * 1.4).floor() as i32) & 1 == 0;
-                let lit = if tooth { 0.78 + 0.18 * rim } else { 0.38 };
-                col = shade3(IRON_MID, IRON_HI, IRON_SPEC, lit);
-            }
-
-            // A small porcelain maker's plate on the back plate (not a face:
-            // one line of lettering above three brass rivets).
-            let d_badge = sd_rbox(u, v, -6.8, 0.0, 1.5, 4.4, 0.7);
-            if d_badge < 0.0 {
-                let e = 0.46 + 0.22 * rim;
-                col = shade3(ENAMEL_SH, ENAMEL_MID, ENAMEL_HI, e);
-                if (u + 6.8).abs() < 0.35 && v.abs() < 2.8 {
-                    col = mix(col, (46, 52, 54), 0.55);
-                }
-                if (u + 7.7).abs() < 0.4 && v.abs() < 0.5 {
-                    col = mix(col, BRASS_HI, 0.7);
+            // Machined steel feed-comb lip along the front mouth (`u ≈ 7.35`).
+            if (u - 7.35).abs() < 0.82 && v.abs() <= ROLLER_HALF_WIDTH {
+                let tooth = ((v * 1.55).floor() as i32) & 1 == 0;
+                let comb_lit = if tooth { 0.82 + 0.25 * lit } else { 0.28 };
+                col = shade3(IRON_SH, IRON_HI, IRON_SPEC, comb_lit);
+                if phase2 && tooth && matches!(view.state, MangleState::Intake { .. }) {
+                    col = mix(col, HEAT_GLOW, 0.35 + 0.25 * pulse);
                 }
             }
 
-            // The brass wringer screw across the top: a threaded rod with a
-            // nut at each cheek and a wing knob in the middle.
-            let d_screw = sd_segment(u, v, -3.0, -10.2, -3.0, 10.2, 0.55);
-            if d_screw < 0.15 {
-                let lum_b = 0.60 + 0.30 * (v / 10.0).clamp(-1.0, 1.0) * pl;
-                let thread = ((v * 1.9).sin() * 0.10).abs();
-                col = shade3(BRASS_SH, BRASS_MID, BRASS_HI, lum_b - thread);
-            }
-            for nut_v in [-10.2f32, 10.2] {
-                if sd_circle(u, v, -3.0, nut_v, 0.95) < 0.05 {
-                    col = shade3(BRASS_SH, BRASS_MID, BRASS_HI, 0.72 + 0.18 * rim);
+            // Vintage porcelain-enamel maker's plate on the back housing (`u ∈ [-9.6, -5.8]`).
+            let d_badge = sd_rbox(u, v, -7.7, 0.0, 1.8, 5.4, 0.8);
+            if d_badge < 0.35 {
+                if d_badge > -0.35 {
+                    col = IRON_OUTLINE;
+                } else {
+                    let e_lum = 0.48 + 0.42 * lit + 0.16 * dome;
+                    col = shade3(ENAMEL_SH, ENAMEL_MID, ENAMEL_HI, e_lum);
+                    // Crisp dark enamel stencil bar + brass end rivets.
+                    if (u + 7.7).abs() < 0.42 && v.abs() < 3.4 {
+                        col = mix(col, (26, 38, 46), 0.72);
+                    }
+                    if (u + 7.7).abs() < 0.55 && (v.abs() - 4.3).abs() < 0.55 {
+                        col = BRASS_HI;
+                    }
+                    // Phase 2/3 chipped enamel crack!
+                    if phase2 && (u + 7.4 - v * 0.45).abs() < 0.55 && v > -1.5 && v < 3.2 {
+                        col = IRON_SH;
+                    }
                 }
             }
-            let d_knob = sd_circle(u, v, -3.0, 0.0, 1.35);
-            if d_knob < 0.1 {
-                col = shade3(BRASS_SH, BRASS_MID, BRASS_HI, 0.75 + 0.3 * rim);
-            }
-            // The knob's two wings.
-            if sd_segment(u, v, -3.0, -1.2, -5.0, -2.0, 0.45) < 0.1
-                || sd_segment(u, v, -3.0, 1.2, -5.0, 2.0, 0.45) < 0.1
-            {
-                col = shade3(BRASS_SH, BRASS_MID, BRASS_HI, 0.62);
+
+            // Rear housing battle-damage crack in Phase 3 (glowing hot internal steam/embers!).
+            if phase3 && u < -2.0 && u > -10.0 && v > -7.5 && v < 4.5 {
+                let crack = ((u + 5.8) - (v + 1.5) * 0.55 + (v * 1.4).sin() * 0.45).abs();
+                if crack < 0.65 {
+                    col = mix(IRON_OUTLINE, HEAT_GLOW, 0.55 + 0.40 * pulse);
+                } else if crack < 1.3 {
+                    col = mix(col, IRON_SH, 0.55);
+                }
             }
 
-            // Side cheeks: polished edges that catch the light.
-            let cheek_v = if v >= 0.0 {
-                ROLLER_HALF_WIDTH + 1.2
+            // Heavy raised cast-iron side cheeks with machined specular bevels & rivets!
+            if d_cheek_l < 0.2 || d_cheek_r < 0.2 {
+                let side_sign = v.signum();
+                let c_lit = nu * fl * 0.45 + side_sign * pl * 0.75;
+                let mut cc = shade3(IRON_SH, IRON_MID, IRON_HI, 0.48 + 0.52 * c_lit);
+                if (v.abs() - (ROLLER_HALF_WIDTH + 1.5)).abs() < 0.55 && c_lit > 0.1 {
+                    cc = mix(cc, IRON_SPEC, 0.55);
+                }
+                // Exposed helical steel tension springs seated in the cheeks at `u ≈ -3.6`!
+                if (u + 3.6).abs() < 1.35 && v.abs() > ROLLER_HALF_WIDTH + 0.2 {
+                    let coil = (u * 4.2).sin() * 0.5 + 0.5;
+                    cc = shade3(SPRING_SH, SPRING_COL, SPRING_HI, 0.35 + 0.65 * coil);
+                }
+                // Brass cheek bolts!
+                for &bu in &[-6.6f32, 0.8, 5.2] {
+                    if sd_circle(u, v.abs(), bu, ROLLER_HALF_WIDTH + 1.6, 0.75) < 0.0 {
+                        cc = BRASS_HI;
+                    }
+                }
+                col = cc;
+            }
+
+            // Threaded brass wringer pressure screw across the top (`u ≈ -3.6`) + central T-wing knob!
+            let su = -3.6 + v * screw_skew;
+            let d_screw = sd_segment(u, v, su, -10.8, su, 10.8, 0.75);
+            if d_screw < 0.4 {
+                if d_screw > 0.05 {
+                    col = mix(col, IRON_OUTLINE, 0.72);
+                } else {
+                    let thread = ((v * 2.4).sin() * 0.22).abs();
+                    let b_lit = 0.56 + 0.42 * lit - thread;
+                    col = shade3(BRASS_SH, BRASS_MID, BRASS_HI, b_lit);
+                }
+            }
+            for &nut_v in &[-10.6f32, 10.6] {
+                if sd_circle(u, v, su, nut_v, 1.35) < 0.0 {
+                    col = shade3(BRASS_SH, BRASS_MID, BRASS_HI, 0.65 + 0.35 * lit);
+                }
+            }
+            // Central brass T-wing pressure knob (detaches in late death!).
+            if pose.death < 0.35 {
+                let d_knob = sd_circle(u, v, su, 0.0, 1.75);
+                let d_w1 = sd_segment(u, v, su, -1.2, su - 2.2, -3.2, 0.65);
+                let d_w2 = sd_segment(u, v, su, 1.2, su - 2.2, 3.2, 0.65);
+                let d_k = d_knob.min(d_w1).min(d_w2);
+                if d_k < 0.45 {
+                    if d_k > 0.0 {
+                        col = mix(col, IRON_OUTLINE, 0.78);
+                    } else {
+                        col = shade3(BRASS_SH, BRASS_MID, BRASS_HI, 0.68 + 0.38 * lit);
+                        if d_knob < -0.7 && lit > 0.0 {
+                            col = WARN_HOT;
+                        }
+                    }
+                }
+            }
+
+            // Intact taut black rubber drive belt riding the left-flank pulley in Phase 1/2!
+            if !phase3 && pose.belt_slip < 0.1 {
+                let d_belt = sd_rbox(u, v, -0.5, -(ROLLER_HALF_WIDTH + 2.7), 5.6, 0.75, 0.3);
+                if d_belt < 0.25 {
+                    let rib = ((u + pose.roll * 1.4) * 1.6).sin() * 0.16;
+                    col = shade3(BELT_SH, BELT_MID, BELT_HI, 0.48 + 0.35 * lit + rib);
+                }
+            }
+
+            let final_col = apply_hit(col, hit * 0.42);
+            if cover < 1.0 {
+                let bg = pb.pixel_at(x as usize, y as usize);
+                let rimmed = mix(bg, rim_col, 0.80 * pose.alpha);
+                pb.plot(x, y, mix(rimmed, final_col, cover * pose.alpha));
             } else {
-                -(ROLLER_HALF_WIDTH + 1.2)
-            };
-            let d_cheek = sd_rbox(u, v, -BODY_CENTRE_BACK, cheek_v, 7.0, 1.4, 0.8);
-            if d_cheek < 0.4 {
-                let c_lum = 0.56 + 0.26 * rim + 0.20 * pl * v.signum();
-                col = shade3(IRON_MID, IRON_HI, IRON_SPEC, c_lum);
+                blend_px(pb, x, y, final_col, pose.alpha);
             }
-
-            // Rivets along the cheeks.
-            for k in -1..=1 {
-                let rq = (u - (k as f32 * 4.2 + 0.5)).abs()
-                    + (v.abs() - (ROLLER_HALF_WIDTH + 1.2)).abs();
-                if rq < 0.75 {
-                    col = mix(col, IRON_SPEC, 0.65);
-                }
-            }
-
-            col = apply_hit(col, hit * 0.30);
-            blend_px(pb, x, y, col, pose.alpha);
         }
     }
 
-    // 2b) A death break: two dark cracks and the belt's slack.
+    // 2b) Death collapse fractures & tumbling detached brass wringer knob!
     if matches!(view.state, MangleState::Death) {
-        for (a, b) in [
-            (-6.0f32, 2.0f32),
-            (-2.0, -7.0),
-        ] {
-            let from = base + f * a + p * (-9.0);
-            let to = base + f * b + p * 9.0;
-            draw_arrow(pb, to, from, from, (12, 14, 16), 0.75);
+        let t = pose.death;
+        for (a, b) in [(-6.5f32, 3.5f32), (-1.5, -8.0)] {
+            let from = base + f * a + p * (-9.5);
+            let to = base + f * b + p * 9.5;
+            line_solid(pb, from, to, IRON_OUTLINE, 0.88 * pose.alpha);
+            line_solid(pb, from + f, to + f, HEAT_GLOW, 0.45 * (1.0 - t) * pose.alpha);
+        }
+        // Detached brass wing-knob tumbling off the top!
+        if t >= 0.25 {
+            let kt = ((t - 0.25) / 0.75).clamp(0.0, 1.0);
+            let knob = base - f * (5.0 + kt * 16.0) - p * (kt * 9.0) + Vec2::new(0.0, -(1.0 - kt) * 5.0 * (kt * PI).sin());
+            fill_disc(pb, knob, 2.1, IRON_OUTLINE, 0.85 * pose.alpha);
+            fill_disc(pb, knob, 1.5, BRASS_HI, 0.95 * pose.alpha);
         }
     }
 
-    // 3) The drive belt: torn and hanging in the last quarter.
+    // 3) Torn rubber drive belt whipping loose off the flank in Phase 3 & Death!
     if pose.belt_slip > 0.02 {
         draw_torn_belt(pb, base, f, p, pose.belt_slip, hit, pose.alpha, view.anim);
     }
 
-    // 4) The towel jam spilling out of the nip.
+    // 4) Cloth bulge peeking out during WringOut tell, or HUGE jammed towel in Jam/FinalJam!
+    if pose.wring_bulge > 0.05 {
+        draw_towel_jam(pb, base, f, p, pose.wring_bulge * 0.42, hit, pose.alpha, view.anim);
+    }
     if pose.towel > 0.02 {
         draw_towel_jam(pb, base, f, p, pose.towel, hit, pose.alpha, view.anim);
     }
 
-    // 5) The loose crank (front-most on the right flank).
-    draw_crank(pb, base, f, p, &pose, hit);
+    // 5) The loose brass-and-wood crank on the right flank (x1.5 weak point!).
+    draw_crank(pb, base, f, p, &pose, hit, view.anim);
 
-    // 6) Steam wisps off a jammed nip.
+    // 6) Cel-shaded pressurized steam plumes billowing off the jammed/damaged nip!
     if pose.steam > 0.02 {
         draw_steam(pb, base, f, p, pose.steam, view.anim, pose.alpha);
     }
 
+    // 7) Metallic hit-sparks when struck!
+    if hit > 0.12 {
+        draw_hit_sparks(pb, base, hit, view.anim);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1577,36 +1929,47 @@ fn draw_iron_foot(
     base: Vec2,
     f: Vec2,
     p: Vec2,
+    u_off: f32,
     side: f32,
     lift: f32,
     hit: f32,
     alpha: f32,
 ) {
-    let center = base - f * (BODY_CENTRE_BACK + BODY_HALF_LEN - 0.5) + p * (side * 8.6)
-        + Vec2::new(0.0, 3.4 - lift * 1.8);
-    let Some((x0, x1, y0, y1)) = bbox(pb, center, 4.5, 4.5) else {
+    let center = base + f * u_off + p * (side * 12.0) + Vec2::new(0.0, 2.5 - lift * 2.2);
+    let Some((x0, x1, y0, y1)) = bbox(pb, center, 5.0, 5.0) else {
         return;
     };
+    let fl = f.dot(LIGHT);
+    let pl = p.dot(LIGHT);
     for y in y0..=y1 {
         for x in x0..=x1 {
             let dx = x as f32 - center.x;
             let dy = y as f32 - center.y;
             let u = dx * f.x + dy * f.y;
             let v = dx * p.x + dy * p.y;
-            let d = sd_rbox(u, v, 0.0, 0.0, 2.6, 2.2, 0.8);
-            if d < 0.6 {
-                let lum = 0.46 + 0.30 * (v / 2.2).clamp(-1.0, 1.0) * p.dot(LIGHT);
-                let col = shade3(IRON_SH, IRON_MID, IRON_HI, lum);
-                blend_px(pb, x, y, apply_hit(col, hit * 0.3), (1.0 - (d.max(0.0) / 0.6)) * alpha);
+            // Chunky flared Victorian iron foot with little toe pads.
+            let d_pad = sd_rbox(u, v, 0.0, side * 0.6, 2.7, 2.5, 1.0);
+            let cover = (0.55 - d_pad * 1.25).clamp(0.0, 1.0);
+            if cover <= 0.0 {
+                if d_pad < 1.05 {
+                    blend_px(pb, x, y, IRON_OUTLINE, 0.80 * alpha);
+                }
+                continue;
             }
-            // Two bright bolts.
-            if (u + 0.9).abs() < 0.4 && (v.abs() - 1.0).abs() < 0.4 {
-                blend_px(pb, x, y, IRON_SPEC, 0.8 * alpha);
+            let lit = (u / 2.7) * fl + (v / 2.5) * pl;
+            let mut col = shade3(IRON_SH, IRON_MID, IRON_HI, 0.45 + 0.50 * lit);
+            // Raised cast-iron ankle flange & gleaming brass mounting bolt!
+            if sd_circle(u, v, 0.0, side * 0.4, 0.75) < 0.0 {
+                col = BRASS_HI;
+            } else if d_pad > -0.65 && lit > 0.1 {
+                col = mix(col, IRON_SPEC, 0.40);
             }
+            blend_px(pb, x, y, apply_hit(col, hit * 0.35), cover * alpha);
         }
     }
 }
 
+/// Crumpled, billowing striped laundry towel jammed & bulging out of the nip!
 #[allow(clippy::too_many_arguments)]
 fn draw_towel_jam(
     pb: &mut PixelBuffer,
@@ -1618,36 +1981,54 @@ fn draw_towel_jam(
     alpha: f32,
     anim: f32,
 ) {
-    let nip = base + f * NIP_OFFSET;
-    let Some((x0, x1, y0, y1)) = bbox(pb, nip + f * 3.0, 10.0, 9.0) else {
+    let nip = base + f * (NIP_OFFSET - 1.2);
+    let len = 9.5 * amount;
+    let Some((x0, x1, y0, y1)) = bbox(pb, nip + f * (len * 0.5), 12.0, 12.0) else {
         return;
     };
+    let fl = f.dot(LIGHT);
+    let pl = p.dot(LIGHT);
     for y in y0..=y1 {
         for x in x0..=x1 {
             let dx = x as f32 - nip.x;
             let dy = y as f32 - nip.y;
             let u = dx * f.x + dy * f.y;
             let v = dx * p.x + dy * p.y;
-            if !(0.0..=9.0 * amount).contains(&u) {
+            if u < -0.5 || u > len + 1.5 {
                 continue;
             }
-            let wobble = (anim * 8.0 + v * 0.7).sin() * 0.5;
-            let half_v = (7.2 - (u / 9.0) * 2.2 * amount).max(0.6);
+            let t = (u / len.max(1.0)).clamp(0.0, 1.0);
+            // Organic crumpled cloth lobes billowing outward from the rollers.
+            let ruffle = (v * 0.85 + anim * 5.0).sin() * 0.75 * t;
+            let half_v = (8.2 * (1.0 - t * 0.28) + (t * PI).sin() * 1.4).max(1.2);
+            let du = (0.0 - u).max(u - (len + ruffle));
             let dv = v.abs() - half_v;
-            if dv < 0.8 {
-                let folds = ((u * 1.7 + v * 0.4 + anim * 1.5).sin() * 0.5 + 0.5).powi(2);
-                let col = shade3(TOWEL_SH, TOWEL_MID, TOWEL_HI, 0.55 + 0.30 * folds + 0.10 * wobble);
-                let a = (1.0 - (dv.max(0.0) / 0.8)) * alpha * amount;
-                blend_px(pb, x, y, apply_hit(col, hit * 0.2), a);
+            let d = du.max(dv);
+            let cover = (0.55 - d * 1.2).clamp(0.0, 1.0);
+            if cover <= 0.0 {
+                if d < 1.0 {
+                    blend_px(pb, x, y, IRON_OUTLINE, 0.72 * alpha * amount);
+                }
+                continue;
             }
-            // The cloth's hem.
-            if (u - 8.4 * amount).abs() < 0.6 && v.abs() < half_v {
-                blend_px(pb, x, y, TOWEL_SH, 0.7 * alpha * amount);
+            // Sculpted cloth folds & classic woven red laundry-towel hem stripe!
+            let fold = ((v * 1.35 + u * 0.55).sin() * 0.5 + 0.5).powi(2);
+            let lit = (u / len.max(1.0) - 0.5) * fl * 0.4 + (v / half_v) * pl * 0.5 + fold * 0.55;
+            let mut col = shade3(TOWEL_SH, TOWEL_MID, TOWEL_HI, 0.35 + 0.65 * lit);
+            // Classic red woven stripe near the towel's hem!
+            if (t - 0.74).abs() < 0.11 || (t - 0.88).abs() < 0.05 {
+                col = mix(col, TOWEL_STRIPE, 0.78);
             }
+            // Shadow right where the rollers pinch the cloth.
+            if u < 1.4 {
+                col = scale(col, 0.68 + 0.32 * (u / 1.4).clamp(0.0, 1.0));
+            }
+            blend_px(pb, x, y, apply_hit(col, hit * 0.25), cover * alpha * amount.min(1.0));
         }
     }
 }
 
+/// Torn rubber drive belt whipping loose off the side pulley in Phase 3 / Death.
 #[allow(clippy::too_many_arguments)]
 fn draw_torn_belt(
     pb: &mut PixelBuffer,
@@ -1659,126 +2040,185 @@ fn draw_torn_belt(
     alpha: f32,
     anim: f32,
 ) {
-    let hub = base + f * (CRANK_ALONG + 2.0) + p * CRANK_SIDE_OFFSET;
-    let swing = (anim * 2.6).sin() * 1.5 * slip;
-    let a = hub + Vec2::new(0.0, 1.0);
-    let b = hub + p * (7.0 + swing) + Vec2::new(0.0, 7.0 * slip);
-    let c = b + p * (3.0 + swing * 0.6) + Vec2::new(0.0, 5.0 * slip);
-    for (from, to, w) in [(a, b, 1.6), (b, c, 1.2)] {
+    let hub = base + f * (CRANK_ALONG + 1.5) - p * (ROLLER_HALF_WIDTH + 2.2);
+    let swing1 = (anim * 4.2).sin() * 2.2 * slip;
+    let swing2 = (anim * 4.2 - 1.2).sin() * 3.2 * slip;
+    let a = hub;
+    let b = hub - p * (6.0 + swing1 * 0.4) - f * (2.5 + swing1 * 0.3) + Vec2::new(0.0, 4.5 * slip);
+    let c = b - p * (4.5 + swing2 * 0.5) - f * (1.5 - swing2 * 0.4) + Vec2::new(0.0, 4.0 * slip);
+
+    // Exposed grooved brass pulley wheel where the belt tore off!
+    fill_disc(pb, hub, 2.5, IRON_OUTLINE, 0.85 * alpha);
+    fill_disc(pb, hub, 1.8, BRASS_MID, 0.95 * alpha);
+    blend_px(pb, hub.x.round() as i32, hub.y.round() as i32, IRON_SH, alpha);
+
+    // Whipping torn rubber strap with dark outline & fabric-cord highlight!
+    for &(from, to, w) in &[(a, b, 1.8f32), (b, c, 1.35)] {
         let d = to - from;
-        let steps = (d.len() * 2.0).ceil().max(1.0) as i32;
+        let len = d.len();
+        if len < 0.2 {
+            continue;
+        }
+        let perp = d.perp() * (1.0 / len);
+        let steps = (len * 2.2).ceil().max(2.0) as i32;
         for i in 0..=steps {
             let t = i as f32 / steps as f32;
             let q = from + d * t;
-            let perp = d.perp().normalized() * (w * 0.5 * (1.0 - t * 0.4));
-            for k in [-1.0f32, 0.0, 1.0] {
-                let r = q + perp * k;
-                let lum = 0.55 + 0.35 * (k.abs() - 1.0).abs();
-                let col = shade3(BELT_SH, BELT_MID, BELT_HI, lum);
-                blend_px(
-                    pb,
-                    r.x.round() as i32,
-                    r.y.round() as i32,
-                    apply_hit(col, hit * 0.2),
-                    alpha * 0.95,
-                );
+            let hw = w * 0.55 * (1.0 - t * 0.3);
+            for k in -2..=2 {
+                let off = k as f32 * 0.55;
+                if off.abs() > hw + 0.6 {
+                    continue;
+                }
+                let r = q + perp * off;
+                let col = if off.abs() > hw {
+                    IRON_OUTLINE
+                } else if k == 0 {
+                    BELT_HI
+                } else {
+                    BELT_MID
+                };
+                blend_px(pb, r.x.round() as i32, r.y.round() as i32, apply_hit(col, hit * 0.2), alpha * 0.96);
             }
         }
     }
-    // The frayed end.
-    for k in -1..=1 {
-        let q = c + p * (k as f32 * 0.9) + Vec2::new(0.0, 1.2);
-        blend_px(pb, q.x.round() as i32, q.y.round() as i32, BELT_HI, 0.55 * alpha);
+    // Frayed rubber & white canvas cord strands at the torn tip.
+    for k in -1i32..=1 {
+        let q = c - p * (1.4 + (k.abs() as f32) * 0.6) + f * (k as f32 * 1.1);
+        blend_px(pb, q.x.round() as i32, q.y.round() as i32, TOWEL_MID, 0.85 * alpha);
     }
 }
 
-fn draw_crank(pb: &mut PixelBuffer, base: Vec2, f: Vec2, p: Vec2, pose: &Pose, hit: f32) {
+/// The loose brass-and-wood crank on the right flank (the ×1.5 weak point!).
+fn draw_crank(pb: &mut PixelBuffer, base: Vec2, f: Vec2, p: Vec2, pose: &Pose, hit: f32, anim: f32) {
     let hub = base + f * CRANK_ALONG + p * CRANK_SIDE_OFFSET;
     let lift = pose.crank_loose;
     let drop = Vec2::new(0.0, 2.4 * lift) + p * (1.6 * lift);
     let hub_c = hub + drop;
+    let pulse = 0.5 + 0.5 * (anim * 11.0).sin();
 
-    // Hub.
-    fill_disc(pb, hub_c, 2.1, shade3(BRASS_SH, BRASS_MID, BRASS_HI, 0.8), 0.98 * pose.alpha);
-    // In the jam the crank swings out and down.
+    // Exposed brass mounting spindle linking cheek to dropped hub!
+    if lift > 0.15 {
+        line_solid(pb, hub - p * 1.0, hub_c, IRON_OUTLINE, 0.85 * pose.alpha);
+        line_solid(pb, hub - p * 0.5, hub_c, BRASS_SH, 0.95 * pose.alpha);
+    }
+
+    // Exposed coiled spring beside the dropped crank in Jam/FinalJam.
+    if lift > 0.6 {
+        let coil_a = hub + Vec2::new(0.0, 3.2) + p * 1.2;
+        let coil_b = coil_a + p * 4.2 + Vec2::new(0.0, 2.5);
+        draw_coil_spring(pb, coil_a, coil_b, 3, 1.3, 0.85 * pose.alpha);
+    }
+
+    // Heavy brass gear-hub with crisp dark outline.
+    fill_disc(pb, hub_c, 3.1, IRON_OUTLINE, 0.86 * pose.alpha);
+    fill_disc(
+        pb,
+        hub_c,
+        2.3,
+        apply_hit(shade3(BRASS_SH, BRASS_MID, BRASS_HI, 0.78 + 0.25 * pose.glow), hit * 0.4),
+        0.98 * pose.alpha,
+    );
+    blend_px(
+        pb,
+        (hub_c.x - 0.7).round() as i32,
+        (hub_c.y - 0.7).round() as i32,
+        WARN_HOT,
+        (0.55 + 0.45 * pose.glow) * pose.alpha,
+    );
+
+    // Crank arm: hangs far out and down when loose, clicks & spins when working!
     let angle = if lift > 0.4 {
-        // The dropped crank hangs out and down from the hub.
-        FRAC_PI_2 * 0.85 + 0.25 * lift
+        FRAC_PI_2 * 0.82 + 0.28 * lift + (anim * 5.0).sin() * 0.08
     } else {
         pose.crank_angle
     };
     let dir = Vec2::from_angle(angle);
-    let arm_end = hub_c + dir * (5.2 + 2.2 * lift);
-    // Arm.
+    let arm_end = hub_c + dir * (5.6 + 2.4 * lift);
     let d = arm_end - hub_c;
-    let steps = (d.len() * 2.0).ceil().max(1.0) as i32;
+    let steps = (d.len() * 2.2).ceil().max(2.0) as i32;
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
         let q = hub_c + d * t;
-        for k in [-0.7f32, 0.0, 0.7] {
-            let r = q + dir.perp() * k;
-            let lum = 0.6 + 0.3 * (1.0 - (k.abs() / 0.7));
-            blend_px(
-                pb,
-                r.x.round() as i32,
-                r.y.round() as i32,
-                apply_hit(shade3(BRASS_SH, BRASS_MID, BRASS_HI, lum), hit * 0.3),
-                0.96 * pose.alpha,
-            );
+        for k in -2i32..=2 {
+            let off = k as f32 * 0.6;
+            let r = q + dir.perp() * off;
+            let col = if k.abs() == 2 {
+                IRON_OUTLINE
+            } else {
+                let lum = 0.62 + 0.35 * (1.0 - (k.abs() as f32 * 0.45)) + 0.22 * pose.glow;
+                apply_hit(shade3(BRASS_SH, BRASS_MID, BRASS_HI, lum), hit * 0.35)
+            };
+            blend_px(pb, r.x.round() as i32, r.y.round() as i32, col, 0.96 * pose.alpha);
         }
     }
-    // Wooden handle, crosswise to the arm.
-    let handle = arm_end + dir * 1.4;
-    let hd = dir.perp() * 2.6;
-    let steps = 5;
-    for i in -steps..=steps {
-        let t = i as f32 / steps as f32;
+
+    // Turned mahogany wooden crank handle with dark outline & bright lacquer highlight!
+    let handle = arm_end + dir * 1.3;
+    let hd = dir.perp() * 3.1;
+    let hsteps: i32 = 6;
+    for i in -hsteps..=hsteps {
+        let t = i as f32 / hsteps as f32;
         let q = handle + hd * t;
-        let col = shade3(WOOD_SH, WOOD_MID, WOOD_HI, 0.7 + 0.25 * (1.0 - t.abs()));
-        blend_px(pb, q.x.round() as i32, q.y.round() as i32, col, 0.96 * pose.alpha);
+        for b in -1..=1 {
+            let r = q + dir * (b as f32 * 0.85);
+            let col = if i.abs() == hsteps {
+                IRON_OUTLINE
+            } else if b == -1 {
+                WOOD_HI
+            } else if b == 0 {
+                shade3(WOOD_SH, WOOD_MID, WOOD_HI, 0.72 + 0.25 * (1.0 - t.abs()))
+            } else {
+                WOOD_SH
+            };
+            blend_px(pb, r.x.round() as i32, r.y.round() as i32, apply_hit(col, hit * 0.3), 0.98 * pose.alpha);
+        }
     }
-    // The weak-point sheen: a hot glint on the hub whenever it is exposed.
-    if pose.glow > 0.02 {
-        let g = pose.glow;
-        blend_px(
-            pb,
-            hub_c.x.round() as i32 - 1,
-            hub_c.y.round() as i32 - 1,
-            WARN_HOT,
-            0.55 * g,
-        );
-        blend_px(
-            pb,
-            hub_c.x.round() as i32,
-            hub_c.y.round() as i32 - 1,
-            (255, 255, 255),
-            0.35 * g,
-        );
-    }
-    // A dropped crank's spring coil on the floor (final jam / death).
-    if lift > 0.6 {
-        let coil = hub + Vec2::new(0.0, 5.0) + p * 3.0;
-        for k in 0..3 {
-            ring(pb, coil, 1.6 + k as f32 * 1.4, SPRING_COL, 0.35 * pose.alpha, 0.7);
+
+    // Unmistakable hot weak-point glint & sparkle cross on the exposed crank!
+    if pose.glow > 0.05 {
+        let g = pose.glow * (0.65 + 0.35 * pulse);
+        let hx = hub_c.x.round() as i32;
+        let hy = hub_c.y.round() as i32;
+        pb.plot_add(hx, hy, scale(WARN_HOT, 0.75 * g));
+        for &(ox, oy) in &[(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            pb.plot_add(hx + ox, hy + oy, scale(JAM_GOLD, 0.65 * g));
+        }
+        for &(ox, oy) in &[(-2, 0), (2, 0), (0, -2), (0, 2)] {
+            pb.plot_add(hx + ox, hy + oy, scale(WARN_HOT, 0.38 * g));
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn draw_steam(pb: &mut PixelBuffer, base: Vec2, f: Vec2, p: Vec2, density: f32, anim: f32, alpha: f32) {
-    for i in 0..5 {
-        let phase = i as f32 * 0.7;
-        let t = ((anim * 0.8 + phase) % 1.0).clamp(0.0, 1.0);
-        let u = 4.0 + t * 7.0;
-        let side = ((i as f32 * 2.3).sin()) * 7.0 + (t * 6.0).sin() * 1.5;
-        let q = base + f * u + p * side + Vec2::new(0.0, -t * 6.0);
-        let r = 1.2 + t * 2.0;
-        let a = density * alpha * (1.0 - t) * 0.35;
-        fill_disc(pb, q, r, STEAM_COL, a);
+    let count = if density > 0.65 { 5 } else { 3 };
+    for i in 0..count {
+        let phase = i as f32 / count as f32;
+        let t = (anim * 0.95 + phase).fract();
+        let lift = 0.15 + 0.85 * t;
+        let u = 2.8 + (i as f32 - 2.0) * 0.6;
+        let side = ((i as f32 * 2.1).sin()) * 6.5 + (t * 6.0).sin() * 1.6;
+        let q = base + f * u + p * side + Vec2::new(lift * 2.2, -2.0 - lift * 11.5);
+        let r = 1.6 + lift * 2.3;
+        let a = density * alpha * (1.0 - t * 0.68) * 0.85;
+        draw_steam_puff(pb, q, r, a);
     }
 }
 
-/// The wring-out's rolled towel (a boss projectile).
+/// Crackling brass & steel hit sparks when the Mangle takes damage.
+fn draw_hit_sparks(pb: &mut PixelBuffer, base: Vec2, hit: f32, anim: f32) {
+    let seed = (anim * 24.0) as i32;
+    for k in 0..6 {
+        let a = k as f32 / 6.0 * TAU + hash01(seed + k * 7, 13) * 0.5;
+        let dir = Vec2::from_angle(a);
+        let p0 = base + dir * 10.5;
+        let p1 = base + dir * (14.0 + hit * 4.5);
+        line_solid(pb, p0, p1, if k % 2 == 0 { WARN_HOT } else { JAM_GOLD }, 0.9 * hit);
+    }
+}
+
+/// The wring-out's rolled towel (a boss projectile) — spiral candy-striped cloth cylinder!
 pub fn draw_towel(pb: &mut PixelBuffer, pos: Vec2, vel: Vec2, anim: f32, cam: Vec2, _accent: Rgb) {
     let c = w2s(pos, cam);
     let f = if vel.len_sq() > 4.0 {
@@ -1787,7 +2227,9 @@ pub fn draw_towel(pb: &mut PixelBuffer, pos: Vec2, vel: Vec2, anim: f32, cam: Ve
         Vec2::new(1.0, 0.0)
     };
     let p = f.perp();
-    let Some((x0, x1, y0, y1)) = bbox(pb, c, TOWEL_RADIUS + 2.0, TOWEL_RADIUS + 2.0) else {
+    let fl = f.dot(LIGHT);
+    let pl = p.dot(LIGHT);
+    let Some((x0, x1, y0, y1)) = bbox(pb, c, TOWEL_RADIUS + 3.0, TOWEL_RADIUS + 3.0) else {
         return;
     };
     for y in y0..=y1 {
@@ -1796,24 +2238,28 @@ pub fn draw_towel(pb: &mut PixelBuffer, pos: Vec2, vel: Vec2, anim: f32, cam: Ve
             let dy = y as f32 - c.y;
             let u = dx * f.x + dy * f.y;
             let v = dx * p.x + dy * p.y;
-            let d = sd_rbox(u, v, 0.0, 0.0, TOWEL_RADIUS, TOWEL_RADIUS - 0.6, 1.6);
-            if d < 0.7 {
-                // A spiral roll: cream with oxblood weft bands.
-                let band = ((u * 1.5 + v * 2.2 + anim * 14.0) * 0.8).floor() as i32 & 1 == 0;
-                let lum = 0.65 + 0.30 * (v / TOWEL_RADIUS).clamp(-1.0, 1.0) * p.dot(LIGHT);
-                let col = if band {
-                    shade3(TOWEL_SH, TOWEL_MID, TOWEL_HI, lum)
-                } else {
-                    shade3(ROLLER_RED, ROLLER_RED_HI, (255, 168, 150), lum)
-                };
-                blend_px(pb, x, y, col, 1.0 - (d.max(0.0) / 0.7));
+            let d = sd_rbox(u, v, 0.0, 0.0, TOWEL_RADIUS - 0.4, TOWEL_RADIUS + 0.6, 1.8);
+            let cover = (0.55 - d * 1.25).clamp(0.0, 1.0);
+            if cover <= 0.0 {
+                if d < 1.0 {
+                    blend_px(pb, x, y, IRON_OUTLINE, 0.78);
+                }
+                continue;
             }
+            let band = ((u * 1.6 + v * 0.9 + anim * 16.0) * 0.95).sin() > 0.1;
+            let lit = (u / TOWEL_RADIUS) * fl * 0.55 + (v / TOWEL_RADIUS) * pl * 0.55;
+            let col = if band {
+                shade3(TOWEL_SH, TOWEL_MID, TOWEL_HI, 0.55 + 0.55 * lit)
+            } else {
+                shade3(ROLLER_RED_SH, ROLLER_RED, ROLLER_RED_HI, 0.55 + 0.55 * lit)
+            };
+            blend_px(pb, x, y, col, cover);
         }
     }
-    // Two motion streaks behind it.
-    for k in [-1.0f32, 1.0] {
-        let q = c - f * 3.0 + p * (k * 1.6);
-        blend_px(pb, q.x.round() as i32, q.y.round() as i32, TOWEL_HI, 0.35);
+    // Crisp white motion streaks & soap droplets trailing behind the spinning towel.
+    for &k in &[-2.0f32, 0.0, 2.0] {
+        let q = c - f * (TOWEL_RADIUS + 1.2) + p * k;
+        line_solid(pb, q, q - f * 3.5, TOWEL_HI, 0.55);
     }
 }
 
@@ -2007,6 +2453,7 @@ mod tests {
 
         // (name, state, progress, phase, hp fraction)
         let shots: &[(&str, MangleState, f32, u8, f32)] = &[
+            ("00_idle", MangleState::Idle, 0.35, 1, 1.0),
             ("01_intake_tell", MangleState::Intake { second: false }, 0.45, 1, 0.95),
             ("02_intake_pull", MangleState::Intake { second: false }, 0.80, 1, 0.95),
             ("03_intake_bite", MangleState::Intake { second: false }, 0.945, 1, 0.95),
