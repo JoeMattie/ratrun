@@ -11,12 +11,20 @@
 //! Nothing here is stored between frames: the gait is keyed to the distance
 //! travelled along the facing, and the tail's lag comes from `vel` trailing
 //! `face` during a turn (the sim eases velocity toward the input).
+//!
+//! The one "over time" effect is the Tail Thrash charge (see [`TailCharge`]):
+//! the tail is the weapon's charge meter, so it stretches as the charge fills
+//! and glows once it is ready. The art still keeps no state of its own — the
+//! charge is read off the weapon, and the single-frame "just charged" flash is
+//! aged by the caller from a frame-cache slot it owns
+//! ([`tail_ready_flash`] + `World::tail_ready_at`).
 
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette::{mix, scale, Rgb};
 
 use super::player::Player;
+use super::weapon::WeaponKind;
 
 /// Collision radius of the rat in world pixels (the sim's `PLAYER_RADIUS`).
 /// The sprite may extend past it (tail, ears, whiskers) but the body should
@@ -59,9 +67,30 @@ const PROFILE: [(f32, f32); 10] = [
 const U_TAIL: f32 = -3.6;
 const U_NOSE: f32 = 5.4;
 
-/// Tail length in world pixels and the number of half-pixel steps along it.
+/// Tail length in world pixels (at rest) and the number of steps along it.
 const TAIL_LEN: f32 = 13.0;
 const TAIL_STEPS: usize = 28;
+/// Extra tail length (px) at a full Tail Thrash charge, before the level bonus:
+/// a charged thrash needs a tail that visibly says "this is the weapon"
+/// (the burst's own reach is 60-84 px, four to seven times the sprites here).
+const TAIL_GROW: f32 = 14.0;
+/// Extra reach per Tail Thrash level: the tail tracks `active_reach`, which is
+/// +6 px a level, at about a fifth of that in drawn length.
+const TAIL_LEVEL_GROW: f32 = 0.05;
+/// The most points a fully charged (and dashing, max level) tail ever uses.
+const TAIL_MAX_STEPS: usize = 88;
+
+/// Seconds the "just became ready" flash lasts (the curve lives in
+/// [`tail_ready_flash`]; the caller only owns the timestamp).
+pub const TAIL_READY_FLASH: f32 = 0.55;
+
+// --- Tail Thrash palette ---------------------------------------------------
+// The charge glow is painted in the thrash's own colours so the charged tail
+// matches the arc it becomes: `THRASH_GLOW` is `WeaponKind::TailThrash::color`,
+// `THRASH_HOT` the near-white its leading edge runs at (`draw_tail_thrash`).
+const THRASH_GLOW: Rgb = (255, 178, 92);
+const THRASH_HOT: Rgb = (255, 246, 214);
+const THRASH_HALO: Rgb = (255, 138, 56);
 
 /// Half-size of the box of pixels rasterised around the player.
 const REACH: i32 = 10;
@@ -158,6 +187,88 @@ impl Pose {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tail Thrash charge
+// ---------------------------------------------------------------------------
+
+/// The Tail Thrash's charge, as the art needs it. The tail *is* the charge
+/// meter: at `charge == 0.0` (the frame the thrash fires) it is exactly the
+/// tail the rat has always had, at `1.0` it is nearly twice as long, thicker
+/// and (once `ready`) glowing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TailCharge {
+    /// `1 - timer / cooldown`, the same fraction the HUD's cooldown pip uses.
+    /// `0.0` = just fired, `1.0` = fully charged.
+    pub charge: f32,
+    /// The weapon's level (1-5): a levelled thrash reaches further, so its
+    /// drawn tail does too.
+    pub level: u8,
+    /// Fully charged: the tail glows and Space will fire it.
+    pub ready: bool,
+    /// The one-off "just became ready" flash, `0.0..=1.0`. [`tail_charge`]
+    /// always leaves it at zero: only the draw pass's caller can age it (see
+    /// [`tail_ready_flash`]), and it is not a property of the weapon.
+    pub flash: f32,
+}
+
+impl TailCharge {
+    /// Drawn tail length in world pixels for this much charge.
+    ///
+    /// Linear in the charge so the growth reads as a filling meter, and it is
+    /// already a third longer by half charge (half of a 10 s cooldown is 5 s of
+    /// watching the tail grow, which is the whole point of the read-out).
+    pub fn tail_len(&self) -> f32 {
+        let level = 1.0 + TAIL_LEVEL_GROW * self.level.saturating_sub(1) as f32;
+        (TAIL_LEN + TAIL_GROW * self.charge.clamp(0.0, 1.0)) * level
+    }
+}
+
+/// The rat's Tail Thrash charge, or `None` when it does not own the weapon
+/// (in which case the tail is drawn exactly as it always was).
+///
+/// `ready` is `timer <= 0` — the HUD's rule (`HudState::sync_active_ready`),
+/// so the tail's glow and the HUD's READY pip turn on together.
+pub fn tail_charge(player: &Player) -> Option<TailCharge> {
+    let weapon = player
+        .loadout
+        .weapons
+        .iter()
+        .find(|w| w.kind == WeaponKind::TailThrash)?;
+    // The charge time the sim actually serves this weapon (level and the
+    // fire-rate passive), exactly as `active_weapons_system` spends it.
+    let fire_rate = player.loadout.stats.fire_rate_mult.max(0.1);
+    let charge_time = (weapon.cooldown() / fire_rate).max(0.05);
+    Some(TailCharge {
+        charge: (1.0 - weapon.timer / charge_time).clamp(0.0, 1.0),
+        level: weapon.level,
+        ready: weapon.timer <= 0.0,
+        flash: 0.0,
+    })
+}
+
+/// Age the one-off "the thrash just finished charging" flash and return it,
+/// `0.0..=1.0`.
+///
+/// `ready_at` is a single frame-cache slot owned by the caller (`NEG_INFINITY`
+/// until the charge first tops out): the art may not keep state, and the
+/// crossing has to be remembered somewhere. It is stamped with `elapsed`, the
+/// run clock, so the flash freezes with the rest of the picture on a paused
+/// frame and clears the moment the weapon is spent (charge back to zero).
+/// No rng, no allocation, and nothing here is ever simulated.
+pub fn tail_ready_flash(charge: Option<TailCharge>, elapsed: f32, ready_at: &mut f32) -> f32 {
+    if !charge.is_some_and(|c| c.ready) {
+        *ready_at = f32::NEG_INFINITY;
+        return 0.0;
+    }
+    if !ready_at.is_finite() {
+        *ready_at = elapsed;
+    }
+    let age = (elapsed - *ready_at).max(0.0);
+    let left = (1.0 - age / TAIL_READY_FLASH).clamp(0.0, 1.0);
+    // Snap on, ease out: a flat linear fade reads as a slow dim, not a pop.
+    left * left
+}
+
 /// Final tint for every rat pixel: red on hurt, cold and see-through on the
 /// "off" beat of the invulnerability blink.
 #[derive(Clone, Copy)]
@@ -215,6 +326,43 @@ fn darken(pb: &mut PixelBuffer, x: i32, y: i32, amount: f32) {
 /// Draw the rat at `player.pos`, facing `player.face`. `elapsed` is the run
 /// clock in seconds, for animation and the invulnerability blink.
 pub fn draw_rat(pb: &mut PixelBuffer, player: &Player, elapsed: f32, cam: Vec2) {
+    draw_rat_flash(pb, player, elapsed, cam, 0.0);
+}
+
+/// [`draw_rat`], plus the Tail Thrash's one-off "just charged" flash
+/// (`0.0..=1.0`, see [`tail_ready_flash`]).
+///
+/// The only caller that has a frame-to-frame slot to age the flash from is the
+/// real draw pass (`World::draw_player`); every other caller — the composite
+/// art sheets, boss set-pieces, tests — keeps using [`draw_rat`], which is this
+/// with no flash at all.
+pub fn draw_rat_flash(
+    pb: &mut PixelBuffer,
+    player: &Player,
+    elapsed: f32,
+    cam: Vec2,
+    tail_flash: f32,
+) {
+    let pose = pose_of(player, elapsed);
+    let tint = tint_of(player, elapsed);
+
+    if pose.dash > 0.0 {
+        draw_dash_streaks(pb, &pose, cam);
+    }
+    let mut tail = tail_charge(player);
+    if let Some(t) = tail.as_mut() {
+        t.flash = tail_flash.clamp(0.0, 1.0);
+    }
+    draw_tail(pb, &pose, player.vel, elapsed, tint, cam, tail);
+    draw_feet(pb, &pose, tint, cam);
+    draw_body(pb, &pose, tint, cam);
+    draw_face(pb, &pose, elapsed, tint, cam);
+}
+
+/// Everything about this frame's pose, derived once (split out so the tests can
+/// redraw one layer — the body mask for the tail's "never covers the rat"
+/// check — from the same numbers the real pass uses).
+fn pose_of(player: &Player, elapsed: f32) -> Pose {
     let face = if player.face.len_sq() > 1e-4 {
         player.face.normalized()
     } else {
@@ -225,8 +373,7 @@ pub fn draw_rat(pb: &mut PixelBuffer, player: &Player, elapsed: f32, cam: Vec2) 
     let top = player.loadout.stats.move_speed.max(1.0);
     let moving = (speed / top).clamp(0.0, 1.0);
     let dash = (player.dash_active / 0.16).clamp(0.0, 1.0).sqrt();
-
-    let pose = Pose {
+    Pose {
         pos: player.pos,
         face,
         perp,
@@ -239,8 +386,12 @@ pub fn draw_rat(pb: &mut PixelBuffer, player: &Player, elapsed: f32, cam: Vec2) 
         breathe: 0.18 * (1.0 - moving) * (elapsed * 3.2).sin(),
         moving,
         dash,
-    };
-    let tint = Tint {
+    }
+}
+
+/// The hurt flash and the blink, for the frame being drawn.
+fn tint_of(player: &Player, elapsed: f32) -> Tint {
+    Tint {
         hurt: if player.hurt_flash > 0.0 {
             // Snap to near-solid red, then ease back as the flash runs out.
             (0.55 + player.hurt_flash * 3.0).min(0.85)
@@ -248,15 +399,7 @@ pub fn draw_rat(pb: &mut PixelBuffer, player: &Player, elapsed: f32, cam: Vec2) 
             0.0
         },
         ghost: player.iframes > 0.0 && ((elapsed * 20.0) as i32 % 2 == 0),
-    };
-
-    if dash > 0.0 {
-        draw_dash_streaks(pb, &pose, cam);
     }
-    draw_tail(pb, &pose, player.vel, elapsed, tint, cam);
-    draw_feet(pb, &pose, tint, cam);
-    draw_body(pb, &pose, tint, cam);
-    draw_face(pb, &pose, elapsed, tint, cam);
 }
 
 /// The **Tail Thrash** arc: the rat's tail stretched into a long whipping arc
@@ -358,7 +501,28 @@ fn draw_dash_streaks(pb: &mut PixelBuffer, pose: &Pose, cam: Vec2) {
 /// spine. Standing still it hooks lazily to one side and sways; running it
 /// straightens and a wave whips down it; through a turn it swings toward
 /// where the rat came from (the direction `vel` still points).
-fn draw_tail(pb: &mut PixelBuffer, pose: &Pose, vel: Vec2, elapsed: f32, tint: Tint, cam: Vec2) {
+///
+/// The tail is also the **Tail Thrash's charge meter**. With the weapon owned
+/// it stretches from `TAIL_LEN` to `TAIL_LEN + TAIL_GROW` as the charge fills
+/// (a little further per level), thickens toward the tip as it grows, and once
+/// it is ready it glows in the thrash's own colours: a pulsing warm body, a
+/// soft additive halo on the floor, a one-off flash at the moment it tops out,
+/// and a twinkle at the tip while it waits. With no Tail Thrash
+/// (`tail == None`) every one of those terms is exactly zero and the tail is
+/// pixel for pixel the tail it always was.
+///
+/// A longer tail keeps the at-rest step and simply uses more points, so it
+/// follows the same curl and sway (both are functions of the normalised
+/// distance along the tail) and stays hooked to the rump.
+fn draw_tail(
+    pb: &mut PixelBuffer,
+    pose: &Pose,
+    vel: Vec2,
+    elapsed: f32,
+    tint: Tint,
+    cam: Vec2,
+    tail: Option<TailCharge>,
+) {
     let m = pose.moving;
     // Signed angle from the facing to the velocity: non-zero only mid-turn.
     let lag = if vel.len_sq() > 4.0 {
@@ -369,19 +533,35 @@ fn draw_tail(pb: &mut PixelBuffer, pose: &Pose, vel: Vec2, elapsed: f32, tint: T
         0.0
     };
     let whip = 1.0 - 0.85 * pose.dash;
-    let step = (TAIL_LEN + 3.0 * pose.dash) / TAIL_STEPS as f32;
+    // Length: the charge meter. With nothing to grow the chain keeps exactly
+    // the at-rest tail's `TAIL_STEPS` points and step (so an uncharged tail is
+    // the tail it has always been, to the pixel); a longer tail adds points at
+    // the same spacing, which keeps the curve's shape as it stretches.
+    let len = tail.map_or(TAIL_LEN, |t| t.tail_len()) + 3.0 * pose.dash;
+    let rest_step = (TAIL_LEN + 3.0 * pose.dash) / TAIL_STEPS as f32;
+    let steps = ((len / rest_step).round() as usize).clamp(TAIL_STEPS, TAIL_MAX_STEPS);
+    let step = len / steps as f32;
     let back = pose.face * -1.0;
 
-    let mut pts = [(0i32, 0i32); TAIL_STEPS];
+    let mut pts = [(0i32, 0i32); TAIL_MAX_STEPS];
     let mut p = pose.place(-3.2, 0.0);
-    for (i, slot) in pts.iter_mut().enumerate() {
-        let s = (i as f32 + 0.5) / TAIL_STEPS as f32;
+    for (i, slot) in pts.iter_mut().take(steps).enumerate() {
+        let s = (i as f32 + 0.5) / steps as f32;
         let idle = 1.75 * s.powf(1.3) + 0.24 * (elapsed * 1.7 - s * 2.2).sin();
         let run = 0.22 * s + 0.6 * s * (elapsed * 13.0 - s * 5.5).sin() * whip;
         let theta = lag * s + idle * (1.0 - m) + run * m;
         p += back.rotate(theta) * step;
         *slot = w2s(p, cam);
     }
+    let pts = &pts[..steps];
+
+    let charge = tail.map_or(0.0, |t| t.charge);
+    let ready = tail.is_some_and(|t| t.ready);
+    let flash = tail.map_or(0.0, |t| t.flash);
+    // The idle pulse: about one beat a second, so a charged tail breathes
+    // instead of sitting at a flat maximum (a still frame reads as "live").
+    let pulse = 0.5 + 0.5 * (elapsed * 6.2).sin();
+    let a = tint.alpha();
 
     // Shadow pass first so it never lands on the tail itself.
     if !tint.ghost {
@@ -393,10 +573,127 @@ fn draw_tail(pb: &mut PixelBuffer, pose: &Pose, vel: Vec2, elapsed: f32, tint: T
             }
         }
     }
-    let a = tint.alpha();
+
+    // The tail itself: rose at the rump to near-white at the tip, warming
+    // through the charge, and thick as well as long once it is ready.
     for (i, &(x, y)) in pts.iter().enumerate() {
-        let s = i as f32 / (TAIL_STEPS - 1) as f32;
-        blend(pb, x, y, tint.apply(mix(TAIL_BASE, TAIL_TIP, s)), a);
+        let s = i as f32 / (steps - 1) as f32;
+        let mut colour = mix(TAIL_BASE, TAIL_TIP, s);
+        // Warm through the charge: by half full the tail is already wearing the
+        // thrash's orange, so it reads as "the weapon" long before it glows.
+        colour = mix(colour, THRASH_GLOW, 0.5 * charge);
+        // The widening band is the whip's skin (saturated orange); the chain
+        // itself is its white-hot core, hottest at the tip, so a charged tail
+        // reads as *light* rather than as a flat yellow sausage.
+        let edge = if ready {
+            mix(colour, THRASH_GLOW, 0.35 + 0.3 * pulse)
+        } else {
+            colour
+        };
+        if ready {
+            let heat =
+                ((0.15 + 0.55 * pulse + 0.45 * flash) * (0.15 + 0.85 * s * s)).min(1.0);
+            colour = mix(colour, THRASH_HOT, heat);
+        }
+        blend(pb, x, y, tint.apply(colour), a);
+        if ready {
+            pb.plot_add(x, y, scale(THRASH_GLOW, (0.12 + 0.30 * pulse) * a));
+        }
+
+        // Width: the whip is thin at the rump and thickens toward the tip, so
+        // growing the tail is visible from across a busy screen, not just at
+        // the last pixel.
+        let band = charge * (0.10 + 0.95 * s * s);
+        let kmax = band.round() as i32;
+        if kmax <= 0 {
+            continue;
+        }
+        let (ax, ay) = if i == 0 { pts[1] } else { pts[i - 1] };
+        let d = Vec2::new((x - ax) as f32, (y - ay) as f32);
+        if d.len_sq() <= 1e-4 {
+            continue;
+        }
+        let d = d.normalized();
+        let (nx, ny) = (-d.y, d.x);
+        // Several radii often land on the same pixel (a diagonal normal steps
+        // by one in both axes), and a second blend would double-tint the
+        // blink's half alpha — so each offset is plotted once.
+        let mut used = [(0i32, 0i32); 5];
+        let mut n = 0;
+        for k in 1..=kmax {
+            let (dx, dy) = ((nx * k as f32).round() as i32, (ny * k as f32).round() as i32);
+            if (dx, dy) == (0, 0) || used[..n].contains(&(dx, dy)) {
+                continue;
+            }
+            used[n] = (dx, dy);
+            n += 1;
+            blend(pb, x + dx, y + dy, tint.apply(edge), a);
+            blend(pb, x - dx, y - dy, tint.apply(edge), a);
+        }
+    }
+
+    // Ready halo: a soft additive spill *around* the tail, drawn after the
+    // tail's own pixels (a ring closer in would simply be buried by the two
+    // pixel-thick tail) and before the rat's body, so it glows on the floor and
+    // never washes out the rat. `pulse` breathes it, `flash` doubles it for one
+    // beat.
+    if ready {
+        let gain = 0.028 * (0.55 + 0.9 * pulse + 1.2 * flash);
+        for (i, &(x, y)) in pts.iter().enumerate() {
+            let s = i as f32 / (steps - 1) as f32;
+            let hot = gain * (0.55 + 0.45 * s);
+            for dy in -4i32..=4 {
+                for dx in -4i32..=4 {
+                    let d2 = dx * dx + dy * dy;
+                    if !(2..=12).contains(&d2) {
+                        continue;
+                    }
+                    // The inner ring is nearly white (light spilling off the
+                    // tail), the outer one the thrash's orange, so the glow
+                    // reads as *light* rather than as a brown smear.
+                    let tint = if d2 <= 5 {
+                        mix(THRASH_HALO, THRASH_HOT, 0.6)
+                    } else {
+                        THRASH_HALO
+                    };
+                    pb.plot_add(x + dx, y + dy, scale(tint, hot));
+                }
+            }
+        }
+    }
+
+    if !ready {
+        return;
+    }
+    // The tip is the part of the weapon that does the killing, so it gets the
+    // read: a white-hot twinkle while it waits, and a one-off starburst at the
+    // instant the charge tops out.
+    let (tx, ty) = pts[steps - 1];
+    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        pb.plot_add(tx + dx, ty + dy, scale(THRASH_HOT, (0.30 + 0.45 * pulse) * a));
+    }
+    if flash > 0.0 {
+        // A pop, not just a sparkle: a hot disc at the tip plus a twelve-ray
+        // starburst that shrinks and fades over `TAIL_READY_FLASH`.
+        let r = 1.0 + 5.0 * flash;
+        let gain = (0.35 + 0.65 * flash).min(1.0);
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                pb.plot_add(tx + dx, ty + dy, scale(THRASH_HOT, 0.45 * flash));
+            }
+        }
+        for i in 0..12 {
+            let ang = i as f32 * (std::f32::consts::TAU / 12.0) + 0.26;
+            let long = if i % 2 == 0 { 1.0 } else { 0.55 };
+            for (k, fade) in [(1.0f32, 1.0f32), (0.62, 0.45)] {
+                let reach = r * long * k;
+                let (dx, dy) = (
+                    (ang.cos() * reach).round() as i32,
+                    (ang.sin() * reach).round() as i32,
+                );
+                pb.plot_add(tx + dx, ty + dy, scale(THRASH_HOT, gain * fade));
+            }
+        }
     }
 }
 
@@ -542,6 +839,593 @@ mod tests {
         let mut p = Player::new(pos, WeaponKind::Gnaw);
         p.face = Vec2::from_angle(ang);
         p
+    }
+
+    /// A rat that owns a Tail Thrash at `charge` (0 = just fired, 1 = ready).
+    /// `level` is the weapon level: the drawn tail scales a little with it.
+    fn thrash_rat(pos: Vec2, ang: f32, charge: f32, level: u8) -> Player {
+        let mut p = rat(pos, ang);
+        p.loadout
+            .apply(&crate::game::loadout::Upgrade::NewWeapon(WeaponKind::TailThrash));
+        let i = p
+            .loadout
+            .weapons
+            .iter()
+            .position(|w| w.kind == WeaponKind::TailThrash)
+            .unwrap();
+        let w = &mut p.loadout.weapons[i];
+        w.level = level;
+        let cd = w.cooldown();
+        // `ready` is `timer <= 0`, so a full charge is exactly 0 and `charge`
+        // below that maps straight back onto the fraction the art reads.
+        w.timer = if charge >= 1.0 { 0.0 } else { (1.0 - charge) * cd };
+        p
+    }
+
+    /// Fixed rig for the pixel tests: one buffer size and one rat position, so
+    /// several tests can compare the same pixels.
+    const RIG_W: usize = 96;
+    const RIG_H: usize = 76;
+    const RIG_BG: Rgb = (24, 28, 30);
+    fn rig_pos() -> Vec2 {
+        Vec2::new(48.0, 38.0)
+    }
+
+    fn render_rat(p: &Player, elapsed: f32) -> PixelBuffer {
+        let mut pb = PixelBuffer::new(RIG_W, RIG_H);
+        pb.clear(RIG_BG);
+        draw_rat(&mut pb, p, elapsed, Vec2::ZERO);
+        pb
+    }
+
+    /// Everything the tail added: the pixels that differ from the same rat with
+    /// no Tail Thrash at all. Empty at zero charge — that *is* the promise.
+    fn tail_pixels(charge: f32, level: u8) -> Vec<(i32, i32)> {
+        let plain = render_rat(&rat(rig_pos(), 2.2), 0.0);
+        let charged = render_rat(&thrash_rat(rig_pos(), 2.2, charge, level), 0.0);
+        let mut out = Vec::new();
+        for y in 0..RIG_H as i32 {
+            for x in 0..RIG_W as i32 {
+                let a = plain.pixel_at(x as usize, y as usize);
+                let b = charged.pixel_at(x as usize, y as usize);
+                if a != b {
+                    out.push((x, y));
+                }
+            }
+        }
+        out
+    }
+
+    /// How far the whole rat reaches from its own centre (px) and how many
+    /// pixels it covers: the tail is its longest limb, so both grow with the
+    /// charge.
+    fn silhouette(charge: f32, level: u8) -> (f32, usize) {
+        let pb = render_rat(&thrash_rat(rig_pos(), 2.2, charge, level), 0.0);
+        let c = rig_pos();
+        let (mut far, mut count) = (0.0f32, 0usize);
+        for y in 0..RIG_H as i32 {
+            for x in 0..RIG_W as i32 {
+                if pb.pixel_at(x as usize, y as usize) == RIG_BG {
+                    continue;
+                }
+                count += 1;
+                far = far.max(Vec2::new(x as f32, y as f32).dist(c));
+            }
+        }
+        (far, count)
+    }
+
+    /// The tail is the Tail Thrash's charge meter: it grows and thickens
+    /// smoothly from the tail every rat has to a clearly longer, fatter,
+    /// glowing one, and the growth is already obvious by half charge.
+    #[test]
+    fn tail_grows_with_charge_and_level() {
+        let mut prev = 0.0f32;
+        for i in 0..=10 {
+            let charge = i as f32 / 10.0;
+            let far = silhouette(charge, 1).0;
+            assert!(
+                far > prev,
+                "charge {charge}: the rat reaches {far} px, not past {prev}"
+            );
+            prev = far;
+        }
+        // …and there is more tail on screen at the end than at the start, not
+        // just one pixel further out (the tail thickens as it grows).
+        assert!(silhouette(1.0, 1).1 > silhouette(0.0, 1).1 + 40);
+        // Half charged is already visibly longer (roughly a third of the way to
+        // the full stretch), not a rounding difference to hunt for.
+        let rest = silhouette(0.0, 1).0;
+        let half = silhouette(0.5, 1).0;
+        let full = silhouette(1.0, 1).0;
+        assert!(
+            half > rest * 1.15,
+            "half charge reaches {half} px vs {rest} at rest"
+        );
+        assert!(full > rest * 1.4, "full charge reaches {full} px vs {rest}");
+        // …and the tail itself is where the growth is: at half charge it adds
+        // far more than a pixel or two of tail.
+        assert!(tail_pixels(0.5, 1).len() > 30);
+        assert!(tail_pixels(1.0, 1).len() > tail_pixels(0.5, 1).len());
+        // A levelled weapon reaches further, matching its `active_reach`.
+        assert!(silhouette(1.0, 5).0 > full);
+        // The length is linear in the charge (a filling meter, not a
+        // last-second surprise).
+        let len = |c: f32| {
+            tail_charge(&thrash_rat(Vec2::ZERO, 0.0, c, 1))
+                .unwrap()
+                .tail_len()
+        };
+        assert!((len(0.0) - TAIL_LEN).abs() < 1e-4);
+        assert!(len(0.5) > (len(0.0) + len(1.0)) * 0.48);
+        assert!(len(1.0) >= TAIL_LEN + TAIL_GROW - 1e-4);
+    }
+
+    /// Without the weapon nothing changes at all: the rat's charge source says
+    /// so, and the pixels of a rat with no Tail Thrash are exactly those of a
+    /// rat that owns one with a full (zero) charge freshly spent — which draws
+    /// the untouched tail, since every charged term is multiplied by zero.
+    #[test]
+    fn no_tail_thrash_draws_the_unchanged_tail() {
+        let pos = Vec2::new(30.0, 30.0);
+        let plain = rat(pos, 0.4);
+        assert!(tail_charge(&plain).is_none());
+        // Built by hand (no `Upgrade`), so the rat owns nothing at all.
+        let bare = {
+            let mut p = rat(pos, 0.4);
+            p.loadout.weapons.clear();
+            p
+        };
+        assert!(tail_charge(&bare).is_none());
+
+        let shot = thrash_rat(pos, 0.4, 0.0, 1);
+        assert_eq!(tail_charge(&shot).unwrap().charge, 0.0);
+        let render = |p: &Player| {
+            let mut pb = PixelBuffer::new(64, 60);
+            pb.clear((24, 28, 30));
+            draw_rat(&mut pb, p, 1.7, Vec2::ZERO);
+            pb
+        };
+        let (a, b, c) = (render(&plain), render(&bare), render(&shot));
+        for y in 0..60 {
+            for x in 0..64 {
+                assert_eq!(
+                    a.pixel_at(x, y),
+                    b.pixel_at(x, y),
+                    "an empty loadout changed pixel {x},{y}"
+                );
+                assert_eq!(
+                    a.pixel_at(x, y),
+                    c.pixel_at(x, y),
+                    "a freshly spent thrash changed pixel {x},{y}"
+                );
+            }
+        }
+    }
+
+    /// The glow is a *full charge* state: nothing below ready gains the hot
+    /// pulse, the halo or the tip twinkle, and a ready tail has all three — in
+    /// 16-colour space too, where the fold has to land on a different (bright)
+    /// ANSI slot than the resting tail.
+    #[test]
+    fn tail_glows_only_when_fully_charged() {
+        use crate::term::{map_rgb_with, ColorDepth};
+        use ratatui::style::Color;
+        let near = tail_pixels(0.99, 1);
+        let ready = tail_pixels(1.0, 1);
+        // Below ready the tail is just a long tail. Ready, it also gains the
+        // additive halo ring around itself, so it has strictly more pixels.
+        assert!(
+            !tail_charge(&thrash_rat(Vec2::ZERO, 0.0, 0.99, 1)).unwrap().ready,
+            "0.99 must not count as ready"
+        );
+        assert!(
+            tail_charge(&thrash_rat(Vec2::ZERO, 0.0, 1.0, 1)).unwrap().ready,
+            "a spent-out timer is ready"
+        );
+        assert!(
+            ready.len() > near.len() + 40,
+            "the ready tail adds a halo: {} vs {}",
+            ready.len(),
+            near.len()
+        );
+        // In 16 colours the ready tail must contain pixels that fold to the
+        // brightest slots, and the resting tail must contain none: the glow has
+        // to read on a terminal without 24-bit colour.
+        let is_bright = |c: Rgb| {
+            matches!(
+                map_rgb_with(ColorDepth::Ansi16, c),
+                Color::LightYellow | Color::Yellow | Color::White
+            )
+        };
+        let bright = |px: &[(i32, i32)], pb: &PixelBuffer| {
+            px.iter()
+                .filter(|&&(x, y)| is_bright(pb.pixel_at(x as usize, y as usize)))
+                .count()
+        };
+        let rest_pb = render_rat(&rat(rig_pos(), 2.2), 0.0);
+        let ready_pb = render_rat(&thrash_rat(rig_pos(), 2.2, 1.0, 1), 0.0);
+        assert_eq!(
+            bright(&tail_pixels(0.0, 1), &rest_pb),
+            0,
+            "the resting tail must not fold to a hot colour"
+        );
+        assert!(
+            bright(&ready, &ready_pb) >= 6,
+            "the ready tail needs hot pixels that survive the 16-colour fold"
+        );
+        // The pulse is *in* the colour, not just the presence of the glow: the
+        // two opposite phases of the sine give different tail pixels.
+        let phase = |t: f32| {
+            let pb = render_rat(&thrash_rat(rig_pos(), 2.2, 1.0, 1), t);
+            ready
+                .iter()
+                .map(|&(x, y)| pb.pixel_at(x as usize, y as usize))
+                .collect::<Vec<_>>()
+        };
+        let low = phase(std::f32::consts::FRAC_PI_2 / 6.2);
+        let high = phase(std::f32::consts::FRAC_PI_2 / 6.2 + std::f32::consts::PI / 6.2);
+        assert_ne!(low, high, "the glow must pulse between its two phases");
+    }
+
+    /// Drawing is pure: same rat, same clock, same pixels (twice), and the rat
+    /// itself is untouched — nothing here advances the sim or its rng.
+    #[test]
+    fn tail_draw_is_pure_and_touches_no_sim_state() {
+        let pos = Vec2::new(30.0, 30.0);
+        let p = thrash_rat(pos, 1.1, 1.0, 2);
+        let render = || {
+            let mut pb = PixelBuffer::new(64, 60);
+            pb.clear((24, 28, 30));
+            draw_rat(&mut pb, &p, 2.5, Vec2::ZERO);
+            pb
+        };
+        let (a, b) = (render(), render());
+        for y in 0..60 {
+            for x in 0..64 {
+                assert_eq!(a.pixel_at(x, y), b.pixel_at(x, y), "pixel {x},{y}");
+            }
+        }
+        // The rat is borrowed immutably above, so it cannot have been written
+        // to; assert the charge state the art reads is stable too.
+        assert_eq!(tail_charge(&p), tail_charge(&p));
+    }
+
+    /// The pixels the rat's own body, feet and face paint at **full opacity**:
+    /// the ones that come out the same whatever is underneath, and therefore
+    /// the ones the tail can never show through.
+    ///
+    /// Found by drawing that layer over black and over white and keeping the
+    /// pixels that are identical — a partially covered pixel (or the rim, or
+    /// the drop shadow) is mixed with the background, so it is excluded without
+    /// guessing at a threshold.
+    fn body_mask(p: &Player, elapsed: f32) -> Vec<bool> {
+        let layer = |bg: Rgb| {
+            let pose = pose_of(p, elapsed);
+            let tint = tint_of(p, elapsed);
+            let mut pb = PixelBuffer::new(RIG_W, RIG_H);
+            pb.clear(bg);
+            draw_feet(&mut pb, &pose, tint, Vec2::ZERO);
+            draw_body(&mut pb, &pose, tint, Vec2::ZERO);
+            draw_face(&mut pb, &pose, elapsed, tint, Vec2::ZERO);
+            pb
+        };
+        let (black, white) = (layer((0, 0, 0)), layer((255, 255, 255)));
+        let mut mask = vec![false; RIG_W * RIG_H];
+        for y in 0..RIG_H {
+            for x in 0..RIG_W {
+                mask[y * RIG_W + x] = black.pixel_at(x, y) == white.pixel_at(x, y);
+            }
+        }
+        mask
+    }
+
+    /// The longer tail still comes out of the rump and never covers the rat:
+    /// it is drawn before the body, so every body pixel comes out identical —
+    /// at any heading, and with a swaying run on top.
+    #[test]
+    fn charged_tail_stays_attached_and_off_the_body() {
+        for i in 0..16 {
+            let ang = i as f32 / 16.0 * std::f32::consts::TAU;
+            let mut plain_rat = rat(rig_pos(), ang);
+            let mut charged_rat = thrash_rat(rig_pos(), ang, 1.0, 3);
+            for p in [&mut plain_rat, &mut charged_rat] {
+                p.vel = Vec2::from_angle(ang + 0.5) * 58.0;
+            }
+            let plain = render_rat(&plain_rat, 0.9);
+            let charged = render_rat(&charged_rat, 0.9);
+            let mask = body_mask(&plain_rat, 0.9);
+
+            let mut added = 0;
+            let (mut near, mut far) = (f32::MAX, 0.0f32);
+            for y in 0..RIG_H as i32 {
+                for x in 0..RIG_W as i32 {
+                    let a = plain.pixel_at(x as usize, y as usize);
+                    let b = charged.pixel_at(x as usize, y as usize);
+                    if mask[y as usize * RIG_W + x as usize] {
+                        assert_eq!(
+                            a, b,
+                            "heading {ang}: the tail changed body pixel {x},{y}"
+                        );
+                    }
+                    if a == b {
+                        continue;
+                    }
+                    added += 1;
+                    // `a` is the resting tail's pixel here (the longer one took
+                    // a different path), so only the charged side counts.
+                    let d = Vec2::new(x as f32, y as f32).dist(rig_pos());
+                    if b != RIG_BG {
+                        near = near.min(d);
+                        far = far.max(d);
+                    }
+                }
+            }
+            // It is drawn, it starts at the rump and it stops at the tip: a
+            // chain from the body (not a detached blob) inside the reach the
+            // charged length allows (tail + rump offset + the two-pixel halo).
+            let len = tail_charge(&charged_rat).unwrap().tail_len();
+            assert!(added > 40, "heading {ang}: the charged tail drew nothing");
+            assert!(
+                near < 8.0,
+                "heading {ang}: nearest tail pixel is {near} px out — detached"
+            );
+            assert!(
+                far < 3.5 + len + 3.0,
+                "heading {ang}: tail reaches {far} px, past its {len} px length"
+            );
+        }
+    }
+
+    /// The art is render-only, so a run that *owns* a charged Tail Thrash must
+    /// simulate exactly like the same run without it, even with every frame
+    /// drawn (glow, flash, pulse and all). Two same-seed worlds, one of each,
+    /// walk the same scripted path and are compared every tick: one rng draw
+    /// out of the art would desync them on the first enemy spawn.
+    #[test]
+    fn drawing_a_charged_tail_draws_no_sim_state() {
+        use crate::game::level::Theme;
+        use crate::game::loadout::Upgrade;
+        use crate::game::world::World;
+
+        let mut plain = World::new(Theme::Sewer, 42);
+        let mut tail = World::new(Theme::Sewer, 42);
+        tail.player
+            .loadout
+            .apply(&Upgrade::NewWeapon(WeaponKind::TailThrash));
+        let i = tail
+            .player
+            .loadout
+            .weapons
+            .iter()
+            .position(|w| w.kind == WeaponKind::TailThrash)
+            .unwrap();
+        // Fully charged: the glow, the halo, the tip and the flash all run.
+        tail.player.loadout.weapons[i].timer = 0.0;
+        let mut pb = PixelBuffer::new(80, 40);
+        for tick in 0..180 {
+            let mv = Vec2::from_angle(tick as f32 * 0.07);
+            plain.update(1.0 / 60.0, mv, false);
+            tail.update(1.0 / 60.0, mv, false);
+            plain.draw(&mut pb);
+            tail.draw(&mut pb);
+            assert_eq!(plain.kills, tail.kills, "tick {tick}: kills diverged");
+            assert_eq!(
+                plain.player.pos, tail.player.pos,
+                "tick {tick}: the rat diverged"
+            );
+            let a: Vec<_> = plain.enemies().iter().map(|e| (e.pos, e.hp)).collect();
+            let b: Vec<_> = tail.enemies().iter().map(|e| (e.pos, e.hp)).collect();
+            assert_eq!(a, b, "tick {tick}: enemies diverged");
+        }
+    }
+
+    /// The capture sheets for the tail's charge read-out.
+    ///
+    /// `RATRUN_DUMP=tailcharge cargo test dump_tail_charge_sheet` writes
+    /// `/tmp/ratrun_tailcharge.ppm` (six 112 x 56 px panels, whole-screen feel)
+    /// and `/tmp/ratrun_tailclose.ppm` (the same six at 76 x 46 px, for a hard
+    /// look at the tail itself). Both are no-ops unless `RATRUN_DUMP` says
+    /// `tailcharge`.
+    #[test]
+    fn dump_tail_charge_sheet() {
+        use crate::game::enemy::EnemyKind;
+        use crate::game::level::Theme;
+        use crate::game::loadout::Upgrade;
+        use crate::game::world::World;
+        use rand::SeedableRng;
+
+        if std::env::var("RATRUN_DUMP").as_deref() != Ok("tailcharge") {
+            return;
+        }
+        // Where the idle pulse tops out / bottoms out (sin(elapsed * 6.2)).
+        const PULSE_UP: f32 = std::f32::consts::FRAC_PI_2 / 6.2;
+        const PULSE_DOWN: f32 = PULSE_UP + std::f32::consts::PI / 6.2;
+
+        // One panel: a real world (floor, horde and all) with the thrash
+        // charged to `charge` at weapon `level`. `prime` draws one throwaway
+        // frame far in the past first, so the ready flash has already decayed —
+        // without it the panel catches the flash itself.
+        struct Shot {
+            charge: f32,
+            level: u8,
+            elapsed: f32,
+            prime: bool,
+            horde: bool,
+            theme: Theme,
+            dash: bool,
+        }
+        let shot = |charge: f32| Shot {
+            charge,
+            level: 1,
+            elapsed: 0.0,
+            prime: true,
+            horde: false,
+            theme: Theme::Sewer,
+            dash: false,
+        };
+        let panel = |w: usize, h: usize, s: &Shot| {
+            let mut world = World::new(s.theme, 7);
+            if !world.player.loadout.has(WeaponKind::TailThrash) {
+                world
+                    .player
+                    .loadout
+                    .apply(&Upgrade::NewWeapon(WeaponKind::TailThrash));
+            }
+            let i = world
+                .player
+                .loadout
+                .weapons
+                .iter()
+                .position(|x| x.kind == WeaponKind::TailThrash)
+                .expect("the thrash was just granted");
+            {
+                let weapon = &mut world.player.loadout.weapons[i];
+                weapon.level = s.level;
+                weapon.timer = if s.charge >= 1.0 {
+                    0.0
+                } else {
+                    (1.0 - s.charge) * weapon.cooldown()
+                };
+            }
+            world.player.face = Vec2::from_angle(-0.62);
+            if s.horde {
+                world.player.vel = world.player.face * 58.0;
+                if s.dash {
+                    world.player.dash_active = 0.16;
+                }
+                let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+                let p = world.player.pos;
+                for k in 0..26 {
+                    let a = k as f32 * 0.37;
+                    let at = p + Vec2::from_angle(a) * (14.0 + (k % 5) as f32 * 9.0);
+                    let kind = if k % 6 == 3 {
+                        EnemyKind::Cat
+                    } else {
+                        EnemyKind::Skitterer
+                    };
+                    world.spawn_enemy_with_rng(kind, at, 30.0, &mut rng);
+                }
+            }
+            let mut pb = PixelBuffer::new(w, h);
+            if s.prime {
+                world.elapsed = -10.0;
+                world.draw(&mut pb);
+            }
+            world.elapsed = s.elapsed;
+            world.draw(&mut pb);
+            pb
+        };
+
+        // Nine panels, 3 x 3: nothing / half / ready on the bright pulse; ready
+        // on the dim pulse, the flash frame, and a mid-fight frame; then the
+        // same read on the two brighter themes and a dashing rat.
+        let sheet = |w: usize, h: usize| -> Vec<u8> {
+            let shots = [
+                shot(0.0),
+                shot(0.5),
+                Shot {
+                    elapsed: PULSE_UP,
+                    ..shot(1.0)
+                },
+                Shot {
+                    elapsed: PULSE_DOWN,
+                    ..shot(1.0)
+                },
+                Shot {
+                    elapsed: PULSE_UP,
+                    prime: false,
+                    ..shot(1.0)
+                },
+                Shot {
+                    level: 3,
+                    elapsed: PULSE_UP,
+                    horde: true,
+                    ..shot(1.0)
+                },
+                Shot {
+                    level: 3,
+                    elapsed: PULSE_UP,
+                    horde: true,
+                    theme: Theme::Kitchen,
+                    ..shot(1.0)
+                },
+                Shot {
+                    level: 3,
+                    elapsed: PULSE_DOWN,
+                    horde: true,
+                    theme: Theme::Lab,
+                    ..shot(1.0)
+                },
+                Shot {
+                    level: 5,
+                    elapsed: PULSE_UP,
+                    horde: true,
+                    dash: true,
+                    charge: 0.7,
+                    ..shot(1.0)
+                },
+            ];
+            let panels: Vec<PixelBuffer> = shots.iter().map(|s| panel(w, h, s)).collect();
+            let (cols, rows) = (3, 3);
+            let sw = w * cols;
+            let mut px = vec![0u8; sw * h * rows * 3];
+            for (n, p) in panels.iter().enumerate() {
+                let (ox, oy) = ((n % cols) * w, (n / cols) * h);
+                for y in 0..h {
+                    for x in 0..w {
+                        let c = p.pixel_at(x, y);
+                        let i = ((oy + y) * sw + ox + x) * 3;
+                        px[i..i + 3].copy_from_slice(&[c.0, c.1, c.2]);
+                    }
+                }
+            }
+            let mut out = format!("P6\n{} {}\n255\n", sw, h * rows).into_bytes();
+            out.extend_from_slice(&px);
+            out
+        };
+        std::fs::write("/tmp/ratrun_tailcharge.ppm", sheet(112, 56)).unwrap();
+        std::fs::write("/tmp/ratrun_tailclose.ppm", sheet(76, 46)).unwrap();
+        // The same two sheets folded through the 16-colour terminal palette the
+        // way `PixelBuffer::render_to` does, so the glow can be checked on the
+        // worst colour depth the game supports.
+        let fold = |mut ppm: Vec<u8>| -> Vec<u8> {
+            // The body starts after the header's third newline
+            // ("P6\n<w> <h>\n255\n").
+            let mut start = 0;
+            for _ in 0..3 {
+                start += ppm[start..].iter().position(|&b| b == b'\n').unwrap() + 1;
+            }
+            for px in ppm[start..].chunks_mut(3) {
+                let c = crate::term::map_rgb_with(
+                    crate::term::ColorDepth::Ansi16,
+                    (px[0], px[1], px[2]),
+                );
+                let rgb = match c {
+                    ratatui::style::Color::Black => (0, 0, 0),
+                    ratatui::style::Color::Red => (128, 0, 0),
+                    ratatui::style::Color::Green => (0, 128, 0),
+                    ratatui::style::Color::Yellow => (128, 128, 0),
+                    ratatui::style::Color::Blue => (0, 0, 128),
+                    ratatui::style::Color::Magenta => (128, 0, 128),
+                    ratatui::style::Color::Cyan => (0, 128, 128),
+                    ratatui::style::Color::Gray => (192, 192, 192),
+                    ratatui::style::Color::DarkGray => (128, 128, 128),
+                    ratatui::style::Color::LightRed => (255, 0, 0),
+                    ratatui::style::Color::LightGreen => (0, 255, 0),
+                    ratatui::style::Color::LightYellow => (255, 255, 0),
+                    ratatui::style::Color::LightBlue => (0, 0, 255),
+                    ratatui::style::Color::LightMagenta => (255, 0, 255),
+                    ratatui::style::Color::LightCyan => (0, 255, 255),
+                    ratatui::style::Color::White => (255, 255, 255),
+                    _ => (0, 0, 0),
+                };
+                px.copy_from_slice(&[rgb.0, rgb.1, rgb.2]);
+            }
+            ppm
+        };
+        std::fs::write("/tmp/ratrun_tailcharge16.ppm", fold(sheet(112, 56))).unwrap();
+        std::fs::write("/tmp/ratrun_tailclose16.ppm", fold(sheet(76, 46))).unwrap();
     }
 
     /// Every pose at every angle, including off-buffer positions: must never
