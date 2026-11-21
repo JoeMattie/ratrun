@@ -458,6 +458,12 @@ pub fn traps_system(
     // happen this tick breaks the rat out of the glue (and a dash in progress
     // crosses the pad without sticking, per the art's `Idle` counter).
     let player_dash_now = input.dash && player.dash_cd <= 0.0;
+    // Wave 3 Clean Socks (`systems::powerups`): while they are on, the glue pad
+    // has nothing to grip. Treated exactly like a dash here — a socked rat is
+    // released from a board it is already on and crosses every other pad
+    // without sticking — because the design has one rule ("ignore
+    // sticky-board drag") and no per-board exceptions.
+    let player_socked = player.buffs.socks > 0.0;
 
     spent_sticky.clear();
     spent_mice.clear();
@@ -476,7 +482,12 @@ pub fn traps_system(
         match slot.victim {
             Some(Victim::Player) => {
                 let remaining = slot.remaining - dt;
-                if remaining <= 0.0 || player_dash_now || player_dashing || !player_alive {
+                if remaining <= 0.0
+                    || player_dash_now
+                    || player_dashing
+                    || player_socked
+                    || !player_alive
+                {
                     // The tear follows whatever the rat is doing: its own
                     // momentum, or straight off the board when it is standing
                     // still (a spent hold).
@@ -566,6 +577,7 @@ pub fn traps_system(
                     && player_alive
                     && !player_dashing
                     && !player_dash_now
+                    && !player_socked
                     && on_pad(view.pos, view.facing, player_pos)
                 {
                     player_glued = true;

@@ -2978,6 +2978,81 @@ mod tests {
                 }
                 hh.frame(&[]);
             }
+            // Wave 3 pocket finds (`systems::powerups`). `RATRUN_DUMP=powerups`
+            // puts one of each on the floor around the rat: the tin dome, the
+            // brass key, the pocket watch and the sock. `powerups_fx` runs a
+            // few real frames with every timed buff live, so the capture shows
+            // the white shield rim, the slowed hostile pellets' tails, the
+            // brass decoy with the horde walking at it, the heel prints and the
+            // HUD's timed-strip.
+            "powerups" | "powerups_fx" => {
+                use crate::game::gem::{Pickup, PickupKind};
+                use crate::math::Vec2;
+                hh.enter_playing();
+                let fx = target == "powerups_fx";
+                {
+                    let w = hh.app.world.as_mut().unwrap();
+                    let p = w.player.pos;
+                    // One of each find laid out in a small ring, each with its
+                    // own bob phase so the sprites animate independently.
+                    for (i, kind) in [
+                        PickupKind::BottleCap,
+                        PickupKind::WindupMouse,
+                        PickupKind::PocketWatch,
+                        PickupKind::CleanSocks,
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let a = std::f32::consts::FRAC_PI_2 * i as f32 + 0.4;
+                        w.spawn_pickup(Pickup {
+                            pos: p + Vec2::from_angle(a) * 20.0,
+                            kind,
+                            bob: i as f32 * 1.7,
+                        });
+                    }
+                    if fx {
+                        w.player.buffs.shield = 12.0;
+                        w.player.buffs.decoy = 5.0;
+                        w.player.buffs.slow_bullets = 4.0;
+                        w.player.buffs.socks = 6.0;
+                        // The key east of the rat, with a handful of ordinary
+                        // bodies inside its lure radius and a couple of hostile
+                        // pellets already in the air.
+                        let key = p + Vec2::new(30.0, 0.0);
+                        crate::game::ecs::systems::powerups::spawn_decoy(w, key);
+                        for i in 0..7 {
+                            let a = i as f32 * 0.9;
+                            let at = key + Vec2::from_angle(a) * (14.0 + i as f32 * 2.0);
+                            w.spawn_enemy(
+                                crate::game::enemy::EnemyKind::Skitterer,
+                                at,
+                                2.0,
+                            );
+                        }
+                        for i in 0..5 {
+                            let mut b = crate::game::bullet::Bullet::new(
+                                p + Vec2::new(-26.0, -8.0 + i as f32 * 4.0),
+                                Vec2::new(80.0, 0.0),
+                                3.0,
+                                crate::game::bullet::Faction::Enemy,
+                                (255, 120, 160),
+                            );
+                            b.life = 4.0;
+                            w.spawn_bullet(b);
+                        }
+                    }
+                }
+                if fx {
+                    // A few frames of walking with the socks on, so the heel
+                    // prints and the shield rim have history.
+                    for _ in 0..14 {
+                        hh.frame(&[KeyCode::Right]);
+                    }
+                } else {
+                    hh.frame(&[]);
+                }
+            }
             "levelup" => {
                 hh.frame(&[KeyCode::Enter]); // -> Story
                 hh.frame(&[KeyCode::Enter]); // dossier -> MapIntro

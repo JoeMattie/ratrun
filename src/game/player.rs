@@ -5,6 +5,55 @@ use crate::math::Vec2;
 use super::loadout::Loadout;
 use super::weapon::WeaponKind;
 
+/// Timed buffs from the wave-3 pocket finds (WAVE3_DESIGN §10).
+///
+/// Every countdown is in **simulation seconds** and `0.0` means "inactive", so
+/// a run that never finds one of these pickups carries four zeros and draws no
+/// extra rng. A repeat find refreshes the countdown to full (and, for the
+/// decoy, moves the key).
+///
+/// They live on the player rather than in a separate resource because the
+/// facade already round-trips `World::player` every tick, so the HUD can read
+/// them from `&World` with no new accessor and no twin-spare plumbing.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Buffs {
+    /// Bottle Cap: absorb the next damaging hit (and still grant the normal
+    /// post-hit immunity window). 12 s.
+    pub shield: f32,
+    /// Pocket Watch: hostile pellets travel at 40 % speed. 4 s.
+    pub slow_bullets: f32,
+    /// Clean Socks: sticky boards cannot grab or slow the rat. 6 s.
+    pub socks: f32,
+    /// Wind-up Mouse: the brass key is on the floor (`powerups::Decoy` carries
+    /// its position and timer; this mirror is what the HUD counts down). 5 s.
+    pub decoy: f32,
+}
+
+impl Buffs {
+    /// Every tick: age the countdowns. Returns the kinds that expired this
+    /// tick, so the caller can play the release cue without a second pass.
+    pub fn tick(&mut self, dt: f32) -> [bool; 4] {
+        let mut expired = [false; 4];
+        for (slot, was) in [
+            (&mut self.shield, 0),
+            (&mut self.slow_bullets, 1),
+            (&mut self.socks, 2),
+            (&mut self.decoy, 3),
+        ] {
+            if *slot > 0.0 {
+                *slot = (*slot - dt).max(0.0);
+                expired[was] = *slot == 0.0;
+            }
+        }
+        expired
+    }
+
+    /// Is any timed buff running? (The HUD skips its strip when not.)
+    pub fn any(&self) -> bool {
+        self.shield > 0.0 || self.slow_bullets > 0.0 || self.socks > 0.0 || self.decoy > 0.0
+    }
+}
+
 #[derive(bevy_ecs::resource::Resource)]
 pub struct Player {
     pub pos: Vec2,
@@ -27,6 +76,13 @@ pub struct Player {
     /// the dash key while the cooldown is still running, so a failed press is
     /// never silent (gauge shake + `Sfx::DashDenied`). Visual only.
     pub dash_denied: f32,
+    /// Wave-3 pocket finds (Bottle Cap / Pocket Watch / Clean Socks / the
+    /// Wind-up Mouse's HUD mirror). See [`Buffs`].
+    pub buffs: Buffs,
+    /// Where the Wind-up Mouse's key belongs: set by the collection pass and
+    /// consumed by `powerups_system`, which owns the decoy entity's lifecycle
+    /// (spawn, move on a repeat find, expire). `None` means "no request".
+    pub decoy_at: Option<Vec2>,
 }
 
 /// XP needed to go from `level` to `level + 1`.
@@ -80,6 +136,8 @@ impl Player {
             hurt_flash: 0.0,
             dash_ready_flash: 0.0,
             dash_denied: 0.0,
+            buffs: Buffs::default(),
+            decoy_at: None,
         }
     }
 
@@ -105,9 +163,25 @@ impl Player {
     }
 
     /// Apply incoming damage through armor + i-frames. Returns true if it landed.
+    ///
+    /// This is the **single funnel** every damage source goes through (enemy
+    /// bullets, contact, mousetraps, boss hazards and boss contact), which is
+    /// why the Bottle Cap's shield is checked here rather than at each call
+    /// site: one charge absorbs exactly one hit from any of them.
+    ///
+    /// A blocked hit still reports `true` (the shot is consumed, the hazard
+    /// counts as spent) and still opens the normal post-hit immunity window, so
+    /// the rat cannot be hit twice by the same boss beat: the cap buys one
+    /// hit, not one tick of invulnerability.
     pub fn take_damage(&mut self, raw: f32) -> bool {
         if self.iframes > 0.0 {
             return false;
+        }
+        if self.buffs.shield > 0.0 {
+            self.buffs.shield = 0.0;
+            self.iframes = 0.9;
+            self.hurt_flash = 0.25;
+            return true;
         }
         let dmg = (raw - self.loadout.stats.armor).max(1.0);
         self.hp -= dmg;

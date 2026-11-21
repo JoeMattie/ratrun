@@ -78,6 +78,33 @@ use crate::game::level::Level;
 use crate::game::particle::Particles;
 use crate::game::player::Player;
 use crate::game::particle::vfx;
+use crate::game::ecs::systems::powerups;
+
+/// Weights of the rare-pickup table, in `WAVE3_DESIGN.md` §10 order:
+/// Heal 32, Magnet 18, Nuke 8, Bottle Cap 14, Wind-up Mouse 10, Pocket Watch 9,
+/// Clean Socks 9. The **chance** of a drop is unchanged (ordinary 1.2 %, big
+/// 12 %, boss 100 %); this table only decides *which* find a successful roll
+/// yields, and it costs exactly the one `random_range` draw the legacy three-way
+/// table cost (see `powerups::tests::a_drop_draws_the_same_number_of_random_numbers`).
+pub const PICKUP_WEIGHT_TOTAL: u32 = 100;
+
+/// Roll the rare-pickup kind for one successful drop.
+///
+/// The bucket bounds are the design's cumulative weights, so the table reads
+/// top-to-bottom as the document does. One draw, exactly like the legacy
+/// `random_range(0..3)`.
+#[inline]
+pub fn roll_pickup_kind(rng: &mut StdRng) -> PickupKind {
+    match rng.random_range(0..PICKUP_WEIGHT_TOTAL) {
+        0..=31 => PickupKind::Heal,
+        32..=49 => PickupKind::Magnet,
+        50..=57 => PickupKind::Nuke,
+        58..=71 => PickupKind::BottleCap,
+        72..=81 => PickupKind::WindupMouse,
+        82..=90 => PickupKind::PocketWatch,
+        _ => PickupKind::CleanSocks,
+    }
+}
 
 /// Legacy `World::reap_enemies`  shared by the normal reap and
 /// the same-tick Nuke re-reap.
@@ -148,11 +175,7 @@ fn reap_dead(
         };
         let loot_roll = rng.random::<f32>();
         if loot_roll < drop_chance {
-            let kind = match rng.random_range(0..3) {
-                0 => PickupKind::Heal,
-                1 => PickupKind::Magnet,
-                _ => PickupKind::Nuke,
-            };
+            let kind = roll_pickup_kind(rng);
             let pickup = Pickup {
                 pos: e.pos,
                 kind,
@@ -423,14 +446,14 @@ pub fn pickups_system(
         };
         p.bob += dt * 4.0;
         if p.pos.dist(ppos) < PLAYER_RADIUS + 5.0 {
-            collected.push(p.kind);
+            collected.push((p.kind, p.pos));
             commands.entity(entity).despawn();
         } else {
             // Neon hook: gentle ambient sparkle around pickups waiting on the floor.
             vfx::emit_pickup_ambient(&mut particles, &mut rng.0, p.pos, p.kind, dt);
         }
     }
-    for &k in collected.iter() {
+    for &(k, at) in collected.iter() {
         // Neon hook: the HUD's telemetry list (legacy `self.last_pickups`).
         last_pickups.0.push(k);
         match k {
@@ -491,6 +514,42 @@ pub fn pickups_system(
                 // Neon hook: shockwave, ring and scorch (was an inline burst).
                 vfx::emit_nuke(&mut particles, &mut rng.0, p);
                 sfx.0.push(Sfx::Nuke);
+            }
+
+            // ---- Wave 3 pocket finds (WAVE3_DESIGN §10) -------------------
+            //
+            // Every one of these is a *timed* find, so the collection pass
+            // only arms the timer and plays the feedback; `powerups_system`
+            // owns the countdown and the world reads the timer through the
+            // player (see `systems::powerups`). A repeat find refreshes the
+            // countdown to full instead of stacking a second one, exactly as
+            // the design asks.
+            PickupKind::BottleCap => {
+                player.buffs.shield = powerups::BOTTLE_CAP_SECS;
+                vfx::emit_pickup_find(&mut particles, &mut rng.0, at, k);
+                sfx.0.push(Sfx::PocketFind);
+            }
+            PickupKind::WindupMouse => {
+                player.buffs.decoy = powerups::WINDUP_MOUSE_SECS;
+                // The key's entity is `powerups_system`'s to own (it is where
+                // the entity is aged and despawned); the collection pass only
+                // says *where* it was found. One key at a time: the next tick's
+                // `powerups_system` moves the existing key or spawns the first.
+                player.decoy_at = Some(at);
+                vfx::emit_pickup_find(&mut particles, &mut rng.0, at, k);
+                sfx.0.push(Sfx::PocketFind);
+            }
+            PickupKind::PocketWatch => {
+                player.buffs.slow_bullets = powerups::POCKET_WATCH_SECS;
+                vfx::emit_pickup_find(&mut particles, &mut rng.0, at, k);
+                sfx.0.push(Sfx::PocketFind);
+            }
+            PickupKind::CleanSocks => {
+                player.buffs.socks = powerups::CLEAN_SOCKS_SECS;
+                // "Immediately ready the dash": the rat can leave at once.
+                player.dash_cd = 0.0;
+                vfx::emit_pickup_find(&mut particles, &mut rng.0, at, k);
+                sfx.0.push(Sfx::PocketFind);
             }
         }
     }

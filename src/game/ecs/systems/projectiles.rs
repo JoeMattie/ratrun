@@ -94,7 +94,7 @@
 
 use bevy_ecs::prelude::*;
 
-use crate::game::bullet::Bullet;
+use crate::game::bullet::{Bullet, Faction};
 use bevy_ecs::entity::Entity;
 
 use crate::game::ecs::components::{Pool, SpawnId};
@@ -199,6 +199,16 @@ pub fn bullets_system(
     let dt = input.dt;
     let ppos = player.pos;
     let arena = level.arena;
+    // Pocket Watch (`systems::powerups`): hostile pellets crawl at 40 % of
+    // their travel speed while the watch runs. Only the *step* is scaled, never
+    // `b.vel`, so a pellet resumes its own speed the instant the watch ends; and
+    // only `Bullet` entities are touched, so boss telegraph timers, hazard
+    // shapes and boss projectiles keep their named warning times exactly.
+    let hostile_step = if player.buffs.slow_bullets > 0.0 {
+        crate::game::ecs::systems::powerups::POCKET_WATCH_BULLET_SLOW
+    } else {
+        1.0
+    };
 
     // `SpawnId` order == legacy `Vec<Bullet>` order (spawn order), and the
     // per-bullet rng draws below depend on it.
@@ -229,7 +239,12 @@ pub fn bullets_system(
             // Copy `vel` out first: `Mut<Bullet>` has to be re-borrowed for
             // the `pos` write and the `vel` read would otherwise alias.
             let vel = b.vel;
-            b.pos += vel * dt;
+            let step = if b.faction == Faction::Enemy {
+                hostile_step
+            } else {
+                1.0
+            };
+            b.pos += vel * (dt * step);
         }
         b.life -= dt;
         b.hit_cd = (b.hit_cd - dt).max(0.0);

@@ -541,9 +541,19 @@ fn enemy_cap_holds_through_a_full_run() {
         ticks += 1;
     }
     assert!(w.director.boss_spawned, "boss never spawned");
+    // A level lasts until the boss or the rat dies, so a full run ends on the
+    // clock or on the boss's death. Wave 3's rare-find table reshuffles which
+    // pickup a successful drop yields, which legitimately moves a cleared boss
+    // a few seconds either side of the 300 s mark (the run itself is still a
+    // full one that reached the boss); the cap assertion above is this test's
+    // subject.
     assert!(
         w.elapsed >= director::RUN_SECONDS || w.level_complete(),
-        "run ended before the clock without defeating the boss"
+        "run neither reached the clock nor ended on a boss kill"
+    );
+    assert!(
+        w.elapsed >= director::BOSS_TIME,
+        "the run ended before the boss arrived"
     );
 }
 

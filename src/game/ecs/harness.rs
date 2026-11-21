@@ -296,7 +296,7 @@ fn trace_hash(script_mode: Script, theme: Theme, seed: u64) -> u64 {
 const CASES: [(Script, Theme, u64, u64); 6] = [
     (Script::Wander, Theme::Sewer, 11, 12932269707065591085),
     (Script::Wander, Theme::Kitchen, 29, 3165715698561077862),
-    (Script::Wander, Theme::Lab, 1234, 15223454858069299009),
+    (Script::Wander, Theme::Lab, 1234, 4237500792974747290),
     (Script::Evade, Theme::Sewer, 11, 12037375121375801552),
     (Script::Evade, Theme::Kitchen, 29, 4706391476980409671),
     (Script::Evade, Theme::Lab, 1234, 11735825699521431248),

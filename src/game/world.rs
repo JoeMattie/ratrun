@@ -61,7 +61,7 @@ use crate::render::framebuffer::PixelBuffer;
 use crate::render::lighting::{LightMap, LightScene, LightingMode};
 use crate::render::palette;
 
-use super::bullet::Bullet;
+use super::bullet::{Bullet, Faction};
 use super::campaign::{self, CampaignState, CampaignTotals, Keepable};
 use super::collision::{SpatialGrid, TileKind, TileMap};
 use super::director::{self, Director};
@@ -1117,8 +1117,24 @@ impl World {
                         }
                     }
                 }
-                pb.filled_circle(s.0, s.1, 2, palette::scale(base, 0.7 + pulse * 0.3));
-                pb.plot(s.0, s.1, (255, 255, 255));
+                // The sprite (a globe for the three legacy finds, a two-tone
+                // placeholder for the wave-3 pocket finds) sits on top of the
+                // halo; `art_floor::draw_pickup` is the one place that knows
+                // what each kind looks like.
+                art_floor::draw_pickup(pb, p.kind, s, p.bob);
+            }
+        }
+
+        // The Wind-up Mouse's brass key (`systems::powerups::Decoy`): a floor
+        // object under the entities, drawn after the pickups it came from.
+        {
+            let mut query = self.ecs.query::<(&SpawnId, &crate::game::ecs::systems::powerups::Decoy)>();
+            for (_, d) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let s = self.w2s(d.pos, cam);
+                if !on_screen(s, 8.0, viewport) {
+                    continue;
+                }
+                art_floor::draw_decoy(pb, s, self.elapsed * 3.0);
             }
         }
 
@@ -1159,6 +1175,21 @@ impl World {
                     pb.filled_circle(s.0, s.1, 1, b.color);
                 } else {
                     pb.plot_add(s.0, s.1, b.color);
+                }
+                // Pocket Watch (`systems::powerups`): a hostile pellet that is
+                // crawling drags a short grey-blue tail, so "the pellets are
+                // slow" is legible without reading the numbers. Three pixels
+                // behind the shot is long enough to see at 40 % travel speed
+                // (a slow pellet only moves half a pixel a frame).
+                if self.player.buffs.slow_bullets > 0.0
+                    && b.faction == Faction::Enemy
+                    && b.vel.len_sq() > 0.1
+                {
+                    let back = b.pos - b.vel.normalized() * 3.0;
+                    let tail = self.w2s(back, cam);
+                    pb.plot_add(tail.0, tail.1, (112, 122, 148));
+                    let mid = self.w2s(b.pos - b.vel.normalized() * 1.5, cam);
+                    pb.plot_add(mid.0, mid.1, (80, 88, 108));
                 }
             }
         }

@@ -366,6 +366,111 @@ fn kerb(floor: &mut Floor<'_>, level: &Level, width: i32, height: i32) {
     }
 }
 
+// ---- Floor finds: pickups and the Wind-up Mouse's key --------------------
+//
+// Placeholder two-tone sprites for the wave-3 pocket finds (WAVE3_DESIGN §10):
+// a tin dome with a white rim (Bottle Cap), a brass key that visibly turns
+// (Wind-up Mouse), a pocket-watch face with a stem and a moving hand (Pocket
+// Watch) and a little white sock with a grey sole (Clean Socks). Each is five
+// to eight pixels across, so it reads at half-block resolution. The Neon art
+// pass replaces these; the layer order and the call site do not change.
+//
+// The three legacy finds keep exactly the sprite they had in `World::draw` (a
+// 5 px disc with a white core and the pulsing halo drawn by the caller).
+
+/// Draw one floor pickup at screen position `s` (already `w2s`-mapped).
+///
+/// `bob` is the pickup's animation phase (`Pickup::bob`); it drives the halo
+/// pulse for the legacy disc and the key's spin for the Wind-up Mouse.
+pub fn draw_pickup(pb: &mut PixelBuffer, kind: crate::game::gem::PickupKind, s: (i32, i32), bob: f32) {
+    use crate::game::gem::PickupKind;
+    let pulse = 0.5 + 0.5 * (bob.sin() * 0.5 + 0.5);
+    let base = kind.color();
+    match kind {
+        PickupKind::Heal | PickupKind::Magnet | PickupKind::Nuke => {
+            pb.filled_circle(s.0, s.1, 2, scale(base, 0.7 + pulse * 0.3));
+            pb.plot(s.0, s.1, (255, 255, 255));
+        }
+        PickupKind::BottleCap => {
+            // Tin dome, white rim, two dark crimps at the base.
+            let tin = scale(base, 0.75 + pulse * 0.25);
+            pb.filled_circle(s.0, s.1 - 1, 2, tin);
+            pb.ring(s.0, s.1 - 1, 3, (250, 248, 240));
+            pb.plot(s.0 - 2, s.1 + 2, (128, 124, 116));
+            pb.plot(s.0 + 2, s.1 + 2, (128, 124, 116));
+            pb.plot(s.0 - 1, s.1 - 2, (255, 255, 250));
+        }
+        PickupKind::WindupMouse => draw_windup_key(pb, s, bob, base),
+        PickupKind::PocketWatch => {
+            // Cool clock face: a rim, a white dial and a stem at 12 o'clock.
+            pb.ring(s.0, s.1, 2, scale(base, 0.55));
+            pb.filled_circle(s.0, s.1, 1, (236, 246, 250));
+            pb.plot(s.0, s.1 - 4, (208, 200, 176));
+            pb.plot(s.0, s.1 - 3, (208, 200, 176));
+            // The hand turns once per bob cycle.
+            let a = bob * 0.5 - std::f32::consts::FRAC_PI_2;
+            let hand = Vec2::from_angle(a) * 1.6;
+            pb.plot(s.0 + hand.x.round() as i32, s.1 + hand.y.round() as i32, (48, 62, 74));
+        }
+        PickupKind::CleanSocks => {
+            // A little white sock: leg up the left, foot to the right, grey sole.
+            let white = scale(base, 0.85 + pulse * 0.15);
+            for dy in -3..=0 {
+                pb.plot(s.0 - 1, s.1 + dy, white);
+                pb.plot(s.0, s.1 + dy, scale(white, 0.82));
+            }
+            for dx in -1..=2 {
+                pb.plot(s.0 + dx, s.1 + 1, white);
+            }
+            for dx in -1..=2 {
+                pb.plot(s.0 + dx, s.1 + 2, scale(white, 0.6));
+            }
+            pb.plot(s.0 + 2, s.1, scale(white, 0.82));
+        }
+    }
+}
+
+/// The Wind-up Mouse's brass key on the floor: a bow, a shaft and two teeth,
+/// turning about the shaft's end (`angle` = the pickup's `bob`).
+fn draw_windup_key(pb: &mut PixelBuffer, s: (i32, i32), angle: f32, brass: Rgb) {
+    let d = Vec2::from_angle(angle);
+    let side = d.perp();
+    let bright = scale(brass, 1.0);
+    let dark = scale(brass, 0.55);
+    for k in 0..4 {
+        let at = d * k as f32;
+        pb.plot(s.0 + at.x.round() as i32, s.1 + at.y.round() as i32, bright);
+        // A shaded underside reads as brass rather than a flat line.
+        pb.plot(
+            s.0 + (at.x + side.x * 0.6).round() as i32,
+            s.1 + (at.y + side.y * 0.6).round() as i32,
+            dark,
+        );
+    }
+    // Bow (the loop you hold).
+    let bow = d * -2.0;
+    let bc = (s.0 + bow.x.round() as i32, s.1 + bow.y.round() as i32);
+    pb.plot(bc.0, bc.1, bright);
+    pb.plot(bc.0 + 1, bc.1, dark);
+    pb.plot(bc.0 - 1, bc.1, dark);
+    pb.plot(bc.0, bc.1 + 1, dark);
+    // Teeth at the tip.
+    for k in [3.0f32, 4.0] {
+        let at = d * k + side * 1.0;
+        pb.plot(s.0 + at.x.round() as i32, s.1 + at.y.round() as i32, bright);
+    }
+}
+
+/// The stationary decoy key a Wind-up Mouse drops (`systems::powerups::Decoy`).
+///
+/// Bigger than a floor pickup's key (it is the thing the horde is walking at)
+/// and drawn with a soft shadow so it reads against the floor.
+pub fn draw_decoy(pb: &mut PixelBuffer, s: (i32, i32), angle: f32) {
+    pb.filled_circle(s.0, s.1 + 3, 3, scale((10, 10, 12), 0.5));
+    draw_windup_key(pb, s, angle, (240, 200, 110));
+    pb.plot(s.0, s.1 - 1, (255, 246, 210));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
