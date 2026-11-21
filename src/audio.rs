@@ -6432,11 +6432,11 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             for (i, st) in [0.0f32, 0.045, 0.10].iter().enumerate() {
                 m.add_noise(NoiseLayer {
                     start_s: *st,
-                    dur_s: 0.028,
+                    dur_s: 0.040,
                     pink: false,
                     gain: 0.24,
                     attack_s: 0.0008,
-                    decay_pow: 2.8,
+                    decay_pow: 2.0,
                     filter: FilterMode::BandPass,
                     fc0: 2600.0 + i as f32 * 700.0,
                     fc1: 1900.0,
@@ -6445,6 +6445,23 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
                     ..Default::default()
                 });
             }
+            // The legs under the ticks: a quiet dry rustle that holds the three
+            // ticks together as one sound (and keeps the crest factor in the
+            // range every other effect sits in).
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.17,
+                pink: true,
+                gain: 0.11,
+                attack_s: 0.006,
+                decay_pow: 1.1,
+                filter: FilterMode::BandPass,
+                fc0: 1500.0,
+                fc1: 2300.0,
+                q: 1.1,
+                seed: base_seed ^ 0x5D,
+                ..Default::default()
+            });
             m.add_short_tail(0.10, 3800.0);
             m.finish(0.42, 1.2, 2.4, 30.0)
         }
@@ -7835,8 +7852,8 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             m.add_osc(OscLayer {
                 start_s: 0.0,
                 dur_s: 0.09,
-                f0: 3100.0 * p,
-                f1: 2400.0 * p,
+                f0: 2500.0 * p,
+                f1: 2000.0 * p,
                 pitch_pow: 1.6,
                 wave: Wave::Sine,
                 gain: 0.30,
@@ -7847,8 +7864,8 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             m.add_osc(OscLayer {
                 start_s: 0.0,
                 dur_s: 0.05,
-                f0: 4700.0 * p,
-                f1: 3900.0 * p,
+                f0: 3900.0 * p,
+                f1: 3200.0 * p,
                 pitch_pow: 1.4,
                 wave: Wave::Sine,
                 gain: 0.16,
@@ -7863,10 +7880,12 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
                 gain: 0.14,
                 attack_s: 0.0006,
                 decay_pow: 2.6,
-                filter: FilterMode::HighPass,
-                fc0: 5000.0,
-                fc1: 3000.0,
-                q: 0.9,
+                // Band-passed, not high-passed: the click stays under the
+                // >9 kHz band the spectral test guards.
+                filter: FilterMode::BandPass,
+                fc0: 3800.0,
+                fc1: 2600.0,
+                q: 1.2,
                 seed: base_seed,
                 ..Default::default()
             });
