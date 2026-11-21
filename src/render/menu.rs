@@ -6,6 +6,7 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::game::{
+    art_icons,
     campaign,
     level::Theme,
     loadout::{ChestReward, Loadout, Upgrade},
@@ -458,28 +459,34 @@ pub fn draw_levelup(
     idx: usize,
     hits: &mut HitMap,
 ) {
+    let n = choices.len().max(1) as u16;
+    let large_cards = area.height >= n * 6 + 3 && area.width >= 64;
+    let target_stride: u16 = if large_cards { 6 } else { 4 };
+    let panel_w: u16 = if large_cards { 72 } else { 66 };
+    let panel_h: u16 = if large_cards {
+        n * 6 + if area.height >= n * 6 + 5 { 5 } else { 3 }
+    } else {
+        n * 4 + 5
+    };
     let r = panel(
         f,
-        centered_rect(66, choices.len() as u16 * 4 + 5, area),
+        centered_rect(panel_w, panel_h, area),
         &format!(" LEVEL UP   /   LV {level:02} "),
         TAIL,
     );
     let content = r.inner(Margin::new(1, 0));
-    let stride = (content.height.saturating_sub(1) / choices.len().max(1) as u16).min(4);
+    let stride = (content.height.saturating_sub(1) / n).min(target_stride);
+    let top_pad = u16::from(content.height >= n * stride + 3);
     for (i, (title, desc, flavor)) in choices.iter().enumerate() {
         let selected = i == idx;
-        let card = band(
-            content,
-            i as u16 * stride + u16::from(content.height >= 15),
-            stride,
-        );
+        let card = band(content, i as u16 * stride + top_pad, stride);
         hits.add(card, Target::Upgrade(i));
         let border = if selected { TAIL } else { EDGE };
-        let class = match upgrades.get(i) {
-            Some(Upgrade::NewWeapon(_)) => "NEW WEAPON",
-            Some(Upgrade::LevelWeapon(_)) => "WEAPON",
-            Some(Upgrade::Passive(_)) => "PASSIVE",
-            None => "",
+        let (class, icon) = match upgrades.get(i) {
+            Some(Upgrade::NewWeapon(k)) => ("NEW WEAPON", art_icons::weapon(*k)),
+            Some(Upgrade::LevelWeapon(_)) => ("WEAPON", art_icons::placeholder()),
+            Some(Upgrade::Passive(p)) => ("PASSIVE", art_icons::passive(*p)),
+            None => ("", art_icons::placeholder()),
         };
         let name = format!(
             " {}  {:02}   {} ",
@@ -503,12 +510,13 @@ pub fn draw_levelup(
                 ink(if selected { TAIL } else { MUTED }),
             );
         }
+        let text_rect = draw_card_icon(f.buffer_mut(), inner, icon);
         f.render_widget(
             Paragraph::new(vec![
                 Line::styled(desc.as_str(), ink(COAT)),
                 Line::styled(flavor.as_str(), ink(MUTED).add_modifier(Modifier::ITALIC)),
             ]),
-            inner,
+            text_rect,
         );
     }
     center(
@@ -520,6 +528,46 @@ pub fn draw_levelup(
             MUTED,
         ),
     );
+}
+
+/// Blit a large (`8×4` cells) or small (`4×2` cells) icon on the left side of a
+/// level-up card's inner rectangle and return the remaining rectangle for text.
+fn draw_card_icon(buf: &mut ratatui::buffer::Buffer, inner: Rect, icon: &art_icons::Icon) -> Rect {
+    if inner.height >= art_icons::LARGE_CELL_H && inner.width >= art_icons::LARGE_CELL_W + 14 {
+        let icon_rect = Rect::new(
+            inner.x,
+            inner.y,
+            art_icons::LARGE_CELL_W,
+            art_icons::LARGE_CELL_H,
+        );
+        art_icons::draw(buf, icon_rect, icon);
+        let pad = art_icons::LARGE_CELL_W + 2;
+        let text_y = inner.y + inner.height.saturating_sub(2) / 2;
+        Rect::new(
+            inner.x + pad,
+            text_y,
+            inner.width.saturating_sub(pad),
+            inner.bottom().saturating_sub(text_y),
+        )
+    } else if inner.height >= art_icons::SMALL_CELL_H && inner.width >= art_icons::SMALL_CELL_W + 10
+    {
+        let icon_rect = Rect::new(
+            inner.x,
+            inner.y,
+            art_icons::SMALL_CELL_W,
+            art_icons::SMALL_CELL_H,
+        );
+        art_icons::draw(buf, icon_rect, icon);
+        let pad = art_icons::SMALL_CELL_W + if inner.width < 52 { 1 } else { 2 };
+        Rect::new(
+            inner.x + pad,
+            inner.y,
+            inner.width.saturating_sub(pad),
+            inner.height,
+        )
+    } else {
+        inner
+    }
 }
 
 pub fn draw_story(f: &mut Frame, area: Rect, time: f32, hits: &mut HitMap) {
@@ -842,32 +890,51 @@ pub fn draw_levelup_with_loadout(
     idx: usize,
     hits: &mut HitMap,
 ) {
-    let show_loadout = area.height >= choices.len() as u16 * 4 + 9 && area.width >= 60;
-    let panel_h = choices.len() as u16 * 4 + if show_loadout { 7 } else { 5 };
+    let n = choices.len().max(1) as u16;
+    let large_cards = area.height >= n * 6 + 3 && area.width >= 64;
+    let target_stride: u16 = if large_cards { 6 } else { 4 };
+    let show_loadout = if large_cards {
+        area.height >= n * 6 + 5 && area.width >= 60
+    } else {
+        area.height >= n * 4 + 9 && area.width >= 60
+    };
+    let airy = large_cards && area.height >= n * 6 + 7;
+    let panel_w: u16 = if large_cards { 72 } else { 66 };
+    let panel_h: u16 = if large_cards {
+        n * 6 + if show_loadout { if airy { 7 } else { 5 } } else { 3 }
+    } else {
+        n * 4 + if show_loadout { 7 } else { 5 }
+    };
     let r = panel(
         f,
-        centered_rect(66, panel_h, area),
+        centered_rect(panel_w, panel_h, area),
         &format!(" LEVEL UP   /   LV {level:02} "),
         TAIL,
     );
     let content = r.inner(Margin::new(1, 0));
-    let footer_rows: u16 = if show_loadout { 3 } else { 1 };
-    let stride = (content.height.saturating_sub(footer_rows) / choices.len().max(1) as u16).min(4);
+    let footer_rows: u16 = if show_loadout {
+        if large_cards && !airy { 2 } else { 3 }
+    } else {
+        1
+    };
+    let stride = (content.height.saturating_sub(footer_rows) / n).min(target_stride);
+    let top_pad = if large_cards {
+        u16::from(airy && content.height > n * stride + footer_rows)
+    } else {
+        u16::from(content.height >= 15)
+    };
 
     for (i, (title, desc, flavor)) in choices.iter().enumerate() {
         let selected = i == idx;
-        let card = band(
-            content,
-            i as u16 * stride + u16::from(content.height >= 15),
-            stride,
-        );
+        let card = band(content, i as u16 * stride + top_pad, stride);
         hits.add(card, Target::Upgrade(i));
 
-        let (class, badge_color, pips_preview) = match upgrades.get(i) {
+        let (class, badge_color, pips_preview, icon) = match upgrades.get(i) {
             Some(Upgrade::NewWeapon(k)) => (
                 "NEW WEAPON",
                 to_color(k.color()),
                 Some(format!("{} {}", weapon_glyph(*k), weapon_pips(1, k.max_level()))),
+                art_icons::weapon(*k),
             ),
             Some(Upgrade::LevelWeapon(slot)) => {
                 if let Some(w) = loadout.weapons.get(*slot) {
@@ -880,13 +947,14 @@ pub fn draw_levelup_with_loadout(
                             weapon_glyph(w.kind),
                             weapon_pips(next, w.kind.max_level())
                         )),
+                        art_icons::weapon(w.kind),
                     )
                 } else {
-                    ("WEAPON", TAIL, None)
+                    ("WEAPON", TAIL, None, art_icons::placeholder())
                 }
             }
-            Some(Upgrade::Passive(_)) => ("PASSIVE", HEAL_MINT, None),
-            None => ("", MUTED, None),
+            Some(Upgrade::Passive(p)) => ("PASSIVE", HEAL_MINT, None, art_icons::passive(*p)),
+            None => ("", MUTED, None, art_icons::placeholder()),
         };
 
         let border = if selected { TAIL } else { EDGE };
@@ -927,18 +995,19 @@ pub fn draw_levelup_with_loadout(
             );
         }
 
+        let text_rect = draw_card_icon(f.buffer_mut(), inner, icon);
         f.render_widget(
             Paragraph::new(vec![
                 Line::styled(desc.as_str(), ink(COAT)),
                 Line::styled(flavor.as_str(), ink(MUTED).add_modifier(Modifier::ITALIC)),
             ]),
-            inner,
+            text_rect,
         );
     }
 
     // Current loadout strip so build decisions are informed right on the card screen.
     if show_loadout && r.height >= 4 {
-        let strip_y = r.height.saturating_sub(3);
+        let strip_y = r.height.saturating_sub(if large_cards && !airy { 2 } else { 3 });
         let mut spans: Vec<Span<'_>> = Vec::with_capacity(loadout.weapons.len() * 3 + 4);
         spans.push(label("ARSENAL ", MUTED));
         for (i, w) in loadout.weapons.iter().enumerate() {
@@ -978,8 +1047,8 @@ pub fn draw_levelup_with_loadout(
     );
 }
 
-/// Pause overlay with live Run Dossier (arsenal + biometrics) on medium/large
-/// terminals, falling back cleanly to [`draw_pause`] on compact screens.
+/// Pause overlay with live Run Dossier (arsenal + passives + biometrics) on
+/// medium/large terminals, falling back cleanly to [`draw_pause`] on compact screens.
 pub fn draw_pause_with_run(
     f: &mut Frame,
     area: Rect,
@@ -993,7 +1062,12 @@ pub fn draw_pause_with_run(
     }
 
     let accent = palette::marking(world.level.palette.wall_edge, world.level.palette.accent);
-    let card = centered_rect(58, 18, area);
+    let icon_dossier = area.width >= 76 && area.height >= 24;
+    let card = if icon_dossier {
+        centered_rect(76, 22, area)
+    } else {
+        centered_rect(58, 18, area)
+    };
     let r = panel(
         f,
         card,
@@ -1018,7 +1092,13 @@ pub fn draw_pause_with_run(
         );
     }
 
-    center(f, r, 1, Span::styled("━━━  ▌▌  PAUSED  ▌▌  ━━━", heavy(TAIL)));
+    let banner_row: u16 = if icon_dossier { 0 } else { 1 };
+    let clock_row: u16 = banner_row + 1;
+    let rule_row: u16 = if icon_dossier { 2 } else { 4 };
+    let hdr_row: u16 = rule_row + 1;
+    let body_row: u16 = hdr_row + 1;
+
+    center(f, r, banner_row, Span::styled("━━━  ▌▌  PAUSED  ▌▌  ━━━", heavy(TAIL)));
 
     // The clock counts down to the boss and stops there; once the boss fight is
     // on, show how long it has been running instead of a dead 00:00.
@@ -1032,7 +1112,7 @@ pub fn draw_pause_with_run(
     center(
         f,
         r,
-        2,
+        clock_row,
         Line::from(vec![
             Span::styled(clock_text, heavy(COAT)),
             label("   ·   Lv ", MUTED),
@@ -1046,42 +1126,95 @@ pub fn draw_pause_with_run(
 
     // Divider.
     let rule = "─".repeat(usize::from(inner.width));
-    f.render_widget(Line::styled(rule.as_str(), ink(TRACK)), band(inner, 4, 1));
+    f.render_widget(Line::styled(rule.as_str(), ink(TRACK)), band(inner, rule_row, 1));
 
-    // Left: Arsenal (up to 6 weapons); Right: Biometrics (passive stats).
+    // Left: Arsenal (weapons); Right: Biometrics + Passives.
     let left_w = inner.width / 2;
     let right_x = inner.x + left_w + 1;
     let right_w = inner.width.saturating_sub(left_w + 1);
 
     let buf = f.buffer_mut();
-    buf.set_stringn(inner.x, inner.y + 5, "ARSENAL", left_w as usize, heavy(accent));
-    buf.set_stringn(right_x, inner.y + 5, "BIOMETRICS", right_w as usize, heavy(accent));
+    buf.set_stringn(inner.x, inner.y + hdr_row, "ARSENAL", left_w as usize, heavy(accent));
+    buf.set_stringn(right_x, inner.y + hdr_row, "BIOMETRICS", right_w as usize, heavy(accent));
 
-    for row in 0..6u16 {
-        let y = inner.y + 6 + row;
-        if y >= r.bottom().saturating_sub(3) {
-            break;
+    let body_bottom = r.bottom().saturating_sub(3);
+    if icon_dossier {
+        let rows_avail = body_bottom.saturating_sub(inner.y + body_row);
+        for dy in 0..rows_avail {
+            buf[(inner.x + left_w.saturating_sub(1), inner.y + body_row + dy)]
+                .set_char('│')
+                .set_fg(TRACK)
+                .set_bg(PLATE);
         }
-        buf[(inner.x + left_w.saturating_sub(1), y)]
-            .set_char('│')
-            .set_fg(TRACK)
-            .set_bg(PLATE);
 
-        if let Some(w) = world.player.loadout.weapons.get(row as usize) {
-            let mut gx = inner.x;
-            let mut gbuf = [0u8; 4];
-            let g = weapon_glyph(w.kind).encode_utf8(&mut gbuf);
-            let wcol = to_color(w.kind.color());
-            (gx, _) = buf.set_stringn(gx, y, g, 2, heavy(wcol));
-            (gx, _) = buf.set_stringn(gx + 1, y, w.kind.name(), 13, ink(COAT));
-            let pips = weapon_pips(w.level, w.kind.max_level());
-            let pip_col = if w.is_max() { TRAIL_GOLD } else { wcol };
-            let px = (inner.x + left_w).saturating_sub(7);
-            if px > gx {
-                buf.set_stringn(px, y, &pips, 5, ink(pip_col));
+        // Left: up to 5 weapons with 4×4 half-block icons (2 rows each).
+        if world.player.loadout.weapons.is_empty() {
+            buf.set_stringn(inner.x, inner.y + body_row, "none", left_w as usize, ink(MUTED));
+        } else {
+            let max_slots = (rows_avail / 2) as usize;
+            for (idx, w) in world.player.loadout.weapons.iter().take(max_slots).enumerate() {
+                let y = inner.y + body_row + (idx as u16) * 2;
+                let icon_rect = Rect::new(
+                    inner.x,
+                    y,
+                    art_icons::SMALL_CELL_W,
+                    art_icons::SMALL_CELL_H,
+                );
+                art_icons::draw(buf, icon_rect, art_icons::weapon(w.kind));
+                let tx = inner.x + art_icons::SMALL_CELL_W + 2;
+                let max_tw = (inner.x + left_w.saturating_sub(2)).saturating_sub(tx) as usize;
+                let wcol = to_color(w.kind.color());
+                buf.set_stringn(tx, y, w.kind.name(), max_tw, heavy(COAT));
+                let pips = weapon_pips(w.level, w.kind.max_level());
+                let pip_col = if w.is_max() { TRAIL_GOLD } else { wcol };
+                let (px_end, _) = buf.set_stringn(tx, y + 1, &pips, max_tw, ink(pip_col));
+                if w.is_max() {
+                    buf.set_stringn(
+                        px_end + 1,
+                        y + 1,
+                        "MAX",
+                        max_tw.saturating_sub(6),
+                        heavy(TRAIL_GOLD),
+                    );
+                } else if w.kind.is_active() {
+                    let tag = if w.timer <= 0.0 { "READY" } else { "ACTIVE" };
+                    buf.set_stringn(
+                        px_end + 1,
+                        y + 1,
+                        tag,
+                        max_tw.saturating_sub(6),
+                        ink(if w.timer <= 0.0 { wcol } else { MUTED }),
+                    );
+                }
             }
-        } else if row == 0 {
-            buf.set_stringn(inner.x, y, "none", left_w as usize, ink(MUTED));
+        }
+    } else {
+        for row in 0..6u16 {
+            let y = inner.y + body_row + row;
+            if y >= body_bottom {
+                break;
+            }
+            buf[(inner.x + left_w.saturating_sub(1), y)]
+                .set_char('│')
+                .set_fg(TRACK)
+                .set_bg(PLATE);
+
+            if let Some(w) = world.player.loadout.weapons.get(row as usize) {
+                let mut gx = inner.x;
+                let mut gbuf = [0u8; 4];
+                let g = weapon_glyph(w.kind).encode_utf8(&mut gbuf);
+                let wcol = to_color(w.kind.color());
+                (gx, _) = buf.set_stringn(gx, y, g, 2, heavy(wcol));
+                (gx, _) = buf.set_stringn(gx + 1, y, w.kind.name(), 13, ink(COAT));
+                let pips = weapon_pips(w.level, w.kind.max_level());
+                let pip_col = if w.is_max() { TRAIL_GOLD } else { wcol };
+                let px = (inner.x + left_w).saturating_sub(7);
+                if px > gx {
+                    buf.set_stringn(px, y, &pips, 5, ink(pip_col));
+                }
+            } else if row == 0 {
+                buf.set_stringn(inner.x, y, "none", left_w as usize, ink(MUTED));
+            }
         }
     }
 
@@ -1095,8 +1228,8 @@ pub fn draw_pause_with_run(
         ("Magnet", format!("{:.0}px", st.magnet)),
     ];
     for (i, (k, v)) in stats_rows.iter().enumerate() {
-        let y = inner.y + 6 + i as u16;
-        if y >= r.bottom().saturating_sub(3) {
+        let y = inner.y + body_row + i as u16;
+        if y >= body_bottom {
             break;
         }
         buf.set_stringn(right_x, y, k, 11, ink(MUTED));
@@ -1104,6 +1237,42 @@ pub fn draw_pause_with_run(
         let vx = (right_x + right_w).saturating_sub(vw);
         if vx > right_x + 9 {
             buf.set_stringn(vx, y, v, vw as usize, ink(COAT));
+        }
+    }
+
+    // Passive icon tray beneath Biometrics when the icon dossier has vertical room.
+    if icon_dossier {
+        let pass_hdr_y = inner.y + body_row + 7;
+        let pass_icon_y = pass_hdr_y + 1;
+        if pass_icon_y + art_icons::SMALL_CELL_H <= body_bottom {
+            buf.set_stringn(right_x, pass_hdr_y, "PASSIVES", right_w as usize, heavy(accent));
+            if world.player.loadout.passives.is_empty() {
+                buf.set_stringn(right_x, pass_icon_y, "none", right_w as usize, ink(MUTED));
+            } else {
+                let mut px = right_x;
+                let slot_w = art_icons::SMALL_CELL_W + 3; // 4-col icon + ×N (2) + 1 gap
+                for &(pk, stacks) in world.player.loadout.passives.iter().take(5) {
+                    if px + art_icons::SMALL_CELL_W + 2 > right_x + right_w {
+                        break;
+                    }
+                    let ic = art_icons::passive(pk);
+                    art_icons::draw(
+                        buf,
+                        Rect::new(px, pass_icon_y, art_icons::SMALL_CELL_W, art_icons::SMALL_CELL_H),
+                        ic,
+                    );
+                    let capped = stacks >= pk.max_stacks();
+                    let stk = format!("×{stacks}");
+                    buf.set_stringn(
+                        px + art_icons::SMALL_CELL_W,
+                        pass_icon_y,
+                        &stk,
+                        3,
+                        if capped { heavy(TRAIL_GOLD) } else { ink(to_color(ic.accent)) },
+                    );
+                    px = px.saturating_add(slot_w);
+                }
+            }
         }
     }
 
@@ -1590,6 +1759,89 @@ mod tests {
                     draw_end_summary(f, f.area(), &summary, true, "Escaped.", &scores, &mut hits)
                 })
                 .unwrap();
+        }
+    }
+
+    #[test]
+    fn levelup_draws_icons_and_preserves_hit_rects_at_57x20_80x24_120x40() {
+        let mut lo = Loadout::new(WeaponKind::Gnaw);
+        lo.weapons.push(Weapon::new(WeaponKind::CheeseSpray));
+        let upgrades = vec![
+            Upgrade::LevelWeapon(0),
+            Upgrade::NewWeapon(WeaponKind::AcidSpit),
+            Upgrade::Passive(PassiveKind::Magnet),
+        ];
+        let desc: Vec<_> = upgrades.iter().map(|u| lo.describe(u)).collect();
+
+        for (tw, th) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let mut hits = HitMap::default();
+            let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();
+            terminal
+                .draw(|f| {
+                    draw_levelup_with_loadout(f, f.area(), 5, &desc, &upgrades, &lo, 1, &mut hits);
+                })
+                .unwrap();
+
+            let buf = terminal.backend().buffer();
+            let half_blocks = buf
+                .content
+                .iter()
+                .filter(|c| matches!(c.symbol(), "▀" | "▄"))
+                .count();
+            // 3 cards with at least 4×2 icons (57×20) or 8×4 icons (80×24, 120×40).
+            let min_cells = if tw >= 80 && th >= 24 { 45 } else { 15 };
+            assert!(
+                half_blocks >= min_cells,
+                "{tw}x{th}: expected >= {min_cells} icon cells on level-up cards, got {half_blocks}"
+            );
+
+            // Every card keeps a non-empty clickable hit rectangle.
+            for i in 0..3 {
+                let rect = hits
+                    .rect_for(Target::Upgrade(i))
+                    .unwrap_or_else(|| panic!("{tw}x{th}: missing hit rect for card {i}"));
+                assert!(rect.width >= 20 && rect.height >= 4, "{tw}x{th}: bad card {i} rect {rect:?}");
+                assert_eq!(
+                    hits.at(rect.x + rect.width / 2, rect.y + rect.height / 2),
+                    Some(Target::Upgrade(i))
+                );
+            }
+
+            let text = screen_text(&terminal);
+            assert!(text.contains("Gnaw"), "{tw}x{th}: missing Gnaw title");
+            assert!(text.contains("Acid Spit"), "{tw}x{th}: missing Acid Spit title");
+            assert!(text.contains("Whiskers"), "{tw}x{th}: missing Whiskers title");
+        }
+    }
+
+    #[test]
+    fn pause_dossier_draws_weapon_and_passive_icons_at_80x24_and_120x40() {
+        let mut w = World::new(Theme::Sewer, 7);
+        w.player.loadout.apply(&Upgrade::NewWeapon(WeaponKind::CheeseSpray));
+        w.player.loadout.apply(&Upgrade::NewWeapon(WeaponKind::TailThrash));
+        w.player.loadout.apply(&Upgrade::Passive(PassiveKind::MaxHp));
+        w.player.loadout.apply(&Upgrade::Passive(PassiveKind::Armor));
+
+        for (tw, th) in [(80u16, 24u16), (120, 40)] {
+            let mut hits = HitMap::default();
+            let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();
+            terminal
+                .draw(|f| draw_pause_with_run(f, f.area(), &w, false, &mut hits))
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            let half_blocks = buf
+                .content
+                .iter()
+                .filter(|c| matches!(c.symbol(), "▀" | "▄"))
+                .count();
+            assert!(
+                half_blocks >= 25,
+                "{tw}x{th}: expected weapon & passive icons on pause dossier, got {half_blocks}"
+            );
+            let text = screen_text(&terminal);
+            assert!(text.contains("ARSENAL"));
+            assert!(text.contains("PASSIVES"));
+            assert!(text.contains("BIOMETRICS"));
         }
     }
 }

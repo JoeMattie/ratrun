@@ -2179,10 +2179,11 @@ impl App {
     }
 
     fn draw_game(&mut self, frame: &mut Frame, area: Rect) {
+        let top_h = hud::top_height(area);
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
+                Constraint::Length(top_h),
                 Constraint::Min(1),
                 Constraint::Length(1),
             ])
@@ -3260,8 +3261,9 @@ mod tests {
         h.frame(&[]);
         let ptr = h.app.pixels.px_ptr_for_test();
         let (w, hgt) = (h.app.pixels.w, h.app.pixels.h);
+        let expected_h = 40 - hud::top_height(Rect::new(0, 0, 100, 40)) as usize - 1;
         assert_eq!(w, 100, "buffer spans the game viewport width");
-        assert_eq!(hgt, 38 * 2, "two pixels per viewport row");
+        assert_eq!(hgt, expected_h * 2, "two pixels per viewport row");
 
         for _ in 0..5 {
             h.frame(&[]);
@@ -3275,7 +3277,8 @@ mod tests {
         // A viewport change does resize it.
         h.terminal.backend_mut().resize(80, 30);
         h.frame(&[]);
-        assert_eq!((h.app.pixels.w, h.app.pixels.h), (80, 28 * 2));
+        let resized_h = 30 - hud::top_height(Rect::new(0, 0, 80, 30)) as usize - 1;
+        assert_eq!((h.app.pixels.w, h.app.pixels.h), (80, resized_h * 2));
     }
 
     /// Item 1: the test constructor is pinned to a fixed seed sequence and keeps

@@ -3,6 +3,7 @@ pub mod art_boss_cat;
 pub mod art_boss_mower;
 pub mod art_enemy;
 pub mod art_floor;
+pub mod art_icons;
 pub mod art_marks;
 pub mod art_props;
 pub mod art_rat;
