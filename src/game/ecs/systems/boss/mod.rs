@@ -190,7 +190,7 @@ pub fn trailer_boss() -> BossKind {
 // accessor returns `&'static [BossKind]` without promoting a call expression;
 // parallel boss workers append their own kind to their floor's list.
 const SEWER_POOL: &[BossKind] = &[BossKind::Cat, BossKind::HorseshoeCrab];
-const KITCHEN_POOL: &[BossKind] = &[BossKind::Broom];
+const KITCHEN_POOL: &[BossKind] = &[BossKind::Broom, BossKind::MegaRat];
 const LAB_POOL: &[BossKind] = &[BossKind::Mower];
 const LAUNDRY_POOL: &[BossKind] = &[BossKind::Mangle];
 const PRINTWORKS_POOL: &[BossKind] = &[BossKind::NightEdition];
@@ -264,46 +264,11 @@ impl BossKind {
         pool[(h % pool.len() as u64) as usize]
     }
 
-    /// **Every boss a floor can field**, in the order they are tried: the first
-    /// entry is the floor's original boss and the name `for_theme` answers.
-    ///
-    /// A floor with one fight lists one kind. The Kitchen is the first floor
-    /// with a second one: the Sweeper shares its kitchen with SUBJECT R-01, the
-    /// facility's first success (see [`megarat`]). Parallel boss workers add
-    /// their kinds here — the integrator unions the lists.
-    #[inline]
-    pub fn pool_for_theme(theme: Theme) -> &'static [BossKind] {
-        match theme {
-            Theme::Kitchen => &[BossKind::Broom, BossKind::MegaRat],
-            Theme::Sewer => &[BossKind::Cat],
-            Theme::Lab => &[BossKind::Mower],
-            Theme::Laundry => &[BossKind::Mangle],
-            Theme::Printworks => &[BossKind::NightEdition],
-            Theme::Trailer => &[BossKind::Magpie],
-        }
-    }
-
-    /// The boss a floor fields for a run seed: one pick from
-    /// [`BossKind::pool_for_theme`], deterministic in the level seed.
-    ///
-    /// The pick is a splitmix-style hash of `(seed, theme)` rather than a plain
-    /// `seed % len`: the level seeds are run seeds (sequential per batch), so a
-    /// modulo would alternate floors instead of mixing them. A one-entry pool
-    /// never hashes at all, so every floor that has not gained a second fight
-    /// is byte-identical to the pre-pool build.
+    /// The boss a floor fields for a level seed (the Megarat branch's name for
+    /// [`Self::pool_pick`]; one implementation, two names).
     #[inline]
     pub fn for_theme_seeded(theme: Theme, seed: u64) -> Self {
-        let pool = Self::pool_for_theme(theme);
-        if pool.len() <= 1 {
-            return pool[0];
-        }
-        let mut h = seed ^ (theme as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        h ^= h >> 30;
-        h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        h ^= h >> 27;
-        h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
-        h ^= h >> 31;
-        pool[(h % pool.len() as u64) as usize]
+        Self::pool_pick(theme, seed)
     }
 
     /// The boss for a campaign level slot (0 Sewer, 1 Kitchen, 2 Lab).
@@ -1613,6 +1578,41 @@ impl Boss {
                 ];
                 BossHitShapes::from_slice(&out)
             }
+            BossKind::MegaRat => {
+                // Tail root, haunch and head, all grounded (it never leaves the
+                // floor). In the two recovery windows the exposed weak point
+                // **replaces** the tail root: a boss carries three hit shapes,
+                // so the belly / tail base *is* the third one — which also
+                // makes it the first auto-aim target point, so the rat's own
+                // weapons reach for the window the moment it opens.
+                let view = self.megarat_view();
+                let circles = art_boss_megarat::body_hit_circles(&view);
+                let mut shapes: [BossHitShape; 3] = [
+                    BossHitShape::Circle {
+                        center: circles[0].0,
+                        radius: circles[0].1,
+                        grounded: true,
+                    },
+                    BossHitShape::Circle {
+                        center: circles[1].0,
+                        radius: circles[1].1,
+                        grounded: true,
+                    },
+                    BossHitShape::Circle {
+                        center: circles[2].0,
+                        radius: circles[2].1,
+                        grounded: true,
+                    },
+                ];
+                if let Some((at, radius)) = art_boss_megarat::weak_point(&view) {
+                    shapes[0] = BossHitShape::Circle {
+                        center: at,
+                        radius,
+                        grounded: true,
+                    };
+                }
+                BossHitShapes::from_slice(&shapes)
+            }
             // The platen is a slab, so it is hit through an oriented box; while
             // the type bed or the ribbon is exposed the weak point is its own
             // target, which is what auto-aim and the ground weapons reach for
@@ -1710,41 +1710,6 @@ impl Boss {
                 art_boss_horseshoe_crab::incoming_multiplier(&self.crab_view(), dir, at)
             }
             _ => 1.0,
-            BossKind::MegaRat => {
-                // Tail root, haunch and head, all grounded (it never leaves the
-                // floor). In the two recovery windows the exposed weak point
-                // **replaces** the tail root: a boss carries three hit shapes,
-                // so the belly / tail base *is* the third one — which also
-                // makes it the first auto-aim target point, so the rat's own
-                // weapons reach for the window the moment it opens.
-                let view = self.megarat_view();
-                let circles = art_boss_megarat::body_hit_circles(&view);
-                let mut shapes: [BossHitShape; 3] = [
-                    BossHitShape::Circle {
-                        center: circles[0].0,
-                        radius: circles[0].1,
-                        grounded: true,
-                    },
-                    BossHitShape::Circle {
-                        center: circles[1].0,
-                        radius: circles[1].1,
-                        grounded: true,
-                    },
-                    BossHitShape::Circle {
-                        center: circles[2].0,
-                        radius: circles[2].1,
-                        grounded: true,
-                    },
-                ];
-                if let Some((at, radius)) = art_boss_megarat::weak_point(&view) {
-                    shapes[0] = BossHitShape::Circle {
-                        center: at,
-                        radius,
-                        grounded: true,
-                    };
-                }
-                BossHitShapes::from_slice(&shapes)
-            }
         }
     }
 

@@ -230,6 +230,8 @@ pub fn boss_codename_kind(kind: crate::game::ecs::systems::boss::BossKind) -> (&
         BossKind::HorseshoeCrab => {
             return (crate::lore::HORSESHOE_NAME, crate::lore::HORSESHOE_CLASS);
         }
+        // The Kitchen's second fight: the facility's first success.
+        BossKind::MegaRat => return (crate::lore::MEGARAT_NAME, crate::lore::MEGARAT_CLASS),
     };
     let class_tag = match level {
         CampaignLevel::Sewer => "CLASS-V APEX PREDATOR",
@@ -239,6 +241,13 @@ pub fn boss_codename_kind(kind: crate::game::ecs::systems::boss::BossKind) -> (&
         CampaignLevel::Printworks => "OVERNIGHT PRESS — EDITION 1",
     };
     (level.boss_name(), class_tag)
+}
+
+/// The Megarat branch's name for [`boss_codename_kind`].
+pub fn boss_kind_codename(
+    kind: crate::game::ecs::systems::boss::BossKind,
+) -> (&'static str, &'static str) {
+    boss_codename_kind(kind)
 }
 
 /// The name plate for the fight the player is **in** (or about to be in).

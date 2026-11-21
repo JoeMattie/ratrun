@@ -100,6 +100,7 @@ use super::weapon::WeaponKind;
 use super::art_walls::{Cardinal, WallKind};
 use super::{
     art_boss_broom, art_boss_cat, art_boss_horseshoe_crab, art_boss_magpie, art_boss_mangle,
+    art_boss_megarat,
     art_boss_mower, art_boss_night_edition, art_enemy, art_floor, art_marks, art_miniboss,
     art_props, art_rat, art_traps, art_walls, art_wave3a,
 };

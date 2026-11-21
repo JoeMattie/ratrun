@@ -47,6 +47,10 @@ pub fn warn_colour(kind: BossKind, active: bool) -> Rgb {
         BossKind::NightEdition => ((255, 196, 78), (255, 96, 64)),
         // The bird's own warm plumage.
         BossKind::Magpie => ((255, 178, 92), (255, 86, 74)),
+        // Cold drain-light on wet shell.
+        BossKind::HorseshoeCrab => ((255, 198, 116), (255, 84, 70)),
+        // The first success fights under the kitchen's own warm ramp.
+        BossKind::MegaRat => ((255, 186, 64), (255, 72, 62)),
     };
     if active {
         hot

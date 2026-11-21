@@ -271,13 +271,21 @@ impl StickySlot {
 pub fn enemy_units(kind: EnemyKind) -> u8 {
     match kind {
         EnemyKind::Boss => 0,
-        EnemyKind::Brute => 4,
+        // A snake is a long heavy body; a termite horde is a mass (it fills
+        // the pad like a Brute does).
+        EnemyKind::Brute | EnemyKind::BigSnake | EnemyKind::TermiteHorde => 4,
         EnemyKind::Cat
         | EnemyKind::Spitter
         | EnemyKind::Pillbug
         | EnemyKind::Porter
         | EnemyKind::Turnkey => 2,
-        EnemyKind::Skitterer | EnemyKind::Bat | EnemyKind::BellFlea | EnemyKind::WickMoth => 1,
+        EnemyKind::Skitterer
+        | EnemyKind::Bat
+        | EnemyKind::BellFlea
+        | EnemyKind::WickMoth
+        | EnemyKind::HouseCentipede
+        | EnemyKind::MurderHornet
+        | EnemyKind::Lilliputian => 1,
     }
 }
 
