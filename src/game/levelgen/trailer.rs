@@ -92,7 +92,7 @@ pub fn generate(mut tiles: TileMap, rng: &mut StdRng, seed: u64) -> Level {
     let props = furnish(&mut tiles, &design, &deck, rng);
     let mazes = maze::carve_mazes(&mut tiles, &design, rng, theme);
     let holes = placement::place_rat_holes(&mut tiles, &design, rng);
-    let traps = placement::place_traps(&tiles, &design, &mazes, rng);
+    let mut traps = placement::place_traps(&tiles, &design, &mazes, rng);
 
     // A pit under a rat-hole or a trap's pad would stack two hazards on one
     // cell; drop any that ended up there (the maze warren is carved after the
@@ -117,6 +117,9 @@ pub fn generate(mut tiles: TileMap, rng: &mut StdRng, seed: u64) -> Level {
             && shop_threshold_clear(&deck, mouth)
     });
 
+    // A 40 × 24 snap trap never crowds a shop threshold on the deck either.
+    placement::drop_traps_crowding_shops(&mut traps, &shop_holes);
+
     tiles.rebuild_masks();
     let objects = objects_from(
         &tiles,
@@ -126,6 +129,7 @@ pub fn generate(mut tiles: TileMap, rng: &mut StdRng, seed: u64) -> Level {
         &shop_holes,
         // The flatbed has its own hazards (pits, cargo, wind): no grates, no ink.
         &super::hazards::HazardPlacement::default(),
+        seed,
     );
     let nav = NavGrid::from_tiles(&tiles, SizeClass::Large);
     Level {

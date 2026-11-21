@@ -216,6 +216,27 @@ impl MinimapFrame {
             }
         }
 
+        // A chest sitting on a set mousetrap's plate is a landmark in its own
+        // right: the chest marker is the same blip a dropped chest gets, so a
+        // player reading the map sees the reward waiting behind the bar.
+        for trap in &world.level.objects.mousetraps {
+            if trap.bait != crate::game::art_traps::TrapBait::Chest || trap.bait_taken {
+                continue;
+            }
+            let (cx, cy) = cell_of(trap.pos);
+            if fog.is_seen(cx, cy) {
+                self.markers.push(MapMarker {
+                    cx: cx as f32,
+                    cy: cy as f32,
+                    kind: MarkerKind::Pickup(PickupTag::Chest),
+                });
+                pickups += 1;
+                if pickups >= MAX_PICKUP_MARKERS {
+                    return;
+                }
+            }
+        }
+
         // Floor pickups on explored ground, in `SpawnId`-independent order (the
         // art only needs the positions; ties do not matter for a blip).
         for entity in world.ecs.iter_entities() {
@@ -369,8 +390,8 @@ pub fn minimap_cell(level: &Level, cx: i32, cy: i32) -> MinimapCell {
         TileKind::Wall(WallKind::RatHole { axis }) => MinimapCell::RatHole(minimap_axis(axis)),
         TileKind::Open => {
             let p = crate::game::collision::TileMap::tile_rect(cx, cy).center();
-            if trap_at(level, p) {
-                MinimapCell::Trap
+            if let Some(trap) = trap_at(level, p) {
+                trap
             } else if level
                 .boss_room()
                 .is_some_and(|room| room.rect.contains(cx, cy))
@@ -401,23 +422,43 @@ fn minimap_axis(axis: WallAxis) -> MinimapAxis {
     }
 }
 
-fn trap_at(level: &Level, p: crate::math::Vec2) -> bool {
-    let sticky_hx = crate::game::art_traps::STICKY_TRAP_SIZE.x * 0.5;
-    let sticky_hy = crate::game::art_traps::STICKY_TRAP_SIZE.y * 0.5;
-    level.objects.sticky_traps.iter().any(|t| {
-        crate::game::art_traps::local_box_contains(
-            t.pos,
-            t.facing,
-            p,
-            -sticky_hx,
-            sticky_hx,
-            sticky_hy,
-        )
-    }) || level
-        .objects
-        .mousetraps
-        .iter()
-        .any(|t| (t.pos - p).len() < TILE_F)
+/// The floor-trap mark for a cell centre, if a trap covers it.
+///
+/// A **spent** glue board and a **sprung** snap trap carry no promise any more,
+/// so they leave the plain floor; a hair-trigger snap trap gets its own redder
+/// mark (cheap, and the one trap whose risk a player wants on the map).
+fn trap_at(level: &Level, p: crate::math::Vec2) -> Option<MinimapCell> {
+    use crate::game::art_traps::{StickyTrapState, MOUSETRAP_SIZE, STICKY_TRAP_SIZE};
+    let sticky_hx = STICKY_TRAP_SIZE.x * 0.5;
+    let sticky_hy = STICKY_TRAP_SIZE.y * 0.5;
+    if level.objects.sticky_traps.iter().any(|t| {
+        t.state != StickyTrapState::Used
+            && crate::game::art_traps::local_box_contains(
+                t.pos,
+                t.facing,
+                p,
+                -sticky_hx,
+                sticky_hx,
+                sticky_hy,
+            )
+    }) {
+        return Some(MinimapCell::Trap);
+    }
+    let half = MOUSETRAP_SIZE * 0.5;
+    for t in &level.objects.mousetraps {
+        if !t.live() && t.bait_taken {
+            continue;
+        }
+        let d = p - t.pos;
+        if d.x.abs() <= half.x && d.y.abs() <= half.y {
+            return Some(if t.kind.hair() {
+                MinimapCell::TrapHair
+            } else {
+                MinimapCell::Trap
+            });
+        }
+    }
+    None
 }
 
 /// First explored cell of a rectangle, scanning rows then columns (stable).

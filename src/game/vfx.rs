@@ -2275,19 +2275,21 @@ pub fn emit_glue_tear_free(
 /// Sharp percussive snap flash, flying pine wood splinters, smashed cheese crumbs,
 /// and lateral floor dust kick when a mousetrap striker bar slams shut.
 ///
-/// Aligns with `art_traps::MOUSETRAP_SIZE` (`18×11 px`, strike zone at `+facing * 5.5`).
+/// Aligns with `art_traps::MOUSETRAP_SIZE` (wave 3: `40 × 24 px`, strike zone at
+/// the bait plate's own offset, `+facing * MOUSETRAP_TRIGGER_OFFSET_U`).
 pub fn emit_mousetrap_snap(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, facing: Vec2) {
     let base = safe_pos(pos);
     let dir = safe_dir(facing, Vec2::new(1.0, 0.0));
     let perp = dir.perp();
-    // Striker U-bar slams down onto the +facing bait end (`u ≈ +5.5..7.2`).
-    let impact = base + dir * 5.5;
+    // Striker U-bar slams down onto the +facing bait end, read from the art's
+    // own plate offset so a bigger trap splinters at the right spot.
+    let impact = base + dir * crate::game::art_traps::MOUSETRAP_TRIGGER_OFFSET_U;
 
     // 1. Sharp metallic snap shockwave & blinding bar-impact cross glint.
     ps.push_shockwave(Shockwave {
         pos: impact,
         start_r: 2.0,
-        end_r: 14.0,
+        end_r: 18.0,
         life: 0.17,
         max_life: 0.17,
         color: (255, 206, 108),
@@ -2333,7 +2335,7 @@ pub fn emit_mousetrap_snap(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, fa
         let sp = rng.random_range(52.0..96.0);
         let life = rng.random_range(0.28..0.46);
         ps.push(Particle {
-            pos: impact + perp * rng.random_range(-4.0..4.0),
+            pos: impact + perp * rng.random_range(-7.0..7.0),
             vel: Vec2::from_angle(a) * sp + Vec2::new(0.0, -20.0),
             life,
             max_life: life,

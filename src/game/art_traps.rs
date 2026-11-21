@@ -77,30 +77,92 @@ pub const STICKY_TRAP_HOLD_PLAYER_SECS: f32 = 1.6;
 pub const STICKY_TRAP_HOLD_SMALL_ENEMY_SECS: f32 = 2.5;
 pub const STICKY_TRAP_HOLD_BRUTE_SECS: f32 = 1.5;
 
+/// Glue **units** a board can hold at once (a crowd-control budget, not a body
+/// count: a Skitterer is 1 unit, a Cat 2, a Brute 4).
+///
+/// `STICKY_TRAP_SLOTS` is the same number of *bodies*: the whole capacity spent
+/// on the smallest bodies. Both are fixed, so the victim storage is a fixed-size
+/// array and the simulation allocates nothing per tick.
+pub const STICKY_TRAP_CAPACITY: u8 = 8;
+/// Fixed victim slots on one board (`STICKY_TRAP_CAPACITY` one-unit bodies).
+pub const STICKY_TRAP_SLOTS: usize = STICKY_TRAP_CAPACITY as usize;
+/// Glue units a board spends over its whole life before it is `Used`.
+///
+/// A catch costs the victim's units from this budget; the units are gone even
+/// after the victim tears free, so a fresh board pins a dozen to twenty small
+/// bodies before it is spent (8 units in one go at most).
+pub const STICKY_TRAP_BUDGET: u8 = 20;
+/// Glue units the rat takes (it no longer spends a whole board by itself).
+pub const STICKY_TRAP_RAT_UNITS: u8 = 2;
+/// Seconds a board ignores a body that just tore free of it, so a victim that
+/// is still standing on the pad cannot be caught again (a re-catch would burn
+/// the whole lifetime budget on one enemy).
+pub const STICKY_TRAP_RELEASE_GRACE_SECS: f32 = 1.2;
+/// How many torn-patch scars the art keeps (where victims pulled free).
+pub const STICKY_TRAP_TEARS: usize = 6;
+
+
 /// Full wooden baseboard footprint of a mousetrap (`u` length × `v` width).
+///
+/// Wave 3 made the snap trap roughly twice the old `18 × 11` board: a real
+/// spring trap next to a rat, with the striker bar's swing covering most of the
+/// deck. Every trigger/kill/art extent below is measured from this one pair of
+/// numbers, so the drawn board, the plate and the kill zone cannot drift.
 /// `+facing` (`+u`) is the baited kill end; `-facing` (`-u`) holds the cocked bar.
-pub const MOUSETRAP_SIZE: Vec2 = Vec2 { x: 18.0, y: 11.0 };
+pub const MOUSETRAP_SIZE: Vec2 = Vec2 { x: 40.0, y: 24.0 };
 /// Mousetraps do not block movement.
 pub const MOUSETRAP_BLOCKS_MOVEMENT: bool = false;
 /// Center offset along `+facing` of the copper bait trigger plate.
-pub const MOUSETRAP_TRIGGER_OFFSET_U: f32 = 3.5;
+pub const MOUSETRAP_TRIGGER_OFFSET_U: f32 = 8.0;
 /// Circular trigger radius around `pos + facing * MOUSETRAP_TRIGGER_OFFSET_U`.
-pub const MOUSETRAP_TRIGGER_RADIUS: f32 = 4.5;
-/// Dangerous snap-hit box along local `u` (`-1.0..=9.5`) and `|v| <= 6.0`.
-pub const MOUSETRAP_KILL_U_MIN: f32 = -1.0;
-pub const MOUSETRAP_KILL_U_MAX: f32 = 9.5;
-pub const MOUSETRAP_KILL_HALF_V: f32 = 6.0;
-/// Warning duration before the striker bar slams shut (seconds).
-pub const MOUSETRAP_TRIGGER_SECS: f32 = 0.28;
+pub const MOUSETRAP_TRIGGER_RADIUS: f32 = 6.5;
+/// Dangerous snap-hit box along local `u` (`-4.0..=18.0`) and `|v| <= 10.0`: the
+/// area the striker bar covers when it lands, inset from the board's `20 × 12`
+/// half-extents so a rat at the very rim survives.
+pub const MOUSETRAP_KILL_U_MIN: f32 = -4.0;
+pub const MOUSETRAP_KILL_U_MAX: f32 = 18.0;
+pub const MOUSETRAP_KILL_HALF_V: f32 = 10.0;
+/// Warning duration of an **ordinary** trap before the striker bar slams shut
+/// (seconds).
+///
+/// The bar's damage lands at `MOUSETRAP_HIT_PROGRESS_MIN` of the `0.20 s`
+/// swing, so the rat's real window from touching the plate to the bite is
+/// `0.18 + 0.08 = 0.26 s`: a walking rat covers ~15 px and cannot clear the
+/// `22 × 20` kill rect from the plate, while a dash (`3.2 ×` speed) is already
+/// 48 px away. The pre-wave-3 trap warned for `0.28 s`, which a walking rat
+/// *could* survive on the bigger board — this is the "slightly tighter" value
+/// the wave-3 brief allows.
+pub const MOUSETRAP_TRIGGER_SECS: f32 = 0.18;
 /// Total snap swing + impact animation duration (seconds).
+///
+/// A hair-trigger snap resolves its damage on the touch tick and then plays this
+/// swing for the eye: the bar is already on its way when the noise starts.
 pub const MOUSETRAP_SNAP_SECS: f32 = 0.20;
 /// Active damage window within `MousetrapState::Snapping` (`progress` range).
 pub const MOUSETRAP_HIT_PROGRESS_MIN: f32 = 0.40;
 pub const MOUSETRAP_HIT_PROGRESS_MAX: f32 = 0.65;
-/// Damage dealt by a mousetrap snap (player has 100 HP; Skitterer 6, Brute 22).
-pub const MOUSETRAP_DAMAGE_PLAYER: f32 = 20.0;
-/// Heavy damage dealt to enemies so luring Cats/Brutes into traps is rewarding.
+/// Damage dealt by an **ordinary** snap, as a share of the rat's max HP.
+///
+/// Before wave 3 this was a flat 20 (a knock, not a threat). Trap damage reads
+/// as a share of the pool so it keeps biting late builds, and only half of the
+/// rat's flat armour applies to it (a spring bar does not care about a thick
+/// hide) — see `traps::snap_player_damage`.
+pub const MOUSETRAP_DAMAGE_PLAYER_SHARE: f32 = 0.35;
+/// Damage dealt by a **hair-trigger** snap (share of the rat's max HP).
+///
+/// Never 1.0: no trap may take a rat from full health in one hit, however thin
+/// the build. `0.65` leaves 35 % and a decision to make.
+pub const MOUSETRAP_DAMAGE_PLAYER_HAIR_SHARE: f32 = 0.65;
+/// Share of the rat's flat armour a snap ignores (half).
+pub const MOUSETRAP_ARMOUR_IGNORED: f32 = 0.5;
+/// Heavy damage dealt to enemies so luring Cats/Brutes into traps is rewarding
+/// (a Brute at 1× is 60 HP: one ordinary bar kills it outright).
 pub const MOUSETRAP_DAMAGE_ENEMY: f32 = 80.0;
+/// Hair-trigger bar damage to ground enemies: enough to kill a Brute three times
+/// over and to chunk a named miniboss in one hit.
+pub const MOUSETRAP_DAMAGE_ENEMY_HAIR: f32 = 150.0;
+/// Plate radius the rat must touch to take the bait (its centre inside it).
+pub const MOUSETRAP_BAIT_TAKE_RADIUS: f32 = 7.0;
 
 /// Full wall-slot footprint of a one-way door (`u` wall thickness × `v` span).
 /// `+facing` (`+u`) is the EXIT side; `-facing` (`-u`) is the maze-interior ENTRY side.
@@ -191,35 +253,97 @@ pub enum StickyTrapState {
     ///   dash clears the pad without sticking).
     Idle,
 
-    /// A victim (player rat or ground enemy) is bogged down in the adhesive,
-    /// pulling stretching glue strands as they struggle free.
+    /// **One or more** victims (the player rat and/or ground enemies) are bogged
+    /// down in the adhesive, pulling stretching glue strands as they struggle
+    /// free.
     ///
+    /// - **Capacity**: a board holds [`STICKY_TRAP_CAPACITY`] (8) glue *units*
+    ///   at once — a Skitterer 1, a Cat 2, a Brute 4 — and a lifetime budget of
+    ///   [`STICKY_TRAP_BUDGET`] (20) units, so it pins a dozen to twenty small
+    ///   bodies over its life. `victims` carries one entry per fixed pad slot
+    ///   (the sim pins each ground victim to its slot).
     /// - **Duration**: `1.6s` for the player rat (`STICKY_TRAP_HOLD_PLAYER_SECS`),
     ///   `2.5s` for Skitterers/Cats/Spitters (`STICKY_TRAP_HOLD_SMALL_ENEMY_SECS`),
-    ///   `1.5s` for Brutes (`STICKY_TRAP_HOLD_BRUTE_SECS`), or `0.8s` at 40%
-    ///   slow on bosses. `progress` advances `0.0 -> 1.0` over the hold duration,
-    ///   then transitions to `Used` as the strands snap.
+    ///   `1.5s` for Brutes (`STICKY_TRAP_HOLD_BRUTE_SECS`), each after its own
+    ///   catch; then that victim tears free and its capacity comes back (its
+    ///   spent glue does not). `progress` is the most-progressed victim's hold.
+    ///   Bosses and named minibosses are only slowed while crossing (`0.8s` at
+    ///   40 %) and never enter this state.
     /// - **Warning / Readability**: Disturbed rippled glue pool with thick
-    ///   glistening amber-ivory strands anchoring the board to `victim_pos`;
-    ///   strands elongate, thin, vibrate, and snap into beads past `progress > 0.78`.
-    /// - **Active area**: Affects the currently caught entity (does not double-root
-    ///   a second victim while occupied; implementers may apply a mild 40% slow
-    ///   to bystanders crossing the pad).
-    /// - **Effect & Damage**: Reduces victim movement speed to `20%`
+    ///   glistening amber-ivory strands anchoring the board to each victim, and
+    ///   a tinted glue mound under every sunk body so the load reads at a
+    ///   glance; strands elongate, thin, vibrate, and snap past `progress > 0.78`.
+    /// - **Active area**: every body on the pad that fits the room left. A body
+    ///   too big for the room (or arriving once the budget is gone) is only
+    ///   slowed while it crosses.
+    /// - **Effect & Damage**: Holds each victim at `20%` movement
     ///   (`STICKY_TRAP_SLOW_MULT`) and deals `0` direct damage.
     /// - **Counter**: Pressing **Dash** immediately breaks the player free
-    ///   (jumping `progress` to `1.0` -> `Used` and spending dash cooldown).
-    ///   Conversely, players can lure fast Cats or tough Brutes onto idle glue
-    ///   boards to pin them under sustained weapon fire.
+    ///   (spending dash cooldown; the board keeps its remaining glue), and Clean
+    ///   Socks ignore the pad entirely. Conversely, players can lure a whole
+    ///   pack onto a board and kill it there.
     Stuck,
 
-    /// Spent, torn, dusty glue board after a victim has broken free.
+    /// Spent, torn, dusty glue board: its lifetime glue budget is gone **and**
+    /// its last victim has left.
     ///
     /// - **Duration**: Permanent floor decal (or optional fade after `30.0s`).
     /// - **Visuals**: Scuffed/bent cardboard rim, matte gray-tan torn adhesive
     ///   with lint flecks and short curled stub strands — no wet gloss.
     /// - **Active area / Damage**: None (completely harmless).
     Used,
+}
+
+/// How big a stuck body reads on the pad. The art uses it for the glue mound
+/// the victim is sunk into (a Brute lump is visibly wider than a Skitterer's),
+/// and the simulation uses it to size a victim's own pad slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StickyVictimKind {
+    /// The player rat (`3.0` body radius).
+    Rat,
+    /// Skitterer / Bell Flea / small bodies (`1` glue unit).
+    Small,
+    /// Cat / Spitter / Pillbug / Porter / Turnkey (`2` glue units).
+    Medium,
+    /// Brute and elites (`4` glue units).
+    Big,
+}
+
+impl StickyVictimKind {
+    /// Drawn body radius on the pad, in world px.
+    pub fn body_radius(self) -> f32 {
+        match self {
+            StickyVictimKind::Rat => 3.2,
+            StickyVictimKind::Small => 2.6,
+            StickyVictimKind::Medium => 4.2,
+            StickyVictimKind::Big => 6.5,
+        }
+    }
+
+    /// Width of the glue mound the body is sunk into.
+    pub fn mound_radius(self) -> f32 {
+        self.body_radius() + 1.6
+    }
+}
+
+/// One body currently stuck on a glue board, drawn at its own pad slot.
+///
+/// The sim writes these; the art reads them. `pos` is the slot position (the
+/// sim pins ground victims there) so the load is stable and the drawing has no
+/// ties to break.
+#[derive(Clone, Copy, Debug)]
+pub struct StickyVictimView {
+    /// World-space slot position on the pad.
+    pub pos: Vec2,
+    /// Collision radius of the body (strands anchor onto its flanks).
+    pub radius: f32,
+    /// Body class, for the drawn silhouette/mound size.
+    pub kind: StickyVictimKind,
+    /// The victim's own colour (`EnemyKind::color`, or a rat tone), so a
+    /// Skitterer and a Brute read apart by hue as well as by size.
+    pub color: Rgb,
+    /// `0.0..=1.0` through this victim's own hold (its strand stretch driver).
+    pub progress: f32,
 }
 
 /// View data required to draw a sticky trap. `Copy` and simulation-independent.
@@ -232,16 +356,30 @@ pub struct StickyTrapView {
     /// Current trap state.
     pub state: StickyTrapState,
     /// Normalized progress `0.0..=1.0` through the current state (used in `Stuck`
-    /// to stretch and snap strands).
+    /// to stretch and snap strands: the *most-progressed* victim's hold).
     pub progress: f32,
     /// Monotonic clock in seconds for specular gloss drift and strand quiver.
     pub anim: f32,
-    /// World-space position of the currently stuck victim (used in `Stuck`).
-    /// If equal to `pos`, strands radiate gently from the board center.
+    /// World-space position of the primary (most-progressed) stuck victim (used
+    /// in `Stuck`). If equal to `pos`, strands radiate gently from the board
+    /// center.
     pub victim_pos: Vec2,
-    /// Collision radius of the stuck victim (e.g. `3.0` rat, `6.5` Brute) so
-    /// strands anchor cleanly onto its flanks.
+    /// Collision radius of the primary stuck victim (e.g. `3.0` rat, `6.5`
+    /// Brute) so strands anchor cleanly onto its flanks.
     pub victim_radius: f32,
+    /// Glue units currently held (`0..=STICKY_TRAP_CAPACITY`).
+    pub load: u8,
+    /// Share of the lifetime glue budget already spent, `0.0` fresh to `1.0`
+    /// spent: drives the sheen fading, the coverage going patchy and the debris.
+    pub worn: f32,
+    /// The bodies currently stuck, one per fixed slot (holes are `None`). Slot
+    /// index is the body's pad slot, so a position never moves mid-hold.
+    pub victims: [Option<StickyVictimView>; STICKY_TRAP_SLOTS],
+    /// Where glue was torn away by victims pulling free (ring buffer, world
+    /// space); the art draws a ripped scar at each.
+    pub tears: [Vec2; STICKY_TRAP_TEARS],
+    /// How many entries of `tears` are live (`0..=STICKY_TRAP_TEARS`).
+    pub tear_n: u8,
 }
 
 impl StickyTrapView {
@@ -254,6 +392,28 @@ impl StickyTrapView {
             anim: 0.0,
             victim_pos: pos,
             victim_radius: 3.0,
+            load: 0,
+            worn: 0.0,
+            victims: [None; STICKY_TRAP_SLOTS],
+            tears: [pos; STICKY_TRAP_TEARS],
+            tear_n: 0,
+        }
+    }
+
+    /// Push a torn-glue scar (a victim pulled free of this spot).
+    pub fn add_tear(&mut self, at: Vec2) {
+        let n = STICKY_TRAP_TEARS;
+        if (self.tear_n as usize) < n {
+            self.tears[self.tear_n as usize] = at;
+            self.tear_n += 1;
+        } else {
+            // Full: overwrite the oldest (the ring shifts down by one).
+            let mut i = 1;
+            while i < n {
+                self.tears[i - 1] = self.tears[i];
+                i += 1;
+            }
+            self.tears[n - 1] = at;
         }
     }
 }
@@ -268,27 +428,35 @@ pub enum MousetrapState {
     /// Cocked and baited with a golden wedge of cheese on the `+facing` end.
     ///
     /// - **Duration**: Indefinite until any ground entity (player rat, Skitterer,
-    ///   Cat, Spitter, or Brute; Bats fly over) enters the trigger zone.
-    /// - **Warning**: Warm pine board, gleaming taut steel U-bar cocked back on
-    ///   `-facing`, coiled torsion spring, and bright yellow cheese bait on `+facing`.
-    /// - **Trigger area**: Circle of radius `4.5` (`MOUSETRAP_TRIGGER_RADIUS`)
-    ///   centered at `pos + facing * 3.5` (`MOUSETRAP_TRIGGER_OFFSET_U`).
+    ///   Cat, Spitter, or Brute; Bats fly over) touches the trigger plate.
+    /// - **Warning**: Warm pine `40 × 24` board, gleaming taut steel U-bar cocked
+    ///   back on `-facing`, coiled torsion spring, and the **bait** on `+facing`
+    ///   (cheese, a good floor pickup, or a small chest — level data, see
+    ///   [`TrapBait`]). A hair trigger ([`MousetrapKind::HairTrigger`]) shows a
+    ///   thin quivering filed wire catch and a red-painted bar instead.
+    /// - **Trigger area**: Circle of radius `6.5` (`MOUSETRAP_TRIGGER_RADIUS`)
+    ///   centered at `pos + facing * 8.0` (`MOUSETRAP_TRIGGER_OFFSET_U`).
     ///   Does NOT block movement.
+    /// - **Bait**: the rat's touch collects it through the normal pickup / chest
+    ///   path and springs the trap in the same tick.
     /// - **Damage**: `0` while armed.
-    /// - **Counter**: Walk around, or dash across the bait to intentionally
-    ///   spring the trap behind you against pursuing enemies.
+    /// - **Counter**: Walk around, or dash across the bait to take the reward
+    ///   and leave the bar behind you against pursuing enemies.
     Armed,
 
     /// Hairline pre-snap telegraph: the copper bait pedal has dipped and the
     /// cocked steel striker bar shudders violently before releasing.
     ///
-    /// - **Duration**: `0.28s` (`MOUSETRAP_TRIGGER_SECS`), advancing `progress`
-    ///   `0.0 -> 1.0`, then immediately entering `Snapping`.
+    /// - **Duration**: `0.18s` (`MOUSETRAP_TRIGGER_SECS`), advancing `progress`
+    ///   `0.0 -> 1.0`, then immediately entering `Snapping`. A **hair trigger**
+    ///   never enters this state: its bar resolves on the touch tick.
     /// - **Warning**: High-frequency jitter of the cocked steel bar, bright
     ///   spring tension sparks, and a pulsing crimson-amber ground danger bracket
-    ///   marking the exact `+facing` kill rectangle (`u in [-1.0, 9.5], |v| <= 6.0`).
-    /// - **Damage**: `0` during warning (fair reaction window: at 58 px/s the rat
-    ///   can walk ~16 px or dash clear; slow Brutes at 16 px/s cannot escape).
+    ///   marking the exact `+facing` kill rectangle
+    ///   (`u in [-4.0, 18.0], |v| <= 10.0`, `MOUSETRAP_KILL_*`).
+    /// - **Damage**: `0` during warning. The rat's real window from plate to bite
+    ///   is `0.18 + 0.08 = 0.26 s`: a walk covers ~15 px (still inside the rect),
+    ///   a dash (`3.2 ×` speed) is 48 px away.
     /// - **Counter**: Step clear of the `+facing` kill rectangle or Dash.
     Triggered,
 
@@ -298,14 +466,18 @@ pub enum MousetrapState {
     /// - **Duration**: `0.20s` (`MOUSETRAP_SNAP_SECS`), advancing `progress`
     ///   `0.0 -> 1.0`, then transitioning to `Sprung`.
     /// - **Active hit window**: `progress` in `0.40..=0.65` (impact moment; each
-    ///   overlapping entity is damaged at most once).
-    /// - **Dangerous area**: Oriented rectangle `u in [-1.0, 9.5]`, `|v| <= 6.0`
-    ///   relative to `pos` and `facing`.
+    ///   overlapping entity is damaged at most once). A hair trigger resolved its
+    ///   damage already and never hits again.
+    /// - **Dangerous area**: Oriented rectangle `u in [-4.0, 18.0]`, `|v| <= 10.0`
+    ///   relative to `pos` and `facing` (`MOUSETRAP_KILL_*`).
     /// - **Damage**:
-    ///   - Player rat: **`20` damage** (comparable to a Brute's `22` on 100 HP)
-    ///     plus `0.25s` brief stagger/knockback.
-    ///   - Ground enemies: **`80` damage** (one-shots Skitterers/Cats/Spitters,
-    ///     devastates Brutes) plus `0.6s` stun/knockback.
+    ///   - Player rat: a share of its own pool — `35 %` ordinary
+    ///     (`MOUSETRAP_DAMAGE_PLAYER_SHARE`), `65 %` hair trigger
+    ///     (`MOUSETRAP_DAMAGE_PLAYER_HAIR_SHARE`) — with **half** its flat armour
+    ///     ignored and never a one-shot from full health.
+    ///   - Ground enemies: `80` damage ordinary (`MOUSETRAP_DAMAGE_ENEMY`), `150`
+    ///     hair trigger (`MOUSETRAP_DAMAGE_ENEMY_HAIR`): a Brute dies to either
+    ///     bar and a named miniboss takes a real chunk, once per snap.
     /// - **Counter**: Dash i-frames or exit the kill zone during `Triggered`.
     Snapping,
 
@@ -316,6 +488,71 @@ pub enum MousetrapState {
     ///   cheese smashed into scattered crumbs, subdued contrast.
     /// - **Active area / Damage**: None.
     Sprung,
+}
+
+/// Which bar a set mousetrap carries. **Readable before committing**: a
+/// hair-trigger trap has a thin filed wire catch and a red-painted bar, and it
+/// resolves its damage on the touch tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MousetrapKind {
+    /// The ordinary trap: a `0.18 s` reaction window after the plate is touched,
+    /// then a hard but survivable bar.
+    Ordinary,
+    /// No window at all: the bar lands on the tick the plate is touched, so
+    /// only a dash that is already under way (its i-frames) gets through.
+    HairTrigger,
+}
+
+impl MousetrapKind {
+    /// Is this the instant kind?
+    #[inline]
+    pub fn hair(self) -> bool {
+        matches!(self, MousetrapKind::HairTrigger)
+    }
+
+    /// Warning after the plate is touched, in seconds (`0.0` = instant).
+    #[inline]
+    pub fn reaction_secs(self) -> f32 {
+        match self {
+            MousetrapKind::Ordinary => MOUSETRAP_TRIGGER_SECS,
+            MousetrapKind::HairTrigger => 0.0,
+        }
+    }
+}
+
+/// What sits on a set mousetrap's trigger plate.
+///
+/// Level data (chosen once at generation from the level's own seeded stream),
+/// never rolled at runtime: the player can read the bait from a distance and
+/// decide whether the trap is worth the risk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrapBait {
+    /// Nothing but a crumb of cheese, exactly like the old trap. Sprung for the
+    /// fun of it (enemies still set it off); taking it is free of reward.
+    Cheese,
+    /// A floor pickup, collected through the normal pickup path (minimap tag,
+    /// HUD callout and effect all come from that one place).
+    Pickup(crate::game::gem::PickupKind),
+    /// A miniboss chest: collecting it raises `pending_chests`, so it opens the
+    /// normal chest card (and can evolve a weapon).
+    Chest,
+}
+
+impl TrapBait {
+    /// Worth dashing through an ordinary trap for?
+    #[inline]
+    pub fn is_good(self) -> bool {
+        !matches!(self, TrapBait::Cheese)
+    }
+
+    /// The label the HUD's telemetry / the minimap blip uses.
+    pub fn label(self) -> &'static str {
+        match self {
+            TrapBait::Cheese => "CHEESE",
+            TrapBait::Pickup(kind) => kind.label(),
+            TrapBait::Chest => "CHEST",
+        }
+    }
 }
 
 /// View data required to draw a wooden snap mousetrap. `Copy` and decoupled.
@@ -334,10 +571,23 @@ pub struct MousetrapView {
     pub anim: f32,
     /// Optional `0.0..=1.0` flash intensity (e.g. when a victim is struck).
     pub hit_flash: f32,
+    /// Ordinary bar or hair-trigger (level data, never rolled at runtime).
+    pub kind: MousetrapKind,
+    /// What sits on the plate while it is set (level data).
+    pub bait: TrapBait,
+    /// The rat has taken the bait (it stays lying on a sprung trap).
+    pub bait_taken: bool,
 }
 
 impl MousetrapView {
+    /// An ordinary trap baited with cheese, exactly like the pre-wave-3 trap
+    /// (`MousetrapView::new` keeps every old call site and test honest).
     pub fn new(pos: Vec2, facing: Vec2) -> Self {
+        Self::baited(pos, facing, MousetrapKind::Ordinary, TrapBait::Cheese)
+    }
+
+    /// A trap with its generated kind and bait.
+    pub fn baited(pos: Vec2, facing: Vec2, kind: MousetrapKind, bait: TrapBait) -> Self {
         Self {
             pos,
             facing,
@@ -345,7 +595,19 @@ impl MousetrapView {
             progress: 0.0,
             anim: 0.0,
             hit_flash: 0.0,
+            kind,
+            bait,
+            bait_taken: false,
         }
+    }
+
+    /// Is this trap still set (or mid-snap) and therefore dangerous?
+    #[inline]
+    pub fn live(&self) -> bool {
+        matches!(
+            self.state,
+            MousetrapState::Armed | MousetrapState::Triggered | MousetrapState::Snapping
+        )
     }
 }
 
@@ -946,6 +1208,16 @@ fn draw_metal_bar(
 /// `30 × 22` amber adhesive pool (glossy drifting sheen + trapped debris in
 /// `Idle`, disturbed ripples, base glue bridges & a caught struggling bug in
 /// `Stuck`, matte dusty torn glue & peeled dog-ear flap in `Used`).
+///
+/// Wave 3: the board is a **crowd** tool, so this layer also reads its load and
+/// its wear from a glance:
+///
+/// - every currently stuck body gets a glue mound of its own class size and its
+///   own colour at its fixed pad slot (a Brute lump is visibly wider than a
+///   Skitterer's), under the body sprite the enemy layer draws on top;
+/// - `worn` (the share of the lifetime glue budget already spent) fades the
+///   wet sheen, breaks the coverage into drier patches, and adds grit;
+/// - every place a victim pulled free keeps a ripped scar (`tears`).
 pub fn draw_sticky_trap_ground(
     pb: &mut PixelBuffer,
     view: &StickyTrapView,
@@ -962,6 +1234,8 @@ pub fn draw_sticky_trap_ground(
     let px = STICKY_TRAP_PAD_HALF.x; // 15.0
     let py = STICKY_TRAP_PAD_HALF.y; // 11.0
     let prog = clamp01(view.progress);
+    // Share of the lifetime glue budget already spent (0 fresh, 1 spent).
+    let worn = clamp01(view.worn);
 
     let (tray_base, tray_hi, tray_lo, outline) = match view.state {
         StickyTrapState::Used => ((124, 114, 98), (154, 142, 122), (68, 60, 50), (26, 22, 18)),
@@ -1111,6 +1385,9 @@ pub fn draw_sticky_trap_ground(
             let iu = (u * 1.25).round() as i32;
             let iv = (v * 1.25).round() as i32;
             let grain = hash_f32(iu + (seed as i32 & 31), iv + ((seed >> 5) as i32 & 31));
+            // Spent glue leaves dry, crusted patches: the wet coverage breaks up
+            // as the lifetime budget goes, so "nearly spent" reads at a glance.
+            let dry = grain + 0.78 - worn * 1.45 < 0.0;
 
             // Meniscus edge darkness where thick glue pools against the tray walls.
             let edge_depth = (-d_pad / 2.6).clamp(0.0, 1.0);
@@ -1130,22 +1407,25 @@ pub fn draw_sticky_trap_ground(
                 StickyTrapState::Idle => {
                     let mut c = shade3(glue_dark, glue_mid, glue_hi, lum_base);
                     // Wet diagonal specular sheen drifting smoothly across the glossy glue.
+                    // The sheen fades with the spent glue budget: a nearly dry board
+                    // barely glints.
+                    let sheen = 1.0 - 0.88 * worn;
                     let diag = (u * 0.68 + v * 0.88) - sheen_phase;
                     let band1 = (1.0 - (diag.abs() / 2.55)).clamp(0.0, 1.0);
                     let band2 = (1.0 - ((diag + 5.8).abs() / 1.35)).clamp(0.0, 1.0) * 0.48;
-                    let spec = (band1 * band1 + band2).clamp(0.0, 1.0);
+                    let spec = (band1 * band1 + band2).clamp(0.0, 1.0) * sheen;
                     c = mix(c, glue_hi, spec * 0.76);
-                    if band1 > 0.74 && edge_depth > 0.30 {
-                        c = mix(c, (255, 255, 246), 0.84);
+                    if band1 > 0.74 && edge_depth > 0.30 && worn < 0.55 {
+                        c = mix(c, (255, 255, 246), 0.84 - worn);
                     }
                     // Syrupy curved meniscus highlight tucked cleanly inside the top-left corner.
                     let near_tl = u < -px + 4.4 && v < -py + 3.8;
                     let on_curve = u > -px + 1.0 && v > -py + 1.0;
-                    if near_tl && on_curve && (u + px < 2.1 || v + py < 2.0) {
-                        c = mix(c, (255, 252, 232), 0.58);
+                    if near_tl && on_curve && (u + px < 2.1 || v + py < 2.0) && worn < 0.8 {
+                        c = mix(c, (255, 252, 232), 0.58 * (1.0 - worn));
                     }
                     // Tiny trapped air bubble specular highlights in the amber glue.
-                    if grain > 0.962 && edge_depth > 0.35 {
+                    if grain > 0.962 && edge_depth > 0.35 && worn < 0.7 {
                         c = mix(c, (255, 250, 224), 0.65);
                     }
                     c
@@ -1191,7 +1471,17 @@ pub fn draw_sticky_trap_ground(
 
             // Slight wet rim highlight on bottom-right inner wall (bounced light).
             if view.state != StickyTrapState::Used && (u > px - 1.4 || v > py - 1.4) {
-                col = mix(col, glue_hi, 0.28);
+                col = mix(col, glue_hi, 0.28 * (1.0 - 0.7 * worn));
+            }
+
+            // A dry patch shows the tray underneath, ringed with a crust of old glue.
+            if dry && view.state != StickyTrapState::Used {
+                let crust = hash_f32(iu + 7, iv - 3) < 0.35;
+                col = if crust {
+                    mix(col, (134, 108, 74), 0.62)
+                } else {
+                    mix(tray_base, (176, 162, 138), 0.42)
+                };
             }
 
             pb.plot(x, y, col);
@@ -1199,23 +1489,31 @@ pub fn draw_sticky_trap_ground(
     }
 
     // Embedded stuck debris on the bigger 30×22 glue canvas (lint fiber, specks,
-    // tiny dead gnat) — gives every board grounded floor texture.
-    draw_sticky_debris(pb, &fr, seed, view.state);
+    // tiny dead gnat) — gives every board grounded floor texture, and it
+    // accumulates as the board wears out.
+    draw_sticky_debris(pb, &fr, seed, view.state, worn);
 
-    // Caught bug detail: squirming glazed beetle in Stuck, matte dried remains in Used.
-    if view.state != StickyTrapState::Idle {
-        // Place the caught bug in a corner pocket opposite the victim's pull so it
-        // stays cleanly visible beside the strands and struggling victim.
-        let bug_u = if view.state == StickyTrapState::Stuck && pull_u < -1.5 {
-            9.2
-        } else {
-            -9.2
-        };
-        let bug_v = if view.state == StickyTrapState::Stuck && pull_v < -1.0 {
-            5.8
-        } else {
-            -5.8
-        };
+    // Torn glue scars: one per victim that pulled free, a ragged hole ringed
+    // with dried strands (drawn after the pool so they read over it).
+    for k in 0..(view.tear_n as usize).min(STICKY_TRAP_TEARS) {
+        draw_sticky_tear(pb, &fr, view.tears[k], seed, k as i32);
+    }
+
+    // The load: one glue mound per stuck body, sized and tinted by its kind, at
+    // its fixed pad slot. The body's own sprite is drawn later by the enemy
+    // layer, so this is the glue it is sunk into — the widest thing it must
+    // read through is the body itself.
+    for slot in 0..STICKY_TRAP_SLOTS {
+        if let Some(v) = view.victims[slot] {
+            draw_sticky_victim_mound(pb, &fr, &v, view.anim, slot as u32);
+        }
+    }
+
+    // Dried remains of the board's long-dead first catch, in Used only (the
+    // live victims are drawn as mounds above).
+    if view.state == StickyTrapState::Used {
+        let bug_u = if pull_u < -1.5 { 9.2 } else { -9.2 };
+        let bug_v = if pull_v < -1.0 { 5.8 } else { -5.8 };
         draw_caught_bug(pb, &fr, bug_u, bug_v, view.anim, view.state);
     }
 
@@ -1234,36 +1532,148 @@ pub fn draw_sticky_trap_ground(
     }
 
     // In Stuck state, draw rich shadowed base glue strings bridging off the board
-    // over the dark floor toward the struggling victim (routed clear of the caught bug).
+    // over the dark floor toward **each** struggling victim (routed clear of the
+    // caught bug). One bundle per slot, in slot order, so the drawing has no
+    // tie to break.
     if view.state == StickyTrapState::Stuck {
-        let vp = sticky_effective_victim(view, &fr);
-        let fade = (1.0 - (prog - 0.85).max(0.0) / 0.15).clamp(0.0, 1.0);
-        let su = if pull_u < -1.5 { -1.0 } else { 1.0 };
-        let sv = if pull_v < -1.0 { -1.0 } else { 1.0 };
-        for &(au, av, sag) in &[
-            (-9.2 * su, 6.8 * sv, -1.9),
-            (-3.2 * su, -6.8 * sv, 1.7),
-            (3.2 * su, 6.4 * sv, -1.3),
-            (6.0 * su, -4.8 * sv, 1.1),
-        ] {
-            let anchor = fr.place(au, av);
-            draw_strand_curve(
-                pb,
-                anchor,
-                vp,
-                sag * (1.0 - prog * 0.45),
-                1.45,
-                (238, 220, 152),
-                (58, 38, 14),
-                0.90 * fade,
-            );
+        for slot in 0..STICKY_TRAP_SLOTS {
+            let Some(victim) = view.victims[slot] else {
+                continue;
+            };
+            let vp = sticky_victim_screen(&fr, &victim);
+            let vprog = clamp01(victim.progress);
+            let fade = (1.0 - (vprog - 0.85).max(0.0) / 0.15).clamp(0.0, 1.0);
+            let su = if pull_u < -1.5 { -1.0 } else { 1.0 };
+            let sv = if pull_v < -1.0 { -1.0 } else { 1.0 };
+            for &(au, av, sag) in &[
+                (-9.2 * su, 6.8 * sv, -1.9),
+                (-3.2 * su, -6.8 * sv, 1.7),
+                (3.2 * su, 6.4 * sv, -1.3),
+                (6.0 * su, -4.8 * sv, 1.1),
+            ] {
+                let anchor = fr.place(au, av);
+                draw_strand_curve(
+                    pb,
+                    anchor,
+                    vp,
+                    sag * (1.0 - vprog * 0.45),
+                    1.45,
+                    (238, 220, 152),
+                    (58, 38, 14),
+                    0.90 * fade,
+                );
+            }
         }
+    }
+}
+
+/// One ragged, dried glue scar where a victim tore free of the pad.
+///
+/// `at` is world space; the scar is a small dark hole with pale torn fibres and
+/// a crust ring, so a board that has caught a lot reads its history on the
+/// floor even between waves.
+fn draw_sticky_tear(pb: &mut PixelBuffer, fr: &Frame, at: Vec2, seed: u32, idx: i32) {
+    let d = at - fr.pos;
+    let (u, v) = (d.dot(fr.f), d.dot(fr.p));
+    let px = STICKY_TRAP_PAD_HALF.x;
+    let py = STICKY_TRAP_PAD_HALF.y;
+    if u.abs() > px || v.abs() > py {
+        return;
+    }
+    let r = 2.3 + (hash_f32(idx + (seed as i32 & 15), 5) - 0.5) * 0.8;
+    let (cx, cy) = fr.px(u, v);
+    let reach = (r + 2.0).ceil() as i32;
+    for dy in -reach..=reach {
+        for dx in -reach..=reach {
+            let fx = dx as f32;
+            let fy = dy as f32;
+            let dist = (fx * fx + fy * fy).sqrt();
+            let ang = fy.atan2(fx);
+            let ragged = 0.75 + 0.45 * ((ang * 3.0 + idx as f32).sin() * 0.5 + 0.5);
+            let x = cx + dx;
+            let y = cy + dy;
+            if dist <= r * ragged {
+                // The hole: dry cardboard floor underneath, very dark at the rim.
+                if dist > r * ragged - 0.9 {
+                    blend_px(pb, x, y, (58, 46, 30), 0.85);
+                } else {
+                    blend_px(pb, x, y, (34, 28, 20), 0.9);
+                }
+            } else if dist <= r * ragged + 1.2 {
+                // Crust ring of dried glue and pale torn fibres.
+                let fibre = hash_f32(dx + idx * 7, dy - idx * 3);
+                let col = if fibre > 0.55 {
+                    (238, 222, 176)
+                } else {
+                    (156, 126, 74)
+                };
+                blend_px(pb, x, y, col, 0.72);
+            }
+        }
+    }
+}
+
+/// The glue mound one stuck body is sunk into: a class-sized, victim-tinted
+/// crater ring with a meniscus and a ring of bubbles, so a Brute reads bigger
+/// and a Spitter reads greener than the Skitterer next to it. Drawn before the
+/// body sprite, so it reads as the glue around and behind the body.
+fn draw_sticky_victim_mound(
+    pb: &mut PixelBuffer,
+    fr: &Frame,
+    victim: &StickyVictimView,
+    anim: f32,
+    slot: u32,
+) {
+    let r = victim.kind.mound_radius();
+    let d = victim.pos - fr.pos;
+    let (u, v) = (d.dot(fr.f), d.dot(fr.p));
+    let (cx, cy) = fr.px(u, v);
+    let reach = (r + 1.5).ceil() as i32;
+    // The victim's own colour, dragged into the amber so it still reads as
+    // glue: a green Spitter and a red Brute stay apart at a glance.
+    let tint = mix((196, 154, 74), victim.color, 0.55);
+    let ring = mix((250, 224, 150), victim.color, 0.30);
+    let pulse = 0.5 + 0.5 * (anim * 5.0 + slot as f32 * 1.7).sin();
+    for dy in -reach..=reach {
+        for dx in -reach..=reach {
+            let fx = dx as f32;
+            let fy = dy as f32;
+            let dist = (fx * fx + fy * fy).sqrt();
+            let x = cx + dx;
+            let y = cy + dy;
+            if dist <= r * 0.62 {
+                // Body-shaped shadow: the body itself is drawn on top of this.
+                blend_px(pb, x, y, mix((44, 30, 12), victim.color, 0.22), 0.55);
+            } else if dist <= r {
+                blend_px(pb, x, y, tint, 0.42 + 0.10 * pulse);
+            } else if dist <= r + 1.1 {
+                // Wet meniscus lip catching the light around the sunken body.
+                blend_px(pb, x, y, ring, 0.62);
+            }
+        }
+    }
+    // A couple of bubbles pushed up around the struggling body.
+    for k in 0..3 {
+        let a = anim * 2.2 + slot as f32 * 2.0 + k as f32 * 2.1;
+        let bu = u + a.cos() * (r - 0.4);
+        let bv = v + a.sin() * (r - 0.4);
+        let (bx, by) = fr.px(bu, bv);
+        blend_px(pb, bx, by, (255, 246, 206), 0.55);
     }
 }
 
 /// Draw subtle embedded floor debris (stray lint fiber, tiny crumbs, micro gnat
 /// speck) trapped inside the `30 × 22` glue pool, strictly within `STICKY_TRAP_PAD_HALF`.
-fn draw_sticky_debris(pb: &mut PixelBuffer, fr: &Frame, seed: u32, state: StickyTrapState) {
+///
+/// `worn` (`0` fresh, `1` spent) adds grit: a tired board is dirtier than a
+/// fresh one, and the Used decal keeps the full litter.
+fn draw_sticky_debris(
+    pb: &mut PixelBuffer,
+    fr: &Frame,
+    seed: u32,
+    state: StickyTrapState,
+    worn: f32,
+) {
     let used = state == StickyTrapState::Used;
     let crumb_dark: Rgb = if used { (46, 40, 34) } else { (68, 44, 18) };
     let crumb_mid: Rgb = if used { (76, 68, 56) } else { (104, 72, 30) };
@@ -1303,6 +1713,20 @@ fn draw_sticky_debris(pb: &mut PixelBuffer, fr: &Frame, seed: u32, state: Sticky
     blend_px(pb, gx, gy, crumb_dark, 0.82);
     let (wx, wy) = fr.px(gu + 0.9, gv - 0.7);
     blend_px(pb, wx, wy, lint_col, if used { 0.35 } else { 0.58 });
+
+    // 4. Wear grit: spent glue collects dust, hairs and crumbs. One extra speck
+    // per wear step, at fixed positions, so a tired board looks dirty and a
+    // fresh one stays clean (no rng, no per-frame work when fresh).
+    if !used && worn > 0.05 {
+        let grit = ((worn * 7.0).ceil() as i32).min(7);
+        for k in 0..grit {
+            let a = k as f32 * 2.399 + (seed & 31) as f32 * 0.1;
+            let rad = 3.0 + (k % 3) as f32 * 3.4;
+            let (dx, dy) = fr.px(a.cos() * rad * su, a.sin() * rad * sv);
+            let col = if k % 2 == 0 { crumb_dark } else { lint_col };
+            blend_px(pb, dx, dy, col, 0.55);
+        }
+    }
 }
 
 /// Draw a small trapped beetle/roach stuck in the glue board (glazed & twitching
@@ -1411,13 +1835,24 @@ fn sticky_effective_victim(view: &StickyTrapView, fr: &Frame) -> Vec2 {
     }
 }
 
+/// Screen position of one slot's victim (its pad slot, as the sim wrote it:
+/// world pixels are buffer pixels).
+#[inline]
+fn sticky_victim_screen(_fr: &Frame, victim: &StickyVictimView) -> Vec2 {
+    victim.pos
+}
+
 /// **Foreground / overlay layer** for a sticky trap (draw AFTER entities).
 ///
 /// In `StickyTrapState::Stuck`, draws high-contrast glistening amber-ivory
 /// taffy strands stretching from board anchors across the `30 × 22` glue pool
-/// onto the struggling victim's flanks, complete with dark amber shadow rims
-/// and glossy stretched droplets that thin and snap near `progress -> 1.0`.
-/// No-op in `Idle` and `Used` (fast early-out).
+/// onto the flanks of **every** stuck victim, complete with dark amber shadow
+/// rims and glossy stretched droplets that thin and snap as each victim's own
+/// hold runs out (`progress` per slot).
+///
+/// A crowd therefore reads as a bundle of strands per body: the anchored bodies
+/// visible on the pad, each with its own pull. No-op in `Idle` and `Used` (fast
+/// early-out).
 pub fn draw_sticky_trap(
     pb: &mut PixelBuffer,
     view: &StickyTrapView,
@@ -1432,64 +1867,80 @@ pub fn draw_sticky_trap(
         return;
     }
 
-    let prog = clamp01(view.progress);
-    let vp = sticky_effective_victim(view, &fr);
-    let vr = view.victim_radius.clamp(2.0, 9.0);
-
-    let to_v = vp - fr.pos;
-    let dir = safe_dir(to_v);
-    let side = dir.perp();
-
     let strand_hi: Rgb = (255, 252, 224);
     let strand_mid: Rgb = (242, 214, 128);
     let strand_rim: Rgb = (52, 34, 12);
 
-    // 6 taut foreground strands anchored across the 30×22 glue pool -> victim flanks/paws,
-    // routed clear of the caught bug's corner pocket so both read cleanly.
-    let pull_u = (view.victim_pos - view.pos).dot(fr.f);
-    let pull_v = (view.victim_pos - view.pos).dot(fr.p);
-    let su = if pull_u < -1.5 { -1.0 } else { 1.0 };
-    let sv = if pull_v < -1.0 { -1.0 } else { 1.0 };
-    let anchors: [(f32, f32, f32, f32); 6] = [
-        (-9.4 * su, 7.0 * sv, 0.84 * sv, 0.72),
-        (-3.6 * su, -7.6 * sv, -0.78 * sv, 0.78),
-        (-1.2 * su, 7.6 * sv, 0.62 * sv, 0.84),
-        (3.8 * su, -6.8 * sv, -0.52 * sv, 0.90),
-        (6.8 * su, 5.4 * sv, 0.40 * sv, 0.95),
-        (9.2 * su, -sv, -0.15 * sv, 1.00),
-    ];
+    for slot in 0..STICKY_TRAP_SLOTS {
+        let Some(victim) = view.victims[slot] else {
+            continue;
+        };
+        let prog = clamp01(victim.progress);
+        let vp = sticky_victim_screen(&fr, &victim);
+        let vr = victim.radius.clamp(2.0, 9.0);
+        let to_v = vp - fr.pos;
+        let dir = safe_dir(to_v);
+        let side = dir.perp();
 
-    for (idx, &(au, av, flank_k, snap_at)) in anchors.iter().enumerate() {
-        let a = fr.place(au, av);
-        let quiver = (view.anim * (19.0 + idx as f32 * 5.0) + idx as f32 * 1.9).sin()
-            * (0.65 + 1.05 * prog);
-        // Anchor onto the victim's trailing haunches/flanks so its face stays readable!
-        let target = vp + side * (flank_k * vr * 0.72) - dir * (vr * 0.52);
+        // Three taut strands per body, from fixed anchors (deterministic from
+        // the slot index) across the padding to the victim's trailing flanks so
+        // its own sprite stays readable. The strand set rotates with the slot
+        // so neighbouring bodies do not draw identical bundles.
+        let base = slot as f32 * 2.3;
+        let anchors: [(f32, f32, f32, f32); 3] = [
+            (
+                (base + 0.3).cos() * (STICKY_TRAP_PAD_HALF.x - 1.4),
+                (base + 0.3).sin() * (STICKY_TRAP_PAD_HALF.y - 1.2),
+                0.82,
+                0.72,
+            ),
+            (
+                (base + 2.4).cos() * (STICKY_TRAP_PAD_HALF.x - 1.8),
+                (base + 2.4).sin() * (STICKY_TRAP_PAD_HALF.y - 1.5),
+                -0.74,
+                0.84,
+            ),
+            (
+                (base + 4.4).cos() * (STICKY_TRAP_PAD_HALF.x - 2.4),
+                (base + 4.4).sin() * (STICKY_TRAP_PAD_HALF.y - 1.9),
+                0.18,
+                0.94,
+            ),
+        ];
 
-        if prog < snap_at {
-            let tension = (prog / snap_at).clamp(0.0, 1.0);
-            let width = (1.60 - 0.72 * tension).max(0.68);
-            let col = mix(strand_mid, strand_hi, 0.55 + 0.45 * tension);
-            // Crisp shadowed taffy filament
-            draw_strand_curve(pb, a, target, quiver, width, col, strand_rim, 0.96);
-            // Bright glossy midpoint bead hanging on the stretched strand!
-            let mid = a + (target - a) * 0.52 + safe_dir(target - a).perp() * (quiver * 0.85);
-            let mx = mid.x.round() as i32;
-            let my = mid.y.round() as i32;
-            darken_px(pb, mx + 1, my + 1, 0.42);
-            blend_px(pb, mx, my, (255, 255, 240), 0.96);
-            // Anchor droplet grabbing the victim's body
-            let tx = target.x.round() as i32;
-            let ty = target.y.round() as i32;
-            blend_px(pb, tx, ty, (255, 250, 224), 0.94);
-        } else {
-            // Snapped! Recoiling elastic droplets whipping back toward board & victim.
-            let since = ((prog - snap_at) / (1.0 - snap_at).max(0.05)).clamp(0.0, 1.0);
-            let p_board = a + (target - a) * (0.46 * (1.0 - since));
-            let p_vic = target + (a - target) * (0.38 * (1.0 - since));
-            let alpha = (1.0 - since) * 0.95;
-            blend_px(pb, p_board.x.round() as i32, p_board.y.round() as i32, strand_hi, alpha);
-            blend_px(pb, p_vic.x.round() as i32, p_vic.y.round() as i32, strand_hi, alpha);
+        for (idx, &(au, av, flank_k, snap_at)) in anchors.iter().enumerate() {
+            let a = fr.place(au, av);
+            let quiver = (view.anim * (19.0 + idx as f32 * 5.0) + slot as f32 * 1.1)
+                .sin()
+                * (0.65 + 1.05 * prog);
+            // Anchor onto the victim's trailing haunches/flanks so its face stays readable!
+            let target = vp + side * (flank_k * vr * 0.72) - dir * (vr * 0.52);
+
+            if prog < snap_at {
+                let tension = (prog / snap_at).clamp(0.0, 1.0);
+                let width = (1.60 - 0.72 * tension).max(0.68);
+                let col = mix(strand_mid, strand_hi, 0.55 + 0.45 * tension);
+                // Crisp shadowed taffy filament
+                draw_strand_curve(pb, a, target, quiver, width, col, strand_rim, 0.96);
+                // Bright glossy midpoint bead hanging on the stretched strand!
+                let mid = a + (target - a) * 0.52 + safe_dir(target - a).perp() * (quiver * 0.85);
+                let mx = mid.x.round() as i32;
+                let my = mid.y.round() as i32;
+                darken_px(pb, mx + 1, my + 1, 0.42);
+                blend_px(pb, mx, my, (255, 255, 240), 0.96);
+                // Anchor droplet grabbing the victim's body
+                let tx = target.x.round() as i32;
+                let ty = target.y.round() as i32;
+                blend_px(pb, tx, ty, (255, 250, 224), 0.94);
+            } else {
+                // Snapped! Recoiling elastic droplets whipping back toward board & victim.
+                let since = ((prog - snap_at) / (1.0 - snap_at).max(0.05)).clamp(0.0, 1.0);
+                let p_board = a + (target - a) * (0.46 * (1.0 - since));
+                let p_vic = target + (a - target) * (0.38 * (1.0 - since));
+                let alpha = (1.0 - since) * 0.95;
+                blend_px(pb, p_board.x.round() as i32, p_board.y.round() as i32, strand_hi, alpha);
+                blend_px(pb, p_vic.x.round() as i32, p_vic.y.round() as i32, strand_hi, alpha);
+            }
         }
     }
 }
@@ -1498,18 +1949,28 @@ pub fn draw_sticky_trap(
 // 2. Mousetrap drawing
 // ============================================================================
 
+/// Art unit scale of the mousetrap: the drawing below is authored in the
+/// original `18 × 11` board's units and mapped through this pair, so the bigger
+/// trap is the same trap redrawn at the new resolution (proportions kept) rather
+/// than a stretched bitmap.
+#[inline]
+fn mousetrap_art_scale() -> Vec2 {
+    Vec2::new(MOUSETRAP_SIZE.x / 18.0, MOUSETRAP_SIZE.y / 11.0)
+}
+
 #[inline]
 fn mousetrap_jitter(view: &MousetrapView) -> Vec2 {
     let prog = clamp01(view.progress);
+    let k = mousetrap_art_scale().x;
     match view.state {
         MousetrapState::Triggered => {
-            let amp = 0.25 + 0.65 * prog;
+            let amp = (0.25 + 0.65 * prog) * k;
             let s = (view.anim * 68.0 + prog * 42.0).sin();
             safe_dir(view.facing).perp() * (s * amp)
         }
         MousetrapState::Snapping if (0.42..=0.72).contains(&prog) => {
             let decay = 1.0 - (prog - 0.42) / 0.30;
-            safe_dir(view.facing) * (-0.75 * decay)
+            safe_dir(view.facing) * (-0.75 * decay * k)
         }
         _ => Vec2::ZERO,
     }
@@ -1528,12 +1989,14 @@ pub fn draw_mousetrap_ground(
 ) {
     let prog = clamp01(view.progress);
     let fr = Frame::new(view.pos + mousetrap_jitter(view), view.facing, cam);
-    let Some((x0, x1, y0, y1)) = fr.bbox_pb(pb, 16.0) else {
+    let art = mousetrap_art_scale();
+    let (kx, ky) = (art.x, art.y);
+    let Some((x0, x1, y0, y1)) = fr.bbox_pb(pb, 34.0) else {
         return;
     };
 
-    let hx = MOUSETRAP_SIZE.x * 0.5; // 9.0
-    let hy = MOUSETRAP_SIZE.y * 0.5; // 5.5
+    let hx = 9.0; // art units: the old board's half extents
+    let hy = 5.5;
 
     // 1. Beveled wooden baseboard + drop shadow.
     let wood_shadow: Rgb = if view.state == MousetrapState::Sprung {
@@ -1557,14 +2020,16 @@ pub fn draw_mousetrap_ground(
 
     for y in y0..=y1 {
         for x in x0..=x1 {
-            let (u, v) = fr.local(x, y);
+            let (wu, wv) = fr.local(x, y);
+            let u = wu / kx;
+            let v = wv / ky;
             let d = sd_box(u, v, hx, hy);
             if d > 2.4 {
                 continue;
             }
             if d > 0.75 {
                 let (su, sv) = fr.local_f(x as f32 - 1.5, y as f32 - 1.6);
-                if sd_box(su, sv, hx, hy) <= 0.45 {
+                if sd_box(su / kx, sv / ky, hx, hy) <= 0.45 {
                     darken_px(pb, x, y, 0.48);
                 }
                 continue;
@@ -1611,17 +2076,41 @@ pub fn draw_mousetrap_ground(
         }
     }
 
+    // A hair-trigger board is painted: a dull oxblood wash over the strike half
+    // and a red rim stripe, so the instant kind reads from across the room.
+    if view.kind.hair() {
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let (wu, wv) = fr.local(x, y);
+                let u = wu / kx;
+                let v = wv / ky;
+                let d = sd_box(u, v, hx, hy);
+                if d > -0.25 {
+                    continue;
+                }
+                let rim = d > -1.0 || (u > hx - 1.1 || v.abs() > hy - 1.1);
+                if rim {
+                    blend_px(pb, x, y, (168, 44, 34), 0.72);
+                } else if u > 0.0 {
+                    blend_px(pb, x, y, (142, 38, 32), 0.20);
+                }
+            }
+        }
+    }
+
     // 2. Triggered danger telegraph bracket drawn OVER the board & extending
     //    outside the +u kill zone so the warning reads immediately!
     if view.state == MousetrapState::Triggered {
         let pulse = 0.62 + 0.38 * (prog * 18.0 + view.anim * 24.0).sin().abs();
         let warn_col: Rgb = mix((245, 58, 42), (255, 198, 72), prog * 0.45);
-        let ku0 = MOUSETRAP_KILL_U_MIN;
-        let ku1 = MOUSETRAP_KILL_U_MAX + 1.2;
-        let kv = MOUSETRAP_KILL_HALF_V + 1.2;
+        let ku0 = MOUSETRAP_KILL_U_MIN / kx;
+        let ku1 = MOUSETRAP_KILL_U_MAX / kx + 1.2;
+        let kv = MOUSETRAP_KILL_HALF_V / ky + 1.2;
         for y in y0..=y1 {
             for x in x0..=x1 {
-                let (u, v) = fr.local(x, y);
+                let (wu, wv) = fr.local(x, y);
+                let u = wu / kx;
+                let v = wv / ky;
                 let in_outer = u >= ku0 && u <= ku1 && v.abs() <= kv;
                 if !in_outer {
                     continue;
@@ -1645,10 +2134,10 @@ pub fn draw_mousetrap_ground(
     // 3. Impact shockwave ring on Snapping slam (drawn over floor + board rim)!
     if view.state == MousetrapState::Snapping && prog >= 0.40 {
         let imp = ((prog - 0.40) / 0.60).clamp(0.0, 1.0);
-        let impact_c = fr.place(4.8, 0.0);
-        let ring_r = 3.5 + imp * 10.5;
+        let impact_c = fr.place(4.8 * kx, 0.0);
+        let ring_r = (3.5 + imp * 10.5) * kx;
         let fade = (1.0 - imp) * (1.0 - imp);
-        glow_disc(pb, impact_c.x, impact_c.y, 8.5, (255, 196, 98), 0.70 * fade);
+        glow_disc(pb, impact_c.x, impact_c.y, 8.5 * kx, (255, 196, 98), 0.70 * fade);
         for y in y0..=y1 {
             for x in x0..=x1 {
                 let dx = x as f32 - impact_c.x;
@@ -1664,11 +2153,14 @@ pub fn draw_mousetrap_ground(
 
 /// **Foreground / overlay layer** for a mousetrap (draw AFTER entities).
 ///
-/// Renders the central steel torsion spring coil, copper trigger pedal, golden
-/// cheese wedge (or smashed cheese crumbs when sprung), holding lock rod, and
-/// the gleaming spring-steel striker U-bar (cocked at `-u`, quivering in
-/// `Triggered`, whipping 180° overhead with motion streaks in `Snapping`, or
-/// slammed shut across `+u` in `Sprung`).
+/// Renders the central steel torsion spring coil, copper trigger pedal, the
+/// bait on the plate (a golden cheese wedge, a floor pickup, or a small chest),
+/// the holding catch, and the gleaming spring-steel striker U-bar (cocked at
+/// `-u`, quivering in `Triggered`, whipping 180° overhead with motion streaks in
+/// `Snapping`, or slammed shut across `+u` in `Sprung`).
+///
+/// A **hair-trigger** trap draws a thin, quivering filed wire catch and a
+/// red-painted bar: the kind is legible from a distance before the rat commits.
 pub fn draw_mousetrap(
     pb: &mut PixelBuffer,
     view: &MousetrapView,
@@ -1677,11 +2169,15 @@ pub fn draw_mousetrap(
 ) {
     let prog = clamp01(view.progress);
     let fr = Frame::new(view.pos + mousetrap_jitter(view), view.facing, cam);
-    let Some((x0, x1, y0, y1)) = fr.bbox_pb(pb, 16.0) else {
+    let art = mousetrap_art_scale();
+    let (kx, ky) = (art.x, art.y);
+    let k = (kx + ky) * 0.5;
+    let Some((x0, x1, y0, y1)) = fr.bbox_pb(pb, 34.0) else {
         return;
     };
+    let hair = view.kind.hair();
 
-    // 1. Copper bait pedal at +u (u = 2.6..7.2, |v| <= 2.4)
+    // 1. Copper bait pedal at +u (u = 2.6..7.2, |v| <= 2.4 in art units)
     let pedal_dip = matches!(
         view.state,
         MousetrapState::Triggered | MousetrapState::Snapping | MousetrapState::Sprung
@@ -1692,7 +2188,9 @@ pub fn draw_mousetrap(
 
     for y in y0..=y1 {
         for x in x0..=x1 {
-            let (u, v) = fr.local(x, y);
+            let (wu, wv) = fr.local(x, y);
+            let u = wu / kx;
+            let v = wv / ky;
             let dp = sd_box(u - 4.7, v, 2.3, 2.2);
             if dp <= 0.0 {
                 let lum = if pedal_dip { 0.52 } else { 0.72 }
@@ -1705,118 +2203,175 @@ pub fn draw_mousetrap(
         }
     }
 
-    // 2. Chunky golden Swiss cheese wedge on the pedal (intact in Armed/Triggered;
-    //    splattering in Snapping; smashed crumbs in Sprung).
-    match view.state {
-        MousetrapState::Armed | MousetrapState::Triggered => {
-            let cheese_base: Rgb = (248, 202, 56);
-            let cheese_hi: Rgb = (255, 246, 152);
-            let cheese_lo: Rgb = (186, 128, 22);
-            let cheese_hole: Rgb = (132, 78, 14);
-            let cheese_rim: Rgb = (72, 42, 12);
+    // 2. The bait on the plate. Cheese keeps the old wedge (and its smashed
+    //    crumbs); a pickup or a chest is the reward the trap is guarding, and it
+    //    sits there until the rat takes it — sprung trap or not.
+    let bait_on_plate = !view.bait_taken;
+    let show_cheese = matches!(view.bait, TrapBait::Cheese);
+    if show_cheese {
+        match view.state {
+            MousetrapState::Armed | MousetrapState::Triggered => {
+                let cheese_base: Rgb = (248, 202, 56);
+                let cheese_hi: Rgb = (255, 246, 152);
+                let cheese_lo: Rgb = (186, 128, 22);
+                let cheese_hole: Rgb = (132, 78, 14);
+                let cheese_rim: Rgb = (72, 42, 12);
 
-            // Slightly tilted classic Swiss cheese wedge perched on the copper pedal
-            // (22° cant breaks symmetry so it reads instantly as cheese, not an arrow!).
-            let (sin_c, cos_c) = 0.42_f32.sin_cos();
-            for y in y0..=y1 {
-                for x in x0..=x1 {
-                    let (u, v) = fr.local(x, y);
-                    let du = u - 4.9;
-                    let dv = v + 0.1;
-                    let cu = du * cos_c - dv * sin_c;
-                    let cv = du * sin_c + dv * cos_c;
-                    let half_w = (2.3 - cu) * 0.56 + 0.55;
-                    let in_wedge = (-2.0..=2.3).contains(&cu) && cv.abs() <= half_w;
-                    let in_rim = (-2.7..=2.9).contains(&cu) && cv.abs() <= half_w + 0.75;
-                    if in_wedge {
-                        let lit = 0.74 + 0.32 * fr.lit(du * 0.4, dv * 0.4);
-                        let mut c = shade3(cheese_lo, cheese_base, cheese_hi, lit);
-                        // Two classic round Swiss cheese holes
-                        if (cu + 0.5).hypot(cv - 0.65) < 0.72 || (cu - 0.65).hypot(cv + 0.45) < 0.58 {
-                            c = cheese_hole;
+                // Slightly tilted classic Swiss cheese wedge perched on the copper pedal
+                // (22° cant breaks symmetry so it reads instantly as cheese, not an arrow!).
+                let (sin_c, cos_c) = 0.42_f32.sin_cos();
+                for y in y0..=y1 {
+                    for x in x0..=x1 {
+                        let (wu, wv) = fr.local(x, y);
+                        let du = wu / kx - 4.9;
+                        let dv = wv / ky + 0.1;
+                        let cu = du * cos_c - dv * sin_c;
+                        let cv = du * sin_c + dv * cos_c;
+                        let half_w = (2.3 - cu) * 0.56 + 0.55;
+                        let in_wedge = (-2.0..=2.3).contains(&cu) && cv.abs() <= half_w;
+                        let in_rim = (-2.7..=2.9).contains(&cu) && cv.abs() <= half_w + 0.75;
+                        if in_wedge {
+                            let lit = 0.74 + 0.32 * fr.lit(du * 0.4, dv * 0.4);
+                            let mut c = shade3(cheese_lo, cheese_base, cheese_hi, lit);
+                            // Two classic round Swiss cheese holes
+                            if (cu + 0.5).hypot(cv - 0.65) < 0.72
+                                || (cu - 0.65).hypot(cv + 0.45) < 0.58
+                            {
+                                c = cheese_hole;
+                            }
+                            pb.plot(x, y, c);
+                        } else if in_rim {
+                            blend_px(pb, x, y, cheese_rim, 0.78);
                         }
-                        pb.plot(x, y, c);
-                    } else if in_rim {
-                        blend_px(pb, x, y, cheese_rim, 0.78);
                     }
                 }
             }
-        }
-        MousetrapState::Snapping => {
-            // Flying golden cheese crumbs + wood splinters bursting outward on impact!
-            let burst = ((prog - 0.35).max(0.0) / 0.65).clamp(0.0, 1.0);
-            let crumbs: [(f32, f32); 6] = [
-                (1.0, -0.8),
-                (0.7, 1.1),
-                (-0.4, -1.2),
-                (1.2, 0.4),
-                (0.2, 1.0),
-                (1.1, -0.1),
-            ];
-            for (i, &(du, dv)) in crumbs.iter().enumerate() {
-                let spread = 1.6 + burst * (6.2 + i as f32 * 0.95);
-                let p = fr.px(5.0 + du * spread, dv * spread);
-                let col = if i % 2 == 0 {
-                    (255, 224, 82)
-                } else {
-                    (236, 182, 46)
-                };
-                blend_px(pb, p.0, p.1, col, 1.0 - burst * 0.45);
+            MousetrapState::Snapping => {
+                // Flying golden cheese crumbs + wood splinters bursting outward on impact!
+                let burst = ((prog - 0.35).max(0.0) / 0.65).clamp(0.0, 1.0);
+                let crumbs: [(f32, f32); 6] = [
+                    (1.0, -0.8),
+                    (0.7, 1.1),
+                    (-0.4, -1.2),
+                    (1.2, 0.4),
+                    (0.2, 1.0),
+                    (1.1, -0.1),
+                ];
+                for (i, &(du, dv)) in crumbs.iter().enumerate() {
+                    let spread = 1.6 + burst * (6.2 + i as f32 * 0.95);
+                    let p = fr.px((5.0 + du * spread) * kx, dv * spread * ky);
+                    let col = if i % 2 == 0 {
+                        (255, 224, 82)
+                    } else {
+                        (236, 182, 46)
+                    };
+                    blend_px(pb, p.0, p.1, col, 1.0 - burst * 0.45);
+                }
+            }
+            MousetrapState::Sprung => {
+                // Scattered flattened cheese crumbs stuck near the front edge.
+                for &(cu, cv, bright) in &[
+                    (4.2, -1.6, true),
+                    (6.0, 1.4, true),
+                    (5.2, -0.4, false),
+                    (3.4, 1.9, false),
+                    (6.8, -1.2, true),
+                ] {
+                    let p = fr.px(cu * kx, cv * ky);
+                    let c = if bright {
+                        (214, 174, 62)
+                    } else {
+                        (164, 128, 44)
+                    };
+                    blend_px(pb, p.0, p.1, c, 0.88);
+                }
             }
         }
-        MousetrapState::Sprung => {
-            // Scattered flattened cheese crumbs stuck near the front edge.
-            for &(cu, cv, bright) in &[
-                (4.2, -1.6, true),
-                (6.0, 1.4, true),
-                (5.2, -0.4, false),
-                (3.4, 1.9, false),
-                (6.8, -1.2, true),
-            ] {
-                let p = fr.px(cu, cv);
-                let c = if bright {
-                    (214, 174, 62)
-                } else {
-                    (164, 128, 44)
-                };
-                blend_px(pb, p.0, p.1, c, 0.88);
+    } else if bait_on_plate {
+        // A pickup or a chest sitting on the plate: the same sprite the floor
+        // would draw, so the reward is unmistakable from a distance.
+        let plate = fr.px(4.9 * kx, 0.0);
+        match view.bait {
+            TrapBait::Chest => {
+                // A chest is drawn small enough to fit the plate; the glint ring
+                // makes it read as "there is a chest on that trap" at range.
+                glow_disc(
+                    pb,
+                    plate.0 as f32,
+                    plate.1 as f32,
+                    9.0,
+                    (255, 208, 96),
+                    0.30 + 0.18 * (view.anim * 2.4).sin(),
+                );
+                crate::game::art_floor::draw_chest(pb, plate, view.anim);
             }
+            TrapBait::Pickup(kind) => {
+                crate::game::art_floor::draw_pickup(pb, kind, plate, view.anim);
+            }
+            TrapBait::Cheese => {}
         }
     }
 
     // 3. Central steel torsion coil spring along u = -0.3, |v| <= 3.6
-    let spring_a = fr.place(-0.3, -3.4);
-    let spring_b = fr.place(-0.3, 3.4);
+    let spring_a = fr.place(-0.3 * kx, -3.4 * ky);
+    let spring_b = fr.place(-0.3 * kx, 3.4 * ky);
     draw_metal_bar(
         pb,
         spring_a,
         spring_b,
-        0.95,
-        Vec2::new(0.8, 0.9),
+        0.95 * k,
+        Vec2::new(0.8, 0.9) * k,
         (134, 146, 158),
         (216, 228, 240),
         (24, 28, 34),
     );
     // Dark coil wrap grooves across the spring
-    for k in -2..=2 {
-        let p = fr.px(-0.3, k as f32 * 1.25);
+    for c in -2..=2 {
+        let p = fr.px(-0.3 * kx, c as f32 * 1.25 * ky);
         darken_px(pb, p.0, p.1, 0.45);
     }
 
-    // 4. Holding lock rod (visible when Armed / Triggered).
-    if matches!(view.state, MousetrapState::Armed | MousetrapState::Triggered) {
-        let rod_a = fr.place(-7.6, 0.0);
-        let rod_b = fr.place(3.0, 0.0);
-        draw_metal_bar(
-            pb,
-            rod_a,
-            rod_b,
-            0.45,
-            Vec2::new(0.5, 0.6),
-            (168, 178, 188),
-            (236, 244, 250),
-            (32, 36, 42),
-        );
+    // 4. The catch that holds the bar back. The ordinary trap has a thick steel
+    //    lock rod; the hair-trigger has a hair-thin filed wire that visibly
+    //    quivers — and it is quiet until it is not.
+    match view.state {
+        MousetrapState::Armed | MousetrapState::Triggered => {
+            if hair {
+                let quiver = (view.anim * (52.0 + prog * 60.0)).sin() * 0.55;
+                let a = fr.place(-7.0 * kx, -2.6 * ky);
+                let b = fr.place(2.6 * kx, quiver * ky);
+                draw_metal_bar(
+                    pb,
+                    a,
+                    b,
+                    0.32 * k,
+                    Vec2::new(0.35, 0.4) * k,
+                    (196, 168, 154),
+                    (255, 240, 226),
+                    (68, 24, 18),
+                );
+                // Filed notch: the wire sits in a bright nick on the catch post.
+                let notch = fr.px(-7.2 * kx, 0.0);
+                blend_px(pb, notch.0, notch.1, (255, 246, 210), 0.95);
+                // A faint red tension bead travels along the wire as the rat nears.
+                let bead = fr.place((-7.0 + 9.6 * ((view.anim * 0.7) % 1.0)) * kx, quiver * ky);
+                blend_px(pb, bead.x.round() as i32, bead.y.round() as i32, (232, 64, 48), 0.55);
+            } else {
+                let rod_a = fr.place(-7.6 * kx, 0.0);
+                let rod_b = fr.place(3.0 * kx, 0.0);
+                draw_metal_bar(
+                    pb,
+                    rod_a,
+                    rod_b,
+                    0.45 * k,
+                    Vec2::new(0.5, 0.6) * k,
+                    (168, 178, 188),
+                    (236, 244, 250),
+                    (32, 36, 42),
+                );
+            }
+        }
+        _ => {}
     }
 
     // 5. The heavy U-shaped spring-steel striker bail (kill bar)!
@@ -1843,16 +2398,24 @@ pub fn draw_mousetrap(
 
     let bar_reach = -7.4 * theta.cos();
     let bar_half_v = 4.3;
-    let lift_ofs = Vec2::new(0.0, -lift_height);
-    let sh_ofs = Vec2::new(0.9 + lift_height * 0.45, 1.0 + lift_height * 0.55);
+    let lift_ofs = Vec2::new(0.0, -lift_height) * k;
+    let sh_ofs = Vec2::new(0.9 + lift_height * 0.45, 1.0 + lift_height * 0.55) * k;
 
-    let hinge_l = fr.place(-0.2, -bar_half_v);
-    let hinge_r = fr.place(-0.2, bar_half_v);
-    let tip_l = fr.place(bar_reach, -bar_half_v) + lift_ofs;
-    let tip_r = fr.place(bar_reach, bar_half_v) + lift_ofs;
+    let hinge_l = fr.place(-0.2 * kx, -bar_half_v * ky);
+    let hinge_r = fr.place(-0.2 * kx, bar_half_v * ky);
+    let tip_l = fr.place(bar_reach * kx, -bar_half_v * ky) + lift_ofs;
+    let tip_r = fr.place(bar_reach * kx, bar_half_v * ky) + lift_ofs;
 
-    let steel_mid = mix((170, 186, 204), (255, 246, 224), bar_flash.max(clamp01(view.hit_flash)));
-    let steel_hi = mix((236, 246, 255), (255, 255, 255), bar_flash);
+    // A hair-trigger bar is red-painted: the silhouette answer to "is this one
+    // going to bite before I can move?".
+    let steel_base: Rgb = if hair { (176, 52, 40) } else { (170, 186, 204) };
+    let steel_glint: Rgb = if hair { (255, 148, 120) } else { (236, 246, 255) };
+    let steel_mid = mix(
+        steel_base,
+        if hair { (255, 190, 150) } else { (255, 246, 224) },
+        bar_flash.max(clamp01(view.hit_flash)),
+    );
+    let steel_hi = mix(steel_glint, (255, 255, 255), bar_flash);
     let steel_out: Rgb = (22, 26, 34);
 
     // Motion-blur smear arc behind the whipping striker bar during Snapping!
@@ -1860,36 +2423,55 @@ pub fn draw_mousetrap(
         for ghost in 1..=3 {
             let g_ang = (theta - ghost as f32 * 0.34).max(0.0);
             let g_u = -7.4 * g_ang.cos();
-            let g_lift = Vec2::new(0.0, -g_ang.sin() * 4.6);
-            let ga = fr.place(g_u, -bar_half_v) + g_lift;
-            let gb = fr.place(g_u, bar_half_v) + g_lift;
+            let g_lift = Vec2::new(0.0, -g_ang.sin() * 4.6) * k;
+            let ga = fr.place(g_u * kx, -bar_half_v * ky) + g_lift;
+            let gb = fr.place(g_u * kx, bar_half_v * ky) + g_lift;
             let alpha = (0.55 - ghost as f32 * 0.14).max(0.1);
-            draw_strand_curve(pb, ga, gb, 0.0, 1.0, (240, 248, 255), (120, 140, 165), alpha);
+            draw_strand_curve(pb, ga, gb, 0.0, 1.0 * k, (240, 248, 255), (120, 140, 165), alpha);
         }
     }
 
-    draw_metal_bar(pb, hinge_l, tip_l, 0.65, sh_ofs, steel_mid, steel_hi, steel_out);
-    draw_metal_bar(pb, hinge_r, tip_r, 0.65, sh_ofs, steel_mid, steel_hi, steel_out);
-    draw_metal_bar(pb, tip_l, tip_r, 0.85, sh_ofs, steel_mid, steel_hi, steel_out);
+    draw_metal_bar(pb, hinge_l, tip_l, 0.65 * k, sh_ofs, steel_mid, steel_hi, steel_out);
+    draw_metal_bar(pb, hinge_r, tip_r, 0.65 * k, sh_ofs, steel_mid, steel_hi, steel_out);
+    draw_metal_bar(pb, tip_l, tip_r, 0.85 * k, sh_ofs, steel_mid, steel_hi, steel_out);
 
     // Bright tension sparks at the latch in Triggered; crisp radial impact lines in Snapping!
     if view.state == MousetrapState::Triggered {
-        let spark_p = fr.place(-0.3, (view.anim * 40.0).sin() * 2.2);
-        glow_disc(pb, spark_p.x, spark_p.y, 4.0, (255, 186, 68), 0.88 * (0.4 + 0.6 * prog));
+        let spark_p = fr.place(-0.3 * kx, (view.anim * 40.0).sin() * 2.2 * ky);
+        glow_disc(
+            pb,
+            spark_p.x,
+            spark_p.y,
+            4.0 * k,
+            if hair { (255, 96, 72) } else { (255, 186, 68) },
+            0.88 * (0.4 + 0.6 * prog),
+        );
         // Tiny amber tension sparks zipping off the cocked spring!
-        for k in 0..3 {
-            let s = fr.px(-0.8 - k as f32 * 1.4, (k as f32 - 1.0) * 3.8);
+        for c in 0..3 {
+            let s = fr.px(-0.8 * kx - c as f32 * 1.4 * kx, (c as f32 - 1.0) * 3.8 * ky);
             add_px(pb, s.0, s.1, (255, 220, 112), 0.85 * prog);
         }
     } else if view.state == MousetrapState::Snapping && (0.42..=0.80).contains(&prog) {
         let imp = 1.0 - (prog - 0.42) / 0.38;
         let mid_bar = (tip_l + tip_r) * 0.5;
-        glow_disc(pb, mid_bar.x, mid_bar.y, 5.5, (255, 236, 178), 0.90 * imp);
+        glow_disc(pb, mid_bar.x, mid_bar.y, 5.5 * k, (255, 236, 178), 0.90 * imp);
         // 4 crisp radial impact burst streaks!
         for &(du, dv) in &[(1.0, -0.7), (1.0, 0.7), (0.3, -1.0), (0.3, 1.0)] {
-            let a = fr.place(6.5 + du * 1.6, dv * 2.6);
-            let b = fr.place(6.5 + du * (4.2 + (1.0 - imp) * 3.5), dv * (5.2 + (1.0 - imp) * 2.5));
-            draw_strand_curve(pb, a, b, 0.0, 0.8, (255, 248, 212), (255, 168, 64), 0.90 * imp);
+            let a = fr.place((6.5 + du * 1.6) * kx, dv * 2.6 * ky);
+            let b = fr.place(
+                (6.5 + du * (4.2 + (1.0 - imp) * 3.5)) * kx,
+                dv * (5.2 + (1.0 - imp) * 2.5) * ky,
+            );
+            draw_strand_curve(
+                pb,
+                a,
+                b,
+                0.0,
+                0.8 * k,
+                (255, 248, 212),
+                (255, 168, 64),
+                0.90 * imp,
+            );
         }
     }
 }
@@ -2794,6 +3376,8 @@ mod tests {
                             anim: 1.7,
                             victim_pos: pos + Vec2::new(5.0, -2.0),
                             victim_radius: 4.0,
+                            // The wave-3 fields (load, wear, victims, tears) default to an empty board.
+    ..StickyTrapView::new(Vec2::ZERO, Vec2::new(1.0, 0.0))
                         };
                         draw_sticky_trap_ground(&mut pb, &v, Vec2::ZERO, accent);
                         draw_sticky_trap(&mut pb, &v, Vec2::ZERO, accent);
@@ -2811,6 +3395,8 @@ mod tests {
                             progress: prog,
                             anim: 2.3,
                             hit_flash: prog,
+                            // Ordinary bar, cheese bait: the pre-wave-3 trap.
+    ..MousetrapView::new(Vec2::ZERO, Vec2::new(1.0, 0.0))
                         };
                         draw_mousetrap_ground(&mut pb, &v, Vec2::ZERO, accent);
                         draw_mousetrap(&mut pb, &v, Vec2::ZERO, accent);
@@ -2955,6 +3541,8 @@ mod tests {
                 anim: 0.0,
                 victim_pos: center,
                 victim_radius: 3.0,
+                // The wave-3 fields (load, wear, victims, tears) default to an empty board.
+    ..StickyTrapView::new(Vec2::ZERO, Vec2::new(1.0, 0.0))
             };
             draw_sticky_trap_ground(&mut pb, &view, Vec2::ZERO, accent);
 
@@ -3074,6 +3662,8 @@ mod tests {
                     anim: 0.35 + row as f32 * 0.4,
                     victim_pos: c0,
                     victim_radius: 3.0,
+                    // The wave-3 fields (load, wear, victims, tears) default to an empty board.
+    ..StickyTrapView::new(Vec2::ZERO, Vec2::new(1.0, 0.0))
                 };
                 draw_sticky_trap_ground(&mut pb, &v0, cam, accent);
                 draw_sticky_trap(&mut pb, &v0, cam, accent);
@@ -3089,6 +3679,8 @@ mod tests {
                     anim: 1.4,
                     victim_pos: rat_pos,
                     victim_radius: 3.0,
+                    // The wave-3 fields (load, wear, victims, tears) default to an empty board.
+    ..StickyTrapView::new(Vec2::ZERO, Vec2::new(1.0, 0.0))
                 };
                 draw_sticky_trap_ground(&mut pb, &v1, cam, accent);
                 let p = make_rat(rat_pos, facing);
@@ -3106,6 +3698,8 @@ mod tests {
                     anim: 2.5,
                     victim_pos: rat_pos2,
                     victim_radius: 3.0,
+                    // The wave-3 fields (load, wear, victims, tears) default to an empty board.
+    ..StickyTrapView::new(Vec2::ZERO, Vec2::new(1.0, 0.0))
                 };
                 draw_sticky_trap_ground(&mut pb, &v2, cam, accent);
                 let p2 = make_rat(rat_pos2, facing);
@@ -3123,6 +3717,8 @@ mod tests {
                     anim: 1.9,
                     victim_pos: brute_pos,
                     victim_radius: 6.5,
+                    // The wave-3 fields (load, wear, victims, tears) default to an empty board.
+    ..StickyTrapView::new(Vec2::ZERO, Vec2::new(1.0, 0.0))
                 };
                 draw_sticky_trap_ground(&mut pb, &v3, cam, accent);
                 let b = make_brute(brute_pos, facing);
@@ -3139,6 +3735,8 @@ mod tests {
                     anim: 0.0,
                     victim_pos: c4,
                     victim_radius: 3.0,
+                    // The wave-3 fields (load, wear, victims, tears) default to an empty board.
+    ..StickyTrapView::new(Vec2::ZERO, Vec2::new(1.0, 0.0))
                 };
                 draw_sticky_trap_ground(&mut pb, &v4, cam, accent);
                 draw_sticky_trap(&mut pb, &v4, cam, accent);
@@ -3213,6 +3811,8 @@ mod tests {
                 anim: 0.4,
                 victim_pos: trap_pos,
                 victim_radius: 3.0,
+                // The wave-3 fields (load, wear, victims, tears) default to an empty board.
+    ..StickyTrapView::new(Vec2::ZERO, Vec2::new(1.0, 0.0))
             };
             w.player.pos = trap_pos + Vec2::new(-28.0, 4.0);
             w.player.face = Vec2::new(1.0, 0.0);
@@ -3230,6 +3830,8 @@ mod tests {
                 anim: 1.8,
                 victim_pos: rat_stuck_pos,
                 victim_radius: 3.0,
+                // The wave-3 fields (load, wear, victims, tears) default to an empty board.
+    ..StickyTrapView::new(Vec2::ZERO, Vec2::new(1.0, 0.0))
             };
             w.player.pos = rat_stuck_pos;
             w.player.face = Vec2::new(-1.0, 0.0);
@@ -3249,6 +3851,8 @@ mod tests {
                 anim: 2.1,
                 victim_pos: brute_pos,
                 victim_radius: 6.5,
+                // The wave-3 fields (load, wear, victims, tears) default to an empty board.
+    ..StickyTrapView::new(Vec2::ZERO, Vec2::new(1.0, 0.0))
             };
             w.player.pos = trap_pos + Vec2::new(-26.0, -6.0);
             w.player.face = Vec2::new(1.0, 0.2);
@@ -3268,6 +3872,8 @@ mod tests {
                 anim: 0.0,
                 victim_pos: trap_pos_u,
                 victim_radius: 3.0,
+                // The wave-3 fields (load, wear, victims, tears) default to an empty board.
+    ..StickyTrapView::new(Vec2::ZERO, Vec2::new(1.0, 0.0))
             };
             w_used.player.pos = trap_pos_u + Vec2::new(26.0, -4.0);
             w_used.player.face = Vec2::new(-1.0, 0.0);
@@ -3279,6 +3885,123 @@ mod tests {
         let mut out = format!("P6\n{} {}\n255\n", total_w, total_h).into_bytes();
         out.extend_from_slice(&sheet);
         std::fs::write("/tmp/ratrun_sticky_level.ppm", out).unwrap();
+    }
+
+    /// Wave 3 sheet: `RATRUN_DUMP=sticky_wave3 cargo test dump_sticky_wave3_sheet`
+    ///
+    /// Writes `/tmp/ratrun_sticky_wave3.ppm` (or `RATRUN_DUMP_DIR`) — a real
+    /// `World::draw` frame per case, so the *load* and the *wear* of a glue
+    /// board can be eyeballed: a board at 0, 3 and 8 victims; fresh, half-spent,
+    /// nearly spent and Used; the torn scars a released crowd leaves; and the
+    /// two mousetrap kinds with each bait.
+    #[test]
+    fn dump_sticky_wave3_sheet() {
+        let target = match std::env::var("RATRUN_DUMP") {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        if target != "sticky_wave3" {
+            return;
+        }
+        use crate::game::enemy::EnemyKind;
+        use crate::game::world::World;
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        const VW: usize = 150;
+        const VH: usize = 104;
+        const COLS: usize = 4;
+        const ROWS: usize = 2;
+        let total_w = VW * COLS;
+        let total_h = VH * ROWS;
+        let mut sheet = vec![0u8; total_w * total_h * 3];
+        let mut pb = PixelBuffer::new(VW, VH);
+
+        // One case: a board at the arena centre with `n` stuck Skitterers (their
+        // sprites stand on the pads the art draws, exactly as the sim pins them)
+        // and a given wear share.
+        let mut case = |row: usize, col: usize, n: usize, worn: f32, used: bool, tears: usize| {
+            let theme = if row == 0 { Theme::Sewer } else { Theme::Kitchen };
+            let mut w = World::new(theme, 11 + (row * COLS + col) as u64);
+            w.level.objects.mousetraps.clear();
+            w.level.objects.sticky_traps.clear();
+            let c = w.level.arena * 0.5;
+            w.player.pos = c + Vec2::new(26.0, 30.0);
+            w.player.face = Vec2::new(0.0, -1.0);
+            w.elapsed = 1.2 + col as f32 * 0.3;
+
+            let mut rng = StdRng::seed_from_u64(3);
+            let mut v = StickyTrapView::new(c, Vec2::new(1.0, 0.0));
+            v.state = if used {
+                StickyTrapState::Used
+            } else if n > 0 {
+                StickyTrapState::Stuck
+            } else {
+                StickyTrapState::Idle
+            };
+            v.worn = worn;
+            v.load = (n as u8).min(STICKY_TRAP_CAPACITY);
+            v.progress = if n > 0 { 0.35 } else { 0.0 };
+            for k in 0..tears.min(STICKY_TRAP_TEARS) {
+                let a = k as f32 * 1.9 + 0.4;
+                v.add_tear(c + Vec2::new(a.cos() * 7.0, a.sin() * 5.0));
+            }
+            for k in 0..n.min(STICKY_TRAP_SLOTS) {
+                // The sim's own slot spread, near enough for a sheet.
+                let inset = Vec2::new(
+                    STICKY_TRAP_PAD_HALF.x - 2.5,
+                    STICKY_TRAP_PAD_HALF.y - 2.5,
+                );
+                let a = k as f32 * 2.399;
+                let at = c + Vec2::new(a.cos() * inset.x * 0.7, a.sin() * inset.y * 0.7);
+                v.victims[k] = Some(StickyVictimView {
+                    pos: at,
+                    radius: 2.5,
+                    kind: StickyVictimKind::Small,
+                    color: EnemyKind::Skitterer.color(),
+                    progress: 0.2 + 0.08 * k as f32,
+                });
+                w.spawn_enemy_with_rng(EnemyKind::Skitterer, at, 1.0, &mut rng);
+            }
+            if n > 0 {
+                v.victim_pos = v.victims[0].map(|x| x.pos).unwrap_or(c);
+                v.victim_radius = 2.5;
+            }
+            w.level.objects.sticky_traps.push(v);
+
+            pb.clear((0, 0, 0));
+            w.draw(&mut pb);
+            for y in 0..VH {
+                for x in 0..VW {
+                    let px = pb.pixel_at(x, y);
+                    let gx = col * VW + x;
+                    let gy = row * VH + y;
+                    let idx = (gy * total_w + gx) * 3;
+                    sheet[idx] = px.0;
+                    sheet[idx + 1] = px.1;
+                    sheet[idx + 2] = px.2;
+                }
+            }
+        };
+
+        // Row 0: the load. A fresh board, three victims, a full crowd (8), and a
+        // half-spent board with a crowd on it.
+        case(0, 0, 0, 0.0, false, 0);
+        case(0, 1, 3, 0.08, false, 0);
+        case(0, 2, 8, 0.14, false, 0);
+        case(0, 3, 3, 0.50, false, 1);
+        // Row 1: the wear. Nearly spent with a crowd, a spent Used decal, a
+        // board whose crowd pulled free (torn scars), and the same at night.
+        case(1, 0, 6, 0.92, false, 2);
+        case(1, 1, 0, 1.0, true, 0);
+        case(1, 2, 1, 0.72, false, 4);
+        case(1, 3, 2, 0.30, false, 0);
+
+        let mut out = format!("P6\n{} {}\n255\n", total_w, total_h).into_bytes();
+        out.extend_from_slice(&sheet);
+        let dir = std::env::var_os("RATRUN_DUMP_DIR")
+            .map_or_else(|| std::path::PathBuf::from("/tmp"), std::path::PathBuf::from);
+        std::fs::write(dir.join("ratrun_sticky_wave3.ppm"), out).unwrap();
     }
 
     /// Visual sheet test: `RATRUN_DUMP=traps cargo test dump_traps_sheet`
@@ -3340,6 +4063,8 @@ mod tests {
                             anim: 0.2,
                             victim_pos: c,
                             victim_radius: 3.0,
+                            // The wave-3 fields (load, wear, victims, tears) default to an empty board.
+    ..StickyTrapView::new(Vec2::ZERO, Vec2::new(1.0, 0.0))
                         };
                         draw_sticky_trap_ground(&mut pb, &v, cam, accent);
                         draw_sticky_trap(&mut pb, &v, cam, accent);
@@ -3353,6 +4078,8 @@ mod tests {
                             anim: 1.4,
                             victim_pos: c,
                             victim_radius: 3.0,
+                            // The wave-3 fields (load, wear, victims, tears) default to an empty board.
+    ..StickyTrapView::new(Vec2::ZERO, Vec2::new(1.0, 0.0))
                         };
                         draw_sticky_trap_ground(&mut pb, &v, cam, accent);
                         draw_sticky_trap(&mut pb, &v, cam, accent);
@@ -3367,6 +4094,8 @@ mod tests {
                             anim: 1.1,
                             victim_pos: rat_pos,
                             victim_radius: 3.0,
+                            // The wave-3 fields (load, wear, victims, tears) default to an empty board.
+    ..StickyTrapView::new(Vec2::ZERO, Vec2::new(1.0, 0.0))
                         };
                         draw_sticky_trap_ground(&mut pb, &v, cam, accent);
                         let p = make_rat(rat_pos, Vec2::new(1.0, -0.3));
@@ -3384,6 +4113,8 @@ mod tests {
                             anim: 2.6,
                             victim_pos: rat_pos,
                             victim_radius: 3.0,
+                            // The wave-3 fields (load, wear, victims, tears) default to an empty board.
+    ..StickyTrapView::new(Vec2::ZERO, Vec2::new(1.0, 0.0))
                         };
                         draw_sticky_trap_ground(&mut pb, &v, cam, accent);
                         let p = make_rat(rat_pos, Vec2::new(1.0, -0.2));
@@ -3401,6 +4132,8 @@ mod tests {
                             anim: 1.9,
                             victim_pos: brute_pos,
                             victim_radius: 6.5,
+                            // The wave-3 fields (load, wear, victims, tears) default to an empty board.
+    ..StickyTrapView::new(Vec2::ZERO, Vec2::new(1.0, 0.0))
                         };
                         draw_sticky_trap_ground(&mut pb, &v, cam, accent);
                         let b = make_brute(brute_pos, Vec2::new(1.0, 0.0));
@@ -3416,6 +4149,8 @@ mod tests {
                             anim: 0.0,
                             victim_pos: c,
                             victim_radius: 3.0,
+                            // The wave-3 fields (load, wear, victims, tears) default to an empty board.
+    ..StickyTrapView::new(Vec2::ZERO, Vec2::new(1.0, 0.0))
                         };
                         draw_sticky_trap_ground(&mut pb, &v, cam, accent);
                         draw_sticky_trap(&mut pb, &v, cam, accent);
@@ -3429,6 +4164,8 @@ mod tests {
                             anim: 0.0,
                             victim_pos: c,
                             victim_radius: 3.0,
+                            // The wave-3 fields (load, wear, victims, tears) default to an empty board.
+    ..StickyTrapView::new(Vec2::ZERO, Vec2::new(1.0, 0.0))
                         };
                         draw_sticky_trap_ground(&mut pb, &v, cam, accent);
                         draw_sticky_trap(&mut pb, &v, cam, accent);
@@ -3456,6 +4193,8 @@ mod tests {
                     progress: prog,
                     anim: 1.3 + col as f32 * 0.4,
                     hit_flash: flash,
+                    // Ordinary bar, cheese bait: the pre-wave-3 trap.
+    ..MousetrapView::new(Vec2::ZERO, Vec2::new(1.0, 0.0))
                 };
                 draw_mousetrap_ground(&mut pb, &v, cam, accent);
                 draw_mousetrap(&mut pb, &v, cam, accent);

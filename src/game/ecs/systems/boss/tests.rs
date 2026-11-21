@@ -1020,6 +1020,7 @@ fn mousetraps_damage_the_boss_once_per_snap() {
         progress: 0.5,
         anim: 0.0,
         hit_flash: 0.0,
+        ..MousetrapView::new(boss_pos, Vec2::new(1.0, 0.0))
     });
     let hp_before = w.boss_hp().expect("boss alive").0;
 

@@ -210,7 +210,7 @@ fn generate_stages(
         holes,
         placement::place_rat_holes(&mut tiles, &design, &mut rng)
     );
-    let traps = stage!(
+    let mut traps = stage!(
         traps,
         placement::place_traps(&tiles, &design, &mazes, &mut rng)
     );
@@ -220,6 +220,10 @@ fn generate_stages(
         shop,
         placement::place_shop_holes(&tiles, &design, &mazes)
     );
+    // A `40 × 24` snap trap (or a glue board) must never crowd a shop
+    // threshold. The shops are placed after the traps and draw no rng, so the
+    // prune can only ever remove a trap.
+    placement::drop_traps_crowding_shops(&mut traps, &shop_holes);
     // The side routes' floor hazards (steam grates, ink pads). Every other
     // theme returns immediately without drawing an rng number. After the shop
     // holes, so a hazard is never placed on (or within two cells of) a shop
@@ -234,7 +238,15 @@ fn generate_stages(
 
     let objects = stage!(
         objects,
-        objects_from(&tiles, &mazes, &holes, &traps, &shop_holes, &floor_hazards)
+        objects_from(
+            &tiles,
+            &mazes,
+            &holes,
+            &traps,
+            &shop_holes,
+            &floor_hazards,
+            level_seed(theme, seed, attempt),
+        )
     );
     let nav = stage!(nav, NavGrid::from_tiles(&tiles, SizeClass::Large));
     Level {
@@ -263,6 +275,9 @@ pub(super) fn objects_from(
     traps: &[placement::TrapPlacement],
     shop_holes: &[placement::ShopHolePlacement],
     floor_hazards: &hazards::HazardPlacement,
+    // The level's seed, keying the independent per-trap bait/kind stream (it
+    // draws nothing from the generation rng, so it cannot move the map).
+    spec_seed: u64,
 ) -> LevelObjects {
     // The wave 3 floor hazards: the generator's own view structs, straight in.
     let mut objects = LevelObjects {
@@ -336,9 +351,12 @@ pub(super) fn objects_from(
                 objects.sticky_trap_records.push(record);
             }
             placement::TrapKind::Snap => {
+                // Wave 3: every set trap carries a bar kind and a bait, chosen
+                // from its own deterministic stream at generation time.
+                let (kind, bait) = placement::snap_spec(spec_seed, t.pos);
                 objects
                     .mousetraps
-                    .push(MousetrapView::new(t.pos, t.facing));
+                    .push(MousetrapView::baited(t.pos, t.facing, kind, bait));
                 objects.mousetrap_records.push(record);
             }
         }
