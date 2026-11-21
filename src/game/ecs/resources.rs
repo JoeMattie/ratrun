@@ -150,7 +150,7 @@ pub struct Shake {
 #[derive(Resource, Default, Clone, Copy, Debug)]
 pub struct DamageLedger {
     /// Effective damage dealt to every enemy, by weapon index.
-    pub dealt: [f32; 8],
+    pub dealt: [f32; crate::game::weapon::WEAPON_KINDS],
     /// Effective damage dealt to **the boss**, by weapon index.
     ///
     /// Only weapons that damage the boss outside `boss_damage_system` need to
@@ -159,7 +159,7 @@ pub struct DamageLedger {
     /// cannot carry them — `boss_damage_system` resets that tally after this
     /// one runs — so the batch harness reads this column instead. Also pure
     /// instrumentation: nothing in the schedule reads it back.
-    pub boss: [f32; 8],
+    pub boss: [f32; crate::game::weapon::WEAPON_KINDS],
 }
 
 impl DamageLedger {
@@ -268,6 +268,18 @@ impl ActiveFx {
         }
     }
 }
+
+// ---- Wave 3 weapons A ----------------------------------------------------
+
+/// The Hantavirus mark currently on the boss, if any.
+///
+/// The boss is not an `Enemy`, so it cannot carry the `components::Infection`
+/// component the horde uses; this resource is that mark's home instead. One
+/// mark at a time, no jumps (design §4: "A boss can take ticks"), cleared when
+/// its last tick lands or the boss dies. Permanent scratch: inserted by
+/// `World::new`, never round-tripped (no facade field holds it between ticks).
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct BossVirus(pub Option<crate::game::ecs::components::Infection>);
 
 /// Shared neighbour scratch buffer (legacy `World::neigh`).
 #[derive(Resource, Default)]

@@ -8,6 +8,7 @@ pub mod art_props;
 pub mod art_rat;
 pub mod art_traps;
 pub mod art_walls;
+pub mod art_wave3a;
 pub mod bot;
 pub mod bullet;
 pub mod campaign;

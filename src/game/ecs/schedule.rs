@@ -23,6 +23,8 @@
 //! | 10 | `enemy_move::grid_refresh_system` | second grid build |
 //! | 11 | `weapons::fire_weapons_system` | `fire_weapons` |
 //! | 11b | `weapons::active_weapons_system` | the two Space-triggered weapons (new) |
+//! | 11c | `weapons_wave3a::acid_rain_system` | Acid Rain's locked drops landing (wave 3) |
+//! | 11d | `weapons_wave3a::hantavirus_system` | Hantavirus ticks + third-tick jumps (wave 3) |
 //! | 12 | `projectiles::bullets_system` | `update_bullets` |
 //! | 13 | `projectiles::pools_system` | `update_pools` |
 //! | 13b | `boss::boss_damage_system` | player damage → boss hit shapes |
@@ -30,6 +32,7 @@
 //! | 14 | `combat::player_bullet_hits_system` | `resolve_player_bullets` |
 //! | 15 | `combat::enemy_bullet_hits_system` | `resolve_enemy_hits` |
 //! | 16 | `combat::contact_system` | `resolve_contact` |
+//! | 16b | `weapons_wave3a::hantavirus_death_system` | death-triggered jumps, before the reap |
 //! | 17 | `loot::reap_enemies_system` | `reap_enemies` |
 //! | 18 | `loot::gems_system` | `update_gems` |
 //! | 19 | `loot::pickups_system` | `update_pickups` |
@@ -77,6 +80,7 @@ use bevy_ecs::prelude::*;
 use super::resources::TickInput;
 use super::systems::{
     boss, combat, enemy_move, fog, fx, gates, loot, player, projectiles, spawn, traps, weapons,
+    weapons_wave3a,
 };
 
 /// Legacy `self.damage_numbers.update(dt)` (neon merge, `World::update`).
@@ -126,6 +130,21 @@ pub fn build_tick_schedule() -> Schedule {
             // `bullets_system` moves them, and a sweep's damage lands before
             // `player_bullet_hits`/`reap_enemies` in the same tick.
             weapons::active_weapons_system,
+        )
+            .chain(),
+    );
+
+    // 11c-16: wave 3's Acid Rain and Hantavirus, then the projectile sweep
+    // through contact. A third tuple only because `IntoScheduleConfigs` stops
+    // at 20 entries; it is explicitly chained after `active_weapons_system`, so
+    // the order is still the single chain documented above. The drops' splash
+    // and the virus ticks land before `player_bullet_hits`/`reap_enemies`, and
+    // both read the cached `EnemyIndex` order, which nothing has invalidated
+    // since `grid_refresh`.
+    schedule.add_systems(
+        (
+            weapons_wave3a::acid_rain_system,
+            weapons_wave3a::hantavirus_system,
             projectiles::bullets_system,
             projectiles::pools_system,
             boss::boss_damage_system,
@@ -134,7 +153,8 @@ pub fn build_tick_schedule() -> Schedule {
             combat::enemy_bullet_hits_system,
             combat::contact_system,
         )
-            .chain(),
+            .chain()
+            .after(weapons::active_weapons_system),
     );
 
     // The interactive-object runtime (gates.rs): rat-holes + centring, the
@@ -156,6 +176,11 @@ pub fn build_tick_schedule() -> Schedule {
     // chained so the Nuke re-reap and every deferred drop stay in order.
     schedule.add_systems(
         (
+            // 16b: a Hantavirus host that died this tick (any source) passes
+            // its remaining jumps on while the corpse and the `EnemyIndex`
+            // order still exist — i.e. after every damage pass and before the
+            // reap despawns it.
+            weapons_wave3a::hantavirus_death_system,
             loot::reap_enemies_system,
             loot::gems_system,
             loot::pickups_system,

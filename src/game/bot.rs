@@ -1509,6 +1509,11 @@ fn weapon_tier(k: WeaponKind) -> f32 {
         // to a maxed weapon later: `upgrade_value` adds +6 per level pick.
         WeaponKind::TailThrash => 9.5,
         WeaponKind::SonicSqueak => 9.0,
+        // Wave 3: Acid Rain is area denial that needs no aiming (a horde
+        // weapon, like Tail Whip); Hantavirus needs a pack around the host to
+        // pay off, so it ranks below the direct damage weapons.
+        WeaponKind::AcidRain => 8.5,
+        WeaponKind::Hantavirus => 7.5,
     }
 }
 

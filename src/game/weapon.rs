@@ -39,6 +39,54 @@ pub const SQUEAK_BOSS_SLOW_SECS: f32 = 0.8;
 /// Outward shove (px/s of velocity) the ring gives everything it passes.
 pub const SQUEAK_SHOVE: f32 = 70.0;
 
+// ---- Wave 3 weapons A: Acid Rain and Hantavirus --------------------------
+//
+// Per-level numbers are tables instead of the generic `1 + 0.25 * (level - 1)`
+// scaling because `WAVE3_DESIGN.md` §4 fixes every one of them exactly (the
+// generic arithmetic would land on 2.63 s / 3.38 s cycles and 3.75 damage per
+// virus tick, not the designed 2.6 s / 3.4 s / 4). `Weapon::damage` and
+// `Weapon::cooldown` read these tables when a kind has one and keep the old
+// arithmetic for every other weapon.
+
+/// Acid Rain: how far from the rat a foe may be marked, in px.
+pub const RAIN_RANGE: f32 = 72.0;
+/// Seconds from the shot to the first drop landing.
+pub const RAIN_WINDUP: f32 = 0.35;
+/// Seconds between successive drops of one volley.
+pub const RAIN_STAGGER: f32 = 0.12;
+/// Seconds a drop is drawn *falling* before it lands. The mark ring is on the
+/// floor for the whole wind-up; inside this last window the three lime strokes
+/// descend.
+pub const RAIN_FALL: f32 = 0.16;
+/// Per-splash damage, L1 → L5 (design §4).
+pub const RAIN_DAMAGE: [f32; 5] = [8.0, 10.0, 12.0, 14.0, 16.0];
+/// Cycle length, L1 → L5.
+pub const RAIN_CYCLE: [f32; 5] = [2.8, 2.6, 2.4, 2.2, 2.0];
+/// Drops per volley, L1 → L5.
+pub const RAIN_DROPS: [u8; 5] = [2, 2, 3, 3, 4];
+/// Splash radius (px), L1 → L5.
+pub const RAIN_RADIUS: [f32; 5] = [7.0, 8.0, 8.0, 9.0, 10.0];
+
+/// Hantavirus: how far from the rat the first host may be tagged, in px.
+pub const VIRUS_RANGE: f32 = 56.0;
+/// Damage ticks per host (three pips, one lost per tick).
+pub const VIRUS_TICKS: u8 = 3;
+/// Seconds between ticks.
+pub const VIRUS_TICK: f32 = 0.35;
+/// Per-tick damage, L1 → L5 (design §4).
+pub const VIRUS_DAMAGE: [f32; 5] = [3.0, 4.0, 5.0, 6.0, 7.0];
+/// Cycle length, L1 → L5.
+pub const VIRUS_CYCLE: [f32; 5] = [3.6, 3.4, 3.2, 3.0, 2.8];
+/// Transfers a chain may still make, L1 → L5 (a chain marks `jumps + 1`
+/// bodies at most).
+pub const VIRUS_JUMPS: [u8; 5] = [1, 2, 2, 3, 4];
+/// Reach of a transfer, L1 → L5.
+pub const VIRUS_REACH: [f32; 5] = [14.0, 14.0, 18.0, 18.0, 22.0];
+
+/// Number of weapon kinds: the length of [`WeaponKind::all()`], and the width of
+/// every per-weapon balance array (`DamageLedger`, the batch report).
+pub const WEAPON_KINDS: usize = 10;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WeaponKind {
     Gnaw,        // homing dart at nearest enemy
@@ -49,10 +97,12 @@ pub enum WeaponKind {
     AcidSpit,    // lobbed shot that leaves a damaging pool
     TailThrash,  // ACTIVE: charged burst of sweeping tail sweeps
     SonicSqueak, // ACTIVE: charged expanding stunning ring
+    AcidRain,    // marks floor spots, staggered drops, splash damage
+    Hantavirus,  // tagging infection that jumps down a pack
 }
 
 impl WeaponKind {
-    pub fn all() -> [WeaponKind; 8] {
+    pub fn all() -> [WeaponKind; WEAPON_KINDS] {
         [
             WeaponKind::Gnaw,
             WeaponKind::CheeseSpray,
@@ -62,6 +112,8 @@ impl WeaponKind {
             WeaponKind::AcidSpit,
             WeaponKind::TailThrash,
             WeaponKind::SonicSqueak,
+            WeaponKind::AcidRain,
+            WeaponKind::Hantavirus,
         ]
     }
 
@@ -86,6 +138,8 @@ impl WeaponKind {
             WeaponKind::AcidSpit => 5,
             WeaponKind::TailThrash => 6,
             WeaponKind::SonicSqueak => 7,
+            WeaponKind::AcidRain => 8,
+            WeaponKind::Hantavirus => 9,
         }
     }
 
@@ -99,6 +153,8 @@ impl WeaponKind {
             WeaponKind::AcidSpit => "Acid Spit",
             WeaponKind::TailThrash => "Tail Thrash",
             WeaponKind::SonicSqueak => "Sonic Squeak",
+            WeaponKind::AcidRain => "Acid Rain",
+            WeaponKind::Hantavirus => "Hantavirus",
         }
     }
 
@@ -115,6 +171,8 @@ impl WeaponKind {
             // two player-triggered weapons).
             WeaponKind::TailThrash => "ACTIVE: press SPACE to thrash a long sweeping arc.",
             WeaponKind::SonicSqueak => "ACTIVE: press SPACE to squeak a stunning ring.",
+            WeaponKind::AcidRain => "Marks the floor; staggered drops splash everything nearby.",
+            WeaponKind::Hantavirus => "Tags a foe for three ticks; the mark jumps on when it dies.",
         }
     }
 
@@ -128,6 +186,8 @@ impl WeaponKind {
             WeaponKind::AcidSpit => "Stomach contents, redirected.",
             WeaponKind::TailThrash => "The tail remembered every boot.",
             WeaponKind::SonicSqueak => "Past hearing, straight into the skull.",
+            WeaponKind::AcidRain => "There was a ceiling here once.",
+            WeaponKind::Hantavirus => "Somebody passed a note in Block C.",
         }
     }
 
@@ -141,6 +201,30 @@ impl WeaponKind {
             WeaponKind::AcidSpit => (160, 255, 90),
             WeaponKind::TailThrash => (255, 178, 92),
             WeaponKind::SonicSqueak => (140, 240, 255),
+            // Lime with more yellow in it than Acid Spit's bile green, so the
+            // two acids read apart; plum is unused by any other weapon.
+            WeaponKind::AcidRain => (198, 255, 72),
+            WeaponKind::Hantavirus => (206, 106, 190),
+        }
+    }
+
+    /// Per-level cycle table, for the kinds designed as explicit tables (see
+    /// the constants at the top of this file). `None` means "use the generic
+    /// `1 - 0.06 * (level - 1)` arithmetic".
+    pub fn level_cooldowns(self) -> Option<&'static [f32; 5]> {
+        match self {
+            WeaponKind::AcidRain => Some(&RAIN_CYCLE),
+            WeaponKind::Hantavirus => Some(&VIRUS_CYCLE),
+            _ => None,
+        }
+    }
+
+    /// Per-level damage table; see [`WeaponKind::level_cooldowns`].
+    pub fn level_damage(self) -> Option<&'static [f32; 5]> {
+        match self {
+            WeaponKind::AcidRain => Some(&RAIN_DAMAGE),
+            WeaponKind::Hantavirus => Some(&VIRUS_DAMAGE),
+            _ => None,
         }
     }
 
@@ -162,6 +246,8 @@ impl WeaponKind {
             // every other weapon's (`Weapon::cooldown`).
             WeaponKind::TailThrash => 10.0,
             WeaponKind::SonicSqueak => 6.0,
+            WeaponKind::AcidRain => RAIN_CYCLE[0],
+            WeaponKind::Hantavirus => VIRUS_CYCLE[0],
         }
     }
 
@@ -203,6 +289,11 @@ impl WeaponKind {
             // leaves the thrash as the damagedealer of the pair.
             WeaponKind::TailThrash => 26.0,
             WeaponKind::SonicSqueak => 9.0,
+            // Both wave-3 weapons carry their own per-level tables (design §4)
+            // instead of the generic 25 %-per-level curve; these are the L1
+            // numbers the tables start from.
+            WeaponKind::AcidRain => RAIN_DAMAGE[0],
+            WeaponKind::Hantavirus => VIRUS_DAMAGE[0],
         }
     }
 }
@@ -227,8 +318,19 @@ impl Weapon {
         self.level >= self.kind.max_level()
     }
 
-    /// Damage scales ~25% per level.
+    /// The 0-based, clamped design-table index for this weapon's level. Every
+    /// `[f32; 5]`/`[u8; 5]` table at the top of this file is L1-first.
+    #[inline]
+    fn level_index(&self) -> usize {
+        (self.level.clamp(1, self.kind.max_level()) as usize) - 1
+    }
+
+    /// Damage scales ~25% per level, except for the kinds that carry an
+    /// explicit per-level table (Acid Rain, Hantavirus).
     pub fn damage(&self) -> f32 {
+        if let Some(table) = self.kind.level_damage() {
+            return table[self.level_index()];
+        }
         self.kind.base_damage() * (1.0 + 0.25 * (self.level - 1) as f32)
     }
 
@@ -239,7 +341,34 @@ impl Weapon {
     /// bind. (Clamping the *factor* as before looked like a safety net but was
     /// dead code — 1.0 - 0.06 * 4 = 0.76 never drops under 0.5.)
     pub fn cooldown(&self) -> f32 {
+        if let Some(table) = self.kind.level_cooldowns() {
+            return table[self.level_index()];
+        }
         self.kind.base_cooldown() * (1.0 - 0.06 * (self.level - 1) as f32)
+    }
+
+    /// Acid Rain drops per volley (design §4's "2 / 2 / 3 / 3 / 4").
+    #[inline]
+    pub fn rain_drops(&self) -> u8 {
+        RAIN_DROPS[self.level_index()]
+    }
+
+    /// Acid Rain splash radius in px.
+    #[inline]
+    pub fn rain_radius(&self) -> f32 {
+        RAIN_RADIUS[self.level_index()]
+    }
+
+    /// Hantavirus transfers the chain may still make from its first host.
+    #[inline]
+    pub fn virus_jumps(&self) -> u8 {
+        VIRUS_JUMPS[self.level_index()]
+    }
+
+    /// Hantavirus transfer reach in px.
+    #[inline]
+    pub fn virus_reach(&self) -> f32 {
+        VIRUS_REACH[self.level_index()]
     }
 
     /// Reach in px of an active weapon's effect: the thrash arc's radius or the
@@ -286,6 +415,12 @@ mod tests {
     #[test]
     fn cooldown_shrinks_6_percent_per_level() {
         for kind in WeaponKind::all() {
+            // The two wave-3 weapons carry an explicit per-level cycle table
+            // (design §4) instead of the generic 6 %-per-level arithmetic;
+            // `wave3_weapons_match_the_design_tables` checks those.
+            if kind.level_cooldowns().is_some() {
+                continue;
+            }
             let base = kind.base_cooldown();
             let mut prev = f32::INFINITY;
             for level in 1..=kind.max_level() {
@@ -313,7 +448,8 @@ mod tests {
     /// weapon, never auto-fire, and their reach/charge scale with level.
     #[test]
     fn active_weapons_are_marked_and_scale_with_level() {
-        assert_eq!(WeaponKind::all().len(), 8);
+        assert_eq!(WeaponKind::all().len(), WEAPON_KINDS);
+        assert_eq!(WEAPON_KINDS, 10);
         for kind in WeaponKind::all() {
             assert_eq!(
                 kind.is_active(),
@@ -363,6 +499,58 @@ mod tests {
         squeak.level = WeaponKind::SonicSqueak.max_level();
         assert_eq!(squeak.active_reach(), 130.0);
         assert!((squeak.damage() - 18.0).abs() < 1e-4);
+    }
+
+    /// The four numbers of every `WAVE3_DESIGN.md` §4 row this worker owns,
+    /// per level, straight from the table in the doc.
+    #[test]
+    fn wave3_weapons_match_the_design_tables() {
+        // Damage, cycle, count and reach per rank, L1 → L5.
+        let expect = [
+            (
+                WeaponKind::AcidRain,
+                [8.0, 10.0, 12.0, 14.0, 16.0],
+                [2.8, 2.6, 2.4, 2.2, 2.0],
+                [2.0, 2.0, 3.0, 3.0, 4.0],
+                [7.0, 8.0, 8.0, 9.0, 10.0],
+            ),
+            (
+                WeaponKind::Hantavirus,
+                [3.0, 4.0, 5.0, 6.0, 7.0],
+                [3.6, 3.4, 3.2, 3.0, 2.8],
+                [1.0, 2.0, 2.0, 3.0, 4.0],
+                [14.0, 14.0, 18.0, 18.0, 22.0],
+            ),
+        ];
+        for (kind, dmg, cycle, count, reach) in expect {
+            for level in 1..=5u8 {
+                let mut w = Weapon::new(kind);
+                w.level = level;
+                let i = (level - 1) as usize;
+                assert_eq!(w.damage(), dmg[i], "{kind:?} L{level} damage");
+                assert_eq!(w.cooldown(), cycle[i], "{kind:?} L{level} cycle");
+                let (got_count, got_reach) = match kind {
+                    WeaponKind::AcidRain => (w.rain_drops() as f32, w.rain_radius()),
+                    _ => (w.virus_jumps() as f32, w.virus_reach()),
+                };
+                assert_eq!(got_count, count[i], "{kind:?} L{level} count");
+                assert_eq!(got_reach, reach[i], "{kind:?} L{level} reach");
+            }
+            // Level 1 is the base, so the generic `Weapon::new` path is intact.
+            let w = Weapon::new(kind);
+            assert_eq!(w.damage(), kind.base_damage());
+            assert_eq!(w.cooldown(), kind.base_cooldown());
+            // Neither is a player-triggered weapon, and neither has an active
+            // reach: they auto-fire off a cooldown.
+            assert!(!kind.is_active());
+            assert_eq!(w.active_reach(), 0.0);
+        }
+        // A level past the cap must not index out of the table (the upgrade
+        // loop caps levels, but a corrupt save should not panic the sim).
+        let mut w = Weapon::new(WeaponKind::AcidRain);
+        w.level = 9;
+        assert_eq!(w.damage(), 16.0);
+        assert_eq!(w.cooldown(), 2.0);
     }
 
     #[test]

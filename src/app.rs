@@ -2733,6 +2733,53 @@ mod tests {
                     hh.frame(&[]);
                 }
             }
+            // Wave 3 weapons A, mid-effect: `RATRUN_DUMP=rain` catches a volley
+            // in the air (every mark locked, the lead drop's strokes coming
+            // down), `RATRUN_DUMP=virus` a chain two ticks into its first host
+            // (two pips, the third about to jump).
+            "rain" | "virus" => {
+                hh.enter_playing();
+                {
+                    use crate::game::weapon::WeaponKind;
+                    use rand::SeedableRng;
+                    let w = hh.app.world.as_mut().unwrap();
+                    let kind = if target == "rain" {
+                        WeaponKind::AcidRain
+                    } else {
+                        WeaponKind::Hantavirus
+                    };
+                    // Only the weapon this capture is about: a Gnaw dart in
+                    // flight would read as part of the effect.
+                    w.player.loadout.weapons = vec![crate::game::weapon::Weapon {
+                        kind,
+                        level: 3,
+                        timer: 0.0,
+                    }];
+                    w.player.dash_cd = 5.0;
+                    let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+                    let p = w.player.pos;
+                    // Tough bodies spread through both weapons' reach, so the
+                    // volley fans out over a real crowd and a chain has fresh
+                    // neighbours to jump to.
+                    for i in 0..28 {
+                        let a = i as f32 * 0.42 + 0.3;
+                        let r = 12.0 + (i % 5) as f32 * 9.0;
+                        let at = p + crate::math::Vec2::from_angle(a) * r;
+                        let kind = if i % 6 == 2 {
+                            crate::game::enemy::EnemyKind::Cat
+                        } else {
+                            crate::game::enemy::EnemyKind::Skitterer
+                        };
+                        w.spawn_enemy_with_rng(kind, at, 40.0, &mut rng);
+                    }
+                }
+                // ~0.23 s: the rain volley is fully marked and still falling;
+                // the virus has tagged its first host and has not ticked yet.
+                let frames = if target == "rain" { 17 } else { 30 };
+                for _ in 0..frames {
+                    hh.frame(&[]);
+                }
+            }
             "levelup" => {
                 hh.frame(&[KeyCode::Enter]); // -> Story
                 hh.frame(&[KeyCode::Enter]); // dossier -> MapIntro

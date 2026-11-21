@@ -239,8 +239,8 @@ impl LevelOutcome {
     }
 }
 
-/// `[f32; 8]` in `WeaponKind::all()` order → a serialisable name map.
-fn weapon_damage_map(by_kind: &[f32; 8]) -> BTreeMap<String, f32> {
+/// Per-weapon damage in `WeaponKind::all()` order → a serialisable name map.
+fn weapon_damage_map(by_kind: &[f32]) -> BTreeMap<String, f32> {
     WeaponKind::all()
         .iter()
         .map(|k| (k.name().to_string(), by_kind[k.index()]))
@@ -797,7 +797,7 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
             death: outcome.death.clone(),
         });
         // A weapon "was taken" by a run once, however many levels levelled it.
-        let mut taken_in_run = [false; 8];
+        let mut taken_in_run = [false; crate::game::weapon::WEAPON_KINDS];
         for level in &outcome.levels {
             let agg = match levels.iter_mut().find(|l| l.level == level.level) {
                 Some(a) => a,

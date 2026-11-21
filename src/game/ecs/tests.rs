@@ -541,9 +541,15 @@ fn enemy_cap_holds_through_a_full_run() {
         ticks += 1;
     }
     assert!(w.director.boss_spawned, "boss never spawned");
+    // Two ways to end a full run: the clock runs out while the boss is still
+    // up, or the build kills the boss and the level completes. Every weapon
+    // added to the card pool shifts the seeded upgrade draws, which moves the
+    // second ending by tens of seconds (wave 3's two new weapons already do),
+    // so the cap check above is the invariant and the ending is either.
     assert!(
-        w.elapsed >= director::RUN_SECONDS,
-        "run did not reach the clock"
+        w.level_complete || w.elapsed >= director::RUN_SECONDS,
+        "run ended at {:.1}s without reaching the clock or clearing the level",
+        w.elapsed
     );
 }
 

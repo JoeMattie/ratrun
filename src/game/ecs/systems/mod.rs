@@ -17,3 +17,4 @@ pub mod projectiles;
 pub mod spawn;
 pub mod traps;
 pub mod weapons;
+pub mod weapons_wave3a;

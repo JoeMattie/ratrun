@@ -96,6 +96,10 @@ pub fn weapon_glyph(kind: WeaponKind) -> char {
         // the thrash, a ring for the squeak.
         WeaponKind::TailThrash => 'ϟ',
         WeaponKind::SonicSqueak => '◯',
+        // Wave 3: a falling drop for Acid Rain, a cross (the tag) for
+        // Hantavirus.
+        WeaponKind::AcidRain => '↓',
+        WeaponKind::Hantavirus => '✚',
     }
 }
 
