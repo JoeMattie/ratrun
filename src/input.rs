@@ -49,28 +49,76 @@ impl DashKey {
         }
     }
 
-    /// The title screen's controls line for this mode. Both modes name their
-    /// dash key, because the binding really is different: in the Ctrl mode
-    /// Space only fires the active weapons, so calling it "dash+active" would
-    /// be a lie.
-    pub fn title_legend(self, wide: bool) -> &'static str {
+    /// The title plate's controls legend, **most important line first**.
+    ///
+    /// Every live control for the current mode is named here at least once:
+    /// movement, the dash key, the actives key, the click's two jobs, wheel and
+    /// `Z`/`X` zoom, `Tab` map, `N` minimap size, `C` cursor, `O` options, `M`
+    /// mute, the `[` `]` / `-` `=` volume keys, pause and quit. The review found
+    /// the old single line concealing the click's second action and dropping
+    /// zoom, `N`, `C` and options entirely, and the narrow variant losing
+    /// movement — so the plate lays out as many lines as it has rows for
+    /// (see `menu::draw_title`) and the most essential line is never the one
+    /// dropped.
+    ///
+    /// Both modes name their dash key, because the binding really is different:
+    /// in the Ctrl mode Space *only* fires the active weapons, so calling it
+    /// "dash+active" would be a lie.
+    pub fn title_legend_lines(self, wide: bool) -> &'static [&'static str] {
         match (self, wide) {
-            (DashKey::Ctrl, true) => {
-                "WASD/arrows/mouse move · Ctrl/click dash · Space actives · RMB pause · M mute"
-            }
-            (DashKey::Ctrl, false) => "Ctrl dash · Space actives · RMB pause · M mute",
-            (DashKey::Space, true) => {
-                "WASD/arrows/mouse move · Space/click dash+active · right click pause · M mute"
-            }
-            (DashKey::Space, false) => "WASD/arrows · Space dash+active · RMB pause · M mute",
+            (DashKey::Ctrl, true) => &[
+                "WASD/mouse move · Ctrl dash · Space actives · click = dash + ready actives · Esc/P pause",
+                "wheel or Z/X zoom · Tab map · N minimap · C cursor · O options · M mute",
+                "[ ] music · - = effects · ↑↓ select · ←→ map · Enter confirm · S story · Q quit",
+            ],
+            (DashKey::Ctrl, false) => &[
+                "WASD/mouse move · Ctrl dash · Space actives",
+                "click = dash + ready actives · Esc/P pause",
+                "wheel or Z/X zoom · Tab map · N minimap · C cursor",
+                "O options · M mute · [ ] - = volume · Q quit",
+            ],
+            (DashKey::Space, true) => &[
+                "WASD/mouse move · Space dash + actives · click = dash + ready actives · Esc/P pause",
+                "wheel or Z/X zoom · Tab map · N minimap · C cursor · O options · M mute",
+                "[ ] music · - = effects · ↑↓ select · ←→ map · Enter confirm · S story · Q quit",
+            ],
+            (DashKey::Space, false) => &[
+                "WASD/mouse move · Space dash + actives",
+                "click = dash + ready actives · Esc/P pause",
+                "wheel or Z/X zoom · Tab map · N minimap · C cursor",
+                "O options · M mute · [ ] - = volume · Q quit",
+            ],
         }
     }
 
-    /// The pause plate's status line.
-    pub fn pause_legend(self) -> &'static str {
-        match self {
-            DashKey::Ctrl => "M mute  ·  WASD/mouse move  ·  Ctrl dash",
-            DashKey::Space => "M mute  ·  WASD/mouse move  ·  Space dash",
+    /// The pause plate's controls legend, **most important line first**.
+    ///
+    /// Two lengths: `wide` fits the 76-column dossier (68 and 63 characters),
+    /// the narrow one fits the 58-column card and the compact short-terminal
+    /// plate (43 each). Every live control is named — movement, the dash key,
+    /// the actives, the click's two jobs, the volume keys, mute, options and
+    /// resume — and the legend is never replaced by the audio state: `M` lives
+    /// on the controls row as a chip that reads `M mute` / `M unmute`, so the
+    /// two can never contradict each other (the review found the old plate
+    /// swapping its whole legend for "audio muted").
+    pub fn pause_legend_lines(self, wide: bool) -> &'static [&'static str] {
+        match (self, wide) {
+            (DashKey::Ctrl, true) => &[
+                "WASD/mouse move · Ctrl dash · Space actives · click = dash + actives",
+                "[ ] music · - = effects · O options · Esc/P unpause · Q quit",
+            ],
+            (DashKey::Space, true) => &[
+                "WASD/mouse move · Space dash + actives · click = dash + actives",
+                "[ ] music · - = effects · O options · Esc/P unpause · Q quit",
+            ],
+            (DashKey::Ctrl, false) => &[
+                "move WASD · dash Ctrl · actives Space",
+                "click dash+actives · Esc/P unpause",
+            ],
+            (DashKey::Space, false) => &[
+                "move WASD · dash+actives Space",
+                "click dash+actives · Esc/P unpause",
+            ],
         }
     }
 }
@@ -669,14 +717,71 @@ mod tests {
     fn the_dash_key_names_the_live_binding() {
         assert_eq!(DashKey::Ctrl.name(), "CTRL");
         assert_eq!(DashKey::Space.name(), "SPACE");
-        // Both legends must name the live key and what Space does.
-        assert!(DashKey::Ctrl.title_legend(true).contains("Ctrl/click dash"));
-        assert!(DashKey::Ctrl.title_legend(true).contains("Space actives"));
-        assert!(DashKey::Ctrl.title_legend(false).starts_with("Ctrl dash"));
-        assert!(DashKey::Space.title_legend(true).contains("Space/click dash"));
-        assert!(DashKey::Space.title_legend(false).starts_with("WASD/arrows · Space"));
-        assert!(DashKey::Ctrl.pause_legend().ends_with("Ctrl dash"));
-        assert!(DashKey::Space.pause_legend().ends_with("Space dash"));
+        // Both legends must name the live key and what Space does, and the
+        // click's two jobs (`WAVE3 review`, "Controls and full racks").
+        for wide in [true, false] {
+            let ctrl = DashKey::Ctrl.title_legend_lines(wide).join(" ");
+            assert!(ctrl.contains("Ctrl dash"), "{ctrl}");
+            assert!(ctrl.contains("Space actives"), "{ctrl}");
+            assert!(ctrl.contains("click = dash + ready actives"), "{ctrl}");
+            let space = DashKey::Space.title_legend_lines(wide).join(" ");
+            assert!(space.contains("Space dash + actives"), "{space}");
+            assert!(space.contains("click = dash + ready actives"), "{space}");
+        }
+        // Every live control is named by the title legend and by the pause one.
+        for mode in [DashKey::Ctrl, DashKey::Space] {
+            let title = mode.title_legend_lines(true).join(" ");
+            for needle in [
+                "move",
+                "dash",
+                "actives",
+                "click",
+                "zoom",
+                "Tab map",
+                "N minimap",
+                "C cursor",
+                "O options",
+                "M mute",
+                "[ ] music",
+                "- = effects",
+                "pause",
+                "Q quit",
+            ] {
+                assert!(title.contains(needle), "title legend misses {needle:?}: {title}");
+            }
+            let pause = mode.pause_legend_lines(true).join(" ");
+            for needle in [
+                "move",
+                "dash",
+                "actives",
+                "click",
+                "[ ] music",
+                "- = effects",
+                "O options",
+                "Esc/P unpause",
+            ] {
+                assert!(pause.contains(needle), "pause legend misses {needle:?}: {pause}");
+            }
+        }
+        // Narrow plates keep movement and drop nothing important first: the
+        // first line is the one a short plate can afford.
+        assert!(DashKey::Ctrl.title_legend_lines(false)[0].contains("move"));
+        assert!(DashKey::Space.title_legend_lines(false)[0].contains("move"));
+        // The narrow pause legend still names movement, the dash, the actives,
+        // the click and the way back out of mute.
+        for mode in [DashKey::Ctrl, DashKey::Space] {
+            let narrow = mode.pause_legend_lines(false).join(" ");
+            for needle in ["move", "dash", "actives", "click", "Esc/P unpause"] {
+                assert!(narrow.contains(needle), "narrow pause legend misses {needle:?}: {narrow}");
+            }
+            // …and every legend line fits the 58-column card's inner width.
+            for line in mode.pause_legend_lines(false) {
+                assert!(line.chars().count() <= 54, "{line:?} is wider than the card");
+            }
+            for line in mode.pause_legend_lines(true) {
+                assert!(line.chars().count() <= 72, "{line:?} is wider than the dossier");
+            }
+        }
         // Switching the mode after construction (main's confirmed answer).
         let mut s = InputState::new(true);
         s.set_lone_ctrl(false);

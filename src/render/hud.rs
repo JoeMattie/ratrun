@@ -153,6 +153,48 @@ pub fn weapon_glyph(kind: WeaponKind) -> char {
     }
 }
 
+/// Two-to-four character tag for a weapon slot in the HUD rack.
+///
+/// **These are the identity of a slot, not an abbreviation of its name.** The
+/// review found the two Tail weapons sharing the tag `Ta` in every mode (and
+/// `Tail` in the wide one), because the tag was the first characters of the
+/// *name*: both begin "Tail ". A table with its first two characters unique
+/// across all twelve weapons (and all twelve evolutions) is the fix, and
+/// `hud::tests::every_weapon_and_evolution_tag_is_distinct` pins it.
+#[allow(unreachable_patterns)]
+pub fn weapon_tag(kind: WeaponKind, evolved: bool) -> &'static str {
+    if evolved {
+        return match kind {
+            WeaponKind::Gnaw => "MILK",
+            WeaponKind::CheeseSpray => "FOND",
+            WeaponKind::SqueakNova => "ECHO",
+            WeaponKind::SporeOrbit => "FAIRY",
+            WeaponKind::TailWhip => "RTC",
+            WeaponKind::AcidSpit => "DRAIN",
+            WeaponKind::TailThrash => "FLY",
+            WeaponKind::SonicSqueak => "ROLL",
+            WeaponKind::LaserEyes => "CARB",
+            WeaponKind::SuperDash => "RIP",
+            WeaponKind::AcidRain => "ACID",
+            WeaponKind::Hantavirus => "DEAD",
+        };
+    }
+    match kind {
+        WeaponKind::Gnaw => "GN",
+        WeaponKind::CheeseSpray => "CH",
+        WeaponKind::SqueakNova => "NOVA",
+        WeaponKind::SporeOrbit => "ORB",
+        WeaponKind::TailWhip => "WHIP",
+        WeaponKind::AcidSpit => "SPIT",
+        WeaponKind::TailThrash => "THRSH",
+        WeaponKind::SonicSqueak => "SQK",
+        WeaponKind::LaserEyes => "EYE",
+        WeaponKind::SuperDash => "DASH",
+        WeaponKind::AcidRain => "RAIN",
+        WeaponKind::Hantavirus => "VIR",
+    }
+}
+
 /// Codename of the level's themed boss, plus the overlay's classification tag.
 ///
 /// The names are the campaign screens' own ([`CampaignLevel::boss_name`] in
@@ -228,6 +270,13 @@ pub enum CalloutKind {
     WindupMouse,
     PocketWatch,
     CleanSocks,
+    // Wave 3 review: the first-three-minutes teaching hints. Each fires once
+    // per run — the review's complaint is that a new player is never told how
+    // actives fire or what a chest / shop hole is (`WAVE3 review`, "The first
+    // three minutes"). Appended, so the legacy kinds keep their order.
+    ActivesHint,
+    ChestHint,
+    ShopHint,
 }
 
 impl CalloutKind {
@@ -246,6 +295,9 @@ impl CalloutKind {
             CalloutKind::WindupMouse => BRASS_KEY,
             CalloutKind::PocketWatch => WATCH_ICE,
             CalloutKind::CleanSocks => SOCK_WHITE,
+            CalloutKind::ActivesHint => WARN_AMBER,
+            CalloutKind::ChestHint => TRAIL_GOLD,
+            CalloutKind::ShopHint => GATE_STEEL,
         }
     }
 }
@@ -339,6 +391,9 @@ pub struct HudState {
     /// The wave-3 pocket-find strip: `B12 M5 P4 S6` — one chip per active
     /// timed buff, refilled in `tick` so the draw path allocates nothing.
     buffs: String,
+    /// Does the strip have room for the finds' names (`CAP 12 MOUSE 5`) rather
+    /// than their one-letter tags? Set by `draw_bottom` each frame.
+    wide_chips: bool,
 
     // Overlay retained buffers (accessed by `overlay.rs`).
     pub(crate) boss_hp_text: String,
@@ -393,6 +448,14 @@ pub struct HudState {
     /// `(campaign level, level seed)` the maze latches belong to; a new level
     /// clears the bits (maze indices restart from 0 every level).
     maze_key: (usize, u64),
+
+    // ---- First-three-minutes teaching (one hint each per run) --------------
+    /// A charged active weapon has been explained.
+    taught_actives: bool,
+    /// A chest on the floor has been explained.
+    taught_chest: bool,
+    /// A mouse-hole shop has been explained.
+    taught_shop: bool,
 }
 
 impl Default for HudState {
@@ -413,7 +476,8 @@ impl Default for HudState {
             dash: String::with_capacity(16),
             dash_status: String::with_capacity(8),
             dash_key: DashKey::Space,
-            buffs: String::with_capacity(24),
+            buffs: String::with_capacity(48),
+            wide_chips: false,
             boss_hp_text: String::with_capacity(24),
             boss_banner: String::with_capacity(48),
             miniboss_text: String::with_capacity(48),
@@ -445,6 +509,9 @@ impl Default for HudState {
             maze_claimed_bits: 0,
             maze_slammed_bits: 0,
             maze_key: (usize::MAX, u64::MAX),
+            taught_actives: false,
+            taught_chest: false,
+            taught_shop: false,
         }
     }
 }
@@ -487,6 +554,9 @@ impl HudState {
         self.maze_claimed_bits = 0;
         self.maze_slammed_bits = 0;
         self.maze_key = (usize::MAX, u64::MAX);
+        self.taught_actives = false;
+        self.taught_chest = false;
+        self.taught_shop = false;
         let muted = self.telemetry.muted;
         self.telemetry = HudTelemetry {
             muted,
@@ -680,6 +750,60 @@ impl HudState {
         }
     }
 
+    /// The first-three-minutes hints, once each per run.
+    ///
+    /// The review's opening table found two things a new player is never told:
+    /// that the two ACTIVE weapons wait for a key press (a first Tail Thrash
+    /// "can look like a bad purchase if the player waits for auto-fire"), and
+    /// that a chest is collected by touch (and a mouse hole entered by leaning
+    /// into it). Both use the existing transient callout slot — one line, one
+    /// time, no permanent manual — and name the key the terminal actually uses.
+    fn teach_first_steps(&mut self, world: &World) {
+        if !self.taught_actives {
+            // The first charge of the player's first active weapon.
+            let charged = world
+                .player
+                .loadout
+                .weapons
+                .iter()
+                .position(|w| w.kind.is_active());
+            if let Some(i) = charged {
+                if self.active_ready.get(i).copied().unwrap_or(false) {
+                    self.taught_actives = true;
+                    let tag = match self.dash_key {
+                        DashKey::Ctrl => "SPACE",
+                        // Without lone-modifier reporting Space is also the
+                        // dash, so the hint says both — it is one press.
+                        DashKey::Space => "SPACE",
+                    };
+                    self.push_callout(
+                        CalloutKind::ActivesHint,
+                        tag,
+                        "CHARGED WEAPON · PRESS TO FIRE",
+                        3.6,
+                    );
+                }
+            }
+        }
+        if !self.taught_chest && world.chest_on_floor() {
+            self.taught_chest = true;
+            self.push_callout(CalloutKind::ChestHint, "CHEST", "TOUCH IT TO OPEN", 3.2);
+        }
+        if !self.taught_shop {
+            if let Some(d) = world.nearest_shop_hole() {
+                if d <= 96.0 {
+                    self.taught_shop = true;
+                    self.push_callout(
+                        CalloutKind::ShopHint,
+                        "MOUSE HOLE",
+                        "WALK UP TO THE SPOON",
+                        3.2,
+                    );
+                }
+            }
+        }
+    }
+
     /// Notify the HUD that the player just equipped an upgrade from the level-up screen.
     pub fn notify_upgrade(&mut self, title: &str) {
         self.level_flash = 0.9;
@@ -797,6 +921,7 @@ impl HudState {
         // 5b. Wave 3 pocket finds: one chip per running timer, with the whole
         //     seconds it has left (`B12 M5 P4 S6`). Refilled here (not in the
         //     draw path) so the strip reuses its buffer every frame.
+        let wide_chips = self.wide_chips;
         refill(&mut self.buffs, |b| {
             let buffs = &world.player.buffs;
             let mut any = false;
@@ -813,10 +938,24 @@ impl HudState {
                     b.push(' ');
                 }
                 let secs = left.ceil().max(1.0) as u32;
-                let _ = write!(b, "{}{:02}", kind.buff_tag(), secs.min(99));
+                // `B12 M05 P04 S06` is two letters of nothing: the review could
+                // not tell a buff from a passive. Wide terminals name the find,
+                // narrow ones keep the one-letter chip (the pause plate lists
+                // the running finds in full).
+                if wide_chips {
+                    let _ = write!(b, "{} {}", buff_chip_name(kind), secs.min(99));
+                } else {
+                    let _ = write!(b, "{}{:02}", kind.buff_tag(), secs.min(99));
+                }
                 any = true;
             }
         });
+
+        // 5c. The first-three-minutes hints (`WAVE3 review`, "The first three
+        //     minutes"): how actives fire, and what a chest / shop hole is.
+        //     One callout each per run, in the existing transient slot, so the
+        //     HUD never grows a permanent manual.
+        self.teach_first_steps(world);
 
         // 6. Maze cache claims and one-way gate slams (latched, see
         //    `notify_maze_feed`).
@@ -1037,9 +1176,12 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
     for (i, w) in weapons.iter().enumerate() {
         let (tag, lvl) = &mut state.weapon_tags[i];
         tag.clear();
-        // An evolved weapon shows its chest name (`Milk Teeth`), like the
-        // pause dossier and the keep manifest.
-        push_short_name(tag, w.name());
+        // The slot's *identity tag* (`weapon_tag`), not the head of its name:
+        // the review found both Tail weapons reading `Ta`/`Tail` because the
+        // tag was the first characters of the name. An evolved weapon wears its
+        // evolution's own tag (`MILK`, `DRAIN`, …) so a chest upgrade stays
+        // visible in the rack.
+        tag.push_str(weapon_tag(w.kind, w.evolved));
         lvl.clear();
         if w.is_max() {
             lvl.push('★');
@@ -1608,8 +1750,12 @@ fn draw_loadout_rack(frame: &mut Frame, rack: Rect, world: &World, state: &HudSt
                         .bg(TRACK)
                         .add_modifier(Modifier::BOLD)
                 };
+                // The token names the key rather than abbreviating it: a slot
+                // only has to fit its *own* five columns, which a full 5+5 rack
+                // at 80 columns does (the review's `SPC` case). Only the last
+                // slot on a very tight rail falls back to `SPC`.
                 let spare_after = weapon_limit.saturating_sub(tx + 1);
-                let use_full = spare_after >= 5 && weapons.len() <= 4 && passives_shown <= 3;
+                let use_full = spare_after >= 5;
                 let tok = if use_full { "SPACE" } else { "SPC" };
                 let tok_len = tok.len() as u16;
                 if spare_after >= tok_len {
@@ -1733,6 +1879,19 @@ fn draw_loadout_rack(frame: &mut Frame, rack: Rect, world: &World, state: &HudSt
     }
 }
 
+/// The short name a pocket find wears on the HUD's timed strip.
+fn buff_chip_name(kind: PickupKind) -> &'static str {
+    match kind {
+        PickupKind::BottleCap => "CAP",
+        PickupKind::WindupMouse => "MOUSE",
+        PickupKind::PocketWatch => "WATCH",
+        PickupKind::CleanSocks => "SOCKS",
+        PickupKind::Heal => "HEAL",
+        PickupKind::Magnet => "MAGNET",
+        PickupKind::Nuke => "PURGE",
+    }
+}
+
 /// Format a small `u32` into a stack byte buffer without heap allocation.
 fn fmt_u32_stack(mut n: u32, dst: &mut [u8; 8]) -> usize {
     if n == 0 {
@@ -1757,6 +1916,11 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
         return;
     }
 
+    // The timed-buff strip above this rail names its finds when there is room
+    // (`CAP 12 MOUSE 5`) and falls back to the one-letter chips when there is
+    // not (`B12 M05`). Read next tick by `HudState::tick`.
+    state.wide_chips = area.width >= 96;
+
     let max_hp = world.player.max_hp().max(1.0);
     let hp_val = world.player.hp.max(0.0);
     let hp = (hp_val / max_hp).clamp(0.0, 1.0);
@@ -1774,7 +1938,9 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
     let hurt_active = world.player.hurt_flash > 0.0 || state.hurt_edge > 0.15;
     refill(&mut state.hp, |b| {
         let _ = write!(b, "♥ {:.0}/{:.0}", hp_val, max_hp);
-        if area.width >= 96 && world.player.loadout.stats.armor > 0.0 {
+        // The review's 80×24 capture lost the armour suffix; it costs three
+        // cells on a 30-cell HP meter and fits from 80 columns up.
+        if area.width >= 80 && world.player.loadout.stats.armor > 0.0 {
             let _ = write!(b, " A{:.0}", world.player.loadout.stats.armor);
         }
     });
@@ -1782,7 +1948,11 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
     let xp_next = world.player.xp_to_next.max(1);
     let xp = (world.player.xp as f32 / xp_next as f32).clamp(0.0, 1.0);
     refill(&mut state.xp_label, |b| {
-        if area.width >= 92 {
+        // The review's 57×20 and 80×24 captures both lost the percentage, so
+        // the one number that answers "how close is the next card" was missing
+        // on the two commonest sizes. `XP 42%` is 6 cells and still leaves the
+        // meter a real bar at every supported play size (57×20 included).
+        if area.width >= 56 {
             let pct = (xp * 100.0).round() as u32;
             let _ = write!(b, "XP {:>2}%", pct.min(99));
         } else {
@@ -2172,7 +2342,9 @@ mod tests {
         assert!(text.contains("Lv3"), "missing level in {text:?}");
         assert!(text.contains("KO 42"), "missing kills in {text:?}");
         assert!(text.contains("Score 1234"), "missing score in {text:?}");
-        assert!(text.contains("▸Gnaw2"), "missing icon + weapon in {text:?}");
+        // The slot prints its identity tag (`weapon_tag`), not the head of its
+        // name: `Tail Whip` and `Tail Thrash` both began "Ta" that way.
+        assert!(text.contains("▸GN2"), "missing icon + weapon in {text:?}");
     }
 
     /// A zoom change flashes its setting in the status pill slot (the wheel and
@@ -2629,8 +2801,8 @@ mod tests {
             })
             .unwrap();
         let text = row_text(&terminal);
-        assert!(text.contains("Gn★"), "max-level star missing in {text:?}");
-        assert!(text.contains("Ac1"), "sixth weapon clipped in {text:?}");
+        assert!(text.contains("GN★"), "max-level star missing in {text:?}");
+        assert!(text.contains("CH1"), "second weapon clipped in {text:?}");
     }
 
     #[test]
@@ -3073,5 +3245,271 @@ mod tests {
                 .draw(|f| draw_top(f, f.area(), &w, &mut state))
                 .unwrap();
         }
+    }
+
+    /// Every weapon and every evolution wears a tag whose **first two
+    /// characters are unique**, so no two slots can ever read the same in a
+    /// two-letter rack (the review's "both tails can begin `Ta`").
+    #[test]
+    fn every_weapon_and_evolution_tag_is_distinct() {
+        let mut seen: Vec<(&'static str, String)> = Vec::new();
+        for kind in WeaponKind::all() {
+            for evolved in [false, true] {
+                let tag = weapon_tag(kind, evolved);
+                assert!(tag.len() >= 2 && tag.len() <= 5, "{tag:?} is not a 2-5 char tag");
+                let head: String = tag.chars().take(2).collect();
+                if let Some((other, _)) = seen.iter().find(|(_, h)| *h == head) {
+                    panic!(
+                        "{tag:?} and {other:?} share the two-letter tag {head:?} in a two-letter rack"
+                    );
+                }
+                seen.push((tag, head));
+            }
+        }
+        assert_eq!(seen.len(), 24, "twelve weapons and twelve evolutions");
+    }
+
+    /// The full-rack HUD the review photographed, at the three sizes it named.
+    ///
+    /// Five weapons (one evolved, one charged active), five passives, running
+    /// pocket finds, a dash on cooldown and the boss appointment. Asserts the
+    /// elements the review found clipped, colliding or ambiguous: distinct
+    /// weapon tags, the passive stack counts, the XP percentage and the
+    /// charged-active token. Nothing may run off the right edge.
+    #[test]
+    fn the_full_rack_layout_at_57_80_and_120_columns() {
+        use crate::game::loadout::Upgrade;
+
+        let mut w = known_world();
+        w.player.loadout.weapons = vec![
+            Weapon::new(WeaponKind::TailWhip),
+            Weapon::new(WeaponKind::TailThrash),
+            Weapon::new(WeaponKind::AcidRain),
+            Weapon::new(WeaponKind::Gnaw),
+            Weapon::new(WeaponKind::LaserEyes),
+        ];
+        // Both Tail weapons owned: the collision the review reported.
+        w.player.loadout.weapons[0].level = WeaponKind::TailWhip.max_level();
+        w.player.loadout.weapons[0].evolved = true;
+        w.player.loadout.weapons[1].level = 4;
+        w.player.loadout.weapons[1].timer = 0.0; // charged active
+        w.player.loadout.weapons[2].level = 2;
+        w.player.loadout.weapons[3].level = 5;
+        w.player.loadout.weapons[4].level = 1;
+        for p in [
+            PassiveKind::MaxHp,
+            PassiveKind::Damage,
+            PassiveKind::SpringHeel,
+            PassiveKind::Counterweight,
+            PassiveKind::SecondScent,
+        ] {
+            w.player.loadout.apply(&Upgrade::Passive(p));
+            w.player.loadout.apply(&Upgrade::Passive(p));
+        }
+        w.player.loadout.stats.armor = 2.0;
+        w.player.buffs.shield = 12.0;
+        w.player.buffs.socks = 6.0;
+        w.gold = 47;
+        w.player.xp = w.player.xp_to_next / 2;
+        w.player.dash_cd = 0.9;
+
+        let mut state = HudState::default();
+        state.tick(1.0 / 60.0, &w, &[], false);
+        state.tick(1.0 / 60.0, &w, &[], false);
+
+        for (tw, th) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();
+            terminal
+                .draw(|f| {
+                    let area = f.area();
+                    let top = Rect::new(0, 0, area.width, top_height(area));
+                    draw_top(f, top, &w, &mut state);
+                    let bottom = Rect::new(0, area.height - 1, area.width, 1);
+                    draw_bottom(f, bottom, &w, &mut state);
+                })
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            let rows: Vec<String> = (0..th)
+                .map(|y| (0..tw).map(|x| buf[(x, y)].symbol()).collect::<String>())
+                .collect();
+            let rack: String = rows[1..3].concat();
+            let rail = &rows[0];
+            let bottom = &rows[th as usize - 1];
+
+            // The two Tail weapons never read the same again.
+            let tags = [
+                weapon_tag(WeaponKind::TailWhip, true),
+                weapon_tag(WeaponKind::TailThrash, false),
+                weapon_tag(WeaponKind::AcidRain, false),
+            ];
+            if tw >= 74 {
+                for tag in tags {
+                    let shown: String = tag.chars().take(2).collect();
+                    assert!(
+                        rack.contains(&shown),
+                        "{tw}x{th}: weapon tag {shown:?} missing from the rack: {rack:?}"
+                    );
+                }
+            }
+
+            // Five passive stack marks and the divider are always there.
+            assert!(
+                rack.matches('×').count() >= 5,
+                "{tw}x{th}: passive stack counts missing: {rack:?}"
+            );
+            assert!(
+                rack.contains('│'),
+                "{tw}x{th}: the weapons/passives divider is gone: {rack:?}"
+            );
+
+            // The XP percentage answers "how close is the next card" and now
+            // fits at every supported play size.
+            if tw >= 56 {
+                assert!(
+                    bottom.contains("XP") && bottom.contains('%'),
+                    "{tw}x{th}: XP percentage missing: {bottom:?}"
+                );
+                assert!(
+                    bottom.contains("50%"),
+                    "{tw}x{th}: XP percentage is not the real value: {bottom:?}"
+                );
+            }
+            // The armour suffix has room from 80 columns up.
+            if tw >= 80 {
+                assert!(
+                    bottom.contains(" A"),
+                    "{tw}x{th}: the armour suffix is missing: {bottom:?}"
+                );
+            }
+            // The dash module keeps its key, its bar and its countdown.
+            let has_bar = bottom
+                .chars()
+                .any(|c| matches!(c, '▏' | '▎' | '▍' | '▌' | '▋' | '▊' | '▉' | '█'));
+            assert!(
+                bottom.contains("DASH") && has_bar,
+                "{tw}x{th}: dash module incomplete: {bottom:?}"
+            );
+
+            // The charged active names the key from 80 columns up (a full 5+5
+            // rack used to fall back to the ambiguous `SPC`).
+            if tw >= 80 {
+                assert!(
+                    rack.contains("SPACE"),
+                    "{tw}x{th}: charged active lost its key token: {rack:?}"
+                );
+            }
+
+            // The gold count is always on the rail.
+            assert!(rail.contains("47"), "{tw}x{th}: gold count missing: {rail:?}");
+
+            // Nothing overflows the rail: the last cell of row 0 is not a
+            // half-written token of a longer word (the status pill is
+            // right-aligned and the campaign pips sit past it).
+            assert!(
+                !rail.ends_with("S"),
+                "{tw}x{th}: the top rail clips a status word: {rail:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod first_steps_tests {
+    //! The first-three-minutes hints (`WAVE3 review`): a new player is told how
+    //! the active weapons fire and what a chest / a mouse-hole shop is — once
+    //! per run, through the existing transient callout slot, with no permanent
+    //! manual on the HUD.
+
+    use super::*;
+    use crate::game::loadout::Upgrade;
+    use crate::game::level::Theme;
+    use crate::game::weapon::WeaponKind;
+
+    fn hints(state: &HudState) -> Vec<(CalloutKind, String)> {
+        state
+            .callouts
+            .iter()
+            .filter(|c| c.active)
+            .filter_map(|c| c.kind.map(|k| (k, c.tag.clone())))
+            .collect()
+    }
+
+    fn tick_for(state: &mut HudState, w: &World, frames: usize) {
+        for _ in 0..frames {
+            state.tick(1.0 / 60.0, w, &[], false);
+        }
+    }
+
+    #[test]
+    fn a_charged_active_is_explained_once_per_run() {
+        let mut w = World::new(Theme::Sewer, 7);
+        w.player.loadout.apply(&Upgrade::NewWeapon(WeaponKind::TailThrash));
+        for weapon in w.player.loadout.weapons.iter_mut() {
+            if weapon.kind.is_active() {
+                weapon.timer = 0.0; // charged and waiting
+            }
+        }
+        let mut state = HudState::default();
+        tick_for(&mut state, &w, 3);
+        let seen = hints(&state);
+        assert!(
+            seen.iter().any(|(k, tag)| *k == CalloutKind::ActivesHint && tag == "SPACE"),
+            "the charged active was never explained: {seen:?}"
+        );
+        // It fires once: let the pill expire, then keep charging and ticking.
+        tick_for(&mut state, &w, 400);
+        assert!(
+            !hints(&state).iter().any(|(k, _)| *k == CalloutKind::ActivesHint),
+            "the actives hint fired again"
+        );
+        // A new run teaches it again.
+        state.reset();
+        tick_for(&mut state, &w, 3);
+        assert!(hints(&state).iter().any(|(k, _)| *k == CalloutKind::ActivesHint));
+    }
+
+    #[test]
+    fn a_chest_on_the_floor_is_explained_once_per_run() {
+        let mut w = World::new(Theme::Sewer, 7);
+        let mut state = HudState::default();
+        tick_for(&mut state, &w, 3);
+        assert!(!hints(&state).iter().any(|(k, _)| *k == CalloutKind::ChestHint));
+        w.spawn_chest(w.player.pos + Vec2::new(40.0, 0.0));
+        tick_for(&mut state, &w, 2);
+        assert!(
+            hints(&state).iter().any(|(k, _)| *k == CalloutKind::ChestHint),
+            "a chest on the floor was never explained"
+        );
+        tick_for(&mut state, &w, 400);
+        assert!(!hints(&state).iter().any(|(k, _)| *k == CalloutKind::ChestHint));
+    }
+
+    #[test]
+    fn walking_up_to_a_mouse_hole_is_explained_once_per_run() {
+        let mut w = World::new(Theme::Sewer, 7);
+        let holes: Vec<Vec2> = w
+            .level
+            .objects
+            .shop_holes
+            .iter()
+            .map(|hole| hole.face())
+            .collect();
+        assert!(!holes.is_empty(), "the generated level has no mouse hole");
+        let mut state = HudState::default();
+        // Far from every hole: no hint.
+        w.player.pos = w.level.start;
+        tick_for(&mut state, &w, 3);
+        if w.nearest_shop_hole().unwrap_or(f32::MAX) > 96.0 {
+            assert!(!hints(&state).iter().any(|(k, _)| *k == CalloutKind::ShopHint));
+        }
+        // Standing at a hole: the hint fires.
+        w.player.pos = holes[0];
+        tick_for(&mut state, &w, 2);
+        assert!(
+            hints(&state).iter().any(|(k, _)| *k == CalloutKind::ShopHint),
+            "a mouse-hole shop was never explained"
+        );
+        tick_for(&mut state, &w, 400);
+        assert!(!hints(&state).iter().any(|(k, _)| *k == CalloutKind::ShopHint));
     }
 }

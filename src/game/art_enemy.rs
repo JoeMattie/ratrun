@@ -363,6 +363,24 @@ pub fn draw_enemy_crowd(
     }
 }
 
+/// The wave-3 tells that are anchored to a body but are warnings in their own
+/// right — the Bell Flea's landing crosses and the Turnkey's crossbar — drawn
+/// **without** the body. `World::draw_hostile_layer` re-stamps them after the
+/// lighting pass with this; the sprites are the ones the body pass draws.
+pub fn draw_w3_tells(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2, accent: Rgb) {
+    if !matches!(e.kind, EnemyKind::BellFlea | EnemyKind::Turnkey) {
+        return;
+    }
+    let Some(fr) = prepare_frame(pb, e, cam, accent) else {
+        return;
+    };
+    match e.kind {
+        EnemyKind::BellFlea => draw_bellflea_tells(pb, &fr, e, cam),
+        EnemyKind::Turnkey => draw_turnkey_bar(pb, &fr, e, cam),
+        _ => {}
+    }
+}
+
 /// Shared early-out (screen culling + sub-pixel fast path) and local-frame setup.
 #[inline(always)]
 fn prepare_frame(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2, accent: Rgb) -> Option<Frame> {

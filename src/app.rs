@@ -1478,9 +1478,22 @@ impl App {
         // that reports a lone Ctrl press; on one that cannot, Space keeps doing
         // both (see `InputState::dash_pressed`). A left click on the field is
         // always the pair: it is the mouse player's whole "do the thing".
+        //
+        // A click is the mouse player's whole "do the thing" gesture, so it
+        // asks for both — but it only **releases the charged actives when the
+        // dash actually starts**. A click while the dash is cooling is a
+        // refused dash (`Sfx::DashDenied` + the red gauge) and must not spend a
+        // charged defensive ring on the way out, which is what it used to do
+        // (`WAVE3 review`, "Controls and full racks"). Space is unaffected: it
+        // always fires the actives on its own.
         let click_dash = click == Some(Target::Dash);
+        let dash_ready = self
+            .world
+            .as_ref()
+            .is_none_or(|w| w.player.dash_cd <= 0.0);
+        let click = click_dash && dash_ready;
         let dash = click_dash || self.input.dash_pressed();
-        let active = click_dash || self.input.active_pressed();
+        let active = click || self.input.active_pressed();
         let mut ended = false;
         let mut level_done = false;
         let mut intensity = 1u32;
@@ -4747,7 +4760,35 @@ mod tests {
         );
         assert_eq!(w.player.dash_active, 0.0, "the dash was on cooldown");
 
-        // A mouse dash (left click on the field) is the same press.
+        // A left click on the field is the mouse player's dash gesture. When
+        // the dash is **ready** it releases the charged actives with it…
+        {
+            let w = h.app.world.as_mut().unwrap();
+            for weapon in w.player.loadout.weapons.iter_mut() {
+                if weapon.kind.is_active() {
+                    weapon.timer = 0.0;
+                }
+            }
+            w.player.dash_cd = 0.0;
+            w.player.dash_active = 0.0;
+            // Let the previous burst finish so the new one is unambiguous.
+            let mut fx = w.ecs.resource_mut::<crate::game::ecs::resources::ActiveFx>();
+            fx.thrash_left = 0.0;
+        }
+        let field = h.locate("▀");
+        h.events(&[], &[(MouseEventKind::Down(MouseButton::Left), field)]);
+        {
+            let w = h.app.world.as_ref().unwrap();
+            assert!(w.player.dash_active > 0.0, "the click did not dash");
+            assert!(
+                w.active_fx().thrash_active(),
+                "a click-dash must release a charged active weapon too"
+            );
+        }
+
+        // …and when the dash is **refused** (still cooling) the click spends
+        // nothing but the refusal: a charged defensive ring is never burned by
+        // a dash that did not happen (`WAVE3 review`, punch list 7).
         {
             let w = h.app.world.as_mut().unwrap();
             for weapon in w.player.loadout.weapons.iter_mut() {
@@ -4757,18 +4798,42 @@ mod tests {
             }
             w.player.dash_cd = 3.0;
             w.player.dash_active = 0.0;
-            // Let the previous burst finish so the new one is unambiguous.
             let mut fx = w.ecs.resource_mut::<crate::game::ecs::resources::ActiveFx>();
             fx.thrash_left = 0.0;
         }
-        let field = h.locate("▀");
-        h.events(
-            &[],
-            &[(MouseEventKind::Down(MouseButton::Left), field)],
-        );
+        h.events(&[], &[(MouseEventKind::Down(MouseButton::Left), field)]);
+        {
+            let w = h.app.world.as_ref().unwrap();
+            assert_eq!(w.player.dash_active, 0.0, "the dash was on cooldown");
+            assert!(
+                w.player.dash_denied > 0.0,
+                "a refused click-dash must still blip the gauge"
+            );
+            assert!(
+                !w.active_fx().thrash_active(),
+                "a refused click-dash must not spend a charged active"
+            );
+        }
+
+        // Space is not a click: on a terminal where it *is* the dash key it
+        // keeps doing both, so the keyboard player is never locked out of a
+        // charged weapon for the length of a dash cooldown.
+        {
+            let w = h.app.world.as_mut().unwrap();
+            for weapon in w.player.loadout.weapons.iter_mut() {
+                if weapon.kind.is_active() {
+                    weapon.timer = 0.0;
+                }
+            }
+            w.player.dash_cd = 3.0;
+            w.player.dash_active = 0.0;
+            let mut fx = w.ecs.resource_mut::<crate::game::ecs::resources::ActiveFx>();
+            fx.thrash_left = 0.0;
+        }
+        h.frame(&[KeyCode::Char(' ')]);
         assert!(
             h.app.world.as_ref().unwrap().active_fx().thrash_active(),
-            "a click-dash must release a charged active weapon too"
+            "Space still releases the actives while the dash recharges"
         );
     }
 
@@ -4914,7 +4979,7 @@ mod tests {
         let mut h = Harness::new(80, 24);
         h.frame(&[]);
         assert!(
-            h.screen_text().contains("Space/click dash"),
+            h.screen_text().contains("Space dash + actives"),
             "fallback title legend lost its Space binding"
         );
 
@@ -4923,7 +4988,7 @@ mod tests {
         h.app.set_lone_ctrl(true);
         h.frame(&[]);
         let text = h.screen_text();
-        assert!(text.contains("Ctrl/click dash"), "no Ctrl legend: {text:?}");
+        assert!(text.contains("Ctrl dash"), "no Ctrl legend: {text:?}");
         assert!(text.contains("Space actives"), "no active hint: {text:?}");
         assert_eq!(h.app.hud.dash_key, DashKey::Ctrl);
     }
@@ -5351,6 +5416,261 @@ mod tests {
         assert_eq!(summary.final_score, h.app.last_score);
         assert!(end_text.contains("SCORE BREAKDOWN"));
         assert!(end_text.contains("COMBAT METRICS"));
+    }
+
+    /// Gated behind `RATRUN_UX_DIR`: the wave-3 readability capture set.
+    ///
+    /// Writes ANSI frames (rasterise them with the scratchpad's `view.py`) of
+    /// the busy playfield at 1x and 2x, the full 5+5 HUD, the pause plate and
+    /// the title legend at 57×20, 80×24 and 120×40 — the three sizes and the
+    /// two zooms the review used. Lighting stays at its default (Full) so the
+    /// hostile layer and the screen-space ink are exercised for real.
+    #[test]
+    fn capture_ux_frames() {
+        use crate::game::ecs::components::Wick;
+        use crate::game::ecs::resources::spawn_with_id;
+        use crate::game::enemy::EnemyKind;
+        use crate::game::gem::{Chest, Gem, Gold, Pickup, PickupKind};
+        use crate::game::loadout::{PassiveKind, Upgrade};
+        use crate::game::weapon::{Weapon, WeaponKind};
+        use crate::math::Vec2;
+        use std::fmt::Write as _;
+
+        let Some(dir) = std::env::var_os("RATRUN_UX_DIR") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        /// Serialise the terminal buffer as an ANSI frame `view.py` can read.
+        fn ansi(terminal: &Terminal<TestBackend>, w: u16, h: u16) -> (String, String) {
+            let buf = terminal.backend().buffer();
+            let mut out = String::new();
+            let mut plain = String::new();
+            for y in 0..h {
+                for x in 0..w {
+                    let c = &buf[(x, y)];
+                    let (r, g, b) = xterm_color_rgb(c.fg);
+                    let (br, bg, bb) = xterm_color_rgb(c.bg);
+                    let _ = write!(
+                        out,
+                        "\x1b[38;2;{r};{g};{b};48;2;{br};{bg};{bb}m{}",
+                        c.symbol()
+                    );
+                    plain.push_str(c.symbol());
+                }
+                out.push_str("\x1b[0m\n");
+                plain.push('\n');
+            }
+            (out, plain)
+        }
+
+        for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let mut hh = Harness::new(w, h);
+            hh.enter_playing();
+            {
+                let rng = &mut rand::rngs::StdRng::from_seed([9u8; 32]);
+                use rand::SeedableRng;
+                let _ = rng;
+                let world = hh.app.world.as_mut().unwrap();
+                let mut rng = rand::rngs::StdRng::seed_from_u64(5);
+                let p = world.player.pos;
+                // A standing horde, from flecks to brutes. Tough enough that
+                // nothing dies during the capture: the frame is about reading a
+                // packed floor, not about a particle storm.
+                for i in 0..44 {
+                    let a = i as f32 * 0.37;
+                    let r = 16.0 + (i % 10) as f32 * 14.0;
+                    let kind = match i % 9 {
+                        3 => EnemyKind::Cat,
+                        5 => EnemyKind::Brute,
+                        7 => EnemyKind::Bat,
+                        _ => EnemyKind::Skitterer,
+                    };
+                    world.spawn_enemy_with_rng(
+                        kind,
+                        p + Vec2::from_angle(a) * r,
+                        6000.0,
+                        &mut rng,
+                    );
+                }
+                // Hostile fire in the air, some of it right beside the rat.
+                for i in 0..18 {
+                    let a = i as f32 * 0.7;
+                    let mut b = crate::game::bullet::Bullet::new(
+                        p + Vec2::from_angle(a) * (14.0 + (i % 5) as f32 * 9.0),
+                        Vec2::from_angle(a) * 40.0,
+                        3.0,
+                        crate::game::bullet::Faction::Enemy,
+                        (255, 120, 160),
+                    );
+                    b.life = 4.0;
+                    world.spawn_bullet(b);
+                }
+                // The loot language, one of each.
+                for (i, kind) in [
+                    PickupKind::BottleCap,
+                    PickupKind::WindupMouse,
+                    PickupKind::PocketWatch,
+                    PickupKind::CleanSocks,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    world.spawn_pickup(Pickup {
+                        pos: p + Vec2::from_angle(0.9 * i as f32 + 0.4) * 26.0,
+                        kind,
+                        bob: i as f32,
+                    });
+                }
+                for i in 0..4 {
+                    world.spawn_gem(Gem::new(p + Vec2::from_angle(i as f32 * 1.6) * 16.0, 1));
+                }
+                world.spawn_gem(Gem::new(p + Vec2::new(-10.0, 8.0), 25));
+                spawn_with_id(&mut world.ecs, Gold::new(p + Vec2::new(12.0, -10.0), 1));
+                spawn_with_id(&mut world.ecs, Gold::new(p + Vec2::new(15.0, -8.0), 1));
+                spawn_with_id(&mut world.ecs, Chest { pos: p + Vec2::new(20.0, -12.0) });
+                // A dead Wick Moth's fuse and a Hantavirus countdown.
+                spawn_with_id(
+                    &mut world.ecs,
+                    Wick::new(p + Vec2::new(-16.0, -12.0)),
+                );
+                // The full rack: five weapons (one evolved), five passives.
+                world.player.loadout.weapons = vec![
+                    {
+                        let mut wp = Weapon::new(WeaponKind::TailWhip);
+                        wp.level = WeaponKind::TailWhip.max_level();
+                        wp.evolved = true;
+                        wp
+                    },
+                    {
+                        let mut wp = Weapon::new(WeaponKind::TailThrash);
+                        wp.level = 4;
+                        wp.timer = 0.0;
+                        wp
+                    },
+                    Weapon::new(WeaponKind::AcidRain),
+                    Weapon::new(WeaponKind::Gnaw),
+                    Weapon::new(WeaponKind::LaserEyes),
+                ];
+                for pk in [
+                    PassiveKind::MaxHp,
+                    PassiveKind::Damage,
+                    PassiveKind::SpringHeel,
+                    PassiveKind::Counterweight,
+                    PassiveKind::SecondScent,
+                ] {
+                    world.player.loadout.apply(&Upgrade::Passive(pk));
+                    world.player.loadout.apply(&Upgrade::Passive(pk));
+                }
+                world.player.buffs.shield = 12.0;
+                world.player.buffs.socks = 6.0;
+                world.gold = 47;
+                world.player.xp = world.player.xp_to_next / 2;
+                world.player.dash_cd = 0.9;
+            }
+            // One tick to arm the tells, then a few frames so weapons fire.
+            let step = |hh: &mut Harness| {
+                {
+                    let w = hh.app.world.as_mut().unwrap();
+                    w.player.xp = 0;
+                    w.pending_levelups = 0;
+                    w.player.hp = w.player.max_hp();
+                }
+                hh.frame(&[]);
+                hh.app.screen = Screen::Playing;
+            };
+            for _ in 0..20 {
+                step(&mut hh);
+            }
+
+            for z in [1.0f32, 2.0] {
+                hh.app.world.as_mut().unwrap().set_zoom_instant(z);
+                hh.app.hud.notify_zoom(z);
+                for _ in 0..3 {
+                    step(&mut hh);
+                }
+                // Keep the zoom flash off the status pill: it is not the shot.
+                hh.app.hud.zoom_flash = None;
+                step(&mut hh);
+                let (out, plain) = ansi(&hh.terminal, w, h);
+                std::fs::write(dir.join(format!("{w}x{h}-play-{z}x.ansi")), out).unwrap();
+                std::fs::write(dir.join(format!("{w}x{h}-play-{z}x.txt")), plain).unwrap();
+            }
+            hh.app.world.as_mut().unwrap().set_zoom_instant(1.0);
+
+            // The pause plate (dossier or the compact rack plate).
+            hh.app.screen = Screen::Paused;
+            hh.frame(&[]);
+            let (out, plain) = ansi(&hh.terminal, w, h);
+            std::fs::write(dir.join(format!("{w}x{h}-pause.ansi")), out).unwrap();
+            std::fs::write(dir.join(format!("{w}x{h}-pause.txt")), plain).unwrap();
+            hh.app.muted = true;
+            hh.app.hud.telemetry.muted = true;
+            hh.frame(&[]);
+            let (out, plain) = ansi(&hh.terminal, w, h);
+            std::fs::write(dir.join(format!("{w}x{h}-pause-muted.ansi")), out).unwrap();
+            std::fs::write(dir.join(format!("{w}x{h}-pause-muted.txt")), plain).unwrap();
+        }
+
+        // The loot language on a clean floor: one of every find, a gem of each
+        // tier, two coins and a chest, with no horde and no particles. 1x and
+        // 2x, the two zooms the review judged shapes at.
+        for (w, h) in [(80u16, 24u16), (120, 40)] {
+            let mut hh = Harness::new(w, h);
+            hh.enter_playing();
+            hh.app.lighting = LightingMode::Full;
+            {
+                use rand::SeedableRng;
+                let _ = rand::rngs::StdRng::seed_from_u64(1);
+                let world = hh.app.world.as_mut().unwrap();
+                let p = world.player.pos;
+                world.player.loadout.weapons.clear();
+                world.player.iframes = 60.0;
+                for (i, kind) in [
+                    PickupKind::BottleCap,
+                    PickupKind::WindupMouse,
+                    PickupKind::PocketWatch,
+                    PickupKind::CleanSocks,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    world.spawn_pickup(Pickup {
+                        pos: p + Vec2::new(-45.0 + i as f32 * 14.0, -22.0),
+                        kind,
+                        bob: i as f32,
+                    });
+                }
+                for (i, v) in [1u32, 3, 5, 25].into_iter().enumerate() {
+                    world.spawn_gem(Gem::new(p + Vec2::new(-40.0 + i as f32 * 14.0, 20.0), v));
+                }
+                spawn_with_id(&mut world.ecs, Gold::new(p + Vec2::new(8.0, 20.0), 1));
+                spawn_with_id(&mut world.ecs, Gold::new(p + Vec2::new(12.0, 20.0), 1));
+                spawn_with_id(&mut world.ecs, Chest { pos: p + Vec2::new(24.0, 20.0) });
+            }
+            hh.frame(&[]);
+            hh.app.screen = Screen::Playing;
+            hh.frame(&[]);
+            hh.app.world.as_mut().unwrap().damage_numbers.clear();
+            for z in [1.0f32, 2.0] {
+                hh.app.world.as_mut().unwrap().set_zoom_instant(z);
+                hh.frame(&[]);
+                let (out, plain) = ansi(&hh.terminal, w, h);
+                std::fs::write(dir.join(format!("{w}x{h}-loot-{z}x.ansi")), out).unwrap();
+                std::fs::write(dir.join(format!("{w}x{h}-loot-{z}x.txt")), plain).unwrap();
+            }
+        }
+
+        // The title plate's controls legend, in both input modes if asked.
+        for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let mut hh = Harness::new(w, h);
+            hh.app.set_lone_ctrl(std::env::var("RATRUN_DUMP_CTRL").is_ok());
+            let text = hh.frame(&[]);
+            let (out, _) = ansi(&hh.terminal, w, h);
+            std::fs::write(dir.join(format!("{w}x{h}-title.ansi")), out).unwrap();
+            std::fs::write(dir.join(format!("{w}x{h}-title.txt")), text).unwrap();
+        }
     }
 
     /// Gated behind `RATRUN_HUD_DIR`: captures ANSI + plain text frames of
