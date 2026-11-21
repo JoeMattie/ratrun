@@ -1202,6 +1202,181 @@ pub fn emit_enemy_death(
                 kind: StainKind::Splat,
             });
         }
+        // ---- Wave 3 (`WAVE3_DESIGN.md` §9) ----------------------------
+        //
+        // Each kind's death has to say which corpse it was, because the wick's
+        // fuse is the one death in the game that keeps acting after the body
+        // is gone: it gets a bright, quiet flash of its own instead of a burst
+        // (the burst is `emit_wave3_burst`, one second later).
+        EnemyKind::Pillbug => {
+            // A silver shell caving in: heavy chips, a flat clang of dust.
+            let chips = ps.budget_count(9, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                chips,
+                62.0,
+                radius * 0.5,
+                Ramp::Custom((214, 220, 232), (86, 92, 108)),
+                0.44,
+                false,
+                Shape::Blob,
+                3.2,
+            );
+            let dust = ps.budget_count(6, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                dust,
+                24.0,
+                radius * 0.7,
+                Ramp::Smoke,
+                0.62,
+                false,
+                Shape::Puff,
+                2.4,
+            );
+            ps.push_stain(Stain {
+                pos,
+                radius: radius * 0.8,
+                color: stain_col,
+                life: 9.0,
+                max_life: 9.0,
+                seed: rng.random::<u16>(),
+                kind: StainKind::Splat,
+            });
+        }
+        EnemyKind::BellFlea => {
+            // A struck fork: fine copper filings, one bright chime pip.
+            let filings = ps.budget_count(8, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                filings,
+                88.0,
+                1.6,
+                Ramp::Custom((236, 168, 96), (108, 62, 30)),
+                0.30,
+                true,
+                Shape::Streak,
+                5.5,
+            );
+            let tint = ps.budget_count(4, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                tint,
+                30.0,
+                1.2,
+                Ramp::Blood(ichor),
+                0.38,
+                false,
+                Shape::Dot,
+                3.0,
+            );
+        }
+        EnemyKind::WickMoth => {
+            // The flame gutters to the corpse: a small warm puff and a glowing
+            // scorch mark, then the wick burns (art) and bursts (9 px).
+            let puff = ps.budget_count(5, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                puff,
+                28.0,
+                1.5,
+                Ramp::Fire,
+                0.36,
+                true,
+                Shape::Ember,
+                2.6,
+            );
+            ps.push_stain(Stain {
+                pos,
+                radius: 3.0,
+                color: (54, 32, 18),
+                life: 7.0,
+                max_life: 7.0,
+                seed: rng.random::<u16>(),
+                kind: StainKind::Scorch,
+            });
+        }
+        EnemyKind::Porter => {
+            // The sugar cube shatters: sharp pale shards and a splash of green.
+            let shards = ps.budget_count(7, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                shards,
+                70.0,
+                2.0,
+                Ramp::Custom((252, 252, 246), (176, 186, 168)),
+                0.36,
+                false,
+                Shape::Blob,
+                3.6,
+            );
+            let goo = ps.budget_count(6, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                goo,
+                44.0,
+                radius * 0.6,
+                Ramp::Blood(ichor),
+                0.44,
+                false,
+                Shape::Dot,
+                3.0,
+            );
+            ps.push_stain(Stain {
+                pos,
+                radius: radius * 0.7,
+                color: stain_col,
+                life: 8.0,
+                max_life: 8.0,
+                seed: rng.random::<u16>(),
+                kind: StainKind::Splat,
+            });
+        }
+        EnemyKind::Turnkey => {
+            // Brass scrap and a shower of cold sparks off a snapped key.
+            let scrap = ps.budget_count(8, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                scrap,
+                76.0,
+                radius * 0.5,
+                Ramp::Custom((236, 214, 122), (96, 82, 40)),
+                0.40,
+                false,
+                Shape::Streak,
+                4.0,
+            );
+            let sparks = ps.budget_count(6, false);
+            ps.burst_shaped(
+                rng,
+                pos,
+                sparks,
+                96.0,
+                1.2,
+                Ramp::Spark,
+                0.24,
+                true,
+                Shape::Dot,
+                5.0,
+            );
+            ps.push_stain(Stain {
+                pos,
+                radius: radius * 0.6,
+                color: stain_col,
+                life: 8.0,
+                max_life: 8.0,
+                seed: rng.random::<u16>(),
+                kind: StainKind::Splat,
+            });
+        }
     }
 }
 
@@ -3866,6 +4041,174 @@ pub fn emit_boss_mower_death(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) 
         color: (14, 12, 12),
         life: 16.0,
         max_life: 16.0,
+        seed: rng.random::<u16>(),
+        kind: StainKind::Scorch,
+    });
+}
+
+// ---- Wave 3 ordinary enemies ---------------------------------------------
+
+/// The shared "a warned attack just started" flash: a thin ring in the kind's
+/// own colour, thrown toward `dir` so the tell reads from the rat's side. The
+/// silhouette detail (the curled shell, the dotted crosses, the raised cube,
+/// the dotted bar) belongs to `art_enemy`; this is the moment-of-start cue.
+pub fn emit_wave3_tell(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    pos: Vec2,
+    dir: Vec2,
+    kind: EnemyKind,
+) {
+    let col = crate::render::palette::scale(kind.color(), 1.15);
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 1.5,
+        end_r: 9.0,
+        life: 0.20,
+        max_life: 0.20,
+        color: col,
+        core: (255, 250, 238),
+        thick: 1.0,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    let n = ps.budget_count(4, false);
+    ps.cone_shaped(
+        rng,
+        pos,
+        dir,
+        n,
+        34.0,
+        0.55,
+        Ramp::Custom(col, crate::render::palette::scale(col, 0.4)),
+        0.26,
+        true,
+        Shape::Dot,
+        4.0,
+    );
+}
+
+/// A Bell Flea's landing cross snapping shut (`echo` = the second, spring-back
+/// cross, drawn cooler and thrown downward).
+pub fn emit_flea_impact(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    pos: Vec2,
+    radius: f32,
+    echo: bool,
+) {
+    let (a, b) = if echo {
+        ((168, 214, 236), (74, 96, 132))
+    } else {
+        ((236, 198, 126), (128, 84, 42))
+    };
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 1.0,
+        end_r: radius,
+        life: 0.18,
+        max_life: 0.18,
+        color: a,
+        core: (255, 252, 240),
+        thick: 1.2,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    let n = ps.budget_count(5, false);
+    ps.burst_shaped(
+        rng,
+        pos,
+        n,
+        52.0,
+        2.0,
+        Ramp::Custom(a, b),
+        0.24,
+        true,
+        Shape::Streak,
+        5.0,
+    );
+}
+
+/// A Porter's cube sparkles as it lands a treatment.
+pub fn emit_porter_heal(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 1.0,
+        end_r: 7.0,
+        life: 0.26,
+        max_life: 0.26,
+        color: (198, 242, 208),
+        core: (255, 255, 248),
+        thick: 1.0,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    let n = ps.budget_count(5, false);
+    ps.burst_shaped(
+        rng,
+        pos,
+        n,
+        30.0,
+        1.5,
+        Ramp::Heal,
+        0.42,
+        true,
+        Shape::Cross,
+        3.0,
+    );
+}
+
+/// A Wick Moth's fuse bursting: 9 px of hot light that hurts both sides.
+pub fn emit_wave3_burst(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) {
+    let radius = crate::game::ecs::systems::enemy_wave3::WICK_BURST_RADIUS;
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 1.5,
+        end_r: radius + 3.0,
+        life: 0.26,
+        max_life: 0.26,
+        color: (255, 176, 84),
+        core: (255, 250, 230),
+        thick: 1.6,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    let sparks = ps.budget_count(12, false);
+    ps.burst_shaped(
+        rng,
+        pos,
+        sparks,
+        96.0,
+        2.5,
+        Ramp::Fire,
+        0.34,
+        true,
+        Shape::Streak,
+        4.5,
+    );
+    let embers = ps.budget_count(8, false);
+    ps.burst_shaped(
+        rng,
+        pos,
+        embers,
+        42.0,
+        3.0,
+        Ramp::Fire,
+        0.55,
+        true,
+        Shape::Ember,
+        2.5,
+    );
+    ps.push_stain(Stain {
+        pos,
+        radius: radius * 0.55,
+        color: (58, 34, 20),
+        life: 9.0,
+        max_life: 9.0,
         seed: rng.random::<u16>(),
         kind: StainKind::Scorch,
     });

@@ -354,6 +354,92 @@ const UNLOCKS: [(f32, EnemyKind, f32); 4] = [
     (120.0, EnemyKind::Brute, 1.5),
 ];
 
+// ---- Wave 3 kinds ---------------------------------------------------------
+//
+// `WAVE3_DESIGN.md` §1 and §9. **Every time in this block is written on the
+// design's fifteen-minute clock** and scaled by [`WAVE3_TIME_SCALE`], so
+// `w3-timeline` can stretch `RUN_SECONDS` to 900 without touching a number
+// here: the scale is derived from `RUN_SECONDS` itself.
+
+/// The run length the wave-3 unlock times in `WAVE3_DESIGN.md` are written for.
+pub const DESIGN_RUN_SECONDS: f32 = 900.0;
+
+/// Converts a design (fifteen-minute) time into the current build's clock.
+///
+/// The 5-minute build (`RUN_SECONDS = 300`, this worker's base) sees every
+/// wave-3 kind at a third of its design time, so all five land inside one run;
+/// the 15-minute build gets the design times unchanged. Only this expression
+/// needs to stay right as the timeline grows — nothing else in the file hard
+/// codes a wave-3 arrival.
+pub const WAVE3_TIME_SCALE: f32 = RUN_SECONDS / DESIGN_RUN_SECONDS;
+
+/// First appearance of each wave-3 kind, in **design** seconds (§1: Pillbugs
+/// at 2:00, Bell Fleas at 4:30, Wick Moths at 7:15, Porters at 8:15, Turnkeys
+/// at 9:45). Table order is the roll order, so a given rng state keeps picking
+/// the same kind.
+const WAVE3_UNLOCK_DESIGN: [(f32, EnemyKind); 5] = [
+    (120.0, EnemyKind::Pillbug),
+    (270.0, EnemyKind::BellFlea),
+    (435.0, EnemyKind::WickMoth),
+    (495.0, EnemyKind::Porter),
+    (585.0, EnemyKind::Turnkey),
+];
+
+/// Raw weight of each wave-3 kind before the 20 % cap is applied, in
+/// [`WAVE3_UNLOCK_DESIGN`] order (Pillbug, Bell Flea, Wick Moth, Porter,
+/// Turnkey). Deliberately close together: these are threats, not fodder, and
+/// the cap — not these numbers — decides how much of the horde they take.
+///
+/// The Pillbug is deliberately *not* weighted above the rest. It unlocks first
+/// (2:00, i.e. 40 s in the current build), so until the Bell Flea arrives it is
+/// the only wave-3 kind on the table and its weight *is* the wave-3 share; at
+/// 3.0 that filled the whole 20 % cap with the one kind that never chases
+/// (23 px/s, immobile while curled). Measured on the four-seed autoplay sample
+/// in `autoplay::tests::early_game_headline_rates_stay_inside_generous_bands`,
+/// Expert's damage over the first 120 s fell from 4.4 HP (no wave-3 kind) to
+/// 2.9 (the 3.0 weight), below that guard's 3.0 floor; at 2.0 it is 8.5 and the
+/// opening still meets its band. So no single kind gets to own the share.
+const WAVE3_WEIGHT: [f32; 5] = [2.0, 2.0, 2.5, 2.0, 2.0];
+
+/// §1: "Limit all five new kinds combined to 20 % of spawns."
+///
+/// A ceiling, and the shipped value: the five kinds together take at most a
+/// fifth of the roll, on every campaign level, at every point of the curve.
+/// (`WAVE3_WEIGHT` decides the mix *inside* that share, and the featured
+/// rotation doubles one kind's weight within it.)
+pub const WAVE3_SHARE_CAP: f32 = 0.20;
+
+/// §1: from 9:45 the three newest kinds rotate as *featured threats*, each
+/// taking twice its usual weight within that 20 % share for 30 s.
+const WAVE3_FEATURED_FROM_DESIGN: f32 = 585.0;
+const WAVE3_FEATURED_PERIOD_DESIGN: f32 = 30.0;
+const WAVE3_FEATURED: [EnemyKind; 3] = [
+    EnemyKind::WickMoth,
+    EnemyKind::Porter,
+    EnemyKind::Turnkey,
+];
+
+/// Design time of a wave-3 kind's first appearance, scaled to this build.
+#[inline]
+pub fn wave3_unlock_time(kind: EnemyKind) -> Option<f32> {
+    WAVE3_UNLOCK_DESIGN
+        .iter()
+        .find(|(_, k)| *k == kind)
+        .map(|(t, _)| t * WAVE3_TIME_SCALE)
+}
+
+/// The featured wave-3 kind at curve time `curve`, if the rotation has started.
+#[inline]
+pub fn wave3_featured(curve: f32) -> Option<EnemyKind> {
+    let from = WAVE3_FEATURED_FROM_DESIGN * WAVE3_TIME_SCALE;
+    if curve < from {
+        return None;
+    }
+    let period = WAVE3_FEATURED_PERIOD_DESIGN * WAVE3_TIME_SCALE;
+    let slot = (((curve - from) / period.max(1e-3)).floor() as usize) % WAVE3_FEATURED.len();
+    Some(WAVE3_FEATURED[slot])
+}
+
 /// Weighted pick of an enemy kind appropriate to curve time `curve`.
 pub fn pick_kind_at(curve: f32, rng: &mut impl Rng) -> EnemyKind {
     pick_kind_mixed(curve, 0, rng)
@@ -370,7 +456,7 @@ pub fn pick_kind_mixed(curve: f32, level: usize, rng: &mut impl Rng) -> EnemyKin
     let mix = &LEVEL_MIX[level_slot(level)];
     // One slot per possible kind, on the stack: this runs on every spawn roll
     // and must not allocate.
-    let mut table = [(EnemyKind::Skitterer, 0.0f32); 1 + UNLOCKS.len()];
+    let mut table = [(EnemyKind::Skitterer, 0.0f32); 1 + UNLOCKS.len() + WAVE3_UNLOCK_DESIGN.len()];
     table[0] = (EnemyKind::Skitterer, 6.0 * mix[0]);
     let mut n = 1;
     for &(unlock, kind, weight) in UNLOCKS.iter() {
@@ -383,6 +469,36 @@ pub fn pick_kind_mixed(curve: f32, level: usize, rng: &mut impl Rng) -> EnemyKin
             n += 1;
         }
     }
+    let base_n = n;
+
+    // Wave-3 kinds are appended after the base table, so the roll over a
+    // run without them is bit-for-bit the historical one. Their combined
+    // weight is then capped to `WAVE3_SHARE_CAP` of the whole table, which is
+    // what keeps five special-behaviour bodies from becoming the horde.
+    let featured = wave3_featured(curve);
+    let mut new_weight = 0.0f32;
+    for (i, &(design_at, kind)) in WAVE3_UNLOCK_DESIGN.iter().enumerate() {
+        if curve <= design_at * WAVE3_TIME_SCALE {
+            continue;
+        }
+        let boosted = if featured == Some(kind) { 2.0 } else { 1.0 };
+        let w = WAVE3_WEIGHT[i] * boosted;
+        new_weight += w;
+        table[n] = (kind, w);
+        n += 1;
+    }
+    if new_weight > 0.0 {
+        let base_total: f32 = table[..base_n].iter().map(|(_, w)| w).sum();
+        // new / (base + new) <= cap  <=>  new <= cap/(1-cap) * base
+        let cap = WAVE3_SHARE_CAP / (1.0 - WAVE3_SHARE_CAP) * base_total;
+        if new_weight > cap {
+            let scale = cap / new_weight;
+            for slot in &mut table[base_n..n] {
+                slot.1 *= scale;
+            }
+        }
+    }
+
     let live = &table[..n];
     let total: f32 = live.iter().map(|(_, w)| w).sum();
     let mut roll = rng.random_range(0.0..total);
@@ -844,7 +960,12 @@ mod tests {
             let mut counts: Vec<usize> = vec![0; KIND_ORDER.len()];
             for _ in 0..20_000 {
                 let k = pick_kind_mixed(curve, level, &mut rng);
-                let i = KIND_ORDER.iter().position(|x| *x == k).expect("known kind");
+                // The wave-3 kinds are not part of the per-level mix table;
+                // their share is capped separately, so this test measures the
+                // five base kinds' shares among themselves.
+                let Some(i) = KIND_ORDER.iter().position(|x| *x == k) else {
+                    continue;
+                };
                 counts[i] += 1;
             }
             counts
@@ -874,6 +995,155 @@ mod tests {
             let _ = pick_kind_mixed(curve, 2, &mut b);
             assert_eq!(a.random::<u64>(), b.random::<u64>());
         }
+    }
+
+    /// The five wave-3 kinds unlock at one third of their fifteen-minute design
+    /// times in the current 5-minute build (`WAVE3_TIME_SCALE`), in the §1
+    /// order, and never before their own instant.
+    #[test]
+    fn the_wave3_kinds_unlock_in_design_order() {
+        let expected = [
+            (EnemyKind::Pillbug, 120.0),
+            (EnemyKind::BellFlea, 270.0),
+            (EnemyKind::WickMoth, 435.0),
+            (EnemyKind::Porter, 495.0),
+            (EnemyKind::Turnkey, 585.0),
+        ];
+        let mut prev = 0.0;
+        for (kind, design_at) in expected {
+            let at = wave3_unlock_time(kind).expect("every wave-3 kind is in the table");
+            assert!(
+                (at - design_at * WAVE3_TIME_SCALE).abs() < 1e-3,
+                "{kind:?} unlocks at {at}, expected {}",
+                design_at * WAVE3_TIME_SCALE
+            );
+            assert!(
+                (at - design_at / 3.0).abs() < 1e-3,
+                "{kind:?}: in a 5-minute build the design clock is one third"
+            );
+            assert!(at > prev, "{kind:?} unlocked out of order");
+            prev = at;
+        }
+        // The last unlock is inside the run, and the whole set is inside the
+        // design's own 15 minutes.
+        assert!(prev < BOSS_TIME, "the last wave-3 kind arrives after the boss");
+        assert!(prev * DESIGN_RUN_SECONDS / RUN_SECONDS < DESIGN_RUN_SECONDS);
+
+        // No wave-3 kind before its unlock, every one after it.
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        for (kind, design_at) in expected {
+            let at = design_at * WAVE3_TIME_SCALE;
+            let mut rng = StdRng::seed_from_u64(1234);
+            for _ in 0..400 {
+                assert_ne!(
+                    pick_kind_mixed(at - 0.5, 0, &mut rng),
+                    kind,
+                    "{kind:?} appeared before its own unlock"
+                );
+            }
+            let mut rng = StdRng::seed_from_u64(1234);
+            let mut seen = false;
+            for _ in 0..4000 {
+                if pick_kind_mixed(at + 5.0, 0, &mut rng) == kind {
+                    seen = true;
+                    break;
+                }
+            }
+            assert!(seen, "{kind:?} never appeared after its unlock");
+        }
+    }
+
+    /// §1: "Limit all five new kinds combined to 20 % of spawns." The cap holds
+    /// on every campaign level, and the kinds are still a real presence.
+    #[test]
+    fn the_wave3_kinds_are_capped_at_a_fifth_of_spawns() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        for level in 0..LEVEL_COUNT {
+            for curve in [150.0f32, 200.0, 250.0, BOSS_TIME] {
+                let mut rng = StdRng::seed_from_u64(4242);
+                let mut wave3 = 0usize;
+                let total = 40_000usize;
+                for _ in 0..total {
+                    if pick_kind_mixed(curve, level, &mut rng).is_wave3() {
+                        wave3 += 1;
+                    }
+                }
+                let share = wave3 as f32 / total as f32;
+                let cap = WAVE3_SHARE_CAP;
+                assert!(
+                    share <= cap + 0.012,
+                    "level {level} at {curve}s: wave-3 share {share} exceeds the cap {cap}"
+                );
+                // A cap that is never reached is a missing feature, not a cap.
+                assert!(
+                    share > cap * 0.6,
+                    "level {level} at {curve}s: wave-3 share {share} is too rare to matter"
+                );
+            }
+        }
+        // Early on, before any of them unlock, the roll is the historical one:
+        // not one wave-3 body and exactly the same rng stream as a table without
+        // them.
+        let mut rng = StdRng::seed_from_u64(7);
+        for _ in 0..2000 {
+            assert!(!pick_kind_mixed(20.0, 0, &mut rng).is_wave3());
+        }
+    }
+
+    /// The three newest kinds rotate as featured threats from 9:45 (design
+    /// time), doubling their weight inside the same 20 % share.
+    #[test]
+    fn the_featured_wave3_kind_rotates_and_doubles() {
+        let from = WAVE3_FEATURED_FROM_DESIGN * WAVE3_TIME_SCALE;
+        let period = WAVE3_FEATURED_PERIOD_DESIGN * WAVE3_TIME_SCALE;
+        assert!(wave3_featured(from - 0.1).is_none(), "rotation started early");
+        assert_eq!(wave3_featured(from + 0.1), Some(EnemyKind::WickMoth));
+        assert_eq!(wave3_featured(from + period + 0.1), Some(EnemyKind::Porter));
+        assert_eq!(
+            wave3_featured(from + 2.0 * period + 0.1),
+            Some(EnemyKind::Turnkey)
+        );
+        // And it cycles.
+        assert_eq!(
+            wave3_featured(from + 3.0 * period + 0.1),
+            Some(EnemyKind::WickMoth)
+        );
+
+        // Doubling one kind inside a fixed share really is a doubled share: the
+        // featured kind shows up about twice as often as the same kind does in
+        // its own (rotating) off-window.
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        let share_of = |curve: f32, kind: EnemyKind| {
+            let mut rng = StdRng::seed_from_u64(99);
+            let mut hits = 0usize;
+            let total = 60_000usize;
+            for _ in 0..total {
+                if pick_kind_mixed(curve, 0, &mut rng) == kind {
+                    hits += 1;
+                }
+            }
+            hits as f32 / total as f32
+        };
+        let featured_window = from + 0.5;
+        let other_window = from + period + 0.5;
+        let wick_featured = share_of(featured_window, EnemyKind::WickMoth);
+        let wick_off = share_of(other_window, EnemyKind::WickMoth);
+        assert!(
+            wick_featured > wick_off * 1.6,
+            "the featured kind did not double: {wick_featured} vs {wick_off}"
+        );
+        // The featured rotation never breaks the 20 % cap.
+        let mut total = 0.0;
+        for k in [EnemyKind::WickMoth, EnemyKind::Porter, EnemyKind::Turnkey] {
+            total += share_of(featured_window, k);
+        }
+        assert!(
+            total <= WAVE3_SHARE_CAP + 0.012,
+            "the featured window broke the cap: {total}"
+        );
     }
 
     /// The boss is handed over exactly once, at [`BOSS_TIME`], with the level

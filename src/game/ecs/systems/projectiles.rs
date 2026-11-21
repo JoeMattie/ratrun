@@ -369,7 +369,13 @@ pub fn pools_system(
             }
             if e.pos.dist(p.pos) <= p.radius + e.radius {
                 let hp_before = e.hp.max(0.0);
-                e.hp -= tick_dmg;
+                // Directional armour (the Pillbug's shell): the acid is
+                // arriving from the pool's own centre. The softer flash below
+                // is the pool's own, so this books the hit's side effects
+                // without `hurt`'s tint.
+                let mult = e.damage_mult_from(p.pos);
+                e.hp -= tick_dmg * mult;
+                e.note_damage();
                 // Balance instrumentation only: pools are exclusively Acid
                 // Spit's landed lobs, so the weapon is known here.
                 ledger.add(
@@ -381,7 +387,7 @@ pub fn pools_system(
                     e.id,
                     e.pos,
                     e.radius,
-                    tick_dmg,
+                    tick_dmg * mult,
                     !e.alive(),
                     DamageSource::Acid,
                 );

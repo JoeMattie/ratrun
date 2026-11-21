@@ -12,6 +12,16 @@ pub enum EnemyKind {
     Spitter,
     Brute,
     Boss,
+    /// Wave 3: an armoured oval that curls to present its shell (`WAVE3_DESIGN.md` §9).
+    Pillbug,
+    /// Wave 3: a tuning fork that jumps out and back, landing twice.
+    BellFlea,
+    /// Wave 3: a moth whose death lights a fuse, then bursts.
+    WickMoth,
+    /// Wave 3: a beetle carrying a sugar cube it raises to heal the horde.
+    Porter,
+    /// Wave 3: a key-shaped drone that lays crossbars across its own path.
+    Turnkey,
 }
 
 impl EnemyKind {
@@ -23,6 +33,12 @@ impl EnemyKind {
             EnemyKind::Spitter => 12.0,
             EnemyKind::Brute => 60.0,
             EnemyKind::Boss => 1400.0,
+            // Wave 3 (`WAVE3_DESIGN.md` §9: base HP / speed / contact / XP).
+            EnemyKind::Pillbug => 18.0,
+            EnemyKind::BellFlea => 9.0,
+            EnemyKind::WickMoth => 12.0,
+            EnemyKind::Porter => 26.0,
+            EnemyKind::Turnkey => 22.0,
         }
     }
     pub fn speed(self) -> f32 {
@@ -33,8 +49,21 @@ impl EnemyKind {
             EnemyKind::Spitter => 22.0,
             EnemyKind::Brute => 16.0,
             EnemyKind::Boss => 20.0,
+            EnemyKind::Pillbug => 23.0,
+            EnemyKind::BellFlea => 32.0,
+            EnemyKind::WickMoth => 28.0,
+            EnemyKind::Porter => 20.0,
+            EnemyKind::Turnkey => 24.0,
         }
     }
+    /// Collision radius, which also picks the navigation size class
+    /// ([`crate::game::collision::SizeClass::of_enemy`]): a body at or under
+    /// `RAT_HOLE_MAX_RADIUS` (3.5 px) squeezes through a rat-hole, a larger one
+    /// must take the long way round.
+    ///
+    /// Wave 3: the Bell Flea (2.0) and the Wick Moth (2.5) are small and follow
+    /// the rat through holes; the Pillbug (5.0), Porter (4.5) and Turnkey (4.0)
+    /// are large and are held to corridors and doorways.
     pub fn radius(self) -> f32 {
         match self {
             EnemyKind::Skitterer => 2.5,
@@ -43,6 +72,11 @@ impl EnemyKind {
             EnemyKind::Spitter => 3.0,
             EnemyKind::Brute => 6.5,
             EnemyKind::Boss => 14.0,
+            EnemyKind::Pillbug => 5.0,
+            EnemyKind::BellFlea => 2.0,
+            EnemyKind::WickMoth => 2.5,
+            EnemyKind::Porter => 4.5,
+            EnemyKind::Turnkey => 4.0,
         }
     }
     pub fn damage(self) -> f32 {
@@ -53,6 +87,11 @@ impl EnemyKind {
             EnemyKind::Spitter => 6.0,
             EnemyKind::Brute => 16.0,
             EnemyKind::Boss => 30.0,
+            EnemyKind::Pillbug => 5.0,
+            EnemyKind::BellFlea => 4.0,
+            EnemyKind::WickMoth => 4.0,
+            EnemyKind::Porter => 6.0,
+            EnemyKind::Turnkey => 6.0,
         }
     }
     pub fn xp(self) -> u32 {
@@ -63,6 +102,11 @@ impl EnemyKind {
             EnemyKind::Spitter => 4,
             EnemyKind::Brute => 10,
             EnemyKind::Boss => 200,
+            EnemyKind::Pillbug => 3,
+            EnemyKind::BellFlea => 2,
+            EnemyKind::WickMoth => 3,
+            EnemyKind::Porter => 5,
+            EnemyKind::Turnkey => 4,
         }
     }
     pub fn color(self) -> Rgb {
@@ -73,11 +117,128 @@ impl EnemyKind {
             EnemyKind::Spitter => (120, 200, 90),
             EnemyKind::Brute => (170, 70, 60),
             EnemyKind::Boss => (220, 60, 120),
+            // The wave-3 silhouettes read by colour as well as shape: silver
+            // shell, copper fork, warm wick, pale sugar, brass key.
+            EnemyKind::Pillbug => (186, 192, 206),
+            EnemyKind::BellFlea => (214, 138, 78),
+            EnemyKind::WickMoth => (232, 168, 104),
+            EnemyKind::Porter => (140, 176, 128),
+            EnemyKind::Turnkey => (206, 186, 102),
         }
     }
     /// Spitters fire enemy bullets; others are melee.
+    ///
+    /// A wave-3 kind is never `ranged`: its damage arrives as a floor hazard the
+    /// behaviour system resolves (`enemy_wave3`), not as a bullet.
     pub fn ranged(self) -> bool {
         matches!(self, EnemyKind::Spitter | EnemyKind::Boss)
+    }
+
+    /// One of the five kinds `WAVE3_DESIGN.md` §9 added.
+    #[inline]
+    pub fn is_wave3(self) -> bool {
+        matches!(
+            self,
+            EnemyKind::Pillbug
+                | EnemyKind::BellFlea
+                | EnemyKind::WickMoth
+                | EnemyKind::Porter
+                | EnemyKind::Turnkey
+        )
+    }
+
+    /// A body that cannot be shoved around by an ordinary melee hit.
+    #[inline]
+    pub fn heavy(self) -> bool {
+        matches!(self, EnemyKind::Brute | EnemyKind::Boss | EnemyKind::Pillbug)
+    }
+}
+
+// ---- Wave-3 behaviour state ----------------------------------------------
+
+/// Per-body scratch for the five wave-3 behaviours (`systems::enemy_wave3`).
+///
+/// The timers, ranges and damages themselves live in that module; this struct
+/// is only the storage, so the state round-trips with the body (a test can
+/// inspect or force it between ticks) and the fast path stays allocation-free.
+/// Every field is zero/`ZERO` for the base six kinds, so their tick is
+/// byte-for-byte unchanged and [`W3::holds`] is never true for them.
+#[derive(Clone, Copy, Debug)]
+pub struct W3 {
+    /// 1 once the behaviour system has seeded this body's timers (a body can be
+    /// spawned by the facade or a test as well as by the director, so the
+    /// seeding happens on the first tick it is simulated).
+    pub armed: u8,
+    /// Seconds since the current warned tell started (0 = this tick).
+    pub warn_age: f32,
+    /// Pillbug: seconds left curled (0 = walking), and the cooldown after one.
+    pub curl_t: f32,
+    pub curl_cd: f32,
+    /// Bell Flea: 0 walking, 1 winding up, 2 landed (about to spring back).
+    pub flea_phase: u8,
+    /// Seconds left in the current flea phase.
+    pub flea_t: f32,
+    /// The two locked landing points: where the hop goes and where it started.
+    pub hop_to: Vec2,
+    pub home: Vec2,
+    /// Seconds until the next hop.
+    pub flea_cd: f32,
+    /// Wick Moth: > 0 the fuse is burning on the corpse (the behaviour system
+    /// spawns the `Wick` entity on the tick it sees it), -1 = spent.
+    pub wick_t: f32,
+    /// Porter: seconds left raising the cube (0 = not raising).
+    pub raise_t: f32,
+    /// Seconds until the next raise.
+    pub heal_cd: f32,
+    /// `SpawnId` of the ally being raised for (`u64::MAX` = none).
+    pub heal_target: u64,
+    /// Turnkey: seconds until the next crossbar.
+    pub bar_cd: f32,
+    /// Seconds left of the current crossbar (tell first, then live).
+    pub bar_t: f32,
+    /// Where the crossbar was laid and which way it runs (world space).
+    pub bar_pos: Vec2,
+    pub bar_dir: Vec2,
+    /// The crossbar has already taken its one bite out of the rat.
+    pub bar_spent: bool,
+}
+
+impl Default for W3 {
+    fn default() -> Self {
+        W3 {
+            armed: 0,
+            warn_age: 0.0,
+            curl_t: 0.0,
+            curl_cd: 0.0,
+            flea_phase: 0,
+            flea_t: 0.0,
+            hop_to: Vec2::ZERO,
+            home: Vec2::ZERO,
+            flea_cd: 0.0,
+            wick_t: 0.0,
+            raise_t: 0.0,
+            heal_cd: 0.0,
+            heal_target: u64::MAX,
+            bar_cd: 0.0,
+            bar_t: 0.0,
+            bar_pos: Vec2::ZERO,
+            bar_dir: Vec2::ZERO,
+            bar_spent: false,
+        }
+    }
+}
+
+impl W3 {
+    /// The turnkey's 0.8 s dotted tell (before the bar goes live).
+    #[inline]
+    pub fn bar_telling(&self) -> bool {
+        self.bar_t > crate::game::ecs::systems::enemy_wave3::CROSSBAR_LIVE_SECS
+    }
+
+    /// The body is held in place this tick (its behaviour owns its position).
+    #[inline]
+    pub fn holds(&self) -> bool {
+        self.curl_t > 0.0 || self.flea_phase != 0 || self.raise_t > 0.0
     }
 }
 
@@ -143,6 +304,8 @@ pub struct Enemy {
     pub slow_mult: f32,
     /// Seconds of slow left.
     pub slow_t: f32,
+    /// Wave-3 behaviour state (all zero for the six base kinds).
+    pub w3: W3,
 }
 
 impl Enemy {
@@ -170,6 +333,10 @@ impl Enemy {
             stun: 0.0,
             slow_mult: 1.0,
             slow_t: 0.0,
+            // Likewise zero-initialised: the wave-3 timers are seeded by the
+            // behaviour system on the body's first simulated tick, never from
+            // the rng.
+            w3: W3::default(),
         }
     }
 
@@ -253,6 +420,23 @@ impl Enemy {
     /// inside the goal cell / off-grid, in which case we head straight at the
     /// player).
     pub fn steer(&mut self, target: Vec2, flow_dir: Vec2, dt: f32, speed_mult: f32) {
+        // A wave-3 body in the middle of its own tell or hop is held in place:
+        // its behaviour owns the position this tick (a curled Pillbug, a Bell
+        // Flea between its two crosses, a Porter raising the cube). The timers,
+        // the flash and the contact grace still advance, so the body keeps
+        // taking damage and its own state machine keeps running. Dead cheap for
+        // the base kinds: `holds()` is false.
+        if self.w3.holds() {
+            self.vel = self.vel * (1.0 - (12.0 * dt).min(1.0));
+            if self.flash > 0.0 {
+                self.flash -= dt;
+            }
+            if self.contact_cd > 0.0 {
+                self.contact_cd -= dt;
+            }
+            return;
+        }
+
         // Crowd control (the Sonic Squeak's ring): a stunned body does not steer
         // and its momentum bleeds off fast, so it stops dead instead of sliding
         // past the rat. The slow is a straight multiplier on the per-kind speed
@@ -322,6 +506,65 @@ impl Enemy {
     pub fn hurt(&mut self, dmg: f32) {
         self.hp -= dmg;
         self.flash = 0.12;
+        self.note_damage();
+    }
+
+    /// `hurt` for a hit that arrives **from** a point in world space, with the
+    /// kind's directional armour applied ([`Enemy::damage_mult_from`]). Returns
+    /// the damage actually taken, which is what a caller should draw and record.
+    pub fn hurt_from(&mut self, dmg: f32, from: Vec2) -> f32 {
+        let applied = dmg * self.damage_mult_from(from);
+        self.hurt(applied);
+        applied
+    }
+
+    /// The Pillbug's shell: while it is curled, a hit arriving from its frontal
+    /// 120° arc is quartered and anything else (the exposed rear) doubles.
+    ///
+    /// Every damage source in the game routes through here — bullets, pools, the
+    /// melee arc, the actives, traps, boss hazards and the nuke — so the shell
+    /// cannot be bypassed by picking a different weapon. The arc is measured off
+    /// [`Enemy::facing`], which the curl locks when the tell starts.
+    #[inline]
+    pub fn damage_mult_from(&self, from: Vec2) -> f32 {
+        if self.kind != EnemyKind::Pillbug || self.w3.curl_t <= 0.0 {
+            return 1.0;
+        }
+        let to_hit = from - self.pos;
+        if to_hit.len_sq() <= 1e-6 {
+            return 1.0;
+        }
+        let f = self.facing;
+        if f.len_sq() <= 1e-6 {
+            return 1.0;
+        }
+        // cos(half of 120°) = 0.5, so `dot >= 0.5` is the shell's cone.
+        if to_hit.normalized().dot(f.normalized()) >= 0.5 {
+            crate::game::ecs::systems::enemy_wave3::PILLBUG_FRONT_MULT
+        } else {
+            crate::game::ecs::systems::enemy_wave3::PILLBUG_REAR_MULT
+        }
+    }
+
+    /// Book a damaging hit's side effects without touching the flash tint.
+    ///
+    /// Used by the damage-over-time path (acid pools keep their own softer
+    /// flash) and by the nuke, so a Porter still flinches and a Wick Moth still
+    /// arms its fuse however it died. Draws no rng.
+    pub fn note_damage(&mut self) {
+        // The Porter drops its raise and has to try again (a flinch window, so
+        // one stray shot does not disable it for its whole 5 s cycle).
+        if self.kind == EnemyKind::Porter && self.w3.raise_t > 0.0 {
+            self.w3.raise_t = 0.0;
+            self.w3.heal_target = u64::MAX;
+            self.w3.heal_cd = self.w3.heal_cd.max(
+                crate::game::ecs::systems::enemy_wave3::PORTER_INTERRUPT_COOLDOWN,
+            );
+        }
+        // A Wick Moth that dies lights its own fuse, whatever killed it.
+        if self.kind == EnemyKind::WickMoth && self.hp <= 0.0 && self.w3.wick_t == 0.0 {
+            self.w3.wick_t = crate::game::ecs::systems::enemy_wave3::WICK_FUSE_SECS;
+        }
     }
 
     pub fn alive(&self) -> bool {

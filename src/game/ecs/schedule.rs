@@ -30,6 +30,7 @@
 //! | 14 | `combat::player_bullet_hits_system` | `resolve_player_bullets` |
 //! | 15 | `combat::enemy_bullet_hits_system` | `resolve_enemy_hits` |
 //! | 16 | `combat::contact_system` | `resolve_contact` |
+//! | 16a | `enemy_wave3::wave3_system` | wave-3 kinds' tells, hazards, wick fuse (new) |
 //! | 17 | `loot::reap_enemies_system` | `reap_enemies` |
 //! | 18 | `loot::gems_system` | `update_gems` |
 //! | 19 | `loot::pickups_system` | `update_pickups` |
@@ -76,7 +77,8 @@ use bevy_ecs::prelude::*;
 
 use super::resources::TickInput;
 use super::systems::{
-    boss, combat, enemy_move, fog, fx, gates, loot, player, projectiles, spawn, traps, weapons,
+    boss, combat, enemy_move, enemy_wave3, fog, fx, gates, loot, player, projectiles, spawn,
+    traps, weapons,
 };
 
 /// Legacy `self.damage_numbers.update(dt)` (neon merge, `World::update`).
@@ -154,6 +156,22 @@ pub fn build_tick_schedule() -> Schedule {
 
     // 16-22: reaping through the outcome. Ordered after contact; internally
     // chained so the Nuke re-reap and every deferred drop stay in order.
+    //
+    // `enemy_wave3::wave3_system` leads that chain (row 16a in the map above):
+    // every damage source has run, so a Wick burst resolves into this tick's
+    // reaping and loot path, and every warn it starts is visible before it can
+    // bite. It spawns and despawns only `Wick`s, never an enemy, so the
+    // `EnemyIndex` window is untouched.
+    // The wave-3 behaviour tick sits between contact damage and reaping: every
+    // damage source has run, so a Wick burst resolves into this tick's reaping
+    // and loot path, and every warn it starts is visible before it can bite.
+    // It spawns and despawns only `Wick`s, never an enemy, so the
+    // `EnemyIndex` window is untouched.
+    schedule.add_systems(
+        enemy_wave3::wave3_system
+            .after(combat::contact_system)
+            .before(loot::reap_enemies_system),
+    );
     schedule.add_systems(
         (
             loot::reap_enemies_system,

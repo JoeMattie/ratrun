@@ -1668,7 +1668,9 @@ pub fn resolve_hazards(
                 if !enemy.alive() || !hazard.shape.contains(enemy.pos, enemy.radius) {
                     continue;
                 }
-                enemy.hurt(hazard.damage);
+                // Directional armour (the Pillbug's shell) applies to a boss
+                // hazard hit; the hazard's own centre is the source.
+                let applied = enemy.hurt_from(hazard.damage, hazard.shape.center());
                 let killed = !enemy.alive();
                 vfx::emit_weapon_hit(
                     particles,
@@ -1683,7 +1685,7 @@ pub fn resolve_hazards(
                     enemy.id,
                     enemy.pos,
                     enemy.radius,
-                    hazard.damage,
+                    applied,
                     killed,
                     DamageSource::Normal,
                 );

@@ -1027,6 +1027,20 @@ impl World {
             }
         }
 
+        // Wave 3: a dead Wick Moth's burning fuse, on the floor under
+        // everything else (its 9 px burst is a ground hazard the rat steps out
+        // of). Culled on the wick and on the burst's own radius.
+        {
+            let mut query = self.ecs.query::<(&SpawnId, &crate::game::ecs::components::Wick)>();
+            for (_, wick) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                let s = self.w2s(wick.pos, cam);
+                if !on_screen(s, 12.0, viewport) {
+                    continue;
+                }
+                art_enemy::draw_wick(pb, wick, cam);
+            }
+        }
+
         // Boss bodies in the entity pass (airborne ones go over the player).
         self.draw_boss_body(pb, cam, false);
 
