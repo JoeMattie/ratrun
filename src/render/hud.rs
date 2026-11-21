@@ -224,7 +224,7 @@ pub fn boss_codename(theme: Theme) -> (&'static str, &'static str) {
         CampaignLevel::Sewer => "CLASS-V APEX PREDATOR",
         CampaignLevel::Kitchen => "CLASS-V CUSTODIAN",
         CampaignLevel::Lab => "MK.IV AUTONOMOUS UNIT",
-        CampaignLevel::Laundry => "CLASS-V CUSTODIAN",
+        CampaignLevel::Laundry => "CAST-IRON WRINGER",
         CampaignLevel::Printworks => "OVERNIGHT PRESS — EDITION 1",
     };
     (level.boss_name(), class_tag)
@@ -606,21 +606,21 @@ impl HudState {
             // find and its rule; the timed chip on the buff strip counts it
             // down.
             PickupKind::BottleCap => {
-                self.push_callout(CalloutKind::BottleCap, "+BOTTLE CAP", "GOOD FOR ONE BOOT", 2.4);
+                self.push_callout(CalloutKind::BottleCap, "+BOTTLE CAP", "BLOCKS NEXT HIT · 12s", 2.4);
             }
             PickupKind::WindupMouse => {
                 self.push_callout(
                     CalloutKind::WindupMouse,
                     "+WIND-UP MOUSE",
-                    "CHEAPEST MEMBER OF THE TEAM",
+                    "DECOY LURES FOES · 5s",
                     2.4,
                 );
             }
             PickupKind::PocketWatch => {
-                self.push_callout(CalloutKind::PocketWatch, "+POCKET WATCH", "BORROW FOUR SECONDS", 2.4);
+                self.push_callout(CalloutKind::PocketWatch, "+POCKET WATCH", "ENEMY SHOTS SLOWED · 4s", 2.4);
             }
             PickupKind::CleanSocks => {
-                self.push_callout(CalloutKind::CleanSocks, "+CLEAN SOCKS", "DASH READY", 2.2);
+                self.push_callout(CalloutKind::CleanSocks, "+CLEAN SOCKS", "DASH READY · NO GLUE · 6s", 2.2);
             }
         }
     }
@@ -770,24 +770,17 @@ impl HudState {
             if let Some(i) = charged {
                 if self.active_ready.get(i).copied().unwrap_or(false) {
                     self.taught_actives = true;
-                    let tag = match self.dash_key {
-                        DashKey::Ctrl => "SPACE",
-                        // Without lone-modifier reporting Space is also the
-                        // dash, so the hint says both — it is one press.
-                        DashKey::Space => "SPACE",
+                    let msg = match self.dash_key {
+                        DashKey::Ctrl => "WEAPON CHARGED · PRESS SPACE",
+                        DashKey::Space => "WEAPON CHARGED · SPACE FIRES",
                     };
-                    self.push_callout(
-                        CalloutKind::ActivesHint,
-                        tag,
-                        "CHARGED WEAPON · PRESS TO FIRE",
-                        3.6,
-                    );
+                    self.push_callout(CalloutKind::ActivesHint, "SPACE", msg, 3.6);
                 }
             }
         }
         if !self.taught_chest && world.chest_on_floor() {
             self.taught_chest = true;
-            self.push_callout(CalloutKind::ChestHint, "CHEST", "TOUCH IT TO OPEN", 3.2);
+            self.push_callout(CalloutKind::ChestHint, "CHEST", "WALK OVER IT TO OPEN", 3.2);
         }
         if !self.taught_shop {
             if let Some(d) = world.nearest_shop_hole() {
@@ -796,7 +789,7 @@ impl HudState {
                     self.push_callout(
                         CalloutKind::ShopHint,
                         "MOUSE HOLE",
-                        "WALK UP TO THE SPOON",
+                        "TOUCH THE SPOON TO SHOP",
                         3.2,
                     );
                 }

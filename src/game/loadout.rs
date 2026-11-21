@@ -160,17 +160,17 @@ impl PassiveKind {
     }
     pub fn desc(self) -> &'static str {
         match self {
-            PassiveKind::MaxHp => "+20 max HP (and heal).",
+            PassiveKind::MaxHp => "+20 max HP and heal 20.",
             PassiveKind::MoveSpeed => "+12% move speed.",
-            PassiveKind::Damage => "+15% damage.",
+            PassiveKind::Damage => "+15% weapon damage.",
             PassiveKind::FireRate => "+12% fire rate.",
             PassiveKind::Magnet => "+30% pickup radius.",
             PassiveKind::Regen => "+0.5 HP/s regen.",
-            PassiveKind::Armor => "+1 armor (flat dmg cut).",
-            PassiveKind::SpringHeel => "-0.18s base dash cooldown.",
-            PassiveKind::Counterweight => "+15% weapon shove, +2px melee shove.",
-            PassiveKind::LongFuse => "+12% zone life, +4% splash radius.",
-            PassiveKind::SecondScent => "+10% gem XP (fractions banked).",
+            PassiveKind::Armor => "+1 armor (-1 damage per hit).",
+            PassiveKind::SpringHeel => "-0.18s dash cooldown.",
+            PassiveKind::Counterweight => "+15% knockback, +2px melee shove.",
+            PassiveKind::LongFuse => "+12% zone duration, +4% splash size.",
+            PassiveKind::SecondScent => "+10% gem XP.",
             PassiveKind::LensCap => "+8% ranged reach, +4% melee reach.",
         }
     }
@@ -641,9 +641,9 @@ impl Loadout {
             n => format!("owned ×{n}"),
         };
         if weapon.is_max() && stacks > 0 {
-            format!("  · {} READY with {}.", evo.name, evo.passive.name())
+            format!(" · {} READY ({}).", evo.name, evo.passive.name())
         } else {
-            format!("  · {} needs {} ({}).", evo.name, evo.passive.name(), owned)
+            format!(" · {}: {} ({}).", evo.name, evo.passive.name(), owned)
         }
     }
 
@@ -708,7 +708,7 @@ impl Loadout {
                     (
                         format!("{} (capped)", p.name()),
                         format!(
-                            "At the cap of {}: restores {:.0}% of max HP.",
+                            "Max stacks ({}): heals {:.0}% max HP.",
                             p.max_stacks(),
                             BANDAGE_HEAL_FRAC * 100.0
                         ),
@@ -1262,7 +1262,7 @@ mod tests {
     }
 
     /// The two player-triggered weapons come out of the normal 1-of-3 pool and
-    /// their cards say how to fire them ("ACTIVE: press SPACE").
+    /// their cards say how to fire them ("ACTIVE: Space").
     #[test]
     fn active_weapons_are_offered_and_their_cards_teach_the_space_key() {
         let lo = Loadout::starting();
@@ -1271,7 +1271,7 @@ mod tests {
             let (title, desc, flavor) = lo.describe(&Upgrade::NewWeapon(kind));
             assert!(title.contains(kind.name()), "card title {title:?}");
             assert!(
-                desc.contains("ACTIVE: press SPACE"),
+                desc.contains("ACTIVE: Space"),
                 "{kind:?}'s card must teach the trigger: {desc:?}"
             );
             assert!(!flavor.is_empty());

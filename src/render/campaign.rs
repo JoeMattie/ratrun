@@ -208,7 +208,7 @@ impl CampaignLevel {
             CampaignLevel::Kitchen => Some(CampaignLevel::Lab),
             CampaignLevel::Lab => None,
             CampaignLevel::Laundry => Some(CampaignLevel::Lab),
-            CampaignLevel::Printworks => Some(CampaignLevel::Printworks),
+            CampaignLevel::Printworks => None,
         }
     }
 
@@ -1145,7 +1145,7 @@ pub fn draw_level_complete(
         let stat_items: [(&str, &str, Color); 4] = [
             ("TIME", tbuf.as_str(), COAT),
             ("KILLS", kills_b.as_str(), COAT),
-            ("SCORE SO FAR", score_b.as_str(), TRAIL_GOLD),
+            ("RUN SCORE", score_b.as_str(), TRAIL_GOLD),
             ("GOLD", gold_b.as_str(), TRAIL_GOLD),
         ];
         for (i, (lbl, val, vcol)) in stat_items.iter().enumerate() {
@@ -1163,13 +1163,13 @@ pub fn draw_level_complete(
             if inner.width >= 60 {
                 let _ = write!(
                     sub,
-                    "Stage score +{}   ·   Subject Lv {}   ·   {} upgrades owned",
+                    "Sector score +{}   ·   Subject Lv {}   ·   {} upgrades owned",
                     view.level_score, view.player_level, view.owned_upgrades
                 );
             } else {
                 let _ = write!(
                     sub,
-                    "Stage +{}  ·  Lv {}  ·  {} upgrades",
+                    "Sector +{}  ·  Lv {}  ·  {} upgrades",
                     view.level_score, view.player_level, view.owned_upgrades
                 );
             }
@@ -1200,8 +1200,8 @@ pub fn draw_level_complete(
                 if inner.width >= 54 {
                     let _ = write!(
                         teaser,
-                        "Next: LEVEL {} — {} · Pack {} of {} to carry",
-                        next.number(),
+                        "Next: {} — {} · Pack {} of {}",
+                        next.sector_code(),
                         next.name(),
                         keep_n,
                         view.owned_upgrades
@@ -2139,7 +2139,7 @@ pub fn draw_keep_three(
             );
         }
         // The key hint rides the bottom border, where nothing else is drawn.
-        let hint = "TAB route";
+        let hint = "Tab route";
         let hw = hint.chars().count() as u16;
         let hx = layout.panel_rect.right().saturating_sub(hw + 2);
         put_str(
@@ -2318,9 +2318,9 @@ pub fn draw_level_intro(
         y += 1;
     }
 
-    // Heading: LEVEL N — SECTOR NAME.
+    // Heading: SECTOR CODE — SECTOR NAME.
     let mut heading = StackBuf::<40>::new();
-    let _ = write!(heading, "LEVEL {} — {}", view.level.number(), view.level.name());
+    let _ = write!(heading, "{} — {}", view.level.sector_code(), view.level.name());
     put_centered(buf, inner, y, heading.as_str(), heavy(COAT).bg(PLATE));
     y += if inner.height >= 15 { 2 } else { 1 };
 
@@ -2746,7 +2746,16 @@ pub fn draw_campaign_victory(
             }
             let mut tok = StackBuf::<16>::new();
             let _ = tok.write_char(it.glyph);
+            let mut prefix = ['\0'; 5];
+            let mut n = 0usize;
             for ch in it.name.chars().take(5) {
+                prefix[n] = ch;
+                n += 1;
+            }
+            while n > 0 && prefix[n - 1] == ' ' {
+                n -= 1;
+            }
+            for &ch in &prefix[..n] {
                 let _ = tok.write_char(ch);
             }
             match it.category {
@@ -3015,9 +3024,9 @@ pub fn draw_level_select(
                 let req = match slot.level {
                     CampaignLevel::Sewer => "Locked",
                     CampaignLevel::Kitchen => "Clear Sewer first",
-                    CampaignLevel::Lab => "Clear Kitchen first",
+                    CampaignLevel::Lab => "Clear Sector 2 first",
                     CampaignLevel::Laundry => "Clear Sewer first",
-                    CampaignLevel::Printworks => "Clear Kitchen first",
+                    CampaignLevel::Printworks => "Clear Sector 2 first",
                 };
                 put_centered(buf, ci, best_y, req, ink(MUTED).bg(bg));
             } else if let Some(best) = slot.best {
@@ -3108,9 +3117,9 @@ pub fn draw_level_select(
                     let req = match slot.level {
                         CampaignLevel::Sewer => "Locked",
                         CampaignLevel::Kitchen => "Clear THE SEWERS to unlock",
-                        CampaignLevel::Lab => "Clear THE KITCHENS to unlock",
+                        CampaignLevel::Lab => "Clear SECTOR 02 to unlock",
                         CampaignLevel::Laundry => "Clear THE SEWERS to unlock",
-                        CampaignLevel::Printworks => "Clear THE KITCHENS to unlock",
+                        CampaignLevel::Printworks => "Clear SECTOR 02 to unlock",
                     };
                     let _ = write!(info, "  {}", req);
                     put_str_ellipsis(buf, ci.x + 1, y2, info.as_str(), ci.width.saturating_sub(2), ink(MUTED).bg(bg));

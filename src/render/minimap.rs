@@ -1671,9 +1671,9 @@ pub fn draw_expanded(
     } else {
         let ly = inner.bottom().saturating_sub(1);
         let legend = if view.maze_discovered {
-            " ●You ◇Cache ◆Done ▸Breach ◤Bear "
+            " ●You ◇Cache ◆Done ▸Breach ◤Arena "
         } else {
-            " ●You ▪Wall ▪Hole ◈Boss ◤Bear "
+            " ●You ▪Wall ▪Hole ◈Boss ◤Arena "
         };
         buf.set_stringn(
             inner.x,
@@ -1770,11 +1770,11 @@ fn draw_expanded_sidebar(
         ("▪", palette::to_color(theme.maze_wall), "Maze", "Maze Partition", true),
         ("▪", palette::to_color(RAT_HOLE_LINKED_RGB), "Hole", "Rat-Hole", false),
         ("▪", palette::to_color(ONE_WAY_EXIT_RGB), "Exit", "One-Way Exit", true),
-        ("▸", palette::to_color(theme.accent), "Door", "Maze Breach", true),
-        ("◇", palette::to_color(CACHE_GOLD_RGB), "Open", "Unclaimed Cache", true),
-        ("◆", palette::to_color(CLAIMED_MINT_RGB), "Done", "Claimed Cache", true),
+        ("▸", palette::to_color(theme.accent), "Breach", "Maze Breach", true),
+        ("◇", palette::to_color(CACHE_GOLD_RGB), "Cache", "Unclaimed Cache", true),
+        ("◆", palette::to_color(CLAIMED_MINT_RGB), "Claimed", "Claimed Cache", true),
         ("◈", palette::to_color(BOSS_ROSE_RGB), "Boss", "Boss Arena", false),
-        ("◤", palette::to_color(WARN_AMBER_RGB), "Bear", "Arena Bearing", false),
+        ("◤", palette::to_color(WARN_AMBER_RGB), "Bearing", "Arena Bearing", false),
         // The mouse-hole shop's bent spoon (seen once, remembered after).
         ("☌", palette::to_color(SHOP_SPOON_RGB), "Shop", "Splice Shop", false),
     ];

@@ -69,7 +69,7 @@ impl DashKey {
             (DashKey::Ctrl, true) => &[
                 "WASD/mouse move · Ctrl dash · Space actives · click = dash + ready actives · Esc/P pause",
                 "wheel or Z/X zoom · Tab map · N minimap · C cursor · O options · M mute",
-                "[ ] music · - = effects · ↑↓ select · ←→ map · Enter confirm · S story · Q quit",
+                "[ ] music · - = effects · L story · Q quit",
             ],
             (DashKey::Ctrl, false) => &[
                 "WASD/mouse move · Ctrl dash · Space actives",
@@ -80,7 +80,7 @@ impl DashKey {
             (DashKey::Space, true) => &[
                 "WASD/mouse move · Space dash + actives · click = dash + ready actives · Esc/P pause",
                 "wheel or Z/X zoom · Tab map · N minimap · C cursor · O options · M mute",
-                "[ ] music · - = effects · ↑↓ select · ←→ map · Enter confirm · S story · Q quit",
+                "[ ] music · - = effects · L story · Q quit",
             ],
             (DashKey::Space, false) => &[
                 "WASD/mouse move · Space dash + actives",
@@ -744,6 +744,7 @@ mod tests {
                 "M mute",
                 "[ ] music",
                 "- = effects",
+                "L story",
                 "pause",
                 "Q quit",
             ] {

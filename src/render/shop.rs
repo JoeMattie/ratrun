@@ -176,7 +176,7 @@ pub fn draw(
     // ---- header: the purse, the sockets (text + visual capsules), the den ----
     let used = world.player.loadout.splices.len();
     let purse = format!("GOLD {}", world.gold);
-    let sockets_txt = format!(" · SPLICE SOCKETS {used}/{MAX_SPLICES}");
+    let sockets_txt = format!(" · SPLICES {used}/{MAX_SPLICES}");
     let mut hx = inner.x + 1;
     put(f, hx, inner.y, inner.right().saturating_sub(hx), &purse, heavy(TRAIL_GOLD));
     hx += purse.len() as u16;
@@ -257,7 +257,7 @@ pub fn draw(
             "+",
             HEAL_MINT,
             STITCH_PRICE,
-            ("heal 35% max hp, once per hole", "heal 35%"),
+            ("heal 35% max HP, once per hole", "heal 35%"),
         ),
         (
             ShopItem::Reroll,
@@ -265,7 +265,7 @@ pub fn draw(
             "↻",
             PEWTER,
             0,
-            ("replace the unsold stock, up to twice", "new stock"),
+            ("replace unsold vials, up to twice", "new stock"),
         ),
         (
             ShopItem::Molt,
@@ -273,7 +273,7 @@ pub fn draw(
             "◇",
             VIAL,
             MOLT_PRICE,
-            ("leave one kind, take another at rank 1", "swap a kind"),
+            ("replace an upgrade with a new Lv1 one", "replace upgrade"),
         ),
     ];
     for (item, label, tag, tag_col, price, blurb) in services {
@@ -299,9 +299,9 @@ pub fn draw(
     let footer_row = inner.y + inner.height - 1;
     let mut footer = String::new();
     if world.player.loadout.splices.is_empty() {
-        footer.push_str("no splices in this rat yet");
+        footer.push_str("Splices: none");
     } else {
-        footer.push_str("in you: ");
+        footer.push_str("Spliced: ");
         for (i, kind) in world.player.loadout.splices.iter().enumerate() {
             if i > 0 {
                 footer.push_str(", ");
@@ -412,7 +412,7 @@ fn draw_slice(
         return;
     };
     let Some(kind) = stock.slot(slot) else {
-        put(f, text_x, *y, inner.right() - text_x, "— empty hook —", ink(SPENT));
+        put(f, text_x, *y, inner.right() - text_x, "— sold out —", ink(SPENT));
         *y += card_h;
         return;
     };
@@ -459,7 +459,7 @@ fn draw_slice(
         let status = if sold {
             "SOLD"
         } else if owned {
-            "IN YOU"
+            "SPLICED"
         } else if let Some(deny) = deny {
             deny.reason()
         } else {
@@ -576,14 +576,14 @@ fn draw_leave(f: &mut Frame, inner: Rect, y: u16, row_index: usize, row: usize, 
         inner.x + 30,
         y,
         inner.right().saturating_sub(inner.x + 30),
-        "back to the wall (Esc)",
+        "step back out (Esc)",
         ink(MUTED),
     );
 }
 
 /// The Molt panel: the two-step nomination, over the shelf.
 fn draw_molt(f: &mut Frame, r: Rect, world: &World, hole: usize, molt: MoltUi, hits: &mut HitMap) {
-    let inner = menu::panel(f, r, " ◇ MOLT  /  LEAVE THE OLD SKIN ", VIAL);
+    let inner = menu::panel(f, r, " ◇ MOLT  /  REPLACE UPGRADE ", VIAL);
     if inner.width < 12 || inner.height < 5 {
         return;
     }
@@ -609,7 +609,7 @@ fn draw_molt(f: &mut Frame, r: Rect, world: &World, hole: usize, molt: MoltUi, h
                 inner.x + 1,
                 inner.y,
                 inner.width - 1,
-                "Step 1 of 2 — nominate the kind you leave behind",
+                "Step 1 of 2 — choose an upgrade to replace",
                 heavy(COAT),
             );
             let items = shop::molt_owned(world);
@@ -649,9 +649,9 @@ fn draw_molt(f: &mut Frame, r: Rect, world: &World, hole: usize, molt: MoltUi, h
                 .get(cursor)
                 .is_some_and(|owned| shop::owned_label(world, *owned).contains("EVOLVED"));
             let (line, line_col) = if evolution {
-                ("It forfeits its ranks and its evolution.", WARN_AMBER)
+                ("Loses its levels and evolution.", WARN_AMBER)
             } else {
-                ("It forfeits its ranks.", MUTED)
+                ("Loses its levels.", MUTED)
             };
             put(f, inner.x + 1, hint_row, inner.width - 2, line, ink(line_col));
             put(
@@ -659,7 +659,7 @@ fn draw_molt(f: &mut Frame, r: Rect, world: &World, hole: usize, molt: MoltUi, h
                 inner.x + 1,
                 footer,
                 inner.width - 2,
-                "Enter name it  ·  Esc cancel, free",
+                "Enter select  ·  Esc cancel (free)",
                 ink(VIAL),
             );
         }
@@ -670,7 +670,7 @@ fn draw_molt(f: &mut Frame, r: Rect, world: &World, hole: usize, molt: MoltUi, h
                 inner.x + 1,
                 inner.y,
                 inner.width - 1,
-                &format!("Step 2 of 2 — take, instead of {label}"),
+                &format!("Step 2 of 2 — replace {label}"),
                 heavy(COAT),
             );
             let options = shop::molt_options(world, owned);
@@ -681,7 +681,7 @@ fn draw_molt(f: &mut Frame, r: Rect, world: &World, hole: usize, molt: MoltUi, h
                     inner.x + 1,
                     y,
                     inner.width - 2,
-                    "No unowned kind in that rack: nothing to take.",
+                    "Every upgrade of this type is already owned.",
                     ink(REFUSED),
                 );
             }
@@ -719,7 +719,7 @@ fn draw_molt(f: &mut Frame, r: Rect, world: &World, hole: usize, molt: MoltUi, h
             }
             let (line, line_col) = match deny {
                 Some(deny) => (deny.reason().to_string(), REFUSED),
-                None => (format!("{MOLT_PRICE}g for the change"), TRAIL_GOLD),
+                None => (format!("{MOLT_PRICE}g to swap"), TRAIL_GOLD),
             };
             put(f, inner.x + 1, hint_row, inner.width - 2, &line, ink(line_col));
             put(
@@ -727,7 +727,7 @@ fn draw_molt(f: &mut Frame, r: Rect, world: &World, hole: usize, molt: MoltUi, h
                 inner.x + 1,
                 footer,
                 inner.width - 2,
-                "Enter confirm  ·  Esc cancel, free",
+                "Enter confirm  ·  Esc cancel (free)",
                 ink(VIAL),
             );
         }

@@ -207,22 +207,22 @@ impl WeaponKind {
     pub fn desc(self) -> &'static str {
         match self {
             WeaponKind::Gnaw => "Fires a dart at the nearest foe.",
-            WeaponKind::CheeseSpray => "Scatters darts in a forward arc.",
-            WeaponKind::SqueakNova => "Bursts shots in every direction.",
-            WeaponKind::SporeOrbit => "Spores circle and shred nearby foes.",
-            WeaponKind::TailWhip => "Pulses damage to everything close.",
+            WeaponKind::CheeseSpray => "Scatters darts in a forward fan.",
+            WeaponKind::SqueakNova => "Fires a ring of shots all around you.",
+            WeaponKind::SporeOrbit => "Orbiting spores shred nearby foes.",
+            WeaponKind::TailWhip => "Whips every foe within close reach.",
             WeaponKind::AcidSpit => "Lobs acid that pools and burns.",
             // The "ACTIVE" prefix is what the level-up card shows, so the
             // player learns which weapons the Space bar fires (task: the first
             // two player-triggered weapons).
-            WeaponKind::TailThrash => "ACTIVE: press SPACE to thrash a long sweeping arc.",
-            WeaponKind::SonicSqueak => "ACTIVE: press SPACE to squeak a stunning ring.",
+            WeaponKind::TailThrash => "ACTIVE: Space sweeps a shot-clearing arc.",
+            WeaponKind::SonicSqueak => "ACTIVE: Space blasts a stunning ring.",
             // The dash weapon's card teaches the trigger the same way: the
             // dash key, not Space-the-charge (it has no charge gauge).
-            WeaponKind::LaserEyes => "Pulses a sweeping beam through everything in front.",
-            WeaponKind::SuperDash => "DASH: every dash wounds everything it crosses.",
-            WeaponKind::AcidRain => "Marks the floor; staggered drops splash everything nearby.",
-            WeaponKind::Hantavirus => "Tags a foe for three ticks; the mark jumps on when it dies.",
+            WeaponKind::LaserEyes => "Sweeps piercing beams ahead of you.",
+            WeaponKind::SuperDash => "DASH: wounds every foe you dash through.",
+            WeaponKind::AcidRain => "Drops staggered acid splashes nearby.",
+            WeaponKind::Hantavirus => "Tags a foe for 3 hits, then jumps on.",
         }
     }
 
@@ -230,7 +230,7 @@ impl WeaponKind {
         match self {
             WeaponKind::Gnaw => "Teeth are the original weapon.",
             WeaponKind::CheeseSpray => "Weaponized dairy. Don't ask.",
-            WeaponKind::SqueakNova => "A scream pitched past hearing. It still hurts.",
+            WeaponKind::SqueakNova => "Pitched past hearing. It still hurts.",
             WeaponKind::SporeOrbit => "Fungal hitchhikers from Vat 9, now loyal.",
             WeaponKind::TailWhip => "Forty grams of pure indignation.",
             WeaponKind::AcidSpit => "Stomach contents, redirected.",
@@ -398,42 +398,42 @@ impl WeaponKind {
                 super::loadout::PassiveKind::Damage,
                 "Milk Teeth",
                 "They always come back in.",
-                "The lead dart lodges for 1 s, then pulls back to you, biting each crossed foe once.",
+                "Lead dart lodges 1s, then yanks back to you through every foe in line.",
             ),
             // Fondue Fork — the outer two darts plant tines and string a wire.
             WeaponKind::CheeseSpray => e(
                 super::loadout::PassiveKind::MaxHp,
                 "Fondue Fork",
                 "Dinner is a tripwire.",
-                "The outer two darts plant tines; a cheese string between them cuts crossers for 1.5 s.",
+                "Outer darts plant tines strung with a 1.5s wire that cuts crossers.",
             ),
             // Echo Chamber — spokes bounce off walls and come back.
             WeaponKind::SqueakNova => e(
                 super::loadout::PassiveKind::FireRate,
                 "Echo Chamber",
                 "The walls know the chorus.",
-                "Each spoke that hits a wall returns along its incoming line, hitting once more.",
+                "Every shot that hits a wall rebounds back along its path for a second hit.",
             ),
             // Fairy Ring — every second cast leaves a still, burning ring.
             WeaponKind::SporeOrbit => e(
                 super::loadout::PassiveKind::Regen,
                 "Fairy Ring",
                 "Something grew where you stood.",
-                "Every second cast leaves its satellites fixed for 3 s; crossing the ring burns.",
+                "Every second cast leaves a fixed ring of spores that burns for 3s.",
             ),
             // Ratchet Tail — the whip hooks a body and swings it around.
             WeaponKind::TailWhip => e(
                 super::loadout::PassiveKind::MoveSpeed,
                 "Ratchet Tail",
                 "Give the room a turn.",
-                "A whip hit hooks the nearest body and swings it 90° into everything it crosses.",
+                "Hooks the nearest struck foe and swings it 90° through the crowd.",
             ),
             // Drain Cleaner — the splash becomes a directed corrosive channel.
             WeaponKind::AcidSpit => e(
                 super::loadout::PassiveKind::Armor,
                 "Drain Cleaner",
                 "Clears hair, grease and witnesses.",
-                "The splash runs 36 px forward as a corrosive channel, then lingers for 2 s.",
+                "Splash surges 36px forward as a corrosive channel that burns for 2s.",
             ),
             // Flywheel — the thrash catches pellets and flings them back.
             WeaponKind::TailThrash => e(
@@ -441,42 +441,42 @@ impl WeaponKind {
                 super::loadout::FLYWHEEL_PARTNER,
                 "Flywheel",
                 "Save that for the return trip.",
-                "Each sweep catches up to two hostile pellets; the last sweep flings them forward.",
+                "Sweeps catch up to 2 enemy shots each; the final sweep flings them back.",
             ),
             // Roll Call — the squeak's tags answer with their own pulses.
             WeaponKind::SonicSqueak => e(
                 super::loadout::PassiveKind::Magnet,
                 "Roll Call",
                 "Every cage answers.",
-                "Foes the ring stuns or slows answer 0.8 s later with a 9 px pulse of their own.",
+                "Stunned or slowed foes echo 0.8s later with a damaging pulse of their own.",
             ),
             // Downspout — the volley becomes one marching gutter of drops.
             WeaponKind::AcidRain => e(
                 super::loadout::PassiveKind::LongFuse,
                 "Downspout",
                 "The leak has found the stairs.",
-                "One mark, then each drop steps 10 px back toward you along the same line, leaving 1 s of runoff.",
+                "Drops march 10px per splash back toward you, leaving a 1s acid gutter.",
             ),
             // Dead Letter — a dying host seals its last jumps into a packet.
             WeaponKind::Hantavirus => e(
                 super::loadout::PassiveKind::SecondScent,
                 "Dead Letter",
                 "Return to sender.",
-                "A host that dies with jumps left leaves a sealed packet for 2 s; the first foe to touch it resumes the chain.",
+                "Isolated hosts die leaving a 2s packet; the next foe near it restarts it.",
             ),
             // Carbon Copy — the previous sweep repeats itself backwards.
             WeaponKind::LaserEyes => e(
                 super::loadout::PassiveKind::LensCap,
                 "Carbon Copy",
                 "The camera kept a negative.",
-                "Each completed sweep is recorded; the next one replays the old sweep backwards at half damage.",
+                "Records each beam sweep and replays it backward next burst at 50% damage.",
             ),
             // Ripcord — the dash's route stays taut and then snaps.
             WeaponKind::SuperDash => e(
                 super::loadout::PassiveKind::SpringHeel,
                 "Ripcord",
                 "The tail was the fuse.",
-                "After a dash its route stays taut for 0.6 s: bodies on it take a dash hit and slide 8 px back.",
+                "Your dash trail stays taut for 0.6s, striking foes and yanking them 8px.",
             ),
         }
     }
@@ -716,7 +716,7 @@ mod tests {
         }
         for kind in [WeaponKind::TailThrash, WeaponKind::SonicSqueak] {
             assert!(
-                kind.desc().starts_with("ACTIVE: press SPACE"),
+                kind.desc().starts_with("ACTIVE: Space"),
                 "{kind:?}'s card must teach the Space trigger: {}",
                 kind.desc()
             );
