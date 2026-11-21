@@ -28,6 +28,7 @@ use crate::game::art_boss_broom::BroomBossState;
 use crate::game::art_boss_cat::BossCatState;
 use crate::game::art_boss_mangle::MangleState;
 use crate::game::art_boss_mower::MowerState;
+use crate::game::art_boss_night_edition::NightEditionState;
 use crate::game::art_traps::MazeRewardState;
 use crate::game::art_walls::WallKind;
 use crate::game::bullet::{Bullet, Faction};
@@ -1825,6 +1826,96 @@ impl LightMap {
                         });
                     }
                     _ => {}
+                }
+            }
+            BossState::NightEdition(st) => {
+                // The press works under its own cold compositor's lamp; the
+                // hazards themselves are self-lit by the hazard pass below.
+                if in_range(bsx, bsy, 48.0) {
+                    self.lights.push(PointLight {
+                        x: bsx,
+                        y: bsy,
+                        radius: 46.0,
+                        color: (214, 222, 236),
+                        intensity: 180,
+                        scatter: 36,
+                        priority: 2,
+                        occlude: false,
+                        hard: false,
+                    });
+                }
+                let mut tell = |p: Vec2, radius: f32, color: (u8, u8, u8), intensity: u16| {
+                    let sx = p.x - cam.x;
+                    let sy = p.y - cam.y;
+                    if in_range(sx, sy, radius + 2.0) {
+                        self.lights.push(PointLight {
+                            x: sx,
+                            y: sy,
+                            radius,
+                            color,
+                            intensity,
+                            scatter: 58,
+                            priority: 3,
+                            occlude: false,
+                            hard: false,
+                        });
+                    }
+                };
+                // Amber while the tell runs, red for its last 30 %: the same
+                // warning ramp the other bosses' tells use.
+                let warn = if progress >= 0.7 {
+                    (255, 96, 64)
+                } else {
+                    (255, 196, 78)
+                };
+                match st {
+                    NightEditionState::PageTell | NightEditionState::PageStamp => {
+                        // The sheet's inked part lights up where it will land.
+                        let (ink, _) = crate::game::art_boss_night_edition::inked_rect(
+                            boss.target,
+                            boss.swipe_side,
+                        );
+                        let color = if matches!(st, NightEditionState::PageStamp) {
+                            (255, 96, 64)
+                        } else {
+                            warn
+                        };
+                        tell(ink, 40.0, color, 240);
+                    }
+                    NightEditionState::MisprintTell | NightEditionState::MisprintStamp => {
+                        let rects = crate::game::art_boss_night_edition::misprint_rects(
+                            boss.target,
+                            boss.swipe_side,
+                        );
+                        let color = if matches!(st, NightEditionState::MisprintStamp) {
+                            (255, 96, 64)
+                        } else {
+                            warn
+                        };
+                        for (ink, _) in rects {
+                            tell(ink, 40.0, color, 235);
+                        }
+                    }
+                    NightEditionState::CarriageTell => {
+                        // The bell's spark at the rule's near end.
+                        tell(boss.pounce_origin, 38.0, warn, 245);
+                    }
+                    NightEditionState::CarriageSweep => {
+                        tell(boss.pos, 44.0, (255, 96, 64), 250);
+                    }
+                    NightEditionState::BedLowered | NightEditionState::Ribbon => {
+                        // The exposed weak point glows gold: the punish window
+                        // reads in a dark room.
+                        let view = boss.night_edition_view();
+                        if let Some(weak) = crate::game::art_boss_night_edition::weak_point(&view)
+                        {
+                            tell(weak, 38.0, (255, 216, 112), 255);
+                        }
+                    }
+                    NightEditionState::PhaseTurn | NightEditionState::Wreck => {
+                        tell(boss.pos, 74.0, (255, 198, 120), 275);
+                    }
+                    NightEditionState::Roll => {}
                 }
             }
             _ => {

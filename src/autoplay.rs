@@ -50,6 +50,7 @@ use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::art_boss_broom::BroomBossState;
 use crate::game::art_boss_cat::BossCatState;
 use crate::game::art_boss_mower::MowerState;
+use crate::game::art_boss_night_edition::NightEditionState;
 use crate::game::ecs::resources::DamageLedger;
 use crate::game::ecs::systems::boss::{Boss, BossFight, BossKind, BossProjectile, BossState};
 use crate::game::weapon::WeaponKind;
@@ -261,6 +262,9 @@ pub enum BossAttack {
     Intake,
     Towel,
     Other,
+    // THE NIGHT EDITION (Printworks).
+    PageStamp,
+    Carriage,
 }
 
 impl BossAttack {
@@ -280,6 +284,8 @@ impl BossAttack {
             BossAttack::Intake => "intake",
             BossAttack::Towel => "towel",
             BossAttack::Other => "other",
+            BossAttack::PageStamp => "page stamp",
+            BossAttack::Carriage => "carriage return",
         }
     }
 }
@@ -333,6 +339,14 @@ impl DamageCause {
                 _ => "mangle hazard",
             },
             DamageCause::BossProjectile(BossKind::Mangle) => "rolled towel",
+            DamageCause::BossContact(BossKind::NightEdition) => "the night edition's body",
+            DamageCause::BossHazard(BossKind::NightEdition, a) => match a {
+                BossAttack::PageStamp => "the night edition's impression",
+                BossAttack::Carriage => "carriage return",
+                _ => "the night edition's hazard",
+            },
+            // It fires no projectiles; the arm exists so the label never lies.
+            DamageCause::BossProjectile(BossKind::NightEdition) => "the night edition",
             DamageCause::Trap => "mousetrap",
             DamageCause::Unknown => "unknown",
         }
@@ -1152,6 +1166,7 @@ fn boss_name(kind: BossKind) -> &'static str {
         BossKind::Broom => "broom human",
         BossKind::Mower => "mower",
         BossKind::Mangle => "mangle",
+        BossKind::NightEdition => "the night edition",
     }
 }
 
@@ -1326,6 +1341,17 @@ fn boss_attack(state: &BossState) -> BossAttack {
         BossState::Mangle(s) => match s {
             crate::game::art_boss_mangle::MangleState::Intake { .. } => BossAttack::Intake,
             crate::game::art_boss_mangle::MangleState::WringOut => BossAttack::Towel,
+            _ => BossAttack::Other,
+        },
+        BossState::NightEdition(s) => match s {
+            NightEditionState::PageTell
+            | NightEditionState::PageStamp
+            | NightEditionState::BedLowered
+            | NightEditionState::MisprintTell
+            | NightEditionState::MisprintStamp => BossAttack::PageStamp,
+            NightEditionState::CarriageTell
+            | NightEditionState::CarriageSweep
+            | NightEditionState::Ribbon => BossAttack::Carriage,
             _ => BossAttack::Other,
         },
     }

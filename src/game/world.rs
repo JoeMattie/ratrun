@@ -99,7 +99,8 @@ use super::smoke::{SmokeLayer, SmokeScene};
 use super::weapon::WeaponKind;
 use super::art_walls::{Cardinal, WallKind};
 use super::{
-    art_boss_broom, art_boss_cat, art_boss_mangle, art_boss_mower, art_enemy, art_floor, art_marks, art_miniboss,
+    art_boss_broom, art_boss_cat, art_boss_mangle, art_boss_mower, art_boss_night_edition,
+    art_enemy, art_floor, art_marks, art_miniboss,
     art_props, art_rat, art_traps, art_walls, art_wave3a,
 };
 
@@ -1809,6 +1810,9 @@ impl World {
                     art_boss_mower::draw_mower_ground(pb, &v, cam, accent);
                 }
                 BossArtView::Mangle(v) => art_boss_mangle::draw_ground(pb, &v, cam, accent),
+                BossArtView::NightEdition(v) => {
+                    art_boss_night_edition::draw_ground(pb, &v, cam, accent)
+                }
             }
         }
     }
@@ -1847,6 +1851,7 @@ impl World {
                 BossArtView::Broom(v) => art_boss_broom::draw(pb, &v, cam, accent),
                 BossArtView::Mower(v) => art_boss_mower::draw_mower(pb, &v, cam, accent),
                 BossArtView::Mangle(v) => art_boss_mangle::draw(pb, &v, cam, accent),
+                BossArtView::NightEdition(v) => art_boss_night_edition::draw(pb, &v, cam, accent),
             }
         }
     }

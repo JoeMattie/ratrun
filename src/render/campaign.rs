@@ -247,10 +247,9 @@ impl CampaignLevel {
             CampaignLevel::Sewer => "APEX JAGUAR",
             CampaignLevel::Kitchen => "THE SWEEPER",
             CampaignLevel::Lab => "TURF-REAPER MK.IV",
-            // The floors' own bosses (`WAVE3_DESIGN.md` §12). Until w3-bosses
-            // lands them these floors are guarded by the borrowed broom and
-            // mower (`BossKind::for_theme`), so the *fight* is the placeholder
-            // and the plate is where the floor is going.
+            // The floors' own bosses (`WAVE3_DESIGN.md` §12,
+            // `BossKind::for_theme`): the Laundry fights the Mangle and the
+            // Printworks the Night Edition.
             CampaignLevel::Laundry => "THE MANGLE",
             CampaignLevel::Printworks => "THE NIGHT EDITION",
         }

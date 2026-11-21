@@ -103,6 +103,7 @@ use crate::game::art_boss_broom::{self, BroomBossState, BroomBossView};
 use crate::game::art_boss_mangle::{self, MangleState, MangleView};
 use crate::game::art_boss_cat::{self, BossCatState, BossCatView};
 use crate::game::art_boss_mower::{self, MowerState, MowerView};
+use crate::game::art_boss_night_edition::{self, NightEditionState, NightEditionView};
 use crate::game::art_traps::{
     local_box_contains, MousetrapState, MOUSETRAP_DAMAGE_ENEMY, MOUSETRAP_HIT_PROGRESS_MAX,
     MOUSETRAP_HIT_PROGRESS_MIN, MOUSETRAP_KILL_HALF_V, MOUSETRAP_KILL_U_MAX, MOUSETRAP_KILL_U_MIN,
@@ -116,7 +117,7 @@ use crate::game::ecs::resources::{
     BossDue, DifficultyLevel, NextEnemyId, NextSpawnId, RunCounters, Shake, SfxQueue, TickInput,
 };
 use crate::game::enemy::{Enemy, EnemyKind};
-use crate::game::level::{Level, Theme, TileRect};
+use crate::game::level::{Level, Rectf, Theme, TileRect};
 use crate::game::nav::FlowField;
 use crate::game::particle::damage_number::{DamageNumbers, DamageSource};
 use crate::game::particle::Particles;
@@ -130,6 +131,7 @@ pub mod broom;
 pub mod cat;
 pub mod mangle;
 pub mod mower;
+pub mod night_edition;
 
 // ============================================================================
 // Kind, rng, resource
@@ -146,6 +148,8 @@ pub enum BossKind {
     Mower,
     /// Laundry — The Mangle (cast-iron wringer).
     Mangle,
+    /// Printworks — THE NIGHT EDITION (the walking offset press).
+    NightEdition,
 }
 
 /// The boss the getaway ride fields until it gets a fight of its own.
@@ -161,11 +165,11 @@ impl BossKind {
     /// The boss for a floor.
     ///
     /// **The wave 3 seam.** This is the one function that decides which boss a
-    /// theme spawns: the Laundry and the Printworks currently borrow the
-    /// Kitchen's broom and the Lab's mower so their floors are completable, and
-    /// the boss wave replaces those two arms with `BossKind::Mangle` and
-    /// `BossKind::NightEdition` (plus their arena furniture in
-    /// `levelgen::layout::furnish_arena`). Nothing else maps themes to bosses.
+    /// theme spawns (`boss_spawn_system` calls it, not `for_level`), so a floor
+    /// with its own fight fields it and every other floor meets the same boss
+    /// `for_level` gives. The Laundry fields the Mangle and the Printworks the
+    /// Night Edition, the latter with its own arena in
+    /// `levelgen::layout::furnish_arena`. Nothing else maps themes to bosses.
     #[inline]
     pub fn for_theme(theme: Theme) -> Self {
         match theme {
@@ -173,7 +177,7 @@ impl BossKind {
             Theme::Kitchen => BossKind::Broom,
             Theme::Lab => BossKind::Mower,
             Theme::Laundry => BossKind::Mangle,
-            Theme::Printworks => BossKind::Mower,
+            Theme::Printworks => BossKind::NightEdition,
             Theme::Trailer => trailer_boss(),
         }
     }
@@ -196,6 +200,7 @@ impl BossKind {
             BossKind::Broom => 1600.0,
             BossKind::Mower => 1600.0,
             BossKind::Mangle => art_boss_mangle::BOSS_BASE_HP,
+            BossKind::NightEdition => art_boss_night_edition::BOSS_BASE_HP,
         }
     }
 
@@ -207,6 +212,7 @@ impl BossKind {
             BossKind::Broom => art_boss_broom::STANCE_HALF_WIDTH + art_boss_broom::FOOT_HIT_RADIUS,
             BossKind::Mower => art_boss_mower::BODY_RADIUS,
             BossKind::Mangle => art_boss_mangle::BODY_RADIUS,
+            BossKind::NightEdition => art_boss_night_edition::BODY_RADIUS,
         }
     }
 
@@ -271,6 +277,18 @@ impl BossKind {
             // rotation, so the raw pool has to be larger to buy the same
             // fight. 3.35 lands it beside the Sweeper (see the report).
             BossKind::Mangle => 3.35,
+            // `WAVE3_DESIGN.md` §12 states the Night Edition's pool as the
+            // *final encounter* number (3,000), so the art constant is that
+            // whole design pool and this is the same 2.0 the other stage-3
+            // fight uses: 3,000 × 2.0 × the framework's ×8 = 48,000, 1.25× the
+            // Mangle's design pool and 1.875× the Mower's art base, which is
+            // exactly the ratio §12 asks for (3,000 vs 2,400 vs the borrowed
+            // 1,600). Measured on the same near-complete build and harness as
+            // the others (`night_edition::tests::measure_press_fight`,
+            // `RATRUN_PRESS_MEASURE=1`): 39.5–45.6 s across seven seeds, the bot
+            // dodging every tell (0–1 avoidable hits per fight over 40 s). A
+            // balance pass owns the final number.
+            BossKind::NightEdition => 2.0,
         }
     }
 
@@ -287,6 +305,8 @@ impl BossKind {
             BossKind::Broom => 10.0,
             BossKind::Mower => 14.0,
             BossKind::Mangle => art_boss_mangle::CONTACT_DAMAGE,
+            // The design's own number for this fight (`§12`: body contact 8).
+            BossKind::NightEdition => art_boss_night_edition::CONTACT_DAMAGE,
         }
     }
 
@@ -298,6 +318,7 @@ impl BossKind {
             BossKind::Broom => 2.40,
             BossKind::Mower => 3.4,
             BossKind::Mangle => art_boss_mangle::DEATH_DURATION,
+            BossKind::NightEdition => art_boss_night_edition::DEATH_DURATION,
         }
     }
 
@@ -338,6 +359,17 @@ impl BossKind {
                     1
                 }
             }
+            // The design's thresholds: the page stamp above 65 %, the carriage
+            // return from 65 to 30 %, the misprint below 30 %.
+            BossKind::NightEdition => {
+                if hp_frac <= 0.30 {
+                    3
+                } else if hp_frac <= 0.65 {
+                    2
+                } else {
+                    1
+                }
+            }
         }
     }
 
@@ -349,6 +381,7 @@ impl BossKind {
             BossKind::Broom => BossState::Broom(BroomBossState::Idle),
             BossKind::Mower => BossState::Mower(MowerState::Patrol),
             BossKind::Mangle => BossState::Mangle(MangleState::Idle),
+            BossKind::NightEdition => BossState::NightEdition(NightEditionState::Roll),
         }
     }
 
@@ -360,6 +393,8 @@ impl BossKind {
             BossKind::Broom => 0.55,
             BossKind::Mower => 1.80,
             BossKind::Mangle => art_boss_mangle::IDLE_P1,
+            // The first walk beat is the phase-1 one (`night_edition::ROLL_DURATION[0]`).
+            BossKind::NightEdition => 1.8,
         }
     }
 
@@ -371,6 +406,7 @@ impl BossKind {
             BossKind::Broom => BossState::Broom(BroomBossState::Defeat),
             BossKind::Mower => BossState::Mower(MowerState::Dying),
             BossKind::Mangle => BossState::Mangle(MangleState::Death),
+            BossKind::NightEdition => BossState::NightEdition(NightEditionState::Wreck),
         }
     }
 
@@ -382,6 +418,7 @@ impl BossKind {
             BossKind::Broom => 0xC2B2_AE3D_27D4_EB4F,
             BossKind::Mower => 0x1656_67B1_9E37_79F9,
             BossKind::Mangle => 0xD1B5_4A32_7F6C_1E09,
+            BossKind::NightEdition => 0x7B1D_3C4F_9A2E_5D68,
         }
     }
 
@@ -393,6 +430,7 @@ impl BossKind {
             BossKind::Broom => art_boss_broom::CULL_MARGIN,
             BossKind::Mower => art_boss_mower::BODY_RADIUS + 20.0,
             BossKind::Mangle => art_boss_mangle::CULL_MARGIN,
+            BossKind::NightEdition => art_boss_night_edition::CULL_MARGIN,
         }
     }
 
@@ -404,6 +442,7 @@ impl BossKind {
             BossKind::Broom => &broom::BroomController,
             BossKind::Mower => &mower::MowerController,
             BossKind::Mangle => &mangle::MangleController,
+            BossKind::NightEdition => &night_edition::NightEditionController,
         }
     }
 }
@@ -551,6 +590,7 @@ pub enum BossState {
     Broom(BroomBossState),
     Mower(MowerState),
     Mangle(MangleState),
+    NightEdition(NightEditionState),
 }
 
 /// One art-defined hit shape. Bosses are hit through these, not a single circle.
@@ -736,6 +776,7 @@ pub enum BossArtView {
     Broom(BroomBossView),
     Mower(MowerView),
     Mangle(MangleView),
+    NightEdition(NightEditionView),
 }
 
 // ============================================================================
@@ -1307,6 +1348,36 @@ impl Boss {
                 ];
                 BossHitShapes::from_slice(&out)
             }
+            // The platen is a slab, so it is hit through an oriented box; while
+            // the type bed or the ribbon is exposed the weak point is its own
+            // target, which is what auto-aim and the ground weapons reach for
+            // during the punish window.
+            BossKind::NightEdition => {
+                let view = self.night_edition_view();
+                let (center, facing, half, half_perp) = art_boss_night_edition::body_box(&view);
+                let mut shapes = [
+                    BossHitShape::Box {
+                        center,
+                        facing,
+                        half,
+                        half_perp,
+                        grounded: true,
+                    };
+                    3
+                ];
+                let mut len = 1usize;
+                if let Some(weak) = art_boss_night_edition::weak_point(&view) {
+                    if weak.dist(center) > 1.0 {
+                        shapes[len] = BossHitShape::Circle {
+                            center: weak,
+                            radius: art_boss_night_edition::RIBBON_WINDOW_RADIUS,
+                            grounded: true,
+                        };
+                        len += 1;
+                    }
+                }
+                BossHitShapes::from_slice(&shapes[..len])
+            }
         }
     }
 
@@ -1339,6 +1410,7 @@ impl Boss {
             BossKind::Broom => BossArtView::Broom(self.broom_view()),
             BossKind::Mower => BossArtView::Mower(self.mower_view()),
             BossKind::Mangle => BossArtView::Mangle(self.mangle_view()),
+            BossKind::NightEdition => BossArtView::NightEdition(self.night_edition_view()),
         }
     }
 
@@ -1396,6 +1468,34 @@ impl Boss {
             hp_frac: self.hp_frac(),
             target: self.target,
             enraged: self.phase >= 2,
+        }
+    }
+
+    fn night_edition_state(&self) -> NightEditionState {
+        match self.state {
+            BossState::NightEdition(s) => s,
+            _ => NightEditionState::Roll,
+        }
+    }
+
+    pub(crate) fn night_edition_view(&self) -> NightEditionView {
+        NightEditionView {
+            pos: self.pos,
+            facing: self.facing,
+            state: self.night_edition_state(),
+            progress: self.progress(),
+            anim: self.anim,
+            hit_flash: self.hit_flash,
+            hp_frac: self.hp_frac(),
+            phase: self.phase,
+            page: self.target,
+            // The art's side selector: the page's blank margin.
+            margin_side: self.swipe_side,
+            rule_from: self.pounce_origin,
+            rule_to: self.target,
+            // The framework hands the arena's exported centre as the "dock";
+            // for the Night Edition that is the press bed's centre.
+            bed: self.dock,
         }
     }
 
@@ -1622,6 +1722,25 @@ pub enum BossCue {
     MangleShift,
     /// The springs pop in the death beat.
     MangleDeath,
+    // ---- THE NIGHT EDITION (Printworks) ----
+    /// `PageTell` entry: the sheet is fed and the frame is set.
+    NightPage,
+    /// The impression lands (`PageStamp` entry / a misprint beat).
+    NightStamp,
+    /// `BedLowered` entry: the form drops away from the platen.
+    NightBed,
+    /// `MisprintTell` entry: two sheets, one clear stripe.
+    NightMisprint,
+    /// `CarriageTell` entry: the bell.
+    NightBell,
+    /// `CarriageSweep` entry: the carriage runs the rule.
+    NightCarriage,
+    /// `Ribbon` entry: the ribbon lifts out of the spools.
+    NightRibbon,
+    /// `PhaseTurn` entry: the frame unlatches and re-seats.
+    NightTurn,
+    /// `Wreck` entry: the press tears itself apart.
+    NightWreck,
 }
 
 impl BossCue {
@@ -1664,6 +1783,18 @@ impl BossCue {
             BossCue::MangleJam => Sfx::MangleJam,
             BossCue::MangleShift => Sfx::MangleShift,
             BossCue::MangleDeath => Sfx::MangleDeath,
+            BossCue::NightPage => Sfx::NightStamp,
+            BossCue::NightStamp => Sfx::NightStamp,
+            BossCue::NightBed => Sfx::NightStamp,
+            BossCue::NightMisprint => Sfx::NightBell,
+            BossCue::NightBell => Sfx::NightBell,
+            BossCue::NightCarriage => Sfx::NightCarriage,
+            // The ribbon window is a mechanical reveal, exactly the chest-open
+            // sting's shape.
+            BossCue::NightRibbon => Sfx::CacheOpen,
+            // Re-seating machinery: the dock's servo hum.
+            BossCue::NightTurn => Sfx::MowerDockHum,
+            BossCue::NightWreck => Sfx::MowerDeath,
         }
     }
 }
@@ -2036,6 +2167,25 @@ fn emit_cues(
                     false,
                 );
             }
+            // ---- THE NIGHT EDITION --------------------------------------
+            // The page's own outline is the art's; the cue is the press's
+            // machinery: a glint on the sheet as the frame sets, the dust and
+            // grit of the impression, ink mist off the lowered bed, the bell's
+            // spark at the rule's near end, the carriage's trail and the
+            // ribbon's reveal.
+            BossCue::NightPage => {
+                let (ink, _) =
+                    art_boss_night_edition::inked_rect(boss.target, boss.swipe_side);
+                vfx::emit_weapon_hit(
+                    particles,
+                    rng,
+                    ink,
+                    Vec2::ZERO,
+                    None,
+                    EnemyKind::Boss,
+                    false,
+                );
+            }
             BossCue::MangleBite => {
                 // The nip's metal clang: the mower's wall-impact sparks are
                 // exactly a hard steel bite.
@@ -2049,6 +2199,40 @@ fn emit_cues(
                     particles,
                     rng,
                     art_boss_mangle::crank_pos(&view),
+                    Vec2::ZERO,
+                    None,
+                    EnemyKind::Boss,
+                    false,
+                );
+            }
+            BossCue::NightStamp => {
+                let (ink, half) =
+                    art_boss_night_edition::inked_rect(boss.target, boss.swipe_side);
+                vfx::emit_boss_broom_stomp(particles, rng, ink, half.y.max(8.0), boss.phase >= 2);
+            }
+            BossCue::NightBed => {
+                vfx::emit_boss_mower_overheat_steam(particles, rng, boss.pos, boss.facing, 0.12);
+            }
+            BossCue::NightMisprint => {
+                let rects =
+                    art_boss_night_edition::misprint_rects(boss.target, boss.swipe_side);
+                for (ink, _) in rects {
+                    vfx::emit_weapon_hit(
+                        particles,
+                        rng,
+                        ink,
+                        Vec2::ZERO,
+                        None,
+                        EnemyKind::Boss,
+                        false,
+                    );
+                }
+            }
+            BossCue::NightBell => {
+                vfx::emit_weapon_hit(
+                    particles,
+                    rng,
+                    boss.pounce_origin,
                     Vec2::ZERO,
                     None,
                     EnemyKind::Boss,
@@ -2070,6 +2254,19 @@ fn emit_cues(
                 );
             }
             BossCue::MangleDeath => {
+                vfx::emit_boss_mower_death(particles, rng, boss.pos);
+            }
+            BossCue::NightCarriage => {
+                vfx::emit_boss_mower_charge_trail(particles, rng, boss.pos, boss.facing, false, 0.15);
+            }
+            BossCue::NightRibbon => {
+                let rib = art_boss_night_edition::ribbon_pos(boss.pos, boss.facing);
+                vfx::emit_weapon_hit(particles, rng, rib, Vec2::ZERO, None, EnemyKind::Boss, false);
+            }
+            BossCue::NightTurn => {
+                vfx::emit_boss_mower_flipped_smoke(particles, rng, boss.pos, 0.15);
+            }
+            BossCue::NightWreck => {
                 vfx::emit_boss_mower_death(particles, rng, boss.pos);
             }
         }
@@ -2101,8 +2298,10 @@ pub fn boss_spawn_system(
     if !due.take() || !bosses.is_empty() {
         return;
     }
-    // The floor's own boss: the side-route floors play at a campaign stage
-    // index, so the theme is the only thing that can name their boss.
+    // The theme is authoritative: the side-route floors play at a campaign
+    // stage index, and the Laundry and the Printworks field their own bosses
+    // (the Mangle, the Night Edition), so the theme is the only thing that can
+    // name a floor's boss.
     let kind = BossKind::for_theme(level.theme);
     let arena = level
         .boss_room()
@@ -2952,6 +3151,7 @@ impl BossTrace {
             BossState::Cat(BossCatState::Hurt)
                 | BossState::Broom(BroomBossState::Hurt { .. })
                 | BossState::Mower(MowerState::Flipped | MowerState::Overheat)
+                | BossState::NightEdition(NightEditionState::BedLowered | NightEditionState::Ribbon)
         )
     }
 
