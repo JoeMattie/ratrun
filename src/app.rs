@@ -1810,6 +1810,10 @@ impl App {
             e.kind == MouseEventKind::Down(MouseButton::Middle)
                 && !self.map_open
                 && self.over_playfield(e.column, e.row)
+                // The minimap is a UI overlay sitting on the playfield: it has
+                // its own job (and the wheel skips it), so a click there must
+                // not train the zoom either.
+                && self.hits.at(e.column, e.row) != Some(Target::Minimap)
         });
         if self.input.action_pressed(Action::ResetZoom) && !self.map_open {
             // A mouse reset only counts over the playfield (the minimap, the
@@ -8611,6 +8615,49 @@ mod tests {
         );
         assert_ne!(h.app.scores.minimap_size, before, "the radar still steps");
         assert_eq!(h.app.effective_zoom(), zoom_before, "and the view did not zoom");
+    }
+
+    /// A middle click over the playfield resets the view to 1.0× and does
+    /// nothing else: it is not a `Target`, so it never dashes or fires, and
+    /// over the HUD rails or the compact minimap it is ignored.
+    #[test]
+    fn a_middle_click_resets_the_zoom_over_the_playfield_only() {
+        let mut h = Harness::new(120, 40);
+        h.enter_playing();
+        let game = h.app.last_game;
+        let field = (game.x + game.width / 2, game.y + game.height / 2);
+
+        // Zoom in, then a middle click over the field snaps back to 1.0×.
+        h.events(&[], &[(MouseEventKind::ScrollUp, field)]);
+        h.events(&[], &[(MouseEventKind::ScrollUp, field)]);
+        assert_eq!(h.app.effective_zoom(), 0.5);
+        h.events(&[], &[(MouseEventKind::Down(MouseButton::Middle), field)]);
+        assert_eq!(h.app.effective_zoom(), 1.0, "middle click resets the view");
+
+        // It never dashes or fires: a dash would put the cooldown on the clock,
+        // and the click is not a `Target` so the app never spends the actives.
+        let w = h.app.world.as_ref().unwrap();
+        assert!(w.player.dash_cd <= 0.0, "a middle click must not dash");
+
+        // Over the HUD rails and the compact minimap it is ignored.
+        h.events(&[], &[(MouseEventKind::ScrollUp, field)]);
+        assert_eq!(h.app.effective_zoom(), 0.75);
+        let zoom_before = h.app.effective_zoom();
+        h.events(&[], &[(MouseEventKind::Down(MouseButton::Middle), (10, 0))]);
+        h.events(&[], &[(MouseEventKind::Down(MouseButton::Middle), (10, 39))]);
+        let compact = h.app.last_minimap;
+        h.events(
+            &[],
+            &[(
+                MouseEventKind::Down(MouseButton::Middle),
+                (compact.x + compact.width / 2, compact.y + compact.height / 2),
+            )],
+        );
+        assert_eq!(
+            h.app.effective_zoom(),
+            zoom_before,
+            "only the playfield resets the view"
+        );
     }
 
     #[test]
