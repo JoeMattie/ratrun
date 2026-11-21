@@ -25,9 +25,10 @@ pub const EFFECTS_ROW: usize = 1;
 pub const MINIMAP_ROW: usize = 2;
 pub const CURSOR_ROW: usize = 3;
 pub const MUTE_ROW: usize = 4;
-pub const BACK_ROW: usize = 5;
+pub const ZOOM_ROW: usize = 5;
+pub const BACK_ROW: usize = 6;
 /// How many rows the screen has.
-pub const ROW_COUNT: usize = 6;
+pub const ROW_COUNT: usize = 7;
 
 /// Slider identity used by [`Target::OptionsBar`]: the value the track edits.
 pub const MUSIC_BAR: usize = 0;
@@ -49,6 +50,7 @@ pub enum Row {
     Minimap,
     Cursor,
     Mute,
+    Zoom,
     Back,
 }
 
@@ -59,6 +61,7 @@ pub const ROWS: [Row; ROW_COUNT] = [
     Row::Minimap,
     Row::Cursor,
     Row::Mute,
+    Row::Zoom,
     Row::Back,
 ];
 
@@ -71,6 +74,7 @@ impl Row {
             Row::Minimap => "MINIMAP",
             Row::Cursor => "CURSOR",
             Row::Mute => "MUTE",
+            Row::Zoom => "ZOOM",
             Row::Back => "BACK",
         }
     }
@@ -93,6 +97,9 @@ pub struct OptionsView {
     pub minimap: MinimapSize,
     pub cursor: CursorSetting,
     pub muted: bool,
+    /// View zoom: how much world the playfield shows (`1.0` = unzoomed, `2.0`
+    /// = twice the world). Stepped along [`crate::render::zoom::STEPS`].
+    pub zoom: f32,
     /// Selected row (`0..ROW_COUNT`).
     pub row: usize,
     /// Accent for the panel edge and the sliders (theme or level material).
@@ -195,6 +202,11 @@ fn value_text(view: &OptionsView, row: Row) -> String {
             } else {
                 "OFF".to_string()
             }
+        }
+        Row::Zoom => {
+            let mut s = String::with_capacity(8);
+            crate::render::zoom::format_into(&mut s, view.zoom);
+            s
         }
         Row::Music => String::new(),
         Row::Effects => String::new(),
@@ -431,6 +443,7 @@ mod tests {
             minimap: MinimapSize::Small,
             cursor: CursorSetting::On,
             muted: false,
+            zoom: 1.0,
             row,
             accent: Color::Rgb(144, 184, 173),
         }
@@ -456,7 +469,9 @@ mod tests {
         for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
             let v = view(MUSIC_ROW);
             let (text, hits) = frame(w, h, &v);
-            for label in ["MUSIC", "EFFECTS", "MINIMAP", "CURSOR", "MUTE", "BACK"] {
+            for label in [
+                "MUSIC", "EFFECTS", "MINIMAP", "CURSOR", "MUTE", "ZOOM", "BACK",
+            ] {
                 assert!(text.contains(label), "{w}x{h} is missing {label}:\n{text}");
             }
             assert!(text.contains("60%"), "{w}x{h} missing the music read-out");

@@ -19,7 +19,7 @@ use crate::math::Vec2;
 use crate::render::campaign as campaign_ui;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette;
-use crate::render::{cursor, hud, menu, minimap, minimap_source, options, overlay};
+use crate::render::{cursor, hud, menu, minimap, minimap_source, options, overlay, zoom as view_zoom};
 use crate::scores::{ScoreEntry, ScoreTable};
 
 use menu::{HitMap, RunSummary, Target};
@@ -443,7 +443,16 @@ impl App {
         // the player toward that edge. Two pixels per cell row.
         let gx = (mc as i32 - a.x as i32).clamp(0, a.width as i32 - 1) as f32;
         let gy = (mr as i32 - a.y as i32).clamp(0, a.height as i32 - 1) as f32;
-        Some(w.cam + Vec2::new(gx + 0.5, gy * 2.0 + 1.0))
+        // A zoomed view covers `zoom_scale` world pixels per screen pixel, so
+        // the same cell maps further out in world space (and aim stays exact at
+        // every zoom). `1,1` unzoomed.
+        Some(
+            w.cam
+                + Vec2::new(
+                    (gx + 0.5) * w.zoom_scale.x,
+                    (gy * 2.0 + 1.0) * w.zoom_scale.y,
+                ),
+        )
     }
 
     /// The throttle vector fed to the world: keyboard unit vector, or — when
@@ -540,6 +549,10 @@ impl App {
     fn enter_world(&mut self, world: World, via_story: bool) {
         let level = world.level_index;
         let theme = world.level.theme;
+        let mut world = world;
+        // The saved zoom is a preference, not per-level state: a new level opens
+        // at it, with no glide-in from the previous level's zoom.
+        world.set_zoom_instant(self.scores.zoom);
         self.world = Some(world);
         self.recorded = false;
         self.new_best = false;
@@ -625,6 +638,19 @@ impl App {
                             if !self.map_open && target == Some(Target::Minimap) =>
                         {
                             self.step_minimap_size(step);
+                        }
+                        // Anywhere else over the playfield the wheel zooms the
+                        // view: scroll down widens (2x the current view), up
+                        // pulls in (0.5x). The minimap keeps its own job above,
+                        // and the expanded map swallows the wheel (it is a
+                        // panel you are reading, not the field). The HUD rails
+                        // are outside `last_game`, so the wheel there does
+                        // nothing, exactly as before.
+                        Screen::Playing
+                            if !self.map_open
+                                && self.over_playfield(ev.column, ev.row) =>
+                        {
+                            self.step_zoom(step)
                         }
                         // The wheel steps whichever options row it is over
                         // (scroll up raises a level, scroll down lowers it).
@@ -735,6 +761,13 @@ impl App {
         // play `hud.tick` advances it too.
         if !matches!(self.screen, Screen::Playing) {
             self.hud.tick_volume_flash(dt);
+            self.hud.tick_zoom_flash(dt);
+        }
+        // Render-only zoom easing, on every screen: a zoom set on the options
+        // plate (opened over the paused field) glides in behind it, and the
+        // simulation never sees it (see `World::tick_zoom`).
+        if let Some(w) = self.world.as_mut() {
+            w.tick_zoom(dt);
         }
         // Options: the title row and the pause legend open it; nothing else does.
         if !volume_changed && self.input.pressed_char('o') {
@@ -1000,6 +1033,10 @@ impl App {
             options::MUTE_ROW => {
                 self.toggle_mute();
             }
+            options::ZOOM_ROW => {
+                // Right widens the view (a bigger number), left zooms in.
+                self.set_zoom(view_zoom::step(self.scores.zoom, dir));
+            }
             _ => {}
         }
     }
@@ -1010,7 +1047,9 @@ impl App {
     fn scroll_option(&mut self, row: usize, step: isize) {
         match row {
             options::MUSIC_ROW | options::EFFECTS_ROW => self.adjust_option(row, -step),
-            options::MINIMAP_ROW => self.adjust_option(row, step),
+            // Scroll down widens the view, exactly like the wheel over the
+            // playfield does mid-run.
+            options::MINIMAP_ROW | options::ZOOM_ROW => self.adjust_option(row, step),
             _ => self.adjust_option(row, 1),
         }
     }
@@ -1182,6 +1221,58 @@ impl App {
         self.sfx(Sfx::UiMove);
     }
 
+    /// Is this terminal cell inside the playfield drawn last frame? (The HUD
+    /// rails, the minimap and the menus all live outside it.)
+    fn over_playfield(&self, col: u16, row: u16) -> bool {
+        let g = self.last_game;
+        g.width > 0
+            && g.height > 0
+            && col >= g.x
+            && col < g.right()
+            && row >= g.y
+            && row < g.bottom()
+    }
+
+    /// Step the view zoom and persist it (`dir > 0` widens the view, i.e. shows
+    /// more world at a smaller size). The live level follows immediately; the
+    /// renderer eases the change over about [`view_zoom::EASE_SECS`].
+    fn step_zoom(&mut self, dir: isize) {
+        self.set_zoom(view_zoom::step(self.effective_zoom(), dir));
+    }
+
+    /// The zoom setting in force: the level's own value while a run is live
+    /// (which is the saved one), the saved preference otherwise.
+    fn effective_zoom(&self) -> f32 {
+        self.world
+            .as_ref()
+            .map(|w| w.zoom)
+            .unwrap_or(self.scores.zoom)
+    }
+
+    /// Set the zoom setting, persist it, hand it to the live level, and flash
+    /// the HUD read-out.
+    fn set_zoom(&mut self, zoom: f32) {
+        let zoom = view_zoom::snap(zoom);
+        let mut changed = false;
+        if (self.scores.zoom - zoom).abs() > 0.001 {
+            self.scores.zoom = zoom;
+            if self.persist {
+                self.scores.save();
+            }
+            changed = true;
+        }
+        if let Some(w) = self.world.as_mut() {
+            if (w.zoom - zoom).abs() > 0.001 {
+                changed = true;
+            }
+            w.zoom = zoom;
+        }
+        if changed {
+            self.hud.notify_zoom(zoom);
+            self.sfx(Sfx::UiMove);
+        }
+    }
+
     /// Step compact minimap size from a mouse-wheel scroll over the compact
     /// radar (`step > 0` shrinks toward `Hidden`, `step < 0` grows toward `Normal`).
     fn step_minimap_size(&mut self, step: isize) {
@@ -1205,6 +1296,14 @@ impl App {
         // The minimap is the first claim on Tab, a click on the compact map and
         // Esc: while it is open those *close* it instead of pausing. The
         // simulation keeps running either way.
+        // Keyboard zoom for players without a wheel: `Z` pulls in, `X` widens
+        // (the same ladder the wheel steps). Discrete presses only.
+        if self.input.just_pressed(KeyCode::Char('z')) {
+            self.step_zoom(-1);
+        }
+        if self.input.just_pressed(KeyCode::Char('x')) {
+            self.step_zoom(1);
+        }
         let mut esc_used = false;
         if self.input.just_pressed(KeyCode::Tab) || click == Some(Target::Minimap) {
             self.map_open = !self.map_open;
@@ -1926,6 +2025,7 @@ impl App {
             minimap: self.scores.minimap_size,
             cursor: self.scores.cheese_cursor,
             muted: self.muted,
+            zoom: self.effective_zoom(),
             row: self.options_row,
             accent: options::accent_from(menu::material(self.theme())),
         };
@@ -5453,6 +5553,13 @@ mod tests {
         assert!(h.app.muted(), "the mute row toggles the master mute");
         h.frame(&[KeyCode::Right]);
         assert!(!h.app.muted());
+        // The zoom row steps the view ladder (Right widens, Left pulls in).
+        h.frame(&[KeyCode::Down]);
+        assert_eq!(h.app.options_row, options::ZOOM_ROW);
+        h.frame(&[KeyCode::Right]);
+        assert_eq!(h.app.effective_zoom(), 1.25);
+        h.frame(&[KeyCode::Left]);
+        assert_eq!(h.app.effective_zoom(), 1.0);
         // Enter on the Back row leaves the screen.
         h.frame(&[KeyCode::Down]);
         assert_eq!(h.app.options_row, options::BACK_ROW);
@@ -5561,6 +5668,336 @@ mod tests {
         assert_eq!(parse_volume_env(" 68 "), Some(70));
         assert_eq!(parse_volume_env("200"), Some(100));
         assert_eq!(parse_volume_env("loud"), None);
+    }
+
+
+    // ---- Mouse-wheel zoom ------------------------------------------------
+
+    /// The wheel zooms the playfield and nothing else: over the compact minimap
+    /// it still cycles the radar size, on the title it still walks the sector,
+    /// and on the options plate it still steps the row under the pointer.
+    #[test]
+    fn the_wheel_zooms_the_playfield_and_keeps_its_other_jobs() {
+        let mut h = Harness::new(120, 40);
+        h.enter_playing();
+        let game = h.app.last_game;
+        let field = (game.x + game.width / 2, game.y + game.height / 2);
+        assert_eq!(h.app.effective_zoom(), 1.0, "a new run opens unzoomed");
+
+        // Scroll down (away from you) widens the view, scroll up pulls in.
+        h.events(&[], &[(MouseEventKind::ScrollDown, field)]);
+        assert_eq!(h.app.effective_zoom(), 1.25);
+        h.events(&[], &[(MouseEventKind::ScrollDown, field)]);
+        assert_eq!(h.app.effective_zoom(), 1.5);
+        h.events(&[], &[(MouseEventKind::ScrollUp, field)]);
+        assert_eq!(h.app.effective_zoom(), 1.25);
+
+        // The ladder clamps at both ends (2× the current view, 0.5×).
+        for _ in 0..8 {
+            h.events(&[], &[(MouseEventKind::ScrollDown, field)]);
+        }
+        assert_eq!(h.app.effective_zoom(), 2.0, "max 2x the current view");
+        for _ in 0..8 {
+            h.events(&[], &[(MouseEventKind::ScrollUp, field)]);
+        }
+        assert_eq!(h.app.effective_zoom(), 0.5, "min 0.5x the current view");
+
+        // The live level follows the setting, and the renderer eases into it.
+        let w = h.app.world.as_ref().unwrap();
+        assert_eq!(w.zoom, 0.5);
+        for _ in 0..30 {
+            h.frame(&[]);
+        }
+        assert_eq!(h.app.world.as_ref().unwrap().zoom_view, 0.5);
+
+        // Over the HUD rails (outside the playfield) the wheel does nothing.
+        let zoom_before = h.app.effective_zoom();
+        h.events(&[], &[(MouseEventKind::ScrollDown, (10, 0))]);
+        h.events(&[], &[(MouseEventKind::ScrollDown, (10, 39))]);
+        assert_eq!(
+            h.app.effective_zoom(),
+            zoom_before,
+            "the HUD rails are not the playfield"
+        );
+
+        // Over the compact minimap the wheel keeps its old job.
+        let before = h.app.scores.minimap_size;
+        let compact = h.app.last_minimap;
+        let zoom_before = h.app.effective_zoom();
+        h.events(
+            &[],
+            &[(
+                MouseEventKind::ScrollDown,
+                (compact.x + compact.width / 2, compact.y + compact.height / 2),
+            )],
+        );
+        assert_ne!(h.app.scores.minimap_size, before, "the radar still steps");
+        assert_eq!(h.app.effective_zoom(), zoom_before, "and the view did not zoom");
+    }
+
+    #[test]
+    fn the_wheel_does_not_zoom_the_menus() {
+        // Title: the wheel over the sector row walks the sectors, as before.
+        let mut h = Harness::new(120, 40);
+        h.frame(&[]);
+        let row = h.locate("Sector");
+        let sector_before = h.app.sector();
+        h.events(&[], &[(MouseEventKind::ScrollDown, row)]);
+        assert_ne!(h.app.sector(), sector_before, "the sector row still steps");
+        assert_eq!(h.app.scores.zoom, 1.0, "the title never zooms");
+
+        // Options: the wheel steps the row under the pointer.
+        h.frame(&[KeyCode::Char('o')]);
+        assert_eq!(h.app.screen.name_for_test(), "Options");
+        let music_row = h.locate("MUSIC");
+        let volume_before = h.app.music_volume();
+        h.events(&[], &[(MouseEventKind::ScrollDown, music_row)]);
+        assert_ne!(h.app.music_volume(), volume_before);
+        assert_eq!(h.app.scores.zoom, 1.0, "the options wheel does not zoom");
+
+        // …but the options screen's own ZOOM row does step it, and persists.
+        h.app.options_row = options::ZOOM_ROW;
+        h.frame(&[KeyCode::Right]);
+        assert_eq!(h.app.scores.zoom, 1.25);
+        h.frame(&[KeyCode::Left]);
+        assert_eq!(h.app.scores.zoom, 1.0);
+    }
+
+    /// `Z` pulls the view in, `X` widens it — the keyboard path for players
+    /// without a wheel. Playing only.
+    #[test]
+    fn z_and_x_step_the_zoom_while_playing_only() {
+        let mut h = Harness::new(120, 40);
+        h.frame(&[]); // title
+        h.frame(&[KeyCode::Char('z')]);
+        assert_eq!(h.app.scores.zoom, 1.0, "the title ignores the zoom keys");
+
+        h.enter_playing();
+        h.frame(&[KeyCode::Char('z')]);
+        assert_eq!(h.app.effective_zoom(), 0.75);
+        h.frame(&[KeyCode::Char('z')]);
+        assert_eq!(h.app.effective_zoom(), 0.5);
+        h.frame(&[KeyCode::Char('z')]);
+        assert_eq!(h.app.effective_zoom(), 0.5, "0.5x is the closest view");
+        h.frame(&[KeyCode::Char('x')]);
+        assert_eq!(h.app.effective_zoom(), 0.75);
+        h.frame(&[KeyCode::Char('x')]);
+        h.frame(&[KeyCode::Char('x')]);
+        assert_eq!(h.app.effective_zoom(), 1.25);
+
+        // Paused: the field is frozen and the keys do nothing.
+        h.frame(&[KeyCode::Esc]);
+        assert_eq!(h.app.screen.name_for_test(), "Paused");
+        h.frame(&[KeyCode::Char('x')]);
+        assert_eq!(h.app.effective_zoom(), 1.25, "no zooming while paused");
+    }
+
+    /// The zoom is a preference: it persists beside the other settings, an old
+    /// file without it loads unzoomed, and the next level opens at it without
+    /// gliding in.
+    #[test]
+    fn the_zoom_persists_and_old_save_files_load_unzoomed() {
+        let mut h = Harness::new(120, 40);
+        h.enter_playing();
+        h.frame(&[KeyCode::Char('x')]);
+        h.frame(&[KeyCode::Char('x')]);
+        assert_eq!(h.app.scores.zoom, 1.5);
+        let json = h.app.scores.to_json();
+        assert!(json.contains("\"zoom\""), "the setting is written: {json}");
+        assert_eq!(ScoreTable::parse(&json).zoom, 1.5, "and it round-trips");
+
+        // A file from before the wheel existed: no zoom key ⇒ today's view.
+        let old = r#"{"entries":[],"minimap_size":"small","cheese_cursor":"off"}"#;
+        let old = ScoreTable::parse(old);
+        assert_eq!(old.zoom, 1.0);
+
+        // The next level opens at the saved zoom, already settled (no swoop).
+        let w = World::new(Theme::Sewer, 3);
+        h.app.enter_world(w, false);
+        let world = h.app.world.as_ref().unwrap();
+        assert_eq!(world.zoom, 1.5);
+        assert_eq!(world.zoom_view, 1.5, "no glide-in at level start");
+    }
+
+    /// Mouse steering maps the cursor's cell into the world through the zoom,
+    /// so the same cell aims further out when the view is wider and the point
+    /// always lands inside the rectangle the renderer actually covered.
+    #[test]
+    fn mouse_steering_maps_the_cursor_into_the_world_at_every_zoom() {
+        let mut h = Harness::new(120, 40);
+        h.enter_playing();
+        let game = h.app.last_game;
+        let col = game.x + game.width / 4;
+        let row = game.y + game.height / 2;
+        let mut offsets = Vec::new();
+        for z in crate::render::zoom::STEPS {
+            {
+                let w = h.app.world.as_mut().unwrap();
+                w.set_zoom_instant(z);
+            }
+            h.frame(&[]); // render so `cam` + `zoom_scale` are for this zoom
+            h.set_mouse(col, row);
+            let w = h.app.world.as_ref().unwrap();
+            let p = h.app.mouse_world().expect("a cursor over the field maps");
+            let span = w.view_span();
+            assert!(
+                p.x >= w.cam.x && p.x <= w.cam.x + span.x,
+                "x outside the rendered rectangle at {z}: {p:?} vs {span:?}"
+            );
+            assert!(
+                p.y >= w.cam.y && p.y <= w.cam.y + span.y,
+                "y outside the rendered rectangle at {z}: {p:?} vs {span:?}"
+            );
+            offsets.push((p - w.player.pos).len());
+        }
+        // The cursor sits a quarter of the way in: the aimed world point is
+        // further from the rat the wider the view, in proportion to the zoom.
+        for i in 1..offsets.len() {
+            assert!(
+                offsets[i] > offsets[i - 1],
+                "offsets must grow with the view: {offsets:?}"
+            );
+        }
+        let ratio = offsets[offsets.len() - 1] / offsets[0];
+        let want = crate::render::zoom::MAX / crate::render::zoom::MIN;
+        assert!(
+            (ratio - want).abs() < 0.05,
+            "the mapping scales with the zoom: {ratio} vs {want}"
+        );
+    }
+
+    /// The minimap's view box (and therefore the fog-of-war radar framing and
+    /// the boss compass) follows the zoomed view, not the logical viewport.
+    #[test]
+    fn the_radar_view_box_follows_the_zoom() {
+        let mut h = Harness::new(120, 40);
+        h.enter_playing();
+        h.frame(&[]);
+        let size = minimap::MinimapSize::Normal;
+        let normal = {
+            let w = h.app.world.as_ref().unwrap();
+            h.app.map_frame.view_sized(w, false, size, false).viewport_cells
+        };
+        for z in [crate::render::zoom::MIN, crate::render::zoom::MAX] {
+            h.app.world.as_mut().unwrap().set_zoom_instant(z);
+            h.frame(&[]);
+            let w = h.app.world.as_ref().unwrap();
+            let boxed = h.app.map_frame.view_sized(w, false, size, false).viewport_cells;
+            // Cell widths are rounded down, so compare with a cell of slack.
+            assert!(
+                (boxed.w - normal.w * z).abs() <= 1.0,
+                "radar box width {} at {z}, {} unzoomed",
+                boxed.w,
+                normal.w
+            );
+            assert!(
+                (boxed.h - normal.h * z).abs() <= 1.0,
+                "radar box height {} at {z}, {} unzoomed",
+                boxed.h,
+                normal.h
+            );
+            assert_eq!(
+                w.viewport,
+                Vec2::new(120.0, 76.0),
+                "the logical viewport is untouched"
+            );
+        }
+    }
+
+    /// Gated behind `RATRUN_DUMP_ZOOM=<dir>`: renders a busy 120 × 40 frame at
+    /// z = 0.5, 1 and 2 as PPMs, so the three views can be looked at side by
+    /// side (nothing important may disappear when zoomed out).
+    #[test]
+    fn dump_zoom_frames_ppm() {
+        let Some(dir) = std::env::var_os("RATRUN_DUMP_ZOOM") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (w, h) = (120u16, 40u16);
+        let mut hh = Harness::new(w, h);
+        hh.enter_playing();
+        {
+            use crate::game::enemy::EnemyKind;
+            use crate::game::gem::Gem;
+            use rand::SeedableRng;
+            let world = hh.app.world.as_mut().unwrap();
+            let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+            let p = world.player.pos;
+            for i in 0..90 {
+                let a = i as f32 * 0.31;
+                let r = 14.0 + (i % 12) as f32 * 12.0;
+                let kind = match i % 9 {
+                    3 => EnemyKind::Cat,
+                    5 => EnemyKind::Brute,
+                    _ => EnemyKind::Skitterer,
+                };
+                world.spawn_enemy_with_rng(
+                    kind,
+                    p + crate::math::Vec2::from_angle(a) * r,
+                    30.0,
+                    &mut rng,
+                );
+            }
+            for i in 0..30 {
+                let a = i as f32 * 0.77;
+                world.spawn_gem(Gem::new(p + crate::math::Vec2::from_angle(a) * (20.0 + i as f32), 5));
+            }
+        }
+        // A few live frames so weapons fire, things die and damage numbers pop.
+        // XP is drained each frame: the capture is about the playfield, not the
+        // level-up cards, and the rat must stay in `Playing` to show the field.
+        let step = |hh: &mut Harness| {
+            {
+                let w = hh.app.world.as_mut().unwrap();
+                w.player.xp = 0;
+                w.pending_levelups = 0;
+                w.player.hp = w.player.max_hp();
+            }
+            hh.frame(&[]);
+            if hh.app.screen != Screen::Playing {
+                hh.app.screen = Screen::Playing;
+            }
+        };
+        for _ in 0..40 {
+            step(&mut hh);
+        }
+        for z in [0.5f32, 1.0, 1.5, 2.0] {
+            hh.app.world.as_mut().unwrap().set_zoom_instant(z);
+            hh.app.hud.notify_zoom(z);
+            for _ in 0..3 {
+                step(&mut hh);
+            }
+            let buf = hh.terminal.backend().buffer().clone();
+            let (iw, ih) = (w as usize, h as usize * 2);
+            let mut px = vec![0u8; iw * ih * 3];
+            for cy in 0..h {
+                for cx in 0..w {
+                    let cell = &buf[(cx, cy)];
+                    let top = color_rgb(cell.fg);
+                    let bot = color_rgb(cell.bg);
+                    for (row, (r, g, b)) in [(0usize, top), (1, bot)] {
+                        let y = cy as usize * 2 + row;
+                        let i = (y * iw + cx as usize) * 3;
+                        px[i] = r;
+                        px[i + 1] = g;
+                        px[i + 2] = b;
+                    }
+                }
+            }
+            let mut out = format!("P6\n{} {}\n255\n", iw, ih).into_bytes();
+            out.extend_from_slice(&px);
+            let name = format!("zoom_{z}");
+            std::fs::write(dir.join(format!("{name}.ppm")), out).unwrap();
+            let mut text = String::new();
+            for y in 0..h {
+                for x in 0..w {
+                    text.push_str(buf[(x, y)].symbol());
+                }
+                text.push('\n');
+            }
+            std::fs::write(dir.join(format!("{name}.txt")), text).unwrap();
+        }
     }
 
     /// Gated behind `RATRUN_OPTIONS_DIR`: dumps ANSI captures of the options

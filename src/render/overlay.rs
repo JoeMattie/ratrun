@@ -441,9 +441,13 @@ fn draw_boss_compass(frame: &mut Frame, game: Rect, world: &World, state: &HudSt
     if game.width < 24 || game.height < 10 {
         return;
     }
-    // Viewport extents in world pixels (half-block: 1 col = 1px wide, 1 row = 2px tall).
-    let half_w = (world.viewport.x * 0.5).max(f32::from(game.width) * 0.5);
-    let half_h = (world.viewport.y * 0.5).max(f32::from(game.height));
+    // Viewport extents in world pixels (half-block: 1 col = 1px wide, 1 row =
+    // 2px tall). This is the *rendered* span — the logical viewport times the
+    // mouse-wheel zoom — so zooming out moves the edge indicator out with the
+    // world instead of hiding a boss that is plainly on screen.
+    let span = world.view_span();
+    let half_w = (span.x * 0.5).max(f32::from(game.width) * 0.5);
+    let half_h = (span.y * 0.5).max(f32::from(game.height));
     if offset.x.abs() <= half_w * 0.92 && offset.y.abs() <= half_h * 0.92 {
         return; // Boss is already visible inside the viewport.
     }

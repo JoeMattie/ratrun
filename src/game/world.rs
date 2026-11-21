@@ -59,6 +59,7 @@ use crate::audio::Sfx;
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette;
+use crate::render::zoom;
 
 use super::bullet::Bullet;
 use super::campaign::{self, CampaignState, CampaignTotals, Keepable};
@@ -147,6 +148,25 @@ pub struct World {
     pub carried: CampaignTotals,
     pub cam: Vec2,
     pub viewport: Vec2,
+    /// Mouse-wheel zoom setting: **how much world the view shows** relative to
+    /// the unzoomed view (`1.0` = today's view, `2.0` = twice the width and
+    /// height of world, `0.5` = half). Render-only — see [`crate::render::zoom`]
+    /// and [`World::tick_zoom`]. The simulation never reads it: collision, the
+    /// spawn ring and every system keep using the unzoomed [`World::viewport`],
+    /// so a seed plays out identically at every zoom.
+    pub zoom: f32,
+    /// The eased zoom the renderer used last frame (chases `zoom` over about
+    /// 0.15 s, so a wheel step glides instead of snapping).
+    pub zoom_view: f32,
+    /// Source pixels per screen pixel of the last draw (`1,1` unzoomed). The
+    /// app's screen→world mapping (mouse steering, click targets) scales the
+    /// cell offset by this so aim stays exact at every zoom.
+    pub zoom_scale: Vec2,
+    /// Scratch framebuffer the zoomed world is rendered into at world
+    /// resolution before it is resampled onto the screen grid. Held for the
+    /// whole run (only a size change reallocates it) so a zoomed frame does
+    /// not allocate per tick.
+    world_buf: Option<PixelBuffer>,
     /// SFX events emitted this tick; drained by the app after `update`.
     pub sfx: Vec<Sfx>,
 
@@ -292,6 +312,10 @@ impl World {
             carried: carried_totals,
             cam: Vec2::ZERO,
             viewport: Vec2::new(160.0, 80.0),
+            zoom: zoom::DEFAULT,
+            zoom_view: zoom::DEFAULT,
+            zoom_scale: Vec2::new(1.0, 1.0),
+            world_buf: None,
             sfx: Vec::new(),
 
             // Unused twin of each round-tripped value. `swap_in` leaves the
@@ -883,7 +907,84 @@ impl World {
 
     // ---- Rendering ------------------------------------------------------
 
+    /// Render one frame into `pb` (the screen's half-block pixel grid).
+    ///
+    /// **Zoom** is render-only and lives entirely here: the scene is drawn for
+    /// the rectangle `screen × zoom` around the camera — at world resolution
+    /// into a scratch buffer when zooming out — and resampled onto the screen
+    /// grid (box filter when zooming out, nearest neighbour when zooming in,
+    /// and an exact copy at 1:1). [`World::viewport`] is reset to the unzoomed
+    /// screen size afterwards, so the simulation still sees the view it always
+    /// saw. Damage numbers are glyph-sized, so they are stamped in screen space
+    /// after the resample and never scale.
     pub fn draw(&mut self, pb: &mut PixelBuffer) {
+        let (sw, sh) = (pb.w, pb.h);
+        if sw == 0 || sh == 0 {
+            // A degenerate terminal renders nothing (and must not panic).
+            self.viewport = Vec2::new(sw as f32, sh as f32);
+            self.zoom_scale = Vec2::new(1.0, 1.0);
+            return;
+        }
+        let z = zoom::clamp(self.zoom_view);
+        self.zoom_scale = Vec2::new(1.0, 1.0);
+        if (z - 1.0).abs() < 0.002 {
+            // Unzoomed: the screen buffer *is* the world buffer.
+            self.draw_scene(pb);
+        } else {
+            let ww = ((sw as f32) * z).round().max(1.0) as usize;
+            let wh = ((sh as f32) * z).round().max(1.0) as usize;
+            let mut buf = match self.world_buf.take() {
+                Some(b) => b,
+                None => PixelBuffer::new(ww, wh),
+            };
+            buf.resize(ww, wh);
+            self.draw_scene(&mut buf);
+            buf.resample_to(pb);
+            self.zoom_scale = Vec2::new(ww as f32 / sw as f32, wh as f32 / sh as f32);
+            self.world_buf = Some(buf);
+        }
+        // The logical viewport is the *simulation's*: unzoomed, whatever the
+        // renderer covered.
+        self.viewport = Vec2::new(sw as f32, sh as f32);
+
+        // Screen-space pass: floating damage numbers are text-sized glyphs, so
+        // they keep their 3×5 / 4×6 pixel size at every zoom instead of
+        // blurring into mush when zoomed out.
+        self.damage_numbers
+            .draw_scaled(pb, self.cam, self.zoom_scale);
+    }
+
+    /// Ease the rendered zoom toward the setting (about
+    /// [`zoom::EASE_SECS`]) and snap it onto a ladder rung. Render-only:
+    /// called once per frame by the app, never from the simulation schedule.
+    pub fn tick_zoom(&mut self, dt: f32) {
+        self.zoom = zoom::snap(self.zoom);
+        self.zoom_view = zoom::ease(self.zoom_view, self.zoom, dt.max(0.0));
+    }
+
+    /// Step the zoom one rung (`dir > 0` widens the view). Returns the setting.
+    pub fn zoom_by(&mut self, dir: isize) -> f32 {
+        self.zoom = zoom::step(self.zoom, dir);
+        self.zoom
+    }
+
+    /// Set the zoom with no transition (a level starting at the saved zoom).
+    pub fn set_zoom_instant(&mut self, zoom: f32) {
+        self.zoom = zoom::snap(zoom);
+        self.zoom_view = self.zoom;
+    }
+
+    /// The world rectangle the renderer covered last frame: the logical
+    /// viewport times the eased zoom. Screen-space overlays frame *this* (the
+    /// boss compass, the minimap's view brackets), while the simulation keeps
+    /// using the unzoomed [`World::viewport`].
+    pub fn view_span(&self) -> Vec2 {
+        self.viewport * self.zoom_view.clamp(zoom::MIN, zoom::MAX)
+    }
+
+    /// Draw the world itself into `pb` (whose size *is* the world rectangle it
+    /// must cover), setting [`World::cam`] and [`World::viewport`] for it.
+    fn draw_scene(&mut self, pb: &mut PixelBuffer) {
         let vw = pb.w as f32;
         let vh = pb.h as f32;
         let viewport = Vec2::new(vw, vh);
@@ -1065,11 +1166,10 @@ impl World {
         self.draw_boss_thresholds(pb, cam, WallLayer::Overhang);
         self.draw_object_layer(pb, cam, true);
 
-        // Particles and shockwaves on top.
+        // Particles and shockwaves on top. (Floating damage numbers are text
+        // sized and belong to screen space: `draw` stamps them after the
+        // resample so they never scale.)
         self.particles.draw(pb, cam);
-
-        // Floating enemy damage numbers on top of everything in the playfield.
-        self.damage_numbers.draw(pb, cam);
     }
 
     fn draw_player(&self, pb: &mut PixelBuffer, cam: Vec2) {
@@ -1883,6 +1983,344 @@ mod draw_tests {
                 differing, 0,
                 "{theme:?}: off-screen walls painted {differing} px"
             );
+        }
+    }
+}
+
+// ---- Mouse-wheel zoom ------------------------------------------------------
+//
+// Zoom is render-only, and these tests pin that: the *simulation* keeps the
+// unzoomed viewport (so a seed plays out identically at every zoom), while the
+// *renderer* covers `viewport × zoom` world pixels, resamples them onto the
+// screen grid, and keeps text-sized overlays (damage numbers) at screen size.
+#[cfg(test)]
+mod zoom_tests {
+    use super::*;
+    use crate::game::gem::Gem;
+    use crate::game::level::Theme;
+    use rand::RngExt;
+
+    /// The app's 120 × 40-cell playfield: 120 × 74 half-block pixels.
+    const SCREEN: (usize, usize) = (120, 74);
+
+    fn screen() -> PixelBuffer {
+        PixelBuffer::new(SCREEN.0, SCREEN.1)
+    }
+
+    /// FNV-1a over every pixel, for "did the frame actually change".
+    fn frame_hash(pb: &PixelBuffer) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for y in 0..pb.h {
+            for x in 0..pb.w {
+                let (r, g, b) = pb.pixel_at(x, y);
+                for byte in [r, g, b] {
+                    h ^= u64::from(byte);
+                    h = h.wrapping_mul(0x1000_0000_01b3);
+                }
+            }
+        }
+        h
+    }
+
+    /// Everything the simulation owns, as raw bits: the counters, the player,
+    /// every entity in `SpawnId` order (position + health) and the next rng
+    /// draws. Two runs with the same fingerprint are the same run.
+    fn fingerprint(w: &mut World) -> Vec<u64> {
+        let mut f: Vec<u64> = vec![
+            w.elapsed.to_bits().into(),
+            u64::from(w.kills),
+            u64::from(w.score),
+            u64::from(w.pending_levelups),
+            u64::from(w.game_over),
+            w.player.pos.x.to_bits().into(),
+            w.player.pos.y.to_bits().into(),
+            w.player.hp.to_bits().into(),
+            u64::from(w.player.level),
+            u64::from(w.player.xp),
+        ];
+        let enemies = w.enemies();
+        f.push(enemies.len() as u64);
+        for e in &enemies {
+            f.push(u64::from(e.id));
+            f.push(e.pos.x.to_bits().into());
+            f.push(e.pos.y.to_bits().into());
+            f.push(e.hp.to_bits().into());
+        }
+        let bullets = w.bullets();
+        f.push(bullets.len() as u64);
+        for b in &bullets {
+            f.push(b.pos.x.to_bits().into());
+            f.push(b.pos.y.to_bits().into());
+        }
+        let gems = w.gems();
+        f.push(gems.len() as u64);
+        for g in &gems {
+            f.push(g.pos.x.to_bits().into());
+            f.push(g.pos.y.to_bits().into());
+            f.push(u64::from(g.value));
+        }
+        f.push(w.pickups().len() as u64);
+        f.push(w.pools().len() as u64);
+        // The rng's own state is part of the run: sample the next draws
+        // (this runs after the last tick, so consuming them is harmless and
+        // identical across the compared runs).
+        for _ in 0..8 {
+            f.push(w.rng.random::<u64>());
+        }
+        f
+    }
+
+    /// **The determinism promise.** The same seed and the same inputs play out
+    /// identically at z = 0.5, 1 and 2, however many frames each is drawn —
+    /// zoom lives in the renderer and never reaches the simulation.
+    #[test]
+    fn the_same_seed_plays_out_identically_at_every_zoom() {
+        let mut prints = Vec::new();
+        let mut hashes = Vec::new();
+        for z in [zoom::MIN, 1.0, zoom::MAX] {
+            let mut w = World::new(Theme::Sewer, 11);
+            w.set_zoom_instant(z);
+            assert_eq!(w.zoom_view, z, "the world renders at the requested zoom");
+            assert_eq!(w.viewport, Vec2::new(160.0, 80.0), "the fresh viewport");
+            let mut pb = screen();
+            for tick in 0..900u32 {
+                // The same scripted weave at every zoom.
+                let dir = match (tick / 30) % 4 {
+                    0 => Vec2::new(1.0, 0.0),
+                    1 => Vec2::new(0.0, 1.0),
+                    2 => Vec2::new(-1.0, 0.0),
+                    _ => Vec2::new(0.0, -1.0),
+                };
+                w.update(1.0 / 60.0, dir, tick % 120 == 0);
+                w.tick_zoom(1.0 / 60.0);
+                w.draw(&mut pb);
+                assert_eq!(
+                    w.viewport,
+                    Vec2::new(SCREEN.0 as f32, SCREEN.1 as f32),
+                    "the draw must hand the simulation the *unzoomed* viewport"
+                );
+            }
+            prints.push(fingerprint(&mut w));
+            hashes.push(frame_hash(&pb));
+        }
+        assert_eq!(prints[0], prints[1], "z = 0.5 diverged from the reference run");
+        assert_eq!(prints[1], prints[2], "z = 2 diverged from the reference run");
+        assert_ne!(hashes[0], hashes[1], "z = 0.5 must render a different frame");
+        assert_ne!(hashes[1], hashes[2], "z = 2 must render a different frame");
+    }
+
+    #[test]
+    fn zoom_steps_the_ladder_clamps_and_eases() {
+        let mut w = World::new(Theme::Sewer, 3);
+        assert_eq!(w.zoom, zoom::DEFAULT, "a fresh run is unzoomed");
+        assert_eq!(w.zoom_by(1), 1.25, "wheel down widens the view");
+        assert_eq!(w.zoom_by(1), 1.5);
+        assert_eq!(w.zoom_by(1), zoom::MAX);
+        assert_eq!(w.zoom_by(1), zoom::MAX, "the widest view clamps");
+        assert_eq!(w.zoom_by(-1), 1.5);
+        assert_eq!(w.zoom_by(-1), 1.25);
+        assert_eq!(w.zoom_by(-1), 1.0);
+        assert_eq!(w.zoom_by(-1), 0.75);
+        assert_eq!(w.zoom_by(-1), zoom::MIN);
+        assert_eq!(w.zoom_by(-1), zoom::MIN, "the closest view clamps");
+
+        // The rendered value chases the setting over ~0.15 s, then is exact.
+        w.set_zoom_instant(1.0);
+        w.zoom_by(1);
+        w.zoom_by(1);
+        let mut t = 0.0;
+        while t < zoom::EASE_SECS {
+            w.tick_zoom(1.0 / 60.0);
+            t += 1.0 / 60.0;
+            assert!(w.zoom_view > 1.0 && w.zoom_view <= 1.5, "no overshoot");
+        }
+        for _ in 0..30 {
+            w.tick_zoom(1.0 / 60.0);
+        }
+        assert_eq!(w.zoom_view, 1.5, "the ease settles on the rung");
+
+        // Snapping, and a junk setting (a hand-edited save) tucked back onto
+        // the ladder.
+        w.zoom = 7.0;
+        w.tick_zoom(1.0 / 60.0);
+        assert_eq!(w.zoom, zoom::MAX);
+        w.set_zoom_instant(0.62);
+        assert_eq!((w.zoom, w.zoom_view), (0.5, 0.5));
+    }
+
+    #[test]
+    fn the_rendered_span_is_the_viewport_times_the_zoom() {
+        let mut w = World::new(Theme::Kitchen, 4);
+        let mut pb = screen();
+        for z in zoom::STEPS {
+            w.set_zoom_instant(z);
+            w.draw(&mut pb);
+            let span = w.view_span();
+            assert_eq!(
+                w.viewport,
+                Vec2::new(SCREEN.0 as f32, SCREEN.1 as f32),
+                "the logical viewport never scales"
+            );
+            assert!((span.x - SCREEN.0 as f32 * z).abs() < 0.01);
+            assert!((span.y - SCREEN.1 as f32 * z).abs() < 0.01);
+            // The screen→world scale is one world pixel per screen pixel at
+            // 1:1 and the inverse of the zoom otherwise (within the rounding
+            // of the rendered pixel count).
+            let ratio = w.zoom_scale;
+            assert!((ratio.x - z).abs() < 0.02, "zoom_scale.x at {z}: {ratio:?}");
+            assert!((ratio.y - z).abs() < 0.02, "zoom_scale.y at {z}: {ratio:?}");
+        }
+    }
+
+    /// Zooming out shows world the unzoomed view culls — the entire point of
+    /// the feature. A gem one-and-a-bit viewports east of the camera is off
+    /// screen at 1x and on screen at 2x.
+    #[test]
+    fn zooming_out_shows_world_the_unzoomed_view_culls() {
+        let mut w = World::new(Theme::Lab, 9);
+        let mut pb = screen();
+        // A big map, the rat parked at its middle: the camera is not clamped.
+        w.player.pos = w.level.arena * 0.5;
+        let vw = SCREEN.0 as f32;
+        w.spawn_gem(Gem {
+            pos: w.player.pos + Vec2::new(vw * 0.75, 0.0),
+            color: (255, 0, 255),
+            value: 1,
+            ..Gem::new(Vec2::ZERO, 1)
+        });
+
+        w.set_zoom_instant(1.0);
+        w.draw(&mut pb);
+        assert!(!frame_has_magenta(&pb), "off screen at 1x (the culling view)");
+
+        w.set_zoom_instant(2.0);
+        w.draw(&mut pb);
+        assert!(frame_has_magenta(&pb), "the gem is drawn at 2x");
+    }
+
+    /// Magenta is used by nothing the level art paints, so any magenta pixel is
+    /// the marker gem.
+    fn frame_has_magenta(pb: &PixelBuffer) -> bool {
+        for y in 0..pb.h {
+            for x in 0..pb.w {
+                let (r, g, b) = pb.pixel_at(x, y);
+                // A box-filtered 1-px gem is diluted by its 2 × 2 box, so the
+                // test asks for "purple survives", not "purple is bright".
+                if r > 40 && g < 32 && b > 40 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Degenerate terminals and every zoom, including a mid-transition
+    /// fractional zoom: never a panic, and the buffer keeps its size.
+    #[test]
+    fn a_zoomed_draw_never_panics_at_any_size() {
+        for (sw, sh) in [(0usize, 0usize), (1, 1), (5, 3), (2, 1), (1, 2), (7, 9)] {
+            for z in zoom::STEPS {
+                let mut w = World::new(Theme::Sewer, 2);
+                w.set_zoom_instant(z);
+                let mut pb = PixelBuffer::new(sw, sh);
+                w.draw(&mut pb);
+                assert_eq!((pb.w, pb.h), (sw, sh));
+                assert_eq!(w.viewport, Vec2::new(sw as f32, sh as f32));
+            }
+        }
+        // Mid-transition (a fractional zoom, the eased frame between rungs).
+        let mut w = World::new(Theme::Sewer, 2);
+        let mut pb = screen();
+        w.zoom = 2.0;
+        w.zoom_view = 1.37;
+        w.draw(&mut pb);
+        assert_eq!((pb.w, pb.h), SCREEN);
+        assert!(w.zoom_scale.x > 1.3 && w.zoom_scale.x < 1.4);
+    }
+
+    /// Damage numbers are 3 × 5 glyphs, so they are stamped in screen space:
+    /// the same number covers the same number of pixels at every zoom (it just
+    /// sits at the scaled position).
+    #[test]
+    fn damage_numbers_stay_text_sized_at_every_zoom() {
+        let mut w = World::new(Theme::Sewer, 5);
+        let mut pb = screen();
+        let mut bare = screen();
+        let at = w.player.pos;
+
+        let mut covered = Vec::new();
+        for z in [zoom::MIN, 1.0, zoom::MAX] {
+            w.set_zoom_instant(z);
+            // The same frame without the number: the difference is the glyph.
+            w.damage_numbers.clear();
+            w.draw(&mut bare);
+            w.damage_numbers.record(
+                1,
+                at,
+                3.0,
+                12.0,
+                false,
+                crate::game::particle::damage_number::DamageSource::Normal,
+            );
+            w.draw(&mut pb);
+            let mut n = 0;
+            for y in 0..pb.h {
+                for x in 0..pb.w {
+                    if pb.pixel_at(x, y) != bare.pixel_at(x, y) {
+                        n += 1;
+                    }
+                }
+            }
+            covered.push(n);
+        }
+        assert!(
+            covered.iter().all(|&n| n > 0),
+            "the number must be drawn at every zoom: {covered:?}"
+        );
+        assert_eq!(covered[0], covered[1], "0.5 and 1.0 cover the same glyph area");
+        assert_eq!(covered[1], covered[2], "1.0 and 2.0 cover the same glyph area");
+    }
+
+    /// Draw cost at the 600-enemy cap, for the wave report. Run with
+    /// `cargo test --release zoom_frame_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "perf measurement (min-of-chunks at the enemy cap), not a pass/fail test"]
+    fn zoom_frame_cost_at_the_enemy_cap() {
+        use rand::SeedableRng;
+        use std::time::Instant;
+        let mut w = World::new(Theme::Sewer, 21);
+        let mut rng = StdRng::seed_from_u64(7);
+        let p = w.player.pos;
+        for i in 0..600 {
+            let a = i as f32 * 0.37;
+            let r = 20.0 + (i % 40) as f32 * 12.0;
+            w.spawn_enemy_with_rng(
+                crate::game::enemy::EnemyKind::Skitterer,
+                p + crate::math::Vec2::from_angle(a) * r,
+                10.0,
+                &mut rng,
+            );
+        }
+        println!("enemies: {}", w.enemy_count());
+        // 120 × 40 cells is the task's reference frame; 160 × 168 px is the
+        // viewport `PORT_PLAN.md` measured the unzoomed draw at (385 µs).
+        for (cw, ch) in [(120usize, 74usize), (160, 168)] {
+            let mut pb = PixelBuffer::new(cw, ch);
+            for z in [1.0f32, 2.0, 0.5] {
+                w.set_zoom_instant(z);
+                w.draw(&mut pb);
+                let mut best = f64::INFINITY;
+                for _ in 0..40 {
+                    let t = Instant::now();
+                    w.draw(&mut pb);
+                    best = best.min(t.elapsed().as_secs_f64() * 1e6);
+                }
+                println!(
+                    "zoom {z:>4}x @ {cw}x{ch} px ({}x{} cells): {best:>7.1} us/draw",
+                    cw,
+                    ch / 2,
+                );
+            }
         }
     }
 }
