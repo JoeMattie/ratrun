@@ -1,6 +1,8 @@
 //! Player loadout: owned weapons, passive stats, and the level-up
 //! upgrade-choice generation / application.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use rand::seq::SliceRandom;
 use rand::Rng;
 
@@ -8,6 +10,43 @@ use super::weapon::{Evolution, Weapon, WeaponKind};
 
 pub const MAX_WEAPONS: usize = 5;
 pub const MAX_PASSIVES: usize = 5;
+
+/// Process-wide slot-cap override for the balance pass (`0` = use the
+/// constants above).
+///
+/// The shipped caps are the two constants; the meta-progression layer will make
+/// them per-run values. The wave-3 balance pass has to measure a **fresh**
+/// profile (4 + 4 kinds) against a **maxed** one (8 + 8) without rebuilding, so
+/// every "may this build hold another kind?" check goes through [`slot_caps`].
+/// Only the batch CLI (`--bot-batch … --caps 4:4`) sets this; a normal game
+/// never touches it and reads the constants.
+static CAP_OVERRIDE: AtomicU32 = AtomicU32::new(0);
+
+/// The distinct-kind caps this build is held to: `(weapons, passives)`.
+///
+/// Reads [`CAP_OVERRIDE`] when a batch set one, else [`MAX_WEAPONS`] /
+/// [`MAX_PASSIVES`]. Call this instead of the constants in every cap check.
+#[inline]
+pub fn slot_caps() -> (usize, usize) {
+    let v = CAP_OVERRIDE.load(Ordering::Relaxed);
+    if v == 0 {
+        (MAX_WEAPONS, MAX_PASSIVES)
+    } else {
+        (((v >> 8) & 0xFF) as usize, (v & 0xFF) as usize)
+    }
+}
+
+/// Override [`slot_caps`] process-wide (batch measurement only).
+///
+/// Both caps are clamped to `1..=255` so a typo cannot produce a zero-slot
+/// build. Returns the previous `(weapons, passives)` so a caller can restore it.
+pub fn set_slot_caps(weapons: usize, passives: usize) -> (usize, usize) {
+    let prev = slot_caps();
+    let w = weapons.clamp(1, 255) as u32;
+    let p = passives.clamp(1, 255) as u32;
+    CAP_OVERRIDE.store((w << 8) | p, Ordering::Relaxed);
+    prev
+}
 
 /// Gold a `Purse` level-up card hands over (design §2).
 pub const PURSE_GOLD: u32 = 8;
@@ -505,9 +544,10 @@ impl Loadout {
     /// level's acquisition order) and every stat is derived here, so a carried
     /// loadout is fully described by its parts — no stale numbers cross levels.
     pub fn from_parts(weapons: Vec<Weapon>, passives: Vec<(PassiveKind, u32)>) -> Self {
-        let mut kept_weapons: Vec<Weapon> = Vec::with_capacity(weapons.len().min(MAX_WEAPONS));
+        let (max_weapons, max_passives) = slot_caps();
+        let mut kept_weapons: Vec<Weapon> = Vec::with_capacity(weapons.len().min(max_weapons));
         for weapon in weapons {
-            if kept_weapons.len() == MAX_WEAPONS {
+            if kept_weapons.len() == max_weapons {
                 break;
             }
             if !kept_weapons.iter().any(|w| w.kind == weapon.kind) {
@@ -516,11 +556,11 @@ impl Loadout {
         }
 
         let mut kept_passives: Vec<(PassiveKind, u32)> =
-            Vec::with_capacity(passives.len().min(MAX_PASSIVES));
+            Vec::with_capacity(passives.len().min(max_passives));
         for (kind, stacks) in passives.into_iter().filter(|&(_, stacks)| stacks > 0) {
             if let Some((_, count)) = kept_passives.iter_mut().find(|(p, _)| *p == kind) {
                 *count = count.saturating_add(stacks).min(kind.max_stacks());
-            } else if kept_passives.len() < MAX_PASSIVES {
+            } else if kept_passives.len() < max_passives {
                 kept_passives.push((kind, stacks.min(kind.max_stacks())));
             }
         }
@@ -608,7 +648,7 @@ impl Loadout {
     /// a passive slot is free (design §2). `None` before L4, when the partner is
     /// already owned, or when the passive rack is full.
     pub fn priority_partner(&self) -> Option<PassiveKind> {
-        if self.passives.len() >= MAX_PASSIVES {
+        if self.passives.len() >= slot_caps().1 {
             return None;
         }
         for w in &self.weapons {
@@ -833,14 +873,15 @@ impl Loadout {
     /// Every new kind the build may still open, respecting both caps.
     fn new_kind_cards(&self) -> Vec<Upgrade> {
         let mut out = Vec::new();
-        if self.weapons.len() < MAX_WEAPONS {
+        let (max_weapons, max_passives) = slot_caps();
+        if self.weapons.len() < max_weapons {
             for kind in WeaponKind::all() {
                 if !self.has(kind) {
                     out.push(Upgrade::NewWeapon(kind));
                 }
             }
         }
-        if self.passives.len() < MAX_PASSIVES {
+        if self.passives.len() < max_passives {
             for kind in PassiveKind::all() {
                 if self.stacks(kind) == 0 {
                     out.push(Upgrade::Passive(kind));
@@ -854,7 +895,7 @@ impl Loadout {
     pub fn apply(&mut self, up: &Upgrade) -> f32 {
         match up {
             Upgrade::NewWeapon(k) => {
-                if self.weapons.len() < MAX_WEAPONS && !self.has(*k) {
+                if self.weapons.len() < slot_caps().0 && !self.has(*k) {
                     self.weapons.push(Weapon::new(*k));
                 }
                 0.0
@@ -873,7 +914,7 @@ impl Loadout {
                     // played as a bandage instead of a dead stack.
                     return BANDAGE_HEAL_FRAC * self.stats.max_hp;
                 }
-                if self.passives.len() >= MAX_PASSIVES && self.stacks(*p) == 0 {
+                if self.passives.len() >= slot_caps().1 && self.stacks(*p) == 0 {
                     return 0.0;
                 }
                 self.bump_stack(*p);
