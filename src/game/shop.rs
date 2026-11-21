@@ -393,6 +393,13 @@ pub fn gold_row(kind: EnemyKind) -> (f32, u32) {
         EnemyKind::WickMoth => (0.22, 2),
         EnemyKind::Porter => (0.40, 3),
         EnemyKind::Turnkey => (0.32, 3),
+        // Wave 4: gold in the band of a kind of similar threat. The snake is
+        // the rare one and pays accordingly; the centipede is cheap because it
+        // is a two-hit skirmisher that flees.
+        EnemyKind::BigSnake => (0.55, 4),
+        EnemyKind::HouseCentipede => (0.12, 2),
+        EnemyKind::MurderHornet => (0.22, 2),
+        EnemyKind::TermiteHorde => (0.20, 2),
         EnemyKind::Boss => (1.0, BOSS_GOLD),
         _ => (0.10, 1),
     }

@@ -1805,6 +1805,24 @@ impl World {
             }
         }
 
+        // Wave-4 tells: the snake's lunge lane, the centipede's flutter line,
+        // the hornet's dive line / grounded punish ring and the horde's split
+        // cross. Same reason as the wave-3 block above: none of these may be
+        // dimmed by the ambient or covered by a friendly burst.
+        {
+            let accent = self.level.palette.accent;
+            let mut query = self.ecs.query::<(&SpawnId, &Enemy)>();
+            for (_, e) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                if !e.alive() || !e.kind.is_wave4() {
+                    continue;
+                }
+                if !on_screen(self.w2s(e.pos, cam), e.radius * 6.0 + 48.0, viewport) {
+                    continue;
+                }
+                art_enemy::draw_wave4_tells(pb, e, cam, accent);
+            }
+        }
+
         // The Magpie's falling crate (the thing that lands on the warned
         // square): culled on the bird *and* on the square it falls to.
         {

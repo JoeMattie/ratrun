@@ -322,6 +322,14 @@ fn cull_reach(kind: EnemyKind, r: f32) -> f32 {
         EnemyKind::WickMoth => r * 3.0 + 4.0,
         EnemyKind::Porter => r * 2.4 + 6.0,
         EnemyKind::Turnkey => r + 80.0,
+        // Wave 4. The snake is drawn as a whole chain of body points behind
+        // the head, so its bound is the body length; the horde is drawn far
+        // bigger than its collision radius.
+        EnemyKind::BigSnake => r + (crate::game::enemy::SNAKE_MAX_SEGMENTS as f32) * 8.0,
+        EnemyKind::HouseCentipede => r * 4.0 + 6.0,
+        EnemyKind::MurderHornet => r * 4.5 + 6.0,
+        EnemyKind::TermiteHorde => r * 4.0 + 8.0,
+        EnemyKind::Lilliputian => r * 4.0 + 6.0,
     }
 }
 
@@ -377,6 +385,27 @@ pub fn draw_w3_tells(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2, accent: Rgb) {
     match e.kind {
         EnemyKind::BellFlea => draw_bellflea_tells(pb, &fr, e, cam),
         EnemyKind::Turnkey => draw_turnkey_bar(pb, &fr, e, cam),
+        _ => {}
+    }
+}
+
+/// The wave-4 tells that are drawn on the floor under (and over the lighting
+/// of) the body: the snake's lunge lane, the centipede's flutter line and the
+/// hornet's dive line. `World::draw_hostile_layer` stamps them after the
+/// lighting pass, exactly like [`draw_w3_tells`].
+pub fn draw_wave4_tells(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2, accent: Rgb) {
+    if !e.kind.is_wave4() {
+        return;
+    }
+    let Some(fr) = prepare_frame(pb, e, cam, accent) else {
+        return;
+    };
+    match e.kind {
+        EnemyKind::BigSnake => draw_snake_warn(pb, &fr, e),
+        EnemyKind::HouseCentipede => draw_centipede_warn(pb, &fr, e),
+        EnemyKind::MurderHornet => draw_hornet_warn(pb, &fr, e),
+        EnemyKind::TermiteHorde => draw_horde_split_warn(pb, &fr, e),
+        EnemyKind::Lilliputian => draw_lilliputian_warn(pb, &fr, e),
         _ => {}
     }
 }
@@ -475,6 +504,11 @@ pub fn draw_enemy_styled(
         EnemyKind::WickMoth => draw_wickmoth(pb, &fr, e, elite),
         EnemyKind::Porter => draw_porter(pb, &fr, e, elite),
         EnemyKind::Turnkey => draw_turnkey(pb, &fr, e, cam, elite),
+        EnemyKind::BigSnake => draw_bigsnake(pb, &fr, e, elite),
+        EnemyKind::HouseCentipede => draw_centipede(pb, &fr, e, elite),
+        EnemyKind::MurderHornet => draw_hornet(pb, &fr, e, elite),
+        EnemyKind::TermiteHorde => draw_horde(pb, &fr, e, elite),
+        EnemyKind::Lilliputian => draw_lilliputian(pb, &fr, e, elite),
     }
 }
 
@@ -492,6 +526,11 @@ fn draw_enemy_lod_frame(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam: Vec2, 
         EnemyKind::WickMoth => draw_wickmoth_lod(pb, fr, e, elite),
         EnemyKind::Porter => draw_porter_lod(pb, fr, e, elite),
         EnemyKind::Turnkey => draw_turnkey_lod(pb, fr, e, cam, elite),
+        EnemyKind::BigSnake => draw_bigsnake_lod(pb, fr, e, elite),
+        EnemyKind::HouseCentipede => draw_centipede_lod(pb, fr, e, elite),
+        EnemyKind::MurderHornet => draw_hornet_lod(pb, fr, e, elite),
+        EnemyKind::TermiteHorde => draw_horde_lod(pb, fr, e, elite),
+        EnemyKind::Lilliputian => draw_lilliputian_lod(pb, fr, e, elite),
     }
 }
 
@@ -4735,6 +4774,610 @@ pub fn draw_wick(pb: &mut PixelBuffer, wick: &crate::game::ecs::components::Wick
     pb.plot_add(sp_x, sp_y, (255, 224, 128));
     if urgent {
         pb.plot_add(cx - (sp_x - cx), fy - r, (255, 186, 92));
+    }
+}
+
+// ============================================================================
+// WAVE 4 ENEMIES (Big Snake, House Centipede, Murder Hornet, Termite Horde)
+// ============================================================================
+//
+// Placeholder-but-recognisable silhouettes in the same grammar as the rest of
+// the file: a dark rim, top-left lighting, a hit flash and an elite aura on the
+// shared paths. A Neon art pass can redraw any of these; the tells below are the
+// part that must not move, because each one is a full tick of warning.
+
+/// Filled pixel disc with a soft edge, used for the snake's body coils and the
+/// horde's mass. No trig: the "circle" is the local `dx² + dy²` test.
+fn disc_blend(pb: &mut PixelBuffer, cx: i32, cy: i32, rad: i32, col: Rgb, alpha: f32) {
+    let r2 = rad * rad;
+    for dy in -rad..=rad {
+        for dx in -rad..=rad {
+            let d2 = dx * dx + dy * dy;
+            if d2 > r2 {
+                continue;
+            }
+            let a = if d2 >= r2 - rad { alpha * 0.6 } else { alpha };
+            blend_px(pb, cx + dx, cy + dy, col, a);
+        }
+    }
+}
+
+/// Deterministic churn for the horde's specks: a cheap hash of the speck index
+/// and the animation phase, so the mass seethes without an rng draw per pixel.
+#[inline]
+fn churn(i: u32, phase: f32) -> f32 {
+    let h = (i.wrapping_mul(2_654_435_761) >> 8) as f32 / 16_777_216.0;
+    fast_sin(h * TAU + phase) * 0.5 + 0.5
+}
+
+#[allow(clippy::needless_range_loop)]
+fn draw_bigsnake(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
+    let s = fr.r * (1.0 / 6.0);
+    if elite {
+        draw_w3_elite_aura(pb, fr, 2.2 * s);
+    }
+    let (dark, mid, hi) = if elite {
+        ((42, 58, 28), (150, 186, 96), (236, 246, 190))
+    } else {
+        ((38, 52, 26), (108, 136, 72), (196, 216, 142))
+    };
+    // The body, tail first so the head sits on top of its own neck.
+    let n = e.w4.trail_len as usize;
+    for i in (1..n).rev() {
+        let p = fr.pos + (e.w4.trail[i] - e.pos);
+        let t = i as f32 / (n as f32);
+        let rad = ((1.0 - t * 0.45) * 3.4 * s).round().max(1.0) as i32;
+        let cx = p.x.round() as i32;
+        let cy = p.y.round() as i32;
+        darken_px(pb, cx + 1, cy + 2, 0.30);
+        disc_blend(pb, cx, cy, rad + 1, dark, 0.92);
+        disc_blend(pb, cx - 1, cy - 1, rad, mid, 0.95);
+        // Diamond markings along the spine.
+        if i % 2 == 0 {
+            blend_px(pb, cx, cy, hi, 0.85);
+            blend_px(pb, cx - 1, cy, hi, 0.45);
+        }
+    }
+    // The head: a wedge with two eyes and a flicking tongue.
+    let hc = fr.apply_hit(mid);
+    let hd = fr.apply_hit(dark);
+    let head_r = (fr.r * 0.9).round().max(2.0) as i32;
+    let (hx, hy) = (fr.pos.x.round() as i32, fr.pos.y.round() as i32);
+    darken_px(pb, hx + 1, hy + 2, 0.32);
+    disc_blend(pb, hx, hy, head_r + 1, hd, 0.95);
+    disc_blend(pb, hx - 1, hy - 1, head_r, hc, 0.95);
+    // Brow ridge across the eyes.
+    let brow_a = fr.px(-head_r as f32 * 0.4, -head_r as f32 * 0.9);
+    let brow_b = fr.px(-head_r as f32 * 0.4, head_r as f32 * 0.9);
+    line_blend(pb, brow_a, brow_b, fr.apply_hit(dark), 0.9);
+    // Two hard eye pixels looking down the facing axis.
+    for side in [-1.0f32, 1.0] {
+        let eye = fr.px(head_r as f32 * 0.45, side * head_r as f32 * 0.5);
+        pb.plot(eye.0, eye.1, fr.apply_hit((255, 224, 96)));
+    }
+    // A forked tongue flicking on the tell (the lunge is coming).
+    if e.w4.phase == crate::game::ecs::systems::enemy_wave4::SNAKE_PHASE_COIL
+        || e.w4.phase == crate::game::ecs::systems::enemy_wave4::SNAKE_PHASE_LUNGE
+    {
+        let base = fr.px(head_r as f32, 0.0);
+        let tip = fr.px(head_r as f32 + 3.0, 0.0);
+        line_blend(pb, base, tip, (236, 84, 108), 0.95);
+    }
+    // Stretched-and-still pose: the body lies flatter and greyer (the punish
+    // window is readable from the silhouette alone).
+    if e.w4.phase == crate::game::ecs::systems::enemy_wave4::SNAKE_PHASE_STRETCHED {
+        let a = fr.px(-3.0, 0.0);
+        let b = fr.px(3.0, 0.0);
+        line_blend(pb, a, b, (210, 196, 180), 0.55);
+    }
+}
+
+#[allow(clippy::needless_range_loop)]
+fn draw_bigsnake_lod(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
+    let s = fr.r * (1.0 / 6.0);
+    if elite {
+        draw_w3_elite_aura(pb, fr, 2.0 * s);
+    }
+    let col = apply_hit(e.kind.color(), fr.hit);
+    let n = e.w4.trail_len as usize;
+    for i in (0..n).rev() {
+        let p = fr.pos + (e.w4.trail[i] - e.pos);
+        let cx = p.x.round() as i32;
+        let cy = p.y.round() as i32;
+        darken_px(pb, cx + 1, cy + 1, 0.30);
+        pb.plot(cx, cy, col);
+        if i == 0 {
+            pb.plot(cx - 1, cy - 1, mix_rgb(col, (255, 244, 200), 0.35));
+        }
+    }
+}
+
+fn draw_centipede(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
+    let s = fr.r * (1.0 / 2.4);
+    if elite {
+        draw_w3_elite_aura(pb, fr, 2.2 * s);
+    }
+    let (dark, mid, hi, leg) = if elite {
+        (
+            (58, 44, 30),
+            (212, 190, 146),
+            (250, 240, 214),
+            (236, 208, 128),
+        )
+    } else {
+        (
+            (52, 42, 30),
+            (186, 166, 132),
+            (238, 226, 198),
+            (168, 150, 118),
+        )
+    };
+    // Six segments down the body with two legs each, flickering fast.
+    let flutter = e.w4.phase == crate::game::ecs::systems::enemy_wave4::CENTIPEDE_PHASE_FLUTTER;
+    let cadence = if flutter { 34.0 } else { 22.0 };
+    for i in 0..6 {
+        let t = i as f32 * 0.9;
+        let u = -t * s;
+        let rad = (2.6 - i as f32 * 0.28).max(1.0) * s;
+        let p = fr.px(u, 0.0);
+        darken_px(pb, p.0 + 1, p.1 + 2, 0.28);
+        disc_blend(pb, p.0, p.1, rad.round().max(1.0) as i32 + 1, fr.apply_hit(dark), 0.9);
+        disc_blend(pb, p.0 - 1, p.1 - 1, rad.round().max(1.0) as i32, fr.apply_hit(mid), 0.95);
+        // Legs: the wave runs down the body, faster in the flutter.
+        let ph = fr.anim * cadence * 0.05 - i as f32 * 0.8;
+        let sw = fast_sin(ph) * 1.5 * s;
+        for side in [-1.0f32, 1.0] {
+            let hip = fr.px(u, side * rad * 0.8);
+            let foot = fr.px(u + sw * side, side * (rad + 1.9 * s));
+            line_blend(pb, hip, foot, fr.apply_hit(leg), 0.85);
+        }
+    }
+    // Head at the front with two long antennae and a pair of venom claws.
+    let head = fr.px(1.6 * s, 0.0);
+    disc_blend(pb, head.0, head.1, (3.0 * s).round().max(1.0) as i32, fr.apply_hit(hi), 0.9);
+    for side in [-1.0f32, 1.0] {
+        let a0 = fr.px(2.4 * s, side * 1.0 * s);
+        let a1 = fr.px(4.6 * s, side * (2.4 * s + fast_sin(fr.anim * 0.4) * 0.4 * s));
+        line_blend(pb, a0, a1, fr.apply_hit(leg), 0.9);
+    }
+    if flutter {
+        // The tell: the whole body shivers, a bright seam along its spine.
+        let a = fr.px(1.4 * s, 0.0);
+        let b = fr.px(-5.0 * s, 0.0);
+        line_blend(pb, a, b, (255, 244, 210), 0.55);
+    }
+}
+
+fn draw_centipede_lod(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
+    let s = fr.r * (1.0 / 2.4);
+    if elite {
+        draw_w3_elite_aura(pb, fr, 1.8 * s);
+    }
+    let col = apply_hit(e.kind.color(), fr.hit);
+    for i in 0..6 {
+        let p = fr.px(-(i as f32) * 0.9 * s, 0.0);
+        darken_px(pb, p.0 + 1, p.1 + 1, 0.28);
+        pb.plot(p.0, p.1, if i == 0 { mix_rgb(col, (255, 244, 210), 0.4) } else { col });
+    }
+}
+
+fn draw_hornet(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
+    let s = fr.r * (1.0 / 2.6);
+    if elite {
+        draw_w3_elite_aura(pb, fr, 2.2 * s);
+    }
+    let grounded = e.w4.phase == crate::game::ecs::systems::enemy_wave4::HORNET_PHASE_RECOVER;
+    let (dark, stripe, light, wing) = if elite {
+        (
+            (34, 30, 24),
+            (244, 176, 40),
+            (255, 244, 200),
+            (168, 214, 236),
+        )
+    } else {
+        ((30, 26, 22), (214, 148, 40), (238, 226, 190), (140, 186, 208))
+    };
+    // Wings: still while grounded, a blur in the air.
+    if !grounded {
+        let flap = fast_sin(fr.anim * 6.0).abs() * 1.8 * s;
+        for side in [-1.0f32, 1.0] {
+            let a = fr.px(-0.6 * s, side * 1.2 * s);
+            let b = fr.px(-2.6 * s, side * (3.2 * s + flap));
+            line_blend(pb, a, b, fr.apply_hit(wing), 0.55);
+        }
+    }
+    // Abdomen with hazard stripes, thorax, head, stinger.
+    let tail = fr.px(-2.4 * s, 0.0);
+    let mid = fr.px(-0.4 * s, 0.0);
+    let head = fr.px(1.8 * s, 0.0);
+    line_blend(pb, tail, head, fr.apply_hit(dark), 0.95);
+    for k in 0..3 {
+        let u = -2.0 + k as f32 * 0.8;
+        let a = fr.px(u * s, -1.1 * s);
+        let b = fr.px(u * s, 1.1 * s);
+        line_blend(pb, a, b, fr.apply_hit(stripe), 0.9);
+    }
+    disc_blend(pb, mid.0, mid.1, (1.8 * s).round().max(1.0) as i32, fr.apply_hit(stripe), 0.9);
+    disc_blend(pb, head.0, head.1, (1.6 * s).round().max(1.0) as i32, fr.apply_hit(light), 0.9);
+    // Eyes: two dark pips that read as a face at 1x.
+    for side in [-1.0f32, 1.0] {
+        let eye = fr.px(2.1 * s, side * 0.7 * s);
+        pb.plot(eye.0, eye.1, fr.apply_hit(dark));
+    }
+    // The stinger, out when it is about to dive.
+    if !grounded {
+        let a = fr.px(-2.6 * s, 0.0);
+        let b = fr.px(-4.0 * s, 0.0);
+        line_blend(pb, a, b, fr.apply_hit((246, 236, 214)), 0.9);
+    } else {
+        // Grounded: a squat shadow makes the punish window obvious.
+        let p = fr.px(-0.4 * s, 0.0);
+        line_blend(
+            pb,
+            (p.0 - 2, p.1 + 2),
+            (p.0 + 2, p.1 + 2),
+            (28, 24, 20),
+            0.5,
+        );
+    }
+}
+
+fn draw_hornet_lod(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
+    let s = fr.r * (1.0 / 2.6);
+    if elite {
+        draw_w3_elite_aura(pb, fr, 1.8 * s);
+    }
+    let col = apply_hit(e.kind.color(), fr.hit);
+    let a = fr.px(-2.0 * s, 0.0);
+    let b = fr.px(1.8 * s, 0.0);
+    line_blend(pb, a, b, col, 0.95);
+    pb.plot(a.0 - 1, a.1, mix_rgb(col, (240, 236, 214), 0.4));
+    pb.plot(b.0, b.1 - 1, mix_rgb(col, (255, 250, 230), 0.5));
+}
+
+fn draw_horde(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
+    let s = fr.r * (1.0 / 3.2);
+    if elite {
+        draw_w3_elite_aura(pb, fr, 2.0 * s);
+    }
+    let tier = e.w4.tier.max(1) as f32;
+    // Drawn radius: tier 2 reads as a ~7 px boiling mass, tier 0 as a coin.
+    let spread =
+        crate::game::ecs::systems::enemy_wave4::HORDE_DRAW_RADIUS * (0.6 + 0.2 * tier) * s;
+    let (dark, mid, hi) = if elite {
+        ((44, 34, 20), (232, 216, 178), (255, 250, 232))
+    } else {
+        ((40, 34, 24), (206, 190, 150), (246, 238, 216))
+    };
+    // A soft dark under-mass so the swarm reads as one body, then ~18 specks
+    // churning through it.
+    let c = (
+        fr.pos.x.round() as i32,
+        fr.pos.y.round() as i32,
+    );
+    let rad = spread.round().max(2.0) as i32;
+    disc_blend(pb, c.0, c.1, rad, fr.apply_hit(dark), 0.55);
+    disc_blend(pb, c.0 - 1, c.1 - 1, (rad - 1).max(1), fr.apply_hit(mid), 0.32);
+    let count = 10 + (tier as u32) * 5;
+    for i in 0..count {
+        let a = churn(i, fr.anim * 0.6) * std::f32::consts::TAU;
+        let rr = spread * (0.35 + 0.65 * churn(i + 41, fr.anim * 0.9));
+        let p = Vec2::new(fr.pos.x + a.cos() * rr, fr.pos.y + a.sin() * rr);
+        let px = p.x.round() as i32;
+        let py = p.y.round() as i32;
+        let body = if i % 4 == 0 { hi } else { mid };
+        blend_px(pb, px, py, fr.apply_hit(body), 0.95);
+        if i % 3 == 0 {
+            darken_px(pb, px + 1, py + 1, 0.22);
+        }
+    }
+}
+
+fn draw_horde_lod(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
+    let s = fr.r * (1.0 / 3.2);
+    if elite {
+        draw_w3_elite_aura(pb, fr, 1.8 * s);
+    }
+    let col = apply_hit(e.kind.color(), fr.hit);
+    let c = (fr.pos.x.round() as i32, fr.pos.y.round() as i32);
+    let rad = (crate::game::ecs::systems::enemy_wave4::HORDE_DRAW_RADIUS * 0.5 * s)
+        .round()
+        .max(1.0) as i32;
+    disc_blend(pb, c.0, c.1, rad, col, 0.75);
+    pb.plot(c.0 - 1, c.1 - 1, mix_rgb(col, (255, 250, 232), 0.45));
+}
+
+// ---- Wave-4 floor tells ---------------------------------------------------
+
+/// The snake's lunge lane: a dotted 44 px line the length of the lunge, with a
+/// bright head marker. The body's own silhouette shows the coil.
+fn draw_snake_warn(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy) {
+    use crate::game::ecs::systems::enemy_wave4 as w4;
+    if e.w4.phase != w4::SNAKE_PHASE_COIL {
+        return;
+    }
+    let progress = 1.0 - (e.w4.t / w4::SNAKE_TELL_SECS).clamp(0.0, 1.0);
+    let len = w4::SNAKE_WARN_LINE;
+    let steps = (len / 3.0) as i32;
+    let core = mix_rgb((255, 232, 150), (255, 96, 96), progress);
+    for k in 0..=steps {
+        let u = 2.0 + k as f32 * 3.0;
+        if u > len {
+            break;
+        }
+        // Dotted, and the dots fill in as the tell runs down.
+        if (k as f32 / steps as f32) > progress + 0.15 {
+            continue;
+        }
+        let p = fr.px(u, 0.0);
+        blend_px(pb, p.0, p.1, core, 0.85);
+        let edge = fr.px(u, 0.9);
+        blend_px(pb, edge.0, edge.1, core, 0.40);
+        let edge = fr.px(u, -0.9);
+        blend_px(pb, edge.0, edge.1, core, 0.40);
+    }
+    // The lunge's landing point.
+    let end = fr.px(len, 0.0);
+    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+        blend_px(pb, end.0 + dx, end.1 + dy, core, 0.75);
+    }
+}
+
+/// The centipede's flutter line: a short bright lane along the locked dart.
+fn draw_centipede_warn(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy) {
+    use crate::game::ecs::systems::enemy_wave4 as w4;
+    if e.w4.phase != w4::CENTIPEDE_PHASE_FLUTTER {
+        return;
+    }
+    let progress = 1.0 - (e.w4.t / w4::CENTIPEDE_FLUTTER_SECS).clamp(0.0, 1.0);
+    let col = mix_rgb((255, 236, 168), (255, 120, 96), progress);
+    let len = w4::CENTIPEDE_DART_SPEED * w4::CENTIPEDE_DART_SECS;
+    let steps = (len / 4.0) as i32;
+    for k in 0..=steps {
+        let u = 2.0 + k as f32 * 4.0;
+        if u > len {
+            break;
+        }
+        if (k as f32 / steps.max(1) as f32) > progress + 0.2 {
+            continue;
+        }
+        let p = fr.px(u, 0.0);
+        blend_px(pb, p.0, p.1, col, 0.80);
+    }
+}
+
+/// The hornet's dive line and the tightening ring: it locks the aim at the tell
+/// and the ring closes as the dive approaches. Grounded recovery shows a plain
+/// ring so "punish now" is readable from the floor.
+fn draw_hornet_warn(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy) {
+    use crate::game::ecs::systems::enemy_wave4 as w4;
+    match e.w4.phase {
+        w4::HORNET_PHASE_CHARGE => {
+            let progress = 1.0 - (e.w4.t / w4::HORNET_TELL_SECS).clamp(0.0, 1.0);
+            let col = mix_rgb((255, 232, 150), (255, 96, 96), progress);
+            let len = w4::HORNET_DIVE_SPEED * w4::HORNET_DIVE_SECS;
+            let steps = (len / 4.0) as i32;
+            for k in 0..=steps {
+                let u = 2.0 + k as f32 * 4.0;
+                if u > len {
+                    break;
+                }
+                if (k as f32 / steps.max(1) as f32) > progress + 0.15 {
+                    continue;
+                }
+                let p = fr.px(u, 0.0);
+                blend_px(pb, p.0, p.1, col, 0.85);
+                blend_px(pb, p.0, p.1 + 1, col, 0.35);
+            }
+        }
+        w4::HORNET_PHASE_RECOVER => {
+            // The punish window: a calm white ring where it sits.
+            let r = (e.radius + 4.0).round() as i32;
+            let c = (fr.pos.x.round() as i32, fr.pos.y.round() as i32);
+            for k in 0..24 {
+                let a = k as f32 / 24.0 * std::f32::consts::TAU;
+                let p = (c.0 + (a.cos() * r as f32).round() as i32,
+                         c.1 + (a.sin() * r as f32).round() as i32);
+                blend_px(pb, p.0, p.1, (236, 248, 255), 0.55);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The horde's split warning: the mass glows pale for the ticks before it tears
+/// in two.
+fn draw_horde_split_warn(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy) {
+    if e.w4.split_pending == 0 {
+        return;
+    }
+    let c = (fr.pos.x.round() as i32, fr.pos.y.round() as i32);
+    let r = (crate::game::ecs::systems::enemy_wave4::HORDE_DRAW_RADIUS * 0.8).round() as i32;
+    line_blend(pb, (c.0 - r, c.1), (c.0 + r, c.1), (255, 246, 214), 0.6);
+    line_blend(pb, (c.0, c.1 - r), (c.0, c.1 + r), (255, 246, 214), 0.6);
+}
+
+// ---- Lilliputians --------------------------------------------------------
+
+/// One tiny person, about five pixels tall: a head, a pale facility coat, two
+/// legs, and the one prop that says which job it has (a levelled spear, a bent
+/// bow, a coil of rope, or the squad's little flag). At 1x the silhouette is a
+/// person; at zoom-out the LOD path leaves a bright dot, so a squad reads as a
+/// formation.
+fn draw_lilliputian(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
+    use crate::game::ecs::systems::enemy_wave4 as w4;
+    let s = fr.r * 0.75;
+    if elite {
+        draw_w3_elite_aura(pb, fr, 2.0 * s);
+    }
+    let coat = if elite {
+        (226, 232, 240)
+    } else {
+        e.kind.color()
+    };
+    let coat = fr.apply_hit(coat);
+    let skin = fr.apply_hit((228, 190, 152));
+    let dark = fr.apply_hit((52, 58, 70));
+    let steel = fr.apply_hit((212, 220, 232));
+
+    // Feet, body, head (drawn in the local frame so it faces the rat).
+    let feet = fr.px(-0.4 * s, 0.0);
+    let body = fr.px(0.6 * s, 0.0);
+    let head = fr.px(1.9 * s, 0.0);
+    darken_px(pb, feet.0 + 1, feet.1 + 1, 0.25);
+    // Legs.
+    for side in [-1.0f32, 1.0] {
+        let knee = fr.px(-0.2 * s, side * 0.5 * s);
+        let foot = fr.px(0.2 * s + fast_sin(fr.anim * 2.2 + side) * 0.3 * s, side * 0.6 * s);
+        line_blend(pb, knee, foot, dark, 0.9);
+    }
+    // Coat: two stacked pixels, widest at the shoulders.
+    line_blend(pb, feet, body, coat, 0.98);
+    for side in [-1.0f32, 1.0] {
+        let sh = fr.px(0.8 * s, side * 0.9 * s);
+        blend_px(pb, sh.0, sh.1, coat, 0.85);
+    }
+    // Head + a little hard hat (the facility's, shrunk with them).
+    blend_px(pb, head.0, head.1, skin, 0.98);
+    let hat = fr.px(2.2 * s, 0.0);
+    blend_px(pb, hat.0, hat.1, steel, 0.85);
+
+    // The role prop.
+    match e.w4.role {
+        w4::LILLI_ROLE_SPEAR => {
+            let levelled = e.w4.phase != w4::LILLI_PHASE_WALK;
+            let (a, b) = if levelled {
+                (fr.px(1.0 * s, 0.8 * s), fr.px(4.6 * s, 0.6 * s))
+            } else {
+                (fr.px(1.2 * s, 0.8 * s), fr.px(2.4 * s, 2.2 * s))
+            };
+            line_blend(pb, a, b, steel, 0.95);
+            blend_px(pb, b.0, b.1, (255, 250, 236), if levelled { 0.95 } else { 0.6 });
+        }
+        w4::LILLI_ROLE_ARCHER => {
+            let kneel = e.w4.phase == w4::LILLI_PHASE_TELL;
+            let nock = fr.px(2.2 * s, 0.9 * s);
+            let tip_a = fr.px(2.6 * s, 1.9 * s);
+            let tip_b = fr.px(2.6 * s, -0.1 * s);
+            line_blend(pb, nock, tip_a, (166, 122, 74), 0.95);
+            line_blend(pb, nock, tip_b, (166, 122, 74), 0.95);
+            // The string, drawn back when the arrow is nocked.
+            let pull = if kneel { 0.9 * s } else { 0.2 * s };
+            let draw = fr.px(2.2 * s - pull, 0.9 * s);
+            line_blend(pb, tip_a, draw, (232, 238, 246), 0.7);
+            line_blend(pb, draw, tip_b, (232, 238, 246), 0.7);
+        }
+        w4::LILLI_ROLE_ROPE => {
+            let coil = fr.px(0.4 * s, 1.1 * s);
+            let taut = e.w4.phase != w4::LILLI_PHASE_WALK;
+            let end = if taut {
+                fr.px(3.0 * s, 1.3 * s)
+            } else {
+                fr.px(1.4 * s, 1.7 * s)
+            };
+            line_blend(pb, coil, end, (196, 170, 118), if taut { 0.95 } else { 0.7 });
+        }
+        _ => {
+            // The squad's little flag: a pole and a pale pennant.
+            let base = fr.px(0.8 * s, -1.0 * s);
+            let top = fr.px(1.9 * s, -1.0 * s);
+            line_blend(pb, base, top, (128, 110, 82), 0.9);
+            let wave = fast_sin(fr.anim * 2.0) * 0.5;
+            let flag = fr.px(2.6 * s, -1.4 * s + wave);
+            blend_px(pb, flag.0, flag.1, (232, 96, 108), 0.92);
+        }
+    }
+    // Panic: the whole tiny body leans into the run.
+    if e.w4.phase == w4::LILLI_PHASE_PANIC {
+        let a = fr.px(-0.6 * s, 0.0);
+        let b = fr.px(1.0 * s, 0.0);
+        line_blend(pb, a, b, (236, 248, 255), 0.35);
+    }
+}
+
+fn draw_lilliputian_lod(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, elite: bool) {
+    use crate::game::ecs::systems::enemy_wave4 as w4;
+    if elite {
+        draw_w3_elite_aura(pb, fr, 2.0);
+    }
+    let col = apply_hit(e.kind.color(), fr.hit);
+    let p = (fr.pos.x.round() as i32, fr.pos.y.round() as i32);
+    darken_px(pb, p.0 + 1, p.1 + 1, 0.30);
+    pb.plot(p.0, p.1, col);
+    // A one-pixel role tint so a distant squad still reads as mixed.
+    let tint = match e.w4.role {
+        w4::LILLI_ROLE_ARCHER => (166, 122, 74),
+        w4::LILLI_ROLE_ROPE => (196, 170, 118),
+        w4::LILLI_ROLE_LEADER => (232, 96, 108),
+        _ => (212, 220, 232),
+    };
+    pb.plot(p.0, p.1 - 1, tint);
+}
+
+/// The squad's floor tells: the levelled spear line, the archer's marked arc,
+/// the rope tightening around the rat and the panic wheel.
+fn draw_lilliputian_warn(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy) {
+    use crate::game::ecs::systems::enemy_wave4 as w4;
+    match (e.w4.role, e.w4.phase) {
+        (w4::LILLI_ROLE_SPEAR, w4::LILLI_PHASE_TELL)
+        | (w4::LILLI_ROLE_LEADER, w4::LILLI_PHASE_TELL) => {
+            // The points glint: a short line out past the 44 px reach.
+            let progress = 1.0 - (e.w4.t / w4::SPEAR_TELL_SECS).clamp(0.0, 1.0);
+            let col = mix_rgb((255, 236, 170), (255, 120, 96), progress);
+            let a = fr.px(3.0, 0.0);
+            let b = fr.px(w4::SPEAR_REACH, 0.0);
+            line_blend(pb, a, b, col, 0.55 + 0.35 * progress);
+        }
+        (w4::LILLI_ROLE_ARCHER, w4::LILLI_PHASE_TELL) => {
+            // The marked arc the pellets will cross.
+            let progress = 1.0 - (e.w4.t / w4::ARCHER_TELL_SECS).clamp(0.0, 1.0);
+            let col = mix_rgb((255, 236, 170), (255, 120, 96), progress);
+            let reach = w4::ARCHER_BULLET_SPEED * 0.9;
+            let half = w4::ARCHER_SPREAD;
+            for k in 0..=6 {
+                let t = k as f32 / 6.0;
+                let a = -half + 2.0 * half * t;
+                let dir = e.w4.dir.rotate(a);
+                let p = fr.pos + dir * reach * (0.25 + 0.75 * progress);
+                blend_px(
+                    pb,
+                    p.x.round() as i32,
+                    p.y.round() as i32,
+                    col,
+                    0.75,
+                );
+            }
+        }
+        (w4::LILLI_ROLE_ROPE, w4::LILLI_PHASE_TELL) => {
+            // The rope tightening: a closing ring with four spokes.
+            let progress = 1.0 - (e.w4.t / w4::ROPE_TIE_SECS).clamp(0.0, 1.0);
+            let r = w4::ROPE_REACH * (1.0 - 0.55 * progress);
+            let c = (fr.pos.x.round() as i32, fr.pos.y.round() as i32);
+            let steps = 20;
+            let col = mix_rgb((214, 190, 140), (255, 236, 180), progress);
+            for k in 0..steps {
+                let a = k as f32 / steps as f32 * std::f32::consts::TAU;
+                let p = (
+                    c.0 + (a.cos() * r).round() as i32,
+                    c.1 + (a.sin() * r).round() as i32,
+                );
+                blend_px(pb, p.0, p.1, col, 0.30 + 0.55 * progress);
+            }
+        }
+        (w4::LILLI_ROLE_ROPE, w4::LILLI_PHASE_ACTION) => {
+            // The knot is closed: a taut ring the rat has to dash out of.
+            let c = (fr.pos.x.round() as i32, fr.pos.y.round() as i32);
+            let r = (w4::ROPE_REACH * 0.45).round() as i32;
+            for k in 0..20 {
+                let a = k as f32 / 20.0 * std::f32::consts::TAU;
+                let p = (
+                    c.0 + (a.cos() * r as f32).round() as i32,
+                    c.1 + (a.sin() * r as f32).round() as i32,
+                );
+                blend_px(pb, p.0, p.1, (255, 244, 210), 0.85);
+            }
+        }
+        _ => {}
     }
 }
 

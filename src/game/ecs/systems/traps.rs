@@ -241,7 +241,7 @@ fn is_live_mouse(state: MousetrapState) -> bool {
 fn is_ground(kind: EnemyKind) -> bool {
     // The Wick Moth flies (a teardrop with a lit tail) exactly like the Bat, so
     // glue and mousetraps do not hold it either.
-    !matches!(kind, EnemyKind::Bat | EnemyKind::WickMoth)
+    !matches!(kind, EnemyKind::Bat | EnemyKind::WickMoth | EnemyKind::MurderHornet)
 }
 
 /// `(hold seconds, movement multiplier)` for a ground enemy caught by glue.

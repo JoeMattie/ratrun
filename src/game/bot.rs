@@ -854,6 +854,7 @@ impl Bot {
                 // its tell has committed to, so the bot can leave them now
                 // instead of walking into them when they bite.
                 self.scan_wave3_enemy(w, en, p);
+                self.scan_wave4_enemy(w, en, p);
                 if let Some(mb) = e.get::<Miniboss>() {
                     if en.alive() && !mb.chest_dropped {
                         self.miniboss_pos = Some(en.pos);
@@ -1061,6 +1062,140 @@ impl Bot {
                     damage: w3::CROSSBAR_DAMAGE,
                 });
             }
+            _ => {}
+        }
+    }
+
+    /// Push the floor shapes a wave-4 body has committed to: the snake's lunge
+    /// lane *and* its no-walk-body, the centipede's dart, the hornet's dive,
+    /// the spear line's reach, the archer's marked arc and a tightening rope.
+    #[allow(clippy::needless_range_loop)]
+    fn scan_wave4_enemy(&mut self, w: &World, en: &Enemy, p: Vec2) {
+        use crate::game::ecs::systems::enemy_wave4 as w4;
+        match en.kind {
+            EnemyKind::BigSnake => {
+                // The body is a moving wall: a chain of small soft circles so
+                // the bot walks round it instead of being pushed along it.
+                for k in 1..en.w4.trail_len as usize {
+                    let seg = en.w4.trail[k];
+                    if !self.sees(w, p, seg) {
+                        continue;
+                    }
+                    self.threats.push(Threat::WaveHazard {
+                        pos: seg,
+                        radius: w4::SNAKE_BODY_RADIUS,
+                        dir: Vec2::ZERO,
+                        warn_left: 0.0,
+                        active_left: 0.20,
+                        damage: 1.0,
+                    });
+                }
+                // The lunge lane: a 40 px line down the locked aim.
+                let live = en.w4.phase == w4::SNAKE_PHASE_COIL
+                    || en.w4.phase == w4::SNAKE_PHASE_LUNGE;
+                if live {
+                    let half = w4::SNAKE_LUNGE_DISTANCE * 0.5;
+                    let centre = en.pos + en.w4.dir * half;
+                    let warn_left = if en.w4.phase == w4::SNAKE_PHASE_COIL {
+                        en.w4.t
+                    } else {
+                        0.0
+                    };
+                    self.threats.push(Threat::WaveHazard {
+                        pos: centre,
+                        radius: half,
+                        dir: en.w4.dir,
+                        warn_left,
+                        active_left: warn_left + 0.30,
+                        damage: en.damage,
+                    });
+                }
+            }
+            EnemyKind::HouseCentipede => {
+                if en.w4.phase != w4::CENTIPEDE_PHASE_FLUTTER {
+                    return;
+                }
+                let half = w4::CENTIPEDE_DART_SPEED * w4::CENTIPEDE_DART_SECS * 0.5;
+                self.threats.push(Threat::WaveHazard {
+                    pos: en.pos + en.w4.dir * half,
+                    radius: half,
+                    dir: en.w4.dir,
+                    warn_left: en.w4.t,
+                    active_left: en.w4.t + 0.25,
+                    damage: en.damage,
+                });
+            }
+            EnemyKind::MurderHornet => {
+                let live = en.w4.phase == w4::HORNET_PHASE_CHARGE
+                    || en.w4.phase == w4::HORNET_PHASE_DIVE;
+                if !live {
+                    return;
+                }
+                let half = w4::HORNET_DIVE_SPEED * w4::HORNET_DIVE_SECS * 0.5;
+                let warn_left = if en.w4.phase == w4::HORNET_PHASE_CHARGE {
+                    en.w4.t
+                } else {
+                    0.0
+                };
+                self.threats.push(Threat::WaveHazard {
+                    pos: en.pos + en.w4.dir * half,
+                    radius: half,
+                    dir: en.w4.dir,
+                    warn_left,
+                    active_left: warn_left + 0.35,
+                    damage: w4::HORNET_JAB_DAMAGE,
+                });
+            }
+            EnemyKind::Lilliputian => match (en.w4.role, en.w4.phase) {
+                (w4::LILLI_ROLE_SPEAR, w4::LILLI_PHASE_TELL)
+                | (w4::LILLI_ROLE_LEADER, w4::LILLI_PHASE_TELL) => {
+                    let half = w4::SPEAR_REACH * 0.5;
+                    self.threats.push(Threat::WaveHazard {
+                        pos: en.pos + en.facing * half,
+                        radius: half,
+                        dir: en.facing,
+                        warn_left: en.w4.t,
+                        active_left: en.w4.t + 0.20,
+                        damage: en.damage,
+                    });
+                }
+                (w4::LILLI_ROLE_ARCHER, w4::LILLI_PHASE_TELL) => {
+                    // The marked arc, sampled as three small circles along the
+                    // aim so the bot steps off the line before the pellets.
+                    let reach = w4::ARCHER_BULLET_SPEED * 0.8;
+                    for k in [-1.0f32, 0.0, 1.0] {
+                        let dir = en.w4.dir.rotate(k * w4::ARCHER_SPREAD);
+                        let at = en.pos + dir * reach;
+                        if !self.sees(w, p, at) {
+                            continue;
+                        }
+                        self.threats.push(Threat::WaveHazard {
+                            pos: at,
+                            radius: 7.0,
+                            dir: Vec2::ZERO,
+                            warn_left: en.w4.t,
+                            active_left: en.w4.t + 0.25,
+                            damage: en.damage,
+                        });
+                    }
+                }
+                (w4::LILLI_ROLE_ROPE, w4::LILLI_PHASE_TELL)
+                | (w4::LILLI_ROLE_ROPE, w4::LILLI_PHASE_ACTION) => {
+                    self.threats.push(Threat::WaveHazard {
+                        pos: en.pos,
+                        radius: w4::ROPE_REACH,
+                        dir: Vec2::ZERO,
+                        warn_left: if en.w4.phase == w4::LILLI_PHASE_TELL {
+                            en.w4.t
+                        } else {
+                            0.0
+                        },
+                        active_left: en.w4.t + 0.25,
+                        damage: 2.0,
+                    });
+                }
+                _ => {}
+            },
             _ => {}
         }
     }

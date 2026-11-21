@@ -331,6 +331,11 @@ impl DamageCause {
             DamageCause::EnemyContact(EnemyKind::WickMoth) => "wick moth contact",
             DamageCause::EnemyContact(EnemyKind::Porter) => "porter contact",
             DamageCause::EnemyContact(EnemyKind::Turnkey) => "turnkey contact",
+            DamageCause::EnemyContact(EnemyKind::BigSnake) => "big snake contact",
+            DamageCause::EnemyContact(EnemyKind::HouseCentipede) => "house centipede contact",
+            DamageCause::EnemyContact(EnemyKind::MurderHornet) => "murder hornet contact",
+            DamageCause::EnemyContact(EnemyKind::TermiteHorde) => "termite horde contact",
+            DamageCause::EnemyContact(EnemyKind::Lilliputian) => "lilliputian contact",
             DamageCause::EnemyBullet => "spitter bullets",
             DamageCause::BossContact(BossKind::Cat) => "jaguar body",
             DamageCause::BossContact(BossKind::Broom) => "broom human body",
@@ -1241,6 +1246,11 @@ fn enemy_kind_name(kind: EnemyKind) -> &'static str {
         EnemyKind::WickMoth => "wick moth",
         EnemyKind::Porter => "porter",
         EnemyKind::Turnkey => "turnkey",
+        EnemyKind::BigSnake => "big snake",
+        EnemyKind::HouseCentipede => "house centipede",
+        EnemyKind::MurderHornet => "murder hornet",
+        EnemyKind::TermiteHorde => "termite horde",
+        EnemyKind::Lilliputian => "lilliputian",
     }
 }
 

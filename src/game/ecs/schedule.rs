@@ -91,8 +91,8 @@ use bevy_ecs::prelude::*;
 
 use super::resources::TickInput;
 use super::systems::{
-    boss, combat, enemy_move, enemy_wave3, evolutions, fog, fx, gates, hazards, loot, miniboss,
-    player, powerups, projectiles, shop, spawn, trailer, traps, weapons, weapons_wave3a,
+    boss, combat, enemy_move, enemy_wave3, enemy_wave4, evolutions, fog, fx, gates, hazards, loot,
+    miniboss, player, powerups, projectiles, shop, spawn, trailer, traps, weapons, weapons_wave3a,
     weapons_wave3b,
 };
 
@@ -294,6 +294,14 @@ pub fn build_tick_schedule() -> Schedule {
             // 16c: the wave-3 enemies' behaviour tick (see the comment above
             // this tuple).
             enemy_wave3::wave3_system,
+            // 16c2: the wave-4 kinds' behaviour tick. After wave 3 so its
+            // warned-attack limiter counts every tell that started this tick;
+            // before the flatbed pass so a horde that splits (the one place a
+            // system in this window spawns an enemy) is placed by it in the
+            // same tick, and before the reap so a lunge, jab or split kill takes
+            // the normal loot path. `EnemyIndex` is already stale here, which
+            // is legal: nothing after `contact` reads it.
+            enemy_wave4::wave4_system,
             // 16d: the flatbed's hazard pass (see the comment above this
             // tuple). A pit fall takes 35 % of an enemy's max HP and can kill,
             // so it is a damage pass and must precede the Hantavirus death

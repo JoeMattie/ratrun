@@ -303,7 +303,92 @@ pub fn director_system(
             if live + queued >= cap || live + queued >= budget {
                 break;
             }
-            let kind = director::pick_kind_for(difficulty.0, elapsed, &mut rng.0);
+            let mut kind = director::pick_kind_for(difficulty.0, elapsed, &mut rng.0);
+            // The big snake is a moving wall, so it is also the one kind with a
+            // live cap: a third one on the floor would cut the room into
+            // corridors. The substitution draws no rng and no extra body, so a
+            // run without a snake is bit-for-bit the old roll.
+            if kind == EnemyKind::BigSnake
+                && enemies
+                    .iter()
+                    .filter(|e| e.kind == EnemyKind::BigSnake)
+                    .count()
+                    >= director::WAVE4_SNAKE_LIVE_CAP
+            {
+                kind = EnemyKind::Skitterer;
+            }
+            // A lilliputian roll brings a whole squad instead of one body.
+            // The cap keeps it to two squads on the floor; over the cap the
+            // roll is substituted with fodder, and the squad itself is
+            // truncated to the remaining budget, so the enemy cap still holds.
+            if kind == EnemyKind::Lilliputian {
+                let live_lill = enemies
+                    .iter()
+                    .filter(|e| e.kind == EnemyKind::Lilliputian)
+                    .count();
+                let room = cap
+                    .saturating_sub(live + queued)
+                    .min(budget.saturating_sub(live + queued))
+                    .min(crate::game::ecs::systems::enemy_wave4::LILLI_SQUAD_SIZE)
+                    .min(director::WAVE4_LILLI_LIVE_CAP.saturating_sub(live_lill));
+                if room == 0 {
+                    kind = EnemyKind::Skitterer;
+                } else if let Some(centre) = spawn_pulse_point(
+                    &mut rng.0,
+                    &level,
+                    &player,
+                    viewport.0,
+                    &mut scratch,
+                    room_wave && i == 0,
+                    flank.as_ref(),
+                    i,
+                ) {
+                    use crate::game::ecs::systems::enemy_wave4 as w4;
+                    // The leader's `SpawnId` is the squad's id, so a straggler
+                    // can name the squad it wants to rejoin.
+                    let first = next_id.take();
+                    let squad = first.0 as u32;
+                    let mut spawned = 0usize;
+                    for k in 0..room {
+                        let id = if k == 0 { first } else { next_id.take() };
+                        let off = Vec2::from_angle(
+                            k as f32 / room as f32 * std::f32::consts::TAU,
+                        ) * 7.0;
+                        if !level.tiles.circle_clear(
+                            centre + off,
+                            EnemyKind::Lilliputian.radius(),
+                            SizeClass::Small,
+                        ) {
+                            continue;
+                        }
+                        let mut enemy = Enemy::spawn_with_mods(
+                            EnemyKind::Lilliputian,
+                            centre + off,
+                            mult,
+                            mods,
+                            &mut rng.0,
+                        );
+                        enemy.id = next_enemy_id.take();
+                        enemy.w4.role = match k {
+                            0 => w4::LILLI_ROLE_LEADER,
+                            1..=3 => w4::LILLI_ROLE_SPEAR,
+                            4 | 5 => w4::LILLI_ROLE_ARCHER,
+                            _ => w4::LILLI_ROLE_ROPE,
+                        };
+                        enemy.w4.slot = k as u8;
+                        enemy.w4.squad = squad;
+                        enemy.w4.squad_peak = room as u16;
+                        commands.spawn((enemy, id));
+                        spawned += 1;
+                    }
+                    queued += spawned;
+                    continue;
+                } else {
+                    // No safe off-screen point for the squad: skip the pulse
+                    // body entirely, exactly like a failed single spawn.
+                    continue;
+                }
+            }
             let Some(pos) = spawn_pulse_point(
                 &mut rng.0,
                 &level,

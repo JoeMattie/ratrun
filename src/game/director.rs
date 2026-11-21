@@ -607,6 +607,66 @@ const WAVE3_FEATURED: [EnemyKind; 3] = [
     EnemyKind::Turnkey,
 ];
 
+// ---- Wave 4 kinds ---------------------------------------------------------
+//
+// The four kinds the wave-4 batch adds, on the same 900 s design clock as the
+// wave-3 table above (no second scale: `WAVE3_TIME_SCALE` already converts
+// design seconds to this build's clock).
+
+/// First appearance of each wave-4 kind, in **design** seconds, in roll order.
+/// The centipede arrives mid-run, the horde at the six-minute mark, the hornet
+/// at 7:30 and the snake once the build is nearly complete.
+///
+/// Every one of these is after the opening 60 s on purpose: the determinism
+/// goldens (`ecs::harness`) and the map pin sample a 60 s run, so adding a kind
+/// that cannot appear before 4:00 leaves both untouched.
+pub const WAVE4_UNLOCK_DESIGN: [(f32, EnemyKind); 5] = [
+    (240.0, EnemyKind::HouseCentipede),
+    (330.0, EnemyKind::Lilliputian),
+    (360.0, EnemyKind::TermiteHorde),
+    (450.0, EnemyKind::MurderHornet),
+    (510.0, EnemyKind::BigSnake),
+];
+
+/// Raw weight of each wave-4 kind, in [`WAVE4_UNLOCK_DESIGN`] order. The snake
+/// is the rarest by a wide margin: it is also the only kind with a live cap
+/// (`enemy_wave4::SNAKE_LIVE_CAP`, enforced by `spawn::director_system`).
+const WAVE4_WEIGHT: [f32; 5] = [2.2, 1.6, 1.8, 1.8, 1.2];
+
+/// The second tier of the special-kind budget: the four wave-4 kinds together
+/// take at most 15 % of the roll.
+///
+/// **Decision (two tiers).** Wave 3's five told kinds keep their 20 % ceiling —
+/// they are the floor's texture — and the wave-4 kinds get a tighter 15 %
+/// because each one is a *response test* rather than a body (a snake splits the
+/// room, a horde ignores chip damage, a hornet punishes greed). A third ceiling
+/// ([`SPECIAL_SHARE_CAP`]) scales both if a generous level mix ever pushes the
+/// two groups past 30 % together, so the ordinary ten kinds stay the horde.
+pub const WAVE4_SHARE_CAP: f32 = 0.15;
+
+/// The combined ceiling for every special kind (wave 3 + wave 4).
+pub const SPECIAL_SHARE_CAP: f32 = 0.30;
+
+/// How many big snakes may be alive at once. A snake's body is a wall, so the
+/// cap is the room's: two snakes is an arena with three lanes, three snakes is
+/// a maze. `spawn::director_system` substitutes fodder for an over-cap roll.
+pub const WAVE4_SNAKE_LIVE_CAP: usize =
+    crate::game::ecs::systems::enemy_wave4::SNAKE_LIVE_CAP;
+
+/// How many lilliputian bodies may be alive at once (two squads). A roll that
+/// would start a third squad is substituted with fodder instead.
+pub const WAVE4_LILLI_LIVE_CAP: usize =
+    crate::game::ecs::systems::enemy_wave4::LILLI_LIVE_CAP;
+
+/// Design time of a wave-4 kind's first appearance, scaled to this build.
+#[inline]
+pub fn wave4_unlock_time(kind: EnemyKind) -> Option<f32> {
+    WAVE4_UNLOCK_DESIGN
+        .iter()
+        .find(|(_, k)| *k == kind)
+        .map(|(t, _)| t * WAVE3_TIME_SCALE)
+}
+
 /// Design time of a wave-3 kind's first appearance, scaled to this build.
 #[inline]
 pub fn wave3_unlock_time(kind: EnemyKind) -> Option<f32> {
@@ -644,7 +704,8 @@ pub fn pick_kind_mixed(curve: f32, level: usize, rng: &mut impl Rng) -> EnemyKin
     let mix = &LEVEL_MIX[level_slot(level)];
     // One slot per possible kind, on the stack: this runs on every spawn roll
     // and must not allocate.
-    let mut table = [(EnemyKind::Skitterer, 0.0f32); 1 + UNLOCKS.len() + WAVE3_UNLOCK_DESIGN.len()];
+    let mut table = [(EnemyKind::Skitterer, 0.0f32);
+        1 + UNLOCKS.len() + WAVE3_UNLOCK_DESIGN.len() + WAVE4_UNLOCK_DESIGN.len()];
     table[0] = (EnemyKind::Skitterer, 6.0 * mix[0]);
     let mut n = 1;
     for &(unlock, kind, weight) in UNLOCKS.iter() {
@@ -683,6 +744,47 @@ pub fn pick_kind_mixed(curve: f32, level: usize, rng: &mut impl Rng) -> EnemyKin
             let scale = cap / new_weight;
             for slot in &mut table[base_n..n] {
                 slot.1 *= scale;
+            }
+        }
+    }
+
+    // Wave-4 kinds are appended after the wave-3 group, so the roll over a run
+    // without them is bit-for-bit the wave-3 result. Their combined weight is
+    // capped to `WAVE4_SHARE_CAP` of the table they join, and then both special
+    // groups are scaled together if they would take more than
+    // `SPECIAL_SHARE_CAP` of the whole roll.
+    let wave3_n = n;
+    let mut w4_weight = 0.0f32;
+    for (i, &(design_at, kind)) in WAVE4_UNLOCK_DESIGN.iter().enumerate() {
+        if curve <= design_at * WAVE3_TIME_SCALE {
+            continue;
+        }
+        let w = WAVE4_WEIGHT[i];
+        w4_weight += w;
+        table[n] = (kind, w);
+        n += 1;
+    }
+    if w4_weight > 0.0 {
+        let rest: f32 = table[..wave3_n].iter().map(|(_, w)| w).sum();
+        let cap = WAVE4_SHARE_CAP / (1.0 - WAVE4_SHARE_CAP) * rest;
+        if w4_weight > cap {
+            let scale = cap / w4_weight;
+            for slot in &mut table[wave3_n..n] {
+                slot.1 *= scale;
+            }
+        }
+    }
+    // The combined special-kind ceiling (see `SPECIAL_SHARE_CAP`).
+    {
+        let base_total: f32 = table[..base_n].iter().map(|(_, w)| w).sum();
+        let special: f32 = table[base_n..n].iter().map(|(_, w)| w).sum();
+        if special > 0.0 && base_total > 0.0 {
+            let cap = SPECIAL_SHARE_CAP / (1.0 - SPECIAL_SHARE_CAP) * base_total;
+            if special > cap {
+                let scale = cap / special;
+                for slot in &mut table[base_n..n] {
+                    slot.1 *= scale;
+                }
             }
         }
     }
