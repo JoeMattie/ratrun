@@ -368,7 +368,7 @@ pub fn gems_system(
             // acceleration forever) and speed up as the gem gets closer.
             // (`vel` copied out first: `Mut<Gem>` cannot be deref'd twice.)
             let closeness = (1.0 - dist / magnet.max(1.0)).clamp(0.0, 1.0);
-            let speed = 90.0 + closeness * 150.0;
+            let speed = pull_speed(dist, closeness);
             let desired = to.normalized() * speed;
             let vel = g.vel;
             g.vel = vel + (desired - vel) * (12.0 * dt).min(1.0);
@@ -446,7 +446,7 @@ pub fn treasure_system(
             if coin.magnetized || dist < magnet {
                 coin.magnetized = true;
                 let closeness = (1.0 - dist / magnet.max(1.0)).clamp(0.0, 1.0);
-                let desired = to.normalized() * (90.0 + closeness * 150.0);
+                let desired = to.normalized() * pull_speed(dist, closeness);
                 vel += (desired - vel) * (12.0 * dt).min(1.0);
                 coin.vel = vel;
             }
@@ -676,6 +676,20 @@ pub fn outcome_system(
     } else if counters.level_complete {
         counters.won = level.is_final();
     }
+}
+
+/// Speed (px/s) of a magnetized gem or coin `dist` px from the rat.
+///
+/// Inside pickup range it is the familiar 90 -> 240 px/s ease-in. Beyond it
+/// (a Magnet pickup magnetizes every gem and coin on the floor, wherever it
+/// lies) the pull scales with distance, so loot from the far side of the level
+/// streams in within a couple of seconds instead of trailing the rat at walking
+/// pace for half a minute. Capped so nothing teleports.
+#[inline]
+fn pull_speed(dist: f32, closeness: f32) -> f32 {
+    const FAR_GAIN: f32 = 2.5;
+    const FAR_CAP: f32 = 1600.0;
+    (90.0 + closeness * 150.0).max((dist * FAR_GAIN).min(FAR_CAP))
 }
 
 #[cfg(test)]
@@ -1369,5 +1383,20 @@ mod tests {
         };
         assert_eq!(run(11), run(11));
         assert_ne!(run(11), run(12));
+    }
+
+    /// A Magnet pickup is a level-wide vacuum: loot from the far side of the
+    /// map arrives in seconds, not at the old 90 px/s crawl.
+    #[test]
+    fn a_magnet_pulls_far_loot_in_quickly() {
+        assert_eq!(pull_speed(10.0, 0.5), 165.0, "near loot keeps the old ease-in");
+        assert!(pull_speed(1000.0, 0.0) >= 1600.0 - 1e-3);
+        // 2000 px away: simulate the pursuit against a stationary rat.
+        let (mut dist, mut t) = (2000.0f32, 0.0f32);
+        while dist > 6.0 && t < 30.0 {
+            dist -= pull_speed(dist, 0.0) * (1.0 / 60.0);
+            t += 1.0 / 60.0;
+        }
+        assert!(t < 3.0, "far loot took {t:.1}s to arrive");
     }
 }

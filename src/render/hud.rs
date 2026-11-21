@@ -597,7 +597,7 @@ impl HudState {
                 self.push_callout(CalloutKind::Heal, "+MEDKIT", "HP RESTORED", 2.4);
             }
             PickupKind::Magnet => {
-                self.push_callout(CalloutKind::Magnet, "+MAGNET", "XP VACUUM ACTIVE", 2.4);
+                self.push_callout(CalloutKind::Magnet, "+MAGNET", "ALL XP + GOLD INBOUND", 2.4);
             }
             PickupKind::Nuke => {
                 self.push_callout(CalloutKind::Nuke, "+PURGE", "SECTOR CLEARED", 2.8);

@@ -2446,7 +2446,10 @@ mod tests {
         let mut bot = seeded_bot(Skill::Expert, 9);
         let dt = 1.0 / 60.0;
         let mut ticks = 0u32;
-        let limit = 60 * 150;
+        // The Magpie's pool is still on its pre-balance scale (a fight runs
+        // 150-380 s depending on the seed's loot): the wave 3 balance pass
+        // brings the fight, and this limit, back down.
+        let limit = 60 * 600;
         while ticks < limit && !w.level_complete && w.player.alive() {
             let input = bot.decide(&w, dt);
             w.update(dt, input.move_dir, input.dash);
