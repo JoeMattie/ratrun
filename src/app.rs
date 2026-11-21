@@ -4254,6 +4254,16 @@ mod tests {
         }
     }
 
+    /// The wedge tip is the lower half of the mouse cell: `▄` in cheese yellow
+    /// over text, or the background of an existing `▀` playfield cell.
+    fn is_cheese_tip(cell: &ratatui::buffer::Cell) -> bool {
+        match cell.symbol() {
+            "▄" => is_cheese_yellow(cell.fg),
+            "▀" => is_cheese_yellow(cell.bg),
+            _ => false,
+        }
+    }
+
     #[test]
     fn cheese_cursor_appears_on_move_hides_after_keyboard_and_returns() {
         let _guard = CURSOR_ENV_LOCK.lock().unwrap();
@@ -4267,13 +4277,11 @@ mod tests {
         h.events(&[], &[(MouseEventKind::Moved, (10, 6))]);
         assert!(h.app.cursor_visible());
         let tip = &h.terminal.backend().buffer()[(10, 6)];
-        assert_eq!(tip.symbol(), "▀");
         assert!(
-            is_cheese_yellow(tip.fg),
-            "expected cheese-yellow hot spot at (10, 6), got {:?}",
-            tip.fg
+            is_cheese_tip(tip),
+            "expected cheese-yellow hot spot at (10, 6), got {tip:?}"
         );
-        assert_ne!(tip.fg, before_cell.fg);
+        assert_ne!(tip, &before_cell);
 
         // Keyboard-only activity for > FADE_END_SECS hides the cursor completely.
         h.frame(&[KeyCode::Down]);
@@ -4295,8 +4303,7 @@ mod tests {
         h.events(&[], &[(MouseEventKind::Moved, (14, 7))]);
         assert!(h.app.cursor_visible());
         let returned = &h.terminal.backend().buffer()[(14, 7)];
-        assert_eq!(returned.symbol(), "▀");
-        assert!(is_cheese_yellow(returned.fg));
+        assert!(is_cheese_tip(returned));
     }
 
     #[test]
@@ -4306,16 +4313,14 @@ mod tests {
         let mut tiny = Harness::new(1, 1);
         tiny.events(&[], &[(MouseEventKind::Moved, (0, 0))]);
         let cell = &tiny.terminal.backend().buffer()[(0, 0)];
-        assert_eq!(cell.symbol(), "▀");
-        assert!(is_cheese_yellow(cell.fg));
+        assert!(is_cheese_tip(cell));
 
         // All four edges and corners on 80×24.
         let mut h = Harness::new(80, 24);
         for &(x, y) in &[(0, 0), (79, 0), (0, 23), (79, 23), (78, 22)] {
             h.events(&[], &[(MouseEventKind::Moved, (x, y))]);
             let tip = &h.terminal.backend().buffer()[(x, y)];
-            assert_eq!(tip.symbol(), "▀", "missing tip at edge ({x},{y})");
-            assert!(is_cheese_yellow(tip.fg), "wrong tip colour at ({x},{y})");
+            assert!(is_cheese_tip(tip), "missing tip at edge ({x},{y})");
         }
     }
 
@@ -4340,7 +4345,7 @@ mod tests {
         h.events(&[], &[(MouseEventKind::Moved, (sx, sy))]);
         assert!(h.app.cursor_visible());
         assert_eq!(h.app.hits.at(sx, sy), Some(Target::Start));
-        assert!(is_cheese_yellow(h.terminal.backend().buffer()[(sx, sy)].fg));
+        assert!(is_cheese_tip(&h.terminal.backend().buffer()[(sx, sy)]));
 
         // Left-clicking at (sx, sy) activates START RUN -> Story!
         h.events(&[], &[(MouseEventKind::Down(MouseButton::Left), (sx, sy))]);
@@ -4499,12 +4504,7 @@ mod tests {
             }
             h.events(&[], &[(MouseEventKind::Moved, pos)]);
             let tip = &h.terminal.backend().buffer()[pos];
-            assert_eq!(tip.symbol(), "▀", "cursor missing on screen {name}");
-            assert!(
-                is_cheese_yellow(tip.fg),
-                "cursor hot spot not cheese-yellow on {name}: {:?}",
-                tip.fg
-            );
+            assert!(is_cheese_tip(tip), "cursor missing on screen {name}: {tip:?}");
         }
     }
 

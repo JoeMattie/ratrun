@@ -3,21 +3,19 @@
 //!
 //! # Geometry & Hot Spot
 //!
-//! The cursor occupies a `4 × 2` terminal-cell bounding box (`4 × 4` square
-//! half-block pixels using `▀` and `▄`), with the resting Swiss cheese wedge
-//! sitting cleanly in the top `4 × 3` half-block pixels (`4:3` landscape
-//! wedge — `1.5` cells tall, leaving the bottom half of row 1 transparent so
-//! text beneath peeks through). Its **hot spot** is `(0, 0)` — the top-left
-//! pixel of the reported mouse cell `(col, row)`, which is the sharp lit tip
-//! of the cheese wedge. Because the wedge expands right and slightly down from
-//! that tip:
+//! The cursor occupies a `6 × 2` terminal-cell bounding box (`6 × 4` square
+//! half-block pixels using `▀` and `▄`) holding a side-on cheese wedge: a flat
+//! base, a lit slope climbing to the right, and a tall rind at the back. Its
+//! **hot spot** is the wedge's pointed tip, the bottom-left pixel of the box,
+//! which sits in the lower half of the reported mouse cell `(col, row)`; the
+//! rest of the wedge rises up and to the right, into the row above.
 //!
-//! - On a 1-row button or menu label, the tip points cleanly at the target cell
-//!   without obscuring text above or to the left, and leaves the bottom half of
-//!   the row below uncovered.
+//! - On a 1-row button or menu label, the tip points at the target cell and
+//!   only the thin end of the wedge covers text; nothing below the pointer or
+//!   to its left is hidden.
 //! - On terminals that do not implement OSC 22 (`Apple Terminal`, `WezTerm`),
-//!   the right half and lower face of the wedge extend beside and below the OS
-//!   arrow pointer rather than disappearing behind it.
+//!   the body of the wedge sits above and beside the OS arrow pointer rather
+//!   than disappearing behind it.
 //! - On terminals that support OSC 22 (`Ghostty`, `Kitty`, `iTerm2`), the real
 //!   pointer switches to a thin `crosshair` centered on the tip while the cheese
 //!   is visible.
@@ -25,7 +23,7 @@
 //! # Zero-Allocation Contract
 //!
 //! [`draw`] and [`draw_with_depth`] operate purely on stack arrays and write at
-//! most 8 cells directly into ratatui's [`Buffer`]. No heap allocation happens
+//! most 12 cells directly into ratatui's [`Buffer`]. No heap allocation happens
 //! per frame.
 
 use ratatui::buffer::Buffer;
@@ -36,18 +34,18 @@ use crate::render::palette::{self, Rgb, CHEESE_RGB};
 use crate::term::ColorDepth;
 
 /// Cursor bounding box in terminal cells (width × height).
-/// The resting wedge uses `4 × 3` half-block pixels (`1.5` cells tall); the
-/// fourth half-row (`py = 3`) is used only for the pressed-down `Held` squash.
-pub const WIDTH: u16 = 4;
+/// The wedge's base is the bottom half-row (`py = 3`); the box is drawn one
+/// cell above the mouse row so that base lands in the mouse cell.
+pub const WIDTH: u16 = 6;
 pub const HEIGHT: u16 = 2;
 
 /// Half-block pixel height (`HEIGHT * 2`).
 const PIXEL_W: usize = WIDTH as usize;
 const PIXEL_H: usize = (HEIGHT as usize) * 2;
 
-/// Hot spot offset from the reported mouse cell `(col, row)`: the top-left tip
-/// pixel of the cheese wedge sits directly on `(col, row)`.
-pub const HOTSPOT: (u16, u16) = (0, 0);
+/// Hot spot as a cell offset inside the bounding box: the wedge tip is in the
+/// box's bottom-left cell, which is drawn on the reported mouse cell.
+pub const HOTSPOT: (u16, u16) = (0, HEIGHT - 1);
 
 /// Seconds of keyboard-only activity before the cursor starts fading.
 pub const FADE_START_SECS: f32 = 0.65;
@@ -268,16 +266,15 @@ pub struct CursorView {
     pub playing_steer: bool,
 }
 
-/// Build the `4 × 4` half-block pixel grid for the current cursor state.
+/// Build the `6 × 4` half-block pixel grid for the current cursor state.
 ///
-/// Layout coordinates: `grid[py][px]` where `px ∈ 0..4` (columns) and
+/// Layout coordinates: `grid[py][px]` where `px ∈ 0..6` (columns) and
 /// `py ∈ 0..4` (half-block rows; cell row 0 = `py 0,1`, cell row 1 = `py 2,3`).
-/// Hot spot is `grid[0][0]`.
+/// Hot spot is the tip at `grid[3][0]`.
 ///
-/// The resting wedge occupies a `4 × 3` landscape silhouette (`py = 0..=2`):
-/// sunlit top-left tip at `(0, 0)`, a single 4-side-enclosed Swiss hole at
-/// `(1, 1)` so it reads unmistakably even in 16-colour mode, warm cheddar
-/// shading across the cut face, and a solid 2-pixel back rind along `x = 3`.
+/// The wedge is a right triangle: sunlit tip at `(0, 3)`, a lit slope rising
+/// to the right, a Swiss hole at `(4, 2)` enclosed on all four sides so it
+/// reads even in 16-colour mode, and a solid 4-pixel back rind along `x = 5`.
 fn build_sprite(view: CursorView) -> [[Option<Rgb>; PIXEL_W]; PIXEL_H] {
     let gleam = |c: Rgb| -> Rgb {
         if view.hover {
@@ -305,54 +302,44 @@ fn build_sprite(view: CursorView) -> [[Option<Rgb>; PIXEL_W]; PIXEL_H] {
     // silhouette and hot-spot tip (0,0) rock-steady.
     let bob_up = view.playing_steer && ((view.bob_time * 1.3).fract() < 0.45);
 
+    let n = None;
     let mut grid: [[Option<Rgb>; PIXEL_W]; PIXEL_H] = if view.held {
-        // Pressed / squished wedge: compresses down 1 half-pixel onto a dark
-        // rim shadow while keeping a smooth diagonal slope from tip (0, 0).
+        // Pressed: the wedge squashes one pixel lower onto a dark rim shadow.
         [
-            [Some(tip), Some(hi), None, None],
-            [Some(body), Some(hole), Some(hi), None],
-            [Some(body_lo), Some(body), Some(body_lo), Some(rind)],
-            [Some(rim), Some(rim), Some(rim), Some(rind_dark)],
-        ]
-    } else if view.hover {
-        // Hovering over a clickable UI target: brighter gleaming cheese with a
-        // crisp mouse-nibble out of the upper-right slope (2, 0), sharpening
-        // the triangular wedge while leaving the back rind solid.
-        [
-            [Some(tip), Some(hi), None, None],
-            [Some(hi), Some(hole), Some(body), Some(rind)],
-            [Some(body), Some(body_lo), Some(body_lo), Some(rind_dark)],
-            [None, None, None, None],
+            [n; PIXEL_W],
+            [n, n, n, n, Some(hi), Some(rind)],
+            [n, Some(hi), Some(hi), Some(body), Some(hole), Some(rind)],
+            [Some(tip), Some(rim), Some(rim), Some(rim), Some(rim), Some(rind_dark)],
         ]
     } else if bob_up {
-        // Gentle play-mode bob: sunlit gleam glides along the ridge & face.
+        // Gentle play-mode bob: sunlit gleam glides up the slope.
         [
-            [Some(tip), Some(tip), Some(hi), None],
-            [Some(tip), Some(hole), Some(hi), Some(rind)],
-            [Some(hi), Some(body), Some(body), Some(rind)],
-            [None, None, None, None],
+            [n, n, n, n, Some(hi), Some(rind)],
+            [n, n, n, Some(tip), Some(tip), Some(rind)],
+            [n, Some(tip), Some(tip), Some(hi), Some(hole), Some(rind)],
+            [Some(tip), Some(hi), Some(body), Some(body), Some(body_lo), Some(rind_dark)],
         ]
     } else {
-        // Default 4×3 landscape Swiss cheese wedge pointing top-left.
+        // Default wedge (hover only brightens it via `gleam`): flat base, lit slope climbing from the tip at the
+        // hot spot to a four-pixel rind at the back.
         [
-            [Some(tip), Some(hi), Some(hi), None],
-            [Some(hi), Some(hole), Some(body), Some(rind)],
-            [Some(body), Some(body_lo), Some(body_lo), Some(rind_dark)],
-            [None, None, None, None],
+            [n, n, n, n, Some(tip), Some(rind)],
+            [n, n, n, Some(hi), Some(hi), Some(rind)],
+            [n, Some(hi), Some(hi), Some(body), Some(hole), Some(rind)],
+            [Some(tip), Some(body), Some(body), Some(body_lo), Some(body_lo), Some(rind_dark)],
         ]
     };
 
-    // Click feedback: quick nibble notch at `(2, 0)` with a detached butter-
-    // white crumb/sparkle popping off the upper-right at `(3, 0)`, keeping the
-    // back rind solid.
+    // Click feedback: a nibble out of the slope at `(3, 1)` and a butter-white
+    // crumb popping off above it at `(2, 0)`.
     if view.click_pulse > 0.05 {
         let sparkle = if view.click_pulse > 0.45 {
             CHEESE_SPARKLE
         } else {
             CHEESE_TIP
         };
-        grid[0][2] = None;
-        grid[0][3] = Some(sparkle);
+        grid[1][3] = None;
+        grid[0][2] = Some(sparkle);
     }
 
     grid
@@ -444,7 +431,11 @@ pub fn draw_with_depth(buf: &mut Buffer, area: Rect, view: CursorView, depth: Co
     let grid = build_sprite(view);
 
     for dy in 0..HEIGHT {
-        let Some(cy) = origin_y.checked_add(dy) else {
+        // The box hangs above the mouse cell: its bottom row is the mouse row.
+        let Some(cy) = origin_y
+            .checked_add(dy)
+            .and_then(|y| y.checked_sub(HOTSPOT.1))
+        else {
             continue;
         };
         if cy < area.y || cy >= bottom {
@@ -542,45 +533,40 @@ mod tests {
         }
     }
 
+    fn rgb(c: Rgb) -> Color {
+        Color::Rgb(c.0, c.1, c.2)
+    }
+
     #[test]
-    fn draws_at_reported_cell_with_top_left_hotspot() {
+    fn draws_wedge_with_tip_on_the_reported_cell() {
         let area = Rect::new(0, 0, 10, 6);
         let mut buf = Buffer::empty(area);
         draw_with_depth(&mut buf, area, view_at(3, 2), ColorDepth::Truecolor);
 
+        // The tip is the lower half of the mouse cell; the slope above is open.
         let tip = &buf[(3, 2)];
-        assert_eq!(tip.symbol(), "▀");
-        assert_eq!(tip.fg, Color::Rgb(CHEESE_TIP.0, CHEESE_TIP.1, CHEESE_TIP.2));
-        assert_eq!(tip.bg, Color::Rgb(CHEESE_HI.0, CHEESE_HI.1, CHEESE_HI.2));
+        assert_eq!(tip.symbol(), "▄");
+        assert_eq!(tip.fg, rgb(CHEESE_TIP));
+        assert_eq!(buf[(3, 1)].symbol(), " ", "nothing above the tip");
+        assert_eq!(buf[(5, 1)].symbol(), " ", "open air above the low slope");
 
-        // Enclosed Swiss hole sits inside cell (4, 2) bottom pixel; sunlit ridge on top.
-        let hole_cell = &buf[(4, 2)];
+        // Enclosed Swiss hole: top pixel of cell (7, 2), base beneath it.
+        let hole_cell = &buf[(7, 2)];
         assert_eq!(hole_cell.symbol(), "▀");
-        assert_eq!(
-            hole_cell.fg,
-            Color::Rgb(CHEESE_HI.0, CHEESE_HI.1, CHEESE_HI.2)
-        );
-        assert_eq!(
-            hole_cell.bg,
-            Color::Rgb(CHEESE_HOLE.0, CHEESE_HOLE.1, CHEESE_HOLE.2)
-        );
+        assert_eq!(hole_cell.fg, rgb(CHEESE_HOLE));
+        assert_eq!(hole_cell.bg, rgb(CHEESE_BODY_LO));
 
-        // Shaded back rind corner anchors bottom-right of the wedge at (6, 3) top pixel.
-        let rim_cell = &buf[(6, 3)];
-        assert_eq!(rim_cell.symbol(), "▀");
-        assert_eq!(
-            rim_cell.fg,
-            Color::Rgb(
-                CHEESE_RIND_DARK.0,
-                CHEESE_RIND_DARK.1,
-                CHEESE_RIND_DARK.2
-            )
-        );
+        // Back rind runs the full height of the box at x = 8.
+        assert_eq!(buf[(8, 1)].fg, rgb(CHEESE_RIND));
+        assert_eq!(buf[(8, 1)].bg, rgb(CHEESE_RIND));
+        assert_eq!(buf[(8, 2)].fg, rgb(CHEESE_RIND));
+        assert_eq!(buf[(8, 2)].bg, rgb(CHEESE_RIND_DARK));
 
-        // Cells outside the 4×2 footprint stay untouched.
+        // Cells outside the 6×2 footprint stay untouched.
         assert_eq!(buf[(2, 2)].symbol(), " ");
-        assert_eq!(buf[(7, 2)].symbol(), " ");
-        assert_eq!(buf[(3, 4)].symbol(), " ");
+        assert_eq!(buf[(9, 2)].symbol(), " ");
+        assert_eq!(buf[(3, 3)].symbol(), " ");
+        assert_eq!(buf[(8, 0)].symbol(), " ");
     }
 
     #[test]
@@ -589,11 +575,8 @@ mod tests {
         let one = Rect::new(0, 0, 1, 1);
         let mut buf = Buffer::empty(one);
         draw_with_depth(&mut buf, one, view_at(0, 0), ColorDepth::Truecolor);
-        assert_eq!(buf[(0, 0)].symbol(), "▀");
-        assert_eq!(
-            buf[(0, 0)].fg,
-            Color::Rgb(CHEESE_TIP.0, CHEESE_TIP.1, CHEESE_TIP.2)
-        );
+        assert_eq!(buf[(0, 0)].symbol(), "▄");
+        assert_eq!(buf[(0, 0)].fg, rgb(CHEESE_TIP));
 
         // 0×0 terminal: no-op.
         let zero = Rect::new(0, 0, 0, 0);
@@ -615,7 +598,7 @@ mod tests {
             let mut b = Buffer::empty(area);
             draw_with_depth(&mut b, area, view_at(x, y), ColorDepth::Truecolor);
             if x < area.width && y < area.height {
-                assert_eq!(b[(x, y)].symbol(), "▀", "tip missing at ({x},{y})");
+                assert_eq!(b[(x, y)].symbol(), "▄", "tip missing at ({x},{y})");
             }
         }
     }
@@ -626,23 +609,19 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let floor_top = Color::Rgb(14, 22, 20);
         let floor_bot = Color::Rgb(40, 70, 64);
-        // Cell (5, 1) is the upper-right of the 4×2 cursor at (2, 1):
-        // top pixel is transparent (None), bottom pixel is CHEESE_RIND.
-        buf[(5, 1)].set_symbol("▀");
-        buf[(5, 1)].set_fg(floor_top);
-        buf[(5, 1)].set_bg(floor_bot);
+        // The tip cell: top pixel transparent, bottom pixel is the tip.
+        buf[(2, 1)].set_symbol("▀");
+        buf[(2, 1)].set_fg(floor_top);
+        buf[(2, 1)].set_bg(floor_bot);
 
         draw_with_depth(&mut buf, area, view_at(2, 1), ColorDepth::Truecolor);
 
-        assert_eq!(buf[(5, 1)].symbol(), "▀");
+        assert_eq!(buf[(2, 1)].symbol(), "▀");
         assert_eq!(
-            buf[(5, 1)].fg, floor_top,
+            buf[(2, 1)].fg, floor_top,
             "transparent top half must preserve the playfield pixel beneath"
         );
-        assert_eq!(
-            buf[(5, 1)].bg,
-            Color::Rgb(CHEESE_RIND.0, CHEESE_RIND.1, CHEESE_RIND.2)
-        );
+        assert_eq!(buf[(2, 1)].bg, rgb(CHEESE_TIP));
     }
 
     #[test]
@@ -656,23 +635,24 @@ mod tests {
 
         draw_with_depth(&mut buf, area, view_at(1, 1), ColorDepth::Truecolor);
         assert_eq!(buf[(1, 1)].modifier, Modifier::empty());
-        assert_eq!(buf[(1, 1)].symbol(), "▀");
+        assert_eq!(buf[(1, 1)].symbol(), "▄");
     }
 
     #[test]
     fn degrades_to_yellow_in_256_and_16_colour_and_survives_safe_glyphs() {
         let area = Rect::new(0, 0, 8, 4);
 
-        // 16-colour mode: tip and cut face read as LightYellow, enclosed hole
-        // and back rind read as Yellow (ochre).
+        // 16-colour mode: tip, slope and base read as LightYellow; the
+        // enclosed hole and back rind read as Yellow (ochre).
         let mut b16 = Buffer::empty(area);
         draw_with_depth(&mut b16, area, view_at(1, 1), ColorDepth::Ansi16);
         assert_eq!(b16[(1, 1)].fg, Color::LightYellow, "tip should be yellow");
-        assert_eq!(b16[(1, 1)].bg, Color::LightYellow, "hi should be yellow");
-        assert_eq!(b16[(2, 1)].bg, Color::Yellow, "enclosed hole should read as ochre");
-        assert_eq!(b16[(3, 1)].bg, Color::LightYellow, "body should be yellow");
-        assert_eq!(b16[(4, 1)].fg, Color::Yellow, "rind should be ochre yellow");
-        assert_eq!(b16[(4, 2)].fg, Color::Yellow, "lower rind stays solid ochre");
+        assert_eq!(b16[(2, 1)].fg, Color::LightYellow, "slope should be yellow");
+        assert_eq!(b16[(2, 1)].bg, Color::LightYellow, "base should be yellow");
+        assert_eq!(b16[(5, 1)].fg, Color::Yellow, "enclosed hole should read as ochre");
+        assert_eq!(b16[(5, 1)].bg, Color::LightYellow, "base under the hole is yellow");
+        assert_eq!(b16[(6, 1)].fg, Color::Yellow, "rind should be ochre yellow");
+        assert_eq!(b16[(6, 0)].fg, Color::Yellow, "upper rind stays solid ochre");
 
         // Hover state in 16-colour mode must also remain yellow (never wash out to Gray/White).
         let mut h16 = Buffer::empty(area);
@@ -680,38 +660,33 @@ mod tests {
         hv.hover = true;
         draw_with_depth(&mut h16, area, hv, ColorDepth::Ansi16);
         assert_eq!(h16[(1, 1)].fg, Color::LightYellow, "hover tip stays yellow");
-        assert_eq!(h16[(2, 1)].fg, Color::LightYellow, "hover hi stays yellow");
-        assert_eq!(h16[(2, 1)].bg, Color::Yellow, "hover hole stays ochre");
-        // Hover cell (3, 1) has top nibbled (None) and bottom = body, so over a
-        // blank cell it draws `▄` with fg = LightYellow.
-        assert_eq!(h16[(3, 1)].symbol(), "▄");
-        assert_eq!(h16[(3, 1)].fg, Color::LightYellow, "hover body stays yellow");
+        assert_eq!(h16[(5, 1)].fg, Color::Yellow, "hover hole stays ochre");
+        // Hover keeps the full silhouette: slope pixel (3, 1) is still there.
+        assert_eq!(h16[(4, 0)].symbol(), "▄");
+        assert_eq!(h16[(4, 0)].fg, Color::LightYellow, "hover slope stays yellow");
 
         // 256-colour mode: all painted colours are Indexed, never Rgb.
         let mut b256 = Buffer::empty(area);
         draw_with_depth(&mut b256, area, view_at(1, 1), ColorDepth::Ansi256);
-        for y in 1..=2 {
-            for x in 1..=4 {
-                assert!(
-                    matches!(b256[(x, y)].fg, Color::Indexed(_)),
-                    "256-colour fg must be Indexed at ({x},{y})"
-                );
-            }
+        for (x, y) in (1..=6).map(|x| (x, 1)).chain((4..=6).map(|x| (x, 0))) {
+            assert!(
+                matches!(b256[(x, y)].fg, Color::Indexed(_)),
+                "256-colour fg must be Indexed at ({x},{y})"
+            );
         }
 
         // Safe glyph set keeps `▀` and `▄` intact.
         let mut bsafe = Buffer::empty(area);
         draw_with_depth(&mut bsafe, area, view_at(1, 1), ColorDepth::Truecolor);
-        let before: Vec<String> = (1..=2)
-            .flat_map(|y| (1..=4).map(move |x| (x, y)))
-            .map(|(x, y)| bsafe[(x, y)].symbol().to_string())
-            .collect();
+        let cells = |b: &Buffer| -> Vec<String> {
+            (0..=1)
+                .flat_map(|y| (1..=6).map(move |x| (x, y)))
+                .map(|(x, y)| b[(x, y)].symbol().to_string())
+                .collect()
+        };
+        let before = cells(&bsafe);
         sanitize_with(&mut bsafe, GlyphSet::Safe, ColorDepth::Truecolor);
-        let after: Vec<String> = (1..=2)
-            .flat_map(|y| (1..=4).map(move |x| (x, y)))
-            .map(|(x, y)| bsafe[(x, y)].symbol().to_string())
-            .collect();
-        assert_eq!(before, after, "cursor glyphs must belong to the safe set");
+        assert_eq!(before, cells(&bsafe), "cursor glyphs must belong to the safe set");
     }
 
     #[test]
