@@ -1478,6 +1478,12 @@ impl App {
             self.screen = Screen::Paused;
             return;
         }
+        // The full map is a pause: the world holds still while it is open, so
+        // reading the route is never paid for in health. Tab, Esc or a click
+        // on the map closes it and play resumes on the next frame.
+        if self.map_open {
+            return;
+        }
         let move_dir = self.resolve_move_dir();
         // Ctrl dashes and Space fires the charged active weapons on a terminal
         // that reports a lone Ctrl press; on one that cannot, Space keeps doing
@@ -3811,6 +3817,26 @@ mod tests {
     /// Render a real frame and dump it as a PPM (each cell → 1×2 pixels:
     /// fg on top, bg below). Gated behind RATRUN_DUMP (value selects the
     /// screen: play|story|levelup|treasure|chest) so it's a manual screenshot tool.
+    /// Tab's full map pauses the world; closing it resumes play.
+    #[test]
+    fn the_full_map_pauses_the_world() {
+        let mut hh = Harness::new(80, 24);
+        hh.enter_playing();
+        hh.frame(&[]);
+        hh.frame(&[KeyCode::Tab]);
+        assert!(hh.app.map_open);
+        let before = hh.app.world.as_ref().unwrap().elapsed;
+        for _ in 0..30 {
+            hh.frame(&[KeyCode::Right]);
+        }
+        let held = hh.app.world.as_ref().unwrap().elapsed;
+        assert_eq!(held, before, "the world advanced behind the open map");
+        hh.frame(&[KeyCode::Tab]);
+        assert!(!hh.app.map_open);
+        hh.frame(&[]);
+        assert!(hh.app.world.as_ref().unwrap().elapsed > before, "play did not resume");
+    }
+
     #[test]
     fn dump_frame_ppm() {
         let target = match std::env::var("RATRUN_DUMP") {
@@ -6031,18 +6057,6 @@ mod tests {
         // The next Esc is the old pause binding again.
         hh.frame(&[KeyCode::Esc]);
         assert_eq!(hh.app.screen.name_for_test(), "Paused");
-    }
-
-    #[test]
-    fn the_simulation_keeps_running_while_the_map_is_open() {
-        let mut hh = Harness::new(120, 40);
-        hh.enter_playing();
-        hh.frame(&[KeyCode::Tab]);
-        let t0 = hh.app.world.as_ref().unwrap().elapsed;
-        hh.frame(&[]);
-        hh.frame(&[]);
-        let t1 = hh.app.world.as_ref().unwrap().elapsed;
-        assert!(t1 > t0, "the run froze while the map was open");
     }
 
     #[test]
