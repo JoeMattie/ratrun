@@ -279,7 +279,14 @@ pub fn next_loadout(previous: &Loadout, chosen: &[Keepable]) -> Result<Loadout, 
         }
     }
 
-    Ok(Loadout::from_parts(weapons, passives))
+    let mut carried = Loadout::from_parts(weapons, passives);
+    // Gene splices sit **outside the racks**: they ride along whatever the
+    // keep-three choice was, and last until the run ends (`WAVE3_DESIGN` §6).
+    if !previous.splices.is_empty() {
+        carried.splices = previous.splices.clone();
+        carried.rebuild_stats();
+    }
+    Ok(carried)
 }
 
 // ---- Cumulative counters -------------------------------------------------

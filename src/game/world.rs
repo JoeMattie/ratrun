@@ -88,6 +88,7 @@ use super::nav::{FlowField, NavBudget};
 use super::particle::damage_number::{DamageNumbers, DEFAULT_CAP as DAMAGE_NUMBER_CAP};
 use super::particle::Particles;
 use super::player::Player;
+use super::shop::ShopBook;
 use super::smoke::{SmokeLayer, SmokeScene};
 use super::weapon::WeaponKind;
 use super::art_walls::{Cardinal, WallKind};
@@ -130,6 +131,12 @@ pub struct World {
     pub gold: u32,
     pub pending_chests: u32,
     pub pending_shop: bool,
+    /// Which shop hole raised `pending_shop` (`LevelObjects::shop_holes`
+    /// index); the App opens this hole's shelf.
+    pub pending_shop_hole: usize,
+    /// Every shop hole's shelf and service state on this level (inventory
+    /// survives a revisit). Between ticks only; the simulation never reads it.
+    pub shop: ShopBook,
     pub shake: f32,
     pub shake_ofs: Vec2,
     pub pending_levelups: u32,
@@ -278,6 +285,9 @@ impl World {
         // squeeze + blocked latches, cache claims and the HUD maze feed);
         // `gates::GateRuntime::sync` sizes it from `level.objects`.
         ecs.insert_resource(super::ecs::systems::gates::GateRuntime::default());
+        // Mouse-hole shop thresholds (the touch edge, the re-arm and the exit
+        // grace). Permanent scratch like `GateRuntime`.
+        ecs.insert_resource(super::ecs::systems::shop::ShopRuntime::default());
 
         World {
             ecs,
@@ -300,6 +310,8 @@ impl World {
             gold: carried_totals.gold,
             pending_chests: 0,
             pending_shop: false,
+            pending_shop_hole: 0,
+            shop: ShopBook::default(),
             shake: 0.0,
             shake_ofs: Vec2::ZERO,
             pending_levelups: 0,
@@ -370,6 +382,69 @@ impl World {
         };
         self.gold = balance;
         true
+    }
+
+    /// The shop threshold scratch (permanent ECS resource; used between ticks
+    /// by the App and the bot to grant the 0.8 s exit grace).
+    pub fn shop_runtime(&self) -> &super::ecs::systems::shop::ShopRuntime {
+        self.ecs
+            .get_resource::<super::ecs::systems::shop::ShopRuntime>()
+            .expect("ShopRuntime is inserted in World::new")
+    }
+
+    /// The same, mutably (between ticks only).
+    pub fn shop_runtime_mut(&mut self) -> &mut super::ecs::systems::shop::ShopRuntime {
+        self.ecs
+            .get_resource_mut::<super::ecs::systems::shop::ShopRuntime>()
+            .expect("ShopRuntime is inserted in World::new")
+            .into_inner()
+    }
+
+    /// Where the bot should walk to do some shopping, if buying would do
+    /// something useful right now (`None` otherwise).
+    ///
+    /// This is a **query**: it peeks at the shelf a hole *would* stock
+    /// (`ShopBook::peek`, a pure function of the floor seed and the hole index)
+    /// without opening it, so the bot never pays a shelf into existence, and it
+    /// never draws rng. The candidate is the nearest hole with an affordable,
+    /// useful item: a splice while a socket is free, or a Stitch when the rat
+    /// is hurt.
+    pub fn shop_goal_point(&self) -> Option<Vec2> {
+        use crate::game::shop::{self, ShopBook, STITCH_PRICE};
+        let splices = &self.player.loadout.splices;
+        let sockets_free = splices.len() < shop::MAX_SPLICES;
+        let hurt = self.player.hp < self.player.max_hp() * 0.65;
+        let mut best: Option<(f32, Vec2)> = None;
+        for (index, hole) in self.level.objects.shop_holes.iter().enumerate() {
+            let live = self.shop.get(index);
+            let shelf = match live {
+                Some(stock) => {
+                    let mut shelf = [None; shop::STOCK_SIZE];
+                    for (slot, value) in shelf.iter_mut().enumerate() {
+                        if !stock.sold.get(slot).copied().unwrap_or(false) {
+                            *value = stock.slot(slot);
+                        }
+                    }
+                    shelf
+                }
+                None => ShopBook::peek(self.level.seed, index),
+            };
+            let splice_wanted = sockets_free
+                && shelf.iter().flatten().any(|kind| {
+                    !splices.contains(kind) && self.gold >= kind.price()
+                });
+            let stitch_wanted = hurt
+                && live.is_none_or(|stock| !stock.stitched)
+                && self.gold >= STITCH_PRICE;
+            if !splice_wanted && !stitch_wanted {
+                continue;
+            }
+            let d = self.player.pos.dist(hole.face());
+            if best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, hole.face()));
+            }
+        }
+        best.map(|(_, face)| face)
     }
 
     /// Resolve one queued chest, including any gold granted by the reward.
@@ -741,6 +816,7 @@ impl World {
             gold: self.gold,
             pending_chests: self.pending_chests,
             pending_shop: self.pending_shop,
+            pending_shop_hole: self.pending_shop_hole,
             pending_levelups: self.pending_levelups,
             game_over: self.game_over,
             won: self.won,
@@ -819,6 +895,7 @@ impl World {
         self.gold = counters.gold;
         self.pending_chests = counters.pending_chests;
         self.pending_shop = counters.pending_shop;
+        self.pending_shop_hole = counters.pending_shop_hole;
         self.pending_levelups = counters.pending_levelups;
         self.game_over = counters.game_over;
         self.won = counters.won;
@@ -1514,6 +1591,11 @@ impl World {
                 art_traps::draw_rat_hole_ground(pb, &view, cam, accent);
             }
         }
+        // The mouse-hole shops: only the foreground pass draws them, over the
+        // wall body, so the bent spoon and the whisker scratches read.
+        if foreground {
+            self.draw_shop_holes(pb, cam);
+        }
         for reward in &objects.rewards {
             if !on_screen(self.w2s(reward.pos, cam), 22.0, vp) {
                 continue;
@@ -1525,6 +1607,17 @@ impl World {
             } else {
                 art_traps::draw_maze_reward_ground(pb, &view, cam, accent);
             }
+        }
+    }
+
+    /// The mouse-hole shops' markers (placeholder art, `art_walls`): a wall,
+    /// the opening, the bent spoon and the three whisker scratches.
+    fn draw_shop_holes(&self, pb: &mut PixelBuffer, cam: Vec2) {
+        for hole in &self.level.objects.shop_holes {
+            if !on_screen(self.w2s(hole.pos, cam), 24.0, self.viewport) {
+                continue;
+            }
+            art_walls::draw_shop_hole(pb, hole, cam, self.elapsed);
         }
     }
 

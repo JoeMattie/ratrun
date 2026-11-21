@@ -14,6 +14,7 @@ pub mod gates;
 pub mod loot;
 pub mod player;
 pub mod projectiles;
+pub mod shop;
 pub mod spawn;
 pub mod traps;
 pub mod weapons;

@@ -111,7 +111,7 @@ fn reap_dead(
     );
     dead.sort_unstable_by_key(|&(id, _)| id);
 
-    for &(_, entity) in dead.iter() {
+    for &(id, entity) in dead.iter() {
         let Ok((_, _, e)) = enemies.get(entity) else {
             continue;
         };
@@ -160,16 +160,12 @@ fn reap_dead(
             };
             commands.spawn((pickup, next_id.take()));
         }
-        // Use the opposite end of the pickup roll for gold. XP value gives
-        // rarer enemy kinds a better chance with no additional RNG draw.
-        let gold = if e.kind == EnemyKind::Boss {
-            20
-        } else if e.elite {
-            5
-        } else {
-            let chance = (1 + e.kind.xp().min(11)) as f32 * 0.01;
-            u32::from(loot_roll >= 1.0 - chance)
-        };
+        // Gold: the design's chance x value table (`shop::gold_for`), rolled
+        // from a **gold-only** seeded stream keyed by the floor seed and the
+        // victim's `SpawnId` — never from the simulation's rng, so adding gold
+        // cannot shift the pickup roll above (one coin per eligible kill,
+        // carrying its whole value).
+        let gold = crate::game::shop::gold_for(level.seed, id, e.kind, e.elite);
         if gold > 0 {
             commands.spawn((Gold::new(e.pos, gold), next_id.take()));
         }
@@ -315,6 +311,10 @@ pub fn gems_system(
         }
     }
     if gained > 0 {
+        // Blackboard Belly pays +25% gem XP; the fraction is banked so a 1 XP
+        // gem still pays its share in the end.
+        let xp_mult = crate::game::shop::gem_xp_mult(&player.loadout.splices);
+        let gained = crate::game::shop::xp_with_bank(xp_mult, &mut player.xp_bank, gained);
         let p = player.pos;
         // Neon hook: replaces the 4-particle inline gem burst.
         vfx::emit_gem_collect(&mut particles, &mut rng.0, p, gained);
@@ -343,6 +343,9 @@ pub fn treasure_system(
     let dt = input.dt;
     let ppos = player.pos;
     let magnet = player.loadout.stats.magnet;
+    // Gene splices: Hoard Gland pays +50% per coin. With no splice the
+    // multiplier is exactly 1.0 and every value passes through unchanged.
+    let coin_mult = crate::game::shop::coin_mult(&player.loadout.splices);
     let coin_radius = PLAYER_RADIUS + 3.0;
     let chest_radius = PLAYER_RADIUS + 4.0;
     let mut gained = 0u32;
@@ -366,7 +369,7 @@ pub fn treasure_system(
             }
             coin.pos += vel * dt;
             if coin.pos.dist_sq(ppos) < coin_radius * coin_radius {
-                gained = gained.saturating_add(coin.value);
+                gained = gained.saturating_add(crate::game::shop::scaled(coin.value, coin_mult));
                 commands.entity(entity).despawn();
             }
         } else if let Ok((_, _, chest)) = chests.get(entity) {
@@ -435,7 +438,9 @@ pub fn pickups_system(
         last_pickups.0.push(k);
         match k {
             PickupKind::Heal => {
-                let h = player.max_hp() * 0.35;
+                let h = player.max_hp()
+                    * 0.35
+                    * crate::game::shop::heal_mult(&player.loadout.splices);
                 player.heal(h);
                 // Neon hooks: heal burst + its own sting (was `Sfx::Pickup`).
                 let p = player.pos;
@@ -1084,7 +1089,8 @@ mod tests {
         let mut gold = w.ecs.query::<(&SpawnId, &Gold)>();
         let drops: Vec<_> = gold.iter(&w.ecs).sort_by_key::<&SpawnId, _>(|id| id.0)
             .map(|(_, coin)| coin.value).collect();
-        assert_eq!(drops, [5, 20]);
+        // Elite 5, full boss 30 (`WAVE3_DESIGN` §6's table), in SpawnId order.
+        assert_eq!(drops, [crate::game::shop::ELITE_GOLD, crate::game::shop::BOSS_GOLD]);
     }
 
     #[test]

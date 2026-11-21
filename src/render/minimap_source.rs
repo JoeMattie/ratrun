@@ -173,6 +173,21 @@ impl MinimapFrame {
             });
         }
 
+        // Mouse-hole shops: the spoon is revealed on sight and then remembered
+        // (the fog's `seen` bit is sticky, so a visited hole keeps its marker
+        // for the rest of the run and a hole nobody has walked past stays
+        // hidden).
+        for hole in &world.level.objects.shop_holes {
+            let (hx, hy) = cell_of(hole.pos);
+            if fog.is_seen(hx, hy) {
+                self.markers.push(MapMarker {
+                    cx: hx as f32,
+                    cy: hy as f32,
+                    kind: MarkerKind::Shop,
+                });
+            }
+        }
+
         // Mark chests first so a crowded map always has room for them.
         let mut pickups = 0;
         for entity in world.ecs.iter_entities() {
@@ -846,4 +861,42 @@ mod tests {
             assert!(expanded_rect(game).is_empty());
         }
     }
+
+    /// The shop's spoon marker appears only once the hole has been seen, and is
+    /// remembered afterwards (the fog's `seen` bit is sticky).
+    #[test]
+    fn the_shop_spoon_is_revealed_on_sight_and_then_remembered() {
+        use crate::game::world::World;
+        let mut world = World::new(Theme::Sewer, 7);
+        let hole = world.level.objects.shop_holes[0];
+        let (hx, hy) = cell_of(hole.pos);
+        let mut frame = MinimapFrame::new();
+
+        // Unexplored: no spoon anywhere on the map.
+        frame.refresh(&world);
+        assert!(
+            !frame.markers().iter().any(|m| m.kind == MarkerKind::Shop),
+            "an unexplored hole is not on the map"
+        );
+
+        // Seen once (the rat walks up to it): the spoon is there.
+        world.fog.reveal_cell(&world.level, (hx, hy));
+        frame.refresh(&world);
+        let spoon = frame
+            .markers()
+            .iter()
+            .find(|m| m.kind == MarkerKind::Shop)
+            .expect("a seen hole keeps its spoon");
+        assert_eq!((spoon.cx, spoon.cy), (hx as f32, hy as f32));
+
+        // Walk away: the fog's live view moves on, the marker is remembered.
+        world.player.pos = Vec2::new(32.0, 32.0);
+        world.fog.update_from(&world.level, world.player.pos);
+        frame.refresh(&world);
+        assert!(
+            frame.markers().iter().any(|m| m.kind == MarkerKind::Shop),
+            "a visited shop stays on the map"
+        );
+    }
+
 }

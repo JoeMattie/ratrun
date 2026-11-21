@@ -210,6 +210,15 @@ pub struct Loadout {
     /// bit-for-bit when every passive is kept.
     pub passives: Vec<(PassiveKind, u32)>,
     pub stats: Stats,
+    /// Owned **gene splices**, in purchase order (`game::shop`).
+    ///
+    /// Permanent for the run and on neither rack: they are not weapons and not
+    /// passive stacks, so they never count against [`MAX_WEAPONS`] /
+    /// [`MAX_PASSIVES`] and the keep-three screen cannot see them. They ride
+    /// along with the loadout between campaign levels
+    /// (`campaign::next_loadout`), which is what makes them last until the run
+    /// ends. [`Loadout::rebuild_stats`] applies them **after** the passives.
+    pub splices: Vec<super::shop::SpliceKind>,
 }
 
 /// `Weapon` lives in `game::weapon` and does not derive `Debug`; this prints
@@ -245,6 +254,7 @@ impl Loadout {
             weapons: vec![Weapon::new(start)],
             passives: Vec::new(),
             stats: Stats::default(),
+            splices: Vec::new(),
         }
     }
 
@@ -290,7 +300,25 @@ impl Loadout {
             weapons: kept_weapons,
             passives: kept_passives,
             stats,
+            splices: Vec::new(),
         }
+    }
+
+    /// Rebuild [`Self::stats`] from scratch: every passive stack in acquisition
+    /// order, then every owned gene splice on top (the design's "apply splice
+    /// multipliers after passive stats"), with the shop's floors.
+    ///
+    /// This is the single place a splice (or a Molt) changes the numbers, so a
+    /// carried loadout, a purchased splice and a level-up can never disagree.
+    pub fn rebuild_stats(&mut self) {
+        let mut stats = Stats::default();
+        for &(kind, stacks) in &self.passives {
+            for _ in 0..stacks {
+                apply_passive_stack(&mut stats, kind);
+            }
+        }
+        super::shop::apply_splices(&mut stats, &self.splices);
+        self.stats = stats;
     }
 
     #[allow(dead_code)] // Used by the upcoming evolution chest reward.
@@ -446,7 +474,13 @@ impl Loadout {
                     return 0.0;
                 }
                 self.bump_stack(*p);
-                apply_passive_stack(&mut self.stats, *p)
+                let heal = apply_passive_stack(&mut self.stats, *p);
+                if !self.splices.is_empty() {
+                    // The splice multipliers go *after* the passives, so a
+                    // passive picked while spliced has to replay them.
+                    self.rebuild_stats();
+                }
+                heal
             }
         }
     }

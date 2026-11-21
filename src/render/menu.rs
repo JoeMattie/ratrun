@@ -64,6 +64,14 @@ pub enum Target {
     OptionsBar(usize),
     /// The options screen's Back row: returns to wherever the player came from.
     OptionsBack,
+    /// The gene-splice shop: the shelf row at this index (`0..shop::ROW_COUNT`).
+    ShopRow(usize),
+    /// The shop's Molt two-step list row at this index.
+    ShopMoltRow(usize),
+    /// The shop's exit row (registered separately for a whole-row click).
+    ShopLeave,
+    /// The shop's free Molt cancellation.
+    ShopCancel,
 }
 
 /// How many interactive rectangles one screen can register. The campaign
@@ -709,12 +717,6 @@ pub fn draw_chest(f: &mut Frame, area: Rect, reward: ChestReward, hits: &mut Hit
     };
     center(f, r, 2, Span::styled(text, heavy(COAT)));
     controls(f, band(r, 5, 1), hits, &[(" Enter / Continue ", Some(Target::Continue))]);
-}
-
-pub fn draw_shop(f: &mut Frame, area: Rect, gold: u32) {
-    let r = panel(f, centered_rect(42, 8, area), " SHOP ", TRAIL_GOLD);
-    center(f, r, 2, Span::styled(format!("{gold} gold"), heavy(TRAIL_GOLD)));
-    center(f, r, 5, label("Esc / Enter to leave", MUTED));
 }
 
 #[allow(clippy::too_many_arguments)]

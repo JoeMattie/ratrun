@@ -539,6 +539,12 @@ impl AutoRun {
             self.take_upgrade();
         }
         Bot::claim_chests(&mut self.world);
+        // The mouse-hole shelf takes over the frame the threshold fires: buy
+        // what is worth buying and leave, so a self-playing run never stalls on
+        // a menu it cannot see.
+        if self.world.pending_shop && !self.world.finished() {
+            self.bot.shop_visit(&mut self.world);
+        }
         if self.world.game_over {
             self.finish_death();
             return;
@@ -1319,6 +1325,32 @@ mod tests {
         assert_eq!(run.world().player.loadout.weapons[0].level, 3);
         run.step(1.0 / 60.0);
         assert_eq!(run.ticks, 2);
+    }
+
+    /// The self-playing run (and therefore the `--ai` wall) gets through the
+    /// shop screen in the frame it opens: it buys what is worth buying and
+    /// leaves, so it never sits on a menu nobody can click.
+    #[test]
+    fn wave3_autoplay_visits_the_shop_and_gets_through_it() {
+        let mut run = AutoRun::new(9, AutoOpts::practice(0, Skill::Expert));
+        {
+            let w = run.world_mut();
+            w.gold = 300;
+            w.player.hp = w.player.max_hp() * 0.4;
+            w.pending_shop = true;
+            w.pending_shop_hole = 0;
+        }
+        run.step(1.0 / 60.0);
+        let w = run.world();
+        assert!(!w.pending_shop, "the bot left the shelf in the same step");
+        assert!(
+            !w.player.loadout.splices.is_empty() || w.player.hp > w.player.max_hp() * 0.4,
+            "it bought either a splice or a stitch"
+        );
+        // And the run carries on simulating.
+        let elapsed = run.world().elapsed;
+        run.step(1.0 / 60.0);
+        assert!(run.world().elapsed > elapsed);
     }
 
     #[test]

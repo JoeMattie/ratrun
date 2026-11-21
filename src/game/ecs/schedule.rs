@@ -77,7 +77,8 @@ use bevy_ecs::prelude::*;
 
 use super::resources::TickInput;
 use super::systems::{
-    boss, combat, enemy_move, fog, fx, gates, loot, player, projectiles, spawn, traps, weapons,
+    boss, combat, enemy_move, fog, fx, gates, loot, player, projectiles, shop, spawn, traps,
+    weapons,
 };
 
 /// Legacy `self.damage_numbers.update(dt)` (neon merge, `World::update`).
@@ -147,6 +148,10 @@ pub fn build_tick_schedule() -> Schedule {
             gates::passage_system,
             gates::cache_system,
             gates::door_system,
+            // 5b: the mouse-hole shops' thresholds. Same slot and the same
+            // reasons as the gates: it reads the rat's post-move position and
+            // draws no rng (it only raises the pending flag + the hole index).
+            shop::threshold_system,
         )
             .chain()
             .after(fog::reveal_system)

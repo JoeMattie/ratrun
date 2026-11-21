@@ -74,7 +74,7 @@ use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette::{self, Rgb};
 
-use super::level::{Rectf, Theme};
+use super::level::{Rectf, ShopHole, Theme};
 
 // ---- Public Geometry & Collision Constants ---------------------------------
 
@@ -898,6 +898,83 @@ fn blend_px(pb: &mut PixelBuffer, x: i32, y: i32, c: Rgb, alpha: f32) {
 ///
 /// Call right after `art_floor::draw_floor` and floor stains, **before**
 /// entities, traps, pickups, and [`draw_wall_cell`]. Zero heap allocation.
+/// **The mouse-hole shop's marker**: the opening, the bent spoon over it and
+/// the three white whisker scratches on the floor in front.
+///
+/// Placeholder art (Neon redraws it in wave 2): the read it must keep is
+/// exactly the design's — a dark arch in the masonry with a *bent spoon*
+/// hanging over it, three pale scratches on the fork that lead the eye to it,
+/// and a slow pewter glint so it is not mistaken for a rat-hole. Drawn on the
+/// foreground object layer, over the wall body.
+pub fn draw_shop_hole(pb: &mut PixelBuffer, hole: &ShopHole, cam: Vec2, t: f32) {
+    let cx = hole.pos.x - cam.x;
+    let cy = hole.pos.y - cam.y;
+    if !cx.is_finite() || !cy.is_finite() || cx < -40.0 || cy < -40.0 {
+        return;
+    }
+    let (x, y) = (cx.round() as i32, cy.round() as i32);
+    let (fx, fy) = (hole.facing.x.round() as i32, hole.facing.y.round() as i32);
+    // Horizontal walls (the face looks north/south) sit their opening on the
+    // wall's front face; vertical ones keep it on the tile's centre line.
+    let face_dx = fx;
+    let face_dy = fy;
+    let ox = x + face_dx * 5;
+    let oy = y + face_dy * 5 - 1;
+
+    const MOUTH: Rgb = (10, 9, 12);
+    const MOUTH_RIM: Rgb = (58, 52, 60);
+    const SPOON: Rgb = (176, 180, 190);
+    const SPOON_HI: Rgb = (238, 241, 248);
+    const SPOON_DARK: Rgb = (104, 108, 120);
+    const SCRATCH: Rgb = (236, 240, 244);
+
+    // The bent opening: a 9 x 7 arch of black, an inner shadow and a gnawed rim.
+    for dy in -3i32..=3 {
+        let half = if dy.abs() <= 1 { 4 } else if dy.abs() == 2 { 3 } else { 2 };
+        for dx in -half..=half {
+            pb.plot(ox + dx, oy + dy, MOUTH);
+        }
+        pb.plot(ox - half - 1, oy + dy, MOUTH_RIM);
+        pb.plot(ox + half + 1, oy + dy, MOUTH_RIM);
+    }
+    for dx in -2i32..=2 {
+        pb.plot(ox + dx, oy + 4, MOUTH_RIM);
+        pb.plot(ox + dx, oy - 4, MOUTH_RIM);
+    }
+
+    // The bent spoon hanging over the opening: handle, elbow, bowl.
+    let glint = 0.5 + 0.5 * (t * 1.7).sin();
+    let glint_col = palette::mix(SPOON, SPOON_HI, 0.25 + 0.55 * glint);
+    let top = oy - 7;
+    for i in 0..6 {
+        pb.plot(ox + 3, top + i, if i == 0 { SPOON_HI } else { SPOON });
+    }
+    // The kink where it was bent over the lip of the wall.
+    pb.plot(ox + 2, top + 5, SPOON);
+    pb.plot(ox + 1, top + 6, SPOON_DARK);
+    // The bowl: a 3 px pewter disc under the elbow.
+    pb.filled_circle(ox, top + 8, 2, SPOON);
+    pb.plot(ox, top + 8, glint_col);
+    pb.plot(ox - 1, top + 9, SPOON_DARK);
+
+    // Three whisker scratches on the floor at the fork, all pointing at the
+    // opening: the shop's "you can see it from the junction" tell.
+    let (sx, sy) = (ox + face_dx * 4, oy + face_dy * 5 + 2);
+    let side = (face_dy, -face_dx);
+    for (i, spread) in [-3, 0, 3].iter().enumerate() {
+        let bx = sx + side.0 * spread - face_dx;
+        let by = sy + side.1 * spread - face_dy;
+        let len = 3 + i as i32 % 2;
+        pb.line(
+            bx,
+            by,
+            bx + face_dx * len + side.0 * 2,
+            by + face_dy * len + side.1 * 2,
+            SCRATCH,
+        );
+    }
+}
+
 pub fn draw_wall_ground(pb: &mut PixelBuffer, view: &WallCellView, cam: Vec2, accent: Rgb) {
     if matches!(view.kind, WallKind::Solid)
         && view.mask.has(NeighborMask::S)

@@ -91,7 +91,9 @@ use rand::RngExt;
 
 use crate::game::art_walls::{Cardinal, WallAxis, WallKind};
 use crate::game::collision::{cardinal_vec, SizeClass, TileKind, TileMap};
-use crate::game::level::{Level, MazeSection, RatHoleRole, Room, RoomKind, TileRect};
+use crate::game::level::{
+    Level, MazeSection, RatHoleRole, Room, RoomKind, ShopHoleRole, TileRect,
+};
 use crate::math::Vec2;
 
 use super::layout::Layout;
@@ -803,6 +805,227 @@ fn mouth_ok(tiles: &TileMap, cx: i32, cy: i32) -> bool {
         }
     }
     open >= 2
+}
+
+// ---- Mouse-hole shops -------------------------------------------------------
+
+/// One shop hole: a face of a structural wall, and the floor cell in front of
+/// it (the threshold).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShopHolePlacement {
+    /// The wall cell the hole is cut into.
+    pub cell: (i32, i32),
+    /// The public floor cell in front of the face.
+    pub mouth: (i32, i32),
+    /// Direction from the wall cell toward `mouth`.
+    pub approach: Cardinal,
+    /// Why this hole was chosen.
+    pub role: ShopHoleRole,
+}
+
+/// The walking-distance band the first shop hole must sit in, in cell steps
+/// from the spawn ("the first 16 to 40 walking cells").
+const SHOP_FIRST_MIN: u32 = 16;
+const SHOP_FIRST_MAX: u32 = 40;
+
+/// The second hole must be at least this many cells further along than the
+/// first one, so the two visits are two different parts of the run.
+const SHOP_SECOND_GAP: u32 = 8;
+
+/// Two shop holes never share (or crowd) a wall face.
+const SHOP_HOLE_SPACING: i32 = 4;
+
+/// Open cardinal neighbours a mouth needs to count as a **fork**: the face
+/// looks onto a junction the rat can turn at (the hole sits at the fork, not
+/// down a dead end).
+const SHOP_FORK_NEIGHBOURS: usize = 3;
+
+/// **Stage B (shop holes).** Pick the two mouse-hole shops of this level.
+///
+/// Both are **faces of structural walls** onto public, reachable floor: the
+/// wall cell stays solid (nothing walks into a hole; nothing gets stuck on it)
+/// and the map's passability is untouched, so the only change to a generated
+/// map is the two records. "Public" means reachable from the spawn with every
+/// one-way door treated as shut, which is exactly "never behind a one-way
+/// door"; mazes and the boss arena's floor are excluded outright.
+///
+/// * The **first** hole goes 16–40 walking cells from the spawn and prefers a
+///   face looking onto a fork (three open neighbours) on the way to an ordinary
+///   room.
+/// * The **second** goes on a different approach toward the boss arena: at
+///   least [`SHOP_SECOND_GAP`] cells further from the spawn than the first, and
+///   as near the arena as that allows.
+/// * If a band has no candidate at all, the **nearest valid face** by walking
+///   distance stands in, so every map still carries two holes whenever it has
+///   two usable wall faces.
+///
+/// Determinism: no rng is drawn at all (every tie is broken by cell order), so
+/// adding this stage cannot move a single existing drop roll. Regular rat-holes
+/// are untouched: a shop hole never shares a wall cell with one, never sits
+/// within a cell of one, and never closes one.
+pub fn place_shop_holes(
+    tiles: &TileMap,
+    layout: &Layout,
+    mazes: &[MazeSection],
+) -> Vec<ShopHolePlacement> {
+    let field = HoleField::new(tiles, layout);
+    let walk = Walk::new(tiles);
+    // Public floor: every one-way door shut, so a face only reachable through
+    // (or past) a maze exit gate is not public.
+    let mut public = walk.clone();
+    for cy in 0..public.rows {
+        for cx in 0..public.cols {
+            let i = public.idx(cx, cy);
+            if public.gate[i] != 0 {
+                public.small[i] = false;
+            }
+        }
+    }
+    let mut flood = Flood::new(tiles.cols(), tiles.rows());
+    let start = validate::cell_of(layout.start);
+    if !public.in_bounds(start.0, start.1) {
+        return Vec::new();
+    }
+    let start_d = flood.run_copy(&public, start, SizeClass::Small);
+    let boss_d = room_target(tiles, layout.boss_arena)
+        .map(|cell| flood.run_copy(&public, cell, SizeClass::Small))
+        .unwrap_or_default();
+
+    let mut candidates: Vec<(ShopHolePlacement, u32, u32)> = Vec::new();
+    for cy in 2..tiles.rows() - 2 {
+        for cx in 2..tiles.cols() - 2 {
+            if !tiles.is_full_solid(cx, cy) {
+                continue;
+            }
+            if !hole_zone_ok(tiles, layout, &field, cx, cy) {
+                continue;
+            }
+            for (dx, dy, approach) in [
+                (0, -1, Cardinal::North),
+                (0, 1, Cardinal::South),
+                (-1, 0, Cardinal::West),
+                (1, 0, Cardinal::East),
+            ] {
+                let mouth = (cx + dx, cy + dy);
+                if !public.in_bounds(mouth.0, mouth.1) {
+                    continue;
+                }
+                // Public, reachable floor in front of the face.
+                if !public.small[public.idx(mouth.0, mouth.1)] {
+                    continue;
+                }
+                if start_d[public.idx(mouth.0, mouth.1)] == UNREACHED {
+                    continue;
+                }
+                if layout.boss_arena.contains(mouth.0, mouth.1)
+                    || layout.start_room.contains(mouth.0, mouth.1)
+                {
+                    continue;
+                }
+                if mazes.iter().any(|maze| {
+                    maze.bounds.inflate(1).contains(cx, cy)
+                        || maze.bounds.inflate(1).contains(mouth.0, mouth.1)
+                }) {
+                    continue;
+                }
+                let d = start_d[public.idx(mouth.0, mouth.1)];
+                let boss = boss_d
+                    .get(public.idx(mouth.0, mouth.1))
+                    .copied()
+                    .unwrap_or(UNREACHED);
+                candidates.push((
+                    ShopHolePlacement {
+                        cell: (cx, cy),
+                        mouth,
+                        approach,
+                        role: ShopHoleRole::Fork,
+                    },
+                    d,
+                    boss,
+                ));
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    // Nearest valid face is the fallback ranking everywhere: walking distance
+    // from the spawn, then cell order (a total order, so no rng).
+    candidates.sort_by_key(|(hole, d, _)| (*d, hole.mouth.1, hole.mouth.0));
+
+    let mut placed: Vec<ShopHolePlacement> = Vec::new();
+
+    // The first hole: inside the 16-40 band, preferring a face that looks onto
+    // a fork; the nearest valid face when no candidate sits in the band.
+    let first = candidates
+        .iter()
+        .filter(|(_, d, _)| (SHOP_FIRST_MIN..=SHOP_FIRST_MAX).contains(d))
+        .min_by_key(|(hole, d, _)| {
+            let open = open_neighbours(tiles, hole.mouth);
+            (SHOP_FORK_NEIGHBOURS.saturating_sub(open), *d, hole.mouth.1, hole.mouth.0)
+        })
+        .or_else(|| candidates.first())
+        .copied();
+    let Some((first_hole, first_d, first_boss)) = first else {
+        return placed;
+    };
+    placed.push(ShopHolePlacement {
+        role: ShopHoleRole::Fork,
+        ..first_hole
+    });
+
+    // The second hole: a different approach toward the boss arena, at least
+    // SHOP_SECOND_GAP cells further along, ranked by how close to the arena it
+    // sits. `2` = a face strictly closer to the arena than the first one, `1` =
+    // any face far enough along (the rollback when the arena side has no
+    // usable face), `0` = the nearest face at all.
+    let mut best: Option<(u8, u32, u32, i32, i32, ShopHolePlacement)> = None;
+    for (hole, d2, boss2) in candidates.iter() {
+        if Some(hole.cell) == Some(first_hole.cell) {
+            continue;
+        }
+        let crowded = (hole.cell.0 - first_hole.cell.0).abs() < SHOP_HOLE_SPACING
+            && (hole.cell.1 - first_hole.cell.1).abs() < SHOP_HOLE_SPACING;
+        if crowded {
+            continue;
+        }
+        let far_enough = *d2 >= first_d.saturating_add(SHOP_SECOND_GAP);
+        let tier = if far_enough && *boss2 != UNREACHED && *boss2 < first_boss {
+            2
+        } else if far_enough {
+            1
+        } else {
+            0
+        };
+        if tier == 0 {
+            continue;
+        }
+        let key = (u8::MAX - tier, *boss2, *d2, hole.mouth.1, hole.mouth.0);
+        let better = best
+            .as_ref()
+            .is_none_or(|b| key < (b.0, b.1, b.2, b.3, b.4));
+        if better {
+            best = Some((key.0, key.1, key.2, key.3, key.4, *hole));
+        }
+    }
+    if let Some((_, _, _, _, _, hole)) = best {
+        placed.push(ShopHolePlacement {
+            role: ShopHoleRole::Approach,
+            ..hole
+        });
+    }
+
+    placed.truncate(2);
+    placed
+}
+
+/// Open cardinal neighbours of a cell (walls do not count).
+fn open_neighbours(tiles: &TileMap, cell: (i32, i32)) -> usize {
+    CARDINALS
+        .iter()
+        .filter(|&&(dx, dy)| tiles.get(cell.0 + dx, cell.1 + dy).is_open())
+        .count()
 }
 
 // ---- Traps -----------------------------------------------------------------
@@ -1518,6 +1741,7 @@ const CARDINAL_GATES: [u8; 4] = [2, 4, 3, 1];
 /// match per cell; the masks cost one byte. Carving a rat-hole changes only the
 /// small class (a hole is still a wall for the large one), so [`Self::open_hole`]
 /// is the single mutation placement makes.
+#[derive(Clone)]
 struct Walk {
     cols: i32,
     rows: i32,
@@ -2969,4 +3193,244 @@ mod tests {
         // cy = 19 (footprint 18..=20) leaves North bypass 16..=17 (2 tiles) -> OK!
         assert!(sticky_bypass_ok(&tiles, &[], (20, 19)));
     }
+
+    // ---- Mouse-hole shops ---------------------------------------------------
+
+    /// Walking distance from `from` to every cell, small class, with every
+    /// one-way door treated as shut (the "public floor" definition).
+    fn public_distances(tiles: &TileMap, from: (i32, i32)) -> Vec<u32> {
+        let n = (tiles.cols() * tiles.rows()) as usize;
+        let mut dist = vec![UNREACHED; n];
+        let idx = |x: i32, y: i32| (y * tiles.cols() + x) as usize;
+        if !tiles.passable(from.0, from.1, SizeClass::Small) {
+            return dist;
+        }
+        let mut queue = VecDeque::new();
+        dist[idx(from.0, from.1)] = 0;
+        queue.push_back(from);
+        while let Some((cx, cy)) = queue.pop_front() {
+            let d = dist[idx(cx, cy)];
+            for (dx, dy) in CARDINALS {
+                let (nx, ny) = (cx + dx, cy + dy);
+                if nx < 0 || ny < 0 || nx >= tiles.cols() || ny >= tiles.rows() {
+                    continue;
+                }
+                if !tiles.passable(nx, ny, SizeClass::Small) {
+                    continue;
+                }
+                if tiles.one_way_dir(nx, ny).is_some() {
+                    continue;
+                }
+                let i = idx(nx, ny);
+                if dist[i] != UNREACHED {
+                    continue;
+                }
+                dist[i] = d + 1;
+                queue.push_back((nx, ny));
+            }
+        }
+        dist
+    }
+
+    /// Every shop-hole invariant, over `per_theme` seeds on every theme.
+    #[test]
+    fn shop_holes_sit_on_public_floor_and_never_in_an_arena_a_maze_or_a_gate() {
+        let per_theme = 200u64;
+        let mut maps_with_two = 0usize;
+        let mut maps = 0usize;
+        let mut first_in_band = 0usize;
+        for theme in Theme::all() {
+            for seed in 0..per_theme {
+                let level = generate_once(theme, seed, 0);
+                let holes = &level.objects.shop_holes;
+                maps += 1;
+                assert!(
+                    holes.len() <= 2,
+                    "{theme:?} seed {seed}: {} shop holes",
+                    holes.len()
+                );
+                if holes.len() == 2 {
+                    maps_with_two += 1;
+                }
+                let start = validate::cell_of(level.start);
+                let dist = public_distances(&level.tiles, start);
+                let boss = level.boss_room().expect("a boss arena").rect;
+                let start_room = level.start_room().expect("a start room").rect;
+                for (i, hole) in holes.iter().enumerate() {
+                    assert_eq!(hole.index, i, "the index is the shelf's seed key");
+                    let (cx, cy) = hole.cell;
+                    let (mx, my) = hole.mouth;
+                    // The wall cell is a real structural wall, and it stays
+                    // solid: nothing walks into a shop hole.
+                    assert!(
+                        level.tiles.is_full_solid(cx, cy),
+                        "{theme:?} seed {seed}: shop hole {i} is not in a wall"
+                    );
+                    assert!(
+                        !level.tiles.passable(cx, cy, SizeClass::Small),
+                        "{theme:?} seed {seed}: shop hole {i} is walkable"
+                    );
+                    // The face looks onto open public floor, one cell away.
+                    assert_eq!(
+                        (mx - cx).abs() + (my - cy).abs(),
+                        1,
+                        "{theme:?} seed {seed}: hole {i} does not face its mouth"
+                    );
+                    assert!(
+                        level.tiles.get(mx, my).is_open()
+                            && level.tiles.passable(mx, my, SizeClass::Small),
+                        "{theme:?} seed {seed}: hole {i} faces a wall"
+                    );
+                    assert_ne!(
+                        dist[(my * level.tiles.cols() + mx) as usize],
+                        UNREACHED,
+                        "{theme:?} seed {seed}: hole {i} is not public floor"
+                    );
+                    // Never an arena floor, never the start room, never a maze,
+                    // never a rat-hole or a doorway.
+                    assert!(!boss.contains(mx, my) && !boss.contains(cx, cy));
+                    assert!(!start_room.contains(mx, my) && !start_room.contains(cx, cy));
+                    for maze in &level.mazes {
+                        assert!(
+                            !maze.bounds.inflate(1).contains(cx, cy)
+                                && !maze.bounds.inflate(1).contains(mx, my),
+                            "{theme:?} seed {seed}: hole {i} is in a maze"
+                        );
+                    }
+                    assert!(
+                        !matches!(level.tiles.get(cx, cy), TileKind::Wall(WallKind::RatHole { .. })),
+                        "a shop hole never takes a rat-hole's cell"
+                    );
+                    // Two cells clear of any other interactive object.
+                    for dy in -1..=1 {
+                        for dx in -1..=1 {
+                            assert!(
+                                !matches!(
+                                    level.tiles.get(cx + dx, cy + dy),
+                                    TileKind::Wall(
+                                        WallKind::Doorway { .. }
+                                            | WallKind::OneWayDoor { .. }
+                                            | WallKind::RatHole { .. }
+                                    )
+                                ),
+                                "{theme:?} seed {seed}: hole {i} crowds a door or a hole"
+                            );
+                        }
+                    }
+                    // The first hole is in the 16-40 band when the map has a
+                    // candidate there, and the nearest valid face otherwise.
+                    if i == 0 {
+                        let d = dist[(my * level.tiles.cols() + mx) as usize];
+                        if (16..=40).contains(&d) {
+                            first_in_band += 1;
+                        }
+                    }
+                }
+                if holes.len() == 2 {
+                    let a = holes[0];
+                    let b = holes[1];
+                    assert_ne!(a.cell, b.cell, "{theme:?} seed {seed}: one hole twice");
+                    assert!(
+                        (a.cell.0 - b.cell.0).abs() >= SHOP_HOLE_SPACING.saturating_sub(1)
+                            || (a.cell.1 - b.cell.1).abs() >= SHOP_HOLE_SPACING.saturating_sub(1),
+                        "{theme:?} seed {seed}: shop holes on top of each other"
+                    );
+                    assert_eq!(a.role, ShopHoleRole::Fork);
+                    assert_eq!(b.role, ShopHoleRole::Approach);
+                    let da = dist[(a.mouth.1 * level.tiles.cols() + a.mouth.0) as usize];
+                    let db = dist[(b.mouth.1 * level.tiles.cols() + b.mouth.0) as usize];
+                    assert_ne!(da, UNREACHED);
+                    assert_ne!(db, UNREACHED);
+                    assert!(
+                        db > da,
+                        "{theme:?} seed {seed}: the second hole is not further along"
+                    );
+                }
+            }
+        }
+        // Every map has two usable wall faces in practice, and the first hole
+        // lands in its band on almost all of them.
+        assert!(
+            maps_with_two * 100 >= maps * 98,
+            "only {maps_with_two} of {maps} maps grew two shop holes"
+        );
+        assert!(
+            first_in_band * 100 >= maps * 90,
+            "only {first_in_band} of {maps} first holes landed in the 16-40 band"
+        );
+    }
+
+    /// The placement is a pure *query*: it never paints, never carves and never
+    /// draws an rng number, so a generated map changes only by the records it
+    /// returns. (Kills the "shop holes move the map pin" worry from this side.)
+    #[test]
+    fn placing_shop_holes_leaves_the_map_untouched_and_draws_no_rng() {
+        for theme in Theme::all() {
+            for seed in [0u64, 5, 42] {
+                let level = generate_once(theme, seed, 0);
+                let layout = level_layout(&level);
+                let before: Vec<TileKind> = (0..level.tiles.rows())
+                    .flat_map(|cy| {
+                        (0..level.tiles.cols()).map(move |cx| (cx, cy))
+                    })
+                    .map(|(cx, cy)| level.tiles.get(cx, cy))
+                    .collect();
+                let holes = place_shop_holes(&level.tiles, &layout, &level.mazes);
+                let after: Vec<TileKind> = (0..level.tiles.rows())
+                    .flat_map(|cy| {
+                        (0..level.tiles.cols()).map(move |cx| (cx, cy))
+                    })
+                    .map(|(cx, cy)| level.tiles.get(cx, cy))
+                    .collect();
+                assert_eq!(before, after, "{theme:?} seed {seed}: the map moved");
+                assert_eq!(
+                    holes.len(),
+                    level.objects.shop_holes.len(),
+                    "the pipeline copies every placement"
+                );
+            }
+        }
+    }
+
+    /// The nearest valid face is the fallback: on a hand-built map with no wall
+    /// at all there is no candidate, and with a single long wall the hole goes
+    /// on the face nearest the spawn (no rng, no panic).
+    #[test]
+    fn a_map_without_walls_grows_no_shop_holes_and_a_long_wall_gets_one() {
+        let theme = Theme::Sewer;
+        let mut tiles = TileMap::new(40, 30, theme, 1);
+        tiles.fill_cells(0, 0, 40, 30, TileKind::Wall(WallKind::Solid));
+        tiles.fill_cells(2, 2, 36, 26, TileKind::Open);
+        tiles.rebuild_masks();
+        let layout = Layout {
+            rooms: Vec::new(),
+            start: TileMap::tile_rect(20, 15).center(),
+            start_room: TileRect::new(10, 10, 10, 8),
+            boss_arena: TileRect::new(0, 0, 1, 1),
+            boss: Default::default(),
+            maze_slots: Vec::new(),
+            partitions: Vec::new(),
+        };
+        assert!(
+            place_shop_holes(&tiles, &layout, &[]).is_empty(),
+            "a map with no structural wall has no shop"
+        );
+
+        // A long partition right through the room: the nearest face wins.
+        tiles.fill_cells(2, 12, 36, 1, TileKind::Wall(WallKind::Solid));
+        tiles.rebuild_masks();
+        let layout = Layout {
+            rooms: Vec::new(),
+            start: TileMap::tile_rect(20, 15).center(),
+            start_room: TileRect::new(10, 10, 10, 8),
+            boss_arena: TileRect::new(0, 0, 1, 1),
+            boss: Default::default(),
+            maze_slots: Vec::new(),
+            partitions: Vec::new(),
+        };
+        let holes = place_shop_holes(&tiles, &layout, &[]);
+        assert!(!holes.is_empty(), "a long wall carries a shop face");
+        assert_eq!(holes[0].cell.1, 12, "the hole is in the partition");
+    }
+
 }

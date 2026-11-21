@@ -12,6 +12,9 @@ pub struct Player {
     pub hp: f32,
     pub loadout: Loadout,
     pub xp: u32,
+    /// Fractional gem XP banked by the Blackboard Belly splice (see
+    /// [`crate::game::shop::xp_with_bank`]); `0.0` without it.
+    pub xp_bank: f32,
     pub level: u32,
     pub xp_to_next: u32,
     pub face: Vec2,
@@ -63,6 +66,7 @@ impl Player {
             hp: loadout.stats.max_hp,
             loadout,
             xp: 0,
+            xp_bank: 0.0,
             level: 1,
             xp_to_next: xp_for_level(1),
             face: Vec2::new(0.0, -1.0),
@@ -95,13 +99,19 @@ impl Player {
     }
 
     /// Apply incoming damage through armor + i-frames. Returns true if it landed.
+    ///
+    /// Two gene splices are read here, because they are about the *hit* rather
+    /// than a stat: Hollow Bones adds +3 incoming damage **before** armor, and
+    /// Double Lid adds 0.22 s to the post-hit immunity. A rat with no splices
+    /// takes exactly the legacy numbers.
     pub fn take_damage(&mut self, raw: f32) -> bool {
         if self.iframes > 0.0 {
             return false;
         }
+        let raw = raw + super::shop::incoming_extra(&self.loadout.splices);
         let dmg = (raw - self.loadout.stats.armor).max(1.0);
         self.hp -= dmg;
-        self.iframes = 0.9;
+        self.iframes = 0.9 + super::shop::iframe_extra(&self.loadout.splices);
         self.hurt_flash = 0.25;
         true
     }

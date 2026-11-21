@@ -12,6 +12,7 @@ use crate::game::campaign::{self, CampaignState, KeepKind, Keepable};
 use crate::game::gem::PickupKind;
 use crate::game::level::Theme;
 use crate::game::loadout::{ChestReward, Loadout, PassiveKind, Upgrade};
+use crate::game::shop;
 use crate::game::world::World;
 use crate::input::InputState;
 use crate::lore;
@@ -21,6 +22,7 @@ use crate::render::framebuffer::PixelBuffer;
 use crate::render::lighting::{self, LightingMode};
 use crate::render::palette;
 use crate::render::{cursor, hud, menu, minimap, minimap_source, options, overlay};
+use crate::render::shop as shop_ui;
 use crate::scores::{ScoreEntry, ScoreTable};
 
 use menu::{HitMap, RunSummary, Target};
@@ -179,6 +181,10 @@ pub struct App {
     world: Option<World>,
     levelup_choices: Vec<Upgrade>,
     chest_reward: Option<ChestReward>,
+    /// Gene-splice shop: the selected shelf row (`0..shop::ROW_COUNT`).
+    shop_row: usize,
+    /// Gene-splice shop: the open Molt two-step step, if any.
+    shop_molt: Option<shop_ui::MoltUi>,
     levelup_desc: Vec<(String, String, String)>,
     levelup_idx: usize,
     intro_timer: f32,
@@ -307,6 +313,8 @@ impl App {
             world: None,
             levelup_choices: Vec::new(),
             chest_reward: None,
+            shop_row: 0,
+            shop_molt: None,
             levelup_desc: Vec::new(),
             levelup_idx: 0,
             intro_timer: 0.0,
@@ -783,7 +791,7 @@ impl App {
             Screen::Victory => self.update_victory(click),
             Screen::End => self.update_end(click),
             Screen::Chest => self.update_chest(click),
-            Screen::Shop => self.update_shop(),
+            Screen::Shop => self.update_shop(click),
         }
         if self.screen != previous {
             self.hits.clear();
@@ -1361,6 +1369,12 @@ impl App {
             self.sfx(Sfx::CacheOpen);
         } else if std::mem::take(&mut w.pending_shop) {
             self.map_open = false;
+            // Open this hole's shelf (generated on the first visit from the
+            // floor seed + hole index, so a revisit sees the same stock).
+            let hole = w.pending_shop_hole;
+            w.open_shop(hole);
+            self.shop_row = 0;
+            self.shop_molt = None;
             self.screen = Screen::Shop;
         } else {
             self.screen = Screen::Playing;
@@ -1375,10 +1389,176 @@ impl App {
         }
     }
 
-    fn update_shop(&mut self) {
-        if self.input.just_pressed(KeyCode::Esc) || self.input.just_pressed(KeyCode::Enter) {
-            self.resume_or_open_reward();
+    /// One frame of the gene-splice shop. The simulation is **paused** while it
+    /// is open (this screen never calls `World::update`), so the shelf, the
+    /// purse and the rat cannot change underneath the player's choice.
+    fn update_shop(&mut self, click: Option<Target>) {
+        if self.world.is_none() {
+            self.screen = Screen::Playing;
+            return;
         }
+        // The Molt flow owns the keys and the pointer while it is open.
+        if self.shop_molt.is_some() {
+            self.update_shop_molt(click);
+            return;
+        }
+        // A click picks its row and activates it, exactly like Enter.
+        if let Some(Target::ShopRow(row)) = click {
+            self.shop_row = row.min(shop::ROW_COUNT - 1);
+            self.activate_shop_row();
+            return;
+        }
+        if click == Some(Target::ShopLeave) || self.input.just_pressed(KeyCode::Esc) {
+            self.close_shop();
+            return;
+        }
+        if self.input.just_pressed(KeyCode::Up) || self.input.pressed_char('k') {
+            self.shop_row = (self.shop_row + shop::ROW_COUNT - 1) % shop::ROW_COUNT;
+            self.sfx(Sfx::UiMove);
+        }
+        if self.input.just_pressed(KeyCode::Down) || self.input.pressed_char('j') {
+            self.shop_row = (self.shop_row + 1) % shop::ROW_COUNT;
+            self.sfx(Sfx::UiMove);
+        }
+        if self.input.just_pressed(KeyCode::Enter) {
+            self.activate_shop_row();
+        }
+        if self.input.pressed_char('m') {
+            self.begin_molt();
+        }
+    }
+
+    /// Buy (or activate) the selected shelf row.
+    fn activate_shop_row(&mut self) {
+        let item = shop::row_item(self.shop_row);
+        match item {
+            shop::ShopItem::Leave => return self.close_shop(),
+            shop::ShopItem::Molt => return self.begin_molt(),
+            _ => {}
+        }
+        let Some(world) = self.world.as_mut() else {
+            return;
+        };
+        let hole = world.pending_shop_hole;
+        match shop::buy(world, hole, item) {
+            shop::Purchase::Bought { .. } => self.sfx(Sfx::Purchase),
+            shop::Purchase::Denied(_) => self.sfx(Sfx::Denied),
+        }
+    }
+
+    /// Start the Molt two-step (or refuse it with the shelf's own reason).
+    fn begin_molt(&mut self) {
+        let Some(world) = self.world.as_ref() else {
+            return;
+        };
+        let hole = world.pending_shop_hole;
+        if shop::molt_deny(world, hole).is_some() || shop::molt_owned(world).is_empty() {
+            self.sfx(Sfx::Denied);
+            return;
+        }
+        self.shop_molt = Some(shop_ui::MoltUi::Forfeit { cursor: 0 });
+        self.sfx(Sfx::UiMove);
+    }
+
+    /// One frame of the Molt nomination: nominate, then pick, `Esc` cancels for
+    /// free at either step.
+    fn update_shop_molt(&mut self, click: Option<Target>) {
+        let Some(molt) = self.shop_molt else {
+            return;
+        };
+        let Some(world) = self.world.as_ref() else {
+            self.shop_molt = None;
+            return;
+        };
+        let hole = world.pending_shop_hole;
+        let len = match molt {
+            shop_ui::MoltUi::Forfeit { .. } => shop::molt_owned(world).len(),
+            shop_ui::MoltUi::Pick { owned, .. } => shop::molt_options(world, owned).len(),
+        };
+        if let Some(Target::ShopMoltRow(i)) = click {
+            self.shop_molt = Some(molt.with_cursor(i));
+            self.confirm_molt();
+            return;
+        }
+        if click == Some(Target::ShopCancel) || self.input.just_pressed(KeyCode::Esc) {
+            // Free cancel: nothing is spent until the second selection.
+            self.shop_molt = None;
+            self.sfx(Sfx::UiMove);
+            return;
+        }
+        let cursor = molt.cursor();
+        let mut next = cursor;
+        if self.input.just_pressed(KeyCode::Up) || self.input.pressed_char('k') {
+            next = (cursor + len.max(1) - 1) % len.max(1);
+            self.sfx(Sfx::UiMove);
+        }
+        if self.input.just_pressed(KeyCode::Down) || self.input.pressed_char('j') {
+            next = (cursor + 1) % len.max(1);
+            self.sfx(Sfx::UiMove);
+        }
+        if next != cursor {
+            self.shop_molt = Some(molt.with_cursor(next));
+        }
+        if self.input.just_pressed(KeyCode::Enter) {
+            let _ = hole;
+            self.confirm_molt();
+        }
+    }
+
+    /// Confirm the current Molt step.
+    fn confirm_molt(&mut self) {
+        let Some(molt) = self.shop_molt else {
+            return;
+        };
+        let Some(world) = self.world.as_ref() else {
+            self.shop_molt = None;
+            return;
+        };
+        let hole = world.pending_shop_hole;
+        match molt {
+            shop_ui::MoltUi::Forfeit { cursor } => {
+                let owned = shop::molt_owned(world);
+                let Some(&owned) = owned.get(cursor.min(owned.len().saturating_sub(1))) else {
+                    self.sfx(Sfx::Denied);
+                    return;
+                };
+                if shop::molt_options(world, owned).is_empty() {
+                    self.sfx(Sfx::Denied);
+                    return;
+                }
+                self.shop_molt = Some(shop_ui::MoltUi::Pick { owned, cursor: 0 });
+                self.sfx(Sfx::UiSelect);
+            }
+            shop_ui::MoltUi::Pick { owned, cursor } => {
+                let options = shop::molt_options(world, owned);
+                let Some(&pick) = options.get(cursor.min(options.len().saturating_sub(1))) else {
+                    self.sfx(Sfx::Denied);
+                    return;
+                };
+                let Some(world) = self.world.as_mut() else {
+                    return;
+                };
+                match shop::molt(world, hole, owned, pick) {
+                    Ok(()) => {
+                        self.shop_molt = None;
+                        self.sfx(Sfx::Purchase);
+                    }
+                    Err(_) => self.sfx(Sfx::Denied),
+                }
+            }
+        }
+    }
+
+    /// Leave the shelf: the flag drops, the threshold gets its 0.8 s grace and
+    /// the run resumes.
+    fn close_shop(&mut self) {
+        if let Some(world) = self.world.as_mut() {
+            world.leave_shop();
+        }
+        self.shop_molt = None;
+        self.shop_row = 0;
+        self.sfx(Sfx::UiSelect);
+        self.screen = Screen::Playing;
     }
 
     /// The level's boss died. Bank the level's own numbers (they unlock the
@@ -1968,7 +2148,15 @@ impl App {
             Screen::Shop => {
                 self.draw_game(frame, area);
                 if let Some(w) = self.world.as_ref() {
-                    menu::draw_shop(frame, area, w.gold);
+                    shop_ui::draw(
+                        frame,
+                        area,
+                        w,
+                        w.pending_shop_hole,
+                        self.shop_row,
+                        self.shop_molt,
+                        &mut self.hits,
+                    );
                 }
             }
         }
@@ -2776,16 +2964,258 @@ mod tests {
         assert!(h.screen_text().contains("+10 gold"));
         h.click("Enter / Continue");
         assert!(matches!(h.app.screen, Screen::Shop));
-        assert!(h.screen_text().contains("33 gold"));
-        assert_eq!(h.app.world.as_ref().unwrap().elapsed, elapsed);
+        // The shelf's header carries the purse (the chest's +10 gold included).
+        assert!(h.screen_text().contains("GOLD 33"));
+        assert_eq!(
+            h.app.world.as_ref().unwrap().elapsed,
+            elapsed,
+            "the simulation is paused while the shelf is open"
+        );
 
         h.frame(&[KeyCode::Esc]);
         assert!(matches!(h.app.screen, Screen::Playing));
         h.app.world.as_mut().unwrap().pending_shop = true;
         h.frame(&[]);
         assert!(matches!(h.app.screen, Screen::Shop));
-        h.frame(&[KeyCode::Enter]);
+        // Enter buys the selected row, so leaving is Esc (or the LEAVE row).
+        h.frame(&[KeyCode::Esc]);
         assert!(matches!(h.app.screen, Screen::Playing));
+    }
+
+    // ---- The gene-splice shop screen -------------------------------------
+
+    /// Walk the run onto shop hole 0's threshold (the way the game does it) and
+    /// stop on the open shelf.
+    fn open_shop_at(h: &mut Harness, gold: u32) {
+        h.enter_playing();
+        {
+            let w = h.app.world.as_mut().unwrap();
+            w.gold = gold;
+            let hole = w.level.objects.shop_holes[0];
+            w.player.pos = hole.face() + hole.facing * 3.0;
+        }
+        // One frame: the threshold system raises the flag and the app opens the
+        // shelf in the same `resume_or_open_reward`.
+        h.frame(&[]);
+        assert!(
+            matches!(h.app.screen, Screen::Shop),
+            "the threshold opens the shelf"
+        );
+    }
+
+    fn shelf(h: &Harness, slot: usize) -> crate::game::shop::SpliceKind {
+        h.app
+            .world
+            .as_ref()
+            .unwrap()
+            .shop
+            .get(0)
+            .and_then(|stock| stock.slot(slot))
+            .expect("the shelf has a splice in this slot")
+    }
+
+    #[test]
+    fn the_shop_screen_works_by_keyboard_at_fiftyseven_eighty_and_120() {
+        for (w, hgt) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let mut h = Harness::new(w, hgt);
+            open_shop_at(&mut h, 200);
+            let text = h.screen_text();
+            assert!(text.contains("GENE SPLICE SHELF"), "{w}x{hgt}: no title");
+            assert!(text.contains("GOLD 200"), "{w}x{hgt}: no purse");
+            assert!(
+                text.contains("SPLICE SOCKETS 0/2"),
+                "{w}x{hgt}: no sockets"
+            );
+            // Both sides of the first bargain are shown before payment.
+            let first = shelf(&h, 0);
+            assert!(text.contains(first.name()), "{w}x{hgt}: no card");
+            assert!(text.contains(first.plus()), "{w}x{hgt}: no gain");
+            assert!(text.contains(first.minus()), "{w}x{hgt}: no cost");
+            assert!(text.contains("LEAVE"), "{w}x{hgt}: no exit row");
+
+            // The simulation is frozen while the shelf is open.
+            let elapsed = h.app.world.as_ref().unwrap().elapsed;
+            h.frame(&[]);
+            h.frame(&[]);
+            assert_eq!(h.app.world.as_ref().unwrap().elapsed, elapsed);
+
+            // Down moves the cursor; Enter buys the row it is on.
+            h.frame(&[KeyCode::Down]);
+            assert_eq!(h.app.shop_row, 1);
+            h.frame(&[KeyCode::Enter]);
+            let bought = shelf(&h, 1);
+            let w0 = h.app.world.as_ref().unwrap();
+            assert_eq!(w0.gold, 200 - bought.price(), "{w}x{hgt}: paid the price");
+            assert!(w0.player.loadout.splices.contains(&bought));
+            assert!(h.screen_text().contains("SPLICE SOCKETS 1/2"));
+
+            // The second socket, then the third purchase is refused with the
+            // shelf's own reason (and the purse does not move).
+            h.frame(&[KeyCode::Up]);
+            h.frame(&[KeyCode::Enter]);
+            assert_eq!(
+                h.app.world.as_ref().unwrap().player.loadout.splices.len(),
+                2
+            );
+            let gold = h.app.world.as_ref().unwrap().gold;
+            h.frame(&[KeyCode::Enter]);
+            assert_eq!(
+                h.app.world.as_ref().unwrap().gold,
+                gold,
+                "{w}x{hgt}: nothing is charged for a refused row"
+            );
+            assert!(
+                h.screen_text().contains("both sockets full")
+                    || h.screen_text().contains("sold"),
+                "{w}x{hgt}: the refusal has a reason"
+            );
+
+            // Esc leaves and the run resumes behind the 0.8 s grace.
+            h.frame(&[KeyCode::Esc]);
+            assert!(matches!(h.app.screen, Screen::Playing), "{w}x{hgt}");
+            assert!(
+                h.app.world.as_ref().unwrap().shop_runtime().grace > 0.0,
+                "{w}x{hgt}: the exit grace is armed"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shop_screen_works_by_mouse_with_hover_at_fiftyseven_eighty_and_120() {
+        for (w, hgt) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let mut h = Harness::new(w, hgt);
+            open_shop_at(&mut h, 200);
+            // Hover the first card: the row reports itself as hovered.
+            let first = shelf(&h, 0);
+            let pos = h.locate(first.name());
+            h.events(&[], &[(MouseEventKind::Moved, pos)]);
+            assert_eq!(
+                h.app.hits.hovered,
+                Some(Target::ShopRow(0)),
+                "{w}x{hgt}: hover does not reach the shelf row"
+            );
+            // Click it: bought.
+            h.events(
+                &[],
+                &[(MouseEventKind::Down(MouseButton::Left), pos)],
+            );
+            assert!(
+                h.app
+                    .world
+                    .as_ref()
+                    .unwrap()
+                    .player
+                    .loadout
+                    .splices
+                    .contains(&first),
+                "{w}x{hgt}: a click buys the row under the pointer"
+            );
+            // Click the exit row.
+            let leave = h.locate("LEAVE");
+            h.events(
+                &[],
+                &[(MouseEventKind::Down(MouseButton::Left), leave)],
+            );
+            assert!(
+                matches!(h.app.screen, Screen::Playing),
+                "{w}x{hgt}: clicking LEAVE leaves"
+            );
+            assert!(!h.app.world.as_ref().unwrap().pending_shop);
+        }
+    }
+
+    #[test]
+    fn the_molt_two_step_works_by_keyboard_and_cancels_free() {
+        let mut h = Harness::new(80, 24);
+        open_shop_at(&mut h, 200);
+        {
+            use crate::game::weapon::WeaponKind;
+            let lo = &mut h.app.world.as_mut().unwrap().player.loadout;
+            lo.apply(&Upgrade::NewWeapon(WeaponKind::CheeseSpray));
+            lo.weapons[0].level = 4;
+        }
+        let gold = h.app.world.as_ref().unwrap().gold;
+        // "m" opens step one and the shelf says so.
+        h.frame(&[KeyCode::Char('m')]);
+        assert!(h.app.shop_molt.is_some());
+        assert!(h.screen_text().contains("Step 1 of 2"));
+        // Cancel is free: nothing is spent and the shelf is back.
+        h.frame(&[KeyCode::Esc]);
+        assert!(h.app.shop_molt.is_none());
+        assert!(matches!(h.app.screen, Screen::Shop));
+        assert_eq!(h.app.world.as_ref().unwrap().gold, gold);
+
+        // Nominate the first weapon, then take the first option offered.
+        h.frame(&[KeyCode::Char('m')]);
+        h.frame(&[KeyCode::Enter]);
+        assert!(
+            matches!(
+                h.app.shop_molt,
+                Some(shop_ui::MoltUi::Pick { .. })
+            ),
+            "Enter names the kind and moves to step two"
+        );
+        assert!(h.screen_text().contains("Step 2 of 2"));
+        h.frame(&[KeyCode::Enter]);
+        let w = h.app.world.as_ref().unwrap();
+        assert!(h.app.shop_molt.is_none());
+        assert_eq!(
+            w.gold,
+            gold - crate::game::shop::MOLT_PRICE,
+            "Molt costs its price"
+        );
+        assert_eq!(w.player.loadout.weapons[0].level, 1, "rank 1");
+        assert!(!w.player.loadout.weapons[0].evolved);
+    }
+
+    #[test]
+    fn the_molt_two_step_works_by_mouse() {
+        let mut h = Harness::new(120, 40);
+        open_shop_at(&mut h, 200);
+        {
+            use crate::game::weapon::WeaponKind;
+            let lo = &mut h.app.world.as_mut().unwrap().player.loadout;
+            lo.apply(&Upgrade::NewWeapon(WeaponKind::CheeseSpray));
+        }
+        let before = h.app.world.as_ref().unwrap().player.loadout.weapons[0].kind;
+        h.click("MOLT");
+        assert!(h.app.shop_molt.is_some(), "clicking MOLT opens step one");
+        h.frame(&[]);
+        // Nominate Gnaw (the first row of step one). "Gnaw Lv1" only exists on
+        // this panel: the HUD rack prints the bare name.
+        h.click("Gnaw Lv1");
+        assert!(matches!(h.app.shop_molt, Some(shop_ui::MoltUi::Pick { .. })));
+        // Park the pointer off the panel so the cheese cursor does not sit on
+        // the option text the next `locate` reads.
+        h.events(&[], &[(MouseEventKind::Moved, (0, 0))]);
+        h.frame(&[]);
+        // Take the first offered replacement.
+        let options = {
+            let w = h.app.world.as_ref().unwrap();
+            crate::game::shop::molt_options(
+                w,
+                crate::game::shop::OwnedKind::Weapon(0),
+            )
+        };
+        let label = crate::game::shop::new_label(options[0]);
+        h.click(&label);
+        let w = h.app.world.as_ref().unwrap();
+        assert_ne!(w.player.loadout.weapons[0].kind, before);
+        assert_eq!(w.player.loadout.weapons[0].level, 1);
+    }
+
+    #[test]
+    fn a_denied_row_costs_nothing_and_says_why() {
+        let mut h = Harness::new(80, 24);
+        open_shop_at(&mut h, 0);
+        assert!(h.screen_text().contains("not enough gold"));
+        h.frame(&[KeyCode::Enter]);
+        let w = h.app.world.as_ref().unwrap();
+        assert_eq!(w.gold, 0);
+        assert!(w.player.loadout.splices.is_empty());
+        assert!(matches!(h.app.screen, Screen::Shop), "still on the shelf");
+        // Stitch at full health has its own reason.
+        assert!(h.screen_text().contains("at full health"));
     }
 
     /// A practice run starts a later sector with no carried build, so it must
@@ -2810,7 +3240,15 @@ mod tests {
             Ok(v) => v,
             Err(_) => return,
         };
-        let (w, h) = (120u16, 46u16);
+        // `RATRUN_DUMP_SIZE=57x20` captures a smaller terminal (the shop
+        // screen's compact layout); the default is the big one.
+        let (w, h) = std::env::var("RATRUN_DUMP_SIZE")
+            .ok()
+            .and_then(|size| {
+                let (a, b) = size.split_once('x')?;
+                Some((a.parse().ok()?, b.parse().ok()?))
+            })
+            .unwrap_or((120u16, 46u16));
         let mut hh = Harness::new(w, h);
         hh.frame(&[]);
 
@@ -2887,6 +3325,61 @@ mod tests {
                     w.spawn_chest(p);
                 }
                 hh.frame(&[]);
+            }
+            // A mouse-hole shop in its wall, in a live frame: the rat stands a
+            // stride off the threshold (so the shelf does not open) and the
+            // spoon, the scratches and the wall all read. `hole-map` is the
+            // same frame with the expanded minimap open, to show the spoon
+            // marker on the map.
+            "hole" | "hole-map" => {
+                hh.enter_playing();
+                let hole = {
+                    let w = hh.app.world.as_mut().unwrap();
+                    let hole = w.level.objects.shop_holes[0];
+                    // Stand a stride down the wall from it, so the hole sits
+                    // clear of the HUD and the compact map in the capture.
+                    w.player.pos = hole.face()
+                        + hole.facing * 26.0
+                        + crate::math::Vec2::new(-hole.facing.y, hole.facing.x) * -26.0;
+                    hole
+                };
+                let _ = hole;
+                hh.frame(&[]);
+                hh.frame(&[]);
+                if target == "hole-map" {
+                    hh.frame(&[KeyCode::Tab]);
+                }
+            }
+            // The gene-splice shop (`WAVE3_DESIGN` §6): the shelf as it opens
+            // ("shop"), one burnt down by a reroll and with a splice bought
+            // ("shop-late"), and the Molt two-step ("shop-molt"). Teleporting
+            // the rat onto hole 0's threshold makes the touch fire for real.
+            "shop" | "shop-late" | "shop-molt" => {
+                hh.enter_playing();
+                {
+                    let w = hh.app.world.as_mut().unwrap();
+                    w.gold = 61;
+                    w.player.hp = w.player.max_hp() * 0.55;
+                    let hole = w.level.objects.shop_holes[0];
+                    w.player.pos = hole.face() + hole.facing * 3.0;
+                }
+                hh.frame(&[]); // the threshold system raises the flag
+                hh.frame(&[]); // the app opens the shelf
+                assert!(matches!(hh.app.screen, Screen::Shop));
+                if target == "shop-late" {
+                    // Buy the first affordable splice, then turn the shelf.
+                    hh.frame(&[KeyCode::Enter]);
+                    hh.app.shop_row = 4;
+                    hh.frame(&[KeyCode::Enter]);
+                    hh.app.shop_row = 3;
+                    hh.frame(&[KeyCode::Enter]);
+                    hh.frame(&[]);
+                } else if target == "shop-molt" {
+                    hh.app.shop_row = 5;
+                    hh.frame(&[KeyCode::Enter]);
+                    hh.frame(&[]);
+                    assert!(hh.app.shop_molt.is_some());
+                }
             }
             "levelup" => {
                 hh.frame(&[KeyCode::Enter]); // -> Story

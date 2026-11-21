@@ -120,6 +120,8 @@ pub struct StageTimings {
     pub mazes: u64,
     pub holes: u64,
     pub traps: u64,
+    /// Mouse-hole shops (the two per level; no rng, a graph query only).
+    pub shop: u64,
     pub masks: u64,
     pub objects: u64,
     pub nav: u64,
@@ -135,6 +137,7 @@ impl StageTimings {
             mazes: self.mazes.min(other.mazes),
             holes: self.holes.min(other.holes),
             traps: self.traps.min(other.traps),
+            shop: self.shop.min(other.shop),
             masks: self.masks.min(other.masks),
             objects: self.objects.min(other.objects),
             nav: self.nav.min(other.nav),
@@ -147,6 +150,7 @@ impl StageTimings {
             + self.mazes
             + self.holes
             + self.traps
+            + self.shop
             + self.masks
             + self.objects
             + self.nav
@@ -198,10 +202,19 @@ fn generate_stages(
         traps,
         placement::place_traps(&tiles, &design, &mazes, &mut rng)
     );
+    // The two mouse-hole shops. No rng: the walls are chosen by walking
+    // distance, so this stage cannot move an existing drop roll or hole.
+    let shop_holes = stage!(
+        shop,
+        placement::place_shop_holes(&tiles, &design, &mazes)
+    );
 
     stage!(masks, tiles.rebuild_masks());
 
-    let objects = stage!(objects, objects_from(&tiles, &mazes, &holes, &traps));
+    let objects = stage!(
+        objects,
+        objects_from(&tiles, &mazes, &holes, &traps, &shop_holes)
+    );
     let nav = stage!(nav, NavGrid::from_tiles(&tiles, SizeClass::Large));
     Level {
         theme,
@@ -226,6 +239,7 @@ fn objects_from(
     mazes: &[MazeSection],
     holes: &[placement::RatHolePlacement],
     traps: &[placement::TrapPlacement],
+    shop_holes: &[placement::ShopHolePlacement],
 ) -> LevelObjects {
     let mut objects = LevelObjects::default();
 
@@ -243,6 +257,20 @@ fn objects_from(
         objects.rat_hole_records.push(RatHoleRecord {
             role: hole.role,
             approach: hole.approach,
+        });
+    }
+
+    // The two mouse-hole shops (stage B's placement, dressed as the level's
+    // own record: the shelf and the threshold system read this).
+    for (index, hole) in shop_holes.iter().enumerate() {
+        objects.shop_holes.push(crate::game::level::ShopHole {
+            index,
+            cell: hole.cell,
+            pos: TileMap::tile_rect(hole.cell.0, hole.cell.1).center(),
+            facing: cardinal_vec(hole.approach),
+            approach: hole.approach,
+            mouth: hole.mouth,
+            role: hole.role,
         });
     }
 
