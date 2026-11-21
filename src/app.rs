@@ -13,7 +13,7 @@ use crate::game::gem::PickupKind;
 use crate::game::level::Theme;
 use crate::game::loadout::{ChestReward, Loadout, PassiveKind, Upgrade};
 use crate::game::world::World;
-use crate::input::InputState;
+use crate::input::{DashKey, InputState};
 use crate::lore;
 use crate::math::Vec2;
 use crate::render::campaign as campaign_ui;
@@ -352,7 +352,23 @@ impl App {
         };
         app.push_volumes();
         app.menu_music();
+        // The HUD's dash module names the live dash key (CTRL, or SPACE on a
+        // terminal that cannot report a lone modifier), like the legends.
+        app.hud.dash_key = app.dash_key();
         app
+    }
+
+    /// Force the dash mapping. `main` calls this with the answer the terminal
+    /// gave *after* the enhancement flags were pushed: a terminal that answers
+    /// the protocol query but ignores report-all-keys keeps the Space mapping.
+    pub fn set_lone_ctrl(&mut self, on: bool) {
+        self.input.set_lone_ctrl(on);
+        self.hud.dash_key = self.dash_key();
+    }
+
+    /// The key that dashes in this input mode (see `input::DashKey`).
+    pub fn dash_key(&self) -> DashKey {
+        self.input.dash_key()
     }
 
     /// The theme of the sector the title/select screen points at.
@@ -1273,13 +1289,19 @@ impl App {
             return;
         }
         let move_dir = self.resolve_move_dir();
-        let dash = click == Some(Target::Dash) || self.input.just_pressed(KeyCode::Char(' '));
+        // Ctrl dashes and Space fires the charged active weapons on a terminal
+        // that reports a lone Ctrl press; on one that cannot, Space keeps doing
+        // both (see `InputState::dash_pressed`). A left click on the field is
+        // always the pair: it is the mouse player's whole "do the thing".
+        let click_dash = click == Some(Target::Dash);
+        let dash = click_dash || self.input.dash_pressed();
+        let active = click_dash || self.input.active_pressed();
         let mut ended = false;
         let mut level_done = false;
         let mut intensity = 1u32;
         if let Some(w) = self.world.as_mut() {
             let hp_before = w.player.hp;
-            w.update(dt, move_dir, dash);
+            w.update_with(dt, move_dir, dash, active);
             // Drain SFX into a reused buffer, de-duplicated per frame so a
             // 16-shot nova is one sound.
             self.sfx_frame.clear();
@@ -1824,6 +1846,7 @@ impl App {
                     self.scores.level_unlocked(self.sector()),
                     &self.scores,
                     &self.rat_art,
+                    self.dash_key(),
                     &mut self.hits,
                 );
             }
@@ -1844,6 +1867,7 @@ impl App {
                         self.scores.level_unlocked(self.sector()),
                         &self.scores,
                         &self.rat_art,
+                        self.dash_key(),
                         &mut self.hits,
                     );
                 }
@@ -1860,6 +1884,7 @@ impl App {
                     self.scores.level_unlocked(self.sector()),
                     &self.scores,
                     &self.rat_art,
+                    self.dash_key(),
                     &mut self.hits,
                 );
                 menu::draw_story(frame, area, self.story_time, &mut self.hits);
@@ -1888,9 +1913,16 @@ impl App {
                     ),
                     Screen::Paused => {
                         if let Some(w) = self.world.as_ref() {
-                            menu::draw_pause_with_run(frame, area, w, self.muted, &mut self.hits);
+                            menu::draw_pause_with_run(
+                                frame,
+                                area,
+                                w,
+                                self.muted,
+                                self.dash_key(),
+                                &mut self.hits,
+                            );
                         } else {
-                            menu::draw_pause(frame, area, &mut self.hits);
+                            menu::draw_pause(frame, area, self.dash_key(), &mut self.hits);
                         }
                     }
                     Screen::LevelUp => {
@@ -2373,7 +2405,19 @@ fn draw_map_legend(frame: &mut Frame, game: Rect, panel: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKeyCode, MouseEvent, MouseEventKind,
+    };
+
+    /// What crossterm builds from a lone left-Ctrl press under the Kitty
+    /// protocol with report-all-keys (`CSI 57442;5:1u`).
+    fn ctrl_press() -> KeyEvent {
+        KeyEvent::new_with_kind(
+            KeyCode::Modifier(ModifierKeyCode::LeftControl),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        )
+    }
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -2463,6 +2507,18 @@ mod tests {
                     row,
                     modifiers: KeyModifiers::NONE,
                 });
+            }
+            self.app.update(1.0 / 60.0);
+            self.terminal.draw(|f| self.app.render(f)).unwrap();
+            self.screen_text()
+        }
+
+        /// Advance one frame, injecting raw key events (a lone Ctrl press has
+        /// no `KeyCode`-only form: it needs its modifier and kind).
+        fn frame_events(&mut self, events: &[KeyEvent]) -> String {
+            self.app.input.begin_frame();
+            for &ev in events {
+                self.app.input.handle_key(ev);
             }
             self.app.update(1.0 / 60.0);
             self.terminal.draw(|f| self.app.render(f)).unwrap();
@@ -2810,11 +2866,45 @@ mod tests {
             Ok(v) => v,
             Err(_) => return,
         };
-        let (w, h) = (120u16, 46u16);
+        // `RATRUN_DUMP_W` / `RATRUN_DUMP_H` let a capture target any size (the
+        // default stays the documented 120x46).
+        let env_size = |key: &str, default: u16| {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+        let (w, h) = (env_size("RATRUN_DUMP_W", 120), env_size("RATRUN_DUMP_H", 46));
         let mut hh = Harness::new(w, h);
         hh.frame(&[]);
 
         match target.as_str() {
+            // The dash module and the on-rat gauge in each of their three
+            // states. `RATRUN_DUMP_CTRL=1` captures the Ctrl mapping (the
+            // default is the Space fallback).
+            "dash-ready" | "dash-cd" | "dash-denied" => {
+                hh.app
+                    .set_lone_ctrl(std::env::var("RATRUN_DUMP_CTRL").is_ok());
+                hh.enter_playing();
+                {
+                    let w = hh.app.world.as_mut().unwrap();
+                    w.player.dash_active = 0.0;
+                    w.player.dash_ready_flash = 0.0;
+                    w.player.dash_denied = 0.0;
+                    match target.as_str() {
+                        "dash-ready" => w.player.dash_cd = 0.0,
+                        "dash-cd" => w.player.dash_cd = 1.2,
+                        _ => {
+                            w.player.dash_cd = 1.2;
+                            w.player.dash_denied = 0.16;
+                        }
+                    }
+                }
+                // Two frames: the first tick sets the HUD up, the second draws
+                // the state the capture is about.
+                hh.frame(&[]);
+                hh.frame(&[]);
+            }
             "title" => {
                 hh.frame(&[]);
             }
@@ -2961,6 +3051,17 @@ mod tests {
         let dir = std::env::var_os("RATRUN_DUMP_DIR")
             .map_or_else(|| std::path::PathBuf::from("/tmp"), std::path::PathBuf::from);
         std::fs::write(dir.join(format!("ratrun_{target}.ppm")), out).unwrap();
+                // The PPM carries colours only (the half-block pixels are one flat
+        // colour per cell side), so the cell *text* — which is what the HUD,
+        // the legends and the menus are — lands next to it, one line per row.
+        let mut text = String::new();
+        for y in 0..h {
+            for x in 0..w {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        std::fs::write(dir.join(format!("ratrun_{target}.txt")), text).unwrap();
     }
 
     /// Space is one press with two jobs: it dashes (unchanged) and releases any
@@ -3036,6 +3137,162 @@ mod tests {
             h.app.world.as_ref().unwrap().active_fx().thrash_active(),
             "a click-dash must release a charged active weapon too"
         );
+    }
+
+    /// A kitty-protocol terminal splits the old Space press in two: Ctrl dashes,
+    /// Space only releases the charged active weapons.
+    #[test]
+    fn ctrl_dashes_and_space_only_fires_the_actives_on_a_kitty_terminal() {
+        let app = App::with_options(true, None, ScoreTable::default(), false, Some(TEST_SEED));
+        let mut h = Harness::with_app(app, 80, 24);
+        h.enter_playing();
+        assert_eq!(h.app.dash_key(), DashKey::Ctrl);
+        {
+            use crate::game::weapon::WeaponKind;
+            let w = h.app.world.as_mut().unwrap();
+            w.player.loadout.apply(&Upgrade::NewWeapon(WeaponKind::TailThrash));
+            for weapon in w.player.loadout.weapons.iter_mut() {
+                if weapon.kind.is_active() {
+                    weapon.timer = 0.0;
+                }
+            }
+            let p = w.player.pos;
+            w.spawn_enemy(
+                crate::game::enemy::EnemyKind::Skitterer,
+                p + crate::math::Vec2::new(14.0, 0.0),
+                8.0,
+            );
+            w.player.dash_cd = 0.0;
+        }
+
+        // Ctrl alone: the dash fires and no active weapon is spent.
+        h.frame_events(&[ctrl_press()]);
+        {
+            let w = h.app.world.as_ref().unwrap();
+            assert!(w.player.dash_cd > 0.0, "a lone Ctrl press must dash");
+            assert!(
+                !w.active_fx().thrash_active(),
+                "Ctrl must not release the charged active weapon"
+            );
+        }
+
+        // Space alone: the active weapon fires and the dash is untouched.
+        {
+            let w = h.app.world.as_mut().unwrap();
+            for weapon in w.player.loadout.weapons.iter_mut() {
+                if weapon.kind.is_active() {
+                    weapon.timer = 0.0;
+                }
+            }
+            w.player.dash_cd = 0.0;
+            w.player.dash_active = 0.0;
+        }
+        h.frame(&[KeyCode::Char(' ')]);
+        {
+            let w = h.app.world.as_ref().unwrap();
+            assert!(
+                w.active_fx().thrash_active(),
+                "Space must release the charged active weapon"
+            );
+            assert_eq!(w.player.dash_cd, 0.0, "Space must not dash in Ctrl mode");
+        }
+
+        // A left click on the field is still the whole pair, so a mouse player
+        // keeps dashing and firing actives with one button.
+        {
+            let w = h.app.world.as_mut().unwrap();
+            for weapon in w.player.loadout.weapons.iter_mut() {
+                if weapon.kind.is_active() {
+                    weapon.timer = 0.0;
+                }
+            }
+            w.player.dash_cd = 0.0;
+            w.player.dash_active = 0.0;
+            let mut fx = w.ecs.resource_mut::<crate::game::ecs::resources::ActiveFx>();
+            fx.thrash_left = 0.0;
+        }
+        let field = h.locate("▀");
+        h.events(&[], &[(MouseEventKind::Down(MouseButton::Left), field)]);
+        let w = h.app.world.as_ref().unwrap();
+        assert!(w.player.dash_cd > 0.0, "a click must dash");
+        assert!(
+            w.active_fx().thrash_active(),
+            "a click must also release the charged active weapon"
+        );
+    }
+
+    /// Without lone-modifier reporting, Space keeps doing both jobs, so the game
+    /// is playable on Apple Terminal and friends.
+    #[test]
+    fn fallback_mode_keeps_space_dashing() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        assert_eq!(h.app.dash_key(), DashKey::Space);
+        {
+            let w = h.app.world.as_mut().unwrap();
+            w.player.dash_cd = 0.0;
+        }
+        // A lone Ctrl press that a terminal sends anyway cannot dash here...
+        h.frame_events(&[ctrl_press()]);
+        assert_eq!(
+            h.app.world.as_ref().unwrap().player.dash_cd,
+            0.0,
+            "Ctrl is not the dash key in the fallback mode"
+        );
+        // ...Space does.
+        h.frame(&[KeyCode::Char(' ')]);
+        assert!(
+            h.app.world.as_ref().unwrap().player.dash_cd > 0.0,
+            "Space must still dash in the fallback mode"
+        );
+    }
+
+    /// A dash refused by the cooldown is never silent: the sim sets the shake
+    /// timer (the on-rat gauge and the HUD read it) and the HUD prints WAIT.
+    #[test]
+    fn a_refused_dash_is_visible_and_heard() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        {
+            let w = h.app.world.as_mut().unwrap();
+            w.player.dash_cd = 1.5;
+            w.player.dash_active = 0.0;
+            w.player.dash_denied = 0.0;
+        }
+        let text = h.frame(&[KeyCode::Char(' ')]);
+        {
+            let w = h.app.world.as_ref().unwrap();
+            assert!(
+                w.player.dash_denied > 0.0,
+                "the refused press left no trace for the gauge"
+            );
+            assert_eq!(w.player.dash_active, 0.0, "a refused press must not dash");
+        }
+        assert!(
+            text.contains("WAIT"),
+            "the HUD did not report the refusal: {text:?}"
+        );
+    }
+
+    /// The title legend (and the HUD's dash module) name the key the mode
+    /// actually uses.
+    #[test]
+    fn the_legends_name_the_live_dash_key() {
+        let mut h = Harness::new(80, 24);
+        h.frame(&[]);
+        assert!(
+            h.screen_text().contains("Space/click dash"),
+            "fallback title legend lost its Space binding"
+        );
+
+        // Flip to the Ctrl mapping precisely as `main` does after confirming
+        // the terminal honours report-all-keys.
+        h.app.set_lone_ctrl(true);
+        h.frame(&[]);
+        let text = h.screen_text();
+        assert!(text.contains("Ctrl/click dash"), "no Ctrl legend: {text:?}");
+        assert!(text.contains("Space actives"), "no active hint: {text:?}");
+        assert_eq!(h.app.hud.dash_key, DashKey::Ctrl);
     }
 
     #[test]

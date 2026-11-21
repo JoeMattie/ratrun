@@ -13,6 +13,7 @@ use crate::game::{
     weapon::WeaponKind,
     world::World,
 };
+use crate::input::DashKey;
 use crate::lore;
 use crate::render::campaign::{
     campaign_pips_width, draw_campaign_pips, CampaignLevel, CampaignProgressView,
@@ -281,6 +282,7 @@ pub fn draw_title(
     sector_unlocked: bool,
     scores: &ScoreTable,
     rat: &[String],
+    dash_key: DashKey,
     hits: &mut HitMap,
 ) {
     let tone = material(theme);
@@ -417,19 +419,10 @@ pub fn draw_title(
                 );
             }
         }
-        center(
-            f,
-            r,
-            r.height - 2,
-            label(
-                if wide {
-                    "WASD/arrows/mouse move · Space/click dash+active · right click pause · M mute"
-                } else {
-                    "WASD/arrows · Space dash+active · RMB pause · M mute"
-                },
-                MUTED,
-            ),
-        );
+        // The dash key is named from the live input mode: Ctrl where the
+        // terminal reports a lone modifier press, Space where it cannot (see
+        // `input::DashKey`).
+        center(f, r, r.height - 2, label(dash_key.title_legend(wide), MUTED));
         controls(
             f,
             band(r, r.height - 1, 1),
@@ -680,7 +673,7 @@ pub fn draw_map_intro(f: &mut Frame, area: Rect, theme: Theme, accent: Color, hi
     );
 }
 
-pub fn draw_pause(f: &mut Frame, area: Rect, hits: &mut HitMap) {
+pub fn draw_pause(f: &mut Frame, area: Rect, dash_key: DashKey, hits: &mut HitMap) {
     let r = panel(f, centered_rect(46, 8, area), " RUN CONTROL ", MUTED);
     center(f, r, 1, Span::styled("━━━  ▌▌  ━━━", heavy(TAIL)));
     center(f, r, 2, Span::styled("PAUSED", heavy(COAT)));
@@ -697,7 +690,20 @@ pub fn draw_pause(f: &mut Frame, area: Rect, hits: &mut HitMap) {
         ],
     );
     if r.height >= 7 {
-        center(f, r, 6, label("[ ] music · - = effects · O options", MUTED));
+        // The narrow plate still names the dash key (the full plate has its own
+        // legend line); `O options` is already on the controls row above.
+        center(
+            f,
+            r,
+            6,
+            label(
+                match dash_key {
+                    DashKey::Ctrl => "[ ] music · - = fx · Ctrl dash",
+                    DashKey::Space => "[ ] music · - = fx · Space dash",
+                },
+                MUTED,
+            ),
+        );
     }
 }
 
@@ -1054,10 +1060,11 @@ pub fn draw_pause_with_run(
     area: Rect,
     world: &World,
     muted: bool,
+    dash_key: DashKey,
     hits: &mut HitMap,
 ) {
     if area.width < 58 || area.height < 21 {
-        draw_pause(f, area, hits);
+        draw_pause(f, area, dash_key, hits);
         return;
     }
 
@@ -1279,7 +1286,7 @@ pub fn draw_pause_with_run(
     let mute_label = if muted {
         "M unmute  ·  audio muted"
     } else {
-        "M mute  ·  WASD/mouse move  ·  Space/click dash"
+        dash_key.pause_legend()
     };
     center(
         f,
@@ -1641,7 +1648,7 @@ mod tests {
         let mut hits = HitMap::default();
 
         let mut wide = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        wide.draw(|f| draw_pause_with_run(f, f.area(), &w, true, &mut hits))
+        wide.draw(|f| draw_pause_with_run(f, f.area(), &w, true, DashKey::Space, &mut hits))
             .unwrap();
         let wt = screen_text(&wide);
         assert!(wt.contains("ARSENAL"), "dossier arsenal missing");
@@ -1653,7 +1660,7 @@ mod tests {
         hits.clear();
         let mut compact = Terminal::new(TestBackend::new(57, 20)).unwrap();
         compact
-            .draw(|f| draw_pause_with_run(f, f.area(), &w, false, &mut hits))
+            .draw(|f| draw_pause_with_run(f, f.area(), &w, false, DashKey::Space, &mut hits))
             .unwrap();
         let ct = screen_text(&compact);
         assert!(ct.contains("PAUSED"));
@@ -1670,14 +1677,14 @@ mod tests {
 
         w.elapsed = 65.0; // 255 s boss time → 03:10 to go
         terminal
-            .draw(|f| draw_pause_with_run(f, f.area(), &w, true, &mut hits))
+            .draw(|f| draw_pause_with_run(f, f.area(), &w, true, DashKey::Space, &mut hits))
             .unwrap();
         let text = screen_text(&terminal);
         assert!(text.contains("03:10 to boss"), "no build-up clock: {text}");
 
         w.elapsed = crate::game::director::BOSS_TIME + 42.0;
         terminal
-            .draw(|f| draw_pause_with_run(f, f.area(), &w, true, &mut hits))
+            .draw(|f| draw_pause_with_run(f, f.area(), &w, true, DashKey::Space, &mut hits))
             .unwrap();
         let text = screen_text(&terminal);
         assert!(
@@ -1826,7 +1833,7 @@ mod tests {
             let mut hits = HitMap::default();
             let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();
             terminal
-                .draw(|f| draw_pause_with_run(f, f.area(), &w, false, &mut hits))
+                .draw(|f| draw_pause_with_run(f, f.area(), &w, false, crate::input::DashKey::Space, &mut hits))
                 .unwrap();
             let buf = terminal.backend().buffer();
             let half_blocks = buf

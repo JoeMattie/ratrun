@@ -45,11 +45,14 @@ pub struct TickInput {
     pub dt: f32,
     pub move_dir: Vec2,
     pub dash: bool,
-    /// The same Space/click press as `dash`, read by the **active weapons**
-    /// (`weapons::active_weapons_system`): one press dashes *and* releases every
-    /// fully charged active weapon. It is a separate field so a test (or a
-    /// future input) can fire an active weapon while the dash is charging.
-    /// `World::begin_tick` mirrors `dash` into it.
+    /// The Space/click press, read by the **active weapons**
+    /// (`weapons::active_weapons_system`): it releases every fully charged
+    /// active weapon. It is a separate field from `dash` because the two jobs
+    /// only share a key on a terminal that cannot report a lone Ctrl press
+    /// (there Space dashes *and* fires, so `World::begin_tick` mirrors `dash`
+    /// into it); on a Kitty-protocol terminal Ctrl dashes and Space is only
+    /// this field (`World::begin_tick_with`). A test can fire an active weapon
+    /// while the dash is charging either way.
     pub active: bool,
 }
 

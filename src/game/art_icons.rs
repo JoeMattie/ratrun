@@ -1623,7 +1623,7 @@ mod tests {
                     area,
                     ratatui::style::Style::default().bg(Color::Rgb(11, 15, 17)),
                 );
-                menu::draw_pause_with_run(f, area, &world, false, &mut hits);
+                menu::draw_pause_with_run(f, area, &world, false, crate::input::DashKey::Space, &mut hits);
             })
             .unwrap();
             dump_buf(term.backend().buffer(), w, h, "pause");

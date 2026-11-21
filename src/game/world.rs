@@ -705,11 +705,21 @@ impl World {
     }
 
     pub fn update(&mut self, dt: f32, move_dir: Vec2, dash: bool) {
+        // One press, two jobs: the legacy Space press dashes *and* fires the
+        // charged active weapons (`active` mirrors `dash`).
+        self.update_with(dt, move_dir, dash, dash);
+    }
+
+    /// [`update`](Self::update) with the dash and the active-weapon press told
+    /// apart, which is what the App does on a terminal that reports a lone
+    /// Ctrl press (Ctrl dashes, Space only fires the actives). The bot and the
+    /// harness keep using `update`, where one press is both.
+    pub fn update_with(&mut self, dt: f32, move_dir: Vec2, dash: bool, active: bool) {
         // Neon merge: the HUD reads only this tick's pickups.
         self.last_pickups.clear();
         if self.finished() {
             // Keep particles settling for a beat, but freeze the sim.
-            self.begin_tick(dt, move_dir, dash);
+            self.begin_tick_with(dt, move_dir, dash, active);
             self.settle_schedule.run(&mut self.ecs);
             self.end_tick();
             return;
@@ -717,7 +727,7 @@ impl World {
         // Legacy `update` line 123.
         self.elapsed += dt;
 
-        self.begin_tick(dt, move_dir, dash);
+        self.begin_tick_with(dt, move_dir, dash, active);
         self.schedule.run(&mut self.ecs);
         self.end_tick();
     }
@@ -731,11 +741,17 @@ impl World {
         // `TickInput::active` mirrors `dash` here, and `player_system` /
         // `active_weapons_system` each decide whether *they* can spend it (a
         // dash on cooldown still fires a charged weapon, and vice versa).
+        self.begin_tick_with(dt, move_dir, dash, dash);
+    }
+
+    /// [`begin_tick`](Self::begin_tick) with the two presses told apart (see
+    /// [`update_with`](Self::update_with)).
+    pub fn begin_tick_with(&mut self, dt: f32, move_dir: Vec2, dash: bool, active: bool) {
         self.ecs.insert_resource(TickInput {
             dt,
             move_dir,
             dash,
-            active: dash,
+            active,
         });
         self.ecs.insert_resource(Viewport(self.viewport));
         self.ecs.insert_resource(NukeTick(false));

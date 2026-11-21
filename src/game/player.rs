@@ -19,6 +19,14 @@ pub struct Player {
     pub dash_active: f32,
     pub iframes: f32,
     pub hurt_flash: f32,
+    /// Seconds left of the "dash is back" pop: set the tick the cooldown runs
+    /// out, read by the on-rat gauge (`art_rat::draw_dash_gauge`) and the HUD's
+    /// dash module. Purely visual, no rng, no sim effect.
+    pub dash_ready_flash: f32,
+    /// Seconds left of the "dash refused" shake: set when the player presses
+    /// the dash key while the cooldown is still running, so a failed press is
+    /// never silent (gauge shake + `Sfx::DashDenied`). Visual only.
+    pub dash_denied: f32,
 }
 
 /// XP needed to go from `level` to `level + 1`.
@@ -70,6 +78,8 @@ impl Player {
             dash_active: 0.0,
             iframes: 0.0,
             hurt_flash: 0.0,
+            dash_ready_flash: 0.0,
+            dash_denied: 0.0,
         }
     }
 
