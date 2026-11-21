@@ -153,13 +153,22 @@ pub fn trailer_boss() -> BossKind {
 }
 
 impl BossKind {
-    /// The boss for a campaign theme.
+    /// The boss for a floor.
+    ///
+    /// **The wave 3 seam.** This is the one function that decides which boss a
+    /// theme spawns: the Laundry and the Printworks currently borrow the
+    /// Kitchen's broom and the Lab's mower so their floors are completable, and
+    /// the boss wave replaces those two arms with `BossKind::Mangle` and
+    /// `BossKind::NightEdition` (plus their arena furniture in
+    /// `levelgen::layout::furnish_arena`). Nothing else maps themes to bosses.
     #[inline]
     pub fn for_theme(theme: Theme) -> Self {
         match theme {
             Theme::Sewer => BossKind::Cat,
             Theme::Kitchen => BossKind::Broom,
             Theme::Lab => BossKind::Mower,
+            Theme::Laundry => BossKind::Broom,
+            Theme::Printworks => BossKind::Mower,
             Theme::Trailer => trailer_boss(),
         }
     }

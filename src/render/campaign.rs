@@ -15,6 +15,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::Frame;
 
 use crate::game::art_icons;
+use crate::game::level::Theme;
 use crate::render::palette::{mix, to_color, Rgb, COAT, EDGE, MUTED, PLATE, TAIL, TRACK};
 
 // Semantic colors matching `src/render/hud.rs` and `src/render/menu.rs`.
@@ -141,15 +142,38 @@ pub enum CampaignLevel {
     Sewer = 0,
     Kitchen = 1,
     Lab = 2,
+    /// Stage two's side route (`WAVE3_DESIGN.md` §11): the laundry floor.
+    Laundry = 3,
+    /// Stage three's side route: the printworks.
+    Printworks = 4,
 }
 
 impl CampaignLevel {
+    /// The three campaign **stages**, in order: the original route. The side
+    /// route floors are reachable through [`Self::from_theme`] but are not
+    /// extra stages, so the sector-select screen and the progress pips stay
+    /// three steps long.
     pub const fn all() -> [CampaignLevel; 3] {
         [
             CampaignLevel::Sewer,
             CampaignLevel::Kitchen,
             CampaignLevel::Lab,
         ]
+    }
+
+    /// The plate for a floor the player is on (including the side routes).
+    pub const fn from_theme(theme: Theme) -> CampaignLevel {
+        match theme {
+            Theme::Sewer => CampaignLevel::Sewer,
+            Theme::Kitchen => CampaignLevel::Kitchen,
+            Theme::Lab => CampaignLevel::Lab,
+            Theme::Laundry => CampaignLevel::Laundry,
+            Theme::Printworks => CampaignLevel::Printworks,
+            // The getaway ride has no campaign plate of its own: it is a
+            // last-stage practice floor and borrows the Lab's (as its boss
+            // bar does, see `boss::trailer_boss`).
+            Theme::Trailer => CampaignLevel::Lab,
+        }
     }
 
     pub const fn index(self) -> usize {
@@ -161,7 +185,9 @@ impl CampaignLevel {
         match index {
             0 => CampaignLevel::Sewer,
             1 => CampaignLevel::Kitchen,
-            _ => CampaignLevel::Lab,
+            2 => CampaignLevel::Lab,
+            3 => CampaignLevel::Laundry,
+            _ => CampaignLevel::Printworks,
         }
     }
 
@@ -171,6 +197,8 @@ impl CampaignLevel {
             CampaignLevel::Sewer => 1,
             CampaignLevel::Kitchen => 2,
             CampaignLevel::Lab => 3,
+            CampaignLevel::Laundry => 2,
+            CampaignLevel::Printworks => 3,
         }
     }
 
@@ -179,6 +207,8 @@ impl CampaignLevel {
             CampaignLevel::Sewer => Some(CampaignLevel::Kitchen),
             CampaignLevel::Kitchen => Some(CampaignLevel::Lab),
             CampaignLevel::Lab => None,
+            CampaignLevel::Laundry => Some(CampaignLevel::Lab),
+            CampaignLevel::Printworks => Some(CampaignLevel::Printworks),
         }
     }
 
@@ -187,6 +217,8 @@ impl CampaignLevel {
             CampaignLevel::Sewer => "THE SEWERS",
             CampaignLevel::Kitchen => "THE KITCHENS",
             CampaignLevel::Lab => "THE LAB",
+            CampaignLevel::Laundry => "THE LAUNDRY",
+            CampaignLevel::Printworks => "THE PRINTWORKS",
         }
     }
 
@@ -195,6 +227,8 @@ impl CampaignLevel {
             CampaignLevel::Sewer => "Sewer",
             CampaignLevel::Kitchen => "Kitchen",
             CampaignLevel::Lab => "Lab",
+            CampaignLevel::Laundry => "Laundry",
+            CampaignLevel::Printworks => "Printworks",
         }
     }
 
@@ -203,6 +237,8 @@ impl CampaignLevel {
             CampaignLevel::Sewer => "SECTOR 01",
             CampaignLevel::Kitchen => "SECTOR 02",
             CampaignLevel::Lab => "SECTOR 03",
+            CampaignLevel::Laundry => "SECTOR 02B",
+            CampaignLevel::Printworks => "SECTOR 03B",
         }
     }
 
@@ -211,6 +247,12 @@ impl CampaignLevel {
             CampaignLevel::Sewer => "APEX JAGUAR",
             CampaignLevel::Kitchen => "THE SWEEPER",
             CampaignLevel::Lab => "TURF-REAPER MK.IV",
+            // The floors' own bosses (`WAVE3_DESIGN.md` §12). Until w3-bosses
+            // lands them these floors are guarded by the borrowed broom and
+            // mower (`BossKind::for_theme`), so the *fight* is the placeholder
+            // and the plate is where the floor is going.
+            CampaignLevel::Laundry => "THE MANGLE",
+            CampaignLevel::Printworks => "THE NIGHT EDITION",
         }
     }
 
@@ -219,6 +261,8 @@ impl CampaignLevel {
             CampaignLevel::Sewer => "APEX JAGUAR  —  DOWN",
             CampaignLevel::Kitchen => "THE SWEEPER  —  ROUTED",
             CampaignLevel::Lab => "TURF-REAPER MK.IV  —  SCRAPPED",
+            CampaignLevel::Laundry => "THE MANGLE  —  JAMMED",
+            CampaignLevel::Printworks => "THE NIGHT EDITION  —  STOPPED",
         }
     }
 
@@ -232,6 +276,12 @@ impl CampaignLevel {
             }
             CampaignLevel::Lab => {
                 "Belly-up on the tiles, rotary blades spinning down to silence. The emergency STOP flashes dark. The blast door ahead stands unlatched."
+            }
+            CampaignLevel::Laundry => {
+                "For the first time in thirty years, the laundry stops. The drum ticks as it cools, and the service stair beyond it is unlatched."
+            }
+            CampaignLevel::Printworks => {
+                "The last edition rolls off the belt, curls under the street door, and you are out with it."
             }
         }
     }
@@ -247,6 +297,12 @@ impl CampaignLevel {
             CampaignLevel::Lab => {
                 "Where you were made. The lights hum a number that used to be your name. End it here. Walk out the front door."
             }
+            CampaignLevel::Laundry => {
+                "Indigo tile, steam between the machines, and a hundred doors that will not open. The whites come out pink down here."
+            }
+            CampaignLevel::Printworks => {
+                "Ink in the seams of your paws and the presses still running overnight. Tomorrow's front page says you were caught."
+            }
         }
     }
 
@@ -256,6 +312,8 @@ impl CampaignLevel {
             CampaignLevel::Sewer => (144, 184, 173),
             CampaignLevel::Kitchen => (213, 173, 122),
             CampaignLevel::Lab => (151, 175, 214),
+            CampaignLevel::Laundry => (159, 200, 200),
+            CampaignLevel::Printworks => (182, 180, 165),
         }
     }
 
@@ -333,6 +391,17 @@ pub enum KeepThreeAction {
     /// Confirm the chosen pack and descend/ascend into the next level.
     /// Emitted in [`HitList`] only when [`keep_three_can_confirm`] is `true`.
     Confirm,
+    /// Pick the route floor at this index (`0..2`) for the level being packed
+    /// for (`WAVE3_DESIGN.md` §1: Kitchen or Laundry, then Lab or Printworks).
+    Route(u8),
+}
+
+/// One route chip on the keep screen: the floor's name and whether it is the
+/// chosen one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RouteChip<'a> {
+    pub name: &'a str,
+    pub chosen: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -354,6 +423,10 @@ pub struct KeepThreeView<'a> {
     pub scroll: usize,
     /// Currently hovered mouse target.
     pub hovered: Option<KeepThreeAction>,
+    /// The two floors the next level may be played on (original route first),
+    /// or `[None, None]` when the next level has no choice (stage one, or the
+    /// campaign is over).
+    pub route: [Option<RouteChip<'a>>; 2],
 }
 
 // ---------------------------------------------------------------------------
@@ -914,6 +987,35 @@ fn draw_boss_triumph_emblem(buf: &mut Buffer, area: Rect, level: CampaignLevel, 
                 put_centered(buf, area, y + i as u16, line, ink(*col).bg(PLATE));
             }
         }
+        CampaignLevel::Laundry => {
+            // Placeholder: the Laundry's fight is the borrowed broom until the
+            // Mangle lands, so its triumph plate is the broom's.
+            let rows = [
+                ("    ╲   ╭───╮   ▄▀▀▀▄   ", WARN_AMBER),
+                ("     ╲  │▓▓▓│  ▐█████▌  ", TRAIL_GOLD),
+                ("══════╲═╧═┴═╧═══▀▀▀▀▀═══", level.accent()),
+            ];
+            for (i, (line, col)) in rows.iter().enumerate() {
+                if y + i as u16 >= area.height {
+                    break;
+                }
+                put_centered(buf, area, y + i as u16, line, ink(*col).bg(PLATE));
+            }
+        }
+        CampaignLevel::Printworks => {
+            // Placeholder: the Printworks' fight is the borrowed mower.
+            let rows = [
+                ("  ▄█▄  ▀▀▀▀▀▀▀▀▀▀  ▄█▄  ", WARN_AMBER),
+                ("  ▐█▌  [  STOP  ]  ▐█▌  ", DANGER),
+                ("═══╧═══╲════════╱═══╧═══", level.accent()),
+            ];
+            for (i, (line, col)) in rows.iter().enumerate() {
+                if y + i as u16 >= area.height {
+                    break;
+                }
+                put_centered(buf, area, y + i as u16, line, ink(*col).bg(PLATE));
+            }
+        }
         CampaignLevel::Lab => {
             // TURF-REAPER MK.IV: flipped mower shell belly-up + dead STOP button + treads.
             let rows = [
@@ -1441,7 +1543,25 @@ pub fn draw_keep_three(
         let _ = write!(cap, " PACK {} OF {} ", required, view.items.len());
     }
 
-    let _ = write!(cap, " · GOLD {} ", view.gold);
+    // The purse rides the caption when there is room for it *and* the route
+    // chips that follow the caption on the same border; on a narrow panel
+    // (57x20) the chips win the header and the purse moves to the bottom
+    // border, so neither is ever clipped.
+    let mut gold_text = StackBuf::<24>::new();
+    let _ = write!(gold_text, " · GOLD {} ", view.gold);
+    let chips_w: u16 = view
+        .route
+        .iter()
+        .flatten()
+        .map(|chip| chip.name.chars().count() as u16 + 3)
+        .sum();
+    let gold_w = gold_text.as_str().chars().count() as u16;
+    let header_need = 2 + cap.as_str().chars().count() as u16 + gold_w + 3 + chips_w + 3;
+    let gold_in_caption =
+        chips_w == 0 || layout.panel_rect.width < 40 || header_need <= layout.panel_rect.width;
+    if gold_in_caption {
+        let _ = write!(cap, "{}", gold_text.as_str());
+    }
 
     let buf = f.buffer_mut();
     let inner = panel(
@@ -1977,6 +2097,62 @@ pub fn draw_keep_three(
         }
     }
 
+    // The next stage's route (`WAVE3_DESIGN.md` §1). The two chips live on the
+    // panel header, after the caption, so every layout (120x40, 80x24, 57x20)
+    // shows the choice without losing a manifest row. Original route first;
+    // Tab toggles, and the chips are clickable.
+    let has_route = view.route.iter().any(|chip| chip.is_some());
+    if has_route && layout.panel_rect.width >= 40 {
+        let y = layout.panel_rect.y;
+        let mut x = layout.panel_rect.x + 2 + cap.as_str().chars().count() as u16 + 3;
+        let room = layout.panel_rect.right().saturating_sub(3);
+        for (i, chip) in view.route.iter().enumerate() {
+            let Some(chip) = chip else { continue };
+            let mut lbl = StackBuf::<16>::new();
+            let _ = write!(lbl, "[{}]", chip.name);
+            let w = lbl.as_str().chars().count() as u16;
+            if x + w > room {
+                break;
+            }
+            let style = if chip.chosen {
+                heavy(HEAL_MINT).bg(PLATE)
+            } else if view.hovered == Some(KeepThreeAction::Route(i as u8)) {
+                ink(COAT).bg(PLATE_HILITE)
+            } else {
+                ink(MUTED).bg(PLATE)
+            };
+            put_str(buf, x, y, lbl.as_str(), w, style);
+            hits.push(Rect::new(x, y, w, 1), KeepThreeAction::Route(i as u8));
+            x += w + 1;
+        }
+        // The purse, when the chips took its place on the header.
+        if !gold_in_caption {
+            let mut purse = StackBuf::<24>::new();
+            let _ = write!(purse, " GOLD {} ", view.gold);
+            let pw = purse.as_str().chars().count() as u16;
+            put_str(
+                buf,
+                layout.panel_rect.x + 2,
+                layout.panel_rect.bottom().saturating_sub(1),
+                purse.as_str(),
+                pw,
+                ink(TRAIL_GOLD).bg(PLATE),
+            );
+        }
+        // The key hint rides the bottom border, where nothing else is drawn.
+        let hint = "TAB route";
+        let hw = hint.chars().count() as u16;
+        let hx = layout.panel_rect.right().saturating_sub(hw + 2);
+        put_str(
+            buf,
+            hx,
+            layout.panel_rect.bottom().saturating_sub(1),
+            hint,
+            hw,
+            ink(EDGE).bg(PLATE),
+        );
+    }
+
     hits
 }
 
@@ -2061,6 +2237,19 @@ fn level_emblem(level: CampaignLevel) -> [&'static str; 3] {
             "══╧═════╧═════╧══",
         ],
         CampaignLevel::Lab => [
+            "  ╭──╮      ╭──╮  ",
+            "──┤  ├──»───┤  ├──",
+            "  ╰──╯      ╰──╯  ",
+        ],
+        // The side route floors share the borrowed boss's bay until their own
+        // art lands: the Laundry gets the broom's bay, the Printworks the
+        // mower's.
+        CampaignLevel::Laundry => [
+            " ▄▄▄   ▄▄▄   ▄▄▄ ",
+            " ▀█▀   ▀█▀   ▀█▀ ",
+            "══╧═════╧═════╧══",
+        ],
+        CampaignLevel::Printworks => [
             "  ╭──╮      ╭──╮  ",
             "──┤  ├──»───┤  ├──",
             "  ╰──╯      ╰──╯  ",
@@ -2829,6 +3018,8 @@ pub fn draw_level_select(
                     CampaignLevel::Sewer => "Locked",
                     CampaignLevel::Kitchen => "Clear Sewer first",
                     CampaignLevel::Lab => "Clear Kitchen first",
+                    CampaignLevel::Laundry => "Clear Sewer first",
+                    CampaignLevel::Printworks => "Clear Kitchen first",
                 };
                 put_centered(buf, ci, best_y, req, ink(MUTED).bg(bg));
             } else if let Some(best) = slot.best {
@@ -2920,6 +3111,8 @@ pub fn draw_level_select(
                         CampaignLevel::Sewer => "Locked",
                         CampaignLevel::Kitchen => "Clear THE SEWERS to unlock",
                         CampaignLevel::Lab => "Clear THE KITCHENS to unlock",
+                        CampaignLevel::Laundry => "Clear THE SEWERS to unlock",
+                        CampaignLevel::Printworks => "Clear THE KITCHENS to unlock",
                     };
                     let _ = write!(info, "  {}", req);
                     put_str_ellipsis(buf, ci.x + 1, y2, info.as_str(), ci.width.saturating_sub(2), ink(MUTED).bg(bg));
@@ -3352,6 +3545,7 @@ mod tests {
                     } else {
                         Some(KeepThreeAction::ToggleItem(1))
                     },
+                    route: [None, None],
                 };
                 assert_eq!(keep_three_can_confirm(&view), *expect_confirm);
 
@@ -3391,6 +3585,7 @@ mod tests {
                 cursor: 0,
                 scroll: 0,
                 hovered: None,
+                route: [None, None],
             };
             let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
             let mut hits = HitList::new();
@@ -3426,6 +3621,7 @@ mod tests {
             cursor: 0,
             scroll: 0,
             hovered: None,
+            route: [None, None],
         };
         assert!(keep_three_can_confirm(&few_view));
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -3474,6 +3670,7 @@ mod tests {
                 cursor: 16,
                 scroll: 2,
                 hovered: Some(KeepThreeAction::ScrollUp),
+                route: [None, None],
             };
             wide_term
                 .draw(|f| hits = draw_keep_three(f, f.area(), &wide_view))
@@ -3849,6 +4046,7 @@ mod tests {
                     cursor,
                     scroll,
                     hovered: hov,
+                    route: [None, None],
                 };
                 term.draw(|f| {
                     let _ = draw_keep_three(f, f.area(), &k3);

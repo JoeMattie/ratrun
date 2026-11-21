@@ -109,6 +109,10 @@ fn accent(world: &World) -> Color {
         Theme::Sewer => (144, 184, 173),
         Theme::Kitchen => (213, 173, 122),
         Theme::Lab => (151, 175, 214),
+        // Porcelain over indigo tile; newsprint with its registration cyan
+        // (the title row's material tints for the two side-route floors).
+        Theme::Laundry => (159, 200, 200),
+        Theme::Printworks => (120, 178, 182),
         // Sun-bleached deck planks.
         Theme::Trailer => (214, 196, 150),
     })

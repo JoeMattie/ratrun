@@ -118,7 +118,15 @@ pub fn generate(mut tiles: TileMap, rng: &mut StdRng, seed: u64) -> Level {
     });
 
     tiles.rebuild_masks();
-    let objects = objects_from(&tiles, &mazes, &holes, &traps, &shop_holes);
+    let objects = objects_from(
+        &tiles,
+        &mazes,
+        &holes,
+        &traps,
+        &shop_holes,
+        // The flatbed has its own hazards (pits, cargo, wind): no grates, no ink.
+        &super::hazards::HazardPlacement::default(),
+    );
     let nav = NavGrid::from_tiles(&tiles, SizeClass::Large);
     Level {
         theme,

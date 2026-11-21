@@ -346,6 +346,18 @@ enum Threat {
         pos: Vec2,
         facing: Vec2,
     },
+    /// A steam grate: a 1 s warn, then a 0.7 s one-tile plume for 8.
+    Steam {
+        pos: Vec2,
+        warn_left: f32,
+        active_left: f32,
+    },
+    /// An ink pad: no damage, but the slow makes every escape worse, so a dry
+    /// route of equal length wins.
+    Ink {
+        pos: Vec2,
+        half: Vec2,
+    },
     Mousetrap {
         pos: Vec2,
         facing: Vec2,
@@ -1745,6 +1757,35 @@ fn threat_cost(_p: Vec2, threat: Threat, q: Vec2, t: f32, contact_scale: f32) ->
                 0.0
             }
         }
+        Threat::Steam {
+            pos,
+            warn_left,
+            active_left,
+        } => {
+            // The plume covers one 16 px cell; a rat in the cell takes 8. Read
+            // it like a hazard: leave the cell before the puffs stop, and never
+            // walk in while the plume is up.
+            let near = (q.x - pos.x).abs() <= crate::game::hazards::STEAM_HALF + R
+                && (q.y - pos.y).abs() <= crate::game::hazards::STEAM_HALF + R;
+            if !near {
+                0.0
+            } else if active_left > 0.0 {
+                14.0
+            } else if warn_left <= t + 0.12 {
+                12.0
+            } else {
+                // A grate that is still resting is a mild "don't stand here".
+                1.5
+            }
+        }
+        Threat::Ink { pos, half } => {
+            let on = (q.x - pos.x).abs() <= half.x + R && (q.y - pos.y).abs() <= half.y + R;
+            if on {
+                2.5
+            } else {
+                0.0
+            }
+        }
         Threat::Mousetrap { pos, facing, armed } => {
             let trigger = pos + facing * 3.5;
             if armed && trigger.dist(q) < 4.5 + R {
@@ -2089,6 +2130,62 @@ mod tests {
             goal.dist(hole.face()) > 1.5,
             "the shop cooldown keeps the rat off the shelf"
         );
+    }
+
+    /// A headless run on each wave 3 floor: the bot survives the opening, keeps
+    /// moving (never frozen for a long window), and its path crosses the floor.
+    ///
+    /// The hazards are the point: a bot that walks into every steam plume or
+    /// stands on ink loses its escape speed and gets caught. `Skill::Skilled`
+    /// (a good human) has to clear the first two minutes on both floors.
+    #[test]
+    fn the_bot_plays_both_new_floors_without_getting_stuck() {
+        for theme in [Theme::Laundry, Theme::Printworks] {
+            for seed in [3u64, 11] {
+                let mut w = World::new(theme, seed);
+                let mut bot = seeded_bot(Skill::Skilled, seed);
+                let dt = 1.0 / 30.0;
+                let mut last = w.player.pos;
+                let mut still = 0.0f32;
+                let mut worst_still = 0.0f32;
+                let mut travelled = 0.0f32;
+                let mut steps = 0u32;
+                while w.elapsed < 60.0 && w.player.alive() {
+                    let input = bot.decide(&w, dt);
+                    w.update(dt, input.move_dir, input.dash);
+                    // Spend level-ups like the app does (first card), so the
+                    // build keeps up with the director.
+                    if w.pending_levelups > 0 {
+                        w.pending_levelups = 0;
+                        let choices = w.player.loadout.generate_choices(&mut w.rng);
+                        if let Some(choice) = choices.first() {
+                            let choice = choice.clone();
+                            w.player.loadout.apply(&choice);
+                        }
+                    }
+                    let moved = w.player.pos.dist(last);
+                    travelled += moved;
+                    last = w.player.pos;
+                    still = if moved < 0.4 { still + dt } else { 0.0 };
+                    worst_still = worst_still.max(still);
+                    steps += 1;
+                }
+                assert!(steps > 60, "{theme:?} seed {seed}: the run never ran");
+                assert!(
+                    worst_still < 6.0,
+                    "{theme:?} seed {seed}: the bot stood still for {worst_still:.1} s"
+                );
+                assert!(
+                    travelled > 900.0,
+                    "{theme:?} seed {seed}: the bot only travelled {travelled:.0} px"
+                );
+                assert!(
+                    w.elapsed >= 40.0,
+                    "{theme:?} seed {seed}: died at {:.1} s on a new floor",
+                    w.elapsed
+                );
+            }
+        }
     }
 
     #[test]

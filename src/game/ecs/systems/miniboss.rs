@@ -497,6 +497,8 @@ pub fn schedule_for(theme: Theme, appointment: usize) -> MinibossKind {
         Theme::Sewer => [Corkscrew, BellDiver, MilkCarton, SisterSnip],
         Theme::Kitchen => [MilkCarton, SisterSnip, BellDiver, Foreman],
         Theme::Lab => [BellDiver, Corkscrew, Foreman, Bobbin],
+        Theme::Laundry => [Bobbin, SisterSnip, Corkscrew, MilkCarton],
+        Theme::Printworks => [Foreman, Bobbin, SisterSnip, BellDiver],
         Theme::Trailer => [Corkscrew, Foreman, Bobbin, BellDiver],
     };
     row[appointment.min(3)]
@@ -838,7 +840,20 @@ pub fn chest_floor_near(level: &Level, pos: Vec2) -> Vec2 {
     use crate::game::levelgen::validate::{is_reached, reachable};
     let tiles = &level.tiles;
     let seen = reachable(tiles, cell_of(level.start), SizeClass::Small);
-    let ok = |c: (i32, i32), at: Vec2| is_reached(&seen, tiles, c) && level.pit_at(at).is_none();
+    // ... and not on a floor hazard, a trap or a shop threshold: a chest is a
+    // reward, so touching it must not cost a scald, a glue hold or a shop stop.
+    let objects = &level.objects;
+    let clear = |c: (i32, i32), at: Vec2| {
+        const KEEP: f32 = 22.0;
+        !objects.steam_grates.iter().any(|g| g.cell == c)
+            && !objects.ink_pads.iter().any(|p| p.cells.contains(c.0, c.1))
+            && !objects.sticky_traps.iter().any(|t| t.pos.dist_sq(at) < KEEP * KEEP)
+            && !objects.mousetraps.iter().any(|t| t.pos.dist_sq(at) < KEEP * KEEP)
+            && !objects.shop_holes.iter().any(|h| h.mouth == c || h.cell == c)
+    };
+    let ok = |c: (i32, i32), at: Vec2| {
+        is_reached(&seen, tiles, c) && level.pit_at(at).is_none() && clear(c, at)
+    };
     let cell = cell_of(pos);
     if ok(cell, pos) {
         return pos;
@@ -991,6 +1006,8 @@ mod tests {
             (Theme::Sewer, [Corkscrew, BellDiver, MilkCarton, SisterSnip]),
             (Theme::Kitchen, [MilkCarton, SisterSnip, BellDiver, Foreman]),
             (Theme::Lab, [BellDiver, Corkscrew, Foreman, Bobbin]),
+            (Theme::Laundry, [Bobbin, SisterSnip, Corkscrew, MilkCarton]),
+            (Theme::Printworks, [Foreman, Bobbin, SisterSnip, BellDiver]),
         ];
         for (theme, row) in rows {
             for (i, kind) in row.into_iter().enumerate() {
@@ -1156,7 +1173,45 @@ mod tests {
                             "{theme:?}/{seed}: chest at {at:?} is not reachable"
                         );
                         assert!(level.pit_at(at).is_none(), "{theme:?}/{seed}: chest in a pit");
+                        let c = cell_of(at);
+                        let o = &level.objects;
+                        assert!(
+                            !o.steam_grates.iter().any(|g| g.cell == c)
+                                && !o.ink_pads.iter().any(|p| p.cells.contains(c.0, c.1)),
+                            "{theme:?}/{seed}: chest on a floor hazard"
+                        );
+                        assert!(
+                            !o.sticky_traps.iter().any(|t| t.pos.dist(at) < 22.0)
+                                && !o.mousetraps.iter().any(|t| t.pos.dist(at) < 22.0),
+                            "{theme:?}/{seed}: chest on a trap"
+                        );
+                        assert!(
+                            !o.shop_holes.iter().any(|h| h.mouth == c),
+                            "{theme:?}/{seed}: chest on a shop threshold"
+                        );
                     }
+                }
+                // Every hazard, trap and shop threshold in particular.
+                let spots: Vec<Vec2> = level
+                    .objects
+                    .steam_grates
+                    .iter()
+                    .map(|g| g.pos)
+                    .chain(level.objects.ink_pads.iter().map(|p| p.pos))
+                    .chain(level.objects.sticky_traps.iter().map(|t| t.pos))
+                    .chain(level.objects.shop_holes.iter().map(|h| h.face()))
+                    .collect();
+                for spot in spots {
+                    let at = chest_floor_near(level, spot);
+                    let c = cell_of(at);
+                    let o = &level.objects;
+                    assert!(
+                        !o.steam_grates.iter().any(|g| g.cell == c)
+                            && !o.ink_pads.iter().any(|p| p.cells.contains(c.0, c.1))
+                            && !o.sticky_traps.iter().any(|t| t.pos.dist(at) < 22.0)
+                            && !o.shop_holes.iter().any(|h| h.mouth == c),
+                        "{theme:?}/{seed}: a corpse on a hazard left its chest on one"
+                    );
                 }
                 // Every pit centre in particular.
                 for pit in &level.trailer.pits {

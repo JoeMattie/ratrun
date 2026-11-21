@@ -13,6 +13,7 @@ pub mod enemy_wave3;
 pub mod fog;
 pub mod fx;
 pub mod gates;
+pub mod hazards;
 pub mod loot;
 pub mod miniboss;
 pub mod player;

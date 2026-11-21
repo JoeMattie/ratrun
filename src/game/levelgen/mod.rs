@@ -55,6 +55,7 @@
 //! share) over that many seeds per theme, and fails if any first attempt does
 //! not validate.
 
+pub mod hazards;
 pub mod layout;
 pub mod maze;
 /// The flatbed trailer's own generator (see the module docs).
@@ -124,6 +125,7 @@ pub struct StageTimings {
     pub traps: u64,
     /// Mouse-hole shops (the two per level; no rng, a graph query only).
     pub shop: u64,
+    pub hazards: u64,
     pub masks: u64,
     pub objects: u64,
     pub nav: u64,
@@ -140,6 +142,7 @@ impl StageTimings {
             holes: self.holes.min(other.holes),
             traps: self.traps.min(other.traps),
             shop: self.shop.min(other.shop),
+            hazards: self.hazards.min(other.hazards),
             masks: self.masks.min(other.masks),
             objects: self.objects.min(other.objects),
             nav: self.nav.min(other.nav),
@@ -153,6 +156,7 @@ impl StageTimings {
             + self.holes
             + self.traps
             + self.shop
+            + self.hazards
             + self.masks
             + self.objects
             + self.nav
@@ -216,12 +220,21 @@ fn generate_stages(
         shop,
         placement::place_shop_holes(&tiles, &design, &mazes)
     );
+    // The side routes' floor hazards (steam grates, ink pads). Every other
+    // theme returns immediately without drawing an rng number. After the shop
+    // holes, so a hazard is never placed on (or within two cells of) a shop
+    // threshold: the shops draw no rng, so their order against this stage
+    // cannot move a map.
+    let floor_hazards = stage!(
+        hazards,
+        hazards::place_hazards(&tiles, &design, &mazes, &traps, &shop_holes, &mut rng, theme)
+    );
 
     stage!(masks, tiles.rebuild_masks());
 
     let objects = stage!(
         objects,
-        objects_from(&tiles, &mazes, &holes, &traps, &shop_holes)
+        objects_from(&tiles, &mazes, &holes, &traps, &shop_holes, &floor_hazards)
     );
     let nav = stage!(nav, NavGrid::from_tiles(&tiles, SizeClass::Large));
     Level {
@@ -249,8 +262,14 @@ pub(super) fn objects_from(
     holes: &[placement::RatHolePlacement],
     traps: &[placement::TrapPlacement],
     shop_holes: &[placement::ShopHolePlacement],
+    floor_hazards: &hazards::HazardPlacement,
 ) -> LevelObjects {
-    let mut objects = LevelObjects::default();
+    // The wave 3 floor hazards: the generator's own view structs, straight in.
+    let mut objects = LevelObjects {
+        steam_grates: floor_hazards.steam.clone(),
+        ink_pads: floor_hazards.ink.clone(),
+        ..LevelObjects::default()
+    };
 
     // Rat-holes: one view per hole cell, facing along the passage toward the
     // public approach side (the placement's sign, not just the axis), plus the
@@ -361,7 +380,7 @@ mod tests {
     const TRACE_SEEDS: u64 = 20;
 
     /// Pinned trace, `[theme][seed]`, themes in [`Theme::all`] order.
-    const TRACE_HASHES: [[u64; TRACE_SEEDS as usize]; 3] = [
+    const TRACE_HASHES: [[u64; TRACE_SEEDS as usize]; 5] = [
         [
             7901615061446041732,
             15502363835303310573,
@@ -427,6 +446,50 @@ mod tests {
             12444291170820633288,
             11978326705507914405,
             11810453782985305217,
+        ],
+        [
+            10805153750296198966,
+            7548889806504944601,
+            9897101852491524005,
+            1310106696961805487,
+            14785086157927733246,
+            1796014402922629108,
+            6875031593368173912,
+            16749783029973098476,
+            7525110446455092098,
+            13407763939320226327,
+            4886153586835503292,
+            12020689746040755017,
+            7382750281915165240,
+            6684903351532267424,
+            3660827753175808298,
+            8078296994505069644,
+            18397929916828482381,
+            12189623922460122744,
+            14723125589798940805,
+            5671486694062776221,
+        ],
+        [
+            2805033260889253580,
+            4296887941057542401,
+            8031120419572949743,
+            5932859544970636391,
+            17355364757017056556,
+            12880258993441098085,
+            11614103405664815644,
+            2057413203185587314,
+            11481437907816839974,
+            16890948871737174899,
+            7396753733202041375,
+            12844065411721536629,
+            4601447131429807952,
+            11347625665094173514,
+            6772207712386858751,
+            14833103384097737430,
+            396962693700443366,
+            3441419261846561323,
+            6999302537078967599,
+            7497394559652938252,
         ],
     ];
 
@@ -606,6 +669,7 @@ mod tests {
             let mut mazes = Vec::new();
             let mut holes = Vec::new();
             let mut traps = Vec::new();
+            let mut hazards_v = Vec::new();
             let mut masks = Vec::new();
             let mut objects = Vec::new();
             let mut nav = Vec::new();
@@ -623,6 +687,7 @@ mod tests {
                 mazes.push(t.mazes);
                 holes.push(t.holes);
                 traps.push(t.traps);
+                hazards_v.push(t.hazards);
                 masks.push(t.masks);
                 objects.push(t.objects);
                 nav.push(t.nav);
@@ -630,13 +695,14 @@ mod tests {
             }
             println!(
                 "{theme:?} ({per_theme} seeds, median µs): layout {}, furnish {}, \
-                 mazes {}, rat-holes {}, traps {}, masks {}, objects {}, nav {} \
-                 | total {} ({:.2} ms, p95 {} µs, max {} µs)",
+                 mazes {}, rat-holes {}, traps {}, floor-hazards {}, masks {}, \
+                 objects {}, nav {} | total {} ({:.2} ms, p95 {} µs, max {} µs)",
                 median(&mut layout),
                 median(&mut furnish),
                 median(&mut mazes),
                 median(&mut holes),
                 median(&mut traps),
+                median(&mut hazards_v),
                 median(&mut masks),
                 median(&mut objects),
                 median(&mut nav),
@@ -667,7 +733,7 @@ mod tests {
 
     #[test]
     fn map_trace_pin() {
-        let mut actual = [[0u64; TRACE_SEEDS as usize]; 3];
+        let mut actual = [[0u64; TRACE_SEEDS as usize]; 5];
         for (t, theme) in Theme::all().into_iter().enumerate() {
             for seed in 0..TRACE_SEEDS {
                 actual[t][seed as usize] = map_hash(&generate_once(theme, seed, 0));

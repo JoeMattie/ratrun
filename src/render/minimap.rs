@@ -213,6 +213,26 @@ impl MinimapPalette {
         blood: (90, 200, 255),
     };
 
+    /// Indigo tile and denim (Laundry).
+    pub const LAUNDRY: Self = Self {
+        bg: (0x22, 0x26, 0x3B),
+        bg_alt: (0x2A, 0x2F, 0x48),
+        wall: (0x42, 0x67, 0x79),
+        wall_edge: (0xB3, 0xC7, 0xC3),
+        accent: (0x9F, 0xD8, 0xD4),
+        blood: (0xD8, 0x7E, 0xA6),
+    };
+
+    /// Newsprint against charcoal, with the registration cyan (Printworks).
+    pub const PRINTWORKS: Self = Self {
+        bg: (0x22, 0x23, 0x2A),
+        bg_alt: (0x2C, 0x2D, 0x36),
+        wall: (0x96, 0x94, 0x88),
+        wall_edge: (0xB6, 0xB4, 0xA5),
+        accent: (0x4E, 0x94, 0x98),
+        blood: (0x55, 0x40, 0x64),
+    };
+
     /// The flatbed: warm oak over an asphalt night, with lane-marking amber.
     pub const TRAILER: Self = Self {
         bg: (38, 29, 21),

@@ -11,6 +11,8 @@
 //! | # | system | legacy step |
 //! |---|--------|-------------|
 //! | -1 | `powerups::powerups_system` | wave-3 pocket-find timers (new) |
+//! | 0 | `traps::traps_system` | floor traps (sticky boards, mousetraps); before the player |
+//! | 0b | `hazards::hazards_system` | steam grates + ink pads (Laundry / Printworks only); explicitly after 0 and before 1 |
 //! | 1 | `player::player_system` | `update_player` |
 //! | 2 | `fog::reveal_system` | fog of war (minimap; new, writes only `Fog`) |
 //! | 3 | `enemy_move::flow_refresh_system` | flow refresh |
@@ -89,8 +91,9 @@ use bevy_ecs::prelude::*;
 
 use super::resources::TickInput;
 use super::systems::{
-    boss, combat, enemy_move, enemy_wave3, evolutions, fog, fx, gates, loot, miniboss, player,
-    powerups, projectiles, shop, spawn, trailer, traps, weapons, weapons_wave3a, weapons_wave3b,
+    boss, combat, enemy_move, enemy_wave3, evolutions, fog, fx, gates, hazards, loot, miniboss,
+    player, powerups, projectiles, shop, spawn, trailer, traps, weapons, weapons_wave3a,
+    weapons_wave3b,
 };
 
 /// Legacy `self.damage_numbers.update(dt)` (neon merge, `World::update`).
@@ -123,6 +126,26 @@ pub fn build_tick_schedule() -> Schedule {
     // (a Pocket Watch has to cover the whole tick) and before everything that
     // reads a buff. A run without one of these pickups returns immediately.
     schedule.add_systems(powerups::powerups_system.before(traps::traps_system));
+    // 0b: the wave 3 floor hazards (steam grates, ink pads). Next to the traps
+    // for the same reasons: the rat's ink slow is folded into this tick's
+    // `TickInput` before `player_system` derives its movement, the pursuers'
+    // `InkSlow` component is multiplied in by `enemy_steering_system`, and a
+    // plume's damage lands before `reap_enemies`, so a scalded kill takes the
+    // normal loot path.
+    //
+    // The whole pre-player order is therefore fixed: `powerups` (-1, so Clean
+    // Socks are already aged) → `traps` (0) → `hazards` (0b) → `player` (1).
+    // Relative to the contact→reap chain the hazards are simply the earliest
+    // damage pass of the tick: a plume kill is a corpse through every weapon
+    // pass (nothing targets it), lights a Wick Moth's fuse in
+    // `enemy_wave3::wave3_system`, passes a Hantavirus host's jumps on in
+    // `hantavirus_death_system`, and is reaped at row 17 like any other —
+    // a named miniboss's chest included.
+    schedule.add_systems(
+        hazards::hazards_system
+            .after(traps::traps_system)
+            .before(player::player_system),
+    );
 
     // 1-15: everything up to and including contact damage.
     schedule.add_systems(

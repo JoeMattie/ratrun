@@ -295,6 +295,10 @@ pub fn validate(level: &Level) -> Result<(), Vec<String>> {
     // 7. Placed objects must describe the grid they animate.
     check_objects(level, &mut errors);
 
+    // 8. The side routes' floor hazards (§11): on public, reachable floor, off
+    // every arena/start/maze reservation, and never without a dry way past.
+    check_hazards(level, &small, &mut errors);
+
     if errors.is_empty() {
         Ok(())
     } else {
@@ -379,7 +383,7 @@ fn check_arena(level: &Level, small: &[bool], large: &[bool], errors: &mut Vec<S
 
     // Kitchen: the design's 96 x 80 px encounter floor plus the approach to the
     // pocket under the human's feet (the floor's first ring).
-    if level.theme == Theme::Kitchen {
+    if matches!(level.theme, Theme::Kitchen | Theme::Laundry) {
         let world = floor.to_world();
         if world.w < 96.0 || world.h < 80.0 {
             errors.push(format!(
@@ -399,7 +403,7 @@ fn check_arena(level: &Level, small: &[bool], large: &[bool], errors: &mut Vec<S
         }
     }
 
-    if level.theme == Theme::Lab {
+    if matches!(level.theme, Theme::Lab | Theme::Printworks) {
         check_lab_arena(level, arena, errors);
     }
 
@@ -660,6 +664,108 @@ fn check_escape_hole(
 
 /// The placed objects must agree with the grid, and no hazard may sit on the
 /// player's spawn.
+/// The wave 3 floor hazards: steam grates (Laundry) and ink pads (Printworks).
+///
+/// Both are walkable floor, so the danger is not connectivity but fairness:
+/// every one needs a dry route at least two cells wide past it, and none may
+/// sit on the start room, the boss arena's fighting floor, a maze section or a
+/// threshold.
+fn check_hazards(level: &Level, small: &[bool], errors: &mut Vec<String>) {
+    let tiles = &level.tiles;
+    let theme = level.theme;
+    let arena = level.boss_room().map(|room| room.rect);
+    let start_room = level.start_room().map(|room| room.rect);
+    let clear = |cell: (i32, i32), what: &str, errors: &mut Vec<String>| {
+        if !tiles.get(cell.0, cell.1).is_open() {
+            errors.push(format!("{what} at {cell:?} is not open floor"));
+            return false;
+        }
+        if !is_reached(small, tiles, cell) {
+            errors.push(format!("{what} at {cell:?} is unreachable"));
+        }
+        if start_room.is_some_and(|room| room.contains(cell.0, cell.1)) {
+            errors.push(format!("{what} at {cell:?} is in the start room"));
+        }
+        if arena.is_some_and(|room| room.inflate(1).contains(cell.0, cell.1)) {
+            errors.push(format!("{what} at {cell:?} is in the boss arena"));
+        }
+        for slot in &level.mazes {
+            if slot.bounds.inflate(1).contains(cell.0, cell.1) {
+                errors.push(format!("{what} at {cell:?} is inside a maze section"));
+            }
+        }
+        if near_threshold(tiles, cell) {
+            errors.push(format!("{what} at {cell:?} is on a threshold"));
+        }
+        if !super::hazards::dry_route(tiles, cell) {
+            errors.push(format!(
+                "{what} at {cell:?} has no two-cell dry route past it"
+            ));
+        }
+        true
+    };
+
+    for grate in &level.objects.steam_grates {
+        clear(grate.cell, "steam grate", errors);
+    }
+    for pad in &level.objects.ink_pads {
+        // The generator anchors a pad at its first cell; the dry route is
+        // measured there (a grown pad spreads into the corner it was found
+        // against, so its far cell can sit in the corner itself).
+        let cell = (pad.cells.x, pad.cells.y);
+        clear(cell, "ink pad", errors);
+        for (cx, cy) in pad.cells.cells() {
+            if !tiles.get(cx, cy).is_open() {
+                errors.push(format!("ink pad cell ({cx}, {cy}) is not floor"));
+            }
+        }
+    }
+
+    let expected = match theme {
+        Theme::Laundry => Some(level.objects.steam_grates.len()),
+        Theme::Printworks => Some(level.objects.ink_pads.len()),
+        _ => None,
+    };
+    if let Some(count) = expected {
+        let other = match theme {
+            Theme::Laundry => level.objects.ink_pads.len(),
+            _ => level.objects.steam_grates.len(),
+        };
+        if other != 0 {
+            errors.push(format!("{theme:?} carries another theme's hazard"));
+        }
+        let (lo, hi) = super::hazards::HAZARDS;
+        if !(lo..=hi).contains(&count) {
+            errors.push(format!(
+                "{theme:?} placed {count} hazards, the design says {lo}-{hi}"
+            ));
+        }
+    } else if !level.objects.steam_grates.is_empty() || !level.objects.ink_pads.is_empty() {
+        errors.push(format!("{theme:?} has hazards it should not have"));
+    }
+}
+
+/// Is any wall cell within two cells of `cell` a threshold (doorway, one-way
+/// door or rat-hole)? A hazard in front of one would charge a toll on the only
+/// way through.
+fn near_threshold(tiles: &TileMap, cell: (i32, i32)) -> bool {
+    for dy in -2..=2 {
+        for dx in -2..=2 {
+            if matches!(
+                tiles.get(cell.0 + dx, cell.1 + dy),
+                TileKind::Wall(
+                    WallKind::Doorway { .. }
+                        | WallKind::OneWayDoor { .. }
+                        | WallKind::RatHole { .. }
+                )
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn check_objects(level: &Level, errors: &mut Vec<String>) {
     let tiles = &level.tiles;
     for hole in &level.objects.rat_holes {

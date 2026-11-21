@@ -38,7 +38,7 @@ use super::loadout::{Loadout, PassiveKind};
 use super::weapon::{Weapon, WeaponKind};
 use super::world::World;
 
-/// Number of levels in the campaign: Sewer, Kitchen, Lab.
+/// Number of levels in the campaign: Sewer, stage two, stage three.
 pub const LEVEL_COUNT: usize = 3;
 /// How many powerups the player keeps between levels.
 pub const KEEP_COUNT: usize = 3;
@@ -47,24 +47,28 @@ pub const STARTING_WEAPON: WeaponKind = Loadout::START_WEAPON;
 
 /// The **getaway ride**: the flatbed trailer level.
 ///
-/// It is the third route option for the final stage of the campaign (the
-/// "Lab" slot): `w3-levels` builds the route choice, and this is the theme it
-/// offers alongside the Lab and the other final-stage route. It is not a
-/// campaign *step*, so it is not in [`Theme::all`].
+/// It is **not** a campaign step: the keep screen's route choice offers two
+/// floors per stage ([`Route::options`]) and the Flatbed is not one of them, so
+/// it is not in [`Theme::all`]. It is a bonus practice floor on the title's
+/// sector row ([`Theme::playable`]), built with level index [`LEVEL_COUNT`]
+/// (see [`is_getaway_sector`]). Offering it as a third final-stage route is
+/// the hook this function was left for; the route UI is two chips wide today.
 pub fn getaway_theme() -> Theme {
     Theme::Trailer
 }
 
-/// How many sectors the title's sector row and the sector-select screen offer:
-/// the three campaign sectors plus the getaway ride.
+/// How many **level indices** a world can be built with: the three campaign
+/// stages plus the getaway ride's own index (the bot batch's `--level` range).
+/// The title's sector row is wider: it lists every floor, [`Theme::playable`].
 pub const SECTOR_COUNT: usize = LEVEL_COUNT + 1;
 
-/// Is `sector` the getaway ride rather than a campaign level?
+/// Is level index `sector` the getaway ride rather than a campaign stage?
 pub fn is_getaway_sector(sector: usize) -> bool {
     sector == LEVEL_COUNT
 }
 
-/// The theme the title's sector row shows for `sector`.
+/// The original-route theme of level index `sector` (the getaway ride for
+/// its own index).
 pub fn sector_theme(sector: usize) -> Theme {
     if is_getaway_sector(sector) {
         getaway_theme()
@@ -73,12 +77,80 @@ pub fn sector_theme(sector: usize) -> Theme {
     }
 }
 
-/// The theme of campaign level `index` (0 Sewer, 1 Kitchen, 2 Lab).
+/// The theme of campaign level `index` **on the original route** (0 Sewer,
+/// 1 Kitchen, 2 Lab).
 ///
 /// Out-of-range indices wrap, so a caller cannot index past the campaign; the
-/// real bound is [`LEVEL_COUNT`].
+/// real bound is [`LEVEL_COUNT`]. A side route goes through
+/// [`Route`]/[`CampaignState::theme`], which is what a run in flight uses.
 pub fn level_theme(index: usize) -> Theme {
-    Theme::all()[index % LEVEL_COUNT]
+    Route::ORIGINAL.theme(index % LEVEL_COUNT)
+}
+
+/// The two floors a campaign stage may be played on (`WAVE3_DESIGN.md` §1).
+///
+/// Stage one is always the Sewer. Stage two is the Kitchen or the Laundry,
+/// stage three the Lab or the Printworks. The original route is the first
+/// option everywhere, so "keep the original route as the first menu choice" is
+/// a property of the table and not of the UI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Route {
+    pub stage2: Theme,
+    pub stage3: Theme,
+}
+
+impl Route {
+    /// Sewer → Kitchen → Lab.
+    pub const ORIGINAL: Route = Route {
+        stage2: Theme::Kitchen,
+        stage3: Theme::Lab,
+    };
+
+    /// The floors a stage may be played on, original route first.
+    pub const fn options(stage: usize) -> &'static [Theme] {
+        match stage {
+            0 => &[Theme::Sewer],
+            1 => &[Theme::Kitchen, Theme::Laundry],
+            _ => &[Theme::Lab, Theme::Printworks],
+        }
+    }
+
+    /// The floor this route plays at `stage`.
+    pub fn theme(self, stage: usize) -> Theme {
+        match stage {
+            0 => Theme::Sewer,
+            1 => self.stage2,
+            _ => self.stage3,
+        }
+    }
+
+    /// Switch `stage` to `theme`. Returns `false` (and changes nothing) when the
+    /// theme is not one of that stage's options.
+    pub fn choose(&mut self, stage: usize, theme: Theme) -> bool {
+        if !Self::options(stage).contains(&theme) {
+            return false;
+        }
+        match stage {
+            0 => {}
+            1 => self.stage2 = theme,
+            _ => self.stage3 = theme,
+        }
+        true
+    }
+
+    /// The route that uses `theme` at `stage` (unchanged if it is not an
+    /// option).
+    pub fn with(self, stage: usize, theme: Theme) -> Route {
+        let mut route = self;
+        route.choose(stage, theme);
+        route
+    }
+}
+
+/// The campaign stage a floor belongs to (a side route floor shares its stage
+/// with the original one).
+pub fn theme_stage(theme: Theme) -> usize {
+    theme.stage()
 }
 
 /// Is `index` the campaign's last level (finishing it wins the run)?
@@ -102,11 +174,34 @@ pub fn level_seed(run_seed: u64, index: usize) -> u64 {
     if index == 0 {
         return run_seed;
     }
-    let mut h = run_seed ^ (index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    mix_seed(run_seed, index as u64)
+}
+
+/// splitmix64 finaliser over `(run seed, key)`.
+fn mix_seed(run_seed: u64, key: u64) -> u64 {
+    let mut h = run_seed ^ key.wrapping_mul(0x9e37_79b9_7f4a_7c15);
     h = h.wrapping_add(0x9e37_79b9_7f4a_7c15);
     h = (h ^ (h >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     h = (h ^ (h >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     h ^ (h >> 31)
+}
+
+/// The map seed of campaign level `index` played on `theme`.
+///
+/// The original route's floors keep the seed [`level_seed`] has always given
+/// them (so every existing seeded map and test still means the same thing);
+/// a side route floor mixes its own theme in, so the Laundry and the Printworks
+/// are never generated from the Kitchen's or the Lab's seed.
+pub fn level_seed_on(run_seed: u64, index: usize, theme: Theme) -> u64 {
+    if index == 0 || theme == Route::ORIGINAL.theme(index) {
+        return level_seed(run_seed, index);
+    }
+    let theme_key = match theme {
+        Theme::Laundry => 0x51af_1e3b_c7d9_2a41u64,
+        Theme::Printworks => 0x7c3d_8b62_4e19_f0a5u64,
+        other => other as u64,
+    };
+    mix_seed(level_seed(run_seed, index), theme_key)
 }
 
 // ---- What the player keeps ----------------------------------------------
@@ -356,7 +451,7 @@ impl CampaignTotals {
 /// mutates it.
 #[derive(Clone, Debug)]
 pub struct CampaignState {
-    /// 0 Sewer, 1 Kitchen, 2 Lab.
+    /// 0 Sewer, 1 stage two, 2 stage three.
     pub level: usize,
     /// The loadout the next level starts with.
     pub loadout: Loadout,
@@ -364,6 +459,8 @@ pub struct CampaignState {
     pub run_seed: u64,
     /// Score/kills/time banked by the levels already completed.
     pub totals: CampaignTotals,
+    /// Which floor each stage is played on (stage one is always the Sewer).
+    pub route: Route,
 }
 
 impl CampaignState {
@@ -374,15 +471,40 @@ impl CampaignState {
             loadout: Loadout::starting(),
             run_seed,
             totals: CampaignTotals::default(),
+            route: Route::ORIGINAL,
         }
     }
 
     pub fn theme(&self) -> Theme {
-        level_theme(self.level)
+        self.route.theme(self.level)
     }
 
     pub fn level_seed(&self) -> u64 {
-        level_seed(self.run_seed, self.level)
+        level_seed_on(self.run_seed, self.level, self.theme())
+    }
+
+    /// The floors the **next** level can be played on, original route first
+    /// (empty when the current level is the last one).
+    ///
+    /// The keep screen is shown before [`CampaignState::complete_level`], so
+    /// these are the options for stage `level + 1`.
+    pub fn next_options(&self) -> &'static [Theme] {
+        let next = self.level + 1;
+        if next >= LEVEL_COUNT {
+            return &[];
+        }
+        Route::options(next)
+    }
+
+    /// Pick the floor for the level the player is about to start (stage
+    /// `level + 1`). Returns `false` (and changes nothing) when it is not an
+    /// option for that stage.
+    pub fn choose_route(&mut self, theme: Theme) -> bool {
+        let next = self.level + 1;
+        if next >= LEVEL_COUNT {
+            return false;
+        }
+        self.route.choose(next, theme)
     }
 
     pub fn is_final_level(&self) -> bool {
@@ -461,18 +583,115 @@ mod tests {
 
     #[test]
     fn levels_are_the_campaign_in_order() {
-        assert_eq!(Theme::all()[..], [
-            level_theme(0),
-            level_theme(1),
-            level_theme(2)
-        ]);
-        assert_eq!(level_theme(0), Theme::Sewer);
-        assert_eq!(level_theme(1), Theme::Kitchen);
-        assert_eq!(level_theme(2), Theme::Lab);
+        // The original route is the first option at every stage, and it is what
+        // the bare `level_theme` helper reports.
+        assert_eq!(
+            [level_theme(0), level_theme(1), level_theme(2)],
+            [Theme::Sewer, Theme::Kitchen, Theme::Lab]
+        );
+        for stage in 0..LEVEL_COUNT {
+            assert_eq!(
+                Route::options(stage)[0],
+                Route::ORIGINAL.theme(stage),
+                "stage {stage} must offer the original route first"
+            );
+        }
+        assert_eq!(Route::options(1), &[Theme::Kitchen, Theme::Laundry]);
+        assert_eq!(Route::options(2), &[Theme::Lab, Theme::Printworks]);
+        assert_eq!(Theme::all().len(), 5, "five floors, three stages");
         assert!(!is_final_level(0) && !is_final_level(1));
         assert!(is_final_level(2));
         assert_eq!(levels_remaining(0), 2);
         assert_eq!(levels_remaining(2), 0);
+    }
+
+    #[test]
+    fn the_route_choice_is_seeded_and_deterministic() {
+        // Two campaigns from one run seed that pick the same side route play
+        // exactly the same maps.
+        let mut a = CampaignState::new(97);
+        let mut b = CampaignState::new(97);
+        for camp in [&mut a, &mut b] {
+            assert_eq!(camp.route, Route::ORIGINAL, "the original route is the start");
+            // The choice always names the *next* stage's floor.
+            assert!(camp.choose_route(Theme::Laundry));
+            camp.level = 1;
+            assert!(camp.choose_route(Theme::Printworks));
+        }
+        assert_eq!(a.route, b.route);
+        assert_eq!(
+            a.route,
+            Route {
+                stage2: Theme::Laundry,
+                stage3: Theme::Printworks
+            }
+        );
+        // Stage two and stage three are the side floors.
+        assert_eq!(a.theme(), Theme::Laundry);
+        assert_eq!(a.level_seed(), level_seed_on(97, 1, Theme::Laundry));
+        a.level = 2;
+        b.level = 2;
+        assert_eq!(a.level_seed(), b.level_seed());
+        assert_eq!(a.theme(), Theme::Printworks);
+        assert_eq!(a.level_seed(), level_seed_on(97, 2, Theme::Printworks));
+        // A side route is a different map from the original at that stage.
+        assert_ne!(a.level_seed(), level_seed(97, 2));
+        assert_eq!(
+            a.level_seed(),
+            level_seed_on(97, 2, Theme::Printworks),
+            "the seed is a pure function of (run seed, stage, floor)"
+        );
+        // The original route keeps the historical seeds.
+        let mut original = CampaignState::new(97);
+        assert_eq!(original.level_seed(), 97, "stage one is the run seed");
+        // An illegal choice changes nothing: stage two offers the Kitchen and
+        // the Laundry only, stage three the Lab and the Printworks only.
+        assert!(!original.choose_route(Theme::Sewer));
+        assert!(!original.choose_route(Theme::Printworks));
+        assert_eq!(original.route, Route::ORIGINAL);
+        original.level = 1;
+        assert_eq!(original.level_seed(), level_seed(97, 1));
+        assert!(!original.choose_route(Theme::Kitchen), "stage three's list");
+        assert_eq!(original.route, Route::ORIGINAL);
+    }
+
+    #[test]
+    fn the_route_offers_the_design_s_options_original_first() {
+        // A fresh campaign is about to pick stage two's floor.
+        let mut camp = CampaignState::new(5);
+        assert_eq!(camp.next_options(), &[Theme::Kitchen, Theme::Laundry]);
+        camp.level = 1;
+        assert_eq!(camp.next_options(), &[Theme::Lab, Theme::Printworks]);
+        camp.level = 2;
+        assert!(camp.next_options().is_empty(), "the last level has no next");
+        assert!(!camp.choose_route(Theme::Lab), "the run is over");
+        // Every floor belongs to a stage.
+        for theme in Theme::all() {
+            assert!(theme_stage(theme) < LEVEL_COUNT);
+            assert!(
+                Route::options(theme_stage(theme)).contains(&theme),
+                "{theme:?} is not offered at its own stage"
+            );
+        }
+    }
+
+    #[test]
+    fn a_side_route_campaign_plays_the_side_route_floors() {
+        let mut camp = CampaignState::new(11);
+        let mut world = camp.world();
+        assert_eq!(world.level.theme, Theme::Sewer);
+        world.mark_level_complete();
+        // The keep screen's choice names stage two, then the campaign advances.
+        assert!(camp.choose_route(Theme::Laundry), "stage two's side route");
+        camp.complete_level(&world, &[]).expect("valid keep");
+        let mut world = camp.world();
+        assert_eq!(world.level.theme, Theme::Laundry);
+        world.mark_level_complete();
+        assert!(camp.choose_route(Theme::Printworks), "stage three's side route");
+        camp.complete_level(&world, &[]).expect("valid keep");
+        let world = camp.world();
+        assert_eq!(world.level.theme, Theme::Printworks);
+        assert!(world.is_final_level(), "the Printworks is the last floor");
     }
 
     #[test]
@@ -734,6 +953,7 @@ mod tests {
             loadout: Loadout::starting(),
             run_seed: 23,
             totals: CampaignTotals::default(),
+            route: Route::ORIGINAL,
         };
         assert_eq!(campaign.world().level.seed, other.world().level.seed);
         assert_eq!(campaign.world().level.seed, expected);
@@ -862,6 +1082,7 @@ mod tests {
             loadout: Loadout::starting(),
             run_seed: 43,
             totals: CampaignTotals::default(),
+            route: Route::ORIGINAL,
         };
         let mut world = campaign.world();
         assert!(world.is_final_level());

@@ -191,11 +191,10 @@ pub struct ThemeAmbient {
     pub rat_tint: Rgb,
 }
 
-/// Ambient tint & lighting character for `theme`. Unknown/future themes receive
-/// a balanced cool-neutral default so new themes compile and read cleanly.
+/// Ambient tint & lighting character for `theme`: one row per playable floor
+/// (the match is exhaustive, so a new theme cannot ship without one).
 #[inline]
 pub fn theme_ambient(theme: Theme) -> ThemeAmbient {
-    #[allow(unreachable_patterns)]
     match theme {
         // Dim, damp green-blue subterranean shadow; warm lantern rat contrasts nicely.
         Theme::Sewer => ThemeAmbient {
@@ -222,11 +221,20 @@ pub fn theme_ambient(theme: Theme) -> ThemeAmbient {
             hard_pools: false,
             rat_tint: (255, 248, 230),
         },
-        // Sensible default for future themes (e.g. Laundry, Printworks).
-        _ => ThemeAmbient {
-            mul: [148, 152, 162],
+        // Cool indigo under a haze of steam: the blue channel leads and the
+        // shadows stay soft (wet air scatters the light), with a pale
+        // porcelain glow on the rat.
+        Theme::Laundry => ThemeAmbient {
+            mul: [126, 138, 184],
             hard_pools: false,
-            rat_tint: (248, 244, 232),
+            rat_tint: (232, 244, 246),
+        },
+        // Flat newsprint grey with a registration-cyan lean: neutral shadows,
+        // crisp pools under the press lamps, a cool cyan-white rat.
+        Theme::Printworks => ThemeAmbient {
+            mul: [146, 154, 160],
+            hard_pools: true,
+            rat_tint: (220, 246, 248),
         },
     }
 }

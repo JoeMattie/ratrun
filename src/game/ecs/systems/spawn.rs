@@ -2017,7 +2017,11 @@ mod tests {
                 maps += 1;
             }
         }
-        assert_eq!(maps, 24, "the sweep must cover every theme");
+        assert_eq!(
+            maps,
+            Theme::all().len() * 8,
+            "the sweep must cover every theme"
+        );
     }
 
     /// The director's ring additionally proves the point is on the horde's

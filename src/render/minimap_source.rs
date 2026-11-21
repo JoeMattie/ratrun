@@ -267,6 +267,8 @@ impl MinimapFrame {
             Theme::Sewer => MinimapPalette::SEWER,
             Theme::Kitchen => MinimapPalette::KITCHEN,
             Theme::Lab => MinimapPalette::LAB,
+            Theme::Laundry => MinimapPalette::LAUNDRY,
+            Theme::Printworks => MinimapPalette::PRINTWORKS,
             Theme::Trailer => MinimapPalette::TRAILER,
         };
         let cols = world.level.tiles.cols().max(1);

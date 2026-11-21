@@ -73,6 +73,8 @@ pub enum Target {
     ShopLeave,
     /// The shop's free Molt cancellation.
     ShopCancel,
+    /// Keep screen: pick route floor `i` (`0..2`) for the next campaign level.
+    RouteOption(usize),
 }
 
 /// How many interactive rectangles one screen can register. The campaign
@@ -201,15 +203,25 @@ pub(crate) fn panel(f: &mut Frame, r: Rect, caption: &str, edge: Color) -> Rect 
 }
 
 // Title screens have no World. These desaturated inks match the three facility materials.
-/// The title's sector-row text: the campaign level number, its short name and
-/// a `×` when the level has not been unlocked yet.
-fn sector_name(sector: usize, unlocked: bool) -> String {
-    // The row's last sector is the getaway ride: the flatbed level, which is a
-    // route option rather than a campaign step (see `campaign::getaway_theme`).
-    if crate::game::campaign::is_getaway_sector(sector) {
-        return format!("{:02} {}", sector + 1, Theme::Trailer.name());
+/// The title's sector-row text for the floor at `floor` (an index into
+/// [`Theme::playable`]): the campaign **stage** number, the floor's short name
+/// and a `×` when its stage has not been unlocked yet.
+///
+/// The side-route floors carry their stage's number (`02 Laundry`,
+/// `03 Printworks`). The row's last entry is the getaway ride: the flatbed is a
+/// bonus practice floor rather than a campaign step (see
+/// `campaign::getaway_theme`), numbered one past the stages and never locked.
+fn sector_name(floor: usize, unlocked: bool) -> String {
+    let floors = Theme::playable();
+    let theme = floors[floor.min(floors.len() - 1)];
+    if theme.is_trailer() {
+        return format!(
+            "{:02} {}",
+            crate::game::campaign::LEVEL_COUNT + 1,
+            theme.name()
+        );
     }
-    let level = crate::render::campaign::CampaignLevel::from_index(sector);
+    let level = crate::render::campaign::CampaignLevel::from_theme(theme);
     if unlocked {
         format!("{:02} {}", level.number(), level.short_name())
     } else {
@@ -222,6 +234,8 @@ pub(crate) fn material(theme: Theme) -> palette::Rgb {
         Theme::Sewer => (144, 184, 173),
         Theme::Kitchen => (213, 173, 122),
         Theme::Lab => (151, 175, 214),
+        Theme::Laundry => (159, 200, 200),
+        Theme::Printworks => (182, 180, 165),
         Theme::Trailer => (206, 178, 132),
     }
 }
@@ -351,8 +365,11 @@ pub fn draw_title(
     let mut y = rat_h + art_gap + logo_h;
     center(f, body, y, label(lore::TITLE_BLURB, MUTED));
     y += 1 + gap;
-    let menu = centered_rect(30, body.height, body);
-    let sector_label = "Sector   ";
+    // 32 columns: the sector row lists every playable floor now, and
+    // `Sector ‹ 03 Printworks × ›` plus the ` ▸  ` pointer is 30 cells — it did
+    // not fit the old 30-column band at 57x20.
+    let menu = centered_rect(32, body.height, body);
+    let sector_label = "Sector ";
     let sector_text = sector_name(sector, sector_unlocked);
     let sector_row = format!("{sector_label}‹ {sector_text} ›");
     for (i, text) in ["START RUN", sector_row.as_str(), "OPTIONS", "QUIT"]
@@ -663,6 +680,17 @@ pub fn draw_map_intro(f: &mut Frame, area: Rect, theme: Theme, accent: Color, hi
             "  ╭──╮      ╭──╮  ",
             "──┤  ├──»───┤  ├──",
             "  ╰──╯      ╰──╯  ",
+        ],
+        // A washer drum and a press roller: the two side-route floors.
+        Theme::Laundry => [
+            "  ╭───────╮  ╭──╮ ",
+            "──┤ ▓▓▓▓▓ ├──┤░░├─",
+            "  ╰───────╯  ╰──╯ ",
+        ],
+        Theme::Printworks => [
+            "  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄  ",
+            "──█▓▓▓▓▓▓▓▓▓▓▓▓█──",
+            "  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀  ",
         ],
         Theme::Trailer => [
             " ▚▚▚▚▚▚▚▚▚▚▚▚▚▚▚▚ ",
@@ -1175,7 +1203,9 @@ pub fn draw_pause_with_run(
     let pips_w = campaign_pips_width(true);
     if card.width > pips_w + 34 {
         let pips = CampaignProgressView {
-            current: CampaignLevel::from_index(world.level_index),
+            // The plate follows the floor (a side route, or the getaway ride
+            // borrowing the Lab's), not the stage's original theme.
+            current: CampaignLevel::from_theme(world.level.theme),
             cleared_count: world.level_index.min(campaign::LEVEL_COUNT) as u8,
             bg: None,
         };

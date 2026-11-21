@@ -121,11 +121,13 @@ pub enum Sfx {
     MinibossArrive,
     MinibossTell,
     MinibossRetreat,
+    // Wave 3 floor hazards (steam grates).
+    SteamHiss,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 81] = [
+    pub const ALL: [Sfx; 82] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -219,6 +221,8 @@ impl Sfx {
         Sfx::MinibossArrive,
         Sfx::MinibossTell,
         Sfx::MinibossRetreat,
+        // Wave 3 floor hazards (steam grates).
+        Sfx::SteamHiss,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -305,6 +309,7 @@ impl Sfx {
             Sfx::MinibossArrive => "MINIBOSS_ARRIVE",
             Sfx::MinibossTell => "MINIBOSS_TELL",
             Sfx::MinibossRetreat => "MINIBOSS_RETREAT",
+            Sfx::SteamHiss => "STEAM_HISS",
         }
     }
 
@@ -350,7 +355,8 @@ impl Sfx {
             | Sfx::MowerWallClang
             | Sfx::MowerFlipped
             | Sfx::ShootRain
-            | Sfx::Bump => 3,
+            | Sfx::Bump
+            | Sfx::SteamHiss => 3,
             Sfx::Pickup
             | Sfx::UiSelect
             | Sfx::Heal
@@ -459,7 +465,8 @@ impl Sfx {
             | Sfx::MowerFlipped
             | Sfx::MowerDockHum
             | Sfx::ShootRain
-            | Sfx::Bump => 1,
+            | Sfx::Bump
+            | Sfx::SteamHiss => 1,
             Sfx::Shoot | Sfx::ShootSpray | Sfx::Hit | Sfx::Gem | Sfx::UiMove => 0,
             Sfx::Gold => 0,
             // Pure feedback: never steals a voice from a hit or a kill.
@@ -5924,6 +5931,57 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             });
             m.finish(0.40, 1.0, 2.0, 20.0)
         }
+
+        // 62. SteamHiss: the one-tile plume leaving a laundry grate — a bright
+        // band-passed hiss that opens and settles, over a low pressure thump.
+        Sfx::SteamHiss => {
+            const PITCH: [f32; 3] = [1.0, 0.92, 1.07];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.42);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.30,
+                pink: true,
+                gain: 0.42,
+                attack_s: 0.012,
+                decay_pow: 1.5,
+                filter: FilterMode::BandPass,
+                fc0: 900.0 * p,
+                fc1: 3200.0 * p,
+                fc_pow: 0.8,
+                q: 0.8,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.03,
+                dur_s: 0.35,
+                pink: false,
+                gain: 0.20,
+                attack_s: 0.03,
+                decay_pow: 2.0,
+                filter: FilterMode::HighPass,
+                fc0: 2600.0 * p,
+                fc1: 1400.0 * p,
+                q: 0.7,
+                seed: base_seed ^ 0x5151,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.004,
+                dur_s: 0.20,
+                f0: 150.0 * p,
+                f1: 78.0 * p,
+                pitch_pow: 0.7,
+                wave: Wave::Sine,
+                gain: 0.26,
+                attack_s: 0.003,
+                decay_pow: 1.4,
+                ..Default::default()
+            });
+            m.add_short_tail(0.16, 4800.0);
+            m.finish(0.46, 1.2, 2.2, 22.0)
+        }
     }
 }
 
@@ -6883,6 +6941,181 @@ const TRAILER_SECTIONS: [Section4; NUM_SECTIONS] = [
     },
 ];
 
+// ---- Wave 3 side routes --------------------------------------------------
+//
+// The two new floors get their own key, tempo, timbre and drum *feel*. Their
+// melodic material is the existing arrangements transposed into the new key
+// (a const transform, so nothing is hand-copied and nothing can drift), while
+// the grooves are new: that is enough for the Laundry's brushed 6/8 with two
+// low pump notes and a missed beat before the steam, and the Printworks'
+// platen clack on beats two and four with the bass pausing for the bell. A
+// composer pass can replace the tables without touching the mixer.
+
+/// Transpose one voice by `d` semitones, leaving rest/hold markers alone.
+const fn shift_voice(src: &[i8; SECTION_STEPS], d: i8) -> [i8; SECTION_STEPS] {
+    let mut out = [R; SECTION_STEPS];
+    let mut i = 0;
+    while i < SECTION_STEPS {
+        let v = src[i];
+        out[i] = if v == R || v == H { v } else { v + d };
+        i += 1;
+    }
+    out
+}
+
+/// Transpose a voicing by `d` semitones.
+const fn shift_chord(src: ChordSlot, d: i8) -> ChordSlot {
+    ChordSlot {
+        name: src.name,
+        tones: [src.tones[0] + d, src.tones[1] + d, src.tones[2] + d],
+    }
+}
+
+/// The Laundry's bass: two low pump notes per bar, everything else rests. The
+/// harmony is the source arrangement's, so the progression still moves.
+const fn pump_bass(src: &[i8; SECTION_STEPS]) -> [i8; SECTION_STEPS] {
+    let mut out = [R; SECTION_STEPS];
+    let mut i = 0;
+    while i < SECTION_STEPS {
+        let step = i % 16;
+        if step == 0 || step == 6 {
+            let mut v = src[i];
+            if v == R || v == H {
+                // A hold or rest at the pump step: use the bar's first note.
+                v = 0;
+            }
+            out[i] = v;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The Printworks' bass: the source line, but silent on the last two 16ths of
+/// every bar — the bell rings into that gap.
+const fn bell_pause_bass(src: &[i8; SECTION_STEPS]) -> [i8; SECTION_STEPS] {
+    let mut out = [R; SECTION_STEPS];
+    let mut i = 0;
+    while i < SECTION_STEPS {
+        let step = i % 16;
+        out[i] = if step == 14 || step == 15 { R } else { src[i] };
+        i += 1;
+    }
+    out
+}
+
+/// A brushed 6/8 groove in 16ths: two low pumps, a brush on the fifth and the
+/// ninth, ticks between them, and the last bar of each section missing its
+/// final brush — the breath before the steam.
+const fn steam_6_8(src: &[u8; SECTION_STEPS]) -> [u8; SECTION_STEPS] {
+    let mut out = [0u8; SECTION_STEPS];
+    let mut i = 0;
+    while i < SECTION_STEPS {
+        let step = i % 16;
+        let boss = src[i] & 0xF0;
+        out[i] = match step {
+            0 => KICK | (boss & BKICK),
+            2 => HAT,
+            6 => KICK,
+            5 | 11 => HAT | (boss & BHAT),
+            3 => SNARE,
+            9 => SNARE | (boss & BSNARE),
+            13 => OHAT,
+            15 if (i / 16) % 4 == 3 => 0,
+            _ => 0,
+        };
+        i += 1;
+    }
+    out
+}
+
+/// A press-hall groove: the platen clacks on beats two and four of every bar,
+/// the drum turns underneath, and the boss layer doubles the clack.
+const fn platen_clack(src: &[u8; SECTION_STEPS]) -> [u8; SECTION_STEPS] {
+    let mut out = [0u8; SECTION_STEPS];
+    let mut i = 0;
+    while i < SECTION_STEPS {
+        let step = i % 16;
+        let boss = src[i] & 0xF0;
+        out[i] = match step {
+            0 => KICK,
+            4 => SNARE,
+            8 => KICK | (boss & BKICK),
+            12 => SNARE | (boss & BSNARE),
+            10 | 14 => HAT | (boss & BHAT),
+            _ => 0,
+        };
+        i += 1;
+    }
+    out
+}
+
+/// One transposed section with a new groove and an optional bass rewrite.
+const fn retune(
+    src: Section4,
+    d: i8,
+    groove: u8,
+    pump: bool,
+    bell_pause: bool,
+) -> Section4 {
+    let bass = if pump {
+        pump_bass(&src.bass)
+    } else if bell_pause {
+        bell_pause_bass(&src.bass)
+    } else {
+        shift_voice(&src.bass, d)
+    };
+    let drums = if groove == 0 {
+        steam_6_8(&src.drums)
+    } else {
+        platen_clack(&src.drums)
+    };
+    Section4 {
+        name: src.name,
+        chords: [
+            shift_chord(src.chords[0], d),
+            shift_chord(src.chords[1], d),
+            shift_chord(src.chords[2], d),
+            shift_chord(src.chords[3], d),
+            shift_chord(src.chords[4], d),
+            shift_chord(src.chords[5], d),
+            shift_chord(src.chords[6], d),
+            shift_chord(src.chords[7], d),
+        ],
+        bass,
+        lead: shift_voice(&src.lead, d),
+        counter: shift_voice(&src.counter, d),
+        drums,
+        boss_drive: src.boss_drive,
+    }
+}
+
+/// A whole arrangement: every source section transposed and re-grooved.
+const fn retune_all(
+    src: &[Section4; NUM_SECTIONS],
+    d: i8,
+    groove: u8,
+    pump: bool,
+    bell_pause: bool,
+) -> [Section4; NUM_SECTIONS] {
+    let mut out = [src[0]; NUM_SECTIONS];
+    let mut i = 0;
+    while i < NUM_SECTIONS {
+        out[i] = retune(src[i], d, groove, pump, bell_pause);
+        i += 1;
+    }
+    out
+}
+
+/// Laundry: A minor, 92 BPM, brushed 6/8 with two low pump notes.
+const LAUNDRY_SECTIONS: [Section4; NUM_SECTIONS] =
+    retune_all(&SEWER_SECTIONS, -3, 0, true, false);
+
+/// Printworks: E dorian, 132 BPM, platen clacks on beats two and four with the
+/// bass pausing for the bell.
+const PRINTWORKS_SECTIONS: [Section4; NUM_SECTIONS] =
+    retune_all(&KITCHEN_SECTIONS, 2, 1, false, true);
+
 fn track_for(theme: Theme) -> TrackCfg {
     match theme {
         Theme::Sewer => TrackCfg {
@@ -6923,6 +7156,32 @@ fn track_for(theme: Theme) -> TrackCfg {
             chord_pulse_mix: 0.44,
             chord_lp: 1650.0,
             sections: &LAB_SECTIONS,
+        },
+        Theme::Laundry => TrackCfg {
+            key_name: "A Minor",
+            root: 110.00, // A2
+            bpm: 92.0,
+            lead_duty: 0.50,
+            lead_lp: 1850.0,
+            counter_duty: 0.42,
+            counter_lp: 1400.0,
+            chord_pulse_duty: 0.30,
+            chord_pulse_mix: 0.40,
+            chord_lp: 1350.0,
+            sections: &LAUNDRY_SECTIONS,
+        },
+        Theme::Printworks => TrackCfg {
+            key_name: "E Dorian",
+            root: 164.81, // E3 (bass voice sings E2)
+            bpm: 132.0,
+            lead_duty: 0.22,
+            lead_lp: 2500.0,
+            counter_duty: 0.30,
+            counter_lp: 1650.0,
+            chord_pulse_duty: 0.18,
+            chord_pulse_mix: 0.44,
+            chord_lp: 1500.0,
+            sections: &PRINTWORKS_SECTIONS,
         },
         // The getaway ride: faster than the Lab, warmer than the Kitchen.
         Theme::Trailer => TrackCfg {
