@@ -707,115 +707,335 @@ const fn theme_palette(theme: Theme) -> &'static WallPalette {
     }
 }
 
-/// The theme whose wall **carving** a floor reuses.
-///
-/// The wave 3 side routes share the existing material systems until their own
-/// art pass: the Laundry reuses the Kitchen's boarded porcelain (white goods
-/// and painted board) and the Printworks reuses the Sewer's block courses
-/// (a type wall is brick, reversed). Their own [`theme_palette`] entry makes
-/// them read apart at a glance, and their floors, props and hazards are bespoke.
+/// Legacy helper kept only for any theme that does not yet have bespoke wall
+/// carving; both wave 3 side routes (`Laundry`, `Printworks`) now implement
+/// their own full wall, doorway, maze, and boss-threshold art directly.
 #[inline]
 const fn wall_style(theme: Theme) -> Theme {
-    match theme {
-        Theme::Laundry => Theme::Kitchen,
-        Theme::Printworks => Theme::Sewer,
-        other => other,
-    }
+    theme
 }
 
-// ---- Wave 3 wall materials (palette-driven) -------------------------------
+// ---- Wave 3 wall materials (compile-time LUTs, zero per-pixel mix) ---------
 //
-// The two side routes get their own materials rather than a donor's LUT: the
-// Laundry's walls are ribbed washboard porcelain over a denim body, the
-// Printworks' are newsprint type-block courses with printed ink rules and the
-// registration cyan. Both are built from the theme's own [`WallPalette`], so
-// they cannot inherit the Sewer's green bricks or the Kitchen's oak.
+// Laundry: ribbed porcelain & faded-denim washboard coping over alternating
+// corrugated dado and recessed washer-bank enamel cabinets.
+// Printworks: cast-lead letterpress type-block chases embossed with genuinely
+// readable reversed capital letters, ink-stained reglets and cyan crop ticks
+// over riveted charcoal press-bed plinths and stacked newsprint reams.
 
-/// The Laundry's top face: a vertical washboard rib every four pixels, a denim
-/// seam every eight and a brass rivet where ribs meet a seam row.
+/// Precomputed compile-time color table for Laundry ribbed washboard walls.
+struct LaundryLut {
+    rib_hi: [Rgb; 2],
+    rib_mid: [Rgb; 2],
+    rib_lo: [Rgb; 2],
+    seam: Rgb,
+    porcelain_hi: Rgb,
+    porcelain_mid: Rgb,
+    porcelain_lo: Rgb,
+    front_flute_hi: Rgb,
+    front_flute_mid: Rgb,
+    front_flute_lo: Rgb,
+    front_cab_hi: Rgb,
+    front_cab_mid: Rgb,
+    front_cab_lo: Rgb,
+    brass_hi: Rgb,
+    brass_lo: Rgb,
+}
+
+const LAUNDRY_LUT: LaundryLut = {
+    let p = PAL_LAUNDRY;
+    let b0 = p.top_base;
+    let b1 = p.top_alt;
+    LaundryLut {
+        rib_hi: [mix_c(b0, p.cornice, 0.52), mix_c(b1, p.cornice, 0.44)],
+        rib_mid: [b0, b1],
+        rib_lo: [mix_c(b0, p.top_lo, 0.56), mix_c(b1, p.top_lo, 0.58)],
+        seam: p.mortar,
+        porcelain_hi: mix_c(p.cornice, (230, 238, 236), 0.35),
+        porcelain_mid: mix_c(p.top_base, p.cornice, 0.48),
+        porcelain_lo: mix_c(p.top_alt, p.top_lo, 0.42),
+        front_flute_hi: mix_c(p.front_alt, p.cornice, 0.42),
+        front_flute_mid: p.front_base,
+        front_flute_lo: p.front_dark,
+        front_cab_hi: mix_c(p.cornice, (218, 228, 226), 0.30),
+        front_cab_mid: mix_c(p.front_alt, p.cornice, 0.52),
+        front_cab_lo: mix_c(p.front_base, p.front_dark, 0.55),
+        brass_hi: mix_c(p.detail_a, (236, 208, 128), 0.38),
+        brass_lo: scale_c(p.detail_a, 0.68),
+    }
+};
+
+/// 8 genuinely readable 5×5 **reversed** capital letterpress glyphs
+/// (`Ǝ`, `Я`, `И`, `ꟼ`, `ꓶ`, `Ƨ`, `ꓞ`, `ꓕ`). Bit 4 is leftmost pixel.
+const REVERSED_TYPE_GLYPHS: [[u8; 5]; 8] = [
+    // 0: mirrored E (Ǝ)
+    [0b11111, 0b00001, 0b01111, 0b00001, 0b11111],
+    // 1: mirrored R (Я)
+    [0b01111, 0b10001, 0b01111, 0b00101, 0b01001],
+    // 2: mirrored N (И)
+    [0b10001, 0b10011, 0b10101, 0b11001, 0b10001],
+    // 3: mirrored P (ꟼ)
+    [0b01111, 0b10001, 0b01111, 0b00001, 0b00001],
+    // 4: mirrored L (ꓶ)
+    [0b00001, 0b00001, 0b00001, 0b00001, 0b11111],
+    // 5: mirrored S (Ƨ)
+    [0b11110, 0b00001, 0b01110, 0b10000, 0b01111],
+    // 6: mirrored F (ꓞ)
+    [0b11111, 0b00001, 0b01111, 0b00001, 0b00001],
+    // 7: mirrored G (ꓨ)
+    [0b01110, 0b00001, 0b11001, 0b10001, 0b01110],
+];
+
+/// Precomputed compile-time color table for Printworks type-block walls.
+struct PrintworksLut {
+    block_body: [Rgb; 3],
+    block_bevel: [Rgb; 3],
+    block_shade: [Rgb; 3],
+    letter_hi: Rgb,
+    letter_ink: Rgb,
+    reglet: Rgb,
+    cyan_tick: Rgb,
+    brass_quoin: Rgb,
+    iron_hi: Rgb,
+    iron_mid: Rgb,
+    iron_lo: Rgb,
+    ink_stripe: Rgb,
+    ream_hi: Rgb,
+    ream_mid: Rgb,
+    ream_lo: Rgb,
+}
+
+const PRINTWORKS_LUT: PrintworksLut = {
+    let p = PAL_PRINTWORKS;
+    let b0 = mix_c(p.front_dark, p.top_alt, 0.42);  // cast lead-grey sort
+    let b1 = mix_c(p.front_dark, p.top_base, 0.56); // newsprint-silver sort
+    let b2 = mix_c(p.front_dark, p.detail_a, 0.42); // ink-stained lead sort
+    PrintworksLut {
+        block_body: [b0, b1, b2],
+        block_bevel: [
+            mix_c(b0, p.top_hi, 0.46),
+            mix_c(b1, p.top_hi, 0.52),
+            mix_c(b2, p.top_hi, 0.36),
+        ],
+        block_shade: [
+            scale_c(b0, 0.66),
+            scale_c(b1, 0.68),
+            scale_c(b2, 0.64),
+        ],
+        letter_hi: p.top_hi,
+        letter_ink: mix_c(p.front_dark, p.detail_a, 0.58),
+        reglet: p.mortar,
+        cyan_tick: p.detail_b,
+        brass_quoin: (184, 152, 82),
+        iron_hi: (86, 88, 98),
+        iron_mid: (52, 54, 64),
+        iron_lo: p.front_dark,
+        ink_stripe: mix_c(p.front_dark, p.detail_a, 0.72),
+        ream_hi: p.top_hi,
+        ream_mid: p.front_alt,
+        ream_lo: p.top_lo,
+    }
+};
+
+/// The Laundry's top face: framed 16×8 washboard porcelain & faded-denim
+/// corrugated panels with varied rib direction/tone, indigo mortar seams,
+/// brass rivets, and occasional recessed enamel coping plates.
 #[inline]
 fn laundry_top(wx: i32, wy: i32, _cell_h: u32) -> Rgb {
-    let p = &PAL_LAUNDRY;
-    let col = wx.div_euclid(8);
-    let row = wy.div_euclid(8);
-    let n = hash3(col, row, 0x31a7);
-    let base = if n & 1 == 0 { p.top_base } else { p.top_alt };
-    let rib = wx.rem_euclid(4);
-    if wy.rem_euclid(8) == 0 {
-        p.mortar
-    } else if rib == 0 {
-        mix_c(p.top_hi, p.cornice, 0.30)
-    } else if rib == 3 {
-        mix_c(base, p.top_lo, 0.45)
-    } else if rib == 1 && wy.rem_euclid(8) == 2 && n & 3 == 0 {
-        p.detail_a
-    } else {
-        base
-    }
-}
+    let bx = wx.div_euclid(16);
+    let by = wy.div_euclid(8);
+    let lx = wx.rem_euclid(16);
+    let ly = wy.rem_euclid(8);
+    let n = hash3(bx, by, 0x31a7);
+    let ti = (n & 1) as usize;
 
-/// The Laundry's south face: porcelain ribs, a brass kick strip and a shadowed
-/// skirting course.
-#[inline]
-fn laundry_front(wx: i32, fy: i32) -> Rgb {
-    let p = &PAL_LAUNDRY;
-    let rib = wx.rem_euclid(5);
-    let body = if rib == 0 {
-        p.front_dark
-    } else if rib == 1 {
-        p.front_alt
+    // Crisp recessed indigo panel joints.
+    if ly == 0 || lx == 0 {
+        return LAUNDRY_LUT.seam;
+    }
+    // Top porcelain highlight rail on each panel.
+    if ly == 1 {
+        return if lx == 1 || lx == 15 {
+            LAUNDRY_LUT.porcelain_hi
+        } else {
+            LAUNDRY_LUT.porcelain_mid
+        };
+    }
+    // Bottom shadowed channel lip.
+    if ly == 7 {
+        return LAUNDRY_LUT.rib_lo[ti];
+    }
+    // Occasional smooth porcelain coping hatch (breaks up long washboard runs).
+    if (n & 7) == 5 && (3..=12).contains(&lx) && (2..=5).contains(&ly) {
+        return if lx == 3 || ly == 2 {
+            LAUNDRY_LUT.porcelain_hi
+        } else if lx == 12 || ly == 5 {
+            LAUNDRY_LUT.porcelain_lo
+        } else if lx == 8 && ly == 3 {
+            LAUNDRY_LUT.brass_hi
+        } else {
+            LAUNDRY_LUT.porcelain_mid
+        };
+    }
+    // Brass corner fasteners on alternating washboard bays.
+    if (lx == 2 || lx == 13) && ly == 2 && (n & 3) == 0 {
+        return LAUNDRY_LUT.brass_hi;
+    }
+    // Corrugated washboard ribs (3 px repeat: bright crest, denim body, shadow trough).
+    let horiz = (n & 4) != 0;
+    let phase = if horiz {
+        (ly - 2).rem_euclid(3)
     } else {
-        p.front_base
+        (lx + ((n >> 4) & 3) as i32).rem_euclid(3)
     };
-    match fy {
-        0 => mix_c(p.front_alt, p.top_hi, 0.35),
-        1 if rib == 2 => mix_c(body, p.cornice, 0.16),
-        3 => p.detail_a,
-        4 => p.front_dark,
-        _ => body,
+    match phase {
+        0 => LAUNDRY_LUT.rib_hi[ti],
+        2 => LAUNDRY_LUT.rib_lo[ti],
+        _ => LAUNDRY_LUT.rib_mid[ti],
     }
 }
 
-/// The Printworks' top face: a 9 x 5-cell type block course, ink mortar, a
-/// reversed-letter pip on some blocks and a cyan registration tick every other
-/// column.
+/// The Laundry's south face: alternates corrugated washboard porcelain dado
+/// with recessed enamel washer-bank cabinet panels (matching the long washer
+/// banks in Laundry halls) above a brass kick strip and dark indigo skirting.
+#[inline]
+fn laundry_front(wx: i32, fy: i32, bay_h: u32, has_w: bool, has_e: bool) -> Rgb {
+    let lx = wx.rem_euclid(16);
+    let is_washer_bay = (bay_h & 1) == 0 && (has_w || has_e);
+    if is_washer_bay {
+        match fy {
+            0 => {
+                if lx == 0 || lx == 15 {
+                    LAUNDRY_LUT.seam
+                } else {
+                    LAUNDRY_LUT.front_cab_hi
+                }
+            }
+            4 => LAUNDRY_LUT.front_flute_lo,
+            _ => {
+                if lx == 0 || lx == 15 {
+                    LAUNDRY_LUT.front_cab_lo
+                } else if fy == 3 {
+                    LAUNDRY_LUT.brass_lo
+                } else {
+                    LAUNDRY_LUT.front_cab_mid
+                }
+            }
+        }
+    } else {
+        let flute = wx.rem_euclid(4);
+        match fy {
+            0 => LAUNDRY_LUT.front_flute_hi,
+            3 => {
+                if flute == 0 {
+                    LAUNDRY_LUT.brass_lo
+                } else {
+                    LAUNDRY_LUT.brass_hi
+                }
+            }
+            4 => LAUNDRY_LUT.front_flute_lo,
+            _ => match flute {
+                0 => LAUNDRY_LUT.front_flute_lo,
+                1 => LAUNDRY_LUT.front_flute_hi,
+                _ => LAUNDRY_LUT.front_flute_mid,
+            },
+        }
+    }
+}
+
+/// The Printworks' top face: staggered 10 × 8 cast-lead letterpress type
+/// blocks with genuinely readable reversed capital letters (`Ǝ Я И ꟼ ꓶ Ƨ ꓞ ꓨ`),
+/// charcoal reglet seams, brass lockup quoins, and registration-cyan crop ticks.
 #[inline]
 fn printworks_top(wx: i32, wy: i32, _cell_h: u32) -> Rgb {
-    let p = &PAL_PRINTWORKS;
-    let bx = wx.div_euclid(9);
-    let by = wy.div_euclid(5);
-    let lx = wx.rem_euclid(9);
-    let ly = wy.rem_euclid(5);
+    let by = wy.div_euclid(8);
+    let ly = wy.rem_euclid(8);
+    let stagger = (by & 1) * 5;
+    let sx = wx + stagger;
+    let bx = sx.div_euclid(10);
+    let lx = sx.rem_euclid(10);
     let n = hash3(bx, by, 0x5511);
-    let base = if n & 1 == 0 { p.top_base } else { p.top_alt };
+    let bi = (n % 3) as usize;
+
+    // Charcoal reglet / furniture seams separating each type sort.
     if lx == 0 || ly == 0 {
-        p.mortar
-    } else if ly == 1 {
-        mix_c(base, p.top_hi, 0.55)
-    } else if (n >> 3) & 7 == 0 && (3..=5).contains(&lx) && (2..=3).contains(&ly) {
-        p.mortar // the reversed letter's face, standing proud
-    } else if (bx & 1) == 1 && ly == 4 && lx == 7 {
-        p.detail_b // registration cyan
-    } else if ly == 4 {
-        mix_c(base, p.top_lo, 0.35)
-    } else {
-        base
+        return PRINTWORKS_LUT.reglet;
     }
+    // Top bevel highlight & lower lip shadow.
+    if ly == 1 {
+        return if lx == 1 && (n & 7) == 3 {
+            PRINTWORKS_LUT.brass_quoin
+        } else {
+            PRINTWORKS_LUT.block_bevel[bi]
+        };
+    }
+    if ly == 7 || lx == 9 {
+        // Registration cyan corner tick on every 4th sort.
+        if ly == 7 && lx == 8 && (n & 3) == 1 {
+            return PRINTWORKS_LUT.cyan_tick;
+        }
+        return PRINTWORKS_LUT.block_shade[bi];
+    }
+
+    // Embossed 5×5 reversed capital letter standing proud on ~60% of sorts!
+    if (n & 7) < 5 && (2..=6).contains(&lx) && (2..=6).contains(&ly) {
+        let glyph = REVERSED_TYPE_GLYPHS[((n >> 4) & 7) as usize];
+        let gx = (lx - 2) as usize;
+        let gy = (ly - 2) as usize;
+        let on = ((glyph[gy] >> (4 - gx)) & 1) != 0;
+        if on {
+            // Top-lit raised lead face vs ink-stained lower edge.
+            let above_on = gy > 0 && ((glyph[gy - 1] >> (4 - gx)) & 1) != 0;
+            return if !above_on {
+                PRINTWORKS_LUT.letter_hi
+            } else {
+                PRINTWORKS_LUT.letter_ink
+            };
+        }
+        // Subtle 1 px cast shadow directly below a raised letter stroke.
+        if gy > 0 && ((glyph[gy - 1] >> (4 - gx)) & 1) != 0 {
+            return PRINTWORKS_LUT.block_shade[bi];
+        }
+    }
+
+    PRINTWORKS_LUT.block_body[bi]
 }
 
-/// The Printworks' south face: charcoal panel, one printed ink rule across the
-/// middle and cyan registration ticks at the block joints.
+/// The Printworks' south face: alternates riveted charcoal press-bed iron
+/// plinths (with a dried-ink purple stripe) and stacked newsprint paper reams.
 #[inline]
-fn printworks_front(wx: i32, fy: i32) -> Rgb {
-    let p = &PAL_PRINTWORKS;
-    let rule = wx.rem_euclid(8) == 0;
-    match fy {
-        0 => mix_c(p.front_alt, p.top_hi, 0.30),
-        2 => mix_c(p.front_dark, p.detail_a, 0.55),
-        3 => p.mortar,
-        4 => p.front_dark,
-        _ if rule => mix_c(p.front_base, p.detail_b, 0.30),
-        _ => p.front_base,
+fn printworks_front(wx: i32, fy: i32, bay_h: u32, has_w: bool, has_e: bool) -> Rgb {
+    let lx = wx.rem_euclid(16);
+    let is_ream = (bay_h & 1) == 1 && (has_w || has_e);
+    if is_ream {
+        // Compressed stack of newsprint sheets: crisp pale paper strata.
+        if lx == 0 || lx == 15 {
+            PRINTWORKS_LUT.iron_lo
+        } else {
+            match fy {
+                0 => PRINTWORKS_LUT.ream_hi,
+                1 => PRINTWORKS_LUT.ream_lo,
+                2 => PRINTWORKS_LUT.ream_mid,
+                3 => PRINTWORKS_LUT.ream_hi,
+                _ => PRINTWORKS_LUT.iron_lo,
+            }
+        }
+    } else {
+        // Riveted charcoal cast-iron press plinth with dried-ink plum stripe.
+        let seam = lx == 0 || lx == 15;
+        match fy {
+            0 => if seam { PRINTWORKS_LUT.iron_lo } else { PRINTWORKS_LUT.iron_hi },
+            2 => if seam { PRINTWORKS_LUT.iron_lo } else { PRINTWORKS_LUT.ink_stripe },
+            3 => {
+                if lx == 4 || lx == 11 {
+                    PRINTWORKS_LUT.brass_quoin
+                } else {
+                    PRINTWORKS_LUT.iron_mid
+                }
+            }
+            4 => PRINTWORKS_LUT.iron_lo,
+            _ => if seam { PRINTWORKS_LUT.iron_lo } else { PRINTWORKS_LUT.iron_mid },
+        }
     }
 }
 
@@ -1211,18 +1431,29 @@ pub fn draw_shop_hole(pb: &mut PixelBuffer, hole: &ShopHole, cam: Vec2, t: f32) 
 
     // 3) The bent pewter spoon hanging over the arch: flared handle, iron nail,
     //    kinked elbow bent over the wall lip, and a concave gleaming pewter bowl.
+    //    Wrapped in a tight dark contour halo so it reads crisply on pale
+    //    porcelain Laundry ribs and bright newsprint Printworks blocks as well
+    //    as dark Sewer/Lab stone.
     //    When the hole faces North (fy < 0), keep the spoon handle tucked onto
     //    the wall masonry to the right so it never crosses the north floor scratches.
     let glint_col = palette::mix(SPOON_MID, SPOON_HI, 0.35 + 0.65 * glint);
     if fy < 0 {
         // North-facing wall: bowl hangs over the arch, kinked handle angles down-right onto masonry.
         let by = oy - 1;
-        for dy in -1i32..=2 {
-            for dx in -2i32..=2 {
-                if dx * dx + (dy - 1) * (dy - 1) <= 4 {
-                    darken_px(pb, ox + dx + 1, by + dy + 1, 0.42);
+        // Dark contour halo around bowl and angled handle so pale newsprint /
+        // porcelain walls never swallow the silver spoon.
+        for dy in -2i32..=3 {
+            for dx in -3i32..=3 {
+                if dx * dx + (dy - 1) * (dy - 1) <= 7 {
+                    blend_px(pb, ox + dx, by + dy, GNAW_DARK, 0.72);
                 }
             }
+        }
+        for &(hx, hy) in &[
+            (2, 0), (3, 0), (4, 1), (5, 1), (6, 2), (7, 3), (7, 4),
+            (6, 5), (5, 4), (4, 3), (3, 2),
+        ] {
+            blend_px(pb, ox + hx, by + hy, GNAW_DARK, 0.78);
         }
         // Handle pinned into the wall masonry to the right of the arch.
         pb.plot(ox + 2, by + 1, SPOON_HI);
@@ -1252,14 +1483,18 @@ pub fn draw_shop_hole(pb: &mut PixelBuffer, hole: &ShopHole, cam: Vec2, t: f32) 
         }
     } else {
         let top = oy - 9;
-        // Drop shadow behind the spoon on the wall.
-        for i in 0..5 {
-            darken_px(pb, ox + 4, top + i + 1, 0.45);
+        // Full dark contour outline behind handle, elbow, and bowl so the
+        // bright pewter silhouette separates cleanly from porcelain & newsprint walls.
+        for &(hx, hy) in &[
+            (2, -1), (3, -1), (4, -1), (5, 0), (5, 1), (5, 2), (4, 3), (4, 4),
+            (2, 0), (2, 1), (2, 2), (2, 3), (1, 4), (0, 5), (3, 5), (2, 6),
+        ] {
+            blend_px(pb, ox + hx, top + hy, GNAW_DARK, 0.78);
         }
-        for dy in 0..4 {
-            for dx in -2..=2 {
-                if dx * dx + (dy - 1) * (dy - 1) <= 4 {
-                    darken_px(pb, ox + dx + 1, top + 6 + dy + 1, 0.42);
+        for dy in -1i32..=4 {
+            for dx in -3i32..=3 {
+                if dx * dx + (dy - 1) * (dy - 1) <= 7 {
+                    blend_px(pb, ox + dx, top + 6 + dy, GNAW_DARK, 0.68);
                 }
             }
         }
@@ -1574,8 +1809,32 @@ fn draw_doorway_ground(
                                     pal.thresh_base
                                 }
                             }
-                            // `wall_style` never returns the side-route themes: they borrow a donor.
-                            Theme::Laundry | Theme::Printworks => unreachable!(),
+                            Theme::Laundry => {
+                                // Brass junction drain grate set inside porcelain threshold
+                                if ly == 9 || ly == 10 {
+                                    if (lx % 3) == 0 {
+                                        pal.outline
+                                    } else {
+                                        pal.detail_a
+                                    }
+                                } else {
+                                    pal.thresh_base
+                                }
+                            }
+                            Theme::Printworks => {
+                                // Cast-iron press-track sill with cyan registration ticks at jambs
+                                if (lx == x0 + 1 || lx == x1 - 2) && (ly == 9 || ly == 10) {
+                                    pal.detail_b
+                                } else if ly == 9 || ly == 10 {
+                                    if (lx % 4) == 0 {
+                                        pal.thresh_hi
+                                    } else {
+                                        pal.front_dark
+                                    }
+                                } else {
+                                    pal.thresh_base
+                                }
+                            }
                             _ => pal.thresh_base,
                         }
                     };
@@ -1652,8 +1911,32 @@ fn draw_doorway_ground(
                                     pal.thresh_base
                                 }
                             }
-                            // `wall_style` never returns the side-route themes: they borrow a donor.
-                            Theme::Laundry | Theme::Printworks => unreachable!(),
+                            Theme::Laundry => {
+                                // Vertical brass junction drain grate inside porcelain threshold
+                                if lx == 8 || lx == 9 {
+                                    if (ly % 3) == 0 {
+                                        pal.outline
+                                    } else {
+                                        pal.detail_a
+                                    }
+                                } else {
+                                    pal.thresh_base
+                                }
+                            }
+                            Theme::Printworks => {
+                                // Vertical press-track sill with cyan registration ticks at jambs
+                                if (ly == y0 + 1 || ly == y1 - 2) && (lx == 8 || lx == 9) {
+                                    pal.detail_b
+                                } else if lx == 8 || lx == 9 {
+                                    if (ly % 4) == 0 {
+                                        pal.thresh_hi
+                                    } else {
+                                        pal.front_dark
+                                    }
+                                } else {
+                                    pal.thresh_base
+                                }
+                            }
                             _ => pal.thresh_base,
                         }
                     };
@@ -2398,12 +2681,12 @@ fn fill_front_row(
         }
         Theme::Laundry => {
             for lx in x_start..x_end {
-                row_px[lx as usize] = laundry_front(wx0 + lx, fy);
+                row_px[lx as usize] = laundry_front(wx0 + lx, fy, bay_h, has_w, has_e);
             }
         }
         Theme::Printworks => {
             for lx in x_start..x_end {
-                row_px[lx as usize] = printworks_front(wx0 + lx, fy);
+                row_px[lx as usize] = printworks_front(wx0 + lx, fy, bay_h, has_w, has_e);
             }
         }
         _ => {
@@ -2808,8 +3091,50 @@ fn draw_front_accents(
                 pb.plot(sx + 8, front_y + 1, pip);
             }
         }
-        // `wall_style` never returns the side-route themes: they borrow a donor.
-        Theme::Laundry | Theme::Printworks => unreachable!(),
+        Theme::Laundry => {
+            let is_washer_bay = (bay_h & 1) == 0 && (has_w || has_e);
+            if is_washer_bay {
+                // Recessed chrome washer porthole bezel with soft aqua drum glint
+                // (makes long washer banks in Laundry halls read as real machines!)
+                pb.rect_fill(sx + 5, front_y + 1, 6, 3, pal.outline);
+                pb.plot(sx + 5, front_y + 1, pal.trim_hi);
+                pb.plot(sx + 10, front_y + 1, pal.detail_b);
+                let shimmer = 0.55 + 0.45 * (view.anim_clock * 2.2 + view.cell_x as f32).sin();
+                let water = palette::mix((28, 56, 78), accent, 0.35 + 0.35 * shimmer);
+                pb.plot(sx + 6, front_y + 2, water);
+                pb.plot(sx + 7, front_y + 2, palette::mix(water, pal.trim_hi, 0.45));
+                pb.plot(sx + 8, front_y + 2, water);
+                pb.plot(sx + 9, front_y + 2, pal.detail_c); // hint of pink wash tumbling!
+                // Little soap drawer pull on the left & cycle dial on the right.
+                pb.plot(sx + 2, front_y + 1, pal.trim_hi);
+                pb.plot(sx + 13, front_y + 1, pal.detail_a);
+            } else if (cell_h & 3) == 1 && has_w && has_e {
+                // Brass hot/cold laundry spigot & soap-pipe collar on washboard bay.
+                pb.plot(sx + 7, front_y + 1, LAUNDRY_LUT.brass_hi);
+                pb.plot(sx + 8, front_y + 1, LAUNDRY_LUT.brass_lo);
+                pb.plot(sx + 7, front_y + 2, pal.detail_c);
+                pb.plot(sx + 8, front_y + 2, accent);
+            }
+        }
+        Theme::Printworks => {
+            let is_ream = (bay_h & 1) == 1 && (has_w || has_e);
+            if is_ream {
+                // Bound twine straps holding stacked newsprint reams.
+                for &tx in &[4, 11] {
+                    pb.plot(sx + tx, front_y + 1, pal.detail_a);
+                    pb.plot(sx + tx, front_y + 2, pal.detail_a);
+                    pb.plot(sx + tx, front_y + 3, PRINTWORKS_LUT.brass_quoin);
+                }
+            } else if has_w || has_e {
+                // Brass press nameplate + subtle pulsing cyan registration lamp.
+                pb.rect_fill(sx + 5, front_y + 1, 5, 1, PRINTWORKS_LUT.brass_quoin);
+                if (cell_h & 3) == 0 {
+                    let pulse = 0.65 + 0.35 * (view.anim_clock * 2.4 + view.cell_x as f32 * 1.3).sin();
+                    pb.plot(sx + 13, front_y + 1, palette::scale(pal.detail_b, 0.75 + 0.55 * pulse));
+                    pb.plot(sx + 13, front_y + 2, pal.outline);
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -3013,8 +3338,30 @@ fn draw_maze_cell(
                             lab_top_base
                         }
                     }
-                    // `wall_style` never returns the side-route themes: they borrow a donor.
-                    Theme::Laundry | Theme::Printworks => unreachable!(),
+                    Theme::Laundry => {
+                        // Porcelain-capped ribbed washboard & drying-rack divider
+                        let at_post = (wx % 8 == 0) && (ly == MAZE_INSET_Y + 1 || ly == y_front_start - 1);
+                        if at_post {
+                            pal.detail_a
+                        } else if (wx & 3) == 0 {
+                            LAUNDRY_LUT.porcelain_hi
+                        } else if (wx & 3) == 2 {
+                            LAUNDRY_LUT.rib_lo[0]
+                        } else {
+                            pal.maze_top
+                        }
+                    }
+                    Theme::Printworks => {
+                        // Charcoal galley-rack divider with pale newsprint cap & cyan clip
+                        let at_clip = (wx % 10 == 0) && ly == MAZE_INSET_Y + 1;
+                        if at_clip {
+                            pal.detail_b
+                        } else if (wx + wy) % 5 == 0 {
+                            PRINTWORKS_LUT.ream_mid
+                        } else {
+                            pal.maze_top
+                        }
+                    }
                     _ => kitchen_top_hi,
                 };
 
@@ -3069,8 +3416,24 @@ fn draw_maze_cell(
                             lab_front_mid
                         }
                     }
-                    // `wall_style` never returns the side-route themes: they borrow a donor.
-                    Theme::Laundry | Theme::Printworks => unreachable!(),
+                    Theme::Laundry => {
+                        if fy == 3 {
+                            LAUNDRY_LUT.brass_lo
+                        } else if (wx & 3) == 0 {
+                            LAUNDRY_LUT.front_flute_hi
+                        } else {
+                            pal.maze_front
+                        }
+                    }
+                    Theme::Printworks => {
+                        if fy == 3 {
+                            PRINTWORKS_LUT.ink_stripe
+                        } else if (wx & 7) == 0 {
+                            PRINTWORKS_LUT.ream_lo
+                        } else {
+                            pal.maze_front
+                        }
+                    }
                     _ => kitchen_front_hi,
                 };
                 if fy == 0 {
@@ -3284,8 +3647,8 @@ fn draw_jamb_pillar_v(
         Theme::Lab => palette::scale(accent, 0.90),
         Theme::Kitchen => pal.detail_a,
         Theme::Sewer => pal.trim_hi,
-        // `wall_style` never returns the side-route themes: they borrow a donor.
-        Theme::Laundry | Theme::Printworks => unreachable!(),
+        Theme::Laundry => pal.detail_a,
+        Theme::Printworks => pal.detail_b,
         _ => pal.detail_a,
     };
     pb.plot(pip_x, y + TOP_FACE_H - 2, pip_col);
@@ -3335,8 +3698,8 @@ fn draw_jamb_pillar_h(
         Theme::Lab => palette::scale(accent, 0.90),
         Theme::Kitchen => pal.detail_a,
         Theme::Sewer => pal.trim_hi,
-        // `wall_style` never returns the side-route themes: they borrow a donor.
-        Theme::Laundry | Theme::Printworks => unreachable!(),
+        Theme::Laundry => pal.detail_a,
+        Theme::Printworks => pal.detail_b,
         _ => pal.detail_a,
     };
     pb.plot(x + 3, pip_y, pip_col);
@@ -3359,8 +3722,8 @@ fn draw_oneway_gate(
         Theme::Sewer => pal.detail_b,
         Theme::Kitchen => pal.maze_top,
         Theme::Lab => pal.maze_top,
-        // `wall_style` never returns the side-route themes: they borrow a donor.
-        Theme::Laundry | Theme::Printworks => unreachable!(),
+        Theme::Laundry => pal.cornice,
+        Theme::Printworks => pal.maze_top,
         Theme::Trailer => pal.maze_top,
     };
     let leaf_hi = pal.trim_hi;
@@ -3750,15 +4113,30 @@ pub fn draw_boss_threshold_ground(
                 accent,
             );
         }
-        // `wall_style` never returns the side-route themes: they borrow a donor.
-        Theme::Laundry | Theme::Printworks => unreachable!(),
+        Theme::Laundry => {
+            draw_boss_threshold_laundry(pb, sx, sy, view.inward, u0, u1, du_off, pal);
+        }
+        Theme::Printworks => {
+            draw_boss_threshold_printworks(
+                pb,
+                sx,
+                sy,
+                view.inward,
+                u0,
+                u1,
+                du_off,
+                view.cell.anim_clock,
+                pal,
+            );
+        }
         _ => {}
     }
 }
 
 /// **Overhang layer (optional)**: add subtle per-theme boss-doorway trim to the
 /// 4 px horizontal doorway lintel (claw-notched stone for Sewer, brass-cornered
-/// timber architrave for Kitchen, hazard-striped warning beam + beacons for Lab).
+/// timber architrave for Kitchen, hazard-striped warning beam + beacons for Lab,
+/// striped mangle-roller trim for Laundry, reversed type notches + cyan lamps for Printworks).
 ///
 /// Call right **after** [`draw_wall_overhang`] for horizontal boss doorways.
 /// No-op for vertical doorways. Zero heap allocation; **never changes collision**.
@@ -3837,9 +4215,150 @@ pub fn draw_boss_threshold_overhang(
                 }
             }
         }
-        // `wall_style` never returns the side-route themes: they borrow a donor.
-        Theme::Laundry | Theme::Printworks => unreachable!(),
+        Theme::Laundry => {
+            // Porcelain-and-pink candy-striped mangle roller trim + brass end caps
+            let stripe_a: Rgb = (206, 220, 218);
+            let stripe_b: Rgb = pal.detail_c;
+            for u in u0..u1 {
+                let du = u + du_off;
+                let px = sx + u;
+                if du == 3 || du == 4 || du == 27 || du == 28 {
+                    pb.plot(px, sy + 1, LAUNDRY_LUT.brass_hi);
+                    pb.plot(px, sy + 2, LAUNDRY_LUT.brass_lo);
+                } else if (6..=25).contains(&du) {
+                    let s1 = (du + 1).rem_euclid(4) < 2;
+                    let s2 = (du + 2).rem_euclid(4) < 2;
+                    pb.plot(px, sy + 1, if s1 { stripe_a } else { stripe_b });
+                    pb.plot(px, sy + 2, if s2 { scale_c(stripe_a, 0.80) } else { scale_c(stripe_b, 0.78) });
+                }
+            }
+        }
+        Theme::Printworks => {
+            // Cast-iron press lintel with twin pulsing cyan registration lamps & brass quoins
+            let pulse = 0.60 + 0.40 * (view.cell.anim_clock * 3.4).sin();
+            let lamp = scale_c((98, 206, 212), 0.72 + 0.28 * pulse);
+            for u in u0..u1 {
+                let du = u + du_off;
+                let px = sx + u;
+                if du == 3 || du == 28 {
+                    pb.plot(px, sy + 1, lamp);
+                    pb.plot(px, sy + 2, pal.detail_b);
+                } else if du == 4 || du == 27 {
+                    pb.plot(px, sy + 1, pal.outline);
+                    pb.plot(px, sy + 2, pal.outline);
+                } else if (6..=25).contains(&du) && (du % 4) == 0 {
+                    pb.plot(px, sy + 1, PRINTWORKS_LUT.ream_hi);
+                    pb.plot(px, sy + 2, PRINTWORKS_LUT.ink_stripe);
+                }
+            }
+        }
         _ => {}
+    }
+}
+
+/// **Laundry boss threshold**: wet indigo & porcelain tile apron with a central
+/// slotted brass floor drain and pink ruined-wash drips leading into The Mangle.
+#[allow(clippy::too_many_arguments)]
+fn draw_boss_threshold_laundry(
+    pb: &mut PixelBuffer,
+    sx: i32,
+    sy: i32,
+    inward: Cardinal,
+    u0: i32,
+    u1: i32,
+    du_off: i32,
+    pal: &WallPalette,
+) {
+    let porc: Rgb = (146, 166, 166);
+    let denim: Rgb = (54, 78, 96);
+    let throat: Rgb = (14, 18, 30);
+    let pink: Rgb = (168, 98, 128);
+    let (v0, v1) = match inward {
+        Cardinal::South => (6, 15),
+        Cardinal::North => (1, 10),
+        Cardinal::East | Cardinal::West => (4, 13),
+    };
+    for u in u0..u1 {
+        let du = u + du_off;
+        for v in v0..v1 {
+            let lv = v - v0;
+            let (px, py) = boss_uv_to_screen(sx, sy, inward, u, v);
+            let in_drain = (9..=22).contains(&du) && (2..=6).contains(&lv);
+            let c = if in_drain {
+                if lv == 2 || lv == 6 || du == 9 || du == 22 {
+                    LAUNDRY_LUT.brass_hi
+                } else if (du % 3) == 0 {
+                    LAUNDRY_LUT.brass_lo
+                } else {
+                    throat
+                }
+            } else if ((du / 4) + (lv / 3)) & 1 == 0 {
+                porc
+            } else {
+                denim
+            };
+            let a = if lv == 0 || lv == v1 - v0 - 1 { 0.52 } else { 0.88 };
+            blend_px(pb, px, py, c, a);
+        }
+        // Stray pink-wash puddle streak crossing the threshold edge.
+        if (12..=19).contains(&du) && (du & 1) == 0 {
+            let (px, py) = boss_uv_to_screen(sx, sy, inward, u, v1 + 1);
+            blend_px(pb, px, py, pink, 0.42);
+        }
+    }
+    let _ = pal;
+}
+
+/// **Printworks boss threshold**: printed broadsheet proof-sheet apron with a
+/// clean unprinted blank margin stripe, dark inked column rules and cyan
+/// corner registration marks foreshadowing The Night Edition.
+#[allow(clippy::too_many_arguments)]
+fn draw_boss_threshold_printworks(
+    pb: &mut PixelBuffer,
+    sx: i32,
+    sy: i32,
+    inward: Cardinal,
+    u0: i32,
+    u1: i32,
+    du_off: i32,
+    anim_clock: f32,
+    pal: &WallPalette,
+) {
+    let paper: Rgb = (138, 136, 124);
+    let margin: Rgb = (164, 162, 148);
+    let ink: Rgb = (58, 42, 72);
+    let pulse = 0.65 + 0.35 * (anim_clock * 2.4).sin();
+    let cyan = scale_c(pal.detail_b, 0.75 + 0.35 * pulse);
+    let (v0, v1) = match inward {
+        Cardinal::South => (6, 16),
+        Cardinal::North => (1, 11),
+        Cardinal::East | Cardinal::West => (3, 13),
+    };
+    for u in u0..u1 {
+        let du = u + du_off;
+        if !(3..=28).contains(&du) {
+            continue;
+        }
+        for v in v0..v1 {
+            let lv = v - v0;
+            let (px, py) = boss_uv_to_screen(sx, sy, inward, u, v);
+            let corner_crop = ((du == 3 || du == 4 || du == 27 || du == 28) && (lv == 0 || lv == v1 - v0 - 1))
+                || ((du == 3 || du == 28) && (lv == 1 || lv == v1 - v0 - 2));
+            let c = if corner_crop {
+                cyan
+            } else if (21..=26).contains(&du) {
+                // Blank margin stripe (visual foreshadow of Night Edition's safe margin!)
+                margin
+            } else if lv == 2 && (6..=19).contains(&du) {
+                ink
+            } else if (lv == 4 || lv == 6) && (6..=18).contains(&du) && du != 12 {
+                mix_c(paper, ink, 0.65)
+            } else {
+                paper
+            };
+            let a = if lv == 0 || lv == v1 - v0 - 1 { 0.60 } else { 0.86 };
+            blend_px(pb, px, py, c, a);
+        }
     }
 }
 
