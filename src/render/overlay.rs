@@ -742,24 +742,49 @@ mod tests {
         assert!(text.contains("PHASE 2"), "missing the fight phase: {text}");
     }
 
-    /// Each campaign level gets its own boss name on the bar.
+    /// Each campaign level names **the boss actually on the floor**. A pooled
+    /// floor (Sewer: Jaguar / Horseshoe, Kitchen: Sweeper / R-01) fields one of
+    /// two by level seed, so the bar is checked for both pool mates.
     #[test]
     fn the_boss_bar_uses_each_levels_boss_name() {
-        for (level, name) in [(0usize, "APEX JAGUAR"), (1, "THE SWEEPER"), (2, "TURF-REAPER MK.IV")] {
-            let mut w = World::new_level(
-                level,
-                7,
-                crate::game::loadout::Loadout::new(crate::game::weapon::WeaponKind::Gnaw),
-            );
-            w.director.boss_spawned = true;
-            let mut hud = HudState::default();
-            hud.telemetry.set_boss_hp(Some((900.0, 1400.0)));
-            let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
-            terminal
-                .draw(|f| draw_overlays(f, f.area(), &w, &mut hud))
-                .unwrap();
-            let text = buf_text(&terminal);
-            assert!(text.contains(name), "level {level}: missing {name} in {text}");
+        use crate::game::ecs::systems::boss::BossKind;
+        for (level, names) in [
+            (0usize, &["APEX JAGUAR", crate::lore::HORSESHOE_NAME][..]),
+            (1, &["THE SWEEPER", crate::lore::MEGARAT_NAME][..]),
+            (2, &["TURF-REAPER MK.IV"][..]),
+        ] {
+            let mut seen: Vec<&str> = Vec::new();
+            for seed in 0..48u64 {
+                let mut w = World::new_level(
+                    level,
+                    seed,
+                    crate::game::loadout::Loadout::new(crate::game::weapon::WeaponKind::Gnaw),
+                );
+                w.director.boss_spawned = true;
+                // The plate of the boss this level seed fields.
+                let kind = BossKind::pool_pick(w.level.theme, w.level.seed);
+                let name = boss_codename_kind(kind).0;
+                assert!(names.contains(&name), "level {level}: {kind:?} is not this floor's");
+                let mut hud = HudState::default();
+                hud.telemetry.set_boss_hp(Some((900.0, 1400.0)));
+                let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+                terminal
+                    .draw(|f| draw_overlays(f, f.area(), &w, &mut hud))
+                    .unwrap();
+                let text = buf_text(&terminal);
+                assert!(text.contains(name), "level {level} seed {seed}: missing {name} in {text}");
+                // ...and never its pool mate's.
+                for other in names.iter().filter(|n| **n != name) {
+                    assert!(!text.contains(other), "level {level} seed {seed}: named {other}");
+                }
+                if !seen.contains(&name) {
+                    seen.push(name);
+                }
+                if seen.len() == names.len() {
+                    break;
+                }
+            }
+            assert_eq!(seen.len(), names.len(), "level {level}: only saw {seen:?}");
         }
     }
 

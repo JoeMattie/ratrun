@@ -915,6 +915,7 @@ fn dash_plan(ctx: &BossContext<'_>, boss: &Boss) -> Option<(Vec2, Vec2)> {
 /// A boss with no pending call (`Boss::call_count == 0`) draws no rng, spawns
 /// nothing and costs one branch per boss per tick, so a fight that never calls
 /// is byte-identical to one without this system.
+#[allow(clippy::too_many_arguments)]
 pub fn boss_summon_system(
     mut commands: Commands,
     level: Res<Level>,
@@ -1150,9 +1151,16 @@ mod tests {
             seen_megarat |= a == BossKind::MegaRat;
         }
         assert!(seen_broom && seen_megarat, "both wardens must be reachable");
-        // Every other floor is a one-entry pool and cannot move at all.
+        // The Sewer is the other pooled floor (the Jaguar and the Horseshoe),
+        // and its draw stays inside its own pool.
+        let sewer = BossKind::pool_for_theme(Theme::Sewer);
+        assert_eq!(sewer, &[BossKind::Cat, BossKind::HorseshoeCrab]);
+        for seed in 0..64u64 {
+            assert!(sewer.contains(&BossKind::for_theme_seeded(Theme::Sewer, seed)));
+        }
+        // Every single-entry floor cannot move at all.
         for theme in Theme::all() {
-            if theme == Theme::Kitchen {
+            if BossKind::pool_for_theme(theme).len() > 1 {
                 continue;
             }
             for seed in 0..16u64 {
@@ -1443,12 +1451,24 @@ mod tests {
             tick(&mut w);
             t += DT;
             let b = boss_of(&mut w).expect("alive");
+            // Which pass is each live hazard? By its aim, not its slot: the
+            // framework drops an expired hazard, so pass 2 moves into slot 0
+            // the tick pass 1 runs out.
             let live: Vec<usize> = b
                 .hazards
                 .iter()
-                .enumerate()
-                .filter(|(_, h)| h.is_active())
-                .map(|(i, _)| i)
+                .filter(|h| h.is_active())
+                .map(|h| match h.shape {
+                    HazardShape::Arc { facing: dir, .. } => {
+                        if (dir - want_first).len() < 1e-3 {
+                            0
+                        } else {
+                            assert!((dir - want_second).len() < 1e-3, "a stray arc: {dir:?}");
+                            1
+                        }
+                    }
+                    other => panic!("a pass must be an arc, got {other:?}"),
+                })
                 .collect();
             match megastate(&b) {
                 MegaRatState::ThrashPass1 => {

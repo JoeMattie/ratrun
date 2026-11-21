@@ -180,8 +180,9 @@ pub const GROOM_BAND: [f32; 2] = [30.0, 92.0];
 /// Extra speed while hunting a rat that has left the arena.
 pub const HUNT_SPEED_MULT: f32 = 1.7;
 
-/// The pause between a phase-change `Call` and the fight resuming is inside
-/// `Call` itself; nothing extra is needed here.
+// (The pause between a phase-change `Call` and the fight resuming is inside
+// `Call` itself; nothing extra is needed here.)
+
 // ---- the gnaw lunge -------------------------------------------------------
 
 /// The lunge's telegraph (`GnawWindup`).
@@ -1466,7 +1467,7 @@ fn draw_bite_mark(pb: &mut PixelBuffer, pose: &Pose) {
     // Splintered tile around the incisors.
     for k in 0..9 {
         let a = k as f32 / 9.0 * TAU + 0.3;
-        let len = 5.0 + 4.0 * hash2(k as i32, 3, 17);
+        let len = 5.0 + 4.0 * hash2(k, 3, 17);
         draw_segment(
             pb,
             at + Vec2::from_angle(a) * 3.0,
@@ -2437,8 +2438,11 @@ mod tests {
         for side in [1.0f32, -1.0] {
             let (dir, h) = thrash_half(&view, side);
             assert!((h * 2.0 - half).abs() < 1e-6, "each pass covers half the arc");
-            // The half's outer edge must reach the marked arc's edge.
-            let edge = dir.rotate(h).angle() - facing.angle();
+            // The half's outer edge (the side away from the facing) must reach
+            // the marked arc's edge, and its inner edge the facing itself.
+            let edge = dir.rotate(side * h).angle() - facing.angle();
+            let seam = dir.rotate(-side * h).angle() - facing.angle();
+            assert!(seam.abs() < 1e-5, "pass {side} leaves a seam of {seam} at the facing");
             assert!(
                 (edge.abs() - half).abs() < 1e-5,
                 "pass {side} reaches {edge} but the arc is {half}"
@@ -2639,7 +2643,7 @@ mod tests {
             );
             boss.state = crate::game::ecs::systems::boss::BossState::MegaRat(*state);
             boss.duration = 1.0;
-            boss.elapsed = prog;
+            boss.elapsed = *prog;
             boss.phase = *phase;
             boss.anim = 1.7;
             boss.facing = Vec2::new(0.94, 0.34);
@@ -2727,7 +2731,7 @@ mod tests {
                     MegaRatState::SqueakShout | MegaRatState::DashPass => 3,
                     _ => 1,
                 };
-                view.hp_frac = 1.0 - (*prog as f32) * 0.4;
+                view.hp_frac = 1.0 - *prog * 0.4;
                 view.lane_start = Vec2::new(40.0, 74.0);
                 view.sweep = 1.0;
                 view.dash_cd = if *state == MegaRatState::DashSkid {

@@ -902,10 +902,14 @@ mod tests {
         let pool = BossKind::pool_for_theme(Theme::Sewer);
         assert_eq!(pool[0], BossKind::Cat, "the floor's original boss is first");
         assert!(pool.contains(&BossKind::HorseshoeCrab));
-        // Every other floor's pool is its own boss and nothing else (the other
-        // wave-3 boss workers union their own entries in).
+        assert_eq!(pool.len(), 2);
+        // The Kitchen is the other pooled floor (it shares with the Megarat);
+        // every remaining floor's pool is its own boss and nothing else.
+        assert_eq!(
+            BossKind::pool_for_theme(Theme::Kitchen),
+            &[BossKind::Broom, BossKind::MegaRat]
+        );
         for (theme, kind) in [
-            (Theme::Kitchen, BossKind::Broom),
             (Theme::Lab, BossKind::Mower),
             (Theme::Laundry, BossKind::Mangle),
             (Theme::Printworks, BossKind::NightEdition),
@@ -925,8 +929,11 @@ mod tests {
             saw_cat |= a == BossKind::Cat;
         }
         assert!(saw_crab && saw_cat, "the pool draw must reach both bosses");
-        // Single-entry pools are pinned.
-        assert_eq!(BossKind::pool_pick(Theme::Kitchen, 7), BossKind::Broom);
+        // Single-entry pools are pinned, whatever the seed.
+        for seed in 0..16u64 {
+            assert_eq!(BossKind::pool_pick(Theme::Lab, seed), BossKind::Mower);
+            assert_eq!(BossKind::pool_pick(Theme::Trailer, seed), BossKind::Magpie);
+        }
     }
 
     #[test]
@@ -1051,7 +1058,7 @@ mod tests {
         while t < art::TELSON_TELL[0] * 0.9 {
             tick(&mut w);
             t += DT;
-            std::mem::swap(&mut w.sfx, &mut Vec::new());
+            w.sfx = Vec::new();
         }
         assert_eq!(w.player.hp, tell_start_hp, "the tell must not damage");
         // Then the sweep lands, exactly once (the loop stops when the sweep
@@ -1061,7 +1068,7 @@ mod tests {
         let mut t = 0.0;
         while t < 3.0 && state_of(&mut w) != CrabState::Recover {
             tick(&mut w);
-            std::mem::swap(&mut w.sfx, &mut Vec::new());
+            w.sfx = Vec::new();
             if w.player.hp < last {
                 hits += last - w.player.hp;
                 last = w.player.hp;
@@ -1148,7 +1155,7 @@ mod tests {
         let mut saw_wedge = false;
         for _ in 0..600 {
             tick(&mut w);
-            std::mem::swap(&mut w.sfx, &mut Vec::new());
+            w.sfx = Vec::new();
             if state_of(&mut w) == CrabState::Wedged {
                 saw_wedge = true;
                 break;
@@ -1241,7 +1248,7 @@ mod tests {
         let mut saw_mark = false;
         for _ in 0..400 {
             tick(&mut w);
-            std::mem::swap(&mut w.sfx, &mut Vec::new());
+            w.sfx = Vec::new();
             if state_of(&mut w) == CrabState::BurrowTell {
                 saw_mark = true;
                 break;
@@ -1258,7 +1265,7 @@ mod tests {
         let mut t = 0.0;
         while t < 8.0 && state_of(&mut w) != CrabState::Recover {
             tick(&mut w);
-            std::mem::swap(&mut w.sfx, &mut Vec::new());
+            w.sfx = Vec::new();
             if state_of(&mut w) == CrabState::Burrow {
                 underground = true;
                 let boss = boss_of(&mut w).unwrap();
@@ -1294,7 +1301,7 @@ mod tests {
         let mut flipped = false;
         for _ in 0..120 {
             tick(&mut w);
-            std::mem::swap(&mut w.sfx, &mut Vec::new());
+            w.sfx = Vec::new();
             if state_of(&mut w) == CrabState::Flipped {
                 flipped = true;
                 break;
@@ -1316,7 +1323,7 @@ mod tests {
         let mut t = 0.0;
         while t < 4.0 && state_of(&mut w) == CrabState::Flipped {
             tick(&mut w);
-            std::mem::swap(&mut w.sfx, &mut Vec::new());
+            w.sfx = Vec::new();
             if w.player.hp < last {
                 hits += last - w.player.hp;
                 last = w.player.hp;
@@ -1333,7 +1340,7 @@ mod tests {
         let mut t = 0.0;
         while t < 2.0 && state_of(&mut w) != CrabState::Dome {
             tick(&mut w);
-            std::mem::swap(&mut w.sfx, &mut Vec::new());
+            w.sfx = Vec::new();
             t += DT;
         }
         assert_eq!(state_of(&mut w), CrabState::Dome);
@@ -1366,7 +1373,7 @@ mod tests {
         let mut t = 0.0;
         while t < art::POSE_DURATION * 0.8 {
             tick(&mut w);
-            std::mem::swap(&mut w.sfx, &mut Vec::new());
+            w.sfx = Vec::new();
             t += DT;
         }
         assert_eq!(w.player.hp, hp0);
@@ -1410,7 +1417,7 @@ mod tests {
             w.player.vel = Vec2::new(58.0, 0.0);
             w.player.pos += w.player.vel * DT;
             tick(&mut w);
-            std::mem::swap(&mut w.sfx, &mut Vec::new());
+            w.sfx = Vec::new();
         }
         let moved = w.player.pos.x - start.x;
         // 58 px/s for 1 s, minus the pool's 45 % share (and the crab's own
@@ -1444,7 +1451,7 @@ mod tests {
         let mut t = 0.0;
         while t < art::DEATH_DURATION + 1.0 && !w.level_complete {
             tick(&mut w);
-            std::mem::swap(&mut w.sfx, &mut Vec::new());
+            w.sfx = Vec::new();
             t += DT;
         }
         assert!(w.level_complete);
@@ -1467,7 +1474,7 @@ mod tests {
         let d0 = boss_of(&mut w).unwrap().pos.dist(rat);
         for _ in 0..120 {
             tick(&mut w);
-            std::mem::swap(&mut w.sfx, &mut Vec::new());
+            w.sfx = Vec::new();
         }
         let boss = boss_of(&mut w).unwrap();
         assert!(boss.hunting, "a rat outside the arena is a hunt");
@@ -1497,7 +1504,7 @@ mod tests {
                 let mv = Vec2::from_angle(a);
                 let dash = (t * 4.0) as i32 % 8 == 0;
                 w.update(DT, mv, dash);
-                std::mem::swap(&mut w.sfx, &mut Vec::new());
+                w.sfx = Vec::new();
                 if (t * 60.0) as i32 % 15 == 0 {
                     let boss = boss_of(&mut w).expect("boss alive");
                     trace.push((
@@ -1543,7 +1550,7 @@ mod tests {
             while t < limit && !w.finished() {
                 let input = bot.decide(&w, DT);
                 w.update(DT, input.move_dir, input.dash);
-                std::mem::swap(&mut w.sfx, &mut Vec::new());
+                w.sfx = Vec::new();
                 let mut guard = 0;
                 while w.pending_levelups > 0 && guard < 32 {
                     guard += 1;

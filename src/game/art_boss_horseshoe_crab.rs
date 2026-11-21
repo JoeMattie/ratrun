@@ -853,12 +853,12 @@ fn band(pb: &mut PixelBuffer, center: Vec2, inner: f32, outer: f32, col: Rgb, al
     }
 }
 
-/// A pie slice between `inner` and `outer`, `half_angle` either side of `facing`.
+/// A pie slice between the `(inner, outer)` radii, `half_angle` either side of
+/// `facing`.
 fn arc_band(
     pb: &mut PixelBuffer,
     center: Vec2,
-    inner: f32,
-    outer: f32,
+    (inner, outer): (f32, f32),
     facing: Vec2,
     half_angle: f32,
     col: Rgb,
@@ -974,10 +974,10 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, accent: Rgb
             // The painted band, filling in from the hinge outward.
             let fill = inner + (outer - inner) * t;
             let col = if t > 0.85 { WARN_HOT } else { WARN_AMBER };
-            arc_band(pb, sc, inner, fill, af, half, col, 0.16 + 0.10 * pulse);
-            arc_band(pb, sc, fill - 1.4, fill, af, half, col, 0.62);
-            arc_band(pb, sc, outer, outer + 1.2, af, half, col, 0.50 + 0.25 * pulse);
-            arc_band(pb, sc, inner, inner + 1.0, af, half, col, 0.40);
+            arc_band(pb, sc, (inner, fill), af, half, col, 0.16 + 0.10 * pulse);
+            arc_band(pb, sc, (fill - 1.4, fill), af, half, col, 0.62);
+            arc_band(pb, sc, (outer, outer + 1.2), af, half, col, 0.50 + 0.25 * pulse);
+            arc_band(pb, sc, (inner, inner + 1.0), af, half, col, 0.40);
             // Radial tick marks, so the fan reads as a swept sector.
             for k in 0..9 {
                 let a = -half + 2.0 * half * (k as f32 / 8.0);
@@ -997,9 +997,9 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, accent: Rgb
             let side = if view.sweep_side >= 0.0 { 1.0 } else { -1.0 };
             let ang = -side * half + (2.0 * half) * smoothstep(p);
             // The live band, flashing as the spike crosses it.
-            let live = p >= TELSON_ACTIVE_PROGRESS && p <= TELSON_ACTIVE_PROGRESS + 0.30;
+            let live = (TELSON_ACTIVE_PROGRESS..=TELSON_ACTIVE_PROGRESS + 0.30).contains(&p);
             let col = if live { WARN_HOT } else { WARN_AMBER };
-            arc_band(pb, sc, inner, outer, af, half, col, if live { 0.16 } else { 0.08 });
+            arc_band(pb, sc, (inner, outer), af, half, col, if live { 0.16 } else { 0.08 });
             // The spike's own leading edge.
             let d = af.rotate(ang);
             line_solid(pb, sc + d * inner, sc + d * outer, WARN_HOT, 0.85);
@@ -1223,18 +1223,17 @@ pub fn draw_tell_overlay(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2) {
             let (center, inner, outer, af, half) = telson_arc(view);
             let sc = w2s(center, cam);
             let live = matches!(view.state, CrabState::TelsonSweep)
-                && p >= TELSON_ACTIVE_PROGRESS
-                && p <= TELSON_ACTIVE_PROGRESS + 0.30;
+                && (TELSON_ACTIVE_PROGRESS..=TELSON_ACTIVE_PROGRESS + 0.30).contains(&p);
             let col = if live { (255, 246, 196) } else { (255, 206, 96) };
-            arc_band(pb, sc, inner, inner + 1.2, af, half, col, 0.85);
-            arc_band(pb, sc, outer - 0.8, outer + 0.8, af, half, col, 0.92);
+            arc_band(pb, sc, (inner, inner + 1.2), af, half, col, 0.85);
+            arc_band(pb, sc, (outer - 0.8, outer + 0.8), af, half, col, 0.92);
             for k in 0..9 {
                 let a = -half + 2.0 * half * (k as f32 / 8.0);
                 let d = af.rotate(a);
                 line_solid(pb, sc + d * inner, sc + d * (inner + 4.2), col, 0.85);
             }
             if live {
-                arc_band(pb, sc, inner, outer, af, half, col, 0.10 + 0.06 * pulse);
+                arc_band(pb, sc, (inner, outer), af, half, col, 0.10 + 0.06 * pulse);
             }
         }
         CrabState::BulldozeTell | CrabState::Bulldoze => {
@@ -1345,7 +1344,7 @@ pub fn draw(pb: &mut PixelBuffer, view: &CrabView, cam: Vec2, _accent: Rgb) {
         CrabState::BurrowTell => view.anim * 7.0,
         _ => view.anim * 1.6,
     };
-    draw_legs(pb, view, &c, f, perp, hit, step_phase, false);
+    draw_legs(pb, &c, f, perp, hit, step_phase, false);
 
     // The wedge lifts the rear of the shell: draw a dark gap first.
     let lifted = matches!(view.state, CrabState::Wedged);
@@ -1424,10 +1423,10 @@ fn draw_dome(
             } else {
                 (14.0 + (u + 2.0) * 0.64).max(3.6)
             };
-            let in_dome = u >= -DOME_HALF_LEN - 0.5 && u <= 16.5 && v.abs() <= half_w;
+            let in_dome = (-DOME_HALF_LEN - 0.5..=16.5).contains(&u) && v.abs() <= half_w;
             let rim = (v.abs() - half_w).abs() < 1.0 || (u - 16.5).abs() < 1.0 || (u + DOME_HALF_LEN).abs() < 1.0;
             if !in_dome {
-                if rim && u >= -DOME_HALF_LEN - 1.0 && u <= 17.5 && v.abs() <= half_w + 1.2 {
+                if rim && (-DOME_HALF_LEN - 1.0..=17.5).contains(&u) && v.abs() <= half_w + 1.2 {
                     blend_px(pb, x, y, SHELL_OUT, 0.85);
                 }
                 continue;
@@ -1510,7 +1509,7 @@ fn draw_dome(
             } else {
                 (14.0 + (u + 2.0) * 0.64).max(3.6)
             };
-            let inside = u >= -DOME_HALF_LEN - 0.5 && u <= 16.5 && v.abs() <= half_w;
+            let inside = (-DOME_HALF_LEN - 0.5..=16.5).contains(&u) && v.abs() <= half_w;
             let near_edge = (v.abs() - half_w).abs() < 1.2 || (u - 16.5).abs() < 1.2 || (u + DOME_HALF_LEN).abs() < 1.2;
             if !inside && near_edge {
                 blend_px(pb, x, y, SHELL_OUT, 0.75);
@@ -1521,7 +1520,6 @@ fn draw_dome(
 
 fn draw_legs(
     pb: &mut PixelBuffer,
-    _view: &CrabView,
     c: &Vec2,
     f: Vec2,
     perp: Vec2,
@@ -1890,7 +1888,11 @@ mod tests {
 
         // Wedged: the shell is up, everything counts and the gills pay double.
         v.state = CrabState::Wedged;
-        assert_eq!(incoming_multiplier(&v, front, v.pos), 1.0);
+        // (Sampled on the nose: the gill fan sits `GILL_BACK` = 7 px behind the
+        // centre with a 6.5 + 2 px catch, so the exact centre is inside it.)
+        let nose = v.pos + unit_facing(&v) * (BODY_RADIUS * 0.6);
+        assert!(nose.dist(gill_pos(&v)) > GILL_RADIUS + 2.0);
+        assert_eq!(incoming_multiplier(&v, front, nose), 1.0);
         assert_eq!(incoming_multiplier(&v, front, gill_pos(&v)), GILL_DAMAGE_MULT);
 
         // Flipped: the weak point is the whole underside.
@@ -1952,8 +1954,8 @@ mod tests {
         assert_eq!(DEATH_DURATION, 2.60);
         assert_eq!(BLOOD_LIFE, 6.0);
         assert_eq!(BLOOD_SLOW, 0.45);
-        assert!(DOME_SPEED[0] < DOME_SPEED[2]);
-        assert!(BULLDOZE_SPEED[0] > 58.0, "the bulldoze must outwalk the rat");
+        const { assert!(DOME_SPEED[0] < DOME_SPEED[2]) };
+        const { assert!(BULLDOZE_SPEED[0] > 58.0, "the bulldoze must outwalk the rat") };
         // The punish windows are the states the framework must treat as safe
         // for the rat to stand in.
         assert!(CrabState::Wedged.is_recovery());

@@ -226,7 +226,9 @@ fn boss_death_plays_its_beat_then_completes_the_level_once() {
     assert_eq!(gold.iter(&w.ecs).count(), 0, "the boss drops no coin now");
 
     // Every tick of the beat keeps the boss (and never re-raises anything).
-    let ticks = (art_boss_cat::DEATH_DURATION / DT).ceil() as usize + 2;
+    // (The floor's boss, not "the cat": the Sewer pool fields the Jaguar or
+    // the Horseshoe by seed, and their death beats differ in length.)
+    let ticks = (floor_boss(&w).death_duration() / DT).ceil() as usize + 2;
     let mut completions = 0usize;
     let mut was_complete = false;
     for _ in 0..ticks {
@@ -256,22 +258,34 @@ fn boss_death_plays_its_beat_then_completes_the_level_once() {
     assert_eq!(w.gold, banked, "the boss's gold is credited once");
 }
 
-/// §6 for **all six bosses**, on a campaign floor and on a practice floor
+/// §6 for **every boss of every floor** (both pool mates of the Sewer and the
+/// Kitchen included), on a campaign floor and on a practice floor
 /// (`difficulty_override = Some(0)`): the clear credits exactly
 /// [`crate::game::shop::BOSS_GOLD`] to the wallet, once, and leaves no coin on
 /// the floor. The credit lives in the shared death path of
 /// `boss_update_system`, so a boss added later inherits it; this pins that.
 #[test]
 fn every_boss_credits_its_gold_exactly_once_at_the_clear() {
-    for theme in Theme::all() {
+    // Every pool mate of every floor: a seed is searched per boss, so a pooled
+    // floor (Sewer, Kitchen) is cleared with each of its bosses.
+    let mut cleared = 0usize;
+    for (theme, want) in Theme::all()
+        .into_iter()
+        .flat_map(|t| BossKind::pool_for_theme(t).iter().map(move |k| (t, *k)))
+    {
+        let seed = (0..256u64)
+            .find(|s| BossKind::pool_pick(theme, *s) == want)
+            .expect("every pool mate is reachable by seed");
+        cleared += 1;
         for practice in [false, true] {
-            let mut w = World::new(theme, 9);
+            let mut w = World::new(theme, seed);
             if practice {
                 w.difficulty_override = Some(0);
             }
             spawn_boss(&mut w);
             let kind = boss_of(&mut w).expect("the floor's boss").kind;
             assert_eq!(kind, floor_boss(&w));
+            assert_eq!(kind, want);
             let before = w.gold;
             {
                 let mut query = w.ecs.query::<&mut Boss>();
@@ -294,6 +308,9 @@ fn every_boss_credits_its_gold_exactly_once_at_the_clear() {
             assert_eq!(coins.iter(&w.ecs).count(), 0, "{kind:?}: no boss coin");
         }
     }
+    // The five `Theme::all()` floors field seven bosses between them (the
+    // Magpie's flatbed is not a menu floor).
+    assert_eq!(cleared, 7, "every pool mate of every floor was cleared");
 }
 
 /// The boss's death breaks the horde, and that despawn has to happen **after**

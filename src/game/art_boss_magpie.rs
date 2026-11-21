@@ -588,6 +588,27 @@ pub fn head_center(view: &MagpieView) -> Vec2 {
     }
 }
 
+/// Longest the neck is drawn from the body centre to a buried head.
+const BURIED_NECK_MAX: f32 = HEAD_OFFSET + 3.2;
+
+/// The body's world centre for this view: `view.pos`, except while the bill is
+/// down (`Peck`/`Stuck`), when the torso **leans after the head** so the neck
+/// never stretches past [`BURIED_NECK_MAX`]. The sprite and the hit circles
+/// both read this, so the bird is always drawn over the shapes the rat hits.
+#[inline]
+pub fn body_center(view: &MagpieView) -> Vec2 {
+    if !matches!(view.state, MagpieState::Peck | MagpieState::Stuck) {
+        return view.pos;
+    }
+    let to_head = head_center(view) - view.pos;
+    let d = to_head.len();
+    if d > BURIED_NECK_MAX {
+        view.pos + to_head * ((d - BURIED_NECK_MAX) / d)
+    } else {
+        view.pos
+    }
+}
+
 /// The bill tip (world). While stuck this is the strike point: the bill is the
 /// line from the head to the planks.
 #[inline]
@@ -605,9 +626,12 @@ pub fn beak_tip(view: &MagpieView) -> Vec2 {
 #[inline]
 pub fn body_hit_circles(view: &MagpieView) -> [(Vec2, f32); 3] {
     let f = safe_facing(view.facing);
+    // The leaned centre (`body_center`): the tail root and the body follow the
+    // torso the sprite draws, the head stays parked on the strike point.
+    let body = body_center(view);
     [
-        (view.pos - f * (TAIL_LENGTH * 0.45), 5.5),
-        (view.pos, BODY_RADIUS * 0.82),
+        (body - f * (TAIL_LENGTH * 0.45), 5.5),
+        (body, BODY_RADIUS * 0.82),
         (head_center(view), HEAD_RADIUS),
     ]
 }
@@ -929,16 +953,9 @@ impl Pose {
 
         // Visual body centre: during Peck/Stuck, lean the torso forward so the neck stays
         // anatomically fierce (~13-17 px from chest to buried head) instead of stretching across the deck!
-        let mut body = ground + jitter + Vec2::new(0.0, -lift);
-        if buried {
-            let to_head = head - body;
-            let d = to_head.len();
-            let max_neck = HEAD_OFFSET + 3.2;
-            if d > max_neck {
-                let pull = d - max_neck;
-                body += to_head * (pull / d);
-            }
-        }
+        // The lean is `body_center`, the same world point the hit circles are
+        // built on, so the leaned torso stays over what the rat can hit.
+        let body = ground + (body_center(view) - view.pos) + jitter + Vec2::new(0.0, -lift);
 
         Self {
             body,
