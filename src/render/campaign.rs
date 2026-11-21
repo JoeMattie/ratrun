@@ -14,6 +14,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::Frame;
 
+use crate::game::art_icons;
 use crate::render::palette::{mix, to_color, Rgb, COAT, EDGE, MUTED, PLATE, TAIL, TRACK};
 
 // Semantic colors matching `src/render/hud.rs` and `src/render/menu.rs`.
@@ -1274,14 +1275,21 @@ fn draw_manifest_row(
     };
     cx = put_str(buf, cx, y0, chk, 2, heavy(chk_col).bg(bg));
 
-    // Upgrade glyph.
-    let g_col = if dim_unselected {
-        to_color(mix(item.color, (70, 78, 82), 0.6))
+    // Upgrade icon (4×4 pixel sprite on 2-line rows, single glyph on 1-line compact rows).
+    let show_pixel_icon = two_line && row_rect.height >= 2 && row_rect.width >= 38;
+    if show_pixel_icon {
+        let icon_rect = Rect::new(cx, y0, art_icons::SMALL_CELL_W, art_icons::SMALL_CELL_H);
+        art_icons::draw(buf, icon_rect, art_icons::by_name(item.name));
+        cx = cx.saturating_add(art_icons::SMALL_CELL_W + 1);
     } else {
-        item_col
-    };
-    cx = put_str(buf, cx, y0, item.glyph.encode_utf8(&mut tmp), 1, heavy(g_col).bg(bg));
-    cx = put_str(buf, cx, y0, " ", 1, ink(COAT).bg(bg));
+        let g_col = if dim_unselected {
+            to_color(mix(item.color, (70, 78, 82), 0.6))
+        } else {
+            item_col
+        };
+        cx = put_str(buf, cx, y0, item.glyph.encode_utf8(&mut tmp), 1, heavy(g_col).bg(bg));
+        cx = put_str(buf, cx, y0, " ", 1, ink(COAT).bg(bg));
+    }
 
     // Right-side status badge (`[KEEP]` / `[LEAVE]`) and level pips/stacks.
     let tag = if is_selected {
@@ -1360,7 +1368,7 @@ fn draw_manifest_row(
         let y1 = y0 + 1;
         let cont_ch = if is_selected { "▌" } else { " " };
         put_str(buf, row_rect.x, y1, cont_ch, 1, ink(bar_col).bg(bg));
-        let detail_x = row_rect.x + 6;
+        let detail_x = if show_pixel_icon { cx } else { row_rect.x + 6 };
         let detail_w = row_rect.right().saturating_sub(detail_x + 2);
         let detail_style = if dim_unselected {
             ink(EDGE).bg(bg)
@@ -1604,9 +1612,20 @@ pub fn draw_keep_three(
                 let mut hdr = StackBuf::<24>::new();
                 let _ = write!(hdr, " SLOT 0{} ", s_idx + 1);
                 put_str(buf, sbox.x + 2, sbox.y, hdr.as_str(), 10, heavy(HEAL_MINT).bg(PLATE_PACKED));
-                let mut g = [0u8; 4];
-                let mut cx = put_str(buf, si.x + 1, si.y, it.glyph.encode_utf8(&mut g), 1, heavy(icol).bg(PLATE_PACKED));
-                cx = put_str(buf, cx, si.y, " ", 1, ink(COAT).bg(PLATE_PACKED));
+                let text_x = if si.height >= art_icons::SMALL_CELL_H && si.width >= 16 {
+                    let icon_rect = Rect::new(
+                        si.x + 1,
+                        si.y,
+                        art_icons::SMALL_CELL_W,
+                        art_icons::SMALL_CELL_H,
+                    );
+                    art_icons::draw(buf, icon_rect, art_icons::by_name(it.name));
+                    si.x + 1 + art_icons::SMALL_CELL_W + 1
+                } else {
+                    let mut g = [0u8; 4];
+                    let cx = put_str(buf, si.x + 1, si.y, it.glyph.encode_utf8(&mut g), 1, heavy(icol).bg(PLATE_PACKED));
+                    put_str(buf, cx, si.y, " ", 1, ink(COAT).bg(PLATE_PACKED))
+                };
                 let mut tag = StackBuf::<16>::new();
                 match it.category {
                     UpgradeCategory::Weapon { level, max_level } => {
@@ -1617,15 +1636,15 @@ pub fn draw_keep_three(
                     }
                 }
                 let tw = tag.as_str().chars().count() as u16;
-                let nw = si.right().saturating_sub(cx + tw + 2);
-                put_str_ellipsis(buf, cx, si.y, it.name, nw, heavy(COAT).bg(PLATE_PACKED));
+                let nw = si.right().saturating_sub(text_x + tw + 2);
+                put_str_ellipsis(buf, text_x, si.y, it.name, nw, heavy(COAT).bg(PLATE_PACKED));
                 put_str(buf, si.right().saturating_sub(tw + 1), si.y, tag.as_str(), tw, heavy(icol).bg(PLATE_PACKED));
                 put_str_ellipsis(
                     buf,
-                    si.x + 1,
+                    text_x,
                     si.y + 1,
                     it.detail,
-                    si.width.saturating_sub(2),
+                    si.right().saturating_sub(text_x + 1),
                     ink(MUTED).bg(PLATE_PACKED),
                 );
             } else {
@@ -2173,16 +2192,28 @@ pub fn draw_level_intro(
                 let crect = Rect::new(cx, inner.y + y, card_w, card_h);
                 let icol = to_color(it.color);
                 let ci = sub_box(buf, crect, EDGE, PLATE_SUB);
-                let mut g = [0u8; 4];
-                let mut tx = put_str(
-                    buf,
-                    ci.x,
-                    ci.y,
-                    it.glyph.encode_utf8(&mut g),
-                    1,
-                    heavy(icol).bg(PLATE_SUB),
-                );
-                tx = put_str(buf, tx, ci.y, " ", 1, ink(COAT).bg(PLATE_SUB));
+                let show_ci_icon = card_h >= 4 && ci.height >= art_icons::SMALL_CELL_H && ci.width >= 15;
+                let tx = if show_ci_icon {
+                    let icon_rect = Rect::new(
+                        ci.x,
+                        ci.y,
+                        art_icons::SMALL_CELL_W,
+                        art_icons::SMALL_CELL_H,
+                    );
+                    art_icons::draw(buf, icon_rect, art_icons::by_name(it.name));
+                    ci.x + art_icons::SMALL_CELL_W + 1
+                } else {
+                    let mut g = [0u8; 4];
+                    let t0 = put_str(
+                        buf,
+                        ci.x,
+                        ci.y,
+                        it.glyph.encode_utf8(&mut g),
+                        1,
+                        heavy(icol).bg(PLATE_SUB),
+                    );
+                    put_str(buf, t0, ci.y, " ", 1, ink(COAT).bg(PLATE_SUB))
+                };
                 let mut badge = StackBuf::<28>::new();
                 match it.category {
                     UpgradeCategory::Weapon { level, max_level } => {
@@ -2216,7 +2247,15 @@ pub fn draw_level_intro(
                     .bg(PLATE_SUB),
                 );
                 if card_h >= 4 && ci.height >= 2 {
-                    put_str_ellipsis(buf, ci.x, ci.y + 1, it.detail, ci.width, ink(MUTED).bg(PLATE_SUB));
+                    let dx = if show_ci_icon { tx } else { ci.x };
+                    put_str_ellipsis(
+                        buf,
+                        dx,
+                        ci.y + 1,
+                        it.detail,
+                        ci.right().saturating_sub(dx),
+                        ink(MUTED).bg(PLATE_SUB),
+                    );
                 }
             }
         } else {
