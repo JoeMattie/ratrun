@@ -365,8 +365,12 @@ fn scripted_crowd_reaches_the_cap_curve() {
             break;
         }
     }
+    // The 15-minute curve opens at 0.8→1.5 bodies/s, so 60 s of the Evade
+    // script (which kills as it flees) holds a smaller peak than the old
+    // 300 s curve did. The trace is still non-vacuous as long as the crowd
+    // and a second kind appear.
     assert!(
-        peak >= 15,
+        peak >= 8,
         "crowd never grew (peak {peak}): the trace cases would be vacuous"
     );
     assert!(

@@ -77,7 +77,8 @@ use bevy_ecs::prelude::*;
 
 use super::resources::TickInput;
 use super::systems::{
-    boss, combat, enemy_move, fog, fx, gates, loot, player, projectiles, spawn, traps, weapons,
+    boss, combat, enemy_move, fog, fx, gates, loot, miniboss, player, projectiles, spawn, traps,
+    weapons,
 };
 
 /// Legacy `self.damage_numbers.update(dt)` (neon merge, `World::update`).
@@ -138,6 +139,16 @@ pub fn build_tick_schedule() -> Schedule {
             .chain(),
     );
 
+    // Named miniboss appointments: spawn/retreat and the signature state
+    // machine. It runs right after the director (so its spawn lands before the
+    // grid build) and before the boss hand-off, in its own chained step
+    // because the 20-element tuple above is full.
+    schedule.add_systems(
+        miniboss::miniboss_system
+            .after(spawn::director_system)
+            .before(boss::boss_spawn_system),
+    );
+
     // The interactive-object runtime (gates.rs): rat-holes + centring, the
     // maze-cache heist, then the one-way doors and the exit slam. Chained
     // between the fog reveal and the flow refresh so all three see this tick's
@@ -157,6 +168,7 @@ pub fn build_tick_schedule() -> Schedule {
     // chained so the Nuke re-reap and every deferred drop stay in order.
     schedule.add_systems(
         (
+            miniboss::miniboss_chest_system,
             loot::reap_enemies_system,
             loot::gems_system,
             loot::treasure_system,

@@ -24,8 +24,9 @@ pub fn draw_overlays(frame: &mut Frame, game: Rect, world: &World, state: &mut H
 
     draw_damage_and_low_hp(frame, game, world, state);
     let top_reserved = draw_boss_ui(frame, game, world, state);
+    let miniboss_reserved = draw_miniboss_ui(frame, game, world, state, top_reserved);
     draw_boss_compass(frame, game, world, state);
-    draw_callouts(frame, game, world, state, top_reserved);
+    draw_callouts(frame, game, world, state, top_reserved + miniboss_reserved);
 }
 
 /// Subtle perimeter brackets on damage impact and critical low health.
@@ -411,6 +412,93 @@ fn draw_boss_ui(frame: &mut Frame, game: Rect, world: &World, state: &mut HudSta
         return 3;
     }
 
+    0
+}
+
+/// How close to the next miniboss appointment the warning banner opens.
+pub const MINIBOSS_WARNING_SECS: f32 = 20.0;
+
+/// The named-miniboss nameplate (wave 3). While one is alive it draws a short
+/// name and a compact HP bar under the boss chrome; when none is alive but the
+/// next appointment is within [`MINIBOSS_WARNING_SECS`] it draws the warning.
+/// Returns the number of rows reserved at the top of `game`.
+fn draw_miniboss_ui(
+    frame: &mut Frame,
+    game: Rect,
+    world: &World,
+    state: &mut HudState,
+    top: u16,
+) -> u16 {
+    if game.width < 30 || game.height < 8 {
+        return 0;
+    }
+    let y = game.y + top;
+    if y + 1 >= game.bottom() {
+        return 0;
+    }
+    // A live miniboss: two rows (name + bar).
+    if let Some((name, hp, max_hp)) = world.miniboss_hp() {
+        let ratio = (hp.max(0.0) / max_hp.max(1.0)).clamp(0.0, 1.0);
+        let bar_w = (game.width * 46 / 100).clamp(18, 54).min(game.width.saturating_sub(2));
+        if bar_w < 12 {
+            return 0;
+        }
+        let bx = game.x + (game.width - bar_w) / 2;
+        state.miniboss_text.clear();
+        let _ = write!(
+            state.miniboss_text,
+            " ◆ {}  {:.0}/{:.0} ",
+            name.to_uppercase(),
+            hp.max(0.0),
+            max_hp
+        );
+        let tw = (state.miniboss_text.chars().count() as u16).min(game.width);
+        let tx = game.x + (game.width - tw) / 2;
+        let buf = frame.buffer_mut();
+        buf.set_stringn(
+            tx,
+            y,
+            &state.miniboss_text,
+            tw as usize,
+            Style::default()
+                .fg(COAT)
+                .bg(PLATE)
+                .add_modifier(Modifier::BOLD),
+        );
+        // Bar: filled part in amber, the rest in the track colour.
+        let filled = (bar_w as f32 * ratio).round() as u16;
+        for i in 0..bar_w {
+            let c = if i < filled { WARN_AMBER } else { TRACK };
+            buf[(bx + i, y + 1)].set_char('█').set_style(Style::default().fg(c).bg(PLATE));
+        }
+        return 2;
+    }
+    // No miniboss: warn when the next appointment is close.
+    if let Some(at) = world.next_miniboss_time() {
+        let rem = at - world.elapsed;
+        if rem > 0.0 && rem <= MINIBOSS_WARNING_SECS {
+            let pulse = 0.5 + 0.5 * (state.clock * 9.0).sin();
+            state.miniboss_text.clear();
+            let _ = write!(
+                state.miniboss_text,
+                " ◆ APPOINTMENT IN {:02}s ",
+                rem.ceil().max(1.0) as u32
+            );
+            let tw = (state.miniboss_text.chars().count() as u16).min(game.width);
+            let tx = game.x + (game.width - tw) / 2;
+            let fg = if pulse > 0.5 { PLATE } else { WARN_AMBER };
+            let bg = if pulse > 0.5 { WARN_AMBER } else { PLATE };
+            let buf = frame.buffer_mut();
+            buf.set_stringn(
+                tx,
+                y,
+                &state.miniboss_text,
+                tw as usize,
+                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+            );
+            return 1;
+        }
+    }
     0
 }
 

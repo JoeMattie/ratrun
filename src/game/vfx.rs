@@ -3871,6 +3871,89 @@ pub fn emit_boss_mower_death(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2) 
     });
 }
 
+// ---- Named minibosses (wave 3) -------------------------------------------
+
+/// Arrival sting: a dusty ground ring plus a short burst of brass sparks.
+pub fn emit_miniboss_arrive(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, accent: Rgb) {
+    let base = safe_pos(pos);
+    ps.push_shockwave(Shockwave {
+        pos: base,
+        start_r: 3.0,
+        end_r: 34.0,
+        life: 0.42,
+        max_life: 0.42,
+        color: accent,
+        core: (255, 246, 214),
+        thick: 1.8,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    let sparks = ps.budget_count(18, true);
+    ps.burst_shaped(
+        rng,
+        base,
+        sparks,
+        82.0,
+        4.0,
+        Ramp::Spark,
+        0.46,
+        true,
+        Shape::Streak,
+        3.0,
+    );
+    let dust = ps.budget_count(10, false);
+    ps.burst_shaped(
+        rng,
+        base,
+        dust,
+        30.0,
+        7.0,
+        Ramp::Smoke,
+        0.55,
+        false,
+        Shape::Blob,
+        5.0,
+    );
+}
+
+/// Tell cue: a thin flashing ring around the miniboss so the wind-up reads even
+/// before the shape itself is drawn.
+pub fn emit_miniboss_tell(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, color: Rgb) {
+    let base = safe_pos(pos);
+    ps.push_shockwave(Shockwave {
+        pos: base,
+        start_r: 6.0,
+        end_r: 20.0,
+        life: 0.24,
+        max_life: 0.24,
+        color,
+        core: (255, 255, 255),
+        thick: 1.2,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    let pips = ps.budget_count(6, true);
+    for k in 0..pips {
+        let a = k as f32 / pips.max(1) as f32 * std::f32::consts::TAU
+            + rng.random_range(-0.12..0.12);
+        let d = Vec2::from_angle(a);
+        let life = rng.random_range(0.18..0.32);
+        ps.push(Particle {
+            pos: base + d * 10.0,
+            vel: d * rng.random_range(26.0..44.0),
+            life,
+            max_life: life,
+            drag: 5.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(color, color),
+            additive: true,
+            shape: Shape::Dot,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

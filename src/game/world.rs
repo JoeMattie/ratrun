@@ -90,8 +90,8 @@ use super::player::Player;
 use super::weapon::WeaponKind;
 use super::art_walls::{Cardinal, WallKind};
 use super::{
-    art_boss_broom, art_boss_cat, art_boss_mower, art_enemy, art_floor, art_marks, art_props,
-    art_rat, art_traps, art_walls,
+    art_boss_broom, art_boss_cat, art_boss_mower, art_enemy, art_floor, art_marks, art_miniboss,
+    art_props, art_rat, art_traps, art_walls,
 };
 
 pub struct World {
@@ -263,6 +263,8 @@ impl World {
         // The boss fight's own state (private rng stream, damage-number id,
         // reusable scratch). Permanent, like `BossDue`; a spawn re-seeds it.
         ecs.insert_resource(BossFight::default());
+        // Named miniboss appointments + spawn grace (wave 3).
+        ecs.insert_resource(super::ecs::systems::miniboss::MinibossSchedule::default());
         // Floor-trap side table (glue victims + mousetrap hit bookkeeping);
         // `traps::TrapRuntime::sync` sizes it from `level.objects`.
         ecs.insert_resource(super::ecs::systems::traps::TrapRuntime::default());
@@ -500,6 +502,46 @@ impl World {
             return Some(b.pos - self.player.pos);
         }
         self.living_enemy_boss().map(|e| e.pos - self.player.pos)
+    }
+
+    // ---- Named minibosses (wave 3) -------------------------------------
+
+    /// The living miniboss, if one is active.
+    fn living_miniboss(&self) -> Option<(&Enemy, &super::ecs::systems::miniboss::Miniboss)> {
+        self.ecs.iter_entities().find_map(|entity| {
+            let e = entity.get::<Enemy>()?;
+            let mb = entity.get::<super::ecs::systems::miniboss::Miniboss>()?;
+            if e.alive() && !mb.chest_dropped {
+                Some((e, mb))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// The living miniboss's `(name, hp, max_hp)` for the nameplate.
+    pub fn miniboss_hp(&self) -> Option<(&'static str, f32, f32)> {
+        self.living_miniboss().map(|(e, mb)| {
+            (mb.kind.name(), e.hp.max(0.0), e.max_hp)
+        })
+    }
+
+    /// The living miniboss's world position.
+    pub fn miniboss_marker(&self) -> Option<Vec2> {
+        self.living_miniboss().map(|(e, _)| e.pos)
+    }
+
+    /// The next appointment clock, if one is pending.
+    pub fn next_miniboss_time(&self) -> Option<f32> {
+        self.ecs
+            .resource::<super::ecs::systems::miniboss::MinibossSchedule>()
+            .next_appointment()
+    }
+
+    /// Is a boss-phase cleanup pace in effect? (The director reads this through
+    /// its own timer; the HUD only needs the flag.)
+    pub fn cleanup_pace(&self) -> bool {
+        self.boss_time_reached()
     }
 
     // ---- Fog of war / minimap accessors --------------------------------
@@ -859,6 +901,27 @@ impl World {
         ChestSpawn { pos }.spawn(&mut self.ecs)
     }
 
+    /// Inject a named miniboss between ticks (tests use this; the real system
+    /// spawns through `Commands`).
+    pub fn spawn_miniboss(
+        &mut self,
+        kind: super::ecs::systems::miniboss::MinibossKind,
+        appointment: usize,
+        pos: Vec2,
+    ) -> Entity {
+        use super::ecs::systems::miniboss::{appointment_hp, Miniboss};
+        let mut enemy = Enemy::spawn(EnemyKind::Brute, pos, 1.0, &mut self.rng);
+        enemy.hp = appointment_hp(appointment);
+        enemy.max_hp = enemy.hp;
+        enemy.radius = kind.body_radius();
+        enemy.damage = 8.0;
+        enemy.speed_scale = 2.4;
+        enemy.id = self.next_enemy_id;
+        self.next_enemy_id = self.next_enemy_id.wrapping_add(1).max(1);
+        let mb = Miniboss::new(kind, appointment);
+        spawn_with_id(&mut self.ecs, (enemy, mb))
+    }
+
     pub fn spawn_gem(&mut self, gem: Gem) -> Entity {
         spawn_with_id(&mut self.ecs, gem)
     }
@@ -970,6 +1033,8 @@ impl World {
         // Boss ground layer: floor telegraphs and drop shadows, after the
         // stains and before props/entities (the art's "Ground" layer).
         self.draw_boss_ground(pb, cam);
+        // Named-miniboss telegraphs share that ground layer (wave 3).
+        self.draw_miniboss_ground(pb, cam);
 
         // Wall ground layer: contact shadows and floor thresholds, under
         // everything that stands on the floor.
@@ -1087,19 +1152,24 @@ impl World {
         // health ring), so cull with a generous margin.
         let accent = self.level.palette.accent;
         {
-            let mut query = self.ecs.query::<(&SpawnId, &Enemy)>();
+            let mut query = self
+                .ecs
+                .query::<(&SpawnId, &Enemy, Option<&super::ecs::systems::miniboss::Miniboss>)>();
             // Count what is on screen first: past CROWD_LOD_THRESHOLD the art
             // switches small enemies to its cheaper level-of-detail drawing.
             let visible = query
                 .iter(&self.ecs)
-                .filter(|(_, e)| on_screen(self.w2s(e.pos, cam), e.radius * 3.0 + 8.0, viewport))
+                .filter(|(_, e, _)| on_screen(self.w2s(e.pos, cam), e.radius * 3.0 + 8.0, viewport))
                 .count();
-            for (_, e) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+            for (_, e, mb) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
                 let s = self.w2s(e.pos, cam);
                 if !on_screen(s, e.radius * 3.0 + 8.0, viewport) {
                     continue;
                 }
-                art_enemy::draw_enemy_crowd(pb, e, cam, accent, visible);
+                match mb {
+                    Some(mb) => art_miniboss::draw(pb, e, mb, cam, accent),
+                    None => art_enemy::draw_enemy_crowd(pb, e, cam, accent, visible),
+                }
             }
         }
 
@@ -1184,6 +1254,23 @@ impl World {
                     art_boss_mower::draw_mower_ground(pb, &v, cam, accent);
                 }
             }
+        }
+    }
+
+    /// Named-miniboss ground layer: the tell/active telegraph under the bodies.
+    fn draw_miniboss_ground(&mut self, pb: &mut PixelBuffer, cam: Vec2) {
+        let accent = self.level.palette.accent;
+        let mut query = self
+            .ecs
+            .query::<(&Enemy, &super::ecs::systems::miniboss::Miniboss)>();
+        for (e, mb) in query.iter(&self.ecs) {
+            if !e.alive() {
+                continue;
+            }
+            if !on_screen(self.w2s(e.pos, cam), 90.0, self.viewport) {
+                continue;
+            }
+            art_miniboss::draw_telegraph(pb, mb, cam, accent);
         }
     }
 

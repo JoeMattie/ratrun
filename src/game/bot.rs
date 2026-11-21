@@ -111,6 +111,7 @@ use crate::game::collision::{cell_of, SizeClass};
 use crate::game::gem::{Gem, Pickup};
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::systems::boss::{Boss, BossProjectile, HazardShape};
+use crate::game::ecs::systems::miniboss::{Miniboss, MinibossShape, MinibossState};
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::PickupKind;
 use crate::game::loadout::{Loadout, PassiveKind, Upgrade};
@@ -327,6 +328,13 @@ enum Threat {
         active_left: f32,
         damage: f32,
     },
+    /// A named miniboss's signature telegraph / active shape.
+    MinibossHazard {
+        shape: MinibossShape,
+        warn_left: f32,
+        active_left: f32,
+        damage: f32,
+    },
     /// A boss projectile (blade disc, fang, shard).
     Projectile {
         pos: Vec2,
@@ -373,6 +381,8 @@ pub struct Bot {
     level: usize,
     /// Boss seen this level, for the counter rules.
     boss_pos: Option<Vec2>,
+    /// Living named miniboss (wave 3), for the fight objective.
+    miniboss_pos: Option<Vec2>,
     boss_kind: Option<crate::game::ecs::systems::boss::BossKind>,
     decisions: u64,
 }
@@ -397,6 +407,7 @@ impl Bot {
             pickups: Vec::with_capacity(8),
             level: 0,
             boss_pos: None,
+            miniboss_pos: None,
             boss_kind: None,
             decisions: 0,
         }
@@ -422,6 +433,7 @@ impl Bot {
         self.held = BotInput::IDLE;
         self.since_decision = f32::INFINITY;
         self.boss_pos = None;
+        self.miniboss_pos = None;
         self.boss_kind = None;
     }
 
@@ -721,6 +733,7 @@ impl Bot {
         self.pickups.clear();
         let p = w.player.pos;
         self.boss_pos = None;
+        self.miniboss_pos = None;
         self.boss_kind = None;
         for e in w.ecs.iter_entities() {
             if let Some(en) = e.get::<Enemy>() {
@@ -734,6 +747,31 @@ impl Bot {
                     damage: en.damage,
                     kind: en.kind,
                 });
+                if let Some(mb) = e.get::<Miniboss>() {
+                    if en.alive() && !mb.chest_dropped {
+                        self.miniboss_pos = Some(en.pos);
+                        if let Some(shape) = mb.telegraph() {
+                            // The telegraph is a danger for its whole tell:
+                            // treat it as immediately lethal so the bot leaves
+                            // the shape before the 1 s tell expires.
+                            let active_left = match mb.state {
+                                MinibossState::Tell => 1.0,
+                                MinibossState::Active => {
+                                    (mb.kind.active_duration() - mb.timer).max(0.0) + 0.1
+                                }
+                                _ => 0.0,
+                            };
+                            if active_left > 0.0 {
+                                self.threats.push(Threat::MinibossHazard {
+                                    shape,
+                                    warn_left: 0.0,
+                                    active_left,
+                                    damage: mb.signature_damage,
+                                });
+                            }
+                        }
+                    }
+                }
             } else if let Some(b) = e.get::<Bullet>() {
                 if b.faction != Faction::Enemy || !self.sees(w, p, b.pos) {
                     continue;
@@ -980,6 +1018,22 @@ impl Bot {
                 -1.5
             };
         }
+        // A named miniboss is a fight objective too (wave 3): keep the weapons
+        // in range, but stay out of its body and signatures (the hazard cost
+        // already does the dodging). The pull is lighter than the boss's.
+        if self.boss_pos.is_none() {
+            if let Some(mpos) = self.miniboss_pos {
+                let d = mpos.dist(p);
+                let toward = (mpos - p).normalized();
+                bonus += if d > 80.0 {
+                    1.6 * dir.dot(toward)
+                } else if d > 28.0 {
+                    0.8 * dir.dot(toward)
+                } else {
+                    -1.0
+                };
+            }
+        }
 
         -danger * self.params.safety + bonus
     }
@@ -1023,6 +1077,11 @@ impl Bot {
                         && shape.contains(p, R + 1.0)
                         && (warn_left <= 0.20 || warn_left > 0.0)
                     {
+                        imminent = true;
+                    }
+                }
+                Threat::MinibossHazard { shape, active_left, .. } => {
+                    if active_left > 0.0 && shape.contains(p, R + 1.5) {
                         imminent = true;
                     }
                 }
@@ -1237,6 +1296,15 @@ impl Bot {
                 (bpos + Vec2::from_angle(ang) * ring).clamp_box(Vec2::splat(20.0), w.level.arena - Vec2::splat(20.0));
             return;
         }
+        // A living miniboss gets the same slow orbit, a little wider so the
+        // 1 s tell is always readable and the signature shapes can be left.
+        if let Some(mpos) = self.miniboss_pos {
+            let ang = (p - mpos).angle() + self.orbit_sign * 1.1;
+            let ring = 38.0;
+            self.goal = (mpos + Vec2::from_angle(ang) * ring)
+                .clamp_box(Vec2::splat(20.0), w.level.arena - Vec2::splat(20.0));
+            return;
+        }
 
         // Otherwise run a long leg toward open ground away from the crowd.
         // Waypoints are far enough that the rat keeps a sustained heading
@@ -1449,6 +1517,18 @@ fn threat_cost(_p: Vec2, threat: Threat, q: Vec2, t: f32, contact_scale: f32) ->
                 } else {
                     (damage / 10.0).clamp(0.8, 4.0) * 16.0
                 }
+            }
+        }
+        Threat::MinibossHazard {
+            shape,
+            active_left,
+            damage,
+            ..
+        } => {
+            if active_left <= 0.0 || !shape.contains(q, R) {
+                0.0
+            } else {
+                (damage / 10.0).clamp(0.8, 4.0) * 16.0
             }
         }
         Threat::StickyPad { pos, facing } => {

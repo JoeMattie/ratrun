@@ -141,15 +141,16 @@ fn headless_run_does_not_panic() {
 /// first, which compares the cache against a freshly sorted `SpawnId` list and
 /// fails the test if any slot disagrees. `cargo test` builds with
 /// `debug_assertions`, so this test drives the longest shape a run takes —
-/// 300 s at 60 Hz with the rat kept alive, so the horde cap, elites and the
-/// boss window are all reached — and every tick of it is checked.
+/// 15 minutes at 60 Hz with the rat kept alive, so the horde budget, elites,
+/// the miniboss appointments and the boss window are all reached — and every
+/// tick of it is checked.
 #[test]
 fn enemy_index_is_fresh_at_every_reader_for_a_full_run() {
     let mut w = World::new(Theme::Sewer, 4242);
     let dt = 1.0 / 60.0;
     let mut peak = 0usize;
     let mut ticks = 0u32;
-    while !w.finished() && ticks < 18_100 {
+    while !w.finished() && ticks < 54_100 {
         let dir = Vec2::from_angle(ticks as f32 * 0.05);
         w.update(dt, dir, ticks.is_multiple_of(157));
         w.player.hp = w.player.max_hp();
@@ -159,7 +160,74 @@ fn enemy_index_is_fresh_at_every_reader_for_a_full_run() {
     }
     assert!(w.director.boss_spawned, "run never reached the boss window");
     assert!(w.elapsed >= director::BOSS_TIME, "run never reached the boss time");
-    assert!(peak > 40, "crowd never grew (peak {peak}): guard untested");
+    // The 15-minute curve's live budget is much smaller than the old 300 s
+    // curve's, so a kiting rat holds a smaller crowd; the guard is only here
+    // to prove the index is exercised at all.
+    assert!(peak > 10, "crowd never grew (peak {peak}): guard untested");
+}
+
+/// A full fifteen-minute level on every existing theme, twice, must agree
+/// tick for tick (the wave-3 length; §1). The rat is kept alive and the input
+/// is a deterministic circle, so the run reaches the boss window instead of
+/// ending early. The twin-run comparison is a cheap determinism proof that
+/// does not depend on the golden list (which this wave deliberately moves).
+#[test]
+fn full_fifteen_minute_level_per_theme_is_deterministic() {
+    fn fingerprint(theme: Theme, seed: u64) -> (u64, u64) {
+        let mut w = World::new(theme, seed);
+        let dt = 1.0 / 60.0;
+        let ticks = (director::RUN_SECONDS / dt).ceil() as u32 + 120;
+        for tick in 0..ticks {
+            let dir = Vec2::from_angle(tick as f32 * 0.017);
+            w.update(dt, dir, tick.is_multiple_of(97));
+            w.player.hp = w.player.max_hp();
+            apply_pending(&mut w);
+            if w.finished() {
+                break;
+            }
+        }
+        // Fold the outcome and a coarse state summary: enough to catch any
+        // divergence, cheap enough to run per theme.
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        let enemies = w.enemies();
+        let p = &w.player;
+        for v in [
+            w.elapsed.to_bits() as u64,
+            w.kills as u64,
+            w.score as u64,
+            w.gold as u64,
+            p.hp.to_bits() as u64,
+            p.xp as u64,
+            p.level as u64,
+            p.pos.x.to_bits() as u64,
+            p.pos.y.to_bits() as u64,
+            enemies.len() as u64,
+        ] {
+            h ^= v;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        for e in &enemies {
+            for v in [
+                e.kind as u32 as u64,
+                e.hp.to_bits() as u64,
+                e.pos.x.to_bits() as u64,
+                e.pos.y.to_bits() as u64,
+            ] {
+                h ^= v;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+        }
+        (w.elapsed as u64, h)
+    }
+    for theme in Theme::all() {
+        let a = fingerprint(theme, 12345);
+        let b = fingerprint(theme, 12345);
+        assert_eq!(a, b, "{theme:?}: the same seed diverged over 15 minutes");
+        assert!(
+            a.0 >= director::BOSS_TIME as u64,
+            "{theme:?}: the level did not reach the 15:00 boss time"
+        );
+    }
 }
 
 /// Manual screenshot tool: line up one of each insect + a glowing pickup
@@ -526,7 +594,7 @@ fn enemy_cap_holds_through_a_full_run() {
     let mut w = World::new(Theme::Sewer, 17);
     let dt = 0.1;
     let mut ticks = 0;
-    while !w.finished() && ticks < 4000 {
+    while !w.finished() && ticks < 9200 {
         w.update(dt, Vec2::ZERO, false);
         apply_pending(&mut w);
         // Keep the rat alive so the cap is exercised into the boss fight.

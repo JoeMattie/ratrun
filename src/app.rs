@@ -2782,6 +2782,39 @@ mod tests {
             "story" => {
                 hh.frame(&[KeyCode::Char('l')]);
             }
+            // A named miniboss mid-tell, with its nameplate and the 15:00 clock
+            // (wave 3). The appointment is pinned past the live schedule so the
+            // test body is not immediately retreated.
+            t if t == "miniboss" || t.starts_with("miniboss-") => {
+                hh.enter_playing();
+                use crate::game::ecs::systems::miniboss::{
+                    Miniboss, MinibossKind, MinibossState,
+                };
+                let which = match t.strip_prefix("miniboss-").unwrap_or("corkscrew") {
+                    "snip" => MinibossKind::SisterSnip,
+                    "bobbin" => MinibossKind::Bobbin,
+                    "bell" => MinibossKind::BellDiver,
+                    "foreman" => MinibossKind::Foreman,
+                    "milk" => MinibossKind::MilkCarton,
+                    _ => MinibossKind::Corkscrew,
+                };
+                let w = hh.app.world.as_mut().unwrap();
+                w.elapsed = 186.0;
+                w.ecs
+                    .resource_mut::<crate::game::ecs::systems::miniboss::MinibossSchedule>()
+                    .next = 1;
+                let p = w.player.pos;
+                let pos = p + Vec2::new(48.0, 0.0);
+                let e = w.spawn_miniboss(which, 0, pos);
+                {
+                    let mut mb = w.ecs.get_mut::<Miniboss>(e).unwrap();
+                    mb.state = MinibossState::Tell;
+                    mb.timer = 0.25;
+                    mb.origin = pos;
+                    mb.aim = (p - pos).normalized();
+                }
+                hh.frame(&[]);
+            }
             // The two player-triggered weapons, mid-effect, over a real horde:
             // `RATRUN_DUMP=thrash` catches the tail arc a few frames into its
             // burst, `RATRUN_DUMP=squeak` the ring a few frames into its

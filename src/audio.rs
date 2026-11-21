@@ -89,11 +89,15 @@ pub enum Sfx {
     ShootThrash,
     SonicSqueak,
     Gold,
+    // Named minibosses (wave 3).
+    MinibossArrive,
+    MinibossTell,
+    MinibossRetreat,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 62] = [
+    pub const ALL: [Sfx; 65] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -162,6 +166,9 @@ impl Sfx {
         Sfx::ShootThrash,
         Sfx::SonicSqueak,
         Sfx::Gold,
+        Sfx::MinibossArrive,
+        Sfx::MinibossTell,
+        Sfx::MinibossRetreat,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -229,6 +236,9 @@ impl Sfx {
             Sfx::ShootThrash => "THRASH",
             Sfx::SonicSqueak => "SQUEAK",
             Sfx::Gold => "GOLD",
+            Sfx::MinibossArrive => "MINIBOSS_ARRIVE",
+            Sfx::MinibossTell => "MINIBOSS_TELL",
+            Sfx::MinibossRetreat => "MINIBOSS_RETREAT",
         }
     }
 
@@ -296,6 +306,7 @@ impl Sfx {
             | Sfx::LevelComplete
             | Sfx::CampaignVictory => 1,
             Sfx::Gold => 2,
+            Sfx::MinibossArrive | Sfx::MinibossTell | Sfx::MinibossRetreat => 1,
         }
     }
 
@@ -360,6 +371,7 @@ impl Sfx {
             | Sfx::MowerDockHum => 1,
             Sfx::Shoot | Sfx::ShootSpray | Sfx::Hit | Sfx::Gem | Sfx::UiMove => 0,
             Sfx::Gold => 0,
+            Sfx::MinibossArrive | Sfx::MinibossTell | Sfx::MinibossRetreat => 2,
         }
     }
 
@@ -5050,6 +5062,84 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
                 });
             }
             m.finish(0.36, 1.0, 2.0, 10.0)
+        }
+        // A low, grinding arrival sting: a saw-tooth swell with a brass edge.
+        Sfx::MinibossArrive => {
+            let mut m = MixBuf::new(0.55);
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.50,
+                f0: 110.0,
+                f1: 55.0,
+                wave: Wave::Saw,
+                gain: 0.30,
+                attack_s: 0.02,
+                decay_pow: 1.6,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.02,
+                dur_s: 0.30,
+                pink: true,
+                gain: 0.18,
+                attack_s: 0.01,
+                decay_pow: 2.0,
+                filter: FilterMode::LowPass,
+                fc0: 900.0,
+                fc1: 900.0,
+                q: 1.2,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.finish(0.50, 1.2, 2.2, 22.0)
+        }
+        // A short, bright warning tick repeated twice: the signature tell.
+        Sfx::MinibossTell => {
+            let mut m = MixBuf::new(0.34);
+            for i in 0..2 {
+                m.add_osc(OscLayer {
+                    start_s: i as f32 * 0.12,
+                    dur_s: 0.06,
+                    f0: 880.0,
+                    f1: 1320.0,
+                    wave: Wave::Pulse(0.5),
+                    gain: 0.22,
+                    attack_s: 0.002,
+                    decay_pow: 2.0,
+                    ..Default::default()
+                });
+            }
+            m.finish(0.34, 1.0, 2.0, 12.0)
+        }
+        // A downward, receding hiss: the miniboss retreats.
+        Sfx::MinibossRetreat => {
+            let mut m = MixBuf::new(0.40);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.36,
+                pink: true,
+                gain: 0.20,
+                attack_s: 0.01,
+                decay_pow: 1.4,
+                filter: FilterMode::HighPass,
+                fc0: 400.0,
+                fc1: 400.0,
+                q: 0.8,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.30,
+                f0: 300.0,
+                f1: 120.0,
+                wave: Wave::Triangle,
+                gain: 0.20,
+                attack_s: 0.005,
+                decay_pow: 1.8,
+                ..Default::default()
+            });
+            m.finish(0.40, 1.0, 2.0, 20.0)
         }
     }
 }

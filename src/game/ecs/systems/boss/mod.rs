@@ -1924,7 +1924,7 @@ pub fn boss_spawn_system(
     // The director's curve freezes at BOSS_TIME; the boss spawns then.
     let hp = kind.base_hp()
         * kind.hp_scale()
-        * director::hp_mult_for(difficulty.0, director::BOSS_TIME);
+        * director::boss_hp_mult_for(difficulty.0, director::BOSS_TIME);
     let mut boss = Boss::new(kind, pos, hp, arena, dock, hunting);
     boss.id = next_enemy_id.take();
     boss.facing = (player.pos - pos).normalized();

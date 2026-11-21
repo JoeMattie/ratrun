@@ -72,6 +72,7 @@ use crate::game::ecs::resources::{
     Shake, TickInput,
 };
 use crate::game::ecs::systems::boss::BossFight;
+use crate::game::ecs::systems::miniboss::Miniboss;
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::{Chest, Gem, Gold, Pickup, PickupKind};
 use crate::game::level::Level;
@@ -97,6 +98,7 @@ fn reap_dead(
     shake: &mut Shake,
     next_id: &mut NextSpawnId,
     enemies: &Query<(Entity, &SpawnId, &Enemy)>,
+    minibosses: &Query<&Miniboss>,
     dead: &mut Vec<(u64, Entity)>,
 ) {
     // Only the corpses matter, so collect and sort just those: the per-enemy
@@ -135,8 +137,10 @@ fn reap_dead(
         } else {
             sfx.push(Sfx::Kill);
         }
-        // Drop XP gem(s).
-        let gem = Gem::new(e.pos, e.kind.xp());
+        // Drop XP gem(s). A named miniboss carries its own appointment XP
+        // (§1: 25/40/55/70), so it does not use the body kind's value.
+        let xp = minibosses.get(entity).map(|mb| mb.xp).unwrap_or_else(|_| e.kind.xp());
+        let gem = Gem::new(e.pos, xp);
         commands.spawn((gem, next_id.take()));
         // Rare pickup drops.
         let drop_chance = if e.kind == EnemyKind::Boss {
@@ -159,6 +163,13 @@ fn reap_dead(
                 bob: 0.0,
             };
             commands.spawn((pickup, next_id.take()));
+        }
+        // A miniboss's 12 gold is queued with its chest (section 6), so it
+        // skips the ordinary gold roll.
+        if minibosses.get(entity).is_ok() {
+            counters.kills += 1;
+            counters.score += xp * 10;
+            continue;
         }
         // Use the opposite end of the pickup roll for gold. XP value gives
         // rarer enemy kinds a better chance with no additional RNG draw.
@@ -189,6 +200,7 @@ pub fn reap_enemies_system(
     mut next_id: ResMut<NextSpawnId>,
     mut fight: ResMut<BossFight>,
     enemies: Query<(Entity, &SpawnId, &Enemy)>,
+    minibosses: Query<&Miniboss>,
     mut dead: Local<Vec<(u64, Entity)>>,
 ) {
     // The boss died this tick: the horde breaks and flees. `boss_update_system`
@@ -220,6 +232,7 @@ pub fn reap_enemies_system(
         &mut shake,
         &mut next_id,
         &enemies,
+        &minibosses,
         &mut dead,
     );
 }
@@ -240,6 +253,7 @@ pub fn nuke_reap_system(
     mut shake: ResMut<Shake>,
     mut next_id: ResMut<NextSpawnId>,
     enemies: Query<(Entity, &SpawnId, &Enemy)>,
+    minibosses: Query<&Miniboss>,
     mut dead: Local<Vec<(u64, Entity)>>,
 ) {
     if !nuke.0 {
@@ -255,6 +269,7 @@ pub fn nuke_reap_system(
         &mut shake,
         &mut next_id,
         &enemies,
+        &minibosses,
         &mut dead,
     );
     nuke.0 = false;
