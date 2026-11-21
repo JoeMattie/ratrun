@@ -382,8 +382,12 @@ fn check_arena(level: &Level, small: &[bool], large: &[bool], errors: &mut Vec<S
     }
 
     // Kitchen: the design's 96 x 80 px encounter floor plus the approach to the
-    // pocket under the human's feet (the floor's first ring).
-    if matches!(level.theme, Theme::Kitchen | Theme::Laundry) {
+    // pocket under the human's feet (the floor's first ring). The Laundry and
+    // the Printworks field the same clear-pocket contract for their own bosses.
+    if matches!(
+        level.theme,
+        Theme::Kitchen | Theme::Laundry | Theme::Printworks
+    ) {
         let world = floor.to_world();
         if world.w < 96.0 || world.h < 80.0 {
             errors.push(format!(
@@ -403,7 +407,7 @@ fn check_arena(level: &Level, small: &[bool], large: &[bool], errors: &mut Vec<S
         }
     }
 
-    if matches!(level.theme, Theme::Lab | Theme::Printworks) {
+    if level.theme == Theme::Lab {
         check_lab_arena(level, arena, errors);
     }
 

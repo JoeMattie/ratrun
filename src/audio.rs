@@ -123,11 +123,16 @@ pub enum Sfx {
     MinibossRetreat,
     // Wave 3 floor hazards (steam grates).
     SteamHiss,
+    // THE NIGHT EDITION (Printworks): the press's carriage bell, its platen
+    // clack and the carriage running its rule.
+    NightBell,
+    NightStamp,
+    NightCarriage,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 82] = [
+    pub const ALL: [Sfx; 85] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -223,6 +228,10 @@ impl Sfx {
         Sfx::MinibossRetreat,
         // Wave 3 floor hazards (steam grates).
         Sfx::SteamHiss,
+        // THE NIGHT EDITION (Printworks).
+        Sfx::NightBell,
+        Sfx::NightStamp,
+        Sfx::NightCarriage,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -310,6 +319,9 @@ impl Sfx {
             Sfx::MinibossTell => "MINIBOSS_TELL",
             Sfx::MinibossRetreat => "MINIBOSS_RETREAT",
             Sfx::SteamHiss => "STEAM_HISS",
+            Sfx::NightBell => "NIGHT_BELL",
+            Sfx::NightStamp => "NIGHT_STAMP",
+            Sfx::NightCarriage => "NIGHT_CARRIAGE",
         }
     }
 
@@ -356,7 +368,8 @@ impl Sfx {
             | Sfx::MowerFlipped
             | Sfx::ShootRain
             | Sfx::Bump
-            | Sfx::SteamHiss => 3,
+            | Sfx::SteamHiss
+            | Sfx::NightStamp => 3,
             Sfx::Pickup
             | Sfx::UiSelect
             | Sfx::Heal
@@ -395,6 +408,11 @@ impl Sfx {
             Sfx::Purchase => 2,
             Sfx::Denied => 2,
             Sfx::MinibossArrive | Sfx::MinibossTell | Sfx::MinibossRetreat => 1,
+            // The bell always rings the same; the press's clack and the
+            // carriage each get three pitches so a fight does not machine-gun
+            // one sample.
+            Sfx::NightBell => 1,
+            Sfx::NightCarriage => 3,
         }
     }
 
@@ -413,7 +431,8 @@ impl Sfx {
             | Sfx::MowerDeath
             | Sfx::LevelComplete
             | Sfx::CampaignVictory
-            | Sfx::Evolve => 3,
+            | Sfx::Evolve
+            | Sfx::NightBell => 3,
             Sfx::Hurt
             | Sfx::Nuke
             | Sfx::ShootThrash
@@ -443,7 +462,8 @@ impl Sfx {
             | Sfx::MowerBladeSpin
             | Sfx::MowerOverheat
             | Sfx::PocketFind
-            | Sfx::Infect => 2,
+            | Sfx::Infect
+            | Sfx::NightStamp => 2,
             Sfx::Kill
             | Sfx::Dash
             | Sfx::ShootNova
@@ -466,7 +486,8 @@ impl Sfx {
             | Sfx::MowerDockHum
             | Sfx::ShootRain
             | Sfx::Bump
-            | Sfx::SteamHiss => 1,
+            | Sfx::SteamHiss
+            | Sfx::NightCarriage => 1,
             Sfx::Shoot | Sfx::ShootSpray | Sfx::Hit | Sfx::Gem | Sfx::UiMove => 0,
             Sfx::Gold => 0,
             // Pure feedback: never steals a voice from a hit or a kill.
@@ -5981,6 +6002,176 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             });
             m.add_short_tail(0.16, 4800.0);
             m.finish(0.46, 1.2, 2.2, 22.0)
+        }
+
+        // ---- THE NIGHT EDITION (Printworks) ------------------------------
+
+        // The carriage bell: a brass typewriter bell struck once. Inharmonic
+        // partials (a bell, not a chime), a striker click and a very short
+        // room tail, so it cuts through the press's own clatter.
+        Sfx::NightBell => {
+            let mut m = MixBuf::new(0.34);
+            for (i, &(ratio, gain)) in [(1.0f32, 0.44f32), (2.76, 0.20), (4.07, 0.10), (5.43, 0.05)]
+                .iter()
+                .enumerate()
+            {
+                m.add_osc(OscLayer {
+                    start_s: 0.0,
+                    dur_s: (0.30 - i as f32 * 0.045).max(0.06),
+                    f0: 2320.0 * ratio,
+                    f1: 2292.0 * ratio,
+                    pitch_pow: 0.6,
+                    wave: Wave::Sine,
+                    gain,
+                    attack_s: 0.0012,
+                    decay_pow: 2.4 + i as f32 * 0.35,
+                    ..Default::default()
+                });
+            }
+            // Stiff striker on the bell's lip.
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.010,
+                pink: false,
+                gain: 0.26,
+                attack_s: 0.0006,
+                decay_pow: 2.8,
+                filter: FilterMode::BandPass,
+                fc0: 4200.0,
+                fc1: 2400.0,
+                q: 1.7,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_short_tail(0.09, 6200.0);
+            m.finish(0.30, 1.1, 1.2, 20.0)
+        }
+
+        // The platen clack: a cast-iron impression. Sub thump, a hard metallic
+        // bite where the type meets the sheet, and the paper's own crunch.
+        Sfx::NightStamp => {
+            const PITCH: [f32; 3] = [1.0, 0.90, 1.09];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.30);
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.22,
+                f0: 128.0 * p,
+                f1: 38.0 * p,
+                pitch_pow: 0.40,
+                wave: Wave::Sine,
+                gain: 0.95,
+                attack_s: 0.0018,
+                decay_pow: 1.45,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.070,
+                f0: 430.0 * p,
+                f1: 150.0 * p,
+                pitch_pow: 0.55,
+                wave: Wave::Triangle,
+                gain: 0.40,
+                attack_s: 0.0012,
+                decay_pow: 2.2,
+                ..Default::default()
+            });
+            // The frame's steel ring just after the strike.
+            m.add_fm(FmLayer {
+                start_s: 0.006,
+                dur_s: 0.11,
+                c0: 1560.0 * p,
+                c1: 1480.0 * p,
+                mod_ratio: 1.41,
+                mod_index0: 1.6,
+                mod_index1: 0.15,
+                mod_pow: 2.0,
+                gain: 0.16,
+                attack_s: 0.004,
+                decay_pow: 2.3,
+                filter: FilterMode::BandPass,
+                fc0: 2400.0,
+                fc1: 1500.0,
+                q: 1.4,
+                ..Default::default()
+            });
+            // Sheet crunch: dry, papery, low-passed.
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.075,
+                pink: true,
+                gain: 0.62,
+                attack_s: 0.0014,
+                decay_pow: 2.0,
+                filter: FilterMode::LowPass,
+                fc0: 2400.0 * p,
+                fc1: 320.0,
+                fc_pow: 0.55,
+                q: 1.1,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_short_tail(0.12, 2200.0);
+            m.finish(0.32, 1.5, 1.0, 26.0)
+        }
+
+        // The carriage return: a ratchet zip running a steel rail. A rising
+        // click train (each tooth of the escapement) under one band-passed
+        // whoosh, ending with the stop bracket's knock.
+        Sfx::NightCarriage => {
+            const PITCH: [f32; 3] = [1.0, 0.94, 1.06];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.46);
+            for i in 0..9 {
+                let t = i as f32 * 0.032;
+                let f = (900.0 + i as f32 * 120.0) * p;
+                m.add_noise(NoiseLayer {
+                    start_s: t,
+                    dur_s: 0.020,
+                    pink: false,
+                    gain: 0.32 - i as f32 * 0.015,
+                    attack_s: 0.0008,
+                    decay_pow: 2.2,
+                    filter: FilterMode::BandPass,
+                    fc0: f,
+                    fc1: f * 0.8,
+                    q: 1.9,
+                    seed: base_seed.wrapping_add(i as u32 * 733),
+                    ..Default::default()
+                });
+            }
+            // The rail's whoosh.
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.28,
+                pink: true,
+                gain: 0.30,
+                attack_s: 0.010,
+                decay_pow: 1.3,
+                filter: FilterMode::BandPass,
+                fc0: 700.0 * p,
+                fc1: 2600.0 * p,
+                fc_pow: 0.7,
+                q: 1.1,
+                seed: base_seed ^ 0x30F1,
+                ..Default::default()
+            });
+            // Brass stop bracket.
+            m.add_osc(OscLayer {
+                start_s: 0.29,
+                dur_s: 0.13,
+                f0: 320.0 * p,
+                f1: 120.0 * p,
+                pitch_pow: 0.6,
+                wave: Wave::Triangle,
+                gain: 0.34,
+                attack_s: 0.0015,
+                decay_pow: 2.0,
+                ..Default::default()
+            });
+            m.add_short_tail(0.13, 3400.0);
+            m.finish(0.34, 1.3, 1.4, 24.0)
         }
     }
 }

@@ -2159,9 +2159,12 @@ pub fn boss_floor_cells(theme: Theme) -> (i32, i32) {
         Theme::Lab => (4, BUMPER_LEN),
         // Laundry borrows the broom's arena (a clear 96 x 80 px pocket).
         Theme::Laundry => (6, 5),
-        // Printworks borrows the mower's: it needs the two bumpers and the dock
-        // until the Night Edition lands.
-        Theme::Printworks => (4, BUMPER_LEN),
+        // The Night Edition's press bed: the same clear 96 x 80 px pocket. It
+        // is a stamp fight — the sheet is 36 x 30 px and the carriage rule is
+        // 54 px long, both drawn at wherever the rat stands — so the fight is
+        // won and lost on open floor, and the only furniture is the press bed
+        // the art lays under the boss itself.
+        Theme::Printworks => (6, 5),
         Theme::Trailer => (6, 5),
     }
 }
@@ -2195,10 +2198,11 @@ fn furnish_arena(tiles: &mut TileMap, theme: Theme, arena: TileRect, field: Tile
         // validator: nothing else has to be placed inside the arena.
         Theme::Kitchen => {}
         // Wave 3 routes, same mapping as `BossKind::for_theme`: the Laundry's
-        // boss is the broom (a clear pocket) and the Printworks' is the mower
-        // (bumpers and a dock), until the Mangle and the Night Edition land.
+        // boss is the broom (a clear pocket, until the Mangle lands) and the
+        // Printworks' is the Night Edition, whose arena is a clear press bed.
+        // Neither wants the Lab's steel bumpers or its charging dock.
         Theme::Laundry => {}
-        Theme::Printworks => furnish_lab(tiles, arena, floor, &mouths, &mut boss, true),
+        Theme::Printworks => {}
         // The flatbed's cab hold is empty plate.
         Theme::Trailer => {}
     }

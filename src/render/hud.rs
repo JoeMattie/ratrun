@@ -170,13 +170,14 @@ pub fn boss_codename(theme: Theme) -> (&'static str, &'static str) {
         crate::game::ecs::systems::boss::BossKind::Cat => CampaignLevel::Sewer,
         crate::game::ecs::systems::boss::BossKind::Broom => CampaignLevel::Kitchen,
         crate::game::ecs::systems::boss::BossKind::Mower => CampaignLevel::Lab,
+        crate::game::ecs::systems::boss::BossKind::NightEdition => CampaignLevel::Printworks,
     };
     let class_tag = match level {
         CampaignLevel::Sewer => "CLASS-V APEX PREDATOR",
         CampaignLevel::Kitchen => "CLASS-V CUSTODIAN",
         CampaignLevel::Lab => "MK.IV AUTONOMOUS UNIT",
         CampaignLevel::Laundry => "CLASS-V CUSTODIAN",
-        CampaignLevel::Printworks => "MK.IV AUTONOMOUS UNIT",
+        CampaignLevel::Printworks => "OVERNIGHT PRESS — EDITION 1",
     };
     (level.boss_name(), class_tag)
 }
