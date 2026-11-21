@@ -242,7 +242,10 @@ impl BossController for MowerController {
             }
             BossState::Mower(MowerState::Flipped) => tick_flipped(ctx, boss),
             BossState::Mower(MowerState::Docking) => tick_docking(ctx, boss),
-            BossState::Mower(MowerState::Dying) | BossState::Cat(_) | BossState::Broom(_) => {}
+            BossState::Mower(MowerState::Dying)
+            | BossState::Cat(_)
+            | BossState::Broom(_)
+            | BossState::Mangle(_) => {}
         }
 
         // The art owns the multiplier; set it after the transitions so the

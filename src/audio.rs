@@ -123,11 +123,19 @@ pub enum Sfx {
     MinibossRetreat,
     // Wave 3 floor hazards (steam grates).
     SteamHiss,
+    // The Laundry boss, The Mangle: a geared wringer (wave 3).
+    MangleRollers,
+    MangleBite,
+    MangleCrank,
+    MangleTowel,
+    MangleJam,
+    MangleShift,
+    MangleDeath,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 82] = [
+    pub const ALL: [Sfx; 89] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -223,6 +231,14 @@ impl Sfx {
         Sfx::MinibossRetreat,
         // Wave 3 floor hazards (steam grates).
         Sfx::SteamHiss,
+        // The Laundry boss.
+        Sfx::MangleRollers,
+        Sfx::MangleBite,
+        Sfx::MangleCrank,
+        Sfx::MangleTowel,
+        Sfx::MangleJam,
+        Sfx::MangleShift,
+        Sfx::MangleDeath,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -310,6 +326,13 @@ impl Sfx {
             Sfx::MinibossTell => "MINIBOSS_TELL",
             Sfx::MinibossRetreat => "MINIBOSS_RETREAT",
             Sfx::SteamHiss => "STEAM_HISS",
+            Sfx::MangleRollers => "MANGLE_ROLLERS",
+            Sfx::MangleBite => "MANGLE_BITE",
+            Sfx::MangleCrank => "MANGLE_CRANK",
+            Sfx::MangleTowel => "MANGLE_TOWEL",
+            Sfx::MangleJam => "MANGLE_JAM",
+            Sfx::MangleShift => "MANGLE_SHIFT",
+            Sfx::MangleDeath => "MANGLE_DEATH",
         }
     }
 
@@ -395,6 +418,13 @@ impl Sfx {
             Sfx::Purchase => 2,
             Sfx::Denied => 2,
             Sfx::MinibossArrive | Sfx::MinibossTell | Sfx::MinibossRetreat => 1,
+            Sfx::MangleCrank => 2,
+            Sfx::MangleRollers
+            | Sfx::MangleBite
+            | Sfx::MangleTowel
+            | Sfx::MangleJam
+            | Sfx::MangleShift
+            | Sfx::MangleDeath => 1,
         }
     }
 
@@ -411,6 +441,7 @@ impl Sfx {
             | Sfx::CatDeath
             | Sfx::BroomDefeat
             | Sfx::MowerDeath
+            | Sfx::MangleDeath
             | Sfx::LevelComplete
             | Sfx::CampaignVictory
             | Sfx::Evolve => 3,
@@ -443,6 +474,10 @@ impl Sfx {
             | Sfx::MowerBladeSpin
             | Sfx::MowerOverheat
             | Sfx::PocketFind
+            | Sfx::MangleRollers
+            | Sfx::MangleBite
+            | Sfx::MangleJam
+            | Sfx::MangleShift
             | Sfx::Infect => 2,
             Sfx::Kill
             | Sfx::Dash
@@ -466,6 +501,8 @@ impl Sfx {
             | Sfx::MowerDockHum
             | Sfx::ShootRain
             | Sfx::Bump
+            | Sfx::MangleCrank
+            | Sfx::MangleTowel
             | Sfx::SteamHiss => 1,
             Sfx::Shoot | Sfx::ShootSpray | Sfx::Hit | Sfx::Gem | Sfx::UiMove => 0,
             Sfx::Gold => 0,
@@ -5981,6 +6018,344 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             });
             m.add_short_tail(0.16, 4800.0);
             m.finish(0.46, 1.2, 2.2, 22.0)
+        }
+
+        // 66. MangleRollers: the wringer's geared whirr as the rollers turn
+        // backwards to outline the intake lane — a saw tooth drive with a
+        // wooden frame knock.
+        Sfx::MangleRollers => {
+            let mut m = MixBuf::new(0.72);
+            // Rising-then-falling gear whine (the rollers reverse).
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.66,
+                f0: 96.0,
+                f1: 132.0,
+                pitch_pow: 0.6,
+                wave: Wave::Saw,
+                gain: 0.30,
+                attack_s: 0.03,
+                decay_pow: 1.5,
+                filter: FilterMode::BandPass,
+                fc0: 420.0,
+                fc1: 980.0,
+                q: 1.1,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.02,
+                dur_s: 0.62,
+                f0: 192.0,
+                f1: 264.0,
+                wave: Wave::Triangle,
+                gain: 0.16,
+                attack_s: 0.02,
+                decay_pow: 1.8,
+                ..Default::default()
+            });
+            // Two gear-tooth catches as the drive reverses.
+            for (i, &st) in [0.10f32, 0.34].iter().enumerate() {
+                m.add_noise(NoiseLayer {
+                    start_s: st,
+                    dur_s: 0.04,
+                    pink: true,
+                    gain: 0.30,
+                    attack_s: 0.001,
+                    decay_pow: 2.4,
+                    filter: FilterMode::BandPass,
+                    fc0: 1400.0,
+                    fc1: 700.0,
+                    q: 1.6,
+                    seed: base_seed.wrapping_add(i as u32 * 733),
+                    ..Default::default()
+                });
+            }
+            m.finish(0.44, 1.3, 4.0, 30.0)
+        }
+
+        // 67. MangleBite: the single nip — a hard steel clang with the cloth
+        // swallowed underneath.
+        Sfx::MangleBite => {
+            let mut m = MixBuf::new(0.40);
+            for (i, &f) in [420.0f32, 630.0, 910.0].iter().enumerate() {
+                m.add_fm(FmLayer {
+                    start_s: i as f32 * 0.006,
+                    dur_s: 0.20,
+                    c0: f,
+                    c1: f * 0.82,
+                    mod_ratio: 2.41,
+                    mod_index0: 2.4,
+                    mod_index1: 0.2,
+                    mod_pow: 1.8,
+                    gain: 0.34 - i as f32 * 0.08,
+                    attack_s: 0.002,
+                    decay_pow: 2.2,
+                    ..Default::default()
+                });
+            }
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.10,
+                pink: true,
+                gain: 0.34,
+                attack_s: 0.001,
+                decay_pow: 2.6,
+                filter: FilterMode::LowPass,
+                fc0: 2400.0,
+                fc1: 320.0,
+                q: 1.1,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // The swallowed-away cloth.
+            m.add_osc(OscLayer {
+                start_s: 0.03,
+                dur_s: 0.26,
+                f0: 180.0,
+                f1: 52.0,
+                pitch_pow: 0.7,
+                wave: Wave::Triangle,
+                gain: 0.22,
+                attack_s: 0.01,
+                decay_pow: 1.4,
+                ..Default::default()
+            });
+            m.finish(0.52, 1.5, 2.0, 26.0)
+        }
+
+        // 68. MangleCrank: a brass ratchet click (two variants for the double
+        // crank of the wring-out).
+        Sfx::MangleCrank => {
+            let p = if v == 0 { 1.0 } else { 0.945 };
+            let mut m = MixBuf::new(0.20);
+            m.add_fm(FmLayer {
+                start_s: 0.0,
+                dur_s: 0.075,
+                c0: 1180.0 * p,
+                c1: 760.0 * p,
+                mod_ratio: 3.11,
+                mod_index0: 1.6,
+                mod_index1: 0.05,
+                mod_pow: 2.4,
+                gain: 0.34,
+                attack_s: 0.001,
+                decay_pow: 2.6,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.002,
+                dur_s: 0.035,
+                pink: false,
+                gain: 0.22,
+                attack_s: 0.001,
+                decay_pow: 2.8,
+                filter: FilterMode::BandPass,
+                fc0: 3000.0,
+                fc1: 1800.0,
+                q: 1.4,
+                seed: base_seed.wrapping_add(v as u32 * 97),
+                ..Default::default()
+            });
+            m.finish(0.38, 1.2, 1.5, 18.0)
+        }
+
+        // 69. MangleTowel: the rolled towel shot down the rail — a soft
+        // compressed-air thump with a flapping tail.
+        Sfx::MangleTowel => {
+            let mut m = MixBuf::new(0.42);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.10,
+                pink: true,
+                gain: 0.30,
+                attack_s: 0.002,
+                decay_pow: 2.0,
+                filter: FilterMode::LowPass,
+                fc0: 900.0,
+                fc1: 300.0,
+                q: 1.0,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.30,
+                f0: 240.0,
+                f1: 96.0,
+                pitch_pow: 0.8,
+                wave: Wave::Sine,
+                gain: 0.26,
+                attack_s: 0.004,
+                decay_pow: 1.6,
+                ..Default::default()
+            });
+            for i in 0..3 {
+                m.add_noise(NoiseLayer {
+                    start_s: 0.07 + i as f32 * 0.06,
+                    dur_s: 0.06,
+                    pink: true,
+                    gain: 0.14 - i as f32 * 0.03,
+                    attack_s: 0.004,
+                    decay_pow: 2.2,
+                    filter: FilterMode::BandPass,
+                    fc0: 1600.0 - i as f32 * 320.0,
+                    fc1: 900.0,
+                    q: 0.9,
+                    seed: base_seed.wrapping_add(i as u32 * 313),
+                    ..Default::default()
+                });
+            }
+            m.finish(0.42, 1.25, 2.0, 24.0)
+        }
+
+        // 70. MangleJam: the nip stuffs — a muffled wooden thud under a rising
+        // steam hiss.
+        Sfx::MangleJam => {
+            let mut m = MixBuf::new(0.55);
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.24,
+                f0: 128.0,
+                f1: 58.0,
+                pitch_pow: 0.5,
+                wave: Wave::Sine,
+                gain: 0.34,
+                attack_s: 0.002,
+                decay_pow: 1.4,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.02,
+                dur_s: 0.42,
+                pink: true,
+                gain: 0.24,
+                attack_s: 0.02,
+                decay_pow: 1.5,
+                filter: FilterMode::BandPass,
+                fc0: 700.0,
+                fc1: 2400.0,
+                q: 0.8,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // A bent frame's short metal groan.
+            m.add_fm(FmLayer {
+                start_s: 0.03,
+                dur_s: 0.30,
+                c0: 320.0,
+                c1: 190.0,
+                mod_ratio: 1.41,
+                mod_index0: 1.8,
+                mod_index1: 0.4,
+                mod_pow: 1.6,
+                gain: 0.18,
+                attack_s: 0.01,
+                decay_pow: 1.8,
+                ..Default::default()
+            });
+            m.finish(0.46, 1.3, 3.0, 28.0)
+        }
+
+        // 71. MangleShift: a phase change — the frame shudders, the belt slaps.
+        Sfx::MangleShift => {
+            let mut m = MixBuf::new(0.62);
+            for (i, &st) in [0.0f32, 0.09, 0.17, 0.26].iter().enumerate() {
+                m.add_noise(NoiseLayer {
+                    start_s: st,
+                    dur_s: 0.055,
+                    pink: true,
+                    gain: 0.30 - i as f32 * 0.05,
+                    attack_s: 0.001,
+                    decay_pow: 2.2,
+                    filter: FilterMode::LowPass,
+                    fc0: 1500.0,
+                    fc1: 280.0,
+                    q: 1.2,
+                    seed: base_seed.wrapping_add(i as u32 * 811),
+                    ..Default::default()
+                });
+            }
+            m.add_osc(OscLayer {
+                start_s: 0.04,
+                dur_s: 0.48,
+                f0: 74.0,
+                f1: 46.0,
+                pitch_pow: 0.6,
+                wave: Wave::Saw,
+                gain: 0.26,
+                attack_s: 0.03,
+                decay_pow: 1.2,
+                ..Default::default()
+            });
+            m.finish(0.40, 1.2, 4.0, 34.0)
+        }
+
+        // 72. MangleDeath: the springs pop, the belt unspools and the rollers
+        // coast down to nothing.
+        Sfx::MangleDeath => {
+            let mut m = MixBuf::new(1.10);
+            // Spring twang.
+            m.add_fm(FmLayer {
+                start_s: 0.0,
+                dur_s: 0.26,
+                c0: 900.0,
+                c1: 220.0,
+                pitch_pow: 0.5,
+                mod_ratio: 1.73,
+                mod_index0: 3.0,
+                mod_index1: 0.1,
+                mod_pow: 1.1,
+                gain: 0.40,
+                attack_s: 0.002,
+                decay_pow: 1.6,
+                ..Default::default()
+            });
+            // The frame lets go.
+            m.add_osc(OscLayer {
+                start_s: 0.06,
+                dur_s: 0.70,
+                f0: 120.0,
+                f1: 30.0,
+                pitch_pow: 0.45,
+                wave: Wave::Sine,
+                gain: 0.72,
+                attack_s: 0.004,
+                decay_pow: 1.3,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.06,
+                dur_s: 0.84,
+                pink: true,
+                gain: 0.52,
+                attack_s: 0.004,
+                decay_pow: 1.5,
+                filter: FilterMode::LowPass,
+                fc0: 3600.0,
+                fc1: 110.0,
+                fc_pow: 0.55,
+                q: 1.2,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // Rollers coasting out.
+            m.add_osc(OscLayer {
+                start_s: 0.12,
+                dur_s: 0.80,
+                f0: 220.0,
+                f1: 26.0,
+                pitch_pow: 1.3,
+                wave: Wave::Saw,
+                gain: 0.22,
+                attack_s: 0.01,
+                decay_pow: 1.9,
+                filter: FilterMode::LowPass,
+                fc0: 1200.0,
+                fc1: 180.0,
+                ..Default::default()
+            });
+            m.add_short_tail(0.22, 3200.0);
+            m.finish(0.55, 1.6, 2.0, 40.0)
         }
     }
 }
