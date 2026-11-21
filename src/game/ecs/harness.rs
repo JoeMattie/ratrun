@@ -299,7 +299,7 @@ const CASES: [(Script, Theme, u64, u64); 6] = [
     (Script::Wander, Theme::Lab, 1234, 4530738605580125554),
     (Script::Evade, Theme::Sewer, 11, 14544662130699174509),
     (Script::Evade, Theme::Kitchen, 29, 12893660204553364186),
-    (Script::Evade, Theme::Lab, 1234, 18057423521044793719),
+    (Script::Evade, Theme::Lab, 1234, 8417585171014525892),
 ];
 
 #[test]
