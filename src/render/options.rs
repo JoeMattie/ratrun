@@ -28,9 +28,11 @@ pub const CURSOR_ROW: usize = 3;
 pub const MUTE_ROW: usize = 4;
 pub const LIGHTING_ROW: usize = 5;
 pub const ZOOM_ROW: usize = 6;
-pub const BACK_ROW: usize = 7;
+/// Auto-pick level-ups (persisted; the level-up screen's toggle writes it too).
+pub const AUTO_PICK_ROW: usize = 7;
+pub const BACK_ROW: usize = 8;
 /// How many rows the screen has.
-pub const ROW_COUNT: usize = 8;
+pub const ROW_COUNT: usize = 9;
 
 /// Slider identity used by [`Target::OptionsBar`]: the value the track edits.
 pub const MUSIC_BAR: usize = 0;
@@ -55,6 +57,7 @@ pub enum Row {
     Zoom,
     Back,
     Lighting,
+    AutoPick,
 }
 
 /// The screen's rows in order; index with the constants above.
@@ -66,6 +69,7 @@ pub const ROWS: [Row; ROW_COUNT] = [
     Row::Mute,
     Row::Lighting,
     Row::Zoom,
+    Row::AutoPick,
     Row::Back,
 ];
 
@@ -81,6 +85,7 @@ impl Row {
             Row::Zoom => "ZOOM",
             Row::Back => "BACK",
             Row::Lighting => "LIGHTING",
+            Row::AutoPick => "AUTO-PICK",
         }
     }
 
@@ -110,6 +115,9 @@ pub struct OptionsView {
     /// Accent for the panel edge and the sliders (theme or level material).
     pub accent: Color,
     pub lighting: LightingMode,
+    /// Auto-pick level-ups: the same preference the level-up screen's toggle
+    /// writes. Chests are **not** auto-opened (see the row's note).
+    pub auto_pick: bool,
 }
 
 /// Rows and slider tracks for one terminal area.
@@ -223,6 +231,13 @@ fn value_text(view: &OptionsView, row: Row) -> String {
         Row::Effects => String::new(),
         Row::Back => String::new(),
         Row::Lighting => view.lighting.as_str().to_uppercase(),
+        Row::AutoPick => {
+            if view.auto_pick {
+                "ON".to_string()
+            } else {
+                "OFF".to_string()
+            }
+        }
     }
 }
 
@@ -415,8 +430,12 @@ pub fn draw(f: &mut Frame, area: Rect, view: &OptionsView, hits: &mut HitMap) {
             .centered(),
             legend_row,
         );
+        // The auto-pick row's note says what the setting does *not* do: a chest
+        // is a reward moment and its evolution deserves its card.
         let note = if view.muted {
             " master mute on — levels are kept"
+        } else if view.row == AUTO_PICK_ROW {
+            " cards skipped; chests still open their card"
         } else {
             " effects preview while you adjust"
         };
@@ -459,6 +478,7 @@ mod tests {
             row,
             accent: Color::Rgb(144, 184, 173),
             lighting: LightingMode::Full,
+            auto_pick: false,
         }
     }
 
@@ -483,7 +503,8 @@ mod tests {
             let v = view(MUSIC_ROW);
             let (text, hits) = frame(w, h, &v);
             for label in [
-                "MUSIC", "EFFECTS", "MINIMAP", "CURSOR", "MUTE", "LIGHTING", "ZOOM", "BACK",
+                "MUSIC", "EFFECTS", "MINIMAP", "CURSOR", "MUTE", "LIGHTING", "ZOOM", "AUTO-PICK",
+                "BACK",
             ] {
                 assert!(text.contains(label), "{w}x{h} is missing {label}:\n{text}");
             }

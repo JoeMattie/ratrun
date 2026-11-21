@@ -624,6 +624,12 @@ impl Bot {
 
     /// Pick one of the three level-up cards by the documented value heuristic.
     pub fn pick_upgrade(&mut self, w: &World, choices: &[Upgrade]) -> usize {
+        // Expert never takes the card-read draw: the noiseless valuation is the
+        // shared one (`best_upgrade`), so the auto-pick toggle and the bot take
+        // the same card from the same state.
+        if self.params.pick_noise <= 0.0 {
+            return best_upgrade(w, choices);
+        }
         let lo = &w.player.loadout;
         let hp_frac = (w.player.hp / w.player.max_hp().max(1.0)).clamp(0.0, 1.0);
         let mut best = 0usize;
@@ -632,12 +638,7 @@ impl Bot {
             let v = upgrade_value(lo, up, hp_frac);
             // The human skills' read of the cards is imperfect; Expert never
             // takes the draw, so every skill stays deterministic per seed.
-            let v = if self.params.pick_noise > 0.0 {
-                v * (1.0
-                    + (self.rng.random::<f32>() - 0.5) * 2.0 * self.params.pick_noise)
-            } else {
-                v
-            };
+            let v = v * (1.0 + (self.rng.random::<f32>() - 0.5) * 2.0 * self.params.pick_noise);
             if v > best_value {
                 best_value = v;
                 best = i;
@@ -2012,6 +2013,31 @@ pub fn upgrade_value(lo: &Loadout, up: &Upgrade, hp_frac: f32) -> f32 {
         }
         Upgrade::Purse => 3.0,
     }
+}
+
+/// The card the deterministic valuation takes: the highest [`upgrade_value`],
+/// ties to the earliest slot. This is the choice the auto-pick toggle makes
+/// without opening the card screen, and what [`Bot::pick_upgrade`] returns when
+/// its skill takes no card-read noise — so a manual pick and an auto pick from
+/// the same state land on the same card. It draws no rng and reads only the
+/// loadout + health, so the same state always gives the same card.
+///
+/// The cards are already filtered by [`Loadout::generate_choices_with_hp`]
+/// (slot caps, evolution partners, the bandage hidden at full health), so this
+/// only ranks legal cards.
+pub fn best_upgrade(w: &World, choices: &[Upgrade]) -> usize {
+    let lo = &w.player.loadout;
+    let hp_frac = (w.player.hp / w.player.max_hp().max(1.0)).clamp(0.0, 1.0);
+    let mut best = 0usize;
+    let mut best_value = f32::NEG_INFINITY;
+    for (i, up) in choices.iter().enumerate() {
+        let v = upgrade_value(lo, up, hp_frac);
+        if v > best_value {
+            best_value = v;
+            best = i;
+        }
+    }
+    best
 }
 
 /// How much the bot values the pick that completes an evolution (a weapon

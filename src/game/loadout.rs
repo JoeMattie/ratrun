@@ -725,6 +725,47 @@ impl Loadout {
         }
     }
 
+    /// The name and **new rank** of a pick, for the auto-pick toast
+    /// ("Cheese Spray Lv3"): the same card [`Loadout::describe`] names, but
+    /// compressed to the rank the pick lands on. Call it *before* applying the
+    /// card, since the rank comes from the current loadout.
+    pub fn picked_label(&self, up: &Upgrade) -> String {
+        match up {
+            Upgrade::NewWeapon(k) => format!("{} Lv1", k.name()),
+            Upgrade::LevelWeapon(i) => match self.weapons.get(*i) {
+                Some(w) => format!("{} Lv{}", w.name(), (w.level + 1).min(w.kind.max_level())),
+                None => "Weapon".to_string(),
+            },
+            Upgrade::Passive(p) => {
+                if self.stacks(*p) >= p.max_stacks() {
+                    format!("{} (capped)", p.name())
+                } else {
+                    format!("{} Lv{}", p.name(), self.stacks(*p) + 1)
+                }
+            }
+            Upgrade::Bandage => "Bandage".to_string(),
+            Upgrade::Purse => "Purse".to_string(),
+        }
+    }
+
+    /// The icon a pick's toast wears: the same sprite the level-up card shows
+    /// for it (`art_icons::weapon`/`passive`, the gilded coin for the purse,
+    /// the regen flask for the bandage). Call it *before* applying the card,
+    /// since a rank-up's kind comes from the loadout.
+    pub fn picked_icon(&self, up: &Upgrade) -> &'static crate::game::art_icons::Icon {
+        use crate::game::art_icons;
+        match up {
+            Upgrade::NewWeapon(k) => art_icons::weapon(*k),
+            Upgrade::LevelWeapon(i) => match self.weapons.get(*i) {
+                Some(w) => art_icons::weapon(w.kind),
+                None => art_icons::placeholder(),
+            },
+            Upgrade::Passive(p) => art_icons::passive(*p),
+            Upgrade::Bandage => art_icons::passive(PassiveKind::Regen),
+            Upgrade::Purse => &art_icons::GOLD_COIN,
+        }
+    }
+
     /// Build up to three distinct level-up choices at **unknown health**.
     ///
     /// This is the entry point the harnesses and older tests use; it assumes a

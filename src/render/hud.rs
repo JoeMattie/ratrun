@@ -277,6 +277,10 @@ pub enum CalloutKind {
     ActivesHint,
     ChestHint,
     ShopHint,
+    /// The auto-pick toggle took a level-up card without the screen: the pill
+    /// carries the picked card's icon, name and new rank. Appended, so the
+    /// legacy kinds keep their order.
+    AutoPick,
 }
 
 impl CalloutKind {
@@ -298,6 +302,7 @@ impl CalloutKind {
             CalloutKind::ActivesHint => WARN_AMBER,
             CalloutKind::ChestHint => TRAIL_GOLD,
             CalloutKind::ShopHint => GATE_STEEL,
+            CalloutKind::AutoPick => TRAIL_GOLD,
         }
     }
 }
@@ -311,6 +316,10 @@ pub struct CalloutSlot {
     pub message: String,
     pub timer: f32,
     pub duration: f32,
+    /// Optional half-block icon drawn to the left of the text (auto-pick
+    /// toasts). `None` for the text-only callouts; an icon pill is two rows
+    /// tall so the 4x2 small sprite fits.
+    pub icon: Option<&'static crate::game::art_icons::Icon>,
 }
 
 /// Snapshot of world entity telemetry fed into the HUD without reading
@@ -566,6 +575,21 @@ impl HudState {
 
     /// Push a transient callout pill without allocating once slot buffers are warm.
     pub fn push_callout(&mut self, kind: CalloutKind, tag: &str, message: &str, duration: f32) {
+        self.push_callout_with_icon(kind, None, tag, message, duration);
+    }
+
+    /// Push a callout pill that also carries an [`art_icons`] sprite to the left
+    /// of its text (the auto-pick toast). Same slot discipline as
+    /// [`Self::push_callout`]; the icon is a `'static` reference, so nothing is
+    /// allocated for it.
+    pub fn push_callout_with_icon(
+        &mut self,
+        kind: CalloutKind,
+        icon: Option<&'static crate::game::art_icons::Icon>,
+        tag: &str,
+        message: &str,
+        duration: f32,
+    ) {
         // Prefer an inactive slot; otherwise replace the slot closest to expiring.
         let idx = self
             .callouts
@@ -588,6 +612,7 @@ impl HudState {
         slot.message.push_str(message);
         slot.timer = duration;
         slot.duration = duration.max(0.1);
+        slot.icon = icon;
     }
 
     /// Notify the HUD that a specific pickup was collected.

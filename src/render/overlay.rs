@@ -627,15 +627,20 @@ fn draw_callouts(
     let align_right = game.width >= 66;
 
     // Uniform column width across stacked pills so left `▌` bars align crisply.
+    // An icon pill is two rows tall: the 4x2 small sprite on the left, the tag
+    // on its top row and the message on its bottom row.
     let mut col_w = 0u16;
     for &idx in &active_indices[..visible] {
         let slot = &state.callouts[idx];
-        let w = 1
-            + 1
-            + slot.tag.chars().count() as u16
-            + 2
-            + slot.message.chars().count() as u16
-            + 1;
+        let w = if slot.icon.is_some() {
+            1 + 1
+                + crate::game::art_icons::SMALL_CELL_W
+                + 1
+                + slot.tag.chars().count().max(slot.message.chars().count()) as u16
+                + 1
+        } else {
+            1 + 1 + slot.tag.chars().count() as u16 + 2 + slot.message.chars().count() as u16 + 1
+        };
         col_w = col_w.max(w);
     }
     col_w = col_w.min(game.width.saturating_sub(2));
@@ -648,12 +653,13 @@ fn draw_callouts(
         game.x + (game.width.saturating_sub(col_w)) / 2
     };
 
-    for (row_idx, &slot_idx) in active_indices[..visible].iter().enumerate() {
-        let y = start_y + row_idx as u16;
-        if y >= game.bottom().saturating_sub(2) {
+    let mut y = start_y;
+    for &slot_idx in active_indices[..visible].iter() {
+        let slot = &state.callouts[slot_idx];
+        let h = if slot.icon.is_some() { 2 } else { 1 };
+        if y + h > game.bottom().saturating_sub(2) {
             break;
         }
-        let slot = &state.callouts[slot_idx];
         let kind_col = slot
             .kind
             .map(|k| k.color(sector_accent))
@@ -664,11 +670,47 @@ fn draw_callouts(
         let msg_fg = fade_color(COAT, fade);
         let bar_fg = fade_color(kind_col, fade);
 
-        buf.set_style(Rect::new(x0, y, col_w, 1), Style::default().bg(PLATE));
-        buf[(x0, y)].set_char('▌').set_fg(bar_fg).set_bg(PLATE);
+        buf.set_style(Rect::new(x0, y, col_w, h), Style::default().bg(PLATE));
+        for bar_y in y..y + h {
+            buf[(x0, bar_y)].set_char('▌').set_fg(bar_fg).set_bg(PLATE);
+        }
+        let limit = x0 + col_w;
+
+        if let Some(icon) = slot.icon {
+            // Icon first, then the two text lines to its right.
+            crate::game::art_icons::draw(
+                buf,
+                Rect::new(
+                    x0 + 2,
+                    y,
+                    crate::game::art_icons::SMALL_CELL_W,
+                    crate::game::art_icons::SMALL_CELL_H,
+                ),
+                icon,
+            );
+            let tx = x0 + 2 + crate::game::art_icons::SMALL_CELL_W + 1;
+            buf.set_stringn(
+                tx,
+                y,
+                &slot.tag,
+                limit.saturating_sub(tx) as usize,
+                Style::default()
+                    .fg(tag_fg)
+                    .bg(PLATE)
+                    .add_modifier(Modifier::BOLD),
+            );
+            buf.set_stringn(
+                tx,
+                y + 1,
+                &slot.message,
+                limit.saturating_sub(tx) as usize,
+                Style::default().fg(msg_fg).bg(PLATE),
+            );
+            y += h;
+            continue;
+        }
 
         let mut cx = x0 + 2;
-        let limit = x0 + col_w;
         (cx, _) = buf.set_stringn(
             cx,
             y,
@@ -693,6 +735,7 @@ fn draw_callouts(
             limit.saturating_sub(cx) as usize,
             Style::default().fg(msg_fg).bg(PLATE),
         );
+        y += h;
     }
 }
 
