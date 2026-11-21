@@ -459,16 +459,32 @@ pub fn super_dash_system(
     let radius = w.dash_radius();
     let dmg = w.damage() * player.loadout.stats.damage_mult;
     let kind = WeaponKind::SuperDash;
+    // The legs the rat actually travelled this tick (collision-resolved
+    // sub-steps). A chord across them could cut a corner a wall put in the
+    // path; `record` guarantees at least one leg whenever `segment` is set, so
+    // a dash that moved nothing (pressed flush into a wall) hits nothing.
+    // Copied out of the resource (the array is `Copy`), so the hit walk below
+    // can still mark hits and extend the Ripcord route.
+    let legs = track.segs;
+    let leg_n = track.seg_len;
+    let on_legs = |pos: Vec2, other: f32| {
+        (0..leg_n).any(|i| {
+            let (a, b) = legs[i];
+            segment_circle_hit(a, b, radius, pos, other)
+        })
+    };
 
     // One sound for the whole dash, on its first leg.
     if track.legs == 1 {
         sfx.0.push(Sfx::SuperDash);
     }
-    // Ripcord: the real travelled leg is kept for 0.6 s after the dash, so the
-    // evolution damages the route the rat actually took (a dash stopped by a
-    // wall records its short leg, exactly like the dash hit does).
+    // Ripcord: the real travelled legs are kept for 0.6 s after the dash, so
+    // the evolution damages the route the rat actually took (a dash stopped by
+    // a wall records its short leg, exactly like the dash hit does).
     if w.evolved {
-        track.extend_route(from, to);
+        for &(a, b) in &legs[..leg_n] {
+            track.extend_route(a, b);
+        }
     }
     vfx::emit_super_dash_comb(&mut particles, &mut rng.0, from, to, radius);
 
@@ -480,7 +496,7 @@ pub fn super_dash_system(
         if !e.alive() || track.already_hit(id.0) {
             continue;
         }
-        if !segment_circle_hit(from, to, radius, e.pos, e.radius) {
+        if !on_legs(e.pos, e.radius) {
             continue;
         }
         track.mark_hit(id.0);

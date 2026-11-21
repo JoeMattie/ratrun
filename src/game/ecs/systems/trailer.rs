@@ -60,7 +60,7 @@ use crate::game::ecs::resources::{RngRes, RunCounters, SfxQueue, TickInput};
 use crate::game::art_boss_magpie;
 use crate::game::ecs::systems::boss::{Boss, BossKind, BossState};
 use crate::game::enemy::{Enemy, EnemyKind};
-use crate::game::gem::Gem;
+use crate::game::gem::{Gem, Gold, Pickup};
 use crate::game::level::{Level, Theme, TrailerDeck};
 use crate::game::particle::vfx;
 use crate::game::particle::Particles;
@@ -105,6 +105,11 @@ pub fn trailer_system(
     mut player: ResMut<Player>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
     mut gems: Query<&mut Gem>,
+    // Loot on the deck: a drop that lands in a hole is nudged onto the nearest
+    // plank (see the "loot on the deck" pass), and the slipstream drags coins
+    // exactly as it drags gems.
+    mut gold: Query<&mut Gold>,
+    mut pickups: Query<&mut Pickup>,
     mut sfx: ResMut<SfxQueue>,
     mut particles: ResMut<Particles>,
     mut rng: ResMut<RngRes>,
@@ -180,6 +185,34 @@ pub fn trailer_system(
     }
     if any_fell {
         sfx.0.push(Sfx::TrapTrigger);
+    }
+
+    // ---- loot on the deck ------------------------------------------------
+    //
+    // A gem, coin or pocket find dropped over a hole would sit where the rat
+    // cannot stand (its touch radius never reaches the middle of a pit) until
+    // the level ends. Nudge each onto the nearest plank instead: the same
+    // "nearest solid plank" walk the fallen bodies use, and no rng.
+    for mut gem in gems.iter_mut() {
+        if deck.pit_at(gem.pos).is_some() {
+            if let Some(safe) = nearest_plank(&level, gem.pos, SizeClass::Small, 0) {
+                gem.pos = safe;
+            }
+        }
+    }
+    for mut coin in gold.iter_mut() {
+        if deck.pit_at(coin.pos).is_some() {
+            if let Some(safe) = nearest_plank(&level, coin.pos, SizeClass::Small, 0) {
+                coin.pos = safe;
+            }
+        }
+    }
+    for mut find in pickups.iter_mut() {
+        if deck.pit_at(find.pos).is_some() {
+            if let Some(safe) = nearest_plank(&level, find.pos, SizeClass::Small, 0) {
+                find.pos = safe;
+            }
+        }
     }
 
     // ---- sliding cargo ---------------------------------------------------
@@ -258,6 +291,17 @@ pub fn trailer_system(
         let to = gem.pos + Vec2::new(-WIND_PULL_GEMS * dt, 0.0);
         if slipstream_floor(&level, to) {
             gem.pos = to;
+        }
+    }
+    // Coins are just as light (a coin is a gem with a square glint), and a
+    // purse left up-wind of the rat is the same loss as an XP gem.
+    for mut coin in gold.iter_mut() {
+        if !deck.windy_at(coin.pos) {
+            continue;
+        }
+        let to = coin.pos + Vec2::new(-WIND_PULL_GEMS * dt, 0.0);
+        if slipstream_floor(&level, to) {
+            coin.pos = to;
         }
     }
     // The smallest bodies are dragged too.
@@ -386,6 +430,74 @@ mod tests {
     /// `Local` state, including the bump counter, behaves as in a run).
     fn tick(w: &mut World, dt: f32) {
         w.update(dt, Vec2::ZERO, false);
+    }
+
+    /// Loot dropped over a hole is nudged onto the nearest plank, and the
+    /// slipstream drags coins exactly as it drags gems.
+    #[test]
+    fn loot_never_stays_in_a_hole_and_the_wind_moves_coins() {
+        let mut w = bed_world();
+        let deck = w.level.trailer.deck;
+        let hole = TileRect::new(deck.x + 5, deck.y + 3, 1, 1);
+        w.level
+            .trailer
+            .pits
+            .push(Pit::new(hole, PitKind::BrokenPlank));
+        let centre = hole.center_world();
+        let gem = w.spawn_gem(Gem::new(centre, 1));
+        let coin = crate::game::ecs::resources::spawn_with_id(&mut w.ecs, Gold::new(centre, 2));
+        tick(&mut w, 1.0 / 60.0);
+        let gem_pos = w.ecs.get::<Gem>(gem).unwrap().pos;
+        let coin_pos = w.ecs.get::<Gold>(coin).unwrap().pos;
+        assert!(w.level.trailer.pit_at(gem_pos).is_none(), "the gem sat in the hole");
+        assert!(w.level.trailer.pit_at(coin_pos).is_none(), "the coin sat in the hole");
+
+        // A windy stretch: a coin is blown tailward like a gem.
+        w.level.trailer.wind.push(TileRect::new(
+            deck.x + 8,
+            deck.y + 4,
+            4,
+            2,
+        ));
+        let windy = TileRect::new(deck.x + 8, deck.y + 4, 4, 2).center_world();
+        let coin = crate::game::ecs::resources::spawn_with_id(&mut w.ecs, Gold::new(windy, 2));
+        let x0 = w.ecs.get::<Gold>(coin).unwrap().pos.x;
+        for _ in 0..10 {
+            tick(&mut w, 1.0 / 60.0);
+        }
+        let x1 = w.ecs.get::<Gold>(coin).unwrap().pos.x;
+        assert!(x1 < x0, "the slipstream must herd coins too ({x0} -> {x1})");
+    }
+
+    /// A Bell Flea never picks a landing on a hole: it waits for open planks.
+    #[test]
+    fn a_bell_flea_refuses_a_pit_landing() {
+        let mut w = bed_world();
+        let deck = w.level.trailer.deck;
+        // A wall of holes straight between the flea and the rat.
+        for dx in 3..7 {
+            w.level
+                .trailer
+                .pits
+                .push(Pit::new(TileRect::new(deck.x + dx, deck.y + 4, 1, 1), PitKind::BrokenPlank));
+        }
+        let from = deck.center_world() + Vec2::new(-40.0, 0.0);
+        let flea = w.spawn_enemy(EnemyKind::BellFlea, from, 1.0);
+        {
+            let mut e = w.ecs.get_mut::<Enemy>(flea).unwrap();
+            e.w3.armed = 1;
+            e.w3.flea_cd = 0.0;
+        }
+        for _ in 0..120 {
+            w.update(1.0 / 60.0, Vec2::ZERO, false);
+            let e = w.ecs.get::<Enemy>(flea).unwrap();
+            if e.w3.flea_phase == 1 {
+                assert!(
+                    w.level.trailer.pit_at(e.w3.hop_to).is_none(),
+                    "the flea chose a landing in a hole"
+                );
+            }
+        }
     }
 
     #[test]

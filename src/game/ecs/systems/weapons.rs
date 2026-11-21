@@ -129,7 +129,7 @@ pub fn fire_weapons_system(
     mut next_id: ResMut<NextSpawnId>,
     index: Res<EnemyIndex>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
-    bosses: Query<&Boss>,
+    mut bosses: Query<&mut Boss>,
     bullets: Query<(Entity, &SpawnId, &Bullet)>,
     mut damage_numbers: ResMut<DamageNumbers>,
     mut ledger: ResMut<DamageLedger>,
@@ -248,11 +248,13 @@ pub fn fire_weapons_system(
             &mut scratch.orbit_scratch,
             &mut scratch.target_scratch,
             &boss_points,
+            &mut bosses,
             &stats,
             &mut melee_nudge,
             &scratch.infected,
             &mut scratch.boss_virus,
             &mut scratch.evo.fairy_casts,
+            &mut scratch.moved,
         );
         if fired {
             player.loadout.weapons[i].timer += cd;
@@ -261,6 +263,25 @@ pub fn fire_weapons_system(
             // tick instead of serving a full cooldown for a dud shot.
             player.loadout.weapons[i].timer = 0.0;
         }
+    }
+
+    // A weapon moved a body this tick (Counterweight's nudge or Ratchet Tail's
+    // swing): re-file the buckets from the still-valid `EnemyIndex` so every
+    // later reader (`bullets`, `pools`, `boss_damage`, `player_bullet_hits`,
+    // `contact`) sees the body where it actually is. One grid fill, and only on
+    // a tick that moved something; `SpawnId` order is unchanged, so the index
+    // is never sorted again here.
+    if *scratch.moved {
+        *scratch.moved = false;
+        let arena = level.arena;
+        scratch.grid.reset(arena, crate::game::ecs::constants::GRID_CELL);
+        let grid = &mut scratch.grid;
+        grid.fill(
+            index
+                .0
+                .iter()
+                .filter_map(|&entity| enemies.get(entity).ok().map(|(_, _, e)| e.pos)),
+        );
     }
 }
 
@@ -463,6 +484,33 @@ pub struct FireScratch<'w, 's> {
     /// fired it — and survived a world reset. `World::new_level*` inserts it, so
     /// it starts at zero with the run.
     evo: ResMut<'w, crate::game::ecs::resources::EvoRuntime>,
+    /// The enemy spatial grid, re-filed here when a weapon *moved* a body.
+    ///
+    /// `enemy_move::grid_refresh_system` files every enemy under the cell it
+    /// stood in at the end of the movement phase. Two weapons then write
+    /// `Enemy::pos` themselves: Counterweight's melee nudge (the whip) and
+    /// Ratchet Tail's quarter-arc swing. `EnemyIndex` stays valid (nothing
+    /// spawned or despawned), so the debug guard passes, but the grid still
+    /// lists the body in its *old* cell: a bullet that sweeps it later this
+    /// tick asks the grid at the new position, gets the old bucket and misses
+    /// a body it is touching. Rebuilding the buckets from the (still valid)
+    /// index takes one grid fill, so it only happens on a tick that actually
+    /// moved something (`moved`).
+    grid: ResMut<'w, crate::game::collision::SpatialGrid>,
+    moved: Local<'s, bool>,
+}
+
+/// The active-weapons pass's two reused buffers.
+///
+/// Bundled into one [`bevy_ecs::system::SystemParam`] because bevy caps a
+/// system at 16 parameters: the `SpawnId`-ordered enemy list (the narrow-harness
+/// fallback order) and the `SpawnId`-ordered hostile-pellet list Flywheel's
+/// catch walks in (an evolution that records state per pellet, so the order it
+/// visits them in is part of the spec).
+#[derive(bevy_ecs::system::SystemParam)]
+pub struct ActiveScratch<'s> {
+    fallback: Local<'s, Vec<Entity>>,
+    pellets: Local<'s, Vec<(u64, Entity)>>,
 }
 
 /// Nearest-first ordering key: smaller distance, then the regular enemy before
@@ -592,7 +640,7 @@ pub fn active_weapons_system(
     mut ledger: ResMut<DamageLedger>,
     mut shake: ResMut<Shake>,
     mut fx: ResMut<ActiveFx>,
-    mut fallback: Local<Vec<Entity>>,
+    mut scratch: ActiveScratch,
 ) {
     let dt = input.dt;
     let ppos = player.pos;
@@ -610,6 +658,10 @@ pub fn active_weapons_system(
     // length check and gets a sorted reused scratch instead (never once per
     // sweep).
     let enemy_count = enemies.iter().len();
+    // The two buffers are disjoint fields, so the enemy order can stay
+    // borrowed while the pellet scratch is handed to the sweep.
+    let fallback: &mut Vec<Entity> = &mut scratch.fallback;
+    let pellets: &mut Vec<(u64, Entity)> = &mut scratch.pellets;
     let order: &[Entity] = if index.0.len() == enemy_count {
         #[cfg(debug_assertions)]
         debug_assert_enemy_index(
@@ -730,6 +782,7 @@ pub fn active_weapons_system(
                 &mut ledger,
                 &mut fx,
                 stats.shove_mult,
+                pellets,
             );
         }
         fx.thrash_left = (fx.thrash_left - dt).max(0.0);
@@ -785,6 +838,8 @@ fn thrash_sweep(
     fx: &mut ActiveFx,
     // Counterweight: a weapon's native shove (see `Stats::shove`).
     shove_mult: f32,
+    // `(SpawnId, Entity)` of this tick's hostile pellets, reused every sweep.
+    pellet_order: &mut Vec<(u64, Entity)>,
 ) {
     let kind = WeaponKind::TailThrash;
     let reach = fx.thrash_reach;
@@ -832,8 +887,25 @@ fn thrash_sweep(
     }
 
     // The arc also thrashes aside every enemy shot inside its reach.
+    //
+    // The catch is the one part of the sweep with **rng and entity state**
+    // (Flywheel records which pellets it caught), so the walk must not follow
+    // query storage order: two layouts holding the same `SpawnId`s at the same
+    // positions would otherwise catch different pellets and draw their sparks
+    // in a different order. Sorted into the reused scratch, as everywhere else.
+    pellet_order.clear();
+    pellet_order.extend(
+        enemy_bullets
+            .iter()
+            .filter(|(_, _, b)| b.faction == Faction::Enemy)
+            .map(|(entity, id, _)| (id.0, entity)),
+    );
+    pellet_order.sort_unstable_by_key(|&(id, _)| id);
     let mut caught_this_sweep = 0u8;
-    for (entity, _, b) in enemy_bullets.iter() {
+    for &(_, entity) in pellet_order.iter() {
+        let Ok((_, _, b)) = enemy_bullets.get(entity) else {
+            continue;
+        };
         if b.faction != Faction::Enemy {
             continue;
         }
@@ -1042,6 +1114,9 @@ fn fire_one(
     orbit_scratch: &mut Vec<Entity>,
     target_scratch: &mut Vec<Candidate>,
     boss_points: &BossTargetable,
+    // The boss's own body: a whip that reaches a boss body must damage it here,
+    // with the reach and damage this cast actually used (see the Tail Whip arm).
+    bosses: &mut Query<&mut Boss>,
     // Wave 3 passive hooks (Lens Cap's reach, Long Fuse's zone life and splash
     // radius, Counterweight's shove) and the per-body melee-nudge log it needs.
     stats: &crate::game::loadout::Stats,
@@ -1049,51 +1124,69 @@ fn fire_one(
     infected: &Query<&crate::game::ecs::components::Infection>,
     boss_virus: &mut crate::game::ecs::resources::BossVirus,
     fairy_casts: &mut u8,
+    // Set when this shot moved a body: the grid has to be re-filed before the
+    // projectile/contact passes read it (see `FireScratch::grid`).
+    moved: &mut bool,
 ) -> bool {
     let color = kind.color();
     let mut fired = false;
     match kind {
         WeaponKind::Gnaw => {
-            if let Some(epos) =
-                nearest_visible(level, kind, order, enemies, boss_points, ppos, target_scratch)
-            {
+            // Lens Cap stretches a ranged weapon's reach, which for an aiming
+            // weapon is the range it will consider: a dart that flies further
+            // must also be allowed to pick a target that far away.
+            let range = stats.ranged_reach(target_range(kind));
+            if let Some(epos) = nearest_visible_within(
+                level,
+                kind,
+                range,
+                order,
+                enemies,
+                boss_points,
+                ppos,
+                target_scratch,
+            ) {
                 let dir = (epos - ppos).normalized();
+                // One dart, two from level 4 (`Weapon::level_projectiles` is
+                // the level for Gnaw): a fan of ±3° keeps the pair from
+                // stacking into one body at close range while staying
+                // effectively single-target at range.
+                let shots = 1 + projs / 4;
+                // Milk Teeth (`WAVE3_DESIGN` §3) evolves the **lead** dart: it
+                // lodges for 1 s and comes home biting every body it crosses
+                // (`evolutions::milk_teeth_system`). The rest of the level-5
+                // volley still flies as Gnaw darts, so an earned evolution is
+                // never a downgrade in output, range or boss damage.
+                let mut started = 0;
                 if evolved {
-                    // Milk Teeth: one dart that lodges and comes home.
-                    // `evolutions::milk_teeth_system` flies it, bites with it
-                    // and books the damage under Gnaw.
-                    // Milk Teeth's flight is a ranged reach: Lens Cap
-                    // stretches it exactly as it stretches a dart's life.
                     commands.spawn((
                         MilkTooth::new(
                             ppos,
                             dir * evolutions::MILK_SPEED,
                             dmg,
+                            // The same flight a Gnaw dart gets (2.5 s of life,
+                            // Lens Cap included), so the tooth reaches the
+                            // target the aim picked.
                             stats.ranged_reach(evolutions::MILK_REACH),
                         ),
                         next_id.take(),
                     ));
-                } else {
-                    // One dart, two from level 4 (`Weapon::level_projectiles` is
-                    // the level for Gnaw): a fan of ±3° keeps the pair from
-                    // stacking into one body at close range while staying
-                    // effectively single-target at range.
-                    let shots = 1 + projs / 4;
-                    for k in 0..shots {
-                        let angle = if shots > 1 {
-                            let spread = (k as f32 - (shots - 1) as f32 / 2.0) * 0.052;
-                            dir.angle() + spread
-                        } else {
-                            dir.angle()
-                        };
-                        let v = Vec2::from_angle(angle) * 120.0;
-                        let mut b = Bullet::new(ppos, v, dmg, Faction::Player, color);
-                        b.size = 1;
-                        // Lens Cap: a ranged weapon's reach is its projectile life.
-                        b.life = stats.ranged_reach(b.life);
-                        b.weapon = Some(kind);
-                        commands.spawn((b, next_id.take()));
-                    }
+                    started = 1;
+                }
+                for k in started..shots {
+                    let angle = if shots > 1 {
+                        let spread = (k as f32 - (shots - 1) as f32 / 2.0) * 0.052;
+                        dir.angle() + spread
+                    } else {
+                        dir.angle()
+                    };
+                    let v = Vec2::from_angle(angle) * 120.0;
+                    let mut b = Bullet::new(ppos, v, dmg, Faction::Player, color);
+                    b.size = 1;
+                    // Lens Cap: a ranged weapon's reach is its projectile life.
+                    b.life = stats.ranged_reach(b.life);
+                    b.weapon = Some(kind);
+                    commands.spawn((b, next_id.take()));
                 }
                 vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, dir, 0.0);
                 fired = true;
@@ -1256,6 +1349,7 @@ fn fire_one(
                             SizeClass::Small,
                             None,
                         );
+                        *moved = true;
                     }
                     vfx::emit_tail_whip_hit(particles, &mut rng.0, pos, pos - ppos, killed);
                     damage_numbers.record(
@@ -1268,8 +1362,45 @@ fn fire_one(
                     );
                 }
             }
+            // The full boss is not an `Enemy`: its hit shapes take the same
+            // whipped reach, with **this cast's** Lens Cap-stretched radius and
+            // Short Teeth-scaled damage. Resolving it here (rather than from a
+            // "the whip fired" signal another system watches for) keeps a
+            // consumed `Sfx` out of the simulation: whether the caller drains
+            // audio can never change a boss's HP.
+            for mut boss in bosses.iter_mut() {
+                if boss.dead {
+                    continue;
+                }
+                let shapes = boss.hit_shapes();
+                if shapes.iter().next().is_none() {
+                    continue;
+                }
+                if !shapes.circle_hits_grounded(ppos, radius)
+                    || level.tiles.segment_hit(ppos, boss.pos, 1.0).is_some()
+                {
+                    continue;
+                }
+                let amount = dmg * boss.damage_mult;
+                if !boss.take_damage(amount) {
+                    continue;
+                }
+                ledger.add_boss(kind, amount);
+                let killed = boss.hp <= 0.0;
+                vfx::emit_tail_whip_hit(particles, &mut rng.0, boss.pos, boss.pos - ppos, killed);
+                damage_numbers.record(
+                    boss.id,
+                    boss.pos,
+                    boss.kind.body_radius(),
+                    amount,
+                    killed,
+                    DamageSource::TailWhip,
+                );
+            }
             if evolved {
-                ratchet_swing(
+                // Ratchet Tail teleports the hooked body around the rat, so
+                // the grid has to follow it (below).
+                if ratchet_swing(
                     level,
                     ppos,
                     pface,
@@ -1281,7 +1412,9 @@ fn fire_one(
                     particles,
                     damage_numbers,
                     ledger,
-                );
+                ) {
+                    *moved = true;
+                }
             }
             vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, pface, radius);
             fired = true;
@@ -1470,7 +1603,7 @@ fn ratchet_swing(
     particles: &mut Particles,
     damage_numbers: &mut DamageNumbers,
     ledger: &mut DamageLedger,
-) {
+) -> bool {
     let kind = WeaponKind::TailWhip;
     // 1. The hook: nearest ordinary body inside the arc, ties by `SpawnId`.
     let mut hook: Option<(Entity, Vec2, f32, f32)> = None; // entity, pos, dist, radius
@@ -1496,7 +1629,7 @@ fn ratchet_swing(
         }
     }
     let Some((hooked, from, radius_from_rat, hooked_radius)) = hook else {
-        return;
+        return false;
     };
     // 2. Which way round? Sweep into more bodies; an exact tie follows the
     //    facing side of the hook (and clockwise when that is zero too).
@@ -1547,7 +1680,7 @@ fn ratchet_swing(
     let dest = ppos + Vec2::from_angle(start_angle + turn) * radius_from_rat;
     let class = crate::game::collision::SizeClass::of_enemy(EnemyKind::Skitterer);
     if !level.tiles.circle_clear(dest, hooked_radius, class) {
-        return;
+        return false;
     }
     // 4. One base hit each into everything the quarter arc crosses.
     for &entity in order {
@@ -1590,11 +1723,14 @@ fn ratchet_swing(
         damage_numbers.record(id, pos, radius, applied, killed, DamageSource::TailWhip);
     }
     // 5. Release: the body lands a quarter turn around the rat.
+    let mut moved = false;
     if let Ok((_, _, mut e)) = enemies.get_mut(hooked) {
         e.pos = dest;
         e.vel = Vec2::ZERO;
+        moved = true;
     }
     vfx::emit_ratchet_swing(particles, &mut rng.0, ppos, radius_from_rat, start_angle, turn);
+    moved
 }
 
 #[cfg(test)]
@@ -1661,6 +1797,134 @@ mod tests {
         w.begin_tick(dt, Vec2::ZERO, false);
         w.ecs.run_system_cached(fire_weapons_system).unwrap();
         w.end_tick();
+    }
+
+    /// **Milk Teeth** evolves the **lead** dart: the level-5 pair keeps its
+    /// second dart as a Gnaw dart, so an earned evolution is never a downgrade
+    /// in output (the tooth flies one dart's worth of range, gets its return
+    /// bite on top, and the other dart still fires).
+    #[test]
+    fn milk_teeth_keeps_the_level_five_second_dart() {
+        let mut w = World::new(Theme::Sewer, 31);
+        w.clear_enemies();
+        w.clear_bullets();
+        arm(&mut w, WeaponKind::Gnaw);
+        w.player.loadout.weapons[0].level = WeaponKind::Gnaw.max_level();
+        w.player.loadout.weapons[0].evolved = true;
+        w.player.loadout.weapons[0].timer = 0.0;
+        let target = w.player.pos + Vec2::new(120.0, 0.0);
+        w.spawn_enemy(EnemyKind::Cat, target, 1.0);
+        run_weapons(&mut w, 1.0 / 60.0);
+
+        let mut darts = w.ecs.query::<&crate::game::ecs::components::MilkTooth>();
+        let teeth = darts.iter(&w.ecs).count();
+        let gnaw = w
+            .bullets()
+            .iter()
+            .filter(|b| b.weapon == Some(WeaponKind::Gnaw))
+            .count();
+        assert_eq!(teeth, 1, "the evolved Gnaw fires one Milk Tooth");
+        assert_eq!(gnaw, 1, "and keeps the second level-5 dart");
+    }
+
+    /// The whip's boss damage is resolved with the cast (reach, damage and
+    /// attribution), not from `Sfx::ShootWhip`: twin worlds that drain the
+    /// sound queue differently must see the same boss HP.
+    #[test]
+    fn whip_boss_damage_does_not_depend_on_draining_audio() {
+        use crate::game::ecs::systems::boss::{Boss, BossKind};
+        let build = || {
+            let mut w = World::new(Theme::Sewer, 41);
+            w.clear_enemies();
+            arm(&mut w, WeaponKind::TailWhip);
+            let mid = w.level.arena * 0.5;
+            w.player.pos = mid + Vec2::new(-12.0, 0.0);
+            let arena = w
+                .level
+                .boss_room()
+                .map(|r| r.rect)
+                .unwrap_or_else(|| crate::game::level::TileRect::new(0, 0, 10, 10));
+            let mut boss = Boss::new(BossKind::Cat, mid, 5000.0, arena, mid, false);
+            boss.invuln = 0.0;
+            w.ecs.spawn((boss, crate::game::ecs::components::SpawnId(999)));
+            w
+        };
+        let mut drained = build();
+        let mut undrained = build();
+        let hp0 = {
+            let mut q = drained.ecs.query::<&Boss>();
+            q.iter(&drained.ecs).next().unwrap().hp
+        };
+        // Two ticks each; only one of them clears `sfx` between ticks.
+        for _ in 0..2 {
+            drained.update(1.0 / 60.0, Vec2::ZERO, false);
+            drained.sfx.clear();
+            undrained.update(1.0 / 60.0, Vec2::ZERO, false);
+        }
+        let hp = |w: &mut World| {
+            let mut q = w.ecs.query::<&Boss>();
+            q.iter(&w.ecs).next().unwrap().hp
+        };
+        assert!(hp(&mut drained) < hp0, "the whip must hurt a boss in reach");
+        assert_eq!(
+            hp(&mut drained),
+            hp(&mut undrained),
+            "boss HP must not depend on whether the caller drained the sfx queue"
+        );
+    }
+
+    /// A weapon that **moved** a body (Counterweight's melee nudge, Ratchet
+    /// Tail's swing) re-files the spatial grid, so this tick's bullet sweep
+    /// still finds the body where it now stands.
+    ///
+    /// White-box on purpose: the bucket contents are what the sweep reads, and
+    /// the failure this pins is precisely a body that is in `EnemyIndex` but in
+    /// the grid's *old* cell.
+    #[test]
+    fn a_nudged_body_is_re_filed_in_the_grid() {
+        use crate::game::collision::SpatialGrid;
+        use crate::game::ecs::resources::{EnemyIndex, NeighborScratch};
+        use crate::game::loadout::PassiveKind;
+        let mut w = World::new(Theme::Sewer, 43);
+        w.clear_enemies();
+        arm(&mut w, WeaponKind::TailWhip);
+        // Counterweight: +2 px of outward shove per stack on the whip, once per
+        // body per 0.4 s.
+        w.player.loadout.passives.push((PassiveKind::Counterweight, 4));
+        w.player.loadout.rebuild_stats();
+        let ppos = w.player.pos;
+        // Right at the whip's inner reach, so the nudge of 8 px moves it.
+        let body = w.spawn_enemy(EnemyKind::Brute, ppos + Vec2::new(18.0, 0.0), 400.0);
+        let before = w.ecs.get::<Enemy>(body).unwrap().pos;
+        // The schedule's order: grid build, then the weapon pass.
+        w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
+        w.ecs
+            .run_system_cached(crate::game::ecs::systems::enemy_move::grid_build_system)
+            .unwrap();
+        w.ecs.run_system_cached(fire_weapons_system).unwrap();
+        let after = w.ecs.get::<Enemy>(body).unwrap().pos;
+        let slot = {
+            let index = w.ecs.resource::<EnemyIndex>();
+            index
+                .0
+                .iter()
+                .position(|&e| e == body)
+                .expect("the body is in the index")
+        };
+        // Ask the grid at the body's **new** position, exactly like a bullet.
+        let mut neigh = NeighborScratch::default();
+        w.ecs
+            .resource::<SpatialGrid>()
+            .neighbors_within(after, 1.0, &mut neigh.0);
+        w.end_tick();
+        assert!(
+            after.dist_sq(before) > 0.01,
+            "the whip's Counterweight nudge did not move the body"
+        );
+        assert!(
+            neigh.0.iter().any(|&j| j as usize == slot),
+            "the grid still lists the body in its old cell ({before:?} -> {after:?})"
+        );
     }
 
     /// Fire `kind` once at a fixed near target so targeting weapons always

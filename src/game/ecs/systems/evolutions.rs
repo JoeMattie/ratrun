@@ -87,9 +87,9 @@ use crate::game::ecs::components::{
 };
 use crate::game::ecs::resources::{
     ActiveFx, DamageLedger, DashTrack, EnemyIndex, RngRes, TickInput, FLYWHEEL_CAP,
-    RIPCORD_SECS, ROLL_CALL_TAG_CAP,
+    RIPCORD_SECS,
 };
-use crate::game::ecs::systems::boss::Boss;
+use crate::game::ecs::systems::boss::{Boss, BossHitShapes};
 use crate::game::ecs::systems::projectiles::los_clear;
 #[cfg(debug_assertions)]
 use crate::game::ecs::resources::debug_assert_enemy_index;
@@ -110,7 +110,12 @@ pub const MILK_SPEED: f32 = 120.0;
 /// Speed of the return thread (a little faster than the throw).
 pub const MILK_RETURN_SPEED: f32 = 170.0;
 /// How far the dart flies before it lodges in the air and comes home.
-pub const MILK_REACH: f32 = 74.0;
+///
+/// The lead dart's flight is the whole Gnaw dart flight (`Bullet::new`'s 2.5 s
+/// of life at 120 px/s = 300 px), not a short lob: an evolved Gnaw keeps the
+/// targeting range its base form had (the aim picks a body up to
+/// `target_range` away, so a shorter reach would fire into empty floor).
+pub const MILK_REACH: f32 = 300.0;
 /// Collision radius of the dart (the Gnaw dart's body).
 pub const MILK_RADIUS: f32 = 2.0;
 /// A return thread disappears this close to the rat.
@@ -150,6 +155,10 @@ pub const ROLL_CALL_DELAY: f32 = 0.8;
 pub const ROLL_CALL_RADIUS: f32 = 9.0;
 /// Answers that may hit the same body.
 pub const ROLL_CALL_MAX_ANSWERS: u8 = 3;
+/// Distinct bodies one Roll Call ring can keep an answer tally for. Fixed (no
+/// per-tick allocation); a body past the cap gets no answer rather than more
+/// than three.
+pub const ROLL_CALL_VICTIM_CAP: usize = 48;
 
 /// Hostile pellets one Flywheel sweep catches.
 pub const FLYWHEEL_PER_SWEEP: u8 = 2;
@@ -279,6 +288,46 @@ fn wall_or(level: &Level, from: Vec2, to: Vec2, radius: f32) -> (Vec2, bool) {
     }
 }
 
+/// One Milk Teeth hit on the full boss: the dart's segment against the boss's
+/// damageable hit shapes, with the boss's own damage multiplier and the ledger
+/// column of its base weapon. Returns the boss position when the hit landed.
+///
+/// Identical to the path `boss_damage_system` uses for player bullets, so a
+/// chest that turns Gnaw into Milk Teeth cannot turn a boss-capable build into
+/// a zero-damage one.
+#[allow(clippy::too_many_arguments)]
+fn bite_boss(
+    boss: &mut Boss,
+    from: Vec2,
+    to: Vec2,
+    damage: f32,
+    ledger: &mut DamageLedger,
+    damage_numbers: &mut DamageNumbers,
+    rng: &mut rand::rngs::StdRng,
+    particles: &mut Particles,
+) -> Option<Vec2> {
+    let shapes = boss.hit_shapes();
+    if shapes.iter().next().is_none() || !shapes.segment_hits_grounded(from, to, MILK_RADIUS) {
+        return None;
+    }
+    let amount = damage * boss.damage_mult;
+    if !boss.take_damage(amount) {
+        return None;
+    }
+    ledger.add_boss(WeaponKind::Gnaw, amount);
+    let killed = boss.hp <= 0.0;
+    vfx::emit_milk_teeth_bite(particles, rng, boss.pos, killed);
+    damage_numbers.record(
+        boss.id,
+        boss.pos,
+        boss.kind.body_radius(),
+        amount,
+        killed,
+        DamageSource::Normal,
+    );
+    Some(boss.pos)
+}
+
 // ---- Milk Teeth -----------------------------------------------------------
 
 /// Fly a **Milk Teeth** dart, lodge it, then pull it home biting whatever it
@@ -294,6 +343,7 @@ pub fn milk_teeth_system(
     mut damage_numbers: ResMut<DamageNumbers>,
     mut ledger: ResMut<DamageLedger>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
+    mut bosses: Query<&mut Boss>,
     mut darts: Query<(Entity, &SpawnId, &mut MilkTooth)>,
     mut fallback: Local<Vec<Entity>>,
     mut dart_order: Local<Vec<(u64, Entity)>>,
@@ -334,6 +384,28 @@ pub fn milk_teeth_system(
                         break;
                     }
                 }
+                // The boss is not an `Enemy`: its hit shapes are the target,
+                // exactly as `boss_damage_system` reaches it for a dart, so an
+                // evolved Gnaw never stops being a boss weapon.
+                let mut boss_bite: Option<Vec2> = None;
+                if bit.is_none() {
+                    for mut boss in bosses.iter_mut() {
+                        if boss.dead {
+                            continue;
+                        }
+                        boss_bite = bite_boss(
+                            &mut boss,
+                            from,
+                            end,
+                            dart.damage,
+                            &mut ledger,
+                            &mut damage_numbers,
+                            &mut rng.0,
+                            &mut particles,
+                        );
+                        break;
+                    }
+                }
                 if let Some((slot, _)) = bit {
                     let enemy = order[slot];
                     if let Ok((_, _, mut e)) = enemies.get_mut(enemy) {
@@ -352,6 +424,13 @@ pub fn milk_teeth_system(
                             dart.pos = pos;
                         }
                     }
+                    dart.phase = MilkPhase::Lodged;
+                    dart.age = 0.0;
+                    dart.vel = Vec2::ZERO;
+                } else if let Some(bpos) = boss_bite {
+                    // The lead dart lodges in the boss's hit shape and comes
+                    // home from there.
+                    dart.pos = bpos;
                     dart.phase = MilkPhase::Lodged;
                     dart.age = 0.0;
                     dart.vel = Vec2::ZERO;
@@ -390,7 +469,11 @@ pub fn milk_teeth_system(
                 } else {
                     from + dir * step
                 };
-                // Bite every body the thread crosses, once each.
+                // Bite every body the thread crosses, once each. The record
+                // comes first: past `MILK_BITE_CAP` a body is not bitten at
+                // all rather than bitten again on every tick it stays inside
+                // the sweep.
+                let mut hit_any = false;
                 for &enemy in order.iter() {
                     let Ok((_, id, mut e)) = enemies.get_mut(enemy) else {
                         continue;
@@ -400,6 +483,10 @@ pub fn milk_teeth_system(
                     }
                     if crate::game::collision::segment_circle_hit(from, to, MILK_RADIUS, e.pos, e.radius)
                     {
+                        if !dart.remember_bite(id.0) {
+                            continue;
+                        }
+                        hit_any = true;
                         let pos = e.pos;
                         let killed = hit_body(
                             &mut e,
@@ -410,8 +497,32 @@ pub fn milk_teeth_system(
                             &mut damage_numbers,
                             DamageSource::Normal,
                         );
-                        dart.remember_bite(id.0);
                         vfx::emit_milk_teeth_bite(&mut particles, &mut rng.0, pos, killed);
+                    }
+                }
+                // The boss is bitten once per return thread, on the ordinary
+                // hit-shape path (`_ = hit_any` keeps the walk above honest).
+                let _ = hit_any;
+                if !dart.boss_bitten {
+                    for mut boss in bosses.iter_mut() {
+                        if boss.dead {
+                            continue;
+                        }
+                        if bite_boss(
+                            &mut boss,
+                            from,
+                            to,
+                            dart.damage,
+                            &mut ledger,
+                            &mut damage_numbers,
+                            &mut rng.0,
+                            &mut particles,
+                        )
+                        .is_some()
+                        {
+                            dart.boss_bitten = true;
+                        }
+                        break;
                     }
                 }
                 dart.pos = to;
@@ -468,6 +579,11 @@ pub fn fondue_string_system(
                 e.pos,
                 e.radius,
             ) {
+                // Recording first keeps the once-per-body rule honest past
+                // `STRING_CUT_CAP`: an untracked body is not cut at all.
+                if !line.remember_cut(id.0) {
+                    continue;
+                }
                 let pos = e.pos;
                 let killed = hit_body(
                     &mut e,
@@ -478,7 +594,6 @@ pub fn fondue_string_system(
                     &mut damage_numbers,
                     DamageSource::Normal,
                 );
-                line.remember_cut(id.0);
                 vfx::emit_fondue_cut(&mut particles, &mut rng.0, pos, killed);
             }
         }
@@ -531,6 +646,13 @@ pub fn fairy_ring_system(
             }
             let edge = (e.pos.dist(ring.pos) - ring.radius).abs();
             if edge <= e.radius + FAIRY_BAND {
+                // The cooldown table is the "one hit per body per second"
+                // memory: if the ring cannot record this body (the table is
+                // full of other live cooldowns) it does not hit it either,
+                // instead of recycling an entry and re-hitting its owner.
+                if !ring.cool(id.0, FAIRY_HIT_COOLDOWN) {
+                    continue;
+                }
                 let pos = e.pos;
                 let killed = hit_body(
                     &mut e,
@@ -541,7 +663,6 @@ pub fn fairy_ring_system(
                     &mut damage_numbers,
                     DamageSource::Orbit,
                 );
-                ring.cool(id.0, FAIRY_HIT_COOLDOWN);
                 vfx::emit_fairy_ring_hit(&mut particles, &mut rng.0, pos, killed);
             }
         }
@@ -588,6 +709,25 @@ fn in_stripe(start: Vec2, dir: Vec2, open_len: f32, pos: Vec2, radius: f32) -> b
     along >= -radius && along <= open_len + radius && perp <= CHANNEL_HALF_W + radius
 }
 
+/// Does the corrosive stripe cover any of the boss's grounded hit shapes?
+///
+/// The boss is not an `Enemy` body, so `in_stripe` (which takes a circle) is
+/// applied per shape: a shape's centre inside the stripe, or the stripe's axis
+/// inside a shape's own radius, counts as a cover.
+fn stripe_covers_point(shapes: &BossHitShapes, start: Vec2, dir: Vec2, open_len: f32) -> bool {
+    // The stripe's axis is sampled in 4 px steps (the same approximation
+    // `BossHitShape::overlaps_segment` uses), so a shape wider than the stripe
+    // is still caught by its own radius and a shape the stripe misses is not.
+    let steps = ((open_len / 4.0).ceil().max(1.0)) as u32;
+    shapes.iter().any(|shape| {
+        shape.grounded()
+            && (0..=steps).any(|i| {
+                let t = i as f32 / steps as f32;
+                shape.overlaps_circle(start + dir * (open_len * t), CHANNEL_HALF_W)
+            })
+    })
+}
+
 /// Tick every **Drain Cleaner** channel: the advancing front, then the pool.
 pub fn drain_cleaner_system(
     mut commands: Commands,
@@ -600,6 +740,7 @@ pub fn drain_cleaner_system(
     mut damage_numbers: ResMut<DamageNumbers>,
     mut ledger: ResMut<DamageLedger>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
+    mut bosses: Query<&mut Boss>,
     mut channels: Query<(Entity, &SpawnId, &mut CorrosiveChannel)>,
     mut fallback: Local<Vec<Entity>>,
     mut channel_order: Local<Vec<(u64, Entity)>>,
@@ -640,6 +781,12 @@ pub fn drain_cleaner_system(
                     continue;
                 }
                 if in_stripe(ch.start, ch.dir, open_len, e.pos, e.radius) {
+                    // Record before the hit: a body the front cannot remember
+                    // (the fixed history is full) is skipped, never hit again
+                    // on the next tick of the same advancing front.
+                    if !ch.remember_hit(id.0) {
+                        continue;
+                    }
                     let pos = e.pos;
                     let killed = hit_body(
                         &mut e,
@@ -650,8 +797,46 @@ pub fn drain_cleaner_system(
                         &mut damage_numbers,
                         DamageSource::Acid,
                     );
-                    ch.remember_hit(id.0);
                     vfx::emit_drain_hit(&mut particles, &mut rng.0, pos, killed);
+                }
+            }
+            // The full boss is not an `Enemy`: its hit shapes take the same one
+            // front hit a body does (so the replacement chip cannot leave a
+            // boss-capable build with no way to hurt the boss), with the boss's
+            // own damage multiplier and the weapon's ledger column.
+            if !ch.boss_hit && !ch.runoff {
+                for mut boss in bosses.iter_mut() {
+                    if boss.dead {
+                        continue;
+                    }
+                    let shapes = boss.hit_shapes();
+                    if shapes.iter().next().is_none() {
+                        continue;
+                    }
+                    if !shapes.circle_hits_grounded(
+                        ch.start + ch.dir * open_len,
+                        CHANNEL_HALF_W,
+                    ) && !stripe_covers_point(&shapes, ch.start, ch.dir, open_len)
+                    {
+                        continue;
+                    }
+                    let amount = ch.front_damage * boss.damage_mult;
+                    if !boss.take_damage(amount) {
+                        continue;
+                    }
+                    ch.boss_hit = true;
+                    ledger.add_boss(kind, amount);
+                    let killed = boss.hp <= 0.0;
+                    vfx::emit_drain_hit(&mut particles, &mut rng.0, boss.pos, killed);
+                    damage_numbers.record(
+                        boss.id,
+                        boss.pos,
+                        boss.kind.body_radius(),
+                        amount,
+                        killed,
+                        DamageSource::Acid,
+                    );
+                    break;
                 }
             }
         } else {
@@ -687,6 +872,35 @@ pub fn drain_cleaner_system(
                         DamageSource::Acid,
                     );
                 }
+            }
+        }
+        if ch.age > advance {
+            // The settled stripe is a pool: it ticks the boss's hit shapes the
+            // same way `boss_damage_system` ticks a round `Pool`.
+            for mut boss in bosses.iter_mut() {
+                if boss.dead {
+                    continue;
+                }
+                let shapes = boss.hit_shapes();
+                if shapes.iter().next().is_none() {
+                    continue;
+                }
+                if !stripe_covers_point(&shapes, ch.start, ch.dir, open) {
+                    continue;
+                }
+                let amount = ch.dps * dt * boss.damage_mult;
+                if !boss.take_damage(amount) {
+                    continue;
+                }
+                ledger.add_boss(kind, amount);
+                damage_numbers.record(
+                    boss.id,
+                    boss.pos,
+                    boss.kind.body_radius(),
+                    amount,
+                    false,
+                    DamageSource::Acid,
+                );
             }
         }
         let front = if advance > 0.0 {
@@ -1008,9 +1222,11 @@ pub fn roll_call_system(
     }
     let order = enemy_order(&index, &enemies, &mut fallback);
     let damage = evo.answer_damage;
-    // How many answers have already hit each victim (a fixed tally: at most
-    // `ROLL_CALL_TAG_CAP` distinct victims, 3 answers each).
-    let mut answers: [Option<(u64, u8)>; ROLL_CALL_TAG_CAP] = [None; ROLL_CALL_TAG_CAP];
+    // How many answers have already hit each victim, a fixed tally sized for
+    // the **victims** (not for the emitters: one ring of answers can reach far
+    // more bodies than the ring tagged). A body the tally cannot hold gets no
+    // answer at all, so a 13th victim can never take every answer in the room.
+    let mut answers: [Option<(u64, u8)>; ROLL_CALL_VICTIM_CAP] = [None; ROLL_CALL_VICTIM_CAP];
     let tag_n = evo.tag_n as usize;
     for slot in 0..tag_n {
         let Some((Some(entity), Some(id))) = Some((evo.tags[slot], evo.tag_ids[slot])) else {
@@ -1034,22 +1250,31 @@ pub fn roll_call_system(
             // The cap counts answers per body across the whole ring.
             let mut count = 0u8;
             let mut at: Option<usize> = None;
+            let mut full = true;
             for (i, entry) in answers.iter().enumerate() {
                 match entry {
                     Some((held, n)) if *held == victim_id.0 => {
                         count = *n;
                         at = Some(i);
+                        full = false;
                         break;
                     }
                     None => {
                         at = Some(i);
+                        full = false;
                         break;
                     }
                     _ => {}
                 }
             }
-            if count >= ROLL_CALL_MAX_ANSWERS {
+            // Recording the answer is a precondition of the hit: a tally with
+            // no room for this body cannot enforce "three answers each", so it
+            // withholds the damage instead of letting every answer through.
+            if count >= ROLL_CALL_MAX_ANSWERS || full {
                 continue;
+            }
+            if let Some(i) = at {
+                answers[i] = Some((victim_id.0, count + 1));
             }
             let pos = victim.pos;
             let killed = hit_body(
@@ -1061,9 +1286,6 @@ pub fn roll_call_system(
                 &mut damage_numbers,
                 DamageSource::Normal,
             );
-            if let Some(i) = at {
-                answers[i] = Some((victim_id.0, count + 1));
-            }
             vfx::emit_roll_call_pulse(&mut particles, &mut rng.0, pos, killed);
             let _ = id;
         }
@@ -1167,6 +1389,27 @@ mod tests {
         weapon.evolved = true;
         w.player.loadout = Loadout::from_parts(vec![weapon], Vec::new());
         w
+    }
+
+    /// A boss body planted at the arena centre, in its neutral state (so its
+    /// hit shapes are grounded and damageable), with the `BossFight` book it
+    /// needs. Used by the "the evolution still hurts a boss" tests.
+    fn spawn_grounded_boss(
+        w: &mut World,
+        kind: crate::game::ecs::systems::boss::BossKind,
+    ) -> Entity {
+        use crate::game::ecs::systems::boss::{Boss, BossFight};
+        let mid = w.level.arena * 0.5;
+        let arena = w
+            .level
+            .boss_room()
+            .map(|r| r.rect)
+            .unwrap_or_else(|| crate::game::level::TileRect::new(0, 0, 10, 10));
+        let mut boss = Boss::new(kind, mid, 5000.0, arena, mid, false);
+        boss.invuln = 0.0;
+        let entity = w.ecs.spawn((boss, SpawnId(999))).id();
+        let _ = std::marker::PhantomData::<BossFight>;
+        entity
     }
 
     fn hp_of(w: &World, entity: Entity) -> f32 {
@@ -1541,6 +1784,247 @@ mod tests {
         }
         assert!(hp_of(&w, near) < mid, "the answer must land on the packing body");
         assert_eq!(w.active_fx().tag_n, 0, "the tags are spent");
+    }
+
+    // ---- Regressions: saturation, boss hits, pellet order ---------------
+
+    /// A fixed "each body once" history must not turn into damage over time
+    /// past its cap: a body the history cannot record is **not** hit again on
+    /// the next tick (`MILK_BITE_CAP` + 1 bodies in one return thread).
+    #[test]
+    fn a_full_history_never_repeats_a_milk_bite() {
+        let mut w = evolved_world(WeaponKind::Gnaw);
+        let origin = w.player.pos;
+        // One more body than the dart can remember, all in a line the return
+        // thread crosses, all sturdy enough to survive one bite.
+        let bodies: Vec<Entity> = (0..(MILK_BITE_CAP as i32 + 1))
+            .map(|i| {
+                w.spawn_enemy(
+                    EnemyKind::Brute,
+                    origin + Vec2::new(40.0 + i as f32 * 1.5, 0.0),
+                    600.0,
+                )
+            })
+            .collect();
+        let before: Vec<f32> = bodies.iter().map(|&e| hp_of(&w, e)).collect();
+        {
+            let mut dart = MilkTooth::new(
+                origin + Vec2::new(30.0, 0.0),
+                Vec2::ZERO,
+                3.0,
+                MILK_REACH,
+            );
+            dart.phase = MilkPhase::Back;
+            spawn_with_id(&mut w.ecs, dart);
+        }
+        // Two ticks of the return thread through the whole line.
+        for _ in 0..2 {
+            run(&mut w, milk_teeth_system);
+        }
+        let after: Vec<f32> = bodies.iter().map(|&e| hp_of(&w, e)).collect();
+        for (i, (b, a)) in before.iter().zip(&after).enumerate() {
+            let hits = (b - a) / 3.0;
+            assert!(
+                hits <= 1.0 + 1e-4,
+                "body {i} was bitten {hits} times (cap {MILK_BITE_CAP}, one bite each)"
+            );
+        }
+    }
+
+    /// The same rule for the Fondue string, the Fairy Ring's cooldown table and
+    /// the Drain Cleaner's front history.
+    #[test]
+    fn full_evolution_histories_withhold_rather_than_repeat() {
+        // Fondue string: cap + 1 crossers, two ticks.
+        let mut w = evolved_world(WeaponKind::CheeseSpray);
+        let origin = w.player.pos;
+        let bodies: Vec<Entity> = (0..(STRING_CUT_CAP as i32 + 1))
+            .map(|i| {
+                w.spawn_enemy(
+                    EnemyKind::Brute,
+                    origin + Vec2::new(0.0, -30.0 + i as f32 * 1.0),
+                    600.0,
+                )
+            })
+            .collect();
+        let before: Vec<f32> = bodies.iter().map(|&e| hp_of(&w, e)).collect();
+        spawn_with_id(
+            &mut w.ecs,
+            CheeseString::new(
+                origin + Vec2::new(0.0, -40.0),
+                origin + Vec2::new(0.0, 40.0),
+                STRING_SECS,
+                3.0,
+            ),
+        );
+        for _ in 0..2 {
+            run(&mut w, fondue_string_system);
+        }
+        for (i, (&b, &a)) in before.iter().zip(bodies.iter()).enumerate() {
+            let hits = (b - hp_of(&w, a)) / 3.0;
+            assert!(hits <= 1.0 + 1e-4, "string cut body {i} {hits} times");
+        }
+
+        // Fairy ring: cap + 1 bodies standing on the band for a second.
+        let mut w = evolved_world(WeaponKind::SporeOrbit);
+        let origin = w.player.pos;
+        let bodies: Vec<Entity> = (0..(FAIRY_TRACK_CAP as i32 + 1))
+            .map(|i| {
+                let a = i as f32 * 0.05;
+                w.spawn_enemy(
+                    EnemyKind::Brute,
+                    origin + Vec2::from_angle(a) * FAIRY_RADIUS,
+                    600.0,
+                )
+            })
+            .collect();
+        let before: Vec<f32> = bodies.iter().map(|&e| hp_of(&w, e)).collect();
+        spawn_with_id(&mut w.ecs, FairyRing::new(origin, FAIRY_RADIUS, FAIRY_SECS, 4, 3.0));
+        for _ in 0..4 {
+            run(&mut w, fairy_ring_system);
+        }
+        for (i, (&b, &a)) in before.iter().zip(bodies.iter()).enumerate() {
+            let hits = (b - hp_of(&w, a)) / 3.0;
+            assert!(
+                hits <= 1.0 + 1e-4,
+                "ring hit body {i} {hits} times inside one cooldown window"
+            );
+        }
+    }
+
+    /// **Roll Call** caps a victim at three answers by remembering the
+    /// **victims**: a 13th body in range of every answer used to take all of
+    /// them (the tally was sized to the twelve emitters).
+    #[test]
+    fn roll_call_caps_every_victim_at_three_answers() {
+        use crate::game::ecs::resources::ROLL_CALL_TAG_CAP;
+        let mut w = evolved_world(WeaponKind::SonicSqueak);
+        let origin = w.player.pos;
+        // Twelve tagged emitters spread around a single tough victim: every
+        // answer pulse reaches it.
+        let victim = w.spawn_enemy(EnemyKind::Brute, origin, 900.0);
+        let before = hp_of(&w, victim);
+        // Twelve tagged emitters packed around the victim (inside the answer
+        // pulse's 9 px), each tagged with its own `SpawnId`.
+        let mut tags: Vec<(Entity, u64)> = Vec::new();
+        for i in 0..ROLL_CALL_TAG_CAP {
+            let e = w.spawn_enemy(
+                EnemyKind::Brute,
+                origin + Vec2::from_angle(i as f32 * 0.5) * 6.0,
+                900.0,
+            );
+            let id = w.ecs.get::<SpawnId>(e).unwrap().0;
+            tags.push((e, id));
+        }
+        {
+            let mut fx = w.ecs.resource_mut::<ActiveFx>();
+            fx.clear_roll_call();
+            for (e, id) in tags {
+                assert!(fx.tag(e, id), "tag");
+            }
+            fx.answer_left = ROLL_CALL_DELAY;
+            fx.answer_damage = 2.0;
+        }
+        // Walk the 0.8 s delay out: the answers fire once it expires.
+        for _ in 0..60 {
+            run(&mut w, roll_call_system);
+        }
+        let answers = (before - hp_of(&w, victim)) / 2.0;
+        assert!(
+            answers <= ROLL_CALL_MAX_ANSWERS as f32 + 1e-4,
+            "the 13th victim took {answers} answers (cap {ROLL_CALL_MAX_ANSWERS})"
+        );
+        assert!(answers > 0.0, "the answer pulses must still land");
+    }
+
+    /// **Milk Teeth** bites the full boss (a chest must not turn a
+    /// boss-capable build into a zero-damage one): the outbound dart lodges in
+    /// its hit shape and the return thread bites it once.
+    #[test]
+    fn milk_teeth_damages_a_grounded_boss() {
+        use crate::game::ecs::systems::boss::BossKind;
+        let mut w = evolved_world(WeaponKind::Gnaw);
+        let boss = spawn_grounded_boss(&mut w, BossKind::Cat);
+        let hp0 = w.ecs.get::<Boss>(boss).unwrap().hp;
+        let boss_pos = w.ecs.get::<Boss>(boss).unwrap().pos;
+        let origin = w.player.pos;
+        let to = boss_pos - origin;
+        spawn_with_id(
+            &mut w.ecs,
+            MilkTooth::new(origin, to.normalized() * MILK_SPEED, 3.0, MILK_REACH),
+        );
+        // Fly out, lodge, come home.
+        for _ in 0..120 {
+            run(&mut w, milk_teeth_system);
+            if w.ecs.get::<Boss>(boss).map(|b| b.hp < hp0).unwrap_or(false) {
+                break;
+            }
+        }
+        let hp1 = w.ecs.get::<Boss>(boss).unwrap().hp;
+        assert!(hp1 < hp0, "the evolved Gnaw never touched the boss ({hp0} -> {hp1})");
+    }
+
+    /// **Drain Cleaner**'s channel — the replacement for Acid Spit's pool —
+    /// keeps hurting a grounded boss: one front hit, then the settled ticks.
+    #[test]
+    fn drain_cleaner_damages_a_grounded_boss() {
+        use crate::game::ecs::systems::boss::BossKind;
+        let mut w = evolved_world(WeaponKind::AcidSpit);
+        let boss = spawn_grounded_boss(&mut w, BossKind::Cat);
+        let boss_pos = w.ecs.get::<Boss>(boss).unwrap().pos;
+        let hp0 = w.ecs.get::<Boss>(boss).unwrap().hp;
+        // A stripe that starts on the boss and runs away from it.
+        let dir = Vec2::new(1.0, 0.0);
+        spawn_with_id(
+            &mut w.ecs,
+            CorrosiveChannel::new(boss_pos, dir, CHANNEL_LEN, 30.0, 12.0),
+        );
+        for _ in 0..40 {
+            run(&mut w, drain_cleaner_system);
+        }
+        let hp1 = w.ecs.get::<Boss>(boss).unwrap().hp;
+        assert!(hp1 < hp0, "the settled channel never touched the boss ({hp0} -> {hp1})");
+    }
+
+    /// **Flywheel** catches pellets in `SpawnId` order, not in query storage
+    /// order: the recorded catch directions are the three lowest ids'.
+    #[test]
+    fn flywheel_catches_pellets_in_spawn_order() {
+        use crate::game::ecs::systems::weapons;
+        let mut w = evolved_world(WeaponKind::TailThrash);
+        let origin = w.player.pos;
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.player.loadout.weapons[0].timer = 0.0;
+        // Three hostile pellets inside the arc, each with its own direction so
+        // the recorded catch identifies them.
+        let mut dirs = Vec::new();
+        for i in 0..3usize {
+            let vel = Vec2::from_angle(0.4 * i as f32) * 40.0;
+            dirs.push(vel);
+            let b = Bullet::new(
+                origin + Vec2::new(4.0, 4.0 + i as f32 * 3.0),
+                vel,
+                5.0,
+                Faction::Enemy,
+                (255, 120, 90),
+            );
+            spawn_with_id(&mut w.ecs, b);
+        }
+        w.begin_tick(DT, Vec2::ZERO, true);
+        w.ecs
+            .run_system_cached(weapons::active_weapons_system)
+            .unwrap();
+        w.end_tick();
+        let fx = w.active_fx();
+        let caught = fx.caught as usize;
+        assert!(caught > 0, "the evolved sweep must catch pellets");
+        // The first sweep's catches, in `SpawnId` (= spawn) order.
+        for k in 0..caught {
+            assert_eq!(
+                fx.caught_dirs[k], dirs[k],
+                "catch {k} is not the {k}th pellet in `SpawnId` order"
+            );
+        }
     }
 
     // ---- The four wave-3 evolutions ------------------------------------

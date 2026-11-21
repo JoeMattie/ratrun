@@ -104,7 +104,6 @@ use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
 use crate::audio::Sfx;
-use crate::game::gem::Gold;
 use crate::game::art_boss_broom::{self, BroomBossState, BroomBossView};
 use crate::game::art_boss_mangle::{self, MangleState, MangleView};
 use crate::game::art_boss_cat::{self, BossCatState, BossCatView};
@@ -2510,13 +2509,19 @@ pub fn boss_spawn_system(
 
 /// Apply player damage to the boss through its art-defined hit shapes.
 ///
-/// Sources: player bullets (including orbit), acid pools, Tail Whip and
-/// mousetraps. Damage numbers and hit vfx use the existing hooks.
+/// Sources: player bullets (including orbit), acid pools and mousetraps.
+/// Damage numbers and hit vfx use the existing hooks.
+///
+/// **Tail Whip is not one of them.** The whip resolves its own boss hit in
+/// `weapons::fire_one`, with the reach and damage that cast actually used (Lens
+/// Cap, Sharp Teeth and Counterweight included). This system used to re-derive
+/// it from `Sfx::ShootWhip`, which made a boss's HP depend on whether the caller
+/// drained the sound queue that tick — a simulation reading its own output.
 #[allow(clippy::too_many_arguments)]
 pub fn boss_damage_system(
     tick: Res<TickInput>,
     level: Res<Level>,
-    player: Res<Player>,
+    _player: Res<Player>,
     mut fight: ResMut<BossFight>,
     mut bosses: Query<&mut Boss>,
     mut bullets: Query<(Entity, &SpawnId, &mut Bullet)>,
@@ -2616,47 +2621,6 @@ pub fn boss_damage_system(
                     false,
                     DamageSource::Acid,
                 );
-            }
-        }
-        // Tail Whip: the weapons system pushed `Sfx::ShootWhip` this tick.
-        if sfx.0.contains(&Sfx::ShootWhip) {
-            if let Some(weapon) = player
-                .loadout
-                .weapons
-                .iter()
-                .find(|w| w.kind == WeaponKind::TailWhip)
-            {
-                // Exactly the aura `weapons::fire_one` used for this volley
-                // (`26.0 + 3.0 * projectiles`), so a whip that clipped an
-                // enemy also reaches a body standing that far away.
-                let reach = 26.0 + weapon.level_projectiles() as f32 * 3.0;
-                let dmg = weapon.damage();
-                if shapes.circle_hits_grounded(player.pos, reach)
-                    && level
-                        .tiles
-                        .segment_hit(player.pos, boss.pos, 1.0)
-                        .is_none()
-                {
-                    let amount = dmg * boss.damage_mult;
-                    if boss.take_damage(amount) {
-                        fight.scratch.dmg.whip += amount;
-                        vfx::emit_tail_whip_hit(
-                            &mut particles,
-                            &mut fight.rng.0,
-                            boss.pos,
-                            boss.pos - player.pos,
-                            false,
-                        );
-                        damage_numbers.record(
-                            boss.id,
-                            boss.pos,
-                            boss.kind.body_radius(),
-                            amount,
-                            false,
-                            DamageSource::TailWhip,
-                        );
-                    }
-                }
             }
         }
         // Mousetraps: an active snap under a hit shape damages once per snap.
@@ -2938,7 +2902,13 @@ pub fn boss_update_system(
         if boss.dead {
             if !boss.death_announced {
                 boss.death_announced = true;
-                commands.spawn((Gold::new(boss.pos, 20), next_spawn_id.take()));
+                // The full boss's gold is **credited at the clear** (§6:
+                // "Full boss 100% × 30, credit at clear"), not dropped as a
+                // coin at its body. The old 20-gold coin sat where the boss
+                // died: a ranged kill outside magnet range, followed by stage
+                // completion banking only the wallet, meant the rat could
+                // receive none of it. The wallet credit happens below, when
+                // the death beat finishes and the level actually completes.
                 shake.amount = shake.amount.max(16.0);
                 // The horde breaks and flees: every remaining enemy is
                 // removed this tick. Raising the flag (instead of despawning
@@ -2988,6 +2958,12 @@ pub fn boss_update_system(
                 if !fight.level_complete {
                     fight.level_complete = true;
                     counters.level_complete = true;
+                    // §6: the boss's own payout lands in the wallet at the
+                    // clear, so it cannot be lost on the floor.
+                    counters.gold = counters
+                        .gold
+                        .saturating_add(crate::game::shop::BOSS_GOLD);
+                    sfx.0.push(Sfx::Gold);
                 }
                 if out.trace.on {
                     out.trace.finish(&boss, &player);

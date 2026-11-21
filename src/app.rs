@@ -131,6 +131,11 @@ struct LevelRecord {
     kills: u32,
     score: u32,
     player_level: u32,
+    /// Which floor this record was played on. The record is banked by **stage**
+    /// (`records[level_index]`), and a stage can be a side route (`WAVE3_DESIGN`
+    /// §11), so the plate cannot be derived from the index: a Laundry stage two
+    /// would be labelled "THE KITCHENS" on the victory breakdown.
+    plate: Option<campaign_ui::CampaignLevel>,
 }
 
 pub struct App {
@@ -1799,6 +1804,7 @@ impl App {
             kills: w.kills,
             score: w.score,
             player_level: w.player.level,
+            plate: Some(campaign_ui::CampaignLevel::from_theme(w.level.theme)),
         };
         let campaign_won = self.campaign.is_some() && w.campaign_won();
         // The getaway ride is a practice floor: clearing it must not overwrite
@@ -2686,7 +2692,11 @@ impl App {
         for (i, row) in levels.iter_mut().enumerate() {
             let record = self.records[i];
             *row = campaign_ui::LevelBreakdown {
-                level: campaign_ui::CampaignLevel::from_index(i),
+                // The floor actually played (a side route keeps its own name);
+                // a stage with no record falls back to the original route's.
+                level: record
+                    .plate
+                    .unwrap_or_else(|| campaign_ui::CampaignLevel::from_index(i)),
                 time_secs: record.time,
                 kills: record.kills,
                 score: record.score,
@@ -3454,6 +3464,34 @@ mod tests {
         assert!(matches!(h.app.screen, Screen::Playing));
     }
 
+    /// The victory breakdown names the floor **actually played**: a campaign
+    /// that took the Laundry fork for stage two must not read "THE KITCHENS"
+    /// (`CampaignLevel::from_index` only knows the original route).
+    #[test]
+    fn the_victory_breakdown_names_the_side_route_floor() {
+        let mut h = Harness::new(120, 44);
+        h.app.records[1].plate = Some(campaign_ui::CampaignLevel::Laundry);
+        h.app.records[1].time = 91.0;
+        h.app.records[2].plate = Some(campaign_ui::CampaignLevel::Printworks);
+        h.app.records[2].time = 92.0;
+        h.app.screen = Screen::Victory;
+        let text = h.frame(&[]);
+        // The breakdown column prints the plate's short name beside its
+        // sector code.
+        assert!(
+            text.contains("Laundry"),
+            "the side route's stage two lost its name:\n{text}"
+        );
+        assert!(
+            !text.contains("Kitchen"),
+            "the victory plate fell back to the original route:\n{text}"
+        );
+        assert!(
+            text.contains("Printworks"),
+            "the side route's stage three lost its name:\n{text}"
+        );
+    }
+
     // ---- The gene-splice shop screen -------------------------------------
 
     /// Walk the run onto shop hole 0's threshold (the way the game does it) and
@@ -3463,7 +3501,12 @@ mod tests {
         {
             let w = h.app.world.as_mut().unwrap();
             w.gold = gold;
-            let hole = w.level.objects.shop_holes[0];
+            let hole = *w
+                .level
+                .objects
+                .shop_holes
+                .first()
+                .expect("the test level carries a shop hole");
             w.player.pos = hole.face() + hole.facing * 3.0;
         }
         // One frame: the threshold system raises the flag and the app opens the
@@ -4321,7 +4364,12 @@ mod tests {
                 hh.enter_playing();
                 let hole = {
                     let w = hh.app.world.as_mut().unwrap();
-                    let hole = w.level.objects.shop_holes[0];
+                    // A flatbed seed can carry no shop hole at all (the
+                    // generator drops faces a pit or a crate blocks); guard the
+                    // dump instead of panicking on it.
+                    let Some(&hole) = w.level.objects.shop_holes.first() else {
+                        return;
+                    };
                     // Stand a stride down the wall from it, so the hole sits
                     // clear of the HUD and the compact map in the capture.
                     w.player.pos = hole.face()
@@ -4346,7 +4394,9 @@ mod tests {
                     let w = hh.app.world.as_mut().unwrap();
                     w.gold = 61;
                     w.player.hp = w.player.max_hp() * 0.55;
-                    let hole = w.level.objects.shop_holes[0];
+                    let Some(&hole) = w.level.objects.shop_holes.first() else {
+                        return;
+                    };
                     w.player.pos = hole.face() + hole.facing * 3.0;
                 }
                 hh.frame(&[]); // the threshold system raises the flag

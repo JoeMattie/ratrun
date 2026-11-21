@@ -59,7 +59,12 @@ use crate::game::weapon::WeaponKind;
 /// The simulation step the batch uses. Fixed, so a run is reproducible.
 pub const DT: f32 = 1.0 / 60.0;
 /// Default cap on simulated time per run (seconds).
-pub const DEFAULT_MAX_SIM_SECONDS: f32 = 1500.0;
+///
+/// A campaign is **three fifteen-minute levels** (3 × 900 s) plus three boss
+/// fights, so the old 1500 s cap cut every full campaign off in the middle of
+/// its second level: the batch could never report a campaign clear at all. 3600
+/// leaves room for a long boss beat on every floor.
+pub const DEFAULT_MAX_SIM_SECONDS: f32 = 3600.0;
 
 /// Parsed command line.
 #[derive(Clone, Debug)]
@@ -90,6 +95,10 @@ pub struct BatchOpts {
     /// `seed + i`. This is how an anomaly report's `seed` is replayed
     /// (`--bot-batch 1 --seed-exact <seed> --trace`).
     pub exact_seed: bool,
+    /// Play `--level` on a specific floor (`--route`): "laundry" and
+    /// "printworks" reach the two side routes the batch could not otherwise
+    /// measure at all (`--level 2` is always the Kitchen, `--level 3` the Lab).
+    pub route: Option<crate::game::level::Theme>,
 }
 
 impl Default for BatchOpts {
@@ -108,6 +117,7 @@ impl Default for BatchOpts {
             analyze: false,
             cycle_skills: false,
             exact_seed: false,
+            route: None,
         }
     }
 }
@@ -738,6 +748,7 @@ fn auto_opts(opts: &BatchOpts) -> AutoOpts {
         campaign: !opts.practice,
         skill: opts.skill,
         carry: opts.carry,
+        route: opts.route,
     }
 }
 
@@ -1725,7 +1736,8 @@ pub fn maybe_run_cli() -> Option<i32> {
 
 const USAGE: &str = "\
 usage: ratrun --bot-batch <N> [--seed <S>] [--level <1-3>] [--practice] \
-[--carry none|typical] [--skill expert|skilled|casual] [--cycle-skills] \
+[--carry none|typical] [--route sewer|kitchen|lab|laundry|printworks] \
+[--skill expert|skilled|casual] [--cycle-skills] \
 [--seed-exact] [--max-sim-seconds <T>] [--threads <K>] [--analyze] [--json] \
 [--trace] \
        ratrun --bot-compare <a.json> <b.json> [--json]
@@ -1735,7 +1747,23 @@ usage: ratrun --bot-batch <N> [--seed <S>] [--level <1-3>] [--practice] \
   --analyze        also run the anomaly scan (see autoplay::anomaly) and list
                    every class it finds with example seeds (costs ~10 %)
   --cycle-skills   rotate Expert, Skilled, Casual per run (mixed-skill batch)
+  --route          play --level on this floor instead of the original route's
+                   (laundry / printworks are the two side routes)
   --seed-exact     read --seed as a run seed (replay an anomaly's seed)";
+
+/// Parse a `--route` argument: the five campaign floors (and the flatbed).
+pub fn parse_route(s: &str) -> Result<crate::game::level::Theme, String> {
+    use crate::game::level::Theme;
+    match s.to_ascii_lowercase().as_str() {
+        "sewer" => Ok(Theme::Sewer),
+        "kitchen" => Ok(Theme::Kitchen),
+        "lab" => Ok(Theme::Lab),
+        "laundry" => Ok(Theme::Laundry),
+        "printworks" | "print" => Ok(Theme::Printworks),
+        "flatbed" | "trailer" | "getaway" => Ok(Theme::Trailer),
+        other => Err(format!("unknown route {other:?}")),
+    }
+}
 
 /// Parse the batch flags. `Ok(None)` means "the flag was not for us".
 pub fn parse_args(args: &[String]) -> Result<Option<BatchOpts>, String> {
@@ -1796,6 +1824,10 @@ pub fn parse_args(args: &[String]) -> Result<Option<BatchOpts>, String> {
             "--analyze" => opts.analyze = true,
             "--cycle-skills" => opts.cycle_skills = true,
             "--seed-exact" => opts.exact_seed = true,
+            "--route" => {
+                let s = value()?;
+                opts.route = Some(parse_route(s)?);
+            }
             other => {
                 if saw {
                     return Err(format!("unknown flag {other:?}"));
@@ -2146,7 +2178,40 @@ mod tests {
             analyze: false,
             cycle_skills: false,
             exact_seed: false,
+            route: None,
         }
+    }
+
+    /// `--route` reaches the two side routes: the batch could only ever ask
+    /// for the original route's floors (`--level 2` was always the Kitchen), so
+    /// the Laundry and Printworks were unmeasurable.
+    #[test]
+    fn the_route_flag_plays_the_side_route_floor() {
+        use crate::game::level::Theme;
+        // Parsing.
+        let args: Vec<String> = ["--bot-batch", "1", "--level", "2", "--practice", "--route", "laundry"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let opts = parse_args(&args).expect("parses").expect("our flag");
+        assert_eq!(opts.route, Some(Theme::Laundry));
+        assert_eq!(parse_route("PRINTWORKS"), Ok(Theme::Printworks));
+        assert!(parse_route("kitchenette").is_err());
+
+        // The world the run builds is that floor.
+        let mut practice = tiny(Skill::Expert, 1, 3);
+        practice.start_level = 1;
+        practice.route = Some(Theme::Laundry);
+        let run = AutoRun::new(7, auto_opts(&practice));
+        assert_eq!(
+            run.world().level.theme,
+            Theme::Laundry,
+            "--route must build the side route's map"
+        );
+        practice.start_level = 2;
+        practice.route = Some(Theme::Printworks);
+        let run = AutoRun::new(7, auto_opts(&practice));
+        assert_eq!(run.world().level.theme, Theme::Printworks);
     }
 
     #[test]

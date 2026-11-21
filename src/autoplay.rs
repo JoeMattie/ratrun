@@ -53,8 +53,10 @@ use crate::game::art_boss_mower::MowerState;
 use crate::game::art_boss_night_edition::NightEditionState;
 use crate::game::ecs::resources::DamageLedger;
 use crate::game::ecs::systems::boss::{Boss, BossFight, BossKind, BossProjectile, BossState};
+use crate::game::ecs::systems::miniboss::Miniboss;
 use crate::game::weapon::WeaponKind;
 use crate::game::enemy::{Enemy, EnemyKind};
+use crate::game::level::Theme;
 use crate::game::loadout::Loadout;
 use crate::game::world::World;
 use crate::math::Vec2;
@@ -133,6 +135,14 @@ pub struct AutoOpts {
     /// What `start_level` starts with (measurement only: the campaign itself
     /// always builds its loadout through [`crate::game::campaign`]).
     pub carry: CarryPreset,
+    /// Play `start_level` on a specific floor instead of the original route's
+    /// (`--route`). This is how the batch reaches the **Laundry** and
+    /// **Printworks** side routes: `start_level` 1 plays the Kitchen by default,
+    /// and there was no way to ask for the Laundry floor at all. A campaign
+    /// started this way carries the choice only into that first level; the
+    /// levels after it follow the original route (the app's own fork picker is
+    /// what a player uses).
+    pub route: Option<Theme>,
 }
 
 impl AutoOpts {
@@ -143,6 +153,7 @@ impl AutoOpts {
             campaign: true,
             skill,
             carry: CarryPreset::None,
+            route: None,
         }
     }
 
@@ -153,6 +164,7 @@ impl AutoOpts {
             campaign: false,
             skill,
             carry: CarryPreset::None,
+            route: None,
         }
     }
 
@@ -167,6 +179,7 @@ impl AutoOpts {
             campaign: false,
             skill,
             carry: CarryPreset::None,
+            route: None,
         }
     }
 
@@ -177,6 +190,7 @@ impl AutoOpts {
             campaign: false,
             skill,
             carry,
+            route: None,
         }
     }
 }
@@ -188,6 +202,7 @@ impl Default for AutoOpts {
             campaign: true,
             skill: Skill::Expert,
             carry: CarryPreset::None,
+            route: None,
         }
     }
 }
@@ -238,6 +253,8 @@ pub enum DamageCause {
     BossHazard(BossKind, BossAttack),
     /// A boss projectile (blade disc, fang, dustpan shard).
     BossProjectile(BossKind),
+    /// A named miniboss's signature hit (the appointment's own warned shape).
+    MinibossSignature(crate::game::ecs::systems::miniboss::MinibossKind),
     /// A floor trap (the mousetrap snap; glue only slows).
     Trap,
     /// Nothing matched the HP loss (should be rare).
@@ -366,7 +383,28 @@ impl DamageCause {
             },
             DamageCause::BossProjectile(BossKind::Magpie) => "magpie feather",
             DamageCause::Trap => "mousetrap",
-            DamageCause::Unknown => "unknown",
+            DamageCause::MinibossSignature(kind) => {
+            // The batch's damage-by-source column used to lump every
+            // appointment hit into "unknown": a fifth of a hard floor's damage
+            // with no author. Named per miniboss, like the boss rows.
+            match kind {
+                crate::game::ecs::systems::miniboss::MinibossKind::Corkscrew => "miniboss: corkscrew",
+                crate::game::ecs::systems::miniboss::MinibossKind::SisterSnip => {
+                    "miniboss: sister snip"
+                }
+                crate::game::ecs::systems::miniboss::MinibossKind::Bobbin => "miniboss: bobbin",
+                crate::game::ecs::systems::miniboss::MinibossKind::BellDiver => {
+                    "miniboss: bell diver"
+                }
+                crate::game::ecs::systems::miniboss::MinibossKind::Foreman => {
+                    "miniboss: the foreman"
+                }
+                crate::game::ecs::systems::miniboss::MinibossKind::MilkCarton => {
+                    "miniboss: milk carton"
+                }
+            }
+        }
+        DamageCause::Unknown => "unknown",
         }
     }
 }
@@ -529,6 +567,9 @@ impl AutoRun {
         let start_level = opts.start_level.min(campaign::SECTOR_COUNT - 1);
         let getaway = campaign::is_getaway_sector(start_level);
         let start_loadout = opts.carry.loadout();
+        // `--route`: play the start level on a side-route floor (Laundry,
+        // Printworks) instead of the original route's own.
+        let route = opts.route.filter(|_| !getaway && start_level > 0);
         let (campaign, world) = if getaway {
             (None, {
                 let mut world = World::new_level_with_theme(
@@ -545,14 +586,23 @@ impl AutoRun {
             let mut state = CampaignState::new(run_seed);
             state.level = start_level;
             state.loadout = start_loadout;
+            if let Some(theme) = route {
+                let _ = state.choose_route(theme);
+            }
             let world = state.world();
             (Some(state), world)
         } else {
-            let world = World::new_level(
-                start_level,
-                campaign::level_seed(run_seed, start_level),
-                start_loadout,
-            );
+            let seed = campaign::level_seed(run_seed, start_level);
+            let world = match route {
+                Some(theme) => World::new_level_with_theme(
+                    start_level,
+                    theme,
+                    seed,
+                    start_loadout,
+                    campaign::CampaignTotals::default(),
+                ),
+                None => World::new_level(start_level, seed, start_loadout),
+            };
             (None, world)
         };
         let mut stats = RunStats::default();
@@ -1068,6 +1118,20 @@ impl AutoRun {
                         ));
                     }
                 }
+            } else if let Some(mb) = e.get::<Miniboss>() {
+                // A named miniboss's signature is its own warned shape; without
+                // this row every appointment hit was attributed to the nearest
+                // ordinary body (or to "unknown") in the damage-by-source table.
+                if let Some(shape) = mb.active_shape() {
+                    if shape.contains(p, R) {
+                        let amount = (mb.signature_damage - armor).max(1.0);
+                        self.threats.push((
+                            DamageCause::MinibossSignature(mb.kind),
+                            amount,
+                            shape.center().dist(p),
+                        ));
+                    }
+                }
             } else if let Some(bp) = e.get::<BossProjectile>() {
                 let d = segment_point_dist(bp.prev, bp.pos, p);
                 if d < bp.radius + R + 2.0 {
@@ -1117,6 +1181,7 @@ impl AutoRun {
 fn classify_death(w: &World, cause: DamageCause) -> String {
     match cause {
         DamageCause::Trap => "trap: mousetrap snap".to_string(),
+        DamageCause::MinibossSignature(kind) => format!("miniboss: {} signature", kind.name()),
         DamageCause::BossContact(kind) => format!("boss: {} body", boss_name(kind)),
         DamageCause::BossHazard(kind, attack) => {
             format!("boss: {} {}", boss_name(kind), attack.name())
@@ -1588,6 +1653,7 @@ mod tests {
             campaign,
             skill,
             carry: CarryPreset::None,
+            route: None,
         };
         let mut out: Vec<Option<super::RunStats>> = (0..jobs.len()).map(|_| None).collect();
         if threads <= 1 {

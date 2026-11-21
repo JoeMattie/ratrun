@@ -233,6 +233,9 @@ pub fn wave3_system(
     mut next_id: ResMut<NextSpawnId>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
     mut wicks: Query<(Entity, &SpawnId, &mut Wick)>,
+    // The Wind-up Mouse's key: a lured body aims its warned attack at the key,
+    // not at the rat (the lure already moves it there — see `enemy_steering`).
+    decoys: Query<(&SpawnId, &crate::game::ecs::systems::powerups::Decoy)>,
     // One reused scratch bundle: the `SpawnId`-ordered enemy list, the
     // warned-attack ledger, the porter's ally snapshot, the wick order and the
     // finished treatments. (`bevy_ecs` accepts at most 16 system parameters, so
@@ -242,6 +245,13 @@ pub fn wave3_system(
     let dt = input.dt;
     let ppos = player.pos;
     let scratch = &mut *scratch;
+    // The live key (highest `SpawnId` wins if two ever exist, the same rule the
+    // steering lure uses, so the walk and the tell agree).
+    let decoy = decoys
+        .iter()
+        .filter(|(_, d)| d.live())
+        .max_by_key(|(id, _)| id.0)
+        .map(|(_, d)| d.pos);
 
     // Cheap gate: with no wave-3 body and no burning wick on the map this
     // system does nothing at all — not one sort, not one rng draw. That is what
@@ -352,10 +362,18 @@ pub fn wave3_system(
         }
 
         let self_id = id.0;
+        // Where this body's warned attack is aimed: the lure's key if the key
+        // is luring it, the rat otherwise. A decoyed Pillbug curls at the key,
+        // a decoyed Flea hops at it and a decoyed Turnkey lays its bar across
+        // the line to it — the tell has to match the body's target, or the
+        // key would be free crowd control with the worst attacks still
+        // pointing at the rat.
+        let target = lure_target(&e, ppos, decoy, &level);
         match e.kind {
-            EnemyKind::Pillbug => pillbug_tick(&mut e, ppos, dt, &scratch.warns, &mut particles, &mut rng, &mut sfx),
+            EnemyKind::Pillbug => pillbug_tick(&mut e, target, dt, &scratch.warns, &mut particles, &mut rng, &mut sfx),
             EnemyKind::BellFlea => flea_tick(
                 &mut e,
+                target,
                 dt,
                 &level,
                 &scratch.warns,
@@ -369,7 +387,7 @@ pub fn wave3_system(
             }
             EnemyKind::Turnkey => turnkey_tick(
                 &mut e,
-                ppos,
+                target,
                 dt,
                 &level,
                 &scratch.warns,
@@ -414,6 +432,29 @@ pub fn wave3_system(
             sfx.0.push(Sfx::Heal);
         }
     }
+}
+
+/// The point a body's warned attack is aimed at: the Wind-up Mouse's key while
+/// the key is luring it, the rat otherwise.
+///
+/// The lure rule is the steering lure's own (`powerups::decoy_lures_body`, the
+/// key's radius and a clear line), so a body the key is *not* pulling keeps
+/// aiming at the rat and the two never disagree about who is being chased.
+#[inline]
+fn lure_target(e: &Enemy, ppos: Vec2, decoy: Option<Vec2>, level: &Level) -> Vec2 {
+    let Some(key) = decoy else {
+        return ppos;
+    };
+    if !crate::game::ecs::systems::powerups::decoy_lures_body(e) {
+        return ppos;
+    }
+    if e.pos.dist_sq(key) > crate::game::ecs::systems::powerups::WINDUP_MOUSE_RADIUS.powi(2) {
+        return ppos;
+    }
+    if !crate::game::ecs::systems::projectiles::los_clear(level, e.pos, key, e.radius) {
+        return ppos;
+    }
+    key
 }
 
 /// Seed a body's timers the first time it is simulated (spawn paths other than
@@ -472,6 +513,8 @@ fn pillbug_tick(
 
 fn flea_tick(
     e: &mut Enemy,
+    // The point this jump is aimed at: the rat, or the Wind-up Mouse's key.
+    ppos: Vec2,
     dt: f32,
     level: &Level,
     warns: &[(Vec2, u64)],
@@ -480,7 +523,6 @@ fn flea_tick(
     rng: &mut RngRes,
     sfx: &mut SfxQueue,
 ) {
-    let ppos = player.pos;
     match e.w3.flea_phase {
         0 => {
             e.w3.flea_cd = (e.w3.flea_cd - dt).max(0.0);
@@ -504,8 +546,13 @@ fn flea_tick(
             let class = SizeClass::of_enemy(e.kind);
             if !level.tiles.circle_clear(hop, e.radius, class)
                 || !level.tiles.circle_clear(e.pos, e.radius, class)
+                // A hole in the deck is no landing either: the hop would drop
+                // the flea into the flatbed's pit for 35 % of its max HP.
+                || level.trailer.pit_at(hop).is_some()
+                || level.trailer.pit_at(e.pos).is_some()
             {
-                // No safe landing (a wall or a jamb): try again shortly. No rng.
+                // No safe landing (a wall, a jamb or a hole): try again shortly.
+                // No rng.
                 e.w3.flea_cd = 0.25;
                 return;
             }
@@ -626,7 +673,8 @@ fn porter_tick(
 
 fn turnkey_tick(
     e: &mut Enemy,
-    ppos: Vec2,
+    // The point the bar is laid across (the rat, or the lure's key).
+    target: Vec2,
     dt: f32,
     level: &Level,
     warns: &[(Vec2, u64)],
@@ -637,13 +685,14 @@ fn turnkey_tick(
 ) {
     if e.w3.bar_t > 0.0 {
         e.w3.bar_t = (e.w3.bar_t - dt).max(0.0);
+        let rat = player.pos;
         if !e.w3.bar_telling()
             && !e.w3.bar_spent
-            && bar_hits(e.w3.bar_pos, e.w3.bar_dir, ppos)
+            && bar_hits(e.w3.bar_pos, e.w3.bar_dir, rat)
             && player.take_damage(CROSSBAR_DAMAGE)
         {
             e.w3.bar_spent = true;
-            vfx::emit_player_hurt(particles, &mut rng.0, ppos);
+            vfx::emit_player_hurt(particles, &mut rng.0, rat);
             sfx.0.push(Sfx::Crossbar);
         }
         if e.w3.bar_t <= 0.0 {
@@ -658,8 +707,12 @@ fn turnkey_tick(
     if warn_pressure(warns, e.pos) >= WARN_MAX_NEARBY {
         return;
     }
-    // The bar lies across the path it has walked: perpendicular to its facing.
-    let dir = if e.facing.len_sq() > 1e-6 {
+    // The bar lies across the path it is walking: perpendicular to the line to
+    // whatever it is chasing (the rat, or the key that lured it).
+    let to = target - e.pos;
+    let dir = if to.len_sq() > 1e-6 {
+        to.normalized().perp()
+    } else if e.facing.len_sq() > 1e-6 {
         e.facing.perp()
     } else {
         Vec2::new(0.0, 1.0)
