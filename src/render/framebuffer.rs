@@ -45,9 +45,10 @@ impl PixelBuffer {
     /// `[x·sx, (x+1)·sx) × [y·sy, (y+1)·sy)`:
     ///
     /// * **zoomed out** (`self.w > dst.w`) the box spans several source
-    ///   pixels, and the average of all of them is written — a box filter, so
-    ///   thin things (bullets, the rat's tail, wall edges) dim rather than
-    ///   vanish;
+    ///   pixels and exactly one of them is written, unblended: the one that
+    ///   stands out most from the box when the box holds a feature, else its
+    ///   first pixel. Edges stay crisp and thin things (bullets, the rat's
+    ///   tail, wall edges) survive at full contrast instead of blurring;
     /// * **zoomed in** (`self.w < dst.w`) the box is a single source pixel,
     ///   which is copied — nearest neighbour, so pixels stay crisp;
     /// * **1:1** this is an exact copy.
@@ -74,7 +75,20 @@ impl PixelBuffer {
                     dst.px[row + x] = self.px[y0 * self.w + x0];
                     continue;
                 }
-                // Box filter (zoomed out): average the covered source box.
+                // Zoomed out: several source pixels land on one screen pixel.
+                // Averaging them (a box filter) keeps thin things from
+                // vanishing but smears every edge into a blur, which is the
+                // opposite of what pixel art wants. Instead pick ONE source
+                // pixel, unblended:
+                //  * if the box holds a feature (a pixel that stands out from
+                //    the box's mean by more than `SALIENT`), take the pixel
+                //    that stands out most, so a one-pixel line, bullet or
+                //    outline survives at full contrast wherever it falls in
+                //    the box (no flicker as the camera scrolls);
+                //  * otherwise the box is flat or mere texture grain: take its
+                //    first pixel, which keeps soft gradients (lighting, smoke)
+                //    from turning into noise.
+                const SALIENT: u32 = 3 * 28 * 28;
                 let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
                 for sy in y0..y1 {
                     let srow = sy * self.w;
@@ -86,11 +100,26 @@ impl PixelBuffer {
                     }
                 }
                 let n = ((x1 - x0) * (y1 - y0)) as u32;
-                dst.px[row + x] = (
-                    ((r + n / 2) / n) as u8,
-                    ((g + n / 2) / n) as u8,
-                    ((b + n / 2) / n) as u8,
-                );
+                let mean = ((r / n) as i32, (g / n) as i32, (b / n) as i32);
+                let mut best = self.px[y0 * self.w + x0];
+                let mut best_d = SALIENT;
+                for sy in y0..y1 {
+                    let srow = sy * self.w;
+                    for sx in x0..x1 {
+                        let c = self.px[srow + sx];
+                        let (dr, dg, db) = (
+                            i32::from(c.0) - mean.0,
+                            i32::from(c.1) - mean.1,
+                            i32::from(c.2) - mean.2,
+                        );
+                        let d = (dr * dr + dg * dg + db * db) as u32;
+                        if d > best_d {
+                            best_d = d;
+                            best = c;
+                        }
+                    }
+                }
+                dst.px[row + x] = best;
             }
         }
     }
@@ -311,24 +340,26 @@ mod tests {
     }
 
     #[test]
-    fn resample_box_filters_when_zooming_out() {
-        // Four opaque pixels (two white, two black) fold into one mid-grey:
-        // a single bright bullet in a 2 × 2 box stays visible instead of
-        // vanishing (or staying white and glaring).
-        let mut src = PixelBuffer::new(4, 2);
-        src.plot(0, 0, (255, 255, 255));
-        src.plot(1, 0, (0, 0, 0));
-        src.plot(0, 1, (0, 0, 0));
-        src.plot(1, 1, (0, 0, 0));
-        src.plot(2, 0, (255, 0, 0));
-        src.plot(3, 0, (255, 0, 0));
-        src.plot(2, 1, (255, 0, 0));
-        src.plot(3, 1, (255, 0, 0));
-        let mut dst = PixelBuffer::new(2, 1);
-        src.resample_to(&mut dst);
-        let left = dst.pixel_at(0, 0);
-        assert!(left.0 > 55 && left.0 < 72, "one lit pixel of four averages to ~64: {left:?}");
-        assert_eq!(dst.pixel_at(1, 0), (255, 0, 0), "a solid block stays solid");
+    fn resample_keeps_one_crisp_pixel_when_zooming_out() {
+        // Zooming out never blends: a single bright bullet in a 2 × 2 box
+        // survives at full contrast wherever it sits in the box, a solid block
+        // stays solid, and low-contrast grain falls back to the first pixel.
+        for (bx, by) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let mut src = PixelBuffer::new(6, 2);
+            src.plot(bx, by, (255, 255, 255));
+            for (x, y) in [(2, 0), (3, 0), (2, 1), (3, 1)] {
+                src.plot(x, y, (255, 0, 0));
+            }
+            src.plot(4, 0, (40, 40, 40));
+            src.plot(5, 0, (44, 42, 40));
+            src.plot(4, 1, (38, 40, 44));
+            src.plot(5, 1, (42, 38, 40));
+            let mut dst = PixelBuffer::new(3, 1);
+            src.resample_to(&mut dst);
+            assert_eq!(dst.pixel_at(0, 0), (255, 255, 255), "the lit pixel at ({bx},{by}) is kept whole");
+            assert_eq!(dst.pixel_at(1, 0), (255, 0, 0), "a solid block stays solid");
+            assert_eq!(dst.pixel_at(2, 0), (40, 40, 40), "flat grain takes the first pixel, unblended");
+        }
     }
 
     #[test]
