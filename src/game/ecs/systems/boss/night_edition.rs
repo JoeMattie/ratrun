@@ -191,6 +191,7 @@ impl BossController for NightEditionController {
             | BossState::Broom(_)
             | BossState::Mower(_)
             | BossState::Mangle(_)
+            | BossState::HorseshoeCrab(_)
             | BossState::Magpie(_) => {}
         }
 

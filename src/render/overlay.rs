@@ -12,7 +12,8 @@ use ratatui::Frame;
 use crate::game::director;
 use crate::game::world::World;
 use crate::render::hud::{
-    boss_codename, HudState, BOSS_HOT, BOSS_ROSE, DANGER, DANGER_DIM, TRAIL_GOLD, WARN_AMBER,
+    boss_codename_kind, HudState, BOSS_HOT, BOSS_ROSE, DANGER, DANGER_DIM, TRAIL_GOLD,
+    WARN_AMBER,
 };
 use crate::render::palette::{self, COAT, EDGE, MUTED, PLATE, TAIL, TRACK};
 
@@ -165,11 +166,13 @@ fn draw_boss_ui(frame: &mut Frame, game: Rect, world: &World, state: &mut HudSta
         && world.elapsed >= director::BOSS_TIME - BOSS_WARNING_SECS
         && world.elapsed < director::BOSS_TIME;
     let pulse = 0.5 + 0.5 * (state.clock * 8.0).sin();
-    // The level's own boss name: the campaign screens' names (Apex Jaguar,
-    // The Sweeper, Turf-Reaper Mk.IV) are used by the warning and the bar.
-    // Themes and campaign levels are 1:1 (`campaign::level_theme`), so this is
-    // the boss the boss framework spawns for the level.
-    let (codename, class_tag) = boss_codename(world.level.theme);
+    // The fight's own boss name: a floor can pool more than one boss
+    // (`BossKind::pool_for_theme`), so a living boss names itself and the
+    // warning names the one the level seed has already drawn.
+    let kind = world.boss_kind().unwrap_or_else(|| {
+        crate::game::ecs::systems::boss::BossKind::pool_pick(world.level.theme, world.level.seed)
+    });
+    let (codename, class_tag) = boss_codename_kind(kind);
 
     // Case 1: pre-boss warning (see `draw_boss_warning`).
     if boss_soon {

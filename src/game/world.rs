@@ -82,7 +82,7 @@ use super::ecs::resources::{
 };
 use super::ecs::schedule::{build_settle_schedule, build_tick_schedule};
 use super::ecs::systems::boss::{
-    Boss, BossArtView, BossFight, BossProjectile, BossProjectileKind, BossTargetable,
+    Boss, BossArtView, BossFight, BossKind, BossProjectile, BossProjectileKind, BossTargetable,
 };
 use super::ecs::systems::gates::{GateRuntime, MazeEvent};
 use super::enemy::{Enemy, EnemyKind};
@@ -99,8 +99,8 @@ use super::smoke::{SmokeLayer, SmokeScene};
 use super::weapon::WeaponKind;
 use super::art_walls::{Cardinal, WallKind};
 use super::{
-    art_boss_broom, art_boss_cat, art_boss_magpie, art_boss_mangle, art_boss_mower,
-    art_boss_night_edition, art_enemy, art_floor, art_marks, art_miniboss,
+    art_boss_broom, art_boss_cat, art_boss_horseshoe_crab, art_boss_magpie, art_boss_mangle,
+    art_boss_mower, art_boss_night_edition, art_enemy, art_floor, art_marks, art_miniboss,
     art_props, art_rat, art_traps, art_walls, art_wave3a,
 };
 
@@ -673,6 +673,16 @@ impl World {
     /// `Boss` entity is alive (the legacy `EnemyKind::Boss` fallback has none).
     pub fn boss_phase(&self) -> Option<u8> {
         self.living_boss().map(|b| b.phase)
+    }
+
+    /// The living boss's kind, if one is active.
+    ///
+    /// A floor can pool more than one boss (`BossKind::pool_for_theme`), so the
+    /// HUD names the fight the player is *in* from this rather than assuming
+    /// the floor's original boss. `&self`, allocation-free, like the other HUD
+    /// accessors.
+    pub fn boss_kind(&self) -> Option<BossKind> {
+        self.living_boss().map(|b| b.kind)
     }
 
     /// Targetable points for auto-aim: the boss's art-defined hit shapes.
@@ -1856,6 +1866,24 @@ impl World {
             }
         }
 
+        // The horseshoe crab's live tell (the tail arc, the charge lane, the
+        // marked burrow, the thrash ring): re-stamped over the lighting, like
+        // the wave-3 ground tells, because the Sewer's ambient must never dim
+        // the shape the rat has to step out of.
+        {
+            let mut query = self.ecs.query::<&Boss>();
+            for boss in query.iter(&self.ecs) {
+                if let BossArtView::HorseshoeCrab(v) = boss.view() {
+                    let margin = boss.kind.cull_margin();
+                    if on_screen(self.w2s(boss.pos, cam), margin, viewport)
+                        || on_screen(self.w2s(boss.target, cam), margin + 40.0, viewport)
+                    {
+                        art_boss_horseshoe_crab::draw_tell_overlay(pb, &v, cam);
+                    }
+                }
+            }
+        }
+
         // Boss-owned projectiles (blade discs, shrapnel).
         self.draw_boss_projectiles(pb, cam);
 
@@ -2023,6 +2051,9 @@ impl World {
                 BossArtView::Magpie(v) => {
                     art_boss_magpie::draw_magpie_ground(pb, &v, cam, accent);
                 }
+                BossArtView::HorseshoeCrab(v) => {
+                    art_boss_horseshoe_crab::draw_ground(pb, &v, cam, accent)
+                }
             }
         }
     }
@@ -2064,6 +2095,9 @@ impl World {
                 BossArtView::NightEdition(v) => art_boss_night_edition::draw(pb, &v, cam, accent),
                 // The falling crate is a hazard: `draw_hostile_layer` owns it.
                 BossArtView::Magpie(v) => art_boss_magpie::draw_magpie(pb, &v, cam, accent),
+                BossArtView::HorseshoeCrab(v) => {
+                    art_boss_horseshoe_crab::draw(pb, &v, cam, accent)
+                }
             }
             self.light_map.mark_emissive_highlights(pb, self.w2s(boss.pos, cam), 19);
         }

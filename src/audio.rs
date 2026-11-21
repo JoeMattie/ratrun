@@ -161,11 +161,33 @@ pub enum Sfx {
     NightTurn,
     NightWreck,
     MagpieGustGather,
+    // The Sewer's pool mate, The Horseshoe (a horseshoe crab): a shell of wet
+    // stone. All appended, so the legacy indices keep their order.
+    /// `Pose` / `Righting`: the plates grinding over the shell.
+    CrabRattle,
+    /// The tail spike cocking over one shoulder.
+    CrabTelsonCock,
+    /// The spike coming through the arc.
+    CrabTelsonSweep,
+    /// The low, grinding rev of the bulldoze.
+    CrabCharge,
+    /// The dome into the masonry (the wedge).
+    CrabWedge,
+    /// Digging through the drain bed.
+    CrabBurrow,
+    /// The eruption.
+    CrabEmerge,
+    /// The shell coming over (the deliberate flip).
+    CrabFlip,
+    /// The dome cracking and the blue flooding out.
+    CrabDeath,
+    /// A shot deflecting off the carapace: a bright, dead metallic ping.
+    CrabShell,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 105] = [
+    pub const ALL: [Sfx; 115] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -288,6 +310,17 @@ impl Sfx {
         Sfx::NightTurn,
         Sfx::NightWreck,
         Sfx::MagpieGustGather,
+        // The Horseshoe (Sewer pool mate).
+        Sfx::CrabRattle,
+        Sfx::CrabTelsonCock,
+        Sfx::CrabTelsonSweep,
+        Sfx::CrabCharge,
+        Sfx::CrabWedge,
+        Sfx::CrabBurrow,
+        Sfx::CrabEmerge,
+        Sfx::CrabFlip,
+        Sfx::CrabDeath,
+        Sfx::CrabShell,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -398,6 +431,16 @@ impl Sfx {
             Sfx::NightTurn => "NIGHT_TURN",
             Sfx::NightWreck => "NIGHT_WRECK",
             Sfx::MagpieGustGather => "MAGPIE_GATHER",
+            Sfx::CrabRattle => "CRAB_RATTLE",
+            Sfx::CrabTelsonCock => "CRAB_TELSON_COCK",
+            Sfx::CrabTelsonSweep => "CRAB_TELSON_SWEEP",
+            Sfx::CrabCharge => "CRAB_CHARGE",
+            Sfx::CrabWedge => "CRAB_WEDGE",
+            Sfx::CrabBurrow => "CRAB_BURROW",
+            Sfx::CrabEmerge => "CRAB_EMERGE",
+            Sfx::CrabFlip => "CRAB_FLIP",
+            Sfx::CrabDeath => "CRAB_DEATH",
+            Sfx::CrabShell => "CRAB_SHELL",
         }
     }
 
@@ -510,6 +553,12 @@ impl Sfx {
             Sfx::NightBed => 2,
             Sfx::MagpieGustGather => 2,
             Sfx::NightTurn | Sfx::NightWreck => 1,
+            // The deflect ping is heard constantly, so it gets the pitch
+            // spread; the rest are one-shot set pieces.
+            Sfx::CrabShell => 3,
+            Sfx::CrabRattle | Sfx::CrabTelsonCock | Sfx::CrabTelsonSweep => 2,
+            Sfx::CrabCharge | Sfx::CrabWedge | Sfx::CrabBurrow | Sfx::CrabEmerge | Sfx::CrabFlip => 2,
+            Sfx::CrabDeath => 1,
         }
     }
 
@@ -613,6 +662,18 @@ impl Sfx {
             Sfx::NightPage | Sfx::NightBed | Sfx::NightTurn => 2,
             Sfx::NightWreck => 3,
             Sfx::MagpieGustGather => 1,
+            // The crab: its death and its wedge are set pieces; the deflect
+            // ping must punch through the horde's own noise; everything else
+            // is a body sound.
+            Sfx::CrabDeath => 3,
+            Sfx::CrabWedge | Sfx::CrabShell => 2,
+            Sfx::CrabRattle
+            | Sfx::CrabTelsonCock
+            | Sfx::CrabTelsonSweep
+            | Sfx::CrabCharge
+            | Sfx::CrabBurrow
+            | Sfx::CrabEmerge
+            | Sfx::CrabFlip => 1,
         }
     }
 
@@ -7191,6 +7252,458 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             });
             m.add_short_tail(0.03, 2600.0);
             m.finish(0.26, 1.05, 9.0, 22.0)
+        }
+
+        // 101. CrabRattle: shell plates grinding over wet stone.
+        Sfx::CrabRattle => {
+            const PITCH: [f32; 2] = [1.0, 0.86];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.24);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.20,
+                pink: true,
+                gain: 0.30,
+                attack_s: 0.006,
+                decay_pow: 1.9,
+                filter: FilterMode::BandPass,
+                fc0: 720.0 * p,
+                fc1: 380.0 * p,
+                q: 1.5,
+                trem_hz: 26.0,
+                trem_depth: 0.35,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.12,
+                f0: 96.0 * p,
+                f1: 72.0 * p,
+                pitch_pow: 0.9,
+                wave: Wave::Triangle,
+                gain: 0.22,
+                attack_s: 0.004,
+                decay_pow: 1.6,
+                ..Default::default()
+            });
+            m.finish(0.26, 1.2, 2.0, 22.0)
+        }
+
+        // 102. CrabTelsonCock: a dry chitin creak rising as the spike lifts.
+        Sfx::CrabTelsonCock => {
+            const PITCH: [f32; 2] = [1.0, 1.12];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.30);
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.24,
+                f0: 210.0 * p,
+                f1: 360.0 * p,
+                pitch_pow: 1.4,
+                wave: Wave::Saw,
+                gain: 0.22,
+                attack_s: 0.03,
+                decay_pow: 1.2,
+                filter: FilterMode::BandPass,
+                fc0: 900.0,
+                fc1: 1700.0,
+                q: 2.4,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.02,
+                dur_s: 0.20,
+                pink: true,
+                gain: 0.14,
+                attack_s: 0.02,
+                decay_pow: 1.5,
+                filter: FilterMode::HighPass,
+                fc0: 1400.0,
+                fc1: 2400.0,
+                q: 0.8,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.finish(0.24, 1.1, 4.0, 26.0)
+        }
+
+        // 103. CrabTelsonSweep: the spike through the air, then its sting.
+        Sfx::CrabTelsonSweep => {
+            const PITCH: [f32; 2] = [1.0, 0.92];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.34);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.14,
+                pink: false,
+                gain: 0.30,
+                attack_s: 0.004,
+                decay_pow: 1.5,
+                filter: FilterMode::BandPass,
+                fc0: 900.0 * p,
+                fc1: 2600.0 * p,
+                fc_pow: 0.6,
+                q: 1.1,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.05,
+                dur_s: 0.16,
+                f0: 420.0 * p,
+                f1: 180.0 * p,
+                pitch_pow: 1.1,
+                wave: Wave::Pulse(0.3),
+                gain: 0.26,
+                attack_s: 0.002,
+                decay_pow: 2.0,
+                filter: FilterMode::LowPass,
+                fc0: 2600.0,
+                fc1: 800.0,
+                q: 1.4,
+                ..Default::default()
+            });
+            m.add_short_tail(0.10, 3200.0);
+            m.finish(0.34, 1.3, 1.0, 18.0)
+        }
+
+        // 104. CrabCharge: a low stone-grinding rev.
+        Sfx::CrabCharge => {
+            const PITCH: [f32; 2] = [1.0, 0.9];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.52);
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.46,
+                f0: 58.0 * p,
+                f1: 96.0 * p,
+                pitch_pow: 0.8,
+                wave: Wave::Saw,
+                gain: 0.34,
+                attack_s: 0.03,
+                decay_pow: 1.1,
+                filter: FilterMode::LowPass,
+                fc0: 420.0,
+                fc1: 620.0,
+                q: 1.2,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.46,
+                pink: true,
+                gain: 0.24,
+                attack_s: 0.02,
+                decay_pow: 1.2,
+                filter: FilterMode::LowPass,
+                fc0: 900.0,
+                fc1: 500.0,
+                q: 1.0,
+                trem_hz: 18.0,
+                trem_depth: 0.30,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.finish(0.34, 1.5, 6.0, 30.0)
+        }
+
+        // 105. CrabWedge: the dome into the wall, and a rockfall of grit.
+        Sfx::CrabWedge => {
+            const PITCH: [f32; 2] = [1.0, 0.82];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.52);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.05,
+                pink: false,
+                gain: 0.42,
+                attack_s: 0.0006,
+                decay_pow: 2.4,
+                filter: FilterMode::LowPass,
+                fc0: 1800.0,
+                fc1: 600.0,
+                q: 1.1,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.34,
+                f0: 84.0 * p,
+                f1: 42.0 * p,
+                pitch_pow: 0.9,
+                wave: Wave::Sine,
+                gain: 0.44,
+                attack_s: 0.001,
+                decay_pow: 1.8,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.04,
+                dur_s: 0.36,
+                pink: true,
+                gain: 0.16,
+                attack_s: 0.01,
+                decay_pow: 1.7,
+                filter: FilterMode::BandPass,
+                fc0: 500.0,
+                fc1: 240.0,
+                q: 1.3,
+                seed: base_seed ^ 0xA1,
+                ..Default::default()
+            });
+            m.add_short_tail(0.10, 2400.0);
+            m.finish(0.44, 1.6, 0.8, 26.0)
+        }
+
+        // 106. CrabBurrow: wet digging and a collapsing drain bed.
+        Sfx::CrabBurrow => {
+            const PITCH: [f32; 2] = [1.0, 1.08];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.42);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.38,
+                pink: true,
+                gain: 0.30,
+                attack_s: 0.01,
+                decay_pow: 1.6,
+                filter: FilterMode::LowPass,
+                fc0: 640.0 * p,
+                fc1: 220.0 * p,
+                q: 1.4,
+                trem_hz: 9.0,
+                trem_depth: 0.40,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.02,
+                dur_s: 0.30,
+                f0: 140.0 * p,
+                f1: 58.0 * p,
+                pitch_pow: 1.0,
+                wave: Wave::Sine,
+                gain: 0.24,
+                attack_s: 0.01,
+                decay_pow: 1.7,
+                ..Default::default()
+            });
+            m.finish(0.28, 1.2, 3.0, 30.0)
+        }
+
+        // 107. CrabEmerge: the floor bursting up.
+        Sfx::CrabEmerge => {
+            const PITCH: [f32; 2] = [1.0, 0.9];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.40);
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.10,
+                f0: 620.0 * p,
+                f1: 180.0 * p,
+                pitch_pow: 1.3,
+                wave: Wave::Pulse(0.4),
+                gain: 0.22,
+                attack_s: 0.002,
+                decay_pow: 2.0,
+                filter: FilterMode::LowPass,
+                fc0: 2400.0,
+                fc1: 900.0,
+                q: 1.5,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.32,
+                f0: 120.0 * p,
+                f1: 46.0 * p,
+                pitch_pow: 0.9,
+                wave: Wave::Sine,
+                gain: 0.40,
+                attack_s: 0.001,
+                decay_pow: 1.8,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.24,
+                pink: true,
+                gain: 0.28,
+                attack_s: 0.001,
+                decay_pow: 1.6,
+                filter: FilterMode::BandPass,
+                fc0: 800.0,
+                fc1: 300.0,
+                q: 1.2,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_short_tail(0.10, 3000.0);
+            m.finish(0.40, 1.5, 0.8, 26.0)
+        }
+
+        // 108. CrabFlip: the shell coming over — a dry clack and a scrape.
+        Sfx::CrabFlip => {
+            const PITCH: [f32; 2] = [1.0, 0.9];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.36);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.03,
+                pink: false,
+                gain: 0.34,
+                attack_s: 0.0006,
+                decay_pow: 2.5,
+                filter: FilterMode::BandPass,
+                fc0: 2200.0 * p,
+                fc1: 1200.0 * p,
+                q: 1.6,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.16,
+                f0: 300.0 * p,
+                f1: 150.0 * p,
+                pitch_pow: 1.2,
+                wave: Wave::Triangle,
+                gain: 0.26,
+                attack_s: 0.002,
+                decay_pow: 1.8,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.06,
+                dur_s: 0.24,
+                pink: true,
+                gain: 0.18,
+                attack_s: 0.01,
+                decay_pow: 1.7,
+                filter: FilterMode::BandPass,
+                fc0: 1100.0,
+                fc1: 420.0,
+                q: 1.2,
+                trem_hz: 24.0,
+                trem_depth: 0.35,
+                seed: base_seed ^ 0xB2,
+                ..Default::default()
+            });
+            m.finish(0.32, 1.3, 1.0, 24.0)
+        }
+
+        // 109. CrabDeath: the dome cracks and the blue floods the floor.
+        Sfx::CrabDeath => {
+            let mut m = MixBuf::new(0.92);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.09,
+                pink: false,
+                gain: 0.40,
+                attack_s: 0.0008,
+                decay_pow: 2.4,
+                filter: FilterMode::LowPass,
+                fc0: 1600.0,
+                fc1: 420.0,
+                q: 1.1,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.52,
+                f0: 92.0,
+                f1: 34.0,
+                pitch_pow: 0.9,
+                wave: Wave::Sine,
+                gain: 0.42,
+                attack_s: 0.001,
+                decay_pow: 1.7,
+                ..Default::default()
+            });
+            // The shell splitting: three crack transients.
+            for k in 0..3 {
+                m.add_noise(NoiseLayer {
+                    start_s: 0.06 + 0.09 * k as f32,
+                    dur_s: 0.05,
+                    pink: false,
+                    gain: 0.22 - 0.04 * k as f32,
+                    attack_s: 0.0008,
+                    decay_pow: 2.4,
+                    filter: FilterMode::BandPass,
+                    fc0: 1700.0 - 250.0 * k as f32,
+                    fc1: 900.0,
+                    q: 1.8,
+                    seed: base_seed ^ (0xC0 + k as u32),
+                    ..Default::default()
+                });
+            }
+            // The blue running out: a wet, falling wash.
+            m.add_noise(NoiseLayer {
+                start_s: 0.24,
+                dur_s: 0.56,
+                pink: true,
+                gain: 0.20,
+                attack_s: 0.06,
+                decay_pow: 1.2,
+                filter: FilterMode::LowPass,
+                fc0: 700.0,
+                fc1: 240.0,
+                q: 0.9,
+                seed: base_seed ^ 0xD4,
+                ..Default::default()
+            });
+            m.add_short_tail(0.18, 2600.0);
+            m.finish(0.46, 1.4, 1.0, 40.0)
+        }
+
+        // 110. CrabShell: a shot deflecting off the carapace — a dead, bright
+        // ping with no body, so it reads as "that did nothing".
+        Sfx::CrabShell => {
+            const PITCH: [f32; 3] = [1.0, 1.18, 0.88];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.14);
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.09,
+                f0: 3100.0 * p,
+                f1: 2400.0 * p,
+                pitch_pow: 1.6,
+                wave: Wave::Sine,
+                gain: 0.30,
+                attack_s: 0.0006,
+                decay_pow: 3.0,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.05,
+                f0: 4700.0 * p,
+                f1: 3900.0 * p,
+                pitch_pow: 1.4,
+                wave: Wave::Sine,
+                gain: 0.16,
+                attack_s: 0.0006,
+                decay_pow: 3.2,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.02,
+                pink: false,
+                gain: 0.14,
+                attack_s: 0.0006,
+                decay_pow: 2.6,
+                filter: FilterMode::HighPass,
+                fc0: 5000.0,
+                fc1: 3000.0,
+                q: 0.9,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.finish(0.22, 1.2, 0.6, 14.0)
         }
     }
 }

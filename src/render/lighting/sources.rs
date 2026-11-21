@@ -1769,6 +1769,61 @@ impl LightMap {
                     NightEditionState::Roll => {}
                 }
             }
+            BossState::HorseshoeCrab(st) => {
+                // The crab sits under a cold drain-light (its shell is wet
+                // stone); the punish windows glow copper-blue, and the gills
+                // when they are out are the brightest thing on the floor.
+                use crate::game::art_boss_horseshoe_crab::CrabState;
+                if in_range(bsx, bsy, 58.0) {
+                    let (col, r, int, sc) = match st {
+                        CrabState::Wedged | CrabState::Flipped => {
+                            ((126, 196, 255), 62.0, 250, 62)
+                        }
+                        CrabState::TelsonTell | CrabState::BulldozeTell | CrabState::BurrowTell => {
+                            ((255, 198, 116), 58.0, 225, 54)
+                        }
+                        CrabState::Death => ((104, 156, 246), 64.0, 230, 58),
+                        _ => ((198, 214, 226), 50.0, 180, 42),
+                    };
+                    self.lights.push(PointLight {
+                        x: bsx,
+                        y: bsy,
+                        radius: r,
+                        color: col,
+                        intensity: int,
+                        scatter: sc,
+                        priority: 2,
+                        occlude: false,
+                        hard: false,
+                    });
+                }
+                // The exposed gills / the marked burrow stay lit through the
+                // dark, so the weak point can never hide in the ambient.
+                let view = boss.crab_view();
+                let at = match st {
+                    CrabState::BurrowTell | CrabState::Burrow | CrabState::Emerge => view.target,
+                    _ => crate::game::art_boss_horseshoe_crab::gill_pos(&view),
+                };
+                let sx = at.x - cam.x;
+                let sy = at.y - cam.y;
+                if in_range(sx, sy, 40.0) {
+                    let live = matches!(
+                        st,
+                        CrabState::Wedged | CrabState::Flipped | CrabState::BurrowTell
+                    );
+                    self.lights.push(PointLight {
+                        x: sx,
+                        y: sy,
+                        radius: 38.0,
+                        color: if live { (255, 232, 138) } else { (150, 206, 236) },
+                        intensity: if live { 245 } else { 165 },
+                        scatter: 44,
+                        priority: 3,
+                        occlude: false,
+                        hard: false,
+                    });
+                }
+            }
             BossState::Magpie(st) => {
                 use crate::game::art_boss_magpie::MagpieState;
                 // Iridescent corvid key-light so the black-and-white plumage

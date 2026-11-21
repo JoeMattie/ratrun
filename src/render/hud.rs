@@ -204,20 +204,31 @@ pub fn weapon_tag(kind: WeaponKind, evolved: bool) -> &'static str {
 /// **Turf-Reaper Mk.IV**. The second element is the arrival banner's flavour
 /// tag and never names a boss.
 pub fn boss_codename(theme: Theme) -> (&'static str, &'static str) {
-    // The bar names the fight the player is *in*, so it follows the boss the
-    // floor actually spawns (`BossKind::for_theme::`, the wave 3 seam). The
-    // Laundry and the Printworks borrow the broom and the mower until their own
-    // bosses land, and then this follows automatically.
-    let level = match crate::game::ecs::systems::boss::BossKind::for_theme(theme) {
-        crate::game::ecs::systems::boss::BossKind::Cat => CampaignLevel::Sewer,
-        crate::game::ecs::systems::boss::BossKind::Broom => CampaignLevel::Kitchen,
-        crate::game::ecs::systems::boss::BossKind::Mower => CampaignLevel::Lab,
-        crate::game::ecs::systems::boss::BossKind::Mangle => CampaignLevel::Laundry,
-        crate::game::ecs::systems::boss::BossKind::NightEdition => CampaignLevel::Printworks,
+    boss_codename_kind(crate::game::ecs::systems::boss::BossKind::for_theme(theme))
+}
+
+/// The same plate for a **specific** boss kind.
+///
+/// A floor can pool more than one boss (`BossKind::pool_for_theme`), so the bar
+/// and the warning ask the world which one is actually coming rather than
+/// assuming the floor's original. The other campaign bosses keep their floor's
+/// plate; the two floorless fights (the bird, the crab) carry their own.
+pub fn boss_codename_kind(kind: crate::game::ecs::systems::boss::BossKind) -> (&'static str, &'static str) {
+    use crate::game::ecs::systems::boss::BossKind;
+    let level = match kind {
+        BossKind::Cat => CampaignLevel::Sewer,
+        BossKind::Broom => CampaignLevel::Kitchen,
+        BossKind::Mower => CampaignLevel::Lab,
+        BossKind::Mangle => CampaignLevel::Laundry,
+        BossKind::NightEdition => CampaignLevel::Printworks,
         // The getaway ride's own fight is not a campaign floor, so it has no
         // campaign plate to borrow: the bar and the warning name the bird.
-        crate::game::ecs::systems::boss::BossKind::Magpie => {
+        BossKind::Magpie => {
             return ("THE MAGPIE", "CLASS-V CORVID THIEF");
+        }
+        // The Sewer's pool mate, whose plate is its own (`lore`).
+        BossKind::HorseshoeCrab => {
+            return (crate::lore::HORSESHOE_NAME, crate::lore::HORSESHOE_CLASS);
         }
     };
     let class_tag = match level {

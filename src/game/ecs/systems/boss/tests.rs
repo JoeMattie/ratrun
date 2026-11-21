@@ -19,6 +19,14 @@ fn boss_of(w: &mut World) -> Option<Boss> {
     query.iter(&w.ecs).next().cloned()
 }
 
+/// The boss this floor's seed actually fields (the wave-3 pool seam): the
+/// framework tests assert against the spawn system's own choice rather than
+/// against a floor's original boss, so a pooled floor is covered by the same
+/// tests.
+fn floor_boss(w: &World) -> BossKind {
+    BossKind::pool_pick(w.level.theme, w.level.seed)
+}
+
 fn spawn_boss(w: &mut World) {
     w.ecs.resource_mut::<BossDue>().due = true;
     w.begin_tick(DT, Vec2::ZERO, false);
@@ -45,7 +53,7 @@ fn boss_spawns_in_the_boss_room_when_due() {
     spawn_boss(&mut w);
 
     let boss = boss_of(&mut w).expect("BossDue spawned the boss");
-    assert_eq!(boss.kind, BossKind::Cat);
+    assert_eq!(boss.kind, floor_boss(&w));
     assert!(arena.contains_world(boss.pos), "boss must spawn in its arena");
     assert!(boss.hp > 0.0);
     assert!(boss.max_hp > 0.0);
@@ -205,7 +213,7 @@ fn boss_death_plays_its_beat_then_completes_the_level_once() {
     let boss = boss_of(&mut w).expect("death state plays before despawn");
     assert!(boss.dead);
     assert!(boss.death_announced);
-    assert_eq!(boss.state, BossKind::Cat.death_state());
+    assert_eq!(boss.state, floor_boss(&w).death_state());
     assert!(
         !w.level_complete,
         "the level completes after the death state, not on the lethal tick"
@@ -263,7 +271,7 @@ fn every_boss_credits_its_gold_exactly_once_at_the_clear() {
             }
             spawn_boss(&mut w);
             let kind = boss_of(&mut w).expect("the floor's boss").kind;
-            assert_eq!(kind, BossKind::for_theme(theme));
+            assert_eq!(kind, floor_boss(&w));
             let before = w.gold;
             {
                 let mut query = w.ecs.query::<&mut Boss>();
@@ -309,7 +317,7 @@ fn boss_death_breaks_the_horde_without_invalidating_the_enemy_index() {
         w.level_index = level;
         spawn_boss(&mut w);
         let boss = boss_of(&mut w).expect("BossDue spawned the boss");
-        assert_eq!(boss.kind, BossKind::for_level(level));
+        assert_eq!(boss.kind, floor_boss(&w));
         // 60 enemies on the field, spread over the arena so a few of them
         // stand in the boss's death hazards too.
         let centre = boss.arena.center_world();
@@ -637,7 +645,7 @@ fn real_schedule_spawns_the_boss_at_boss_time() {
 
     assert!(w.boss_time_reached());
     let boss = boss_of(&mut w).expect("the real schedule spawned the boss");
-    assert_eq!(boss.kind, BossKind::Cat);
+    assert_eq!(boss.kind, BossKind::pool_pick(Theme::Sewer, w.level.seed));
     let (hp, max_hp) = w.boss_hp().expect("HUD accessor reports the boss");
     assert!((hp - boss.hp).abs() < 1e-3);
     assert!((max_hp - boss.max_hp).abs() < 1e-3);

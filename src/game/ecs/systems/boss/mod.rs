@@ -5,13 +5,16 @@
 //! | level | theme | boss | art module |
 //! |-------|-------|------|-----------|
 //! | 0 | Sewer | Jungle Cat (Apex Jaguar) | [`crate::game::art_boss_cat`] |
+//! | 0 | Sewer | The Horseshoe (horseshoe crab) | [`crate::game::art_boss_horseshoe_crab`] |
 //! | 1 | Kitchen | The Sweeper (broom) | [`crate::game::art_boss_broom`] |
 //! | 2 | Lab | TURF-REAPER MK.IV (mower) | [`crate::game::art_boss_mower`] |
 //! | 3 | Laundry | The Mangle (wringer) | [`crate::game::art_boss_mangle`] |
 //! | 4 | Printworks | THE NIGHT EDITION (press) | [`crate::game::art_boss_night_edition`] |
 //! | — (getaway) | Flatbed | The Magpie (bird) | [`crate::game::art_boss_magpie`] |
 //!
-//! Every floor's boss comes from [`BossKind::for_theme`] (the side-route floors
+//! Every floor's boss comes from [`BossKind::pool_for_theme`] + the level seed
+//! ([`BossKind::pool_pick`]; `for_theme` is the first entry, the floor's
+//! original boss) (the side-route floors
 //! and the getaway ride play at a campaign stage index, so `for_level` cannot
 //! name their fights); the flatbed's arm goes through [`trailer_boss`].
 //!
@@ -105,6 +108,7 @@ use rand::{RngExt, SeedableRng};
 
 use crate::audio::Sfx;
 use crate::game::art_boss_broom::{self, BroomBossState, BroomBossView};
+use crate::game::art_boss_horseshoe_crab::{self, CrabState, CrabView};
 use crate::game::art_boss_mangle::{self, MangleState, MangleView};
 use crate::game::art_boss_cat::{self, BossCatState, BossCatView};
 use crate::game::art_boss_magpie::{self, MagpieState, MagpieView};
@@ -135,6 +139,7 @@ use crate::render::palette::Rgb;
 
 pub mod broom;
 pub mod cat;
+pub mod horseshoe_crab;
 pub mod magpie;
 pub mod mangle;
 pub mod mower;
@@ -159,6 +164,8 @@ pub enum BossKind {
     NightEdition,
     /// The Flatbed (getaway ride) — The Magpie.
     Magpie,
+    /// Sewer pool mate of the Jungle Cat — The Horseshoe (horseshoe crab).
+    HorseshoeCrab,
 }
 
 /// The boss the getaway ride fields: **The Magpie**.
@@ -171,26 +178,77 @@ pub fn trailer_boss() -> BossKind {
     BossKind::Magpie
 }
 
+// The floors' boss pools (`BossKind::pool_for_theme`). Const slices so the
+// accessor returns `&'static [BossKind]` without promoting a call expression;
+// parallel boss workers append their own kind to their floor's list.
+const SEWER_POOL: &[BossKind] = &[BossKind::Cat, BossKind::HorseshoeCrab];
+const KITCHEN_POOL: &[BossKind] = &[BossKind::Broom];
+const LAB_POOL: &[BossKind] = &[BossKind::Mower];
+const LAUNDRY_POOL: &[BossKind] = &[BossKind::Mangle];
+const PRINTWORKS_POOL: &[BossKind] = &[BossKind::NightEdition];
+const TRAILER_POOL: &[BossKind] = &[BossKind::Magpie];
+
 impl BossKind {
-    /// The boss for a floor.
+    /// The floor's **original** boss — the pinned, seedless choice.
     ///
-    /// **The wave 3 seam.** This is the one function that decides which boss a
-    /// theme spawns (`boss_spawn_system` calls it, not `for_level`), so a floor
-    /// with its own fight fields it and every other floor meets the same boss
-    /// `for_level` gives. The Laundry fields the Mangle and the Printworks the
-    /// Night Edition, the latter with its own arena in
-    /// `levelgen::layout::furnish_arena`. Nothing else maps themes to bosses
-    /// (the flatbed's own arm goes through [`trailer_boss`]).
+    /// **The wave 3 seam.** `boss_spawn_system` decides a floor's boss with
+    /// [`Self::pool_pick`] (theme + level seed); this is that pool's first
+    /// entry, which is what every caller with no seed to spend means (the HUD's
+    /// default plate, `for_level`'s campaign mapping, tests that pin a boss).
+    /// The Laundry fields the Mangle and the Printworks the Night Edition, the
+    /// latter with its own arena in `levelgen::layout::furnish_arena`. Nothing
+    /// else maps themes to bosses (the flatbed's own arm goes through
+    /// [`trailer_boss`]).
     #[inline]
     pub fn for_theme(theme: Theme) -> Self {
+        // The floor's *original* boss: the pinned choice, and what every caller
+        // that has no level seed to spend means. The spawn system uses
+        // [`Self::pool_pick`] instead.
+        Self::pool_for_theme(theme)[0]
+    }
+
+    /// Every boss a floor can field, in preference order. The first entry is
+    /// the floor's original boss (the one `for_theme` names and the one every
+    /// pre-pool seed expected); later entries are pool mates.
+    ///
+    /// **The wave 3 pool seam.** Parallel boss workers append their own entry
+    /// to their floor's pool; the integrator unions the lists. A floor with one
+    /// entry is pinned to it, and no rng is drawn: the draw is a stable hash of
+    /// the level seed, so a pooled floor spends no rng either.
+    #[inline]
+    pub fn pool_for_theme(theme: Theme) -> &'static [BossKind] {
         match theme {
-            Theme::Sewer => BossKind::Cat,
-            Theme::Kitchen => BossKind::Broom,
-            Theme::Lab => BossKind::Mower,
-            Theme::Laundry => BossKind::Mangle,
-            Theme::Printworks => BossKind::NightEdition,
-            Theme::Trailer => trailer_boss(),
+            Theme::Sewer => SEWER_POOL,
+            Theme::Kitchen => KITCHEN_POOL,
+            Theme::Lab => LAB_POOL,
+            Theme::Laundry => LAUNDRY_POOL,
+            Theme::Printworks => PRINTWORKS_POOL,
+            Theme::Trailer => TRAILER_POOL,
         }
+    }
+
+    /// The boss a floor fields for a level seed: a pooled floor picks one of
+    /// [`Self::pool_for_theme`] with a stable splitmix64 hash of the seed.
+    ///
+    /// Deterministic by construction (no rng draw, so it cannot perturb the run
+    /// stream), uniform enough that both Sewer bosses appear across seeds, and
+    /// stable across builds. Tests that need a particular boss pin the seed and
+    /// assert [`Self::pool_pick`] rather than guessing.
+    #[inline]
+    pub fn pool_pick(theme: Theme, seed: u64) -> Self {
+        let pool = Self::pool_for_theme(theme);
+        if pool.len() <= 1 {
+            return pool[0];
+        }
+        // splitmix64 finaliser over the seed and the theme, so two floors that
+        // share a seed (a campaign links floors by seed) do not correlate.
+        let mut h = seed ^ ((theme as u64).wrapping_add(1)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        h ^= h >> 30;
+        h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        h ^= h >> 27;
+        h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+        h ^= h >> 31;
+        pool[(h % pool.len() as u64) as usize]
     }
 
     /// The boss for a campaign level slot (0 Sewer, 1 Kitchen, 2 Lab).
@@ -213,6 +271,7 @@ impl BossKind {
             BossKind::Mangle => art_boss_mangle::BOSS_BASE_HP,
             BossKind::NightEdition => art_boss_night_edition::BOSS_BASE_HP,
             BossKind::Magpie => art_boss_magpie::BOSS_BASE_HP,
+            BossKind::HorseshoeCrab => art_boss_horseshoe_crab::BOSS_BASE_HP,
         }
     }
 
@@ -226,6 +285,7 @@ impl BossKind {
             BossKind::Mangle => art_boss_mangle::BODY_RADIUS,
             BossKind::NightEdition => art_boss_night_edition::BODY_RADIUS,
             BossKind::Magpie => art_boss_magpie::BODY_RADIUS,
+            BossKind::HorseshoeCrab => art_boss_horseshoe_crab::BODY_RADIUS,
         }
     }
 
@@ -312,6 +372,17 @@ impl BossKind {
             // campaign fights to hold its 45-80 s beat. `4.6` lands the mean at
             // ~54 s; see the shipped measurement in the test.
             BossKind::Magpie => 4.6,
+            // The Sewer pool mate, and the only boss whose *pool* is smaller
+            // than its art's: the dome sheds ~45 % of the rat's fire on any
+            // run that does not flank it, so the raw number already buys a
+            // longer fight. Measured with
+            // `boss::horseshoe_crab::tests::a_bot_kills_the_horseshoe_on_the_real_arena`
+            // (the same Expert bot + Typical carry the other boss fights were
+            // tuned with, five Sewer seeds, spawn to death): at the Cat's 1.4
+            // the fight ran 127.5 s mean (the bot orbits into the dome and
+            // loses half its damage); `0.70` lands it in the 45-80 s band at
+            // ~64 s. A balance pass owns the final number.
+            BossKind::HorseshoeCrab => 0.70,
         }
     }
 
@@ -331,6 +402,7 @@ impl BossKind {
             // The design's own number for this fight (`§12`: body contact 8).
             BossKind::NightEdition => art_boss_night_edition::CONTACT_DAMAGE,
             BossKind::Magpie => art_boss_magpie::CONTACT_DAMAGE,
+            BossKind::HorseshoeCrab => art_boss_horseshoe_crab::CONTACT_DAMAGE,
         }
     }
 
@@ -344,6 +416,7 @@ impl BossKind {
             BossKind::Mangle => art_boss_mangle::DEATH_DURATION,
             BossKind::NightEdition => art_boss_night_edition::DEATH_DURATION,
             BossKind::Magpie => art_boss_magpie::DEATH_DURATION,
+            BossKind::HorseshoeCrab => art_boss_horseshoe_crab::DEATH_DURATION,
         }
     }
 
@@ -404,6 +477,15 @@ impl BossKind {
                     1
                 }
             }
+            BossKind::HorseshoeCrab => {
+                if hp_frac <= art_boss_horseshoe_crab::PHASE3_HP_FRAC {
+                    3
+                } else if hp_frac <= art_boss_horseshoe_crab::PHASE2_HP_FRAC {
+                    2
+                } else {
+                    1
+                }
+            }
         }
     }
 
@@ -417,6 +499,7 @@ impl BossKind {
             BossKind::Mangle => BossState::Mangle(MangleState::Idle),
             BossKind::NightEdition => BossState::NightEdition(NightEditionState::Roll),
             BossKind::Magpie => BossState::Magpie(MagpieState::Perch),
+            BossKind::HorseshoeCrab => BossState::HorseshoeCrab(CrabState::Dome),
         }
     }
 
@@ -431,6 +514,7 @@ impl BossKind {
             // The first walk beat is the phase-1 one (`night_edition::ROLL_DURATION[0]`).
             BossKind::NightEdition => 1.8,
             BossKind::Magpie => art_boss_magpie::PERCH_DURATION[0],
+            BossKind::HorseshoeCrab => art_boss_horseshoe_crab::DOME_DURATION[0],
         }
     }
 
@@ -444,6 +528,7 @@ impl BossKind {
             BossKind::Mangle => BossState::Mangle(MangleState::Death),
             BossKind::NightEdition => BossState::NightEdition(NightEditionState::Wreck),
             BossKind::Magpie => BossState::Magpie(MagpieState::Death),
+            BossKind::HorseshoeCrab => BossState::HorseshoeCrab(CrabState::Death),
         }
     }
 
@@ -457,6 +542,7 @@ impl BossKind {
             BossKind::Mangle => 0xD1B5_4A32_7F6C_1E09,
             BossKind::NightEdition => 0x7B1D_3C4F_9A2E_5D68,
             BossKind::Magpie => 0x7C15_9E37_A1B2_C3D4,
+            BossKind::HorseshoeCrab => 0x51ED_270B_9C4D_0A6F,
         }
     }
 
@@ -470,6 +556,7 @@ impl BossKind {
             BossKind::Mangle => art_boss_mangle::CULL_MARGIN,
             BossKind::NightEdition => art_boss_night_edition::CULL_MARGIN,
             BossKind::Magpie => art_boss_magpie::CULL_MARGIN,
+            BossKind::HorseshoeCrab => art_boss_horseshoe_crab::CULL_MARGIN,
         }
     }
 
@@ -483,6 +570,7 @@ impl BossKind {
             BossKind::Mangle => &mangle::MangleController,
             BossKind::NightEdition => &night_edition::NightEditionController,
             BossKind::Magpie => &magpie::MagpieController,
+            BossKind::HorseshoeCrab => &horseshoe_crab::HorseshoeCrabController,
         }
     }
 }
@@ -632,6 +720,8 @@ pub enum BossState {
     Mangle(MangleState),
     NightEdition(NightEditionState),
     Magpie(MagpieState),
+    /// Sewer pool mate: the horseshoe crab.
+    HorseshoeCrab(CrabState),
 }
 
 /// One art-defined hit shape. Bosses are hit through these, not a single circle.
@@ -836,6 +926,7 @@ pub enum BossArtView {
     Mangle(MangleView),
     NightEdition(NightEditionView),
     Magpie(MagpieView),
+    HorseshoeCrab(CrabView),
 }
 
 // ============================================================================
@@ -974,6 +1065,11 @@ pub struct BossHazard {
     /// is not radial from the shape's centre: it is a fixed world direction, so
     /// a lane can feed toward the machine. Only used by damage-free hazards.
     pub drag: Vec2,
+    /// Share of the rat's *own* movement this hazard takes while it stands
+    /// inside (`0.0` = none, `0.45` = wading at 55 % speed). Applied by undoing
+    /// that fraction of the tick's step, so it costs no i-frames and no new
+    /// player state: the blue blood pools use it. Damage-free by construction.
+    pub slow: f32,
 }
 
 impl BossHazard {
@@ -992,6 +1088,7 @@ impl BossHazard {
             fired: false,
             fired_enemies: false,
             drag: Vec2::ZERO,
+            slow: 0.0,
         }
     }
 
@@ -1013,6 +1110,13 @@ impl BossHazard {
     #[inline]
     pub fn with_drag(mut self, drag: Vec2) -> Self {
         self.drag = drag;
+        self
+    }
+
+    /// Take this share of the rat's own movement while it stands inside.
+    #[inline]
+    pub fn with_slow(mut self, slow: f32) -> Self {
+        self.slow = slow.clamp(0.0, 0.95);
         self
     }
 
@@ -1464,6 +1568,46 @@ impl Boss {
                 ];
                 BossHitShapes::from_slice(&shapes)
             }
+            BossKind::HorseshoeCrab => {
+                // The dome is the body; the gill fans are the one clear weak
+                // point and they only exist while the shell is off (wedged,
+                // flipped). Under the floor it has no grounded shape at all.
+                let view = self.crab_view();
+                let shapes = art_boss_horseshoe_crab::hit_shapes(&view);
+                let out: [BossHitShape; 2] = [
+                    BossHitShape::Box {
+                        center: shapes[0].center,
+                        facing: shapes[0].facing,
+                        half: shapes[0].half,
+                        half_perp: shapes[0].half_perp,
+                        grounded: shapes[0].grounded,
+                    },
+                    BossHitShape::Circle {
+                        center: shapes[1].center,
+                        radius: shapes[1].radius,
+                        grounded: shapes[1].grounded,
+                    },
+                ];
+                BossHitShapes::from_slice(&out)
+            }
+        }
+    }
+
+    /// The damage multiplier for a hit arriving at `at` along `dir` (unit
+    /// travel direction; `Vec2::ZERO` = from underneath, e.g. a pool).
+    ///
+    /// `1.0` for every boss but the horseshoe crab, whose shell **deflects**
+    /// shots arriving over the dome from the front or top (`0.0`, the shot is
+    /// spent and sparks) and whose exposed gills take
+    /// [`art_boss_horseshoe_crab::GILL_DAMAGE_MULT`]. The crab's own art owns
+    /// the rule; the damage system only applies it.
+    #[inline]
+    pub fn incoming_multiplier(&self, dir: Vec2, at: Vec2) -> f32 {
+        match self.kind {
+            BossKind::HorseshoeCrab => {
+                art_boss_horseshoe_crab::incoming_multiplier(&self.crab_view(), dir, at)
+            }
+            _ => 1.0,
         }
     }
 
@@ -1498,6 +1642,7 @@ impl Boss {
             BossKind::Mangle => BossArtView::Mangle(self.mangle_view()),
             BossKind::NightEdition => BossArtView::NightEdition(self.night_edition_view()),
             BossKind::Magpie => BossArtView::Magpie(self.magpie_view()),
+            BossKind::HorseshoeCrab => BossArtView::HorseshoeCrab(self.crab_view()),
         }
     }
 
@@ -1533,6 +1678,29 @@ impl Boss {
         match self.state {
             BossState::Magpie(s) => s,
             _ => MagpieState::Perch,
+        }
+    }
+
+    fn crab_state(&self) -> CrabState {
+        match self.state {
+            BossState::HorseshoeCrab(s) => s,
+            _ => CrabState::Dome,
+        }
+    }
+
+    pub(crate) fn crab_view(&self) -> CrabView {
+        CrabView {
+            pos: self.pos,
+            facing: self.facing,
+            state: self.crab_state(),
+            progress: self.progress(),
+            anim: self.anim,
+            hit_flash: self.hit_flash,
+            hp_frac: self.hp_frac(),
+            phase: self.phase,
+            target: self.target,
+            lane_start: self.pounce_origin,
+            sweep_side: self.swipe_side,
         }
     }
 
@@ -1870,6 +2038,25 @@ pub enum BossCue {
     MagpieCrate,
     /// The `Death` beat: the last rattle.
     MagpieDeath,
+    // ---- The Horseshoe (Sewer pool mate) ----
+    /// `Pose` / `Righting` entry: the plates shifting over the wet shell.
+    CrabRattle,
+    /// `TelsonTell` entry: the spike cocking over one shoulder.
+    CrabTelsonCock,
+    /// `TelsonSweep` entry: the spike coming through.
+    CrabTelsonSweep,
+    /// `BulldozeTell` / `Bulldoze` entry: the low, grinding rev.
+    CrabCharge,
+    /// `Wedged` entry: the dome into the masonry.
+    CrabWedge,
+    /// `BurrowTell` / `Burrow` entry: digging through the drain bed.
+    CrabBurrow,
+    /// `Emerge` entry: the eruption.
+    CrabEmerge,
+    /// `FlipTell` / `Flipped` entry: the shell coming over.
+    CrabFlip,
+    /// The `Death` beat.
+    CrabDeath,
 }
 
 impl BossCue {
@@ -1938,6 +2125,15 @@ impl BossCue {
             BossCue::MagpieGust => Sfx::MagpieGust,
             BossCue::MagpieCrate => Sfx::MagpieCrate,
             BossCue::MagpieDeath => Sfx::MagpieDeath,
+            BossCue::CrabRattle => Sfx::CrabRattle,
+            BossCue::CrabTelsonCock => Sfx::CrabTelsonCock,
+            BossCue::CrabTelsonSweep => Sfx::CrabTelsonSweep,
+            BossCue::CrabCharge => Sfx::CrabCharge,
+            BossCue::CrabWedge => Sfx::CrabWedge,
+            BossCue::CrabBurrow => Sfx::CrabBurrow,
+            BossCue::CrabEmerge => Sfx::CrabEmerge,
+            BossCue::CrabFlip => Sfx::CrabFlip,
+            BossCue::CrabDeath => Sfx::CrabDeath,
         }
     }
 }
@@ -2054,12 +2250,17 @@ pub fn resolve_hazards(
                 // shape, and `drag` is a fixed-direction conveyor on top of it.
                 // Nothing is "hit", so no damage, no i-frames and no hurt vfx
                 // are spent.
-                if hazard.knockback > 0.0 || hazard.drag.len_sq() > 0.0 {
+                if hazard.knockback > 0.0 || hazard.drag.len_sq() > 0.0 || hazard.slow > 0.0 {
                     let dir = (player.pos - hazard.shape.center()).normalized();
                     if hazard.knockback > 0.0 {
                         player.pos += dir * hazard.knockback * dt;
                     }
                     player.pos += hazard.drag * dt;
+                    if hazard.slow > 0.0 {
+                        // Undo the share of this tick's own step: walking in is
+                        // slower, and the rat can always wade back out.
+                        player.pos -= player.vel * dt * hazard.slow;
+                    }
                 }
             } else if player.take_damage(hazard.damage) {
                 player_hit = true;
@@ -2438,6 +2639,56 @@ fn emit_cues(
                 let blood = level_blood();
                 vfx::emit_boss_magpie_death(particles, rng, boss.pos, boss.facing, blood);
             }
+
+            // ---- the horseshoe crab -------------------------------------
+            // Its feedback is all shell and wet floor: the rattle and the
+            // charge are a dust kick off the concrete, the tail is the mower's
+            // steel clang family, and the death is the crab's own blue.
+            BossCue::CrabRattle => {
+                vfx::emit_boss_cat_skid(particles, rng, boss.pos, boss.facing, 0.12);
+            }
+            BossCue::CrabTelsonCock => {
+                vfx::emit_boss_mower_overheat_steam(particles, rng, boss.pos, boss.facing, 0.10);
+            }
+            BossCue::CrabTelsonSweep => {
+                let view = boss.crab_view();
+                let tip = art_boss_horseshoe_crab::telson_tip(&view);
+                vfx::emit_boss_mower_wall_impact(particles, rng, tip, boss.facing, false);
+            }
+            BossCue::CrabCharge => {
+                vfx::emit_boss_mower_charge_trail(particles, rng, boss.pos, boss.facing, false, 0.10);
+            }
+            BossCue::CrabWedge => {
+                let view = boss.crab_view();
+                let gill = art_boss_horseshoe_crab::gill_pos(&view);
+                vfx::emit_boss_mower_wall_impact(particles, rng, gill, -boss.facing, true);
+            }
+            BossCue::CrabBurrow => {
+                let at = boss.target;
+                vfx::emit_boss_broom_stomp(
+                    particles,
+                    rng,
+                    at,
+                    art_boss_horseshoe_crab::BURROW_RADIUS * 0.6,
+                    boss.phase >= 3,
+                );
+            }
+            BossCue::CrabEmerge => {
+                vfx::emit_boss_broom_stomp(
+                    particles,
+                    rng,
+                    boss.pos,
+                    art_boss_horseshoe_crab::BURROW_RADIUS,
+                    true,
+                );
+            }
+            BossCue::CrabFlip => {
+                vfx::emit_boss_mower_flipped_smoke(particles, rng, boss.pos, 0.12);
+            }
+            BossCue::CrabDeath => {
+                let blood = (44, 92, 190);
+                vfx::emit_boss_magpie_death(particles, rng, boss.pos, boss.facing, blood);
+            }
         }
     }
 }
@@ -2478,7 +2729,9 @@ pub fn boss_spawn_system(
     // stage index, and the Laundry and the Printworks field their own bosses
     // (the Mangle, the Night Edition), so the theme is the only thing that can
     // name a floor's boss.
-    let kind = BossKind::for_theme(level.theme);
+    // The floor's pool, chosen by the level seed: a floor with more than one
+    // possible boss draws without spending rng (see [`BossKind::pool_pick`]).
+    let kind = BossKind::pool_pick(level.theme, level.seed);
     let arena = level
         .boss_room()
         .map(|r| r.rect)
@@ -2579,7 +2832,37 @@ pub fn boss_damage_system(
             if !shapes.segment_hits_grounded(bullet.prev_pos, bullet.pos, bullet.radius) {
                 continue;
             }
-            let amount = bullet.damage * boss.damage_mult;
+            // The crab's shell: a shot arriving over the dome from its front
+            // hemisphere sparks off, does nothing, and is spent exactly like a
+            // hit (a free wall pass would make the armour a gift). A pool or a
+            // trap has no travel direction and is "underneath", which counts.
+            let dir = if bullet.vel.len_sq() > 1e-4 {
+                bullet.vel.normalized()
+            } else {
+                Vec2::ZERO
+            };
+            let armour = boss.incoming_multiplier(dir, bullet.pos);
+            if armour <= 0.0 {
+                vfx::emit_weapon_hit(
+                    &mut particles,
+                    &mut fight.rng.0,
+                    bullet.pos,
+                    bullet.vel,
+                    bullet.weapon,
+                    EnemyKind::Boss,
+                    false,
+                );
+                sfx.0.push(Sfx::CrabShell);
+                if bullet.pierce > 0 {
+                    bullet.pierce -= 1;
+                    bullet.hit_cd = 0.12;
+                } else {
+                    bullet.life = 0.0;
+                    bullet.hit_cd = 0.12;
+                }
+                continue;
+            }
+            let amount = bullet.damage * boss.damage_mult * armour;
             if !boss.take_damage(amount) {
                 continue;
             }
@@ -2631,7 +2914,10 @@ pub fn boss_damage_system(
             if !shapes.circle_hits_grounded(pool.pos, pool.radius) {
                 continue;
             }
-            let amount = pool.dps * tick.dt;
+            let amount = pool.dps * tick.dt * boss.incoming_multiplier(Vec2::ZERO, pool.pos);
+            if amount <= 0.0 {
+                continue;
+            }
             if boss.take_damage(amount) {
                 fight.scratch.dmg.pools += amount;
                 damage_numbers.record(
@@ -2660,7 +2946,9 @@ pub fn boss_damage_system(
             if shapes.iter().any(|s| {
                 in_mouse_kill_rect(trap.pos, trap.facing, s.center(), s_radius(s))
             }) {
-                let amount = MOUSETRAP_DAMAGE_ENEMY * boss.damage_mult;
+                let amount = MOUSETRAP_DAMAGE_ENEMY
+                    * boss.damage_mult
+                    * boss.incoming_multiplier(Vec2::ZERO, trap.pos);
                 if boss.take_damage(amount) {
                     fight.scratch.dmg.traps += amount;
                     fight.scratch.mouse_latch.push(latch);
@@ -3305,6 +3593,9 @@ impl BossTrace {
                 | BossState::Mower(MowerState::Flipped | MowerState::Overheat)
                 | BossState::NightEdition(NightEditionState::BedLowered | NightEditionState::Ribbon)
                 | BossState::Magpie(MagpieState::Stuck)
+                | BossState::HorseshoeCrab(
+                    CrabState::Wedged | CrabState::Flipped | CrabState::Recover
+                )
         )
     }
 
