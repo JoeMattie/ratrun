@@ -53,6 +53,16 @@ pub enum Target {
     /// The compact minimap in the play field: a left press toggles the
     /// expanded map (the run keeps going either way).
     Minimap,
+    /// Open the options screen (the title's OPTIONS row and the pause legend).
+    Options,
+    /// A row on the options screen (`0..options::ROW_COUNT`): selects it, and
+    /// on the value rows also steps it forward.
+    OptionsRow(usize),
+    /// A volume slider track on the options screen (`0` music, `1` effects):
+    /// clicking or dragging inside it sets the level from the pointer column.
+    OptionsBar(usize),
+    /// The options screen's Back row: returns to wherever the player came from.
+    OptionsBack,
 }
 
 /// How many interactive rectangles one screen can register. The campaign
@@ -96,6 +106,19 @@ impl HitMap {
             .find(|(r, _)| r.contains((x, y).into()))
             .map(|(_, t)| *t)
     }
+
+    /// The rectangle a target was registered with on the last frame.
+    ///
+    /// The options sliders need it to turn a pointer column into a level
+    /// without duplicating the layout maths the renderer used.
+    pub fn rect_for(&self, target: Target) -> Option<Rect> {
+        self.targets[..self.len]
+            .iter()
+            .rev()
+            .flatten()
+            .find(|(_, t)| *t == target)
+            .map(|(r, _)| *r)
+    }
 }
 
 pub fn centered_rect(w: u16, h: u16, area: Rect) -> Rect {
@@ -108,10 +131,10 @@ pub fn centered_rect(w: u16, h: u16, area: Rect) -> Rect {
     )
 }
 
-fn ink(c: Color) -> Style {
+pub(crate) fn ink(c: Color) -> Style {
     Style::default().fg(c)
 }
-fn heavy(c: Color) -> Style {
+pub(crate) fn heavy(c: Color) -> Style {
     ink(c).add_modifier(Modifier::BOLD)
 }
 fn band(r: Rect, row: u16, height: u16) -> Rect {
@@ -149,7 +172,7 @@ fn controls(f: &mut Frame, row: Rect, hits: &mut HitMap, parts: &[(&str, Option<
 }
 
 /// A stamped metal plate with the light catching its upper and left edges.
-fn panel(f: &mut Frame, r: Rect, caption: &str, edge: Color) -> Rect {
+pub(crate) fn panel(f: &mut Frame, r: Rect, caption: &str, edge: Color) -> Rect {
     f.render_widget(Clear, r);
     let block = Block::bordered()
         .border_style(ink(TRACK))
@@ -179,7 +202,7 @@ fn sector_name(sector: usize, unlocked: bool) -> String {
     }
 }
 
-fn material(theme: Theme) -> palette::Rgb {
+pub(crate) fn material(theme: Theme) -> palette::Rgb {
     match theme {
         Theme::Sewer => (144, 184, 173),
         Theme::Kitchen => (213, 173, 122),
@@ -188,7 +211,7 @@ fn material(theme: Theme) -> palette::Rgb {
 }
 
 pub fn title_art_width(area: Rect) -> Option<u32> {
-    let rows = area.height.saturating_sub(22);
+    let rows = area.height.saturating_sub(23);
     (rows >= 6 && area.width >= 54)
         .then(|| (u32::from(rows) * 4).min(60).min(u32::from(area.width) - 8))
 }
@@ -276,7 +299,7 @@ pub fn draw_title(
     let rat_h = (rat.len() as u16).min(r.height.saturating_sub(logo_h + 11));
     let gap = u16::from(r.height >= 17);
     let art_gap = u16::from(rat_h > 0);
-    let body_h = rat_h + art_gap + logo_h + 6 + gap * 2;
+    let body_h = rat_h + art_gap + logo_h + 7 + gap * 2;
     let body = band(r, r.height.saturating_sub(body_h + 3) / 2, body_h);
     if rat_h > 0 {
         let width = title_art_width(area).unwrap_or(0) as u16;
@@ -315,7 +338,7 @@ pub fn draw_title(
     let sector_label = "Sector   ";
     let sector_text = sector_name(sector, sector_unlocked);
     let sector_row = format!("{sector_label}‹ {sector_text} ›");
-    for (i, text) in ["START RUN", sector_row.as_str(), "QUIT"]
+    for (i, text) in ["START RUN", sector_row.as_str(), "OPTIONS", "QUIT"]
         .into_iter()
         .enumerate()
     {
@@ -330,7 +353,10 @@ pub fn draw_title(
             ink(COAT)
         };
         let rr = band(menu, y + i as u16, 1);
-        hits.add(rr, [Target::Start, Target::Sectors, Target::Quit][i]);
+        hits.add(
+            rr,
+            [Target::Start, Target::Sectors, Target::Options, Target::Quit][i],
+        );
         let prefix = if selected { " ▸  " } else { "    " };
         if i == 1 {
             // The arrows carry their own targets, so the pointer can step the
@@ -352,7 +378,7 @@ pub fn draw_title(
             rr,
         );
     }
-    y += 3 + gap;
+    y += 4 + gap;
     center(
         f,
         body,
@@ -375,6 +401,19 @@ pub fn draw_title(
             if wide {
                 f.buffer_mut()
                     .set_string(r.x + 2, rail.y, " CONTROLS ", ink(MUTED));
+            }
+            // Volume quick keys get their own line when there is room between
+            // the rail and the control legend.
+            if r.width >= 54 {
+                center(
+                    f,
+                    r,
+                    r.height - 3,
+                    Line::from(vec![
+                        label("VOLUME   ", accent),
+                        Span::styled("[ ] music  ·  - = effects  ·  O options", ink(COAT)),
+                    ]),
+                );
             }
         }
         center(
@@ -594,7 +633,7 @@ pub fn draw_map_intro(f: &mut Frame, area: Rect, theme: Theme, accent: Color, hi
 }
 
 pub fn draw_pause(f: &mut Frame, area: Rect, hits: &mut HitMap) {
-    let r = panel(f, centered_rect(39, 8, area), " RUN CONTROL ", MUTED);
+    let r = panel(f, centered_rect(46, 8, area), " RUN CONTROL ", MUTED);
     center(f, r, 1, Span::styled("━━━  ▌▌  ━━━", heavy(TAIL)));
     center(f, r, 2, Span::styled("PAUSED", heavy(COAT)));
     controls(
@@ -603,10 +642,15 @@ pub fn draw_pause(f: &mut Frame, area: Rect, hits: &mut HitMap) {
         hits,
         &[
             (" Esc/P resume ", Some(Target::Resume)),
-            ("   ", None),
+            ("  ", None),
+            (" O options ", Some(Target::Options)),
+            ("  ", None),
             (" Q to menu ", Some(Target::Menu)),
         ],
     );
+    if r.height >= 7 {
+        center(f, r, 6, label("[ ] music · - = effects · O options", MUTED));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1055,12 +1099,24 @@ pub fn draw_pause_with_run(
         r.height.saturating_sub(3),
         label(mute_label, if muted { WARN_AMBER } else { MUTED }),
     );
+    // Volume quick keys, on their own line above the controls when the panel
+    // is tall enough to carry it.
+    if r.height >= 16 {
+        center(
+            f,
+            r,
+            r.height.saturating_sub(2),
+            label("[ ] music  ·  - = effects  ·  O options", MUTED),
+        );
+    }
     controls(
         f,
         band(r, r.height.saturating_sub(1), 1),
         hits,
         &[
             (" Esc/P resume ", Some(Target::Resume)),
+            ("   ", None),
+            (" O options ", Some(Target::Options)),
             ("   ", None),
             (" Q to menu ", Some(Target::Menu)),
         ],

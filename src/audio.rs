@@ -6520,25 +6520,164 @@ impl Source for MusicSynth {
     }
 }
 
+// ---- Volume --------------------------------------------------------------
+
+/// Music gain at the 100% setting — today's fixed music level.
+pub const MUSIC_MAX_GAIN: f32 = 0.50;
+/// Effects gain at the 100% setting — today's fixed effect level.
+pub const SFX_MAX_GAIN: f32 = 0.85;
+/// Slider granularity, in percent.
+pub const VOLUME_STEP: u8 = 5;
+
+/// Round a volume setting into `0..=100` on the [`VOLUME_STEP`] grid.
+pub const fn snap_percent(percent: u8) -> u8 {
+    let clamped = if percent > 100 { 100 } else { percent };
+    ((clamped + VOLUME_STEP / 2) / VOLUME_STEP) * VOLUME_STEP
+}
+
+/// Map a `0..=100` setting to a `0..=1` amplitude factor.
+///
+/// **Squared curve**: `gain = (percent/100)²`. Perceived loudness tracks the
+/// square root of amplitude, so a linear amplitude slider feels like it does
+/// nothing over its top half and falls off a cliff at the bottom; squaring
+/// makes each slider step feel roughly equal (6 dB per 30%, 12 dB per halving)
+/// and hits exactly `0.0` at 0 instead of the −40 dB floor a dB curve leaves.
+pub fn volume_curve(percent: u8) -> f32 {
+    let x = f32::from(snap_percent(percent)) / 100.0;
+    x * x
+}
+
+/// Resolved music amplitude for a `0..=100` setting (`0.0` at 0).
+pub fn music_gain(percent: u8) -> f32 {
+    MUSIC_MAX_GAIN * volume_curve(percent)
+}
+
+/// Resolved effects amplitude for a `0..=100` setting (`0.0` at 0).
+pub fn effects_gain(percent: u8) -> f32 {
+    SFX_MAX_GAIN * volume_curve(percent)
+}
+
+/// A sink whose amplitude the mixer can push to. `Player` is the real one;
+/// tests substitute a recorder, so the gain path is exercised with no device.
+pub trait GainSink {
+    fn set_gain(&self, gain: f32);
+}
+
+impl GainSink for Player {
+    fn set_gain(&self, gain: f32) {
+        self.set_volume(gain);
+    }
+}
+
+/// The player's two independent channel levels plus the master mute on top.
+///
+/// Device-free on purpose: `AudioEngine::new()` returns `None` without an
+/// output device (every test and headless run), so all the level/mute logic
+/// and the gain resolution live here where it can be tested directly, and the
+/// engine only owns the sinks that receive [`VolumeMixer::apply`].
+pub struct VolumeMixer {
+    music: u8,
+    effects: u8,
+    muted: bool,
+}
+
+impl Default for VolumeMixer {
+    /// 100% / 100% unmuted: exactly the pre-slider balance.
+    fn default() -> Self {
+        VolumeMixer {
+            music: 100,
+            effects: 100,
+            muted: false,
+        }
+    }
+}
+
+impl VolumeMixer {
+    pub fn new(music: u8, effects: u8) -> Self {
+        VolumeMixer {
+            music: snap_percent(music),
+            effects: snap_percent(effects),
+            muted: false,
+        }
+    }
+
+    pub fn music(&self) -> u8 {
+        self.music
+    }
+
+    pub fn effects(&self) -> u8 {
+        self.effects
+    }
+
+    pub fn muted(&self) -> bool {
+        self.muted
+    }
+
+    /// Set the music level; returns `true` when it actually moved.
+    pub fn set_music(&mut self, percent: u8) -> bool {
+        let next = snap_percent(percent);
+        let changed = next != self.music;
+        self.music = next;
+        changed
+    }
+
+    /// Set the effects level; returns `true` when it actually moved.
+    pub fn set_effects(&mut self, percent: u8) -> bool {
+        let next = snap_percent(percent);
+        let changed = next != self.effects;
+        self.effects = next;
+        changed
+    }
+
+    /// Flip the master mute, keeping both levels underneath.
+    pub fn toggle_mute(&mut self) -> bool {
+        self.muted = !self.muted;
+        self.muted
+    }
+
+    pub fn set_muted(&mut self, muted: bool) {
+        self.muted = muted;
+    }
+
+    /// Music amplitude with mute applied (`0.0` while muted).
+    pub fn music_gain(&self) -> f32 {
+        if self.muted {
+            0.0
+        } else {
+            music_gain(self.music)
+        }
+    }
+
+    /// Effects amplitude with mute applied (`0.0` while muted).
+    pub fn effects_gain(&self) -> f32 {
+        if self.muted {
+            0.0
+        } else {
+            effects_gain(self.effects)
+        }
+    }
+
+    /// Push the resolved gains to the music sink and every live effect voice.
+    /// The same function runs in the engine (real sinks) and in tests
+    /// (recording sinks), so both channels and *already playing* effects are
+    /// covered by one code path.
+    pub fn apply<'a>(&self, music: &dyn GainSink, voices: impl Iterator<Item = &'a dyn GainSink>) {
+        music.set_gain(self.music_gain());
+        let gain = self.effects_gain();
+        for voice in voices {
+            voice.set_gain(gain);
+        }
+    }
+}
+
 // ---- Engine --------------------------------------------------------------
 
-/// Level for effects; music has its own `music_vol`.
-const SFX_VOL: f32 = 0.85;
 /// Effects play on pooled sinks so they can overlap and so mute can reach
 /// the ones already sounding. Cap the live voices so a kill burst can never
 /// spawn unbounded sinks/mixer tracks.
 const MAX_SFX_VOICES: usize = 24;
 /// Window in milliseconds during which consecutive gem pickups climb the scale.
 const GEM_COMBO_WINDOW_MS: u64 = 480;
-
-/// Master volume for a channel: muting silences music *and* effects.
-fn channel_vol(muted: bool, vol: f32) -> f32 {
-    if muted {
-        0.0
-    } else {
-        vol
-    }
-}
 
 /// Lock-free variant rotation & gem combo pitch-ladder selector.
 struct VariantPicker {
@@ -6696,8 +6835,10 @@ pub struct AudioEngine {
     picker: VariantPicker,
     started_at: Instant,
     intensity: Arc<AtomicU32>,
-    muted: bool,
-    music_vol: f32,
+    /// The player's music/effects levels and the master mute on top. Owns the
+    /// resolved gains; every change is pushed to the live sinks through
+    /// [`VolumeMixer::apply`].
+    levels: VolumeMixer,
 }
 
 impl AudioEngine {
@@ -6717,8 +6858,7 @@ impl AudioEngine {
             picker: VariantPicker::new(),
             started_at: Instant::now(),
             intensity: Arc::new(AtomicU32::new(1)),
-            muted: false,
-            music_vol: 0.50,
+            levels: VolumeMixer::default(),
         })
     }
 
@@ -6767,26 +6907,66 @@ impl AudioEngine {
     }
 
     pub fn toggle_mute(&mut self) -> bool {
-        self.muted = !self.muted;
+        let muted = self.levels.toggle_mute();
         // Reach the sinks that are already playing, not just future sounds.
         self.apply_volumes();
-        self.muted
+        muted
     }
 
     pub fn is_muted(&self) -> bool {
-        self.muted
+        self.levels.muted()
     }
 
-    /// Push the current mute state to every live sink (music and effects).
+    /// Set the master mute explicitly (the app restores a saved state through
+    /// this instead of toggling blind). Reaches the live sinks at once.
+    pub fn set_muted(&mut self, muted: bool) {
+        if self.levels.muted() != muted {
+            self.levels.set_muted(muted);
+            self.apply_volumes();
+        }
+    }
+
+    /// Music level, 0..=100 in steps of 5.
+    pub fn music_volume(&self) -> u8 {
+        self.levels.music()
+    }
+
+    /// Effects level, 0..=100 in steps of 5.
+    pub fn effects_volume(&self) -> u8 {
+        self.levels.effects()
+    }
+
+    /// Set the music level and restart no audio: the playing track's sink takes
+    /// the new gain immediately.
+    pub fn set_music_volume(&mut self, percent: u8) {
+        if self.levels.set_music(percent) {
+            self.apply_volumes();
+        }
+    }
+
+    /// Set the effects level and push it to the voices already sounding (and to
+    /// every voice spawned from now on, which is initialised from the same
+    /// [`Self::effect_voice_gain`]).
+    pub fn set_effects_volume(&mut self, percent: u8) {
+        if self.levels.set_effects(percent) {
+            self.apply_volumes();
+        }
+    }
+
+    /// The gain a freshly created effect voice starts at.
+    fn effect_voice_gain(&self) -> f32 {
+        self.levels.effects_gain()
+    }
+
+    /// Push the resolved music/effects gains to every live sink.
     fn apply_volumes(&self) {
-        self.music
-            .set_volume(channel_vol(self.muted, self.music_vol));
         let Ok(voices) = self.sfx_voices.lock() else {
             return;
         };
-        for v in voices.iter() {
-            v.player.set_volume(channel_vol(self.muted, SFX_VOL));
-        }
+        self.levels.apply(
+            &self.music,
+            voices.iter().map(|v| &v.player as &dyn GainSink),
+        );
     }
 
     pub fn play_sfx(&self, sfx: Sfx) {
@@ -6806,7 +6986,7 @@ impl AudioEngine {
         let Ok(mut voices) = self.sfx_voices.lock() else {
             return;
         };
-        let vol = channel_vol(self.muted, SFX_VOL);
+        let vol = self.effect_voice_gain();
         let src = if (pitch_ratio - 1.0).abs() < 1e-4 {
             CachedSfx::new(samples)
         } else {
@@ -7250,12 +7430,160 @@ mod tests {
         assert!(pitched.iter().all(|x| x.is_finite() && x.abs() <= 1.0));
     }
 
+    // ---- Volume curve, mixer and sink application ----------------------
+
+    /// A gain sink that records what it was handed, so the apply path can be
+    /// tested with no output device (the engine needs one to exist at all).
+    struct RecordingSink(std::cell::Cell<f32>);
+
+    impl RecordingSink {
+        fn new() -> Self {
+            RecordingSink(std::cell::Cell::new(-1.0))
+        }
+        fn gain(&self) -> f32 {
+            self.0.get()
+        }
+    }
+
+    impl GainSink for RecordingSink {
+        fn set_gain(&self, gain: f32) {
+            self.0.set(gain);
+        }
+    }
+
     #[test]
-    fn mute_zeroes_both_channels() {
-        assert_eq!(channel_vol(true, 0.50), 0.0);
-        assert_eq!(channel_vol(true, SFX_VOL), 0.0);
-        assert_eq!(channel_vol(false, 0.50), 0.50);
-        assert_eq!(channel_vol(false, SFX_VOL), SFX_VOL);
+    fn volume_curve_is_squared_zero_at_zero_and_reaches_the_old_levels_at_100() {
+        // 0 is truly silent on both channels (not a -40 dB floor).
+        assert_eq!(volume_curve(0), 0.0);
+        assert_eq!(music_gain(0), 0.0);
+        assert_eq!(effects_gain(0), 0.0);
+        // 100 reproduces exactly the pre-slider constants.
+        assert_eq!(music_gain(100), MUSIC_MAX_GAIN);
+        assert_eq!(effects_gain(100), SFX_MAX_GAIN);
+        assert_eq!(music_gain(100), 0.50);
+        assert_eq!(effects_gain(100), 0.85);
+        // Squared curve: half the setting is a quarter of the amplitude.
+        assert!((volume_curve(50) - 0.25).abs() < 1e-6);
+        assert!((music_gain(50) - 0.125).abs() < 1e-6);
+        // Monotonic non-decreasing across the whole slider, on both channels.
+        let mut prev_music = -1.0;
+        let mut prev_fx = -1.0;
+        for pct in 0..=100u8 {
+            let m = music_gain(pct);
+            let f = effects_gain(pct);
+            assert!(m >= prev_music, "music gain fell at {pct}%");
+            assert!(f >= prev_fx, "effects gain fell at {pct}%");
+            assert!(m <= MUSIC_MAX_GAIN && f <= SFX_MAX_GAIN);
+            prev_music = m;
+            prev_fx = f;
+        }
+    }
+
+    #[test]
+    fn settings_snap_to_five_percent_steps_and_clamp() {
+        assert_eq!(snap_percent(0), 0);
+        assert_eq!(snap_percent(2), 0);
+        assert_eq!(snap_percent(3), 5);
+        assert_eq!(snap_percent(67), 65);
+        assert_eq!(snap_percent(98), 100);
+        assert_eq!(snap_percent(100), 100);
+        assert_eq!(snap_percent(200), 100);
+
+        let mut m = VolumeMixer::default();
+        assert_eq!((m.music(), m.effects(), m.muted()), (100, 100, false));
+        assert!(m.set_music(63));
+        assert_eq!(m.music(), 65);
+        assert!(!m.set_music(64), "same snapped level is not a change");
+        assert!(m.set_effects(7));
+        assert_eq!(m.effects(), 5);
+        assert!(m.set_effects(255));
+        assert_eq!(m.effects(), 100);
+    }
+
+    #[test]
+    fn both_channels_reach_their_sinks_and_every_live_voice() {
+        let mut m = VolumeMixer::new(60, 80);
+        let music = RecordingSink::new();
+        let voices: Vec<RecordingSink> = (0..3).map(|_| RecordingSink::new()).collect();
+        let sinks = || voices.iter().map(|v| v as &dyn GainSink);
+
+        m.apply(&music, sinks());
+        assert_eq!(music.gain(), music_gain(60));
+        for v in &voices {
+            assert_eq!(v.gain(), effects_gain(80));
+        }
+
+        // A change while voices are sounding reaches the live sinks...
+        assert!(m.set_effects(30));
+        m.apply(&music, sinks());
+        for v in &voices {
+            assert_eq!(v.gain(), effects_gain(30));
+        }
+        // ...and a change to the music leaves the effect voices alone.
+        assert!(m.set_music(100));
+        m.apply(&music, sinks());
+        assert_eq!(music.gain(), MUSIC_MAX_GAIN);
+        assert_eq!(voices[0].gain(), effects_gain(30));
+
+        // A voice created *after* the change starts at the current level.
+        let new_voice = RecordingSink::new();
+        new_voice.set_gain(m.effects_gain());
+        assert_eq!(new_voice.gain(), effects_gain(30));
+
+        // Silence at 0 on both channels.
+        m.set_effects(0);
+        m.set_music(0);
+        m.apply(&music, sinks());
+        assert_eq!(music.gain(), 0.0);
+        assert_eq!(voices[0].gain(), 0.0);
+    }
+
+    #[test]
+    fn mute_layers_on_top_and_remembers_both_levels() {
+        let mut m = VolumeMixer::new(55, 35);
+        let music = RecordingSink::new();
+        let voice = RecordingSink::new();
+        let sinks = || [&voice as &dyn GainSink].into_iter();
+
+        m.apply(&music, sinks());
+        assert_eq!(music.gain(), music_gain(55));
+
+        assert!(m.toggle_mute());
+        assert!(m.muted());
+        m.apply(&music, sinks());
+        assert_eq!(music.gain(), 0.0, "mute silences the music sink");
+        assert_eq!(voice.gain(), 0.0, "mute silences live effect voices");
+        assert_eq!(m.music_gain(), 0.0);
+        assert_eq!(m.effects_gain(), 0.0);
+        // The levels underneath are remembered, not zeroed.
+        assert_eq!((m.music(), m.effects()), (55, 35));
+
+        // Changing a level while muted stays silent but is kept.
+        assert!(m.set_music(90));
+        m.apply(&music, sinks());
+        assert_eq!(music.gain(), 0.0);
+        assert_eq!(m.music(), 90);
+
+        // Unmute restores the levels underneath.
+        assert!(!m.toggle_mute());
+        m.apply(&music, sinks());
+        assert_eq!(music.gain(), music_gain(90));
+        assert_eq!(voice.gain(), effects_gain(35));
+    }
+
+    #[test]
+    fn mute_and_levels_are_independent_across_resets() {
+        let mut m = VolumeMixer::new(0, 100);
+        assert_eq!(m.music_gain(), 0.0);
+        m.set_muted(true);
+        m.set_muted(false);
+        assert_eq!(m.music_gain(), 0.0, "a 0 level stays silent after unmuting");
+        assert_eq!(m.effects_gain(), SFX_MAX_GAIN);
+
+        // Re-creating a mixer for a new engine keeps the defaults.
+        let fresh = VolumeMixer::default();
+        assert_eq!(fresh.music_gain(), MUSIC_MAX_GAIN);
+        assert_eq!(fresh.effects_gain(), SFX_MAX_GAIN);
     }
 
     #[test]

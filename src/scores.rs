@@ -14,6 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::audio;
 use crate::config;
 use crate::game::campaign::LEVEL_COUNT;
 use crate::render::cursor::CursorSetting;
@@ -131,7 +132,28 @@ fn deserialize_cursor_setting<'de, D: serde::Deserializer<'de>>(
         .unwrap_or(CursorSetting::On))
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// A 0..=100 volume preference, tolerant of hand-edited files: a number or a
+/// numeric string is snapped to the 5% grid and clamped, anything else (or a
+/// missing field) falls back to `default_volume` so a single bad value can
+/// never drop the rest of the table.
+fn deserialize_volume<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u8, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let raw = value
+        .as_u64()
+        .map(|n| n.min(255) as u8)
+        .or_else(|| value.as_str().and_then(|s| s.trim().parse::<u8>().ok()));
+    Ok(raw.map(audio::snap_percent).unwrap_or(default_volume()))
+}
+
+/// Full volume: the balance every build before the sliders shipped had.
+fn default_volume() -> u8 {
+    100
+}
+
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScoreTable {
     #[serde(default)]
     pub entries: Vec<ScoreEntry>,
@@ -154,6 +176,28 @@ pub struct ScoreTable {
         deserialize_with = "deserialize_cursor_setting"
     )]
     pub cheese_cursor: CursorSetting,
+    /// Music level, 0..=100 in steps of 5. Missing ⇒ `100`, today's balance.
+    #[serde(default = "default_volume", deserialize_with = "deserialize_volume")]
+    pub music_volume: u8,
+    /// Effects level, 0..=100 in steps of 5. Missing ⇒ `100`.
+    #[serde(default = "default_volume", deserialize_with = "deserialize_volume")]
+    pub effects_volume: u8,
+}
+
+impl Default for ScoreTable {
+    /// An empty table at full volume: the balance every build before the
+    /// sliders shipped had. (The derive would zero the volume fields and start
+    /// the game silent.)
+    fn default() -> Self {
+        ScoreTable {
+            entries: Vec::new(),
+            progress: CampaignProgress::default(),
+            minimap_size: MinimapSize::default(),
+            cheese_cursor: CursorSetting::default(),
+            music_volume: default_volume(),
+            effects_volume: default_volume(),
+        }
+    }
 }
 
 impl ScoreTable {
@@ -182,6 +226,8 @@ impl ScoreTable {
     fn normalize(&mut self) {
         self.entries.sort_by_key(|e| std::cmp::Reverse(e.score));
         self.entries.truncate(MAX_ENTRIES);
+        self.music_volume = audio::snap_percent(self.music_volume);
+        self.effects_volume = audio::snap_percent(self.effects_volume);
     }
 
     pub fn save(&self) {
@@ -476,6 +522,43 @@ mod tests {
             let reloaded = ScoreTable::parse(&t.to_json());
             assert_eq!(reloaded.minimap_size, size);
         }
+    }
+
+    #[test]
+    fn volumes_persist_and_old_files_load_at_full() {
+        // A file written before the sliders existed has no volume fields.
+        let missing = ScoreTable::parse(r#"{"entries":[]}"#);
+        assert_eq!(missing.music_volume, 100);
+        assert_eq!(missing.effects_volume, 100);
+        assert_eq!(missing.best(), 0);
+
+        // Hand-edited values are snapped to the 5% grid and clamped, without
+        // dropping the scores beside them.
+        let edited = ScoreTable::parse(
+            r#"{"entries":[{"score":700,"time":10.0,"level":2,"map":"Sewer","won":false}],
+                "music_volume":42,"effects_volume":"17"}"#,
+        );
+        assert_eq!(edited.music_volume, 40);
+        assert_eq!(edited.effects_volume, 15);
+        assert_eq!(edited.best(), 700);
+        for bad in [
+            r#"{"music_volume":400,"effects_volume":-1}"#,
+            r#"{"music_volume":null,"effects_volume":"loud"}"#,
+            r#"{"music_volume":{},"effects_volume":true}"#,
+        ] {
+            let parsed = ScoreTable::parse(bad);
+            assert_eq!(parsed.music_volume, 100, "bad value falls back to 100");
+            assert_eq!(parsed.effects_volume, 100, "bad value falls back to 100");
+        }
+
+        // Valid settings survive a save/load round trip next to the scores.
+        let mut t = ScoreTable::default();
+        t.insert(e(500));
+        t.music_volume = 35;
+        t.effects_volume = 80;
+        let back = ScoreTable::parse(&t.to_json());
+        assert_eq!((back.music_volume, back.effects_volume), (35, 80));
+        assert_eq!(back.best(), 500);
     }
 
     #[test]

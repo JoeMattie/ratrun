@@ -23,6 +23,26 @@ use crate::render::palette::{self, Rgb, COAT, EDGE, MUTED, PLATE, TAIL, TRACK};
 /// Maximum simultaneous transient callouts held on the HUD.
 pub const MAX_CALLOUTS: usize = 3;
 
+/// How long a volume quick-key read-out stays in the status pill slot.
+pub const VOLUME_FLASH_SECS: f32 = 1.6;
+
+/// Which of the two independent channels a read-out is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VolumeChannel {
+    Music,
+    Effects,
+}
+
+impl VolumeChannel {
+    /// Short label for the HUD pill (`MUSIC` / `FX`).
+    pub fn tag(self) -> &'static str {
+        match self {
+            VolumeChannel::Music => "MUSIC",
+            VolumeChannel::Effects => "FX",
+        }
+    }
+}
+
 /// How close to `director::BOSS_TIME` the build-up starts reading as urgent.
 ///
 /// The clock counts *down to the boss*, not to the end of the run (the level
@@ -252,6 +272,10 @@ pub struct HudState {
     pub streak_kills: u32,
     streak_timer: f32,
 
+    /// Transient "MUSIC 60%" read-out after a volume quick key, drawn in the
+    /// top rail's status-pill slot for [`VOLUME_FLASH_SECS`].
+    pub volume_flash: Option<(VolumeChannel, u8, f32)>,
+
     /// Fixed-size callout slots (zero allocation on steady-state pushes).
     pub callouts: [CalloutSlot; MAX_CALLOUTS],
     /// Telemetry snapshot updated by `App` each tick.
@@ -303,6 +327,7 @@ impl Default for HudState {
             next_kill_milestone: 50,
             streak_kills: 0,
             streak_timer: 0.0,
+            volume_flash: None,
             callouts: Default::default(),
             telemetry: HudTelemetry::default(),
             maze_claimed_bits: 0,
@@ -336,6 +361,7 @@ impl HudState {
         self.next_kill_milestone = 50;
         self.streak_kills = 0;
         self.streak_timer = 0.0;
+        self.volume_flash = None;
         for slot in &mut self.callouts {
             slot.active = false;
             slot.timer = 0.0;
@@ -456,7 +482,24 @@ impl HudState {
         }
     }
 
-    /// Notify the HUD that the player just equipped an upgrade from the level-up screen.
+    /// Show a brief "MUSIC 60%" / "FX 60%" read-out after a volume change.
+    pub fn notify_volume(&mut self, channel: VolumeChannel, percent: u8) {
+        self.volume_flash = Some((channel, percent.min(100), VOLUME_FLASH_SECS));
+    }
+
+    /// Age the volume read-out. Called by [`Self::tick`] during play and by the
+    /// app on the other screens, so a read-out set on the title or the options
+    /// plate fades instead of lingering until the next run starts.
+    pub fn tick_volume_flash(&mut self, dt: f32) {
+        if let Some((channel, pct, left)) = self.volume_flash {
+            self.volume_flash = if left - dt.max(0.0) > 0.0 {
+                Some((channel, pct, left - dt.max(0.0)))
+            } else {
+                None
+            };
+        }
+    }
+
     pub fn notify_upgrade(&mut self, title: &str) {
         self.level_flash = 0.9;
         self.push_callout(CalloutKind::Upgrade, "EQUIPPED", title, 2.5);
@@ -467,6 +510,7 @@ impl HudState {
         let dt = dt.clamp(0.0, 0.1);
         self.clock += dt;
         self.telemetry.muted = muted;
+        self.tick_volume_flash(dt);
 
         let hp_ratio = (world.player.hp.max(0.0) / world.player.max_hp().max(1.0)).clamp(0.0, 1.0);
         if !self.initialized {
@@ -787,9 +831,14 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
         }
     }
 
-    // Build right-aligned status pill text.
+    // Build right-aligned status pill text. A volume quick-key read-out owns
+    // the slot while it is fresh: it is a direct answer to a press the player
+    // just made, so it outranks the ambient status.
     refill(&mut state.right_badge, |b| {
-        if boss_phase {
+        let flashing = state.volume_flash;
+        if let Some((channel, pct, _)) = flashing {
+            let _ = write!(b, " {} {}% ", channel.tag(), pct);
+        } else if boss_phase {
             if boss_alive {
                 b.push_str(" ◆ APEX ACTIVE ");
             } else {
@@ -1063,6 +1112,14 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(EDGE).bg(PLATE)
+        };
+        let style = if state.volume_flash.is_some() {
+            Style::default()
+                .fg(TRAIL_GOLD)
+                .bg(PLATE)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            style
         };
         buf.set_stringn(bx, area.y, &state.right_badge, badge_w as usize, style);
     }

@@ -7,7 +7,7 @@ use ratatui::style::{Color, Style};
 use ratatui::widgets::Block;
 use ratatui::Frame;
 
-use crate::audio::{AudioEngine, Sfx};
+use crate::audio::{self, AudioEngine, Sfx};
 use crate::game::campaign::{self, CampaignState, KeepKind, Keepable};
 use crate::game::gem::PickupKind;
 use crate::game::level::Theme;
@@ -19,7 +19,7 @@ use crate::math::Vec2;
 use crate::render::campaign as campaign_ui;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette;
-use crate::render::{cursor, hud, menu, minimap, minimap_source, overlay};
+use crate::render::{cursor, hud, menu, minimap, minimap_source, options, overlay};
 use crate::scores::{ScoreEntry, ScoreTable};
 
 use menu::{HitMap, RunSummary, Target};
@@ -32,6 +32,37 @@ const BACKDROP: Color = Color::Rgb(11, 15, 17);
 /// already played the boss's own death sting on the killing tick, so the
 /// fanfare follows it a beat later rather than stacking on top of it.
 const FANFARE_DELAY_SECS: f32 = 0.55;
+
+/// The title menu's rows, in order: START RUN, the sector row, OPTIONS, QUIT.
+const TITLE_ROWS: usize = 4;
+const TITLE_ACTIONS: [Target; TITLE_ROWS] = [
+    Target::Start,
+    Target::Sectors,
+    Target::Options,
+    Target::Quit,
+];
+
+/// Environment pins for scripted runs (`0..=100`). They override the saved
+/// levels for the session without being written back over them.
+const MUSIC_VOLUME_ENV: &str = "RATRUN_MUSIC_VOLUME";
+const SFX_VOLUME_ENV: &str = "RATRUN_SFX_VOLUME";
+
+/// Minimum gap between effects-volume preview blips, so holding a key or
+/// dragging a slider cannot machine-gun the same effect.
+const PREVIEW_COOLDOWN_SECS: f32 = 0.12;
+
+/// Parse a `RATRUN_*_VOLUME` override: `0..=100`, an optional trailing `%`
+/// and surrounding spaces tolerated. Out-of-range and non-numeric values are
+/// ignored (the saved preference stands).
+fn parse_volume_env(raw: &str) -> Option<u8> {
+    let trimmed = raw.trim().trim_end_matches('%').trim();
+    trimmed.parse::<u8>().ok().map(audio::snap_percent)
+}
+
+/// Read one volume override from the process environment.
+fn env_volume(name: &str) -> Option<u8> {
+    std::env::var(name).ok().as_deref().and_then(parse_volume_env)
+}
 
 /// The level-intro label for a single-sector practice run.
 const PRACTICE_BLURB: &str = "PRACTICE RUN — this sector alone, on the default loadout. \
@@ -50,6 +81,9 @@ enum Screen {
     Playing,
     LevelUp,
     Paused,
+    /// Music/effects volumes and the scattered preferences, opened from the
+    /// title menu or the pause screen (see [`Screen::options_return`]).
+    Options,
     /// A non-final level's boss died: the sector-cleared plate.
     LevelComplete,
     /// The keep-three manifest before the next campaign level.
@@ -74,6 +108,7 @@ impl Screen {
             Screen::Playing => "Playing",
             Screen::LevelUp => "LevelUp",
             Screen::Paused => "Paused",
+            Screen::Options => "Options",
             Screen::LevelComplete => "LevelComplete",
             Screen::KeepThree => "KeepThree",
             Screen::Victory => "Victory",
@@ -168,6 +203,28 @@ pub struct App {
     hud: hud::HudState,
     hits: HitMap,
     muted: bool,
+    /// Live music level (0..=100, steps of 5).
+    ///
+    /// This is the app's record of what the engine's mixer holds, for the same
+    /// reason as `music_intensity`: `AudioEngine::new()` returns `None` without
+    /// an audio device — every test and headless run — so the level the player
+    /// set would otherwise be unobservable (and the HUD read-out impossible).
+    music_volume: u8,
+    /// Live effects level (0..=100, steps of 5).
+    effects_volume: u8,
+    /// `RATRUN_MUSIC_VOLUME` / `RATRUN_SFX_VOLUME` startup pins. A pinned
+    /// channel is applied but never written back over the saved preference.
+    music_env: Option<u8>,
+    effects_env: Option<u8>,
+    /// Options screen: the selected row (`0..options::ROW_COUNT`).
+    options_row: usize,
+    /// Where Esc/Back on the options screen returns to (`Title` or `Paused`).
+    options_return: Screen,
+    /// Cooldown before another effects-volume preview blip may play.
+    preview_cd: f32,
+    /// Preview blips played so far (lets tests see the rate limit with no
+    /// audio device; see `music_volume`).
+    previews: u32,
     damage_taken: f32,
     dashes_used: u32,
     heals_picked: u32,
@@ -204,6 +261,13 @@ impl App {
         persist: bool,
         fixed_seed: Option<u64>,
     ) -> Self {
+        // Environment pins resolve once, before the store is moved into the
+        // app; a pinned channel's saved value is left untouched (see
+        // `set_music_volume`).
+        let music_env = env_volume(MUSIC_VOLUME_ENV);
+        let effects_env = env_volume(SFX_VOLUME_ENV);
+        let music_volume = audio::snap_percent(music_env.unwrap_or(scores.music_volume));
+        let effects_volume = audio::snap_percent(effects_env.unwrap_or(scores.effects_volume));
         let mut app = App {
             screen: Screen::Title,
             should_quit: false,
@@ -247,6 +311,14 @@ impl App {
             hud: hud::HudState::default(),
             hits: HitMap::default(),
             muted: false,
+            music_volume,
+            effects_volume,
+            music_env,
+            effects_env,
+            options_row: options::MUSIC_ROW,
+            options_return: Screen::Title,
+            preview_cd: 0.0,
+            previews: 0,
             damage_taken: 0.0,
             dashes_used: 0,
             heals_picked: 0,
@@ -261,6 +333,7 @@ impl App {
             cursor: cursor::CursorState::default(),
             cursor_env: cursor::env_override(),
         };
+        app.push_volumes();
         app.menu_music();
         app
     }
@@ -553,6 +626,19 @@ impl App {
                         {
                             self.step_minimap_size(step);
                         }
+                        // The wheel steps whichever options row it is over
+                        // (scroll up raises a level, scroll down lowers it).
+                        Screen::Options => {
+                            let row = match target {
+                                Some(Target::OptionsBar(bar)) => bar,
+                                Some(Target::OptionsRow(i)) => i,
+                                _ => options::ROW_COUNT,
+                            };
+                            if row < options::ROW_COUNT {
+                                self.options_row = row;
+                                self.scroll_option(row, step);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -568,7 +654,28 @@ impl App {
                         Some(Target::Sectors | Target::PreviousSector | Target::NextSector) => {
                             self.menu_idx = 1
                         }
-                        Some(Target::Quit) => self.menu_idx = 2,
+                        Some(Target::Options) => self.menu_idx = 2,
+                        Some(Target::Quit) => self.menu_idx = 3,
+                        Some(Target::OptionsRow(i)) => {
+                            self.options_row = i.min(options::ROW_COUNT - 1)
+                        }
+                        Some(Target::OptionsBar(bar)) => {
+                            self.options_row = bar.min(options::ROW_COUNT - 1);
+                            // A press or drag on the track sets the level from
+                            // the pointer column; handled here so the row's
+                            // click-to-step does not run on top of it.
+                            if matches!(
+                                ev.kind,
+                                MouseEventKind::Down(MouseButton::Left)
+                                    | MouseEventKind::Drag(MouseButton::Left)
+                            ) {
+                                if let Some(track) = self.hits.rect_for(Target::OptionsBar(bar)) {
+                                    let level = options::percent_at(track, ev.column);
+                                    self.set_option_bar(bar, level);
+                                }
+                                return None;
+                            }
+                        }
                         Some(Target::SelectSector(i)) => {
                             self.select_idx = i.min(campaign::LEVEL_COUNT - 1)
                         }
@@ -593,16 +700,48 @@ impl App {
         self.tick_stings(dt);
         // Global mute toggle.
         if self.input.pressed_char('m') {
-            self.muted = !self.muted;
-            self.hud.telemetry.muted = self.muted;
-            if let Some(a) = self.audio.as_mut() {
-                a.toggle_mute();
-            }
+            self.toggle_mute();
         }
         // Global cheese-cursor preference toggle ('c'; ignores Ctrl+C).
         let cursor_toggled = self.input.pressed_unmodified_char('c');
         if cursor_toggled {
             self.toggle_cheese_cursor();
+        }
+        // Volume quick keys, live on every screen so a scripted run can set a
+        // level without navigating: `[` / `]` step music, `-` / `=` step
+        // effects (both in 5% steps). Discrete presses only, so holding a key
+        // never runs the level away.
+        let mut volume_changed = false;
+        if self.input.pressed_char('[') {
+            self.set_music_volume(options::step_volume(self.music_volume, -1));
+            volume_changed = true;
+        }
+        if self.input.pressed_char(']') {
+            self.set_music_volume(options::step_volume(self.music_volume, 1));
+            volume_changed = true;
+        }
+        if self.input.pressed_char('-') {
+            self.set_effects_volume(options::step_volume(self.effects_volume, -1), true);
+            volume_changed = true;
+        }
+        if self.input.pressed_char('=') {
+            self.set_effects_volume(options::step_volume(self.effects_volume, 1), true);
+            volume_changed = true;
+        }
+        // Preview blips are rate limited so a mouse drag across the slider
+        // cannot machine-gun one effect per cell.
+        self.preview_cd = (self.preview_cd - dt.max(0.0)).max(0.0);
+        // The HUD read-out ages with the frame clock on every screen; during
+        // play `hud.tick` advances it too.
+        if !matches!(self.screen, Screen::Playing) {
+            self.hud.tick_volume_flash(dt);
+        }
+        // Options: the title row and the pause legend open it; nothing else does.
+        if !volume_changed && self.input.pressed_char('o') {
+            let from = self.screen;
+            if matches!(from, Screen::Title | Screen::Paused) {
+                self.open_options(from);
+            }
         }
         let previous = self.screen;
         let click = self.mouse_action();
@@ -618,6 +757,7 @@ impl App {
             Screen::Playing => self.update_playing(dt, click),
             Screen::LevelUp => self.update_levelup(click),
             Screen::Paused => self.update_paused(click),
+            Screen::Options => self.update_options(click),
             Screen::LevelComplete => self.update_levelcomplete(click),
             Screen::KeepThree => self.update_keep_three(click),
             Screen::Victory => self.update_victory(click),
@@ -664,6 +804,225 @@ impl App {
         self.sfx(Sfx::UiMove);
     }
 
+    // ---- Volume ---------------------------------------------------------
+
+    /// The live music level (`0..=100`, steps of 5).
+    pub fn music_volume(&self) -> u8 {
+        self.music_volume
+    }
+
+    /// The live effects level (`0..=100`, steps of 5).
+    pub fn effects_volume(&self) -> u8 {
+        self.effects_volume
+    }
+
+    /// Whether the master mute is engaged.
+    pub fn muted(&self) -> bool {
+        self.muted
+    }
+
+    /// How many effects-volume preview blips have played (tests read this to
+    /// see the rate limit with no audio device).
+    pub fn preview_blips(&self) -> u32 {
+        self.previews
+    }
+
+    /// Push both levels and the mute to the engine. A no-op without a device:
+    /// the app's own records stay authoritative so the options screen and the
+    /// HUD read-out work on every headless run.
+    fn push_volumes(&mut self) {
+        let Some(a) = self.audio.as_mut() else {
+            return;
+        };
+        a.set_muted(self.muted);
+        a.set_music_volume(self.music_volume);
+        a.set_effects_volume(self.effects_volume);
+    }
+
+    /// Save the levels beside the scores (in-memory only when `persist` is
+    /// false). A channel pinned by its environment variable is applied but
+    /// never written back over the saved preference.
+    fn save_volumes(&mut self) {
+        if self.music_env.is_none() {
+            self.scores.music_volume = self.music_volume;
+        }
+        if self.effects_env.is_none() {
+            self.scores.effects_volume = self.effects_volume;
+        }
+        if self.persist {
+            self.scores.save();
+        }
+    }
+
+    /// Set the music level. The playing track's sink takes the new gain at
+    /// once — no restart, no gap.
+    fn set_music_volume(&mut self, percent: u8) {
+        let next = audio::snap_percent(percent);
+        if next == self.music_volume {
+            return;
+        }
+        self.music_volume = next;
+        if let Some(a) = self.audio.as_mut() {
+            a.set_music_volume(next);
+        }
+        self.save_volumes();
+        self.hud.notify_volume(hud::VolumeChannel::Music, next);
+    }
+
+    /// Set the effects level. The voices already sounding and every new voice
+    /// take the new gain; `preview` plays a short blip so the change is
+    /// audible on the options screen.
+    fn set_effects_volume(&mut self, percent: u8, preview: bool) {
+        let next = audio::snap_percent(percent);
+        if next == self.effects_volume {
+            return;
+        }
+        self.effects_volume = next;
+        if let Some(a) = self.audio.as_mut() {
+            a.set_effects_volume(next);
+        }
+        self.save_volumes();
+        self.hud.notify_volume(hud::VolumeChannel::Effects, next);
+        if preview {
+            self.play_volume_preview();
+        }
+    }
+
+    /// Play the effects-volume preview blip when the rate limit allows it.
+    fn play_volume_preview(&mut self) {
+        if self.preview_cd > 0.0 {
+            return;
+        }
+        self.preview_cd = PREVIEW_COOLDOWN_SECS;
+        self.previews = self.previews.saturating_add(1);
+        self.sfx(Sfx::Gem);
+    }
+
+    /// Flip the master mute, keeping both levels underneath so unmuting
+    /// restores exactly what the player had.
+    fn toggle_mute(&mut self) {
+        self.muted = !self.muted;
+        self.hud.telemetry.muted = self.muted;
+        if let Some(a) = self.audio.as_mut() {
+            a.set_muted(self.muted);
+        }
+        self.sfx(Sfx::UiMove);
+    }
+
+    /// Open the options screen from `from` (the title or the pause screen),
+    /// remembering where Back returns to.
+    fn open_options(&mut self, from: Screen) {
+        self.options_return = if matches!(from, Screen::Paused) {
+            Screen::Paused
+        } else {
+            Screen::Title
+        };
+        self.options_row = options::MUSIC_ROW;
+        self.screen = Screen::Options;
+        // Music stays audible on the options screen wherever it is opened
+        // from: the title's calm track and the paused level's track both keep
+        // playing (pause never stops or ducks the synth), so the music slider
+        // is audible without restarting anything.
+    }
+
+    /// Leave the options screen for wherever it was opened from.
+    fn close_options(&mut self) {
+        self.sfx(Sfx::UiSelect);
+        self.screen = self.options_return;
+    }
+
+    /// Options screen: Up/Down choose a row, Left/Right change it, Enter on
+    /// Back or Esc leaves. Mouse actions arrive as targets from `mouse_action`.
+    fn update_options(&mut self, click: Option<Target>) {
+        let row = self.options_row.min(options::ROW_COUNT - 1);
+        let mut chosen = None;
+        match click {
+            Some(Target::OptionsRow(i)) => {
+                self.options_row = i.min(options::ROW_COUNT - 1);
+                chosen = Some(Target::OptionsRow(self.options_row));
+            }
+            Some(Target::OptionsBack) => {
+                self.close_options();
+                return;
+            }
+            Some(Target::OptionsBar(_)) => {
+                // The bar click already set the level in `mouse_action`.
+            }
+            _ => {}
+        }
+        if self.input.just_pressed(KeyCode::Esc) {
+            self.close_options();
+            return;
+        }
+        if self.input.just_pressed(KeyCode::Up) {
+            self.options_row = (row + options::ROW_COUNT - 1) % options::ROW_COUNT;
+            self.sfx(Sfx::UiMove);
+        }
+        if self.input.just_pressed(KeyCode::Down) {
+            self.options_row = (row + 1) % options::ROW_COUNT;
+            self.sfx(Sfx::UiMove);
+        }
+        let row = self.options_row;
+        if self.input.just_pressed(KeyCode::Left) {
+            self.adjust_option(row, -1);
+        }
+        if self.input.just_pressed(KeyCode::Right) {
+            self.adjust_option(row, 1);
+        }
+        if row == options::BACK_ROW
+            && (self.input.just_pressed(KeyCode::Enter) || chosen.is_some())
+        {
+            self.close_options();
+            return;
+        }
+        if chosen.is_some() && row != options::BACK_ROW {
+            self.adjust_option(row, 1);
+        }
+    }
+
+    /// Step one options row by `dir` (`-1` left, `+1` right).
+    fn adjust_option(&mut self, row: usize, dir: isize) {
+        match row {
+            options::MUSIC_ROW => {
+                self.set_music_volume(options::step_volume(self.music_volume, dir));
+            }
+            options::EFFECTS_ROW => {
+                self.set_effects_volume(options::step_volume(self.effects_volume, dir), true);
+            }
+            options::MINIMAP_ROW => {
+                let next = options::step_minimap(self.scores.minimap_size, dir as i32);
+                self.set_minimap_size(next);
+                self.sfx(Sfx::UiMove);
+            }
+            options::CURSOR_ROW => {
+                self.toggle_cheese_cursor();
+            }
+            options::MUTE_ROW => {
+                self.toggle_mute();
+            }
+            _ => {}
+        }
+    }
+
+    /// Step one options row from a mouse-wheel delta (`step > 0` is scroll
+    /// down). Scroll up raises a volume and grows the minimap; scroll down
+    /// lowers a volume and shrinks the minimap.
+    fn scroll_option(&mut self, row: usize, step: isize) {
+        match row {
+            options::MUSIC_ROW | options::EFFECTS_ROW => self.adjust_option(row, -step),
+            options::MINIMAP_ROW => self.adjust_option(row, step),
+            _ => self.adjust_option(row, 1),
+        }
+    }
+
+    /// Set a volume slider from a pointer column on its track.
+    fn set_option_bar(&mut self, bar: usize, percent: u8) {
+        match bar {
+            options::MUSIC_BAR => self.set_music_volume(percent),
+            _ => self.set_effects_volume(percent, true),
+        }
+    }
+
     fn update_title(&mut self, click: Option<Target>) {
         // A click selects its own action, independent of simultaneous keys.
         let action = if click.is_some() {
@@ -674,11 +1033,11 @@ impl App {
             Some(Target::Story)
         } else {
             if self.input.just_pressed(KeyCode::Up) {
-                self.menu_idx = (self.menu_idx + 2) % 3;
+                self.menu_idx = (self.menu_idx + TITLE_ROWS - 1) % TITLE_ROWS;
                 self.sfx(Sfx::UiMove);
             }
             if self.input.just_pressed(KeyCode::Down) {
-                self.menu_idx = (self.menu_idx + 1) % 3;
+                self.menu_idx = (self.menu_idx + 1) % TITLE_ROWS;
                 self.sfx(Sfx::UiMove);
             }
             if self.input.just_pressed(KeyCode::Left) {
@@ -689,7 +1048,7 @@ impl App {
             }
             self.input
                 .just_pressed(KeyCode::Enter)
-                .then(|| [Target::Start, Target::Sectors, Target::Quit][self.menu_idx])
+                .then(|| TITLE_ACTIONS[self.menu_idx])
         };
         match action {
             Some(Target::Story) => {
@@ -706,6 +1065,10 @@ impl App {
                 // The sector select opens on the sector the title shows.
                 self.sfx(Sfx::UiSelect);
                 self.screen = Screen::SectorSelect;
+            }
+            Some(Target::Options) => {
+                self.sfx(Sfx::UiSelect);
+                self.open_options(Screen::Title);
             }
             Some(Target::NextSector) => self.cycle_sector(1),
             Some(Target::PreviousSector) => self.cycle_sector(-1),
@@ -1254,6 +1617,11 @@ impl App {
     }
 
     fn update_paused(&mut self, click: Option<Target>) {
+        if click == Some(Target::Options) || self.input.pressed_char('o') {
+            self.sfx(Sfx::UiSelect);
+            self.open_options(Screen::Paused);
+            return;
+        }
         if click == Some(Target::Resume)
             || self.input.just_pressed(KeyCode::Esc)
             || self.input.pressed_char('p')
@@ -1385,6 +1753,27 @@ impl App {
                 );
             }
             Screen::SectorSelect => self.draw_sector_select(frame, area),
+            Screen::Options => {
+                // Draw whatever opened the screen underneath, then the plate:
+                // the frozen play field behind the pause overlay, or the title.
+                if self.options_return == Screen::Paused {
+                    self.draw_game(frame, area);
+                } else {
+                    self.ensure_rat_art(area);
+                    menu::draw_title(
+                        frame,
+                        area,
+                        self.theme(),
+                        self.menu_idx,
+                        self.sector(),
+                        self.scores.level_unlocked(self.sector()),
+                        &self.scores,
+                        &self.rat_art,
+                        &mut self.hits,
+                    );
+                }
+                self.draw_options(frame, area);
+            }
             Screen::Story => {
                 self.ensure_rat_art(area);
                 menu::draw_title(
@@ -1527,6 +1916,20 @@ impl App {
         };
         let area = frame.area();
         cursor::draw(frame.buffer_mut(), area, view);
+    }
+
+    /// Draw the options plate over the screen that opened it.
+    fn draw_options(&mut self, frame: &mut Frame, area: Rect) {
+        let view = options::OptionsView {
+            music: self.music_volume,
+            effects: self.effects_volume,
+            minimap: self.scores.minimap_size,
+            cursor: self.scores.cheese_cursor,
+            muted: self.muted,
+            row: self.options_row,
+            accent: options::accent_from(menu::material(self.theme())),
+        };
+        options::draw(frame, area, &view, &mut self.hits);
     }
 
     // ---- Campaign plates -------------------------------------------------
@@ -4661,6 +5064,424 @@ mod tests {
             dump(&buf, w, h, "levelup-256", card_pos, GlyphSet::Unicode, ColorDepth::Ansi256);
             dump(&buf, w, h, "levelup-16", card_pos, GlyphSet::Unicode, ColorDepth::Ansi16);
             dump(&buf, w, h, "levelup-safe", card_pos, GlyphSet::Safe, ColorDepth::Ansi256);
+        }
+    }
+
+    // ---- Separate music/effects volumes ---------------------------------
+
+    /// Guard tests that mutate the volume environment overrides so parallel
+    /// tests never race on the process environment.
+    static VOLUME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The title's OPTIONS row is the third band: two Downs from START RUN.
+    fn title_to_options(h: &mut Harness) {
+        h.frame(&[]);
+        h.frame(&[KeyCode::Down]);
+        h.frame(&[KeyCode::Down]);
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "Options");
+    }
+
+    #[test]
+    fn quick_keys_step_both_volumes_and_show_the_hud_readout() {
+        let _guard = VOLUME_ENV_LOCK.lock().unwrap();
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        assert_eq!(h.app.music_volume(), 100);
+        assert_eq!(h.app.effects_volume(), 100);
+
+        // `[` / `]` step music; `-` / `=` step effects.
+        h.frame(&[KeyCode::Char('[')]);
+        assert_eq!(h.app.music_volume(), 95, "`[` lowers music one step");
+        let flash = h.app.hud.volume_flash.expect("music read-out");
+        assert_eq!(flash.0, hud::VolumeChannel::Music);
+        assert_eq!(flash.1, 95);
+        let text = h.frame(&[]);
+        assert!(text.contains("MUSIC 95%"), "music read-out missing: {text}");
+
+        h.frame(&[KeyCode::Char(']')]);
+        assert_eq!(h.app.music_volume(), 100);
+        h.frame(&[KeyCode::Char('-')]);
+        assert_eq!(h.app.effects_volume(), 95, "`-` lowers effects one step");
+        let text = h.frame(&[]);
+        assert!(text.contains("FX 95%"), "effects read-out missing: {text}");
+        h.frame(&[KeyCode::Char('=')]);
+        assert_eq!(h.app.effects_volume(), 100);
+
+        // Clamp at the ends rather than wrapping.
+        for _ in 0..25 {
+            h.frame(&[KeyCode::Char('[')]);
+        }
+        assert_eq!(h.app.music_volume(), 0);
+        for _ in 0..25 {
+            h.frame(&[KeyCode::Char(']')]);
+        }
+        assert_eq!(h.app.music_volume(), 100);
+        for _ in 0..25 {
+            h.frame(&[KeyCode::Char('-')]);
+        }
+        assert_eq!(h.app.effects_volume(), 0);
+        for _ in 0..25 {
+            h.frame(&[KeyCode::Char('=')]);
+        }
+        assert_eq!(h.app.effects_volume(), 100);
+    }
+
+    #[test]
+    fn mute_sits_on_top_of_the_two_levels_and_restores_them() {
+        let _guard = VOLUME_ENV_LOCK.lock().unwrap();
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        h.frame(&[KeyCode::Char('[')]);
+        h.frame(&[KeyCode::Char('-')]);
+        assert_eq!((h.app.music_volume(), h.app.effects_volume()), (95, 95));
+        assert!(!h.app.muted());
+
+        h.frame(&[KeyCode::Char('m')]);
+        assert!(h.app.muted());
+        assert_eq!(
+            (h.app.music_volume(), h.app.effects_volume()),
+            (95, 95),
+            "mute must not change the levels underneath"
+        );
+        assert!(h.app.hud.telemetry.muted);
+
+        h.frame(&[KeyCode::Char('m')]);
+        assert!(!h.app.muted());
+        assert_eq!((h.app.music_volume(), h.app.effects_volume()), (95, 95));
+    }
+
+    #[test]
+    fn options_opens_from_the_title_menu_and_back_returns_there() {
+        let _guard = VOLUME_ENV_LOCK.lock().unwrap();
+        let mut h = Harness::new(80, 24);
+        title_to_options(&mut h);
+        let text = h.frame(&[]);
+        for needle in ["MUSIC", "EFFECTS", "MINIMAP", "BACK"] {
+            assert!(text.contains(needle), "options missing {needle:?}: {text}");
+        }
+        assert!(text.contains("95%" ) || text.contains("100%"), "no percentage read-out");
+        h.frame(&[KeyCode::Esc]);
+        assert_eq!(h.app.screen.name_for_test(), "Title");
+        assert_eq!(h.app.menu_idx, 2, "the title keeps its OPTIONS row");
+    }
+
+    #[test]
+    fn options_opens_from_pause_and_back_returns_to_the_frozen_run() {
+        let _guard = VOLUME_ENV_LOCK.lock().unwrap();
+        let mut h = Harness::new(80, 30);
+        h.enter_playing();
+        h.frame(&[KeyCode::Esc]);
+        assert_eq!(h.app.screen.name_for_test(), "Paused");
+        let elapsed = h.app.world.as_ref().unwrap().elapsed;
+
+        h.frame(&[KeyCode::Char('o')]);
+        assert_eq!(h.app.screen.name_for_test(), "Options");
+        let text = h.frame(&[]);
+        assert!(text.contains("MUSIC"), "options plate missing: {text}");
+        // The run stays frozen while the plate is open.
+        for _ in 0..10 {
+            h.frame(&[]);
+        }
+        assert_eq!(h.app.world.as_ref().unwrap().elapsed, elapsed);
+
+        h.frame(&[KeyCode::Esc]);
+        assert_eq!(h.app.screen.name_for_test(), "Paused");
+
+        // Enter on the Back row also leaves, returning to the pause plate.
+        h.frame(&[KeyCode::Char('o')]);
+        assert_eq!(h.app.screen.name_for_test(), "Options");
+        for _ in 0..options::BACK_ROW {
+            h.frame(&[KeyCode::Down]);
+        }
+        assert_eq!(h.app.options_row, options::BACK_ROW);
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "Paused");
+
+        h.frame(&[KeyCode::Esc]);
+        assert_eq!(h.app.screen.name_for_test(), "Playing");
+    }
+
+    #[test]
+    fn options_mouse_clicks_and_drags_the_sliders() {
+        let _guard = VOLUME_ENV_LOCK.lock().unwrap();
+        let mut h = Harness::new(80, 24);
+        title_to_options(&mut h);
+        h.frame(&[]);
+        let music = h
+            .app
+            .hits
+            .rect_for(Target::OptionsBar(options::MUSIC_BAR))
+            .expect("music slider rect");
+        // Click the left end: silent.
+        h.events(
+            &[],
+            &[(MouseEventKind::Down(MouseButton::Left), (music.x, music.y))],
+        );
+        assert_eq!(h.app.music_volume(), 0, "left edge is 0%");
+        // Drag to the right end: full.
+        h.events(
+            &[],
+            &[(
+                MouseEventKind::Drag(MouseButton::Left),
+                (music.right() - 1, music.y),
+            )],
+        );
+        assert_eq!(h.app.music_volume(), 100, "right edge is 100%");
+
+        // A click on the effects row's slider also moves it.
+        let effects = h
+            .app
+            .hits
+            .rect_for(Target::OptionsBar(options::EFFECTS_BAR))
+            .expect("effects slider rect");
+        h.events(
+            &[],
+            &[(
+                MouseEventKind::Down(MouseButton::Left),
+                (effects.x + effects.width / 2, effects.y),
+            )],
+        );
+        assert!(
+            (40..=60).contains(&h.app.effects_volume()),
+            "midpoint click should land near 50%, got {}",
+            h.app.effects_volume()
+        );
+
+        // Clicking BACK returns to the title.
+        let back = h
+            .app
+            .hits
+            .rect_for(Target::OptionsBack)
+            .expect("back row rect");
+        h.events(
+            &[],
+            &[(MouseEventKind::Down(MouseButton::Left), (back.x + 2, back.y))],
+        );
+        assert_eq!(h.app.screen.name_for_test(), "Title");
+    }
+
+    #[test]
+    fn options_mouse_wheel_steps_the_row_under_the_pointer() {
+        let _guard = VOLUME_ENV_LOCK.lock().unwrap();
+        let mut h = Harness::new(80, 24);
+        title_to_options(&mut h);
+        h.frame(&[]);
+        let music_row = h
+            .app
+            .hits
+            .rect_for(Target::OptionsRow(options::MUSIC_ROW))
+            .unwrap();
+        let at = (music_row.x + 2, music_row.y);
+        h.events(&[], &[(MouseEventKind::ScrollDown, at)]);
+        assert_eq!(h.app.music_volume(), 95, "wheel down lowers music");
+        h.events(&[], &[(MouseEventKind::ScrollUp, at)]);
+        assert_eq!(h.app.music_volume(), 100, "wheel up raises music");
+
+        // The minimap row cycles through its three sizes.
+        let mm = h
+            .app
+            .hits
+            .rect_for(Target::OptionsRow(options::MINIMAP_ROW))
+            .unwrap();
+        let at = (mm.x + 2, mm.y);
+        assert_eq!(h.app.scores.minimap_size, minimap::MinimapSize::Normal);
+        h.events(&[], &[(MouseEventKind::ScrollDown, at)]);
+        assert_eq!(h.app.scores.minimap_size, minimap::MinimapSize::Small);
+        h.events(&[], &[(MouseEventKind::ScrollDown, at)]);
+        assert_eq!(h.app.scores.minimap_size, minimap::MinimapSize::Hidden);
+        h.events(&[], &[(MouseEventKind::ScrollUp, at)]);
+        assert_eq!(h.app.scores.minimap_size, minimap::MinimapSize::Small);
+    }
+
+    #[test]
+    fn options_rows_change_by_keyboard() {
+        let _guard = VOLUME_ENV_LOCK.lock().unwrap();
+        let mut h = Harness::new(80, 24);
+        title_to_options(&mut h);
+        h.frame(&[]);
+        assert_eq!(h.app.options_row, options::MUSIC_ROW);
+        h.frame(&[KeyCode::Left]);
+        assert_eq!(h.app.music_volume(), 95);
+        h.frame(&[KeyCode::Right]);
+        assert_eq!(h.app.music_volume(), 100);
+
+        // Down to effects, then to the minimap and cursor toggles.
+        h.frame(&[KeyCode::Down]);
+        assert_eq!(h.app.options_row, options::EFFECTS_ROW);
+        h.frame(&[KeyCode::Left]);
+        assert_eq!(h.app.effects_volume(), 95);
+        h.frame(&[KeyCode::Down]);
+        assert_eq!(h.app.options_row, options::MINIMAP_ROW);
+        h.frame(&[KeyCode::Right]);
+        assert_eq!(h.app.scores.minimap_size, minimap::MinimapSize::Small);
+        h.frame(&[KeyCode::Down]);
+        assert_eq!(h.app.options_row, options::CURSOR_ROW);
+        let cursor_before = h.app.scores.cheese_cursor;
+        h.frame(&[KeyCode::Right]);
+        assert_ne!(h.app.scores.cheese_cursor, cursor_before);
+        h.frame(&[KeyCode::Down]);
+        assert_eq!(h.app.options_row, options::MUTE_ROW);
+        h.frame(&[KeyCode::Right]);
+        assert!(h.app.muted(), "the mute row toggles the master mute");
+        h.frame(&[KeyCode::Right]);
+        assert!(!h.app.muted());
+        // Enter on the Back row leaves the screen.
+        h.frame(&[KeyCode::Down]);
+        assert_eq!(h.app.options_row, options::BACK_ROW);
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "Title");
+    }
+
+    #[test]
+    fn effects_preview_is_rate_limited_while_holding_a_key() {
+        let _guard = VOLUME_ENV_LOCK.lock().unwrap();
+        let mut h = Harness::new(80, 24);
+        title_to_options(&mut h);
+        h.frame(&[]);
+        h.frame(&[KeyCode::Down]); // effects row
+        assert_eq!(h.app.options_row, options::EFFECTS_ROW);
+        for _ in 0..10 {
+            h.frame(&[KeyCode::Left]);
+        }
+        assert_eq!(h.app.effects_volume(), 50);
+        let before = h.app.preview_blips();
+        for _ in 0..12 {
+            h.frame(&[KeyCode::Right]);
+        }
+        let blips = h.app.preview_blips() - before;
+        assert!(blips >= 1, "a preview should play while stepping");
+        assert!(blips <= 3, "preview must be rate-limited, got {blips} blips");
+        assert_eq!(h.app.effects_volume(), 100);
+    }
+
+    #[test]
+    fn options_lays_out_at_the_reference_sizes_and_never_panics_tiny() {
+        let _guard = VOLUME_ENV_LOCK.lock().unwrap();
+        for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let mut hh = Harness::new(w, h);
+            title_to_options(&mut hh);
+            let text = hh.frame(&[]);
+            for needle in ["MUSIC", "EFFECTS", "BACK"] {
+                assert!(
+                    text.contains(needle),
+                    "options at {w}x{h} missing {needle:?}: {text}"
+                );
+            }
+        }
+        // Degenerate terminals must not panic when the plate is opened.
+        for (w, h) in [(0u16, 0u16), (5, 3), (1, 1)] {
+            let mut hh = Harness::new(w, h);
+            hh.frame(&[]);
+            hh.frame(&[KeyCode::Char('o')]);
+            let _ = hh.frame(&[]);
+        }
+    }
+
+    #[test]
+    fn volumes_persist_beside_the_preferences_and_old_files_load_at_full() {
+        let _guard = VOLUME_ENV_LOCK.lock().unwrap();
+        // A file written before the sliders existed has no volume fields.
+        let old = ScoreTable::parse("{\"entries\":[]}");
+        assert_eq!((old.music_volume, old.effects_volume), (100, 100));
+
+        // Levels set through the app land in the injected store and round-trip.
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        h.frame(&[KeyCode::Char('[')]);
+        h.frame(&[KeyCode::Char('-')]);
+        assert_eq!(
+            (h.app.scores.music_volume, h.app.scores.effects_volume),
+            (95, 95)
+        );
+        let reloaded = ScoreTable::parse(&h.app.scores.to_json());
+        assert_eq!((reloaded.music_volume, reloaded.effects_volume), (95, 95));
+        let app = App::with_options(false, None, reloaded, false, Some(TEST_SEED));
+        assert_eq!((app.music_volume(), app.effects_volume()), (95, 95));
+    }
+
+    #[test]
+    fn volume_env_overrides_apply_without_overwriting_the_saved_levels() {
+        let _guard = VOLUME_ENV_LOCK.lock().unwrap();
+        let table = ScoreTable {
+            music_volume: 80,
+            effects_volume: 90,
+            ..ScoreTable::default()
+        };
+        std::env::set_var("RATRUN_MUSIC_VOLUME", "40");
+        std::env::set_var("RATRUN_SFX_VOLUME", "65");
+        let app = App::with_options(false, None, table, false, Some(TEST_SEED));
+        std::env::remove_var("RATRUN_MUSIC_VOLUME");
+        std::env::remove_var("RATRUN_SFX_VOLUME");
+
+        assert_eq!((app.music_volume(), app.effects_volume()), (40, 65));
+        let mut h = Harness::with_app(app, 80, 24);
+        h.enter_playing();
+        h.frame(&[KeyCode::Char('[')]);
+        assert_eq!(h.app.music_volume(), 35, "the live level still moves");
+        assert_eq!(
+            (h.app.scores.music_volume, h.app.scores.effects_volume),
+            (80, 90),
+            "a pinned channel must not overwrite the saved preference"
+        );
+    }
+
+    #[test]
+    fn volume_env_parsing_clamps_and_snaps() {
+        assert_eq!(parse_volume_env("0"), Some(0));
+        assert_eq!(parse_volume_env("100"), Some(100));
+        assert_eq!(parse_volume_env("57"), Some(55));
+        assert_eq!(parse_volume_env(" 68 "), Some(70));
+        assert_eq!(parse_volume_env("200"), Some(100));
+        assert_eq!(parse_volume_env("loud"), None);
+    }
+
+    /// Gated behind `RATRUN_OPTIONS_DIR`: dumps ANSI captures of the options
+    /// plate at 80×24 and 120×40 so the screen can be rasterised and reviewed.
+    #[test]
+    fn capture_options_screen() {
+        use crate::term::{sanitize_with, ColorDepth, GlyphSet};
+        use std::fmt::Write;
+
+        let Some(dir) = std::env::var_os("RATRUN_OPTIONS_DIR") else {
+            return;
+        };
+        let _guard = VOLUME_ENV_LOCK.lock().unwrap();
+        let dir = std::path::Path::new(&dir);
+        std::fs::create_dir_all(dir).unwrap();
+
+        for (w, h) in [(80u16, 24u16), (120, 40)] {
+            let mut hh = Harness::new(w, h);
+            title_to_options(&mut hh);
+            // Part-way sliders so the block characters read in the capture.
+            hh.app.music_volume = 60;
+            hh.app.effects_volume = 75;
+            hh.app.options_row = options::MUSIC_ROW;
+            let _ = hh.frame(&[]);
+
+            let mut copy = hh.terminal.backend().buffer().clone();
+            sanitize_with(&mut copy, GlyphSet::Unicode, ColorDepth::Truecolor);
+            let mut ansi = String::new();
+            let mut plain = String::new();
+            for y in 0..h {
+                for x in 0..w {
+                    let c = &copy[(x, y)];
+                    let (r, g, b) = xterm_color_rgb(c.fg);
+                    let (br, bg, bb) = xterm_color_rgb(c.bg);
+                    write!(
+                        ansi,
+                        "\x1b[38;2;{r};{g};{b};48;2;{br};{bg};{bb}m{}",
+                        c.symbol()
+                    )
+                    .unwrap();
+                    plain.push_str(c.symbol());
+                }
+                ansi.push_str("\x1b[0m\n");
+                plain.push('\n');
+            }
+            let path = dir.join(format!("{w}x{h}-options"));
+            std::fs::write(path.with_extension("ansi"), ansi).unwrap();
+            std::fs::write(path.with_extension("txt"), plain).unwrap();
         }
     }
 }
