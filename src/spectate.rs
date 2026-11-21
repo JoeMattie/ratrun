@@ -1265,7 +1265,10 @@ fn worker_loop(
                 let mut buf = Buffer::empty(Rect::new(0, 0, cw, ch));
                 let drawn = contained(|| {
                     if pw > 0 && ph > 0 {
-                        active.world_mut().draw(&mut pixels);
+                        let world = active.world_mut();
+                        world.lighting = crate::render::lighting::LightingMode::Off;
+                        world.smoke_enabled = false;
+                        world.draw(&mut pixels);
                         downsample_into(&pixels, scale, buf.area, &mut buf);
                     }
                 });

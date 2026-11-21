@@ -162,6 +162,18 @@ impl PixelBuffer {
         self.get(x, y)
     }
 
+    /// Direct read-only access to the backing RGB pixel slice (row-major, `w * h`).
+    #[inline]
+    pub fn pixels(&self) -> &[Rgb] {
+        &self.px
+    }
+
+    /// Direct mutable access to the backing RGB pixel slice (row-major, `w * h`).
+    #[inline]
+    pub fn pixels_mut(&mut self) -> &mut [Rgb] {
+        &mut self.px
+    }
+
     #[inline]
     fn get(&self, x: usize, y: usize) -> Rgb {
         if x < self.w && y < self.h {

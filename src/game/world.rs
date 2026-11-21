@@ -58,6 +58,7 @@ use rand::{Rng, SeedableRng};
 use crate::audio::Sfx;
 use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
+use crate::render::lighting::{LightMap, LightScene, LightingMode};
 use crate::render::palette;
 
 use super::bullet::Bullet;
@@ -87,6 +88,7 @@ use super::nav::{FlowField, NavBudget};
 use super::particle::damage_number::{DamageNumbers, DEFAULT_CAP as DAMAGE_NUMBER_CAP};
 use super::particle::Particles;
 use super::player::Player;
+use super::smoke::{SmokeLayer, SmokeScene};
 use super::weapon::WeaponKind;
 use super::art_walls::{Cardinal, WallKind};
 use super::{
@@ -159,6 +161,12 @@ pub struct World {
     director_spare: Option<Director>,
     flow_spare: Option<FlowField>,
     fog_spare: Option<Fog>,
+
+    // ---- Render-only lighting & smoke (never touched by the sim) ---------
+    pub lighting: LightingMode,
+    pub smoke_enabled: bool,
+    light_map: LightMap,
+    smoke: SmokeLayer,
 }
 
 impl World {
@@ -309,6 +317,12 @@ impl World {
             director_spare: Some(Director::default()),
             flow_spare: Some(flow_spare),
             fog_spare: Some(fog_spare),
+
+            lighting: LightingMode::default_for_depth(crate::term::color_depth()),
+            smoke_enabled: LightingMode::default_for_depth(crate::term::color_depth())
+                != LightingMode::Off,
+            light_map: LightMap::new(),
+            smoke: SmokeLayer::new(seed, theme),
         }
     }
 
@@ -1065,11 +1079,61 @@ impl World {
         self.draw_boss_thresholds(pb, cam, WallLayer::Overhang);
         self.draw_object_layer(pb, cam, true);
 
+        // Soft alpha-blended smoke & ambient haze (render-only, under bright sparks).
+        if self.smoke_enabled {
+            self.draw_smoke(pb, cam);
+        }
+
         // Particles and shockwaves on top.
         self.particles.draw(pb, cam);
 
+        // Per-frame 2D lighting pass over world pixels (before screen-space overlays/damage numbers).
+        self.apply_lighting(pb, cam);
+
         // Floating enemy damage numbers on top of everything in the playfield.
         self.damage_numbers.draw(pb, cam);
+    }
+
+    /// Render-only smoke pass; never mutates simulation state or `self.rng`.
+    fn draw_smoke(&mut self, pb: &mut PixelBuffer, cam: Vec2) {
+        let thrash = self.thrash_visual();
+        let scene = SmokeScene {
+            ecs: &self.ecs,
+            level: &self.level,
+            player: &self.player,
+            particles: &self.particles,
+            thrash,
+            cam,
+            elapsed: self.elapsed,
+            mode: self.lighting,
+        };
+        self.smoke.sync_and_draw(pb, &scene);
+    }
+
+    /// Render-only lighting pass; never mutates simulation state or `self.rng`.
+    fn apply_lighting(&mut self, pb: &mut PixelBuffer, cam: Vec2) {
+        if self.lighting == LightingMode::Off {
+            return;
+        }
+        let thrash = self.thrash_visual();
+        let squeak = self.squeak_visual();
+        let scene = LightScene {
+            ecs: &self.ecs,
+            level: &self.level,
+            player: &self.player,
+            particles: &self.particles,
+            thrash,
+            squeak,
+            cam,
+            elapsed: self.elapsed,
+            mode: self.lighting,
+        };
+        self.light_map.apply_scene(pb, &scene);
+    }
+
+    /// Access the render-only smoke layer (tests and screenshot captures).
+    pub fn smoke_mut(&mut self) -> &mut SmokeLayer {
+        &mut self.smoke
     }
 
     fn draw_player(&self, pb: &mut PixelBuffer, cam: Vec2) {
