@@ -291,6 +291,11 @@ pub fn emit_weapon_fire(
         // `fire_one`); reached only if a test asks `emit_weapon_fire` directly.
         WeaponKind::TailThrash => emit_thrash_start(ps, rng, pos),
         WeaponKind::SonicSqueak => emit_sonic_squeak(ps, rng, pos, radius.max(20.0), 0.3),
+        // Wave 3. Laser Eyes' burst start is a pair of muzzle sparks (its
+        // pulses have their own emitter); Super Dash's "fire" is the dash
+        // itself, so the weapon prompt is the comb in `emit_super_dash_comb`.
+        WeaponKind::LaserEyes => emit_laser_muzzle(ps, rng, pos, dir),
+        WeaponKind::SuperDash => {}
     }
 }
 
@@ -459,6 +464,12 @@ pub fn emit_weapon_hit(
                 Shape::Dot,
                 4.8,
             );
+        }
+        // Wave 3's self-driving weapons have their own emitters (a laser
+        // pulse, a dash comb); reached only if a test asks directly.
+        Some(WeaponKind::LaserEyes) => emit_laser_muzzle(ps, rng, pos, reflect),
+        Some(WeaponKind::SuperDash) => {
+            emit_super_dash_comb(ps, rng, pos, pos + reflect * 12.0, 4.0)
         }
     }
 }
@@ -703,6 +714,212 @@ pub fn emit_squeak_hit(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, out_di
         true,
         Shape::Dot,
         4.6,
+    );
+}
+
+// ---- Wave 3 weapons: Laser Eyes and Super Dash ----------------------------
+
+/// Amber core of a Laser Eyes beam.
+const LASER_CORE: Rgb = (255, 246, 214);
+/// Outer glow of the beam.
+const LASER_GLOW: Rgb = (255, 176, 46);
+
+/// The burst's first tick: two muzzle sparks at the eyes (`dir` is the locked
+/// facing). One rng draw per spark, so a burst is a fixed cost.
+pub fn emit_laser_muzzle(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, dir: Vec2) {
+    let f = if dir.len_sq() > 0.01 {
+        dir.normalized()
+    } else {
+        Vec2::new(0.0, -1.0)
+    };
+    let perp = f.perp();
+    let n = ps.budget_count(4, true);
+    for i in 0..n {
+        let side = if i % 2 == 0 { 1.0 } else { -1.0 };
+        let life = rng.random_range(0.10..0.18);
+        ps.push(Particle {
+            pos: pos + f * 3.0 + perp * side * 0.9,
+            vel: f * rng.random_range(20.0..52.0) + perp * side * rng.random_range(4.0..14.0),
+            life,
+            max_life: life,
+            drag: 6.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(LASER_CORE, LASER_GLOW),
+            additive: true,
+            shape: Shape::Dot,
+        });
+    }
+}
+
+/// One pulse of a Laser Eyes burst: a hot amber bar from `origin` along
+/// `angle` for `len` px (already wall-stopped), with a splash of sparks where
+/// it landed. `hits` is how many bodies it pierced (only used for the sparks).
+pub fn emit_laser_pulse(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    origin: Vec2,
+    angle: f32,
+    len: f32,
+    hits: u32,
+) {
+    let dir = Vec2::from_angle(angle);
+    let perp = dir.perp();
+    // The bar itself: a dense row of additive dots along the ray, brightest at
+    // the muzzle. `budget_count` caps the row so a crowded frame still draws
+    // the beam, just sparser.
+    let want = (len * 0.7) as usize;
+    let dots = ps.budget_count(want.max(3), true);
+    for i in 0..dots {
+        let t = i as f32 / dots.max(1) as f32;
+        let p = origin + dir * (2.0 + len * t);
+        let life = rng.random_range(0.07..0.13);
+        let jitter = perp * rng.random_range(-0.6..0.6);
+        ps.push(Particle {
+            pos: p + jitter,
+            vel: perp * rng.random_range(-10.0..10.0),
+            life,
+            max_life: life,
+            drag: 9.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(LASER_CORE, LASER_GLOW),
+            additive: true,
+            shape: Shape::Dot,
+        });
+    }
+    // A spark where the bar ends (a wall face or open air).
+    let end = origin + dir * len;
+    let n = ps.budget_count(2 + hits.min(3) as usize, true);
+    ps.cone_shaped(
+        rng,
+        end,
+        -dir,
+        n,
+        46.0,
+        0.9,
+        Ramp::Custom(LASER_CORE, LASER_GLOW),
+        0.16,
+        true,
+        Shape::Streak,
+        5.0,
+    );
+}
+
+/// Impact fleck on a body a Laser Eyes pulse pierced.
+pub fn emit_laser_hit(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, out_dir: Vec2, killed: bool) {
+    let dir = if out_dir.len_sq() > 0.01 {
+        out_dir.normalized()
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    let n = ps.budget_count(if killed { 5 } else { 3 }, true);
+    ps.cone_shaped(
+        rng,
+        pos,
+        dir,
+        n,
+        96.0,
+        1.0,
+        Ramp::Custom(LASER_CORE, LASER_GLOW),
+        0.18,
+        true,
+        Shape::Streak,
+        5.5,
+    );
+}
+
+/// The Super Dash's **comb**: the travelled segment, drawn as a blue-white cord
+/// with perpendicular teeth through every body it crosses (one emitter call per
+/// tick of the dash, so the comb is the dash's actual route).
+pub fn emit_super_dash_comb(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    from: Vec2,
+    to: Vec2,
+    radius: f32,
+) {
+    let seg = to - from;
+    let len = seg.len();
+    let dir = if len > 0.01 {
+        seg.normalized()
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    let perp = dir.perp();
+    let spine = ps.budget_count((len * 1.4) as usize + 2, true);
+    for i in 0..spine {
+        let t = i as f32 / spine.max(1) as f32;
+        let life = rng.random_range(0.10..0.20);
+        ps.push(Particle {
+            pos: from + seg * t,
+            vel: perp * rng.random_range(-14.0..14.0),
+            life,
+            max_life: life,
+            drag: 8.0,
+            gravity: 0.0,
+            ramp: Ramp::Dash,
+            additive: true,
+            shape: Shape::Dot,
+        });
+    }
+    // The teeth: short perpendicular barbs, one every ~3 px, so a still frame
+    // reads as a comb rather than a line.
+    let teeth = ps.budget_count((len / 3.0) as usize, true);
+    for i in 0..teeth {
+        let t = i as f32 / teeth.max(1) as f32;
+        let side = if i % 2 == 0 { 1.0 } else { -1.0 };
+        let life = rng.random_range(0.10..0.18);
+        let reach = radius * rng.random_range(0.55..1.0);
+        ps.push(Particle {
+            pos: from + seg * t + perp * side * reach,
+            vel: perp * side * rng.random_range(16.0..40.0),
+            life,
+            max_life: life,
+            drag: 9.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom(LASER_CORE, (128, 176, 224)),
+            additive: true,
+            shape: Shape::Streak,
+        });
+    }
+}
+
+/// Impact flash on a body the Super Dash crossed.
+pub fn emit_super_dash_hit(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    pos: Vec2,
+    out_dir: Vec2,
+    killed: bool,
+) {
+    let dir = if out_dir.len_sq() > 0.01 {
+        out_dir.normalized()
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    ps.push(Particle {
+        pos,
+        vel: Vec2::ZERO,
+        life: 0.16,
+        max_life: 0.16,
+        drag: 0.0,
+        gravity: 0.0,
+        ramp: Ramp::Custom(LASER_CORE, (150, 196, 240)),
+        additive: true,
+        shape: Shape::Cross,
+    });
+    let n = ps.budget_count(if killed { 7 } else { 4 }, true);
+    ps.cone_shaped(
+        rng,
+        pos,
+        dir,
+        n,
+        110.0,
+        1.0,
+        Ramp::Dash,
+        0.20,
+        true,
+        Shape::Streak,
+        6.0,
     );
 }
 

@@ -150,7 +150,7 @@ pub struct Shake {
 #[derive(Resource, Default, Clone, Copy, Debug)]
 pub struct DamageLedger {
     /// Effective damage dealt to every enemy, by weapon index.
-    pub dealt: [f32; 8],
+    pub dealt: [f32; crate::game::weapon::WEAPON_SLOTS],
     /// Effective damage dealt to **the boss**, by weapon index.
     ///
     /// Only weapons that damage the boss outside `boss_damage_system` need to
@@ -159,7 +159,7 @@ pub struct DamageLedger {
     /// cannot carry them — `boss_damage_system` resets that tally after this
     /// one runs — so the batch harness reads this column instead. Also pure
     /// instrumentation: nothing in the schedule reads it back.
-    pub boss: [f32; 8],
+    pub boss: [f32; crate::game::weapon::WEAPON_SLOTS],
 }
 
 impl DamageLedger {
@@ -437,6 +437,230 @@ impl BossDue {
     #[inline]
     pub fn is_pending(&self) -> bool {
         self.due && !self.claimed
+    }
+}
+
+// ---- Wave 3 weapons (Laser Eyes, Super Dash) and their passives ---------
+//
+// All four live in the ECS world permanently (inserted by `World::new`, like
+// `ActiveFx`), because none of them is a facade field: they are per-tick state
+// whose readers are systems, `World::draw` (the laser art) and tests.
+
+/// Live state of one **Laser Eyes** burst.
+///
+/// Laser Eyes is an ordinary auto-firing weapon (not an active one: it has no
+/// charge gauge and Space does not spend it) whose shot is a *burst* of pulses
+/// over the following ticks. `weapons_wave3b::laser_eyes_system` charges the
+/// weapon's `Weapon::timer` and owns the burst; `fire_weapons_system` skips the
+/// kind entirely (`WeaponKind::fires_outside_fire_one`).
+///
+/// The facing is **locked at the trigger tick** (design §4: "Lock last facing
+/// at burst start"), so a rat that turns mid-burst does not drag the sweep with
+/// it — the pulses fan out around the direction it was looking when it fired.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct LaserFx {
+    /// Seconds left in the current burst (0 = idle).
+    pub left: f32,
+    /// Seconds elapsed since the trigger tick (drives the pulse schedule).
+    pub age: f32,
+    /// Pulses already resolved in this burst.
+    pub fired: u32,
+    /// Pulses this burst will make at the owning weapon's level.
+    pub pulses: u32,
+    /// The facing locked at the trigger tick (unit vector).
+    pub facing: Vec2,
+    /// The beam's origin (the rat's eye line at the trigger tick).
+    pub origin: Vec2,
+    /// Nominal beam length in px before the wall stop (Lens Cap applied).
+    pub reach: f32,
+    /// Per-pulse damage at the owning weapon's level (Sharp Teeth applied).
+    pub dmg: f32,
+    /// World angle of the pulse resolved most recently (art).
+    pub angle: f32,
+    /// Beam length the last pulse actually reached after the wall stop (art).
+    pub beam: f32,
+    /// Seconds since the last pulse was resolved (drives the blink: the bar is
+    /// lit for the first part of the interval and dark for the rest).
+    pub since_pulse: f32,
+    /// Full length of the burst in seconds (`0` when idle), set at trigger.
+    pub total: f32,
+}
+
+impl LaserFx {
+    /// Is a burst in flight right now?
+    #[inline]
+    pub fn active(&self) -> bool {
+        self.left > 0.0
+    }
+
+    /// Burst progress in `0..=1`, for the art's fade-out.
+    #[inline]
+    pub fn progress(&self) -> f32 {
+        if self.total <= 0.0 {
+            1.0
+        } else {
+            (self.age / self.total).clamp(0.0, 1.0)
+        }
+    }
+}
+
+/// How many bodies one dash can remember as already hit. A dash crosses a
+/// handful of bodies; the fixed history only exists so "once per target per
+/// dash" cannot allocate and cannot loop.
+pub const DASH_HIT_CAP: usize = 48;
+
+/// The dash's **actual** travelled segment(s), written by
+/// `systems::player::player_system`'s dash hook and consumed by
+/// `weapons_wave3b::super_dash_system`.
+///
+/// This is the whole of the coupling between the dash and the Super Dash
+/// weapon: the dash owner records what really happened (a successful dash
+/// started here; this tick moved the rat from `a` to `b` while the dash was
+/// live), so the weapon never has to guess. A blocked or cooling press never
+/// reaches the hook, and the tick after `dash_active` has run out records no
+/// segment, so neither buys a hit.
+#[derive(Resource)]
+pub struct DashTrack {
+    /// `Some((from, to))` while this tick's movement happened during a dash.
+    pub segment: Option<(Vec2, Vec2)>,
+    /// How many dash legs have been travelled in the current dash (the weapon
+    /// uses `== 1` for its one sound per dash).
+    pub legs: u32,
+    /// Has the boss already taken this dash's hit? (The boss is not an
+    /// `Enemy`, so it needs its own flag rather than a `SpawnId` entry.)
+    pub boss_hit: bool,
+    /// `SpawnId`s already hit by the current dash.
+    hits: [u64; DASH_HIT_CAP],
+    hit_len: usize,
+}
+
+impl Default for DashTrack {
+    fn default() -> Self {
+        Self {
+            segment: None,
+            legs: 0,
+            boss_hit: false,
+            hits: [0; DASH_HIT_CAP],
+            hit_len: 0,
+        }
+    }
+}
+
+impl DashTrack {
+    /// A **successful** dash just began: forget the previous dash's hits.
+    #[inline]
+    pub fn begin(&mut self) {
+        self.hit_len = 0;
+        self.legs = 0;
+        self.boss_hit = false;
+        self.segment = None;
+    }
+
+    /// Record this tick's movement. `live` is the dash flag the dash owner
+    /// computed *before* it decayed `player.dash_active`, so the last dash tick
+    /// still counts.
+    #[inline]
+    pub fn record(&mut self, from: Vec2, to: Vec2, live: bool) {
+        if live {
+            self.segment = Some((from, to));
+            self.legs = self.legs.saturating_add(1);
+        } else {
+            self.segment = None;
+        }
+    }
+
+    /// Has the current dash already hit this body?
+    #[inline]
+    pub fn already_hit(&self, id: u64) -> bool {
+        self.hits[..self.hit_len].contains(&id)
+    }
+
+    /// Remember a hit. Past [`DASH_HIT_CAP`] the body is simply not recorded
+    /// (deterministic: the walk is in `SpawnId` order, so the same bodies win
+    /// on every replay).
+    #[inline]
+    pub fn mark_hit(&mut self, id: u64) {
+        if self.hit_len < DASH_HIT_CAP && !self.already_hit(id) {
+            self.hits[self.hit_len] = id;
+            self.hit_len += 1;
+        }
+    }
+}
+
+/// Capacity of the Counterweight melee-nudge log ("once per target per 0.4 s").
+pub const MELEE_NUDGE_CAP: usize = 24;
+
+/// Per-target cooldown for **Counterweight**'s extra melee shove.
+///
+/// The passive gives +2 px of outward shove per stack to ordinary melee hits
+/// that have no native knockback (Tail Whip), at most once per body per 0.4 s.
+/// `weapons::fire_one` asks [`MeleeNudge::ready`] before nudging and then
+/// [`MeleeNudge::mark`]s the body; `weapons_wave3b::melee_nudge_system` decays
+/// the timers (and does nothing at all when the passive is not owned).
+#[derive(Resource, Default)]
+pub struct MeleeNudge {
+    entries: [(u64, f32); MELEE_NUDGE_CAP],
+    len: usize,
+}
+
+impl MeleeNudge {
+    /// Decay every cooldown by `dt`, dropping spent entries (order-preserving,
+    /// so the array cannot drift between replays).
+    pub fn tick(&mut self, dt: f32) {
+        let mut write = 0;
+        for read in 0..self.len {
+            let (id, left) = self.entries[read];
+            let left = left - dt;
+            if left > 0.0 {
+                self.entries[write] = (id, left);
+                write += 1;
+            }
+        }
+        self.len = write;
+    }
+
+    /// May this body be nudged this tick?
+    #[inline]
+    pub fn ready(&self, id: u64) -> bool {
+        !self.entries[..self.len].iter().any(|&(h, _)| h == id)
+    }
+
+    /// Start this body's cooldown. A full log forgets the body instead (it was
+    /// nudged, it just cannot be tracked — never a wrong hit, only a rarer one).
+    #[inline]
+    pub fn mark(&mut self, id: u64, cooldown: f32) {
+        if self.len < MELEE_NUDGE_CAP && self.ready(id) {
+            self.entries[self.len] = (id, cooldown);
+            self.len += 1;
+        }
+    }
+
+    /// Live entries (tests and diagnostics).
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+}
+
+/// **Second Scent**'s fraction bank: gem XP is an integer, so `+10% per stack`
+/// has to remember the remainder between collections ("bank fractional XP
+/// across collections").
+///
+/// Permanent scratch: a new `World` per campaign level starts empty, which is
+/// the campaign's "reset XP and player level" rule.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct XpBank(pub f32);
+
+impl XpBank {
+    /// Scale `xp` by `mult` and return the whole XP now payable, keeping the
+    /// fraction for the next collection.
+    pub fn grant(&mut self, xp: u32, mult: f32) -> u32 {
+        let total = xp as f32 * mult + self.0;
+        // A hair of tolerance keeps 0.6 + 0.6 from arriving as 1.1999999 and
+        // paying 1.
+        let whole = (total + 1e-4).floor().max(0.0);
+        self.0 = (total - whole).max(0.0);
+        whole as u32
     }
 }
 

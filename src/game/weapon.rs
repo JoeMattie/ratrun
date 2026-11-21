@@ -39,6 +39,29 @@ pub const SQUEAK_BOSS_SLOW_SECS: f32 = 0.8;
 /// Outward shove (px/s of velocity) the ring gives everything it passes.
 pub const SQUEAK_SHOVE: f32 = 70.0;
 
+// ---- Laser Eyes tuning (wave 3, design §4) -------------------------------
+
+/// Seconds between two pulses of one Laser Eyes burst. The pulses fire at
+/// `0, 0.10, 0.20, ...` after the trigger, so the burst's damage schedule and
+/// the art's blinking bar share this one number.
+pub const LASER_PULSE_INTERVAL: f32 = 0.10;
+/// Half-angle (radians) of the burst's sweep: pulses are spread evenly across
+/// `-35°..+35°` of the facing the rat held when the burst began.
+pub const LASER_SWEEP_HALF: f32 = 35.0 * std::f32::consts::PI / 180.0;
+/// The beam's half-width in px (the design's "3 px wide" bar).
+pub const LASER_HALF_WIDTH: f32 = 1.5;
+/// Seconds the muzzle glow stays after the last pulse, so a burst ends with a
+/// visible fade instead of a hard cut (art only — nothing damages here).
+pub const LASER_TAIL: f32 = 0.12;
+
+/// Number of weapon slots every per-weapon bookkeeping array needs
+/// (`ecs::resources::DamageLedger`, the balance reports).
+///
+/// Must equal `WeaponKind::all().len()` (a test asserts it): the arrays are
+/// indexed by [`WeaponKind::index`], so a new kind has to raise this and the
+/// arrays in one place. Wave 3 added Laser Eyes and Super Dash.
+pub const WEAPON_SLOTS: usize = 10;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WeaponKind {
     Gnaw,        // homing dart at nearest enemy
@@ -49,10 +72,12 @@ pub enum WeaponKind {
     AcidSpit,    // lobbed shot that leaves a damaging pool
     TailThrash,  // ACTIVE: charged burst of sweeping tail sweeps
     SonicSqueak, // ACTIVE: charged expanding stunning ring
+    LaserEyes,   // sweeping piercing beam, fired in a burst of pulses
+    SuperDash,   // DASH: the dash itself is the attack (passive-triggered)
 }
 
 impl WeaponKind {
-    pub fn all() -> [WeaponKind; 8] {
+    pub fn all() -> [WeaponKind; WEAPON_SLOTS] {
         [
             WeaponKind::Gnaw,
             WeaponKind::CheeseSpray,
@@ -62,6 +87,8 @@ impl WeaponKind {
             WeaponKind::AcidSpit,
             WeaponKind::TailThrash,
             WeaponKind::SonicSqueak,
+            WeaponKind::LaserEyes,
+            WeaponKind::SuperDash,
         ]
     }
 
@@ -72,6 +99,24 @@ impl WeaponKind {
     /// See `game::ecs::systems::weapons::active_weapons_system`.
     pub fn is_active(self) -> bool {
         matches!(self, WeaponKind::TailThrash | WeaponKind::SonicSqueak)
+    }
+
+    /// Is this weapon **not** fired by `weapons::fire_weapons_system`?
+    ///
+    /// Two wave-3 kinds drive themselves and are skipped by the auto-fire
+    /// pass, which keeps their state (a burst, a dash) in
+    /// `weapons_wave3b`:
+    ///
+    /// - [`WeaponKind::LaserEyes`] charges its own timer and resolves a burst
+    ///   of pulses over the following ticks.
+    /// - [`WeaponKind::SuperDash`] never fires on a timer at all: its "fire"
+    ///   is a successful player dash (`systems::player::player_system` records
+    ///   the travelled segment; `weapons_wave3b` damages what it crossed).
+    ///
+    /// Neither is [`WeaponKind::is_active`]: both are passive-triggered, so
+    /// they have no charge gauge and the Space press does not spend them.
+    pub fn fires_outside_fire_one(self) -> bool {
+        matches!(self, WeaponKind::LaserEyes | WeaponKind::SuperDash)
     }
 
     /// Position in [`WeaponKind::all()`]; the index of this weapon in the
@@ -86,6 +131,8 @@ impl WeaponKind {
             WeaponKind::AcidSpit => 5,
             WeaponKind::TailThrash => 6,
             WeaponKind::SonicSqueak => 7,
+            WeaponKind::LaserEyes => 8,
+            WeaponKind::SuperDash => 9,
         }
     }
 
@@ -99,6 +146,8 @@ impl WeaponKind {
             WeaponKind::AcidSpit => "Acid Spit",
             WeaponKind::TailThrash => "Tail Thrash",
             WeaponKind::SonicSqueak => "Sonic Squeak",
+            WeaponKind::LaserEyes => "Laser Eyes",
+            WeaponKind::SuperDash => "Super Dash",
         }
     }
 
@@ -115,6 +164,10 @@ impl WeaponKind {
             // two player-triggered weapons).
             WeaponKind::TailThrash => "ACTIVE: press SPACE to thrash a long sweeping arc.",
             WeaponKind::SonicSqueak => "ACTIVE: press SPACE to squeak a stunning ring.",
+            // The dash weapon's card teaches the trigger the same way: the
+            // dash key, not Space-the-charge (it has no charge gauge).
+            WeaponKind::LaserEyes => "Pulses a sweeping beam through everything in front.",
+            WeaponKind::SuperDash => "DASH: every dash wounds everything it crosses.",
         }
     }
 
@@ -128,6 +181,8 @@ impl WeaponKind {
             WeaponKind::AcidSpit => "Stomach contents, redirected.",
             WeaponKind::TailThrash => "The tail remembered every boot.",
             WeaponKind::SonicSqueak => "Past hearing, straight into the skull.",
+            WeaponKind::LaserEyes => "Please look directly at the sensor.",
+            WeaponKind::SuperDash => "Exit wound, entrance wound, exit.",
         }
     }
 
@@ -141,6 +196,8 @@ impl WeaponKind {
             WeaponKind::AcidSpit => (160, 255, 90),
             WeaponKind::TailThrash => (255, 178, 92),
             WeaponKind::SonicSqueak => (140, 240, 255),
+            WeaponKind::LaserEyes => (255, 196, 74),
+            WeaponKind::SuperDash => (198, 230, 255),
         }
     }
 
@@ -162,6 +219,11 @@ impl WeaponKind {
             // every other weapon's (`Weapon::cooldown`).
             WeaponKind::TailThrash => 10.0,
             WeaponKind::SonicSqueak => 6.0,
+            // The burst cycle (design §4: 2.0 → 1.6 s across the levels).
+            WeaponKind::LaserEyes => 2.0,
+            // Super Dash has no timer of its own: its cycle *is* the dash's
+            // recharge. The number is the nominal 2.0 s for the ledger/HUD.
+            WeaponKind::SuperDash => 2.0,
         }
     }
 
@@ -203,9 +265,46 @@ impl WeaponKind {
             // leaves the thrash as the damagedealer of the pair.
             WeaponKind::TailThrash => 26.0,
             WeaponKind::SonicSqueak => 9.0,
+            // Per pulse (design §4); see [`Weapon::damage`] for the table.
+            WeaponKind::LaserEyes => LASER_DAMAGE[0],
+            // Per crossed body, per dash.
+            WeaponKind::SuperDash => DASH_DAMAGE[0],
+        }
+    }
+
+    /// Per-level damage table, for the wave-3 weapons whose design numbers
+    /// already include level scaling ("Values in every five-entry row run
+    /// L1 → L5"). `None` keeps the classic `base x (1 + 0.25 x level)` curve.
+    pub fn damage_by_level(self) -> Option<[f32; 5]> {
+        match self {
+            WeaponKind::LaserEyes => Some(LASER_DAMAGE),
+            WeaponKind::SuperDash => Some(DASH_DAMAGE),
+            _ => None,
+        }
+    }
+
+    /// Per-level cycle table (seconds). `None` uses the classic
+    /// 6%-per-level cooldown shrink.
+    pub fn cooldown_by_level(self) -> Option<[f32; 5]> {
+        match self {
+            WeaponKind::LaserEyes => Some(LASER_CYCLE),
+            _ => None,
         }
     }
 }
+
+/// Laser Eyes: damage per pulse, L1 → L5 (design §4).
+const LASER_DAMAGE: [f32; 5] = [6.0, 7.0, 8.0, 9.0, 10.0];
+/// Laser Eyes: seconds per burst cycle, L1 → L5.
+const LASER_CYCLE: [f32; 5] = [2.0, 1.9, 1.8, 1.7, 1.6];
+/// Laser Eyes: pulses per burst, L1 → L5.
+const LASER_PULSES: [u32; 5] = [3, 3, 4, 4, 5];
+/// Laser Eyes: beam length in px before the wall stop, L1 → L5.
+const LASER_REACH: [f32; 5] = [34.0, 40.0, 40.0, 48.0, 54.0];
+/// Super Dash: damage per crossed body, L1 → L5.
+const DASH_DAMAGE: [f32; 5] = [14.0, 20.0, 26.0, 32.0, 38.0];
+/// Super Dash: swept radius around the travelled segment, L1 → L5.
+const DASH_RADIUS: [f32; 5] = [4.0, 4.0, 5.0, 5.0, 6.0];
 
 #[derive(Clone)]
 pub struct Weapon {
@@ -227,9 +326,20 @@ impl Weapon {
         self.level >= self.kind.max_level()
     }
 
-    /// Damage scales ~25% per level.
+    /// Index into a per-level table (`level` is 1-based and capped at 5).
+    #[inline]
+    fn tier(&self) -> usize {
+        (self.level.clamp(1, 5) - 1) as usize
+    }
+
+    /// Damage scales ~25% per level, except for the wave-3 weapons that ship
+    /// an explicit per-level table (their design numbers already include the
+    /// scaling).
     pub fn damage(&self) -> f32 {
-        self.kind.base_damage() * (1.0 + 0.25 * (self.level - 1) as f32)
+        match self.kind.damage_by_level() {
+            Some(table) => table[self.tier()],
+            None => self.kind.base_damage() * (1.0 + 0.25 * (self.level - 1) as f32),
+        }
     }
 
     /// Cooldown shrinks slightly with level (6% faster per level).
@@ -239,7 +349,35 @@ impl Weapon {
     /// bind. (Clamping the *factor* as before looked like a safety net but was
     /// dead code — 1.0 - 0.06 * 4 = 0.76 never drops under 0.5.)
     pub fn cooldown(&self) -> f32 {
-        self.kind.base_cooldown() * (1.0 - 0.06 * (self.level - 1) as f32)
+        match self.kind.cooldown_by_level() {
+            Some(table) => table[self.tier()],
+            None => self.kind.base_cooldown() * (1.0 - 0.06 * (self.level - 1) as f32),
+        }
+    }
+
+    /// Laser Eyes: pulses in one burst (3 / 3 / 4 / 4 / 5).
+    pub fn laser_pulses(&self) -> u32 {
+        match self.kind {
+            WeaponKind::LaserEyes => LASER_PULSES[self.tier()],
+            _ => 0,
+        }
+    }
+
+    /// Laser Eyes: beam length in px, before the wall stop and Lens Cap
+    /// (`Stats::ranged_reach`).
+    pub fn laser_reach(&self) -> f32 {
+        match self.kind {
+            WeaponKind::LaserEyes => LASER_REACH[self.tier()],
+            _ => 0.0,
+        }
+    }
+
+    /// Super Dash: the swept radius around the travelled dash segment.
+    pub fn dash_radius(&self) -> f32 {
+        match self.kind {
+            WeaponKind::SuperDash => DASH_RADIUS[self.tier()],
+            _ => 0.0,
+        }
     }
 
     /// Reach in px of an active weapon's effect: the thrash arc's radius or the
@@ -283,9 +421,24 @@ impl Weapon {
 mod tests {
     use super::*;
 
+    /// `WEAPON_SLOTS` is what every per-weapon bookkeeping array is sized to,
+    /// and `index()` must agree with `all()`: a new kind has to update both.
+    #[test]
+    fn weapon_slots_match_the_kind_list() {
+        assert_eq!(WeaponKind::all().len(), WEAPON_SLOTS);
+        for (i, kind) in WeaponKind::all().iter().enumerate() {
+            assert_eq!(kind.index(), i, "{kind:?} is out of index order");
+        }
+    }
+
     #[test]
     fn cooldown_shrinks_6_percent_per_level() {
         for kind in WeaponKind::all() {
+            // Wave-3 weapons with an explicit per-level table are covered by
+            // `wave3_weapons_use_their_design_tables` instead.
+            if kind.cooldown_by_level().is_some() {
+                continue;
+            }
             let base = kind.base_cooldown();
             let mut prev = f32::INFINITY;
             for level in 1..=kind.max_level() {
@@ -313,7 +466,7 @@ mod tests {
     /// weapon, never auto-fire, and their reach/charge scale with level.
     #[test]
     fn active_weapons_are_marked_and_scale_with_level() {
-        assert_eq!(WeaponKind::all().len(), 8);
+        assert_eq!(WeaponKind::all().len(), WEAPON_SLOTS);
         for kind in WeaponKind::all() {
             assert_eq!(
                 kind.is_active(),
@@ -372,5 +525,62 @@ mod tests {
             assert_eq!(w.cooldown(), kind.base_cooldown());
             assert_eq!(w.damage(), kind.base_damage());
         }
+    }
+
+    /// Laser Eyes and Super Dash quote their levels directly in the design
+    /// ("Values in every five-entry row run L1 → L5"), so they ship tables
+    /// instead of the classic 25%-per-level damage curve.
+    #[test]
+    fn wave3_weapons_use_their_design_tables() {
+        let at = |kind: WeaponKind, level: u8| {
+            let mut w = Weapon::new(kind);
+            w.level = level;
+            w
+        };
+        for (level, (dmg, cycle, pulses, reach)) in [
+            (1u8, (6.0f32, 2.0f32, 3u32, 34.0f32)),
+            (2, (7.0, 1.9, 3, 40.0)),
+            (3, (8.0, 1.8, 4, 40.0)),
+            (4, (9.0, 1.7, 4, 48.0)),
+            (5, (10.0, 1.6, 5, 54.0)),
+        ] {
+            let w = at(WeaponKind::LaserEyes, level);
+            assert_eq!(w.damage(), dmg, "laser L{level} damage");
+            assert_eq!(w.cooldown(), cycle, "laser L{level} cycle");
+            assert_eq!(w.laser_pulses(), pulses, "laser L{level} pulses");
+            assert_eq!(w.laser_reach(), reach, "laser L{level} reach");
+        }
+        for (level, (dmg, radius)) in [
+            (1u8, (14.0f32, 4.0f32)),
+            (2, (20.0, 4.0)),
+            (3, (26.0, 5.0)),
+            (4, (32.0, 5.0)),
+            (5, (38.0, 6.0)),
+        ] {
+            let w = at(WeaponKind::SuperDash, level);
+            assert_eq!(w.damage(), dmg, "dash L{level} damage");
+            assert_eq!(w.dash_radius(), radius, "dash L{level} radius");
+        }
+    }
+
+    /// Neither wave-3 weapon is a Space-triggered *active*: Super Dash must
+    /// never read as one (it has no charge gauge), and both keep the
+    /// auto-fire pass out of their state.
+    #[test]
+    fn wave3_weapons_are_not_active() {
+        for kind in WeaponKind::all() {
+            assert_eq!(
+                kind.is_active(),
+                matches!(kind, WeaponKind::TailThrash | WeaponKind::SonicSqueak),
+                "{kind:?} is misclassified as active"
+            );
+            assert_eq!(
+                kind.fires_outside_fire_one(),
+                matches!(kind, WeaponKind::LaserEyes | WeaponKind::SuperDash),
+                "{kind:?} is driven by the wrong system"
+            );
+        }
+        assert!(!WeaponKind::SuperDash.is_active());
+        assert!(!WeaponKind::LaserEyes.is_active());
     }
 }

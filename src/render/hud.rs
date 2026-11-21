@@ -96,6 +96,9 @@ pub fn weapon_glyph(kind: WeaponKind) -> char {
         // the thrash, a ring for the squeak.
         WeaponKind::TailThrash => 'ϟ',
         WeaponKind::SonicSqueak => '◯',
+        // Wave 3: the beam is an eye, the dash weapon a double arrow.
+        WeaponKind::LaserEyes => '◎',
+        WeaponKind::SuperDash => '⇶',
     }
 }
 

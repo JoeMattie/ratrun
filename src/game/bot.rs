@@ -1509,6 +1509,11 @@ fn weapon_tier(k: WeaponKind) -> f32 {
         // to a maxed weapon later: `upgrade_value` adds +6 per level pick.
         WeaponKind::TailThrash => 9.5,
         WeaponKind::SonicSqueak => 9.0,
+        // Wave 3: the laser is a damage stream with a narrow arc (a good pick
+        // once a second weapon covers the sides); Super Dash is escape damage
+        // that also thins a chase, so it ranks with the panic buttons.
+        WeaponKind::LaserEyes => 8.5,
+        WeaponKind::SuperDash => 8.8,
     }
 }
 
@@ -1580,6 +1585,17 @@ pub fn upgrade_value(lo: &Loadout, up: &Upgrade, hp_frac: f32) -> f32 {
                 if early { 5.5 } else { 7.0 }
             }
             PassiveKind::MoveSpeed => 4.5,
+            // Wave 3. The bot has no opinion about the new passives beyond
+            // "take one early and their ranks later": Spring Heel is escape
+            // (like armour), the reach/zone ones are build multipliers, and
+            // Second Scent is a slow XP trickle.
+            PassiveKind::SpringHeel => {
+                if early { 7.0 } else { 5.0 }
+            }
+            PassiveKind::Counterweight => 5.5,
+            PassiveKind::LongFuse => 5.5,
+            PassiveKind::SecondScent => 5.0,
+            PassiveKind::LensCap => if early { 4.5 } else { 6.0 },
         },
     }
 }

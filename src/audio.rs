@@ -88,11 +88,15 @@ pub enum Sfx {
     // Active (Space-triggered) weapons.
     ShootThrash,
     SonicSqueak,
+    // Wave 3's self-driving weapons: the laser's pulse zap and the dash's
+    // cutting whoosh.
+    LaserEyes,
+    SuperDash,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 61] = [
+    pub const ALL: [Sfx; 63] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -160,6 +164,9 @@ impl Sfx {
         // Active (Space-triggered) weapons.
         Sfx::ShootThrash,
         Sfx::SonicSqueak,
+        // Wave 3 self-driving weapons.
+        Sfx::LaserEyes,
+        Sfx::SuperDash,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -226,6 +233,8 @@ impl Sfx {
             Sfx::CampaignVictory => "CAMPAIGN_WIN",
             Sfx::ShootThrash => "THRASH",
             Sfx::SonicSqueak => "SQUEAK",
+            Sfx::LaserEyes => "LASER",
+            Sfx::SuperDash => "SUPER_DASH",
         }
     }
 
@@ -240,6 +249,8 @@ impl Sfx {
             | Sfx::ShootWhip
             | Sfx::ShootThrash
             | Sfx::SonicSqueak
+            | Sfx::LaserEyes
+            | Sfx::SuperDash
             | Sfx::BroomStomp => 4,
             Sfx::Explosion
             | Sfx::Hurt
@@ -314,6 +325,8 @@ impl Sfx {
             | Sfx::Nuke
             | Sfx::ShootThrash
             | Sfx::SonicSqueak
+            | Sfx::LaserEyes
+            | Sfx::SuperDash
             | Sfx::Explosion
             | Sfx::Heal
             | Sfx::Magnet
@@ -5027,6 +5040,117 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             });
             m.add_short_tail(0.12, 5200.0);
             m.finish(0.50, 1.2, 2.4, 26.0)
+        }
+
+        // 62. LaserEyes: one pulse of the optical burst. A short hard zap:
+        // a bright saw chirp dropping off a clipped edge, plus a thin hiss
+        // trailing after it. Deliberately *tiny*: a burst fires 3-5 of these
+        // 0.1 s apart, so the pulse has to stack without turning into mud.
+        Sfx::LaserEyes => {
+            const PITCH: [f32; 4] = [1.0, 1.05, 0.95, 1.02];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.055);
+            // The zap: a narrow saw snapped from high to low in 40 ms.
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.042,
+                f0: 1850.0 * p,
+                f1: 520.0 * p,
+                pitch_pow: 1.5,
+                wave: Wave::Saw,
+                gain: 0.44,
+                attack_s: 0.0006,
+                decay_pow: 2.4,
+                filter: FilterMode::LowPass,
+                fc0: 5200.0 * p,
+                fc1: 1600.0 * p,
+                q: 1.2,
+                ..Default::default()
+            });
+            // A sine an octave up keeps the pulse audible on small speakers.
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.034,
+                f0: 3720.0 * p,
+                f1: 1900.0 * p,
+                pitch_pow: 1.0,
+                wave: Wave::Sine,
+                gain: 0.18,
+                attack_s: 0.0004,
+                decay_pow: 2.6,
+                ..Default::default()
+            });
+            // The air: a thin high hiss as the beam ionizes the dust.
+            m.add_noise(NoiseLayer {
+                start_s: 0.002,
+                dur_s: 0.048,
+                pink: false,
+                gain: 0.20,
+                attack_s: 0.001,
+                decay_pow: 2.2,
+                filter: FilterMode::HighPass,
+                fc0: 4200.0 * p,
+                fc1: 2600.0 * p,
+                q: 0.8,
+                seed: base_seed ^ 0x7A57,
+                ..Default::default()
+            });
+            m.finish(0.34, 1.5, 0.8, 18.0)
+        }
+
+        // 63. SuperDash: the dash as a weapon. A fast rising air cut that ends
+        // in a short bright *tick* (the comb through the bodies), quieter than
+        // the plain dash so the two do not fight when both play.
+        Sfx::SuperDash => {
+            const PITCH: [f32; 4] = [1.0, 1.06, 0.94, 1.03];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.10);
+            // The cut: bandpassed noise sweeping up, very short.
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.075,
+                pink: true,
+                gain: 0.52,
+                attack_s: 0.004,
+                decay_pow: 1.5,
+                filter: FilterMode::BandPass,
+                fc0: 700.0 * p,
+                fc1: 3400.0 * p,
+                fc_pow: 1.4,
+                q: 1.6,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // The tick: a tight metallic ping (two close partials).
+            for &(f, g) in &[(1180.0f32, 0.30f32), (1760.0, 0.20)] {
+                m.add_osc(OscLayer {
+                    start_s: 0.030,
+                    dur_s: 0.055,
+                    f0: f * p,
+                    f1: f * 0.86 * p,
+                    pitch_pow: 0.8,
+                    wave: Wave::Triangle,
+                    gain: g,
+                    attack_s: 0.001,
+                    decay_pow: 2.0,
+                    ..Default::default()
+                });
+            }
+            // A low body under the cut so the dash has weight.
+            m.add_osc(OscLayer {
+                start_s: 0.004,
+                dur_s: 0.085,
+                f0: 240.0 * p,
+                f1: 88.0 * p,
+                pitch_pow: 0.6,
+                wave: Wave::Sine,
+                gain: 0.34,
+                attack_s: 0.002,
+                decay_pow: 1.4,
+                ..Default::default()
+            });
+            m.add_short_tail(0.10, 4400.0);
+            m.finish(0.42, 1.3, 1.2, 22.0)
         }
     }
 }

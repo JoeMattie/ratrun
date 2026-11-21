@@ -360,18 +360,18 @@ pub struct LevelStats {
     /// Effective damage dealt to enemies, by weapon (`WeaponKind::all()`
     /// index). Read from the simulation's `DamageLedger`, which no system
     /// reads back: pure balance instrumentation.
-    pub dealt: [f32; 8],
+    pub dealt: [f32; crate::game::weapon::WEAPON_SLOTS],
     /// Damage dealt to this level's boss, by weapon (`WeaponKind::all()`
     /// index). The boss is not an `Enemy`, so this comes from the boss fight's
     /// own per-tick source tally: acid pools and Tail Whip are exact, aimed
     /// bullets (Gnaw / Cheese Spray) and pattern bullets (Squeak Nova / Spore
     /// Orbit) are split in proportion to those weapons' analytic dps (see
     /// [`boss_weapon_split`]).
-    pub boss_dealt: [f32; 8],
+    pub boss_dealt: [f32; crate::game::weapon::WEAPON_SLOTS],
     /// Running totals of [`DamageLedger::boss`] already booked into
     /// `boss_dealt`. The ledger is cumulative for the level while the report is
     /// incremental, so each tick attributes the delta.
-    pub ledger_boss_seen: [f32; 8],
+    pub ledger_boss_seen: [f32; crate::game::weapon::WEAPON_SLOTS],
 }
 
 /// Progress checkpoints the batch reports level/upgrade snapshots at (seconds
