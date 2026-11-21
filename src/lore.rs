@@ -100,3 +100,22 @@ pub fn victory(theme: Theme) -> &'static str {
 /// Flavor line for dying.
 pub const DEFEAT: &str =
     "SUBJECT R-47 — REACQUIRED. The protocol logs another success. Somewhere, a fresh cage is prepared.";
+
+// ============================================================================
+// The Sewer's pool mate: THE HORSESHOE
+// ============================================================================
+
+/// Name plate for the horseshoe crab (the Sewer's second possible boss).
+///
+/// The other bosses are named by their campaign floor
+/// (`render::campaign::CampaignLevel::boss_name`); the crab shares the Sewer
+/// with the Apex Jaguar, so its plate is its own.
+pub const HORSESHOE_NAME: &str = "THE HORSESHOE";
+
+/// Classification tag beside the name plate, in the same voice as the campaign
+/// plates ("CLASS-V APEX PREDATOR", "MK.IV AUTONOMOUS UNIT").
+pub const HORSESHOE_CLASS: &str = "PRE-PIPE — STILL HERE";
+
+/// The field note the drain rats pass around. It is the boss's lore: something
+/// older than the facility crawled up the outflow and has not left.
+pub const HORSESHOE_FIELD_NOTE: &str = "It was here before the pipes were. It will be here after.";

@@ -4,6 +4,7 @@ pub mod art_boss_magpie;
 pub mod art_boss_mangle;
 pub mod art_boss_mower;
 pub mod art_boss_night_edition;
+pub mod art_boss_horseshoe_crab;
 pub mod art_enemy;
 pub mod art_floor;
 pub mod art_icons;

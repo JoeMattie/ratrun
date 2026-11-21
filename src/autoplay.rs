@@ -287,6 +287,11 @@ pub enum BossAttack {
     Strafe,
     Crate,
     Gust,
+    // The Sewer's pooled horseshoe crab (appended for wave 3).
+    Telson,
+    Bulldoze,
+    Burrow,
+    Legs,
 }
 
 impl BossAttack {
@@ -312,6 +317,10 @@ impl BossAttack {
             BossAttack::Strafe => "strafe pass",
             BossAttack::Crate => "dropped crate",
             BossAttack::Gust => "wing gust",
+            BossAttack::Telson => "telson sweep",
+            BossAttack::Bulldoze => "bulldoze",
+            BossAttack::Burrow => "burrow",
+            BossAttack::Legs => "thrashing legs",
         }
     }
 }
@@ -382,6 +391,16 @@ impl DamageCause {
                 _ => "magpie hazard",
             },
             DamageCause::BossProjectile(BossKind::Magpie) => "magpie feather",
+            DamageCause::BossContact(BossKind::HorseshoeCrab) => "horseshoe crab shell",
+            DamageCause::BossHazard(BossKind::HorseshoeCrab, a) => match a {
+                BossAttack::Telson => "telson sweep",
+                BossAttack::Bulldoze => "bulldoze",
+                BossAttack::Burrow => "the eruption",
+                BossAttack::Legs => "thrashing legs",
+                _ => "horseshoe crab hazard",
+            },
+            // It fires nothing; the arm exists so the label never lies.
+            DamageCause::BossProjectile(BossKind::HorseshoeCrab) => "horseshoe crab",
             DamageCause::Trap => "mousetrap",
             DamageCause::MinibossSignature(kind) => {
             // The batch's damage-by-source column used to lump every
@@ -1252,6 +1271,7 @@ fn boss_name(kind: BossKind) -> &'static str {
         BossKind::Mangle => "mangle",
         BossKind::NightEdition => "the night edition",
         BossKind::Magpie => "magpie",
+        BossKind::HorseshoeCrab => "horseshoe crab",
     }
 }
 
@@ -1447,6 +1467,17 @@ fn boss_attack(state: &BossState) -> BossAttack {
             | crate::game::art_boss_magpie::MagpieState::StrafePass => BossAttack::Strafe,
             crate::game::art_boss_magpie::MagpieState::SnatchDrop => BossAttack::Crate,
             crate::game::art_boss_magpie::MagpieState::Gust => BossAttack::Gust,
+            _ => BossAttack::Other,
+        },
+        BossState::HorseshoeCrab(s) => match s {
+            crate::game::art_boss_horseshoe_crab::CrabState::TelsonTell
+            | crate::game::art_boss_horseshoe_crab::CrabState::TelsonSweep => BossAttack::Telson,
+            crate::game::art_boss_horseshoe_crab::CrabState::BulldozeTell
+            | crate::game::art_boss_horseshoe_crab::CrabState::Bulldoze => BossAttack::Bulldoze,
+            crate::game::art_boss_horseshoe_crab::CrabState::BurrowTell
+            | crate::game::art_boss_horseshoe_crab::CrabState::Burrow
+            | crate::game::art_boss_horseshoe_crab::CrabState::Emerge => BossAttack::Burrow,
+            crate::game::art_boss_horseshoe_crab::CrabState::Flipped => BossAttack::Legs,
             _ => BossAttack::Other,
         },
     }
