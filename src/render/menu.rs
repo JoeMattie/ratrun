@@ -89,6 +89,15 @@ pub enum Target {
     /// The narrow Library layout's "back to the list" chip (the card replaces
     /// the list below 70 columns).
     LibraryCard,
+    /// **The nest** (`crate::render::nest`): the permanent upgrade screen. The
+    /// title's NEST row, the pause screen's read-only chip and the incident
+    /// report's "spend your haul" all open it.
+    Nest,
+    /// A track row on the nest screen (`0..meta::TRACK_COUNT`): selects it, and
+    /// on a click also buys it.
+    NestRow(usize),
+    /// The nest's free refund-all row.
+    NestRefund,
 }
 
 /// How many interactive rectangles one screen can register. The campaign
@@ -344,7 +353,9 @@ pub fn draw_title(
     let rat_h = (rat.len() as u16).min(r.height.saturating_sub(logo_h + 11));
     let gap = u16::from(r.height >= 17);
     let art_gap = u16::from(rat_h > 0);
-    let body_h = rat_h + art_gap + logo_h + 8 + gap * 2;
+    // blurb + the six menu rows (START, sector, OPTIONS, LIBRARY, THE NEST,
+    // QUIT) + BEST, plus the row of slack the block always carried.
+    let body_h = rat_h + art_gap + logo_h + 9 + gap * 2;
     let body = band(r, r.height.saturating_sub(body_h + 3) / 2, body_h);
     if rat_h > 0 {
         let width = title_art_width(area).unwrap_or(0) as u16;
@@ -386,16 +397,23 @@ pub fn draw_title(
     let sector_label = "Sector ";
     let sector_text = sector_name(sector, sector_unlocked);
     let sector_row = format!("{sector_label}‹ {sector_text} ›");
-    for (i, text) in [
-        "START RUN",
-        sector_row.as_str(),
-        "OPTIONS",
-        "LIBRARY",
-        "QUIT",
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    // The nest row carries the bank, so the title always answers "what have I
+    // got to spend" without opening the screen. Empty and unspent reads plain.
+    let nest_row = if scores.meta.bank > 0 {
+        format!("THE NEST  {}g", scores.meta.bank)
+    } else {
+        "THE NEST".to_string()
+    };
+    let rows: [(Target, String); 6] = [
+        (Target::Start, "START RUN".to_string()),
+        (Target::Sectors, sector_row),
+        (Target::Options, "OPTIONS".to_string()),
+        (Target::Library, "LIBRARY".to_string()),
+        (Target::Nest, nest_row),
+        (Target::Quit, "QUIT".to_string()),
+    ];
+    for (i, (target, text)) in rows.iter().enumerate() {
+        let text = text.as_str();
         let selected = i == choice;
         let style = if selected {
             heavy(PLATE).bg(to_color(mix(
@@ -407,16 +425,7 @@ pub fn draw_title(
             ink(COAT)
         };
         let rr = band(menu, y + i as u16, 1);
-        hits.add(
-            rr,
-            [
-                Target::Start,
-                Target::Sectors,
-                Target::Options,
-                Target::Library,
-                Target::Quit,
-            ][i],
-        );
+        hits.add(rr, *target);
         let prefix = if selected { " ▸  " } else { "    " };
         if i == 1 {
             // The arrows carry their own targets, so the pointer can step the
@@ -438,7 +447,7 @@ pub fn draw_title(
             rr,
         );
     }
-    y += 5 + gap;
+    y += 6 + gap;
     center(
         f,
         body,
@@ -1394,6 +1403,8 @@ pub fn draw_end(
     // only its stage number).
     floor: Theme,
     practice: bool,
+    // What the run banked into the nest (`crate::meta::BankTally`).
+    nest: Option<&crate::meta::BankTally>,
 ) {
     let (status, accent) = if won && practice {
         ("SECTOR CLEARED", Color::Rgb(169, 210, 186))
@@ -1453,6 +1464,14 @@ pub fn draw_end(
     if new_best {
         center(f, r, 8, Span::styled(" ◆  NEW HIGH SCORE  ◆ ", heavy(TAIL)));
     }
+    if let (Some(nest), true) = (nest, r.height >= 20) {
+        let style = if nest.voided {
+            ink(WARN_AMBER)
+        } else {
+            heavy(TRAIL_GOLD)
+        };
+        center(f, r, 9, Line::styled(nest.line().as_str(), style));
+    }
     let table = centered_rect(35, inner.height, inner);
     f.render_widget(
         Line::styled("RK    SCORE   SECTOR         TIME", ink(accent)),
@@ -1487,6 +1506,8 @@ pub fn draw_end(
         &[
             (" Enter restart ", Some(Target::Restart)),
             ("   ", None),
+            (" N the nest ", Some(Target::Nest)),
+            ("   ", None),
             (" Q to menu ", Some(Target::Menu)),
         ],
     );
@@ -1518,6 +1539,10 @@ pub struct RunSummary {
     pub sector: u8,
     /// A single-sector practice run (labelled, and never a campaign win).
     pub practice: bool,
+    /// The nest's banking tally for this run (`crate::meta::bank`): what the
+    /// purse, the floor/apex bonuses and the clear put in the bank, and the new
+    /// total. `None` on a report drawn outside a finished run (the tests).
+    pub nest: Option<crate::meta::BankTally>,
 }
 
 /// `SECTOR 2/3`, plus a `PRACTICE` marker for single-sector runs.
@@ -2060,6 +2085,24 @@ pub fn draw_pause_with_run(
         }
     }
 
+    // The nest: the permanent bonuses this run is playing with, kept apart from
+    // the in-run passives the tray above shows (`the nest bought this` vs `this
+    // floor gave me that`). A fresh profile prints nothing at all.
+    let nest_line = world.player.loadout.meta.summary();
+    if !nest_line.is_empty() {
+        let y = inner.y + body_row + 6;
+        if y < body_bottom {
+            let (lx, _) = buf.set_stringn(right_x, y, "NEST ", 5, heavy(TRAIL_GOLD));
+            buf.set_stringn(
+                lx,
+                y,
+                &nest_line,
+                (right_x + right_w).saturating_sub(lx) as usize,
+                ink(TRAIL_GOLD),
+            );
+        }
+    }
+
     // Passive icon tray beneath Biometrics when the icon dossier has vertical room.
     if icon_dossier {
         let pass_hdr_y = inner.y + body_row + 7;
@@ -2126,6 +2169,8 @@ pub fn draw_pause_with_run(
             (" ", None),
             (" L library ", Some(Target::Library)),
             (" ", None),
+            (" B nest ", Some(Target::Nest)),
+            (" ", None),
             (mute_chip, None),
             (" ", None),
             (quit, Some(Target::Menu)),
@@ -2162,6 +2207,7 @@ pub fn draw_end_summary(
             summary.sector,
             summary.theme,
             summary.practice,
+            summary.nest.as_ref(),
         );
         return;
     }
@@ -2336,6 +2382,21 @@ pub fn draw_end_summary(
         );
     }
 
+    // The nest: what this run banked. One line above the records table, so the
+    // tally sits under the numbers it came from.
+    if let Some(nest) = summary.nest.as_ref() {
+        let tally = nest.line();
+        let style = if nest.voided {
+            ink(WARN_AMBER)
+        } else {
+            heavy(TRAIL_GOLD)
+        };
+        f.render_widget(
+            Line::styled(tally.as_str(), style).centered(),
+            band(inner, y_table.saturating_sub(1), 1),
+        );
+    }
+
     // Final Arsenal strip.
     if !summary.weapons.is_empty() {
         let mut wspans: Vec<Span<'_>> = Vec::with_capacity(summary.weapons.len() * 3 + 2);
@@ -2409,6 +2470,8 @@ pub fn draw_end_summary(
         hits,
         &[
             (" Enter restart ", Some(Target::Restart)),
+            ("   ", None),
+            (" N the nest ", Some(Target::Nest)),
             ("   ", None),
             (" Q to menu ", Some(Target::Menu)),
         ],
@@ -2543,6 +2606,18 @@ mod tests {
             armor: 2.0,
             sector: 3,
             practice: false,
+            nest: Some(crate::meta::BankTally {
+                raised: 240,
+                spent: 30,
+                purse: 210,
+                floor_bonus: 75,
+                apex_bonus: 18,
+                win_bonus: 75,
+                halved: false,
+                voided: false,
+                banked: 378,
+                total: 900,
+            }),
         };
         let mut scores = ScoreTable::default();
         scores.insert(ScoreEntry {

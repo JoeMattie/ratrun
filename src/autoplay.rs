@@ -694,7 +694,14 @@ impl AutoRun {
         // practice floor (it is not a campaign step).
         let start_level = opts.start_level.min(campaign::SECTOR_COUNT - 1);
         let getaway = campaign::is_getaway_sector(start_level);
-        let start_loadout = opts.carry.loadout();
+        let mut start_loadout = opts.carry.loadout();
+        // `--bot-batch --meta mid|max`: the nest stage this batch measures. The
+        // batch never reads a player's profile — the stage is a process-wide
+        // flag the runner set from the command line, and `None` (the default)
+        // is the neutral fresh profile every test and the harness use.
+        if let Some(mods) = crate::meta::batch_modifiers() {
+            start_loadout.set_meta(mods);
+        }
         // `--route`: play the start level on a side-route floor (Laundry,
         // Printworks) instead of the original route's own.
         let route = opts.route.filter(|_| !getaway && start_level > 0);

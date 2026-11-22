@@ -10,6 +10,7 @@ mod audio;
 mod config;
 mod input;
 mod lore;
+mod meta;
 mod math;
 mod render;
 mod scores;

@@ -344,6 +344,10 @@ pub enum CalloutKind {
     ShopHint,
     /// A new Library entry was discovered (the `LIBRARY + Pillbug` callout).
     Library,
+    /// The nest's permanent upgrades, announced once when a floor starts
+    /// (`NEST  8+8 slots · +18% move · …`). Appended last so the legacy kinds
+    /// keep their order.
+    Nest,
 }
 
 impl CalloutKind {
@@ -366,6 +370,7 @@ impl CalloutKind {
             CalloutKind::ChestHint => TRAIL_GOLD,
             CalloutKind::ShopHint => GATE_STEEL,
             CalloutKind::Library => TRAIL_GOLD,
+            CalloutKind::Nest => TRAIL_GOLD,
         }
     }
 }
@@ -459,6 +464,10 @@ pub struct HudState {
     /// The wave-3 pocket-find strip: `B12 M5 P4 S6` — one chip per active
     /// timed buff, refilled in `tick` so the draw path allocates nothing.
     buffs: String,
+    /// The nest chip's text (`NEST +6 upgrades`), refilled in `tick` from the
+    /// run's permanent upgrades. Empty for a fresh profile, so the chip never
+    /// appears for a player who has not bought anything.
+    nest: String,
     /// Does the strip have room for the finds' names (`CAP 12 MOUSE 5`) rather
     /// than their one-letter tags? Set by `draw_bottom` each frame.
     wide_chips: bool,
@@ -545,6 +554,7 @@ impl Default for HudState {
             dash_status: String::with_capacity(8),
             dash_key: DashKey::Space,
             buffs: String::with_capacity(48),
+            nest: String::with_capacity(24),
             wide_chips: false,
             boss_hp_text: String::with_capacity(24),
             boss_banner: String::with_capacity(48),
@@ -610,6 +620,7 @@ impl HudState {
         // A run that ends with a pocket find still running must not leave its
         // chip on the next run's strip.
         self.buffs.clear();
+        self.nest.clear();
         self.next_kill_milestone = 50;
         self.streak_kills = 0;
         self.streak_timer = 0.0;
@@ -1009,6 +1020,15 @@ impl HudState {
                     let _ = write!(b, "{}{:02}", kind.buff_tag(), secs.min(99));
                 }
                 any = true;
+            }
+        });
+
+        // 5b. The nest chip: how many permanent tracks this run is carrying.
+        //     Retained buffer, so the draw path still allocates nothing.
+        let nest_tracks = world.player.loadout.meta.tracks_owned();
+        refill(&mut self.nest, |b| {
+            if nest_tracks > 0 {
+                let _ = write!(b, " ⌂ NEST {nest_tracks} ");
             }
         });
 
@@ -2335,6 +2355,31 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
     }
 
     draw_buff_strip(frame, area, &state.buffs);
+    draw_nest_chip(frame, area, &state.nest);
+}
+
+/// The nest chip: `⌂ NEST 7` on the strip row above the bottom rail, hugging its
+/// **right** edge (the buff strip owns the left, the low-health pill the centre).
+///
+/// Drawn only when the run has permanent upgrades — a fresh profile's run shows
+/// nothing, exactly as before the nest existed — and only from 44 columns up,
+/// where the strip row has room for it beside the buffs.
+pub(crate) fn draw_nest_chip(frame: &mut Frame, area: Rect, text: &str) {
+    if text.is_empty() || area.y == 0 || area.width < 44 {
+        return;
+    }
+    let w = (text.chars().count() as u16).min(area.width.saturating_sub(4));
+    if w == 0 {
+        return;
+    }
+    let x = area.right().saturating_sub(w + 1);
+    frame.buffer_mut().set_stringn(
+        x,
+        area.y - 1,
+        text,
+        w as usize,
+        Style::default().fg(TRAIL_GOLD).bg(PLATE),
+    );
 }
 
 /// The wave-3 pocket-find strip: `B12 M05 P04 S06`.

@@ -27,8 +27,12 @@ pub const CURSOR_ROW: usize = 3;
 pub const MUTE_ROW: usize = 4;
 pub const ZOOM_ROW: usize = 5;
 pub const BACK_ROW: usize = 6;
+/// Wipe the nest (`crate::meta`): the bank and every permanent upgrade. Appended
+/// **after** BACK so every existing row keeps its index; it takes two presses
+/// (the row reads `WIPE`, then `CONFIRM?`).
+pub const RESET_ROW: usize = 7;
 /// How many rows the screen has.
-pub const ROW_COUNT: usize = 7;
+pub const ROW_COUNT: usize = 8;
 
 /// Slider identity used by [`Target::OptionsBar`]: the value the track edits.
 pub const MUSIC_BAR: usize = 0;
@@ -52,6 +56,8 @@ pub enum Row {
     Mute,
     Zoom,
     Back,
+    /// The nest's reset (appended last: the legacy rows keep their order).
+    Reset,
 }
 
 /// The screen's rows in order; index with the constants above.
@@ -63,6 +69,7 @@ pub const ROWS: [Row; ROW_COUNT] = [
     Row::Mute,
     Row::Zoom,
     Row::Back,
+    Row::Reset,
 ];
 
 impl Row {
@@ -76,6 +83,7 @@ impl Row {
             Row::Mute => "MUTE",
             Row::Zoom => "ZOOM",
             Row::Back => "BACK",
+            Row::Reset => "NEST",
         }
     }
 
@@ -102,6 +110,8 @@ pub struct OptionsView {
     pub zoom: f32,
     /// Selected row (`0..ROW_COUNT`).
     pub row: usize,
+    /// The RESET row is armed: the next activation wipes the nest.
+    pub reset_armed: bool,
     /// Accent for the panel edge and the sliders (theme or level material).
     pub accent: Color,
 }
@@ -207,6 +217,13 @@ fn value_text(view: &OptionsView, row: Row) -> String {
             let mut s = String::with_capacity(8);
             crate::render::zoom::format_into(&mut s, view.zoom);
             s
+        }
+        Row::Reset => {
+            if view.reset_armed {
+                "CONFIRM?".to_string()
+            } else {
+                "WIPE".to_string()
+            }
         }
         Row::Music => String::new(),
         Row::Effects => String::new(),
@@ -445,6 +462,7 @@ mod tests {
             muted: false,
             zoom: 1.0,
             row,
+            reset_armed: false,
             accent: Color::Rgb(144, 184, 173),
         }
     }

@@ -209,6 +209,7 @@ fn reap_dead(
     minibosses: &mut Query<&mut Miniboss>,
     appointments: &mut MinibossSchedule,
     dead: &mut Vec<(u64, Entity)>,
+    luck: f32,
 ) {
     // Only the corpses matter, so collect and sort just those: the per-enemy
     // rng draws below (death burst, then the drop roll) depend on this order.
@@ -251,7 +252,9 @@ fn reap_dead(
         let xp = minibosses.get(entity).map(|mb| mb.xp).unwrap_or_else(|_| e.kind.xp());
         let gem = Gem::new(e.pos, xp);
         commands.spawn((gem, next_id.take()));
-        // Rare pickup drops.
+        // Rare pickup drops. The nest's Luck track scales the **chance** this
+        // roll is compared against (never the number of draws), so a lucky run
+        // makes the same rng calls in the same order as an unlucky one.
         let drop_chance = if e.kind == EnemyKind::Boss {
             1.0
         } else if big {
@@ -259,6 +262,7 @@ fn reap_dead(
         } else {
             0.012
         };
+        let drop_chance = (drop_chance * luck).min(1.0);
         let loot_roll = rng.random::<f32>();
         if loot_roll < drop_chance {
             let kind = roll_pickup_kind(rng);
@@ -314,6 +318,7 @@ pub fn reap_enemies_system(
     mut shake: ResMut<Shake>,
     mut next_id: ResMut<NextSpawnId>,
     mut fight: ResMut<BossFight>,
+    player: Res<Player>,
     enemies: Query<(Entity, &SpawnId, &Enemy)>,
     mut minibosses: Query<&mut Miniboss>,
     mut appointments: ResMut<MinibossSchedule>,
@@ -354,6 +359,7 @@ pub fn reap_enemies_system(
             &mut minibosses,
             &mut appointments,
             &mut dead,
+            player.loadout.stats.luck_mult,
         );
         for (entity, _, e) in enemies.iter() {
             if e.alive() {
@@ -375,6 +381,7 @@ pub fn reap_enemies_system(
         &mut minibosses,
         &mut appointments,
         &mut dead,
+        player.loadout.stats.luck_mult,
     );
 }
 
@@ -393,6 +400,7 @@ pub fn nuke_reap_system(
     mut sfx: ResMut<SfxQueue>,
     mut shake: ResMut<Shake>,
     mut next_id: ResMut<NextSpawnId>,
+    player: Res<Player>,
     enemies: Query<(Entity, &SpawnId, &Enemy)>,
     mut minibosses: Query<&mut Miniboss>,
     mut appointments: ResMut<MinibossSchedule>,
@@ -414,6 +422,7 @@ pub fn nuke_reap_system(
         &mut minibosses,
         &mut appointments,
         &mut dead,
+        player.loadout.stats.luck_mult,
     );
     nuke.0 = false;
 }
@@ -526,8 +535,11 @@ pub fn treasure_system(
     let ppos = player.pos;
     let magnet = player.loadout.stats.magnet;
     // Gene splices: Hoard Gland pays +50% per coin. With no splice the
-    // multiplier is exactly 1.0 and every value passes through unchanged.
-    let coin_mult = crate::game::shop::coin_mult(&player.loadout.splices);
+    // multiplier is exactly 1.0 and every value passes through unchanged. The
+    // nest's Gold gain track multiplies on top (also exactly 1.0 with no
+    // profile), so a coin's payout is `value x splice x nest`.
+    let coin_mult = crate::game::shop::coin_mult(&player.loadout.splices)
+        * player.loadout.stats.gold_mult;
     let coin_radius = PLAYER_RADIUS + 3.0;
     let chest_radius = PLAYER_RADIUS + 4.0;
     let mut gained = 0u32;

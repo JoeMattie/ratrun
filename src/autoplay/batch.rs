@@ -104,6 +104,12 @@ pub struct BatchOpts {
     /// the shipped constants in force. Set process-wide for the whole batch
     /// (see [`crate::game::loadout::set_slot_caps`]).
     pub caps: Option<(usize, usize)>,
+    /// The **nest** stage this batch plays (`--meta none|mid|max`): the
+    /// permanent upgrades a saved profile would have bought, so balance can be
+    /// measured at a fresh, a half-upgraded and a maxed nest. `None` is the
+    /// neutral profile every test and the determinism harness use; the batch
+    /// never reads a player's real profile.
+    pub meta: Option<crate::meta::MetaStage>,
 }
 
 impl Default for BatchOpts {
@@ -124,6 +130,7 @@ impl Default for BatchOpts {
             exact_seed: false,
             route: None,
             caps: None,
+            meta: None,
         }
     }
 }
@@ -2182,6 +2189,9 @@ pub fn maybe_run_cli() -> Option<i32> {
             return Some(2);
         }
     };
+    // The nest stage is process-wide too (read only by `AutoRun::new`), and it
+    // composes with `--caps`: the caps override still wins for the racks.
+    crate::meta::set_batch_meta(opts.meta);
     if let Some((w, p)) = opts.caps {
         crate::game::loadout::set_slot_caps(w, p);
     }
@@ -2219,6 +2229,7 @@ usage: ratrun --bot-batch <N> [--seed <S>] [--level <1-3>] [--practice] \
                    (laundry / printworks are the two side routes)
   --seed-exact     read --seed as a run seed (replay an anomaly's seed)
   --caps W:P       distinct-kind slot caps (4:4 fresh profile, 8:8 maxed)
+  --meta STAGE     nest stage: none (fresh), mid (half upgraded), max (everything)
   --bot-render F   print the text table for a saved --json report";
 
 /// Parse a `--caps` argument: `W:P` distinct-kind caps (e.g. `4:4` for a fresh
@@ -2315,6 +2326,12 @@ pub fn parse_args(args: &[String]) -> Result<Option<BatchOpts>, String> {
             "--route" => {
                 let s = value()?;
                 opts.route = Some(parse_route(s)?);
+            }
+            "--meta" => {
+                let name = value()?;
+                opts.meta = Some(crate::meta::MetaStage::parse(name).ok_or_else(|| {
+                    format!("unknown --meta stage {name:?} (none|mid|max)")
+                })?);
             }
             "--caps" => {
                 let s = value()?;
@@ -2816,6 +2833,7 @@ mod tests {
             exact_seed: false,
             route: None,
             caps: None,
+            meta: None,
         }
     }
 
@@ -2966,6 +2984,42 @@ mod tests {
         assert!(opts.exact_seed);
         assert_eq!(run_seed(&opts, 0), 123);
         assert_eq!(run_seed(&opts, 1), 124);
+    }
+
+    /// `--meta none|mid|max` parses, refuses a typo, and leaves the process
+    /// flag exactly as it found it (the batch is the only thing that sets it,
+    /// and a leaked flag would silently change every later test).
+    #[test]
+    fn the_meta_flag_names_the_nest_stage() {
+        let args = |line: &str| -> Vec<String> {
+            line.split(' ').map(|s| s.to_string()).collect()
+        };
+        let opts = parse_args(&args("--bot-batch 1 --meta mid"))
+            .expect("ok")
+            .expect("parsed");
+        assert_eq!(opts.meta, Some(crate::meta::MetaStage::Mid));
+        let opts = parse_args(&args("--bot-batch 1 --meta max --caps 8:8"))
+            .expect("ok")
+            .expect("parsed");
+        assert_eq!(opts.meta, Some(crate::meta::MetaStage::Max));
+        assert_eq!(opts.caps, Some((8, 8)), "--meta composes with --caps");
+        assert!(parse_args(&args("--bot-batch 1 --meta everything")).is_err());
+        // No flag at all is the neutral fresh profile.
+        let opts = parse_args(&args("--bot-batch 1")).expect("ok").expect("parsed");
+        assert_eq!(opts.meta, None);
+
+        // A run built while no stage is set starts exactly like a fresh
+        // profile (the local game's default, and what the determinism harness
+        // plays): the batch never reads a saved nest.
+        if crate::meta::batch_meta_stage().is_none() {
+            let run = crate::autoplay::AutoRun::new(
+                11,
+                crate::autoplay::AutoOpts::practice(0, Skill::Expert),
+            );
+            let loadout = &run.world().player.loadout;
+            assert_eq!(loadout.meta, crate::meta::RunModifiers::NONE);
+            assert_eq!((loadout.max_weapons(), loadout.max_passives()), (4, 4));
+        }
     }
 
     /// The Wilson interval and the sample-size helper agree with the textbook
