@@ -1169,6 +1169,7 @@ impl World {
         self.update_full(dt, move_dir, dash, active, aim, 0.0, hold);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_full(
         &mut self,
         dt: f32,
@@ -1276,6 +1277,7 @@ impl World {
         self.begin_tick_full(dt, move_dir, dash, active, None, 0.0, hold);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn begin_tick_full(
         &mut self,
         dt: f32,
@@ -4030,7 +4032,7 @@ mod zoom_tests {
         }
         println!("enemies: {}", w.enemy_count());
         // 120 × 40 cells is the task's reference frame; 160 × 168 px is the
-        // viewport `PORT_PLAN.md` measured the unzoomed draw at (385 µs).
+        // viewport the ECS port measured the unzoomed draw at (385 µs).
         for (cw, ch) in [(120usize, 74usize), (160, 168)] {
             let mut pb = PixelBuffer::new(cw, ch);
             for z in [1.0f32, 2.0, 0.5] {

@@ -1066,7 +1066,8 @@ mod tests {
             run_player(&mut w);
             w.end_tick();
         }
-        let wall_left = TileMap::tile_rect(cx + 2, cy).x;
+        // A `WallKind::Maze` cell is an 8 px spine in the middle of its cell.
+        let wall_left = TileMap::tile_rect(cx + 2, cy).x + 4.0;
         assert!(
             w.player.pos.x <= wall_left - PLAYER_RADIUS + 0.01,
             "the charged dash went through the wall at {:?}",

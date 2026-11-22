@@ -785,7 +785,7 @@ pub const DASH_HIT_CAP: usize = 48;
 /// the fixed number of travelled legs it can remember (a 0.16 s dash at 60 fps
 /// is ~10 legs; the cap bounds a large-`dt` or click-dash route).
 pub const RIPCORD_SECS: f32 = 0.6;
-pub const RIPCORD_SEG_CAP: usize = 24;
+pub const RIPCORD_SEG_CAP: usize = 96;
 
 /// Dash legs one tick can record. The dash moves in sub-steps shorter than the
 /// player radius (`player::PLAYER_SUBSTEP`), so a normal tick is one or two
@@ -949,8 +949,9 @@ impl DashTrack {
 
     /// Add this dash leg to the taut route and keep the cord alive for the
     /// design's [`RIPCORD_SECS`] after the last leg. Past
-    /// [`RIPCORD_SEG_CAP`] legs the route keeps the legs it has (deterministic:
-    /// the cap is reached in travel order).
+    /// [`RIPCORD_SEG_CAP`] legs the route keeps the legs it has and stretches
+    /// the last one to the rat (deterministic: the cap is reached in travel
+    /// order).
     #[inline]
     pub fn extend_route(&mut self, from: Vec2, to: Vec2) {
         if self.route_len == 0 {
@@ -959,6 +960,11 @@ impl DashTrack {
         if self.route_len < RIPCORD_SEG_CAP {
             self.route[self.route_len] = (from, to);
             self.route_len += 1;
+        } else {
+            // Past the cap the last leg is stretched to where the rat really
+            // is (the same rule `push_leg` uses), so the cord always reaches
+            // the end of the dash instead of stopping part-way along it.
+            self.route[RIPCORD_SEG_CAP - 1].1 = to;
         }
         self.route_life = RIPCORD_SECS;
     }
