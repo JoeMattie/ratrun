@@ -32,8 +32,11 @@ pub fn draw_overlays(frame: &mut Frame, game: Rect, world: &World, state: &mut H
     draw_damage_and_low_hp(frame, game, world, state);
     let top_reserved = draw_boss_ui(frame, game, world, state);
     let miniboss_reserved = draw_miniboss_ui(frame, game, world, state, top_reserved);
-    draw_boss_compass(frame, game, world, state);
-    draw_poi_arrows(frame, game, world, state);
+    // The compass goes first and hands its label rectangle to the edge arrows:
+    // a badge that would land on the label is skipped, never stamped half over
+    // it (the arrows are drawn later and used to overwrite ` ◄ BOSS `).
+    let compass = draw_boss_compass(frame, game, world, state);
+    draw_poi_arrows(frame, game, world, state, compass);
     draw_callouts(frame, game, world, state, top_reserved + miniboss_reserved);
 }
 
@@ -81,7 +84,7 @@ fn push_poi(out: &mut [PoiTarget; MAX_POI_SCAN], n: &mut usize, t: PoiTarget) {
 /// stamps), and the badge is bolder the closer the target is. Targets already
 /// inside the viewport draw nothing; at most [`MAX_POI_ARROWS`] are shown, in
 /// priority order chest > shop > maze > rare find.
-fn draw_poi_arrows(frame: &mut Frame, game: Rect, world: &World, _state: &HudState) {
+fn draw_poi_arrows(frame: &mut Frame, game: Rect, world: &World, _state: &HudState, avoid: Rect) {
     if game.width < 28 || game.height < 12 {
         return;
     }
@@ -257,6 +260,7 @@ fn draw_poi_arrows(frame: &mut Frame, game: Rect, world: &World, _state: &HudSta
             near > 0.55,
             &mut placed,
             &mut placed_n,
+            avoid,
         );
     }
 }
@@ -300,6 +304,7 @@ fn draw_edge_badge(
     bold: bool,
     placed: &mut [(u16, u16); MAX_POI_ARROWS],
     placed_n: &mut usize,
+    avoid: Rect,
 ) -> bool {
     let nx = offset.x / half_w.max(1.0);
     let ny = offset.y / half_h.max(1.0);
@@ -326,9 +331,20 @@ fn draw_edge_badge(
         if ny < 0.0 {
             (x, game.y, '▲', false)
         } else {
-            (x, game.bottom().saturating_sub(1), '▼', false)
+            (x, bottom_edge_row(game), '▼', false)
         }
     };
+
+    // The boss compass owns its label: a two-cell badge that touches it is
+    // dropped (an empty `avoid` never matches).
+    if !avoid.is_empty()
+        && y >= avoid.y
+        && y < avoid.bottom()
+        && x < avoid.right()
+        && x + 2 > avoid.x
+    {
+        return false;
+    }
 
     // Keep the two arrows from colliding on the same edge row.
     for &(px, py) in placed.iter().take(*placed_n) {
@@ -349,6 +365,16 @@ fn draw_edge_badge(
         buf[(x + 1, y)].set_char(glyph).set_style(style);
     }
     true
+}
+
+/// The row the bottom-edge indicators (`▼` arrows, ` ▼ BOSS `) sit on: one row
+/// **above** the viewport's last row. The last row is shared by the buff strip
+/// (left), the CRITICAL HP pill (centre) and the nest chip (right), all of
+/// which are drawn over whatever is there; an indicator on that row came out
+/// spliced into them (`CAP 12OSS`).
+#[inline]
+fn bottom_edge_row(game: Rect) -> u16 {
+    game.bottom().saturating_sub(2).max(game.y)
 }
 
 /// Subtle perimeter brackets on damage impact and critical low health.
@@ -451,6 +477,10 @@ fn draw_boss_warning(
         return 0;
     }
     let rem = (director::BOSS_TIME - world.elapsed).ceil().max(1.0) as u32;
+    // The widest wording that fits **whole**: the width tiers are only a
+    // first guess (they assume a short codename), so each one is measured and
+    // falls through to the next when a long name would lose its tail.
+    let room = usize::from(game.width);
     state.boss_banner.clear();
     if game.width >= 56 {
         let _ = write!(
@@ -459,9 +489,13 @@ fn draw_boss_warning(
             codename,
             rem
         );
-    } else if game.width >= 40 {
+    }
+    if game.width >= 40 && (state.boss_banner.is_empty() || state.boss_banner.chars().count() > room) {
+        state.boss_banner.clear();
         let _ = write!(state.boss_banner, " ▸ {} IN {:02}s ◂ ", codename, rem);
-    } else {
+    }
+    if state.boss_banner.is_empty() || state.boss_banner.chars().count() > room {
+        state.boss_banner.clear();
         let _ = write!(state.boss_banner, " ▸ ARENA IN {:02}s ◂ ", rem);
     }
     let bw = (state.boss_banner.chars().count() as u16).min(game.width);
@@ -629,7 +663,7 @@ fn draw_boss_ui(frame: &mut Frame, game: Rect, world: &World, state: &mut HudSta
 
         // During arrival intro, show classification subtitle if room permits.
         if state.boss_intro_timer > 0.0
-            && hdr_right > cx + hp_tw + class_tag.len() as u16 + 4
+            && hdr_right > cx + hp_tw + class_tag.chars().count() as u16 + 4
         {
             let (nx, _) = buf.set_stringn(
                 cx,
@@ -776,7 +810,11 @@ fn draw_miniboss_ui(
     if game.width < 30 || game.height < 8 {
         return 0;
     }
-    let y = game.y + top;
+    // With no boss chrome above it the plate starts one row down, like the
+    // boss banner does: row 0 belongs to the top-edge arrows and the damage
+    // brackets, which used to be stamped through the name.
+    let lead = u16::from(top == 0);
+    let y = game.y + top + lead;
     if y + 1 >= game.bottom() {
         return 0;
     }
@@ -810,12 +848,13 @@ fn draw_miniboss_ui(
                 .add_modifier(Modifier::BOLD),
         );
         // Bar: filled part in amber, the rest in the track colour.
-        let filled = (bar_w as f32 * ratio).round() as u16;
+        // A living miniboss always shows at least one lit cell.
+        let filled = ((bar_w as f32 * ratio).round() as u16).max(u16::from(hp > 0.0));
         for i in 0..bar_w {
             let c = if i < filled { WARN_AMBER } else { TRACK };
             buf[(bx + i, y + 1)].set_char('█').set_style(Style::default().fg(c).bg(PLATE));
         }
-        return 2;
+        return 2 + lead;
     }
     // No countdown before a miniboss: it simply arrives (its entrance, its
     // arrival sting and then this nameplate are the announcement).
@@ -828,7 +867,10 @@ fn draw_miniboss_ui(
 /// **arena** instead, so the 25 s warning's "head for the arena" is a real
 /// bearing and not only text; the pointer switches to the boss the moment the
 /// boss exists.
-fn draw_boss_compass(frame: &mut Frame, game: Rect, world: &World, state: &HudState) {
+///
+/// Returns the label's rectangle (empty when nothing was drawn) so the edge
+/// arrows can keep off it.
+fn draw_boss_compass(frame: &mut Frame, game: Rect, world: &World, state: &HudState) -> Rect {
     // The target: the boss once it exists, else the arena during the pre-boss
     // warning window. `to_boss` only picks the edge label.
     let (offset, to_boss) = match state.telemetry.boss_offset {
@@ -838,16 +880,16 @@ fn draw_boss_compass(frame: &mut Frame, game: Rect, world: &World, state: &HudSt
                 && world.elapsed >= director::BOSS_TIME - BOSS_WARNING_SECS
                 && world.elapsed < director::BOSS_TIME;
             if !warning {
-                return;
+                return Rect::default();
             }
             let Some(room) = world.level.boss_room() else {
-                return;
+                return Rect::default();
             };
             (room.center() - world.player.pos, false)
         }
     };
     if game.width < 24 || game.height < 10 {
-        return;
+        return Rect::default();
     }
     // Viewport extents in world pixels (half-block: 1 col = 1px wide, 1 row =
     // 2px tall). This is the *rendered* span — the logical viewport times the
@@ -857,7 +899,7 @@ fn draw_boss_compass(frame: &mut Frame, game: Rect, world: &World, state: &HudSt
     let half_w = (span.x * 0.5).max(f32::from(game.width) * 0.5);
     let half_h = (span.y * 0.5).max(f32::from(game.height));
     if offset.x.abs() <= half_w * 0.92 && offset.y.abs() <= half_h * 0.92 {
-        return; // Boss is already visible inside the viewport.
+        return Rect::default(); // Boss is already visible inside the viewport.
     }
 
     let nx = offset.x / half_w.max(1.0);
@@ -876,12 +918,15 @@ fn draw_boss_compass(frame: &mut Frame, game: Rect, world: &World, state: &HudSt
         let y = game.y + ((game.height.saturating_sub(2)) as f32 * frac_y) as u16;
         if nx < 0.0 {
             let label = if to_boss { " ◄ BOSS " } else { " ◄ ARENA " };
-            buf.set_stringn(game.x + 1, y, label, (game.width - 2) as usize, style);
+            let lw = (label.chars().count() as u16).min(game.width - 2);
+            buf.set_stringn(game.x + 1, y, label, lw as usize, style);
+            Rect::new(game.x + 1, y, lw, 1)
         } else {
             let label = if to_boss { " BOSS ► " } else { " ARENA ► " };
             let lw = label.chars().count() as u16;
             let x = game.right().saturating_sub(lw + 1).max(game.x);
             buf.set_stringn(x, y, label, lw as usize, style);
+            Rect::new(x, y, lw, 1)
         }
     } else {
         // Top or bottom edge.
@@ -897,9 +942,10 @@ fn draw_boss_compass(frame: &mut Frame, game: Rect, world: &World, state: &HudSt
         let y = if ny < 0.0 {
             game.y
         } else {
-            game.bottom().saturating_sub(1)
+            bottom_edge_row(game)
         };
         buf.set_stringn(cx, y, label, lw as usize, style);
+        Rect::new(cx, y, lw, 1)
     }
 }
 
@@ -1320,6 +1366,143 @@ mod tests {
         assert_eq!(buf[(59, 0)].symbol(), "┐");
         assert_eq!(buf[(0, 19)].symbol(), "└");
         assert_eq!(buf[(59, 19)].symbol(), "┘");
+    }
+
+    /// Text of one buffer row.
+    fn row_text(terminal: &Terminal<TestBackend>, y: u16) -> String {
+        let buf = terminal.backend().buffer();
+        (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    /// A boss below the view while the rat is critical: the bottom compass and
+    /// the CRITICAL HP pill used to share the last row, and whichever was
+    /// drawn second was spliced into the other. The compass now sits one row
+    /// up, at every supported size and every horizontal bearing.
+    #[test]
+    fn the_bottom_compass_never_shares_a_row_with_the_critical_pill() {
+        for (tw, th) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            for dx in [-900.0f32, -200.0, 0.0, 200.0, 900.0] {
+                let mut w = World::new(Theme::Sewer, 7);
+                w.viewport = Vec2::new(f32::from(tw), f32::from(th) * 2.0);
+                w.player.hp = w.player.max_hp() * 0.15;
+                let mut hud = HudState::default();
+                hud.telemetry.set_boss_hp(Some((1400.0, 1400.0)));
+                hud.telemetry.set_boss_offset(Some(Vec2::new(dx, 4000.0)));
+
+                let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();
+                terminal
+                    .draw(|f| draw_overlays(f, f.area(), &w, &mut hud))
+                    .unwrap();
+                let last = row_text(&terminal, th - 1);
+                let above = row_text(&terminal, th - 2);
+                assert!(
+                    last.contains(" ◆ CRITICAL HP ◆ "),
+                    "{tw}x{th} dx {dx}: the pill is not whole: {last:?}"
+                );
+                assert!(
+                    above.contains(" ▼ BOSS "),
+                    "{tw}x{th} dx {dx}: no whole bottom compass one row up: {above:?}"
+                );
+                assert!(!last.contains('▼'), "{tw}x{th} dx {dx}: compass on the strip row: {last:?}");
+            }
+        }
+    }
+
+    /// An edge arrow that would land on the compass label is dropped whole;
+    /// one clear of it is drawn.
+    #[test]
+    fn an_edge_badge_keeps_off_the_compass_label() {
+        let game = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(game);
+        let mut placed = [(0u16, 0u16); MAX_POI_ARROWS];
+        let mut placed_n = 0usize;
+        // Dead left: the badge lands at (1, 9).
+        let left = Vec2::new(-500.0, 0.0);
+        let label = Rect::new(1, 9, 8, 1);
+        let drawn = draw_edge_badge(
+            &mut buf, game, left, 30.0, 20.0, '◆', COAT, true, &mut placed, &mut placed_n, label,
+        );
+        assert!(!drawn, "a badge on the compass label must be skipped");
+        assert_eq!(placed_n, 0, "a skipped badge takes no edge slot");
+        assert_eq!(buf[(1, 9)].symbol(), " ");
+        assert_eq!(buf[(2, 9)].symbol(), " ");
+        // No label (the empty rect): the same badge is drawn.
+        let drawn = draw_edge_badge(
+            &mut buf,
+            game,
+            left,
+            30.0,
+            20.0,
+            '◆',
+            COAT,
+            true,
+            &mut placed,
+            &mut placed_n,
+            Rect::default(),
+        );
+        assert!(drawn);
+        assert_eq!(buf[(1, 9)].symbol(), "◄");
+        assert_eq!(buf[(2, 9)].symbol(), "◆");
+        // Straight down: the badge sits one row above the strip row.
+        let mut placed_n = 0usize;
+        let drawn = draw_edge_badge(
+            &mut buf,
+            game,
+            Vec2::new(0.0, 500.0),
+            30.0,
+            20.0,
+            '◆',
+            COAT,
+            false,
+            &mut placed,
+            &mut placed_n,
+            Rect::default(),
+        );
+        assert!(drawn);
+        assert!(
+            (0..60u16).any(|x| buf[(x, 18)].symbol() == "▼"),
+            "the bottom badge belongs on the row above the strip"
+        );
+        assert!((0..60u16).all(|x| buf[(x, 19)].symbol() != "▼"));
+    }
+
+    /// The warning never loses its tail: a codename too long for a width tier
+    /// drops to the next wording instead of being cut mid-phrase.
+    #[test]
+    fn the_boss_warning_falls_back_to_a_wording_that_fits_whole() {
+        let long = "AN UNREASONABLY LONG CODENAME FOR A BOSS";
+        for (tw, want) in [(120u16, "HEAD FOR THE ARENA ◂"), (57, "IN 10s ◂"), (44, "ARENA IN 10s ◂"), (30, "ARENA IN 10s ◂")] {
+            let mut w = World::new(Theme::Sewer, 7);
+            w.elapsed = director::BOSS_TIME - 10.0;
+            let mut hud = HudState::default();
+            let mut terminal = Terminal::new(TestBackend::new(tw, 20)).unwrap();
+            terminal
+                .draw(|f| {
+                    draw_boss_warning(f, f.area(), &w, &mut hud, long, 0.0);
+                })
+                .unwrap();
+            let row = row_text(&terminal, 1);
+            assert!(row.contains(want), "{tw} cols: wanted {want:?} whole in {row:?}");
+            assert!(row.contains('▸'), "{tw} cols: the banner lost its head: {row:?}");
+        }
+        // Every real codename keeps the full wording at 57 columns.
+        for kind in crate::game::ecs::systems::boss::BossKind::all() {
+            let name = boss_codename_kind(kind).0;
+            let w = {
+                let mut w = World::new(Theme::Sewer, 7);
+                w.elapsed = director::BOSS_TIME - 10.0;
+                w
+            };
+            let mut hud = HudState::default();
+            let mut terminal = Terminal::new(TestBackend::new(57, 20)).unwrap();
+            terminal
+                .draw(|f| {
+                    draw_boss_warning(f, f.area(), &w, &mut hud, name, 0.0);
+                })
+                .unwrap();
+            let row = row_text(&terminal, 1);
+            assert!(row.contains(name) && row.contains('◂'), "{name}: {row:?}");
+        }
     }
 
     #[test]

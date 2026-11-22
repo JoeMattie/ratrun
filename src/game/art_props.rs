@@ -2385,7 +2385,9 @@ fn clothespin(pb: &mut PixelBuffer, x: i32, y: i32, w: i32, h: i32, seed: u32, p
             if ly == 1 || (dx > 0.0 && adx < gap_half + 1.1) {
                 c = palette::mix(c, wood_hi, 0.42);
             }
-            if ((px * 3 + (seed as i32 & 7)) % 5) == 0 && (py & 1) == 0 {
+            // Keyed to the prop's own pixels (`lx`, `ly`): screen coordinates
+            // made the grain swim across the peg as the camera scrolled.
+            if ((lx * 3 + (seed as i32 & 7)) % 5) == 0 && (ly & 1) == 0 {
                 c = palette::mix(c, grain_col, 0.30);
             }
             pb.plot(px, py, c);

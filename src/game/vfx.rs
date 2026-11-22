@@ -1148,6 +1148,169 @@ pub fn emit_enemy_death(
             sig
         }
     };
+    // Lab (batch 6b): each Lab body adds one accent of its own to the
+    // archetype's recoloured cue below (cotton, rim shards, glass, specimen,
+    // steel). One extra burst per death, for these five kinds only.
+    let lab_accent: Option<(Rgb, Rgb, usize, f32)> = match kind {
+        EnemyKind::SwabFoot => Some(((250, 250, 252), (150, 156, 170), 5, 30.0)),
+        EnemyKind::SpinnerLid => Some(((232, 252, 255), (34, 84, 104), 5, 78.0)),
+        EnemyKind::GlassRunner => Some(((250, 255, 252), (90, 150, 150), 8, 86.0)),
+        EnemyKind::WalkingSyringe => Some(((236, 120, 160), (120, 40, 70), 7, 70.0)),
+        EnemyKind::AutoclaveCart => Some(((226, 232, 240), (58, 62, 74), 10, 58.0)),
+        _ => None,
+    };
+    if let Some((hot, cold, count, speed)) = lab_accent {
+        let n = ps.budget_count(count, false);
+        ps.burst_shaped(
+            rng,
+            pos,
+            n,
+            speed,
+            radius * 0.5,
+            Ramp::Custom(hot, cold),
+            0.34,
+            false,
+            Shape::Dot,
+            4.0,
+        );
+    }
+    // Kitchen (batch 6b): what each Kitchen body drops when it breaks, on top
+    // of its archetype's recoloured cue below (the crumb, wing flecks, brass
+    // springs, pepper, ceramic shards, the steel lid). One extra burst per
+    // death, for these six kinds only.
+    let kitchen_accent: Option<(Rgb, Rgb, usize, f32)> = match kind {
+        EnemyKind::CrumbAnt => Some(((255, 244, 206), (150, 118, 70), 3, 40.0)),
+        EnemyKind::FruitFly => Some(((240, 244, 232), (132, 140, 128), 3, 34.0)),
+        EnemyKind::EggTimer => Some(((250, 214, 120), (150, 104, 40), 7, 80.0)),
+        EnemyKind::PepperMill => Some(((96, 72, 54), (24, 18, 14), 9, 58.0)),
+        EnemyKind::PieWeight => Some(((255, 255, 250), (128, 124, 132), 10, 72.0)),
+        EnemyKind::SinkCrab => Some(((246, 248, 252), (92, 98, 112), 6, 66.0)),
+        _ => None,
+    };
+    if let Some((hot, cold, count, speed)) = kitchen_accent {
+        let n = ps.budget_count(count, false);
+        ps.burst_shaped(
+            rng,
+            pos,
+            n,
+            speed,
+            radius * 0.5,
+            Ramp::Custom(hot, cold),
+            0.36,
+            false,
+            Shape::Dot,
+            4.0,
+        );
+    }
+    // Flatbed (batch 6b): one accent per Flatbed body on top of its
+    // archetype's recoloured cue (gravel chips, wing-case flakes, tar drops,
+    // aluminium shards, white feathers, rubber snaps). One extra burst per
+    // death, for these six kinds only.
+    let flatbed_accent: Option<(Rgb, Rgb, usize, f32)> = match kind {
+        EnemyKind::GravelTick => Some(((214, 210, 200), (84, 80, 74), 5, 62.0)),
+        EnemyKind::JuneBug => Some(((226, 180, 110), (78, 50, 28), 5, 54.0)),
+        EnemyKind::TarRat => Some(((92, 86, 80), (14, 12, 12), 7, 40.0)),
+        EnemyKind::LooseCan => Some(((244, 248, 252), (104, 110, 120), 8, 84.0)),
+        EnemyKind::TollGull => Some(((255, 255, 250), (150, 156, 166), 7, 36.0)),
+        EnemyKind::LooseBungee => Some(((240, 238, 228), (150, 56, 54), 8, 72.0)),
+        _ => None,
+    };
+    if let Some((hot, cold, count, speed)) = flatbed_accent {
+        let n = ps.budget_count(count, false);
+        ps.burst_shaped(
+            rng,
+            pos,
+            n,
+            speed,
+            radius * 0.5,
+            Ramp::Custom(hot, cold),
+            0.34,
+            false,
+            Shape::Dot,
+            4.0,
+        );
+    }
+    // Laundry (batch 6b): one accent per Laundry body on top of its
+    // archetype's recoloured cue (wool fluff, wing dust, wood splinters, a
+    // starch puff, a slow lint cloud). One extra burst per death, for these
+    // five kinds only.
+    let laundry_accent: Option<(Rgb, Rgb, usize, f32)> = match kind {
+        EnemyKind::WoolPill => Some(((255, 250, 236), (150, 142, 128), 5, 34.0)),
+        EnemyKind::ClothesMoth => Some(((222, 206, 176), (84, 70, 52), 5, 48.0)),
+        EnemyKind::PegSnapper => Some(((255, 214, 96), (96, 68, 38), 6, 78.0)),
+        EnemyKind::StarchBulb => Some(((250, 252, 255), (84, 96, 116), 7, 56.0)),
+        EnemyKind::LintGolem => Some(((214, 210, 204), (66, 62, 64), 10, 30.0)),
+        _ => None,
+    };
+    if let Some((hot, cold, count, speed)) = laundry_accent {
+        let n = ps.budget_count(count, false);
+        ps.burst_shaped(
+            rng,
+            pos,
+            n,
+            speed,
+            radius * 0.5,
+            Ramp::Custom(hot, cold),
+            0.34,
+            false,
+            Shape::Dot,
+            4.0,
+        );
+    }
+    // Sewer (batch 6b): one accent per Sewer body on top of its archetype's
+    // recoloured cue (bone chips, shell plates, a pale sucker pop, valve
+    // slime). One extra burst per death, for these four kinds only.
+    let sewer_accent: Option<(Rgb, Rgb, usize, f32)> = match kind {
+        EnemyKind::PipeEel => Some(((244, 238, 216), (96, 84, 70), 6, 74.0)),
+        EnemyKind::GrateArcher => Some(((226, 232, 208), (86, 108, 100), 6, 60.0)),
+        EnemyKind::SumpLeech => Some(((236, 222, 206), (58, 54, 62), 6, 44.0)),
+        EnemyKind::SluiceToad => Some(((170, 190, 132), (62, 88, 62), 10, 52.0)),
+        _ => None,
+    };
+    if let Some((hot, cold, count, speed)) = sewer_accent {
+        let n = ps.budget_count(count, false);
+        ps.burst_shaped(
+            rng,
+            pos,
+            n,
+            speed,
+            radius * 0.5,
+            Ramp::Custom(hot, cold),
+            0.34,
+            false,
+            Shape::Dot,
+            4.0,
+        );
+    }
+    // Printworks (batch 6b): what each Printworks body leaves, on top of its
+    // archetype's recoloured cue below (scales, paper scraps, lead filings,
+    // bent wire, newsprint, kraft ribbon, ink spatter). One extra burst per
+    // death, for these seven kinds only.
+    let printworks_accent: Option<(Rgb, Rgb, usize, f32)> = match kind {
+        EnemyKind::Silverfish => Some(((236, 242, 250), (120, 128, 140), 4, 44.0)),
+        EnemyKind::ErratumSlip => Some(((250, 247, 232), (150, 144, 124), 4, 30.0)),
+        EnemyKind::TypeSlug => Some(((212, 214, 224), (44, 46, 54), 6, 52.0)),
+        EnemyKind::StapleCrawler => Some(((232, 240, 252), (56, 66, 88), 6, 84.0)),
+        EnemyKind::PaperWasp => Some(((244, 238, 214), (96, 88, 70), 6, 60.0)),
+        EnemyKind::PaperReel => Some(((250, 247, 232), (140, 112, 80), 12, 64.0)),
+        EnemyKind::InkBlot => Some(((238, 234, 224), (22, 16, 32), 8, 48.0)),
+        _ => None,
+    };
+    if let Some((hot, cold, count, speed)) = printworks_accent {
+        let n = ps.budget_count(count, false);
+        ps.burst_shaped(
+            rng,
+            pos,
+            n,
+            speed,
+            radius * 0.5,
+            Ramp::Custom(hot, cold),
+            0.34,
+            false,
+            Shape::Dot,
+            4.0,
+        );
+    }
     match kind.archetype() {
         EnemyKind::Skitterer => {
             // Crisp chitin flecks + small ichor pop.

@@ -215,6 +215,17 @@ const CUE_BIT: u32 = 1 << 2;
 /// Two touchdown latches for the hurt hop.
 const HOP_1_BIT: u32 = 1 << 3;
 const HOP_2_BIT: u32 = 1 << 4;
+/// The defeat clatter has been cued. Its own bit: `CUE_BIT` is the living
+/// human's once-per-beat latch and is usually still set by the beat it died in
+/// (the framework's death hand-over does not touch `flags`), which silenced
+/// the clatter whenever the kill landed after that beat's own cue.
+const DEFEAT_CUE_BIT: u32 = 1 << 5;
+/// The half-health threshold was crossed during a beat that must not be
+/// interrupted (the `Hurt` hop): the tantrum is owed and starts as soon as the
+/// human is free. `BossOutput::phase_changed` is a one-tick pulse, so without
+/// this the set piece was skipped for the whole fight whenever the rat crossed
+/// 50 % inside its own punish window.
+const PHASE_PENDING_BIT: u32 = 1 << 6;
 /// The attack-decision index (the opening order) sits above the flags.
 const DECISION_SHIFT: u32 = 8;
 const DECISION_MASK: u32 = 0x3F;
@@ -252,7 +263,14 @@ impl BossController for BroomController {
         // ------------------------------------------------------------------
         // Phase 2 set piece: the art's anger tantrum, once per fight.
         // ------------------------------------------------------------------
-        if out.phase_changed && !busy(boss) {
+        if out.phase_changed {
+            boss.flags |= PHASE_PENDING_BIT;
+        }
+        if boss.flags & PHASE_PENDING_BIT != 0 && !busy(boss) {
+            boss.flags &= !PHASE_PENDING_BIT;
+            // Any wind-up it interrupts is cancelled with the pose it belonged
+            // to (the same rule as the `Hurt` hop below).
+            boss.hazards.clear();
             enter(boss, BroomBossState::PhaseChange, PHASE_CHANGE);
             return;
         }
@@ -440,8 +458,9 @@ impl BossController for BroomController {
     /// art's beat is `2.40 s`; the clatter is cued once as the broom hits the
     /// floor (`progress ≈ 0.16`), then the framework reaps the boss.
     fn death_tick(&self, _ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut BossOutput) {
-        if boss.progress() >= DEFEAT_DROP_PROGRESS && !cue_fired(boss) {
-            fire_cue(boss, out, BossCue::BroomDefeat);
+        if boss.progress() >= DEFEAT_DROP_PROGRESS && boss.flags & DEFEAT_CUE_BIT == 0 {
+            boss.flags |= DEFEAT_CUE_BIT;
+            out.cue(BossCue::BroomDefeat);
         }
     }
 }
@@ -1659,6 +1678,42 @@ mod tests {
         assert_eq!(rig.boss().damage_mult, 1.0);
         // Exactly one tantrum per fight.
         for _ in 0..5 * TICKS_PER_SEC {
+            rig.tick();
+            assert_ne!(rig.state(), BroomBossState::PhaseChange);
+        }
+    }
+
+    /// Crossing half health *inside* the `Hurt` hop — the rat's own punish
+    /// window, the likeliest place to cross it — used to drop the tantrum for
+    /// the whole fight: the framework's `phase_changed` is a one-tick pulse and
+    /// the hop must not be interrupted. The set piece is owed instead and
+    /// starts on the first free tick.
+    #[test]
+    fn a_threshold_crossed_mid_hop_still_owes_the_tantrum() {
+        let mut rig = Rig::new(62);
+        rig.set_player(CENTER + Vec2::new(20.0, 0.0));
+        rig.edit(|b| {
+            b.set_state(
+                BossState::Broom(BroomBossState::Hurt { left_foot_hit: true }),
+                HURT,
+            );
+            b.hp = b.max_hp * 0.49;
+        });
+        rig.tick();
+        assert!(
+            matches!(rig.state(), BroomBossState::Hurt { .. }),
+            "the hop is never interrupted"
+        );
+        assert_eq!(rig.boss().phase, 2);
+        let ticks = rig.run_until(200, |r| !matches!(r.state(), BroomBossState::Hurt { .. }));
+        assert!(ticks < 200, "the hop ends");
+        // The hop hands over to `Idle` on its last tick; the owed tantrum takes
+        // the very next one.
+        rig.tick();
+        assert_eq!(rig.state(), BroomBossState::PhaseChange);
+        // And it is still exactly one tantrum.
+        rig.run_until(400, |r| r.state() != BroomBossState::PhaseChange);
+        for _ in 0..3 * TICKS_PER_SEC {
             rig.tick();
             assert_ne!(rig.state(), BroomBossState::PhaseChange);
         }

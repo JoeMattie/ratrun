@@ -30,7 +30,35 @@ use crate::render::menu::{self, HitMap, Target};
 use crate::render::palette::{to_color, COAT, MUTED, PLATE, TAIL, TRACK};
 
 /// A price at or above this needs a second Enter ("confirm") before it is paid.
-pub const CONFIRM_AT: u32 = 300;
+///
+/// This is [`confirm_at`] evaluated for the current price table. It stays a
+/// constant only because `app.rs` reads it as one and the table's accessor
+/// (`Track::price`) is not `const`; `the_confirm_threshold_follows_the_price_table`
+/// fails, naming the new value, the moment a retune moves the table away from
+/// it. Prefer [`needs_confirm`] in new code: it cannot go stale.
+pub const CONFIRM_AT: u32 = 900;
+
+/// The confirm threshold derived from the price table: seven and a half times
+/// the cheapest first step on the board.
+///
+/// That is the proportion the screen shipped with (300 against a cheapest
+/// step of 40), so a table scaled as a whole keeps the same purchases behind
+/// the second press: the cheap early steps buy at once, the later steps, the
+/// slots, the carry track and the revive ask first.
+pub fn confirm_at() -> u32 {
+    let cheapest = Track::ALL
+        .into_iter()
+        .filter_map(|t| t.price(0))
+        .min()
+        .unwrap_or(0);
+    cheapest.saturating_mul(15) / 2
+}
+
+/// Does a purchase at `price` take a second press? Derived from the live
+/// table ([`confirm_at`]), so it follows a retune without an edit here.
+pub fn needs_confirm(price: u32) -> bool {
+    price >= confirm_at()
+}
 
 /// What the screen is waiting for, if anything.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,7 +219,8 @@ pub fn draw(
     // bare `g`: the shop's badges and the Nest have to read as one purse.
     let bank = format!("BANK {}¢", profile.bank);
     put(f, hx, inner.y, inner.right().saturating_sub(hx), &bank, heavy(TRAIL_GOLD));
-    hx += bank.len() as u16 + 3;
+    // Cells, not bytes: `¢` is two bytes wide in UTF-8 and one on screen.
+    hx += bank.chars().count() as u16 + 3;
     let owned = profile.total_levels();
     let max_levels: u32 = Track::ALL
         .into_iter()
@@ -281,18 +310,37 @@ pub fn draw(
     let back_key = controls_src.action_label(Action::Back);
     let reset_key = controls_src.action_label(Action::Reset);
     if let Some(pending) = ui.pending {
-        let prompt = match pending {
-            Pending::Buy(t) => format!(
-                " BUY {} LV{} FOR {}¢?  {confirm_key} confirm · {back_key} cancel ",
-                t.name(),
-                profile.level(t) + 1,
-                profile.next_price(t).unwrap_or(0)
-            ),
-            Pending::Refund => format!(
-                " WIPE EVERY TRACK AND RETURN {}¢?  {confirm_key} confirm · {back_key} cancel ",
-                profile.spent_total()
-            ),
+        // The prompt has to keep both keys on screen: at 57 columns the long
+        // form ran past the plate and clipped the cancel key away, so a
+        // narrow plate gets a short form that still names the price and both
+        // answers.
+        let room = usize::from(inner.width.saturating_sub(2));
+        let (long, short) = match pending {
+            Pending::Buy(t) => {
+                let level = profile.level(t) + 1;
+                let price = profile.next_price(t).unwrap_or(0);
+                (
+                    format!(
+                        " BUY {} LV{level} FOR {price}¢?  {confirm_key} confirm · {back_key} cancel ",
+                        t.name()
+                    ),
+                    format!(
+                        " {} LV{level} · {price}¢?  {confirm_key} buy · {back_key} no",
+                        t.name()
+                    ),
+                )
+            }
+            Pending::Refund => {
+                let paid = profile.spent_total();
+                (
+                    format!(
+                        " WIPE EVERY TRACK AND RETURN {paid}¢?  {confirm_key} confirm · {back_key} cancel "
+                    ),
+                    format!(" WIPE ALL · RETURN {paid}¢?  {confirm_key} yes · {back_key} no"),
+                )
+            }
         };
+        let prompt = if long.chars().count() <= room { long } else { short };
         put(
             f,
             inner.x + 1,
@@ -308,9 +356,12 @@ pub fn draw(
         };
     }
 
-    let back_w = 8u16.min(inner.width);
+    // The button is nine cells wide (` ‹ BACK ›`): at eight the closing
+    // chevron was clipped off the plate.
+    const BACK_LABEL: &str = " ‹ BACK ›";
+    let back_w = (BACK_LABEL.chars().count() as u16).min(inner.width);
     let back = Rect::new(inner.x, footer, back_w, 1);
-    put(f, inner.x, footer, back_w, " ‹ BACK ›", heavy(COAT).bg(TRACK));
+    put(f, inner.x, footer, back_w, BACK_LABEL, heavy(COAT).bg(TRACK));
     hits.add(back, Target::Back);
     let keys = if inner.width >= 70 {
         format!("↑↓ choose · {confirm_key} buy · {reset_key} refund · {back_key} back")
@@ -636,7 +687,16 @@ mod tests {
         // The dearest track still prints its price, even on a 10¢ bank.
         let revive = Track::Revive;
         assert_eq!(profile.next_price(revive), None);
-        assert!(text.contains("60¢"), "the cheapest step's price is printed");
+        // Read from the table, not a literal: a retune must not break this.
+        let cheapest = Track::ALL
+            .into_iter()
+            .filter_map(|t| profile.next_price(t))
+            .min()
+            .expect("an unbought track has a price");
+        assert!(
+            text.contains(&format!("{cheapest}¢")),
+            "the cheapest step's price ({cheapest}¢) is printed:\n{text}"
+        );
     }
 
     /// The currency mark is the style guide's `¢` everywhere the screen prints
@@ -726,6 +786,83 @@ mod tests {
         let (text, _, _) = frame(120, 40, &profile, &mut ui);
         assert!(text.contains("WIPE EVERY TRACK"), "{text}");
         assert!(text.contains("returns") || text.contains("RETURN"), "{text}");
+    }
+
+    /// Both prompts keep both of their keys on the plate at every reference
+    /// size: at 57 columns the long form used to clip the cancel key away.
+    #[test]
+    fn a_confirmation_prompt_keeps_both_keys_at_every_size() {
+        for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let mut profile = MetaProfile::maxed();
+            profile.bank = 9999;
+            // The longest name on the board, one level short of its cap.
+            let track = Track::Luck;
+            profile.set_level(track, track.max_level() - 1);
+            for pending in [Pending::Buy(track), Pending::Refund] {
+                let mut ui = NestUi {
+                    cursor: track.index(),
+                    pending: Some(pending),
+                    ..NestUi::default()
+                };
+                let (text, _, _) = frame(w, h, &profile, &mut ui);
+                let row = text
+                    .lines()
+                    .find(|l| l.contains("¢?"))
+                    .unwrap_or_else(|| panic!("{w}x{h} {pending:?}: no prompt:\n{text}"));
+                assert!(row.contains("Enter"), "{w}x{h} {pending:?} lost confirm:\n{row}");
+                assert!(
+                    row.contains("Esc cancel") || row.contains("Esc no"),
+                    "{w}x{h} {pending:?} lost the cancel key:\n{row}"
+                );
+                if pending == Pending::Buy(track) {
+                    assert!(row.contains(track.name()), "{w}x{h}: {row}");
+                }
+            }
+        }
+    }
+
+    /// The back button is drawn whole and its hit rectangle covers all of it.
+    #[test]
+    fn the_back_button_is_drawn_whole_and_clickable() {
+        for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let profile = started();
+            let mut ui = NestUi::default();
+            let (text, hits, _) = frame(w, h, &profile, &mut ui);
+            assert!(text.contains("‹ BACK ›"), "{w}x{h} clipped the button:\n{text}");
+            let rect = hits.rect_for(Target::Back).expect("back rect");
+            assert_eq!(rect.width, 9, "{w}x{h}: the rect covers the label");
+            let row = text.lines().nth(usize::from(rect.y)).unwrap_or("");
+            let drawn: String = row
+                .chars()
+                .skip(usize::from(rect.x))
+                .take(usize::from(rect.width))
+                .collect();
+            assert_eq!(drawn, " ‹ BACK ›", "{w}x{h}: the rect is not on the label");
+        }
+    }
+
+    /// The constant `app.rs` reads is the table-derived threshold, and the
+    /// split it makes is the intended one: every track's first step buys on
+    /// one press, and the dear ones (a third slot, the carry track, the
+    /// revive) ask first.
+    #[test]
+    fn the_confirm_threshold_follows_the_price_table() {
+        assert_eq!(
+            CONFIRM_AT,
+            confirm_at(),
+            "the price table moved: set nest::CONFIRM_AT to {}",
+            confirm_at()
+        );
+        for track in Track::ALL {
+            let first = track.price(0).expect("a first step has a price");
+            if matches!(track, Track::CarryOver | Track::Revive) {
+                assert!(needs_confirm(first), "{track:?}: a dear first step asks");
+            } else {
+                assert!(!needs_confirm(first), "{track:?}: first step ({first}) asks");
+            }
+        }
+        let third_slot = Track::WeaponSlots.price(2).expect("a third slot");
+        assert!(needs_confirm(third_slot), "the third slot ({third_slot}) asks");
     }
 
     #[test]

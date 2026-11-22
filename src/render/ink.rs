@@ -30,9 +30,11 @@
 //! - **No doubling at 1x.** The hostile marks are re-stamped *only when zoomed
 //!   out* (`scale > 1.05`): at 1x the hostile layer already drew them at the
 //!   right size and the art must not be drawn twice. The loot markers are
-//!   shapes the page did not have at all, so they are drawn at every zoom
-//!   `>= 1` and skipped when zoomed *in* (at `z = 0.5` the sprites are already
-//!   twice the size).
+//!   shapes the page did not have at all, so they are drawn at **every** zoom,
+//!   zoomed in included (pinned by `ink::tests::loot_is_marked_at_every_zoom`).
+//!   They are a fixed size in screen pixels, so over a zoomed-in sprite they
+//!   are a small centre mark and the shape language never switches off
+//!   mid-ease.
 //! - **Cheap.** One walk per query, a bounding test per entity, and a handful of
 //!   `plot` calls each; the whole pass measured ~20 µs at the 600-enemy cap on
 //!   the 120×40 reference view (see `ink::tests::the_ink_pass_stays_cheap`).
@@ -85,11 +87,13 @@ pub fn draw(pb: &mut PixelBuffer, view: &mut InkView) {
         return;
     }
     let zoomed_out = view.scale.x > ZOOMED_OUT || view.scale.y > ZOOMED_OUT;
-    // `unit` is one world pixel in screen pixels: every minimum size below is
-    // expressed in screen pixels, so nothing shrinks past it when zoomed out.
+    // `unit` is how many world pixels one screen pixel covers (2.0 at `z = 2`):
+    // a world length divided by it is a length in screen pixels, and every
+    // minimum size below is in screen pixels, so nothing shrinks past it when
+    // zoomed out.
     let unit = view.scale.x.max(view.scale.y).max(0.01);
 
-    draw_loot(pb, view, zoomed_out);
+    draw_loot(pb, view);
     if zoomed_out {
         draw_hostile(pb, view, unit);
     }
@@ -100,8 +104,8 @@ pub fn draw(pb: &mut PixelBuffer, view: &mut InkView) {
 /// Closed square = coin, diamond = XP, open bracket = pocket find, halo = chest.
 ///
 /// Always at least one screen pixel per mark, and always distinguishable from
-/// the others *by shape* at 1x and 2x. Zero allocation.
-fn draw_loot(pb: &mut PixelBuffer, v: &mut InkView, _zoomed_out: bool) {
+/// the others *by shape* at 1x and 2x. Drawn at every zoom. Zero allocation.
+fn draw_loot(pb: &mut PixelBuffer, v: &mut InkView) {
     let (sw, sh) = (pb.w as i32, pb.h as i32);
     let on = |s: (i32, i32), m: i32| s.0 + m >= 0 && s.1 + m >= 0 && s.0 - m < sw && s.1 - m < sh;
 
@@ -433,6 +437,24 @@ fn outline_shape(pb: &mut PixelBuffer, v: &InkView, shape: &MinibossShape, unit:
                     o.1 + (a.sin() * scale_len).round() as i32,
                 );
                 dotted_line(pb, o, tip, c, 2);
+            }
+            // The far arc closes the sector. A sweeping miniboss tells a cone
+            // up to 150° wide, and two side rays alone read as two separate
+            // beams with open floor between them. One dot every other screen
+            // pixel of arc length, whatever the zoom, both ends included.
+            let base = aim.angle();
+            let arc_px = (2.0 * half_angle * scale_len).abs().ceil() as i32;
+            let steps = arc_px.clamp(4, 1440);
+            for i in 0..=steps {
+                if i % 2 != 0 && i != steps {
+                    continue;
+                }
+                let a = base - half_angle + 2.0 * half_angle * i as f32 / steps as f32;
+                pb.plot(
+                    o.0 + (a.cos() * scale_len).round() as i32,
+                    o.1 + (a.sin() * scale_len).round() as i32,
+                    c,
+                );
             }
         }
         MinibossShape::Cord { spool, tip, .. } => {
@@ -802,6 +824,107 @@ mod tests {
             ] {
                 assert_ne!(a, b, "at z={z}: {name} print the same pixels");
             }
+        }
+    }
+
+    /// Every loot kind keeps its mark on its own screen position at each rung
+    /// of the zoom ladder, zoomed in included: the pass has no zoom gate on
+    /// loot, and the mark follows the per-axis scale.
+    #[test]
+    fn loot_is_marked_at_every_zoom() {
+        for z in [0.5f32, 0.75, 1.0, 1.25, 1.5, 2.0] {
+            let mut w = World::new(Theme::Sewer, 7);
+            w.player.pos = Vec2::new(80.0, 74.0);
+            w.spawn_gem(Gem::new(Vec2::new(20.0, 20.0), 5));
+            crate::game::ecs::resources::spawn_with_id(
+                &mut w.ecs,
+                Gold::new(Vec2::new(40.0, 20.0), 1),
+            );
+            w.spawn_pickup(Pickup {
+                pos: Vec2::new(60.0, 40.0),
+                kind: PickupKind::BottleCap,
+                bob: 0.0,
+            });
+            crate::game::ecs::resources::spawn_with_id(
+                &mut w.ecs,
+                Chest { pos: Vec2::new(40.0, 60.0) },
+            );
+            let pb = render(&mut w, Vec2::new(z, z));
+            let at = |x: f32, y: f32| ((x / z).round() as i32, (y / z).round() as i32);
+            // Gem and coin light their centre pixel; the bracket and the crate
+            // frame leave the centre to the sprite, so count their patch.
+            let (gx, gy) = at(20.0, 20.0);
+            assert!(lum(&pb, gx, gy) > 300, "z={z}: no gem mark");
+            let (cx, cy) = at(40.0, 20.0);
+            assert!(lum(&pb, cx, cy) > 300, "z={z}: no coin mark");
+            let (px, py) = at(60.0, 40.0);
+            assert!(
+                lit_between(&pb, px - 5, py - 2, px + 6, py + 3) >= 4,
+                "z={z}: no pocket-find bracket"
+            );
+            let (hx, hy) = at(40.0, 60.0);
+            assert!(
+                lit_between(&pb, hx - 4, hy - 4, hx + 5, hy + 5) >= 20,
+                "z={z}: no chest frame"
+            );
+        }
+    }
+
+    /// A wide miniboss cone is a closed sector when zoomed out: both side rays
+    /// **and** the far arc between them, at 1.5x and 2x. It used to be the two
+    /// rays alone, which a 150° sweep reads as two unrelated beams.
+    #[test]
+    fn a_zoomed_out_miniboss_cone_draws_its_far_arc() {
+        let origin = Vec2::new(150.0, 140.0);
+        let aim = Vec2::new(1.0, 0.0);
+        let half_angle = 75.0f32.to_radians();
+        let len = 60.0f32;
+        let shape = MinibossShape::Cone { origin, aim, half_angle, len };
+        for z in [1.5f32, 2.0] {
+            let mut w = World::new(Theme::Sewer, 7);
+            let mut pb = PixelBuffer::new(SIZE.0, SIZE.1);
+            pb.clear((0, 0, 0));
+            let view = InkView {
+                ecs: &mut w.ecs,
+                level: &w.level,
+                player: &w.player,
+                cam: Vec2::ZERO,
+                scale: Vec2::new(z, z),
+                size: (SIZE.0 as i32, SIZE.1 as i32),
+                elapsed: 1.0,
+            };
+            outline_shape(&mut pb, &view, &shape, z);
+            let o = ((origin.x / z).round() as i32, (origin.y / z).round() as i32);
+            let r = len / z;
+            // Along the arc, well away from both rays: the middle, and halfway
+            // out to each side.
+            for frac in [-0.9f32, -0.5, 0.0, 0.5, 0.9] {
+                let a = frac * half_angle;
+                let (x, y) = (
+                    o.0 + (a.cos() * r).round() as i32,
+                    o.1 + (a.sin() * r).round() as i32,
+                );
+                assert!(
+                    lit_between(&pb, x - 2, y - 2, x + 3, y + 3) >= 1,
+                    "z={z}: no arc at {:.0}° of the sector",
+                    a.to_degrees()
+                );
+            }
+            // Both rays are still there, halfway out.
+            for side in [-1.0f32, 1.0] {
+                let a = side * half_angle;
+                let (x, y) = (
+                    o.0 + (a.cos() * r * 0.5).round() as i32,
+                    o.1 + (a.sin() * r * 0.5).round() as i32,
+                );
+                assert!(lit_between(&pb, x - 2, y - 2, x + 3, y + 3) >= 1, "z={z}: a ray is missing");
+            }
+            // The sector is an outline: its inside stays clear for the bodies
+            // standing in it, and nothing is drawn behind the miniboss.
+            let (ix, iy) = (o.0 + (r * 0.5).round() as i32, o.1);
+            assert_eq!(lit_between(&pb, ix - 2, iy - 2, ix + 3, iy + 3), 0, "z={z}: the cone is filled");
+            let (bx, by) = (o.0 - (r * 0.5).round() as i32, o.1);
+            assert_eq!(lit_between(&pb, bx - 3, by - 3, bx + 4, by + 4), 0, "z={z}: ink behind the cone");
         }
     }
 

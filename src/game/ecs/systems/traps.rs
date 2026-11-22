@@ -80,7 +80,7 @@
 //! - bosses and named minibosses keep the art's `0.8 s` at `40 %`
 //!   ([`STICKY_HOLD_BOSS_SECS`]) as a *crossing* slow: they never take a glue
 //!   unit and are never held;
-//! - the mousetrap keeps the art's `0.28 s` bait warning and `0.20 s` swing for
+//! - the mousetrap keeps the art's `0.18 s` bait warning and `0.20 s` swing for
 //!   an ordinary snap, deals a share of the rat's pool
 //!   ([`MOUSETRAP_DAMAGE_PLAYER_SHARE`] / [`MOUSETRAP_DAMAGE_PLAYER_HAIR_SHARE`],
 //!   half its flat armour ignored) and flattens ground enemies
@@ -678,12 +678,13 @@ fn collect_bait(
     at: Vec2,
     commands: &mut Commands,
     next_id: &mut NextSpawnId,
-    last_pickups: &mut crate::game::ecs::resources::LastPickups,
 ) {
     match bait {
         TrapBait::Cheese => {}
         TrapBait::Pickup(kind) => {
-            last_pickups.0.push(kind);
+            // No `LastPickups` push here: `loot::pickups_system` books the find
+            // when the rat collects it, so a second push from the trap made the
+            // HUD call it out twice and the App count one Heal as two.
             commands.spawn((
                 Pickup {
                     pos: at,
@@ -735,7 +736,6 @@ pub fn traps_system(
     mut damage_numbers: ResMut<DamageNumbers>,
     mut sfx: ResMut<SfxQueue>,
     mut next_id: ResMut<NextSpawnId>,
-    mut last_pickups: ResMut<crate::game::ecs::resources::LastPickups>,
     mut scratch: Local<Scratch>,
 ) {
     let dt = input.dt;
@@ -761,7 +761,9 @@ pub fn traps_system(
     traps
         .live_mice
         .retain(|&i| is_live_mouse(&level.objects.mousetraps[i]));
-    if traps.live_sticky.is_empty() && traps.live_mice.is_empty() {
+    // (Not while a crossing slow is still owed its removal: the board that
+    // gave it may have been the last live trap on the floor.)
+    if traps.live_sticky.is_empty() && traps.live_mice.is_empty() && traps.cross_prev.is_empty() {
         return;
     }
 
@@ -1135,6 +1137,14 @@ pub fn traps_system(
                     view.state = StickyTrapState::Used;
                     view.progress = 1.0;
                     scratch.spent_sticky.push(i);
+                    // A used board leaves the live list, so nothing would
+                    // ever run its boss timer down: lift the crossing slow
+                    // now or the boss keeps its 40 % for the rest of the fight.
+                    if let Some(b) = slot.boss.take() {
+                        if enemies.get(b.entity).is_ok() {
+                            commands.entity(b.entity).remove::<TrapSlow>();
+                        }
+                    }
                 } else {
                     view.state = StickyTrapState::Idle;
                 }
@@ -1177,7 +1187,6 @@ pub fn traps_system(
                         player_pos,
                         &mut commands,
                         &mut next_id,
-                        &mut last_pickups,
                     );
                 }
                 // *Any* ground body — the rat or a member of the horde it is
@@ -1298,7 +1307,6 @@ pub fn traps_system(
                         player_pos,
                         &mut commands,
                         &mut next_id,
-                        &mut last_pickups,
                     );
                 }
             }
@@ -2874,5 +2882,67 @@ mod tests {
             !a.4.is_empty() || !a.5.is_empty(),
             "no traps on the map, test proves nothing"
         );
+    }
+
+    /// A bait is an ordinary floor find: the pickup pass books it for the HUD
+    /// and the App's counters, once. (The trap used to book it as well, so one
+    /// Heal on a plate was called out twice and counted as two.)
+    #[test]
+    fn a_collected_bait_is_booked_exactly_once() {
+        let mut w = open_arena(331);
+        let c = centre(&w);
+        add_mousetrap_spec(
+            &mut w,
+            c,
+            MousetrapKind::Ordinary,
+            TrapBait::Pickup(PickupKind::Heal),
+        );
+        w.player.pos = c + FACING * MOUSETRAP_TRIGGER_OFFSET_U;
+        traps_and_pickups_tick(&mut w);
+        assert!(w.level.objects.mousetraps[0].bait_taken);
+        let booked = w
+            .last_pickups()
+            .iter()
+            .filter(|&&k| k == PickupKind::Heal)
+            .count();
+        assert_eq!(booked, 1, "one bait, one callout");
+    }
+
+    /// The floor's last live board runs out of glue with a body crossing it:
+    /// the crossing slow must still come off the tick after, although no trap
+    /// is live any more (the early-out used to strand it for the whole floor).
+    #[test]
+    fn a_crossing_slow_is_lifted_after_the_last_board_is_used_up() {
+        let mut w = open_arena(337);
+        let c = centre(&w);
+        add_board(&mut w, c);
+        w.player.pos = c + Vec2::new(400.0, 0.0);
+        // One empty tick builds the side table, then the glue is spent.
+        traps_tick(&mut w, Vec2::ZERO, false);
+        w.ecs.resource_mut::<TrapRuntime>().sticky[0].budget_left = 0;
+        let e = add_enemy(&mut w, EnemyKind::Skitterer, c, 1.0);
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert_eq!(board_state(&w, 0), StickyTrapState::Used);
+        assert!(has_slow(&mut w, e), "a body on a spent pad is still slowed that tick");
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert!(!has_slow(&mut w, e), "the crossing slow outlived the board");
+    }
+
+    /// A board that is used up while a boss carries its crossing slow lifts
+    /// that slow itself: a used board leaves the live list, so its boss timer
+    /// would never run down.
+    #[test]
+    fn a_board_used_up_under_a_boss_lifts_the_boss_slow() {
+        let mut w = open_arena(347);
+        let c = centre(&w);
+        add_board(&mut w, c);
+        w.player.pos = c + Vec2::new(400.0, 0.0);
+        let boss = add_enemy(&mut w, EnemyKind::Boss, c, 40.0);
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert!(has_slow(&mut w, boss));
+        w.ecs.resource_mut::<TrapRuntime>().sticky[0].budget_left = 0;
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert_eq!(board_state(&w, 0), StickyTrapState::Used);
+        assert!(!has_slow(&mut w, boss), "the boss kept the glue of a dead board");
     }
 }

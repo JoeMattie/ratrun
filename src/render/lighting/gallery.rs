@@ -1,3 +1,11 @@
+//! Capture harnesses for the lighting pass (test builds only).
+//!
+//! `capture_lighting_gallery` and `capture_ambience_gallery` stage scenes and
+//! write PPM frames per lighting tier and colour depth for a human to compare;
+//! they assert nothing about the picture. Both are no-ops unless
+//! `RATRUN_LIGHTING_CAPTURES=<dir>` is set. `terminal_rgb` gives
+//! the colour a cell lands on after the fold to a terminal depth.
+
 use super::*;
 use crate::game::art_boss_cat::BossCatState;
 use crate::game::art_boss_mower::MowerState;

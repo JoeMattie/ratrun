@@ -1,5 +1,10 @@
 # The things underfoot
 
+> **Status (in the tree now).** This is the design contract; `src/game/roster.rs` is its implementation.
+> - **Registered:** all 48 ordinary kinds (`EnemyKind::all()` is 49 with the legacy `Boss` body) and all 24 minibosses (`MinibossKind`). Every floor's eight slots and four appointments hold their designed kind; no slot carries a stand-in.
+> - **Director:** the slot unlocks, caps, pool shares, single weighted draw and the 9:45 featured rotation below are live (`roster::pick_kind`).
+> - **Still pending:** the per-kind rules of the 33 wave-four ordinary kinds. Each behaves as its `EnemyKind::archetype()` base today: the `V(X)` rows lack their one new rule and the six `N` rows (Sump Leech, Egg Timer, Walking Syringe, Peg Snapper, Staple Crawler, Loose Can) borrow a neighbour's behaviour. Bodies without bespoke art draw their archetype recoloured. `roster.rs`'s module docs carry the exact list.
+
 R-47 should know which floor he woke on before he finds a wall. In the sewer the first kill is a copper roach that runs straight at his teeth. In the laundry it is a tuft of wet wool that advances one stitch at a time. Give each floor exclusive ownership of **eight ordinary kinds**, including both one-XP bodies. Keep the dodge vocabulary, collision rules and timings recognizable across the campaign. Spend the art budget on the bodies that fill the screen, and the behaviour budget on the encounters that change where the rat wants to stand.
 
 ## Reading a room
@@ -113,7 +118,7 @@ Road-yellow, bare aluminium and white ties over dark oak. Gravel clicks on the d
 
 ## Named appointments and elites
 
-All 24 minibosses have exactly one home. Fixed order gives every player the same four lessons in increasing complexity, including a repeatable 12:00 rehearsal for the boss. One signature per kind. For **every** row lock aim and outline the full footprint for 1 s, strike as specified, expose the body for at least 1 s, leave 4 s between the strike ending and the next tell. Draw 16–40 px along the longest axis, collision radius 6.5–7.5. Use slot HP 160/320/540/780, contact 8 and signature damage 14/16/18/20. Each signature hits once per rat. Existing encounter rewards, retreat, arena checks and chest rules apply.
+All 24 minibosses have exactly one home. Fixed order gives every player the same four lessons in increasing complexity, including a repeatable 12:00 rehearsal for the boss. One signature per kind. For **every** row lock aim and outline the full footprint for 1 s, strike as specified, expose the body for at least 1 s, leave 4 s between the strike ending and the next tell. Draw 16–40 px along the longest axis, collision radius 6.5–7.5. Use slot HP 800/1600/2500/3400, contact 8 and signature damage 14/16/18/20. Each signature hits once per rat. Existing encounter rewards, retreat, arena checks and chest rules apply.
 
 Shape dimensions are length × full width unless noted. Stamp patterns mark every centre during the tell and pulse in listed order. Ring gaps stay fixed, a quarter turn off locked aim. **Data** means an existing signature evaluator with different dimensions, centres or angles and new art. **New** means new collision and matching tell geometry. Existing rows retain their own evaluator.
 
@@ -138,7 +143,7 @@ Shape dimensions are length × full width unless noted. Stamp patterns mark ever
 | Printworks 3:00 | The Foreman · existing | 20 px rubber stamp on two heavy boots | Three 12×12 squares 16 apart along rat heading, live 0.3 each in sequence. Turn off the marked line. | Denied in triplicate. |
 | Printworks 6:00 | Quoin Key · data, Sister Snip | 23 px fork of steel driven by a walking wedge | Chase frame closes over a 38-long, 55° wedge in 0.75. Step around the heel. | Locks the story in place. |
 | Printworks 9:00 | Carbon Twin · data, Milk Carton | 26 px two offset sheets peeling apart | Lays a 38×20 transfer rectangle from the folded edge for 1.4. Skirt the sheet by its short edge. | Your duplicate stayed behind. |
-| Printworks 12:00 | Late Plate · new, closing ring | 32 px curved printing plate with a torn registration notch | 5-wide circle centred on rat at lock shrinks from radius 32 to 6 in 1.2. A 65° break faces the nearest open aisle. Escape through the break. Teaches the Night Edition’s blank margin. | That's all the room we have tonight. |
+| Printworks 12:00 | Late Plate · new, closing ring | 32 px curved printing plate with a torn registration notch | 5-wide circle centred on rat at lock shrinks from radius 32 to 5 in 1.2. A 65° break faces the nearest open aisle. Escape through the break. Teaches the Night Edition’s blank margin. | That's all the room we have tonight. |
 | Flatbed 3:00 | Tarpaulin Pup · data, Milk Carton | 20 px folded tarp with four grommet feet | Unfurls a 30×18 rectangle for 1.1. Pass round the hem on solid deck. | Contents may have shifted. |
 | Flatbed 6:00 | Axle Nut · data, Corkscrew | 24 px walking hex nut, black hole in its face | Rolls a 50×10 trench out along locked aim over 0.65. Move one plank aside. | Last seen under the truck. |
 | Flatbed 9:00 | Chain Dog · data, Bobbin | 28 px chain loop dragging a triangular binder | Chain 36×6 swings 115° in 0.9. Slip behind the latch instead of retreating toward a pit. | Stays where it's tied. Mostly. |

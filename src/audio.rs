@@ -270,11 +270,38 @@ pub enum Sfx {
     /// The click at a full meter, so "held long enough" is audible without
     /// looking at the gauge.
     DashCharged,
+    // ---- Fodder approach sounds (WAVE4_ROSTERS.md: one pair per floor) ----
+    // Quiet, short and voice-priority 0: a crowd of these must never mask a
+    // tell. Played on approach in view, coalesced by kind by the caller.
+    /// Sewer ground fodder: claws ticking along a pipe.
+    ApproachPipeClaws,
+    /// Sewer flying fodder: wing leather under a grate.
+    ApproachWingLeather,
+    /// Kitchen ground fodder: ant feet tapping in pairs.
+    ApproachAntFeet,
+    /// Kitchen flying fodder: a short rising whine.
+    ApproachWhine,
+    /// Lab ground fodder: a swab's soft shff.
+    ApproachSwab,
+    /// Lab flying fodder: a chattering sample lid.
+    ApproachLid,
+    /// Laundry ground fodder: a wet wool slap.
+    ApproachWoolSlap,
+    /// Laundry flying fodder: a dry brush.
+    ApproachBrush,
+    /// Printworks ground fodder: a silverfish rasp.
+    ApproachRasp,
+    /// Printworks flying fodder: a double paper flap.
+    ApproachPaperFlap,
+    /// Flatbed ground fodder: gravel clicks.
+    ApproachGravel,
+    /// Flatbed flying fodder: a loose-washer rattle.
+    ApproachWasher,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 153] = [
+    pub const ALL: [Sfx; 165] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -450,6 +477,19 @@ impl Sfx {
         // Super Dash's hold-to-charge.
         Sfx::DashCharge,
         Sfx::DashCharged,
+        // Fodder approach sounds, one pair per floor.
+        Sfx::ApproachPipeClaws,
+        Sfx::ApproachWingLeather,
+        Sfx::ApproachAntFeet,
+        Sfx::ApproachWhine,
+        Sfx::ApproachSwab,
+        Sfx::ApproachLid,
+        Sfx::ApproachWoolSlap,
+        Sfx::ApproachBrush,
+        Sfx::ApproachRasp,
+        Sfx::ApproachPaperFlap,
+        Sfx::ApproachGravel,
+        Sfx::ApproachWasher,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -608,6 +648,18 @@ impl Sfx {
             Sfx::CobraDeath => "COBRA_DEATH",
             Sfx::DashCharge => "DASH_CHARGE",
             Sfx::DashCharged => "DASH_CHARGED",
+            Sfx::ApproachPipeClaws => "APPROACH_PIPE_CLAWS",
+            Sfx::ApproachWingLeather => "APPROACH_WING_LEATHER",
+            Sfx::ApproachAntFeet => "APPROACH_ANT_FEET",
+            Sfx::ApproachWhine => "APPROACH_WHINE",
+            Sfx::ApproachSwab => "APPROACH_SWAB",
+            Sfx::ApproachLid => "APPROACH_LID",
+            Sfx::ApproachWoolSlap => "APPROACH_WOOL_SLAP",
+            Sfx::ApproachBrush => "APPROACH_BRUSH",
+            Sfx::ApproachRasp => "APPROACH_RASP",
+            Sfx::ApproachPaperFlap => "APPROACH_PAPER_FLAP",
+            Sfx::ApproachGravel => "APPROACH_GRAVEL",
+            Sfx::ApproachWasher => "APPROACH_WASHER",
         }
     }
 
@@ -753,6 +805,19 @@ impl Sfx {
             | Sfx::CobraDeath => 1,
             // A rising whine and the full-meter click: one recording each.
             Sfx::DashCharge | Sfx::DashCharged => 1,
+            // Approach chatter repeats in a crowd: three takes each.
+            Sfx::ApproachPipeClaws
+            | Sfx::ApproachWingLeather
+            | Sfx::ApproachAntFeet
+            | Sfx::ApproachWhine
+            | Sfx::ApproachSwab
+            | Sfx::ApproachLid
+            | Sfx::ApproachWoolSlap
+            | Sfx::ApproachBrush
+            | Sfx::ApproachRasp
+            | Sfx::ApproachPaperFlap
+            | Sfx::ApproachGravel
+            | Sfx::ApproachWasher => APPROACH_TAKES,
         }
     }
 
@@ -894,6 +959,19 @@ impl Sfx {
             Sfx::CobraDeath => 3,
             // Pure dash feedback: never steals a voice from a hit or a kill.
             Sfx::DashCharge | Sfx::DashCharged => 0,
+            // Ambient chatter: the first thing dropped when the pool is full.
+            Sfx::ApproachPipeClaws
+            | Sfx::ApproachWingLeather
+            | Sfx::ApproachAntFeet
+            | Sfx::ApproachWhine
+            | Sfx::ApproachSwab
+            | Sfx::ApproachLid
+            | Sfx::ApproachWoolSlap
+            | Sfx::ApproachBrush
+            | Sfx::ApproachRasp
+            | Sfx::ApproachPaperFlap
+            | Sfx::ApproachGravel
+            | Sfx::ApproachWasher => 0,
         }
     }
 
@@ -902,6 +980,13 @@ impl Sfx {
         self as usize
     }
 }
+
+/// Takes cached for each fodder approach sound (see [`APPROACH_PITCH`]).
+const APPROACH_TAKES: usize = 3;
+/// Per-take pitch factor for the approach sounds.
+const APPROACH_PITCH: [f32; APPROACH_TAKES] = [1.0, 1.09, 0.93];
+/// Mix level of every approach sound: under a hit (and far under any tell).
+const APPROACH_PEAK: f32 = 0.20;
 
 // ---- DSP primitives ------------------------------------------------------
 
@@ -9689,6 +9774,386 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             }
             m.finish(0.26, 1.1, 2.0, 24.0)
         }
+
+        // ---- Fodder approach sounds ----
+        // All twelve share one brief: under 140 ms, dense enough to read at
+        // APPROACH_PEAK, and band-limited below ~3 kHz so a crowd of them
+        // leaves the tells' bright band clear.
+
+        // Sewer A. Claws on a pipe: three small metallic ticks.
+        Sfx::ApproachPipeClaws => {
+            let p = APPROACH_PITCH[v];
+            let mut m = MixBuf::new(0.10);
+            for (i, &t0) in [0.0f32, 0.029, 0.058].iter().enumerate() {
+                m.add_fm(FmLayer {
+                    start_s: t0,
+                    dur_s: 0.034,
+                    c0: (1850.0 + 210.0 * i as f32) * p,
+                    c1: (1780.0 + 210.0 * i as f32) * p,
+                    mod_ratio: 2.76,
+                    mod_index0: 1.2,
+                    mod_index1: 0.2,
+                    gain: 0.30,
+                    attack_s: 0.001,
+                    decay_pow: 1.6,
+                    // The upper sidebands land past 9 kHz: roll them off.
+                    filter: FilterMode::LowPass,
+                    fc0: 4200.0,
+                    fc1: 3000.0,
+                    ..Default::default()
+                });
+            }
+            m.add_noise(NoiseLayer {
+                dur_s: 0.095,
+                gain: 0.07,
+                decay_pow: 0.8,
+                filter: FilterMode::BandPass,
+                fc0: 1500.0 * p,
+                fc1: 1100.0 * p,
+                q: 1.4,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.finish(APPROACH_PEAK, 1.1, 2.0, 18.0)
+        }
+
+        // Sewer B. Wing leather under a grate: two soft flaps and a thin ring.
+        Sfx::ApproachWingLeather => {
+            let p = APPROACH_PITCH[v];
+            let mut m = MixBuf::new(0.13);
+            for (i, &t0) in [0.0f32, 0.062].iter().enumerate() {
+                m.add_noise(NoiseLayer {
+                    start_s: t0,
+                    dur_s: 0.062,
+                    pink: true,
+                    gain: 0.34,
+                    attack_s: 0.008,
+                    decay_pow: 1.3,
+                    filter: FilterMode::LowPass,
+                    fc0: 950.0 * p,
+                    fc1: 320.0 * p,
+                    q: 0.8,
+                    seed: base_seed ^ (i as u32 + 1),
+                    ..Default::default()
+                });
+            }
+            m.add_osc(OscLayer {
+                start_s: 0.004,
+                dur_s: 0.11,
+                f0: 1320.0 * p,
+                f1: 1290.0 * p,
+                wave: Wave::Triangle,
+                gain: 0.05,
+                attack_s: 0.004,
+                decay_pow: 1.4,
+                ..Default::default()
+            });
+            m.finish(APPROACH_PEAK, 1.1, 4.0, 22.0)
+        }
+
+        // Kitchen A. Ant feet tapping in pairs: tick-tick, tick-tick.
+        Sfx::ApproachAntFeet => {
+            let p = APPROACH_PITCH[v];
+            let mut m = MixBuf::new(0.105);
+            for (i, &t0) in [0.0f32, 0.019, 0.054, 0.073].iter().enumerate() {
+                m.add_noise(NoiseLayer {
+                    start_s: t0,
+                    dur_s: 0.022,
+                    gain: 0.32,
+                    attack_s: 0.001,
+                    decay_pow: 1.3,
+                    filter: FilterMode::BandPass,
+                    fc0: 2500.0 * p,
+                    fc1: 1900.0 * p,
+                    q: 1.8,
+                    seed: base_seed ^ (i as u32 + 1),
+                    ..Default::default()
+                });
+                m.add_osc(OscLayer {
+                    start_s: t0,
+                    dur_s: 0.016,
+                    f0: (if i % 2 == 0 { 1480.0 } else { 1240.0 }) * p,
+                    f1: 900.0 * p,
+                    wave: Wave::Triangle,
+                    gain: 0.16,
+                    attack_s: 0.001,
+                    decay_pow: 1.8,
+                    ..Default::default()
+                });
+            }
+            m.finish(APPROACH_PEAK, 1.1, 2.0, 16.0)
+        }
+
+        // Kitchen B. A short rising whine.
+        Sfx::ApproachWhine => {
+            let p = APPROACH_PITCH[v];
+            let mut m = MixBuf::new(0.13);
+            m.add_osc(OscLayer {
+                dur_s: 0.125,
+                f0: 520.0 * p,
+                f1: 960.0 * p,
+                pitch_pow: 1.4,
+                wave: Wave::Saw,
+                gain: 0.30,
+                attack_s: 0.020,
+                decay_pow: 0.9,
+                filter: FilterMode::LowPass,
+                fc0: 1500.0,
+                fc1: 2600.0,
+                q: 1.1,
+                vib_hz: 46.0,
+                vib_depth: 0.012,
+                ..Default::default()
+            });
+            m.finish(APPROACH_PEAK, 1.1, 6.0, 24.0)
+        }
+
+        // Lab A. A swab's shff: one soft breath of cotton on tile.
+        Sfx::ApproachSwab => {
+            let p = APPROACH_PITCH[v];
+            let mut m = MixBuf::new(0.12);
+            m.add_noise(NoiseLayer {
+                dur_s: 0.115,
+                gain: 0.36,
+                attack_s: 0.030,
+                decay_pow: 1.1,
+                filter: FilterMode::BandPass,
+                fc0: 1700.0 * p,
+                fc1: 2700.0 * p,
+                q: 1.0,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.finish(APPROACH_PEAK, 1.0, 8.0, 26.0)
+        }
+
+        // Lab B. A chattering sample lid: four hollow plastic clicks, slowing.
+        Sfx::ApproachLid => {
+            let p = APPROACH_PITCH[v];
+            let mut m = MixBuf::new(0.115);
+            for (i, &t0) in [0.0f32, 0.021, 0.045, 0.074].iter().enumerate() {
+                m.add_osc(OscLayer {
+                    start_s: t0,
+                    dur_s: 0.026,
+                    f0: 1180.0 * p,
+                    f1: 820.0 * p,
+                    wave: Wave::Pulse(0.30),
+                    gain: 0.30 - 0.04 * i as f32,
+                    attack_s: 0.001,
+                    decay_pow: 1.5,
+                    filter: FilterMode::BandPass,
+                    fc0: 1500.0 * p,
+                    fc1: 1000.0 * p,
+                    q: 2.2,
+                    ..Default::default()
+                });
+            }
+            m.add_noise(NoiseLayer {
+                dur_s: 0.11,
+                gain: 0.05,
+                decay_pow: 0.8,
+                filter: FilterMode::BandPass,
+                fc0: 2100.0,
+                fc1: 1600.0,
+                q: 1.2,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.finish(APPROACH_PEAK, 1.1, 2.0, 18.0)
+        }
+
+        // Laundry A. A wet wool slap: a low thud with a soggy tail.
+        Sfx::ApproachWoolSlap => {
+            let p = APPROACH_PITCH[v];
+            let mut m = MixBuf::new(0.125);
+            m.add_osc(OscLayer {
+                dur_s: 0.070,
+                f0: 190.0 * p,
+                f1: 96.0 * p,
+                pitch_pow: 0.7,
+                gain: 0.36,
+                attack_s: 0.003,
+                decay_pow: 1.5,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                dur_s: 0.050,
+                pink: true,
+                gain: 0.30,
+                attack_s: 0.002,
+                decay_pow: 1.6,
+                filter: FilterMode::LowPass,
+                fc0: 1500.0 * p,
+                fc1: 300.0 * p,
+                q: 0.9,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.022,
+                dur_s: 0.098,
+                gain: 0.14,
+                attack_s: 0.012,
+                decay_pow: 1.2,
+                filter: FilterMode::BandPass,
+                fc0: 760.0 * p,
+                fc1: 520.0 * p,
+                q: 2.4,
+                seed: base_seed ^ 0x77,
+                ..Default::default()
+            });
+            m.finish(APPROACH_PEAK, 1.2, 3.0, 24.0)
+        }
+
+        // Laundry B. A dry brush: a bristly stroke, fluttered.
+        Sfx::ApproachBrush => {
+            let p = APPROACH_PITCH[v];
+            let mut m = MixBuf::new(0.13);
+            m.add_noise(NoiseLayer {
+                dur_s: 0.125,
+                gain: 0.36,
+                attack_s: 0.012,
+                decay_pow: 1.0,
+                filter: FilterMode::BandPass,
+                fc0: 2100.0 * p,
+                fc1: 2900.0 * p,
+                q: 1.3,
+                trem_hz: 58.0,
+                trem_depth: 0.65,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.finish(APPROACH_PEAK, 1.0, 5.0, 24.0)
+        }
+
+        // Printworks A. A silverfish rasp: a fast dry buzz over paper.
+        Sfx::ApproachRasp => {
+            let p = APPROACH_PITCH[v];
+            let mut m = MixBuf::new(0.10);
+            m.add_noise(NoiseLayer {
+                dur_s: 0.095,
+                gain: 0.32,
+                attack_s: 0.004,
+                decay_pow: 0.9,
+                filter: FilterMode::BandPass,
+                fc0: 2700.0 * p,
+                fc1: 2000.0 * p,
+                q: 2.0,
+                trem_hz: 142.0 * p,
+                trem_depth: 0.85,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                dur_s: 0.090,
+                f0: 318.0 * p,
+                f1: 286.0 * p,
+                wave: Wave::Saw,
+                gain: 0.08,
+                attack_s: 0.004,
+                decay_pow: 1.0,
+                filter: FilterMode::BandPass,
+                fc0: 1400.0,
+                fc1: 1100.0,
+                q: 1.5,
+                ..Default::default()
+            });
+            m.finish(APPROACH_PEAK, 1.1, 3.0, 18.0)
+        }
+
+        // Printworks B. A double paper flap: two papery slaps, the second lower.
+        Sfx::ApproachPaperFlap => {
+            let p = APPROACH_PITCH[v];
+            let mut m = MixBuf::new(0.115);
+            for (i, &t0) in [0.0f32, 0.056].iter().enumerate() {
+                let drop = 1.0 - 0.18 * i as f32;
+                m.add_noise(NoiseLayer {
+                    start_s: t0,
+                    dur_s: 0.055,
+                    gain: 0.36,
+                    attack_s: 0.002,
+                    decay_pow: 1.4,
+                    filter: FilterMode::BandPass,
+                    fc0: 1750.0 * p * drop,
+                    fc1: 720.0 * p * drop,
+                    q: 0.9,
+                    seed: base_seed ^ (i as u32 + 1),
+                    ..Default::default()
+                });
+            }
+            m.finish(APPROACH_PEAK, 1.1, 2.0, 20.0)
+        }
+
+        // Flatbed A. Gravel clicks: four stony ticks at uneven spacing.
+        Sfx::ApproachGravel => {
+            let p = APPROACH_PITCH[v];
+            let mut m = MixBuf::new(0.115);
+            for (i, &(t0, f)) in [(0.0f32, 1250.0f32), (0.027, 920.0), (0.044, 1480.0), (0.079, 1050.0)]
+                .iter()
+                .enumerate()
+            {
+                m.add_noise(NoiseLayer {
+                    start_s: t0,
+                    dur_s: 0.028,
+                    pink: true,
+                    gain: 0.34,
+                    attack_s: 0.001,
+                    decay_pow: 1.4,
+                    filter: FilterMode::BandPass,
+                    fc0: f * p,
+                    fc1: f * p * 0.7,
+                    q: 2.6,
+                    seed: base_seed ^ (i as u32 + 1),
+                    ..Default::default()
+                });
+            }
+            m.add_noise(NoiseLayer {
+                dur_s: 0.11,
+                pink: true,
+                gain: 0.05,
+                decay_pow: 0.8,
+                filter: FilterMode::LowPass,
+                fc0: 700.0,
+                fc1: 500.0,
+                seed: base_seed ^ 0x99,
+                ..Default::default()
+            });
+            m.finish(APPROACH_PEAK, 1.1, 2.0, 18.0)
+        }
+
+        // Flatbed B. A loose-washer rattle: a thin steel ring, shaken.
+        Sfx::ApproachWasher => {
+            let p = APPROACH_PITCH[v];
+            let mut m = MixBuf::new(0.135);
+            for &(f, g) in &[(2150.0f32, 0.28f32), (2890.0, 0.12)] {
+                m.add_osc(OscLayer {
+                    dur_s: 0.13,
+                    f0: f * p,
+                    f1: f * p * 0.985,
+                    wave: Wave::Sine,
+                    gain: g,
+                    attack_s: 0.002,
+                    decay_pow: 1.1,
+                    trem_hz: 37.0,
+                    trem_depth: 0.9,
+                    ..Default::default()
+                });
+            }
+            m.add_noise(NoiseLayer {
+                dur_s: 0.12,
+                gain: 0.06,
+                decay_pow: 1.0,
+                filter: FilterMode::BandPass,
+                fc0: 1700.0,
+                fc1: 1300.0,
+                q: 1.5,
+                trem_hz: 37.0,
+                trem_depth: 0.9,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.finish(APPROACH_PEAK, 1.1, 3.0, 24.0)
+        }
     }
 }
 
@@ -10711,9 +11176,9 @@ const fn bell_pause_bass(src: &[i8; SECTION_STEPS]) -> [i8; SECTION_STEPS] {
     out
 }
 
-/// A brushed 6/8 groove in 16ths: two low pumps, a brush on the fifth and the
-/// ninth, ticks between them, and the last bar of each section missing its
-/// final brush — the breath before the steam.
+/// A brushed 6/8 groove in 16ths: kicks on steps 0 and 6, snare brushes on 3
+/// and 9, ticks on 2, 5 and 11, and an open brush on 13 that the last bar of
+/// each section leaves out — the breath before the steam.
 const fn steam_6_8(src: &[u8; SECTION_STEPS]) -> [u8; SECTION_STEPS] {
     let mut out = [0u8; SECTION_STEPS];
     let mut i = 0;
@@ -10727,8 +11192,9 @@ const fn steam_6_8(src: &[u8; SECTION_STEPS]) -> [u8; SECTION_STEPS] {
             5 | 11 => HAT | (boss & BHAT),
             3 => SNARE,
             9 => SNARE | (boss & BSNARE),
+            // The section's last bar drops its closing brush.
+            13 if (i / 16) % 4 == 3 => 0,
             13 => OHAT,
-            15 if (i / 16) % 4 == 3 => 0,
             _ => 0,
         };
         i += 1;
@@ -10765,10 +11231,16 @@ const fn retune(
     pump: bool,
     bell_pause: bool,
 ) -> Section4 {
+    // Every bass rewrite is transposed with the chords, lead and counter. It
+    // used to keep the source key, which put the Laundry's bass a minor third
+    // above its harmony and the Printworks' a whole tone below it (a semitone
+    // rub on every major chord). The pump is lifted an octave on the way: the
+    // Laundry's root is already A2, and a further three semitones down would
+    // put its tonic at 46 Hz, under anything a laptop speaker reproduces.
     let bass = if pump {
-        pump_bass(&src.bass)
+        shift_voice(&pump_bass(&src.bass), d + 12)
     } else if bell_pause {
-        bell_pause_bass(&src.bass)
+        shift_voice(&bell_pause_bass(&src.bass), d)
     } else {
         shift_voice(&src.bass, d)
     };
@@ -10814,11 +11286,11 @@ const fn retune_all(
     out
 }
 
-/// Laundry: A minor, 92 BPM, brushed 6/8 with two low pump notes.
+/// Laundry: F# minor, 92 BPM, brushed 6/8 with two low pump notes.
 const LAUNDRY_SECTIONS: [Section4; NUM_SECTIONS] =
     retune_all(&SEWER_SECTIONS, -3, 0, true, false);
 
-/// Printworks: E dorian, 132 BPM, platen clacks on beats two and four with the
+/// Printworks: F# mixolydian, 132 BPM, platen clacks on beats two and four with the
 /// bass pausing for the bell.
 const PRINTWORKS_SECTIONS: [Section4; NUM_SECTIONS] =
     retune_all(&KITCHEN_SECTIONS, 2, 1, false, true);
@@ -10865,8 +11337,10 @@ fn track_for(theme: Theme) -> TrackCfg {
             sections: &LAB_SECTIONS,
         },
         Theme::Laundry => TrackCfg {
-            key_name: "A Minor",
-            root: 110.00, // A2
+            // The Sewer's C minor arrangement, written three semitones down
+            // against an A2 reference: it sounds in F# minor.
+            key_name: "F# Minor",
+            root: 110.00, // A2 (the tuning reference, not the tonic)
             bpm: 92.0,
             lead_duty: 0.50,
             lead_lp: 1850.0,
@@ -10878,8 +11352,11 @@ fn track_for(theme: Theme) -> TrackCfg {
             sections: &LAUNDRY_SECTIONS,
         },
         Theme::Printworks => TrackCfg {
-            key_name: "E Dorian",
-            root: 164.81, // E3 (bass voice sings E2)
+            // The Kitchen's D mixolydian arrangement, written two semitones up
+            // against an E3 reference: it sounds in F# mixolydian, a tone
+            // above the Flatbed, which shares this reference and tempo.
+            key_name: "F# Mixolydian",
+            root: 164.81, // E3 (the tuning reference, not the tonic)
             bpm: 132.0,
             lead_duty: 0.22,
             lead_lp: 2500.0,
@@ -10890,11 +11367,13 @@ fn track_for(theme: Theme) -> TrackCfg {
             chord_lp: 1500.0,
             sections: &PRINTWORKS_SECTIONS,
         },
-        // The getaway ride: faster than the Lab, warmer than the Kitchen.
+        // The getaway ride: the fastest track in the game, warmer than the
+        // Kitchen. Its own reference and tempo: it used to share both (E3,
+        // 132 BPM) with the Printworks.
         Theme::Trailer => TrackCfg {
-            key_name: "E Mixolydian",
-            root: 164.81, // E3
-            bpm: 132.0,
+            key_name: "F Mixolydian",
+            root: 174.61, // F3
+            bpm: 140.0,
             lead_duty: 0.34,
             lead_lp: 3050.0,
             counter_duty: 0.50,
@@ -11089,6 +11568,10 @@ pub struct MusicSynth {
     drum_mix: f32,
     boss_mix: f32,
     ctrl_chord_gain: f32,
+    /// `ctrl_chord_gain` slewed per sample (~1 ms). The control-rate value
+    /// jumps at every beat-pulse reset and on each chord change's swell; the
+    /// pad follows this instead so neither lands as a one-sample step.
+    chord_gain_smooth: f32,
     ctrl_chord_pmix: f32,
     ctrl_lead_lp: f32,
     ctrl_lead_gain: f32,
@@ -11198,6 +11681,7 @@ impl MusicSynth {
             drum_mix,
             boss_mix,
             ctrl_chord_gain: 0.056,
+            chord_gain_smooth: 0.0,
             ctrl_chord_pmix: chord_pmix,
             ctrl_lead_lp: (lead_lp_alpha * (1.0 + 0.30 * boss_mix)).min(0.88),
             ctrl_lead_gain: (0.112 + 0.022 * boss_mix) * lead_mix,
@@ -11453,7 +11937,8 @@ impl MusicSynth {
         }
 
         // 2. 3-Voice Polyphonic Chord Pad / Chiptune Comping (always 3 simultaneous tones!)
-        let cg = self.ctrl_chord_gain;
+        self.chord_gain_smooth += (self.ctrl_chord_gain - self.chord_gain_smooth) * 0.02;
+        let cg = self.chord_gain_smooth;
         let p0 = wrap_phase(self.chord_phase[0] + self.chord_dt[0]);
         let p1 = wrap_phase(self.chord_phase[1] + self.chord_dt[1]);
         let p2 = wrap_phase(self.chord_phase[2] + self.chord_dt[2]);
@@ -11539,6 +12024,11 @@ impl MusicSynth {
                 drums_out += fast_sin_unit(self.kick_phase) * self.kick_env * att * kick_scale;
                 self.kick_freq = 44.0 + (self.kick_freq - 44.0) * 0.9964;
                 self.kick_env *= 0.9990;
+            } else {
+                // A hit whose layer is faded out is spent, not parked: left at
+                // full level it would sound late, off the beat, the moment the
+                // intensity rose and its layer faded in.
+                self.kick_env = 0.0;
             }
         }
 
@@ -11554,6 +12044,13 @@ impl MusicSynth {
             } else {
                 self.lead_mix
             }) > 0.001;
+        // Same rule as the kick: a muted layer's hit is dropped, never held.
+        if !need_snare {
+            self.snare_env = 0.0;
+        }
+        if !need_hat {
+            self.hat_env = 0.0;
+        }
 
         if need_snare || need_hat {
             self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -11906,11 +12403,18 @@ impl CachedSfx {
         }
     }
 
+    /// A non-finite ratio plays at the natural pitch: a NaN step would never
+    /// advance `pos`, and the voice would hold its slot on one sample forever.
     fn with_pitch(data: Arc<[f32]>, pitch_ratio: f32) -> Self {
+        let step = if pitch_ratio.is_finite() {
+            pitch_ratio.clamp(0.5, 2.0)
+        } else {
+            1.0
+        };
         CachedSfx {
             data,
             pos: 0.0,
-            step: pitch_ratio.clamp(0.5, 2.0),
+            step,
         }
     }
 }
@@ -12576,6 +13080,148 @@ mod tests {
         assert!(pitched.iter().all(|x| x.is_finite() && x.abs() <= 1.0));
     }
 
+    /// A NaN step never advances the read position, so the voice would play
+    /// one sample forever and hold its pool slot for the rest of the session.
+    #[test]
+    fn a_non_finite_pitch_plays_at_the_natural_rate_and_ends() {
+        let data: Arc<[f32]> = Arc::from(vec![0.25f32; 64].into_boxed_slice());
+        for ratio in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let src = CachedSfx::with_pitch(Arc::clone(&data), ratio);
+            assert_eq!(src.current_span_len(), Some(64), "ratio {ratio}");
+            assert_eq!(src.take(1000).count(), 64, "ratio {ratio} must end with the buffer");
+        }
+        // Out-of-range ratios are clamped, and still end.
+        assert_eq!(CachedSfx::with_pitch(Arc::clone(&data), 0.0).take(1000).count(), 128);
+        assert_eq!(CachedSfx::with_pitch(Arc::clone(&data), 99.0).take(1000).count(), 32);
+    }
+
+    /// The two retuned arrangements move every voice by the same interval:
+    /// the bass rewrites used to stay in the source key under transposed
+    /// chords and melody.
+    #[test]
+    fn retuned_floors_keep_the_bass_in_the_key_of_the_harmony() {
+        let cases: [(&[Section4; NUM_SECTIONS], &[Section4; NUM_SECTIONS], i8, &str); 2] = [
+            (&LAUNDRY_SECTIONS, &SEWER_SECTIONS, -3, "Laundry"),
+            (&PRINTWORKS_SECTIONS, &KITCHEN_SECTIONS, 2, "Printworks"),
+        ];
+        for (out, src, d, name) in cases {
+            for (s, (o, i)) in out.iter().zip(src.iter()).enumerate() {
+                for k in 0..3 {
+                    assert_eq!(o.chords[0].tones[k], i.chords[0].tones[k] + d, "{name} section {s}");
+                }
+                let mut voiced = 0;
+                for step in 0..SECTION_STEPS {
+                    let b = o.bass[step];
+                    if b == R || b == H {
+                        continue;
+                    }
+                    voiced += 1;
+                    // The pump substitutes the tonic where the source rests or
+                    // holds; everywhere else the note is the source's note.
+                    let from = if i.bass[step] == R || i.bass[step] == H { 0 } else { i.bass[step] };
+                    assert_eq!(
+                        (i32::from(b) - i32::from(from) - i32::from(d)).rem_euclid(12),
+                        0,
+                        "{name} section {s} step {step}: bass {b} is not the source's {from} moved {d}"
+                    );
+                }
+                assert!(voiced > 0, "{name} section {s} has no bass at all");
+            }
+        }
+    }
+
+    /// The Laundry's groove drops the open brush from the last bar of every
+    /// section and keeps it in the other three.
+    #[test]
+    fn the_laundry_groove_breathes_on_the_last_bar_of_each_section() {
+        for (s, sec) in LAUNDRY_SECTIONS.iter().enumerate() {
+            for bar in 0..SECTION_BARS {
+                let open = sec.drums[bar * STEPS_PER_BAR + 13] & OHAT != 0;
+                assert_eq!(open, bar != SECTION_BARS - 1, "section {s} bar {bar}");
+            }
+        }
+    }
+
+    /// A drum hit triggered while its layer is faded out is dropped. Held at
+    /// full level it would sound late when the intensity rose.
+    #[test]
+    fn drum_hits_under_a_muted_layer_are_not_held_for_later() {
+        for theme in Theme::playable() {
+            let mut synth = MusicSynth::new(theme, Arc::new(AtomicU32::new(0)));
+            let n = synth.samples_per_step as usize * STEPS_PER_BAR * 4;
+            for _ in 0..n {
+                let _ = synth.next();
+            }
+            assert_eq!(synth.kick_env, 0.0, "{theme:?} parked a kick at intensity 0");
+            assert_eq!(synth.snare_env, 0.0, "{theme:?} parked a snare at intensity 0");
+            assert_eq!(synth.hat_env, 0.0, "{theme:?} parked a hat at intensity 0");
+        }
+    }
+
+    /// The pad's gain never moves by more than a sliver between two samples,
+    /// at any intensity: no step at the beat-pulse reset, none on a chord
+    /// change.
+    #[test]
+    fn the_chord_pad_gain_never_steps() {
+        for theme in Theme::playable() {
+            for lvl in [0u32, 3] {
+                let mut synth = MusicSynth::new(theme, Arc::new(AtomicU32::new(lvl)));
+                let n = synth.samples_per_step as usize * STEPS_PER_BAR * 6;
+                let mut prev = synth.chord_gain_smooth;
+                for i in 0..n {
+                    let _ = synth.next();
+                    let g = synth.chord_gain_smooth;
+                    assert!(
+                        (g - prev).abs() < 0.0015,
+                        "{theme:?} int={lvl} sample {i}: pad gain stepped {prev} -> {g}"
+                    );
+                    prev = g;
+                }
+            }
+        }
+    }
+
+    /// Every approach sound stays under ordinary combat chatter and short
+    /// enough that a crowd cannot smear into a drone or mask a tell.
+    #[test]
+    fn approach_sounds_are_quiet_short_and_lowest_priority() {
+        let approach = &Sfx::ALL[Sfx::ALL.len() - 12..];
+        assert_eq!(approach[0], Sfx::ApproachPipeClaws);
+        assert_eq!(approach[11], Sfx::ApproachWasher);
+        let hit = peak(&sfx_samples(Sfx::Hit));
+        let warn = peak(&sfx_samples(Sfx::Warn));
+        for &sfx in approach {
+            assert_eq!(sfx.priority(), 0, "{sfx:?}");
+            assert_eq!(sfx.variant_count(), APPROACH_TAKES, "{sfx:?}");
+            for v in 0..APPROACH_TAKES {
+                let s = sfx_variant_samples(sfx, v);
+                let ms = s.len() as f32 * 1000.0 / SR_F;
+                assert!(ms <= 140.0, "{sfx:?} v{v} runs {ms:.0} ms");
+                let pk = peak(&s);
+                assert!(pk <= APPROACH_PEAK + 1e-3, "{sfx:?} v{v} peak {pk}");
+                assert!(pk < hit && pk < warn, "{sfx:?} v{v} peak {pk} vs hit {hit}, warn {warn}");
+            }
+        }
+    }
+
+    /// The Flatbed is not a campaign floor, so the `Theme::all()` music tests
+    /// never reach it: every playable floor's track must sound, stay bounded
+    /// and replay bit-for-bit.
+    #[test]
+    fn every_playable_floor_has_bounded_deterministic_music() {
+        for theme in Theme::playable() {
+            for lvl in 0..=3u32 {
+                let n = SR as usize * 3;
+                let a: Vec<f32> = MusicSynth::new(theme, Arc::new(AtomicU32::new(lvl))).take(n).collect();
+                let b: Vec<f32> = MusicSynth::new(theme, Arc::new(AtomicU32::new(lvl))).take(n).collect();
+                assert_eq!(a, b, "{theme:?} int={lvl} must be deterministic");
+                assert!(a.iter().all(|x| x.is_finite()), "{theme:?} int={lvl} non-finite");
+                assert!(peak(&a) <= 0.80, "{theme:?} int={lvl} peak {}", peak(&a));
+                assert!(rms(&a) > 0.01, "{theme:?} int={lvl} is silent: rms {}", rms(&a));
+            }
+        }
+    }
+
     // ---- Volume curve, mixer and sink application ----------------------
 
     /// A gain sink that records what it was handed, so the apply path can be
@@ -13208,8 +13854,10 @@ mod tests {
 
     #[test]
     fn music_themes_are_musically_distinct_and_deterministic() {
+        // All six playable floors, the Flatbed included: no two share a
+        // reference pitch or a tempo.
         let mut excerpts: Vec<(Theme, Vec<f32>, f32, f32)> = Vec::new();
-        for theme in Theme::all() {
+        for theme in Theme::playable() {
             let mut a = MusicSynth::new(theme, Arc::new(AtomicU32::new(2)));
             let mut b = MusicSynth::new(theme, Arc::new(AtomicU32::new(2)));
             let n = SR as usize * 4;

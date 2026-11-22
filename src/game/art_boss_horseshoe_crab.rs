@@ -788,6 +788,10 @@ fn hash01(x: i32, y: i32) -> f32 {
 
 fn line_solid(pb: &mut PixelBuffer, a: Vec2, b: Vec2, col: Rgb, alpha: f32) {
     let d = b - a;
+    // A non-finite endpoint would saturate `steps` (two billion plots).
+    if !d.len().is_finite() {
+        return;
+    }
     let steps = d.len().max(1.0) as i32;
     for i in 0..=steps {
         let t = i as f32 / steps.max(1) as f32;
@@ -798,6 +802,10 @@ fn line_solid(pb: &mut PixelBuffer, a: Vec2, b: Vec2, col: Rgb, alpha: f32) {
 
 fn line_dashed(pb: &mut PixelBuffer, a: Vec2, b: Vec2, col: Rgb, alpha: f32, dash: f32, phase: f32) {
     let d = b - a;
+    // A non-finite endpoint would saturate `steps` (two billion plots).
+    if !d.len().is_finite() {
+        return;
+    }
     let steps = d.len().max(1.0) as i32;
     for i in 0..=steps {
         let t = i as f32 / steps.max(1) as f32;
@@ -1426,6 +1434,13 @@ fn draw_dome(
             let in_dome = (-DOME_HALF_LEN - 0.5..=16.5).contains(&u) && v.abs() <= half_w;
             let rim = (v.abs() - half_w).abs() < 1.0 || (u - 16.5).abs() < 1.0 || (u + DOME_HALF_LEN).abs() < 1.0;
             if !in_dome {
+                // The movable spines down each flank of the abdomen: the saw
+                // edge that makes the silhouette a horseshoe crab's.
+                let over = v.abs() - half_w;
+                if (-13.0..=-3.5).contains(&u) && over > 0.0 && over <= 3.0 && (u * 1.25).sin() > 0.55 {
+                    blend_px(pb, x, y, apply_hit(HINGE_MID, hit), 0.95);
+                    continue;
+                }
                 if rim && (-DOME_HALF_LEN - 1.0..=17.5).contains(&u) && v.abs() <= half_w + 1.2 {
                     blend_px(pb, x, y, SHELL_OUT, 0.85);
                 }
@@ -1436,7 +1451,7 @@ fn draw_dome(
             let nv = (v / half_w.max(1e-3)).clamp(-1.0, 1.0);
             let dome = (1.0 - (nu * nu * 0.55 + nv * nv * 0.75)).clamp(0.0, 1.0);
             let lit = nu * fl + nv * pl;
-            let mut lum = 0.38 + 0.30 * dome + 0.36 * lit - crouch * 0.10;
+            let mut lum = 0.34 + 0.30 * dome + 0.46 * lit - crouch * 0.10;
             // The rim is darker and the specular crest is on the upper-left.
             if rim {
                 lum *= 0.55;
@@ -1459,6 +1474,27 @@ fn draw_dome(
             }
             if v.abs() < 0.8 && u > -7.0 {
                 col = mix(col, SHELL_SH, 0.22);
+            }
+            // The hinge seam between the head shield and the abdomen, and the
+            // two eye ridges running forward from it: the shell's own drawing.
+            if (u + 2.0).abs() < 0.75 && !rim {
+                col = mix(col, SHELL_OUT, 0.50);
+            } else if (u + 0.6).abs() < 0.6 && !rim {
+                col = mix(col, SHELL_HI, 0.30);
+            }
+            if (v.abs() - 6.2).abs() < 0.75 && u > -1.0 && u < 12.5 {
+                col = mix(col, if nv * pl > 0.0 { SHELL_SPEC } else { SHELL_SH }, 0.42);
+            }
+            // A light edge and a dark edge just inside the outline, so the
+            // dome has a lit side and a shaded side at any size.
+            let edge = (half_w - v.abs()).min(16.5 - u).min(u + DOME_HALF_LEN);
+            if !rim && edge < 3.0 {
+                let k = 1.0 - ((edge - 1.0) / 2.0).clamp(0.0, 1.0);
+                if lit > 0.12 {
+                    col = mix(col, SHELL_SPEC, 0.50 * k);
+                } else if lit < -0.12 {
+                    col = mix(col, SHELL_OUT, 0.50 * k);
+                }
             }
             // The hinge: two knuckle bumps at the back of the shell.
             let hinge = Vec2::new(-DOME_HALF_LEN + 1.5, 0.0);
@@ -2095,5 +2131,26 @@ mod tests {
             under.2 > under.0,
             "the underside should read blue-pale, not shell-brown: {under:?}"
         );
+    }
+
+    /// The shell reads as a lit dome with a saw-edged abdomen: the side facing
+    /// the light is brighter than the far side, and the flank spines stand
+    /// outside the outline.
+    #[test]
+    fn the_shell_has_a_lit_side_a_shaded_side_and_flank_spines() {
+        const BG: Rgb = (10, 10, 10);
+        let mut pb = PixelBuffer::new(80, 80);
+        pb.clear(BG);
+        let v = sample_view(Vec2::new(40.0, 40.0), 0.0, CrabState::Dome, 0.3);
+        draw(&mut pb, &v, Vec2::ZERO, (90, 220, 200));
+        let lum = |c: Rgb| c.0 as u32 + c.1 as u32 + c.2 as u32;
+        let (mut top, mut bottom) = (0u32, 0u32);
+        for x in 40..52usize {
+            for dy in 6..14usize {
+                top += lum(pb.pixel_at(x, 40 - dy));
+                bottom += lum(pb.pixel_at(x, 40 + dy));
+            }
+        }
+        assert!(top > bottom, "the dome has no lit side: top {top} bottom {bottom}");
     }
 }

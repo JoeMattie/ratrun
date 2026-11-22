@@ -82,7 +82,8 @@ pub struct BatchOpts {
     /// `Typical` is the modal three-powerup keep of real campaigns, so a
     /// `--level 2`/`--level 3` batch measures the level a carried player meets.
     pub carry: CarryPreset,
-    /// Print a per-5-simulated-second trace of the first run (diagnostics).
+    /// Print a trace line every half simulated second of the first run
+    /// (diagnostics).
     pub trace: bool,
     /// Run the anomaly scan (see [`super::anomaly`]) and report its classes.
     /// Costs roughly 10 % of a batch and never changes a run.
@@ -448,6 +449,9 @@ pub struct BatchReport {
     /// The gold economy: income, spend and purchases per level.
     #[serde(default)]
     pub gold: GoldAgg,
+    /// What a run pays into the nest and what that buys at today's prices.
+    #[serde(default)]
+    pub nest: NestAgg,
     /// Deaths bucketed by minute on the level.
     #[serde(default)]
     pub death_minutes: Vec<DeathMinute>,
@@ -619,6 +623,112 @@ pub struct ProgressAgg {
     /// Mean gold on hand at this checkpoint.
     #[serde(default)]
     pub mean_gold: f32,
+}
+
+/// The nest economy of a batch: what each run would bank under
+/// [`crate::meta::bank`], and how many such runs today's
+/// [`crate::meta::Track`] prices take.
+///
+/// Per run: the purse is the gold collected minus the gold spent over every
+/// level played (a campaign carries the purse between floors and a run starts
+/// at zero), floors are the levels cleared, the apex count is every boss and
+/// named miniboss killed, and a `--practice` batch banks at the practice rate.
+/// A bot run never uses the console, so nothing is voided.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct NestAgg {
+    /// Gold banked per run (distribution over the batch).
+    pub banked: Percentiles,
+    /// Mean unspent purse banked per run (after the practice halving).
+    pub purse: f32,
+    /// Mean floor + boss/miniboss + clear bonuses banked per run.
+    pub bonuses: f32,
+    /// The cheapest first purchase on the nest board.
+    pub cheapest_price: u32,
+    /// The median track's whole cost (level 0 to its cap).
+    pub median_track_cost: u32,
+    /// Every track to its cap.
+    pub table_cost: u32,
+    /// Runs at the **median** banked figure to afford the cheapest step
+    /// (`0.0` when the median run banks nothing; the same for the two below).
+    pub runs_to_cheapest: f32,
+    /// Runs at the median banked figure to buy the median track outright.
+    pub runs_to_median_track: f32,
+    /// Runs at the median banked figure to buy the whole table.
+    pub runs_to_table: f32,
+}
+
+/// What one finished run would bank, as `(banked, purse, bonuses)`.
+fn run_bank(practice: bool, run: &RunOutcome) -> (u32, u32, u32) {
+    let collected = run
+        .levels
+        .iter()
+        .fold(0u32, |sum, l| sum.saturating_add(l.gold_collected));
+    let spent = run
+        .levels
+        .iter()
+        .fold(0u32, |sum, l| sum.saturating_add(l.gold_spent));
+    let floors = run.levels.iter().filter(|l| l.cleared).count();
+    let apex: usize = run
+        .levels
+        .iter()
+        .map(|l| usize::from(l.boss_defeated) + l.minibosses.iter().filter(|m| m.killed).count())
+        .sum();
+    let end = crate::meta::RunEnd {
+        purse: collected.saturating_sub(spent),
+        spent,
+        floors: floors.min(u8::MAX as usize) as u8,
+        apex: apex.min(u8::MAX as usize) as u8,
+        won: run.won,
+        practice,
+        console_used: false,
+    };
+    // A scratch profile: the batch never reads or writes a saved nest.
+    let mut scratch = crate::meta::MetaProfile::default();
+    let tally = crate::meta::bank(&mut scratch, &end);
+    (
+        tally.banked,
+        tally.purse,
+        tally.floor_bonus + tally.apex_bonus + tally.win_bonus,
+    )
+}
+
+/// Fold the batch into its nest economy (see [`NestAgg`]). Run order in, so
+/// the figures are identical whatever the thread count.
+fn nest_agg(practice: bool, outcomes: &[RunOutcome]) -> NestAgg {
+    use crate::meta::Track;
+    let banks: Vec<(u32, u32, u32)> = outcomes.iter().map(|r| run_bank(practice, r)).collect();
+    let n = banks.len().max(1) as f32;
+    let banked = Percentiles::of(banks.iter().map(|b| b.0 as f32).collect());
+    let purse = banks.iter().map(|b| b.1 as f32).sum::<f32>() / n;
+    let bonuses = banks.iter().map(|b| b.2 as f32).sum::<f32>() / n;
+    let cheapest_price = Track::ALL
+        .into_iter()
+        .filter_map(|t| t.price(0))
+        .min()
+        .unwrap_or(0);
+    let mut costs: Vec<u32> = Track::ALL.into_iter().map(Track::total_cost).collect();
+    costs.sort_unstable();
+    let median_track_cost = costs.get(costs.len() / 2).copied().unwrap_or(0);
+    let table_cost: u32 = costs.iter().sum();
+    let median = banked.median;
+    let runs_for = |price: u32| -> f32 {
+        if median > 0.0 {
+            price as f32 / median
+        } else {
+            0.0
+        }
+    };
+    NestAgg {
+        banked,
+        purse,
+        bonuses,
+        cheapest_price,
+        median_track_cost,
+        table_cost,
+        runs_to_cheapest: runs_for(cheapest_price),
+        runs_to_median_track: runs_for(median_track_cost),
+        runs_to_table: runs_for(table_cost),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -922,11 +1032,20 @@ pub fn run_batch_traced(opts: &BatchOpts) -> BatchReport {
             },
         );
         let mut next_trace = 0.0f32;
+        let mut last_elapsed = 0.0f32;
         let mut simulated = 0.0f32;
         while !run.finished() && simulated < opts.max_sim_seconds {
             run.step(DT);
             simulated += DT;
-            if i == 0 && run.world().elapsed >= next_trace {
+            // The floor clock restarts on every campaign level: without this
+            // the trace went silent on level two until its clock passed the
+            // whole of level one's.
+            let elapsed = run.world().elapsed;
+            if elapsed < last_elapsed {
+                next_trace = 0.0;
+            }
+            last_elapsed = elapsed;
+            if i == 0 && elapsed >= next_trace {
                 eprintln!("{}", run.trace_line());
                 next_trace += 0.5;
             }
@@ -964,6 +1083,7 @@ fn auto_opts(opts: &BatchOpts) -> AutoOpts {
 /// Fold per-run outcomes into the report. `outcomes` is in run order.
 fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> BatchReport {
     let runs = outcomes.len();
+    let nest = nest_agg(opts.practice, &outcomes);
     let mut levels: Vec<LevelAgg> = Vec::new();
     let mut damage: BTreeMap<String, (f32, usize)> = BTreeMap::new();
     let mut deaths: Vec<DeathOutcome> = Vec::new();
@@ -1519,6 +1639,7 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
             at_3m: mean(&gold_at_3m),
             collected_at_3m: mean(&gold_collected_at_3m),
         },
+        nest,
         death_minutes: death_minute_aggs(&death_minutes),
     }
 }
@@ -2286,7 +2407,9 @@ pub fn parse_args(args: &[String]) -> Result<Option<BatchOpts>, String> {
                 opts.seed = value()?.parse::<u64>().map_err(|_| "seed must be a number")?;
             }
             "--level" => {
-                let level = value()?.parse::<usize>().map_err(|_| "level must be 1-3")?;
+                let level = value()?
+                    .parse::<usize>()
+                    .map_err(|_| format!("level must be 1-{}", campaign::SECTOR_COUNT))?;
                 if !(1..=campaign::SECTOR_COUNT).contains(&level) {
                     return Err(format!("level must be 1-{}", campaign::SECTOR_COUNT));
                 }
@@ -2338,7 +2461,10 @@ pub fn parse_args(args: &[String]) -> Result<Option<BatchOpts>, String> {
                 opts.caps = Some(parse_caps(s)?);
             }
             other => {
-                if saw {
+                // An unknown flag is an error wherever it sits relative to
+                // `--bot-batch`: `--typo --bot-batch 30` used to fall through
+                // to "not ours" and start the real game on the batch's TTY.
+                if saw || args.iter().any(|a| a == "--bot-batch") {
                     return Err(format!("unknown flag {other:?}"));
                 }
                 // Not our flag (another mode owns the command line); leave it.
@@ -2758,6 +2884,36 @@ resolving a 5-point difference between two arms needs ~{} runs per arm (95% conf
         ));
         s.push('\n');
     }
+    if r.nest.banked.n > 0 {
+        s.push_str(&format!(
+            "Nest: {:.0} gold banked/run median (mean {:.0}, p25 {:.0}, p75 {:.0}, max {:.0}); mean {:.0} purse + {:.0} bonuses{}\n",
+            r.nest.banked.median,
+            r.nest.banked.mean,
+            r.nest.banked.p25,
+            r.nest.banked.p75,
+            r.nest.banked.max,
+            r.nest.purse,
+            r.nest.bonuses,
+            if r.practice { " (practice: half rate)" } else { "" }
+        ));
+        if r.nest.banked.median > 0.0 {
+            s.push_str(&format!(
+                "  at the median run: cheapest step {} gold = {:.1} runs, median track {} gold = {:.1} runs, whole table {} gold = {:.0} runs\n",
+                r.nest.cheapest_price,
+                r.nest.runs_to_cheapest,
+                r.nest.median_track_cost,
+                r.nest.runs_to_median_track,
+                r.nest.table_cost,
+                r.nest.runs_to_table
+            ));
+        } else {
+            s.push_str(&format!(
+                "  the median run banks nothing: cheapest step {} gold, median track {} gold, whole table {} gold\n",
+                r.nest.cheapest_price, r.nest.median_track_cost, r.nest.table_cost
+            ));
+        }
+        s.push('\n');
+    }
     if !r.death_minutes.is_empty() {
         s.push_str("Deaths by minute:\n");
         for m in &r.death_minutes {
@@ -2839,6 +2995,72 @@ mod tests {
     /// `--route` reaches the two side routes: the batch could only ever ask
     /// for the original route's floors (`--level 2` was always the Kitchen), so
     /// the Laundry and Printworks were unmeasurable.
+    /// The nest block is pure arithmetic over the run rows and the live price
+    /// table, so it can be pinned without playing a game.
+    #[test]
+    fn the_nest_block_banks_each_run_by_the_real_rule_and_prices_it() {
+        use crate::meta::{Track, APEX_BONUS, FLOOR_BONUS, WIN_BONUS};
+        let mut runs = vec![run_one(11, AutoOpts::practice(0, Skill::Expert), 2.0); 3];
+        for (i, run) in runs.iter_mut().enumerate() {
+            run.won = false;
+            for level in run.levels.iter_mut() {
+                level.cleared = false;
+                level.boss_defeated = false;
+                level.minibosses.clear();
+                level.gold_collected = 0;
+                level.gold_spent = 0;
+            }
+            let first = run.levels.first_mut().expect("a run has a level");
+            first.gold_collected = 100 * (i as u32 + 1) + 40;
+            first.gold_spent = 40;
+        }
+        // Purses 100, 200, 300 and nothing else: a death banks the purse.
+        assert_eq!(run_bank(false, &runs[0]), (100, 100, 0));
+        let nest = nest_agg(false, &runs);
+        assert_eq!(nest.banked.n, 3);
+        assert_eq!(nest.banked.median, 200.0);
+        assert_eq!(nest.purse, 200.0);
+        assert_eq!(nest.bonuses, 0.0);
+        let cheapest = Track::ALL.into_iter().filter_map(|t| t.price(0)).min().unwrap();
+        assert_eq!(nest.cheapest_price, cheapest);
+        assert_eq!(nest.runs_to_cheapest, cheapest as f32 / 200.0);
+        assert_eq!(
+            nest.table_cost,
+            Track::ALL.into_iter().map(Track::total_cost).sum::<u32>()
+        );
+        assert!(nest.cheapest_price <= nest.median_track_cost);
+        assert!(nest.median_track_cost < nest.table_cost);
+
+        // A cleared, won floor with its boss down pays every bonus; practice
+        // halves each part.
+        let mut clear = runs[0].clone();
+        clear.won = true;
+        clear.levels[0].cleared = true;
+        clear.levels[0].boss_defeated = true;
+        let bonuses = FLOOR_BONUS + APEX_BONUS + WIN_BONUS;
+        assert_eq!(run_bank(false, &clear), (100 + bonuses, 100, bonuses));
+        let half = FLOOR_BONUS / 2 + APEX_BONUS / 2 + WIN_BONUS / 2;
+        assert_eq!(run_bank(true, &clear), (50 + half, 50, half));
+
+        // An empty batch prints no nest block and divides by nothing.
+        let empty = nest_agg(false, &[]);
+        assert_eq!(empty.banked.n, 0);
+        assert_eq!(empty.runs_to_table, 0.0);
+    }
+
+    #[test]
+    fn an_unknown_flag_before_bot_batch_is_an_error_not_a_game_start() {
+        let args: Vec<String> = ["--typo", "--bot-batch", "3"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let err = parse_args(&args).expect_err("the batch owns this command line");
+        assert!(err.contains("--typo"), "{err}");
+        // Without `--bot-batch` the line still belongs to another mode.
+        let args: Vec<String> = ["--typo"].iter().map(|s| s.to_string()).collect();
+        assert!(parse_args(&args).expect("not ours").is_none());
+    }
+
     #[test]
     fn the_route_flag_plays_the_side_route_floor() {
         use crate::game::level::Theme;

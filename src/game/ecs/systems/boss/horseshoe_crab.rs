@@ -113,6 +113,11 @@ impl BossController for HorseshoeCrabController {
         // A phase threshold is a set piece: the harmless pose change, and the
         // blue starts to run.
         if out.phase_changed && !matches!(boss.state, BossState::HorseshoeCrab(CrabState::Death)) {
+            // The attack it abandons takes its telegraph with it (an arc, a
+            // lane or a marked burrow must not land out of the harmless pose).
+            // The blue pools are floor, not an attack: they carry no damage
+            // and stay.
+            boss.hazards.retain(|h| h.damage <= 0.0);
             enter(boss, CrabState::Pose, art::POSE_DURATION);
             shed_blood(ctx, boss);
         }
@@ -125,7 +130,7 @@ impl BossController for HorseshoeCrabController {
             BossState::HorseshoeCrab(CrabState::Bulldoze) => tick_bulldoze(ctx, boss),
             BossState::HorseshoeCrab(CrabState::Wedged) => tick_wedged(ctx, boss),
             BossState::HorseshoeCrab(CrabState::BurrowTell) => tick_burrow_tell(ctx, boss),
-            BossState::HorseshoeCrab(CrabState::Burrow) => tick_burrow(boss),
+            BossState::HorseshoeCrab(CrabState::Burrow) => tick_burrow(ctx, boss),
             BossState::HorseshoeCrab(CrabState::Emerge) => tick_emerge(boss),
             BossState::HorseshoeCrab(CrabState::FlipTell) => tick_flip_tell(boss),
             BossState::HorseshoeCrab(CrabState::Flipped) => tick_flipped(ctx, boss),
@@ -328,13 +333,51 @@ fn tick_burrow_tell(ctx: &mut BossContext<'_>, boss: &mut Boss) {
     }
 }
 
-fn tick_burrow(boss: &mut Boss) {
+fn tick_burrow(ctx: &BossContext<'_>, boss: &mut Boss) {
     // Under the floor: no wall rule, no contact, nothing to hit. It arrives at
     // the mark as the dive ends.
     if boss.progress() >= 1.0 {
-        boss.pos = boss.target;
+        // The mark is only checked against *part* of the body (it follows a
+        // rat that hugs a wall), but `move_boss` steps the whole body: a crab
+        // surfacing where its own radius does not fit could not take a step
+        // afterwards and sat in `Dome` until the framework's rejoin rule
+        // teleported it. Surface on the nearest floor the body does fit.
+        boss.pos = surface_spot(ctx, boss);
         enter(boss, CrabState::Emerge, art::EMERGE);
     }
+}
+
+/// Where the burrowing crab comes up: its mark when the whole body fits there,
+/// otherwise the first fitting point on the way back toward where it dived
+/// (floor it was standing on a moment ago), otherwise the nearest open cell.
+/// The mark itself is the last resort, which is the old behaviour.
+fn surface_spot(ctx: &BossContext<'_>, boss: &Boss) -> Vec2 {
+    let radius = boss.kind.body_radius();
+    let mark = boss.target;
+    if ctx.footprint_fits(mark, radius) {
+        return mark;
+    }
+    let back = boss.pounce_origin - mark;
+    let len = back.len();
+    if len > 1e-3 {
+        let dir = back * (1.0 / len);
+        let mut d = 2.0;
+        while d <= len.min(48.0) {
+            let p = mark + dir * d;
+            if ctx.footprint_fits(p, radius) {
+                return p;
+            }
+            d += 2.0;
+        }
+    }
+    let open = ctx.nearest_open(mark);
+    if ctx.footprint_fits(open, radius) {
+        return open;
+    }
+    if ctx.footprint_fits(boss.pounce_origin, radius) {
+        return boss.pounce_origin;
+    }
+    mark
 }
 
 fn tick_emerge(boss: &mut Boss) {
@@ -1361,6 +1404,52 @@ mod tests {
     }
 
     // ---- phase pose ------------------------------------------------------
+
+    /// The burrow's mark is checked against part of the body only, so it can
+    /// sit closer to a wall than the crab can stand. Surfacing exactly there
+    /// left a body `move_boss` could not step (a `Dome` that never walked until
+    /// the framework's rejoin teleported it); it now surfaces on the nearest
+    /// floor its own radius fits.
+    #[test]
+    fn it_never_surfaces_where_its_own_body_does_not_fit() {
+        let mut w = crab_world(CRAB_SEED);
+        spawn_crab(&mut w);
+        let arena = w.level.boss_room().unwrap().rect;
+        let tile = crate::game::collision::TILE_F;
+        let left = arena.x as f32 * tile;
+        let fits = |w: &World, p: Vec2, r: f32| w.level.tiles.circle_clear(p, r, SizeClass::Large);
+        // A mark beside the arena's left wall that the tell would accept (the
+        // half-radius check) but the whole body cannot stand on.
+        let mut mark = None;
+        'rows: for row in 1..arena.h.max(2) - 1 {
+            let y = (arena.y + row) as f32 * tile + tile * 0.5;
+            for dx in -16..48 {
+                let p = Vec2::new(left + dx as f32, y);
+                if fits(&w, p, art::BODY_RADIUS * 0.5) && !fits(&w, p, art::BODY_RADIUS) {
+                    mark = Some(p);
+                    break 'rows;
+                }
+            }
+        }
+        let mark = mark.expect("the arena's left wall has a spot only half the body fits");
+        let c = arena_centre(&w);
+        place(&mut w, c, c + Vec2::new(40.0, 0.0));
+        set_state(&mut w, CrabState::Burrow, 0.05);
+        with_boss(&mut w, |b| b.target = mark);
+        let next = drive_until_change(&mut w, 1.0);
+        assert_eq!(next, CrabState::Emerge);
+        let boss = boss_of(&mut w).unwrap();
+        assert!(
+            fits(&w, boss.pos, boss.kind.body_radius()),
+            "the crab surfaced wedged at {:?} (mark {mark:?})",
+            boss.pos
+        );
+        assert!(
+            boss.pos.dist(mark) <= 8.0 * tile + 1.0,
+            "it surfaced far from its own mark: {:?} vs {mark:?}",
+            boss.pos
+        );
+    }
 
     #[test]
     fn a_phase_threshold_spends_the_harmless_pose_change() {

@@ -173,8 +173,17 @@ const DOCK_ARRIVE: f32 = 6.0;
 /// Recharge (art: `4%` max HP per second, `12%` total).
 const DOCK_HEAL_PER_S: f32 = 0.04;
 const DOCK_HEAL_MAX: f32 = 0.12;
-/// Damage that short-circuits the recharge (art: `120` burst during charging).
-const DOCK_INTERRUPT: f32 = 120.0;
+/// Damage *dealt during the channel* that short-circuits the recharge, as a
+/// fraction of the pool.
+///
+/// The art's number is `120` against its own 1,600 base. It was applied as an
+/// absolute against the director-scaled pool (×16 at the boss time), where it
+/// is half a percent: one volley cancelled every recharge into the long vent,
+/// so the dock never healed anything. It was also compared with the *net* hp
+/// change, which the 4 %/s heal outruns for any ordinary build. Now it is the
+/// damage actually landed while charging, and 2 % of the pool is about a
+/// second and a half of focused fire for the builds the scale was tuned on.
+const DOCK_INTERRUPT_FRAC: f32 = 0.02;
 /// The rat standing on the pad's kill switch short-circuits it too (art).
 const DOCK_SWITCH_RADIUS: f32 = 11.0;
 /// Defensive surge ring (art: `r = 26 px`, `12` damage, `0.45 s` of warning).
@@ -202,6 +211,10 @@ const F_DOCK_CHARGING: u32 = 1 << 1;
 const S_DOCK_BASE: usize = 0;
 /// The circling direction (`+1`/`-1`), one rng draw per patrol entry.
 const S_CIRCLE: usize = 1;
+/// HP at the end of the last charging tick (to see this tick's damage).
+const S_DOCK_SEEN: usize = 2;
+/// Damage landed since the dock channel started.
+const S_DOCK_TAKEN: usize = 3;
 
 // ============================================================================
 // Controller
@@ -227,6 +240,10 @@ impl BossController for MowerController {
         // `Boss::phase` only ever increases, so this fires at 0.66 and 0.33
         // and nowhere else.
         if out.phase_changed && !matches!(boss.state, BossState::Mower(MowerState::Dying)) {
+            // The move it abandons takes its telegraphs with it: a ram lane
+            // (and its scorch wake) must not stay live with no mower in it
+            // while the machine drives off to its pad.
+            boss.hazards.clear();
             enter_docking(boss);
         }
 
@@ -580,17 +597,23 @@ fn tick_docking(ctx: &mut BossContext<'_>, boss: &mut Boss) {
             move_boss(ctx, boss, to_dock, DOCK_SPEED);
         } else {
             boss.scratch[S_DOCK_BASE] = boss.hp;
+            boss.scratch[S_DOCK_SEEN] = boss.hp;
+            boss.scratch[S_DOCK_TAKEN] = 0.0;
             boss.flags |= F_DOCK_CHARGING;
         }
     } else {
         let base = boss.scratch[S_DOCK_BASE];
+        // What the rat landed since the last tick of the channel (the damage
+        // system runs before this one, so `hp` already has it).
+        boss.scratch[S_DOCK_TAKEN] += (boss.scratch[S_DOCK_SEEN] - boss.hp).max(0.0);
         let cap = (base + DOCK_HEAL_MAX * boss.max_hp).min(boss.max_hp);
         if boss.hp < cap {
             boss.hp = (boss.hp + DOCK_HEAL_PER_S * boss.max_hp * ctx.dt).min(cap);
         }
         // Short circuit: enough burst damage, or the rat reaching the kill
         // switch on the pad, cancels the recharge into a long vent.
-        let burst = base - boss.hp >= DOCK_INTERRUPT;
+        boss.scratch[S_DOCK_SEEN] = boss.hp;
+        let burst = boss.scratch[S_DOCK_TAKEN] >= DOCK_INTERRUPT_FRAC * boss.max_hp;
         let switch = ctx.player_pos.dist(boss.dock) <= DOCK_SWITCH_RADIUS;
         if burst || switch {
             enter(boss, MowerState::Overheat, OVERHEAT_DURATION);
@@ -654,6 +677,8 @@ fn enter_docking(boss: &mut Boss) {
     enter(boss, MowerState::Docking, DOCK_DURATION);
     // Not charging yet: the transit to the pad runs first.
     boss.scratch[S_DOCK_BASE] = boss.hp;
+    boss.scratch[S_DOCK_SEEN] = boss.hp;
+    boss.scratch[S_DOCK_TAKEN] = 0.0;
     boss.flags &= !F_DOCK_CHARGING;
 }
 
@@ -1534,8 +1559,9 @@ mod tests {
             let charging = boss_of(&mut w).unwrap().flags & F_DOCK_CHARGING != 0;
             if charging {
                 with_boss(&mut w, |b| {
-                    b.take_damage(DOCK_INTERRUPT * 0.5);
-                    b.take_damage(DOCK_INTERRUPT * 0.5);
+                    let half = DOCK_INTERRUPT_FRAC * b.max_hp * 0.5;
+                    b.take_damage(half);
+                    b.take_damage(half + 0.01);
                 });
             }
             tick(&mut w);
@@ -1546,7 +1572,53 @@ mod tests {
                 break;
             }
         }
-        assert!(interrupted, "120 burst damage must short-circuit the recharge");
+        assert!(
+            interrupted,
+            "`DOCK_INTERRUPT_FRAC` of the pool landed during the channel must short-circuit it"
+        );
+    }
+
+    /// The dead-heal regression: one ordinary volley (the art's old absolute
+    /// `120`, half a percent of a scaled pool) must *not* cancel the recharge.
+    #[test]
+    fn mower_docking_survives_a_single_volley() {
+        let (mut w, room) = lane_setup(73, 1);
+        let dock = room.center_world() + Vec2::new(40.0, 0.0);
+        with_boss(&mut w, |b| {
+            b.dock = dock;
+            b.pos = room.center_world() - Vec2::new(0.0, 30.0);
+            b.hp = b.max_hp * 0.5;
+            enter_docking(b);
+        });
+        w.player.pos = dock + Vec2::new(0.0, 60.0);
+        let mut hit = false;
+        let mut healed_after_hit = false;
+        let mut hp_at_hit = 0.0;
+        for _ in 0..(DOCK_DURATION / DT) as usize {
+            let b = boss_of(&mut w).unwrap();
+            if mower_state(&b) != MowerState::Docking {
+                break;
+            }
+            if b.flags & F_DOCK_CHARGING != 0 && !hit {
+                hit = true;
+                with_boss(&mut w, |b| {
+                    b.take_damage(DOCK_INTERRUPT_FRAC * b.max_hp * 0.25);
+                });
+                hp_at_hit = boss_of(&mut w).unwrap().hp;
+            }
+            tick(&mut w);
+            let b = boss_of(&mut w).unwrap();
+            assert_ne!(
+                mower_state(&b),
+                MowerState::Overheat,
+                "a quarter of the threshold cancelled the recharge"
+            );
+            if hit && b.hp > hp_at_hit {
+                healed_after_hit = true;
+            }
+        }
+        assert!(hit, "the channel never started");
+        assert!(healed_after_hit, "the dock kept recharging after the volley");
     }
 
     // ---- deferred volley -------------------------------------------------

@@ -524,6 +524,7 @@ impl LightMap {
                 }
                 let sx = e.pos.x - cam.x;
                 let sy = e.pos.y - cam.y;
+                self.gather_floor_tells(e, cam, vw, vh, elapsed);
                 if e.kind == EnemyKind::Boss {
                     boss_phase = Some(boss_phase.unwrap_or(1));
                     let r = 136.0;
@@ -557,7 +558,13 @@ impl LightMap {
                             x: tx,
                             y: ty,
                             radius: r,
-                            color: (255, 174, 78),
+                            // A kind that borrows the Moth's fuse (the Ink
+                            // Blot) burns in its own colour.
+                            color: if e.kind == EnemyKind::WickMoth {
+                                (255, 174, 78)
+                            } else {
+                                emissive_rgb(e.kind.color())
+                            },
                             intensity: (145.0 * flick) as u16,
                             scatter: (30.0 * flick) as u16,
                             priority: 1,
@@ -577,14 +584,20 @@ impl LightMap {
                     if in_range(bx, by, r) {
                         let pulse = 0.78 + 0.22 * (elapsed * 9.0 + e.anim).sin();
                         let base = if telling { 120.0 } else { 185.0 };
+                        let brass = if telling {
+                            (248, 196, 92)
+                        } else {
+                            (255, 224, 118)
+                        };
                         self.lights.push(PointLight {
                             x: bx,
                             y: by,
                             radius: r,
-                            color: if telling {
-                                (248, 196, 92)
+                            // The Loose Bungee's bar reads in its own colour.
+                            color: if e.kind == EnemyKind::Turnkey {
+                                brass
                             } else {
-                                (255, 224, 118)
+                                blend_rgb(brass, emissive_rgb(e.kind.color()), 0.6)
                             },
                             intensity: (base * pulse) as u16,
                             scatter: ((if telling { 24.0 } else { 42.0 }) * pulse) as u16,
@@ -593,7 +606,7 @@ impl LightMap {
                             hard: false,
                         });
                     }
-                } else if e.kind == EnemyKind::Porter && e.w3.raise_t > 0.0 {
+                } else if e.kind.archetype() == EnemyKind::Porter && e.w3.raise_t > 0.0 {
                     // Porter raising its sugar cube: soft mint-white healing beacon.
                     let r = 22.0;
                     if in_range(sx, sy - 4.0, r) {
@@ -605,6 +618,25 @@ impl LightMap {
                             color: (186, 255, 214),
                             intensity: (148.0 * pulse) as u16,
                             scatter: (32.0 * pulse) as u16,
+                            priority: 1,
+                            occlude: false,
+                            hard: false,
+                        });
+                    }
+                } else if e.w3.curl_t > 0.0 || e.w3.flea_phase != 0 {
+                    // A committed curl or a marked hop (Pillbug, Bell Flea and
+                    // every kind on those bodies): a small pulse in the kind's
+                    // own colour, so the commit reads in a dark room.
+                    let r = 18.0;
+                    if in_range(sx, sy, r) {
+                        let pulse = 0.78 + 0.22 * (elapsed * 9.0 + e.anim).sin();
+                        self.lights.push(PointLight {
+                            x: sx,
+                            y: sy,
+                            radius: r,
+                            color: emissive_rgb(e.kind.color()),
+                            intensity: (120.0 * pulse) as u16,
+                            scatter: (24.0 * pulse) as u16,
                             priority: 1,
                             occlude: false,
                             hard: false,
@@ -691,8 +723,10 @@ impl LightMap {
                         let entrance =
                             !mb.tell_cued && mb.origin == Vec2::ZERO && mb.timer < 1.15;
                         let (b_col, b_r, b_int, b_scat) = match mb.state {
+                            // The wind-up glows in the kind's own colour;
+                            // the strike is red and the opening mint for all.
                             MinibossState::Tell => (
-                                (255, 206, 86),
+                                emissive_rgb(kind_col),
                                 36.0,
                                 (195.0 * pulse) as u16,
                                 (46.0 * pulse) as u16,
@@ -731,7 +765,11 @@ impl LightMap {
                                     x: sx,
                                     y: sy,
                                     radius: r,
-                                    color: if active { (255, 92, 66) } else { (255, 195, 76) },
+                                    color: if active {
+                                        (255, 92, 66)
+                                    } else {
+                                        emissive_rgb(kind_col)
+                                    },
                                     intensity: if active { 260 } else { 205 },
                                     scatter: if active { 68 } else { 44 },
                                     priority: 3,
@@ -1017,6 +1055,87 @@ impl LightMap {
         }
 
         boss_phase
+    }
+
+    /// Light for the floor kinds' own warned attacks, read from the state each
+    /// `floor_*` system mirrors onto the body: the Loose Can's lane, the Sump
+    /// Leech's tongue, the Walking Syringe's ray, the Egg Timer's ring, the Peg
+    /// Snapper's jaws and the Staple Crawler's feet. A warning pulses in the
+    /// kind's own colour; the live strike is the shared hostile red.
+    fn gather_floor_tells(&mut self, e: &Enemy, cam: Vec2, vw: f32, vh: f32, elapsed: f32) {
+        use crate::game::ecs::systems::{
+            floor_flatbed, floor_kitchen, floor_lab, floor_laundry, floor_printworks, floor_sewer,
+        };
+        const LIVE: Rgb = (255, 92, 66);
+        let own = emissive_rgb(e.kind.color());
+        let pulse = 0.80 + 0.20 * (elapsed * 9.0 + e.anim).sin();
+        let mut pool = |at: Vec2, radius: f32, live: bool, strength: f32| {
+            let (sx, sy) = (at.x - cam.x, at.y - cam.y);
+            if sx + radius >= 0.0 && sy + radius >= 0.0 && sx - radius < vw && sy - radius < vh {
+                let (color, intensity, scatter) = if live {
+                    (LIVE, 215.0 * strength, 50.0 * strength)
+                } else {
+                    (own, 150.0 * strength * pulse, 30.0 * strength * pulse)
+                };
+                self.lights.push(PointLight {
+                    x: sx,
+                    y: sy,
+                    radius,
+                    color,
+                    intensity: intensity as u16,
+                    scatter: scatter as u16,
+                    priority: 2,
+                    occlude: false,
+                    hard: false,
+                });
+            }
+        };
+        match e.kind {
+            EnemyKind::LooseCan => {
+                if let Some(path) = floor_flatbed::can_path(e) {
+                    let live = e.w4.phase == floor_flatbed::CAN_PHASE_ROLL;
+                    pool((path.points[0] + path.points[1]) * 0.5, 24.0, live, 1.0);
+                    if path.bounced {
+                        pool((path.points[1] + path.points[2]) * 0.5, 24.0, live, 1.0);
+                    }
+                }
+            }
+            EnemyKind::SumpLeech => {
+                if let Some((lip, tip, phase, progress)) = floor_sewer::leech_tongue(e) {
+                    let live = phase == floor_sewer::LEECH_PHASE_HOLD;
+                    pool((lip + tip) * 0.5, 20.0, live, 0.6 + 0.4 * progress);
+                }
+            }
+            EnemyKind::WalkingSyringe => {
+                if let Some(ray) = floor_lab::syringe_ray(e) {
+                    pool((ray.from + ray.to) * 0.5, 20.0, ray.live, 0.6 + 0.4 * ray.progress);
+                }
+            }
+            EnemyKind::EggTimer => {
+                if let Some((centre, radius)) = floor_kitchen::egg_ring_of(e) {
+                    pool(centre, (radius + 12.0).min(90.0), true, 0.8);
+                } else if let Some((centre, progress)) = floor_kitchen::egg_tell_of(e) {
+                    pool(centre, 20.0 + 8.0 * progress, false, 0.6 + 0.4 * progress);
+                }
+            }
+            EnemyKind::PegSnapper => {
+                if let Some(view) = floor_laundry::jaw_view(e) {
+                    let live = view.phase == floor_laundry::PEG_PHASE_CLOSE;
+                    for jaw in view.jaws() {
+                        pool(jaw, 16.0, live, 1.0);
+                    }
+                }
+            }
+            EnemyKind::StapleCrawler => {
+                if floor_printworks::staple_warned(e) {
+                    let live = e.w4.phase == floor_printworks::STAPLE_PHASE_STRIKE;
+                    for foot in [e.w4.trail[0], e.w4.trail[1]] {
+                        pool(foot, 15.0, live, 1.0);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Fixed lights derived from existing themed props, Lab charging dock, and
@@ -2124,6 +2243,14 @@ impl LightMap {
             }
         }
     }
+}
+
+/// A body colour as a light colour: same hue, scaled so its strongest channel
+/// is full. Dull coats (mud, tarpaulin, ink) still throw a readable glow.
+fn emissive_rgb(c: Rgb) -> Rgb {
+    let peak = u32::from(c.0.max(c.1).max(c.2)).max(1);
+    let lift = |v: u8| (u32::from(v) * 255 / peak) as u8;
+    (lift(c.0), lift(c.1), lift(c.2))
 }
 
 #[inline]

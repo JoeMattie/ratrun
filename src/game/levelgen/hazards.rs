@@ -260,27 +260,14 @@ pub fn place_hazards(
             }
         }
         if !placed && room_index >= rooms.len() * 2 {
-            // Every room has had two full sampling passes: stop rather than
+            // Every room has been sampled at least once (the walk starts at
+            // a random room, so between one and two passes): stop rather than
             // spin. `validate` reports short counts, so a starved map is a
             // visible generator bug and not a silent one.
             break;
         }
     }
     placement
-}
-
-/// The corner or lane a hazard grows into, or `None` when the cell is boxed in.
-///
-/// A steam grate is one cell; an ink pad spreads toward the inside corner it
-/// was placed against (up to 2 × 1 cells), which is what makes a pad read as a
-/// spill in a corner rather than a tile of paint. A pad never grows over a wall,
-/// a reservation or a threshold: the pad's own cells are checked, not just the
-/// cell it started from.
-fn grow_hazard(tiles: &TileMap, cell: (i32, i32), avoid: &[TileRect]) -> Option<(i32, i32)> {
-    if !tiles.get(cell.0, cell.1).is_open() || avoid.iter().any(|r| r.contains(cell.0, cell.1)) {
-        return None;
-    }
-    Some(cell)
 }
 
 /// Does a hazard's footprint (grown by the two cells a hazard keeps clear) touch

@@ -599,12 +599,19 @@ fn nearest_base(c: Rgb) -> u8 {
 
 /// Direct-mapped cache from packed RGB to palette index. 4096 entries covers
 /// every colour the game draws several times over, so the per-frame cost is a
-/// load and a compare per pixel. Atomics only because the table is a static;
-/// the game renders on one thread.
+/// load and a compare per pixel.
+///
+/// One entry is **one word** — `index << 24 | rgb` — so a reader can never see
+/// one writer's colour beside another writer's index. (The table is a static
+/// and `cargo test` folds colours from many threads at both depths; with the
+/// tag and the value in separate cells a torn pair could hand a 256-colour
+/// index to the 16-colour name table and index it out of bounds.) The index
+/// also says which depth wrote the entry: the 16-colour answers are `0..16`,
+/// the 256-colour answers are `16..=255`, so no depth bits are needed. The
+/// all-zero empty entry reads as "black → ANSI 0", which is the right answer.
 const CACHE_BITS: usize = 12;
 const CACHE_LEN: usize = 1 << CACHE_BITS;
-static CACHE_TAG: [AtomicU32; CACHE_LEN] = [const { AtomicU32::new(0) }; CACHE_LEN];
-static CACHE_VAL: [AtomicU8; CACHE_LEN] = [const { AtomicU8::new(0) }; CACHE_LEN];
+static CACHE: [AtomicU32; CACHE_LEN] = [const { AtomicU32::new(0) }; CACHE_LEN];
 
 #[inline]
 fn cache_slot(key: u32) -> usize {
@@ -614,21 +621,18 @@ fn cache_slot(key: u32) -> usize {
 /// Map an RGB to the palette index for `depth`, through the cache.
 #[inline]
 fn cached_index(depth: ColorDepth, c: Rgb) -> u8 {
-    let key = ((depth.code() as u32) << 24)
-        | ((c.0 as u32) << 16)
-        | ((c.1 as u32) << 8)
-        | c.2 as u32;
-    let tag = key | 0x0100_0000; // never 0: 0 means "empty slot"
-    let slot = cache_slot(key);
-    if CACHE_TAG[slot].load(Ordering::Relaxed) == tag {
-        return CACHE_VAL[slot].load(Ordering::Relaxed);
+    let rgb = ((c.0 as u32) << 16) | ((c.1 as u32) << 8) | c.2 as u32;
+    // The depth is part of the slot hash so the two depths rarely evict each
+    // other, and part of the hit test through the index range (see `CACHE`).
+    let slot = cache_slot(((depth.code() as u32) << 24) | rgb);
+    let base = depth == ColorDepth::Ansi16;
+    let entry = CACHE[slot].load(Ordering::Relaxed);
+    let cached = (entry >> 24) as u8;
+    if entry & 0x00FF_FFFF == rgb && (cached < 16) == base {
+        return cached;
     }
-    let value = match depth {
-        ColorDepth::Ansi16 => nearest_base(c),
-        _ => nearest_cube(c),
-    };
-    CACHE_VAL[slot].store(value, Ordering::Relaxed);
-    CACHE_TAG[slot].store(tag, Ordering::Relaxed);
+    let value = if base { nearest_base(c) } else { nearest_cube(c) };
+    CACHE[slot].store(((value as u32) << 24) | rgb, Ordering::Relaxed);
     value
 }
 
@@ -859,6 +863,23 @@ fn query_reply(timeout: Duration) -> KeyboardProbe {
         match scan_reply(&seen[..len]) {
             Reply::Protocol(flags) => {
                 probe.flags = Some(flags);
+                // The DA1 answer to the second half of the query is still
+                // owed. Left unread it becomes the *next* query's first bytes
+                // (`main` asks twice) and, after `--probe`, is typed into the
+                // user's shell as `62;4c`. It normally arrives in the same
+                // read; wait a bounded moment for it otherwise.
+                let drain_until = std::time::Instant::now() + DA1_GRACE;
+                while !scan(&seen[..len]).1 && len < seen.len() {
+                    let now = std::time::Instant::now();
+                    if now >= drain_until || !stdin_readable(drain_until - now) {
+                        break;
+                    }
+                    let n = stdin_read(&mut seen[len..]);
+                    if n == 0 {
+                        break;
+                    }
+                    len += n;
+                }
                 break;
             }
             Reply::Da1 => {
@@ -899,29 +920,47 @@ enum Reply {
 /// A protocol answer wins over DA1 even when DA1 arrived first: terminals send
 /// both replies to the pair of queries, and the order is not specified.
 fn scan_reply(bytes: &[u8]) -> Reply {
+    match scan(bytes) {
+        (Some(flags), _) => Reply::Protocol(flags),
+        (None, true) => Reply::Da1,
+        (None, false) => Reply::None,
+    }
+}
+
+/// Both halves of [`scan_reply`]: the first protocol answer's flags, and
+/// whether a **complete** DA1 answer (`CSI ? … c`) is in the bytes.
+///
+/// Only a terminated DA1 counts. Other private-mode reports share the prefix
+/// (`CSI ? 2026 ; 2 $ y`) and a DA1 cut off mid-read is not an answer yet;
+/// calling either one "DA1" would start the short grace window early and could
+/// give up on a protocol answer that is still in flight.
+fn scan(bytes: &[u8]) -> (Option<u32>, bool) {
+    let mut protocol = None;
     let mut da1 = false;
     let mut i = 0;
     while i + 2 < bytes.len() {
         if bytes[i] == 0x1b && bytes[i + 1] == b'[' && bytes[i + 2] == b'?' {
             let mut j = i + 3;
             let mut value = 0u32;
-            let mut any = false;
             while j < bytes.len() && bytes[j].is_ascii_digit() {
                 value = value.saturating_mul(10).saturating_add((bytes[j] - b'0') as u32);
-                any = true;
                 j += 1;
             }
             if j < bytes.len() {
                 match bytes[j] {
-                    b'u' => return Reply::Protocol(value),
+                    b'u' => {
+                        protocol.get_or_insert(value);
+                        i = j + 1;
+                        continue;
+                    }
                     // DA1 also carries `;`-separated parameters.
                     b';' | b'c' => {
-                        da1 = true;
                         let mut k = j;
                         while k < bytes.len() && (bytes[k].is_ascii_digit() || bytes[k] == b';') {
                             k += 1;
                         }
                         if k < bytes.len() && bytes[k] == b'c' {
+                            da1 = true;
                             i = k + 1;
                             continue;
                         }
@@ -931,18 +970,10 @@ fn scan_reply(bytes: &[u8]) -> Reply {
                     _ => {}
                 }
             }
-            if !any {
-                i += 1;
-                continue;
-            }
         }
         i += 1;
     }
-    if da1 {
-        Reply::Da1
-    } else {
-        Reply::None
-    }
+    (protocol, da1)
 }
 
 /// Block until stdin has bytes to read, up to `timeout`. Returns false on
@@ -1320,6 +1351,47 @@ mod tests {
                 assert_eq!(found, Reply::Protocol(1));
             }
         }
+    }
+
+    #[test]
+    fn only_a_complete_da1_counts_as_da1() {
+        // Cut off mid-read: not an answer yet.
+        assert_eq!(scan_reply(b"\x1b[?62;"), Reply::None);
+        assert_eq!(scan_reply(b"\x1b[?62;4"), Reply::None);
+        // Another private-mode report (DECRPM) is not DA1.
+        assert_eq!(scan_reply(b"\x1b[?2026;2$y"), Reply::None);
+        // ...and does not hide a protocol answer behind it.
+        assert_eq!(scan_reply(b"\x1b[?2026;2$y\x1b[?9u"), Reply::Protocol(9));
+        // Both halves are reported, whichever order they arrive in, so the
+        // query can tell when the paired DA1 has been drained.
+        assert_eq!(scan(b"\x1b[?1u"), (Some(1), false));
+        assert_eq!(scan(b"\x1b[?1u\x1b[?62;4c"), (Some(1), true));
+        assert_eq!(scan(b"\x1b[?62;4c\x1b[?1u"), (Some(1), true));
+        // The first protocol answer is the one that counts.
+        assert_eq!(scan(b"\x1b[?1u\x1b[?9u"), (Some(1), false));
+    }
+
+    #[test]
+    fn the_colour_cache_never_mixes_the_two_depths() {
+        // The same colours through both depths, interleaved, twice: every
+        // 16-colour answer must stay inside the 16-colour table (the names
+        // lookup would panic otherwise) and match a cold lookup.
+        for round in 0..2 {
+            for i in 0..600u32 {
+                let c = ((i * 7) as u8, (i * 13) as u8, (i * 29) as u8);
+                let base = cached_index(ColorDepth::Ansi16, c);
+                let cube = cached_index(ColorDepth::Ansi256, c);
+                assert!(base < 16, "round {round}: {c:?} -> {base}");
+                assert!(cube >= 16, "round {round}: {c:?} -> {cube}");
+                assert_eq!(base, nearest_base(c));
+                assert_eq!(cube, nearest_cube(c));
+                let _ = map_rgb_with(ColorDepth::Ansi16, c);
+            }
+        }
+        // The empty entry's reading ("black is ANSI 0") is the true answer.
+        assert_eq!(nearest_base((0, 0, 0)), 0);
+        assert_eq!(cached_index(ColorDepth::Ansi16, (0, 0, 0)), 0);
+        assert_eq!(cached_index(ColorDepth::Ansi256, (0, 0, 0)), 16);
     }
 
     #[test]

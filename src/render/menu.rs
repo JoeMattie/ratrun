@@ -542,16 +542,18 @@ pub fn draw_title(
         } else {
             format!("· {quit_key} quit")
         };
-        let mut parts: Vec<(&str, Option<Target>)> = vec![(
-            // The narrow row is 54 cells: it has to fit the 55-cell plate
-            // of a 57-column terminal with `Q quit` intact.
-            if wide {
-                "↑↓ select · ←→/wheel sector · Enter confirm or click · "
-            } else {
-                "↑↓ select · ←→ sector · Enter/click ·"
-            },
-            None,
-        )];
+        // Confirm is an action like the rest (`Input::confirm_pressed`), so
+        // the rail names its live key rather than a literal `Enter`.
+        let confirm_key = controls_src.action_label(Action::Confirm);
+        let lead = if wide {
+            format!("↑↓ select · ←→/wheel sector · {confirm_key} confirm or click · ")
+        } else {
+            // With the default keys the narrow row is 54 cells: it has to
+            // fit the 55-cell plate of a 57-column terminal with `Q quit`
+            // intact.
+            format!("↑↓ select · ←→ sector · {confirm_key}/click ·")
+        };
+        let mut parts: Vec<(&str, Option<Target>)> = vec![(lead.as_str(), None)];
         let story_needle = format!("{} story", controls_src.action_label(Action::Library));
         if !named(&story_needle) {
             parts.push((story_chip.as_str(), Some(Target::Story)));
@@ -585,6 +587,28 @@ pub fn draw_levelup(
     idx: usize,
     auto_pick: bool,
     auto_key: &str,
+    hits: &mut HitMap,
+) {
+    draw_levelup_keyed(
+        f, area, level, choices, upgrades, idx, auto_pick, auto_key, "Enter", hits,
+    );
+}
+
+/// [`draw_levelup`] with the Confirm key named by the caller: the legend's
+/// `Enter equip` is `Action::Confirm`, so the App should pass
+/// `controls.action_label(Action::Confirm)` here (see the batch 6 report for
+/// the call site). `draw_levelup` passes the default key's name.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_levelup_keyed(
+    f: &mut Frame,
+    area: Rect,
+    level: u32,
+    choices: &[(String, String, String)],
+    upgrades: &[Upgrade],
+    idx: usize,
+    auto_pick: bool,
+    auto_key: &str,
+    confirm_key: &str,
     hits: &mut HitMap,
 ) {
     let n = choices.len().max(1) as u16;
@@ -662,7 +686,7 @@ pub fn draw_levelup(
         r.height.saturating_sub(1),
         Line::styled(
             format!(
-                "↑↓ select · Enter equip · {} · {auto_key} auto-pick",
+                "↑↓ select · {confirm_key} equip · {} · {auto_key} auto-pick",
                 pick_chip(choices.len())
             ),
             ink(MUTED),
@@ -679,43 +703,133 @@ fn pick_chip(cards: usize) -> String {
     }
 }
 
-/// Format `(desc, flavor)` for a level-up card's `text_rect` without mid-word clipping:
-/// on 3-row cards (`80×24+`), the `" · "` evolution partner note sits cleanly on row 3;
-/// on 2-row compact cards (`57×20`), a partner note wider than `width` is omitted so
-/// no half-word fragment (`" · Milk Tee"`) dangles off the right edge.
+/// Greedy word wrap to `width` cells. A word longer than a whole row is split
+/// across rows, so nothing is ever lost off the right edge.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    let mut used = 0usize;
+    for word in text.split_whitespace() {
+        let mut rest = word;
+        loop {
+            let len = rest.chars().count();
+            let gap = usize::from(used > 0);
+            if used + gap + len <= width {
+                if gap == 1 {
+                    line.push(' ');
+                }
+                line.push_str(rest);
+                used += gap + len;
+                break;
+            }
+            if used > 0 {
+                lines.push(std::mem::take(&mut line));
+                used = 0;
+                continue;
+            }
+            // A single word wider than the row.
+            let cut = rest
+                .char_indices()
+                .nth(width)
+                .map_or(rest.len(), |(i, _)| i);
+            lines.push(rest[..cut].to_string());
+            rest = &rest[cut..];
+            if rest.is_empty() {
+                break;
+            }
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// Keep at most `cap` of `lines`. When rows are dropped, the last kept row ends
+/// in `…` on a word boundary, so the cut is marked and never a half word.
+fn clip_lines(lines: &mut Vec<String>, cap: usize, width: usize) {
+    if lines.len() <= cap {
+        return;
+    }
+    lines.truncate(cap);
+    let width = width.max(1);
+    if let Some(last) = lines.last_mut() {
+        while last.chars().count() + 2 > width {
+            match last.rfind(' ') {
+                Some(i) => last.truncate(i),
+                None => {
+                    last.clear();
+                    break;
+                }
+            }
+        }
+        if !last.is_empty() {
+            last.push(' ');
+        }
+        last.push('…');
+    }
+}
+
+/// Format `(desc, flavor)` for a level-up card's `text_rect`: wrapped, never
+/// clipped mid-word.
+///
+/// The stat line comes first and may take every row. An evolution partner note
+/// (the part of `desc` after `" · "`) rides on the stat line where a two-row
+/// card has the width for both, gets a row of its own on a taller card, and is
+/// left out of a two-row card it does not fit. The flavor line takes whatever
+/// rows remain, wrapped, and ends in `…` when it needs more than there are.
 fn levelup_card_lines<'a>(
     desc: &'a str,
     flavor: &'a str,
     width: u16,
     height: u16,
 ) -> Vec<Line<'a>> {
-    if let Some((main, partner)) = desc.split_once(" · ") {
-        if height >= 3 {
-            let p_col = if partner.contains("READY") {
-                TRAIL_GOLD
-            } else {
-                MUTED
-            };
-            return vec![
-                Line::styled(main, ink(COAT)),
-                Line::styled(flavor, ink(MUTED).add_modifier(Modifier::ITALIC)),
-                Line::styled(partner, ink(p_col)),
-            ];
-        }
-        let top = if desc.chars().count() <= usize::from(width) {
-            desc
-        } else {
-            main
-        };
-        return vec![
-            Line::styled(top, ink(COAT)),
-            Line::styled(flavor, ink(MUTED).add_modifier(Modifier::ITALIC)),
-        ];
+    let w = usize::from(width).max(1);
+    let rows = usize::from(height);
+    let (main, partner) = match desc.split_once(" · ") {
+        Some((main, partner)) => (main, Some(partner)),
+        None => (desc, None),
+    };
+    let joined = rows < 3 && partner.is_some() && desc.chars().count() <= w;
+    let top = if joined { desc } else { main };
+    let partner = if joined || rows < 3 { None } else { partner };
+
+    let mut top_lines = wrap_words(top, w);
+    clip_lines(&mut top_lines, rows, w);
+    let left = rows.saturating_sub(top_lines.len());
+    // The partner note is build information, so it outranks the flavor line
+    // for the last row; it is still printed under it.
+    let partner = partner.filter(|_| left >= 1);
+    let flavor_rows = left - usize::from(partner.is_some());
+    let mut flavor_lines = if flavor_rows > 0 {
+        wrap_words(flavor, w)
+    } else {
+        Vec::new()
+    };
+    clip_lines(&mut flavor_lines, flavor_rows, w);
+
+    let mut out: Vec<Line<'a>> = Vec::with_capacity(rows);
+    for line in top_lines {
+        out.push(Line::styled(line, ink(COAT)));
     }
-    vec![
-        Line::styled(desc, ink(COAT)),
-        Line::styled(flavor, ink(MUTED).add_modifier(Modifier::ITALIC)),
-    ]
+    for line in flavor_lines {
+        out.push(Line::styled(line, ink(MUTED).add_modifier(Modifier::ITALIC)));
+    }
+    if let Some(partner) = partner {
+        let p_col = if partner.contains("READY") {
+            TRAIL_GOLD
+        } else {
+            MUTED
+        };
+        // One row: a note wider than the card is cut on a word.
+        let mut note = wrap_words(partner, w);
+        clip_lines(&mut note, 1, w);
+        for line in note {
+            out.push(Line::styled(line, ink(p_col)));
+        }
+    }
+    out
 }
 
 /// The AUTO-PICK toggle on the level-up screen: one centred pill below the
@@ -905,7 +1019,12 @@ pub fn draw_map_intro(f: &mut Frame, area: Rect, theme: Theme, accent: Color, hi
 }
 
 pub fn draw_pause(f: &mut Frame, area: Rect, controls_src: &Controls, hits: &mut HitMap) {
-    let r = panel(f, centered_rect(46, 8, area), " RUN CONTROL ", MUTED);
+    // Nine rows: the border's two plus seven content rows, the last of which
+    // (content row 6) is the legend. The plate used to be eight rows tall,
+    // which left six content rows, so the `r.height >= 7` legend below could
+    // never be drawn. A terminal shorter than nine rows still clamps the plate
+    // and drops the legend, never the controls.
+    let r = panel(f, centered_rect(46, 9, area), " RUN CONTROL ", MUTED);
     center(f, r, 1, Span::styled("━━━  ▌▌  ━━━", heavy(TAIL)));
     center(f, r, 2, Span::styled("PAUSED", heavy(COAT)));
     // The keys are read from the live bindings, the way the `L` library chip
@@ -932,13 +1051,18 @@ pub fn draw_pause(f: &mut Frame, area: Rect, controls_src: &Controls, hits: &mut
     if r.height >= 7 {
         // The narrow plate still names the dash key (the full plate has its own
         // legend line); `O options` is already on the controls row above.
+        // The volume keys are actions too, so they follow their bindings.
         center(
             f,
             r,
             6,
             label(
                 &format!(
-                    "[ ] music · - = fx · {} dash · {} library",
+                    "{} {} music · {} {} fx · {} dash · {} library",
+                    controls_src.action_label(Action::MusicDown),
+                    controls_src.action_label(Action::MusicUp),
+                    controls_src.action_label(Action::EffectsDown),
+                    controls_src.action_label(Action::EffectsUp),
                     controls_src.live_dash_label(),
                     controls_src.action_label(Action::Library)
                 ),
@@ -974,11 +1098,14 @@ pub fn draw_pause_compact(
     // is followed by one compact line (`GN2 CSP1 ASP3 …` / `HP3 DMG2 …`) naming
     // every kind in the rack, rank and stack included.
     let h = area.height.saturating_sub(2).min(15);
-    let r = panel(f, centered_rect(w, h, area), " RUN CONTROL ", MUTED);
-    if r.height < 9 || r.width < 30 {
+    // Decide the fallback from the plate's content size (the border takes two
+    // of each) *before* painting it: drawing this plate and then the bare one
+    // over it left the first plate's edges showing around the second.
+    if h.saturating_sub(2) < 9 || w.saturating_sub(2) < 30 {
         draw_pause(f, area, controls_src, hits);
         return;
     }
+    let r = panel(f, centered_rect(w, h, area), " RUN CONTROL ", MUTED);
     center(f, r, 0, Span::styled("━━━  ▌▌  PAUSED  ━━━", heavy(TAIL)));
     let clock_text = if world.boss_time_reached() {
         let fought = (world.elapsed - crate::game::director::BOSS_TIME).max(0.0) as u32;
@@ -1574,24 +1701,38 @@ pub fn draw_end(
     if new_best {
         center(f, r, 8, Span::styled(" ◆  NEW HIGH SCORE  ◆ ", heavy(TAIL)));
     }
-    if let (Some(nest), true) = (nest, r.height >= 20) {
+    // The nest tally sits on row 9, under the numbers it came from. The plate
+    // is at most 21 rows (19 of content), so the old `r.height >= 20` gate was
+    // never true and the compact report never said what the run banked. A
+    // plate with a spare row (the 57x20 one has exactly one) splits a tally too
+    // long for one row into the breakdown and the sum, and the records table
+    // moves down a row to make room.
+    let mut table_shift: u16 = 0;
+    if let (Some(nest), true) = (nest, r.height >= 11) {
         let style = if nest.voided {
             ink(WARN_AMBER)
         } else {
             heavy(TRAIL_GOLD)
         };
-        let tally = nest.line_within(r.width as usize);
-        center(f, r, 9, Line::styled(tally.as_str(), style));
+        let rows = if r.height >= 18 { 2 } else { 1 };
+        let lines = nest_tally_lines(nest, r.width as usize, rows);
+        for (i, line) in lines.iter().enumerate() {
+            center(f, r, 9 + i as u16, Line::styled(line.as_str(), style));
+        }
+        table_shift = (lines.len() as u16).saturating_sub(1);
     }
     let table = centered_rect(35, inner.height, inner);
-    f.render_widget(
-        Line::styled("RK    SCORE   SECTOR         TIME", ink(accent)),
-        band(table, 10, 1),
-    );
+    // The header needs a row of its own above the chips.
+    if r.height > 11 + table_shift {
+        f.render_widget(
+            Line::styled("RK    SCORE   SECTOR         TIME", ink(accent)),
+            band(table, 10 + table_shift, 1),
+        );
+    }
     for (i, e) in scores
         .entries
         .iter()
-        .take(usize::from(r.height.saturating_sub(12)).min(5))
+        .take(usize::from(r.height.saturating_sub(12 + table_shift)).min(5))
         .enumerate()
     {
         let s = e.time as u32;
@@ -1607,7 +1748,7 @@ pub fn draw_end(
                 ),
                 ink(if i == 0 { COAT } else { MUTED }),
             ),
-            band(table, 11 + i as u16, 1),
+            band(table, 11 + table_shift + i as u16, 1),
         );
     }
     let [restart_chip, nest_chip, menu_chip] = end_chips(controls_src);
@@ -1623,6 +1764,50 @@ pub fn draw_end(
             (menu_chip.as_str(), Some(Target::Menu)),
         ],
     );
+}
+
+/// The nest tally as the lines an end plate prints: `max` cells wide, on up to
+/// `rows` rows.
+///
+/// The wording is [`crate::meta::BankTally::line`]'s own (nothing is retyped
+/// here). The whole line is used where it fits. Where it does not and the plate
+/// has two rows, it is split at the `=` into the breakdown (purse, floor, boss
+/// and clear bonuses) and the sum with the new balance, so the report still
+/// says where the gold came from. Otherwise it is the short gain-and-balance
+/// form, which keeps the practice half-rate note whenever that fits: a halved
+/// run must not look like a full-rate one. A voided (console) tally is one
+/// line.
+fn nest_tally_lines(nest: &crate::meta::BankTally, max: usize, rows: usize) -> Vec<String> {
+    const HALF: &str = "(practice: half)";
+    let fits = |s: &str| s.chars().count() <= max;
+    let full = nest.line();
+    if nest.voided || fits(&full) {
+        return vec![full];
+    }
+    if rows >= 2 {
+        if let Some((parts, sum)) = full.split_once(" = ") {
+            let sum = format!("= {sum}");
+            if fits(parts) && fits(&sum) {
+                return vec![parts.to_string(), sum];
+            }
+            // The half-rate note rides on the shorter row.
+            if let Some(bare) = parts.strip_suffix(HALF) {
+                let bare = bare.trim_end();
+                let noted = format!("{sum}  {HALF}");
+                if fits(bare) && fits(&noted) {
+                    return vec![bare.to_string(), noted];
+                }
+            }
+        }
+    }
+    let short = nest.line_within(max);
+    if nest.halved && !short.contains(HALF) {
+        let noted = format!("{short}  {HALF}");
+        if fits(&noted) {
+            return vec![noted];
+        }
+    }
+    vec![short]
 }
 
 /// The end screens' three chips, named from the live bindings so a rebind
@@ -1703,6 +1888,28 @@ pub fn draw_levelup_with_loadout(
     auto_key: &str,
     hits: &mut HitMap,
 ) {
+    draw_levelup_with_loadout_keyed(
+        f, area, level, choices, upgrades, loadout, idx, auto_pick, auto_key, "Enter", hits,
+    );
+}
+
+/// [`draw_levelup_with_loadout`] with the Confirm key named by the caller (the
+/// legend's `Enter equip` is `Action::Confirm`). The unkeyed function passes
+/// the default key's name.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_levelup_with_loadout_keyed(
+    f: &mut Frame,
+    area: Rect,
+    level: u32,
+    choices: &[(String, String, String)],
+    upgrades: &[Upgrade],
+    loadout: &Loadout,
+    idx: usize,
+    auto_pick: bool,
+    auto_key: &str,
+    confirm_key: &str,
+    hits: &mut HitMap,
+) {
     let n = choices.len().max(1) as u16;
     let large_cards = area.height >= n * 6 + 3 && area.width >= 64;
     let target_stride: u16 = if large_cards { 6 } else { 4 };
@@ -1735,7 +1942,11 @@ pub fn draw_levelup_with_loadout(
     let top_pad = if large_cards {
         u16::from(airy && content.height > n * stride + footer_rows)
     } else {
-        u16::from(content.height >= 15)
+        // Centre the stack in the rows above the footer. Three cards on the
+        // 57x20 plate have two spare rows (one above, one below, as before);
+        // one or two cards used to sit against the top edge with the spare
+        // rows all underneath.
+        content.height.saturating_sub(footer_rows + n * stride) / 2
     };
 
     for (i, (title, desc, flavor)) in choices.iter().enumerate() {
@@ -1787,6 +1998,8 @@ pub fn draw_levelup_with_loadout(
             i + 1,
             title
         );
+        // The title sits on the top border from the card's second column.
+        let name_w = name.chars().count() as u16;
         let block = Block::bordered()
             .border_style(ink(border))
             .title(Span::styled(
@@ -1797,9 +2010,16 @@ pub fn draw_levelup_with_loadout(
         f.render_widget(block, card);
 
         // Top-right weapon glyph + next-level pips inside the card border.
+        // Skipped when the title reaches them: a long evolved name used to be
+        // overprinted by the pips on the same border row.
         if let Some(pips) = pips_preview {
             let pw = pips.chars().count() as u16 + 2;
-            if card.width >= 48 && card.height >= 3 && card.right() > card.x + pw + 28 {
+            let clear_of_title = card.x + 1 + name_w < card.right().saturating_sub(pw + 2);
+            if card.width >= 48
+                && card.height >= 3
+                && card.right() > card.x + pw + 28
+                && clear_of_title
+            {
                 f.buffer_mut().set_string(
                     card.right() - pw - 2,
                     card.y,
@@ -1847,7 +2067,7 @@ pub fn draw_levelup_with_loadout(
         r.height.saturating_sub(1),
         Line::styled(
             format!(
-                "↑↓ select · Enter equip · {} · {auto_key} auto-pick",
+                "↑↓ select · {confirm_key} equip · {} · {auto_key} auto-pick",
                 pick_chip(choices.len())
             ),
             ink(MUTED),
@@ -2441,7 +2661,11 @@ pub fn draw_end_summary(
     buf.set_stringn(lx, inner.y + y_cols, "SCORE BREAKDOWN", lw as usize, heavy(accent));
     buf.set_stringn(rx, inner.y + y_cols, "COMBAT METRICS", rw as usize, heavy(accent));
 
-    for row in 0..6u16 {
+    // The short plate has five rows under the column heads before the divider
+    // (`y_best`); the tall one has six. The sixth metric used to be drawn on
+    // the divider's row and then ruled over.
+    let metric_n: usize = if compact_v { 5 } else { 6 };
+    for row in 0..=metric_n as u16 {
         buf[(inner.x + half.saturating_sub(1), inner.y + y_cols + row)]
             .set_char('│')
             .set_fg(TRACK)
@@ -2514,7 +2738,7 @@ pub fn draw_end_summary(
             ),
         ),
     ];
-    for (i, (k, v)) in metric_rows.iter().enumerate() {
+    for (i, (k, v)) in metric_rows.iter().take(metric_n).enumerate() {
         let y = inner.y + y_cols + 1 + i as u16;
         buf.set_stringn(rx, y, k, rw as usize, ink(MUTED));
         let vw = v.chars().count() as u16;
@@ -2541,17 +2765,26 @@ pub fn draw_end_summary(
 
     // The nest: what this run banked. One line above the records table, so the
     // tally sits under the numbers it came from.
+    // The tall plate has a spare row above the chips, so a tally too long for
+    // one row is split into the breakdown and the sum there, and the records
+    // table moves down a row. The short plate keeps one row.
+    let mut y_table = y_table;
     if let Some(nest) = summary.nest.as_ref() {
-        let tally = nest.line_within(inner.width as usize);
         let style = if nest.voided {
             ink(WARN_AMBER)
         } else {
             heavy(TRAIL_GOLD)
         };
-        f.render_widget(
-            Line::styled(tally.as_str(), style).centered(),
-            band(inner, y_table.saturating_sub(1), 1),
-        );
+        let rows = if compact_v { 1 } else { 2 };
+        let lines = nest_tally_lines(nest, inner.width as usize, rows);
+        let first = y_table.saturating_sub(1);
+        for (i, line) in lines.iter().enumerate() {
+            f.render_widget(
+                Line::styled(line.as_str(), style).centered(),
+                band(inner, first + i as u16, 1),
+            );
+        }
+        y_table += (lines.len() as u16).saturating_sub(1);
     }
 
     // Final Arsenal strip.
@@ -2586,7 +2819,10 @@ pub fn draw_end_summary(
         Line::styled("   RK    SCORE   SECTOR         TIME", ink(accent)),
         band(table, y_table, 1),
     );
-    let max_rows = usize::from(r.height.saturating_sub(y_table + 3)).min(5);
+    // Rows between the table head and the chips, less the spacer the unsplit
+    // layout keeps above the chips (a split tally spends that spacer).
+    let spacer = if y_table == y_arsenal + 2 { 3 } else { 2 };
+    let max_rows = usize::from(r.height.saturating_sub(y_table + spacer)).min(5);
     let mut highlighted = false;
     for (i, e) in scores.entries.iter().take(max_rows).enumerate() {
         let s = e.time as u32;
@@ -2698,6 +2934,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_title_rail_names_the_live_confirm_key() {
+        let mut c = Controls::default();
+        for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let (text, _) = title_frame(w, h, &c);
+            let key = c.action_label(Action::Confirm).to_string();
+            assert!(
+                text.contains(&format!("{key} confirm")) || text.contains(&format!("{key}/click")),
+                "{w}x{h}: the rail does not name {key:?}:\n{text}"
+            );
+        }
+        let _ = c.bind_active_kbm(Action::Confirm, Binding::Key(KeyBind::Char('f')));
+        for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let (text, _) = title_frame(w, h, &c);
+            assert!(
+                text.contains("F confirm") || text.contains("F/click"),
+                "{w}x{h}: the rebound confirm key is not named:\n{text}"
+            );
+            assert!(
+                !text.contains("Enter confirm") && !text.contains("Enter/click"),
+                "{w}x{h}: a stale confirm key:\n{text}"
+            );
+        }
+    }
+
     /// A rebind moves the title's chips with it, and the rail still names the
     /// action exactly once.
     #[test]
@@ -2736,6 +2997,420 @@ mod tests {
         let text = screen_text(&terminal);
         assert!(text.contains("1 pick"), "one card is one key:\n{text}");
         assert!(!text.contains("1–3"));
+    }
+
+    /// The four banking outcomes, built by `meta::bank` itself so the plates are
+    /// checked against the real rule and never against retyped numbers.
+    fn bank_cases() -> Vec<(&'static str, bool, bool, crate::meta::BankTally)> {
+        use crate::meta::{bank, MetaProfile, RunEnd};
+        let run = |floors, apex, won, practice, console_used| {
+            let mut profile = MetaProfile {
+                bank: 300,
+                ..MetaProfile::default()
+            };
+            bank(
+                &mut profile,
+                &RunEnd {
+                    purse: 41,
+                    spent: 12,
+                    floors,
+                    apex,
+                    won,
+                    practice,
+                    console_used,
+                },
+            )
+        };
+        vec![
+            ("death", false, false, run(1, 2, false, false, false)),
+            ("clear", true, false, run(3, 6, true, false, false)),
+            ("practice", true, true, run(1, 1, true, true, false)),
+            ("console", false, false, run(2, 3, false, false, true)),
+        ]
+    }
+
+    fn assert_tally_is_true(text: &str, tally: &crate::meta::BankTally, at: &str) {
+        if tally.voided {
+            assert!(text.contains("nothing banked"), "{at}: no console line:\n{text}");
+            assert!(!text.contains("bank now"), "{at}: a voided run shows a gain:\n{text}");
+            return;
+        }
+        let gain = format!("+{}¢", tally.banked);
+        let balance = format!("bank now {}¢", tally.total);
+        assert!(text.contains(&gain), "{at}: no {gain:?}:\n{text}");
+        assert!(text.contains(&balance), "{at}: no {balance:?}:\n{text}");
+        if tally.halved {
+            assert!(text.contains("practice: half"), "{at}: the half rate is not named:\n{text}");
+        }
+    }
+
+    /// The compact incident report never printed the nest tally: it was gated
+    /// on a content height the 21-row plate cannot have. It prints at every
+    /// size now, for each banking outcome, with the chips still registered.
+    #[test]
+    fn the_compact_incident_report_prints_the_bank_tally() {
+        let scores = ScoreTable::default();
+        for (name, won, practice, tally) in bank_cases() {
+            for (w, h) in [(57u16, 20u16), (57, 16), (66, 22), (67, 40)] {
+                let mut hits = HitMap::default();
+                let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+                t.draw(|f| {
+                    draw_end(
+                        f,
+                        f.area(),
+                        won,
+                        4200,
+                        41,
+                        312.0,
+                        9,
+                        180,
+                        false,
+                        "The floor keeps what it takes.",
+                        &scores,
+                        &mut hits,
+                        1,
+                        Theme::Sewer,
+                        practice,
+                        Some(&tally),
+                        &Controls::default(),
+                    );
+                })
+                .unwrap();
+                let text = screen_text(&t);
+                let at = format!("{name} at {w}x{h}");
+                assert_tally_is_true(&text, &tally, &at);
+                assert!(text.contains("INCIDENT REPORT"), "{at}: no caption");
+                for target in [Target::Restart, Target::Nest, Target::Menu] {
+                    let rect = hits
+                        .rect_for(target)
+                        .unwrap_or_else(|| panic!("{at}: {target:?} is not registered"));
+                    assert!(rect.right() <= w && rect.bottom() <= h, "{at}: {target:?} off screen");
+                }
+            }
+        }
+        // The 57x20 plate has the row to say where a death's gold came from.
+        let (_, won, practice, tally) = bank_cases().remove(0);
+        let mut hits = HitMap::default();
+        let mut t = Terminal::new(TestBackend::new(57, 20)).unwrap();
+        t.draw(|f| {
+            draw_end(
+                f, f.area(), won, 4200, 41, 312.0, 9, 180, false, "Lore.", &scores, &mut hits, 1,
+                Theme::Sewer, practice, Some(&tally), &Controls::default(),
+            );
+        })
+        .unwrap();
+        let text = screen_text(&t);
+        let floors = format!("floors {}¢", tally.floor_bonus);
+        assert!(text.contains(&floors), "57x20: no breakdown ({floors:?}):\n{text}");
+        assert!(text.contains("RK    SCORE"), "57x20: the records head was pushed out:\n{text}");
+    }
+
+    fn summary_for(won: bool, practice: bool, tally: crate::meta::BankTally) -> RunSummary {
+        RunSummary {
+            won,
+            theme: Theme::Sewer,
+            combat_score: 3000,
+            gold: 41,
+            bonus_time: 600,
+            bonus_level: 600,
+            bonus_win: 0,
+            final_score: 4200,
+            time: 312.0,
+            level: 9,
+            kills: 180,
+            damage_taken: 64.0,
+            dashes_used: 17,
+            heals_picked: 2,
+            boss_slain: false,
+            weapons: vec![(WeaponKind::Gnaw, 3)],
+            damage_mult: 1.2,
+            fire_rate_mult: 1.0,
+            armor: 0.0,
+            sector: 1,
+            practice,
+            console_used: tally.voided,
+            nest: Some(tally),
+        }
+    }
+
+    /// The expanded report prints a true tally for each outcome on both plates,
+    /// and the tall plate (which has the row) keeps the breakdown.
+    #[test]
+    fn the_expanded_incident_report_prints_the_bank_tally() {
+        let scores = ScoreTable::default();
+        for (name, won, practice, tally) in bank_cases() {
+            for (w, h) in [(68u16, 23u16), (80, 24), (90, 32), (120, 40)] {
+                let summary = summary_for(won, practice, tally);
+                let mut hits = HitMap::default();
+                let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+                t.draw(|f| {
+                    draw_end_summary(
+                        f, f.area(), &summary, false, "Lore.", &scores, &Controls::default(), &mut hits,
+                    );
+                })
+                .unwrap();
+                let text = screen_text(&t);
+                let at = format!("{name} at {w}x{h}");
+                assert_tally_is_true(&text, &tally, &at);
+                if h >= 27 && !tally.voided {
+                    let floors = format!("floors {}¢", tally.floor_bonus);
+                    assert!(text.contains(&floors), "{at}: no breakdown ({floors:?}):\n{text}");
+                }
+                assert!(text.contains("RK    SCORE"), "{at}: no records head:\n{text}");
+                for target in [Target::Restart, Target::Nest, Target::Menu] {
+                    assert!(hits.rect_for(target).is_some(), "{at}: {target:?} lost");
+                }
+            }
+        }
+    }
+
+    /// The short expanded plate has five metric rows above its divider. The
+    /// sixth used to be drawn on the divider's row and ruled over; it is left
+    /// to the tall plate now, and the five that fit are whole.
+    #[test]
+    fn the_short_report_drops_the_sixth_metric_instead_of_ruling_over_it() {
+        let scores = ScoreTable::default();
+        let (_, won, practice, tally) = bank_cases().remove(0);
+        let summary = summary_for(won, practice, tally);
+        for (w, h, sixth) in [(80u16, 24u16, false), (90, 32, true)] {
+            let mut hits = HitMap::default();
+            let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+            t.draw(|f| {
+                draw_end_summary(
+                    f, f.area(), &summary, false, "Lore.", &scores, &Controls::default(), &mut hits,
+                );
+            })
+            .unwrap();
+            let text = screen_text(&t);
+            assert!(text.contains("Dmg Taken"), "{w}x{h}: the fifth metric is missing:\n{text}");
+            assert_eq!(text.contains("Dashes / Dmg"), sixth, "{w}x{h}:\n{text}");
+        }
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| &*s.content).collect()
+    }
+
+    #[test]
+    fn card_text_wraps_on_words_and_marks_a_cut() {
+        assert_eq!(wrap_words("one two three", 7), vec!["one two", "three"]);
+        assert_eq!(wrap_words("abcdefghij kl", 4), vec!["abcd", "efgh", "ij", "kl"]);
+        assert!(wrap_words("", 10).is_empty());
+        let mut lines = wrap_words("alpha beta gamma delta", 10);
+        clip_lines(&mut lines, 1, 10);
+        assert_eq!(lines, vec!["alpha …"]);
+        let mut whole = wrap_words("alpha beta", 10);
+        clip_lines(&mut whole, 1, 10);
+        assert_eq!(whole, vec!["alpha beta"], "a line that fits is not marked");
+
+        let desc = "Bites the nearest thing for 12 damage every 0.8 s and chains twice";
+        let flavor = "Teeth first, questions never, and certainly no apologies afterwards.";
+        for (w, h) in [(20u16, 2u16), (30, 2), (44, 2), (44, 3), (58, 3), (58, 4)] {
+            let lines = levelup_card_lines(desc, flavor, w, h);
+            assert!(lines.len() <= usize::from(h), "{w}x{h}: {} rows", lines.len());
+            let source: Vec<&str> = desc.split_whitespace().chain(flavor.split_whitespace()).collect();
+            for line in &lines {
+                let text = line_text(line);
+                assert!(text.chars().count() <= usize::from(w), "{w}x{h}: {text:?} overflows");
+                for word in text.split_whitespace() {
+                    assert!(
+                        word == "…" || source.contains(&word),
+                        "{w}x{h}: {word:?} is a clipped word in {text:?}"
+                    );
+                }
+            }
+            // The stat line always starts the card.
+            assert!(line_text(&lines[0]).starts_with("Bites"), "{w}x{h}");
+        }
+        // Short text keeps the old shape: stat line, then flavor.
+        let lines = levelup_card_lines("+10% damage", "Sharper.", 44, 2);
+        assert_eq!(lines.iter().map(line_text).collect::<Vec<_>>(), vec!["+10% damage", "Sharper."]);
+        // The partner note: its own row on a tall card, joined on a short one
+        // that has the width, dropped from a short one that has not.
+        let noted = "+10% damage · Milk Teeth READY";
+        let tall = levelup_card_lines(noted, "Sharper.", 44, 3);
+        assert_eq!(
+            tall.iter().map(line_text).collect::<Vec<_>>(),
+            vec!["+10% damage", "Sharper.", "Milk Teeth READY"]
+        );
+        let short = levelup_card_lines(noted, "Sharper.", 44, 2);
+        assert_eq!(line_text(&short[0]), noted);
+        let narrow = levelup_card_lines(noted, "Sharper.", 20, 2);
+        assert_eq!(line_text(&narrow[0]), "+10% damage");
+        assert!(!narrow.iter().any(|l| line_text(l).contains("Milk")));
+    }
+
+    /// One, two and three cards: the AUTO-PICK chip is on screen, is its own
+    /// click target clear of every card, and the legend names the Confirm key it
+    /// is given. On the compact plate a short stack sits centred above the chip.
+    #[test]
+    fn levelup_lays_out_one_two_and_three_cards_with_the_auto_pick_chip() {
+        let mut lo = Loadout::new(WeaponKind::Gnaw);
+        lo.weapons.push(Weapon::new(WeaponKind::CheeseSpray));
+        let all = [
+            Upgrade::LevelWeapon(0),
+            Upgrade::NewWeapon(WeaponKind::AcidSpit),
+            Upgrade::Passive(PassiveKind::Magnet),
+        ];
+        for n in 1..=3usize {
+            let upgrades = all[..n].to_vec();
+            let desc: Vec<_> = upgrades.iter().map(|u| lo.describe(u)).collect();
+            for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
+                let at = format!("{n} cards at {w}x{h}");
+                let mut hits = HitMap::default();
+                let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+                t.draw(|f| {
+                    draw_levelup_with_loadout_keyed(
+                        f, f.area(), 5, &desc, &upgrades, &lo, 0, false, "U", "F", &mut hits,
+                    );
+                })
+                .unwrap();
+                let buf = t.backend().buffer();
+                let row_text = |y: u16| -> String { (0..w).map(|x| buf[(x, y)].symbol()).collect() };
+                let chip = hits
+                    .rect_for(Target::AutoPickToggle)
+                    .unwrap_or_else(|| panic!("{at}: no auto-pick chip"));
+                assert!(row_text(chip.y).contains("AUTO-PICK: OFF"), "{at}: {:?}", row_text(chip.y));
+                assert_eq!(
+                    hits.at(chip.x + chip.width / 2, chip.y),
+                    Some(Target::AutoPickToggle),
+                    "{at}: the chip is not what a click on it hits"
+                );
+                let cards: Vec<Rect> = (0..n)
+                    .map(|i| {
+                        hits.rect_for(Target::Upgrade(i))
+                            .unwrap_or_else(|| panic!("{at}: card {i} has no rect"))
+                    })
+                    .collect();
+                for (i, card) in cards.iter().enumerate() {
+                    assert!(card.height >= 4, "{at}: card {i} is {card:?}");
+                    assert!(card.bottom() <= chip.y, "{at}: card {i} covers the chip row");
+                    assert_eq!(
+                        hits.at(card.x + card.width / 2, card.y + card.height / 2),
+                        Some(Target::Upgrade(i)),
+                        "{at}"
+                    );
+                    if i > 0 {
+                        assert!(cards[i - 1].bottom() <= card.y, "{at}: cards {i} overlap");
+                    }
+                }
+                assert!(hits.rect_for(Target::Upgrade(n)).is_none(), "{at}: a phantom card");
+                let text = screen_text(&t);
+                assert!(text.contains("F equip"), "{at}: the Confirm key is not named");
+                assert!(!text.contains("Enter equip"), "{at}: a stale Confirm key");
+                assert!(text.contains(&pick_chip(n)), "{at}: wrong pick legend");
+                if (w, h) == (57, 20) {
+                    let caption = (0..h)
+                        .find(|&y| row_text(y).contains("LEVEL UP"))
+                        .expect("the plate's caption row");
+                    let above = cards[0].y - (caption + 1);
+                    let below = chip.y - cards[n - 1].bottom();
+                    assert!(
+                        above.abs_diff(below) <= 1,
+                        "{at}: the stack is not centred ({above} rows above, {below} below)"
+                    );
+                }
+            }
+        }
+        // The unkeyed entry point keeps the default key's name.
+        let upgrades = all.to_vec();
+        let desc: Vec<_> = upgrades.iter().map(|u| lo.describe(u)).collect();
+        let mut hits = HitMap::default();
+        let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        t.draw(|f| {
+            draw_levelup_with_loadout(f, f.area(), 5, &desc, &upgrades, &lo, 0, false, "U", &mut hits);
+        })
+        .unwrap();
+        assert!(screen_text(&t).contains("Enter equip"));
+    }
+
+    /// The bare pause plate was eight rows tall, so its content was six rows
+    /// and the legend on content row 6 was never drawn. It is nine now, and the
+    /// volume keys on it are the live bindings, not a literal `[ ]` / `- =`.
+    #[test]
+    fn the_bare_pause_plate_prints_its_legend_from_the_live_bindings() {
+        let mut c = Controls::default();
+        for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let mut hits = HitMap::default();
+            let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+            t.draw(|f| draw_pause(f, f.area(), &c, &mut hits)).unwrap();
+            let text = screen_text(&t);
+            let music = format!(
+                "{} {} music",
+                c.action_label(Action::MusicDown),
+                c.action_label(Action::MusicUp)
+            );
+            assert!(text.contains(&music), "{w}x{h}: no {music:?}:\n{text}");
+            assert!(text.contains(" fx · "), "{w}x{h}: no effects keys:\n{text}");
+            assert!(text.contains("dash · "), "{w}x{h}: no dash key:\n{text}");
+            assert!(text.contains("library"), "{w}x{h}: no library key:\n{text}");
+            for target in [Target::Resume, Target::Options, Target::Menu] {
+                assert!(hits.rect_for(target).is_some(), "{w}x{h}: {target:?} lost");
+            }
+        }
+        // A rebind moves the legend with it.
+        let _ = c.bind_active_kbm(Action::MusicDown, Binding::Key(KeyBind::Char('j')));
+        let mut hits = HitMap::default();
+        let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        t.draw(|f| draw_pause(f, f.area(), &c, &mut hits)).unwrap();
+        let text = screen_text(&t);
+        let music = format!(
+            "{} {} music",
+            c.action_label(Action::MusicDown),
+            c.action_label(Action::MusicUp)
+        );
+        assert!(text.contains(&music), "the rebound key is not named:\n{text}");
+        assert!(!text.contains("[ ] music"), "a stale volume key:\n{text}");
+
+        // Too short for the legend: the controls strip is what survives.
+        let mut hits = HitMap::default();
+        let mut t = Terminal::new(TestBackend::new(50, 8)).unwrap();
+        t.draw(|f| draw_pause(f, f.area(), &c, &mut hits)).unwrap();
+        assert!(screen_text(&t).contains("resume"));
+        assert!(hits.rect_for(Target::Resume).is_some());
+    }
+
+    /// A terminal too narrow for the compact plate falls back to the bare one
+    /// *before* anything is painted: the fallback used to be drawn over the
+    /// compact plate's frame, which showed as a second `RUN CONTROL` caption.
+    #[test]
+    fn the_compact_pause_fallback_paints_one_plate() {
+        let w = World::new(Theme::Kitchen, 7);
+        for (tw, th) in [(30u16, 20u16), (31, 24), (57, 10)] {
+            let mut hits = HitMap::default();
+            let mut t = Terminal::new(TestBackend::new(tw, th)).unwrap();
+            t.draw(|f| {
+                draw_pause_compact(f, f.area(), &w, false, &Controls::default(), &mut hits)
+            })
+            .unwrap();
+            let text = screen_text(&t);
+            assert_eq!(
+                text.matches("RUN CONTROL").count(),
+                1,
+                "{tw}x{th}: two plates:\n{text}"
+            );
+            assert!(text.contains("PAUSED"), "{tw}x{th}:\n{text}");
+        }
+    }
+
+    /// The next-rank pips share the card's top border with its title. A long
+    /// name keeps every letter; the pips give way.
+    #[test]
+    fn levelup_pips_never_overprint_a_long_card_title() {
+        let lo = Loadout::new(WeaponKind::Gnaw);
+        let upgrades = vec![Upgrade::NewWeapon(WeaponKind::AcidSpit)];
+        let long = "Longname ".repeat(6).trim_end().to_string();
+        let desc = vec![(long.clone(), "Does a thing.".to_string(), "Flavor.".to_string())];
+        for (w, h) in [(80u16, 24u16), (120, 40)] {
+            let mut hits = HitMap::default();
+            let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+            t.draw(|f| {
+                draw_levelup_with_loadout(f, f.area(), 4, &desc, &upgrades, &lo, 0, false, "U", &mut hits);
+            })
+            .unwrap();
+            let text = screen_text(&t);
+            assert!(text.contains(&long), "{w}x{h}: the title was overprinted:\n{text}");
+        }
     }
 
     #[test]

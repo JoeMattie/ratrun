@@ -2,7 +2,8 @@
 //!
 //! The title's `LIBRARY` row and the pause screen open a four-tab dossier over
 //! everything the player has actually met: the ordinary horde and the named
-//! appointments (**BESTIARY**), the ten slots' worth of gear (**ARSENAL**), the
+//! minibosses and bosses (**BESTIARY**), the weapons, evolutions, passives and
+//! splices (**ARSENAL**), the
 //! floor furniture — finds, traps, hazards and the level's own features
 //! (**FIELD GUIDE**) and the six floors themselves (**FLOORS**).
 //!
@@ -145,7 +146,7 @@ impl Category {
 }
 
 pub const CATEGORY_COUNT: usize = Category::ALL.len();
-/// Kinds one category can hold. Far above today's largest (23 props); a new
+/// Kinds one category can hold. Above today's largest (49 enemies); a new
 /// variant past it is a test failure, not silent corruption.
 pub const MAX_KINDS: usize = 64;
 /// 64-bit words per category bitset.
@@ -754,55 +755,55 @@ pub fn all_rows() -> Vec<Row> {
 fn enemy_text(k: EnemyKind) -> (&'static str, &'static str) {
     match k {
         EnemyKind::Skitterer => (
-            "Sewer · the first minute",
+            "Sewer · from the start",
             "The baseline: a brown smear with legs and an opinion about your ankles. \
              It has never been fed and it has never been fast. Everything else in this \
              facility is an escalation of this.",
         ),
         EnemyKind::Bat => (
-            "From the first minute",
+            "Sewer · from 0:45",
             "Winged, purple and ceiling-bound. It does not walk, so the floor's traps, \
              ink and glue mean nothing to it. Learn to look up before the room fills \
              and you stop noticing them overhead.",
         ),
         EnemyKind::Cat => (
-            "From about 1:15",
+            "Kitchen · from 1:15",
             "A cat, wearing the smug authority of a facility pet that was never told the \
              protocol had engaged. It is faster than it looks. It will not follow you \
              into a hole, and it will remember exactly where you went in.",
         ),
         EnemyKind::Spitter => (
-            "From about 3:35",
+            "Lab · from 3:35",
             "A recycled sprayer head with a metabolism. It holds the middle distance and \
              spits pellets at it: four alive at a time, no more. Close the gap or walk \
              sideways; either is cheaper than standing still.",
         ),
         EnemyKind::Brute => (
-            "From about 6:35",
+            "Flatbed · from 6:35",
             "The floor's first real wall. Slow, enormous, and built to keep walking while \
              you are shooting it. You cannot out-trade a brute in the open. Kill it while \
              it is still crossing a doorway.",
         ),
         EnemyKind::Pillbug => (
-            "From about 2:00",
+            "Sewer · from 2:00",
             "It brought its own door. Curls at arm's length and shows the silver shell: \
              a quarter of your damage goes in from the front, double goes in from behind. \
              Loop past its shoulder, bite the seam, and never linger at its face.",
         ),
         EnemyKind::BellFlea => (
-            "From about 4:30",
+            "Laundry · from 4:30",
             "Even the echo has feet. Once every few seconds it rings: a hop out along a \
              locked line, then a hop home. Both landing crosses show before they land. \
              Step off the first, leave the second empty.",
         ),
         EnemyKind::WickMoth => (
-            "From about 7:15",
+            "Laundry · from 9:45",
             "It dies with the light on. The corpse burns for a moment and then burns on \
              purpose, and the burst does not care whose side the light is on. Lure the \
              pack across the wick and step back.",
         ),
         EnemyKind::Porter => (
-            "From about 8:15",
+            "Kitchen · from 4:30",
             "One lump for medicinal purposes. It carries a sugar cube to the nearest \
              wounded body and patches it up while you watch. Any hit knocks the cube out \
              of the mix. Move toward the carrier, not the crowd.",
@@ -814,37 +815,37 @@ fn enemy_text(k: EnemyKind) -> (&'static str, &'static str) {
              the generic label.",
         ),
         EnemyKind::Turnkey => (
-            "From about 9:45",
+            "Lab · from 9:45",
             "Nobody asked who locked the hallway. Every few seconds it lays a live \
              crossbar across the floor it has just walked, after a dotted tell. Bait the \
              bar onto spent ground, then change lanes.",
         ),
         EnemyKind::HouseCentipede => (
-            "From about 4:00",
+            "Laundry · from 1:15",
             "Enough feet for a committee. It runs the skirting board, flutters in place \
              behind a dotted line, and then is somewhere else. Touch it and it bolts for \
              the nearest wall. Meet it in the open or not at all.",
         ),
         EnemyKind::Lilliputian => (
-            "From about 5:30",
+            "Lab · from 4:30",
             "Ten very small people with a plan. Spears level, archers kneel, and the \
              rope crew ties you to the floor while they do. The line is thick in front \
              and thin behind. Thin the squad and what is left runs for the walls.",
         ),
         EnemyKind::TermiteHorde => (
-            "From about 6:00",
+            "Printworks · from 4:30",
             "One appetite, many mouths. A single dart only ever takes a nibble out of \
              it, a hard hit splits it in two, and anything left alone grows back. Bring \
              something that hits an area, and finish what you start.",
         ),
         EnemyKind::MurderHornet => (
-            "From about 7:30",
+            "Flatbed · from 4:30",
             "The buzz climbs, a line locks, and it comes down the line. A miss puts it \
              on the floor for a long second, where it takes half again as much. Step \
              off the stripe, then turn round.",
         ),
         EnemyKind::BigSnake => (
-            "From about 8:30",
+            "Sewer · from 9:45",
             "A corridor that moves. The body divides the room and the head rears along \
              a marked line before it lunges, then lies stretched out and regrets it. \
              Go round the tail, or dash across, and bite the head while it rests.",
@@ -1240,7 +1241,7 @@ fn weapon_text(k: WeaponKind) -> (&'static str, &'static str) {
         WeaponKind::TailWhip => (
             "Level-up card · any floor",
             "Forty grams of pure indignation, delivered in a ring at arm's length. No \
-             aiming, no travel time, no mercy for anything idiots chose to stand next \
+             aiming, no travel time, no mercy for anything that chose to stand next \
              to you.",
         ),
         WeaponKind::AcidSpit => (
@@ -1392,8 +1393,8 @@ fn passive_text(k: PassiveKind) -> (&'static str, &'static str) {
         ),
         PassiveKind::FireRate => (
             "Level-up card · any floor",
-            "More is, itself, a strategy. Every stack shortens every cooldown in the \
-             rack, including the charged weapons' panic buttons.",
+            "More is, itself, a strategy. Every stack shortens every cooldown you \
+             carry, including the charged weapons' panic buttons.",
         ),
         PassiveKind::Magnet => (
             "Level-up card · any floor",
@@ -1540,9 +1541,10 @@ fn object_text(k: ObjectKind) -> (&'static str, &'static str) {
     match k {
         ObjectKind::Elite => (
             "Any floor · the horde, occasionally",
-            "Not a kind, a promotion. Every so often one ordinary body is gilded: three \
-             times the gem value, gilded contact, a coin purse that is always paid. It \
-             is the same enemy you already know with a better accountant.",
+            "Not a species, a promotion. Every so often the floor's heavy turns up \
+             gilded: more hit points than the ordinary one, and a coin purse that is \
+             always paid. It is the same enemy you already know with a better \
+             accountant.",
         ),
         ObjectKind::Gold => (
             "Any kill · a seeded glint on the floor",
@@ -1553,7 +1555,7 @@ fn object_text(k: ObjectKind) -> (&'static str, &'static str) {
         ObjectKind::Chest => (
             "Every named miniboss · touch to open",
             "Salvage left by whoever the miniboss used to be. It pays an evolution if \
-             the rack can offer one, otherwise a free rank, otherwise a purse and a \
+             the build can offer one, otherwise a free rank, otherwise a purse and a \
              patch-up.",
         ),
         ObjectKind::StickyBoard => (
@@ -1664,27 +1666,27 @@ fn prop_text(k: PropKind) -> (&'static str, &'static str) {
 fn floor_text(t: Theme) -> (&'static str, &'static str) {
     match t {
         Theme::Sewer => (
-            "Campaign · stage one",
+            "Campaign · sector 1",
             "Cold pipes and colder things. The drainage threads under the whole facility \
              and every other floor in this building sits on top of it.",
         ),
         Theme::Kitchen => (
-            "Campaign · stage two",
+            "Campaign · sector 2",
             "Grease, snap-traps and the stink of bait. Everything here wants the rat fed \
              to something with a bigger mouth.",
         ),
         Theme::Lab => (
-            "Campaign · stage three",
+            "Campaign · sector 3",
             "Where the rat was made. The lights hum a number that used to be its name, and \
              the blast door at the end is the front door.",
         ),
         Theme::Laundry => (
-            "Side route · stage two",
+            "Side route · sector 2",
             "Indigo tile, steam between the machines, and a hundred doors that will not \
              open. The whites come out pink down here.",
         ),
         Theme::Printworks => (
-            "Side route · stage three",
+            "Side route · sector 3",
             "Ink in the seams of your paws and the presses still running overnight. \
              Tomorrow's front page says you were caught.",
         ),
@@ -1704,6 +1706,15 @@ fn floor_text(t: Theme) -> (&'static str, &'static str) {
 /// (a boss card: hit points, contact, phases, death, floor, **shares**, drops,
 /// answer — the pooled floors' `SHARES` row used to push `ANSWER` off the card).
 pub const FACT_ROWS: usize = 9;
+
+/// Columns one fact value gets on the card at 80×24, the smallest terminal
+/// that shows the list and the card side by side: the panel's inner width is
+/// 76, the list takes 30 and the divider 1, which leaves the card 45, and
+/// `render::library::draw_fact` gives the label 12 of those. A longer value is
+/// clipped on screen, so every authored or formatted value fits this.
+pub const FACT_VALUE_COLS: usize = 33;
+/// Columns a value loses when the row also draws its five-cell bar.
+pub const FACT_BAR_COLS: usize = 6;
 
 #[derive(Clone, Debug, Default)]
 pub struct Facts {
@@ -1827,60 +1838,61 @@ pub fn enemy_floors(k: EnemyKind) -> Option<String> {
     })
 }
 
-/// One line naming the kind's tell and the answer to it (the words on the
-/// card's `TELL` fact).
+/// A few words naming the kind's tell and the answer to it (the card's `TELL`
+/// fact, so at most [`FACT_VALUE_COLS`] wide). The full designed rule, with
+/// every number, is the kind's dossier in [`enemy_text`].
 pub fn enemy_answer(k: EnemyKind) -> &'static str {
     match k {
         EnemyKind::Skitterer => "none — just teeth",
         EnemyKind::Bat => "none — it flies over the floor",
-        EnemyKind::Cat => "fast approach — break the line with a wall",
-        EnemyKind::Spitter => "stops to spit — close the gap or sidestep",
-        EnemyKind::Brute => "slow wind-up — do not trade in the open",
+        EnemyKind::Cat => "fast — break the line with a wall",
+        EnemyKind::Spitter => "stops to spit — sidestep or close",
+        EnemyKind::Brute => "slow — never trade in the open",
         EnemyKind::Boss => "see the floor's own boss card",
-        EnemyKind::Pillbug => "curls 1.4 s — loop behind the shell",
-        EnemyKind::BellFlea => "two crosses show — leave the second empty",
-        EnemyKind::WickMoth => "the corpse flares — step off the wick",
-        EnemyKind::Porter => "raises the cube 0.9 s — hit the carrier",
-        EnemyKind::Turnkey => "dotted bar 0.8 s — bait it, then change lanes",
-        EnemyKind::BigSnake => "rears on a marked line — bite the head while it rests",
-        EnemyKind::HouseCentipede => "flutters on a dotted line — step off; it flees when hit",
-        EnemyKind::MurderHornet => "rising buzz, locked line — punish it on the floor",
-        EnemyKind::TermiteHorde => "none — darts only nibble, bring an area hit",
-        EnemyKind::Lilliputian => "spears level, archers kneel — hit the line from behind",
-        // The 33 wave-four registrations: each row's "player's answer".
-        EnemyKind::PipeEel => "Steers at half turning rate. Reverse around a pipe end to shed it.",
-        EnemyKind::GrateArcher => "Shot through its puckered lip. Put a pipe between lip and rat.",
-        EnemyKind::SumpLeech => "At 24 px it extends a straight 24×4 tongue after 0.7 s, holds 0.4 s, then rests 4. Bait the tongue and cross behind its head.",
-        EnemyKind::SluiceToad => "Heavy continuous contact. Draw its broad belly out of the valve throat.",
-        EnemyKind::CrumbAnt => "Holds its heading for 0.25 s between corrections. Cut across the file.",
-        EnemyKind::FruitFly => "A weaving flyer that catches a rat trailing the ant file. Sweep across its nose.",
-        EnemyKind::EggTimer => "Within 26 px it winds for 1 s, ticks a 5-wide ring out from radius 4 to 22 in 0.8 s for 7, then sleeps 2 s. Stay inside its departing ring or clear the dial early.",
-        EnemyKind::PepperMill => "The shot splits into two rays, slightly apart, on release. Walk the seam as the cap twists.",
-        EnemyKind::PieWeight => "Keeps advancing under fire. Lead it along the counter's long side to open the aisle.",
-        EnemyKind::SinkCrab => "Curls like the pillbug, with the shield a quarter turn left of its approach. Let the shield pass and cut right behind the lid.",
-        EnemyKind::SwabFoot => "Small direct cleaner. Shave the head off the approaching column.",
-        EnemyKind::SpinnerLid => "Its weave flips handedness every 1.2 s. Cross while it shows its broad face.",
-        EnemyKind::GlassRunner => "Runs a direct large-class route. Turn through the narrow service chase.",
-        EnemyKind::WalkingSyringe => "Within 30 px it plants its tip and draws a 26×3 dotted ray for 0.75 s. The thrust fills the ray for 0.2 s at 8 damage, then retracts over 0.8 s. Step across the needle and approach the barrel.",
-        EnemyKind::AutoclaveCart => "Wide slow blocker. Tow it past the tanks before circling for gems.",
-        EnemyKind::WoolPill => "Pauses 0.15 s every 1.1 s to pull its strand free. Double back through the stalled rank.",
-        EnemyKind::ClothesMoth => "Weaves through the break the pills leave. Give the moving shawls room.",
-        EnemyKind::PegSnapper => "Within 20 px it shows two 16×3 jaws 14 apart for 0.8 s. They slide together in 0.3 s for 7, stay closed 1 s. Walk out through an open end.",
-        EnemyKind::StarchBulb => "The shot travels at 45 px/s for its first 0.5 s, then 95. Cross near the bulb before the jet picks up.",
-        EnemyKind::LintGolem => "A slow solid plug between washers. Lead it into the sorting bay.",
-        EnemyKind::Silverfish => "Streams through the gaps in the press beds. Meet its nose to collect the close gems.",
-        EnemyKind::ErratumSlip => "Weaves twice as wide for its first second. Wait for the loose sheets to fold in before turning.",
-        EnemyKind::TypeSlug => "Keeps its last heading for 0.6 s after losing sight. Break sight at a reel, then reverse.",
-        EnemyKind::StapleCrawler => "Within 26 px it marks two radius-4 holes 14 apart astride you for 0.8 s. Both feet land for 0.4 s at 7 each on one shared hit. Walk between the feet.",
-        EnemyKind::PaperWasp => "Shot from the rolled tip. Move across the press lane as the tube opens.",
-        EnemyKind::PaperReel => "Wide continuous contact. Pull the roll off the aisle before entering.",
-        EnemyKind::InkBlot => "Its wick, radius and damage are the moth's; the burst centre slides 12 px along its last velocity over the 1 s fuse, with the endpoint marked. Lead the travelling spot into the swarm.",
-        EnemyKind::GravelTick => "Drifts 5 px/s toward the tailgate while chasing. Collect on the cab side of its line.",
-        EnemyKind::JuneBug => "Wobbles into your line around cargo. Step across its belly shadow.",
-        EnemyKind::TarRat => "Straight large-class chaser. Put a wide crate corner in its path.",
-        EnemyKind::LooseCan => "Within 32 px it rocks for 0.8 s and outlines a 48×6 roll with one bounce off the first solid face. It rolls at 60 px/s, stops at a second obstacle, then lies still 1 s. Cross behind the rebound.",
-        EnemyKind::TollGull => "The shot aims 0.35 s ahead along your current velocity. Reverse as the beak opens.",
-        EnemyKind::LooseBungee => "Crossbar tell, length, life and damage; on the first crossing it pulls you 6 toward its hook, swept against solids and stopped before pits. Route around the free end.",
+        EnemyKind::Pillbug => "curls 1.4s — loop behind it",
+        EnemyKind::BellFlea => "two crosses — skip the second",
+        EnemyKind::WickMoth => "corpse flares — step off the wick",
+        EnemyKind::Porter => "lifts the cube 0.9s — hit it",
+        EnemyKind::Turnkey => "dotted bar 0.8s — change lanes",
+        EnemyKind::BigSnake => "rears on a line — bite the head",
+        EnemyKind::HouseCentipede => "dotted line — step off it",
+        EnemyKind::MurderHornet => "locked line — hit it grounded",
+        EnemyKind::TermiteHorde => "none — bring an area hit",
+        EnemyKind::Lilliputian => "spears level — hit from behind",
+        // The 33 wave-four registrations (`WAVE4_ROSTERS.md`), cut to one row.
+        EnemyKind::PipeEel => "turns wide — reverse round a pipe",
+        EnemyKind::GrateArcher => "lip puckers — keep a pipe between",
+        EnemyKind::SumpLeech => "tongue line — cross behind it",
+        EnemyKind::SluiceToad => "none — draw it out of the valve",
+        EnemyKind::CrumbAnt => "corrects late — cut the file",
+        EnemyKind::FruitFly => "weaves in — sweep across its nose",
+        EnemyKind::EggTimer => "winds, then rings — stay inside",
+        EnemyKind::PepperMill => "cap twists — walk the seam",
+        EnemyKind::PieWeight => "none — lead it off the aisle",
+        EnemyKind::SinkCrab => "curls — cut right behind the lid",
+        EnemyKind::SwabFoot => "none — shave the column's head",
+        EnemyKind::SpinnerLid => "weave flips — cross its face",
+        EnemyKind::GlassRunner => "runs straight — take a narrow gap",
+        EnemyKind::WalkingSyringe => "dotted needle — step across it",
+        EnemyKind::AutoclaveCart => "none — tow it past the tanks",
+        EnemyKind::WoolPill => "stalls — double back through",
+        EnemyKind::ClothesMoth => "weaves through gaps — give room",
+        EnemyKind::PegSnapper => "two jaws — leave by an open end",
+        EnemyKind::StarchBulb => "slow, then fast — cross up close",
+        EnemyKind::LintGolem => "none — lead it to the sorting bay",
+        EnemyKind::Silverfish => "none — meet it nose on",
+        EnemyKind::ErratumSlip => "wide weave — wait for the fold",
+        EnemyKind::TypeSlug => "holds heading — break sight",
+        EnemyKind::StapleCrawler => "two marks — walk between them",
+        EnemyKind::PaperWasp => "tube opens — move across the lane",
+        EnemyKind::PaperReel => "none — pull it off the aisle",
+        EnemyKind::InkBlot => "sliding fuse — lead it to a pack",
+        EnemyKind::GravelTick => "drifts tailward — stay cab side",
+        EnemyKind::JuneBug => "wobbles in — cross its shadow",
+        EnemyKind::TarRat => "runs straight — use a crate edge",
+        EnemyKind::LooseCan => "outlines its roll — cross behind",
+        EnemyKind::TollGull => "beak opens — reverse",
+        EnemyKind::LooseBungee => "dotted cord — round the free end",
     }
 }
 
@@ -1963,7 +1975,7 @@ fn boss_facts(k: BossKind, f: &mut Facts) {
         let others: Vec<&str> = pool.iter().filter(|o| **o != k).map(|o| boss_name(*o)).collect();
         f.push(
             "SHARES",
-            format!("one of {} bosses here · or {}", pool.len(), others.join(", ")),
+            format!("1 of {} · or {}", pool.len(), others.join(", ")),
         );
     } else {
         // Every boss card carries the row, so "this floor has one fight" is
@@ -1978,14 +1990,14 @@ fn boss_answer(k: BossKind) -> &'static str {
     match k {
         BossKind::Cat => "leave the marked landing empty",
         BossKind::Broom => "stand in the pocket at its heel",
-        BossKind::Mower => "step off the charge line, punish the miss",
-        BossKind::Mangle => "change sides between bites, hit the crank",
+        BossKind::Mower => "leave the line, punish the miss",
+        BossKind::Mangle => "switch sides, hit the crank",
         BossKind::NightEdition => "stand on the blank margin",
         BossKind::Magpie => "cross the wind, not against it",
-        BossKind::HorseshoeCrab => "get behind the dome, hit the gills",
-        BossKind::MegaRat => "leave the marked shape, punish the miss",
-        BossKind::Hawk => "step off the talon print, then bite the nape",
-        BossKind::Cobra => "leave the loop by its gap, then hit the hood's spectacle mark",
+        BossKind::HorseshoeCrab => "get behind it, hit the gills",
+        BossKind::MegaRat => "leave the mark, punish the miss",
+        BossKind::Hawk => "leave the print, bite the nape",
+        BossKind::Cobra => "leave by the gap, hit the hood",
     }
 }
 
@@ -2017,14 +2029,31 @@ fn weapon_facts(k: WeaponKind, f: &mut Facts) {
         },
     );
     f.push("DAMAGE 1→5", damage);
-    f.push("CYCLE 1→5", format!("{cycle} s"));
-    f.push("AT L5", format!("evolves with {}", evolution_partner(k)));
+    f.push("CYCLE 1→5", format!("{cycle}s"));
+    f.push(
+        "AT MAX",
+        if k.evolution().is_some() {
+            format!("evolves with {}", evolution_partner(k))
+        } else {
+            "no evolution".to_string()
+        },
+    );
     f.push("EVOLUTION", k.evolution().map(|e| e.name).unwrap_or("none"));
     f.push(
-        "RACK",
-        format!("one of {} weapon slots", crate::game::loadout::MAX_WEAPONS),
+        "SLOT",
+        format!("one of up to {} weapon slots", crate::game::loadout::MAX_WEAPONS),
     );
-    f.push("EACH LEVEL", "+25% damage, 6% faster");
+    // Only the classic curve is "+25%, 6% faster"; the weapons that ship their
+    // own per-level tables are already printed in full on the rows above.
+    f.push(
+        "EACH LEVEL",
+        match (k.damage_by_level().is_some(), k.cooldown_by_level().is_some()) {
+            (false, false) => "+25% damage, 6% faster",
+            (true, false) => "own damage table, 6% faster",
+            (false, true) => "+25% damage, own cycle table",
+            (true, true) => "own damage and cycle tables",
+        },
+    );
 }
 
 fn evolution_partner(k: WeaponKind) -> &'static str {
@@ -2040,16 +2069,25 @@ fn evolution_facts(k: WeaponKind, f: &mut Facts) {
     f.push("WEAPON", k.name());
     f.push(
         "NEEDS",
-        format!("{} L5 + one {}", k.name(), e.passive.name()),
+        format!("{} L{} + {}", k.name(), k.max_level(), e.passive.name()),
     );
     f.push("FROM", "a miniboss chest");
-    f.push("LOCKED IN", "yes — an evolution cannot be undone");
-    f.push("TIMING", "keeps the weapon's own family and slot");
+    f.push("LOCKED IN", "yes — it cannot be undone");
+    f.push("KEEPS", "the weapon's slot and timing");
     f.push("DAMAGE", "credited to the original weapon");
 }
 
 fn passive_facts(k: PassiveKind, f: &mut Facts) {
-    f.push("EACH STACK", k.desc());
+    // The card's own line, split at its comma when it carries two effects so
+    // each half fits a row.
+    let desc = k.desc().trim_end_matches('.');
+    match desc.split_once(", ") {
+        Some((first, second)) if desc.chars().count() > FACT_VALUE_COLS => {
+            f.push("EACH STACK", first);
+            f.push("AND", second);
+        }
+        _ => f.push("EACH STACK", desc),
+    }
     f.push("CAP", format!("{} stacks", k.max_stacks()));
     let partners: Vec<&'static str> = WeaponKind::all()
         .iter()
@@ -2065,9 +2103,9 @@ fn passive_facts(k: PassiveKind, f: &mut Facts) {
         },
     );
     f.push(
-        "RACK",
+        "SLOT",
         format!(
-            "one of {} passive slots",
+            "one of up to {} passive slots",
             crate::game::loadout::MAX_PASSIVES
         ),
     );
@@ -2080,8 +2118,8 @@ fn splice_facts(k: SpliceKind, f: &mut Facts) {
     f.push("COST", k.minus());
     f.push("LASTS", "to the end of the run");
     f.push(
-        "SOCKETS",
-        format!("{} (splices take neither rack)", shop::MAX_SPLICES),
+        "LIMIT",
+        format!("{} per run · takes no slot", shop::MAX_SPLICES),
     );
     f.push("BOUGHT FROM", "a mouse-hole shop");
     f.push("APPLIED", "after the passive stacks");
@@ -2117,12 +2155,12 @@ fn pickup_facts(k: PickupKind, f: &mut Facts) {
             f.push(
                 "EFFECT",
                 format!(
-                    "ordinary enemies chase it within {:.0} px",
+                    "the horde chases it within {:.0} px",
                     powerups::WINDUP_MOUSE_RADIUS
                 ),
             );
             f.push("LASTS", format!("{:.0}s", powerups::WINDUP_MOUSE_SECS));
-            f.push("IGNORES", "elites and bosses");
+            f.push("IGNORES", "elites, minibosses and bosses");
         }
         PickupKind::PocketWatch => {
             f.push(
@@ -2154,38 +2192,44 @@ fn prop_facts(k: PropKind, f: &mut Facts) {
 }
 
 fn floor_facts(t: Theme, f: &mut Facts) {
-    let boss = BossKind::for_theme(t);
     f.push(
-        "STAGE",
-        format!(
-            "{} of {}",
-            t.stage() + 1,
-            crate::game::campaign::LEVEL_COUNT
-        ),
-    );
-    f.push("BOSS", boss_name(boss));
-    let appointments: Vec<String> = (0..crate::game::director::MINIBOSS_TIMES.len())
-        .map(|i| {
+        "SECTOR",
+        if Theme::all().contains(&t) {
             format!(
-                "{} @ {:02}:{:02}",
-                miniboss::schedule_for(t, i).name(),
-                (crate::game::director::MINIBOSS_TIMES[i] as u32) / 60,
-                (crate::game::director::MINIBOSS_TIMES[i] as u32) % 60
+                "{} of {}",
+                t.stage() + 1,
+                crate::game::campaign::LEVEL_COUNT
             )
-        })
-        .collect();
-    f.push("MINIBOSSES", appointments.join(" · "));
+        } else {
+            // The Flatbed is never a campaign step.
+            "practice only".to_string()
+        },
+    );
+    // A pooled floor fields one of its bosses per run: name every one, a row
+    // each, so the card does not promise the fight `for_theme` lists first.
+    for (i, boss) in BossKind::pool_for_theme(t).iter().enumerate() {
+        f.push(if i == 0 { "BOSS" } else { "OR" }, boss_name(*boss));
+    }
+    // The floor's four named minibosses, a row each with its clock.
+    for (i, at) in crate::game::director::MINIBOSS_TIMES.iter().enumerate() {
+        f.push(
+            "MINIBOSS",
+            format!(
+                "{} · {}:{:02}",
+                miniboss::schedule_for(t, i).name(),
+                (*at as u32) / 60,
+                (*at as u32) % 60
+            ),
+        );
+    }
+    f.push("HAZARD", floor_hazard(t));
     f.push(
-        "BOSS CLOCK",
+        "MAZES",
         format!(
-            "{:02}:{:02}",
-            (crate::game::director::BOSS_TIME as u32) / 60,
-            (crate::game::director::BOSS_TIME as u32) % 60
+            "at most one, on about 1 map in {}",
+            crate::game::levelgen::layout::MAZE_ONE_IN
         ),
     );
-    f.push("HAZARD", floor_hazard(t));
-    f.push("SHOP HOLES", "2 under the spoons");
-    f.push("MAZES", "at least one per generated floor");
 }
 
 fn floor_hazard(t: Theme) -> &'static str {
@@ -2204,19 +2248,40 @@ fn object_facts(k: ObjectKind, f: &mut Facts) {
     use crate::game::hazards;
     match k {
         ObjectKind::Elite => {
-            f.push("XP", "×3 the kind's gems");
+            f.push("BODY", "the floor's heavy, gilded");
+            f.push("HP", "more than the ordinary heavy's");
             f.push("COIN", format!("{} gold, always", shop::ELITE_GOLD));
-            f.push("HP", "the kind's own pool");
-            f.push("CAPPED", "elites rarely, never beside a miniboss");
+            let first = crate::game::director::ELITE_START as u32;
+            f.push("FIRST", format!("from {}:{:02}", first / 60, first % 60));
+            f.push(
+                "NEVER",
+                format!(
+                    "within {:.0}s of a miniboss",
+                    crate::game::director::ELITE_APPOINTMENT_GAP
+                ),
+            );
         }
         ObjectKind::Gold => {
-            f.push("VALUE", "1–3 by kind, ×5 elite, ×12 miniboss, ×30 boss");
+            f.push("VALUE", "set by the enemy that drops it");
+            f.push(
+                "ALWAYS",
+                format!(
+                    "elite {} · miniboss {} · boss {}",
+                    shop::ELITE_GOLD,
+                    shop::MINIBOSS_GOLD,
+                    shop::BOSS_GOLD
+                ),
+            );
             f.push("MAGNET", "yes — like gems");
             f.push("SPENT AT", "a mouse-hole shop shelf");
         }
         ObjectKind::Chest => {
             f.push("FROM", "every named miniboss");
-            f.push("PAYS", "an evolution → a free rank → 24 gold");
+            f.push("PAYS", "an evolution, else a free rank");
+            f.push(
+                "OR ELSE",
+                format!("{} gold", crate::game::loadout::CHEST_GOLD),
+            );
             f.push(
                 "ALSO",
                 format!(
@@ -2263,7 +2328,7 @@ fn object_facts(k: ObjectKind, f: &mut Facts) {
             f.push(
                 "RED BAR",
                 format!(
-                    "hair trigger — no delay, {:.0}% / {:.0}",
+                    "no warning · {:.0}% / {:.0}",
                     crate::game::art_traps::MOUSETRAP_DAMAGE_PLAYER_HAIR_SHARE * 100.0,
                     crate::game::art_traps::MOUSETRAP_DAMAGE_ENEMY_HAIR
                 ),
@@ -2328,8 +2393,8 @@ fn object_facts(k: ObjectKind, f: &mut Facts) {
                     crate::game::ecs::systems::trailer::SLIDE_DAMAGE
                 ),
             );
-            f.push("TO A BODY", "nothing — the crate is at rat height");
-            f.push("PATTERN", "creaks first, then shifts on the joint");
+            f.push("TO A BODY", "nothing — it rides at rat height");
+            f.push("PATTERN", "creaks, then shifts on a joint");
         }
         ObjectKind::Slipstream => {
             f.push(
@@ -2346,7 +2411,7 @@ fn object_facts(k: ObjectKind, f: &mut Facts) {
                     crate::game::ecs::systems::trailer::WIND_PULL_GEMS
                 ),
             );
-            f.push("LIGHT ONLY", "small bodies, not the cat or the brute");
+            f.push("LIGHT ONLY", "small bodies, not the heavy ones");
             f.push("STOPS AT", "the deck edge");
         }
         ObjectKind::RatHole => {
@@ -2366,7 +2431,7 @@ fn object_facts(k: ObjectKind, f: &mut Facts) {
             f.push("TAKES", "gold for gene splices");
             f.push(
                 "SPLICES",
-                format!("{} sockets, bought once each", shop::MAX_SPLICES),
+                format!("{} per run, each bought once", shop::MAX_SPLICES),
             );
             f.push(
                 "SERVICES",
@@ -2379,7 +2444,7 @@ fn object_facts(k: ObjectKind, f: &mut Facts) {
             );
         }
         ObjectKind::MazeCache => {
-            f.push("PAYS", "a cache: gems, gold and a rank");
+            f.push("PAYS", "one free level-up");
             f.push("COSTS", "a maze, walked in and out");
             f.push("ENTRANCE", "revealed once seen on the map");
             f.push("EXIT", "a one-way door");
@@ -2464,6 +2529,10 @@ pub struct Library {
     fresh: [[u64; 1]; CATEGORY_COUNT],
     /// Per-floor marks, so `seen` counts floors rather than frames.
     run_seen: [[u64; 1]; CATEGORY_COUNT],
+    /// Per-floor "already booked as owned" marks. Separate from `run_seen`
+    /// because a card offer or a chest marks an entry seen before the build
+    /// carries it.
+    run_owned: [[u64; 1]; CATEGORY_COUNT],
     /// Enemies last survey, `SpawnId`-ordered, for the kill diff; `cur` and
     /// `gone` are the retained scratch the diff reuses.
     prev: Vec<(u64, EnemyKind)>,
@@ -2493,6 +2562,7 @@ impl Default for Library {
             stats: [[Record::default(); MAX_KINDS]; CATEGORY_COUNT],
             fresh: [[0; 1]; CATEGORY_COUNT],
             run_seen: [[0; 1]; CATEGORY_COUNT],
+            run_owned: [[0; 1]; CATEGORY_COUNT],
             prev: Vec::new(),
             cur: Vec::new(),
             gone: Vec::new(),
@@ -2622,6 +2692,7 @@ impl Library {
     /// floors, not frames).
     pub fn begin_floor(&mut self) {
         self.run_seen = [[0; 1]; CATEGORY_COUNT];
+        self.run_owned = [[0; 1]; CATEGORY_COUNT];
         self.prev.clear();
         self.prev_kills = 0;
     }
@@ -2668,6 +2739,33 @@ impl Library {
         out.append(&mut self.news);
     }
 }
+
+/// How many real kinds a category holds (its discriminants are `0..len`).
+fn category_len(cat: Category) -> usize {
+    match cat {
+        Category::Enemy => EnemyKind::all().len(),
+        Category::Miniboss => MinibossKind::all().len(),
+        Category::Boss => BossKind::all().len(),
+        Category::Weapon | Category::Evolution => WeaponKind::all().len(),
+        Category::Passive => PassiveKind::all().len(),
+        Category::Splice => SpliceKind::ALL.len(),
+        Category::Pickup => PICKUP_KINDS.len(),
+        Category::Prop => PROP_KINDS.len(),
+        Category::Floor => Theme::playable().len(),
+        Category::Object => ObjectKind::ALL.len(),
+    }
+}
+
+/// Every pickup kind, in discriminant order.
+const PICKUP_KINDS: [PickupKind; 7] = [
+    PickupKind::Heal,
+    PickupKind::Magnet,
+    PickupKind::Nuke,
+    PickupKind::BottleCap,
+    PickupKind::WindupMouse,
+    PickupKind::PocketWatch,
+    PickupKind::CleanSocks,
+];
 
 /// Rebuild a [`Key`] from its persisted `(category, kind)` pair, so
 /// [`Library::reveal_all`] can walk the whole table.
@@ -2729,17 +2827,7 @@ fn splice_at(i: usize) -> Option<SpliceKind> {
 }
 
 fn pickup_at(i: usize) -> Option<PickupKind> {
-    [
-        PickupKind::Heal,
-        PickupKind::Magnet,
-        PickupKind::Nuke,
-        PickupKind::BottleCap,
-        PickupKind::WindupMouse,
-        PickupKind::PocketWatch,
-        PickupKind::CleanSocks,
-    ]
-    .get(i)
-    .copied()
+    PICKUP_KINDS.get(i).copied()
 }
 
 fn object_at(i: usize) -> Option<ObjectKind> {
@@ -2791,7 +2879,10 @@ impl Library {
     /// "everything in this category is known" early-outs make a mature run a
     /// handful of bitset tests per frame.
     pub fn survey(&mut self, w: &crate::game::world::World) {
-        if self.any_undiscovered(Category::Enemy) {
+        // The gilded note is an `Object`, but it is found on an enemy body.
+        if self.any_undiscovered(Category::Enemy)
+            || !self.is_seen(Key::Object(ObjectKind::Elite))
+        {
             self.survey_enemies(w);
         }
         if self.any_undiscovered(Category::Miniboss) || self.any_undiscovered(Category::Boss) {
@@ -2807,9 +2898,21 @@ impl Library {
         self.survey_kills(w);
     }
 
+    /// Does the category still hold a locked entry? Only the bits of real
+    /// kinds are tested: a category never fills all 64, so comparing against
+    /// `u64::MAX` would keep every early-out in [`Library::survey`] dead.
     fn any_undiscovered(&self, cat: Category) -> bool {
-        let c = cat as usize;
-        (0..WORDS).any(|word| self.seen[c][word] != u64::MAX)
+        let n = category_len(cat).min(MAX_KINDS);
+        let mask = if n >= 64 { u64::MAX } else { (1u64 << n) - 1 };
+        self.seen[cat as usize][0] & mask != mask
+    }
+
+    /// First time this floor that `key` is found in the build? Sets the mark.
+    fn first_owned_this_floor(&mut self, key: Key) -> bool {
+        let (c, i, m) = self.bit(key);
+        let first = self.run_owned[c][i >> 6] & m == 0;
+        self.run_owned[c][i >> 6] |= m;
+        first
     }
 
     fn see_if(&mut self, key: Key, visible: bool) -> bool {
@@ -2834,6 +2937,7 @@ impl Library {
     }
 
     fn survey_named(&mut self, w: &crate::game::world::World) {
+        let mut framework_boss = false;
         for entity in w.ecs.iter_entities() {
             if let Some(mb) = entity.get::<miniboss::Miniboss>() {
                 // The fight starts when the body stops approaching.
@@ -2844,13 +2948,17 @@ impl Library {
                 }
             }
             if let Some(boss) = entity.get::<crate::game::ecs::systems::boss::Boss>() {
+                framework_boss = true;
                 if !boss.dead {
                     self.see_if(Key::Boss(boss.kind), true);
                 }
             }
         }
         // A test-spawned legacy boss body (no `Boss` component) still counts.
-        if w.boss_hp().is_some() {
+        // Only then: `boss_hp` also answers for a real boss, and on a pooled
+        // floor the fight may not be `for_theme`'s kind — the fallback would
+        // unlock the pool mate the player has never met.
+        if !framework_boss && w.boss_hp().is_some() {
             self.see_if(Key::Boss(BossKind::for_theme(w.level.theme)), true);
         }
     }
@@ -2968,39 +3076,53 @@ impl Library {
         }
     }
 
-    /// Gear is discovered from the rack (owned) — the "offered" half is marked
+    /// Gear is discovered from the build (owned) — the "offered" half is marked
     /// by the App when it deals a level-up card.
+    ///
+    /// `OWNED`/`EVOLVED` count floors the build carried the entry on, booked
+    /// once per floor. They must not hang off "first ever seen": nearly every
+    /// weapon and passive is offered on a card (and so already seen) before it
+    /// is owned, and the screen shows the full entry only once `owned > 0`.
     fn survey_gear(&mut self, w: &crate::game::world::World) {
         let loadout = &w.player.loadout;
         for weapon in &loadout.weapons {
             let key = Key::Weapon(weapon.kind);
-            if self.mark_seen(key) {
+            self.mark_seen(key);
+            if self.first_owned_this_floor(key) {
                 self.bump(key, Counter::Owned, 1);
             }
             if weapon.evolved {
                 let evo = Key::Evolution(weapon.kind);
                 self.mark_seen(evo);
-                self.bump(key, Counter::Evolved, 1);
+                if self.first_owned_this_floor(evo) {
+                    // The weapon's card prints EVOLVED n; the evolution's own
+                    // card reads its own record to know it was worn.
+                    self.bump(key, Counter::Evolved, 1);
+                    self.bump(evo, Counter::Evolved, 1);
+                }
             }
         }
         for &(kind, _) in &loadout.passives {
             let key = Key::Passive(kind);
-            if self.mark_seen(key) {
+            self.mark_seen(key);
+            if self.first_owned_this_floor(key) {
                 self.bump(key, Counter::Owned, 1);
             }
         }
         for &kind in &loadout.splices {
             let key = Key::Splice(kind);
-            if self.mark_seen(key) {
+            self.mark_seen(key);
+            if self.first_owned_this_floor(key) {
                 self.bump(key, Counter::Owned, 1);
             }
         }
     }
 
     /// Kills, by diffing the living enemy set against last survey's (the ECS
-    /// never exposes a per-kind tally). A floor that is cleared wholesale is
-    /// skipped, and the count is capped by the run's own kill counter so a
-    /// despawn for any other reason cannot be booked as a kill.
+    /// never exposes a per-kind tally). The count is capped by the rise in the
+    /// run's own kill counter, so a despawn for any other reason — a level
+    /// reset, a test's `clear_enemies`, a retreat — cannot be booked as a kill
+    /// while a Purge's whole screen still is.
     fn survey_kills(&mut self, w: &crate::game::world::World) {
         use crate::game::ecs::components::SpawnId;
         let kills_now = w.kills;
@@ -3028,12 +3150,10 @@ impl Library {
                 gone.push(kind);
             }
         }
-        // A bulk removal is a level reset (or a test's `clear_enemies`), not a
-        // pile of kills; the run's own kill counter caps the rest.
-        if gone.len() <= 24 {
-            for kind in gone.iter().take(delta as usize) {
-                self.bump(Key::Enemy(*kind), Counter::Killed, 1);
-            }
+        // A bulk removal that is not a kill (a level reset) does not raise the
+        // kill counter, so `delta` is the only cap this needs.
+        for kind in gone.iter().take(delta as usize) {
+            self.bump(Key::Enemy(*kind), Counter::Killed, 1);
         }
         std::mem::swap(&mut self.prev, &mut current);
         self.cur = current;

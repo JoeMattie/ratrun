@@ -1034,6 +1034,23 @@ pub fn draw_ground(pb: &mut PixelBuffer, view: &BroomBossView, cam: Vec2, accent
             if p < 0.66 {
                 let charge = (p / 0.66).clamp(0.0, 1.0);
                 draw_stomp_telegraph(pb, c, STOMP_SHOCKWAVE_RADIUS, charge, pose.anger, pulse);
+                // The inner crush circle is its own, heavier hit
+                // (`STOMP_CRUSH_RADIUS`): mark its edge so the telegraph
+                // shows both of the shapes the controller pushes.
+                if let Some((x0, x1, y0, y1)) =
+                    bbox(pb, c, STOMP_CRUSH_RADIUS + 1.0, STOMP_CRUSH_RADIUS + 1.0)
+                {
+                    let col = mix(WARN_RED, WARN_HOT, 0.25 + 0.35 * pulse);
+                    for y in y0..=y1 {
+                        for x in x0..=x1 {
+                            let dx = x as f32 - c.x;
+                            let dy = y as f32 - c.y;
+                            if ((dx * dx + dy * dy).sqrt() - STOMP_CRUSH_RADIUS).abs() < 0.6 {
+                                blend_px(pb, x, y, col, 0.50 + 0.35 * charge);
+                            }
+                        }
+                    }
+                }
             } else {
                 let imp_t = ((p - 0.66) / 0.34).clamp(0.0, 1.0);
                 draw_shockwave_and_dust(pb, c, STOMP_SHOCKWAVE_RADIUS, imp_t, accent, true);

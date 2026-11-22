@@ -121,6 +121,9 @@ impl CampaignProgress {
     /// fastest positive time.
     fn record(&mut self, theme: Theme, score: u32, time: f32) {
         let entry = self.floors.entry(theme.name().to_string()).or_default();
+        // A non-finite time would be written as `null` and fail the next load;
+        // `0.0` is this record's "no time yet".
+        let time = if time.is_finite() { time.max(0.0) } else { 0.0 };
         let fresh = LevelBestEntry {
             cleared: true,
             score,
@@ -307,7 +310,33 @@ fn deserialize_meta<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<crate::meta::MetaProfile, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(serde_json::from_value(value).unwrap_or_default())
+    Ok(match serde_json::from_value(value.clone()) {
+        Ok(profile) => profile,
+        Err(_) => salvage_meta(&value),
+    })
+}
+
+/// Read what can be read of a nest whose strict parse failed: one bad number
+/// (a bank edited past `u32`, a level past `u8`, a negative or fractional
+/// value) must not wipe every track the player bought. Out-of-range numbers
+/// saturate, unreadable ones are dropped; `MetaProfile::normalize` clamps the
+/// levels afterwards.
+fn salvage_meta(value: &serde_json::Value) -> crate::meta::MetaProfile {
+    let mut profile = crate::meta::MetaProfile::default();
+    let Some(object) = value.as_object() else {
+        return profile;
+    };
+    if let Some(bank) = object.get("bank").and_then(|b| b.as_u64()) {
+        profile.bank = bank.min(u64::from(u32::MAX)) as u32;
+    }
+    if let Some(levels) = object.get("levels").and_then(|l| l.as_object()) {
+        for (key, level) in levels {
+            if let Some(n) = level.as_u64() {
+                profile.levels.insert(key.clone(), n.min(u64::from(u8::MAX)) as u8);
+            }
+        }
+    }
+    profile
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -390,21 +419,99 @@ impl Default for ScoreTable {
 }
 
 impl ScoreTable {
+    /// Where the save file lives, or `None` when this process must not touch
+    /// one.
+    ///
+    /// **The test guard.** In a test build the real data dir is never used:
+    /// [`Self::load`] returns the default table and [`Self::save`] writes
+    /// nothing, whatever constructor the test called (`App::new` loads and
+    /// persists; see its docs). A test that wants a real file sets
+    /// `RATRUN_DATA_DIR` to a directory of its own and gets exactly that.
+    fn store_path() -> Option<std::path::PathBuf> {
+        #[cfg(test)]
+        {
+            if std::env::var_os("RATRUN_DATA_DIR").is_none_or(|dir| dir.is_empty()) {
+                return None;
+            }
+        }
+        Some(config::scores_path())
+    }
+
     pub fn load() -> ScoreTable {
-        match std::fs::read_to_string(config::scores_path()) {
-            Ok(s) => ScoreTable::parse(&s),
+        let Some(path) = Self::store_path() else {
+            return ScoreTable::default();
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(s) => {
+                // A file that is not a JSON object at all (truncated by a
+                // crash, a merge marker, an editor's mistake) loads as an
+                // empty table, and the first save would overwrite it for
+                // good: the scores, the unlocks and the nest's bank. Keep the
+                // unreadable bytes beside it first. Best effort, and never in
+                // tests (no test may write beside the real save file).
+                #[cfg(not(test))]
+                {
+                    if !s.trim().is_empty() && !Self::is_json_object(&s) {
+                        let _ = std::fs::copy(&path, path.with_extension("json.corrupt"));
+                    }
+                }
+                ScoreTable::parse(&s)
+            }
             Err(_) => ScoreTable::default(),
         }
+    }
+
+    /// Is `json` a JSON object (the only shape a save file has)?
+    fn is_json_object(json: &str) -> bool {
+        serde_json::from_str::<serde_json::Value>(json).is_ok_and(|v| v.is_object())
     }
 
     /// Parse a persisted table. The file on disk may be hand-edited or written
     /// by an older build, so it is normalized (sorted high→low, trimmed to
     /// `MAX_ENTRIES`) before anything trusts `best()` or the top-five display.
-    /// Unparseable JSON yields an empty table.
+    /// Unparseable JSON yields an empty table; valid JSON with a field this
+    /// build cannot read loses **that field only** (see [`Self::salvage`]).
     pub fn parse(json: &str) -> ScoreTable {
-        let mut table: ScoreTable = serde_json::from_str(json).unwrap_or_default();
+        let mut table: ScoreTable = match serde_json::from_str(json) {
+            Ok(table) => table,
+            Err(_) => ScoreTable::salvage(json),
+        };
         table.normalize();
         table
+    }
+
+    /// Load what can be loaded from a file whose strict parse failed.
+    ///
+    /// The strict parse is all-or-nothing: one field of the wrong type (a
+    /// `null` time, `"auto_pick": "yes"`, one malformed score entry) used to
+    /// drop the whole table, and the next save then erased the nest's bank and
+    /// every unlock with it. Here each malformed score entry is dropped on its
+    /// own, then each top-level field that cannot be read alone is dropped and
+    /// loads its default; everything else survives. Not JSON, or not an
+    /// object, is still an empty table.
+    fn salvage(json: &str) -> ScoreTable {
+        let Ok(serde_json::Value::Object(mut map)) =
+            serde_json::from_str::<serde_json::Value>(json)
+        else {
+            return ScoreTable::default();
+        };
+        if let Some(serde_json::Value::Array(items)) = map.get_mut("entries") {
+            items.retain(|item| serde_json::from_value::<ScoreEntry>(item.clone()).is_ok());
+        }
+        let keys: Vec<String> = map.keys().cloned().collect();
+        for key in keys {
+            let Some(value) = map.get(&key).cloned() else {
+                continue;
+            };
+            // Every field has a default, so a one-field object parses exactly
+            // when that field does.
+            let mut probe = serde_json::Map::new();
+            probe.insert(key.clone(), value);
+            if serde_json::from_value::<ScoreTable>(serde_json::Value::Object(probe)).is_err() {
+                map.remove(&key);
+            }
+        }
+        serde_json::from_value(serde_json::Value::Object(map)).unwrap_or_default()
     }
 
     /// The table as it would be written to disk (round-trips through [`parse`]).
@@ -432,11 +539,22 @@ impl ScoreTable {
     }
 
     pub fn save(&self) {
-        let path = config::scores_path();
+        let Some(path) = Self::store_path() else {
+            return;
+        };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
         if let Ok(json) = serde_json::to_string_pretty(self) {
+            // Write beside the file and rename over it: a crash or a full disk
+            // mid-write then leaves the old save intact instead of a truncated
+            // one (which would load as an empty table). If the rename is
+            // refused, fall back to the plain write.
+            let tmp = path.with_extension("json.tmp");
+            if std::fs::write(&tmp, &json).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+                return;
+            }
+            let _ = std::fs::remove_file(&tmp);
             let _ = std::fs::write(&path, json);
         }
     }
@@ -444,7 +562,12 @@ impl ScoreTable {
     /// Insert an entry, keep sorted high→low, trim to MAX_ENTRIES.
     /// Returns the entry's 0-based rank, or `None` when it scored too low to
     /// make the table at all.
-    pub fn insert(&mut self, entry: ScoreEntry) -> Option<usize> {
+    pub fn insert(&mut self, mut entry: ScoreEntry) -> Option<usize> {
+        // JSON has no NaN: serde writes a non-finite float as `null`, which
+        // this struct cannot read back.
+        if !entry.time.is_finite() {
+            entry.time = 0.0;
+        }
         let score = entry.score;
         // Entries that already scored the same stay above the new one, matching
         // the stable ordering used by `normalize`.
@@ -621,6 +744,93 @@ mod tests {
         assert_eq!(t.entries.len(), MAX_ENTRIES);
         // 500 is the lowest survivor: 100 was trimmed when the table filled.
         assert_eq!(t.entries[MAX_ENTRIES - 1].score, 500);
+    }
+
+    #[test]
+    fn one_bad_field_does_not_drop_the_rest_of_the_save() {
+        // `auto_pick` has the wrong type and the second entry has no score:
+        // both are dropped, and the nest, the unlock and the good entry stay.
+        let json = r#"{
+            "entries": [
+                {"score": 700, "time": 12.0, "level": 4, "map": "Sewer", "won": false},
+                {"time": 1.0, "level": 1, "map": "Sewer", "won": false},
+                {"score": 300, "time": null, "level": 2, "map": "Sewer", "won": false}
+            ],
+            "progress": {"floors": {"Sewer": {"cleared": true, "score": 900, "time": 600.0}}},
+            "auto_pick": "yes",
+            "meta": {"bank": 4321, "levels": {"move_speed": 3}}
+        }"#;
+        let t = ScoreTable::parse(json);
+        assert_eq!(t.entries.len(), 1, "only the well-formed entry survives");
+        assert_eq!(t.best(), 700);
+        assert!(!t.auto_pick, "the unreadable field loads its default");
+        assert_eq!(t.meta.bank, 4321, "the bank survives a bad sibling field");
+        assert_eq!(t.meta.level(crate::meta::Track::MoveSpeed), 3);
+        assert!(t.floor_cleared(Theme::Sewer), "the unlock survives");
+        assert_eq!(t.music_volume, 100);
+    }
+
+    #[test]
+    fn a_broken_progress_block_costs_only_the_progress() {
+        let json = r#"{"progress": {"floors": {"Sewer": {"time": null}}},
+                       "meta": {"bank": 55}}"#;
+        let t = ScoreTable::parse(json);
+        assert_eq!(t.meta.bank, 55);
+        assert!(!t.floor_cleared(Theme::Sewer));
+    }
+
+    #[test]
+    fn an_out_of_range_nest_number_saturates_instead_of_wiping_the_nest() {
+        let json = r#"{"meta": {"bank": 99999999999, "levels": {"move_speed": 900, "regen": -1, "armor": 2}}}"#;
+        let t = ScoreTable::parse(json);
+        assert_eq!(t.meta.bank, u32::MAX);
+        let track = crate::meta::Track::MoveSpeed;
+        assert_eq!(t.meta.level(track), track.max_level());
+        assert_eq!(t.meta.level(crate::meta::Track::Regen), 0);
+        assert_eq!(t.meta.level(crate::meta::Track::Armor), 2);
+    }
+
+    #[test]
+    fn a_non_finite_time_never_reaches_the_file() {
+        let mut t = ScoreTable::default();
+        let mut entry = e(10);
+        entry.time = f32::NAN;
+        t.insert(entry);
+        t.record_floor(Theme::Sewer, 10, f32::INFINITY);
+        let back = ScoreTable::parse(&t.to_json());
+        assert_eq!(back.entries.len(), 1);
+        assert_eq!(back.entries[0].time, 0.0);
+        assert!(back.floor_cleared(Theme::Sewer));
+    }
+
+    /// No test may read or write the player's save, whichever constructor it
+    /// used: with no `RATRUN_DATA_DIR` there is no store at all, and with one
+    /// (another test may be setting it concurrently) the store is that
+    /// directory, never the platform data dir.
+    #[test]
+    fn a_test_build_never_resolves_the_real_save_path() {
+        match ScoreTable::store_path() {
+            None => {}
+            Some(path) => {
+                if let Some(real) = dirs::data_dir() {
+                    assert!(
+                        !path.starts_with(real.join("ratrun")),
+                        "a test resolved the real save file: {path:?}"
+                    );
+                }
+            }
+        }
+        // Both are no-ops without a store, and must not panic.
+        let table = ScoreTable::load();
+        table.save();
+    }
+
+    #[test]
+    fn only_a_json_object_counts_as_a_save_file() {
+        assert!(ScoreTable::is_json_object("{}"));
+        assert!(!ScoreTable::is_json_object("{ not json"));
+        assert!(!ScoreTable::is_json_object("[]"));
+        assert!(!ScoreTable::is_json_object(""));
     }
 
     #[test]

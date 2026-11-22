@@ -623,8 +623,93 @@ fn pose_enemy(e: &mut Enemy, t: f32) {
     }
 }
 
-/// A posed boss (its tell or its signature), looping.
+/// The frame, in px at 1:1, a boss's card pose needs around its body point
+/// for the whole animal to be in it (`(width, height)`). A plate is at most
+/// 44 × 30 px and every boss sprite is 26–58 px long, so 1:1 is a crop.
+fn boss_extent(kind: BossKind) -> (f32, f32) {
+    match kind {
+        BossKind::Cat => (66.0, 42.0),
+        // The shoes stand `STANCE_HALF_WIDTH` either side of the body point
+        // (each drawn 13 px in radius), and the broom head reaches
+        // `SWEEP_OUTER_RADIUS` ahead. The sweep's far left and right (about
+        // 36 px off-axis) are allowed to leave the plate: fitting them would
+        // cost a 3x reduction and a 9 px pair of shoes.
+        BossKind::Broom => (
+            2.0 * (art_boss_broom::SWEEP_OUTER_RADIUS + 2.0),
+            2.0 * (art_boss_broom::STANCE_HALF_WIDTH + 13.0 + 2.0),
+        ),
+        BossKind::Mower => (44.0, 42.0),
+        BossKind::Mangle => (46.0, 42.0),
+        BossKind::NightEdition => (48.0, 44.0),
+        BossKind::Magpie => (52.0, 42.0),
+        // The tail trails 39 px astern of the body point.
+        BossKind::HorseshoeCrab => (82.0, 46.0),
+        BossKind::MegaRat => (68.0, 44.0),
+        // Wings at full span over the hover's lift.
+        BossKind::Hawk => (58.0, 60.0),
+        // The open hood and the fangs ahead of it, whole. The slack body
+        // (`rest_chain`) trails some 70 px astern and 60 px to either side,
+        // far longer than any plate, so the card frames the head and lets
+        // the first loops run off the edge.
+        BossKind::Cobra => {
+            use crate::game::art_boss_cobra as cobra;
+            (
+                2.0 * (cobra::HOOD_RADIUS + cobra::FANG_REACH + 8.0),
+                2.0 * (cobra::HOOD_RADIUS + 8.0),
+            )
+        }
+    }
+}
+
+/// A posed boss (its tell or its signature), looping, fitted to the plate.
+///
+/// The art modules draw at 1:1 only (their geometry is the gameplay spec), so
+/// a plate too small for the animal is drawn `k`× oversized into a scratch
+/// buffer over the plate's own floor and box-filtered back down. The whole
+/// pose — body, shadow, tell — shrinks together about the same body point.
 fn draw_boss(art: &mut PixelBuffer, kind: BossKind, accent: Rgb, t: f32) {
+    let (w, h) = (art.w, art.h);
+    if w == 0 || h == 0 {
+        return;
+    }
+    let (need_w, need_h) = boss_extent(kind);
+    let k = ((need_w / w as f32).max(need_h / h as f32).ceil() as usize).clamp(1, 8);
+    if k == 1 || art.pixels().len() < w * h {
+        pose_boss(art, kind, accent, t);
+        return;
+    }
+    let (bw, bh) = (w * k, h * k);
+    let mut big = PixelBuffer::new(bw, bh);
+    {
+        let src = art.pixels();
+        let dst = big.pixels_mut();
+        for y in 0..bh {
+            for x in 0..bw {
+                dst[y * bw + x] = src[(y / k) * w + x / k];
+            }
+        }
+    }
+    pose_boss(&mut big, kind, accent, t);
+    let n = (k * k) as u32;
+    let src = big.pixels();
+    for y in 0..h {
+        for x in 0..w {
+            let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
+            for yy in 0..k {
+                let row = (y * k + yy) * bw + x * k;
+                for px in &src[row..row + k] {
+                    r += px.0 as u32;
+                    g += px.1 as u32;
+                    b += px.2 as u32;
+                }
+            }
+            art.plot(x as i32, y as i32, ((r / n) as u8, (g / n) as u8, (b / n) as u8));
+        }
+    }
+}
+
+/// Draw a boss's card pose at 1:1, body at the buffer's `(w/2, 0.56h)`.
+fn pose_boss(art: &mut PixelBuffer, kind: BossKind, accent: Rgb, t: f32) {
     let c = Vec2::new(art.w as f32 * 0.5, art.h as f32 * 0.56);
     let facing = Vec2::new(1.0, 0.0);
     let target = c + Vec2::new(28.0, 4.0);
@@ -745,11 +830,12 @@ fn draw_boss(art: &mut PixelBuffer, kind: BossKind, accent: Rgb, t: f32) {
             megarat::draw_megarat(art, &v, Vec2::ZERO, accent);
         }
         BossKind::Hawk => {
-            // The stopped shadow over a locked reticle: the fight's signature
-            // frame, the one the card's text is about.
+            // The hover: wings at full span a body-length over the planks,
+            // downdraft rings under it. (A dive lifts the bird up to 58 px
+            // above its ground point, clean off the top of any plate.)
             let mut v = HawkView::new(c, facing, target);
-            v.state = crate::game::art_boss_hawk::HawkState::Dive;
-            v.progress = 0.74;
+            v.state = crate::game::art_boss_hawk::HawkState::Hover;
+            v.progress = cycle;
             v.anim = anim;
             v.hp_frac = 0.7;
             v.phase = 2;
@@ -1453,3 +1539,54 @@ pub fn weapon_tint(kind: WeaponKind) -> Rgb {
 
 #[cfg(test)]
 mod tests;
+
+/// The boss plates: every boss fits its card whole (kept beside `draw_boss`).
+#[cfg(test)]
+mod boss_plate_tests {
+    use super::*;
+
+    const BG: Rgb = (10, 10, 10);
+
+    fn plate(kind: BossKind, w: usize, h: usize, t: f32) -> PixelBuffer {
+        let mut art = PixelBuffer::new(w, h);
+        art.clear(BG);
+        draw_boss(&mut art, kind, (90, 220, 200), t);
+        art
+    }
+
+    /// No boss leaves its plate nearly empty (the Redtail's dive used to be
+    /// drawn above the top row), at the wide and the narrow card sizes.
+    #[test]
+    fn every_boss_paints_its_plate() {
+        for kind in BossKind::all() {
+            for (w, h, min) in [(44usize, 30usize, 90usize), (26, 12, 20)] {
+                for t in [0.0f32, 0.9, 2.1] {
+                    let art = plate(kind, w, h, t);
+                    let painted = art.pixels().iter().filter(|p| **p != BG).count();
+                    assert!(
+                        painted >= min,
+                        "{kind:?} leaves a {w}x{h} plate nearly empty at t={t}: {painted} px"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The reduction covers the animal: the extent table always yields a
+    /// scratch frame at least as large as the boss needs, and degenerate
+    /// plates do not panic.
+    #[test]
+    fn the_scratch_frame_holds_the_whole_boss() {
+        for kind in BossKind::all() {
+            let (need_w, need_h) = boss_extent(kind);
+            for (w, h) in [(44usize, 30usize), (26, 12), (44, 18)] {
+                let k = (need_w / w as f32).max(need_h / h as f32).ceil();
+                assert!(w as f32 * k >= need_w && h as f32 * k >= need_h, "{kind:?}");
+                assert!(k <= 8.0, "{kind:?} needs more than the 8x cap on {w}x{h}");
+            }
+            for (w, h) in [(1usize, 1usize), (2, 2), (200, 150)] {
+                let _ = plate(kind, w, h, 1.0);
+            }
+        }
+    }
+}

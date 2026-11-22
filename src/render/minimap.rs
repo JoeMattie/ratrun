@@ -2120,8 +2120,11 @@ fn draw_expanded_sidebar(
 
     // Rare finds key: one glyph per walk-back-worthy object, so every icon the
     // map stamps is named. Two columns when the rail is wide enough, so eight
-    // finds cost four rows instead of eight.
-    if y + 2 < bottom {
+    // finds cost four rows instead of eight. The block needs its spacer, its
+    // header and at least one entry row above the status line (`y + 4`): with a
+    // discovered maze on the 80×24 rail the old `y + 2` test printed a bare
+    // `FINDS` header with nothing under it.
+    if y + 4 < bottom {
         y += 1;
         buf.set_stringn(
             x,
@@ -4397,6 +4400,44 @@ mod tests {
         // and an RGB, and no marker glyph is empty.
         for kind in all_marker_kinds() {
             assert!(!kind.glyph().is_whitespace(), "{kind:?} has no glyph");
+        }
+    }
+
+    /// The sidebar's `FINDS` header is only printed with at least one find
+    /// under it. With a discovered maze the 80×24 rail has eleven legend rows
+    /// and used to end in a bare header.
+    #[test]
+    fn the_finds_header_is_never_printed_without_an_entry() {
+        let map = FakeMap::showcase(false);
+        let markers = sample_markers(false);
+        let labels = sample_labels(false);
+        let mut scratch = MinimapScratch::new();
+        for (w, h) in [(80u16, 24u16), (90, 26), (100, 30), (120, 40)] {
+            for maze in [false, true] {
+                let mut view = make_view(
+                    MinimapMode::Expanded,
+                    MinimapPalette::SEWER,
+                    "SEWER",
+                    &markers,
+                    &labels,
+                    false,
+                    w,
+                    h,
+                );
+                view.maze_discovered = maze;
+                let term = render_settled(&mut view, &map, w, h, &mut scratch);
+                let rows = buffer_rows(term.backend().buffer());
+                for (i, row) in rows.iter().enumerate() {
+                    if !row.contains("FINDS") {
+                        continue;
+                    }
+                    let next = rows.get(i + 1).map(String::as_str).unwrap_or("");
+                    assert!(
+                        next.contains(PickupTag::ALL[0].label()),
+                        "{w}x{h} maze={maze}: a FINDS header with nothing under it: {next:?}"
+                    );
+                }
+            }
         }
     }
 

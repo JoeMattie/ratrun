@@ -13,8 +13,11 @@
 //!
 //! Timings: `TELL_TIME` 1 s → active window (per kind) → `RECOVER_TIME` 1 s
 //! exposed → cooldown so the next tell is 4 s after the last signature ended.
-//! Aim is locked at the tell's first tick, the whole footprint is outlined for
-//! the full second, and one strike bites the rat once (`hit_this_strike`).
+//! The body walks to within its own reach first
+//! ([`MinibossKind::engage_range`]), aim is locked at the tell's first tick,
+//! the whole footprint is outlined for the full second (a swinging cord tells
+//! as the whole sector it sweeps), and one strike bites the rat once
+//! (`hit_this_strike`). Slot HP is [`appointment_hp`]: 800 / 1600 / 2500 / 3400.
 //! A signature whose shape leaves no walkable escape is re-aimed (up to 8
 //! tries) and skipped if still trapped.
 //!
@@ -65,6 +68,7 @@ use rand::rngs::StdRng;
 
 use crate::audio::Sfx;
 use crate::game::collision::SizeClass;
+use crate::game::ecs::components::SpawnId;
 use crate::game::director::MINIBOSS_TIMES;
 use crate::game::ecs::resources::{
     NextEnemyId, NextSpawnId, RngRes, RunCounters, SfxQueue, TickInput, Viewport,
@@ -119,6 +123,10 @@ pub const RING_GAP_HALF: f32 = std::f32::consts::FRAC_PI_6; // 30°
 /// fixed, readable feature of the ring (never the rat's own line) while staying
 /// derivable from the aim that was locked at tell start.
 pub const RING_GAP_TURN: f32 = std::f32::consts::FRAC_PI_2;
+/// The radius the Late Plate's closing ring finishes at. With its 2.5 px
+/// half-width and the rat's 3 px body, anything at or under 5.5 bites a rat
+/// that stood still on the locked centre; 5 leaves half a pixel of margin.
+pub const LATE_PLATE_CLOSED: f32 = 5.0;
 /// Half-size of a Foreman stamp (12 px square).
 pub const STAMP_HALF: f32 = 6.0;
 /// Spacing between the three stamps.
@@ -127,8 +135,14 @@ pub const STAMP_SPACING: f32 = 16.0;
 pub const SPILL_LEN: f32 = 32.0;
 /// Half-width of the spill.
 pub const SPILL_HALF: f32 = 10.0;
-/// How close the rat must be before the miniboss starts its tell.
+/// The furthest any miniboss starts its tell from: the range of the rows whose
+/// signature is anchored on the rat (Cage Counter, Road Atlas, Late Plate) and
+/// the cap for everything else. See [`MinibossKind::engage_range`].
 pub const ENGAGE_RANGE: f32 = 70.0;
+/// A body-anchored signature tells once the rat is within this fraction of its
+/// reach, so a rat that simply stops when the tell sounds is still inside the
+/// footprint and has to make the row's answer.
+pub const ENGAGE_REACH_FRACTION: f32 = 0.7;
 
 /// The twenty-four named minibosses: `WAVE4_ROSTERS.md`, "Named appointments
 /// and elites". The first six are wave 3's; the rest are wave 4's eighteen,
@@ -265,6 +279,38 @@ impl MinibossKind {
             MinibossKind::ChainDog => 7.0,
             MinibossKind::RoadAtlas => 7.5,
         }
+    }
+
+    /// How close the body walks before it starts its tell.
+    ///
+    /// Every tell used to start at [`ENGAGE_RANGE`] (70 px), but a signature
+    /// anchored on the body reaches 30–50 px: a rat that stood still when the
+    /// tell sounded was outside nearly every shape. A body-anchored row now
+    /// closes to [`ENGAGE_REACH_FRACTION`] of its own reach first; the rows
+    /// anchored on the rat's locked position keep the full range.
+    pub fn engage_range(self) -> f32 {
+        use SignatureShape as S;
+        let reach = match self.signature().shape {
+            S::Trench { len, .. }
+            | S::Cone { len, .. }
+            | S::Cord { len, .. }
+            | S::Spill { len, .. }
+            | S::Pincer { len, .. }
+            | S::Lane { len, .. } => len,
+            S::Ring {
+                from,
+                to,
+                on_rat: false,
+                ..
+            } => from.max(to),
+            S::Ring { on_rat: true, .. } => return ENGAGE_RANGE,
+            S::Stamps { half, layout } => match layout {
+                // Three pads out from the body: the far edge of the third.
+                StampLayout::Along { spacing } => spacing * 3.0 + half,
+                StampLayout::AroundRat { .. } | StampLayout::V { .. } => return ENGAGE_RANGE,
+            },
+        };
+        (reach * ENGAGE_REACH_FRACTION).clamp(self.body_radius() + 10.0, ENGAGE_RANGE)
     }
 
     /// The row's signature: which shared evaluator it uses and with what
@@ -457,14 +503,21 @@ impl MinibossKind {
                 },
             },
             // ---- printworks 12:00, new: a 5-wide ring on the rat's locked
-            // position, radius 32 → 6 in 1.2, with a 65° break. The break is
-            // a fixed quarter turn off the locked aim, exactly as the Bell
-            // Diver's chipped rim is, so it is never the rat's own line. ----
+            // position, radius 32 → 5 in 1.2, with a 65° break. The break is
+            // a quarter turn off the locked aim, exactly as the Bell Diver's
+            // chipped rim is, so it is never the rat's own line; the tell
+            // turns the aim until the break opens onto walkable floor (see
+            // `escape_exists`).
+            //
+            // The design row says "to 6", but a 5-wide rim at radius 6 stops
+            // 0.5 px short of a rat (radius 3) that never moved off the lock:
+            // standing still was the answer. `LATE_PLATE_CLOSED` finishes the
+            // ring half a pixel inside that reach, so only the break is safe.
             MinibossKind::LatePlate => Signature {
                 active: 1.2,
                 shape: S::Ring {
                     from: 32.0,
-                    to: 6.0,
+                    to: LATE_PLATE_CLOSED,
                     half: 2.5,
                     gap_half: 65.0_f32.to_radians() * 0.5,
                     on_rat: true,
@@ -531,10 +584,20 @@ impl MinibossKind {
                 half_angle,
                 len,
             },
-            SignatureShape::Cord { len, half, .. } => MinibossShape::Cord {
-                spool: mb.origin,
-                tip: mb.origin + mb.aim * len,
-                half,
+            // A swinging cord's footprint is the whole sector it sweeps, not
+            // the one line it lies on mid-swing: `sweep/2` either side of the
+            // locked aim, out to the cord's far edge, widened by the angle its
+            // half-thickness subtends at the tip. (The tell used to be the
+            // single mid-swing cord, so a 150° blade struck 75° either side of
+            // the line the player, the bot and `escape_exists` were shown.)
+            // Close to the hub the cord's own width pokes up to `half` px past
+            // this wedge — inside the body's contact disc, where the rat is
+            // already being hurt.
+            SignatureShape::Cord { len, half, sweep } => MinibossShape::Cone {
+                origin: mb.origin,
+                aim: mb.aim,
+                half_angle: sweep * 0.5 + (half / len.max(1.0)).clamp(0.0, 1.0).asin(),
+                len: len + half,
             },
             SignatureShape::Ring {
                 from,
@@ -888,7 +951,11 @@ impl MinibossShape {
                     return false;
                 }
                 if d <= 1e-4 {
-                    return false;
+                    // Dead centre has no bearing, so the break cannot shelter
+                    // it: a body here that reaches the rim (the band test
+                    // above) straddles it on every side. This is the rat that
+                    // stands still inside the Late Plate's closing ring.
+                    return true;
                 }
                 let ang = v.normalized().dot(gap_dir.normalized()).clamp(-1.0, 1.0).acos();
                 ang > gap_half
@@ -1070,18 +1137,32 @@ impl Miniboss {
         if self.state != MinibossState::Active {
             return None;
         }
-        self.kind.active_shape(self, self.timer)
+        // Clamp to the window: the state machine leaves `Active` on the first
+        // tick whose timer reaches the duration, and that tick must still
+        // evaluate the strike's *final* pose (a ring fully closed, a trench
+        // fully filled, a sweep at its far edge). Unclamped, the timer steps
+        // past the window on that tick and the last pose is never tested —
+        // at a long frame (dt up to 50 ms) that skipped the whole end of the
+        // strike.
+        self.kind
+            .active_shape(self, self.timer.min(self.kind.active_duration()))
     }
 }
 
-/// HP by appointment (§8): 160 / 320 / 540 / 780.
+/// HP by appointment (3:00 / 6:00 / 9:00 / 12:00): 800 / 1600 / 2500 / 3400.
+///
+/// `WAVE4_ROSTERS.md` still prints the wave-3 ladder (160 / 320 / 540 / 780);
+/// bot runs killed those bodies in 2–6 s, before a second signature, so batch
+/// six raised the ladder about fivefold. Every reader (the spawn, the console
+/// and test spawn in `World::spawn_miniboss`, the Library's HIT POINTS fact)
+/// goes through this function.
 #[inline]
 pub fn appointment_hp(appointment: usize) -> f32 {
     match appointment {
-        0 => 160.0,
-        1 => 320.0,
-        2 => 540.0,
-        _ => 780.0,
+        0 => 800.0,
+        1 => 1600.0,
+        2 => 2500.0,
+        _ => 3400.0,
     }
 }
 
@@ -1204,7 +1285,8 @@ pub fn miniboss_system(
     mut sfx: ResMut<SfxQueue>,
     mut particles: ResMut<Particles>,
     mut scratch: Local<SpawnScratch>,
-    mut bosses: Query<(Entity, &mut Enemy, &mut Miniboss)>,
+    mut order: Local<Vec<(u64, Entity)>>,
+    mut bosses: Query<(Entity, &mut Enemy, &mut Miniboss, &SpawnId)>,
 ) {
     let dt = input.dt;
     let elapsed = counters.elapsed;
@@ -1212,7 +1294,17 @@ pub fn miniboss_system(
 
     // 1. Tick the living minibosses.
     let mut alive = 0u32;
-    for (_, mut e, mut mb) in bosses.iter_mut() {
+    // In spawn order: the loop draws rng (arrival and hurt particles), and the
+    // console can put two named bodies on the floor at once.
+    // (The same collect-sort-`get_mut` shape `enemy_move` and `combat` use;
+    // the buffer is a `Local`, so a tick allocates nothing once it has grown.)
+    order.clear();
+    order.extend(bosses.iter().map(|(entity, _, _, id)| (id.0, entity)));
+    order.sort_unstable_by_key(|&(id, _)| id);
+    for &(_, entity) in order.iter() {
+        let Ok((_, mut e, mut mb, _)) = bosses.get_mut(entity) else {
+            continue;
+        };
         if !e.alive() {
             continue;
         }
@@ -1234,7 +1326,7 @@ pub fn miniboss_system(
                 // Let the ordinary steering walk it in; just watch the range.
                 // Nothing here touches `stun`/`slow_mult`: crowd control (the
                 // Sonic Squeak's ring) is the rat's, not the appointment's.
-                if e.pos.dist(ppos) <= ENGAGE_RANGE {
+                if e.pos.dist(ppos) <= mb.kind.engage_range() {
                     begin_tell(
                         &mut mb,
                         &mut e,
@@ -1271,9 +1363,11 @@ pub fn miniboss_system(
                     // ring, a claw sweeping back through the same ground —
                     // bites once, not once a tick. The rat's i-frames would
                     // hide a repeat inside half a second anyway; the latch is
-                    // what makes the rule independent of the i-frame length,
-                    // and of whether the first bite was blocked by a dash or
-                    // an unrelated hurt.
+                    // what makes the rule independent of the i-frame length.
+                    // It is set only by a bite that *lands*: one blocked by a
+                    // dash or by i-frames from an unrelated hurt leaves the
+                    // strike live, so a dodge has to carry the rat clear of
+                    // the shape, not merely through its first tick.
                     if !mb.hit_this_strike
                         && shape.contains(ppos, crate::game::ecs::constants::PLAYER_RADIUS)
                         && player.take_damage(mb.signature_damage)
@@ -1315,7 +1409,7 @@ pub fn miniboss_system(
         if elapsed >= at {
             // Retreat every living miniboss (no loot, no chest).
             let mut retreat = Vec::new();
-            for (entity, e, _) in bosses.iter() {
+            for (entity, e, _, _) in bosses.iter() {
                 if e.alive() {
                     retreat.push(entity);
                 }
@@ -1345,7 +1439,7 @@ pub fn miniboss_system(
         // The level's boss is the fifth appointment: a miniboss that outlived
         // the 12:00 slot retreats without loot when the boss is due, by the
         // same "one named enemy at a time" rule. No rng, no spawn.
-        for (entity, e, _) in bosses.iter() {
+        for (entity, e, _, _) in bosses.iter() {
             if e.alive() {
                 commands.entity(entity).despawn();
                 sfx.0.push(Sfx::MinibossRetreat);
@@ -1370,6 +1464,19 @@ fn begin_tell(
     } else {
         aim
     };
+    // The rollers leave a safe seam down the middle of their lane. Aimed
+    // straight at the rat, that seam is where the rat already stands and the
+    // strike never has to be answered; turn the lane just far enough that the
+    // rat is under one bar's centre line and has to step to the seam.
+    let aim = match mb.kind.signature().shape {
+        SignatureShape::Lane {
+            seam_half, half, ..
+        } => {
+            let d = ppos.dist(e.pos).max(1.0);
+            aim.rotate(((seam_half + half) / d).clamp(0.0, 0.7).asin())
+        }
+        _ => aim,
+    };
     mb.origin = e.pos;
     mb.aim = aim;
     mb.target = ppos;
@@ -1390,23 +1497,55 @@ fn begin_tell(
     }
     mb.state = MinibossState::Tell;
     mb.timer = 0.0;
-    mb.tell_cued = false;
-    if !mb.tell_cued {
-        mb.tell_cued = true;
-        sfx.0.push(Sfx::MinibossTell);
-        crate::game::particle::vfx::emit_miniboss_tell(
-            particles,
-            rng,
-            e.pos,
-            (255, 226, 140),
-        );
-    }
+    // `tell_cued` stays set from the first tell on: the art reads it to know
+    // the arrival pose is over.
+    mb.tell_cued = true;
+    sfx.0.push(Sfx::MinibossTell);
+    crate::game::particle::vfx::emit_miniboss_tell(particles, rng, e.pos, (255, 226, 140));
 }
 
 /// Is there at least one walkable direction out of the rat's position that the
 /// telegraph does not cover? Sampled at 8 compass points.
 fn escape_exists(mb: &Miniboss, ppos: Vec2, level: &Level) -> bool {
     let shape = mb.kind.telegraph(mb);
+    // A ring has exactly one answer — its break — and the 12 px samples below
+    // sit inside its rim, so they cannot judge it. Require the break itself
+    // to be floor the rat can walk; `begin_tell` turns the aim, and the break
+    // with it, an eighth at a time until one is.
+    //
+    // * Closing on the rat (the Late Plate): the whole way out, from the lock
+    //   past the rim ("a 65° break faces the nearest open aisle").
+    // * Growing from the body (Bell Diver, Petri Mother, Suds Bailiff): the
+    //   rat meets the ring where it stands, so the break must be open from
+    //   the rat's own distance outward — somewhere to wait for the rim to
+    //   pass — rather than pointing into a wall.
+    if let (
+        SignatureShape::Ring { on_rat, .. },
+        MinibossShape::RingGap {
+            origin,
+            radius,
+            half,
+            gap_dir,
+            ..
+        },
+    ) = (mb.kind.signature().shape, shape)
+    {
+        let dir = gap_dir.normalized();
+        let reach = radius + half + crate::game::ecs::constants::PLAYER_RADIUS * 2.0;
+        let mut d = if on_rat {
+            6.0
+        } else {
+            origin.dist(ppos).clamp(12.0, radius)
+        };
+        while d <= reach {
+            let cell = crate::game::collision::cell_of(origin + dir * d);
+            if !level.tiles.get(cell.0, cell.1).passable(SizeClass::Small) {
+                return false;
+            }
+            d += 6.0;
+        }
+        return true;
+    }
     for i in 0..8 {
         let ang = i as f32 * std::f32::consts::TAU / 8.0;
         let dir = Vec2::from_angle(ang);
@@ -1672,6 +1811,76 @@ mod tests {
         assert!(!s.contains(Vec2::new(0.0, RING_RADIUS + RING_HALF + 2.0), 0.0));
     }
 
+    /// The Late Plate's ring closes on a rat that never left the lock: the
+    /// last pose of the strike reaches it, and no earlier one does.
+    #[test]
+    fn the_closing_ring_bites_a_rat_that_stands_still_at_its_centre() {
+        const R: f32 = crate::game::ecs::constants::PLAYER_RADIUS;
+        let kind = MinibossKind::LatePlate;
+        let mut m = mb(kind, Vec2::new(200.0, 160.0), Vec2::new(1.0, 0.0));
+        let rat = m.rat_lock();
+        let d = kind.active_duration();
+        // Open: the rat in the middle is untouched for most of the strike.
+        let open = kind.active_shape(&m, d * 0.5).expect("mid strike");
+        assert!(!open.contains(rat, R), "the ring bit its centre while still wide");
+        // Closed: the final pose bites dead centre, whatever the break faces.
+        let closed = kind.active_shape(&m, d).expect("final pose");
+        assert!(closed.contains(rat, R), "a rat standing still was never bitten");
+        // The state machine's last active tick (timer just past the window)
+        // still evaluates that final pose.
+        m.state = MinibossState::Active;
+        m.timer = d + 1.0 / 60.0;
+        let last = m.active_shape().expect("the last tick still has a shape");
+        assert_eq!(last, closed);
+        // Out through the break is still the answer.
+        let out = rat + m.aim.rotate(RING_GAP_TURN) * 20.0;
+        for i in 0..=24 {
+            let t = (d * i as f32 / 24.0).min(d);
+            assert!(!kind.active_shape(&m, t).expect("active").contains(out, R));
+        }
+    }
+
+    /// A rat that stops dead when the tell sounds is still inside every
+    /// body-anchored footprint: the body closes to within its own reach first.
+    #[test]
+    fn every_body_anchored_row_engages_inside_its_own_reach() {
+        for kind in MinibossKind::all() {
+            let range = kind.engage_range();
+            assert!(range <= ENGAGE_RANGE, "{kind:?} engages from {range}");
+            assert!(range > kind.body_radius() + 6.0, "{kind:?} engages inside contact");
+            // The rat on the aim line at the engage range, as `begin_tell`
+            // would lock it.
+            let mut m = Miniboss::new(kind, 0);
+            m.origin = Vec2::new(200.0, 160.0);
+            m.aim = Vec2::new(1.0, 0.0);
+            m.target = m.origin + m.aim * range;
+            lock_stamps(&mut m);
+            let rat = m.target;
+            // The rollers aim their seam at the rat by design ("align with the
+            // seam"): the row's reach is still checked, a pad's width aside.
+            let probe = match kind.signature().shape {
+                SignatureShape::Lane { seam_half, half, .. } => {
+                    rat + m.aim.perp() * (seam_half + half)
+                }
+                _ => rat,
+            };
+            let tell = kind.telegraph(&m);
+            // A travelling ring's tell is its outermost rim, which encloses
+            // the strike rather than painting it: the rat must be inside it.
+            if let MinibossShape::RingGap { origin, radius, .. } = tell {
+                assert!(
+                    rat.dist(origin) < radius,
+                    "{kind:?}: a rat at the engage range ({range}) is outside the ring"
+                );
+                continue;
+            }
+            assert!(
+                tell.contains(probe, crate::game::ecs::constants::PLAYER_RADIUS),
+                "{kind:?}: a rat at the engage range ({range}) stands outside the tell"
+            );
+        }
+    }
+
     #[test]
     fn three_stamps_hit_shape_is_exact() {
         let m = mb(MinibossKind::Foreman, Vec2::ZERO, Vec2::new(1.0, 0.0));
@@ -1766,8 +1975,10 @@ mod tests {
 
     #[test]
     fn appointment_stats_match_the_design() {
-        assert_eq!(appointment_hp(0), 160.0);
-        assert_eq!(appointment_hp(3), 780.0);
+        assert_eq!(appointment_hp(0), 800.0);
+        assert_eq!(appointment_hp(1), 1600.0);
+        assert_eq!(appointment_hp(2), 2500.0);
+        assert_eq!(appointment_hp(3), 3400.0);
         assert_eq!(appointment_signature_damage(0), 14.0);
         assert_eq!(appointment_signature_damage(3), 20.0);
         assert_eq!(appointment_xp(0), 25);
@@ -2147,11 +2358,12 @@ mod tests {
             }
         }
         // The rings: "6 wide expands to 36 … 75° gap", "8 wide expands to 42
-        // … 65° gap", and the closing one (32 → 6, 5 wide, 65°, on the rat).
+        // … 65° gap", and the closing one (32 → 5, 5 wide, 65°, on the rat:
+        // see `LATE_PLATE_CLOSED` for why it is not the row's 6).
         for (kind, from, to, width, gap, on_rat, active) in [
             (MinibossKind::PetriMother, 0.0, 36.0, 6.0, 75.0, false, 1.2),
             (MinibossKind::SudsBailiff, 0.0, 42.0, 8.0, 65.0, false, 1.2),
-            (MinibossKind::LatePlate, 32.0, 6.0, 5.0, 65.0, true, 1.2),
+            (MinibossKind::LatePlate, 32.0, LATE_PLATE_CLOSED, 5.0, 65.0, true, 1.2),
         ] {
             match kind.signature() {
                 Signature {
@@ -2301,53 +2513,27 @@ mod tests {
     }
 
     /// §8/`WAVE4_ROSTERS.md`: outline the full footprint for the whole tell.
-    /// Everywhere the strike can bite was already marked, and a swinging cord's
-    /// tell is the same cord on the locked aim (its art draws the arc).
+    /// Everywhere the strike can bite was already marked, a swinging cord's
+    /// whole swept sector included.
     #[test]
     fn the_tell_outlines_the_whole_strike_footprint() {
         for kind in MinibossKind::all() {
             let m = locked(kind);
             let tell = kind.telegraph(&m);
             let d = kind.active_duration();
-            let sweeping = matches!(kind.signature().shape, SignatureShape::Cord { .. });
+            // A swinging cord's tell is the wedge it sweeps. Along the wedge's
+            // two edges the cord's own half-width overhangs by up to `half` px,
+            // and its hub end sits inside the body: so for those five rows
+            // "marked" means within half a cord's width, outside the body.
+            let (pad, hub) = match kind.signature().shape {
+                SignatureShape::Cord { half, .. } => (half, kind.body_radius()),
+                _ => (0.0, 0.0),
+            };
             for i in 0..=8 {
                 let t = d * i as f32 / 8.0;
                 let strike = kind
                     .active_shape(&m, t)
                     .unwrap_or_else(|| panic!("{kind:?}: no strike at {t}"));
-                if sweeping {
-                    match (tell, strike) {
-                        (
-                            MinibossShape::Cord {
-                                spool: s0,
-                                tip: t0,
-                                half: h0,
-                            },
-                            MinibossShape::Cord {
-                                spool: s1,
-                                tip: t1,
-                                half: h1,
-                            },
-                        ) => {
-                            assert!(s0.dist(s1) < 1e-3, "{kind:?}: the spool moved");
-                            assert!(
-                                (h0 - h1).abs() < 1e-6,
-                                "{kind:?}: the tell's width is not the strike's"
-                            );
-                            assert!(
-                                (t0.dist(s0) - t1.dist(s1)).abs() < 1e-3,
-                                "{kind:?}: the tell's reach is not the strike's"
-                            );
-                            // Mid-window the swing is on the locked aim, which
-                            // is exactly the line the tell drew.
-                            if i == 4 {
-                                assert!(t0.dist(t1) < 1e-3, "{kind:?}: mid-sweep is off the tell");
-                            }
-                        }
-                        _ => panic!("{kind:?} is not a cord"),
-                    }
-                    continue;
-                }
                 // A travelling ring's tell is its outermost rim (the Bell
                 // Diver's wave-3 tell, unchanged): it *encloses* the strike
                 // rather than painting it, so the claim is that the live ring
@@ -2382,9 +2568,15 @@ mod tests {
                     for gx in 0..=96 {
                         let q = m.origin
                             + Vec2::new((gx as f32 - 48.0) * 2.0, (gy as f32 - 32.0) * 2.0);
+                        if q.dist(m.origin) <= hub {
+                            continue;
+                        }
                         if strike.contains(q, crate::game::ecs::constants::PLAYER_RADIUS) {
                             assert!(
-                                tell.contains(q, crate::game::ecs::constants::PLAYER_RADIUS),
+                                tell.contains(
+                                    q,
+                                    crate::game::ecs::constants::PLAYER_RADIUS + pad
+                                ),
                                 "{kind:?}: {q:?} is struck at t={t} but was not marked"
                             );
                         }
@@ -2469,7 +2661,8 @@ mod tests {
             w.player.hp = 1.0e6;
             w.elapsed = 30.0;
             let p = w.player.pos;
-            let e = w.spawn_miniboss(kind, 0, p + Vec2::new(40.0, 0.0));
+            let near = 40.0f32.min(kind.engage_range() - 2.0);
+            let e = w.spawn_miniboss(kind, 0, p + Vec2::new(near, 0.0));
             let mut states: Vec<MinibossState> = Vec::new();
             let ticks = (((kind.active_duration() + 8.0) / DT) as usize) + 8;
             for _ in 0..ticks {
@@ -2551,14 +2744,16 @@ mod tests {
             w.player.hp = 1.0e6;
             w.elapsed = 30.0;
             let p = w.player.pos;
-            let e = w.spawn_miniboss(kind, 0, p + Vec2::new(30.0, 0.0));
+            let near = 30.0f32.min(kind.engage_range() - 2.0);
+            let e = w.spawn_miniboss(kind, 0, p + Vec2::new(near, 0.0));
             let mut start_hp: Option<f32> = None;
             let mut placed = false;
             let ticks = (((TELL_TIME + kind.active_duration()) / DT) as usize) + 8;
             for _ in 0..ticks {
                 // Once the strike starts, stand where the row actually bites:
                 // on a roller's bar, or on the closing ring's own path (a rat
-                // that stays put in the middle of that ring is never touched).
+                // that stays put in the middle of that ring is bitten only as
+                // it finishes closing; the rim's path is bitten mid-strike).
                 let (active, hot) = {
                     let Some(mb) = w.ecs.get::<Miniboss>(e) else {
                         break;

@@ -28,7 +28,11 @@
 //!    of it, arriving from the impact point. From level 4 a couple of spike
 //!    shards break off and fly on as ordinary friendly bullets.
 //! 3. **Recoil.** An evolved **Barbed Wire** lash drags its catch home,
-//!    bursting every body it crosses. Heavy bodies are not dragged.
+//!    bursting every body it crosses. Heavy bodies are not dragged; a catch
+//!    the crack killed is reeled in empty (the line still bursts). So that
+//!    there *is* something to cross, an auto-aimed Barbed Wire lash casts at
+//!    the farthest hookable body in reach instead of the nearest
+//!    ([`pick_lash_target`]).
 //!
 //! The boss is not an `Enemy`: it is picked through its grounded hit points
 //! (`BossTargetable`), takes the full lash through its hit shapes, and can
@@ -107,6 +111,13 @@ pub struct LashScratch {
 
 // ---- Target picking ------------------------------------------------------
 
+/// Bodies the Barbed Wire hook slips off (and the crack does not stagger): an
+/// elite, a named miniboss and every `EnemyKind::heavy()` body.
+#[inline]
+fn unhookable(e: &Enemy) -> bool {
+    e.kind.heavy() || e.elite || e.named
+}
+
 /// Where a lash is aimed: the impact point plus what the full hit lands on.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LashPick {
@@ -116,8 +127,9 @@ pub(crate) struct LashPick {
 
 #[derive(Clone, Copy)]
 struct Candidate {
-    /// The pick key: distance from the choosing point (the rat, or the aim
-    /// point when an aim exists).
+    /// The pick key, smallest first: squared distance from the choosing point
+    /// (the rat, or the aim point when an aim exists) — negated for a hookable
+    /// body under a Barbed Wire auto-aim, which casts at the farthest one.
     dist_sq: f32,
     /// Enemy bodies first, boss hit points second (the rule every aiming
     /// weapon shares).
@@ -182,6 +194,16 @@ fn push_candidate(out: &mut [Candidate; CANDIDATES], n: &mut usize, c: Candidate
 /// lash goes where the player is pointing rather than behind them. Everything
 /// else — the reach, the tie order, the wall stop — is shared, so the aim
 /// branch is one argument at the call site in [`fire_spiked_tail`].
+///
+/// `hook` is the evolved **Barbed Wire** lash. Under auto-aim the plain rule
+/// (nearest the rat) made the evolution a no-op: the nearest body has, by
+/// definition, nothing between it and the rat, so the reel crossed nobody and
+/// moved its catch a few pixels. A hooking auto-aimed lash therefore casts
+/// *long*: the **farthest** hookable body in reach first (ties by `SpawnId`),
+/// then, when nothing in reach can be hooked, the heavy bodies and the boss
+/// nearest-first exactly as before. An aimed lash is unchanged — the player
+/// chose the catch.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn pick_lash_target(
     level: &Level,
     order: &[Entity],
@@ -190,8 +212,11 @@ pub(crate) fn pick_lash_target(
     from: Vec2,
     reach: f32,
     aim: Option<Vec2>,
+    hook: bool,
 ) -> Option<LashPick> {
     let reach_sq = reach * reach;
+    // Only auto-aim casts long; see the doc comment.
+    let cast_long = hook && aim.is_none();
     // With an aim, "nearest" is measured from the aim point; without, from the
     // rat's rump.
     let key_from = aim.unwrap_or(from);
@@ -205,15 +230,27 @@ pub(crate) fn pick_lash_target(
             continue;
         }
         // The reach is always the tail's: an aim cannot stretch the weapon.
+        // It is measured to the body's near **edge**, the rule the other two
+        // tail weapons use (`dist <= reach + e.radius`): measured to the
+        // centre, a Brute or a miniboss pressed against the reach was refused
+        // while visibly inside it, and the weapon sat idle.
         let dist_sq = e.pos.dist_sq(from);
-        if dist_sq.is_nan() || dist_sq > reach_sq {
+        let limit = reach + e.radius;
+        if dist_sq.is_nan() || dist_sq > limit * limit {
             continue;
         }
+        // A negated key sorts every hookable body ahead of the rest, farthest
+        // first; everything else keeps its plain nearest-first key.
+        let key = if cast_long && !unhookable(e) {
+            -dist_sq
+        } else {
+            e.pos.dist_sq(key_from)
+        };
         push_candidate(
             &mut cand,
             &mut n,
             Candidate {
-                dist_sq: e.pos.dist_sq(key_from),
+                dist_sq: key,
                 rank: 0,
                 id: id.0,
                 pos: e.pos,
@@ -277,7 +314,9 @@ pub(crate) fn fire_spiked_tail(
     // The aim hook: `None` is auto-fire (nearest the rat); an aimed scheme
     // hands its reticle point through and the lash takes the eligible body
     // nearest it.
-    let Some(pick) = pick_lash_target(level, order, enemies, boss_points, ppos, reach, aim) else {
+    let Some(pick) =
+        pick_lash_target(level, order, enemies, boss_points, ppos, reach, aim, evolved)
+    else {
         return false;
     };
     commands.spawn((
@@ -353,7 +392,7 @@ fn crack(
                 let id = e.id;
                 // Heavy bodies (an elite, a named miniboss, a Brute, a curled
                 // Pillbug) keep their footing: a shorter shove, no stagger.
-                let heavy = e.kind.heavy() || e.elite || e.named;
+                let heavy = unhookable(&e);
                 let scale = if heavy { LASH_HEAVY_SCALE } else { 1.0 };
                 if !heavy {
                     e.stun = e.stun.max(LASH_STAGGER);
@@ -514,6 +553,12 @@ fn crack(
 /// cracked on it. Heavy bodies (elites, named minibosses, `EnemyKind::heavy()`)
 /// are not dragged at all — the hook slips off and only the lash hit stands.
 ///
+/// A catch the crack **killed** (the common case: a level-5 lash one-shots most
+/// of the horde, and the corpse is reaped before the recoil starts) is still
+/// reeled in: the barbs come home along the same line from the impact point
+/// and burst everything they cross; there is just no body left to move. Before
+/// this the evolution silently did nothing on every lash that killed.
+///
 /// Returns whether a body moved (the caller re-files the spatial grid).
 #[allow(clippy::too_many_arguments)]
 fn drag(
@@ -530,15 +575,22 @@ fn drag(
         return false;
     };
     // Everything read off the caught body before the walk below (which needs
-    // the query mutably).
-    let Some((from, radius, heavy)) = enemies.get(primary).ok().and_then(|(_, _, e)| {
-        e.alive()
-            .then(|| (e.pos, e.radius, e.kind.heavy() || e.elite || e.named))
-    }) else {
-        return false;
-    };
+    // the query mutably). `None` = the catch is dead or already reaped: the
+    // barbs reel home empty from the impact point (which stopped following
+    // the body when it died).
+    let live = enemies
+        .get(primary)
+        .ok()
+        .and_then(|(_, _, e)| e.alive().then(|| (e.pos, e.radius, unhookable(e))));
+    let (from, radius, heavy) = live.unwrap_or((lash.target, 0.0, false));
     // The hook slips off anything heavy: only the lash hit stands.
     if heavy {
+        return false;
+    }
+    // The crack refuses a body that stepped behind masonry during the wind-up;
+    // the reel must refuse it too, or a body the lash never touched would be
+    // hauled through the wall.
+    if !los_clear(level, lash.origin, from, LASH_LOS_RADIUS) {
         return false;
     }
     let gap = LASH_DRAG_GAP + radius;
@@ -590,7 +642,7 @@ fn drag(
         crossed += 1;
     }
 
-    let moved = if to != from {
+    let moved = if live.is_some() && to != from {
         if let Ok((_, _, mut e)) = enemies.get_mut(primary) {
             e.pos = level
                 .tiles
@@ -1329,6 +1381,84 @@ mod tests {
             w.ecs.get::<Enemy>(brute).unwrap().pos,
             p + Vec2::new(50.0, 0.0),
             "a Brute is not a fish on a line"
+        );
+    }
+
+    /// The known "Barbed Wire never does anything on auto-aim" bug: the plain
+    /// nearest pick leaves nothing between the catch and the rat. An evolved
+    /// auto-aimed lash casts at the **farthest hookable** body in reach; the
+    /// plain weapon and heavy bodies keep the nearest-first rule.
+    #[test]
+    fn barbed_wire_auto_aim_casts_at_the_farthest_hookable_body() {
+        let layout = |w: &mut World| {
+            let p = w.player.pos;
+            let near = w.spawn_enemy(EnemyKind::Skitterer, p + Vec2::new(9.0, -1.0), 400.0);
+            let far = w.spawn_enemy(EnemyKind::Skitterer, p + Vec2::new(50.0, 0.0), 400.0);
+            // Farther still, but heavy: the hook would slip, so it is not the
+            // long cast's choice while anything hookable is in reach.
+            let brute = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(0.0, 58.0), 400.0);
+            (near, far, brute)
+        };
+        let mut plain = arena(93, 5);
+        let (near, _, _) = layout(&mut plain);
+        assert!(run_fire(&mut plain));
+        assert_eq!(
+            lashes(&mut plain)[0].primary,
+            Some(LashTarget::Enemy(near)),
+            "the plain lash still takes the nearest body"
+        );
+
+        let mut barbed = arena(93, 5);
+        barbed.player.loadout.weapons[0].evolved = true;
+        let (_, far, _) = layout(&mut barbed);
+        assert!(run_fire(&mut barbed));
+        assert_eq!(
+            lashes(&mut barbed)[0].primary,
+            Some(LashTarget::Enemy(far)),
+            "Barbed Wire casts long, at the farthest hookable body"
+        );
+
+        // Only heavy bodies in reach: nearest-first, as before.
+        let mut heavy = arena(94, 5);
+        heavy.player.loadout.weapons[0].evolved = true;
+        let p = heavy.player.pos;
+        let close = heavy.spawn_enemy(EnemyKind::Brute, p + Vec2::new(20.0, 0.0), 400.0);
+        heavy.spawn_enemy(EnemyKind::Brute, p + Vec2::new(0.0, 50.0), 400.0);
+        assert!(run_fire(&mut heavy));
+        assert_eq!(lashes(&mut heavy)[0].primary, Some(LashTarget::Enemy(close)));
+    }
+
+    /// A catch the crack kills is reaped before the recoil; the barbs still
+    /// come home along the line and burst what they cross. (Before the fix a
+    /// lash that killed its target — most of them at level 5 — never reeled.)
+    #[test]
+    fn barbed_wire_reels_in_even_when_the_crack_kills_the_catch() {
+        let mut w = arena(95, 5);
+        let p = w.player.pos;
+        w.player.loadout.weapons[0].evolved = true;
+        let caught = w.spawn_enemy(EnemyKind::Skitterer, p + Vec2::new(50.0, 0.0), 400.0);
+        // On the line home, outside the crack's own burst.
+        let crossed = w.spawn_enemy(EnemyKind::Skitterer, p + Vec2::new(24.0, 1.0), 400.0);
+        let start = hp(&w, crossed);
+        // One hit point: the crack kills it. The narrow harness has no reap,
+        // so despawn it by hand the way `reap_enemies` would the same tick.
+        w.ecs.get_mut::<Enemy>(caught).unwrap().hp = 1.0;
+        assert!(run_fire_aimed(&mut w, p + Vec2::new(50.0, 0.0)));
+        let ticks = (LASH_WINDUP / DT).floor() as usize + 1;
+        for _ in 0..ticks {
+            run_lash(&mut w, DT);
+        }
+        assert!(!w.ecs.get::<Enemy>(caught).unwrap().alive(), "the crack killed it");
+        assert_eq!(hp(&w, crossed), start, "the crack's burst does not reach the line");
+        let _ = w.ecs.despawn(caught);
+        for _ in 0..6 {
+            run_lash(&mut w, DT);
+        }
+        let burst = LASH_DAMAGE[4] * LASH_BURST_FRAC;
+        let lost = start - hp(&w, crossed);
+        assert!(
+            (lost - burst).abs() < 1e-3,
+            "the empty reel still bursts a crossed body once ({lost} != {burst})"
         );
     }
 

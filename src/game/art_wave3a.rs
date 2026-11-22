@@ -36,6 +36,45 @@ fn shade_px(pb: &mut PixelBuffer, x: i32, y: i32, amount: f32) {
     pb.plot(x, y, palette::scale(cur, 1.0 - amount));
 }
 
+/// Drops the repeats from a ring walked by angle.
+///
+/// A dotted ring steps round its circle more often than the circle has pixels,
+/// so consecutive steps round to the same pixel. With an additive or shading
+/// plot that pixel was hit twice and came out brighter than its neighbours —
+/// and which pixels doubled changed with the radius and the spin, so a growing
+/// or turning ring shimmered. Because the walk is monotonic in angle, a repeat
+/// can only be the pixel just plotted, or (closing the loop) the first one.
+pub(crate) struct RingDedup {
+    first: Option<(i32, i32)>,
+    last: Option<(i32, i32)>,
+}
+
+impl RingDedup {
+    pub(crate) fn new() -> Self {
+        Self {
+            first: None,
+            last: None,
+        }
+    }
+
+    /// `true` when `p` was already plotted by this walk (skip it).
+    pub(crate) fn repeat(&mut self, p: (i32, i32)) -> bool {
+        if self.last == Some(p) {
+            return true;
+        }
+        if self.first == Some(p) && self.last.is_some() {
+            // Back at the start: only a repeat once the walk has moved on.
+            self.last = Some(p);
+            return true;
+        }
+        if self.first.is_none() {
+            self.first = Some(p);
+        }
+        self.last = Some(p);
+        false
+    }
+}
+
 /// Draw one locked Acid Rain drop at screen position `s`.
 ///
 /// Three reads, in the design's order:
@@ -93,6 +132,9 @@ pub fn draw_acid_drop(pb: &mut PixelBuffer, d: &AcidDrop, s: (i32, i32)) {
     } else {
         // Dashed target ring with subtle dark floor etch so it reads on bright floors.
         let steps = (ring_r * 8).max(16);
+        // The ring has more steps than pixels, so neighbouring steps round to
+        // the same pixel; each pixel is shaded and lit once (see `RingDedup`).
+        let mut seen = RingDedup::new();
         for i in 0..steps {
             // 2-on, 1-off dashed cadence shifted by volley index so stacked drops separate.
             if (i + phase * 2).rem_euclid(3) == 2 {
@@ -101,6 +143,9 @@ pub fn draw_acid_drop(pb: &mut PixelBuffer, d: &AcidDrop, s: (i32, i32)) {
             let a = i as f32 / steps as f32 * std::f32::consts::TAU;
             let dx = (a.cos() * ring_r as f32).round() as i32;
             let dy = (a.sin() * ring_r as f32).round() as i32;
+            if seen.repeat((dx, dy)) {
+                continue;
+            }
             shade_px(pb, s.0 + dx, s.1 + dy, 0.28);
             pb.plot_add(s.0 + dx, s.1 + dy, palette::scale(STROKE, 0.55 + 0.35 * dim));
         }
@@ -124,10 +169,14 @@ pub fn draw_acid_drop(pb: &mut PixelBuffer, d: &AcidDrop, s: (i32, i32)) {
         if r_in >= 2 {
             let in_steps = (r_in * 6).max(8);
             let c_in = palette::scale(CORE, 0.35 + 0.45 * fall);
+            let mut seen = RingDedup::new();
             for i in (0..in_steps).step_by(2) {
                 let a = i as f32 / in_steps as f32 * std::f32::consts::TAU + fall * 1.4;
                 let rx = s.0 + (a.cos() * r_in as f32).round() as i32;
                 let ry = s.1 + (a.sin() * r_in as f32).round() as i32;
+                if seen.repeat((rx, ry)) {
+                    continue;
+                }
                 pb.plot_add(rx, ry, c_in);
             }
         } else {
@@ -471,10 +520,14 @@ pub fn draw_fairy_ring(pb: &mut PixelBuffer, ring: &FairyRing, cam: Vec2, elapse
     // 1. Delicate dotted mycelium floor ring outlining the empty circle.
     let ring_col = palette::scale((82, 214, 152), 0.42 * alpha * pulse);
     let steps = (r * 7).max(24);
+    let mut seen = RingDedup::new();
     for i in (0..steps).step_by(2) {
         let a = i as f32 / steps as f32 * std::f32::consts::TAU + ring.spin * 0.3;
         let rx = center.0 + (a.cos() * ring.radius).round() as i32;
         let ry = center.1 + (a.sin() * ring.radius).round() as i32;
+        if seen.repeat((rx, ry)) {
+            continue;
+        }
         pb.plot_add(rx, ry, ring_col);
     }
 
@@ -947,6 +1000,30 @@ mod tests {
     use crate::game::particle::{vfx, Particles};
     use rand::rngs::StdRng;
     use rand::SeedableRng;
+
+    /// A dotted ring lights each pixel at most once, at every radius: the
+    /// additive plot used to land twice on some pixels.
+    #[test]
+    fn dotted_rings_plot_each_pixel_once() {
+        // `RingDedup` on a closed walk: no pixel is ever let through twice.
+        for r in 1..=14i32 {
+            let steps = (r * 8).max(16);
+            let mut seen = RingDedup::new();
+            let mut plotted: Vec<(i32, i32)> = Vec::new();
+            for i in 0..steps {
+                let a = i as f32 / steps as f32 * std::f32::consts::TAU;
+                let p = (
+                    (a.cos() * r as f32).round() as i32,
+                    (a.sin() * r as f32).round() as i32,
+                );
+                if !seen.repeat(p) {
+                    assert!(!plotted.contains(&p), "radius {r}: {p:?} plotted twice");
+                    plotted.push(p);
+                }
+            }
+            assert!(plotted.len() >= 4, "radius {r}: the ring vanished");
+        }
+    }
 
     /// Gated behind `RATRUN_EVO_SHEET`: writes a 4×2 close-up PPM sheet of all
     /// eight wave-3 evolutions in their signature half-block poses for review.

@@ -108,7 +108,7 @@ enum Screen {
     Story,
     /// Level 1's access-route card (`menu::draw_map_intro`).
     MapIntro,
-    /// Levels 2 and 3's intro plate (`campaign_ui::draw_level_intro`).
+    /// Levels 2 and 3's intro plate (`campaign_ui::draw_level_intro_with`).
     LevelIntro,
     Playing,
     LevelUp,
@@ -175,8 +175,12 @@ struct LevelRecord {
     /// Which floor this record was played on. The record is banked by **stage**
     /// (`records[level_index]`), and a stage can be a side route (`WAVE3_DESIGN`
     /// §11), so the plate cannot be derived from the index: a Laundry stage two
-    /// would be labelled "THE KITCHENS" on the victory breakdown.
+    /// would be labelled "THE KITCHEN" on the victory breakdown.
     plate: Option<campaign_ui::CampaignLevel>,
+    /// The boss this floor ended on (a floor's pool holds more than one, and
+    /// the console can field any). Kept for the victory breakdown; `None` when
+    /// the floor was marked complete without a boss dying.
+    boss: Option<crate::game::ecs::systems::boss::BossKind>,
 }
 
 /// Rolling frame/tick timings for the console's `perf` overlay. Cheap to
@@ -281,6 +285,13 @@ pub struct App {
     story_time: f32,
     /// Game viewport rect from the last frame, for mouse→world mapping.
     last_game: Rect,
+    /// The whole frame area from the last render (the terminal's size), so a
+    /// floor built between frames can be handed the viewport the next render
+    /// would write.
+    last_area: Rect,
+    /// The boss that died on the floor in flight, read on the death edge (the
+    /// world only knows a *living* boss). Reset with each floor.
+    killed_boss: Option<crate::game::ecs::systems::boss::BossKind>,
     rat_art: Vec<String>,
     rat_art_w: u32,
     run_counter: u64,
@@ -433,6 +444,9 @@ pub struct App {
 }
 
 impl App {
+    /// The real game's constructor: it **loads the player's save and persists
+    /// to it**. Tests must use [`App::with_options`] with a default table and
+    /// `persist = false` instead (the test module's `test_app`).
     pub fn new(kitty: bool, audio: Option<AudioEngine>) -> Self {
         Self::with_options(kitty, audio, ScoreTable::load(), true, None)
     }
@@ -488,6 +502,8 @@ impl App {
             intro_timer: 0.0,
             story_time: 0.0,
             last_game: Rect::new(0, 0, 0, 0),
+            last_area: Rect::new(0, 0, 0, 0),
+            killed_boss: None,
             rat_art: Vec::new(),
             rat_art_w: 0,
             run_counter: 0,
@@ -1008,6 +1024,14 @@ impl App {
         // The saved zoom is a preference, not per-level state: a new level opens
         // at it, with no glide-in from the previous level's zoom.
         world.set_zoom_instant(self.scores.zoom);
+        // The simulation's viewport is session input (spawn rings, offscreen
+        // placement). `draw_game` writes it every frame, but a floor's first
+        // tick runs before its first draw, so hand it the same value now
+        // instead of leaving that one tick on the constructor's default.
+        let game = game_rect(self.last_area);
+        if game.width > 0 && game.height > 0 {
+            world.viewport = Vec2::new(game.width as f32, (game.height * 2) as f32);
+        }
         self.world = Some(world);
         self.recorded = false;
         self.new_best = false;
@@ -1015,6 +1039,7 @@ impl App {
         self.dashes_used = 0;
         self.heals_picked = 0;
         self.boss_slain = false;
+        self.killed_boss = None;
         self.prev_boss_alive = false;
         self.last_summary = None;
         self.owned_upgrades = 0;
@@ -1256,12 +1281,19 @@ impl App {
     pub fn update(&mut self, dt: f32) {
         // The pad is polled before the frame's input is consumed, so a button
         // pressed this frame is an action this frame.
+        let was_pad = self.input.controls.device() == Device::Pad;
         self.poll_pad();
         self.input.tick(dt);
+        self.input.controls.note_device(self.input.last_device);
+        // The HUD's dash/active names follow the device in hand: when the pad
+        // takes over (or hands back to the keyboard and mouse) the legends
+        // rebuild, so the HUD's cached copies have to be re-read too.
+        if was_pad != (self.input.controls.device() == Device::Pad) {
+            self.input.hud_labels_changed = true;
+        }
         if self.input.hud_labels_changed {
             self.sync_control_labels();
         }
-        self.input.controls.note_device(self.input.last_device);
         // Deferred stings first: a queued fanfare lands after the sound that
         // caused it (see `queue_sting`).
         self.tick_stings(dt);
@@ -1300,12 +1332,19 @@ impl App {
         // Console `pause` freezes the simulation only (`update_playing` honours
         // the flag); menus and every global key keep working, and closing the
         // console clears it (`close_console`).
+        // The global quick keys stand down while the Controls screen is
+        // capturing a binding: the key being bound (`M`, `C`, `[` …) must only
+        // become the binding, never also fire the action it used to carry.
+        let capturing = matches!(self.screen, Screen::Controls) && self.bind_capture.is_some();
+        // On the splice shelf a bare `M` is Molt (the shelf's legend says so),
+        // so that press must not also flip the mute.
+        let molt_key = matches!(self.screen, Screen::Shop) && self.input.pressed_char('m');
         // Global mute toggle.
-        if self.input.action_pressed(Action::Mute) {
+        if !capturing && !molt_key && self.input.action_pressed(Action::Mute) {
             self.toggle_mute();
         }
         // Global cheese-cursor preference toggle ('c'; ignores Ctrl+C).
-        let cursor_toggled = self.input.action_pressed(Action::ToggleCursor);
+        let cursor_toggled = !capturing && self.input.action_pressed(Action::ToggleCursor);
         if cursor_toggled {
             self.toggle_cheese_cursor();
         }
@@ -1314,19 +1353,19 @@ impl App {
         // effects (both in 5% steps). Discrete presses only, so holding a key
         // never runs the level away.
         let mut volume_changed = false;
-        if self.input.action_pressed(Action::MusicDown) {
+        if !capturing && self.input.action_pressed(Action::MusicDown) {
             self.set_music_volume(options::step_volume(self.music_volume, -1));
             volume_changed = true;
         }
-        if self.input.action_pressed(Action::MusicUp) {
+        if !capturing && self.input.action_pressed(Action::MusicUp) {
             self.set_music_volume(options::step_volume(self.music_volume, 1));
             volume_changed = true;
         }
-        if self.input.action_pressed(Action::EffectsDown) {
+        if !capturing && self.input.action_pressed(Action::EffectsDown) {
             self.set_effects_volume(options::step_volume(self.effects_volume, -1), true);
             volume_changed = true;
         }
-        if self.input.action_pressed(Action::EffectsUp) {
+        if !capturing && self.input.action_pressed(Action::EffectsUp) {
             self.set_effects_volume(options::step_volume(self.effects_volume, 1), true);
             volume_changed = true;
         }
@@ -1349,13 +1388,15 @@ impl App {
             w.tick_zoom(dt);
         }
         // Options: the title row and the pause legend open it; nothing else does.
-        if !volume_changed && self.input.action_pressed(Action::Options) {
+        // `previous` is read first, so a screen change made here clears the
+        // stale hit rectangles at the end of the frame like any other.
+        let previous = self.screen;
+        if !capturing && !volume_changed && self.input.action_pressed(Action::Options) {
             let from = self.screen;
             if matches!(from, Screen::Title | Screen::Paused) {
                 self.open_options(from);
             }
         }
-        let previous = self.screen;
         let click = self.mouse_action();
         match self.screen {
             Screen::Title => self.update_title(click),
@@ -1453,8 +1494,9 @@ impl App {
 
     /// Empty the console's scrollback (the `clear` command).
     pub fn console_clear(&mut self) {
-        self.console.output.clear();
-        self.console.dirty = true;
+        // `Console::clear` also resets the scroll: a view scrolled up over an
+        // emptied scrollback would hide every new line.
+        self.console.clear();
     }
 
     /// The active world, for a command handler's read/write.
@@ -1579,7 +1621,12 @@ impl App {
     /// Start a campaign at `stage` (0-based), optionally on `route`.
     pub fn start_campaign_at(&mut self, stage: usize, route: Option<Theme>) -> Result<(), String> {
         let seed = self.seed();
-        let mut campaign = CampaignState::new(seed);
+        // The same per-run reset every other start path does: without it the
+        // previous run's `banked` flag, bank tally and floor/apex counters
+        // leaked into this one (its report printed the old haul and counted
+        // the old floors).
+        self.begin_run_bookkeeping();
+        let mut campaign = CampaignState::with_modifiers(seed, self.run_modifiers());
         campaign.level = stage.min(campaign::LEVEL_COUNT - 1);
         if let Some(theme) = route {
             campaign.route.choose(campaign.level, theme);
@@ -1591,6 +1638,7 @@ impl App {
         self.keep_items.clear();
         self.keep_entries.clear();
         self.keep_selected.clear();
+        self.keep_splices.clear();
         self.victory_loadout.clear();
         self.console_cheat = false;
         let world = self
@@ -1843,7 +1891,8 @@ impl App {
 
     /// One frame of the nest. Every key and pointer action lives here.
     fn update_nest(&mut self, click: Option<Target>) {
-        if click == Some(Target::Back) || self.input.just_pressed(KeyCode::Esc)
+        // Back is the live binding (Esc / pad B by default), plus Backspace.
+        if click == Some(Target::Back) || self.input.back_pressed()
             || self.input.just_pressed(KeyCode::Backspace)
         {
             if self.nest_ui.pending.take().is_some() {
@@ -1854,12 +1903,12 @@ impl App {
             }
             return;
         }
-        if (self.input.just_pressed(KeyCode::Up) || self.input.pressed_char('k'))
+        // `nav_pressed` covers the arrows, the movement bindings and the pad.
+        if (self.input.nav_pressed(0, -1) || self.input.pressed_char('k'))
             && self.nest_ui.step(-1) {
                 self.sfx(Sfx::UiMove);
             }
-        if (self.input.just_pressed(KeyCode::Down) || self.input.pressed_char('s')
-            || self.input.pressed_char('j'))
+        if (self.input.nav_pressed(0, 1) || self.input.pressed_char('j'))
             && self.nest_ui.step(1) {
                 self.sfx(Sfx::UiMove);
             }
@@ -1899,8 +1948,9 @@ impl App {
             }
         }
 
-        // Enter: confirm a pending action, or activate the row under the cursor.
-        if self.input.just_pressed(KeyCode::Enter) {
+        // Confirm (Enter / pad A by default): confirm a pending action, or
+        // activate the row under the cursor.
+        if self.input.confirm_pressed() {
             activate = Some(self.nest_ui.cursor);
         }
         let Some(idx) = activate else {
@@ -1918,7 +1968,7 @@ impl App {
                 // A first press on a big buy (or a maxed/unaffordable row) only
                 // arms the confirmation; the cheap ones buy straight away.
                 match self.scores.meta.next_price(track) {
-                    Some(price) if price >= nest_ui::CONFIRM_AT => {
+                    Some(price) if nest_ui::needs_confirm(price) => {
                         self.nest_ui.pending = Some(nest_ui::Pending::Buy(track));
                         self.sfx(Sfx::UiMove);
                     }
@@ -2031,10 +2081,12 @@ impl App {
         if self.input.pressed_char('q') {
             tab_step -= 1;
         }
-        if self.input.just_pressed(KeyCode::Right) || self.input.pressed_char('d') {
+        // `nav_pressed` is the arrows, the live movement bindings (A/D by
+        // default) and the pad's d-pad/stick, so a pad can read the index.
+        if self.input.nav_pressed(1, 0) {
             tab_step += 1;
         }
-        if self.input.just_pressed(KeyCode::Left) || self.input.pressed_char('a') {
+        if self.input.nav_pressed(-1, 0) {
             tab_step -= 1;
         }
         if tab_step != 0 {
@@ -2045,10 +2097,10 @@ impl App {
 
         let entries = self.library_entries();
         let mut step = 0isize;
-        if self.input.just_pressed(KeyCode::Up) || self.input.pressed_char('w') {
+        if self.input.nav_pressed(0, -1) {
             step -= 1;
         }
-        if self.input.just_pressed(KeyCode::Down) || self.input.pressed_char('s') {
+        if self.input.nav_pressed(0, 1) {
             step += 1;
         }
         if self.input.just_pressed(KeyCode::PageUp) {
@@ -2070,9 +2122,10 @@ impl App {
             // A stepped cursor in the narrow list re-opens nothing.
         }
 
-        // Back: Esc leaves the card first, then the screen.
+        // Back (the live binding: Esc / pad B by default, plus Backspace)
+        // leaves the card first, then the screen.
         let back = click == Some(Target::Back)
-            || self.input.just_pressed(KeyCode::Esc)
+            || self.input.back_pressed()
             || self.input.just_pressed(KeyCode::Backspace);
         if click == Some(Target::LibraryCard) {
             self.library_ui.card_open = false;
@@ -2088,15 +2141,13 @@ impl App {
             }
             return;
         }
-        // Enter opens the card on the narrow layout; on the wide one the card
-        // is already on screen.
-        if self.input.just_pressed(KeyCode::Enter) {
+        // Confirm (the live binding: Enter / pad A by default) opens the card
+        // on the narrow layout; on the wide one the card is already on screen.
+        if self.input.confirm_pressed() {
             if self.library_shape.narrow {
                 self.library_ui.card_open = true;
-                self.sfx(Sfx::UiSelect);
-            } else {
-                self.sfx(Sfx::UiSelect);
             }
+            self.sfx(Sfx::UiSelect);
         }
         // Reading an entry clears its NEW mark.
         let card_visible = !self.library_shape.narrow || self.library_ui.card_open;
@@ -2162,7 +2213,7 @@ impl App {
         }
         // Enter activates the reset row exactly like a click does (arm, then
         // wipe): every other action row is stepped with Left/Right instead.
-        if row == options::RESET_ROW && self.input.just_pressed(KeyCode::Enter) {
+        if row == options::RESET_ROW && self.input.confirm_pressed() {
             self.adjust_option(row, 1);
             return;
         }
@@ -2859,6 +2910,10 @@ impl App {
         let aim = self.aim_point();
         if let Some(w) = self.world.as_mut() {
             let hp_before = w.player.hp;
+            // Who is on the floor before the tick, so a death edge below can
+            // name the kind in the Library (the nameplate is gone afterwards).
+            let boss_before = w.boss_kind();
+            let miniboss_before = w.miniboss_hp().map(|(name, _, _)| name);
             // Console `timescale x` scales the simulation step; default 1.0.
             let sim_dt = dt * self.timescale;
             w.update_with_dash_hold(sim_dt, move_dir, dash, active, aim, dash_hold);
@@ -2872,6 +2927,9 @@ impl App {
             }
             if w.player.hp < hp_before {
                 self.damage_taken += hp_before - w.player.hp;
+                // A hit is felt on the pad (the Options RUMBLE row; a no-op
+                // without a connected, focused pad).
+                self.input.pad.rumble_if(self.input.controls.rumble, 0.12);
             }
             if self.sfx_frame.contains(&Sfx::Dash) {
                 self.dashes_used += 1;
@@ -2889,15 +2947,42 @@ impl App {
             let boss_alive = boss_hp.is_some();
             if self.prev_boss_alive && !boss_alive && w.director.boss_spawned {
                 self.boss_slain = true;
+                self.killed_boss = boss_before;
+                // The boss going down gets a longer pulse than a hit.
+                self.input.pad.rumble_if(self.input.controls.rumble, 0.4);
                 // Every apex kill pays the nest a bonus (see `meta::APEX_BONUS`).
                 self.apex_kills = self.apex_kills.saturating_add(1);
+                // The Library's KILLED counter for the boss itself.
+                if let (Some(kind), false) = (boss_before, self.console_cheat) {
+                    self.scores.library.bump(
+                        LibraryKey::Boss(kind),
+                        library_index::Counter::Killed,
+                        1,
+                    );
+                }
             }
             self.prev_boss_alive = boss_alive;
             // A named miniboss dies when its nameplate goes away; the chest it
             // leaves arrives on the same tick, so the edge is the whole test.
             let miniboss_alive = w.miniboss_hp().is_some();
-            if self.prev_miniboss_alive && !miniboss_alive {
+            // A survivor that **retreats** (the next appointment, or the boss
+            // coming due) also drops its nameplate, without loot: the system
+            // says so with `Sfx::MinibossRetreat`, and that is not a kill.
+            if self.prev_miniboss_alive
+                && !miniboss_alive
+                && !self.sfx_frame.contains(&Sfx::MinibossRetreat)
+            {
                 self.apex_kills = self.apex_kills.saturating_add(1);
+                // The Library's KILLED counter for the named miniboss (the
+                // survey only sees its `Brute` body).
+                let kind = miniboss_before.and_then(miniboss_kind_named);
+                if let (Some(kind), false) = (kind, self.console_cheat) {
+                    self.scores.library.bump(
+                        LibraryKey::Miniboss(kind),
+                        library_index::Counter::Killed,
+                        1,
+                    );
+                }
             }
             self.prev_miniboss_alive = miniboss_alive;
             self.hud.telemetry.set_boss_alive(boss_alive);
@@ -2949,7 +3034,27 @@ impl App {
             // damage source; the card says so).
             if !self.console_cheat {
                 if let Some(w) = self.world.as_ref() {
-                    self.scores.library.note_death(w);
+                    // KILLED YOU: a death in a boss fight is the boss's, and a
+                    // death beside a named miniboss is the miniboss's; anything
+                    // else goes to the nearest body, as before.
+                    let miniboss = w
+                        .miniboss_hp()
+                        .and_then(|(name, _, _)| miniboss_kind_named(name))
+                        .filter(|_| {
+                            w.miniboss_marker().is_some_and(|at| {
+                                (at - w.player.pos).len() <= MINIBOSS_BLAME_RANGE
+                            })
+                        });
+                    let killed_by = library_index::Counter::KilledBy;
+                    if let Some(kind) = w.boss_kind() {
+                        self.scores.library.bump(LibraryKey::Boss(kind), killed_by, 1);
+                    } else if let Some(kind) = miniboss {
+                        self.scores
+                            .library
+                            .bump(LibraryKey::Miniboss(kind), killed_by, 1);
+                    } else {
+                        self.scores.library.note_death(w);
+                    }
                 }
             }
             self.finalize();
@@ -3221,6 +3326,7 @@ impl App {
             score: w.score,
             player_level: w.player.level,
             plate: Some(campaign_ui::CampaignLevel::from_theme(theme)),
+            boss: self.killed_boss,
         };
         let campaign_won = self.campaign.is_some() && w.campaign_won();
         // One floor down this run (the bank's floor bonus counts these; a
@@ -3661,7 +3767,10 @@ impl App {
         if let Some(Target::Upgrade(i)) = click {
             pick = Some(i);
         }
-        if let Some(i) = pick {
+        // A pick that names no card (a stale hit rectangle, an empty hand) is
+        // dropped: applying it would take nothing and re-open the screen, and
+        // re-opening re-rolls the cards with a fresh rng draw.
+        if let Some(i) = pick.filter(|&i| i < self.levelup_choices.len()) {
             self.sfx(Sfx::UiSelect);
             self.apply_levelup(i);
         }
@@ -3694,8 +3803,27 @@ impl App {
         let w = self.world.as_mut()?;
         let label = w.player.loadout.picked_label(&up);
         let icon = w.player.loadout.picked_icon(&up);
+        // The Library's TAKEN counter: the kind this card ranks or adds (read
+        // before `apply`, while a rank-up's slot index is still the card's).
+        let taken = match &up {
+            Upgrade::NewWeapon(kind) => Some(LibraryKey::Weapon(*kind)),
+            Upgrade::LevelWeapon(slot) => w
+                .player
+                .loadout
+                .weapons
+                .get(*slot)
+                .map(|weapon| LibraryKey::Weapon(weapon.kind)),
+            Upgrade::Passive(kind) => Some(LibraryKey::Passive(*kind)),
+            Upgrade::Bandage | Upgrade::Purse => None,
+        };
         let heal = w.player.loadout.apply(&up);
         w.player.heal(heal);
+        // Never on a CONSOLE USED run, like every other Library counter.
+        if let (Some(key), false) = (taken, self.console_cheat) {
+            self.scores
+                .library
+                .bump(key, library_index::Counter::Picked, 1);
+        }
         if matches!(up, Upgrade::Purse) {
             w.gold = w.gold.saturating_add(crate::game::loadout::PURSE_GOLD);
         }
@@ -3799,7 +3927,9 @@ impl App {
     }
 
     fn update_paused(&mut self, click: Option<Target>) {
-        if click == Some(Target::Options) || self.input.pressed_char('o') {
+        // The Options key itself is handled once, globally, in `update` (it
+        // reads the live binding); only the pointer needs this screen.
+        if click == Some(Target::Options) {
             self.sfx(Sfx::UiSelect);
             self.open_options(Screen::Paused);
             return;
@@ -3957,6 +4087,7 @@ impl App {
 
     pub fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
+        self.last_area = area;
         self.hits.clear();
         match self.screen {
             Screen::Title => {
@@ -4086,7 +4217,12 @@ impl App {
                 // small struct, once a frame, on a menu screen) so the draw call
                 // holds no borrow of `self`.
                 let view: meta::MetaProfile = if self.nest_read_only {
-                    nest_ui::profile_from_modifiers(&self.run_modifiers())
+                    // `live_modifiers` is what the run was built with; the saved
+                    // profile only stands in when no run is in flight.
+                    let mods = self
+                        .live_modifiers()
+                        .unwrap_or_else(|| self.run_modifiers());
+                    nest_ui::profile_from_modifiers(&mods)
                 } else {
                     self.scores.meta.clone()
                 };
@@ -4246,7 +4382,14 @@ impl App {
             Screen::Shop => {
                 self.draw_game(frame, area);
                 if let Some(w) = self.world.as_ref() {
-                    shop_ui::draw(
+                    // The shelf's legend names the live Confirm/Back keys; Molt
+                    // is a bare `M` in `update_shop`, not an action.
+                    let keys = shop_ui::ShopKeys {
+                        confirm: self.input.controls.action_label(Action::Confirm),
+                        back: self.input.controls.action_label(Action::Back),
+                        molt: shop_ui::ShopKeys::DEFAULT.molt,
+                    };
+                    shop_ui::draw_with_keys(
                         frame,
                         area,
                         w,
@@ -4254,6 +4397,7 @@ impl App {
                         self.shop_row,
                         self.shop_molt,
                         &mut self.hits,
+                        &keys,
                     );
                 }
             }
@@ -4438,7 +4582,7 @@ impl App {
                 _ => None,
             },
         };
-        let list = campaign_ui::draw_level_select(frame, area, &view);
+        let list = campaign_ui::draw_level_select_with(frame, area, &view, &self.plate_keys());
         for (rect, action) in list.iter() {
             let target = match action {
                 campaign_ui::LevelSelectAction::SelectLevel(floor) => {
@@ -4448,6 +4592,17 @@ impl App {
                 campaign_ui::LevelSelectAction::Back => Target::Back,
             };
             self.hits.add(rect, target);
+        }
+    }
+
+    /// The key names the campaign plates print, from the live bindings. Space
+    /// (pack) and Tab (route) are raw keys in `update_keep_three`, not
+    /// actions, so they keep the plates' stock names.
+    fn plate_keys(&self) -> campaign_ui::PlateKeys<'_> {
+        campaign_ui::PlateKeys {
+            confirm: self.input.controls.action_label(Action::Confirm),
+            toggle: campaign_ui::PlateKeys::DEFAULT.toggle,
+            route: campaign_ui::PlateKeys::DEFAULT.route,
         }
     }
 
@@ -4477,7 +4632,19 @@ impl App {
                     hovered: (self.hits.hovered == Some(Target::Continue))
                         .then_some(campaign_ui::LevelCompleteAction::Continue),
                 };
-                campaign_ui::draw_level_complete(frame, area, &view)
+                // The boss that actually died here; a floor completed without
+                // one (a test hook) falls back to the floor's seeded pick, the
+                // same expression the spawner uses.
+                let boss = self.killed_boss.unwrap_or_else(|| {
+                    crate::game::ecs::systems::boss::BossKind::pool_pick(w.level.theme, w.level.seed)
+                });
+                campaign_ui::draw_level_complete_with(
+                    frame,
+                    area,
+                    &view,
+                    &self.plate_keys(),
+                    Some(boss),
+                )
             }
             None => return,
         };
@@ -4501,7 +4668,7 @@ impl App {
                     hovered: (self.hits.hovered == Some(Target::Begin))
                         .then_some(campaign_ui::LevelIntroAction::Begin),
                 };
-                campaign_ui::draw_level_intro(frame, area, &view)
+                campaign_ui::draw_level_intro_with(frame, area, &view, &self.plate_keys())
             }
             None => return,
         };
@@ -4543,7 +4710,7 @@ impl App {
                 route: self.keep_route_chips(),
                 splices: &self.keep_splices,
             };
-            campaign_ui::draw_keep_three(frame, area, &view)
+            campaign_ui::draw_keep_three_with(frame, area, &view, &self.plate_keys())
         };
         for (rect, action) in list.iter() {
             let target = match action {
@@ -4567,6 +4734,7 @@ impl App {
             kills: 0,
             score: 0,
             player_level: 0,
+            boss: None,
         }; campaign::LEVEL_COUNT];
         for (i, row) in levels.iter_mut().enumerate() {
             let record = self.records[i];
@@ -4580,6 +4748,9 @@ impl App {
                 kills: record.kills,
                 score: record.score,
                 player_level: record.player_level,
+                // The boss that died there (the pool's other member, or a
+                // console pick), when the App saw it die.
+                boss: record.boss,
             };
         }
         let (total_time, total_kills) = match self.world.as_ref() {
@@ -4607,7 +4778,7 @@ impl App {
                     _ => None,
                 },
             };
-            campaign_ui::draw_campaign_victory(frame, area, &view)
+            campaign_ui::draw_campaign_victory_with(frame, area, &view, &self.plate_keys())
         };
         for (rect, action) in list.iter() {
             let target = match action {
@@ -4641,16 +4812,7 @@ impl App {
     }
 
     fn draw_game(&mut self, frame: &mut Frame, area: Rect) {
-        let top_h = hud::top_height(area);
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(top_h),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ])
-            .split(area);
-        let (top, game, bottom) = (rows[0], rows[1], rows[2]);
+        let [top, game, bottom] = game_rows(area);
         self.last_game = game;
 
         if let Some(w) = self.world.as_mut() {
@@ -4755,6 +4917,43 @@ impl App {
             self.last_minimap = panel;
         }
     }
+}
+
+/// The play screen's three rows inside `area`: the top HUD rail, the pixel
+/// viewport and the bottom HUD row. One function so the viewport `draw_game`
+/// draws into and the one `enter_world` pre-sizes a new floor for cannot drift.
+fn game_rows(area: Rect) -> [Rect; 3] {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(hud::top_height(area)),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+    [rows[0], rows[1], rows[2]]
+}
+
+/// The pixel viewport's cell rectangle inside `area` (see [`game_rows`]).
+fn game_rect(area: Rect) -> Rect {
+    if area.width == 0 || area.height == 0 {
+        return Rect::new(0, 0, 0, 0);
+    }
+    game_rows(area)[1]
+}
+
+/// How close (world px) a named miniboss has to be to the rat's body for a
+/// death to be booked against it in the Library rather than the nearest minion.
+const MINIBOSS_BLAME_RANGE: f32 = 64.0;
+
+/// The miniboss kind behind a nameplate (`World::miniboss_hp` hands the HUD the
+/// name, not the kind).
+fn miniboss_kind_named(
+    name: &str,
+) -> Option<crate::game::ecs::systems::miniboss::MinibossKind> {
+    crate::game::ecs::systems::miniboss::MinibossKind::all()
+        .into_iter()
+        .find(|kind| kind.name() == name)
 }
 
 /// Paint the near-black plate backdrop the campaign screens sit on.
@@ -5445,7 +5644,7 @@ mod tests {
     }
 
     /// The victory breakdown names the floor **actually played**: a campaign
-    /// that took the Laundry fork for stage two must not read "THE KITCHENS"
+    /// that took the Laundry fork for stage two must not read "THE KITCHEN"
     /// (`CampaignLevel::from_index` only knows the original route).
     #[test]
     fn the_victory_breakdown_names_the_side_route_floor() {
@@ -5498,6 +5697,23 @@ mod tests {
         );
     }
 
+    /// A purse that covers anything one shelf visit can charge, computed from
+    /// the shop's own tables so a retune cannot leave these tests short: one
+    /// more than a full set of the dearest splice, a Stitch, every Turn and a
+    /// Molt.
+    fn shop_purse() -> u32 {
+        use crate::game::shop::{
+            SpliceKind, MAX_REROLLS, MAX_SPLICES, MOLT_PRICE, REROLL_BASE_PRICE, STITCH_PRICE,
+        };
+        let dearest = SpliceKind::ALL
+            .iter()
+            .map(|kind| kind.price())
+            .max()
+            .unwrap_or(0);
+        let turns: u32 = (0..MAX_REROLLS).map(|i| REROLL_BASE_PRICE << i).sum();
+        dearest * (MAX_SPLICES as u32 + 1) + STITCH_PRICE + turns + MOLT_PRICE
+    }
+
     fn shelf(h: &Harness, slot: usize) -> crate::game::shop::SpliceKind {
         h.app
             .world
@@ -5513,10 +5729,14 @@ mod tests {
     fn the_shop_screen_works_by_keyboard_at_fiftyseven_eighty_and_120() {
         for (w, hgt) in [(57u16, 20u16), (80, 24), (120, 40)] {
             let mut h = Harness::new(w, hgt);
-            open_shop_at(&mut h, 200);
+            open_shop_at(&mut h, shop_purse());
             let text = h.screen_text();
             assert!(text.contains("GENE SPLICE SHELF"), "{w}x{hgt}: no title");
-            assert!(text.contains("GOLD 200"), "{w}x{hgt}: no purse");
+            let purse = shop_purse();
+            assert!(
+                text.contains(&format!("GOLD {purse}")),
+                "{w}x{hgt}: no purse"
+            );
             assert!(
                 text.contains("SPLICES 0/2"),
                 "{w}x{hgt}: no splices counter"
@@ -5540,7 +5760,7 @@ mod tests {
             h.frame(&[KeyCode::Enter]);
             let bought = shelf(&h, 1);
             let w0 = h.app.world.as_ref().unwrap();
-            assert_eq!(w0.gold, 200 - bought.price(), "{w}x{hgt}: paid the price");
+            assert_eq!(w0.gold, purse - bought.price(), "{w}x{hgt}: paid the price");
             assert!(w0.player.loadout.splices.contains(&bought));
             assert!(h.screen_text().contains("SPLICES 1/2"));
 
@@ -5579,7 +5799,7 @@ mod tests {
     fn the_shop_screen_works_by_mouse_with_hover_at_fiftyseven_eighty_and_120() {
         for (w, hgt) in [(57u16, 20u16), (80, 24), (120, 40)] {
             let mut h = Harness::new(w, hgt);
-            open_shop_at(&mut h, 200);
+            open_shop_at(&mut h, shop_purse());
             // Hover the first card: the row reports itself as hovered.
             let first = shelf(&h, 0);
             let pos = h.locate(first.name());
@@ -5619,10 +5839,560 @@ mod tests {
         }
     }
 
+    /// `M` on the shelf is Molt (the legend says so), so that press must not
+    /// also flip the global mute.
+    #[test]
+    fn the_molt_key_does_not_mute_on_the_shelf() {
+        let _guard = VOLUME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut h = Harness::new(80, 24);
+        open_shop_at(&mut h, shop_purse());
+        assert!(!h.app.muted());
+        h.frame(&[KeyCode::Char('m')]);
+        assert!(matches!(h.app.screen, Screen::Shop));
+        assert!(!h.app.muted(), "M is Molt on the shelf, never mute");
+    }
+
+    /// While the Controls screen is capturing, the pressed key only becomes
+    /// the binding: it must not also fire the global action it used to carry.
+    #[test]
+    fn a_key_being_bound_never_fires_its_old_global_action() {
+        let _guard = VOLUME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut h = Harness::new(80, 24);
+        h.frame(&[]);
+        h.app.open_options(Screen::Title);
+        h.app.open_controls();
+        h.app.bind_capture = Some(Action::Map);
+        assert!(!h.app.muted());
+        h.frame(&[KeyCode::Char('m')]);
+        assert!(h.app.bind_capture.is_none(), "the press became the binding");
+        assert!(!h.app.muted(), "the old mute key must not mute mid-capture");
+    }
+
+    /// The Library and the Nest read the live Back binding, so pad B leaves
+    /// them (they used to read a raw Esc and trapped a pad player).
+    #[test]
+    fn pad_back_leaves_the_library_and_the_nest() {
+        use crate::controls::PadBind;
+        use crate::gamepad::PadEvent;
+        let mut h = Harness::new(120, 40);
+        h.frame(&[]);
+        h.app.input.pad_event(PadEvent::Connected);
+        h.app.open_library(Screen::Title);
+        h.frame(&[]);
+        assert!(matches!(h.app.screen, Screen::Library));
+        h.app.input.begin_frame();
+        h.app.input.pad_event(PadEvent::Button(PadBind::East, true));
+        h.app.update(1.0 / 60.0);
+        assert!(matches!(h.app.screen, Screen::Title), "pad B closes the Library");
+
+        h.app.input.begin_frame();
+        h.app.input.pad_event(PadEvent::Button(PadBind::East, false));
+        h.app.update(1.0 / 60.0);
+        h.app.open_nest(Screen::Title);
+        h.frame(&[]);
+        assert!(matches!(h.app.screen, Screen::Nest));
+        h.app.input.begin_frame();
+        h.app.input.pad_event(PadEvent::Button(PadBind::East, true));
+        h.app.update(1.0 / 60.0);
+        assert!(matches!(h.app.screen, Screen::Title), "pad B closes the Nest");
+    }
+
+    // ---- Batch 6 end-to-end flows ----------------------------------------
+
+    /// One whole campaign hop: boss down → sector card → keep-three with the
+    /// side route picked → the next floor's intro plate → play resumes. The
+    /// run is neither banked nor scored on the way (it has not ended).
+    #[test]
+    fn a_campaign_hop_goes_card_keep_route_intro_and_plays_on() {
+        let mut h = Harness::new(100, 32);
+        h.enter_playing();
+        h.grant_keepables();
+        h.finish_level();
+        assert_eq!(h.app.screen.name_for_test(), "LevelComplete");
+        assert_eq!(h.app.floors_cleared, 1);
+        assert!(!h.app.banked, "a cleared floor is not the end of the run");
+        assert!(!h.app.recorded, "no score entry until the run ends");
+        let run_seed = h.app.campaign.as_ref().unwrap().run_seed;
+
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "KeepThree");
+        h.frame(&[KeyCode::Tab]);
+        assert_eq!(h.app.keep_route, Some(Theme::Laundry));
+        for _ in 0..3 {
+            h.frame(&[KeyCode::Char(' ')]);
+            h.frame(&[KeyCode::Down]);
+        }
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "LevelIntro");
+        {
+            let w = h.app.world.as_ref().expect("the next floor");
+            assert_eq!(w.level_index, 1);
+            assert_eq!(w.level.theme, Theme::Laundry);
+            assert_eq!(w.level.seed, campaign::level_seed_on(run_seed, 1, Theme::Laundry));
+            assert_eq!(w.elapsed, 0.0, "the intro plate holds the new floor still");
+        }
+        assert!(!h.app.carried_entries.is_empty(), "the pack rides along");
+        assert_eq!(h.app.floors_cleared, 1, "the counter survives the hop");
+        assert!(!h.app.banked && !h.app.recorded);
+        assert!(h.app.scores.entries.is_empty(), "no score before the run ends");
+
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "Playing");
+        h.frame(&[]);
+        assert!(h.app.world.as_ref().unwrap().elapsed > 0.0);
+    }
+
+    /// A practice run on the Flatbed ends on the incident report, banks at the
+    /// practice rate (half, rounded down) and leaves the campaign's stage
+    /// records alone.
+    #[test]
+    fn a_flatbed_practice_run_ends_on_the_report_and_banks_half() {
+        let mut h = Harness::new(90, 32);
+        h.frame(&[]);
+        h.app.start_practice(campaign::getaway_theme());
+        assert_eq!(h.app.practice, Some(campaign::getaway_theme()));
+        assert!(h.app.campaign.is_none());
+        h.frame(&[]);
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "Playing");
+        h.app.world.as_mut().unwrap().gold = 41;
+        h.finish_level();
+        assert_eq!(h.app.screen.name_for_test(), "LevelComplete");
+        assert!(!h.app.banked);
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "End", "practice never reaches keep-three");
+
+        let tally = h.app.bank_tally.expect("the report carries a tally");
+        assert!(tally.halved && !tally.voided);
+        assert_eq!(tally.purse, 41 / meta::PRACTICE_DIVISOR);
+        assert_eq!(tally.floor_bonus, meta::FLOOR_BONUS / meta::PRACTICE_DIVISOR);
+        assert_eq!(tally.win_bonus, meta::WIN_BONUS / meta::PRACTICE_DIVISOR);
+        assert_eq!(tally.apex_bonus, 0);
+        assert_eq!(
+            tally.banked,
+            tally.purse + tally.floor_bonus + tally.win_bonus
+        );
+        assert_eq!(h.app.scores.meta.bank, tally.banked);
+        let summary = h.app.last_summary.as_ref().expect("a summary");
+        assert!(summary.practice && summary.won);
+        assert!(
+            h.app.records.iter().all(|r| r.plate.is_none()),
+            "the getaway ride must not write a campaign stage record"
+        );
+        assert_eq!(h.app.scores.entries.len(), 1, "one score entry for the run");
+
+        // Lingering on the report never banks or scores twice.
+        h.frame(&[]);
+        h.app.finalize();
+        assert_eq!(h.app.scores.meta.bank, tally.banked);
+        assert_eq!(h.app.scores.entries.len(), 1);
+        // Enter retries the same practice floor as a fresh, unbanked run.
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.practice, Some(campaign::getaway_theme()));
+        assert!(!h.app.banked && h.app.bank_tally.is_none());
+        assert_eq!(h.app.floors_cleared, 0);
+        assert_eq!(h.app.scores.meta.bank, tally.banked);
+    }
+
+    /// The shelf's Turn row: two paid turns (the base price, then double), a
+    /// refused third, then the LEAVE row resumes the run.
+    #[test]
+    fn the_shelf_turns_twice_refuses_a_third_and_leaves() {
+        use crate::game::shop::{ShopItem, MAX_REROLLS, REROLL_BASE_PRICE};
+        let mut h = Harness::new(80, 24);
+        let purse = shop_purse();
+        open_shop_at(&mut h, purse);
+        let row_of = |item: ShopItem| {
+            (0..shop::ROW_COUNT)
+                .find(|&r| shop::row_item(r) == item)
+                .expect("the shelf has this row")
+        };
+        h.app.shop_row = row_of(ShopItem::Reroll);
+        h.frame(&[KeyCode::Enter]);
+        {
+            let w = h.app.world.as_ref().unwrap();
+            assert_eq!(w.gold, purse - REROLL_BASE_PRICE);
+            assert_eq!(w.shop.get(0).unwrap().rerolls, 1);
+        }
+        h.frame(&[KeyCode::Enter]);
+        let after_two = purse - REROLL_BASE_PRICE - (REROLL_BASE_PRICE << 1);
+        {
+            let w = h.app.world.as_ref().unwrap();
+            assert_eq!(w.gold, after_two);
+            assert_eq!(w.shop.get(0).unwrap().rerolls, MAX_REROLLS);
+        }
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(
+            h.app.world.as_ref().unwrap().gold,
+            after_two,
+            "a third turn is refused and free"
+        );
+        assert!(matches!(h.app.screen, Screen::Shop));
+        let elapsed = h.app.world.as_ref().unwrap().elapsed;
+        h.app.shop_row = row_of(ShopItem::Leave);
+        h.frame(&[KeyCode::Enter]);
+        assert!(matches!(h.app.screen, Screen::Playing));
+        assert_eq!(
+            h.app.world.as_ref().unwrap().elapsed,
+            elapsed,
+            "the shelf never ticked the world, and leaving resumes next frame"
+        );
+        assert!(!h.app.world.as_ref().unwrap().pending_shop);
+    }
+
+    /// A chest opened with a max-level weapon and its partner passive evolves
+    /// it: the card is the evolution, the world holds still, Enter resumes.
+    #[test]
+    fn a_chest_evolves_a_maxed_weapon_with_its_partner() {
+        let mut h = Harness::new(80, 30);
+        h.enter_playing();
+        let kind = {
+            let w = h.app.world.as_mut().unwrap();
+            w.clear_enemies();
+            w.clear_gems();
+            let kind = w.player.loadout.weapons[0].kind;
+            let partner = kind.evolution().expect("the start weapon evolves").passive;
+            w.player.loadout.weapons[0].level = kind.max_level();
+            w.player.loadout.apply(&Upgrade::Passive(partner));
+            w.player.xp_to_next = 1_000_000;
+            let pos = w.player.pos;
+            w.spawn_chest(pos);
+            kind
+        };
+        h.frame(&[]);
+        assert!(matches!(h.app.screen, Screen::Chest));
+        assert!(
+            matches!(h.app.chest_reward, Some(ChestReward::Evolve { kind: k, .. }) if k == kind),
+            "the chest must evolve the eligible weapon: {:?}",
+            h.app.chest_reward.is_some()
+        );
+        assert!(h.app.world.as_ref().unwrap().player.loadout.weapons[0].evolved);
+        let elapsed = h.app.world.as_ref().unwrap().elapsed;
+        h.frame(&[]);
+        assert_eq!(h.app.world.as_ref().unwrap().elapsed, elapsed, "the card pauses the sim");
+        h.frame(&[KeyCode::Enter]);
+        assert!(matches!(h.app.screen, Screen::Playing));
+        assert!(h.app.chest_reward.is_none());
+        // Evolved once: a second chest cannot evolve the same weapon again.
+        {
+            let w = h.app.world.as_mut().unwrap();
+            let pos = w.player.pos;
+            w.spawn_chest(pos);
+        }
+        h.frame(&[]);
+        assert!(matches!(h.app.screen, Screen::Chest));
+        assert!(!matches!(h.app.chest_reward, Some(ChestReward::Evolve { .. })));
+    }
+
+    /// Losing the terminal's focus mid-charge (`main` reports it with
+    /// `set_focused(false)`) cancels a held Super Dash: nothing fires, then or
+    /// on the late mouse-up.
+    #[test]
+    fn focus_loss_cancels_a_held_super_dash_charge() {
+        let mut h = Harness::new(100, 30);
+        h.enter_playing();
+        {
+            use crate::game::weapon::WeaponKind;
+            let w = h.app.world.as_mut().unwrap();
+            w.player
+                .loadout
+                .apply(&Upgrade::NewWeapon(WeaponKind::SuperDash));
+            w.player.dash_cd = 0.0;
+            w.player.dash_active = 0.0;
+            w.player.hp = 1.0e9;
+            w.player.xp_to_next = 1_000_000;
+        }
+        let field = h.locate("▀");
+        h.events(&[], &[(MouseEventKind::Down(MouseButton::Left), field)]);
+        for _ in 0..20 {
+            h.frame(&[]);
+        }
+        assert!(h.app.world.as_ref().unwrap().player.dash_charging);
+        assert!(h.app.world.as_ref().unwrap().player.dash_charge > 0.0);
+
+        // Focus goes away between frames, as `main` delivers it.
+        h.app.input.begin_frame();
+        h.app.input.set_focused(false);
+        assert!(h.app.input.dash_cancelled() && !h.app.input.dash_up());
+        h.app.update(1.0 / 60.0);
+        h.app.input.set_focused(true);
+        {
+            let w = h.app.world.as_ref().unwrap();
+            assert!(!w.player.dash_charging, "the charge must be dropped");
+            assert_eq!(w.player.dash_charge, 0.0);
+            assert_eq!(w.player.dash_active, 0.0, "a focus loss must never dash");
+        }
+        // The button's real release arrives later: it has nothing to fire.
+        h.events(&[], &[(MouseEventKind::Up(MouseButton::Left), field)]);
+        let w = h.app.world.as_ref().unwrap();
+        assert_eq!(w.player.dash_active, 0.0);
+        assert!(!w.player.dash_charging);
+    }
+
+    /// A CONSOLE USED run banks nothing and enters no score, whether it ends
+    /// in a death or a quit from the pause screen.
+    #[test]
+    fn a_console_used_run_banks_and_scores_nothing() {
+        // Death.
+        let mut h = Harness::new(90, 32);
+        h.enter_playing();
+        h.app.console_flag_cheat();
+        h.app.world.as_mut().unwrap().gold = 130;
+        h.app.world.as_mut().unwrap().player.hp = -1.0;
+        h.frame(&[]);
+        assert_eq!(h.app.screen.name_for_test(), "End");
+        let tally = h.app.bank_tally.expect("a voided tally is still a tally");
+        assert!(tally.voided);
+        assert_eq!(tally.banked, 0);
+        assert_eq!(h.app.scores.meta.bank, 0);
+        assert!(h.app.scores.entries.is_empty(), "no score from a console run");
+        assert!(!h.app.new_best);
+        assert!(h.app.last_summary.as_ref().is_some_and(|s| s.console_used));
+        h.frame(&[KeyCode::Char('q')]);
+        assert_eq!(h.app.screen.name_for_test(), "Title");
+        assert_eq!(h.app.scores.meta.bank, 0);
+
+        // Quit from pause.
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        h.app.console_flag_cheat();
+        h.app.world.as_mut().unwrap().gold = 42;
+        h.frame(&[KeyCode::Esc]);
+        h.frame(&[KeyCode::Char('q')]);
+        assert_eq!(h.app.screen.name_for_test(), "Title");
+        assert_eq!(h.app.scores.meta.bank, 0, "a console run's purse is void");
+        assert!(h.app.bank_tally.is_some_and(|t| t.voided));
+    }
+
+    /// The Nest's revive: the first death stands the rat back up and the run
+    /// goes on (no report, no bank); the second death ends it, banked once.
+    #[test]
+    fn the_nests_revive_spends_once_and_the_second_death_ends_the_run() {
+        let mut app = test_app();
+        app.scores.meta.set_level(meta::Track::Revive, 1);
+        let mut h = Harness::with_app(app, 90, 32);
+        h.enter_playing();
+        {
+            let w = h.app.world.as_mut().unwrap();
+            assert_eq!(w.revives_left, 1);
+            w.clear_enemies();
+            w.gold = 30;
+            w.player.hp = -1.0;
+        }
+        h.frame(&[]);
+        assert_eq!(h.app.screen.name_for_test(), "Playing", "the revive keeps the run alive");
+        {
+            let w = h.app.world.as_ref().unwrap();
+            assert_eq!(w.revives_left, 0);
+            assert!(w.player.hp > 0.0 && !w.game_over);
+        }
+        assert!(!h.app.banked && !h.app.recorded);
+        assert!(h.app.scores.entries.is_empty());
+
+        h.app.world.as_mut().unwrap().player.hp = -1.0;
+        h.frame(&[]);
+        assert_eq!(h.app.screen.name_for_test(), "End", "one revive per run");
+        assert!(h.app.banked && h.app.recorded);
+        assert_eq!(h.app.scores.entries.len(), 1);
+        assert_eq!(h.app.scores.meta.bank, 30);
+        // Nothing on the report banks or scores again.
+        h.frame(&[]);
+        h.frame(&[KeyCode::Char('b')]);
+        h.frame(&[KeyCode::Esc]);
+        assert_eq!(h.app.screen.name_for_test(), "End");
+        assert_eq!(h.app.scores.entries.len(), 1);
+        assert_eq!(h.app.scores.meta.bank, 30);
+    }
+
+    /// A campaign victory is finalised exactly once: one score entry, one
+    /// bank (purse + three floors + the win), and neither the victory plate,
+    /// the Nest round trip nor the walk back to the title repeats it.
+    #[test]
+    fn a_campaign_victory_scores_and_banks_exactly_once() {
+        let mut h = Harness::new(100, 32);
+        h.frame(&[]);
+        h.app
+            .start_campaign_at(campaign::LEVEL_COUNT - 1, None)
+            .expect("the final stage starts");
+        // A direct call is not a console command, so the run is clean here.
+        h.app.console_cheat = false;
+        h.frame(&[]);
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "Playing");
+        h.app.world.as_mut().unwrap().gold = 10;
+        h.finish_level();
+        assert_eq!(h.app.screen.name_for_test(), "Victory");
+        assert!(h.app.banked && h.app.recorded);
+        let tally = h.app.bank_tally.expect("the victory carries a tally");
+        assert_eq!(tally.win_bonus, meta::WIN_BONUS);
+        assert_eq!(tally.floor_bonus, meta::FLOOR_BONUS, "one floor was cleared this run");
+        assert_eq!(tally.banked, 10 + meta::FLOOR_BONUS + meta::WIN_BONUS);
+        assert_eq!(h.app.scores.meta.bank, tally.banked);
+        assert_eq!(h.app.scores.entries.len(), 1);
+        assert!(h.app.scores.entries[0].campaign_won);
+
+        h.frame(&[]);
+        h.frame(&[KeyCode::Char('b')]);
+        assert_eq!(h.app.screen.name_for_test(), "Nest");
+        h.frame(&[KeyCode::Esc]);
+        assert_eq!(h.app.screen.name_for_test(), "Victory");
+        h.app.finalize();
+        h.frame(&[KeyCode::Char('q')]);
+        assert_eq!(h.app.screen.name_for_test(), "Title");
+        assert_eq!(h.app.scores.entries.len(), 1);
+        assert_eq!(h.app.scores.meta.bank, tally.banked);
+    }
+
+    /// A miniboss that **retreats** (here: the boss comes due) is not an apex
+    /// kill, so it pays the nest nothing.
+    #[test]
+    fn a_retreating_miniboss_is_not_an_apex_kill() {
+        let mut h = Harness::new(100, 32);
+        h.enter_playing();
+        {
+            let w = h.app.world.as_mut().unwrap();
+            w.player.hp = 1.0e9;
+            w.player.xp_to_next = 1_000_000;
+            // Every appointment is overdue and the boss is due: the schedule
+            // appoints one miniboss a tick, then retreats the last survivor.
+            w.elapsed = crate::game::director::BOSS_TIME;
+        }
+        let mut seen = false;
+        for _ in 0..12 {
+            h.frame(&[]);
+            if !matches!(h.app.screen, Screen::Playing) {
+                break;
+            }
+            seen |= h.app.prev_miniboss_alive;
+        }
+        assert!(seen, "the schedule never put a miniboss on the floor");
+        assert!(
+            h.app.world.as_ref().unwrap().miniboss_hp().is_none(),
+            "the last miniboss should have retreated by now"
+        );
+        assert_eq!(h.app.apex_kills, 0, "a retreat was counted as a kill");
+    }
+
+    /// The audio bridge: one frame's effects are de-duplicated (a volley is
+    /// one sound), and the simulation's queue is always left drained.
+    #[test]
+    fn the_sfx_bridge_dedups_each_frame_and_drains_the_queue() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        {
+            let w = h.app.world.as_mut().unwrap();
+            for _ in 0..16 {
+                w.sfx.push(Sfx::Heal);
+            }
+            w.sfx.push(Sfx::Dash);
+            w.sfx.push(Sfx::Dash);
+        }
+        let dashes = h.app.dashes_used;
+        h.frame(&[]);
+        let heals = h.app.sfx_frame.iter().filter(|s| **s == Sfx::Heal).count();
+        assert_eq!(heals, 1, "sixteen identical effects are one sound");
+        assert_eq!(h.app.sfx_frame.iter().filter(|s| **s == Sfx::Dash).count(), 1);
+        assert_eq!(h.app.dashes_used, dashes + 1, "one dash per frame, not per event");
+        assert!(h.app.world.as_ref().unwrap().sfx.is_empty());
+        // The next frame starts from an empty list: nothing replays.
+        h.frame(&[]);
+        assert!(!h.app.sfx_frame.contains(&Sfx::Heal));
+    }
+
+    /// A new floor is handed the viewport before its first tick: the value the
+    /// next render would write, never the constructor's default.
+    #[test]
+    fn a_new_floor_starts_with_the_terminals_viewport() {
+        let mut h = Harness::new(100, 32);
+        h.frame(&[]); // the title: the App now knows the terminal's size
+        h.frame(&[KeyCode::Enter]); // START RUN builds the floor
+        let built = h.app.world.as_ref().expect("a floor").viewport;
+        h.frame(&[KeyCode::Enter]);
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.screen.name_for_test(), "Playing");
+        h.frame(&[]);
+        let game = h.app.last_game;
+        let drawn = Vec2::new(game.width as f32, (game.height * 2) as f32);
+        assert_eq!(h.app.world.as_ref().unwrap().viewport, drawn);
+        assert_eq!(built, drawn, "the first tick must not run at another size");
+    }
+
+    /// The simulation's viewport is written by the App's render on a resize —
+    /// under an overlay too — and the first frame at a new size already
+    /// carries it.
+    #[test]
+    fn a_resize_writes_the_simulation_viewport() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        h.frame(&[]);
+        let game = h.app.last_game;
+        let expect = |g: Rect| Vec2::new(g.width as f32, (g.height * 2) as f32);
+        assert_eq!(h.app.world.as_ref().unwrap().viewport, expect(game));
+
+        h.terminal.backend_mut().resize(120, 40);
+        h.frame(&[]);
+        let bigger = h.app.last_game;
+        assert!(bigger.width > game.width && bigger.height > game.height);
+        assert_eq!(h.app.world.as_ref().unwrap().viewport, expect(bigger));
+
+        // Paused: the field is still drawn behind the plate, so a resize there
+        // reaches the simulation's viewport before play resumes.
+        h.frame(&[KeyCode::Esc]);
+        assert_eq!(h.app.screen.name_for_test(), "Paused");
+        h.terminal.backend_mut().resize(60, 20);
+        h.frame(&[]);
+        let smaller = h.app.last_game;
+        assert_eq!(h.app.world.as_ref().unwrap().viewport, expect(smaller));
+    }
+
+    /// The Library's counters the App books: TAKEN when a card is taken, and
+    /// KILLED YOU against the boss when the rat dies in its fight. A CONSOLE
+    /// USED run books neither.
+    #[test]
+    fn the_app_books_taken_and_boss_killed_you_but_not_on_a_console_run() {
+        use crate::game::library::Counter;
+        for cheat in [false, true] {
+            let mut h = Harness::new(80, 30);
+            h.show_upgrade_cards();
+            if cheat {
+                h.app.console_flag_cheat();
+            }
+            let key = LibraryKey::Passive(PassiveKind::Damage);
+            let before = h.app.scores.library.record(key).picked;
+            h.frame(&[KeyCode::Char('1')]);
+            let want = if cheat { before } else { before + 1 };
+            assert_eq!(
+                h.app.scores.library.record(key).picked,
+                want,
+                "cheat={cheat}: TAKEN after picking the Damage card"
+            );
+        }
+        assert!(miniboss_kind_named("Corkscrew").is_some());
+        assert!(miniboss_kind_named("nobody").is_none());
+        let _ = Counter::KilledBy;
+    }
+
+    /// A console-started campaign resets the per-run bank bookkeeping like
+    /// every other start path (it used to inherit the previous run's `banked`
+    /// flag and tally).
+    #[test]
+    fn a_console_campaign_resets_the_bank_bookkeeping() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        h.app.floors_cleared = 2;
+        h.app.back_to_title();
+        assert!(h.app.banked, "quitting a run banks it");
+        h.app.start_campaign_at(0, None).expect("a campaign starts");
+        assert!(!h.app.banked);
+        assert!(h.app.bank_tally.is_none());
+        assert_eq!(h.app.floors_cleared, 0);
+        assert!(!h.app.console_cheat);
+    }
+
     #[test]
     fn the_molt_two_step_works_by_keyboard_and_cancels_free() {
         let mut h = Harness::new(80, 24);
-        open_shop_at(&mut h, 200);
+        open_shop_at(&mut h, shop_purse());
         {
             use crate::game::weapon::WeaponKind;
             let lo = &mut h.app.world.as_mut().unwrap().player.loadout;
@@ -5666,7 +6436,7 @@ mod tests {
     #[test]
     fn the_molt_two_step_works_by_mouse() {
         let mut h = Harness::new(120, 40);
-        open_shop_at(&mut h, 200);
+        open_shop_at(&mut h, shop_purse());
         {
             use crate::game::weapon::WeaponKind;
             let lo = &mut h.app.world.as_mut().unwrap().player.loadout;
@@ -8053,16 +8823,25 @@ mod tests {
         h.frame(&[KeyCode::Down]);
         assert_eq!(h.app.nest_ui.cursor, meta::Track::MoveSpeed.index());
         let before = h.app.scores.meta.bank;
+        // The price comes from the table, so a retune cannot stale this test.
+        let price = h
+            .app
+            .scores
+            .meta
+            .next_price(meta::Track::MoveSpeed)
+            .expect("the first step has a price");
+        assert!(!nest_ui::needs_confirm(price) && price <= before);
         h.frame(&[KeyCode::Enter]);
         assert_eq!(h.app.scores.meta.level(meta::Track::MoveSpeed), 1);
-        assert_eq!(h.app.scores.meta.bank, before - 40);
+        assert_eq!(h.app.scores.meta.bank, before - price);
         assert!(h.app.nest_ui.pending.is_none(), "a cheap buy is not confirmed");
 
         // Esc returns to the title, and the title row shows the new balance.
         h.frame(&[KeyCode::Esc]);
         assert_eq!(h.app.screen.name_for_test(), "Title");
         let title = h.frame(&[]);
-        assert!(title.contains("460¢"), "the row did not re-read the bank:\n{title}");
+        let left = format!("{}¢", before - price);
+        assert!(title.contains(&left), "the row did not re-read the bank:\n{title}");
     }
 
     /// The pause screen opens the nest **read-only**: the plate shows the run's
@@ -8096,8 +8875,15 @@ mod tests {
     #[test]
     fn an_expensive_purchase_needs_a_second_enter() {
         let mut h = Harness::new(80, 24);
-        h.app.scores.meta.bank = 1_000;
+        h.app.scores.meta.bank = 100_000;
         h.app.scores.meta.set_level(meta::Track::WeaponSlots, 2);
+        let price = h
+            .app
+            .scores
+            .meta
+            .next_price(meta::Track::WeaponSlots)
+            .expect("the third slot has a price");
+        assert!(nest_ui::needs_confirm(price), "this step must need a confirm");
         h.app.open_nest(Screen::Title);
         h.app.nest_ui.cursor = meta::Track::WeaponSlots.index();
         h.frame(&[]);
@@ -8115,7 +8901,7 @@ mod tests {
         h.frame(&[KeyCode::Enter]);
         h.frame(&[KeyCode::Enter]);
         assert_eq!(h.app.scores.meta.level(meta::Track::WeaponSlots), 3);
-        assert_eq!(h.app.scores.meta.bank, 1_000 - 520);
+        assert_eq!(h.app.scores.meta.bank, 100_000 - price);
     }
 
     /// The refund-all is free, needs a confirm, and returns exactly what was
@@ -8123,7 +8909,16 @@ mod tests {
     #[test]
     fn refunding_the_nest_needs_a_confirm_and_returns_the_gold() {
         let mut h = Harness::new(80, 24);
-        h.app.scores.meta.bank = 100;
+        let price = h
+            .app
+            .scores
+            .meta
+            .next_price(meta::Track::WeaponSlots)
+            .expect("the first slot has a price");
+        // Exactly enough for one step below the confirm threshold.
+        assert!(!nest_ui::needs_confirm(price));
+        let bank = price + 40;
+        h.app.scores.meta.bank = bank;
         h.app.open_nest(Screen::Title);
         h.app.nest_ui.cursor = meta::Track::WeaponSlots.index();
         h.frame(&[]);
@@ -8134,7 +8929,7 @@ mod tests {
         assert_eq!(h.app.nest_ui.pending, Some(nest_ui::Pending::Refund));
         h.frame(&[KeyCode::Enter]);
         assert_eq!(h.app.scores.meta.total_levels(), 0);
-        assert_eq!(h.app.scores.meta.bank, 100, "the 60 g came back");
+        assert_eq!(h.app.scores.meta.bank, bank, "the price came back");
     }
 
     /// A finished run banks its unspent purse, the incident report prints the
@@ -8241,6 +9036,13 @@ mod tests {
         for (w, rows) in [(57u16, 20u16), (120, 40)] {
             let mut h = Harness::new(w, rows);
             h.app.scores.meta.bank = 300;
+            let price = h
+                .app
+                .scores
+                .meta
+                .next_price(meta::Track::MoveSpeed)
+                .expect("the first step has a price");
+            assert!(!nest_ui::needs_confirm(price) && price <= 300);
             h.app.open_nest(Screen::Title);
             h.frame(&[]);
             let pos = h.locate("QUICK PAWS");
@@ -8250,7 +9052,7 @@ mod tests {
                 1,
                 "{w}x{rows}: the click did not buy the row under the pointer"
             );
-            assert_eq!(h.app.scores.meta.bank, 300 - 40);
+            assert_eq!(h.app.scores.meta.bank, 300 - price);
             assert_eq!(h.app.nest_ui.cursor, meta::Track::MoveSpeed.index());
             // The wheel walks the list (one track a notch).
             h.events(&[], &[(MouseEventKind::ScrollDown, (2, 2))]);
@@ -10149,7 +10951,7 @@ mod tests {
             "the practice run must be labelled"
         );
         assert!(
-            h.screen_text().contains("THE KITCHENS"),
+            h.screen_text().contains("THE KITCHEN"),
             "the intro plate names the chosen floor"
         );
         {
@@ -10191,7 +10993,7 @@ mod tests {
         h.finish_level();
         assert_eq!(h.app.screen.name_for_test(), "LevelComplete");
         assert!(
-            h.screen_text().contains("THE KITCHENS"),
+            h.screen_text().contains("THE KITCHEN"),
             "the complete plate names the floor that was played"
         );
         h.frame(&[KeyCode::Char(' ')]);

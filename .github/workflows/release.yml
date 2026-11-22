@@ -30,7 +30,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" --title "Rat Run $TAG" --generate-notes
+            gh release create "$TAG" --verify-tag --title "Rat Run $TAG" --generate-notes
 
   build:
     needs: create-release
@@ -50,10 +50,11 @@ jobs:
         with:
           ref: ${{ env.TAG }}
 
-      # rodio/cpal link ALSA on Linux; the dev headers are a build prerequisite.
-      - name: Install ALSA headers (Linux)
+      # rodio/cpal link ALSA and the default `gamepad` feature (gilrs) links
+      # libudev on Linux; both dev header packages are build prerequisites.
+      - name: Install ALSA and udev headers (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
 
       # rust-toolchain.toml pins the compiler; rustup installs it on first use.
       - name: Install the pinned toolchain and target
@@ -194,7 +195,11 @@ jobs:
           cd dist
           ditto -c -k --keepParent "Rat Run.app" "RatRun-$TAG-macos.app.zip"
           name="ratrun-$TAG-macos-universal"
-          mkdir "$name" && cp ratrun "$name/" && cp ../README.md "$name/" 2>/dev/null || true
+          # Only the README copy may fail quietly; a missing binary must stop
+          # the job instead of shipping an empty archive.
+          mkdir "$name"
+          cp ratrun "$name/"
+          cp ../README.md "$name/" 2>/dev/null || true
           tar -czf "$name.tar.gz" "$name"
 
       - name: Upload to the release

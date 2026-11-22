@@ -450,12 +450,21 @@ fn pose_of(player: &Player, elapsed: f32) -> Pose {
     let top = player.loadout.stats.move_speed.max(1.0);
     let moving = (speed / top).clamp(0.0, 1.0);
     let dash = (player.dash_active / 0.16).clamp(0.0, 1.0).sqrt();
+    // The Super Dash charge pose: the rat coils (shorter and wider, the exact
+    // opposite of the dash stretch) as the meter fills, so the release reads
+    // as a spring let go. Zero unless the dash is being held, and a tap never
+    // shows it (the meter has barely moved). Render-only.
+    let coil = if player.dash_charging {
+        player.dash_charge.clamp(0.0, 1.0) * (1.0 - dash)
+    } else {
+        0.0
+    };
     Pose {
         pos: player.pos,
         face,
         perp,
-        su: 1.0 + 0.32 * dash,
-        sv: 1.0 - 0.14 * dash,
+        su: 1.0 + 0.32 * dash - CHARGE_COIL_SQUASH * coil,
+        sv: 1.0 - 0.14 * dash + CHARGE_COIL_SPREAD * coil,
         // Keyed to distance along the facing: feet step with the ground and
         // stop dead when the rat does.
         phase: player.pos.dot(face) * 1.15,
@@ -494,6 +503,11 @@ const PIP_CHARGING: Rgb = (236, 172, 108);
 const PIP_READY: Rgb = (255, 246, 214);
 const PIP_DENIED: Rgb = (238, 74, 84);
 
+/// The Super Dash **charge pose**: how much the body shortens along the facing
+/// and widens across it at a full meter (see [`pose_of`]).
+const CHARGE_COIL_SQUASH: f32 = 0.16;
+const CHARGE_COIL_SPREAD: f32 = 0.12;
+
 /// The Super Dash charge ring: how many pips it has (a closed circle, unlike
 /// the seven-pip cooldown arc) and its colours — the weapon's own blue-white,
 /// so "charging the dash" never reads as "the dash is ready" (that is amber
@@ -512,7 +526,7 @@ const PREVIEW_MAX_LEN: f32 = 96.0;
 /// hostile layer).
 const PREVIEW_COLOR: Rgb = (150, 196, 255);
 
-/// The dash cooldown, attached to the rat: a shallow arc of five pips under it
+/// The dash cooldown, attached to the rat: a shallow arc of [`GAUGE_PIPS`] pips under it
 /// that fills back up as the cooldown runs out.
 ///
 /// States, all of them impossible to miss without any extra clutter:
@@ -597,8 +611,8 @@ pub fn draw_dash_gauge(pb: &mut PixelBuffer, player: &Player, elapsed: f32, cam:
             }
         }
     }
-    // While dashing the arc leaves a hot streak behind it: a single bright pixel
-    // each side keeps the drain visible without adding particles.
+    // While dashing the arc keeps one extra bright pixel just below its lowest
+    // pip, so the drain stays visible without adding particles.
     if dashing {
         let a = std::f32::consts::PI * 0.5;
         let dir = Vec2::from_angle(a);
@@ -1410,6 +1424,41 @@ mod tests {
         pb.clear(RIG_BG);
         draw_rat(&mut pb, p, elapsed, Vec2::ZERO);
         pb
+    }
+
+    /// The Super Dash charge pose: the rat coils as the meter fills, an idle
+    /// rat (and a held dash with an empty meter) is exactly the pose it always
+    /// was, and a dash in flight still stretches.
+    #[test]
+    fn charging_a_super_dash_coils_the_rat() {
+        let mut p = rat(rig_pos(), 0.0);
+        let idle = pose_of(&p, 0.0);
+        assert_eq!((idle.su, idle.sv), (1.0, 1.0));
+
+        p.dash_charging = true;
+        p.dash_charge = 0.0;
+        let held = pose_of(&p, 0.0);
+        assert_eq!((held.su, held.sv), (1.0, 1.0), "an empty meter shows no coil");
+
+        p.dash_charge = 0.5;
+        let half = pose_of(&p, 0.0);
+        p.dash_charge = 7.0; // out of range: clamped, never a negative stretch
+        let full = pose_of(&p, 0.0);
+        assert!(half.su < 1.0 && full.su < half.su, "shorter as it fills");
+        assert!(half.sv > 1.0 && full.sv > half.sv, "wider as it fills");
+        assert!((full.su - (1.0 - CHARGE_COIL_SQUASH)).abs() < 1e-6);
+        assert!(full.su > 0.5, "the body never collapses");
+
+        // The meter alone does nothing: the pose needs the held flag.
+        p.dash_charging = false;
+        let stale = pose_of(&p, 0.0);
+        assert_eq!((stale.su, stale.sv), (1.0, 1.0));
+
+        // The coiled rat still draws, clipped, at a buffer corner.
+        p.dash_charging = true;
+        p.pos = Vec2::new(0.0, 0.0);
+        let mut pb = PixelBuffer::new(8, 8);
+        draw_rat(&mut pb, &p, 0.3, Vec2::ZERO);
     }
 
     /// Everything the tail added: the pixels that differ from the same rat with

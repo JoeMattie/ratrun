@@ -692,7 +692,14 @@ impl InputState {
         self.ctrl_down = false;
         self.dash_kb_down = false;
         self.dash_mouse_down = false;
+        // Drop the pad's held buttons and sticks too, then hand its focus back
+        // to whatever the terminal's really is. A caller that uses this on its
+        // own (without `set_focused`) reports no matching focus gain, so
+        // leaving the pad unfocused here would switch the controller off for
+        // good. Through `set_focused(false)` the pad stays unfocused (that
+        // path cleared `self.focused` first).
         self.pad.set_focused(false);
+        self.pad.set_focused(self.focused);
         if dash_held {
             self.cancel_dash();
         }
@@ -1379,6 +1386,35 @@ mod tests {
         assert!(!s.dash_up(), "a focus loss must never look like a release");
         assert!(s.dash_cancelled(), "the charge must be cancelled, not fired");
         assert!(!s.dash_down());
+    }
+
+    /// `release_all` on its own drops the pad's held state but must not leave
+    /// the pad switched off: no focus gain is reported on that path, so the
+    /// controller would stay dead. Only `set_focused(false)` silences it.
+    #[test]
+    fn release_all_drops_pad_holds_but_keeps_the_pad_alive() {
+        use crate::controls::PadBind;
+        let mut s = InputState::new(false);
+        s.pad_event(PadEvent::Connected);
+        s.begin_frame();
+        s.pad_event(PadEvent::Button(PadBind::R1, true));
+        assert!(s.dash_held());
+        s.begin_frame();
+        s.release_all();
+        assert!(!s.dash_held(), "the held button is dropped");
+        assert!(s.dash_cancelled() && !s.dash_up());
+        // The pad still answers afterwards.
+        s.begin_frame();
+        s.pad_event(PadEvent::Button(PadBind::R1, true));
+        assert!(s.dash_held(), "the pad must still be read after release_all");
+        // A real focus loss keeps it quiet until focus returns.
+        s.set_focused(false);
+        s.begin_frame();
+        s.pad_event(PadEvent::Button(PadBind::R1, true));
+        assert!(!s.dash_held(), "an unfocused pad is ignored");
+        s.set_focused(true);
+        s.pad_event(PadEvent::Button(PadBind::R1, true));
+        assert!(s.dash_held());
     }
 
     /// A pad unplugged mid-charge cancels it too: its release never arrives.

@@ -203,6 +203,9 @@ impl Console {
     /// Clear the scrollback (the `clear` command).
     pub fn clear(&mut self) {
         self.output.clear();
+        // A view scrolled up over an emptied scrollback would hide every new
+        // line (`visible` ends `scroll` lines above the newest).
+        self.scroll = 0;
         self.dirty = true;
     }
 
@@ -1177,6 +1180,9 @@ pub const CVAR_NAMES: &[&str] = &["enemy_cap", "spawn_rate", "xp_mult", "damage_
 /// slot the word sits in.
 pub fn complete(console: &Console) -> Vec<String> {
     let (start, word) = console.word_at_cursor();
+    // Every candidate is a lowercase slug and lookups ignore case, so a word
+    // typed with capitals (`give weapon Gn`) completes too.
+    let word = word.to_ascii_lowercase();
     let before = &console.input[..start];
     let trimmed = before.trim_start();
     let words: Vec<&str> = trimmed.split_whitespace().collect();
@@ -1189,7 +1195,7 @@ pub fn complete(console: &Console) -> Vec<String> {
             .filter(|n| n.starts_with(&word))
             .collect();
     }
-    let Some(cmd) = find_command(words[0]) else {
+    let Some(cmd) = find_command(&words[0].to_ascii_lowercase()) else {
         return Vec::new();
     };
     // The argument index is the number of complete words after the command.
@@ -1199,6 +1205,18 @@ pub fn complete(console: &Console) -> Vec<String> {
     if cmd.name == "remove" && arg_index == 0 {
         let mut out = candidates(ArgKind::Weapon);
         out.extend(candidates(ArgKind::Passive));
+        return out.into_iter().filter(|c| c.starts_with(&word)).collect();
+    }
+    // `tp` takes a named place or an x coordinate, `evolve` a weapon or `all`.
+    if cmd.name == "tp" && arg_index == 0 {
+        return candidates(ArgKind::Words(TP_KINDS))
+            .into_iter()
+            .filter(|c| c.starts_with(&word))
+            .collect();
+    }
+    if cmd.name == "evolve" && arg_index == 0 {
+        let mut out = candidates(ArgKind::Weapon);
+        out.push("all".to_string());
         return out.into_iter().filter(|c| c.starts_with(&word)).collect();
     }
     let kind = if cmd.name == "give" && arg_index == 1 {
@@ -1326,9 +1344,31 @@ fn parse_on_off(arg: Option<&str>, current: bool) -> Result<bool, String> {
     }
 }
 
+/// A finite number. `f32::from_str` also accepts `nan`, `inf` and
+/// `infinity`; one of those in the rat's position, health or speed poisons the
+/// simulation (every comparison with NaN is false, so the range checks below
+/// would wave it through), so they are refused here for every command.
 fn parse_f32(arg: &str, what: &str) -> Result<f32, String> {
     arg.parse::<f32>()
-        .map_err(|_| format!("expected a number for {what}, got `{arg}`"))
+        .ok()
+        .filter(|v| v.is_finite())
+        .ok_or_else(|| format!("expected a number for {what}, got `{arg}`"))
+}
+
+/// The most bodies, chests or pickups one command may spawn, and the most
+/// ticks one `step` may run: the handlers loop on the frame thread, so an
+/// unbounded count (`spawn rat 4000000000`) would hang the game.
+const MAX_COUNT: usize = 500;
+/// One minute of simulation at 60 ticks a second.
+const MAX_STEP_TICKS: u32 = 3_600;
+
+/// A spawn count in `1..=MAX_COUNT` (default 1).
+fn parse_count(arg: Option<&&str>, what: &str) -> Result<usize, String> {
+    let n = arg.map(|s| parse_usize(s, what)).transpose()?.unwrap_or(1);
+    if n > MAX_COUNT {
+        return Err(format!("{what} is capped at {MAX_COUNT} per command"));
+    }
+    Ok(n)
 }
 
 fn parse_usize(arg: &str, what: &str) -> Result<usize, String> {
@@ -1510,7 +1550,10 @@ fn cmd_give(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
                     "all {max_w} weapon slots are full — `remove` one, or buy WEAPON SLOTS in the Nest"
                 ));
             }
-            world.give_weapon(w, level.min(255) as u8);
+            // Clamp to the weapon's real ladder: the stat tables are indexed by
+            // level, and the line below must print the level actually given.
+            let level = level.clamp(1, u32::from(w.max_level())) as u8;
+            world.give_weapon(w, level);
             app.console_line(format!("gave {} L{}", w.name(), level), LineKind::Success);
         }
         Some("passive") => {
@@ -1557,8 +1600,8 @@ fn cmd_level(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
     let name = args.first().ok_or("usage: level <weapon> <n>")?;
     let n = args.get(1).ok_or("usage: level <weapon> <n>")?;
     let w = find_weapon(name).ok_or_else(|| format!("unknown weapon `{name}`"))?;
-    let level = parse_u32(n, "level")?;
-    if world.set_weapon_level(w, level.min(255) as u8) {
+    let level = parse_u32(n, "level")?.clamp(1, u32::from(w.max_level())) as u8;
+    if world.set_weapon_level(w, level) {
         app.console_line(format!("{} → L{}", w.name(), level), LineKind::Success);
     } else {
         return Err(format!("{} is not in the loadout", w.name()));
@@ -1646,7 +1689,7 @@ fn cmd_chest(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
     let Some(world) = app.world_mut() else {
         return Err("no run in progress".into());
     };
-    let n = args.first().map(|s| parse_usize(s, "chest")).transpose()?.unwrap_or(1);
+    let n = parse_count(args.first(), "chest")?;
     let pos = world.player.pos;
     for i in 0..n {
         world.spawn_chest_near(pos, i as f32);
@@ -1661,7 +1704,7 @@ fn cmd_pickup(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
     };
     let name = args.first().ok_or("usage: pickup <kind> [n]")?;
     let kind = find_pickup(name).ok_or_else(|| format!("unknown pickup `{name}`"))?;
-    let n = args.get(1).map(|s| parse_usize(s, "count")).transpose()?.unwrap_or(1);
+    let n = parse_count(args.get(1), "count")?;
     let pos = world.player.pos;
     for i in 0..n {
         world.spawn_pickup_near(kind, pos, i as f32);
@@ -1704,7 +1747,7 @@ fn cmd_spawn(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
     };
     let name = args.first().ok_or("usage: spawn <enemy> [count] [elite]")?;
     let kind = find_enemy(name).ok_or_else(|| format!("unknown enemy `{name}`"))?;
-    let count = args.get(1).map(|s| parse_usize(s, "count")).transpose()?.unwrap_or(1);
+    let count = parse_count(args.get(1), "count")?;
     let elite = args.get(2).is_some_and(|s| s.eq_ignore_ascii_case("elite"));
     let pos = world.player.pos;
     for i in 0..count {
@@ -1813,6 +1856,9 @@ fn cmd_pause(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
 
 fn cmd_step(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
     let n = args.first().map(|s| parse_u32(s, "step")).transpose()?.unwrap_or(1);
+    if n > MAX_STEP_TICKS {
+        return Err(format!("step is capped at {MAX_STEP_TICKS} ticks (one minute)"));
+    }
     app.step_ticks(n as usize);
     app.console_line(format!("stepped {n} tick(s)"), LineKind::Success);
     Ok(())
@@ -1832,7 +1878,12 @@ fn cmd_campaign(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> 
     if !(1..=crate::game::campaign::LEVEL_COUNT).contains(&n) {
         return Err(format!("stage must be 1..{}", crate::game::campaign::LEVEL_COUNT));
     }
-    let route = args.get(1).and_then(|s| find_floor(s));
+    // An unknown route name used to be dropped silently and the original
+    // route started instead; say so, like every other lookup here.
+    let route = match args.get(1) {
+        Some(name) => Some(find_floor(name).ok_or_else(|| format!("unknown floor `{name}`"))?),
+        None => None,
+    };
     app.start_campaign_at(n - 1, route)?;
     app.console_line(format!("campaign stage {n}"), LineKind::Success);
     Ok(())
@@ -2172,11 +2223,25 @@ fn cmd_get(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+/// How deep `exec` may nest. A script that execs itself (or two that exec each
+/// other) would otherwise recurse until the stack overflows and take the
+/// terminal down with it.
+const MAX_EXEC_DEPTH: u8 = 8;
+
+thread_local! {
+    /// How many `exec` calls are open on this thread right now.
+    static EXEC_DEPTH: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
 fn cmd_exec(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
     let path = args.first().ok_or("usage: exec <file>")?;
+    if EXEC_DEPTH.with(|d| d.get()) >= MAX_EXEC_DEPTH {
+        return Err(format!("exec nested more than {MAX_EXEC_DEPTH} deep (does `{path}` exec itself?)"));
+    }
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read `{path}`: {e}"))?;
     let mut count = 0;
+    EXEC_DEPTH.with(|d| d.set(d.get() + 1));
     for raw in text.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -2188,6 +2253,7 @@ fn cmd_exec(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
             Err(e) => app.console_line(format!("error: {e}"), LineKind::Error),
         }
     }
+    EXEC_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
     app.console_line(format!("exec ran {count} command(s)"), LineKind::Success);
     Ok(())
 }
@@ -2252,7 +2318,13 @@ fn parse_clock(raw: &str) -> Result<f32, String> {
             }
             Ok(m as f32 * 60.0 + s as f32)
         }
-        [s] => s.parse::<f32>().map_err(|_| format!("bad time `{raw}` (use mm:ss)")),
+        // Plain seconds: finite and not negative (`time -5` and `time nan`
+        // would hand the director a clock no curve is defined for).
+        [s] => s
+            .parse::<f32>()
+            .ok()
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .ok_or_else(|| format!("bad time `{raw}` (use mm:ss)")),
         _ => Err(format!("bad time `{raw}` (use mm:ss)")),
     }
 }
@@ -2647,6 +2719,133 @@ mod tests {
             after - before,
             dt
         );
+    }
+
+    // ---- Hostile input (batch 6) ------------------------------------------
+
+    #[test]
+    fn non_finite_numbers_are_refused_everywhere() {
+        let mut app = fresh_app();
+        for line in [
+            "heal nan",
+            "hurt nan",
+            "speed nan",
+            "speed inf",
+            "tp nan 10",
+            "tp 10 inf",
+            "time nan",
+            "time -5",
+            "time inf",
+            "set spawn_rate nan",
+            "set spawn_rate inf",
+            "set damage_mult nan",
+            "set xp_mult -inf",
+            "timescale nan",
+            "zoom nan",
+        ] {
+            assert!(run_command(&mut app, line).is_err(), "`{line}` was accepted");
+        }
+        let world = app.world_ref().expect("a run is up");
+        assert!(world.player.hp.is_finite());
+        assert!(world.player.speed_mult.is_finite());
+        assert!(world.player.pos.x.is_finite() && world.player.pos.y.is_finite());
+        assert!(world.elapsed.is_finite() && world.elapsed >= 0.0);
+    }
+
+    #[test]
+    fn counts_and_steps_are_capped() {
+        let mut app = fresh_app();
+        for line in [
+            "spawn skitterer 4000000000",
+            "chest 4000000000",
+            "pickup nuke 4000000000",
+            "step 4000000000",
+        ] {
+            // Whatever the first enemy/pickup is called, a refused count must
+            // be refused before anything spawns; an unknown name is an error
+            // too, so either way the command fails fast instead of hanging.
+            assert!(run_command(&mut app, line).is_err(), "`{line}` was accepted");
+        }
+        let enemy = slug(EnemyKind::all()[0].name());
+        let e = run_command(&mut app, &format!("spawn {enemy} {}", MAX_COUNT + 1)).unwrap_err();
+        assert!(e.contains("capped"), "expected the cap, got {e}");
+        run_command(&mut app, &format!("spawn {enemy} 3")).expect("a small spawn works");
+    }
+
+    #[test]
+    fn weapon_levels_clamp_to_the_ladder() {
+        let mut app = fresh_app();
+        let w = WeaponKind::all()[0];
+        let name = slug(w.name());
+        run_command(&mut app, &format!("give weapon {name} 99")).expect("give works");
+        let level = |app: &crate::app::App| {
+            app.world_ref()
+                .unwrap()
+                .player
+                .loadout
+                .weapons
+                .iter()
+                .find(|x| x.kind == w)
+                .map(|x| x.level)
+        };
+        assert_eq!(level(&app), Some(w.max_level()));
+        run_command(&mut app, &format!("level {name} 250")).expect("level works");
+        assert_eq!(level(&app), Some(w.max_level()));
+        run_command(&mut app, &format!("level {name} 0")).expect("level works");
+        assert_eq!(level(&app), Some(1));
+    }
+
+    #[test]
+    fn campaign_refuses_an_unknown_route() {
+        let mut app = fresh_app();
+        let e = run_command(&mut app, "campaign 2 notafloor").unwrap_err();
+        assert!(e.contains("notafloor"), "expected the name, got {e}");
+    }
+
+    #[test]
+    fn completion_ignores_case_and_knows_tp_and_evolve() {
+        let mut c = Console::new();
+        c.open_panel();
+        c.input = "GIVE weapon GN".into();
+        c.cursor = c.input.len();
+        assert!(complete(&c).iter().any(|s| s == "gnaw"), "got {:?}", complete(&c));
+        c.input = "tp ar".into();
+        c.cursor = c.input.len();
+        assert_eq!(complete(&c), vec!["arena".to_string()]);
+        c.input = "evolve al".into();
+        c.cursor = c.input.len();
+        assert_eq!(complete(&c), vec!["all".to_string()]);
+    }
+
+    #[test]
+    fn clearing_a_scrolled_view_shows_new_output() {
+        let mut c = Console::new();
+        for i in 0..40 {
+            c.push(Line::output(format!("line {i}")));
+        }
+        c.scroll_up(30);
+        c.handle_key(ctrl(KeyCode::Char('l')), 10);
+        c.push(Line::output("fresh"));
+        let (_, visible) = c.visible(10);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].text, "fresh");
+    }
+
+    #[test]
+    fn a_script_that_execs_itself_stops() {
+        let mut app = fresh_app();
+        let dir = std::env::temp_dir().join(format!("ratrun-exec-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("loop.cfg");
+        std::fs::write(&path, format!("exec \"{}\"\n", path.display())).expect("write script");
+        // Returns (the nested error is printed, not propagated) instead of
+        // overflowing the stack.
+        run_command(&mut app, &format!("exec \"{}\"", path.display())).expect("exec returns");
+        assert!(
+            app.console.output.iter().any(|l| l.text.contains("nested")),
+            "the depth guard never spoke"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---- Availability ----------------------------------------------------

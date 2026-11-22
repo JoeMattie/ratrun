@@ -145,8 +145,9 @@ fn accent(world: &World) -> Color {
 /// Draw the shop over the frozen field.
 ///
 /// `row` is the selected shelf row (`0..ROW_COUNT`), `molt` the open Molt step
-/// (if any). Every actionable rectangle is registered in `hits` **only when it
-/// can be activated**, so the pointer never hovers a dead row.
+/// (if any). Every shelf, service and exit row registers its rectangle in
+/// `hits`, refused or not: a refused row still takes the cursor and prints its
+/// reason ([`Deny::reason`]), and the app decides what a click on it does.
 pub fn draw(
     f: &mut Frame,
     area: Rect,
@@ -155,6 +156,46 @@ pub fn draw(
     row: usize,
     molt: Option<MoltUi>,
     hits: &mut HitMap,
+) {
+    draw_with_keys(f, area, world, hole, row, molt, hits, &ShopKeys::DEFAULT);
+}
+
+/// The key names the shelf prints in its legend, its exit row and the Molt
+/// panel's footer.
+///
+/// They used to be literals, so a rebind made the legend wrong. [`draw`]
+/// passes [`ShopKeys::DEFAULT`] (the stock bindings); a caller with a
+/// `Controls` passes `action_label(..)` through [`draw_with_keys`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShopKeys<'a> {
+    /// Buys the selected row (`Action::Confirm`).
+    pub confirm: &'a str,
+    /// Leaves the shelf / cancels the Molt (`Action::Back`).
+    pub back: &'a str,
+    /// Opens the Molt directly (a bare `M` in `app.rs`).
+    pub molt: &'a str,
+}
+
+impl ShopKeys<'static> {
+    /// The stock bindings, i.e. the literals the shelf printed before.
+    pub const DEFAULT: ShopKeys<'static> = ShopKeys {
+        confirm: "Enter",
+        back: "Esc",
+        molt: "M",
+    };
+}
+
+/// [`draw`] with the key names it prints.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_with_keys(
+    f: &mut Frame,
+    area: Rect,
+    world: &World,
+    hole: usize,
+    row: usize,
+    molt: Option<MoltUi>,
+    hits: &mut HitMap,
+    keys: &ShopKeys<'_>,
 ) {
     let w = area.width.saturating_sub(2).clamp(24, 84);
     let roomy = w >= 76 && area.height >= 28;
@@ -292,7 +333,7 @@ pub fn draw(
         y += 1;
     }
     if y < inner.y + inner.height.saturating_sub(1) {
-        draw_leave(f, inner, y, ROW_COUNT - 1, row, hits);
+        draw_leave(f, inner, y, ROW_COUNT - 1, row, hits, keys);
     }
 
     // ---- footer: what is already in the rat, and the keys (never overlapping) -
@@ -309,14 +350,17 @@ pub fn draw(
             footer.push_str(kind.name());
         }
     }
-    let keys = if inner.width >= 72 {
-        Some("↑↓ select · Enter buy · M molt · Esc leave")
+    let legend = if inner.width >= 72 {
+        Some(format!(
+            "↑↓ select · {} buy · {} molt · {} leave",
+            keys.confirm, keys.molt, keys.back
+        ))
     } else if inner.width >= 58 {
-        Some("↑↓ · Enter · M molt · Esc")
+        Some(format!("↑↓ · {} · {} molt · {}", keys.confirm, keys.molt, keys.back))
     } else {
         None
     };
-    let max_footer = match keys {
+    let max_footer = match legend.as_deref() {
         Some(k) => inner
             .width
             .saturating_sub(k.chars().count() as u16 + 4),
@@ -328,7 +372,7 @@ pub fn draw(
         ink(HEAL_MINT)
     };
     put(f, inner.x + 1, footer_row, max_footer, &footer, footer_style);
-    if let Some(k) = keys {
+    if let Some(k) = legend.as_deref() {
         let klen = k.chars().count() as u16;
         let x = inner.right().saturating_sub(klen + 1);
         put(f, x, footer_row, inner.right() - x, k, ink(MUTED));
@@ -336,7 +380,7 @@ pub fn draw(
 
     // ---- the Molt step, over everything ------------------------------------
     if let Some(molt) = molt {
-        draw_molt(f, r, world, hole, molt, hits);
+        draw_molt(f, r, world, hole, molt, hits, keys);
     }
 }
 
@@ -409,6 +453,9 @@ fn draw_slice(
         }
     }
     let Some(stock) = world.shop.get(hole) else {
+        // No stock for this hole: still take the card's rows, or the three
+        // cards (and their hit rectangles) would stack on one another.
+        *y += card_h;
         return;
     };
     let Some(kind) = stock.slot(slot) else {
@@ -437,7 +484,9 @@ fn draw_slice(
         ink(COAT)
     };
     let price = format!("{}¢", kind.price());
-    let price_w = price.len() as u16;
+    // Cells, not bytes (`¢` is two bytes): the price sits flush with the
+    // refusal status on the card's third row.
+    let price_w = price.chars().count() as u16;
     let px = inner.right().saturating_sub(price_w + 1);
     let name_w = px.saturating_sub(text_x + 1);
     put(f, text_x, *y, name_w, kind.name(), name_style);
@@ -574,7 +623,15 @@ fn draw_service(
 }
 
 /// The exit row.
-fn draw_leave(f: &mut Frame, inner: Rect, y: u16, row_index: usize, row: usize, hits: &mut HitMap) {
+fn draw_leave(
+    f: &mut Frame,
+    inner: Rect,
+    y: u16,
+    row_index: usize,
+    row: usize,
+    hits: &mut HitMap,
+    keys: &ShopKeys<'_>,
+) {
     let selected = row == row_index;
     let target = Target::ShopRow(row_index);
     let hovered = hits.hovered == Some(target);
@@ -598,13 +655,21 @@ fn draw_leave(f: &mut Frame, inner: Rect, y: u16, row_index: usize, row: usize, 
         inner.x + 30,
         y,
         inner.right().saturating_sub(inner.x + 30),
-        "step back out (Esc)",
+        &format!("step back out ({})", keys.back),
         ink(MUTED),
     );
 }
 
 /// The Molt panel: the two-step nomination, over the shelf.
-fn draw_molt(f: &mut Frame, r: Rect, world: &World, hole: usize, molt: MoltUi, hits: &mut HitMap) {
+fn draw_molt(
+    f: &mut Frame,
+    r: Rect,
+    world: &World,
+    hole: usize,
+    molt: MoltUi,
+    hits: &mut HitMap,
+    keys: &ShopKeys<'_>,
+) {
     let inner = menu::panel(f, r, " ◇ MOLT  /  REPLACE UPGRADE ", VIAL);
     if inner.width < 12 || inner.height < 5 {
         return;
@@ -614,9 +679,11 @@ fn draw_molt(f: &mut Frame, r: Rect, world: &World, hole: usize, molt: MoltUi, h
     let hint_row = footer.saturating_sub(1);
     let list_bottom = hint_row;
 
-    // Cancel is always live (it is free, at either step).
+    // Cancel is always live (it is free, at either step). Its rectangle is
+    // the footer row that says so — not the hint row above it, which is a
+    // warning about the selected upgrade and used to cancel on a click too.
     hits.add(
-        band(inner, hint_row.saturating_sub(inner.y), 2),
+        band(inner, footer.saturating_sub(inner.y), 1),
         Target::ShopCancel,
     );
 
@@ -685,7 +752,7 @@ fn draw_molt(f: &mut Frame, r: Rect, world: &World, hole: usize, molt: MoltUi, h
                 inner.x + 1,
                 footer,
                 inner.width - 2,
-                "Enter select  ·  Esc cancel (free)",
+                &format!("{} select  ·  {} cancel (free)", keys.confirm, keys.back),
                 ink(VIAL),
             );
         }
@@ -754,7 +821,7 @@ fn draw_molt(f: &mut Frame, r: Rect, world: &World, hole: usize, molt: MoltUi, h
                 inner.x + 1,
                 footer,
                 inner.width - 2,
-                "Enter confirm  ·  Esc cancel (free)",
+                &format!("{} confirm  ·  {} cancel (free)", keys.confirm, keys.back),
                 ink(VIAL),
             );
         }
@@ -1104,6 +1171,117 @@ fn draw_splice_vial(buf: &mut Buffer, area: Rect, kind: SpliceKind, sold: bool, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    const SIZES: [(u16, u16); 3] = [(57, 20), (80, 24), (120, 40)];
+
+    fn frame(w: u16, h: u16, world: &World, molt: Option<MoltUi>) -> (Vec<String>, HitMap) {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let mut hits = HitMap::default();
+        term.draw(|f| draw(f, f.area(), world, 0, 0, molt, &mut hits))
+            .unwrap();
+        let buf = term.backend().buffer();
+        let rows = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+        (rows, hits)
+    }
+
+    /// Every row of the shelf is on the plate at the three reference sizes and
+    /// its hit rectangle is the row it is drawn on: the three cards never
+    /// share rows (they used to stack when a hole had no stock), and each
+    /// service's rectangle is the row that prints its name.
+    #[test]
+    fn shelf_rows_and_their_hit_rectangles_agree_at_every_size() {
+        let world = World::new(Theme::Sewer, 7);
+        for (w, h) in SIZES {
+            let (rows, hits) = frame(w, h, &world, None);
+            let text = rows.join("\n");
+            assert!(text.contains("THE BLIND SPOT"), "{w}x{h}: no title:\n{text}");
+            let mut cards: Vec<Rect> = Vec::new();
+            for slot in 0..shop::STOCK_SIZE {
+                let rect = hits
+                    .rect_for(Target::ShopRow(slot))
+                    .unwrap_or_else(|| panic!("{w}x{h}: card {slot} has no rectangle"));
+                for other in &cards {
+                    assert!(
+                        !rect.intersects(*other),
+                        "{w}x{h}: card {slot} overlaps another card"
+                    );
+                }
+                cards.push(rect);
+            }
+            for (row_index, label) in [(3usize, "STITCH"), (4, "TURN THE SHELF"), (5, "MOLT")] {
+                let rect = hits
+                    .rect_for(Target::ShopRow(row_index))
+                    .unwrap_or_else(|| panic!("{w}x{h}: {label} has no rectangle"));
+                assert_eq!(rect.height, 1, "{w}x{h}: {label}");
+                assert!(
+                    rows[usize::from(rect.y)].contains(label),
+                    "{w}x{h}: {label}'s rectangle is not on its row:\n{text}"
+                );
+            }
+            let leave = hits.rect_for(Target::ShopLeave).expect("leave row");
+            assert!(rows[usize::from(leave.y)].contains("LEAVE"), "{w}x{h}:\n{text}");
+        }
+    }
+
+    /// The shelf prints the key names it is handed, and the plain `draw`
+    /// prints the stock ones.
+    #[test]
+    fn the_shelf_prints_the_key_names_it_is_given() {
+        let world = World::new(Theme::Sewer, 7);
+        let keys = ShopKeys {
+            confirm: "F9",
+            back: "F8",
+            molt: "F7",
+        };
+        for (w, h) in SIZES {
+            for molt in [None, Some(MoltUi::Forfeit { cursor: 0 })] {
+                let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+                let mut hits = HitMap::default();
+                term.draw(|f| draw_with_keys(f, f.area(), &world, 0, 0, molt, &mut hits, &keys))
+                    .unwrap();
+                let text: String = term
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|c| c.symbol())
+                    .collect();
+                assert!(text.contains("F8"), "{w}x{h} {molt:?}: the back key");
+                assert!(!text.contains("Esc"), "{w}x{h} {molt:?}: a stock key leaked");
+                assert!(!text.contains("Enter"), "{w}x{h} {molt:?}: a stock key leaked");
+            }
+            let (rows, _) = frame(w, h, &world, None);
+            assert!(rows.join("").contains("(Esc)"), "{w}x{h}: the default exit key");
+        }
+    }
+
+    /// The Molt panel's cancel rectangle is the footer row that offers it, and
+    /// nothing else: a click on the warning line above no longer cancels.
+    #[test]
+    fn molt_cancel_rectangle_is_the_row_that_says_cancel() {
+        let world = World::new(Theme::Sewer, 7);
+        for (w, h) in SIZES {
+            let (rows, hits) = frame(w, h, &world, Some(MoltUi::Forfeit { cursor: 0 }));
+            let cancel = hits.rect_for(Target::ShopCancel).expect("cancel rect");
+            assert_eq!(cancel.height, 1, "{w}x{h}: one row");
+            assert!(
+                rows[usize::from(cancel.y)].contains("Esc cancel"),
+                "{w}x{h}: the cancel rectangle is not on the cancel row"
+            );
+            assert!(
+                rows.iter().any(|r| r.contains("Step 1 of 2")),
+                "{w}x{h}: the Molt heading is missing"
+            );
+        }
+    }
 
     /// Showcase all 10 bespoke specimen vials (roomy 8×8 + compact 4×4 + sold empty).
     /// `RATRUN_DUMP=shop_vials cargo test dump_shop_vials_sheet`.

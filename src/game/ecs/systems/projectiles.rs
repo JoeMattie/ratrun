@@ -209,6 +209,8 @@ pub fn bullets_system(
     // `b.vel`, so a pellet resumes its own speed the instant the watch ends; and
     // only `Bullet` entities are touched, so boss telegraph timers, hazard
     // shapes and boss projectiles keep their named warning times exactly.
+    // A slowed pellet's `life` runs down at the same reduced rate (below), so
+    // its range is unchanged.
     let hostile_step = if player.buffs.slow_bullets > 0.0 {
         crate::game::ecs::systems::powerups::POCKET_WATCH_BULLET_SLOW
     } else {
@@ -251,7 +253,17 @@ pub fn bullets_system(
             };
             b.pos += vel * (dt * step);
         }
-        b.life -= dt;
+        // A pellet the Pocket Watch slows ages at the same rate it travels, so
+        // the watch costs it speed and never range: it still reaches as far as
+        // it would have (and a slowed lob still times out over its target, not
+        // short of it). `dt * 1.0` is exactly `dt`, so nothing moves without
+        // a running watch.
+        let age_step = if b.orbit.is_none() && b.faction == Faction::Enemy {
+            hostile_step
+        } else {
+            1.0
+        };
+        b.life -= dt * age_step;
         b.hit_cd = (b.hit_cd - dt).max(0.0);
 
         // Shots respect walls: stop a free-flying bullet at the first wall
@@ -486,6 +498,43 @@ mod tests {
     /// instead of the map (what `Level::walls.clear()` used to do).
     fn open_map(w: &mut World) {
         w.level.tiles = TileMap::new(MAP_COLS, MAP_ROWS, w.level.theme, 0);
+    }
+
+    /// The Pocket Watch slows a hostile pellet without cutting its range: a
+    /// slowed pellet ages at the rate it travels, a friendly one is untouched.
+    #[test]
+    fn a_slowed_hostile_pellet_keeps_its_range() {
+        use crate::game::ecs::systems::powerups::{POCKET_WATCH_BULLET_SLOW, POCKET_WATCH_SECS};
+
+        const DT: f32 = 1.0 / 60.0;
+        let mut w = World::new(Theme::Sewer, 97);
+        open_map(&mut w);
+        w.clear_bullets();
+        w.player.pos = w.level.arena * 0.5;
+        // Well away from the rat, flying away from it.
+        let at = w.player.pos + Vec2::new(200.0, 0.0);
+        let mut hostile = Bullet::new(at, Vec2::new(60.0, 0.0), 1.0, Faction::Enemy, (255, 0, 0));
+        hostile.life = 5.0;
+        let mut friendly = Bullet::new(at, Vec2::new(60.0, 0.0), 1.0, Faction::Player, (0, 0, 255));
+        friendly.life = 5.0;
+        w.spawn_bullet(hostile);
+        w.spawn_bullet(friendly);
+        w.player.buffs.slow_bullets = POCKET_WATCH_SECS;
+
+        w.begin_tick(DT, Vec2::ZERO, false);
+        w.ecs.run_system_cached(bullets_system).expect("bullets run");
+        w.end_tick();
+
+        let bullets = w.bullets();
+        assert!(
+            (bullets[0].life - (5.0 - DT * POCKET_WATCH_BULLET_SLOW)).abs() < 1e-5,
+            "a slowed pellet aged {} s in one tick",
+            5.0 - bullets[0].life
+        );
+        assert!(
+            (bullets[1].life - (5.0 - DT)).abs() < 1e-5,
+            "the watch changed a friendly shot's lifetime"
+        );
     }
 
     /// Legacy `acid_spit_pool_lands_at_its_target_after_travel` setup: the

@@ -1,6 +1,6 @@
 //! (a) Player movement, dash, sub-stepping and timers.
 //!
-//! Reproduces **verbatim** the legacy //! (`World::update_player`):
+//! Reproduces **verbatim** the legacy `World::update_player`:
 //!
 //! | legacy | here |
 //! | --- | --- |
@@ -31,8 +31,8 @@
 //!
 //! Ordering: first system in the tick (legacy `update()` calls it first,
 //! before the flow-field refresh). The clock (`RunCounters::elapsed += dt`) is
-//! incremented by `World::update` before `begin_tick`, exactly where legacy
-//! the legacy `update` did it.
+//! incremented by `World::update` before `begin_tick`, exactly where the
+//! legacy `update` did it.
 //!
 //! Notes:
 //! - `move_dir` is a throttle vector, not a unit direction; keep
@@ -64,8 +64,8 @@ use crate::game::weapon::WeaponKind;
 use crate::math::Vec2;
 
 /// How long the on-rat gauge and the HUD's dash module stay lit once the dash
-/// is back.
-const DASH_READY_SECS: f32 = 0.35;
+/// is back. (`loot::pickups_system` uses it for the Clean Socks' refill too.)
+pub const DASH_READY_SECS: f32 = 0.35;
 /// How long a refused dash shakes the gauge and turns the HUD module red. Also
 /// the throttle on the refused blip (see `player_system`).
 pub const DASH_DENIED_SECS: f32 = 0.16;
@@ -113,6 +113,11 @@ pub fn player_system(
     mut shake: ResMut<Shake>,
     // Console `noclip on`: skip tile collision. Default false = normal.
     debug: Res<DebugFlags>,
+    // A dash press the cooldown refused whose input is still held (Super Dash
+    // only): the one hold that may start a charge without a fresh press edge.
+    // Input bookkeeping, not simulation state: it is only ever set from live
+    // hold edges, which the bot and the goldens never pass.
+    mut hold_buffered: Local<bool>,
 ) {
     let dt = input.dt;
     let move_dir = input.move_dir;
@@ -153,8 +158,13 @@ pub fn player_system(
             // exactly the pre-charge one, with no release latency.
             player.dash_charging = false;
             player.dash_charge = 0.0;
+            *hold_buffered = false;
         }
         Some(level) => {
+            if !input.dash_held || input.dash_released {
+                // The buffered hold ends with the hold itself.
+                *hold_buffered = false;
+            }
             if input.charge > 0.0 && (dash || input.dash_held || input.dash_released) {
                 // A scripted charged release (`World::update_with_charge`: the
                 // bot and the single-system tests hand the meter over whole).
@@ -197,15 +207,35 @@ pub fn player_system(
                 player.dash_charging = true;
                 player.dash_charge = 0.0;
                 sfx.0.push(Sfx::DashCharge);
+            } else if input.dash_down {
+                // Pressed while the dash is cooling and kept down: the refused
+                // press below, and the hold is remembered.
+                *hold_buffered = true;
+            } else if *hold_buffered
+                && input.dash_held
+                && player.dash_cd <= 0.0
+                && player.dash_active <= 0.0
+            {
+                // A press the cooldown refused, still held when the dash comes
+                // back: the charge starts now and the release fires it (a
+                // short one as a tap, as usual) instead of the input being
+                // dropped. Only a hold whose own press was refused *in play,
+                // with the weapon owned* counts: a hold that began in a menu,
+                // or before the weapon was picked up, never set the flag. A tap
+                // during the cooldown stays the refused press.
+                *hold_buffered = false;
+                player.dash_charging = true;
+                player.dash_charge = 0.0;
+                sfx.0.push(Sfx::DashCharge);
             }
         }
     }
 
-    // Dash (legacy 189-199), plus the charged release above. `was_charging` is
+    // Dash (legacy 189-199), plus the charged release above. `was_cooling` is
     // read here, before the trigger, so the ready tick below is the tick the
     // *old* cooldown ran out (a dash that starts now must not also announce
     // itself as ready).
-    let was_charging = player.dash_cd > 0.0;
+    let was_cooling = player.dash_cd > 0.0;
     // The App reports a live held dash input as edges; on such a tick the plain
     // `dash` flag must not also fire an instant dash (the release does). Without
     // the weapon, or without hold information (the bot, the harness, `update`),
@@ -297,6 +327,12 @@ pub fn player_system(
     let arena = level.arena;
     let lo = Vec2::splat(PLAYER_RADIUS);
     let hi = Vec2::new(arena.x - PLAYER_RADIUS, arena.y - PLAYER_RADIUS);
+    // `DashTrack::segs` is *this tick's* legs. Start it empty every tick: a
+    // live dash tick does not clear it in `record`, so without this the legs of
+    // every earlier tick of the same dash piled up (the weapon re-tested the
+    // whole path so far each tick, and Ripcord's route was filled with
+    // duplicates until its cap cut the cord short).
+    dash_track.seg_len = 0;
     for _ in 0..steps {
         // Where this sub-step started, so the dash records the legs that
         // really happened (a sub-step a wall pushes back on is no movement and
@@ -342,7 +378,7 @@ pub fn player_system(
     // Pure-visual dash feedback timers (no sim reads them, no rng involved).
     player.dash_ready_flash = (player.dash_ready_flash - dt).max(0.0);
     player.dash_denied = (player.dash_denied - dt).max(0.0);
-    if was_charging && player.dash_cd <= 0.0 {
+    if was_cooling && player.dash_cd <= 0.0 {
         // The dash is back: the gauge pops bright and a quiet tick lands.
         player.dash_ready_flash = DASH_READY_SECS;
         sfx.0.push(Sfx::DashReady);
@@ -558,6 +594,101 @@ mod tests {
         w.end_tick();
 
         assert!((w.player.hp - 50.5).abs() < 1e-4, "hp = {}", w.player.hp);
+    }
+
+    /// `DashTrack::legs_now` is one tick's legs, not the dash so far: on the
+    /// second tick of a dash the first recorded leg starts where the rat stood
+    /// at the top of *that* tick, and the last one ends where it stands now.
+    #[test]
+    fn dash_legs_are_recorded_per_tick_not_accumulated() {
+        use crate::game::ecs::resources::DashTrack;
+
+        let mut w = World::new(Theme::Sewer, 47);
+        open_map(&mut w);
+        w.player.pos = w.level.arena * 0.5;
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.player.dash_cd = 0.0;
+
+        let mut first_tick_legs = 0;
+        for i in 0..4 {
+            let start = w.player.pos;
+            w.begin_tick(DT, Vec2::new(1.0, 0.0), i == 0);
+            run_player(&mut w);
+            w.end_tick();
+            let track = w.ecs.resource::<DashTrack>();
+            let legs = track.legs_now();
+            assert!(!legs.is_empty(), "tick {i}: a moving dash recorded no leg");
+            assert!(
+                legs[0].0.dist(start) < 1e-3,
+                "tick {i}: the first leg starts at {:?}, not at this tick's start {start:?}",
+                legs[0].0
+            );
+            assert!(
+                legs[legs.len() - 1].1.dist(w.player.pos) < 1e-3,
+                "tick {i}: the last leg does not end at the rat"
+            );
+            if i == 0 {
+                first_tick_legs = legs.len();
+            } else {
+                // The velocity only eases up to dash speed, so a later tick may
+                // take a sub-step more than the first, never the running total.
+                assert!(
+                    legs.len() <= first_tick_legs + 2,
+                    "tick {i}: {} legs after {first_tick_legs} on the first tick (accumulating)",
+                    legs.len()
+                );
+            }
+        }
+    }
+
+    /// A dash press the cooldown refuses, held until the dash is back, is not
+    /// dropped: the charge starts on the tick the cooldown ends and the release
+    /// fires a dash.
+    #[test]
+    fn a_hold_through_the_cooldown_is_buffered_and_fires_on_release() {
+        let mut w = World::new(Theme::Sewer, 53);
+        open_map(&mut w);
+        own_super_dash(&mut w);
+        w.player.pos = w.level.arena * 0.5;
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.player.dash_cd = 3.0 * DT;
+        w.player.dash_active = 0.0;
+
+        let step = |w: &mut World, hold: DashHold| {
+            w.begin_tick_with_dash_hold(DT, Vec2::new(1.0, 0.0), false, false, hold);
+            run_player(w);
+            w.end_tick();
+        };
+
+        // The press lands while the dash is cooling: refused, no charge.
+        step(&mut w, PRESS);
+        assert!(!w.player.dash_charging, "a refused press started a charge");
+        assert_eq!(w.player.dash_active, 0.0, "a refused press dashed");
+
+        // Still held when the cooldown runs out: the charge starts.
+        for _ in 0..6 {
+            step(&mut w, HELD);
+        }
+        assert!(w.player.dash_charging, "the buffered hold never started a charge");
+        assert_eq!(w.player.dash_active, 0.0, "the hold fired without a release");
+
+        // The release fires the dash.
+        step(&mut w, RELEASE);
+        assert!(!w.player.dash_charging);
+        assert!(w.player.dash_cd > 0.0, "the release did not dash");
+
+        // A hold with no refused press behind it (begun in a menu, or before
+        // the weapon was owned) never starts a charge on its own.
+        let mut w = World::new(Theme::Sewer, 59);
+        open_map(&mut w);
+        own_super_dash(&mut w);
+        w.player.pos = w.level.arena * 0.5;
+        w.player.dash_cd = 0.0;
+        for _ in 0..6 {
+            step(&mut w, HELD);
+        }
+        assert!(!w.player.dash_charging, "an unpressed hold started a charge");
+        assert_eq!(w.player.dash_active, 0.0);
     }
 
     /// Run one tick of the player system with the given dash press.

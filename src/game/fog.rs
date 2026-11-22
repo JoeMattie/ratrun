@@ -113,6 +113,11 @@ pub struct Fog {
     view_clock: u32,
     /// Player cell the last reveal ran for; `(-1, -1)` before the first one.
     cell: (i32, i32),
+    /// Which one-way doors were see-through at the last reveal (bit `i` =
+    /// `LevelObjects::one_way_doors[i]`, the first 64). A leaf that swings
+    /// open or shut while the rat stands still changes what it can see, so a
+    /// change here reruns the flood without a cell change.
+    door_sig: u64,
     /// Determinism hook: `false` makes the reveal system a no-op, which the
     /// harness uses to prove the fog cannot move the simulation.
     pub reveal_enabled: bool,
@@ -150,6 +155,7 @@ impl Fog {
             clock: 1,
             view_clock: 0,
             cell: (-1, -1),
+            door_sig: 0,
             reveal_enabled: true,
         }
     }
@@ -321,14 +327,18 @@ impl Fog {
         }
     }
 
-    /// Reveal from a world position, but only when the player's cell changed.
-    /// Returns `true` when the flood ran.
+    /// Reveal from a world position, but only when the player's cell changed
+    /// or a one-way door swung past the see-through threshold (otherwise a rat
+    /// waiting in front of an opening leaf kept a blank far side until it
+    /// stepped into the doorway). Returns `true` when the flood ran.
     pub fn update_from(&mut self, level: &Level, pos: Vec2) -> bool {
         let cell = cell_of(pos);
-        if cell == self.cell {
+        let door_sig = Self::door_signature(level);
+        if cell == self.cell && door_sig == self.door_sig {
             return false;
         }
         self.cell = cell;
+        self.door_sig = door_sig;
         self.reveal_cell(level, cell);
         true
     }
@@ -434,6 +444,18 @@ impl Fog {
                 .is_some_and(|door| door.open_progress() >= 0.5),
             _ => false,
         }
+    }
+
+    /// One bit per one-way door (the first 64) that is currently see-through,
+    /// by the same `open_progress() >= 0.5` rule as [`Self::see_through`].
+    fn door_signature(level: &Level) -> u64 {
+        let mut sig = 0u64;
+        for (i, door) in level.objects.one_way_doors.iter().enumerate().take(64) {
+            if door.open_progress() >= 0.5 {
+                sig |= 1u64 << i;
+            }
+        }
+        sig
     }
 
     fn next_stamp(&mut self) -> u32 {
@@ -659,6 +681,36 @@ mod tests {
         fog.reveal_cell(&level, origin);
         assert!(fog.is_seen(15, 15));
         assert!(fog.is_seen(16, 15));
+    }
+
+    /// A leaf that swings open while the rat stands still must rerun the
+    /// flood: the cell did not change, what it can see did.
+    #[test]
+    fn a_door_opening_in_front_of_a_standing_rat_reruns_the_flood() {
+        let mut level = arena();
+        barrier_column(&mut level, 14, TileKind::Wall(WallKind::Solid));
+        level
+            .tiles
+            .set(14, 15, TileKind::Wall(WallKind::OneWayDoor {
+                dir: Cardinal::East,
+            }));
+        level.tiles.rebuild_masks();
+        level
+            .objects
+            .one_way_doors
+            .push(OneWayDoor::new((14, 15), Vec2::new(1.0, 0.0)));
+
+        let mut fog = Fog::new(level.tiles.cols(), level.tiles.rows());
+        let pos = centre((13, 15));
+        assert!(fog.update_from(&level, pos));
+        assert!(!fog.is_seen(15, 15));
+        assert!(!fog.update_from(&level, pos), "nothing changed: no flood");
+
+        level.objects.one_way_doors[0].view.state = OneWayDoorState::Opening;
+        level.objects.one_way_doors[0].view.progress = 1.0;
+        assert!(fog.update_from(&level, pos), "the open leaf reruns the flood");
+        assert!(fog.is_seen(15, 15));
+        assert!(!fog.update_from(&level, pos), "and only once");
     }
 
     #[test]

@@ -1,3 +1,19 @@
+//! Everything drawn: the half-block pixel buffer the world is painted into, the
+//! render-only passes over it, and the ratatui screens around it.
+//!
+//! * `framebuffer` — `PixelBuffer`, the `width × (height*2)` RGB grid blitted
+//!   one `▀` per cell, and `resample_to` (the zoom resample).
+//! * `zoom`, `lighting`, `ink`, `hazard_outline` — render-only passes: the zoom
+//!   ladder, the 2D light map applied before the resample, and the screen-space
+//!   re-stamp of gameplay-critical marks after it. None may touch the
+//!   simulation.
+//! * `palette` — colours and `to_term()`, the fold to the terminal's depth.
+//! * `hud`, `overlay`, `minimap`, `minimap_source`, `cursor` — what sits over
+//!   the playfield during a run.
+//! * `menu`, `options`, `controls`, `campaign`, `shop`, `nest`, `library`,
+//!   `console` — one module per screen. Each screen's `layout()` is the single
+//!   source of truth for its pointer hit rectangles.
+
 pub mod campaign;
 pub mod controls;
 pub mod console;

@@ -1,5 +1,7 @@
 # Rat Run · Subject R-47's route to the surface
 
+> **Status.** The wave-3 design brief, kept for its numbers and intent. It shipped without taking the §13 cut list: all four weapons (13 in total), ten splices with both rerolls, all six minibosses and both side-route bosses are in the tree. Later work extends it: `WAVE4_ROSTERS.md` replaces §8–§9's cast with per-floor rosters (48 ordinary kinds, 24 minibosses), and the Flatbed is a sixth, practice-only floor. Where this file and the code disagree, the code is right.
+
 ## 1. Fifteen minutes on the floor
 
 At 0:00 the rat has Gnaw and enough empty floor to turn back for its first gem. At 3:00 it should recognize a particular enemy by its silhouette. At 12:00 it should be steering a build it chose. At 15:00 the clock reads BOSS. Killing the themed boss clears the floor. Keep the current boss hunt and death sequence. A rat miles from the arena still gets a fight.

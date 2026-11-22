@@ -73,7 +73,10 @@ pub struct ShopRuntime {
 
 impl ShopRuntime {
     fn sync(&mut self, level: &Level) {
-        if self.key == Some(level.seed) {
+        // The length is part of the key (as in `TrapRuntime::sync`): a level
+        // whose hole list changed under the same seed must not index past
+        // the old buffer.
+        if self.key == Some(level.seed) && self.inside.len() == level.objects.shop_holes.len() {
             return;
         }
         self.key = Some(level.seed);

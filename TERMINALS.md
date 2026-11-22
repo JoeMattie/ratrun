@@ -378,7 +378,7 @@ mode, which has its own pointer-free input path.
 * `src/input.rs` — `InputState`, the per-frame `pressed` list, the held-key
   grace window and `DashKey` (which key the HUD and legends name);
   `release_all()` on focus loss.
-* `src/controls.rs` — the remappable layer over `input.rs` (three schemes, 23
+* `src/controls.rs` — the remappable layer over `input.rs` (three schemes, 26
   actions, the legends), including the lone-modifier rule in
   `KeyBind::from_event`.
 * `src/gamepad.rs` — the `gilrs` poller behind the `gamepad` feature, gated on

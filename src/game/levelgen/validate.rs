@@ -154,6 +154,15 @@ pub fn validate(level: &Level) -> Result<(), Vec<String>> {
                 maze.exit
             )),
         }
+        // The door itself must be walkable *from the inside*: the flood only
+        // enters a door cell along its allowed direction, so a reached exit is
+        // one the rat can actually leave through after the cache.
+        if !is_reached(&small, tiles, maze.exit) {
+            errors.push(format!(
+                "maze {i}: exit {:?} cannot be reached from inside the warren",
+                maze.exit
+            ));
+        }
         let (dx, dy) = cardinal_delta(maze.exit_dir);
         let outside = (maze.exit.0 + dx, maze.exit.1 + dy);
         if !tiles.passable(outside.0, outside.1, SizeClass::Small) {
@@ -294,6 +303,9 @@ pub fn validate(level: &Level) -> Result<(), Vec<String>> {
 
     // 7. Placed objects must describe the grid they animate.
     check_objects(level, &mut errors);
+
+    // 7b. Shop holes: a solid wall cell with reachable floor in front of it.
+    check_shop_holes(level, &small, &mut errors);
 
     // 8. The side routes' floor hazards (§11): on public, reachable floor, off
     // every arena/start/maze reservation, and never without a dry way past.
@@ -770,6 +782,43 @@ fn near_threshold(tiles: &TileMap, cell: (i32, i32)) -> bool {
     false
 }
 
+/// The mouse-hole shops: each is cut into a wall cell that stays solid (so
+/// nothing walks into it) and is entered by touching its face from the mouth
+/// cell, which must be open floor the rat can reach — a shop behind a wall is a
+/// shop nobody can open.
+fn check_shop_holes(level: &Level, small: &[bool], errors: &mut Vec<String>) {
+    let tiles = &level.tiles;
+    for (i, hole) in level.objects.shop_holes.iter().enumerate() {
+        if hole.index != i {
+            errors.push(format!(
+                "shop hole {i} at {:?} carries index {}",
+                hole.cell, hole.index
+            ));
+        }
+        if tiles.passable(hole.cell.0, hole.cell.1, SizeClass::Small) {
+            errors.push(format!("shop hole {i} at {:?} is not in a wall", hole.cell));
+        }
+        let (dx, dy) = (hole.mouth.0 - hole.cell.0, hole.mouth.1 - hole.cell.1);
+        if dx.abs() + dy.abs() != 1 {
+            errors.push(format!(
+                "shop hole {i}: mouth {:?} is not beside its wall cell {:?}",
+                hole.mouth, hole.cell
+            ));
+        }
+        if !tiles.get(hole.mouth.0, hole.mouth.1).is_open() {
+            errors.push(format!(
+                "shop hole {i}: mouth {:?} is not open floor",
+                hole.mouth
+            ));
+        } else if !is_reached(small, tiles, hole.mouth) {
+            errors.push(format!(
+                "shop hole {i}: mouth {:?} is unreachable",
+                hole.mouth
+            ));
+        }
+    }
+}
+
 fn check_objects(level: &Level, errors: &mut Vec<String>) {
     let tiles = &level.tiles;
     for hole in &level.objects.rat_holes {
@@ -847,6 +896,14 @@ fn check_objects(level: &Level, errors: &mut Vec<String>) {
     for (cx, cy, kind) in tiles.iter_walls() {
         if matches!(kind, WallKind::OneWayDoor { .. }) && level.objects.door_at(cx, cy).is_none() {
             errors.push(format!("one-way door cell ({cx}, {cy}) has no door object"));
+        }
+        // The mirror of the object check above: a hole cell with no object is
+        // passable but never animates, never squeezes and never tells the fog
+        // it was crossed (`gates::passage_system` walks the objects).
+        if matches!(kind, WallKind::RatHole { .. })
+            && !level.objects.rat_holes.iter().any(|h| h.cell == (cx, cy))
+        {
+            errors.push(format!("rat-hole cell ({cx}, {cy}) has no rat-hole object"));
         }
     }
     if level.objects.rewards.len() != level.mazes.len() {
@@ -1353,6 +1410,80 @@ mod tests {
             errors.iter().any(|e| e.contains("rat-hole")),
             "unexpected report: {errors:#?}"
         );
+    }
+
+    #[test]
+    fn a_rat_hole_cell_without_its_object_fails_validation() {
+        let mut level = Level::generate(Theme::Kitchen, 5);
+        assert!(
+            !level.objects.rat_holes.is_empty(),
+            "the fixture map must carry a rat-hole"
+        );
+        level.objects.rat_holes.remove(0);
+        let errors = validate(&level).expect_err("an unanimated hole must fail");
+        assert!(
+            errors.iter().any(|e| e.contains("has no rat-hole object")),
+            "unexpected report: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn a_shop_hole_with_a_walled_or_sealed_mouth_fails_validation() {
+        let level = Level::generate(Theme::Kitchen, 5);
+        assert!(
+            !level.objects.shop_holes.is_empty(),
+            "the fixture map must carry a shop hole"
+        );
+        // The mouth turned into a wall: nothing to stand on.
+        let mut walled = Level::generate(Theme::Kitchen, 5);
+        let mouth = walled.objects.shop_holes[0].mouth;
+        walled
+            .tiles
+            .set(mouth.0, mouth.1, TileKind::Wall(WallKind::Solid));
+        walled.tiles.rebuild_masks();
+        let errors = validate(&walled).expect_err("a walled shop mouth must fail");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("shop hole 0") && e.contains("is not open floor")),
+            "unexpected report: {errors:#?}"
+        );
+        // The hole's wall cell knocked out: the shop is no longer in a wall.
+        let mut opened = Level::generate(Theme::Kitchen, 5);
+        let cell = opened.objects.shop_holes[0].cell;
+        opened.tiles.set(cell.0, cell.1, TileKind::Open);
+        opened.tiles.rebuild_masks();
+        let errors = validate(&opened).expect_err("a shop hole in open floor must fail");
+        assert!(
+            errors.iter().any(|e| e.contains("is not in a wall")),
+            "unexpected report: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn a_maze_exit_walled_in_from_the_inside_fails_validation() {
+        // Find a map with a maze, then wall up the cell just inside its door.
+        for seed in 0..64u64 {
+            let mut level = Level::generate(Theme::Sewer, seed);
+            let Some(maze) = level.mazes.first().copied() else {
+                continue;
+            };
+            let (dx, dy) = cardinal_delta(maze.exit_dir);
+            let inside = (maze.exit.0 - dx, maze.exit.1 - dy);
+            level
+                .tiles
+                .set(inside.0, inside.1, TileKind::Wall(WallKind::Solid));
+            level.tiles.rebuild_masks();
+            let errors = validate(&level).expect_err("a walled-in exit must fail");
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("cannot be reached from inside the warren")),
+                "seed {seed}: unexpected report: {errors:#?}"
+            );
+            return;
+        }
+        panic!("no Sewer seed in 0..64 carries a maze");
     }
 
     #[test]

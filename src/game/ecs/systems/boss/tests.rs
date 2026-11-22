@@ -619,6 +619,43 @@ fn a_rejoin_never_teleports_the_boss_into_a_wall() {
     }
 }
 
+/// The rejoin waits for the neutral beat: a boss that is owed a relocation but
+/// is in the middle of a set piece stays where its attack is, and is walked
+/// back on the first neutral tick.
+#[test]
+fn a_rejoin_waits_for_the_neutral_beat() {
+    let mut w = World::new(Theme::Sewer, 41);
+    open_arena(&mut w);
+    let far = w.player.pos + Vec2::new(600.0, 0.0);
+    spawn_boss_at(&mut w, BossKind::Cat, far, 5000.0);
+    {
+        let mut query = w.ecs.query::<&mut Boss>();
+        let mut boss = query.iter_mut(&mut w.ecs).next().expect("boss alive");
+        boss.set_state(BossState::Cat(BossCatState::Roar), 5.0);
+        boss.lost = RELOCATE_AFTER_SECS;
+    }
+    update_boss(&mut w, DT);
+    let boss = boss_of(&mut w).expect("boss alive");
+    assert!(
+        boss.pos.dist(w.player.pos) > REJOIN_DIST,
+        "a roaring cat was relocated mid-roar to {:?}",
+        boss.pos
+    );
+    assert!(boss.lost >= RELOCATE_AFTER_SECS, "the timer keeps running");
+    {
+        let mut query = w.ecs.query::<&mut Boss>();
+        let mut boss = query.iter_mut(&mut w.ecs).next().expect("boss alive");
+        boss.set_state(BossState::Cat(BossCatState::Stalk), 5.0);
+    }
+    update_boss(&mut w, DT);
+    let boss = boss_of(&mut w).expect("boss alive");
+    assert!(
+        boss.pos.dist(w.player.pos) <= REJOIN_DIST,
+        "the neutral cat was not walked back ({:?})",
+        boss.pos
+    );
+}
+
 #[test]
 fn a_walled_off_boss_smashes_through_and_reaches_the_rat() {
     let mut w = walled_pocket_world();
@@ -1097,6 +1134,41 @@ fn a_leaping_cat_takes_no_ground_damage() {
     assert!(
         w.ecs.get::<crate::game::bullet::Bullet>(bullet).is_some(),
         "the shot was consumed by a body it passed under"
+    );
+}
+
+/// A mousetrap is on the floor: like a dart or a pool it cannot bite a jaguar
+/// in mid-leap (the trap pass used to test every hit shape, grounded or not,
+/// so a snap under the arc of a pounce cost the cat a full trap hit).
+#[test]
+fn a_leaping_cat_is_not_bitten_by_a_mousetrap() {
+    let mut w = World::new(Theme::Sewer, 39);
+    open_arena(&mut w);
+    let boss_pos = w.player.pos + Vec2::new(40.0, 0.0);
+    spawn_boss_at(&mut w, BossKind::Cat, boss_pos, 5000.0);
+    {
+        let mut query = w.ecs.query::<&mut Boss>();
+        let mut boss = query.iter_mut(&mut w.ecs).next().expect("boss alive");
+        boss.set_state(BossState::Cat(BossCatState::Pounce), 0.70);
+        boss.elapsed = 0.35;
+        assert!(boss.is_airborne());
+    }
+    w.level.objects.mousetraps.push(MousetrapView {
+        pos: boss_pos,
+        facing: Vec2::new(1.0, 0.0),
+        state: MousetrapState::Snapping,
+        progress: 0.5,
+        anim: 0.0,
+        hit_flash: 0.0,
+        ..MousetrapView::new(boss_pos, Vec2::new(1.0, 0.0))
+    });
+    let hp_before = w.boss_hp().expect("boss alive").0;
+
+    tick_boss_damage(&mut w);
+
+    assert!(
+        (w.boss_hp().expect("boss alive").0 - hp_before).abs() < 1e-3,
+        "a floor trap bit a cat that was in the air"
     );
 }
 

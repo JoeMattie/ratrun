@@ -501,10 +501,18 @@ pub fn draw(f: &mut Frame, area: Rect, view: &OptionsView, hits: &mut HitMap) {
         } else {
             " effects preview while you adjust"
         };
-        f.render_widget(
-            Line::styled(note, ink(if view.muted { EDGE } else { MUTED })).centered(),
-            Rect::new(inner.x, legend_y.saturating_add(2), inner.width, 1),
-        );
+        // The note keeps a blank row under the legend when the plate has one
+        // to spare and closes up when it does not. It never leaves the content
+        // rect: on a 19-row terminal `legend_y + 2` is the plate's bottom
+        // border, and the note used to be printed over it.
+        let last_row = inner.bottom().saturating_sub(1);
+        let note_y = legend_y.saturating_add(2).min(last_row);
+        if note_y > legend_y {
+            f.render_widget(
+                Line::styled(note, ink(if view.muted { EDGE } else { MUTED })).centered(),
+                Rect::new(inner.x, note_y, inner.width, 1),
+            );
+        }
     }
 
     // Accent the panel's outer edge faintly so the plate reads as focused.
@@ -671,6 +679,35 @@ mod tests {
                 above.contains('─'),
                 "{w}x{h}: the header divider is not above the first row: {above:?}"
             );
+        }
+    }
+
+    /// On a 19-row terminal the plate's content is 17 rows and `legend + 2` is
+    /// its bottom border: the note closes up under the legend instead of being
+    /// printed over the frame.
+    #[test]
+    fn the_note_stays_inside_the_plate_on_a_short_terminal() {
+        for (w, h) in [(57u16, 19u16), (80, 19), (57, 20), (80, 24), (120, 40)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            let mut hits = HitMap::default();
+            term.draw(|f| draw(f, f.area(), &view(AUTO_PICK_ROW), &mut hits))
+                .unwrap();
+            let buf = term.backend().buffer();
+            let lay = layout(Rect::new(0, 0, w, h));
+            let border_y = lay.panel.bottom() - 1;
+            let border: String = (lay.panel.x..lay.panel.right())
+                .map(|x| buf[(x, border_y)].symbol())
+                .collect();
+            assert!(
+                !border.chars().any(|c| c.is_alphanumeric()),
+                "{w}x{h}: text on the plate's bottom border: {border:?}"
+            );
+            let (text, _) = frame(w, h, &view(AUTO_PICK_ROW));
+            assert!(
+                text.contains("chests still open their card"),
+                "{w}x{h}: the auto-pick note is missing:\n{text}"
+            );
+            assert!(text.contains("Esc back"), "{w}x{h}: legend missing");
         }
     }
 

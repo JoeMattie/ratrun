@@ -16,7 +16,8 @@
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
 
 use crate::game::ecs::systems::miniboss::{
-    Miniboss, MinibossKind, MinibossShape, MinibossState, RECOVER_TIME, RING_GAP_TURN, TELL_TIME,
+    Miniboss, MinibossKind, MinibossShape, MinibossState, SignatureShape, RECOVER_TIME,
+    RING_GAP_TURN, TELL_TIME,
 };
 use crate::game::enemy::Enemy;
 use crate::math::Vec2;
@@ -2565,19 +2566,24 @@ impl Frame {
                 let s = (anim * 6.0).sin();
                 (s * 1.6, -s.abs() * 1.5, 0.0)
             }
+            // Wind back against the facing (with the held beat's quiver), then
+            // lunge along it on the strike.
             Pose::Tell(t) => {
                 let c = tell_coil(t);
-                (c * 2.6, -c * 1.1, c)
+                (-c * 2.6 + tell_quiver(t) * 0.5, -c * 1.1, c)
             }
             Pose::Strike(_) => (4.4, 0.0, 1.0),
             Pose::Recover(_) => (-2.6, 0.0, 0.0),
             Pose::Retreat(t) => (-((t * 9.0).sin().abs()) * 2.0, 0.0, 0.0),
             Pose::Death(_) => (0.0, 0.0, 0.0),
         };
+        // `lean` runs along the facing (it used to be a screen-x offset, so a
+        // body facing left lunged backwards on its strike); `lift` is screen-up.
+        let fdir = safe_dir(f, Vec2::new(1.0, 0.0));
         Frame {
-            c: center + hurt_jolt(f, flash, anim) + Vec2::new(lean, lift),
-            f: safe_dir(f, Vec2::new(1.0, 0.0)),
-            s: safe_dir(f, Vec2::new(1.0, 0.0)).perp(),
+            c: center + hurt_jolt(f, flash, anim) + fdir * lean + Vec2::new(0.0, lift),
+            f: fdir,
+            s: fdir.perp(),
             pose,
             anim,
             flash,
@@ -2627,6 +2633,22 @@ impl Frame {
         if let Pose::Recover(t) = self.pose {
             draw_recover_beacon(pb, self.c, t);
             draw_dizzy_stars(pb, self.c - Vec2::new(0.0, 11.0), 6.4, t);
+        }
+        // The shared wind-up mark: a warning "!" over the body, flickering
+        // while it coils and steady through the held beat, so every one of the
+        // eighteen has a tell that reads without knowing its accessory.
+        if let Pose::Tell(t) = self.pose {
+            if t >= 0.6 || (t * 10.0).fract() < 0.6 {
+                let x = self.c.x.round() as i32;
+                let y = (self.c.y - 15.0).round() as i32;
+                let col: Rgb = (255, 226, 96);
+                for dy in 0..4 {
+                    plot_px(pb, x, y + dy, col);
+                    plot_px(pb, x + 1, y + dy, col);
+                }
+                plot_px(pb, x, y + 5, col);
+                plot_px(pb, x + 1, y + 5, col);
+            }
         }
         draw_hurt_burst(pb, self.c, self.f, self.flash, spark);
     }
@@ -2682,8 +2704,14 @@ fn draw_valve_widow(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, ani
     fr.disc(pb, fr.c, 3.4, rust);
     // The long wrench foreleg: wound back through the tell, thrown forward on
     // the strike. This is the row's tell.
-    let reach = 8.0 + fr.coil * 5.0 - if matches!(pose, Pose::Strike(_)) { 4.0 } else { 0.0 };
-    let jaw = fr.at(reach * 0.6, -5.4 - fr.coil * 1.6);
+    // Long (the silhouette's one asymmetry): out past the wheel at rest, cocked
+    // back beside the hub through the tell, at full stretch on the strike.
+    let reach = if matches!(pose, Pose::Strike(_)) {
+        15.0
+    } else {
+        11.0 - fr.coil * 7.0
+    };
+    let jaw = fr.at(reach, -5.4 - fr.coil * 2.2);
     fr.capsule(pb, fr.at(1.5, -3.4), jaw, 1.9, 1.3, steel);
     // Open-ended wrench jaw.
     fr.capsule(pb, jaw, jaw + fr.f.rotate(0.35) * 4.4, 1.2, 0.8, steel);
@@ -2711,32 +2739,53 @@ fn draw_mudlark(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f
         wave4_death(pb, &fr, t, mud);
         return;
     }
+    let striking = matches!(pose, Pose::Strike(_));
     fr.shadow(pb, 15.0, 5.6);
-    // Wide low carapace.
-    fr.ellipse(pb, fr.c, 9.6, 5.2, mud);
-    // The two claws: 5 px bars astride the aim, open at the tell and closed on
-    // the strike. They start 28 apart and shut to 4.
+    // Eight jointed legs splayed wide under the shell: the crab is far wider
+    // than it is long (about 30 px toe to toe).
+    for i in 0..4 {
+        let t = i as f32 - 1.5;
+        let step = (anim * 6.0 + i as f32 * 1.3).sin() * 1.2;
+        for side in [-1.0f32, 1.0] {
+            let knee = fr.at(t * 2.6, side * 9.4);
+            fr.capsule(pb, fr.at(t * 1.8, side * 4.0), knee, 1.1, 0.9, mud);
+            fr.capsule(pb, knee, fr.at(t * 3.4 + step * side, side * 13.4), 0.9, 0.5, mud);
+        }
+    }
+    // The carapace: a stadium lying across the facing.
+    fr.capsule(pb, fr.at(0.0, -5.2), fr.at(0.0, 5.2), 5.4, 5.4, mud);
+    // The two broken mousetraps it wears on its back: a plank each, with the
+    // sprung bail bent up across it.
+    for side in [-1.0f32, 1.0] {
+        let at = fr.at(-1.2, side * 4.6);
+        fr.slab(pb, at, fr.f, 4.2, 2.6, trap);
+        fr.capsule(
+            pb,
+            at - fr.f * 3.0 - fr.s * (side * 1.8),
+            at + fr.f * 1.6 + fr.s * (side * 2.6),
+            0.6,
+            0.6,
+            steel,
+        );
+        fr.disc(pb, at, 0.9, steel);
+    }
+    // The claws astride the aim: arms thrown wide for the tell (they start 28
+    // apart), slammed to the centre line on the strike. Each ends in a
+    // two-finger pincer that gapes through the tell and is shut on the strike.
     let sep = if matches!(pose, Pose::Tell(_)) {
         13.0 + fr.coil * 1.5
-    } else if matches!(pose, Pose::Strike(_)) {
+    } else if striking {
         2.0
     } else {
         8.0
     };
+    let gape = if striking { 0.08 } else { 0.35 + fr.coil * 0.35 };
     for side in [-1.0f32, 1.0] {
-        let base = fr.at(-2.0, side * 3.0);
-        let tip = fr.at(9.6, side * sep);
-        fr.capsule(pb, base, tip, 2.4, 2.0, steel);
-        // The broken mousetrap it wears: a sprung frame on each claw.
-        fr.slab(pb, base + fr.f * 2.0 + fr.s * (side * 2.0), fr.f, 3.4, 2.2, trap);
-        fr.disc(pb, base + fr.f * 2.0 + fr.s * (side * 2.0), 0.9, steel);
-    }
-    // Six stubby walking legs.
-    for i in 0..3 {
-        let t = i as f32 - 1.0;
-        let step = (anim * 6.0 + i as f32 * 1.3).sin() * 1.1;
-        fr.capsule(pb, fr.at(1.0, t * 4.8), fr.at(4.5 + step, t * 7.4), 0.9, 0.5, mud);
-        fr.capsule(pb, fr.at(-1.0, t * 4.8), fr.at(-4.5 - step, t * 7.4), 0.9, 0.5, mud);
+        let shoulder = fr.at(3.0, side * 6.0);
+        let wrist = fr.at(9.0, side * sep);
+        fr.capsule(pb, shoulder, wrist, 2.2, 2.6, mud);
+        fr.capsule(pb, wrist, wrist + fr.f.rotate(side * gape) * 6.0, 2.0, 0.8, steel);
+        fr.capsule(pb, wrist, wrist + fr.f.rotate(-side * gape) * 5.0, 1.6, 0.7, steel);
     }
     // Two eyes on stalks.
     fr.disc(pb, fr.at(5.4, -2.2), 1.2, mud);
@@ -2758,23 +2807,33 @@ fn draw_pastry_wheel(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, an
         wave4_death(pb, &fr, t, steel);
         return;
     }
-    fr.shadow(pb, 9.5, 4.6);
+    let striking = matches!(pose, Pose::Strike(_));
+    fr.shadow(pb, 10.5, 4.6);
     let spin = anim * (3.0 + fr.coil * 9.0);
-    // The fluted coin at the front.
-    let wheel = fr.at(4.0 + fr.coil * 1.6, 0.0);
-    spokes(pb, &fr, wheel, 6.4, 10, spin, 1.0, steel);
-    fr.disc(pb, wheel, 3.2, wood);
-    // The fork handle behind it.
-    let grip = fr.at(-8.4, 0.0);
-    fr.capsule(pb, grip, wheel - fr.f * 1.0, 1.8, 1.2, wood);
-    for k in [-1.0f32, 0.0, 1.0] {
-        fr.capsule(pb, grip + fr.s * (k * 1.6), grip - fr.f * 4.0 + fr.s * (k * 2.2), 0.8, 0.5, steel);
+    // The wheel rears back along its handle through the tell and is thrown
+    // forward down the cut on the strike.
+    let wheel = fr.at(if striking { 7.0 } else { 5.0 - fr.coil * 2.4 }, 0.0);
+    // The handle: a long wooden grip ending in a two-tine fork that carries
+    // the axle either side of the wheel.
+    fr.capsule(pb, fr.at(-11.0, 0.0), fr.at(-2.5, 0.0), 2.0, 1.5, wood);
+    for side in [-1.0f32, 1.0] {
+        fr.capsule(pb, fr.at(-2.5, side * 1.0), wheel + fr.s * (side * 2.8), 0.9, 0.8, steel);
     }
-    // A curl of cut pastry under the wheel, growing through the tell.
+    // The fluted coin: ten scallops round a solid disc, so the edge is wavy
+    // rather than spoked.
+    for i in 0..10 {
+        let dir = fr.f.rotate(spin + i as f32 * TAU / 10.0);
+        fr.disc(pb, wheel + dir * 5.4, 1.5, steel);
+    }
+    fr.disc(pb, wheel, 5.2, steel);
+    fr.disc(pb, wheel, 2.0, wood);
+    // One dark flute so the spin (and the spin-up of the tell) is visible.
+    fr.capsule(pb, wheel + fr.f.rotate(spin) * 2.0, wheel + fr.f.rotate(spin) * 4.6, 0.6, 0.6, wood);
+    // A curl of cut pastry at the wheel's leading edge, growing with the tell.
     if fr.coil > 0.15 {
-        fr.disc(pb, fr.at(9.0, 3.4), 1.0 + fr.coil * 1.4, dough);
+        fr.disc(pb, wheel + fr.f * 5.0 + fr.s * 3.4, 1.0 + fr.coil * 1.4, dough);
     }
-    fr.eye(pb, 1.0, 0.0, 1.4, (255, 252, 240), (86, 54, 26));
+    fr.eye(pb, -6.0, 0.0, 1.4, (255, 252, 240), (86, 54, 26));
     fr.cues(pb, (232, 236, 244), steel.hi);
 }
 
@@ -2784,6 +2843,7 @@ fn draw_pastry_wheel(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, an
 fn draw_salt_hen(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
     let china = pal((255, 252, 244), (226, 216, 200), (150, 140, 126));
     let blue = pal((176, 214, 244), (92, 138, 190), (44, 70, 106));
+    let hole = pal((44, 70, 106), (26, 42, 66), (14, 22, 36));
     let salt = pal((255, 255, 250), (238, 240, 236), (188, 194, 190));
     let beak = pal((255, 206, 120), (214, 158, 62), (110, 74, 24));
     let fr = Frame::new(center, f, pose, anim, flash);
@@ -2791,30 +2851,39 @@ fn draw_salt_hen(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: 
         wave4_death(pb, &fr, t, china);
         return;
     }
-    fr.shadow(pb, 10.0, 4.4);
-    // Plump china body.
-    fr.ellipse(pb, fr.c, 7.2, 6.0, china);
-    // High tail with the three holes, tipped further back through the tell.
-    let tail = fr.at(-6.0 - fr.coil * 1.4, -3.0 - fr.coil * 2.2);
-    fr.capsule(pb, fr.at(-3.0, -1.0), tail, 2.6, 1.8, china);
+    let striking = matches!(pose, Pose::Strike(_));
+    fr.shadow(pb, 10.5, 4.4);
+    // Two china feet under the body.
+    for side in [-1.0f32, 1.0] {
+        fr.capsule(pb, fr.at(0.4, side * 2.4), fr.at(0.4, side * 3.4) + Vec2::new(0.0, 4.0), 0.9, 0.5, blue);
+    }
+    // Plump china body with a painted wing.
+    fr.ellipse(pb, fr.c, 7.0, 6.0, china);
+    fr.capsule(pb, fr.at(-2.0, 0.0) + Vec2::new(0.0, 1.0), fr.at(2.5, 0.0) + Vec2::new(0.0, 2.2), 1.3, 0.8, blue);
+    // The high tail is the shaker's cap: a tall fan with three dark holes. It
+    // stands upright at rest and tips over toward the rat to pour.
+    let tip = if striking { 6.0 } else { fr.coil * 5.0 };
+    let root = fr.at(-4.5, 0.0) + Vec2::new(0.0, -3.0);
+    let top = fr.at(-6.5 + tip, 0.0) + Vec2::new(0.0, -10.5 + tip * 0.3);
+    fr.capsule(pb, root, top, 3.0, 3.6, china);
     for k in 0..3 {
-        let at = tail + fr.s * ((k as f32 - 1.0) * 1.5) + fr.f * 0.2;
-        fr.disc(pb, at, 0.7, blue);
+        let at = top + fr.s * ((k as f32 - 1.0) * 2.2) + Vec2::new(0.0, -0.4);
+        fr.disc(pb, at, 1.0, hole);
     }
     // Head, comb and beak.
-    let head = fr.at(6.4, -3.0);
+    let head = fr.at(6.0, 0.0) + Vec2::new(0.0, -3.5);
     fr.disc(pb, head, 2.6, china);
-    fr.slab(pb, head + fr.s * -2.2, fr.f, 1.6, 0.8, blue);
-    fr.capsule(pb, head + fr.f * 1.8, head + fr.f * 3.6 + fr.s * 0.4, 1.0, 0.4, beak);
-    // Two china feet.
-    for side in [-1.0f32, 1.0] {
-        fr.capsule(pb, fr.at(0.4, side * 2.4), fr.at(0.4, side * 3.4) + Vec2::new(0.0, 3.0), 0.9, 0.5, blue);
-    }
-    // The salt it is about to lay: a swelling pile at the beak.
+    fr.slab(pb, head + Vec2::new(0.0, -2.6), fr.f, 1.6, 0.8, blue);
+    fr.capsule(pb, head + fr.f * 1.8, head + fr.f * 3.8 + Vec2::new(0.0, 0.4), 1.0, 0.4, beak);
+    // Salt running out of the tipped cap: three grains, one per hole.
     if fr.coil > 0.2 {
-        fr.disc(pb, head + fr.f * 5.0 + Vec2::new(0.0, 2.4), 1.0 + fr.coil * 1.2, salt);
+        for k in 0..3 {
+            let fall = ((anim * 2.4 + k as f32 * 0.33).fract()) * 6.0;
+            let at = top + fr.f * (2.0 + fr.coil * 2.0) + fr.s * ((k as f32 - 1.0) * 2.2) + Vec2::new(0.0, fall);
+            fr.disc(pb, at, 0.9, salt);
+        }
     }
-    fr.eye(pb, 6.8, -4.0, 1.2, (255, 255, 255), (44, 70, 106));
+    fr.eye(pb, 6.6, 0.0, 1.2, (255, 255, 255), (44, 70, 106));
     fr.cues(pb, (236, 242, 252), china.hi);
 }
 
@@ -2833,7 +2902,12 @@ fn draw_pot_brush(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim:
     fr.shadow(pb, 12.5, 5.2);
     // Jointed handle from the back to the elbow.
     let elbow = fr.at(-1.0 + fr.coil * 2.0, -4.0);
-    fr.capsule(pb, fr.at(-9.5, -1.0), elbow, 1.5, 1.3, wood);
+    // Two sections with a visible knuckle, so the whole reads as a long
+    // jointed arm rather than a stub behind a fan.
+    let knuckle = fr.at(-8.0, 1.6);
+    fr.capsule(pb, fr.at(-15.0, -1.0), knuckle, 1.4, 1.4, wood);
+    fr.capsule(pb, knuckle, elbow, 1.5, 1.3, wood);
+    fr.disc(pb, knuckle, 1.7, bristle);
     fr.disc(pb, elbow, 1.6, wood);
     // The bristle fan: eleven short strokes spreading from the elbow.
     let spread = 0.55 + fr.coil * 0.45;
@@ -2865,26 +2939,38 @@ fn draw_dose_pump(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim:
         wave4_death(pb, &fr, t, glass);
         return;
     }
+    let striking = matches!(pose, Pose::Strike(_));
     fr.shadow(pb, 8.0, 4.2);
-    // The barrel, upright: length along `up`, not the facing.
-    let up = Vec2::new(0.0, -1.0);
-    fr.slab(pb, fr.c, up, 6.4, 3.4, glass);
-    // The dose inside, rising as the plunger draws back.
-    let level = -4.0 + fr.coil * 2.6;
-    fr.slab(pb, fr.c + up * level, up, 2.2, 2.9, fluid);
-    // Plunger rod through the top.
-    fr.capsule(pb, fr.c + up * 6.0, fr.c + up * (10.0 + fr.coil * 2.0), 1.4, 1.0, steel);
-    fr.slab(pb, fr.c + up * (10.0 + fr.coil * 2.0), fr.s, 1.2, 1.0, steel);
-    // Wide plunger foot at the bottom.
-    fr.slab(pb, fr.c + up * -7.2, fr.s, 1.4, 3.6, steel);
-    // Needle out the bottom, extending on the strike.
-    let needle = if matches!(pose, Pose::Strike(_)) { 6.0 } else { 3.0 };
-    fr.capsule(pb, fr.c + up * -8.0, fr.c + up * (-8.0 - needle), 0.8, 0.4, steel);
-    // Two printed ticks on the glass.
+    // The barrel stands on its nose at rest and is levelled at the rat through
+    // the tell: `nose` swings from straight down to the locked aim, which is
+    // the line the injection trench will run along.
+    let down = Vec2::new(0.0, 1.0);
+    let level = if striking || matches!(pose, Pose::Recover(_)) {
+        1.0
+    } else {
+        fr.coil.min(1.0)
+    };
+    let nose = safe_dir(down * (1.0 - level) + fr.f * level, down);
+    let side = nose.perp();
+    // Glass barrel.
+    fr.slab(pb, fr.c, nose, 6.4, 3.4, glass);
+    // The dose: drawn in as the plunger pulls back, gone once it is driven.
+    let dose = if striking { 0.8 } else { 1.6 + fr.coil * 2.4 };
+    fr.slab(pb, fr.c + nose * (5.6 - dose), nose, dose, 2.8, fluid);
+    // Two printed graduations.
     for k in 0..2 {
-        fr.slab(pb, fr.c + up * (-1.0 + k as f32 * 2.4) + fr.s * 2.0, fr.s, 0.6, 0.9, fluid);
+        fr.slab(pb, fr.c + nose * (-3.4 + k as f32 * 2.4), side, 1.8, 0.4, fluid);
     }
-    fr.eye(pb, 2.2, 1.6, 1.3, (250, 255, 255), (60, 88, 34));
+    // The plunger foot: a wide flange on the barrel's back end, the rod
+    // through it, and the thumb plate — pulled far back through the tell.
+    let pull = if striking { 7.6 } else { 10.0 + fr.coil * 2.6 };
+    fr.capsule(pb, fr.c - nose * 6.0, fr.c - nose * pull, 1.3, 1.0, steel);
+    fr.slab(pb, fr.c - nose * pull, side, 3.0, 1.0, steel);
+    fr.slab(pb, fr.c - nose * 6.8, side, 4.4, 1.0, steel);
+    // The needle, shot out on the strike.
+    let needle = if striking { 13.0 } else { 9.6 };
+    fr.capsule(pb, fr.c + nose * 6.4, fr.c + nose * needle, 0.8, 0.4, steel);
+    fr.eye(pb, 0.0, 0.0, 1.3, (250, 255, 255), (60, 88, 34));
     fr.cues(pb, (200, 232, 214), glass.hi);
 }
 
@@ -2909,11 +2995,25 @@ fn draw_petri_mother(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, an
     for i in 0..18 {
         let a = i as f32 * TAU / 18.0;
         let dir = Vec2::from_angle(a);
-        if dir.dot(gap) > 0.86 {
+        // The break is as wide as the ring's own 75° sterile gap.
+        if dir.dot(gap) > 0.79 {
             continue;
         }
-        let at = fr.c + Vec2::new(dir.x * 10.4, dir.y * 4.0);
-        fr.disc(pb, at, 0.9, agar);
+        let at = fr.c + Vec2::new(dir.x * 11.0, dir.y * 4.6);
+        fr.disc(pb, at, 1.3, glass);
+    }
+    // The culture front: a ring of spots creeping out across the agar toward
+    // the rim through the tell — the ring that is about to leave the dish.
+    if fr.coil > 0.1 {
+        let front = 3.0 + fr.coil.min(1.0) * 6.0;
+        for i in 0..10 {
+            let dir = Vec2::from_angle(i as f32 * TAU / 10.0 + anim);
+            if dir.dot(gap) > 0.79 {
+                continue;
+            }
+            let at = fr.c + Vec2::new(dir.x * front, dir.y * front * 0.42 - 0.8);
+            fr.disc(pb, at, 0.8, colony);
+        }
     }
     // The colony, swelling with the tell.
     let r = 1.8 + fr.coil * 2.6 + (anim * 3.0).sin() * 0.3;
@@ -2964,6 +3064,17 @@ fn draw_cage_counter(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, an
     // The pointer arm at the top, and the tally mark it lands on.
     fr.capsule(pb, fr.c - Vec2::new(0.0, 8.4), fr.c - Vec2::new(0.0, 5.4), 1.0, 0.7, pad);
     fr.disc(pb, fr.c - Vec2::new(0.0, 9.0), 1.2, pad);
+    // Three reader lamps under the wheel: dark at rest, lit one by one as the
+    // tell counts up (left, right, centre — the order its pads pulse in).
+    let lit = if matches!(pose, Pose::Strike(_)) {
+        3
+    } else {
+        (fr.coil * 3.0).floor() as i32
+    };
+    for (n, x) in [(0, -4.0f32), (1, 4.0), (2, 0.0)] {
+        let at = fr.c + Vec2::new(x, 5.6);
+        fr.disc(pb, at, 1.3, if n < lit { pad } else { ink });
+    }
     fr.eye(pb, 1.8, 0.0, 1.4, (255, 252, 236), (54, 62, 74));
     fr.cues(pb, (236, 224, 188), brass.hi);
 }
@@ -2975,30 +3086,49 @@ fn draw_rotor_technician(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose
     let shell = pal((176, 214, 236), (98, 140, 172), (46, 68, 92));
     let cable = pal((236, 196, 90), (172, 122, 44), (82, 56, 20));
     let spark = pal((255, 250, 214), (250, 208, 96), (176, 116, 32));
+    let steel = pal((244, 250, 255), (176, 190, 206), (80, 90, 108));
     let fr = Frame::new(center, f, pose, anim, flash);
     if let Pose::Death(t) = pose {
         wave4_death(pb, &fr, t, shell);
         return;
     }
-    fr.shadow(pb, 11.0, 5.0);
-    // Snaking cable behind the head: five beads on a travelling sine.
-    for i in 0..5 {
+    fr.shadow(pb, 12.0, 5.0);
+    // The snaking cable behind the head: seven beads on a travelling sine,
+    // long enough that head and cable together run about 32 px.
+    for i in 0..7 {
         let u = i as f32;
         let ph = anim * 4.0 + u * 1.1 + fr.coil * 2.0;
-        let at = fr.at(-5.0 - u * 3.2, (ph.sin()) * (1.4 + u * 0.5));
-        fr.disc(pb, at, 1.6 - u * 0.12, cable);
+        let at = fr.at(-7.0 - u * 2.4, ph.sin() * (1.0 + u * 0.45));
+        fr.disc(pb, at, 1.5 - u * 0.1, cable);
     }
-    // The triangular rotor head: three blades 120° apart, turning with the coil.
-    let turn = anim * 2.4 + fr.coil * 1.8;
+    // The triangular rotor head: three corners joined by straight sides, idly
+    // turning, squared up to the rat as the tell locks.
+    let turn = anim * 1.2 * (1.0 - fr.coil.min(1.0));
+    let corners: [Vec2; 3] =
+        std::array::from_fn(|k| fr.c + fr.f.rotate(turn + k as f32 * TAU / 3.0) * 8.6);
     for k in 0..3 {
-        let dir = fr.f.rotate(turn + k as f32 * TAU / 3.0);
-        fr.capsule(pb, fr.c, fr.c + dir * 6.6, 2.2, 1.0, shell);
+        fr.capsule(pb, corners[k], corners[(k + 1) % 3], 1.6, 1.6, shell);
     }
-    fr.disc(pb, fr.c, 2.6, spark);
-    // A tiny spark at the live tip during the tell.
+    fr.disc(pb, fr.c, 4.6, shell);
+    fr.disc(pb, fr.c, 2.2, spark);
+    // The blade. Folded back over the cable at rest; through the tell it
+    // swings out to the edge its 150° turn starts from (never across the aim),
+    // then follows the strike round to the far edge and hangs there, spent.
+    let half_sweep = 75.0_f32.to_radians();
+    let (ang, reach) = match pose {
+        Pose::Tell(_) => {
+            let k = fr.coil.min(1.0);
+            (-PI + (PI - half_sweep) * k, 9.0 + 5.0 * k)
+        }
+        Pose::Strike(t) => (-half_sweep + 2.0 * half_sweep * t, 15.0),
+        Pose::Recover(_) => (half_sweep, 12.0),
+        _ => (-PI, 9.0),
+    };
+    let blade = fr.f.rotate(ang);
+    fr.capsule(pb, fr.c, fr.c + blade * reach, 1.8, 0.9, steel);
+    // A live spark on the blade's tip through the tell.
     if fr.coil > 0.3 {
-        let tip = fr.c + fr.f.rotate(turn) * 7.6;
-        fr.disc(pb, tip, 1.1, spark);
+        fr.disc(pb, fr.c + blade * (reach + 1.0), 1.1, spark);
     }
     fr.eye(pb, 2.0, 0.0, 1.3, (255, 255, 255), (46, 68, 92));
     fr.cues(pb, (180, 220, 240), spark.hi);
@@ -3008,6 +3138,7 @@ fn draw_rotor_technician(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose
 // A 27 px soap dome with one flat broken edge, foaming through the tell.
 fn draw_suds_bailiff(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
     let soap = pal((236, 250, 252), (176, 214, 222), (88, 124, 138));
+    let cut = pal((88, 124, 138), (58, 86, 98), (34, 52, 62));
     let foam = pal((255, 255, 255), (222, 240, 244), (150, 180, 190));
     let brass = pal((255, 230, 158), (196, 148, 58), (96, 66, 22));
     let fr = Frame::new(center, f, pose, anim, flash);
@@ -3015,24 +3146,33 @@ fn draw_suds_bailiff(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, an
         wave4_death(pb, &fr, t, soap);
         return;
     }
-    fr.shadow(pb, 12.0, 5.0);
-    // The dome: a tall ellipse with a flat broken chord on its dark side.
-    fr.ellipse(pb, fr.c, 8.4, 7.4, soap);
-    let flat = fr.at(-4.6, 0.0);
-    fr.slab(pb, flat, Vec2::new(0.0, 1.0), 5.2, 1.2, soap);
-    fr.slab(pb, flat + fr.f * -0.6, Vec2::new(0.0, 1.0), 4.0, 0.6, foam);
+    fr.shadow(pb, 13.0, 5.0);
+    // The dome: a big round bubble sitting in a flat skirt of foam.
+    let dome = fr.c + Vec2::new(0.0, -1.0);
+    fr.disc(pb, dome, 9.0, soap);
+    fr.slab(pb, fr.c + Vec2::new(0.0, 6.8), Vec2::new(1.0, 0.0), 9.8, 1.6, foam);
+    // The one flat broken edge: a chord sliced off the dome on the side its
+    // rim's gap opens (a quarter turn off the facing), dark with a bright lip.
+    let gap = fr.f.rotate(RING_GAP_TURN);
+    let chord = dome + gap * 7.6;
+    fr.slab(pb, chord, gap.perp(), 4.6, 1.5, cut);
+    fr.slab(pb, chord - gap * 1.6, gap.perp(), 4.2, 0.5, foam);
     // A peaked bailiff's cap on top.
-    fr.slab(pb, fr.c + Vec2::new(0.0, -7.4), fr.s, 1.0, 3.4, brass);
-    fr.slab(pb, fr.c + Vec2::new(0.0, -6.2), fr.s, 0.8, 4.0, brass);
-    // Foam beads: more of them, further out, through the tell.
-    let n = 3 + (fr.coil * 4.0) as i32;
+    fr.slab(pb, dome + Vec2::new(0.0, -9.6), Vec2::new(1.0, 0.0), 2.6, 1.2, brass);
+    fr.slab(pb, dome + Vec2::new(0.0, -8.2), Vec2::new(1.0, 0.0), 4.4, 0.8, brass);
+    // Foam beads boiling off the dome: more of them, further out, through the
+    // tell — the rim that is about to roll outward.
+    let n = 4 + (fr.coil * 6.0) as i32;
     for k in 0..n {
-        let a = anim * 1.2 + k as f32 * TAU / n.max(1) as f32;
-        let r = 8.0 + (k as f32 * 1.7 + anim * 3.0).sin() * 1.6 + fr.coil;
-        let at = fr.c + Vec2::from_angle(a) * r;
-        fr.disc(pb, at, 1.2, foam);
+        let a = anim * 1.2 + k as f32 * TAU / n as f32;
+        let dir = Vec2::from_angle(a);
+        if dir.dot(gap) > 0.84 {
+            continue;
+        }
+        let r = 10.0 + (k as f32 * 1.7 + anim * 3.0).sin() * 1.2 + fr.coil * 3.0;
+        fr.disc(pb, dome + dir * r, 1.3, foam);
     }
-    fr.eye(pb, 3.0, -1.8, 1.4, (255, 255, 255), (88, 124, 138));
+    fr.eye(pb, 3.0, -1.8, 1.5, (255, 255, 255), (88, 124, 138));
     fr.cues(pb, (236, 250, 250), foam.hi);
 }
 
@@ -3049,20 +3189,26 @@ fn draw_wringer_boy(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, ani
         return;
     }
     fr.shadow(pb, 15.5, 5.4);
-    // The frame the pair runs in.
-    fr.slab(pb, fr.c, fr.f, 4.2, 9.0, rubber);
-    // Two rollers astride the aim, spinning.
-    let sep = if matches!(pose, Pose::Tell(_)) {
-        9.5 + fr.coil
+    // The frame the pair runs in: a low bed behind the rollers.
+    fr.slab(pb, fr.at(-3.4, 0.0), fr.s, 12.0, 1.6, rubber);
+    // Two rollers end to end across the aim, exactly as the strike's bars lie:
+    // a cylinder either side of the central seam the glove hangs through.
+    // They part for the tell and slam back to the seam on the strike.
+    let inner = if matches!(pose, Pose::Tell(_)) {
+        4.4 + fr.coil * 1.6
     } else if matches!(pose, Pose::Strike(_)) {
-        4.6
+        2.6
     } else {
-        7.0
+        3.4
     };
+    let roll = (anim * (3.4 + fr.coil * 6.0)).rem_euclid(TAU);
     for side in [-1.0f32, 1.0] {
-        let at = fr.at(0.0, side * sep);
-        spokes(pb, &fr, at, 4.6, 8, anim * 3.4 + side, 0.9, steel);
-        fr.disc(pb, at, 2.0, rubber);
+        let mid = fr.at(0.6, side * (inner + 6.0));
+        fr.slab(pb, mid, fr.s, 6.0, 2.8, steel);
+        // End caps and a rolling seam line, so the cylinder visibly turns.
+        fr.disc(pb, fr.at(0.6, side * inner), 2.8, rubber);
+        fr.disc(pb, fr.at(0.6, side * (inner + 12.0)), 2.8, rubber);
+        fr.slab(pb, mid + fr.f * (roll.cos() * 2.0), fr.s, 5.4, 0.5, rubber);
     }
     // The limp glove hanging between them, dragged further in by the coil.
     let hand = fr.at(5.6 - fr.coil * 1.4, 0.0);
@@ -3093,8 +3239,13 @@ fn draw_quoin_key(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim:
         let step = (anim * 5.0 + side).sin() * 1.0;
         fr.capsule(pb, fr.at(-6.0, side * 2.4), fr.at(-6.0 + step, side * 3.6) + Vec2::new(0.0, 2.4), 0.9, 0.5, ink);
     }
-    // The steel fork: two prongs that close as the tell coils.
-    let close = fr.coil * 3.0;
+    // The steel fork: the prongs spread wide through the tell (the wedge the
+    // chase frame is about to close over) and snap shut on the strike.
+    let close = if matches!(pose, Pose::Strike(_)) {
+        2.6
+    } else {
+        -fr.coil * 2.6
+    };
     for side in [-1.0f32, 1.0] {
         let root = fr.at(-1.0, side * (3.6 - close * 0.5));
         let tip = fr.at(7.4, side * (3.0 - close));
@@ -3117,19 +3268,30 @@ fn draw_carbon_twin(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, ani
         wave4_death(pb, &fr, t, sheet);
         return;
     }
-    fr.shadow(pb, 11.0, 4.6);
-    // Two sheets: the carbon one under, the paper one over, peeling apart.
-    let peel = 1.2 + fr.coil * 2.6 + (anim * 3.0).sin() * 0.3;
-    fr.slab(pb, fr.at(-2.0, -peel), fr.f, 10.4, 1.4, carbon);
-    fr.slab(pb, fr.at(0.0, peel), fr.f.rotate(0.10), 10.4, 1.4, sheet);
-    // Ruled lines on the paper sheet.
+    fr.shadow(pb, 12.0, 4.8);
+    // Two real sheets, offset: dark carbon under, white paper over. They peel
+    // further apart through the tell and slap flat together on the strike.
+    let apart = if matches!(pose, Pose::Strike(_)) {
+        0.6
+    } else {
+        2.0 + fr.coil * 3.0 + (anim * 3.0).sin() * 0.3
+    };
+    fr.slab(pb, fr.at(-apart * 0.6, -apart), fr.f, 10.0, 5.0, carbon);
+    let top = fr.at(apart * 0.6, apart);
+    fr.slab(pb, top, fr.f, 10.0, 5.0, sheet);
+    // Ruled lines on the paper.
     for k in 0..3 {
-        let at = fr.at(-6.0 + k as f32 * 5.0, peel + 0.2);
-        fr.slab(pb, at, fr.f, 2.2, 0.4, inkline);
+        fr.slab(pb, top + fr.s * ((k as f32 - 1.0) * 2.6), fr.f, 7.0, 0.4, inkline);
     }
-    // The offset ghost edge: the telling detail of a carbon copy.
-    fr.slab(pb, fr.at(9.6, -1.6), fr.f, 1.2, 1.0, inkline);
-    fr.eye(pb, 4.0, peel + 0.4, 1.3, (255, 255, 255), (34, 38, 50));
+    // The folded edge the transfer is laid from: a dark spine joining the two
+    // at the front.
+    fr.slab(pb, fr.at(10.2, 0.0), fr.s, apart + 5.0, 0.8, inkline);
+    // The paper's back corner curling up as it peels.
+    if fr.coil > 0.1 {
+        let corner = top - fr.f * 9.0 + fr.s * 4.2 + Vec2::new(0.0, -fr.coil * 2.0);
+        fr.disc(pb, corner, 1.4 + fr.coil, sheet);
+    }
+    fr.eye(pb, 3.0 + apart * 0.6, apart, 1.4, (255, 255, 255), (34, 38, 50));
     fr.cues(pb, (212, 218, 228), sheet.hi);
 }
 
@@ -3146,19 +3308,29 @@ fn draw_late_plate(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim
         return;
     }
     fr.shadow(pb, 11.5, 4.8);
-    // The curved plate: five linked segments along an arc that curls in.
-    let curl = 1.0 + fr.coil * 0.5;
-    for i in 0..5 {
-        let u = i as f32 - 2.0;
-        let a = u * 0.42 * curl;
-        let dir = fr.f.rotate(a);
-        let at = fr.c + dir * (6.0 - fr.coil * 0.8);
-        fr.slab(pb, at, dir, 3.2, 1.6, steel);
+    // The curved plate: nine tangent segments on a wide arc bowed toward the
+    // rat (about 30 px tip to tip), curling tighter through the tell the way
+    // its ring closes. One segment is missing: the torn registration notch,
+    // a real break in the silhouette like the break in its ring.
+    let curl = 1.0 + fr.coil * 0.45;
+    let radius = 11.0 - fr.coil * 2.4;
+    let hub = fr.c - fr.f * 4.0;
+    for i in 0..9 {
+        if i == 6 {
+            continue;
+        }
+        let u = i as f32 - 4.0;
+        let dir = fr.f.rotate(u * 0.32 * curl);
+        let at = hub + dir * radius;
+        fr.slab(pb, at, dir.perp(), 2.4, 1.7, steel);
+        // The inked printing face on the inside of the curve.
+        fr.slab(pb, at - dir * 1.4, dir.perp(), 2.0, 0.5, ink);
     }
-    // The torn registration notch: a dark bite out of the plate's rim.
-    let notch = fr.c + fr.f.rotate(0.55) * 6.4;
-    fr.disc(pb, notch, 1.3, paper);
-    fr.disc(pb, notch, 0.7, ink);
+    // Torn paper edges either side of the notch.
+    for u in [1.45f32, 2.55] {
+        let dir = fr.f.rotate(u * 0.32 * curl);
+        fr.disc(pb, hub + dir * radius, 1.0, paper);
+    }
     // A registration cross on the plate.
     fr.slab(pb, fr.c, fr.f, 2.2, 0.4, ink);
     fr.slab(pb, fr.c, fr.s, 2.2, 0.4, ink);
@@ -3178,19 +3350,32 @@ fn draw_tarpaulin_pup(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, a
         return;
     }
     fr.shadow(pb, 10.0, 4.2);
-    // Folded tarp: two overlapping slabs, opening out with the coil.
-    let open = fr.coil * 0.30;
-    fr.slab(pb, fr.at(-1.2, 0.0), fr.f, 5.4, 3.2, tarp);
-    fr.slab(pb, fr.at(1.4, 0.0), fr.f.rotate(open), 5.0, 3.0, weave);
-    // Seams along the fold.
-    for k in 0..2 {
-        fr.slab(pb, fr.at(-3.0 + k as f32 * 3.4, 0.0), fr.f.rotate(open * 0.5), 1.0, 2.6, tarp);
-    }
-    // Four grommet feet.
-    for (a, s) in [(-4.4f32, -2.6f32), (-4.4, 2.6), (4.4, -2.6), (4.4, 2.6)] {
+    // A wagging tail of tarp at the back.
+    fr.capsule(pb, fr.at(-6.0, 0.0), fr.at(-9.4, (anim * 7.0).sin() * 1.8), 1.3, 0.6, tarp);
+    // Four grommet feet under the fold.
+    for (a, s) in [(-4.4f32, -3.0f32), (-4.4, 3.0), (4.4, -3.0), (4.4, 3.0)] {
         let at = fr.at(a, s);
-        fr.capsule(pb, at, at + Vec2::new(0.0, 2.6), 0.9, 0.6, grommet);
-        fr.disc(pb, at, 0.8, grommet);
+        fr.capsule(pb, at, at + Vec2::new(0.0, 3.0), 0.9, 0.6, grommet);
+        fr.disc(pb, at, 1.0, grommet);
+    }
+    // The folded tarp: a base panel with two seams...
+    fr.slab(pb, fr.at(-1.2, 0.0), fr.f, 5.6, 3.6, tarp);
+    for k in 0..2 {
+        fr.slab(pb, fr.at(-4.0 + k as f32 * 2.6, 0.0), fr.s, 3.4, 0.4, grommet);
+    }
+    // ...and the top fold, which slides forward and lengthens as it unfurls:
+    // a little through the tell, all the way out on the strike.
+    let unfurl = if matches!(pose, Pose::Strike(_)) {
+        7.0
+    } else {
+        fr.coil * 4.0
+    };
+    fr.slab(pb, fr.at(1.4 + unfurl * 0.5, 0.0), fr.f, 4.6 + unfurl * 0.5, 3.2, weave);
+    // The hem on its leading edge.
+    fr.slab(pb, fr.at(6.0 + unfurl, 0.0), fr.s, 3.2, 0.5, grommet);
+    // Two floppy corner ears.
+    for side in [-1.0f32, 1.0] {
+        fr.capsule(pb, fr.at(3.4, side * 2.6), fr.at(1.8, side * 5.2), 1.3, 0.6, weave);
     }
     fr.eye(pb, 3.2, -0.8, 1.3, (255, 255, 250), (58, 68, 38));
     fr.cues(pb, (186, 196, 148), weave.hi);
@@ -3211,15 +3396,17 @@ fn draw_axle_nut(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: 
     fr.shadow(pb, 9.6, 4.4);
     // Six flat facets: a ring of short slabs, rolling with the coil.
     let spin = anim * 1.8 + fr.coil * 2.2;
+    // Each flat is a slab lying along the tangent, so the outline has six
+    // straight sides and six corners instead of reading as a toothed gear.
     for k in 0..6 {
         let dir = fr.f.rotate(spin + k as f32 * TAU / 6.0);
-        let at = fr.c + dir * 6.6;
-        fr.slab(pb, at, dir.perp(), 1.1, 2.6, steel);
+        let at = fr.c + dir * 8.4;
+        fr.slab(pb, at, dir.perp(), 5.6, 1.6, steel);
     }
-    fr.disc(pb, fr.c, 5.2, steel);
-    // The black hole in its face.
-    fr.disc(pb, fr.c, 2.6, hole);
-    fr.disc(pb, fr.c + Vec2::new(-0.6, -0.6), 1.4, grease);
+    fr.disc(pb, fr.c, 8.2, steel);
+    // The black hole in its face: big enough to be the first thing read.
+    fr.disc(pb, fr.c, 4.0, hole);
+    fr.disc(pb, fr.c + Vec2::new(-0.8, -0.8), 1.8, grease);
     // Two stubby walking legs, out of phase with the roll.
     for side in [-1.0f32, 1.0] {
         let step = (anim * 6.0 + side * 1.6).sin() * 1.2;
@@ -3234,6 +3421,7 @@ fn draw_axle_nut(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: 
 // tell and swings on the strike.
 fn draw_chain_dog(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
     let chain = pal((236, 240, 250), (156, 166, 184), (64, 70, 86));
+    let link = pal((156, 166, 184), (98, 106, 124), (44, 48, 60));
     let binder = pal((255, 196, 108), (196, 124, 48), (96, 54, 20));
     let hide = pal((206, 186, 150), (146, 124, 92), (70, 58, 40));
     let fr = Frame::new(center, f, pose, anim, flash);
@@ -3241,24 +3429,45 @@ fn draw_chain_dog(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim:
         wave4_death(pb, &fr, t, chain);
         return;
     }
-    fr.shadow(pb, 11.0, 4.6);
-    // The chain loop: eight links on a travelling curve behind the body.
-    for i in 0..8 {
-        let u = i as f32;
-        let ph = anim * 3.0 + u * 0.9 + fr.coil * 1.6;
-        let at = fr.at(-4.0 - u * 2.2, ph.sin() * (1.2 + u * 0.35));
-        fr.disc(pb, at, 1.5 - u * 0.07, chain);
+    fr.shadow(pb, 12.5, 4.8);
+    // The triangular load binder on its drag chain. Dragged behind at rest;
+    // through the tell it is hauled round to the edge the swing starts from
+    // (never across the aim), then follows the strike to the far edge.
+    let half_sweep = 57.5_f32.to_radians();
+    let (ang, reach) = match pose {
+        Pose::Tell(_) => {
+            let k = fr.coil.min(1.0);
+            (-PI + (PI - half_sweep) * k, 11.0 + 2.0 * k)
+        }
+        Pose::Strike(t) => (-half_sweep + 2.0 * half_sweep * t, 14.0),
+        Pose::Recover(_) => (half_sweep, 12.0),
+        _ => (-PI + (anim * 3.0).sin() * 0.25, 11.0),
+    };
+    let drag = fr.f.rotate(ang);
+    let anchor = fr.at(-1.0, 0.0);
+    let at_binder = anchor + drag * reach;
+    for k in 1..4 {
+        fr.disc(pb, anchor + drag * (reach * k as f32 / 4.0), 1.2, link);
     }
-    // Triangular binder head.
-    let tip = fr.at(7.4, 0.0);
-    fr.capsule(pb, fr.at(1.0, -3.4), tip, 2.0, 1.4, binder);
-    fr.capsule(pb, fr.at(1.0, 3.4), tip, 2.0, 1.4, binder);
-    fr.slab(pb, fr.at(1.4, 0.0), fr.s, 1.4, 3.4, hide);
-    // Two ears.
+    let corners: [Vec2; 3] =
+        std::array::from_fn(|k| at_binder + drag.rotate(k as f32 * TAU / 3.0) * 3.8);
+    for k in 0..3 {
+        fr.capsule(pb, corners[k], corners[(k + 1) % 3], 1.2, 1.2, binder);
+    }
+    // The body: a closed loop of chain, twelve links on an oval, crawling.
+    for i in 0..12 {
+        let a = i as f32 * TAU / 12.0 + anim * 0.8;
+        let at = fr.at(a.cos() * 6.5 - 1.0, a.sin() * 4.6);
+        fr.disc(pb, at, 1.5, if i % 2 == 0 { chain } else { link });
+    }
+    // Head, snout and two ears at the front of the loop.
+    let head = fr.at(6.5, 0.0);
     for side in [-1.0f32, 1.0] {
-        fr.capsule(pb, fr.at(-0.4, side * 2.0), fr.at(-2.0, side * 3.4), 1.0, 0.6, hide);
+        fr.capsule(pb, head + fr.s * (side * 1.8), fr.at(4.6, side * 4.4), 1.1, 0.6, hide);
     }
-    fr.eye(pb, 4.6, -1.4, 1.3, (255, 250, 232), (70, 58, 40));
+    fr.disc(pb, head, 3.0, hide);
+    fr.capsule(pb, head, fr.at(10.0, 0.0), 1.8, 1.0, hide);
+    fr.eye(pb, 7.0, -0.8, 1.3, (255, 250, 232), (70, 58, 40));
     fr.cues(pb, (226, 214, 190), binder.hi);
 }
 
@@ -3277,10 +3486,19 @@ fn draw_road_atlas(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim
     }
     fr.shadow(pb, 13.0, 4.8);
     // Two swept wings, drawn back further as the tell coils.
-    let sweep = 0.5 + fr.coil * 0.35;
+    // A gull's span: held out to the sides at rest (the 34 px silhouette),
+    // swept back through the tell, thrown forward and down on the strike.
+    let sweep = if matches!(pose, Pose::Strike(_)) {
+        0.75
+    } else {
+        1.35 + fr.coil * 0.75
+    };
     for side in [-1.0f32, 1.0] {
         let dir = fr.f.rotate(side * sweep);
-        fr.capsule(pb, fr.at(-1.0, side * 1.6), fr.c + dir * (10.4 + fr.coil * 1.6), 1.8, 0.9, slate);
+        let wrist = fr.c + dir * 8.0;
+        fr.capsule(pb, fr.at(-1.0, side * 1.6), wrist, 2.2, 1.6, slate);
+        // The outer wing kinks back at the wrist, as a gull's does.
+        fr.capsule(pb, wrist, wrist + fr.f.rotate(side * (sweep + 0.45)) * 7.6, 1.6, 0.7, gull);
     }
     // Body and tail.
     fr.ellipse(pb, fr.c, 5.6, 3.0, gull);
@@ -3315,6 +3533,25 @@ pub fn draw_telegraph(pb: &mut PixelBuffer, mb: &Miniboss, cam: Vec2, _accent: R
         (mb.timer / TELL_TIME.max(0.05)).clamp(0.0, 1.0)
     };
 
+    // A swinging cord's tell shape is the wedge it sweeps (a `Cone`), but it is
+    // drawn as a cord: the stitched arc of the row's own sweep, both edges of
+    // the sector, and the cord itself waiting on the edge the swing starts from.
+    if let SignatureShape::Cord { len, half, sweep } = mb.kind.signature().shape {
+        let aim = safe_dir(mb.aim, Vec2::new(1.0, 0.0));
+        draw_cord_telegraph(
+            pb,
+            mb.origin,
+            mb.origin + aim * len,
+            half,
+            sweep,
+            active_shape,
+            cam,
+            is_active,
+            progress,
+        );
+        return;
+    }
+
     match full_shape {
         MinibossShape::Trench { a, b, half } => {
             draw_trench_telegraph(pb, a, b, half, active_shape, cam, is_active, progress);
@@ -3328,7 +3565,9 @@ pub fn draw_telegraph(pb: &mut PixelBuffer, mb: &Miniboss, cam: Vec2, _accent: R
             draw_cone_telegraph(pb, origin, aim, half_angle, len, cam, is_active, progress);
         }
         MinibossShape::Cord { spool, tip, half } => {
-            draw_cord_telegraph(pb, spool, tip, half, active_shape, cam, is_active, progress);
+            // Not reached through a row today (cords tell as their sector,
+            // above); a bare cord shape draws as the wave-3 quarter turn.
+            draw_cord_telegraph(pb, spool, tip, half, FRAC_PI_2, active_shape, cam, is_active, progress);
         }
         MinibossShape::RingGap {
             origin,
@@ -3349,6 +3588,35 @@ pub fn draw_telegraph(pb: &mut PixelBuffer, mb: &Miniboss, cam: Vec2, _accent: R
                 is_active,
                 progress,
             );
+            // A *closing* ring (the Late Plate) passes over everything inside
+            // its rim, so the tell also washes the interior — all of it but
+            // the wedge of the break, which is the one way out.
+            if let SignatureShape::Ring { from, to, .. } = mb.kind.signature().shape {
+                if from > to && !is_active {
+                    let o = origin - cam;
+                    let g = safe_dir(gap_dir, Vec2::new(1.0, 0.0));
+                    let cos_gap = gap_half.cos();
+                    let mut r = to.max(3.0);
+                    while r < radius - half {
+                        let n = ((r * TAU / 4.0).ceil() as i32).max(6);
+                        for i in 0..n {
+                            let dir = Vec2::from_angle(i as f32 * TAU / n as f32 + r * 0.37);
+                            if dir.dot(g) > cos_gap {
+                                continue;
+                            }
+                            let q = o + dir * r;
+                            blend_px(
+                                pb,
+                                q.x.round() as i32,
+                                q.y.round() as i32,
+                                (72, 198, 184),
+                                0.16 + 0.18 * progress,
+                            );
+                        }
+                        r += 4.0;
+                    }
+                }
+            }
         }
         MinibossShape::Stamps { centers, half } => {
             draw_stamps_telegraph(pb, centers, half, active_shape, cam, is_active, progress);
@@ -3791,6 +4059,7 @@ fn draw_cord_telegraph(
     spool: Vec2,
     tip: Vec2,
     half: f32,
+    sweep: f32,
     active_shape: Option<MinibossShape>,
     cam: Vec2,
     is_active: bool,
@@ -3808,12 +4077,39 @@ fn draw_cord_telegraph(
     let hot_core: Rgb = (255, 246, 252);
     let silver: Rgb = (238, 246, 255);
 
-    // 1. Stitched 90° sweep-arc preview (±45° around `base_dir` at exact `len`)!
-    let arc_steps = ((len * 1.35).ceil() as i32).clamp(18, 68);
+    // 0. The swept sector itself, through the tell: a sparse wash over every
+    //    place the cord will pass and a dotted line down both of its edges, so
+    //    the warning is the footprint and not just its rim.
+    let half_sweep = sweep * 0.5;
+    if !is_active {
+        let rings = (len / 3.0) as i32;
+        for r in 2..=rings {
+            let rr = r as f32 * 3.0;
+            let n = ((rr * sweep / 3.0).ceil() as i32).max(2);
+            for i in 0..=n {
+                let ang = -half_sweep + sweep * (i as f32 / n as f32);
+                let pt = s + base_dir.rotate(ang) * rr;
+                blend_px(pb, pt.x.round() as i32, pt.y.round() as i32, rose_fill, 0.16 + 0.16 * progress);
+            }
+        }
+        for &side in &[-1.0_f32, 1.0] {
+            let edge = base_dir.rotate(side * half_sweep);
+            let mut d = 5.0;
+            while d <= len + half {
+                let pt = s + edge * d;
+                blend_px(pb, pt.x.round() as i32, pt.y.round() as i32, rose_edge, 0.66);
+                d += 2.0;
+            }
+        }
+    }
+
+    // 1. Stitched sweep-arc preview: the row's own sweep (`±sweep/2` around
+    //    `base_dir`) at the cord's far edge.
+    let arc_steps = ((len * sweep * 0.9).ceil() as i32).clamp(18, 120);
     for i in 0..=arc_steps {
         let u = i as f32 / arc_steps as f32;
-        let ang = -FRAC_PI_4 + u * FRAC_PI_2;
-        let pt = s + base_dir.rotate(ang) * len;
+        let ang = -half_sweep + u * sweep;
+        let pt = s + base_dir.rotate(ang) * (len + half);
         if i % 2 == 0 || is_active {
             blend_px(
                 pb,
@@ -3824,9 +4120,9 @@ fn draw_cord_telegraph(
             );
         }
     }
-    // Small directional sweep chevron at the +45° end of the arc so swing direction is obvious!
-    let end_dir = base_dir.rotate(FRAC_PI_4);
-    let end_pt = s + end_dir * len;
+    // Small directional sweep chevron at the far end of the arc so swing direction is obvious!
+    let end_dir = base_dir.rotate(half_sweep);
+    let end_pt = s + end_dir * (len + half);
     let tang = end_dir.perp();
     for &side in &[-1.0_f32, 1.0] {
         let tip_c = end_pt - tang * 3.5 + end_dir * (side * 2.5);
@@ -3840,7 +4136,8 @@ fn draw_cord_telegraph(
             tip: atip,
             half: ahalf,
         }) => (aspool - cam, atip - cam, ahalf),
-        _ => (s, tip - cam, half),
+        // Through the tell the cord waits on the edge its swing starts from.
+        _ => (s, s + base_dir.rotate(-half_sweep) * len, half),
     };
 
     // During Active, paint a lush multi-ribbon crimson smear wake behind the sweeping cord!

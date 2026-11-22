@@ -2,8 +2,9 @@
 //!
 //! The thread: you are **Subject R-47**, a lab rat that chewed out of its cage
 //! in a sprawling research facility. The building's automated extermination
-//! protocol has triggered. Claw up from the Sewers, through the Kitchens, to
-//! the Lab core — and get out.
+//! protocol has triggered. Claw up from the Sewers, through the Kitchen or the
+//! Laundry, to the Lab or the Printworks — and get out. The Flatbed is the
+//! ride home (a practice floor, never a campaign step).
 
 use crate::game::level::Theme;
 
@@ -35,11 +36,12 @@ pub fn map_intro(theme: Theme) -> (&'static str, &'static str) {
              facility. Follow the current up and out.",
         ),
         Theme::Kitchen => (
-            "SECTOR 02 — THE KITCHENS",
-            "Grease, snap-traps, and the stink of bait. Everything here wants \
-             you fed — to something with a bigger mouth. Nobody agrees who \
-             keeps this kitchen: the caretaker with the broom, or the thing in \
-             the cold room that was the first of us.",
+            "SECTOR 02 — THE KITCHEN",
+            // 145 cells is the card's whole budget (STYLE.md §6): the earlier
+            // four-sentence note was cut off mid-clause on the intro card.
+            "Grease, snap-traps, and the stink of bait. Nobody agrees who \
+             keeps this kitchen: the broom, or the thing in the cold room \
+             that was first.",
         ),
         Theme::Lab => (
             "SECTOR 03 — THE LAB",
@@ -171,3 +173,64 @@ pub const COBRA_ARRIVAL: &str =
 /// The field note on the specimen card.
 pub const COBRA_FIELD_NOTE: &str =
     "Twenty-two feet of it, and the room it was kept in was eleven. That is how it got out.";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// STYLE.md §6: an intro note wraps in 49 x 3 at 57 x 20, a payoff line in
+    /// 62 x 2. A longer string is cut off mid-sentence on its card.
+    #[test]
+    fn every_lore_line_fits_its_card_budget() {
+        for theme in Theme::playable() {
+            let (heading, flavor) = map_intro(theme);
+            assert!(
+                heading.chars().count() <= 32,
+                "{theme:?}: heading is {} cells",
+                heading.chars().count()
+            );
+            assert!(
+                flavor.chars().count() <= 145,
+                "{theme:?}: intro note is {} cells (budget 145)",
+                flavor.chars().count()
+            );
+            let win = victory(theme);
+            assert!(
+                win.chars().count() <= 112,
+                "{theme:?}: victory line is {} cells (budget 112)",
+                win.chars().count()
+            );
+        }
+        assert!(DEFEAT.chars().count() <= 112);
+    }
+
+    /// STYLE.md §1: no exclamation marks anywhere in the lore.
+    #[test]
+    fn the_lore_never_shouts() {
+        let mut all: Vec<&str> = vec![
+            TITLE_BLURB,
+            MEGARAT_NAME,
+            MEGARAT_CLASS,
+            MEGARAT_ARRIVAL,
+            DEFEAT,
+            HORSESHOE_NAME,
+            HORSESHOE_CLASS,
+            HORSESHOE_FIELD_NOTE,
+            HAWK_NAME,
+            HAWK_CLASS,
+            HAWK_FIELD_NOTE,
+            COBRA_NAME,
+            COBRA_CLASS,
+            COBRA_ARRIVAL,
+            COBRA_FIELD_NOTE,
+        ];
+        all.extend_from_slice(INTRO);
+        for theme in Theme::playable() {
+            let (heading, flavor) = map_intro(theme);
+            all.extend([heading, flavor, victory(theme)]);
+        }
+        for line in all {
+            assert!(!line.contains('!'), "exclamation mark in {line:?}");
+        }
+    }
+}

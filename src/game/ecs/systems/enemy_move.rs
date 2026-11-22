@@ -263,7 +263,25 @@ pub fn enemy_steering_system(
             }
         }
         let ink = ink.get(entity).map_or(1.0, |s| s.0);
+        // Laundry (`floor_laundry`): a Wool Pill's stall and a planted Peg
+        // Snapper stand still; exactly 1.0 for every other body.
+        let ink = ink * crate::game::ecs::systems::floor_laundry::gait_mult(&e);
+        // Kitchen (`floor_kitchen`): a Crumb Ant holds its heading between
+        // course corrections; every other kind gets `flow_dir` back untouched.
+        if e.kind == EnemyKind::CrumbAnt {
+            flow_dir = crate::game::ecs::systems::floor_kitchen::crumb_ant_course(
+                &mut *e, target, flow_dir, dt,
+            );
+        }
+        // Lab (`floor_lab`): a Spinner Lid's weave flips handedness; a no-op
+        // for every other kind.
+        let lid_wander = e.wander;
+        // Sewer: the Pipe Eel eases its velocity at half the rate (`floor_sewer`).
+        // `None` for every other kind, so nothing else changes.
+        let eel_before = crate::game::ecs::systems::floor_sewer::pipe_eel_before(&e);
         e.steer(target, flow_dir, dt, speed_mult * glue * ink);
+        crate::game::ecs::systems::floor_sewer::pipe_eel_after(&mut e, eel_before, dt);
+        crate::game::ecs::systems::floor_lab::lid_weave(&mut e, lid_wander, dt);
         // Keep enemies inside the arena.
         e.pos = e
             .pos
@@ -333,10 +351,25 @@ pub fn enemy_fire_system(
                     b.size = 2;
                     pending.push((id.0, b));
                 }
+            } else if e.kind == EnemyKind::PepperMill {
+                // Kitchen (`floor_kitchen`): the mill's shot leaves as two rays
+                // at ±10°, both under this body's `SpawnId`, left ray first.
+                for b in crate::game::ecs::systems::floor_kitchen::pepper_mill_shots(
+                    from, ppos, dmg, color,
+                ) {
+                    pending.push((id.0, b));
+                }
             } else {
-                let v = (ppos - from).normalized() * 75.0;
+                // Flatbed (`floor_flatbed`): the Toll Gull leads the rat by
+                // 0.35 s; every other kind gets `ppos` back untouched.
+                let aim = crate::game::ecs::systems::floor_flatbed::shot_target(
+                    e.kind, from, ppos, player.vel,
+                );
+                let v = (aim - from).normalized() * 75.0;
                 let mut b = Bullet::new(from, v, dmg, Faction::Enemy, color);
                 b.life = 4.0;
+                // Laundry: the Starch Bulb's jet leaves slow (no-op otherwise).
+                crate::game::ecs::systems::floor_laundry::shape_shot(e.kind, &mut b);
                 pending.push((id.0, b));
             }
         }

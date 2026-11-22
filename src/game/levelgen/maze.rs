@@ -914,7 +914,7 @@ pub fn maze_walk_cells(tiles: &TileMap, maze: &MazeSection) -> Option<i32> {
     let target = maze.reward_cell;
     let mut seen = vec![false; (bounds.w.max(0) * bounds.h.max(0)) as usize];
     let index = |cx: i32, cy: i32| ((cy - bounds.y) * bounds.w + (cx - bounds.x)) as usize;
-    if !bounds.contains(target.0, target.1) || !bounds.contains(maze.entry.0, maze.entry.1) {
+    if !bounds.contains(target.0, target.1) {
         return None;
     }
     let mut dist = vec![-1i32; seen.len()];

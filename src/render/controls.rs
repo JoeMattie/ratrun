@@ -155,13 +155,20 @@ pub fn draw(f: &mut Frame, area: Rect, view: &ControlsView, hits: &mut HitMap) {
         }
         let r = Rect::new(inner.x, y, inner.width, 1);
         let selected = row == view.row;
-        let hovered = hits.hovered == Some(Target::ControlsRow(row));
+        // The target this row registers below. RESET and BACK carry their own
+        // targets, so hover is tested against the same one: comparing every row
+        // with `ControlsRow` left those two buttons without a hover state.
+        let target = match row {
+            BACK_ROW => Target::ControlsBack,
+            RESET_ROW => Target::ControlsReset,
+            _ => Target::ControlsRow(row),
+        };
+        let hovered = hits.hovered == Some(target);
         if selected {
-            // Whole-row band, then the marker on top of it.
-            f.buffer_mut().set_style(
-                Rect::new(r.x, y, lay.panel.width.saturating_sub(4), 1),
-                Style::default().bg(TRACK),
-            );
+            // Whole-row band (the row's own rect, which is also its pointer
+            // rectangle), then the marker on top of it.
+            f.buffer_mut()
+                .set_style(r, Style::default().bg(TRACK));
             f.buffer_mut()[(r.x, y)].set_char('▸').set_fg(tone);
         }
         let label_style = if selected {
@@ -223,11 +230,6 @@ pub fn draw(f: &mut Frame, area: Rect, view: &ControlsView, hits: &mut HitMap) {
                 Rect::new(bx, y, w, 1),
             );
         }
-        let target = match row {
-            BACK_ROW => Target::ControlsBack,
-            RESET_ROW => Target::ControlsReset,
-            _ => Target::ControlsRow(row),
-        };
         hits.add(r, target);
     }
 
@@ -380,6 +382,72 @@ mod tests {
             out.push('\n');
         }
         (out, hits)
+    }
+
+    /// RESET and BACK register their own targets, so their hover state is
+    /// tested against those: both buttons used to ignore the pointer.
+    #[test]
+    fn the_reset_and_back_buttons_show_a_hover_state() {
+        let c = Controls::default();
+        for (target, row) in [
+            (Target::ControlsBack, BACK_ROW),
+            (Target::ControlsReset, RESET_ROW),
+        ] {
+            let chevron_fg = |hovered: Option<Target>| {
+                let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+                let mut hits = HitMap::default();
+                hits.hovered = hovered;
+                let view = ControlsView {
+                    scheme: c.scheme(),
+                    controls: &c,
+                    row: SCHEME_ROW,
+                    scroll: 0,
+                    capturing: None,
+                    note: "",
+                    accent: Color::Rgb(144, 184, 173),
+                    lone_ctrl: true,
+                };
+                term.draw(|f| draw(f, f.area(), &view, &mut hits)).unwrap();
+                let rect = hits
+                    .rect_for(target)
+                    .unwrap_or_else(|| panic!("row {row} is not on screen"));
+                let buf = term.backend().buffer();
+                let x = (rect.x..rect.right())
+                    .find(|&x| buf[(x, rect.y)].symbol() == "‹")
+                    .expect("the button's chevron");
+                buf[(x, rect.y)].fg
+            };
+            assert_eq!(chevron_fg(None), COAT, "row {row} at rest");
+            assert_eq!(chevron_fg(Some(target)), PLATE, "row {row} hovered");
+        }
+    }
+
+    /// The selected row's band is the row's own pointer rectangle: every cell
+    /// that answers a click is banded, and nothing outside it.
+    #[test]
+    fn the_selected_band_covers_exactly_the_rows_hit_rect() {
+        let c = Controls::default();
+        let row = action_row(Action::Dash);
+        for (w, h) in [(80u16, 40u16), (120, 40)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            let mut hits = HitMap::default();
+            let view = ControlsView {
+                scheme: c.scheme(),
+                controls: &c,
+                row,
+                scroll: 0,
+                capturing: None,
+                note: "",
+                accent: Color::Rgb(144, 184, 173),
+                lone_ctrl: true,
+            };
+            term.draw(|f| draw(f, f.area(), &view, &mut hits)).unwrap();
+            let rect = hits.rect_for(Target::ControlsRow(row)).expect("the DASH row");
+            let buf = term.backend().buffer();
+            for x in rect.x..rect.right() {
+                assert_eq!(buf[(x, rect.y)].bg, TRACK, "{w}x{h}: column {x} is not banded");
+            }
+        }
     }
 
     #[test]

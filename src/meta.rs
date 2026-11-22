@@ -34,21 +34,24 @@
 //! shelf (splices are 24-38 g each, a shelf visit can take 100+) and dies early
 //! banks far less.
 //!
-//! **The assumption the prices are set against: a typical finished run banks
-//! 200-300 gold** (a campaign that reaches the Lab and spends a little, or a
-//! good practice floor). [`crate::game::shop`]'s gold income is being retuned by
-//! the balance pass as this lands; if the measured haul per run is `K` times
-//! 250, scale every price in [`Track::prices`] by `K` and nothing else here
-//! changes.
+//! **The assumption the prices are set against (batch 6 re-base): a typical
+//! finished run banks about 900 gold.** The first table assumed 250 a run; the
+//! bot measured ~1 971 gold a *floor*, which maxed the nest in three clears.
+//! The fix is in two halves: `game::shop` cuts drop chances to a third (about
+//! 650 gold a floor, about 900 banked by a run that dies on floor two and
+//! spends a little), and every price here and the three bank bonuses are x3.
+//! **Until the income half lands these prices are still ~3x too cheap for the
+//! measured income.** If the measured haul per run is `K` times 900, scale
+//! every price in [`Track::prices`] by `K` and nothing else here changes.
 //!
-//! Against 250 gold a run:
+//! Against 900 gold a run:
 //!
-//! * cheapest first step 40 g → **a first purchase after one or two runs**;
-//! * a fifth weapon *and* a fifth passive slot is 60 + 60 → by run one, and both
-//!   at six slots (60 + 200 each side) by about run five to eight;
-//! * the whole table is **18 070 g** → about **72 runs** at 250 a run (90 at
-//!   200, 60 at 300), with the last weapon/passive slot (1 200 g) and the revive
-//!   (1 500 g) as the long-term goals the owner asked for.
+//! * cheapest first step 120 g → **a first purchase after the first run**;
+//! * a fifth weapon *and* a fifth passive slot is 180 + 180 → by run one, and
+//!   both at six slots (180 + 600 each side) by about run two or three;
+//! * the whole table is **54 210 g** → about **60 runs** at 900 a run, with the
+//!   last weapon/passive slot (3 600 g) and the revive (4 500 g) as the
+//!   long-term goals the owner asked for.
 //!
 //! ## Effects at full (a maxed profile is strong, not a win button)
 //!
@@ -84,7 +87,7 @@ use crate::game::loadout::{SlotCaps, Stats, MIN_SLOTS};
 /// How many upgrade tracks the nest has.
 pub const TRACK_COUNT: usize = 15;
 
-/// How many tracks are "one level each" specials (the revive).
+/// The most extra keep slots the carry-over track can buy (its level cap).
 pub const MAX_CARRY_BONUS: u8 = 2;
 
 // ============================================================================
@@ -279,21 +282,23 @@ impl Track {
     /// a long-term goal (see the module economy note for the derivation).
     fn prices(self) -> &'static [u32] {
         match self {
-            Track::WeaponSlots => &[60, 200, 520, 1_200],
-            Track::PassiveSlots => &[60, 200, 520, 1_200],
-            Track::MoveSpeed => &[40, 70, 120, 190, 280, 400],
-            Track::PickupRange => &[40, 70, 120, 190, 280],
-            Track::FireRate => &[60, 100, 170, 260, 380, 540],
-            Track::MaxHp => &[50, 85, 140, 215, 310, 430],
-            Track::Regen => &[55, 95, 160, 250, 360],
-            Track::Armor => &[70, 130, 220, 340],
-            Track::Damage => &[60, 100, 170, 260, 380, 540],
-            Track::DashCooldown => &[50, 85, 140, 215, 310],
-            Track::XpGain => &[60, 100, 170, 260, 380],
-            Track::GoldGain => &[80, 130, 200, 290, 400],
-            Track::Luck => &[70, 120, 200, 320],
-            Track::CarryOver => &[400, 900],
-            Track::Revive => &[1_500],
+            // Batch 6: every price is the original table x3 (K = 900 / 250,
+            // rounded down; see the module economy note).
+            Track::WeaponSlots => &[180, 600, 1_560, 3_600],
+            Track::PassiveSlots => &[180, 600, 1_560, 3_600],
+            Track::MoveSpeed => &[120, 210, 360, 570, 840, 1_200],
+            Track::PickupRange => &[120, 210, 360, 570, 840],
+            Track::FireRate => &[180, 300, 510, 780, 1_140, 1_620],
+            Track::MaxHp => &[150, 255, 420, 645, 930, 1_290],
+            Track::Regen => &[165, 285, 480, 750, 1_080],
+            Track::Armor => &[210, 390, 660, 1_020],
+            Track::Damage => &[180, 300, 510, 780, 1_140, 1_620],
+            Track::DashCooldown => &[150, 255, 420, 645, 930],
+            Track::XpGain => &[180, 300, 510, 780, 1_140],
+            Track::GoldGain => &[240, 390, 600, 870, 1_200],
+            Track::Luck => &[210, 360, 600, 960],
+            Track::CarryOver => &[1_200, 2_700],
+            Track::Revive => &[4_500],
         }
     }
 
@@ -326,7 +331,9 @@ impl Track {
             Track::PickupRange => format!("+{}% pickup", u32::from(level) * 8),
             Track::FireRate => format!("+{}% fire rate", u32::from(level) * 2),
             Track::MaxHp => format!("+{} HP", u32::from(level) * 8),
-            Track::Regen => format!("+{:.1} HP/s", f32::from(level) * 0.08),
+            // Two decimals: at one, levels 2 and 3 (0.16, 0.24) both printed
+            // "+0.2" and the row looked like a purchase that did nothing.
+            Track::Regen => format!("+{:.2} HP/s", f32::from(level) * 0.08),
             Track::Armor => format!("-{:.1} dmg/hit", f32::from(level) * 0.5),
             Track::Damage => format!("+{:.1}% damage", f32::from(level) * 2.5),
             Track::DashCooldown => format!("-{:.2}s dash", f32::from(level) * 0.05),
@@ -650,10 +657,12 @@ impl RunModifiers {
             parts.push(format!("+{} HP", self.max_hp.round() as u32));
         }
         if self.regen > 0.0 {
-            parts.push(format!("+{:.1} regen", self.regen));
+            parts.push(format!("+{:.2} regen", self.regen));
         }
         if self.armor > 0.0 {
-            parts.push(format!("+{:.0} armor", self.armor));
+            // One decimal: the track steps by 0.5, and `{:.0}` printed level 1
+            // as "+0 armor".
+            parts.push(format!("+{:.1} armor", self.armor));
         }
         if self.dash_cd > 0.0 {
             parts.push(format!("-{:.2}s dash", self.dash_cd));
@@ -706,11 +715,11 @@ pub fn apply(stats: &mut Stats, mods: &RunModifiers) {
 // ============================================================================
 
 /// Banked for every campaign floor the run cleared.
-pub const FLOOR_BONUS: u32 = 25;
+pub const FLOOR_BONUS: u32 = 75;
 /// Banked for every boss or named miniboss the run put down.
-pub const APEX_BONUS: u32 = 6;
+pub const APEX_BONUS: u32 = 15;
 /// Banked for winning the run (the campaign cleared, or a practice floor).
-pub const WIN_BONUS: u32 = 75;
+pub const WIN_BONUS: u32 = 225;
 /// A practice run banks at half rate: it is repeatable on any unlocked floor
 /// and its boss is the only stake.
 pub const PRACTICE_DIVISOR: u32 = 2;
@@ -730,8 +739,8 @@ pub struct RunEnd {
     pub won: bool,
     /// A single-floor practice run.
     pub practice: bool,
-    /// The run used the developer console. Another worker is adding the flag;
-    /// until it lands the app passes `false` (see `App::console_used`).
+    /// The run used the developer console (a state-changing command, or the
+    /// console started it): it banks nothing.
     pub console_used: bool,
 }
 
@@ -1011,13 +1020,13 @@ mod tests {
         }
         assert_eq!(Track::from_index(Track::ALL.len()), None);
         assert_eq!(Track::from_key("no_such_track"), None);
-        // The economy note in the module docs says the whole table is 18 070 g:
-        // about 72 runs at 250 banked a run.
-        assert_eq!(total, 18_070, "the table's total changed: update the note");
+        // The economy note in the module docs says the whole table is 54 210 g:
+        // about 60 runs at 900 banked a run.
+        assert_eq!(total, 54_210, "the table's total changed: update the note");
             assert!(
-            (60..=100).contains(&(total / 250)),
-            "the table should max out in 60-100 runs at 250 a run, got {}",
-            total / 250
+            (50..=80).contains(&(total / 900)),
+            "the table should max out in 50-80 runs at 900 a run, got {}",
+            total / 900
         );
     }
 
@@ -1062,7 +1071,18 @@ mod tests {
         assert_eq!(Track::PickupRange.value_text(5), "+40% pickup");
         assert_eq!(Track::Damage.value_text(6), "+15.0% damage");
         assert_eq!(Track::MaxHp.value_text(6), "+48 HP");
-        assert_eq!(Track::Regen.value_text(5), "+0.4 HP/s");
+        assert_eq!(Track::Regen.value_text(5), "+0.40 HP/s");
+        // Every level of every track reads differently from the one before:
+        // a purchase always changes the line the player bought it for.
+        for track in Track::ALL {
+            for level in 1..=track.max_level() {
+                assert_ne!(
+                    track.value_text(level),
+                    track.value_text(level - 1),
+                    "{track:?} level {level} prints the same value as the level below"
+                );
+            }
+        }
         assert_eq!(Track::Armor.value_text(4), "-2.0 dmg/hit");
         assert_eq!(Track::DashCooldown.value_text(5), "-0.25s dash");
         assert_eq!(Track::XpGain.value_text(5), "+20% XP");
@@ -1104,19 +1124,19 @@ mod tests {
     fn buy_spends_the_bank_and_refund_returns_exactly_what_was_paid() {
         let mut profile = MetaProfile::default();
         profile.bank = 1_000;
-        assert_eq!(profile.buy(Track::WeaponSlots), Some(60));
+        assert_eq!(profile.buy(Track::WeaponSlots), Some(180));
         assert_eq!(profile.level(Track::WeaponSlots), 1);
-        assert_eq!(profile.bank, 940);
-        assert_eq!(profile.next_price(Track::WeaponSlots), Some(200));
-        assert_eq!(profile.buy(Track::WeaponSlots), Some(200));
-        assert_eq!(profile.bank, 740);
+        assert_eq!(profile.bank, 820);
+        assert_eq!(profile.next_price(Track::WeaponSlots), Some(600));
+        assert_eq!(profile.buy(Track::WeaponSlots), Some(600));
+        assert_eq!(profile.bank, 220);
         assert_eq!(profile.total_levels(), 2);
 
         // A short bank refuses and touches nothing.
         let mut poor = MetaProfile::default();
-        poor.bank = 59;
+        poor.bank = 179;
         assert_eq!(poor.buy(Track::WeaponSlots), None);
-        assert_eq!(poor.bank, 59);
+        assert_eq!(poor.bank, 179);
         assert_eq!(poor.level(Track::WeaponSlots), 0);
 
         // Maxed refuses even with gold in hand.
@@ -1127,7 +1147,7 @@ mod tests {
 
         // The refund is exactly the sum paid: it can neither mint nor burn gold.
         let paid = profile.spent_total();
-        assert_eq!(paid, 60 + 200);
+        assert_eq!(paid, 180 + 600);
         let before = profile.bank;
         assert_eq!(profile.refund_all(), paid);
         assert_eq!(profile.bank, before + paid);
@@ -1298,8 +1318,8 @@ mod tests {
             "+12% rate",
             "+15% dmg",
             "+48 HP",
-            "+0.4 regen",
-            "+2 armor",
+            "+0.40 regen",
+            "+2.0 armor",
             "-0.25s dash",
             "+20% XP",
             "+25% gold",
@@ -1309,6 +1329,11 @@ mod tests {
         ] {
             assert!(summary.contains(needle), "{needle} missing from {summary}");
         }
+        // The first armour level is half a point, not "+0 armor".
+        let mut one = MetaProfile::default();
+        one.set_level(Track::Armor, 1);
+        let summary = RunModifiers::from_profile(&one).summary();
+        assert!(summary.contains("+0.5 armor"), "{summary}");
         // `summary_into` writes the same text into a caller's buffer.
         let mut buf = String::from("stale");
         maxed.summary_into(&mut buf);
@@ -1348,7 +1373,7 @@ mod tests {
         assert_eq!(tally.floor_bonus, FLOOR_BONUS * 3);
         assert_eq!(tally.apex_bonus, APEX_BONUS * 4);
         assert_eq!(tally.win_bonus, WIN_BONUS);
-        assert_eq!(tally.banked, 40 + 75 + 24 + 75);
+        assert_eq!(tally.banked, 40 + FLOOR_BONUS * 3 + APEX_BONUS * 4 + WIN_BONUS);
         assert_eq!(profile.bank, tally.banked);
         // The next run adds to it rather than replacing it.
         let second = bank(&mut profile, &end(10));

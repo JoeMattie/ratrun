@@ -1044,7 +1044,7 @@ impl HudState {
 
         // 3. Dash-ready glint when cooldown finishes.
         if self.prev_dash_cd > 0.0 && world.player.dash_cd <= 0.0 {
-            self.dash_ready_flash = 0.45;
+            self.dash_ready_flash = 0.6;
         }
         self.dash_ready_flash = (self.dash_ready_flash - dt).max(0.0);
 
@@ -1169,37 +1169,41 @@ impl HudState {
                 world.elapsed,
             ))
         };
+        //    The wording names the roster *role* that unlocks (flying fodder,
+        //    chaser, elite, shooter, heavy), never a Sewer body: every floor
+        //    fills those slots with its own kinds, and "SWARM BATS INBOUND" on
+        //    the Kitchen announced an enemy that floor does not field.
         if stage > self.escalation_stage {
             self.escalation_stage = stage;
             match stage {
                 1 => self.push_callout(
                     CalloutKind::Escalation,
                     "THREAT +",
-                    "SWARM BATS INBOUND",
+                    "FLYERS INBOUND",
                     2.5,
                 ),
                 2 => self.push_callout(
                     CalloutKind::Escalation,
                     "THREAT +",
-                    "STALKER CATS DETECTED",
+                    "CHASERS DETECTED",
                     2.5,
                 ),
                 3 => self.push_callout(
                     CalloutKind::Escalation,
                     "WARNING",
-                    "ELITE BRUTES UNLOCKED",
+                    "ELITES UNLOCKED",
                     2.8,
                 ),
                 4 => self.push_callout(
                     CalloutKind::Escalation,
                     "THREAT +",
-                    "ACID SPITTERS ACTIVE",
+                    "SHOOTERS ACTIVE",
                     2.5,
                 ),
                 5 => self.push_callout(
                     CalloutKind::Escalation,
                     "WARNING",
-                    "HEAVY BRUTES DEPLOYED",
+                    "HEAVIES DEPLOYED",
                     2.8,
                 ),
                 BOSS_STAGE => self.push_callout(
@@ -1288,6 +1292,29 @@ fn cooldown_pip(ready: f32) -> char {
     let idx = ((ready.clamp(0.0, 1.0) * 7.0).round() as usize).min(7);
     VSTEPS[idx]
 }
+
+/// The READY token for a charged active weapon: the live binding's label when
+/// `full` fits, else three characters of it. `SPACE` — in any case, since the
+/// controls layer spells the key `Space` — shortens to `SPC` (not `SPA`); every
+/// other label keeps its head, cut on a char boundary.
+fn short_key_token(name: &str, full: bool) -> &str {
+    if full {
+        name
+    } else if name.eq_ignore_ascii_case("SPACE") {
+        "SPC"
+    } else {
+        let cut = name.char_indices().nth(3).map_or(name.len(), |(k, _)| k);
+        &name[..cut]
+    }
+}
+
+/// The one-cell READY mark of a charged active weapon where its key cannot be
+/// spelled (see `draw_loadout_rack`).
+const READY_MARK: &str = "◆";
+
+/// The dash module's "it is back" slab: the same warm white the on-rat dash
+/// gauge turns when the dash is ready (`render::ink`).
+const DASH_FLASH: Color = Color::Rgb(255, 246, 214);
 
 fn rgb_of_color(c: Color) -> Rgb {
     match c {
@@ -1437,11 +1464,10 @@ pub fn draw_top(frame: &mut Frame, area: Rect, world: &World, state: &mut HudSta
     // exactly full), so the ready state is carried by the slot's own highlight
     // instead — zero columns, same information.
     let show_active_gauge = area.width >= 68;
-    let ready_token = if area.width >= 80 {
-        state.active_name.as_str()
-    } else {
-        "SPC"
-    };
+    // The token is the *live* binding. Narrow rails shorten it to three
+    // characters (`SPACE` → `SPC`, the abbreviation the HUD has always used);
+    // they must never print `SPC` for a key the player rebound.
+    let ready_token = short_key_token(state.active_name.as_str(), area.width >= 80);
     let show_icons = !tight || weapons.len() <= 3;
     let show_streak = (if has_rack { area.width >= 68 } else { area.width >= 92 })
         && !state.streak_buf.is_empty();
@@ -2048,7 +2074,24 @@ fn draw_loadout_rack(frame: &mut Frame, rack: Rect, world: &World, state: &HudSt
         // the solid pip and the slot's highlight (`charged` styles above).
         buf.set_stringn(tx, y1, pip_s, 1, Style::default().fg(pip_fg).bg(TRACK));
         let bar_room = text_w - 1;
-        if active && charged && bar_room >= 3 {
+        if active && charged && bar_room < 3 {
+            // No room to name the key: a READY chip no cooldown pip can be
+            // mistaken for. Auto weapons only ever show block glyphs on the
+            // track colour; a charged Tail Thrash / Sonic Squeak shows a dark
+            // diamond on a solid plate of its own colour, across the whole
+            // read-out (white-hot for the beat it finishes charging).
+            let chip_bg = if charge_flash > 0.0 { COAT } else { w_col };
+            let chip = Style::default()
+                .fg(PLATE)
+                .bg(chip_bg)
+                .add_modifier(Modifier::BOLD);
+            buf.set_stringn(tx, y1, READY_MARK, 1, chip);
+            for k in 0..bar_room {
+                if tx + 1 + k < right {
+                    buf[(tx + 1 + k, y1)].set_char(' ').set_style(chip);
+                }
+            }
+        } else if active && charged {
             let tok_style = if charge_flash > 0.0 {
                 Style::default()
                     .fg(PLATE)
@@ -2063,14 +2106,7 @@ fn draw_loadout_rack(frame: &mut Frame, rack: Rect, world: &World, state: &HudSt
             // The live binding's label where it fits, else three letters of
             // it (`SPACE` -> `SPC`, the abbreviation the HUD has always used).
             let name = state.active_name.as_str();
-            let tok = if name.chars().count() <= bar_room as usize {
-                name
-            } else if name == "SPACE" {
-                "SPC"
-            } else {
-                let cut = name.char_indices().nth(3).map_or(name.len(), |(k, _)| k);
-                &name[..cut]
-            };
+            let tok = short_key_token(name, name.chars().count() <= bar_room as usize);
             buf.set_stringn(tx + 1, y1, tok, bar_room as usize, tok_style);
         } else if bar_room > 0 {
             draw_mini_bar(buf, tx + 1, y1, bar_room.min(4), ready, w_col);
@@ -2305,9 +2341,18 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
     // A press that could not be spent (the cooldown is still running): the
     // module goes red for a beat so a refused dash is never silent.
     let dash_denied = !dash_ready && world.player.dash_denied > 0.0;
+    // While a charge is held on a narrow rail the key name is dropped (the
+    // player is holding that key) and its cells go to the meter instead, so
+    // the charge reads as a real bar at 57 columns rather than four cells.
+    let name_in_label = area.width >= 44 && !(charging && area.width < 72);
+    let idle_label_w: u16 = if area.width >= 44 {
+        state.dash_name.chars().count() as u16 + 5 // "<key> DASH"
+    } else {
+        4
+    };
     refill(&mut state.dash, |b| {
         let word = if charging { "CHARGE" } else { "DASH" };
-        if area.width >= 44 {
+        if name_in_label {
             let _ = write!(b, "{} {}", state.dash_name, word);
         } else {
             b.push_str(word);
@@ -2365,8 +2410,16 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
     } else {
         0
     };
-    let bar_block: u16 = if bar_w > 0 { bar_w + 2 } else { 0 };
     let dash_text_w = state.dash.chars().count() as u16;
+    // The cells the shorter CHARGE label frees widen the meter, so the module
+    // keeps its idle width (the HP/XP split does not jump when the key goes
+    // down) and the charge gets every cell.
+    let bar_w: u16 = if charging && bar_w > 0 {
+        bar_w + idle_label_w.saturating_sub(dash_text_w)
+    } else {
+        bar_w
+    };
+    let bar_block: u16 = if bar_w > 0 { bar_w + 2 } else { 0 };
     // Pad the state word to a steady width so READY ⇄ 3.4s does not shove the
     // HP/XP divider around (only DASHING, which is 0.16 s, is wider).
     let status_w = (state.dash_status.chars().count() as u16).max(5);
@@ -2407,8 +2460,16 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
 
     // 3. Dash module: divider, key label, charge bar, state badge.
     let dash_rect = Rect::new(area.right() - dash_width, area.y, dash_width, 1);
+    // The ready moment: for the length of the flash the WHOLE module (label,
+    // bar and badge) is one warm-white slab, not just a brighter badge, so the
+    // dash coming back is visible from the corner of the eye at every size.
+    let ready_pop = dash_ready
+        && !charging
+        && !dashing
+        && (state.dash_ready_flash > 0.0 || world.player.dash_ready_flash > 0.0);
+    let module_bg = if ready_pop { DASH_FLASH } else { PLATE };
     let buf = frame.buffer_mut();
-    buf.set_style(dash_rect, Style::default().bg(PLATE));
+    buf.set_style(dash_rect, Style::default().bg(module_bg));
     let mut dx = dash_rect.x;
     if show_sep && dx < dash_rect.right() {
         buf[(dx, dash_rect.y)]
@@ -2419,7 +2480,9 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
     }
     // The label: muted while recharging, bright when the dash is back, red on a
     // refused press, blue-white while a Super Dash charge fills.
-    let label_style = if dash_denied {
+    let label_style = if ready_pop {
+        Style::default().fg(PLATE).bg(DASH_FLASH).add_modifier(Modifier::BOLD)
+    } else if dash_denied {
         Style::default().fg(DANGER).bg(PLATE).add_modifier(Modifier::BOLD)
     } else if charging || dash_ready || dashing {
         Style::default().fg(COAT).bg(PLATE).add_modifier(Modifier::BOLD)
@@ -2444,11 +2507,7 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
     } else if dash_ready {
         // Either the HUD's own edge detection or the sim's `dash_ready_flash`
         // (which also drives the on-rat gauge) lights the just-became-ready pop.
-        let bg = if state.dash_ready_flash > 0.0 || world.player.dash_ready_flash > 0.0 {
-            COAT
-        } else {
-            accent
-        };
+        let bg = if ready_pop { DASH_FLASH } else { accent };
         Style::default().fg(PLATE).bg(bg).add_modifier(Modifier::BOLD)
     } else if dash_denied {
         Style::default()
@@ -2469,6 +2528,8 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
         } else {
             Color::Rgb(198, 230, 255)
         }
+    } else if ready_pop {
+        COAT
     } else if dash_ready {
         accent
     } else if dash_denied {
@@ -2491,7 +2552,7 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
             if end < dash_rect.right() {
                 buf[(end, dash_rect.y)]
                     .set_char(' ')
-                    .set_style(Style::default().bg(PLATE));
+                    .set_style(Style::default().bg(module_bg));
             }
         }
     }
@@ -3145,6 +3206,276 @@ mod tests {
     }
 
     /// Becoming ready flashes the slot once (the HUD's own "spend me" cue).
+    /// The narrow READY token is three characters of the *live* binding.
+    #[test]
+    fn the_short_ready_token_abbreviates_the_live_binding() {
+        assert_eq!(short_key_token("SPACE", true), "SPACE");
+        assert_eq!(short_key_token("SPACE", false), "SPC");
+        // The controls layer spells the key `Space`: any case shortens the same.
+        assert_eq!(short_key_token("Space", false), "SPC");
+        assert_eq!(short_key_token("space", false), "SPC");
+        assert_eq!(short_key_token("Space", true), "Space");
+        assert_eq!(short_key_token("Spade", false), "Spa", "only the key's own name is special");
+        assert_eq!(short_key_token("L-CLICK", false), "L-C");
+        assert_eq!(short_key_token("L-CLICK", true), "L-CLICK");
+        assert_eq!(short_key_token("F", false), "F");
+        assert_eq!(short_key_token("é×ab", false), "é×a", "cut on a char boundary");
+        assert_eq!(short_key_token("", false), "");
+    }
+
+    /// The single-row rail between 68 and 79 columns used to print `SPC` for a
+    /// charged active whatever the player had bound: a chip that lied. It now
+    /// spells the binding's own first three characters.
+    #[test]
+    fn a_rebound_active_key_is_never_called_spc_on_the_one_row_rail() {
+        let w = active_loadout_world(0.0);
+        for width in [68u16, 72, 76, 79, 80, 100] {
+            let mut state = HudState::default();
+            state.active_name = "L-CLICK".to_string();
+            state.tick(1.0 / 60.0, &w, &[], false);
+            state.tick(1.0 / 60.0, &w, &[], false);
+            let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+            terminal
+                .draw(|f| {
+                    let area = Rect::new(0, 0, f.area().width, 1);
+                    draw_top(f, area, &w, &mut state);
+                })
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            let text: String = (0..width).map(|x| buf[(x, 0)].symbol()).collect();
+            assert!(
+                !text.contains("SPC") && !text.contains("SPACE"),
+                "{width} cols: the rail named a key the player unbound: {text:?}"
+            );
+            assert!(
+                text.contains("L-C"),
+                "{width} cols: the charged active does not name its binding: {text:?}"
+            );
+        }
+    }
+
+    /// The bottom rail's symbols and background colours, one entry per cell.
+    fn bottom_rail(w: &World, state: &mut HudState, cols: u16, rows: u16) -> (Vec<String>, Vec<Color>) {
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap();
+        terminal
+            .draw(|f| {
+                let row = Rect::new(0, rows - 1, f.area().width, 1);
+                draw_bottom(f, row, w, state);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        (
+            (0..cols).map(|x| buf[(x, rows - 1)].symbol().to_string()).collect(),
+            (0..cols).map(|x| buf[(x, rows - 1)].bg).collect(),
+        )
+    }
+
+    /// Cell index where `needle` starts on a rail (every HUD glyph is one cell).
+    fn find_cells(cells: &[String], needle: &str) -> Option<usize> {
+        let want: Vec<String> = needle.chars().map(|c| c.to_string()).collect();
+        cells.windows(want.len()).position(|w| w == want.as_slice())
+    }
+
+    /// **The dash coming back is unmistakable at every size**: for the length
+    /// of the ready flash the whole module — key, word, bar and badge — is one
+    /// warm-white slab, and it settles to the accent READY badge afterwards.
+    #[test]
+    fn the_dash_ready_moment_lights_the_whole_module_at_every_size() {
+        for (cols, rows) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let mut w = known_world();
+            w.player.dash_cd = 0.0;
+            w.player.dash_ready_flash = 0.0;
+            let mut state = HudState::default();
+
+            state.dash_ready_flash = 0.6;
+            let (cells, bgs) = bottom_rail(&w, &mut state, cols, rows);
+            let from = find_cells(&cells, "SPACE DASH").unwrap_or_else(|| panic!("{cols}x{rows}: no label: {cells:?}"));
+            let ready = find_cells(&cells, "READY").unwrap_or_else(|| panic!("{cols}x{rows}: no READY: {cells:?}"));
+            let lit = (from..ready + 5).filter(|&x| bgs[x] == DASH_FLASH).count();
+            let bar = (from..ready + 5).filter(|&x| bgs[x] == TRACK).count();
+            assert!(bar >= 4, "{cols}x{rows}: the bar is missing from the module");
+            assert_eq!(
+                lit + bar,
+                ready + 5 - from,
+                "{cols}x{rows}: the ready flash must cover the label, the gaps and the badge"
+            );
+            assert!(lit >= 15, "{cols}x{rows}: only {lit} cells flash");
+
+            // Settled: no slab left, the accent READY badge is back.
+            state.dash_ready_flash = 0.0;
+            let (cells, bgs) = bottom_rail(&w, &mut state, cols, rows);
+            let accent = palette::marking(w.level.palette.wall_edge, w.level.palette.accent);
+            assert!(!bgs.contains(&DASH_FLASH), "{cols}x{rows}: the flash never ends");
+            let ready = find_cells(&cells, "READY").expect("READY");
+            assert_eq!(bgs[ready], accent, "{cols}x{rows}: READY is not on the accent plate");
+
+            // The sim's own flash (set on the tick the cooldown ends) lights
+            // it too, and a cooling dash never does.
+            w.player.dash_ready_flash = 0.2;
+            let (_, bgs) = bottom_rail(&w, &mut state, cols, rows);
+            assert!(bgs.contains(&DASH_FLASH), "{cols}x{rows}: the sim's ready flash is ignored");
+            w.player.dash_cd = 0.5;
+            let (_, bgs) = bottom_rail(&w, &mut state, cols, rows);
+            assert!(!bgs.contains(&DASH_FLASH), "{cols}x{rows}: a cooling dash flashed ready");
+        }
+    }
+
+    /// The HUD's own edge detector arms the flash on the tick the cooldown
+    /// reaches zero, and it lasts long enough to be seen.
+    #[test]
+    fn the_cooldown_ending_arms_the_ready_flash() {
+        let mut w = known_world();
+        let mut state = HudState::default();
+        w.player.dash_cd = 0.4;
+        state.tick(1.0 / 60.0, &w, &[], false);
+        state.tick(1.0 / 60.0, &w, &[], false);
+        assert_eq!(state.dash_ready_flash, 0.0, "no flash while cooling");
+        w.player.dash_cd = 0.0;
+        state.tick(1.0 / 60.0, &w, &[], false);
+        assert!(state.dash_ready_flash >= 0.5, "the ready flash is too short to see");
+        for _ in 0..60 {
+            state.tick(1.0 / 60.0, &w, &[], false);
+        }
+        assert_eq!(state.dash_ready_flash, 0.0, "the flash must end");
+    }
+
+    /// **While cooling the bar visibly refills**: empty right after the dash,
+    /// more cells every quarter of the cooldown, and never the READY word.
+    #[test]
+    fn the_cooling_dash_bar_refills_step_by_step_at_every_size() {
+        for (cols, rows) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let mut w = known_world();
+            let mut state = HudState::default();
+            let max_cd = w.player.loadout.stats.dash_cd.max(0.1);
+            let mut last = None;
+            for quarter in [1.0f32, 0.75, 0.5, 0.25] {
+                w.player.dash_cd = max_cd * quarter;
+                let (cells, bgs) = bottom_rail(&w, &mut state, cols, rows);
+                let from = find_cells(&cells, "DASH").expect("DASH") + 4;
+                // Eighths of a cell filled across the bar (the TRACK cells
+                // after the label).
+                let filled: usize = (from..cols as usize)
+                    .filter(|&x| bgs[x] == TRACK)
+                    .map(|x| match cells[x].as_str() {
+                        "█" => 8,
+                        "▉" => 7,
+                        "▊" => 6,
+                        "▋" => 5,
+                        "▌" => 4,
+                        "▍" => 3,
+                        "▎" => 2,
+                        "▏" => 1,
+                        _ => 0,
+                    })
+                    .sum();
+                assert!(find_cells(&cells, "READY").is_none(), "{cols}x{rows}: READY while cooling");
+                if let Some(prev) = last {
+                    assert!(filled > prev, "{cols}x{rows}: the bar did not grow at {quarter}: {prev} -> {filled}");
+                } else {
+                    assert_eq!(filled, 0, "{cols}x{rows}: a fresh cooldown starts empty");
+                }
+                last = Some(filled);
+            }
+        }
+    }
+
+    /// **The Super Dash charge reads at 57x20**: the held meter takes the cells
+    /// of the key name (a real bar, not four cells), shows its percentage and
+    /// FULL, and the module keeps its idle width so the HP/XP split does not
+    /// jump when the key goes down. Wide rails keep the key in the label.
+    #[test]
+    fn the_super_dash_charge_meter_reads_at_every_size() {
+        for (cols, rows) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let mut w = known_world();
+            let mut state = HudState::default();
+            let (idle, _) = bottom_rail(&w, &mut state, cols, rows);
+            let idle_divider = idle.iter().position(|c| c == "│");
+
+            w.player.dash_charging = true;
+            w.player.dash_charge = 0.5;
+            let (cells, bgs) = bottom_rail(&w, &mut state, cols, rows);
+            let text: String = cells.concat();
+            assert!(text.contains("CHARGE") && text.contains("50%"), "{cols}x{rows}: {text:?}");
+            let from = find_cells(&cells, "CHARGE").expect("CHARGE") + 6;
+            let bar: Vec<usize> = (from..cols as usize).filter(|&x| bgs[x] == TRACK).collect();
+            let full = bar.iter().filter(|&&x| cells[x] == "█").count();
+            assert!(bar.len() >= 6, "{cols}x{rows}: the charge meter is only {} cells", bar.len());
+            assert_eq!(full * 2, bar.len(), "{cols}x{rows}: half a charge is half the bar: {text:?}");
+            if cols < 72 {
+                assert!(!text.contains("SPACE"), "{cols}x{rows}: the key name should yield to the meter");
+                assert_eq!(
+                    cells.iter().position(|c| c == "│"),
+                    idle_divider,
+                    "{cols}x{rows}: the module changed width when the charge started"
+                );
+            } else {
+                assert!(text.contains("SPACE CHARGE"), "{cols}x{rows}: {text:?}");
+            }
+
+            w.player.dash_charge = 1.0;
+            let (cells, bgs) = bottom_rail(&w, &mut state, cols, rows);
+            let text: String = cells.concat();
+            assert!(text.contains("FULL"), "{cols}x{rows}: no FULL: {text:?}");
+            let from = find_cells(&cells, "CHARGE").expect("CHARGE") + 6;
+            assert!(
+                (from..cols as usize).filter(|&x| bgs[x] == TRACK).all(|x| cells[x] == "█"),
+                "{cols}x{rows}: a full charge is a full bar: {text:?}"
+            );
+        }
+    }
+
+    /// **A charged Tail Thrash / Sonic Squeak reads READY in a way no cooldown
+    /// pip does**, even on a rack too crowded to spell the key: each charged
+    /// active shows the key token or, where that cannot fit, a dark diamond on
+    /// a plate of the weapon's own colour. A charging one shows neither.
+    #[test]
+    fn charged_actives_show_a_distinct_ready_chip_on_every_rack() {
+        let rack_row = |w: &World, width: u16| {
+            let mut state = HudState::default();
+            state.tick(1.0 / 60.0, w, &[], false);
+            state.tick(1.0 / 60.0, w, &[], false);
+            let mut terminal = Terminal::new(TestBackend::new(width, 3)).unwrap();
+            terminal
+                .draw(|f| {
+                    let area = Rect::new(0, 0, f.area().width, 3);
+                    draw_top(f, area, w, &mut state);
+                })
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            let cells: Vec<String> = (0..width).map(|x| buf[(x, 2)].symbol().to_string()).collect();
+            let bgs: Vec<Color> = (0..width).map(|x| buf[(x, 2)].bg).collect();
+            (cells, bgs)
+        };
+        let charged = active_loadout_world(0.0);
+        let charging = active_loadout_world(5.0);
+        let thrash = palette::to_color(WeaponKind::TailThrash.color());
+        let squeak = palette::to_color(WeaponKind::SonicSqueak.color());
+        for width in [40u16, 57, 80, 120] {
+            let (cells, bgs) = rack_row(&charged, width);
+            let text: String = cells.concat();
+            let tokens = text.matches("SPACE").count() + text.matches("SPC").count();
+            let chips = (0..width as usize)
+                .filter(|&x| cells[x] == READY_MARK && (bgs[x] == thrash || bgs[x] == squeak))
+                .count();
+            assert_eq!(
+                tokens + chips,
+                2,
+                "{width} cols: each charged active needs a key token or a READY chip: {text:?}"
+            );
+
+            let (cells, _) = rack_row(&charging, width);
+            let text: String = cells.concat();
+            assert!(
+                !text.contains("SPACE") && !text.contains("SPC"),
+                "{width} cols: a charging active names its key: {text:?}"
+            );
+            assert!(
+                !text.contains(READY_MARK),
+                "{width} cols: a charging active wears the READY mark: {text:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_weapon_that_just_charged_flashes_once() {
         let mut w = active_loadout_world(0.2);

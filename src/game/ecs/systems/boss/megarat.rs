@@ -85,7 +85,6 @@
 
 use super::*;
 use crate::game::art_boss_megarat as art;
-use crate::game::ecs::resources::RngRes;
 use crate::game::art_boss_megarat::MegaRatState;
 
 /// The Megarat's controller (zero-sized; the state lives on the [`Boss`]).
@@ -650,7 +649,7 @@ fn next_attack(ctx: &mut BossContext<'_>, boss: &mut Boss) {
     boss.scratch[S_DECISIONS] = decisions + 1.0;
     boss.scratch[S_ROT] = ((boss.scratch[S_ROT] as u32 + 1) % 4) as f32;
 
-    let want = if decisions < 0.5 || decisions < 1.5 {
+    let want = if decisions < 1.5 {
         Attack::Gnaw
     } else if decisions < 2.5 {
         Attack::Thrash
@@ -871,8 +870,12 @@ fn dash_plan(ctx: &BossContext<'_>, boss: &Boss) -> Option<(Vec2, Vec2)> {
     let len = (dist + art::DASH_OVERSHOOT)
         .clamp(art::DASH_MIN_LEN, art::DASH_REACH);
     let start = boss.pos;
-    let mut end = start + dir * len;
+    let mut len = len;
     // Keep the lane's far end on the encounter floor while both are inside it.
+    // The lane is *shortened along its own heading*: clamping the end point
+    // per axis (the old rule) bent a diagonal lane away from the rat it was
+    // aimed through, so near an arena edge the tell could be painted beside
+    // the rat instead of over it.
     if ctx.arena.contains_world(start) && ctx.arena.contains_world(ctx.player_pos) {
         let margin = art::BODY_RADIUS + 4.0;
         let min = Vec2::new(
@@ -883,11 +886,22 @@ fn dash_plan(ctx: &BossContext<'_>, boss: &Boss) -> Option<(Vec2, Vec2)> {
             ctx.arena.right() as f32 * collision::TILE_F - margin,
             ctx.arena.bottom() as f32 * collision::TILE_F - margin,
         );
-        end = end.clamp_box(min, max);
+        if dir.x > 1e-4 {
+            len = len.min((max.x - start.x) / dir.x);
+        } else if dir.x < -1e-4 {
+            len = len.min((min.x - start.x) / dir.x);
+        }
+        if dir.y > 1e-4 {
+            len = len.min((max.y - start.y) / dir.y);
+        } else if dir.y < -1e-4 {
+            len = len.min((min.y - start.y) / dir.y);
+        }
     }
-    if start.dist(end) < art::DASH_MIN_LEN {
+    // (A body standing inside the margin can make `len` negative: no lane.)
+    if len < art::DASH_MIN_LEN {
         return None;
     }
+    let end = start + dir * len;
     // The whole flight has to fit the body, or the lane lies.
     let steps = (start.dist(end) / 8.0).ceil().max(1.0) as i32;
     for i in 0..=steps {
@@ -921,11 +935,15 @@ pub fn boss_summon_system(
     level: Res<Level>,
     mut next_spawn_id: ResMut<NextSpawnId>,
     mut next_enemy_id: ResMut<NextEnemyId>,
-    mut rng: ResMut<RngRes>,
+    mut fight: ResMut<BossFight>,
     mut particles: ResMut<Particles>,
     mut sfx: ResMut<SfxQueue>,
     mut bosses: Query<&mut Boss>,
 ) {
+    // The called rats roll their spawn variance (and their arrival vfx) on the
+    // boss's own stream, like every other draw a fight makes: a `Call` must not
+    // move the run's main rng, or the horde after the phase change would depend
+    // on when the rat crossed the threshold.
     for mut boss in bosses.iter_mut() {
         let count = boss.call_count;
         if count == 0 {
@@ -960,14 +978,14 @@ pub fn boss_summon_system(
                 pos,
                 BOSS_CALL_HP_MULT,
                 crate::game::enemy::EnemyMods::NONE,
-                &mut rng.0,
+                &mut fight.rng.0,
             );
             enemy.id = next_enemy_id.take();
             commands.spawn((enemy, next_spawn_id.take()));
             placed += 1;
             vfx::emit_boss_spawn(
                 &mut particles,
-                &mut rng.0,
+                &mut fight.rng.0,
                 pos,
                 level.palette.accent,
             );

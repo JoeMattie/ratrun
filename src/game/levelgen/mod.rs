@@ -16,6 +16,10 @@
 //!    them chosen for the route they serve. *(worker P2)*
 //! 5. [`placement::place_traps`] — sticky traps and mousetraps in corridors
 //!    and rooms. *(worker P2)*
+//! 6. [`placement::place_shop_holes`] — the two shop holes in structural wall
+//!    faces.
+//! 7. `lights::place` — light fixtures and ambient emitters, on their own
+//!    salted rng over the finished tiles.
 //!
 //! Then [`validate`] proves the map is playable; [`generate`] retries with a
 //! salted seed when it is not. The retry is a **safety net, not a routine
@@ -42,7 +46,8 @@
 //! ```
 //!
 //! and `levelgen::tests::map_trace_pin` pins the exact output (tile grid and
-//! every placed object) of 60 seeds, so a cost change cannot quietly change
+//! every placed object) of 20 seeds on each of the five campaign themes (100
+//! maps), so a cost change cannot quietly change
 //! which holes and traps a seed grows.
 //!
 //! ## Measuring it
@@ -395,7 +400,7 @@ mod tests {
     //
     // Optimising the generator must not change *what* it generates. This pin
     // hashes the whole tile grid (every cell's kind and neighbour mask) and
-    // every placed object (cell, world position, facing) for 60 seeds, so a
+    // every placed object (cell, world position, facing) for 20 seeds per campaign theme (100 maps), so a
     // refactor that alters which holes or traps are chosen, or moves one by a
     // cell, fails here instead of silently in a player's run.
     //
@@ -404,7 +409,7 @@ mod tests {
     // stage change makes this fail, the pin needs regenerating (integrator) —
     // print it with `RATRUN_LEVEL_TRACE=1 cargo test map_trace_pin -- --nocapture`.
 
-    /// Seeds per theme (`0..TRACE_SEEDS`): 3 × 20 = 60 pinned maps.
+    /// Seeds per theme (`0..TRACE_SEEDS`): 5 × 20 = 100 pinned maps.
     const TRACE_SEEDS: u64 = 20;
 
     /// Pinned trace, `[theme][seed]`, themes in [`Theme::all`] order.
@@ -785,7 +790,7 @@ mod tests {
     // record of what it is for (`TrapRecord`, `RatHoleRecord`). Later systems
     // read them through the accessors, so these tests check both the plumbing
     // (one record per object, same index) and the meaning (role, public side,
-    // encounter-ness) on 60 seeds per run.
+    // encounter-ness) on 100 maps per run (20 seeds per campaign theme).
 
     /// Small-class cell distances from `from` (the generator's own flood is
     /// private to `placement`, so the test keeps its own).

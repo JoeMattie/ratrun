@@ -477,6 +477,10 @@ impl BossController for CatController {
         // ---- crossing half health is the roar set piece (it outranks a
         //      stagger: the phase change must always read) ------------------
         if out.phase_changed && !matches!(state, BossCatState::Hurt | BossCatState::Roar) {
+            // Whatever it was winding up is cancelled with the pose it
+            // belonged to (a queued claw arc must not land out of the roar);
+            // the roar's own two hazards are queued right after.
+            boss.hazards.clear();
             enter_roar(ctx, boss, out);
             return;
         }

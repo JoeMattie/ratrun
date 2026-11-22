@@ -35,7 +35,7 @@
 //! ## Campaign structure (see [`super::campaign`])
 //!
 //! A `World` simulates **one level** of a three-level campaign (Sewer →
-//! Kitchen → Lab). The level index, the carried loadout and the banked totals
+//! Kitchen or Laundry → Lab or Printworks), or one practice floor. The level index, the carried loadout and the banked totals
 //! are constructor inputs:
 //!
 //! * [`World::new`] — level 0 with the default loadout (the legacy signature).
@@ -46,7 +46,7 @@
 //! The level's boss dying sets `level_complete` (the boss framework writes
 //! `RunCounters::level_complete`; [`World::mark_level_complete`] is the facade
 //! equivalent). The outcome rules live in `ecs::systems::loot::outcome_system`,
-//! and only the **final** level's completion sets `won`. The five-minute clock no longer ends
+//! and only the **final** level's completion sets `won`. The clock does not end
 //! anything: [`World::time_left`] counts down to `director::BOSS_TIME` and then
 //! reports zero, and [`World::boss_time_reached`] marks the phase change.
 
@@ -2475,18 +2475,41 @@ impl World {
             let accent = self.level.palette.accent;
             let mut query = self.ecs.query::<(&SpawnId, &Enemy)>();
             for (_, e) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
-                if !e.alive()
-                    || !matches!(
-                        e.kind.archetype(),
-                        EnemyKind::BellFlea | EnemyKind::Turnkey
-                    )
-                {
+                // One gate for every body-anchored floor tell (`floor_tell_reach`):
+                // the two wave-3 archetypes exactly as before, plus each
+                // floor's own kinds with the reach their tell needs. Wave-4
+                // bodies (the Loose Can among them) are stamped by the block
+                // below.
+                if !e.alive() || e.kind.is_wave4() {
                     continue;
                 }
-                if !on_screen(self.w2s(e.pos, cam), e.radius * 3.0 + 8.0, viewport) {
+                let Some(reach) = floor_tell_reach(e.kind, e.radius) else {
+                    continue;
+                };
+                if !on_screen(self.w2s(e.pos, cam), reach, viewport) {
                     continue;
                 }
-                art_enemy::draw_w3_tells(pb, e, cam, accent);
+                draw_floor_tell(pb, e, cam, accent);
+            }
+        }
+
+        // Printworks: the Ink Blot's marked endpoint, shown for the whole fuse
+        // of every wick that carries an `InkSlide` (the burst travels there).
+        {
+            use crate::game::ecs::systems::enemy_wave3::{WICK_BURST_RADIUS, WICK_FUSE_SECS};
+            use crate::game::ecs::systems::floor_printworks::InkSlide;
+            let mut query =
+                self.ecs.query::<(&SpawnId, &crate::game::ecs::components::Wick, &InkSlide)>();
+            for (_, wick, slide) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                if !on_screen(self.w2s(slide.end, cam), WICK_BURST_RADIUS + 4.0, viewport) {
+                    continue;
+                }
+                crate::game::art_roster_printworks::draw_ink_endpoint(
+                    pb,
+                    slide.end,
+                    cam,
+                    wick.fuse / WICK_FUSE_SECS,
+                );
             }
         }
 
@@ -2501,7 +2524,11 @@ impl World {
                 if !e.alive() || !e.kind.is_wave4() {
                     continue;
                 }
-                if !on_screen(self.w2s(e.pos, cam), e.radius * 6.0 + 48.0, viewport) {
+                // The old margin, widened only for a kind whose own floor tell
+                // reaches further (the Loose Can's marked roll).
+                let margin = (e.radius * 6.0 + 48.0)
+                    .max(floor_tell_reach(e.kind, e.radius).unwrap_or(0.0));
+                if !on_screen(self.w2s(e.pos, cam), margin, viewport) {
                     continue;
                 }
                 art_enemy::draw_wave4_tells(pb, e, cam, accent);
@@ -3160,6 +3187,69 @@ pub(crate) fn on_screen(s: (i32, i32), margin: f32, viewport: Vec2) -> bool {
     let x = s.0 as f32;
     let y = s.1 as f32;
     x + margin >= 0.0 && y + margin >= 0.0 && x - margin < viewport.x && y - margin < viewport.y
+}
+
+/// Does `kind` post a body-anchored floor tell that the hostile layer must
+/// re-stamp over the lighting, and how far from the body's centre can that
+/// tell reach (world px, used as the `on_screen` margin)?
+///
+/// One row per floor kind with its own tell, each computed from the constants
+/// its hit test reads plus a few pixels of slack. The two wave-3 archetypes
+/// (and every registration that still inherits one) keep the margin they
+/// always had. `None`: nothing to stamp.
+pub(crate) fn floor_tell_reach(kind: EnemyKind, radius: f32) -> Option<f32> {
+    use crate::game::ecs::systems::{
+        floor_flatbed, floor_kitchen, floor_lab, floor_laundry, floor_printworks, floor_sewer,
+    };
+    match kind {
+        // Sewer: the tongue leaves the body's rim.
+        EnemyKind::SumpLeech => Some(radius + floor_sewer::LEECH_TONGUE_LEN + 10.0),
+        // Kitchen: the ring grows to its end radius around the body.
+        EnemyKind::EggTimer => {
+            Some(floor_kitchen::EGG_RING_END + floor_kitchen::EGG_RING_WIDTH + 4.0)
+        }
+        // Lab: the ray starts at the needle tip.
+        EnemyKind::WalkingSyringe => {
+            Some(floor_lab::SYRINGE_TIP + floor_lab::SYRINGE_RAY_LEN + 4.0)
+        }
+        // Laundry: the jaws close on the spot the rat stood, up to the trigger
+        // range away.
+        EnemyKind::PegSnapper => Some(
+            floor_laundry::PEG_TRIGGER_RANGE
+                + floor_laundry::PEG_JAW_LEN
+                + floor_laundry::PEG_JAW_GAP
+                + 4.0,
+        ),
+        // Printworks: two feet around the locked rat.
+        EnemyKind::StapleCrawler => Some(
+            floor_printworks::STAPLE_TRIGGER_RANGE + 14.0 + floor_printworks::STAPLE_FOOT_RADIUS + 8.0,
+        ),
+        // Flatbed: the marked roll (stamped by the wave-4 block).
+        EnemyKind::LooseCan => Some(radius + floor_flatbed::CAN_ROLL_LENGTH + 12.0),
+        _ => match kind.archetype() {
+            // Unchanged: the Bell Flea's crosses and the Turnkey's crossbar.
+            EnemyKind::BellFlea | EnemyKind::Turnkey => Some(radius * 3.0 + 8.0),
+            _ => None,
+        },
+    }
+}
+
+/// Stamp one body's floor tell (the wave-3 block of `draw_hostile_layer`).
+///
+/// A floor kind with its own tell calls its floor's draw directly, so it never
+/// also posts the archetype's mark; everything else is `draw_w3_tells`, as
+/// before. Each floor draw gates itself on the body's phase.
+fn draw_floor_tell(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2, accent: palette::Rgb) {
+    match e.kind {
+        EnemyKind::SumpLeech => crate::game::art_roster_sewer::draw_leech_tongue(pb, e, cam),
+        EnemyKind::EggTimer => crate::game::art_roster_kitchen::draw_egg_ring(pb, e, cam),
+        EnemyKind::WalkingSyringe => crate::game::art_roster_lab::draw_syringe_tell(pb, e, cam),
+        EnemyKind::PegSnapper => crate::game::art_roster_laundry::draw_peg_tell(pb, e, cam),
+        EnemyKind::StapleCrawler => {
+            crate::game::art_roster_printworks::draw_staple_tell(pb, e, cam)
+        }
+        _ => art_enemy::draw_w3_tells(pb, e, cam, accent),
+    }
 }
 
 // ---- Draw-layer tests ------------------------------------------------------

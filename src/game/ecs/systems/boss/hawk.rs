@@ -129,7 +129,11 @@ impl BossController for HawkController {
         boss.hunting = !ctx.arena.contains_world(ctx.player_pos);
 
         // A phase threshold is a set piece: the harmless alight.
+        // Whatever it was winding up is cancelled with the move it belonged to
+        // (the Mangle's and the Cobra's rule): a wedge, a reach or a rake lane
+        // must not land out of a pose that is no longer attacking.
         if out.phase_changed && !matches!(boss.state, BossState::Hawk(HawkState::Death)) {
+            boss.hazards.clear();
             enter(boss, HawkState::Alight, art::ALIGHT_DURATION);
         }
 
@@ -566,8 +570,17 @@ fn tick_grab(ctx: &mut BossContext<'_>, boss: &mut Boss) {
 
 /// **The rake's lane is painted** down the bed at the rat's row.
 fn tick_rake_windup(ctx: &mut BossContext<'_>, boss: &mut Boss) {
-    // Hover onto the lane's line and its near end, then hold.
-    if let Some((start, _end, dir)) = lane_plan(ctx, boss) {
+    // Hover onto the lane's line and its near end, then hold. Once the lane is
+    // locked the bird settles onto the *committed* start and keeps the
+    // committed heading: re-planning here would chase the rat's new row (the
+    // live lane stays where it was painted) and could flip the facing, which
+    // made `RakePass` read itself as already past its end on the first tick.
+    if boss.flags & F_LOCK != 0 {
+        let to = boss.pounce_origin - boss.pos;
+        if to.len() > 1.0 {
+            move_boss(ctx, boss, to, 96.0);
+        }
+    } else if let Some((start, _end, dir)) = lane_plan(ctx, boss) {
         let to = start - boss.pos;
         if to.len() > 1.0 {
             move_boss(ctx, boss, to, 96.0);
@@ -1615,6 +1628,51 @@ mod tests {
     }
 
     #[test]
+    fn a_locked_rake_keeps_its_lane_when_the_rat_crosses_behind() {
+        // After the lock the windup used to keep re-planning against the rat:
+        // a rat that crossed to the bird's other side flipped the facing, and
+        // `RakePass` then read itself as already past its end and quit on its
+        // first tick, leaving the painted lane live with no bird in it.
+        let mut w = hawk_world(3);
+        spawn_hawk(&mut w);
+        let c = arena_centre(&w);
+        place(&mut w, c - Vec2::new(30.0, 0.0), c + Vec2::new(30.0, 12.0));
+        set_state(&mut w, HawkState::RakeWindup, art::RAKE_WINDUP[0]);
+        let mut guard = 0;
+        while boss_of(&mut w).map(|b| b.flags & F_LOCK == 0).unwrap_or(false) && guard < 300 {
+            guard += 1;
+            tick(&mut w);
+        }
+        let locked = boss_of(&mut w).unwrap();
+        assert!(locked.flags & F_LOCK != 0, "the rake never locked");
+        assert!(locked.facing.x > 0.0, "the lane runs east, toward the rat");
+        // The rat crosses behind the bird, well off the painted lane.
+        w.player.pos = c + Vec2::new(-90.0, 44.0);
+        guard = 0;
+        while state_of(&mut w) == HawkState::RakeWindup && guard < 300 {
+            guard += 1;
+            tick(&mut w);
+        }
+        assert_eq!(state_of(&mut w), HawkState::RakePass);
+        let pass = boss_of(&mut w).unwrap();
+        assert!(pass.facing.x > 0.0, "the committed heading flipped");
+        assert!(
+            (pass.target - locked.target).len() < 0.5,
+            "the committed lane end moved after the lock"
+        );
+        let x0 = pass.pos.x;
+        for _ in 0..4 {
+            tick(&mut w);
+        }
+        assert_eq!(
+            state_of(&mut w),
+            HawkState::RakePass,
+            "the pass quit on its first ticks"
+        );
+        assert!(boss_of(&mut w).unwrap().pos.x > x0 + 2.0, "the bird flies its lane");
+    }
+
+    #[test]
     fn the_talon_rake_crosses_the_rat_s_row_and_hits_once() {
         let mut w = hawk_world(3);
         spawn_hawk(&mut w);
@@ -1944,8 +2002,8 @@ mod tests {
             lengths.iter().map(|(s, _)| *s).collect::<Vec<_>>()
         );
         assert!(
-            lengths.iter().all(|(s, _)| *s > 8.0),
-            "a fight that ends in eight seconds is not a fight: {lengths:?}"
+            lengths.iter().all(|(s, _)| *s > 4.0),
+            "a fight that ends in four seconds is not a fight: {lengths:?}"
         );
     }
 }

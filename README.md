@@ -75,9 +75,22 @@ have never seen.*
 *A Sewer room lit by a brazier: the fixture's pool of light falls off into the
 dark.*
 
-> **TODO (not produced):** `docs/img/gameplay.mp4` — one floor, start to boss
-> kill. It needs a live screen recording from a real terminal; the capture
-> harness only writes still frames.
+## What is new
+
+- **Every floor has its own cast.** 48 ordinary enemy kinds, eight to a floor
+  and none shared between floors: the Sewer opens on Skitterers, the Laundry on
+  Wool Pills. (The 33 newest are named, statted and in the Library;
+  most still move like the body they are built on and get their own trick in a
+  later update.)
+- **24 named minibosses**, four per floor in a fixed order, each with one
+  signature shape, a one-second tell and a chest on death.
+- **Three more floors**: the Laundry and the Printworks as side routes with
+  their own hazards and bosses, and the Flatbed, a practice ride with pits,
+  sliding cargo and a slipstream.
+- **Hold-to-charge Super Dash**, twelve chest evolutions, the gene-splice shop
+  behind the mouse holes, and the Nest's fifteen permanent tracks.
+- **Remappable controls** for keyboard, mouse and gamepad (26 actions, three
+  schemes), and a four-tab Library that fills in as you meet things.
 
 ## Features
 
@@ -89,7 +102,7 @@ dark.*
   bonus practice floor, playable on its own from sector select.
 - **Every floor has its own roster**: eight enemy kinds that unlock on the
   clock, from the first fodder to a third trick at 9:45, and its own four
-  minibosses.
+  minibosses — 48 ordinary kinds and 24 named minibosses across the six floors.
 - **Fifteen minutes a floor**, escalating hordes, **four named minibosses** at
   3:00, 6:00, 9:00 and 12:00 (each leaves a chest), then **the floor's boss** at
   15:00. Ten bosses across the six floors; a floor draws its boss from its own
@@ -114,11 +127,28 @@ dark.*
   legibility, and a remappable control scheme for keyboard, mouse and gamepad.
 - **Persistent** high scores, per-floor bests, preferences and your Nest.
 
+## The floors
+
+| Floor | Where it sits | Watch for | Boss pool |
+| --- | --- | --- | --- |
+| **The Sewers** | sector 1 | glue boards and baited mousetraps | The Jungle Cat, The Horseshoe |
+| **The Kitchen** | sector 2 | glue boards and baited mousetraps | The Sweeper, SUBJECT R-01 |
+| **The Laundry** | sector 2, side route | steam grates that warn, then plume | The Mangle |
+| **The Lab** | sector 3 | glue boards and baited mousetraps | TURF-REAPER MK.IV, KING COBRA |
+| **The Printworks** | sector 3, side route | ink pads that slow you while you stand in them | THE NIGHT EDITION |
+| **The Flatbed** | practice only | pits in the bed, sliding cargo, the slipstream | The Magpie, The Redtail |
+
 ## Install
 
-Rust is the only requirement. The repository pins its toolchain in
-`rust-toolchain.toml` (currently `1.100.0`) — `rustup` fetches it on demand, so
-no global change is needed.
+Tagged releases attach prebuilt binaries: a universal macOS build (a
+double-clickable `Rat Run.app` that opens the game in Ghostty, iTerm2 or
+Terminal, and the bare `ratrun` binary), Linux x86_64 and Windows x86_64. The
+Linux binary needs the ALSA and udev runtime libraries (`libasound2`,
+`libudev1`), which a desktop install already has.
+
+To build from source, Rust is the only requirement. The repository pins its
+toolchain in `rust-toolchain.toml` (currently `1.100.0`) — `rustup` fetches it
+on demand, so no global change is needed.
 
 ```sh
 git clone <this repo> && cd ratrun
@@ -186,8 +216,8 @@ Three schemes, chosen on the **Options** screen and saved with the rest of your
 preferences. Every binding is remappable on the **Controls** screen: pick a row,
 press a key, pad button or mouse button, and a conflict swaps the two actions.
 `R` (the Reset action, or the RESET DEFAULTS row) restores the active scheme's
-defaults, and
-`X` / `Delete` / `Backspace` unbinds the selected row.
+defaults, and `X` / `Delete` / `Backspace` unbinds the selected row. The tables
+below are the defaults; every legend in the game prints the live binding.
 
 Movement, menus and preferences are the same in all three schemes:
 

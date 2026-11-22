@@ -965,6 +965,10 @@ fn hash01(x: i32, y: i32) -> f32 {
 
 fn line_solid(pb: &mut PixelBuffer, a: Vec2, b: Vec2, col: Rgb, alpha: f32) {
     let d = b - a;
+    // A non-finite endpoint would saturate `steps` (two billion plots).
+    if !d.len().is_finite() {
+        return;
+    }
     let steps = d.len().max(1.0) as i32;
     for i in 0..=steps {
         let t = i as f32 / steps.max(1) as f32;
@@ -983,6 +987,10 @@ fn line_dashed(
     phase: f32,
 ) {
     let d = b - a;
+    // A non-finite endpoint would saturate `steps` (two billion plots).
+    if !d.len().is_finite() {
+        return;
+    }
     let steps = d.len().max(1.0) as i32;
     for i in 0..=steps {
         let t = i as f32 / steps.max(1) as f32;
@@ -1109,6 +1117,10 @@ fn ellipse(
 /// whip are all made of these.
 fn capsule(pb: &mut PixelBuffer, a: Vec2, b: Vec2, r: f32, col: Rgb, alpha: f32) {
     let d = b - a;
+    // A non-finite endpoint would saturate `steps` (two billion plots).
+    if !d.len().is_finite() {
+        return;
+    }
     let steps = d.len().max(1.0) as i32;
     for i in 0..=steps {
         let t = i as f32 / steps.max(1) as f32;
@@ -1361,10 +1373,20 @@ fn draw_strike_marks(pb: &mut PixelBuffer, view: &CobraView, cam: Vec2) {
             // The fang-cross at the bite point: where it is going to land.
             let d = smooth_dir(b - a);
             let p = d.perp();
+            // The corridor's real width: the hazard is `STRIKE_HALF_WIDTH`
+            // either side of the line, so both edges are drawn, not only the
+            // centre line.
+            for s in [-1.0f32, 1.0] {
+                let o = p * (s * STRIKE_HALF_WIDTH);
+                line_dashed(pb, a + o, b + o, col, 0.45, 3.0, -view.anim * 26.0);
+            }
             line_solid(pb, b - d * 5.0 - p * 5.0, b + d * 5.0 + p * 5.0, col, 0.85);
             line_solid(pb, b - d * 5.0 + p * 5.0, b + d * 5.0 - p * 5.0, col, 0.85);
             if live {
                 capsule(pb, a, b, 1.6, WARN_HOT, 0.35);
+                // Stamped once per px of length, so a faint alpha builds to a
+                // soft fill of the whole corridor.
+                capsule(pb, a, b, STRIKE_HALF_WIDTH, WARN_HOT, 0.03);
             }
         }
         CobraState::SwayTell => {

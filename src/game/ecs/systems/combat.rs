@@ -450,7 +450,12 @@ pub fn contact_system(
         // cornered one cannot avoid. Measured (120 runs, two seed bases):
         // Skilled L1 68→64 %, Casual 42→29 %, Expert 84→75 % — i.e. the
         // horde phase now filters instead of the boss fight doing all of it.
-        player.iframes = CONTACT_IFRAMES;
+        // The Double Lid splice's extra grace applies to a contact hit too
+        // (`take_damage` already added it to its own 0.9 s, which the line
+        // below replaces; without the term the splice did nothing against the
+        // commonest hit in the game). Zero without the splice.
+        player.iframes =
+            CONTACT_IFRAMES + crate::game::shop::iframe_extra(&player.loadout.splices);
         let p = player.pos;
         vfx::emit_player_hurt(&mut particles, &mut rng.0, p);
         shake.amount = shake.amount.max(5.0);
@@ -566,6 +571,44 @@ mod tests {
         assert!(
             w.enemies()[0].contact_cd > 0.0,
             "a landed hit should set cooldown"
+        );
+    }
+
+    /// A landed contact hit buys `CONTACT_IFRAMES`, plus the Double Lid
+    /// splice's extra grace when the build owns it (the splice used to be
+    /// overwritten by the contact window).
+    #[test]
+    fn contact_iframes_include_the_double_lid_splice() {
+        use crate::game::shop::{iframe_extra, SpliceKind};
+
+        let hit = |lid: bool| -> f32 {
+            let mut w = World::new(Theme::Sewer, 73);
+            open_map(&mut w);
+            w.player.pos = w.level.arena * 0.5;
+            w.clear_enemies();
+            let p = w.player.pos;
+            let entity = w.spawn_enemy(EnemyKind::Cat, p, 1.0);
+            w.ecs.get_mut::<Enemy>(entity).unwrap().contact_cd = 0.0;
+            if lid {
+                w.player.loadout.splices.push(SpliceKind::DoubleLid);
+            }
+            w.player.iframes = 0.0;
+            let hp = w.player.hp;
+            rebuild_broadphase(&mut w);
+            run(&mut w, combat::contact_system);
+            assert!(w.player.hp < hp, "the contact hit did not land");
+            w.player.iframes
+        };
+
+        let plain = hit(false);
+        assert!((plain - CONTACT_IFRAMES).abs() < 1e-6, "plain window = {plain}");
+        let extra = iframe_extra(&[SpliceKind::DoubleLid]);
+        assert!(extra > 0.0, "Double Lid grants no extra grace");
+        let lidded = hit(true);
+        assert!(
+            (lidded - (CONTACT_IFRAMES + extra)).abs() < 1e-6,
+            "lidded window = {lidded}, expected {}",
+            CONTACT_IFRAMES + extra
         );
     }
 

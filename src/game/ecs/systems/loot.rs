@@ -81,7 +81,6 @@ use crate::game::player::Player;
 use crate::game::particle::vfx;
 use crate::game::ecs::systems::powerups;
 
-/// Weights of the rare-pickup table, in `WAVE3_DESIGN.md` §10 order:
 /// Share of a **named** miniboss's max HP a Nuke takes instead of killing it.
 ///
 /// A Nuke clears the ordinary horde outright; an appointment is a fight the rat
@@ -90,6 +89,7 @@ use crate::game::ecs::systems::powerups;
 /// appointment — and the rat still has to finish the body.
 pub const NUKE_NAMED_CHUNK: f32 = 0.35;
 
+/// Weights of the rare-pickup table, in `WAVE3_DESIGN.md` §10 order:
 /// Heal 32, Magnet 18, Nuke 8, Bottle Cap 14, Wind-up Mouse 10, Pocket Watch 9,
 /// Clean Socks 9. The **chance** of a drop is unchanged (ordinary 1.2 %, big
 /// 12 %, boss 100 %); this table only decides *which* find a successful roll
@@ -228,6 +228,12 @@ fn reap_dead(
             continue;
         };
         commands.entity(entity).despawn();
+        // A Wick Moth whose fuse was armed (`Enemy::note_damage`) but not yet
+        // turned into a `Wick` — it died after `wave3_system` ran this tick: a
+        // Nuke, a wave-4 hit, a flatbed fall — still leaves its burning wick.
+        if e.kind.archetype() == EnemyKind::WickMoth && e.w3.wick_t > 0.0 {
+            commands.spawn((crate::game::ecs::components::Wick::new(e.pos), next_id.take()));
+        }
 
         let blood = level.palette.blood;
         // The death cue follows the **archetype** (the floor's heavy dies like
@@ -534,9 +540,10 @@ pub fn treasure_system(
     mut gold: Query<(Entity, &SpawnId, &mut Gold)>,
     chests: Query<(Entity, &SpawnId, &Chest)>,
     mut ordered: Local<SpawnOrdered>,
-    // Hoard Gland's banked half-gold (see `shop::coin_payout`): a `Local`, so
-    // it rides across ticks until the floor ends (a new level builds a new
-    // schedule and starts empty).
+    // The unpaid coin bonus, in thousandths of a gold (Hoard Gland's banked
+    // halves and the nest's Gold gain fractions; see `shop::coin_payout`): a
+    // `Local`, so it rides across ticks until the floor ends (a new level
+    // builds a new schedule and starts empty).
     mut half_bank: Local<u32>,
 ) {
     let dt = input.dt;
@@ -764,6 +771,13 @@ pub fn pickups_system(
             PickupKind::CleanSocks => {
                 player.buffs.socks = powerups::CLEAN_SOCKS_SECS;
                 // "Immediately ready the dash": the rat can leave at once.
+                // `player_system` only announces a cooldown it watched run out,
+                // so a refill that cuts one short gives the ready cue here.
+                if player.dash_cd > 0.0 {
+                    player.dash_ready_flash =
+                        crate::game::ecs::systems::player::DASH_READY_SECS;
+                    sfx.0.push(Sfx::DashReady);
+                }
                 player.dash_cd = 0.0;
                 vfx::emit_pickup_find(&mut particles, &mut rng.0, at, k);
                 sfx.0.push(Sfx::PocketFind);

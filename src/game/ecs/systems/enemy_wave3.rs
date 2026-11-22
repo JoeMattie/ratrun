@@ -349,6 +349,11 @@ pub fn wave3_system(
             continue;
         }
 
+        // Lab (`floor_lab`): the Walking Syringe runs its own needle, not the
+        // Bell Flea's hop.
+        if crate::game::ecs::systems::floor_lab::owns(e.kind) {
+            continue;
+        }
         // A dead Wick Moth becomes a burning wick, once (a registration that
         // inherits the moth's fuse does the same).
         if e.kind.archetype() == EnemyKind::WickMoth && e.hp <= 0.0 && e.w3.wick_t > 0.0 {
@@ -360,6 +365,11 @@ pub fn wave3_system(
 
         if e.w3.armed == 0 {
             arm(&mut e);
+        }
+
+        // Sewer: the Sump Leech never curls; its tongue is `floor_sewer`'s.
+        if e.kind == EnemyKind::SumpLeech {
+            continue;
         }
 
         let self_id = id.0;
@@ -485,6 +495,11 @@ fn pillbug_tick(
     rng: &mut RngRes,
     sfx: &mut SfxQueue,
 ) {
+    // Kitchen (`floor_kitchen`): an Egg Timer never curls; its dial is its own
+    // state machine.
+    if e.kind == EnemyKind::EggTimer {
+        return;
+    }
     e.w3.curl_cd = (e.w3.curl_cd - dt).max(0.0);
     if e.w3.curl_t > 0.0 {
         e.w3.curl_t -= dt;
@@ -506,6 +521,11 @@ fn pillbug_tick(
     let to = ppos - e.pos;
     if to.len_sq() > 1e-6 {
         e.facing = to.normalized();
+    }
+    // Kitchen (`floor_kitchen`): a Sink Crab's lid faces 90° left of its
+    // approach for the whole curl.
+    if e.kind == EnemyKind::SinkCrab {
+        e.facing = crate::game::ecs::systems::floor_kitchen::sink_crab_shield_facing(e.facing);
     }
     e.w3.curl_t = PILLBUG_CURL_SECS;
     e.w3.warn_age = 0.0;
@@ -697,6 +717,9 @@ fn turnkey_tick(
             e.w3.bar_spent = true;
             vfx::emit_player_hurt(particles, &mut rng.0, rat);
             sfx.0.push(Sfx::Crossbar);
+            // Flatbed (`floor_flatbed`): the Loose Bungee's bar also drags the
+            // rat toward its hook. A no-op for every other kind; no rng.
+            crate::game::ecs::systems::floor_flatbed::bungee_pull(e.kind, e.pos, level, player);
         }
         if e.w3.bar_t <= 0.0 {
             e.w3.bar_spent = false;

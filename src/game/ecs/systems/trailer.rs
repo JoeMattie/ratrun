@@ -172,16 +172,23 @@ pub fn trailer_system(
         // the holes like the moth flies them.
         if !e.alive()
             || e.named
-            || matches!(
+            // (The Loose Can borrows the hornet's archetype but rolls on the
+            // deck, so it falls: `floor_flatbed`.)
+            || (matches!(
                 e.kind.archetype(),
                 EnemyKind::WickMoth | EnemyKind::MurderHornet
-            )
+            ) && e.kind != EnemyKind::LooseCan)
             || deck.pit_at(e.pos).is_none()
         {
             continue;
         }
         let class = SizeClass::of_radius(e.radius);
-        if let Some(safe) = nearest_plank(&level, e.pos, class, ENEMY_RECOVERY_MARGIN) {
+        // Prefer a plank two cells clear of every hole; on a deck too broken to
+        // offer one in reach, any plank beats leaving the body standing in the
+        // hole untouched for the rest of the floor.
+        let landing = nearest_plank(&level, e.pos, class, ENEMY_RECOVERY_MARGIN)
+            .or_else(|| nearest_plank(&level, e.pos, class, 0));
+        if let Some(safe) = landing {
             // A fall has no direction (the unmodified multiplier, whatever a
             // Pillbug's shell is doing); `note_damage` books the side effects
             // (a Porter drops its raise).
@@ -275,6 +282,13 @@ pub fn trailer_system(
                     gem.pos = to;
                 }
             }
+            // Coins ride the same wind as gems (see the slipstream below).
+            for mut coin in gold.iter_mut() {
+                let to = coin.pos + Vec2::new(-GUST_WIND_GEMS * dt, 0.0);
+                if slipstream_floor(&level, to) {
+                    coin.pos = to;
+                }
+            }
             for &(_, entity) in order.iter() {
                 let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
                     continue;
@@ -317,6 +331,13 @@ pub fn trailer_system(
                 let to = gem.pos + away * (push * dt);
                 if slipstream_floor(&level, to) {
                     gem.pos = to;
+                }
+            }
+            for mut coin in gold.iter_mut() {
+                let away = (coin.pos - from).normalized();
+                let to = coin.pos + away * (push * dt);
+                if slipstream_floor(&level, to) {
+                    coin.pos = to;
                 }
             }
             for &(_, entity) in order.iter() {
@@ -411,7 +432,7 @@ pub fn nearest_plank(
         (from.y / crate::game::collision::TILE_F).floor() as i32,
     );
     let deck = level.trailer.deck;
-    let mut best: Option<(i32, Vec2)> = None;
+    let mut best: Option<(f32, Vec2)> = None;
     for r in 1..=RECOVERY_RADIUS {
         for dy in -r..=r {
             for dx in -r..=r {
@@ -434,8 +455,11 @@ pub fn nearest_plank(
                     continue;
                 }
                 let d = (from - centre).len_sq();
-                if best.is_none_or(|(bd, _)| d < bd as f32) {
-                    best = Some((d as i32, centre));
+                // Strict `<` on the exact distance: ties keep the first cell
+                // of the fixed walk. (The distance used to be truncated to an
+                // integer, so a nearer cell within a pixel-squared lost.)
+                if best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, centre));
                 }
             }
         }
@@ -523,6 +547,30 @@ mod tests {
         }
         let x1 = w.ecs.get::<Gold>(coin).unwrap().pos.x;
         assert!(x1 < x0, "the slipstream must herd coins too ({x0} -> {x1})");
+    }
+
+    /// The plank search compares exact distances. With the two nearer cells
+    /// holed, the left cell (0.004 px farther along x) beats the upper one
+    /// (0.008 px farther along y) although both squares truncate to 256.
+    #[test]
+    fn the_nearest_plank_is_not_decided_by_a_truncated_distance() {
+        let mut w = bed_world();
+        let deck = w.level.trailer.deck;
+        let (cx, cy) = (deck.x + 6, deck.y + 4);
+        for (px, py) in [(cx + 1, cy), (cx, cy + 1)] {
+            w.level
+                .trailer
+                .pits
+                .push(Pit::new(TileRect::new(px, py, 1, 1), PitKind::BrokenPlank));
+        }
+        let centre = crate::game::collision::TileMap::tile_rect(cx, cy).center();
+        let from = centre + Vec2::new(0.004, 0.008);
+        let left = crate::game::collision::TileMap::tile_rect(cx - 1, cy).center();
+        let got = nearest_plank(&w.level, from, SizeClass::Small, 0).expect("a plank is in reach");
+        assert!(
+            (got - left).len() < 0.01,
+            "expected the left plank {left:?}, got {got:?}"
+        );
     }
 
     /// A Bell Flea never picks a landing on a hole: it waits for open planks.

@@ -144,6 +144,12 @@ impl Geometry {
                 for y in y0..=y1 {
                     for x in x0..=x1 {
                         let tile = &mut self.tiles[(y * cols + x) as usize];
+                        // A prop that laps onto a wall cell must not replace the
+                        // wall's full-height occluder with its own partial, lower
+                        // one: light would leak through that cell.
+                        if tile.layer == LayerMask::WALLS.0 {
+                            continue;
+                        }
                         let bounds = TileMap::tile_rect(x, y);
                         tile.footprint = footprint(bounds, prop.rect) & outline;
                         tile.layer = LayerMask::PROPS.0;

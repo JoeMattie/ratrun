@@ -847,6 +847,28 @@ pub fn pick_kind(theme: Theme, clock: f32, caps: &SlotCaps, rng: &mut impl Rng) 
     roster.kind(last)
 }
 
+/// The procedural approach sound of a floor's fodder body (the design's "sound
+/// pair for its two fodder kinds"): slot A is the ground fodder, slot B the
+/// flying fodder, every other slot is silent on approach (`None`) because the
+/// louder accents are reserved for tells. Played by
+/// `systems::approach::approach_sfx_system`.
+pub fn approach_sfx(theme: Theme, slot: Slot) -> Option<crate::audio::Sfx> {
+    use crate::audio::Sfx;
+    let (a, b) = match theme {
+        Theme::Sewer => (Sfx::ApproachPipeClaws, Sfx::ApproachWingLeather),
+        Theme::Kitchen => (Sfx::ApproachAntFeet, Sfx::ApproachWhine),
+        Theme::Lab => (Sfx::ApproachSwab, Sfx::ApproachLid),
+        Theme::Laundry => (Sfx::ApproachWoolSlap, Sfx::ApproachBrush),
+        Theme::Printworks => (Sfx::ApproachRasp, Sfx::ApproachPaperFlap),
+        Theme::Trailer => (Sfx::ApproachGravel, Sfx::ApproachWasher),
+    };
+    match slot {
+        Slot::A => Some(a),
+        Slot::B => Some(b),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

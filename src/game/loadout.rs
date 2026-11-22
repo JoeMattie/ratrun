@@ -479,12 +479,9 @@ pub enum Upgrade {
 /// restores.
 const BANDAGE_HEAL_FRAC: f32 = 0.25;
 
-/// Apply one stack of `p` to `stats`, returning the HP the pick heals.
-///
-/// This is the single source of truth for what a passive does: [`Loadout::apply`]
-/// uses it for a live level-up and [`Loadout::from_parts`] replays it when a
-/// carried loadout is rebuilt for the next campaign level, so the two can never
-/// drift apart.
+/// Max HP one Fat Reserves stack adds (and heals on the pick).
+const MAX_HP_STACK: f32 = 20.0;
+
 /// Health a passive stack heals when it is granted, for the callers that grant
 /// stacks outside the level-up card (a chest's free rank).
 ///
@@ -494,16 +491,22 @@ const BANDAGE_HEAL_FRAC: f32 = 0.25;
 #[inline]
 pub fn passive_stack_heal(p: PassiveKind) -> f32 {
     match p {
-        PassiveKind::MaxHp => 20.0,
+        PassiveKind::MaxHp => MAX_HP_STACK,
         _ => 0.0,
     }
 }
 
+/// Apply one stack of `p` to `stats`, returning the HP the pick heals.
+///
+/// This is the single source of truth for what a passive does: [`Loadout::apply`]
+/// uses it for a live level-up and [`Loadout::from_parts`] replays it when a
+/// carried loadout is rebuilt for the next campaign level, so the two can never
+/// drift apart.
 fn apply_passive_stack(stats: &mut Stats, p: PassiveKind) -> f32 {
     match p {
         PassiveKind::MaxHp => {
-            stats.max_hp += 20.0;
-            20.0
+            stats.max_hp += MAX_HP_STACK;
+            MAX_HP_STACK
         }
         PassiveKind::MoveSpeed => {
             stats.move_speed *= 1.12;
@@ -1523,6 +1526,38 @@ mod tests {
         let before = lo.stats.damage_mult;
         lo.apply(&Upgrade::Passive(PassiveKind::Damage));
         assert!(lo.stats.damage_mult > before);
+    }
+
+    /// Quick Paws (`MoveSpeed`) stacks: every one of its six stacks multiplies
+    /// the move speed by 1.12 again, the total is ~x1.97, the stack record
+    /// counts each pick, and a carried rebuild lands on the same number.
+    #[test]
+    fn quick_paws_stacks_six_times_and_compounds() {
+        assert_eq!(PassiveKind::MoveSpeed.name(), "Quick Paws");
+        let mut lo = Loadout::new(WeaponKind::Gnaw);
+        let base = lo.stats.move_speed;
+        let mut prev = base;
+        for stack in 1..=PassiveKind::MoveSpeed.max_stacks() {
+            lo.apply(&Upgrade::Passive(PassiveKind::MoveSpeed));
+            assert_eq!(lo.stacks(PassiveKind::MoveSpeed), stack);
+            assert!(
+                (lo.stats.move_speed - prev * 1.12).abs() < 1e-3,
+                "stack {stack} did not add its own 12%: {prev} -> {}",
+                lo.stats.move_speed
+            );
+            prev = lo.stats.move_speed;
+        }
+        assert!((lo.stats.move_speed / base - 1.12f32.powi(6)).abs() < 1e-3);
+        // A seventh pick is the capped bandage: no more speed, no extra stack.
+        lo.apply(&Upgrade::Passive(PassiveKind::MoveSpeed));
+        assert_eq!(lo.stacks(PassiveKind::MoveSpeed), 6);
+        assert_eq!(lo.stats.move_speed, prev);
+        // The same number after a from-scratch rebuild and after a carry-over.
+        let live = lo.stats.move_speed;
+        lo.rebuild_stats();
+        assert_eq!(lo.stats.move_speed, live);
+        let carried = Loadout::from_parts(lo.weapons.clone(), lo.passives.clone());
+        assert_eq!(carried.stats.move_speed, live);
     }
 
     #[test]

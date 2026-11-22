@@ -1,3 +1,13 @@
+//! Assertions for the lighting pass: shapes, blends and layer masks; distinct
+//! wall, prop and doorway shadows; cached fixture shadows refreshing when a
+//! door opens; emissive cores; the quality controller and palette dither; an
+//! enemy staying readable at the edge of a blackout on every theme; and that
+//! degenerate viewports or a change of tier never change the simulation.
+//!
+//! Also here: the fixture/emitter placement sweep over generated maps and the
+//! timing measurements (placement cost, a 600-enemy frame), which print
+//! numbers and are not correctness gates.
+
 use super::*;
 use crate::game::art_traps::OneWayDoorState;
 use crate::game::art_walls::{Cardinal, WallAxis, WallKind};
@@ -591,4 +601,128 @@ fn lighting_timings_with_600_enemies_and_ambient_particles() {
             }
         }
     }
+}
+
+#[test]
+fn a_flood_of_halos_cannot_evict_the_rats_aura() {
+    // The rat's aura joins the shaped list inside `apply_scene`, after every
+    // `emit` of the frame. A full list used to drop it silently.
+    let w = test_world(Theme::Sewer);
+    let cam = w.player.pos - Vec2::new(64.0, 48.0);
+    let shot = |halos: usize| {
+        let mut map = LightMap::new();
+        let mut pb = PixelBuffer::new(128, 96);
+        pb.clear((104, 102, 107));
+        map.begin_frame();
+        for _ in 0..halos {
+            // Far off-screen: the halos themselves light nothing here.
+            map.emit(Vec2::new(-4000.0, -4000.0), (255, 90, 60), 20.0, 0.6);
+        }
+        map.apply_scene(
+            &mut pb,
+            &test_scene(&w, LightingMode::Full, ColorDepth::Truecolor, cam),
+        );
+        pb
+    };
+    let calm = shot(0);
+    let flood = shot(200);
+    for (x, y) in [(64, 48), (72, 48), (64, 58)] {
+        assert_eq!(lum(&flood, x, y), lum(&calm, x, y), "at {x},{y}");
+    }
+}
+
+#[test]
+fn a_relapse_doubles_the_wait_before_the_next_climb() {
+    let slow = Duration::from_millis(8);
+    let fast = Duration::from_micros(60);
+    let drop_tier = |map: &mut LightMap| {
+        for _ in 0..8 {
+            map.observe_cost(LightingMode::Full, slow, 9_600);
+        }
+    };
+    let cheap = |map: &mut LightMap, frames: usize| {
+        let mode = map.quality(LightingMode::Full);
+        for _ in 0..frames {
+            map.observe_cost(mode, fast, 9_600);
+        }
+    };
+    let mut map = LightMap::new();
+    drop_tier(&mut map);
+    assert_eq!(map.quality(LightingMode::Full), LightingMode::Hard);
+    cheap(&mut map, 180);
+    assert_eq!(map.quality(LightingMode::Full), LightingMode::Full);
+    // Losing the regained tier straight away is a relapse.
+    drop_tier(&mut map);
+    assert_eq!(map.quality(LightingMode::Full), LightingMode::Hard);
+    cheap(&mut map, 180);
+    assert_eq!(
+        map.quality(LightingMode::Full),
+        LightingMode::Hard,
+        "the second climb must wait twice as long"
+    );
+    cheap(&mut map, 180);
+    assert_eq!(map.quality(LightingMode::Full), LightingMode::Full);
+    // A climb that holds through its probation earns the short wait back.
+    cheap(&mut map, 600);
+    drop_tier(&mut map);
+    cheap(&mut map, 180);
+    assert_eq!(map.quality(LightingMode::Full), LightingMode::Full);
+}
+
+#[test]
+fn a_prop_lapping_onto_a_wall_does_not_open_a_light_leak() {
+    let mut w = test_world(Theme::Sewer);
+    w.level.tiles.fill_cells(4, 0, 1, 6, WALL);
+    let mut light = Light::radial(Vec2::new(38.0, 41.0), 110.0, (255, 235, 199), 0.98);
+    light.shadow_softness = ShadowSoftness::None;
+    let sealed = frame(&w, &[light], LightingMode::Full);
+    // A coil with no occluder of its own, half on the floor and half on the
+    // wall cell straight between the light and the probe.
+    w.level.props.push(Prop {
+        rect: Rectf::new(56.0, 32.0, 16.0, 16.0),
+        kind: PropKind::ChainCoil,
+    });
+    let lapped = frame(&w, &[light], LightingMode::Full);
+    assert_eq!(lum(&lapped, 92, 42), lum(&sealed, 92, 42));
+}
+
+#[test]
+fn a_room_seen_from_a_passage_is_no_brighter_than_the_passage() {
+    // The view is a lamp-lit room; the rat stands far off-screen at (700, 700).
+    let mut w = test_world(Theme::Kitchen);
+    w.level.objects.light_zones.push(LightZone {
+        rect: TileRect::new(0, 0, 8, 6),
+        kind: LightZoneKind::Room,
+    });
+    w.level.objects.lights.push(LightFixture {
+        pos: Vec2::new(64.0, 48.0),
+        kind: LightFixtureKind::Pendant,
+        radius: 60.0,
+        seed: 1,
+    });
+    // Unzoned ground under the rat: nothing is capped.
+    let open = frame(&w, &[], LightingMode::Full);
+    // The rat in a passage: the room's ambient and its lamp both come down.
+    w.level.objects.light_zones.push(LightZone {
+        rect: TileRect::new(40, 40, 8, 8),
+        kind: LightZoneKind::Corridor,
+    });
+    let from_passage = frame(&w, &[], LightingMode::Full);
+    assert!(
+        lum(&from_passage, 8, 8) + 8 < lum(&open, 8, 8),
+        "ambient: {} vs {}",
+        lum(&from_passage, 8, 8),
+        lum(&open, 8, 8)
+    );
+    assert!(
+        lum(&from_passage, 70, 52) + 8 < lum(&open, 70, 52),
+        "lamp: {} vs {}",
+        lum(&from_passage, 70, 52),
+        lum(&open, 70, 52)
+    );
+    // The rat in a room of his own: an equal room is shown at full value.
+    w.level.objects.light_zones[1].kind = LightZoneKind::Room;
+    let from_room = frame(&w, &[], LightingMode::Full);
+    assert_eq!(lum(&from_room, 8, 8), lum(&open, 8, 8));
+    assert_eq!(lum(&from_room, 70, 52), lum(&open, 70, 52));
 }

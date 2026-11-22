@@ -79,7 +79,8 @@ impl PickupKind {
         }
     }
 
-    /// Two-letter tag the HUD's timed-buff strip prints next to the seconds.
+    /// One-letter tag the HUD's timed-buff strip prints next to the seconds
+    /// (empty for the instant pickups, which have no timer).
     pub fn buff_tag(self) -> &'static str {
         match self {
             PickupKind::BottleCap => "B",

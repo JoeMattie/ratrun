@@ -918,6 +918,621 @@ pub const PLACEHOLDER: Icon = {
 };
 
 // ============================================================================
+// Evolutions (12)
+// ============================================================================
+//
+// One silhouette per evolution, in the base weapon's colour family. An evolved
+// weapon used to wear its base icon inside a frame; at HUD size that frame was
+// four corner pixels, so the rack could not say which weapons had evolved.
+
+/// Milk Teeth (Gnaw) — two baby teeth in a gum and a third out on its thread.
+const MILK_TEETH: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'P', (236, 128, 150)), // gum
+        (b'W', (255, 254, 240)), // enamel glint
+        (b'I', (232, 218, 180)), // ivory
+        (b'T', (150, 196, 214)), // the thread
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"PPPPPPPP",
+                b"PWIPWIPP",
+                b".WI.WI..",
+                b".WI.WI.T",
+                b"..I..I.T",
+                b"......T.",
+                b"..WI.T..",
+                b"..WIT...",
+            ],
+            PAL,
+        ),
+        small: grid4([b"PPPP", b"W.W.", b"I.IT", b"..WT"], PAL),
+        accent: (244, 232, 200),
+    }
+};
+
+/// Fondue Fork (Cheese Spray) — a two-pronged fork run through a melting lump of cheese.
+const FONDUE_FORK: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'S', (206, 214, 226)), // steel
+        (b'K', (110, 122, 142)), // steel shade
+        (b'H', (255, 244, 170)), // hot cheese
+        (b'Y', (255, 206, 58)), // cheese
+        (b'O', (196, 124, 24)), // cheese rind
+    ];
+    Icon {
+        large: grid8(
+            [
+                b".S...K..",
+                b".S...K..",
+                b".SHYYK..",
+                b".SSSKK..",
+                b"HYYSYYO.",
+                b".YYSYO..",
+                b"...S.O..",
+                b"...K....",
+            ],
+            PAL,
+        ),
+        small: grid4([b"S.K.", b"SHK.", b"YSYO", b".K.."], PAL),
+        accent: (255, 206, 58),
+    }
+};
+
+/// Echo Chamber (Squeak Nova) — a squeak boxed in by two walls.
+const ECHO_CHAMBER: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'L', (226, 196, 255)), // lit wall
+        (b'V', (176, 104, 248)), // wall
+        (b'D', (92, 44, 160)), // shaded wall
+        (b'W', (255, 255, 255)), // the squeak
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"LLLLLLLV",
+                b"L......D",
+                b"L.VVVV.D",
+                b"L.VWWD.D",
+                b"L.VWWD.D",
+                b"L.VDDD.D",
+                b"L......D",
+                b"VDDDDDDD",
+            ],
+            PAL,
+        ),
+        small: grid4([b"LLLV", b"LWWD", b"LWWD", b"VDDD"], PAL),
+        accent: (196, 140, 255),
+    }
+};
+
+/// Fairy Ring (Spore Orbit) — four mint mushrooms round an empty circle.
+const FAIRY_RING: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'W', (232, 255, 244)), // cap glint
+        (b'M', (108, 248, 172)), // cap
+        (b'G', (40, 150, 98)), // cap shade
+        (b'S', (206, 232, 218)), // stem
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"...WM...",
+                b"..WMMG..",
+                b"...SS...",
+                b"WM....WM",
+                b"MMG..MMG",
+                b".S....S.",
+                b"...WM...",
+                b"..WMMG..",
+            ],
+            PAL,
+        ),
+        small: grid4([b".WM.", b"M..M", b"S..S", b".MG."], PAL),
+        accent: (108, 248, 172),
+    }
+};
+
+/// Ratchet Tail (Tail Whip) — a toothed ratchet wheel with the tail wound off it.
+const RATCHET_TAIL: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'W', (240, 244, 250)), // tooth glint
+        (b'S', (170, 182, 200)), // steel
+        (b'D', (52, 60, 78)), // hub
+        (b'P', (248, 150, 172)), // tail
+        (b'R', (190, 84, 112)), // tail shade
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"..W.S...",
+                b".WSSSS..",
+                b"WSDDSSS.",
+                b".SD.DS..",
+                b"SSDDSSSP",
+                b".SSSSS.P",
+                b"..S.S.PR",
+                b"....PPR.",
+            ],
+            PAL,
+        ),
+        small: grid4([b"W.S.", b"SDSP", b"S.SP", b".PR."], PAL),
+        accent: (200, 208, 222),
+    }
+};
+
+/// Drain Cleaner (Acid Spit) — a capped bottle of something green.
+const DRAIN_CLEANER: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'K', (60, 92, 200)), // cap
+        (b'W', (236, 255, 214)), // glass glint
+        (b'A', (196, 255, 92)), // acid
+        (b'G', (96, 200, 48)), // acid shade
+        (b'D', (36, 96, 30)), // bottle shade
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"...KK...",
+                b"...KK...",
+                b"..WGGD..",
+                b".WGGGGD.",
+                b".WAAAGD.",
+                b".WAAAGD.",
+                b".WGGGGD.",
+                b"..DDDD..",
+            ],
+            PAL,
+        ),
+        small: grid4([b".KK.", b"WGGD", b"WAAD", b".DD."], PAL),
+        accent: (150, 236, 70),
+    }
+};
+
+/// Flywheel (Tail Thrash) — a heavy spoked wheel, rim hot.
+const FLYWHEEL: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'W', (255, 246, 214)), // hub
+        (b'O', (255, 170, 72)), // rim
+        (b'F', (206, 96, 30)), // rim shade
+        (b'S', (140, 110, 96)), // spokes
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"..OOOO..",
+                b".OS..SO.",
+                b"O.S..S.F",
+                b"OSSWWSSF",
+                b"OSSWWSSF",
+                b"O.S..S.F",
+                b".OS..SF.",
+                b"..FFFF..",
+            ],
+            PAL,
+        ),
+        small: grid4([b".OO.", b"OWWF", b"OWWF", b".FF."], PAL),
+        accent: (255, 170, 72),
+    }
+};
+
+/// Roll Call (Sonic Squeak) — a clipboard with three names on it.
+const ROLL_CALL: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'K', (84, 96, 112)), // clip
+        (b'P', (244, 240, 222)), // paper
+        (b'C', (64, 176, 214)), // names
+        (b'T', (150, 146, 128)), // paper shade
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"..KKKK..",
+                b".PPKKPP.",
+                b".PCCCCP.",
+                b".PPPPPP.",
+                b".PCCCPP.",
+                b".PPPPPP.",
+                b".PCCCCT.",
+                b".TTTTTT.",
+            ],
+            PAL,
+        ),
+        small: grid4([b".KK.", b"PCCP", b"PCPP", b"TTTT"], PAL),
+        accent: (120, 204, 232),
+    }
+};
+
+/// Downspout (Acid Rain) — a pipe elbow letting go of what it carries.
+const DOWNSPOUT: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'L', (206, 216, 226)), // lit pipe
+        (b'S', (120, 134, 150)), // pipe
+        (b'D', (58, 68, 84)), // pipe shade
+        (b'A', (170, 255, 72)), // acid
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"LLLLLL..",
+                b"SSSSSSL.",
+                b"DDDDSSL.",
+                b"...DSSL.",
+                b"...DSSL.",
+                b"...DDDD.",
+                b"....AA..",
+                b"...A..A.",
+            ],
+            PAL,
+        ),
+        small: grid4([b"LLL.", b"DDSL", b".DSL", b"..A."], PAL),
+        accent: (170, 255, 72),
+    }
+};
+
+/// Dead Letter (Hantavirus) — a sealed envelope; the seal is the wrong colour.
+const DEAD_LETTER: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'W', (246, 240, 226)), // paper
+        (b'D', (176, 164, 142)), // fold
+        (b'S', (120, 108, 92)), // paper shade
+        (b'P', (232, 78, 204)), // the seal
+        (b'Y', (255, 226, 96)), // seal glint
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"........",
+                b"WWWWWWWW",
+                b"WDWWWWDW",
+                b"WWDWWDWW",
+                b"WWWYPWWW",
+                b"WWWPPWWS",
+                b"WWWWWWWS",
+                b"SSSSSSSS",
+            ],
+            PAL,
+        ),
+        small: grid4([b"WDDW", b"WYPW", b"WPPS", b"SSSS"], PAL),
+        accent: (232, 78, 204),
+    }
+};
+
+/// Carbon Copy (Laser Eyes) — a carbon sheet and the copy under it, one red line on both.
+const CARBON_COPY: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'K', (44, 50, 72)), // carbon
+        (b'B', (86, 96, 128)), // carbon sheen
+        (b'W', (250, 250, 244)), // copy
+        (b'L', (170, 176, 186)), // ruled lines
+        (b'R', (255, 70, 60)), // the beam
+    ];
+    Icon {
+        large: grid8(
+            [
+                b".BBBBB..",
+                b".BKKKK..",
+                b".BRRRK..",
+                b".BKWWWWW",
+                b".KKWLLLW",
+                b"...WRRRW",
+                b"...WLLLW",
+                b"...WWWWW",
+            ],
+            PAL,
+        ),
+        small: grid4([b"BKK.", b"BRWW", b".KRW", b".WWW"], PAL),
+        accent: (255, 110, 96),
+    }
+};
+
+/// Ripcord (Super Dash) — a red pull ring on a white cord.
+const RIPCORD: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'C', (236, 244, 255)), // cord
+        (b'W', (255, 190, 180)), // ring glint
+        (b'R', (238, 62, 62)), // ring
+        (b'D', (150, 28, 40)), // ring shade
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"......CC",
+                b".....CC.",
+                b"....CC..",
+                b"..WRCR..",
+                b".WR..RD.",
+                b".R....D.",
+                b".RR..DD.",
+                b"..RDDD..",
+            ],
+            PAL,
+        ),
+        small: grid4([b"..CC", b".WC.", b"R..D", b".RD."], PAL),
+        accent: (238, 62, 62),
+    }
+};
+
+// ============================================================================
+// Gene splices (10)
+// ============================================================================
+//
+// One silhouette per splice. They used to borrow the passive icon of the stat
+// they sell, which made Glass Incisors read as Sharp Teeth on the shelf and
+// left two pairs (Double Lid / Copper Nerves, Blackboard Belly / Long Fingers)
+// pixel-identical.
+
+/// Glass Incisors — two long glass teeth hanging from a pink gum.
+const GLASS_INCISORS: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'P', (236, 128, 150)), // gum
+        (b'W', (250, 254, 255)), // glass glint
+        (b'C', (132, 214, 236)), // glass body
+        (b'D', (52, 108, 136)),  // glass shadow
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"PPPPPPPP",
+                b".WCD.WCD",
+                b".WCD.WCD",
+                b".WCD.WCD",
+                b".WCD.WCD",
+                b".WC..WC.",
+                b"..C...C.",
+                b"........",
+            ],
+            PAL,
+        ),
+        small: grid4([b"PPPP", b"WC.W", b"WC.W", b".C.C"], PAL),
+        accent: (132, 214, 236),
+    }
+};
+
+/// Boiler Heart — a furnace-orange heart with a dark grate and a wisp of steam.
+const BOILER_HEART: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'W', (236, 240, 244)), // steam
+        (b'Y', (255, 226, 120)), // hot glint
+        (b'O', (244, 138, 48)),  // boiler body
+        (b'R', (172, 70, 28)),   // shaded side
+        (b'D', (48, 24, 20)),    // grate slot
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"...W.W..",
+                b".OO.OO..",
+                b"OYOOOOR.",
+                b"OOOOOOR.",
+                b"ODDDDDR.",
+                b".OOOOR..",
+                b"..OOR...",
+                b"...R....",
+            ],
+            PAL,
+        ),
+        small: grid4([b".W.W", b"OYOR", b"ODDR", b".OR."], PAL),
+        accent: (244, 138, 48),
+    }
+};
+
+/// Hollow Bones — a bone on the diagonal with a dark hollow down its shaft.
+const HOLLOW_BONES: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'W', (250, 246, 232)), // bone highlight
+        (b'B', (206, 196, 172)), // bone shade
+        (b'D', (58, 50, 62)),    // the hollow
+    ];
+    Icon {
+        large: grid8(
+            [
+                b".WW.....",
+                b"WWWW....",
+                b"WWWDW...",
+                b".WDDDW..",
+                b"..WDDDB.",
+                b"...WDBBB",
+                b"....BBBB",
+                b".....BB.",
+            ],
+            PAL,
+        ),
+        small: grid4([b"WW..", b"WDW.", b".WDB", b"..BB"], PAL),
+        accent: (226, 218, 196),
+    }
+};
+
+/// Double Lid — an eye under two stacked lids.
+const DOUBLE_LID: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'V', (146, 98, 214)),  // outer lid
+        (b'L', (206, 176, 244)), // inner lid
+        (b'W', (250, 250, 255)), // sclera
+        (b'K', (24, 18, 40)),    // pupil
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"..VVVV..",
+                b".VLLLLV.",
+                b"VLWWWWLV",
+                b"LWWKKWWL",
+                b"LWWKKWWL",
+                b"VLWWWWLV",
+                b".VLLLLV.",
+                b"..VVVV..",
+            ],
+            PAL,
+        ),
+        small: grid4([b"VVVV", b"LLLL", b"WKKW", b".VV."], PAL),
+        accent: (176, 136, 232),
+    }
+};
+
+/// Hoard Gland — a pink cheek pouch with a coin showing through.
+const HOARD_GLAND: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'W', (255, 232, 236)), // pouch sheen
+        (b'P', (240, 150, 170)), // pouch
+        (b'M', (168, 82, 110)),  // pouch shade
+        (b'Y', (255, 240, 150)), // coin glint
+        (b'G', (236, 178, 44)),  // coin
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"..PPPP..",
+                b".PWWPPP.",
+                b"PWPGGPPM",
+                b"PPGYGGPM",
+                b"PPGGGGPM",
+                b"PPPGGPMM",
+                b".PPPMMM.",
+                b"..MMMM..",
+            ],
+            PAL,
+        ),
+        small: grid4([b".WP.", b"PYGM", b"PGGM", b".MM."], PAL),
+        accent: (240, 150, 170),
+    }
+};
+
+/// Copper Nerves — a copper nerve cell: a bright node with six bare-wire
+/// branches.
+const COPPER_NERVES: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'Y', (255, 244, 190)), // live node
+        (b'C', (226, 132, 72)),  // copper
+        (b'B', (148, 76, 40)),   // tarnished copper
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"C.....C.",
+                b".C...C..",
+                b"..C.C...",
+                b"CCCYCCCB",
+                b"..CYC...",
+                b".C...B..",
+                b"C.....B.",
+                b"........",
+            ],
+            PAL,
+        ),
+        small: grid4([b"C..C", b".YY.", b"CYYB", b"C..B"], PAL),
+        accent: (226, 132, 72),
+    }
+};
+
+/// Night Shift — a crescent moon and one star.
+const NIGHT_SHIFT: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'W', (255, 255, 240)), // star and moon rim
+        (b'Y', (246, 226, 132)), // moon
+        (b'O', (176, 150, 70)),  // moon shade
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"..WYY...",
+                b".WYY....",
+                b"WYY...W.",
+                b"WYY..WWW",
+                b"YYY...W.",
+                b"YYYO....",
+                b".YYYOOO.",
+                b"..OOOO..",
+            ],
+            PAL,
+        ),
+        small: grid4([b".WY.", b"WY.W", b"YY..", b".YOO"], PAL),
+        accent: (246, 226, 132),
+    }
+};
+
+/// Blackboard Belly — a slate in a wooden frame with two chalked lines.
+const BLACKBOARD_BELLY: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'B', (170, 118, 66)),  // wooden frame
+        (b'D', (104, 68, 36)),   // frame shade
+        (b'S', (36, 62, 54)),    // slate
+        (b'W', (240, 244, 236)), // chalk
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"BBBBBBBB",
+                b"BSSSSSSD",
+                b"BSWWWSSD",
+                b"BSSSSSSD",
+                b"BSWWWWSD",
+                b"BSSSSSSD",
+                b"BDDDDDDD",
+                b".D....D.",
+            ],
+            PAL,
+        ),
+        small: grid4([b"BBBB", b"BWWD", b"BSSD", b"DDDD"], PAL),
+        accent: (124, 176, 150),
+    }
+};
+
+/// Ballast Sac — a tied sandbag, narrow at the neck and heavy at the base.
+const BALLAST_SAC: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'L', (232, 212, 164)), // lit burlap
+        (b'T', (192, 164, 112)), // burlap
+        (b'D', (112, 90, 56)),   // shaded burlap
+        (b'K', (70, 44, 30)),    // the tie
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"..L.T...",
+                b"..LTT...",
+                b"..KKK...",
+                b".LTTTT..",
+                b"LLTTTTD.",
+                b"LTTTTTDD",
+                b"TTTTTDDD",
+                b".DDDDDD.",
+            ],
+            PAL,
+        ),
+        small: grid4([b".LT.", b".KK.", b"LTTD", b"TDDD"], PAL),
+        accent: (192, 164, 112),
+    }
+};
+
+/// Long Fingers — a paw with three long thin fingers reaching up.
+const LONG_FINGERS: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'W', (255, 236, 232)), // fingertip
+        (b'P', (244, 176, 172)), // skin
+        (b'M', (176, 104, 110)), // shaded palm
+    ];
+    Icon {
+        large: grid8(
+            [
+                b".W..W..W",
+                b".P..P..P",
+                b".P..P..P",
+                b".P..P..P",
+                b".P..P.PM",
+                b".PPPPPM.",
+                b"..PPPM..",
+                b"..MMM...",
+            ],
+            PAL,
+        ),
+        small: grid4([b"W.W.", b"P.P.", b"PPPM", b".MM."], PAL),
+        accent: (244, 176, 172),
+    }
+};
+
+// ============================================================================
 // Lookup API
 // ============================================================================
 
@@ -943,13 +1558,46 @@ pub fn weapon(kind: WeaponKind) -> &'static Icon {
     }
 }
 
+/// Look up the icon for a weapon's **evolution** (`WeaponKind::evolution`), or
+/// `None` for a weapon that has none (Spiked Tail). No wildcard: a new weapon
+/// must say here whether it has an evolved icon.
+pub fn evolution(kind: WeaponKind) -> Option<&'static Icon> {
+    Some(match kind {
+        WeaponKind::Gnaw => &MILK_TEETH,
+        WeaponKind::CheeseSpray => &FONDUE_FORK,
+        WeaponKind::SqueakNova => &ECHO_CHAMBER,
+        WeaponKind::SporeOrbit => &FAIRY_RING,
+        WeaponKind::TailWhip => &RATCHET_TAIL,
+        WeaponKind::AcidSpit => &DRAIN_CLEANER,
+        WeaponKind::TailThrash => &FLYWHEEL,
+        WeaponKind::SonicSqueak => &ROLL_CALL,
+        WeaponKind::AcidRain => &DOWNSPOUT,
+        WeaponKind::Hantavirus => &DEAD_LETTER,
+        WeaponKind::LaserEyes => &CARBON_COPY,
+        WeaponKind::SuperDash => &RIPCORD,
+        WeaponKind::SpikedTail => return None,
+    })
+}
+
+/// The icon [`draw_evolved`] actually paints for `icon`: a base weapon icon
+/// becomes its evolution's own icon, anything else is drawn as given.
+///
+/// Every caller hands [`draw_evolved`] `weapon(kind)`, so the swap lives here
+/// and the evolved art reaches the HUD rack, the cards and the keep plate
+/// without those callers changing.
+fn evolved_form(icon: &Icon) -> &Icon {
+    for kind in WeaponKind::all() {
+        if icon == weapon(kind) {
+            return evolution(kind).unwrap_or(icon);
+        }
+    }
+    icon
+}
+
 /// Look up the icon for a passive.
 ///
-/// Every passive present at wave-3 start is matched explicitly (verified by
-/// unit tests); the trailing wildcard arm exists strictly so sibling wave-3
-/// branches that append new `PassiveKind` variants compile immediately with
-/// [`placeholder`] until their art constant is wired in.
-#[allow(unreachable_patterns)]
+/// Every passive is matched explicitly (no wildcard), like [`weapon`]: a new
+/// `PassiveKind` must pick its icon here to compile.
 pub fn passive(kind: PassiveKind) -> &'static Icon {
     match kind {
         PassiveKind::MaxHp => &MAX_HP,
@@ -965,29 +1613,27 @@ pub fn passive(kind: PassiveKind) -> &'static Icon {
         PassiveKind::LongFuse => &LONG_FUSE,
         PassiveKind::SecondScent => &SECOND_SCENT,
         PassiveKind::LensCap => &LENS_CAP,
-        _ => &PLACEHOLDER,
     }
 }
 
 /// Look up the icon for a gene splice (`game::shop::SpliceKind`).
 ///
-/// The ten splices have no art of their own yet, so each borrows the authored
-/// icon of the stat it sells (a placeholder the wave-2 art pass replaces); the
-/// mapping is stable so a splice keeps one silhouette on the shelf and in the
-/// HUD.
+/// Each of the ten splices has its own authored silhouette (the body part its
+/// name says), distinct from every weapon and passive icon, so a splice never
+/// reads as the passive that sells the same stat.
 pub fn splice(kind: crate::game::shop::SpliceKind) -> &'static Icon {
     use crate::game::shop::SpliceKind;
     match kind {
-        SpliceKind::GlassIncisors => &DAMAGE,
-        SpliceKind::BoilerHeart => &REGEN,
-        SpliceKind::HollowBones => &MOVE_SPEED,
-        SpliceKind::DoubleLid => &DASH_COOLDOWN,
-        SpliceKind::HoardGland => &GOLD_COIN,
-        SpliceKind::CopperNerves => &DASH_COOLDOWN,
-        SpliceKind::NightShift => &FIRE_RATE,
-        SpliceKind::BlackboardBelly => &MAGNET,
-        SpliceKind::BallastSac => &ARMOR,
-        SpliceKind::LongFingers => &MAGNET,
+        SpliceKind::GlassIncisors => &GLASS_INCISORS,
+        SpliceKind::BoilerHeart => &BOILER_HEART,
+        SpliceKind::HollowBones => &HOLLOW_BONES,
+        SpliceKind::DoubleLid => &DOUBLE_LID,
+        SpliceKind::HoardGland => &HOARD_GLAND,
+        SpliceKind::CopperNerves => &COPPER_NERVES,
+        SpliceKind::NightShift => &NIGHT_SHIFT,
+        SpliceKind::BlackboardBelly => &BLACKBOARD_BELLY,
+        SpliceKind::BallastSac => &BALLAST_SAC,
+        SpliceKind::LongFingers => &LONG_FINGERS,
     }
 }
 
@@ -1199,15 +1845,56 @@ pub fn draw_small_with_depth(buf: &mut Buffer, area: Rect, icon: &Icon, depth: C
     blit_grid::<SMALL_PX_W, SMALL_PX_H>(buf, area, &icon.small, depth);
 }
 
-/// Composite `icon` wearing the gilded **evolved** frame treatment.
+/// Composite `icon` in its **evolved** form.
 ///
-/// - When `area` is at least `10 × 5` cells (`10 × 10` px), draws a full outer
-///   gilded border with corner sparkles around the centered `8 × 8` icon so
-///   zero icon pixels are covered.
-/// - On `8 × 4` (large) or smaller (small) areas, composites `icon` first and
-///   then overlays [`EVOLVED_FRAME`] in the corners.
+/// A base weapon icon is swapped for its evolution's own icon
+/// ([`evolved_form`]), and the result sits on a gilded plate so "evolved"
+/// reads at every size without covering a single icon pixel:
+///
+/// - at `10 × 5` cells or more, a complete one-pixel gold border (lit top-left,
+///   shaded bottom-right) runs round the centred `8 × 8` icon;
+/// - at `8 × 4` (large) and below (small), every transparent icon pixel is
+///   filled with a dark-gold plate and the free corners are bright gold, so the
+///   whole footprint — not four corner pixels — says "evolved".
 pub fn draw_evolved(buf: &mut Buffer, area: Rect, icon: &Icon) {
     draw_evolved_with_depth(buf, area, icon, crate::term::color_depth());
+}
+
+/// Gilded-plate colours: the glint, the lit and shaded gold of the border, and
+/// the two dark-gold tones of the backing plate (lit upper half, shaded lower).
+const GILT_GLINT: Rgb = (255, 254, 226);
+const GILT_LIT: Rgb = (255, 216, 62);
+const GILT_SHADE: Rgb = (214, 142, 20);
+const PLATE_LIT: Rgb = (124, 86, 14);
+const PLATE_SHADE: Rgb = (86, 56, 8);
+
+/// `grid` on the evolved backing plate: transparent pixels become dark gold,
+/// transparent corners bright gold. Icon pixels are never replaced.
+fn plated<const W: usize, const H: usize>(
+    grid: &[[Option<Rgb>; W]; H],
+) -> [[Option<Rgb>; W]; H] {
+    let mut out = *grid;
+    for (y, row) in out.iter_mut().enumerate() {
+        for (x, px) in row.iter_mut().enumerate() {
+            if px.is_some() {
+                continue;
+            }
+            let (left, top) = (x == 0, y == 0);
+            let (right, bottom) = (x + 1 == W, y + 1 == H);
+            *px = Some(if left && top {
+                GILT_GLINT
+            } else if (right && top) || (left && bottom) {
+                GILT_LIT
+            } else if right && bottom {
+                GILT_SHADE
+            } else if y * 2 < H {
+                PLATE_LIT
+            } else {
+                PLATE_SHADE
+            });
+        }
+    }
+    out
 }
 
 /// Like [`draw_evolved`], with an explicit [`ColorDepth`].
@@ -1215,42 +1902,35 @@ pub fn draw_evolved_with_depth(buf: &mut Buffer, area: Rect, icon: &Icon, depth:
     if area.width == 0 || area.height == 0 {
         return;
     }
+    let icon = evolved_form(icon);
     if area.width >= EVOLVED_FRAME_CELL_W && area.height >= EVOLVED_FRAME_CELL_H {
-        // Outer 10×10 gilded royal frame around the centered 8×8 icon.
-        const W: Rgb = (255, 254, 226);
-        const Y: Rgb = (255, 216, 62);
-        const G: Rgb = (214, 142, 20);
-        const OUTER: [[Option<Rgb>; 10]; 10] = [
-            [Some(W), Some(Y), Some(G), None, Some(W), Some(W), None, Some(G), Some(Y), Some(W)],
-            [Some(Y), None, None, None, None, None, None, None, None, Some(Y)],
-            [Some(G), None, None, None, None, None, None, None, None, Some(G)],
-            [None; 10],
-            [None; 10],
-            [None; 10],
-            [None; 10],
-            [Some(G), None, None, None, None, None, None, None, None, Some(G)],
-            [Some(Y), None, None, None, None, None, None, None, None, Some(Y)],
-            [Some(G), Some(Y), Some(G), None, None, None, None, Some(G), Some(Y), Some(G)],
-        ];
-        // Center the 8×8 icon inside the 10×10 box (offset by 1 col, 1 half-row):
-        // composite icon first into a 10×10 stack scratch, then overlay the frame.
+        // The 8×8 icon centred in a 10×10 box (one column, one half-row in),
+        // inside a complete gold border.
         let mut combined = [[None; 10]; 10];
+        for y in 0..10 {
+            for x in 0..10 {
+                if x == 0 || y == 0 || x == 9 || y == 9 {
+                    let corner = (x == 0 || x == 9) && (y == 0 || y == 9);
+                    combined[y][x] = Some(if corner && x == 0 && y == 0 {
+                        GILT_GLINT
+                    } else if x == 9 || y == 9 {
+                        GILT_SHADE
+                    } else {
+                        GILT_LIT
+                    });
+                }
+            }
+        }
         for y in 0..LARGE_PX_H {
             for x in 0..LARGE_PX_W {
                 combined[y + 1][x + 1] = icon.large[y][x];
             }
         }
-        for y in 0..10 {
-            for x in 0..10 {
-                if let Some(c) = OUTER[y][x] {
-                    combined[y][x] = Some(c);
-                }
-            }
-        }
         blit_grid::<10, 10>(buf, area, &combined, depth);
+    } else if area.width >= LARGE_CELL_W && area.height >= LARGE_CELL_H {
+        blit_grid::<LARGE_PX_W, LARGE_PX_H>(buf, area, &plated(&icon.large), depth);
     } else {
-        draw_with_depth(buf, area, icon, depth);
-        draw_with_depth(buf, area, &EVOLVED_FRAME, depth);
+        blit_grid::<SMALL_PX_W, SMALL_PX_H>(buf, area, &plated(&icon.small), depth);
     }
 }
 
@@ -1387,6 +2067,28 @@ mod tests {
             ("EvolvedFrame", &EVOLVED_FRAME),
             ("SpikedTail", &SPIKED_TAIL),
             ("Placeholder", &PLACEHOLDER),
+            ("MilkTeeth", &MILK_TEETH),
+            ("FondueFork", &FONDUE_FORK),
+            ("EchoChamber", &ECHO_CHAMBER),
+            ("FairyRing", &FAIRY_RING),
+            ("RatchetTail", &RATCHET_TAIL),
+            ("DrainCleaner", &DRAIN_CLEANER),
+            ("Flywheel", &FLYWHEEL),
+            ("RollCall", &ROLL_CALL),
+            ("Downspout", &DOWNSPOUT),
+            ("DeadLetter", &DEAD_LETTER),
+            ("CarbonCopy", &CARBON_COPY),
+            ("Ripcord", &RIPCORD),
+            ("GlassIncisors", &GLASS_INCISORS),
+            ("BoilerHeart", &BOILER_HEART),
+            ("HollowBones", &HOLLOW_BONES),
+            ("DoubleLid", &DOUBLE_LID),
+            ("HoardGland", &HOARD_GLAND),
+            ("CopperNerves", &COPPER_NERVES),
+            ("NightShift", &NIGHT_SHIFT),
+            ("BlackboardBelly", &BLACKBOARD_BELLY),
+            ("BallastSac", &BALLAST_SAC),
+            ("LongFingers", &LONG_FINGERS),
         ]
     }
 
@@ -1419,6 +2121,96 @@ mod tests {
             );
         }
         assert_eq!(by_name("UnknownFutureThing"), placeholder());
+    }
+
+    /// Every weapon with an evolution row has an evolved icon and no other
+    /// weapon does; `draw_evolved` paints that icon, not the base one, and at
+    /// HUD size the evolved tile is fully opaque (the gilded plate), so it can
+    /// never be mistaken for the base icon drawn by `draw`.
+    #[test]
+    fn evolutions_have_their_own_icons_and_a_full_plate() {
+        for kind in WeaponKind::all() {
+            assert_eq!(
+                evolution(kind).is_some(),
+                kind.evolution().is_some(),
+                "{kind:?}: evolved icon and evolution row disagree"
+            );
+            let Some(evo) = evolution(kind) else {
+                assert!(std::ptr::eq(evolved_form(weapon(kind)), weapon(kind)));
+                continue;
+            };
+            assert!(evo != weapon(kind), "{kind:?} evolves into its own icon");
+            assert_eq!(evolved_form(weapon(kind)), evo);
+
+            for (w, h) in [(4u16, 2u16), (8, 4), (10, 5)] {
+                let area = Rect::new(0, 0, w, h);
+                let mut base = Buffer::empty(area);
+                let mut evolved = Buffer::empty(area);
+                draw_with_depth(&mut base, area, weapon(kind), ColorDepth::Truecolor);
+                draw_evolved_with_depth(&mut evolved, area, weapon(kind), ColorDepth::Truecolor);
+                assert!(base != evolved, "{kind:?} at {w}x{h}: evolved looks like the base");
+                if w < 10 {
+                    for y in 0..h {
+                        for x in 0..w {
+                            assert_eq!(
+                                evolved[(x, y)].symbol(),
+                                "▀",
+                                "{kind:?} at {w}x{h}: hole in the plate at ({x},{y})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // An icon that is not a base weapon's is plated as given.
+        assert!(std::ptr::eq(evolved_form(&MAGNET), &MAGNET));
+    }
+
+    /// The plate fills only what the icon leaves transparent.
+    #[test]
+    fn the_evolved_plate_never_replaces_an_icon_pixel() {
+        for (name, icon) in all_named_icons() {
+            let big = plated(&icon.large);
+            for y in 0..LARGE_PX_H {
+                for x in 0..LARGE_PX_W {
+                    assert!(big[y][x].is_some(), "{name}: unplated pixel");
+                    if let Some(c) = icon.large[y][x] {
+                        assert_eq!(big[y][x], Some(c), "{name}: plate covered ({x},{y})");
+                    }
+                }
+            }
+            let small = plated(&icon.small);
+            for y in 0..SMALL_PX_H {
+                for x in 0..SMALL_PX_W {
+                    if let Some(c) = icon.small[y][x] {
+                        assert_eq!(small[y][x], Some(c), "{name}: plate covered ({x},{y})");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A splice must never wear a weapon's or a passive's icon (it used to
+    /// borrow the passive of the stat it sells), nor another splice's.
+    #[test]
+    fn every_splice_has_its_own_icon() {
+        use crate::game::shop::SpliceKind;
+        let splices = SpliceKind::ALL;
+        for (i, &kind) in splices.iter().enumerate() {
+            let ic = splice(kind);
+            assert!(ic != placeholder(), "splice {kind:?} returned placeholder");
+            for w in WeaponKind::all() {
+                assert!(ic != weapon(w), "splice {kind:?} shares {w:?}'s icon");
+            }
+            for p in PassiveKind::all() {
+                assert!(ic != passive(p), "splice {kind:?} shares {p:?}'s icon");
+            }
+            for &other in &splices[i + 1..] {
+                let o = splice(other);
+                assert!(ic.large != o.large, "{kind:?} and {other:?} share a large icon");
+                assert!(ic.small != o.small, "{kind:?} and {other:?} share a small icon");
+            }
+        }
     }
 
     #[test]

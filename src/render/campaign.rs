@@ -15,6 +15,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::Frame;
 
 use crate::game::art_icons;
+use crate::game::ecs::systems::boss::BossKind;
 use crate::game::level::Theme;
 use crate::render::palette::{mix, to_color, Rgb, COAT, EDGE, MUTED, PLATE, TAIL, TRACK};
 
@@ -66,6 +67,71 @@ impl<const N: usize> core::fmt::Write for StackBuf<N> {
             self.len += enc.len();
         }
         Ok(())
+    }
+}
+
+/// The key names a campaign plate prints in its buttons and legends.
+///
+/// The plates used to hard-code `Enter`, `Space` and `Tab`, so a rebind made
+/// every legend wrong. The `draw_*_with` entry points take one of these; the
+/// plain `draw_*` ones pass [`PlateKeys::DEFAULT`] (the stock bindings), so a
+/// caller that has a `Controls` hands over `action_label(..)` and one that
+/// does not keeps the old text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlateKeys<'a> {
+    /// The confirm key (`Action::Confirm`).
+    pub confirm: &'a str,
+    /// The key that packs / unpacks a row on the keep plate.
+    pub toggle: &'a str,
+    /// The key that switches the next sector's route on the keep plate.
+    pub route: &'a str,
+}
+
+impl PlateKeys<'static> {
+    /// The stock bindings, i.e. the literals the plates printed before.
+    pub const DEFAULT: PlateKeys<'static> = PlateKeys {
+        confirm: "Enter",
+        toggle: "Space",
+        route: "Tab",
+    };
+}
+
+impl Default for PlateKeys<'static> {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// The cleared-sector verdict and narrative line for a boss that is **not**
+/// its floor's original fight (`None` for the six originals, whose words are
+/// [`CampaignLevel::boss_verdict`] / [`CampaignLevel::boss_triumph_line`]).
+///
+/// Four floors draw one of two bosses by seed; without this the plate told a
+/// run that killed the Horseshoe that the Apex Jaguar was down.
+pub const fn alternate_boss_plate(kind: BossKind) -> Option<(&'static str, &'static str)> {
+    match kind {
+        BossKind::HorseshoeCrab => Some((
+            "THE HORSESHOE  —  TURNED OVER",
+            "Flipped on its back in the outflow, legs working at nothing. It was here before the pipes. The pipes are yours now.",
+        )),
+        BossKind::MegaRat => Some((
+            "SUBJECT R-01  —  RETIRED",
+            "The first success lies still on the cold room floor. The collar tag reads R-01. The pantry door behind it was never locked.",
+        )),
+        BossKind::Cobra => Some((
+            "KING COBRA  —  UNCOILED",
+            "Twenty-two feet of it, slack across the tiles. The door it broke on the way out of its room is still open.",
+        )),
+        BossKind::Hawk => Some((
+            "THE REDTAIL  —  SHAKEN OFF",
+            "The shadow lifts off the deck and falls behind with the road noise. Nothing on the flatbed is bigger than you now.",
+        )),
+        BossKind::Cat
+        | BossKind::Broom
+        | BossKind::Mower
+        | BossKind::Mangle
+        | BossKind::NightEdition
+        | BossKind::Magpie => None,
     }
 }
 
@@ -247,7 +313,7 @@ impl CampaignLevel {
     pub const fn name(self) -> &'static str {
         match self {
             CampaignLevel::Sewer => "THE SEWERS",
-            CampaignLevel::Kitchen => "THE KITCHENS",
+            CampaignLevel::Kitchen => "THE KITCHEN",
             CampaignLevel::Lab => "THE LAB",
             CampaignLevel::Laundry => "THE LAUNDRY",
             CampaignLevel::Printworks => "THE PRINTWORKS",
@@ -323,7 +389,7 @@ impl CampaignLevel {
     pub const fn boss_triumph_line(self) -> &'static str {
         match self {
             CampaignLevel::Sewer => {
-                "The big cat overshot its last pounce and skidded into the drain. Quiet returns to the pipes — climb toward the heat of the kitchens."
+                "The big cat overshot its last pounce and skidded into the drain. Quiet returns to the pipes — climb toward the heat of the kitchen."
             }
             CampaignLevel::Kitchen => {
                 "One ankle bite too many. The broom clatters across the linoleum and two huge slippers hop straight out the pantry door."
@@ -349,7 +415,7 @@ impl CampaignLevel {
                 "Cold pipes and colder things. The drainage threads under the whole facility. Follow the current up and out."
             }
             CampaignLevel::Kitchen => {
-                "Grease, snap-traps, and the stink of bait. Everything here wants you fed — to something with a bigger mouth."
+                "Grease, snap-traps, and the stink of bait. Nobody agrees who keeps this kitchen: the broom, or the thing in the cold room that was first."
             }
             CampaignLevel::Lab => {
                 "Where you were made. The lights hum a number that used to be your name. End it here. Walk out the front door."
@@ -361,7 +427,9 @@ impl CampaignLevel {
                 "Ink in the seams of your paws and the presses still running overnight. Tomorrow's front page says you were caught."
             }
             CampaignLevel::Trailer => {
-                "Forty feet of oak deck and a hundred klicks of night, and the road roaring underneath your paws. The cab is forward. So is the magpie: it has been riding the slipstream over the cab since the last weigh station, and it has already decided the cab is its nest."
+                // The same note as `lore::map_intro`: the earlier 260-cell
+                // paragraph was cut off after three rows on every plate.
+                "Forty feet of wet deck doing eighty into the dark. The cab is forward. So is the magpie, and it thinks the rig is its nest."
             }
         }
     }
@@ -510,6 +578,9 @@ pub struct KeepThreeView<'a> {
 // Screen 3: Level Intro (Levels 2 & 3; consistent with menu::draw_map_intro)
 // ---------------------------------------------------------------------------
 
+/// The most carried upgrades the intro plate lists (the keep limit's cap).
+const MAX_CARRIED_SHOWN: usize = crate::game::campaign::MAX_KEEP;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LevelIntroAction {
     Begin,
@@ -521,7 +592,8 @@ pub struct LevelIntroView<'a> {
     pub level: CampaignLevel,
     /// Optional flavor line override (`None` uses the built-in sector flavor).
     pub flavor: Option<&'a str>,
-    /// Upgrades carried in from the previous level (0..=3).
+    /// Upgrades carried in from the previous level (0..=5: three by default,
+    /// two more from the nest's carry track).
     pub carried: &'a [UpgradeEntry<'a>],
     /// Cumulative campaign score entering this level.
     pub score_so_far: u32,
@@ -548,6 +620,9 @@ pub struct LevelBreakdown {
     pub kills: u32,
     pub score: u32,
     pub player_level: u32,
+    /// The boss that actually died on this floor (a floor's pool holds more
+    /// than one). `None` falls back to the floor's original boss.
+    pub boss: Option<BossKind>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -815,9 +890,8 @@ fn put_str(buf: &mut Buffer, x: u16, y: u16, s: &str, max_w: u16, style: Style) 
     cx
 }
 
-/// Write a string truncated with `'…'` (`'.'`? no, single-cell `'.'` or `'·'` or `..` — wait,
-/// let's use single-cell `'~'` or `".."`? Actually `'…'` U+2026 is East Asian Ambiguous width 1,
-/// even safer: truncate cleanly or use `".."` when tight!).
+/// Write a string clipped to `max_w` cells, ending in `..` when it had to be
+/// cut (two ASCII dots: `…` is ambiguous-width in some terminals).
 fn put_str_ellipsis(buf: &mut Buffer, x: u16, y: u16, s: &str, max_w: u16, style: Style) -> u16 {
     if max_w == 0 {
         return x;
@@ -1040,11 +1114,15 @@ fn stamp_header_pips(
     let mut nb = StackBuf::<8>::new();
     let _ = write!(nb, "{}/3 ", current.stage_number());
     cx = put_str(buf, cx, y, nb.as_str(), 4, heavy(COAT).bg(PLATE));
-    for (idx, lvl) in CampaignLevel::all().into_iter().enumerate() {
+    // The pips are **stages**, so the current one is matched by stage: a side
+    // route (Laundry, Printworks) is never equal to the original route's plate
+    // and used to show no current pip at all.
+    let current_stage = usize::from(current.stage_number().saturating_sub(1));
+    for idx in 0..CampaignLevel::all().len() {
         let (ch, col) = if (idx as u8) < cleared_count {
             ('●', HEAL_MINT)
-        } else if lvl == current {
-            ('◆', lvl.accent())
+        } else if idx == current_stage {
+            ('◆', current.accent())
         } else {
             ('○', EDGE)
         };
@@ -1161,6 +1239,22 @@ pub fn draw_level_complete(
     area: Rect,
     view: &LevelCompleteView<'_>,
 ) -> HitList<LevelCompleteAction, 4> {
+    draw_level_complete_with(f, area, view, &PlateKeys::DEFAULT, None)
+}
+
+/// [`draw_level_complete`] with the key names it prints and the boss the run
+/// actually killed.
+///
+/// `boss` matters on the four floors that draw one of two bosses: with
+/// `Some(kind)` the verdict pill and the narrative line name that boss
+/// ([`alternate_boss_plate`]); with `None` they name the floor's original.
+pub fn draw_level_complete_with(
+    f: &mut Frame,
+    area: Rect,
+    view: &LevelCompleteView<'_>,
+    keys: &PlateKeys<'_>,
+    boss: Option<BossKind>,
+) -> HitList<LevelCompleteAction, 4> {
     let mut hits = HitList::new();
     if area.width < 12 || area.height < 6 {
         return hits;
@@ -1200,9 +1294,14 @@ pub fn draw_level_complete(
 
     // Triumph status pill (boss-specific verdict). The getaway ride has its
     // own: its boss is the Magpie, not the Lab's mower.
-    let verdict = match view.theme {
-        Some(Theme::Trailer) => "THE MAGPIE  —  BLOWN OFF",
-        _ => view.level.boss_verdict(),
+    let alt = match boss {
+        Some(kind) => alternate_boss_plate(kind),
+        None => None,
+    };
+    let verdict = match (alt, view.theme) {
+        (Some((verdict, _)), _) => verdict,
+        (None, Some(Theme::Trailer)) => "THE MAGPIE  —  BLOWN OFF",
+        (None, _) => view.level.boss_verdict(),
     };
     let mut badge = StackBuf::<64>::new();
     if inner.width >= 42 {
@@ -1220,7 +1319,8 @@ pub fn draw_level_complete(
     y += if inner.height >= 18 { 2 } else { 1 };
 
     // Boss-specific geometric triumph emblem (when vertical space allows).
-    if inner.height >= 16 && inner.width >= 30 {
+    // The emblem is the floor's original boss, so the pool mate goes without.
+    if alt.is_none() && inner.height >= 16 && inner.width >= 30 {
         draw_boss_triumph_emblem(buf, inner, view.level, y);
         y += 4;
     }
@@ -1228,6 +1328,7 @@ pub fn draw_level_complete(
     // Narrative beat specific to the downed boss.
     let triumph = view
         .custom_triumph
+        .or(alt.map(|(_, line)| line))
         .unwrap_or_else(|| view.level.boss_triumph_line());
     let text_inset = if inner.width >= 40 { 3 } else { 1 };
     let text_rect = Rect::new(
@@ -1321,22 +1422,23 @@ pub fn draw_level_complete(
         let mut teaser = StackBuf::<72>::new();
         match view.next {
             Some(next) => {
-                let keep_n = view.owned_upgrades.min(3);
+                // No pack size here: the limit is three to five (the nest's
+                // carry track), this view does not carry it, and the old
+                // "Pack 3 of N" was wrong for a run that keeps four or five.
+                // The keep-three plate that follows states the real number.
                 if inner.width >= 54 {
                     let _ = write!(
                         teaser,
-                        "Next: LEVEL {} — {} · Pack {} of {} to carry",
-                        next.stage_number(),
+                        "Next: {} — {} · pack from {} upgrades",
+                        next.sector_code(),
                         next.name(),
-                        keep_n,
                         view.owned_upgrades
                     );
                 } else {
                     let _ = write!(
                         teaser,
-                        "Next: {} · Pack {} of {}",
+                        "Next: {} · pack from {}",
                         next.short_name(),
-                        keep_n,
                         view.owned_upgrades
                     );
                 }
@@ -1361,22 +1463,15 @@ pub fn draw_level_complete(
     }
 
     // Primary CTA button.
-    let cta_label = match view.next {
-        Some(_) => {
-            if inner.width >= 38 {
-                " ▸  Enter / click   PACK 3 UPGRADES "
-            } else {
-                " ▸ Enter  PACK 3 "
-            }
-        }
-        None => {
-            if inner.width >= 38 {
-                " ▸  Enter / click   ESCAPE FACILITY "
-            } else {
-                " ▸ Enter  ESCAPE "
-            }
-        }
+    let mut cta = StackBuf::<72>::new();
+    let wide = inner.width >= 38;
+    let _ = match (view.next.is_some(), wide) {
+        (true, true) => write!(cta, " ▸  {} / click   PACK UPGRADES ", keys.confirm),
+        (true, false) => write!(cta, " ▸ {}  PACK ", keys.confirm),
+        (false, true) => write!(cta, " ▸  {} / click   ESCAPE FACILITY ", keys.confirm),
+        (false, false) => write!(cta, " ▸ {}  ESCAPE ", keys.confirm),
     };
+    let cta_label = cta.as_str();
     let btn_state = if view.hovered == Some(LevelCompleteAction::Continue) {
         ButtonState::Hovered
     } else {
@@ -1634,6 +1729,16 @@ pub fn draw_keep_three(
     area: Rect,
     view: &KeepThreeView<'_>,
 ) -> HitList<KeepThreeAction, 32> {
+    draw_keep_three_with(f, area, view, &PlateKeys::DEFAULT)
+}
+
+/// [`draw_keep_three`] with the key names its buttons and legends print.
+pub fn draw_keep_three_with(
+    f: &mut Frame,
+    area: Rect,
+    view: &KeepThreeView<'_>,
+    keys: &PlateKeys<'_>,
+) -> HitList<KeepThreeAction, 32> {
     let mut hits = HitList::new();
     if area.width < 16 || area.height < 8 {
         return hits;
@@ -1646,11 +1751,16 @@ pub fn draw_keep_three(
     let pack_full = required > 0 && selected_count >= required;
     let next_accent = view.next_level.accent();
 
-    // Collect indices of currently selected items (up to 3 for slot previews).
-    let mut packed_indices: [Option<usize>; 3] = [None; 3];
+    // Collect indices of currently selected items for the slot previews, in
+    // manifest order (so a slot never changes place when another is packed
+    // below it). The pack holds three to five (`campaign::MAX_KEEP`): the
+    // previews used to stop at three and hid the fourth and fifth.
+    const SLOTS: usize = crate::game::campaign::MAX_KEEP;
+    let slot_count = required.clamp(1, SLOTS);
+    let mut packed_indices: [Option<usize>; SLOTS] = [None; SLOTS];
     let mut p_len = 0usize;
     for (i, _) in view.items.iter().enumerate() {
-        if view.selected.get(i).copied().unwrap_or(false) && p_len < 3 {
+        if view.selected.get(i).copied().unwrap_or(false) && p_len < SLOTS {
             packed_indices[p_len] = Some(i);
             p_len += 1;
         }
@@ -1701,13 +1811,19 @@ pub fn draw_keep_three(
         None,
         if can_confirm { HEAL_MINT } else { TAIL },
     );
-    stamp_header_pips(
-        buf,
-        layout.panel_rect,
-        cap.as_str(),
-        view.next_level,
-        view.from_level.number(),
-    );
+    // The stage pips share the top border with the route chips. The chips are
+    // a control and the pips are decoration, so when both cannot fit the pips
+    // go (the chips used to be painted over half of them).
+    let chips_end = layout.panel_rect.x + 2 + cap.as_str().chars().count() as u16 + 3 + chips_w;
+    if chips_w == 0 || chips_end + 15 < layout.panel_rect.right() {
+        stamp_header_pips(
+            buf,
+            layout.panel_rect,
+            cap.as_str(),
+            view.next_level,
+            view.from_level.number(),
+        );
+    }
 
     if inner.width < 12 || inner.height < 6 {
         return hits;
@@ -1833,8 +1949,8 @@ pub fn draw_keep_three(
         );
 
         // Progress pips right-aligned on right header row.
-        let mut pips_x = right_x + rw.saturating_sub(7);
-        for i in 0..required.min(3) {
+        let mut pips_x = right_x + rw.saturating_sub(slot_count as u16 * 2 + 1);
+        for i in 0..required.min(SLOTS) {
             let filled = i < selected_count;
             let s = if filled { "▰ " } else { "▱ " };
             pips_x = put_str(
@@ -1862,14 +1978,18 @@ pub fn draw_keep_three(
         );
         hline(buf, right_x, inner.y + 2, rw, '─', ink(TRACK).bg(PLATE));
 
-        // 3 physical pack slot cards.
+        // One pack slot card per slot: four rows each when they all fit above
+        // the confirm block, three (name only) when a four- or five-slot pack
+        // would otherwise lose its last cards.
         let mut ry = inner.y + 3;
-        let slots_to_draw = required.clamp(1, 3);
+        let slots_to_draw = slot_count;
+        let slots_bottom = inner.bottom().saturating_sub(6);
+        let slot_h: u16 = if ry + slots_to_draw as u16 * 4 <= slots_bottom { 4 } else { 3 };
         for (s_idx, maybe_item) in packed_indices.iter().enumerate().take(slots_to_draw) {
-            if ry + 4 > inner.bottom().saturating_sub(6) {
+            if ry + slot_h > slots_bottom {
                 break;
             }
-            let sbox = Rect::new(right_x, ry, rw, 4);
+            let sbox = Rect::new(right_x, ry, rw, slot_h);
             if let Some(item_idx) = *maybe_item {
                 let it = &view.items[item_idx];
                 let icol = to_color(it.color);
@@ -1904,23 +2024,27 @@ pub fn draw_keep_three(
                 let nw = si.right().saturating_sub(text_x + tw + 2);
                 put_str_ellipsis(buf, text_x, si.y, it.name, nw, heavy(COAT).bg(PLATE_PACKED));
                 put_str(buf, si.right().saturating_sub(tw + 1), si.y, tag.as_str(), tw, heavy(icol).bg(PLATE_PACKED));
-                put_str_ellipsis(
-                    buf,
-                    text_x,
-                    si.y + 1,
-                    it.detail,
-                    si.right().saturating_sub(text_x + 1),
-                    ink(MUTED).bg(PLATE_PACKED),
-                );
+                if si.height >= 2 {
+                    put_str_ellipsis(
+                        buf,
+                        text_x,
+                        si.y + 1,
+                        it.detail,
+                        si.right().saturating_sub(text_x + 1),
+                        ink(MUTED).bg(PLATE_PACKED),
+                    );
+                }
             } else {
                 let si = sub_box(buf, sbox, TRACK, PLATE_DIM);
                 let mut hdr = StackBuf::<24>::new();
                 let _ = write!(hdr, " SLOT 0{} ", s_idx + 1);
                 put_str(buf, sbox.x + 2, sbox.y, hdr.as_str(), 10, ink(MUTED).bg(PLATE_DIM));
                 put_centered(buf, si, 0, "— empty slot —", ink(MUTED).bg(PLATE_DIM));
-                put_centered(buf, si, 1, "Space or click an upgrade", ink(EDGE).bg(PLATE_DIM));
+                let mut how = StackBuf::<48>::new();
+                let _ = write!(how, "{} or click an upgrade", keys.toggle);
+                put_centered(buf, si, 1, how.as_str(), ink(EDGE).bg(PLATE_DIM));
             }
-            ry += 4;
+            ry += slot_h;
         }
 
         // "LEFT BEHIND" section — reinforcing the emotional weight of sacrifice!
@@ -1972,9 +2096,9 @@ pub fn draw_keep_three(
         hline(buf, right_x, confirm_y.saturating_sub(1), rw, '─', ink(TRACK).bg(PLATE));
 
         // Big Confirm button in right pane.
-        let mut cbuf = StackBuf::<40>::new();
+        let mut cbuf = StackBuf::<64>::new();
         if can_confirm {
-            let _ = write!(cbuf, " ▸  ENTER {}  (Enter) ", view.next_level.name());
+            let _ = write!(cbuf, " ▸  ENTER {}  ({}) ", view.next_level.name(), keys.confirm);
         } else {
             let rem = required.saturating_sub(selected_count);
             let _ = write!(cbuf, "  SELECT {} MORE TO CONFIRM  ", rem);
@@ -1994,11 +2118,17 @@ pub fn draw_keep_three(
         }
 
         // Bottom key hints across full panel.
+        let mut legend = StackBuf::<96>::new();
+        let _ = write!(
+            legend,
+            "↑↓ move   ·   {} / click pack or unpack   ·   {} confirm",
+            keys.toggle, keys.confirm
+        );
         put_centered(
             buf,
             inner,
             inner.height.saturating_sub(1),
-            "↑↓ move   ·   Space / click pack or unpack   ·   Enter confirm",
+            legend.as_str(),
             ink(MUTED).bg(PLATE),
         );
     } else {
@@ -2017,7 +2147,7 @@ pub fn draw_keep_three(
             12,
             heavy(if can_confirm { HEAL_MINT } else { TAIL }).bg(PLATE),
         );
-        for i in 0..required.min(3) {
+        for i in 0..required.min(SLOTS) {
             let filled = i < selected_count;
             hx = put_str(
                 buf,
@@ -2060,12 +2190,17 @@ pub fn draw_keep_three(
         if inner.height >= 12 {
             let mut px = inner.x + 1;
             let slot_gap: u16 = if compact { 1 } else { 2 };
-            let slot_w = (inner.width.saturating_sub(2 + slot_gap * 2) / 3).max(8);
-            for (s_idx, maybe_idx) in packed_indices.iter().enumerate().take(required.clamp(1, 3))
-            {
+            // Three columns for a pack of up to three (the layout the plate
+            // always had); a four- or five-slot pack divides the same row.
+            let cols = slot_count.max(3) as u16;
+            let slot_w = (inner.width.saturating_sub(2 + slot_gap * (cols - 1)) / cols).max(8);
+            for (s_idx, maybe_idx) in packed_indices.iter().enumerate().take(slot_count) {
+                if px + slot_w > inner.right() {
+                    break;
+                }
                 let item = maybe_idx.and_then(|idx| view.items.get(idx));
                 px = draw_pack_slot_pill(buf, px, y, slot_w, s_idx, item);
-                if s_idx < 2 {
+                if s_idx + 1 < slot_count {
                     px = put_str(buf, px, y, "  ", slot_gap, ink(PLATE).bg(PLATE));
                 }
             }
@@ -2190,10 +2325,10 @@ pub fn draw_keep_three(
         } else {
             inner.bottom().saturating_sub(2)
         };
-        let mut cbuf = StackBuf::<40>::new();
+        let mut cbuf = StackBuf::<64>::new();
         if can_confirm {
             if inner.width >= 58 {
-                let _ = write!(cbuf, " ▸  CONFIRM & ENTER {}  (Enter) ", view.next_level.short_name().to_uppercase());
+                let _ = write!(cbuf, " ▸  CONFIRM & ENTER {}  ({}) ", view.next_level.short_name().to_uppercase(), keys.confirm);
             } else {
                 let _ = write!(cbuf, " ▸ CONFIRM ({}/{}) ", selected_count, required);
             }
@@ -2219,11 +2354,13 @@ pub fn draw_keep_three(
             let cx = inner.right().saturating_sub(cw + 1);
             let hint_w = cx.saturating_sub(inner.x + 2);
             if hint_w >= 10 {
+                let mut legend = StackBuf::<64>::new();
+                let _ = write!(legend, "↑↓ nav · {} toggle · {}", keys.toggle, keys.confirm);
                 put_str_ellipsis(
                     buf,
                     inner.x + 1,
                     confirm_row,
-                    "↑↓ nav · Space toggle · Enter",
+                    legend.as_str(),
                     hint_w,
                     ink(MUTED).bg(PLATE),
                 );
@@ -2239,11 +2376,17 @@ pub fn draw_keep_three(
             if can_confirm {
                 hits.push(crect, KeepThreeAction::Confirm);
             }
+            let mut legend = StackBuf::<96>::new();
+            let _ = write!(
+                legend,
+                "↑↓ select   ·   {}/click pack   ·   {} confirm",
+                keys.toggle, keys.confirm
+            );
             put_centered(
                 buf,
                 inner,
                 inner.height.saturating_sub(1),
-                "↑↓ select   ·   Space/click pack   ·   Enter confirm",
+                legend.as_str(),
                 ink(MUTED).bg(PLATE),
             );
         }
@@ -2292,7 +2435,9 @@ pub fn draw_keep_three(
             );
         }
         // The key hint rides the bottom border, where nothing else is drawn.
-        let hint = "Tab route";
+        let mut route_hint = StackBuf::<32>::new();
+        let _ = write!(route_hint, "{} route", keys.route);
+        let hint = route_hint.as_str();
         let hw = hint.chars().count() as u16;
         let hx = layout.panel_rect.right().saturating_sub(hw + 2);
         put_str(
@@ -2424,13 +2569,25 @@ pub fn draw_level_intro(
     area: Rect,
     view: &LevelIntroView<'_>,
 ) -> HitList<LevelIntroAction, 4> {
+    draw_level_intro_with(f, area, view, &PlateKeys::DEFAULT)
+}
+
+/// [`draw_level_intro`] with the key name its begin button prints.
+pub fn draw_level_intro_with(
+    f: &mut Frame,
+    area: Rect,
+    view: &LevelIntroView<'_>,
+    keys: &PlateKeys<'_>,
+) -> HitList<LevelIntroAction, 4> {
     let mut hits = HitList::new();
     if area.width < 12 || area.height < 6 {
         return hits;
     }
 
     let accent = view.level.accent();
-    let carried_n = view.carried.len().min(3);
+    // The nest's carry track raises the keep limit from three to five
+    // (`campaign::keep_limit`), so the plate lists up to five, not three.
+    let carried_n = view.carried.len().min(MAX_CARRIED_SHOWN);
     let very_tall = area.width >= 74 && area.height >= 26;
     let spacious = area.width >= 66 && area.height >= 22;
     let pw = if very_tall {
@@ -2477,16 +2634,17 @@ pub fn draw_level_intro(
         y += 1;
     }
 
-    // Heading: LEVEL N — SECTOR NAME. The getaway ride is not a campaign
-    // stage, so it gets its own heading instead of a false "LEVEL 4".
+    // Heading: SECTOR NN — NAME, the same words as level 1's access-route
+    // card (`lore::map_intro`) and STYLE.md's "Sector". The getaway ride is
+    // not a campaign stage, so it gets its own heading.
     let mut heading = StackBuf::<40>::new();
     if view.level == CampaignLevel::Trailer {
         let _ = write!(heading, "THE GETAWAY — {}", view.level.short_name().to_uppercase());
     } else {
         let _ = write!(
             heading,
-            "LEVEL {} — {}",
-            view.level.stage_number(),
+            "{} — {}",
+            view.level.sector_code(),
             view.level.name()
         );
     }
@@ -2550,8 +2708,9 @@ pub fn draw_level_intro(
                 "Nothing carried — claws and nerve only.",
                 ink(MUTED).bg(PLATE),
             );
-        } else if spacious && y + 3 <= btn_row {
-            // 3 side-by-side mini cards for carried upgrades!
+        } else if spacious && carried_n <= 3 && y + 3 <= btn_row {
+            // Up to three side-by-side mini cards; a bigger pack falls
+            // through to the stacked rows or the pills below.
             let card_h: u16 = if very_tall && y + 4 <= btn_row { 4 } else { 3 };
             let gap = 1u16;
             let total_w = inner.width.saturating_sub(4);
@@ -2632,7 +2791,7 @@ pub fn draw_level_intro(
             // Compact stacked or inline rows for carried upgrades.
             let avail_rows = btn_row.saturating_sub(y);
             if avail_rows >= carried_n as u16 {
-                for (i, it) in view.carried.iter().take(3).enumerate() {
+                for (i, it) in view.carried.iter().take(carried_n).enumerate() {
                     let row_y = inner.y + y + i as u16;
                     let icol = to_color(it.color);
                     let mut g = [0u8; 4];
@@ -2665,7 +2824,11 @@ pub fn draw_level_intro(
                 // Single-line inline pills when height is very tight.
                 let mut px = inner.x + 2;
                 let slot_w = (inner.width.saturating_sub(6) / carried_n.max(1) as u16).max(8);
-                for (i, it) in view.carried.iter().take(3).enumerate() {
+                for (i, it) in view.carried.iter().take(carried_n).enumerate() {
+                    // Never start a pill that would run off the plate.
+                    if px + slot_w > inner.right() {
+                        break;
+                    }
                     px = draw_pack_slot_pill(buf, px, inner.y + y, slot_w, i, Some(it));
                     px = put_str(buf, px, inner.y + y, " ", 1, ink(PLATE).bg(PLATE));
                 }
@@ -2674,11 +2837,13 @@ pub fn draw_level_intro(
     }
 
     // Begin CTA pill matching `menu::draw_map_intro`.
-    let btn_label = if inner.width >= 30 {
-        " ▸  Enter / click   begin "
+    let mut btn = StackBuf::<64>::new();
+    let _ = if inner.width >= 30 {
+        write!(btn, " ▸  {} / click   begin ", keys.confirm)
     } else {
-        " ▸ Enter  begin "
+        write!(btn, " ▸ {}  begin ", keys.confirm)
     };
+    let btn_label = btn.as_str();
     let bw = (btn_label.chars().count() as u16).min(inner.width);
     let bx = inner.x + (inner.width - bw) / 2;
     let bstate = if view.hovered == Some(LevelIntroAction::Begin) {
@@ -2702,6 +2867,17 @@ pub fn draw_campaign_victory(
     f: &mut Frame,
     area: Rect,
     view: &CampaignVictoryView<'_>,
+) -> HitList<CampaignVictoryAction, 4> {
+    draw_campaign_victory_with(f, area, view, &PlateKeys::DEFAULT)
+}
+
+/// [`draw_campaign_victory`] with the confirm key its replay button prints
+/// (the menu key is already `view.menu_key`).
+pub fn draw_campaign_victory_with(
+    f: &mut Frame,
+    area: Rect,
+    view: &CampaignVictoryView<'_>,
+    keys: &PlateKeys<'_>,
 ) -> HitList<CampaignVictoryAction, 4> {
     let mut hits = HitList::new();
     if area.width < 12 || area.height < 6 {
@@ -2881,7 +3057,11 @@ pub fn draw_campaign_victory(
                 let _ = write!(
                     line,
                     "  {:<18}  {}   {:>5}   {:>7}",
-                    row.level.boss_name(),
+                    // The boss that was killed, when the App knows it; else
+                    // the floor's original.
+                    row.boss
+                        .map(|kind| crate::render::hud::boss_codename_kind(kind).0)
+                        .unwrap_or(row.level.boss_name()),
                     rtime.as_str(),
                     row.kills,
                     row.score
@@ -2951,11 +3131,13 @@ pub fn draw_campaign_victory(
     }
 
     // Bottom buttons: Play Again & Menu.
-    let play_lbl = if inner.width >= 44 {
-        " ▸ Enter  new campaign "
+    let mut play = StackBuf::<64>::new();
+    let _ = if inner.width >= 44 {
+        write!(play, " ▸ {}  new campaign ", keys.confirm)
     } else {
-        " Enter replay "
+        write!(play, " {} replay ", keys.confirm)
     };
+    let play_lbl = play.as_str();
     let menu_lbl = format!(" {}  to menu ", view.menu_key);
     let menu_lbl = menu_lbl.as_str();
     let gap = 3u16;
@@ -3243,6 +3425,17 @@ pub fn draw_level_select(
     area: Rect,
     view: &LevelSelectView<'_>,
 ) -> HitList<LevelSelectAction, 16> {
+    draw_level_select_with(f, area, view, &PlateKeys::DEFAULT)
+}
+
+/// [`draw_level_select`] with the confirm key its start button and legend
+/// print (the back key is already `view.back_key`).
+pub fn draw_level_select_with(
+    f: &mut Frame,
+    area: Rect,
+    view: &LevelSelectView<'_>,
+    keys: &PlateKeys<'_>,
+) -> HitList<LevelSelectAction, 16> {
     let mut hits = HitList::new();
     if area.width < 16 || area.height < 8 || view.slots.is_empty() {
         return hits;
@@ -3322,11 +3515,11 @@ pub fn draw_level_select(
     if subtitle {
         if card_h >= 8 {
             let line = if inner.width >= 70 {
-                "Clear any floor of a stage to open the next · Flatbed always open"
+                "Clear a sector to open the next · Flatbed always open"
             } else if inner.width >= 52 {
-                "Clear a stage to open the next · Flatbed always open"
+                "Clear a sector to open the next · Flatbed open"
             } else {
-                "Clear a stage to open the next"
+                "Clear a sector to open the next"
             };
             put_centered(buf, inner, 0, line, ink(MUTED).bg(PLATE));
         } else if sel_slot.unlocked {
@@ -3384,13 +3577,15 @@ pub fn draw_level_select(
 
     // Bottom action bar: Start + Back.
     let can_start = sel_slot.unlocked;
-    let start_lbl = if !can_start {
-        " SECTOR LOCKED "
+    let mut start = StackBuf::<64>::new();
+    let _ = if !can_start {
+        write!(start, " SECTOR LOCKED ")
     } else if inner.width >= 48 {
-        " ▸  Enter  START SECTOR "
+        write!(start, " ▸  {}  START SECTOR ", keys.confirm)
     } else {
-        " ▸ Enter START "
+        write!(start, " ▸ {} START ", keys.confirm)
     };
+    let start_lbl = start.as_str();
     let back_lbl = format!(" {}  back ", view.back_key);
     let back_lbl = back_lbl.as_str();
     let btn_gap = 3u16;
@@ -3444,8 +3639,8 @@ pub fn draw_level_select(
             inner,
             hint_row,
             &format!(
-                "Arrows / click select  ·  Enter begin  ·  {} back",
-                view.back_key
+                "Arrows / click select  ·  {} begin  ·  {} back",
+                keys.confirm, view.back_key
             ),
             ink(MUTED).bg(PLATE),
         );
@@ -3520,14 +3715,17 @@ fn draw_three_pips(
     spaced: bool,
     bg: Color,
 ) -> u16 {
-    for (idx, lvl) in CampaignLevel::all().into_iter().enumerate() {
+    // Matched by stage, like `stamp_header_pips`: a side-route floor is on
+    // stage two or three and must light that pip.
+    let current_stage = usize::from(current.stage_number().saturating_sub(1));
+    for idx in 0..CampaignLevel::all().len() {
         if cx >= max_x {
             break;
         }
         let (ch, col) = if (idx as u8) < cleared_count {
             ('●', HEAL_MINT)
-        } else if lvl == current {
-            ('◆', lvl.accent())
+        } else if idx == current_stage {
+            ('◆', current.accent())
         } else {
             ('○', EDGE)
         };
@@ -3727,6 +3925,46 @@ mod tests {
             .collect()
     }
 
+    /// The cleared-sector plate promises no pack size it cannot know (the
+    /// limit is three to five), and names the next sector by its sector code.
+    #[test]
+    fn level_complete_names_the_next_sector_and_no_fixed_pack_size() {
+        let view = LevelCompleteView {
+            level: CampaignLevel::Sewer,
+            theme: None,
+            time_secs: 252.0,
+            kills: 284,
+            score_so_far: 6420,
+            gold: 24,
+            level_score: 3120,
+            player_level: 9,
+            owned_upgrades: 11,
+            next: Some(CampaignLevel::Laundry),
+            custom_triumph: None,
+            hovered: None,
+        };
+        for &(w, h) in &SIZES {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            let mut hits = HitList::new();
+            term.draw(|f| {
+                hits = draw_level_complete(f, f.area(), &view);
+            })
+            .unwrap();
+            assert_hits_inside_drawn_controls(&term, &hits);
+            let txt = buffer_text(&term);
+            assert!(!txt.contains("PACK 3"), "{w}x{h}: a fixed pack size");
+            assert!(!txt.contains("Pack 3 of"), "{w}x{h}: a fixed pack size");
+            assert!(!txt.contains("LEVEL "), "{w}x{h}: says LEVEL, not SECTOR");
+            assert!(txt.contains("PACK"), "{w}x{h}: the button lost its verb");
+            if w >= 120 {
+                assert!(
+                    txt.contains("SECTOR 02B — THE LAUNDRY"),
+                    "{w}x{h}: the next sector is not named"
+                );
+            }
+        }
+    }
+
     #[test]
     fn level_complete_all_bosses_and_sizes() {
         for lvl in all_floor_plates() {
@@ -3768,6 +4006,185 @@ mod tests {
                 })
                 .unwrap();
             }
+        }
+    }
+
+    /// A five-upgrade pack (the nest's carry track) shows all five slots: the
+    /// previews used to stop at three. The route chips keep their rectangles
+    /// and are never painted over by the header's stage pips.
+    #[test]
+    fn keep_three_shows_a_five_slot_pack_and_whole_route_chips() {
+        let items = sample_upgrades();
+        let mut sel = [false; 13];
+        for flag in sel.iter_mut().take(5) {
+            *flag = true;
+        }
+        let view = KeepThreeView {
+            from_level: CampaignLevel::Sewer,
+            next_level: CampaignLevel::Kitchen,
+            gold: 24,
+            items: &items,
+            selected: &sel,
+            max_keep: 5,
+            cursor: 0,
+            scroll: 0,
+            hovered: None,
+            route: [
+                Some(RouteChip { name: "Kitchen", chosen: true }),
+                Some(RouteChip { name: "Laundry", chosen: false }),
+            ],
+            splices: &[],
+        };
+        assert!(keep_three_can_confirm(&view));
+        for &(w, h) in &SIZES {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            let mut hits = HitList::new();
+            term.draw(|f| {
+                hits = draw_keep_three(f, f.area(), &view);
+            })
+            .unwrap();
+            assert_single_cell_glyphs(&term);
+            let txt = buffer_text(&term);
+            assert!(hits.find(KeepThreeAction::Confirm).is_some(), "{w}x{h}");
+            if w >= 120 {
+                assert!(txt.contains("SLOT 05"), "{w}x{h}: the fifth slot card is missing");
+            } else {
+                // The fifth packed upgrade (Tail Whip) has a pill of its own.
+                assert!(txt.contains("[◈ Tail"), "{w}x{h}: the fifth pill is missing");
+            }
+            for (i, name) in ["[Kitchen]", "[Laundry]"].into_iter().enumerate() {
+                assert!(txt.contains(name), "{w}x{h}: route chip {name} is not whole");
+                let rect = hits
+                    .find(KeepThreeAction::Route(i as u8))
+                    .unwrap_or_else(|| panic!("{w}x{h}: route chip {i} has no rectangle"));
+                assert_eq!(rect.width as usize, name.chars().count(), "{w}x{h}: {name}");
+            }
+        }
+    }
+
+    /// Every plate prints the key names it is handed, and the plain entry
+    /// points print the stock ones.
+    #[test]
+    fn plates_print_the_key_names_they_are_given() {
+        let keys = PlateKeys {
+            confirm: "F9",
+            toggle: "F8",
+            route: "F7",
+        };
+        let items = sample_upgrades();
+        let sel = [true, true, true, false, false, false, false, false, false, false, false, false, false];
+        let keep = KeepThreeView {
+            from_level: CampaignLevel::Sewer,
+            next_level: CampaignLevel::Laundry,
+            gold: 24,
+            items: &items,
+            selected: &sel,
+            max_keep: 3,
+            cursor: 0,
+            scroll: 0,
+            hovered: None,
+            route: [
+                Some(RouteChip { name: "Kitchen", chosen: false }),
+                Some(RouteChip { name: "Laundry", chosen: true }),
+            ],
+            splices: &[],
+        };
+        let intro = LevelIntroView {
+            level: CampaignLevel::Laundry,
+            flavor: None,
+            carried: &[],
+            score_so_far: 0,
+            gold: 0,
+            hovered: None,
+        };
+        for &(w, h) in &SIZES {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| {
+                let _ = draw_keep_three_with(f, f.area(), &keep, &keys);
+            })
+            .unwrap();
+            let txt = buffer_text(&term);
+            assert!(txt.contains("F7 route"), "{w}x{h}: the route key");
+            assert!(txt.contains("F9"), "{w}x{h}: the confirm key");
+            assert!(!txt.contains("Enter"), "{w}x{h}: a stock key leaked");
+            assert!(!txt.contains("Space") && !txt.contains("Tab route"), "{w}x{h}");
+
+            term.draw(|f| {
+                let _ = draw_keep_three(f, f.area(), &keep);
+            })
+            .unwrap();
+            assert!(buffer_text(&term).contains("Tab route"), "{w}x{h}: the default");
+
+            term.draw(|f| {
+                let _ = draw_level_intro_with(f, f.area(), &intro, &keys);
+            })
+            .unwrap();
+            let txt = buffer_text(&term);
+            assert!(txt.contains("F9") && !txt.contains("Enter"), "{w}x{h}: intro");
+        }
+    }
+
+    /// The cleared-sector plate names the boss the run killed: a Sewer that
+    /// fielded the Horseshoe no longer says the Apex Jaguar is down.
+    #[test]
+    fn level_complete_names_the_boss_that_was_killed() {
+        let view = LevelCompleteView {
+            level: CampaignLevel::Sewer,
+            theme: Some(Theme::Sewer),
+            time_secs: 252.0,
+            kills: 284,
+            score_so_far: 6420,
+            gold: 24,
+            level_score: 3120,
+            player_level: 9,
+            owned_upgrades: 11,
+            next: Some(CampaignLevel::Kitchen),
+            custom_triumph: None,
+            hovered: None,
+        };
+        for &(w, h) in &SIZES {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            let mut hits = HitList::new();
+            term.draw(|f| {
+                hits = draw_level_complete_with(
+                    f,
+                    f.area(),
+                    &view,
+                    &PlateKeys::DEFAULT,
+                    Some(BossKind::HorseshoeCrab),
+                );
+            })
+            .unwrap();
+            assert_single_cell_glyphs(&term);
+            assert_hits_inside_drawn_controls(&term, &hits);
+            let txt = buffer_text(&term);
+            assert!(txt.contains("THE HORSESHOE"), "{w}x{h}: the killed boss");
+            assert!(!txt.contains("APEX JAGUAR"), "{w}x{h}: names the other boss");
+
+            // The floor's original boss keeps the original plate.
+            term.draw(|f| {
+                let _ = draw_level_complete_with(
+                    f,
+                    f.area(),
+                    &view,
+                    &PlateKeys::DEFAULT,
+                    Some(BossKind::Cat),
+                );
+            })
+            .unwrap();
+            assert!(buffer_text(&term).contains("APEX JAGUAR"), "{w}x{h}");
+        }
+        // Every pool mate has words of its own, inside the plate's budgets.
+        for kind in [
+            BossKind::HorseshoeCrab,
+            BossKind::MegaRat,
+            BossKind::Cobra,
+            BossKind::Hawk,
+        ] {
+            let (verdict, line) = alternate_boss_plate(kind).expect("a pool mate's plate");
+            assert!(verdict.chars().count() <= 32, "{kind:?}: {verdict}");
+            assert!(line.chars().count() <= 150, "{kind:?}: {line}");
+            assert!(!line.contains('!'));
         }
     }
 
@@ -3989,6 +4406,93 @@ mod tests {
         }
     }
 
+    /// The nest's carry track lets a run keep five upgrades: the intro plate
+    /// names all five (it used to stop at three), at every reference size.
+    #[test]
+    fn level_intro_lists_a_five_upgrade_pack() {
+        let items = sample_upgrades();
+        let carried = [items[0], items[1], items[2], items[3], items[6]];
+        let view = LevelIntroView {
+            level: CampaignLevel::Printworks,
+            flavor: None,
+            carried: &carried,
+            score_so_far: 6420,
+            gold: 24,
+            hovered: None,
+        };
+        for &(w, h) in &SIZES {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            let mut hits = HitList::new();
+            term.draw(|f| hits = draw_level_intro(f, f.area(), &view)).unwrap();
+            assert_single_cell_glyphs(&term);
+            assert_hits_inside_drawn_controls(&term, &hits);
+            let txt = buffer_text(&term);
+            for it in &carried {
+                // A pill shows the first word (six cells at most), a row or a
+                // card the whole name: the first word's head is on all three.
+                let head: String = it
+                    .name
+                    .split(' ')
+                    .next()
+                    .unwrap_or(it.name)
+                    .chars()
+                    .take(6)
+                    .collect();
+                assert!(
+                    txt.contains(&head),
+                    "{w}x{h}: carried upgrade {} is not on the plate",
+                    it.name
+                );
+            }
+        }
+    }
+
+    /// The intro plate says "Sector" like every other screen (STYLE.md §3),
+    /// with the same code the level 1 card prints, and the default note fits
+    /// its three rows whole on every floor.
+    #[test]
+    fn level_intro_heading_reads_sector_and_the_note_is_not_cut() {
+        for lvl in all_floor_plates() {
+            let view = LevelIntroView {
+                level: lvl,
+                flavor: None,
+                carried: &[],
+                score_so_far: 0,
+                gold: 0,
+                hovered: None,
+            };
+            assert!(
+                lvl.default_intro_flavor().chars().count() <= 145,
+                "{lvl:?}: the default note is over the 145-cell budget"
+            );
+            for &(w, h) in &SIZES {
+                let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+                term.draw(|f| {
+                    let _ = draw_level_intro(f, f.area(), &view);
+                })
+                .unwrap();
+                let txt = buffer_text(&term);
+                assert!(!txt.contains("LEVEL "), "{lvl:?} {w}x{h}: says LEVEL");
+                if lvl != CampaignLevel::Trailer {
+                    assert!(
+                        txt.contains(lvl.sector_code()),
+                        "{lvl:?} {w}x{h}: no sector code"
+                    );
+                }
+                // The note's last word made it onto the plate.
+                let last = lvl
+                    .default_intro_flavor()
+                    .rsplit(' ')
+                    .next()
+                    .unwrap_or_default();
+                assert!(
+                    txt.contains(last),
+                    "{lvl:?} {w}x{h}: the note was cut before {last:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn campaign_victory_all_sizes() {
         let items = sample_upgrades();
@@ -4006,6 +4510,7 @@ mod tests {
                     kills: 284,
                     score: 6420,
                     player_level: 9,
+                    boss: None,
                 },
                 LevelBreakdown {
                     level: CampaignLevel::Kitchen,
@@ -4013,6 +4518,7 @@ mod tests {
                     kills: 318,
                     score: 8140,
                     player_level: 10,
+                    boss: None,
                 },
                 LevelBreakdown {
                     level: CampaignLevel::Lab,
@@ -4020,6 +4526,7 @@ mod tests {
                     kills: 340,
                     score: 10300,
                     player_level: 11,
+                    boss: None,
                 },
             ],
             final_loadout: &items[..4],
@@ -4380,6 +4887,50 @@ mod tests {
         }
     }
 
+    /// A side-route floor lights its own stage's pip: the Laundry is stage
+    /// two and the Printworks stage three, and both used to show no current
+    /// pip at all (the pips compared plates, not stages).
+    #[test]
+    fn side_route_floors_light_their_stage_pip() {
+        for (lvl, want) in [
+            (CampaignLevel::Sewer, "◆ ○ ○"),
+            (CampaignLevel::Laundry, "● ◆ ○"),
+            (CampaignLevel::Kitchen, "● ◆ ○"),
+            (CampaignLevel::Printworks, "● ● ◆"),
+            (CampaignLevel::Lab, "● ● ◆"),
+        ] {
+            let view = CampaignProgressView {
+                current: lvl,
+                cleared_count: lvl.stage_number().saturating_sub(1),
+                bg: None,
+            };
+            let mut term = Terminal::new(TestBackend::new(24, 1)).unwrap();
+            term.draw(|f| {
+                let _ = draw_campaign_pips(f, Rect::new(0, 0, 24, 1), &view);
+            })
+            .unwrap();
+            let txt = buffer_text(&term);
+            assert!(txt.contains(want), "{lvl:?}: wanted {want:?} in {txt:?}");
+
+            // The plate header's pips agree (the intro plate at 80x24).
+            let intro = LevelIntroView {
+                level: lvl,
+                flavor: None,
+                carried: &[],
+                score_so_far: 0,
+                gold: 0,
+                hovered: None,
+            };
+            let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            term.draw(|f| {
+                let _ = draw_level_intro(f, f.area(), &intro);
+            })
+            .unwrap();
+            let txt = buffer_text(&term);
+            assert!(txt.contains(want), "{lvl:?}: header pips lack {want:?}");
+        }
+    }
+
     fn color_rgb(c: Color) -> (u8, u8, u8) {
         match c {
             Color::Rgb(r, g, b) => (r, g, b),
@@ -4442,6 +4993,7 @@ mod tests {
                     kills: 284,
                     score: 6420,
                     player_level: 9,
+                    boss: None,
                 },
                 LevelBreakdown {
                     level: CampaignLevel::Kitchen,
@@ -4449,6 +5001,7 @@ mod tests {
                     kills: 318,
                     score: 8140,
                     player_level: 10,
+                    boss: None,
                 },
                 LevelBreakdown {
                     level: CampaignLevel::Lab,
@@ -4456,6 +5009,7 @@ mod tests {
                     kills: 340,
                     score: 10300,
                     player_level: 11,
+                    boss: None,
                 },
             ],
             final_loadout: &items[..4],

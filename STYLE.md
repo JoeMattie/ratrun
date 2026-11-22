@@ -84,7 +84,7 @@ Never slice `.name().chars().take(4)` for compact strips (`Tail Whip` and `Tail 
 
 ### Key Names
 - Named keys in legends/prose: **`Space`**, **`Ctrl`**, **`Enter`**, **`Esc`**, **`Tab`** (ALL CAPS only inside all-caps HUD badges like `CTRL DASH`, `SPACE`, `[TAB]`).
-- Single-letter keys: **`WASD`**, **`O`**, **`M`**, **`N`**, **`C`**, **`L`**, **`Q`**, **`P`**, **`Z/X`**.
+- Single-letter keys: **`WASD`**, **`O`**, **`M`**, **`N`**, **`C`**, **`L`**, **`Q`**, **`P`**, **`U`**, **`B`**, **`R`**, **`Z/X`**. These are the defaults: a legend that names a remappable action prints the live binding (`Controls::action_label`), never a hard-coded letter.
 - Arrows & symbols: **`↑↓`**, **`←→`**, **`[ ]`**, **`- =`**, **`wheel`**, **`click`**.
 - Separators in legends: ` · ` (spaced middle dot) between bindings.
 

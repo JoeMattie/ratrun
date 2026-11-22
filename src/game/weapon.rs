@@ -1,5 +1,8 @@
-//! Auto-firing weapons. Each weapon has a cooldown and a firing pattern;
-//! the actual spawning lives in `world.rs` so it can see all entities.
+//! The thirteen weapons (`WeaponKind::all`): names, per-level stats, cooldowns
+//! and evolutions. This module is data and rules only; the firing patterns
+//! live in the weapon systems (`ecs/systems/weapons.rs`, `weapons_wave3a.rs`,
+//! `weapons_wave3b.rs`, `weapon_spiketail.rs`, `evolutions.rs`), which can see
+//! every entity.
 
 use crate::render::palette::Rgb;
 
@@ -132,7 +135,8 @@ pub const LASH_TOTAL: f32 = 0.34;
 pub const LASH_DAMAGE: [f32; 5] = [22.0, 27.0, 33.0, 38.0, 44.0];
 /// Cycle length, L1 → L5.
 pub const LASH_CYCLE: [f32; 5] = [1.3, 1.19, 1.08, 0.96, 0.85];
-/// Reach of the lash (rat to impact point), L1 → L5. Lens Cap stretches it.
+/// Reach of the lash (rat to the target's near edge), L1 → L5. Lens Cap
+/// stretches it.
 pub const LASH_REACH: [f32; 5] = [44.0, 49.0, 54.0, 59.0, 64.0];
 /// Radius of the burst at the impact point, L1 → L5. Long Fuse widens it.
 pub const LASH_RADIUS: [f32; 5] = [10.0, 11.5, 13.0, 14.5, 16.0];
@@ -543,8 +547,9 @@ impl WeaponKind {
             ),
             // Barbed Wire — the lash hooks, and the recoil reels the catch in.
             // Partner: Counterweight, the passive that is literally a weight
-            // tied to the tip of a weapon (every other passive already partners
-            // exactly one weapon; this is the one whose card the reel *is*).
+            // tied to the tip of a weapon. It is the one passive with **two**
+            // rows (Flywheel is the other), so one stack opens both; a chest
+            // still evolves one weapon at a time, earliest in rack order.
             WeaponKind::SpikedTail => e(
                 super::loadout::PassiveKind::Counterweight,
                 "Barbed Wire",
@@ -627,7 +632,7 @@ impl Weapon {
     pub fn damage(&self) -> f32 {
         match self.kind.damage_by_level() {
             Some(table) => table[self.tier()],
-            None => self.kind.base_damage() * (1.0 + 0.25 * (self.level - 1) as f32),
+            None => self.kind.base_damage() * (1.0 + 0.25 * self.level.saturating_sub(1) as f32),
         }
     }
 
@@ -640,7 +645,7 @@ impl Weapon {
     pub fn cooldown(&self) -> f32 {
         match self.kind.cooldown_by_level() {
             Some(table) => table[self.tier()],
-            None => self.kind.base_cooldown() * (1.0 - 0.06 * (self.level - 1) as f32),
+            None => self.kind.base_cooldown() * (1.0 - 0.06 * self.level.saturating_sub(1) as f32),
         }
     }
 
@@ -731,8 +736,8 @@ impl Weapon {
     /// over a third of the screen, and 90 px of squeak rings most of it.
     pub fn active_reach(&self) -> f32 {
         match self.kind {
-            WeaponKind::TailThrash => 60.0 + 6.0 * (self.level - 1) as f32,
-            WeaponKind::SonicSqueak => 90.0 + 10.0 * (self.level - 1) as f32,
+            WeaponKind::TailThrash => 60.0 + 6.0 * self.level.saturating_sub(1) as f32,
+            WeaponKind::SonicSqueak => 90.0 + 10.0 * self.level.saturating_sub(1) as f32,
             _ => 0.0,
         }
     }

@@ -254,6 +254,28 @@ struct KeyboardMode {
     lone_ctrl: bool,
 }
 
+/// Read the flags the terminal reports **after** the push into
+/// `(releases reported, lone Ctrl reported)`.
+///
+/// * `REPORT_EVENT_TYPES` in effect is what makes a held key report its
+///   release. A terminal that answers the query but did not take that flag
+///   must be treated like a legacy one: assuming releases there would leave a
+///   movement key held for ever, where the auto-repeat grace window always
+///   works.
+/// * `REPORT_ALL_KEYS_AS_ESCAPE_CODES` in effect is what makes a bare Ctrl
+///   report at all.
+/// * No answer to the second query (`None`) proves nothing either way: the
+///   protocol did answer once, so releases are still assumed, and Ctrl-dash
+///   falls back to Space-dash.
+fn keyboard_mode_from(in_effect: Option<u32>) -> (bool, bool) {
+    let has = |flag: KeyboardEnhancementFlags| {
+        in_effect.is_some_and(|f| f & u32::from(flag.bits()) != 0)
+    };
+    let releases = in_effect.is_none() || has(KeyboardEnhancementFlags::REPORT_EVENT_TYPES);
+    let lone_ctrl = has(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES);
+    (releases, lone_ctrl)
+}
+
 /// Set up the alternate screen, mouse + focus reporting and the Kitty keyboard
 /// protocol flags (Ghostty, Kitty and others report them).
 /// Raw mode is enabled by `main` (which owns the restore guard).
@@ -276,7 +298,7 @@ fn setup_terminal() -> Result<(Terminal<CrosstermBackend<io::Stdout>>, KeyboardM
     // first frame. `term::query_keyboard_enhancement` sends the same two
     // queries and gives up after 300 ms. Asking is never skipped: tmux and ssh
     // forward the query, so sniffing the environment would only break them.
-    let kitty = term::query_keyboard_enhancement();
+    let mut kitty = term::query_keyboard_enhancement();
     let mut lone_ctrl = false;
     if kitty {
         // `REPORT_EVENT_TYPES` buys the held-key releases; report-all-keys is
@@ -295,11 +317,8 @@ fn setup_terminal() -> Result<(Terminal<CrosstermBackend<io::Stdout>>, KeyboardM
         // the first query yet ignores the push (or never answers the second)
         // leaves `lone_ctrl` false, and Ctrl-dash falls back to Space-dash —
         // the game stays playable instead of losing its only dash key.
-        lone_ctrl = term::query_keyboard()
-            .flags
-            .is_some_and(|f| {
-                f & u32::from(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES.bits()) != 0
-            });
+        let in_effect = term::query_keyboard().flags;
+        (kitty, lone_ctrl) = keyboard_mode_from(in_effect);
     }
 
     let backend = CrosstermBackend::new(stdout);
@@ -309,6 +328,39 @@ fn setup_terminal() -> Result<(Terminal<CrosstermBackend<io::Stdout>>, KeyboardM
         KeyboardMode { kitty, lone_ctrl },
     ))
 }
+
+/// Set by `SIGTERM`/`SIGHUP` (see [`install_termination_handlers`]); the frame
+/// loop reads it and leaves through the ordinary quit path.
+static TERMINATE: AtomicBool = AtomicBool::new(false);
+
+/// Turn `kill` and a closed terminal window into an ordinary quit.
+///
+/// Without this a `SIGTERM` ends the process with the terminal still in raw
+/// mode, on the alternate screen, with mouse capture and the keyboard
+/// enhancement flags pushed — no destructor runs on a default signal death.
+/// The handler only stores an atomic (async-signal-safe); the frame loop
+/// notices within one frame and returns, which unwinds through the reader
+/// thread's join and the restore guard like any other exit.
+///
+/// Installed by `run` only: the `--ai` wall has its own loop and keeps the
+/// default disposition rather than a handler nobody reads.
+#[cfg(unix)]
+fn install_termination_handlers() {
+    extern "C" fn on_terminate(_signal: libc::c_int) {
+        TERMINATE.store(true, Ordering::SeqCst);
+    }
+    let handler = on_terminate as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    // SAFETY: `on_terminate` is an `extern "C"` function that only performs an
+    // atomic store, which is async-signal-safe; `signal` is given valid signal
+    // numbers and a valid handler address.
+    unsafe {
+        libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGHUP, handler);
+    }
+}
+
+#[cfg(not(unix))]
+fn install_termination_handlers() {}
 
 fn restore_terminal() -> Result<()> {
     let mut stdout = io::stdout();
@@ -468,17 +520,34 @@ pub(crate) fn drain_input(
                 }
                 match ev {
                     Event::Key(k) => {
+                        // `C` too: Caps Lock or Shift must not disarm the one
+                        // key that always quits.
                         if k.kind == KeyEventKind::Press
-                            && k.code == KeyCode::Char('c')
+                            && matches!(k.code, KeyCode::Char('c' | 'C'))
                             && k.modifiers.contains(KeyModifiers::CONTROL)
                         {
                             quit = true;
                         }
+                        // Input can only arrive at a focused terminal, so a key
+                        // or a click proves focus even if the gain report was
+                        // lost (or the terminal never sends one).
+                        if !input.focused {
+                            input.set_focused(true);
+                        }
                         input.handle_key(k);
                     }
-                    Event::Mouse(m) => input.handle_mouse(m),
-                    // A key held when focus is lost never reports Release.
-                    Event::FocusLost => input.release_all(),
+                    Event::Mouse(m) => {
+                        if !input.focused && !is_mouse_motion(m.kind) {
+                            input.set_focused(true);
+                        }
+                        input.handle_mouse(m);
+                    }
+                    // A key held when focus is lost never reports Release, and
+                    // a pad must not drive a game nobody is watching: this
+                    // drops every held input *and* mutes the pad until focus
+                    // returns (`App::poll_pad` reads `input.focused`).
+                    Event::FocusLost => input.set_focused(false),
+                    Event::FocusGained => input.set_focused(true),
                     _ => {}
                 }
             }
@@ -516,9 +585,14 @@ fn run(
     // guard stops and joins the thread, so the terminal is only restored after
     // the reader has finished.
     let (_input, rx) = InputThread::spawn();
+    install_termination_handlers();
 
     while !app.should_quit {
         let frame_start = Instant::now();
+        if TERMINATE.load(Ordering::SeqCst) {
+            // `kill` / a closed window: leave the way `Q` does.
+            break;
+        }
 
         app.input.begin_frame();
         // A dead input reader (or a read error) ends the run: without input the
@@ -724,6 +798,66 @@ mod tests {
         tx.send(Ok(Event::FocusLost)).unwrap();
         drain_input(&rx, &mut input).unwrap();
         assert_eq!(input.move_dir(), crate::math::Vec2::ZERO);
+    }
+
+    #[test]
+    fn focus_loss_mutes_the_pad_until_focus_or_input_returns() {
+        use crate::controls::PadBind;
+        use crate::gamepad::PadEvent;
+
+        let (tx, rx) = reader();
+        let mut input = InputState::new(true);
+        input.pad_event(PadEvent::Connected);
+        tx.send(Ok(Event::FocusLost)).unwrap();
+        drain_input(&rx, &mut input).unwrap();
+        assert!(!input.focused);
+        input.pad_event(PadEvent::Button(PadBind::South, true));
+        assert!(
+            !input.pad.button_down(PadBind::South),
+            "a pad in someone's lap must not drive an unfocused game"
+        );
+
+        // The gain report switches it back on.
+        tx.send(Ok(Event::FocusGained)).unwrap();
+        drain_input(&rx, &mut input).unwrap();
+        assert!(input.focused);
+        input.pad_event(PadEvent::Button(PadBind::South, true));
+        assert!(input.pad.button_down(PadBind::South));
+
+        // A terminal that never reports the gain: a key proves focus. Mouse
+        // motion alone does not (some terminals report hover while unfocused).
+        tx.send(Ok(Event::FocusLost)).unwrap();
+        tx.send(Ok(motion(1, 1))).unwrap();
+        drain_input(&rx, &mut input).unwrap();
+        assert!(!input.focused);
+        tx.send(Ok(press(KeyCode::Char('w')))).unwrap();
+        drain_input(&rx, &mut input).unwrap();
+        assert!(input.focused, "a key press can only come from a focused terminal");
+    }
+
+    #[test]
+    fn ctrl_shift_c_quits_too() {
+        let (tx, rx) = reader();
+        tx.send(Ok(Event::Key(KeyEvent::new(
+            KeyCode::Char('C'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ))))
+        .unwrap();
+        let mut input = InputState::new(false);
+        assert!(drain_input(&rx, &mut input).unwrap());
+    }
+
+    #[test]
+    fn the_flags_in_effect_decide_releases_and_lone_ctrl() {
+        // Both flags stuck (Ghostty, Kitty): 2 | 8.
+        assert_eq!(keyboard_mode_from(Some(0b1010)), (true, true));
+        // Event types only: releases, but a bare Ctrl never reports.
+        assert_eq!(keyboard_mode_from(Some(0b0010)), (true, false));
+        // The push was ignored: no releases, so the grace window must be used.
+        assert_eq!(keyboard_mode_from(Some(0)), (false, false));
+        assert_eq!(keyboard_mode_from(Some(0b0001)), (false, false));
+        // The second query went unanswered: keep the first answer's verdict.
+        assert_eq!(keyboard_mode_from(None), (true, false));
     }
 
     #[test]

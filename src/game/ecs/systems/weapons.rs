@@ -8,8 +8,10 @@
 //!   use: see [`nearest_visible`] and the "shots respect walls" section below.
 //! - `fire_weapons` (cooldown, `fire_rate_mult`, `damage_mult`, dud-shot retry
 //!   rule).
-//! - `fire_one` — all six weapons (Gnaw, Cheese Spray, Squeak Nova, Spore
-//!   Orbit, Tail Whip, Acid Spit), including Tail Whip's direct `Enemy::hurt`
+//! - `fire_one` — the six original weapons (Gnaw, Cheese Spray, Squeak Nova,
+//!   Spore Orbit, Tail Whip, Acid Spit) plus the dispatch arms for Acid Rain,
+//!   Hantavirus and Spiked Tail; the ACTIVE weapons, Laser Eyes and Super Dash
+//!   fire from their own systems. Includes Tail Whip's direct `Enemy::hurt`
 //!   and Spore Orbit's "carry the angle, drop the old ring" rule.
 //!
 //! Neon-branch hooks re-applied here (`fire_one`):
@@ -1041,6 +1043,14 @@ fn squeak_ring(
         if edge > now || edge <= prev {
             continue;
         }
+        // Wall cover blocks the ring exactly as it blocks the other weapons
+        // (and as the boss branch below already does): a body behind masonry
+        // takes **nothing** — no damage, no shove, no stun, no Roll Call tag.
+        // The line test used to gate only the stun, so the ring still dealt
+        // its damage and shove straight through a wall.
+        if !los_clear(level, origin, e.pos, MELEE_LOS_RADIUS) {
+            continue;
+        }
         let hp_before = e.hp.max(0.0);
         // The ring arrives from its own origin, so the shell faces it.
         let applied = e.hurt_from(dmg, origin);
@@ -1051,9 +1061,8 @@ fn squeak_ring(
         let enemy_radius = e.radius;
         let enemy_id = e.id;
         // Elites keep their footing (slowed, not stunned); everything else is
-        // pinned for the full stun. Wall cover blocks the ring exactly as it
-        // blocks the weapons: the arc of a squeak is physical.
-        if los_clear(level, origin, pos, MELEE_LOS_RADIUS) {
+        // pinned for the full stun.
+        {
             if e.elite || e.kind.heavy() {
                 e.slow_for(SQUEAK_ELITE_SLOW, SQUEAK_STUN);
             } else {
@@ -2468,6 +2477,104 @@ mod tests {
         assert!(w.bullets().is_empty(), "Tail Whip must not spawn bullets");
     }
 
+    /// Every auto-firing weapon in `fire_one` serves exactly its own level-1
+    /// cooldown for a shot (measured on a zero-length tick), then stays quiet
+    /// until that cooldown has run out.
+    #[test]
+    fn every_auto_weapon_fires_on_its_own_cooldown() {
+        for kind in [
+            WeaponKind::Gnaw,
+            WeaponKind::CheeseSpray,
+            WeaponKind::SqueakNova,
+            WeaponKind::SporeOrbit,
+            WeaponKind::TailWhip,
+            WeaponKind::AcidSpit,
+        ] {
+            let mut w = World::new(Theme::Sewer, 4321);
+            open_map(&mut w);
+            w.clear_enemies();
+            w.clear_bullets();
+            w.clear_pools();
+            arm(&mut w, kind);
+            let at = w.player.pos + Vec2::new(10.0, 0.0);
+            w.spawn_enemy(EnemyKind::Brute, at, 400.0);
+            run_weapons(&mut w, 0.0);
+            let timer = w.player.loadout.weapons[0].timer;
+            assert!(
+                (timer - kind.base_cooldown()).abs() < 1e-5,
+                "{kind:?}: a shot served {timer}, the table says {}",
+                kind.base_cooldown()
+            );
+            // Half a cooldown later it is still cooling (no second shot: a
+            // shot would have added a whole cooldown to the timer).
+            let cd = kind.base_cooldown();
+            run_weapons(&mut w, cd * 0.5);
+            let timer = w.player.loadout.weapons[0].timer;
+            assert!(
+                (timer - cd * 0.5).abs() < 1e-4,
+                "{kind:?} fired again inside its cooldown (timer {timer})"
+            );
+            // Once the rest has run out it fires again and serves a new one.
+            run_weapons(&mut w, cd * 0.5 + 0.01);
+            let timer = w.player.loadout.weapons[0].timer;
+            assert!(
+                (timer - (cd - 0.01)).abs() < 1e-3,
+                "{kind:?} did not fire when its cooldown ran out (timer {timer})"
+            );
+        }
+    }
+
+    /// Squeak Nova: one full ring per shot, evenly spaced, every spoke tagged
+    /// with the weapon (so its hits credit the Nova's ledger column).
+    #[test]
+    fn squeak_nova_fires_one_evenly_spaced_ring() {
+        let mut w = World::new(Theme::Sewer, 77);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        arm(&mut w, WeaponKind::SqueakNova);
+        run_weapons(&mut w, 0.0);
+        let bullets = w.bullets();
+        let want = w.player.loadout.weapons[0].level_projectiles() as usize;
+        assert_eq!(bullets.len(), want, "a level-1 nova is {want} spokes");
+        let step = std::f32::consts::TAU / want as f32;
+        for (k, b) in bullets.iter().enumerate() {
+            assert_eq!(b.weapon, Some(WeaponKind::SqueakNova));
+            assert_eq!(b.faction as u8, Faction::Player as u8);
+            let dir = Vec2::from_angle(k as f32 * step);
+            assert!(
+                (b.vel.normalized() - dir).len() < 1e-3,
+                "spoke {k} is off its angle: {:?}",
+                b.vel
+            );
+        }
+    }
+
+    /// Tail Whip books what it dealt to its own ledger column and to no other.
+    #[test]
+    fn tail_whip_credits_its_own_ledger_column() {
+        let mut w = World::new(Theme::Sewer, 78);
+        open_map(&mut w);
+        w.clear_enemies();
+        w.clear_bullets();
+        let at = w.player.pos + Vec2::new(10.0, 0.0);
+        let body = w.spawn_enemy(EnemyKind::Brute, at, 400.0);
+        let before = w.ecs.get::<Enemy>(body).unwrap().hp;
+        arm(&mut w, WeaponKind::TailWhip);
+        run_weapons(&mut w, 0.0);
+        let lost = before - w.ecs.get::<Enemy>(body).unwrap().hp;
+        assert!(lost > 0.0, "the whip missed");
+        let ledger = w.ecs.resource::<crate::game::ecs::resources::DamageLedger>();
+        for kind in WeaponKind::all() {
+            let booked = ledger.dealt[kind.index()];
+            if kind == WeaponKind::TailWhip {
+                assert!((booked - lost).abs() < 1e-3, "whip column {booked} != {lost}");
+            } else {
+                assert_eq!(booked, 0.0, "{kind:?} was credited with a whip hit");
+            }
+        }
+    }
+
     /// Neon hook: every player projectile is tagged with the weapon that fired
     /// it (used by `resolve_player_bullets` for spark/damage-number styling).
     #[test]
@@ -3282,6 +3389,37 @@ mod tests {
             !w.sfx.contains(&Sfx::Shoot),
             "a blocked shot must not announce itself"
         );
+    }
+
+    /// The squeak ring is physical: a body behind masonry takes no damage and
+    /// no stun (the line test used to gate only the stun).
+    #[test]
+    fn sonic_squeak_does_not_hit_through_a_wall() {
+        let mut w = World::new(Theme::Sewer, 507);
+        let face = wall_between(&mut w);
+        let p = w.player.pos;
+        let hidden = w.spawn_enemy(EnemyKind::Cat, Vec2::new(face + 24.0, p.y), 1.0);
+        // The same distance on the open side, so the ring demonstrably ran.
+        let open = w.spawn_enemy(EnemyKind::Cat, Vec2::new(p.x - 30.0, p.y), 1.0);
+        let hidden_hp = w.ecs.get::<Enemy>(hidden).unwrap().hp;
+        let open_hp = w.ecs.get::<Enemy>(open).unwrap().hp;
+        arm_active(&mut w, WeaponKind::SonicSqueak, 0.0);
+
+        tick_active(&mut w, true);
+        let mut ticks = 0;
+        while w.active_fx().squeak_active() {
+            tick_active(&mut w, false);
+            ticks += 1;
+            assert!(ticks < 100, "the squeak ring never finished");
+        }
+
+        assert!(
+            w.ecs.get::<Enemy>(open).unwrap().hp < open_hp,
+            "the ring must hit the body in the open"
+        );
+        let e = w.ecs.get::<Enemy>(hidden).unwrap();
+        assert_eq!(e.hp, hidden_hp, "the ring dealt damage through a wall");
+        assert_eq!(e.stun, 0.0, "and must not stun through one");
     }
 
     /// "No target" behaviour is unchanged: the timer stays ready so the

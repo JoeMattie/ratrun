@@ -309,6 +309,10 @@ static NOVA_10: [(f32, f32); 10] = build_nova_10();
 fn cull_reach(kind: EnemyKind, r: f32) -> f32 {
     // A registration paints its archetype's body, so it needs the archetype's
     // screen bound.
+    // Sewer: the Sump Leech's tongue reaches 24 px past its lip.
+    if kind == EnemyKind::SumpLeech {
+        return r + 34.0;
+    }
     let kind = kind.archetype();
     match kind {
         EnemyKind::Skitterer => r * 2.2 + 2.0, // 5.5 * (r/2.5) + 2
@@ -382,6 +386,28 @@ pub fn draw_enemy_crowd(
 /// **without** the body. `World::draw_hostile_layer` re-stamps them after the
 /// lighting pass with this; the sprites are the ones the body pass draws.
 pub fn draw_w3_tells(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2, accent: Rgb) {
+    // Sewer: the Sump Leech's tongue footprint (its own geometry, no frame).
+    if e.kind == EnemyKind::SumpLeech {
+        crate::game::art_roster_sewer::draw_leech_tongue(pb, e, cam);
+        return;
+    }
+    // Laundry (`art_roster_laundry`): the Peg Snapper's floor jaws, from the
+    // same view its hit test reads.
+    if e.kind == EnemyKind::PegSnapper {
+        crate::game::art_roster_laundry::draw_peg_tell(pb, e, cam);
+        return;
+    }
+    // Lab (`art_roster_lab`): the Walking Syringe posts its own ray, not the
+    // Bell Flea's crosses.
+    if e.kind == EnemyKind::WalkingSyringe {
+        crate::game::art_roster_lab::draw_syringe_tell(pb, e, cam);
+        return;
+    }
+    // Printworks: the Staple Crawler's two marked holes (its own geometry).
+    if e.kind == EnemyKind::StapleCrawler {
+        crate::game::art_roster_printworks::draw_staple_tell(pb, e, cam);
+        return;
+    }
     // The tell belongs to the archetype: a registered body that inherits the
     // Bell Flea's hop or the Turnkey's crossbar posts the same floor mark.
     if !matches!(e.kind.archetype(), EnemyKind::BellFlea | EnemyKind::Turnkey) {
@@ -403,6 +429,12 @@ pub fn draw_w3_tells(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2, accent: Rgb) {
 /// lighting pass, exactly like [`draw_w3_tells`].
 pub fn draw_wave4_tells(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2, accent: Rgb) {
     if !e.kind.is_wave4() {
+        return;
+    }
+    // Flatbed: the Loose Can's marked roll (before the body cull: the path
+    // reaches 48 px past a can that may itself be just off screen).
+    if e.kind == EnemyKind::LooseCan {
+        crate::game::art_roster_flatbed::draw_loose_can_tell(pb, e, cam);
         return;
     }
     let Some(fr) = prepare_frame(pb, e, cam, accent) else {
@@ -622,14 +654,82 @@ type BodyDraw = fn(&mut PixelBuffer, &Frame, &Enemy, Vec2, bool);
 fn bespoke_body(kind: EnemyKind) -> Option<BodyDraw> {
     /// The per-floor art batch adds its rows here:
     /// `(EnemyKind::PipeEel, draw_pipeeel as BodyDraw)`.
-    const TABLE: &[(EnemyKind, BodyDraw)] = &[];
+    const TABLE: &[(EnemyKind, BodyDraw)] = &[
+        (EnemyKind::PipeEel, crate::game::art_roster_sewer::draw_pipe_eel as BodyDraw),
+        (EnemyKind::WoolPill, crate::game::art_roster_laundry::draw_wool_pill as BodyDraw),
+        (EnemyKind::ClothesMoth, crate::game::art_roster_laundry::draw_clothes_moth as BodyDraw),
+        (EnemyKind::PegSnapper, crate::game::art_roster_laundry::draw_peg_snapper as BodyDraw),
+        (EnemyKind::StarchBulb, crate::game::art_roster_laundry::draw_starch_bulb as BodyDraw),
+        (EnemyKind::LintGolem, crate::game::art_roster_laundry::draw_lint_golem as BodyDraw),
+        (EnemyKind::GrateArcher, crate::game::art_roster_sewer::draw_grate_archer as BodyDraw),
+        (EnemyKind::SumpLeech, crate::game::art_roster_sewer::draw_sump_leech as BodyDraw),
+        (EnemyKind::SluiceToad, crate::game::art_roster_sewer::draw_sluice_toad as BodyDraw),
+        (EnemyKind::Silverfish, crate::game::art_roster_printworks::draw_silverfish as BodyDraw),
+        (EnemyKind::ErratumSlip, crate::game::art_roster_printworks::draw_erratumslip as BodyDraw),
+        (EnemyKind::TypeSlug, crate::game::art_roster_printworks::draw_typeslug as BodyDraw),
+        (EnemyKind::StapleCrawler, crate::game::art_roster_printworks::draw_staplecrawler as BodyDraw),
+        (EnemyKind::PaperWasp, crate::game::art_roster_printworks::draw_paperwasp as BodyDraw),
+        (EnemyKind::PaperReel, crate::game::art_roster_printworks::draw_paperreel as BodyDraw),
+        (EnemyKind::InkBlot, crate::game::art_roster_printworks::draw_inkblot as BodyDraw),
+        (EnemyKind::SwabFoot, crate::game::art_roster_lab::draw_swabfoot as BodyDraw),
+        (EnemyKind::SpinnerLid, crate::game::art_roster_lab::draw_spinnerlid as BodyDraw),
+        (EnemyKind::GlassRunner, crate::game::art_roster_lab::draw_glassrunner as BodyDraw),
+        (EnemyKind::WalkingSyringe, crate::game::art_roster_lab::draw_walkingsyringe as BodyDraw),
+        (EnemyKind::AutoclaveCart, crate::game::art_roster_lab::draw_autoclavecart as BodyDraw),
+        (EnemyKind::GravelTick, crate::game::art_roster_flatbed::draw_gravel_tick as BodyDraw),
+        (EnemyKind::JuneBug, crate::game::art_roster_flatbed::draw_june_bug as BodyDraw),
+        (EnemyKind::TarRat, crate::game::art_roster_flatbed::draw_tar_rat as BodyDraw),
+        (EnemyKind::LooseCan, crate::game::art_roster_flatbed::draw_loose_can as BodyDraw),
+        (EnemyKind::TollGull, crate::game::art_roster_flatbed::draw_toll_gull as BodyDraw),
+        (EnemyKind::LooseBungee, crate::game::art_roster_flatbed::draw_loose_bungee as BodyDraw),
+        (EnemyKind::CrumbAnt, crate::game::art_roster_kitchen::draw_crumbant as BodyDraw),
+        (EnemyKind::FruitFly, crate::game::art_roster_kitchen::draw_fruitfly as BodyDraw),
+        (EnemyKind::EggTimer, crate::game::art_roster_kitchen::draw_eggtimer as BodyDraw),
+        (EnemyKind::PepperMill, crate::game::art_roster_kitchen::draw_peppermill as BodyDraw),
+        (EnemyKind::PieWeight, crate::game::art_roster_kitchen::draw_pieweight as BodyDraw),
+        (EnemyKind::SinkCrab, crate::game::art_roster_kitchen::draw_sinkcrab as BodyDraw),
+    ];
     TABLE.iter().find(|(k, _)| *k == kind).map(|(_, draw)| *draw)
 }
 
 /// The far-LOD half of [`bespoke_body`].
 fn bespoke_lod(kind: EnemyKind) -> Option<BodyDraw> {
     /// The per-floor art batch adds its rows here, beside the full-detail row.
-    const TABLE: &[(EnemyKind, BodyDraw)] = &[];
+    const TABLE: &[(EnemyKind, BodyDraw)] = &[
+        (EnemyKind::PipeEel, crate::game::art_roster_sewer::draw_pipe_eel_lod as BodyDraw),
+        (EnemyKind::WoolPill, crate::game::art_roster_laundry::draw_wool_pill_lod as BodyDraw),
+        (EnemyKind::ClothesMoth, crate::game::art_roster_laundry::draw_clothes_moth_lod as BodyDraw),
+        (EnemyKind::PegSnapper, crate::game::art_roster_laundry::draw_peg_snapper_lod as BodyDraw),
+        (EnemyKind::StarchBulb, crate::game::art_roster_laundry::draw_starch_bulb_lod as BodyDraw),
+        (EnemyKind::LintGolem, crate::game::art_roster_laundry::draw_lint_golem_lod as BodyDraw),
+        (EnemyKind::GrateArcher, crate::game::art_roster_sewer::draw_grate_archer_lod as BodyDraw),
+        (EnemyKind::SumpLeech, crate::game::art_roster_sewer::draw_sump_leech_lod as BodyDraw),
+        (EnemyKind::SluiceToad, crate::game::art_roster_sewer::draw_sluice_toad_lod as BodyDraw),
+        (EnemyKind::Silverfish, crate::game::art_roster_printworks::draw_silverfish_lod as BodyDraw),
+        (EnemyKind::ErratumSlip, crate::game::art_roster_printworks::draw_erratumslip_lod as BodyDraw),
+        (EnemyKind::TypeSlug, crate::game::art_roster_printworks::draw_typeslug_lod as BodyDraw),
+        (EnemyKind::StapleCrawler, crate::game::art_roster_printworks::draw_staplecrawler_lod as BodyDraw),
+        (EnemyKind::PaperWasp, crate::game::art_roster_printworks::draw_paperwasp_lod as BodyDraw),
+        (EnemyKind::PaperReel, crate::game::art_roster_printworks::draw_paperreel_lod as BodyDraw),
+        (EnemyKind::InkBlot, crate::game::art_roster_printworks::draw_inkblot_lod as BodyDraw),
+        (EnemyKind::SwabFoot, crate::game::art_roster_lab::draw_swabfoot_lod as BodyDraw),
+        (EnemyKind::SpinnerLid, crate::game::art_roster_lab::draw_spinnerlid_lod as BodyDraw),
+        (EnemyKind::GlassRunner, crate::game::art_roster_lab::draw_glassrunner_lod as BodyDraw),
+        (EnemyKind::WalkingSyringe, crate::game::art_roster_lab::draw_walkingsyringe_lod as BodyDraw),
+        (EnemyKind::AutoclaveCart, crate::game::art_roster_lab::draw_autoclavecart_lod as BodyDraw),
+        (EnemyKind::GravelTick, crate::game::art_roster_flatbed::draw_gravel_tick_lod as BodyDraw),
+        (EnemyKind::JuneBug, crate::game::art_roster_flatbed::draw_june_bug_lod as BodyDraw),
+        (EnemyKind::TarRat, crate::game::art_roster_flatbed::draw_tar_rat_lod as BodyDraw),
+        (EnemyKind::LooseCan, crate::game::art_roster_flatbed::draw_loose_can_lod as BodyDraw),
+        (EnemyKind::TollGull, crate::game::art_roster_flatbed::draw_toll_gull_lod as BodyDraw),
+        (EnemyKind::LooseBungee, crate::game::art_roster_flatbed::draw_loose_bungee_lod as BodyDraw),
+        (EnemyKind::CrumbAnt, crate::game::art_roster_kitchen::draw_crumbant_lod as BodyDraw),
+        (EnemyKind::FruitFly, crate::game::art_roster_kitchen::draw_fruitfly_lod as BodyDraw),
+        (EnemyKind::EggTimer, crate::game::art_roster_kitchen::draw_eggtimer_lod as BodyDraw),
+        (EnemyKind::PepperMill, crate::game::art_roster_kitchen::draw_peppermill_lod as BodyDraw),
+        (EnemyKind::PieWeight, crate::game::art_roster_kitchen::draw_pieweight_lod as BodyDraw),
+        (EnemyKind::SinkCrab, crate::game::art_roster_kitchen::draw_sinkcrab_lod as BodyDraw),
+    ];
     TABLE.iter().find(|(k, _)| *k == kind).map(|(_, draw)| *draw)
 }
 
@@ -640,8 +740,8 @@ fn wears_base_body(kind: EnemyKind) -> bool {
 
 /// Run a body draw and remap every pixel it painted onto `kind`'s own colour.
 ///
-/// The remap is a per-channel gain between the archetype's `color()` and the
-/// kind's: the body's own shading survives (dark rims stay dark, a cream
+/// The remap is a luminance tint from the archetype's `color()` to the kind's
+/// (`recolor_pixel`): the body's own shading survives (dark rims stay dark, a cream
 /// highlight still reads as a highlight) while its hue becomes the kind's, so a
 /// Sluice Toad is instantly a different body from a Brute at a glance and at
 /// far zoom.
@@ -669,11 +769,6 @@ fn recolor_body(
     let (w, h) = ((x1 - x0 + 1) as usize, (y1 - y0 + 1) as usize);
     let from = base.color();
     let to = kind.color();
-    let gain = [
-        channel_gain(from.0, to.0),
-        channel_gain(from.1, to.1),
-        channel_gain(from.2, to.2),
-    ];
     RECOLOR_SCRATCH.with(|scratch| {
         let mut buf = scratch.borrow_mut();
         buf.clear();
@@ -689,38 +784,63 @@ fn recolor_body(
                 let y = y0 as usize + row;
                 let after = pb.pixel_at(x, y);
                 if after != before {
-                    pb.plot(x as i32, y as i32, recolor_pixel(after, gain));
+                    pb.plot(x as i32, y as i32, recolor_pixel(after, from, to));
                 }
             }
         }
     });
 }
 
-/// Per-channel gain from one body colour to another (never divides by zero).
-#[inline]
-fn channel_gain(from: u8, to: u8) -> f32 {
-    (to as f32 + 1.0) / (from as f32 + 1.0)
-}
-
 /// One painted pixel, moved onto the registered kind's colour.
+///
+/// The pixel keeps its own brightness relative to the archetype's body colour
+/// `from` and takes the hue of the kind's colour `to` (a luminance tint, capped
+/// at twice the target so a highlight cannot blow out). A per-channel gain did
+/// this badly: any channel that is low in `from` and high in `to` gave neutral
+/// pixels a strong cast (a grey outline turned blue on the Loose Can).
+///
+/// Only mid-tones take the tint. A near-black pixel (an outline, a pupil) and a
+/// near-white one (the hit flash, a glint) keep their own value, so outlines
+/// stay neutral and damage feedback stays bright on a dark-coloured kind.
 #[inline]
-fn recolor_pixel(px: Rgb, gain: [f32; 3]) -> Rgb {
+fn recolor_pixel(px: Rgb, from: Rgb, to: Rgb) -> Rgb {
     #[inline]
-    fn ch(c: u8, g: f32) -> u8 {
-        (c as f32 * g).round().clamp(0.0, 255.0) as u8
+    fn lum(c: Rgb) -> f32 {
+        0.30 * c.0 as f32 + 0.59 * c.1 as f32 + 0.11 * c.2 as f32
     }
-    (ch(px.0, gain[0]), ch(px.1, gain[1]), ch(px.2, gain[2]))
+    let l = lum(px);
+    // How much of the tint this pixel takes: 0 at the dark and bright ends,
+    // 1 across the body's mid-tones.
+    let dark = ((l - 24.0) / 40.0).clamp(0.0, 1.0);
+    let bright = ((240.0 - l) / 40.0).clamp(0.0, 1.0);
+    let weight = dark.min(bright);
+    if weight <= 0.0 {
+        return px;
+    }
+    let k = (l / lum(from).max(1.0)).min(2.0);
+    #[inline]
+    fn ch(own: u8, target: u8, k: f32, weight: f32) -> u8 {
+        let tinted = (target as f32 * k).min(255.0);
+        (own as f32 + (tinted - own as f32) * weight)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    }
+    (
+        ch(px.0, to.0, k, weight),
+        ch(px.1, to.1, k, weight),
+        ch(px.2, to.2, k, weight),
+    )
 }
 
 /// Precomputed per-enemy screen-space frame.
 #[derive(Clone, Copy)]
-struct Frame {
-    pos: Vec2,
-    f: Vec2,
-    p: Vec2,
-    r: f32,
-    anim: f32,
-    hit: f32,
+pub(crate) struct Frame {
+    pub(crate) pos: Vec2,
+    pub(crate) f: Vec2,
+    pub(crate) p: Vec2,
+    pub(crate) r: f32,
+    pub(crate) anim: f32,
+    pub(crate) hit: f32,
     flash_col: Rgb,
     flash_str: f32,
     hp_frac: f32,

@@ -338,6 +338,9 @@ fn tick_misprint_stamp(ctx: &mut BossContext<'_>, boss: &mut Boss, out: &mut Bos
         if begin_carriage(ctx, boss) {
             return;
         }
+        // No rule fits from here, so there is no carriage for the long ribbon
+        // to follow: drop the request rather than leave it for a later sweep.
+        boss.flags &= !F_LONG_RIBBON;
         enter_roll(ctx, boss);
     }
 }
@@ -357,6 +360,12 @@ fn tick_carriage_sweep(ctx: &mut BossContext<'_>, boss: &mut Boss) {
     if !moved || boss.progress() >= 1.0 {
         // Jammed at the end of the rule (or against a wall): the ribbon comes
         // up, and that is the opening.
+        // A carriage that jams early stops being a ram: the rule's corridor was
+        // queued live for the whole `SWEEP_TIME`, and without this it kept
+        // hurting along its full length while the press sat jammed with its
+        // ribbon up — the punish window the rat is supposed to walk into.
+        boss.hazards
+            .retain(|h| !matches!(h.shape, HazardShape::Corridor { .. }));
         let long = boss.flags & F_LONG_RIBBON != 0;
         boss.flags &= !F_LONG_RIBBON;
         let duration = if long { art::RIBBON_LONG } else { art::RIBBON };

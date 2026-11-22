@@ -103,6 +103,20 @@ pub fn generate(mut tiles: TileMap, rng: &mut StdRng, seed: u64) -> Level {
             .all(|(cx, cy)| matches!(tiles.get(cx, cy), TileKind::Open))
     });
 
+    // The tile test above cannot see a trap: a trap is a floor object and
+    // never paints a cell, so a glue board or a set trap could still sit on a
+    // hole in the planks (the rat would fall through the pad it is standing
+    // on). The trap goes, not the pit: the pits are the bed's own hazard and
+    // carry a minimum count, the traps are only capped. One cell of margin
+    // covers a snap trap's 3 x 3 footprint.
+    traps.retain(|trap| {
+        let (cx, cy) = validate_cell(trap.pos);
+        !deck
+            .pits
+            .iter()
+            .any(|pit| pit.rect.inflate(1).contains(cx, cy))
+    });
+
     // The mouse-hole shops (no rng, tiles untouched). On the flatbed a hole
     // is cut into cargo standing on the bed — never the rock outside the
     // rails, which is open air — and its threshold must be deck the rat can
@@ -762,6 +776,31 @@ mod tests {
             let level = level_for(seed);
             if let Err(errors) = super::super::validate::validate(&level) {
                 panic!("seed {seed}: {errors:#?}");
+            }
+        }
+    }
+
+    /// A trap never paints a tile, so the pit/tile test cannot see one: no
+    /// glue board or set trap may sit on, or touch, a hole in the planks.
+    #[test]
+    fn no_trap_sits_on_or_beside_a_pit() {
+        for seed in 0..200u64 {
+            let level = level_for(seed);
+            let objects = &level.objects;
+            for pos in objects
+                .sticky_traps
+                .iter()
+                .map(|t| t.pos)
+                .chain(objects.mousetraps.iter().map(|t| t.pos))
+            {
+                let (cx, cy) = validate_cell(pos);
+                for pit in &level.trailer.pits {
+                    assert!(
+                        !pit.rect.inflate(1).contains(cx, cy),
+                        "seed {seed}: trap at ({cx}, {cy}) touches the pit {:?}",
+                        pit.rect
+                    );
+                }
             }
         }
     }

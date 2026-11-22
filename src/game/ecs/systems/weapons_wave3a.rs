@@ -928,7 +928,14 @@ pub fn hantavirus_death_system(
         let Some(inf) = inf else {
             continue;
         };
-        if e.alive() || !inf.active() || inf.jumps_left == 0 {
+        // `jumps_left` alone decides, **not** `inf.active()`: a host killed by
+        // its own third tick has no ticks left (so it is no longer "active")
+        // but still owes its jump — `hantavirus_system` breaks out before the
+        // third-tick transfer when the tick kills. Requiring an active mark
+        // here dropped exactly that chain (and never sealed its Dead Letter).
+        // A live host's third tick and step 2 below both zero `jumps_left`,
+        // so nothing can transfer twice.
+        if e.alive() || inf.jumps_left == 0 {
             continue;
         }
         jumps.push(Jump {
@@ -1491,6 +1498,36 @@ mod tests {
         assert!(mark_of(&w, c).is_none(), "the far body is not the neighbour");
         let spent = mark_of(&w, a).unwrap();
         assert!(!spent.active() && spent.jumps_left == 0, "the corpse is spent");
+    }
+
+    /// A host killed by its own **third** tick has no ticks left but still owes
+    /// its jump: the death pass must carry the chain on. (It used to require an
+    /// "active" mark, so the most common death of all — the contagion finishing
+    /// the body — ended the chain.)
+    #[test]
+    fn a_host_killed_by_its_third_tick_still_passes_the_chain() {
+        let mut w = arena(79, WeaponKind::Hantavirus, 3);
+        let p = w.player.pos;
+        let a = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(10.0, 0.0), 1.0);
+        let b = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(16.0, 0.0), 1.0);
+        assert!(run_fire(&mut w));
+        run_virus(&mut w, 0.35);
+        run_virus(&mut w, 0.35);
+        assert_eq!(mark_of(&w, a).unwrap().ticks_left, 1);
+        // Leave it less than one tick of health: the third tick is the kill.
+        w.ecs.get_mut::<Enemy>(a).unwrap().hp = VIRUS_DAMAGE[2] * 0.5;
+        run_virus(&mut w, 0.35);
+        assert!(!w.ecs.get::<Enemy>(a).unwrap().alive(), "the third tick kills");
+        let owed = mark_of(&w, a).expect("the corpse keeps its mark for the death pass");
+        assert_eq!(owed.ticks_left, 0);
+        assert_eq!(owed.jumps_left, VIRUS_JUMPS[2], "the jump is still owed");
+
+        run_virus_death(&mut w);
+
+        let moved = mark_of(&w, b).expect("the chain jumps off the corpse");
+        assert_eq!(moved.ticks_left, 3);
+        assert_eq!(moved.jumps_left, VIRUS_JUMPS[2] - 1);
+        assert_eq!(mark_of(&w, a).unwrap().jumps_left, 0, "and cannot jump twice");
     }
 
     /// **A long step never over-ticks a corpse.** A public `World::update` step

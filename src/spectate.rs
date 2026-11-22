@@ -1228,7 +1228,9 @@ fn worker_loop(
         if let Some(active) = run.as_ref() {
             if active.finished() {
                 let plate = *finished_at.get_or_insert_with(Instant::now);
-                if !once && should_restart(plate.elapsed()) {
+                // A paused wall holds its plates: Space is how a result is
+                // read, so it must not be swapped for a fresh game meanwhile.
+                if !once && !paused && should_restart(plate.elapsed()) {
                     run_index += 1;
                     seed = tile_seed(base, run_index);
                     run = None;
@@ -1242,7 +1244,7 @@ fn worker_loop(
             }
         }
         if let Some((_, at)) = &failure {
-            if !once && should_restart(at.elapsed()) {
+            if !once && !paused && should_restart(at.elapsed()) {
                 run_index += 1;
                 seed = tile_seed(base, run_index);
                 failure = None;
@@ -1496,7 +1498,10 @@ pub fn spectate_keys(state: &mut WallState, input: &InputState, area: Rect) -> b
         if !input.pressed_char(*key) {
             continue;
         }
-        state.zoom = if state.zoom == Some(i) { None } else { Some(i) };
+        // Through `toggle_zoom`, which refuses a game the wall does not have:
+        // `9` on a four-game wall used to zoom game 8, hiding every tile
+        // behind a view of nothing.
+        state.toggle_zoom(i);
     }
     if input.pressed_char('+') || input.pressed_char('=') {
         state.speed_up();
@@ -1994,6 +1999,22 @@ mod tests {
         let screen = text(&buf);
         assert!(!screen.contains("DIED"), "a restarted game must drop its plate");
         assert!(screen.contains("#1"));
+    }
+
+    #[test]
+    fn a_number_key_past_the_last_game_zooms_nothing() {
+        use crossterm::event::{KeyEvent, KeyModifiers};
+        let mut state = WallState::new(4);
+        let area = Rect::new(0, 0, 80, 24);
+        let mut input = InputState::new(false);
+        input.handle_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE));
+        spectate_keys(&mut state, &input, area);
+        assert_eq!(state.zoom, None, "game 9 does not exist on a four-game wall");
+
+        let mut input = InputState::new(false);
+        input.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+        spectate_keys(&mut state, &input, area);
+        assert_eq!(state.zoom, Some(3), "the last real game still zooms");
     }
 
     #[test]

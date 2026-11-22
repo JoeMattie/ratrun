@@ -146,17 +146,26 @@ fn facts_match_the_constants() {
         .value
         .contains(&PassiveKind::SpringHeel.max_stacks().to_string()));
 
-    // A floor names its real boss and the real appointment clock.
+    // A floor names every boss its pool may field (a row each) and its four
+    // named minibosses.
     let kitchen = facts(Key::Floor(Theme::Kitchen));
-    let boss = kitchen
+    let bosses: Vec<&str> = kitchen
         .rows()
         .iter()
-        .find(|f| f.label == "BOSS")
-        .expect("a boss");
-    assert_eq!(
-        boss.value,
-        name_of(Key::Boss(BossKind::for_theme(Theme::Kitchen)))
-    );
+        .filter(|f| f.label == "BOSS" || f.label == "OR")
+        .map(|f| f.value.as_str())
+        .collect();
+    let pool: Vec<&str> = BossKind::pool_for_theme(Theme::Kitchen)
+        .iter()
+        .map(|kind| name_of(Key::Boss(*kind)))
+        .collect();
+    assert_eq!(bosses, pool);
+    let named = kitchen
+        .rows()
+        .iter()
+        .filter(|f| f.label == "MINIBOSS")
+        .count();
+    assert_eq!(named, crate::game::director::MINIBOSS_TIMES.len());
 }
 
 /// A boss entry is named the same thing the HUD's boss bar calls it.
@@ -499,4 +508,248 @@ fn every_wave_four_registration_has_a_card() {
         assert_eq!(tell.value, enemy_answer(kind), "{kind:?}");
     }
     assert_eq!(registered, 33, "the batch registers 33 ordinary kinds");
+}
+
+/// Each category's kinds index `0..category_len` exactly once. The survey's
+/// "everything here is known" early-outs mask the seen bitset with that
+/// length, so a gap or a short list would leave an early-out dead (or fire it
+/// with an entry still locked).
+#[test]
+fn every_category_is_a_contiguous_range() {
+    for (c, cat) in Category::ALL.into_iter().enumerate() {
+        let mut indexes: Vec<usize> = (0..MAX_KINDS)
+            .filter_map(|kind| key_at(c, kind))
+            .map(|key| {
+                assert_eq!(key.category(), cat);
+                key.kind_index()
+            })
+            .collect();
+        indexes.sort_unstable();
+        let expected: Vec<usize> = (0..category_len(cat)).collect();
+        assert_eq!(indexes, expected, "{cat:?} is not 0..len");
+    }
+}
+
+/// The early-outs can actually fire: a fully revealed library reports no
+/// category as holding a locked entry, and one missing kind reopens its own.
+#[test]
+fn a_complete_category_reports_nothing_undiscovered() {
+    let mut lib = Library::default();
+    for cat in Category::ALL {
+        assert!(lib.any_undiscovered(cat), "{cat:?} starts complete");
+    }
+    lib.reveal_all();
+    for cat in Category::ALL {
+        assert!(!lib.any_undiscovered(cat), "{cat:?} never completes");
+    }
+    let mut partial = Library::default();
+    for kind in PICKUP_KINDS.into_iter().skip(1) {
+        partial.mark_seen(Key::Pickup(kind));
+    }
+    assert!(partial.any_undiscovered(Category::Pickup));
+    partial.mark_seen(Key::Pickup(PICKUP_KINDS[0]));
+    assert!(!partial.any_undiscovered(Category::Pickup));
+}
+
+/// A weapon offered on a card and only then taken still becomes a full entry:
+/// `OWNED` is booked once per floor the build carries it, not on the first
+/// sighting (which the offer already used up). The same for an evolution,
+/// whose own card reads its own record.
+#[test]
+fn gear_offered_first_is_still_booked_as_owned() {
+    use crate::game::loadout::Upgrade;
+    use crate::game::world::World;
+
+    let kind = WeaponKind::CheeseSpray;
+    let mut w = World::new(Theme::Sewer, 5);
+    let mut lib = Library::default();
+    lib.begin_floor();
+    lib.note_offered(&Upgrade::NewWeapon(kind));
+    assert!(lib.is_seen(Key::Weapon(kind)));
+    assert_eq!(lib.record(Key::Weapon(kind)).owned, 0, "offered is not owned");
+
+    w.player.loadout.weapons.retain(|held| held.kind != kind);
+    w.player.loadout.weapons.push(Weapon::new(kind));
+    lib.survey(&w);
+    lib.survey(&w);
+    assert_eq!(lib.record(Key::Weapon(kind)).owned, 1, "once per floor");
+
+    // Evolved: booked once, on the weapon's card and on the evolution's own.
+    for held in w.player.loadout.weapons.iter_mut() {
+        if held.kind == kind {
+            held.evolved = true;
+        }
+    }
+    for _ in 0..3 {
+        lib.survey(&w);
+    }
+    assert!(lib.is_seen(Key::Evolution(kind)));
+    assert_eq!(lib.record(Key::Weapon(kind)).evolved, 1, "not once per frame");
+    assert_eq!(lib.record(Key::Evolution(kind)).evolved, 1);
+
+    // The next floor carries both: one more of each.
+    lib.begin_floor();
+    lib.survey(&w);
+    lib.survey(&w);
+    assert_eq!(lib.record(Key::Weapon(kind)).owned, 2);
+    assert_eq!(lib.record(Key::Evolution(kind)).evolved, 2);
+}
+
+/// An ordinary enemy's locked hint names the floor and the clock its roster
+/// slot really keeps (the hints are authored strings; this pins them to
+/// `roster` so a schedule change cannot leave them behind).
+#[test]
+fn enemy_hints_agree_with_the_roster() {
+    for row in all_rows() {
+        let Key::Enemy(kind) = row.key else {
+            continue;
+        };
+        let Some(home) = enemy_floors(kind) else {
+            continue;
+        };
+        let (floor, clock) = home.split_once(" · ").expect("floor · clock");
+        assert!(
+            row.hint.starts_with(floor),
+            "{}: hint {:?} is not on {floor}",
+            row.name,
+            row.hint
+        );
+        assert!(
+            row.hint.ends_with(clock),
+            "{}: hint {:?} does not say {clock:?}",
+            row.name,
+            row.hint
+        );
+    }
+}
+
+/// The weapon card does not claim the classic "+25%, 6% faster" curve for a
+/// weapon that ships its own per-level table.
+#[test]
+fn each_level_row_matches_the_weapons_curve() {
+    for kind in WeaponKind::all() {
+        let facts = facts(Key::Weapon(kind));
+        let each = facts
+            .rows()
+            .iter()
+            .find(|f| f.label == "EACH LEVEL")
+            .expect("an EACH LEVEL row");
+        assert_eq!(
+            each.value.contains("+25% damage"),
+            kind.damage_by_level().is_none(),
+            "{}: {}",
+            kind.name(),
+            each.value
+        );
+        assert_eq!(
+            each.value.contains("6% faster"),
+            kind.cooldown_by_level().is_none(),
+            "{}: {}",
+            kind.name(),
+            each.value
+        );
+    }
+}
+
+/// No fact value is wider than the card gives it at 80×24
+/// ([`FACT_VALUE_COLS`], less the bar where the row draws one): the screen
+/// clips a longer value mid-word. This walks every row of the registry —
+/// enemies' `TELL`, the bosses' `ANSWER` and `SHARES`, the minibosses, the
+/// gear and the floors — so a new entry cannot ship a line that does not fit.
+#[test]
+fn every_fact_value_fits_its_row() {
+    for row in all_rows() {
+        let facts = facts(row.key);
+        assert!(
+            !facts.rows().is_empty(),
+            "{} has no facts at all",
+            row.name
+        );
+        for fact in facts.rows() {
+            let room = if fact.bar >= 0.0 {
+                FACT_VALUE_COLS - FACT_BAR_COLS
+            } else {
+                FACT_VALUE_COLS
+            };
+            let cols = fact.value.chars().count();
+            assert!(
+                cols <= room,
+                "{} · {}: {:?} is {cols} columns (room for {room})",
+                row.name,
+                fact.label,
+                fact.value
+            );
+        }
+    }
+    // The floor card is the fullest: its rows must all be on the card.
+    for theme in Theme::playable() {
+        let floor = facts(Key::Floor(theme));
+        assert!(
+            floor.rows().iter().any(|f| f.label == "MAZES"),
+            "{}'s card ran out of rows before its last fact",
+            theme.name()
+        );
+    }
+}
+
+/// The tell line was cut to one row, so the dossier is where the designed
+/// rule lives: every wave-four kind's note is longer than its tell and no
+/// tell is a whole sentence carried over from the design table.
+#[test]
+fn wave_four_tells_are_short_and_the_dossier_keeps_the_rule() {
+    let rows = all_rows();
+    for kind in EnemyKind::all().into_iter().filter(|k| k.is_registration()) {
+        let tell = enemy_answer(kind);
+        assert!(tell.chars().count() <= FACT_VALUE_COLS, "{kind:?}: {tell:?}");
+        let row = rows
+            .iter()
+            .find(|r| r.key == Key::Enemy(kind))
+            .expect("a Bestiary row");
+        assert!(
+            row.dossier.chars().count() > tell.chars().count() * 2,
+            "{}'s dossier does not carry the rule its tell was cut from",
+            row.name
+        );
+    }
+}
+
+/// Thirteen evolutions, not twelve: Spiked Tail evolves into Barbed Wire, and
+/// the Arsenal carries a row and a full card for it.
+#[test]
+fn barbed_wire_is_the_thirteenth_evolution() {
+    let rows = all_rows();
+    let evolutions: Vec<&Row> = rows
+        .iter()
+        .filter(|r| matches!(r.key, Key::Evolution(_)))
+        .collect();
+    assert_eq!(evolutions.len(), 13);
+    assert_eq!(
+        evolutions.len(),
+        WeaponKind::all()
+            .into_iter()
+            .filter(|k| k.evolution().is_some())
+            .count()
+    );
+    let wire = evolutions
+        .iter()
+        .find(|r| r.key == Key::Evolution(WeaponKind::SpikedTail))
+        .expect("Spiked Tail's evolution row");
+    assert_eq!(wire.name, "Barbed Wire");
+    assert!(wire.hint.contains(WeaponKind::SpikedTail.name()));
+    let needs = facts(wire.key);
+    let needs = needs
+        .rows()
+        .iter()
+        .find(|f| f.label == "NEEDS")
+        .expect("a NEEDS row");
+    assert!(needs.value.contains(PassiveKind::Counterweight.name()));
+    // Counterweight partners two weapons, and its card names both.
+    let partner = facts(Key::Passive(PassiveKind::Counterweight));
+    let evolves = partner
+        .rows()
+        .iter()
+        .find(|f| f.label == "EVOLVES")
+        .expect("an EVOLVES row");
+    assert!(evolves.value.contains(WeaponKind::TailThrash.name()));
+    assert!(evolves.value.contains(WeaponKind::SpikedTail.name()));
 }

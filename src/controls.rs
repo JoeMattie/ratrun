@@ -148,6 +148,13 @@ impl Action {
         }
     }
 
+    /// The actions a menu cannot be driven without. A rebind may move their
+    /// key but never leaves one of them with no keyboard/mouse binding at all
+    /// (see [`Bindings::bind_kbm`]).
+    pub const fn is_menu_critical(self) -> bool {
+        matches!(self, Action::Pause | Action::Back | Action::Confirm)
+    }
+
     /// Is this action a movement direction? Movement bindings are the ones
     /// that hold a key down instead of firing once.
     pub const fn is_move(self) -> bool {
@@ -293,6 +300,16 @@ impl KeyBind {
             KeyBind::Char('x') => "X",
             KeyBind::Char('y') => "Y",
             KeyBind::Char('z') => "Z",
+            KeyBind::Char('0') => "0",
+            KeyBind::Char('1') => "1",
+            KeyBind::Char('2') => "2",
+            KeyBind::Char('3') => "3",
+            KeyBind::Char('4') => "4",
+            KeyBind::Char('5') => "5",
+            KeyBind::Char('6') => "6",
+            KeyBind::Char('7') => "7",
+            KeyBind::Char('8') => "8",
+            KeyBind::Char('9') => "9",
             KeyBind::Char(_) => "KEY",
             KeyBind::Up => "UP",
             KeyBind::Down => "DOWN",
@@ -388,6 +405,11 @@ impl KeyBind {
         if chars.next().is_some() {
             return None;
         }
+        if c == ' ' {
+            // One spelling per key: `Char(' ')` would match the same event as
+            // `Space` yet compare unequal, hiding the pair from conflict swaps.
+            return Some(KeyBind::Space);
+        }
         Some(KeyBind::Char(c.to_ascii_lowercase()))
     }
 
@@ -411,7 +433,7 @@ impl KeyBind {
         if ctrl && matches!(ev.code, KeyCode::Char('c' | 'C')) {
             return Err(Unbindable::CtrlC);
         }
-        let mut bind = match ev.code {
+        let bind = match ev.code {
             KeyCode::Modifier(m) => match m {
                 ModifierKeyCode::LeftControl | ModifierKeyCode::RightControl => KeyBind::Ctrl,
                 ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift => KeyBind::Shift,
@@ -442,15 +464,8 @@ impl KeyBind {
         if (ctrl || alt) && !matches!(bind, KeyBind::Ctrl | KeyBind::Alt) {
             return Err(Unbindable::Combo);
         }
-        // A lone modifier arrives with its own modifier bit set; that is the
-        // same press, not a combo.
-        if matches!(bind, KeyBind::Ctrl | KeyBind::Alt | KeyBind::Shift) {
-            bind = match bind {
-                KeyBind::Ctrl => KeyBind::Ctrl,
-                KeyBind::Shift => KeyBind::Shift,
-                _ => KeyBind::Alt,
-            };
-        }
+        // (A lone modifier arrives with its own modifier bit set; that is the
+        // same press, not a combo, which is why the two are exempt above.)
         Ok(bind)
     }
 
@@ -882,10 +897,28 @@ impl Bindings {
 
     /// Bind `new` to `action`, resolving a conflict by **swapping** the two
     /// actions' bindings. Returns the action whose binding moved, if any.
+    ///
+    /// Two details keep the table free of surprises:
+    /// * rebinding an action to the binding its **own alternate** already holds
+    ///   swaps the two slots (the old primary becomes the alternate) instead of
+    ///   leaving the same binding in both and dropping the old one;
+    /// * the defaults share a binding between a pair of actions on purpose
+    ///   (`Esc` is Pause and Back, the left click is Dash and Fire actives), so
+    ///   every slot that held `new` receives the old binding and the pair stays
+    ///   paired. The last such action is the one reported;
+    /// * when `action` had **no** binding there is nothing to hand back, so a
+    ///   holder that is menu-critical ([`Action::is_menu_critical`]) and has no
+    ///   other slot keeps the key and shares it rather than going unbound.
     pub fn bind_kbm(&mut self, action: Action, new: Binding) -> Option<Action> {
         let old = self.kbm[action.index()];
+        if new == old {
+            return None;
+        }
         let mut swapped = None;
         if !new.is_none() {
+            if self.alt[action.index()] == new {
+                self.alt[action.index()] = old;
+            }
             for other in ACTIONS {
                 if other == action {
                     continue;
@@ -897,6 +930,23 @@ impl Bindings {
                         self.alt[other.index()]
                     };
                     if cur == new {
+                        // Taking a key for an action that had none hands the
+                        // holder nothing in return. Pause, Back and Confirm
+                        // must never end up with no key at all that way (Esc
+                        // is Pause *and* Back: one such rebind would strip
+                        // both, and the menus could not be left), so a holder
+                        // with no other slot keeps the key and shares it.
+                        let spare = if slot == 0 {
+                            self.alt[other.index()]
+                        } else {
+                            self.kbm[other.index()]
+                        };
+                        if old.is_none()
+                            && other.is_menu_critical()
+                            && (spare.is_none() || spare == new)
+                        {
+                            continue;
+                        }
                         if slot == 0 {
                             self.kbm[other.index()] = old;
                         } else {
@@ -1045,8 +1095,17 @@ impl Controls {
     }
 
     /// Note which device drove the last input (glyph hints follow it).
+    ///
+    /// Called every frame, so it only rebuilds the cached legends when the
+    /// answer changes *between the pad and the keyboard/mouse* — the one switch
+    /// the legends differ on. Without the rebuild the pad legends were only ever
+    /// seen after an unrelated rebinding.
     pub fn note_device(&mut self, device: Device) {
+        let was_pad = self.device == Device::Pad;
         self.device = device;
+        if was_pad != (device == Device::Pad) {
+            self.rebuild();
+        }
     }
 
     pub fn device(&self) -> Device {
@@ -1074,21 +1133,23 @@ impl Controls {
         }
     }
 
-    /// The label of the active-weapon key.
+    /// The label of the active-weapon input, as the legends name it: the pad
+    /// button while the pad drives, else the key (or the click in Mouse aim),
+    /// falling back to the alternate when the primary slot is unbound.
     pub fn active_label(&self) -> &str {
-        match self.active().get(Action::FireActives) {
-            Binding::Mouse(m) => m.label(),
-            Binding::Key(k) => k.label(),
-            Binding::Pad(p) => p.label(),
-            Binding::None => "—",
-        }
+        &self.active_label
     }
 
     /// The dash key as it will actually work on **this** terminal: a Ctrl
     /// binding on a terminal without lone-modifier reporting falls back to
     /// Space (which then also fires the actives).
     pub fn live_dash_label(&self) -> &str {
-        if !self.lone_ctrl_hint && self.active().get(Action::Dash) == Binding::Key(KeyBind::Ctrl) {
+        // `dash_label` already carries this rule for the keyboard legends; the
+        // explicit check keeps a pad player's `RB` from being renamed `Space`.
+        if self.device != Device::Pad
+            && !self.lone_ctrl_hint
+            && self.active().get(Action::Dash) == Binding::Key(KeyBind::Ctrl)
+        {
             return "Space";
         }
         &self.dash_label
@@ -1416,11 +1477,19 @@ impl Controls {
                 let mut set = Bindings::defaults(*scheme);
                 for a in ACTIONS {
                     let idx = a.index();
+                    // A hand-edited `pad:…` in a keyboard/mouse slot could never
+                    // fire and would print a pad glyph in the keyboard legend:
+                    // keep the default instead (the pad slot is filtered below).
+                    let kbm_ok = |b: &Binding| !matches!(b, Binding::Pad(_));
                     if let Some(raw) = s.kbm.get(idx).and_then(|v| Binding::parse(v)) {
-                        set.kbm[idx] = raw;
+                        if kbm_ok(&raw) {
+                            set.kbm[idx] = raw;
+                        }
                     }
                     if let Some(raw) = s.alt.get(idx).and_then(|v| Binding::parse(v)) {
-                        set.alt[idx] = raw;
+                        if kbm_ok(&raw) {
+                            set.alt[idx] = raw;
+                        }
                     }
                     if let Some(raw) = s.pad.get(idx).and_then(|v| Binding::parse(v)) {
                         if matches!(raw, Binding::Pad(_) | Binding::None) {
@@ -1430,7 +1499,11 @@ impl Controls {
                 }
                 // An action newer than the file takes its default key only
                 // when the player has not already given that key to something
-                // else; otherwise it starts unbound, never double-bound.
+                // else; otherwise it starts unbound, never double-bound. A key
+                // an older action holds *by default* is not the player's doing:
+                // the defaults share it on purpose (Esc is Pause and Back), so
+                // it does not count as taken.
+                let stock = Bindings::defaults(*scheme);
                 for a in ACTIONS {
                     let idx = a.index();
                     if idx < s.kbm.len() {
@@ -1438,7 +1511,9 @@ impl Controls {
                     }
                     let fresh = set.kbm[idx];
                     let taken = ACTIONS.into_iter().any(|o| {
-                        o.index() < s.kbm.len() && set.kbm_slots(o).contains(&fresh)
+                        o.index() < s.kbm.len()
+                            && set.kbm_slots(o).contains(&fresh)
+                            && !stock.kbm_slots(o).contains(&fresh)
                     });
                     if taken && !fresh.is_none() {
                         set.kbm[idx] = Binding::None;
@@ -1542,6 +1617,547 @@ mod tests {
         assert_eq!(moved, Some(Action::Confirm));
         assert_eq!(b.pad_of(Action::Confirm), Binding::Pad(PadBind::Start));
         assert_eq!(b.pad_of(Action::Pause), Binding::Pad(PadBind::South));
+    }
+
+    #[test]
+    fn binding_an_action_to_its_own_alternate_swaps_the_two_slots() {
+        let mut b = Bindings::defaults(Scheme::MouseAim);
+        // Dash: right click, alternate Ctrl. Asking for Ctrl as the primary
+        // must not leave Ctrl in both slots and lose the right click.
+        let moved = b.bind_kbm(Action::Dash, Binding::Key(KeyBind::Ctrl));
+        assert_eq!(moved, None, "no other action was touched");
+        assert_eq!(b.get(Action::Dash), Binding::Key(KeyBind::Ctrl));
+        assert_eq!(b.alt_of(Action::Dash), Binding::Mouse(MouseBind::Right));
+        // Rebinding to the binding already held is a no-op.
+        let before = b.kbm;
+        assert_eq!(b.bind_kbm(Action::Dash, Binding::Key(KeyBind::Ctrl)), None);
+        assert_eq!(b.kbm, before);
+    }
+
+    #[test]
+    fn a_shared_default_stays_shared_after_a_swap() {
+        let mut b = Bindings::defaults(Scheme::Classic);
+        // Esc is Pause *and* Back by default; taking it for the map hands both
+        // the map's old key, so neither is left unbound or split.
+        b.bind_kbm(Action::Map, Binding::Key(KeyBind::Esc));
+        assert_eq!(b.get(Action::Map), Binding::Key(KeyBind::Esc));
+        assert_eq!(b.get(Action::Pause), Binding::Key(KeyBind::Tab));
+        assert_eq!(b.get(Action::Back), Binding::Key(KeyBind::Tab));
+        assert_eq!(b.alt_of(Action::Pause), Binding::Key(KeyBind::Char('p')));
+    }
+
+    #[test]
+    fn the_legends_follow_the_device_without_a_rebinding() {
+        let mut c = Controls::default();
+        c.set_lone_ctrl_hint(false);
+        assert_eq!(c.live_dash_label(), "Space");
+        assert_eq!(c.active_label(), "Space");
+        // The pad takes over: no rebuild call, the note alone must do it.
+        c.note_device(Device::Pad);
+        let title = c.title_legend_lines(true).join(" ");
+        assert!(title.contains("RB dash"), "{title}");
+        assert_eq!(c.live_dash_label(), "RB", "a pad dash is never renamed Space");
+        assert_eq!(c.active_label(), "X");
+        // Keyboard and mouse share one legend; back from the pad restores it.
+        c.note_device(Device::Mouse);
+        let title = c.title_legend_lines(true).join(" ");
+        assert!(title.contains("WASD"), "{title}");
+        assert_eq!(c.live_dash_label(), "Space");
+    }
+
+    #[test]
+    fn hand_edited_saves_are_normalised() {
+        // One spelling per key, so a conflict with Space is still a conflict.
+        assert_eq!(Binding::parse("key: "), Some(Binding::Key(KeyBind::Space)));
+        assert_eq!(Binding::parse(" "), Some(Binding::Key(KeyBind::Space)));
+        assert_eq!(KeyBind::Char('7').label(), "7");
+
+        // A pad button written into a keyboard slot keeps the default.
+        let mut saved = Controls::default().to_saved();
+        let scheme = saved.schemes[0].as_mut().unwrap();
+        scheme.kbm[Action::Mute.index()] = "pad:south".into();
+        scheme.alt[Action::Pause.index()] = "pad:east".into();
+        scheme.pad[Action::Mute.index()] = "key:m".into();
+        let c = Controls::from_saved(&saved);
+        assert_eq!(c.active().get(Action::Mute), Binding::Key(KeyBind::Char('m')));
+        assert_eq!(c.active().alt_of(Action::Pause), Binding::Key(KeyBind::Char('p')));
+        assert_eq!(c.active().pad_of(Action::Mute), Binding::Pad(PadBind::L1));
+    }
+
+    // ---- Properties over the whole table ---------------------------------
+
+    fn same_table(a: &Bindings, b: &Bindings) -> bool {
+        a.kbm == b.kbm && a.alt == b.alt && a.pad == b.pad
+    }
+
+    /// How many keyboard/mouse slots of the whole table hold `x`.
+    fn kbm_holders(b: &Bindings, x: Binding) -> usize {
+        ACTIONS
+            .into_iter()
+            .flat_map(|a| b.kbm_slots(a))
+            .filter(|slot| *slot == x)
+            .count()
+    }
+
+    #[test]
+    fn the_tables_are_indexed_by_position() {
+        for (i, a) in ACTIONS.into_iter().enumerate() {
+            assert_eq!(a.index(), i, "{a:?}");
+        }
+        for (i, p) in PAD_BINDS.into_iter().enumerate() {
+            assert_eq!(p.index(), i, "{p:?}");
+            assert_eq!(PadBind::parse(p.as_str()), Some(p));
+        }
+        for (i, sch) in SCHEMES.into_iter().enumerate() {
+            assert_eq!(sch.index(), i);
+            assert_eq!(Scheme::parse(sch.as_str()), Some(sch));
+            assert_eq!(Scheme::parse(sch.name()), Some(sch), "the display name parses too");
+        }
+    }
+
+    #[test]
+    fn every_action_has_a_label_in_every_scheme() {
+        // The action column: non-empty, distinct, and short enough for the
+        // Controls screen's column.
+        for a in ACTIONS {
+            assert!(!a.label().is_empty(), "{a:?}");
+            assert!(a.label().chars().count() <= 14, "{a:?}: {}", a.label());
+            for other in ACTIONS {
+                assert!(a == other || a.label() != other.label(), "{a:?} / {other:?}");
+            }
+        }
+        for scheme in SCHEMES {
+            let mut c = Controls::default();
+            c.set_scheme(scheme);
+            for device in [Device::Keyboard, Device::Mouse, Device::Pad] {
+                c.note_device(device);
+                for a in ACTIONS {
+                    // Every slot prints something real: never empty, never the
+                    // "KEY" / "F" placeholders of an unnamed key.
+                    for slot in c
+                        .active()
+                        .kbm_slots(a)
+                        .into_iter()
+                        .chain([c.active().pad_of(a)])
+                    {
+                        let label = slot.label();
+                        assert!(!label.is_empty(), "{scheme:?} {a:?}");
+                        assert!(label != "KEY" && label != "F", "{scheme:?} {a:?}: {label}");
+                    }
+                    assert!(!c.action_label(a).is_empty(), "{scheme:?} {a:?}");
+                    let (kbm, pad) = c.row_labels(a);
+                    assert!(!pad.is_empty(), "{scheme:?} {a:?}");
+                    // An action with a keyboard/mouse binding names it in its row.
+                    if !c.active().get(a).is_none() || !c.active().alt_of(a).is_none() {
+                        assert!(!kbm.is_empty(), "{scheme:?} {a:?}");
+                    }
+                }
+                // Every legend line is real text.
+                for wide in [true, false] {
+                    for line in c.title_legend_lines(wide).iter().chain(c.pause_legend_lines(wide)) {
+                        assert!(!line.trim().is_empty(), "{scheme:?} {device:?}");
+                    }
+                    assert!(!c.title_legend_lines(wide).is_empty());
+                    assert!(!c.pause_legend_lines(wide).is_empty());
+                }
+                assert!(!c.live_dash_label().is_empty());
+                assert!(!c.active_label().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn every_default_binding_round_trips_through_its_saved_spelling() {
+        for scheme in SCHEMES {
+            let b = Bindings::defaults(scheme);
+            for a in ACTIONS {
+                for slot in [b.get(a), b.alt_of(a), b.pad_of(a)] {
+                    assert_eq!(Binding::parse(&slot.as_str()), Some(slot), "{scheme:?} {a:?}");
+                }
+            }
+        }
+        // Every key spelling, not just the defaults.
+        let mut keys = vec![
+            KeyBind::Up, KeyBind::Down, KeyBind::Left, KeyBind::Right, KeyBind::Home,
+            KeyBind::End, KeyBind::PageUp, KeyBind::PageDown, KeyBind::Enter, KeyBind::Esc,
+            KeyBind::Tab, KeyBind::Space, KeyBind::Backspace, KeyBind::Delete, KeyBind::Insert,
+            KeyBind::Ctrl, KeyBind::Shift, KeyBind::Alt,
+        ];
+        keys.extend((1..=12).map(KeyBind::F));
+        keys.extend(('a'..='z').map(KeyBind::Char));
+        keys.extend(('0'..='9').map(KeyBind::Char));
+        keys.extend("-=[],./;'\\`".chars().map(KeyBind::Char));
+        for k in keys {
+            assert_eq!(KeyBind::parse(&k.as_str()), Some(k), "{k:?}");
+            let label = k.label();
+            assert!(!label.is_empty() && label != "KEY" && label != "F", "{k:?}: {label}");
+        }
+        for m in [
+            MouseBind::Left, MouseBind::Right, MouseBind::Middle,
+            MouseBind::WheelUp, MouseBind::WheelDown,
+        ] {
+            assert_eq!(MouseBind::parse(m.as_str()), Some(m));
+        }
+    }
+
+    #[test]
+    fn the_defaults_share_only_the_documented_bindings() {
+        for scheme in SCHEMES {
+            let b = Bindings::defaults(scheme);
+            for a in ACTIONS {
+                for slot in b.kbm_slots(a) {
+                    if slot.is_none() {
+                        continue;
+                    }
+                    let holders = kbm_holders(&b, slot);
+                    let shared_on_purpose = slot == Binding::Key(KeyBind::Esc)
+                        || (slot == Binding::Mouse(MouseBind::Left) && scheme != Scheme::MouseAim);
+                    if shared_on_purpose {
+                        assert_eq!(holders, 2, "{scheme:?} {a:?} {slot:?}");
+                    } else {
+                        assert_eq!(holders, 1, "{scheme:?}: {slot:?} is double-bound ({a:?})");
+                    }
+                }
+                // No pad button does two jobs.
+                let pad = b.pad_of(a);
+                if !pad.is_none() {
+                    let n = ACTIONS.into_iter().filter(|o| b.pad_of(*o) == pad).count();
+                    assert_eq!(n, 1, "{scheme:?}: {pad:?} is double-bound ({a:?})");
+                }
+            }
+        }
+    }
+
+    /// Swap is an involution: taking another action's binding and then taking
+    /// your own back restores the whole table. (It holds whenever the binding
+    /// you started with is yours alone — a deliberately shared one, like Esc,
+    /// is handed to everyone who held the other, by design.)
+    #[test]
+    fn a_keyboard_swap_undone_restores_the_table() {
+        for scheme in SCHEMES {
+            let start = Bindings::defaults(scheme);
+            for a in ACTIONS {
+                let x = start.get(a);
+                if x.is_none() || kbm_holders(&start, x) != 1 {
+                    continue;
+                }
+                for other in ACTIONS {
+                    for y in start.kbm_slots(other) {
+                        if y.is_none() || y == x {
+                            continue;
+                        }
+                        let mut b = start;
+                        let moved = b.bind_kbm(a, y);
+                        assert_eq!(b.get(a), y);
+                        if other != a {
+                            assert!(moved.is_some(), "{scheme:?} {a:?} <- {y:?}");
+                            assert!(
+                                b.kbm_slots(other).contains(&x),
+                                "{scheme:?}: {other:?} must receive {x:?}"
+                            );
+                        }
+                        // Nothing is lost: both bindings are still on the table.
+                        assert!(kbm_holders(&b, x) >= 1, "{scheme:?} {a:?}: {x:?} dropped");
+                        b.bind_kbm(a, x);
+                        assert!(
+                            same_table(&b, &start),
+                            "{scheme:?}: {a:?} <- {y:?} <- {x:?} did not restore the table"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_pad_swap_undone_restores_the_table() {
+        for scheme in SCHEMES {
+            let start = Bindings::defaults(scheme);
+            for a in ACTIONS {
+                let x = start.pad_of(a);
+                if x.is_none() {
+                    continue;
+                }
+                for p in PAD_BINDS {
+                    let y = Binding::Pad(p);
+                    if y == x {
+                        continue;
+                    }
+                    let holder = start.action_for_pad(y);
+                    let mut b = start;
+                    assert_eq!(b.bind_pad(a, y), holder, "{scheme:?} {a:?} <- {y:?}");
+                    assert_eq!(b.pad_of(a), y);
+                    if let Some(h) = holder {
+                        assert_eq!(b.pad_of(h), x);
+                    }
+                    b.bind_pad(a, x);
+                    assert!(same_table(&b, &start), "{scheme:?} {a:?} <- {y:?} <- {x:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_swap_never_touches_the_other_schemes_or_a_third_action() {
+        let mut c = Controls::default();
+        let before = c.sets;
+        c.bind_active_kbm(Action::Mute, Binding::Key(KeyBind::Char('n')));
+        for (i, scheme) in SCHEMES.into_iter().enumerate() {
+            if scheme != c.scheme() {
+                assert!(same_table(&c.sets[i], &before[i]), "{scheme:?} changed");
+            }
+        }
+        let now = c.active();
+        for a in ACTIONS {
+            if a != Action::Mute && a != Action::MinimapSize {
+                assert_eq!(now.kbm_slots(a), before[0].kbm_slots(a), "{a:?}");
+            }
+            assert_eq!(now.pad_of(a), before[0].pad_of(a), "{a:?}");
+        }
+    }
+
+    /// A save of today's shape reads back exactly, for every scheme and after
+    /// rebinding, unbinding and tuning.
+    #[test]
+    fn the_current_save_shape_round_trips_exactly() {
+        let mut c = Controls::default();
+        for scheme in SCHEMES {
+            c.set_scheme(scheme);
+            c.bind_active_kbm(Action::Dash, Binding::Key(KeyBind::Char('v')));
+            c.bind_active_kbm(Action::Map, Binding::Mouse(MouseBind::WheelUp));
+            c.bind_active_pad(Action::Pause, Binding::Pad(PadBind::South));
+            c.unbind_active_kbm(Action::Library);
+        }
+        c.deadzone = 0.4;
+        c.rumble = true;
+        let saved = c.to_saved();
+        for s in saved.schemes.iter().flatten() {
+            assert_eq!(s.kbm.len(), ACTION_COUNT);
+            assert_eq!(s.alt.len(), ACTION_COUNT);
+            assert_eq!(s.pad.len(), ACTION_COUNT);
+        }
+        let back = Controls::from_saved(&saved);
+        assert_eq!(back.scheme(), c.scheme());
+        for i in 0..SCHEMES.len() {
+            assert!(same_table(&back.sets[i], &c.sets[i]), "scheme {i}");
+        }
+        assert!((back.deadzone - 0.4).abs() < 1e-6 && back.rumble);
+        // And the second generation is byte-identical to the first.
+        let again = back.to_saved();
+        assert_eq!(again.scheme, saved.scheme);
+        for i in 0..SCHEMES.len() {
+            let (a, b) = (again.schemes[i].as_ref().unwrap(), saved.schemes[i].as_ref().unwrap());
+            assert_eq!((&a.kbm, &a.alt, &a.pad), (&b.kbm, &b.alt, &b.pad), "scheme {i}");
+        }
+        assert_eq!(back.title_legend_lines(true), c.title_legend_lines(true));
+    }
+
+    /// Every older shape of the save: the binding arrays were shorter when
+    /// fewer actions existed. Whatever the length, the saved prefix is kept
+    /// and the actions the file has never heard of load at their defaults.
+    #[test]
+    fn every_older_save_length_loads_at_the_defaults() {
+        let full = Controls::default().to_saved();
+        for n in 0..=ACTION_COUNT {
+            let mut saved = full.clone();
+            for s in saved.schemes.iter_mut().flatten() {
+                s.kbm.truncate(n);
+                s.alt.truncate(n);
+                s.pad.truncate(n);
+            }
+            let c = Controls::from_saved(&saved);
+            for (i, scheme) in SCHEMES.into_iter().enumerate() {
+                assert!(
+                    same_table(&c.sets[i], &Bindings::defaults(scheme)),
+                    "a {n}-action save of {scheme:?} must load as the defaults"
+                );
+            }
+            // Re-saving upgrades the file to today's length.
+            for s in c.to_saved().schemes.iter().flatten() {
+                assert_eq!(s.kbm.len(), ACTION_COUNT, "from a {n}-action save");
+            }
+        }
+        // The three arrays did not always grow together.
+        let mut ragged = full.clone();
+        for s in ragged.schemes.iter_mut().flatten() {
+            s.alt.clear();
+            s.pad.truncate(5);
+        }
+        let c = Controls::from_saved(&ragged);
+        for (i, scheme) in SCHEMES.into_iter().enumerate() {
+            assert!(same_table(&c.sets[i], &Bindings::defaults(scheme)), "{scheme:?}");
+        }
+    }
+
+    /// The migration rule, for every cut point and every newer action: if the
+    /// player had already given that action's default key to something the
+    /// file knows, the new action starts unbound — never double-bound — and
+    /// the player's own choice is untouched.
+    #[test]
+    fn a_newer_action_never_takes_a_key_the_old_save_already_uses() {
+        for (i, scheme) in SCHEMES.into_iter().enumerate() {
+            let defaults = Bindings::defaults(scheme);
+            for n in 1..ACTION_COUNT {
+                for newer in ACTIONS.into_iter().filter(|a| a.index() >= n) {
+                    let wanted = defaults.get(newer);
+                    if wanted.is_none() {
+                        continue;
+                    }
+                    // The player bound the newer action's default key to the
+                    // file's last known action, then saved (before `newer`
+                    // existed).
+                    let holder = ACTIONS[n - 1];
+                    if defaults.kbm_slots(holder).contains(&wanted) {
+                        // A deliberately shared default (Esc): not a conflict.
+                        continue;
+                    }
+                    let mut old = defaults;
+                    old.kbm[holder.index()] = wanted;
+                    let mut c = Controls::default();
+                    c.sets[i] = old;
+                    let mut saved = c.to_saved();
+                    for s in saved.schemes.iter_mut().flatten() {
+                        s.kbm.truncate(n);
+                        s.alt.truncate(n);
+                        s.pad.truncate(n);
+                    }
+                    let loaded = Controls::from_saved(&saved);
+                    let set = &loaded.sets[i];
+                    assert_eq!(set.get(holder), wanted, "{scheme:?} n={n}: the player's key moved");
+                    assert!(
+                        set.get(newer).is_none(),
+                        "{scheme:?} n={n}: {newer:?} double-binds {wanted:?} with {holder:?}"
+                    );
+                    // Every other newer action still gets its default.
+                    for a in ACTIONS.into_iter().filter(|a| a.index() >= n && *a != newer) {
+                        if defaults.get(a) != wanted {
+                            assert_eq!(set.get(a), defaults.get(a), "{scheme:?} n={n} {a:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Shapes no version ever wrote, which a hand edit or a damaged file can
+    /// still produce: nothing panics and everything unreadable is a default.
+    #[test]
+    fn damaged_saves_load_as_defaults_without_panicking() {
+        let defaults = |i: usize| Bindings::defaults(SCHEMES[i]);
+
+        // No scheme blocks at all (the oldest saves had no controls).
+        let c = Controls::from_saved(&SavedControls::default());
+        assert_eq!(c.scheme(), Scheme::Classic);
+        assert!((c.deadzone - DEFAULT_DEADZONE).abs() < 1e-6 && !c.rumble);
+        for i in 0..3 {
+            assert!(same_table(&c.sets[i], &defaults(i)));
+        }
+
+        // Garbage in every slot, an unknown scheme, impossible dead zones.
+        for junk in ["", "???", "key:", "key:ww", "mouse:fifth", "pad:paddle", "f13", "KEY", "🐀🐀"] {
+            for deadzone in [f32::NAN, f32::INFINITY, -1.0, 0.0, 1e9] {
+                let saved = SavedControls {
+                    scheme: junk.to_string(),
+                    schemes: std::array::from_fn(|_| {
+                        Some(SavedScheme {
+                            kbm: vec![junk.to_string(); ACTION_COUNT],
+                            alt: vec![junk.to_string(); ACTION_COUNT],
+                            pad: vec![junk.to_string(); ACTION_COUNT],
+                        })
+                    }),
+                    deadzone,
+                    rumble: false,
+                };
+                let c = Controls::from_saved(&saved);
+                assert_eq!(c.scheme(), Scheme::Classic, "{junk:?}");
+                assert!((0.05..=0.9).contains(&c.deadzone), "{deadzone} -> {}", c.deadzone);
+                for i in 0..3 {
+                    assert!(same_table(&c.sets[i], &defaults(i)), "{junk:?} scheme {i}");
+                }
+            }
+        }
+
+        // A file from a *newer* build: more entries than this build has
+        // actions. The extras are ignored.
+        let mut long = Controls::default().to_saved();
+        for s in long.schemes.iter_mut().flatten() {
+            for v in [&mut s.kbm, &mut s.alt, &mut s.pad] {
+                v.extend(["key:j".to_string(), "pad:south".to_string(), "none".to_string()]);
+            }
+        }
+        let c = Controls::from_saved(&long);
+        for i in 0..3 {
+            assert!(same_table(&c.sets[i], &defaults(i)), "scheme {i}");
+        }
+
+        // One scheme block missing: only that scheme falls back.
+        let mut c = Controls::default();
+        c.bind_active_kbm(Action::Mute, Binding::Key(KeyBind::Char('v')));
+        let mut partial = c.to_saved();
+        partial.schemes[1] = None;
+        let back = Controls::from_saved(&partial);
+        assert_eq!(back.sets[0].get(Action::Mute), Binding::Key(KeyBind::Char('v')));
+        assert!(same_table(&back.sets[1], &defaults(1)));
+    }
+
+    #[test]
+    fn binding_an_unbound_action_never_strands_pause_back_or_confirm() {
+        for scheme in SCHEMES {
+            // Esc is Pause and Back. Give it to an action that has no key.
+            let mut b = Bindings::defaults(scheme);
+            b.unbind_kbm(Action::Mute);
+            let moved = b.bind_kbm(Action::Mute, Binding::Key(KeyBind::Esc));
+            assert_eq!(b.get(Action::Mute), Binding::Key(KeyBind::Esc));
+            // Pause has its alternate, so it gives Esc up...
+            assert_eq!(moved, Some(Action::Pause), "{scheme:?}");
+            assert!(b.get(Action::Pause).is_none());
+            assert_eq!(b.alt_of(Action::Pause), Binding::Key(KeyBind::Char('p')));
+            // ...Back has nothing else, so it keeps Esc and shares it.
+            assert_eq!(b.get(Action::Back), Binding::Key(KeyBind::Esc), "{scheme:?}");
+
+            // Confirm's only key is Enter.
+            let mut b = Bindings::defaults(scheme);
+            b.unbind_kbm(Action::Mute);
+            assert_eq!(b.bind_kbm(Action::Mute, Binding::Key(KeyBind::Enter)), None);
+            assert_eq!(b.get(Action::Confirm), Binding::Key(KeyBind::Enter));
+
+            // An ordinary holder is still stripped: no silent double-binding.
+            let mut b = Bindings::defaults(scheme);
+            b.unbind_kbm(Action::Mute);
+            let moved = b.bind_kbm(Action::Mute, Binding::Key(KeyBind::Char('n')));
+            assert_eq!(moved, Some(Action::MinimapSize));
+            assert!(b.get(Action::MinimapSize).is_none());
+
+            // And a real swap (the action had a key) still moves the key off
+            // the critical actions, because they receive one in return.
+            let mut b = Bindings::defaults(scheme);
+            b.bind_kbm(Action::Mute, Binding::Key(KeyBind::Esc));
+            assert_eq!(b.get(Action::Back), Binding::Key(KeyBind::Char('m')));
+            assert_eq!(b.get(Action::Pause), Binding::Key(KeyBind::Char('m')));
+
+            // Whatever single rebind is made, none of the three ends keyless.
+            for target in ACTIONS {
+                for holder in [Action::Pause, Action::Back, Action::Confirm] {
+                    for key in Bindings::defaults(scheme).kbm_slots(holder) {
+                        if key.is_none() {
+                            continue;
+                        }
+                        let mut b = Bindings::defaults(scheme);
+                        b.unbind_kbm(target);
+                        b.bind_kbm(target, key);
+                        for a in [Action::Pause, Action::Back, Action::Confirm] {
+                            if a == target {
+                                continue;
+                            }
+                            assert!(
+                                b.kbm_slots(a).iter().any(|s| !s.is_none()),
+                                "{scheme:?}: {target:?} <- {key:?} left {a:?} with no key"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

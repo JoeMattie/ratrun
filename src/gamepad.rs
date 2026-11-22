@@ -44,6 +44,9 @@ pub enum PadEvent {
 const NAV_DELAY: f32 = 0.24;
 const NAV_REPEAT: f32 = 0.10;
 
+/// The longest single rumble a request can ask for, in seconds.
+pub const MAX_RUMBLE_SECS: f32 = 1.0;
+
 /// The live pad state. Cheap to copy-free update; no allocation.
 #[derive(Clone, Debug, Default)]
 pub struct PadState {
@@ -92,6 +95,7 @@ impl PadState {
             self.right = Vec2::ZERO;
             self.nav_step = None;
             self.nav_dir = (0, 0);
+            self.rumble_left = 0.0;
         }
     }
 
@@ -106,6 +110,7 @@ impl PadState {
             self.right = Vec2::ZERO;
             self.nav_step = None;
             self.nav_dir = (0, 0);
+            self.rumble_left = 0.0;
         }
     }
 
@@ -293,10 +298,40 @@ impl PadState {
             .find(|b| self.pressed[b.index()])
     }
 
-    /// Request a rumble for `secs` (ignored without a pad or with rumble off).
+    /// Request a rumble of `secs` seconds. Ignored without a connected pad or
+    /// while the terminal is unfocused, so a request can never sit in the queue
+    /// and buzz a pad plugged in minutes later. The **caller** gates on the
+    /// player's preference (`Controls::rumble`); see [`PadState::rumble_if`].
     pub fn rumble(&mut self, secs: f32) {
-        self.rumble_left = self.rumble_left.max(secs);
+        if !self.connected || !self.focused || !secs.is_finite() || secs <= 0.0 {
+            return;
+        }
+        self.rumble_left = self.rumble_left.max(secs.min(MAX_RUMBLE_SECS));
     }
+
+    /// [`PadState::rumble`] behind the Options toggle: the one-line call site
+    /// for the app (`pad.rumble_if(controls.rumble, 0.12)` on a hit).
+    pub fn rumble_if(&mut self, enabled: bool, secs: f32) {
+        if enabled {
+            self.rumble(secs);
+        }
+    }
+}
+
+/// One analog stick as gilrs reports it, in the game's convention.
+///
+/// gilrs normalises every pad so **up is +1**; the game's axes are screen
+/// space (`y` positive down, see [`PadEvent::Stick`]), so `y` is negated here —
+/// without it pushing the stick up walks the rat down. A deflection inside the
+/// dead zone is snapped to zero *before* it reaches [`PadState::apply`], so a
+/// drifting stick at rest neither counts as pad activity (which would flip the
+/// legends to pad glyphs under a keyboard player) nor moves anything.
+fn stick_from_gilrs(x: f32, y_up: f32, deadzone: f32) -> Vec2 {
+    let v = Vec2::new(x, -y_up);
+    if !v.x.is_finite() || !v.y.is_finite() || v.len() <= deadzone.clamp(0.0, 0.95) {
+        return Vec2::ZERO;
+    }
+    v
 }
 
 /// The gilrs-backed poller. With the `gamepad` feature off, this type is an
@@ -360,6 +395,7 @@ impl PadPoller {
                 EventType::Disconnected if self.pad == Some(ev.id) => {
                     self.pad = None;
                     self.effect = None;
+                    self.was_connected = false;
                     state.apply(PadEvent::Disconnected);
                 }
                 _ => {}
@@ -382,6 +418,9 @@ impl PadPoller {
         let pad = g.gamepad(id);
         if !pad.is_connected() {
             self.pad = None;
+            // The cached effect is bound to the pad that just left.
+            self.effect = None;
+            self.was_connected = false;
             state.apply(PadEvent::Disconnected);
             return any;
         }
@@ -411,26 +450,33 @@ impl PadPoller {
                 any = true;
             }
         }
-        let left = Vec2::new(
+        let left = stick_from_gilrs(
             pad.value(Axis::LeftStickX),
             pad.value(Axis::LeftStickY),
+            deadzone,
         );
-        let right = Vec2::new(
+        let right = stick_from_gilrs(
             pad.value(Axis::RightStickX),
             pad.value(Axis::RightStickY),
+            deadzone,
         );
         state.apply(PadEvent::Stick(Stick::Left, left));
         state.apply(PadEvent::Stick(Stick::Right, right));
-        let _ = deadzone;
         // Rumble drains here so the pad driver is only ever touched from the
         // poll (never from the simulation or a test). Off by default in the
         // options; a pad without force feedback simply does nothing.
         if state.rumble_left > 0.0 {
+            let ms = (state.rumble_left.min(MAX_RUMBLE_SECS) * 1000.0).round().max(1.0) as u32;
             state.rumble_left = 0.0;
             if pad.is_ff_supported() {
+                use gilrs::ff::{Repeat, Ticks};
                 if self.effect.is_none() {
-                    use gilrs::ff::{BaseEffect, BaseEffectType, EffectBuilder, Replay, Ticks};
-                    let play_for = Ticks::from_ms(120);
+                    use gilrs::ff::{BaseEffect, BaseEffectType, EffectBuilder, Replay};
+                    // The base effects run for as long as any request may ask;
+                    // the effect's *repeat* window (set per play below) is what
+                    // ends it. gilrs' default is `Repeat::Infinitely`, which
+                    // would leave the motors running until the pad is unplugged.
+                    let play_for = Ticks::from_ms((MAX_RUMBLE_SECS * 1000.0) as u32);
                     self.effect = EffectBuilder::new()
                         .add_effect(BaseEffect {
                             kind: BaseEffectType::Strong { magnitude: 42_000 },
@@ -448,11 +494,15 @@ impl PadPoller {
                             },
                             ..Default::default()
                         })
+                        .repeat(Repeat::For(Ticks::from_ms(ms)))
                         .gamepads(&[id])
                         .finish(g)
                         .ok();
                 }
                 if let Some(effect) = self.effect.as_ref() {
+                    // `play` restarts the effect's clock; the repeat window
+                    // makes this request stop itself after `ms`.
+                    let _ = effect.set_repeat(Repeat::For(Ticks::from_ms(ms)));
                     let _ = effect.play();
                 }
             }
@@ -566,6 +616,54 @@ mod tests {
         assert!(p.connected());
         p.apply(PadEvent::Button(PadBind::South, true));
         assert!(p.button_down(PadBind::South));
+    }
+
+    #[test]
+    fn a_gilrs_stick_is_flipped_to_screen_space_and_snapped_inside_the_dead_zone() {
+        // gilrs: up is +1. The game: up is -y.
+        let up = stick_from_gilrs(0.0, 1.0, 0.2);
+        assert_eq!(up, Vec2::new(0.0, -1.0));
+        let mut p = pad();
+        p.apply(PadEvent::Stick(Stick::Left, up));
+        assert!(p.move_vec(0.2).y < -0.9, "stick up must move up");
+        // A resting stick that drifts inside the dead zone is not activity.
+        let drift = stick_from_gilrs(0.15, -0.05, 0.2);
+        assert_eq!(drift, Vec2::ZERO);
+        p.begin_frame();
+        p.apply(PadEvent::Stick(Stick::Left, drift));
+        assert!(!p.active(), "drift must not claim the legends for the pad");
+        // A broken axis never poisons the movement vector.
+        assert_eq!(stick_from_gilrs(f32::NAN, 0.0, 0.2), Vec2::ZERO);
+    }
+
+    #[test]
+    fn rumble_needs_a_focused_connected_pad_and_the_toggle() {
+        let mut none = PadState::new();
+        none.rumble(0.2);
+        assert_eq!(none.rumble_left, 0.0, "no pad: nothing queued for later");
+
+        let mut p = pad();
+        p.rumble_if(false, 0.2);
+        assert_eq!(p.rumble_left, 0.0, "the Options toggle is off");
+        p.rumble_if(true, 0.2);
+        assert!((p.rumble_left - 0.2).abs() < 1e-6);
+        // The longer request wins, capped at the maximum.
+        p.rumble(0.1);
+        assert!((p.rumble_left - 0.2).abs() < 1e-6);
+        p.rumble(60.0);
+        assert!((p.rumble_left - MAX_RUMBLE_SECS).abs() < 1e-6);
+        p.rumble(f32::NAN);
+        assert!((p.rumble_left - MAX_RUMBLE_SECS).abs() < 1e-6);
+
+        // Losing focus or the pad drops a pending request.
+        p.set_focused(false);
+        assert_eq!(p.rumble_left, 0.0);
+        p.rumble(0.2);
+        assert_eq!(p.rumble_left, 0.0, "unfocused: ignored");
+        p.set_focused(true);
+        p.rumble(0.2);
+        p.apply(PadEvent::Disconnected);
+        assert_eq!(p.rumble_left, 0.0);
     }
 
     #[test]

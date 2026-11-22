@@ -55,8 +55,10 @@
 //!
 //! ## Determinism
 //!
-//! One rng draw per `Perch` entry (which way it paces) and no others; every
-//! attack is chosen from a fixed rotation in [`Boss::scratch`]. Nothing
+//! The controller draws **nothing** from the boss's rng stream: every attack is
+//! chosen from a fixed rotation in [`Boss::scratch`], and the perch always
+//! paces the same way round the rat (the `S_ROT` sign it reads is never
+//! negative, so the pace direction is a constant, not a draw). Nothing
 //! allocates per tick: hazards go into the boss's pre-reserved ring and the
 //! lane/line probes walk the stack.
 //!
@@ -122,7 +124,11 @@ impl BossController for MagpieController {
         boss.hunting = !ctx.arena.contains_world(ctx.player_pos);
 
         // A phase threshold is a set piece: the harmless ruffle.
+        // Whatever it was winding up is cancelled with the move it belonged to
+        // (the Mangle's and the Cobra's rule): a beak line, a lane or a crate
+        // must not land out of a pose that is no longer attacking.
         if out.phase_changed && !matches!(boss.state, BossState::Magpie(MagpieState::Death)) {
+            boss.hazards.clear();
             enter(boss, MagpieState::Ruffle, art_boss_magpie::RUFFLE_DURATION);
             boss.scratch[S_ROT] = 0.0;
         }
@@ -345,11 +351,18 @@ fn tick_strafe_windup(ctx: &mut BossContext<'_>, boss: &mut Boss) {
     boss.facing = Vec2::new(dir.signum(), 0.0);
     boss.target = Vec2::new(boss.target.x, lane_y);
     if boss.flags & F_LOCK == 0 && boss.progress() >= 0.55 {
+        // The lane lost its fit between the takeoff and the lock (the rat
+        // walked behind cargo, or into a spot with no step off the lane): the
+        // pass is refused. Flying it anyway would be a pass with no live lane
+        // and no tell, so the bird repositions instead.
+        if !queue_lane(ctx, boss) {
+            enter_perch(boss);
+            return;
+        }
         boss.flags |= F_LOCK;
-        queue_lane(ctx, boss);
     }
     if boss.progress() >= 1.0 {
-        // If the lane was never queued (it lost its fit), fall back to a peck.
+        // Defensive: a windup that somehow ends unlocked never flies.
         if boss.flags & F_LOCK == 0 {
             enter_perch(boss);
             return;
@@ -643,11 +656,12 @@ fn lane_plan(ctx: &BossContext<'_>, boss: &Boss) -> Option<(Vec2, Vec2, f32)> {
     Some((start, end, dir))
 }
 
-/// Queue the pass's live corridor once the windup has shown it.
-fn queue_lane(ctx: &mut BossContext<'_>, boss: &mut Boss) {
+/// Queue the pass's live corridor once the windup has shown it. Returns
+/// `false` (and queues nothing) when no fair lane exists any more.
+fn queue_lane(ctx: &mut BossContext<'_>, boss: &mut Boss) -> bool {
     let slot = phase_slot(boss);
     let Some((start, end, dir)) = lane_plan(ctx, boss) else {
-        return;
+        return false;
     };
     boss.scratch[S_LANE_Y] = start.y;
     boss.scratch[S_LANE_DIR] = dir;
@@ -668,6 +682,7 @@ fn queue_lane(ctx: &mut BossContext<'_>, boss: &mut Boss) {
     )
     .with_knockback(110.0);
     let _ = boss.push_hazard(lane);
+    true
 }
 
 /// Plan (again) and remember the lane on entering `StrafeWindup`.
@@ -1302,6 +1317,70 @@ mod tests {
         }
         assert!((t - art::RUFFLE_DURATION).abs() < 0.08, "ruffle {t}");
         assert_eq!(state_of(&mut w), MagpieState::Perch);
+    }
+
+    /// A phase threshold cancels the move it interrupts: a beak line that was
+    /// already on the planks must not strike out of the harmless ruffle.
+    #[test]
+    fn a_ruffle_cancels_the_telegraph_it_interrupts() {
+        let mut w = trailer_world(19);
+        spawn_magpie(&mut w);
+        let centre = arena_centre(&w);
+        place(&mut w, centre, centre + Vec2::new(40.0, 0.0));
+        set_state(&mut w, MagpieState::PeckWindup, art::PECK_WINDUP[0]);
+        let mut t = 0.0;
+        while boss_of(&mut w).expect("alive").hazards.is_empty() && t < 1.0 {
+            tick(&mut w);
+            t += DT;
+        }
+        assert!(!boss_of(&mut w).expect("alive").hazards.is_empty());
+        // Cross the first threshold with the line still warning.
+        with_boss(&mut w, |b| b.hp = b.max_hp * (art::PHASE2_HP_FRAC - 0.01));
+        tick(&mut w);
+        let boss = boss_of(&mut w).expect("alive");
+        assert_eq!(magpie_state(&boss), MagpieState::Ruffle);
+        assert!(
+            boss.hazards.is_empty(),
+            "the interrupted peck's line is still on the planks"
+        );
+    }
+
+    /// A lane that stops being fair between the takeoff and the lock is
+    /// refused: the bird goes back to its perch. It used to latch the lock
+    /// anyway and fly the pass with no live lane and no tell.
+    #[test]
+    fn a_lane_that_loses_its_fit_is_never_flown() {
+        let mut w = trailer_world(21);
+        spawn_magpie(&mut w);
+        let arena = w.level.boss_room().expect("hold").rect;
+        let row = arena_centre(&w).y;
+        // 40 px short of the lane's east end with the rat further east still:
+        // the only run left is shorter than `STRAFE_MIN_LEN`, so `lane_plan`
+        // has nothing to offer at the lock.
+        let east_end = arena.right() as f32 * TILE_F - art::STRAFE_END_MARGIN;
+        let bird = Vec2::new(east_end - art::STRAFE_MIN_LEN * 0.5, row);
+        place(&mut w, bird, bird + Vec2::new(30.0, 0.0));
+        set_state(&mut w, MagpieState::StrafeWindup, art::STRAFE_WINDUP[0]);
+        with_boss(&mut w, |b| {
+            b.scratch[S_LANE_Y] = row;
+            b.scratch[S_LANE_DIR] = 1.0;
+        });
+        let mut t = 0.0;
+        while state_of(&mut w) == MagpieState::StrafeWindup && t < 2.0 {
+            tick(&mut w);
+            t += DT;
+        }
+        let boss = boss_of(&mut w).expect("alive");
+        assert_eq!(
+            magpie_state(&boss),
+            MagpieState::Perch,
+            "a refused lane must fall back to the perch, not a pass"
+        );
+        assert!(boss.hazards.is_empty(), "no lane was queued");
+        assert!(
+            t < art::STRAFE_WINDUP[0] - 0.05,
+            "the refusal happens at the lock, not at the end of the windup ({t})"
+        );
     }
 
     // ---- death -----------------------------------------------------------

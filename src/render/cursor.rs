@@ -426,6 +426,11 @@ pub fn draw(buf: &mut Buffer, area: Rect, view: CursorView) {
 /// cell, with a gap in the middle so the aim point itself stays readable and a
 /// bright centre pip. Three cells tall and five wide at most; clipped at every
 /// edge and allocation-free. A click pulse squeezes the arms inwards.
+///
+/// It fades exactly like the wedge: each glyph's colour is blended from what
+/// is under it (the cell's background) by `view.alpha`, then folded to the
+/// terminal's colour depth. (It used to mix the tone with itself, so it never
+/// faded, and handed raw RGB to 256- and 16-colour terminals.)
 fn draw_reticle(buf: &mut Buffer, area: Rect, view: CursorView, depth: ColorDepth) {
     let alpha = view.alpha.clamp(0.0, 1.0);
     let tone = if view.hover { HOVER_GLEAM } else { CHEESE_HI };
@@ -433,31 +438,39 @@ fn draw_reticle(buf: &mut Buffer, area: Rect, view: CursorView, depth: ColorDept
     let (x, y) = view.pos;
     let right = area.x.saturating_add(area.width);
     let bottom = area.y.saturating_add(area.height);
-    let mut put = |cx: u16, cy: u16, glyph: &str, rgb: Rgb| {
+    let mut put = |cx: Option<u16>, cy: Option<u16>, glyph: char, rgb: Rgb| {
+        // An arm that would leave the screen is dropped, not folded back onto
+        // the edge cell.
+        let (Some(cx), Some(cy)) = (cx, cy) else {
+            return;
+        };
         if cx < area.x || cx >= right || cy < area.y || cy >= bottom {
             return;
         }
         if let Some(cell) = buf.cell_mut((cx, cy)) {
-            cell.set_char(glyph.chars().next().unwrap_or('+'))
-                .set_fg(crate::render::palette::to_color(palette::mix(
-                    rgb,
-                    match depth {
-                        ColorDepth::Ansi16 => (255, 255, 255),
-                        _ => rgb,
-                    },
-                    alpha,
-                )))
-                .set_style(Modifier::empty());
+            // What the glyph sits on: the cell's background as displayed (a
+            // REVERSED button shows its `fg` there). Modifiers are stripped so
+            // the reticle never inverts or picks up an underline, and the
+            // displayed background is kept.
+            let under = if cell.modifier.contains(Modifier::REVERSED) {
+                cell.fg
+            } else {
+                cell.bg
+            };
+            cell.modifier = Modifier::empty();
+            cell.set_char(glyph)
+                .set_fg(palette::to_term(blend_alpha(rgb, under, alpha), depth))
+                .set_bg(under);
         }
     };
     // Horizontal arms with a gap, then a vertical bar through the centre.
     for d in 1..=arm {
-        put(x.saturating_sub(d), y, "─", tone);
-        put(x.saturating_add(d), y, "─", tone);
+        put(x.checked_sub(d), Some(y), '─', tone);
+        put(x.checked_add(d), Some(y), '─', tone);
     }
-    put(x, y.saturating_sub(1), "│", tone);
-    put(x, y.saturating_add(1), "│", tone);
-    put(x, y, "•", if view.held { HOVER_GLEAM } else { CHEESE_TIP });
+    put(Some(x), y.checked_sub(1), '│', tone);
+    put(Some(x), y.checked_add(1), '│', tone);
+    put(Some(x), Some(y), '•', if view.held { HOVER_GLEAM } else { CHEESE_TIP });
 }
 
 /// Like [`draw`], with an explicit [`ColorDepth`] for deterministic testing.
@@ -582,6 +595,86 @@ mod tests {
 
     fn rgb(c: Rgb) -> Color {
         Color::Rgb(c.0, c.1, c.2)
+    }
+
+    /// The Mouse aim reticle fades with `alpha` like the wedge does, folds its
+    /// colour to the terminal's depth, strips modifiers and clips at the edges
+    /// without folding an arm back onto the screen.
+    #[test]
+    fn the_reticle_fades_folds_and_clips() {
+        let area = Rect::new(0, 0, 12, 6);
+        let reticle = |x: u16, y: u16, alpha: f32| CursorView {
+            reticle: true,
+            alpha,
+            ..view_at(x, y)
+        };
+
+        // Full strength, truecolor: the exact tones, on five cells by three.
+        let mut buf = Buffer::empty(area);
+        buf.set_style(area, ratatui::style::Style::default().bg(Color::Rgb(10, 10, 10)));
+        draw_with_depth(&mut buf, area, reticle(5, 3, 1.0), ColorDepth::Truecolor);
+        assert_eq!(buf[(5, 3)].symbol(), "•");
+        assert_eq!(buf[(5, 3)].fg, rgb(CHEESE_TIP));
+        for (x, y, glyph) in [(3u16, 3u16, "─"), (4, 3, "─"), (6, 3, "─"), (7, 3, "─"), (5, 2, "│"), (5, 4, "│")] {
+            assert_eq!(buf[(x, y)].symbol(), glyph, "({x},{y})");
+            assert_eq!(buf[(x, y)].fg, rgb(CHEESE_HI), "({x},{y})");
+            assert_eq!(buf[(x, y)].bg, Color::Rgb(10, 10, 10), "the cell keeps its background");
+        }
+
+        // Half faded: the arm colour sits strictly between the background and
+        // the tone (it used to stay at full strength until it vanished).
+        let mut half = Buffer::empty(area);
+        half.set_style(area, ratatui::style::Style::default().bg(Color::Rgb(10, 10, 10)));
+        draw_with_depth(&mut half, area, reticle(5, 3, 0.5), ColorDepth::Truecolor);
+        let Color::Rgb(r, g, _) = half[(4, 3)].fg else {
+            panic!("truecolor reticle must be RGB");
+        };
+        assert!(r > 10 && r < CHEESE_HI.0, "red did not fade: {r}");
+        assert!(g > 10 && g < CHEESE_HI.1, "green did not fade: {g}");
+
+        // 16 and 256 colours: no raw RGB reaches the terminal.
+        for depth in [ColorDepth::Ansi16, ColorDepth::Ansi256] {
+            let mut b = Buffer::empty(area);
+            draw_with_depth(&mut b, area, reticle(5, 3, 1.0), depth);
+            for (x, y) in [(5u16, 3u16), (4, 3), (5, 2)] {
+                assert!(
+                    !matches!(b[(x, y)].fg, Color::Rgb(..)),
+                    "{depth:?}: raw RGB at ({x},{y}): {:?}",
+                    b[(x, y)].fg
+                );
+            }
+        }
+
+        // A REVERSED, bold button under the reticle keeps the colour it showed
+        // and loses the modifiers.
+        let mut rev = Buffer::empty(area);
+        rev.set_style(
+            area,
+            ratatui::style::Style::default()
+                .fg(Color::Rgb(200, 180, 40))
+                .bg(Color::Rgb(1, 2, 3))
+                .add_modifier(Modifier::REVERSED | Modifier::BOLD),
+        );
+        draw_with_depth(&mut rev, area, reticle(5, 3, 1.0), ColorDepth::Truecolor);
+        assert!(rev[(5, 3)].modifier.is_empty());
+        assert_eq!(rev[(5, 3)].bg, Color::Rgb(200, 180, 40));
+
+        // The top-left corner: the centre pip is the pip, and no arm is folded
+        // back onto column 0 / row 0.
+        let mut corner = Buffer::empty(area);
+        draw_with_depth(&mut corner, area, reticle(0, 0, 1.0), ColorDepth::Truecolor);
+        assert_eq!(corner[(0, 0)].symbol(), "•");
+        assert_eq!(corner[(1, 0)].symbol(), "─");
+        assert_eq!(corner[(0, 1)].symbol(), "│");
+        let mut near = Buffer::empty(area);
+        draw_with_depth(&mut near, area, reticle(1, 0, 1.0), ColorDepth::Truecolor);
+        assert_eq!(near[(0, 0)].symbol(), "─", "the one arm cell that fits");
+        assert_eq!(near[(1, 0)].symbol(), "•");
+        // Bottom-right corner and far off-screen: no panic.
+        for (x, y) in [(11u16, 5u16), (u16::MAX, u16::MAX), (40, 40)] {
+            let mut b = Buffer::empty(area);
+            draw_with_depth(&mut b, area, reticle(x, y, 1.0), ColorDepth::Truecolor);
+        }
     }
 
     #[test]

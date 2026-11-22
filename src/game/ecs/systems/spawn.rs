@@ -202,9 +202,6 @@ const FLANK_OFFSETS: [(i32, i32); 32] = [
 /// Cells of a cell rectangle's inset that a room spawn stays inside.
 const ROOM_INSET: i32 = 2;
 
-/// Legacy `World::run_director`, now with the campaign curve, the maze-free
-/// spawn rule, room waves and the two-group flank.
-#[allow(clippy::too_many_arguments)]
 /// Read-only console tunables and switches, bundled so `director_system` stays
 /// within Bevy's 16-parameter `IntoSystem` limit. Neutral defaults: a run that
 /// never opens the console reads the same numbers as before.
@@ -221,6 +218,8 @@ pub struct DirectorIds<'w> {
     pub next_enemy_id: ResMut<'w, NextEnemyId>,
 }
 
+/// Legacy `World::run_director`, now with the campaign curve, the maze-free
+/// spawn rule, room waves and the two-group flank.
 pub fn director_system(
     mut commands: Commands,
     input: Res<TickInput>,
@@ -377,43 +376,40 @@ pub fn director_system(
                     flank.as_ref(),
                     i,
                 ) {
-                    use crate::game::ecs::systems::enemy_wave4 as w4;
-                    // The leader's `SpawnId` is the squad's id, so a straggler
-                    // can name the squad it wants to rejoin.
-                    let first = ids.next_id.take();
-                    let squad = first.0 as u32;
-                    let mut spawned = 0usize;
-                    for k in 0..room {
-                        let id = if k == 0 { first } else { ids.next_id.take() };
-                        let off = Vec2::from_angle(
-                            k as f32 / room as f32 * std::f32::consts::TAU,
-                        ) * 7.0;
-                        if !level.tiles.circle_clear(
-                            centre + off,
-                            EnemyKind::Lilliputian.radius(),
-                            SizeClass::Small,
-                        ) {
-                            continue;
+                    // Two passes over the same fixed ring of offsets: count
+                    // the members that fit, then spawn exactly those. Roles and
+                    // slots follow the *placed* index, so the first body on the
+                    // floor is always the leader (a blocked first offset used
+                    // to leave the squad leaderless), the peak is the number
+                    // that really arrived, and no `SpawnId` is spent on a body
+                    // that was never spawned.
+                    let placed = lilli_squad_points(&level, centre, room, |_, _| {});
+                    let mut squad = 0u32;
+                    let spawned = lilli_squad_points(&level, centre, room, |j, at| {
+                        // The leader's `SpawnId` is the squad's id, so a
+                        // straggler can name the squad it wants to rejoin.
+                        let id = ids.next_id.take();
+                        if j == 0 {
+                            squad = id.0 as u32;
                         }
                         let mut enemy = Enemy::spawn_with_mods(
                             EnemyKind::Lilliputian,
-                            centre + off,
+                            at,
                             mult,
                             mods,
                             &mut rng.0,
                         );
                         enemy.id = ids.next_enemy_id.take();
-                        enemy.w4.role = match k {
-                            0 => w4::LILLI_ROLE_LEADER,
-                            1..=3 => w4::LILLI_ROLE_SPEAR,
-                            4 | 5 => w4::LILLI_ROLE_ARCHER,
-                            _ => w4::LILLI_ROLE_ROPE,
-                        };
-                        enemy.w4.slot = k as u8;
+                        enemy.w4.role = lilli_role(j);
+                        enemy.w4.slot = j as u8;
                         enemy.w4.squad = squad;
-                        enemy.w4.squad_peak = room as u16;
+                        enemy.w4.squad_peak = placed as u16;
                         commands.spawn((enemy, id));
-                        spawned += 1;
+                    });
+                    if spawned == 0 {
+                        // Nowhere to stand around the point: no squad, and
+                        // nothing against the slot's cap.
+                        continue;
                     }
                     queued += spawned;
                     // One roll, one body against the cap, however many of the
@@ -506,6 +502,45 @@ pub fn director_system(
     // Boss hand-off (no generic boss spawn any more): the boss framework reads
     // `BossDue` and spawns the level's boss in its arena.
     director::raise_boss_due(&mut director, &mut boss_due, elapsed, level_index.0);
+}
+
+/// The role of the `j`-th body of a Lilliputian squad **that made it onto the
+/// floor**: the first is always the leader.
+#[inline]
+fn lilli_role(j: usize) -> u8 {
+    use crate::game::ecs::systems::enemy_wave4 as w4;
+    match j {
+        0 => w4::LILLI_ROLE_LEADER,
+        1..=3 => w4::LILLI_ROLE_SPEAR,
+        4 | 5 => w4::LILLI_ROLE_ARCHER,
+        _ => w4::LILLI_ROLE_ROPE,
+    }
+}
+
+/// Walk the `room` ring offsets of a squad around `centre` and call `place`
+/// with `(placed index, position)` for each one a Lilliputian fits at. Returns
+/// how many fitted. No rng and no allocation, so the director runs it twice
+/// (count, then spawn) and gets the same answer both times.
+fn lilli_squad_points(
+    level: &Level,
+    centre: Vec2,
+    room: usize,
+    mut place: impl FnMut(usize, Vec2),
+) -> usize {
+    let mut placed = 0usize;
+    for k in 0..room {
+        let off = Vec2::from_angle(k as f32 / room as f32 * std::f32::consts::TAU) * 7.0;
+        let at = centre + off;
+        if !level
+            .tiles
+            .circle_clear(at, EnemyKind::Lilliputian.radius(), SizeClass::Small)
+        {
+            continue;
+        }
+        place(placed, at);
+        placed += 1;
+    }
+    placed
 }
 
 /// Live ordinary bodies per roster slot on `theme`, counted the way the
@@ -742,6 +777,10 @@ impl SpawnScratch {
     /// Is the cell containing `p` on the horde's connected map?
     pub fn is_reachable(&self, level: &Level, p: Vec2) -> bool {
         let (cx, cy) = cell_of(p);
+        // An off-map column must not wrap into the neighbouring row's index.
+        if !level.tiles.in_bounds(cx, cy) {
+            return false;
+        }
         self.reach
             .get((cy * level.tiles.cols() + cx) as usize)
             .copied()
@@ -995,7 +1034,8 @@ pub fn spawn_pulse_point(
     // One angle draw per pulse member, exactly like the legacy ring.
     let base = ring_base_angle(rng, player);
     if let Some(flank) = flank {
-        return flank.point(level, player, viewport, index);
+        // The table was synced when the flank was planned (same tick).
+        return flank.point(level, player, viewport, index, Some(&scratch.reach));
     }
     if room_wave {
         if let Some(p) = room_wave_point(rng, level, player, scratch) {
@@ -1102,6 +1142,7 @@ fn room_open_cell(
     room: &Room,
     class: SizeClass,
     keep_away: Option<Vec2>,
+    reach: Option<&[bool]>,
 ) -> Option<Vec2> {
     let area = room.rect.inflate(-ROOM_INSET);
     if area.w <= 0 || area.h <= 0 {
@@ -1118,6 +1159,12 @@ fn room_open_cell(
             if p.dist_sq(from) < SPAWN_MIN_DIST * SPAWN_MIN_DIST {
                 continue;
             }
+        }
+        // The cell itself must be on the horde's map, not just somewhere in
+        // a room that has such a cell (a walled-off corner of the room is a
+        // pocket the body could never leave).
+        if !cell_reachable(reach, level, p) {
+            continue;
         }
         if level.tiles.passable(cx, cy, class) && level.tiles.circle_clear(p, clear, class) {
             found = Some(p);
@@ -1143,7 +1190,7 @@ fn nearest_reachable_room_cell(
         if best.is_some_and(|(bd, _)| bd <= d) {
             continue;
         }
-        if let Some(p) = room_open_cell(level, room, class, Some(player.pos)) {
+        if let Some(p) = room_open_cell(level, room, class, Some(player.pos), Some(&scratch.reach)) {
             best = Some((d, p));
         }
     }
@@ -1258,6 +1305,7 @@ impl FlankPlan {
         player: &Player,
         viewport: Vec2,
         index: usize,
+        reach: Option<&[bool]>,
     ) -> Option<Vec2> {
         let anchor = self.anchors[index % 2];
         let member = index / 2;
@@ -1282,6 +1330,11 @@ impl FlankPlan {
                 continue;
             }
             if !off_screen(p, player.pos, viewport) {
+                continue;
+            }
+            // A cell beside the doorway can be on the far side of a wall from
+            // it: only cells on the horde's own map (the anchor already is).
+            if !cell_reachable(reach, level, p) {
                 continue;
             }
             return Some(p);
@@ -1495,15 +1548,21 @@ fn cell_reachable(reach: Option<&[bool]>, level: &Level, p: Vec2) -> bool {
         return true;
     };
     let (cx, cy) = cell_of(p);
+    // An off-map column must not wrap into the neighbouring row's index.
+    if !level.tiles.in_bounds(cx, cy) {
+        return false;
+    }
     reach
         .get((cy * level.tiles.cols() + cx) as usize)
         .copied()
         .unwrap_or(false)
 }
 
-/// Nearest wall-clear cell centre to `p`, searching ring by ring. Prefers a
-/// cell the horde can reach when a reachability table is supplied, and falls
-/// back to plain clearance so the result is never inside a wall. `min_from` is
+/// Nearest wall-clear cell centre to `p`, searching ring by ring. With a
+/// reachability table (the director's path) only a cell the horde can reach is
+/// ever returned — `None` means skip the spawn, never a body in a sealed
+/// pocket. Without one (the cache-free [`spawn_point`] primitive) plain
+/// clearance decides, so the result is never inside a wall. `min_from` is
 /// the keep-away point (the player): a cell closer than `min_dist` to it is
 /// never chosen, so the fallback cannot drop an enemy on top of the rat.
 fn nearest_clear(
@@ -1516,10 +1575,11 @@ fn nearest_clear(
     min_dist: f32,
 ) -> Option<Vec2> {
     let (hx, hy) = cell_of(p);
-    for require_reach in [true, false] {
-        if require_reach && reach.is_none() {
-            continue;
-        }
+    // One pass: the table decides whenever there is one. (There used to be a
+    // second, table-free pass that could hand the director an unreachable
+    // cell.)
+    let require_reach = reach.is_some();
+    {
         for r in 0..=max_cells {
             for dy in -r..=r {
                 for dx in -r..=r {
@@ -1603,6 +1663,118 @@ mod tests {
     use crate::game::weapon::WeaponKind;
     use crate::game::world::World;
     use crate::math::Vec2;
+
+    /// The director's last fallback never leaves the horde's map: with a
+    /// reachability table that says "nowhere", there is no point at all, while
+    /// the table-free primitive still finds plain clear floor.
+    #[test]
+    fn the_fallback_never_returns_a_cell_off_the_horde_map() {
+        let mut w = World::new(Theme::Sewer, 13);
+        open_level(&mut w.level);
+        w.level.tiles.rebuild_masks();
+        let cells = (w.level.tiles.cols() * w.level.tiles.rows()) as usize;
+        let nowhere = vec![false; cells];
+        let p = w.level.arena * 0.5;
+        assert!(
+            super::nearest_clear(&w.level, p, SizeClass::Large, 10, Some(&nowhere), None, 0.0)
+                .is_none(),
+            "an unreachable cell was offered to the director"
+        );
+        assert!(
+            super::nearest_clear(&w.level, p, SizeClass::Large, 10, None, None, 0.0).is_some()
+        );
+        // The room escape obeys the same table, cell by cell.
+        let room = crate::game::level::Room::new(
+            crate::game::level::TileRect::new(20, 20, 12, 12),
+            RoomKind::Room,
+        );
+        assert!(super::room_open_cell(&w.level, &room, SizeClass::Large, None, Some(&nowhere))
+            .is_none());
+        assert!(super::room_open_cell(&w.level, &room, SizeClass::Large, None, None).is_some());
+    }
+
+    /// A squad's first placed body is its leader even when the first ring
+    /// offset is walled off, and the count is what really fits.
+    #[test]
+    fn a_squad_with_a_blocked_first_offset_still_has_a_leader() {
+        use crate::game::ecs::systems::enemy_wave4 as w4;
+        let mut w = World::new(Theme::Sewer, 17);
+        open_level(&mut w.level);
+        // The centre sits just left of a cell boundary; the cell to its right
+        // (where offset 0, +7 px along x, lands) is solid.
+        let (ccx, ccy) = (60, 60);
+        let centre = Vec2::new((ccx + 1) as f32 * TILE_F - 3.0, ccy as f32 * TILE_F + TILE_F * 0.5);
+        w.level
+            .tiles
+            .fill_cells(ccx + 1, ccy - 1, 1, 3, TileKind::Wall(WallKind::Solid));
+        w.level.tiles.rebuild_masks();
+        let mut first: Option<(usize, Vec2)> = None;
+        let mut indices = Vec::new();
+        let n = super::lilli_squad_points(&w.level, centre, 10, |j, at| {
+            if first.is_none() {
+                first = Some((j, at));
+            }
+            indices.push(j);
+        });
+        assert!(n > 0 && n < 10, "the wall should block some of the ring, not all ({n})");
+        let (j0, at0) = first.expect("someone fits");
+        assert_eq!(j0, 0);
+        assert!(at0.x < (ccx + 1) as f32 * TILE_F, "the leader is not in the wall");
+        assert_eq!(indices, (0..n).collect::<Vec<_>>(), "placed indices are compact");
+        assert_eq!(super::lilli_role(0), w4::LILLI_ROLE_LEADER);
+        assert_ne!(super::lilli_role(1), w4::LILLI_ROLE_LEADER);
+    }
+
+    /// A flank member is never placed on a cell the horde cannot reach: with a
+    /// table that says "nowhere" every offset is refused and the group falls
+    /// back to its (validated) anchor.
+    #[test]
+    fn a_flank_member_stays_on_the_horde_map() {
+        let mut w = World::new(Theme::Sewer, 19);
+        open_level(&mut w.level);
+        w.level.tiles.rebuild_masks();
+        let anchor = TileMap::tile_rect(40, 40).center();
+        let plan = super::FlankPlan { anchors: [anchor, anchor] };
+        w.player.pos = anchor + Vec2::new(600.0, 0.0);
+        let viewport = Vec2::new(120.0, 80.0);
+        let cells = (w.level.tiles.cols() * w.level.tiles.rows()) as usize;
+        let nowhere = vec![false; cells];
+        let mut only = vec![false; cells];
+        // One reachable cell, two to the right of the anchor.
+        only[(40 * w.level.tiles.cols() + 42) as usize] = true;
+        for member in 0..6 {
+            assert_eq!(
+                plan.point(&w.level, &w.player, viewport, member, Some(&nowhere)),
+                Some(anchor)
+            );
+            assert_eq!(
+                plan.point(&w.level, &w.player, viewport, member, Some(&only)),
+                Some(TileMap::tile_rect(42, 40).center())
+            );
+        }
+    }
+
+    /// A point off the map is never "reachable": a negative column used to wrap
+    /// into the previous row's last cell (`cy * cols + cx` with `cx = -1`).
+    #[test]
+    fn a_point_off_the_map_is_never_reachable() {
+        let w = World::new(Theme::Sewer, 11);
+        let mut scratch = SpawnScratch::default();
+        scratch.sync(&w.level);
+        // Pretend every cell is on the horde's map, so only the bounds test
+        // can say no.
+        scratch.reach.iter_mut().for_each(|c| *c = true);
+        for row in 1..w.level.tiles.rows() {
+            let y = row as f32 * TILE_F + TILE_F * 0.5;
+            assert!(!scratch.is_reachable(&w.level, Vec2::new(-TILE_F * 0.5, y)));
+            assert!(!super::cell_reachable(
+                Some(&scratch.reach),
+                &w.level,
+                Vec2::new(-TILE_F * 0.5, y)
+            ));
+        }
+        assert!(scratch.is_reachable(&w.level, Vec2::new(TILE_F * 0.5, TILE_F * 0.5)));
+    }
 
     /// Strip the generated layout so the ring has room (what
     /// `Level::walls.clear()` used to do before the tile grid owned
@@ -2896,8 +3068,18 @@ mod tests {
                     // Each group's bodies stay off screen and in the chamber's
                     // neighbourhood (the offsets are a fixed cell spiral).
                     for member in 0..8 {
-                        if let Some(p) = plan.point(&w.level, &w.player, w.viewport, member) {
+                        if let Some(p) = plan.point(
+                            &w.level,
+                            &w.player,
+                            w.viewport,
+                            member,
+                            Some(&scratch.reach),
+                        ) {
                             assert!(!in_maze(&w.level, p));
+                            assert!(
+                                scratch.is_reachable(&w.level, p),
+                                "{theme:?} seed {seed}: flank member {member} at {p:?} is off the horde's map"
+                            );
                             assert!(w
                                 .level
                                 .tiles

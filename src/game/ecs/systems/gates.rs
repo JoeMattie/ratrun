@@ -129,6 +129,17 @@ pub const HOLE_SQUEEZE_SOUND_SECS: f32 = 0.4;
 /// hovering on the trigger line cannot rattle it open/closed every frame.
 const GATE_OPEN_SOUND_SECS: f32 = 0.5;
 
+/// How far short of `ONE_WAY_DOOR_HALF_U` the open zone stops on the `+facing`
+/// side (px). A rat pressed against the shut leaf from the wrong side rests at
+/// exactly `u = ONE_WAY_DOOR_HALF_U`; the margin keeps that spot (and its float
+/// noise) out of the zone that opens and arms the door.
+const OPEN_ZONE_BACKSTOP_MARGIN: f32 = 0.25;
+
+/// Longest single-tick move along a door's passage axis that still counts as
+/// the rat walking through it (px): three cells, several times any dash on a
+/// 50 ms frame, and well short of a placed/teleported rat.
+const MAX_CROSSING_STEP: f32 = 48.0;
+
 // ============================================================================
 // Per-object runtime state
 // ============================================================================
@@ -170,6 +181,10 @@ pub struct DoorRuntime {
     pub open_cd: f32,
     /// How many times the leaf started opening (tests/diagnostics).
     pub opens: u32,
+    /// The rat's `u` on the previous tick, while it was laterally inside the
+    /// doorway (`None` otherwise). Lets a crossing faster than the sampled
+    /// windows — a dash on a long frame — still arm and slam the leaf.
+    pub last_u: Option<f32>,
 }
 
 /// Runtime state of one `RatHole`.
@@ -680,7 +695,17 @@ fn update_door(
     let held = lateral && u.abs() <= ONE_WAY_DOOR_HALF_U + PLAYER_RADIUS;
     // Approach through the maze side: the art's `u in [-10, 0]` trigger, opened
     // out to the leaf plane so a rat that is already sliding through counts.
-    let open_zone = lateral && (-ONE_WAY_DOOR_TRIGGER_DIST..=ONE_WAY_DOOR_HALF_U).contains(&u);
+    //
+    // The `+facing` end stops `OPEN_ZONE_BACKSTOP_MARGIN` short of
+    // `ONE_WAY_DOOR_HALF_U`: the shut leaf's collider is 2 px either side of
+    // the cell centre, so a rat leaning on the backstop from the wrong side
+    // rests at `u = 2 + PLAYER_RADIUS = 5.0` give or take a float ulp. With an
+    // inclusive `..= 5.0` that resting spot was half inside the open zone: the
+    // leaf swung open for a rat it was refusing and `armed` latched from the
+    // outside.
+    let open_zone = lateral
+        && (-ONE_WAY_DOOR_TRIGGER_DIST..=ONE_WAY_DOOR_HALF_U - OPEN_ZONE_BACKSTOP_MARGIN)
+            .contains(&u);
     // Pushing into the backstop from the `+facing` side.
     let wrong_zone = lateral && (-ONE_WAY_DOOR_HALF_U..=ONE_WAY_DOOR_TRIGGER_DIST).contains(&u);
     let pressing_wrong = wrong_zone && intent.dot(f) < -0.3;
@@ -695,14 +720,32 @@ fn update_door(
         OneWayDoorState::Closing => 1.0 - view.progress.clamp(0.0, 1.0),
         _ => 0.0,
     };
-    rt.armed |= open_zone;
+    // A whole crossing inside one tick: last tick the rat was on the maze side
+    // of the backstop (or inside the leaf), this tick its body is clear on the
+    // `+facing` side, and both samples are in the doorway's lane. The open
+    // zone and the clearing window below are 10-15 px wide and sampled once a
+    // tick, so a dash on a long frame could step over either: the leaf then
+    // never armed, or the slam waited for the rat's next stroll past the
+    // outside. The player's move is sub-stepped against the tile grid, so the
+    // only way from one side to the other is through the leaf; the step bound
+    // keeps a teleport (a test, the console) from counting as a walk.
+    let last_u = rt.last_u;
+    rt.last_u = lateral.then_some(u);
+    let crossed = lateral
+        && u >= ONE_WAY_DOOR_HALF_U + PLAYER_RADIUS
+        && last_u.is_some_and(|prev| {
+            prev < ONE_WAY_DOOR_HALF_U - OPEN_ZONE_BACKSTOP_MARGIN
+                && u - prev <= MAX_CROSSING_STEP
+        });
+    rt.armed |= open_zone || crossed;
     // The rat's body has just cleared the leaf into the `+facing` side. The
     // window is bounded (`u <= 8 + ONE_WAY_DOOR_TRIGGER_DIST`) so a rat that
     // walked around the outside of the maze never trips the slam.
-    let cleared = lateral
-        && (ONE_WAY_DOOR_HALF_U + PLAYER_RADIUS
-            ..=ONE_WAY_DOOR_HALF_U + PLAYER_RADIUS + ONE_WAY_DOOR_TRIGGER_DIST)
-            .contains(&u);
+    let cleared = crossed
+        || (lateral
+            && (ONE_WAY_DOOR_HALF_U + PLAYER_RADIUS
+                ..=ONE_WAY_DOOR_HALF_U + PLAYER_RADIUS + ONE_WAY_DOOR_TRIGGER_DIST)
+                .contains(&u));
 
     if claimed_exit && rt.armed && !rt.slammed && cleared {
         slam_door(view, rt, index, fx, feed);
@@ -1067,6 +1110,33 @@ mod tests {
         assert_eq!(fx.world.ecs.resource::<GateRuntime>().doors[0].refusals, 2);
     }
 
+    /// The rat's real resting spot against the shut leaf from the wrong side
+    /// is `u = 2 (half the leaf collider) + PLAYER_RADIUS = 5.0`, i.e. exactly
+    /// `ONE_WAY_DOOR_HALF_U`, give or take float noise. That spot must refuse,
+    /// never open the leaf or arm the slam.
+    #[test]
+    fn the_backstop_resting_spot_refuses_and_never_opens_or_arms() {
+        for nudge in [-1e-4_f32, 0.0, 1e-4] {
+            let mut fx = maze_fixture(Cardinal::East);
+            let (gate, f) = (fx.gate, fx.facing);
+            fx.world.player.pos = gate + f * (ONE_WAY_DOOR_HALF_U + nudge);
+            fx.world.sfx.clear();
+            tick(&mut fx.world, -f);
+            assert_eq!(
+                door(&fx).state,
+                OneWayDoorState::Refused,
+                "nudge {nudge}: leaning on the backstop must refuse"
+            );
+            for _ in 0..60 {
+                tick(&mut fx.world, -f);
+            }
+            let rt = fx.world.ecs.resource::<GateRuntime>();
+            assert_eq!(rt.doors[0].opens, 0, "nudge {nudge}: the leaf never opens");
+            assert!(!rt.doors[0].armed, "nudge {nudge}: never armed from outside");
+            assert_eq!(rt.doors[0].refusals, 1, "nudge {nudge}");
+        }
+    }
+
     /// The horde can never pass a gate: collision resolves enemies with
     /// `player_vel: None`, so the leaf is a wall from both sides forever.
     #[test]
@@ -1270,6 +1340,56 @@ mod tests {
                 "nothing may follow through the slam (u = {u}, step {step})"
             );
         }
+    }
+
+    /// A dash on a long frame can carry the rat from before the open zone to
+    /// beyond the clearing window in one tick. The crossing must still arm the
+    /// leaf and slam it, on that tick.
+    #[test]
+    fn a_crossing_faster_than_the_windows_still_arms_and_slams() {
+        let mut fx = maze_fixture(Cardinal::East);
+        let (gate, f) = (fx.gate, fx.facing);
+        fx.world.player.pos = fx.reward;
+        tick(&mut fx.world, Vec2::ZERO);
+        assert!(fx.world.ecs.resource::<GateRuntime>().rewards[0].claimed);
+        // Short of the open zone (`u = -12`): seen in the lane, not armed.
+        fx.world.player.pos = gate - f * 12.0;
+        tick(&mut fx.world, f);
+        assert!(!fx.world.ecs.resource::<GateRuntime>().doors[0].armed);
+        // One tick later the body is past the clearing window (`u = 20`).
+        fx.world.player.pos = gate + f * 20.0;
+        fx.world.sfx.clear();
+        tick(&mut fx.world, f);
+        let rt = fx.world.ecs.resource::<GateRuntime>();
+        assert!(rt.doors[0].armed, "the crossing itself arms the leaf");
+        assert!(rt.doors[0].slammed, "and slams it on the same tick");
+        assert_eq!(sfx_count(&fx.world, Sfx::GateSlam), 1);
+        assert_eq!(door(&fx).state, OneWayDoorState::Closed);
+    }
+
+    /// The crossing rule must not turn the outside of the maze into a trigger:
+    /// a rat walking away from the backstop, or along the outside lane, never
+    /// crossed anything.
+    #[test]
+    fn walking_the_outside_of_a_claimed_maze_never_slams() {
+        let mut fx = maze_fixture(Cardinal::East);
+        let (gate, f) = (fx.gate, fx.facing);
+        fx.world.player.pos = fx.reward;
+        tick(&mut fx.world, Vec2::ZERO);
+        // Leaning on the backstop, then walking straight out through the
+        // clearing window and beyond.
+        for u in [5.0_f32, 6.0, 9.0, 14.0, 19.0, 30.0] {
+            fx.world.player.pos = gate + f * u;
+            tick(&mut fx.world, f);
+        }
+        // And a placed rat (reward -> far outside) is not a walk either.
+        fx.world.player.pos = fx.reward;
+        tick(&mut fx.world, Vec2::ZERO);
+        fx.world.player.pos = gate + f * 40.0;
+        tick(&mut fx.world, f);
+        let rt = fx.world.ecs.resource::<GateRuntime>();
+        assert!(!rt.doors[0].armed);
+        assert!(!rt.doors[0].slammed);
     }
 
     // ---- Rat-holes --------------------------------------------------------

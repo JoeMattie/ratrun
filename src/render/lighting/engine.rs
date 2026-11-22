@@ -1,3 +1,20 @@
+//! The light map itself: light descriptions, accumulation, shadows and the
+//! final shade over the world pixels.
+//!
+//! * [`LightingMode`] — the detail tiers (`LIVE = [Full, Hard, Coarse,
+//!   Compact]`). `default_for_depth` picks the starting tier from the
+//!   terminal's colour depth, and the cost-driven quality controller drops a
+//!   tier when a frame runs past its budget.
+//! * [`Light`], [`LightShape`], [`Falloff`], [`Blend`], [`Flicker`],
+//!   [`LayerMask`], [`ShadowSoftness`], [`ShadowColor`] — what a light is.
+//!   Radii are world pixels, cone half-angles radians; receiver and occluder
+//!   masks are independent.
+//! * [`LightMap`] — owns its scratch buffers, the occluder set and the cached
+//!   angular visibility profiles, so a steady frame allocates nothing.
+//!
+//! Render-only: nothing here reads or writes simulation state, and a change of
+//! tier must never change a simulated number.
+
 use super::shadow::{Body, Geometry, ShadowProfile, Surface};
 use super::{fixtures, LightScene, ThemeAmbient};
 use crate::game::ecs::systems::boss::Boss;
@@ -228,6 +245,31 @@ pub(super) struct PointLight {
 const CANDIDATES: usize = 256;
 const MAX_MARKS: usize = 12_288;
 const MAX_BODIES: usize = 8;
+/// Shaped lights kept per frame. A full list evicts its lowest priority.
+const MAX_SHAPED: usize = 64;
+/// Consecutive over-budget frames before the controller drops a tier.
+const SLOW_FRAMES: u8 = 8;
+/// Consecutive comfortably cheap frames before it climbs back one tier. The
+/// count doubles per relapse (see `QualityController::backoff`).
+const FAST_FRAMES: u16 = 180;
+/// A tier regained and lost again within this many frames is a relapse.
+const PROBATION_FRAMES: u16 = 600;
+const MAX_BACKOFF: u8 = 4;
+/// Share of the gap the ambient cap closes per frame (about 0.4 s at 60 FPS).
+const CAP_EASE: f32 = 0.12;
+
+/// Ambient gain of a light zone; `None` is unzoned floor.
+fn zone_gain(zone: Option<LightZoneKind>) -> f32 {
+    match zone {
+        Some(LightZoneKind::Start) => 0.95,
+        Some(LightZoneKind::Room) => 0.80,
+        Some(LightZoneKind::Corridor) => 0.56,
+        Some(LightZoneKind::Arena) => 0.64,
+        Some(LightZoneKind::Blackout) => 0.26,
+        Some(LightZoneKind::Maze) => 0.25,
+        None => 0.70,
+    }
+}
 
 pub(super) struct Candidates {
     points: Vec<PointLight>,
@@ -293,11 +335,23 @@ impl Default for Grid {
     }
 }
 
+/// Cost-driven tier switching. `penalty` tiers are added to the base mode.
+///
+/// Dropping is quick (`SLOW_FRAMES` over budget in a row) and climbing is slow
+/// (`FAST_FRAMES` well under budget in a row). A cheap frame at the lower tier
+/// does not prove the tier above fits, so a climb that is lost again inside
+/// `PROBATION_FRAMES` doubles the next climb's wait: a scene that sits between
+/// two tiers settles on the cheaper one instead of flapping every few seconds.
+/// A climb that survives its probation earns one step of that wait back.
 #[derive(Default)]
 struct QualityController {
     penalty: usize,
     slow: u8,
-    fast: u8,
+    fast: u16,
+    /// Frames left in which losing the regained tier counts as a relapse.
+    probation: u16,
+    /// Left shift on `FAST_FRAMES`, `0..=MAX_BACKOFF`.
+    backoff: u8,
 }
 
 pub struct LightMap {
@@ -310,6 +364,13 @@ pub struct LightMap {
     moving_shadows: [ShadowProfile; 3],
     bodies: Vec<Body>,
     controller: QualityController,
+    /// Reused coverage scratch for the ambient smoke plumes (`ambience.rs`).
+    pub(super) plume: Vec<u8>,
+    /// Eased ambient gain of the zone the rat stands in. Nothing on screen is
+    /// lit above it, so a room he has not walked into never outshines the
+    /// passage he is in; it brightens as he enters. `None` until he has stood
+    /// in a zone (an unzoned level is not capped at all).
+    ambient_cap: Option<f32>,
 }
 
 impl Default for LightMap {
@@ -325,7 +386,7 @@ impl LightMap {
                 points: Vec::with_capacity(CANDIDATES),
                 weakest: 0,
             },
-            shaped: Vec::with_capacity(64),
+            shaped: Vec::with_capacity(MAX_SHAPED),
             marks: Vec::with_capacity(MAX_MARKS),
             grid: Grid::default(),
             geometry: Geometry::default(),
@@ -333,6 +394,8 @@ impl LightMap {
             moving_shadows: [ShadowProfile::default(); 3],
             bodies: Vec::with_capacity(MAX_BODIES),
             controller: QualityController::default(),
+            plume: Vec::new(),
+            ambient_cap: None,
         }
     }
 
@@ -348,20 +411,34 @@ impl LightMap {
         let budget = 160.0 + pixels as f64 * 0.035;
         let micros = elapsed.as_secs_f64() * 1e6;
         let state = &mut self.controller;
+        if state.probation != 0 {
+            state.probation -= 1;
+            if state.probation == 0 {
+                // The regained tier held: forgive one relapse.
+                state.backoff = state.backoff.saturating_sub(1);
+            }
+        }
         if micros > budget && mode.rank() < LightingMode::Compact.rank() {
             state.fast = 0;
             state.slow += 1;
-            if state.slow == 8 {
+            if state.slow >= SLOW_FRAMES {
                 state.slow = 0;
-                state.penalty += 1;
+                // Never bank more tiers than exist, or a later, cheaper base
+                // mode would have to pay them all back before recovering.
+                state.penalty = (state.penalty + 1).min(LightingMode::LIVE.len() - 1);
+                if state.probation != 0 {
+                    state.probation = 0;
+                    state.backoff = (state.backoff + 1).min(MAX_BACKOFF);
+                }
             }
         } else {
             state.slow = 0;
             if micros < budget * 0.56 && state.penalty != 0 {
                 state.fast += 1;
-                if state.fast == 180 {
+                if state.fast >= FAST_FRAMES << state.backoff {
                     state.fast = 0;
                     state.penalty -= 1;
+                    state.probation = PROBATION_FRAMES;
                 }
             } else {
                 state.fast = 0;
@@ -374,10 +451,12 @@ impl LightMap {
         self.marks.clear();
     }
 
+    /// Submit a light for this frame. The list holds `MAX_SHAPED`; once full,
+    /// a light replaces the lowest-priority entry it outranks (so a screen of
+    /// priority-1 halos cannot crowd out the rat's aura) and is dropped
+    /// otherwise.
     pub fn push_shaped(&mut self, light: Light, priority: u8) {
-        if self.shaped.len() < self.shaped.capacity() {
-            self.shaped.push((light, priority));
-        }
+        push_shaped(&mut self.shaped, light, priority);
     }
 
     /// A cheap coloured halo from a short-lived source, in world pixels.
@@ -436,17 +515,45 @@ impl LightMap {
         self.geometry.sync(scene.level);
         let theme = scene.level.theme;
         let profile = super::theme_ambient(theme);
+        // The rat's own zone bounds the ambient everywhere and the reach of
+        // lamps hung in brighter zones. Eased per frame (render-only state), and
+        // held while he crosses unzoned cells so a doorway does not pulse.
+        let cap = match (
+            self.geometry.surface(scene.player.pos).zone,
+            self.ambient_cap,
+        ) {
+            (Some(zone), Some(cap)) => {
+                let cap = cap + (zone_gain(Some(zone)) - cap) * CAP_EASE;
+                self.ambient_cap = Some(cap);
+                cap
+            }
+            (Some(zone), None) => {
+                let cap = zone_gain(Some(zone));
+                self.ambient_cap = Some(cap);
+                cap
+            }
+            (None, cap) => cap.unwrap_or(1.0),
+        };
         self.grid
-            .prepare(pb, scene.cam, scene.mode, &self.geometry, profile);
+            .prepare(pb, scene.cam, scene.mode, &self.geometry, profile, cap);
         self.lights.points.clear();
         self.lights.weakest = 0;
         let phase = self.gather_lights(pb.w, pb.h, scene);
         self.static_shadows
             .resize(scene.level.objects.lights.len(), ShadowProfile::default());
         for (i, fixture) in scene.level.objects.lights.iter().enumerate() {
-            let light = fixtures::light(*fixture, theme, profile, phase, scene);
+            let mut light = fixtures::light(*fixture, theme, profile, phase, scene);
             if !self.grid.overlaps(light) || light.energy <= 0.001 {
                 continue;
+            }
+            if fixture.kind != LightFixtureKind::Sun {
+                // A lamp hung in a brighter zone than the rat's is turned down
+                // by the same ratio as that zone's ambient.
+                let own = zone_gain(self.geometry.surface(fixture.pos).zone);
+                if own > cap {
+                    light.energy *= cap / own;
+                    light.scatter *= cap / own;
+                }
             }
             if fixture.kind == LightFixtureKind::Sun {
                 self.sun(pb, scene, light);
@@ -490,9 +597,7 @@ impl LightMap {
             } else {
                 Falloff::Smooth
             };
-            if self.shaped.len() < self.shaped.capacity() {
-                self.shaped.push((light, p.priority));
-            }
+            push_shaped(&mut self.shaped, light, p.priority);
         }
         // Prefer the rat, then active arena lights and foreground flashes.
         self.shaped.sort_unstable_by(|a, b| {
@@ -528,7 +633,10 @@ impl LightMap {
         if hp < 0.35 {
             self.grid.vignette(hp, scene.elapsed);
         }
-        self.marks.retain(|m| pb.pixels()[m.index] == m.source);
+        // A mark outlives its pixel when a later sprite painted over it, and
+        // (defensively) when the buffer it was taken from is not this one.
+        self.marks
+            .retain(|m| pb.pixels().get(m.index) == Some(&m.source));
         self.grid.composite(pb, scene.depth);
         for mark in &self.marks {
             let pixel = &mut pb.pixels_mut()[mark.index];
@@ -580,6 +688,16 @@ impl LightMap {
         if scene.mode != LightingMode::Compact {
             for entity in scene.ecs.iter_entities() {
                 if let Some(boss) = entity.get::<Boss>() {
+                    // A bird overhead or a cat mid-pounce draws its own
+                    // detached shadow; a ground shadow at its feet would be a
+                    // second one. A wreck casts nothing new either.
+                    let magpie_up = matches!(
+                        boss.state,
+                        crate::game::ecs::systems::boss::BossState::Magpie(st) if st.flying()
+                    );
+                    if boss.is_airborne() || magpie_up || boss.dead {
+                        continue;
+                    }
                     add_body(
                         &mut self.bodies,
                         Body {
@@ -621,6 +739,25 @@ impl LightMap {
     }
 }
 
+/// The body of [`LightMap::push_shaped`], on the list alone so it can run
+/// while another field of the map is borrowed.
+fn push_shaped(shaped: &mut Vec<(Light, u8)>, light: Light, priority: u8) {
+    if shaped.len() < MAX_SHAPED {
+        shaped.push((light, priority));
+        return;
+    }
+    // First of the lowest priority: deterministic, and only on overflow.
+    let mut weakest = 0;
+    for (i, entry) in shaped.iter().enumerate() {
+        if entry.1 < shaped[weakest].1 {
+            weakest = i;
+        }
+    }
+    if shaped[weakest].1 < priority {
+        shaped[weakest] = (light, priority);
+    }
+}
+
 impl Grid {
     fn prepare(
         &mut self,
@@ -629,6 +766,7 @@ impl Grid {
         mode: LightingMode,
         geometry: &Geometry,
         profile: ThemeAmbient,
+        cap: f32,
     ) {
         self.stride = mode.stride();
         let s = self.stride as i32;
@@ -652,17 +790,9 @@ impl Grid {
         for i in 0..self.samples.len() {
             let p = self.point(i % self.w, i / self.w);
             let surface = geometry.surface(p);
-            let zone_gain = match surface.zone {
-                Some(LightZoneKind::Start) => 0.95,
-                Some(LightZoneKind::Room) => 0.80,
-                Some(LightZoneKind::Corridor) => 0.56,
-                Some(LightZoneKind::Arena) => 0.64,
-                Some(LightZoneKind::Blackout) => 0.26,
-                Some(LightZoneKind::Maze) => 0.25,
-                None => 0.70,
-            };
+            let gain = zone_gain(surface.zone).min(cap);
             self.samples[i] = Sample {
-                mul: profile.mul.map(|c| (c as f32 * zone_gain) as u16),
+                mul: profile.mul.map(|c| (c as f32 * gain) as u16),
                 ..Sample::default()
             };
             self.surfaces[i] = surface;

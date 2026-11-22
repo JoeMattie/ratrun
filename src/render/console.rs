@@ -142,15 +142,26 @@ pub fn draw(frame: &mut Frame, area: Rect, console: &Console) {
     // Prompt line: "> " + the edited text, with a blinking caret.
     let prompt_style = Style::default().bg(CONSOLE_BG).fg(COAT);
     buf.set_stringn(panel.x, prompt_y, PROMPT, panel.width as usize, prompt_style);
-    let text_x = panel.x + PROMPT.len() as u16;
-    let avail = panel.width.saturating_sub(PROMPT.len() as u16);
-    buf.set_stringn(text_x, prompt_y, &console.input, avail as usize, prompt_style);
+    let prompt_w = PROMPT.chars().count() as u16;
+    let text_x = panel.x + prompt_w;
+    let avail = usize::from(panel.width.saturating_sub(prompt_w));
+    // The cursor's column in cells (the cursor itself is a byte index), and
+    // the horizontal scroll that keeps it on the panel: a line longer than the
+    // panel used to push the caret and everything typed after it off the right
+    // edge.
+    let cursor_col = console
+        .input
+        .get(..console.cursor)
+        .map_or_else(|| console.input.chars().count(), |s| s.chars().count());
+    let skip = (cursor_col + 1).saturating_sub(avail);
+    let shown: String = console.input.chars().skip(skip).take(avail).collect();
+    buf.set_stringn(text_x, prompt_y, &shown, avail, prompt_style);
 
-    // Caret: a solid block when the blink phase is "on". Place it at the
-    // cursor's display column (byte index for ASCII, which commands are).
+    // Caret: a solid block when the blink phase is "on", over the character
+    // under the cursor (a space at the end of the line).
     let blink_on = console.blink < 0.53;
     if blink_on {
-        let caret_col = text_x.saturating_add(console.cursor as u16);
+        let caret_col = text_x.saturating_add(cursor_col.saturating_sub(skip) as u16);
         if caret_col < panel.right() {
             let ch = console
                 .input
@@ -246,6 +257,38 @@ mod tests {
             buffer_text(&term).contains("CONSOLE"),
             "an open console did not paint its title"
         );
+    }
+
+    /// A line longer than the panel scrolls with the cursor: the end of what
+    /// was typed and the caret stay on the prompt row at every size.
+    #[test]
+    fn a_long_prompt_scrolls_to_keep_the_caret_visible() {
+        for (w, h) in SIZES {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            let mut c = open_console();
+            c.blink = 0.0;
+            c.input = format!("spawn {} TAIL", "x".repeat(usize::from(w) + 20));
+            c.cursor = c.input.len();
+            term.draw(|f| draw(f, f.area(), &c)).unwrap();
+            let p = panel_rect(Rect::new(0, 0, w, h), 1.0);
+            let buf = term.backend().buffer();
+            let row: String = (0..w).map(|x| buf[(x, p.bottom() - 1)].symbol()).collect();
+            assert!(row.starts_with(PROMPT), "{w}x{h}: the prompt mark scrolled away");
+            assert!(row.contains("TAIL"), "{w}x{h}: the line's end is off screen: {row:?}");
+            // The caret is the last cell of the row, after the last character.
+            assert_eq!(
+                buf[(w - 1, p.bottom() - 1)].bg,
+                CARET_FG,
+                "{w}x{h}: the caret is not on the panel"
+            );
+
+            // With the cursor at the start, the line reads from its first word.
+            c.cursor = 0;
+            term.draw(|f| draw(f, f.area(), &c)).unwrap();
+            let buf = term.backend().buffer();
+            let row: String = (0..w).map(|x| buf[(x, p.bottom() - 1)].symbol()).collect();
+            assert!(row.contains("spawn"), "{w}x{h}: {row:?}");
+        }
     }
 
     #[test]

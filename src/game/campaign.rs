@@ -1,13 +1,16 @@
-//! The campaign: three themed levels in order, the carry-over between them and
+//! The campaign: three themed levels on a branching route, the carry-over
+//! between them and
 //! the deterministic seeds that make a run reproducible.
 //!
 //! ## Run structure (owner's decision)
 //!
-//! Sewer → Kitchen → Lab. A level is **complete when its boss dies**; killing
-//! the Lab boss wins the run. The five-minute clock is no longer the win
-//! condition — `director::RUN_SECONDS` is now only the top of the difficulty
-//! curve, and the boss fight starts at `director::BOSS_TIME` (255 s) and
-//! continues until the boss or the rat dies while the horde keeps coming.
+//! Sewer → (Kitchen | Laundry) → (Lab | Printworks): the player picks each
+//! later stage's floor on the keep plate. A level is **complete when its boss
+//! dies**; killing the third level's boss wins the run. The clock is not a win
+//! condition — `director::RUN_SECONDS` is only the top of the difficulty
+//! curve, and the boss fight starts at `director::BOSS_TIME` (900 s, the same
+//! value) and continues until the boss or the rat dies. The Flatbed is a
+//! practice floor and never a campaign step.
 //!
 //! The simulation side of that lives in [`super::world::World`] (`level_index`,
 //! `level_complete`, `finished`, `campaign_won`) and
@@ -18,8 +21,8 @@
 //! 2. [`CampaignState::world`] — build the `World` for the current level.
 //! 3. Play until the boss dies (`world.level_complete()`).
 //! 4. [`keepables`] — list what the player may take through, in a stable order
-//!    with display strings (the 3-of-N keep screen).
-//! 5. [`CampaignState::complete_level`] — validate the choice (≤ 3, no
+//!    with display strings (the keep screen: up to [`keep_limit`] of N).
+//! 5. [`CampaignState::complete_level`] — validate the choice (≤ [`keep_limit`], no
 //!    duplicates), fold the level's score/kills/time into the totals, carry
 //!    the chosen powerups and advance the level index.
 //! 6. [`CampaignState::world`] again for the next level, or stop when
@@ -290,7 +293,7 @@ impl Keepable {
 /// Why a keep selection is not allowed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum KeepError {
-    /// More than [`KEEP_COUNT`] entries were chosen.
+    /// More than [`keep_limit`] entries were chosen.
     TooMany { count: usize },
     /// The same weapon/passive appears twice.
     Duplicate(KeepKind),
@@ -351,7 +354,7 @@ pub fn keepables(loadout: &Loadout) -> Vec<Keepable> {
 }
 
 /// Validate a keep selection against the loadout it comes from: at most
-/// [`KEEP_COUNT`] entries, no duplicates, every entry owned.
+/// [`keep_limit`] entries, no duplicates, every entry owned.
 ///
 /// `previous` matters because the entries carry a level: keeping a weapon the
 /// level never owned would be an infinite powerup generator. An empty selection
@@ -460,11 +463,13 @@ pub struct CampaignTotals {
 impl CampaignTotals {
     /// Fold one completed level's counters in.
     pub fn absorb(&mut self, world: &World) {
-        self.score += world.score;
-        self.kills += world.kills;
+        // Saturating: a console `gold`/score edit or a very long run must not
+        // overflow-panic a debug build between floors.
+        self.score = self.score.saturating_add(world.score);
+        self.kills = self.kills.saturating_add(world.kills);
         self.elapsed += world.elapsed;
         self.gold = world.gold;
-        self.gold_spent += world.gold_spent;
+        self.gold_spent = self.gold_spent.saturating_add(world.gold_spent);
         self.revives_used = self.revives_used.saturating_add(world.revives_used());
     }
 }

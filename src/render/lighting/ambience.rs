@@ -37,6 +37,8 @@ fn recipe(kind: EmitterKind) -> Recipe {
     use EmitterKind::*;
     use Motion::{Drift, Drip as Fall, Jet, Orbit, Rise, Spark};
     let (core, vapour, rate, life, size, travel, radius, energy, motion) = match kind {
+        // A smoulder, not a bonfire: a low ember pool under its own smoke,
+        // dimmer and tighter than a ceiling lamp on every floor.
         Fire => (
             (255, 157, 67),
             (106, 88, 93),
@@ -44,8 +46,8 @@ fn recipe(kind: EmitterKind) -> Recipe {
             2.60,
             7.4,
             (8.0, -29.0),
-            109.0,
-            0.92,
+            84.0,
+            0.56,
             Rise,
         ),
         Steam => (
@@ -235,8 +237,9 @@ pub(crate) fn draw_ambience(
         if light.casts_shadow {
             map.push_shaped(
                 light,
+                // Above the halos, below the rat's own and combat lights.
                 if emitter.kind == EmitterKind::Fire {
-                    3
+                    2
                 } else {
                     1
                 },
@@ -308,7 +311,7 @@ fn paint_emitter(
     let count = (births_per_sec * spec.life)
         .ceil()
         .clamp(1.0, MAX_BIRTHS as f32) as usize;
-    let mut plume = Plume::new(x, y);
+    let mut plume = Plume::new(x, y, std::mem::take(&mut map.plume));
     let opacity = MAX_SMOKE_OPACITY * 0.56 * emitter.intensity.min(1.0);
     for i in 0..count {
         let index = newest - i as i32;
@@ -381,6 +384,7 @@ fn paint_emitter(
         }
     }
     plume.paint(pb, spec.vapour);
+    map.plume = plume.finish();
 }
 
 fn dot(map: &mut LightMap, pb: &mut PixelBuffer, p: Vec2, color: Rgb) {
@@ -395,20 +399,41 @@ fn dot(map: &mut LightMap, pb: &mut PixelBuffer, p: Vec2, color: Rgb) {
 const PLUME_SIDE: usize = 96;
 
 /// Merge overlapping puffs into one bounded-opacity stamp per emitter.
+///
+/// The coverage buffer is borrowed from the `LightMap` and handed back by
+/// [`Plume::finish`] with only the touched box cleared, so an emitter costs
+/// neither an allocation nor a 9 KB wipe per frame.
 struct Plume {
     origin: (i32, i32),
     bounds: (i32, i32, i32, i32),
-    coverage: [u8; PLUME_SIDE * PLUME_SIDE],
+    coverage: Vec<u8>,
 }
 
 impl Plume {
-    fn new(x: i32, y: i32) -> Self {
+    /// `coverage` must be all zero or of the wrong length (it is then rebuilt).
+    fn new(x: i32, y: i32, mut coverage: Vec<u8>) -> Self {
         let half = PLUME_SIDE as i32 / 2;
+        if coverage.len() != PLUME_SIDE * PLUME_SIDE {
+            coverage.clear();
+            coverage.resize(PLUME_SIDE * PLUME_SIDE, 0);
+        }
         Self {
             origin: (x - half, y - half),
             bounds: (PLUME_SIDE as i32, PLUME_SIDE as i32, 0, 0),
-            coverage: [0; PLUME_SIDE * PLUME_SIDE],
+            coverage,
         }
+    }
+
+    /// Zero what the puffs touched and return the buffer for the next emitter.
+    fn finish(mut self) -> Vec<u8> {
+        let (x0, y0, x1, y1) = self.bounds;
+        if x0 < x1 {
+            for y in y0.max(0)..y1.min(PLUME_SIDE as i32) {
+                let row = y as usize * PLUME_SIDE;
+                self.coverage[row + x0 as usize..row + x1 as usize].fill(0);
+            }
+        }
+        self.coverage
     }
 
     fn puff(&mut self, p: Vec2, radius: f32, alpha: f32) {
@@ -535,7 +560,7 @@ mod tests {
         let mut pb = PixelBuffer::new(20, 20);
         for count in [1, 4, 12] {
             pb.clear((255, 255, 255));
-            let mut plume = Plume::new(10, 10);
+            let mut plume = Plume::new(10, 10, Vec::new());
             for _ in 0..count {
                 plume.puff(Vec2::new(10.0, 10.0), 8.0, 0.19);
             }

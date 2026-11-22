@@ -25,8 +25,8 @@
 //!
 //! ## Campaign levels
 //!
-//! The three maps are a campaign in order (Sewer → Kitchen → Lab — see
-//! [`crate::game::campaign`]) and the director takes the campaign level index
+//! A campaign is three levels on a branching route (Sewer → Kitchen or
+//! Laundry → Lab or Printworks — see [`crate::game::campaign`]) and the director takes the campaign level index
 //! every system tick (`resources::LevelIndex`). The owner found the later
 //! levels far too hard on the old 300 s curves, so the wave-3 re-base is
 //! deliberately gentle: **no clock offset** (every stage opens with the same
@@ -641,8 +641,17 @@ pub fn elite_interval_at(curve: f32) -> f32 {
         // No elites yet: retry in a minute rather than never arming the timer.
         return 60.0;
     }
-    (1.0 / (chance * bodies_per_second_at(curve).max(0.1))).max(6.0)
+    // The ceiling matters as much as the floor: the timer is reset once, at
+    // spawn time, with the interval of *that* instant. The first elite lands
+    // around 3:20, where the chance is ~0.1 % and the raw interval ~280 s, so
+    // without a cap the floor saw no second elite until ~8:00 (the chance
+    // column implies about ten in that gap) and then one every 6-10 s.
+    (1.0 / (chance * bodies_per_second_at(curve).max(0.1))).clamp(6.0, ELITE_INTERVAL_MAX)
 }
+
+/// The longest the elite timer may be reset to once elites are live (see
+/// [`elite_interval_at`]): a rising chance is re-read at least this often.
+pub const ELITE_INTERVAL_MAX: f32 = 45.0;
 
 /// The horde's damage multiplier at the top of a level's ramp (its boss time).
 ///
@@ -685,6 +694,23 @@ pub fn pick_kind(elapsed: f32, rng: &mut impl Rng) -> EnemyKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The elite timer is reset once per elite, so a huge interval read while
+    /// the chance is still tiny must not silence elites for minutes.
+    #[test]
+    fn the_elite_interval_is_bounded_once_elites_are_live() {
+        let mut t = ELITE_START + 1.0;
+        while t <= BOSS_TIME {
+            let gap = elite_interval_at(t);
+            assert!(
+                (6.0..=ELITE_INTERVAL_MAX).contains(&gap),
+                "elite interval {gap} s at {t} s is outside 6..={ELITE_INTERVAL_MAX}"
+            );
+            t += 1.0;
+        }
+        // Late in the floor the design's rate still wins over the ceiling.
+        assert!(elite_interval_at(BOSS_TIME) < 10.0);
+    }
     use crate::game::campaign::LEVEL_COUNT;
 
     #[test]
@@ -722,7 +748,9 @@ mod tests {
                 seen.push(k);
             }
         }
-        assert!(seen.contains(&EnemyKind::Bat) && seen.contains(&EnemyKind::Brute));
+        // The Sewer's heavy is the Sluice Toad now: a Brute by archetype.
+        assert!(seen.contains(&EnemyKind::Bat));
+        assert!(seen.iter().any(|k| k.archetype() == EnemyKind::Brute));
         assert!(seen.contains(&EnemyKind::Skitterer));
     }
 

@@ -42,7 +42,12 @@ impl PixelBuffer {
     ///
     /// The source covers exactly the same world rectangle the destination will
     /// show, so each destination pixel owns the source box
-    /// `[x·sx, (x+1)·sx) × [y·sy, (y+1)·sy)`:
+    /// `[⌊x·sx⌋, ⌊(x+1)·sx⌋) × [⌊y·sy⌋, ⌊(y+1)·sy⌋)` (at least one pixel).
+    /// Both ends round **down**, so zoomed out the boxes partition the source:
+    /// every source pixel belongs to exactly one screen pixel, and a one-pixel
+    /// line is one pixel wide at the fractional rungs (1.25×, 1.5×) wherever it
+    /// falls, instead of doubling when it lands on a shared column. Zoomed in
+    /// (0.5×, 0.75×) the box is always a single pixel:
     ///
     /// * **zoomed out** (`self.w > dst.w`) the box spans several source
     ///   pixels and exactly one of them is written, unblended: the one that
@@ -65,11 +70,11 @@ impl PixelBuffer {
         }
         for y in 0..dst.h {
             let y0 = y * self.h / dst.h;
-            let y1 = ((y + 1) * self.h).div_ceil(dst.h).max(y0 + 1).min(self.h);
+            let y1 = ((y + 1) * self.h / dst.h).max(y0 + 1).min(self.h);
             let row = y * dst.w;
             for x in 0..dst.w {
                 let x0 = x * self.w / dst.w;
-                let x1 = ((x + 1) * self.w).div_ceil(dst.w).max(x0 + 1).min(self.w);
+                let x1 = ((x + 1) * self.w / dst.w).max(x0 + 1).min(self.w);
                 if x1 - x0 == 1 && y1 - y0 == 1 {
                     // Nearest neighbour (zoomed in): keep the pixel exact.
                     dst.px[row + x] = self.px[y0 * self.w + x0];
@@ -375,6 +380,44 @@ mod tests {
         assert_eq!(dst.pixel_at(1, 0), (200, 0, 0));
         assert_eq!(dst.pixel_at(2, 0), (0, 200, 0));
         assert_eq!(dst.pixel_at(3, 1), (0, 200, 0));
+    }
+
+    #[test]
+    fn fractional_zoom_out_keeps_a_thin_line_one_pixel_wide_wherever_it_falls() {
+        // 1.5× and 1.25× (the fractional rungs): a one-pixel bright column on
+        // a dark field lands on exactly one screen column at every source
+        // position, never two (the boxes partition the source) and never none.
+        for (sw, dw) in [(12usize, 8usize), (10, 8), (180, 120), (150, 120), (71, 57)] {
+            for col in 0..sw {
+                let mut src = PixelBuffer::new(sw, 2);
+                src.plot(col as i32, 0, (255, 255, 255));
+                src.plot(col as i32, 1, (255, 255, 255));
+                let mut dst = PixelBuffer::new(dw, 2);
+                src.resample_to(&mut dst);
+                let lit = (0..dw).filter(|&x| dst.pixel_at(x, 0) == (255, 255, 255)).count();
+                assert_eq!(lit, 1, "source column {col} of {sw} → {dw} lit {lit} screen columns");
+            }
+        }
+    }
+
+    #[test]
+    fn fractional_zoom_in_is_nearest_neighbour_with_no_salience_pick() {
+        // 0.75× and other non-integer close-ups: every screen pixel copies the
+        // one source pixel under its left edge. A bright pixel must not bleed
+        // into the neighbour that merely overlaps it.
+        for (sw, dw) in [(3usize, 4usize), (90, 120), (43, 57), (5, 8)] {
+            let mut src = PixelBuffer::new(sw, 1);
+            for x in 0..sw {
+                // Alternate dark and bright so any salience pick would show.
+                let v = if x % 2 == 0 { 10 } else { 250 };
+                src.plot(x as i32, 0, (v, x as u8, 0));
+            }
+            let mut dst = PixelBuffer::new(dw, 1);
+            src.resample_to(&mut dst);
+            for x in 0..dw {
+                assert_eq!(dst.pixel_at(x, 0), src.pixel_at(x * sw / dw, 0), "{sw} → {dw}, screen x {x}");
+            }
+        }
     }
 
     #[test]

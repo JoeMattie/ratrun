@@ -867,7 +867,9 @@ fn hash01(ix: i32, iy: i32) -> f32 {
 fn line_dashed(pb: &mut PixelBuffer, a: Vec2, b: Vec2, col: Rgb, alpha: f32, dash: f32, phase: f32) {
     let d = b - a;
     let len = d.len();
-    if len <= 0.1 {
+    // A non-positive dash would never advance `t` below (an endless loop), and
+    // a non-finite length would never end it.
+    if len <= 0.1 || !len.is_finite() || !dash.is_finite() || dash < 0.25 {
         return;
     }
     let dir = d * (1.0 / len);
@@ -891,6 +893,9 @@ fn line_dashed(pb: &mut PixelBuffer, a: Vec2, b: Vec2, col: Rgb, alpha: f32, das
 
 fn line_solid(pb: &mut PixelBuffer, a: Vec2, b: Vec2, col: Rgb, alpha: f32) {
     let d = b - a;
+    if !d.len().is_finite() {
+        return;
+    }
     let steps = (d.len() * 1.5).ceil().max(1.0) as i32;
     for i in 0..=steps {
         let t = i as f32 / steps as f32;

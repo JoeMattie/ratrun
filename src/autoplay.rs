@@ -260,6 +260,18 @@ pub enum DamageCause {
     MinibossSignature(crate::game::ecs::systems::miniboss::MinibossKind),
     /// A floor trap (the mousetrap snap; glue only slows).
     Trap,
+    /// A Laundry steam grate's plume (it used to be booked to the nearest
+    /// body's contact, or to "unknown").
+    Steam,
+    /// A fall through a hole in the Flatbed's deck.
+    Pit,
+    /// The Flatbed's sliding crate.
+    Cargo,
+    /// A regular enemy's **warned floor attack** (not its body): a Bell Flea's
+    /// landing, a Turnkey's crossbar, a Wick Moth's burst, a hornet's dive, an
+    /// Egg Timer's ring, a Walking Syringe's needle, a Peg Snapper's jaws, a
+    /// Staple Crawler's feet. Named by the kind that owns the attack.
+    FloorAttack(EnemyKind),
     /// Nothing matched the HP loss (should be rare).
     Unknown,
 }
@@ -510,6 +522,10 @@ impl DamageCause {
             // It fires nothing but its own spit; the arm keeps the label honest.
             DamageCause::BossProjectile(BossKind::Cobra) => "cobra venom",
             DamageCause::Trap => "mousetrap",
+            DamageCause::Steam => "steam grate",
+            DamageCause::Pit => "deck hole",
+            DamageCause::Cargo => "sliding cargo",
+            DamageCause::FloorAttack(kind) => floor_attack_name(kind),
             DamageCause::MinibossSignature(kind) => {
             // The batch's damage-by-source column used to lump every
             // appointment hit into "unknown": a fifth of a hard floor's damage
@@ -924,7 +940,12 @@ impl AutoRun {
         let hp_before = self.world.player.hp;
         let regen = self.world.player.loadout.stats.regen * dt;
         let boss_before = self.boss_state();
-        self.world.update(dt, input.move_dir, input.dash);
+        // `update` with the bot's Super Dash charge passed through: with
+        // `charge == 0.0` (every tick the bot is not holding for a lane) this
+        // is exactly `World::update`. The charge used to be dropped here, so
+        // the bot's charged dash never fired in a batch.
+        self.world
+            .update_with_charge(dt, input.move_dir, input.dash, input.dash, None, input.charge);
         // No audio in a self-playing run: the queue is drained and discarded.
         self.world.sfx.clear();
         self.account_tick(dt, hp_before, regen, boss_before);
@@ -1080,7 +1101,16 @@ impl AutoRun {
     }
 
     fn take_upgrade(&mut self) {
-        let choices = self.world.player.loadout.generate_choices(&mut self.rng);
+        // The App's own path (`App::open_levelup` / `apply_levelup`): the cards
+        // are drawn against the rat's real health, so a Bandage is hidden at
+        // full health instead of being offered at the old fixed 50 %.
+        let hp_frac =
+            (self.world.player.hp / self.world.player.max_hp().max(1.0)).clamp(0.0, 1.0);
+        let choices = self
+            .world
+            .player
+            .loadout
+            .generate_choices_with_hp(&mut self.rng, hp_frac);
         if choices.is_empty() {
             return;
         }
@@ -1089,6 +1119,14 @@ impl AutoRun {
         let title = self.world.player.loadout.describe(&choices[pick]).0;
         let heal = self.world.player.loadout.apply(&choices[pick]);
         self.world.player.heal(heal);
+        // The wallet belongs to the caller, not the loadout: without this a
+        // Purse card was a wasted level-up for the bot.
+        if matches!(choices[pick], crate::game::loadout::Upgrade::Purse) {
+            self.world.gold = self
+                .world
+                .gold
+                .saturating_add(crate::game::loadout::PURSE_GOLD);
+        }
         self.level_stats().upgrades.push(title);
     }
 
@@ -1464,6 +1502,24 @@ impl AutoRun {
         // is still the likeliest author of an unexplained HP drop.
         let mut nearest: Option<(EnemyKind, f32)> = None;
         for e in w.ecs.iter_entities() {
+            // A named miniboss's signature is its own warned shape; without
+            // this row every appointment hit was attributed to the nearest
+            // ordinary body (or to "unknown") in the damage-by-source table.
+            // A miniboss entity is an `Enemy` too, so this cannot be an arm of
+            // the chain below (as an `else if` after the `Enemy` arm it never
+            // ran, and every signature hit was booked as "brute contact").
+            if let Some(mb) = e.get::<Miniboss>() {
+                if let Some(shape) = mb.active_shape() {
+                    if shape.contains(p, R) {
+                        let amount = (mb.signature_damage - armor).max(1.0);
+                        self.threats.push((
+                            DamageCause::MinibossSignature(mb.kind),
+                            amount,
+                            shape.center().dist(p),
+                        ));
+                    }
+                }
+            }
             if let Some(en) = e.get::<Enemy>() {
                 if !en.alive() {
                     continue;
@@ -1471,6 +1527,13 @@ impl AutoRun {
                 let d = en.pos.dist(p);
                 if d - en.radius <= NEAR_ENEMY_PX {
                     self.near_enemy = true;
+                }
+                if let Some(raw) = floor_attack_landing(en, p) {
+                    self.threats.push((
+                        DamageCause::FloorAttack(en.kind),
+                        (raw - armor).max(1.0),
+                        d,
+                    ));
                 }
                 if nearest.map(|(_, nd)| d < nd) != Some(false) {
                     nearest = Some((en.kind, d));
@@ -1523,19 +1586,16 @@ impl AutoRun {
                         ));
                     }
                 }
-            } else if let Some(mb) = e.get::<Miniboss>() {
-                // A named miniboss's signature is its own warned shape; without
-                // this row every appointment hit was attributed to the nearest
-                // ordinary body (or to "unknown") in the damage-by-source table.
-                if let Some(shape) = mb.active_shape() {
-                    if shape.contains(p, R) {
-                        let amount = (mb.signature_damage - armor).max(1.0);
-                        self.threats.push((
-                            DamageCause::MinibossSignature(mb.kind),
-                            amount,
-                            shape.center().dist(p),
-                        ));
-                    }
+            } else if let Some(wick) = e.get::<crate::game::ecs::components::Wick>() {
+                // A dead Wick Moth's fuse running out inside this tick.
+                use crate::game::ecs::systems::enemy_wave3 as w3;
+                let d = wick.pos.dist(p);
+                if wick.fuse <= 0.05 && d <= w3::WICK_BURST_RADIUS + R + 2.0 {
+                    self.threats.push((
+                        DamageCause::FloorAttack(EnemyKind::WickMoth),
+                        (w3::WICK_RAT_DAMAGE - armor).max(1.0),
+                        d,
+                    ));
                 }
             } else if let Some(bp) = e.get::<BossProjectile>() {
                 let d = segment_point_dist(bp.prev, bp.pos, p);
@@ -1597,6 +1657,141 @@ impl AutoRun {
                 ));
             }
         }
+        // The Flatbed's own hazards (both lists are empty on every other
+        // floor). The snapshot is pre-tick, so a rat a step from the edge
+        // counts: the fall lands on the tick its centre crosses.
+        let deck = &w.level.trailer;
+        let near_pit = deck.pits.iter().any(|pit| {
+            let rect = pit.rect.to_world();
+            let m = 3.0;
+            p.x + m > rect.x && p.x - m < rect.right() && p.y + m > rect.y && p.y - m < rect.bottom()
+        });
+        if near_pit {
+            use crate::game::ecs::systems::trailer::FALL_PLAYER_DAMAGE;
+            self.threats.push((DamageCause::Pit, (FALL_PLAYER_DAMAGE - armor).max(1.0), 0.0));
+        }
+        for slide in &deck.slides {
+            use crate::game::ecs::systems::trailer::SLIDE_DAMAGE;
+            let offset = crate::game::level::TrailerDeck::slide_offset(slide, w.elapsed);
+            let d = p - (slide.rest + slide.dir * offset);
+            let slack = R + 3.0;
+            if d.x.abs() <= slide.half.x + slack && d.y.abs() <= slide.half.y + slack {
+                self.threats.push((DamageCause::Cargo, (SLIDE_DAMAGE - armor).max(1.0), d.len()));
+            }
+        }
+        for grate in &w.level.objects.steam_grates {
+            // A plume that is up and has not scalded the rat yet, or a tell
+            // that runs out inside this tick (the snapshot is pre-tick).
+            let landing = (grate.plume() && !grate.player_struck)
+                || (grate.warning()
+                    && grate.timer >= crate::game::hazards::STEAM_WARN_SECS - 0.05);
+            if landing && grate.covers(p, R + 2.0) {
+                self.threats.push((
+                    DamageCause::Steam,
+                    (crate::game::hazards::STEAM_DAMAGE - armor).max(1.0),
+                    grate.pos.dist(p),
+                ));
+            }
+        }
+    }
+}
+
+/// The raw (pre-armour) damage of the warned floor attack `en` could land on a
+/// rat at `p` **this tick**, if any. Read through the same `&Enemy` views the
+/// hit tests and the bot use, with a couple of pixels of slack because the
+/// snapshot is taken before the tick moves anything.
+///
+/// A kind owned by a `floor_*` module is read through that module only: it
+/// keeps its state in its archetype's scratch fields with a different meaning.
+fn floor_attack_landing(en: &Enemy, p: Vec2) -> Option<f32> {
+    use crate::game::ecs::systems::{
+        enemy_wave3 as w3, enemy_wave4 as w4, floor_kitchen, floor_lab, floor_laundry,
+        floor_printworks,
+    };
+    /// Seconds: one tick of slack on a timer that expires inside the tick.
+    const SOON: f32 = 0.05;
+    let slack = R + 2.0;
+    match en.kind {
+        EnemyKind::EggTimer => {
+            let (centre, radius) = floor_kitchen::egg_ring_of(en)?;
+            ((centre.dist(p) - radius).abs() <= floor_kitchen::EGG_RING_WIDTH * 0.5 + slack + 1.0)
+                .then_some(floor_kitchen::EGG_RING_DAMAGE)
+        }
+        EnemyKind::WalkingSyringe => {
+            let ray = floor_lab::syringe_ray(en)?;
+            ((ray.live || ray.progress >= 0.9)
+                && segment_point_dist(ray.from, ray.to, p)
+                    <= floor_lab::SYRINGE_RAY_WIDTH * 0.5 + slack)
+                .then_some(floor_lab::SYRINGE_DAMAGE)
+        }
+        EnemyKind::PegSnapper => {
+            let view = floor_laundry::jaw_view(en)?;
+            let closing = view.live()
+                || (view.phase == floor_laundry::PEG_PHASE_TELL
+                    && view.t >= floor_laundry::PEG_TELL_SECS - SOON);
+            (closing && view.touches(p, slack + 2.0)).then_some(floor_laundry::PEG_JAW_DAMAGE)
+        }
+        EnemyKind::StapleCrawler => {
+            let striking = en.w4.phase == floor_printworks::STAPLE_PHASE_STRIKE
+                || (en.w4.phase == floor_printworks::STAPLE_PHASE_TELL && en.w4.t <= SOON);
+            let reach = floor_printworks::STAPLE_FOOT_RADIUS + slack;
+            (floor_printworks::staple_warned(en)
+                && striking
+                && [en.w4.trail[0], en.w4.trail[1]].iter().any(|f| f.dist(p) <= reach))
+            .then_some(floor_printworks::STAPLE_FOOT_DAMAGE)
+        }
+        // The tongue only slows, and a rolling can is its own body's contact.
+        EnemyKind::SumpLeech | EnemyKind::LooseCan => None,
+        _ => match en.kind.archetype() {
+            EnemyKind::BellFlea => {
+                // Phase 1: the first cross (at `hop_to`) is pending. Phase 2:
+                // the spring back home is.
+                let at = match en.w3.flea_phase {
+                    1 => en.w3.hop_to,
+                    2 => en.w3.home,
+                    _ => return None,
+                };
+                (en.w3.flea_t <= SOON && at.dist(p) <= w3::FLEA_CROSS_RADIUS + slack)
+                    .then_some(w3::FLEA_CROSS_DAMAGE)
+            }
+            EnemyKind::Turnkey => {
+                let live = en.w3.bar_t > 0.0
+                    && !en.w3.bar_spent
+                    && en.w3.bar_t <= w3::CROSSBAR_LIVE_SECS + SOON;
+                let half = en.w3.bar_dir * (w3::CROSSBAR_LEN * 0.5);
+                (live
+                    && segment_point_dist(en.w3.bar_pos - half, en.w3.bar_pos + half, p)
+                        <= slack + 1.0)
+                    .then_some(w3::CROSSBAR_DAMAGE)
+            }
+            EnemyKind::MurderHornet => {
+                // The jab is the diving body itself, once per dive.
+                let diving = en.w4.phase == w4::HORNET_PHASE_DIVE
+                    || (en.w4.phase == w4::HORNET_PHASE_CHARGE && en.w4.t <= SOON);
+                let reach = en.radius + slack + w4::HORNET_DIVE_SPEED / 60.0;
+                (diving && en.w4.spent == 0 && en.pos.dist(p) <= reach)
+                    .then_some(w4::HORNET_JAB_DAMAGE)
+            }
+            _ => None,
+        },
+    }
+}
+
+/// The damage-by-source label of a warned floor attack, by the kind that owns
+/// it (a registered kind on a base body's attack reads as that attack).
+fn floor_attack_name(kind: EnemyKind) -> &'static str {
+    match kind {
+        EnemyKind::WickMoth => "wick moth burst",
+        EnemyKind::EggTimer => "egg timer ring",
+        EnemyKind::WalkingSyringe => "syringe needle",
+        EnemyKind::PegSnapper => "peg snapper jaws",
+        EnemyKind::StapleCrawler => "staple crawler feet",
+        _ => match kind.archetype() {
+            EnemyKind::BellFlea => "bell flea landing",
+            EnemyKind::Turnkey => "turnkey crossbar",
+            EnemyKind::MurderHornet => "murder hornet dive",
+            _ => "warned floor attack",
+        },
     }
 }
 
@@ -1609,6 +1804,10 @@ impl AutoRun {
 fn classify_death(w: &World, cause: DamageCause) -> String {
     match cause {
         DamageCause::Trap => "trap: mousetrap snap".to_string(),
+        DamageCause::Steam => "hazard: steam plume".to_string(),
+        DamageCause::Pit => "hazard: fell through the deck".to_string(),
+        DamageCause::Cargo => "hazard: sliding cargo".to_string(),
+        DamageCause::FloorAttack(kind) => format!("floor attack: {}", floor_attack_name(kind)),
         DamageCause::MinibossSignature(kind) => format!("miniboss: {} signature", kind.name()),
         DamageCause::BossContact(kind) => format!("boss: {} body", boss_name(kind)),
         DamageCause::BossHazard(kind, attack) => {

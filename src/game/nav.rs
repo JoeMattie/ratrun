@@ -578,6 +578,9 @@ pub struct FlowField {
 
     // In-flight recompute.
     job: Option<Job>,
+    /// A job that had already published part of its field was abandoned for a
+    /// new goal: the committed tables mix two goals until a job completes.
+    mixed: bool,
     queue: VecDeque<(i32, i32)>,
     scratch_cost: Vec<u32>,
     scratch_dir: Vec<Vec2>,
@@ -620,6 +623,7 @@ impl FlowField {
             coarse_target: std::array::from_fn(|_| vec![Vec2::ZERO; coarse_n]),
             coarse_cost: std::array::from_fn(|_| vec![u32::MAX; coarse_n]),
             job: None,
+            mixed: false,
             queue: VecDeque::with_capacity(fine_n),
             scratch_cost: vec![u32::MAX; fine_n],
             scratch_dir: vec![Vec2::ZERO; fine_n],
@@ -653,12 +657,26 @@ impl FlowField {
         };
 
         if self.job.map(|j| j.goal) != Some(gc) {
-            if self.goal == Some(gc) {
+            // A job publishes its fine window (and then each class's coarse
+            // table) as it goes, before `self.goal` moves. Once it has
+            // published anything the committed field is a mix of two goals, so
+            // "the field already points there" is only true for a job that has
+            // not committed yet.
+            let job_published = self.job.is_some_and(|j| {
+                j.class == 1 || matches!(j.stage, Stage::Coarse | Stage::Done)
+            });
+            if self.goal == Some(gc) && !job_published && !self.mixed {
                 // The player came back to the committed goal cell: drop the
                 // partial work, the field already points there.
                 self.job = None;
                 out.shared = self.fine_shared;
                 return out;
+            }
+            if job_published {
+                // The abandoned job overwrote part of the field: `self.goal`
+                // no longer describes all of it, so a return to that cell must
+                // not be mistaken for "nothing to do" until a job completes.
+                self.mixed = true;
             }
             self.start(gc);
         }
@@ -775,6 +793,7 @@ impl FlowField {
                 Stage::Done => {
                     self.job = None;
                     self.goal = Some(job.goal);
+                    self.mixed = false;
                     out.changed = true;
                     out.shared = job.shared;
                     return;
@@ -954,6 +973,19 @@ impl FlowField {
     /// when the window is shared).
     fn commit_fine(&mut self, job: Job) {
         let slot = if job.shared { 0 } else { job.class };
+        if !job.shared && job.class == 0 && self.fine_shared {
+            // Shared -> split: class 1 has been reading slot 0, and its own
+            // slot holds whatever the last split left there (possibly a window
+            // from minutes ago, around a goal on the far side of the map).
+            // Hand it the field it was actually using, so "keeps its previous
+            // window" below is true until its own build lands.
+            let (shared, own) = self.fine_dir.split_at_mut(1);
+            own[0].copy_from_slice(&shared[0]);
+            let (shared, own) = self.fine_cost.split_at_mut(1);
+            own[0].copy_from_slice(&shared[0]);
+            self.fine_win[1] = self.fine_win[0];
+            self.fine_valid[1] = self.fine_valid[0];
+        }
         self.fine_dir[slot].copy_from_slice(&self.scratch_dir);
         self.fine_cost[slot].copy_from_slice(&self.scratch_cost);
         self.fine_win[slot] = job.win;
@@ -1000,11 +1032,21 @@ impl FlowField {
 
     /// World position of the gate a step from `(bx, by)` crosses (the midpoint
     /// of the boundary opening), `None` when that edge has no gate. A diagonal
-    /// step returns the midpoint between its two half-gates.
+    /// step returns the gate of its first leg ([`Self::diagonal_leg`]): that
+    /// is the opening the body really walks through, where the average of two
+    /// half-gates is a point inside the block that no route crosses.
     fn gate_midpoint(&self, class: usize, bx: i32, by: i32, dx: i32, dy: i32) -> Option<Vec2> {
         if !self.block_in_bounds(bx, by) {
             return None;
         }
+        let (dx, dy) = if dx != 0 && dy != 0 {
+            match self.diagonal_leg(class, bx, by, dx, dy) {
+                Some(leg) => leg,
+                None => (dx, dy),
+            }
+        } else {
+            (dx, dy)
+        };
         let pos = |dx: i32, dy: i32| -> Option<Vec2> {
             let i = match (dx.signum(), dy.signum()) {
                 (1, 0) => 0,
@@ -1039,10 +1081,63 @@ impl FlowField {
 
     /// Does the edge from block `(bx, by)` toward `(dx, dy)` have a real gate
     /// (a pair of open, non-door cells straddling the shared boundary)?
-    /// Diagonal edges need both of their orthogonal halves. Static, like
+    /// A diagonal edge needs a real two-leg walk through one of the two
+    /// orthogonal neighbours ([`Self::diagonal_leg`]). Static, like
     /// [`Self::block_open_at`].
     #[inline]
     fn block_gate_at(&self, class: usize, bx: i32, by: i32, dx: i32, dy: i32) -> bool {
+        if dx != 0 && dy != 0 {
+            return self.diagonal_leg(class, bx, by, dx, dy).is_some();
+        }
+        self.cardinal_gate_at(class, bx, by, dx, dy)
+    }
+
+    /// The first leg of a diagonal block step, as a cardinal `(dx, 0)` or
+    /// `(0, dy)`: the orthogonal neighbour the walk goes through. `None` when
+    /// neither neighbour carries it.
+    ///
+    /// The old rule ("this block has a gate on both of its own sides") never
+    /// looked at the far block: the east gate and the south gate could each
+    /// lead into a neighbour that is walled off from the diagonal block, and
+    /// the coarse BFS then costed a route through rock. A diagonal now exists
+    /// only when one neighbour is traversable, is gated from this block and is
+    /// gated on to the diagonal block. The rule reads the same from both ends
+    /// (the two legs are the same two boundaries), so the BFS, which walks it
+    /// backwards from the goal, and the target derivation agree. The `x` leg
+    /// is tried first: a fixed order, so the choice is deterministic.
+    fn diagonal_leg(
+        &self,
+        class: usize,
+        bx: i32,
+        by: i32,
+        dx: i32,
+        dy: i32,
+    ) -> Option<(i32, i32)> {
+        let (sx, sy) = (dx.signum(), dy.signum());
+        if sx == 0 || sy == 0 {
+            return None;
+        }
+        // Through the horizontal neighbour, then vertically into the corner.
+        if self.block_open_at(class, bx + sx, by)
+            && self.cardinal_gate_at(class, bx, by, sx, 0)
+            && self.cardinal_gate_at(class, bx + sx, by, 0, sy)
+        {
+            return Some((sx, 0));
+        }
+        // Through the vertical neighbour, then horizontally into the corner.
+        if self.block_open_at(class, bx, by + sy)
+            && self.cardinal_gate_at(class, bx, by, 0, sy)
+            && self.cardinal_gate_at(class, bx, by + sy, sx, 0)
+        {
+            return Some((0, sy));
+        }
+        None
+    }
+
+    /// Does the **cardinal** edge from block `(bx, by)` toward `(dx, dy)` have
+    /// a gate? `false` for a diagonal or a zero step.
+    #[inline]
+    fn cardinal_gate_at(&self, class: usize, bx: i32, by: i32, dx: i32, dy: i32) -> bool {
         if !self.block_in_bounds(bx, by) {
             return false;
         }
@@ -1057,10 +1152,6 @@ impl FlowField {
             (-1, 0) => open(W),
             (0, 1) => open(S),
             (0, -1) => open(N),
-            (1, 1) => open(E) && open(S),
-            (1, -1) => open(E) && open(N),
-            (-1, 1) => open(W) && open(S),
-            (-1, -1) => open(W) && open(N),
             _ => false,
         }
     }
@@ -1692,6 +1783,93 @@ mod tests {
         assert_eq!(f.goal_cell(), g0);
         assert!(f.update(&tiles, Vec2::new(300.0, 300.0), NavBudget::FULL).changed);
         assert_ne!(f.goal_cell(), g0);
+    }
+
+    /// A job publishes its fine window before it finishes. Abandoning it
+    /// because the rat stepped back onto the committed goal cell must rebuild
+    /// the field, not leave the fine window aimed at the cell next door.
+    #[test]
+    fn returning_to_the_committed_goal_after_a_published_job_rebuilds_the_field() {
+        let tiles = test_tiles(40, 40, &[]);
+        let mut f = FlowField::new(&tiles);
+        let a = Vec2::new(6.5 * TILE_F, 6.5 * TILE_F);
+        let b = Vec2::new(7.5 * TILE_F, 6.5 * TILE_F);
+        assert!(f.update(&tiles, a, NavBudget::FULL).changed);
+        assert_eq!(f.goal_cell(), Some((6, 6)));
+        // Toward B with no coarse budget: the fine window is published, the
+        // job is parked in its coarse stage.
+        let u = f.update(
+            &tiles,
+            b,
+            NavBudget {
+                fine_cells: u32::MAX,
+                coarse_blocks: 0,
+            },
+        );
+        assert!(!u.changed, "the job must still be in flight");
+        assert_eq!(
+            f.fine_sample(SizeClass::Small, 7, 6).map(|s| s.1),
+            Some(0),
+            "the fine window toward B is already published"
+        );
+        // Back onto A before the job completes.
+        let u = f.update(&tiles, a, NavBudget::FULL);
+        assert!(u.changed, "the mixed field must be rebuilt toward A");
+        assert_eq!(f.goal_cell(), Some((6, 6)));
+        assert_eq!(f.fine_sample(SizeClass::Small, 6, 6).map(|s| s.1), Some(0));
+        assert_eq!(f.fine_sample(SizeClass::Small, 7, 6).map(|s| s.1), Some(1));
+        // And a job that has published nothing is still dropped for free.
+        let u = f.update(
+            &tiles,
+            b,
+            NavBudget {
+                fine_cells: 8,
+                coarse_blocks: 0,
+            },
+        );
+        assert!(!u.changed);
+        let u = f.update(&tiles, a, NavBudget::FULL);
+        assert!(!u.changed, "nothing was published: the field still points at A");
+        assert_eq!((u.fine_cells, u.coarse_blocks), (0, 0));
+    }
+
+    /// A diagonal block edge needs a real two-leg walk. Block (0, 0) is sealed
+    /// behind its own bottom row and right column; the goal block (1, 1) has
+    /// gates west and north, which the old "both of my own sides are gated"
+    /// rule took as an edge into the sealed corner.
+    #[test]
+    fn a_diagonal_coarse_edge_needs_a_walkable_leg() {
+        let b = COARSE_BLOCK_CELLS as f32 * TILE_F;
+        let walls = [
+            Rectf::new(0.0, b - TILE_F, b, TILE_F),
+            Rectf::new(b - TILE_F, 0.0, TILE_F, b),
+        ];
+        let tiles = test_tiles(24, 24, &walls);
+        let mut f = FlowField::new(&tiles);
+        for class in 0..2 {
+            assert!(f.block_open_at(class, 0, 0), "the sealed corner is still floor");
+            assert!(!f.block_gate_at(class, 1, 1, -1, -1), "no leg into the corner");
+            assert!(!f.block_gate_at(class, 0, 0, 1, 1), "and none out of it");
+            assert_eq!(f.diagonal_leg(class, 1, 1, -1, -1), None);
+            // An honest diagonal still stands, read the same from both ends.
+            assert!(f.block_gate_at(class, 1, 1, 1, 1));
+            assert!(f.block_gate_at(class, 2, 2, -1, -1));
+            assert_eq!(f.diagonal_leg(class, 1, 1, 1, 1), Some((1, 0)));
+            // The aim of a diagonal is its first leg's gate, not an average.
+            assert_eq!(
+                f.gate_midpoint(class, 1, 1, 1, 1),
+                f.gate_midpoint(class, 1, 1, 1, 0)
+            );
+        }
+        let goal = Vec2::new(12.5 * TILE_F, 12.5 * TILE_F);
+        assert!(f.update(&tiles, goal, NavBudget::FULL).changed);
+        assert_eq!(f.coarse_sample(SizeClass::Small, 1, 1).1, 0);
+        assert_eq!(f.coarse_sample(SizeClass::Small, 2, 2).1, 1);
+        assert_eq!(
+            f.coarse_sample(SizeClass::Small, 0, 0).1,
+            u32::MAX,
+            "the coarse BFS must not cost a route into a sealed block"
+        );
     }
 
     #[test]

@@ -1,5 +1,18 @@
 # CONTENT_PLAN.md — procedural levels, mazes, traps, bosses and pathfinding
 
+> **Status: delivered; kept as the record of the contract.** Everything below
+> shipped — the tile-grid levels, mazes, rat-holes, traps, the nav rewrite and
+> the first three bosses — and `Level::walls` is gone. The game has since grown
+> past it (six floors, ten bosses, per-floor rosters), so read `CLAUDE.md` for
+> how the tree works now and this file for *why* the level, collision and nav
+> contracts look the way they do. Still binding: §7 (determinism) and §9 (art
+> view structs are the spec where art and gameplay disagree). No longer
+> current: the five-owner split in §8, "all three maps" in §11, the §2 note of
+> up to two mazes (the generator carves at most one), and §10's `cargo test
+> levelgeneration` (no test has that name; the generator's tests live under
+> `game::levelgen`, e.g. `cargo test levelgen`). A failing golden now prints
+> every moved row ready to paste into `CASES`.
+
 The owner's brief: boss fights with *a huge jungle cat, a human with a broom and a
 robot lawnmower*; *sticky traps and mousetraps*; *each level 10× larger with
 procedural layouts, mazes, walls with holes the rat can duck into that larger

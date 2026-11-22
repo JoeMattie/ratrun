@@ -33,3 +33,11 @@ pub mod weapons_wave3a;
 // The Spiked Tail Whip's lash (wave 3, w3-spiketail): its own file so the
 // wind-up/crack/recoil beat stays in one place.
 pub mod weapon_spiketail;
+pub mod floor_laundry;
+pub mod floor_printworks;
+pub mod floor_kitchen;
+pub mod floor_lab;
+pub mod floor_sewer;
+pub mod floor_flatbed;
+// Fodder approach sounds (one pair per floor); not yet in the schedule.
+pub mod approach;

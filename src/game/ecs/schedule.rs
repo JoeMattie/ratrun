@@ -13,8 +13,11 @@
 //! | -1 | `powerups::powerups_system` | wave-3 pocket-find timers (new) |
 //! | 0 | `traps::traps_system` | floor traps (sticky boards, mousetraps); before the player |
 //! | 0b | `hazards::hazards_system` | steam grates + ink pads (Laundry / Printworks only); explicitly after 0 and before 1 |
+//! | 0c | `floor_sewer::floor_sewer_slow_system` | the Sump Leech's tongue slow folded into this tick's throttle (Sewer); explicitly after 0b and before 1 |
 //! | 1 | `player::player_system` | `update_player` |
 //! | 2 | `fog::reveal_system` | fog of war (minimap; new, writes only `Fog`) |
+//! | 2a | `gates::{passage,cache,door}_system` | rat-holes, the maze cache, one-way doors (new); explicitly after 2 and before 3 |
+//! | 2b | `shop::threshold_system` | the mouse-hole shops' thresholds (new); chained right after the doors |
 //! | 3 | `enemy_move::flow_refresh_system` | flow refresh |
 //! | 4 | `spawn::director_system` | `run_director` |
 //! | 4a | `miniboss::miniboss_system` | named miniboss appointments, retreats and signatures (wave 3); explicitly after 4 and before 4b |
@@ -39,10 +42,12 @@
 //! | 13d | `boss::cobra::coil_block_system` | the King Cobra's coils push a walking rat out of the body (a dashing one passes over); explicitly after 13c and before 14 |
 //! | 14 | `combat::player_bullet_hits_system` | `resolve_player_bullets` |
 //! | 15 | `combat::enemy_bullet_hits_system` | `resolve_enemy_hits` |
-//! | 16 | `combat::contact_system` | `resolve_contact` |
-//! | 16b | `evolutions::milk_teeth_system` … `roll_call_system`, `dead_letter_system`, `ripcord_system` | evolved weapons (new) |
+//! | 16 | `combat::contact_system` | `resolve_contact`; the last reader of `EnemyIndex` by index |
+//! | 16b | `evolutions::{milk_teeth,fondue_tines,fondue_string}_system`, `fairy_ring_system`, `drain_cleaner_system`, `roll_call_system`, `dead_letter_system`, `ripcord_system` | evolved weapons (new), in this order |
 //! | 16c | `enemy_wave3::wave3_system` | wave-3 kinds' tells, hazards, wick fuse (new); after every weapon damage pass so a moth any of them killed lights its wick |
 //! | 16c2 | `enemy_wave4::wave4_system` | wave-4 kinds' tells and hazards (new); right after 16c |
+//! | 16c3 | `floor_sewer::floor_sewer_system`, `floor_kitchen::floor_kitchen_system`, `floor_lab::floor_lab_system`, `floor_laundry::floor_laundry_system`, `floor_printworks::floor_printworks_system`, `floor_flatbed::floor_flatbed_system` | the per-floor roster rules (new), in this order; right after 16c2 |
+//! | 16c4 | `approach::approach_sfx_system` | fodder approach sounds (new; writes only `SfxQueue`); right after 16c3 |
 //! | 16d | `trailer::trailer_system` | the flatbed's holes, cargo and wind (new; `Theme::Trailer` only); a fall can kill, so it runs before 16e |
 //! | 16e | `weapons_wave3a::hantavirus_death_system` | death-triggered jumps (sees evolution, wick-burst and fall kills), before the reap |
 //! | 17 | `loot::reap_enemies_system` | `reap_enemies`; a named miniboss's chest + gold drop here (`miniboss::drop_loot`) |
@@ -71,8 +76,8 @@
 //! `gates::door_system` in that same group: it reads the rat's post-move
 //! position, draws no rng, and only raises `pending_shop` + the hole index.
 //!
-//! `elapsed += dt` is applied by `World::update` before
-//! `begin_tick`; the per-tick `NukeTick` reset happens in `World::begin_tick`,
+//! `elapsed += dt` is applied by `World::update` before `begin_tick`; the
+//! per-tick `NukeTick` reset happens in `World::begin_tick`.
 //!
 //! The chain is split into several tuples because `IntoScheduleConfigs` is
 //! implemented for tuples up to 20 elements. Each tuple is `.chain()`ed, so
@@ -82,17 +87,17 @@
 //! it starts with reaping, so the reaped→gem ordering is itself chained and
 //! deferred spawns are visible to `gems_system`.
 //!
-//! `settle_schedule` is the legacy `finished()` early-return path (lines
-//! 118-122): only particles advance, nothing else in the sim runs.
+//! [`build_settle_schedule`] is the legacy `finished()` early-return path:
+//! only particles and damage numbers advance, nothing else in the sim runs.
 
 use bevy_ecs::prelude::*;
 
 use super::resources::TickInput;
 use super::systems::{
-    boss, combat, enemy_move, enemy_wave3, enemy_wave4, evolutions, fog, fx, gates, hazards, loot,
-    miniboss, player, powerups, projectiles, shop, spawn, trailer, traps, weapon_spiketail, weapons,
-    weapons_wave3a,
-    weapons_wave3b,
+    approach, boss, combat, enemy_move, enemy_wave3, enemy_wave4, evolutions, floor_flatbed,
+    floor_kitchen, floor_lab, floor_laundry, floor_printworks, floor_sewer, fog, fx, gates, hazards,
+    loot, miniboss, player, powerups, projectiles, shop, spawn, trailer, traps, weapon_spiketail,
+    weapons, weapons_wave3a, weapons_wave3b,
 };
 
 /// Legacy `self.damage_numbers.update(dt)` (neon merge, `World::update`).
@@ -133,7 +138,8 @@ pub fn build_tick_schedule() -> Schedule {
     // normal loot path.
     //
     // The whole pre-player order is therefore fixed: `powerups` (-1, so Clean
-    // Socks are already aged) → `traps` (0) → `hazards` (0b) → `player` (1).
+    // Socks are already aged) → `traps` (0) → `hazards` (0b) → the Sewer's
+    // tongue slow (0c, added below) → `player` (1).
     // Relative to the contact→reap chain the hazards are simply the earliest
     // damage pass of the tick: a plume kill is a corpse through every weapon
     // pass (nothing targets it), lights a Wick Moth's fuse in
@@ -145,8 +151,19 @@ pub fn build_tick_schedule() -> Schedule {
             .after(traps::traps_system)
             .before(player::player_system),
     );
+    // 0c: the Sump Leech's tongue slow (Sewer). Same reason and same shape as
+    // the ink pad: it shortens this tick's `TickInput` throttle, so it has to
+    // sit after the hazards and before the player. It returns at once unless a
+    // tongue has touched the rat (the `TongueSlow` resource does not exist
+    // until then), draws no rng and touches no entity.
+    schedule.add_systems(
+        floor_sewer::floor_sewer_slow_system
+            .after(hazards::hazards_system)
+            .before(player::player_system),
+    );
 
-    // 1-15: everything up to and including contact damage.
+    // 1-11b: the player through the active weapons (the first tuple of the
+    // legacy chain; contact damage is in the tuple after it).
     schedule.add_systems(
         (
             player::player_system,
@@ -179,7 +196,7 @@ pub fn build_tick_schedule() -> Schedule {
     );
 
     // 11d-16: wave 3's Acid Rain and Hantavirus, then the projectile sweep
-    // through contact. A third tuple only because `IntoScheduleConfigs` stops
+    // through contact. A separate tuple only because `IntoScheduleConfigs` stops
     // at 20 entries; it is explicitly chained after `active_weapons_system`, so
     // the order is still the single chain documented above. The drops' splash
     // and the virus ticks land before `player_bullet_hits`/`reap_enemies`, and
@@ -260,7 +277,7 @@ pub fn build_tick_schedule() -> Schedule {
             gates::passage_system,
             gates::cache_system,
             gates::door_system,
-            // 5b: the mouse-hole shops' thresholds. Same slot and the same
+            // 2b: the mouse-hole shops' thresholds. Same slot and the same
             // reasons as the gates: it reads the rat's post-move position and
             // draws no rng (it only raises the pending flag + the hole index).
             shop::threshold_system,
@@ -270,7 +287,8 @@ pub fn build_tick_schedule() -> Schedule {
             .before(enemy_move::flow_refresh_system),
     );
 
-    // 16-22: reaping through the outcome. Ordered after contact; internally
+    // 16b-24: the evolved weapons, reaping, loot and the outcome. Ordered
+    // after contact; internally
     // chained so the Nuke re-reap and every deferred drop stay in order.
     //
     // `trailer::trailer_system` is the flatbed's hazard pass (holes, sliding
@@ -329,6 +347,29 @@ pub fn build_tick_schedule() -> Schedule {
             // the normal loot path. `EnemyIndex` is already stale here, which
             // is legal: nothing after `contact` reads it.
             enemy_wave4::wave4_system,
+            // 16c3: the per-floor roster rules, one system per floor, in route
+            // order. Each returns before its sort on a floor that has none of
+            // its kinds. They take `Commands` only to attach a state component
+            // (or, the Sewer, one resource) to a body on its first tick — never
+            // to spawn or despawn an enemy — and none reads `EnemyIndex`. After
+            // wave 3 and 4 so a wick `wave3_system` lit this tick exists for the
+            // Printworks' slide; before the flatbed pass so a body they moved
+            // can still fall this tick, and before the reap so a hit they land
+            // on the rat is this tick's. One nested chain: the outer tuple is
+            // at `IntoScheduleConfigs`' 20-entry limit.
+            (
+                floor_sewer::floor_sewer_system,
+                floor_kitchen::floor_kitchen_system,
+                floor_lab::floor_lab_system,
+                floor_laundry::floor_laundry_system,
+                floor_printworks::floor_printworks_system,
+                floor_flatbed::floor_flatbed_system,
+                // 16c4: the fodder approach sounds. Reads the bodies where
+                // they stand after every behaviour pass; writes only the
+                // `SfxQueue` (no rng, no entity, no simulated value).
+                approach::approach_sfx_system,
+            )
+                .chain(),
             // 16d: the flatbed's hazard pass (see the comment above this
             // tuple). A pit fall takes 35 % of an enemy's max HP and can kill,
             // so it is a damage pass and must precede the Hantavirus death

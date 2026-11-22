@@ -1,4 +1,10 @@
 //! Enemies: kinds, per-kind stats, and steering behavior toward the player.
+//!
+//! `EnemyKind` is append-only and `EnemyKind::all()` lists every kind: the 48
+//! ordinary bodies the floor rosters own (`game/roster.rs`) plus the legacy
+//! `Boss` body. Stats, name, colour and XP key on the kind itself; behaviour
+//! keys on [`EnemyKind::archetype`], the existing body whose steering, attack
+//! and nav size class a kind reuses until it has a rule of its own.
 
 use crate::math::Vec2;
 use crate::render::palette::Rgb;

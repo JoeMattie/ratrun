@@ -174,7 +174,8 @@ pub struct TrapPlacement {
     pub encounter: bool,
 }
 
-/// One rat-hole placement: one cell, or two aligned cells through a thick wall.
+/// One rat-hole placement: one cell (the two-cell form through a thick wall is
+/// modelled but never produced today; see [`place_rat_holes`]).
 #[derive(Clone, Copy, Debug)]
 pub struct RatHolePlacement {
     /// The northern/western cell of the tunnel.
@@ -235,8 +236,10 @@ impl Pierce {
 /// Two of the holes are chosen for the route they serve — near the first
 /// excursion from the start room and outside a mid-run hall — whenever such a
 /// candidate exists; the rest are random. A hole goes into a wall that is one
-/// cell thick on its passage axis; a two-cell-thick wall is pierced as a pair of
-/// aligned cells, so the 8 px tunnel stays straight (`CONTENT_PLAN.md` §2).
+/// cell thick on its passage axis. A two-cell-thick wall is left alone today
+/// ([`pierce_at`] never returns a pair), so [`RatHolePlacement::second`] is
+/// always `None`; the pair plumbing ([`Pierce::second`], the validator's
+/// three-cell mouth walk) is kept for a generator that pierces thick walls.
 /// Holes never touch the border, the start room, the boss arena, a room
 /// interior (props live there) or a doorway, and two picks are kept apart so
 /// they never merge into a door.

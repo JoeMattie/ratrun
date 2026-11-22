@@ -421,9 +421,6 @@ pub const HOVER_LIFT: f32 = 11.0;
 /// Key light, upper left (the same convention as the other boss art).
 const LIGHT: Vec2 = Vec2 { x: -0.55, y: -0.83 };
 
-/// Where the light throws the shadow, in px of ground offset per unit of lift.
-const SHADOW_THROW: Vec2 = Vec2 { x: 0.22, y: 0.30 };
-
 // ============================================================================
 // State spec
 // ============================================================================
@@ -1333,6 +1330,9 @@ fn ring(pb: &mut PixelBuffer, at: Vec2, radius: f32, c: Rgb, a: f32, width: f32)
 fn line_solid(pb: &mut PixelBuffer, a: Vec2, b: Vec2, c: Rgb, alpha: f32) {
     let d = b - a;
     let len = d.len();
+    if !len.is_finite() {
+        return;
+    }
     if len <= 0.01 {
         blend_px(pb, a.x.round() as i32, a.y.round() as i32, c, alpha);
         return;
@@ -1651,7 +1651,11 @@ pub fn draw_hawk_ground(pb: &mut PixelBuffer, view: &HawkView, cam: Vec2, accent
 fn draw_shadow(pb: &mut PixelBuffer, pose: &Pose) {
     let low = 1.0 - pose.lift01;
     let alpha = (0.17 + 0.40 * low) * pose.alpha;
-    let centre = pose.ground + SHADOW_THROW * pose.lift;
+    // On the ground point exactly, whatever the altitude: the shadow *is* the
+    // boss's position while it is overhead (the HP arc, the spent mark where a
+    // dive committed and every hit shape are all at this point). A throw that
+    // grows with the lift put it up to 21 px away from all of them.
+    let centre = pose.ground;
     let scale = 0.62 + 0.52 * low;
     let soft = 3.0 - 2.0 * low;
     let reach = 34.0 * scale + soft + 2.0;
@@ -1806,7 +1810,9 @@ fn draw_downdraft(pb: &mut PixelBuffer, pose: &Pose) {
             continue;
         }
         let r = DOWNDRAFT_INNER + (DOWNDRAFT_OUTER - DOWNDRAFT_INNER) * t;
-        ring(pb, pose.ground + SHADOW_THROW * pose.lift, r, (214, 200, 170), 0.34 * (1.0 - t), 1.0);
+        // Centred where `downdraft_shape` pushes from (the ground point), like
+        // the dust flecks below — not on the thrown shadow.
+        ring(pb, pose.ground, r, (214, 200, 170), 0.34 * (1.0 - t), 1.0);
         // Four flecks of deck dust riding the ring out.
         for j in 0..4 {
             let a = j as f32 * std::f32::consts::FRAC_PI_2 + k as f32 * 0.5;
@@ -2500,9 +2506,8 @@ mod tests {
                     pb.plot(x, y, (196, 172, 132));
                 }
             }
-            // The shadow is thrown by the bird's altitude, so sample its centre
-            // rather than the bird's ground point.
-            let centre = v.pos + SHADOW_THROW * altitude(v.state, v.phase, v.progress);
+            // The shadow sits on the bird's ground point at every altitude.
+            let centre = v.pos;
             let (px, py) = (centre.x.round().max(0.0) as usize, centre.y.round().max(0.0) as usize);
             let before = pb.pixel_at(px, py);
             draw_hawk_ground(&mut pb, &v, Vec2::ZERO, (206, 150, 70));

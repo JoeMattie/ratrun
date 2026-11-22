@@ -96,12 +96,12 @@
 //! * [`resolve_hazards`] only *damages* enemies (`hit_enemies` hazards such as
 //!   the mower's ram and the broom's sweep); corpses are removed by the normal
 //!   reap, after the window.
-//! * The three controllers (`cat`, `broom`, `mower`) take no `Commands` at all:
+//! * No controller (one module per `BossKind`) takes `Commands`:
 //!   they move the boss, push hazards and queue projectiles/cues, so they
 //!   cannot spawn or despawn an entity.
 //!
 //! `boss::tests::boss_death_breaks_the_horde_without_invalidating_the_enemy_index`
-//! locks the whole thing down for all three bosses through the real schedule.
+//! locks the whole thing down through the real schedule.
 
 use bevy_ecs::prelude::*;
 use rand::rngs::StdRng;
@@ -390,14 +390,24 @@ impl BossKind {
         match self {
             BossKind::Cat => 1.4,
             BossKind::Broom => 1.95,
-            BossKind::Mower => 2.0,
+            // Batch-6: 2.0 -> 1.8. The dock's recharge can no longer be
+            // cancelled by a single hit (`mower::DOCK_INTERRUPT_FRAC`), so a
+            // phase change now really hands back a few percent of the pool;
+            // the 10 % cut keeps the measured ~80 s median where it was.
+            // Blind, not re-measured.
+            BossKind::Mower => 1.8,
             // The Laundry is a stage-two floor. Measured with the same
             // near-complete bot build that fights the Sweeper and the Mower,
             // the Mangle at 1.95 died in 19 s against their 33 s / 26 s: its
             // jam windows are a 1.5x damage window for a third of every
             // rotation, so the raw pool has to be larger to buy the same
             // fight. 3.35 lands it beside the Sweeper (see the report).
-            BossKind::Mangle => 3.35,
+            // **Batch-6 re-scale (blind, not measured).** The reported
+            // bot-batch fight ran ~185 s on the old 3.35 pool, i.e. about
+            // 232 dps actually landed — far below the build the old number
+            // was tuned against. Scaled linearly to a ~60 s fight; the next
+            // batch run owns the final number.
+            BossKind::Mangle => 1.1,
             // `WAVE3_DESIGN.md` §12 states the Night Edition's pool as the
             // *final encounter* number (3,000), so the art constant is that
             // whole design pool and this is the same 2.0 the other stage-3
@@ -409,7 +419,12 @@ impl BossKind {
             // `RATRUN_PRESS_MEASURE=1`): 39.5–45.6 s across seven seeds, the bot
             // dodging every tell (0–1 avoidable hits per fight over 40 s). A
             // balance pass owns the final number.
-            BossKind::NightEdition => 2.0,
+            // **Batch-6 re-scale (blind, not measured).** The 39.5-45.6 s
+            // above is the near-complete harness build (~1.1 k dps). The
+            // campaign bot lands ~320 dps into the other stage-3 fight (the
+            // Mower: 25,600 hp, ~80 s median), where 2.0 would be a ~150 s
+            // press. 0.85 is ~20,400 hp, about 64 s at that rate.
+            BossKind::NightEdition => 0.85,
             // Measured with `magpie::tests::a_bot_kills_the_magpie_on_the_real_deck`
             // (the same method the campaign bosses were tuned with, applied to
             // the flatbed: the Expert bot with a carried build, spawn to death
@@ -419,7 +434,12 @@ impl BossKind {
             // always-reachable body, so it takes a much bigger pool than the
             // campaign fights to hold its 45-80 s beat. `4.6` lands the mean at
             // ~54 s; see the shipped measurement in the test.
-            BossKind::Magpie => 4.6,
+            // **Batch-6 re-scale (blind, not measured).** The reported
+            // bot-batch fight ran ~340 s on the old 4.6 pool, i.e. about
+            // 173 dps actually landed — far below the build the old number
+            // was tuned against. Scaled linearly to a ~60 s fight; the next
+            // batch run owns the final number.
+            BossKind::Magpie => 0.85,
             // The Sewer pool mate, and the only boss whose *pool* is smaller
             // than its art's: the dome sheds ~45 % of the rat's fire on any
             // run that does not flank it, so the raw number already buys a
@@ -442,7 +462,12 @@ impl BossKind {
             // once the windows are spent. Provisional: the balance pass owns
             // the final number. Measured with
             // `megarat::tests::a_bot_kills_the_megarat_on_the_real_arena`.
-            BossKind::MegaRat => 2.6,
+            // **Batch-6 re-scale (blind, not measured).** The campaign bot
+            // lands ~350 dps into the other Kitchen fight (the Sweeper:
+            // 24,960 hp, ~72 s median); at 2.6 this pool is 33,280 hp, a
+            // ~96 s fight before the called rats take their share. 1.7 is
+            // 21,760 hp, about 62 s at that rate.
+            BossKind::MegaRat => 1.7,
             // The flatbed's second bird, expressed like the first: art pool ×
             // scale × the framework's ×8. **Assumed, not measured** (the wave-3
             // rule is no bot batches for content workers): a near-complete
@@ -454,7 +479,12 @@ impl BossKind {
             // ~54 s at the assumed uptime; a balance pass owns the number. See
             // `hawk::tests::a_bot_kills_the_hawk_on_the_real_deck` for the
             // measurement that must be taken.
-            BossKind::Hawk => 2.6,
+            // **Batch-6 re-scale (blind, not measured).** The magpie's reported
+            // fight puts the flatbed bot at ~173 dps into an always-hittable
+            // bird, not the ~1.1 k assumed above; at the hawk's ~45 % uptime
+            // that is ~78 dps, and 2.6 would be a seven-minute fight. 0.4 is
+            // 5,120 hp, about 65 s at that rate.
+            BossKind::Hawk => 0.4,
             // The Lab's *second* fight, and the one that spends the most of
             // every rotation in a punish window: `FangsStuck` is a x1.5 window
             // after every strike (twice per rotation from phase 2) and
@@ -472,7 +502,12 @@ impl BossKind {
             // and a short-range kit only reaches it during its strikes). Halved
             // so the fight ends; it is still long for a melee build and the
             // stand-off band is the thing a balance pass should look at.
-            BossKind::Cobra => 1.0,
+            // **Batch-6 re-scale (blind, not measured).** The reported
+            // bot-batch fight ran ~183 s on the old 1.0 pool, i.e. about
+            // 79 dps actually landed — far below the build the old number
+            // was tuned against. Scaled linearly to a ~60 s fight; the next
+            // batch run owns the final number.
+            BossKind::Cobra => 0.35,
         }
     }
 
@@ -3713,8 +3748,11 @@ pub fn boss_damage_system(
             if fight.scratch.mouse_latch.contains(&latch) {
                 continue;
             }
+            // Grounded shapes only, like the bullet and pool passes above: a
+            // trap is on the floor, so it cannot bite a jaguar in mid-leap, a
+            // raised slipper or the jammed Mangle's lifted frame.
             if shapes.iter().any(|s| {
-                in_mouse_kill_rect(trap.pos, trap.facing, s.center(), s_radius(s))
+                s.grounded() && in_mouse_kill_rect(trap.pos, trap.facing, s.center(), s_radius(s))
             }) {
                 let amount = MOUSETRAP_DAMAGE_ENEMY
                     * boss.damage_mult
@@ -4089,7 +4127,15 @@ pub fn boss_update_system(
         let stuck = fight.stuck;
         if to_player.len() > REJOIN_DIST || no_los || stuck {
             boss.lost += dt;
-            if boss.lost >= RELOCATE_AFTER_SECS {
+            // Only out of the neutral beat. The timer keeps running through an
+            // attack, but the move itself waits for it to finish: relocating a
+            // boss mid-charge, mid-dive or on its walk to the dock dropped a
+            // live body (contact damage and all) beside the rat while the
+            // hazards it had queued stayed where they were painted, and fought
+            // the Mower's `Docking` transit every five seconds. Every attack
+            // chain returns to the neutral state, so the rule still cannot
+            // strand a level; it just lands on the first neutral tick.
+            if boss.lost >= RELOCATE_AFTER_SECS && boss.state == boss.kind.initial_state() {
                 if let Some(spot) = rejoin_spot(&level, player.pos, boss.kind.body_radius()) {
                     boss.lost = 0.0;
                     boss.pos = spot;

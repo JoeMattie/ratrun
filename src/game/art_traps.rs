@@ -38,7 +38,7 @@
 //! | Object         | Footprint (`u × v`, world px) | Blocks Movement? |
 //! |----------------|-------------------------------|------------------|
 //! | Sticky Trap    | `36.0 × 28.0` (pad `30 × 22`) | No (walkable floor hazard; Bats fly over) |
-//! | Mousetrap      | `18.0 × 11.0`                 | No (walkable floor hazard; Bats fly over) |
+//! | Mousetrap      | `40.0 × 24.0`                 | No (walkable floor hazard; Bats fly over) |
 //! | One-Way Door   | `10.0 × 24.0` (gap `18.0`)    | Jambs always solid; passage open to player from `-facing`, solid from `+facing` and solid to enemies |
 //! | Rat-Hole       | `14.0 × 22.0` (gap `8.0`)     | Cheeks always solid; gap passable if `radius <= 3.2`, solid if `radius > 3.2` |
 //! | Maze Reward    | `18.0 × 18.0` (`r = 8.5`)     | No (low walkable dais; collects within `r = 11.0`) |
@@ -1272,6 +1272,11 @@ pub fn draw_sticky_trap_ground(
         hx + hy - 5.4
     };
 
+    // A live (Idle / Stuck) board wears a heavier outline than a spent one:
+    // the dark rim runs 1.5 px past the footprint instead of 0.75.
+    let live = view.state != StickyTrapState::Used;
+    let rim_out = if live { 1.5 } else { 0.75 };
+
     for y in y0..=y1 {
         for x in x0..=x1 {
             let (u, v) = fr.local(x, y);
@@ -1292,7 +1297,7 @@ pub fn draw_sticky_trap_ground(
             }
 
             // Soft contact shadow cast down-right.
-            if d_outer > 0.75 {
+            if d_outer > rim_out {
                 let (su, sv) = fr.local_f(x as f32 - 1.6, y as f32 - 1.6);
                 let ds = sd_box(su, sv, hx, hy);
                 if ds <= 0.4 && !(su + sv > curl_cut && su > 0.0 && sv > 0.0) {
@@ -1301,9 +1306,19 @@ pub fn draw_sticky_trap_ground(
                 continue;
             }
 
-            // Crisp dark outer silhouette rim.
+            // Crisp dark outer silhouette rim (two pixels on a live board).
             if d_outer > -0.45 {
-                blend_px(pb, x, y, outline, 0.92);
+                blend_px(pb, x, y, outline, if live { 0.97 } else { 0.92 });
+                continue;
+            }
+
+            // Hazard tape: a one-pixel yellow-and-black keyline just inside the
+            // rim of a live board, so its full footprint reads on every floor.
+            // Symmetric about each edge's midpoint, which is always yellow.
+            if live && d_outer > -1.4 && !(u + v > flap_cut && u > 0.0 && v > 0.0) {
+                let along = if hx - u.abs() < hy - v.abs() { v } else { u };
+                let dark = ((along.abs() + 1.5) / 3.0).floor() as i32 % 2 == 1;
+                pb.plot(x, y, if dark { STICKY_TAPE_DARK } else { STICKY_TAPE_YELLOW });
                 continue;
             }
 
@@ -1974,6 +1989,19 @@ fn mousetrap_jitter(view: &MousetrapView) -> Vec2 {
     }
 }
 
+/// Hazard-tape keyline on a live sticky board's rim. Yellow and near-black
+/// alternate, so one of the two contrasts with any floor: the dark Sewer and
+/// Lab stone, the warm Kitchen and Flatbed wood (close to the tray's own
+/// cardboard), the pale Laundry porcelain and the grey Printworks concrete.
+const STICKY_TAPE_YELLOW: Rgb = (255, 220, 70);
+const STICKY_TAPE_DARK: Rgb = (22, 18, 14);
+
+/// The pale keyline just inside a mousetrap board's outline. The pine board is
+/// the Kitchen's and the Flatbed's own wall colour family, so the edge needs a
+/// light line and a dark one to hold against them.
+const MOUSETRAP_KEYLINE: Rgb = (252, 240, 206);
+const MOUSETRAP_KEYLINE_SPRUNG: Rgb = (150, 136, 110);
+
 /// **Ground layer** for a mousetrap (draw after floor/stains, BEFORE entities).
 ///
 /// Renders the grounded drop shadow, beveled warm pine baseboard with wood
@@ -2025,7 +2053,9 @@ pub fn draw_mousetrap_ground(
             if d > 2.4 {
                 continue;
             }
-            if d > 0.75 {
+            // The dark outline runs ~2.4 px past the board (1.1 art units; it
+            // was 0.75), then the drop shadow takes over.
+            if d > 1.1 {
                 let (su, sv) = fr.local_f(x as f32 - 1.5, y as f32 - 1.6);
                 if sd_box(su / kx, sv / ky, hx, hy) <= 0.45 {
                     darken_px(pb, x, y, 0.48);
@@ -2033,7 +2063,21 @@ pub fn draw_mousetrap_ground(
                 continue;
             }
             if d > -0.25 {
-                blend_px(pb, x, y, outline, 0.92);
+                blend_px(pb, x, y, outline, 0.96);
+                continue;
+            }
+            // Pale keyline just inside the outline: light against dark floors,
+            // and with the outline a hard double edge against warm ones.
+            if d > -0.95 {
+                pb.plot(
+                    x,
+                    y,
+                    if view.state == MousetrapState::Sprung {
+                        MOUSETRAP_KEYLINE_SPRUNG
+                    } else {
+                        MOUSETRAP_KEYLINE
+                    },
+                );
                 continue;
             }
 
@@ -2091,6 +2135,34 @@ pub fn draw_mousetrap_ground(
                     blend_px(pb, x, y, (168, 44, 34), 0.72);
                 } else if u > 0.0 {
                     blend_px(pb, x, y, (142, 38, 32), 0.20);
+                }
+            }
+        }
+    }
+
+    // An armed trap marks its own bite: four dim red corner brackets at the
+    // kill zone's corners, breathing slowly, so the dangerous half of the
+    // board is legible *before* the plate is touched (the `Triggered`
+    // telegraph below is only 0.18 s, and a hair trigger has none). Painted on
+    // the board, under the bar and the bait the overlay layer draws.
+    if view.state == MousetrapState::Armed {
+        let breathe = 0.36 + 0.14 * (view.anim * 2.6).sin();
+        let ku0 = MOUSETRAP_KILL_U_MIN / kx;
+        let ku1 = MOUSETRAP_KILL_U_MAX / kx;
+        let kv = MOUSETRAP_KILL_HALF_V / ky;
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let (wu, wv) = fr.local(x, y);
+                let u = wu / kx;
+                let v = wv / ky;
+                if u < ku0 - 0.5 || u > ku1 + 0.5 || v.abs() > kv + 0.5 {
+                    continue;
+                }
+                let du = (u - ku0).abs().min((u - ku1).abs());
+                let dv = (v.abs() - kv).abs();
+                // Corners only: an L with ~5 px arms, ~2 px thick.
+                if (du < 0.5 || dv < 0.5) && du < 2.2 && dv < 2.2 {
+                    blend_px(pb, x, y, (214, 62, 44), breathe);
                 }
             }
         }

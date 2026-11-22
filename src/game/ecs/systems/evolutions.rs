@@ -90,6 +90,8 @@ use crate::game::ecs::resources::{
     ActiveFx, DamageLedger, DashTrack, EnemyIndex, NextSpawnId, RngRes, TickInput, FLYWHEEL_CAP,
     RIPCORD_SECS,
 };
+use crate::game::collision::SpatialGrid;
+use crate::game::ecs::constants::GRID_CELL;
 use crate::game::ecs::systems::boss::{Boss, BossHitShapes};
 use crate::game::ecs::systems::projectiles::los_clear;
 #[cfg(debug_assertions)]
@@ -145,6 +147,9 @@ pub const FAIRY_SECS: f32 = 3.0;
 pub const FAIRY_BAND: f32 = 2.0;
 /// One hit per target per second while crossing the ring.
 pub const FAIRY_HIT_COOLDOWN: f32 = 1.0;
+/// Line radius of the "is this body sheltered from the ring's centre" test
+/// (a floor effect, the same 1 px every splash uses).
+pub const FAIRY_LOS_RADIUS: f32 = 1.0;
 /// Orbit radius of the fixed ring (the Spore Orbit radius).
 pub const FAIRY_RADIUS: f32 = 26.0;
 
@@ -519,12 +524,21 @@ pub fn milk_teeth_system(
                 } else {
                     from + dir * step
                 };
+                // The thread always comes home (a tooth stranded behind a
+                // wall would be a lost weapon), but it does not **bite**
+                // through masonry: a step that crosses or starts inside a wall
+                // bites nobody, the same cover rule every other friendly hit
+                // obeys. It used to bite straight through walls all the way
+                // back.
+                let in_cover = level.tiles.segment_hit(from, to, MILK_RADIUS).is_some();
                 // Bite every body the thread crosses, once each. The record
                 // comes first: past `MILK_BITE_CAP` a body is not bitten at
                 // all rather than bitten again on every tick it stays inside
                 // the sweep.
-                let mut hit_any = false;
                 for &enemy in order.iter() {
+                    if in_cover {
+                        break;
+                    }
                     let Ok((_, id, mut e)) = enemies.get_mut(enemy) else {
                         continue;
                     };
@@ -536,7 +550,6 @@ pub fn milk_teeth_system(
                         if !dart.remember_bite(id.0) {
                             continue;
                         }
-                        hit_any = true;
                         let pos = e.pos;
                         let killed = hit_body(
                             &mut e,
@@ -551,9 +564,8 @@ pub fn milk_teeth_system(
                     }
                 }
                 // The boss is bitten once per return thread, on the ordinary
-                // hit-shape path (`_ = hit_any` keeps the walk above honest).
-                let _ = hit_any;
-                if !dart.boss_bitten {
+                // hit-shape path (and under the same cover rule).
+                if !dart.boss_bitten && !in_cover {
                     for mut boss in bosses.iter_mut() {
                         if boss.dead {
                             continue;
@@ -597,6 +609,22 @@ pub fn milk_teeth_system(
 /// body that walks into an outer dart's path after the cast still moves its end
 /// of the string — the review's "the ordinary outer bullets fly and deal damage
 /// after the string already appears from a cast-time ray".
+/// [`fondue_tines_system`]'s reused buffers.
+///
+/// `struck` is the "the tines and the filament share one hit per body" memory:
+/// `(cast SpawnId, body key)` for every body (or boss, keyed with
+/// [`BOSS_EFFECT_KEY`]) a tine of a still-pending cast hit. When the cast
+/// becomes a string those bodies are entered in its cut list, so the body a
+/// tine planted on is not cut a second time by the string that ends on it.
+/// Entries leave with their cast, and the whole list is dropped whenever no
+/// tine or cast is alive, so nothing survives into another floor.
+#[derive(Default)]
+pub struct TineScratch {
+    /// (cast `SpawnId`, slot, plant point) in tine `SpawnId` order.
+    settled: Vec<(u64, u8, Vec2)>,
+    struck: Vec<(u64, u64)>,
+}
+
 pub fn fondue_tines_system(
     mut commands: Commands,
     input: Res<TickInput>,
@@ -612,13 +640,14 @@ pub fn fondue_tines_system(
     mut tines: Query<(Entity, &SpawnId, &mut FondueTine)>,
     mut casts: Query<(Entity, &SpawnId, &mut FondueCast)>,
     mut fallback: Local<Vec<Entity>>,
-    // (cast `SpawnId`, slot, plant point) in tine `SpawnId` order.
-    mut settled: Local<Vec<(u64, u8, Vec2)>>,
+    mut tine_scratch: Local<TineScratch>,
     mut order_scratch: Local<Vec<(u64, Entity)>>,
 ) {
     if tines.is_empty() && casts.is_empty() {
+        tine_scratch.struck.clear();
         return; // an unevolved spray (or none at all): no work, no rng
     }
+    let TineScratch { settled, struck } = &mut *tine_scratch;
     let dt = input.dt;
     let kind = WeaponKind::CheeseSpray;
     let order = enemy_order(&index, &enemies, &mut fallback);
@@ -670,8 +699,9 @@ pub fn fondue_tines_system(
 
         let mut planted: Option<Vec2> = None;
         if let Some((_, plant, candidate)) = body {
-            if let Ok((_, _, mut e)) = enemies.get_mut(candidate) {
+            if let Ok((_, sid, mut e)) = enemies.get_mut(candidate) {
                 if e.alive() {
+                    struck.push((tine.cast, sid.0));
                     let pos = e.pos;
                     let killed = hit_body(
                         &mut e,
@@ -706,6 +736,7 @@ pub fn fondue_tines_system(
                     continue;
                 }
                 ledger.add_boss(kind, amount);
+                struck.push((tine.cast, BOSS_EFFECT_KEY | u64::from(boss.id)));
                 let killed = boss.hp <= 0.0;
                 vfx::emit_fondue_cut(&mut particles, &mut rng.0, boss.pos, killed);
                 damage_numbers.record(
@@ -761,12 +792,21 @@ pub fn fondue_tines_system(
             let (a, b) = (cast.ends[0].unwrap_or(Vec2::ZERO), cast.ends[1].unwrap_or(Vec2::ZERO));
             let dmg = cast.damage;
             commands.entity(entity).despawn();
-            let string = CheeseString::new(a, b, STRING_SECS, dmg);
+            let mut string = CheeseString::new(a, b, STRING_SECS, dmg);
+            // One hit per body, ever: what this cast's tines already struck
+            // starts out cut.
+            for &(owner, key) in struck.iter() {
+                if owner == cast_id {
+                    let _ = string.remember_cut(key);
+                }
+            }
+            struck.retain(|&(owner, _)| owner != cast_id);
             commands.spawn((string, next_id.take()));
             continue;
         }
         cast.wait -= dt;
         if cast.wait <= 0.0 {
+            struck.retain(|&(owner, _)| owner != cast_id);
             commands.entity(entity).despawn();
         }
     }
@@ -879,6 +919,7 @@ pub fn fondue_string_system(
 pub fn fairy_ring_system(
     mut commands: Commands,
     input: Res<TickInput>,
+    level: Res<Level>,
     index: Res<EnemyIndex>,
     mut rng: ResMut<RngRes>,
     mut particles: ResMut<Particles>,
@@ -914,7 +955,12 @@ pub fn fairy_ring_system(
                 continue;
             }
             let edge = (e.pos.dist(ring.pos) - ring.radius).abs();
-            if edge <= e.radius + FAIRY_BAND {
+            // The ring grew out from where the rat stood: masonry between
+            // that point and a body shelters it, exactly as it shelters a
+            // body from a splash (the band used to burn through walls).
+            if edge <= e.radius + FAIRY_BAND
+                && los_clear(&level, ring.pos, e.pos, FAIRY_LOS_RADIUS)
+            {
                 // The cooldown table is the "one hit per body per second"
                 // memory: if the ring cannot record this body (the table is
                 // full of other live cooldowns) it does not hit it either,
@@ -948,6 +994,13 @@ pub fn fairy_ring_system(
             let shapes = boss.hit_shapes();
             if shapes.iter().next().is_none()
                 || !shapes.ring_hits_grounded(ring.pos, ring.radius, FAIRY_BAND)
+            {
+                continue;
+            }
+            if level
+                .tiles
+                .segment_hit(ring.pos, boss.pos, FAIRY_LOS_RADIUS)
+                .is_some()
             {
                 continue;
             }
@@ -1353,6 +1406,7 @@ pub fn ripcord_system(
     mut damage_numbers: ResMut<DamageNumbers>,
     mut ledger: ResMut<DamageLedger>,
     mut track: ResMut<DashTrack>,
+    mut grid: ResMut<SpatialGrid>,
     mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
     mut bosses: Query<&mut Boss>,
     mut fallback: Local<Vec<Entity>>,
@@ -1384,6 +1438,8 @@ pub fn ripcord_system(
     let start = track.route_start();
     let legs = track.route_len();
 
+    // Set when the cord slid a body: the grid is re-filed below.
+    let mut slid = false;
     if taut {
         let order = enemy_order(&index, &enemies, &mut fallback);
         for &entity in order.iter() {
@@ -1441,6 +1497,7 @@ pub fn ripcord_system(
                     crate::game::collision::SizeClass::Small,
                     None,
                 );
+                slid = true;
             }
             vfx::emit_ripcord_hit(&mut particles, &mut rng.0, pos, back, killed);
         }
@@ -1492,6 +1549,22 @@ pub fn ripcord_system(
                 );
             }
         }
+    }
+
+    // The slide wrote `Enemy::pos`. `EnemyIndex` is still the live order
+    // (nothing spawned or despawned), but the grid lists each slid body under
+    // its old cell, and the wave-3/4 and trailer passes still run this tick.
+    // Re-file the buckets from the index, as Counterweight's nudge, Ratchet
+    // Tail and the Barbed Wire drag do. Skipped in a narrow test whose index
+    // was never built (filling from a stale index would empty the grid).
+    if slid && index.0.len() == enemies.iter().len() {
+        grid.reset(level.arena, GRID_CELL);
+        grid.fill(
+            index
+                .0
+                .iter()
+                .filter_map(|&entity| enemies.get(entity).ok().map(|(_, _, e)| e.pos)),
+        );
     }
 
     // Draw the cord while it is taut, then let the fuse run out. The legs are
@@ -2028,6 +2101,112 @@ mod tests {
             run(&mut w, fairy_ring_system);
         }
         assert!(hp_of(&w, body) < burnt, "the cooldown lifts after a second");
+    }
+
+    /// A 3-cell solid column at tile column `cx`, centred on tile row `cy`.
+    fn wall_column(w: &mut World, cx: i32, cy: i32) {
+        w.level.tiles.fill_cells(
+            cx,
+            cy - 1,
+            1,
+            3,
+            TileKind::Wall(crate::game::art_walls::WallKind::Solid),
+        );
+        w.level.tiles.rebuild_masks();
+    }
+
+    /// Fairy Ring: masonry between the planted centre and a body shelters it
+    /// (the band used to burn straight through a wall), while a body on the
+    /// open side of the same ring still burns.
+    #[test]
+    fn fairy_ring_does_not_burn_through_a_wall() {
+        let mut w = evolved_world(WeaponKind::SporeOrbit);
+        let damage = w.player.loadout.weapons[0].damage();
+        // Centre in tile (99, 80); the column fills tile column 100.
+        let centre = Vec2::new(99.0 * 16.0 + 8.0, 80.0 * 16.0 + 8.0);
+        wall_column(&mut w, 100, 80);
+        spawn_with_id(
+            &mut w.ecs,
+            FairyRing::new(centre, FAIRY_RADIUS, FAIRY_SECS, 5, damage),
+        );
+        let hidden = w.spawn_enemy(EnemyKind::Skitterer, centre + Vec2::new(FAIRY_RADIUS, 0.0), 400.0);
+        let open = w.spawn_enemy(EnemyKind::Skitterer, centre + Vec2::new(-FAIRY_RADIUS, 0.0), 400.0);
+        let (hidden_hp, open_hp) = (hp_of(&w, hidden), hp_of(&w, open));
+        run(&mut w, fairy_ring_system);
+        assert!(hp_of(&w, open) < open_hp, "the open side of the ring burns");
+        assert_eq!(hp_of(&w, hidden), hidden_hp, "the ring burnt a body behind a wall");
+        // Booked to Spore Orbit, the base weapon.
+        let ledger = w.ecs.resource::<DamageLedger>();
+        assert!(ledger.dealt[WeaponKind::SporeOrbit.index()] > 0.0);
+    }
+
+    /// Milk Teeth: the return thread comes home through a wall but bites
+    /// nobody while it is inside the masonry, and bites again in the open.
+    #[test]
+    fn milk_teeth_return_does_not_bite_inside_a_wall() {
+        let mut w = evolved_world(WeaponKind::Gnaw);
+        // Rat in tile (99, 80), wall in column 100, the lodged tooth beyond it.
+        let y = 80.0 * 16.0 + 8.0;
+        w.player.pos = Vec2::new(99.0 * 16.0 + 2.0, y);
+        wall_column(&mut w, 100, 80);
+        let mut dart = MilkTooth::new(Vec2::new(102.0 * 16.0 + 8.0, y), Vec2::ZERO, 5.0, MILK_REACH);
+        dart.phase = MilkPhase::Back;
+        spawn_with_id(&mut w.ecs, dart);
+        // One body in the middle of the masonry (a test fixture: nothing can
+        // stand there, which is the point), one in the open beyond it.
+        let walled = w.spawn_enemy(EnemyKind::Skitterer, Vec2::new(100.0 * 16.0 + 8.0, y), 400.0);
+        let open = w.spawn_enemy(EnemyKind::Skitterer, Vec2::new(101.0 * 16.0 + 10.0, y), 400.0);
+        let (walled_hp, open_hp) = (hp_of(&w, walled), hp_of(&w, open));
+        for _ in 0..60 {
+            run(&mut w, milk_teeth_system);
+        }
+        assert_eq!(
+            w.ecs.query::<&MilkTooth>().iter(&w.ecs).count(),
+            0,
+            "the thread still comes home through the wall"
+        );
+        assert!(hp_of(&w, open) < open_hp, "the thread bites in the open");
+        assert_eq!(hp_of(&w, walled), walled_hp, "the thread bit through masonry");
+        let ledger = w.ecs.resource::<DamageLedger>();
+        assert!(ledger.dealt[WeaponKind::Gnaw.index()] > 0.0, "booked to Gnaw");
+    }
+
+    /// Fondue Fork: the body a tine planted on took that tine's hit, so the
+    /// string that ends on it does not cut it a second time ("one hit per
+    /// body, ever: the tines and the filament share it").
+    #[test]
+    fn a_tine_struck_body_is_not_cut_again_by_its_own_string() {
+        use crate::game::ecs::systems::weapons;
+        let mut w = evolved_world(WeaponKind::CheeseSpray);
+        let origin = w.player.pos;
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.player.loadout.weapons[0].timer = 0.0;
+        let half = (w.player.loadout.weapons[0].level_projectiles() as f32 - 1.0) * 0.5;
+        let cross = origin + Vec2::from_angle(-half * 0.18) * 20.0;
+        let body = w.spawn_enemy(EnemyKind::Brute, cross, 400.0);
+        // Fire by hand so the inner darts never fly: only the tines and the
+        // string can touch the body in this harness.
+        run(&mut w, weapons::fire_weapons_system);
+        let before = hp_of(&w, body);
+        let mut strung = false;
+        for _ in 0..80 {
+            run(&mut w, fondue_tines_system);
+            if w.ecs.query::<&CheeseString>().iter(&w.ecs).next().is_some() {
+                strung = true;
+                break;
+            }
+        }
+        assert!(strung, "the pair never planted a string");
+        let after_tine = hp_of(&w, body);
+        assert!(after_tine < before, "the tine hit the body it planted on");
+        for _ in 0..10 {
+            run(&mut w, fondue_string_system);
+        }
+        assert_eq!(
+            hp_of(&w, body),
+            after_tine,
+            "the string cut the body its own tine had already struck"
+        );
     }
 
     /// Ratchet Tail: the whip hooks the nearest ordinary body, swings it a

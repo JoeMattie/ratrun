@@ -222,7 +222,10 @@ struct Params {
     noise: f32,
     /// Multiplier on the danger field.
     safety: f32,
-    /// Seconds of enemy-motion prediction.
+    /// Seconds of enemy-motion prediction. **Not read by the policy**: `score`
+    /// samples the same 0.12 / 0.27 / 0.48 s for every skill, so the ladder's
+    /// "horizon" is a label only (kept for the ordering test). A lower skill's
+    /// short sight comes from its reaction hold, its noise and its vision.
     horizon: f32,
     /// Sidestep the cat's locked pounce ring at the last moment.
     boss_counters: bool,
@@ -233,6 +236,8 @@ struct Params {
     /// How much XP-gem greed competes with safety.
     greed: f32,
     /// Weight of the soft crowd gradient (enemies further than contact range).
+    /// **Not read by the policy** either: the escape field in `score` uses a
+    /// fixed 0.8 for every skill.
     crowd: f32,
     /// Weight of "keep going the way you were going".
     momentum: f32,
@@ -382,8 +387,13 @@ enum Threat {
     Mousetrap {
         pos: Vec2,
         facing: Vec2,
-        /// The bar is still up (or coming down): the kill rect bites.
+        /// The bar is still up and the plate untouched: stepping on the plate
+        /// (or a horde body doing it) starts the snap.
         armed: bool,
+        /// The plate has been touched and the bar has not landed yet
+        /// (`Triggered`, or `Snapping` before the hit window closes): the kill
+        /// rect bites within ~0.26 s, whoever set it off.
+        committed: bool,
         /// Hair trigger: no reaction window at all, never entered on purpose.
         hair: bool,
         /// A good bait still sits on the plate.
@@ -485,6 +495,8 @@ impl Bot {
         self.orbit_sign = if self.rng.random::<bool>() { 1.0 } else { -1.0 };
         self.held = BotInput::IDLE;
         self.since_decision = f32::INFINITY;
+        // A new floor has new holes: the last floor's visit does not count.
+        self.shop_cd = 0.0;
         self.boss_pos = None;
         self.miniboss_pos = None;
         self.boss_kind = None;
@@ -770,13 +782,20 @@ impl Bot {
             }
         }
         w.leave_shop();
-        self.shop_cd = SHOP_COOLDOWN_SECS;
+        // A visit that bought nothing (the shelf held only trades the bot
+        // refuses right now) must not be repeated every few seconds: the hole
+        // still looks worth a walk to `World::shop_goal_point`.
+        self.shop_cd = if bought == 0 {
+            SHOP_DRY_COOLDOWN_SECS
+        } else {
+            SHOP_COOLDOWN_SECS
+        };
         bought
     }
 
     /// The one thing the bot would buy next at `hole`, if anything.
     fn shop_choice(&self, w: &World, hole: usize) -> Option<crate::game::shop::ShopItem> {
-        use crate::game::shop::{self, Deny, ShopItem};
+        use crate::game::shop::{self, ShopItem};
         let stock = w.shop.get(hole)?;
         let hp_frac = (w.player.hp / w.player.max_hp().max(1.0)).clamp(0.0, 1.0);
         if hp_frac < 0.66 && shop::deny_reason(w, hole, ShopItem::Stitch).is_none() {
@@ -799,14 +818,14 @@ impl Bot {
             if cuts_hp && hp_frac < 0.6 {
                 continue;
             }
-            let _ = Deny::Gold;
             return Some(ShopItem::Splice(slot));
         }
         None
     }
 
-    /// Pick up to `KEEP_COUNT` entries to carry into the next level, by the
-    /// same value heuristic (always at least one weapon).
+    /// Pick up to `campaign::keep_limit` entries (3, plus the nest's carry
+    /// track) to carry into the next level, by the same value heuristic
+    /// (always at least one weapon).
     pub fn pick_keep(&mut self, w: &World, items: &[Keepable]) -> Vec<usize> {
         let lo = &w.player.loadout;
         let hp_frac = (w.player.hp / w.player.max_hp().max(1.0)).clamp(0.0, 1.0);
@@ -823,7 +842,9 @@ impl Bot {
         });
         let mut chosen: Vec<usize> = scored
             .iter()
-            .take(crate::game::campaign::KEEP_COUNT)
+            // The nest's carry track raises the limit; a `--meta max` batch
+            // must use the slots it paid for, like the keep screen does.
+            .take(crate::game::campaign::keep_limit(lo))
             .map(|&(_, i)| i)
             .collect();
         // A pack with no weapon would fall back to the starting weapon, so the
@@ -947,8 +968,14 @@ impl Bot {
                 // The body is a threat of its own above; these are the shapes
                 // its tell has committed to, so the bot can leave them now
                 // instead of walking into them when they bite.
-                self.scan_wave3_enemy(w, en, p);
-                self.scan_wave4_enemy(w, en, p);
+                // A kind whose warned attack lives in a `floor_*` module keeps
+                // its state in the same `w3`/`w4` scratch its archetype would
+                // use, with a different meaning: read it through that module's
+                // own view and never through the archetype's.
+                if !self.scan_floor_enemy(w, en, p) {
+                    self.scan_wave3_enemy(w, en, p);
+                    self.scan_wave4_enemy(w, en, p);
+                }
                 if let Some(mb) = e.get::<Miniboss>() {
                     if en.alive() && !mb.chest_dropped {
                         self.miniboss_pos = Some(en.pos);
@@ -1101,10 +1128,16 @@ impl Bot {
                 }
             }
             for trap in &w.level.objects.mousetraps {
-                let armed = trap.live();
+                use crate::game::art_traps::{MousetrapState, MOUSETRAP_HIT_PROGRESS_MAX};
+                let armed = trap.state == MousetrapState::Armed;
+                // Touched, bar not landed yet: the rect is about to bite. A
+                // `Snapping` trap past its hit window is only the bar settling.
+                let committed = trap.state == MousetrapState::Triggered
+                    || (trap.state == MousetrapState::Snapping
+                        && trap.progress <= MOUSETRAP_HIT_PROGRESS_MAX);
                 // A sprung trap is inert, but its bait is still free to take.
                 let keeps_bait = !trap.bait_taken && trap.bait.is_good();
-                if (armed || keeps_bait)
+                if (armed || committed || keeps_bait)
                     && trap.pos.dist_sq(p) < 90.0 * 90.0
                     && self.sees(w, p, trap.pos)
                 {
@@ -1112,11 +1145,238 @@ impl Bot {
                         pos: trap.pos,
                         facing: trap.facing,
                         armed,
+                        committed,
                         hair: trap.kind.hair(),
                         bait_good: keeps_bait,
                     });
                 }
             }
+            // The Laundry's steam grates and the Printworks' ink pads. Both
+            // lists are empty on every other floor.
+            for grate in &w.level.objects.steam_grates {
+                use crate::game::hazards::{
+                    SteamPhase, STEAM_PLUME_SECS, STEAM_REST_SECS, STEAM_WARN_SECS,
+                };
+                if grate.pos.dist_sq(p) >= 90.0 * 90.0 || !self.sees(w, p, grate.pos) {
+                    continue;
+                }
+                let (warn_left, active_left) = match grate.phase {
+                    SteamPhase::Resting => (
+                        (STEAM_REST_SECS - grate.timer).max(0.0) + STEAM_WARN_SECS,
+                        0.0,
+                    ),
+                    SteamPhase::Warning => ((STEAM_WARN_SECS - grate.timer).max(0.0), 0.0),
+                    // A plume that has already scalded the rat cannot do it
+                    // again (once per occupant per plume).
+                    SteamPhase::Plume if grate.player_struck => (STEAM_REST_SECS, 0.0),
+                    SteamPhase::Plume => (0.0, (STEAM_PLUME_SECS - grate.timer).max(0.0)),
+                };
+                self.threats.push(Threat::Steam {
+                    pos: grate.pos,
+                    warn_left: self.quantise_warn(warn_left),
+                    active_left,
+                });
+            }
+            for pad in &w.level.objects.ink_pads {
+                // The pad is a rectangle of whole cells, so the range test is
+                // against its nearest edge, not its centre.
+                let dx = ((p.x - pad.pos.x).abs() - pad.half.x).max(0.0);
+                let dy = ((p.y - pad.pos.y).abs() - pad.half.y).max(0.0);
+                if dx * dx + dy * dy < 90.0 * 90.0 && self.sees(w, p, pad.pos) {
+                    self.threats.push(Threat::Ink {
+                        pos: pad.pos,
+                        half: pad.half,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Push the warned floor shape of a kind owned by a `floor_*` module (batch
+    /// 6): the Sump Leech's tongue, the Egg Timer's ring, the Walking Syringe's
+    /// needle ray and the Peg Snapper's sliding jaws. Each is read through the
+    /// module's own `&Enemy` view (the one geometry its hit test and its art
+    /// use), never through the raw scratch fields.
+    ///
+    /// Returns `true` when the kind is one of these, whether or not a shape is
+    /// on the floor right now, so the caller skips the archetype scans (their
+    /// reading of the same scratch would be a phantom hazard).
+    fn scan_floor_enemy(&mut self, w: &World, en: &Enemy, p: Vec2) -> bool {
+        use crate::game::ecs::systems::{floor_kitchen, floor_lab, floor_laundry, floor_sewer};
+        match en.kind {
+            EnemyKind::SumpLeech => {
+                if let Some((lip, tip, phase, _)) = floor_sewer::leech_tongue(en) {
+                    let mid = (lip + tip) * 0.5;
+                    if self.sees(w, p, mid) {
+                        // `w4.t` is the seconds left in the phase. The tongue
+                        // only slows, so it is costed as the lightest hazard.
+                        let (warn_left, active_left) = if phase == floor_sewer::LEECH_PHASE_WARN {
+                            (en.w4.t.max(0.0), en.w4.t.max(0.0) + floor_sewer::LEECH_HOLD_SECS)
+                        } else {
+                            (0.0, en.w4.t.max(0.0) + 0.05)
+                        };
+                        self.threats.push(Threat::WaveHazard {
+                            pos: mid,
+                            radius: lip.dist(tip) * 0.5,
+                            dir: (tip - lip).normalized(),
+                            warn_left: self.quantise_warn(warn_left),
+                            active_left,
+                            damage: 2.0,
+                        });
+                    }
+                }
+                true
+            }
+            EnemyKind::EggTimer => {
+                // The ring grows from the body out to `EGG_RING_END`; the
+                // whole disc it sweeps is the place to be out of. (Standing
+                // inside the band once it has passed is safe, but the bot
+                // does not plan a hop through a 5 px band.)
+                let reach = floor_kitchen::EGG_RING_END + floor_kitchen::EGG_RING_WIDTH * 0.5;
+                let timing = if let Some((_, progress)) = floor_kitchen::egg_tell_of(en) {
+                    let warn = (1.0 - progress) * floor_kitchen::EGG_WIND_SECS;
+                    Some((warn, warn + floor_kitchen::EGG_RING_SECS))
+                } else if floor_kitchen::egg_ring_of(en).is_some() {
+                    Some((0.0, en.w4.t.max(0.0) + 0.05))
+                } else {
+                    None
+                };
+                if let Some((warn_left, active_left)) = timing {
+                    if self.sees(w, p, en.pos) {
+                        self.threats.push(Threat::WaveHazard {
+                            pos: en.pos,
+                            radius: reach,
+                            dir: Vec2::ZERO,
+                            warn_left: self.quantise_warn(warn_left),
+                            active_left,
+                            damage: floor_kitchen::EGG_RING_DAMAGE,
+                        });
+                    }
+                }
+                true
+            }
+            EnemyKind::WalkingSyringe => {
+                if let Some(ray) = floor_lab::syringe_ray(en) {
+                    let mid = (ray.from + ray.to) * 0.5;
+                    if self.sees(w, p, mid) {
+                        let warn_left = if ray.live {
+                            0.0
+                        } else {
+                            (1.0 - ray.progress) * floor_lab::SYRINGE_TELL_SECS
+                        };
+                        self.threats.push(Threat::WaveHazard {
+                            pos: mid,
+                            radius: ray.from.dist(ray.to) * 0.5,
+                            dir: (ray.to - ray.from).normalized(),
+                            warn_left: self.quantise_warn(warn_left),
+                            active_left: warn_left + floor_lab::SYRINGE_THRUST_SECS,
+                            damage: floor_lab::SYRINGE_DAMAGE,
+                        });
+                    }
+                }
+                true
+            }
+            EnemyKind::PegSnapper => {
+                if let Some(view) = floor_laundry::jaw_view(en) {
+                    // `view.t` is the seconds *into* the phase. The two bars
+                    // slide in from `PEG_JAW_GAP / 2` either side of the
+                    // centre; the disc that holds their whole travel is the
+                    // shape to leave during the tell.
+                    let timing = match view.phase {
+                        floor_laundry::PEG_PHASE_TELL => {
+                            let warn = (floor_laundry::PEG_TELL_SECS - view.t).max(0.0);
+                            Some((warn, warn + floor_laundry::PEG_CLOSE_SECS))
+                        }
+                        floor_laundry::PEG_PHASE_CLOSE => Some((
+                            0.0,
+                            (floor_laundry::PEG_CLOSE_SECS - view.t).max(0.0) + 0.05,
+                        )),
+                        // Shut: the bars are at rest and harmless.
+                        _ => None,
+                    };
+                    if let Some((warn_left, active_left)) = timing {
+                        if self.sees(w, p, view.centre) {
+                            self.threats.push(Threat::WaveHazard {
+                                pos: view.centre,
+                                radius: (floor_laundry::PEG_JAW_GAP
+                                    + floor_laundry::PEG_JAW_THICK)
+                                    * 0.5
+                                    + 1.0,
+                                dir: Vec2::ZERO,
+                                warn_left: self.quantise_warn(warn_left),
+                                active_left,
+                                damage: floor_laundry::PEG_JAW_DAMAGE,
+                            });
+                        }
+                    }
+                }
+                true
+            }
+            EnemyKind::StapleCrawler => {
+                use crate::game::ecs::systems::floor_printworks as pw;
+                if pw::staple_warned(en) {
+                    // The two planted feet are mirrored in `w4.trail[0..2]`;
+                    // `w4.t` is the seconds left in the tell or the strike.
+                    let left = en.w4.t.max(0.0);
+                    let (warn_left, active_left) = if en.w4.phase == pw::STAPLE_PHASE_TELL {
+                        (left, left + pw::STAPLE_STRIKE_SECS)
+                    } else {
+                        (0.0, left + 0.05)
+                    };
+                    for foot in [en.w4.trail[0], en.w4.trail[1]] {
+                        if !self.sees(w, p, foot) {
+                            continue;
+                        }
+                        self.threats.push(Threat::WaveHazard {
+                            pos: foot,
+                            // The strike's own reach (`staple_hits`): the
+                            // spot between the feet is the safe one.
+                            radius: pw::STAPLE_FOOT_RADIUS - pw::STAPLE_GRAZE,
+                            dir: Vec2::ZERO,
+                            warn_left: self.quantise_warn(warn_left),
+                            active_left,
+                            damage: pw::STAPLE_FOOT_DAMAGE,
+                        });
+                    }
+                }
+                true
+            }
+            EnemyKind::LooseCan => {
+                use crate::game::ecs::systems::floor_flatbed as fb;
+                if let Some(path) = fb::can_path(en) {
+                    // The marked lane, bounce included. The rock clock is not
+                    // mirrored on the body, so the whole lane counts as live
+                    // from the first rock: the bot leaves it during the tell.
+                    let active_left =
+                        fb::CAN_ROCK_SECS + fb::CAN_ROLL_LENGTH / fb::CAN_ROLL_SPEED;
+                    for i in 0..path.legs() {
+                        let (a, b) = path.leg(i);
+                        let span = a.dist(b);
+                        if span < 1.0 {
+                            continue;
+                        }
+                        let dir = (b - a) * (1.0 / span);
+                        let mid = (a + b) * 0.5;
+                        if !self.sees(w, p, mid) {
+                            continue;
+                        }
+                        // `WaveHazard` lines are 1 px thick; two of them 2 px
+                        // either side of the centre line cover the 3 px lane.
+                        for side in [-2.0f32, 2.0] {
+                            self.threats.push(Threat::WaveHazard {
+                                pos: mid + dir.perp() * side,
+                                radius: span * 0.5,
+                                dir,
+                                warn_left: 0.0,
+                                active_left,
+                                damage: en.damage,
+                            });
+                        }
+                    }
+                }
+                true
+            }
+            _ => false,
         }
     }
 
@@ -1545,10 +1805,37 @@ impl Bot {
                     active_left,
                     ..
                 } => {
-                    if active_left > 0.0
-                        && shape.contains(p, R + 1.0)
-                        && (warn_left <= 0.20 || warn_left > 0.0)
-                    {
+                    // Spend the dash only when the hazard is about to fire (or
+                    // is live). The old test was `warn_left <= 0.20 ||
+                    // warn_left > 0.0`, which is always true: the dash went
+                    // the moment the rat stood in a tell, however long it had
+                    // left, and was on cooldown when the hazard landed. 0.30 s
+                    // covers Skilled's 0.25 s reaction gap and its 0.2 s
+                    // timer quantum; the walk out of a longer tell is the
+                    // danger field's job.
+                    if active_left > 0.0 && shape.contains(p, R + 1.0) && warn_left <= 0.30 {
+                        imminent = true;
+                    }
+                }
+                Threat::Mousetrap {
+                    pos,
+                    facing,
+                    committed: true,
+                    ..
+                } => {
+                    // A snap already coming down with the rat in its rect:
+                    // the dash's i-frames are the only sure way out.
+                    use crate::game::art_traps::{
+                        MOUSETRAP_KILL_HALF_V, MOUSETRAP_KILL_U_MAX, MOUSETRAP_KILL_U_MIN,
+                    };
+                    if crate::game::art_traps::local_box_contains(
+                        pos,
+                        facing,
+                        p,
+                        MOUSETRAP_KILL_U_MIN,
+                        MOUSETRAP_KILL_U_MAX,
+                        MOUSETRAP_KILL_HALF_V,
+                    ) {
                         imminent = true;
                     }
                 }
@@ -1592,20 +1879,24 @@ impl Bot {
                 _ => {}
             }
         }
-        // A Cat already in chase range: spend the burst to open the gap.
+        // A Cat already in chase range: spend the burst to open the gap. Keyed
+        // on the archetype, so the registered Cat-bodied chasers (Pipe Eel,
+        // Glass Runner, Type Slug, Tar Rat) get the same rule at their own
+        // speed.
         for t in &self.threats {
             if let Threat::Enemy {
                 pos,
                 vel,
-                kind: EnemyKind::Cat,
+                kind,
                 radius,
                 ..
             } = *t
             {
+                if kind.archetype() != EnemyKind::Cat {
+                    continue;
+                }
                 let to_rat = p - pos;
-                if to_rat.len() < radius + R + 16.0
-                    && vel.dot(to_rat) > 0.5 * EnemyKind::Cat.speed()
-                {
+                if to_rat.len() < radius + R + 16.0 && vel.dot(to_rat) > 0.5 * kind.speed() {
                     return true;
                 }
             }
@@ -1752,6 +2043,11 @@ impl Bot {
     fn update_goal(&mut self, w: &World, dt: f32) {
         let p = w.player.pos;
         self.goal_timer -= dt;
+        // The shop cooldown is wall-clock: it runs on every decision. (It used
+        // to be decremented by one decision's `dt` only on the ticks a leg was
+        // re-rolled, and not at all near a boss or miniboss, so the 9 s
+        // cooldown really lasted minutes.)
+        self.shop_cd = (self.shop_cd - dt.max(0.0)).max(0.0);
         let reached = self.goal.dist_sq(p) < 40.0 * 40.0;
         if self.goal_timer > 0.0 && !reached {
             return;
@@ -1816,8 +2112,6 @@ impl Bot {
                     return;
                 }
             }
-        } else {
-            self.shop_cd = (self.shop_cd - dt.max(0.0)).max(0.0);
         }
 
         // Otherwise run a long leg toward open ground away from the crowd.
@@ -1945,10 +2239,13 @@ impl Bot {
                 armed,
                 hair,
                 bait_good,
+                ..
             } = *t
             else {
                 continue;
             };
+            // Only a trap that is still set: one already coming down is a
+            // hazard to leave, and a sprung one's bait is a free walk-up.
             if !armed || hair || !bait_good {
                 continue;
             }
@@ -1964,8 +2261,11 @@ impl Bot {
                 continue;
             }
             let dir = to.normalized();
-            // Do not spend the escape dash into a wall of bodies.
-            if self.score(w, p, dir, false) > 10.0 {
+            // Do not spend the escape dash into a wall of bodies. (This used
+            // to read `score(..) > 10.0`, which is backwards — a high score is
+            // a *good* heading — and never fired either way, because the
+            // openness term alone keeps every score below zero.)
+            if self.enemies_near(plate, 30.0) >= 2 || !self.path_clear(w, p, plate) {
                 continue;
             }
             if best.is_none_or(|(bd, _)| d < bd) {
@@ -2008,6 +2308,8 @@ impl Bot {
 const SHOP_SEEK_RADIUS: f32 = 320.0;
 /// Seconds after a visit before the next shop leg may be planned.
 const SHOP_COOLDOWN_SECS: f32 = 9.0;
+/// The same, after a visit that bought nothing.
+const SHOP_DRY_COOLDOWN_SECS: f32 = 45.0;
 
 /// What the boss counter wants the rat to do right now.
 enum BossCounter {
@@ -2205,6 +2507,7 @@ fn threat_cost(_p: Vec2, threat: Threat, q: Vec2, t: f32, contact_scale: f32) ->
             pos,
             facing,
             armed,
+            committed,
             hair,
             ..
         } => {
@@ -2221,26 +2524,36 @@ fn threat_cost(_p: Vec2, threat: Threat, q: Vec2, t: f32, contact_scale: f32) ->
             let (u, v) = (d.dot(f), d.dot(f.perp()));
             let in_kill = (MOUSETRAP_KILL_U_MIN - R..=MOUSETRAP_KILL_U_MAX + R).contains(&u)
                 && v.abs() <= MOUSETRAP_KILL_HALF_V + R;
-            if armed && in_kill {
-                // The bar bites anywhere in its rect; a hair-trigger trap lands
-                // on the touch tick, so it is never worth entering (a dash that
-                // is *already* running is the only way through, and the bot
-                // does not plan those).
-                if hair {
+            let on_plate = (q - pos - f * MOUSETRAP_TRIGGER_OFFSET_U).len()
+                < MOUSETRAP_TRIGGER_RADIUS + R;
+            if committed {
+                // The plate has been touched (by the rat or by the horde): the
+                // bar lands inside ~0.26 s for a third of the rat's health, so
+                // the rect is a firing hazard, not a nuisance.
+                if in_kill {
                     40.0
                 } else {
-                    10.0
+                    0.0
                 }
-            } else if armed && (q - pos - f * MOUSETRAP_TRIGGER_OFFSET_U).len()
-                < MOUSETRAP_TRIGGER_RADIUS + R
-            {
-                // Touching the plate springs it; the window is short but the
-                // bar is only dangerous inside its rect.
-                if hair {
-                    30.0
-                } else {
-                    6.0
-                }
+            } else if armed && hair && in_kill {
+                // A hair-trigger trap lands on the touch tick, so its rect is
+                // never worth entering (a dash that is *already* running is
+                // the only way through, and the bot does not plan those).
+                40.0
+            } else if armed && on_plate {
+                // Touching the plate springs it. An ordinary trap gives 0.26 s
+                // from the touch to the bite, and the plate sits 10 px inside
+                // the rect on every side: at the base 58 px/s a walking rat
+                // does **not** get out in time, so the plate of an ordinary
+                // trap is as much a no-go as a hair trigger's (the old 6-point
+                // cost lost to any gem and is why the Skilled bot ate snaps).
+                // `bait_dash` is the one deliberate way across.
+                30.0
+            } else if armed && in_kill {
+                // The rest of an ordinary trap's rect only bites if something
+                // steps on the plate while the rat is inside: a mild cost, so
+                // a leg can still drag a Brute across it.
+                10.0
             } else {
                 0.0
             }
@@ -3026,5 +3339,322 @@ mod tests {
             0.0,
             "a boss behind the rat is not a lane"
         );
+    }
+
+    /// Batch 6: the plate of an **ordinary** trap is as much a no-go as a hair
+    /// trigger's (a walking rat cannot leave the rect in the 0.26 s between
+    /// the touch and the bite), a bar that is already coming down makes the
+    /// whole rect a hazard, and a bar that has landed is nothing.
+    #[test]
+    fn an_ordinary_trap_plate_is_a_no_go_and_a_committed_bar_is_a_hazard() {
+        use crate::game::art_traps::MOUSETRAP_TRIGGER_OFFSET_U;
+        let pos = Vec2::new(400.0, 400.0);
+        let facing = Vec2::new(1.0, 0.0);
+        let plate = pos + facing * MOUSETRAP_TRIGGER_OFFSET_U;
+        // Inside the kill rect, clear of the plate circle.
+        let corner = pos + Vec2::new(-2.0, 9.0);
+        let far = pos + Vec2::new(60.0, 0.0);
+        let trap = |armed: bool, committed: bool, hair: bool| Threat::Mousetrap {
+            pos,
+            facing,
+            armed,
+            committed,
+            hair,
+            bait_good: false,
+        };
+        let cost = |t: Threat, q: Vec2| threat_cost(Vec2::ZERO, t, q, 0.12, 1.0);
+
+        let ordinary = trap(true, false, false);
+        assert!(cost(ordinary, plate) >= 30.0, "the plate must outweigh any loot pull");
+        assert!(cost(ordinary, plate) >= cost(trap(true, false, true), plate) * 0.75);
+        let rect = cost(ordinary, corner);
+        assert!(rect > 0.0 && rect < cost(ordinary, plate), "the rest of the rect is mild");
+        assert_eq!(cost(ordinary, far), 0.0);
+
+        let coming_down = trap(false, true, false);
+        assert!(cost(coming_down, corner) >= 40.0, "a committed bar bites the whole rect");
+        assert_eq!(cost(coming_down, far), 0.0);
+
+        // Landed (or sprung with a bait left): free floor.
+        let spent = trap(false, false, false);
+        assert_eq!(cost(spent, plate), 0.0);
+        assert_eq!(cost(spent, corner), 0.0);
+    }
+
+    /// Batch 6: a snap already coming down with the rat in its rect spends the
+    /// dash (the i-frames are the only sure way out for a 0.25 s reaction).
+    #[test]
+    fn a_committed_snap_under_the_rat_spends_the_dash() {
+        let mut w = World::new(Theme::Sewer, 17);
+        w.clear_enemies();
+        w.player.dash_cd = 0.0;
+        let p = w.player.pos;
+        for skill in [Skill::Expert, Skill::Skilled] {
+            let mut bot = seeded_bot(skill, 17);
+            bot.threats.clear();
+            bot.threats.push(Threat::Mousetrap {
+                pos: p - Vec2::new(4.0, 0.0),
+                facing: Vec2::new(1.0, 0.0),
+                armed: false,
+                committed: true,
+                hair: false,
+                bait_good: false,
+            });
+            assert!(bot.wants_dash(&w, &unit_dirs()), "{skill:?} stood under the bar");
+            // The same trap still merely armed is not a reason to dash.
+            bot.threats.clear();
+            bot.threats.push(Threat::Mousetrap {
+                pos: p - Vec2::new(4.0, 0.0),
+                facing: Vec2::new(1.0, 0.0),
+                armed: true,
+                committed: false,
+                hair: false,
+                bait_good: false,
+            });
+            assert!(!bot.wants_dash(&w, &unit_dirs()), "{skill:?} dashed off an armed trap");
+        }
+    }
+
+    /// Batch 6: the scan used to never build `Threat::Steam` / `Threat::Ink`,
+    /// so the Laundry's plumes were invisible to every skill.
+    #[test]
+    fn the_scan_reads_steam_grates() {
+        use crate::game::hazards::{SteamGrate, STEAM_REST_SECS};
+        let mut w = World::new(Theme::Sewer, 9);
+        w.clear_enemies();
+        let p = w.player.pos;
+        // Half a second into the 1 s tell, two cells from the rat.
+        let cell = cell_of(p + Vec2::new(32.0, 0.0));
+        w.level
+            .objects
+            .steam_grates
+            .push(SteamGrate::new(cell, STEAM_REST_SECS + 0.5));
+
+        let mut expert = seeded_bot(Skill::Expert, 9);
+        expert.scan(&w);
+        let warn = expert.threats.iter().find_map(|t| match *t {
+            Threat::Steam {
+                warn_left,
+                active_left,
+                ..
+            } => Some((warn_left, active_left)),
+            _ => None,
+        });
+        let (warn_left, active_left) = warn.expect("the expert never saw the grate");
+        assert!((warn_left - 0.5).abs() < 1e-3, "warn_left = {warn_left}");
+        assert_eq!(active_left, 0.0);
+
+        // Casual is not trap-aware: it keeps walking into them.
+        let mut casual = seeded_bot(Skill::Casual, 9);
+        casual.scan(&w);
+        assert!(!casual.threats.iter().any(|t| matches!(t, Threat::Steam { .. })));
+    }
+
+    /// Batch 6: the shop cooldown is wall-clock. It used to tick only on the
+    /// decisions that re-rolled a leg, by one decision's `dt`.
+    #[test]
+    fn the_shop_cooldown_runs_on_every_decision() {
+        let w = World::new(Theme::Sewer, 5);
+        let mut bot = seeded_bot(Skill::Expert, 5);
+        // A leg that is neither reached nor expired: no re-roll this call.
+        bot.goal = w.player.pos + Vec2::new(150.0, 0.0);
+        bot.goal_timer = 100.0;
+        bot.shop_cd = SHOP_COOLDOWN_SECS;
+        bot.update_goal(&w, 4.0);
+        assert!(
+            (bot.shop_cd - (SHOP_COOLDOWN_SECS - 4.0)).abs() < 1e-4,
+            "shop_cd = {}",
+            bot.shop_cd
+        );
+        bot.on_new_level(1);
+        assert_eq!(bot.shop_cd, 0.0, "a new floor's holes are not on cooldown");
+    }
+
+    /// Batch 6: Casual is worse *on purpose*, in the ways a new player is —
+    /// it re-plans late (it holds one input for its whole 0.45 s reaction) and
+    /// it does not dash off a body the way the other two do (its only dash is
+    /// the low-health panic) — not through a side effect.
+    #[test]
+    fn casual_is_slower_and_dashes_later_by_design() {
+        let mut w = World::new(Theme::Sewer, 11);
+        w.level.tiles = crate::game::collision::TileMap::new(200, 160, Theme::Sewer, 0);
+        w.clear_enemies();
+        w.player.pos = w.level.arena * 0.5;
+        w.player.dash_cd = 0.0;
+        let p = w.player.pos;
+        // A heavy body on the rat at full health: the deliberate dash.
+        w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(8.0, 0.0), 1.0);
+        for skill in [Skill::Expert, Skill::Skilled] {
+            let mut bot = seeded_bot(skill, 11);
+            bot.scan(&w);
+            assert!(bot.wants_dash(&w, &unit_dirs()), "{skill:?} keeps a Brute on it");
+        }
+        let mut casual = seeded_bot(Skill::Casual, 11);
+        casual.scan(&w);
+        assert!(
+            !casual.wants_dash(&w, &unit_dirs()),
+            "Casual has no deliberate dash at full health"
+        );
+
+        // Reaction: one decision, then the same input for the rest of the
+        // window (20 ticks = 0.33 s < 0.45 s); Expert re-plans every 0.08 s.
+        let dt = 1.0 / 60.0;
+        let first = casual.decide(&w, dt);
+        let made = casual.decisions;
+        for _ in 0..20 {
+            assert_eq!(casual.decide(&w, dt), first, "Casual changed its mind early");
+        }
+        assert_eq!(casual.decisions, made);
+        let mut expert = seeded_bot(Skill::Expert, 11);
+        for _ in 0..21 {
+            let _ = expert.decide(&w, dt);
+        }
+        assert!(expert.decisions >= 3, "Expert re-plans inside the same window");
+    }
+
+    // ---- Batch 6: the `floor_*` warned attacks ---------------------------
+
+    /// One body of `kind` 20 px east of the rat, posed by `pose(body, rat)`,
+    /// scanned by an Expert: `(rat, body, the hazards it posted)`.
+    fn floor_scan(kind: EnemyKind, pose: impl FnOnce(&mut Enemy, Vec2)) -> (Vec2, Enemy, Vec<Threat>) {
+        let mut w = World::new(Theme::Sewer, 3);
+        let p = w.player.pos;
+        let mut en = Enemy::spawn(kind, p + Vec2::new(20.0, 0.0), 1.0, &mut w.rng);
+        pose(&mut en, p);
+        let mut bot = seeded_bot(Skill::Expert, 3);
+        bot.threats.clear();
+        assert!(
+            bot.scan_floor_enemy(&w, &en, p),
+            "{kind:?} is a floor-owned kind: its archetype's scan must be skipped"
+        );
+        (p, en, bot.threats.clone())
+    }
+
+    /// The cost of standing at `q` when every posted hazard has fired.
+    fn floor_cost(threats: &[Threat], q: Vec2) -> f32 {
+        threats
+            .iter()
+            .map(|t| threat_cost(Vec2::ZERO, *t, q, 2.0, 1.0))
+            .sum()
+    }
+
+    #[test]
+    fn a_plain_kind_is_not_a_floor_owned_kind() {
+        let mut w = World::new(Theme::Sewer, 3);
+        let p = w.player.pos;
+        let en = Enemy::spawn(EnemyKind::Skitterer, p + Vec2::new(20.0, 0.0), 1.0, &mut w.rng);
+        let mut bot = seeded_bot(Skill::Expert, 3);
+        bot.threats.clear();
+        assert!(!bot.scan_floor_enemy(&w, &en, p));
+        assert!(bot.threats.is_empty());
+    }
+
+    #[test]
+    fn the_bot_reads_the_sump_leech_tongue() {
+        use crate::game::ecs::systems::floor_sewer as fs;
+        let (_, en, threats) = floor_scan(EnemyKind::SumpLeech, |e, _| {
+            e.w4.phase = fs::LEECH_PHASE_WARN;
+            e.w4.t = 0.3;
+            e.w4.dir = Vec2::new(-1.0, 0.0);
+        });
+        assert_eq!(threats.len(), 1);
+        let (lip, tip) = fs::tongue_segment(en.pos, en.radius, en.w4.dir);
+        assert!(floor_cost(&threats, (lip + tip) * 0.5) > 0.0, "on the tongue");
+        assert_eq!(floor_cost(&threats, en.pos + Vec2::new(0.0, 30.0)), 0.0, "beside it");
+        match threats[0] {
+            Threat::WaveHazard { warn_left, .. } => assert!((warn_left - 0.3).abs() < 1e-3),
+            other => panic!("not a floor hazard: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_bot_reads_the_egg_timer_ring() {
+        use crate::game::ecs::systems::floor_kitchen as fk;
+        let (_, en, threats) = floor_scan(EnemyKind::EggTimer, |e, _| {
+            e.w4.phase = fk::EGG_PHASE_WIND;
+            e.w4.t = 0.4;
+        });
+        assert_eq!(threats.len(), 1);
+        // Anywhere the ring will pass is hot; past its last radius is not.
+        assert!(floor_cost(&threats, en.pos + Vec2::new(fk::EGG_RING_END - 2.0, 0.0)) > 0.0);
+        assert!(floor_cost(&threats, en.pos + Vec2::new(0.0, 10.0)) > 0.0);
+        assert_eq!(floor_cost(&threats, en.pos + Vec2::new(fk::EGG_RING_END + 12.0, 0.0)), 0.0);
+        // Asleep: nothing on the floor.
+        let (_, _, asleep) = floor_scan(EnemyKind::EggTimer, |e, _| {
+            e.w4.phase = fk::EGG_PHASE_SLEEP;
+        });
+        assert!(asleep.is_empty());
+    }
+
+    #[test]
+    fn the_bot_reads_the_walking_syringe_ray() {
+        use crate::game::ecs::systems::floor_lab as fl;
+        let (_, en, threats) = floor_scan(EnemyKind::WalkingSyringe, |e, _| {
+            fl::pose_for_test(e, fl::SYRINGE_TELL, Vec2::new(-1.0, 0.0));
+        });
+        assert_eq!(threats.len(), 1);
+        let (from, to) = fl::ray_from(en.pos, en.w4.dir);
+        assert!(floor_cost(&threats, (from + to) * 0.5) > 0.0, "on the ray");
+        assert_eq!(floor_cost(&threats, (from + to) * 0.5 + Vec2::new(0.0, 12.0)), 0.0);
+        // Retracting: the needle is spent.
+        let (_, _, spent) = floor_scan(EnemyKind::WalkingSyringe, |e, _| {
+            fl::pose_for_test(e, fl::SYRINGE_RETRACT, Vec2::new(-1.0, 0.0));
+        });
+        assert!(spent.is_empty());
+    }
+
+    #[test]
+    fn the_bot_reads_the_peg_snapper_jaws() {
+        use crate::game::ecs::systems::floor_laundry as fl;
+        let pose = |phase: u8| {
+            move |e: &mut Enemy, rat: Vec2| {
+                // The `W3` mirror `jaw_view` reads: phase and seconds into it.
+                e.w3.home = Vec2::new(phase as f32, 0.2);
+                e.w3.bar_pos = rat;
+                e.w3.bar_dir = Vec2::new(1.0, 0.0);
+            }
+        };
+        let (p, _, threats) = floor_scan(EnemyKind::PegSnapper, pose(fl::PEG_PHASE_TELL));
+        assert_eq!(threats.len(), 1);
+        assert!(floor_cost(&threats, p) > 0.0, "between the jaws");
+        assert!(floor_cost(&threats, p + Vec2::new(0.0, fl::PEG_JAW_GAP * 0.5)) > 0.0);
+        assert_eq!(floor_cost(&threats, p + Vec2::new(0.0, 30.0)), 0.0, "well outside");
+        let (_, _, shut) = floor_scan(EnemyKind::PegSnapper, pose(fl::PEG_PHASE_SHUT));
+        assert!(shut.is_empty(), "shut jaws are harmless");
+    }
+
+    #[test]
+    fn the_bot_reads_the_staple_crawler_feet() {
+        use crate::game::ecs::systems::floor_printworks as fp;
+        let (p, en, threats) = floor_scan(EnemyKind::StapleCrawler, |e, rat| {
+            let feet = fp::staple_feet(e.pos, rat);
+            e.w4.phase = fp::STAPLE_PHASE_TELL;
+            e.w4.t = 0.3;
+            e.w4.trail[0] = feet[0];
+            e.w4.trail[1] = feet[1];
+        });
+        assert_eq!(threats.len(), 2, "one hazard per foot");
+        let feet = fp::staple_feet(en.pos, p);
+        assert!(floor_cost(&threats, feet[0]) > 0.0);
+        assert!(floor_cost(&threats, feet[1]) > 0.0);
+        // The rat's own spot, between the feet, is the safe place to stand.
+        assert_eq!(floor_cost(&threats, p), 0.0);
+    }
+
+    #[test]
+    fn the_bot_reads_the_loose_can_lane_and_its_bounce() {
+        use crate::game::ecs::systems::floor_flatbed as fb;
+        let (p, _, threats) = floor_scan(EnemyKind::LooseCan, |e, rat| {
+            let path = fb::CanPath {
+                points: [e.pos, rat - Vec2::new(20.0, 0.0), rat - Vec2::new(20.0, -30.0)],
+                bounced: true,
+            };
+            e.w4.phase = fb::CAN_PHASE_ROCK;
+            fb::store_can_path(e, &path);
+        });
+        assert_eq!(threats.len(), 4, "two legs, two lines each");
+        assert!(floor_cost(&threats, p) > 0.0, "on the first leg");
+        assert!(floor_cost(&threats, p + Vec2::new(-20.0, 20.0)) > 0.0, "on the bounce");
+        assert_eq!(floor_cost(&threats, p + Vec2::new(0.0, -25.0)), 0.0, "off the lane");
     }
 }

@@ -566,7 +566,10 @@ pub fn super_dash_system(
         if shapes.iter().next().is_none() {
             continue;
         }
-        if !shapes.segment_hits_grounded(from, to, radius) {
+        // The same travelled legs the horde is tested against, not the
+        // `from → to` chord: a dash that slid round a corner must not reach a
+        // boss through the masonry the chord cuts across.
+        if !(0..leg_n).any(|i| shapes.segment_hits_grounded(legs[i].0, legs[i].1, radius)) {
             continue;
         }
         track.boss_hit = true;

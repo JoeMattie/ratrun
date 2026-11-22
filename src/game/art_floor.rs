@@ -968,15 +968,83 @@ pub fn draw_pickup(pb: &mut PixelBuffer, kind: crate::game::gem::PickupKind, s: 
     let pulse = 0.5 + 0.5 * (bob.sin() * 0.5 + 0.5);
     let base = kind.color();
     match kind {
-        PickupKind::Heal | PickupKind::Magnet | PickupKind::Nuke => {
-            pb.filled_circle(s.0, s.1, 2, scale(base, 0.7 + pulse * 0.3));
-            pb.plot(s.0, s.1, (255, 255, 255));
-        }
+        // The three legacy pickups used to be the same two-pixel disc in three
+        // colours, which a colour-folded terminal (or a lit floor) could not
+        // tell apart. Each keeps its colour and gets its own silhouette.
+        PickupKind::Heal => draw_heal_cross(pb, s, scale(base, 0.7 + pulse * 0.3)),
+        PickupKind::Magnet => draw_horseshoe(pb, s, scale(base, 0.7 + pulse * 0.3)),
+        PickupKind::Nuke => draw_nuke_burst(pb, s, scale(base, 0.7 + pulse * 0.3), pulse),
         PickupKind::BottleCap => draw_bottle_cap(pb, s, pulse),
         PickupKind::WindupMouse => draw_windup_pickup(pb, s, bob),
         PickupKind::PocketWatch => draw_pocket_watch(pb, s, bob),
         PickupKind::CleanSocks => draw_clean_socks(pb, s, pulse),
     }
+}
+
+/// Dark contour shared by the three legacy pickups, so each silhouette holds
+/// against a bright floor or its own halo.
+const PICKUP_OUTLINE: Rgb = (18, 22, 30);
+
+/// Heal: a fat medical cross (7 px across) with a white core.
+fn draw_heal_cross(pb: &mut PixelBuffer, s: (i32, i32), body: Rgb) {
+    let (cx, cy) = s;
+    // Contour: the cross grown by one pixel.
+    pb.rect_fill(cx - 4, cy - 2, 9, 5, PICKUP_OUTLINE);
+    pb.rect_fill(cx - 2, cy - 4, 5, 9, PICKUP_OUTLINE);
+    // Body: two 7 × 3 bars.
+    pb.rect_fill(cx - 3, cy - 1, 7, 3, body);
+    pb.rect_fill(cx - 1, cy - 3, 3, 7, body);
+    // White core cross.
+    pb.rect_fill(cx - 2, cy, 5, 1, (255, 255, 255));
+    pb.rect_fill(cx, cy - 2, 1, 5, (255, 255, 255));
+}
+
+/// Magnet: a horseshoe, open downward, with white pole tips.
+fn draw_horseshoe(pb: &mut PixelBuffer, s: (i32, i32), body: Rgb) {
+    let (cx, cy) = s;
+    // Contour.
+    pb.rect_fill(cx - 3, cy - 4, 7, 1, PICKUP_OUTLINE);
+    pb.rect_fill(cx - 4, cy - 3, 9, 2, PICKUP_OUTLINE);
+    pb.rect_fill(cx - 4, cy - 1, 4, 5, PICKUP_OUTLINE);
+    pb.rect_fill(cx + 1, cy - 1, 4, 5, PICKUP_OUTLINE);
+    // The bow and the two arms.
+    pb.rect_fill(cx - 2, cy - 3, 5, 1, body);
+    pb.rect_fill(cx - 3, cy - 2, 7, 1, body);
+    pb.rect_fill(cx - 3, cy - 1, 2, 3, body);
+    pb.rect_fill(cx + 2, cy - 1, 2, 3, body);
+    // Top-left sheen on the bow.
+    pb.plot(cx - 2, cy - 3, mix(body, (255, 255, 255), 0.55));
+    pb.plot(cx - 1, cy - 3, mix(body, (255, 255, 255), 0.55));
+    // White pole tips.
+    pb.rect_fill(cx - 3, cy + 2, 2, 1, (255, 255, 255));
+    pb.rect_fill(cx + 2, cy + 2, 2, 1, (255, 255, 255));
+}
+
+/// Nuke: an eight-point burst round a hot core; the diagonal rays breathe
+/// with `pulse` so it is the one pickup that visibly throbs.
+fn draw_nuke_burst(pb: &mut PixelBuffer, s: (i32, i32), body: Rgb, pulse: f32) {
+    let (cx, cy) = s;
+    pb.filled_circle(cx, cy, 3, PICKUP_OUTLINE);
+    // Cardinal rays, outlined by the disc where they leave it.
+    for d in 1..=4 {
+        pb.plot(cx + d, cy, body);
+        pb.plot(cx - d, cy, body);
+        pb.plot(cx, cy + d, body);
+        pb.plot(cx, cy - d, body);
+    }
+    // Diagonal rays: two pixels, three at the top of the pulse.
+    let reach = if pulse > 0.8 { 3 } else { 2 };
+    for d in 1..=reach {
+        for (sx, sy) in [(-1, -1), (1, -1), (-1, 1), (1, 1)] {
+            pb.plot(cx + sx * d, cy + sy * d, body);
+        }
+    }
+    // Hot core: yellow ring round a white centre.
+    let hot = mix(body, (255, 240, 150), 0.7);
+    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+        pb.plot(cx + dx, cy + dy, hot);
+    }
+    pb.plot(cx, cy, (255, 255, 255));
 }
 
 /// Fluted tin bottle cap with a visibly corrugated toothed rim, metallic
@@ -1272,10 +1340,16 @@ pub fn draw_decoy(pb: &mut PixelBuffer, s: (i32, i32), angle: f32) {
         let fade = (1.0 - phase) * 0.55;
         let col = scale((244, 196, 86), fade);
         let steps = (r * 6).max(12);
+        // One additive plot per pixel: an expanding ring whose steps doubled up
+        // on some pixels shimmered as it grew.
+        let mut seen = crate::game::art_wave3a::RingDedup::new();
         for i in (0..steps).step_by(2) {
             let a = i as f32 / steps as f32 * std::f32::consts::TAU + angle * 0.2;
             let rx = cx + (a.cos() * r as f32).round() as i32;
             let ry = cy + (a.sin() * r as f32).round() as i32;
+            if seen.repeat((rx, ry)) {
+                continue;
+            }
             pb.plot_add(rx, ry, col);
         }
     }
@@ -1477,6 +1551,46 @@ pub fn draw_chest(pb: &mut PixelBuffer, s: (i32, i32), elapsed: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every pickup paints a different silhouette (the set of pixels it
+    /// touches), not just a different colour, and stays inside a 13 px box.
+    #[test]
+    fn pickups_have_pairwise_distinct_silhouettes() {
+        use crate::game::gem::PickupKind;
+        const BG: Rgb = (1, 2, 3);
+        let shape = |kind: PickupKind| -> Vec<bool> {
+            let mut pb = PixelBuffer::new(32, 32);
+            pb.clear(BG);
+            draw_pickup(&mut pb, kind, (16, 16), 0.0);
+            for y in 0..pb.h {
+                for x in 0..pb.w {
+                    let inside = (10..=22).contains(&x) && (10..=22).contains(&y);
+                    assert!(inside || pb.pixel_at(x, y) == BG, "{kind:?} paints ({x}, {y})");
+                }
+            }
+            pb.pixels().iter().map(|&p| p != BG).collect()
+        };
+        let kinds = PickupKind::all();
+        let shapes: Vec<Vec<bool>> = kinds.iter().map(|&k| shape(k)).collect();
+        for i in 0..kinds.len() {
+            assert!(shapes[i].iter().any(|&p| p), "{:?} drew nothing", kinds[i]);
+            for j in i + 1..kinds.len() {
+                assert!(shapes[i] != shapes[j], "{:?} and {:?} share a silhouette", kinds[i], kinds[j]);
+            }
+        }
+    }
+
+    /// Drawing at and past every buffer edge must clip, never panic.
+    #[test]
+    fn pickups_clip_at_the_buffer_edges() {
+        use crate::game::gem::PickupKind;
+        let mut pb = PixelBuffer::new(8, 8);
+        for kind in PickupKind::all() {
+            for s in [(0, 0), (7, 7), (-3, 4), (4, -3), (11, 4), (4, 11), (-40, -40)] {
+                draw_pickup(&mut pb, kind, s, 1.3);
+            }
+        }
+    }
 
     #[test]
     fn floor_scrolls_as_a_crop_of_the_arena() {

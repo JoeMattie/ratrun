@@ -453,6 +453,10 @@ pub fn wave4_system(
         if !e.kind.is_wave4() || !e.alive() {
             continue;
         }
+        // Flatbed (`floor_flatbed`): the Loose Can runs its own state machine.
+        if crate::game::ecs::systems::floor_flatbed::owns_state_machine(e.kind) {
+            continue;
+        }
         if e.w4.armed == 0 {
             arm(&mut e);
         }
