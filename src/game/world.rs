@@ -230,6 +230,17 @@ pub struct World {
     /// whole run (only a size change reallocates it) so a zoomed frame does
     /// not allocate per tick.
     world_buf: Option<PixelBuffer>,
+    /// The DETAIL option: the finest block-glyph set a zoomed-out frame may be
+    /// drawn with ([`crate::render::subcell`]). Render-only, `Off` by default;
+    /// the App sets it from the saved option and the terminal's capabilities.
+    pub subcell: crate::render::subcell::SubcellSet,
+    /// The zoomed-out picture at sub-cell resolution, when the last `draw`
+    /// produced one (see [`World::detail`]). Held for the run like `world_buf`.
+    detail: crate::render::subcell::DetailFrame,
+    detail_live: bool,
+    /// The resampled screen picture before the damage digits and the ink pass
+    /// stamped it: the difference is what the detail frame carries over.
+    detail_base: PixelBuffer,
     /// SFX events emitted this tick; drained by the app after `update`.
     pub sfx: Vec<Sfx>,
 
@@ -457,6 +468,10 @@ impl World {
             zoom_view: zoom::DEFAULT,
             zoom_scale: Vec2::new(1.0, 1.0),
             world_buf: None,
+            subcell: crate::render::subcell::SubcellSet::Off,
+            detail: crate::render::subcell::DetailFrame::new(),
+            detail_live: false,
+            detail_base: PixelBuffer::new(0, 0),
             sfx: Vec::new(),
             tail_ready_at: f32::NEG_INFINITY,
 
@@ -1809,8 +1824,10 @@ impl World {
             // A degenerate terminal renders nothing (and must not panic).
             self.render_viewport = Vec2::new(sw as f32, sh as f32);
             self.zoom_scale = Vec2::new(1.0, 1.0);
+            self.detail_live = false;
             return;
         }
+        self.detail_live = false;
         let z = zoom::clamp(self.zoom_view);
         self.zoom_scale = Vec2::new(1.0, 1.0);
         if (z - 1.0).abs() < 0.002 {
@@ -1828,6 +1845,19 @@ impl World {
             {
                 let _p = crate::prof::scope(crate::prof::Stage::Resample);
                 buf.resample_to(pb);
+                // DETAIL: the same world picture again on the sub-cell grid
+                // (the scene and the lighting pass already ran at world
+                // resolution, so this is one more resample and nothing else).
+                // The half-block picture above is still drawn in full: the
+                // screen-space passes below stamp it, and what they change is
+                // carried onto the detail frame afterwards.
+                if sh.is_multiple_of(2) {
+                    if let Some(grid) = crate::render::subcell::grid_for(self.subcell, z) {
+                        buf.resample_to(self.detail.begin(grid, sw, sh / 2));
+                        self.detail_base.copy_from(pb);
+                        self.detail_live = true;
+                    }
+                }
             }
             self.zoom_scale = Vec2::new(ww as f32 / sw as f32, wh as f32 / sh as f32);
             self.world_buf = Some(buf);
@@ -1861,6 +1891,17 @@ impl World {
         // digits) because a pellet that kills the player outranks the number
         // that explains the last hit (see [`crate::render::ink`]).
         self.draw_ink(pb);
+        if self.detail_live {
+            self.detail.overlay(&self.detail_base, pb);
+        }
+    }
+
+    /// The sub-cell picture of the frame [`World::draw`] just drew, when the
+    /// DETAIL option produced one (zoomed out, a set allowed): blit this
+    /// instead of the half-block buffer. `None` at 1× and zoomed in, where the
+    /// half-block buffer is the whole picture.
+    pub fn detail(&self) -> Option<&crate::render::subcell::DetailFrame> {
+        self.detail_live.then_some(&self.detail)
     }
 
     /// The last pass of the frame: [`crate::render::ink::draw`] with the view

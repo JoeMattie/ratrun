@@ -118,6 +118,53 @@ impl GlyphSet {
     }
 }
 
+/// The finest block-glyph family the terminal is known to draw cleanly: what
+/// the DETAIL option's AUTO may use for the zoomed-out playfield
+/// (`crate::render::subcell`). Ordered coarse to fine.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum BlockSet {
+    /// `▀` only: the picture every terminal gets today. The answer for any
+    /// terminal this game has not been told about.
+    Half,
+    /// The ten quadrants `U+2596..=U+259F` (Block Elements, Unicode 1.0).
+    Quad,
+    /// Sextants, `U+1FB00..=U+1FB3B` (Symbols for Legacy Computing, Unicode 13).
+    Sextant,
+    /// Octants, `U+1CD00..=U+1CDE5` (the Supplement, Unicode 16).
+    Octant,
+}
+
+impl BlockSet {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BlockSet::Half => "half",
+            BlockSet::Quad => "quad",
+            BlockSet::Sextant => "sextant",
+            BlockSet::Octant => "octant",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "half" | "halfblock" => Some(BlockSet::Half),
+            "quad" | "quadrant" | "quadrants" => Some(BlockSet::Quad),
+            "sextant" | "sextants" => Some(BlockSet::Sextant),
+            "octant" | "octants" => Some(BlockSet::Octant),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn code(self) -> u8 {
+        match self {
+            BlockSet::Half => 1,
+            BlockSet::Quad => 2,
+            BlockSet::Sextant => 3,
+            BlockSet::Octant => 4,
+        }
+    }
+}
+
 /// Which rule produced the colour answer (for the support table and `--caps`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ColorSource {
@@ -173,6 +220,8 @@ pub struct Capabilities {
     pub color_source: ColorSource,
     pub glyphs: GlyphSet,
     pub glyph_source: GlyphSource,
+    /// The finest block glyphs the terminal is known to draw (see [`BlockSet`]).
+    pub blocks: BlockSet,
     pub multiplexer: bool,
     /// `TERM_PROGRAM` as reported by the terminal (empty when unset).
     pub term_program: String,
@@ -184,11 +233,12 @@ impl Capabilities {
     /// One line for `--caps` and the support table.
     pub fn describe(&self) -> String {
         format!(
-            "color={} ({}) glyphs={} ({}) multiplexer={} TERM={} TERM_PROGRAM={}",
+            "color={} ({}) glyphs={} ({}) blocks={} multiplexer={} TERM={} TERM_PROGRAM={}",
             self.color.as_str(),
             self.color_source.as_str(),
             self.glyphs.as_str(),
             self.glyph_source.as_str(),
+            self.blocks.as_str(),
             if self.multiplexer { "yes" } else { "no" },
             if self.term.is_empty() { "-" } else { &self.term },
             if self.term_program.is_empty() {
@@ -242,6 +292,12 @@ const CJK_LANGUAGES: &[&str] = &["ja", "ko", "zh", "wja", "jpn", "kor", "zho"];
 /// the "looks like garbage" case.
 const SAFE_GLYPH_PROGRAMS: &[&str] = &["Apple_Terminal"];
 
+/// Terminal programs that draw the sextants themselves (pixel-exact, no font
+/// involved), so cells tile without gaps. Ghostty also draws octants from
+/// 1.2, but its version is not detected here, so octants stay opt-in
+/// (`--glyphs octant`, `RATRUN_GLYPHS=octant` or `RATRUN_SUBCELL=octant`).
+const SEXTANT_PROGRAMS: &[&str] = &["ghostty", "kitty", "WezTerm"];
+
 // ---------------------------------------------------------------------------
 // Resolved state
 // ---------------------------------------------------------------------------
@@ -253,6 +309,7 @@ const UNRESOLVED: u8 = 0;
 
 static DEPTH: AtomicU8 = AtomicU8::new(UNRESOLVED);
 static GLYPHS: AtomicU8 = AtomicU8::new(UNRESOLVED);
+static BLOCKS: AtomicU8 = AtomicU8::new(UNRESOLVED);
 static MULTIPLEXER: AtomicU8 = AtomicU8::new(UNRESOLVED);
 
 /// The colour depth to render for. `Truecolor` until [`init`] has run.
@@ -274,6 +331,18 @@ pub fn glyph_set() -> GlyphSet {
     }
 }
 
+/// The finest block glyphs the terminal is known to draw. `Half` until
+/// [`init`] has run, so tests and headless renders get today's picture.
+#[inline]
+pub fn block_set() -> BlockSet {
+    match BLOCKS.load(Ordering::Relaxed) {
+        2 => BlockSet::Quad,
+        3 => BlockSet::Sextant,
+        4 => BlockSet::Octant,
+        _ => BlockSet::Half,
+    }
+}
+
 /// True when the terminal is behind tmux or screen. Diagnostics only.
 #[inline]
 pub fn is_multiplexer() -> bool {
@@ -288,6 +357,7 @@ pub fn init(args: &[String]) -> Capabilities {
     let caps = detect(args);
     DEPTH.store(caps.color.code(), Ordering::Relaxed);
     GLYPHS.store(caps.glyphs.code(), Ordering::Relaxed);
+    BLOCKS.store(caps.blocks.code(), Ordering::Relaxed);
     MULTIPLEXER.store(if caps.multiplexer { 2 } else { 1 }, Ordering::Relaxed);
     caps
 }
@@ -327,12 +397,21 @@ pub fn detect_with(cli: &CliOverrides, env: &dyn Fn(&str) -> String) -> Capabili
         &env("LC_CTYPE"),
         &env("LANG"),
     );
+    let blocks = detect_blocks(
+        cli.blocks,
+        &env("RATRUN_GLYPHS"),
+        glyphs,
+        &term,
+        &term_program,
+        multiplexer,
+    );
 
     Capabilities {
         color,
         color_source,
         glyphs,
         glyph_source,
+        blocks,
         multiplexer,
         term_program,
         term,
@@ -344,6 +423,9 @@ pub fn detect_with(cli: &CliOverrides, env: &dyn Fn(&str) -> String) -> Capabili
 pub struct CliOverrides {
     pub color: Option<ColorDepth>,
     pub glyphs: Option<GlyphSet>,
+    /// `--glyphs quad|sextant|octant|half`: the block family, which rides the
+    /// same flag as the glyph inventory (the two value sets do not overlap).
+    pub blocks: Option<BlockSet>,
 }
 
 impl CliOverrides {
@@ -379,6 +461,8 @@ impl CliOverrides {
                     if let Some(v) = value {
                         if let Some(set) = GlyphSet::parse(&v) {
                             out.glyphs = Some(set);
+                        } else if let Some(set) = BlockSet::parse(&v) {
+                            out.blocks = Some(set);
                         }
                     }
                 }
@@ -465,6 +549,36 @@ fn detect_glyphs(
         return (GlyphSet::Safe, GlyphSource::TermProgram);
     }
     (GlyphSet::Unicode, GlyphSource::Default)
+}
+
+/// The block family for the DETAIL option. An explicit answer wins; the safe
+/// glyph set and a multiplexer (whose width table is its own) keep the half
+/// block; otherwise only a terminal known to draw the glyphs itself gets them.
+fn detect_blocks(
+    cli: Option<BlockSet>,
+    env_override: &str,
+    glyphs: GlyphSet,
+    term: &str,
+    term_program: &str,
+    multiplexer: bool,
+) -> BlockSet {
+    if let Some(set) = cli {
+        return set;
+    }
+    if let Some(set) = BlockSet::parse(env_override) {
+        return set;
+    }
+    if glyphs == GlyphSet::Safe || multiplexer {
+        return BlockSet::Half;
+    }
+    let known = SEXTANT_PROGRAMS.iter().any(|p| p.eq_ignore_ascii_case(term_program))
+        || term == "xterm-ghostty"
+        || term == "xterm-kitty";
+    if known {
+        BlockSet::Sextant
+    } else {
+        BlockSet::Half
+    }
 }
 
 /// True when a locale tag names a CJK language (`ja_JP.UTF-8`, `zh-Hans`,
@@ -1105,12 +1219,76 @@ mod tests {
     }
 
     #[test]
+    fn only_a_terminal_known_to_draw_them_gets_finer_blocks() {
+        let none = CliOverrides::default();
+        // Ghostty, Kitty and WezTerm draw sextants themselves.
+        for env in [
+            &[("TERM", "xterm-ghostty"), ("TERM_PROGRAM", "ghostty")][..],
+            &[("TERM", "xterm-kitty")][..],
+            &[("TERM", "xterm-256color"), ("TERM_PROGRAM", "WezTerm")][..],
+        ] {
+            assert_eq!(caps(env, none).blocks, BlockSet::Sextant, "{env:?}");
+        }
+        // Anything else keeps the half block, and so does a multiplexer or
+        // the safe glyph set, whatever is underneath.
+        for env in [
+            &[("TERM", "xterm-256color")][..],
+            &[("TERM_PROGRAM", "Apple_Terminal")][..],
+            &[("TERM_PROGRAM", "iTerm.app"), ("COLORTERM", "truecolor")][..],
+            &[("TERM_PROGRAM", "ghostty"), ("TMUX", "/tmp/tmux-1/default,1,0")][..],
+            &[("TERM_PROGRAM", "ghostty"), ("LANG", "ja_JP.UTF-8")][..],
+            &[][..],
+        ] {
+            assert_eq!(caps(env, none).blocks, BlockSet::Half, "{env:?}");
+        }
+        // The flag and the environment name a family outright; octants are
+        // only ever reached this way.
+        let cli = CliOverrides::parse(&["--glyphs".to_string(), "octant".to_string()]);
+        assert_eq!(cli.blocks, Some(BlockSet::Octant));
+        assert_eq!(cli.glyphs, None, "a block family is not a glyph inventory");
+        assert_eq!(caps(&[], cli).blocks, BlockSet::Octant);
+        assert_eq!(caps(&[], cli).glyphs, GlyphSet::Unicode);
+        assert_eq!(caps(&[("RATRUN_GLYPHS", "quad")], none).blocks, BlockSet::Quad);
+        assert_eq!(
+            caps(&[("TERM_PROGRAM", "ghostty"), ("RATRUN_GLYPHS", "half")], none).blocks,
+            BlockSet::Half
+        );
+        assert!(caps(&[("TERM_PROGRAM", "ghostty")], none).describe().contains("blocks=sextant"));
+        assert!(BlockSet::Half < BlockSet::Quad && BlockSet::Sextant < BlockSet::Octant);
+    }
+
+    #[test]
+    fn sub_cell_glyphs_fold_like_any_other_cell() {
+        // Sextants and octants are not in the safe set's rewrite table (they
+        // are never emitted there), and their colours fold with the rest.
+        use ratatui::layout::Rect;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 3, 1));
+        for (x, glyph) in ["\u{1FB00}", "\u{1CD00}", "\u{259A}"].iter().enumerate() {
+            let cell = &mut buf[(x as u16, 0)];
+            cell.set_symbol(glyph);
+            cell.fg = Color::Rgb(250, 240, 60);
+            cell.bg = Color::Rgb(20, 24, 40);
+        }
+        for depth in [ColorDepth::Ansi256, ColorDepth::Ansi16] {
+            let mut folded = buf.clone();
+            sanitize_with(&mut folded, GlyphSet::Unicode, depth);
+            for x in 0..3u16 {
+                assert_eq!(folded[(x, 0)].symbol(), buf[(x, 0)].symbol());
+                assert!(!matches!(folded[(x, 0)].fg, Color::Rgb(..)), "{depth:?}");
+                assert!(!matches!(folded[(x, 0)].bg, Color::Rgb(..)), "{depth:?}");
+                assert_ne!(folded[(x, 0)].fg, folded[(x, 0)].bg, "{depth:?}: the pattern survives");
+            }
+        }
+    }
+
+    #[test]
     fn the_flag_beats_the_environment() {
         let c = caps(
             &[("RATRUN_COLOR", "16")],
             CliOverrides {
                 color: Some(ColorDepth::Truecolor),
                 glyphs: None,
+                blocks: None,
             },
         );
         assert_eq!(c.color, ColorDepth::Truecolor);
@@ -1164,6 +1342,7 @@ mod tests {
             CliOverrides {
                 color: None,
                 glyphs: Some(GlyphSet::Safe),
+                blocks: None,
             },
         );
         assert_eq!(c.glyphs, GlyphSet::Safe);
@@ -1410,6 +1589,7 @@ mod tests {
             CliOverrides {
                 color: None,
                 glyphs: Some(GlyphSet::Unicode),
+                blocks: None,
             },
         );
         assert_eq!(c.glyphs, GlyphSet::Unicode);

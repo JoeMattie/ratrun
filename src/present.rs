@@ -344,11 +344,19 @@ const CLEAR_ALL: &[u8] = b"\x1b[2J";
 
 /// Is this symbol certainly one cell wide, without measuring it? One byte is
 /// ASCII; `U+2500..=U+25FF` (box drawing, block elements — the half block the
-/// play field is made of — and geometric shapes) is `E2 94..97 xx`.
+/// play field is made of — and geometric shapes) is `E2 94..97 xx`. The
+/// sub-cell blit's glyphs are four bytes: `U+1FB00..=U+1FBFF` (sextants,
+/// Symbols for Legacy Computing) is `F0 9F AC..AF xx` and
+/// `U+1CD00..=U+1CEBF` (octants, the Supplement) is `F0 9C B4..BA xx`.
 #[inline(always)]
 fn narrow_symbol(symbol: &str) -> bool {
     let b = symbol.as_bytes();
-    b.len() == 1 || (b.len() == 3 && b[0] == 0xE2 && (0x94..=0x97).contains(&b[1]))
+    b.len() == 1
+        || (b.len() == 3 && b[0] == 0xE2 && (0x94..=0x97).contains(&b[1]))
+        || (b.len() == 4
+            && b[0] == 0xF0
+            && ((b[1] == 0x9F && (0xAC..=0xAF).contains(&b[2]))
+                || (b[1] == 0x9C && (0xB4..=0xBA).contains(&b[2]))))
 }
 
 /// A cell the direct diff handles: no diff option, at most one cell wide. For
@@ -1697,11 +1705,15 @@ mod tests {
     }
 
     /// Play a scripted session and hand every rendered frame to `each`.
-    fn scripted_session(mut each: impl FnMut(&str, &Buffer)) {
+    fn scripted_session(
+        detail: Option<crate::render::subcell::Choice>,
+        mut each: impl FnMut(&str, &Buffer),
+    ) {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
         use ratatui::backend::TestBackend;
 
         let mut app = App::with_options(false, None, crate::scores::ScoreTable::default(), false, Some(2));
+        app.set_subcell_override(detail);
         let mut terminal = Terminal::new(TestBackend::new(100, 36)).unwrap();
         let mut step = |app: &mut App,
                         terminal: &mut Terminal<TestBackend>,
@@ -1753,6 +1765,18 @@ mod tests {
         // Zoom out and back (the ease redraws the field under the read-out).
         run!("zoom out", 14, &[c('x')]);
         run!("zoom in", 14, &[c('z')]);
+        // All the way out and back, through every rung (and, with DETAIL on,
+        // every sub-cell grid), playing at the widest view for a while.
+        for _ in 0..3 {
+            run!("zoom wide", 8, &[c('x')]);
+        }
+        for i in 0..30 {
+            let key = [c('d'), c('s'), c('a'), c('w')][(i / 8) % 4];
+            step(&mut app, &mut terminal, "play wide", &[key], None);
+        }
+        for _ in 0..3 {
+            run!("zoom back", 8, &[c('z')]);
+        }
         // The expanded map over the field, then closed.
         run!("map open", 6, &[KeyCode::Tab]);
         run!("map closed", 6, &[KeyCode::Tab]);
@@ -1805,7 +1829,7 @@ mod tests {
             .collect();
         let mut frames = 0u32;
         let mut seen = std::collections::BTreeSet::new();
-        scripted_session(|what, frame| {
+        scripted_session(None, |what, frame| {
             frames += 1;
             seen.insert(what.to_string());
             for ((depth, glyphs), (direct, ratatui)) in variants.iter().zip(rigs.iter_mut()) {
@@ -1837,6 +1861,61 @@ mod tests {
             eprintln!(
                 "{depth:?}: {} cells, direct {} bytes ({} fallback frames), ratatui {} bytes",
                 direct.cells, direct.bytes, direct.presenter.fallbacks, ratatui.bytes
+            );
+        }
+    }
+
+    /// The same session with DETAIL forced to octants: zoomed out, the field
+    /// is quadrant, sextant and octant glyphs (four UTF-8 bytes for the last
+    /// two). The direct path must take them as plain one-cell symbols — no
+    /// fallback to ratatui's diff — and leave the same screen as ratatui's
+    /// path at every colour depth.
+    #[test]
+    fn sub_cell_glyphs_go_through_the_direct_path_and_match_ratatui() {
+        use crate::render::subcell::{Choice, SubcellSet};
+        use crate::term::{sanitize_with, ColorDepth, GlyphSet};
+        let depths = [ColorDepth::Truecolor, ColorDepth::Ansi256, ColorDepth::Ansi16];
+        let mut rigs: Vec<(Rig, Rig)> = depths
+            .iter()
+            .map(|_| (Rig::new(PresentMode::Direct), Rig::new(PresentMode::Ratatui)))
+            .collect();
+        let (mut quad, mut sextant, mut octant) = (0u32, 0u32, 0u32);
+        let mut frames = 0u32;
+        scripted_session(Some(Choice::Force(SubcellSet::Octant)), |what, frame| {
+            frames += 1;
+            for cell in frame.content.iter() {
+                match cell.symbol().chars().next() {
+                    Some('\u{2596}'..='\u{259F}') => quad += 1,
+                    Some('\u{1FB00}'..='\u{1FB3B}') => sextant += 1,
+                    Some('\u{1CD00}'..='\u{1CDE5}') => octant += 1,
+                    _ => {}
+                }
+                assert!(
+                    narrow_symbol(cell.symbol()) || cell.symbol().len() <= 3,
+                    "{:?} is measured every frame",
+                    cell.symbol()
+                );
+            }
+            for (depth, (direct, ratatui)) in depths.iter().zip(rigs.iter_mut()) {
+                let mut folded = frame.clone();
+                sanitize_with(&mut folded, GlyphSet::Unicode, *depth);
+                let label = format!("{what} (frame {frames}, {depth:?})");
+                let a = direct.show(&folded, &format!("direct: {label}"));
+                let b = ratatui.show(&folded, &format!("ratatui: {label}"));
+                assert_eq!(a, b, "{label}: the two paths sent a different number of cells");
+                assert!(
+                    direct.vt.cells == ratatui.vt.cells,
+                    "{label}: the two paths left different screens"
+                );
+            }
+        });
+        assert!(quad > 100 && sextant > 100 && octant > 100, "{quad} / {sextant} / {octant}");
+        for (depth, (direct, ratatui)) in depths.iter().zip(&rigs) {
+            assert_eq!(direct.presenter.fallbacks, 0, "{depth:?}: a sub-cell glyph is not exotic");
+            assert_eq!(direct.cells, ratatui.cells);
+            eprintln!(
+                "{depth:?} with octants: {} cells, direct {} bytes, ratatui {} bytes",
+                direct.cells, direct.bytes, ratatui.bytes
             );
         }
     }

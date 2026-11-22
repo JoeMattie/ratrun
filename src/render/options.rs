@@ -26,19 +26,21 @@ pub const MINIMAP_ROW: usize = 2;
 pub const CURSOR_ROW: usize = 3;
 pub const MUTE_ROW: usize = 4;
 pub const ZOOM_ROW: usize = 5;
+/// Sub-cell detail for the zoomed-out view (`crate::render::subcell`).
+pub const DETAIL_ROW: usize = 6;
 /// Auto-pick level-ups (persisted; the level-up screen's toggle writes it too).
-pub const AUTO_PICK_ROW: usize = 6;
+pub const AUTO_PICK_ROW: usize = 7;
 // Wave 3 controls.
-pub const SCHEME_ROW: usize = 7;
-pub const CONTROLS_ROW: usize = 8;
-pub const DEADZONE_ROW: usize = 9;
-pub const RUMBLE_ROW: usize = 10;
+pub const SCHEME_ROW: usize = 8;
+pub const CONTROLS_ROW: usize = 9;
+pub const DEADZONE_ROW: usize = 10;
+pub const RUMBLE_ROW: usize = 11;
 /// Wipe the nest (`crate::meta`): the bank and every permanent upgrade. It
 /// takes two presses (the row reads `WIPE`, then `CONFIRM?`).
-pub const RESET_ROW: usize = 11;
-pub const BACK_ROW: usize = 12;
+pub const RESET_ROW: usize = 12;
+pub const BACK_ROW: usize = 13;
 /// How many rows the screen has.
-pub const ROW_COUNT: usize = 13;
+pub const ROW_COUNT: usize = 14;
 
 /// Slider identity used by [`Target::OptionsBar`]: the value the track edits.
 pub const MUSIC_BAR: usize = 0;
@@ -46,7 +48,7 @@ pub const EFFECTS_BAR: usize = 1;
 
 /// Preferred panel size; clamped to the terminal.
 pub const PANEL_W: u16 = 58;
-pub const PANEL_H: u16 = 20;
+pub const PANEL_H: u16 = 21;
 /// Width of the label column inside a row (`MUSIC`, `EFFECTS`, …). Eleven
 /// columns, not ten: `AUTO-PICK` is nine letters, so ten left the value strip
 /// butted against the label (`AUTO-PICK‹ OFF ›`).
@@ -72,6 +74,8 @@ pub enum Row {
     AutoPick,
     /// The nest's reset (appended last: the legacy rows keep their order).
     Reset,
+    /// Sub-cell detail when zoomed out (OFF / AUTO).
+    Detail,
 }
 
 /// The screen's rows in order; index with the constants above.
@@ -82,6 +86,7 @@ pub const ROWS: [Row; ROW_COUNT] = [
     Row::Cursor,
     Row::Mute,
     Row::Zoom,
+    Row::Detail,
     Row::AutoPick,
     Row::Scheme,
     Row::Controls,
@@ -108,6 +113,7 @@ impl Row {
             Row::Rumble => "RUMBLE",
             Row::AutoPick => "AUTO-PICK",
             Row::Reset => "NEST",
+            Row::Detail => "DETAIL",
         }
     }
 
@@ -147,6 +153,10 @@ pub struct OptionsView {
     /// Auto-pick level-ups: the same preference the level-up screen's toggle
     /// writes. Chests are **not** auto-opened (see the row's note).
     pub auto_pick: bool,
+    /// The DETAIL option (`true` = AUTO) and the glyph set it resolves to on
+    /// this terminal, which the row prints so AUTO is never a mystery.
+    pub detail: bool,
+    pub detail_set: crate::render::subcell::SubcellSet,
 }
 
 /// Rows and slider tracks for one terminal area.
@@ -285,6 +295,16 @@ fn value_text(view: &OptionsView, row: Row) -> String {
                 "ON".to_string()
             } else {
                 "OFF".to_string()
+            }
+        }
+        Row::Detail => {
+            use crate::render::subcell::SubcellSet;
+            match (view.detail, view.detail_set) {
+                // An environment override can force a set with the option off.
+                (false, SubcellSet::Off) => "OFF".to_string(),
+                (true, SubcellSet::Off) => "AUTO: N/A".to_string(),
+                (true, set) => format!("AUTO: {}", set.as_str().to_uppercase()),
+                (false, set) => format!("ENV: {}", set.as_str().to_uppercase()),
             }
         }
         Row::Rumble => {
@@ -479,7 +499,7 @@ pub fn draw(f: &mut Frame, area: Rect, view: &OptionsView, hits: &mut HitMap) {
     // One row under the last row (BACK), and the note two under it.
     let legend_y = lay.rows[ROW_COUNT - 1].y.saturating_add(1);
     let legend_row = Rect::new(inner.x, legend_y, inner.width, 1);
-    if !legend_row.is_empty() && inner.height > ROW_COUNT as u16 + 3 {
+    if !legend_row.is_empty() && inner.height > ROW_COUNT as u16 + 2 {
         f.render_widget(
             Line::styled(
                 if inner.width >= LEGEND.chars().count() as u16 {
@@ -498,6 +518,8 @@ pub fn draw(f: &mut Frame, area: Rect, view: &OptionsView, hits: &mut HitMap) {
             " master mute on — levels are kept"
         } else if view.row == AUTO_PICK_ROW {
             " cards skipped; chests still open their card"
+        } else if view.row == DETAIL_ROW {
+            " finer blocks when zoomed out (try --glyph-card)"
         } else {
             " effects preview while you adjust"
         };
@@ -552,6 +574,8 @@ mod tests {
             deadzone: 0.2,
             rumble: false,
             auto_pick: false,
+            detail: false,
+            detail_set: crate::render::subcell::SubcellSet::Off,
         }
     }
 
@@ -682,9 +706,10 @@ mod tests {
         }
     }
 
-    /// On a 19-row terminal the plate's content is 17 rows and `legend + 2` is
+    /// On a 20-row terminal the plate's content is 18 rows and `legend + 2` is
     /// its bottom border: the note closes up under the legend instead of being
-    /// printed over the frame.
+    /// printed over the frame. At 19 rows the fourteen rows and the legend
+    /// fill the plate, and the note is the thing that gives way.
     #[test]
     fn the_note_stays_inside_the_plate_on_a_short_terminal() {
         for (w, h) in [(57u16, 19u16), (80, 19), (57, 20), (80, 24), (120, 40)] {
@@ -703,9 +728,10 @@ mod tests {
                 "{w}x{h}: text on the plate's bottom border: {border:?}"
             );
             let (text, _) = frame(w, h, &view(AUTO_PICK_ROW));
-            assert!(
+            assert_eq!(
                 text.contains("chests still open their card"),
-                "{w}x{h}: the auto-pick note is missing:\n{text}"
+                h >= 20,
+                "{w}x{h}: the auto-pick note (shown from 20 rows up):\n{text}"
             );
             assert!(text.contains("Esc back"), "{w}x{h}: legend missing");
         }

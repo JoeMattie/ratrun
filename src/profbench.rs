@@ -329,6 +329,12 @@ fn configure(run: &mut AutoRun, cfg: &Cfg) -> Rect {
     w.set_zoom_instant(cfg.zoom);
     w.lighting = cfg.tier;
     w.lighting_depth = crate::term::color_depth();
+    // `RATRUN_SUBCELL` shapes a direct run the way it shapes the app's.
+    w.subcell = crate::render::subcell::resolve(
+        false,
+        crate::render::subcell::Choice::from_env(),
+        crate::term::block_set(),
+    );
     w.prof_reset_controller();
     prof::freeze_controller(!cfg.free);
     g
@@ -380,7 +386,10 @@ fn bench_direct(run: &mut AutoRun, cfg: &Cfg, floor: &str, at: f32, sample: Opti
                 .wrapping_mul(0x0000_0100_0000_01B3);
         }
         let t2b = Instant::now();
-        pixels.render_to(g, &mut cur);
+        match run.world().detail() {
+            Some(detail) => detail.render_to(g, &mut cur),
+            None => pixels.render_to(g, &mut cur),
+        }
         let t3 = Instant::now();
         changed_cells += prev.diff(&cur).len() as u64;
         std::mem::swap(&mut prev, &mut cur);

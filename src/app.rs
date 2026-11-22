@@ -237,6 +237,8 @@ struct PictureKey {
     ),
     /// Render-only toggles: the hitbox overlay and the smoke layer.
     toggles: (bool, bool),
+    /// The DETAIL option's resolved glyph set.
+    subcell: crate::render::subcell::SubcellSet,
 }
 
 impl PictureKey {
@@ -248,6 +250,7 @@ impl PictureKey {
             zoom: (w.zoom_view.to_bits(), w.zoom.to_bits()),
             lighting: (w.lighting, w.lighting_tier(), w.lighting_depth),
             toggles: (w.hitboxes, w.smoke_enabled),
+            subcell: w.subcell,
         }
     }
 }
@@ -379,6 +382,9 @@ pub struct App {
     /// channel is applied but never written back over the saved preference.
     music_env: Option<u8>,
     effects_env: Option<u8>,
+    /// `RATRUN_SUBCELL`, read once at startup: overrides the DETAIL option for
+    /// the session (the saved option is left alone).
+    subcell_env: Option<crate::render::subcell::Choice>,
     /// Options screen: the selected row (`0..options::ROW_COUNT`).
     options_row: usize,
     /// Where Esc/Back on the options screen returns to (`Title` or `Paused`).
@@ -580,6 +586,7 @@ impl App {
             effects_volume,
             music_env,
             effects_env,
+            subcell_env: crate::render::subcell::Choice::from_env(),
             options_row: options::MUSIC_ROW,
             options_return: Screen::Title,
             preview_cd: 0.0,
@@ -2329,6 +2336,9 @@ impl App {
                 // Right widens the view (a bigger number), left zooms in.
                 self.set_zoom(view_zoom::step(self.scores.zoom, dir));
             }
+            options::DETAIL_ROW => {
+                self.toggle_detail();
+            }
             options::AUTO_PICK_ROW => {
                 // Binary: Left and Right both flip it.
                 self.toggle_auto_pick();
@@ -3987,6 +3997,24 @@ impl App {
     /// Flip the auto-pick preference. The level-up screen's pill, the options
     /// row and the in-play key all go through here, so the save and the toast
     /// are identical.
+    /// Flip the DETAIL option (OFF / AUTO): sub-cell glyphs for the zoomed-out
+    /// view where the terminal is known to draw them. Render-only.
+    /// Force a glyph set for the session, as `RATRUN_SUBCELL` does (tests).
+    #[cfg(test)]
+    pub(crate) fn set_subcell_override(&mut self, choice: Option<crate::render::subcell::Choice>) {
+        self.subcell_env = choice;
+        self.picture_dirty = true;
+    }
+
+    fn toggle_detail(&mut self) {
+        self.scores.detail = !self.scores.detail;
+        if self.persist {
+            self.scores.save();
+        }
+        self.picture_dirty = true;
+        self.sfx(Sfx::UiMove);
+    }
+
     fn toggle_auto_pick(&mut self) {
         let on = !self.scores.auto_pick;
         self.scores.auto_pick = on;
@@ -4613,6 +4641,12 @@ impl App {
             deadzone: self.input.controls.deadzone,
             rumble: self.input.controls.rumble,
             auto_pick: self.scores.auto_pick,
+            detail: self.scores.detail,
+            detail_set: crate::render::subcell::resolve(
+                self.scores.detail,
+                self.subcell_env,
+                crate::term::block_set(),
+            ),
         };
         options::draw(frame, area, &view, &mut self.hits);
     }
@@ -4949,6 +4983,11 @@ impl App {
                 // see happened (`picture_dirty`). The key is taken *before*
                 // the draw, so a lighting tier the cost controller changes
                 // during this draw is a different key next frame.
+                w.subcell = crate::render::subcell::resolve(
+                    self.scores.detail,
+                    self.subcell_env,
+                    crate::term::block_set(),
+                );
                 let key = PictureKey::of(w, self.run_counter, &self.pixels);
                 if self.picture_dirty || self.picture_key != Some(key) {
                     w.draw(&mut self.pixels);
@@ -4957,7 +4996,12 @@ impl App {
                     self.picture_dirty = false;
                 }
                 let _p = crate::prof::scope(crate::prof::Stage::Blit);
-                self.pixels.render_to(game, frame.buffer_mut());
+                // Zoomed out with DETAIL on, the frame is the sub-cell picture;
+                // otherwise (and always at 1x) the half-block one.
+                match w.detail() {
+                    Some(detail) => detail.render_to(game, frame.buffer_mut()),
+                    None => self.pixels.render_to(game, frame.buffer_mut()),
+                }
             }
         } else {
             frame.render_widget(
@@ -12600,6 +12644,13 @@ mod tests {
         assert_eq!(h.app.effective_zoom(), 1.25);
         h.frame(&[KeyCode::Left]);
         assert_eq!(h.app.effective_zoom(), 1.0);
+        // The detail row: OFF / AUTO, both directions flip it.
+        h.frame(&[KeyCode::Down]);
+        assert_eq!(h.app.options_row, options::DETAIL_ROW);
+        h.frame(&[KeyCode::Right]);
+        assert!(h.app.scores.detail, "Right turns DETAIL to AUTO");
+        h.frame(&[KeyCode::Left]);
+        assert!(!h.app.scores.detail, "Left turns it back off");
         // The auto-pick row sits between Zoom and Back (wave 3); both
         // directions flip the binary preference.
         h.frame(&[KeyCode::Down]);
@@ -13300,6 +13351,88 @@ mod tests {
             (ratio - want).abs() < 0.05,
             "the mapping scales with the zoom: {ratio} vs {want}"
         );
+    }
+
+    /// DETAIL is a zoomed-out feature only: at 1x and zoomed in the frame is
+    /// cell-for-cell what it is with the option off, whatever glyph set is
+    /// forced; zoomed out it draws sub-cell glyphs, one cell wide each. And
+    /// AUTO on a terminal not known to draw them (every test: the block set
+    /// is `Half` until `term::init`) is the half-block picture at every zoom.
+    #[test]
+    fn detail_only_changes_the_zoomed_out_frame() {
+        use crate::render::subcell::{Choice, SubcellSet};
+        use ratatui::buffer::CellWidth;
+        for set in [SubcellSet::Quad, SubcellSet::Sextant, SubcellSet::Octant] {
+            let mut off = Harness::new(120, 40);
+            let mut on = Harness::new(120, 40);
+            let mut auto = Harness::new(120, 40);
+            off.app.subcell_env = None;
+            on.app.subcell_env = Some(Choice::Force(set));
+            auto.app.subcell_env = None;
+            auto.app.scores.detail = true;
+            for h in [&mut off, &mut on, &mut auto] {
+                h.enter_playing();
+                for i in 0..90 {
+                    h.frame(&[[KeyCode::Right, KeyCode::Down][(i / 30) % 2]]);
+                }
+            }
+            for z in crate::render::zoom::STEPS {
+                for h in [&mut off, &mut on, &mut auto] {
+                    h.app.world.as_mut().unwrap().set_zoom_instant(z);
+                    h.frame(&[]);
+                }
+                let (a, b, c) = (
+                    off.terminal.backend().buffer(),
+                    on.terminal.backend().buffer(),
+                    auto.terminal.backend().buffer(),
+                );
+                assert!(a == c, "{set:?} z={z}: AUTO without a known terminal changed the frame");
+                let game = on.app.last_game;
+                let mut fine = 0;
+                for y in game.top()..game.bottom() {
+                    for x in game.left()..game.right() {
+                        let cell = &b[(x, y)];
+                        assert_eq!(cell.symbol().cell_width(), 1);
+                        if !matches!(cell.symbol(), "▀" | " ") && a[(x, y)].symbol() == "▀" {
+                            fine += 1;
+                        }
+                    }
+                }
+                if z <= 1.0 {
+                    assert!(a == b, "{set:?} z={z}: DETAIL changed a frame that is not zoomed out");
+                    assert!(on.app.world.as_ref().unwrap().detail().is_none());
+                } else {
+                    assert!(fine > 20, "{set:?} z={z}: only {fine} sub-cell glyphs on the field");
+                    assert!(off.app.world.as_ref().unwrap().detail().is_none());
+                }
+            }
+        }
+    }
+
+    /// The DETAIL row flips the saved option, prints what AUTO resolves to,
+    /// and a change redraws the frozen picture under the plate.
+    #[test]
+    fn the_detail_row_toggles_the_option_and_redraws() {
+        let mut h = paused_harness();
+        h.app.subcell_env = None;
+        assert!(!h.app.scores.detail, "off by default");
+        let drawn = h.app.world_draws;
+        h.app.adjust_option(options::DETAIL_ROW, 1);
+        assert!(h.app.scores.detail);
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 1, "the option redraws the field");
+        h.app.adjust_option(options::DETAIL_ROW, -1);
+        assert!(!h.app.scores.detail, "left and right both flip it");
+        // A forced set is a different picture key, so it redraws on its own.
+        h.frame(&[]);
+        let drawn = h.app.world_draws;
+        h.app.subcell_env = Some(crate::render::subcell::Choice::Force(
+            crate::render::subcell::SubcellSet::Octant,
+        ));
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 1, "a new glyph set must redraw");
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 1);
     }
 
     /// The minimap's view box (and therefore the fog-of-war radar framing and

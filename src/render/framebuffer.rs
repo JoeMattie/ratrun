@@ -129,6 +129,14 @@ impl PixelBuffer {
         }
     }
 
+    /// Become a copy of `src` (same size, same pixels), keeping the allocation.
+    pub fn copy_from(&mut self, src: &PixelBuffer) {
+        self.w = src.w;
+        self.h = src.h;
+        self.px.clear();
+        self.px.extend_from_slice(&src.px);
+    }
+
     pub fn clear(&mut self, c: Rgb) {
         for p in self.px.iter_mut() {
             *p = c;

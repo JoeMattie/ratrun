@@ -15,7 +15,8 @@ by asking the terminal (see *The startup query*), not by sniffing `TERM`.
 | Knob | Values | Effect |
 | --- | --- | --- |
 | `RATRUN_COLOR` | `truecolor`, `256`, `16` | Force the colour depth; beats all detection. |
-| `RATRUN_GLYPHS` | `unicode`, `safe` | Force the glyph set. |
+| `RATRUN_GLYPHS` | `unicode`, `safe`; or `half`, `quad`, `sextant`, `octant` | Force the glyph set, or the finest block family the DETAIL option may use. |
+| `RATRUN_SUBCELL` | `off`, `quad`, `sextant`, `octant`, `auto` | Override the DETAIL option (sub-cell blocks when zoomed out) for a session. `--glyph-card` prints a test card. |
 | `--color <v>` | same as `RATRUN_COLOR` | Command-line form; beats the environment. |
 | `--glyphs <v>` | same as `RATRUN_GLYPHS` | Command-line form; beats the environment. |
 | `--caps` | flag | Print the resolved capability set and exit (no TTY needed). |

@@ -103,6 +103,14 @@ fn main() -> Result<()> {
         println!("{}", caps.describe());
         return Ok(());
     }
+    if args.iter().any(|a| a == "--glyph-card") {
+        // A test card for the DETAIL option: every block-glyph family the
+        // sub-cell blit can use, so the terminal's owner can see which it
+        // draws cleanly. Plain output; the terminal is never put in raw mode.
+        println!("{}", caps.describe());
+        print!("{}", render::subcell::glyph_card());
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--prof-bench") {
         profbench::run(&args);
         return Ok(());

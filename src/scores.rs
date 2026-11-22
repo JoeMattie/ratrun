@@ -389,6 +389,11 @@ pub struct ScoreTable {
     /// the default way to level up.
     #[serde(default)]
     pub auto_pick: bool,
+    /// The DETAIL option: `true` is AUTO (draw the zoomed-out view with the
+    /// finest block glyphs the terminal is known to draw), `false` is OFF
+    /// (half blocks, the picture every earlier build drew). Missing ⇒ OFF.
+    #[serde(default)]
+    pub detail: bool,
     /// **The nest**: gold banked across runs and one level per permanent
     /// upgrade track (`crate::meta`). Missing in any file written before the
     /// nest existed, which loads as a fresh profile (bank 0, every track 0, so
@@ -413,6 +418,7 @@ impl Default for ScoreTable {
             library: Library::default(),
             controls: ControlsFile::default(),
             auto_pick: false,
+            detail: false,
             meta: crate::meta::MetaProfile::default(),
         }
     }
