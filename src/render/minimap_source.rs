@@ -344,6 +344,8 @@ impl MinimapFrame {
             hovered,
             explored_pct: Some(pct),
             maze_discovered,
+            map_key: minimap::DEFAULT_MAP_KEY,
+            size_key: minimap::DEFAULT_SIZE_KEY,
             reveal_clock: world.fog().clock(),
         }
     }

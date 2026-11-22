@@ -354,6 +354,10 @@ pub struct App {
     /// frame once this is warm) and the per-frame marker/label buffers.
     minimap_scratch: minimap::MinimapScratch,
     map_frame: minimap_source::MinimapFrame,
+    /// The live `Action::Map` / `Action::MinimapSize` labels, upper-cased for
+    /// the map hints and refreshed only when a binding changes.
+    map_key_label: String,
+    size_key_label: String,
     /// In-game cheese mouse cursor visibility and animation state.
     cursor: cursor::CursorState,
     /// Optional `RATRUN_CURSOR` environment override (resolved once at startup).
@@ -537,6 +541,8 @@ impl App {
             last_map: Rect::new(0, 0, 0, 0),
             minimap_scratch: minimap::MinimapScratch::new(),
             map_frame: minimap_source::MinimapFrame::new(),
+            map_key_label: minimap::DEFAULT_MAP_KEY.to_string(),
+            size_key_label: minimap::DEFAULT_SIZE_KEY.to_string(),
             cursor: cursor::CursorState::default(),
             cursor_env: cursor::env_override(),
             slot_caps: SlotCaps::DEFAULT,
@@ -4278,7 +4284,7 @@ impl App {
                     }
                     Screen::LevelUp => {
                         if let Some(w) = self.world.as_ref() {
-                            menu::draw_levelup_with_loadout(
+                            menu::draw_levelup_with_loadout_keyed(
                                 frame,
                                 area,
                                 w.player.level,
@@ -4288,10 +4294,11 @@ impl App {
                                 self.levelup_idx,
                                 self.scores.auto_pick,
                                 self.input.controls.action_label(Action::AutoPick),
+                                self.input.controls.action_label(Action::Confirm),
                                 &mut self.hits,
                             );
                         } else {
-                            menu::draw_levelup(
+                            menu::draw_levelup_keyed(
                                 frame,
                                 area,
                                 1,
@@ -4300,6 +4307,7 @@ impl App {
                                 self.levelup_idx,
                                 self.scores.auto_pick,
                                 self.input.controls.action_label(Action::AutoPick),
+                                self.input.controls.action_label(Action::Confirm),
                                 &mut self.hits,
                             );
                         }
@@ -4898,9 +4906,21 @@ impl App {
         self.map_frame.refresh(w);
         let hovered = self.hits.hovered == Some(Target::Minimap);
         let compact_size = self.scores.minimap_size;
-        let view = self
+        let mut view = self
             .map_frame
             .view_sized(w, expanded, compact_size, hovered);
+        // The map hints name the live Map and MinimapSize bindings (cached
+        // upper-case, so a frame allocates only when a binding changed).
+        let map_label = self.input.controls.action_label(Action::Map);
+        if !self.map_key_label.eq_ignore_ascii_case(map_label) {
+            self.map_key_label = map_label.to_uppercase();
+        }
+        let size_label = self.input.controls.action_label(Action::MinimapSize);
+        if !self.size_key_label.eq_ignore_ascii_case(size_label) {
+            self.size_key_label = size_label.to_uppercase();
+        }
+        view.map_key = &self.map_key_label;
+        view.size_key = &self.size_key_label;
         minimap::draw(frame, game, &view, w, &mut self.minimap_scratch);
         if expanded {
             let panel = minimap_source::expanded_rect(game);
@@ -6579,6 +6599,52 @@ mod tests {
         assert!(!hh.app.map_open);
         hh.frame(&[]);
         assert!(hh.app.world.as_ref().unwrap().elapsed > before, "play did not resume");
+    }
+
+    /// The map hints and the level-up legend name the live bindings, not the
+    /// default keys.
+    #[test]
+    fn the_map_hints_and_the_level_up_legend_follow_a_rebind() {
+        use crate::controls::{Binding, KeyBind};
+        let mut hh = Harness::new(120, 40);
+        hh.enter_playing();
+        let radar = hh.frame(&[]);
+        assert!(radar.contains("N·TAB"), "the default radar hint:\n{radar}");
+        hh.app
+            .input
+            .controls
+            .bind_active_kbm(Action::Map, Binding::Key(KeyBind::Char('j')));
+        hh.app
+            .input
+            .controls
+            .bind_active_kbm(Action::MinimapSize, Binding::Key(KeyBind::Char('h')));
+        hh.app
+            .input
+            .controls
+            .bind_active_kbm(Action::Confirm, Binding::Key(KeyBind::Char('y')));
+        let radar = hh.frame(&[]);
+        assert!(radar.contains("H·J"), "the radar hint names the new keys:\n{radar}");
+        assert!(!radar.contains("N·TAB"), "a stale radar hint:\n{radar}");
+        let map = hh.frame(&[KeyCode::Char('j')]);
+        assert!(hh.app.map_open);
+        assert!(map.contains("[J] CLOSE"), "the modal names the new Map key:\n{map}");
+        assert!(map.contains("[J] Close  [H] Size"), "the rail names both keys:\n{map}");
+        assert!(!map.contains("[TAB]"), "a stale map hint:\n{map}");
+        hh.frame(&[KeyCode::Char('j')]);
+        assert!(!hh.app.map_open);
+
+        hh.app.world.as_mut().unwrap().pending_levelups = 1;
+        let mut text = hh.frame(&[]);
+        for _ in 0..4 {
+            if hh.app.screen.name_for_test() == "LevelUp" {
+                break;
+            }
+            text = hh.frame(&[]);
+        }
+        assert_eq!(hh.app.screen.name_for_test(), "LevelUp");
+        let text = if text.contains("equip") { text } else { hh.frame(&[]) };
+        assert!(text.contains("Y equip"), "the legend names the new Confirm key:\n{text}");
+        assert!(!text.contains("Enter equip"), "a stale Confirm key:\n{text}");
     }
 
     #[allow(clippy::field_reassign_with_default)]
@@ -10619,10 +10685,14 @@ mod tests {
         }
 
         // -- Level 2 (Kitchen) -----------------------------------------------
+        let kitchen_boss = {
+            let w = h.app.world.as_ref().unwrap();
+            crate::game::ecs::systems::boss::BossKind::pool_pick(w.level.theme, w.level.seed)
+        };
         h.finish_level();
         assert_eq!(h.app.screen.name_for_test(), "LevelComplete");
         assert!(
-            h.screen_text().contains("THE SWEEPER"),
+            h.screen_text().contains(hud::boss_codename_kind(kitchen_boss).0),
             "the Kitchen boss must be named"
         );
         h.frame(&[KeyCode::Enter]);
@@ -11193,8 +11263,14 @@ mod tests {
                 complete.contains(plate.name()),
                 "{theme:?}: the complete plate must name the floor:\n{complete}"
             );
+            // The plate names the boss this seed's floor actually fields (the
+            // pool pick), not the floor's original boss.
+            let fielded = {
+                let w = h.app.world.as_ref().unwrap();
+                crate::game::ecs::systems::boss::BossKind::pool_pick(w.level.theme, w.level.seed)
+            };
             assert!(
-                complete.contains(plate.boss_name()),
+                complete.contains(hud::boss_codename_kind(fielded).0),
                 "{theme:?}: the complete plate must name the boss:\n{complete}"
             );
 

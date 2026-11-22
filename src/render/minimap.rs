@@ -667,7 +667,16 @@ pub struct MinimapView<'a> {
     /// map's legend and compact legend strip so rare mazes are neither dead
     /// clutter nor spoiled before discovery.
     pub maze_discovered: bool,
+    /// The live label of `Action::Map` as the hints print it (`"TAB"` by
+    /// default). The App passes the binding's label, upper-cased.
+    pub map_key: &'a str,
+    /// The live label of `Action::MinimapSize` (`"N"` by default).
+    pub size_key: &'a str,
 }
+
+/// The default key names the map hints print when nobody rebound them.
+pub const DEFAULT_MAP_KEY: &str = "TAB";
+pub const DEFAULT_SIZE_KEY: &str = "N";
 
 /// Reusable scratch buffers kept across frames by the caller (e.g. on `App`).
 ///
@@ -1363,14 +1372,35 @@ pub fn draw_compact(
         rect.width.saturating_sub(4) as usize,
         title_style,
     );
-    let hint_opt = if rect.width >= 18 {
-        Some(if view.hovered { " ▸TAB " } else { " N·TAB " })
+    // The two keys are bindable (`Action::Map`, `Action::MinimapSize`): the
+    // default spelling is a literal, a rebound one is formatted.
+    use std::borrow::Cow;
+    let defaults = view.map_key == DEFAULT_MAP_KEY && view.size_key == DEFAULT_SIZE_KEY;
+    let hover_hint: Cow<'_, str> = if defaults {
+        Cow::Borrowed(" ▸TAB ")
+    } else {
+        Cow::Owned(format!(" ▸{} ", view.map_key))
+    };
+    let hint_opt: Option<Cow<'_, str>> = if rect.width >= 18 {
+        Some(if view.hovered {
+            hover_hint
+        } else if defaults {
+            Cow::Borrowed(" N·TAB ")
+        } else {
+            Cow::Owned(format!(" {}·{} ", view.size_key, view.map_key))
+        })
     } else if rect.width >= 14 {
-        Some(if view.hovered { " ▸TAB " } else { " N " })
+        Some(if view.hovered {
+            hover_hint
+        } else if defaults {
+            Cow::Borrowed(" N ")
+        } else {
+            Cow::Owned(format!(" {} ", view.size_key))
+        })
     } else {
         None
     };
-    if let Some(hint) = hint_opt {
+    if let Some(hint) = hint_opt.as_deref() {
         let hw = hint.chars().count() as u16;
         let hx = rect.right().saturating_sub(hw + 1);
         if hx >= rect.x + 7 {
@@ -1449,8 +1479,9 @@ fn draw_hidden_hint(buf: &mut Buffer, area: Rect, view: &MinimapView<'_>) {
     }
 
     // Quiet 1-cell hint that a map exists and `N` cycles it back.
+    // One cell: the first character of the live MinimapSize key.
     buf[(x, y)]
-        .set_char('N')
+        .set_char(view.size_key.chars().next().unwrap_or('N'))
         .set_style(Style::default().fg(EDGE).bg(PLATE));
 }
 
@@ -1930,11 +1961,14 @@ pub fn draw_expanded(
             sector, explored_pct
         );
     }
-    let close_hint = if modal.width < 64 {
-        " [TAB] "
+    let close_hint: std::borrow::Cow<'_, str> = if view.map_key == DEFAULT_MAP_KEY {
+        std::borrow::Cow::Borrowed(if modal.width < 64 { " [TAB] " } else { " [TAB] CLOSE " })
+    } else if modal.width < 64 {
+        std::borrow::Cow::Owned(format!(" [{}] ", view.map_key))
     } else {
-        " [TAB] CLOSE "
+        std::borrow::Cow::Owned(format!(" [{}] CLOSE ", view.map_key))
     };
+    let close_hint: &str = &close_hint;
     let cw = close_hint.chars().count() as u16;
     let hdr_max = modal.width.saturating_sub(cw + 4) as usize;
     buf.set_stringn(
@@ -1977,6 +2011,7 @@ pub fn draw_expanded(
             boss_active,
             bearing_active,
             effective_compact_size(area, view.compact_size),
+            (view.map_key, view.size_key),
             scratch,
         );
     } else {
@@ -2012,6 +2047,7 @@ fn draw_expanded_sidebar(
     boss_active: bool,
     bearing_active: bool,
     compact_size: MinimapSize,
+    keys: (&str, &str),
     scratch: &mut MinimapScratch,
 ) {
     if side.width < 12 || side.height < 10 {
@@ -2289,10 +2325,15 @@ fn draw_expanded_sidebar(
             );
         }
         if ky > y {
+            let hint: std::borrow::Cow<'_, str> = if keys == (DEFAULT_MAP_KEY, DEFAULT_SIZE_KEY) {
+                std::borrow::Cow::Borrowed("[TAB] Close  [N] Size")
+            } else {
+                std::borrow::Cow::Owned(format!("[{}] Close  [{}] Size", keys.0, keys.1))
+            };
             buf.set_stringn(
                 x,
                 ky,
-                "[TAB] Close  [N] Size",
+                &hint,
                 max_w,
                 Style::default().fg(EDGE).bg(PLATE),
             );
@@ -3135,6 +3176,8 @@ mod tests {
             hovered: false,
             explored_pct: None,
             maze_discovered: true,
+            map_key: DEFAULT_MAP_KEY,
+            size_key: DEFAULT_SIZE_KEY,
             reveal_clock: 1,
         }
     }
