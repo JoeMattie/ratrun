@@ -11972,8 +11972,8 @@ mod tests {
     /// over text, or the background of an existing `▀` playfield cell.
     fn is_cheese_tip(cell: &ratatui::buffer::Cell) -> bool {
         match cell.symbol() {
-            "▄" => is_cheese_yellow(cell.fg),
-            "▀" => is_cheese_yellow(cell.bg),
+            // The tip is the upper pixel of its cell.
+            "▀" => is_cheese_yellow(cell.fg),
             _ => false,
         }
     }
