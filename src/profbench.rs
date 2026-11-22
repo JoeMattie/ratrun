@@ -53,7 +53,7 @@ static HORDE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::n
 /// One measured simulation step: the bot's, or a standing rat's.
 fn step(run: &mut AutoRun, frame: usize) {
     let horde = HORDE.load(std::sync::atomic::Ordering::Relaxed);
-    if horde > 0 && frame % 8 == 0 {
+    if horde > 0 && frame.is_multiple_of(8) {
         let w = run.world_mut();
         let have = w.enemy_count();
         let kinds = crate::game::enemy::EnemyKind::all();
@@ -397,7 +397,7 @@ fn bench_direct(run: &mut AutoRun, cfg: &Cfg, floor: &str, at: f32, sample: Opti
             transitions.push((frames, tier_label(tier)));
             last_tier = tier;
         }
-        if frames % 16 == 0 {
+        if frames.is_multiple_of(16) {
             enemies += run.world().enemy_count() as u64;
             bullets += run.world().bullet_count() as u64;
         }
