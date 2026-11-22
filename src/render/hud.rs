@@ -643,10 +643,35 @@ impl HudState {
     /// Push a transient callout pill without allocating once slot buffers are warm.
     pub fn push_callout(&mut self, kind: CalloutKind, tag: &str, message: &str, duration: f32) {
         // Prefer an inactive slot; otherwise replace the slot closest to expiring.
-        let idx = self
-            .callouts
-            .iter()
-            .position(|c| !c.active)
+        // A Library note is the one pill that never evicts another kind: with
+        // the rail full of gameplay callouts it is dropped (the entry is still
+        // marked NEW in the index).
+        let free = self.callouts.iter().position(|c| !c.active);
+        if kind == CalloutKind::Library && free.is_none() {
+            let oldest_note = self
+                .callouts
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.kind == Some(CalloutKind::Library))
+                .min_by(|(_, a), (_, b)| a.timer.total_cmp(&b.timer))
+                .map(|(i, _)| i);
+            if oldest_note.is_none() {
+                return;
+            }
+        }
+        let idx = free
+            .or_else(|| {
+                (kind == CalloutKind::Library)
+                    .then(|| {
+                        self.callouts
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, c)| c.kind == Some(CalloutKind::Library))
+                            .min_by(|(_, a), (_, b)| a.timer.total_cmp(&b.timer))
+                            .map(|(i, _)| i)
+                    })
+                    .flatten()
+            })
             .unwrap_or_else(|| {
                 self.callouts
                     .iter()
@@ -1139,20 +1164,31 @@ impl HudState {
     /// Every director curve function reads `curve_clock` (see
     /// `director::curve_clock`), so the milestones this stage fires land where
     /// the spawns actually change even on a level whose curve opens partway in.
+    ///
+    /// The thresholds are the director's own: each stage's callout names a
+    /// kind, and it fires on that kind's first-appearance row
+    /// (`director::base_unlock_time`) — bats, cats, the elite gate
+    /// (`director::ELITE_START`), spitters, brutes. Nothing here restates the
+    /// fifteen-minute schedule, so a retimed table moves the callouts with it.
     fn stage_for_curve(curve: f32) -> u8 {
-        if curve >= 120.0 {
-            5
-        } else if curve >= 75.0 {
-            4
-        } else if curve >= director::ELITE_START {
-            3
-        } else if curve >= 45.0 {
-            2
-        } else if curve >= 20.0 {
-            1
-        } else {
-            0
+        use crate::game::enemy::EnemyKind;
+        let at = |kind| director::base_unlock_time(kind).unwrap_or(f32::INFINITY);
+        // Highest stage whose threshold has passed (the table is not assumed
+        // to be sorted: the elite gate is tuned separately from the unlocks).
+        let thresholds = [
+            at(EnemyKind::Bat),
+            at(EnemyKind::Cat),
+            director::ELITE_START,
+            at(EnemyKind::Spitter),
+            at(EnemyKind::Brute),
+        ];
+        let mut stage = 0;
+        for (i, &t) in thresholds.iter().enumerate() {
+            if curve >= t {
+                stage = i as u8 + 1;
+            }
         }
+        stage
     }
 }
 
@@ -1679,8 +1715,7 @@ struct RackPlan {
 }
 
 impl RackPlan {
-    /// Total tag/level cells the plan can show — what the plans in
-    /// [`plan_rack`] are ranked by.
+    /// Total tag/level cells the plan can show.
     fn text_cells(&self) -> u16 {
         self.weapon_pitch.saturating_sub(4) * self.weapons_shown as u16
             + self.passive_pitch.saturating_sub(4) * self.passives_shown as u16
@@ -1733,21 +1768,21 @@ fn assign_rack_text(spare: u16, nw: u16, np: u16) -> (u16, u16, u16) {
 /// [`assign_rack_text`]). If a rack of bare icons would leave whole slots with
 /// no number at all, up to [`MAX_MARKER_DROPS`] more tail slots are traded for
 /// a read-out on the rest — a numbered rack plus an honest `+N` beats sixteen
-/// anonymous sprites. A divider column is kept when the cell it costs is not
-/// better spent on text.
+/// anonymous sprites. The divider column is kept unless the cell it costs
+/// would show another slot or give a whole rack its first read-out (a rank or
+/// a stack digit): a longer tag is not worth an unseparated rack.
 fn plan_rack(width: u16, slots_w: usize, slots_p: usize) -> RackPlan {
-    let mut best: Option<RackPlan> = None;
-    for divider in [1u16, 0] {
-        let plan = plan_rack_with(width, slots_w, slots_p, divider);
-        if best.is_none_or(|b| plan.text_cells() > b.text_cells()) {
-            best = Some(plan);
-        }
-    }
-    match best {
-        Some(plan) => plan,
-        // Unreachable (the loop always runs once) but never a panic in a
-        // render path.
-        None => plan_rack_with(width, slots_w, slots_p, 0),
+    let with = plan_rack_with(width, slots_w, slots_p, 1);
+    let without = plan_rack_with(width, slots_w, slots_p, 0);
+    let shown = |p: &RackPlan| p.weapons_shown + p.passives_shown;
+    let numbered = |p: &RackPlan| {
+        u8::from(p.weapon_pitch > 4 && p.weapons_shown > 0)
+            + u8::from(p.passive_pitch > 4 && p.passives_shown > 0)
+    };
+    if shown(&without) > shown(&with) || numbered(&without) > numbered(&with) {
+        without
+    } else {
+        with
     }
 }
 
@@ -1788,8 +1823,8 @@ fn plan_rack_with(width: u16, slots_w: usize, slots_p: usize, divider: u16) -> R
         // Trade a tail slot for read-outs on the rest.
         if shown_p > 0 {
             shown_p -= 1;
-        } else if shown_w > 0 {
-            shown_w -= 1;
+        } else {
+            shown_w = shown_w.saturating_sub(1);
         }
         marker = 2;
         drops += 1;
@@ -3063,13 +3098,23 @@ mod tests {
         let mut state = HudState::default();
         state.tick(1.0 / 60.0, &w, &[], false);
 
-        // Cross 20s Bat unlock threshold + Heal pickup.
+        // Not yet: the old five-minute schedule announced bats at 20 s, long
+        // before the director can spawn one.
         w.elapsed = 21.0;
+        state.tick(1.0 / 60.0, &w, &[], false);
+        assert!(
+            !state.callouts.iter().any(|c| c.active && c.tag == "THREAT +"),
+            "the bat callout fired before the bat unlock"
+        );
+        // Cross the director's Bat unlock + Heal pickup.
+        w.elapsed = director::base_unlock_time(crate::game::enemy::EnemyKind::Bat)
+            .expect("the bat unlock row")
+            + 1.0;
         w.player.hp = 60.0;
         state.tick(1.0 / 60.0, &w, &[], false);
         assert!(
             state.callouts.iter().any(|c| c.active && c.tag == "THREAT +"),
-            "crossing 20s should emit escalation callout"
+            "crossing the bat unlock should emit escalation callout"
         );
 
         w.player.hp = 95.0;
@@ -3192,6 +3237,34 @@ mod tests {
     /// The two boundaries are the director's own gates, not wall-clock numbers:
     /// tier 3 opens at `director::ELITE_START` (90 s since the early-game pass)
     /// and tier 4 at the 120 s brute unlock of the level-0 curve.
+    /// The escalation callouts sit on the director's fifteen-minute tables,
+    /// not the old five-minute schedule: each stage opens on the second its
+    /// kind can first spawn, and the last one is well past the old 2:00.
+    #[test]
+    fn escalation_stages_follow_the_directors_unlocks() {
+        use crate::game::enemy::EnemyKind;
+        let at = |k| director::base_unlock_time(k).expect("a base unlock row");
+        let rows = [
+            (1u8, at(EnemyKind::Bat)),
+            (2, at(EnemyKind::Cat)),
+            (3, director::ELITE_START),
+            (4, at(EnemyKind::Spitter)),
+            (5, at(EnemyKind::Brute)),
+        ];
+        assert_eq!(HudState::stage_for_curve(0.0), 0);
+        let mut prev = 0.0;
+        for (stage, t) in rows {
+            assert!(t > prev, "stage {stage} is out of order at {t}");
+            assert!(t < director::RUN_SECONDS, "stage {stage} never fires");
+            assert_eq!(HudState::stage_for_curve(t - 0.5), stage - 1);
+            assert_eq!(HudState::stage_for_curve(t), stage);
+            prev = t;
+        }
+        // The old schedule had every stage in by 2:00 of a five-minute run.
+        assert_eq!(HudState::stage_for_curve(120.0), 2);
+        assert_eq!(HudState::stage_for_curve(director::RUN_SECONDS), 5);
+    }
+
     #[test]
     fn the_threat_tier_reads_the_levels_curve_clock() {
         // Sewer: t = 0 is the curve's start.
@@ -3455,10 +3528,27 @@ mod tests {
                 // One number per slot at the wide sizes; the stack marker is
                 // never confusable with a weapon's rank (`×` only for passives).
                 if tw >= 80 {
-                    assert!(
-                        rack_text.contains('×') || rack_text.contains('+'),
-                        "caps {caps:?} at {tw}x{th}: no passive read-out and no marker: {rack_text:?}"
-                    );
+                    // Sixteen slots at 80 columns leave exactly one text cell
+                    // each (80 - 16 icons of 4): the planner spends it on the
+                    // bare stack digit (`text_w == 1` in `draw_equipment_rack`),
+                    // so there the read-out is one digit per slot and no `×`.
+                    let one_cell_each = usize::from(tw) == 4 * (caps.weapons + caps.passives) + 16;
+                    if one_cell_each {
+                        // (`★` is a maxed weapon's rank.)
+                        let digits = rack_text
+                            .chars()
+                            .filter(|c| c.is_ascii_digit() || *c == '★')
+                            .count();
+                        assert!(
+                            digits >= caps.weapons + caps.passives,
+                            "caps {caps:?} at {tw}x{th}: a slot lost its number: {rack_text:?}"
+                        );
+                    } else {
+                        assert!(
+                            rack_text.contains('×') || rack_text.contains('+'),
+                            "caps {caps:?} at {tw}x{th}: no passive read-out and no marker: {rack_text:?}"
+                        );
+                    }
                 }
                 // The two racks are separated whenever there is room for it.
                 if tw >= 106 {

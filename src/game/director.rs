@@ -542,6 +542,14 @@ const UNLOCKS: [(f32, EnemyKind, f32); 4] = [
     (395.0, EnemyKind::Brute, 1.5),
 ];
 
+/// When a base kind first joins the roll, on the curve clock (the
+/// [`UNLOCKS`] row). `None` for a kind that is always in the roll or is not a
+/// base kind. The HUD's escalation callouts read this, so "bats inbound" lands
+/// on the second the first bat can spawn.
+pub fn base_unlock_time(kind: EnemyKind) -> Option<f32> {
+    UNLOCKS.iter().find(|(_, k, _)| *k == kind).map(|(t, _, _)| *t)
+}
+
 // ---- Wave 3 kinds ---------------------------------------------------------
 //
 // `WAVE3_DESIGN.md` §1 and §9. **Every time in this block is written on the
