@@ -99,8 +99,8 @@ use super::smoke::{SmokeLayer, SmokeScene};
 use super::weapon::WeaponKind;
 use super::art_walls::{Cardinal, WallKind};
 use super::{
-    art_boss_broom, art_boss_cat, art_boss_horseshoe_crab, art_boss_magpie, art_boss_mangle,
-    art_boss_megarat,
+    art_boss_broom, art_boss_cat, art_boss_cobra, art_boss_horseshoe_crab, art_boss_magpie,
+    art_boss_mangle, art_boss_megarat,
     art_boss_mower, art_boss_night_edition, art_enemy, art_floor, art_marks, art_miniboss,
     art_props, art_rat, art_traps, art_walls, art_wave3a,
 };
@@ -1988,6 +1988,26 @@ impl World {
             }
         }
 
+        // The King Cobra's laid body: the coil and the spiral lane are *walls*,
+        // so their outline is re-stamped over the lighting (the crab's live
+        // tell gets the same treatment for the same reason). The body itself
+        // stays in the entity pass; this is only the shape the rat has to
+        // respect, plus the doorway out of it.
+        {
+            let mut query = self.ecs.query::<&Boss>();
+            for boss in query.iter(&self.ecs) {
+                let BossArtView::Cobra(v) = boss.view() else {
+                    continue;
+                };
+                let margin = boss.kind.cull_margin();
+                if on_screen(self.w2s(boss.pos, cam), margin, viewport)
+                    || on_screen(self.w2s(boss.target, cam), margin, viewport)
+                {
+                    art_boss_cobra::draw_coil_tell(pb, &v, cam);
+                }
+            }
+        }
+
         // Boss-owned projectiles (blade discs, shrapnel).
         self.draw_boss_projectiles(pb, cam);
 
@@ -2165,6 +2185,9 @@ impl World {
                 BossArtView::MegaRat(v) => {
                     art_boss_megarat::draw_megarat_ground(pb, &v, cam, accent);
                 }
+                BossArtView::Cobra(v) => {
+                    art_boss_cobra::draw_ground(pb, &v, cam, accent);
+                }
             }
         }
     }
@@ -2210,6 +2233,7 @@ impl World {
                     art_boss_horseshoe_crab::draw(pb, &v, cam, accent)
                 }
                 BossArtView::MegaRat(v) => art_boss_megarat::draw_megarat(pb, &v, cam, accent),
+                BossArtView::Cobra(v) => art_boss_cobra::draw(pb, &v, cam, accent),
             }
             self.light_map.mark_emissive_highlights(pb, self.w2s(boss.pos, cam), 19);
         }

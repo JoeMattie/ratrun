@@ -1,5 +1,6 @@
 pub mod art_boss_broom;
 pub mod art_boss_cat;
+pub mod art_boss_cobra;
 pub mod art_boss_magpie;
 pub mod art_boss_megarat;
 pub mod art_boss_mangle;

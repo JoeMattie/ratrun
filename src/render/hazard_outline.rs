@@ -51,6 +51,9 @@ pub fn warn_colour(kind: BossKind, active: bool) -> Rgb {
         BossKind::HorseshoeCrab => ((255, 198, 116), (255, 84, 70)),
         // The first success fights under the kitchen's own warm ramp.
         BossKind::MegaRat => ((255, 186, 64), (255, 72, 62)),
+        // Venom on a cold tile: the same amber tell, a greener hot beat so a
+        // live puddle is never mistaken for the loop's clock.
+        BossKind::Cobra => ((255, 196, 92), (210, 255, 96)),
     };
     if active {
         hot

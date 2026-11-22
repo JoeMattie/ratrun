@@ -129,3 +129,26 @@ pub const HORSESHOE_CLASS: &str = "PRE-PIPE — STILL HERE";
 /// The field note the drain rats pass around. It is the boss's lore: something
 /// older than the facility crawled up the outflow and has not left.
 pub const HORSESHOE_FIELD_NOTE: &str = "It was here before the pipes were. It will be here after.";
+
+// ============================================================================
+// The Lab's other specimen: KING COBRA
+// ============================================================================
+
+/// Name plate for the Lab's second boss.
+///
+/// The Lab's original fight is the Turf-Reaper Mk.IV, so the king's plate is
+/// its own: a specimen number the facility stopped saying out loud.
+pub const COBRA_NAME: &str = "KING COBRA";
+
+/// Classification tag beside the name plate, in the same voice as the campaign
+/// plates ("CLASS-V APEX PREDATOR", "PRE-PIPE — STILL HERE").
+pub const COBRA_CLASS: &str = "CLASS-VII SPECIMEN — LOOSE";
+
+/// The arrival banner's flavour line (the plate's second row, and the fight's
+/// own epitaph at the clear).
+pub const COBRA_ARRIVAL: &str =
+    "The lab grew it long. The lab grew it longer than the room it was kept in.";
+
+/// The field note on the specimen card.
+pub const COBRA_FIELD_NOTE: &str =
+    "Twenty-two feet of it, and the room it was kept in was eleven. That is how it got out.";

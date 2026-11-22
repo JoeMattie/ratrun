@@ -909,8 +909,12 @@ mod tests {
             BossKind::pool_for_theme(Theme::Kitchen),
             &[BossKind::Broom, BossKind::MegaRat]
         );
+        // every remaining floor starts with its own boss
+        assert_eq!(
+            BossKind::pool_for_theme(Theme::Lab),
+            &[BossKind::Mower, BossKind::Cobra]
+        );
         for (theme, kind) in [
-            (Theme::Lab, BossKind::Mower),
             (Theme::Laundry, BossKind::Mangle),
             (Theme::Printworks, BossKind::NightEdition),
             (Theme::Trailer, BossKind::Magpie),
@@ -931,7 +935,8 @@ mod tests {
         assert!(saw_crab && saw_cat, "the pool draw must reach both bosses");
         // Single-entry pools are pinned, whatever the seed.
         for seed in 0..16u64 {
-            assert_eq!(BossKind::pool_pick(Theme::Lab, seed), BossKind::Mower);
+            assert!(BossKind::pool_for_theme(Theme::Lab)
+                .contains(&BossKind::pool_pick(Theme::Lab, seed)));
             assert_eq!(BossKind::pool_pick(Theme::Trailer, seed), BossKind::Magpie);
         }
     }

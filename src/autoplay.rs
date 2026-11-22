@@ -300,6 +300,13 @@ pub enum BossAttack {
     Thrash,
     Squeak,
     Dash,
+    // KING COBRA (the Lab's second boss, appended for wave 3).
+    CobraStrike,
+    CobraConstrict,
+    CobraVenom,
+    CobraTail,
+    CobraSway,
+    CobraSpiral,
 }
 
 impl BossAttack {
@@ -333,6 +340,12 @@ impl BossAttack {
             BossAttack::Thrash => "tail thrash",
             BossAttack::Squeak => "sonic squeak",
             BossAttack::Dash => "dash",
+            BossAttack::CobraStrike => "cobra strike",
+            BossAttack::CobraConstrict => "constriction",
+            BossAttack::CobraVenom => "venom",
+            BossAttack::CobraTail => "tail whip",
+            BossAttack::CobraSway => "the sway",
+            BossAttack::CobraSpiral => "the spiral lane",
         }
     }
 }
@@ -428,6 +441,18 @@ impl DamageCause {
             },
             // It fires no projectiles; the arm exists so the label never lies.
             DamageCause::BossProjectile(BossKind::MegaRat) => "subject r-01",
+            DamageCause::BossContact(BossKind::Cobra) => "king cobra's body",
+            DamageCause::BossHazard(BossKind::Cobra, a) => match a {
+                BossAttack::CobraStrike => "king cobra's strike",
+                BossAttack::CobraConstrict => "the constriction",
+                BossAttack::CobraVenom => "cobra venom",
+                BossAttack::CobraTail => "king cobra's tail whip",
+                BossAttack::CobraSway => "the sway's strike",
+                BossAttack::CobraSpiral => "the spiral lane",
+                _ => "king cobra hazard",
+            },
+            // It fires nothing but its own spit; the arm keeps the label honest.
+            DamageCause::BossProjectile(BossKind::Cobra) => "cobra venom",
             DamageCause::Trap => "mousetrap",
             DamageCause::MinibossSignature(kind) => {
             // The batch's damage-by-source column used to lump every
@@ -1543,6 +1568,7 @@ fn boss_name(kind: BossKind) -> &'static str {
         BossKind::Magpie => "magpie",
         BossKind::HorseshoeCrab => "horseshoe crab",
         BossKind::MegaRat => "subject r-01",
+        BossKind::Cobra => "king cobra",
     }
 }
 
@@ -1782,6 +1808,21 @@ fn boss_attack(state: &BossState) -> BossAttack {
             | crate::game::art_boss_magpie::MagpieState::StrafePass => BossAttack::Strafe,
             crate::game::art_boss_magpie::MagpieState::SnatchDrop => BossAttack::Crate,
             crate::game::art_boss_magpie::MagpieState::Gust => BossAttack::Gust,
+            _ => BossAttack::Other,
+        },
+        BossState::Cobra(s) => match s {
+            crate::game::art_boss_cobra::CobraState::HoodTell
+            | crate::game::art_boss_cobra::CobraState::Strike => BossAttack::CobraStrike,
+            crate::game::art_boss_cobra::CobraState::ReStrikeTell => BossAttack::CobraStrike,
+            crate::game::art_boss_cobra::CobraState::SwayTell => BossAttack::CobraSway,
+            crate::game::art_boss_cobra::CobraState::ConstrictTell
+            | crate::game::art_boss_cobra::CobraState::Constrict => BossAttack::CobraConstrict,
+            crate::game::art_boss_cobra::CobraState::VenomTell
+            | crate::game::art_boss_cobra::CobraState::VenomSpit => BossAttack::CobraVenom,
+            crate::game::art_boss_cobra::CobraState::TailTell
+            | crate::game::art_boss_cobra::CobraState::TailSweep => BossAttack::CobraTail,
+            crate::game::art_boss_cobra::CobraState::SpiralCoil
+            | crate::game::art_boss_cobra::CobraState::SpiralChase => BossAttack::CobraSpiral,
             _ => BossAttack::Other,
         },
         BossState::HorseshoeCrab(s) => match s {

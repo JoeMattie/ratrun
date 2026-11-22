@@ -1949,6 +1949,45 @@ impl LightMap {
                     }
                 }
             }
+            BossState::Cobra(st) => {
+                // A cold-lab specimen: the head carries a sickly green lamp
+                // (the venom), and the hood's spectacle mark lights up when it
+                // is exposed.
+                let (col, r, inten, scat) = match st {
+                    crate::game::art_boss_cobra::CobraState::HoodTell
+                    | crate::game::art_boss_cobra::CobraState::Strike
+                    | crate::game::art_boss_cobra::CobraState::ReStrikeTell => {
+                        ((255, 196, 92), 62.0, 235u16, 54u16)
+                    }
+                    crate::game::art_boss_cobra::CobraState::FangsStuck
+                    | crate::game::art_boss_cobra::CobraState::SpiralEnd => {
+                        let pulse = 0.78 + 0.22 * (elapsed * 9.0).sin().abs();
+                        ((198, 255, 132), 46.0, (215.0 * pulse) as u16, (52.0 * pulse) as u16)
+                    }
+                    crate::game::art_boss_cobra::CobraState::VenomTell
+                    | crate::game::art_boss_cobra::CobraState::VenomSpit => {
+                        ((126, 226, 104), 56.0, 225, 50)
+                    }
+                    crate::game::art_boss_cobra::CobraState::Constrict
+                    | crate::game::art_boss_cobra::CobraState::ConstrictTell => {
+                        ((148, 236, 118), 60.0, 200, 44)
+                    }
+                    _ => ((132, 208, 118), 50.0, 178, 40),
+                };
+                if in_range(bsx, bsy, r) {
+                    self.lights.push(PointLight {
+                        x: bsx,
+                        y: bsy,
+                        radius: r,
+                        color: col,
+                        intensity: inten,
+                        scatter: scat,
+                        priority: 2,
+                        occlude: false,
+                        hard: false,
+                    });
+                }
+            }
             _ => {
                 // Fallback aura for future wave-3 bosses.
                 if in_range(bsx, bsy, 58.0) {

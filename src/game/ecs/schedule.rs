@@ -351,6 +351,22 @@ pub fn build_tick_schedule() -> Schedule {
             .after(combat::contact_system),
     );
 
+    // 13d: the King Cobra's laid body is a **moving wall**. A boss controller
+    // has no player access (`BossContext` hands it a `&Level` and a
+    // `&mut StdRng` and nothing else) and the coil must not be a tile edit —
+    // the map pin is a golden — so the separation pass lives here, right after
+    // the update slot that laid the loop this tick and before the damage
+    // passes. A walking rat is pushed out of the nearest body point, a dashing
+    // one passes over it; a floor with no cobra on it (or a cobra that is not
+    // coiled) returns before touching anything, so every other fight is
+    // byte-identical. It spawns and despawns nothing, so the `EnemyIndex`
+    // window is untouched.
+    schedule.add_systems(
+        boss::cobra::coil_block_system
+            .after(boss::boss_update_system)
+            .before(combat::player_bullet_hits_system),
+    );
+
     schedule
 }
 

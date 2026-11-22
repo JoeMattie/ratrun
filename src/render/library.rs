@@ -665,6 +665,10 @@ fn draw_boss(art: &mut PixelBuffer, kind: BossKind, accent: Rgb, t: f32) {
             art_boss_magpie::draw_magpie_ground(art, &v, Vec2::ZERO, accent);
             art_boss_magpie::draw_magpie(art, &v, Vec2::ZERO, accent);
         }
+        // The pooled floors' second fights have no posed preview of their own
+        // here (their plates still list and describe them); the index's card
+        // falls back to the floor's own boss rather than invent a pose.
+        _ => {}
     }
 }
 

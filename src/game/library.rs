@@ -309,6 +309,11 @@ fn boss_name(k: BossKind) -> &'static str {
         BossKind::Mangle => crate::render::hud::boss_codename(Theme::Laundry).0,
         BossKind::NightEdition => crate::render::hud::boss_codename(Theme::Printworks).0,
         BossKind::Magpie => crate::render::hud::boss_codename(Theme::Trailer).0,
+        // The pooled floors' second fights have plates of their own (the same
+        // strings the boss bar shows), so the index never invents a name.
+        BossKind::HorseshoeCrab => crate::render::hud::boss_codename_kind(k).0,
+        BossKind::MegaRat => crate::render::hud::boss_codename_kind(k).0,
+        BossKind::Cobra => crate::render::hud::boss_codename_kind(k).0,
     }
 }
 
@@ -413,10 +418,14 @@ pub fn flavour_of(key: Key) -> Option<&'static str> {
     }
 }
 
-/// The boss's floor (the inverse of [`BossKind::for_theme`]).
+/// The boss's floor (the inverse of [`BossKind::pool_for_theme`]).
+///
+/// A floor can field more than one boss, so this asks which floor's *pool*
+/// holds the kind rather than which floor names it first: the pool mates (the
+/// horseshoe, SUBJECT R-01, the cobra) each report the floor they share.
 fn boss_theme(k: BossKind) -> Theme {
     for theme in Theme::playable() {
-        if BossKind::for_theme(theme) == k {
+        if BossKind::pool_for_theme(theme).contains(&k) {
             return theme;
         }
     }
@@ -491,6 +500,9 @@ pub fn all_rows() -> Vec<Row> {
         BossKind::Mangle,
         BossKind::NightEdition,
         BossKind::Magpie,
+        BossKind::HorseshoeCrab,
+        BossKind::MegaRat,
+        BossKind::Cobra,
     ] {
         let (hint, dossier) = boss_text(k);
         rows.push(Row {
@@ -813,6 +825,29 @@ fn boss_text(k: BossKind) -> (&'static str, &'static str) {
              one blank margin, and stamps the inked part. Later it sweeps a carriage \
              rule across the floor. Stand on the unprinted stripe and let the edition \
              come out wrong.",
+        ),
+        BossKind::HorseshoeCrab => (
+            "Sewer · 15:00 — the other boss",
+            "The dome is armour and the eye slit is the only way in: everything \
+             arriving over the shell from the front sparks off it. Its tail sweeps \
+             the arc behind the dome, so the rat that hides from the shell is the \
+             rat the tail is for. Let it bulldoze into a wall and the gill fans come \
+             out from under the rim.",
+        ),
+        BossKind::MegaRat => (
+            "Kitchen · 15:00 — the other boss",
+            "The facility's first success, collared and tagged, fighting with \
+             copies of the rat's own kit. Every move is bigger, slower and told: \
+             step off the teeth line, take the belly while the incisors are in the \
+             cabinet, and keep out of the tail's two-pass arc.",
+        ),
+        BossKind::Cobra => (
+            "Lab · 15:00 — the other boss",
+            "An escaped specimen twenty-two feet long in a room eleven wide, so the \
+             coils are the room's walls. Step off the marked strike line and hit the \
+             spectacle mark on the open hood; leave the loop through its one gap, or \
+             dash over the coil; and when it lays the arena out as a spiral lane, run \
+             it — the head is spent at the end of it.",
         ),
         BossKind::Magpie => (
             "Flatbed · the getaway",
@@ -1481,6 +1516,9 @@ fn boss_answer(k: BossKind) -> &'static str {
         BossKind::Mangle => "change sides between bites, hit the crank",
         BossKind::NightEdition => "stand on the blank margin",
         BossKind::Magpie => "cross the wind, not against it",
+        BossKind::HorseshoeCrab => "let the shell arm itself into a wall, then hit the gills",
+        BossKind::MegaRat => "step off the line, bite the belly while the teeth are stuck",
+        BossKind::Cobra => "leave the loop by its gap, then hit the hood's spectacle mark",
     }
 }
 
@@ -2209,6 +2247,9 @@ fn boss_at(i: usize) -> Option<BossKind> {
         BossKind::Mangle,
         BossKind::NightEdition,
         BossKind::Magpie,
+        BossKind::HorseshoeCrab,
+        BossKind::MegaRat,
+        BossKind::Cobra,
     ]
     .get(i)
     .copied()

@@ -238,6 +238,8 @@ pub fn boss_codename_kind(kind: crate::game::ecs::systems::boss::BossKind) -> (&
         }
         // The Kitchen's second fight: the facility's first success.
         BossKind::MegaRat => return (crate::lore::MEGARAT_NAME, crate::lore::MEGARAT_CLASS),
+        // The Lab's other specimen, with a plate of its own for the same reason.
+        BossKind::Cobra => return (crate::lore::COBRA_NAME, crate::lore::COBRA_CLASS),
     };
     let class_tag = match level {
         CampaignLevel::Sewer => "CLASS-V APEX PREDATOR",
