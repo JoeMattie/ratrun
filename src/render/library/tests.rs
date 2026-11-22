@@ -433,8 +433,7 @@ fn a_card_animates_only_after_the_cursor_rests() {
     let rows = all_rows();
     let mut lib = Library::default();
     lib.reveal_all();
-    let mut ui = LibraryUi::default();
-    ui.still = false;
+    let mut ui = LibraryUi { still: false, ..Default::default() };
     let key = ui.selected_key(&rows).expect("a selection");
     assert!(catalogued(&lib, key));
     // Nothing on the frame the selection arrives: a card scrolled past is a
@@ -470,8 +469,7 @@ fn a_locked_card_builds_nothing_however_long_it_rests() {
     let rows = all_rows();
     let mut lib = Library::default();
     lib.reveal_all();
-    let mut ui = LibraryUi::default();
-    ui.still = false;
+    let mut ui = LibraryUi { still: false, ..Default::default() };
     // An entry that is seen but not owned is still silhouetted: its plate must
     // not run a scene either (a weapon only offered on a card).
     let row = rows
@@ -480,8 +478,9 @@ fn a_locked_card_builds_nothing_however_long_it_rests() {
         .expect("a weapon row");
     assert!(lib.is_seen(row.key));
     assert!(!catalogued(&lib, row.key), "an unowned weapon is not catalogued");
+    // The caller gates on `catalogued` (`App::tick_library_card`).
     for _ in 0..40 {
-        ui.tick_card(0.1, Some(row.key), true);
+        ui.tick_card(0.1, Some(row.key), catalogued(&lib, row.key));
     }
     assert_eq!(ui.scene_key(), None, "a half-catalogued card ran a scene");
     // A locked entry (live = false) never builds, whatever it is.
@@ -502,8 +501,7 @@ fn the_still_switch_freezes_every_card() {
     let rows = all_rows();
     let mut lib = Library::default();
     lib.reveal_all();
-    let mut ui = LibraryUi::default();
-    ui.still = true;
+    let mut ui = LibraryUi { still: true, ..Default::default() };
     let key = ui.selected_key(&rows).expect("a selection");
     for _ in 0..40 {
         ui.tick_card(0.1, Some(key), true);
@@ -526,8 +524,7 @@ fn a_running_scene_is_what_the_plate_draws() {
     let rows = all_rows();
     let mut lib = Library::default();
     lib.reveal_all();
-    let mut ui = LibraryUi::default();
-    ui.still = false;
+    let mut ui = LibraryUi { still: false, ..Default::default() };
     let key = ui.selected_key(&rows).expect("a selection");
     for _ in 0..3 {
         ui.tick_card(0.1, Some(key), true);

@@ -119,7 +119,8 @@ fn hostile_shots(scene: &mut LibraryScene) -> usize {
 fn a_body_is_hurt(scene: &mut LibraryScene) -> bool {
     let w = scene.world();
     let mut q = w.ecs.query::<&Enemy>();
-    q.iter(&w.ecs).any(|e| e.hp < e.max_hp - 0.01)
+    // A max-level evolution kills a dummy outright, so a kill counts too.
+    w.kills > 0 || q.iter(&w.ecs).any(|e| e.hp < e.max_hp - 0.01)
 }
 
 // ---- The samples ----------------------------------------------------------
@@ -414,5 +415,44 @@ fn capture_library_filmstrips() {
         let names: Vec<&str> = chunk.iter().map(|(n, _)| n.as_str()).collect();
         eprintln!("sheet {n}: {}", names.join(", "));
         write_ansi(&dir, &format!("sheet{n:02}-{}", want[0]), &out);
+    }
+}
+
+/// `RATRUN_LIBANIM_TIMINGS=1 cargo test library_scene_timings -- --nocapture`:
+/// the cost of one card frame (one fixed step plus one plate draw) for a
+/// spread of cards, in the profile the test is built with. A no-op otherwise.
+#[test]
+fn library_scene_timings() {
+    if std::env::var("RATRUN_LIBANIM_TIMINGS").is_err() {
+        return;
+    }
+    let keys = [
+        Key::Enemy(EnemyKind::Skitterer),
+        Key::Miniboss(MinibossKind::Corkscrew),
+        Key::Boss(BossKind::Cat),
+        Key::Weapon(WeaponKind::AcidSpit),
+        Key::Evolution(WeaponKind::SqueakNova),
+        Key::Object(ObjectKind::StickyBoard),
+    ];
+    for key in keys {
+        let built = std::time::Instant::now();
+        let mut scene = LibraryScene::build(key).expect("a scene");
+        let build_us = built.elapsed().as_micros();
+        let mut art = PixelBuffer::new(44, 60);
+        let frames = 600u32;
+        let (mut step_us, mut draw_us) = (0u128, 0u128);
+        for _ in 0..frames {
+            let t = std::time::Instant::now();
+            scene.step();
+            step_us += t.elapsed().as_micros();
+            let t = std::time::Instant::now();
+            plate(&mut scene, &mut art);
+            draw_us += t.elapsed().as_micros();
+        }
+        println!(
+            "LIBANIM {key:?}: build {build_us} us, step {} us, draw {} us a frame",
+            step_us / u128::from(frames),
+            draw_us / u128::from(frames)
+        );
     }
 }

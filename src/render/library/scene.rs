@@ -72,7 +72,7 @@ pub const REST_SECS: f32 = 0.15;
 /// frame must not turn into a burst of ticks).
 const MAX_STEPS: u32 = 4;
 /// Every scene world's seed. A scene is a fixture, not a roll.
-const SEED: u64 = 0x11B2_A27;
+const SEED: u64 = 0x011B_2A27;
 
 /// How an entry's card moves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -712,7 +712,7 @@ fn stage_passive(theme: Theme, kind: PassiveKind) -> Option<Staged> {
 /// The Magnet card's loot: a fresh pair of gems at the plate's edge every
 /// 24 ticks, at the far side of the widened pickup radius.
 fn magnet_gems(world: &mut World, _subject: Option<Entity>, tick: u32) {
-    if tick % 24 != 0 {
+    if !tick.is_multiple_of(24) {
         return;
     }
     let rat = world.player.pos;
@@ -834,7 +834,7 @@ fn stage_gold(theme: Theme) -> Staged {
 
 /// A fresh coin at the plate's edge, every 20 ticks (the Gold card's cue).
 fn gold_trail(world: &mut World, _subject: Option<Entity>, tick: u32) {
-    if tick % 20 != 0 {
+    if !tick.is_multiple_of(20) {
         return;
     }
     let rat = world.player.pos;
@@ -877,9 +877,9 @@ fn stage_sticky(theme: Theme) -> Staged {
         kind: EnemyKind::Brute,
         first: 0.5,
         every: 0.7,
-        ring: 66.0,
+        ring: 60.0,
         hp: 120.0,
-        speed: 0.5,
+        speed: 1.0,
         from: Some(Vec2::new(0.0, 1.0)),
     });
     (world, script, None)

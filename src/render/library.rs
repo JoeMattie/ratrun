@@ -649,7 +649,10 @@ fn draw_art(art: &mut PixelBuffer, scenes: &mut Scenes, key: Key, accent: Rgb, t
         }
         Key::Boss(kind) => draw_boss(art, kind, accent, t),
         Key::Weapon(kind) | Key::Evolution(kind) => {
-            let icon = art_icons::weapon(kind);
+            let icon = match key {
+                Key::Evolution(_) => art_icons::evolution(kind).unwrap_or_else(|| art_icons::weapon(kind)),
+                _ => art_icons::weapon(kind),
+            };
             let gold = matches!(key, Key::Evolution(_));
             draw_icon(art, icon, gold, t);
         }
