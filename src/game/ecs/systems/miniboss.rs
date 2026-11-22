@@ -20,8 +20,8 @@
 //! is planted until its exposed second is over ([`Miniboss::holds`]). The
 //! whole footprint is outlined for the full second (a swinging cord tells
 //! as the whole sector it sweeps), and one strike bites the rat once
-//! (`hit_this_strike`). Slot HP is [`appointment_hp`]: 2000 / 4000 / 5500 /
-//! 7000.
+//! (`hit_this_strike`). Slot HP is [`appointment_hp`]: 3800 / 8000 / 10000 /
+//! 12000.
 //! A signature whose shape leaves no walkable escape is re-aimed (up to 8
 //! tries) and skipped if still trapped.
 //!
@@ -1185,24 +1185,22 @@ impl Miniboss {
     }
 }
 
-/// HP by appointment (3:00 / 6:00 / 9:00 / 12:00): 2000 / 4000 / 5500 /
-/// 7000.
+/// HP by appointment (3:00 / 6:00 / 9:00 / 12:00): 3800 / 8000 / 10000 /
+/// 12000.
 ///
 /// The wave-3 ladder (160 / 320 / 540 / 780) died in 2–6 s, and batch six's
 /// (800 / 1600 / 2500 / 3400) in 5 / 7 / 10 / 14 s for the Skilled bot: one
 /// signature at most. Batch seven sized it for a 20–45 s fight by slot
-/// (3800 / 8000 / 10000 / 12000, measured 23 / 30 / 40 / 48 s over 96
-/// campaigns), which the owner found too long: batch eight cut the pools to
-/// roughly half and left everything else about a named fight alone. Every reader (the spawn, the console
+/// (measured 23 / 30 / 40 / 48 s over 96 campaigns). Every reader (the spawn, the console
 /// and test spawn in `World::spawn_miniboss`, the Library's HIT POINTS fact)
 /// goes through this function.
 #[inline]
 pub fn appointment_hp(appointment: usize) -> f32 {
     match appointment {
-        0 => 2000.0,
-        1 => 4000.0,
-        2 => 5500.0,
-        _ => 7000.0,
+        0 => 3800.0,
+        1 => 8000.0,
+        2 => 10000.0,
+        _ => 12000.0,
     }
 }
 
@@ -2069,11 +2067,12 @@ mod tests {
 
     #[test]
     fn appointment_stats_match_the_design() {
-        // Batch eight's ladder: batch seven's pools cut to roughly half.
-        assert_eq!(appointment_hp(0), 2000.0);
-        assert_eq!(appointment_hp(1), 4000.0);
-        assert_eq!(appointment_hp(2), 5500.0);
-        assert_eq!(appointment_hp(3), 7000.0);
+        // Batch seven's ladder: sized for 20-45 s fights by slot (measured
+        // with the Skilled bot: 23 / 30 / 40 / 48 s).
+        assert_eq!(appointment_hp(0), 3800.0);
+        assert_eq!(appointment_hp(1), 8000.0);
+        assert_eq!(appointment_hp(2), 10000.0);
+        assert_eq!(appointment_hp(3), 12000.0);
         assert_eq!(appointment_signature_damage(0), 18.0);
         assert_eq!(appointment_signature_damage(1), 22.0);
         assert_eq!(appointment_signature_damage(2), 26.0);
