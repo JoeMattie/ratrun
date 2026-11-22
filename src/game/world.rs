@@ -3125,6 +3125,10 @@ impl World {
     /// Traps, doors, rat-holes and maze rewards: `foreground == false` draws
     /// the ground layer (before entities), `true` the overlay layer (after
     /// them). Culled to the view.
+    ///
+    /// A floor trap is under every body standing on it: the glue board draws
+    /// entirely in the ground pass, and a mousetrap's upper art joins the
+    /// overlay only while its bar is in the air.
     fn draw_object_layer(&mut self, pb: &mut PixelBuffer, cam: Vec2, foreground: bool) {
         let accent = self.level.palette.accent;
         let vp = self.render_viewport;
@@ -3136,13 +3140,19 @@ impl World {
             if !on_screen(self.w2s(view.pos, cam), sticky_margin, vp) {
                 continue;
             }
+            // The whole board is a floor object: tray, glue and the strands
+            // that hold a caught body all draw in the ground pass, so every
+            // body on the pad is drawn over every pixel of it. The strands
+            // used to be composited after the entities; on a loaded board
+            // (three strands, rims and beads per body) they buried the small
+            // bodies, which read as enemies sliding under the trap.
+            if foreground {
+                continue;
+            }
             let mut view = *view;
             view.anim = anim;
-            if foreground {
-                art_traps::draw_sticky_trap(pb, &view, cam, accent);
-            } else {
-                art_traps::draw_sticky_trap_ground(pb, &view, cam, accent);
-            }
+            art_traps::draw_sticky_trap_ground(pb, &view, cam, accent);
+            art_traps::draw_sticky_trap(pb, &view, cam, accent);
         }
         for view in &objects.mousetraps {
             if !on_screen(self.w2s(view.pos, cam), 16.0, vp) {
@@ -3150,10 +3160,19 @@ impl World {
             }
             let mut view = *view;
             view.anim = anim;
-            if foreground {
-                art_traps::draw_mousetrap(pb, &view, cam, accent);
-            } else {
+            // The spring, pedal, bait and bar lie on the board while the trap
+            // is cocked or spent, so a body walking over it is above them.
+            // Only the bar in the air (the quiver and the 180-degree whip) is
+            // genuinely overhead.
+            let overhead = matches!(
+                view.state,
+                art_traps::MousetrapState::Triggered | art_traps::MousetrapState::Snapping
+            );
+            if !foreground {
                 art_traps::draw_mousetrap_ground(pb, &view, cam, accent);
+            }
+            if foreground == overhead {
+                art_traps::draw_mousetrap(pb, &view, cam, accent);
             }
         }
         for door in &objects.one_way_doors {
@@ -4595,5 +4614,176 @@ mod meta_tests {
         assert_eq!(stats.fire_rate_mult, 1.0 + 0.02 * 6.0);
         assert_eq!(stats.damage_mult, 1.0 + 0.025 * 6.0);
         assert_eq!(w.player.loadout.max_weapons(), 8);
+    }
+}
+
+#[cfg(test)]
+mod trap_order_tests {
+    use super::*;
+    use crate::game::art_traps::{MousetrapView, StickyTrapView};
+
+    /// A world with one glue board (or snap trap) beside the rat, flat-lit.
+    fn board_world(mousetrap: bool) -> (World, Vec2) {
+        let mut w = World::new(Theme::Sewer, 5);
+        w.peace = true;
+        w.player.god = true;
+        w.player.loadout.weapons.clear();
+        w.level.objects.sticky_traps.clear();
+        w.level.objects.sticky_trap_records.clear();
+        w.level.objects.mousetraps.clear();
+        w.level.objects.mousetrap_records.clear();
+        let at = w.player.pos + Vec2::new(40.0, 0.0);
+        let record = crate::game::level::TrapRecord {
+            encounter: false,
+            approach: crate::game::art_walls::Cardinal::East,
+        };
+        if mousetrap {
+            w.level.objects.mousetraps.push(MousetrapView::new(at, Vec2::new(1.0, 0.0)));
+            w.level.objects.mousetrap_records.push(record);
+        } else {
+            w.level.objects.sticky_traps.push(StickyTrapView::new(at, Vec2::new(1.0, 0.0)));
+            w.level.objects.sticky_trap_records.push(record);
+        }
+        (w, at)
+    }
+
+    pub(super) fn dump(name: &str, pb: &PixelBuffer) {
+        let Ok(dir) = std::env::var("RATRUN_TRAP_ORDER_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = String::new();
+        for cy in 0..pb.h / 2 {
+            for x in 0..pb.w {
+                let t = pb.pixel_at(x, cy * 2);
+                let b = pb.pixel_at(x, cy * 2 + 1);
+                s.push_str(&format!(
+                    "\x1b[38;2;{};{};{};48;2;{};{};{}m▀",
+                    t.0, t.1, t.2, b.0, b.1, b.2
+                ));
+            }
+            s.push_str("\x1b[0m\n");
+        }
+        std::fs::write(format!("{dir}/{}x{}-{name}.ansi", pb.w, pb.h / 2), s).unwrap();
+    }
+
+    /// One of each behaviour archetype (the bodies every other kind is drawn
+    /// as or recoloured from).
+    const ARCHETYPES: [EnemyKind; 15] = [
+        EnemyKind::Skitterer,
+        EnemyKind::Bat,
+        EnemyKind::Cat,
+        EnemyKind::Spitter,
+        EnemyKind::Brute,
+        EnemyKind::Pillbug,
+        EnemyKind::BellFlea,
+        EnemyKind::WickMoth,
+        EnemyKind::Porter,
+        EnemyKind::Turnkey,
+        EnemyKind::BigSnake,
+        EnemyKind::HouseCentipede,
+        EnemyKind::MurderHornet,
+        EnemyKind::TermiteHorde,
+        EnemyKind::Lilliputian,
+    ];
+
+    fn frame(w: &mut World) -> PixelBuffer {
+        let mut pb = PixelBuffer::new(120, 76);
+        w.draw(&mut pb);
+        pb
+    }
+
+    /// The share of a body's opaque pixels that the trap leaves untouched.
+    ///
+    /// The world is drawn four times at the same instant: as it is (`a`),
+    /// with the traps taken off the floor (`b`), with the floor repainted in
+    /// another theme's colours (`c`), and with the bodies taken off as well
+    /// (`d`). A pixel belongs to a body when `c` and `d` differ; it is
+    /// *opaque* when the body covers the floor completely there (`b == c`:
+    /// the floor's colour made no difference); and it is *intact* when the
+    /// real frame shows that same pixel, which is only true if nothing of
+    /// the trap was drawn over it.
+    fn intact_share(w: &mut World, name: &str) -> f32 {
+        let a = frame(w);
+        dump(name, &a);
+        w.level.objects.sticky_traps.clear();
+        w.level.objects.mousetraps.clear();
+        let b = frame(w);
+        let accent = w.level.palette.accent;
+        w.level.palette = crate::game::level::Palette::for_theme(Theme::Kitchen);
+        w.level.palette.accent = accent;
+        let c = frame(w);
+        w.clear_enemies();
+        let d = frame(w);
+        let (mut opaque, mut intact) = (0u32, 0u32);
+        for i in 0..a.pixels().len() {
+            if c.pixels()[i] != d.pixels()[i] && b.pixels()[i] == c.pixels()[i] {
+                opaque += 1;
+                // A faint additive wash (smoke, a particle's glow) may tint a
+                // body by a few levels; anything drawn *over* it changes it
+                // outright.
+                let (p, q) = (a.pixels()[i], b.pixels()[i]);
+                let near = |x: u8, y: u8| x.abs_diff(y) <= 12;
+                if near(p.0, q.0) && near(p.1, q.1) && near(p.2, q.2) {
+                    intact += 1;
+                }
+            }
+        }
+        assert!(opaque >= 4, "{name}: the body drew {opaque} opaque pixels");
+        intact as f32 / opaque as f32
+    }
+
+    /// A caught body is drawn over every pixel of the glue board, strands
+    /// included: for each archetype, alone on a board that has just caught it.
+    #[test]
+    fn a_body_on_a_glue_board_is_drawn_over_the_board() {
+        for kind in ARCHETYPES {
+            let (mut w, at) = board_world(false);
+            w.lighting = LightingMode::Off;
+            w.spawn_enemy(kind, at + Vec2::new(-4.0, 2.0), 1.0);
+            // Long enough for the board to catch a ground body and string it.
+            for _ in 0..12 {
+                w.update(1.0 / 60.0, Vec2::ZERO, false);
+            }
+            let share = intact_share(&mut w, &format!("glue-{}", kind.name()));
+            assert!(share > 0.9, "{}: only {share:.2} of the body is over the board", kind.name());
+        }
+    }
+
+    /// The same with a board holding a crowd, drawn at the far level of
+    /// detail (more than `CROWD_LOD_THRESHOLD` bodies in view).
+    #[test]
+    fn a_crowd_on_a_glue_board_is_drawn_over_the_board_at_the_far_lod() {
+        let (mut w, at) = board_world(false);
+        w.lighting = LightingMode::Off;
+        for i in 0..6 {
+            let p = at + Vec2::new(-12.0 + 5.0 * i as f32, -6.0 + 12.0 * (i % 2) as f32);
+            w.spawn_enemy([EnemyKind::Skitterer, EnemyKind::Cat, EnemyKind::Brute][i % 3], p, 1.0);
+        }
+        for _ in 0..12 {
+            w.update(1.0 / 60.0, Vec2::ZERO, false);
+        }
+        // The rest of the crowd stands off the board, in view, between ticks.
+        for i in 0..(crate::game::art_enemy::CROWD_LOD_THRESHOLD + 10) {
+            let p = w.player.pos
+                + Vec2::new(-52.0 + (i % 12) as f32 * 4.0, -30.0 + (i / 12) as f32 * 5.0);
+            w.spawn_enemy(EnemyKind::Skitterer, p, 1.0);
+        }
+        let share = intact_share(&mut w, "glue-crowd");
+        assert!(share > 0.9, "only {share:.2} of the crowd is over the board");
+    }
+
+    /// A cocked snap trap is a floor object too: a body standing on it is
+    /// over the spring, the pedal, the bait and the resting bar.
+    #[test]
+    fn a_body_on_a_cocked_mousetrap_is_drawn_over_it() {
+        for kind in ARCHETYPES {
+            let (mut w, at) = board_world(true);
+            w.lighting = LightingMode::Off;
+            // Drawn between ticks: the trap is still armed under the body.
+            w.spawn_enemy(kind, at + Vec2::new(6.0, 1.0), 1.0);
+            let share = intact_share(&mut w, &format!("snap-{}", kind.name()));
+            assert!(share > 0.9, "{}: only {share:.2} of the body is over the trap", kind.name());
+        }
     }
 }
