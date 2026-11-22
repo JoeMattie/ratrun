@@ -6951,7 +6951,20 @@ mod tests {
                     "bell" => MinibossKind::BellDiver,
                     "foreman" => MinibossKind::Foreman,
                     "milk" => MinibossKind::MilkCarton,
-                    _ => MinibossKind::Corkscrew,
+                    // Any kind by its name with the punctuation dropped
+                    // (`miniboss-valvewidow`, `miniboss-themudlark`).
+                    other => MinibossKind::all()
+                        .into_iter()
+                        .find(|k| {
+                            let slug: String = k
+                                .name()
+                                .chars()
+                                .filter(|c| c.is_ascii_alphanumeric())
+                                .map(|c| c.to_ascii_lowercase())
+                                .collect();
+                            slug == other
+                        })
+                        .unwrap_or(MinibossKind::Corkscrew),
                 };
                 let w = hh.app.world.as_mut().unwrap();
                 w.elapsed = 186.0;

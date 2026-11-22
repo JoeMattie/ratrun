@@ -203,6 +203,14 @@ pub struct World {
     /// show cumulative numbers (`total_score`/`total_kills`/`total_time`).
     pub carried: CampaignTotals,
     pub cam: Vec2,
+    /// Render-only: the point the camera frames instead of the rat. `None`
+    /// (every run) follows the rat; the Library's card scenes frame their
+    /// subject. No system reads it.
+    pub cam_focus: Option<Vec2>,
+    /// Render-only: skip the lighting pass (the Library's card plates are
+    /// flat-lit, with the hostile layer self-lit as always). `false` in every
+    /// run.
+    pub flat_lit: bool,
     /// The **simulation's** logical viewport: the unzoomed screen size, set by
     /// the App on resize (and by a headless caller explicitly). Never written
     /// by drawing — `render_viewport` is the renderer's own copy — so a run that
@@ -346,6 +354,23 @@ impl World {
         // The level is generated from the level seed (same seed + theme = same
         // map, always). `Level::new` is the seed-0 convenience wrapper.
         let level = Level::generate(theme, seed);
+        World::with_level(level_index, level, seed, carried, carried_totals)
+    }
+
+    /// [`World::new_level_with_theme`] over a level the caller already built.
+    ///
+    /// The Library's card scenes (`render::library::scene`) run the real
+    /// schedule over a hand-built patch of floor instead of a generated map;
+    /// every run still goes through `new_level_with_theme`, which generates
+    /// its level and lands here.
+    pub fn with_level(
+        level_index: usize,
+        level: Level,
+        seed: u64,
+        carried: Loadout,
+        carried_totals: CampaignTotals,
+    ) -> World {
+        let theme = level.theme;
         let center = level.start;
         // Captured **before** `carried` is moved into the player below: the nest
         // grants the run's revives, minus what the earlier floors of the
@@ -462,6 +487,8 @@ impl World {
             level_complete: false,
             carried: carried_totals,
             cam: Vec2::ZERO,
+            cam_focus: None,
+            flat_lit: false,
             viewport: Vec2::new(160.0, 80.0),
             render_viewport: Vec2::new(160.0, 80.0),
             zoom: zoom::DEFAULT,
@@ -1960,7 +1987,7 @@ impl World {
         let arena = self.level.arena;
 
         // Camera follows the player, clamped to arena (centered if smaller).
-        let mut cam = self.player.pos - Vec2::new(vw * 0.5, vh * 0.5);
+        let mut cam = self.cam_focus.unwrap_or(self.player.pos) - Vec2::new(vw * 0.5, vh * 0.5);
         cam.x = if arena.x <= vw {
             (arena.x - vw) * 0.5
         } else {
@@ -2739,7 +2766,7 @@ impl World {
         if self.lighting == LightingMode::Off {
             return;
         }
-        if crate::prof::lighting_skipped() {
+        if self.flat_lit || crate::prof::lighting_skipped() {
             return;
         }
         let thrash = self.thrash_visual();

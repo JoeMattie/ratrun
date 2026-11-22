@@ -82,6 +82,8 @@ use crate::game::art_miniboss;
 use crate::game::art_props;
 use crate::game::art_traps::{self, MousetrapView, RatHoleView, StickyTrapView};
 
+pub mod scene;
+
 const VIAL: Color = Color::Rgb(196, 202, 214);
 const ROW_SEL_BG: Color = Color::Rgb(26, 32, 34);
 
