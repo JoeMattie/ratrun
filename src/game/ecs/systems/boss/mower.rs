@@ -30,13 +30,13 @@
 //!    `0.40 s` rebound pause) and end flipped. A clean run that touches nothing
 //!    vents (`Overheat`, 1.5× damage) instead.
 //! 5. Two HP thresholds (`0.66`, `0.33`) retreat to the dock (`Docking`) once
-//!    each, healing up to 12% unless the rat short-circuits the recharge.
+//!    each, healing up to 6% unless the rat short-circuits the recharge.
 //!
 //! ## State machine (art timings; phases at hp > 0.66 / 0.33..0.66 / ≤ 0.33)
 //!
 //! | state | duration | telegraph / active window | damage |
 //! |-------|----------|---------------------------|--------|
-//! | `Patrol` | 2.40 / 2.00 / 1.60 s | none | body contact 14 |
+//! | `Patrol` | 1.50 / 1.25 / 1.00 s | none | body contact 14 |
 //! | `Scan` | 1.35 / 1.10 / 0.90 s | lidar cone 72 px, ±0.42 rad, lock at 0.70 | 0 (sensor) |
 //! | `ChargeWindup` | 0.85 / 0.72 / 0.60 s | aim freezes at 0.45, ram queued there | body contact |
 //! | `Charge` | 0.55–0.95 s (≤135 px) | corridor 12.5 px half-width | 26 ram + 4 scorch |
@@ -79,8 +79,10 @@ use crate::game::ecs::systems::projectiles::{los_clear, wall_hit};
 
 /// Domestic-cruise speed per phase (art: 24 / 30 / 36 px/s).
 const PATROL_SPEED: [f32; 3] = [24.0, 30.0, 36.0];
-/// Cruise beat per phase (art: `1.6 s..2.4 s`, shorter later).
-const PATROL_DURATION: [f32; 3] = [2.40, 2.00, 1.60];
+/// Cruise beat per phase (art: `1.6 s..2.4 s`, shorter later). Batch seven
+/// cut it from 2.40 / 2.00 / 1.60: the patrol was 34 % of a measured fight,
+/// spent 105 px from the rat at a third of the damage the charge windows take.
+const PATROL_DURATION: [f32; 3] = [1.50, 1.25, 1.00];
 /// The mid-range band patrol holds the rat at (art: `45..85 px`).
 const PATROL_BAND: [f32; 2] = [45.0, 85.0];
 
@@ -170,9 +172,10 @@ const DOCK_DURATION: f32 = 4.00;
 const DOCK_SPEED: f32 = 48.0;
 /// How close the prongs have to be before the induction channel starts.
 const DOCK_ARRIVE: f32 = 6.0;
-/// Recharge (art: `4%` max HP per second, `12%` total).
+/// Recharge (art: `4%` max HP per second, `12%` total; batch seven halved the
+/// total: two docks handed back a quarter of the pool).
 const DOCK_HEAL_PER_S: f32 = 0.04;
-const DOCK_HEAL_MAX: f32 = 0.12;
+const DOCK_HEAL_MAX: f32 = 0.06;
 /// Damage *dealt during the channel* that short-circuits the recharge, as a
 /// fraction of the pool.
 ///

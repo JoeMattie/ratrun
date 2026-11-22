@@ -1079,8 +1079,9 @@ mod tests {
             expected
         );
         assert!(
-            // 20,400 after the batch-six `hp_scale` retune (2.0 -> 0.85).
-            boss.max_hp > 15_000.0,
+            // 14,880 after the batch-seven `hp_scale` retune (0.85 -> 0.62,
+            // measured: a 53 s median fight for the Skilled bot).
+            boss.max_hp > 12_000.0,
             "the final floor's fight must be a real pool, got {:.0}",
             boss.max_hp
         );

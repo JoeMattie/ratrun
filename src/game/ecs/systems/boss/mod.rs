@@ -385,17 +385,42 @@ impl BossKind {
     /// level-1 clear rate is Cat-limited and the pool was not the problem there.
     /// Medians land at 57 / 72 / 80 s (see the batch4 report) with the floor at
     /// ~26 s.
+    ///
+    /// **Batch seven, measured** (`--bot-batch 96 --cycle-skills`, the two
+    /// side routes with `--route`, the Flatbed with `--practice --level 4`;
+    /// fight length is boss-alive seconds, walk to the arena included). The
+    /// numbers the comments on the arms below call "blind" are superseded by
+    /// this table:
+    ///
+    /// | boss | scale | pool | Skilled median | fastest Skilled |
+    /// |---|---:|---:|---:|---:|
+    /// | Cat | 1.4 | 24,640 | 80 s | 25 s |
+    /// | Horseshoe | 0.70 → 1.65 | 26,400 | 58 s (was 23) | 42 s |
+    /// | Broom | 1.95 → 0.7 | 8,960 | 79 s (was 136) | 30 s |
+    /// | MegaRat | 1.7 → 1.5 | 19,200 | 57 s (was 78) | 25 s |
+    /// | Mangle | 1.1 → 1.55 | 19,840 | 67 s (was 51) | 26 s |
+    /// | Mower | 1.8 → 1.0 | 12,800 | 66 s (was 132) | 27 s |
+    /// | Cobra | 0.35 → 1.0 | 14,400 | 64 s (was 22) | 25 s |
+    /// | Night Edition | 0.85 → 0.62 | 14,880 | 59 s (was 84) | 32 s |
+    /// | Magpie | 0.85 → 1.45 | 18,560 | 50 s (was 39) | 47 s |
+    /// | Hawk | 0.4 → 0.8 | 10,240 | 75 s (was 27) | 62 s |
+    ///
+    /// The Broom's and the Mower's pools are small because the rat lands
+    /// little on them (one planted slipper at a time; a patrol that holds
+    /// 45-85 px and a charge that carries it away): about 150-200 dps against
+    /// 370-470 into the Cat or R-01. The Mower also lost a third of its patrol
+    /// beat and half its dock heal (`mower.rs`).
     #[inline]
     pub fn hp_scale(self) -> f32 {
         match self {
             BossKind::Cat => 1.4,
-            BossKind::Broom => 1.95,
+            BossKind::Broom => 0.7,
             // Batch-6: 2.0 -> 1.8. The dock's recharge can no longer be
             // cancelled by a single hit (`mower::DOCK_INTERRUPT_FRAC`), so a
             // phase change now really hands back a few percent of the pool;
             // the 10 % cut keeps the measured ~80 s median where it was.
             // Blind, not re-measured.
-            BossKind::Mower => 1.8,
+            BossKind::Mower => 1.0,
             // The Laundry is a stage-two floor. Measured with the same
             // near-complete bot build that fights the Sweeper and the Mower,
             // the Mangle at 1.95 died in 19 s against their 33 s / 26 s: its
@@ -407,7 +432,7 @@ impl BossKind {
             // 232 dps actually landed — far below the build the old number
             // was tuned against. Scaled linearly to a ~60 s fight; the next
             // batch run owns the final number.
-            BossKind::Mangle => 1.1,
+            BossKind::Mangle => 1.55,
             // `WAVE3_DESIGN.md` §12 states the Night Edition's pool as the
             // *final encounter* number (3,000), so the art constant is that
             // whole design pool and this is the same 2.0 the other stage-3
@@ -424,7 +449,7 @@ impl BossKind {
             // campaign bot lands ~320 dps into the other stage-3 fight (the
             // Mower: 25,600 hp, ~80 s median), where 2.0 would be a ~150 s
             // press. 0.85 is ~20,400 hp, about 64 s at that rate.
-            BossKind::NightEdition => 0.85,
+            BossKind::NightEdition => 0.62,
             // Measured with `magpie::tests::a_bot_kills_the_magpie_on_the_real_deck`
             // (the same method the campaign bosses were tuned with, applied to
             // the flatbed: the Expert bot with a carried build, spawn to death
@@ -439,7 +464,7 @@ impl BossKind {
             // 173 dps actually landed — far below the build the old number
             // was tuned against. Scaled linearly to a ~60 s fight; the next
             // batch run owns the final number.
-            BossKind::Magpie => 0.85,
+            BossKind::Magpie => 1.45,
             // The Sewer pool mate, and the only boss whose *pool* is smaller
             // than its art's: the dome sheds ~45 % of the rat's fire on any
             // run that does not flank it, so the raw number already buys a
@@ -450,7 +475,7 @@ impl BossKind {
             // the fight ran 127.5 s mean (the bot orbits into the dome and
             // loses half its damage); `0.70` lands it in the 45-80 s band at
             // ~64 s. A balance pass owns the final number.
-            BossKind::HorseshoeCrab => 0.70,
+            BossKind::HorseshoeCrab => 1.65,
             // SUBJECT R-01 is the Kitchen's *second* fight and the mirror
             // fight: every rotation spends a third of its time in a punish
             // window (a ×1.35 belly, a ×1.25 tail base) and it calls three
@@ -467,7 +492,7 @@ impl BossKind {
             // 24,960 hp, ~72 s median); at 2.6 this pool is 33,280 hp, a
             // ~96 s fight before the called rats take their share. 1.7 is
             // 21,760 hp, about 62 s at that rate.
-            BossKind::MegaRat => 1.7,
+            BossKind::MegaRat => 1.5,
             // The flatbed's second bird, expressed like the first: art pool ×
             // scale × the framework's ×8. **Assumed, not measured** (the wave-3
             // rule is no bot batches for content workers): a near-complete
@@ -484,7 +509,7 @@ impl BossKind {
             // bird, not the ~1.1 k assumed above; at the hawk's ~45 % uptime
             // that is ~78 dps, and 2.6 would be a seven-minute fight. 0.4 is
             // 5,120 hp, about 65 s at that rate.
-            BossKind::Hawk => 0.4,
+            BossKind::Hawk => 0.8,
             // The Lab's *second* fight, and the one that spends the most of
             // every rotation in a punish window: `FangsStuck` is a x1.5 window
             // after every strike (twice per rotation from phase 2) and
@@ -507,7 +532,7 @@ impl BossKind {
             // 79 dps actually landed — far below the build the old number
             // was tuned against. Scaled linearly to a ~60 s fight; the next
             // batch run owns the final number.
-            BossKind::Cobra => 0.35,
+            BossKind::Cobra => 1.0,
         }
     }
 
