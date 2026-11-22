@@ -11968,8 +11968,8 @@ mod tests {
         }
     }
 
-    /// The wedge tip is the lower half of the mouse cell: `▄` in cheese yellow
-    /// over text, or the background of an existing `▀` playfield cell.
+    /// The wedge tip is the upper half of the mouse cell: a `▀` whose
+    /// foreground is cheese yellow, over text and playfield cells alike.
     fn is_cheese_tip(cell: &ratatui::buffer::Cell) -> bool {
         match cell.symbol() {
             // The tip is the upper pixel of its cell.
