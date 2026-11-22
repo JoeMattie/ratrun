@@ -715,11 +715,11 @@ pub fn apply(stats: &mut Stats, mods: &RunModifiers) {
 // ============================================================================
 
 /// Banked for every campaign floor the run cleared.
-pub const FLOOR_BONUS: u32 = 75;
+pub const FLOOR_BONUS: u32 = 25;
 /// Banked for every boss or named miniboss the run put down.
-pub const APEX_BONUS: u32 = 15;
+pub const APEX_BONUS: u32 = 6;
 /// Banked for winning the run (the campaign cleared, or a practice floor).
-pub const WIN_BONUS: u32 = 225;
+pub const WIN_BONUS: u32 = 75;
 /// A practice run banks at half rate: it is repeatable on any unlocked floor
 /// and its boss is the only stake.
 pub const PRACTICE_DIVISOR: u32 = 2;
@@ -1337,7 +1337,7 @@ mod tests {
         // `summary_into` writes the same text into a caller's buffer.
         let mut buf = String::from("stale");
         maxed.summary_into(&mut buf);
-        assert_eq!(buf, summary);
+        assert_eq!(buf, maxed.summary());
     }
 
     // ---- banking ---------------------------------------------------------
