@@ -2109,15 +2109,6 @@ impl World {
     /// The last pass of the frame: [`crate::render::ink::draw`] with the view
     /// this draw used. Render-only; no rng, no simulation state.
     fn draw_ink(&mut self, pb: &mut PixelBuffer) {
-        // The ink pass re-stamps the rat's minimum-size core and its dash arc,
-        // both read from `player.pos`. A plate with no rat (`World::hide_rat`)
-        // must not show them either, so park the rat off the map for the length
-        // of the pass and put it straight back. Render-only: nothing ticks
-        // here, and the value is restored before this returns.
-        let rat = self.player.pos;
-        if self.hide_rat {
-            self.player.pos = Vec2::new(-4096.0, -4096.0);
-        }
         let mut view = crate::render::ink::InkView {
             ecs: &mut self.ecs,
             level: &self.level,
@@ -2126,9 +2117,11 @@ impl World {
             scale: self.zoom_scale,
             size: (pb.w as i32, pb.h as i32),
             elapsed: self.elapsed,
+            // A plate with no rat (`World::hide_rat`) must not show the ink
+            // pass's rat core or dash arc either.
+            hide_rat: self.hide_rat,
         };
         crate::render::ink::draw(pb, &mut view);
-        self.player.pos = rat;
     }
 
     /// Ease the rendered zoom toward the setting (about

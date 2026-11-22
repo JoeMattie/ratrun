@@ -924,6 +924,7 @@ mod tests {
                 scale,
                 size: (160, 148),
                 elapsed: 0.4,
+                hide_rat: false,
             };
             ink_draw(&mut pb, &mut view);
             

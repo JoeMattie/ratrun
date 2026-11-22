@@ -165,7 +165,7 @@ fn on_plate(scene: &LibraryScene, p: Vec2) -> bool {
 
 /// Does the plate hold this exact colour?
 fn has_colour(pb: &PixelBuffer, c: Rgb) -> bool {
-    pb.pixels().iter().any(|p| *p == c)
+    pb.pixels().contains(&c)
 }
 
 /// The ink pass's rat core, and only the ink pass's rat core: two exact
@@ -190,6 +190,15 @@ fn bestiary_plates_show_no_rat() {
         let mut art = PixelBuffer::new(44, 30);
         plate(&mut scene, &mut art);
         assert!(!has_rat_ink(&art), "{key:?} drew the ink pass's rat mark");
+        // The comparison is made without the card's dummy: at a shooter's zoom
+        // the cork covers the whole rat, and the proof is about the world pass.
+        // (Half a second in, so the camera has eased onto the plate's lane.)
+        for _ in 0..30 {
+            scene.step();
+        }
+        let dummy = scene.script.dummy;
+        scene.script.dummy = false;
+        plate(&mut scene, &mut art);
         let hidden = art.pixels().to_vec();
         scene.world.hide_rat = false;
         plate(&mut scene, &mut art);
@@ -198,6 +207,7 @@ fn bestiary_plates_show_no_rat() {
             "{key:?}: hide_rat changes nothing, so the plate is not the proof"
         );
         scene.world.hide_rat = true;
+        scene.script.dummy = dummy;
         for _ in 0..20 {
             plate(&mut scene, &mut art);
             assert!(!has_rat_ink(&art), "{key:?} drew the ink pass's rat mark");

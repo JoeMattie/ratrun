@@ -78,6 +78,9 @@ pub struct InkView<'a> {
     /// The screen buffer's size in pixels.
     pub size: (i32, i32),
     pub elapsed: f32,
+    /// A card plate with no rat (`World::hide_rat`): skip the rat's core and
+    /// its dash arc. Always `false` in a run.
+    pub hide_rat: bool,
 }
 
 /// Draw the ink pass into `pb` (the **screen** buffer, after the resample).
@@ -360,7 +363,7 @@ fn draw_hostile(pb: &mut PixelBuffer, v: &mut InkView, unit: f32) {
     // 8. The rat itself, and the dash arc that tells you whether you can
     //    escape: both keep a minimum screen size so "where am I" and "can I
     //    dash" survive a 2×2 box filter.
-    {
+    if !v.hide_rat {
         let s = screen(v.player.pos, v.cam, v.scale);
         if on(s, 2) {
             // The rat's own sprite is pale: a bright core keeps "where am I"
@@ -706,6 +709,7 @@ mod tests {
             scale,
             size: (SIZE.0 as i32, SIZE.1 as i32),
             elapsed: 1.0,
+            hide_rat: false,
         };
         draw(&mut pb, &mut view);
         pb
@@ -892,6 +896,7 @@ mod tests {
                 scale: Vec2::new(z, z),
                 size: (SIZE.0 as i32, SIZE.1 as i32),
                 elapsed: 1.0,
+                hide_rat: false,
             };
             outline_shape(&mut pb, &view, &shape, z);
             let o = ((origin.x / z).round() as i32, (origin.y / z).round() as i32);
@@ -981,6 +986,7 @@ mod tests {
                 scale: Vec2::new(2.0, 2.0),
                 size: (120, 74),
                 elapsed: 1.0,
+                hide_rat: false,
             };
             draw(&mut pb, &mut view);
         }

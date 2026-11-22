@@ -68,6 +68,7 @@ use bevy_ecs::entity::Entity;
 
 use crate::game::art_traps::{MazeRewardView, MousetrapView, RatHoleView, StickyTrapView};
 use crate::game::art_walls::{Cardinal, WallAxis, WallKind};
+use crate::game::bullet::{Bullet, Faction};
 use crate::game::campaign::CampaignTotals;
 use crate::game::collision::{SizeClass, TileKind, TileMap};
 use crate::game::ecs::resources::{spawn_with_id, DashHold};
@@ -118,7 +119,8 @@ const DUMMY_R: f32 = 6.0;
 /// a plate; the card therefore stages its own: the body is held on a slow arc
 /// at this distance, so the whole flight, the muzzle and the dummy share one
 /// frame (and the scene's own strafe is the movement the card is about).
-const SHOT_LANE: f32 = 68.0;
+/// 58 px leaves both ends a body's width inside the 77 px plate.
+const SHOT_LANE: f32 = 58.0;
 
 /// How an entry's card moves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -288,7 +290,9 @@ impl LibraryScene {
             acc: 0.0,
             held: false,
             focus: Vec2::ZERO,
-            view: Vec2::new(66.0, 45.0),
+            // The card's art plate is 44 × 30 until the first draw says
+            // otherwise, so the opening frame is already framed for the lane.
+            view: Vec2::new(44.0, 30.0) * (script.shrink.max(1) as f32 * script.zoom),
             pending: 1,
             big: PixelBuffer::new(1, 1),
         };
@@ -668,8 +672,12 @@ type Staged = (World, Script, Option<Entity>);
 fn stage(key: Key) -> Option<Staged> {
     let theme = library::theme_of(key);
     match key {
-        Key::Enemy(kind) => Some(stage_enemy(theme, kind, false)),
-        Key::Miniboss(kind) => Some(stage_miniboss(theme, kind)),
+        // A body is staged on the floor that fields it: the roster slot (which
+        // picks the family) and the per-floor behaviour systems (each a no-op
+        // off its own floor) are both keyed on that floor, not on the card's
+        // index theme.
+        Key::Enemy(kind) => Some(stage_enemy(home_floor(kind), kind, false)),
+        Key::Miniboss(kind) => Some(stage_miniboss(miniboss_floor(kind), kind)),
         Key::Boss(kind) => Some(stage_boss(theme, kind)),
         Key::Weapon(kind) => Some(stage_weapon(theme, kind, false)),
         Key::Evolution(kind) => Some(stage_weapon(theme, kind, true)),
@@ -685,6 +693,23 @@ fn stage(key: Key) -> Option<Staged> {
 }
 
 // ---- Bestiary: the six families -------------------------------------------
+
+/// The floor whose roster fields `kind` (no kind is on two floors). A kind on
+/// no floor (the legacy boss body, which has no scene) answers the Sewer.
+fn home_floor(kind: EnemyKind) -> Theme {
+    Theme::playable()
+        .into_iter()
+        .find(|t| roster::floor(*t).slot_of(kind).is_some())
+        .unwrap_or(Theme::Sewer)
+}
+
+/// The floor whose appointments name `kind`.
+fn miniboss_floor(kind: MinibossKind) -> Theme {
+    Theme::playable()
+        .into_iter()
+        .find(|t| roster::appointments(*t).contains(&kind))
+        .unwrap_or(Theme::Sewer)
+}
 
 /// A bestiary plate, staged by the body's roster slot on its own floor: what
 /// the kind *is* decides what the card shows.
@@ -838,7 +863,13 @@ fn stage_chaser(theme: Theme, kind: EnemyKind) -> Staged {
         body.hp = 6000.0;
         body.max_hp = 6000.0;
     }
-    let mut script = Script::new(LAP_LOOP, 1.25);
+    // A pipe lap is wide (the eel swings out at half its turning rate), so its
+    // plate shows more floor than the rat-hole's.
+    let zoom = match lap {
+        Lap::Pipe => 1.75,
+        Lap::Hole => 1.25,
+    };
+    let mut script = Script::new(LAP_LOOP, zoom);
     script.framing = Framing::Point(centre);
     let cue: fn(&mut World, Option<Entity>, u32) = match lap {
         Lap::Pipe => pipe_lap_cue,
@@ -905,6 +936,18 @@ fn shooter_strafe(world: &mut World, subject: Option<Entity>, tick: u32) {
     let at = aim + Vec2::from_angle(a) * SHOT_LANE;
     if let Some(mut body) = world.ecs.get_mut::<Enemy>(e) {
         body.pos = at;
+    }
+    // The hidden rat is invulnerable, so a pellet would fly on through it and
+    // off the plate. The shot ends at the dummy: that is the card's "it lands".
+    let mut spent = Vec::new();
+    let mut shots = world.ecs.query::<(Entity, &Bullet)>();
+    for (shot, b) in shots.iter(&world.ecs) {
+        if b.faction == Faction::Enemy && (b.pos.dist(aim) <= DUMMY_R || b.pos.x > aim.x) {
+            spent.push(shot);
+        }
+    }
+    for shot in spent {
+        world.ecs.despawn(shot);
     }
 }
 
@@ -999,6 +1042,12 @@ fn stage_weapon(theme: Theme, kind: WeaponKind, evolved: bool) -> Staged {
     // The rat faces its dummies (a Laser Eyes card fires down `face`, and an
     // idle rat never turns on its own).
     world.player.face = Vec2::new(1.0, 0.0);
+    if kind == WeaponKind::LaserEyes {
+        // The burst is a fan of thin beams either side of the facing, and at
+        // most levels none of them runs dead ahead: turn the rat so the fan's
+        // first beam crosses the target in front of it.
+        world.player.face = Vec2::from_angle(crate::game::weapon::LASER_SWEEP_HALF);
+    }
     let mut script = Script::new(5.0, 1.5);
     script.framing = Framing::Rat;
     // Standing targets, not a chase: the arsenal plate is about what the
