@@ -87,7 +87,7 @@ dark.*
 - **Three more floors**: the Laundry and the Printworks as side routes with
   their own hazards and bosses, and the Flatbed, a practice ride with pits,
   sliding cargo and a slipstream.
-- **Hold-to-charge Super Dash**, twelve chest evolutions, the gene-splice shop
+- **Hold-to-charge Super Dash**, thirteen chest evolutions, the gene-splice shop
   behind the mouse holes, and the Nest's fifteen permanent tracks.
 - **Remappable controls** for keyboard, mouse and gamepad (26 actions, three
   schemes), and a four-tab Library that fills in as you meet things.
@@ -107,7 +107,7 @@ dark.*
   3:00, 6:00, 9:00 and 12:00 (each leaves a chest), then **the floor's boss** at
   15:00. Ten bosses across the six floors; a floor draws its boss from its own
   pool.
-- **13 weapons**, **12 passives**, and **12 evolutions** — a maxed weapon plus
+- **13 weapons**, **12 passives**, and **13 evolutions** — a maxed weapon plus
   the right passive evolves into something else entirely when you open a chest.
 - **Gold, and two places to spend it.** Mouse holes in the walls hide a
   gene-splice shelf: two splice sockets, plus a heal, a reroll and a Molt
