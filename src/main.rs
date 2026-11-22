@@ -12,6 +12,7 @@ mod controls;
 mod gamepad;
 mod input;
 mod lore;
+mod meta;
 mod math;
 mod render;
 mod scores;

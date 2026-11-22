@@ -1032,6 +1032,120 @@ pub fn by_name(name: &str) -> &'static Icon {
 }
 
 // ============================================================================
+// The nest (permanent upgrade tracks)
+// ============================================================================
+
+/// `Track::WeaponSlots` / `Track::PassiveSlots` — three rack slots on a rail
+/// with one lit gold bay, i.e. "room for one more".
+const SLOT_RACK: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'W', (238, 244, 246)), // lit slot edge
+        (b'S', (128, 152, 160)), // cold steel bay
+        (b'L', (86, 104, 112)),  // shaded rail
+        (b'G', (248, 206, 96)),  // the open bay's gold glint
+        (b'D', (30, 40, 46)),    // dark rim
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"........",
+                b"DSWSDSSD",
+                b"DSWSDSSD",
+                b"DSWSDGSD",
+                b"DSWSDGSD",
+                b"DSWSDSSD",
+                b"LSSSSSSL",
+                b".DDDDDD.",
+            ],
+            PAL,
+        ),
+        small: grid4([b"SWGD", b"SWGD", b"SWGD", b"LDDD"], PAL),
+        accent: (176, 198, 204),
+    }
+};
+
+/// `Track::Revive` — a heart with a white cross: get up once more.
+const REVIVE: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'W', (255, 248, 250)), // the cross
+        (b'H', (246, 76, 98)),   // heart body
+        (b'R', (176, 32, 54)),   // shaded heart
+        (b'D', (104, 16, 30)),   // deep maroon
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"........",
+                b".HHWWHH.",
+                b"HHHWWHHR",
+                b"HHWWWWHR",
+                b".HHWWHHR",
+                b"..HHHRR.",
+                b"...RD...",
+                b"........",
+            ],
+            PAL,
+        ),
+        small: grid4([b".W..", b"HWHH", b".HH.", b"..D."], PAL),
+        accent: (222, 120, 132),
+    }
+};
+
+/// `Track::CarryOver` — a satchel with a gold buckle: the pack that carries
+/// more powerups to the next floor.
+const PACK: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'L', (150, 128, 96)),  // leather strap and rim
+        (b'S', (110, 88, 62)),   // satchel body
+        (b'G', (248, 206, 96)),  // gold buckle
+        (b'D', (54, 42, 30)),    // dark seam
+    ];
+    Icon {
+        large: grid8(
+            [
+                b"..LLLL..",
+                b".L....L.",
+                b"LLLLLLLL",
+                b"LSSSSSSL",
+                b"LSGGGGSL",
+                b"LSSSSSSL",
+                b"LSSSSSSL",
+                b".DDDDDD.",
+            ],
+            PAL,
+        ),
+        small: grid4([b".LL.", b"LSSL", b"LGGD", b"LDDD"], PAL),
+        accent: (196, 168, 120),
+    }
+};
+
+/// Look up the icon for a nest track.
+///
+/// The stat tracks borrow the authored passive icon of the stat they sell (the
+/// same icon the level-up card prints, so the nest reads as the same currency);
+/// the tracks with no in-run twin get their own authored sprite above.
+pub fn meta(track: crate::meta::Track) -> &'static Icon {
+    use crate::meta::Track;
+    match track {
+        Track::WeaponSlots => &SLOT_RACK,
+        Track::PassiveSlots => &SLOT_RACK,
+        Track::MoveSpeed => &MOVE_SPEED,
+        Track::PickupRange => &MAGNET,
+        Track::FireRate => &FIRE_RATE,
+        Track::MaxHp => &MAX_HP,
+        Track::Regen => &REGEN,
+        Track::Armor => &ARMOR,
+        Track::Damage => &DAMAGE,
+        Track::DashCooldown => &DASH_COOLDOWN,
+        Track::XpGain => &SECOND_SCENT,
+        Track::GoldGain => &GOLD_COIN,
+        Track::Luck => &CHEST,
+        Track::CarryOver => &PACK,
+        Track::Revive => &REVIVE,
+    }
+}
+
+// ============================================================================
 // Compositing Renderer (Zero Allocation)
 // ============================================================================
 

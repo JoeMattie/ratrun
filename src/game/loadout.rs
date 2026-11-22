@@ -394,6 +394,14 @@ pub struct Stats {
     pub shove_px: f32,
     /// Second Scent: multiplier for collected gem XP (fractions are banked).
     pub xp_mult: f32,
+    /// The nest: multiplier for every coin's value (`meta::Track::GoldGain`).
+    /// Read by `loot::treasure_system` on top of the gene splices' own coin
+    /// multiplier; 1.0 (no profile) passes every value through unchanged.
+    pub gold_mult: f32,
+    /// The nest: multiplier for the rare-pickup drop chance
+    /// (`meta::Track::Luck`). Read by `loot::reap_enemies_system`; it scales the
+    /// **chance** the existing roll is compared against, so it adds no rng draw.
+    pub luck_mult: f32,
 }
 
 impl Default for Stats {
@@ -414,6 +422,8 @@ impl Default for Stats {
             shove_mult: 1.0,
             shove_px: 0.0,
             xp_mult: 1.0,
+            gold_mult: 1.0,
+            luck_mult: 1.0,
         }
     }
 }
@@ -582,6 +592,16 @@ pub struct Loadout {
     /// (`campaign::next_loadout`), which is what makes them last until the run
     /// ends. [`Loadout::rebuild_stats`] applies them **after** the passives.
     pub splices: Vec<super::shop::SpliceKind>,
+    /// The profile's **permanent** upgrades, compiled at run start
+    /// ([`crate::meta::RunModifiers`]).
+    ///
+    /// [`Loadout::rebuild_stats`] applies them **first** — base stats → nest →
+    /// passive stacks → gene splices — so a from-scratch rebuild always equals
+    /// the live numbers. They ride along between campaign floors
+    /// (`campaign::next_loadout`) and the App builds them from the saved profile
+    /// once per run; tests, the bot batch and the determinism harness use
+    /// [`crate::meta::RunModifiers::NONE`], which is bit-exact neutral.
+    pub meta: crate::meta::RunModifiers,
 }
 
 /// `Weapon` lives in `game::weapon` and does not derive `Debug`; this prints
@@ -619,13 +639,35 @@ impl Loadout {
     /// A loadout with explicit rack caps (the profile's slot upgrades). The caps
     /// are clamped to [`MIN_SLOTS`]`..=`[`MAX_SLOTS`].
     pub fn with_caps(start: WeaponKind, caps: SlotCaps) -> Self {
+        let caps = SlotCaps::new(caps.weapons, caps.passives);
         Loadout {
             weapons: vec![Weapon::new(start)],
             passives: Vec::new(),
             stats: Stats::default(),
-            caps: SlotCaps::new(caps.weapons, caps.passives),
+            caps,
             splices: Vec::new(),
+            // No profile, but the caps in force ride on the modifiers too, so
+            // `meta.caps` always names the rack this loadout is held to.
+            meta: crate::meta::RunModifiers::with_caps(caps),
         }
+    }
+
+    /// A loadout on `mods`' racks with the profile's permanent bonuses already
+    /// folded in (the App's run start): `caps` come from the slot tracks and
+    /// `stats` are rebuilt so the first frame of the level already carries them.
+    pub fn with_modifiers(start: WeaponKind, mods: crate::meta::RunModifiers) -> Self {
+        let mut loadout = Loadout::with_caps(start, mods.caps);
+        loadout.meta = mods;
+        loadout.rebuild_stats();
+        loadout
+    }
+
+    /// Replace the permanent upgrades (a carried loadout keeps its floor's) and
+    /// rebuild. Ownership is untouched: the rack caps never strip a slot.
+    pub fn set_meta(&mut self, mods: crate::meta::RunModifiers) {
+        self.meta = mods;
+        self.caps = SlotCaps::new(mods.caps.weapons, mods.caps.passives);
+        self.rebuild_stats();
     }
 
     /// The default level-1 loadout ([`Loadout::START_WEAPON`], no passives) on a
@@ -710,17 +752,22 @@ impl Loadout {
             stats,
             caps,
             splices: Vec::new(),
+            meta: crate::meta::RunModifiers::with_caps(caps),
         }
     }
 
-    /// Rebuild [`Self::stats`] from scratch: every passive stack in acquisition
-    /// order, then every owned gene splice on top (the design's "apply splice
-    /// multipliers after passive stats"), with the shop's floors.
+    /// Rebuild [`Self::stats`] from scratch: the base numbers, then the
+    /// profile's permanent upgrades ([`Self::meta`]), then every passive stack in
+    /// acquisition order, then every owned gene splice on top (the design's
+    /// "apply splice multipliers after passive stats"), with the shop's floors.
     ///
-    /// This is the single place a splice (or a Molt) changes the numbers, so a
-    /// carried loadout, a purchased splice and a level-up can never disagree.
+    /// This is the single place a splice, a Molt or a permanent upgrade changes
+    /// the numbers, so a carried loadout, a purchased splice, a level-up and a
+    /// run start can never disagree. With no profile (`meta` neutral) the new
+    /// first step is bit-exact identity, so every existing number is unchanged.
     pub fn rebuild_stats(&mut self) {
         let mut stats = Stats::default();
+        crate::meta::apply(&mut stats, &self.meta);
         for &(kind, stacks) in &self.passives {
             for _ in 0..stacks {
                 apply_passive_stack(&mut stats, kind);
@@ -1815,6 +1862,102 @@ mod tests {
         assert_eq!(copy.stats.magnet, lo.stats.magnet);
         assert_eq!(copy.stats.regen, lo.stats.regen);
         assert_eq!(copy.stats.armor, lo.stats.armor);
+    }
+
+    /// The nest composes **under** the passives and the splices
+    /// (`base -> permanent -> passive stacks -> gene splices`), and a
+    /// from-scratch rebuild always lands on the live numbers — the property that
+    /// makes a carried loadout, a bought splice and a run start agree.
+    #[test]
+    fn permanent_upgrades_compose_before_passives_and_splices() {
+        let mods = crate::meta::RunModifiers::from_profile(&crate::meta::MetaProfile::maxed());
+
+        // Base -> nest only.
+        let mut lo = Loadout::with_modifiers(WeaponKind::Gnaw, mods);
+        assert_eq!(lo.caps, SlotCaps::FULL, "the slot tracks are the racks");
+        assert_eq!(lo.meta, mods);
+        let nest_only = lo.stats;
+        assert_eq!(nest_only.max_hp, 130.0 + 48.0);
+        assert_eq!(nest_only.armor, 2.0);
+        assert_eq!(nest_only.damage_mult, 1.0 + 0.025 * 6.0);
+
+        // The nest is the **first** step: two Fat Reserves stacks add their own
+        // 40 HP on top of the nest's +48, and Thick Hide adds its armour.
+        lo.apply(&Upgrade::Passive(PassiveKind::MaxHp));
+        lo.apply(&Upgrade::Passive(PassiveKind::MaxHp));
+        lo.apply(&Upgrade::Passive(PassiveKind::Damage));
+        lo.apply(&Upgrade::Passive(PassiveKind::Armor));
+        assert_eq!(lo.stats.max_hp, nest_only.max_hp + 40.0);
+        assert_eq!(lo.stats.armor, nest_only.armor + 1.0);
+        assert!(
+            lo.stats.damage_mult > nest_only.damage_mult,
+            "a passive stack multiplies on top of the nest's bonus"
+        );
+
+        // A gene splice goes on top of both.
+        let before_splice = lo.stats;
+        lo.splices.push(crate::game::shop::SpliceKind::GlassIncisors);
+        lo.rebuild_stats();
+        let live = lo.stats;
+        assert!(
+            live.damage_mult > before_splice.damage_mult,
+            "the splice multiplies last"
+        );
+
+        // A from-scratch replay of the same parts (the campaign carry-over path)
+        // reproduces every number.
+        let mut copy = Loadout::from_parts(lo.weapons.clone(), lo.passives.clone());
+        copy.splices = lo.splices.clone();
+        copy.set_meta(mods);
+        assert_eq!(copy.stats.max_hp, live.max_hp);
+        assert_eq!(copy.stats.move_speed, live.move_speed);
+        assert_eq!(copy.stats.magnet, live.magnet);
+        assert_eq!(copy.stats.damage_mult, live.damage_mult);
+        assert_eq!(copy.stats.fire_rate_mult, live.fire_rate_mult);
+        assert_eq!(copy.stats.regen, live.regen);
+        assert_eq!(copy.stats.armor, live.armor);
+        assert_eq!(copy.stats.dash_cd, live.dash_cd);
+        assert_eq!(copy.stats.xp_mult, live.xp_mult);
+        assert_eq!(copy.stats.gold_mult, live.gold_mult);
+        assert_eq!(copy.stats.luck_mult, live.luck_mult);
+        assert_eq!(copy.caps, lo.caps);
+
+        // Buying nothing composes to exactly the base stats, and dropping the
+        // nest back to neutral removes exactly its contribution.
+        let plain = Loadout::with_modifiers(WeaponKind::Gnaw, crate::meta::RunModifiers::NONE);
+        let base = Stats::default();
+        assert_eq!(plain.stats.max_hp, base.max_hp);
+        assert_eq!(plain.stats.move_speed, base.move_speed);
+        assert_eq!(plain.stats.damage_mult, base.damage_mult);
+        assert_eq!(plain.stats.magnet, base.magnet);
+        assert_eq!(plain.stats.regen, base.regen);
+        assert_eq!(plain.stats.armor, base.armor);
+        assert_eq!(plain.stats.dash_cd, base.dash_cd);
+        assert_eq!(plain.stats.gold_mult, 1.0);
+        assert_eq!(plain.stats.luck_mult, 1.0);
+        assert_eq!((plain.max_weapons(), plain.max_passives()), (MIN_SLOTS, MIN_SLOTS));
+    }
+
+    /// The slot tracks drive the level-up offers: a maxed nest is offered
+    /// seventh and eighth kinds, a fresh profile never is.
+    #[test]
+    fn permanent_slot_upgrades_drive_the_offers() {
+        let full = crate::meta::RunModifiers::from_profile(&crate::meta::MetaProfile::maxed());
+        let mut lo = Loadout::with_modifiers(WeaponKind::Gnaw, full);
+        assert_eq!((lo.max_weapons(), lo.max_passives()), (MAX_SLOTS, MAX_SLOTS));
+        for kind in WeaponKind::all().into_iter().skip(1).take(MAX_SLOTS - 1) {
+            lo.apply(&Upgrade::NewWeapon(kind));
+        }
+        for kind in PassiveKind::all().into_iter().take(MAX_SLOTS) {
+            lo.apply(&Upgrade::Passive(kind));
+        }
+        assert_eq!(lo.weapons.len(), MAX_SLOTS);
+        assert_eq!(lo.passives.len(), MAX_SLOTS);
+
+        // The same profile at half the slot tracks holds six of each.
+        let mid = crate::meta::RunModifiers::from_profile(&crate::meta::MetaProfile::mid());
+        let mid_lo = Loadout::with_modifiers(WeaponKind::Gnaw, mid);
+        assert_eq!((mid_lo.max_weapons(), mid_lo.max_passives()), (6, 6));
     }
 
     /// The rack caps are **data**: a fresh profile plays 4 + 4, the persistent

@@ -33,9 +33,12 @@ pub const SCHEME_ROW: usize = 7;
 pub const CONTROLS_ROW: usize = 8;
 pub const DEADZONE_ROW: usize = 9;
 pub const RUMBLE_ROW: usize = 10;
-pub const BACK_ROW: usize = 11;
+/// Wipe the nest (`crate::meta`): the bank and every permanent upgrade. It
+/// takes two presses (the row reads `WIPE`, then `CONFIRM?`).
+pub const RESET_ROW: usize = 11;
+pub const BACK_ROW: usize = 12;
 /// How many rows the screen has.
-pub const ROW_COUNT: usize = 12;
+pub const ROW_COUNT: usize = 13;
 
 /// Slider identity used by [`Target::OptionsBar`]: the value the track edits.
 pub const MUSIC_BAR: usize = 0;
@@ -65,6 +68,8 @@ pub enum Row {
     Deadzone,
     Rumble,
     AutoPick,
+    /// The nest's reset (appended last: the legacy rows keep their order).
+    Reset,
 }
 
 /// The screen's rows in order; index with the constants above.
@@ -81,6 +86,7 @@ pub const ROWS: [Row; ROW_COUNT] = [
     Row::Deadzone,
     Row::Rumble,
     Row::Back,
+    Row::Reset,
 ];
 
 impl Row {
@@ -99,6 +105,7 @@ impl Row {
             Row::Deadzone => "DEADZONE",
             Row::Rumble => "RUMBLE",
             Row::AutoPick => "AUTO-PICK",
+            Row::Reset => "NEST",
         }
     }
 
@@ -125,6 +132,8 @@ pub struct OptionsView {
     pub zoom: f32,
     /// Selected row (`0..ROW_COUNT`).
     pub row: usize,
+    /// The RESET row is armed: the next activation wipes the nest.
+    pub reset_armed: bool,
     /// Accent for the panel edge and the sliders (theme or level material).
     pub accent: Color,
     /// Selected control scheme (wave 3).
@@ -239,6 +248,13 @@ fn value_text(view: &OptionsView, row: Row) -> String {
             let mut s = String::with_capacity(8);
             crate::render::zoom::format_into(&mut s, view.zoom);
             s
+        }
+        Row::Reset => {
+            if view.reset_armed {
+                "CONFIRM?".to_string()
+            } else {
+                "WIPE".to_string()
+            }
         }
         Row::Music => String::new(),
         Row::Effects => String::new(),
@@ -498,6 +514,7 @@ mod tests {
             muted: false,
             zoom: 1.0,
             row,
+            reset_armed: false,
             accent: Color::Rgb(144, 184, 173),
             scheme: crate::controls::Scheme::Classic,
             deadzone: 0.2,

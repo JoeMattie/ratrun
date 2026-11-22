@@ -149,6 +149,19 @@ pub struct World {
     pub shake_ofs: Vec2,
     pub pending_levelups: u32,
     pub game_over: bool,
+    /// Gold spent in the splice shops since this floor started.
+    ///
+    /// Facade-only bookkeeping for the incident report's banking tally: nothing
+    /// in the simulation reads it, and it is **not** round-tripped (no system
+    /// spends gold; the App's shop screen does, between ticks). The campaign
+    /// totals add each floor's figure up.
+    pub gold_spent: u32,
+    /// Revives still in hand this **run** (the nest's "Ninth Life").
+    ///
+    /// Set from `loadout.meta.revives` at the run's first floor, minus what the
+    /// earlier floors of the campaign spent (`CampaignTotals::revives_used`). A
+    /// fresh profile carries zero and the facade's revive path never runs.
+    pub revives_left: u8,
     /// The run was won: the **final** campaign level was completed.
     ///
     /// Kept as a plain field because `app.rs`/`render` summarise a run from it;
@@ -303,6 +316,13 @@ impl World {
         // map, always). `Level::new` is the seed-0 convenience wrapper.
         let level = Level::generate(theme, seed);
         let center = level.start;
+        // Captured **before** `carried` is moved into the player below: the nest
+        // grants the run's revives, minus what the earlier floors of the
+        // campaign already spent (`CampaignTotals::revives_used`).
+        let revives_left = carried
+            .meta
+            .revives
+            .saturating_sub(carried_totals.revives_used);
         let mut flow = FlowField::new(&level.tiles);
         flow.update(&level.tiles, center, NavBudget::FULL);
         let flow_spare = FlowField::new(&level.tiles);
@@ -383,6 +403,8 @@ impl World {
             kills: 0,
             score: 0,
             gold: carried_totals.gold,
+            gold_spent: 0,
+            revives_left,
             pending_chests: 0,
             pending_shop: false,
             pending_shop_hole: 0,
@@ -462,7 +484,17 @@ impl World {
             return false;
         };
         self.gold = balance;
+        self.gold_spent = self.gold_spent.saturating_add(n);
         true
+    }
+
+    /// Revives this rat has already used this run (`0` for a fresh profile).
+    pub fn revives_used(&self) -> u8 {
+        self.player
+            .loadout
+            .meta
+            .revives
+            .saturating_sub(self.revives_left)
     }
 
     /// The shop threshold scratch (permanent ECS resource; used between ticks
@@ -1091,6 +1123,28 @@ impl World {
         self.begin_tick_full(dt, move_dir, dash, active, aim, charge);
         self.schedule.run(&mut self.ecs);
         self.end_tick();
+        self.try_revive();
+    }
+
+    /// Get up once per run (the nest's **Ninth Life**).
+    ///
+    /// If this tick killed the rat and a revive is still in hand, stand back up
+    /// at half health behind a generous immunity window instead of ending the
+    /// run. Facade bookkeeping only: no rng draw, no system, no schedule slot,
+    /// and a run with no profile has zero revives, so it never reaches the
+    /// writes below and every existing trace is unchanged.
+    fn try_revive(&mut self) {
+        if !self.game_over || self.revives_left == 0 {
+            return;
+        }
+        self.revives_left -= 1;
+        self.player.hp = (self.player.max_hp() * REVIVE_HP_FRAC).max(1.0);
+        self.player.iframes = REVIVE_IFRAMES;
+        self.player.hurt_flash = 0.0;
+        // `outcome_system` clears `level_complete` and `won` on the death tick,
+        // so only the loss flag has to come back off.
+        self.game_over = false;
+        self.sfx.push(Sfx::Heal);
     }
 
     /// Move the facade singletons into the Bevy world as resources.
@@ -2613,6 +2667,15 @@ const DAMAGE_CLEAR_RADIUS: f32 = 26.0;
 /// south/east and the overhang layer reaches a few pixels up.
 const WALL_DRAW_MARGIN: i32 = 1;
 
+/// Fraction of max HP a nest revive (`meta::Track::Revive`) stands the rat back
+/// up with. Half a bar is enough to run, not enough to ignore the mistake.
+const REVIVE_HP_FRAC: f32 = 0.5;
+
+/// Immunity window a nest revive grants, in seconds. Deliberately longer than a
+/// normal post-hit window (`player::HIT_IFRAMES` is 0.9 s): the rat stood up
+/// inside whatever just killed it, so it needs a moment to move.
+const REVIVE_IFRAMES: f32 = 2.5;
+
 // ---- Prop rendering -------------------------------------------------------
 
 /// Cheap viewport test: can a point with `margin` pixels of drawn extent still
@@ -3753,5 +3816,132 @@ mod viewport_tests {
         );
         // Both runs actually simulated something worth comparing.
         assert!(drawn.elapsed > 5.9);
+    }
+}
+
+#[cfg(test)]
+mod meta_tests {
+    //! The nest's run-level hooks: the Ninth Life revive, the gold tally and the
+    //! fact that a fresh profile's world is the world this build always made.
+
+    use super::*;
+    use crate::game::campaign::CampaignTotals;
+    use crate::game::level::Theme;
+    use crate::game::loadout::{Loadout, WeaponKind};
+
+    const DT: f32 = 1.0 / 60.0;
+
+    fn with_nest(theme: Theme, seed: u64, mods: crate::meta::RunModifiers) -> World {
+        World::new_level_with_theme(
+            0,
+            theme,
+            seed,
+            Loadout::with_modifiers(Loadout::START_WEAPON, mods),
+            CampaignTotals::default(),
+        )
+    }
+
+    fn maxed() -> crate::meta::RunModifiers {
+        crate::meta::RunModifiers::from_profile(&crate::meta::MetaProfile::maxed())
+    }
+
+    /// A fresh profile's world is untouched by the nest: 4 + 4 racks, base
+    /// stats and no revive.
+    #[test]
+    fn a_fresh_profile_starts_the_world_it_always_did() {
+        let plain = World::new(Theme::Sewer, 5);
+        let explicit = with_nest(Theme::Sewer, 5, crate::meta::RunModifiers::NONE);
+        assert_eq!(plain.revives_left, 0);
+        assert_eq!(explicit.revives_left, 0);
+        assert_eq!(plain.player.max_hp(), 130.0);
+        assert_eq!(plain.player.loadout.max_weapons(), 4);
+        assert_eq!(plain.player.loadout.stats.gold_mult, 1.0);
+        assert_eq!(plain.player.loadout.stats.luck_mult, 1.0);
+        assert_eq!(plain.player.loadout.stats.armor, 0.0);
+    }
+
+    /// The Ninth Life: the first death of a run stands the rat back up at half
+    /// health with an immunity window; the second one ends the run.
+    #[test]
+    fn a_nest_revive_stands_the_rat_back_up_once() {
+        let mut w = with_nest(Theme::Sewer, 3, maxed());
+        assert_eq!(w.revives_left, 1);
+        assert_eq!(w.revives_used(), 0);
+
+        w.player.hp = -5.0;
+        w.update(DT, Vec2::ZERO, false);
+        assert!(!w.game_over, "the revive kept the run alive");
+        assert_eq!(w.revives_left, 0);
+        assert_eq!(w.revives_used(), 1);
+        let half = w.player.max_hp() * 0.5;
+        assert!(
+            (w.player.hp - half).abs() < 0.001,
+            "the revive restores half a bar: {} vs {half}",
+            w.player.hp
+        );
+        assert!(w.player.iframes > 0.5, "the revive grants a real immunity window");
+
+        // One a run: the second death is the end, and it draws no rng.
+        w.player.iframes = 0.0;
+        w.player.hp = -5.0;
+        w.update(DT, Vec2::ZERO, false);
+        assert!(w.game_over, "the second death ends the run");
+        assert_eq!(w.revives_used(), 1);
+    }
+
+    /// The purse and the spend counter: what the report's tally reads. `spend_gold`
+    /// is the only place gold leaves the purse, so it is the only place that
+    /// counts.
+    #[test]
+    fn spent_gold_is_counted_and_a_campaign_carries_the_running_total() {
+        let mut w = World::new(Theme::Sewer, 7);
+        w.gold = 50;
+        assert!(w.spend_gold(20));
+        assert!(!w.spend_gold(1000));
+        assert_eq!(w.gold, 30);
+        assert_eq!(w.gold_spent, 20);
+
+        let mut totals = CampaignTotals::default();
+        totals.absorb(&w);
+        assert_eq!(totals.gold, 30);
+        assert_eq!(totals.gold_spent, 20);
+        // The next floor starts with the carried purse and its own counter.
+        let mut carried = World::new_level_with_theme(
+            1,
+            Theme::Kitchen,
+            9,
+            Loadout::with_modifiers(WeaponKind::Gnaw, maxed()),
+            totals,
+        );
+        assert_eq!(carried.gold, 30);
+        assert_eq!(carried.gold_spent, 0);
+        // A revive that an earlier floor spent is not handed out again.
+        carried.revives_left = 0;
+        let mut totals = CampaignTotals::default();
+        totals.absorb(&carried);
+        assert_eq!(totals.revives_used, 1);
+        let next_floor = World::new_level_with_theme(
+            2,
+            Theme::Lab,
+            11,
+            Loadout::with_modifiers(WeaponKind::Gnaw, maxed()),
+            totals,
+        );
+        assert_eq!(next_floor.revives_left, 0, "one revive per run, not per floor");
+    }
+
+    /// The nest's stat block reaches the simulation through the loadout: max HP,
+    /// armour, magnet, and the fire-rate/damage multipliers the weapon systems
+    /// read every frame.
+    #[test]
+    fn the_nest_s_stats_are_live_on_the_player() {
+        let w = with_nest(Theme::Sewer, 3, maxed());
+        let stats = w.player.loadout.stats;
+        assert_eq!(w.player.max_hp(), 130.0 + 48.0);
+        assert_eq!(stats.armor, 2.0);
+        assert_eq!(stats.magnet, 22.0 * (1.0 + 0.08 * 5.0));
+        assert_eq!(stats.fire_rate_mult, 1.0 + 0.02 * 6.0);
+        assert_eq!(stats.damage_mult, 1.0 + 0.025 * 6.0);
+        assert_eq!(w.player.loadout.max_weapons(), 8);
     }
 }

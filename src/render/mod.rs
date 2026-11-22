@@ -11,6 +11,7 @@ pub mod overlay;
 pub mod shop;
 pub mod palette;
 pub mod minimap;
+pub mod nest;
 pub mod minimap_source;
 pub mod options;
 pub mod lighting;

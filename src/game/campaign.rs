@@ -40,8 +40,22 @@ use super::world::World;
 
 /// Number of levels in the campaign: Sewer, stage two, stage three.
 pub const LEVEL_COUNT: usize = 3;
-/// How many powerups the player keeps between levels.
+/// How many powerups the player keeps between levels with a fresh profile.
+///
+/// The nest's "Deep Pockets" track raises it (see [`keep_limit`]); three was the
+/// number this screen shipped with and it is still the default.
 pub const KEEP_COUNT: usize = 3;
+/// The most the nest can raise the keep count to (three, plus the track's two).
+pub const MAX_KEEP: usize = KEEP_COUNT + crate::meta::MAX_CARRY_BONUS as usize;
+
+/// How many powerups **this** loadout may keep between floors.
+///
+/// A fresh profile keeps [`KEEP_COUNT`]; the nest's carry-over track buys one or
+/// two more (a rack can hold eight of each kind now, so a bigger pack has
+/// something to carry). Clamped to [`MAX_KEEP`].
+pub fn keep_limit(loadout: &Loadout) -> usize {
+    (KEEP_COUNT + loadout.meta.carry_bonus as usize).min(MAX_KEEP)
+}
 /// The weapon a level falls back to when the kept powerups include none.
 pub const STARTING_WEAPON: WeaponKind = Loadout::START_WEAPON;
 
@@ -288,7 +302,7 @@ impl KeepError {
     pub fn message(&self) -> String {
         match self {
             KeepError::TooMany { count } => {
-                format!("keep at most {KEEP_COUNT} powerups (chose {count})")
+                format!("too many powerups kept ({count})")
             }
             KeepError::Duplicate(kind) => format!("{} was chosen twice", kind.name()),
             KeepError::NotOwned(kind) => format!("{} is not in the loadout", kind.name()),
@@ -343,7 +357,8 @@ pub fn keepables(loadout: &Loadout) -> Vec<Keepable> {
 /// level never owned would be an infinite powerup generator. An empty selection
 /// is valid (the next level then starts on [`STARTING_WEAPON`]).
 pub fn validate_keep(previous: &Loadout, chosen: &[Keepable]) -> Result<(), KeepError> {
-    if chosen.len() > KEEP_COUNT {
+    let limit = keep_limit(previous);
+    if chosen.len() > limit {
         return Err(KeepError::TooMany {
             count: chosen.len(),
         });
@@ -407,12 +422,15 @@ pub fn next_loadout(previous: &Loadout, chosen: &[Keepable]) -> Result<Loadout, 
     // The profile's rack caps ride along between levels unchanged: a run that
     // started on 6 + 6 racks keeps them on every floor it carries into.
     let mut carried = Loadout::from_parts_with_caps(weapons, passives, previous.caps);
+    // The nest's permanent upgrades ride along too (they are part of every
+    // floor's base stats — `Loadout::rebuild_stats` applies them first).
+    carried.meta = previous.meta;
     // Gene splices sit **outside the racks**: they ride along whatever the
     // keep-three choice was, and last until the run ends (`WAVE3_DESIGN` §6).
     if !previous.splices.is_empty() {
         carried.splices = previous.splices.clone();
-        carried.rebuild_stats();
     }
+    carried.rebuild_stats();
     Ok(carried)
 }
 
@@ -431,6 +449,12 @@ pub struct CampaignTotals {
     pub elapsed: f32,
     /// Spendable balance at the end of the most recently completed level.
     pub gold: u32,
+    /// Gold spent in the splice shops on the floors already completed (the
+    /// incident report's "spent" tally; the purse above is the other half).
+    pub gold_spent: u32,
+    /// Revives the earlier floors of this campaign already spent (the nest's
+    /// Ninth Life is **one per run**, not one per floor).
+    pub revives_used: u8,
 }
 
 impl CampaignTotals {
@@ -440,6 +464,8 @@ impl CampaignTotals {
         self.kills += world.kills;
         self.elapsed += world.elapsed;
         self.gold = world.gold;
+        self.gold_spent += world.gold_spent;
+        self.revives_used = self.revives_used.saturating_add(world.revives_used());
     }
 }
 
@@ -475,9 +501,19 @@ impl CampaignState {
     /// upgrades, 4 to 8 each side). The caps ride along every carried loadout
     /// (`next_loadout`), so every floor of the campaign uses them.
     pub fn with_caps(run_seed: u64, caps: crate::game::loadout::SlotCaps) -> Self {
+        CampaignState::with_modifiers(
+            run_seed,
+            crate::meta::RunModifiers::with_caps(caps),
+        )
+    }
+
+    /// A fresh campaign on the profile's **permanent upgrades** (the nest): the
+    /// slot tracks set the racks and every other track is folded into the
+    /// carried loadout's stats, so floor one already has them.
+    pub fn with_modifiers(run_seed: u64, mods: crate::meta::RunModifiers) -> Self {
         CampaignState {
             level: 0,
-            loadout: Loadout::with_caps(Loadout::START_WEAPON, caps),
+            loadout: Loadout::with_modifiers(Loadout::START_WEAPON, mods),
             run_seed,
             totals: CampaignTotals::default(),
             route: Route::ORIGINAL,
@@ -789,6 +825,72 @@ mod tests {
         // Exactly three distinct owned entries is fine, and so is none.
         assert_eq!(validate_keep(&lo, &list[..3]), Ok(()));
         assert_eq!(validate_keep(&lo, &[]), Ok(()));
+    }
+
+    /// The nest's carry-over track buys a bigger keep pack, and a carried
+    /// loadout keeps the run's permanent upgrades on every floor.
+    #[test]
+    fn the_nest_buys_a_bigger_keep_pack_and_rides_the_carry_over() {
+        let mods = crate::meta::RunModifiers::from_profile(&crate::meta::MetaProfile::maxed());
+        assert_eq!(MAX_KEEP, KEEP_COUNT + 2);
+        assert_eq!(keep_limit(&Loadout::starting()), KEEP_COUNT);
+
+        let mut campaign = CampaignState::with_modifiers(11, mods);
+        assert_eq!(campaign.loadout.meta, mods, "floor one starts on the nest");
+        assert_eq!(campaign.loadout.caps.weapons, 8, "the slot tracks are the racks");
+        let mut world = campaign.world();
+        assert_eq!(world.player.loadout.meta, mods);
+        assert_eq!(world.player.loadout.stats.armor, 2.0);
+        assert_eq!(world.revives_left, 1, "the Ninth Life is armed");
+        assert_eq!(keep_limit(&world.player.loadout), MAX_KEEP);
+
+        for p in [
+            PassiveKind::MaxHp,
+            PassiveKind::MoveSpeed,
+            PassiveKind::Damage,
+            PassiveKind::Regen,
+            PassiveKind::Armor,
+            PassiveKind::Magnet,
+        ] {
+            world.player.loadout.apply(&crate::game::loadout::Upgrade::Passive(p));
+        }
+        let keep = world.keepables();
+        assert!(keep.len() >= 6, "a starting weapon and six passives");
+        // Five fit on an upgraded nest...
+        assert_eq!(validate_keep(&world.player.loadout, &keep[..5]), Ok(()));
+
+        // ... and five are refused on a fresh one (the same loadout, no nest).
+        let mut fresh = Loadout::with_modifiers(STARTING_WEAPON, crate::meta::RunModifiers::NONE);
+        for p in [
+            PassiveKind::MaxHp,
+            PassiveKind::MoveSpeed,
+            PassiveKind::Damage,
+            PassiveKind::Regen,
+            PassiveKind::Armor,
+            PassiveKind::Magnet,
+        ] {
+            fresh.apply(&crate::game::loadout::Upgrade::Passive(p));
+        }
+        let fresh_keep = keepables(&fresh);
+        assert_eq!(
+            validate_keep(&fresh, &fresh_keep[..5]),
+            Err(KeepError::TooMany { count: 5 })
+        );
+
+        world.mark_level_complete();
+        campaign.complete_level(&world, &keep[..5]).expect("five fit");
+        let carried = campaign.world();
+        assert_eq!(carried.player.loadout.meta, mods, "the nest rides along");
+        assert_eq!(carried.player.loadout.caps.weapons, 8);
+        assert_eq!(
+            carried.revives_left, 1,
+            "an unused revive is still in hand on the next floor"
+        );
+        assert_eq!(
+            campaign.loadout.passives.len(),
+            5,
+            "the five kept passives were carried"
+        );
     }
 
     /// A carried evolution keeps working **without its partner**: the passive
@@ -1125,6 +1227,8 @@ mod tests {
                 kills: 7,
                 elapsed: 302.5,
                 gold: 0,
+                gold_spent: 0,
+                revives_used: 0,
             }
         );
 

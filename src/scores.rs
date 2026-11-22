@@ -298,6 +298,14 @@ pub fn controls_to_file(controls: &Controls) -> ControlsFile {
         deadzone: saved.deadzone,
         rumble: saved.rumble,
     }
+/// The nest, tolerant of a hand-edited file: anything that is not a nest object
+/// (a string, a list, null) loads as a fresh profile instead of failing the
+/// whole table and dropping the player's scores with it.
+fn deserialize_meta<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<crate::meta::MetaProfile, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -350,6 +358,12 @@ pub struct ScoreTable {
     /// the default way to level up.
     #[serde(default)]
     pub auto_pick: bool,
+    /// **The nest**: gold banked across runs and one level per permanent
+    /// upgrade track (`crate::meta`). Missing in any file written before the
+    /// nest existed, which loads as a fresh profile (bank 0, every track 0, so
+    /// the racks are 4 + 4 and no bonus applies).
+    #[serde(default, deserialize_with = "deserialize_meta")]
+    pub meta: crate::meta::MetaProfile,
 }
 
 impl Default for ScoreTable {
@@ -368,6 +382,7 @@ impl Default for ScoreTable {
             library: Library::default(),
             controls: ControlsFile::default(),
             auto_pick: false,
+            meta: crate::meta::MetaProfile::default(),
         }
     }
 }
@@ -409,6 +424,9 @@ impl ScoreTable {
             self.controls.deadzone = crate::controls::DEFAULT_DEADZONE;
         }
         self.controls.deadzone = self.controls.deadzone.clamp(0.05, 0.9);
+        // The nest: drop unknown track keys and clamp a hand-edited level into
+        // its track's range, so a corrupt save can never over-upgrade a run.
+        self.meta.normalize();
     }
 
     pub fn save(&self) {
@@ -522,6 +540,15 @@ impl ScoreTable {
             return;
         }
         self.record_floor(campaign::level_theme(level), score, time);
+    }
+
+    // ---- The nest (`crate::meta`) ---------------------------------------
+
+    /// Wipe the nest: the bank and every permanent upgrade. Scores, floor
+    /// progress and the Library are untouched (this is "reset progress" on the
+    /// upgrade track, not a new save file).
+    pub fn reset_nest(&mut self) {
+        self.meta = crate::meta::MetaProfile::default();
     }
 }
 
@@ -955,6 +982,76 @@ mod tests {
             let reloaded = ScoreTable::parse(&t.to_json());
             assert_eq!(reloaded.cheese_cursor, setting);
         }
+    }
+
+    /// The nest rides in the same save file: a file written before it existed
+    /// loads as a fresh profile, a saved nest round-trips next to the scores,
+    /// and a hand-edited nest can never over-upgrade a run or drop the table.
+    #[test]
+    fn the_nest_persists_and_old_files_load_as_a_fresh_profile() {
+        use crate::meta::{MetaProfile, RunModifiers, Track};
+
+        // A file written before the nest has no `meta` field at all.
+        let old = ScoreTable::parse(r#"{"entries":[]}"#);
+        assert_eq!(old.meta, MetaProfile::default());
+        assert_eq!(old.meta.bank, 0);
+        assert_eq!(old.meta.total_levels(), 0);
+        assert_eq!(RunModifiers::from_profile(&old.meta), RunModifiers::NONE);
+
+        // A saved nest round-trips, and the scores beside it survive.
+        let mut t = ScoreTable::default();
+        t.insert(e(700));
+        t.meta.bank = 321;
+        t.meta.set_level(Track::WeaponSlots, 2);
+        t.meta.set_level(Track::MoveSpeed, 4);
+        let back = ScoreTable::parse(&t.to_json());
+        assert_eq!(back.meta.bank, 321);
+        assert_eq!(back.meta.level(Track::WeaponSlots), 2);
+        assert_eq!(back.meta.level(Track::MoveSpeed), 4);
+        assert_eq!(back.best(), 700);
+        assert_eq!(
+            RunModifiers::from_profile(&back.meta).caps,
+            crate::game::loadout::SlotCaps::new(6, 4),
+            "two weapon-slot purchases are a 6 + 4 rack"
+        );
+
+        // A hand-edited nest is clamped to the tracks it names; unknown keys are
+        // dropped and the scores are kept.
+        let edited = ScoreTable::parse(
+            r#"{"entries":[{"score":900,"time":10.0,"level":2,"map":"Sewer","won":false}],
+                "meta":{"bank":42,"levels":{"damage":99,"bogus":3,"move_speed":0}}}"#,
+        );
+        assert_eq!(edited.meta.bank, 42);
+        assert_eq!(edited.meta.level(Track::Damage), Track::Damage.max_level());
+        assert_eq!(edited.meta.level(Track::MoveSpeed), 0);
+        assert_eq!(edited.meta.levels.len(), 1, "unknown/zero keys are dropped");
+        assert_eq!(edited.best(), 900);
+
+        // A junk `meta` value loads as a fresh nest instead of failing the whole
+        // table (the same tolerance the volume and zoom fields have).
+        for bad in [r#""lots""#, "[1,2]", "null", "7"] {
+            let json = format!(
+                r#"{{"entries":[{{"score":500,"time":10.0,"level":2,"map":"Sewer","won":false}}],"meta":{bad}}}"#
+            );
+            let parsed = ScoreTable::parse(&json);
+            assert_eq!(parsed.meta, MetaProfile::default(), "meta = {bad}");
+            assert_eq!(parsed.best(), 500, "a bad nest must not drop the scores");
+        }
+
+        // "Reset progress" wipes the nest and keeps everything else.
+        let mut wiped = ScoreTable::default();
+        wiped.record_floor(Theme::Sewer, 4100, 240.0);
+        wiped.insert(e(600));
+        wiped.meta.bank = 90;
+        wiped.meta.set_level(Track::Revive, 1);
+        wiped.reset_nest();
+        assert_eq!(wiped.meta, MetaProfile::default());
+        assert_eq!(wiped.best(), 600);
+        assert!(wiped.floor_cleared(Theme::Sewer), "the sector stays cleared");
+        assert_eq!(
+            ScoreTable::parse(&wiped.to_json()).meta,
+            MetaProfile::default()
+        );
     }
 
     #[test]

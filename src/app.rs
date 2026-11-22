@@ -20,9 +20,11 @@ use crate::gamepad::PadPoller;
 use crate::input::{DashKey, InputState};
 use crate::lore;
 use crate::math::Vec2;
+use crate::meta;
 use crate::render::campaign as campaign_ui;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::library as library_ui;
+use crate::render::nest as nest_ui;
 use crate::render::palette;
 use crate::render::{
     controls as render_controls, cursor, hud, menu, minimap, minimap_source, options, overlay,
@@ -37,17 +39,25 @@ use menu::{HitMap, RunSummary, Target};
 /// story dossier paints).
 const BACKDROP: Color = Color::Rgb(11, 15, 17);
 
+/// The nest's gold: the same trail colour the HUD's purse uses.
+const NEST_GOLD: Color = Color::Rgb(248, 206, 96);
+
 /// How long a level-clear fanfare waits before it plays. The simulation has
 /// already played the boss's own death sting on the killing tick, so the
 /// fanfare follows it a beat later rather than stacking on top of it.
 const FANFARE_DELAY_SECS: f32 = 0.55;
 
-/// The title menu's rows, in order: START RUN, the sector row, OPTIONS, QUIT.
-const TITLE_ROWS: usize = 4;
+/// The title menu's rows, in order: START RUN, the sector row, OPTIONS,
+/// LIBRARY, THE NEST, QUIT. The drawn row list in `menu::draw_title` is the
+/// same six, in the same order (the keyboard and the pointer select the same
+/// thing).
+const TITLE_ROWS: usize = 6;
 const TITLE_ACTIONS: [Target; TITLE_ROWS] = [
     Target::Start,
     Target::Sectors,
     Target::Options,
+    Target::Library,
+    Target::Nest,
     Target::Quit,
 ];
 
@@ -120,6 +130,10 @@ enum Screen {
     Library,
     /// The remappable-controls screen (opened from Options).
     Controls,
+    /// **The nest** (permanent upgrades): opened from the title's NEST row, the
+    /// incident report's "spend your haul" chip and the victory plate, and
+    /// read-only from the pause screen (you cannot buy mid-run).
+    Nest,
 }
 
 #[cfg(test)]
@@ -145,6 +159,7 @@ impl Screen {
             Screen::Shop => "Shop",
             Screen::Library => "Library",
             Screen::Controls => "Controls",
+            Screen::Nest => "Nest",
         }
     }
 }
@@ -301,10 +316,14 @@ pub struct App {
     cursor_env: Option<bool>,
     /// Rack caps the next run starts with (the profile's persistent slot
     /// upgrades, `loadout::MIN_SLOTS..=MAX_SLOTS`; a fresh profile is 4 + 4).
-    /// The persistent upgrade shop sets it through [`App::set_slot_caps`]; the
-    /// campaign carries it between levels. Tests use it to play on 6 + 6 or
-    /// 8 + 8 racks.
+    /// The nest's slot tracks set it at every run start; the campaign carries
+    /// it between levels. Tests and the batch pin it through
+    /// [`App::set_slot_caps`], which makes a run start honour the pin instead of
+    /// re-reading the profile (`slot_caps_pinned`).
     pub slot_caps: SlotCaps,
+    /// Did a caller pin `slot_caps` (a test or the batch) rather than take the
+    /// profile's slot tracks? A run start then keeps the pinned racks.
+    slot_caps_pinned: bool,
     /// The Library screen's own state: tab, cursor, scroll, the card art clock
     /// and its cached card scenes.
     library_ui: library_ui::LibraryUi,
@@ -336,6 +355,33 @@ pub struct App {
     /// clock). Zero means "now". Only meaningful while
     /// `scores.auto_pick` is on; the simulation never reads it.
     auto_pick_wait: f32,
+    /// The nest screen's own state: cursor, window, pending confirmation.
+    nest_ui: nest_ui::NestUi,
+    /// Where Esc leaves the nest (`Title`, `End`, `Victory` or `Paused`).
+    nest_return: Screen,
+    /// Is this visit read-only? The pause screen opens the nest as a dossier
+    /// only: you cannot buy mid-run, so a track's price reads "later".
+    nest_read_only: bool,
+    /// Last frame's nest measurement (visible rows), so the cursor can be kept
+    /// in the window.
+    nest_shape: nest_ui::DrawInfo,
+    /// The banking tally of the run that just ended (`crate::meta::bank`).
+    bank_tally: Option<meta::BankTally>,
+    /// Has this run been banked already? One bank per run (death, quit or win),
+    /// so quitting the incident report cannot bank it twice.
+    banked: bool,
+    /// Campaign floors cleared this run (the bank's floor bonus).
+    floors_cleared: u8,
+    /// Bosses and named minibosses killed this run (the bank's apex bonus).
+    apex_kills: u32,
+    /// Was a named miniboss alive on the last simulated frame? The kill is the
+    /// `Some -> None` edge of `World::miniboss_hp`.
+    prev_miniboss_alive: bool,
+    /// Did this run use the console? Another worker is adding the flag; until
+    /// it lands this is `false` and nothing is voided (see `meta::RunEnd`).
+    console_used: bool,
+    /// The options screen's RESET row is armed (press again to wipe the nest).
+    reset_armed: bool,
 }
 
 impl App {
@@ -430,6 +476,7 @@ impl App {
             cursor: cursor::CursorState::default(),
             cursor_env: cursor::env_override(),
             slot_caps: SlotCaps::DEFAULT,
+            slot_caps_pinned: false,
             library_ui: library_ui::LibraryUi::default(),
             library_rows: library_index::all_rows(),
             library_return: Screen::Title,
@@ -443,6 +490,17 @@ impl App {
             controls_scroll: 0,
             controls_visible: 16,
             auto_pick_wait: 0.0,
+            nest_ui: nest_ui::NestUi::default(),
+            nest_return: Screen::Title,
+            nest_read_only: false,
+            nest_shape: nest_ui::DrawInfo::default(),
+            bank_tally: None,
+            banked: true,
+            floors_cleared: 0,
+            apex_kills: 0,
+            prev_miniboss_alive: false,
+            console_used: false,
+            reset_armed: false,
         };
         // `RATRUN_LIBRARY_ALL=1` unveils the index for screenshots and tests;
         // it is memory-only and never written back over the score file.
@@ -736,13 +794,48 @@ impl App {
     /// Set the rack caps the next run starts with (the persistent slot
     /// upgrades bought between runs). Ownership already on a carried loadout is
     /// never dropped by a lower cap; see [`Loadout::set_caps`].
+    ///
+    /// The nest (`scores.meta`) is the real source of the caps; this is kept for
+    /// the tests and the batch, which play a hand-made profile without a saved
+    /// one.
     pub fn set_slot_caps(&mut self, caps: SlotCaps) {
         self.slot_caps = SlotCaps::new(caps.weapons, caps.passives);
+        self.slot_caps_pinned = true;
+    }
+
+    /// The saved profile compiled into this run's permanent bonuses
+    /// (`crate::meta::RunModifiers`). Read once per run start.
+    pub fn run_modifiers(&self) -> meta::RunModifiers {
+        let mut mods = meta::RunModifiers::from_profile(&self.scores.meta);
+        // A pinned rack (a test or the batch asking for 6 + 6 / 8 + 8) wins
+        // over the profile's slot tracks; every other track still applies.
+        if self.slot_caps_pinned {
+            mods.caps = self.slot_caps;
+        }
+        mods
+    }
+
+    /// Reset the per-run bookkeeping a new run starts with: the banking tally,
+    /// the floor/apex counters and the revive/sting state. Called by every
+    /// `start_*` (never by `enter_world`, which also runs for floor two).
+    fn begin_run_bookkeeping(&mut self) {
+        self.banked = false;
+        self.bank_tally = None;
+        self.floors_cleared = 0;
+        self.apex_kills = 0;
+        self.prev_miniboss_alive = false;
+        if !self.slot_caps_pinned {
+            self.slot_caps = self.run_modifiers().caps;
+        }
     }
 
     fn start_campaign(&mut self, via_story: bool) {
         let seed = self.seed();
-        self.campaign = Some(CampaignState::with_caps(seed, self.slot_caps));
+        self.begin_run_bookkeeping();
+        // The nest: the profile's permanent upgrades are compiled once here and
+        // ride every floor (the campaign carries the loadout, modifiers and
+        // all).
+        self.campaign = Some(CampaignState::with_modifiers(seed, self.run_modifiers()));
         self.practice = None;
         self.records = [LevelRecord::default(); campaign::LEVEL_COUNT];
         self.keep_items.clear();
@@ -769,6 +862,7 @@ impl App {
         // A practice run is a side-route floor too, so it uses the same seeded
         // derivation a campaign on that route does.
         let seed = campaign::level_seed_on(self.seed(), level, theme);
+        self.begin_run_bookkeeping();
         self.campaign = None;
         self.practice = Some(theme);
         self.records = [LevelRecord::default(); campaign::LEVEL_COUNT];
@@ -784,7 +878,9 @@ impl App {
             level,
             theme,
             seed,
-            Loadout::with_caps(Loadout::START_WEAPON, self.slot_caps),
+            // A practice run still gets the profile's permanent upgrades: the
+            // nest is the player's, not the campaign's.
+            Loadout::with_modifiers(Loadout::START_WEAPON, self.run_modifiers()),
             campaign::CampaignTotals::default(),
         );
         // No carried build: play this sector's map and boss on the first
@@ -824,6 +920,7 @@ impl App {
         // campaign's stages (`campaign::is_getaway_sector`).
         let sector = campaign::LEVEL_COUNT;
         let seed = campaign::level_seed(self.seed(), sector);
+        self.begin_run_bookkeeping();
         self.campaign = None;
         self.practice = Some(campaign::getaway_theme());
         self.records = [LevelRecord::default(); campaign::LEVEL_COUNT];
@@ -836,7 +933,7 @@ impl App {
             sector,
             campaign::getaway_theme(),
             seed,
-            Loadout::with_caps(Loadout::START_WEAPON, self.slot_caps),
+            Loadout::with_modifiers(Loadout::START_WEAPON, self.run_modifiers()),
             campaign::CampaignTotals::default(),
         );
         self.enter_world(world, false);
@@ -871,6 +968,21 @@ impl App {
         // discovery marks (the library's "seen" counts floors, not frames).
         self.scores.library.begin_floor();
         self.scores.library.mark_seen(LibraryKey::Floor(theme));
+        // Announcing the nest once per floor keeps the permanent bonuses
+        // distinct from the in-run passives the HUD rack grows: this is what the
+        // rat carried *in*. Silent for a fresh profile.
+        let (nest_line, miniboss_alive) = match self.world.as_ref() {
+            Some(w) => (
+                w.player.loadout.meta.summary(),
+                w.miniboss_hp().is_some(),
+            ),
+            None => (String::new(), false),
+        };
+        if !nest_line.is_empty() {
+            self.hud
+                .push_callout(hud::CalloutKind::Nest, "NEST", &nest_line, 4.5);
+        }
+        self.prev_miniboss_alive = miniboss_alive;
         self.intro_timer = 4.0;
         self.carried_entries = match self.campaign.as_ref() {
             Some(c) if level > 0 => entries_for(&campaign::keepables(&c.loadout)),
@@ -887,6 +999,43 @@ impl App {
         self.play_music(theme, 1);
     }
 
+    /// Bank a finished (or abandoned) run into the nest **once**, and record
+    /// the tally the report prints.
+    ///
+    /// The rule itself lives in [`meta::bank`]; this only gathers the run's
+    /// figures: the unspent purse, what the splice shops took, the floors
+    /// cleared, the apex kills, whether it won, and the practice/console flags.
+    fn bank_the_run(&mut self) {
+        if self.banked {
+            return;
+        }
+        let end = match self.world.as_ref() {
+            Some(w) => meta::RunEnd {
+                purse: w.gold,
+                // The floors already carried spent their own gold; the campaign
+                // totals keep that sum.
+                spent: w.carried.gold_spent.saturating_add(w.gold_spent),
+                floors: self.floors_cleared,
+                apex: self.apex_kills.min(u32::from(u8::MAX)) as u8,
+                won: self.run_won(w),
+                practice: self.practice.is_some(),
+                console_used: self.console_used,
+            },
+            None => return,
+        };
+        let tally = meta::bank(&mut self.scores.meta, &end);
+        self.bank_tally = Some(tally);
+        self.banked = true;
+        // New gold can open a slot: the next run starts on the new racks
+        // (unless a caller pinned them).
+        if !self.slot_caps_pinned {
+            self.slot_caps = meta::RunModifiers::from_profile(&self.scores.meta).caps;
+        }
+        if self.persist {
+            self.scores.save();
+        }
+    }
+
     /// Another run of the kind just played, skipping the story dossier.
     fn retry(&mut self) {
         match self.practice {
@@ -896,7 +1045,13 @@ impl App {
     }
 
     /// Drop the run and return to the title (pause → Q, end → Q, victory → Q).
+    ///
+    /// Leaving a live run **banks its haul** too: the owner's rule is that the
+    /// unspent purse is banked at the end of *every* run, and quitting is an end
+    /// (a practice rate applies to a practice run). On the report/victory
+    /// screens the run already banked itself in `finalize`, so this is a no-op.
     fn back_to_title(&mut self) {
+        self.bank_the_run();
         self.world = None;
         self.campaign = None;
         self.practice = None;
@@ -958,6 +1113,13 @@ impl App {
                         // The Library's wheel scrolls the list without moving
                         // the selection.
                         Screen::Library => self.scroll_library(step),
+                        // The nest's wheel walks the track list (the window
+                        // follows the cursor, so the wheel and the arrows agree).
+                        Screen::Nest => {
+                            if self.nest_ui.step(step) {
+                                self.sfx(Sfx::UiMove);
+                            }
+                        }
                         // The wheel steps whichever options row it is over
                         // (scroll up raises a level, scroll down lowers it).
                         Screen::Options => {
@@ -990,7 +1152,8 @@ impl App {
                         }
                         Some(Target::Options) => self.menu_idx = 2,
                         Some(Target::Library) => self.menu_idx = 3,
-                        Some(Target::Quit) => self.menu_idx = 4,
+                        Some(Target::Nest) => self.menu_idx = 4,
+                        Some(Target::Quit) => self.menu_idx = 5,
                         Some(Target::OptionsRow(i)) => {
                             self.options_row = i.min(options::ROW_COUNT - 1)
                         }
@@ -1121,6 +1284,7 @@ impl App {
             Screen::Shop => self.update_shop(click),
             Screen::Library => self.update_library(click),
             Screen::Controls => self.update_controls(click),
+            Screen::Nest => self.update_nest(click),
         }
         if self.screen != previous {
             self.hits.clear();
@@ -1277,6 +1441,7 @@ impl App {
             Screen::Title
         };
         self.options_row = options::MUSIC_ROW;
+        self.reset_armed = false;
         self.screen = Screen::Options;
         // Music stays audible on the options screen wherever it is opened
         // from: the title's calm track and the paused level's track both keep
@@ -1287,6 +1452,7 @@ impl App {
     /// Leave the options screen for wherever it was opened from.
     fn close_options(&mut self) {
         self.sfx(Sfx::UiSelect);
+        self.reset_armed = false;
         self.screen = self.options_return;
     }
 
@@ -1310,6 +1476,176 @@ impl App {
     fn close_library(&mut self) {
         self.sfx(Sfx::UiSelect);
         self.screen = self.library_return;
+    }
+
+    // ---- The nest --------------------------------------------------------
+
+    /// Open the permanent upgrades. From the pause screen it is **read-only**:
+    /// a run in flight cannot buy anything (the bank is the profile's, and the
+    /// run's modifiers were compiled when it started).
+    fn open_nest(&mut self, from: Screen) {
+        self.nest_return = from;
+        self.nest_read_only = matches!(from, Screen::Paused);
+        self.nest_ui.pending = None;
+        // A run in flight keeps its own state frozen behind the plate, exactly
+        // like the pause screen, the library and the splice shelf.
+        self.map_open = false;
+        self.screen = Screen::Nest;
+    }
+
+    /// Leave the nest for wherever it was opened from.
+    fn close_nest(&mut self) {
+        self.sfx(Sfx::UiSelect);
+        self.nest_ui.pending = None;
+        self.screen = self.nest_return;
+    }
+
+    /// One frame of the nest. Every key and pointer action lives here.
+    fn update_nest(&mut self, click: Option<Target>) {
+        if click == Some(Target::Back) || self.input.just_pressed(KeyCode::Esc)
+            || self.input.just_pressed(KeyCode::Backspace)
+        {
+            if self.nest_ui.pending.take().is_some() {
+                // Esc cancels the pending confirmation first, like the shop.
+                self.sfx(Sfx::UiMove);
+            } else {
+                self.close_nest();
+            }
+            return;
+        }
+        if self.input.just_pressed(KeyCode::Up) || self.input.pressed_char('k') {
+            if self.nest_ui.step(-1) {
+                self.sfx(Sfx::UiMove);
+            }
+        }
+        if self.input.just_pressed(KeyCode::Down) || self.input.pressed_char('s')
+            || self.input.pressed_char('j')
+        {
+            if self.nest_ui.step(1) {
+                self.sfx(Sfx::UiMove);
+            }
+        }
+        if self.input.just_pressed(KeyCode::PageUp) {
+            if self.nest_ui.step(-(self.nest_shape.visible.max(1) as isize)) {
+                self.sfx(Sfx::UiMove);
+            }
+        }
+        if self.input.just_pressed(KeyCode::PageDown) {
+            if self.nest_ui.step(self.nest_shape.visible.max(1) as isize) {
+                self.sfx(Sfx::UiMove);
+            }
+        }
+
+        // Pointer: a row selects (and, on a click, buys); the refund row and the
+        // back chip have targets of their own.
+        let mut activate: Option<usize> = None;
+        match click {
+            Some(Target::NestRow(i)) => {
+                if i < meta::TRACK_COUNT {
+                    self.nest_ui.cursor = i;
+                    self.nest_ui.pending = None;
+                    self.sfx(Sfx::UiMove);
+                    activate = Some(i);
+                }
+            }
+            Some(Target::NestRefund) => {
+                self.nest_ui.pending = Some(nest_ui::Pending::Refund);
+                self.sfx(Sfx::UiMove);
+            }
+            _ => {}
+        }
+        if self.input.pressed_char('r') {
+            if self.scores.meta.spent_total() == 0 {
+                self.sfx(Sfx::Denied);
+            } else {
+                self.nest_ui.pending = Some(nest_ui::Pending::Refund);
+                self.sfx(Sfx::UiMove);
+            }
+        }
+
+        // Enter: confirm a pending action, or activate the row under the cursor.
+        if self.input.just_pressed(KeyCode::Enter) {
+            activate = Some(self.nest_ui.cursor);
+        }
+        let Some(idx) = activate else {
+            return;
+        };
+        let track = meta::Track::from_index(idx).unwrap_or_default();
+        match self.nest_ui.pending.take() {
+            Some(nest_ui::Pending::Buy(t)) => {
+                if t == track || click.is_some() {
+                    self.nest_buy(t);
+                }
+            }
+            Some(nest_ui::Pending::Refund) => self.nest_refund(),
+            None => {
+                // A first press on a big buy (or a maxed/unaffordable row) only
+                // arms the confirmation; the cheap ones buy straight away.
+                match self.scores.meta.next_price(track) {
+                    Some(price) if price >= nest_ui::CONFIRM_AT => {
+                        self.nest_ui.pending = Some(nest_ui::Pending::Buy(track));
+                        self.sfx(Sfx::UiMove);
+                    }
+                    Some(_) => self.nest_buy(track),
+                    None => self.sfx(Sfx::Denied),
+                }
+            }
+        }
+    }
+
+    /// Buy one level of `track` from the bank.
+    fn nest_buy(&mut self, track: meta::Track) {
+        if self.nest_read_only {
+            self.sfx(Sfx::Denied);
+            return;
+        }
+        match self.scores.meta.buy(track) {
+            Some(_) => {
+                self.sfx(Sfx::Purchase);
+                if self.persist {
+                    self.scores.save();
+                }
+            }
+            None => self.sfx(Sfx::Denied),
+        }
+        self.nest_ui.pending = None;
+    }
+
+    /// Refund every track and return the gold (free: the nest is for
+    /// experimenting).
+    fn nest_refund(&mut self) {
+        if self.nest_read_only {
+            self.sfx(Sfx::Denied);
+            return;
+        }
+        let paid = self.scores.meta.refund_all();
+        if paid > 0 {
+            self.sfx(Sfx::Purchase);
+            if self.persist {
+                self.scores.save();
+            }
+        } else {
+            self.sfx(Sfx::UiMove);
+        }
+        self.nest_ui.pending = None;
+    }
+
+    /// Wipe the whole nest (the options screen's RESET, after its confirm): the
+    /// bank **and** every track. Scores, floor progress and the Library stay.
+    fn reset_nest(&mut self) {
+        self.scores.reset_nest();
+        if !self.slot_caps_pinned {
+            self.slot_caps = meta::RunModifiers::from_profile(&self.scores.meta).caps;
+        }
+        if self.persist {
+            self.scores.save();
+        }
+    }
+
+    /// The run's own permanent upgrades, for the read-only nest (the pause
+    /// screen). `None` when no run is in flight (the saved profile is drawn).
+    fn live_modifiers(&self) -> Option<meta::RunModifiers> {
+        self.world.as_ref().map(|w| w.player.loadout.meta)
     }
 
     /// Drain the library's freshly discovered keys into the HUD's callout rail
@@ -1467,10 +1803,12 @@ impl App {
         }
         if self.input.nav_pressed(0, -1) {
             self.options_row = (row + options::ROW_COUNT - 1) % options::ROW_COUNT;
+            self.reset_armed = false;
             self.sfx(Sfx::UiMove);
         }
         if self.input.nav_pressed(0, 1) {
             self.options_row = (row + 1) % options::ROW_COUNT;
+            self.reset_armed = false;
             self.sfx(Sfx::UiMove);
         }
         let row = self.options_row;
@@ -1484,6 +1822,12 @@ impl App {
             && (self.input.confirm_pressed() || chosen.is_some())
         {
             self.close_options();
+            return;
+        }
+        // Enter activates the reset row exactly like a click does (arm, then
+        // wipe): every other action row is stepped with Left/Right instead.
+        if row == options::RESET_ROW && self.input.just_pressed(KeyCode::Enter) {
+            self.adjust_option(row, 1);
             return;
         }
         if chosen.is_some() && row != options::BACK_ROW {
@@ -1539,6 +1883,18 @@ impl App {
                 self.input.controls.rumble = !self.input.controls.rumble;
                 self.save_controls();
                 self.sfx(Sfx::UiMove);
+            }
+            options::RESET_ROW => {
+                // Two steps: arm, then wipe. The row prints `WIPE` /
+                // `CONFIRM?` so the second press is never a surprise.
+                if self.reset_armed {
+                    self.reset_armed = false;
+                    self.reset_nest();
+                    self.sfx(Sfx::Purchase);
+                } else {
+                    self.reset_armed = true;
+                    self.sfx(Sfx::UiMove);
+                }
             }
             _ => {}
         }
@@ -1835,6 +2191,10 @@ impl App {
             Some(Target::Library) => {
                 self.sfx(Sfx::UiSelect);
                 self.open_library(Screen::Title);
+            }
+            Some(Target::Nest) => {
+                self.sfx(Sfx::UiSelect);
+                self.open_nest(Screen::Title);
             }
             Some(Target::NextSector) => self.cycle_sector(1),
             Some(Target::PreviousSector) => self.cycle_sector(-1),
@@ -2171,8 +2531,17 @@ impl App {
             let boss_alive = boss_hp.is_some();
             if self.prev_boss_alive && !boss_alive && w.director.boss_spawned {
                 self.boss_slain = true;
+                // Every apex kill pays the nest a bonus (see `meta::APEX_BONUS`).
+                self.apex_kills = self.apex_kills.saturating_add(1);
             }
             self.prev_boss_alive = boss_alive;
+            // A named miniboss dies when its nameplate goes away; the chest it
+            // leaves arrives on the same tick, so the edge is the whole test.
+            let miniboss_alive = w.miniboss_hp().is_some();
+            if self.prev_miniboss_alive && !miniboss_alive {
+                self.apex_kills = self.apex_kills.saturating_add(1);
+            }
+            self.prev_miniboss_alive = miniboss_alive;
             self.hud.telemetry.set_boss_alive(boss_alive);
             self.hud.telemetry.set_boss_hp(boss_hp);
             self.hud.telemetry.set_boss_offset(w.boss_offset());
@@ -2488,6 +2857,9 @@ impl App {
             plate: Some(campaign_ui::CampaignLevel::from_theme(theme)),
         };
         let campaign_won = self.campaign.is_some() && w.campaign_won();
+        // One floor down this run (the bank's floor bonus counts these; a
+        // practice/ getaway floor is charged at the practice rate instead).
+        self.floors_cleared = self.floors_cleared.saturating_add(1);
         // The campaign's per-stage breakdown only takes campaign levels: the
         // getaway ride is a practice floor and must not overwrite a stage.
         if !getaway {
@@ -2627,6 +2999,15 @@ impl App {
         ))
     }
 
+    /// How many powerups this run may carry between floors: 3, plus the nest's
+    /// carry-over track (up to 5).
+    fn keep_max(&self) -> usize {
+        match self.world.as_ref() {
+            Some(w) => campaign::keep_limit(&w.player.loadout),
+            None => campaign::KEEP_COUNT,
+        }
+    }
+
     /// `(selected, required)` straight from the art's own helpers, so the pack
     /// size is decided in one place (`keep_three_required`).
     fn keep_counts(&self) -> (usize, usize) {
@@ -2636,7 +3017,8 @@ impl App {
             gold: self.world.as_ref().map_or(0, |w| w.gold),
             items: &self.keep_entries,
             selected: &self.keep_selected,
-            max_keep: campaign::KEEP_COUNT,
+            // The nest's carry-over track buys a bigger pack (3 -> 5).
+            max_keep: self.keep_max(),
             cursor: self.keep_cursor,
             scroll: self.keep_scroll,
             hovered: None,
@@ -2792,6 +3174,11 @@ impl App {
     /// Campaign victory plate: Enter/click on the focused action, arrows/Tab
     /// move the focus, Q returns to the title.
     fn update_victory(&mut self, click: Option<Target>) {
+        if click == Some(Target::Nest) || self.input.pressed_char('n') {
+            self.sfx(Sfx::UiSelect);
+            self.open_nest(Screen::Victory);
+            return;
+        }
         if self.input.nav_pressed(-1, 0)
             || self.input.nav_pressed(1, 0)
             || self.input.just_pressed(KeyCode::Tab)
@@ -3045,6 +3432,13 @@ impl App {
             self.open_library(Screen::Paused);
             return;
         }
+        // The nest opens here **read-only**: a dossier of what this run carries,
+        // not a shop (you cannot buy mid-run).
+        if click == Some(Target::Nest) || self.input.pressed_char('b') {
+            self.sfx(Sfx::UiSelect);
+            self.open_nest(Screen::Paused);
+            return;
+        }
         if click == Some(Target::Resume)
             || self.input.back_pressed()
             || self.input.action_pressed(Action::Pause)
@@ -3057,6 +3451,11 @@ impl App {
     }
 
     fn update_end(&mut self, click: Option<Target>) {
+        if click == Some(Target::Nest) || self.input.pressed_char('n') {
+            self.sfx(Sfx::UiSelect);
+            self.open_nest(Screen::End);
+            return;
+        }
         if click == Some(Target::Restart) || self.input.confirm_pressed() {
             self.retry();
         }
@@ -3107,6 +3506,8 @@ impl App {
             armor: w.player.loadout.stats.armor,
             sector: (w.level_index + 1).clamp(1, campaign::LEVEL_COUNT) as u8,
             practice: self.practice.is_some(),
+            // The nest's banking tally, already computed by `finalize`.
+            nest: self.bank_tally,
         }
     }
 
@@ -3114,6 +3515,10 @@ impl App {
         if self.recorded {
             return;
         }
+        // Bank the haul **before** the summary is built: the incident report
+        // prints the tally, so it has to exist first. Already banked (a quit to
+        // the title, then the report) is a no-op.
+        self.bank_the_run();
         // Hoisted: the sting choice at the end of this function needs it too.
         let campaign_won = self.campaign.is_some()
             && self.world.as_ref().is_some_and(|w| w.campaign_won());
@@ -3253,6 +3658,50 @@ impl App {
                     &self.scores.library,
                     accent,
                     &mut self.library_ui,
+                    &mut self.hits,
+                );
+            }
+            Screen::Nest => {
+                // The nest opens over whatever the player came from: the frozen
+                // play field behind the pause plate, a plain backdrop behind the
+                // incident report / victory plate (those draw their own frame),
+                // or the title.
+                if self.nest_return == Screen::Paused && self.world.is_some() {
+                    self.draw_game(frame, area);
+                } else if matches!(self.nest_return, Screen::End | Screen::Victory) {
+                    draw_backdrop(frame, area);
+                } else {
+                    self.ensure_rat_art(area);
+                    menu::draw_title(
+                        frame,
+                        area,
+                        self.theme(),
+                        self.menu_idx,
+                        self.floor(),
+                        self.sector_unlocked(),
+                        &self.scores,
+                        &self.rat_art,
+                        self.dash_key(),
+                        &mut self.hits,
+                    );
+                }
+                // Read-only from the pause screen: the **run's** compiled
+                // modifiers, never the saved bank, so the dossier cannot show a
+                // purchase the run is not playing with. The view is owned (a
+                // small struct, once a frame, on a menu screen) so the draw call
+                // holds no borrow of `self`.
+                let view: meta::MetaProfile = if self.nest_read_only {
+                    nest_ui::profile_from_modifiers(&self.run_modifiers())
+                } else {
+                    self.scores.meta.clone()
+                };
+                let accent = menu::material(self.theme());
+                self.nest_shape = nest_ui::draw(
+                    frame,
+                    area,
+                    &view,
+                    &mut self.nest_ui,
+                    accent,
                     &mut self.hits,
                 );
             }
@@ -3456,6 +3905,7 @@ impl App {
             muted: self.muted,
             zoom: self.effective_zoom(),
             row: self.options_row,
+            reset_armed: self.reset_armed,
             accent: options::accent_from(menu::material(self.theme())),
             scheme: self.input.controls.scheme(),
             deadzone: self.input.controls.deadzone,
@@ -3633,7 +4083,7 @@ impl App {
                 gold: self.world.as_ref().map_or(0, |w| w.gold),
                 items: &self.keep_entries,
                 selected: &self.keep_selected,
-                max_keep: campaign::KEEP_COUNT,
+                max_keep: self.keep_max(),
                 cursor: self.keep_cursor,
                 scroll: self.keep_scroll,
                 hovered: match self.hits.hovered {
@@ -3724,6 +4174,25 @@ impl App {
                 campaign_ui::CampaignVictoryAction::Menu => Target::Menu,
             };
             self.hits.add(rect, target);
+        }
+        // The haul and a way to spend it: the campaign plate is the art's own
+        // fixed layout, so the nest strip is stamped on the screen's last row.
+        if let Some(tally) = self.bank_tally {
+            let text = format!(" N  THE NEST  ·  {} ", tally.line());
+            let w = (text.chars().count() as u16).min(area.width);
+            let rect = Rect::new(
+                area.x + area.width.saturating_sub(w) / 2,
+                area.bottom().saturating_sub(1),
+                w,
+                1,
+            );
+            frame.render_widget(
+                ratatui::widgets::Paragraph::new(text.as_str())
+                    .style(Style::default().fg(NEST_GOLD))
+                    .centered(),
+                rect,
+            );
+            self.hits.add(rect, Target::Nest);
         }
     }
 
@@ -5870,6 +6339,64 @@ mod tests {
                 hh.frame(&[]);
                 hh.frame(&[]);
             }
+            // ---- The nest (permanent upgrades) ---------------------------
+            // `nest` is a fresh profile's nest (everything at 0, 4 + 4 racks),
+            // `nest-started` a few levels bought with gold in hand, `nest-max`
+            // every track at its cap. `end-bank` is the incident report with a
+            // banking tally on it, `pause-nest` the pause screen's read-only
+            // dossier (a run in flight, upgrades in hand), `title-nest` the
+            // title row showing the bank.
+            t if t == "nest" || t == "nest-started" || t == "nest-max" || t == "title-nest" => {
+                use crate::meta::{MetaProfile, Track};
+                let mut table = ScoreTable::default();
+                table.meta = match t {
+                    "nest-started" => {
+                        let mut profile = MetaProfile::default();
+                        profile.bank = 240;
+                        profile.set_level(Track::WeaponSlots, 1);
+                        profile.set_level(Track::MoveSpeed, 2);
+                        profile.set_level(Track::Revive, 1);
+                        profile
+                    }
+                    "nest-max" => MetaProfile::maxed(),
+                    _ => MetaProfile::default(),
+                };
+                let app = App::with_options(false, None, table, false, Some(TEST_SEED));
+                hh = Harness::with_app(app, w, h);
+                if t == "title-nest" {
+                    hh.frame(&[]);
+                } else {
+                    hh.app.open_nest(Screen::Title);
+                    hh.frame(&[]);
+                    hh.frame(&[]);
+                }
+            }
+            "pause-nest" => {
+                use crate::meta::MetaProfile;
+                let mut table = ScoreTable::default();
+                table.meta = MetaProfile::maxed();
+                let app = App::with_options(false, None, table, false, Some(TEST_SEED));
+                hh = Harness::with_app(app, w, h);
+                hh.enter_playing();
+                hh.app.world.as_mut().unwrap().gold = 37;
+                hh.frame(&[KeyCode::Esc]);
+                hh.frame(&[KeyCode::Char('b')]);
+                hh.frame(&[]);
+            }
+            "end-bank" => {
+                let mut table = ScoreTable::default();
+                table.meta.bank = 90;
+                let app = App::with_options(false, None, table, false, Some(TEST_SEED));
+                hh = Harness::with_app(app, w, h);
+                hh.enter_playing();
+                {
+                    let w = hh.app.world.as_mut().unwrap();
+                    w.gold = 131;
+                    w.player.hp = -1.0;
+                }
+                hh.frame(&[]);
+                hh.frame(&[]);
+            }
             "levelup" => {
                 hh.frame(&[KeyCode::Enter]); // -> Story
                 hh.frame(&[KeyCode::Enter]); // dossier -> MapIntro
@@ -6536,6 +7063,234 @@ mod tests {
 
     /// Item 1: the test constructor is pinned to a fixed seed sequence and keeps
     /// scores in memory only.
+    // ---- The nest (permanent upgrades) ------------------------------------
+
+    /// The title's NEST row shows the bank, opens the plate, and a cheap track
+    /// buys on one Enter (the price is also debited once).
+    #[test]
+    fn the_title_nest_row_opens_the_nest_and_buys_a_track() {
+        let mut h = Harness::new(80, 24);
+        h.app.scores.meta.bank = 500;
+        let title = h.frame(&[]);
+        assert!(title.contains("THE NEST"), "no nest row on the title:
+{title}");
+        assert!(title.contains("500g"), "the row does not show the bank:
+{title}");
+
+        h.click("THE NEST");
+        assert_eq!(h.app.screen.name_for_test(), "Nest");
+        assert!(!h.app.nest_read_only, "the title path may buy");
+        assert!(h.app.scores.meta.can_buy(meta::Track::WeaponSlots));
+
+        // QUICK PAWS is the third row in the table.
+        h.frame(&[KeyCode::Down]);
+        h.frame(&[KeyCode::Down]);
+        assert_eq!(h.app.nest_ui.cursor, meta::Track::MoveSpeed.index());
+        let before = h.app.scores.meta.bank;
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.scores.meta.level(meta::Track::MoveSpeed), 1);
+        assert_eq!(h.app.scores.meta.bank, before - 40);
+        assert!(h.app.nest_ui.pending.is_none(), "a cheap buy is not confirmed");
+
+        // Esc returns to the title, and the title row shows the new balance.
+        h.frame(&[KeyCode::Esc]);
+        assert_eq!(h.app.screen.name_for_test(), "Title");
+        let title = h.frame(&[]);
+        assert!(title.contains("460g"), "the row did not re-read the bank:\n{title}");
+    }
+
+    /// The pause screen opens the nest **read-only**: the plate shows the run's
+    /// bonuses and not one press can spend the profile's bank.
+    #[test]
+    fn the_pause_nest_is_a_read_only_dossier() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        h.app.scores.meta.bank = 1_000;
+        h.frame(&[KeyCode::Esc]);
+        assert_eq!(h.app.screen.name_for_test(), "Paused");
+        h.frame(&[KeyCode::Char('b')]);
+        assert_eq!(h.app.screen.name_for_test(), "Nest");
+        assert!(h.app.nest_read_only);
+        h.app.nest_ui.cursor = meta::Track::WeaponSlots.index();
+        h.frame(&[]);
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(
+            h.app.scores.meta.level(meta::Track::WeaponSlots),
+            0,
+            "a run in flight cannot buy a slot"
+        );
+        assert_eq!(h.app.scores.meta.bank, 1_000);
+        assert!(h.app.scores.meta.bank > 0);
+        // Esc goes back to the pause plate, not the title.
+        h.frame(&[KeyCode::Esc]);
+        assert_eq!(h.app.screen.name_for_test(), "Paused");
+    }
+
+    /// An expensive purchase takes two Enters, and Esc cancels the arming.
+    #[test]
+    fn an_expensive_purchase_needs_a_second_enter() {
+        let mut h = Harness::new(80, 24);
+        h.app.scores.meta.bank = 1_000;
+        h.app.scores.meta.set_level(meta::Track::WeaponSlots, 2);
+        h.app.open_nest(Screen::Title);
+        h.app.nest_ui.cursor = meta::Track::WeaponSlots.index();
+        h.frame(&[]);
+
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.scores.meta.level(meta::Track::WeaponSlots), 2, "armed only");
+        assert_eq!(
+            h.app.nest_ui.pending,
+            Some(nest_ui::Pending::Buy(meta::Track::WeaponSlots))
+        );
+        h.frame(&[KeyCode::Esc]);
+        assert!(h.app.nest_ui.pending.is_none());
+        assert_eq!(h.app.screen.name_for_test(), "Nest", "Esc cancelled the buy");
+
+        h.frame(&[KeyCode::Enter]);
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.scores.meta.level(meta::Track::WeaponSlots), 3);
+        assert_eq!(h.app.scores.meta.bank, 1_000 - 520);
+    }
+
+    /// The refund-all is free, needs a confirm, and returns exactly what was
+    /// paid (the sandbox the screen promises).
+    #[test]
+    fn refunding_the_nest_needs_a_confirm_and_returns_the_gold() {
+        let mut h = Harness::new(80, 24);
+        h.app.scores.meta.bank = 100;
+        h.app.open_nest(Screen::Title);
+        h.app.nest_ui.cursor = meta::Track::WeaponSlots.index();
+        h.frame(&[]);
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.scores.meta.bank, 40);
+
+        h.frame(&[KeyCode::Char('r')]);
+        assert_eq!(h.app.nest_ui.pending, Some(nest_ui::Pending::Refund));
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.scores.meta.total_levels(), 0);
+        assert_eq!(h.app.scores.meta.bank, 100, "the 60 g came back");
+    }
+
+    /// A finished run banks its unspent purse, the incident report prints the
+    /// tally and offers the nest, and leaving cannot bank it twice.
+    #[test]
+    fn the_incident_report_banks_the_haul_and_offers_the_nest() {
+        let mut h = Harness::new(90, 32);
+        h.enter_playing();
+        h.app.world.as_mut().unwrap().gold = 130;
+        h.app.world.as_mut().unwrap().player.hp = -1.0;
+        h.frame(&[]);
+        assert_eq!(h.app.screen.name_for_test(), "End");
+
+        let tally = h.app.bank_tally.as_ref().copied().unwrap_or_default();
+        assert_eq!(tally.purse, 130);
+        assert_eq!(tally.banked, 130, "no floor was cleared, so no bonuses");
+        assert_eq!(h.app.scores.meta.bank, 130);
+
+        let text = h.frame(&[]);
+        assert!(text.contains("NEST"), "no tally on the report:
+{text}");
+        assert!(text.contains("+130"), "the tally does not name the haul:
+{text}");
+        assert!(
+            text.contains("the nest"),
+            "the report lost its nest chip:
+{text}"
+        );
+
+        // N opens the nest and Esc comes back to the report.
+        h.frame(&[KeyCode::Char('n')]);
+        assert_eq!(h.app.screen.name_for_test(), "Nest");
+        h.frame(&[KeyCode::Esc]);
+        assert_eq!(h.app.screen.name_for_test(), "End");
+        // Quitting now must not bank the same run again.
+        h.frame(&[KeyCode::Char('q')]);
+        assert_eq!(h.app.screen.name_for_test(), "Title");
+        assert_eq!(h.app.scores.meta.bank, 130);
+    }
+
+    /// Quitting a live run banks the unspent purse at the practice rate, so a
+    /// player can never lose the haul by walking away.
+    #[test]
+    fn a_quit_mid_run_still_banks_the_purse() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        h.app.world.as_mut().unwrap().gold = 42;
+        h.frame(&[KeyCode::Esc]);
+        h.frame(&[KeyCode::Char('q')]);
+        assert_eq!(h.app.screen.name_for_test(), "Title");
+        assert_eq!(h.app.scores.meta.bank, 42, "the campaign banks at full rate");
+    }
+
+    /// A saved nest shapes the run the App starts, and the read-only dossier is
+    /// the run's own modifiers.
+    #[test]
+    fn a_saved_nest_shapes_the_next_run() {
+        let mut app = test_app();
+        app.scores.meta.bank = 10_000;
+        app.scores.meta.set_level(meta::Track::WeaponSlots, 4);
+        app.scores.meta.set_level(meta::Track::Damage, 6);
+        app.scores.meta.set_level(meta::Track::Revive, 1);
+        let mut h = Harness::with_app(app, 80, 30);
+        h.enter_playing();
+        let w = h.app.world.as_ref().unwrap();
+        assert_eq!(w.player.loadout.max_weapons(), 8);
+        assert_eq!(w.player.loadout.stats.damage_mult, 1.0 + 0.025 * 6.0);
+        assert_eq!(w.revives_left, 1);
+        assert!(
+            h.app.run_modifiers().tracks_owned() == 3,
+            "the modifiers name the three tracks that were bought"
+        );
+        // The HUD's chip names the nest on a run that carries upgrades, and the
+        // frame draws without it for a fresh profile (asserted elsewhere).
+        let text = h.frame(&[]);
+        assert!(text.contains("NEST") || text.contains('⌂'), "no HUD nest chip:\n{text}");
+    }
+
+    /// The options RESET row takes two presses and wipes the nest (bank and
+    /// tracks) without touching the scores.
+    #[test]
+    fn the_options_reset_wipes_the_nest_after_a_confirm() {
+        let mut h = Harness::new(80, 30);
+        h.app.scores.meta.bank = 500;
+        h.app.scores.meta.set_level(meta::Track::Damage, 3);
+        h.app.open_options(Screen::Title);
+        h.app.options_row = options::RESET_ROW;
+        h.frame(&[]);
+        h.frame(&[KeyCode::Enter]);
+        assert!(h.app.reset_armed, "the first press only arms it");
+        assert!(h.app.scores.meta.total_levels() > 0);
+        assert!(h.app.scores.meta.bank > 0);
+        h.frame(&[KeyCode::Enter]);
+        assert_eq!(h.app.scores.meta.total_levels(), 0);
+        assert_eq!(h.app.scores.meta.bank, 0);
+        assert!(!h.app.reset_armed);
+    }
+
+    /// The nest's rows are clickable at the compact and the roomy size: the
+    /// pointer buys exactly the row it is on, and the wheel walks the list.
+    #[test]
+    fn the_nest_rows_buy_by_click_at_57_and_120() {
+        for (w, h) in [(57u16, 20u16), (120, 40)] {
+            let mut h = Harness::new(w, h);
+            h.app.scores.meta.bank = 300;
+            h.app.open_nest(Screen::Title);
+            h.frame(&[]);
+            let pos = h.locate("QUICK PAWS");
+            h.events(&[], &[(MouseEventKind::Down(MouseButton::Left), pos)]);
+            assert_eq!(
+                h.app.scores.meta.level(meta::Track::MoveSpeed),
+                1,
+                "{w}x{h}: the click did not buy the row under the pointer"
+            );
+            assert_eq!(h.app.scores.meta.bank, 300 - 40);
+            assert_eq!(h.app.nest_ui.cursor, meta::Track::MoveSpeed.index());
+            // The wheel walks the list (one track a notch).
+            h.events(&[], &[(MouseEventKind::ScrollDown, (2, 2))]);
+            assert_eq!(h.app.nest_ui.cursor, meta::Track::MoveSpeed.index() + 1);
+        }
+    }
+
     #[test]
     fn test_app_is_deterministic_and_does_not_persist() {
         let mut a = Harness::new(80, 30);
