@@ -31,7 +31,7 @@ use super::art_traps::{
     MazeRewardView, MousetrapView, OneWayDoorState, OneWayDoorView, RatHoleView, StickyTrapView,
 };
 use super::art_walls::{Cardinal, WallCellView};
-use super::collision::{SizeClass, TileMap, TILE, TILE_F};
+use super::collision::{cell_of, SizeClass, TileMap, TILE, TILE_F};
 use super::levelgen;
 use super::nav::NavGrid;
 
@@ -668,6 +668,13 @@ pub enum LightFixtureKind {
     Arena,
     Broken,
     Sun,
+    /// A lamp mounted on a structural wall face (batch 9). Unlike the hanging
+    /// fixtures its source sits on the face itself and throws a fan of light
+    /// into the room along [`LightFixture::wall_facing`], so a corridor reads
+    /// as a rhythm of pools with dark stretches between them. The wall it
+    /// hangs on occludes the half of the fan behind it. Placed by
+    /// `levelgen::lights`, drawn and lit by `render::lighting::fixtures`.
+    Sconce,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -676,6 +683,37 @@ pub struct LightFixture {
     pub kind: LightFixtureKind,
     pub radius: f32,
     pub seed: u32,
+}
+
+impl LightFixture {
+    /// The direction a wall-mounted lamp faces: the unit vector pointing away
+    /// from the wall face it hangs on, into the floor it lights.
+    ///
+    /// A [`LightFixtureKind::Sconce`] is placed **on its face**, half a pixel
+    /// inside the floor cell in front of it, so the nearest wall cell is always
+    /// the one it is mounted on (8.5 px from `pos`) and every other wall cell is
+    /// at least 17.9 px out — the rule is unambiguous and needs no stored
+    /// facing. The generator mounts by exactly this rule and the renderer reads
+    /// it back with it, so the two can never disagree; a fixture with no wall
+    /// neighbour (nothing places one) falls back to south, into the room.
+    ///
+    /// Allocation-free and total, so the renderer may call it per fixture per
+    /// frame.
+    pub fn wall_facing(&self, tiles: &TileMap) -> Vec2 {
+        let (cx, cy) = cell_of(self.pos);
+        let mut best: Option<(f32, Vec2)> = None;
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            if !tiles.get(cx + dx, cy + dy).is_wall() {
+                continue;
+            }
+            let centre = TileMap::tile_rect(cx + dx, cy + dy).center();
+            let d = self.pos.dist_sq(centre);
+            if best.is_none_or(|(nearest, _)| d < nearest) {
+                best = Some((d, Vec2::new(-(dx as f32), -(dy as f32))));
+            }
+        }
+        best.map_or(Vec2::new(0.0, 1.0), |(_, dir)| dir)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -26,21 +26,20 @@ pub const MINIMAP_ROW: usize = 2;
 pub const CURSOR_ROW: usize = 3;
 pub const MUTE_ROW: usize = 4;
 pub const ZOOM_ROW: usize = 5;
-/// Sub-cell detail for the zoomed-out view (`crate::render::subcell`).
-pub const DETAIL_ROW: usize = 6;
 /// Auto-pick level-ups (persisted; the level-up screen's toggle writes it too).
-pub const AUTO_PICK_ROW: usize = 7;
+pub const AUTO_PICK_ROW: usize = 6;
 // Wave 3 controls.
-pub const SCHEME_ROW: usize = 8;
-pub const CONTROLS_ROW: usize = 9;
-pub const DEADZONE_ROW: usize = 10;
-pub const RUMBLE_ROW: usize = 11;
+pub const SCHEME_ROW: usize = 7;
+pub const CONTROLS_ROW: usize = 8;
+pub const DEADZONE_ROW: usize = 9;
+pub const RUMBLE_ROW: usize = 10;
 /// Wipe the nest (`crate::meta`): the bank and every permanent upgrade. It
 /// takes two presses (the row reads `WIPE`, then `CONFIRM?`).
-pub const RESET_ROW: usize = 12;
-pub const BACK_ROW: usize = 13;
-/// How many rows the screen has.
-pub const ROW_COUNT: usize = 14;
+pub const RESET_ROW: usize = 11;
+pub const BACK_ROW: usize = 12;
+/// How many rows the screen has. (Sub-cell detail used to have a row here; it
+/// is always on now — see `crate::render::subcell` — so the plate lost one row.)
+pub const ROW_COUNT: usize = 13;
 
 /// Slider identity used by [`Target::OptionsBar`]: the value the track edits.
 pub const MUSIC_BAR: usize = 0;
@@ -74,8 +73,6 @@ pub enum Row {
     AutoPick,
     /// The nest's reset (appended last: the legacy rows keep their order).
     Reset,
-    /// Sub-cell detail when zoomed out (OFF / AUTO).
-    Detail,
 }
 
 /// The screen's rows in order; index with the constants above.
@@ -86,7 +83,6 @@ pub const ROWS: [Row; ROW_COUNT] = [
     Row::Cursor,
     Row::Mute,
     Row::Zoom,
-    Row::Detail,
     Row::AutoPick,
     Row::Scheme,
     Row::Controls,
@@ -113,7 +109,6 @@ impl Row {
             Row::Rumble => "RUMBLE",
             Row::AutoPick => "AUTO-PICK",
             Row::Reset => "NEST",
-            Row::Detail => "DETAIL",
         }
     }
 
@@ -153,10 +148,6 @@ pub struct OptionsView {
     /// Auto-pick level-ups: the same preference the level-up screen's toggle
     /// writes. Chests are **not** auto-opened (see the row's note).
     pub auto_pick: bool,
-    /// The DETAIL option (`true` = AUTO) and the glyph set it resolves to on
-    /// this terminal, which the row prints so AUTO is never a mystery.
-    pub detail: bool,
-    pub detail_set: crate::render::subcell::SubcellSet,
 }
 
 /// Rows and slider tracks for one terminal area.
@@ -295,16 +286,6 @@ fn value_text(view: &OptionsView, row: Row) -> String {
                 "ON".to_string()
             } else {
                 "OFF".to_string()
-            }
-        }
-        Row::Detail => {
-            use crate::render::subcell::SubcellSet;
-            match (view.detail, view.detail_set) {
-                // An environment override can force a set with the option off.
-                (false, SubcellSet::Off) => "OFF".to_string(),
-                (true, SubcellSet::Off) => "AUTO: N/A".to_string(),
-                (true, set) => format!("AUTO: {}", set.as_str().to_uppercase()),
-                (false, set) => format!("ENV: {}", set.as_str().to_uppercase()),
             }
         }
         Row::Rumble => {
@@ -518,8 +499,6 @@ pub fn draw(f: &mut Frame, area: Rect, view: &OptionsView, hits: &mut HitMap) {
             " master mute on — levels are kept"
         } else if view.row == AUTO_PICK_ROW {
             " cards skipped; chests still open their card"
-        } else if view.row == DETAIL_ROW {
-            " finer blocks when zoomed out (try --glyph-card)"
         } else {
             " effects preview while you adjust"
         };
@@ -574,8 +553,6 @@ mod tests {
             deadzone: 0.2,
             rumble: false,
             auto_pick: false,
-            detail: false,
-            detail_set: crate::render::subcell::SubcellSet::Off,
         }
     }
 
@@ -706,10 +683,11 @@ mod tests {
         }
     }
 
-    /// On a 20-row terminal the plate's content is 18 rows and `legend + 2` is
-    /// its bottom border: the note closes up under the legend instead of being
-    /// printed over the frame. At 19 rows the fourteen rows and the legend
-    /// fill the plate, and the note is the thing that gives way.
+    /// On a 20-row terminal the plate's content is 18 rows and `legend + 2`
+    /// sits inside it, so the note has its blank row. With the DETAIL row gone
+    /// (thirteen rows) a 19-row terminal fits the note again: its content is
+    /// 17 rows, the legend lands on row 17 and the note on the plate's last
+    /// content row instead of over its bottom border.
     #[test]
     fn the_note_stays_inside_the_plate_on_a_short_terminal() {
         for (w, h) in [(57u16, 19u16), (80, 19), (57, 20), (80, 24), (120, 40)] {
@@ -728,12 +706,34 @@ mod tests {
                 "{w}x{h}: text on the plate's bottom border: {border:?}"
             );
             let (text, _) = frame(w, h, &view(AUTO_PICK_ROW));
-            assert_eq!(
+            assert!(
                 text.contains("chests still open their card"),
-                h >= 20,
-                "{w}x{h}: the auto-pick note (shown from 20 rows up):\n{text}"
+                "{w}x{h}: the auto-pick note does not fit its own plate:\n{text}"
             );
             assert!(text.contains("Esc back"), "{w}x{h}: legend missing");
+        }
+    }
+
+    /// The DETAIL row is gone (detail is always on, see
+    /// `crate::render::subcell`): no row of the plate carries it, every row the
+    /// plate does have is drawn and clickable, and the freed row brings the
+    /// legend and its note inside the plate at 19 rows as well.
+    #[test]
+    fn there_is_no_detail_row_any_more() {
+        for (w, h) in [(57u16, 20u16), (80, 19), (120, 40)] {
+            let (text, hits) = frame(w, h, &view(MUSIC_ROW));
+            assert!(!text.contains("DETAIL"), "{w}x{h}: a DETAIL row survived:\n{text}");
+            assert!(!text.contains("AUTO:"), "{w}x{h}: a stale detail value:\n{text}");
+            for i in 0..ROW_COUNT {
+                assert!(
+                    hits.rect_for(Target::OptionsRow(i)).is_some(),
+                    "{w}x{h}: row {i} is not drawn"
+                );
+            }
+            assert_eq!(ROWS.len(), ROW_COUNT);
+            assert!(text.contains("AUTO-PICK"), "{w}x{h}: the auto-pick row is gone");
+            assert!(text.contains("ZOOM"), "{w}x{h}: the zoom row is gone");
+            assert!(text.contains("Esc back"), "{w}x{h}: the legend does not fit");
         }
     }
 

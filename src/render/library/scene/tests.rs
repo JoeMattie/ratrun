@@ -5,9 +5,12 @@
 //! The animating plate is deliberately sampled, not proven per entry: the
 //! registry is content, and a new kind's *behaviour* is the simulation's to
 //! test. What is exhaustive here is the plan (a row cannot ship without an
-//! answer) and the two-loop survival of everything that runs.
+//! answer), the two-loop survival of everything that runs, and the card's two
+//! promises: **a bestiary plate shows no rat** (the render flag is what takes
+//! it out), and **the subject stays in frame** for most of the loop.
 
 use super::*;
+use crate::game::bullet::{Bullet, Faction};
 use crate::game::ecs::systems::boss::BossState;
 use crate::game::ecs::systems::miniboss::{Miniboss, MinibossState};
 use crate::game::hazards::SteamPhase;
@@ -46,7 +49,7 @@ fn every_registry_row_has_a_scene_or_a_reason() {
 }
 
 /// Every scene builds, then runs two whole loops: no panic, no game over, and
-/// the card rat still alive at every step.
+/// the card rat still alive at every step (hidden or not: it is the real rat).
 #[test]
 fn every_scene_runs_two_loops_and_the_rat_survives() {
     for row in all_rows() {
@@ -72,6 +75,23 @@ fn every_scene_runs_two_loops_and_the_rat_survives() {
 }
 
 // ---- Sampling helpers -----------------------------------------------------
+
+/// Every bestiary entry: the ordinary bodies, the named fights, the bosses and
+/// the Elite card. The one still bestiary row (the legacy `Boss` body) is not
+/// a scene and is skipped by the plan, not by a special case here.
+fn bestiary_keys() -> Vec<Key> {
+    let mut keys = Vec::new();
+    for row in all_rows() {
+        if matches!(
+            row.key,
+            Key::Enemy(_) | Key::Miniboss(_) | Key::Boss(_) | Key::Object(ObjectKind::Elite)
+        ) && plan(row.key) == Plan::Sandbox
+        {
+            keys.push(row.key);
+        }
+    }
+    keys
+}
 
 /// Step one whole loop, calling `f` after every tick (before the rebuild).
 fn one_loop(scene: &mut LibraryScene, mut f: impl FnMut(&mut LibraryScene)) {
@@ -115,6 +135,16 @@ fn hostile_shots(scene: &mut LibraryScene) -> usize {
         .count()
 }
 
+/// Where the hostile shots in flight are right now.
+fn hostile_shot_points(scene: &mut LibraryScene) -> Vec<Vec2> {
+    let w = scene.world();
+    let mut q = w.ecs.query::<&Bullet>();
+    q.iter(&w.ecs)
+        .filter(|b| b.faction == Faction::Enemy)
+        .map(|b| b.pos)
+        .collect()
+}
+
 /// Is any body in the scene hurt (a weapon's own proof that it connected)?
 fn a_body_is_hurt(scene: &mut LibraryScene) -> bool {
     let w = scene.world();
@@ -123,13 +153,143 @@ fn a_body_is_hurt(scene: &mut LibraryScene) -> bool {
     w.kills > 0 || q.iter(&w.ecs).any(|e| e.hp < e.max_hp - 0.01)
 }
 
+/// Was `p` on the plate the last draw covered?
+fn on_plate(scene: &LibraryScene, p: Vec2) -> bool {
+    let cam = scene.world.cam;
+    let v = scene.view;
+    p.x >= cam.x - 0.5
+        && p.x <= cam.x + v.x + 0.5
+        && p.y >= cam.y - 0.5
+        && p.y <= cam.y + v.y + 0.5
+}
+
+/// Does the plate hold this exact colour?
+fn has_colour(pb: &PixelBuffer, c: Rgb) -> bool {
+    pb.pixels().iter().any(|p| *p == c)
+}
+
+/// The ink pass's rat core, and only the ink pass's rat core: two exact
+/// colours no other drawing code in the game produces.
+const RAT_INK: [Rgb; 2] = [(255, 240, 244), (255, 196, 210)];
+
+fn has_rat_ink(pb: &PixelBuffer) -> bool {
+    pb.pixels().iter().any(|p| RAT_INK.contains(p))
+}
+
+// ---- A portrait of its subject --------------------------------------------
+
+/// No bestiary plate draws a rat. The render flag is the mechanism (the
+/// simulation still needs the target), and the same plate with the flag off
+/// *does* differ, so this is a real assertion and not a plate that happens to
+/// hide the rat behind its own dummy.
+#[test]
+fn bestiary_plates_show_no_rat() {
+    for key in bestiary_keys() {
+        let mut scene = LibraryScene::build(key).unwrap_or_else(|| panic!("{key:?} has no scene"));
+        assert!(scene.world.hide_rat, "{key:?} would draw the card's rat");
+        let mut art = PixelBuffer::new(44, 30);
+        plate(&mut scene, &mut art);
+        assert!(!has_rat_ink(&art), "{key:?} drew the ink pass's rat mark");
+        let hidden = art.pixels().to_vec();
+        scene.world.hide_rat = false;
+        plate(&mut scene, &mut art);
+        assert!(
+            art.pixels() != hidden.as_slice(),
+            "{key:?}: hide_rat changes nothing, so the plate is not the proof"
+        );
+        scene.world.hide_rat = true;
+        for _ in 0..20 {
+            plate(&mut scene, &mut art);
+            assert!(!has_rat_ink(&art), "{key:?} drew the ink pass's rat mark");
+            scene.step();
+        }
+    }
+}
+
+/// The subject is on the plate for at least four fifths of the loop: a card
+/// that frames a body must not lose it at the edge.
+#[test]
+fn every_bestiary_subject_stays_on_its_plate() {
+    for key in bestiary_keys() {
+        let mut scene = LibraryScene::build(key).unwrap_or_else(|| panic!("{key:?} has no scene"));
+        let mut art = PixelBuffer::new(44, 30);
+        let ticks = (scene.loop_secs() / TICK) as u32;
+        let (mut seen, mut on) = (0u32, 0u32);
+        for i in 0..ticks {
+            if i % 6 == 0 {
+                plate(&mut scene, &mut art);
+                seen += 1;
+                if scene.subject_on_plate() {
+                    on += 1;
+                }
+            }
+            scene.step();
+        }
+        assert!(
+            on * 100 >= seen * 80,
+            "{key:?}: the subject was on the plate {on} of {seen} samples"
+        );
+    }
+}
+
+/// Every family whose plate is about an attack draws the card's own practice
+/// target where the hidden rat stands — and it is the card's own pixels, not
+/// an entity: no body of that kind of colour can be among the enemies.
+#[test]
+fn the_aimed_families_draw_a_practice_dummy() {
+    for key in bestiary_keys() {
+        let mut scene = LibraryScene::build(key).unwrap_or_else(|| panic!("{key:?} has no scene"));
+        if !scene.script.dummy {
+            continue;
+        }
+        let mut art = PixelBuffer::new(44, 30);
+        let mut seen = false;
+        for _ in 0..40 {
+            plate(&mut scene, &mut art);
+            seen |= has_colour(&art, CORK) && has_colour(&art, RIND);
+            scene.step();
+        }
+        assert!(seen, "{key:?} draws no practice dummy");
+    }
+}
+
+/// The four bestiary families do not share one script: a pack is not a
+/// shooter, a shooter is not a trick, and a trick is not a heavy.
+#[test]
+fn the_bestiary_families_run_different_scripts() {
+    let mut shapes: Vec<(f32, f32, bool)> = Vec::new();
+    for slot in [Slot::A, Slot::C, Slot::R, Slot::I, Slot::H] {
+        let key = Key::Enemy(roster::kind(Theme::Sewer, slot));
+        let scene = LibraryScene::build(key).expect("a bestiary scene");
+        let shape = (scene.script.loop_secs, scene.script.zoom, scene.script.dummy);
+        assert!(
+            !shapes.contains(&shape),
+            "{slot:?} restages another family's script: {shape:?}"
+        );
+        shapes.push(shape);
+    }
+    let theme = Theme::Sewer;
+    let pack = LibraryScene::build(Key::Enemy(roster::kind(theme, Slot::A))).expect("a pack");
+    let shock = LibraryScene::build(Key::Enemy(roster::kind(theme, Slot::I))).expect("a trick");
+    assert!(!pack.script.dummy, "a pack attacks nothing, so it has no dummy");
+    assert!(shock.script.dummy, "a trick is aimed at a dummy");
+    assert!(
+        pack.script.cue.is_some(),
+        "a pack needs its crossing waypoint"
+    );
+    assert!(
+        pack.subject.is_some() && shock.subject.is_some(),
+        "both families are about a body"
+    );
+}
+
 // ---- The samples ----------------------------------------------------------
 
-/// One `R` (shooter), one `V` (chaser) and one `N` (trick) body per floor, the
-/// three behaviour classes the roster's own comments name: all three plates
-/// move, and the shooter's shot really leaves inside a loop. (A chaser's
-/// attack is contact and a trick's is a warned footprint, so the walk *is*
-/// their tell; the shot is the one attack a plate can prove from the world.)
+/// One `R` (shooter), one `C` (chaser) and one `I` (trick) body per floor: all
+/// three plates move, the shooter's shot really leaves inside a loop, and the
+/// chaser really runs its lap. (A trick's attack is a warned footprint, so its
+/// walk into range *is* the tell; the shot is the one attack a plate can prove
+/// from the world.)
 #[test]
 fn a_shooter_a_chaser_and_a_trick_per_floor_animate() {
     for theme in Theme::playable() {
@@ -142,6 +302,41 @@ fn a_shooter_a_chaser_and_a_trick_per_floor_animate() {
         let mut peak = 0;
         one_loop(&mut scene, |s| peak = peak.max(hostile_shots(s)));
         assert!(peak > 0, "{key:?} never fired inside one loop");
+
+        let key = Key::Enemy(roster::kind(theme, Slot::C));
+        let mut scene = LibraryScene::build(key).expect("a chaser scene");
+        let mut first: Option<Vec2> = None;
+        let mut far = 0.0f32;
+        one_loop(&mut scene, |s| {
+            if let Some(p) = s.subject_pos() {
+                let start = *first.get_or_insert(p);
+                far = far.max(p.dist(start));
+            }
+        });
+        assert!(far > 8.0, "{key:?} never left its spot: {far} px");
+    }
+}
+
+/// A shooter's shot stays on the plate for its whole flight: the pellet is
+/// never alone on empty floor, because the lane is framed with both ends.
+#[test]
+fn every_shooter_keeps_its_shot_on_the_plate() {
+    for theme in Theme::playable() {
+        let key = Key::Enemy(roster::kind(theme, Slot::R));
+        let mut scene = LibraryScene::build(key).expect("a shooter scene");
+        let mut art = PixelBuffer::new(44, 30);
+        let (mut shots, mut off) = (0u32, 0u32);
+        one_loop(&mut scene, |s| {
+            plate(s, &mut art);
+            for p in hostile_shot_points(s) {
+                shots += 1;
+                if !on_plate(s, p) {
+                    off += 1;
+                }
+            }
+        });
+        assert!(shots > 0, "{key:?} never fired inside one loop");
+        assert_eq!(off, 0, "{key:?}: {off} of {shots} shots left the plate");
     }
 }
 
@@ -194,7 +389,7 @@ fn the_bosses_run_their_attack_states() {
     }
 }
 
-/// Six weapons hit the dummies the scene feeds them.
+/// Six weapons hit the standing dummies the scene keeps in front of the rat.
 #[test]
 fn the_weapons_fire_at_the_dummies() {
     for kind in [
@@ -228,6 +423,37 @@ fn the_evolutions_run() {
         let mut hit = false;
         one_loop(&mut scene, |s| hit |= a_body_is_hurt(s));
         assert!(hit, "{kind:?}'s evolution never connected inside one loop");
+    }
+}
+
+/// The field guide separates what a body springs from what the rat is the
+/// point of: a glue board, a mousetrap, a steam grate and an ink pad are shown
+/// being sprung by fodder (the rat is not drawn); a pit, a rat-hole and the
+/// sliding cargo are about the rat, so it stays.
+#[test]
+fn the_traps_are_sprung_by_fodder_not_the_rat() {
+    for kind in [
+        ObjectKind::StickyBoard,
+        ObjectKind::Mousetrap,
+        ObjectKind::SteamGrate,
+        ObjectKind::InkPad,
+        ObjectKind::Slipstream,
+    ] {
+        let scene = LibraryScene::build(Key::Object(kind)).expect("a hazard scene");
+        assert!(scene.world.hide_rat, "{kind:?} shows the rat as its subject");
+    }
+    for kind in [
+        ObjectKind::Pit,
+        ObjectKind::RatHole,
+        ObjectKind::SlidingCargo,
+        ObjectKind::Gold,
+        ObjectKind::Chest,
+        ObjectKind::MazeCache,
+        ObjectKind::ShopHole,
+        ObjectKind::OneWayDoor,
+    ] {
+        let scene = LibraryScene::build(Key::Object(kind)).expect("a rat scene");
+        assert!(!scene.world.hide_rat, "{kind:?} hid the rat it is about");
     }
 }
 

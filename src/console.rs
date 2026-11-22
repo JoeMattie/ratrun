@@ -1092,6 +1092,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         read_only: false,
         handler: cmd_exec,
     },
+    CommandSpec {
+        name: "smooth",
+        aliases: &["epx"],
+        usage: "smooth [on|off]",
+        summary: "Toggle the 1x edge smoothing (a render-only A/B).",
+        args: &[ArgKind::OnOff],
+        read_only: true,
+        handler: cmd_smooth,
+    },
 ];
 
 /// Find a command by name or alias.
@@ -2241,6 +2250,15 @@ fn cmd_hitboxes(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> 
     Ok(())
 }
 
+fn cmd_smooth(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
+    // Render-only, like `fps` and `hitboxes` above: no simulation state moves,
+    // so it must not flag the run as cheated.
+    let on = parse_on_off(args.first().copied(), app.smooth_enabled())?;
+    app.set_smooth(on);
+    app.console_line(format!("smooth {}", if on { "on" } else { "off" }), LineKind::Success);
+    Ok(())
+}
+
 fn cmd_lights(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
     use crate::render::lighting::LightingMode;
     let raw = args.first().map(|s| s.to_ascii_lowercase());
@@ -2768,6 +2786,22 @@ mod tests {
             run_command(&mut app, cmd).expect(cmd);
             assert!(!app.console_cheat, "`{cmd}` must not flag the run");
         }
+    }
+
+    /// `smooth` is a render-only A/B (the 1x edge smoothing), so it must be
+    /// usable mid-run without branding the run CONSOLE USED.
+    #[test]
+    fn the_smooth_command_a_bs_the_picture_without_flagging() {
+        let mut app = fresh_app();
+        assert!(app.smooth_enabled(), "on by default");
+        run_command(&mut app, "smooth off").expect("smooth off");
+        assert!(!app.smooth_enabled());
+        assert!(!app.console_cheat, "a render-only toggle must not flag the run");
+        run_command(&mut app, "smooth on").expect("smooth on");
+        assert!(app.smooth_enabled());
+        run_command(&mut app, "smooth").expect("smooth steps");
+        assert!(!app.smooth_enabled(), "no argument flips it");
+        assert!(scrollback(&app).contains("smooth off"));
     }
 
     #[test]

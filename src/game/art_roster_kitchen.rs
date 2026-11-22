@@ -315,22 +315,23 @@ fn turned_row(pb: &mut PixelBuffer, fr: &Frame, x0: i32, x1: i32, y: i32, c: Pal
 
 // ---- Crumb Ant (V Skitterer, r 2.5) -----------------------------------------
 
-const ANT_HI: Rgb = (214, 146, 86);
-const ANT_MID: Rgb = (122, 70, 38);
-const ANT_LO: Rgb = (48, 24, 14);
-const ANT_KNEE: Rgb = (176, 112, 62);
-const ANT_EYE: Rgb = (255, 208, 112);
-const CRUMB_HI: Rgb = (255, 248, 214);
-const CRUMB_MID: Rgb = (238, 208, 146);
-const CRUMB_LO: Rgb = (158, 116, 62);
-const CRUMB_CRUST: Rgb = (122, 82, 40);
+const ANT_HI: Rgb = (242, 186, 124);
+const ANT_MID: Rgb = (182, 112, 60);
+const ANT_LO: Rgb = (96, 52, 28);
+const ANT_SPEC: Rgb = (248, 212, 162);
+const ANT_KNEE: Rgb = (224, 162, 98);
+const ANT_EYE: Rgb = (255, 224, 128);
+const CRUMB_HI: Rgb = (255, 254, 240);
+const CRUMB_MID: Rgb = (246, 224, 174);
+const CRUMB_LO: Rgb = (186, 144, 86);
+const CRUMB_CRUST: Rgb = (146, 102, 54);
 
-/// Three grease-dark mahogany beads with pinched waists, six articulated
-/// marching legs, and a toasted square biscuit crumb clamped in its jaws.
+/// Three sunlit chestnut-mahogany beads with pinched waists, six articulated
+/// marching legs, and a bright toasted square biscuit crumb clamped in its jaws.
 pub(crate) fn draw_crumbant(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, _cam: Vec2, _elite: bool) {
     let s = fr.r / 2.5;
     let body = pal(fr, ANT_HI, ANT_MID, ANT_LO);
-    let leg_lo = tone(fr, ANT_LO);
+    let leg_lo = tone(fr, ANT_MID);
     let leg_knee = tone(fr, ANT_KNEE);
     let lunge = if e.contact_cd > 0.25 { 0.55 * s } else { 0.0 };
 
@@ -348,7 +349,7 @@ pub(crate) fn draw_crumbant(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, _cam: V
             let knee = at(fr, u_hip * s + swing * 0.45, side * (2.05 * s + lift));
             let foot = at(fr, u_hip * s + swing - 0.35 * s, side * 3.05 * s);
             dim(pb, foot.0 + 1, foot.1 + 1, 0.74);
-            line_blend(pb, hip, knee, leg_knee, 0.92);
+            line_blend(pb, hip, knee, leg_knee, 0.96);
             line_blend(pb, knee, foot, leg_lo, 0.92);
         }
     }
@@ -359,24 +360,40 @@ pub(crate) fn draw_crumbant(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, _cam: V
     for side in [-1.0f32, 1.0] {
         let a0 = at(fr, 2.1 * s, side * 0.75 * s);
         let a1 = at(fr, 2.9 * s + lunge * 0.4, side * (1.85 * s + ant_wave * side));
-        line_blend(pb, a0, a1, ant_c, 0.80);
+        line_blend(pb, a0, a1, ant_c, 0.88);
     }
 
-    // Three distinct beads with crisp pinched petiole waists:
-    // 1) Gaster (plump rear abdomen with a subtle dark chitin band).
+    // Three distinct beads with crisp pinched petiole waists + glossy top-left
+    // chitin catchlights so all three beads read cleanly in 60% ambient light:
+    // 1) Gaster (plump rear abdomen with subtle chitin band + glossy specular dot).
     let gaster = place(fr, -2.55 * s, 0.0);
     shaded_ellipse(pb, fr, gaster, fr.f, (1.65 * s, 1.35 * s), body);
     let band_a = at(fr, -2.75 * s, -0.75 * s);
     let band_b = at(fr, -2.75 * s, 0.75 * s);
-    line_blend(pb, band_a, band_b, tone(fr, ANT_LO), 0.62);
+    line_blend(pb, band_a, band_b, tone(fr, ANT_LO), 0.42);
+    let g_spec = (
+        (gaster.x + LIGHT.x * 0.85 * s).round() as i32,
+        (gaster.y + LIGHT.y * 0.75 * s).round() as i32,
+    );
+    pb.plot(g_spec.0, g_spec.1, tone(fr, ANT_SPEC));
 
     // 2) Pinched narrow thorax (middle bead).
     let thorax = place(fr, -0.15 * s, 0.0);
     shaded_ellipse(pb, fr, thorax, fr.f, (0.95 * s, 0.80 * s), body);
+    let t_spec = (
+        (thorax.x + LIGHT.x * 0.4 * s).round() as i32,
+        (thorax.y + LIGHT.y * 0.4 * s).round() as i32,
+    );
+    pb.plot(t_spec.0, t_spec.1, tone(fr, ANT_HI));
 
     // 3) Head bead (front).
     let head = place(fr, (1.75 * s) + lunge * 0.35, 0.0);
     shaded_ellipse(pb, fr, head, fr.f, (1.05 * s, 1.05 * s), body);
+    let h_spec = (
+        (head.x + LIGHT.x * 0.55 * s).round() as i32,
+        (head.y + LIGHT.y * 0.55 * s).round() as i32,
+    );
+    pb.plot(h_spec.0, h_spec.1, tone(fr, ANT_SPEC));
 
     // Warm amber eye glints so the ant's face survives low ambient light.
     let eye = if fr.hit > 0.65 {
@@ -389,16 +406,17 @@ pub(crate) fn draw_crumbant(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, _cam: V
         pb.plot(ep.0, ep.1, eye);
     }
 
-    // Dark mandibles clamping the sides of the square crumb.
+    // Mandibles clamping the sides of the square crumb.
     let jaw_spread = if lunge > 0.0 { 1.35 } else { 1.05 };
+    let jaw_c = tone(fr, ANT_LO);
     for side in [-1.0f32, 1.0] {
         let j0 = at(fr, 2.35 * s + lunge * 0.35, side * 0.65 * s);
         let j1 = at(fr, 3.25 * s + lunge, side * jaw_spread * s);
-        line_blend(pb, j0, j1, leg_lo, 0.96);
+        line_blend(pb, j0, j1, jaw_c, 0.96);
     }
 
-    // The square crumb: crisp toasted 3x3 biscuit held ahead of the jaws,
-    // bobbing gently sideways with the march.
+    // The square crumb: crisp pale 3x3 biscuit held ahead of the jaws (strictly
+    // the brightest pixels on the body), bobbing gently sideways with the march.
     let bob_v = (fr.anim * 1.15).sin() * 0.30 * s;
     let (qx, qy) = at(fr, 3.95 * s + lunge, bob_v);
     for dy in -2..=2i32 {
@@ -426,7 +444,7 @@ pub(crate) fn draw_crumbant(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, _cam: V
     pb.plot(qx + 1, qy + 1, c_crust);
 }
 
-/// Far LOD: three pinched dark-rimmed beads, swapping feet and the pale crumb.
+/// Far LOD: three lifted pinched beads, swapping feet and the brightest pale crumb.
 pub(crate) fn draw_crumbant_lod(
     pb: &mut PixelBuffer,
     fr: &Frame,
@@ -440,18 +458,18 @@ pub(crate) fn draw_crumbant_lod(
     let (fx, fy) = at(fr, 0.2 * s, side * s);
     pb.plot(fx, fy, tone(fr, ANT_KNEE));
     let (bx, by) = at(fr, -1.6 * s, -side * s);
-    pb.plot(bx, by, tone(fr, ANT_LO));
+    pb.plot(bx, by, tone(fr, ANT_MID));
 
     let (gx, gy) = at(fr, -2.3 * s, 0.0);
     dim(pb, gx + 1, gy + 1, 0.70);
-    pb.plot(gx, gy, tone(fr, ANT_MID));
-    pb.plot(gx - 1, gy, tone(fr, ANT_LO));
+    pb.plot(gx, gy, tone(fr, ANT_HI));
+    pb.plot(gx - 1, gy, tone(fr, ANT_MID));
     let (tx, ty) = centre(fr);
-    pb.plot(tx, ty, tone(fr, ANT_LO));
+    pb.plot(tx, ty, tone(fr, ANT_MID));
     let (hx, hy) = at(fr, 1.7 * s, 0.0);
-    pb.plot(hx, hy, tone(fr, ANT_HI));
+    pb.plot(hx, hy, tone(fr, ANT_SPEC));
 
-    // Crisp 2x2 pale square crumb at the front so the column reads at 2x zoom.
+    // Crisp 2x2 pale square crumb at the front (brightest pixel on the ant).
     let (qx, qy) = at(fr, 3.6 * s, 0.0);
     pb.plot(qx, qy, tone(fr, CRUMB_HI));
     pb.plot(qx + 1, qy, tone(fr, CRUMB_MID));
@@ -1873,5 +1891,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn crumb_ant_beads_are_lifted_and_crumb_is_brightest() {
+        let mut e = body(EnemyKind::CrumbAnt);
+        e.facing = Vec2::new(1.0, 0.0);
+        e.anim = 0.0;
+        let mut pb = PixelBuffer::new(80, 80);
+        pb.clear((0, 0, 0));
+        art_enemy::draw_enemy(&mut pb, &e, Vec2::ZERO, (255, 0, 255));
+        let lum = |c: Rgb| c.0 as u32 + c.1 as u32 + c.2 as u32;
+        let mut max_lum = 0u32;
+        let mut max_pos = (0i32, 0i32);
+        let mut lifted_beads = 0usize;
+        for y in 0..80usize {
+            for x in 0..80usize {
+                let c = pb.pixel_at(x, y);
+                if c == (0, 0, 0) {
+                    continue;
+                }
+                let l = lum(c);
+                if l > max_lum {
+                    max_lum = l;
+                    max_pos = (x as i32, y as i32);
+                }
+                // Warm chestnut pixels behind the crumb (x <= 42 for east-facing ant at x = 40).
+                if (x as i32) <= 42 && l >= 320 {
+                    lifted_beads += 1;
+                }
+            }
+        }
+        assert!(lifted_beads >= 8, "crumb ant beads must stay lifted above dark tiles (got {lifted_beads})");
+        assert!(max_lum >= 740, "pale square crumb must be bright (max {max_lum})");
+        // East-facing ant holds the crumb ahead of its head (x >= 43).
+        assert!(max_pos.0 >= 43, "brightest pixel should sit on the carried crumb, got {max_pos:?}");
     }
 }

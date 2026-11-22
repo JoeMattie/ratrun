@@ -329,12 +329,13 @@ fn configure(run: &mut AutoRun, cfg: &Cfg) -> Rect {
     w.set_zoom_instant(cfg.zoom);
     w.lighting = cfg.tier;
     w.lighting_depth = crate::term::color_depth();
-    // `RATRUN_SUBCELL` shapes a direct run the way it shapes the app's.
+    // `RATRUN_SUBCELL` and `RATRUN_SMOOTH` shape a direct run the way they
+    // shape the app's.
     w.subcell = crate::render::subcell::resolve(
-        false,
         crate::render::subcell::Choice::from_env(),
         crate::term::block_set(),
     );
+    w.smooth = crate::render::subcell::smooth_from_env();
     w.prof_reset_controller();
     prof::freeze_controller(!cfg.free);
     g

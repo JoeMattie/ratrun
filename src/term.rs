@@ -119,7 +119,7 @@ impl GlyphSet {
 }
 
 /// The finest block-glyph family the terminal is known to draw cleanly: what
-/// the DETAIL option's AUTO may use for the zoomed-out playfield
+/// the always-on sub-cell detail may use for the playfield
 /// (`crate::render::subcell`). Ordered coarse to fine.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum BlockSet {
@@ -551,7 +551,7 @@ fn detect_glyphs(
     (GlyphSet::Unicode, GlyphSource::Default)
 }
 
-/// The block family for the DETAIL option. An explicit answer wins; the safe
+/// The block family for the sub-cell detail. An explicit answer wins; the safe
 /// glyph set and a multiplexer (whose width table is its own) keep the half
 /// block; otherwise only a terminal known to draw the glyphs itself gets them.
 fn detect_blocks(

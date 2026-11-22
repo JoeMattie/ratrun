@@ -1,4 +1,4 @@
-//! Sub-cell detail for the zoomed-out playfield (the **DETAIL** option).
+//! Sub-cell detail for the playfield (always on; there is no option).
 //!
 //! The half-block blit shows two pixels a cell. Zoomed out, a cell covers more
 //! world pixels than that (eight at 2×), and [`PixelBuffer::resample_to`]
@@ -24,9 +24,20 @@
 //! sextant numbering skips the two patterns that are `▌` and `▐`, and the
 //! octant block is not in bit order at all.
 //!
-//! **Render-only.** Nothing here reads or writes simulation state. The path is
-//! taken only when the eased zoom is past [`ZOOMED_OUT`]; at 1× and zoomed in
-//! the frame is byte-identical with the option on or off.
+//! At 1× (and zoomed in, where a cell covers less than two world pixels) the
+//! half-block picture is already the whole picture, so there is nothing to
+//! resample: the sub-pixels come from an **EPX / Scale2x** upscale of it
+//! instead (`smooth_into`). A corner takes the neighbour's colour only when
+//! the two adjacent neighbours agree and the opposite ones differ, so a
+//! staircase diagonal or a curve rounds off — and because the rule only ever
+//! copies an existing colour, no new colour appears. The guards (contrast
+//! threshold `EDGE`, the 1-px **thin** rule, and the identical-pair cell
+//! rule) are what keep it from touching a pellet, a whisker or a soft
+//! gradient; see `smooth_into`.
+//!
+//! **Render-only.** Nothing here reads or writes simulation state. With
+//! smoothing off (`RATRUN_SMOOTH=0`, console `smooth off`) a 1× frame is
+//! byte-identical to the half-block blit every earlier build drew.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -64,7 +75,7 @@ impl SubcellSet {
 /// What `RATRUN_SUBCELL` asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Choice {
-    /// Use what the terminal is known to draw (the option's AUTO).
+    /// Use what the terminal is known to draw (the AUTO rule).
     Auto,
     /// Exactly this set, whatever the terminal claims (`Off` included).
     Force(SubcellSet),
@@ -88,11 +99,22 @@ impl Choice {
     }
 }
 
-/// The set to draw with: the environment override wins, then the DETAIL
-/// option; AUTO is whatever the terminal is known to draw
-/// ([`crate::term::BlockSet`]), which is nothing finer than half blocks on a
-/// terminal this game has not been told about.
-pub fn resolve(detail_auto: bool, env: Option<Choice>, blocks: crate::term::BlockSet) -> SubcellSet {
+/// Whether the 1× edge smoothing is on: `RATRUN_SMOOTH=0` (or `off`/`false`/
+/// `no`) pins it off for a session, anything else leaves the default (on).
+/// The console `smooth` command is the live A/B; this is the capture pin.
+pub fn smooth_from_env() -> bool {
+    match std::env::var("RATRUN_SMOOTH") {
+        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "off" | "false" | "no"),
+        Err(_) => true,
+    }
+}
+
+/// The set to draw with: the environment override wins, else whatever the
+/// terminal is known to draw ([`crate::term::BlockSet`]), which is nothing
+/// finer than half blocks on a terminal this game has not been told about.
+/// There is no setting: detail is always on, and `RATRUN_SUBCELL` exists only
+/// to pin a set for a session, a capture or a test (`off` forces half blocks).
+pub fn resolve(env: Option<Choice>, blocks: crate::term::BlockSet) -> SubcellSet {
     use crate::term::BlockSet;
     let auto = match blocks {
         BlockSet::Half => SubcellSet::Off,
@@ -102,9 +124,7 @@ pub fn resolve(detail_auto: bool, env: Option<Choice>, blocks: crate::term::Bloc
     };
     match env {
         Some(Choice::Force(set)) => set,
-        Some(Choice::Auto) => auto,
-        None if detail_auto => auto,
-        None => SubcellSet::Off,
+        Some(Choice::Auto) | None => auto,
     }
 }
 
@@ -168,6 +188,29 @@ pub fn grid_for(set: SubcellSet, zoom: f32) -> Option<Grid> {
     })
 }
 
+/// The grid for a whole frame: zoomed out, [`grid_for`]'s answer (the finest
+/// set the zoom can fill); at 1× and zoomed in, the grid the **smoothing**
+/// upscale (`smooth_into`) feeds — two sub-pixels across per world pixel
+/// either way, and one sub-row per world pixel at the quad grid (the vertical
+/// resolution the half-block blit already had) or two at the octant grid (the
+/// full 2 × 2 of the rule). `None` when the set is `Off` or smoothing is off.
+pub fn grid_for_frame(set: SubcellSet, zoom: f32, smooth: bool) -> Option<Grid> {
+    if let Some(g) = grid_for(set, zoom) {
+        return Some(g);
+    }
+    if !smooth || set == SubcellSet::Off {
+        return None;
+    }
+    // A sextant grid has one and a half sub-rows per world pixel, which the
+    // 2 × 2 rule cannot fill exactly; the quad grid is the honest answer (and
+    // what the zoom ladder already picks for a sextant terminal at 1.25×).
+    Some(match set {
+        SubcellSet::Octant => Grid::Octant,
+        SubcellSet::Off => return None,
+        SubcellSet::Quad | SubcellSet::Sextant => Grid::Quad,
+    })
+}
+
 /// One encoded cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Encoded {
@@ -184,6 +227,22 @@ const FLAT_SPREAD: i32 = 28;
 /// Squared distance from the cell's mean past which a sub-pixel is a feature
 /// (the same line `PixelBuffer::resample_to` draws).
 const SALIENT: u32 = 3 * 28 * 28;
+
+/// The contrast (summed over the three channels) an edge must exceed before
+/// the smoothing rule may round it. Below this the two pixels are a lit
+/// gradient or texture grain: rounding across it would band a light falloff
+/// or shimmer frame to frame, so the picture is left alone. Above it they are
+/// two regions, and the corner between them is a stair-step worth rounding.
+const EDGE: i32 = 48;
+
+/// Do two pixels differ by more than `EDGE` (summed channel distance)?
+#[inline]
+fn differs(a: Rgb, b: Rgb) -> bool {
+    (i32::from(a.0) - i32::from(b.0)).abs()
+        + (i32::from(a.1) - i32::from(b.1)).abs()
+        + (i32::from(a.2) - i32::from(b.2)).abs()
+        >= EDGE
+}
 
 #[inline]
 fn dist(a: Rgb, b: Rgb) -> u32 {
@@ -315,6 +374,141 @@ pub fn encode(px: &[Rgb], ink: u8, grid: Grid) -> Encoded {
     }
 }
 
+/// The key each encoded cell's neighbourhood falls back on when it cannot be
+/// split: a flat cell is the plain half block the old blit wrote.
+///
+/// # Smoothing (the 1× and zoomed-in picture)
+///
+/// Zoomed out, [`DetailFrame`] is fed by `PixelBuffer::resample_to`; at 1× and
+/// zoomed in the picture holds no world pixels the half-block blit does not
+/// already show, so the sub-pixels are made by an **EPX / Scale2x** upscale of
+/// it: every world pixel becomes `2 × grid.rows()/2` sub-pixels. The corner
+/// rule is EPX's: a corner takes its adjacent neighbour's colour only when
+/// those two neighbours agree and the two opposite ones differ, so a staircase
+/// diagonal or a curve rounds off — and only ever copies an *existing* colour,
+/// so no new colour appears and a cell still holds at most three.
+///
+/// Four guards keep the exactness the playfield needs. Each is a pure function
+/// of the current picture (no temporal state), so a frame cannot shimmer
+/// because the last one differed:
+///
+/// 1. **Contrast.** The rule only runs across edges that differ by at least
+///    `EDGE` summed over the channels. Two pixels either side of a lit
+///    gradient are inside that; rounding across one would band the falloff.
+/// 2. **Thin.** A pixel whose colour run is one pixel wide in either axis
+///    (both horizontal neighbours differ, or both vertical ones do, by
+///    `EDGE`) is a line — a whisker, a tail tip, a telegraph, a pellet's rim
+///    — or a lone speck. It is never modified and never copied outward as a
+///    corner colour, so a one-pixel feature cannot be thinned, thickened or
+///    erased. A *corner* of a body with like-coloured neighbours on two
+///    adjacent sides is not thin, so silhouettes still round.
+/// 3. **Identical pair.** A cell whose two world pixels are the same colour is
+///    written flat: the smoothing has nothing to round there, so flat floor
+///    costs exactly what it did before.
+/// 4. **Ink.** Ink and salience are not in this picture at all: the ink pass
+///    and the damage digits stamp the half-block buffer *after* this, and
+///    [`DetailFrame::overlay`] carries what they changed onto the sub-pixels it
+///    covers, exact colours, so a mark can never be smoothed away.
+///
+/// Returns whether it filled `dst` (the sizes must be the smoothing grid's).
+fn smooth_into(src: &PixelBuffer, dst: &mut PixelBuffer, grid: Grid, thin: &mut Vec<bool>) -> bool {
+    let rp = (grid.rows() / 2).max(1);
+    let (w, h) = (src.w, src.h);
+    if w == 0 || h == 0 || !h.is_multiple_of(2) || dst.w != w * 2 || dst.h != h * rp {
+        return false;
+    }
+    let s = src.pixels();
+    let at = |x: usize, y: usize| s[y * w + x];
+    thin.clear();
+    thin.resize(w * h, false);
+    for y in 0..h {
+        for x in 0..w {
+            let p = at(x, y);
+            let dl = x == 0 || differs(at(x - 1, y), p);
+            let dr = x + 1 == w || differs(at(x + 1, y), p);
+            let du = y == 0 || differs(at(x, y - 1), p);
+            let dd = y + 1 == h || differs(at(x, y + 1), p);
+            thin[y * w + x] = (dl && dr) || (du && dd);
+        }
+    }
+    let dw = dst.w;
+    let out = dst.pixels_mut();
+    for y in 0..h {
+        let yu = y.saturating_sub(1);
+        let yd = (y + 1).min(h - 1);
+        let row = y * rp * dw;
+        for x in 0..w {
+            let xl = x.saturating_sub(1);
+            let xr = (x + 1).min(w - 1);
+            let p = at(x, y);
+            // The cell's partner row (the other half of the same terminal
+            // cell). Identical pair, or a thin pixel: write it flat.
+            let partner = if y % 2 == 0 { (y + 1).min(h - 1) } else { y - 1 };
+            if at(x, partner) == p || thin[y * w + x] {
+                for r in 0..rp {
+                    out[row + r * dw + x * 2] = p;
+                    out[row + r * dw + x * 2 + 1] = p;
+                }
+                continue;
+            }
+            let (b, g) = (at(x, yu), at(x, yd));
+            let (d, e) = (at(xl, y), at(xr, y));
+            let f = at(xl, yd);
+            let hh = at(xr, yd);
+            let (mut c0, mut c1) = (p, p);
+            let (mut c2, mut c3) = (p, p);
+            // Upper-left: left and up agree, and each differs from the corner
+            // opposite it. `c0` is the neighbour's own colour, never a blend.
+            if !differs(d, b)
+                && differs(d, hh)
+                && differs(b, f)
+                && !thin[yu * w + xl]
+                && !thin[y * w + xl]
+            {
+                c0 = d;
+            }
+            if !differs(b, e)
+                && differs(b, f)
+                && differs(e, hh)
+                && !thin[yu * w + xr]
+                && !thin[y * w + xr]
+            {
+                c1 = e;
+            }
+            if !differs(d, g)
+                && differs(d, hh)
+                && differs(g, f)
+                && !thin[yd * w + xl]
+                && !thin[y * w + xl]
+            {
+                c2 = d;
+            }
+            if !differs(e, g)
+                && differs(e, f)
+                && differs(g, hh)
+                && !thin[yd * w + xr]
+                && !thin[y * w + xr]
+            {
+                c3 = e;
+            }
+            if rp == 1 {
+                // One sub-row a world pixel (the quad grid): the rule has no
+                // second row to land in, so the rounded half is written — the
+                // upper one where it rounded, else the lower, so a staircase
+                // rounds whichever way it steps.
+                out[row + x * 2] = if c0 != p { c0 } else { c2 };
+                out[row + x * 2 + 1] = if c1 != p { c1 } else { c3 };
+            } else {
+                for (r, (a, c)) in [(c0, c1), (c2, c3)].into_iter().enumerate() {
+                    out[row + r * dw + x * 2] = a;
+                    out[row + r * dw + x * 2 + 1] = c;
+                }
+            }
+        }
+    }
+    true
+}
+
 /// The zoomed-out picture at sub-cell resolution: `2·cols × grid.rows()·rows`
 /// pixels, plus one bit a sub-pixel for what the screen-space passes stamped.
 pub struct DetailFrame {
@@ -324,6 +518,9 @@ pub struct DetailFrame {
     px: PixelBuffer,
     /// Per cell: bit `row * 2 + col` set = that sub-pixel is ink.
     ink: Vec<u8>,
+    /// The smoothing pass's per-pixel "this is a one-pixel-wide feature" flags,
+    /// held here so a smoothing frame allocates nothing.
+    thin: Vec<bool>,
 }
 
 impl Default for DetailFrame {
@@ -340,6 +537,7 @@ impl DetailFrame {
             rows: 0,
             px: PixelBuffer::new(0, 0),
             ink: Vec::new(),
+            thin: Vec::new(),
         }
     }
 
@@ -368,6 +566,16 @@ impl DetailFrame {
         self.ink.clear();
         self.ink.resize(cols * rows, 0);
         &mut self.px
+    }
+
+    /// Start a smoothing frame of `cols × rows` cells on `grid` and fill it
+    /// from `src` (the half-block picture at 1x or zoomed in) with the EPX
+    /// upscale of `smooth_into`. Returns whether it filled the frame; the
+    /// scratch the rule needs lives in this frame, so a steady-state frame
+    /// allocates nothing.
+    pub fn smooth_from(&mut self, grid: Grid, cols: usize, rows: usize, src: &PixelBuffer) -> bool {
+        self.begin(grid, cols, rows);
+        smooth_into(src, &mut self.px, grid, &mut self.thin)
     }
 
     /// Carry the screen-space passes over: every half-block pixel that differs
@@ -461,7 +669,10 @@ impl DetailFrame {
 
 /// The `--glyph-card` test card: each glyph set drawn as labelled rows, so the
 /// owner of a terminal can see which sets it draws cleanly (solid, gapless,
-/// one cell wide) before turning DETAIL on. Plain text plus SGR; no raw mode.
+/// one cell wide). Sub-cell detail is always on, so this is how a terminal that
+/// is not recognised can be checked before it is added to `term`'s known list
+/// (or pinned with `--glyphs`/`RATRUN_GLYPHS`). Plain text plus SGR; no raw
+/// mode.
 pub fn glyph_card() -> String {
     use std::fmt::Write;
     let mut out = String::new();
@@ -542,7 +753,8 @@ pub fn glyph_card() -> String {
         }
     }
     let _ = writeln!(out);
-    let _ = writeln!(out, "Turn it on: Options > DETAIL > AUTO, or RATRUN_SUBCELL=quad|sextant|octant|auto|off.");
+    let _ = writeln!(out, "Detail is always on. Pin a set with --glyphs quad|sextant|octant|half,");
+    let _ = writeln!(out, "or RATRUN_SUBCELL=quad|sextant|octant|auto|off for one session.");
     out
 }
 
@@ -707,18 +919,296 @@ mod tests {
     }
 
     #[test]
-    fn the_override_beats_the_option_and_auto_needs_a_known_terminal() {
+    fn the_override_beats_the_terminal_and_auto_needs_a_known_one() {
         use crate::term::BlockSet;
-        assert_eq!(resolve(false, None, BlockSet::Octant), SubcellSet::Off, "the option is off");
-        assert_eq!(resolve(true, None, BlockSet::Half), SubcellSet::Off, "unknown terminal");
-        assert_eq!(resolve(true, None, BlockSet::Sextant), SubcellSet::Sextant);
-        assert_eq!(resolve(true, None, BlockSet::Octant), SubcellSet::Octant);
-        assert_eq!(resolve(false, Choice::parse("auto"), BlockSet::Quad), SubcellSet::Quad);
-        assert_eq!(resolve(false, Choice::parse("octant"), BlockSet::Half), SubcellSet::Octant);
-        assert_eq!(resolve(true, Choice::parse("off"), BlockSet::Octant), SubcellSet::Off);
+        // There is no option any more: with no override the terminal decides,
+        // and a terminal not known to draw finer blocks keeps half blocks.
+        assert_eq!(resolve(None, BlockSet::Half), SubcellSet::Off, "unknown terminal");
+        assert_eq!(resolve(None, BlockSet::Quad), SubcellSet::Quad);
+        assert_eq!(resolve(None, BlockSet::Sextant), SubcellSet::Sextant);
+        assert_eq!(resolve(None, BlockSet::Octant), SubcellSet::Octant);
+        assert_eq!(resolve(Choice::parse("auto"), BlockSet::Quad), SubcellSet::Quad);
+        assert_eq!(resolve(Choice::parse("octant"), BlockSet::Half), SubcellSet::Octant);
+        assert_eq!(resolve(Choice::parse("off"), BlockSet::Octant), SubcellSet::Off);
         assert_eq!(Choice::parse("sextant"), Some(Choice::Force(SubcellSet::Sextant)));
         assert_eq!(Choice::parse("QUAD "), Some(Choice::Force(SubcellSet::Quad)));
         assert_eq!(Choice::parse("lots"), None);
+    }
+
+    /// The frame grid: zoomed out it is [`grid_for`]'s answer; at 1x and zoomed
+    /// in it is the smoothing grid — the full 2x2 only where the glyph set has
+    /// two sub-rows a world pixel (octants), the 2-wide one else — and nothing
+    /// at all with smoothing off or the half-block set.
+    #[test]
+    fn the_frame_grid_covers_the_smoothing_zooms() {
+        use SubcellSet::*;
+        assert_eq!(grid_for_frame(Octant, 2.0, true), Some(Grid::Octant));
+        assert_eq!(grid_for_frame(Octant, 2.0, false), Some(Grid::Octant), "zoomed out is not smoothing");
+        assert_eq!(grid_for_frame(Sextant, 1.25, true), Some(Grid::Quad));
+        for z in [0.5, 0.75, 1.0] {
+            assert_eq!(grid_for_frame(Octant, z, true), Some(Grid::Octant));
+            assert_eq!(grid_for_frame(Quad, z, true), Some(Grid::Quad));
+            assert_eq!(grid_for_frame(Sextant, z, true), Some(Grid::Quad));
+            for set in [Off, Quad, Sextant, Octant] {
+                assert_eq!(grid_for_frame(set, z, false), None, "{set:?} at {z} with smoothing off");
+            }
+            assert_eq!(grid_for_frame(Off, z, true), None, "half blocks: nothing to encode");
+        }
+    }
+
+    /// A 45° stair-step between two regions, both at least two pixels thick,
+    /// rounds exactly as the EPX rule says: only the one cell the step cuts
+    /// through changes, and its corner becomes the other region's own colour.
+    #[test]
+    fn a_stair_step_rounds_into_the_expected_sub_pixels() {
+        // A above, B below, stepping down to the right.
+        let (a, b) = (A, B);
+        let mut src = PixelBuffer::new(4, 4);
+        for y in 0..4 {
+            for x in 0..4 {
+                src.plot(x, y, if x >= 3 - y { a } else { b });
+            }
+        }
+        // Octants: two sub-rows a world pixel, the full 2x2 of the rule.
+        let mut frame = DetailFrame::new();
+        assert!(frame.smooth_from(Grid::Octant, 4, 2, &src));
+        // The cell holding the step (x = 2; world rows 0 and 1): its upper
+        // sub-row is the dark region, its lower one rounds its upper-left
+        // corner to the dark region's colour.
+        let e = frame.cell(2, 0);
+        assert_eq!(
+            e,
+            Encoded { glyph: Grid::Octant.glyph(0b1110_0000), fg: a, bg: b },
+            "the step's corner should take the dark region's own colour"
+        );
+        // Every other cell is flat or exactly the half block it was.
+        assert_eq!(frame.cell(0, 0), Encoded { glyph: '▀', fg: b, bg: b });
+        assert_eq!(frame.cell(1, 0), Encoded { glyph: '▀', fg: b, bg: b });
+        assert_eq!(frame.cell(3, 0), Encoded { glyph: '▀', fg: a, bg: a });
+        assert_eq!(frame.cell(2, 1), Encoded { glyph: '▀', fg: a, bg: a });
+
+        // Quadrants: two sub-pixels across, one down — the horizontal half of
+        // the rule, which rounds the same corner in its own resolution.
+        let mut frame = DetailFrame::new();
+        assert!(frame.smooth_from(Grid::Quad, 4, 2, &src));
+        assert_eq!(
+            frame.cell(2, 0),
+            Encoded { glyph: Grid::Quad.glyph(0b1000), fg: a, bg: b }
+        );
+        assert_eq!(frame.cell(3, 0), Encoded { glyph: '▀', fg: a, bg: a });
+    }
+
+    /// A flat picture is the half-block blit: every sub-pixel is its world
+    /// pixel, every cell the plain `▀`, so flat floor costs exactly what it did.
+    #[test]
+    fn a_flat_picture_is_the_half_block_blit() {
+        let floor = (52, 48, 44);
+        let mut src = PixelBuffer::new(8, 6);
+        src.clear(floor);
+        for grid in [Grid::Quad, Grid::Octant] {
+            let mut frame = DetailFrame::new();
+            assert!(frame.smooth_from(grid, 8, 3, &src));
+            for cy in 0..3 {
+                for cx in 0..8 {
+                    assert_eq!(
+                        frame.cell(cx, cy),
+                        Encoded { glyph: '▀', fg: floor, bg: floor },
+                        "{grid:?} ({cx}, {cy})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A soft lit gradient is not an edge: nothing is rounded and no cell
+    /// needs a sub-cell glyph, so a lamp's falloff cannot band or shimmer.
+    #[test]
+    fn a_smooth_lit_gradient_emits_no_sub_cell_glyphs() {
+        let mut src = PixelBuffer::new(24, 16);
+        for y in 0..16 {
+            for x in 0..24 {
+                let v = 30 + (x * 5 + y * 3) as u8; // steps of 3-8 a pixel
+                src.plot(x, y, (v, v, v));
+            }
+        }
+        let mut frame = DetailFrame::new();
+        assert!(frame.smooth_from(Grid::Octant, 24, 8, &src));
+        for cy in 0..8 {
+            for cx in 0..24 {
+                let e = frame.cell(cx, cy);
+                assert_eq!(e.glyph, '▀', "({cx}, {cy}) took a sub-cell glyph: {e:?}");
+                assert_eq!(e.fg, src.pixel_at(cx, cy * 2));
+                assert_eq!(e.bg, src.pixel_at(cx, cy * 2 + 1));
+            }
+        }
+        // A hard *straight* edge through the same picture is not a stair-step
+        // either, and must not turn into glyphs: the rule rounds corners, not
+        // edges, so a wall or a platform keeps its exact silhouette.
+        let mut step = PixelBuffer::new(24, 16);
+        step.clear(B);
+        for y in 0..16 {
+            step.line(0, y as i32, 11, y as i32, A);
+        }
+        let mut frame = DetailFrame::new();
+        assert!(frame.smooth_from(Grid::Octant, 24, 8, &step));
+        for cy in 0..8 {
+            for cx in 0..24 {
+                let e = frame.cell(cx, cy);
+                assert_eq!(e.glyph, '▀', "({cx}, {cy}) took a sub-cell glyph: {e:?}");
+            }
+        }
+    }
+
+    /// A one-pixel line — a whisker, a telegraph, a bullet's rim — is never
+    /// modified and never copied outward: every line pixel keeps all its
+    /// sub-pixels, and no sub-pixel outside the line takes its colour.
+    #[test]
+    fn a_one_pixel_line_survives_the_smoothing_unchanged() {
+        let floor = (40, 44, 52);
+        let line = (255, 236, 120);
+        let (w, h) = (24usize, 16usize);
+        let mut src = PixelBuffer::new(w, h);
+        src.clear(floor);
+        // A shallow diagonal, a vertical, a horizontal and a lone speck.
+        for i in 0..12 {
+            src.plot(2 + i, 2 + i / 2, line);
+        }
+        src.line(18, 1, 18, 14, line);
+        src.line(3, 12, 14, 12, line);
+        src.plot(21, 14, line);
+        let mut is_line = vec![false; w * h];
+        for (i, &c) in src.pixels().iter().enumerate() {
+            is_line[i] = c == line;
+        }
+        for grid in [Grid::Quad, Grid::Octant] {
+            let rp = (grid.rows() / 2).max(1);
+            let mut frame = DetailFrame::new();
+            assert!(frame.smooth_from(grid, w, h / 2, &src));
+            let px = frame.pixels();
+            for y in 0..h {
+                for x in 0..w {
+                    let want = is_line[y * w + x];
+                    for r in 0..rp {
+                        for c in 0..2 {
+                            let got = px.pixel_at(x * 2 + c, y * rp + r) == line;
+                            assert_eq!(
+                                got, want,
+                                "{grid:?}: ({x}, {y}) sub-pixel ({c}, {r}) is_line={want}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A two-by-two pellet (the smallest a body's bright core gets) is not a
+    /// stair-step: all four of its pixels keep every sub-pixel, and no floor
+    /// cell takes its colour.
+    #[test]
+    fn a_two_pixel_pellet_is_not_thinned() {
+        let floor = (44, 40, 48);
+        let pellet = (255, 120, 160);
+        let mut src = PixelBuffer::new(10, 8);
+        src.clear(floor);
+        for y in 3..5 {
+            for x in 4..6 {
+                src.plot(x, y, pellet);
+            }
+        }
+        let mut frame = DetailFrame::new();
+        assert!(frame.smooth_from(Grid::Octant, 10, 4, &src));
+        let px = frame.pixels();
+        for y in 0..8 {
+            for x in 0..10 {
+                let want = (4usize..6).contains(&x) && (3usize..5).contains(&y);
+                for r in 0..2 {
+                    for c in 0..2 {
+                        assert_eq!(
+                            px.pixel_at(x * 2 + c, y * 2 + r) == pellet,
+                            want,
+                            "({x}, {y}) sub-pixel ({c}, {r})"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(frame.cell(0, 0), Encoded { glyph: '▀', fg: floor, bg: floor });
+    }
+
+    /// At 1x the smoothed frame is still one cell wide a column and carries the
+    /// ink pass's marks exactly: the smoothing runs on the picture *before* the
+    /// screen-space passes, and [`DetailFrame::overlay`] stamps what they
+    /// changed, so a coin, a gem and a hostile pellet are never smoothed away.
+    #[test]
+    fn the_ink_marks_survive_the_one_x_smoothing() {
+        use crate::game::bullet::{Bullet, Faction};
+        use crate::game::gem::{Gem, Gold};
+        use crate::game::level::Theme;
+        use crate::game::world::World;
+        use crate::math::Vec2;
+
+        const COIN: Rgb = (255, 196, 64);
+        const COIN_CORE: Rgb = (255, 246, 196);
+        const BORDER: Rgb = (14, 10, 18);
+        const WHITE: Rgb = (255, 255, 255);
+        for set in [SubcellSet::Quad, SubcellSet::Octant] {
+            let mut w = World::new(Theme::Sewer, 7);
+            let p = w.player.pos;
+            w.spawn_gem(Gem::new(p + Vec2::new(-60.0, -40.0), 5));
+            crate::game::ecs::resources::spawn_with_id(
+                &mut w.ecs,
+                Gold::new(p + Vec2::new(60.0, -40.0), 1),
+            );
+            w.spawn_bullet(Bullet::new(
+                p + Vec2::new(50.0, 44.0),
+                Vec2::new(0.0, 0.0),
+                4.0,
+                Faction::Enemy,
+                (240, 120, 160),
+            ));
+            w.set_zoom_instant(1.0);
+            w.subcell = set;
+            w.smooth = true;
+            let mut pb = PixelBuffer::new(120, 80);
+            w.draw(&mut pb);
+            let frame = w.detail().expect("1x with smoothing: a detail frame");
+            assert_eq!(frame.cells(), (120, 40));
+            assert_eq!(frame.grid(), grid_for_frame(set, 1.0, true).unwrap());
+
+            let mut seen = [0usize; 4];
+            for y in 0..pb.h {
+                for x in 0..pb.w {
+                    if x.abs_diff(60) < 14 && y.abs_diff(40) < 14 {
+                        continue;
+                    }
+                    let c = pb.pixel_at(x, y);
+                    let Some(k) = [COIN, COIN_CORE, BORDER, WHITE].iter().position(|&m| m == c)
+                    else {
+                        continue;
+                    };
+                    seen[k] += 1;
+                    let e = frame.cell(x, y / 2);
+                    assert!(
+                        e.fg == c || e.bg == c,
+                        "{set:?}: the mark {c:?} at ({x}, {y}) became {e:?}"
+                    );
+                }
+            }
+            assert!(seen[0] >= 8 && seen[1] >= 1, "{set:?}: the coin square: {seen:?}");
+            assert!(seen[2] >= 4, "{set:?}: the pellet border: {seen:?}");
+            assert!(seen[3] >= 1, "{set:?}: the gem centre: {seen:?}");
+
+            // Smoothing off: no detail frame, so the frame is the half-block
+            // blit byte for byte (the same buffer `set = Off` draws).
+            w.smooth = false;
+            w.draw(&mut pb);
+            assert!(w.detail().is_none(), "with smoothing off 1x has no detail frame");
+            let mut plain = PixelBuffer::new(120, 80);
+            w.subcell = SubcellSet::Off;
+            w.draw(&mut plain);
+            assert_eq!(pb.pixels(), plain.pixels(), "smoothing off is today's picture");
+        }
     }
 
     /// A one-world-pixel bright line at 2× lands on the octant grid 1:1, so it
@@ -872,10 +1362,12 @@ mod tests {
             assert!(seen[2] >= 4, "{set:?}: the pellet border: {seen:?}");
             assert!(seen[3] >= 1, "{set:?}: the gem centre: {seen:?}");
 
-            // Without a set, or at 1x with one, there is no detail frame.
+            // Without a set, or at 1x with the smoothing off, there is no
+            // detail frame.
             w.set_zoom_instant(1.0);
+            w.smooth = false;
             w.draw(&mut pb);
-            assert!(w.detail().is_none(), "{set:?}: 1x is the half-block picture");
+            assert!(w.detail().is_none(), "{set:?}: 1x with smoothing off is the half-block picture");
             w.set_zoom_instant(2.0);
             w.subcell = SubcellSet::Off;
             w.draw(&mut pb);
@@ -886,7 +1378,7 @@ mod tests {
     #[test]
     fn the_glyph_card_names_every_set() {
         let card = glyph_card();
-        for label in ["half", "quadrant", "sextant", "octant", "RATRUN_SUBCELL"] {
+        for label in ["half", "quadrant", "sextant", "octant", "RATRUN_SUBCELL", "always on"] {
             assert!(card.contains(label), "{label}");
         }
         assert!(card.contains('\u{1FB00}') && card.contains('\u{1CD00}') && card.contains('▚'));

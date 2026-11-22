@@ -211,6 +211,16 @@ pub struct World {
     /// flat-lit, with the hostile layer self-lit as always). `false` in every
     /// run.
     pub flat_lit: bool,
+    /// Render-only: draw no rat at all — neither the sprite
+    /// ([`World::draw_player`]) nor the ink pass's minimum-size core and dash
+    /// arc.
+    ///
+    /// The Library's bestiary plates are portraits of their subject, but every
+    /// hostile behaviour in the simulation needs a target: the card keeps a
+    /// hidden, invulnerable, scripted rat as the aim point and draws its own
+    /// practice dummy at the same spot. The run never sets this; no system
+    /// reads it.
+    pub hide_rat: bool,
     /// The **simulation's** logical viewport: the unzoomed screen size, set by
     /// the App on resize (and by a headless caller explicitly). Never written
     /// by drawing — `render_viewport` is the renderer's own copy — so a run that
@@ -238,10 +248,17 @@ pub struct World {
     /// whole run (only a size change reallocates it) so a zoomed frame does
     /// not allocate per tick.
     world_buf: Option<PixelBuffer>,
-    /// The DETAIL option: the finest block-glyph set a zoomed-out frame may be
-    /// drawn with ([`crate::render::subcell`]). Render-only, `Off` by default;
-    /// the App sets it from the saved option and the terminal's capabilities.
+    /// The finest block-glyph set a frame may be drawn with
+    /// ([`crate::render::subcell`]). Render-only; the App sets it from the
+    /// terminal's capabilities and the `RATRUN_SUBCELL` pin. There is no
+    /// setting: zoomed out it is always on.
     pub subcell: crate::render::subcell::SubcellSet,
+    /// EPX edge smoothing of the 1x (and zoomed-in) picture: the sub-cell
+    /// frame that [`World::detail`] hands back is built by upscaling the
+    /// half-block picture with the Scale2x corner rule. Render-only, on by
+    /// default; the App sets it from `RATRUN_SMOOTH` and the console's
+    /// `smooth` command.
+    pub smooth: bool,
     /// The zoomed-out picture at sub-cell resolution, when the last `draw`
     /// produced one (see [`World::detail`]). Held for the run like `world_buf`.
     detail: crate::render::subcell::DetailFrame,
@@ -489,6 +506,7 @@ impl World {
             cam: Vec2::ZERO,
             cam_focus: None,
             flat_lit: false,
+            hide_rat: false,
             viewport: Vec2::new(160.0, 80.0),
             render_viewport: Vec2::new(160.0, 80.0),
             zoom: zoom::DEFAULT,
@@ -496,6 +514,7 @@ impl World {
             zoom_scale: Vec2::new(1.0, 1.0),
             world_buf: None,
             subcell: crate::render::subcell::SubcellSet::Off,
+            smooth: true,
             detail: crate::render::subcell::DetailFrame::new(),
             detail_live: false,
             detail_base: PixelBuffer::new(0, 0),
@@ -2008,7 +2027,8 @@ impl World {
             {
                 let _p = crate::prof::scope(crate::prof::Stage::Resample);
                 buf.resample_to(pb);
-                // DETAIL: the same world picture again on the sub-cell grid
+                // Sub-cell detail: the same world picture again on the finer
+                // grid (the smoothing upscale below covers 1x and zoomed in).
                 // (the scene and the lighting pass already ran at world
                 // resolution, so this is one more resample and nothing else).
                 // The half-block picture above is still drawn in full: the
@@ -2024,6 +2044,24 @@ impl World {
             }
             self.zoom_scale = Vec2::new(ww as f32 / sw as f32, wh as f32 / sh as f32);
             self.world_buf = Some(buf);
+        }
+        // At 1x (and zoomed in, where a cell covers less than two world pixels)
+        // `pb` *is* the screen picture, so the sub-cell frame is an EPX upscale
+        // of it rather than a second resample: the Scale2x corner rule rounds
+        // staircases and curves without inventing a colour, and its guards (see
+        // `subcell::smooth_into`) leave a flat floor, a thin feature, an ink
+        // mark and a lit gradient alone. With `smooth` off there is no detail
+        // frame at these zooms at all, so the frame is the half-block blit every
+        // earlier build drew, byte for byte.
+        if !self.detail_live && sw > 0 && sh.is_multiple_of(2) {
+            if let Some(grid) =
+                crate::render::subcell::grid_for_frame(self.subcell, z, self.smooth)
+            {
+                if self.detail.smooth_from(grid, sw, sh / 2, pb) {
+                    self.detail_base.copy_from(pb);
+                    self.detail_live = true;
+                }
+            }
         }
         // The renderer's own viewport, unzoomed: the simulation's `viewport`
         // is not touched here (see the doc comment above).
@@ -2059,10 +2097,11 @@ impl World {
         }
     }
 
-    /// The sub-cell picture of the frame [`World::draw`] just drew, when the
-    /// DETAIL option produced one (zoomed out, a set allowed): blit this
-    /// instead of the half-block buffer. `None` at 1× and zoomed in, where the
-    /// half-block buffer is the whole picture.
+    /// The sub-cell picture of the frame [`World::draw`] just drew, when it
+    /// produced one: zoomed out on a terminal known to draw block glyphs, and
+    /// at 1× (or zoomed in) with `smooth` on, where it is the EPX upscale of
+    /// the half-block picture. `None` otherwise — the half-block buffer then is
+    /// the whole picture, and it is what every earlier build drew.
     pub fn detail(&self) -> Option<&crate::render::subcell::DetailFrame> {
         self.detail_live.then_some(&self.detail)
     }
@@ -2070,6 +2109,15 @@ impl World {
     /// The last pass of the frame: [`crate::render::ink::draw`] with the view
     /// this draw used. Render-only; no rng, no simulation state.
     fn draw_ink(&mut self, pb: &mut PixelBuffer) {
+        // The ink pass re-stamps the rat's minimum-size core and its dash arc,
+        // both read from `player.pos`. A plate with no rat (`World::hide_rat`)
+        // must not show them either, so park the rat off the map for the length
+        // of the pass and put it straight back. Render-only: nothing ticks
+        // here, and the value is restored before this returns.
+        let rat = self.player.pos;
+        if self.hide_rat {
+            self.player.pos = Vec2::new(-4096.0, -4096.0);
+        }
         let mut view = crate::render::ink::InkView {
             ecs: &mut self.ecs,
             level: &self.level,
@@ -2080,6 +2128,7 @@ impl World {
             elapsed: self.elapsed,
         };
         crate::render::ink::draw(pb, &mut view);
+        self.player.pos = rat;
     }
 
     /// Ease the rendered zoom toward the setting (about
@@ -2946,6 +2995,11 @@ impl World {
     }
 
     fn draw_player(&mut self, pb: &mut PixelBuffer, cam: Vec2) {
+        // A card plate with no rat (`World::hide_rat`): the simulation still
+        // has one, the picture does not.
+        if self.hide_rat {
+            return;
+        }
         // Super Dash charge: the lane preview under the rat. Faint blue-white
         // (the weapon's own colour, never a telegraph red), at the length this
         // charge would carry, stopped by the first wall.

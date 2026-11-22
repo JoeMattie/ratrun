@@ -31,10 +31,10 @@
 //!   with jet-black primary tips, a hovering ground shadow and a long flat
 //!   road-yellow beak (crimson tip spot) that splits wide open with a glowing
 //!   throat charge before firing ([`gull_beak_open`]).
-//! * **Loose Bungee**: a thick forged-steel J-hook and brass crimp ferrule
-//!   dragging a continuous braided crimson-and-white striped elastic loop that
-//!   whips as it travels and snaps wire-taut with tension glints while its
-//!   crossbar tells.
+//! * **Loose Bungee**: a gleaming forged-steel J-hook with a bright metal edge
+//!   and brass crimp ferrule dragging a continuous braided road-yellow and
+//!   black striped elastic loop that whips as it travels and snaps wire-taut
+//!   with tension glints while its crossbar tells.
 //!
 //! ## Public draws for the hostile layer
 //!
@@ -920,10 +920,10 @@ fn june_bug_lod(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
 /// Tar Rat: a sleek, hunched road-tar rodent with a stiff pennant tail, low
 /// nose and bounding gallop.
 ///
-/// Glossy obsidian-tar coat with oily bluish-silver ridge highlights so it
-/// pops off dark oak and low pooled light, piercing road-yellow eyes, four
-/// bounding gallop paws (flaring with pale claws on contact) and a dead-straight
-/// tail ending in a solid triangular tar-matted pennant.
+/// Deep tar-black interior framed by a strong cool-silver wet light rim so it
+/// pops off the dark oak deck in 60% ambient light, a continuous glossy wet
+/// specular streak along the arched back, a pale nose & piercing road-yellow
+/// eye glints, bounding gallop paws and a sharply rimmed stiff pennant tail.
 pub(crate) fn draw_tar_rat(pb: &mut PixelBuffer, _fr: &Frame, e: &Enemy, cam: Vec2, _elite: bool) {
     tar_rat(pb, e, cam);
 }
@@ -936,12 +936,12 @@ fn tar_rat(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
     let s = fx.s;
     let stretch = fx.anim.sin(); // +1 extended gallop, -1 gathered tuck
     let lunge = if e.contact_cd > 0.28 { 1.15 * s } else { 0.0 };
-    let rim_col = fx.rim((122, 126, 138));
+    let lit_v_sign = if fx.pl >= 0.0 { 1.0_f32 } else { -1.0_f32 };
 
     // 1) Bounding gallop paws (under the body so the haunches overhang them).
-    let leg_dark = fx.c((24, 22, 26));
-    let leg_sheen = fx.c((94, 100, 114));
-    let claw_c = fx.c(if lunge > 0.0 { (236, 240, 248) } else { (154, 158, 168) });
+    let leg_dark = fx.c((26, 28, 36));
+    let leg_sheen = fx.c((158, 170, 192));
+    let claw_c = fx.c(if lunge > 0.0 { (252, 254, 255) } else { (222, 232, 246) });
     let fore_reach = (3.4 + 1.85 * stretch) * s + lunge;
     let aft_reach = (-3.7 - 1.75 * stretch) * s;
     let stance_v = (2.65 - 0.35 * stretch) * s;
@@ -950,17 +950,18 @@ fn tar_rat(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
         let fp = fx.px(fore_reach, side * stance_v);
         darken_px(pb, fp.0 + 1, fp.1 + 1, 0.34);
         line_blend(pb, fh, fp, leg_dark, 0.96);
-        blend_px(pb, fp.0, fp.1, claw_c, 0.90);
+        blend_px(pb, fh.0, fh.1, leg_sheen, 0.72);
+        blend_px(pb, fp.0, fp.1, claw_c, 0.95);
 
         let ah = fx.px(-2.4 * s, side * 1.55 * s);
         let ap = fx.px(aft_reach, side * (stance_v + 0.15 * s));
         darken_px(pb, ap.0 + 1, ap.1 + 1, 0.34);
         line_blend(pb, ah, ap, leg_dark, 0.96);
-        blend_px(pb, ah.0, ah.1, leg_sheen, 0.65);
-        blend_px(pb, ap.0, ap.1, claw_c, 0.72);
+        blend_px(pb, ah.0, ah.1, leg_sheen, 0.78);
+        blend_px(pb, ap.0, ap.1, claw_c, 0.88);
     }
 
-    // 2) Sculpted tar-slick rodent body + dead-straight stiff pennant tail.
+    // 2) Sculpted tar-black rodent body + dead-straight stiff pennant tail.
     let u_min = -12.6 * s;
     let u_max = 6.6 * s + lunge;
     let v_max = 4.2 * s;
@@ -968,22 +969,26 @@ fn tar_rat(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
         return;
     };
 
-    let base = e.kind.color();
-    let tar_sh = (12, 11, 15);
-    let tar_mid = mix(base, (40, 38, 46), 0.65);
-    let tar_hi = (126, 134, 152);
-    let oil_sheen = (218, 226, 242);
-    let ear_hi = fx.c((144, 152, 170));
+    // Keep the mass unmistakably tar-black, framed by a strong cool-silver wet
+    // light rim and a bright glossy dorsal specular streak.
+    let tar_sh = (12, 12, 18);
+    let tar_mid = (26, 28, 36);
+    let tar_hi = (98, 108, 128);
+    let oil_sheen = (232, 242, 255);
+    let spec_white = (252, 254, 255);
+    let rim_lit = fx.c((218, 230, 248));
+    let rim_sh = fx.c((132, 144, 166));
+    let ear_hi = fx.c((206, 220, 240));
 
     let haunch = EllipseSdf::new((-2.0 - 0.35 * stretch) * s, 0.0, (2.3 + 0.25 * stretch) * s, (2.2 - 0.15 * stretch) * s);
     let chest = EllipseSdf::new(0.95 * s, 0.0, 2.05 * s, 1.95 * s);
     let snout = TaperSdf::new((2.1 * s, 0.0), (5.0 * s + lunge, 0.0), 1.42 * s, 0.56 * s);
     let ear = EllipseSdf::new(2.25 * s, 1.85 * s, 0.85 * s, 0.70 * s);
-    let tail_rod = CapsuleSdf::new((-3.8 * s, 0.0), (-11.4 * s, 0.0), 0.52 * s);
+    let tail_rod = CapsuleSdf::new((-3.8 * s, 0.0), (-11.4 * s, 0.0), 0.58 * s);
 
     let du_sh = -(fx.f.x + 1.5 * fx.f.y);
     let dv_sh = -(fx.p.x + 1.5 * fx.p.y);
-    let rim_lim = 0.88 * s;
+    let rim_lim = 0.92 * s;
 
     // Evaluate body + solid filled triangular pennant tail.
     let eval_rat = |u: f32, v: f32| -> (f32, u8) {
@@ -998,12 +1003,12 @@ fn tar_rat(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
         let d_body = d_head.min(d_ear);
         let d_tail = if u < -2.6 * s {
             let rod = tail_rod.eval(u, v);
-            // Solid triangular tar-matted pennant from u = -6.7 to tip u = -11.5.
-            let d_flag = if u >= -12.6 * s && u <= -5.6 * s {
-                let t = ((u + 11.5 * s) / (4.8 * s)).clamp(0.0, 1.0);
-                let half_w = (2.35 * t) * s;
+            // Solid triangular tar-matted pennant from u = -6.5 to tip u = -11.5.
+            let d_flag = if u >= -12.6 * s && u <= -5.4 * s {
+                let t = ((u + 11.5 * s) / (5.0 * s)).clamp(0.0, 1.0);
+                let half_w = (2.45 * t) * s;
                 let dv = av - half_w;
-                let du_base = u - (-6.7 * s);
+                let du_base = u - (-6.5 * s);
                 let du_tip = (-11.5 * s) - u;
                 dv.max(du_base).max(du_tip)
             } else {
@@ -1027,48 +1032,57 @@ fn tar_rat(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
         for x in x0..=x1 {
             let (d, part) = eval_rat(u, v);
             if d < rim_lim {
-                let col = match part {
+                let (col, edge_rim, edge_alpha) = match part {
                     2 => {
-                        // Swept-back rat ear: dark inner hollow with oily silver upper rim.
-                        if fx.lit(0.2, if v >= 0.0 { 0.8 } else { -0.8 }) > 0.05 {
+                        // Swept-back rat ear: dark tar hollow framed by a bright silver rim.
+                        let c = if fx.lit(0.2, if v >= 0.0 { 0.8 } else { -0.8 }) > -0.15 {
                             ear_hi
                         } else {
-                            fx.c((34, 34, 42))
-                        }
+                            fx.c((48, 52, 64))
+                        };
+                        (c, rim_lit, 0.90)
                     }
                     1 => {
-                        // Stiff tar pennant: deep obsidian core with crisp silvery-oil lit edge.
-                        let nv = (v / (2.2 * s)).clamp(-1.0, 1.0);
+                        // Stiff tar pennant: deep obsidian tar interior with a strong wet-silver
+                        // outline, gleaming leading mast edge and rod highlight.
+                        let nv = (v / (2.4 * s)).clamp(-1.0, 1.0);
                         let lit = fx.lit(-0.2, nv);
-                        let edge = (d > -0.82 * s) && lit > -0.1;
-                        let mut c = shade3(tar_sh, tar_mid, tar_hi, 0.34 + 0.56 * lit);
-                        if edge {
-                            c = mix(c, oil_sheen, 0.62);
-                        } else if (u + 6.9 * s).abs() < 0.55 * s && v.abs() < 2.2 * s {
-                            // Crisp leading mast edge of the stiff pennant flag.
-                            c = mix(c, oil_sheen, 0.52);
+                        let mut c = shade3(tar_sh, tar_mid, tar_hi, 0.30 + 0.45 * lit);
+                        if (u + 6.7 * s).abs() < 0.65 * s && v.abs() < 2.35 * s {
+                            // Crisp leading mast sheen of the stiff tar pennant flag.
+                            c = mix(c, oil_sheen, 0.78);
+                        } else if u > -6.8 * s && (v - lit_v_sign * 0.25 * s).abs() < 0.40 * s {
+                            // Glossy highlight along the stiff tarred tail rod.
+                            c = mix(c, oil_sheen, 0.68);
+                        } else if d > -0.75 * s && lit > -0.15 {
+                            c = mix(c, oil_sheen, 0.72);
                         }
-                        fx.c(c)
+                        let r_col = if lit > -0.15 { rim_lit } else { rim_sh };
+                        (fx.c(c), r_col, 0.92)
                     }
                     _ => {
                         let nu = ((u - 0.5 * s) / (4.4 * s)).clamp(-1.0, 1.0);
                         let nv = (v / (2.2 * s)).clamp(-1.0, 1.0);
                         let dome = (1.0 - (nu * nu * 0.42 + nv * nv * 0.80)).clamp(0.0, 1.0);
                         let lit = fx.lit(nu, nv);
-                        let lum = 0.28 + 0.34 * dome + 0.66 * lit;
+                        let lum = 0.22 + 0.28 * dome + 0.54 * lit;
                         let mut c = shade3(tar_sh, tar_mid, tar_hi, lum);
-                        // Wet oily bluish-silver road-tar specular ribbon along lit spine.
-                        if lit > 0.34 && dome > 0.26 {
-                            c = mix(c, oil_sheen, ((lit - 0.28) * 1.15).clamp(0.0, 0.84));
+                        // Continuous wet glossy road-tar specular streak along the arched back
+                        // (always readable regardless of heading).
+                        let v_ridge = lit_v_sign * 0.55 * s;
+                        let d_ridge = (v - v_ridge).abs();
+                        if u >= -3.6 * s && u <= 2.8 * s && d_ridge < 0.68 * s {
+                            let core = (1.0 - d_ridge / (0.68 * s)).clamp(0.0, 1.0);
+                            let spec_c = if core > 0.55 { spec_white } else { oil_sheen };
+                            c = mix(c, spec_c, (0.55 + 0.40 * core).clamp(0.0, 0.94));
+                        } else if lit > 0.32 && dome > 0.24 {
+                            c = mix(c, oil_sheen, ((lit - 0.24) * 1.1).clamp(0.0, 0.80));
                         }
-                        // Subtle matted tar ridge streaks across the haunch.
-                        if u < 1.2 * s && ((u / s) * 2.4).sin() > 0.55 && v.abs() < 1.3 * s {
-                            c = mix(c, tar_sh, 0.45);
-                        }
-                        fx.c(c)
+                        let r_col = if lit > -0.10 { rim_lit } else { rim_sh };
+                        (fx.c(c), r_col, if lit > -0.10 { 0.92 } else { 0.82 })
                     }
                 };
-                plot_sdf(pb, (x, y), d, rim_lim, col, (rim_col, 0.72));
+                plot_sdf(pb, (x, y), d, rim_lim, col, (edge_rim, edge_alpha));
             } else {
                 // Ground drop shadow under the galloping body and stiff tail.
                 let su = u + du_sh;
@@ -1082,24 +1096,29 @@ fn tar_rat(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
         }
     }
 
-    // 3) Low snout tip, fierce piercing road-yellow eyes and stiff tar whiskers.
+    // 3) Pale snout tip & nose-bridge glint, piercing road-yellow eyes and bright whiskers.
     let nose = fx.px(5.35 * s + lunge, 0.0);
-    pb.plot(nose.0, nose.1, fx.c((204, 132, 126)));
+    pb.plot(nose.0, nose.1, fx.c((252, 226, 218)));
+    let nose_glint = fx.px(4.55 * s + lunge, lit_v_sign * 0.35 * s);
+    pb.plot(nose_glint.0, nose_glint.1, fx.c((255, 250, 244)));
     let eye_c = if fx.hit > 0.70 {
         (28, 22, 16)
     } else {
-        (255, 226, 68)
+        (255, 238, 86)
     };
+    let brow_glint = fx.c((255, 252, 224));
     for side in [-1.0f32, 1.0] {
         let ep = fx.px(3.65 * s + lunge * 0.6, side * 0.92 * s);
         pb.plot(ep.0, ep.1, eye_c);
+        let gl = fx.px(3.95 * s + lunge * 0.6, side * 1.20 * s);
+        blend_px(pb, gl.0, gl.1, brow_glint, 0.78);
         let w = fx.px(4.35 * s + lunge * 0.6, side * 1.95 * s);
-        blend_px(pb, w.0, w.1, fx.c((134, 140, 156)), 0.55);
+        blend_px(pb, w.0, w.1, fx.c((186, 198, 218)), 0.72);
     }
 }
 
-/// Far LOD: a glossy black dash with an oily silver back ridge, yellow eye
-/// glint, stepping gallop paw and stiff pennant cross.
+/// Far LOD: a tar-black dash with a bright wet-silver rim & dorsal streak,
+/// pale nose/yellow eye glint, stepping gallop paw and readable stiff pennant.
 pub(crate) fn draw_tar_rat_lod(pb: &mut PixelBuffer, _fr: &Frame, e: &Enemy, cam: Vec2, _elite: bool) {
     tar_rat_lod(pb, e, cam);
 }
@@ -1107,31 +1126,38 @@ pub(crate) fn draw_tar_rat_lod(pb: &mut PixelBuffer, _fr: &Frame, e: &Enemy, cam
 fn tar_rat_lod(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
     let fx = Fx::of(e, cam, 4.0);
     let s = fx.s;
-    let tar = fx.c((26, 24, 30));
-    let sheen = fx.c((182, 192, 210));
+    let lit_v_sign = if fx.pl >= 0.0 { 1.0_f32 } else { -1.0_f32 };
+    let tar = fx.c((16, 16, 22));
+    let rim = fx.c((196, 210, 232));
+    let sheen = fx.c((236, 244, 255));
     let a = fx.px(-2.4 * s, 0.0);
     let b = fx.px(3.0 * s, 0.0);
-    let tail = fx.px(-5.6 * s, 0.0);
-    thick_line(pb, a, b, tar, (8, 8, 10));
+    let tail = fx.px(-5.8 * s, 0.0);
+    // Tar-black body with bright wet-silver outer edge.
+    thick_line(pb, a, b, tar, rim);
     seg(pb, a, tail, tar);
-    // Solid mini pennant + bright mast edge.
-    let fa = fx.px(-4.6 * s, -1.3 * s);
-    let fb = fx.px(-4.6 * s, 1.3 * s);
-    seg(pb, fa, tail, tar);
+    // Readable stiff pennant tail: dark flag framed by bright mast & edge glints.
+    let fa = fx.px(-4.5 * s, -1.4 * s);
+    let fb = fx.px(-4.5 * s, 1.4 * s);
+    seg(pb, fa, tail, rim);
     seg(pb, fb, tail, tar);
     seg(pb, fa, fb, sheen);
-    // Oily dorsal highlight & yellow eye glint.
-    let back = fx.px(0.4 * s, 0.0);
-    pb.plot(back.0, back.1 - 1, sheen);
-    let eye = fx.px(2.8 * s, 0.0);
+    // Continuous wet dorsal specular streak along the back.
+    let back_a = fx.px(-1.4 * s, lit_v_sign * 0.8 * s);
+    let back_b = fx.px(1.6 * s, lit_v_sign * 0.8 * s);
+    seg(pb, back_a, back_b, sheen);
+    // Pale nose & piercing road-yellow eye glint.
+    let eye = fx.px(2.4 * s, 0.0);
     pb.plot(eye.0, eye.1, fx.c(ROAD_YELLOW_HI));
+    let nose = fx.px(3.6 * s, 0.0);
+    pb.plot(nose.0, nose.1, fx.c((252, 228, 220)));
     // Alternating gallop paw.
     let paw = if fx.frame == 0 {
         fx.px(2.8 * s, 1.8 * s)
     } else {
         fx.px(-2.2 * s, 1.8 * s)
     };
-    pb.plot(paw.0, paw.1, tar);
+    pb.plot(paw.0, paw.1, rim);
 }
 
 // ---- Loose Can -------------------------------------------------------------
@@ -1641,15 +1667,16 @@ fn toll_gull_lod(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
 
 // ---- Loose Bungee ----------------------------------------------------------
 
-/// Loose Bungee: a forged-steel J-hook and brass crimp ferrule dragging a
-/// thick braided crimson-and-white striped rubber loop.
+/// Loose Bungee: a gleaming forged-steel J-hook with a bright metal edge and
+/// brass crimp ferrule dragging a thick braided road-yellow and black striped
+/// rubber loop.
 ///
-/// The hook leads on a 2 px sculpted steel shank with a dipped safety tip on
-/// the J-return. Behind the ferrule trails a continuous tubular striped
-/// elastic loop that whips side-to-side as it moves. Tell pose: while its
-/// crossbar is telling (`bar_telling`), the loop snaps pulled wire-taut and
-/// quivers while the ferrule and hook bend blaze with road-yellow tension
-/// glints.
+/// The hook leads on a 2 px sculpted bare-metal shank and J-bend catching a
+/// razor-bright white metal edge. Behind the ferrule trails a continuous
+/// tubular two-colour (road-yellow and glossy black) striped elastic loop that
+/// whips side-to-side as it moves. Tell pose: while its crossbar is telling
+/// (`bar_telling`), the loop snaps pulled wire-taut and quivers while the
+/// ferrule and hook bend blaze with road-yellow tension glints.
 pub(crate) fn draw_loose_bungee(pb: &mut PixelBuffer, _fr: &Frame, e: &Enemy, cam: Vec2, _elite: bool) {
     loose_bungee(pb, e, cam);
 }
@@ -1662,7 +1689,7 @@ fn loose_bungee(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
     let s = fx.s;
     let taut = e.w3.bar_telling();
     let live = e.w3.bar_t > 0.0 && !taut && !e.w3.bar_spent;
-    let rim_col = fx.rim((154, 134, 134));
+    let rim_col = fx.rim((154, 144, 122));
 
     let (ru, rv, sway) = if taut {
         (4.85 * s, 1.32 * s, (fx.anim * 9.0).sin() * 0.35 * s)
@@ -1674,21 +1701,23 @@ fn loose_bungee(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
     let centre_u = -1.1 * s - ru;
     let cord_r = 0.88 * s;
 
-    // 1) Continuous tubular braided crimson-and-white striped rubber loop + forged J-hook.
-    let rubber = e.kind.color();
-    let red_sh = (82, 22, 22);
-    let red_mid = mix(rubber, (198, 62, 58), 0.5);
-    let red_hi = (248, 126, 114);
-    let wht_sh = (134, 128, 118);
-    let wht_mid = TIE_WHITE;
-    let wht_hi = (255, 254, 248);
+    // 1) Continuous tubular braided road-yellow & glossy black striped rubber
+    //    loop + gleaming bare-metal J-hook.
+    let yel_sh = (164, 122, 20);
+    let yel_mid = ROAD_YELLOW;
+    let yel_hi = ROAD_YELLOW_HI;
+    let blk_sh = (14, 14, 20);
+    let blk_mid = (34, 36, 46);
+    let blk_hi = (128, 138, 158);
+    let blk_rim = (176, 186, 204);
 
-    let steel_sh = (50, 56, 68);
-    let steel_mid = (168, 178, 192);
+    let steel_sh = (72, 82, 98);
+    let steel_mid = (182, 194, 212);
     let steel_hi = (248, 252, 255);
-    let brass_sh = (118, 82, 20);
+    let metal_edge = (255, 255, 255);
+    let brass_sh = (128, 88, 20);
     let brass_mid = ROAD_YELLOW;
-    let brass_hi = (255, 246, 184);
+    let brass_hi = (255, 248, 194);
 
     let shank = CapsuleSdf::new((0.5 * s, 0.0), (4.2 * s, 0.0), 0.78 * s);
     let bend_a = CapsuleSdf::new((4.2 * s, 0.0), (5.55 * s, 1.35 * s), 0.78 * s);
@@ -1761,47 +1790,56 @@ fn loose_bungee(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
             if d < rim_lim {
                 let col = match part {
                     2 => {
-                        // Brass/road-yellow crimping collar anchoring cord to hook.
+                        // Bright brass/road-yellow crimping collar anchoring cord to hook.
                         let nu = ((u + 0.25 * s) / (1.05 * s)).clamp(-1.0, 1.0);
                         let nv = (v / (1.25 * s)).clamp(-1.0, 1.0);
-                        let lum = 0.44 + 0.56 * fx.lit(nu, nv) + if taut { 0.26 } else { 0.0 };
+                        let lum = 0.52 + 0.52 * fx.lit(nu, nv) + if taut { 0.26 } else { 0.0 };
                         let mut c = shade3(brass_sh, brass_mid, brass_hi, lum);
-                        if (u + 0.25 * s).abs() < 0.28 * s {
-                            c = mix(c, brass_sh, 0.55);
+                        if (u + 0.25 * s).abs() < 0.26 * s {
+                            c = mix(c, brass_sh, 0.45);
                         }
                         fx.c(c)
                     }
                     1 => {
-                        // Forged brushed-steel J-hook with dipped vinyl safety tip on the barb.
+                        // Gleaming forged-steel J-hook with a crisp bright metal edge!
                         let bevel = (-d / (0.8 * s)).clamp(0.0, 1.0);
                         let lit = fx.lit(0.25, if v > 1.8 * s { 0.7 } else { -0.7 });
-                        let is_tip = u < 3.1 * s && v > 2.2 * s;
-                        let c = if is_tip {
-                            shade3(red_sh, red_mid, red_hi, 0.44 + 0.36 * bevel + 0.48 * lit)
-                        } else {
-                            let mut lum = 0.36 + 0.40 * bevel + 0.62 * lit;
-                            if lit > 0.22 && bevel > 0.35 {
-                                lum += 0.28;
-                            }
-                            shade3(steel_sh, steel_mid, steel_hi, lum)
-                        };
+                        let mut lum = 0.48 + 0.36 * bevel + 0.56 * lit;
+                        if bevel > 0.35 && lit > 0.0 {
+                            lum += 0.30;
+                        }
+                        let mut c = shade3(steel_sh, steel_mid, steel_hi, lum);
+                        // Bright chrome metal edge catching light along the shank, J-bend & barb.
+                        if d > -0.45 * s && lit > -0.25 {
+                            c = mix(c, metal_edge, 0.85);
+                        } else if bevel > 0.55 {
+                            c = mix(c, steel_hi, 0.55);
+                        }
                         fx.c(c)
                     }
                     _ => {
-                        // Alternating bold crimson-and-white braided elastic stripes.
-                        let stripe = ((theta * 5.0 / PI).floor() as i32) & 1 == 0;
+                        // Bold alternating two-colour road-yellow and glossy black rubber stripes.
+                        let stripe = ((theta * 4.0 / PI).floor() as i32) & 1 == 0;
                         let bevel = (-d / cord_r).clamp(0.0, 1.0);
                         let lit = fx.lit(theta.cos() * 0.5, theta.sin() * 0.7);
-                        let lum = 0.38 + 0.38 * bevel + 0.52 * lit + if taut { 0.14 } else { 0.0 };
-                        let c = if stripe {
-                            shade3(red_sh, red_mid, red_hi, lum)
+                        let lum = 0.42 + 0.36 * bevel + 0.50 * lit + if taut { 0.16 } else { 0.0 };
+                        let mut c = if stripe {
+                            shade3(yel_sh, yel_mid, yel_hi, lum + 0.08)
                         } else {
-                            shade3(wht_sh, wht_mid, wht_hi, lum)
+                            let mut b = shade3(blk_sh, blk_mid, blk_hi, lum * 0.85);
+                            // Glossy rubber edge sheen so black stripes stay distinct on dark oak.
+                            if d > -0.42 * s && lit > -0.10 {
+                                b = mix(b, blk_rim, 0.58);
+                            }
+                            b
                         };
+                        if stripe && bevel > 0.45 && lit > 0.1 {
+                            c = mix(c, yel_hi, 0.45);
+                        }
                         fx.c(c)
                     }
                 };
-                plot_sdf(pb, (x, y), d, rim_lim, col, (rim_col, 0.70));
+                plot_sdf(pb, (x, y), d, rim_lim, col, (rim_col, 0.72));
             } else {
                 let su = u + du_sh;
                 let sv = v + dv_sh;
@@ -1814,13 +1852,17 @@ fn loose_bungee(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
         }
     }
 
-    // 2) Specular steel hook glint + bright road-yellow tension spark on tell / live bar.
-    let bend_glint = fx.px(4.85 * s, 0.75 * s);
+    // 2) Crisp bare-metal hook edge glints + road-yellow tension spark on tell / live bar.
+    let shank_glint = fx.px(2.4 * s, -0.35 * s);
+    let bend_glint = fx.px(4.95 * s, 0.85 * s);
+    let barb_glint = fx.px(2.55 * s, 3.10 * s);
+    pb.plot(shank_glint.0, shank_glint.1, fx.c(metal_edge));
     pb.plot(
         bend_glint.0,
         bend_glint.1,
-        fx.c(if taut { (255, 255, 245) } else { ALU_HI }),
+        fx.c(if taut { (255, 255, 245) } else { metal_edge }),
     );
+    pb.plot(barb_glint.0, barb_glint.1, fx.c(steel_hi));
     if taut {
         let g = fx.px(5.45 * s, 1.45 * s);
         pb.plot(g.0, g.1, ROAD_YELLOW_HI);
@@ -1836,8 +1878,8 @@ fn loose_bungee(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
     }
 }
 
-/// Far LOD: a bright steel J-hook leading a brass ferrule and swaying
-/// crimson-and-white rubber loop (pulls straight with a yellow glint on tell).
+/// Far LOD: a bright metal-edged J-hook leading a brass ferrule and swaying
+/// road-yellow-and-black striped rubber loop (pulls straight with a yellow glint on tell).
 pub(crate) fn draw_loose_bungee_lod(pb: &mut PixelBuffer, _fr: &Frame, e: &Enemy, cam: Vec2, _elite: bool) {
     loose_bungee_lod(pb, e, cam);
 }
@@ -1846,19 +1888,21 @@ fn loose_bungee_lod(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
     let fx = Fx::of(e, cam, 4.0);
     let s = fx.s;
     let taut = e.w3.bar_telling();
-    let steel = fx.c((188, 196, 208));
-    let steel_lo = fx.c((64, 70, 82));
-    // Forged steel J-hook corner.
+    let steel = fx.c(ALU_HI);
+    let steel_lo = fx.c((64, 72, 86));
+    let metal_hi = fx.c((255, 255, 255));
+    let rubber_blk = fx.c((24, 26, 34));
+    // Forged steel J-hook corner with bright metal edge.
     let h0 = fx.px(0.0, 0.0);
     let h1 = fx.px(2.8 * s, 0.0);
     let h2 = fx.px(3.2 * s, 1.5 * s);
     let h3 = fx.px(1.8 * s, 1.8 * s);
     thick_line(pb, h0, h1, steel, steel_lo);
-    seg(pb, h1, h2, steel);
-    seg(pb, h2, h3, fx.c(e.kind.color()));
+    seg(pb, h1, h2, metal_hi);
+    seg(pb, h2, h3, steel);
     // Brass crimp ferrule.
-    pb.plot(h0.0, h0.1, fx.c(if taut { (255, 252, 220) } else { ROAD_YELLOW }));
-    // Striped trailing loop.
+    pb.plot(h0.0, h0.1, fx.c(if taut { (255, 252, 220) } else { ROAD_YELLOW_HI }));
+    // Road-yellow and black striped trailing loop.
     let sway = if taut {
         0.0
     } else if fx.frame == 0 {
@@ -1870,9 +1914,11 @@ fn loose_bungee_lod(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
     let l1 = fx.px(-1.7 * s, sway);
     let l2 = fx.px(tail_u, sway * 0.5);
     let l3 = fx.px(-2.2 * s, -sway * 0.6);
-    pb.plot(l1.0, l1.1, fx.c(e.kind.color()));
-    pb.plot(l2.0, l2.1, fx.c(TIE_WHITE));
-    pb.plot(l3.0, l3.1, fx.c(e.kind.color()));
+    let l4 = fx.px(-3.1 * s, -sway * 0.3);
+    pb.plot(l1.0, l1.1, fx.c(ROAD_YELLOW));
+    pb.plot(l2.0, l2.1, rubber_blk);
+    pb.plot(l3.0, l3.1, fx.c(ROAD_YELLOW_HI));
+    pb.plot(l4.0, l4.1, rubber_blk);
     if taut {
         pb.plot(h2.0, h2.1, ROAD_YELLOW_HI);
     }
@@ -2154,5 +2200,37 @@ mod taut_loop_tests {
             let painted = pb.pixels().iter().filter(|c| **c != (0, 0, 0)).count();
             assert!((20..=120).contains(&painted), "{facing:?}: {painted} pixels");
         }
+    }
+
+    #[test]
+    fn tar_rat_keeps_dark_tar_core_with_bright_rim_and_glints() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+        let e = Enemy::spawn(crate::game::enemy::EnemyKind::TarRat, Vec2::new(24.0, 20.0), 1.0, &mut rng);
+        let bg = (40, 30, 22);
+        let mut pb = PixelBuffer::new(48, 40);
+        pb.clear(bg);
+        tar_rat(&mut pb, &e, Vec2::ZERO);
+        let painted: Vec<Rgb> = pb.pixels().iter().copied().filter(|&c| c != bg).collect();
+        let dark_core = painted.iter().filter(|c| c.0 as u32 + c.1 as u32 + c.2 as u32 <= 130).count();
+        let bright_rim = painted.iter().filter(|c| c.0 as u32 + c.1 as u32 + c.2 as u32 >= 560).count();
+        assert!(dark_core >= 12, "tar rat must stay tar-black inside (got {dark_core})");
+        assert!(bright_rim >= 8, "tar rat needs a strong light rim & wet back streak (got {bright_rim})");
+    }
+
+    #[test]
+    fn loose_bungee_uses_road_yellow_black_stripes_and_bright_metal_hook() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(4);
+        let e = Enemy::spawn(crate::game::enemy::EnemyKind::LooseBungee, Vec2::new(24.0, 20.0), 1.0, &mut rng);
+        let bg = (40, 30, 22);
+        let mut pb = PixelBuffer::new(48, 40);
+        pb.clear(bg);
+        loose_bungee(&mut pb, &e, Vec2::ZERO);
+        let painted: Vec<Rgb> = pb.pixels().iter().copied().filter(|&c| c != bg).collect();
+        let yellow = painted.iter().filter(|c| c.0 > 180 && c.1 > 140 && c.2 < 120).count();
+        let black = painted.iter().filter(|c| c.0 < 55 && c.1 < 55 && c.2 < 65).count();
+        let metal = painted.iter().filter(|c| c.0 > 220 && c.1 > 225 && c.2 > 230).count();
+        assert!(yellow >= 6, "bungee loop needs road-yellow stripes (got {yellow})");
+        assert!(black >= 6, "bungee loop needs black stripes (got {black})");
+        assert!(metal >= 4, "bungee J-hook needs a bright metal edge (got {metal})");
     }
 }

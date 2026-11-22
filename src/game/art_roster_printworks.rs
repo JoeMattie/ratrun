@@ -511,27 +511,28 @@ pub(crate) fn draw_silverfish_lod(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, _
 
 // ---- Erratum Slip (B, r 2.0) -----------------------------------------------
 
-/// Torn L of proof paper tumbling edge over edge above its own hover shadow,
-/// flashing its pale printed face (with a proofreader's red mark) and its
-/// cooler newsprint back.
+/// Torn L of bright bone-white proof paper tumbling edge over edge above its
+/// own hover shadow, flashing its warm-white printed face (with a proofreader's
+/// red mark) and its cooler bone-white back, framed by a crisp dark ink edge.
 pub(crate) fn draw_erratumslip(pb: &mut PixelBuffer, fr: &Frame, _e: &Enemy, _cam: Vec2, _elite: bool) {
     let s = fr.r * (1.0 / 2.0);
-    // `anim` runs at the Bat's 22/s buzz, so slow fractions produce a clean tumble.
-    let turn = fr.anim * 0.14;
-    let flip = (fr.anim * 0.22).cos();
-    let bob = (fr.anim * 0.22).sin();
-    // Never collapse below 44% width so the defining L-notch stays ≥ 2 px wide.
-    let squash = 0.44 + 0.56 * flip.abs();
+    // `anim` runs at the Bat's 22/s buzz; brisk rotation + edge-over-edge flip
+    // make the paper tumble unmistakable across consecutive frames.
+    let turn = fr.anim * 0.26;
+    let flip = (fr.anim * 0.34).cos();
+    let bob = (fr.anim * 0.34).sin();
+    // Never collapse below 56% width so both L-bars stay ≥ 2 bright px wide.
+    let squash = 0.56 + 0.44 * flip.abs();
     let inv_squash = 1.0 / squash;
     let (sn, cs) = turn.sin_cos();
 
     // 1) Detached hover shadow shifted down-right so it reads as flying.
     let sh_cx = (fr.pos.x + 2.1 * s).round() as i32;
-    let sh_cy = (fr.pos.y + (3.1 + 0.45 * bob) * s).round() as i32;
-    hover_shadow(pb, sh_cx, sh_cy, (2.2 + 0.7 * squash) * s, 1.5 * s, 0.34);
+    let sh_cy = (fr.pos.y + (3.2 + 0.50 * bob) * s).round() as i32;
+    hover_shadow(pb, sh_cx, sh_cy, (2.3 + 0.7 * squash) * s, 1.5 * s, 0.38);
 
-    // 2) Watertight pixel-rasterized tumbling L-sheet with torn serrated end.
-    let reach = (6.2 * s).ceil() as i32;
+    // 2) Watertight pixel-rasterized tumbling torn L-sheet of bone-white paper.
+    let reach = (6.6 * s).ceil() as i32;
     let cx = fr.pos.x.round() as i32;
     let cy = fr.pos.y.round() as i32;
     let x0 = (cx - reach).max(0);
@@ -543,23 +544,25 @@ pub(crate) fn draw_erratumslip(pb: &mut PixelBuffer, fr: &Frame, _e: &Enemy, _ca
     }
 
     let front = flip >= 0.0;
+    // Keep both faces unmistakably bright bone-white under 60% ambient light:
+    // warm cream-white front vs crisp cool-bone reverse so each flip flashes.
     let (p_sh, p_mid, p_hi) = if front {
-        (PAPER_DARK, PAPER, PAPER_HI)
+        ((212, 206, 188), (248, 244, 232), (255, 254, 246))
     } else {
-        ((118, 114, 102), (186, 182, 168), (228, 224, 210))
+        ((188, 192, 186), (228, 232, 224), (248, 250, 244))
     };
     let rim_c = rim_tone(fr);
 
-    // Sheet-space L SDF:
-    //   horizontal foot: a in [-3.3*s, +3.1*s], b in [-3.1*s, -0.7*s]
-    //   vertical upright: a in [-3.3*s, -0.7*s], b in [-1.0*s, torn_end]
+    // Sheet-space L SDF (generous arms around an open inner notch):
+    //   horizontal foot:  a in [-3.4*s, +3.4*s], b in [-3.2*s, -0.6*s]
+    //   vertical upright: a in [-3.4*s, -0.6*s], b in [-1.0*s, torn_end]
     let sheet_sd = |a: f32, b: f32| -> f32 {
-        let foot = box_sdf(a, b, -0.1 * s, -1.9 * s, 3.2 * s, 1.2 * s);
-        let torn_bump = (a * (3.8 / s)).sin() * 0.38 * s;
-        let b_end = 3.35 * s + torn_bump;
+        let foot = box_sdf(a, b, 0.0, -1.9 * s, 3.4 * s, 1.3 * s);
+        let torn_bump = (a * (3.8 / s)).sin() * 0.42 * s;
+        let b_end = 3.55 * s + torn_bump;
         let mid_b = 0.5 * (-s + b_end);
         let half_b = 0.5 * (b_end + 1.0 * s);
-        let upright = box_sdf(a, b, -2.0 * s, mid_b, 1.3 * s, half_b);
+        let upright = box_sdf(a, b, -2.0 * s, mid_b, 1.4 * s, half_b);
         foot.min(upright)
     };
 
@@ -573,73 +576,75 @@ pub(crate) fn draw_erratumslip(pb: &mut PixelBuffer, fr: &Frame, _e: &Enemy, _ca
             let a = rx;
             let b = ry * inv_squash;
             // Scale SDF back to approximate screen pixels along the squashed axis.
-            let d = sheet_sd(a, b) * (0.65 + 0.35 * squash);
-            let cover = (0.48 - d * 1.25).clamp(0.0, 1.0);
-            if cover > 0.0 {
+            let d = sheet_sd(a, b) * (0.68 + 0.32 * squash);
+            if d <= 0.12 * s {
                 let lit = ((dx * LIGHT_X + dy * LIGHT_Y) / (4.5 * s)).clamp(-1.0, 1.0);
-                // Catch a bright specular fold edge whenever the sheet tilts edge-on.
-                let sheen = (1.0 - flip.abs()) * 0.28;
-                let lum = 0.56 + 0.38 * lit + sheen;
+                // Catch a bright specular flash whenever the tumbling sheet turns edge-on.
+                let sheen = (1.0 - flip.abs()) * 0.42;
+                let lum = 0.68 + 0.34 * lit + sheen;
                 let mut col = shade3(p_sh, p_mid, p_hi, lum);
 
-                // Bright folded paper edge on the top/left border.
-                if d > -0.85 * s && lit > -0.1 {
-                    col = mix(col, p_hi, 0.72);
+                // Crisp pure-white lit border & edge-on fold glint.
+                if d > -0.78 * s && (lit > -0.15 || flip.abs() < 0.42) {
+                    col = mix(col, (255, 255, 250), 0.78);
                 } else if front {
-                    // Printed proof lines on the bars + crimson proofreader's erratum mark at the corner!
-                    let on_corner = a > -2.6 * s && a < -1.1 * s && b > -2.5 * s && b < -1.1 * s;
-                    let on_foot_line = a > -0.3 * s && a < 2.4 * s && (b + 1.9 * s).abs() < 0.42 * s;
-                    let on_up_line = b > 0.1 * s && b < 2.5 * s && (a + 2.0 * s).abs() < 0.42 * s;
+                    // Bold crimson proofreader's erratum mark at the L elbow + fine proof rules.
+                    let on_corner = a > -2.7 * s && a < -1.1 * s && b > -2.6 * s && b < -1.1 * s;
+                    let on_foot_line = a > -0.1 * s && a < 2.6 * s && (b + 1.9 * s).abs() < 0.28 * s;
+                    let on_up_line = b > 0.2 * s && b < 2.7 * s && (a + 2.0 * s).abs() < 0.28 * s;
                     if on_corner {
-                        col = if lit > 0.2 { mix(PROOF_RED, WARN_HI, 0.32) } else { PROOF_RED };
+                        col = if lit > 0.15 { mix(PROOF_RED, WARN_HI, 0.30) } else { PROOF_RED };
                     } else if on_foot_line || on_up_line {
-                        col = mix(col, CREASE, 0.72);
+                        col = mix(col, CREASE, 0.42);
                     }
-                } else if a > -2.4 * s && a < 1.8 * s && (b + 1.9 * s).abs() < 0.38 * s {
-                    // Faint ink bleed-through on the back face.
-                    col = mix(col, CREASE, 0.32);
+                } else if a > -2.2 * s && a < 1.8 * s && (b + 1.9 * s).abs() < 0.26 * s {
+                    // Subtle reverse-side crease line so the back face reads distinctly while flipping.
+                    col = mix(col, (148, 154, 162), 0.40);
                 }
 
-                let out_c = tone(fr, col);
-                if cover >= 1.0 {
-                    pb.plot(x, y, out_c);
-                } else {
-                    let bg = pb.pixel_at(x as usize, y as usize);
-                    let rimmed = mix(bg, rim_c, 0.66 * (1.0 - cover));
-                    pb.plot(x, y, mix(rimmed, out_c, cover));
-                }
-            } else if d < 0.85 * s {
-                put(pb, x, y, rim_c, 0.62);
+                // Plot full-brightness bone paper without letting the dark rim eat the arms.
+                pb.plot(x, y, tone(fr, col));
+            } else if d < 1.12 * s {
+                // Crisp dark ink silhouette edge strictly outside the bright paper.
+                put(pb, x, y, rim_c, 0.86);
             }
         }
     }
 }
 
-pub(crate) fn draw_erratumslip_lod(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, _cam: Vec2, _elite: bool) {
-    let col = tone(fr, e.kind.color());
-    let hi = tone(fr, PAPER_HI);
-    let dark = tone(fr, PAPER_DARK);
+pub(crate) fn draw_erratumslip_lod(pb: &mut PixelBuffer, fr: &Frame, _e: &Enemy, _cam: Vec2, _elite: bool) {
+    let col = tone(fr, (246, 242, 228));
+    let hi = tone(fr, (255, 254, 246));
+    let rim = rim_tone(fr);
     let (cx, cy) = centre(fr);
     // Detached hover shadow.
-    shade(pb, cx + 2, cy + 3, 0.34);
-    shade(pb, cx + 3, cy + 3, 0.25);
-    // Crisp 2-px-thick tumbling L in four orientations with a red proof mark at the elbow.
-    let q = ((fr.anim * 0.09) as i32).rem_euclid(4);
+    shade(pb, cx + 2, cy + 3, 0.36);
+    shade(pb, cx + 3, cy + 3, 0.26);
+    // Crisp 2-px-thick bone-white tumbling L in four orientations with a dark
+    // outer edge and a red proof mark at the elbow.
+    let q = ((fr.anim * 0.14) as i32).rem_euclid(4);
     let (dx, dy) = match q {
         0 => (1, 1),
         1 => (-1, 1),
         2 => (-1, -1),
         _ => (1, -1),
     };
+    // Dark rim just outside the L arms so the bright bone-white L pops on any tile.
+    for ix in 0..=2 {
+        put(pb, cx + ix * dx, cy - dy, rim, 0.85);
+    }
+    for iy in 0..=3 {
+        put(pb, cx - dx, cy + iy * dy, rim, 0.85);
+    }
     // Horizontal bar (3x2)
     for ix in 0..=2 {
-        put(pb, cx + ix * dx, cy, if ix == 2 { hi } else { col }, 1.0);
-        put(pb, cx + ix * dx, cy + dy, dark, 1.0);
+        put(pb, cx + ix * dx, cy, hi, 1.0);
+        put(pb, cx + ix * dx, cy + dy, col, 1.0);
     }
     // Vertical bar (2x4)
     for iy in 1..=3 {
-        put(pb, cx, cy + iy * dy, col, 1.0);
-        put(pb, cx + dx, cy + iy * dy, if iy == 3 { dark } else { hi }, 1.0);
+        put(pb, cx, cy + iy * dy, hi, 1.0);
+        put(pb, cx + dx, cy + iy * dy, col, 1.0);
     }
     // Proofreader's red erratum mark at the elbow.
     put(pb, cx, cy, tone(fr, PROOF_RED), 1.0);
@@ -1929,5 +1934,34 @@ mod tests {
             let d = Vec2::new(x as f32, y as f32).dist(end);
             assert!(d <= rad + 1.0, "endpoint pixel {d} px from centre (rad {rad})");
         }
+    }
+
+    #[test]
+    fn erratum_slip_stays_bright_bone_white_with_dark_edge_across_tumble() {
+        let bg = (40, 40, 44);
+        let mut prev = None;
+        let mut changes = 0usize;
+        for step in 0..8 {
+            let pb = render(EnemyKind::ErratumSlip, step as f32 * 2.5, false);
+            let px = painted(&pb, bg);
+            let lum = |c: Rgb| c.0 as u32 + c.1 as u32 + c.2 as u32;
+            let bright = px.iter().filter(|&&(x, y)| lum(pb.pixel_at(x, y)) >= 620).count();
+            let dark_edge = px.iter().filter(|&&(x, y)| lum(pb.pixel_at(x, y)) <= 120).count();
+            assert!(
+                bright >= 8,
+                "erratum slip step {step} needs bright bone-white paper mass (got {bright})"
+            );
+            assert!(
+                dark_edge >= 6,
+                "erratum slip step {step} needs a crisp dark edge (got {dark_edge})"
+            );
+            if let Some(p) = prev {
+                if p != pb.pixels() {
+                    changes += 1;
+                }
+            }
+            prev = Some(pb.pixels().to_vec());
+        }
+        assert!(changes >= 5, "erratum slip should visibly tumble across frames (got {changes})");
     }
 }
