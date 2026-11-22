@@ -14,13 +14,16 @@
 //! eased value it renders with, and the wheel, the `Z`/`X` keys and the options
 //! row all step the same ladder through [`step`].
 //!
-//! What zoom deliberately does **not** do: move the spawn ring. Spawns are
-//! still placed just outside the *unzoomed* viewport, so at `z = 2` an enemy can
-//! be seen popping into existence in the extra band of world the wider view
-//! reveals. That is accepted: pushing the ring out with the zoom would change
-//! where enemies appear — simulation state — and the same seed would then play
-//! differently at different zooms (see
+//! What zoom never does is *move* the spawn ring. The ring is sized once, from
+//! the simulation viewport times the ladder's widest rung
+//! (`game::ecs::systems::spawn::MAX_ZOOM_OUT`, pinned equal to [`MAX`]), so
+//! every ordinary spawn lands outside the view at `z = 2` whatever the player's
+//! current zoom is: nothing pops into existence in the wider view, and because
+//! the eased zoom is never read by the simulation the same seed still plays
+//! identically at every zoom (see
 //! `game::world::zoom_tests::the_same_seed_plays_out_identically_at_every_zoom`).
+//! A new rung above [`MAX`] must move that constant with it (a test fails
+//! otherwise) and moves the determinism goldens.
 //!
 //! [`World`]: crate::game::world::World
 

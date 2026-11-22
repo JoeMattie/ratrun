@@ -1685,11 +1685,18 @@ mod tests {
             if !w.player.loadout.has(kind) {
                 w.player.loadout.apply(&Upgrade::NewWeapon(kind));
             }
+            // The weapon under test alone: the opening horde is one or two
+            // bodies arriving from beyond the widest zoom's view, and the
+            // starting Gnaw picks them off before they are inside this weapon's
+            // 56 px reach.
+            w.player.loadout.weapons.retain(|weapon| weapon.kind == kind);
             for weapon in w.player.loadout.weapons.iter_mut() {
                 weapon.level = 3;
                 weapon.timer = 0.0;
             }
-            for tick in 0..600u32 {
+            // Fifteen seconds: the horde arrives from beyond the widest zoom's
+            // view, and a rat on the move takes most of ten to meet it.
+            for tick in 0..900u32 {
                 let a = tick as f32 * 0.01;
                 let mv = Vec2::from_angle(a);
                 w.update(1.0 / 60.0, mv, false);
@@ -1718,7 +1725,7 @@ mod tests {
             assert_eq!(a.2, b.2, "{kind:?}: the set of marked bodies diverged");
             assert_eq!(a.3, b.3, "{kind:?}: booked damage diverged");
             // The trace comparison is worth nothing if the weapon never fired.
-            assert!(a.3 > 0, "{kind:?} dealt no damage in a live 10 s run");
+            assert!(a.3 > 0, "{kind:?} dealt no damage in a live 15 s run");
         }
     }
 

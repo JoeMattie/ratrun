@@ -29,8 +29,10 @@
 //! and the miniboss arrival all read that one rectangle, and none of them reads
 //! the current zoom: the same seed still plays out identically at every rung.
 //! Bodies therefore walk further in than they used to, so a body still outside
-//! that view carries an approach speed boost ([`boost_approach`]) until it
-//! comes into it — no rng, no position change, nothing visible.
+//! the **unzoomed** (1.0) view carries an approach speed boost
+//! ([`boost_approach`]) until it comes into it — no rng, no position change.
+//! Measured against the old ring, first contact on a standing rat is 4.2 s
+//! before and 4.1 s after (160 × 80).
 //!
 //! ## The boss
 //!
@@ -120,15 +122,18 @@ pub const MAX_ZOOM_OUT: f32 = 2.0;
 const RING_MARGIN: f32 = 16.0;
 
 /// Approach speed multiplier for a **ground** body that is still outside the
-/// widest view (see [`boost_approach`]).
+/// unzoomed (1.0) view (see [`boost_approach`]).
 ///
 /// The ring moved out to the widest view's half-diagonal, so a body has further
-/// to walk before it can be seen or fought: this gives the walk-in back, and it
-/// is taken off again the moment the body comes into view, so nothing the rat
-/// can see moves differently from before. 1.8× turns a 30 px/s skitterer into
-/// 54 px/s while it is out of sight — the extra 50-90 px of ring costs about a
-/// third of a second instead of three.
-pub const APPROACH_BOOST_GROUND: f32 = 1.8;
+/// to walk before it can be fought: this gives the walk-in back, and it is
+/// taken off again the moment the body comes into the 1.0 view, so nothing on
+/// the unzoomed screen moves differently from before. (Zoomed out, the band
+/// between the two views shows the body hurrying in.) Tuned on the integration
+/// pass: with the boost held only outside the *widest* view first contact on a
+/// standing rat went from 4.2 s to 5.4 s (the ring is barely outside that
+/// view on the horizontal bearings, so there was nothing to boost across);
+/// held to the 1.0 view, ×1.8 gives 4.4 s, ×2.0 4.1 s and ×2.5 3.5 s.
+pub const APPROACH_BOOST_GROUND: f32 = 2.0;
 /// The same for a flying body, which is already quick: ×1.3.
 pub const APPROACH_BOOST_FLYER: f32 = 1.3;
 /// A body whose own speed is at or above this (px/s) is never boosted: the
@@ -282,6 +287,26 @@ pub struct DirectorIds<'w> {
     pub next_enemy_id: ResMut<'w, NextEnemyId>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only measurement hook: when armed (`Some`), every point the
+    /// director places a body at is recorded as `(point, rat, tag)` — tag 0 an
+    /// ordinary pulse body, 1 a Lilliputian squad's centre, 2 an elite, 3 a
+    /// pulse body that was **skipped** (no point). Read by
+    /// `spawns_inside_the_widest_view_in_bot_play`.
+    pub(crate) static SPAWN_LOG: std::cell::RefCell<Option<Vec<(Vec2, Vec2, u8)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn log_spawn(pos: Vec2, rat: Vec2, tag: u8) {
+    SPAWN_LOG.with(|l| {
+        if let Some(log) = l.borrow_mut().as_mut() {
+            log.push((pos, rat, tag));
+        }
+    });
+}
+
 /// Legacy `World::run_director`, now with the campaign curve, the maze-free
 /// spawn rule, room waves and the two-group flank.
 pub fn director_system(
@@ -310,7 +335,7 @@ pub fn director_system(
     let dt = input.dt;
     let elapsed = counters.elapsed;
     // The ring sits outside the widest view, so a body walks further in than it
-    // used to: give the ones still out of sight their approach speed back (no
+    // used to: give the ones still outside the 1.0 view their approach speed back (no
     // rng, no spawn, no position) before anything else this tick.
     boost_approach(&mut enemies, &mut director.approach, &player, viewport.0);
     // The campaign level shifts the whole curve (`director::curve_clock`), which
@@ -453,6 +478,8 @@ pub fn director_system(
                     // to leave the squad leaderless), the peak is the number
                     // that really arrived, and no `SpawnId` is spent on a body
                     // that was never spawned.
+                    #[cfg(test)]
+                    log_spawn(centre, player.pos, 1);
                     let placed = lilli_squad_points(&level, centre, room, |_, _| {});
                     let mut squad = 0u32;
                     let spawned = lilli_squad_points(&level, centre, room, |j, at| {
@@ -493,6 +520,8 @@ pub fn director_system(
                 } else {
                     // No safe off-screen point for the squad: skip the pulse
                     // body entirely, exactly like a failed single spawn.
+                    #[cfg(test)]
+                    log_spawn(player.pos, player.pos, 3);
                     continue;
                 }
             }
@@ -509,8 +538,12 @@ pub fn director_system(
                 // No safe, off-screen, wall-clear point (the rat is deep in a
                 // maze, or boxed into a pocket): skip the spawn. A body in a
                 // warren or on top of the player is worse than no body.
+                #[cfg(test)]
+                log_spawn(player.pos, player.pos, 3);
                 continue;
             };
+            #[cfg(test)]
+            log_spawn(pos, player.pos, 0);
             let mut enemy = Enemy::spawn_with_mods(kind, pos, mult, mods, &mut rng.0);
             // Neon merge: legacy `run_director` ids every director-spawned
             // enemy from the monotonic `next_enemy_id` counter (0 is reserved
@@ -547,6 +580,8 @@ pub fn director_system(
                 viewport.0,
                 &mut scratch,
             ) {
+                #[cfg(test)]
+                log_spawn(pos, player.pos, 2);
                 let mult = director::horde_hp_mult_for(difficulty.0, elapsed) * 1.6;
                 // The elite wears the floor's own heavy (the roster's H slot):
                 // its elite is that body with the double stripe and the
@@ -655,17 +690,19 @@ fn live_slot_counts<E: std::ops::Deref<Target = Enemy>>(
 
 /// One tick of the approach speed boost.
 ///
-/// A body the director placed outside the widest view walks in at
+/// A body outside the unzoomed (1.0) view walks in at
 /// [`APPROACH_BOOST_GROUND`] (×1.3 for flyers) until it comes into that view,
 /// at which point it is put back on exactly the speed scale it spawned with.
+/// (A body that wanders back out of it is boosted again: the rule is where the
+/// body is, not where it has been.)
 /// `Director::approach` is the registry, keyed by `SpawnId` and sorted, so the
 /// boost is applied and removed exactly once per body.
 ///
 /// Why this mechanism rather than a pacing change: it draws no rng, changes no
 /// spawn position, no spawn count and no pulse cadence, and it cannot fire
-/// inside the view — so the change that makes a spawn invisible at every zoom
-/// leaves the horde's arrival schedule (and the number of rng draws per run)
-/// alone. A slower spawn cadence would have reshaped the whole curve.
+/// inside the 1.0 view — so the change that makes a spawn invisible at every
+/// zoom leaves the horde's arrival schedule (and the number of rng draws per
+/// run) alone.
 ///
 /// Never a named miniboss (it has its own arrival walk), never an elite, never
 /// a body whose own speed is already [`APPROACH_SPEED_CEIL`] or more.
@@ -675,12 +712,14 @@ fn boost_approach(
     player: &Player,
     viewport: Vec2,
 ) {
+    let mut live = 0usize;
     for (id, mut e) in enemies.iter_mut() {
+        live += 1;
         let at = approach.binary_search_by_key(&id.0, |&(id, _)| id);
         let out_of_sight = !e.named
             && !e.elite
             && e.speed_scale > 0.0
-            && off_screen(e.pos, player.pos, viewport);
+            && !in_sim_view(e.pos, player.pos, viewport);
         if !out_of_sight {
             // Back in view (or no longer an ordinary body): restore the exact
             // scale it spawned with — a multiply/divide pair would leave a
@@ -707,6 +746,23 @@ fn boost_approach(
             approach.insert(at, (id.0, e.speed_scale));
             e.speed_scale *= boost;
         }
+    }
+    // A body that dies while it is still boosted leaves its row behind (the
+    // restore above only ever sees the living), and most fodder dies out there.
+    // `SpawnId`s are never reused, so a dead row is only weight: sweep them when
+    // they outnumber the living. No rng, no simulation state.
+    if approach.len() > live * 2 + 64 {
+        let mut alive = vec![false; approach.len()];
+        for (id, _) in enemies.iter() {
+            if let Ok(at) = approach.binary_search_by_key(&id.0, |&(id, _)| id) {
+                alive[at] = true;
+            }
+        }
+        let mut row = 0;
+        approach.retain(|_| {
+            row += 1;
+            alive[row - 1]
+        });
     }
 }
 
@@ -3916,13 +3972,12 @@ mod tests {
     /// minutes, on a fixed seed, with no weapons (nothing dies, so the count is
     /// the director's own) and an invulnerable rat.
     ///
-    /// Values derived by reading the old code, for the coordinator to compare:
-    /// the ring was `max(vp.len() * 0.5 + 16, 120)` (120 px at 120×74 and at
-    /// 160×80, where the floor binds), the first pulse fires on tick 1
-    /// (`Director::spawn_timer` starts spent) with one 30 px/s skitterer, so
-    /// first contact was ~4 s before the approach boost. The ring is now 157 px
-    /// at 120×74 and 195 px at 160×80, and the boost runs out of sight at
-    /// 54 px/s, which is why the window below is the same as before.
+    /// The old ring was `max(vp.len() * 0.5 + 16, 120)` (120 px at 120×74 and
+    /// at 160×80, where the floor binds), the first pulse fires on tick 1
+    /// (`Director::spawn_timer` starts spent) with one 30 px/s skitterer, and
+    /// first contact in this exact loop measured 4.17 s on the commit before
+    /// the ring moved. The ring is now 157 px at 120×74 and 195 px at 160×80,
+    /// and the boost runs at 60 px/s outside the 1.0 view: 4.1 s.
     #[test]
     fn the_opening_still_reaches_the_rat_on_time() {
         let dt = 1.0 / 30.0;
@@ -3951,12 +4006,13 @@ mod tests {
                         e.pos
                     );
                 }
-                // The approach boost ends at the widest view's edge: nothing
-                // the rat can see moves at anything but its own speed. (Asserted
-                // inside the *unzoomed* view: a body that crosses the widest
-                // view's edge during a tick keeps last tick's scale until the
-                // next director pass, and the two bands are far apart.)
-                if !e.named && !e.elite && super::in_sim_view(e.pos, rat, vp) {
+                // The approach boost ends at the unzoomed view's edge: nothing
+                // on the 1.0 screen moves at anything but its own speed.
+                // (Asserted a body's width inside that edge: a body that
+                // crosses it during a tick keeps last tick's scale until the
+                // next director pass.)
+                let inset = Vec2::new(vp.x - 16.0, vp.y - 16.0);
+                if !e.named && !e.elite && super::in_sim_view(e.pos, rat, inset) {
                     assert!(
                         (e.speed_scale - 1.0).abs() < 1e-6,
                         "{:?} moves at {}× inside the view",
@@ -3996,8 +4052,8 @@ mod tests {
         // The window the old ring held (~4 s of walk) plus the extra ring, with
         // the out-of-sight boost giving most of it back.
         assert!(
-            (1.0..=9.0).contains(&first),
-            "first contact at {first:.1} s is outside the 1-9 s opening"
+            (2.5..=5.5).contains(&first),
+            "first contact at {first:.1} s is outside the 2.5-5.5 s opening (it was 4.2 s on the old ring)"
         );
         for (at, live, near) in marks {
             // The budget is a step table, and it steps *at* these instants: the
@@ -4015,5 +4071,180 @@ mod tests {
             );
         }
         assert_eq!(named.len(), 1, "the 3:00 miniboss did not arrive");
+    }
+
+    /// Measurement, not a gate: bot play on every floor at two viewports, with
+    /// every director placement logged. Prints how many bodies were placed
+    /// inside the view the widest zoom shows (rat-centred, and through the
+    /// arena-clamped camera the renderer really uses), inside the unzoomed
+    /// view, and how many pulse bodies were skipped.
+    ///
+    /// `cargo test spawns_inside_the_widest_view_in_bot_play -- --ignored --nocapture`
+    /// (`RATRUN_SPAWN_SECS` sets the seconds per run, default 240).
+    #[test]
+    #[ignore = "measurement"]
+    fn spawns_inside_the_widest_view_in_bot_play() {
+        use crate::autoplay::{AutoOpts, AutoRun};
+        use crate::game::bot::Skill;
+        let secs: f32 = std::env::var("RATRUN_SPAWN_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(240.0);
+        println!(
+            "floor       viewport  placed  in-2x(rat) in-2x(cam) in-1x  skipped  min-dist"
+        );
+        let mut totals = [0usize; 5];
+        for theme in Theme::playable() {
+            for vp in [Vec2::new(120.0, 74.0), Vec2::new(200.0, 116.0)] {
+                let mut opts = if theme == Theme::Trailer {
+                    AutoOpts::getaway(Skill::Skilled)
+                } else {
+                    AutoOpts::practice(0, Skill::Skilled)
+                };
+                if theme != Theme::Trailer {
+                    opts.route = Some(theme);
+                }
+                let mut run = AutoRun::new(1000, opts);
+                assert_eq!(run.world().level.theme, theme);
+                run.world_mut().viewport = vp;
+                run.world_mut().player.god = true;
+                let arena = run.world().level.arena;
+                super::SPAWN_LOG.with(|l| *l.borrow_mut() = Some(Vec::new()));
+                while run.world().elapsed < secs && !run.finished() {
+                    run.step(1.0 / 60.0);
+                }
+                let log = super::SPAWN_LOG.with(|l| l.borrow_mut().take()).unwrap_or_default();
+                let (mut placed, mut in_rat, mut in_cam, mut in_one, mut skipped) = (0, 0, 0, 0, 0);
+                let mut min_dist = f32::MAX;
+                for (p, rat, tag) in log {
+                    if tag == 3 {
+                        skipped += 1;
+                        continue;
+                    }
+                    placed += 1;
+                    min_dist = min_dist.min(p.dist(rat));
+                    let d = p - rat;
+                    if d.x.abs() < vp.x && d.y.abs() < vp.y {
+                        in_rat += 1;
+                    }
+                    if d.x.abs() < vp.x * 0.5 && d.y.abs() < vp.y * 0.5 {
+                        in_one += 1;
+                    }
+                    // The renderer's camera at the widest zoom: the rat-centred
+                    // rectangle of `viewport × 2`, clamped to the arena.
+                    let view = vp * 2.0;
+                    let clamp = |c: f32, a: f32, v: f32| {
+                        if a <= v {
+                            (a - v) * 0.5
+                        } else {
+                            c.clamp(0.0, a - v)
+                        }
+                    };
+                    let cx = clamp(rat.x - view.x * 0.5, arena.x, view.x);
+                    let cy = clamp(rat.y - view.y * 0.5, arena.y, view.y);
+                    if p.x > cx && p.x < cx + view.x && p.y > cy && p.y < cy + view.y {
+                        in_cam += 1;
+                    }
+                }
+                println!(
+                    "{:<11} {:>3}x{:<4} {placed:>6} {in_rat:>10} {in_cam:>10} {in_one:>6} {skipped:>8} {min_dist:>9.0}",
+                    format!("{theme:?}"),
+                    vp.x,
+                    vp.y,
+                );
+                for (t, v) in totals.iter_mut().zip([placed, in_rat, in_cam, in_one, skipped]) {
+                    *t += v;
+                }
+            }
+        }
+        println!(
+            "TOTAL                {:>6} {:>10} {:>10} {:>6} {:>8}",
+            totals[0], totals[1], totals[2], totals[3], totals[4]
+        );
+    }
+
+    /// Measurement, not a gate: the opening's pace in bot play on every floor
+    /// (four seeds, viewport 120 × 74): first contact, first kill, first
+    /// level-up, and kills / live bodies / rat level at 1:00, 3:00 and 6:00.
+    ///
+    /// `cargo test opening_pace_in_bot_play -- --ignored --nocapture`
+    #[test]
+    #[ignore = "measurement"]
+    fn opening_pace_in_bot_play() {
+        use crate::autoplay::{AutoOpts, AutoRun};
+        use crate::game::bot::Skill;
+        println!(
+            "floor       contact  kill  lvl-up | kills@1/3/6 min        | live@1/3/6 min     | level@3/6"
+        );
+        let mut all = [0.0f32; 11];
+        let mut floors = 0.0f32;
+        for theme in Theme::playable() {
+            let mut sum = [0.0f32; 11];
+            let seeds = [1000u64, 1001, 1002, 1003];
+            for seed in seeds {
+                let mut opts = if theme == Theme::Trailer {
+                    AutoOpts::getaway(Skill::Skilled)
+                } else {
+                    AutoOpts::practice(0, Skill::Skilled)
+                };
+                if theme != Theme::Trailer {
+                    opts.route = Some(theme);
+                }
+                let mut run = AutoRun::new(seed, opts);
+                run.world_mut().viewport = Vec2::new(120.0, 74.0);
+                run.world_mut().player.god = true;
+                let (mut contact, mut kill, mut lvl) = (None, None, None);
+                let marks = [60.0f32, 180.0, 360.0];
+                let mut next = 0;
+                while next < marks.len() && !run.finished() {
+                    run.step(1.0 / 60.0);
+                    let w = run.world_mut();
+                    let t = w.elapsed;
+                    if contact.is_none() {
+                        let rat = w.player.pos;
+                        let touch = w.enemies().iter().any(|e| {
+                            e.pos.dist(rat)
+                                <= crate::game::ecs::constants::PLAYER_RADIUS + e.radius + 2.0
+                        });
+                        if touch {
+                            contact = Some(t);
+                        }
+                    }
+                    if kill.is_none() && w.kills > 0 {
+                        kill = Some(t);
+                    }
+                    if lvl.is_none() && w.player.level > 1 {
+                        lvl = Some(t);
+                    }
+                    if t >= marks[next] {
+                        sum[3 + next] += w.kills as f32;
+                        sum[6 + next] += w.enemy_count() as f32;
+                        if next > 0 {
+                            sum[8 + next] += w.player.level as f32;
+                        }
+                        next += 1;
+                    }
+                }
+                sum[0] += contact.unwrap_or(360.0);
+                sum[1] += kill.unwrap_or(360.0);
+                sum[2] += lvl.unwrap_or(360.0);
+            }
+            let n = seeds.len() as f32;
+            let m: Vec<f32> = sum.iter().map(|v| v / n).collect();
+            println!(
+                "{:<11} {:>6.1}s {:>5.1}s {:>5.1}s | {:>6.0} {:>6.0} {:>6.0}   | {:>5.0} {:>5.0} {:>5.0}  | {:>4.1} {:>4.1}",
+                format!("{theme:?}"),
+                m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10]
+            );
+            for (a, v) in all.iter_mut().zip(&m) {
+                *a += v;
+            }
+            floors += 1.0;
+        }
+        let m: Vec<f32> = all.iter().map(|v| v / floors).collect();
+        println!(
+            "{:<11} {:>6.1}s {:>5.1}s {:>5.1}s | {:>6.0} {:>6.0} {:>6.0}   | {:>5.0} {:>5.0} {:>5.0}  | {:>4.1} {:>4.1}",
+            "MEAN", m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10]
+        );
     }
 }

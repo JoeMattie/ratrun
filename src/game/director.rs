@@ -231,8 +231,8 @@ pub struct Director {
     /// scale they spawned with)`, sorted by id. See
     /// [`crate::game::ecs::systems::spawn::APPROACH_BOOST_GROUND`]: the spawn
     /// ring sits outside the *widest* view now, so a walking body is boosted
-    /// until it comes into that view and then put back on exactly the scale it
-    /// spawned with. Never an rng draw, never a spawn, never a position.
+    /// until it comes into the unzoomed view and then put back on exactly the
+    /// scale it spawned with. Never an rng draw, never a spawn, never a position.
     pub approach: Vec<(u64, f32)>,
 }
 
@@ -472,8 +472,25 @@ pub fn elite_chance_at(curve: f32) -> f32 {
 /// level (floor 0.35 s) so a late pulse is a handful of bodies rather than a
 /// wall of them.
 pub fn spawn_interval_at(curve: f32) -> f32 {
-    (1.6 - curve / 900.0).max(0.35)
+    let base = (1.6 - curve / 900.0).max(0.35);
+    if curve < OPENING_SECS {
+        base * OPENING_INTERVAL_MULT
+    } else {
+        base
+    }
 }
+
+/// The opening's quicker pulse: for the first [`OPENING_SECS`] of the curve the
+/// pulse interval is multiplied by [`OPENING_INTERVAL_MULT`].
+///
+/// Spawns land beyond the widest zoom's view now, so the first bodies die (and
+/// drop their XP) further from the rat than they used to and the first card
+/// came about three seconds later. Ten bodies instead of seven in the first
+/// twelve seconds give those seconds back. A pulse in this window is still one
+/// body (`rate × interval` stays under 1.5), so nothing but the cadence moves.
+pub const OPENING_SECS: f32 = 12.0;
+/// See [`OPENING_SECS`].
+pub const OPENING_INTERVAL_MULT: f32 = 0.7;
 
 /// [`spawn_interval_at`] for a campaign level and the real run clock.
 #[inline]
@@ -804,8 +821,28 @@ mod tests {
     #[test]
     fn difficulty_escalates() {
         assert!(hp_mult(120.0) > hp_mult(0.0));
-        assert!(spawn_interval(200.0) < spawn_interval(0.0));
+        // Measured from the end of the opening's quick pulse (`OPENING_SECS`):
+        // the first twelve seconds are deliberately faster than what follows.
+        assert!(spawn_interval(200.0) < spawn_interval(OPENING_SECS));
         assert!(pulse_count(200.0) > pulse_count(0.0));
+    }
+
+    /// The opening's quick pulse: one body at a time, about ten of them in the
+    /// first twelve seconds instead of seven, and the curve's own interval the
+    /// moment the window closes.
+    #[test]
+    fn the_opening_pulse_is_quicker_and_still_one_body() {
+        let mut t = 0.0f32;
+        let mut bodies = 0;
+        while t < OPENING_SECS {
+            assert_eq!(pulse_count(t), 1, "an opening pulse at {t}s is not one body");
+            bodies += 1;
+            t += spawn_interval(t);
+        }
+        assert!((10..=11).contains(&bodies), "{bodies} bodies in the opening window");
+        let raw = 1.6 - OPENING_SECS / 900.0;
+        assert!((spawn_interval(OPENING_SECS) - raw).abs() < 1e-6);
+        assert!((spawn_interval(0.0) - 1.6 * OPENING_INTERVAL_MULT).abs() < 1e-6);
     }
 
     #[test]
@@ -841,11 +878,13 @@ mod tests {
         // Late: the frozen boss-time curve wants many more bodies than the
         // opening (the exact rate is the level-1 curve's tuning; the cap itself
         // is `ENEMY_CAP`).
+        // (Against the curve's own opening pace, right after the first quick
+        // seconds of `OPENING_SECS`.)
         assert!(
-            spawn_rate(300.0) > 5.0 * spawn_rate(0.0),
+            spawn_rate(300.0) > 5.0 * spawn_rate(OPENING_SECS),
             "late rate {} is not an order above the opening {}",
             spawn_rate(300.0),
-            spawn_rate(0.0)
+            spawn_rate(OPENING_SECS)
         );
         // And the early game is not a wall of bugs: the first seconds stay slow.
         assert!(spawn_rate(0.0) < 3.0, "early rate {}", spawn_rate(0.0));
