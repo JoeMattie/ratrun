@@ -1765,7 +1765,7 @@ mod tests {
         // Zoom out and back (the ease redraws the field under the read-out).
         run!("zoom out", 14, &[c('x')]);
         run!("zoom in", 14, &[c('z')]);
-        // All the way out and back, through every rung (and, with DETAIL on,
+        // All the way out and back, through every rung (and, with sub-cell detail,
         // every sub-cell grid), playing at the widest view for a while.
         for _ in 0..3 {
             run!("zoom wide", 8, &[c('x')]);
@@ -1865,7 +1865,7 @@ mod tests {
         }
     }
 
-    /// The same session with DETAIL forced to octants: zoomed out, the field
+    /// The same session with the detail forced to octants: zoomed out, the field
     /// is quadrant, sextant and octant glyphs (four UTF-8 bytes for the last
     /// two). The direct path must take them as plain one-cell symbols — no
     /// fallback to ratatui's diff — and leave the same screen as ratatui's

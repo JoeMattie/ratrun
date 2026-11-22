@@ -1047,7 +1047,7 @@ mod tests {
         let mut step = PixelBuffer::new(24, 16);
         step.clear(B);
         for y in 0..16 {
-            step.line(0, y as i32, 11, y as i32, A);
+            step.line(0, y, 11, y, A);
         }
         let mut frame = DetailFrame::new();
         assert!(frame.smooth_from(Grid::Octant, 24, 8, &step));
@@ -1155,13 +1155,13 @@ mod tests {
         for set in [SubcellSet::Quad, SubcellSet::Octant] {
             let mut w = World::new(Theme::Sewer, 7);
             let p = w.player.pos;
-            w.spawn_gem(Gem::new(p + Vec2::new(-60.0, -40.0), 5));
+            w.spawn_gem(Gem::new(p + Vec2::new(-30.0, -20.0), 5));
             crate::game::ecs::resources::spawn_with_id(
                 &mut w.ecs,
-                Gold::new(p + Vec2::new(60.0, -40.0), 1),
+                Gold::new(p + Vec2::new(30.0, -20.0), 1),
             );
             w.spawn_bullet(Bullet::new(
-                p + Vec2::new(50.0, 44.0),
+                p + Vec2::new(25.0, 22.0),
                 Vec2::new(0.0, 0.0),
                 4.0,
                 Faction::Enemy,
@@ -1196,7 +1196,8 @@ mod tests {
                 }
             }
             assert!(seen[0] >= 8 && seen[1] >= 1, "{set:?}: the coin square: {seen:?}");
-            assert!(seen[2] >= 4, "{set:?}: the pellet border: {seen:?}");
+            // (No pellet border here: the ink pass re-stamps hostile marks only
+            // when zoomed out, so at 1x there is none to keep.)
             assert!(seen[3] >= 1, "{set:?}: the gem centre: {seen:?}");
 
             // Smoothing off: no detail frame, so the frame is the half-block
@@ -1359,7 +1360,8 @@ mod tests {
                 }
             }
             assert!(seen[0] >= 8 && seen[1] >= 1, "{set:?}: the coin square: {seen:?}");
-            assert!(seen[2] >= 4, "{set:?}: the pellet border: {seen:?}");
+            // (No pellet border here: the ink pass re-stamps hostile marks only
+            // when zoomed out, so at 1x there is none to keep.)
             assert!(seen[3] >= 1, "{set:?}: the gem centre: {seen:?}");
 
             // Without a set, or at 1x with the smoothing off, there is no

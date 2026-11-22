@@ -7,7 +7,7 @@
 //!   ladder, the 2D light map applied before the resample, and the screen-space
 //!   re-stamp of gameplay-critical marks after it. None may touch the
 //!   simulation.
-//! * `subcell` — the DETAIL option: the zoomed-out picture drawn with quadrant,
+//! * `subcell` — sub-cell detail (always on): the zoomed-out picture drawn with quadrant,
 //!   sextant or octant glyphs instead of half blocks. Render-only.
 //! * `palette` — colours and `to_term()`, the fold to the terminal's depth.
 //! * `hud`, `overlay`, `minimap`, `minimap_source`, `cursor` — what sits over
