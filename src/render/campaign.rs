@@ -566,6 +566,8 @@ pub struct CampaignVictoryView<'a> {
     pub focus: CampaignVictoryAction,
     /// Currently pointer-hovered action button.
     pub hovered: Option<CampaignVictoryAction>,
+    /// The bound to-menu key's name (`Action::Quit`), printed on its button.
+    pub menu_key: &'a str,
 }
 
 // ---------------------------------------------------------------------------
@@ -626,6 +628,8 @@ pub struct LevelSelectView<'a> {
     pub selected: usize,
     /// Currently hovered mouse action.
     pub hovered: Option<LevelSelectAction>,
+    /// The bound back key's name (`Action::Back`), printed on its button.
+    pub back_key: &'a str,
 }
 
 // ---------------------------------------------------------------------------
@@ -2952,7 +2956,8 @@ pub fn draw_campaign_victory(
     } else {
         " Enter replay "
     };
-    let menu_lbl = " Q  to menu ";
+    let menu_lbl = format!(" {}  to menu ", view.menu_key);
+    let menu_lbl = menu_lbl.as_str();
     let gap = 3u16;
     let pw_b = play_lbl.chars().count() as u16;
     let mw_b = menu_lbl.chars().count() as u16;
@@ -3386,7 +3391,8 @@ pub fn draw_level_select(
     } else {
         " ▸ Enter START "
     };
-    let back_lbl = " Esc  back ";
+    let back_lbl = format!(" {}  back ", view.back_key);
+    let back_lbl = back_lbl.as_str();
     let btn_gap = 3u16;
     let sw = start_lbl.chars().count() as u16;
     let bw = back_lbl.chars().count() as u16;
@@ -3437,7 +3443,10 @@ pub fn draw_level_select(
             buf,
             inner,
             hint_row,
-            "Arrows / click select  ·  Enter begin  ·  Esc back",
+            &format!(
+                "Arrows / click select  ·  Enter begin  ·  {} back",
+                view.back_key
+            ),
             ink(MUTED).bg(PLATE),
         );
     }
@@ -3984,6 +3993,7 @@ mod tests {
     fn campaign_victory_all_sizes() {
         let items = sample_upgrades();
         let view = CampaignVictoryView {
+            menu_key: "Q",
             final_score: 24860,
             total_time_secs: 764.0,
             total_kills: 942,
@@ -4130,6 +4140,7 @@ mod tests {
     fn level_select_locked_unlocked_and_all_sizes() {
         let slots = sample_slots();
         let view = LevelSelectView {
+            back_key: "Esc",
             slots: &slots,
             selected: 1,
             hovered: Some(LevelSelectAction::SelectLevel(0)),
@@ -4168,6 +4179,7 @@ mod tests {
 
         // A locked selection cannot start; an unlocked one can.
         let locked = LevelSelectView {
+            back_key: "Esc",
             slots: &slots,
             selected: 3, // the Lab, locked in the sample
             hovered: None,
@@ -4178,6 +4190,7 @@ mod tests {
             "a locked floor must not offer Start"
         );
         let open = LevelSelectView {
+            back_key: "Esc",
             slots: &slots,
             selected: 0,
             hovered: None,
@@ -4208,6 +4221,7 @@ mod tests {
         let slots = sample_slots();
         let last = slots.len() - 1;
         let view = LevelSelectView {
+            back_key: "Esc",
             slots: &slots,
             selected: last,
             hovered: None,
@@ -4292,6 +4306,7 @@ mod tests {
         }
         for &(w, h) in &[(80u16, 24u16), (120, 40)] {
             let view = LevelSelectView {
+                back_key: "Esc",
                 slots: &all_open,
                 selected: 0,
                 hovered: None,
@@ -4318,6 +4333,7 @@ mod tests {
         let slots = sample_slots();
         for selected in [0usize, 1, 5] {
             let view = LevelSelectView {
+                back_key: "Esc",
                 slots: &slots,
                 selected,
                 hovered: None,
@@ -4413,6 +4429,7 @@ mod tests {
         let sel3 = [true, false, true, false, false, false, true, false, false, false, false, false, false];
 
         let victory = CampaignVictoryView {
+            menu_key: "Q",
             final_score: 24860,
             total_time_secs: 764.0,
             total_kills: 942,
@@ -4536,6 +4553,7 @@ mod tests {
             // slot's own highlight, name, best and unlock state).
             for selected in 0..select_slots.len() {
                 let select = LevelSelectView {
+                    back_key: "Esc",
                     slots: &select_slots,
                     selected,
                     hovered: None,

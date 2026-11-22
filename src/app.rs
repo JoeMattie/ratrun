@@ -1274,7 +1274,7 @@ impl App {
                 || self.input.just_pressed(KeyCode::Char('~'));
             if backtick {
                 if self.console.open {
-                    self.console.close();
+                    self.close_console();
                 } else {
                     // Any screen: the title, a run, the Library, the Nest,
                     // Options and Controls all sit under the console.
@@ -1297,11 +1297,9 @@ impl App {
             }
             self.console.tick(dt);
         }
-        // Console `pause`: the game stays frozen even with the console closed.
-        if self.console_paused {
-            self.input.pressed.clear();
-            return;
-        }
+        // Console `pause` freezes the simulation only (`update_playing` honours
+        // the flag); menus and every global key keep working, and closing the
+        // console clears it (`close_console`).
         // Global mute toggle.
         if self.input.action_pressed(Action::Mute) {
             self.toggle_mute();
@@ -1630,12 +1628,20 @@ impl App {
         }
     }
 
+    /// Close the console. A console `pause` ends with it: the pause is a
+    /// console tool (`step n` works under it), so shutting the console is the
+    /// obvious undo and a closed console never leaves the world frozen.
+    fn close_console(&mut self) {
+        self.console.close();
+        self.console_paused = false;
+    }
+
     /// Route one key press to the console and run whatever it asks for.
     fn handle_console_key(&mut self, key: crossterm::event::KeyEvent) {
         let rows = self.last_game.height.max(20) as usize;
         match self.console.handle_key(key, rows) {
             Some(crate::console::ConsoleAction::Close) => {
-                self.console.close();
+                self.close_console();
             }
             Some(crate::console::ConsoleAction::Complete) => {
                 if self.console.comp_idx.is_some() {
@@ -1884,7 +1890,7 @@ impl App {
             }
             _ => {}
         }
-        if self.input.pressed_char('r') {
+        if self.input.action_pressed(Action::Reset) {
             if self.scores.meta.spent_total() == 0 {
                 self.sfx(Sfx::Denied);
             } else {
@@ -2360,7 +2366,7 @@ impl App {
                 self.set_scheme(next);
             }
         }
-        if self.input.pressed_char('r') {
+        if self.input.action_pressed(Action::Reset) {
             self.reset_controls_scheme();
             return;
         }
@@ -2473,7 +2479,7 @@ impl App {
         // A click selects its own action, independent of simultaneous keys.
         let action = if click.is_some() {
             click
-        } else if self.input.pressed_char('q') {
+        } else if self.input.action_pressed(Action::Quit) {
             Some(Target::Quit)
         } else if self.input.action_pressed(Action::Library) {
             Some(Target::Story)
@@ -2540,7 +2546,7 @@ impl App {
     fn update_sector_select(&mut self, click: Option<Target>) {
         if click == Some(Target::Back)
             || self.input.back_pressed()
-            || self.input.pressed_char('q')
+            || self.input.action_pressed(Action::Quit)
         {
             self.sfx(Sfx::UiSelect);
             self.screen = Screen::Title;
@@ -2579,7 +2585,7 @@ impl App {
         if click == Some(Target::Back)
             || self.input.confirm_pressed()
             || self.input.back_pressed()
-            || self.input.pressed_char('q')
+            || self.input.action_pressed(Action::Quit)
         {
             self.sfx(Sfx::UiSelect);
             // The dossier is also the campaign's opening: a run in flight
@@ -3543,7 +3549,7 @@ impl App {
     /// Campaign victory plate: Enter/click on the focused action, arrows/Tab
     /// move the focus, Q returns to the title.
     fn update_victory(&mut self, click: Option<Target>) {
-        if click == Some(Target::Nest) || self.input.pressed_char('n') {
+        if click == Some(Target::Nest) || self.input.action_pressed(Action::Nest) {
             self.sfx(Sfx::UiSelect);
             self.open_nest(Screen::Victory);
             return;
@@ -3581,7 +3587,7 @@ impl App {
             }
             _ => {}
         }
-        if self.input.pressed_char('q') {
+        if self.input.action_pressed(Action::Quit) {
             self.back_to_title();
         }
     }
@@ -3805,7 +3811,7 @@ impl App {
         }
         // The nest opens here **read-only**: a dossier of what this run carries,
         // not a shop (you cannot buy mid-run).
-        if click == Some(Target::Nest) || self.input.pressed_char('b') {
+        if click == Some(Target::Nest) || self.input.action_pressed(Action::Nest) {
             self.sfx(Sfx::UiSelect);
             self.open_nest(Screen::Paused);
             return;
@@ -3816,13 +3822,16 @@ impl App {
         {
             self.screen = Screen::Playing;
         }
-        if click == Some(Target::Menu) || self.input.pressed_char('q') || self.input.pad_back() {
+        if click == Some(Target::Menu)
+            || self.input.action_pressed(Action::Quit)
+            || self.input.pad_back()
+        {
             self.back_to_title();
         }
     }
 
     fn update_end(&mut self, click: Option<Target>) {
-        if click == Some(Target::Nest) || self.input.pressed_char('n') {
+        if click == Some(Target::Nest) || self.input.action_pressed(Action::Nest) {
             self.sfx(Sfx::UiSelect);
             self.open_nest(Screen::End);
             return;
@@ -3830,7 +3839,10 @@ impl App {
         if click == Some(Target::Restart) || self.input.confirm_pressed() {
             self.retry();
         }
-        if click == Some(Target::Menu) || self.input.pressed_char('q') || self.input.pad_back() {
+        if click == Some(Target::Menu)
+            || self.input.action_pressed(Action::Quit)
+            || self.input.pad_back()
+        {
             self.back_to_title();
         }
     }
@@ -4085,6 +4097,7 @@ impl App {
                     &view,
                     &mut self.nest_ui,
                     accent,
+                    &self.input.controls,
                     &mut self.hits,
                 );
             }
@@ -4179,6 +4192,7 @@ impl App {
                                 self.new_best,
                                 lore_line,
                                 &self.scores,
+                                &self.input.controls,
                                 &mut self.hits,
                             );
                         }
@@ -4412,6 +4426,7 @@ impl App {
             count += 1;
         }
         let view = campaign_ui::LevelSelectView {
+            back_key: self.input.controls.action_label(Action::Back),
             slots: &slots[..count],
             selected: self.floor(),
             hovered: match self.hits.hovered {
@@ -4576,6 +4591,7 @@ impl App {
         };
         let list = {
             let view = campaign_ui::CampaignVictoryView {
+                menu_key: self.input.controls.action_label(Action::Quit),
                 final_score: self.last_score,
                 total_time_secs: total_time,
                 total_kills,
@@ -4603,7 +4619,10 @@ impl App {
         // The haul and a way to spend it: the campaign plate is the art's own
         // fixed layout, so the nest strip is stamped on the screen's last row.
         if let Some(tally) = self.bank_tally {
-            let text = format!(" N  THE NEST  ·  {} ", tally.line());
+            let key = self.input.controls.action_label(Action::Nest);
+            // The strip's own words take 18 cells beside the key's name.
+            let room = (area.width as usize).saturating_sub(18 + key.chars().count());
+            let text = format!(" {key}  THE NEST  ·  {} ", tally.line_within(room));
             let w = (text.chars().count() as u16).min(area.width);
             let rect = Rect::new(
                 area.x + area.width.saturating_sub(w) / 2,
@@ -4662,6 +4681,7 @@ impl App {
             hud::draw_top(frame, top, w, &mut self.hud);
             hud::draw_bottom(frame, bottom, w, &mut self.hud);
             // Persistent CONSOLE USED tag in the top rail's right corner.
+            let mut tag_right = top.right();
             if self.console_cheat {
                 let label = " CONSOLE USED ";
                 let lw = label.len() as u16;
@@ -4675,6 +4695,24 @@ impl App {
                         Style::default()
                             .bg(Color::Rgb(120, 20, 20))
                             .fg(Color::Rgb(255, 200, 200)),
+                    );
+                    tag_right = bx;
+                }
+            }
+            // Console `pause`: a small chip beside it, so a frozen world never
+            // looks like a hang.
+            if self.console_paused {
+                let label = " PAUSED ";
+                let lw = label.len() as u16;
+                if tag_right > top.x + lw {
+                    frame.buffer_mut().set_stringn(
+                        tag_right - lw,
+                        top.y,
+                        label,
+                        lw as usize,
+                        Style::default()
+                            .bg(Color::Rgb(200, 160, 40))
+                            .fg(Color::Rgb(20, 16, 8)),
                     );
                 }
             }
@@ -6769,16 +6807,35 @@ mod tests {
                         }
                     }
                 }
-                let (tab, cursor) = match t.strip_prefix("library-").unwrap_or("") {
+                use crate::game::ecs::systems::boss::BossKind;
+                let sub = t.strip_prefix("library-").unwrap_or("");
+                // `library-boss` is the first floor boss; `library-boss-<n>`
+                // (0..=9, `BossKind::all()` order) is any of the ten. Entries
+                // are named by key, never by a row index (which moves whenever
+                // a group gains an entry).
+                let boss = sub.strip_prefix("boss").map(|rest| {
+                    let n = rest.trim_start_matches('-').parse::<usize>().unwrap_or(0);
+                    let all = BossKind::all();
+                    all[n.min(all.len() - 1)]
+                });
+                let (tab, cursor) = match sub {
                     "arsenal" => (library_index::Tab::Arsenal, 1),
                     "field" => (library_index::Tab::FieldGuide, 2),
                     "floors" => (library_index::Tab::Floors, 0),
-                    "boss" => (library_index::Tab::Bestiary, 22),
                     _ => (library_index::Tab::Bestiary, 0),
                 };
                 hh.app.open_library(Screen::Title);
                 hh.app.library_ui.set_tab(tab);
                 hh.app.library_ui.cursor = cursor;
+                if let Some(kind) = boss {
+                    let key = library_index::Key::Boss(kind);
+                    hh.app.scores.library.mark_seen(key);
+                    hh.app.scores.library.bump(key, library_index::Counter::Killed, 1);
+                    assert!(
+                        hh.app.library_ui.select_key(&rows, key),
+                        "no Library row for {kind:?}"
+                    );
+                }
                 hh.frame(&[]);
                 hh.frame(&[]);
             }
@@ -6937,6 +6994,208 @@ mod tests {
                 hh.frame(&[]);
                 hh.frame(&[]);
             }
+            // ---- Batch-four captures ------------------------------------
+            // `floor-<name>`: fifteen seconds of real play on a named floor
+            // (sewer, kitchen, lab, laundry, printworks, flatbed), a few
+            // minutes into the curve so the frame has a horde in it.
+            t if t.starts_with("floor-") => {
+                let theme = match &t["floor-".len()..] {
+                    "kitchen" => Theme::Kitchen,
+                    "lab" => Theme::Lab,
+                    "laundry" => Theme::Laundry,
+                    "printworks" => Theme::Printworks,
+                    "flatbed" => Theme::Trailer,
+                    _ => Theme::Sewer,
+                };
+                if theme == Theme::Sewer {
+                    hh.enter_playing();
+                } else {
+                    hh.app.start_practice(theme);
+                    hh.frame(&[KeyCode::Enter]); // intro -> Playing
+                }
+                {
+                    use crate::game::weapon::WeaponKind;
+                    let w = hh.app.world.as_mut().unwrap();
+                    // Past the opening trickle, short of the 3:00 appointment.
+                    w.elapsed = 150.0;
+                    w.player
+                        .loadout
+                        .apply(&Upgrade::NewWeapon(WeaponKind::CheeseSpray));
+                    w.player
+                        .loadout
+                        .apply(&Upgrade::NewWeapon(WeaponKind::SporeOrbit));
+                }
+                for tick in 0..780u32 {
+                    let mv = match (tick / 45) % 4 {
+                        0 => KeyCode::Right,
+                        1 => KeyCode::Down,
+                        2 => KeyCode::Left,
+                        _ => KeyCode::Up,
+                    };
+                    if let Some(w) = hh.app.world.as_mut() {
+                        w.player.hp = w.player.max_hp();
+                    }
+                    let text = hh.frame(&[mv]);
+                    // A card or a chest plate is answered, never captured.
+                    if text.contains("LEVEL UP") || text.contains("CHEST OPENED") {
+                        hh.frame(&[KeyCode::Enter]);
+                    }
+                }
+                // Finish on a frame of play, not on a plate.
+                for _ in 0..6 {
+                    if matches!(hh.app.screen, Screen::Playing) {
+                        break;
+                    }
+                    hh.frame(&[KeyCode::Enter]);
+                }
+            }
+            // `bossfight-<n>`: boss `n` of `BossKind::all()` on its own floor,
+            // a few seconds into the fight, the rat standing off in the arena.
+            t if t.starts_with("bossfight") => {
+                use crate::game::ecs::systems::boss::BossKind;
+                let n = t
+                    .trim_start_matches("bossfight")
+                    .trim_start_matches('-')
+                    .parse::<usize>()
+                    .unwrap_or(0);
+                let all = BossKind::all();
+                let kind = all[n.min(all.len() - 1)];
+                let theme = Theme::playable()
+                    .into_iter()
+                    .find(|&th| BossKind::pool_for_theme(th).contains(&kind))
+                    .unwrap_or(Theme::Sewer);
+                if theme == Theme::Sewer {
+                    hh.enter_playing();
+                } else {
+                    hh.app.start_practice(theme);
+                    hh.frame(&[KeyCode::Enter]);
+                }
+                {
+                    let w = hh.app.world.as_mut().unwrap();
+                    let centre = w
+                        .level
+                        .boss_room()
+                        .map(|r| r.rect.center_world())
+                        .expect("every floor has an arena");
+                    w.clear_enemies();
+                    w.player.pos = centre + Vec2::new(64.0, 30.0);
+                    w.force_boss(kind);
+                }
+                let frames = std::env::var("RATRUN_DUMP_FRAMES")
+                    .ok()
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(260);
+                for _ in 0..frames {
+                    if let Some(w) = hh.app.world.as_mut() {
+                        w.player.hp = w.player.max_hp();
+                    }
+                    let text = hh.frame(&[]);
+                    if text.contains("LEVEL UP") {
+                        hh.frame(&[KeyCode::Enter]);
+                    }
+                }
+            }
+            // `map-early`: the full map a second into a run, when almost the
+            // whole panel is still the unseen veil.
+            "map-early" => {
+                hh.enter_playing();
+                for _ in 0..45 {
+                    hh.frame(&[KeyCode::Right]);
+                }
+                hh.frame(&[KeyCode::Tab]);
+                hh.frame(&[]);
+            }
+            // `superdash-charge` / `superdash-release`: Ctrl held with the
+            // Super Dash owned (the ring on the rat, the HUD's CHARGE meter and
+            // the lane preview), then the frames after the key comes up.
+            "superdash-charge" | "superdash-release" => {
+                let app = App::with_options(true, None, ScoreTable::default(), false, Some(TEST_SEED));
+                hh = Harness::with_app(app, w, h);
+                hh.enter_playing();
+                {
+                    use crate::game::enemy::EnemyKind;
+                    use crate::game::weapon::WeaponKind;
+                    let w = hh.app.world.as_mut().unwrap();
+                    w.clear_enemies();
+                    w.player
+                        .loadout
+                        .apply(&Upgrade::NewWeapon(WeaponKind::SuperDash));
+                    w.player.face = Vec2::new(1.0, 0.0);
+                    w.player.dash_cd = 0.0;
+                    w.player.dash_active = 0.0;
+                    w.player.xp_to_next = 1_000_000;
+                    let p = w.player.pos;
+                    for i in 0..5 {
+                        w.spawn_enemy(
+                            EnemyKind::Cat,
+                            p + Vec2::new(26.0 + i as f32 * 9.0, (i % 2) as f32 * 5.0 - 2.0),
+                            400.0,
+                        );
+                    }
+                }
+                hh.frame_events(&[ctrl_press()]);
+                for _ in 0..34 {
+                    if let Some(w) = hh.app.world.as_mut() {
+                        w.player.hp = w.player.max_hp();
+                    }
+                    hh.frame_events(&[]);
+                }
+                if target == "superdash-release" {
+                    hh.frame_events(&[KeyEvent::new_with_kind(
+                        KeyCode::Modifier(ModifierKeyCode::LeftControl),
+                        KeyModifiers::CONTROL,
+                        KeyEventKind::Release,
+                    )]);
+                    for _ in 0..5 {
+                        hh.frame_events(&[]);
+                    }
+                }
+            }
+            // `firelit`: the rat parked beside a fire in a dark room, horde
+            // cleared. Walks the floors until one has a fire emitter.
+            "firelit" => {
+                use crate::game::collision::SizeClass;
+                use crate::game::level::EmitterKind;
+                let mut placed = false;
+                for theme in [Theme::Sewer, Theme::Laundry, Theme::Kitchen, Theme::Printworks] {
+                    if theme == Theme::Sewer {
+                        hh.enter_playing();
+                    } else {
+                        hh.app.start_practice(theme);
+                        hh.frame(&[KeyCode::Enter]);
+                    }
+                    let w = hh.app.world.as_mut().unwrap();
+                    let fires: Vec<Vec2> = w
+                        .level
+                        .objects
+                        .emitters
+                        .iter()
+                        .filter(|e| e.kind == EmitterKind::Fire)
+                        .map(|e| e.pos)
+                        .collect();
+                    'fires: for fire in fires {
+                        for (dx, dy) in [(-22.0, 10.0), (22.0, 10.0), (0.0, 22.0), (0.0, -22.0)] {
+                            let at = fire + Vec2::new(dx, dy);
+                            if w.level.tiles.circle_clear(at, 6.0, SizeClass::Small) {
+                                w.clear_enemies();
+                                w.player.pos = at;
+                                placed = true;
+                                break 'fires;
+                            }
+                        }
+                    }
+                    if placed {
+                        break;
+                    }
+                }
+                assert!(placed, "no floor in this seed has a fire to stand beside");
+                for _ in 0..60 {
+                    if let Some(w) = hh.app.world.as_mut() {
+                        w.clear_enemies();
+                    }
+                    hh.frame(&[]);
+                }
+            }
             "levelup" => {
                 hh.frame(&[KeyCode::Enter]); // -> Story
                 hh.frame(&[KeyCode::Enter]); // dossier -> MapIntro
@@ -6986,6 +7245,17 @@ mod tests {
             }
         }
 
+        // `RATRUN_DUMP_ZOOM=2` re-frames any in-run capture at that zoom.
+        if let Some(zoom) = std::env::var("RATRUN_DUMP_ZOOM")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+        {
+            if let Some(w) = hh.app.world.as_mut() {
+                w.set_zoom_instant(zoom);
+                w.damage_numbers.clear();
+                hh.frame(&[]);
+            }
+        }
         let buf = hh.terminal.backend().buffer().clone();
         if let Some(dir) = std::env::var_os("RATRUN_DUMP_DIR") {
             use std::fmt::Write;
@@ -7770,7 +8040,7 @@ mod tests {
         let title = h.frame(&[]);
         assert!(title.contains("THE NEST"), "no nest row on the title:
 {title}");
-        assert!(title.contains("500g"), "the row does not show the bank:
+        assert!(title.contains("500¢"), "the row does not show the bank:
 {title}");
 
         h.click("THE NEST");
@@ -7792,7 +8062,7 @@ mod tests {
         h.frame(&[KeyCode::Esc]);
         assert_eq!(h.app.screen.name_for_test(), "Title");
         let title = h.frame(&[]);
-        assert!(title.contains("460g"), "the row did not re-read the bank:\n{title}");
+        assert!(title.contains("460¢"), "the row did not re-read the bank:\n{title}");
     }
 
     /// The pause screen opens the nest **read-only**: the plate shows the run's
@@ -7894,8 +8164,9 @@ mod tests {
 {text}"
         );
 
-        // N opens the nest and Esc comes back to the report.
-        h.frame(&[KeyCode::Char('n')]);
+        // B (the Nest action's default) opens the nest and Esc comes back to
+        // the report.
+        h.frame(&[KeyCode::Char('b')]);
         assert_eq!(h.app.screen.name_for_test(), "Nest");
         h.frame(&[KeyCode::Esc]);
         assert_eq!(h.app.screen.name_for_test(), "End");
@@ -12105,6 +12376,64 @@ mod tests {
             json.contains("library"),
             "the library must serialise with the score table"
         );
+    }
+
+    /// Console `pause` freezes the simulation only: the pause plate and the
+    /// menus still answer, the HUD says PAUSED, and closing the console ends it.
+    #[test]
+    fn console_pause_freezes_only_the_sim_and_ends_when_the_console_closes() {
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        h.frame(&[]);
+        // The flag set with the console shut (a script, `exec`): the world
+        // holds still, the chip shows, and the pause key still works.
+        h.app.toggle_console_pause();
+        let before = h.app.world.as_ref().unwrap().elapsed;
+        let mut text = String::new();
+        for _ in 0..3 {
+            text = h.frame(&[]);
+        }
+        assert_eq!(h.app.world.as_ref().unwrap().elapsed, before, "the sim ran");
+        assert!(text.contains("PAUSED"), "no PAUSED chip:\n{text}");
+        h.frame(&[KeyCode::Esc]);
+        assert_eq!(h.app.screen.name_for_test(), "Paused", "the menus froze too");
+        h.frame(&[KeyCode::Esc]);
+        assert_eq!(h.app.screen.name_for_test(), "Playing");
+        // Opening and closing the console clears it; play resumes.
+        h.frame(&[KeyCode::Char('`')]);
+        assert!(h.app.console_paused);
+        h.frame(&[KeyCode::Char('`')]);
+        assert!(!h.app.console_paused, "closing the console must end the pause");
+        h.frame(&[]);
+        assert!(h.app.world.as_ref().unwrap().elapsed > before);
+    }
+
+    /// The end screen's chips and keys follow the bindings: rebinding the Nest
+    /// and Quit actions moves both the text and the key that works.
+    #[test]
+    fn the_end_screen_keys_follow_their_bindings() {
+        let mut h = Harness::new(90, 32);
+        h.enter_playing();
+        h.app
+            .input
+            .controls
+            .bind_active_kbm(Action::Nest, Binding::Key(KeyBind::Char('g')));
+        h.app
+            .input
+            .controls
+            .bind_active_kbm(Action::Quit, Binding::Key(KeyBind::Char('k')));
+        h.app.world.as_mut().unwrap().player.hp = -1.0;
+        h.frame(&[]);
+        let text = h.frame(&[]);
+        assert!(text.contains("G the nest"), "the nest chip:\n{text}");
+        assert!(text.contains("K to menu"), "the menu chip:\n{text}");
+        h.frame(&[KeyCode::Char('b')]);
+        assert_eq!(h.app.screen.name_for_test(), "End", "the old key still works");
+        h.frame(&[KeyCode::Char('g')]);
+        assert_eq!(h.app.screen.name_for_test(), "Nest");
+        h.frame(&[KeyCode::Esc]);
+        h.frame(&[KeyCode::Char('k')]);
+        assert_eq!(h.app.screen.name_for_test(), "Title");
     }
 
     /// The console pauses the run: opening it freezes the sim, keys typed while

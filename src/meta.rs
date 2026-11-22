@@ -795,6 +795,17 @@ impl BankTally {
         ));
         s
     }
+
+    /// The tally for a row `max` cells wide: the full breakdown where it fits,
+    /// otherwise the gain and the new balance alone. Never a clipped sum (the
+    /// full line is up to ~95 cells and the report's plate is 66).
+    pub fn line_within(&self, max: usize) -> String {
+        let full = self.line();
+        if self.voided || full.chars().count() <= max {
+            return full;
+        }
+        format!("NEST  +{}¢  ·  bank now {}¢", self.banked, self.total)
+    }
 }
 
 /// Bank a finished run into `profile` and return the tally.

@@ -115,8 +115,30 @@ pub fn unknown_veil_rgb() -> Rgb {
 #[inline]
 pub fn unknown_veil_rgb_for(depth: crate::term::ColorDepth) -> Rgb {
     match depth {
-        crate::term::ColorDepth::Ansi16 => UNKNOWN_VEIL_ANSI16_RGB,
-        _ => UNKNOWN_VEIL_RGB,
+        crate::term::ColorDepth::Truecolor => UNKNOWN_VEIL_RGB,
+        // The 256-colour cube has no dark desaturated red either: the oxblood
+        // folds to a grey there. The same maroon request keeps it red.
+        crate::term::ColorDepth::Ansi256 | crate::term::ColorDepth::Ansi16 => {
+            UNKNOWN_VEIL_ANSI16_RGB
+        }
+    }
+}
+
+/// The weave's three inks (dots, scanline, frontier rim) for a depth. Only
+/// truecolor can show steps this small; on a folded palette they would land on
+/// grey or black and read as noise, so the veil stays flat there.
+#[inline]
+fn unknown_weave_rgb_for(depth: crate::term::ColorDepth) -> (Rgb, Rgb, Rgb) {
+    match depth {
+        crate::term::ColorDepth::Truecolor => (
+            UNKNOWN_VEIL_GRID_RGB,
+            UNKNOWN_VEIL_SCANLINE_RGB,
+            UNKNOWN_VEIL_FRONTIER_RGB,
+        ),
+        _ => {
+            let flat = unknown_veil_rgb_for(depth);
+            (flat, flat, flat)
+        }
     }
 }
 /// Ticks of the first-sight reveal wipe (≈ 0.4 s at 60 FPS): a cell fades from
@@ -2297,12 +2319,14 @@ impl DerivedPalette {
         let maze_wall = palette::mix(p.accent, COAT_RGB, 0.20);
         let doorway = palette::mix(floor_live, p.accent, 0.36);
 
+        let (unknown_grid, unknown_scanline, unknown_frontier) =
+            unknown_weave_rgb_for(crate::term::color_depth());
         Self {
             fog_base,
             unknown: unknown_veil_rgb(),
-            unknown_grid: UNKNOWN_VEIL_GRID_RGB,
-            unknown_scanline: UNKNOWN_VEIL_SCANLINE_RGB,
-            unknown_frontier: UNKNOWN_VEIL_FRONTIER_RGB,
+            unknown_grid,
+            unknown_scanline,
+            unknown_frontier,
             memory_sink,
             floor_live,
             boss_floor,

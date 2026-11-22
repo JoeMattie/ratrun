@@ -22,6 +22,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::Frame;
 
+use crate::controls::{Action, Controls};
 use crate::game::art_icons;
 use crate::meta::{MetaProfile, Track};
 use crate::render::hud::{HEAL_MINT, TRAIL_GOLD, WARN_AMBER};
@@ -148,6 +149,7 @@ pub fn draw(
     profile: &MetaProfile,
     ui: &mut NestUi,
     accent: Color,
+    controls_src: &Controls,
     hits: &mut HitMap,
 ) -> DrawInfo {
     hits.clear();
@@ -273,16 +275,21 @@ pub fn draw(
     }
 
     // ---- the footer: the confirm prompt, or the keys ----------------------
+    // Every key is named from the live bindings (`Controls`), so a rebind
+    // moves the text with the key.
+    let confirm_key = controls_src.action_label(Action::Confirm);
+    let back_key = controls_src.action_label(Action::Back);
+    let reset_key = controls_src.action_label(Action::Reset);
     if let Some(pending) = ui.pending {
         let prompt = match pending {
             Pending::Buy(t) => format!(
-                " BUY {} LV{} FOR {}¢?  Enter confirm · Esc cancel ",
+                " BUY {} LV{} FOR {}¢?  {confirm_key} confirm · {back_key} cancel ",
                 t.name(),
                 profile.level(t) + 1,
                 profile.next_price(t).unwrap_or(0)
             ),
             Pending::Refund => format!(
-                " WIPE EVERY TRACK AND RETURN {}¢?  Enter confirm · Esc cancel ",
+                " WIPE EVERY TRACK AND RETURN {}¢?  {confirm_key} confirm · {back_key} cancel ",
                 profile.spent_total()
             ),
         };
@@ -306,11 +313,11 @@ pub fn draw(
     put(f, inner.x, footer, back_w, " ‹ BACK ›", heavy(COAT).bg(TRACK));
     hits.add(back, Target::Back);
     let keys = if inner.width >= 70 {
-        "↑↓ choose · Enter buy · R refund · Esc back"
+        format!("↑↓ choose · {confirm_key} buy · {reset_key} refund · {back_key} back")
     } else if inner.width >= 54 {
-        "↑↓ · Enter buy · R refund · Esc back"
+        format!("↑↓ · {confirm_key} buy · {reset_key} refund · {back_key} back")
     } else {
-        "↑↓ · Enter · Esc"
+        format!("↑↓ · {confirm_key} · {back_key}")
     };
     let kx = inner.x + back_w + 1;
     // A windowed list says which rows are on screen. The chip has its own cell
@@ -330,7 +337,7 @@ pub fn draw(
     } else {
         inner.right().saturating_sub(kx)
     };
-    put(f, kx, footer, keys_max, keys, ink(MUTED));
+    put(f, kx, footer, keys_max, &keys, ink(MUTED));
     if let (Some(chip), true) = (chip.as_ref(), chip_fits) {
         let x = inner.right().saturating_sub(chip_w + 1);
         put(f, x, footer, chip_w, chip, ink(MUTED));
@@ -555,6 +562,7 @@ mod tests {
                 profile,
                 ui,
                 Color::Rgb(144, 184, 173),
+                &Controls::default(),
                 &mut hits,
             );
         });

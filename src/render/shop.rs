@@ -436,7 +436,7 @@ fn draw_slice(
     } else {
         ink(COAT)
     };
-    let price = format!("{}g", kind.price());
+    let price = format!("{}¢", kind.price());
     let price_w = price.len() as u16;
     let px = inner.right().saturating_sub(price_w + 1);
     let name_w = px.saturating_sub(text_x + 1);
@@ -555,8 +555,8 @@ fn draw_service(
     let style = if deny.is_some() { ink(SPENT) } else { heavy(COAT) };
     put(f, inner.x + 4, y, 20, label, style);
     let price = match item {
-        ShopItem::Reroll => stock.and_then(shop::reroll_price).map(|p| format!("{p}g")),
-        _ => (price > 0).then(|| format!("{price}g")),
+        ShopItem::Reroll => stock.and_then(shop::reroll_price).map(|p| format!("{p}¢")),
+        _ => (price > 0).then(|| format!("{price}¢")),
     };
     if let Some(price) = price {
         let p_style = if deny.is_some() { ink(SPENT) } else { heavy(TRAIL_GOLD) };
@@ -745,7 +745,7 @@ fn draw_molt(f: &mut Frame, r: Rect, world: &World, hole: usize, molt: MoltUi, h
             }
             let (line, line_col) = match deny {
                 Some(deny) => (deny.reason().to_string(), REFUSED),
-                None => (format!("{MOLT_PRICE}g to swap"), TRAIL_GOLD),
+                None => (format!("{MOLT_PRICE}¢ to swap"), TRAIL_GOLD),
             };
             put(f, inner.x + 1, hint_row, inner.width - 2, &line, ink(line_col));
             draw_list_range(f, inner, hint_row, offset, list_h, options.len());

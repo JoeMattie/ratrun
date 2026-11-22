@@ -40,7 +40,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKe
 use crate::math::Vec2;
 
 /// How many actions the table holds (index into every binding array).
-pub const ACTION_COUNT: usize = 23;
+pub const ACTION_COUNT: usize = 26;
 
 /// One thing the player can bind a key, a mouse button or a pad button to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -71,6 +71,14 @@ pub enum Action {
     AutoPick,
     /// The story crawl on the title, the Library on the pause screen.
     Library,
+    /// Open the Nest from the pause plate, the incident report and the
+    /// campaign victory screen.
+    Nest,
+    /// Leave: quit from the title, back to the menu from the pause plate, the
+    /// incident report and the victory screen.
+    Quit,
+    /// Refund every Nest track; reset the scheme on the Controls screen.
+    Reset,
 }
 
 /// Every action in table order; the index is the array index everywhere.
@@ -98,6 +106,9 @@ pub const ACTIONS: [Action; ACTION_COUNT] = [
     Action::Back,
     Action::AutoPick,
     Action::Library,
+    Action::Nest,
+    Action::Quit,
+    Action::Reset,
 ];
 
 impl Action {
@@ -131,6 +142,9 @@ impl Action {
             Action::Back => "BACK",
             Action::AutoPick => "AUTO-PICK",
             Action::Library => "STORY/LIBRARY",
+            Action::Nest => "THE NEST",
+            Action::Quit => "QUIT/TO MENU",
+            Action::Reset => "REFUND/RESET",
         }
     }
 
@@ -788,6 +802,11 @@ impl Bindings {
         b.kbm[Action::Back.index()] = Binding::Key(KeyBind::Esc);
         b.kbm[Action::AutoPick.index()] = Binding::Key(KeyBind::Char('u'));
         b.kbm[Action::Library.index()] = Binding::Key(KeyBind::Char('l'));
+        // `B`, not the `N` the end screens once used: `N` is the minimap size,
+        // and one action cannot share a default with another.
+        b.kbm[Action::Nest.index()] = Binding::Key(KeyBind::Char('b'));
+        b.kbm[Action::Quit.index()] = Binding::Key(KeyBind::Char('q'));
+        b.kbm[Action::Reset.index()] = Binding::Key(KeyBind::Char('r'));
 
         // Pad defaults: d-pad/stick move, RB dashes, X fires the actives,
         // Start pauses, View opens the map, Y flips the cursor, LB mutes,
@@ -1244,13 +1263,14 @@ impl Controls {
                 key(Action::Mute)
             ),
             format!(
-                "{} {} music · {} {} effects · {} story · {} · Q quit",
+                "{} {} music · {} {} effects · {} story · {} · {} quit",
                 key(Action::MusicDown),
                 key(Action::MusicUp),
                 key(Action::EffectsDown),
                 key(Action::EffectsUp),
                 key(Action::Library),
-                charge_hint
+                charge_hint,
+                key(Action::Quit)
             ),
         ];
         let narrow_first = if share {
@@ -1285,12 +1305,13 @@ impl Controls {
                 "WASD/mouse move · {dash} dash · {actives} actives · {click_job}"
             ),
             format!(
-                "{} {} music · {} {} effects · {} options · {pause} unpause · Q quit",
+                "{} {} music · {} {} effects · {} options · {pause} unpause · {} quit",
                 key(Action::MusicDown),
                 key(Action::MusicUp),
                 key(Action::EffectsDown),
                 key(Action::EffectsUp),
-                key(Action::Options)
+                key(Action::Options),
+                key(Action::Quit)
             ),
         ];
         let narrow_click = if self.scheme == Scheme::MouseAim {
@@ -1405,6 +1426,22 @@ impl Controls {
                         if matches!(raw, Binding::Pad(_) | Binding::None) {
                             set.pad[idx] = raw;
                         }
+                    }
+                }
+                // An action newer than the file takes its default key only
+                // when the player has not already given that key to something
+                // else; otherwise it starts unbound, never double-bound.
+                for a in ACTIONS {
+                    let idx = a.index();
+                    if idx < s.kbm.len() {
+                        continue;
+                    }
+                    let fresh = set.kbm[idx];
+                    let taken = ACTIONS.into_iter().any(|o| {
+                        o.index() < s.kbm.len() && set.kbm_slots(o).contains(&fresh)
+                    });
+                    if taken && !fresh.is_none() {
+                        set.kbm[idx] = Binding::None;
                     }
                 }
                 c.sets[i] = set;
@@ -1652,6 +1689,47 @@ mod tests {
         assert_eq!(fresh.active().get(Action::Dash), Binding::Key(KeyBind::Ctrl));
         assert!((fresh.deadzone - DEFAULT_DEADZONE).abs() < 1e-6);
         assert!(!fresh.rumble);
+    }
+
+    /// Nest, Quit and Reset are ordinary actions: their defaults collide with
+    /// nothing, a rebind swaps like any other, and a file saved before they
+    /// existed never loads with one key on two actions.
+    #[test]
+    fn nest_quit_and_reset_are_bindable_and_never_double_bound() {
+        for scheme in SCHEMES {
+            let b = Bindings::defaults(scheme);
+            for a in [Action::Nest, Action::Quit, Action::Reset] {
+                let key = b.get(a);
+                assert!(!key.is_none(), "{a:?} has no default");
+                let owners = ACTIONS
+                    .into_iter()
+                    .filter(|&o| b.kbm_slots(o).contains(&key))
+                    .count();
+                assert_eq!(owners, 1, "{scheme:?}: {a:?}'s default is shared");
+            }
+        }
+        // A conflict swaps: binding Mute's key to Quit hands Quit's to Mute.
+        let mut c = Controls::default();
+        let swapped = c.bind_active_kbm(Action::Quit, Binding::Key(KeyBind::Char('m')));
+        assert_eq!(swapped, Some(Action::Mute));
+        assert_eq!(c.active().get(Action::Mute), Binding::Key(KeyBind::Char('q')));
+        assert_eq!(c.action_label(Action::Quit), "M");
+        assert!(c.pause_legend_lines(true).join(" ").contains("M quit"));
+
+        // An old save (23 actions) in which the player had put B on Mute: the
+        // new Nest action must not also claim B.
+        let mut old = Controls::default();
+        old.bind_active_kbm(Action::Mute, Binding::Key(KeyBind::Char('b')));
+        let mut saved = old.to_saved();
+        for s in saved.schemes.iter_mut().flatten() {
+            s.kbm.truncate(23);
+            s.alt.truncate(23);
+            s.pad.truncate(23);
+        }
+        let back = Controls::from_saved(&saved);
+        assert_eq!(back.active().get(Action::Mute), Binding::Key(KeyBind::Char('b')));
+        assert!(back.active().get(Action::Nest).is_none(), "B is on two actions");
+        assert_eq!(back.active().get(Action::Quit), Binding::Key(KeyBind::Char('q')));
     }
 
     #[test]

@@ -445,7 +445,7 @@ pub fn draw_title(
     // The nest row carries the bank, so the title always answers "what have I
     // got to spend" without opening the screen. Empty and unspent reads plain.
     let nest_row = if scores.meta.bank > 0 {
-        format!("THE NEST  {}g", scores.meta.bank)
+        format!("THE NEST  {}¢", scores.meta.bank)
     } else {
         "THE NEST".to_string()
     };
@@ -531,6 +531,12 @@ pub fn draw_title(
         }
         // The story key follows its binding (the STORY / LIBRARY action).
         let story_chip = format!(" {} story ", controls_src.action_label(Action::Library));
+        let quit_key = controls_src.action_label(Action::Quit);
+        let quit_chip = if wide {
+            format!(" · {quit_key} quit")
+        } else {
+            format!("· {quit_key} quit")
+        };
         controls(
             f,
             band(r, r.height - 1, 1),
@@ -547,7 +553,7 @@ pub fn draw_title(
                     None,
                 ),
                 (story_chip.as_str(), Some(Target::Story)),
-                (if wide { " · Q quit" } else { "· Q quit" }, None),
+                (quit_chip.as_str(), None),
             ],
         );
     }
@@ -882,6 +888,7 @@ pub fn draw_pause(f: &mut Frame, area: Rect, controls_src: &Controls, hits: &mut
     let opts_key = controls_src.action_label(Action::Options);
     let resume_chip = format!(" {pause_key} resume ");
     let opts_chip = format!(" {opts_key} options ");
+    let menu_chip = format!(" {} to menu ", controls_src.action_label(Action::Quit));
     controls(
         f,
         band(r, 4, 1),
@@ -891,7 +898,7 @@ pub fn draw_pause(f: &mut Frame, area: Rect, controls_src: &Controls, hits: &mut
             ("  ", None),
             (opts_chip.as_str(), Some(Target::Options)),
             ("  ", None),
-            (" Q to menu ", Some(Target::Menu)),
+            (menu_chip.as_str(), Some(Target::Menu)),
         ],
     );
     if r.height >= 7 {
@@ -1105,6 +1112,7 @@ pub fn draw_pause_compact(
     let lib_chip = format!(" {} lib ", controls_src.action_label(Action::Library));
     let pause_chip = format!(" {} resume ", controls_src.action_label(Action::Pause));
     let opts_chip = format!(" {} opts ", controls_src.action_label(Action::Options));
+    let menu_chip = format!(" {} to menu ", controls_src.action_label(Action::Quit));
     controls(
         f,
         band(r, r.height.saturating_sub(1), 1),
@@ -1118,7 +1126,7 @@ pub fn draw_pause_compact(
             (" ", None),
             (mute_txt.as_str(), None),
             (" ", None),
-            (" Q to menu ", Some(Target::Menu)),
+            (menu_chip.as_str(), Some(Target::Menu)),
         ],
     );
 }
@@ -1477,6 +1485,8 @@ pub fn draw_end(
     practice: bool,
     // What the run banked into the nest (`crate::meta::BankTally`).
     nest: Option<&crate::meta::BankTally>,
+    // The live bindings: the chips name the keys that actually work.
+    controls_src: &Controls,
 ) {
     let (status, accent) = if won && practice {
         ("SECTOR CLEARED", Color::Rgb(169, 210, 186))
@@ -1542,7 +1552,8 @@ pub fn draw_end(
         } else {
             heavy(TRAIL_GOLD)
         };
-        center(f, r, 9, Line::styled(nest.line().as_str(), style));
+        let tally = nest.line_within(r.width as usize);
+        center(f, r, 9, Line::styled(tally.as_str(), style));
     }
     let table = centered_rect(35, inner.height, inner);
     f.render_widget(
@@ -1571,18 +1582,29 @@ pub fn draw_end(
             band(table, 11 + i as u16, 1),
         );
     }
+    let [restart_chip, nest_chip, menu_chip] = end_chips(controls_src);
     controls(
         f,
         band(r, r.height.saturating_sub(1), 1),
         hits,
         &[
-            (" Enter restart ", Some(Target::Restart)),
+            (restart_chip.as_str(), Some(Target::Restart)),
             ("   ", None),
-            (" N the nest ", Some(Target::Nest)),
+            (nest_chip.as_str(), Some(Target::Nest)),
             ("   ", None),
-            (" Q to menu ", Some(Target::Menu)),
+            (menu_chip.as_str(), Some(Target::Menu)),
         ],
     );
+}
+
+/// The end screens' three chips, named from the live bindings so a rebind
+/// moves the text with the key.
+fn end_chips(controls_src: &Controls) -> [String; 3] {
+    [
+        format!(" {} restart ", controls_src.action_label(Action::Confirm)),
+        format!(" {} the nest ", controls_src.action_label(Action::Nest)),
+        format!(" {} to menu ", controls_src.action_label(Action::Quit)),
+    ]
 }
 
 /// Snapshot of a completed run's metrics for the expanded end-of-run Incident Report.
@@ -2237,14 +2259,20 @@ pub fn draw_pause_with_run(
     // The clickable chip says just `Resume`: the legend above already names
     // `Esc/P`, and a duplicated label makes the chip's hit target ambiguous.
     // Options names its own live key (the same `Action::Options` the app opens
-    // the screen with), so a rebind moves the text. `Q` has no action yet.
+    // the screen with), so a rebind moves the text; so do the Nest and to-menu chips.
     let opts_key = controls_src.action_label(Action::Options);
     let opts = if icon_dossier {
         format!(" {opts_key} options ")
     } else {
         format!(" {opts_key} opts ")
     };
-    let quit = if icon_dossier { " Q to menu " } else { " Q menu " };
+    let quit_key = controls_src.action_label(Action::Quit);
+    let quit = if icon_dossier {
+        format!(" {quit_key} to menu ")
+    } else {
+        format!(" {quit_key} menu ")
+    };
+    let nest_chip = format!(" {} nest ", controls_src.action_label(Action::Nest));
     let library_chip = format!(" {} library ", controls_src.action_label(Action::Library));
     controls(
         f,
@@ -2257,11 +2285,11 @@ pub fn draw_pause_with_run(
             (" ", None),
             (library_chip.as_str(), Some(Target::Library)),
             (" ", None),
-            (" B nest ", Some(Target::Nest)),
+            (nest_chip.as_str(), Some(Target::Nest)),
             (" ", None),
             (mute_chip.as_str(), None),
             (" ", None),
-            (quit, Some(Target::Menu)),
+            (quit.as_str(), Some(Target::Menu)),
         ],
     );
 }
@@ -2269,6 +2297,7 @@ pub fn draw_pause_with_run(
 /// Expanded Incident Report end-of-run summary with score breakdown, combat
 /// telemetry, final arsenal, boss commendation, and ranked records.
 /// Falls back cleanly to [`draw_end`] on compact terminals.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_end_summary(
     f: &mut Frame,
     area: Rect,
@@ -2276,6 +2305,7 @@ pub fn draw_end_summary(
     new_best: bool,
     lore_line: &str,
     scores: &ScoreTable,
+    controls_src: &Controls,
     hits: &mut HitMap,
 ) {
     if area.width < 68 || area.height < 23 {
@@ -2296,6 +2326,7 @@ pub fn draw_end_summary(
             summary.theme,
             summary.practice,
             summary.nest.as_ref(),
+            controls_src,
         );
         return;
     }
@@ -2480,7 +2511,7 @@ pub fn draw_end_summary(
     // The nest: what this run banked. One line above the records table, so the
     // tally sits under the numbers it came from.
     if let Some(nest) = summary.nest.as_ref() {
-        let tally = nest.line();
+        let tally = nest.line_within(inner.width as usize);
         let style = if nest.voided {
             ink(WARN_AMBER)
         } else {
@@ -2559,16 +2590,17 @@ pub fn draw_end_summary(
         );
     }
 
+    let [restart_chip, nest_chip, menu_chip] = end_chips(controls_src);
     controls(
         f,
         band(r, r.height.saturating_sub(1), 1),
         hits,
         &[
-            (" Enter restart ", Some(Target::Restart)),
+            (restart_chip.as_str(), Some(Target::Restart)),
             ("   ", None),
-            (" N the nest ", Some(Target::Nest)),
+            (nest_chip.as_str(), Some(Target::Nest)),
             ("   ", None),
-            (" Q to menu ", Some(Target::Menu)),
+            (menu_chip.as_str(), Some(Target::Menu)),
         ],
     );
 }
@@ -2729,7 +2761,7 @@ mod tests {
         let mut hits = HitMap::default();
         let mut big = Terminal::new(TestBackend::new(90, 32)).unwrap();
         big.draw(|f| {
-            draw_end_summary(f, f.area(), &summary, true, "Escaped.", &scores, &mut hits)
+            draw_end_summary(f, f.area(), &summary, true, "Escaped.", &scores, &Controls::default(), &mut hits)
         })
         .unwrap();
         let bt = screen_text(&big);
@@ -2747,7 +2779,7 @@ mod tests {
         practice.sector = 2;
         hits.clear();
         big.draw(|f| {
-            draw_end_summary(f, f.area(), &practice, false, "Cleared.", &scores, &mut hits)
+            draw_end_summary(f, f.area(), &practice, false, "Cleared.", &scores, &Controls::default(), &mut hits)
         })
         .unwrap();
         let pt = screen_text(&big);
@@ -2759,7 +2791,7 @@ mod tests {
             let mut small = Terminal::new(TestBackend::new(tw, th)).unwrap();
             small
                 .draw(|f| {
-                    draw_end_summary(f, f.area(), &summary, true, "Escaped.", &scores, &mut hits)
+                    draw_end_summary(f, f.area(), &summary, true, "Escaped.", &scores, &Controls::default(), &mut hits)
                 })
                 .unwrap();
         }

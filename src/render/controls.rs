@@ -33,7 +33,10 @@ pub fn action_row(action: Action) -> usize {
 
 /// Preferred panel size; clamped to the terminal.
 pub const PANEL_W: u16 = 72;
-pub const PANEL_H: u16 = 33;
+// Border (2) + header (2) + legend and note (3) + every table row, so the whole
+// table shows without scrolling on a 40-row terminal however many actions
+// there are.
+pub const PANEL_H: u16 = 7 + ROW_COUNT as u16;
 const LABEL_W: u16 = 13;
 const KEY_W: u16 = 16;
 const PAD_W: u16 = 7;
@@ -232,20 +235,23 @@ pub fn draw(f: &mut Frame, area: Rect, view: &ControlsView, hits: &mut HitMap) {
     let legend_y = (inner.y + inner.height).saturating_sub(lay.legend_rows);
     if inner.height > lay.header_rows + 1 {
         let narrow = inner.width < 56;
-        let lines: [&str; 2] = if view.capturing.is_some() {
+        // Reset and Back are actions like any other: name their live keys.
+        let reset = view.controls.action_label(Action::Reset);
+        let back = view.controls.action_label(Action::Back);
+        let lines: [String; 2] = if view.capturing.is_some() {
             [
-                "PRESS the new key, mouse or pad button · Esc cancels",
-                "a conflict swaps the two bindings · Ctrl+C always quits",
+                "PRESS the new key, mouse or pad button · Esc cancels".to_string(),
+                "a conflict swaps the two bindings · Ctrl+C always quits".to_string(),
             ]
         } else if narrow {
             [
-                "↑↓ row · ←→ change · Enter rebind · R reset",
-                "click a row to select · Esc back · wheel scrolls",
+                format!("↑↓ row · ←→ change · Enter rebind · {reset} reset"),
+                format!("click a row to select · {back} back · wheel scrolls"),
             ]
         } else {
             [
-                "↑↓ row · ←→ scheme/value · Enter or A rebind · R reset · Esc back",
-                "click a row to select and rebind · Cmd/Fn and Ctrl+C cannot bind",
+                format!("↑↓ row · ←→ scheme/value · Enter or A rebind · {reset} reset · {back} back"),
+                "click a row to select and rebind · Cmd/Fn and Ctrl+C cannot bind".to_string(),
             ]
         };
         for (i, line) in lines.iter().enumerate() {
@@ -254,7 +260,7 @@ pub fn draw(f: &mut Frame, area: Rect, view: &ControlsView, hits: &mut HitMap) {
                 break;
             }
             f.render_widget(
-                Line::styled(*line, ink(MUTED)).centered(),
+                Line::styled(line.as_str(), ink(MUTED)).centered(),
                 Rect::new(inner.x, y, inner.width, 1),
             );
         }
