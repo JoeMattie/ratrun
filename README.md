@@ -12,34 +12,72 @@ and the Lab core, or take the side routes through the Laundry and the
 Printworks — and take a practice run on the back of a moving flatbed when you
 want a different kind of floor.
 
-## Screenshots and video
+## Screenshots
 
-> **TODO (coordinator):** every frame below is a placeholder. `dump:<target>`
-> means it comes straight from `RATRUN_DUMP=<target> cargo test dump_frame_ppm`
-> (add `RATRUN_DUMP_DIR=docs/img` and copy `ratrun_<target>.ppm`); `live` means
-> it needs a real run captured from the terminal. Save each under `docs/img/`
-> with the filename given and write the caption underneath it.
+Every frame below is a real 120 × 40 terminal frame, dumped by the game's own
+capture harness (`RATRUN_DUMP=<target> RATRUN_DUMP_DIR=<dir> cargo test
+dump_frame_ppm`, see [`CLAUDE.md`](CLAUDE.md)) and rasterised cell for cell.
 
-| file | how | caption |
-| --- | --- | --- |
-| `docs/img/title.png` | `dump:title` | The title plate: Subject R-47, the sector row and the controls legend. |
-| `docs/img/sector-select.png` | `dump:select` | Sector select: cleared, open and locked floors with their bests. |
-| `docs/img/sewer.png` | `live` (run 1) | The Sewers: damp green masonry, a lantern-lit start room and the first horde. |
-| `docs/img/kitchen.png` | `live` (stage 2, original route) | The Kitchen: warm amber light over counters, grease and snap-traps. |
-| `docs/img/lab.png` | `live` (stage 3, original route) | The Lab: cold clinical pools under hard-edged lamps. |
-| `docs/img/laundry.png` | `live` (stage 2, side route) | The Laundry: washer aisles and a steam grate mid-plume. |
-| `docs/img/printworks.png` | `live` (stage 3, side route) | The Printworks: offset press islands and ink pads that slow the floor. |
-| `docs/img/flatbed.png` | `dump:trailer` | The getaway ride: the flatbed's planks, the road through the gaps, the cargo. |
-| `docs/img/boss.png` | `dump:boss-cat` (or `live`) | A boss fight — here the Jungle Cat — with the boss bar, the arena and the hazard tell. |
-| `docs/img/miniboss.png` | `dump:miniboss-foreman` | A named appointment mid-tell: the shape is warned before it bites. |
-| `docs/img/levelup.png` | `dump:levelup` | A level-up: three cards, icons, a stat line and a flavor line each. |
-| `docs/img/library.png` | `dump:library` | The Library's BESTIARY tab: discovered entries beside locked ones. |
-| `docs/img/nest.png` | `dump:nest-max` | The Nest: the permanent upgrade board with banked gold. |
-| `docs/img/shop.png` | `dump:shop` | The gene-splice shelf behind a mouse hole: stock, splice sockets and the services. |
-| `docs/img/map.png` | `dump:map` | The expanded `Tab` map — and the red veil over territory you have never seen. |
-| `docs/img/zoomed-out.png` | `dump:play` with `RATRUN_DUMP_ZOOM=2` | Zoomed out to 2×: twice the world, with the ink pass keeping pellets and loot legible. |
-| `docs/img/firelit.png` | `live` (a Laundry or Sewer room with a fire) | A dark room lit by a single fire: fixture pool, cast shadows, ambient embers. |
-| `docs/img/gameplay.mp4` | `live` (screen recording) | One floor, start to boss kill. |
+![The title plate](docs/img/title.png)
+
+*The title plate: Subject R-47, the sector row and the controls legend.*
+
+![Sector select](docs/img/sector-select.png)
+
+*Sector select: cleared, open and locked floors with their bests. A floor with
+two possible bosses names both.*
+
+| | |
+| --- | --- |
+| ![The Sewers](docs/img/sewer.png) | ![The Kitchen](docs/img/kitchen.png) |
+| *The Sewers: damp green masonry and the first horde.* | *The Kitchen: warm amber light over tile and counters.* |
+| ![The Lab](docs/img/lab.png) | ![The Laundry](docs/img/laundry.png) |
+| *The Lab: cold clinical floor under hard-edged lamps.* | *The Laundry: washer aisles and a floor drain.* |
+| ![The Printworks](docs/img/printworks.png) | ![The Flatbed](docs/img/flatbed.png) |
+| *The Printworks: press islands and paper stacks.* | *The getaway ride: the flatbed's planks and rails.* |
+
+![A boss fight](docs/img/boss.png)
+
+*A boss fight — here the Apex Jaguar — with the boss bar and a marked landing
+(the red outline) before it bites.*
+
+![A named miniboss](docs/img/miniboss.png)
+
+*A named miniboss, The Foreman, with its own health plate.*
+
+![A level-up](docs/img/levelup.png)
+
+*A level-up: three cards, each with an icon, a stat line and a flavor line.*
+
+![The Library](docs/img/library.png)
+
+*The Library's BESTIARY tab: discovered entries beside locked ones.*
+
+![The Nest](docs/img/nest.png)
+
+*The Nest: the permanent upgrade board (here fully bought).*
+
+![The splice shop](docs/img/shop.png)
+
+*The gene-splice shelf behind a mouse hole: three splices and the services.*
+
+![The full map](docs/img/map.png)
+
+*The expanded `Tab` map a second into a run: the dark red veil is territory you
+have never seen.*
+
+![Zoomed out](docs/img/zoomed-out.png)
+
+*Zoomed out to 2×: twice the world, with pellets and loot kept legible.*
+
+![A fire-lit room](docs/img/firelit.png)
+
+*A Sewer room lit by a brazier: the fixture's pool of light falls off into the
+dark.*
+
+> **TODO (not produced):** `docs/img/gameplay.mp4` — one floor, start to boss
+> kill. It needs a live screen recording from a real terminal; the capture
+> harness only writes still frames.
 
 ## Features
 
@@ -49,6 +87,9 @@ want a different kind of floor.
   Kitchen *or* Laundry → Lab *or* Printworks. Between sectors you pack up to
   three powerups and pick which floor the next sector plays. The Flatbed is a
   bonus practice floor, playable on its own from sector select.
+- **Every floor has its own roster**: eight enemy kinds that unlock on the
+  clock, from the first fodder to a third trick at 9:45, and its own four
+  minibosses.
 - **Fifteen minutes a floor**, escalating hordes, **four named minibosses** at
   3:00, 6:00, 9:00 and 12:00 (each leaves a chest), then **the floor's boss** at
   15:00. Ten bosses across the six floors; a floor draws its boss from its own
@@ -59,7 +100,7 @@ want a different kind of floor.
   gene-splice shelf: two splice sockets, plus a heal, a reroll and a Molt
   service. Between runs, the **Nest** spends banked gold on 15 permanent tracks
   (more weapon and passive slots — 4 up to 8 each — speed, pickup range, HP,
-  armour, luck, a revive, and more).
+  armor, luck, a revive, and more).
 - **The Library**: a four-tab dossier that unlocks as you actually meet things —
   bestiary, arsenal, field guide and the floors themselves.
 - **Procedural levels**: a 200 × 160 tile facility per seed with rooms, halls,
@@ -144,7 +185,8 @@ the Kitty keyboard protocol, mouse reporting and the half block `▀`.
 Three schemes, chosen on the **Options** screen and saved with the rest of your
 preferences. Every binding is remappable on the **Controls** screen: pick a row,
 press a key, pad button or mouse button, and a conflict swaps the two actions.
-`R` (or the RESET DEFAULTS row) restores the active scheme's defaults, and
+`R` (the Reset action, or the RESET DEFAULTS row) restores the active scheme's
+defaults, and
 `X` / `Delete` / `Backspace` unbinds the selected row.
 
 Movement, menus and preferences are the same in all three schemes:
@@ -165,7 +207,9 @@ Movement, menus and preferences are the same in all three schemes:
 | `U` | toggle auto-pick level-ups |
 | `L` | story crawl on the title, Library in a run |
 | `Enter` | confirm · `Esc` back |
-| `Q` | quit (from the menus) |
+| `B` | the Nest (from the pause screen, the incident report and the victory screen) |
+| `Q` | quit from the title; back to the menu from pause and the end screens |
+| `R` | refund every Nest track (on the Nest); reset the scheme (on Controls) |
 | `1` `2` `3`, arrows + `Enter`, or a click | pick a level-up card |
 
 Where the schemes differ:
@@ -176,6 +220,13 @@ Where the schemes differ:
 | Move | `WASD` / arrows, or the pointer | `WASD` / arrows (eight directions) | left stick or d-pad (analog speed) |
 | Dash | `Ctrl` (or left click; `Space` also dashes without lone-Ctrl reporting) | right click (or `Ctrl`) | `RB` |
 | Fire charged actives | `Space` (or left click) | left click (or `Space`) | `X` |
+
+**Super Dash** changes the dash: once you own that weapon, *hold* the dash input
+to charge it (about 0.9 s to full, faster as it levels) and *release* to fire a
+longer, wider, harder-hitting dash. A quick tap is still the ordinary dash, and
+without the weapon the dash fires on the press as always. A key can only be held
+on a terminal that reports key releases (the Kitty protocol); the mouse button
+and the gamepad can always charge.
 
 In **Classic** a left click is the whole "do the thing" gesture (dash plus any
 ready actives). In **Mouse aim** the clicks split, so a left click never spends
