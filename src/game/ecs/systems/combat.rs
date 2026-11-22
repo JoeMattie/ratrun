@@ -460,7 +460,7 @@ pub fn contact_system(
 
 #[cfg(test)]
 mod tests {
-    //! Narrow single-system tests (PORT_PLAN §2): `begin_tick` → one system via
+    //! Narrow single-system tests: `begin_tick` → one system via
     //! `run_system_cached` → `end_tick`. They cover the legacy tests that
     //! exercise only combat .
 

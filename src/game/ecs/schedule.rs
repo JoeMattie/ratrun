@@ -36,11 +36,13 @@
 //! | 13 | `projectiles::pools_system` | `update_pools` |
 //! | 13b | `boss::boss_damage_system` | player damage → boss hit shapes |
 //! | 13c | `boss::boss_update_system` | boss state machine + hazards |
+//! | 13d | `boss::cobra::coil_block_system` | the King Cobra's coils push a walking rat out of the body (a dashing one passes over); explicitly after 13c and before 14 |
 //! | 14 | `combat::player_bullet_hits_system` | `resolve_player_bullets` |
 //! | 15 | `combat::enemy_bullet_hits_system` | `resolve_enemy_hits` |
 //! | 16 | `combat::contact_system` | `resolve_contact` |
 //! | 16b | `evolutions::milk_teeth_system` … `roll_call_system`, `dead_letter_system`, `ripcord_system` | evolved weapons (new) |
 //! | 16c | `enemy_wave3::wave3_system` | wave-3 kinds' tells, hazards, wick fuse (new); after every weapon damage pass so a moth any of them killed lights its wick |
+//! | 16c2 | `enemy_wave4::wave4_system` | wave-4 kinds' tells and hazards (new); right after 16c |
 //! | 16d | `trailer::trailer_system` | the flatbed's holes, cargo and wind (new; `Theme::Trailer` only); a fall can kill, so it runs before 16e |
 //! | 16e | `weapons_wave3a::hantavirus_death_system` | death-triggered jumps (sees evolution, wick-burst and fall kills), before the reap |
 //! | 17 | `loot::reap_enemies_system` | `reap_enemies`; a named miniboss's chest + gold drop here (`miniboss::drop_loot`) |
@@ -72,10 +74,11 @@
 //! `elapsed += dt` is applied by `World::update` before
 //! `begin_tick`; the per-tick `NukeTick` reset happens in `World::begin_tick`,
 //!
-//! The chain is split into two tuples because `IntoScheduleConfigs` is
+//! The chain is split into several tuples because `IntoScheduleConfigs` is
 //! implemented for tuples up to 20 elements. Each tuple is `.chain()`ed, so
 //! Bevy inserts `ApplyDeferred` between consecutive systems whose predecessor
-//! uses `Commands`. The second group is explicitly `.after(contact_system)`;
+//! uses `Commands`. The later groups are explicitly anchored (`.after(...)` /
+//! `.before(...)`); the last one is `.after(contact_system)`:
 //! it starts with reaping, so the reaped→gem ordering is itself chained and
 //! deferred spawns are visible to `gems_system`.
 //!

@@ -30,8 +30,8 @@
 //! Constants, operation order and the number/order of rng draws are copied
 //! from the legacy code (and the neon diff did not change them). The only
 //! sanctioned divergence is the iteration order: every entity query is walked
-//! in `SpawnId` order instead of the legacy `Vec`/`swap_remove` order (port
-//! contract, PORT_PLAN.md §3).
+//! in `SpawnId` order instead of the legacy `Vec`/`swap_remove` order (the
+//! port's one sanctioned difference; see `CLAUDE.md`, "Determinism rules").
 //!
 //! ## No per-tick allocation
 //!

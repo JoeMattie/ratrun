@@ -2,7 +2,7 @@
 //! legacy functions and line ranges it must reproduce, the resources and
 //! components it uses, and the ordering constraints it relies on.
 //!
-//! See `PORT_PLAN.md` for the ownership table and the stable-ordering rule
+//! See `CLAUDE.md` ("Determinism rules") for the stable-ordering rule
 //! (`SpawnId`).
 
 pub mod boss;

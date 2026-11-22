@@ -12,7 +12,7 @@
 //!
 //! The public facade (`game::world::World`) owns a [`bevy_ecs::world::World`]
 //! and the schedules, and keeps the legacy public fields as real fields. See
-//! `PORT_PLAN.md` for the mechanism.
+//! `CLAUDE.md` ("The facade round-trip") for the mechanism.
 
 pub mod components;
 pub mod constants;

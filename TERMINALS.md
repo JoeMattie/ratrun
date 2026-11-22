@@ -85,6 +85,7 @@ names whichever key is live.
 | --- | --- | --- |
 | movement (`WASD`, pad direction) | **yes**, when available | a held key is the movement input; without releases the game uses a short auto-repeat **grace window** and the key lapses unless it repeats |
 | `Ctrl` dash | yes (press *and* release) | the lone-modifier press is the dash; release ends the press |
+| holding the dash key to charge a **Super Dash** | **yes** | the charge fires on the release edge; without release reporting a key press is always a tap (an ordinary dash) and only the mouse button or the gamepad can charge — the legends say which |
 | letters, `Space`, `Q`, digits | no | used as discrete presses from the per-frame `pressed` list |
 | `Enter`, `Tab`, `Backspace` | **not relied on** | under `REPORT_EVENT_TYPES` alone these do not report releases; the game only ever treats them as discrete presses, so it never needs one |
 

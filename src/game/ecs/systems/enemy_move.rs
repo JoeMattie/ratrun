@@ -531,7 +531,7 @@ mod tests {
         approx(a.x, b.x) && approx(a.y, b.y)
     }
 
-    /// Narrow harness (PORT_PLAN §2): one system, no schedule.
+    /// Narrow harness: one system, no schedule.
     fn run_one<O: 'static, M>(w: &mut World, system: impl IntoSystem<(), O, M> + 'static) -> O {
         w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
         let out = w.ecs.run_system_cached(system).unwrap();

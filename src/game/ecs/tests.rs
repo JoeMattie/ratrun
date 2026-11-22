@@ -6,7 +6,7 @@
 //! - Entities are spawned through the facade helpers (`World::spawn_enemy`,
 //!   `spawn_bullet`, `spawn_gem`, `spawn_pickup`, `spawn_pool`) instead of
 //!   pushing to the legacy `Vec` fields.
-//! - Single-system tests use the narrow harness from `PORT_PLAN.md` §2:
+//! - Single-system tests use the narrow harness (`CLAUDE.md`, "Testing strategy"):
 //!   `world.begin_tick(dt, dir, dash)`,
 //!   `world.ecs.run_system_cached(systems::..::system)`, `world.end_tick()`.
 //!   Between `begin_tick` and `end_tick` the facade singleton fields are
@@ -1155,8 +1155,8 @@ fn acid_spit_pool_lands_on_a_wall_not_behind_it() {
 }
 
 // ---- Neon combat-feedback merge tests -------------------------------------
-// Ported from the other team's `world.rs` additions (audited hunk by hunk in
-// `PORT_PLAN.md`, "Merge-hook audit"). Entity setup goes through the facade
+// Ported from the other team's `world.rs` additions (audited hunk by hunk when
+// the simulation was ported). Entity setup goes through the facade
 // spawn helpers; single-system steps use the narrow harness.
 
 #[test]
