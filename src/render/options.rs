@@ -26,14 +26,16 @@ pub const MINIMAP_ROW: usize = 2;
 pub const CURSOR_ROW: usize = 3;
 pub const MUTE_ROW: usize = 4;
 pub const ZOOM_ROW: usize = 5;
-// Wave 3 controls (appended; the rows above keep their indices).
-pub const SCHEME_ROW: usize = 6;
-pub const CONTROLS_ROW: usize = 7;
-pub const DEADZONE_ROW: usize = 8;
-pub const RUMBLE_ROW: usize = 9;
-pub const BACK_ROW: usize = 10;
+/// Auto-pick level-ups (persisted; the level-up screen's toggle writes it too).
+pub const AUTO_PICK_ROW: usize = 6;
+// Wave 3 controls.
+pub const SCHEME_ROW: usize = 7;
+pub const CONTROLS_ROW: usize = 8;
+pub const DEADZONE_ROW: usize = 9;
+pub const RUMBLE_ROW: usize = 10;
+pub const BACK_ROW: usize = 11;
 /// How many rows the screen has.
-pub const ROW_COUNT: usize = 11;
+pub const ROW_COUNT: usize = 12;
 
 /// Slider identity used by [`Target::OptionsBar`]: the value the track edits.
 pub const MUSIC_BAR: usize = 0;
@@ -62,6 +64,7 @@ pub enum Row {
     Controls,
     Deadzone,
     Rumble,
+    AutoPick,
 }
 
 /// The screen's rows in order; index with the constants above.
@@ -72,6 +75,7 @@ pub const ROWS: [Row; ROW_COUNT] = [
     Row::Cursor,
     Row::Mute,
     Row::Zoom,
+    Row::AutoPick,
     Row::Scheme,
     Row::Controls,
     Row::Deadzone,
@@ -94,6 +98,7 @@ impl Row {
             Row::Controls => "CONTROLS",
             Row::Deadzone => "DEADZONE",
             Row::Rumble => "RUMBLE",
+            Row::AutoPick => "AUTO-PICK",
         }
     }
 
@@ -128,6 +133,9 @@ pub struct OptionsView {
     pub deadzone: f32,
     /// Rumble on hits, off by default (wave 3; needs a force-feedback pad).
     pub rumble: bool,
+    /// Auto-pick level-ups: the same preference the level-up screen's toggle
+    /// writes. Chests are **not** auto-opened (see the row's note).
+    pub auto_pick: bool,
 }
 
 /// Rows and slider tracks for one terminal area.
@@ -238,6 +246,13 @@ fn value_text(view: &OptionsView, row: Row) -> String {
         Row::Scheme => view.scheme.name().to_string(),
         Row::Controls => "OPEN ›".to_string(),
         Row::Deadzone => format!("{:.2}", view.deadzone),
+        Row::AutoPick => {
+            if view.auto_pick {
+                "ON".to_string()
+            } else {
+                "OFF".to_string()
+            }
+        }
         Row::Rumble => {
             if view.rumble {
                 "ON".to_string()
@@ -437,8 +452,12 @@ pub fn draw(f: &mut Frame, area: Rect, view: &OptionsView, hits: &mut HitMap) {
             .centered(),
             legend_row,
         );
+        // The auto-pick row's note says what the setting does *not* do: a chest
+        // is a reward moment and its evolution deserves its card.
         let note = if view.muted {
             " master mute on — levels are kept"
+        } else if view.row == AUTO_PICK_ROW {
+            " cards skipped; chests still open their card"
         } else {
             " effects preview while you adjust"
         };
@@ -483,6 +502,7 @@ mod tests {
             scheme: crate::controls::Scheme::Classic,
             deadzone: 0.2,
             rumble: false,
+            auto_pick: false,
         }
     }
 
@@ -507,7 +527,7 @@ mod tests {
             let v = view(MUSIC_ROW);
             let (text, hits) = frame(w, h, &v);
             for label in [
-                "MUSIC", "EFFECTS", "MINIMAP", "CURSOR", "MUTE", "ZOOM", "BACK",
+                "MUSIC", "EFFECTS", "MINIMAP", "CURSOR", "MUTE", "ZOOM", "AUTO-PICK", "BACK",
             ] {
                 assert!(text.contains(label), "{w}x{h} is missing {label}:\n{text}");
             }

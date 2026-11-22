@@ -95,6 +95,8 @@ pub enum Target {
     ControlsReset,
     /// Controls screen: the back row.
     ControlsBack,
+    /// The level-up screen's AUTO-PICK pill: flips the preference (the AUTO-PICK action, `U` by default).
+    AutoPickToggle,
 }
 
 /// How many interactive rectangles one screen can register. The campaign
@@ -538,6 +540,7 @@ pub fn draw_title(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_levelup(
     f: &mut Frame,
     area: Rect,
@@ -545,16 +548,19 @@ pub fn draw_levelup(
     choices: &[(String, String, String)],
     upgrades: &[Upgrade],
     idx: usize,
+    auto_pick: bool,
+    auto_key: &str,
     hits: &mut HitMap,
 ) {
     let n = choices.len().max(1) as u16;
     let large_cards = area.height >= n * 6 + 3 && area.width >= 64;
     let target_stride: u16 = if large_cards { 6 } else { 4 };
     let panel_w: u16 = if large_cards { 72 } else { 66 };
+    // One extra row for the AUTO-PICK pill above the legend.
     let panel_h: u16 = if large_cards {
-        n * 6 + if area.height >= n * 6 + 5 { 5 } else { 3 }
+        n * 6 + (if area.height >= n * 6 + 5 { 5 } else { 3 }) + 1
     } else {
-        n * 4 + 5
+        n * 4 + 6
     };
     let r = panel(
         f,
@@ -563,7 +569,7 @@ pub fn draw_levelup(
         TAIL,
     );
     let content = r.inner(Margin::new(1, 0));
-    let stride = (content.height.saturating_sub(1) / n).min(target_stride);
+    let stride = (content.height.saturating_sub(2) / n).min(target_stride);
     let top_pad = u16::from(content.height >= n * stride + 3);
     for (i, (title, desc, flavor)) in choices.iter().enumerate() {
         let selected = i == idx;
@@ -614,13 +620,14 @@ pub fn draw_levelup(
             text_rect,
         );
     }
+    draw_auto_pick_pill(f, r, r.height.saturating_sub(2), auto_pick, hits);
     center(
         f,
         r,
         r.height.saturating_sub(1),
-        label(
-            "↑↓ select   ·   Enter/click equip   ·   1–3 quick pick",
-            MUTED,
+        Line::styled(
+            format!("↑↓ select · Enter equip · 1–3 pick · {auto_key} auto-pick"),
+            ink(MUTED),
         ),
     );
 }
@@ -662,6 +669,26 @@ fn levelup_card_lines<'a>(
         Line::styled(desc, ink(COAT)),
         Line::styled(flavor, ink(MUTED).add_modifier(Modifier::ITALIC)),
     ]
+}
+
+/// The AUTO-PICK toggle on the level-up screen: one centred pill below the
+/// cards. Clicking it flips the preference; the AUTO-PICK key (`U`) does the same.
+/// Drawn as a real widget so the mouse hit target is the pill itself.
+fn draw_auto_pick_pill(f: &mut Frame, r: Rect, row: u16, on: bool, hits: &mut HitMap) {
+    let text = if on { " AUTO-PICK: ON " } else { " AUTO-PICK: OFF " };
+    let w = text.chars().count() as u16;
+    let band = band(r, row, 1);
+    if band.is_empty() || w > band.width {
+        return;
+    }
+    let rect = Rect::new(band.x + (band.width - w) / 2, band.y, w, 1);
+    let style = if on {
+        heavy(PLATE).bg(TAIL)
+    } else {
+        heavy(COAT).bg(TRACK)
+    };
+    f.render_widget(Line::styled(text, style), rect);
+    hits.add(rect, Target::AutoPickToggle);
 }
 
 /// Blit a large (`8×4` cells) or small (`4×2` cells) icon on the left side of a
@@ -1579,6 +1606,8 @@ pub fn draw_levelup_with_loadout(
     upgrades: &[Upgrade],
     loadout: &Loadout,
     idx: usize,
+    auto_pick: bool,
+    auto_key: &str,
     hits: &mut HitMap,
 ) {
     let n = choices.len().max(1) as u16;
@@ -1591,10 +1620,11 @@ pub fn draw_levelup_with_loadout(
     };
     let airy = large_cards && area.height >= n * 6 + 7;
     let panel_w: u16 = if large_cards { 72 } else { 66 };
+    // One extra row for the AUTO-PICK pill above the legend.
     let panel_h: u16 = if large_cards {
-        n * 6 + if show_loadout { if airy { 7 } else { 5 } } else { 3 }
+        n * 6 + (if show_loadout { if airy { 7 } else { 5 } } else { 3 }) + 1
     } else {
-        n * 4 + if show_loadout { 7 } else { 5 }
+        n * 4 + (if show_loadout { 7 } else { 5 }) + 1
     };
     let r = panel(
         f,
@@ -1604,9 +1634,9 @@ pub fn draw_levelup_with_loadout(
     );
     let content = r.inner(Margin::new(1, 0));
     let footer_rows: u16 = if show_loadout {
-        if large_cards && !airy { 2 } else { 3 }
+        if large_cards && !airy { 3 } else { 4 }
     } else {
-        1
+        2
     };
     let stride = (content.height.saturating_sub(footer_rows) / n).min(target_stride);
     let top_pad = if large_cards {
@@ -1712,18 +1742,19 @@ pub fn draw_levelup_with_loadout(
     // as many as the panel can hold; the rack caps run to 8 + 8, so the strip
     // measures itself and ends in a `+N` marker rather than clipping a name.
     if show_loadout && r.height >= 4 {
-        let strip_y = r.height.saturating_sub(if large_cards && !airy { 2 } else { 3 });
+        let strip_y = r.height.saturating_sub(if large_cards && !airy { 3 } else { 4 });
         let spans = loadout_strip(loadout, r.width.saturating_sub(4) as usize);
         center(f, r, strip_y, Line::from(spans));
     }
 
+    draw_auto_pick_pill(f, r, r.height.saturating_sub(2), auto_pick, hits);
     center(
         f,
         r,
         r.height.saturating_sub(1),
-        label(
-            "↑↓ select   ·   Enter/click equip   ·   1–3 quick pick",
-            MUTED,
+        Line::styled(
+            format!("↑↓ select · Enter equip · 1–3 pick · {auto_key} auto-pick"),
+            ink(MUTED),
         ),
     );
 }
@@ -2481,7 +2512,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 26)).unwrap();
         terminal
             .draw(|f| {
-                draw_levelup_with_loadout(f, f.area(), 4, &desc, &upgrades, &lo, 0, &mut hits);
+                draw_levelup_with_loadout(f, f.area(), 4, &desc, &upgrades, &lo, 0, false, &mut hits);
             })
             .unwrap();
         let text = screen_text(&terminal);
@@ -2644,7 +2675,7 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();
             terminal
                 .draw(|f| {
-                    draw_levelup_with_loadout(f, f.area(), 5, &desc, &upgrades, &lo, 1, &mut hits);
+                    draw_levelup_with_loadout(f, f.area(), 5, &desc, &upgrades, &lo, 1, false, &mut hits);
                 })
                 .unwrap();
 

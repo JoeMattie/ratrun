@@ -60,6 +60,18 @@ const SFX_VOLUME_ENV: &str = "RATRUN_SFX_VOLUME";
 /// dragging a slider cannot machine-gun the same effect.
 const PREVIEW_COOLDOWN_SECS: f32 = 0.12;
 
+/// How long the auto-pick toast stays in the HUD callout area.
+const AUTO_PICK_TOAST_SECS: f32 = 2.5;
+/// Spacing between auto-picked cards when several level-ups land at once, so
+/// each toast is readable. The first card lands immediately (the same frame a
+/// manual screen would have opened, so the simulation and its rng see exactly
+/// what a manual pick of that card would cause); the cards queued behind it
+/// wait their turn.
+const AUTO_PICK_SPACING_SECS: f32 = 0.4;
+/// The short reveal before the auto-pick toggle takes the current card when it
+/// is switched on from the level-up screen itself.
+const AUTO_PICK_REVEAL_SECS: f32 = 0.4;
+
 /// Parse a `RATRUN_*_VOLUME` override: `0..=100`, an optional trailing `%`
 /// and surrounding spaces tolerated. Out-of-range and non-numeric values are
 /// ignored (the saved preference stands).
@@ -320,6 +332,10 @@ pub struct App {
     /// First visible Controls row and how many rows fit (updated by the draw).
     controls_scroll: usize,
     controls_visible: usize,
+    /// Seconds until the next auto-picked card may land (the reveal/spacing
+    /// clock). Zero means "now". Only meaningful while
+    /// `scores.auto_pick` is on; the simulation never reads it.
+    auto_pick_wait: f32,
 }
 
 impl App {
@@ -426,6 +442,7 @@ impl App {
             controls_from_options: true,
             controls_scroll: 0,
             controls_visible: 16,
+            auto_pick_wait: 0.0,
         };
         // `RATRUN_LIBRARY_ALL=1` unveils the index for screenshots and tests;
         // it is memory-only and never written back over the score file.
@@ -1059,6 +1076,9 @@ impl App {
         // Preview blips are rate limited so a mouse drag across the slider
         // cannot machine-gun one effect per cell.
         self.preview_cd = (self.preview_cd - dt.max(0.0)).max(0.0);
+        // The auto-pick reveal/spacing clock runs on every screen; only the
+        // play and level-up screens ever spend it.
+        self.auto_pick_wait = (self.auto_pick_wait - dt.max(0.0)).max(0.0);
         // The HUD read-out ages with the frame clock on every screen; during
         // play `hud.tick` advances it too.
         if !matches!(self.screen, Screen::Playing) {
@@ -1495,6 +1515,10 @@ impl App {
                 // Right widens the view (a bigger number), left zooms in.
                 self.set_zoom(view_zoom::step(self.scores.zoom, dir));
             }
+            options::AUTO_PICK_ROW => {
+                // Binary: Left and Right both flip it.
+                self.toggle_auto_pick();
+            }
             options::SCHEME_ROW => {
                 let next = self.input.controls.scheme().step(dir as i32);
                 self.set_scheme(next);
@@ -1765,7 +1789,7 @@ impl App {
             click
         } else if self.input.pressed_char('q') {
             Some(Target::Quit)
-        } else if self.input.pressed_char('l') {
+        } else if self.input.action_pressed(Action::Library) {
             Some(Target::Story)
         } else {
             if self.input.nav_pressed(0, -1) {
@@ -2018,6 +2042,12 @@ impl App {
         if self.input.action_pressed(Action::ZoomOut) {
             self.step_zoom(1);
         }
+        // Take back control mid-run: `U` flips auto-pick — the same preference
+        // the level-up screen's pill and the options row set — so a player who
+        // turned it on always gets the cards back. Discrete presses only.
+        if self.input.action_pressed(Action::AutoPick) {
+            self.toggle_auto_pick();
+        }
         // Middle click (or the bound key / R3) resets the view to 1.0x, but
         // only over the playfield: the minimap, HUD rails and the expanded map
         // have their own jobs, and a menu never trains a zoom.
@@ -2199,11 +2229,31 @@ impl App {
     }
 
     fn resume_or_open_reward(&mut self) {
+        let (pending, auto) = match self.world.as_ref() {
+            Some(w) => (w.pending_levelups, self.scores.auto_pick),
+            None => return,
+        };
+        if pending > 0 {
+            if !auto {
+                self.open_levelup();
+                return;
+            }
+            // Auto-pick: the card lands without the screen. The first one lands
+            // on the same tick a manual screen would have opened (so the run is
+            // identical); cards queued behind it wait their spacing so each
+            // toast is readable, and the game keeps running.
+            if self.auto_pick_wait > 0.0 {
+                self.screen = Screen::Playing;
+                return;
+            }
+            self.auto_pick_one();
+        }
         let Some(w) = self.world.as_mut() else {
             return;
         };
         if w.pending_levelups > 0 {
-            self.open_levelup();
+            // A card was just taken and more are queued: wait out the spacing.
+            self.screen = Screen::Playing;
         } else if let Some(reward) = w.claim_chest() {
             self.map_open = false;
             self.chest_reward = Some(reward);
@@ -2805,6 +2855,27 @@ impl App {
     }
 
     fn update_levelup(&mut self, click: Option<Target>) {
+        // The AUTO-PICK pill: key `A`/`U` or a click flips the preference. It
+        // takes effect from this card on, after the short reveal below.
+        // The AUTO-PICK action (`U` by default), never a bare `A`: that key is
+        // move-left on the default scheme and steps the card selection here.
+        if self.input.action_pressed(Action::AutoPick)
+            || click == Some(Target::AutoPickToggle)
+        {
+            self.toggle_auto_pick();
+            if self.scores.auto_pick {
+                self.auto_pick_wait = AUTO_PICK_REVEAL_SECS;
+            }
+        }
+        // Auto-pick on: the screen only steals control long enough to reveal
+        // the card. The pick itself is deterministic (the bot's valuation),
+        // and the choices were already drawn when the screen opened, so this
+        // draws no rng and lands exactly where a manual pick would. The clock
+        // itself is decremented once per frame in `update`.
+        if self.scores.auto_pick && self.auto_pick_wait <= 0.0 {
+            self.auto_pick_current();
+            return;
+        }
         let n = self.levelup_choices.len().max(1);
         if self.input.nav_pressed(0, -1) || self.input.nav_pressed(-1, 0) {
             self.levelup_idx = (self.levelup_idx + n - 1) % n;
@@ -2833,19 +2904,133 @@ impl App {
     }
 
     fn apply_levelup(&mut self, i: usize) {
-        if let Some(w) = self.world.as_mut() {
-            if let Some(up) = self.levelup_choices.get(i).cloned() {
-                if let Some((title, _, _)) = self.levelup_desc.get(i) {
-                    self.hud.notify_upgrade(title);
-                }
-                let heal = w.player.loadout.apply(&up);
-                w.player.heal(heal);
-                if matches!(up, Upgrade::Purse) {
-                    w.gold = w.gold.saturating_add(crate::game::loadout::PURSE_GOLD);
-                }
-                w.pending_levelups = w.pending_levelups.saturating_sub(1);
-            }
+        if let Some((title, _, _)) = self.levelup_desc.get(i) {
+            self.hud.notify_upgrade(title);
+        }
+        let choices = std::mem::take(&mut self.levelup_choices);
+        self.apply_card(&choices, i);
+        self.levelup_choices = choices;
+        if self.world.is_some() {
             self.resume_or_open_reward();
+        }
+    }
+
+    /// Apply one level-up card to the world: the shared core of a manual pick
+    /// and an auto pick. Returns the toast label and icon for the card
+    /// (`("Cheese Spray Lv3", icon)`), captured before the rank changes.
+    ///
+    /// The loadout's `apply` + the purse's gold credit are exactly what a
+    /// manual pick does, so the simulation sees the same state either way.
+    fn apply_card(
+        &mut self,
+        choices: &[Upgrade],
+        i: usize,
+    ) -> Option<(String, &'static crate::game::art_icons::Icon)> {
+        let up = choices.get(i)?.clone();
+        let w = self.world.as_mut()?;
+        let label = w.player.loadout.picked_label(&up);
+        let icon = w.player.loadout.picked_icon(&up);
+        let heal = w.player.loadout.apply(&up);
+        w.player.heal(heal);
+        if matches!(up, Upgrade::Purse) {
+            w.gold = w.gold.saturating_add(crate::game::loadout::PURSE_GOLD);
+        }
+        w.pending_levelups = w.pending_levelups.saturating_sub(1);
+        Some((label, icon))
+    }
+
+    /// Take the card the level-up screen is showing without a player choice:
+    /// the deterministic valuation over the already-drawn choices. Draws no
+    /// rng (the choices were drawn when the screen opened), so it lands exactly
+    /// where a manual pick would.
+    fn auto_pick_current(&mut self) {
+        let choices = std::mem::take(&mut self.levelup_choices);
+        let pick = match self.world.as_ref() {
+            Some(w) => crate::game::bot::best_upgrade(w, &choices),
+            None => {
+                self.levelup_choices = choices;
+                return;
+            }
+        };
+        let picked = self.apply_card(&choices, pick);
+        self.levelup_choices = choices;
+        if let Some((label, icon)) = picked {
+            self.toast_auto_pick(&label, icon);
+            self.auto_pick_wait = AUTO_PICK_SPACING_SECS;
+            self.resume_or_open_reward();
+        }
+    }
+
+    /// Take a level-up card without opening the screen: draw the choices
+    /// exactly as the manual screen does (one rng draw per level-up, in the
+    /// same place in the tick), pick with the bot's deterministic valuation,
+    /// apply it and toast what landed. The game keeps running.
+    ///
+    /// Returns the cards that were offered and the index taken, so a test can
+    /// prove the pick was a legal card from the same set the manual screen
+    /// shows (slot caps and evolution partners included).
+    fn auto_pick_one(&mut self) -> Option<(Vec<Upgrade>, usize)> {
+        let choices = {
+            let w = self.world.as_mut()?;
+            // The bandage fallback is hidden at full health, exactly as for
+            // the manual screen (`design §2`).
+            let hp_frac = (w.player.hp / w.player.max_hp().max(1.0)).clamp(0.0, 1.0);
+            w.player
+                .loadout
+                .generate_choices_with_hp(&mut w.rng, hp_frac)
+        };
+        if choices.is_empty() {
+            return None;
+        }
+        let pick = crate::game::bot::best_upgrade(self.world.as_ref()?, &choices);
+        if let Some((label, icon)) = self.apply_card(&choices, pick) {
+            self.toast_auto_pick(&label, icon);
+            self.auto_pick_wait = AUTO_PICK_SPACING_SECS;
+        }
+        Some((choices, pick))
+    }
+
+    /// Tell the player what the auto-pick took, in the HUD callout area: the
+    /// card's icon, its name and its new rank (`AUTO  Cheese Spray Lv3`).
+    fn toast_auto_pick(&mut self, label: &str, icon: &'static crate::game::art_icons::Icon) {
+        self.hud.push_callout_with_icon(
+            hud::CalloutKind::AutoPick,
+            Some(icon),
+            "AUTO",
+            label,
+            AUTO_PICK_TOAST_SECS,
+        );
+        // The level-up sound. The simulation already stings the tick a level-up
+        // is earned (`Sfx::LevelUp` from the gem), so only the cards queued
+        // behind that first one need their own sting here.
+        if !self.sfx_frame.contains(&Sfx::LevelUp) {
+            self.sfx(Sfx::LevelUp);
+        }
+    }
+
+    /// Flip the auto-pick preference. The level-up screen's pill, the options
+    /// row and the in-play key all go through here, so the save and the toast
+    /// are identical.
+    fn toggle_auto_pick(&mut self) {
+        let on = !self.scores.auto_pick;
+        self.scores.auto_pick = on;
+        if self.persist {
+            self.scores.save();
+        }
+        self.sfx(Sfx::UiSelect);
+        // Say so in the HUD callout area when the flip happens in play; on the
+        // level-up screen the pill itself shows the new state.
+        if matches!(self.screen, Screen::Playing) {
+            self.hud.push_callout(
+                hud::CalloutKind::AutoPick,
+                if on { "AUTO-PICK ON" } else { "AUTO-PICK OFF" },
+                if on {
+                    "CARDS SKIPPED · U TAKES BACK CONTROL"
+                } else {
+                    "THE CARDS ARE YOURS AGAIN"
+                },
+                AUTO_PICK_TOAST_SECS,
+            );
         }
     }
 
@@ -2855,7 +3040,7 @@ impl App {
             self.open_options(Screen::Paused);
             return;
         }
-        if click == Some(Target::Library) || self.input.pressed_char('l') {
+        if click == Some(Target::Library) || self.input.action_pressed(Action::Library) {
             self.sfx(Sfx::UiSelect);
             self.open_library(Screen::Paused);
             return;
@@ -3120,6 +3305,8 @@ impl App {
                                 &self.levelup_choices,
                                 &w.player.loadout,
                                 self.levelup_idx,
+                                self.scores.auto_pick,
+                                self.input.controls.action_label(Action::AutoPick),
                                 &mut self.hits,
                             );
                         } else {
@@ -3130,6 +3317,8 @@ impl App {
                                 &self.levelup_desc,
                                 &self.levelup_choices,
                                 self.levelup_idx,
+                                self.scores.auto_pick,
+                                self.input.controls.action_label(Action::AutoPick),
                                 &mut self.hits,
                             );
                         }
@@ -3271,6 +3460,7 @@ impl App {
             scheme: self.input.controls.scheme(),
             deadzone: self.input.controls.deadzone,
             rumble: self.input.controls.rumble,
+            auto_pick: self.scores.auto_pick,
         };
         options::draw(frame, area, &view, &mut self.hits);
     }
@@ -5696,6 +5886,19 @@ mod tests {
                         break; // dump the card itself
                     }
                 }
+            }
+            // The auto-pick toast in play: turn the toggle on, earn a card and
+            // dump the frame the callout lands in (no screen, game running).
+            "autopick" => {
+                hh.enter_playing();
+                hh.app.scores.auto_pick = true;
+                {
+                    let w = hh.app.world.as_mut().unwrap();
+                    w.clear_enemies();
+                    w.clear_gems();
+                    w.pending_levelups = 1;
+                }
+                hh.frame(&[]);
             }
             _ => {
                 hh.frame(&[KeyCode::Enter]); // -> Story
@@ -9383,6 +9586,15 @@ mod tests {
         assert_eq!(h.app.effective_zoom(), 1.25);
         h.frame(&[KeyCode::Left]);
         assert_eq!(h.app.effective_zoom(), 1.0);
+        // The auto-pick row sits between Zoom and Back (wave 3); both
+        // directions flip the binary preference.
+        h.frame(&[KeyCode::Down]);
+        assert_eq!(h.app.options_row, options::AUTO_PICK_ROW);
+        assert!(!h.app.scores.auto_pick, "default is off");
+        h.frame(&[KeyCode::Right]);
+        assert!(h.app.scores.auto_pick, "Right turns auto-pick on");
+        h.frame(&[KeyCode::Left]);
+        assert!(!h.app.scores.auto_pick, "Left turns it back off");
         // Wave 3 controls rows sit between zoom and back.
         h.frame(&[KeyCode::Down]);
         assert_eq!(h.app.options_row, options::SCHEME_ROW);
@@ -9407,6 +9619,328 @@ mod tests {
         assert_eq!(h.app.options_row, options::BACK_ROW);
         h.frame(&[KeyCode::Enter]);
         assert_eq!(h.app.screen.name_for_test(), "Title");
+    }
+
+    // ---- Auto-pick level-ups (wave 3) ------------------------------------
+
+    /// The level-up screen's AUTO-PICK pill: key `A` and a mouse click both
+    /// flip the preference and the pill reads the new state.
+    #[test]
+    fn the_level_up_screen_toggle_flips_auto_pick_by_key_and_mouse() {
+        // Key A.
+        let mut h = Harness::new(80, 26);
+        h.show_upgrade_cards();
+        assert!(matches!(h.app.screen, Screen::LevelUp));
+        assert!(h.frame(&[]).contains("AUTO-PICK: OFF"), "the pill starts OFF");
+        h.frame(&[KeyCode::Char('u')]);
+        assert!(h.app.scores.auto_pick, "U turns auto-pick on");
+        assert!(h.frame(&[]).contains("AUTO-PICK: ON"), "the pill reads ON");
+        h.frame(&[KeyCode::Char('u')]);
+        assert!(!h.app.scores.auto_pick, "U turns it back off");
+
+        // Mouse: clicking the pill flips it too.
+        let mut h = Harness::new(80, 26);
+        h.show_upgrade_cards();
+        h.frame(&[]);
+        h.click("AUTO-PICK");
+        assert!(h.app.scores.auto_pick, "a click on the pill turns auto-pick on");
+    }
+
+    /// Turning the pill on takes the current card after the short reveal, and
+    /// the card is the deterministic valuation of the dealt set.
+    #[test]
+    fn turning_auto_pick_on_the_screen_takes_the_current_card_after_the_reveal() {
+        let mut h = Harness::new(80, 26);
+        h.show_upgrade_cards();
+        h.frame(&[]);
+        let choices = h.app.levelup_choices.clone();
+        let pick = crate::game::bot::best_upgrade(h.app.world.as_ref().unwrap(), &choices);
+        assert_eq!(
+            pick, 1,
+            "the valuation takes Armor out of Damage/Armor/Magnet"
+        );
+        h.frame(&[KeyCode::Char('a')]);
+        assert!(h.app.scores.auto_pick);
+        // The reveal holds the screen for a beat, then the card lands.
+        let mut picked = false;
+        for _ in 0..40 {
+            h.frame(&[]);
+            if matches!(h.app.screen, Screen::Playing) {
+                picked = true;
+                break;
+            }
+        }
+        assert!(picked, "the reveal must end and the card land");
+        let loadout = &h.app.world.as_ref().unwrap().player.loadout;
+        assert_eq!(
+            loadout.stacks(PassiveKind::Armor),
+            1,
+            "the valuation's card was applied"
+        );
+        assert_eq!(h.app.world.as_ref().unwrap().pending_levelups, 0);
+    }
+
+    /// A later level-up with auto-pick on never opens the screen.
+    #[test]
+    fn later_level_ups_never_open_the_screen_when_auto_pick_is_on() {
+        let mut h = Harness::new(80, 30);
+        h.enter_playing();
+        h.app.scores.auto_pick = true;
+        {
+            let w = h.app.world.as_mut().unwrap();
+            w.clear_enemies();
+            w.clear_gems();
+            w.pending_levelups = 1;
+        }
+        let text = h.frame(&[]);
+        assert!(
+            matches!(h.app.screen, Screen::Playing),
+            "auto-pick must not open the screen"
+        );
+        assert!(text.contains("AUTO"), "the player is told what landed");
+        assert_eq!(h.app.world.as_ref().unwrap().pending_levelups, 0);
+    }
+
+    /// Several pending level-ups queue one toast per spacing, and the game
+    /// keeps running the whole time.
+    #[test]
+    fn several_pending_level_ups_queue_one_toast_at_a_time() {
+        let mut h = Harness::new(80, 30);
+        h.enter_playing();
+        h.app.scores.auto_pick = true;
+        {
+            let w = h.app.world.as_mut().unwrap();
+            w.clear_enemies();
+            w.clear_gems();
+            w.pending_levelups = 3;
+        }
+        // The first card lands immediately (the same tick a manual screen would
+        // have opened); the two behind it wait their spacing.
+        let _ = h.frame(&[]);
+        assert!(matches!(h.app.screen, Screen::Playing));
+        assert_eq!(
+            h.app.world.as_ref().unwrap().pending_levelups,
+            2,
+            "only one card lands per spacing"
+        );
+        for _ in 0..10 {
+            let _ = h.frame(&[]);
+            assert!(matches!(h.app.screen, Screen::Playing));
+        }
+        assert_eq!(
+            h.app.world.as_ref().unwrap().pending_levelups,
+            2,
+            "the second card waits its turn"
+        );
+        // After the spacing the queue drains.
+        for _ in 0..40 {
+            let _ = h.frame(&[]);
+        }
+        assert_eq!(h.app.world.as_ref().unwrap().pending_levelups, 0);
+    }
+
+    /// The toast carries the card's icon and its label at every reference size.
+    #[test]
+    fn auto_pick_toast_carries_the_icon_and_label_at_every_size() {
+        for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let mut hh = Harness::new(w, h);
+            hh.enter_playing();
+            hh.app.scores.auto_pick = true;
+            {
+                let world = hh.app.world.as_mut().unwrap();
+                world.clear_enemies();
+                world.clear_gems();
+                world.pending_levelups = 1;
+            }
+            let text = hh.frame(&[]);
+            assert!(matches!(hh.app.screen, Screen::Playing), "{w}x{h} paused");
+            assert!(text.contains("AUTO"), "{w}x{h} toast tag missing:\n{text}");
+            let slot = hh
+                .app
+                .hud
+                .callouts
+                .iter()
+                .find(|c| c.kind == Some(hud::CalloutKind::AutoPick))
+                .expect("an auto-pick toast");
+            assert!(slot.icon.is_some(), "{w}x{h} toast lost its icon");
+            assert!(
+                slot.message.contains("Lv") || slot.message.contains("Bandage") || slot.message.contains("Purse"),
+                "{w}x{h} toast label {:?} lost its rank",
+                slot.message
+            );
+            // The pill's text is really drawn (not just held in the callout):
+            // the label's first word lands in the frame.
+            let head = slot.message.split_whitespace().next().unwrap_or("");
+            assert!(
+                text.contains(head),
+                "{w}x{h} toast label {head:?} not rendered:\n{text}"
+            );
+        }
+    }
+
+    /// The auto pick only ever ranks legal cards: the dealt set hides a new
+    /// passive at a full rack and pushes the evolution partner first.
+    #[test]
+    fn auto_pick_respects_slot_caps_and_evolution_partners() {
+        // Caps: a full passive rack offers no new passive.
+        let mut h = Harness::new(80, 30);
+        h.enter_playing();
+        {
+            let w = h.app.world.as_mut().unwrap();
+            for p in [
+                PassiveKind::Armor,
+                PassiveKind::Magnet,
+                PassiveKind::Damage,
+                PassiveKind::Regen,
+                PassiveKind::MoveSpeed,
+            ] {
+                w.player.loadout.apply(&Upgrade::Passive(p));
+            }
+            assert_eq!(
+                w.player.loadout.passives.len(),
+                crate::game::loadout::MAX_PASSIVES
+            );
+        }
+        let (choices, _pick) = h.app.auto_pick_one().expect("a card was dealt");
+        for c in &choices {
+            if let Upgrade::Passive(p) = c {
+                assert!(
+                    h.app.world.as_ref().unwrap().player.loadout.stacks(*p) > 0,
+                    "a full rack must not deal a new passive ({p:?})"
+                );
+            }
+        }
+
+        // Partners: an owned L4 weapon with its partner unowned pushes the
+        // partner into the dealt set.
+        let mut h = Harness::new(80, 30);
+        h.enter_playing();
+        let partner = {
+            let w = h.app.world.as_mut().unwrap();
+            // Two weapons so the first-level-up "second weapon" rule does not
+            // pre-empt the partner promotion.
+            w.player
+                .loadout
+                .apply(&Upgrade::NewWeapon(crate::game::weapon::WeaponKind::CheeseSpray));
+            w.player.loadout.weapons[0].level = 4;
+            w.player.loadout.weapons[0].kind.evolution().unwrap().passive
+        };
+        let (choices, _pick) = h.app.auto_pick_one().expect("a card was dealt");
+        assert!(
+            choices.iter().any(|c| matches!(c, Upgrade::Passive(p) if *p == partner)),
+            "the evolution partner must be dealt: {choices:?}"
+        );
+    }
+
+    /// The options row flips auto-pick, spells out the chest exception and
+    /// persists beside the other preferences.
+    #[test]
+    fn options_row_toggles_auto_pick_and_shows_its_note() {
+        let _guard = VOLUME_ENV_LOCK.lock().unwrap();
+        let mut h = Harness::new(80, 26);
+        title_to_options(&mut h);
+        for _ in 0..options::AUTO_PICK_ROW {
+            h.frame(&[KeyCode::Down]);
+        }
+        assert_eq!(h.app.options_row, options::AUTO_PICK_ROW);
+        let text = h.frame(&[]);
+        assert!(text.contains("AUTO-PICK"), "row label missing:\n{text}");
+        assert!(text.contains("OFF"), "default must be off");
+        assert!(
+            text.contains("chests still open their card"),
+            "the note must spell out the chest exception:\n{text}"
+        );
+        h.frame(&[KeyCode::Right]);
+        assert!(h.app.scores.auto_pick, "Right flips it on");
+        assert!(h.frame(&[]).contains("ON"));
+        h.frame(&[KeyCode::Right]);
+        assert!(!h.app.scores.auto_pick, "Right flips it back off");
+        // It round-trips through the saved table next to the scores.
+        let mut on = h.app.scores.clone();
+        on.auto_pick = true;
+        let back = ScoreTable::parse(&on.to_json());
+        assert!(back.auto_pick);
+    }
+
+    /// Turning auto-pick off mid-run hands the cards back.
+    #[test]
+    fn turning_auto_pick_off_mid_run_restores_the_manual_screen() {
+        let mut h = Harness::new(80, 30);
+        h.enter_playing();
+        h.app.scores.auto_pick = true;
+        let text = h.frame(&[KeyCode::Char('u')]);
+        assert!(!h.app.scores.auto_pick, "U in play flips it off");
+        assert!(
+            text.contains("AUTO-PICK OFF"),
+            "the flip must be announced:\n{text}"
+        );
+        {
+            let w = h.app.world.as_mut().unwrap();
+            w.clear_enemies();
+            w.clear_gems();
+            w.pending_levelups = 1;
+        }
+        h.frame(&[]);
+        assert!(
+            matches!(h.app.screen, Screen::LevelUp),
+            "the manual cards must be back"
+        );
+    }
+
+    /// Chests are a reward moment: the setting never opens them without the
+    /// card.
+    #[test]
+    fn chests_still_open_their_card_when_auto_pick_is_on() {
+        let mut h = Harness::new(80, 30);
+        h.enter_playing();
+        h.app.scores.auto_pick = true;
+        {
+            let w = h.app.world.as_mut().unwrap();
+            w.clear_enemies();
+            w.clear_gems();
+            let pos = w.player.pos;
+            w.spawn_chest(pos);
+        }
+        h.frame(&[]);
+        assert!(
+            matches!(h.app.screen, Screen::Chest),
+            "auto-pick must not swallow the chest"
+        );
+    }
+
+    /// A manual pick and an auto pick from the same state draw the same cards
+    /// and apply the same card: the rng sees exactly what a manual run would.
+    #[test]
+    fn a_manual_pick_and_an_auto_pick_from_the_same_state_are_identical() {
+        let mut manual = Harness::new(80, 30);
+        let mut auto = Harness::new(80, 30);
+        manual.enter_playing();
+        auto.enter_playing();
+        for _ in 0..90 {
+            manual.frame(&[KeyCode::Right]);
+            auto.frame(&[KeyCode::Right]);
+        }
+        // The manual screen draws its 1-of-3 from the run rng.
+        manual.app.open_levelup();
+        let manual_choices = manual.app.levelup_choices.clone();
+        // The auto path draws its 1-of-3 from the same rng position.
+        let (auto_choices, auto_pick) = auto.app.auto_pick_one().expect("a card was dealt");
+        assert_eq!(
+            format!("{manual_choices:?}"),
+            format!("{auto_choices:?}"),
+            "the rng draws must match a manual screen"
+        );
+        // The auto pick is the manual valuation of the same set.
+        let manual_pick = crate::game::bot::best_upgrade(
+            manual.app.world.as_ref().unwrap(),
+            &manual_choices,
+        );
+        assert_eq!(manual_pick, auto_pick, "the choice must match");
+        // Applying the same card leaves the same loadout.
+        manual.app.apply_levelup(manual_pick);
+        let manual_loadout = format!("{:?}", manual.app.world.as_ref().unwrap().player.loadout);
+        let auto_loadout = format!("{:?}", auto.app.world.as_ref().unwrap().player.loadout);
+        assert_eq!(manual_loadout, auto_loadout, "the applied card must match");
     }
 
     #[test]

@@ -40,7 +40,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKe
 use crate::math::Vec2;
 
 /// How many actions the table holds (index into every binding array).
-pub const ACTION_COUNT: usize = 21;
+pub const ACTION_COUNT: usize = 23;
 
 /// One thing the player can bind a key, a mouse button or a pad button to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -66,6 +66,11 @@ pub enum Action {
     Options,
     Confirm,
     Back,
+    /// Flip auto-pick level-ups (in play and on the level-up screen).
+    /// Appended: saved binding arrays are indexed by action.
+    AutoPick,
+    /// The story crawl on the title, the Library on the pause screen.
+    Library,
 }
 
 /// Every action in table order; the index is the array index everywhere.
@@ -91,6 +96,8 @@ pub const ACTIONS: [Action; ACTION_COUNT] = [
     Action::Options,
     Action::Confirm,
     Action::Back,
+    Action::AutoPick,
+    Action::Library,
 ];
 
 impl Action {
@@ -122,6 +129,8 @@ impl Action {
             Action::Options => "OPTIONS",
             Action::Confirm => "CONFIRM",
             Action::Back => "BACK",
+            Action::AutoPick => "AUTO-PICK",
+            Action::Library => "STORY / LIBRARY",
         }
     }
 
@@ -777,6 +786,8 @@ impl Bindings {
         b.kbm[Action::Options.index()] = Binding::Key(KeyBind::Char('o'));
         b.kbm[Action::Confirm.index()] = Binding::Key(KeyBind::Enter);
         b.kbm[Action::Back.index()] = Binding::Key(KeyBind::Esc);
+        b.kbm[Action::AutoPick.index()] = Binding::Key(KeyBind::Char('u'));
+        b.kbm[Action::Library.index()] = Binding::Key(KeyBind::Char('l'));
 
         // Pad defaults: d-pad/stick move, RB dashes, X fires the actives,
         // Start pauses, View opens the map, Y flips the cursor, LB mutes,

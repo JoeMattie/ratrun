@@ -345,6 +345,11 @@ pub struct ScoreTable {
     /// unreadable fields load their defaults, so an old file keeps working.
     #[serde(default)]
     pub controls: ControlsFile,
+    /// Auto-pick level-ups: take the 1-of-3 card without opening the screen.
+    /// Missing in old files (and for a fresh install) ⇒ `false`: the cards are
+    /// the default way to level up.
+    #[serde(default)]
+    pub auto_pick: bool,
 }
 
 impl Default for ScoreTable {
@@ -362,6 +367,7 @@ impl Default for ScoreTable {
             zoom: default_zoom(),
             library: Library::default(),
             controls: ControlsFile::default(),
+            auto_pick: false,
         }
     }
 }
@@ -845,6 +851,35 @@ mod tests {
         let back = ScoreTable::parse(&t.to_json());
         assert_eq!((back.music_volume, back.effects_volume), (35, 80));
         assert_eq!(back.best(), 500);
+    }
+
+    #[test]
+    fn auto_pick_persists_and_old_files_load_it_off() {
+        // Old files (and a fresh install) have no auto-pick field: the cards
+        // stay the default way to level up.
+        let missing = ScoreTable::parse(r#"{"entries":[]}"#);
+        assert!(!missing.auto_pick, "old files default to manual cards");
+        assert!(!ScoreTable::default().auto_pick);
+
+        // Unreadable values fall back to off without dropping the scores.
+        for bad in [
+            r#"{"entries":[{"score":500,"time":10.0,"level":2,"map":"Sewer","won":false}],"auto_pick":"yes"}"#,
+            r#"{"entries":[],"auto_pick":null}"#,
+            r#"{"entries":[],"auto_pick":7}"#,
+        ] {
+            let parsed = ScoreTable::parse(bad);
+            assert!(!parsed.auto_pick, "unreadable auto_pick loads as off");
+        }
+
+        // Both states round-trip next to the scores.
+        for on in [false, true] {
+            let mut t = ScoreTable::default();
+            t.insert(e(500));
+            t.auto_pick = on;
+            let back = ScoreTable::parse(&t.to_json());
+            assert_eq!(back.auto_pick, on);
+            assert_eq!(back.best(), 500);
+        }
     }
 
     #[test]

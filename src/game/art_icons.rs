@@ -1791,6 +1791,7 @@ mod tests {
                     &upgrades,
                     &world.player.loadout,
                     0,
+                    false,
                     &mut hits,
                 );
             })
