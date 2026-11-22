@@ -401,10 +401,16 @@ pub(super) const TAIL_REACH: f32 = 1.7;
 /// small pool. Above it the source is a room-scale light (the rat's aura, a
 /// boss presence, a nuke, an arena fixture) and keeps its own size.
 const SMALL_LIGHT_MAX: f32 = 52.0;
-/// A contribution this small in `Q8.8` multiplier units cannot move a mid-tone
-/// pixel by a whole level, so it is exactly zero: it would only repaint cells
-/// as the light breathes.
-pub(super) const MIN_GAIN: f32 = 2.0;
+/// A contribution smaller than this, in `Q8.8` multiplier units, is exactly
+/// zero, and a small light's tail is painted in flat steps of this size. It is
+/// the one knob between a long soft tail and terminal output: every band edge
+/// of a *moving* halo repaints cells. Measured with `--prof-bench --mode app
+/// --still` (Sewer, 5:00): 2.0 cost +26 % / +32 % bytes a frame at 120x40 /
+/// 200x60 against the build before the tail existed, 4.0 +20 % / +24 %, 6.0
+/// +14 % / +17 %, 7.0 +13 % / +15 %. At 7.0 a dim halo (gain under ~40) keeps
+/// its old size and only the brighter small lights (lamps, chests, emissive
+/// props) throw a visible skirt.
+pub(super) const MIN_GAIN: f32 = 7.0;
 /// The base level of every floor and zone, as a share of the theme's tint.
 /// Batch 8 lowered it by 40 %: the room is a dark floor with pools of light on
 /// it, so the pools, the auras and the enemy glints read as light.

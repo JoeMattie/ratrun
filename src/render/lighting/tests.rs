@@ -75,7 +75,9 @@ fn shapes_blends_layers_and_ambient_zones() {
         kind: LightZoneKind::Blackout,
     });
     let idle = frame(&w, &[], LightingMode::Full);
-    assert!(lum(&idle, 24, 42) >= lum(&idle, 90, 42) + 12);
+    // The ambient is 40 % darker than it was (`AMBIENT_SCALE`), so the gap
+    // between an open floor and a blackout scaled with it (12 -> 7).
+    assert!(lum(&idle, 24, 42) >= lum(&idle, 90, 42) + 7);
     let p = Vec2::new(48.0, 42.0);
     let mut light = Light::radial(p, 63.0, (255, 199, 105), 0.95);
     let radial = frame(&w, &[light], LightingMode::Full);
@@ -709,7 +711,8 @@ fn a_room_seen_from_a_passage_is_no_brighter_than_the_passage() {
     });
     let from_passage = frame(&w, &[], LightingMode::Full);
     assert!(
-        lum(&from_passage, 8, 8) + 8 < lum(&open, 8, 8),
+        // 8 before `AMBIENT_SCALE` 0.60 took two fifths off both levels.
+        lum(&from_passage, 8, 8) + 4 < lum(&open, 8, 8),
         "ambient: {} vs {}",
         lum(&from_passage, 8, 8),
         lum(&open, 8, 8)
@@ -803,9 +806,9 @@ fn every_floor_and_zone_is_darker_by_two_fifths_and_never_black() {
         let profile = theme_ambient(theme);
         for zone in zones {
             let gain = zone_gain(zone);
-            for channel in 0..3 {
-                let before = f32::from(profile.mul[channel]) * gain;
-                let now = ambient_level(profile.mul[channel], gain);
+            for (channel, &mul) in profile.mul.iter().enumerate() {
+                let before = f32::from(mul) * gain;
+                let now = ambient_level(mul, gain);
                 assert!(
                     now >= AMBIENT_FLOOR,
                     "{theme:?} {zone:?} ch{channel} is black"
