@@ -424,7 +424,10 @@ fn every_miniboss_footprint_fits_its_plate() {
                 ] {
                     assert!(
                         on_plate(&scene, corner),
-                        "{kind:?}: footprint corner {corner:?} left the plate"
+                        "{kind:?}: footprint corner {corner:?} left the plate (bounds {lo:?}..{hi:?}, zoom {}, cam {:?}, view {:?})",
+                        scene.world.zoom,
+                        scene.world.cam,
+                        scene.view
                     );
                 }
             }
@@ -840,7 +843,9 @@ fn the_pocket_finds_are_collected() {
         one_loop(&mut scene, |s| {
             let w = s.world();
             let mut q = w.ecs.query::<&Pickup>();
-            present &= q.iter(&w.ecs).next().is_some();
+            // The staged find itself: a body the Nuke kills may drop a find of
+            // its own, and that one is not what the card is about.
+            present &= q.iter(&w.ecs).any(|p| p.kind == kind);
         });
         assert!(!present, "{kind:?} was never collected");
     }

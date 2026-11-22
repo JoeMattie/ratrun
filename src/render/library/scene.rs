@@ -597,7 +597,7 @@ impl LibraryScene {
         if w == 0 || h == 0 {
             return;
         }
-        let k = self.script.shrink.max(1);
+        let mut k = self.script.shrink.max(1);
         let mut zoom = self.script.zoom;
         if self.script.fit {
             // A named fight: hold the body and its live footprint, centred,
@@ -610,10 +610,17 @@ impl LibraryScene {
                     self.fit_span.x.max(span.x),
                     self.fit_span.y.max(span.y),
                 );
-                let (vw, vh) = ((w * k) as f32, (h * k) as f32);
-                zoom = (self.fit_span.x / (vw * FIT_MARGIN))
-                    .max(self.fit_span.y / (vh * FIT_MARGIN))
+                // World pixels per plate pixel that hold the footprint.
+                let total = (self.fit_span.x / (w as f32 * FIT_MARGIN))
+                    .max(self.fit_span.y / (h as f32 * FIT_MARGIN))
                     .clamp(FIT_ZOOM_MIN, FIT_ZOOM_MAX);
+                // `World::draw` honours a zoom only inside the ladder
+                // (`zoom::clamp`), so a footprint wider than the ladder's top
+                // shows is drawn oversized and box-filtered down, the way a
+                // boss plate is (`Script::shrink`).
+                k = ((total / crate::render::zoom::MAX).ceil() as usize).max(1);
+                zoom = total / k as f32;
+                self.script.shrink = k;
                 // Centred on the midpoint of body + footprint (`fit_bounds`).
                 self.focus = (lo + hi) * 0.5;
             }
@@ -1335,7 +1342,19 @@ fn stage_miniboss(theme: Theme, kind: MinibossKind) -> Staged {
 }
 
 fn stage_boss(theme: Theme, kind: BossKind) -> Staged {
-    let mut world = sandbox(patch(theme, 44, 34));
+    let mut level = patch(theme, 44, 34);
+    if theme == Theme::Trailer {
+        // The scheduled arrival spawns on the map's boss arena, and a map
+        // without one means "the whole map": on the bed's own 200-cell map that
+        // is 80 cells from the card. Give the bed an arena around the card's
+        // start, the size of the other floors' boss patch.
+        let (cx, _) = crate::game::collision::cell_of(level.start);
+        let deck = level.trailer.deck;
+        let arena = TileRect::new(cx - 22, deck.y, 44, deck.h);
+        level.boss.floor = arena;
+        level.rooms.push(crate::game::level::Room::new(arena, crate::game::level::RoomKind::Boss));
+    }
+    let mut world = sandbox(level);
     hide_rat(&mut world);
     // The dummy stands just outside the boss's body contact, on the side its
     // attacks are aimed at, so the plate frames the animal, the space it is
@@ -1993,18 +2012,45 @@ const CORK_LIT: Rgb = (232, 196, 148);
 const CORK_RIND: Rgb = (96, 62, 36);
 const RIND: Rgb = (240, 196, 92);
 const CHALK: Rgb = (255, 248, 232);
+/// The cork's own shadow (a value nothing else in the game draws).
+const CORK_SHADOW: Rgb = (25, 21, 30);
+
+/// The plate pixels the world's pass left as bare floor, taken **before** the
+/// dummy paints anything: the cork may only land on these.
+///
+/// A mask and not a colour test on the live plate: the dummy lays its rim, band
+/// and cross over its own cork, and "this pixel is already cork-coloured" cannot
+/// say whose cork it is — The Mudlark's shell is exactly [`CORK`], and a dark
+/// outline can match the shadow.
+struct BareFloor {
+    w: usize,
+    h: usize,
+    bare: Vec<bool>,
+}
+
+impl BareFloor {
+    fn of(pb: &PixelBuffer, floor: &PixelBuffer) -> BareFloor {
+        let (w, h) = (pb.w.min(floor.w), pb.h.min(floor.h));
+        let mut bare = Vec::with_capacity(w * h);
+        for y in 0..h {
+            for x in 0..w {
+                bare.push(pb.pixel_at(x, y) == floor.pixel_at(x, y));
+            }
+        }
+        BareFloor { w, h, bare }
+    }
+
+    fn at(&self, x: i32, y: i32) -> bool {
+        (0..self.w as i32).contains(&x)
+            && (0..self.h as i32).contains(&y)
+            && self.bare[y as usize * self.w + x as usize]
+    }
+}
 
 /// One horizontal chord of a circle of radius `r`, `dy` rows from its centre,
-/// painted only where `pb` still holds the bare floor `floor` — the card's
-/// dummy never covers anything the world's pass drew.
-fn chord(
-    pb: &mut PixelBuffer,
-    floor: &PixelBuffer,
-    s: (i32, i32),
-    r: i32,
-    dy: i32,
-    c: Rgb,
-) {
+/// painted only where the world's pass left bare floor — the card's dummy
+/// never covers anything the world drew.
+fn chord(pb: &mut PixelBuffer, floor: &BareFloor, s: (i32, i32), r: i32, dy: i32, c: Rgb) {
     let h2 = r * r - dy * dy;
     if h2 <= 0 {
         return;
@@ -2015,20 +2061,11 @@ fn chord(
     }
 }
 
-/// Paint one pixel of the card's dummy, and only if that pixel is bare floor
-/// (or already this dummy's own ink, so its bands and cross can be laid over
-/// the cork it just put down): the check is what puts the cork *under* the
-/// bodies (see [`draw_practice_dummy`]).
-fn plot_on_floor(pb: &mut PixelBuffer, floor: &PixelBuffer, x: i32, y: i32, c: Rgb) {
-    if !(0..pb.w as i32).contains(&x) || !(0..pb.h as i32).contains(&y) {
-        return;
-    }
-    let (ux, uy) = (x as usize, y as usize);
-    if ux >= floor.w || uy >= floor.h {
-        return;
-    }
-    let current = pb.pixel_at(ux, uy);
-    if current == floor.pixel_at(ux, uy) || DUMMY_INK.contains(&current) {
+/// Paint one pixel of the card's dummy, and only if the world's pass left that
+/// pixel as bare floor: the check is what puts the cork *under* the bodies (see
+/// [`draw_practice_dummy`]).
+fn plot_on_floor(pb: &mut PixelBuffer, floor: &BareFloor, x: i32, y: i32, c: Rgb) {
+    if floor.at(x, y) {
         pb.plot(x, y, c);
     }
 }
@@ -2048,8 +2085,9 @@ fn plot_on_floor(pb: &mut PixelBuffer, floor: &PixelBuffer, x: i32, y: i32, c: R
 /// all end their loop standing on the dummy).
 fn draw_practice_dummy(pb: &mut PixelBuffer, floor: &PixelBuffer, s: (i32, i32), r: i32) {
     let r = r.max(2);
+    let floor = &BareFloor::of(pb, floor);
     // Its own shadow, so it stands on the floor rather than in it.
-    chord(pb, floor, (s.0, s.1 + r), r, 0, (24, 20, 28));
+    chord(pb, floor, (s.0, s.1 + r), r, 0, CORK_SHADOW);
     for dy in -r..=r {
         let h2 = r * r - dy * dy;
         if h2 <= 0 {
@@ -2083,10 +2121,9 @@ fn draw_practice_dummy(pb: &mut PixelBuffer, floor: &PixelBuffer, s: (i32, i32),
     plot_on_floor(pb, floor, s.0 + 1, s.1 - 1, CHALK);
 }
 
-/// Every colour the card's dummy paints (its shadow included): no other drawing
-/// code in the game produces these exact values, which is what lets the tests
-/// tell a cork pixel from a body's.
-const DUMMY_INK: [Rgb; 6] = [CORK, CORK_LIT, CORK_RIND, RIND, CHALK, (24, 20, 28)];
+/// Every colour the card's dummy paints (its shadow included).
+#[cfg(test)]
+const DUMMY_INK: [Rgb; 6] = [CORK, CORK_LIT, CORK_RIND, RIND, CHALK, CORK_SHADOW];
 
 /// The world rectangle one signature footprint covers, straight from the
 /// shape's own numbers. A fitted plate asks the shape rather than guessing from
