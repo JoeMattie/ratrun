@@ -4331,9 +4331,9 @@ impl App {
     fn draw_controls(&mut self, frame: &mut Frame, area: Rect) {
         let note = if self.controls_note.is_empty() {
             if self.input.lone_ctrl {
-                "Ctrl and Shift can be bound on this terminal · Cmd/Fn cannot"
+                "Ctrl and Shift can be bound here · Cmd/Fn cannot"
             } else {
-                "this terminal does not report lone modifiers — Ctrl/Shift binds will not work"
+                "this terminal cannot bind a lone Ctrl or Shift"
             }
         } else {
             self.controls_note.as_str()
@@ -6823,6 +6823,103 @@ mod tests {
                     let w = hh.app.world.as_mut().unwrap();
                     w.gold = 131;
                     w.player.hp = -1.0;
+                }
+                hh.frame(&[]);
+                hh.frame(&[]);
+            }
+            // Integration captures: the Controls screen, the options panel, the
+            // console open over play with `help`, the full map after a walk,
+            // and the King Cobra's three set pieces on the Lab arena.
+            "controls" => {
+                hh.app.open_controls();
+                hh.frame(&[]);
+                hh.frame(&[]);
+            }
+            "options" => {
+                title_to_options(&mut hh);
+                hh.frame(&[]);
+            }
+            "console" => {
+                hh.enter_playing();
+                for _ in 0..40 {
+                    hh.frame(&[KeyCode::Right]);
+                }
+                hh.frame(&[KeyCode::Char('`')]);
+                for c in "help".chars() {
+                    hh.frame(&[KeyCode::Char(c)]);
+                }
+                hh.frame(&[KeyCode::Enter]);
+                for _ in 0..40 {
+                    hh.frame(&[]);
+                }
+            }
+            "map" => {
+                hh.enter_playing();
+                for tick in 0..600u32 {
+                    let mv = match (tick / 90) % 4 {
+                        0 => KeyCode::Right,
+                        1 => KeyCode::Down,
+                        2 => KeyCode::Left,
+                        _ => KeyCode::Up,
+                    };
+                    let text = hh.frame(&[mv]);
+                    if text.contains("LEVEL UP") {
+                        hh.frame(&[KeyCode::Enter]);
+                    }
+                }
+                hh.frame(&[KeyCode::Tab]);
+                hh.frame(&[]);
+            }
+            t if t.starts_with("cobra") => {
+                use crate::game::art_boss_cobra::{self as cobra_art, CobraState};
+                use crate::game::ecs::systems::boss::{Boss, BossKind, BossState};
+                hh.enter_playing();
+                hh.app.start_floor(Theme::Lab).expect("the Lab starts");
+                for _ in 0..6 {
+                    if matches!(hh.app.screen, Screen::Playing) {
+                        break;
+                    }
+                    hh.frame(&[KeyCode::Enter]);
+                }
+                let (state, duration, progress) = match t {
+                    "cobra-constrict" => (CobraState::Constrict, cobra_art::COIL_TIGHTEN[0], 0.45),
+                    "cobra-spiral" => (CobraState::SpiralChase, cobra_art::SPIRAL_CHASE, 0.4),
+                    _ => (CobraState::HoodTell, cobra_art::HOOD_TELL[0], 0.8),
+                };
+                let centre = {
+                    let w = hh.app.world.as_mut().unwrap();
+                    let centre = w
+                        .level
+                        .boss_room()
+                        .map(|r| r.rect.center_world())
+                        .expect("the Lab has an arena");
+                    w.clear_enemies();
+                    w.player.pos = centre + Vec2::new(18.0, 22.0);
+                    w.force_boss(BossKind::Cobra);
+                    centre
+                };
+                // The loop is 148 px across at its widest: the wide view shows
+                // the whole set piece.
+                hh.app.set_zoom(2.0);
+                // Let the arrival flourish finish before the pose is staged.
+                for _ in 0..90 {
+                    hh.frame(&[]);
+                }
+                {
+                    let w = hh.app.world.as_mut().unwrap();
+                    w.clear_enemies();
+                    let rat = w.player.pos;
+                    let mut q = w.ecs.query::<&mut Boss>();
+                    for mut b in q.iter_mut(&mut w.ecs) {
+                        b.pos = centre + Vec2::new(-40.0, -10.0);
+                        b.target = rat;
+                        b.pounce_origin = centre;
+                        b.facing = (rat - b.pos).normalized();
+                        b.hazards.clear();
+                        b.flags = 0;
+                        b.set_state(BossState::Cobra(state), duration);
+                        b.elapsed = duration * progress;
+                    }
                 }
                 hh.frame(&[]);
                 hh.frame(&[]);

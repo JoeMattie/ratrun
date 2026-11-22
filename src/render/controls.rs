@@ -32,8 +32,8 @@ pub fn action_row(action: Action) -> usize {
 }
 
 /// Preferred panel size; clamped to the terminal.
-pub const PANEL_W: u16 = 66;
-pub const PANEL_H: u16 = 30;
+pub const PANEL_W: u16 = 72;
+pub const PANEL_H: u16 = 33;
 const LABEL_W: u16 = 13;
 const KEY_W: u16 = 16;
 const PAD_W: u16 = 7;
@@ -71,10 +71,13 @@ pub struct ControlsLayout {
 /// Where the table sits inside `area` for `row`/`scroll`.
 pub fn layout(area: Rect, scroll: usize) -> ControlsLayout {
     let panel = centered_rect(PANEL_W.min(area.width), PANEL_H.min(area.height), area);
-    let inner = panel.inner(Margin::new(2, 0));
-    // header (title + rule), legend (2 lines), note (1), brackets (0)
+    // The same inner rectangle `menu::panel` hands the draw (inside the
+    // border), so the row count here is the row count on screen and the last
+    // table row never lands on the legend.
+    let inner = panel.inner(Margin::new(1, 1));
+    // header (title + rule), then the legend (2 lines) and the note (1).
     let header_rows: u16 = 2;
-    let legend_rows: u16 = 2;
+    let legend_rows: u16 = 3;
     let visible = inner
         .height
         .saturating_sub(header_rows + legend_rows)

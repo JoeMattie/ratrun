@@ -130,7 +130,7 @@ impl Action {
             Action::Confirm => "CONFIRM",
             Action::Back => "BACK",
             Action::AutoPick => "AUTO-PICK",
-            Action::Library => "STORY / LIBRARY",
+            Action::Library => "STORY/LIBRARY",
         }
     }
 

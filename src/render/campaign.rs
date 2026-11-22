@@ -3044,7 +3044,7 @@ fn slot_unlock_hint(slot: &LevelSlotView) -> &'static str {
     match slot.stage {
         0 => "Locked",
         1 => "Clear the Sewers first",
-        2 => "Clear a stage-two floor first",
+        2 => "Clear an S2 sector first",
         _ => "Clear the campaign first",
     }
 }
