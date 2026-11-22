@@ -139,6 +139,12 @@ impl Presenter {
         self.full = true;
     }
 
+    /// Does the terminal's frame no longer match what was last presented (it
+    /// was resized)? Such a frame must be rendered now.
+    pub fn stale_for<W: Write>(&self, terminal: &mut Terminal<CrosstermBackend<W>>) -> bool {
+        self.full || terminal.get_frame().area() != self.prev.area
+    }
+
     /// Render one frame with `render` and send what changed, inside a
     /// synchronized update (DEC mode 2026) so it is presented atomically
     /// instead of tearing; terminals without support ignore the markers.
@@ -147,8 +153,6 @@ impl Presenter {
         terminal: &mut Terminal<CrosstermBackend<W>>,
         render: impl FnOnce(&mut Frame),
     ) -> io::Result<Presented> {
-        // A resize clears the screen and both of ratatui's buffers.
-        terminal.autoresize()?;
         let area = {
             let mut frame = terminal.get_frame();
             render(&mut frame);
@@ -287,12 +291,42 @@ impl FramePacer {
     }
 }
 
+/// When to ask the terminal for its size.
+///
+/// `crossterm::terminal::size` opens `/dev/tty` and issues an ioctl — every
+/// frame, that was 2.6–3.5 % of the loop's busy time. The terminal reports a
+/// resize as an event, so the size is asked for only then, with a slow poll
+/// behind it for a terminal (or multiplexer) that loses the report.
+#[derive(Debug, Default)]
+pub struct SizePoll {
+    last: Option<Instant>,
+}
+
+/// The fallback poll interval of [`SizePoll`].
+pub const SIZE_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+impl SizePoll {
+    /// Should the size be queried now? `resized` is "a resize event arrived
+    /// this frame".
+    pub fn due(&mut self, now: Instant, resized: bool) -> bool {
+        let due = resized
+            || self
+                .last
+                .is_none_or(|last| now.saturating_duration_since(last) >= SIZE_POLL_INTERVAL);
+        if due {
+            self.last = Some(now);
+        }
+        due
+    }
+}
+
 /// One iteration of the frame loop after `App::update`: decide whether to
 /// render, render, fold the frame for this terminal, present it.
 #[derive(Default)]
 pub struct FrameLoop {
     pub presenter: Presenter,
     pub pacer: FramePacer,
+    pub size: SizePoll,
 }
 
 impl FrameLoop {
@@ -307,7 +341,13 @@ impl FrameLoop {
             // The terminal may have been drawn over while we were away.
             self.presenter.invalidate();
         }
-        let urgent = app.repaint_urgent() || self.presenter.full;
+        if self.size.due(now, app.input.resized) {
+            // One size query; on a change ratatui resizes its buffers and
+            // clears the screen (a no-op for the fixed viewports of tests and
+            // the bench, which never touch a TTY).
+            terminal.autoresize()?;
+        }
+        let urgent = app.repaint_urgent() || self.presenter.stale_for(terminal);
         if !self.pacer.should_render(now, app.frame_demand(), urgent) {
             return Ok(None);
         }
@@ -486,6 +526,42 @@ mod tests {
         seen.clear();
         let shown = presenter.frame(&mut terminal, styled("CAT")).unwrap();
         assert_eq!(shown.cells, 3, "nothing is assumed about a failed frame");
+    }
+
+    #[test]
+    fn the_size_is_asked_for_on_a_resize_event_and_once_a_second() {
+        let t0 = Instant::now();
+        let frame = Duration::from_micros(16_667);
+        let mut poll = SizePoll::default();
+        assert!(poll.due(t0, false), "the first frame learns the size");
+        let mut asked = 0;
+        for i in 1..=600u32 {
+            if poll.due(t0 + frame * i, false) {
+                asked += 1;
+            }
+        }
+        assert!((9..=10).contains(&asked), "10 s of frames asked {asked} times");
+        // A resize event asks at once, and restarts the fallback clock.
+        let now = t0 + frame * 601;
+        assert!(poll.due(now, true));
+        assert!(!poll.due(now + frame, false));
+        assert!(poll.due(now + frame * 2, true), "every resize event asks");
+    }
+
+    #[test]
+    fn a_frame_of_a_new_size_is_stale_until_presented() {
+        let seen = Recorder::default();
+        let mut terminal = fixed(FrameOut::new(seen.clone()), 20, 4);
+        let mut presenter = Presenter::new();
+        assert!(presenter.stale_for(&mut terminal), "nothing presented yet");
+        presenter.frame(&mut terminal, styled("RAT")).unwrap();
+        assert!(!presenter.stale_for(&mut terminal));
+        let mut resized = fixed(FrameOut::new(seen.clone()), 30, 6);
+        assert!(presenter.stale_for(&mut resized), "a new size must render now");
+        presenter.frame(&mut resized, styled("RAT")).unwrap();
+        assert!(!presenter.stale_for(&mut resized));
+        presenter.invalidate();
+        assert!(presenter.stale_for(&mut resized));
     }
 
     #[test]
