@@ -805,7 +805,12 @@ impl App {
 
     fn menu_music(&mut self) {
         let theme = self.theme();
-        self.play_music(theme, 0); // calm: bass only
+        // The menus keep the classic title music; the floor songs start with
+        // the run (`AudioEngine::play_music`).
+        self.music_intensity = 0;
+        if let Some(a) = self.audio.as_mut() {
+            a.play_menu_music(theme);
+        }
     }
 
     /// Start (or restart) the level's music at `intensity` and record it.
@@ -14048,8 +14053,12 @@ mod tests {
         assert_eq!(h.app.world.as_ref().unwrap().ticks, ticks);
         assert_eq!(h.app.world_draws, drawn, "the paused picture was redrawn");
 
-        // Closing the index drops the scene.
+        // Closing the index drops the scene (Back leaves an opened card
+        // first, then the screen).
         h.frame(&[KeyCode::Esc]);
+        if h.app.screen.name_for_test() == "Library" {
+            h.frame(&[KeyCode::Esc]);
+        }
         assert_eq!(h.app.screen.name_for_test(), "Paused");
         assert_eq!(h.app.library_ui.scene_key(), None);
         assert!(!h.app.library_ui.frame_due());

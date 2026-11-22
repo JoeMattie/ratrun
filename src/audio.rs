@@ -12548,6 +12548,16 @@ impl AudioEngine {
         cache
     }
 
+    /// The title and menu track: always the classic chiptune at the calm
+    /// tier, whatever `RATRUN_MUSIC` says. The floor songs belong to a run.
+    pub fn play_menu_music(&mut self, theme: Theme) {
+        self.intensity.store(0, Ordering::Relaxed);
+        self.music.clear();
+        self.music.append(MusicSynth::new(theme, self.intensity.clone()));
+        self.apply_volumes();
+        self.music.play();
+    }
+
     pub fn play_music(&mut self, theme: Theme, intensity: u32) {
         self.intensity.store(intensity, Ordering::Relaxed);
         self.music.clear();

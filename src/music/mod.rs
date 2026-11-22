@@ -311,16 +311,16 @@ mod tests {
         assert_eq!(seen.len(), Theme::playable().len());
         assert_eq!(SONGS.len(), 6);
         // No two songs share a name, a tempo or a loop length.
-        for i in 0..SONGS.len() {
-            for j in (i + 1)..SONGS.len() {
-                assert_ne!(SONGS[i].name, SONGS[j].name);
-                assert_ne!(SONGS[i].bpm, SONGS[j].bpm, "{} and {}", SONGS[i].name, SONGS[j].name);
+        for (i, a) in SONGS.iter().enumerate() {
+            for b in &SONGS[i + 1..] {
+                assert_ne!(a.name, b.name);
+                assert_ne!(a.bpm, b.bpm, "{} and {}", a.name, b.name);
                 assert_ne!(
-                    (SONGS[i].bpm, SONGS[i].bars),
-                    (SONGS[j].bpm, SONGS[j].bars),
+                    (a.bpm, a.bars),
+                    (b.bpm, b.bars),
                     "{} and {}",
-                    SONGS[i].name,
-                    SONGS[j].name
+                    a.name,
+                    b.name
                 );
             }
         }
@@ -385,7 +385,7 @@ mod tests {
     fn every_song_uses_a_band_of_roles_and_a_live_mix() {
         for song in SONGS {
             assert!(song.note_count() > 100, "{}: only {} notes", song.name, song.note_count());
-            assert!(song.parts[Role::Bass.index()].len() > 0 || song.parts[Role::Pad.index()].len() > 0);
+            assert!(!song.parts[Role::Bass.index()].is_empty() || !song.parts[Role::Pad.index()].is_empty());
             let used = Role::ALL
                 .iter()
                 .filter(|r| !song.parts[r.index()].is_empty())

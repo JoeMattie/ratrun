@@ -41,12 +41,18 @@ pub fn render_floor_at(
         bail!("--music-render: seconds must be a positive number, got {seconds}");
     }
     let intensity = intensity.min(3);
+    let n = (seconds * sample_rate as f32).round() as usize;
+    // `RATRUN_MUSIC=classic` renders the pre-MIDI synth for a comparison (it
+    // only exists at the engine rate).
+    if super::classic_requested() && sample_rate == SR {
+        let mut synth = crate::audio::MusicSynth::new(theme, Arc::new(AtomicU32::new(intensity)));
+        return Ok((0..n).map(|_| synth.next().unwrap_or(0.0)).collect());
+    }
     let mut synth = SongSynth::with_sample_rate(
         theme,
         Arc::new(AtomicU32::new(intensity)),
         sample_rate,
     );
-    let n = (seconds * sample_rate as f32).round() as usize;
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         out.push(synth.next().unwrap_or(0.0));
