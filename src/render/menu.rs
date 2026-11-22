@@ -530,6 +530,11 @@ pub fn draw_title(
             center(f, r, r.height - 2 - i as u16, label(line, MUTED));
         }
         // The story key follows its binding (the STORY / LIBRARY action).
+        // Each action is named **once**: the wide plate's own legend carries
+        // `L story` and `Q quit` on its last line, so the rail below repeats a
+        // chip only when that line is not on screen (the title printed `Q quit`
+        // twice at 80 × 24 and 120 × 40).
+        let named = |needle: &str| lines.iter().take(n).any(|line| line.contains(needle));
         let story_chip = format!(" {} story ", controls_src.action_label(Action::Library));
         let quit_key = controls_src.action_label(Action::Quit);
         let quit_chip = if wide {
@@ -537,25 +542,36 @@ pub fn draw_title(
         } else {
             format!("· {quit_key} quit")
         };
-        controls(
-            f,
-            band(r, r.height - 1, 1),
-            hits,
-            &[
-                // The narrow row is 54 cells: it has to fit the 55-cell plate
-                // of a 57-column terminal with `Q quit` intact.
-                (
-                    if wide {
-                        "↑↓ select · ←→/wheel sector · Enter confirm or click · "
-                    } else {
-                        "↑↓ select · ←→ sector · Enter/click ·"
-                    },
-                    None,
-                ),
-                (story_chip.as_str(), Some(Target::Story)),
-                (quit_chip.as_str(), None),
-            ],
-        );
+        let mut parts: Vec<(&str, Option<Target>)> = vec![(
+            // The narrow row is 54 cells: it has to fit the 55-cell plate
+            // of a 57-column terminal with `Q quit` intact.
+            if wide {
+                "↑↓ select · ←→/wheel sector · Enter confirm or click · "
+            } else {
+                "↑↓ select · ←→ sector · Enter/click ·"
+            },
+            None,
+        )];
+        let story_needle = format!("{} story", controls_src.action_label(Action::Library));
+        if !named(&story_needle) {
+            parts.push((story_chip.as_str(), Some(Target::Story)));
+        } else if let Some(i) = lines
+            .iter()
+            .take(n)
+            .position(|line| line.contains(&story_needle))
+        {
+            // The legend line already names the story key, so the chip is not
+            // repeated — but the **pointer** keeps the way in: that line is the
+            // story target (it holds no other control).
+            hits.add(
+                band(r, r.height.saturating_sub(2 + i as u16), 1),
+                Target::Story,
+            );
+        }
+        if !named(&format!("{quit_key} quit")) {
+            parts.push((quit_chip.as_str(), None));
+        }
+        controls(f, band(r, r.height - 1, 1), hits, &parts);
     }
 }
 
@@ -645,10 +661,22 @@ pub fn draw_levelup(
         r,
         r.height.saturating_sub(1),
         Line::styled(
-            format!("↑↓ select · Enter equip · 1–3 pick · {auto_key} auto-pick"),
+            format!(
+                "↑↓ select · Enter equip · {} · {auto_key} auto-pick",
+                pick_chip(choices.len())
+            ),
             ink(MUTED),
         ),
     );
+}
+
+/// The number-key legend for a card row: the plate said `1–3 pick` even on a
+/// screen holding one card, and only the cards that are on it answer.
+fn pick_chip(cards: usize) -> String {
+    match cards {
+        0 | 1 => "1 pick".to_string(),
+        n => format!("1–{n} pick"),
+    }
 }
 
 /// Format `(desc, flavor)` for a level-up card's `text_rect` without mid-word clipping:
@@ -1818,7 +1846,10 @@ pub fn draw_levelup_with_loadout(
         r,
         r.height.saturating_sub(1),
         Line::styled(
-            format!("↑↓ select · Enter equip · 1–3 pick · {auto_key} auto-pick"),
+            format!(
+                "↑↓ select · Enter equip · {} · {auto_key} auto-pick",
+                pick_chip(choices.len())
+            ),
             ink(MUTED),
         ),
     );
@@ -2608,6 +2639,7 @@ pub fn draw_end_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controls::{Binding, KeyBind};
     use crate::game::loadout::PassiveKind;
     use crate::game::weapon::Weapon;
     use crate::scores::ScoreEntry;
@@ -2621,6 +2653,89 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect()
+    }
+
+    /// The title plate's whole frame as text plus its hit map, at a pinned size.
+    fn title_frame(w: u16, h: u16, controls: &Controls) -> (String, HitMap) {
+        let mut hits = HitMap::default();
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let scores = crate::scores::ScoreTable::default();
+        let rat: Vec<String> = Vec::new();
+        terminal
+            .draw(|f| {
+                draw_title(
+                    f,
+                    f.area(),
+                    Theme::Sewer,
+                    0,
+                    0,
+                    true,
+                    &scores,
+                    &rat,
+                    controls,
+                    &mut hits,
+                );
+            })
+            .unwrap();
+        (screen_text(&terminal), hits)
+    }
+
+    /// The title legend printed `Q quit` twice (`… Q quit` on the plate's own
+    /// legend line and again on the rail under it). Each action is named once.
+    #[test]
+    fn the_title_legend_names_each_action_once() {
+        let controls = Controls::default();
+        for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let (text, hits) = title_frame(w, h, &controls);
+            assert!(
+                hits.rect_for(Target::Story).is_some(),
+                "{w}x{h}: the story lost its click target"
+            );
+            for needle in ["Q quit", "L story"] {
+                let n = text.matches(needle).count();
+                assert_eq!(n, 1, "{w}x{h}: {needle:?} printed {n} times:\n{text}");
+            }
+        }
+    }
+
+    /// A rebind moves the title's chips with it, and the rail still names the
+    /// action exactly once.
+    #[test]
+    fn the_title_quit_chip_follows_the_binding_and_stays_single() {
+        let mut controls = Controls::default();
+        let _ = controls.bind_active_kbm(Action::Quit, Binding::Key(KeyBind::Char('k')));
+        for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let (text, _) = title_frame(w, h, &controls);
+            assert_eq!(
+                text.matches("K quit").count(),
+                1,
+                "{w}x{h}: the live quit key is not named once:\n{text}"
+            );
+            assert!(!text.contains("Q quit"), "{w}x{h}: a stale quit key:\n{text}");
+        }
+    }
+
+    /// The level-up legend names only the number keys the plate answers: `1–3`
+    /// on a full three-card screen, `1 pick` on a one-card one.
+    #[test]
+    fn the_level_up_legend_promises_only_the_cards_that_answer() {
+        assert_eq!(pick_chip(3), "1–3 pick");
+        assert_eq!(pick_chip(2), "1–2 pick");
+        assert_eq!(pick_chip(1), "1 pick");
+        assert_eq!(pick_chip(0), "1 pick");
+        let lo = Loadout::new(WeaponKind::Gnaw);
+        let upgrades = vec![Upgrade::Bandage];
+        let desc: Vec<_> = upgrades.iter().map(|u| lo.describe(u)).collect();
+        let mut hits = HitMap::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| {
+                draw_levelup(f, f.area(), 4, &desc, &upgrades, 0, false, "U", &mut hits);
+            })
+            .unwrap();
+        let text = screen_text(&terminal);
+        assert!(text.contains("1 pick"), "one card is one key:\n{text}");
+        assert!(!text.contains("1–3"));
     }
 
     #[test]

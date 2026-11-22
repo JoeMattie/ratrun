@@ -47,8 +47,10 @@ pub const EFFECTS_BAR: usize = 1;
 /// Preferred panel size; clamped to the terminal.
 pub const PANEL_W: u16 = 58;
 pub const PANEL_H: u16 = 20;
-/// Width of the label column inside a row ("MUSIC", "EFFECTS", …).
-const LABEL_W: u16 = 10;
+/// Width of the label column inside a row (`MUSIC`, `EFFECTS`, …). Eleven
+/// columns, not ten: `AUTO-PICK` is nine letters, so ten left the value strip
+/// butted against the label (`AUTO-PICK‹ OFF ›`).
+const LABEL_W: u16 = 11;
 /// Keyboard hint under the rows.
 const LEGEND: &str = "↑↓ row · ←→ adjust · wheel · Enter open · Esc back";
 
@@ -274,7 +276,9 @@ fn value_text(view: &OptionsView, row: Row) -> String {
         Row::Effects => String::new(),
         Row::Back => String::new(),
         Row::Scheme => view.scheme.name().to_string(),
-        Row::Controls => "OPEN ›".to_string(),
+        // The value strip draws its own `‹ ›`, so the value itself is bare
+        // (`CONTROLS ‹ OPEN › ›` was a doubled chevron).
+        Row::Controls => "OPEN".to_string(),
         Row::Deadzone => format!("{:.2}", view.deadzone),
         Row::AutoPick => {
             if view.auto_pick {
@@ -556,6 +560,48 @@ mod tests {
             out.push('\n');
         }
         (out, hits)
+    }
+
+    /// `CONTROLS ‹ OPEN › ›` (a doubled chevron) and `AUTO-PICK‹ OFF ›` (no gap
+    /// after a nine-letter label) were the 57 × 20 review finds. Every row now
+    /// keeps one chevron pair and a gap between label and value.
+    #[test]
+    fn every_row_leaves_a_gap_between_its_label_and_value() {
+        assert_eq!(value_text(&view(MUSIC_ROW), Row::Controls), "OPEN");
+        for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            let mut hits = HitMap::default();
+            term.draw(|f| draw(f, f.area(), &view(BACK_ROW), &mut hits))
+                .unwrap();
+            let buf = term.backend().buffer();
+            let mut seen_rows = 0;
+            for (i, row_def) in ROWS.iter().enumerate() {
+                let Some(row) = hits.rect_for(Target::OptionsRow(i)) else {
+                    continue;
+                };
+                seen_rows += 1;
+                let text: String = (row.x..row.right())
+                    .map(|x| buf[(x, row.y)].symbol())
+                    .collect();
+                let text = text.trim_end();
+                let label = row_def.label();
+                assert!(
+                    text.contains(label),
+                    "{w}x{h}: row {i} lost its label: {text:?}"
+                );
+                let after = text.split(label).nth(1).unwrap_or("");
+                assert!(
+                    after.is_empty() || after.starts_with(' '),
+                    "{w}x{h}: {label:?} runs into its value: {text:?}"
+                );
+                if text.contains('›') {
+                    assert_eq!(text.matches('‹').count(), 1, "{w}x{h}: {text:?}");
+                    assert_eq!(text.matches('›').count(), 1, "{w}x{h}: {text:?}");
+                    assert!(!text.contains("› ›"), "{w}x{h}: doubled chevron: {text:?}");
+                }
+            }
+            assert!(seen_rows >= 8, "{w}x{h}: only {seen_rows} rows drawn");
+        }
     }
 
     #[test]

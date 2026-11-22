@@ -18,6 +18,10 @@
 //! far mouth is only "known" once it has been seen or crossed, and the boss
 //! arena bearing starts at [`ARENA_BEARING_AFTER_SECS`] on the fog boundary
 //! without revealing the route.
+//!
+//! **Ink lives in the art module.** Nothing here names a colour, so the corner
+//! radar and the expanded Tab map cannot drift apart: both paint the unseen
+//! veil from `minimap::unknown_veil_rgb_for` through one `DerivedPalette`.
 
 use ratatui::layout::Rect;
 

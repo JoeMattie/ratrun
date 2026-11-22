@@ -235,9 +235,11 @@ pub fn draw(f: &mut Frame, area: Rect, view: &ControlsView, hits: &mut HitMap) {
     let legend_y = (inner.y + inner.height).saturating_sub(lay.legend_rows);
     if inner.height > lay.header_rows + 1 {
         let narrow = inner.width < 56;
-        // Reset and Back are actions like any other: name their live keys.
+        // Reset, Back and Confirm are actions like any other: name their live
+        // keys (the app rebinds on `Action::Confirm`, not on the raw Enter).
         let reset = view.controls.action_label(Action::Reset);
         let back = view.controls.action_label(Action::Back);
+        let confirm = view.controls.action_label(Action::Confirm);
         let lines: [String; 2] = if view.capturing.is_some() {
             [
                 "PRESS the new key, mouse or pad button · Esc cancels".to_string(),
@@ -245,13 +247,16 @@ pub fn draw(f: &mut Frame, area: Rect, view: &ControlsView, hits: &mut HitMap) {
             ]
         } else if narrow {
             [
-                format!("↑↓ row · ←→ change · Enter rebind · {reset} reset"),
-                format!("click a row to select · {back} back · wheel scrolls"),
+                format!("↑↓ row · ←→ change · {confirm} rebind · X unbind"),
+                format!("{reset} reset · {back} back · click a row to rebind"),
             ]
         } else {
+            // `X` and Delete/Backspace unbind a row (a raw key in the app, so it
+            // is named literally); `A` used to be advertised here and did
+            // nothing. Every Action key on the screen is its live label.
             [
-                format!("↑↓ row · ←→ scheme/value · Enter or A rebind · {reset} reset · {back} back"),
-                "click a row to select and rebind · Cmd/Fn and Ctrl+C cannot bind".to_string(),
+                format!("↑↓ row · ←→ scheme/value · {confirm} rebind · X unbind"),
+                format!("{reset} reset · {back} back · click a row · Cmd/Fn and Ctrl+C cannot bind"),
             ]
         };
         for (i, line) in lines.iter().enumerate() {
@@ -291,8 +296,61 @@ pub fn accent_from(rgb: crate::render::palette::Rgb) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controls::{Binding, KeyBind};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    /// The plate drawn against a given `Controls` (for the live-label checks).
+    fn frame_with(w: u16, h: u16, c: &Controls) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let mut hits = HitMap::default();
+        let view = ControlsView {
+            scheme: c.scheme(),
+            controls: c,
+            row: SCHEME_ROW,
+            scroll: 0,
+            capturing: None,
+            note: "a note",
+            accent: Color::Rgb(144, 184, 173),
+            lone_ctrl: true,
+        };
+        term.draw(|f| draw(f, f.area(), &view, &mut hits)).unwrap();
+        let buf = term.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// The legend used to advertise `A` next to `Enter rebind` (nothing binds
+    /// `A`) and never named the unbind key, which is a plain `X` (with Delete
+    /// and Backspace). Reset, Back and Confirm are `Action`s, so they print the
+    /// live label.
+    #[test]
+    fn the_legend_names_the_unbind_key_and_the_live_action_keys() {
+        let mut c = Controls::default();
+        for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let text = frame_with(w, h, &c);
+            for needle in ["X unbind", "R reset", "Esc back", "Enter rebind"] {
+                assert!(text.contains(needle), "{w}x{h}: {needle:?} missing:\n{text}");
+            }
+            assert!(!text.contains("or A"), "{w}x{h}: a key that does nothing:\n{text}");
+            assert!(!text.contains("wheel"), "{w}x{h}: the wheel does not scroll the table:\n{text}");
+        }
+        // A rebind moves the words with it.
+        let _ = c.bind_active_kbm(Action::Reset, Binding::Key(KeyBind::Char('y')));
+        let _ = c.bind_active_kbm(Action::Confirm, Binding::Key(KeyBind::Char('f')));
+        for (w, h) in [(57u16, 20u16), (120, 40)] {
+            let text = frame_with(w, h, &c);
+            assert!(text.contains("Y reset"), "{w}x{h}:\n{text}");
+            assert!(text.contains("F rebind"), "{w}x{h}:\n{text}");
+            assert!(!text.contains("Enter rebind"), "{w}x{h}: a stale key:\n{text}");
+        }
+    }
 
     fn frame(w: u16, h: u16, row: usize, capturing: Option<Action>, scheme: Scheme) -> (String, HitMap) {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();

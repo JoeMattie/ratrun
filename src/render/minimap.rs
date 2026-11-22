@@ -86,6 +86,15 @@ const TAIL_RGB: Rgb = (239, 168, 185);
 /// than *every* floor's remembered ground, so explored space still reads as the
 /// brighter cartography and the map never outshines the UI around it.
 pub const UNKNOWN_VEIL_RGB: Rgb = (40, 14, 16);
+/// The same veil in the **256-colour** cube.
+///
+/// The cube's darkest red is `(95, 0, 0)` (index 52): the oxblood above is
+/// nearer to black than to it, so it would fold to a flat black panel. Asking
+/// for this maroon lands the whole veil on that one cube entry instead, which is
+/// red at 256 *and* at 16 colours — one request, one fold, no per-mode guess.
+/// The 256 cube simply has no darker red to give; the truecolor path keeps the
+/// calm oxblood.
+pub const UNKNOWN_VEIL_ANSI256_RGB: Rgb = (66, 0, 0);
 /// The same veil for a terminal with only **16 colours**.
 ///
 /// Every dark red folds to the base `maroon` there, and folding to maroon needs
@@ -112,15 +121,18 @@ pub fn unknown_veil_rgb() -> Rgb {
 
 /// [`unknown_veil_rgb`] for an explicit depth, so the tests can drive every
 /// depth without touching the process-wide capability.
+///
+/// **This is the only veil in the renderer.** The compact radar and the expanded
+/// Tab map both read it through [`DerivedPalette`], which is what keeps the two
+/// panels the same colour at every depth — a second constant anywhere is a bug.
 #[inline]
 pub fn unknown_veil_rgb_for(depth: crate::term::ColorDepth) -> Rgb {
     match depth {
         crate::term::ColorDepth::Truecolor => UNKNOWN_VEIL_RGB,
         // The 256-colour cube has no dark desaturated red either: the oxblood
         // folds to a grey there. The same maroon request keeps it red.
-        crate::term::ColorDepth::Ansi256 | crate::term::ColorDepth::Ansi16 => {
-            UNKNOWN_VEIL_ANSI16_RGB
-        }
+        crate::term::ColorDepth::Ansi256 => UNKNOWN_VEIL_ANSI256_RGB,
+        crate::term::ColorDepth::Ansi16 => UNKNOWN_VEIL_ANSI16_RGB,
     }
 }
 
@@ -1034,7 +1046,10 @@ pub fn draw_compact(
                 if cx < 0 || cy < 0 || cx >= cols || cy >= rows || !source.seen(cx, cy) {
                     scratch.vis[idx] = 0;
                     scratch.kind[idx] = KIND_UNSEEN;
-                    scratch.pixels[idx] = fog_void_color(&theme, cx, cy);
+                    // The weave is a screen-space pattern in every mode (never
+                    // map coordinates), so the compact radar and the expanded
+                    // map paint the same cloth at the same density.
+                    scratch.pixels[idx] = fog_void_color(&theme, px as i32, py as i32);
                     continue;
                 }
                 let rec = source.recency(cx, cy).clamp(0.0, 1.0);
@@ -2303,6 +2318,13 @@ struct DerivedPalette {
 
 impl DerivedPalette {
     fn from_palette(p: MinimapPalette) -> Self {
+        Self::from_palette_at(p, crate::term::color_depth())
+    }
+
+    /// [`DerivedPalette::from_palette`] against an explicit colour depth, so a
+    /// test can prove the compact radar and the expanded map paint one veil at
+    /// *every* depth rather than only at the one this process resolved.
+    fn from_palette_at(p: MinimapPalette, depth: crate::term::ColorDepth) -> Self {
         let fog_base = palette::scale(palette::mix(PLATE_RGB, p.bg, 0.32), 0.52);
         let memory_sink = palette::mix(fog_base, PLATE_RGB, 0.52);
 
@@ -2319,11 +2341,10 @@ impl DerivedPalette {
         let maze_wall = palette::mix(p.accent, COAT_RGB, 0.20);
         let doorway = palette::mix(floor_live, p.accent, 0.36);
 
-        let (unknown_grid, unknown_scanline, unknown_frontier) =
-            unknown_weave_rgb_for(crate::term::color_depth());
+        let (unknown_grid, unknown_scanline, unknown_frontier) = unknown_weave_rgb_for(depth);
         Self {
             fog_base,
-            unknown: unknown_veil_rgb(),
+            unknown: unknown_veil_rgb_for(depth),
             unknown_grid,
             unknown_scanline,
             unknown_frontier,
@@ -3017,6 +3038,31 @@ mod tests {
             }
             self.recency[self.idx(cx, cy)]
         }
+    }
+
+    /// The most common colour over the scratch's unseen pixels, leaving out
+    /// the `rim` ink (the frontier line where unseen touches seen: in a tight
+    /// corner radar around an explored room that rim can outnumber the field).
+    fn dominant_unseen_ink(scratch: &MinimapScratch, rim: Rgb) -> Rgb {
+        let mut counts: Vec<(Rgb, usize)> = Vec::new();
+        for (i, &v) in scratch.vis.iter().enumerate() {
+            if v != 0 {
+                continue;
+            }
+            let px = scratch.pixels[i];
+            if px == rim {
+                continue;
+            }
+            match counts.iter_mut().find(|(c, _)| *c == px) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((px, 1)),
+            }
+        }
+        counts
+            .into_iter()
+            .max_by_key(|(_, n)| *n)
+            .expect("the panel has unseen pixels")
+            .0
     }
 
     fn sample_markers(boss_discovered: bool) -> Vec<MapMarker> {
@@ -4159,6 +4205,80 @@ mod tests {
         }
         assert_eq!(base.unseen_reads.get(), 0);
         assert_eq!(swapped.unseen_reads.get(), 0);
+    }
+
+    /// The compact radar and the expanded Tab map are the same cloth: one veil
+    /// constant per colour depth, one weave, no second call path. The review saw
+    /// the corner radar's veil as the more saturated of the two; a second
+    /// constant anywhere is exactly how that happens, so this pins the ink for
+    /// both panels at truecolor, 256 and 16 colours.
+    #[test]
+    fn the_compact_and_expanded_veils_are_one_ink() {
+        use crate::term::ColorDepth;
+        let map = FakeMap::showcase(true);
+        let markers = sample_markers(true);
+        let labels = sample_labels(true);
+        let mut scratch = MinimapScratch::new();
+        for depth in [
+            ColorDepth::Truecolor,
+            ColorDepth::Ansi256,
+            ColorDepth::Ansi16,
+        ] {
+            // One constructor, so both panels inherit the same five inks.
+            let theme = DerivedPalette::from_palette_at(MinimapPalette::SEWER, depth);
+            // The calm oxblood in truecolor; the maroon the cube can actually
+            // draw below it (the fold lands that on the cube's one dark red).
+            let expected: Rgb = match depth {
+                ColorDepth::Truecolor => (40, 14, 16),
+                _ => (66, 0, 0),
+            };
+            assert_eq!(theme.unknown, expected, "{depth:?}");
+            assert_eq!(theme.unknown, unknown_veil_rgb_for(depth), "{depth:?}");
+            // The weave is one coordinate-driven pattern for every mode.
+            for (x, y) in [(0, 0), (1, 4), (8, 8), (13, 7), (21, 16)] {
+                let ink = fog_void_color(&theme, x, y);
+                assert!(
+                    ink == theme.unknown
+                        || ink == theme.unknown_grid
+                        || ink == theme.unknown_scanline,
+                    "{depth:?} ({x},{y}): the weave drew {ink:?}"
+                );
+            }
+            // The panels themselves render at the process-wide depth, so the
+            // pixel check below only speaks for that one.
+            if depth != crate::term::color_depth() {
+                continue;
+            }
+            for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
+                let mut seen_px = Vec::new();
+                for mode in [MinimapMode::Compact, MinimapMode::Expanded] {
+                    let mut view = make_view(
+                        mode,
+                        MinimapPalette::SEWER,
+                        "SEWER",
+                        &markers,
+                        &labels,
+                        true,
+                        w,
+                        h,
+                    );
+                    let _ = render_settled(&mut view, &map, w, h, &mut scratch);
+                    // The dominant unseen ink is the veil itself — in both
+                    // panels, at every depth and size. Bracket and beacon
+                    // overlays blend *toward* the chrome, never past the veil.
+                    let ink = dominant_unseen_ink(&scratch, theme.unknown_frontier);
+                    assert_eq!(
+                        ink, theme.unknown,
+                        "{depth:?} {mode:?} {w}x{h}: the unseen field is {ink:?}, not the veil"
+                    );
+                    seen_px.push(ink);
+                }
+                assert_eq!(
+                    seen_px[0], seen_px[1],
+                    "{w}x{h}: the radar and the map disagree on the veil"
+                );
+            }
+        }
     }
 
     #[test]

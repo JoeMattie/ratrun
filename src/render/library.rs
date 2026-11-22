@@ -34,6 +34,15 @@
 //! list takes the whole panel and Enter opens the card over it (`Esc` returns
 //! to the list), at 80 × 24 and 120 × 40 the list and the card sit side by
 //! side.
+//!
+//! ## The card's height budget
+//!
+//! The dossier is the reason the card exists, so it is **measured first**: the
+//! note is wrapped on words at the card's width and the art plate takes only
+//! the rows that are left (never fewer than [`MIN_ART_H`]). A short note buys a
+//! tall plate; a long one shrinks it. When even that is not enough the note is
+//! cut on a whole sentence, else on a whole word followed by the safe `…`
+//! glyph — never mid-word, never mid-clause.
 
 use rand::SeedableRng;
 use ratatui::layout::Rect;
@@ -75,6 +84,17 @@ use crate::game::art_traps::{self, MousetrapView, RatHoleView, StickyTrapView};
 
 const VIAL: Color = Color::Rgb(196, 202, 214);
 const ROW_SEL_BG: Color = Color::Rgb(26, 32, 34);
+
+/// The most rows the dossier will take: past this the note is a page, not a
+/// card, and the art has already given the plate every row it can.
+const DOSSIER_MAX_LINES: usize = 9;
+/// The art plate never shrinks below this many cells: a card with no specimen
+/// is just a facts table.
+const MIN_ART_H: u16 = 5;
+/// The narrow (57 × 20) card's preferred art height.
+const NARROW_ART_H: u16 = 6;
+/// Rows the player's own record line claims at the foot of the card.
+const STATS_H: u16 = 2;
 
 fn ink(c: Color) -> Style {
     Style::default().fg(c)
@@ -280,10 +300,12 @@ pub fn draw(
         band(inner, rule_y, 1),
     );
     let row = band(inner, inner.height - 1, 1);
+    // Every key this list accepts is named here (and each of them works: the
+    // screen's own keys are raw, not bindings — see the report on `Action`).
     let legend = if info.narrow {
-        "↑↓ browse · Enter card · ←→ tab · Esc back"
+        "↑↓ browse · Enter card · ←→/QE tab · Esc back"
     } else {
-        "↑↓/WS browse · ←→/Tab tab · wheel scroll · Esc back"
+        "↑↓/WS/AD browse · ←→/Tab/QE tab · wheel scroll · Esc back"
     };
     put(f, row.x, row.y, row.width, legend, ink(MUTED));
     let back = if info.narrow && ui.card_open {
@@ -1041,6 +1063,38 @@ fn draw_card(
     let row = entry_row(rows, ui.tab, ui.cursor)?;
     let seen = lib.is_seen(row.key);
     let full = full_entry(lib, row.key);
+    // Everything the text half will need, measured before the art takes a row.
+    let facts = library::facts(row.key);
+    let fact_rows = facts.rows().len() as u16;
+    let stats = stats_line(lib, row.key);
+    let flavour = if full {
+        library::flavour_of(row.key)
+    } else {
+        None
+    };
+    let width = usize::from(area.width);
+    let mut dossier = row.dossier;
+    if !full {
+        dossier = "The field note is withheld until the rat has carried this. ";
+    }
+    let mut dossier_lines = wrap_words(dossier, width);
+    dossier_lines.truncate(DOSSIER_MAX_LINES);
+    // flavour + note + (OFFERED and the `found:` hint) + rule + facts + record
+    let mut want = u16::from(flavour.is_some()) + dossier_lines.len() as u16;
+    want += if full { 0 } else { 2 };
+    want += STATS_H;
+    want = want.saturating_add(1 + fact_rows);
+    let base_art: u16 = if narrow {
+        NARROW_ART_H
+    } else {
+        (area.height / 2).clamp(9, 15)
+    };
+    // The plate keeps the top of the card and gives up only the rows the note
+    // needs, so a long dossier is never cut for an oversized specimen.
+    let art_h = area
+        .height
+        .saturating_sub(3 + want)
+        .clamp(MIN_ART_H, base_art.max(MIN_ART_H));
     // Viewing the card is what clears the NEW mark (the App owns that).
     let mut x = area.x;
     let name = if seen { row.name } else { "???" };
@@ -1061,16 +1115,11 @@ fn draw_card(
     }
 
     // Art window.
-    let art_h_cells: u16 = if narrow {
-        8
-    } else {
-        (area.height / 2).clamp(9, 15)
-    };
     let art_w_cells = area
         .width
         .saturating_sub(2)
         .min(if narrow { 26 } else { 44 });
-    let art_rect = Rect::new(area.x + 1, area.y + 2, art_w_cells, art_h_cells);
+    let art_rect = Rect::new(area.x + 1, area.y + 2, art_w_cells, art_h);
     if art_rect.height >= 2 {
         ui.art
             .resize(art_rect.width as usize, art_rect.height as usize * 2);
@@ -1122,18 +1171,17 @@ fn draw_card(
     }
 
     // Flavour line (the game's own table, not retyped).
-    if let Some(flavour) = library::flavour_of(row.key) {
-        if full {
-            put(
-                f,
-                area.x,
-                y,
-                area.width,
-                &format!("\u{201c}{flavour}\u{201d}"),
-                ink(VIAL).add_modifier(Modifier::ITALIC),
-            );
-            y += 1;
-        }
+    if let Some(flavour) = flavour {
+        let line = format!("\u{201c}{flavour}\u{201d}");
+        put(
+            f,
+            area.x,
+            y,
+            area.width,
+            &clip_line(&line, width),
+            ink(VIAL).add_modifier(Modifier::ITALIC),
+        );
+        y += 1;
     }
 
     if !full {
@@ -1148,34 +1196,32 @@ fn draw_card(
         y += 1;
     }
 
-    // Dossier (withheld until the entry is fully catalogued).
-    let mut dossier = row.dossier;
-    if !full {
-        dossier = "The field note is withheld until the rat has carried this. ";
-    }
-    let para = Paragraph::new(dossier)
-        .style(ink(COAT))
-        .wrap(Wrap { trim: true });
-    let facts = library::facts(row.key);
-    let fact_rows = facts.rows().len() as u16;
-    let stats = stats_line(lib, row.key);
-    let stats_h = 2;
-    let room = area
-        .bottom()
-        .saturating_sub(y)
-        .saturating_sub(fact_rows + stats_h + 1);
-    if room > 0 {
-        f.render_widget(para, Rect::new(area.x, y, area.width, room.min(5)));
-        y += room.min(5);
+    // Dossier (withheld until the entry is fully catalogued), wrapped on whole
+    // words and cut on a sentence or an ellipsis rather than mid-clause.
+    if y < area.bottom() {
+        let tail = area.bottom() - y;
+        let need = dossier_lines.len() as u16;
+        // The record line keeps its place only where it does not cost a line
+        // of the note: the note is what the card is for.
+        let reserve = if tail >= need.saturating_add(1 + STATS_H) {
+            1 + STATS_H
+        } else {
+            0
+        };
+        let room = usize::from(tail.saturating_sub(reserve));
+        for line in fit_lines(&dossier_lines, room, width) {
+            put(f, area.x, y, area.width, &line, ink(COAT));
+            y += 1;
+        }
     }
     if !full && y < area.bottom() {
         let hint = format!("found: {}", row.hint);
-        put(f, area.x, y, area.width, &hint, ink(MUTED));
+        put(f, area.x, y, area.width, &clip_line(&hint, width), ink(MUTED));
         y += 1;
     }
 
     // Facts: label, value, and a five-cell bar where a bar says more.
-    if y < area.bottom().saturating_sub(stats_h) {
+    if y < area.bottom().saturating_sub(STATS_H) {
         f.render_widget(
             Line::styled("─".repeat(usize::from(area.width)).as_str(), ink(TRACK)),
             band(area, y - area.y, 1),
@@ -1183,7 +1229,7 @@ fn draw_card(
         y += 1;
     }
     for fact in facts.rows() {
-        if y + stats_h >= area.bottom() {
+        if y + STATS_H >= area.bottom() {
             break;
         }
         draw_fact(f, area, y, fact, accent);
@@ -1192,10 +1238,116 @@ fn draw_card(
     // The player's own record.
     if y < area.bottom() {
         let sy = area.bottom() - 1;
-        put(f, area.x, sy, area.width, &stats, ink(MUTED));
+        put(f, area.x, sy, area.width, &clip_line(&stats, width), ink(MUTED));
     }
     hits.add(area, Target::LibraryRow(ui.cursor));
     Some(())
+}
+
+/// Greedy word wrap at `width` columns. Words are never split, so a card can
+/// not hyphenate a species name; a single word wider than the line is left
+/// whole and clipped by the caller.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if width == 0 {
+        return out;
+    }
+    let mut line = String::new();
+    let mut line_w = 0usize;
+    for word in text.split_whitespace() {
+        let w = word.chars().count();
+        if line_w == 0 {
+            line.push_str(word);
+            line_w = w;
+        } else if line_w + 1 + w <= width {
+            line.push(' ');
+            line.push_str(word);
+            line_w += 1 + w;
+        } else {
+            out.push(std::mem::take(&mut line));
+            line.push_str(word);
+            line_w = w;
+        }
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
+/// True when the line ends a sentence (the card may cut there).
+fn ends_sentence(line: &str) -> bool {
+    matches!(line.trim_end().chars().last(), Some('.' | '!' | '?'))
+}
+
+/// Fit wrapped `lines` into `room` rows without ever cutting mid-word.
+///
+/// A whole sentence inside the window reads better than a trailing ellipsis, so
+/// the last complete one is preferred (as long as it keeps at least half the
+/// rows); otherwise the last row is trimmed back to a whole word and closed
+/// with the safe `…` glyph.
+fn fit_lines(lines: &[String], room: usize, width: usize) -> Vec<String> {
+    if room == 0 {
+        return Vec::new();
+    }
+    if lines.len() <= room {
+        return lines.to_vec();
+    }
+    let mut kept: Vec<String> = lines[..room].to_vec();
+    let half = room.div_ceil(2);
+    if let Some(i) = kept
+        .iter()
+        .rposition(|line| ends_sentence(line))
+        .filter(|&i| i + 1 >= half)
+    {
+        kept.truncate(i + 1);
+        return kept;
+    }
+    if let Some(last) = kept.last_mut() {
+        while last.chars().count() + 2 > width {
+            match last.rfind(' ') {
+                Some(i) if i > 0 => last.truncate(i),
+                _ => {
+                    *last = "\u{2026}".to_string();
+                    break;
+                }
+            }
+        }
+        if !last.ends_with('\u{2026}') {
+            last.push_str(" \u{2026}");
+        }
+    }
+    kept
+}
+
+/// One line cut to `width`: unchanged when it fits, else whole words plus the
+/// safe `…` glyph (never a sliced letter).
+fn clip_line(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    // Whole words first: the glyph and its space cost two cells of the line.
+    let mut out = String::new();
+    for word in text.split_whitespace() {
+        let w = word.chars().count();
+        let next = out.chars().count() + if out.is_empty() { w } else { w + 1 };
+        if next + 2 > width {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    if out.is_empty() {
+        "\u{2026}".to_string()
+    } else {
+        out.push_str(" \u{2026}");
+        out
+    }
 }
 
 fn draw_fact(f: &mut Frame, area: Rect, y: u16, fact: &Fact, accent: Color) {
