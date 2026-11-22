@@ -975,45 +975,163 @@ impl Grid {
         }
     }
 
+    /// Apply the light grid to the pixels.
+    ///
+    /// The hot loop of the lighting pass: every world pixel, every frame. The
+    /// per-sample work (which of the shine, additive and tint terms can matter
+    /// at all) is decided once per run of pixels under a sample, and the walk
+    /// along a row steps the sample index instead of dividing for it. The
+    /// arithmetic per pixel is unchanged — [`Sample::shade_exact`] is the
+    /// reference form and the fast paths are that form with terms that are
+    /// provably no-ops removed (pinned by `composite_fast_paths_match_the_reference`).
     fn composite(&self, pb: &mut PixelBuffer, depth: ColorDepth) {
         let (w, h) = (pb.w, pb.h);
+        if w == 0 || h == 0 || self.stride == 0 {
+            return;
+        }
+        let stride = self.stride;
         let pixels = pb.pixels_mut();
         let low_colour = depth != ColorDepth::Truecolor;
-        for y in 0..h {
+        // The first run of a row ends at the next sample boundary; every later
+        // run is a whole stride.
+        let first = (stride - self.offset.0 % stride).min(w);
+        let first_sample = self.offset.0 / stride;
+        for (y, row) in pixels.chunks_exact_mut(w).take(h).enumerate() {
             let by = y + self.offset.1;
-            let base = (by / self.stride) * self.w;
-            let mut x = 0;
-            while x < w {
-                let bx = x + self.offset.0;
-                let end = (x + self.stride - bx % self.stride).min(w);
-                let sample = self.samples[base + bx / self.stride];
-                for (dx, pixel) in pixels[y * w + x..y * w + end].iter_mut().enumerate() {
-                    let (r, g, b) = *pixel;
-                    // Transient highlights from older sprite art still carry a
-                    // little emission. Marked cores are restored explicitly.
-                    let peak = r.max(g).max(b);
-                    let shine = i32::from(peak.saturating_sub(218)) * 5;
-                    let channel = |c: u8, n: usize| {
-                        let mul = i32::from(sample.mul[n]).max(shine);
-                        let base = ((i32::from(c) * mul) >> 8).min(255);
-                        let lit =
-                            (base + ((i32::from(sample.add[n]) * (255 - base)) >> 8)).clamp(0, 255);
-                        if sample.tint[3] == 0 {
-                            lit as u8
-                        } else {
-                            (((lit * (256 - i32::from(sample.tint[3]))) >> 8)
-                                + i32::from(sample.tint[n]))
-                            .min(255) as u8
-                        }
-                    };
-                    let lit = (channel(r, 0), channel(g, 1), channel(b, 2));
-                    *pixel = if low_colour {
-                        palette_dither(lit, depth, bx + dx, by)
-                    } else {
-                        lit
-                    };
+            let samples = &self.samples[(by / stride) * self.w + first_sample..];
+            if low_colour {
+                // Palette terminals dither after the exact shade.
+                let (mut x, mut end) = (0, first);
+                for sample in samples {
+                    for (dx, pixel) in row[x..end].iter_mut().enumerate() {
+                        let lit = sample.shade_exact(*pixel);
+                        *pixel = palette_dither(lit, depth, x + dx + self.offset.0, by);
+                    }
+                    if end == w {
+                        break;
+                    }
+                    x = end;
+                    end = (end + stride).min(w);
                 }
-                x = end;
+            } else if stride == 1 {
+                for (pixel, sample) in row.iter_mut().zip(samples) {
+                    sample.shade_run(std::slice::from_mut(pixel));
+                }
+            } else {
+                let (mut x, mut end) = (0, first);
+                for sample in samples {
+                    sample.shade_run(&mut row[x..end]);
+                    if end == w {
+                        break;
+                    }
+                    x = end;
+                    end = (end + stride).min(w);
+                }
+            }
+        }
+    }
+}
+
+/// The most the emission term can raise a multiplier to: a channel peak of
+/// 255 is `(255 - 218) * 5`.
+const MAX_SHINE: u16 = (255 - SHINE_FLOOR as u16) * 5;
+/// Channel peaks above this carry a little emission of their own.
+const SHINE_FLOOR: u8 = 218;
+
+impl Sample {
+    /// The reference shade of one pixel under this sample: multiply (never
+    /// below the pixel's own emission), add toward white, then mix the tint.
+    #[inline(always)]
+    fn shade_exact(&self, (r, g, b): Rgb) -> Rgb {
+        // Transient highlights from older sprite art still carry a
+        // little emission. Marked cores are restored explicitly.
+        let peak = r.max(g).max(b);
+        let shine = i32::from(peak.saturating_sub(SHINE_FLOOR)) * 5;
+        let channel = |c: u8, n: usize| {
+            let mul = i32::from(self.mul[n]).max(shine);
+            let base = ((i32::from(c) * mul) >> 8).min(255);
+            let lit = (base + ((i32::from(self.add[n]) * (255 - base)) >> 8)).clamp(0, 255);
+            if self.tint[3] == 0 {
+                lit as u8
+            } else {
+                (((lit * (256 - i32::from(self.tint[3]))) >> 8) + i32::from(self.tint[n])).min(255)
+                    as u8
+            }
+        };
+        (channel(r, 0), channel(g, 1), channel(b, 2))
+    }
+
+    /// Shade a run of truecolor pixels that all sit under this sample.
+    ///
+    /// Bit-identical to [`Sample::shade_exact`] per pixel; what is decided
+    /// once for the run is which terms can be skipped:
+    ///
+    /// * no tint (`tint[3] == 0`) — the tint mix is skipped;
+    /// * every multiplier at or above [`MAX_SHINE`] — the emission term can
+    ///   never win the `max`, so the channel peak is not even computed;
+    /// * no additive light (`add == 0`) — the add is `+ 0`, and the result of
+    ///   the multiply is already in `0..=255`;
+    /// * the identity sample (`mul == 256`, `add == 0`) — nothing to do.
+    #[inline(always)]
+    fn shade_run(&self, run: &mut [Rgb]) {
+        if self.tint[3] != 0 {
+            for pixel in run {
+                *pixel = self.shade_exact(*pixel);
+            }
+            return;
+        }
+        let mul = [
+            i32::from(self.mul[0]),
+            i32::from(self.mul[1]),
+            i32::from(self.mul[2]),
+        ];
+        let add = [
+            i32::from(self.add[0]),
+            i32::from(self.add[1]),
+            i32::from(self.add[2]),
+        ];
+        let no_add = self.add == [0, 0, 0];
+        let no_shine = self.mul.iter().all(|m| *m >= MAX_SHINE);
+        if no_add && self.mul == [256, 256, 256] {
+            return;
+        }
+        // One channel with the multipliers already chosen.
+        #[inline(always)]
+        fn scale(c: u8, mul: i32) -> i32 {
+            ((i32::from(c) * mul) >> 8).min(255)
+        }
+        #[inline(always)]
+        fn lift(base: i32, add: i32) -> u8 {
+            (base + ((add * (255 - base)) >> 8)).clamp(0, 255) as u8
+        }
+        match (no_shine, no_add) {
+            (true, true) => {
+                for (r, g, b) in run {
+                    *r = scale(*r, mul[0]) as u8;
+                    *g = scale(*g, mul[1]) as u8;
+                    *b = scale(*b, mul[2]) as u8;
+                }
+            }
+            (true, false) => {
+                for (r, g, b) in run {
+                    *r = lift(scale(*r, mul[0]), add[0]);
+                    *g = lift(scale(*g, mul[1]), add[1]);
+                    *b = lift(scale(*b, mul[2]), add[2]);
+                }
+            }
+            (false, _) => {
+                for (r, g, b) in run {
+                    let peak = (*r).max(*g).max(*b);
+                    let m = if peak > SHINE_FLOOR {
+                        let shine = i32::from(peak - SHINE_FLOOR) * 5;
+                        [mul[0].max(shine), mul[1].max(shine), mul[2].max(shine)]
+                    } else {
+                        mul
+                    };
+                    *r = lift(scale(*r, m[0]), add[0]);
+                    *g = lift(scale(*g, m[1]), add[1]);
+                    *b = lift(scale(*b, m[2]), add[2]);
+                }
             }
         }
     }
@@ -1081,4 +1199,183 @@ fn palette_dither(color: Rgb, depth: ColorDepth, x: usize, y: usize) -> Rgb {
     let offset = phase * span / 32;
     let adjust = |c| (i16::from(c) + offset).clamp(0, 255) as u8;
     (adjust(color.0), adjust(color.1), adjust(color.2))
+}
+
+#[cfg(test)]
+mod composite_tests {
+    use super::*;
+
+    /// A small deterministic generator (the tests must not depend on `rand`'s
+    /// stream).
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u32 {
+            self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 33) as u32
+        }
+        fn below(&mut self, n: u32) -> u32 {
+            self.next() % n
+        }
+    }
+
+    /// Samples that hit every fast path and every boundary of one.
+    fn samples(rng: &mut Lcg, n: usize) -> Vec<Sample> {
+        let muls: [u16; 12] = [0, 1, 60, 184, 185, 186, 255, 256, 257, 300, 512, 900];
+        let adds: [i16; 9] = [0, 0, 0, 1, -1, 38, -120, 200, 256];
+        (0..n)
+            .map(|i| {
+                let pick_mul = |rng: &mut Lcg| match rng.below(3) {
+                    0 => muls[rng.below(12) as usize],
+                    1 => 256,
+                    _ => rng.below(700) as u16,
+                };
+                let mul = if i % 7 == 0 {
+                    [256, 256, 256]
+                } else {
+                    [pick_mul(rng), pick_mul(rng), pick_mul(rng)]
+                };
+                let add = if rng.below(2) == 0 {
+                    [0, 0, 0]
+                } else {
+                    [
+                        adds[rng.below(9) as usize],
+                        adds[rng.below(9) as usize],
+                        adds[rng.below(9) as usize],
+                    ]
+                };
+                let tint = if rng.below(4) == 0 {
+                    [
+                        rng.below(256) as u8,
+                        rng.below(256) as u8,
+                        rng.below(256) as u8,
+                        rng.below(256) as u8,
+                    ]
+                } else {
+                    [rng.below(256) as u8, 0, 0, 0]
+                };
+                Sample { mul, add, tint }
+            })
+            .collect()
+    }
+
+    fn pixel(rng: &mut Lcg) -> Rgb {
+        let edge: [u8; 8] = [0, 1, 217, 218, 219, 254, 255, 128];
+        let c = |rng: &mut Lcg| {
+            if rng.below(3) == 0 {
+                edge[rng.below(8) as usize]
+            } else {
+                rng.below(256) as u8
+            }
+        };
+        (c(rng), c(rng), c(rng))
+    }
+
+    /// The composite exactly as it was before the fast paths: one closure,
+    /// every term evaluated for every pixel.
+    fn reference(grid: &Grid, pb: &mut PixelBuffer, depth: ColorDepth) {
+        let (w, h) = (pb.w, pb.h);
+        let pixels = pb.pixels_mut();
+        let low_colour = depth != ColorDepth::Truecolor;
+        for y in 0..h {
+            let by = y + grid.offset.1;
+            let base = (by / grid.stride) * grid.w;
+            let mut x = 0;
+            while x < w {
+                let bx = x + grid.offset.0;
+                let end = (x + grid.stride - bx % grid.stride).min(w);
+                let sample = grid.samples[base + bx / grid.stride];
+                for (dx, pixel) in pixels[y * w + x..y * w + end].iter_mut().enumerate() {
+                    let (r, g, b) = *pixel;
+                    let peak = r.max(g).max(b);
+                    let shine = i32::from(peak.saturating_sub(218)) * 5;
+                    let channel = |c: u8, n: usize| {
+                        let mul = i32::from(sample.mul[n]).max(shine);
+                        let base = ((i32::from(c) * mul) >> 8).min(255);
+                        let lit =
+                            (base + ((i32::from(sample.add[n]) * (255 - base)) >> 8)).clamp(0, 255);
+                        if sample.tint[3] == 0 {
+                            lit as u8
+                        } else {
+                            (((lit * (256 - i32::from(sample.tint[3]))) >> 8)
+                                + i32::from(sample.tint[n]))
+                            .min(255) as u8
+                        }
+                    };
+                    let lit = (channel(r, 0), channel(g, 1), channel(b, 2));
+                    *pixel = if low_colour {
+                        palette_dither(lit, depth, bx + dx, by)
+                    } else {
+                        lit
+                    };
+                }
+                x = end;
+            }
+        }
+    }
+
+    #[test]
+    fn the_shine_ceiling_is_what_the_fast_path_assumes() {
+        assert_eq!(MAX_SHINE, 185);
+        assert_eq!(i32::from(255u8.saturating_sub(SHINE_FLOOR)) * 5, i32::from(MAX_SHINE));
+    }
+
+    #[test]
+    fn shade_run_matches_the_reference_for_every_channel_value() {
+        // Every sample class against every channel value (and every peak).
+        let mut rng = Lcg(7);
+        for sample in samples(&mut rng, 400) {
+            for c in 0..=255u8 {
+                for other in [0u8, 100, 218, 219, 255] {
+                    for px in [(c, other, other), (other, c, other), (other, other, c), (c, c, c)] {
+                        let mut run = [px];
+                        sample.shade_run(&mut run);
+                        assert_eq!(
+                            run[0],
+                            sample.shade_exact(px),
+                            "pixel {px:?} under mul {:?} add {:?} tint {:?}",
+                            sample.mul,
+                            sample.add,
+                            sample.tint
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn composite_fast_paths_match_the_reference() {
+        let mut rng = Lcg(42);
+        for stride in [1usize, 2, 3, 4, 8] {
+            for (pw, ph) in [(1usize, 1usize), (7, 5), (64, 33), (121, 80)] {
+                for offset in [(0usize, 0usize), (1, 0), (stride - 1, stride - 1), (5, 9)] {
+                    let gw = (pw + offset.0) / stride + 2;
+                    let gh = (ph + offset.1) / stride + 2;
+                    let grid = Grid {
+                        w: gw,
+                        h: gh,
+                        stride,
+                        start: Vec2::ZERO,
+                        offset,
+                        samples: samples(&mut rng, gw * gh),
+                        surfaces: Vec::new(),
+                    };
+                    for depth in [ColorDepth::Truecolor, ColorDepth::Ansi256, ColorDepth::Ansi16] {
+                        let mut fast = PixelBuffer::new(pw, ph);
+                        for p in fast.pixels_mut() {
+                            *p = pixel(&mut rng);
+                        }
+                        let mut slow = PixelBuffer::new(pw, ph);
+                        slow.pixels_mut().copy_from_slice(fast.pixels());
+                        grid.composite(&mut fast, depth);
+                        reference(&grid, &mut slow, depth);
+                        assert!(
+                            fast.pixels() == slow.pixels(),
+                            "stride {stride} size {pw}x{ph} offset {offset:?} depth {depth:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
