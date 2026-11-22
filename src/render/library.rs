@@ -707,10 +707,31 @@ fn draw_boss(art: &mut PixelBuffer, kind: BossKind, accent: Rgb, t: f32) {
             art_boss_hawk::draw_hawk_ground(art, &v, Vec2::ZERO, accent);
             art_boss_hawk::draw_hawk(art, &v, Vec2::ZERO, accent);
         }
-        // The pooled floors' second fights have no posed preview of their own
-        // here (their plates still list and describe them); the index's card
-        // falls back to the floor's own boss rather than invent a pose.
-        _ => {}
+        BossKind::Cobra => {
+            use crate::game::art_boss_cobra::{self as cobra, CobraState, CobraView};
+            // The hood open over a marked strike line: the tell the fight is
+            // read by.
+            let v = CobraView {
+                pos: c,
+                facing,
+                state: CobraState::HoodTell,
+                progress: cycle,
+                anim,
+                hit_flash: 0.0,
+                hp_frac: 0.8,
+                phase: 1,
+                target,
+                lane_start: target,
+                gap_angle: 0.0,
+                pools: [Vec2::ZERO; cobra::POOL_VIEW],
+                pool_r: [0.0; cobra::POOL_VIEW],
+                pool_n: 0,
+                hunting: false,
+                arena: crate::game::level::TileRect::new(0, 0, 20, 16),
+            };
+            cobra::draw_ground(art, &v, Vec2::ZERO, accent);
+            cobra::draw(art, &v, Vec2::ZERO, accent);
+        }
     }
 }
 
@@ -1218,7 +1239,7 @@ fn entry_row(rows: &[Row], tab: Tab, cursor: usize) -> Option<Row> {
 fn lib_name(key: Key) -> &'static str {
     match key {
         Key::Enemy(_) => "ORDINARY",
-        Key::Miniboss(_) => "APPOINTMENT",
+        Key::Miniboss(_) => "MINIBOSS",
         Key::Boss(_) => "FLOOR BOSS",
         Key::Weapon(_) => "WEAPON",
         Key::Evolution(_) => "EVOLUTION",

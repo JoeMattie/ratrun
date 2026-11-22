@@ -483,7 +483,7 @@ pub fn all_rows() -> Vec<Row> {
         hint,
         dossier,
     });
-    const APPOINTMENTS: &str = "NAMED APPOINTMENTS";
+    const APPOINTMENTS: &str = "NAMED MINIBOSSES";
     for k in [
         MinibossKind::Corkscrew,
         MinibossKind::SisterSnip,
@@ -698,49 +698,49 @@ fn enemy_text(k: EnemyKind) -> (&'static str, &'static str) {
              facility is an escalation of this.",
         ),
         EnemyKind::Bat => (
-            "Sewer · from the first minute",
+            "From the first minute",
             "Winged, purple and ceiling-bound. It does not walk, so the floor's traps, \
              ink and glue mean nothing to it. Learn to look up before the room fills \
              and you stop noticing them overhead.",
         ),
         EnemyKind::Cat => (
-            "Sewer · from about 1:15",
+            "From about 1:15",
             "A cat, wearing the smug authority of a facility pet that was never told the \
              protocol had engaged. It is faster than it looks. It will not follow you \
              into a hole, and it will remember exactly where you went in.",
         ),
         EnemyKind::Spitter => (
-            "Sewer · from about 3:35",
+            "From about 3:35",
             "A recycled sprayer head with a metabolism. It holds the middle distance and \
              spits pellets at it: four alive at a time, no more. Close the gap or walk \
              sideways; either is cheaper than standing still.",
         ),
         EnemyKind::Brute => (
-            "Sewer · from about 6:35",
+            "From about 6:35",
             "The floor's first real wall. Slow, enormous, and built to keep walking while \
              you are shooting it. You cannot out-trade a brute in the open. Kill it while \
              it is still crossing a doorway.",
         ),
         EnemyKind::Pillbug => (
-            "Sewer · from about 2:00",
+            "From about 2:00",
             "It brought its own door. Curls at arm's length and shows the silver shell: \
              a quarter of your damage goes in from the front, double goes in from behind. \
              Loop past its shoulder, bite the seam, and never linger at its face.",
         ),
         EnemyKind::BellFlea => (
-            "Sewer · from about 4:30",
+            "From about 4:30",
             "Even the echo has feet. Once every few seconds it rings: a hop out along a \
              locked line, then a hop home. Both landing crosses show before they land. \
              Step off the first, leave the second empty.",
         ),
         EnemyKind::WickMoth => (
-            "Sewer · from about 7:15",
+            "From about 7:15",
             "It dies with the light on. The corpse burns for a moment and then burns on \
              purpose, and the burst does not care whose side the light is on. Lure the \
              pack across the wick and step back.",
         ),
         EnemyKind::Porter => (
-            "Sewer · from about 8:15",
+            "From about 8:15",
             "One lump for medicinal purposes. It carries a sugar cube to the nearest \
              wounded body and patches it up while you watch. Any hit knocks the cube out \
              of the mix. Move toward the carrier, not the crowd.",
@@ -752,37 +752,37 @@ fn enemy_text(k: EnemyKind) -> (&'static str, &'static str) {
              the generic label.",
         ),
         EnemyKind::Turnkey => (
-            "Sewer · from about 9:45",
+            "From about 9:45",
             "Nobody asked who locked the hallway. Every few seconds it lays a live \
              crossbar across the floor it has just walked, after a dotted tell. Bait the \
              bar onto spent ground, then change lanes.",
         ),
         EnemyKind::HouseCentipede => (
-            "Sewer · from about 4:00",
+            "From about 4:00",
             "Enough feet for a committee. It runs the skirting board, flutters in place \
              behind a dotted line, and then is somewhere else. Touch it and it bolts for \
              the nearest wall. Meet it in the open or not at all.",
         ),
         EnemyKind::Lilliputian => (
-            "Sewer · from about 5:30",
+            "From about 5:30",
             "Ten very small people with a plan. Spears level, archers kneel, and the \
              rope crew ties you to the floor while they do. The line is thick in front \
              and thin behind. Thin the squad and what is left runs for the walls.",
         ),
         EnemyKind::TermiteHorde => (
-            "Sewer · from about 6:00",
+            "From about 6:00",
             "One appetite, many mouths. A single dart only ever takes a nibble out of \
              it, a hard hit splits it in two, and anything left alone grows back. Bring \
              something that hits an area, and finish what you start.",
         ),
         EnemyKind::MurderHornet => (
-            "Sewer · from about 7:30",
+            "From about 7:30",
             "The buzz climbs, a line locks, and it comes down the line. A miss puts it \
              on the floor for a long second, where it takes half again as much. Step \
              off the stripe, then turn round.",
         ),
         EnemyKind::BigSnake => (
-            "Sewer · from about 8:30",
+            "From about 8:30",
             "A corridor that moves. The body divides the room and the head rears along \
              a marked line before it lunges, then lies stretched out and regrets it. \
              Go round the tail, or dash across, and bite the head while it rests.",
@@ -793,37 +793,37 @@ fn enemy_text(k: EnemyKind) -> (&'static str, &'static str) {
 fn miniboss_text(k: MinibossKind) -> (&'static str, &'static str) {
     match k {
         MinibossKind::Corkscrew => (
-            "Sewer · the 3:00 appointment",
+            "Named miniboss · between 3:00 and 12:00",
             "The drain has grown a tooth. A brass auger under a pink worm, it fills a \
              trench from its tail to its tip and then the trench is teeth. Step sideways \
              out of the lane and bite the exposed head while it works.",
         ),
         MinibossKind::SisterSnip => (
-            "Sewer · the 12:00 appointment",
+            "Named miniboss · between 3:00 and 12:00",
             "She trims loose ends. The shears open over a wedge, hold the shape long \
              enough to be read, and close once. Walk behind the pivot and the whole \
              attack is behind you.",
         ),
         MinibossKind::Bobbin => (
-            "Sewer · the 9:00 appointment",
+            "Named miniboss · between 3:00 and 12:00",
             "It learned to sew in circles. A spindle rat pays out a cord to a fixed spool \
              and then swings the whole length through a quarter turn. Cross behind the \
              moving cord, not in front of it.",
         ),
         MinibossKind::BellDiver => (
-            "Sewer · the 6:00 appointment",
+            "Named miniboss · between 3:00 and 12:00",
             "Listen for the missing note. Its ring expands all the way out to arm's \
              length with one chipped gap in the rim, and the gap is never the side you \
              are standing on. Line yourself up with the chip.",
         ),
         MinibossKind::Foreman => (
-            "Sewer · the 9:00 appointment",
+            "Named miniboss · between 3:00 and 12:00",
             "Denied in triplicate. It walks your last heading and stamps three squares \
              along it, one after the other. The first mark is an invitation: turn the \
              corner and let the rest land on nothing.",
         ),
         MinibossKind::MilkCarton => (
-            "Sewer · the 6:00 appointment",
+            "Named miniboss · between 3:00 and 12:00",
             "Three weeks past instructions. It tilts on its printed corners and spills \
              one long rectangle out of the spout. Circle around the folded seam while \
              the puddle decides where it lives.",
@@ -834,20 +834,20 @@ fn miniboss_text(k: MinibossKind) -> (&'static str, &'static str) {
 fn boss_text(k: BossKind) -> (&'static str, &'static str) {
     match k {
         BossKind::Cat => (
-            "Sewer · 15:00 — the boss",
+            "Sewer · 15:00 — one of two bosses",
             "The facility's mascot, grown to the size of its reputation. It crouches, \
              marks the floor where it means to land, and then lands there. Everything \
              the jaguar teaches is the same lesson the rest of the route repeats: read \
              the mark, leave it empty, punish the recovery.",
         ),
         BossKind::Broom => (
-            "Kitchen · 15:00 — the boss",
+            "Kitchen · 15:00 — one of two bosses",
             "Custody, with feet. The sweeper marches, stomps a shadowed foot and drags \
              its whole reach round in an arc. It always leaves a safe pocket at its \
              heel; the trick is being in it when the bristles arrive.",
         ),
         BossKind::Mower => (
-            "Lab · 15:00 — the boss",
+            "Lab · 15:00 — one of two bosses",
             "A laboratory mower that treated the specimen floor as a lawn. It scans, \
              it charges in a straight line, and a charge that misses the rat meets a \
              wall instead. A missed attack is your whole opening: step off the line and \
@@ -868,7 +868,7 @@ fn boss_text(k: BossKind) -> (&'static str, &'static str) {
              come out wrong.",
         ),
         BossKind::Cobra => (
-            "Lab · 15:00 — the other boss",
+            "Lab · 15:00 — one of two bosses",
             "An escaped specimen twenty-two feet long in a room eleven wide, so the \
              coils are the room's walls. Step off the marked strike line and hit the \
              spectacle mark on the open hood; leave the loop through its one gap, or \
@@ -876,34 +876,33 @@ fn boss_text(k: BossKind) -> (&'static str, &'static str) {
              it — the head is spent at the end of it.",
         ),
         BossKind::Magpie => (
-            "Flatbed · the getaway",
+            "Flatbed · the getaway — one of two bosses",
             "The bird that has been riding the slipstream since the last weigh station, \
              and has decided the cab is its nest. It pecks, it strafes the deck, and it \
              beats its wings against the trailer's own wind. Everything loose on the \
              deck, the rat included, is going tailward.",
         ),
         BossKind::HorseshoeCrab => (
-            "Sewer · 15:00 — the other boss",
+            "Sewer · 15:00 — one of two bosses",
             "It was here before the pipes were. A dome with a spike behind it: shots \
              from the front spark off and are wasted. It sweeps the tail, bulldozes a \
              marked lane into the nearest wall, and digs. Every miss shows you the \
              gills. Get behind it and stay there.",
         ),
         BossKind::MegaRat => (
-            "Kitchen · 15:00 — the other boss",
+            "Kitchen · 15:00 — one of two bosses",
             "The facility's first success, collared and tagged, and never let out. It \
              fights with your kit: the bite, the tail, the squeak, the dash, each one \
              larger, slower and marked on the floor first. Every move it misses is a \
              window. It has won this fight before.",
         ),
         BossKind::Hawk => (
-            "Flatbed · the getaway",
-            "The other bird. The magpie wants the cargo; this one wants you, and it has \
-             been following the truck since the last weigh station with its shadow. High \
-             up it cannot be touched at all — watch the shape crossing the planks, step \
-             off the talon print, and be there when it buries its feet in the oak. When \
-             it stoops to hover, it is finally reachable, and it knows it: darts, a \
-             marked grab and a talon rake down the boards.",
+            "Flatbed · the getaway — one of two bosses",
+            "The other bird. The magpie wants the cargo; this one wants you. High up it \
+             cannot be touched at all: watch the shadow crossing the planks, step off \
+             the talon print, and be there when it buries its feet in the oak. When it \
+             stoops to hover it is finally in reach, and it knows it: darts, a marked \
+             grab and a talon rake down the boards.",
         ),
     }
 }
@@ -1205,7 +1204,7 @@ fn pickup_text(k: PickupKind) -> (&'static str, &'static str) {
         PickupKind::Nuke => (
             "Rare drop · any floor",
             "Sector purge. The ordinary horde dies where it stands and the named \
-             appointments take a fixed chunk instead, because a promise is a promise.",
+             minibosses take a fixed chunk instead, because a promise is a promise.",
         ),
         PickupKind::BottleCap => (
             "Rare drop · any floor",
@@ -1216,7 +1215,7 @@ fn pickup_text(k: PickupKind) -> (&'static str, &'static str) {
         PickupKind::WindupMouse => (
             "Rare drop · any floor",
             "The cheapest member of the team. A brass key spins on the floor and the \
-             ordinary horde walks at it instead of at the rat; elites and appointments \
+             ordinary horde walks at it instead of at the rat; elites and minibosses \
              keep their targets.",
         ),
         PickupKind::PocketWatch => (
@@ -1247,8 +1246,8 @@ fn object_text(k: ObjectKind) -> (&'static str, &'static str) {
              you for something permanent.",
         ),
         ObjectKind::Chest => (
-            "Every named appointment · touch to open",
-            "Salvage left by whoever the appointment used to be. It pays an evolution if \
+            "Every named miniboss · touch to open",
+            "Salvage left by whoever the miniboss used to be. It pays an evolution if \
              the rack can offer one, otherwise a free rank, otherwise a purse and a \
              patch-up.",
         ),
@@ -1523,7 +1522,7 @@ fn miniboss_facts(k: MinibossKind, f: &mut Facts) {
     let last = miniboss::appointment_hp(last_appointment);
     f.push(
         "HIT POINTS",
-        format!("{first:.0} → {last:.0} by appointment"),
+        format!("{first:.0} at 3:00 → {last:.0} at 12:00"),
     );
     let dmg_first = miniboss::appointment_signature_damage(0);
     let dmg_last = miniboss::appointment_signature_damage(last_appointment);
@@ -1552,7 +1551,7 @@ fn miniboss_facts(k: MinibossKind, f: &mut Facts) {
             .join(" "),
     );
     f.push("DROPS", format!("a chest + {} gold", shop::MINIBOSS_GOLD));
-    f.push("SIZE", "one appointment at a time");
+    f.push("SIZE", "one at a time");
 }
 
 fn boss_facts(k: BossKind, f: &mut Facts) {
@@ -1571,6 +1570,16 @@ fn boss_facts(k: BossKind, f: &mut Facts) {
             (crate::game::director::BOSS_TIME as u32) % 60
         ),
     );
+    // A floor with a pool fields one of its bosses per run: say so, and name
+    // the other, so a player who met this one knows there is a second.
+    let pool = BossKind::pool_for_theme(boss_theme(k));
+    if pool.len() > 1 {
+        let others: Vec<&str> = pool.iter().filter(|o| **o != k).map(|o| boss_name(*o)).collect();
+        f.push(
+            "SHARES",
+            format!("one of {} bosses here · or {}", pool.len(), others.join(", ")),
+        );
+    }
     f.push("DROPS", format!("{} gold + the floor", shop::BOSS_GOLD));
     f.push("ANSWER", boss_answer(k));
 }
@@ -1775,7 +1784,7 @@ fn floor_facts(t: Theme, f: &mut Facts) {
             )
         })
         .collect();
-    f.push("APPOINTMENTS", appointments.join(" · "));
+    f.push("MINIBOSSES", appointments.join(" · "));
     f.push(
         "BOSS CLOCK",
         format!(
@@ -1808,7 +1817,7 @@ fn object_facts(k: ObjectKind, f: &mut Facts) {
             f.push("XP", "×3 the kind's gems");
             f.push("COIN", format!("{} gold, always", shop::ELITE_GOLD));
             f.push("HP", "the kind's own pool");
-            f.push("CAPPED", "elites rarely, never with an appointment");
+            f.push("CAPPED", "elites rarely, never beside a miniboss");
         }
         ObjectKind::Gold => {
             f.push("VALUE", "1–3 by kind, ×5 elite, ×12 miniboss, ×30 boss");
@@ -1816,7 +1825,7 @@ fn object_facts(k: ObjectKind, f: &mut Facts) {
             f.push("SPENT AT", "a mouse-hole shop shelf");
         }
         ObjectKind::Chest => {
-            f.push("FROM", "every named appointment");
+            f.push("FROM", "every named miniboss");
             f.push("PAYS", "an evolution → a free rank → 24 gold");
             f.push(
                 "ALSO",

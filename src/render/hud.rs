@@ -313,18 +313,33 @@ pub fn boss_plate(world: &World) -> (&'static str, &'static str) {
 /// `boss` is the boss phase itself, which is decided by the real run clock
 /// (`World::boss_time_reached` / a living boss), not by the curve: the curve
 /// freezes at `BOSS_TIME` but a later campaign level's curve starts above it.
+///
+/// The thresholds are the director's own, not clock literals, so a retimed
+/// curve retimes the meter: tier 2 when the first new enemy joins the horde
+/// (the Bat's unlock), tier 3 when elites start, tier 4 when the Brute, the
+/// last of the original roster, unlocks (never before the elites).
 pub fn threat_tier(curve: f32, boss: bool) -> u8 {
+    use crate::game::enemy::EnemyKind;
+    let at = |kind| director::base_unlock_time(kind).unwrap_or(f32::INFINITY);
+    let (second, third, fourth) = threat_thresholds(at(EnemyKind::Bat), at(EnemyKind::Brute));
     if boss {
         5
-    } else if curve >= 540.0 {
+    } else if curve >= fourth {
         4
-    } else if curve >= director::ELITE_START {
+    } else if curve >= third {
         3
-    } else if curve >= 20.0 {
+    } else if curve >= second {
         2
     } else {
         1
     }
+}
+
+/// The curve-clock thresholds of tiers 2, 3 and 4, kept in order whatever the
+/// unlock table says.
+fn threat_thresholds(first_unlock: f32, last_unlock: f32) -> (f32, f32, f32) {
+    let third = director::ELITE_START;
+    (first_unlock.min(third), third, last_unlock.max(third))
 }
 
 /// Category of a transient in-game HUD callout pill.
@@ -3350,8 +3365,14 @@ mod tests {
     #[test]
     fn the_threat_tier_reads_the_levels_curve_clock() {
         // Sewer: t = 0 is the curve's start.
+        use crate::game::enemy::EnemyKind;
+        // The thresholds are the director's (the fifteen-minute curve), not the
+        // five-minute era's 20 s / 540 s literals.
+        let bat = director::base_unlock_time(EnemyKind::Bat).expect("bats unlock");
+        let brute = director::base_unlock_time(EnemyKind::Brute).expect("brutes unlock");
         assert_eq!(threat_tier(director::curve_clock(0, 0.0), false), 1);
-        assert_eq!(threat_tier(director::curve_clock(0, 30.0), false), 2);
+        assert_eq!(threat_tier(director::curve_clock(0, bat - 1.0), false), 1);
+        assert_eq!(threat_tier(director::curve_clock(0, bat), false), 2);
         assert_eq!(
             threat_tier(director::curve_clock(0, director::ELITE_START - 1.0), false),
             2
@@ -3360,7 +3381,10 @@ mod tests {
             threat_tier(director::curve_clock(0, director::ELITE_START), false),
             3
         );
-        assert_eq!(threat_tier(director::curve_clock(0, 540.0), false), 4);
+        assert_eq!(threat_tier(director::curve_clock(0, brute - 1.0), false), 3);
+        assert_eq!(threat_tier(director::curve_clock(0, brute), false), 4);
+        // Whatever the table says, the tiers stay in order.
+        assert_eq!(threat_thresholds(500.0, 10.0), (director::ELITE_START, director::ELITE_START, director::ELITE_START));
         // Every stage opens with the same grace (wave-3 re-base): a carried
         // level starts on the calm opening tier, not a mid-run one.
         assert_eq!(threat_tier(director::curve_clock(1, 0.0), false), 1);
