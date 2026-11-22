@@ -16,7 +16,11 @@ cargo test <name>
 cargo clippy --all-targets          # lint (keep clean)
 cargo run --release -- --caps       # resolved terminal caps, then exit
 cargo run --release -- --probe      # caps + this terminal's keyboard-protocol answer
+cargo run --release -- --prof-bench --color truecolor --floor sewer --at 300 \
+    --mode app --cfg 120x40:1.0:full:600   # dev only: headless frame-cost benchmark
 ```
+
+**Profiling (dev only):** `--prof-bench` (`src/profbench.rs`, stage timers in `src/prof.rs`) plays one floor forward with the bot and prints one JSON line per `--cfg COLSxROWS:ZOOM:TIER:FRAMES[:free]`. `--mode direct` times `World::draw` stage by stage and prints a `frame_hash` of every pixel (the proof that a render change is bit-identical); `--mode app` runs the real update/render/present path against a counting sink (frame p50, present cost, bytes and `write` calls per frame); `--mode title` / `--mode paused` measure the idle screens; `--mode encode` and `--mode audio` are micro-benchmarks. `--still`, `--horde N`, `--nolight` and `--sample FILE:SECS` shape a run. The stage scopes cost one relaxed atomic load when the bench is off. `RATRUN_PROF_NO_AUDIO=1` keeps a PTY harness from opening an audio device. Not a player-facing flag: it never touches the terminal or the save.
 
 **Toolchain:** `rust-toolchain.toml` pins `1.100.0` (`bevy_ecs` 0.20 declares `rust-version = 1.95` and the machine default is older). rustup installs it on demand — never touch the global default.
 

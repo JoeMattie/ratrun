@@ -1180,6 +1180,7 @@ impl World {
         charge: f32,
         hold: DashHold,
     ) {
+        let _prof = crate::prof::scope(crate::prof::Stage::SimTick);
         // Neon merge: the HUD reads only this tick's pickups.
         self.last_pickups.clear();
         if self.finished() {
@@ -1796,6 +1797,7 @@ impl World {
     /// headless caller sets it once), so two same-seed runs cannot diverge
     /// because one of them drew a resized framebuffer and the other did not.
     pub fn draw(&mut self, pb: &mut PixelBuffer) {
+        let _prof = crate::prof::scope(crate::prof::Stage::Draw);
         let (sw, sh) = (pb.w, pb.h);
         if sw == 0 || sh == 0 {
             // A degenerate terminal renders nothing (and must not panic).
@@ -1817,7 +1819,10 @@ impl World {
             };
             buf.resize(ww, wh);
             self.draw_scene(&mut buf);
-            buf.resample_to(pb);
+            {
+                let _p = crate::prof::scope(crate::prof::Stage::Resample);
+                buf.resample_to(pb);
+            }
             self.zoom_scale = Vec2::new(ww as f32 / sw as f32, wh as f32 / sh as f32);
             self.world_buf = Some(buf);
         }
@@ -1828,6 +1833,7 @@ impl World {
         // Screen-space pass: floating damage numbers are text-sized glyphs, so
         // they keep their 3×5 / 4×6 pixel size at every zoom instead of
         // blurring into mush when zoomed out.
+        let _pd = crate::prof::scope(crate::prof::Stage::DamageNumbers);
         self.damage_numbers
             .draw_scaled_clear_of(
                 pb,
@@ -1841,6 +1847,8 @@ impl World {
                 Some((self.player.pos, DAMAGE_CLEAR_RADIUS)),
             );
 
+        drop(_pd);
+        let _pi = crate::prof::scope(crate::prof::Stage::Ink);
         // Screen-space ink: hostile marks, the rat and the loot language keep a
         // minimum on-screen size at every zoom, and are stamped after the
         // resample so nothing averages them away. Drawn last (over the damage
@@ -1919,6 +1927,7 @@ impl World {
         cam += self.shake_ofs;
         self.cam = cam;
         self.light_map.begin_frame();
+        let mut _s = crate::prof::scope(crate::prof::Stage::SceneFloor);
 
         pb.clear(self.level.palette.bg);
 
@@ -1945,6 +1954,7 @@ impl World {
         self.draw_boss_thresholds(pb, cam, WallLayer::Ground);
         self.draw_object_layer(pb, cam, false);
 
+        _s = crate::prof::scope(crate::prof::Stage::SceneWallsProps);
         // Wall bodies: caps and south faces, under the entities (the lintels
         // that go *over* the rat are drawn after them).
         self.draw_wall_layer(pb, cam, WallLayer::Body);
@@ -1964,11 +1974,13 @@ impl World {
             }
         }
 
+        _s = crate::prof::scope(crate::prof::Stage::SceneFixturesAmbience);
         let ambience_started = std::time::Instant::now();
         draw_fixtures(&mut self.light_map, pb, &self.level.objects.lights, self.level.theme, cam, self.elapsed);
         draw_ambience(&mut self.light_map, pb, &self.level.objects.emitters, cam, self.elapsed, self.player.pos);
         let ambience_cost = ambience_started.elapsed();
 
+        _s = crate::prof::scope(crate::prof::Stage::SceneGroundLoot);
         // Acid pools, in `SpawnId` order (overlapping sprites must draw in
         // spawn order, exactly like the legacy `Vec`).
         {
@@ -2116,6 +2128,7 @@ impl World {
 
         // Enemies (animated insects). Bugs overhang their radius (legs, wings,
         // health ring), so cull with a generous margin.
+        _s = crate::prof::scope(crate::prof::Stage::SceneEnemies);
         let accent = self.level.palette.accent;
         {
             let mut query = self
@@ -2147,6 +2160,7 @@ impl World {
             }
         }
 
+        _s = crate::prof::scope(crate::prof::Stage::SceneActors);
         // Boss bodies in the entity pass (airborne ones go over the player).
         self.draw_boss_body(pb, cam, false);
 
@@ -2223,15 +2237,18 @@ impl World {
         // so the rat is visibly ducking *under* them; then the foreground half
         // of the level objects (glue strands, striker bars, door leaves, the
         // rat-hole arch and the reward pedestal).
+        _s = crate::prof::scope(crate::prof::Stage::SceneOverhang);
         self.draw_wall_layer(pb, cam, WallLayer::Overhang);
         self.draw_boss_thresholds(pb, cam, WallLayer::Overhang);
         self.draw_object_layer(pb, cam, true);
 
+        _s = crate::prof::scope(crate::prof::Stage::SceneSmoke);
         // Brief smoke from combat and moving machinery, under bright sparks.
         if self.smoke_enabled {
             self.draw_smoke(pb, cam);
         }
 
+        _s = crate::prof::scope(crate::prof::Stage::SceneParticles);
         // Particles and shockwaves on top.
         self.particles.draw(pb, cam);
 
@@ -2308,6 +2325,7 @@ impl World {
         // their sprites at every zoom. Floating damage numbers are text sized
         // and belong to screen space: `draw` stamps them after the resample, so
         // they never scale and are never darkened by the ambient.
+        _s = crate::prof::scope(crate::prof::Stage::Lighting);
         self.apply_lighting(pb, cam, ambience_cost);
 
         // Hostile information wins the frame: pellets, telegraphs, tells and
@@ -2315,7 +2333,9 @@ impl World {
         // self-lit) and after every friendly effect (so a burst can never hide
         // the thing that is about to hurt the player). Screen-space minimum
         // sizes for the zoomed-out view live in `render::ink`.
+        _s = crate::prof::scope(crate::prof::Stage::Hostile);
         self.draw_hostile_layer(pb, cam);
+        drop(_s);
 
         // Developer overlay, dead last: the console's `hitboxes on` outlines the
         // collision shapes the simulation actually uses. Nothing may hide it.
@@ -2672,6 +2692,9 @@ impl World {
         if self.lighting == LightingMode::Off {
             return;
         }
+        if crate::prof::lighting_skipped() {
+            return;
+        }
         let thrash = self.thrash_visual();
         let squeak = self.squeak_visual();
         let scene = LightScene {
@@ -2689,6 +2712,16 @@ impl World {
         let started = std::time::Instant::now();
         self.light_map.apply_scene(pb, &scene);
         self.light_map.observe_cost(scene.mode, started.elapsed() + ambience_cost, pb.w * pb.h);
+    }
+
+    /// `--prof-bench`: the tier the last frame's lighting ran at.
+    pub(crate) fn prof_tier(&self) -> LightingMode {
+        self.light_map.quality(self.lighting)
+    }
+
+    /// `--prof-bench`: forget the cost controller's state between configs.
+    pub(crate) fn prof_reset_controller(&mut self) {
+        self.light_map.prof_reset_controller();
     }
 
     /// Access the render-only smoke layer (tests and screenshot captures).

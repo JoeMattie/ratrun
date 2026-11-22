@@ -1615,6 +1615,21 @@ impl App {
         }
     }
 
+    /// `--prof-bench`: skip the intro plate and play.
+    pub(crate) fn prof_force_playing(&mut self) {
+        self.screen = Screen::Playing;
+    }
+
+    /// `--prof-bench`: the current screen's name.
+    pub(crate) fn prof_screen(&self) -> &'static str {
+        match self.screen {
+            Screen::Title => "Title",
+            Screen::Playing => "Playing",
+            Screen::Paused => "Paused",
+            _ => "Other",
+        }
+    }
+
     /// Start a practice run on `theme` (`floor <name>`).
     pub fn start_floor(&mut self, theme: Theme) -> Result<(), String> {
         self.console_floor = Some(theme);
@@ -3030,6 +3045,7 @@ impl App {
         // not a sighting.
         if !self.console_cheat {
             if let Some(w) = self.world.as_ref() {
+                let _p = crate::prof::scope(crate::prof::Stage::Survey);
                 self.scores.library.survey(w);
             }
         }
@@ -4835,6 +4851,7 @@ impl App {
                 // resized terminal and one that never drew simulate the same.
                 w.viewport = Vec2::new(game.width as f32, (game.height * 2) as f32);
                 w.draw(&mut self.pixels);
+                let _p = crate::prof::scope(crate::prof::Stage::Blit);
                 self.pixels.render_to(game, frame.buffer_mut());
             }
         } else {
@@ -4846,8 +4863,10 @@ impl App {
 
         if let Some(w) = self.world.as_ref() {
             if matches!(self.screen, Screen::Playing) {
+                let _p = crate::prof::scope(crate::prof::Stage::Overlays);
                 overlay::draw_overlays(frame, game, w, &mut self.hud);
             }
+            let _p = crate::prof::scope(crate::prof::Stage::Hud);
             hud::draw_top(frame, top, w, &mut self.hud);
             hud::draw_bottom(frame, bottom, w, &mut self.hud);
             // Persistent CONSOLE USED tag in the top rail's right corner.
@@ -4903,6 +4922,7 @@ impl App {
         // Markers + labels first (reused buffers), then the art's own layout and
         // drawing: `render/minimap.rs` owns the panel geometry, the radar window
         // and the modal legend rail.
+        let _p = crate::prof::scope(crate::prof::Stage::Minimap);
         self.map_frame.refresh(w);
         let hovered = self.hits.hovered == Some(Target::Minimap);
         let compact_size = self.scores.minimap_size;

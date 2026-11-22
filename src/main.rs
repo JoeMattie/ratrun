@@ -14,6 +14,8 @@ mod console;
 mod input;
 mod lore;
 mod meta;
+mod prof;
+mod profbench;
 mod math;
 mod render;
 mod scores;
@@ -100,6 +102,10 @@ fn main() -> Result<()> {
     let caps = term::init(&args);
     if args.iter().any(|a| a == "--caps") {
         println!("{}", caps.describe());
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--prof-bench") {
+        profbench::run(&args);
         return Ok(());
     }
     if args.iter().any(|a| a == "--probe") {

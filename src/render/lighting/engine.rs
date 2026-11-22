@@ -407,7 +407,14 @@ impl LightMap {
         LightingMode::LIVE[(base.rank() + self.controller.penalty).min(3)]
     }
 
+    pub(crate) fn prof_reset_controller(&mut self) {
+        self.controller = QualityController::default();
+    }
+
     pub fn observe_cost(&mut self, mode: LightingMode, elapsed: Duration, pixels: usize) {
+        if crate::prof::controller_frozen() {
+            return;
+        }
         let budget = 160.0 + pixels as f64 * 0.035;
         let micros = elapsed.as_secs_f64() * 1e6;
         let state = &mut self.controller;
@@ -512,7 +519,10 @@ impl LightMap {
         if pb.w == 0 || pb.h == 0 {
             return;
         }
-        self.geometry.sync(scene.level);
+        {
+            let _p = crate::prof::scope(crate::prof::Stage::LSync);
+            self.geometry.sync(scene.level);
+        }
         let theme = scene.level.theme;
         let profile = super::theme_ambient(theme);
         // The rat's own zone bounds the ambient everywhere and the reach of
@@ -534,11 +544,20 @@ impl LightMap {
             }
             (None, cap) => cap.unwrap_or(1.0),
         };
-        self.grid
-            .prepare(pb, scene.cam, scene.mode, &self.geometry, profile, cap);
+        {
+            let _p = crate::prof::scope(crate::prof::Stage::LPrepare);
+            self.grid
+                .prepare(pb, scene.cam, scene.mode, &self.geometry, profile, cap);
+        }
+        crate::prof::count(crate::prof::Stage::CSamples, self.grid.samples.len() as u64);
         self.lights.points.clear();
         self.lights.weakest = 0;
-        let phase = self.gather_lights(pb.w, pb.h, scene);
+        let phase = {
+            let _p = crate::prof::scope(crate::prof::Stage::LGather);
+            self.gather_lights(pb.w, pb.h, scene)
+        };
+        crate::prof::count(crate::prof::Stage::CPoints, self.lights.points.len() as u64);
+        let _pstatic = crate::prof::scope(crate::prof::Stage::LStaticLights);
         self.static_shadows
             .resize(scene.level.objects.lights.len(), ShadowProfile::default());
         for (i, fixture) in scene.level.objects.lights.iter().enumerate() {
@@ -555,15 +574,25 @@ impl LightMap {
                     light.scatter *= cap / own;
                 }
             }
+            crate::prof::count(crate::prof::Stage::CStaticLit, 1);
             if fixture.kind == LightFixtureKind::Sun {
+                let _p = crate::prof::scope(crate::prof::Stage::LSun);
                 self.sun(pb, scene, light);
                 continue;
             }
             let shadow = &mut self.static_shadows[i];
-            shadow.bake(&self.geometry, light);
+            {
+                let _p = crate::prof::scope(crate::prof::Stage::LStaticBake);
+                if shadow.bake(&self.geometry, light) {
+                    crate::prof::count(crate::prof::Stage::CStaticBakeMiss, 1);
+                }
+            }
+            let _p = crate::prof::scope(crate::prof::Stage::LStaticSplat);
             self.grid
                 .splat(light, Some(shadow), scene.mode, scene.elapsed, theme);
         }
+        drop(_pstatic);
+        let _prank = crate::prof::scope(crate::prof::Stage::LRank);
         let (cap, shadows) = scene.mode.budget();
         let points = &mut self.lights.points;
         let rat = scene.player.pos - scene.cam;
@@ -607,11 +636,14 @@ impl LightMap {
                     .total_cmp(&b.0.pos.dist_sq(scene.player.pos))
             })
         });
+        drop(_prank);
+        crate::prof::count(crate::prof::Stage::CShaped, self.shaped.len() as u64);
         let mut shadow_index = 0;
         for &(mut light, _) in self.shaped.iter().take(cap) {
             if !self.grid.overlaps(light) {
                 continue;
             }
+            crate::prof::count(crate::prof::Stage::CShapedLit, 1);
             if matches!(light.shape, LightShape::Directional { .. }) {
                 self.grid.sun(light, &self.geometry, &[], scene.mode);
                 continue;
@@ -620,24 +652,38 @@ impl LightMap {
                 let profile = &mut self.moving_shadows[shadow_index];
                 // Stabilise the visibility origin at pixel scale as the rat moves.
                 light.pos = Vec2::new(light.pos.x.round(), light.pos.y.round());
-                profile.bake(&self.geometry, light);
+                {
+                    let _p = crate::prof::scope(crate::prof::Stage::LMovingBake);
+                    if profile.bake(&self.geometry, light) {
+                        crate::prof::count(crate::prof::Stage::CMovingBakeMiss, 1);
+                    }
+                }
                 shadow_index += 1;
                 Some(&*profile)
             } else {
                 None
             };
+            let _p = crate::prof::scope(crate::prof::Stage::LMovingSplat);
             self.grid
                 .splat(light, shadow, scene.mode, scene.elapsed, theme);
         }
         let hp = (scene.player.hp / scene.player.max_hp().max(1.0)).clamp(0.0, 1.0);
         if hp < 0.35 {
+            let _p = crate::prof::scope(crate::prof::Stage::LVignette);
             self.grid.vignette(hp, scene.elapsed);
         }
         // A mark outlives its pixel when a later sprite painted over it, and
         // (defensively) when the buffer it was taken from is not this one.
+        crate::prof::count(crate::prof::Stage::CMarks, self.marks.len() as u64);
+        let _pm = crate::prof::scope(crate::prof::Stage::LMarks);
         self.marks
             .retain(|m| pb.pixels().get(m.index) == Some(&m.source));
-        self.grid.composite(pb, scene.depth);
+        drop(_pm);
+        {
+            let _p = crate::prof::scope(crate::prof::Stage::LComposite);
+            self.grid.composite(pb, scene.depth);
+        }
+        let _pm = crate::prof::scope(crate::prof::Stage::LMarks);
         for mark in &self.marks {
             let pixel = &mut pb.pixels_mut()[mark.index];
             if mark.readable {
@@ -837,6 +883,7 @@ impl Grid {
             LightShape::Cone { half_angle, .. } => half_angle.cos(),
             _ => 0.0,
         };
+        let mut touched = 0u64;
         for y in lo(centre.y)..hi(centre.y, self.h) {
             for x in lo(centre.x)..hi(centre.x, self.w) {
                 let delta = self.point(x, y) - light.pos;
@@ -871,9 +918,11 @@ impl Grid {
                 } else {
                     0.0
                 };
+                touched += 1;
                 self.samples[i].light(light, (fall * face + glint) * flicker, visibility);
             }
         }
+        crate::prof::count(crate::prof::Stage::CSplatSamples, touched);
     }
 
     fn sun(&mut self, light: Light, geometry: &Geometry, bodies: &[Body], mode: LightingMode) {

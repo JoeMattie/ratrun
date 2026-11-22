@@ -12494,6 +12494,11 @@ pub struct AudioEngine {
 impl AudioEngine {
     /// Returns `None` if no output device is available (stays silent).
     pub fn new() -> Option<AudioEngine> {
+        // `RATRUN_PROF_NO_AUDIO=1` (the profiling PTY harness): never open a
+        // device, exactly as on a machine without one.
+        if std::env::var_os("RATRUN_PROF_NO_AUDIO").is_some() {
+            return None;
+        }
         let mut stream = DeviceSinkBuilder::open_default_sink().ok()?;
         // rodio prints to stderr when the device sink drops, which would land
         // on the restored terminal at exit.

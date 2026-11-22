@@ -367,7 +367,7 @@ impl Default for ShadowProfile {
 }
 
 impl ShadowProfile {
-    pub(super) fn bake(&mut self, geometry: &Geometry, light: Light) {
+    pub(super) fn bake(&mut self, geometry: &Geometry, light: Light) -> bool {
         let radius = light.shape.extent();
         let key = (
             geometry.revision,
@@ -377,7 +377,7 @@ impl ShadowProfile {
             light.height.to_bits(),
         );
         if self.key == Some(key) {
-            return;
+            return false;
         }
         self.key = Some(key);
         let origin = light.pos;
@@ -399,6 +399,7 @@ impl ShadowProfile {
                 light.occluders,
             );
         }
+        true
     }
 
     pub(super) fn visibility(
