@@ -285,6 +285,33 @@ impl PixelBuffer {
             return;
         }
         let depth = crate::term::color_depth();
+        // The usual case — the area lies inside the buffer and the pixel grid
+        // covers it — walks whole rows: one slice of cells against the two
+        // pixel rows it shows, with no per-cell position lookup or bounds
+        // check. (ratatui hands out a blank buffer every frame, so each cell's
+        // glyph does have to be written; what this avoids is finding the cell.)
+        let (cols, rows) = (area.width as usize, area.height as usize);
+        let inside = area.x >= buf.area.x
+            && area.y >= buf.area.y
+            && area.right() <= buf.area.right()
+            && area.bottom() <= buf.area.bottom();
+        if inside && cols <= self.w && rows * 2 <= self.h {
+            let stride = buf.area.width as usize;
+            let left = (area.x - buf.area.x) as usize;
+            let top = (area.y - buf.area.y) as usize;
+            for cy in 0..rows {
+                let start = (top + cy) * stride + left;
+                let cells = &mut buf.content[start..start + cols];
+                let upper = &self.px[cy * 2 * self.w..][..cols];
+                let lower = &self.px[(cy * 2 + 1) * self.w..][..cols];
+                for ((cell, &top), &bot) in cells.iter_mut().zip(upper).zip(lower) {
+                    cell.set_symbol("▀");
+                    cell.fg = super::palette::to_term(top, depth);
+                    cell.bg = super::palette::to_term(bot, depth);
+                }
+            }
+            return;
+        }
         for cy in 0..area.height {
             let top_y = cy as usize * 2;
             let bot_y = top_y + 1;
@@ -305,6 +332,48 @@ impl PixelBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_row_blit_writes_the_same_cells_as_the_cell_by_cell_one() {
+        // A buffer that is larger than the area (the fast path) against the
+        // same blit clipped by a buffer that cuts the area (the slow path):
+        // every cell both of them cover must agree, and the fast path must not
+        // touch a cell outside the area.
+        let mut pb = PixelBuffer::new(9, 8);
+        for (i, p) in pb.pixels_mut().iter_mut().enumerate() {
+            *p = (i as u8, (i * 3) as u8, (i * 7) as u8);
+        }
+        let area = Rect::new(2, 1, 9, 4);
+        let mut whole = Buffer::empty(Rect::new(0, 0, 14, 7));
+        pb.render_to(area, &mut whole);
+        let mut cut = Buffer::empty(Rect::new(0, 0, 8, 4));
+        pb.render_to(area, &mut cut);
+        let mut painted = 0;
+        for y in 0..7u16 {
+            for x in 0..14u16 {
+                let cell = &whole[(x, y)];
+                if area.contains(ratatui::layout::Position::new(x, y)) {
+                    painted += 1;
+                    assert_eq!(cell.symbol(), "▀");
+                    let (cx, cy) = ((x - 2) as usize, (y - 1) as usize);
+                    let depth = crate::term::color_depth();
+                    assert_eq!(cell.fg, crate::render::palette::to_term(pb.pixel_at(cx, cy * 2), depth));
+                    assert_eq!(cell.bg, crate::render::palette::to_term(pb.pixel_at(cx, cy * 2 + 1), depth));
+                    if x < 8 && y < 4 {
+                        assert_eq!(cell, &cut[(x, y)], "cell ({x}, {y})");
+                    }
+                } else {
+                    assert_eq!(cell.symbol(), " ", "cell ({x}, {y}) is outside the area");
+                }
+            }
+        }
+        assert_eq!(painted, 36);
+        // A pixel grid smaller than the area keeps the padded (black) blit.
+        let small = PixelBuffer::new(3, 2);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 14, 7));
+        small.render_to(area, &mut buf);
+        assert_eq!(buf[(10, 4)].symbol(), "▀");
+    }
 
     #[test]
     fn rect_fill_clips_to_bounds() {
