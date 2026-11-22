@@ -62,6 +62,7 @@ use crate::render::palette::{mix, to_color, Rgb, COAT, EDGE, MUTED, PLATE, TRACK
 
 use crate::game::art_boss_broom::{self, BroomBossView};
 use crate::game::art_boss_cat::{self, BossCatView};
+use crate::game::art_boss_hawk::{self, HawkView};
 use crate::game::art_boss_magpie::{self, MagpieView};
 use crate::game::art_boss_mangle::{self, MangleView};
 use crate::game::art_boss_mower::{self, MowerView};
@@ -664,6 +665,20 @@ fn draw_boss(art: &mut PixelBuffer, kind: BossKind, accent: Rgb, t: f32) {
             };
             art_boss_magpie::draw_magpie_ground(art, &v, Vec2::ZERO, accent);
             art_boss_magpie::draw_magpie(art, &v, Vec2::ZERO, accent);
+        }
+        BossKind::Hawk => {
+            // The stopped shadow over a locked reticle: the fight's signature
+            // frame, the one the card's text is about.
+            let mut v = HawkView::new(c, facing, target);
+            v.state = crate::game::art_boss_hawk::HawkState::Dive;
+            v.progress = 0.74;
+            v.anim = anim;
+            v.hp_frac = 0.7;
+            v.phase = 2;
+            v.lane_start = c - Vec2::new(26.0, 6.0);
+            v.decoy = target + Vec2::new(0.0, 20.0);
+            art_boss_hawk::draw_hawk_ground(art, &v, Vec2::ZERO, accent);
+            art_boss_hawk::draw_hawk(art, &v, Vec2::ZERO, accent);
         }
     }
 }

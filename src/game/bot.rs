@@ -925,11 +925,16 @@ impl Bot {
                 if !self.sees(w, p, boss.pos) {
                     continue;
                 }
-                self.threats.push(Threat::BossBody {
-                    pos: boss.pos,
-                    radius: boss.kind.body_radius(),
-                    damage: boss.contact_damage.max(boss.kind.contact_damage()),
-                });
+                // A boss that is out of reach (the hawk overhead) is only a
+                // shadow: dodging it would be dodging nothing, and the bot must
+                // spend that movement reading the deck marks instead.
+                if !boss.overhead() {
+                    self.threats.push(Threat::BossBody {
+                        pos: boss.pos,
+                        radius: boss.kind.body_radius(),
+                        damage: boss.contact_damage.max(boss.kind.contact_damage()),
+                    });
+                }
                 for h in &boss.hazards {
                     // A damage-free hazard is a *shove*, not a hit: the
                     // Magpie's wing-beat gusts are push-only, and treating one
@@ -2737,7 +2742,11 @@ mod tests {
     #[test]
     fn the_bot_never_stands_on_a_hole_and_clears_the_flatbed() {
         use crate::game::weapon::WeaponKind;
-        let mut w = World::new(Theme::Trailer, 41);
+        // A seed whose flatbed pool draws **the magpie**: this test (and its
+        // 600 s fight clock) measures the magpie's pool, and the flatbed now
+        // pools two birds. The Redtail's own fight has its own test
+        // (`boss::hawk::tests::a_bot_kills_the_hawk_on_the_real_deck`).
+        let mut w = World::new(Theme::Trailer, 5);
         {
             let lo = &mut w.player.loadout;
             for kind in [

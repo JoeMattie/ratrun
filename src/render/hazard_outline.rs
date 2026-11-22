@@ -51,6 +51,8 @@ pub fn warn_colour(kind: BossKind, active: bool) -> Rgb {
         BossKind::HorseshoeCrab => ((255, 198, 116), (255, 84, 70)),
         // The first success fights under the kitchen's own warm ramp.
         BossKind::MegaRat => ((255, 186, 64), (255, 72, 62)),
+        // A raptor's talon print on oak: warmer and browner than the horde's.
+        BossKind::Hawk => ((255, 198, 118), (255, 96, 66)),
     };
     if active {
         hot

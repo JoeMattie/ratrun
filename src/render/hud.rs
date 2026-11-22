@@ -238,6 +238,9 @@ pub fn boss_codename_kind(kind: crate::game::ecs::systems::boss::BossKind) -> (&
         }
         // The Kitchen's second fight: the facility's first success.
         BossKind::MegaRat => return (crate::lore::MEGARAT_NAME, crate::lore::MEGARAT_CLASS),
+        // The flatbed's pool mate: the hawk that has been following the truck.
+        // (While it is high, `boss_plate` swaps the tag for the overhead one.)
+        BossKind::Hawk => return (crate::lore::HAWK_NAME, crate::lore::HAWK_CLASS),
     };
     let class_tag = match level {
         CampaignLevel::Sewer => "CLASS-V APEX PREDATOR",
@@ -275,11 +278,18 @@ pub fn boss_plate(world: &World) -> (&'static str, &'static str) {
         if boss.dead {
             None
         } else {
-            Some(boss.kind)
+            // The overhead read rides on the plate: the Redtail is only a
+            // shadow while it is high, and the bar must say why the rat's
+            // weapons are finding nothing.
+            Some((boss.kind, boss.overhead()))
         }
     });
     match live {
-        Some(kind) => boss_kind_codename(kind),
+        // Only the Redtail can be out of reach, and the plate must say so.
+        Some((BossKind::Hawk, true)) => {
+            (crate::lore::HAWK_NAME, crate::game::art_boss_hawk::OVERHEAD_TAG)
+        }
+        Some((kind, _)) => boss_kind_codename(kind),
         None => {
             let theme = world.level.theme;
             let kind = BossKind::for_theme_seeded(theme, world.level.seed);

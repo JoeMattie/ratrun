@@ -309,6 +309,9 @@ fn boss_name(k: BossKind) -> &'static str {
         BossKind::Mangle => crate::render::hud::boss_codename(Theme::Laundry).0,
         BossKind::NightEdition => crate::render::hud::boss_codename(Theme::Printworks).0,
         BossKind::Magpie => crate::render::hud::boss_codename(Theme::Trailer).0,
+        BossKind::Hawk => crate::render::hud::boss_kind_codename(BossKind::Hawk).0,
+        BossKind::HorseshoeCrab => crate::render::hud::boss_kind_codename(BossKind::HorseshoeCrab).0,
+        BossKind::MegaRat => crate::render::hud::boss_kind_codename(BossKind::MegaRat).0,
     }
 }
 
@@ -491,6 +494,7 @@ pub fn all_rows() -> Vec<Row> {
         BossKind::Mangle,
         BossKind::NightEdition,
         BossKind::Magpie,
+        BossKind::Hawk,
     ] {
         let (hint, dossier) = boss_text(k);
         rows.push(Row {
@@ -820,6 +824,15 @@ fn boss_text(k: BossKind) -> (&'static str, &'static str) {
              and has decided the cab is its nest. It pecks, it strafes the deck, and it \
              beats its wings against the trailer's own wind. Everything loose on the \
              deck, the rat included, is going tailward.",
+        ),
+        BossKind::Hawk => (
+            "Flatbed · the getaway",
+            "The other bird. The magpie wants the cargo; this one wants you, and it has \
+             been following the truck since the last weigh station with its shadow. High \
+             up it cannot be touched at all — watch the shape crossing the planks, step \
+             off the talon print, and be there when it buries its feet in the oak. When \
+             it stoops to hover, it is finally reachable, and it knows it: darts, a \
+             marked grab and a talon rake down the boards.",
         ),
     }
 }
@@ -1481,6 +1494,7 @@ fn boss_answer(k: BossKind) -> &'static str {
         BossKind::Mangle => "change sides between bites, hit the crank",
         BossKind::NightEdition => "stand on the blank margin",
         BossKind::Magpie => "cross the wind, not against it",
+        BossKind::Hawk => "step off the talon print, then bite the nape",
     }
 }
 
@@ -2209,6 +2223,7 @@ fn boss_at(i: usize) -> Option<BossKind> {
         BossKind::Mangle,
         BossKind::NightEdition,
         BossKind::Magpie,
+        BossKind::Hawk,
     ]
     .get(i)
     .copied()
