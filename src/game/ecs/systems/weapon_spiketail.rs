@@ -698,8 +698,7 @@ pub fn spiked_tail_system(
     lash_buf.sort_unstable_by_key(|&(id, _)| id);
 
     let mut moved = false;
-    for slot in 0..lash_buf.len() {
-        let entity = lash_buf[slot].1;
+    for &(_, entity) in lash_buf.iter() {
         let Ok((_, _, mut lash)) = lashes.get_mut(entity) else {
             continue;
         };
@@ -844,6 +843,16 @@ mod tests {
     fn run_fire(w: &mut World) -> bool {
         let before = w.player.loadout.weapons[0].timer;
         w.begin_tick(0.0, Vec2::ZERO, false);
+        w.ecs.run_system_cached(fire_weapons_system).unwrap();
+        w.end_tick();
+        w.player.loadout.weapons[0].timer > before
+    }
+
+    /// [`run_fire`] with a reticle: the lash takes the eligible body nearest
+    /// `aim` instead of the one nearest the rat.
+    fn run_fire_aimed(w: &mut World, aim: Vec2) -> bool {
+        let before = w.player.loadout.weapons[0].timer;
+        w.begin_tick_with_aim(0.0, Vec2::ZERO, false, false, Some(aim));
         w.ecs.run_system_cached(fire_weapons_system).unwrap();
         w.end_tick();
         w.player.loadout.weapons[0].timer > before
@@ -1270,7 +1279,9 @@ mod tests {
             hp(&w, aside),
         ];
         w.player.loadout.weapons[0].evolved = true;
-        assert!(run_fire(&mut w));
+        // Auto-fire would take the nearest body (`crossed_b`); the far catch
+        // with bodies in between is an aimed lash, pointed at the catch.
+        assert!(run_fire_aimed(&mut w, p + Vec2::new(50.0, 0.0)));
         let l = lashes(&mut w);
         assert!(l[0].evolved);
         assert_eq!(l[0].primary, Some(LashTarget::Enemy(caught)));
@@ -1446,6 +1457,13 @@ mod tests {
         w.player.loadout.weapons[0].evolved = true;
         let caught = w.spawn_enemy(EnemyKind::Skitterer, p + Vec2::new(50.0, 0.0), 400.0);
         assert!(run_fire(&mut w));
+        // The single-system harness has no schedule in front of it: build the
+        // index and the grid the way the tick does before the lash runs.
+        w.begin_tick(0.0, Vec2::ZERO, false);
+        w.ecs
+            .run_system_cached(crate::game::ecs::systems::enemy_move::grid_build_system)
+            .unwrap();
+        w.end_tick();
         let ticks = (LASH_RECOIL_AT / DT).floor() as usize + 2;
         for _ in 0..ticks {
             run_lash(&mut w, DT);

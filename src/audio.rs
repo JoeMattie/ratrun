@@ -11614,8 +11614,11 @@ mod tests {
             total_variants >= 140,
             "expected rich variant bank across all 59 SFX, got {total_variants}"
         );
+        // The bank is 128 effects (the Spiked Tail's lash took it past the old
+        // 16 MiB line); the budget is a tripwire against a runaway variant
+        // count, not a hard limit.
         assert!(
-            bytes < 16 * 1024 * 1024,
+            bytes < 18 * 1024 * 1024,
             "audio cache unexpectedly large: {bytes} bytes"
         );
     }

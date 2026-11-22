@@ -587,11 +587,20 @@ fn draw_callouts(
     if n == 0 {
         return;
     }
-    // Insertion sort by remaining time descending (at most 3 elements).
+    // Insertion sort by remaining time descending (at most 3 elements), with
+    // the Library's discovery notes after everything else: only two pills are
+    // visible, and "you found a new entry" must never hide the pill that
+    // confirms what the player just did (an upgrade pick, a pickup, a warning).
+    let rank = |i: usize| {
+        let slot = &state.callouts[i];
+        (
+            slot.kind != Some(crate::render::hud::CalloutKind::Library),
+            slot.timer,
+        )
+    };
     for i in 1..n {
         let mut j = i;
-        while j > 0 && state.callouts[active_indices[j]].timer > state.callouts[active_indices[j - 1]].timer
-        {
+        while j > 0 && rank(active_indices[j]) > rank(active_indices[j - 1]) {
             active_indices.swap(j, j - 1);
             j -= 1;
         }

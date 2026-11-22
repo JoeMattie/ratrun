@@ -155,10 +155,16 @@ fn the_tab_strip_registers_targets_and_counts() {
         "no row target"
     );
     let buf = terminal.backend().buffer().clone();
-    let row: String = (0..80).map(|x| buf[(x, 1)].symbol()).collect();
+    // The panel is centred with a one-cell margin: row 1 is its border, row 2
+    // the tab strip.
+    let row: String = (0..80).map(|x| buf[(x, 2)].symbol()).collect();
     let (seen, total) = lib.counts(&rows, Tab::Bestiary);
     assert!(
         row.contains(&format!("{seen}/{total}")),
-        "the bestiary count {seen}/{total} is missing from {row:?}"
+        "the bestiary count {seen}/{total} is missing from {row:?}\n{}",
+        (0..24)
+            .map(|y| (0..80).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }

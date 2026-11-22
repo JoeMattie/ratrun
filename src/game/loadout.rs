@@ -1909,7 +1909,9 @@ mod tests {
         let mut lo = Loadout::with_caps(WeaponKind::Gnaw, SlotCaps::new(6, 6));
         lo.apply(&Upgrade::NewWeapon(WeaponKind::AcidSpit));
         lo.apply(&Upgrade::Passive(PassiveKind::Damage));
-        let keep: Vec<_> = keepables(&lo).into_iter().take(2).collect();
+        // The manifest lists weapons first (Gnaw, Acid Spit), then passives:
+        // keep one of each.
+        let keep: Vec<_> = keepables(&lo).into_iter().skip(1).take(2).collect();
         let next = campaign::next_loadout(&lo, &keep).expect("a valid keep");
         assert_eq!(next.caps, SlotCaps::new(6, 6));
         assert_eq!(next.weapons.len(), 1);

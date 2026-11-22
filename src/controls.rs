@@ -1528,8 +1528,9 @@ mod tests {
             "C cursor",
             "O options",
             "M mute",
-            "[ music",
-            "- effects",
+            "[ ] music",
+            "- = effects",
+            "L story",
             "pause",
             "Q quit",
         ] {

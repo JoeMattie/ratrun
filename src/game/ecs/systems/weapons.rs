@@ -1876,7 +1876,7 @@ mod tests {
     use crate::game::ecs::components::{Entity, SpawnId};
     use crate::game::ecs::resources::EnemyIndex;
     use crate::game::enemy::{Enemy, EnemyKind};
-    use crate::game::ecs::components::{CheeseString, EvolvedShot, MilkTooth};
+    use crate::game::ecs::components::{EvolvedShot, MilkTooth};
     use crate::game::level::{MAP_COLS, MAP_ROWS, Theme, TileRect};
     use crate::game::particle::Particles;
     use crate::game::particle::damage_number::DamageNumbers;
@@ -2065,6 +2065,8 @@ mod tests {
 
     /// **Fondue Fork, aimed**: the two tines straddle the reticle, so the
     /// string plants across the aim line rather than across the old facing.
+    /// (The tines are projectiles: the string itself appears once both have
+    /// planted, so the cast is read from the tines' flight.)
     #[test]
     fn fondue_fork_tines_straddle_the_aim() {
         let mut w = World::new(Theme::Sewer, 28);
@@ -2076,16 +2078,14 @@ mod tests {
         w.player.loadout.weapons[0].evolved = true;
         let p = w.player.pos;
         run_weapons_aim(&mut w, 1.0 / 60.0, Some(p + Vec2::new(0.0, 160.0)));
-        let mut q = w.ecs.query::<&CheeseString>();
-        let string = q.iter(&w.ecs).next().expect("the fork's string");
-        // Both plant points are on the aim's forward side (+y) and straddle it.
-        assert!(string.a.y > p.y && string.b.y > p.y, "tines behind the aim");
-        let straddles = (string.a.x - p.x) * (string.b.x - p.x) < 0.0;
+        let mut q = w.ecs.query::<&crate::game::ecs::components::FondueTine>();
+        let tines: Vec<Vec2> = q.iter(&w.ecs).map(|t| t.vel).collect();
+        assert_eq!(tines.len(), 2, "the fork throws two tines");
+        // Both fly to the aim's forward side (+y) and straddle it.
+        assert!(tines.iter().all(|v| v.y > 0.0), "tines behind the aim: {tines:?}");
         assert!(
-            straddles,
-            "tines did not straddle the aim: {:?} {:?}",
-            string.a,
-            string.b
+            tines[0].x * tines[1].x < 0.0,
+            "tines did not straddle the aim: {tines:?}"
         );
     }
 

@@ -3842,7 +3842,10 @@ mod tests {
                     return (row[..byte].chars().count() as u16, y);
                 }
             }
-            panic!("{text:?} is missing from the frame")
+            let frame: Vec<String> = (0..buf.area.height)
+                .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+                .collect();
+            panic!("{text:?} is missing from the frame:\n{}", frame.join("\n"))
         }
 
         fn click(&mut self, text: &str) {
@@ -3956,9 +3959,13 @@ mod tests {
             // A floor that has not been unlocked is marked on the title row.
             h.frame(&[KeyCode::Right]);
             h.frame(&[KeyCode::Right]);
+            // The pointer still rests where the `›` arrow was, which is where
+            // the longer name puts its mark: park it before reading the row.
+            h.events(&[], &[(MouseEventKind::Moved, (0, 0))]);
             assert!(
                 h.screen_text().contains("Laundry ×"),
-                "a locked floor is marked on the title"
+                "a locked floor is marked on the title: {}",
+                h.screen_text()
             );
             h.frame(&[KeyCode::Left, KeyCode::Left]);
             h.click("L story");
@@ -6454,7 +6461,7 @@ mod tests {
         let after_pick = h.frame(&[]);
         assert!(
             after_pick.contains("EQUIPPED"),
-            "HUD should display EQUIPPED callout after upgrade pick"
+            "HUD should display EQUIPPED callout after upgrade pick: {after_pick}"
         );
 
         // Ending the run populates RunSummary matching finalized score.
@@ -10010,6 +10017,9 @@ mod tests {
     #[test]
     fn the_library_navigates_by_mouse() {
         let mut h = Harness::new(80, 24);
+        // A fresh profile lists every entry as `???`; unveil the index so the
+        // rows carry their names.
+        h.app.scores.library.reveal_all();
         open_library_from_title(&mut h);
         // Click the ARSENAL tab (unselected, so it is drawn without brackets)
         // and then a row under it.

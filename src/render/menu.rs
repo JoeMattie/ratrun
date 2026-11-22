@@ -351,7 +351,42 @@ pub fn draw_title(
     let gap = u16::from(r.height >= 17);
     let art_gap = u16::from(rat_h > 0);
     let body_h = rat_h + art_gap + logo_h + 8 + gap * 2;
-    let body = band(r, r.height.saturating_sub(body_h + 3) / 2, body_h);
+    let mut body_top = r.height.saturating_sub(body_h + 3) / 2;
+    // The controls legend is a block of lines, most important first, laid
+    // out from the bottom up: the plate takes as many as it has rows for and
+    // never drops the first one. The lines carry the **current** bindings
+    // (`controls::Controls::title_legend_lines`), so a remapped key shows here
+    // at once.
+    let legend = controls_src.title_legend_lines(r.width >= 96);
+    // One row less than the old ladder: the title carries five menu rows now
+    // (the LIBRARY row), so the legend keeps clear of the BEST line.
+    let legend_room = if r.height >= 19 {
+        4
+    } else if r.height >= 18 {
+        3
+    } else if r.height >= 16 {
+        2
+    } else {
+        1
+    };
+    let mut legend_n = legend.len().min(legend_room);
+    if legend_n < legend.len() && r.height >= 16 {
+        // One more line fits when the body's last painted row (BEST) still
+        // clears the rail, if need be by lifting the body into the spare rows
+        // above it. That is the 57x20 plate: all four lines, nothing dropped.
+        let rail = r.height.saturating_sub(3 + legend_n as u16);
+        let end = body_top + body_h - 1;
+        if end <= rail {
+            legend_n += 1;
+        } else if end - rail <= body_top {
+            body_top -= end - rail;
+            legend_n += 1;
+        }
+    }
+    while legend_n > 1 && r.height.saturating_sub(2 + legend_n as u16) < 8 {
+        legend_n -= 1;
+    }
+    let body = band(r, body_top, body_h);
     if rat_h > 0 {
         let width = title_art_width(area).unwrap_or(0) as u16;
         let x = r.x + r.width.saturating_sub(width) / 2;
@@ -456,28 +491,8 @@ pub fn draw_title(
     );
     if r.height >= 12 {
         let wide = r.width >= 72;
-        // The controls legend is laid out as a block of lines, most important
-        // first, from the bottom up: the plate takes as many as it has rows for
-        // and never drops the first one. Every live control is named there and
-        // the lines carry the **current** bindings (see
-        // `controls::Controls::title_legend_lines`), so a remapped key shows
-        // here at once.
-        let lines = controls_src.title_legend_lines(r.width >= 96);
-        // One row less than the old ladder: the title carries five menu rows
-        // now (the LIBRARY row), so the legend keeps clear of the BEST line.
-        let room = if r.height >= 19 {
-            4
-        } else if r.height >= 18 {
-            3
-        } else if r.height >= 16 {
-            2
-        } else {
-            1
-        };
-        let mut n = lines.len().min(room);
-        while n > 1 && r.height.saturating_sub(2 + n as u16) < 8 {
-            n -= 1;
-        }
+        let lines = legend;
+        let n = legend_n;
         if r.height >= 16 {
             let rail_row = r.height.saturating_sub(2 + n as u16);
             f.render_widget(
@@ -506,16 +521,18 @@ pub fn draw_title(
             band(r, r.height - 1, 1),
             hits,
             &[
+                // The narrow row is 54 cells: it has to fit the 55-cell plate
+                // of a 57-column terminal with `Q quit` intact.
                 (
                     if wide {
                         "↑↓ select · ←→/wheel sector · Enter confirm or click · "
                     } else {
-                        "↑↓ select · ←→ sector · Enter/click · "
+                        "↑↓ select · ←→ sector · Enter/click ·"
                     },
                     None,
                 ),
                 (" L story ", Some(Target::Story)),
-                (" · Q quit", None),
+                (if wide { " · Q quit" } else { "· Q quit" }, None),
             ],
         );
     }
@@ -1900,7 +1917,7 @@ pub fn draw_pause_with_run(
                     buf.set_stringn(
                         inner.x,
                         y,
-                        &format!("+{hidden} more"),
+                        format!("+{hidden} more"),
                         left_w as usize,
                         ink(WARN_AMBER),
                     );
@@ -1934,7 +1951,7 @@ pub fn draw_pause_with_run(
                             buf.set_stringn(
                                 right_x,
                                 pass_icon_y + art_icons::SMALL_CELL_H,
-                                &format!("+{rest}"),
+                                format!("+{rest}"),
                                 right_w as usize,
                                 ink(WARN_AMBER),
                             );
@@ -2016,7 +2033,7 @@ pub fn draw_pause_with_run(
             buf.set_stringn(
                 inner.x,
                 y,
-                &format!("+{} more", n_w - shown),
+                format!("+{} more", n_w - shown),
                 left_w as usize,
                 ink(WARN_AMBER),
             );
@@ -2044,7 +2061,7 @@ pub fn draw_pause_with_run(
                     counted += 1;
                 }
                 if counted < n_p {
-                    buf.set_stringn(px, y, &format!("+{}", n_p - counted), left_w as usize, ink(WARN_AMBER));
+                    buf.set_stringn(px, y, format!("+{}", n_p - counted), left_w as usize, ink(WARN_AMBER));
                 }
             }
         }
@@ -2700,6 +2717,8 @@ mod tests {
     #[test]
     fn the_short_pause_plate_keeps_the_loadout_and_the_legend() {
         let mut w = World::new(Theme::Sewer, 7);
+        // Five weapons: one more than a fresh profile's rack holds.
+        w.player.loadout.set_caps(crate::game::loadout::SlotCaps::new(5, 5));
         for kind in [
             WeaponKind::CheeseSpray,
             WeaponKind::TailThrash,
