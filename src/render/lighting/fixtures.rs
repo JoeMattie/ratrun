@@ -28,6 +28,8 @@ pub(super) const SCONCE_HALF_ANGLE: f32 = 1.02;
 /// How high a wall lamp sits, in world px. Low on the wall, so a crate or a
 /// counter beside it still throws a shadow.
 pub(super) const SCONCE_HEIGHT: f32 = 9.0;
+/// How many times a second a wall lamp's flicker takes a new value.
+const SCONCE_FLICKER_HZ: f32 = 3.0;
 
 /// The lens colour of a theme's wall lamp (batch 9): the light's tint and the
 /// drawn lens are one value, so the pixels and the pool can never disagree.
@@ -278,11 +280,19 @@ pub(super) fn light(
                 };
                 light.scatter = light.energy * 0.30;
             } else {
-                light.flicker = Some(Flicker {
+                // A wall lamp breathes in steps, not every frame: the same
+                // gentle curve a hanging lamp uses, sampled three times a
+                // second and held. A continuous flicker repainted its whole
+                // pool every frame (measured: +46–80 % changed cells on a still
+                // screen with one lamp in view); held steps repaint it three
+                // times a second.
+                let held = (scene.elapsed * SCONCE_FLICKER_HZ).floor() / SCONCE_FLICKER_HZ;
+                light.energy *= Flicker {
                     amount: 0.09,
                     speed: 7.0,
                     phase: phase_offset,
-                });
+                }
+                .gain(held);
             }
         }
         Kind::Arena => {

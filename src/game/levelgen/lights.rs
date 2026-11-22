@@ -388,7 +388,11 @@ fn sconce_faces(level: &Level, blocked: &[(i32, i32)]) -> Vec<Face> {
         for dir in DIRS {
             let (dx, dy) = cardinal_delta(dir);
             let floor = (x + dx, y + dy);
+            // The pool needs floor to run into: a face onto a one-cell-wide
+            // slot (the far side is wall again) is not a lamp's wall.
+            let beyond = (floor.0 + dx, floor.1 + dy);
             if level.tiles.get(floor.0, floor.1) == TileKind::Open
+                && level.tiles.get(beyond.0, beyond.1) == TileKind::Open
                 && !blocked.contains(&floor)
             {
                 faces.push(Face {
@@ -438,7 +442,24 @@ fn place_wall_lamps(level: &mut Level, rng: &mut rand::rngs::StdRng) {
         .map(|f| f.pos)
         .collect();
     let mut chosen: Vec<Face> = Vec::new();
-    for room in &level.rooms {
+    // The cap binds on every campaign map (the roles would ask for about
+    // fifty), so the order decides who is lit. Spend it where a lamp matters
+    // most and then thin evenly instead of truncating the room list: the arena
+    // and the start room, the corridors, every other room or hall, and only
+    // then the rooms in between. Each group keeps the level's own room order.
+    let mut order: Vec<&Room> = Vec::with_capacity(level.rooms.len());
+    order.extend(level.rooms.iter().filter(|r| r.kind == RoomKind::Boss));
+    order.extend(level.rooms.iter().filter(|r| r.kind == RoomKind::Start));
+    order.extend(level.rooms.iter().filter(|r| r.kind == RoomKind::Corridor));
+    let living = || {
+        level
+            .rooms
+            .iter()
+            .filter(|r| matches!(r.kind, RoomKind::Room | RoomKind::Hall))
+    };
+    order.extend(living().step_by(2));
+    order.extend(living().skip(1).step_by(2));
+    for room in order {
         if chosen.len() >= SCONCE_CAP {
             break;
         }
@@ -546,10 +567,11 @@ fn room_lamps(
     let mut list: Vec<(i32, Face)> = faces
         .iter()
         .filter(|f| room.rect.contains(f.floor.0, f.floor.1))
-        .filter(|f| match (horizontal, f.dir) {
-            (true, Cardinal::North | Cardinal::South) => true,
-            (false, Cardinal::East | Cardinal::West) => true,
-            _ => false,
+        .filter(|f| {
+            matches!(
+                (horizontal, f.dir),
+                (true, Cardinal::North | Cardinal::South) | (false, Cardinal::East | Cardinal::West)
+            )
         })
         .filter(|f| !near(doorways, f.floor, SCONCE_DOOR_GAP))
         .map(|f| {
