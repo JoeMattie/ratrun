@@ -1147,7 +1147,7 @@ mod tests {
         for (level, names) in [
             (0usize, &["APEX JAGUAR", crate::lore::HORSESHOE_NAME][..]),
             (1, &["THE SWEEPER", crate::lore::MEGARAT_NAME][..]),
-            (2, &["TURF-REAPER MK.IV"][..]),
+            (2, &["TURF-REAPER MK.IV", crate::lore::COBRA_NAME][..]),
         ] {
             let mut seen: Vec<&str> = Vec::new();
             for seed in 0..48u64 {
@@ -1184,6 +1184,17 @@ mod tests {
         }
     }
 
+    /// The floor's name plate for whatever boss this level seed fields (the
+    /// Lab pools the mower and the cobra, so a hard-coded name here would pin
+    /// one of the two).
+    fn floor_plate(w: &World) -> &'static str {
+        boss_codename_kind(crate::game::ecs::systems::boss::BossKind::pool_pick(
+            w.level.theme,
+            w.level.seed,
+        ))
+        .0
+    }
+
     #[test]
     fn pre_boss_countdown_renders_before_boss_time() {
         let mut w = World::new(Theme::Lab, 7);
@@ -1195,9 +1206,10 @@ mod tests {
             .draw(|f| draw_overlays(f, f.area(), &w, &mut hud))
             .unwrap();
         let text = buf_text(&terminal);
+        let plate = floor_plate(&w);
         assert!(
-            text.contains("TURF-REAPER MK.IV IN 07s"),
-            "missing pre-boss countdown in {text}"
+            text.contains(&format!("{plate} IN 07s")),
+            "missing pre-boss countdown for {plate} in {text}"
         );
         assert!(
             text.contains("HEAD FOR THE ARENA"),
@@ -1217,9 +1229,10 @@ mod tests {
             .draw(|f| draw_overlays(f, f.area(), &w, &mut hud))
             .unwrap();
         let text = buf_text(&terminal);
+        let plate = floor_plate(&w);
         assert!(
-            text.contains("TURF-REAPER MK.IV IN 20s"),
-            "no 25 s pre-boss warning in {text}"
+            text.contains(&format!("{plate} IN 20s")),
+            "no 25 s pre-boss warning for {plate} in {text}"
         );
 
         // Well before the window: nothing yet (the top rows stay free).

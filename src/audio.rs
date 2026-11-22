@@ -238,11 +238,36 @@ pub enum Sfx {
     HawkRuffle,
     /// The last fall.
     HawkDeath,
+    // ---- KING COBRA (the Lab's second boss) ----
+    /// `Rear` entry: the tongue out, tasting for the rat.
+    CobraTaste,
+    /// The hood's dry rattle (the flare, the second strike's tell, the rise).
+    CobraHood,
+    /// The head coming down the marked line.
+    CobraStrike,
+    /// The fangs going into the floor.
+    CobraStuck,
+    /// The hypnotic beat the strike follows: a two-tone pulse.
+    CobraSway,
+    /// The throat filling before the spit.
+    CobraVenomTell,
+    /// The glob and its three landings.
+    CobraSpit,
+    /// The tail whip: a coil's worth of tail across the floor.
+    CobraTail,
+    /// The body slamming down as a wall, and the loop taking up the slack.
+    CobraCoil,
+    /// The loop letting go.
+    CobraLoosen,
+    /// The head coming down its own spiral lane.
+    CobraSpiral,
+    /// The body unspooling.
+    CobraDeath,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 139] = [
+    pub const ALL: [Sfx; 151] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -402,6 +427,19 @@ impl Sfx {
         Sfx::HawkRake,
         Sfx::HawkRuffle,
         Sfx::HawkDeath,
+        // KING COBRA (the Lab's second boss).
+        Sfx::CobraTaste,
+        Sfx::CobraHood,
+        Sfx::CobraStrike,
+        Sfx::CobraStuck,
+        Sfx::CobraSway,
+        Sfx::CobraVenomTell,
+        Sfx::CobraSpit,
+        Sfx::CobraTail,
+        Sfx::CobraCoil,
+        Sfx::CobraLoosen,
+        Sfx::CobraSpiral,
+        Sfx::CobraDeath,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -546,6 +584,18 @@ impl Sfx {
             Sfx::HawkRake => "HAWK_RAKE",
             Sfx::HawkRuffle => "HAWK_RUFFLE",
             Sfx::HawkDeath => "HAWK_DEATH",
+            Sfx::CobraTaste => "COBRA_TASTE",
+            Sfx::CobraHood => "COBRA_HOOD",
+            Sfx::CobraStrike => "COBRA_STRIKE",
+            Sfx::CobraStuck => "COBRA_STUCK",
+            Sfx::CobraSway => "COBRA_SWAY",
+            Sfx::CobraVenomTell => "COBRA_VENOM_TELL",
+            Sfx::CobraSpit => "COBRA_SPIT",
+            Sfx::CobraTail => "COBRA_TAIL",
+            Sfx::CobraCoil => "COBRA_COIL",
+            Sfx::CobraLoosen => "COBRA_LOOSEN",
+            Sfx::CobraSpiral => "COBRA_SPIRAL",
+            Sfx::CobraDeath => "COBRA_DEATH",
         }
     }
 
@@ -679,6 +729,16 @@ impl Sfx {
             Sfx::HawkCry | Sfx::HawkLock | Sfx::HawkWings | Sfx::HawkHover => 3,
             Sfx::HawkDarts | Sfx::HawkRake | Sfx::HawkRuffle => 2,
             Sfx::HawkImpact | Sfx::HawkStuck | Sfx::HawkGrab | Sfx::HawkDeath => 1,
+            // The cobra's body sounds get a little spread so a fight does not
+            // machine-gun one sample; the set pieces are single.
+            Sfx::CobraTaste | Sfx::CobraStrike | Sfx::CobraSway => 2,
+            Sfx::CobraHood => 3,
+            Sfx::CobraVenomTell | Sfx::CobraSpit | Sfx::CobraTail => 2,
+            Sfx::CobraStuck
+            | Sfx::CobraCoil
+            | Sfx::CobraLoosen
+            | Sfx::CobraSpiral
+            | Sfx::CobraDeath => 1,
         }
     }
 
@@ -811,6 +871,13 @@ impl Sfx {
             Sfx::HawkLock | Sfx::HawkImpact | Sfx::HawkDeath => 3,
             Sfx::HawkStuck | Sfx::HawkGrab | Sfx::HawkRake => 2,
             Sfx::HawkCry | Sfx::HawkWings | Sfx::HawkHover | Sfx::HawkDarts | Sfx::HawkRuffle => 1,
+            // The cobra: the strike, the whip and the fangs are hits; the body
+            // sounds sit under them; the death is a set piece.
+            Sfx::CobraStrike | Sfx::CobraStuck | Sfx::CobraTail | Sfx::CobraSpit => 2,
+            Sfx::CobraHood | Sfx::CobraVenomTell | Sfx::CobraCoil => 1,
+            Sfx::CobraSway | Sfx::CobraLoosen | Sfx::CobraSpiral => 1,
+            Sfx::CobraTaste => 0,
+            Sfx::CobraDeath => 3,
         }
     }
 
@@ -8971,6 +9038,534 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             });
             m.add_short_tail(0.20, 3200.0);
             m.finish(0.86, 1.5, 1.4, 44.0)
+        }
+
+        // ---- KING COBRA (the Lab's second boss) --------------------------
+        // The voice is a big dry animal on a tile floor: no machinery, no
+        // steel. Scale is a rustle, the hood is a rattle, and every attack has
+        // its own consonant so the rat can hear which tell it is in before it
+        // can see it.
+
+        // CobraTaste: the tongue out — two quick flicks and a breath.
+        Sfx::CobraTaste => {
+            const PITCH: [f32; 2] = [1.0, 1.14];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.26);
+            for k in 0..2 {
+                m.add_noise(NoiseLayer {
+                    start_s: k as f32 * 0.075,
+                    dur_s: 0.030,
+                    pink: true,
+                    gain: 0.20 - 0.04 * k as f32,
+                    attack_s: 0.002,
+                    decay_pow: 2.2,
+                    filter: FilterMode::BandPass,
+                    fc0: 2400.0 * p,
+                    fc1: 1500.0 * p,
+                    q: 2.2,
+                    seed: base_seed ^ (0x70 + k as u32),
+                    ..Default::default()
+                });
+            }
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.20,
+                pink: true,
+                gain: 0.10,
+                attack_s: 0.02,
+                decay_pow: 1.4,
+                filter: FilterMode::BandPass,
+                fc0: 2200.0 * p,
+                fc1: 3300.0 * p,
+                q: 0.8,
+                seed: base_seed ^ 0x71,
+                ..Default::default()
+            });
+            m.add_short_tail(0.05, 3600.0);
+            m.finish(0.22, 1.1, 3.0, 18.0)
+        }
+
+        // CobraHood: the hood's dry rattle — plates of scale going up, five
+        // clicks and a low body under them.
+        Sfx::CobraHood => {
+            const PITCH: [f32; 3] = [1.0, 1.16, 0.86];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.32);
+            for k in 0..5 {
+                m.add_noise(NoiseLayer {
+                    start_s: k as f32 * 0.026,
+                    dur_s: 0.018,
+                    pink: false,
+                    gain: 0.26 - 0.03 * k as f32,
+                    attack_s: 0.0010,
+                    decay_pow: 2.6,
+                    filter: FilterMode::BandPass,
+                    fc0: 2900.0 * p,
+                    fc1: 2000.0 * p,
+                    q: 3.4,
+                    seed: base_seed ^ (0xB0 + k as u32),
+                    ..Default::default()
+                });
+            }
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.22,
+                f0: 120.0 * p,
+                f1: 92.0 * p,
+                pitch_pow: 0.9,
+                wave: Wave::Triangle,
+                gain: 0.20,
+                attack_s: 0.010,
+                decay_pow: 1.6,
+                filter: FilterMode::LowPass,
+                fc0: 620.0,
+                fc1: 340.0,
+                q: 1.0,
+                ..Default::default()
+            });
+            m.add_short_tail(0.07, 4200.0);
+            m.finish(0.26, 1.2, 4.0, 20.0)
+        }
+
+        // CobraStrike: the head coming down the marked line — a fast air
+        // sweep downward and the mass landing behind it.
+        Sfx::CobraStrike => {
+            const PITCH: [f32; 2] = [1.0, 0.88];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.30);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.16,
+                pink: true,
+                gain: 0.34,
+                attack_s: 0.004,
+                decay_pow: 1.1,
+                filter: FilterMode::BandPass,
+                fc0: 2600.0 * p,
+                fc1: 520.0 * p,
+                fc_pow: 1.6,
+                q: 1.6,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.10,
+                dur_s: 0.16,
+                f0: 210.0 * p,
+                f1: 60.0,
+                pitch_pow: 0.5,
+                wave: Wave::Saw,
+                gain: 0.42,
+                attack_s: 0.002,
+                decay_pow: 1.9,
+                filter: FilterMode::LowPass,
+                fc0: 1400.0,
+                fc1: 320.0,
+                q: 1.1,
+                ..Default::default()
+            });
+            m.add_short_tail(0.10, 2400.0);
+            m.finish(0.38, 1.4, 1.0, 16.0)
+        }
+
+        // CobraStuck: the fangs into the floor — a wet, bright thunk with the
+        // splinter of tile after it.
+        Sfx::CobraStuck => {
+            let mut m = MixBuf::new(0.34);
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.14,
+                f0: 260.0,
+                f1: 58.0,
+                pitch_pow: 0.45,
+                wave: Wave::Saw,
+                gain: 0.48,
+                attack_s: 0.001,
+                decay_pow: 2.1,
+                filter: FilterMode::LowPass,
+                fc0: 2200.0,
+                fc1: 420.0,
+                q: 1.2,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.006,
+                dur_s: 0.12,
+                pink: false,
+                gain: 0.30,
+                attack_s: 0.001,
+                decay_pow: 2.4,
+                filter: FilterMode::BandPass,
+                fc0: 3000.0,
+                fc1: 1200.0,
+                q: 1.4,
+                seed: base_seed ^ 0x2C,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.06,
+                dur_s: 0.20,
+                pink: true,
+                gain: 0.14,
+                attack_s: 0.01,
+                decay_pow: 1.5,
+                filter: FilterMode::LowPass,
+                fc0: 900.0,
+                fc1: 240.0,
+                q: 0.9,
+                seed: base_seed ^ 0x2D,
+                ..Default::default()
+            });
+            m.add_short_tail(0.09, 3000.0);
+            m.finish(0.44, 1.3, 1.0, 20.0)
+        }
+
+        // CobraSway: the hypnotic beat — two soft tones a fifth apart, one per
+        // beat, so the rhythm is the warning.
+        Sfx::CobraSway => {
+            const PITCH: [f32; 2] = [1.0, 0.86];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.44);
+            for (k, f) in [(0usize, 196.0f32), (1, 147.0)] {
+                m.add_osc(OscLayer {
+                    start_s: k as f32 * 0.16,
+                    dur_s: 0.20,
+                    f0: f * p,
+                    f1: f * p * 0.99,
+                    pitch_pow: 1.0,
+                    wave: Wave::Sine,
+                    gain: 0.24,
+                    attack_s: 0.02,
+                    decay_pow: 1.4,
+                    vib_hz: 5.2,
+                    vib_depth: 0.03,
+                    ..Default::default()
+                });
+            }
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.34,
+                pink: true,
+                gain: 0.10,
+                attack_s: 0.04,
+                decay_pow: 1.2,
+                filter: FilterMode::BandPass,
+                fc0: 900.0,
+                fc1: 1600.0,
+                q: 1.2,
+                trem_hz: 6.4,
+                trem_depth: 0.5,
+                seed: base_seed ^ 0x3B,
+                ..Default::default()
+            });
+            m.add_short_tail(0.10, 3000.0);
+            m.finish(0.28, 1.1, 6.0, 30.0)
+        }
+
+        // CobraVenomTell: the throat filling — a wet rising hiss.
+        Sfx::CobraVenomTell => {
+            const PITCH: [f32; 2] = [1.0, 1.15];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.36);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.26,
+                pink: true,
+                gain: 0.24,
+                attack_s: 0.05,
+                decay_pow: 0.9,
+                filter: FilterMode::BandPass,
+                fc0: 620.0 * p,
+                fc1: 1900.0 * p,
+                fc_pow: 1.3,
+                q: 2.0,
+                trem_hz: 18.0,
+                trem_depth: 0.35,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.22,
+                f0: 132.0 * p,
+                f1: 196.0 * p,
+                pitch_pow: 1.3,
+                wave: Wave::Triangle,
+                gain: 0.18,
+                attack_s: 0.04,
+                decay_pow: 1.2,
+                filter: FilterMode::LowPass,
+                fc0: 700.0,
+                fc1: 380.0,
+                q: 1.0,
+                ..Default::default()
+            });
+            m.add_short_tail(0.06, 3200.0);
+            m.finish(0.26, 1.2, 8.0, 24.0)
+        }
+
+        // CobraSpit: the glob leaving and three landings — a wet splat with a
+        // spray that outlives it.
+        Sfx::CobraSpit => {
+            const PITCH: [f32; 2] = [1.0, 1.18];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.40);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.05,
+                pink: true,
+                gain: 0.34,
+                attack_s: 0.001,
+                decay_pow: 2.0,
+                filter: FilterMode::BandPass,
+                fc0: 1400.0 * p,
+                fc1: 700.0 * p,
+                q: 1.5,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.10,
+                f0: 320.0 * p,
+                f1: 96.0,
+                pitch_pow: 0.6,
+                wave: Wave::Triangle,
+                gain: 0.34,
+                attack_s: 0.001,
+                decay_pow: 2.0,
+                ..Default::default()
+            });
+            // The spray falling: a wet scatter that keeps hissing.
+            m.add_noise(NoiseLayer {
+                start_s: 0.04,
+                dur_s: 0.30,
+                pink: true,
+                gain: 0.18,
+                attack_s: 0.02,
+                decay_pow: 1.3,
+                filter: FilterMode::BandPass,
+                fc0: 2600.0 * p,
+                fc1: 1200.0 * p,
+                q: 1.1,
+                seed: base_seed ^ 0x66,
+                ..Default::default()
+            });
+            m.add_short_tail(0.12, 3000.0);
+            m.finish(0.34, 1.2, 2.0, 22.0)
+        }
+
+        // CobraTail: the whip — a swish and a hard crack, the same family as
+        // the rat's own lash at body scale.
+        Sfx::CobraTail => {
+            const PITCH: [f32; 2] = [1.0, 0.88];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.30);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.12,
+                pink: true,
+                gain: 0.30,
+                attack_s: 0.010,
+                decay_pow: 0.8,
+                filter: FilterMode::BandPass,
+                fc0: 380.0 * p,
+                fc1: 2400.0 * p,
+                fc_pow: 1.2,
+                q: 2.6,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.118,
+                dur_s: 0.040,
+                pink: false,
+                gain: 0.62,
+                attack_s: 0.0006,
+                decay_pow: 2.8,
+                filter: FilterMode::BandPass,
+                fc0: 2600.0 * p,
+                fc1: 800.0,
+                q: 1.2,
+                seed: base_seed ^ 0x5B,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.118,
+                dur_s: 0.09,
+                f0: 620.0 * p,
+                f1: 130.0,
+                pitch_pow: 0.4,
+                wave: Wave::Saw,
+                gain: 0.44,
+                attack_s: 0.001,
+                decay_pow: 2.0,
+                filter: FilterMode::LowPass,
+                fc0: 2800.0,
+                fc1: 520.0,
+                q: 1.2,
+                ..Default::default()
+            });
+            m.add_short_tail(0.10, 2600.0);
+            m.finish(0.40, 1.4, 1.0, 16.0)
+        }
+
+        // CobraCoil: the body slamming down as a wall — a long gritty scrape
+        // with the weight landing on the front of it.
+        Sfx::CobraCoil => {
+            let mut m = MixBuf::new(0.52);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.42,
+                pink: true,
+                gain: 0.30,
+                attack_s: 0.010,
+                decay_pow: 1.0,
+                filter: FilterMode::BandPass,
+                fc0: 520.0,
+                fc1: 1500.0,
+                q: 1.3,
+                trem_hz: 12.0,
+                trem_depth: 0.4,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.02,
+                dur_s: 0.28,
+                f0: 150.0,
+                f1: 48.0,
+                pitch_pow: 0.5,
+                wave: Wave::Saw,
+                gain: 0.40,
+                attack_s: 0.006,
+                decay_pow: 1.7,
+                filter: FilterMode::LowPass,
+                fc0: 1200.0,
+                fc1: 260.0,
+                q: 1.1,
+                ..Default::default()
+            });
+            m.add_short_tail(0.16, 2200.0);
+            m.finish(0.40, 1.3, 2.0, 34.0)
+        }
+
+        // CobraLoosen: the loop letting go — the scrape in reverse, falling.
+        Sfx::CobraLoosen => {
+            let mut m = MixBuf::new(0.36);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.28,
+                pink: true,
+                gain: 0.24,
+                attack_s: 0.030,
+                decay_pow: 1.2,
+                filter: FilterMode::BandPass,
+                fc0: 1500.0,
+                fc1: 520.0,
+                fc_pow: 1.2,
+                q: 1.2,
+                seed: base_seed ^ 0x91,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.20,
+                f0: 120.0,
+                f1: 64.0,
+                pitch_pow: 0.8,
+                wave: Wave::Triangle,
+                gain: 0.18,
+                attack_s: 0.02,
+                decay_pow: 1.5,
+                filter: FilterMode::LowPass,
+                fc0: 500.0,
+                fc1: 220.0,
+                q: 1.0,
+                ..Default::default()
+            });
+            m.add_short_tail(0.07, 2600.0);
+            m.finish(0.26, 1.1, 4.0, 22.0)
+        }
+
+        // CobraSpiral: the head coming down its own lane — a fast sliding
+        // scrape, rising, with the body's weight behind it.
+        Sfx::CobraSpiral => {
+            let mut m = MixBuf::new(0.34);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.26,
+                pink: true,
+                gain: 0.30,
+                attack_s: 0.020,
+                decay_pow: 0.9,
+                filter: FilterMode::BandPass,
+                fc0: 700.0,
+                fc1: 2400.0,
+                fc_pow: 1.3,
+                q: 1.7,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.24,
+                f0: 96.0,
+                f1: 168.0,
+                pitch_pow: 1.2,
+                wave: Wave::Saw,
+                gain: 0.22,
+                attack_s: 0.02,
+                decay_pow: 1.4,
+                filter: FilterMode::LowPass,
+                fc0: 900.0,
+                fc1: 420.0,
+                q: 1.2,
+                ..Default::default()
+            });
+            m.add_short_tail(0.09, 2600.0);
+            m.finish(0.30, 1.2, 3.0, 22.0)
+        }
+
+        // CobraDeath: the body unspooling — a long descending hiss with three
+        // heavy lengths of it hitting the tile.
+        Sfx::CobraDeath => {
+            let mut m = MixBuf::new(1.20);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.95,
+                pink: true,
+                gain: 0.34,
+                attack_s: 0.02,
+                decay_pow: 0.9,
+                filter: FilterMode::BandPass,
+                fc0: 2400.0,
+                fc1: 420.0,
+                fc_pow: 1.2,
+                q: 1.1,
+                seed: base_seed,
+                ..Default::default()
+            });
+            for k in 0..3 {
+                m.add_osc(OscLayer {
+                    start_s: 0.14 + k as f32 * 0.26,
+                    dur_s: 0.20,
+                    f0: 180.0 - k as f32 * 30.0,
+                    f1: 44.0,
+                    pitch_pow: 0.6,
+                    wave: Wave::Saw,
+                    gain: 0.34 - 0.06 * k as f32,
+                    attack_s: 0.002,
+                    decay_pow: 1.8,
+                    filter: FilterMode::LowPass,
+                    fc0: 1100.0,
+                    fc1: 240.0,
+                    q: 1.0,
+                    ..Default::default()
+                });
+            }
+            m.add_short_tail(0.26, 2400.0);
+            m.finish(0.52, 1.4, 2.0, 60.0)
         }
     }
 }

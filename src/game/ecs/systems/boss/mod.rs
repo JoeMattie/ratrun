@@ -7,7 +7,7 @@
 //! | 0 | Sewer | Jungle Cat (Apex Jaguar) | [`crate::game::art_boss_cat`] |
 //! | 0 | Sewer | The Horseshoe (horseshoe crab) | [`crate::game::art_boss_horseshoe_crab`] |
 //! | 1 | Kitchen | The Sweeper (broom) / SUBJECT R-01 (megarat) | [`crate::game::art_boss_broom`], [`crate::game::art_boss_megarat`] |
-//! | 2 | Lab | TURF-REAPER MK.IV (mower) | [`crate::game::art_boss_mower`] |
+//! | 2 | Lab | TURF-REAPER MK.IV (mower) / KING COBRA | [`crate::game::art_boss_mower`], [`crate::game::art_boss_cobra`] |
 //! | 3 | Laundry | The Mangle (wringer) | [`crate::game::art_boss_mangle`] |
 //! | 4 | Printworks | THE NIGHT EDITION (press) | [`crate::game::art_boss_night_edition`] |
 //! | — (getaway) | Flatbed | The Magpie (bird) | [`crate::game::art_boss_magpie`] |
@@ -110,6 +110,7 @@ use rand::{RngExt, SeedableRng};
 use crate::audio::Sfx;
 use crate::game::art_boss_broom::{self, BroomBossState, BroomBossView};
 use crate::game::art_boss_hawk::{self, HawkState, HawkView};
+use crate::game::art_boss_cobra::{self, CobraState, CobraView};
 use crate::game::art_boss_horseshoe_crab::{self, CrabState, CrabView};
 use crate::game::art_boss_mangle::{self, MangleState, MangleView};
 use crate::game::art_boss_cat::{self, BossCatState, BossCatView};
@@ -144,6 +145,7 @@ use crate::render::palette::Rgb;
 pub mod broom;
 pub mod cat;
 pub mod hawk;
+pub mod cobra;
 pub mod horseshoe_crab;
 pub mod magpie;
 pub mod mangle;
@@ -187,6 +189,13 @@ pub enum BossKind {
     /// tagged, that fights with twisted copies of the player's own kit. See
     /// [`megarat`] and [`crate::game::art_boss_megarat`].
     MegaRat,
+    /// The Lab's second fight — **KING COBRA**.
+    ///
+    /// An escaped specimen far longer than the arena is wide: its coils are the
+    /// arena's moving walls, its hood's back is its one weak point, and in its
+    /// last third it lays the whole room out as a spiral lane and comes down it.
+    /// See [`cobra`] and [`crate::game::art_boss_cobra`].
+    Cobra,
 }
 
 /// The boss the getaway ride fields: **The Magpie**.
@@ -204,7 +213,7 @@ pub fn trailer_boss() -> BossKind {
 // parallel boss workers append their own kind to their floor's list.
 const SEWER_POOL: &[BossKind] = &[BossKind::Cat, BossKind::HorseshoeCrab];
 const KITCHEN_POOL: &[BossKind] = &[BossKind::Broom, BossKind::MegaRat];
-const LAB_POOL: &[BossKind] = &[BossKind::Mower];
+const LAB_POOL: &[BossKind] = &[BossKind::Mower, BossKind::Cobra];
 const LAUNDRY_POOL: &[BossKind] = &[BossKind::Mangle];
 const PRINTWORKS_POOL: &[BossKind] = &[BossKind::NightEdition];
 const TRAILER_POOL: &[BossKind] = &[BossKind::Magpie, BossKind::Hawk];
@@ -307,6 +316,7 @@ impl BossKind {
             BossKind::HorseshoeCrab => art_boss_horseshoe_crab::BOSS_BASE_HP,
             BossKind::MegaRat => art_boss_megarat::BOSS_BASE_HP,
             BossKind::Hawk => art_boss_hawk::BOSS_BASE_HP,
+            BossKind::Cobra => art_boss_cobra::BOSS_BASE_HP,
         }
     }
 
@@ -323,6 +333,7 @@ impl BossKind {
             BossKind::HorseshoeCrab => art_boss_horseshoe_crab::BODY_RADIUS,
             BossKind::MegaRat => art_boss_megarat::BODY_RADIUS,
             BossKind::Hawk => art_boss_hawk::BODY_RADIUS,
+            BossKind::Cobra => art_boss_cobra::BODY_RADIUS,
         }
     }
 
@@ -444,6 +455,16 @@ impl BossKind {
             // `hawk::tests::a_bot_kills_the_hawk_on_the_real_deck` for the
             // measurement that must be taken.
             BossKind::Hawk => 2.6,
+            // The Lab's *second* fight, and the one that spends the most of
+            // every rotation in a punish window: `FangsStuck` is a x1.5 window
+            // after every strike (twice per rotation from phase 2) and
+            // `SpiralEnd` a x1.4 one after the third phase's set piece. Against
+            // the merged-campaign band this file quotes for the Sweeper and the
+            // Mangle (a near-complete build lands 250-600 dps into a boss),
+            // 1,800 x 2.0 x the framework's x8 lands ~29 k, i.e. the same
+            // 45-80 s beat the Mower holds at 3,200 with no weak point at all.
+            // Provisional: the balance pass owns the final number.
+            BossKind::Cobra => 2.0,
         }
     }
 
@@ -466,6 +487,7 @@ impl BossKind {
             BossKind::HorseshoeCrab => art_boss_horseshoe_crab::CONTACT_DAMAGE,
             BossKind::MegaRat => art_boss_megarat::CONTACT_DAMAGE,
             BossKind::Hawk => art_boss_hawk::CONTACT_DAMAGE,
+            BossKind::Cobra => art_boss_cobra::CONTACT_DAMAGE,
         }
     }
 
@@ -482,6 +504,7 @@ impl BossKind {
             BossKind::HorseshoeCrab => art_boss_horseshoe_crab::DEATH_DURATION,
             BossKind::MegaRat => art_boss_megarat::DEATH_DURATION,
             BossKind::Hawk => art_boss_hawk::DEATH_DURATION,
+            BossKind::Cobra => art_boss_cobra::DEATH_DURATION,
         }
     }
 
@@ -569,6 +592,16 @@ impl BossKind {
                     1
                 }
             }
+            // The sway opens at 66 %, the laid spiral at 33 %.
+            BossKind::Cobra => {
+                if hp_frac <= art_boss_cobra::PHASE3_HP_FRAC {
+                    3
+                } else if hp_frac <= art_boss_cobra::PHASE2_HP_FRAC {
+                    2
+                } else {
+                    1
+                }
+            }
         }
     }
 
@@ -586,6 +619,7 @@ impl BossKind {
             BossKind::MegaRat => BossState::MegaRat(MegaRatState::Groom),
             // It arrives as a shadow: the first state is the circling overhead.
             BossKind::Hawk => BossState::Hawk(HawkState::Circle),
+            BossKind::Cobra => BossState::Cobra(CobraState::Rear),
         }
     }
 
@@ -603,6 +637,7 @@ impl BossKind {
             BossKind::HorseshoeCrab => art_boss_horseshoe_crab::DOME_DURATION[0],
             BossKind::MegaRat => art_boss_megarat::GROOM_DURATION[0],
             BossKind::Hawk => art_boss_hawk::CIRCLE_DURATION[0],
+            BossKind::Cobra => art_boss_cobra::REAR_DURATION[0],
         }
     }
 
@@ -619,6 +654,7 @@ impl BossKind {
             BossKind::HorseshoeCrab => BossState::HorseshoeCrab(CrabState::Death),
             BossKind::MegaRat => BossState::MegaRat(MegaRatState::Death),
             BossKind::Hawk => BossState::Hawk(HawkState::Death),
+            BossKind::Cobra => BossState::Cobra(CobraState::Death),
         }
     }
 
@@ -635,6 +671,7 @@ impl BossKind {
             BossKind::HorseshoeCrab => 0x51ED_270B_9C4D_0A6F,
             BossKind::MegaRat => 0x3F2A_8D71_C6B4_05E9,
             BossKind::Hawk => 0x8D4C_2F91_B7A3_6E52,
+            BossKind::Cobra => 0xA17C_5E93_0BD4_62E8,
         }
     }
 
@@ -651,6 +688,7 @@ impl BossKind {
             BossKind::HorseshoeCrab => art_boss_horseshoe_crab::CULL_MARGIN,
             BossKind::MegaRat => art_boss_megarat::CULL_MARGIN,
             BossKind::Hawk => art_boss_hawk::CULL_MARGIN,
+            BossKind::Cobra => art_boss_cobra::CULL_MARGIN,
         }
     }
 
@@ -692,6 +730,7 @@ impl BossKind {
             BossKind::Mangle => "mangle",
             BossKind::NightEdition => "nightedition",
             BossKind::Magpie => "magpie",
+            BossKind::Cobra => &cobra::CobraController,
         }
     }
 }
@@ -846,6 +885,8 @@ pub enum BossState {
     MegaRat(MegaRatState),
     /// The Flatbed's pool mate: the hawk (overhead, diving, hovering).
     Hawk(HawkState),
+    /// The Lab's second fight: the King Cobra.
+    Cobra(CobraState),
 }
 
 /// One art-defined hit shape. Bosses are hit through these, not a single circle.
@@ -1053,6 +1094,7 @@ pub enum BossArtView {
     HorseshoeCrab(CrabView),
     MegaRat(MegaRatView),
     Hawk(HawkView),
+    Cobra(CobraView),
 }
 
 // ============================================================================
@@ -1814,6 +1856,33 @@ impl Boss {
                 ];
                 BossHitShapes::from_slice(&shapes)
             }
+            BossKind::Cobra => {
+                // The head, the neck behind it and the hood. While the fangs
+                // are in the floor (or the laid spiral has dropped) the art's
+                // weak point **replaces** the head, so the open hood's back is
+                // the first thing auto-aim reaches for — and the first circle
+                // is the spectacle mark itself.
+                let view = self.cobra_view();
+                let circles = art_boss_cobra::body_hit_circles(&view);
+                let shapes: [BossHitShape; 3] = [
+                    BossHitShape::Circle {
+                        center: circles[0].0,
+                        radius: circles[0].1,
+                        grounded: true,
+                    },
+                    BossHitShape::Circle {
+                        center: circles[1].0,
+                        radius: circles[1].1,
+                        grounded: true,
+                    },
+                    BossHitShape::Circle {
+                        center: circles[2].0,
+                        radius: circles[2].1,
+                        grounded: true,
+                    },
+                ];
+                BossHitShapes::from_slice(&shapes)
+            }
         }
     }
 
@@ -1869,6 +1938,7 @@ impl Boss {
             BossKind::HorseshoeCrab => BossArtView::HorseshoeCrab(self.crab_view()),
             BossKind::MegaRat => BossArtView::MegaRat(self.megarat_view()),
             BossKind::Hawk => BossArtView::Hawk(self.hawk_view()),
+            BossKind::Cobra => BossArtView::Cobra(self.cobra_view()),
         }
     }
 
@@ -1927,6 +1997,61 @@ impl Boss {
             target: self.target,
             lane_start: self.pounce_origin,
             sweep_side: self.swipe_side,
+        }
+    }
+
+    fn cobra_state(&self) -> CobraState {
+        match self.state {
+            BossState::Cobra(s) => s,
+            _ => CobraState::Rear,
+        }
+    }
+
+    /// The King Cobra's view. The framework hands the art two things it cannot
+    /// derive from the boss's own fields and must not guess at:
+    ///
+    /// * the loop's opening angle, from the controller's own scratch (the art
+    ///   draws the gap where the animal is holding it open, and the separation
+    ///   pass in [`cobra::coil_block_system`] walks the same chain);
+    /// * the live venom puddles, read out of `self.hazards` — those are the
+    ///   boss's own hazards, so a dead cobra draws no pools, and the art and the
+    ///   damage can never disagree about where a puddle is.
+    pub(crate) fn cobra_view(&self) -> CobraView {
+        let mut pools = [Vec2::ZERO; art_boss_cobra::POOL_VIEW];
+        let mut pool_r = [0.0f32; art_boss_cobra::POOL_VIEW];
+        let mut pool_n = 0u8;
+        for hazard in self.hazards.iter() {
+            // A puddle is the damage-free slow circle; only one that has
+            // already landed is drawn (the splash's own warn is the lob).
+            if hazard.slow <= 0.0 || hazard.elapsed < hazard.warn {
+                continue;
+            }
+            if (pool_n as usize) >= pools.len() {
+                break;
+            }
+            if let HazardShape::Circle { center, radius } = hazard.shape {
+                pools[pool_n as usize] = center;
+                pool_r[pool_n as usize] = radius;
+                pool_n += 1;
+            }
+        }
+        CobraView {
+            pos: self.pos,
+            facing: self.facing,
+            state: self.cobra_state(),
+            progress: self.progress(),
+            anim: self.anim,
+            hit_flash: self.hit_flash,
+            hp_frac: self.hp_frac(),
+            phase: self.phase,
+            target: self.target,
+            lane_start: self.pounce_origin,
+            gap_angle: self.scratch[cobra::S_GAP],
+            pools,
+            pool_r,
+            pool_n,
+            hunting: self.hunting,
+            arena: self.arena,
         }
     }
 
@@ -2397,6 +2522,37 @@ pub enum BossCue {
     HawkRuffle,
     /// The `Death` beat: it comes down out of the sky for the last time.
     HawkDeath,
+    // ---- KING COBRA (the Lab's second fight) ----
+    /// `Rear` entry: the tongue out, tasting for the rat.
+    CobraTaste,
+    /// `Rise` entry: the full height and the hood all the way open.
+    CobraRise,
+    /// `HoodTell` / `ReStrikeTell` entry: the hood's dry rattle.
+    CobraHood,
+    /// `Strike` entry: the head coming down the line.
+    CobraStrike,
+    /// `FangsStuck` / `SpiralEnd` entry: the fangs into the floor.
+    CobraStuck,
+    /// `SwayTell` entry: the first beat of the rhythm.
+    CobraSway,
+    /// `VenomTell` entry: the throat working, a wet rising hiss.
+    CobraVenomTell,
+    /// `VenomSpit`: the glob and the three landings.
+    CobraSpit,
+    /// `TailTell` entry: a coil's worth of tail dragging round.
+    CobraTailTell,
+    /// `TailSweep`: the whip across the floor.
+    CobraTailSweep,
+    /// `ConstrictTell` / `SpiralCoil` entry: the body slamming down as a wall.
+    CobraCoil,
+    /// `Constrict` entry: the loop taking up the slack.
+    CobraTighten,
+    /// `Loosen` entry: the loop letting go.
+    CobraLoosen,
+    /// `SpiralChase` entry: the head coming down its own lane.
+    CobraSpiral,
+    /// The `Death` beat: the body unspools.
+    CobraDeath,
 }
 
 impl BossCue {
@@ -2506,6 +2662,20 @@ impl BossCue {
             BossCue::HawkRake => Sfx::HawkRake,
             BossCue::HawkRuffle => Sfx::HawkRuffle,
             BossCue::HawkDeath => Sfx::HawkDeath,
+            // The cobra: one voice for the body and one for each of its three
+            // attacks (see `Sfx::Cobra*`), so the rat can hear which tell it is.
+            BossCue::CobraTaste => Sfx::CobraTaste,
+            BossCue::CobraRise | BossCue::CobraHood => Sfx::CobraHood,
+            BossCue::CobraStrike => Sfx::CobraStrike,
+            BossCue::CobraStuck => Sfx::CobraStuck,
+            BossCue::CobraSway => Sfx::CobraSway,
+            BossCue::CobraVenomTell => Sfx::CobraVenomTell,
+            BossCue::CobraSpit => Sfx::CobraSpit,
+            BossCue::CobraTailTell | BossCue::CobraTailSweep => Sfx::CobraTail,
+            BossCue::CobraCoil | BossCue::CobraTighten => Sfx::CobraCoil,
+            BossCue::CobraLoosen => Sfx::CobraLoosen,
+            BossCue::CobraSpiral => Sfx::CobraSpiral,
+            BossCue::CobraDeath => Sfx::CobraDeath,
         }
     }
 }
@@ -3111,6 +3281,88 @@ fn emit_cues(
                 vfx::emit_boss_spawn(particles, rng, boss.pos, level_blood());
             }
             BossCue::MegaRatDeath => {
+                let blood = level_blood();
+                vfx::emit_boss_cat_death(particles, rng, boss.pos, boss.facing, blood);
+            }
+
+            // ---- the King Cobra ------------------------------------------
+            // Its feedback is all scale, dust and venom: the body sliding on
+            // the tile for the taste and the rise, the mower's steel family for
+            // the impact of its loops, the rat's own tail thrash for the whip,
+            // and a ring of grit where the loop slams down.
+            BossCue::CobraTaste | BossCue::CobraRise | BossCue::CobraHood => {
+                vfx::emit_boss_cat_skid(particles, rng, boss.pos, boss.facing, 0.10);
+            }
+            BossCue::CobraStrike => {
+                vfx::emit_boss_mower_charge_trail(particles, rng, boss.pos, boss.facing, false, 0.14);
+            }
+            BossCue::CobraStuck | BossCue::CobraLoosen => {
+                // The fangs going into the floor: the broom's slam, at the
+                // strike's own width.
+                vfx::emit_boss_broom_stomp(
+                    particles,
+                    rng,
+                    boss.target,
+                    art_boss_cobra::STRIKE_HALF_WIDTH + 4.0,
+                    boss.phase >= 2,
+                );
+            }
+            BossCue::CobraSway => {
+                vfx::emit_boss_cat_skid(particles, rng, boss.pos, boss.facing.perp(), 0.12);
+            }
+            BossCue::CobraVenomTell => {
+                // A wet glint at the fangs as the throat fills.
+                let fangs = art_boss_cobra::fangs_pos(&boss.cobra_view());
+                vfx::emit_weapon_hit(
+                    particles,
+                    rng,
+                    fangs,
+                    Vec2::ZERO,
+                    None,
+                    EnemyKind::Boss,
+                    false,
+                );
+            }
+            BossCue::CobraSpit => {
+                let view = boss.cobra_view();
+                for k in 0..art_boss_cobra::VENOM_MARKS {
+                    let at = art_boss_cobra::venom_mark_centre(&view, k, None);
+                    vfx::emit_weapon_hit(
+                        particles,
+                        rng,
+                        at,
+                        Vec2::ZERO,
+                        None,
+                        EnemyKind::Boss,
+                        false,
+                    );
+                }
+            }
+            BossCue::CobraTailTell | BossCue::CobraTailSweep => {
+                vfx::emit_thrash_sweep(
+                    particles,
+                    rng,
+                    boss.pos,
+                    boss.facing.angle(),
+                    art_boss_cobra::TAIL_OUTER,
+                    true,
+                );
+            }
+            BossCue::CobraCoil | BossCue::CobraTighten => {
+                // The loop arrives as a ring of grit, not a puff: the body is
+                // the wall, so the floor has to show it landing.
+                vfx::emit_sonic_squeak(
+                    particles,
+                    rng,
+                    boss.target,
+                    art_boss_cobra::coil_radius(&boss.cobra_view()).max(12.0),
+                    0.22,
+                );
+            }
+            BossCue::CobraSpiral => {
+                vfx::emit_boss_mower_charge_trail(particles, rng, boss.pos, boss.facing, false, 0.12);
+            }
+            BossCue::CobraDeath => {
                 let blood = level_blood();
                 vfx::emit_boss_cat_death(particles, rng, boss.pos, boss.facing, blood);
             }
@@ -4103,6 +4355,7 @@ impl BossTrace {
                         | art_boss_megarat::MegaRatState::ThrashRecover
                 )
                 | BossState::Hawk(HawkState::TalonBury)
+                | BossState::Cobra(CobraState::FangsStuck | CobraState::SpiralEnd)
         )
     }
 

@@ -148,3 +148,26 @@ pub const HAWK_CLASS: &str = "CLASS-V STOOPING PREDATOR";
 
 /// The field note on the deck's wind-blasted noticeboard.
 pub const HAWK_FIELD_NOTE: &str = "Nothing on this deck is bigger than its shadow.";
+
+// ============================================================================
+// The Lab's other specimen: KING COBRA
+// ============================================================================
+
+/// Name plate for the Lab's second boss.
+///
+/// The Lab's original fight is the Turf-Reaper Mk.IV, so the king's plate is
+/// its own: a specimen number the facility stopped saying out loud.
+pub const COBRA_NAME: &str = "KING COBRA";
+
+/// Classification tag beside the name plate, in the same voice as the campaign
+/// plates ("CLASS-V APEX PREDATOR", "PRE-PIPE — STILL HERE").
+pub const COBRA_CLASS: &str = "CLASS-VII SPECIMEN — LOOSE";
+
+/// The arrival banner's flavour line (the plate's second row, and the fight's
+/// own epitaph at the clear).
+pub const COBRA_ARRIVAL: &str =
+    "The lab grew it long. The lab grew it longer than the room it was kept in.";
+
+/// The field note on the specimen card.
+pub const COBRA_FIELD_NOTE: &str =
+    "Twenty-two feet of it, and the room it was kept in was eleven. That is how it got out.";

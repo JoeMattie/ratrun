@@ -1707,6 +1707,13 @@ impl Bot {
                                 crate::game::art_boss_megarat::MegaRatState::GnawStuck
                                     | crate::game::art_boss_megarat::MegaRatState::ThrashRecover
                             )
+                        // The cobra's two windows read the same way: the fangs
+                        // are in the floor, or the head is spent at the end of
+                        // its own lane — walk onto the hood, do not orbit it.
+                            | BossState::Cobra(
+                                crate::game::art_boss_cobra::CobraState::FangsStuck
+                                    | crate::game::art_boss_cobra::CobraState::SpiralEnd
+                            )
                     )
                 })
             });

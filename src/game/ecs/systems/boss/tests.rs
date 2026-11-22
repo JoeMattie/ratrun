@@ -308,9 +308,11 @@ fn every_boss_credits_its_gold_exactly_once_at_the_clear() {
             assert_eq!(coins.iter(&w.ecs).count(), 0, "{kind:?}: no boss coin");
         }
     }
-    // The five `Theme::all()` floors field seven bosses between them (the
-    // Magpie's flatbed is not a menu floor).
-    assert_eq!(cleared, 7, "every pool mate of every floor was cleared");
+    // The five `Theme::all()` floors field eight bosses between them (the
+    // Magpie's flatbed is not a menu floor): the Cat and the Horseshoe, the
+    // Sweeper and SUBJECT R-01, the Mower and the King Cobra, the Mangle, the
+    // Night Edition.
+    assert_eq!(cleared, 8, "every pool mate of every floor was cleared");
 }
 
 /// The boss's death breaks the horde, and that despawn has to happen **after**
@@ -683,7 +685,12 @@ fn real_schedule_spawns_the_boss_at_boss_time() {
 fn the_mower_death_blast_lands_inside_the_art_radius() {
     use crate::game::level::Theme as BossTheme;
 
-    let mut w = World::new(BossTheme::Lab, 23);
+    // The Lab pools the Mower with the King Cobra: ask for a seed that fields
+    // the mower, because the blast is the mower's own art.
+    let seed = (0..8192u64)
+        .find(|s| BossKind::for_theme_seeded(BossTheme::Lab, *s) == BossKind::Mower)
+        .expect("some Lab seed fields the mower");
+    let mut w = World::new(BossTheme::Lab, seed);
     w.level_index = 2;
     w.ecs.resource_mut::<BossDue>().due = true;
     w.begin_tick(DT, Vec2::ZERO, false);

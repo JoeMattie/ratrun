@@ -318,6 +318,7 @@ fn boss_name(k: BossKind) -> &'static str {
             crate::render::hud::boss_codename_kind(k).0
         }
         BossKind::Hawk => crate::render::hud::boss_codename_kind(BossKind::Hawk).0,
+        BossKind::Cobra => crate::render::hud::boss_codename_kind(k).0,
     }
 }
 
@@ -422,7 +423,11 @@ pub fn flavour_of(key: Key) -> Option<&'static str> {
     }
 }
 
-/// The boss's floor (the inverse of [`BossKind::for_theme`]).
+/// The boss's floor (the inverse of [`BossKind::pool_for_theme`]).
+///
+/// A floor can field more than one boss, so this asks which floor's *pool*
+/// holds the kind rather than which floor names it first: the pool mates (the
+/// horseshoe, SUBJECT R-01, the cobra) each report the floor they share.
 fn boss_theme(k: BossKind) -> Theme {
     for theme in Theme::playable() {
         if BossKind::pool_for_theme(theme).contains(&k) {
@@ -508,6 +513,7 @@ pub fn all_rows() -> Vec<Row> {
         BossKind::HorseshoeCrab,
         BossKind::MegaRat,
         BossKind::Hawk,
+        BossKind::Cobra,
     ] {
         let (hint, dossier) = boss_text(k);
         rows.push(Row {
@@ -860,6 +866,14 @@ fn boss_text(k: BossKind) -> (&'static str, &'static str) {
              one blank margin, and stamps the inked part. Later it sweeps a carriage \
              rule across the floor. Stand on the unprinted stripe and let the edition \
              come out wrong.",
+        ),
+        BossKind::Cobra => (
+            "Lab · 15:00 — the other boss",
+            "An escaped specimen twenty-two feet long in a room eleven wide, so the \
+             coils are the room's walls. Step off the marked strike line and hit the \
+             spectacle mark on the open hood; leave the loop through its one gap, or \
+             dash over the coil; and when it lays the arena out as a spiral lane, run \
+             it — the head is spent at the end of it.",
         ),
         BossKind::Magpie => (
             "Flatbed · the getaway",
@@ -1572,6 +1586,7 @@ fn boss_answer(k: BossKind) -> &'static str {
         BossKind::HorseshoeCrab => "get behind the dome, hit the gills",
         BossKind::MegaRat => "leave the marked shape, punish the miss",
         BossKind::Hawk => "step off the talon print, then bite the nape",
+        BossKind::Cobra => "leave the loop by its gap, then hit the hood's spectacle mark",
     }
 }
 
@@ -2320,6 +2335,7 @@ fn boss_at(i: usize) -> Option<BossKind> {
         BossKind::HorseshoeCrab,
         BossKind::MegaRat,
         BossKind::Hawk,
+        BossKind::Cobra,
     ]
     .get(i)
     .copied()

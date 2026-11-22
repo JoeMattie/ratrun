@@ -53,6 +53,9 @@ pub fn warn_colour(kind: BossKind, active: bool) -> Rgb {
         BossKind::MegaRat => ((255, 186, 64), (255, 72, 62)),
         // A raptor's talon print on oak: warmer and browner than the horde's.
         BossKind::Hawk => ((255, 198, 118), (255, 96, 66)),
+        // Venom on a cold tile: the same amber tell, a greener hot beat so a
+        // live puddle is never mistaken for the loop's clock.
+        BossKind::Cobra => ((255, 196, 92), (210, 255, 96)),
     };
     if active {
         hot
