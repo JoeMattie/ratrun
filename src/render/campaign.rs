@@ -3138,8 +3138,7 @@ fn draw_level_slot(
 
     // Tall cards keep the old bay cards' emblem and boss codename.
     if h >= 11 && ci.width >= 19 {
-        let mut ey = 3u16;
-        for line in level_emblem(slot.level) {
+        for (ey, line) in (3u16..).zip(level_emblem(slot.level)) {
             put_centered(
                 buf,
                 ci,
@@ -3147,7 +3146,6 @@ fn draw_level_slot(
                 line,
                 ink(if slot.unlocked { accent } else { EDGE }).bg(bg),
             );
-            ey += 1;
         }
         put_centered(
             buf,

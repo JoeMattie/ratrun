@@ -338,9 +338,8 @@ fn entries_in(rows: &[Row], tab: Tab) -> usize {
 /// entry_index, row)`. `entry_index` is `None` for a header line.
 fn walk_lines(rows: &[Row], tab: Tab, mut f: impl FnMut(usize, Option<usize>, &Row)) {
     let mut line = 0usize;
-    let mut entry = 0usize;
     let mut group = "";
-    for row in rows.iter().filter(|r| r.tab == tab) {
+    for (entry, row) in rows.iter().filter(|r| r.tab == tab).enumerate() {
         if row.group != group {
             f(line, None, row);
             line += 1;
@@ -348,7 +347,6 @@ fn walk_lines(rows: &[Row], tab: Tab, mut f: impl FnMut(usize, Option<usize>, &R
         }
         f(line, Some(entry), row);
         line += 1;
-        entry += 1;
     }
 }
 
@@ -366,6 +364,7 @@ fn measure(rows: &[Row], tab: Tab, cursor: usize) -> (usize, usize) {
 }
 
 /// The scrolling list. Returns the number of rows it could show.
+#[allow(clippy::too_many_arguments)]
 fn draw_list(
     f: &mut Frame,
     area: Rect,
@@ -836,7 +835,7 @@ fn draw_object_art(
 }
 
 /// The cached steam-grate scene (a single grate, mid-cycle).
-fn steam_scene<'a>(scenes: &'a mut Scenes, centre: Vec2, t: f32) -> &'a LevelObjects {
+fn steam_scene(scenes: &mut Scenes, centre: Vec2, t: f32) -> &LevelObjects {
     let objects = scenes.steam.get_or_insert_with(|| {
         let mut objects = LevelObjects::default();
         objects.steam_grates.push(hazards::SteamGrate::new(
@@ -852,7 +851,7 @@ fn steam_scene<'a>(scenes: &'a mut Scenes, centre: Vec2, t: f32) -> &'a LevelObj
 }
 
 /// The cached ink-pad scene.
-fn ink_scene<'a>(scenes: &'a mut Scenes, centre: Vec2) -> &'a LevelObjects {
+fn ink_scene(scenes: &mut Scenes, centre: Vec2) -> &LevelObjects {
     scenes.ink.get_or_insert_with(|| {
         let mut objects = LevelObjects::default();
         let cell = ((centre.x / 16.0) as i32, (centre.y / 16.0) as i32);
@@ -1100,12 +1099,10 @@ fn draw_card(
         f.render_widget(para, Rect::new(area.x, y, area.width, room.min(5)));
         y += room.min(5);
     }
-    if !full {
-        if y < area.bottom() {
-            let hint = format!("found: {}", row.hint);
-            put(f, area.x, y, area.width, &hint, ink(MUTED));
-            y += 1;
-        }
+    if !full && y < area.bottom() {
+        let hint = format!("found: {}", row.hint);
+        put(f, area.x, y, area.width, &hint, ink(MUTED));
+        y += 1;
     }
 
     // Facts: label, value, and a five-cell bar where a bar says more.
