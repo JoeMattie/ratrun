@@ -80,7 +80,8 @@
 //! | | Expert | Skilled | Casual |
 //! |---|---|---|---|
 //! | reactions | 0.08 s heading hold, live sensors/dash | 0.25 s | 0.45 s |
-//! | horizon | 0.48 s | 0.22 s | 0.14 s |
+//! | horizon | 0.48 s | 0.48 s | 0.19 s |
+//! | crowd read (escape field) | 0.8 | 0.8 | 0.38 |
 //! | vision | whole simulation | screen + explored minimap | screen only |
 //! | hazard timer read | exact | quantised to 0.2 s | quantised to 0.4 s |
 //! | steering noise | 0 | 0.12 rad | 0.42 rad |
@@ -213,6 +214,21 @@ impl BotInput {
     };
 }
 
+/// The lookahead every decision used before the horizon was a real
+/// parameter: `score`'s last sample, in seconds. Expert and Skilled keep it,
+/// so wiring the parameter changed nothing for them (`x * (0.48 / 0.48)` is
+/// exact).
+const HORIZON_FULL: f32 = 0.48;
+/// The escape field's weight, likewise the value every skill used.
+const CROWD_FULL: f32 = 0.8;
+/// Casual's lookahead: a little over a quarter of a second, about 15 px of
+/// travel at the base speed. Tuned with the batch (see the balance log): the
+/// table's old 0.14 s label left it blind to anything past contact range.
+const CASUAL_HORIZON: f32 = 0.19;
+/// Casual's read of the crowd further out: it notices the thin side of a pack
+/// less than a practised player does.
+const CASUAL_CROWD: f32 = 0.38;
+
 /// The skill's reaction model.
 #[derive(Clone, Copy, Debug)]
 struct Params {
@@ -222,10 +238,11 @@ struct Params {
     noise: f32,
     /// Multiplier on the danger field.
     safety: f32,
-    /// Seconds of enemy-motion prediction. **Not read by the policy**: `score`
-    /// samples the same 0.12 / 0.27 / 0.48 s for every skill, so the ladder's
-    /// "horizon" is a label only (kept for the ordering test). A lower skill's
-    /// short sight comes from its reaction hold, its noise and its vision.
+    /// How far ahead `score` looks, in seconds: the last of its three
+    /// samples (the other two keep their ratio, see [`HORIZON_FULL`]). Expert
+    /// and Skilled read the full 0.48 s; Casual's is short, which is the way a
+    /// new player is worse: it sees what is about to touch it and little of
+    /// what it is walking into, so it leaves a warned shape late.
     horizon: f32,
     /// Sidestep the cat's locked pounce ring at the last moment.
     boss_counters: bool,
@@ -235,9 +252,8 @@ struct Params {
     trap_aware: bool,
     /// How much XP-gem greed competes with safety.
     greed: f32,
-    /// Weight of the soft crowd gradient (enemies further than contact range).
-    /// **Not read by the policy** either: the escape field in `score` uses a
-    /// fixed 0.8 for every skill.
+    /// Weight of the soft crowd gradient: the escape field in `score` (mass
+    /// 85-250 px along a heading, which decides the way out of a pack).
     crowd: f32,
     /// Weight of "keep going the way you were going".
     momentum: f32,
@@ -266,12 +282,12 @@ impl Params {
                 reaction: 0.08,
                 noise: 0.0,
                 safety: 1.0,
-                horizon: 0.30,
+                horizon: HORIZON_FULL,
                 boss_counters: true,
                 smart_dash: true,
                 trap_aware: true,
                 greed: 10.0,
-                crowd: 2.2,
+                crowd: CROWD_FULL,
                 momentum: 1.6,
                 standoff: false,
                 instant_dash: true,
@@ -283,12 +299,12 @@ impl Params {
                 reaction: 0.25,
                 noise: 0.12,
                 safety: 0.88,
-                horizon: 0.22,
+                horizon: HORIZON_FULL,
                 boss_counters: true,
                 smart_dash: true,
                 trap_aware: true,
                 greed: 5.0,
-                crowd: 1.5,
+                crowd: CROWD_FULL,
                 momentum: 1.4,
                 standoff: false,
                 instant_dash: false,
@@ -300,12 +316,12 @@ impl Params {
                 reaction: 0.45,
                 noise: 0.42,
                 safety: 0.62,
-                horizon: 0.14,
+                horizon: CASUAL_HORIZON,
                 boss_counters: false,
                 smart_dash: false,
                 trap_aware: false,
                 greed: 1.0,
-                crowd: 0.8,
+                crowd: CASUAL_CROWD,
                 momentum: 1.0,
                 standoff: false,
                 instant_dash: false,
@@ -441,6 +457,18 @@ pub struct Bot {
     /// Seconds before the rat may set off to another mouse-hole shop (a visit
     /// should not turn into a loop between two holes).
     shop_cd: f32,
+    /// The current leg is a walk to a mouse-hole shop (the goal pull is
+    /// stronger and the gem pull weaker, or greed keeps the rat off the shelf).
+    shop_leg: bool,
+    /// Seconds spent on shop legs since the last visit: a hole the straight
+    /// line cannot reach is given up on instead of being rubbed against.
+    shop_chase: f32,
+    /// The threshold the shop leg is walking to.
+    shop_face: Vec2,
+    /// The route there: a flow field toward `shop_face`, built the first time
+    /// a floor's shop is worth a walk (the horde's own field routes to the
+    /// rat, so the bot keeps one of its own). `None` until then.
+    shop_flow: Option<Box<crate::game::nav::FlowField>>,
     /// Boss seen this level, for the counter rules.
     boss_pos: Option<Vec2>,
     /// Living named miniboss (wave 3), for the fight objective.
@@ -469,6 +497,10 @@ impl Bot {
             pickups: Vec::with_capacity(8),
             level: 0,
             shop_cd: 0.0,
+            shop_leg: false,
+            shop_chase: 0.0,
+            shop_face: Vec2::ZERO,
+            shop_flow: None,
             boss_pos: None,
             miniboss_pos: None,
             boss_kind: None,
@@ -497,6 +529,10 @@ impl Bot {
         self.since_decision = f32::INFINITY;
         // A new floor has new holes: the last floor's visit does not count.
         self.shop_cd = 0.0;
+        self.shop_leg = false;
+        self.shop_chase = 0.0;
+        // The field is built for one floor's tiles.
+        self.shop_flow = None;
         self.boss_pos = None;
         self.miniboss_pos = None;
         self.boss_kind = None;
@@ -782,6 +818,8 @@ impl Bot {
             }
         }
         w.leave_shop();
+        self.shop_leg = false;
+        self.shop_chase = 0.0;
         // A visit that bought nothing (the shelf held only trades the bot
         // refuses right now) must not be repeated every few seconds: the hole
         // still looks worth a walk to `World::shop_goal_point`.
@@ -990,10 +1028,25 @@ impl Bot {
                                 }
                                 _ => 0.0,
                             };
+                            // Expert and Skilled read the shape the moment
+                            // it is drawn (`warn_left` 0). Casual reads it the
+                            // way it reads a boss telegraph: through its own
+                            // coarse timer and short lookahead, so it starts
+                            // to leave late and is sometimes still inside.
+                            let warn_left = if self.skill == Skill::Casual
+                                && mb.state == MinibossState::Tell
+                            {
+                                self.quantise_warn(
+                                    (crate::game::ecs::systems::miniboss::TELL_TIME - mb.timer)
+                                        .max(0.0),
+                                )
+                            } else {
+                                0.0
+                            };
                             if active_left > 0.0 {
                                 self.threats.push(Threat::MinibossHazard {
                                     shape,
-                                    warn_left: 0.0,
+                                    warn_left,
                                     active_left,
                                     damage: mb.signature_damage,
                                 });
@@ -1574,8 +1627,11 @@ impl Bot {
     fn score(&self, w: &World, p: Vec2, dir: Vec2, moving: bool) -> f32 {
         let speed = w.player.loadout.stats.move_speed;
         // Seconds ahead, and how much each sample counts.
+        // The three samples keep their spacing and scale with the skill's
+        // horizon (×1 exactly for Expert and Skilled).
         const TIMES: [f32; 3] = [0.12, 0.27, 0.48];
         const WEIGHTS: [f32; 3] = [0.5, 0.32, 0.18];
+        let reach = self.params.horizon / HORIZON_FULL;
         let mut danger = 0.0f32;
 
         // Walls: standing inside one is fatal to the plan; a short runway is
@@ -1583,7 +1639,12 @@ impl Bot {
         if !self.clear(w, p, R + 0.5) {
             danger += 100.0;
         }
-        if moving {
+        // The last steps of a shop leg end *on* a wall face: there the wall
+        // terms below (a short runway, a sample inside the wall, a closed-in
+        // cell) are the destination, not a hazard. Without this the rat stood
+        // 15-30 px from the shelf until it gave the errand up.
+        let door = self.shop_leg && p.dist(self.shop_face) < SHOP_DOOR_RADIUS;
+        if moving && !door {
             let runway = self.runway(w, p, dir, 140.0);
             danger += (1.0 - runway / 140.0).powi(2) * 9.0;
         }
@@ -1594,12 +1655,16 @@ impl Bot {
         let contact_scale = 1.0 - 0.85 * invuln;
 
         for (i, &t) in TIMES.iter().enumerate() {
+            let t = t * reach;
             let q = p + dir * (speed * t);
             let wt = WEIGHTS[i];
-            if !self.clear(w, q, R) {
-                danger += 80.0 * wt;
+            let at_door = door && q.dist(self.shop_face) < SHOP_DOOR_RADIUS * 0.5;
+            if !at_door {
+                if !self.clear(w, q, R) {
+                    danger += 80.0 * wt;
+                }
+                danger += (DIRS as f32 - self.openness(w, q) as f32) * 1.1 * wt;
             }
-            danger += (DIRS as f32 - self.openness(w, q) as f32) * 1.1 * wt;
 
             for threat in &self.threats {
                 danger += wt * threat_cost(p, *threat, q, t, contact_scale);
@@ -1610,7 +1675,7 @@ impl Bot {
         // surrounded is decided 100-200 px out. When the rat is inside a pack
         // every nearby direction looks equally bad, so the way out is the
         // direction with the thinnest mass further along it.
-        let end = p + dir * (speed * 0.48);
+        let end = p + dir * (speed * self.params.horizon);
         let mut thin = 0.0f32;
         for (dist, weight) in [(85.0f32, 1.0f32), (165.0, 0.55), (250.0, 0.3)] {
             let probe = p + dir * dist;
@@ -1623,7 +1688,7 @@ impl Bot {
                 }
             }
         }
-        danger += thin * 0.8;
+        danger += thin * self.params.crowd;
 
         // Drifting into the arena border funnels a kite into a corner.
         let edge = self.edge_gap(w, end);
@@ -1647,7 +1712,21 @@ impl Bot {
         // Loop / waypoint attraction.
         let to_goal = self.goal - p;
         if to_goal.len_sq() > 4.0 {
-            let g = if fighting { 0.5 } else { 1.4 };
+            let g = if fighting {
+                0.5
+            } else if self.shop_leg {
+                // The threshold is in a wall face, and the field's wall terms
+                // (a short runway, a closed-in cell) push the rat off it: the
+                // last steps need a pull that beats them, or the rat stands
+                // 20 px from the shelf until it gives up.
+                if p.dist(self.shop_face) < SHOP_DOOR_RADIUS {
+                    SHOP_DOOR_PULL
+                } else {
+                    SHOP_LEG_PULL
+                }
+            } else {
+                1.4
+            };
             bonus += g * dir.dot(to_goal.normalized());
         }
         // Loot attraction. XP is the whole progression, so gems pull hard —
@@ -1673,6 +1752,10 @@ impl Bot {
                     let guard = 1.0 / (1.0 + self.enemies_near(gpos, 45.0) as f32 * 0.5);
                     let greed = if fighting {
                         self.params.greed * 0.2
+                    } else if self.shop_leg {
+                        // On the way to the shelf: gems on the route, not a
+                        // detour for every one in sight.
+                        self.params.greed.min(SHOP_LEG_PULL * 0.5)
                     } else {
                         self.params.greed
                     };
@@ -2039,6 +2122,24 @@ impl Bot {
         None
     }
 
+    /// Where a shop leg heads next from `p`: a stride along the route to the
+    /// threshold, or the threshold itself for the last steps.
+    fn shop_waypoint(&self, p: Vec2) -> Vec2 {
+        let face = self.shop_face;
+        if p.dist(face) < 40.0 {
+            return face;
+        }
+        let dir = self
+            .shop_flow
+            .as_ref()
+            .map_or(Vec2::ZERO, |f| f.dir_at(SizeClass::Small, p));
+        if dir.len_sq() < 0.25 {
+            face
+        } else {
+            p + dir * 64.0
+        }
+    }
+
     /// Re-roll the waypoint when it is reached or its timer expires.
     fn update_goal(&mut self, w: &World, dt: f32) {
         let p = w.player.pos;
@@ -2048,11 +2149,21 @@ impl Bot {
         // re-rolled, and not at all near a boss or miniboss, so the 9 s
         // cooldown really lasted minutes.)
         self.shop_cd = (self.shop_cd - dt.max(0.0)).max(0.0);
-        let reached = self.goal.dist_sq(p) < 40.0 * 40.0;
+        if self.shop_leg {
+            self.shop_chase += dt.max(0.0);
+            // Follow the route, not the straight line: the next waypoint is a
+            // stride along the flow field (the threshold itself once it is
+            // close or the field has no opinion, i.e. inside its own room).
+            self.goal = self.shop_waypoint(p);
+        }
+        // A shop leg ends on the threshold itself (`pending_shop`), not 40 px
+        // short of it, so only its timer re-plans it.
+        let reached = !self.shop_leg && self.goal.dist_sq(p) < 40.0 * 40.0;
         if self.goal_timer > 0.0 && !reached {
             return;
         }
         self.goal_timer = 2.4 + self.rng.random::<f32>() * 0.8;
+        self.shop_leg = false;
 
         // In a boss fight, orbit the arena around the boss instead of roaming.
         if let Some(bpos) = self.boss_pos {
@@ -2104,11 +2215,24 @@ impl Bot {
         // past a shelf the build could buy from is leaving gold on the floor.
         // Never during a boss fight (the orbit above owns that) and never twice
         // in a row off the same visit.
-        if self.shop_cd <= 0.0 {
-            if let Some(face) = w.shop_goal_point() {
+        if self.shop_cd <= 0.0 && self.miniboss_pos.is_none() {
+            if self.shop_chase > SHOP_CHASE_LIMIT_SECS {
+                // The straight line does not get there (a wall, a pack in the
+                // doorway): stop trying for a while.
+                self.shop_cd = SHOP_DRY_COOLDOWN_SECS;
+                self.shop_chase = 0.0;
+            } else if let Some(face) = w.shop_goal_point() {
                 if p.dist(face) < SHOP_SEEK_RADIUS {
-                    self.goal = face;
+                    let tiles = &w.level.tiles;
+                    let flow = self
+                        .shop_flow
+                        .get_or_insert_with(|| Box::new(crate::game::nav::FlowField::new(tiles)));
+                    // The same goal cell again costs nothing.
+                    flow.update(tiles, face, crate::game::nav::NavBudget::FULL);
+                    self.shop_face = face;
+                    self.goal = self.shop_waypoint(p);
                     self.goal_timer = 1.4;
+                    self.shop_leg = true;
                     return;
                 }
             }
@@ -2305,7 +2429,19 @@ impl Bot {
 }
 
 /// How far the bot will walk to a mouse-hole shop the purse can use.
-const SHOP_SEEK_RADIUS: f32 = 320.0;
+const SHOP_SEEK_RADIUS: f32 = 1400.0;
+/// The goal pull of a shop leg. An ordinary waypoint pulls 1.4, which Expert's
+/// gem greed (10) and Skilled's (5) always beat: the better the bot, the less
+/// it shopped (0.08 / 0.36 / 0.83 purchases a floor, measured).
+const SHOP_LEG_PULL: f32 = 5.0;
+/// Inside this distance of the threshold the pull is [`SHOP_DOOR_PULL`].
+const SHOP_DOOR_RADIUS: f32 = 72.0;
+/// The pull of the last steps onto the threshold (the runway and openness
+/// terms it has to beat sum to about 12 against a wall).
+const SHOP_DOOR_PULL: f32 = 16.0;
+/// Seconds of shop legs without reaching the threshold before the bot gives
+/// that errand up for [`SHOP_DRY_COOLDOWN_SECS`].
+const SHOP_CHASE_LIMIT_SECS: f32 = 40.0;
 /// Seconds after a visit before the next shop leg may be planned.
 const SHOP_COOLDOWN_SECS: f32 = 9.0;
 /// The same, after a visit that bought nothing.
@@ -2446,11 +2582,13 @@ fn threat_cost(_p: Vec2, threat: Threat, q: Vec2, t: f32, contact_scale: f32) ->
         }
         Threat::MinibossHazard {
             shape,
+            warn_left,
             active_left,
             damage,
-            ..
         } => {
-            if active_left <= 0.0 || !shape.contains(q, R) {
+            // `warn_left` is 0 for every skill but Casual (see the scan), so
+            // the lookahead gate below only ever delays Casual's read.
+            if active_left <= 0.0 || !shape.contains(q, R) || warn_left > t + 0.12 {
                 0.0
             } else {
                 (damage / 10.0).clamp(0.8, 4.0) * 16.0
@@ -2882,10 +3020,24 @@ mod tests {
         let mut bot = seeded_bot(Skill::Expert, 3);
         let _ = bot.decide(&w, 1.0 / 60.0);
         let (goal, _) = bot.debug_goal();
+        // The leg is to that threshold; the waypoint is a stride along the
+        // route there (the flow field's), so it is nearer the face than the
+        // rat is, or the face itself for the last steps.
+        assert!(bot.shop_leg, "a shelf it can afford starts a shop leg");
+        assert!(bot.shop_face.dist(face) < 1.5, "{:?} vs {face:?}", bot.shop_face);
+        assert!(
+            goal.dist(face) < w.player.pos.dist(face),
+            "the waypoint leads toward the hole's face ({goal:?} vs {face:?})"
+        );
+        w.player.pos = face + hole.facing * 20.0;
+        let mut close = seeded_bot(Skill::Expert, 3);
+        let _ = close.decide(&w, 1.0 / 60.0);
+        let (goal, _) = close.debug_goal();
         assert!(
             goal.dist(face) < 1.5,
-            "the waypoint is the hole's face ({goal:?} vs {face:?})"
+            "the last steps aim at the face itself ({goal:?} vs {face:?})"
         );
+        w.player.pos = face + hole.facing * 120.0 + side * 40.0;
 
         // No gold: no shop leg, the rat goes back to kiting open floor.
         w.gold = 0;
@@ -3103,8 +3255,14 @@ mod tests {
         assert!(skilled.noise < casual.noise);
         assert!(expert.safety > skilled.safety);
         assert!(skilled.safety > casual.safety);
-        assert!(expert.horizon > skilled.horizon);
+        // Expert and Skilled share the full lookahead (and the full read of
+        // the crowd); only Casual is short-sighted.
+        assert_eq!(expert.horizon, HORIZON_FULL);
+        assert_eq!(skilled.horizon, HORIZON_FULL);
         assert!(skilled.horizon > casual.horizon);
+        assert_eq!(expert.crowd, CROWD_FULL);
+        assert_eq!(skilled.crowd, CROWD_FULL);
+        assert!(skilled.crowd > casual.crowd);
         assert_eq!(expert.vision, Vision::Full);
         assert_eq!(skilled.vision, Vision::Screen);
         assert_eq!(casual.vision, Vision::Screen);
@@ -3448,6 +3606,35 @@ mod tests {
         let mut casual = seeded_bot(Skill::Casual, 9);
         casual.scan(&w);
         assert!(!casual.threats.iter().any(|t| matches!(t, Threat::Steam { .. })));
+    }
+
+    /// Casual's short horizon is real: the same bot, given the full lookahead,
+    /// penalises walking at a body ahead of it much more. (The parameter used
+    /// to be a label that `score` never read.)
+    #[test]
+    fn casual_looks_a_shorter_way_ahead() {
+        let mut w = World::new(Theme::Sewer, 5);
+        w.clear_enemies();
+        let p = w.player.pos;
+        w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(52.0, 0.0), 1.0);
+        let toward = Vec2::new(1.0, 0.0);
+        let danger = |horizon: f32| -> f32 {
+            let mut bot = seeded_bot(Skill::Casual, 3);
+            bot.params.horizon = horizon;
+            bot.scan(&w);
+            bot.goal = p;
+            // Less is worse: the heading at the body against the heading away.
+            bot.score(&w, p, -toward, true) - bot.score(&w, p, toward, true)
+        };
+        let short = danger(CASUAL_HORIZON);
+        let full = danger(HORIZON_FULL);
+        assert!(
+            full > short + 0.5,
+            "the full lookahead reads the body ahead ({full:.2}) and Casual's barely does ({short:.2})"
+        );
+        // Expert and Skilled are untouched by the wiring: the scale is exactly 1.
+        assert_eq!(Params::for_skill(Skill::Skilled).horizon / HORIZON_FULL, 1.0);
+        assert_eq!(Params::for_skill(Skill::Expert).horizon / HORIZON_FULL, 1.0);
     }
 
     /// Batch 6: the shop cooldown is wall-clock. It used to tick only on the

@@ -25,33 +25,31 @@
 //!
 //! ## The economy (derivation — retune here)
 //!
-//! Income: `game::shop` pays a coin per eligible kill from a chance × value
-//! table (0.08 × 1 for a skitterer … 0.45 × 3 for a brute), plus
-//! [`crate::game::shop::ELITE_GOLD`] (5), [`crate::game::shop::MINIBOSS_GOLD`]
-//! (12) and [`crate::game::shop::BOSS_GOLD`] (30). A floor of the fifteen-minute
-//! timeline is a few thousand kills, so a full three-floor campaign that spends
-//! nothing banks in the low thousands — but a run that *uses* the gene-splice
-//! shelf (splices are 24-38 g each, a shelf visit can take 100+) and dies early
-//! banks far less.
+//! Income (batch 7, measured with `--bot-batch 96 --cycle-skills`): a floor of
+//! the fifteen-minute timeline pays about **650 gold** — roughly 350 from the
+//! ordinary coin table in `game::shop::gold_row`, 150 from elites
+//! ([`crate::game::shop::ELITE_GOLD`] each), 65 from Purse cards
+//! ([`crate::game::loadout::PURSE_GOLD`]), 48 from the four minibosses
+//! ([`crate::game::shop::MINIBOSS_GOLD`]), 30 from the boss
+//! ([`crate::game::shop::BOSS_GOLD`]) and a little from spent chests. The
+//! gene-splice shelf takes about 115 of the first floor's (two splices; they
+//! ride to the end of the run, so later floors spend almost nothing).
 //!
-//! **The assumption the prices are set against (batch 6 re-base): a typical
-//! finished run banks about 900 gold.** The first table assumed 250 a run; the
-//! bot measured ~1 971 gold a *floor*, which maxed the nest in three clears.
-//! The fix is in two halves: `game::shop` cuts drop chances to a third (about
-//! 650 gold a floor, about 900 banked by a run that dies on floor two and
-//! spends a little), and every price here and the three bank bonuses are x3.
-//! **Until the income half lands these prices are still ~3x too cheap for the
-//! measured income.** If the measured haul per run is `K` times 900, scale
-//! every price in [`Track::prices`] by `K` and nothing else here changes.
+//! **The assumption the prices are set against: the median run banks about
+//! 2,000 gold** (the mixed-skill batch's median; a three-floor clear banks
+//! about 2,100 with the bonuses, a run that dies on floor one 300-600). If the
+//! measured median is `K` times 2,000, scale every price in [`Track::prices`]
+//! by `K` and nothing else here changes; the batch report's `Nest:` lines
+//! print the three figures below for any table.
 //!
-//! Against 900 gold a run:
+//! Against 2,000 gold a run:
 //!
-//! * cheapest first step 120 g → **a first purchase after the first run**;
-//! * a fifth weapon *and* a fifth passive slot is 180 + 180 → by run one, and
-//!   both at six slots (180 + 600 each side) by about run two or three;
-//! * the whole table is **54 210 g** → about **60 runs** at 900 a run, with the
-//!   last weapon/passive slot (3 600 g) and the revive (4 500 g) as the
-//!   long-term goals the owner asked for.
+//! * cheapest first step 240 g → **a first purchase after the first run**,
+//!   even one that died on the first floor;
+//! * the median track costs 6 600 g in all → **three to four runs**;
+//! * the whole table is **108 420 g** → about **54 runs**, with the last
+//!   weapon/passive slot (7 200 g) and the revive (9 000 g) as the long-term
+//!   goals the owner asked for.
 //!
 //! ## Effects at full (a maxed profile is strong, not a win button)
 //!
@@ -282,23 +280,24 @@ impl Track {
     /// a long-term goal (see the module economy note for the derivation).
     fn prices(self) -> &'static [u32] {
         match self {
-            // Batch 6: every price is the original table x3 (K = 900 / 250,
-            // rounded down; see the module economy note).
-            Track::WeaponSlots => &[180, 600, 1_560, 3_600],
-            Track::PassiveSlots => &[180, 600, 1_560, 3_600],
-            Track::MoveSpeed => &[120, 210, 360, 570, 840, 1_200],
-            Track::PickupRange => &[120, 210, 360, 570, 840],
-            Track::FireRate => &[180, 300, 510, 780, 1_140, 1_620],
-            Track::MaxHp => &[150, 255, 420, 645, 930, 1_290],
-            Track::Regen => &[165, 285, 480, 750, 1_080],
-            Track::Armor => &[210, 390, 660, 1_020],
-            Track::Damage => &[180, 300, 510, 780, 1_140, 1_620],
-            Track::DashCooldown => &[150, 255, 420, 645, 930],
-            Track::XpGain => &[180, 300, 510, 780, 1_140],
-            Track::GoldGain => &[240, 390, 600, 870, 1_200],
-            Track::Luck => &[210, 360, 600, 960],
-            Track::CarryOver => &[1_200, 2_700],
-            Track::Revive => &[4_500],
+            // Batch 7: the original table x6. Batch 6 tripled it against an
+            // assumed 900 gold a run; the measured median run banks about
+            // 2,000 (see the module economy note), so it is doubled again.
+            Track::WeaponSlots => &[360, 1_200, 3_120, 7_200],
+            Track::PassiveSlots => &[360, 1_200, 3_120, 7_200],
+            Track::MoveSpeed => &[240, 420, 720, 1_140, 1_680, 2_400],
+            Track::PickupRange => &[240, 420, 720, 1_140, 1_680],
+            Track::FireRate => &[360, 600, 1_020, 1_560, 2_280, 3_240],
+            Track::MaxHp => &[300, 510, 840, 1_290, 1_860, 2_580],
+            Track::Regen => &[330, 570, 960, 1_500, 2_160],
+            Track::Armor => &[420, 780, 1_320, 2_040],
+            Track::Damage => &[360, 600, 1_020, 1_560, 2_280, 3_240],
+            Track::DashCooldown => &[300, 510, 840, 1_290, 1_860],
+            Track::XpGain => &[360, 600, 1_020, 1_560, 2_280],
+            Track::GoldGain => &[480, 780, 1_200, 1_740, 2_400],
+            Track::Luck => &[420, 720, 1_200, 1_920],
+            Track::CarryOver => &[2_400, 5_400],
+            Track::Revive => &[9_000],
         }
     }
 
@@ -1020,13 +1019,13 @@ mod tests {
         }
         assert_eq!(Track::from_index(Track::ALL.len()), None);
         assert_eq!(Track::from_key("no_such_track"), None);
-        // The economy note in the module docs says the whole table is 54 210 g:
-        // about 60 runs at 900 banked a run.
-        assert_eq!(total, 54_210, "the table's total changed: update the note");
-            assert!(
-            (50..=80).contains(&(total / 900)),
-            "the table should max out in 50-80 runs at 900 a run, got {}",
-            total / 900
+        // The economy note in the module docs says the whole table is
+        // 108 420 g: about 54 runs at the measured 2,000 banked a run.
+        assert_eq!(total, 108_420, "the table's total changed: update the note");
+        assert!(
+            (40..=60).contains(&(total / 2_000)),
+            "the table should max out in 40-60 runs at 2,000 a run, got {}",
+            total / 2_000
         );
     }
 
@@ -1123,20 +1122,24 @@ mod tests {
     #[test]
     fn buy_spends_the_bank_and_refund_returns_exactly_what_was_paid() {
         let mut profile = MetaProfile::default();
-        profile.bank = 1_000;
-        assert_eq!(profile.buy(Track::WeaponSlots), Some(180));
+        // Read from the table, so a retune of the prices cannot break the
+        // arithmetic this test is about.
+        let first = Track::WeaponSlots.price(0).expect("a first step");
+        let second = Track::WeaponSlots.price(1).expect("a second step");
+        profile.bank = first + second + 220;
+        assert_eq!(profile.buy(Track::WeaponSlots), Some(first));
         assert_eq!(profile.level(Track::WeaponSlots), 1);
-        assert_eq!(profile.bank, 820);
-        assert_eq!(profile.next_price(Track::WeaponSlots), Some(600));
-        assert_eq!(profile.buy(Track::WeaponSlots), Some(600));
+        assert_eq!(profile.bank, second + 220);
+        assert_eq!(profile.next_price(Track::WeaponSlots), Some(second));
+        assert_eq!(profile.buy(Track::WeaponSlots), Some(second));
         assert_eq!(profile.bank, 220);
         assert_eq!(profile.total_levels(), 2);
 
         // A short bank refuses and touches nothing.
         let mut poor = MetaProfile::default();
-        poor.bank = 179;
+        poor.bank = first - 1;
         assert_eq!(poor.buy(Track::WeaponSlots), None);
-        assert_eq!(poor.bank, 179);
+        assert_eq!(poor.bank, first - 1);
         assert_eq!(poor.level(Track::WeaponSlots), 0);
 
         // Maxed refuses even with gold in hand.
@@ -1147,7 +1150,7 @@ mod tests {
 
         // The refund is exactly the sum paid: it can neither mint nor burn gold.
         let paid = profile.spent_total();
-        assert_eq!(paid, 180 + 600);
+        assert_eq!(paid, first + second);
         let before = profile.bank;
         assert_eq!(profile.refund_all(), paid);
         assert_eq!(profile.bank, before + paid);

@@ -1642,13 +1642,13 @@ mod tests {
             assert_eq!(kind.xp(), xp, "{kind:?} XP");
         }
         // The gold column, chance × pieces: the `WAVE4_ROSTERS.md` chances cut
-        // to about a third by the batch-six income pass, read from the shop's
-        // own row.
+        // to about a third by the batch-six income pass and by a further
+        // ×0.72 in batch seven, read from the shop's own row.
         use crate::game::shop;
-        assert_eq!(shop::gold_row(EnemyKind::PipeEel), (0.06, 2));
-        assert_eq!(shop::gold_row(EnemyKind::CrumbAnt), (0.03, 1));
-        assert_eq!(shop::gold_row(EnemyKind::PaperReel), (0.15, 3));
-        assert_eq!(shop::gold_row(EnemyKind::LooseBungee), (0.11, 3));
+        assert_eq!(shop::gold_row(EnemyKind::PipeEel), (0.043, 2));
+        assert_eq!(shop::gold_row(EnemyKind::CrumbAnt), (0.022, 1));
+        assert_eq!(shop::gold_row(EnemyKind::PaperReel), (0.108, 3));
+        assert_eq!(shop::gold_row(EnemyKind::LooseBungee), (0.079, 3));
     }
 
     /// One floor's registrations, in roster order (`Boss` is nobody's slot).

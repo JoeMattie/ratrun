@@ -18,9 +18,9 @@
 //! | 0–1 | 0.8→1.5 | 18 | 0 |
 //! | 1–3 | 1.5→3 | 42 | 0 |
 //! | 3–6 | 3→5 | 72 | 0→1 % |
-//! | 6–9 | 5→7 | 105 | 1→2 % |
-//! | 9–12 | 7→9 | 135 | 2→3 % |
-//! | 12–15 | 9→11 | 165 | 3→4 % |
+//! | 6–9 | 5→7 | 115 | 1→2 % |
+//! | 9–12 | 7→9 | 150 | 2→3 % |
+//! | 12–15 | 9→11 | 185 | 3→4 % |
 //! | 15+ | 1 (cleanup) | 35 | 0 |
 //!
 //! ## Campaign levels
@@ -150,7 +150,12 @@ pub fn horde_speed_mult(elapsed: f32) -> f32 {
 /// opening minutes of every stage are identical and the extra bite arrives
 /// during the build-up. It multiplies the *horde's* hp only, at spawn time
 /// ([`horde_hp_mult_for`]); the boss pool stays on [`hp_mult_for`].
-pub const LEVEL_HP_EXTRA: [f32; 3] = [1.0, 1.05, 1.10];
+///
+/// **Batch seven** (measured, 96 campaigns): the design's +5 % / +10 % left
+/// the Skilled bot at 16/16 wins and the Casual one at 9/16. The rows are now
+/// +20 % / +45 % / +70 %, stage one included (its damage and speed stay at
+/// base: see [`enemy_mods_for`]).
+pub const LEVEL_HP_EXTRA: [f32; 3] = [1.2, 1.45, 1.7];
 /// Run-clock second after which a later stage's extra hp starts to apply.
 pub const LEVEL_HP_EXTRA_AFTER: f32 = 180.0;
 
@@ -361,10 +366,10 @@ const LIVE_BUDGET: [(f32, usize); 7] = [
     (0.0, 18),
     (60.0, 42),
     (180.0, 72),
-    (360.0, 105),
-    (540.0, 135),
-    (720.0, 165),
-    (900.0, 165),
+    (360.0, 115),
+    (540.0, 150),
+    (720.0, 185),
+    (900.0, 185),
 ];
 
 /// Elite chance per ordinary spawn by curve clock (the §1 column), as a
@@ -660,12 +665,16 @@ pub const ELITE_INTERVAL_MAX: f32 = 45.0;
 /// later stages readable: contact damage is the base kind's, plus a small
 /// per-stage ramp. The horde's bite lives in [`LEVEL_ELITE_INTERVAL`] and
 /// the floor's roster (more visible heavies, a real ranged line) instead.
-const LEVEL_DAMAGE_TOP: [f32; 3] = [1.0, 1.12, 1.20];
+///
+/// **Batch seven**: ×1.12 / ×1.20 did not register on a build with a few
+/// armour stacks (a flat point off every hit). Stages two and three now reach
+/// ×1.6 / ×1.9 at the boss; stage one stays at base, as the design asks.
+const LEVEL_DAMAGE_TOP: [f32; 3] = [1.0, 1.6, 1.9];
 
 /// The horde's speed multiplier at the top of a level's ramp. The Lab's swarm
 /// stays the quickest, but only just: a faster horde walks into melee-range
 /// weapons on the merged build, so the measured cliff lives well above this.
-const LEVEL_SPEED_TOP: [f32; 3] = [1.0, 1.05, 1.10];
+const LEVEL_SPEED_TOP: [f32; 3] = [1.0, 1.08, 1.15];
 
 /// Shape of the ramp: `t^exp` over the level, so a lower exponent bites sooner.
 const LEVEL_RAMP_EXP: [f32; 3] = [1.0, 1.0, 1.0];
@@ -824,7 +833,7 @@ mod tests {
             );
         }
         // Live budget.
-        for (t, v) in [(0.0, 18), (60.0, 42), (180.0, 72), (360.0, 105), (540.0, 135), (720.0, 165)] {
+        for (t, v) in [(0.0, 18), (60.0, 42), (180.0, 72), (360.0, 115), (540.0, 150), (720.0, 185)] {
             assert_eq!(live_budget_at(t), v, "live budget at {t}s");
         }
         // Elite chance per ordinary spawn.
@@ -1024,9 +1033,11 @@ mod tests {
         }
     }
 
-    /// Level 0's scalar knobs are the base game, bit for bit: the campaign
-    /// must not touch the Sewer's hp, damage, speed or elite cadence, because
-    /// those curves belong to the early-game pass. The *kinds* are the floor's
+    /// Level 0's damage, speed and elite cadence are the base game, bit for
+    /// bit (the design: "speed and contact damage at base on stage one"). Its
+    /// ordinary hp is the base curve through the opening, then carries the
+    /// batch-seven horde extra from 3:00 ([`LEVEL_HP_EXTRA`], +20 % by the
+    /// boss), which the boss pool does not. The *kinds* are the floor's
     /// roster, which is a separate axis (see `each_floor_fields_its_own_cast`).
     #[test]
     fn level_one_is_the_base_game() {
@@ -1035,9 +1046,17 @@ mod tests {
         use rand::SeedableRng;
         for t in [0.0f32, 30.0, 120.0, 200.0, BOSS_TIME, 999.0] {
             assert_eq!(enemy_mods_for(0, t), EnemyMods::NONE);
-            assert_eq!(horde_hp_mult_for(0, t), hp_mult_for(0, t));
-            assert_eq!(horde_hp_mult_at(curve_clock(0, t), 0), hp_mult_at(curve_clock(0, t)));
+            let extra = level_hp_extra(0, t);
+            assert_eq!(horde_hp_mult_for(0, t), hp_mult_for(0, t) * extra);
+            if t <= LEVEL_HP_EXTRA_AFTER {
+                assert_eq!(extra, 1.0, "the opening is the base curve at {t}s");
+            } else {
+                assert!(extra > 1.0 && extra <= LEVEL_HP_EXTRA[0], "{extra} at {t}s");
+            }
+            // The boss pool never carries the horde's extra.
+            assert_eq!(boss_hp_mult_for(0, t), hp_mult_for(0, t) * BOSS_POOL_SCALE);
         }
+        assert_eq!(level_hp_extra(0, BOSS_TIME), LEVEL_HP_EXTRA[0]);
         assert_eq!(elite_interval_for(0), ELITE_INTERVAL);
         // The level-0 roll is the Sewer's roster roll, with or without a
         // campaign level in front of it (`pick_kind_for` only shifts the

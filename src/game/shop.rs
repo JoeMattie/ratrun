@@ -61,13 +61,13 @@ pub const STOCK_SIZE: usize = 3;
 pub const MAX_REROLLS: u8 = 2;
 
 /// Price of the first "turn the shelf", in gold. The second costs twice.
-pub const REROLL_BASE_PRICE: u32 = 20;
+pub const REROLL_BASE_PRICE: u32 = 14;
 
 /// Price of a Stitch.
-pub const STITCH_PRICE: u32 = 30;
+pub const STITCH_PRICE: u32 = 20;
 
 /// Price of a Molt.
-pub const MOLT_PRICE: u32 = 60;
+pub const MOLT_PRICE: u32 = 40;
 
 /// Fraction of max HP a Stitch restores.
 pub const STITCH_FRACTION: f32 = 0.35;
@@ -148,16 +148,16 @@ impl SpliceKind {
 
     pub fn price(self) -> u32 {
         match self {
-            SpliceKind::GlassIncisors => 105,
-            SpliceKind::BoilerHeart => 96,
-            SpliceKind::HollowBones => 84,
-            SpliceKind::DoubleLid => 90,
-            SpliceKind::HoardGland => 90,
-            SpliceKind::CopperNerves => 114,
-            SpliceKind::NightShift => 102,
-            SpliceKind::BlackboardBelly => 108,
-            SpliceKind::BallastSac => 84,
-            SpliceKind::LongFingers => 72,
+            SpliceKind::GlassIncisors => 70,
+            SpliceKind::BoilerHeart => 64,
+            SpliceKind::HollowBones => 56,
+            SpliceKind::DoubleLid => 60,
+            SpliceKind::HoardGland => 60,
+            SpliceKind::CopperNerves => 76,
+            SpliceKind::NightShift => 68,
+            SpliceKind::BlackboardBelly => 72,
+            SpliceKind::BallastSac => 56,
+            SpliceKind::LongFingers => 48,
         }
     }
 
@@ -387,8 +387,9 @@ pub fn scaled(value: u32, mult: f32) -> u32 {
 // Gold (WAVE3_DESIGN §6)
 // ============================================================================
 
-/// Elites always pay this much, replacing their kind's own roll.
-pub const ELITE_GOLD: u32 = 3;
+/// Elites always pay this much, replacing their kind's own roll. (About 77
+/// elites die on a floor, so this one number is a quarter of its income.)
+pub const ELITE_GOLD: u32 = 2;
 
 /// A miniboss pays this alongside its chest (`w3-timeline` raises it).
 pub const MINIBOSS_GOLD: u32 = 12;
@@ -398,7 +399,9 @@ pub const BOSS_GOLD: u32 = 30;
 
 /// The chance × value table, by kind (batch 6: every chance cut to about a
 /// third of the wave-3 design's, values unchanged — a floor paid ~1,970 gold
-/// against 48-76 for two splices) — the **gold row** step of the
+/// against 48-76 for two splices; batch 7: a further ×0.72, measured: the
+/// floor still paid ~1,010 against a 650 target, 480 of it from this table)
+/// — the **gold row** step of the
 /// roster's registration seam (`crate::game::roster`, "Adding a new ordinary
 /// kind", step 3).
 ///
@@ -412,69 +415,69 @@ pub const BOSS_GOLD: u32 = 30;
 #[allow(unreachable_patterns)]
 pub fn gold_row(kind: EnemyKind) -> (f32, u32) {
     match kind {
-        EnemyKind::Skitterer => (0.03, 1),
-        EnemyKind::Bat => (0.035, 1),
-        EnemyKind::Cat => (0.06, 2),
-        EnemyKind::Spitter => (0.07, 2),
-        EnemyKind::Brute => (0.15, 3),
+        EnemyKind::Skitterer => (0.022, 1),
+        EnemyKind::Bat => (0.025, 1),
+        EnemyKind::Cat => (0.043, 2),
+        EnemyKind::Spitter => (0.05, 2),
+        EnemyKind::Brute => (0.108, 3),
         // The five wave-3 kinds (`WAVE3_DESIGN.md` §6).
-        EnemyKind::Pillbug => (0.06, 2),
-        EnemyKind::BellFlea => (0.05, 2),
-        EnemyKind::WickMoth => (0.075, 2),
-        EnemyKind::Porter => (0.13, 3),
-        EnemyKind::Turnkey => (0.11, 3),
+        EnemyKind::Pillbug => (0.043, 2),
+        EnemyKind::BellFlea => (0.036, 2),
+        EnemyKind::WickMoth => (0.054, 2),
+        EnemyKind::Porter => (0.094, 3),
+        EnemyKind::Turnkey => (0.079, 3),
         // Wave 4: gold in the band of a kind of similar threat. The snake is
         // the rare one and pays accordingly; the centipede is cheap because it
         // is a two-hit skirmisher that flees.
-        EnemyKind::BigSnake => (0.18, 4),
-        EnemyKind::HouseCentipede => (0.04, 2),
-        EnemyKind::MurderHornet => (0.075, 2),
-        EnemyKind::TermiteHorde => (0.07, 2),
+        EnemyKind::BigSnake => (0.13, 4),
+        EnemyKind::HouseCentipede => (0.029, 2),
+        EnemyKind::MurderHornet => (0.054, 2),
+        EnemyKind::TermiteHorde => (0.05, 2),
         EnemyKind::Boss => (1.0, BOSS_GOLD),
         // ---- Wave-four registrations ---------------------------------------
         // `WAVE4_ROSTERS.md`'s Gold column, percent × pieces: chance 0.08 is
         // 8 % × 1. The row is the kind's own, not its archetype's.
         //
         // Sewer.
-        EnemyKind::PipeEel => (0.06, 2),
-        EnemyKind::GrateArcher => (0.07, 2),
-        EnemyKind::SumpLeech => (0.07, 2),
-        EnemyKind::SluiceToad => (0.15, 3),
+        EnemyKind::PipeEel => (0.043, 2),
+        EnemyKind::GrateArcher => (0.05, 2),
+        EnemyKind::SumpLeech => (0.05, 2),
+        EnemyKind::SluiceToad => (0.108, 3),
         // Kitchen.
-        EnemyKind::CrumbAnt => (0.03, 1),
-        EnemyKind::FruitFly => (0.035, 1),
-        EnemyKind::EggTimer => (0.06, 2),
-        EnemyKind::PepperMill => (0.07, 2),
-        EnemyKind::PieWeight => (0.15, 3),
-        EnemyKind::SinkCrab => (0.085, 2),
+        EnemyKind::CrumbAnt => (0.022, 1),
+        EnemyKind::FruitFly => (0.025, 1),
+        EnemyKind::EggTimer => (0.043, 2),
+        EnemyKind::PepperMill => (0.05, 2),
+        EnemyKind::PieWeight => (0.108, 3),
+        EnemyKind::SinkCrab => (0.061, 2),
         // Lab.
-        EnemyKind::SwabFoot => (0.03, 1),
-        EnemyKind::SpinnerLid => (0.035, 1),
-        EnemyKind::GlassRunner => (0.06, 2),
-        EnemyKind::WalkingSyringe => (0.06, 2),
-        EnemyKind::AutoclaveCart => (0.15, 3),
+        EnemyKind::SwabFoot => (0.022, 1),
+        EnemyKind::SpinnerLid => (0.025, 1),
+        EnemyKind::GlassRunner => (0.043, 2),
+        EnemyKind::WalkingSyringe => (0.043, 2),
+        EnemyKind::AutoclaveCart => (0.108, 3),
         // Laundry.
-        EnemyKind::WoolPill => (0.03, 1),
-        EnemyKind::ClothesMoth => (0.035, 1),
-        EnemyKind::PegSnapper => (0.06, 2),
-        EnemyKind::StarchBulb => (0.07, 2),
-        EnemyKind::LintGolem => (0.15, 3),
+        EnemyKind::WoolPill => (0.022, 1),
+        EnemyKind::ClothesMoth => (0.025, 1),
+        EnemyKind::PegSnapper => (0.043, 2),
+        EnemyKind::StarchBulb => (0.05, 2),
+        EnemyKind::LintGolem => (0.108, 3),
         // Printworks.
-        EnemyKind::Silverfish => (0.03, 1),
-        EnemyKind::ErratumSlip => (0.035, 1),
-        EnemyKind::TypeSlug => (0.06, 2),
-        EnemyKind::StapleCrawler => (0.06, 2),
-        EnemyKind::PaperWasp => (0.07, 2),
-        EnemyKind::PaperReel => (0.15, 3),
-        EnemyKind::InkBlot => (0.075, 2),
+        EnemyKind::Silverfish => (0.022, 1),
+        EnemyKind::ErratumSlip => (0.025, 1),
+        EnemyKind::TypeSlug => (0.043, 2),
+        EnemyKind::StapleCrawler => (0.043, 2),
+        EnemyKind::PaperWasp => (0.05, 2),
+        EnemyKind::PaperReel => (0.108, 3),
+        EnemyKind::InkBlot => (0.054, 2),
         // Flatbed.
-        EnemyKind::GravelTick => (0.03, 1),
-        EnemyKind::JuneBug => (0.035, 1),
-        EnemyKind::TarRat => (0.06, 2),
-        EnemyKind::LooseCan => (0.06, 2),
-        EnemyKind::TollGull => (0.07, 2),
-        EnemyKind::LooseBungee => (0.11, 3),
-        _ => (0.035, 1),
+        EnemyKind::GravelTick => (0.022, 1),
+        EnemyKind::JuneBug => (0.025, 1),
+        EnemyKind::TarRat => (0.043, 2),
+        EnemyKind::LooseCan => (0.043, 2),
+        EnemyKind::TollGull => (0.05, 2),
+        EnemyKind::LooseBungee => (0.079, 3),
+        _ => (0.025, 1),
     }
 }
 
@@ -1474,15 +1477,15 @@ mod tests {
     }
 
     #[test]
-    fn turning_the_shelf_brings_unseen_stock_and_costs_twenty_then_forty() {
+    fn turning_the_shelf_brings_unseen_stock_and_the_second_turn_costs_double() {
         let mut w = shop_world(13, 100);
         let first: Vec<Option<SpliceKind>> = (0..STOCK_SIZE)
             .map(|s| w.shop.get(0).unwrap().slot(s))
             .collect();
-        assert_eq!(reroll_price(w.shop.get(0).unwrap()), Some(20));
+        assert_eq!(reroll_price(w.shop.get(0).unwrap()), Some(REROLL_BASE_PRICE));
         assert_eq!(
             buy(&mut w, 0, ShopItem::Reroll),
-            Purchase::Bought { price: 20 }
+            Purchase::Bought { price: REROLL_BASE_PRICE }
         );
         let second: Vec<Option<SpliceKind>> = (0..STOCK_SIZE)
             .map(|s| w.shop.get(0).unwrap().slot(s))
@@ -1494,10 +1497,10 @@ mod tests {
                 "{kind:?} was already on the shelf"
             );
         }
-        assert_eq!(w.gold, 80);
+        assert_eq!(w.gold, 100 - REROLL_BASE_PRICE);
         assert_eq!(
             buy(&mut w, 0, ShopItem::Reroll),
-            Purchase::Bought { price: 40 }
+            Purchase::Bought { price: REROLL_BASE_PRICE * 2 }
         );
         assert_eq!(w.shop.get(0).unwrap().rerolls, MAX_REROLLS);
         assert_eq!(
@@ -1834,18 +1837,18 @@ mod tests {
 
     #[test]
     fn the_gold_table_is_the_designs() {
-        assert_eq!(gold_row(EnemyKind::Skitterer), (0.03, 1));
-        assert_eq!(gold_row(EnemyKind::Bat), (0.035, 1));
-        assert_eq!(gold_row(EnemyKind::Cat), (0.06, 2));
-        assert_eq!(gold_row(EnemyKind::Spitter), (0.07, 2));
-        assert_eq!(gold_row(EnemyKind::Brute), (0.15, 3));
-        assert_eq!(gold_row(EnemyKind::Pillbug), (0.06, 2));
-        assert_eq!(gold_row(EnemyKind::BellFlea), (0.05, 2));
-        assert_eq!(gold_row(EnemyKind::WickMoth), (0.075, 2));
-        assert_eq!(gold_row(EnemyKind::Porter), (0.13, 3));
-        assert_eq!(gold_row(EnemyKind::Turnkey), (0.11, 3));
+        assert_eq!(gold_row(EnemyKind::Skitterer), (0.022, 1));
+        assert_eq!(gold_row(EnemyKind::Bat), (0.025, 1));
+        assert_eq!(gold_row(EnemyKind::Cat), (0.043, 2));
+        assert_eq!(gold_row(EnemyKind::Spitter), (0.05, 2));
+        assert_eq!(gold_row(EnemyKind::Brute), (0.108, 3));
+        assert_eq!(gold_row(EnemyKind::Pillbug), (0.043, 2));
+        assert_eq!(gold_row(EnemyKind::BellFlea), (0.036, 2));
+        assert_eq!(gold_row(EnemyKind::WickMoth), (0.054, 2));
+        assert_eq!(gold_row(EnemyKind::Porter), (0.094, 3));
+        assert_eq!(gold_row(EnemyKind::Turnkey), (0.079, 3));
         assert_eq!(gold_row(EnemyKind::Boss), (1.0, BOSS_GOLD));
-        // The boss always pays 30; an elite always pays 5, whatever its kind.
+        // The boss and an elite always pay their fixed coin, whatever the kind.
         assert_eq!(gold_for(7, 1, EnemyKind::Boss, false), BOSS_GOLD);
         assert_eq!(gold_for(7, 1, EnemyKind::Skitterer, true), ELITE_GOLD);
         assert_eq!(gold_for(7, 1, EnemyKind::Brute, true), ELITE_GOLD);
@@ -1861,12 +1864,14 @@ mod tests {
             .filter(|id| gold_for(7, *id, EnemyKind::Brute, false) > 0)
             .count();
         let rate = hits as f32 / 3999.0;
-        assert!((rate - 0.15).abs() < 0.04, "brute rate {rate}");
+        let chance = gold_row(EnemyKind::Brute).0;
+        assert!((rate - chance).abs() < 0.03, "brute rate {rate} against {chance}");
         let hits = (1..4000u64)
             .filter(|id| gold_for(7, *id, EnemyKind::Skitterer, false) > 0)
             .count();
         let rate = hits as f32 / 3999.0;
-        assert!((rate - 0.03).abs() < 0.02, "skitterer rate {rate}");
+        let chance = gold_row(EnemyKind::Skitterer).0;
+        assert!((rate - chance).abs() < 0.015, "skitterer rate {rate} against {chance}");
     }
 
     /// The gold-row half of the roster registration seam: every kind on every

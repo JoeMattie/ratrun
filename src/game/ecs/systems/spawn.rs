@@ -2112,7 +2112,9 @@ mod tests {
         );
         let expected = crate::game::roster::kind(Theme::Sewer, crate::game::roster::Slot::H)
             .base_hp()
-            * director::hp_mult(open)
+            // The horde's own curve: the shared ramp times level one's
+            // `LEVEL_HP_EXTRA` (which starts at the same 3:00 gate).
+            * director::horde_hp_mult_for(0, open)
             * 1.6;
         assert!((brute.max_hp - expected).abs() < 1e-3, "hp = {}", brute.hp);
     }
@@ -2738,9 +2740,10 @@ mod tests {
             early_peak >= 12,
             "only {early_peak} enemies before 60 s: the horde never builds"
         );
+        let top = director::live_budget_at(director::RUN_SECONDS - 1.0);
         assert!(
-            (120..=165).contains(&peak),
-            "the late horde did not reach its budget: peak {peak}"
+            (top * 3 / 4..=top).contains(&peak),
+            "the late horde did not reach its budget: peak {peak} of {top}"
         );
         assert!(peak < ENEMY_CAP, "the 600-body cap was touched: {peak}");
         assert!(w.director.boss_spawned, "the boss slot never filled");

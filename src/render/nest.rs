@@ -36,7 +36,7 @@ use crate::render::palette::{to_color, COAT, MUTED, PLATE, TAIL, TRACK};
 /// (`Track::price`) is not `const`; `the_confirm_threshold_follows_the_price_table`
 /// fails, naming the new value, the moment a retune moves the table away from
 /// it. Prefer [`needs_confirm`] in new code: it cannot go stale.
-pub const CONFIRM_AT: u32 = 900;
+pub const CONFIRM_AT: u32 = 1_800;
 
 /// The confirm threshold derived from the price table: seven and a half times
 /// the cheapest first step on the board.
