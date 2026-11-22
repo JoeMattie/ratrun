@@ -190,9 +190,10 @@ fn bestiary_plates_show_no_rat() {
         let mut art = PixelBuffer::new(44, 30);
         plate(&mut scene, &mut art);
         assert!(!has_rat_ink(&art), "{key:?} drew the ink pass's rat mark");
-        // The comparison is made without the card's dummy: at a shooter's zoom
-        // the cork covers the whole rat, and the proof is about the world pass.
-        // (Half a second in, so the camera has eased onto the plate's lane.)
+        // The comparison is made without the card's dummy: the cork is drawn at
+        // the rat's own point, so taking it out is what makes the proof about
+        // the world pass alone. (Half a second in, so the camera has eased onto
+        // the plate's lane.)
         for _ in 0..30 {
             scene.step();
         }
@@ -291,6 +292,298 @@ fn the_bestiary_families_run_different_scripts() {
         pack.subject.is_some() && shock.subject.is_some(),
         "both families are about a body"
     );
+}
+
+/// The card's dummy is painted **under** the picture. On every frame of every
+/// aimed plate the cork changes only pixels the world's own pass left as bare
+/// floor, so a body standing on the dummy keeps its own pixels: the Bell Flea's
+/// landing crosses, the Wick Moth's burst and the Loose Bungee's hook all end
+/// their loop standing on the target, and the plate must still show them.
+#[test]
+fn the_practice_dummy_never_paints_over_a_body() {
+    const W: usize = 44;
+    const H: usize = 30;
+    for key in bestiary_keys() {
+        let mut scene = LibraryScene::build(key).unwrap_or_else(|| panic!("{key:?} has no scene"));
+        if !scene.script.dummy {
+            continue;
+        }
+        let mut art = PixelBuffer::new(W, H);
+        let mut bare = PixelBuffer::new(W, H);
+        // The proof compares two draws of the same frame, so the one layer that
+        // is stateful across draws (smoke advances its own particles) is out.
+        scene.world.smoke_enabled = false;
+        let ticks = (scene.loop_secs() / TICK) as u32;
+        let (mut drawn, mut subject_drawn) = (false, 0u32);
+        for _ in 0..ticks {
+            plate(&mut scene, &mut art);
+            let subject = scene.subject_pos();
+            // The same frame with the card's own target switched off, and the
+            // bare floor the world's pass leaves where nothing stands.
+            scene.script.dummy = false;
+            plate(&mut scene, &mut bare);
+            scene.script.dummy = true;
+            let floor = scene.floor_plate(W, H).pixels().to_vec();
+            assert_eq!(floor.len(), W * H);
+            // The dummy's own disc on the plate, from the same placement rule
+            // `draw` uses.
+            let scale = scene.world.zoom.max(0.01) * scene.script.shrink.max(1) as f32;
+            let cam = scene.world.cam;
+            let p = scene.world.player.pos;
+            let sx = ((p.x - cam.x) / scale).round() as i32;
+            let sy = ((p.y - cam.y) / scale).round() as i32;
+            let r = ((DUMMY_R / scale).round() as i32).max(2) + 1;
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    let (x, y) = (sx + dx, sy + dy);
+                    if !(0..W as i32).contains(&x) || !(0..H as i32).contains(&y) {
+                        continue;
+                    }
+                    let i = y as usize * W + x as usize;
+                    if art.pixels()[i] == bare.pixels()[i] {
+                        continue;
+                    }
+                    drawn = true;
+                    assert_eq!(
+                        bare.pixels()[i], floor[i],
+                        "{key:?}: the dummy painted over a drawn pixel at ({x}, {y})"
+                    );
+                    assert!(
+                        DUMMY_INK.contains(&art.pixels()[i]),
+                        "{key:?}: the dummy painted a colour it does not own at ({x}, {y})"
+                    );
+                }
+            }
+            // The subject's own point: whenever the world drew something there,
+            // the cork left it alone.
+            if let Some(p) = subject {
+                let scale = scene.view.x / W as f32;
+                let x = ((p.x - scene.world.cam.x) / scale).round() as i32;
+                let y = ((p.y - scene.world.cam.y) / scale).round() as i32;
+                if (0..W as i32).contains(&x) && (0..H as i32).contains(&y) {
+                    let i = y as usize * W + x as usize;
+                    if bare.pixels()[i] != floor[i] {
+                        subject_drawn += 1;
+                        assert_eq!(
+                            art.pixels()[i], bare.pixels()[i],
+                            "{key:?}: the dummy covered the subject at ({x}, {y})"
+                        );
+                    }
+                }
+            }
+            // Every third frame: the bodies move a pixel or two between
+            // samples, so a body standing on the dummy is caught on the frames
+            // that matter without paying two plate draws for all 60.
+            for _ in 0..3 {
+                scene.step();
+            }
+        }
+        assert!(drawn, "{key:?} never drew its practice dummy");
+        assert!(
+            subject_drawn > 0,
+            "{key:?}: the subject was never drawn at its own point"
+        );
+    }
+}
+
+/// Every named fight's plate holds its whole footprint during the tell and the
+/// strike: the body, the telegraph's own shape (a cone, a cord's swept sector,
+/// the Salt Hen's three pads) and the target are all inside the drawn view with
+/// the fit's margin. The stage centres on body + footprint and takes its zoom
+/// from those bounds, so a wide row can no longer clip the right edge.
+#[test]
+fn every_miniboss_footprint_fits_its_plate() {
+    for kind in MinibossKind::all() {
+        let key = Key::Miniboss(kind);
+        let mut scene = LibraryScene::build(key).expect("a miniboss scene");
+        let subject = scene.subject().expect("a miniboss body");
+        let mut art = PixelBuffer::new(44, 30);
+        let ticks = (scene.loop_secs() / TICK) as u32;
+        let mut showed = false;
+        for i in 0..ticks {
+            let live = scene
+                .world
+                .ecs
+                .get::<Miniboss>(subject)
+                .map(|mb| (mb.state, mb.telegraph()));
+            let strike = matches!(
+                live,
+                Some((MinibossState::Tell | MinibossState::Active, Some(_)))
+            );
+            if i == 0 || strike {
+                plate(&mut scene, &mut art);
+            }
+            if strike {
+                showed = true;
+                let (lo, hi) = scene.fit_bounds().expect("a fitted footprint");
+                for corner in [
+                    Vec2::new(lo.x, lo.y),
+                    Vec2::new(hi.x, lo.y),
+                    Vec2::new(lo.x, hi.y),
+                    Vec2::new(hi.x, hi.y),
+                ] {
+                    assert!(
+                        on_plate(&scene, corner),
+                        "{kind:?}: footprint corner {corner:?} left the plate"
+                    );
+                }
+            }
+            scene.step();
+        }
+        assert!(showed, "{kind:?} never showed a tell or a strike");
+    }
+}
+
+/// Every flatbed card stands on the trailer's own bed. The deck art, the
+/// slipstream and the tailgate drift all read the map's own deck rectangle, so
+/// a card built on a patch at the origin showed plain green instead of planks,
+/// joints and the rushing road in the gaps.
+#[test]
+fn flatbed_cards_stand_on_the_deck() {
+    let mut keys: Vec<Key> = Vec::new();
+    for slot in [
+        Slot::A,
+        Slot::B,
+        Slot::C,
+        Slot::I,
+        Slot::II,
+        Slot::III,
+        Slot::R,
+        Slot::H,
+    ] {
+        let kind = roster::kind(Theme::Trailer, slot);
+        // A body is staged on the floor that fields it (`home_floor`), so only
+        // the kinds this floor owns are flatbed cards.
+        if home_floor(kind) == Theme::Trailer {
+            keys.push(Key::Enemy(kind));
+        }
+    }
+    for kind in roster::appointments(Theme::Trailer) {
+        if miniboss_floor(kind) == Theme::Trailer {
+            keys.push(Key::Miniboss(kind));
+        }
+    }
+    for kind in [
+        ObjectKind::Pit,
+        ObjectKind::SlidingCargo,
+        ObjectKind::Slipstream,
+    ] {
+        keys.push(Key::Object(kind));
+    }
+    for key in keys {
+        let mut scene = LibraryScene::build(key).unwrap_or_else(|| panic!("{key:?} has no scene"));
+        {
+            let world = scene.world();
+            let level = &world.level;
+            assert_eq!(level.theme, Theme::Trailer, "{key:?}");
+            assert!(
+                !level.trailer.is_empty(),
+                "{key:?}: the plate has no deck for the floor art to draw"
+            );
+            let (cx, cy) = crate::game::collision::cell_of(level.start);
+            assert!(
+                level.trailer.deck.contains(cx, cy),
+                "{key:?}: the card starts off the bed at {cx},{cy}"
+            );
+        }
+    }
+}
+
+/// Every weapon and every evolution has a runnable scene, whatever the save
+/// has owned. The Library's animation gate is deliberately the caller's rule
+/// (`render::library::catalogued`: a weapon or passive must be *owned*, an
+/// evolution owned or evolved), so a locked card stays `???`, a merely-offered
+/// weapon keeps its static silhouette pose, and the scene layer itself never
+/// blanks a plate.
+#[test]
+fn every_weapon_has_a_scene_and_the_gate_is_the_callers() {
+    for kind in WeaponKind::all() {
+        assert!(
+            matches!(plan(Key::Weapon(kind)), Plan::Sandbox),
+            "{kind:?} is planned as a still plate"
+        );
+        assert!(
+            LibraryScene::build(Key::Weapon(kind)).is_some(),
+            "{kind:?} has no arsenal scene"
+        );
+        if kind.evolution().is_some() {
+            assert!(
+                LibraryScene::build(Key::Evolution(kind)).is_some(),
+                "{kind:?}'s evolution has no scene"
+            );
+        }
+    }
+}
+
+/// The arsenal's three targets stand at the effect's own scale: outside the
+/// radius the renderer clears hit digits from (26 px), and inside the reach of
+/// the shortest melee weapon at max rank (Tail Whip's aura is 26 + 3 × level).
+#[test]
+fn the_arsenal_targets_stand_at_the_effects_range() {
+    let rat = Vec2::new(100.0, 100.0);
+    for home in dummy_homes(rat) {
+        let d = home.dist(rat);
+        assert!(d > 26.0, "a target at {d} px has its hit digits suppressed");
+        assert!(d <= 34.0, "a target at {d} px is beyond a max-rank whip's aura");
+    }
+}
+
+/// A brief active weapon fires several times inside one loop: the plate keeps
+/// the charge off (the cost is on the card's facts, not in its picture) while
+/// the effect, the hit flash and the digits are the weapon's own.
+#[test]
+fn the_active_weapons_fire_several_times_a_loop() {
+    use crate::game::ecs::resources::ActiveFx;
+    for kind in [WeaponKind::SonicSqueak, WeaponKind::TailThrash] {
+        let key = Key::Weapon(kind);
+        let mut scene = LibraryScene::build(key).expect("a weapon scene");
+        let mut fired = 0u32;
+        let mut was = false;
+        one_loop(&mut scene, |s| {
+            let fx = *s.world().ecs.resource::<ActiveFx>();
+            let now = match kind {
+                WeaponKind::SonicSqueak => fx.squeak_left > 0.0,
+                _ => fx.thrash_left > 0.0,
+            };
+            if now && !was {
+                fired += 1;
+            }
+            was = now;
+        });
+        assert!(fired >= 3, "{kind:?} fired {fired} times inside one loop");
+    }
+}
+
+/// The Toll Gull's plate runs its target: the hidden rat walks away from the
+/// gull in bursts, and its shot is aimed off the line the dummy is standing on
+/// (the 0.35 s lead), which is what the card exists to show.
+#[test]
+fn the_toll_gull_leads_a_running_target() {
+    let key = Key::Enemy(EnemyKind::TollGull);
+    let mut scene = LibraryScene::build(key).expect("a gull scene");
+    let mut fastest = 0.0f32;
+    let mut off_axis = false;
+    let mut shots = 0u32;
+    one_loop(&mut scene, |s| {
+        let w = s.world();
+        let aim = w.player.pos;
+        fastest = fastest.max(w.player.vel.len());
+        let mut q = w.ecs.query::<&Bullet>();
+        for b in q.iter(&w.ecs) {
+            if b.faction != Faction::Enemy {
+                continue;
+            }
+            shots += 1;
+            let dir = b.vel.normalized();
+            let direct = (aim - b.pos).normalized();
+            if dir.dot(direct) < 0.9995 {
+                off_axis = true;
+            }
+        }
+    });
+    assert!(shots > 0, "the gull never fired");
+    assert!(fastest > 20.0, "the card's target never ran ({fastest} px/s)");
+    assert!(off_axis, "every shot was aimed straight at the standing dummy");
 }
 
 // ---- The samples ----------------------------------------------------------

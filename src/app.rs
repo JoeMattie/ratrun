@@ -715,7 +715,8 @@ impl App {
     /// The world-space aim point, or `None` for auto-aim.
     ///
     /// * Mouse aim: the pointer, mapped through the same viewport + zoom as
-    ///   the renderer (so the reticle is exact at 0.5x, 1x and 2x).
+    ///   the renderer (so the aim point is exact at 0.5x, 1x and 2x, and the
+    ///   cheese wedge's tip marks it).
     /// * Gamepad: the right stick, when deflected, a fixed distance in front
     ///   of the rat.
     /// * Classic: never (weapons auto-aim; the pointer steers).
@@ -1530,6 +1531,7 @@ impl App {
                 kb_pressed,
                 kb_moving: self.input.move_dir() != Vec2::ZERO,
                 prefer_mouse: self.input.prefer_mouse,
+                mouse_aims: self.input.controls.mouse_aims(),
                 playing: matches!(self.screen, Screen::Playing),
             },
         );
@@ -4640,6 +4642,14 @@ impl App {
 
     /// Composite the cheese mouse cursor last, on top of every normal-game
     /// screen, without disturbing `self.hits`.
+    ///
+    /// It is drawn **after** `draw_game` has blitted the playfield — half-block
+    /// or sub-cell, lit, hostiles and overlays on top — so it is stamped in
+    /// screen space over all of it and the sub-cell encoder and the 1×
+    /// smoothing can never eat it (they only ever saw the picture underneath).
+    /// It is not part of the cached picture (`PictureKey`), so it never forces a
+    /// redraw. In `Scheme::MouseAim` this wedge **is** the reticle: its tip is
+    /// in the pointer's cell, and that cell is the one `aim_point` reads.
     fn draw_cursor(&self, frame: &mut Frame) {
         if !self.cursor_enabled() {
             return;
@@ -4663,7 +4673,6 @@ impl App {
             bob_time: self.cursor.bob_time(),
             alpha,
             playing_steer: matches!(self.screen, Screen::Playing) && self.input.prefer_mouse,
-            reticle: self.input.controls.mouse_aims(),
         };
         let area = frame.area();
         cursor::draw(frame.buffer_mut(), area, view);
@@ -12273,6 +12282,144 @@ mod tests {
         }
     }
 
+    /// In `Scheme::MouseAim` the pointer is the aim point, and it is drawn as
+    /// the game's **cheese wedge** — not a crosshair — with the tip on the
+    /// pointer cell. The aim vector the tick receives is unchanged: the cursor
+    /// is presentation only and reads `aim_point`, never feeds it.
+    #[test]
+    fn mouse_aim_play_draws_the_cheese_wedge_at_the_pointer() {
+        let _guard = CURSOR_ENV_LOCK.lock().unwrap();
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        h.app.set_scheme(Scheme::MouseAim);
+        assert!(h.app.input.controls.mouse_aims());
+        h.frame(&[]);
+        let game = h.app.last_game;
+        assert!(game.width > 8 && game.height > 4, "no playfield to point at");
+        // Clear of the corner minimap and of the rat, so the cells under the
+        // wedge are plain field.
+        let pos = (game.x + game.width / 2, game.y + 2);
+
+        h.events(&[], &[(MouseEventKind::Moved, pos)]);
+        assert!(h.app.cursor_visible(), "mouse aim must show the cheese");
+
+        let buf = h.terminal.backend().buffer();
+        // The wedge: the tip is the upper half of the pointer cell, and the cut
+        // face widens to the right of it.
+        let tip = &buf[pos];
+        assert_eq!(tip.symbol(), "▀", "the wedge tip is the pointer cell's upper half");
+        assert!(is_cheese_yellow(tip.fg), "the tip must be cheese yellow: {tip:?}");
+        let body = &buf[(pos.0 + 1, pos.1)];
+        assert!(
+            is_cheese_yellow(body.fg) && is_cheese_yellow(body.bg),
+            "no cheese body right of the tip: {body:?}"
+        );
+        // No reticle pixels: not the centre pip, nor an arm above, below, left
+        // or right of it (the crosshair that used to be drawn here).
+        assert_ne!(buf[pos].symbol(), "•", "the centre pip is back");
+        assert_ne!(buf[(pos.0 + 1, pos.1)].symbol(), "─", "a right arm is back");
+        assert_ne!(buf[(pos.0 - 1, pos.1)].symbol(), "─", "a left arm is back");
+        assert_ne!(buf[(pos.0, pos.1 + 1)].symbol(), "│", "a lower arm is back");
+        assert_ne!(buf[(pos.0, pos.1 - 1)].symbol(), "│", "an upper arm is back");
+
+        // The aim vector, pinned by the same arithmetic `App::mouse_world` uses
+        // (the pointer cell's centre in world pixels, through the camera and the
+        // zoom). This work must never move it.
+        let w = h.app.world.as_ref().unwrap();
+        let want = w.cam
+            + Vec2::new(
+                ((pos.0 as i32 - game.x as i32) as f32 + 0.5) * w.zoom_scale.x,
+                (((pos.1 as i32 - game.y as i32) * 2) as f32 + 1.0) * w.zoom_scale.y,
+            );
+        let aim = h.app.aim_point().expect("mouse aim always has an aim point");
+        assert!(
+            (aim.x - want.x).abs() < 0.01 && (aim.y - want.y).abs() < 0.01,
+            "the aim point moved: {aim:?} vs {want:?}"
+        );
+
+        // Presentation only: the cursor option decides whether a pointer is
+        // drawn, never where the shot goes; Classic still auto-aims.
+        h.app.scores.cheese_cursor = cursor::CursorSetting::Off;
+        assert!(!h.app.cursor_enabled());
+        let off = h.app.aim_point().expect("still aiming");
+        assert!(
+            (off.x - aim.x).abs() < 0.001 && (off.y - aim.y).abs() < 0.001,
+            "the cursor option moved the aim: {off:?} vs {aim:?}"
+        );
+        h.app.scores.cheese_cursor = cursor::CursorSetting::On;
+        h.app.set_scheme(Scheme::Classic);
+        assert!(h.app.aim_point().is_none(), "Classic auto-aims: no pointer aim at all");
+    }
+
+    /// The bindable `ToggleCursor` action hides the wedge in mouse aim exactly
+    /// as it does in Classic, and pressing it again brings the cheese back.
+    #[test]
+    fn toggle_cursor_hides_the_cheese_in_mouse_aim_play() {
+        let _guard = CURSOR_ENV_LOCK.lock().unwrap();
+        let mut h = Harness::new(80, 24);
+        h.enter_playing();
+        h.app.set_scheme(Scheme::MouseAim);
+        h.frame(&[]);
+        let game = h.app.last_game;
+        let pos = (game.x + game.width / 2, game.y + 2);
+        h.events(&[], &[(MouseEventKind::Moved, pos)]);
+        assert!(is_cheese_tip(&h.terminal.backend().buffer()[pos]));
+
+        h.frame(&[KeyCode::Char('c')]);
+        assert_eq!(h.app.scores.cheese_cursor, cursor::CursorSetting::Off);
+        assert!(!h.app.cursor_visible());
+        assert!(
+            !is_cheese_tip(&h.terminal.backend().buffer()[pos]),
+            "ToggleCursor left the wedge on the playfield"
+        );
+
+        h.frame(&[KeyCode::Char('c')]);
+        assert_eq!(h.app.scores.cheese_cursor, cursor::CursorSetting::On);
+        assert!(h.app.cursor_visible());
+        assert!(is_cheese_tip(&h.terminal.backend().buffer()[pos]), "the cheese did not return");
+    }
+
+    /// The wedge is stamped in screen space after the playfield blit, so the
+    /// sub-cell encoder (quadrant, sextant and octant) and the 1x EPX smoothing
+    /// cannot eat it: at every zoom the pointer cell is the wedge's tip and the
+    /// cell beside it is cheese.
+    #[test]
+    fn the_cheese_wedge_survives_sub_cells_and_one_x_smoothing() {
+        use crate::render::subcell::{Choice, SubcellSet};
+        let _guard = CURSOR_ENV_LOCK.lock().unwrap();
+        for (set, zoom) in [
+            (SubcellSet::Octant, crate::render::zoom::MAX),
+            (SubcellSet::Sextant, crate::render::zoom::MAX),
+            (SubcellSet::Octant, 1.0),
+            (SubcellSet::Quad, 1.0),
+        ] {
+            let mut h = Harness::new(80, 24);
+            h.app.set_subcell_override(Some(Choice::Force(set)));
+            h.app.set_smooth(true);
+            h.enter_playing();
+            h.app.set_scheme(Scheme::MouseAim);
+            h.app.world.as_mut().unwrap().set_zoom_instant(zoom);
+            h.frame(&[]);
+            let game = h.app.last_game;
+            let pos = (game.x + game.width / 2, game.y + 2);
+            h.events(&[], &[(MouseEventKind::Moved, pos)]);
+
+            assert!(
+                h.app.world.as_ref().unwrap().detail().is_some(),
+                "{set:?} z={zoom}: no sub-cell frame was drawn to survive"
+            );
+            let buf = h.terminal.backend().buffer();
+            let tip = &buf[pos];
+            assert_eq!(tip.symbol(), "▀", "{set:?} z={zoom}: the encoder ate the tip");
+            assert!(is_cheese_yellow(tip.fg), "{set:?} z={zoom}: tip {:?}", tip.fg);
+            let body = &buf[(pos.0 + 1, pos.1)];
+            assert!(
+                is_cheese_yellow(body.fg) && is_cheese_yellow(body.bg),
+                "{set:?} z={zoom}: the encoder ate the body: {body:?}"
+            );
+        }
+    }
+
     /// Gated behind `RATRUN_CHEESE_DIR`: dumps ANSI captures of the cheese
     /// cursor across Title, Gameplay (Sewer + Kitchen + Expanded Map), and
     /// Level-Up at 80×24 and 120×40 in truecolor, 256-colour, 16-colour and
@@ -12381,6 +12528,17 @@ mod tests {
                 gp.events(&[], &[(MouseEventKind::Moved, play_pos)]);
                 let buf_k = gp.terminal.backend().buffer().clone();
                 dump(&buf_k, w, h, "play-kitchen-tc", play_pos, GlyphSet::Unicode, ColorDepth::Truecolor);
+
+                // Mouse aim: the same cheese wedge is the reticle now (batch
+                // ten). Truecolor for the keyline, 16-colour for the fold.
+                gp.app.set_scheme(Scheme::MouseAim);
+                gp.frame(&[]);
+                gp.events(&[], &[(MouseEventKind::Moved, play_pos)]);
+                let buf_aim = gp.terminal.backend().buffer().clone();
+                dump(&buf_aim, w, h, "play-aim-tc", play_pos, GlyphSet::Unicode, ColorDepth::Truecolor);
+                dump(&buf_aim, w, h, "play-aim-16", play_pos, GlyphSet::Unicode, ColorDepth::Ansi16);
+                gp.app.set_scheme(Scheme::Classic);
+                gp.frame(&[]);
 
                 // Expanded minimap overlay check.
                 gp.frame(&[KeyCode::Tab]);

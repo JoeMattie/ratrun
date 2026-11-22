@@ -1,6 +1,13 @@
 //! Cheese mouse cursor — a tiny half-block Swiss cheese wedge drawn on top of
 //! every normal-game screen while the player is using the mouse.
 //!
+//! It is the **only** pointer, in every control scheme: in `Scheme::MouseAim`
+//! the pointer is the aim point, so this wedge is the reticle too (there is no
+//! crosshair). The hot spot is the tip, in the reported mouse cell, and that
+//! cell is the cell whose centre `App::aim_point` hands to `TickInput.aim` —
+//! so the shot goes where the tip points, and the aim maths never reads the
+//! cursor at all.
+//!
 //! # Geometry & Hot Spot
 //!
 //! The cursor occupies a `6 × 2` terminal-cell bounding box (`6 × 4` square
@@ -20,6 +27,21 @@
 //! - On terminals that support OSC 22 (`Ghostty`, `Kitty`, `iTerm2`), the real
 //!   pointer switches to a thin `crosshair` centered on the tip while the cheese
 //!   is visible.
+//! - A one-pixel dark keyline runs along the two exposed edges, so the wedge
+//!   keeps its silhouette over a white explosion, a Squeak Nova ring or a
+//!   Cheese Spray pellet of its own colour, and over the floor's darkest
+//!   corners (in 16 colours it folds to black).
+//!
+//! # Where it is stamped
+//!
+//! [`draw`] writes ratatui cells, in **screen space**, from `App::render` after
+//! the playfield has been blitted — after the half-block picture, after the
+//! sub-cell encoder turned it into quadrant/sextant/octant glyphs, after the
+//! lighting and the hostile layer, after the overlays, the HUD and the
+//! minimap. Nothing runs after it but `term::sanitize` (whose safe set holds
+//! `▀`/`▄`) and the presenter, so the _smoothing_ and the sub-cell encoder
+//! cannot eat it: they only ever see the picture underneath. It is not part of
+//! the cached world picture (`PictureKey`), so it never forces a redraw.
 //!
 //! # Zero-Allocation Contract
 //!
@@ -71,6 +93,11 @@ const CHEESE_RIND: Rgb = (202, 132, 22);
 const CHEESE_RIND_DARK: Rgb = (148, 88, 14);
 /// Deep amber Swiss cheese hole (`Yellow` in 16-colour, enclosed by `LightYellow`).
 const CHEESE_HOLE: Rgb = (120, 68, 12);
+/// One-pixel keyline along the wedge's two exposed edges (`Black` in
+/// 16-colour). The cut faces are the brightest thing on the playfield, so over
+/// a white explosion or a `CheeseSpray` pellet — which is exactly
+/// `CHEESE_BODY` — the wedge would otherwise dissolve into its own colour.
+const CHEESE_EDGE: Rgb = (26, 18, 10);
 /// Dark umber pressed-down rim used on the `Held` squash (`Black` in 16-colour).
 const CHEESE_RIM: Rgb = (58, 32, 8);
 /// Bright butter-white click sparkle / crumb (`White` in 16-colour).
@@ -169,8 +196,31 @@ pub struct CursorInput {
     pub kb_moving: bool,
     /// `InputState::prefer_mouse` (false once movement keys reclaim steering).
     pub prefer_mouse: bool,
+    /// True in `Scheme::MouseAim`, where the pointer is the **aim point** rather
+    /// than a steering device: there the wedge is the reticle, the keyboard is
+    /// the only way to move, and so moving must not retire the pointer (only
+    /// the `ToggleCursor` action and the cursor option do).
+    pub mouse_aims: bool,
     /// True on `Screen::Playing`.
     pub playing: bool,
+}
+
+impl CursorInput {
+    /// Does this frame's keyboard activity retire the pointer?
+    ///
+    /// During play, Space (dash) / Tab (map) / M (mute) while still steering by
+    /// mouse must not hide the cheese; only reclaiming steering via movement
+    /// keys (`prefer_mouse == false`) hides it. Mouse aim is the exception:
+    /// WASD is the only way to move there, the pointer is the aiming device and
+    /// the wedge is its reticle, so walking while the pointer holds still must
+    /// keep it on screen. Off the field, any keyboard activity does.
+    fn keyboard_retires(&self) -> bool {
+        if self.playing {
+            !self.mouse_aims && (!self.prefer_mouse || self.kb_moving)
+        } else {
+            self.kb_pressed || self.kb_moving || !self.prefer_mouse
+        }
+    }
 }
 
 impl CursorState {
@@ -188,17 +238,8 @@ impl CursorState {
             self.click_timer = (self.click_timer - dt).max(0.0);
         }
 
-        if !inp.mouse_active {
-            if inp.playing {
-                // During play, Space (dash) / Tab (map) / M (mute) while still
-                // steering by mouse must not hide the cheese; only reclaiming
-                // steering via movement keys (prefer_mouse == false) hides it.
-                if !inp.prefer_mouse || inp.kb_moving {
-                    self.kb_hiding = true;
-                }
-            } else if inp.kb_pressed || inp.kb_moving || !inp.prefer_mouse {
-                self.kb_hiding = true;
-            }
+        if !inp.mouse_active && inp.keyboard_retires() {
+            self.kb_hiding = true;
         }
 
         if self.kb_hiding {
@@ -265,10 +306,6 @@ pub struct CursorView {
     pub alpha: f32,
     /// True while steering the rat with the mouse in `Playing`.
     pub playing_steer: bool,
-    /// Draw a **reticle** instead of the cheese wedge: the Mouse aim scheme
-    /// points with the pointer, so the cursor is a crosshair (still cheese
-    /// coloured, still the same hot spot and fade). Classic keeps the cheese.
-    pub reticle: bool,
 }
 
 /// Build the `6 × 4` half-block pixel grid for the current cursor state.
@@ -281,16 +318,18 @@ pub struct CursorView {
 /// for this size, not resampled):
 ///
 /// ```text
-///   T H H . . .      T tip (hot spot)   H lit upper edge
-///   . H B B H R      B cut face         L lower, warmer face
-///   . . B o B R      o Swiss hole       R rind   D shaded rind corner
-///   . . . L L D
+///   T H H e e e      T tip (hot spot)   H lit upper edge
+///   e H B B H R      B cut face         L lower, warmer face
+///   . e B o B R      o Swiss hole       R rind   D shaded rind corner
+///   . . e L L D      e dark keyline
 /// ```
 ///
 /// The upper edge drops one pixel on its way right and the lower edge falls
 /// at 45°, so the body widens away from the tip to a three-pixel rind across
 /// the far end (`x = 5`). The hole at `(3, 2)` is enclosed on all four sides
-/// so it reads even in 16-colour mode.
+/// so it reads even in 16-colour mode. The keyline fills the six box pixels
+/// along the two exposed edges — it never covers a cheese pixel, so the
+/// silhouette and the hot-spot tip stay exactly where they were.
 fn build_sprite(view: CursorView) -> [[Option<Rgb>; PIXEL_W]; PIXEL_H] {
     let gleam = |c: Rgb| -> Rgb {
         if view.hover {
@@ -347,6 +386,17 @@ fn build_sprite(view: CursorView) -> [[Option<Rgb>; PIXEL_W]; PIXEL_H] {
             [n, n, n, Some(body_lo), Some(body_lo), Some(rind_dark)],
         ]
     };
+
+    // One pixel of dark keyline along the two exposed edges: above the upper
+    // edge's descent `(3..=5, 0)` and under the 45° lower edge
+    // `(0, 1), (1, 2), (2, 3)`. Only still-empty pixels are filled, so the
+    // pressed rim, the bob's sheen and the click crumb keep their own pixels
+    // and no cheese pixel is darkened.
+    for (px, py) in [(3, 0), (4, 0), (5, 0), (0, 1), (1, 2), (2, 3)] {
+        if grid[py][px].is_none() {
+            grid[py][px] = Some(CHEESE_EDGE);
+        }
+    }
 
     // Click feedback: a nibble out of the upper edge at `(2, 0)` and a
     // butter-white crumb popping off beyond it at `(4, 0)`.
@@ -436,57 +486,6 @@ pub fn draw(buf: &mut Buffer, area: Rect, view: CursorView) {
     draw_with_depth(buf, area, view, crate::term::color_depth());
 }
 
-/// The Mouse aim reticle: a cheese-coloured crosshair centred on the mouse
-/// cell, with a gap in the middle so the aim point itself stays readable and a
-/// bright centre pip. Three cells tall and five wide at most; clipped at every
-/// edge and allocation-free. A click pulse squeezes the arms inwards.
-///
-/// It fades exactly like the wedge: each glyph's colour is blended from what
-/// is under it (the cell's background) by `view.alpha`, then folded to the
-/// terminal's colour depth. (It used to mix the tone with itself, so it never
-/// faded, and handed raw RGB to 256- and 16-colour terminals.)
-fn draw_reticle(buf: &mut Buffer, area: Rect, view: CursorView, depth: ColorDepth) {
-    let alpha = view.alpha.clamp(0.0, 1.0);
-    let tone = if view.hover { HOVER_GLEAM } else { CHEESE_HI };
-    let arm = if view.click_pulse > 0.5 { 1 } else { 2 };
-    let (x, y) = view.pos;
-    let right = area.x.saturating_add(area.width);
-    let bottom = area.y.saturating_add(area.height);
-    let mut put = |cx: Option<u16>, cy: Option<u16>, glyph: char, rgb: Rgb| {
-        // An arm that would leave the screen is dropped, not folded back onto
-        // the edge cell.
-        let (Some(cx), Some(cy)) = (cx, cy) else {
-            return;
-        };
-        if cx < area.x || cx >= right || cy < area.y || cy >= bottom {
-            return;
-        }
-        if let Some(cell) = buf.cell_mut((cx, cy)) {
-            // What the glyph sits on: the cell's background as displayed (a
-            // REVERSED button shows its `fg` there). Modifiers are stripped so
-            // the reticle never inverts or picks up an underline, and the
-            // displayed background is kept.
-            let under = if cell.modifier.contains(Modifier::REVERSED) {
-                cell.fg
-            } else {
-                cell.bg
-            };
-            cell.modifier = Modifier::empty();
-            cell.set_char(glyph)
-                .set_fg(palette::to_term(blend_alpha(rgb, under, alpha), depth))
-                .set_bg(under);
-        }
-    };
-    // Horizontal arms with a gap, then a vertical bar through the centre.
-    for d in 1..=arm {
-        put(x.checked_sub(d), Some(y), '─', tone);
-        put(x.checked_add(d), Some(y), '─', tone);
-    }
-    put(Some(x), y.checked_sub(1), '│', tone);
-    put(Some(x), y.checked_add(1), '│', tone);
-    put(Some(x), Some(y), '•', if view.held { HOVER_GLEAM } else { CHEESE_TIP });
-}
-
 /// Like [`draw`], with an explicit [`ColorDepth`] for deterministic testing.
 pub fn draw_with_depth(buf: &mut Buffer, area: Rect, view: CursorView, depth: ColorDepth) {
     let alpha = view.alpha.clamp(0.0, 1.0);
@@ -497,10 +496,6 @@ pub fn draw_with_depth(buf: &mut Buffer, area: Rect, view: CursorView, depth: Co
     let (origin_x, origin_y) = view.pos;
     let right = area.x.saturating_add(area.width);
     let bottom = area.y.saturating_add(area.height);
-    if view.reticle {
-        draw_reticle(buf, area, view, depth);
-        return;
-    }
     let grid = build_sprite(view);
 
     for dy in 0..HEIGHT {
@@ -603,7 +598,6 @@ mod tests {
             bob_time: 0.0,
             alpha: 1.0,
             playing_steer: false,
-            reticle: false,
         }
     }
 
@@ -611,84 +605,23 @@ mod tests {
         Color::Rgb(c.0, c.1, c.2)
     }
 
-    /// The Mouse aim reticle fades with `alpha` like the wedge does, folds its
-    /// colour to the terminal's depth, strips modifiers and clips at the edges
-    /// without folding an arm back onto the screen.
+    /// The wedge has no crosshair form left: it is the pointer in every
+    /// scheme, so `Scheme::MouseAim` draws exactly the cheese `Scheme::Classic`
+    /// does (pinned end to end by `app::tests`). No reticle glyph is left on
+    /// the hot spot or on its four arms.
     #[test]
-    fn the_reticle_fades_folds_and_clips() {
+    fn the_wedge_is_the_only_pointer() {
         let area = Rect::new(0, 0, 12, 6);
-        let reticle = |x: u16, y: u16, alpha: f32| CursorView {
-            reticle: true,
-            alpha,
-            ..view_at(x, y)
-        };
-
-        // Full strength, truecolor: the exact tones, on five cells by three.
         let mut buf = Buffer::empty(area);
-        buf.set_style(area, ratatui::style::Style::default().bg(Color::Rgb(10, 10, 10)));
-        draw_with_depth(&mut buf, area, reticle(5, 3, 1.0), ColorDepth::Truecolor);
-        assert_eq!(buf[(5, 3)].symbol(), "•");
-        assert_eq!(buf[(5, 3)].fg, rgb(CHEESE_TIP));
-        for (x, y, glyph) in [(3u16, 3u16, "─"), (4, 3, "─"), (6, 3, "─"), (7, 3, "─"), (5, 2, "│"), (5, 4, "│")] {
-            assert_eq!(buf[(x, y)].symbol(), glyph, "({x},{y})");
-            assert_eq!(buf[(x, y)].fg, rgb(CHEESE_HI), "({x},{y})");
-            assert_eq!(buf[(x, y)].bg, Color::Rgb(10, 10, 10), "the cell keeps its background");
+        draw_with_depth(&mut buf, area, view_at(4, 2), ColorDepth::Truecolor);
+        for (x, y) in [(4u16, 2u16), (3, 2), (5, 2), (4, 1), (4, 3)] {
+            assert!(
+                !matches!(buf[(x, y)].symbol(), "•" | "─" | "│"),
+                "reticle glyph left at ({x},{y})"
+            );
         }
-
-        // Half faded: the arm colour sits strictly between the background and
-        // the tone (it used to stay at full strength until it vanished).
-        let mut half = Buffer::empty(area);
-        half.set_style(area, ratatui::style::Style::default().bg(Color::Rgb(10, 10, 10)));
-        draw_with_depth(&mut half, area, reticle(5, 3, 0.5), ColorDepth::Truecolor);
-        let Color::Rgb(r, g, _) = half[(4, 3)].fg else {
-            panic!("truecolor reticle must be RGB");
-        };
-        assert!(r > 10 && r < CHEESE_HI.0, "red did not fade: {r}");
-        assert!(g > 10 && g < CHEESE_HI.1, "green did not fade: {g}");
-
-        // 16 and 256 colours: no raw RGB reaches the terminal.
-        for depth in [ColorDepth::Ansi16, ColorDepth::Ansi256] {
-            let mut b = Buffer::empty(area);
-            draw_with_depth(&mut b, area, reticle(5, 3, 1.0), depth);
-            for (x, y) in [(5u16, 3u16), (4, 3), (5, 2)] {
-                assert!(
-                    !matches!(b[(x, y)].fg, Color::Rgb(..)),
-                    "{depth:?}: raw RGB at ({x},{y}): {:?}",
-                    b[(x, y)].fg
-                );
-            }
-        }
-
-        // A REVERSED, bold button under the reticle keeps the colour it showed
-        // and loses the modifiers.
-        let mut rev = Buffer::empty(area);
-        rev.set_style(
-            area,
-            ratatui::style::Style::default()
-                .fg(Color::Rgb(200, 180, 40))
-                .bg(Color::Rgb(1, 2, 3))
-                .add_modifier(Modifier::REVERSED | Modifier::BOLD),
-        );
-        draw_with_depth(&mut rev, area, reticle(5, 3, 1.0), ColorDepth::Truecolor);
-        assert!(rev[(5, 3)].modifier.is_empty());
-        assert_eq!(rev[(5, 3)].bg, Color::Rgb(200, 180, 40));
-
-        // The top-left corner: the centre pip is the pip, and no arm is folded
-        // back onto column 0 / row 0.
-        let mut corner = Buffer::empty(area);
-        draw_with_depth(&mut corner, area, reticle(0, 0, 1.0), ColorDepth::Truecolor);
-        assert_eq!(corner[(0, 0)].symbol(), "•");
-        assert_eq!(corner[(1, 0)].symbol(), "─");
-        assert_eq!(corner[(0, 1)].symbol(), "│");
-        let mut near = Buffer::empty(area);
-        draw_with_depth(&mut near, area, reticle(1, 0, 1.0), ColorDepth::Truecolor);
-        assert_eq!(near[(0, 0)].symbol(), "─", "the one arm cell that fits");
-        assert_eq!(near[(1, 0)].symbol(), "•");
-        // Bottom-right corner and far off-screen: no panic.
-        for (x, y) in [(11u16, 5u16), (u16::MAX, u16::MAX), (40, 40)] {
-            let mut b = Buffer::empty(area);
-            draw_with_depth(&mut b, area, reticle(x, y, 1.0), ColorDepth::Truecolor);
-        }
+        assert_eq!(buf[(4, 2)].symbol(), "▀", "the tip cell is the wedge's top half");
+        assert_eq!(buf[(4, 2)].fg, rgb(CHEESE_TIP));
     }
 
     #[test]
@@ -698,13 +631,18 @@ mod tests {
         draw_with_depth(&mut buf, area, view_at(3, 2), ColorDepth::Truecolor);
 
         // The tip is the upper half of the mouse cell, at the box's top-left;
-        // nothing is drawn above it, left of it, or directly under it.
+        // the keyline's shadow is under it, and nothing is drawn above it.
         let tip = &buf[(3, 2)];
         assert_eq!(tip.symbol(), "▀");
         assert_eq!(tip.fg, rgb(CHEESE_TIP));
+        assert_eq!(tip.bg, rgb(CHEESE_EDGE), "the keyline sits under the hot spot");
         assert_eq!(buf[(3, 1)].symbol(), " ", "nothing above the tip");
         assert_eq!(buf[(3, 3)].symbol(), " ", "nothing under the tip: the body trails right");
-        assert_eq!(buf[(4, 3)].symbol(), " ", "the lower edge falls away at 45 degrees");
+        assert_eq!(
+            buf[(4, 3)].fg,
+            rgb(CHEESE_EDGE),
+            "the keyline follows the lower edge down at 45 degrees"
+        );
 
         // The body widens down and to the right: the upper edge is lit, the
         // cut face starts under it.
@@ -712,10 +650,15 @@ mod tests {
         assert_eq!(buf[(4, 2)].bg, rgb(CHEESE_HI));
         assert_eq!(buf[(5, 2)].fg, rgb(CHEESE_HI));
         assert_eq!(buf[(5, 2)].bg, rgb(CHEESE_BODY));
-        assert_eq!(buf[(6, 2)].symbol(), "▄", "open air above the falling upper edge");
-        assert_eq!(buf[(6, 2)].fg, rgb(CHEESE_BODY));
+        assert_eq!(
+            buf[(6, 2)].fg,
+            rgb(CHEESE_EDGE),
+            "the keyline closes the open air above the falling upper edge"
+        );
+        assert_eq!(buf[(6, 2)].bg, rgb(CHEESE_BODY));
         assert_eq!(buf[(5, 3)].symbol(), "▀");
         assert_eq!(buf[(5, 3)].fg, rgb(CHEESE_BODY));
+        assert_eq!(buf[(5, 3)].bg, rgb(CHEESE_EDGE), "the keyline under the cut face");
 
         // Enclosed Swiss hole: top pixel of cell (6, 3), the lower face beneath.
         let hole_cell = &buf[(6, 3)];
@@ -725,11 +668,13 @@ mod tests {
         assert_eq!(buf[(7, 3)].fg, rgb(CHEESE_BODY), "cheese right of the hole");
 
         // The rind stands across the far end, three pixels at x = 5; the
-        // pixel above it is open, which is the tilt of the upper edge.
-        assert_eq!(buf[(7, 2)].symbol(), "▄");
-        assert_eq!(buf[(7, 2)].fg, rgb(CHEESE_HI));
-        assert_eq!(buf[(8, 2)].symbol(), "▄", "the top-right pixel of the box is open");
-        assert_eq!(buf[(8, 2)].fg, rgb(CHEESE_RIND));
+        // pixel above it is the keyline, which is the tilt of the upper edge.
+        assert_eq!(buf[(7, 2)].symbol(), "▀");
+        assert_eq!(buf[(7, 2)].fg, rgb(CHEESE_EDGE));
+        assert_eq!(buf[(7, 2)].bg, rgb(CHEESE_HI));
+        assert_eq!(buf[(8, 2)].symbol(), "▀", "the top-right pixel of the box is keylined");
+        assert_eq!(buf[(8, 2)].fg, rgb(CHEESE_EDGE));
+        assert_eq!(buf[(8, 2)].bg, rgb(CHEESE_RIND));
         assert_eq!(buf[(8, 3)].fg, rgb(CHEESE_RIND));
         assert_eq!(buf[(8, 3)].bg, rgb(CHEESE_RIND_DARK));
 
@@ -780,29 +725,33 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let floor_top = Color::Rgb(14, 22, 20);
         let floor_bot = Color::Rgb(40, 70, 64);
-        // The tip cell: top pixel is the tip, bottom pixel transparent.
-        buf[(2, 1)].set_symbol("▀");
-        buf[(2, 1)].set_fg(floor_top);
-        buf[(2, 1)].set_bg(floor_bot);
-        // A cell whose top pixel is transparent: (3, 0) of the box.
-        buf[(5, 1)].set_symbol("▀");
-        buf[(5, 1)].set_fg(floor_top);
-        buf[(5, 1)].set_bg(floor_bot);
+        // A cell whose bottom half is transparent: (1, 1) of the box, under
+        // the keyline that follows the lower edge.
+        buf[(3, 2)].set_symbol("▀");
+        buf[(3, 2)].set_fg(floor_top);
+        buf[(3, 2)].set_bg(floor_bot);
+        // A cell whose top half is transparent: the click nibble eats (2, 0)
+        // of the box, above the cut face.
+        buf[(4, 1)].set_symbol("▀");
+        buf[(4, 1)].set_fg(floor_top);
+        buf[(4, 1)].set_bg(floor_bot);
 
-        draw_with_depth(&mut buf, area, view_at(2, 1), ColorDepth::Truecolor);
+        let mut view = view_at(2, 1);
+        view.click_pulse = 1.0;
+        draw_with_depth(&mut buf, area, view, ColorDepth::Truecolor);
 
-        assert_eq!(buf[(2, 1)].symbol(), "▀");
-        assert_eq!(buf[(2, 1)].fg, rgb(CHEESE_TIP));
+        assert_eq!(buf[(3, 2)].symbol(), "▀");
+        assert_eq!(buf[(3, 2)].fg, rgb(CHEESE_EDGE));
         assert_eq!(
-            buf[(2, 1)].bg, floor_bot,
+            buf[(3, 2)].bg, floor_bot,
             "transparent bottom half must preserve the playfield pixel beneath"
         );
-        assert_eq!(buf[(5, 1)].symbol(), "▀");
+        assert_eq!(buf[(4, 1)].symbol(), "▀");
         assert_eq!(
-            buf[(5, 1)].fg, floor_top,
+            buf[(4, 1)].fg, floor_top,
             "transparent top half must preserve the playfield pixel beneath"
         );
-        assert_eq!(buf[(5, 1)].bg, rgb(CHEESE_BODY));
+        assert_eq!(buf[(4, 1)].bg, rgb(CHEESE_BODY));
     }
 
     #[test]
@@ -835,8 +784,12 @@ mod tests {
         assert_eq!(b16[(3, 2)].fg, Color::LightYellow, "face left of the hole is yellow");
         assert_eq!(b16[(5, 2)].fg, Color::LightYellow, "face right of the hole is yellow");
         assert_eq!(b16[(6, 2)].fg, Color::Yellow, "rind should be ochre yellow");
-        assert_eq!(b16[(6, 1)].fg, Color::Yellow, "upper rind stays solid ochre");
-        assert_eq!(b16[(5, 1)].fg, Color::LightYellow, "the upper edge runs to the rind");
+        assert_eq!(b16[(4, 1)].fg, Color::Black, "the keyline reads black in 16 colours");
+        assert_eq!(b16[(4, 1)].bg, Color::LightYellow, "the cut face under it stays yellow");
+        assert_eq!(b16[(6, 1)].fg, Color::Black, "the keyline above the rind");
+        assert_eq!(b16[(6, 1)].bg, Color::Yellow, "the upper rind stays solid ochre");
+        assert_eq!(b16[(5, 1)].fg, Color::Black, "the keyline above the upper edge");
+        assert_eq!(b16[(5, 1)].bg, Color::LightYellow, "the upper edge runs to the rind");
 
         // Hover state in 16-colour mode must also remain yellow (never wash out to Gray/White).
         let mut h16 = Buffer::empty(area);
@@ -845,9 +798,11 @@ mod tests {
         draw_with_depth(&mut h16, area, hv, ColorDepth::Ansi16);
         assert_eq!(h16[(1, 1)].fg, Color::LightYellow, "hover tip stays yellow");
         assert_eq!(h16[(4, 2)].fg, Color::Yellow, "hover hole stays ochre");
-        // Hover keeps the full silhouette: face pixel (3, 1) is still there.
-        assert_eq!(h16[(4, 1)].symbol(), "▄");
-        assert_eq!(h16[(4, 1)].fg, Color::LightYellow, "hover face stays yellow");
+        // Hover keeps the full silhouette: the face under (3, 0) of the box is
+        // still there, only its keyline darkened.
+        assert_eq!(h16[(4, 1)].symbol(), "▀");
+        assert_eq!(h16[(4, 1)].fg, Color::Black, "the keyline stays dark on hover");
+        assert_eq!(h16[(4, 1)].bg, Color::LightYellow, "hover face stays yellow");
 
         // 256-colour mode: all painted colours are Indexed, never Rgb.
         let mut b256 = Buffer::empty(area);
@@ -938,6 +893,55 @@ mod tests {
         );
         assert_eq!(st.alpha(), 1.0);
         assert!(st.is_visible());
+    }
+
+    /// In `Scheme::MouseAim` the pointer is the **aim point** and WASD is the
+    /// only way to move, so walking with the pointer holding still must keep
+    /// the wedge on screen (it is the reticle; retiring it would leave the
+    /// player aiming blind). Classic and Gamepad keep the old rule, and so does
+    /// every menu screen, whatever the scheme.
+    #[test]
+    fn mouse_aim_keeps_the_wedge_while_the_keyboard_moves() {
+        let held = |mouse_aims: bool, playing: bool| {
+            let mut st = CursorState::default();
+            st.update(
+                1.0 / 60.0,
+                CursorInput {
+                    mouse_active: true,
+                    prefer_mouse: true,
+                    playing,
+                    mouse_aims,
+                    ..Default::default()
+                },
+            );
+            // Two seconds of holding a direction key without moving the mouse;
+            // the keyboard also clears `prefer_mouse`.
+            for _ in 0..120 {
+                st.update(
+                    1.0 / 60.0,
+                    CursorInput {
+                        kb_pressed: true,
+                        kb_moving: true,
+                        playing,
+                        mouse_aims,
+                        ..Default::default()
+                    },
+                );
+            }
+            st
+        };
+
+        let aiming = held(true, true);
+        assert_eq!(aiming.alpha(), 1.0, "mouse aim: the pointer is the aim point");
+        assert!(aiming.is_visible());
+
+        let classic = held(false, true);
+        assert_eq!(classic.alpha(), 0.0, "classic: the keyboard reclaims the pointer");
+        assert!(!classic.is_visible());
+
+        let menu = held(true, false);
+        assert_eq!(menu.alpha(), 0.0, "a menu retires the wedge on a keypress");
+        assert!(!menu.is_visible());
     }
 
     #[test]

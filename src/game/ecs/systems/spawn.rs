@@ -18,6 +18,20 @@
 //!   [`APPROACH_CELLS`] path cells, so a wave arrives instead of queueing
 //!   behind a wall on the far side of the map.
 //!
+//! ## Where "out of sight" is measured (batch ten)
+//!
+//! The zoom ladder shows up to **twice** the world in each direction, so the
+//! simulation's "out of sight" is the **widest** view ([`widest_view`]): the
+//! simulation viewport times [`MAX_ZOOM_OUT`], a plain number mirroring
+//! `render::zoom::MAX` so the simulation depends on no render state. The ring
+//! ([`ring_radius`]), the off-screen test behind it ([`off_screen`]), the flank
+//! anchors and their outward walk, the room-wave acceptance, the room escape
+//! and the miniboss arrival all read that one rectangle, and none of them reads
+//! the current zoom: the same seed still plays out identically at every rung.
+//! Bodies therefore walk further in than they used to, so a body still outside
+//! that view carries an approach speed boost ([`boost_approach`]) until it
+//! comes into it — no rng, no position change, nothing visible.
+//!
 //! ## The boss
 //!
 //! The director no longer spawns one. At `director::BOSS_TIME` it raises the
@@ -74,10 +88,12 @@ use rand::RngExt;
 use crate::game::collision::{SizeClass, TileMap};
 use crate::game::director::{self, Director};
 use crate::game::ecs::constants::ENEMY_CAP;
+use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::resources::{
     BossDue, Cvars, DebugFlags, DifficultyLevel, LevelIndex, NextEnemyId, NextSpawnId, RngRes,
     RunCounters, TickInput, Viewport,
 };
+use crate::game::ecs::systems::approach::in_sim_view;
 use crate::game::ecs::systems::miniboss::MinibossSchedule;
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::level::{Level, MazeSection, Room, RoomKind, Theme, TileRect};
@@ -91,6 +107,51 @@ use crate::math::Vec2;
 const RING_ATTEMPTS: i32 = 12;
 /// Floor of the ring radius: spawns must never appear on screen.
 const MIN_RING_RADIUS: f32 = 120.0;
+
+/// The widest rung of the render-only zoom ladder, as a **plain number**.
+///
+/// The simulation must never depend on render state ([`crate::render::zoom`]
+/// owns the real ladder), so the ladder's top is mirrored here;
+/// `the_spawn_view_is_the_widest_rung_of_the_zoom_ladder` pins the two
+/// together. At this zoom the screen shows `viewport × 2` of world per axis.
+pub const MAX_ZOOM_OUT: f32 = 2.0;
+
+/// Slack between the widest view's half-diagonal and the spawn ring.
+const RING_MARGIN: f32 = 16.0;
+
+/// Approach speed multiplier for a **ground** body that is still outside the
+/// widest view (see [`boost_approach`]).
+///
+/// The ring moved out to the widest view's half-diagonal, so a body has further
+/// to walk before it can be seen or fought: this gives the walk-in back, and it
+/// is taken off again the moment the body comes into view, so nothing the rat
+/// can see moves differently from before. 1.8× turns a 30 px/s skitterer into
+/// 54 px/s while it is out of sight — the extra 50-90 px of ring costs about a
+/// third of a second instead of three.
+pub const APPROACH_BOOST_GROUND: f32 = 1.8;
+/// The same for a flying body, which is already quick: ×1.3.
+pub const APPROACH_BOOST_FLYER: f32 = 1.3;
+/// A body whose own speed is at or above this (px/s) is never boosted: the
+/// centipede and the hornet already cross the ring faster than the rat can
+/// walk, and the point of the boost is the slow opening fodder.
+pub const APPROACH_SPEED_CEIL: f32 = 40.0;
+
+/// The world-pixel view the **widest zoom-out** reveals around the rat: the
+/// simulation viewport scaled by [`MAX_ZOOM_OUT`].
+///
+/// Every "out of sight" distance in the simulation is measured against *this*
+/// rectangle — the spawn ring ([`ring_radius`]), the off-screen preference
+/// behind it ([`off_screen`]), the flank anchors, the room-wave and fallback
+/// preferences, the miniboss arrival (which shares
+/// [`spawn_point_reachable`]) and the straggler approach boost — and never
+/// against the current zoom. That is what makes a spawn invisible on every
+/// rung of the ladder (the owner saw bodies pop in at `2.0`) while the run
+/// still simulates identically at all of them
+/// (`world::zoom_tests::the_same_seed_plays_out_identically_at_every_zoom`).
+#[inline]
+pub fn widest_view(viewport: Vec2) -> Vec2 {
+    viewport * MAX_ZOOM_OUT
+}
 /// Keep spawns this far inside the arena border.
 const SPAWN_MARGIN: f32 = 8.0;
 /// Never spawn closer than this to the player.
@@ -159,6 +220,9 @@ const FALLBACK_SEARCH_CELLS: i32 = 10;
 /// Minimum angle between the two flanking approaches (radians, ≈ 60°): two
 /// doors on the same wall are one approach, not a pinch.
 const FLANK_MIN_SEPARATION: f32 = std::f32::consts::FRAC_PI_3;
+/// Cells [`FlankPlan::point`] walks outwards from a crowded doorway before it
+/// gives up and stands the group on the anchor.
+const FLANK_OUTWARD_CELLS: i32 = 16;
 
 /// Member offsets (in cells) for a flanking group, ordered outwards from the
 /// doorway. Members cycle through it, so a late pulse (25+ bodies) still
@@ -236,13 +300,19 @@ pub fn director_system(
     mut boss_due: ResMut<BossDue>,
     mut rng: ResMut<RngRes>,
     mut ids: DirectorIds,
-    enemies: Query<&Enemy>,
+    // `&mut`: the approach boost below is the one write the director makes to a
+    // living body (its speed scale, never its position or its rng).
+    mut enemies: Query<(&SpawnId, &mut Enemy)>,
     // Per-run scratch, reused across ticks: the per-level reachability cache
     // costs one flood fill per map and must not be recomputed per spawn.
     mut scratch: Local<SpawnScratch>,
 ) {
     let dt = input.dt;
     let elapsed = counters.elapsed;
+    // The ring sits outside the widest view, so a body walks further in than it
+    // used to: give the ones still out of sight their approach speed back (no
+    // rng, no spawn, no position) before anything else this tick.
+    boost_approach(&mut enemies, &mut director.approach, &player, viewport.0);
     // The campaign level shifts the whole curve (`director::curve_clock`), which
     // also freezes at the boss time, so the horde keeps its late-curve rate for
     // as long as the boss fight lasts.
@@ -301,7 +371,7 @@ pub fn director_system(
         director.spawn_timer = director::horde_interval(elapsed, boss_phase) * grace / rate;
         let count = director::horde_pulse(elapsed, boss_phase);
         let budget = director::horde_live_budget(elapsed, boss_phase);
-        let live = enemies.iter().count();
+        let live = enemies.iter_mut().count();
         if schedule.suppress(elapsed) || console.debug.peace {
             // Quiet after the death, or `peace on`: hold every fresh spawn,
             // but keep the boss hand-off alive.
@@ -337,7 +407,7 @@ pub fn director_system(
         // slot's share back to its floor's fodder inside the one draw. Counted
         // once per pulse and topped up as this pulse queues bodies (the design
         // counts queued bodies toward every cap).
-        let mut slot_counts = live_slot_counts(level.theme, enemies.iter());
+        let mut slot_counts = live_slot_counts(level.theme, enemies.iter_mut().map(|(_, e)| e));
         for i in 0..count {
             if live + queued >= cap || live + queued >= budget {
                 break;
@@ -354,8 +424,8 @@ pub fn director_system(
             // truncated to the remaining budget, so the enemy cap still holds.
             if kind == EnemyKind::Lilliputian {
                 let live_lill = enemies
-                    .iter()
-                    .filter(|e| e.kind == EnemyKind::Lilliputian)
+                    .iter_mut()
+                    .filter(|(_, e)| e.kind == EnemyKind::Lilliputian)
                     .count();
                 let room = cap
                     .saturating_sub(live + queued)
@@ -468,8 +538,8 @@ pub fn director_system(
         && !director::near_appointment(elapsed)
     {
         director.elite_timer = director::elite_interval_at(curve);
-        let elites = enemies.iter().filter(|e| e.elite).count();
-        if enemies.iter().count() + queued < cap && elites < 3 {
+        let elites = enemies.iter_mut().filter(|(_, e)| e.elite).count();
+        if enemies.iter_mut().count() + queued < cap && elites < 3 {
             if let Some(pos) = spawn_point_reachable(
                 &mut rng.0,
                 &level,
@@ -552,9 +622,9 @@ fn lilli_squad_points(
 /// * A **squad** counts once ("count a squad, segment chain or swarm as one
 ///   body with one payout"): ten lilliputians are one II body, and a
 ///   half-destroyed squad still counts once, which is why the count rounds up.
-fn live_slot_counts<'a>(
+fn live_slot_counts<E: std::ops::Deref<Target = Enemy>>(
     theme: Theme,
-    enemies: impl Iterator<Item = &'a Enemy>,
+    enemies: impl Iterator<Item = E>,
 ) -> [u16; roster::SLOT_COUNT] {
     use crate::game::ecs::systems::enemy_wave4 as w4;
     let floor = roster::floor(theme);
@@ -581,6 +651,63 @@ fn live_slot_counts<'a>(
         }
     }
     counts
+}
+
+/// One tick of the approach speed boost.
+///
+/// A body the director placed outside the widest view walks in at
+/// [`APPROACH_BOOST_GROUND`] (×1.3 for flyers) until it comes into that view,
+/// at which point it is put back on exactly the speed scale it spawned with.
+/// `Director::approach` is the registry, keyed by `SpawnId` and sorted, so the
+/// boost is applied and removed exactly once per body.
+///
+/// Why this mechanism rather than a pacing change: it draws no rng, changes no
+/// spawn position, no spawn count and no pulse cadence, and it cannot fire
+/// inside the view — so the change that makes a spawn invisible at every zoom
+/// leaves the horde's arrival schedule (and the number of rng draws per run)
+/// alone. A slower spawn cadence would have reshaped the whole curve.
+///
+/// Never a named miniboss (it has its own arrival walk), never an elite, never
+/// a body whose own speed is already [`APPROACH_SPEED_CEIL`] or more.
+fn boost_approach(
+    enemies: &mut Query<(&SpawnId, &mut Enemy)>,
+    approach: &mut Vec<(u64, f32)>,
+    player: &Player,
+    viewport: Vec2,
+) {
+    for (id, mut e) in enemies.iter_mut() {
+        let at = approach.binary_search_by_key(&id.0, |&(id, _)| id);
+        let out_of_sight = !e.named
+            && !e.elite
+            && e.speed_scale > 0.0
+            && off_screen(e.pos, player.pos, viewport);
+        if !out_of_sight {
+            // Back in view (or no longer an ordinary body): restore the exact
+            // scale it spawned with — a multiply/divide pair would leave a
+            // rounding error on every body for the rest of the run.
+            if let Ok(at) = at {
+                e.speed_scale = approach[at].1;
+                approach.remove(at);
+            }
+            continue;
+        }
+        if at.is_ok() {
+            continue;
+        }
+        let speed = e.kind.speed();
+        if speed <= 0.0 || speed >= APPROACH_SPEED_CEIL {
+            continue;
+        }
+        let boost = if e.kind.archetype() == EnemyKind::Bat {
+            APPROACH_BOOST_FLYER
+        } else {
+            APPROACH_BOOST_GROUND
+        };
+        if let Err(at) = at {
+            approach.insert(at, (id.0, e.speed_scale));
+            e.speed_scale *= boost;
+        }
+    }
 }
 
 /// 8-connected neighbourhood, cardinals first.
@@ -703,6 +830,32 @@ pub fn chamber_room_index(level: &Level, p: Vec2) -> Option<usize> {
         })
 }
 
+/// How far the spawn search had to fall back before it found a point. Counted
+/// per level on the [`SpawnScratch`] (a `Local`, so it costs no resource), so a
+/// test — or the coordinator measuring the doubled ring — can read how often a
+/// 2× ring is clamped against a wall, the level edge or a corridor.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpawnFallbacks {
+    /// The widest-view ring: the normal case, invisible at every zoom.
+    pub ring: u32,
+    /// 1.5 ring radii out (the ring itself was walled, further out was not).
+    pub ring_outward: u32,
+    /// The 1.0-view ring: nearer, still outside the unzoomed view.
+    pub ring_inward: u32,
+    /// Any legal point on the ring, which can be inside the widest view.
+    pub ring_any: u32,
+    /// The nearest staging room whose cell is outside the unzoomed view.
+    pub room_out_of_view: u32,
+    /// The nearest staging room, whatever the view (the rat is boxed in).
+    pub room: u32,
+    /// The nearest clear cell around the ring point (the last legal resort).
+    pub near: u32,
+    /// No point at all: the spawn was skipped.
+    pub skipped: u32,
+    /// A room-wave point was refused because it was inside the widest view.
+    pub room_wave_in_view: u32,
+}
+
 /// Facts about one level that every spawn needs but that are far too expensive
 /// to recompute per spawn: which cells the horde can actually path to, which
 /// rooms contain such a cell, and (rebuilt when the player changes cell) the
@@ -741,6 +894,8 @@ pub struct SpawnScratch {
     /// Chamber openings: raw candidates, then one representative per cluster.
     raw_openings: Vec<(i32, i32)>,
     openings: Vec<(i32, i32)>,
+    /// How often each fallback rung of the search fired (see [`SpawnFallbacks`]).
+    pub fallbacks: SpawnFallbacks,
 }
 
 impl SpawnScratch {
@@ -948,11 +1103,25 @@ fn cell_of(p: Vec2) -> (i32, i32) {
     )
 }
 
-/// Radius of the spawn ring: just beyond the viewport, floored so a small
-/// terminal still spawns off screen.
+/// Radius of the spawn ring: just beyond the **widest** view the zoom ladder
+/// can show, floored so a small terminal still spawns off screen.
+///
+/// The ring is a circle and the off-screen test is per axis, so the widest
+/// view's half-diagonal (plus [`RING_MARGIN`]) puts every sample outside that
+/// rectangle on every bearing: a point at that radius always has one axis
+/// further out than the widest view's half-extent on that axis. This is what
+/// keeps the pop-in the owner saw at `2.0` from happening.
 #[inline]
 pub fn ring_radius(viewport: Vec2) -> f32 {
-    (viewport.len() * 0.5 + 16.0).max(MIN_RING_RADIUS)
+    (widest_view(viewport).len() * 0.5 + RING_MARGIN).max(MIN_RING_RADIUS)
+}
+
+/// Radius of the ring at the **unzoomed** (1.0) view: the old radius, kept as
+/// the first inward step of the spawn search and as the line the escape paths
+/// hold ("at least outside the 1.0 view").
+#[inline]
+pub fn one_x_ring_radius(viewport: Vec2) -> f32 {
+    (viewport.len() * 0.5 + RING_MARGIN).max(MIN_RING_RADIUS)
 }
 
 /// `World::spawn_point` . Also used by the facade's
@@ -968,8 +1137,20 @@ pub fn ring_radius(viewport: Vec2) -> f32 {
 /// the very same ring through the cached flood fill; both share the sampling
 /// below, so there is one ring implementation, not two.
 pub fn spawn_point(rng: &mut StdRng, level: &Level, player: &Player, viewport: Vec2) -> Vec2 {
+    let mut fb = SpawnFallbacks::default();
+    spawn_point_counted(rng, level, player, viewport, &mut fb)
+}
+
+/// [`spawn_point`], with the fallback rungs counted into `fb`.
+fn spawn_point_counted(
+    rng: &mut StdRng,
+    level: &Level,
+    player: &Player,
+    viewport: Vec2,
+    fb: &mut SpawnFallbacks,
+) -> Vec2 {
     let base = ring_base_angle(rng, player);
-    spawn_point_from_base(level, player, viewport, base, None)
+    sample_ring(level, player, viewport, base, None, fb)
         .or_else(|| fallback_point(level, player, viewport, base, None))
         .unwrap_or_else(|| last_resort(level, player, viewport, base))
 }
@@ -983,8 +1164,9 @@ fn spawn_point_from_base(
     viewport: Vec2,
     base: f32,
     reach: Option<&[bool]>,
+    fb: &mut SpawnFallbacks,
 ) -> Option<Vec2> {
-    sample_ring(level, player, viewport, base, reach)
+    sample_ring(level, player, viewport, base, reach, fb)
 }
 
 /// The director's spawn point: [`spawn_point`] plus the cached reachability
@@ -995,8 +1177,10 @@ fn spawn_point_from_base(
 /// into a warren or onto the rat, which is worse than one fewer enemy.
 ///
 /// When the whole ring is walled in (the rat ducking through a rat-hole or
-/// into a maze aisle) the last legal fallback is the nearest room the horde can
-/// enter — still never a maze cell.
+/// into a maze aisle) the ladder is: the nearest staging room whose cell is
+/// outside the **unzoomed** view (so the body still arrives from out of sight),
+/// then the nearest staging room at all, then the nearest clear cell around the
+/// ring point. Every rung is counted in [`SpawnScratch::fallbacks`].
 pub fn spawn_point_reachable(
     rng: &mut StdRng,
     level: &Level,
@@ -1006,13 +1190,44 @@ pub fn spawn_point_reachable(
 ) -> Option<Vec2> {
     let base = ring_base_angle(rng, player);
     scratch.sync(level);
-    if let Some(p) = spawn_point_from_base(level, player, viewport, base, Some(&scratch.reach)) {
+    spawn_ladder(level, player, viewport, base, scratch)
+}
+
+/// The search ladder both spawn entry points share: the ring passes, then the
+/// room escapes, then the nearest clear cell around the ring point.
+fn spawn_ladder(
+    level: &Level,
+    player: &Player,
+    viewport: Vec2,
+    base: f32,
+    scratch: &mut SpawnScratch,
+) -> Option<Vec2> {
+    let mut stats = scratch.fallbacks;
+    let hit = spawn_point_from_base(level, player, viewport, base, Some(&scratch.reach), &mut stats);
+    scratch.fallbacks = stats;
+    if let Some(p) = hit {
         return Some(p);
     }
-    if let Some(p) = nearest_reachable_room_cell(level, scratch, player, SizeClass::Large) {
+    let room = nearest_reachable_room_cell(level, scratch, player, SizeClass::Large, viewport);
+    if let Some((p, out_of_view)) = room {
+        if out_of_view {
+            scratch.fallbacks.room_out_of_view += 1;
+        } else {
+            scratch.fallbacks.room += 1;
+        }
         return Some(p);
     }
-    fallback_point(level, player, viewport, base, Some(&scratch.reach))
+    let last = fallback_point(level, player, viewport, base, Some(&scratch.reach));
+    match last {
+        Some(p) => {
+            scratch.fallbacks.near += 1;
+            Some(p)
+        }
+        None => {
+            scratch.fallbacks.skipped += 1;
+            None
+        }
+    }
 }
 
 /// Where member `index` of a pulse spawns.
@@ -1035,21 +1250,26 @@ pub fn spawn_pulse_point(
     let base = ring_base_angle(rng, player);
     if let Some(flank) = flank {
         // The table was synced when the flank was planned (same tick).
-        return flank.point(level, player, viewport, index, Some(&scratch.reach));
+        if let Some(p) = flank.point(level, player, viewport, index, Some(&scratch.reach)) {
+            return Some(p);
+        }
+        // No out-of-sight cell around this group's doorway: the ring stages
+        // this body instead (still out of sight), so a pinch never pops in.
     }
     if room_wave {
         if let Some(p) = room_wave_point(rng, level, player, scratch) {
-            return Some(p);
+            if off_screen(p, player.pos, viewport) {
+                return Some(p);
+            }
+            // The chosen room is inside the widest view (a room wave is staged
+            // in a chamber the rat is not in, but that chamber can be on
+            // screen). The ring stages this body instead, so nothing
+            // materialises where the rat can see it. One counter, no rng.
+            scratch.fallbacks.room_wave_in_view += 1;
         }
     }
     scratch.sync(level);
-    if let Some(p) = spawn_point_from_base(level, player, viewport, base, Some(&scratch.reach)) {
-        return Some(p);
-    }
-    if let Some(p) = nearest_reachable_room_cell(level, scratch, player, SizeClass::Large) {
-        return Some(p);
-    }
-    fallback_point(level, player, viewport, base, Some(&scratch.reach))
+    spawn_ladder(level, player, viewport, base, scratch)
 }
 
 /// A room-wave spawn: pick (deterministically, from the caller's rng) one room
@@ -1175,26 +1395,43 @@ fn room_open_cell(
 }
 
 /// The nearest room the horde can enter, and a wall-clear cell inside it.
+///
+/// Returns the point and whether it is outside the **unzoomed** view. A room
+/// whose cell is out of sight is preferred (only tie-broken by distance among
+/// rooms that are): a body that has to arrive from the room escape should still
+/// arrive from off screen, which is the whole point of the ring move. When no
+/// staging room has an out-of-view cell (the rat is boxed into a pocket), the
+/// nearest room at all is the answer — still never a maze cell.
 fn nearest_reachable_room_cell(
     level: &Level,
     scratch: &SpawnScratch,
     player: &Player,
     class: SizeClass,
-) -> Option<Vec2> {
-    let mut best: Option<(f32, Vec2)> = None;
+    viewport: Vec2,
+) -> Option<(Vec2, bool)> {
+    let mut out: Option<(f32, Vec2)> = None;
+    let mut near: Option<(f32, Vec2)> = None;
     for (i, room) in level.rooms.iter().enumerate() {
         if !room_staging_ok(scratch, i, room) {
             continue;
         }
         let d = room.center().dist_sq(player.pos);
-        if best.is_some_and(|(bd, _)| bd <= d) {
+        let better_out = out.is_none_or(|(bd, _)| d < bd);
+        let better_near = near.is_none_or(|(nd, _)| d < nd);
+        if !better_out && !better_near {
             continue;
         }
         if let Some(p) = room_open_cell(level, room, class, Some(player.pos), Some(&scratch.reach)) {
-            best = Some((d, p));
+            if better_near {
+                near = Some((d, p));
+            }
+            if better_out && !in_sim_view(p, player.pos, viewport) {
+                out = Some((d, p));
+            }
         }
     }
-    best.map(|(_, p)| p)
+    out.map(|(_, p)| (p, true))
+        .or_else(|| near.map(|(_, p)| (p, false)))
 }
 
 /// A wall-clear, reachable cell inside `room` for `class`, sampled from `rng`.
@@ -1339,19 +1576,48 @@ impl FlankPlan {
             }
             return Some(p);
         }
-        // The anchor was validated by `plan_flank`; a crowded doorway is still
-        // better than dropping the group.
-        Some(anchor)
+        // A crowded doorway: walk *outwards* along this group's own bearing
+        // until the point is off the widest view, so a pinch still arrives from
+        // out of sight instead of materialising in it. Never a maze cell, never
+        // an unreachable one.
+        let outward = (anchor - player.pos).normalized();
+        for k in 1..=FLANK_OUTWARD_CELLS {
+            let p = anchor + outward * (k as f32 * crate::game::collision::TILE_F);
+            let (cx, cy) = cell_of(p);
+            if cell_in_maze(level, cx, cy)
+                || !level.tiles.passable(cx, cy, SizeClass::Large)
+                || !level
+                    .tiles
+                    .circle_clear(p, SPAWN_WALL_CLEAR, SizeClass::Large)
+                || p.dist(player.pos) < SPAWN_MIN_DIST
+                || !off_screen(p, player.pos, viewport)
+                || !cell_reachable(reach, level, p)
+            {
+                continue;
+            }
+            return Some(p);
+        }
+        // A crowded doorway, or nothing off screen along its bearing: no point
+        // for this member. Skipping is the file's rule ("skip, never shove") —
+        // the caller stages the body on the ring instead, which is always out of
+        // sight; a flank body is never placed where the rat can see it appear.
+        None
     }
 }
 
-/// Plan the two off-screen flanking groups for chamber `room_index`.
+/// Plan the two flanking groups for chamber `room_index`.
 ///
 /// `None` unless the chamber offers **two real approaches**: openings on its
-/// boundary that are reachable, off screen from the rat, at least
-/// [`SPAWN_MIN_DIST`] away, within [`APPROACH_CELLS`] path cells, and at least
-/// [`FLANK_MIN_SEPARATION`] apart in bearing. The pair with the widest bearing
-/// wins (deterministically; ties keep the first).
+/// boundary that are reachable, at least [`SPAWN_MIN_DIST`] away, within
+/// [`APPROACH_CELLS`] path cells, and at least [`FLANK_MIN_SEPARATION`] apart in
+/// bearing — **and** both groups can actually be placed out of sight (see
+/// [`FlankPlan::point`]: a pinch that materialises on screen is the pop-in this
+/// batch removes). The pair with the widest bearing wins (deterministically;
+/// ties keep the first).
+///
+/// The *doorway* itself may be on screen — it is a route marker, not a spawn
+/// point, and a chamber small enough to show both its doors can still earn a
+/// pinch whose bodies appear out in the dark on either side.
 pub fn plan_flank(
     level: &Level,
     player: &Player,
@@ -1367,13 +1633,13 @@ pub fn plan_flank(
     for i in 0..n {
         let (ax, ay) = scratch.openings[i];
         let a = TileMap::tile_rect(ax, ay).center();
-        if !flank_anchor_ok(level, player, viewport, scratch, a) {
+        if !flank_anchor_ok(level, player, scratch, a) {
             continue;
         }
         for j in (i + 1)..n {
             let (bx, by) = scratch.openings[j];
             let b = TileMap::tile_rect(bx, by).center();
-            if !flank_anchor_ok(level, player, viewport, scratch, b) {
+            if !flank_anchor_ok(level, player, scratch, b) {
                 continue;
             }
             let sep = angle_between(a - player.pos, b - player.pos);
@@ -1385,17 +1651,24 @@ pub fn plan_flank(
             }
         }
     }
-    best.map(|(_, a, b)| FlankPlan { anchors: [a, b] })
+    let plan = best.map(|(_, a, b)| FlankPlan { anchors: [a, b] })?;
+    // Both groups must really land out of sight, or there is no flank.
+    for member in [0usize, 1] {
+        let p = plan.point(level, player, viewport, member, Some(&scratch.reach))?;
+        if !off_screen(p, player.pos, viewport) {
+            return None;
+        }
+    }
+    Some(plan)
 }
 
 /// Is this chamber opening a legal flanking approach?
-fn flank_anchor_ok(
-    level: &Level,
-    player: &Player,
-    viewport: Vec2,
-    scratch: &SpawnScratch,
-    p: Vec2,
-) -> bool {
+///
+/// Note what is **not** here: the doorway does not have to be off screen. The
+/// bodies are placed by [`FlankPlan::point`], which walks out of sight along the
+/// doorway's own bearing; requiring the doorway itself to be beyond the widest
+/// view would have refused every pinch inside a small chamber.
+fn flank_anchor_ok(level: &Level, player: &Player, scratch: &SpawnScratch, p: Vec2) -> bool {
     let (cx, cy) = cell_of(p);
     if cell_in_maze(level, cx, cy) {
         return false;
@@ -1410,9 +1683,6 @@ fn flank_anchor_ok(
         return false;
     }
     if p.dist(player.pos) < SPAWN_MIN_DIST {
-        return false;
-    }
-    if !off_screen(p, player.pos, viewport) {
         return false;
     }
     if !scratch.is_reachable(level, p) {
@@ -1454,22 +1724,36 @@ fn ring_base_angle(rng: &mut StdRng, player: &Player) -> f32 {
 }
 
 /// Sample the ring around the player; `None` when no candidate is legal.
+///
+/// Four passes over **fixed** candidate lists — the order never depends on the
+/// rng, so the result is deterministic — each counted in `fb`:
+///
+/// 0. the [`ring_radius`] ring, out of sight at the widest zoom (the normal
+///    case): `SpawnFallbacks::ring`;
+/// 1. 1.5 ring radii out, when the ring itself is walled (`ring_outward`);
+/// 2. the [`one_x_ring_radius`] ring — inward, nearer, still outside the
+///    *unzoomed* view (`ring_inward`);
+/// 3. any legal point on the ring (`ring_any`), which can be inside the widest
+///    view: a rat in a one-cell corridor leaves nothing better, and the room
+///    and nearest-cell escapes follow.
 fn sample_ring(
     level: &Level,
     player: &Player,
     viewport: Vec2,
     base: f32,
     reach: Option<&[bool]>,
+    fb: &mut SpawnFallbacks,
 ) -> Option<Vec2> {
-    let r = ring_radius(viewport);
+    let outer = ring_radius(viewport);
     let lo = Vec2::splat(SPAWN_MARGIN);
     let hi = level.arena - Vec2::splat(SPAWN_MARGIN);
     let step = std::f32::consts::TAU / RING_ATTEMPTS as f32;
-    // Two passes over the same fixed candidate ring: the first insists the
-    // point is off screen (so nothing is seen to materialise), the second takes
-    // any legal point. Candidate order never depends on the rng, so the result
-    // is deterministic.
-    for strict in [true, false] {
+    for pass in 0..4 {
+        let r = match pass {
+            1 => outer * 1.5,
+            2 => one_x_ring_radius(viewport),
+            _ => outer,
+        };
         for k in 0..=RING_ATTEMPTS {
             // The last candidate mirrors the first angle: a cheap second sweep.
             let a = if k == RING_ATTEMPTS {
@@ -1478,7 +1762,12 @@ fn sample_ring(
                 base + k as f32 * step
             };
             let p = player.pos + Vec2::from_angle(a) * r;
-            if strict && !off_screen(p, player.pos, viewport) {
+            let out_of_sight = match pass {
+                0 | 1 => off_screen(p, player.pos, viewport),
+                2 => !in_sim_view(p, player.pos, viewport),
+                _ => true,
+            };
+            if !out_of_sight {
                 continue;
             }
             if !spawn_point_ok(p, lo, hi, SPAWN_MIN_DIST, SPAWN_WALL_CLEAR, level, player.pos) {
@@ -1486,6 +1775,12 @@ fn sample_ring(
             }
             if !cell_reachable(reach, level, p) {
                 continue;
+            }
+            match pass {
+                0 => fb.ring += 1,
+                1 => fb.ring_outward += 1,
+                2 => fb.ring_inward += 1,
+                _ => fb.ring_any += 1,
             }
             return Some(p);
         }
@@ -1530,13 +1825,17 @@ fn last_resort(level: &Level, player: &Player, viewport: Vec2, base: f32) -> Vec
     p.clamp_box(Vec2::splat(6.0), level.arena - Vec2::splat(6.0))
 }
 
-/// Is `p` outside the screen the player is looking at? The camera is centred on
-/// the player, so this is a plain box test around him.
+/// Is `p` outside the **widest** view the player can be looking at (the
+/// [`widest_view`] rectangle, plus [`OFF_SCREEN_MARGIN`])? The camera is
+/// centred on the player, so this is a plain box test around him — and it is
+/// the *widest* box, so a spawn is out of sight at every rung of the zoom
+/// ladder instead of only at the unzoomed one.
 #[inline]
 fn off_screen(p: Vec2, player: Vec2, viewport: Vec2) -> bool {
+    let view = widest_view(viewport);
     let d = p - player;
-    let hw = viewport.x * 0.5 + OFF_SCREEN_MARGIN;
-    let hh = viewport.y * 0.5 + OFF_SCREEN_MARGIN;
+    let hw = view.x * 0.5 + OFF_SCREEN_MARGIN;
+    let hh = view.y * 0.5 + OFF_SCREEN_MARGIN;
     d.x.abs() > hw || d.y.abs() > hh
 }
 
@@ -1743,9 +2042,11 @@ mod tests {
         // One reachable cell, two to the right of the anchor.
         only[(40 * w.level.tiles.cols() + 42) as usize] = true;
         for member in 0..6 {
+            // No reachable cell anywhere: no member at all — a body is never
+            // dropped where the rat can see it appear (the ring stages it).
             assert_eq!(
                 plan.point(&w.level, &w.player, viewport, member, Some(&nowhere)),
-                Some(anchor)
+                None
             );
             assert_eq!(
                 plan.point(&w.level, &w.player, viewport, member, Some(&only)),
@@ -1851,9 +2152,10 @@ mod tests {
         );
         let wide = spawn_point(&mut rng, &level, &player, Vec2::new(600.0, 400.0));
         let r = (wide - centre).len();
+        let ring = super::widest_view(Vec2::new(600.0, 400.0)).len() * 0.5 + 16.0;
         assert!(
-            (r - (Vec2::new(600.0, 400.0).len() * 0.5 + 16.0)).abs() < 1e-3,
-            "ring radius does not follow the viewport: {r}"
+            (r - ring).abs() < 1e-3,
+            "ring radius does not follow the widest view: {r} (wanted {ring})"
         );
     }
 
@@ -2471,14 +2773,49 @@ mod tests {
     /// Wall clearance every ring point must keep (mirrors `SPAWN_WALL_CLEAR`).
     const RING_CLEAR: f32 = 4.0;
 
-    /// The ring sits just beyond the viewport (and never closer than 120 px),
-    /// so a spawn is never on screen — that is what makes "just outside the
-    /// camera" work on any terminal size.
+    /// The ring sits just beyond the **widest** view the zoom ladder can show
+    /// (and never closer than 120 px), so a spawn is never on screen at any
+    /// zoom — that is what makes "just outside the camera" work on any terminal
+    /// size and at `2.0`, where the old 1.0-view ring was visible.
     #[test]
-    fn the_ring_radius_follows_the_viewport() {
+    fn the_ring_radius_follows_the_widest_view() {
         assert!((ring_radius(Vec2::splat(1.0)) - 120.0).abs() < 1e-4);
         let vp = Vec2::new(600.0, 400.0);
-        assert!((ring_radius(vp) - (vp.len() * 0.5 + 16.0)).abs() < 1e-4);
+        let widest = super::widest_view(vp);
+        assert_eq!(widest, Vec2::new(1200.0, 800.0));
+        assert!((ring_radius(vp) - (widest.len() * 0.5 + 16.0)).abs() < 1e-4);
+        // The 1.0-view ring is kept as the inward step of the search.
+        assert!(super::one_x_ring_radius(vp) < ring_radius(vp));
+        assert!((super::one_x_ring_radius(vp) - (vp.len() * 0.5 + 16.0)).abs() < 1e-4);
+    }
+
+    /// The simulation's "out of sight" is the widest rung of the *render-only*
+    /// zoom ladder, and the ladder itself is the render module's. This pins the
+    /// plain-number mirror (`MAX_ZOOM_OUT`) to `render::zoom::MAX`, and proves
+    /// that every point on the ring is outside that rectangle on every bearing.
+    #[test]
+    fn the_spawn_view_is_the_widest_rung_of_the_zoom_ladder() {
+        assert_eq!(super::MAX_ZOOM_OUT, crate::render::zoom::MAX);
+        for vp in [
+            Vec2::new(120.0, 74.0),
+            Vec2::new(160.0, 80.0),
+            Vec2::new(200.0, 120.0),
+            Vec2::new(60.0, 40.0),
+        ] {
+            let r = ring_radius(vp);
+            let widest = super::widest_view(vp);
+            let rat = Vec2::new(500.0, 500.0);
+            for k in 0..360 {
+                let p = rat + Vec2::from_angle(k as f32 * std::f32::consts::TAU / 360.0) * r;
+                assert!(
+                    super::off_screen(p, rat, vp),
+                    "a ring point {p:?} is inside the widest view {widest:?}"
+                );
+                // …and it is beyond the unzoomed view too, so the inward ring
+                // is still an in-view-free fallback.
+                assert!(!super::in_sim_view(p, rat, vp));
+            }
+        }
     }
 
     /// A moving player biases the ring to the direction he is heading: the
@@ -2545,11 +2882,15 @@ mod tests {
                             "{theme:?} seed {seed}: spawn {p:?} overlaps a wall"
                         );
                         if spot == start {
-                            // The start room is wide enough for the whole ring,
-                            // so the minimum distance must hold there too.
+                            // The ladder prefers the widest-view ring and steps
+                            // inward to the 1.0-view ring before the room and
+                            // nearest-cell escapes, so the minimum distance
+                            // holds unless the rat is boxed into a pocket the
+                            // escapes have to reach through
+                            // (`SpawnFallbacks` counts which rung fired).
                             assert!(
-                                p.dist(spot) >= 89.5,
-                                "{theme:?} seed {seed}: spawn {p:?} too close to the player"
+                                p.dist(spot) >= super::NEAR_SPAWN_DIST - 1e-3,
+                                "{theme:?} seed {seed}: spawn {p:?} on top of the player"
                             );
                         }
                     }
@@ -3043,10 +3384,8 @@ mod tests {
                             !in_maze(&w.level, anchor),
                             "{theme:?} seed {seed}: flank anchor {anchor:?} is in a maze"
                         );
-                        assert!(
-                            super::off_screen(anchor, w.player.pos, w.viewport),
-                            "{theme:?} seed {seed}: flank anchor {anchor:?} is on screen"
-                        );
+                        // The doorway is a route marker: it may be on screen,
+                        // because the bodies are placed out of sight (below).
                         assert!(
                             anchor.dist(w.player.pos) >= super::SPAWN_MIN_DIST - 1e-3,
                             "{theme:?} seed {seed}: flank anchor {anchor:?} is on the rat"
@@ -3352,5 +3691,329 @@ mod tests {
             }
         }
         assert!(checked > 0, "no maze-bearing maps in the sweep");
+    }
+
+    // ---- Batch ten: the spawn ring is the widest view ---------------------
+
+    /// Standpoints that stress the ring: each map's start, four random open
+    /// cells, cells near the level edge (where a doubled ring clamps) and the
+    /// corridor centres (one cell wide, so the ring is inside a wall on every
+    /// bearing and the escape ladder has to find floor).
+    fn hard_standpoints(w: &World, seed: u64) -> Vec<Vec2> {
+        let mut spots = standpoints(w, seed);
+        let (cols, rows) = (w.level.tiles.cols(), w.level.tiles.rows());
+        for (cx, cy) in [(3, 3), (cols - 4, rows - 4), (cols - 4, 3)] {
+            if w.level.tiles.passable(cx, cy, SizeClass::Small) {
+                spots.push(TileMap::tile_rect(cx, cy).center());
+            }
+        }
+        for room in w
+            .level
+            .rooms
+            .iter()
+            .filter(|r| r.kind == RoomKind::Corridor)
+            .take(2)
+        {
+            spots.push(room.center());
+        }
+        spots
+    }
+
+    /// **Batch ten, the promise.** No ordinary spawn lands inside the widest
+    /// view rectangle when the widest-view ring could find a reachable cell
+    /// outside it.
+    ///
+    /// Every path a pulse body (or an elite, or a miniboss, which share
+    /// [`spawn_point_reachable`]) can take is sampled on all six floors, from
+    /// standpoints that include the level edge and one-cell corridors. The
+    /// claim is exact and checkable: a point inside the widest view is only
+    /// legal when the *primary* ring pass (`SpawnFallbacks::ring`) found
+    /// nothing on this sample.
+    #[test]
+    fn no_ordinary_spawn_lands_inside_the_widest_view() {
+        let mut outside = 0usize;
+        let mut inside = 0usize;
+        let mut skipped = 0usize;
+        for theme in Theme::playable() {
+            for seed in [1u64, 44] {
+                let mut w = World::new(theme, seed);
+                let vp = w.viewport;
+                let mut scratch = SpawnScratch::default();
+                for spot in hard_standpoints(&w, seed) {
+                    w.player.pos = spot;
+                    let mut rng = StdRng::seed_from_u64(seed ^ 0x5eed);
+                    for k in 0..24 {
+                        let before = scratch.fallbacks;
+                        let p = super::spawn_pulse_point(
+                            &mut rng,
+                            &w.level,
+                            &w.player,
+                            vp,
+                            &mut scratch,
+                            k % 5 == 0,
+                            None,
+                            k,
+                        );
+                        let after = scratch.fallbacks;
+                        let Some(p) = p else {
+                            skipped += 1;
+                            assert!(
+                                after.skipped > before.skipped,
+                                "{theme:?} seed {seed}: a skipped spawn was not counted"
+                            );
+                            continue;
+                        };
+                        let ring_won = after.ring > before.ring;
+                        if ring_won {
+                            assert!(
+                                super::off_screen(p, w.player.pos, vp),
+                                "{theme:?} seed {seed}: the widest-view ring put {p:?} on screen"
+                            );
+                        }
+                        if super::off_screen(p, w.player.pos, vp) {
+                            outside += 1;
+                        } else {
+                            inside += 1;
+                            assert!(
+                                !ring_won,
+                                "{theme:?} seed {seed}: {p:?} is on screen although the \
+                                 widest-view ring had a reachable point"
+                            );
+                        }
+                        // Whatever the rung, the point is legal ground for the
+                        // horde (no wall, no maze, not on top of the rat).
+                        assert!(
+                            !in_maze(&w.level, p),
+                            "{theme:?} seed {seed}: spawn {p:?} is inside a maze"
+                        );
+                        assert!(p.dist(w.player.pos) >= super::NEAR_SPAWN_DIST - 1e-3);
+                    }
+                }
+            }
+        }
+        println!(
+            "widest-view spawns: {outside} off screen, {inside} forced on screen, {skipped} skipped"
+        );
+        assert!(outside > 0, "the sweep never spawned at all");
+        assert!(
+            outside > inside * 20,
+            "most spawns ({inside} of {}) had to fall back on screen: {outside} were \
+             off screen",
+            outside + inside
+        );
+    }
+
+    /// **[`SpawnFallbacks`] measurement.** How often each rung of the search
+    /// fires per floor: the coordinator reads the doubled ring's cost here
+    /// (`cargo test spawn_fallbacks -- --nocapture`).
+    #[test]
+    fn spawn_fallbacks() {
+        println!("\nspawn search rungs, 24 pulses per standpoint (viewport 160 x 80):");
+        println!(
+            "  {:<11} {:>6} {:>7} {:>6} {:>7} {:>6} {:>6} {:>6}",
+            "floor", "ring", "outward", "inward", "any", "room", "near", "skipped"
+        );
+        let mut total = super::SpawnFallbacks::default();
+        for theme in Theme::playable() {
+            let mut scratch = SpawnScratch::default();
+            let mut rng = StdRng::seed_from_u64(9);
+            for seed in [1u64, 44] {
+                let mut w = World::new(theme, seed);
+                for spot in hard_standpoints(&w, seed) {
+                    w.player.pos = spot;
+                    for k in 0..24 {
+                        super::spawn_pulse_point(
+                            &mut rng,
+                            &w.level,
+                            &w.player,
+                            w.viewport,
+                            &mut scratch,
+                            k % 5 == 0,
+                            None,
+                            k,
+                        );
+                    }
+                }
+            }
+            let fb = scratch.fallbacks;
+            println!(
+                "  {:<11} {:>6} {:>7} {:>6} {:>7} {:>6} {:>6} {:>6}",
+                format!("{theme:?}"),
+                fb.ring,
+                fb.ring_outward,
+                fb.ring_inward,
+                fb.ring_any,
+                fb.room + fb.room_out_of_view,
+                fb.near,
+                fb.skipped
+            );
+            total.ring += fb.ring;
+            total.ring_outward += fb.ring_outward;
+            total.ring_inward += fb.ring_inward;
+            total.ring_any += fb.ring_any;
+            total.room += fb.room + fb.room_out_of_view;
+            total.near += fb.near;
+            total.skipped += fb.skipped;
+            assert!(fb.ring > 0, "{theme:?}: the widest-view ring never fired");
+        }
+        println!(
+            "  {:<11} {:>6} {:>7} {:>6} {:>7} {:>6} {:>6} {:>6}",
+            "total",
+            total.ring,
+            total.ring_outward,
+            total.ring_inward,
+            total.ring_any,
+            total.room,
+            total.near,
+            total.skipped
+        );
+        assert!(
+            total.ring > 0,
+            "the widest-view ring never carried a spawn: {total:?}"
+        );
+    }
+
+    /// **Batch ten, determinism.** The ring is a pure function of the rng, the
+    /// map, the rat and the *simulation* viewport, so the render-only zoom
+    /// cannot move it: the same samples at `0.5`, `1` and `2` are identical
+    /// (`world::zoom_tests` owns the whole-run version of this promise).
+    #[test]
+    fn the_spawn_ring_is_identical_at_every_zoom() {
+        let mut runs = Vec::new();
+        for z in [0.5f32, 1.0, 2.0] {
+            let mut w = World::new(Theme::Sewer, 11);
+            w.set_zoom_instant(z);
+            assert_eq!(w.zoom_view, z, "the world renders at the requested zoom");
+            let mut samples: Vec<(u32, u32)> = Vec::new();
+            let mut rng = StdRng::seed_from_u64(7);
+            for _ in 0..150 {
+                let p = spawn_point(&mut rng, &w.level, &w.player, w.viewport);
+                samples.push((p.x.to_bits(), p.y.to_bits()));
+            }
+            let mut scratch = SpawnScratch::default();
+            let mut rng = StdRng::seed_from_u64(7);
+            for _ in 0..60 {
+                let p = spawn_point_reachable(
+                    &mut rng,
+                    &w.level,
+                    &w.player,
+                    w.viewport,
+                    &mut scratch,
+                );
+                samples.push(match p {
+                    Some(p) => (p.x.to_bits(), p.y.to_bits()),
+                    None => (u32::MAX, u32::MAX),
+                });
+            }
+            runs.push(samples);
+        }
+        assert_eq!(runs[0], runs[1], "z = 0.5 moved the spawn ring");
+        assert_eq!(runs[1], runs[2], "z = 2 moved the spawn ring");
+    }
+
+    /// **Batch ten, pacing.** The ring moved out to the widest view, so measure
+    /// what that costs: first contact and the live count over the first three
+    /// minutes, on a fixed seed, with no weapons (nothing dies, so the count is
+    /// the director's own) and an invulnerable rat.
+    ///
+    /// Values derived by reading the old code, for the coordinator to compare:
+    /// the ring was `max(vp.len() * 0.5 + 16, 120)` (120 px at 120×74 and at
+    /// 160×80, where the floor binds), the first pulse fires on tick 1
+    /// (`Director::spawn_timer` starts spent) with one 30 px/s skitterer, so
+    /// first contact was ~4 s before the approach boost. The ring is now 157 px
+    /// at 120×74 and 195 px at 160×80, and the boost runs out of sight at
+    /// 54 px/s, which is why the window below is the same as before.
+    #[test]
+    fn the_opening_still_reaches_the_rat_on_time() {
+        let dt = 1.0 / 30.0;
+        let mut w = World::new(Theme::Sewer, 41);
+        w.player.loadout.weapons.clear();
+        w.player.god = true;
+        let rat = w.player.pos;
+        let vp = w.viewport;
+        let mut first_contact: Option<f32> = None;
+        let mut named: Vec<u32> = Vec::new();
+        let mut marks: Vec<(f32, usize, usize)> = Vec::new();
+        let mut t = 0.0f32;
+        while t < 190.0 {
+            w.update(dt, Vec2::ZERO, false);
+            w.player.hp = w.player.max_hp();
+            w.pending_levelups = 0;
+            t += dt;
+            for e in w.enemies() {
+                // A named arrival (the 3:00 miniboss) must come from out of
+                // sight like everything else — it shares `spawn_point_reachable`.
+                if e.named && !named.contains(&e.id) {
+                    named.push(e.id);
+                    assert!(
+                        super::off_screen(e.pos, rat, vp),
+                        "a miniboss arrived on screen at {:?}",
+                        e.pos
+                    );
+                }
+                // The approach boost ends at the widest view's edge: nothing
+                // the rat can see moves at anything but its own speed. (Asserted
+                // inside the *unzoomed* view: a body that crosses the widest
+                // view's edge during a tick keeps last tick's scale until the
+                // next director pass, and the two bands are far apart.)
+                if !e.named && !e.elite && super::in_sim_view(e.pos, rat, vp) {
+                    assert!(
+                        (e.speed_scale - 1.0).abs() < 1e-6,
+                        "{:?} moves at {}× inside the view",
+                        e.kind,
+                        e.speed_scale
+                    );
+                }
+                if first_contact.is_none()
+                    && e.pos.dist(rat)
+                        <= crate::game::ecs::constants::PLAYER_RADIUS + e.radius + 2.0
+                {
+                    first_contact = Some(t);
+                }
+            }
+            for at in [30.0f32, 60.0, 180.0] {
+                if (t - at).abs() <= dt * 0.5 && !marks.iter().any(|(m, _, _)| *m == at) {
+                    let near = w
+                        .enemies()
+                        .iter()
+                        .filter(|e| e.pos.dist(rat) <= 300.0)
+                        .count();
+                    marks.push((at, w.enemy_count(), near));
+                }
+            }
+        }
+        let first = first_contact.expect("nothing ever reached the rat");
+        println!(
+            "opening (sewer, seed 41): first contact {first:.1} s; live/near at {}; named \
+             arrivals {}",
+            marks
+                .iter()
+                .map(|(at, live, near)| format!("{at:.0}s {live}/{near}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            named.len()
+        );
+        // The window the old ring held (~4 s of walk) plus the extra ring, with
+        // the out-of-sight boost giving most of it back.
+        assert!(
+            (1.0..=9.0).contains(&first),
+            "first contact at {first:.1} s is outside the 1-9 s opening"
+        );
+        for (at, live, near) in marks {
+            // The budget is a step table, and it steps *at* these instants: the
+            // count to hold is the one the mark has just left.
+            let held = director::live_budget_at((at - 1.0).max(0.0));
+            let budget = director::live_budget_at(at.min(director::BOSS_TIME));
+            assert!(live <= budget, "{at}s: {live} live bodies over the {budget} budget");
+            assert!(
+                live * 2 >= held,
+                "{at}s: only {live} live bodies of the {held} budget it has been holding"
+            );
+            assert!(
+                near > 0,
+                "{at}s: nothing within 300 px of the rat (the horde thinned out)"
+            );
+        }
+        assert_eq!(named.len(), 1, "the 3:00 miniboss did not arrive");
     }
 }

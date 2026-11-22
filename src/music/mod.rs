@@ -163,6 +163,27 @@ pub struct Style {
     pub stab_lp: f32,
     /// Kick drum body pitch, Hz.
     pub kick_hz: f32,
+    /// Pad attack time, ms.
+    pub pad_attack_ms: f32,
+    /// Pad hold decay time to -60 dB, ms (`0.0` = flat sustain).
+    pub pad_decay_ms: f32,
+    /// Optional one-pole high-pass cutoff on the pad, Hz (`0.0` = bypassed).
+    pub pad_hp_hz: f32,
+    /// Bass hold decay time to -60 dB, ms (`0.0` = flat sustain).
+    pub bass_decay_ms: f32,
+    /// Triangle share of the lead voice (rest is pulse).
+    pub lead_tri: f32,
+    /// Lead hold decay time to -60 dB, ms (`0.0` = flat sustain).
+    pub lead_decay_ms: f32,
+    /// Lead brightness envelope sweep time, ms (`0.0` = static cutoff).
+    pub lead_bright_ms: f32,
+    /// Lead vibrato depth as a frequency fraction.
+    pub lead_vib_depth: f32,
+    /// Brass stab decay time to -60 dB, ms.
+    pub stab_decay_ms: f32,
+    /// Enables v2 voice/drum shaping (band-passed noise drums, open hat,
+    /// woodblock/timpani, 1-pole bright LP, kick transient, FX sweep).
+    pub enhanced_drums: bool,
 }
 
 impl Style {
@@ -185,6 +206,16 @@ impl Style {
             stab_duty: 0.40,
             stab_lp: 2000.0,
             kick_hz: 52.0,
+            pad_attack_ms: 90.0,
+            pad_decay_ms: 0.0,
+            pad_hp_hz: 0.0,
+            bass_decay_ms: 0.0,
+            lead_tri: 0.14,
+            lead_decay_ms: 0.0,
+            lead_bright_ms: 0.0,
+            lead_vib_depth: 0.0065,
+            stab_decay_ms: 240.0,
+            enhanced_drums: false,
         }
     }
 }

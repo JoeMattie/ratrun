@@ -227,6 +227,13 @@ pub struct Director {
     pub chamber_dwell: f32,
     /// The chamber the dwell is measured in (`Level::rooms` index, -1 = none).
     pub chamber_room: i32,
+    /// Ordinary bodies carrying the approach speed boost: `(SpawnId, the speed
+    /// scale they spawned with)`, sorted by id. See
+    /// [`crate::game::ecs::systems::spawn::APPROACH_BOOST_GROUND`]: the spawn
+    /// ring sits outside the *widest* view now, so a walking body is boosted
+    /// until it comes into that view and then put back on exactly the scale it
+    /// spawned with. Never an rng draw, never a spawn, never a position.
+    pub approach: Vec<(u64, f32)>,
 }
 
 impl Default for Director {
@@ -242,6 +249,7 @@ impl Default for Director {
             pulses: 0,
             chamber_dwell: 0.0,
             chamber_room: -1,
+            approach: Vec::new(),
         }
     }
 }

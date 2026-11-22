@@ -44,14 +44,17 @@
 //! |---|---|
 //! | A, B (fodder) | a pack of three to five crossing the plate in its own formation, chasing a hidden waypoint that runs edge to edge and back; no dummy |
 //! | C (chaser) | one body running a lap round an obstacle — a pipe stub, or a rat-hole wall a Cat-lineage body cannot pass |
-//! | R (shooter) | a stand-off body strafing and firing at the dummy, framed wide enough (zoom 2) to hold the whole flight |
+//! | R (shooter) | a stand-off body strafing and firing at the dummy down a **short lane** (34 px), so the body, the muzzle and the pellet are drawn large enough to read; the Toll Gull's lane also frames the 22 px its leading shot travels *past* the dummy |
 //! | I, II, III (tricks) | the body's own tell → strike → recovery on the dummy, with room for its footprint |
 //! | H (heavy) | the body lumbering in at its real 16 px/s past the dummy, a size reference |
 //! | Elite | the same pass with the floor's heavy wearing its gild |
 //!
 //! Named fights and bosses have their own staging ([`stage_miniboss`],
-//! [`stage_boss`]); the arsenal and the field guide keep the rat only where the
-//! rat *is* the point (firing, collecting, squeezing through a hole).
+//! [`stage_boss`]); a named fight's plate **fits the footprint it is about**
+//! (body + the live telegraph), because a cone, a cord sweep, the Salt Hen's
+//! three pads and the Mudlark's claws are all wider than a fixed zoom allowed.
+//! The arsenal and the field guide keep the rat only where the rat *is* the
+//! point (firing, collecting, squeezing through a hole).
 //!
 //! ## Keeping the picture honest
 //!
@@ -63,6 +66,25 @@
 //!   the card's dummy are self-lit on top, as always.
 //! * The scene world keeps its own rng (`SEED`), so no card can move a golden
 //!   or the map pin.
+//! * The card's dummy is painted **under** the picture. There is no mid-scene
+//!   draw hook on [`World::draw`], so the plate renders the floor layer a
+//!   second time as a reference and the cork only takes pixels the world's own
+//!   pass left as bare floor: no body, tell, pellet or strand is ever covered
+//!   by the target it is standing on (see [`draw_practice_dummy`]).
+//! * A named fight's plate **fits its footprint** ([`Script::fit`]): the stage
+//!   centres on the live union of body and telegraph and takes its zoom from
+//!   the shape's own bounds (with a margin), so a cone, a cord sweep or the
+//!   Salt Hen's three stamp pads cannot leave the frame.
+//! * The flatbed's cards stand on the trailer's real bed ([`deck_patch`]): that
+//!   floor's planks, joints, rails and slipstream are anchored to the map's own
+//!   deck rectangle, not to wherever a small patch happens to sit, so a Flatbed
+//!   body is shown on its own floor and the Gravel Tick's tailgate drift reads.
+//! * The animation gate is the **caller's** rule, never this module's:
+//!   `render::library::catalogued` (seen, and for a weapon, passive or
+//!   evolution *owned*) decides whether a card runs at all, so a locked card
+//!   stays `???` and a weapon the player was merely offered keeps the static
+//!   silhouette pose `draw_art` gives it. [`plan`] is unconditional, which is
+//!   what guarantees that a plate the caller *does* run is never blank.
 
 use bevy_ecs::entity::Entity;
 
@@ -73,7 +95,9 @@ use crate::game::campaign::CampaignTotals;
 use crate::game::collision::{SizeClass, TileKind, TileMap};
 use crate::game::ecs::resources::{spawn_with_id, DashHold};
 use crate::game::ecs::systems::boss::{Boss, BossKind};
-use crate::game::ecs::systems::miniboss::{MinibossKind, SIGNATURE_GAP, TELL_TIME};
+use crate::game::ecs::systems::miniboss::{
+    Miniboss, MinibossKind, MinibossShape, SIGNATURE_GAP, TELL_TIME,
+};
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::{Gem, Gold, Pickup, PickupKind};
 use crate::game::hazards::{InkPad, SteamGrate};
@@ -119,8 +143,31 @@ const DUMMY_R: f32 = 6.0;
 /// a plate; the card therefore stages its own: the body is held on a slow arc
 /// at this distance, so the whole flight, the muzzle and the dummy share one
 /// frame (and the scene's own strafe is the movement the card is about).
-/// 58 px leaves both ends a body's width inside the 77 px plate.
-const SHOT_LANE: f32 = 58.0;
+/// 34 px leaves both ends a body's width inside the 55 px plate a 1.25× zoom
+/// shows, which is what makes the body, the muzzle swing and the pellet
+/// themselves readable instead of three small marks on a wide floor.
+const SHOT_LANE: f32 = 34.0;
+/// How far past the dummy the Toll Gull's plate frames the lead point (the
+/// pellet of a leading shot lands there when the target is running away).
+const SHOT_LEAD: f32 = 22.0;
+/// The ring the arsenal plate stands its three targets on, in world pixels:
+/// inside every weapon's own reach (the whip's aura is 26 + 3 × level, the
+/// squeak ring 90+), and outside the `< 26 px` radius where the renderer
+/// suppresses hit digits — so the flash *and* the number both show.
+const ARSENAL_RING: f32 = 30.0;
+
+/// How much of a fitted plate the subject's footprint is allowed to take: the
+/// rest is the margin that keeps a clipped edge impossible.
+const FIT_MARGIN: f32 = 0.88;
+/// The narrowest span a fitted stage assumes, so the plate does not start tight
+/// on a body and then pull back when the tell opens.
+const FIT_MIN_SPAN: Vec2 = Vec2 { x: 54.0, y: 38.0 };
+/// Zoom bounds for the fitted stages (world pixels per plate pixel). The upper
+/// bound is set by the travelling rings (a 42 px rim either side of the body is
+/// a 92 px footprint on a 30 px plate, so the plate has to show 3.5× its own
+/// height); the body is small there, but the ring is what that card is about.
+const FIT_ZOOM_MIN: f32 = 0.55;
+const FIT_ZOOM_MAX: f32 = 3.8;
 
 /// How an entry's card moves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,6 +279,13 @@ struct Script {
     cue: Option<fn(&mut World, Option<Entity>, u32)>,
     /// Draw the card's own practice target where the hidden rat stands.
     dummy: bool,
+    /// Frame the plate on the subject's **live footprint** (body + tell) and
+    /// take the zoom from its bounds, instead of the fixed zoom above. A named
+    /// fight is the only family whose subject and hazard are one shape.
+    fit: bool,
+    /// How far past the dummy the aim point is framed: a leading shot's pellet
+    /// travels past its target, so the plate has to hold that far too.
+    lead: f32,
 }
 
 fn idle(_: f32) -> Input {
@@ -249,6 +303,8 @@ impl Script {
             feed: None,
             cue: None,
             dummy: false,
+            fit: false,
+            lead: 0.0,
         }
     }
 }
@@ -271,6 +327,15 @@ pub struct LibraryScene {
     /// Ticks stepped since the last draw.
     pending: u32,
     big: PixelBuffer,
+    /// The bare floor of the plate, rendered the same way the world's own pass
+    /// lays it down. Scratch, so a card draw allocates nothing after the first
+    /// frame (see [`LibraryScene::floor_plate`]).
+    floor_buf: PixelBuffer,
+    /// The reference above at plate resolution (or its `shrink ×` intermediate).
+    floor_mid: PixelBuffer,
+    floor_plate: PixelBuffer,
+    /// The widest subject footprint a fitted stage has had to hold this loop.
+    fit_span: Vec2,
 }
 
 impl LibraryScene {
@@ -295,6 +360,10 @@ impl LibraryScene {
             view: Vec2::new(44.0, 30.0) * (script.shrink.max(1) as f32 * script.zoom),
             pending: 1,
             big: PixelBuffer::new(1, 1),
+            floor_buf: PixelBuffer::new(1, 1),
+            floor_mid: PixelBuffer::new(1, 1),
+            floor_plate: PixelBuffer::new(1, 1),
+            fit_span: FIT_MIN_SPAN,
         };
         scene.focus = scene.focus_target();
         Some(scene)
@@ -385,9 +454,13 @@ impl LibraryScene {
         self.world.pending_shop = false;
         self.tick += 1;
         self.pending = self.pending.saturating_add(1);
-        // The camera eases toward what the plate frames.
-        let target = self.focus_target();
-        self.focus += (target - self.focus) * 0.12;
+        // The camera eases toward what the plate frames. A fitted stage snaps
+        // its own centre on every draw (the footprint it must hold can grow at
+        // the tell), so easing here would fight it.
+        if !self.script.fit {
+            let target = self.focus_target();
+            self.focus += (target - self.focus) * 0.12;
+        }
     }
 
     fn restart(&mut self) {
@@ -403,6 +476,7 @@ impl LibraryScene {
         self.held = false;
         self.view = view;
         self.focus = self.focus_target();
+        self.fit_span = FIT_MIN_SPAN;
         self.pending = self.pending.saturating_add(2);
     }
 
@@ -468,8 +542,21 @@ impl LibraryScene {
         match self.script.framing {
             Framing::Rat => rat,
             Framing::Pair => {
-                let aim = self.script.dummy.then_some(rat);
-                match (self.subject_pos(), aim) {
+                // A leading shot lands past its target, so a card that stages
+                // one frames that far beyond the dummy as well (`Script::lead`).
+                let lead = self.script.lead;
+                let subject = self.subject_pos();
+                let aim = if !self.script.dummy {
+                    None
+                } else {
+                    Some(match subject {
+                        Some(s) if lead > 0.0 && s.dist_sq(rat) > 1e-4 => {
+                            rat + (rat - s).normalized() * lead
+                        }
+                        _ => rat,
+                    })
+                };
+                match (subject, aim) {
                     (Some(s), Some(a)) => {
                         // Both ends of the lane, centred, whenever the plate is
                         // wide enough to hold them with a margin; otherwise the
@@ -511,7 +598,26 @@ impl LibraryScene {
             return;
         }
         let k = self.script.shrink.max(1);
-        let zoom = self.script.zoom;
+        let mut zoom = self.script.zoom;
+        if self.script.fit {
+            // A named fight: hold the body and its live footprint, centred,
+            // with the zoom coming from the shape's own bounds. The span only
+            // ever grows inside a loop (the tell is the widest the footprint
+            // gets), so the camera pulls back once and never pumps.
+            if let Some((lo, hi)) = self.fit_bounds() {
+                let span = hi - lo;
+                self.fit_span = Vec2::new(
+                    self.fit_span.x.max(span.x),
+                    self.fit_span.y.max(span.y),
+                );
+                let (vw, vh) = ((w * k) as f32, (h * k) as f32);
+                zoom = (self.fit_span.x / (vw * FIT_MARGIN))
+                    .max(self.fit_span.y / (vh * FIT_MARGIN))
+                    .clamp(FIT_ZOOM_MIN, FIT_ZOOM_MAX);
+                // Centred on the midpoint of body + footprint (`fit_bounds`).
+                self.focus = (lo + hi) * 0.5;
+            }
+        }
         self.view = Vec2::new((w * k) as f32 * zoom, (h * k) as f32 * zoom);
         self.world.zoom = zoom;
         self.world.zoom_view = zoom;
@@ -521,35 +627,109 @@ impl LibraryScene {
         } else {
             self.big.resize(w * k, h * k);
             self.world.draw(&mut self.big);
-            let n = (k * k) as u32;
-            let (bw, src) = (self.big.w, self.big.pixels());
-            for y in 0..h {
-                for x in 0..w {
-                    let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
-                    for yy in 0..k {
-                        let row = (y * k + yy) * bw + x * k;
-                        for px in &src[row..row + k] {
-                            r += px.0 as u32;
-                            g += px.1 as u32;
-                            b += px.2 as u32;
-                        }
-                    }
-                    art.plot(x as i32, y as i32, ((r / n) as u8, (g / n) as u8, (b / n) as u8));
-                }
-            }
+            box_down(&self.big, art, k);
         }
         if self.script.dummy {
             // The practice target stands exactly where the hidden rat stands:
             // that is the point every attack on the plate is aimed at. Painted
-            // after the world's own pass, so it belongs to the card and not to
-            // the simulation — no entity, no hit shape, nothing to kill.
+            // by the card and not by the simulation — no entity, no hit shape,
+            // nothing to kill — and only on the pixels the world's pass left as
+            // bare floor, so it sits *under* every body, tell and pellet.
             let scale = (self.script.shrink.max(1) as f32) * zoom;
             let cam = self.world.cam;
             let p = self.world.player.pos;
             let sx = ((p.x - cam.x) / scale).round() as i32;
             let sy = ((p.y - cam.y) / scale).round() as i32;
             let r = ((DUMMY_R / scale).round() as i32).max(2);
-            draw_practice_dummy(art, (sx, sy), r);
+            // The floor reference is only needed where the cork can land.
+            let bare = self.floor_plate(w, h);
+            draw_practice_dummy(art, bare, (sx, sy), r);
+        }
+    }
+
+    /// The plate's bare floor, laid down exactly the way [`World::draw`] lays
+    /// it (the same world buffer size, the same resample, the same box filter
+    /// at a boss plate's `shrink`), so a pixel that matches it is a pixel no
+    /// object, body, tell or pellet touched.
+    ///
+    /// This is what lets the card's dummy be painted *under* the picture
+    /// without a hook into the mid-scene layers of `World::draw` (which this
+    /// module does not own): the cork only replaces floor.
+    fn floor_plate(&mut self, w: usize, h: usize) -> &PixelBuffer {
+        let k = self.script.shrink.max(1);
+        let zoom = self.view.x / (w * k) as f32;
+        let ww = ((w * k) as f32 * zoom).round().max(1.0) as usize;
+        let wh = ((h * k) as f32 * zoom).round().max(1.0) as usize;
+        self.floor_buf.resize(ww, wh);
+        // The first thing `World::draw_scene` does: clear to the theme's bg and
+        // paint the floor (the scene is flat-lit, so no light touches it).
+        let bg = self.world.level.palette.bg;
+        self.floor_buf.clear(bg);
+        crate::game::art_floor::draw_floor(
+            &mut self.floor_buf,
+            &self.world.level,
+            self.world.cam,
+            self.world.elapsed,
+        );
+        self.floor_plate.resize(w, h);
+        if k == 1 {
+            self.floor_buf.resample_to(&mut self.floor_plate);
+        } else {
+            self.floor_mid.resize(w * k, h * k);
+            self.floor_buf.resample_to(&mut self.floor_mid);
+            box_down(&self.floor_mid, &mut self.floor_plate, k);
+        }
+        &self.floor_plate
+    }
+
+    /// The world rectangle a fitted plate must hold: the subject's drawn body,
+    /// its live telegraph (the widest the footprint gets) and the aim point.
+    fn fit_bounds(&mut self) -> Option<(Vec2, Vec2)> {
+        let e = self.subject?;
+        let (pos, radius) = {
+            let body = self.world.ecs.get::<Enemy>(e)?;
+            (body.pos, body.radius)
+        };
+        // A named body's sprite is 2.5-3 × its collision radius (the art draws
+        // the body, not the hit disc).
+        let r = (radius * 3.0).max(6.0);
+        let mut lo = pos - Vec2::new(r, r);
+        let mut hi = pos + Vec2::new(r, r);
+        let shape = self
+            .world
+            .ecs
+            .get::<Miniboss>(e)
+            .and_then(|mb| mb.telegraph());
+        if let Some(shape) = shape {
+            let (slo, shi) = shape_bounds(shape);
+            lo = Vec2::new(lo.x.min(slo.x), lo.y.min(slo.y));
+            hi = Vec2::new(hi.x.max(shi.x), hi.y.max(shi.y));
+        }
+        // The target of the attack is part of the picture.
+        let aim = self.world.player.pos;
+        lo = Vec2::new(lo.x.min(aim.x), lo.y.min(aim.y));
+        hi = Vec2::new(hi.x.max(aim.x), hi.y.max(aim.y));
+        Some((lo, hi))
+    }
+}
+
+/// Box-filter `src` down by `k` into `dst` (a boss plate's oversized draw).
+fn box_down(src: &PixelBuffer, dst: &mut PixelBuffer, k: usize) {
+    let (w, h) = (dst.w, dst.h);
+    let n = (k * k) as u32;
+    let (bw, px) = (src.w, src.pixels());
+    for y in 0..h {
+        for x in 0..w {
+            let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
+            for yy in 0..k {
+                let row = (y * k + yy) * bw + x * k;
+                for p in &px[row..row + k] {
+                    r += p.0 as u32;
+                    g += p.1 as u32;
+                    b += p.2 as u32;
+                }
+            }
+            dst.plot(x as i32, y as i32, ((r / n) as u8, (g / n) as u8, (b / n) as u8));
         }
     }
 }
@@ -559,7 +739,14 @@ impl LibraryScene {
 /// A patch of open floor: `cols × rows` tiles of the theme's ground, a solid
 /// border (so a scripted rat cannot walk off the map), no rooms, no props,
 /// nothing placed.
+///
+/// The flatbed is the exception: its floor art (and its slipstream and its
+/// tailgate) is anchored to the *map's* own deck rectangle, so a card about a
+/// Flatbed body has to stand on that bed — see [`deck_patch`].
 fn patch(theme: Theme, cols: i32, rows: i32) -> Level {
+    if theme == Theme::Trailer {
+        return deck_patch();
+    }
     let mut tiles = TileMap::new(cols, rows, theme, 0);
     for x in 0..cols {
         tiles.set(x, 0, TileKind::Wall(WallKind::Solid));
@@ -589,10 +776,63 @@ fn patch(theme: Theme, cols: i32, rows: i32) -> Level {
     }
 }
 
+/// The flatbed's own bed, at the deck's real place on the map (the deck art,
+/// the slipstream and the tailgate all read the map's deck rectangle rather
+/// than the camera, so a card on a patch at the origin showed the verge and a
+/// Flatbed body stood on plain green).
+///
+/// The bed is the only open floor; the rails and the road are solid, as they
+/// are for the simulation on the real generator's map. The card's start sits a
+/// short way in from the tailgate, so the Gravel Tick's drift (`tick_drift`,
+/// tailward along `-x`) reads on the plate.
+fn deck_patch() -> Level {
+    use crate::game::levelgen::trailer::{
+        DECK_LEFT, DECK_RIGHT, DECK_ROWS, DECK_TOP, TAILGATE_CELL,
+    };
+    let (cols, rows) = (200, 160);
+    let mut tiles = TileMap::new(cols, rows, Theme::Trailer, 0);
+    for y in 0..rows {
+        for x in 0..cols {
+            let on_deck = (DECK_LEFT..DECK_RIGHT).contains(&x)
+                && (DECK_TOP..DECK_TOP + DECK_ROWS).contains(&y);
+            if !on_deck {
+                tiles.set(x, y, TileKind::Wall(WallKind::Solid));
+            }
+        }
+    }
+    tiles.rebuild_masks();
+    let nav = NavGrid::from_tiles(&tiles, SizeClass::Large);
+    let arena = Vec2::new(cols as f32 * 16.0, rows as f32 * 16.0);
+    let start = cell_centre((DECK_LEFT + 24, DECK_TOP + DECK_ROWS / 2));
+    Level {
+        theme: Theme::Trailer,
+        seed: 0,
+        arena,
+        tiles,
+        props: Vec::new(),
+        palette: Palette::for_theme(Theme::Trailer),
+        nav,
+        rooms: Vec::new(),
+        start,
+        mazes: Vec::new(),
+        objects: LevelObjects::default(),
+        boss: BossArena::default(),
+        // The bed the floor art draws and `systems::trailer` reads: the full
+        // deck strip, its tailgate (the slipstream's tailward direction) and
+        // no hazards of the generator's own (a card places its feature).
+        trailer: TrailerDeck {
+            deck: TileRect::new(DECK_LEFT, DECK_TOP, DECK_RIGHT - DECK_LEFT, DECK_ROWS),
+            tailgate: cell_centre(TAILGATE_CELL),
+            pits: Vec::new(),
+            wind: Vec::new(),
+            slides: Vec::new(),
+        },
+    }
+}
+
 /// A patch with a solid `w × h`-cell block of wall at cell `(cx, cy)`: the
 /// obstacle a chaser laps round (a pipe end).
-fn blocked(theme: Theme, cols: i32, rows: i32, cx: i32, cy: i32, w: i32, h: i32) -> Level {
-    let mut level = patch(theme, cols, rows);
+fn blocked(mut level: Level, cx: i32, cy: i32, w: i32, h: i32) -> Level {
     for y in cy..cy + h {
         for x in cx..cx + w {
             level.tiles.set(x, y, TileKind::Wall(WallKind::Solid));
@@ -605,10 +845,10 @@ fn blocked(theme: Theme, cols: i32, rows: i32, cx: i32, cy: i32, w: i32, h: i32)
 
 /// A patch with a solid wall down column `wall_x` and one cell of `gap` in it
 /// — a rat-hole, a doorway or a one-way door, the only way through.
-fn walled(theme: Theme, cols: i32, rows: i32, wall_x: i32, gap_y: i32, gap: TileKind) -> Level {
+fn walled(mut level: Level, wall_x: i32, gap_y: i32, gap: TileKind) -> Level {
+    let (cols, rows) = (level.tiles.cols(), level.tiles.rows());
     assert!(wall_x > 1 && wall_x < cols - 2, "the wall must be on the patch");
     assert!(gap_y > 1 && gap_y < rows - 2, "the gap must be on the wall");
-    let mut level = patch(theme, cols, rows);
     for y in 1..rows - 1 {
         level.tiles.set(wall_x, y, TileKind::Wall(WallKind::Solid));
     }
@@ -824,20 +1064,31 @@ fn lap_of(kind: EnemyKind) -> Lap {
 /// dummy: the body never reaches the rat, and the obstacle is the subject.
 fn stage_chaser(theme: Theme, kind: EnemyKind) -> Staged {
     let lap = lap_of(kind);
-    let gap = cell_centre((20, 15));
-    let pipe = cell_centre((19, 14)) + Vec2::new(0.0, 8.0);
+    let base = patch(theme, 40, 30);
+    // The flatbed's bed is only 26 rows tall and sits at its own place on the
+    // map, so the card's obstacle is carved relative to the card's start
+    // rather than at a fixed cell of a hand-sized patch.
+    let start_cell = crate::game::collision::cell_of(base.start);
+    let (pipe_cell, gap_cell) = if theme == Theme::Trailer {
+        (
+            (start_cell.0 - 4, start_cell.1),
+            (start_cell.0 + 4, start_cell.1),
+        )
+    } else {
+        ((19, 14), (20, 15))
+    };
+    let gap = cell_centre(gap_cell);
+    let pipe = cell_centre(pipe_cell) + Vec2::new(0.0, 8.0);
     let centre = match lap {
         Lap::Pipe => pipe,
         Lap::Hole => gap,
     };
     let mut level = match lap {
-        Lap::Pipe => blocked(theme, 40, 30, 19, 14, 1, 2),
+        Lap::Pipe => blocked(base, pipe_cell.0, pipe_cell.1, 1, 2),
         Lap::Hole => walled(
-            theme,
-            40,
-            30,
-            20,
-            15,
+            base,
+            gap_cell.0,
+            gap_cell.1,
             TileKind::Wall(WallKind::RatHole {
                 axis: WallAxis::Vertical,
             }),
@@ -846,7 +1097,7 @@ fn stage_chaser(theme: Theme, kind: EnemyKind) -> Staged {
     level.start = centre;
     if lap == Lap::Hole {
         level.objects.rat_holes.push(RatHole {
-            cell: (20, 15),
+            cell: gap_cell,
             view: RatHoleView::new(gap, Vec2::new(1.0, 0.0)),
         });
     }
@@ -902,6 +1153,11 @@ fn hole_lap_cue(world: &mut World, _subject: Option<Entity>, tick: u32) {
 /// zero and the card scripts the strafe itself, because the Spitter archetype's
 /// real stand-off (80–110 px) is wider than a plate and a card must show the
 /// shot land.
+///
+/// The lane is **shortened** rather than the view widened: at 34 px the body
+/// and the pellet are drawn at a 1.25× zoom (twice the plate size they had at
+/// the old 1.75×), and the hostile layer's self-lit pellet plus the ink pass's
+/// minimum-size stamp stay readable over the floor.
 fn stage_shooter(theme: Theme, kind: EnemyKind) -> Staged {
     let mut world = sandbox(patch(theme, 40, 30));
     hide_rat(&mut world);
@@ -916,10 +1172,35 @@ fn stage_shooter(theme: Theme, kind: EnemyKind) -> Staged {
         body.hp = 4000.0;
         body.max_hp = 4000.0;
     }
-    let mut script = Script::new(5.0, 1.75);
+    // The Toll Gull's shot leads the rat, so its plate has a running target: the
+    // hidden rat (and the dummy with it) steps away in short bursts, which is
+    // exactly the motion the lead aims ahead of.
+    let leads = kind == EnemyKind::TollGull;
+    let mut script = Script::new(5.0, if leads { 1.55 } else { 1.25 });
     script.framing = Framing::Pair;
-    script.cue = Some(shooter_strafe);
+    let strafe: fn(&mut World, Option<Entity>, u32) = if leads {
+        gull_strafe
+    } else {
+        shooter_strafe
+    };
+    script.cue = Some(strafe);
     script.dummy = true;
+    if leads {
+        // The pellet crosses 22 px past the dummy before it is retired.
+        script.lead = SHOT_LEAD;
+        script.input = |t| Input {
+            // Bursts of walking away from the gull, then a stand: the rat has
+            // a velocity when the shot leaves (the three shots of a loop, at
+            // 0.35 / 2.55 / 4.75 s, all fall inside a burst), so
+            // `shot_target` leads it.
+            mv: if (0.2..0.75).contains(&(t % 1.1)) {
+                Vec2::new(1.0, 0.0)
+            } else {
+                Vec2::ZERO
+            },
+            ..Input::default()
+        };
+    }
     (world, script, Some(e))
 }
 
@@ -951,6 +1232,41 @@ fn shooter_strafe(world: &mut World, subject: Option<Entity>, tick: u32) {
     }
 }
 
+/// The Toll Gull's plate: the same strafe, with the aim point walking away in
+/// bursts (see [`stage_shooter`]'s input) so the 0.35 s lead draws a shot that
+/// crosses *beside* the dummy instead of dead on it. The pellet lives a little
+/// past the dummy — the lead is the whole point — and is retired before it can
+/// leave the framed lane.
+fn gull_strafe(world: &mut World, subject: Option<Entity>, tick: u32) {
+    let Some(e) = subject else {
+        return;
+    };
+    let aim = world.player.pos;
+    let t = tick as f32 * TICK;
+    let a = std::f32::consts::PI + (t / 5.0 * std::f32::consts::TAU).sin() * 0.30;
+    let at = aim + Vec2::from_angle(a) * SHOT_LANE;
+    if let Some(mut body) = world.ecs.get_mut::<Enemy>(e) {
+        body.pos = at;
+    }
+    let mut spent = Vec::new();
+    let mut shots = world.ecs.query::<(Entity, &Bullet)>();
+    for (shot, b) in shots.iter(&world.ecs) {
+        // A leading shot can pass the dummy on either side of the lane: retire
+        // it once it is past the framed lead (or has come back almost to the
+        // gull's own body).
+        if b.faction == Faction::Enemy
+            && (b.pos.dist(aim) > SHOT_LANE + SHOT_LEAD + 2.0
+                || b.pos.x > aim.x + 24.0
+                || b.pos.dist(at) <= DUMMY_R)
+        {
+            spent.push(shot);
+        }
+    }
+    for shot in spent {
+        world.ecs.despawn(shot);
+    }
+}
+
 /// A trick: the body's own tell → strike → recovery on the dummy, at a zoom
 /// that leaves room for its real footprint (a curl, a hop's crosses, a
 /// crossbar, a burst, a dive lane, a slide, a needle, jaws, feet, a can's roll
@@ -966,7 +1282,7 @@ fn stage_trick(theme: Theme, kind: EnemyKind) -> Staged {
         body.hp = 6000.0;
         body.max_hp = 6000.0;
     }
-    let mut script = Script::new(6.0, 1.5);
+    let mut script = Script::new(5.0, 1.5);
     script.framing = Framing::Pair;
     script.dummy = true;
     (world, script, Some(e))
@@ -975,18 +1291,22 @@ fn stage_trick(theme: Theme, kind: EnemyKind) -> Staged {
 /// A heavy (and the Elite card, which is the floor's heavy wearing its gild):
 /// the body lumbering in at its real 16 px/s past the dummy, a size reference,
 /// on a camera that holds still so the crossing is the movement.
+///
+/// The body starts inside the plate (a heavy that starts off-frame spends the
+/// first second of every loop walking into the picture) and the loop is only as
+/// long as the walk plus the moment it presses at the dummy.
 fn stage_heavy(theme: Theme, kind: EnemyKind, elite: bool) -> Staged {
     let mut world = sandbox(patch(theme, 40, 30));
     hide_rat(&mut world);
     let aim = world.player.pos;
-    let e = world.spawn_enemy(kind, aim + Vec2::new(-34.0, -2.0), 1.0);
+    let e = world.spawn_enemy(kind, aim + Vec2::new(-24.0, -2.0), 1.0);
     if let Some(mut body) = world.ecs.get_mut::<Enemy>(e) {
         body.elite = elite;
         body.hp = 9000.0;
         body.max_hp = 9000.0;
     }
-    let mut script = Script::new(7.0, 1.25);
-    script.framing = Framing::Point(aim + Vec2::new(-6.0, 0.0));
+    let mut script = Script::new(3.9, 1.35);
+    script.framing = Framing::Point(aim + Vec2::new(-4.0, 0.0));
     script.dummy = true;
     (world, script, Some(e))
 }
@@ -996,15 +1316,21 @@ fn stage_miniboss(theme: Theme, kind: MinibossKind) -> Staged {
     hide_rat(&mut world);
     let aim = world.player.pos;
     let e = world.spawn_miniboss(kind, 0, aim + Vec2::new(-34.0, -2.0));
-    // A named body's whole encounter is tell → strike → recovery → gap, so a
-    // loop exactly that long starts and ends in the same state. The extra leg
-    // is the walk in to its own engage range, which is where the body begins.
+    // A named body's whole encounter is tell → strike → recovery, so a loop
+    // exactly that long starts and ends in the same state. The extra leg is the
+    // walk in to its own engage range, which is where the body begins; the 2.6 s
+    // gap to the *next* tell is cut (a plate that sat out the whole gap was
+    // still for more than a third of its loop).
     // A named body walks at 48 px/s (a Brute's 16 × `MINIBOSS_SPEED_SCALE`).
     let walk = (34.0 - kind.engage_range()).max(0.0) / 48.0;
-    let cycle = TELL_TIME + kind.active_duration() + SIGNATURE_GAP + walk;
-    let mut script = Script::new(cycle.clamp(4.0, 7.0), 2.0);
+    let cycle = TELL_TIME + kind.active_duration() + walk + SIGNATURE_GAP * 0.2;
+    let mut script = Script::new(cycle.clamp(3.4, 6.0), 2.0);
     script.framing = Framing::Pair;
     script.dummy = true;
+    // The stage fits the body + the tell's own footprint (a cone, a sweep, the
+    // Salt Hen's three pads), centre on their midpoint, and takes its zoom from
+    // those bounds: what clipped the right edge of the wide rows.
+    script.fit = true;
     (world, script, Some(e))
 }
 
@@ -1036,7 +1362,10 @@ fn stage_weapon(theme: Theme, kind: WeaponKind, evolved: bool) -> Staged {
         }
         weapon.evolved = true;
     } else {
-        weapon.level = 3.min(kind.max_level());
+        // Top rank: the effect at its most obvious (a level-5 Gnaw's second
+        // dart, a full ring of nova spokes, the whip's widest aura), and the
+        // active weapons' reach at its longest.
+        weapon.level = kind.max_level();
     }
     world.player.loadout.weapons.push(weapon);
     // The rat faces its dummies (a Laser Eyes card fires down `face`, and an
@@ -1052,11 +1381,20 @@ fn stage_weapon(theme: Theme, kind: WeaponKind, evolved: bool) -> Staged {
     script.framing = Framing::Rat;
     // Standing targets, not a chase: the arsenal plate is about what the
     // weapon does to a body, and a brief effect (a squeak ring, a thrash arc)
-    // needs something on the plate to land on between its own flashes.
-    script.cue = Some(arsenal_dummies);
+    // needs something on the plate to land on between its own flashes. The cue
+    // keeps the active weapons charged so a charge of 6-10 s can still fire
+    // several times inside a five-second loop.
+    script.cue = Some(arsenal_cue);
     script.input = match kind {
-        WeaponKind::TailThrash | WeaponKind::SonicSqueak => |t| Input {
-            active: (t % 1.2) < TICK * 1.5 && t > 0.5,
+        // A thrash burst lasts a second, so its presses are 1.4 s apart (three
+        // bursts a loop, each with its own sweep and hit flashes); a squeak ring
+        // expands in 0.3 s and can be fired every 0.8 s (six rings a loop).
+        WeaponKind::TailThrash => |t| Input {
+            active: (t % 1.4) < TICK * 1.5 && t > 0.4,
+            ..Input::default()
+        },
+        WeaponKind::SonicSqueak => |t| Input {
+            active: (t % 0.8) < TICK * 1.5 && t > 0.4,
             ..Input::default()
         },
         WeaponKind::SuperDash => |t| {
@@ -1072,13 +1410,30 @@ fn stage_weapon(theme: Theme, kind: WeaponKind, evolved: bool) -> Staged {
     (world, script, None)
 }
 
-/// Where the arsenal plate's three targets stand: in front of the rat, inside
-/// the plate at its zoom.
+/// The arsenal plate's per-tick hook: keep the active weapons ready, and keep
+/// the three targets standing.
+///
+/// A Sonic Squeak is charged by a 6 s cooldown and a Tail Thrash by 10 s; a
+/// five-second card could only ever show one of them. The charge is the cost a
+/// card's facts state, not the thing the card demonstrates, so the plate holds
+/// the timer at zero and the effect itself is the weapon's own.
+fn arsenal_cue(world: &mut World, subject: Option<Entity>, tick: u32) {
+    for w in world.player.loadout.weapons.iter_mut() {
+        if w.kind.is_active() {
+            w.timer = 0.0;
+        }
+    }
+    arsenal_dummies(world, subject, tick);
+}
+
+/// Where the arsenal plate's three targets stand: a fan in front of the rat, so
+/// a forward weapon's fire and a radial effect both cross them, at the effect's
+/// own scale and outside the radius where hit digits are suppressed.
 fn dummy_homes(rat: Vec2) -> [Vec2; 3] {
     let mut homes = [rat; 3];
     for (i, home) in homes.iter_mut().enumerate() {
-        let a = i as f32 * std::f32::consts::TAU / 3.0;
-        *home = rat + Vec2::from_angle(a) * 22.0;
+        let a = (i as f32 - 1.0) * 0.66;
+        *home = rat + Vec2::from_angle(a) * ARSENAL_RING;
     }
     homes
 }
@@ -1181,10 +1536,10 @@ fn stage_pickup(theme: Theme, kind: PickupKind) -> Staged {
             body.speed_scale = 0.45;
         }
     }
-    let mut script = Script::new(5.0, 1.5);
+    let mut script = Script::new(2.8, 1.5);
     script.framing = Framing::Point(rat + Vec2::new(16.0, 0.0));
     script.input = |t| Input {
-        mv: if (1.2..1.75).contains(&t) {
+        mv: if (0.4..1.0).contains(&t) {
             Vec2::new(1.0, 0.0)
         } else {
             Vec2::ZERO
@@ -1291,35 +1646,44 @@ fn stage_chest(theme: Theme) -> Staged {
     for (dx, dy) in [(-10.0, 12.0), (14.0, -14.0), (26.0, 16.0)] {
         world.spawn_gem(Gem::new(chest + Vec2::new(dx, dy), 1));
     }
-    let mut script = Script::new(6.0, 2.0);
+    let mut script = Script::new(4.5, 2.0);
     script.framing = Framing::Point(chest - Vec2::new(8.0, 0.0));
     (world, script, None)
 }
 
-/// A glue board takes a pack of Brutes one after another until its lifetime
-/// budget is gone: `Idle` → `Stuck` → `Used`. Sprung by the floor's own bodies,
-/// not by the rat: the rat is the thing they are walking toward, and it is not
-/// drawn.
+/// A glue board takes Brutes one after another until its lifetime budget is
+/// gone: `Idle` → `Stuck` → `Used`. Sprung by the floor's own bodies, not by the
+/// rat: the rat is the thing they are walking toward, and it is not drawn.
+///
+/// One body at a time, on a slow cadence: a Brute spends 4 of the board's 20
+/// glue units, so a 13 s loop walks five of them across it (one caught, one
+/// approaching — the plate is about the board, not about a crowd standing on
+/// it), and the last catch leaves the board `Used` for the closing seconds. The
+/// hidden rat stands well above the plate, so a body that has torn free walks
+/// on out of the frame rather than piling up on the dummy.
 fn stage_sticky(theme: Theme) -> Staged {
     let mut world = sandbox(patch(theme, 40, 30));
     hide_rat(&mut world);
     let rat = world.player.pos;
-    let board = rat + Vec2::new(0.0, 26.0);
+    let board = rat + Vec2::new(0.0, 20.0);
     world
         .level
         .objects
         .sticky_traps
         .push(StickyTrapView::new(board, Vec2::new(1.0, 0.0)));
-    let mut script = Script::new(9.0, 1.5);
-    script.framing = Framing::Point(board + Vec2::new(0.0, -8.0));
-    // The hidden rat stands still above the board: every Brute is fed in from
-    // below it, so each one has to cross the glue.
+    // The rat (the bodies' goal) is 40 px above the board: past the top edge of
+    // the plate, so the far side of the board stays clear.
+    world.player.pos = board - Vec2::new(0.0, 40.0);
+    let mut script = Script::new(13.0, 1.5);
+    script.framing = Framing::Point(board);
+    // Each Brute enters 30 px below the board and walks its own 16 px/s up over
+    // the glue: caught, held 1.5 s, freed, and away off the top of the plate.
     script.feed = Some(Feed {
         kind: EnemyKind::Brute,
         first: 0.5,
-        every: 0.7,
-        ring: 60.0,
-        hp: 120.0,
+        every: 1.9,
+        ring: 70.0,
+        hp: 6000.0,
         speed: 1.0,
         from: Some(Vec2::new(0.0, 1.0)),
     });
@@ -1405,38 +1769,43 @@ fn stage_ink() -> Staged {
     (world, script, None)
 }
 
-/// One of the flatbed's own hazards on a hand-built deck.
+/// One of the flatbed's own hazards, on the trailer's real bed.
 fn stage_deck(feature: DeckFeature) -> Staged {
+    // The flatbed's own bed (planks, joints, rails, the road in the gaps): the
+    // deck art is anchored to the map's deck rectangle, so a hand-sized patch
+    // at the origin only ever showed the verge.
     let mut level = patch(Theme::Trailer, 32, 22);
     let rat = level.start;
-    let mut deck = TrailerDeck {
-        deck: TileRect::new(1, 1, 30, 20),
-        tailgate: Vec2::new(20.0, rat.y),
-        pits: Vec::new(),
-        wind: Vec::new(),
-        slides: Vec::new(),
-    };
     let cells = |p: Vec2| crate::game::collision::cell_of(p);
     let mut script = Script::new(5.0, 1.5);
     match feature {
         DeckFeature::Pit => {
-            let pit_at = Vec2::new(rat.x + 44.0, rat.y);
+            let pit_at = Vec2::new(rat.x + 24.0, rat.y);
             let c = cells(pit_at);
-            deck.pits.push(Pit::new(TileRect::new(c.0, c.1 - 1, 2, 3), PitKind::BrokenPlank));
+            level
+                .trailer
+                .pits
+                .push(Pit::new(TileRect::new(c.0, c.1 - 1, 2, 3), PitKind::BrokenPlank));
             // The rat is the subject of this card, so the plate holds it *and*
             // the hole it is about to fall into.
-            script.framing = Framing::Point(Vec2::new(rat.x + 24.0, rat.y));
+            script.framing = Framing::Point(Vec2::new(rat.x + 14.0, rat.y));
+            script.loop_secs = 4.0;
             // The pit's own point is the rat: 8 damage, i-frames and a
             // replacement on the nearest plank. It walks in, falls, is put
-            // back, and walks in again.
+            // back, and walks in again — two falls a loop, so the card never
+            // stands still for the second half.
             script.input = |t| Input {
-                mv: if (0.3..1.5).contains(&t) { Vec2::new(1.0, 0.0) } else { Vec2::ZERO },
+                mv: if (0.3..1.5).contains(&t) || (2.2..3.4).contains(&t) {
+                    Vec2::new(1.0, 0.0)
+                } else {
+                    Vec2::ZERO
+                },
                 ..Input::default()
             };
         }
         DeckFeature::Cargo => {
             let rest = rat + Vec2::new(28.0, 0.0);
-            deck.slides.push(SlidingCargo {
+            level.trailer.slides.push(SlidingCargo {
                 rest,
                 dir: Vec2::new(1.0, 0.0),
                 travel: 14.0,
@@ -1445,7 +1814,7 @@ fn stage_deck(feature: DeckFeature) -> Staged {
                 warn: 0.6,
             });
             script.framing = Framing::Point(rest + Vec2::new(4.0, 0.0));
-            script.loop_secs = 8.0;
+            script.loop_secs = 6.4;
             script.input = |t| Input {
                 mv: if (1.0..3.0).contains(&t) {
                     Vec2::new(1.0, 0.0)
@@ -1456,13 +1825,12 @@ fn stage_deck(feature: DeckFeature) -> Staged {
             };
         }
         DeckFeature::Wind => {
-            let c = cells(rat + Vec2::new(34.0, 0.0));
+            let c = cells(rat + Vec2::new(24.0, 0.0));
             let wind = TileRect::new(c.0, c.1 - 2, 6, 5);
-            deck.wind.push(wind);
+            level.trailer.wind.push(wind);
             script.framing = Framing::Point(wind.center_world());
         }
     }
-    level.trailer = deck;
     let mut world = sandbox(level);
     if feature == DeckFeature::Wind {
         // The slipstream is a hazard the floor's own bodies are dragged by, so
@@ -1497,9 +1865,7 @@ fn stage_rat_hole(theme: Theme) -> Staged {
     let gap_y = 15;
     let gap = cell_centre((wall_x, gap_y));
     let mut level = walled(
-        theme,
-        40,
-        30,
+        patch(theme, 40, 30),
         wall_x,
         gap_y,
         TileKind::Wall(WallKind::RatHole {
@@ -1514,9 +1880,9 @@ fn stage_rat_hole(theme: Theme) -> Staged {
     let mut world = sandbox(level);
     // The hole's whole point: a Cat is bigger than the gap.
     world.spawn_enemy(EnemyKind::Cat, gap + Vec2::new(30.0, 0.0), 1.0);
-    let mut script = Script::new(5.0, 1.5);
+    let mut script = Script::new(3.6, 1.5);
     script.input = |t| Input {
-        mv: if (0.5..2.4).contains(&t) {
+        mv: if (0.4..2.0).contains(&t) {
             Vec2::new(1.0, 0.0)
         } else {
             Vec2::ZERO
@@ -1533,9 +1899,7 @@ fn stage_one_way_door(theme: Theme) -> Staged {
     let gap_y = 15;
     let gap = cell_centre((wall_x, gap_y));
     let mut level = walled(
-        theme,
-        40,
-        30,
+        patch(theme, 40, 30),
         wall_x,
         gap_y,
         TileKind::Wall(WallKind::OneWayDoor {
@@ -1548,9 +1912,9 @@ fn stage_one_way_door(theme: Theme) -> Staged {
         .one_way_doors
         .push(OneWayDoor::new((wall_x, gap_y), Vec2::new(1.0, 0.0)));
     let world = sandbox(level);
-    let mut script = Script::new(4.5, 1.5);
+    let mut script = Script::new(3.4, 1.5);
     script.input = |t| Input {
-        mv: if (0.4..2.0).contains(&t) {
+        mv: if (0.3..1.3).contains(&t) {
             Vec2::new(1.0, 0.0)
         } else {
             Vec2::ZERO
@@ -1567,7 +1931,12 @@ fn stage_shop_hole(theme: Theme) -> Staged {
     let gap_y = 15;
     let cell = (wall_x, gap_y);
     let pos = cell_centre(cell);
-    let mut level = walled(theme, 40, 30, wall_x, gap_y, TileKind::Wall(WallKind::Solid));
+    let mut level = walled(
+        patch(theme, 40, 30),
+        wall_x,
+        gap_y,
+        TileKind::Wall(WallKind::Solid),
+    );
     level.start = pos - Vec2::new(44.0, 0.0);
     level.objects.shop_holes.push(ShopHole {
         index: 0,
@@ -1579,7 +1948,7 @@ fn stage_shop_hole(theme: Theme) -> Staged {
         role: ShopHoleRole::Fork,
     });
     let world = sandbox(level);
-    let mut script = Script::new(5.0, 1.5);
+    let mut script = Script::new(4.0, 1.5);
     script.framing = Framing::Point(pos - Vec2::new(16.0, 0.0));
     script.input = |t| Input {
         mv: if (0.3..1.7).contains(&t) {
@@ -1602,7 +1971,7 @@ fn stage_maze_cache(theme: Theme) -> Staged {
         .objects
         .rewards
         .push(MazeRewardView::new(pos, Vec2::new(-1.0, 0.0)));
-    let mut script = Script::new(4.5, 1.5);
+    let mut script = Script::new(3.0, 1.5);
     script.framing = Framing::Pair;
     script.input = |t| Input {
         mv: if (0.3..0.7).contains(&t) {
@@ -1625,27 +1994,72 @@ const CORK_RIND: Rgb = (96, 62, 36);
 const RIND: Rgb = (240, 196, 92);
 const CHALK: Rgb = (255, 248, 232);
 
-/// One horizontal chord of a circle of radius `r`, `dy` rows from its centre.
-fn chord(pb: &mut PixelBuffer, s: (i32, i32), r: i32, dy: i32, c: Rgb) {
+/// One horizontal chord of a circle of radius `r`, `dy` rows from its centre,
+/// painted only where `pb` still holds the bare floor `floor` — the card's
+/// dummy never covers anything the world's pass drew.
+fn chord(
+    pb: &mut PixelBuffer,
+    floor: &PixelBuffer,
+    s: (i32, i32),
+    r: i32,
+    dy: i32,
+    c: Rgb,
+) {
     let h2 = r * r - dy * dy;
     if h2 <= 0 {
         return;
     }
     let half = (h2 as f32).sqrt() as i32;
     for dx in -half..=half {
-        pb.plot(s.0 + dx, s.1 + dy, c);
+        plot_on_floor(pb, floor, s.0 + dx, s.1 + dy, c);
+    }
+}
+
+/// Paint one pixel of the card's dummy, and only if that pixel is bare floor
+/// (or already this dummy's own ink, so its bands and cross can be laid over
+/// the cork it just put down): the check is what puts the cork *under* the
+/// bodies (see [`draw_practice_dummy`]).
+fn plot_on_floor(pb: &mut PixelBuffer, floor: &PixelBuffer, x: i32, y: i32, c: Rgb) {
+    if !(0..pb.w as i32).contains(&x) || !(0..pb.h as i32).contains(&y) {
+        return;
+    }
+    let (ux, uy) = (x as usize, y as usize);
+    if ux >= floor.w || uy >= floor.h {
+        return;
+    }
+    let current = pb.pixel_at(ux, uy);
+    if current == floor.pixel_at(ux, uy) || DUMMY_INK.contains(&current) {
+        pb.plot(x, y, c);
     }
 }
 
 /// The card's practice target: a small cork with a cheese-rind band, standing
-/// where the hidden rat stands. Painted by the card itself, after the world's
-/// pass and therefore self-lit: it is never an entity, so no system can see
-/// it, hurt it or count it, and the plate can never become a bigger fight.
-fn draw_practice_dummy(pb: &mut PixelBuffer, s: (i32, i32), r: i32) {
+/// where the hidden rat stands. Painted by the card itself: it is never an
+/// entity, so no system can see it, hurt it or count it, and the plate can
+/// never become a bigger fight.
+///
+/// `floor` is the plate's bare floor ([`LibraryScene::floor_plate`]), and every
+/// pixel is painted only where the world's own pass left that floor alone. So
+/// the dummy sits **under** the picture: a body that lands on it, a tell that
+/// sweeps over it, a pellet crossing it and a glue strand across it all keep
+/// their own pixels, which is what the card's "the attack lands here" mark
+/// needs to stay honest (a body the cork had covered would leave the plate
+/// with no subject at all — the Bell Flea, the Wick Moth and the Loose Bungee
+/// all end their loop standing on the dummy).
+fn draw_practice_dummy(pb: &mut PixelBuffer, floor: &PixelBuffer, s: (i32, i32), r: i32) {
     let r = r.max(2);
     // Its own shadow, so it stands on the floor rather than in it.
-    chord(pb, (s.0, s.1 + r), r, 0, (24, 20, 28));
-    pb.filled_circle(s.0, s.1, r, CORK);
+    chord(pb, floor, (s.0, s.1 + r), r, 0, (24, 20, 28));
+    for dy in -r..=r {
+        let h2 = r * r - dy * dy;
+        if h2 <= 0 {
+            continue;
+        }
+        let half = (h2 as f32).sqrt() as i32;
+        for dx in -half..=half {
+            plot_on_floor(pb, floor, s.0 + dx, s.1 + dy, CORK);
+        }
+    }
     // A hard cork rim, plotted (not the additive `PixelBuffer::ring`): the
     // dummy has to read at full contrast on a bright plate.
     for dy in -r..=r {
@@ -1654,19 +2068,123 @@ fn draw_practice_dummy(pb: &mut PixelBuffer, s: (i32, i32), r: i32) {
             continue;
         }
         let half = (h2 as f32).sqrt() as i32;
-        pb.plot(s.0 - half, s.1 + dy, CORK_RIND);
-        pb.plot(s.0 + half, s.1 + dy, CORK_RIND);
+        plot_on_floor(pb, floor, s.0 - half, s.1 + dy, CORK_RIND);
+        plot_on_floor(pb, floor, s.0 + half, s.1 + dy, CORK_RIND);
     }
     // The cut face, lit from the game's top-left.
-    chord(pb, s, r - 1, -2, CORK_LIT);
-    chord(pb, s, r - 1, -1, CORK_LIT);
+    chord(pb, floor, s, r - 1, -2, CORK_LIT);
+    chord(pb, floor, s, r - 1, -1, CORK_LIT);
     // The rind band: the one bright mark that says "the attack lands here".
-    chord(pb, s, r, r / 2, RIND);
-    chord(pb, s, r, (r / 2).max(1), RIND);
+    chord(pb, floor, s, r, r / 2, RIND);
+    chord(pb, floor, s, r, (r / 2).max(1), RIND);
     // A chalk cross on the face.
-    pb.plot(s.0, s.1 - 1, CHALK);
-    pb.plot(s.0 - 1, s.1 - 1, CHALK);
-    pb.plot(s.0 + 1, s.1 - 1, CHALK);
+    plot_on_floor(pb, floor, s.0, s.1 - 1, CHALK);
+    plot_on_floor(pb, floor, s.0 - 1, s.1 - 1, CHALK);
+    plot_on_floor(pb, floor, s.0 + 1, s.1 - 1, CHALK);
+}
+
+/// Every colour the card's dummy paints (its shadow included): no other drawing
+/// code in the game produces these exact values, which is what lets the tests
+/// tell a cork pixel from a body's.
+const DUMMY_INK: [Rgb; 6] = [CORK, CORK_LIT, CORK_RIND, RIND, CHALK, (24, 20, 28)];
+
+/// The world rectangle one signature footprint covers, straight from the
+/// shape's own numbers. A fitted plate asks the shape rather than guessing from
+/// the kind's name.
+fn shape_bounds(shape: MinibossShape) -> (Vec2, Vec2) {
+    let mut lo = shape.center();
+    let mut hi = lo;
+    let mut grow = |p: Vec2, pad: f32| {
+        lo = Vec2::new(lo.x.min(p.x - pad), lo.y.min(p.y - pad));
+        hi = Vec2::new(hi.x.max(p.x + pad), hi.y.max(p.y + pad));
+    };
+    match shape {
+        MinibossShape::Trench { a, b, half } => {
+            grow(a, half);
+            grow(b, half);
+        }
+        MinibossShape::Cone {
+            origin,
+            aim,
+            half_angle,
+            len,
+        } => {
+            let base = aim.normalized().angle();
+            grow(origin, 0.0);
+            for a in [base - half_angle, base, base + half_angle] {
+                grow(origin + Vec2::from_angle(a) * len, 2.0);
+            }
+        }
+        MinibossShape::Cord { spool, tip, half } => {
+            grow(spool, half);
+            grow(tip, half);
+        }
+        MinibossShape::RingGap {
+            origin,
+            radius,
+            half,
+            ..
+        } => {
+            grow(origin, radius + half);
+        }
+        MinibossShape::Stamps { centers, half } => {
+            for c in centers {
+                grow(c, half);
+            }
+        }
+        MinibossShape::Spill {
+            center,
+            aim,
+            half_len,
+            half_w,
+        } => {
+            let dir = aim.normalized();
+            let side = dir.perp();
+            for along in [-half_len, half_len] {
+                for across in [-half_w, half_w] {
+                    grow(center + dir * along + side * across, 0.0);
+                }
+            }
+        }
+        MinibossShape::Pincer {
+            origin,
+            aim,
+            len,
+            half,
+            gap_lo,
+            gap_hi,
+        } => {
+            let dir = aim.normalized();
+            let side = dir.perp();
+            let sep = gap_lo.max(gap_hi) * 0.5 + half;
+            for along in [0.0, len] {
+                for across in [-sep, sep] {
+                    grow(origin + dir * along + side * across, 0.0);
+                }
+            }
+        }
+        MinibossShape::Lane {
+            origin,
+            aim,
+            len,
+            seam_half,
+            half,
+            bar_len,
+            covered,
+        } => {
+            let dir = aim.normalized();
+            let side = dir.perp();
+            let across = seam_half + half * 2.0;
+            let head = covered.min(len);
+            let tail = (covered - bar_len).max(0.0);
+            for along in [tail, head] {
+                for a in [-across, across] {
+                    grow(origin + dir * along + side * a, 0.0);
+                }
+            }
+        }
+    }
+    (lo, hi)
 }
 
 #[cfg(test)]

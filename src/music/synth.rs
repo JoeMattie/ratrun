@@ -108,6 +108,7 @@ struct Voice {
     dt2: f32,
     vib: f32,
     vib_dt: f32,
+    vib_depth: f32,
     env: f32,
     gate_left: u32,
     attack_inc: f32,
@@ -122,6 +123,10 @@ struct Voice {
     lp_a: f32,
     lp_floor: f32,
     lp_decay: f32,
+    hp1: f32,
+    hp_a: f32,
+    drum_lp_a: f32,
+    one_pole: bool,
     hz0: f32,
     hz1: f32,
     noise: u32,
@@ -140,6 +145,7 @@ impl Voice {
         dt2: 0.0,
         vib: 0.0,
         vib_dt: 0.0,
+        vib_depth: 0.0065,
         env: 0.0,
         gate_left: 0,
         attack_inc: 0.0,
@@ -154,6 +160,10 @@ impl Voice {
         lp_a: 1.0,
         lp_floor: 1.0,
         lp_decay: 0.0,
+        hp1: 0.0,
+        hp_a: 0.0,
+        drum_lp_a: 0.0,
+        one_pole: false,
         hz0: 440.0,
         hz1: 440.0,
         noise: 0x1234_5678,
@@ -435,35 +445,45 @@ impl SongSynth {
 
         let hz = midi_hz(midi.max(12));
         let attack = |ms: f32| 1.0 / (ms.max(0.05) * 1e-3 * sr);
+        let enhanced = style.enhanced_drums;
         match role {
             Role::Kick => {
                 v.src = Src::Kick;
                 v.hz0 = (style.kick_hz * 2.6).max(40.0);
                 v.hz1 = style.kick_hz.max(30.0);
+                v.one_pole = enhanced;
                 v.attack_inc = attack(0.5);
-                v.decay = decay_mul(90.0, sr);
+                v.decay = decay_mul(if enhanced { 95.0 } else { 90.0 }, sr);
             }
             Role::Snare => {
                 v.src = Src::Snare;
                 v.hz0 = 186.0;
-                v.lp_a = lp_coef(1400.0, sr);
-                v.attack_inc = attack(0.6);
-                v.decay = decay_mul(70.0, sr);
+                v.lp_a = lp_coef(if enhanced { 1800.0 } else { 1400.0 }, sr);
+                v.drum_lp_a = if enhanced { lp_coef(7800.0, sr) } else { 0.0 };
+                v.attack_inc = attack(if enhanced { 0.5 } else { 0.6 });
+                v.decay = decay_mul(if enhanced { 95.0 } else { 70.0 }, sr);
             }
             Role::Hat => {
                 v.src = Src::Hat;
-                v.lp_a = lp_coef(6200.0, sr);
+                v.lp_a = lp_coef(if enhanced { 3800.0 } else { 6200.0 }, sr);
+                v.drum_lp_a = if enhanced { lp_coef(8500.0, sr) } else { 0.0 };
                 v.attack_inc = attack(0.3);
-                v.decay = decay_mul(28.0, sr);
+                let hat_ms = if enhanced {
+                    if midi == 46 { 115.0 } else { 32.0 }
+                } else {
+                    28.0
+                };
+                v.decay = decay_mul(hat_ms, sr);
             }
             Role::Perc => {
                 v.src = Src::Perc;
-                let (kind, hz, ms) = perc_params(midi);
+                let (kind, hz, ms) = perc_params(midi, enhanced);
                 v.blend = kind as f32;
                 v.hz0 = hz;
                 v.hz1 = hz * 0.55;
                 v.lp_a = lp_coef((hz * 1.4).clamp(600.0, 9000.0), sr);
-                v.attack_inc = attack(0.6);
+                v.drum_lp_a = if enhanced { lp_coef(7500.0, sr) } else { 0.0 };
+                v.attack_inc = attack(if enhanced && kind == 2 { 2.5 } else { 0.6 });
                 v.decay = decay_mul(ms, sr);
             }
             Role::Bass => {
@@ -476,6 +496,9 @@ impl SongSynth {
                 v.lp_a = lp_coef(style.bass_lp, sr);
                 v.lp_floor = v.lp_a;
                 v.attack_inc = attack(6.0);
+                if style.bass_decay_ms > 0.0 {
+                    v.decay = decay_mul(style.bass_decay_ms, sr);
+                }
                 self.last_bass = midi;
             }
             Role::Pad => {
@@ -487,7 +510,13 @@ impl SongSynth {
                 v.dc_bias = -0.5;
                 v.lp_a = lp_coef(style.pad_lp, sr);
                 v.lp_floor = v.lp_a;
-                v.attack_inc = attack(90.0);
+                v.attack_inc = attack(style.pad_attack_ms);
+                if style.pad_decay_ms > 0.0 {
+                    v.decay = decay_mul(style.pad_decay_ms, sr);
+                }
+                if style.pad_hp_hz > 0.0 {
+                    v.hp_a = lp_coef(style.pad_hp_hz, sr);
+                }
             }
             Role::Arp => {
                 v.src = Src::Pluck;
@@ -496,9 +525,11 @@ impl SongSynth {
                 v.dt2 = v.dt * 2.0;
                 v.duty = 0.25;
                 v.dc_bias = -0.5;
+                v.blend = if enhanced { 0.50 } else { 0.68 };
                 v.lp_a = lp_coef(style.arp_lp, sr);
                 v.lp_floor = lp_coef(style.arp_lp * 0.35, sr);
                 v.lp_decay = 1.0 - (-self.inv_rate / 0.12).exp();
+                v.one_pole = enhanced && style.arp_lp >= 5000.0;
                 v.attack_inc = attack(3.0);
                 v.decay = decay_mul(140.0, sr);
             }
@@ -508,8 +539,20 @@ impl SongSynth {
                 v.inv_dt = 1.0 / v.dt.max(1e-6);
                 v.duty = style.lead_duty;
                 v.dc_bias = 2.0 * style.lead_duty - 1.0;
-                v.lp_a = lp_coef(style.lead_lp, sr);
-                v.lp_floor = v.lp_a;
+                v.blend = style.lead_tri;
+                v.vib_depth = style.lead_vib_depth;
+                if style.lead_bright_ms > 0.0 {
+                    v.lp_a = lp_coef((style.lead_lp * 1.9).min(sr * 0.44), sr);
+                    v.lp_floor = lp_coef(style.lead_lp, sr);
+                    v.lp_decay = 1.0 - (-self.inv_rate / (style.lead_bright_ms * 1e-3)).exp();
+                    v.one_pole = enhanced;
+                } else {
+                    v.lp_a = lp_coef(style.lead_lp, sr);
+                    v.lp_floor = v.lp_a;
+                }
+                if style.lead_decay_ms > 0.0 {
+                    v.decay = decay_mul(style.lead_decay_ms, sr);
+                }
                 v.attack_inc = attack(12.0);
             }
             Role::Stab => {
@@ -521,17 +564,32 @@ impl SongSynth {
                 v.lp_a = lp_coef(style.stab_lp, sr);
                 v.lp_floor = lp_coef(style.stab_lp * 0.5, sr);
                 v.lp_decay = 1.0 - (-self.inv_rate / 0.18).exp();
+                v.one_pole = enhanced && style.stab_lp >= 3500.0;
                 v.attack_inc = attack(8.0);
-                v.decay = decay_mul(240.0, sr);
+                v.decay = decay_mul(style.stab_decay_ms, sr);
             }
             Role::Fx => {
                 v.src = Src::Fx;
                 v.dt = hz * self.inv_rate;
                 v.inv_dt = 1.0 / v.dt.max(1e-6);
-                v.lp_a = lp_coef(2400.0, sr);
-                v.lp_floor = v.lp_a;
                 v.attack_inc = attack(4.0);
-                v.decay = decay_mul(300.0, sr);
+                if enhanced {
+                    if vel >= 80 {
+                        v.lp_a = lp_coef(420.0, sr);
+                        v.lp_floor = lp_coef(4800.0, sr);
+                    } else {
+                        v.lp_a = lp_coef(4500.0, sr);
+                        v.lp_floor = lp_coef(380.0, sr);
+                    }
+                    let sweep_s = (v.gate_left as f32 * 0.55 * self.inv_rate).max(0.08);
+                    v.lp_decay = 1.0 - (-self.inv_rate / sweep_s).exp();
+                    let fx_ms = (v.gate_left as f32 * self.inv_rate * 1200.0).max(260.0);
+                    v.decay = decay_mul(fx_ms, sr);
+                } else {
+                    v.lp_a = lp_coef(2400.0, sr);
+                    v.lp_floor = v.lp_a;
+                    v.decay = decay_mul(300.0, sr);
+                }
             }
         }
         // A stolen voice re-attacks from its current level rather than jumping
@@ -674,9 +732,19 @@ impl SongSynth {
 
 /// General MIDI percussion note -> `(kind, pitch, decay ms)`.
 ///
-/// `kind`: 0 tom (pitch sweep), 1 short noise (clap, rim, shaker), 2 cymbal
-/// (long high noise), 3 cowbell (two tones).
-fn perc_params(note: u8) -> (u8, f32, f32) {
+/// `kind`: 0 tom/timpani (pitch sweep), 1 short noise (clap, rim, shaker),
+/// 2 cymbal (long high noise), 3 cowbell (two tones), 4 woodblock/clave.
+fn perc_params(note: u8, enhanced: bool) -> (u8, f32, f32) {
+    if enhanced {
+        match note {
+            65 => return (0, 110.0, 240.0),
+            66 => return (0, 88.0, 240.0),
+            75 => return (4, 980.0, 30.0),
+            76 => return (4, 1220.0, 30.0),
+            77 => return (4, 780.0, 30.0),
+            _ => {}
+        }
+    }
     match note {
         37 | 39 => (1, 1900.0, 55.0),
         41 => (0, 190.0, 95.0),
@@ -772,21 +840,21 @@ fn voice_sample(v: &mut Voice, sr: f32) -> f32 {
                 v.phase2 -= 1.0;
             }
             let pulse = fast_pulse_dc_free(v.phase2, v.dt2, 1.0 / v.dt2.max(1e-6), v.duty, v.dc_bias);
-            fast_tri(v.phase) * 0.68 + pulse * 0.32
+            fast_tri(v.phase) * v.blend + pulse * (1.0 - v.blend)
         }
         Src::Lead => {
             v.vib += v.vib_dt;
             if v.vib >= 1.0 {
                 v.vib -= 1.0;
             }
-            let fm = 1.0 + 0.0065 * fast_sin_unit(v.vib);
+            let fm = 1.0 + v.vib_depth * fast_sin_unit(v.vib);
             let dt = v.dt * fm;
             v.phase += dt;
             if v.phase >= 1.0 {
                 v.phase -= 1.0;
             }
             let pulse = fast_pulse_dc_free(v.phase, dt, 1.0 / dt.max(1e-6), v.duty, v.dc_bias);
-            pulse * 0.86 + fast_tri(v.phase) * 0.14
+            pulse * (1.0 - v.blend) + fast_tri(v.phase) * v.blend
         }
         Src::Stab => {
             v.phase += v.dt;
@@ -809,22 +877,43 @@ fn voice_sample(v: &mut Voice, sr: f32) -> f32 {
             if v.phase >= 1.0 {
                 v.phase -= 1.0;
             }
-            fast_sin_unit(v.phase)
+            let body = fast_sin_unit(v.phase);
+            if v.one_pole {
+                let mut p3 = v.phase * 3.0;
+                p3 -= p3.floor();
+                let e2 = v.env * v.env;
+                body + 0.24 * fast_sin_unit(p3) * (e2 * e2 * v.env)
+            } else {
+                body
+            }
         }
         Src::Snare => {
             let n = noise(v);
             v.lp1 += v.lp_a * (n - v.lp1);
-            let bright = (n - v.lp1).clamp(-1.5, 1.5);
+            let mut bright = (n - v.lp1).clamp(-1.5, 1.5);
+            let (nw, bw) = if v.drum_lp_a > 0.0 {
+                v.lp2 += v.drum_lp_a * (bright - v.lp2);
+                bright = v.lp2;
+                (0.92, 0.36)
+            } else {
+                (0.68, 0.42)
+            };
             v.phase += v.hz0 / sr;
             if v.phase >= 1.0 {
                 v.phase -= 1.0;
             }
-            bright * 0.68 + fast_sin_unit(v.phase) * 0.42
+            bright * nw + fast_sin_unit(v.phase) * bw
         }
         Src::Hat => {
             let n = noise(v);
             v.lp1 += v.lp_a * (n - v.lp1);
-            (n - v.lp1).clamp(-1.5, 1.5)
+            let h = (n - v.lp1).clamp(-1.5, 1.5);
+            if v.drum_lp_a > 0.0 {
+                v.lp2 += v.drum_lp_a * (h - v.lp2);
+                v.lp2
+            } else {
+                h
+            }
         }
         Src::Perc => {
             let kind = v.blend as u8;
@@ -848,30 +937,54 @@ fn voice_sample(v: &mut Voice, sr: f32) -> f32 {
                     }
                     fast_sin_unit(v.phase) * 0.5 + fast_sin_unit(v.phase2) * 0.5
                 }
+                4 => {
+                    v.phase += v.hz0 / sr;
+                    if v.phase >= 1.0 {
+                        v.phase -= 1.0;
+                    }
+                    v.phase2 += v.hz0 * 2.38 / sr;
+                    if v.phase2 >= 1.0 {
+                        v.phase2 -= 1.0;
+                    }
+                    fast_sin_unit(v.phase) * 0.72 + fast_sin_unit(v.phase2) * 0.28
+                }
                 _ => {
                     let n = noise(v);
                     v.lp1 += v.lp_a * (n - v.lp1);
-                    (n - v.lp1).clamp(-1.5, 1.5)
+                    let h = (n - v.lp1).clamp(-1.5, 1.5);
+                    if v.drum_lp_a > 0.0 {
+                        v.lp2 += v.drum_lp_a * (h - v.lp2);
+                        v.lp2
+                    } else {
+                        h
+                    }
                 }
             }
         }
     };
 
-    // Brightness that darkens as the note decays (plucks and stabs), then a
-    // two-pole low-pass so nothing above the floor's character survives.
+    // Brightness that darkens as the note decays (plucks, stabs, bright leads),
+    // then a one- or two-pole low-pass and optional pad high-pass shelf.
     if v.lp_decay > 0.0 {
         v.lp_a += (v.lp_floor - v.lp_a) * v.lp_decay;
     }
-    // The drums shape themselves (noise high-pass, pitch sweep) and use `lp1`
+    // The drums shape themselves (noise band-pass, pitch sweep) and use `lp1`/`lp2`
     // as their own filter state, so the voice filter is for the pitched parts.
     let is_drum = matches!(v.src, Src::Kick | Src::Snare | Src::Hat | Src::Perc);
-    let filtered = if is_drum || v.lp_a >= 0.999 {
+    let mut filtered = if is_drum || v.lp_a >= 0.999 {
         raw
+    } else if v.one_pole {
+        v.lp1 += v.lp_a * (raw - v.lp1);
+        v.lp1
     } else {
         v.lp1 += v.lp_a * (raw - v.lp1);
         v.lp2 += v.lp_a * (v.lp1 - v.lp2);
         v.lp2
     };
+    if v.hp_a > 0.0 {
+        v.hp1 += v.hp_a * (filtered - v.hp1);
+        filtered -= v.hp1;
+    }
     filtered * v.env
 }
 
@@ -1271,6 +1384,45 @@ mod tests {
             assert!(
                 diff > 0.01,
                 "{theme:?}: the boss tier should add its drive (diff_rms={diff:.4})"
+            );
+        }
+    }
+
+    #[test]
+    fn sewer_and_kitchen_have_v2_brightness_and_clear_pad_detune() {
+        for theme in [Theme::Sewer, Theme::Kitchen] {
+            let song = song_for(theme);
+            assert!(
+                song.style.pad_detune < 0.02,
+                "{theme:?}: pad_detune {} is out of tune (should be < 0.02)",
+                song.style.pad_detune
+            );
+            assert!(song.style.enhanced_drums, "{theme:?}: expected v2 voice mode");
+            for role in Role::ALL {
+                assert!(
+                    !song.parts[role.index()].is_empty(),
+                    "{theme:?}: {} should be populated",
+                    role.name()
+                );
+            }
+            // Measure share of energy above ~2 kHz using a 1-pole high-pass at 2 kHz.
+            let sr = 22_050u32;
+            let mut synth = SongSynth::with_sample_rate(theme, Arc::new(AtomicU32::new(2)), sr);
+            let a = lp_coef(2_000.0, sr as f32);
+            let mut lp = 0.0f32;
+            let mut total_e = 0.0f64;
+            let mut hi_e = 0.0f64;
+            for _ in 0..(sr as usize * 6) {
+                let s = synth.next().unwrap();
+                lp += a * (s - lp);
+                let hi = s - lp;
+                total_e += f64::from(s) * f64::from(s);
+                hi_e += f64::from(hi) * f64::from(hi);
+            }
+            let hi_share = hi_e / total_e.max(1e-12);
+            assert!(
+                hi_share > 0.01,
+                "{theme:?}: >2 kHz energy share {hi_share:.4} is too muffled"
             );
         }
     }
