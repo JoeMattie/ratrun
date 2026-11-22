@@ -66,16 +66,49 @@ pub struct TickInput {
     /// — a direction for Gnaw, Spray and the laser, a point for the lobbed and
     /// marking weapons — documented per weapon in `weapons::fire_one`.
     pub aim: Option<Vec2>,
-    /// Is the dash input **held down** this tick? (Wave-3 Super Dash charge.)
-    /// The App fills it from the live bindings; `World::update` leaves it
-    /// false, so the bot/harness path is unchanged.
+    /// Did the dash input go **down** this tick? (The press edge, from whichever
+    /// device the dash `Action` is bound to: a key, a mouse button or a pad
+    /// button.) The App fills it from the live bindings; `World::update`,
+    /// `World::update_with` and the harness leave it false, so their
+    /// press-to-dash meaning is untouched.
     pub dash_down: bool,
-    /// Did the dash input go **up** this tick? (The release edge.)
+    /// Is the dash input **still held** this tick? With the Super Dash weapon
+    /// owned this is what fills the charge meter; a terminal that cannot report
+    /// a key release cannot hold a key, so there it stays false (the key taps).
+    pub dash_held: bool,
+    /// Did the dash input go **up** this tick? (The release edge: what fires a
+    /// charged Super Dash. Never set by focus loss, which drops the hold
+    /// instead.)
     pub dash_released: bool,
-    /// Charge meter at the moment the dash was released, `0.0` (a tap) to
-    /// `1.0` (full). Only non-zero when the Super Dash weapon is owned and the
-    /// dash was held; `0.0` everywhere else, including `World::update`.
+    /// A **scripted** charge for this tick's release, `0.0` (a tap) to `1.0`
+    /// (full): how the bot and single-system tests hand the sim a charged dash
+    /// without faking a held button (`World::update_with_charge`). The live
+    /// path accumulates `Player::dash_charge` from `dash_held` instead, and
+    /// every legacy caller passes `0.0`.
     pub charge: f32,
+}
+
+/// The dash button's live state for one tick, as the App reads it from
+/// [`crate::input::InputState`]: the press edge, the held state and the release
+/// edge. Grouped so the three cannot be passed in the wrong order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DashHold {
+    /// The press edge this tick.
+    pub down: bool,
+    /// The input is still held.
+    pub held: bool,
+    /// The release edge this tick.
+    pub up: bool,
+}
+
+impl DashHold {
+    /// No held dash input (every pre-charge caller: `World::update`, the bot,
+    /// the harness goldens).
+    pub const NONE: DashHold = DashHold {
+        down: false,
+        held: false,
+        up: false,
+    };
 }
 
 /// Viewport size as of the last `World::draw` (spawn ring radius depends on
@@ -789,6 +822,11 @@ pub struct DashTrack {
     /// Has the boss already taken this dash's hit? (The boss is not an
     /// `Enemy`, so it needs its own flag rather than a `SpawnId` entry.)
     pub boss_hit: bool,
+    /// How hard this dash was charged, `0.0` (a tap: today's ordinary dash) to
+    /// `1.0` (a full Super Dash). `player_system` writes it when the dash
+    /// starts; `super_dash_system` (and Ripcord's cord, which outlives the
+    /// dash) read it to widen the swept radius and raise the per-body damage.
+    pub charge: f32,
     /// `SpawnId`s already hit by the current dash.
     hits: [u64; DASH_HIT_CAP],
     hit_len: usize,
@@ -815,6 +853,7 @@ impl Default for DashTrack {
             seg_len: 0,
             legs: 0,
             boss_hit: false,
+            charge: 0.0,
             hits: [0; DASH_HIT_CAP],
             hit_len: 0,
             route: [(Vec2::ZERO, Vec2::ZERO); RIPCORD_SEG_CAP],
@@ -836,6 +875,7 @@ impl DashTrack {
         self.hit_len = 0;
         self.legs = 0;
         self.boss_hit = false;
+        self.charge = 0.0;
         self.segment = None;
         self.seg_len = 0;
         self.clear_route();

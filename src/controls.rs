@@ -1121,9 +1121,10 @@ impl Controls {
             self.active_label = pad(Action::FireActives);
             self.title_wide = vec![
                 format!(
-                    "L-stick/D-pad move · {} dash · {} actives · R-stick aim · {} pause",
+                    "L-stick/D-pad move · {} dash · {} actives · R-stick aim · hold {} to charge · {} pause",
                     pad(Action::Dash),
                     pad(Action::FireActives),
+                    pad(Action::Dash),
                     pad(Action::Pause),
                 ),
                 format!(
@@ -1202,6 +1203,17 @@ impl Controls {
         // The HUD prints the scheme's primary dash/fire label.
         self.dash_label = dash.clone();
         self.active_label = actives.clone();
+        // Hold-to-charge: the dash input charges the Super Dash and its release
+        // fires it. Where the terminal cannot report a key release the key can
+        // only tap, so the legend names the mouse/pad instead of lying.
+        let (charge_hint, narrow_charge) = if self.lone_ctrl_hint {
+            (format!("hold {dash} to charge"), "hold = charge".to_string())
+        } else {
+            (
+                format!("hold mouse or pad to charge (not {dash})"),
+                "hold mouse = charge".to_string(),
+            )
+        };
         // The dash and the actives share a key only on a terminal without
         // lone-modifier reporting (the pre-Ctrl mapping). Say exactly that.
         let share = b.get(Action::Dash) == Binding::Key(KeyBind::Space)
@@ -1232,18 +1244,19 @@ impl Controls {
                 key(Action::Mute)
             ),
             format!(
-                "{} {} music · {} {} effects · {} story · Q quit",
+                "{} {} music · {} {} effects · {} story · {} · Q quit",
                 key(Action::MusicDown),
                 key(Action::MusicUp),
                 key(Action::EffectsDown),
                 key(Action::EffectsUp),
-                key(Action::Library)
+                key(Action::Library),
+                charge_hint
             ),
         ];
         let narrow_first = if share {
-            format!("WASD move · {dash} dash + actives")
+            format!("WASD move · {dash} dash + actives · {narrow_charge}")
         } else {
-            format!("WASD move · {dash} dash · {actives} actives")
+            format!("WASD move · {dash} dash · {actives} actives · {narrow_charge}")
         };
         self.title_narrow = vec![
             narrow_first,
@@ -1291,11 +1304,28 @@ impl Controls {
         ];
     }
 
-    /// Set once at startup from `InputState::lone_ctrl`, so the legends can say
-    /// whether Space keeps the pre-Ctrl double job.
+    /// Set once at startup from `InputState::lone_ctrl`.
     pub fn set_lone_ctrl_hint(&mut self, on: bool) {
         self.lone_ctrl_hint = on;
         self.rebuild();
+    }
+
+    /// Does this terminal report a **lone modifier** press (the flag that also
+    /// reports its release)? Where it does not, a held key cannot be seen, so
+    /// hold-to-charge is the mouse's and the pad's job and the Controls screen
+    /// says so.
+    pub fn lone_ctrl_reported(&self) -> bool {
+        self.lone_ctrl_hint
+    }
+
+    /// The Controls screen's terminal caveat, in one line: what can be bound
+    /// here, and how the Super Dash's hold-to-charge is delivered.
+    pub fn terminal_note(&self) -> &'static str {
+        if self.lone_ctrl_hint {
+            "Ctrl and Shift can be bound here · hold DASH to charge, release to fire"
+        } else {
+            "no lone Ctrl here · keys tap: charge the Super Dash with mouse or pad"
+        }
     }
 
     pub fn title_legend_lines(&self, wide: bool) -> &[String] {
@@ -1630,5 +1660,36 @@ mod tests {
         assert_eq!(pad_aim_point(o, Vec2::ZERO), None);
         let p = pad_aim_point(o, Vec2::new(0.0, -1.0)).unwrap();
         assert!((p - Vec2::new(100.0, 100.0 - PAD_AIM_DISTANCE)).len() < 1e-3);
+    }
+
+    /// Hold-to-charge is named by the legend, and where the terminal cannot
+    /// report a key release the legend (and the Controls note) says the mouse or
+    /// the pad does the charging instead of pretending a key can.
+    #[test]
+    fn the_legends_and_the_controls_note_name_hold_to_charge() {
+        let mut c = Controls::default();
+        c.set_lone_ctrl_hint(true);
+        c.note_device(Device::Keyboard);
+        let title = c.title_legend_lines(true).join(" ");
+        assert!(title.contains("hold Ctrl to charge"), "{title}");
+        let narrow = c.title_legend_lines(false).join(" ");
+        assert!(narrow.contains("hold = charge"), "{narrow}");
+        assert!(c.terminal_note().contains("hold DASH to charge"));
+
+        // The fallback terminal: keys tap, the mouse/pad charges — and the
+        // narrow legend still fits its 58-column card.
+        c.set_lone_ctrl_hint(false);
+        let title = c.title_legend_lines(true).join(" ");
+        assert!(title.contains("hold mouse or pad to charge"), "{title}");
+        let narrow = c.title_legend_lines(false).join(" ");
+        assert!(narrow.contains("hold mouse = charge"), "{narrow}");
+        for line in c.title_legend_lines(false) {
+            assert!(
+                line.chars().count() <= 56,
+                "{line:?} is too wide for the 58-column card"
+            );
+        }
+        assert!(c.terminal_note().contains("keys tap"));
+        assert!(c.terminal_note().contains("mouse or pad"));
     }
 }

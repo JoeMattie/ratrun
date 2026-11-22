@@ -171,6 +171,67 @@ fn bosses_share_the_huds_names() {
     }
 }
 
+/// Every boss in the pool table has a real card: a name, a hint, a dossier, a
+/// pose (checked by the renderer's own match), and the mechanical rows —
+/// including `SHARES` (said out loud even when the floor has one boss, so a
+/// reader is never left to infer it) and `ANSWER` (the row a pooled boss used
+/// to push off the eight-row card).
+#[test]
+fn every_boss_has_a_whole_card() {
+    use crate::game::ecs::systems::boss::BossKind;
+    let rows = all_rows();
+    for kind in BossKind::all() {
+        let key = Key::Boss(kind);
+        let row = rows
+            .iter()
+            .find(|r| r.key == key)
+            .unwrap_or_else(|| panic!("{} has no card", kind.name()));
+        assert!(!row.name.is_empty() && !row.hint.is_empty(), "{:?}", kind);
+        assert!(
+            !row.dossier.is_empty() && row.dossier.chars().count() > 80,
+            "{} has no dossier",
+            row.name
+        );
+        let facts = facts(key);
+        for label in ["HIT POINTS", "FLOOR", "SHARES", "DROPS", "ANSWER"] {
+            let fact = facts
+                .rows()
+                .iter()
+                .find(|f| f.label == label)
+                .unwrap_or_else(|| panic!("{} has no {label} row", row.name));
+            assert!(!fact.value.trim().is_empty(), "{}: empty {label}", row.name);
+        }
+        // A pooled floor names its mate; a single-boss floor says so.
+        let pool = BossKind::pool_for_theme(boss_theme(kind));
+        let shares = facts
+            .rows()
+            .iter()
+            .find(|f| f.label == "SHARES")
+            .map(|f| f.value.clone())
+            .unwrap_or_default();
+        if pool.len() > 1 {
+            for other in pool.iter().filter(|o| **o != kind) {
+                assert!(
+                    shares.contains(boss_name(*other)),
+                    "{}: SHARES does not name {}: {shares}",
+                    row.name,
+                    boss_name(*other)
+                );
+            }
+        } else {
+            assert!(
+                shares.contains("only boss"),
+                "{}: SHARES should say the floor has one fight: {shares}",
+                row.name
+            );
+        }
+    }
+    // The row budget covers the widest card, or `Facts::push` would silently
+    // drop the last line of it.
+    assert!(FACT_ROWS >= facts(Key::Boss(BossKind::Cat)).rows().len());
+    assert!(FACT_ROWS >= facts(Key::Boss(BossKind::Mangle)).rows().len());
+}
+
 /// An evolution entry exists exactly for the weapons that have one.
 #[test]
 fn evolution_rows_track_the_evolution_table() {

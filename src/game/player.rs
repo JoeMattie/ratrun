@@ -76,6 +76,16 @@ pub struct Player {
     /// the dash key while the cooldown is still running, so a failed press is
     /// never silent (gauge shake + `Sfx::DashDenied`). Visual only.
     pub dash_denied: f32,
+    /// **Super Dash**'s charge meter while the dash input is held, `0.0` to
+    /// `1.0`. Written by `systems::player::player_system` from the held dash
+    /// input (only while the weapon is owned) and read by the on-rat arc
+    /// (`art_rat::draw_dash_gauge`), the lane preview and the HUD's dash
+    /// module. A tap never fills it: the release fires an ordinary dash.
+    pub dash_charge: f32,
+    /// Is the dash input being held for a charge right now? Distinguishes "a
+    /// fresh press, meter empty" from "no charge running at all", which is
+    /// what an empty `dash_charge` alone cannot say.
+    pub dash_charging: bool,
     /// Wave-3 pocket finds (Bottle Cap / Pocket Watch / Clean Socks / the
     /// Wind-up Mouse's HUD mirror). See [`Buffs`].
     pub buffs: Buffs,
@@ -154,6 +164,8 @@ impl Player {
             hurt_flash: 0.0,
             dash_ready_flash: 0.0,
             dash_denied: 0.0,
+            dash_charge: 0.0,
+            dash_charging: false,
             buffs: Buffs::default(),
             decoy_at: None,
             god: false,

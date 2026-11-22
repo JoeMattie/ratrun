@@ -29,6 +29,50 @@ fn render(rows: &[Row], lib: &Library, ui: &mut LibraryUi, w: u16, h: u16) -> (S
     (text, info)
 }
 
+/// Selecting a card **by key** lands on that entry, whatever its row index
+/// is: the row index is positional and moves when a group gains an entry (the
+/// `library-boss` capture's hard-coded index opened a miniboss card instead).
+#[test]
+fn selecting_a_card_by_key_lands_on_that_entry() {
+    use crate::game::ecs::systems::boss::BossKind;
+    use crate::game::library::{Key, Tab};
+    let rows = all_rows();
+    let mut ui = LibraryUi::default();
+    for kind in BossKind::all() {
+        let key = Key::Boss(kind);
+        ui.set_tab(Tab::Bestiary);
+        assert!(
+            ui.select_key(&rows, key),
+            "{} is not in the Bestiary tab",
+            kind.name()
+        );
+        assert_eq!(ui.selected_key(&rows), Some(key), "{}", kind.name());
+        let expect = rows
+            .iter()
+            .filter(|r| r.tab == Tab::Bestiary)
+            .position(|r| r.key == key)
+            .expect("the row exists");
+        assert_eq!(ui.cursor, expect, "{}", kind.name());
+        assert!(ui.card_open, "a by-key selection opens the card");
+    }
+    // A key from another tab is refused and the cursor stays put.
+    ui.set_tab(Tab::Arsenal);
+    let before = ui.cursor;
+    assert!(!ui.select_key(&rows, Key::Boss(BossKind::Cat)));
+    assert_eq!(ui.cursor, before);
+    // The card that opens is the named boss's, not whatever sits at an index.
+    let mut lib = Library::default();
+    for row in &rows {
+        lib.mark_seen(row.key);
+    }
+    let mut ui = LibraryUi::default();
+    ui.set_tab(Tab::Bestiary);
+    assert!(ui.select_key(&rows, Key::Boss(BossKind::Cat)));
+    let (text, _) = render(&rows, &lib, &mut ui, 120, 40);
+    assert!(text.contains("APEX JAGUAR"), "the boss card is not open:\n{text}");
+    assert!(text.contains("SHARES"), "the card lost its SHARES row:\n{text}");
+}
+
 /// A library where every third row has been met (locked rows stay locked).
 fn mixed(rows: &[Row]) -> Library {
     let mut lib = Library::default();

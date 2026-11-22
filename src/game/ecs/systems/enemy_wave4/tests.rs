@@ -1061,70 +1061,88 @@ fn the_wave4_stats_and_timings_match_the_design_table() {
 }
 
 #[test]
-fn the_director_unlocks_wave4_in_design_order_and_keeps_the_caps() {
+fn the_wave4_kinds_have_their_roster_homes_and_the_ceiling_holds() {
     use crate::game::director;
+    use crate::game::roster;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
-    let expected = [
-        (EnemyKind::HouseCentipede, 240.0),
-        (EnemyKind::Lilliputian, 330.0),
-        (EnemyKind::TermiteHorde, 360.0),
-        (EnemyKind::MurderHornet, 450.0),
-        (EnemyKind::BigSnake, 510.0),
+    // `WAVE4_ROSTERS.md` gives every existing kind exactly one home slot; the
+    // wave-4 five are their floors' own C/II/III bodies, not a global tier
+    // that any floor can roll. (This replaces the old "unlocks wave4 in design
+    // order" check, which pinned the removed global unlock table.)
+    let homes = [
+        (EnemyKind::HouseCentipede, Theme::Laundry, roster::Slot::C),
+        (EnemyKind::Lilliputian, Theme::Lab, roster::Slot::II),
+        (EnemyKind::TermiteHorde, Theme::Printworks, roster::Slot::II),
+        (EnemyKind::MurderHornet, Theme::Trailer, roster::Slot::II),
+        (EnemyKind::BigSnake, Theme::Sewer, roster::Slot::III),
     ];
-    let mut prev = 0.0;
-    for (kind, at) in expected {
-        let unlock = director::wave4_unlock_time(kind).expect("in the table");
-        assert!((unlock - at).abs() < 1e-3, "{kind:?} unlocks at {unlock}");
-        assert!(unlock > prev, "{kind:?} unlocked out of order");
-        prev = unlock;
-        // Never before its own instant …
+    for (kind, theme, slot) in homes {
+        assert_eq!(roster::kind(theme, slot), kind, "{kind:?} lost its home slot");
+        assert_eq!(
+            director::base_unlock_time(kind),
+            Some(slot.unlock()),
+            "{kind:?}'s first appearance"
+        );
+        // Never before its slot opens …
         let mut rng = StdRng::seed_from_u64(5);
         for _ in 0..400 {
             assert_ne!(
-                director::pick_kind_at(unlock - 0.5, &mut rng),
+                roster::pick_kind(theme, slot.unlock() - 0.5, &roster::SlotCaps::none(), &mut rng),
                 kind,
                 "{kind:?} appeared before its unlock"
             );
         }
-        // … and it does appear after it.
+        // … and it is a real, regular part of that floor's late roll.
+        let clock = slot.unlock() + 60.0;
         let mut rng = StdRng::seed_from_u64(5);
-        let seen = (0..4000).any(|_| director::pick_kind_at(unlock + 5.0, &mut rng) == kind);
-        assert!(seen, "{kind:?} never appeared after its unlock");
+        let total = 20_000usize;
+        let hits = (0..total)
+            .filter(|_| {
+                roster::pick_kind(theme, clock, &roster::SlotCaps::none(), &mut rng) == kind
+            })
+            .count();
+        let share = hits as f32 / total as f32;
+        assert!(share > 0.02, "{kind:?} is too rare on its own floor: {share}");
     }
-    // Every wave-4 unlock is after the opening 60 s the golden traces sample.
-    assert!(director::wave4_unlock_time(EnemyKind::HouseCentipede).unwrap() > 60.0);
+    // The snake's cap is the roster's too: it is the one wave-4 kind with a
+    // live cap, and the director enforces it through `roster::kind_cap`.
+    assert_eq!(
+        roster::kind_cap(EnemyKind::BigSnake),
+        director::WAVE4_SNAKE_LIVE_CAP
+    );
+    assert_eq!(roster::Slot::III.cap_for(EnemyKind::BigSnake), 2);
 
-    // The second special tier is a real cap: the four kinds together are at
-    // most 15 % of the roll, and both tiers together at most 30 %.
-    let mut rng = StdRng::seed_from_u64(4242);
-    let total = 60_000usize;
-    let mut wave4 = 0usize;
-    let mut special = 0usize;
-    for _ in 0..total {
-        let kind = director::pick_kind_at(director::BOSS_TIME, &mut rng);
-        if kind.is_wave4() {
-            wave4 += 1;
+    // And no floor can break the design's combined special ceiling: the five
+    // wave-4 kinds are specials on their own floors, so this is the same check
+    // the roster runs, through the picker every spawn uses.
+    for theme in Theme::playable() {
+        let floor = roster::floor(theme);
+        let specials: Vec<EnemyKind> = roster::Pool::Special
+            .slots()
+            .iter()
+            .map(|s| floor.kind(*s))
+            .collect();
+        let mut rng = StdRng::seed_from_u64(4242);
+        let total = 40_000usize;
+        let mut special = 0usize;
+        for _ in 0..total {
+            if specials.contains(&roster::pick_kind(
+                theme,
+                700.0,
+                &roster::SlotCaps::none(),
+                &mut rng,
+            )) {
+                special += 1;
+            }
         }
-        if kind.is_wave3() || kind.is_wave4() {
-            special += 1;
-        }
+        let share = special as f32 / total as f32;
+        assert!(
+            share <= roster::SPECIAL_CEILING + 0.012,
+            "{theme:?}: the special share {share} exceeds the ceiling"
+        );
     }
-    let w4_share = wave4 as f32 / total as f32;
-    let special_share = special as f32 / total as f32;
-    assert!(
-        w4_share <= director::WAVE4_SHARE_CAP + 0.012,
-        "wave-4 share {w4_share} exceeds its cap"
-    );
-    assert!(
-        w4_share > director::WAVE4_SHARE_CAP * 0.5,
-        "the wave-4 tier is too rare to be a feature: {w4_share}"
-    );
-    assert!(
-        special_share <= director::SPECIAL_SHARE_CAP + 0.012,
-        "the combined special share {special_share} exceeds its ceiling"
-    );
 }
 
 // ---- Screenshot tools ----------------------------------------------------

@@ -1,109 +1,260 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for coding agents working in this repository: the architecture, the commands, the rules that bind every change, and how to test. Where this file and the code disagree, **trust the code** and fix this file.
 
-Rat Run is a terminal **bullet-hell horde survivor** (Vampire-Survivors-style) written in Rust with `ratatui`. The player only moves; weapons auto-fire; kills drop XP that drives a 1-of-3 upgrade loop; survive a 5-minute escalating horde across three themed maps.
+Rat Run is a terminal **bullet-hell horde survivor** (Vampire-Survivors-shaped) in Rust on `ratatui`. The player only moves; weapons auto-fire; kills drop XP that pays a 1-of-3 upgrade loop; a floor builds from a fifteen-minute difficulty curve into a boss fight. The simulation is a `bevy_ecs` world behind a `World` facade; the world is drawn into a half-block pixel buffer, lit in 2D, and composited under ratatui HUDs and menus. Read `STYLE.md` before writing any player-visible string.
 
 ## Commands
 
 ```sh
-cargo run --release      # play (needs a real TTY — see below)
-cargo build              # debug build
-cargo test               # full suite (unit + per-system + headless sim + TestBackend e2e)
-cargo test <name>        # single test, e.g. cargo test headless_run_does_not_panic
-cargo clippy --all-targets   # lint (keep clean)
+cargo run --release                 # play (needs a real TTY)
+cargo run --release -- --ai 16      # wall of 16 self-playing games
+cargo run --release -- --bot-batch 30 --seed 1000 --json > batch.json
+cargo build
+cargo test                          # full suite (see Testing strategy)
+cargo test <name>
+cargo clippy --all-targets          # lint (keep clean)
+cargo run --release -- --caps       # resolved terminal caps, then exit
+cargo run --release -- --probe      # caps + this terminal's keyboard-protocol answer
 ```
 
-**Toolchain:** `rust-toolchain.toml` pins `1.100.0` for this repo — `bevy_ecs` 0.20 needs rustc ≥ 1.95 and the machine default is 1.94. rustup installs it on demand; don't touch the global default.
+**Toolchain:** `rust-toolchain.toml` pins `1.100.0` (`bevy_ecs` 0.20 declares `rust-version = 1.95` and the machine default is older). rustup installs it on demand — never touch the global default.
 
-**Build prerequisite:** `rodio`/`cpal` link ALSA, so building requires the dev headers: `sudo apt-get install libasound2-dev` (the runtime `libasound.so.2` alone is not enough). Without them the crate won't compile.
+**Build prerequisites:** `rodio`/`cpal` link ALSA, so Linux needs `libasound2-dev` (the runtime `libasound.so.2` alone is not enough). The default `gamepad` feature pulls `gilrs`, which links `libudev` on Linux (`libudev-dev`); `--no-default-features` builds without gamepad *and* without the console.
 
-**Screenshots:** `RATRUN_DUMP=play|story|levelup cargo test dump_frame_ppm` writes `/tmp/ratrun_<target>.ppm` (a rendered frame, each cell → fg-top/bg-bottom pixels). That test is a no-op unless `RATRUN_DUMP` is set.
+**Features** (`Cargo.toml`): `default = ["console", "gamepad"]`. `console` is the backtick admin console (also switchable off at runtime with `RATRUN_CONSOLE=0`).
 
-## Running / testing without a TTY
+**Screenshots:** `RATRUN_DUMP=<target> cargo test dump_frame_ppm` writes `/tmp/ratrun_<target>.ppm` (each cell → fg-top/bg-bottom pixels) plus `ratrun_<target>.txt` (cell text) and, with `RATRUN_DUMP_DIR=<dir>`, an `.ansi` dump. No-op unless `RATRUN_DUMP` is set. Targets include `title`, `story`, `select[-N]`, `library[-arsenal|-field|-floors|-boss]`, `nest`, `nest-max`, `options`, `controls`, `console`, `map`, `levelup`, `autopick`, `chest`, `chest-evo`, `shop`, `hud-boss`, `pause`, `boss-*`, `miniboss-*`, `trailer*` and per-evolution captures (`milk-teeth`, `downspout`, …); anything unrecognised plays ~15 s and dumps a gameplay frame. `RATRUN_DUMP_SIZE` (`120x46`), `RATRUN_DUMP_FLOOR`, `RATRUN_DUMP_ZOOM`, `RATRUN_DUMP_CTRL` tune it.
 
-`cargo run` needs an attached terminal; piped/headless environments make `enable_raw_mode` return `os error 6`, which the app handles by erroring out cleanly (no panic, terminal restored). To drive the **real binary** headlessly, allocate a PTY *with a window size set* (`script` does not set winsize → 0×0 → empty render); use Python's `pty` + `TIOCSWINSZ` (see the harness pattern used during development). For deterministic rendering tests, prefer ratatui's `TestBackend` instead (see `app.rs` tests).
+**Headless without a TTY:** `cargo run` needs an attached terminal; piped input makes `enable_raw_mode` fail with `os error 6`, which the app handles cleanly (no panic, terminal restored). To drive the binary headlessly you must allocate a PTY *with* a window size (`script` leaves winsize 0×0 → empty render); prefer `TestBackend` for deterministic rendering tests.
+
+## Worker rules (this repo, all agents)
+
+- **No compiling and no running.** Workers do not build, test, clippy, fmt or run the game. The coordinator merges the batch into the main checkout, compiles **once**, and fixes the breakage there. Write the code and the tests you would have run, and report what is unverified.
+- **Finished workers are cleared from Orca.** Subtasks are deleted once they report, so do not leave work un-reported and do not start new work after reporting.
 
 ## Architecture
 
-Flow: `main.rs` (terminal lifecycle + 60 FPS loop) → `app.rs` (`App` state machine) → `game/world.rs` (the `World` facade) → `game/ecs/` (a `bevy_ecs` world + one ordered schedule) → `render/` (half-block pixels, HUD/menus).
+`main.rs` (terminal + 60 FPS loop) → `app.rs` (state machine) → `game/world.rs` (facade) → `game/ecs/` (one chained schedule) → `render/` (pixels, HUD).
 
-**Levels are procedural**: a 200 × 160 cell (16 px) tile grid (`game/collision.rs::TileMap`) generated from `(theme, run seed)` by `game/levelgen/`, with `game/nav.rs` flow fields over it and `game/level.rs` as the data model. `CONTENT_PLAN.md` is the contract for that subsystem (data model, generator stages, navigation, tile collision, rendering, spawn pacing, file ownership) — read it before touching levels, walls, mazes, traps or pathfinding.
+| path | owns |
+| --- | --- |
+| `main.rs` | terminal lifecycle, input thread, frame loop |
+| `app.rs` | screen state machine, run/overlay state, audio bridge |
+| `term.rs` | capability detection, colour folding, glyph sanitising |
+| `input.rs`, `controls.rs`, `gamepad.rs` | keys → actions, remapping, pad |
+| `scores.rs`, `meta.rs`, `config.rs` | save file, the nest, data paths |
+| `lore.rs`, `titleart.rs`, `console.rs` | story text, the rat plate, admin console |
+| `audio.rs` | procedural music + SFX |
+| `autoplay/`, `spectate.rs` | bot, batch runner, `--ai` wall |
+| `game/world.rs` | facade: fields, one tick, one frame |
+| `game/ecs/` | schedules, resources, components, `systems/`, `harness.rs` |
+| `game/levelgen/` | the map generator and its validator |
+| `game/` (rest) | data + rules: `level`, `enemy`, `weapon`, `loadout`, `director`, `shop`, `campaign`, `library`, `bot`, `nav`, `collision`, `fog`, `hazards`, `particle`, `smoke`, `vfx`, `art_*` |
+| `render/` | framebuffer, lighting, HUD, menus, minimap, overlays, ink |
 
-- **`main.rs`** owns terminal setup/teardown (raw mode, alt screen, Kitty keyboard flags, focus reporting, restore via a drop guard + `KITTY_PUSHED` static + panic hook), reads crossterm events on a joined input thread into `InputState`, wraps each frame in a synchronized update (DEC 2026), computes `dt`, and calls `app.update(dt)` + `terminal.draw(app.render)`.
-- **`app.rs`** is the only place that knows about screens (`Title / Story / MapIntro / Playing / LevelUp / Paused / End`). It drives the world during `Playing`, freezes it during overlays, owns menu/level-up selection state, finalizes scores, and bridges to audio.
-- **`game/world.rs`** is the facade and the only type outside code names: it keeps the legacy public fields (`player`, `level`, `elapsed`, `kills`, `score`, `pending_levelups`, `game_over`, `won`, `sfx`, `rng`, `cam`, `viewport`, `particles`, `damage_numbers`, …) plus read-only HUD accessors (`boss_hp`, `boss_offset`, `enemy_count`, `last_pickups`) and allocating `SpawnId`-ordered snapshots for tests (`enemies()`, `bullets()`, …), drives one tick, and keeps the camera/culling/draw order for `draw(&mut PixelBuffer)`.
-- **`game/ecs/`** is the simulation: `components.rs`, `resources.rs`, `schedule.rs`, `systems/` (one file per concern), `tests.rs`, plus `harness.rs` (a golden-hash determinism regression).
+- **`main.rs`** enables raw mode first (then arms a `TerminalGuard` drop guard), enters the alternate screen with mouse capture + focus reporting, asks the terminal for its keyboard protocol (`term::query_keyboard_enhancement`, a 300 ms budget; crossterm's own helper waits 2 s), pushes `REPORT_EVENT_TYPES | REPORT_ALL_KEYS_AS_ESCAPE_CODES` when it answers, and re-queries to learn whether a **lone** Ctrl reports (that decides Ctrl-dash vs Space-dash). It reads crossterm events on a joined reader thread, coalesces mouse motion, caps work at `MAX_EVENTS_PER_FRAME`, computes `dt` (capped at 50 ms), calls `app.update(dt)`, and presents each frame inside a DEC 2026 synchronized update. `FocusLost` releases every held key. Restore is idempotent and runs on every exit path including panics.
+- **`app.rs`** is the only module that knows about screens. The real `Screen` enum: `Title`, `SectorSelect`, `Story`, `MapIntro`, `LevelIntro`, `Playing`, `LevelUp`, `Paused`, `Options`, `LevelComplete`, `KeepThree`, `Victory`, `End`, `Chest`, `Shop`, `Library`, `Controls`, `Nest`. The title rows are START RUN, the sector row, OPTIONS, LIBRARY, THE NEST, QUIT. It drives the world during `Playing`, freezes it under overlays (an open map pauses too), owns menu/level-up/shop/keep state, finalizes scores, banks the nest and bridges audio.
+- **`game/world.rs`** keeps the legacy public fields as real fields (`player`, `level`, `elapsed`, `kills`, `score`, `gold`, `pending_levelups`, `pending_chests`, `pending_shop`, `game_over`, `won`, `level_complete`, `sfx`, `rng`, `cam`, `viewport`, `particles`, `damage_numbers`, `fog`, …) so callers between ticks keep working, plus read-only HUD accessors (`boss_hp`, `boss_offset`, `enemy_count`, `last_pickups`) that walk the ECS world for `&self`, and allocating `SpawnId`-ordered snapshots (`enemies()`, `bullets()`, `gems()`, `pickups()`, `pools()`) for tests only. `update()` runs one tick; `draw(&mut PixelBuffer)` runs one frame.
 
-### The facade and the resource round-trip (`game/ecs/resources.rs`)
+### The facade round-trip (`game/ecs/resources.rs`)
 
 Singleton state is authoritative on `World` *between* ticks and in the ECS world *during* one:
 
-1. `update` calls `begin_tick`, which inserts the per-tick resources (`TickInput`, `Viewport`, `NukeTick`, `RunCounters`, `Shake`, `SfxQueue`, `NextEnemyId`, `LastPickups`) and moves `rng` (via the `RngRes` newtype), `level`, `player`, `particles`, `damage_numbers`, `director`, `flow` into the ECS world with `swap_in`. Each type has a pre-built spare twin from `World::new`, so the round-trip allocates nothing.
+1. `begin_tick` inserts the per-tick resources (`TickInput` — `dt`, `move_dir`, `dash`, `active`, `aim`, dash charge —, `Viewport`, `NukeTick`, `LevelIndex`, `DifficultyLevel`, `DebugFlags`, `Cvars`, `BossOverride`, `RunCounters`, `Shake`, `SfxQueue`, `NextEnemyId`, `LastPickups`) and **moves** `rng` (via `RngRes`), `level`, `player`, `particles`, `damage_numbers`, `director`, `flow` and `fog` in with `swap_in`. Every round-tripped type has a spare twin built at `World::new`, so the round trip allocates nothing.
 2. `schedule.run(&mut world.ecs)` — one thread, one chain.
-3. `end_tick` swaps the resources back with `swap_out`. Nothing is copied out of the ECS world per tick: entity components live there for the whole run, the HUD accessors read them directly, and `World::enemies()`/`bullets()`/`gems()`/`pickups()`/`pools()` clone a `SpawnId`-ordered snapshot only when a test or the determinism harness asks for a whole list.
+3. `end_tick` swaps them back with `swap_out` and copies the counters out.
 
-So writes made between ticks (`world.player.hp = …`, `world.pending_levelups = 1`, app tests) reach the next tick and reads right after `update()` see its results. `begin_tick`/`end_tick` are public — that is the per-system harness. Never touch facade singletons while a tick is open; use `world.ecs.resource_mut::<T>()`. `boss_hp()`/`boss_offset()`/`enemy_count()` take `&self` and walk the ECS world with `iter_entities`, so they allocate nothing and work for the `&World` call sites in `app.rs`.
+Nothing is copied out per tick: entity components live in the ECS world for the whole run, so `Entity`/`SpawnId` are stable. Writes between ticks (`world.player.hp = …`, `world.pending_levelups = 1`, app tests) reach the next tick, and reads right after `update()` see its results. `begin_tick`/`end_tick` are public — that *is* the per-system test harness. Never touch a facade singleton while a tick is open; use `world.ecs.resource_mut::<T>()`.
 
-### Components, resources, systems
+### Components and resources
 
-- Components are **coarse**: each legacy entity struct stays one component (`Enemy`, `Bullet`, `Gem`, `Pickup`, `Pool`) plus `SpawnId(u64)`, a monotonic spawn-order tag. Do not split them into Position/Health — art and behaviour take `&Enemy` and friends. Entities live in the ECS world for a whole run, so `Entity`/`SpawnId` are stable.
-- Resources are the singletons above plus permanent scratch (`NextSpawnId`, `NextEnemyId`, `NeighborScratch`, `PickupScratch`, `NukeTick`, `GridScratch`, `EnemyIndex`, `SpatialGrid`). `EnemyIndex` caches the `SpawnId`-ordered enemy list that the spatial grid's bucket indices address (legacy `self.enemies[j]`); it is only valid while no enemy has spawned or despawned since the grid was built, which is why every reader calls `resources::debug_assert_enemy_index` in debug builds (see *Determinism rules*). `Enemy::id` (damage-number identity) comes from `NextEnemyId`, never from a `Vec` index. Systems push `Sfx` into `SfxQueue` where the old code pushed into `self.sfx`; there is no audio system.
-- Systems live in `game/ecs/systems/{player,spawn,enemy_move,weapons,projectiles,combat,loot,fx}.rs`; they spawn with `commands.spawn((component, next_id.take()))` and despawn with `commands.entity(e).despawn()`. The `World::spawn_*`/`clear_*` helpers are for tests and setup — systems must not call them.
+- Components are **coarse**: one legacy struct per component (`Enemy`, `Bullet`, `Gem`, `Pickup`, `Gold`, `Chest`, `Pool`, `Boss`) plus `SpawnId(u64)`, a monotonic spawn-order tag, and wave-3/4 markers (`Miniboss`, `Infection`, `Wick`, `AcidDrop`, `MilkTooth`, `CheeseString`, `FairyRing`, `CorrosiveChannel`, `DeadLetterPacket`, `EchoSpoke`, `Lash`, `TrapSlow`, `InkSlow`, … — see `game/ecs/components.rs`). Do **not** split them into Position/Health: art and behaviour take `&Enemy` and friends.
+- Resources are the per-tick singletons above plus permanent scratch (`NextSpawnId`, `SpatialGrid`, `EnemyIndex`, `GridScratch`, `NeighborScratch`, `PickupScratch`, `DamageLedger`, `ActiveFx`, `LaserFx`, `LaserCopy`, `DashTrack`, `EvoRuntime`, `MeleeNudge`, `XpBank`, `BossDue`, `BossVirus`) and the wave-3 runtimes (`TrapRuntime`, `GateRuntime`, `MinibossSchedule`, `ShopBook`, …).
+- `EnemyIndex` caches the `SpawnId`-ordered enemy list the spatial grid's buckets address (the legacy `self.enemies[j]`). It is valid only while no enemy has spawned or despawned since the grid was built; every reader calls `resources::debug_assert_enemy_index` (compiled out in release). See *Determinism*.
+- `Enemy::id` (damage-number identity) comes from `NextEnemyId`, never a `Vec` index. Systems push `Sfx` into `SfxQueue`; **there is no audio system** — the App drains and plays.
+- Systems spawn with `commands.spawn((component, next_id.take()))` and despawn with `commands.entity(e).despawn()`. `World::spawn_*`/`clear_*` are for tests and setup only.
 
-### The tick schedule — order is behaviour (`game/ecs/schedule.rs`)
+### The tick schedule — order *is* behaviour (`game/ecs/schedule.rs`)
 
-ONE `Schedule`, every system `.chain()`ed, always single-threaded (`multi_threaded` is off in `Cargo.toml`):
+ONE `Schedule`, one thread, `multi_threaded` off. `chain()` inserts `ApplyDeferred` after any system that took `Commands`, so an entity spawned by one system exists for the next. The real order (the module doc carries the full table):
 
-`player → flow_refresh → director → enemy_steering → enemy_fire → grid_build → separation → wall_resolve → grid_refresh → fire_weapons → bullets → pools → player_bullet_hits → enemy_bullet_hits → contact → reap_enemies → gems → pickups → nuke_reap → particles → damage_numbers → shake → outcome`
-
-- `chain()` makes Bevy run `ApplyDeferred` between consecutive systems whenever the earlier one took `Commands`, so entities spawned by one system (director enemies, weapon projectiles, death drops) exist for the next — that replaces the old `Vec::push` visibility.
-- Load-bearing adjacencies: `reap_enemies` right before `gems` (drops collect the same tick), `pickups` right before `nuke_reap` (a Nuke re-reaps the same tick), `outcome` last (loss beats win).
-- The list is two chained tuples only because `IntoScheduleConfigs` covers ≤ 20 entries; the second is `.after(combat::contact_system)`. Still one ordered chain — no parallel ordering, and keep the order map in the module doc in sync.
-- `build_settle_schedule()` is the legacy `finished()` path: particles and damage numbers only. `damage_numbers_system` lives in `schedule.rs` (not `fx.rs`) because that file owns the tick order.
-
-### Determinism rules
-
-Single-threaded, and query iteration order must never decide anything. Whenever the old code relied on "first / next / in-`Vec`-order", iterate sorted by `SpawnId`:
-
-```rust
-for (id, mut e) in enemies.iter_mut().sort_by_key::<&SpawnId, _>(|id| id.0) { /* legacy order */ }
+```text
+powerups → traps → hazards → player → fog::reveal
+  → [gates: passage, cache, door, shop::threshold]
+  → flow_refresh → director → miniboss → boss_spawn → boss::megarat::boss_summon
+  → enemy_steering → enemy_fire → grid_build → separation → wall_resolve
+  → grid_refresh → fire_weapons → active_weapons
+  → [spiked_tail] → [laser_eyes, super_dash, melee_nudge]
+  → acid_rain → hantavirus → bullets → pools
+  → boss_damage → boss_update → [cobra::coil_block]
+  → player_bullet_hits → enemy_bullet_hits → contact
+  → [milk_teeth, fondue_tines, fondue_string] → fairy_ring → drain_cleaner
+  → roll_call → dead_letter → ripcord → wave3 → wave4 → trailer
+  → hantavirus_death → reap_enemies → gems → treasure → pickups
+  → nuke_reap → particles → damage_numbers → shake → outcome
 ```
 
-That covers nearest-enemy ties, separation nudges, per-enemy rng draws, drop order, bullet spawn order and draw order. The number *and* order of rng draws are part of the spec — draw only where the old code drew (e.g. `fx::shake_system` jitters only when `shake > 0.05`). Same seed + same inputs must reproduce the same run.
+Load-bearing adjacencies (each is commented in the file):
 
-**Cached order (`EnemyIndex`).** `enemy_move::grid_build_system` and `grid_refresh_system` build `EnemyIndex` once per tick in `SpawnId` order, together with the `SpatialGrid` whose bucket values index it. It may be read instead of sorting **only** while no enemy has spawned or despawned since the build: usable by `separation`, `wall_resolve`, `grid_refresh`, then (after the refresh) `fire_weapons`, `bullets`/`pools`, `player_bullet_hits`, `enemy_bullet_hits` and `contact` — nothing up to `reap_enemies_system`. It is stale in `enemy_steering`/`enemy_fire` (the director may already have queued spawns) and after `reap_enemies`/`nuke_reap`/`clear_enemies`. Every reader calls `resources::debug_assert_enemy_index` (compiled out in release), which compares the cache with a fresh `SpawnId` sort *including contents*, so `cargo test` verifies the window on every tick of a full run.
+- `traps`/`hazards` run **before** `player` so a glue/ink slow folds into this tick's `TickInput` throttle, and their damage lands before the reap (a trap kill takes the normal loot path).
+- `gates`/`shop::threshold` sit after the fog reveal and before the flow refresh, so all three see the rat's post-move cell.
+- Boss spawns are before `grid_build`; `megarat::boss_summon` exists because a boss controller cannot take `Commands` and may only add `Enemy`s in that slot.
+- Every weapon/melee/area damage pass sits between `grid_build` and `reap_enemies`, so a kill this tick is reaped this tick (and loots this tick).
+- `reap_enemies` right before `gems` (drops collect the same tick); `pickups` right before `nuke_reap` (a Nuke re-reaps); `outcome` last (loss beats win).
+- The chain is split into several tuples only because `IntoScheduleConfigs` stops at 20 entries; later groups are explicitly anchored `.after(...)`. Keep the module-doc order map in sync.
+- `build_settle_schedule()` is the legacy `finished()` path: particles and damage numbers only. `damage_numbers_system` lives in `schedule.rs` because that file owns tick order.
 
-### Rendering: half-block pixels (`render/framebuffer.rs`)
+## Determinism rules
 
-`PixelBuffer` is a `width × (height*2)` RGB grid. `render_to` blits it into a ratatui `Buffer` using the `▀` glyph per cell: **foreground = top pixel, background = bottom pixel**. This doubles vertical resolution and is what makes particles/sprites possible. The buffer is sized to the game viewport each frame; the camera follows the player clamped to the arena (plus a decaying shake offset). All world coordinates are in **world-pixel space** (`Vec2`, f32); `world.cam` + `w2s()` map to screen.
+Single-threaded, and **query iteration order must never decide anything**. Wherever the old code meant "first / next / in-`Vec`-order", iterate sorted by `SpawnId`:
 
-Sprites live in `game/art_floor.rs` (floor + arena border), `art_props.rs` (themed obstacles), `art_enemy.rs` (bugs, elites, health rings, boss arc) and `art_rat.rs` (player). `World::draw` culls props, pools, gems, pickups, bullets and enemies with `on_screen` before calling the art, and iterates entities in `SpawnId` order. At the 600-enemy cap a 160×168-px view costs ~385 µs, of which ~92 % is visible enemy art (~25 µs more if every enemy were drawn unculled: off-screen sprites early-out inside `art_enemy`); see `PORT_PLAN.md` for the measured breakdown. `game/particle.rs` owns the capped ring buffers (particles, shockwaves, floor stains) and hosts `particle::vfx` (feedback emitters the systems call instead of inlining bursts) and `particle::damage_number` (aggregating floating damage digits). Draw order: floor → floor stains → props → pools → gems → pickups → enemies → bullets → player → particles → damage numbers. HUD (`render/hud.rs`), viewport overlays (`render/overlay.rs`: boss bar/warning/compass, low-health cue, callouts, from `HudState`) and menus (`render/menu.rs`) are ratatui widgets drawn *over/around* the pixel viewport.
+```rust
+for (id, mut e) in enemies.iter_mut().sort_by_key::<&SpawnId, _>(|id| id.0) { … }
+```
 
-### Decoupled subsystems
+That covers nearest-enemy ties, separation nudges, per-enemy rng draws, drop order, bullet spawn order and draw order. The **number and order of rng draws** are part of the spec: draw only where the old code drew. A boss owns its own stream (`BossRng`, seeded from the run seed + a per-kind salt) so boss behaviour never perturbs the main one; the shop rolls its shelf from its own `StdRng`, never the simulation's.
 
-- **Audio (`audio.rs`)** is fully procedural (no asset files) and optional: `AudioEngine::new()` returns `None` if there's no device, and everything no-ops silently. The sim never calls audio directly — systems push `Sfx` variants (one per weapon family, kill, boss, pickup, …) into `SfxQueue`; the App **drains and de-duplicates them per frame** (so a 16-shot nova is one sound), plays them, and sets music intensity. Music is a custom infinite `rodio::Source` (`MusicSynth`) with per-theme key/scale/pattern; an `Arc<AtomicU32>` intensity gates the lead + hat layers.
-- **Spawning (`game/director.rs` + `systems/spawn.rs`)** is time-curve based, not fixed waves: `spawn_interval`/`pulse_count`/`hp_mult`/`pick_kind` read `elapsed`; elites and the near-end boss come from the same system under `ENEMY_CAP` (one slot reserved for the boss).
-- **Progression (`game/loadout.rs`)** holds owned weapons + passive `Stats`. On level-up `gems_system` sets `pending_levelups`; the App opens the `LevelUp` screen, calls `generate_choices` (1-of-3) and `apply`. Weapon damage/cooldown/projectile-count scale with level inside `game/weapon.rs`; firing patterns live in `systems/weapons.rs::fire_one`.
-- **Input (`input.rs`)** tracks held movement via the Kitty keyboard protocol (real press/release; Ghostty is the primary target terminal and implements it, as does Kitty) when available, else a short auto-repeat **grace window** fallback. Discrete presses (menus, dash, mute) come from a per-frame `pressed` list.
-- **Controls (`controls.rs`, `gamepad.rs`, `render/controls.rs`)** is the remappable layer over `input.rs`. Three `Scheme`s (Classic / Mouse aim / Gamepad) each carry a `Bindings` of keyboard/mouse plus pad slots, with a primary and an alternate per action; `Controls` owns the active scheme, dead zone and rumble flag, persists beside the scores file, and caches the legends the menus/HUD print. `input.rs` resolves actions through `Controls::active()`, so a rebind takes effect everywhere. The **Controls** screen (opened from Options) captures a key/pad/mouse press, swaps conflicts and resets a scheme. `gamepad.rs` is a thin `gilrs` poller behind the `gamepad` cargo feature (on by default; `--no-default-features` builds without libudev); tests inject `PadEvent`s so no real controller is needed. Aim is deterministic: `aim` is an `Option<Vec2>` in `TickInput`, supplied by the app from the pointer (Mouse aim) or the right stick (Gamepad); Classic passes `None`, so weapons keep nearest-enemy targeting.
-- **Lore (`lore.rs`)** is pure content (intro crawl, per-`Theme` map-intro + victory lines, defeat line); weapon/passive flavor strings live on their enums and surface on level-up cards.
+**The simulation viewport is App state, not a render side effect.** `App::render` writes `world.viewport` on a resize because the viewport drives spawn rings and offscreen placement; `World::draw` never touches it (it sets its own `render_viewport`). So a run drawn at a resized terminal — or at any zoom, or never drawn at all — simulates identically; pinned by `world::zoom_tests::the_same_seed_plays_out_identically_at_every_zoom`. Everything render-only (zoom, lighting, smoke, fog reveal, the ink pass, the Library survey) must stay render-only.
 
-### Where to add content
+**`EnemyIndex` validity window.** `enemy_move::grid_build_system` and `grid_refresh_system` build the `SpawnId`-ordered cache once per tick with the `SpatialGrid`. It may be read *instead of* sorting only while nothing has spawned or despawned since the build: `separation`, `wall_resolve`, `grid_refresh`, then (after the refresh) `fire_weapons`, the active and wave-3 weapon passes, `bullets`/`pools`, the boss passes, `player_bullet_hits`, `enemy_bullet_hits` and `contact` — nothing at or after `reap_enemies`. It is stale in `enemy_steering`/`enemy_fire` (the director may have queued spawns) and after `reap_enemies`/`nuke_reap`/`clear_enemies`. `debug_assert_enemy_index` compares the cache with a fresh `SpawnId` sort *including contents*, so `cargo test` verifies the window on every tick of a full run.
 
-- New weapon: add to `WeaponKind` (`game/weapon.rs`) with stats/flavor, then a firing pattern in `systems/weapons.rs::fire_one` (tag the bullet's `weapon`, add `vfx::emit_weapon_fire`/`emit_weapon_hit` feedback and its `Sfx`).
-- New enemy: add to `EnemyKind` (`game/enemy.rs`) with per-kind stats + `steer`, weight it into `director::pick_kind`, draw it in `game/art_enemy.rs`, hook its death feedback in `particle::vfx`.
-- New system: add `fn x_system(…)` to the matching file in `game/ecs/systems/`, chain it in `game/ecs/schedule.rs` at the exact slot the old code ran in, and add a narrow test in that file.
-- New resource: define it in `game/ecs/resources.rs`; insert it permanently in `World::new` (scratch), or — if the facade exposes it — give it a spare twin and round-trip it in `begin_tick`/`end_tick`.
-- New upgrade/passive: extend `PassiveKind`/`Upgrade` in `game/loadout.rs`.
-- New map/theme: add a `Theme` variant in `game/level.rs` (palette + walls) and content in `lore.rs`; `Theme::all()` drives the menu and music.
+**Goldens (`game/ecs/harness.rs`).** Six scripted seeded games (Wander and Evade × Sewer/Kitchen/Lab seeds) at 60 ticks/s for 60 s; the whole state is folded into an FNV trace hash every half second and compared with `CASES`. Any change in a simulated number, an rng draw or its order, or an iteration rule moves a hash. Failure prints **every** moved row already formatted for `CASES` — paste the whole list in the change that deliberately moved them, never hand-edit one row. `same_seed_same_run` also proves the weaker property directly. **Never edit a hash to make an accidental change pass.**
+
+**The map pin (`game/levelgen/mod.rs` `TRACE_HASHES`).** Pins the exact output of `generate_once` — every tile's kind and neighbour mask plus every placed object — for 20 seeds × the five campaign `Theme`s. Regenerate only when a layout/maze/placement stage changes output on purpose: `RATRUN_LEVEL_TRACE=1 cargo test map_trace_pin -- --nocapture` prints the new table.
+
+## Rendering
+
+`render/framebuffer.rs`: `PixelBuffer` is a `width × (height*2)` RGB grid, blitted into ratatui one `▀` per cell (foreground = top pixel, background = bottom). World coordinates are world-pixel `Vec2`; `world.cam` + `w2s()` map to screen. The camera follows the rat clamped to the arena, plus a decaying shake offset.
+
+**`World::draw_scene` order (real):** floor → floor marks → floor stains → boss ground layer → wall ground layer → boss thresholds → object ground layer → wall bodies → props → light fixtures + ambience → pools → evolved ground effects (channels, fairy rings) → Acid Rain drops → gems → gold → chests → pickups (with halos) → the Wind-up Mouse decoy → enemies (crowd LOD by visible count) → boss bodies (ground) → friendly bullets → cheese strings and milk teeth → the rat → airborne boss bodies → wall overhangs + thresholds + object foreground layer (lintels over the rat) → smoke → particles/shockwaves → Super Dash comb → Roll Call quotes → **the lighting pass** → **the hostile layer** → (debug) hitboxes.
+
+Sprite art lives in `game/art_*.rs`, one module per subject (`art_floor`, `art_walls`, `art_props`, `art_enemy`, `art_miniboss`, `art_traps`, `art_rat`, `art_trailer`, `art_wave3a`, `art_icons`, one `art_boss_*` per boss). **Do not edit art modules to fix gameplay**: their view structs and documented constants are the spec where art and gameplay disagree (`CONTENT_PLAN.md` §9).
+
+**Zoom** (`render/zoom.rs`): ladder `0.5, 0.75, 1.0, 1.25, 1.5, 2.0`, eased over ~0.15 s, stepped by wheel, `Z`/`X`, the options row, or middle click/`R3` to reset. `z > 1` shows more world. Zoomed out, each screen pixel owns a box of world pixels and `PixelBuffer::resample_to` writes **one** source pixel per box, unblended — the most salient pixel if the box holds a feature, else the first — so thin things survive at full contrast instead of blurring; zoomed in the box is a single source pixel (nearest neighbour). Integer arithmetic throughout, so 1:1 is bit-identical.
+
+**Lighting** (`render/lighting.rs` + `render/lighting/`): world-resolution, render-only, applied over world pixels before the resample so lights line up at every zoom. `engine` (`LightMap`, `Light`, `LightShape`, falloff, flicker, layer masks, `LightingMode` + the cost-driven quality controller); `fixtures` (per-theme palette/housing for `LightFixture`s: Pendant, Passage, Arena, Broken, Sun); `sources` (`LightZone`s — Corridor, Room, Start, Arena, Blackout, Maze — decide ambient and add the rat's aura and dynamic emitters); `shadow` (occluder outlines, prop height → shadow profiles, static vs moving bodies, softness); `ambience` (analytic emitters: Fire, Steam, Drip, Cable, Dust, Fog, Exhaust, Pilot, Fumes, Insects, reconstructed from `(seed, elapsed)`, never from a particle pool); `gallery`/`tests` (captures, assertions). Fixtures are placed by `game/levelgen/lights.rs` by room role; prop/pool/pickup art marks emissive rects so they stay bright. `apply_lighting` measures its own cost and drops a tier past budget (`LightingMode::LIVE = [Full, Hard, Coarse, Compact]`, chosen from colour depth: Truecolor→Full, Ansi256→Hard, Ansi16→Coarse). Lighting only shades the playfield: a distant lamp cannot reveal a route (fog and the minimap keep their own rules).
+
+**Hostile layer + ink pass.** Hostile pellets, telegraphs, tells, miniboss shapes and status pips are drawn **after** the lighting pass (self-lit, above every friendly effect) by `draw_hostile_layer`. Then `render/ink.rs` re-stamps gameplay-critical geometry **in screen space after the resample** with a minimum on-screen size: hostile marks only when zoomed out (`scale > 1.05`), loot markers at every zoom `≥ 1` (square = coin, diamond = gem, bracket = pocket find, halo = chest), never doubled at 1×. Damage digits sit between the resample and the ink pass so they keep their pixel size. Both are render-only.
+
+`render/hud.rs`, `render/overlay.rs` (boss bar/warning/compass, low-health cue, callouts), `render/menu.rs` and the other screen modules are ratatui widgets drawn over/around the pixel viewport. Each screen's `layout()` is the single source of truth for its pointer hit rectangles.
+
+## Levels
+
+A level is a **200 × 160** lattice of 16 px tiles (3200 × 2560 world px) plus rooms, maze sections, level objects (traps, doors, rat-holes, shop holes, maze rewards, light fixtures, ambient emitters) and legacy props. `Level::tiles` is the **only** wall geometry: player, enemies, bullets, lobs, spawn checks and `art_walls::wall_colliders` all query the tile grid, so what is drawn and what blocks cannot disagree (`game/collision.rs::TileMap`). `game/nav.rs` keeps the fine window field and coarse block graph per size class.
+
+**Six floors** (`Theme`): Sewer, Kitchen, Lab (the campaign route), Laundry and Printworks (wave-3 side routes at stages 2 and 3), and the Flatbed trailer (the getaway ride — a practice floor, never a campaign step). `Theme::all()` is the five campaign floors; `Theme::playable()` is all six in route order.
+
+`game/levelgen/`: `layout::build_layout` (rooms, corridors, halls, boss arena, start room) → `layout::furnish` (props) → `maze::carve_mazes` (at most one, ~1 map in 8, reward + one-way door at the end) → `placement::place_rat_holes` → `placement::place_traps` → `placement::place_shop_holes` → lights/emitters (separate salted rng over the finished tiles) → `validate` proves the map playable, and `generate` retries with a salted seed if it is not (a safety net, not a routine path). Deterministic from `(theme, seed, attempt)`, ~3 ms median in the dev profile (`RATRUN_LEVEL_TIMINGS=100 cargo test level_stage_timings`); distributions under `RATRUN_LEVEL_STATS`.
+
+- **Hazards**: `systems/traps.rs` — sticky glue boards (20 % speed, a limited glue budget, `Used` when spent) and baited mousetraps (`Armed` → `Triggered` 0.18 s → `Snapping` 0.20 s → `Sprung`; a **hair trigger** skips the warning and resolves on the touch tick). `systems/hazards.rs` — steam grates (Resting 4.0 s → Warning 1.0 s → Plume 0.7 s) in the Laundry, ink pads (permanent 75 % ground speed) in the Printworks.
+- **Light fixtures** (`LightFixtureKind`) and ambient emitters (`EmitterKind`) are placed by `levelgen/lights.rs`; the renderer reads the same structs.
+- **Shop holes**: two per level in structural wall faces; touching a threshold raises `pending_shop` and opens the shop screen.
+- **Interactive objects** (`systems/gates.rs`): rat-holes (an 8 px gap the rat fits and a Cat/Brute does not; the rat is centred laterally), the maze cache (one free level-up + the fog/minimap claim), one-way doors and the exit slam. Enemies never pass a gate.
+- **The Flatbed** (`systems/trailer.rs`, `levelgen::trailer`, `art_trailer`): pits in the bed (rat: 8 damage, i-frames, replaced on the nearest plank; horde: 35 % of max HP + stun), sliding cargo, the slipstream that drags small bodies and gems tailward, expansion-joint bumps, and the Magpie's gust wind.
+- **Fog** (`game/fog.rs`, `systems/fog.rs`): a `Fog` resource round-tripped like the rest, flooded from the rat's cell through open floor and open doorways, stopped by solid walls, maze partitions, closed one-way doors and rat-hole faces (a hole is revealed by sight or by having stood in it). The minimap draws only seen cells; never-seen territory is the dim **red veil**.
+
+## The fifteen-minute timeline
+
+`game/director.rs` is time-curve based, not fixed waves: spawn rate, live budget, hp/kind mix, elite cadence and speed all read `curve_clock(elapsed)`. `RUN_SECONDS = BOSS_TIME = 900.0`. At `BOSS_TIME` the director raises `BossDue`; the boss framework spawns the themed boss in its arena and the horde drops to cleanup pace (1 body/s, budget 35) while the curve clock freezes. A level ends when the boss or the rat dies — the clock is not a win condition. The boss warning starts 25 s early (`render::overlay::BOSS_WARNING_SECS`).
+
+- **Named minibosses** (`systems/miniboss.rs`): four appointments at 3:00, 6:00, 9:00 and 12:00. Six kinds — Corkscrew, Sister Snip, Bobbin, Bell Diver, The Foreman, Milk Carton — each with one signature shape, a 1 s tell, an exposed recovery and a cooldown. A miniboss is an ordinary `Enemy` (a `Brute` body) with a `Miniboss` component, so every damage pass treats it as one and the reap drops **exactly one chest plus `MINIBOSS_GOLD`** at a reachable non-pit cell, whatever killed it (the Nuke's re-reap included). A survivor retreats without loot when the next appointment arrives, so only one is ever on the floor.
+- **Chests** (`loadout::open_chest`): evolve the earliest eligible weapon, else grant a free rank, else pay gold. No rng draw.
+- **Bosses** (`systems/boss/`): one shared tick drives per-floor controllers. Ten kinds, pooled per floor and picked from a stable splitmix64 hash of the level seed (`BossKind::pool_pick`):
+
+| floor | pool |
+| --- | --- |
+| Sewer | The Jungle Cat (Apex Jaguar), The Horseshoe (horseshoe crab) |
+| Kitchen | The Sweeper (broom), SUBJECT R-01 (MegaRat) |
+| Lab | TURF-REAPER MK.IV (mower), KING COBRA |
+| Laundry | The Mangle (wringer) |
+| Printworks | THE NIGHT EDITION (offset press) |
+| Flatbed | The Magpie, The Redtail (hawk) |
+
+  `BossController::tick` owns only transitions; `Boss`, `BossOutput`, `BossHazard`, `BossProjectile`, `move_boss`, `BossContext` (player state, arena, `TileMap` queries, large-class flow field) and the index-window rules are in `boss/mod.rs` — read it before touching a boss.
+
+## Progression
+
+- **13 weapons** (`WeaponKind::all`, `WEAPON_SLOTS = 13`): Gnaw, Cheese Spray, Squeak Nova, Spore Orbit, Tail Whip, Acid Spit, Tail Thrash (ACTIVE), Sonic Squeak (ACTIVE), Laser Eyes, Super Dash (DASH), Acid Rain, Hantavirus, Spiked Tail. Damage/cooldown/projectile-count scale with level in `game/weapon.rs`; firing patterns live in the weapon systems.
+- **12 passives** (`PassiveKind::all`): MaxHp, MoveSpeed, Damage, FireRate, Magnet, Regen, Armor, SpringHeel, Counterweight, LongFuse, SecondScent, LensCap. `loadout::apply_passive_stack` is the single source of truth for a stack (the carried-loadout rebuild replays it).
+- **12 evolutions** (`WeaponKind::evolution`): a chest evolves a max-level weapon whose partner passive the build owns (≥1 stack). An evolution keeps the kind, timing family and damage-ledger column and changes what the attack does: Milk Teeth (Gnaw), Fondue Fork (Cheese Spray), Echo Chamber (Squeak Nova), Fairy Ring (Spore Orbit), Ratchet Tail (Tail Whip), Drain Cleaner (Acid Spit), Flywheel (Tail Thrash), Roll Call (Sonic Squeak), Downspout (Acid Rain + Long Fuse), Dead Letter (Hantavirus + Second Scent), Carbon Copy (Laser Eyes + Lens Cap), Ripcord (Super Dash + Spring Heel). Spiked Tail has no row. Behaviour lives in `systems/evolutions.rs`; damage always credits the base weapon.
+- **Slots**: distinct-kind caps `MIN_SLOTS = 4` … `MAX_SLOTS = 8` per rack, carried on `Loadout`. Read them through `Loadout::max_weapons`/`max_passives`/`loadout::slot_caps`, never the constants (`--caps` overrides them for a batch).
+- **XP**: `player::xp_for_level(l) = round(6 × 1.10^(l-1))`, with no cap, so the first card lands within ~15 s and each level costs noticeably more than the last (20 → 37 XP, 40 → 247, 50 → 640); `xp_to_reach` is the cumulative form.
+- **Level-up cards** (`Loadout::generate_choices`): up to three distinct cards — one owned rank-up, one new kind (the first level-up always offers a second weapon; later the evolution partner of an owned L4/L5 weapon is promoted), one anything-legal. Fallbacks, at most one each: `Bandage` (25 % max HP, hidden at full health) and `Purse` (8 gold). Fewer than three cards is a legal answer. Auto-pick (`U`, persisted) takes each card with 0.4 s toast spacing; the first lands on the frame a manual screen would have opened, so the simulation and its rng see the same thing.
+- **Gold**: coins drop from a per-kind chance × value table plus `ELITE_GOLD` (5), `MINIBOSS_GOLD` (12), `BOSS_GOLD` (30).
+- **The in-run shop** (`game/shop.rs`, "the blind spot / gene splice shelf"): behind the mouse holes. Ten splices in two sockets (`MAX_SPLICES = 2`; they are neither weapons nor passives, never count against a cap and never carry between floors). A shelf is three of them, rolled from `(floor seed, hole index, rerolls)` on its own rng. Services: Stitch (12 g, heal 35 %), Turn the Shelf (8 g, then 16), Molt (22 g, replace an upgrade with a fresh Lv1 of the same type). Splices apply *after* passives in `apply_splices`.
+- **The nest** (`meta.rs`): 15 permanent tracks bought with banked gold (weapon/passive slots 4→8, move speed, pickup range, fire rate, max HP, regen, armour, damage, dash cooldown, XP gain, gold gain, luck, carry-over 3→5, one revive). Every number and price is in `Track`/`Track::prices` — retune there. The profile is a field on `ScoreTable`, so it lives in the same save file. **Banking rule** (`meta::bank`): unspent gold plus `FLOOR_BONUS` 25 per cleared floor, `APEX_BONUS` 6 per boss/miniboss killed and `WIN_BONUS` 75 for the clear; a practice run banks half (rounded down); a run that used the console banks nothing; saturating throughout.
+- **Campaign** (`game/campaign.rs`): three levels, Sewer → (Kitchen | Laundry) → (Lab | Printworks). A level completes when its boss dies. Between levels the keep-three plate lists the build in a stable order and lets the player carry up to `keep_limit(loadout)` (3 by default, +2 from the nest's carry track); `Tab` or a click picks the next stage's route. `level_seed(run_seed, index, theme)` derives each floor's map, so a campaign replays exactly. Practice runs play one floor alone (the Flatbed is always reachable) and do not advance the campaign.
+
+## Controls
+
+`input.rs` is the raw layer, `controls.rs` the remappable layer over it, `gamepad.rs` the pad poller.
+
+- **Three schemes** (`Scheme`): Classic, MouseAim, Gamepad. Each carries `Bindings` — a keyboard/mouse primary + alternate per action, and pad slots. `Controls` owns the active scheme, dead zone, rumble flag and cached legends, persisted beside the scores. `input.rs` resolves every action through `Controls::active()`, so a rebind takes effect everywhere.
+- **23 actions** (`Action`, indexed by array position — the table is append-only): MoveUp/Down/Left/Right, Dash, FireActives, Pause, Map, MinimapSize, ZoomIn, ZoomOut, ResetZoom, ToggleCursor, Mute, MusicDown/Up, EffectsDown/Up, Options, Confirm, Back, AutoPick, Library.
+- **Defaults** (`Bindings::defaults`): `WASD` moves (the arrow keys also steer, as a raw `KeyCode` fallback rather than a binding), `Esc` (alt `P`) pause, `Tab` map, `N` minimap size, `Z`/`X` zoom, middle click reset zoom, `C` cursor, `M` mute, `[`/`]` music, `-`/`=` effects, `O` options, `Enter` confirm, `U` auto-pick, `L` story/library. `Q` quits from the menus as a raw shortcut, not a bound action. Classic and Gamepad: Ctrl dashes (alt left click), Space fires actives (alt left click). MouseAim: right click dashes (alt Ctrl), left click fires actives (alt Space). Pad: d-pad/stick move, `RB` dash, `X` actives, Start pause, View map, `Y` cursor, `LB` mute, `RT`/`LT` zoom, `R3` reset zoom, `L3` minimap.
+- **The Ctrl caveat.** A lone modifier only reports under the Kitty protocol with `REPORT_ALL_KEYS_AS_ESCAPE_CODES`; `KeyboardMode::lone_ctrl` records whether it stuck. Without it Space dashes *and* fires actives (the old mapping) and the legends say so. Held movement uses real key releases when the protocol answers, else a short auto-repeat grace window.
+- **Gamepad** is behind the `gamepad` feature and read only while the terminal has focus (a pad in someone's lap must not drive a game nobody is watching). Tests inject `PadEvent`s, so no controller is needed.
+- **Aim** is deterministic: `TickInput.aim` is an `Option<Vec2>` in world pixels from the pointer (MouseAim) or the right stick (Gamepad) when deflected. Classic passes `None`, so weapons keep nearest-enemy targeting.
+- The **Controls** screen (from Options) captures a key/pad/mouse press, swaps conflicts, unbinds and resets a scheme; `KeyBind::from_event` refuses Cmd/Super, most Fn combinations and `Ctrl+C`.
+
+## UI screens
+
+- **Title**: rat plate, START RUN, the sector row (all six floors), OPTIONS, LIBRARY, THE NEST, QUIT, plus a controls legend that names the live dash key. `Story` (the intro crawl) opens from `L`.
+- **Sector select**: one card per floor with cleared/open/locked state and per-floor bests; picking a later floor starts a labelled **practice** run.
+- **Intros**: `MapIntro` is level 1's access-route card; `LevelIntro` is the plate for later levels.
+- **Playing**: the pixel viewport between a top and bottom HUD row, with the minimap (`MinimapSize`: Normal/Small/Hidden), the boss bar/warning/compass and the low-health cue from `HudState`. `Tab` opens the expanded full-level map (and pauses the simulation).
+- **LevelUp**: 1-of-3 cards with icon, stat line and flavor line; `1`/`2`/`3`, arrows + `Enter`, or a click. Auto-pick skips it with a toast.
+- **Paused**, **Options** (music, effects, minimap, cursor, mute, zoom, auto-pick, scheme, controls, dead zone, rumble, wipe the nest, back), **Controls**, **Chest**, **Shop**, **LevelComplete**, **KeepThree**, **Victory**, **End** (defeat or a finished practice run, with the incident report and bank tally).
+- **Library** (`game/library.rs`, `render/library.rs`): four tabs — BESTIARY, ARSENAL, FIELD GUIDE, FLOORS — over one registry of `Row`s built from exhaustive matches over the game's enums, so a new variant cannot ship without an entry (`registry_is_complete` fails otherwise). Facts are read from the real tables, never retyped. Discovery is render-side (`Library::survey` reads the ECS world and the fog, writes only the Library), so it cannot move a golden. Locked entries show as `???`; `RATRUN_LIBRARY_ALL=1` unveils the index for captures.
+- **The Nest** (`render/nest.rs`): the permanent-upgrade board, opened from the title, the incident report and the victory plate, read-only from the pause screen (no buying mid-run). Wiping it lives in Options and takes two presses.
+- **Console** (`console.rs` + `render/console.rs`): backtick/tilde drop-down with line editing, history, Tab completion and 800 lines of scrollback; the `COMMANDS` registry (`help`, `god`, `noclip`, `give`, `spawn`, `boss`, `floor`, `seed`, `zoom`, `fps`, `hitboxes`, `lights`, `bank`, `nest`, …). Feature-gated on `console` and switchable off with `RATRUN_CONSOLE=0`. **Every state-changing command flags the run "CONSOLE USED"**, which blocks high scores, campaign records, library counters and nest banking.
+
+## Audio
+
+`audio.rs` is fully procedural — no asset files. `AudioEngine::new()` returns `None` when there is no device and everything no-ops silently. The simulation never calls audio: systems push `Sfx` variants into `SfxQueue`, and the App drains and de-duplicates them per frame (a 16-shot nova is one sound) and sets music intensity. Music is a custom infinite `rodio::Source` (`MusicSynth`) with a per-`Theme` key/scale/pattern; an `Arc<AtomicU32>` intensity gates the lead and hat layers. Volumes are 0..=100 in steps of 5 and persisted; `RATRUN_MUSIC_VOLUME`/`RATRUN_SFX_VOLUME` pin them for a session.
+
+## Bot and batch tooling
+
+- **`ratrun --ai [N]`** (`spectate.rs`): a wall of N (default 16, max 32) self-playing games on worker threads, each rendering a real `World::draw` into its own pixel buffer, with captions, outcome plates and a summary strip. No audio is ever constructed. Keys: `+`/`-` speed, Space pause, `1`–`9` or a click zoom a game, `Esc` unzoom, `R` restart the wall, `Q` quit. Flags: `--seed S`, `--skill expert|casual`, `--level 1|2|3`, `--once`.
+- **`ratrun --bot-batch N`** (`autoplay/batch.rs`): headless seeded campaigns at full speed on `--threads` workers, no terminal, no render, no audio; prints win/clear rates with Wilson intervals, death causes, boss fight lengths, damage by source, boss DPS and timings (`--json` for the machine form). Flags that exist: `--seed`, `--level`, `--practice`, `--carry none|typical`, `--route <floor>`, `--skill expert|skilled|casual`, `--cycle-skills`, `--seed-exact`, `--max-sim-seconds`, `--threads`, `--analyze`, `--json`, `--trace`, `--caps W:P`, `--meta none|mid|max`. Companions: `--bot-compare a.json b.json`, `--bot-render a.json`. Determinism: run `i` uses seed `base + i` and the aggregate is built in run order, so identical batches print identically whatever the thread count.
+- **`--caps` / `--probe` / `--color <v>` / `--glyphs <v>`** are the terminal-capability flags (`term.rs`; see `TERMINALS.md`). `--bot-batch` is parsed *before* `--caps`, so the batch's `--caps W:P` never collides.
+- **The bot** (`game/bot.rs`) is a test instrument: it reads the simulation (enemies, bullets, telegraphed boss hazards, trap pads, the tile map) and feeds `move_dir`/`dash` into `World::update`. Two layers — a 2.4–3.2 s waypoint plan and a per-tick 16-heading danger-field steer — with a per-skill reaction delay. It claims chests and picks upgrades through the same paths as the App.
+
+## Where to add content
+
+Every item has exhaustive `match`es that must be touched or the build fails. Grep the type name; do not guess.
+
+- **Weapon**: `WeaponKind` (`game/weapon.rs`, append-only `all()`; `WEAPON_SLOTS` is asserted in tests) with stats, flavor, desc; a firing pattern in the matching `systems/weapons*.rs` (tag the bullet's `weapon`, emit `vfx::emit_weapon_fire`/`emit_weapon_hit`, pick an `Sfx`); the damage-ledger column is the kind index; an `art_icons` icon; the Library ARSENAL row.
+- **Enemy**: `EnemyKind` (`game/enemy.rs`, append-only) — `base_hp`, `speed`, contact damage, xp, `gold_row` (`game/shop.rs`), radius/size class, `steer`; behaviour in `systems/enemy_move.rs`/`enemy_wave3.rs`/`enemy_wave4.rs`; art in `art_enemy`; death feedback in `particle::vfx`; the Library BESTIARY row; and — if `game/roster.rs` is present — that kind's one row in the floor's `slots` table (replacing the stand-in the floor borrows today). Selection is `roster::pick_kind` behind `director::pick_kind`; its module docs list the remaining exhaustive arms a new kind must satisfy.
+- **Miniboss**: `MinibossKind` (`systems/miniboss.rs`) with `name`, `active_duration`, shape, hp and art in `art_miniboss`; `MINIBOSS_TIMES` if the schedule changes; the console completion table; the Library row.
+- **Boss**: `BossKind` (append-only) with `base_hp`, `pool_for_theme` (plus the `*_POOL` const — a second exhaustive match), `for_theme`, the `art_boss_*` module (its view structs/state enums are the spec), a controller in `systems/boss/<name>.rs`, the controller dispatch, the `BossState` enum, smoke hooks in `game/smoke.rs`, name/`all`, console `boss` completion and the Library row.
+- **Pickup**: `PickupKind` (`game/gem.rs`, appended after the three legacy kinds) — `color`, `name`, art in `art_floor::draw_pickup`, effect in `systems/powerups.rs` + `systems/loot.rs`, the HUD callout, the STYLE glossary and the Library FIELD GUIDE row.
+- **Floor/theme**: `Theme` (`game/level.rs`) — `stage`, `palette`, `all`/`playable`, boss pool, `levelgen::layout` furnishing, `levelgen/lights` and hazard placement, `art_floor`/`art_walls`/`art_props`, `lore::map_intro` + victory lines, the audio key/scale, `lighting::theme_ambient` and `lighting::fixtures::colors` (both exhaustive), the `render::campaign` plates, the Library FLOORS row.
+- **Passive**: `PassiveKind` (append-only `all()`, asserted `[_; 12]`) — `name`, flavor, desc, `apply_passive_stack`, icon, card/keep rendering, Library row.
+- **Splice**: `SpliceKind` (`game/shop.rs`, append-only `ALL`), price/bargain, `apply_splices`, the reader-only multiplier hooks, shelf/reroll logic, art, Library ARSENAL row.
+- **Nest track**: `Track` in `meta.rs` (the level table and `Track::prices`), `RunModifiers` + its `apply`, the nest screen rows, and the profile's serde default.
+- **Console command**: one `CommandSpec` row in `COMMANDS` plus a handler; set `read_only: false` if it mutates or the cheat flag will not fire. Arg kinds drive Tab completion.
+- **Library entry**: a `Key` variant, one `all_rows()` row, and the `Key::category`/`Key::kind_index`/group `facts`/`dossier` arms — `registry_is_complete` fails until they exist.
+- **New system**: `fn x_system(…)` in the matching `systems/` file, chained in `schedule.rs` at the exact slot (and added to the module-doc order map), plus a narrow test in the same file. **New resource**: define it in `game/ecs/resources.rs`; insert it permanently in `World::new` (scratch), or give it a spare twin and round-trip it in `begin_tick`/`end_tick` if the facade exposes it.
 
 ## Testing strategy
 
-Four layers, all runnable without audio/TTY: pure-logic unit tests (math, collision, director, loadout, scores, audio synth, damage numbers); **per-system narrow tests** in each `systems/*.rs`, driving one system through `begin_tick` → `ecs.run_system_cached(…)` → `end_tick` and asserting on facade caches; the **ported suite** in `game/ecs/tests.rs` (thousands of headless ticks across themes/viewports, plus spawn/wall/cap/nuke/tie-order regressions); and **`TestBackend` end-to-end** tests (`app.rs`, `render/*`) driving the full App + render stack with simulated keystrokes. Construct `App::new(false, None)` / `World::new(theme, seed)` to stay silent and deterministic. `ecs/harness.rs` is the determinism regression: six scripted seeded games (both scripts, all three themes) whose full state trace is hashed against goldens generated from the pre-port reference, so any change in numbers, rng draws or ordering fails `cargo test`.
+Everything runs without audio or a TTY (`cargo test`; the dev profile's `opt-level = 1` keeps full-run tests fast). The layers:
 
-The default profile is `[profile.dev] opt-level = 1`, so `cargo test` (no `--release`) is fast enough for the full-run tests.
+1. **Pure-logic unit tests** — math, collision, nav, director, loadout, scores, shop, meta, audio synthesis, damage numbers, term/palette.
+2. **Per-system narrow tests** in each `systems/*.rs`: `begin_tick` → `ecs.run_system_cached(…)` → `end_tick`, then assert on facade caches or entity state.
+3. **The ported suite** (`game/ecs/tests.rs`): thousands of headless ticks across themes and viewports, plus spawn/wall/cap/nuke/tie-order regressions.
+4. **`TestBackend` end-to-end** tests (`app.rs`, `render/*`): the full App and render stack with simulated keystrokes, clicks and pad events.
+5. **Gates**: `ecs/harness.rs` (determinism goldens) and `levelgen::tests::map_trace_pin` (map pin), plus the generator's cost and statistics measurements.
+
+Construct `App::new(false, None)` / `World::new(theme, seed)` to stay silent and deterministic. Never assert on a golden whose failure output you have not read.
 
 ## Spinning up workers
 
 When spinning up workers, use `/orchestration` to split the work across parallel child agents. They must show up under the **same workspace in Orca** as the coordinator, so the owner can tab-tile them in one window.
+
+## Standing rules for workers in this repo
+
+- **Workers do not compile or run tests.** Do not run `cargo` (build, check, test, clippy, run, fmt), `rustc` or `rustfmt` in a worker checkout. The coordinator merges the batch into the main checkout, compiles **once**, and fixes the breakage there. Write the tests you would have run and say what is unverified.
+- **Finished workers are cleared from Orca.** Once a worker reports `worker_done` its subtask is deleted so the workspace stays readable. Do not leave work un-reported, and do not start new work after reporting.

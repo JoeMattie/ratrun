@@ -1395,7 +1395,10 @@ fn floor_text(t: Theme) -> (&'static str, &'static str) {
 
 /// Facts the card shows under the dossier: short label/value lines with an
 /// optional five-cell bar.
-pub const FACT_ROWS: usize = 8;
+/// How many facts one card prints. Nine is the widest row set in the registry
+/// (a boss card: hit points, contact, phases, death, floor, **shares**, drops,
+/// answer — the pooled floors' `SHARES` row used to push `ANSWER` off the card).
+pub const FACT_ROWS: usize = 9;
 
 #[derive(Clone, Debug, Default)]
 pub struct Facts {
@@ -1579,6 +1582,10 @@ fn boss_facts(k: BossKind, f: &mut Facts) {
             "SHARES",
             format!("one of {} bosses here · or {}", pool.len(), others.join(", ")),
         );
+    } else {
+        // Every boss card carries the row, so "this floor has one fight" is
+        // said out loud instead of being inferred from a missing line.
+        f.push("SHARES", "the only boss on this floor");
     }
     f.push("DROPS", format!("{} gold + the floor", shop::BOSS_GOLD));
     f.push("ANSWER", boss_answer(k));

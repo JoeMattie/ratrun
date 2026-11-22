@@ -23,6 +23,7 @@ use crate::math::Vec2;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette::{mix, scale, Rgb};
 
+use super::collision::TileMap;
 use super::player::Player;
 use super::weapon::WeaponKind;
 
@@ -493,6 +494,24 @@ const PIP_CHARGING: Rgb = (236, 172, 108);
 const PIP_READY: Rgb = (255, 246, 214);
 const PIP_DENIED: Rgb = (238, 74, 84);
 
+/// The Super Dash charge ring: how many pips it has (a closed circle, unlike
+/// the seven-pip cooldown arc) and its colours — the weapon's own blue-white,
+/// so "charging the dash" never reads as "the dash is ready" (that is amber
+/// and near-white) or as a refusal (red).
+const CHARGE_PIPS: i32 = 18;
+const CHARGE_COLOR: Rgb = (198, 230, 255);
+const CHARGE_FULL: Rgb = (255, 255, 255);
+const CHARGE_SOCKET: Rgb = (46, 58, 84);
+
+/// Length of the Super Dash **lane preview**, in world px, at an empty and at a
+/// full meter (the charged dash travels up to twice the ordinary one).
+const PREVIEW_MIN_LEN: f32 = 46.0;
+const PREVIEW_MAX_LEN: f32 = 96.0;
+/// The preview's colour: the weapon's blue-white, drawn faint. Friendly
+/// information, never a telegraph (those are red or amber and drawn on the
+/// hostile layer).
+const PREVIEW_COLOR: Rgb = (150, 196, 255);
+
 /// The dash cooldown, attached to the rat: a shallow arc of five pips under it
 /// that fills back up as the cooldown runs out.
 ///
@@ -504,7 +523,11 @@ const PIP_DENIED: Rgb = (238, 74, 84);
 /// - **dashing**: the arc flashes bright as it drains;
 /// - **refused** (`dash_denied` running): the arc turns red and jitters one
 ///   pixel side to side, so a press that could not be spent is never silent
-///   (the matching `Sfx::DashDenied` blip comes from `player_system`).
+///   (the matching `Sfx::DashDenied` blip comes from `player_system`);
+/// - **charging** (`dash_charging`): the arc closes into a full ring that fills
+///   clockwise from the top in the Super Dash's own blue-white and pulses at a
+///   full meter — the hold-to-charge read, which is the only state that matters
+///   while it runs.
 ///
 /// Purely visual: no rng is drawn here (the jitter is keyed to the run clock),
 /// so the draw pass stays deterministic.
@@ -520,6 +543,12 @@ pub fn draw_dash_gauge(pb: &mut PixelBuffer, player: &Player, elapsed: f32, cam:
     let ready_pop = player.dash_ready_flash > 0.0;
     let denied = player.dash_denied > 0.0 && !ready;
     let centre = w2s(player.pos, cam);
+    // Holding the dash for a Super Dash replaces the cooldown arc with the
+    // charge ring: the meter is the only thing that matters while it fills.
+    if player.dash_charging {
+        draw_charge_ring(pb, centre, player.dash_charge, elapsed);
+        return;
+    }
     // A refused press shakes the gauge one pixel side to side at ~25 Hz.
     let shake = if denied {
         if (elapsed * 50.0) as i32 % 2 == 0 {
@@ -576,6 +605,82 @@ pub fn draw_dash_gauge(pb: &mut PixelBuffer, player: &Player, elapsed: f32, cam:
         let x = centre.0 + (dir.x * (GAUGE_RADIUS + 1.0)).round() as i32;
         let y = centre.1 + (dir.y * (GAUGE_RADIUS + 1.0)).round() as i32;
         pb.plot_add(x, y, (120, 120, 130));
+    }
+}
+
+/// The **Super Dash charge ring**: the on-rat arc closes into a circle that
+/// fills clockwise from the top as the meter fills, in the weapon's own
+/// blue-white (never the cooldown's amber, never a refusal's red).
+///
+/// At a full meter the lit pips pulse, which is the "held long enough" cue in
+/// the corner of the eye — the simulated meter keeps filling (it caps at 1.0)
+/// and never fires on its own, so the pulse is information, not a countdown.
+fn draw_charge_ring(pb: &mut PixelBuffer, centre: (i32, i32), charge: f32, elapsed: f32) {
+    let charge = charge.clamp(0.0, 1.0);
+    let full = charge >= 1.0;
+    let pulse = if full {
+        0.62 + 0.38 * (elapsed * 9.0).sin().abs()
+    } else {
+        1.0
+    };
+    for i in 0..CHARGE_PIPS {
+        let t = i as f32 / CHARGE_PIPS as f32;
+        // Clockwise from the top, so the fill reads like every other meter.
+        let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * t;
+        let dir = Vec2::from_angle(a);
+        let x = centre.0 + (dir.x * GAUGE_RADIUS).round() as i32;
+        let y = centre.1 + (dir.y * GAUGE_RADIUS).round() as i32;
+        if t < charge {
+            let colour = if full { CHARGE_FULL } else { CHARGE_COLOR };
+            blend(pb, x, y, colour, (0.45 + 0.55 * pulse).min(1.0));
+            blend(pb, x, y + 1, colour, (0.32 + 0.42 * pulse).min(1.0));
+            if full {
+                for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    blend(pb, x + dx, y + dy, CHARGE_COLOR, 0.22 * pulse);
+                }
+            }
+        } else {
+            blend(pb, x, y, CHARGE_SOCKET, 0.7);
+            blend(pb, x, y + 1, CHARGE_SOCKET, 0.45);
+        }
+    }
+}
+
+/// The **Super Dash lane preview**: a faint blue-white line from the rat along
+/// its dash direction, at the length the current charge would carry it, stopped
+/// by the first wall — so "where would this go" is answered before the release
+/// that spends the dash.
+///
+/// Friendly information: the colour is the weapon's own blue-white at low
+/// alpha, deliberately unlike the red/amber enemy telegraphs, and it is drawn
+/// under the rat. Pure drawing from player state + the tile grid; no rng, so
+/// the draw pass stays deterministic.
+pub fn draw_dash_preview(pb: &mut PixelBuffer, player: &Player, tiles: &TileMap, cam: Vec2) {
+    if !player.dash_charging {
+        return;
+    }
+    let charge = player.dash_charge.clamp(0.0, 1.0);
+    let face = if player.face.len_sq() > 1e-4 {
+        player.face.normalized()
+    } else {
+        Vec2::new(0.0, -1.0)
+    };
+    let len = PREVIEW_MIN_LEN + (PREVIEW_MAX_LEN - PREVIEW_MIN_LEN) * charge;
+    let alpha = 0.10 + 0.20 * charge;
+    // Two-pixel steps: a lane that reads as a line without drawing the whole
+    // corridor pixel by pixel every frame.
+    let mut d = 8.0f32;
+    while d <= len {
+        let p = player.pos + face * d;
+        if tiles.get_at(p).is_wall() {
+            // The wall is where the dash stops: mark it faintly and stop.
+            let s = w2s(p, cam);
+            blend(pb, s.0, s.1, PREVIEW_COLOR, alpha + 0.18);
+            break;
+        }
+        let s = w2s(p, cam);
+        blend(pb, s.0, s.1, PREVIEW_COLOR, alpha);
+        d += 2.0;
     }
 }
 

@@ -273,6 +273,13 @@ impl PadState {
         self.down[b.index()]
     }
 
+    /// Did `b` go **up** this frame? (A released pad button is the end of a
+    /// held dash charge; focus loss and unplugs drop the state without it, so a
+    /// lost pad cancels rather than fires.)
+    pub fn button_released(&self, b: PadBind) -> bool {
+        self.released[b.index()]
+    }
+
     /// This frame's menu-navigation step (d-pad/stick with repeat).
     pub fn nav_step(&self) -> Option<(i32, i32)> {
         self.nav_step

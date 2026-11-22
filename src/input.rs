@@ -189,6 +189,23 @@ pub struct InputState {
     /// A lone Ctrl **press** landed this frame. Never set by a repeat, so
     /// holding Ctrl dashes exactly once.
     pub dash_tap: bool,
+    /// Which dash inputs are physically **down** right now. The pad is queried
+    /// live from `pad` (it owns its own held state), so only the keyboard and
+    /// the mouse need a flag here. The keyboard flag is only ever set where the
+    /// terminal reports key releases (`kitty`): without them a key can only
+    /// tap, and a hold would stick forever.
+    dash_kb_down: bool,
+    dash_mouse_down: bool,
+    /// One-frame edges of the whole dash input (any device), which is what
+    /// drives the Super Dash charge: the press starts it, the release fires it.
+    dash_down_edge: bool,
+    dash_up_edge: bool,
+    /// A **fresh** dash press this frame, auto-repeat excluded (any device).
+    dash_fresh: bool,
+    /// Set when a held dash input was dropped **without** a release edge
+    /// (terminal focus loss, pad unplugged): the charge is cancelled, never
+    /// fired.
+    dash_cancelled: bool,
     /// Discrete key presses captured this frame (menus, pause, dash, quit).
     pub pressed: Vec<KeyEvent>,
     /// Ordered UI gestures for this frame, retaining the position of each press.
@@ -223,6 +240,12 @@ impl InputState {
             lone_ctrl: kitty,
             ctrl_down: false,
             dash_tap: false,
+            dash_kb_down: false,
+            dash_mouse_down: false,
+            dash_down_edge: false,
+            dash_up_edge: false,
+            dash_fresh: false,
+            dash_cancelled: false,
             pressed: Vec::new(),
             mouse_pos: None,
             mouse_events: Vec::new(),
@@ -239,6 +262,10 @@ impl InputState {
         self.mouse_clicked = false;
         self.mouse_active = false;
         self.dash_tap = false;
+        self.dash_down_edge = false;
+        self.dash_up_edge = false;
+        self.dash_fresh = false;
+        self.dash_cancelled = false;
         self.mod_taps = [false; 3];
         self.pad.begin_frame();
     }
@@ -252,7 +279,17 @@ impl InputState {
 
     /// Inject one pad event (the seam tests use; `main` feeds these from gilrs).
     pub fn pad_event(&mut self, ev: PadEvent) {
+        let was = self.dash_input_held();
         self.pad.apply(ev);
+        if matches!(ev, PadEvent::Disconnected) {
+            // A pad unplugged mid-charge never reports its release: cancel the
+            // charge instead of firing it.
+            if was {
+                self.cancel_dash();
+            }
+        } else {
+            self.note_dash_transition(was);
+        }
         if self.pad.active() {
             self.last_device = Device::Pad;
             self.prefer_mouse = false;
@@ -316,6 +353,116 @@ impl InputState {
         self.action_pressed(Action::Dash)
     }
 
+    /// Was there a **fresh** dash press this frame, from any device (key, mouse
+    /// button or pad button)? An auto-repeat is never one, so a terminal whose
+    /// only "hold" is the OS repeat key rate cannot machine-gun dashes, and the
+    /// Super Dash charge starts exactly once per real press.
+    pub fn dash_pressed_fresh(&self) -> bool {
+        self.dash_fresh
+    }
+
+    /// Does this terminal report a **key release** for the dash key? Only with
+    /// the Kitty keyboard protocol (`REPORT_EVENT_TYPES`). Where it does not, a
+    /// held key cannot be told apart from a tap, so keys only tap and the Super
+    /// Dash is charged with the mouse button or the pad — the Controls screen
+    /// note and the legend say so.
+    pub fn dash_key_holds(&self) -> bool {
+        self.kitty
+    }
+
+    /// Did the dash input go **down** this frame? (The press edge of a key, a
+    /// mouse button or a pad button bound to the dash Action.)
+    pub fn dash_down(&self) -> bool {
+        self.dash_down_edge
+    }
+
+    /// Is the dash input still **held**? A key only counts where the terminal
+    /// reports its release (see [`dash_key_holds`](Self::dash_key_holds)); the
+    /// mouse and the pad always report theirs.
+    pub fn dash_held(&self) -> bool {
+        self.dash_input_held()
+    }
+
+    /// Did the dash input go **up** this frame? This is what fires a charged
+    /// Super Dash. It is never set by focus loss or an unplugged pad: those
+    /// *cancel* the charge instead (see [`dash_cancelled`](Self::dash_cancelled)).
+    pub fn dash_up(&self) -> bool {
+        self.dash_up_edge
+    }
+
+    /// Was a held dash input dropped without a release edge (the terminal lost
+    /// focus, the pad was unplugged)? The Super Dash charge must be cancelled,
+    /// never fired.
+    pub fn dash_cancelled(&self) -> bool {
+        self.dash_cancelled
+    }
+
+    /// Is any device's dash input down right now? The pad is asked through the
+    /// live bindings (its own held state), never cached here, so a rebind or a
+    /// focus change cannot leave a stale flag behind.
+    fn dash_input_held(&self) -> bool {
+        if self.dash_kb_down || self.dash_mouse_down {
+            return true;
+        }
+        let b = self.controls.active();
+        for slot in b.kbm_slots(Action::Dash) {
+            if let Binding::Pad(p) = slot {
+                if self.pad.button_down(p) {
+                    return true;
+                }
+            }
+        }
+        if let Binding::Pad(p) = b.pad_of(Action::Dash) {
+            return self.pad.button_down(p);
+        }
+        false
+    }
+
+    /// Turn the held-state change around one event into the frame's dash edges.
+    fn note_dash_transition(&mut self, was: bool) {
+        let now = self.dash_input_held();
+        if now && !was {
+            self.dash_down_edge = true;
+            self.dash_fresh = true;
+        }
+        if was && !now {
+            self.dash_up_edge = true;
+        }
+    }
+
+    /// A held dash input vanished **without** a release (focus loss, unplugged
+    /// pad): drop it and report the cancellation, never a release edge.
+    fn cancel_dash(&mut self) {
+        self.dash_kb_down = false;
+        self.dash_mouse_down = false;
+        self.dash_down_edge = false;
+        self.dash_up_edge = false;
+        self.dash_cancelled = true;
+    }
+
+    /// Is this key event the live dash input's key? A Ctrl binding on a terminal
+    /// without lone-modifier reporting is delivered as Space (the pre-Ctrl
+    /// mapping), so that is what counts there.
+    fn dash_key_event(&self, ev: &KeyEvent) -> bool {
+        let b = self.controls.active();
+        if !self.lone_ctrl && b.get(Action::Dash) == Binding::Key(KeyBind::Ctrl) {
+            return ev.code == KeyCode::Char(' ');
+        }
+        b.kbm_slots(Action::Dash)
+            .iter()
+            .any(|slot| matches!(slot, Binding::Key(k) if k.matches_movement(ev)))
+    }
+
+    /// Is this mouse button bound to the dash Action? (The classic left click,
+    /// mouse aim's right click.)
+    fn dash_button(&self, button: MouseButton) -> bool {
+        self.controls
+            .active()
+            .kbm_slots(Action::Dash)
+            .iter()
+            .any(|slot| matches!(slot, Binding::Mouse(m) if m.button() == Some(button)))
+    }
+
     /// Was the active-weapon release asked for this frame? Always Space: in the
     /// Ctrl mode that is Space's only job, and without lone-Ctrl reporting
     /// Space dashes at the same time (the press is shared, as it always was).
@@ -352,13 +499,27 @@ impl InputState {
             _ => return false,
         };
         if slot != 0 {
+            let was = self.dash_input_held();
+            let dash_key = self.dash_key_event(&ev);
             // Shift/Alt are bindable (Controls screen) but never menu keys.
             if ev.kind == KeyEventKind::Press {
                 self.mod_taps[slot] = true;
                 self.last_device = Device::Keyboard;
             }
+            // A rebindable lone modifier can be the dash key: only a terminal
+            // that reports lone modifiers can report its release too, so the
+            // hold is only ever tracked there.
+            if dash_key {
+                match ev.kind {
+                    KeyEventKind::Press | KeyEventKind::Repeat => self.dash_kb_down = true,
+                    KeyEventKind::Release => self.dash_kb_down = false,
+                }
+                self.note_dash_transition(was);
+            }
             return true;
         }
+        let was = self.dash_input_held();
+        let dash_key = self.dash_key_event(&ev);
         match ev.kind {
             KeyEventKind::Press => {
                 self.ctrl_down = true;
@@ -370,6 +531,15 @@ impl InputState {
             // Ctrl must not machine-gun dashes.
             KeyEventKind::Repeat => {}
             KeyEventKind::Release => self.ctrl_down = false,
+        }
+        // The Ctrl hold: this is the Super Dash charge on a terminal that
+        // reports a lone modifier press (the flag that also reports its up).
+        if dash_key {
+            match ev.kind {
+                KeyEventKind::Press | KeyEventKind::Repeat => self.dash_kb_down = true,
+                KeyEventKind::Release => self.dash_kb_down = false,
+            }
+            self.note_dash_transition(was);
         }
         true
     }
@@ -436,6 +606,29 @@ impl InputState {
                 }
             }
         }
+        // Dash hold edges (the Super Dash charge). A key counts as held only
+        // where the terminal reports its release; a terminal that cannot report
+        // one can only tap, and its auto-repeat is never a release or a re-press.
+        if self.dash_key_event(&ev) && !matches!(ev.code, KeyCode::Modifier(_)) {
+            let was = self.dash_input_held();
+            match ev.kind {
+                KeyEventKind::Press => {
+                    if self.kitty {
+                        self.dash_kb_down = true;
+                        self.note_dash_transition(was)
+                    } else {
+                        // No key-up to come: the press *is* the gesture (a tap).
+                        self.dash_down_edge = true;
+                        self.dash_fresh = true;
+                    }
+                }
+                KeyEventKind::Repeat => {}
+                KeyEventKind::Release => {
+                    self.dash_kb_down = false;
+                    self.note_dash_transition(was)
+                }
+            }
+        }
     }
 
     pub fn handle_mouse(&mut self, ev: MouseEvent) {
@@ -473,17 +666,36 @@ impl InputState {
             }
             _ => {}
         }
+        // Dash hold edges: a mouse button bound to the dash (the classic left
+        // click, mouse aim's right click) is held until its Up — and a terminal
+        // always reports a mouse release, whatever the keyboard protocol says.
+        if let MouseEventKind::Down(b) | MouseEventKind::Up(b) = ev.kind {
+            if self.dash_button(b) {
+                let was = self.dash_input_held();
+                self.dash_mouse_down = matches!(ev.kind, MouseEventKind::Down(_));
+                self.note_dash_transition(was);
+            }
+        }
     }
 
     /// Forget every held movement key (and mouse button). Called when the
     /// terminal loses focus: a release for a key or button that was down at
     /// that moment never arrives, so held state would otherwise stick forever.
     pub fn release_all(&mut self) {
+        // A held dash input is dropped here: focus loss and a pad unplug never
+        // report their release, so the Super Dash charge is *cancelled* rather
+        // than fired (see `cancel_dash`).
+        let dash_held = self.dash_input_held();
         self.grace = [0.0; 4];
         self.mouse_down = false;
         // A Ctrl held across a focus change never reports its release either.
         self.ctrl_down = false;
+        self.dash_kb_down = false;
+        self.dash_mouse_down = false;
         self.pad.set_focused(false);
+        if dash_held {
+            self.cancel_dash();
+        }
     }
 
     fn down(&self, d: Dir) -> bool {
@@ -1056,5 +1268,132 @@ mod tests {
         assert_eq!(s.dash_key(), DashKey::Space);
         s.set_lone_ctrl(true);
         assert_eq!(s.dash_key(), DashKey::Ctrl);
+    }
+
+    // ---- Super Dash: hold to charge, release to fire ----------------------
+
+    /// A Kitty-protocol key reports its release, so the dash has all three
+    /// edges: the press starts a charge, the hold fills it, the key-up fires it.
+    /// Auto-repeat is neither a release nor a re-press.
+    #[test]
+    fn dash_key_down_held_and_up_in_kitty_mode() {
+        let mut s = InputState::new(true);
+        assert!(s.dash_key_holds(), "the protocol reports key releases");
+        s.begin_frame();
+        s.handle_key(ctrl(KeyEventKind::Press));
+        assert!(s.dash_down(), "the press edge must report");
+        assert!(s.dash_held(), "Ctrl is held until its release");
+        assert!(s.dash_pressed_fresh());
+        assert!(!s.dash_up());
+
+        s.begin_frame();
+        s.handle_key(ctrl(KeyEventKind::Repeat));
+        assert!(!s.dash_down(), "auto-repeat is never a re-press");
+        assert!(!s.dash_up(), "auto-repeat is never a release");
+        assert!(s.dash_held());
+
+        s.begin_frame();
+        s.handle_key(ctrl(KeyEventKind::Release));
+        assert!(s.dash_up(), "the key-up is the release edge");
+        assert!(!s.dash_held());
+        assert!(!s.dash_down());
+        assert!(!s.dash_cancelled());
+    }
+
+    /// A mouse button charges in either input mode: a terminal always reports
+    /// the button's Up, whatever the keyboard protocol can do.
+    #[test]
+    fn dash_mouse_button_down_held_and_up() {
+        for kitty in [true, false] {
+            let mut s = InputState::new(kitty);
+            s.begin_frame();
+            s.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 4, 5));
+            assert!(s.dash_down(), "LMB down must report (kitty={kitty})");
+            assert!(s.dash_held(), "LMB charges (kitty={kitty})");
+            s.begin_frame();
+            assert!(!s.dash_down() && !s.dash_up());
+            s.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 4, 5));
+            assert!(s.dash_up(), "LMB up must fire (kitty={kitty})");
+            assert!(!s.dash_held());
+        }
+    }
+
+    /// The pad's dash button arrives through the injection seam: down holds,
+    /// up releases (and the pad's own released flag is set for the frame).
+    #[test]
+    fn dash_pad_button_down_held_and_up() {
+        use crate::controls::PadBind;
+        let mut s = InputState::new(false);
+        s.pad_event(PadEvent::Connected);
+        s.begin_frame();
+        s.pad_event(PadEvent::Button(PadBind::R1, true));
+        assert!(s.dash_down() && s.dash_held());
+        s.begin_frame();
+        assert!(!s.dash_down() && s.dash_held());
+        s.pad_event(PadEvent::Button(PadBind::R1, false));
+        assert!(s.dash_up() && !s.dash_held());
+        assert!(s.pad.button_released(PadBind::R1));
+    }
+
+    /// The fallback: a terminal that cannot report key releases can only tap.
+    /// The press still reports its edge (so the Super Dash fires an ordinary
+    /// tap dash) but there is never a held state or a release edge to charge
+    /// with — the mouse and the pad are how that terminal charges.
+    #[test]
+    fn fallback_keys_tap_and_the_mouse_charges() {
+        let mut s = InputState::new(false);
+        assert!(!s.dash_key_holds());
+        s.begin_frame();
+        s.handle_key(key(KeyCode::Char(' '), KeyEventKind::Press));
+        assert!(s.dash_down(), "the tap must still report its press");
+        assert!(s.dash_pressed_fresh());
+        assert!(!s.dash_held(), "a key with no release cannot hold");
+
+        // Its auto-repeat never re-presses (the old `pressed` list does keep
+        // the repeat for the legacy dash path; the fresh edge does not).
+        s.begin_frame();
+        s.handle_key(key(KeyCode::Char(' '), KeyEventKind::Repeat));
+        assert!(!s.dash_down() && !s.dash_held() && !s.dash_up());
+        assert!(!s.dash_pressed_fresh(), "a repeat is not a fresh press");
+
+        // The mouse still charges: its release always arrives.
+        s.begin_frame();
+        s.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
+        assert!(s.dash_down() && s.dash_held());
+        s.begin_frame();
+        s.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, 2));
+        assert!(s.dash_up() && !s.dash_held());
+    }
+
+    /// Losing the terminal's focus while charging drops the hold: there is no
+    /// release edge, so the charge is cancelled rather than fired.
+    #[test]
+    fn focus_loss_cancels_a_dash_hold_without_a_release_edge() {
+        let mut s = InputState::new(true);
+        s.begin_frame();
+        s.handle_key(ctrl(KeyEventKind::Press));
+        assert!(s.dash_held());
+        s.begin_frame();
+        s.set_focused(false);
+        assert!(!s.dash_held(), "the held input must be dropped");
+        assert!(!s.dash_up(), "a focus loss must never look like a release");
+        assert!(s.dash_cancelled(), "the charge must be cancelled, not fired");
+        assert!(!s.dash_down());
+    }
+
+    /// A pad unplugged mid-charge cancels it too: its release never arrives.
+    #[test]
+    fn pad_unplug_cancels_a_dash_hold() {
+        use crate::controls::PadBind;
+        let mut s = InputState::new(false);
+        s.pad_event(PadEvent::Connected);
+        s.begin_frame();
+        s.pad_event(PadEvent::Button(PadBind::R1, true));
+        assert!(s.dash_held());
+        s.begin_frame();
+        s.pad_event(PadEvent::Disconnected);
+        assert!(!s.dash_held());
+        assert!(!s.dash_up());
+        assert!(s.dash_cancelled());
     }
 }

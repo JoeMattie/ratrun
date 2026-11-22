@@ -8,7 +8,7 @@
 //! sits, so the pointer hit rectangles the app registers can never disagree
 //! with what the player sees. All state changes go through [`Action`].
 
-use ratatui::layout::{Margin, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::Frame;
@@ -162,8 +162,13 @@ fn band(r: Rect, row: u16, height: u16) -> Rect {
     Rect::new(r.x, r.y + row, r.width, height.min(r.height - row))
 }
 
-/// A row's label/value strip, inset one cell from the panel edge so the
-/// selection marker has its own column.
+/// A row's label/value strip, one cell in from the selection marker column.
+///
+/// `inner` is the plate's **content** rect (below its border), so row 0 sits two
+/// rows down: the header owns row 0 and its divider row 1. Rows used to start at
+/// the plate's first row, which put the header's `─` divider *on* the MUSIC row
+/// at 57x20 — the label was painted over the rule and the rest of the rule ran
+/// on beside it.
 fn row_rect(inner: Rect, index: usize) -> Rect {
     band(inner, 2 + index as u16, 1)
 }
@@ -175,7 +180,16 @@ pub fn layout(area: Rect) -> OptionsLayout {
         PANEL_H.min(area.height),
         area,
     );
-    let inner = card.inner(Margin::new(2, 0));
+    // `menu::panel` returns the plate's content rect: the border takes the
+    // first and last row, so the content starts at `card.y + 1`. The rows hang
+    // off that rect (see `row_rect`), which is what keeps the header's divider
+    // above them.
+    let inner = Rect::new(
+        card.x.saturating_add(2),
+        card.y.saturating_add(1),
+        card.width.saturating_sub(4),
+        card.height.saturating_sub(2),
+    );
     let rows = std::array::from_fn(|i| row_rect(inner, i));
     let bars = std::array::from_fn(|i| {
         let r = rows[i];
@@ -294,11 +308,15 @@ pub fn draw(f: &mut Frame, area: Rect, view: &OptionsView, hits: &mut HitMap) {
         hits.add(lay.panel, Target::OptionsBack);
         return;
     }
+    // The rows come from the layout, so the header and its divider are placed
+    // *from the first row up*. Nothing here can land on a label.
+    let header_y = lay.rows[0].y.saturating_sub(2);
+    let rule_y = lay.rows[0].y.saturating_sub(1);
 
     // Header: what this screen is, and which channel is where.
     let wide = inner.width >= 34;
     if wide && !lay.rows[0].is_empty() {
-        let header = band(inner, 0, 1);
+        let header = Rect::new(inner.x, header_y, inner.width, 1);
         f.render_widget(
             Line::styled(
                 if inner.width >= 48 {
@@ -313,7 +331,7 @@ pub fn draw(f: &mut Frame, area: Rect, view: &OptionsView, hits: &mut HitMap) {
         );
         f.render_widget(
             Line::styled("─".repeat(usize::from(inner.width)), ink(TRACK)),
-            band(inner, 1, 1),
+            Rect::new(inner.x, rule_y, inner.width, 1),
         );
     }
 
@@ -454,7 +472,9 @@ pub fn draw(f: &mut Frame, area: Rect, view: &OptionsView, hits: &mut HitMap) {
     }
 
     // Legend + a note about what the sliders actually do.
-    let legend_row = band(inner, 2 + ROW_COUNT as u16, 1);
+    // One row under the last row (BACK), and the note two under it.
+    let legend_y = lay.rows[ROW_COUNT - 1].y.saturating_add(1);
+    let legend_row = Rect::new(inner.x, legend_y, inner.width, 1);
     if !legend_row.is_empty() && inner.height > ROW_COUNT as u16 + 3 {
         f.render_widget(
             Line::styled(
@@ -479,7 +499,7 @@ pub fn draw(f: &mut Frame, area: Rect, view: &OptionsView, hits: &mut HitMap) {
         };
         f.render_widget(
             Line::styled(note, ink(if view.muted { EDGE } else { MUTED })).centered(),
-            band(inner, 4 + ROW_COUNT as u16, 1),
+            Rect::new(inner.x, legend_y.saturating_add(2), inner.width, 1),
         );
     }
 
@@ -569,6 +589,42 @@ mod tests {
             // Selecting a different row moves the marker.
             let (text, _) = frame(w, h, &view(BACK_ROW));
             assert!(text.contains("▸"));
+        }
+    }
+
+    /// No plate rule is ever drawn through a row: the header divider sits
+    /// above the first row, so the selected MUSIC row (the 57x20 review case)
+    /// shows its label and slider with no `─` in them.
+    #[test]
+    fn the_header_rule_is_never_drawn_through_the_music_row() {
+        for (w, h) in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let v = view(MUSIC_ROW);
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            let mut hits = HitMap::default();
+            term.draw(|f| draw(f, f.area(), &v, &mut hits)).unwrap();
+            let buf = term.backend().buffer();
+            let row = hits
+                .rect_for(Target::OptionsRow(MUSIC_ROW))
+                .unwrap_or_else(|| panic!("{w}x{h}: no MUSIC row"));
+            let text: String = (row.x..row.right())
+                .map(|x| buf[(x, row.y)].symbol())
+                .collect();
+            assert!(text.contains("MUSIC"), "{w}x{h}: {text:?}");
+            assert!(
+                !text.contains('─'),
+                "{w}x{h}: a rule runs through the MUSIC row: {text:?}"
+            );
+            assert!(
+                row.y > 0,
+                "{w}x{h}: the MUSIC row has no room above it for the header"
+            );
+            let above: String = (row.x..row.right())
+                .map(|x| buf[(x, row.y - 1)].symbol())
+                .collect();
+            assert!(
+                above.contains('─'),
+                "{w}x{h}: the header divider is not above the first row: {above:?}"
+            );
         }
     }
 

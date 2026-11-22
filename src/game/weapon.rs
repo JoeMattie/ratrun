@@ -272,9 +272,9 @@ impl WeaponKind {
             WeaponKind::TailThrash => "ACTIVE: Space sweeps a shot-clearing arc.",
             WeaponKind::SonicSqueak => "ACTIVE: Space blasts a stunning ring.",
             // The dash weapon's card teaches the trigger the same way: the
-            // dash key, not Space-the-charge (it has no charge gauge).
+            // dash key, and (since the hold-to-charge pass) the hold itself.
             WeaponKind::LaserEyes => "Sweeps piercing beams ahead of you.",
-            WeaponKind::SuperDash => "DASH: wounds every foe you dash through.",
+            WeaponKind::SuperDash => "DASH: hold to charge, release to dash through foes.",
             WeaponKind::AcidRain => "Drops staggered acid splashes nearby.",
             WeaponKind::Hantavirus => "Tags a foe for 3 hits, then jumps on.",
             WeaponKind::SpikedTail => "Lashes one foe, then bursts at the hit.",

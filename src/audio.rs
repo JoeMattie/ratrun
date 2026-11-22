@@ -263,11 +263,18 @@ pub enum Sfx {
     CobraSpiral,
     /// The body unspooling.
     CobraDeath,
+    // ---- Super Dash's hold-to-charge (appended for batch 4) ----
+    /// The charge whine while the dash is held: a thin saw climbing for about
+    /// as long as the meter takes to fill at level 1.
+    DashCharge,
+    /// The click at a full meter, so "held long enough" is audible without
+    /// looking at the gauge.
+    DashCharged,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 151] = [
+    pub const ALL: [Sfx; 153] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -440,6 +447,9 @@ impl Sfx {
         Sfx::CobraLoosen,
         Sfx::CobraSpiral,
         Sfx::CobraDeath,
+        // Super Dash's hold-to-charge.
+        Sfx::DashCharge,
+        Sfx::DashCharged,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -596,6 +606,8 @@ impl Sfx {
             Sfx::CobraLoosen => "COBRA_LOOSEN",
             Sfx::CobraSpiral => "COBRA_SPIRAL",
             Sfx::CobraDeath => "COBRA_DEATH",
+            Sfx::DashCharge => "DASH_CHARGE",
+            Sfx::DashCharged => "DASH_CHARGED",
         }
     }
 
@@ -739,6 +751,8 @@ impl Sfx {
             | Sfx::CobraLoosen
             | Sfx::CobraSpiral
             | Sfx::CobraDeath => 1,
+            // A rising whine and the full-meter click: one recording each.
+            Sfx::DashCharge | Sfx::DashCharged => 1,
         }
     }
 
@@ -878,6 +892,8 @@ impl Sfx {
             Sfx::CobraSway | Sfx::CobraLoosen | Sfx::CobraSpiral => 1,
             Sfx::CobraTaste => 0,
             Sfx::CobraDeath => 3,
+            // Pure dash feedback: never steals a voice from a hit or a kill.
+            Sfx::DashCharge | Sfx::DashCharged => 0,
         }
     }
 
@@ -9579,6 +9595,99 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             }
             m.add_short_tail(0.26, 2400.0);
             m.finish(0.52, 1.4, 2.0, 60.0)
+        }
+
+        // The Super Dash's hold: a thin rising whine that lasts about as long as
+        // the meter takes to fill at level 1, so the ear can hear the charge
+        // climb without watching the gauge. One recording (no variants): a
+        // pitch-shifted take would read as a different charge.
+        Sfx::DashCharge => {
+            let mut m = MixBuf::new(0.92);
+            // The whine: a saw climbing a couple of octaves, filtered so the
+            // top of the climb bites instead of squealing.
+            m.add_osc(OscLayer {
+                start_s: 0.02,
+                dur_s: 0.80,
+                f0: 220.0,
+                f1: 880.0,
+                pitch_pow: 1.4,
+                wave: Wave::Saw,
+                gain: 0.26,
+                attack_s: 0.06,
+                decay_pow: 0.7,
+                filter: FilterMode::LowPass,
+                fc0: 900.0,
+                fc1: 5200.0,
+                q: 1.1,
+                vib_hz: 11.0,
+                vib_depth: 0.012,
+                ..Default::default()
+            });
+            // A quieter partial an octave up, so the top of the climb carries.
+            m.add_osc(OscLayer {
+                start_s: 0.10,
+                dur_s: 0.70,
+                f0: 440.0,
+                f1: 1760.0,
+                pitch_pow: 1.4,
+                wave: Wave::Triangle,
+                gain: 0.12,
+                attack_s: 0.07,
+                decay_pow: 0.8,
+                ..Default::default()
+            });
+            // Air pulled in behind it.
+            m.add_noise(NoiseLayer {
+                start_s: 0.02,
+                dur_s: 0.78,
+                pink: true,
+                gain: 0.16,
+                attack_s: 0.09,
+                decay_pow: 0.7,
+                filter: FilterMode::HighPass,
+                fc0: 600.0,
+                fc1: 3400.0,
+                fc_pow: 1.2,
+                q: 0.8,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.finish(0.30, 1.2, 30.0, 90.0)
+        }
+
+        // A full meter: a short bright metallic click with a small bell under
+        // it, so "held long enough" is audible on its own.
+        Sfx::DashCharged => {
+            let mut m = MixBuf::new(0.16);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.020,
+                pink: false,
+                gain: 0.45,
+                attack_s: 0.0006,
+                decay_pow: 2.6,
+                filter: FilterMode::BandPass,
+                fc0: 3200.0,
+                fc1: 2100.0,
+                q: 2.0,
+                seed: base_seed,
+                ..Default::default()
+            });
+            for &(f, g, d) in &[(1568.0f32, 0.30f32, 0.14f32), (2349.0, 0.16, 0.11)] {
+                m.add_osc(OscLayer {
+                    start_s: 0.004,
+                    dur_s: d,
+                    f0: f,
+                    f1: f * 0.99,
+                    pitch_pow: 0.6,
+                    wave: Wave::Sine,
+                    gain: g,
+                    attack_s: 0.0008,
+                    decay_pow: 2.4,
+                    ..Default::default()
+                });
+            }
+            m.finish(0.26, 1.1, 2.0, 24.0)
         }
     }
 }

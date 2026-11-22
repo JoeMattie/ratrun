@@ -31,9 +31,11 @@
 //! levels far too hard on the old 300 s curves, so the wave-3 re-base is
 //! deliberately gentle: **no clock offset** (every stage opens with the same
 //! grace) and only +5 % / +10 % ordinary hp after 3:00 ([`LEVEL_HP_EXTRA`]).
-//! The per-level difference now lives in kind ([`LEVEL_MIX`]), elite cadence
-//! ([`LEVEL_ELITE_INTERVAL`]) and a small damage/speed ramp
-//! ([`enemy_mods_for`]).
+//! The campaign level now only scales *numbers* (hp, damage, speed, elite
+//! cadence): the **kinds** come from the floor's own roster
+//! ([`crate::game::roster`]), looked up by [`Theme`](crate::game::level::Theme),
+//! so a practice run ([`crate::game::world::World::difficulty_override`]` =
+//! Some(0)`) still meets the Flatbed's cast with the Sewer's scalars.
 //!
 //! ## The boss
 //!
@@ -41,14 +43,24 @@
 //! it raises the `BossDue` signal ([`raise_boss_due`]) and the boss framework
 //! spawns the themed boss in its arena. The 25 s warning before [`BOSS_TIME`]
 //! is unchanged (`render::overlay::BOSS_WARNING_SECS`). Once the boss is on the
-//! floor the ordinary horde falls to **cleanup pace** (1 body/s, Skitterer/Bat,
-//! live budget 35) — the design's last row — while the curve clock freezes so
-//! the boss's own pool cannot run away.
+//! floor the ordinary horde falls to **cleanup pace** (1 body/s, the floor's own
+//! A/B fodder, live budget 35) — the roster's 15+ row — while the curve clock
+//! freezes so the boss's own pool cannot run away.
+//!
+//! ## Kind selection
+//!
+//! The director no longer owns a kind table. [`crate::game::roster`] holds one
+//! static row per floor, and every spawn source (ring pulses, room waves,
+//! flanking groups and fallbacks) asks it the same question with the same clock
+//! and the same live caps, so a floor can never spawn a kind it does not own and
+//! a per-floor content pass only ever edits one roster row.
 
-use rand::{Rng, RngExt};
+use rand::Rng;
 
 use super::enemy::EnemyKind;
 use crate::game::ecs::resources::BossDue;
+use crate::game::level::Theme;
+use crate::game::roster::{self, SlotCaps};
 
 /// The leg of the clock a *level* is paced against. Since the campaign change
 /// this is the build-up, not a win condition: survival no longer ends a level,
@@ -153,39 +165,16 @@ pub const LEVEL_HP_EXTRA_AFTER: f32 = 180.0;
 /// up and makes the level easier again.
 ///
 /// The later stages keep the horde's bite in *bodies* rather than numbers: more
-/// elites and a different kind mix. These are the base intervals the running
-/// system uses when the curve's elite chance is zero; [`elite_interval_at`]
-/// follows the §1 elite-chance column instead.
+/// elites and a different kind mix (the mix itself is the floor's roster — see
+/// [`crate::game::roster`]). These are the base intervals the running system
+/// uses when the curve's elite chance is zero; [`elite_interval_at`] follows
+/// the §1 elite-chance column instead.
 pub const LEVEL_ELITE_INTERVAL: [f32; 3] = [ELITE_INTERVAL, 27.0, 20.0];
 
-/// Per-level weighting of the kind table ([`pick_kind_for`]), columns in
-/// [`KIND_ORDER`].
-///
-/// Level 1 is the curve's own mix. The **Kitchen** keeps its ranged Spitters
-/// and Cats (a carried build that kites melee all day has to dodge a stand-off
-/// line), but the first cut (Cat ×1.7, Spitter ×2.0) was the single hardest
-/// thing in the merged game: it killed Expert on level 2 34 % of the time, more
-/// than the Lab killed anybody, so its Cat/Spitter weights came down and its
-/// Brute weight up. The **Lab** is still the fast swarm (Bats stay the largest
-/// single share, so the rat cannot out-walk the horde it arrived with) but it
-/// fields a real ranged line too: after the damage ramp came down the Lab was
-/// the *easiest* cleared level of the three, and Spitters are the pressure that
-/// separates a reading player from a reacting one — the bots' Lab gap only
-/// opens up when the threat is something you can see coming.
-const LEVEL_MIX: [[f32; 5]; 3] = [
-    [1.0, 1.0, 1.0, 1.0, 1.0],
-    [1.2, 1.0, 1.45, 1.7, 1.05],
-    [1.2, 1.7, 1.3, 1.4, 1.0],
-];
-
-/// The kind order [`LEVEL_MIX`] columns are indexed by.
-const KIND_ORDER: [EnemyKind; 5] = [
-    EnemyKind::Skitterer,
-    EnemyKind::Bat,
-    EnemyKind::Cat,
-    EnemyKind::Spitter,
-    EnemyKind::Brute,
-];
+// The old per-level kind weighting (`LEVEL_MIX` / `KIND_ORDER`) lived here.
+// Kind selection is per floor now: see [`crate::game::roster`]. The campaign
+// level still scales numbers only (hp, damage, speed, elite cadence), which is
+// what keeps a practice run (level 0 scalars) on any floor faithful.
 
 /// Seconds the rat has to hold one chamber before the director stages a flank.
 ///
@@ -532,132 +521,40 @@ pub fn horde_live_budget(elapsed: f32, boss_phase: bool) -> usize {
     }
 }
 
-/// Kinds that unlock over time: (unlock time, kind, weight). Kept in table
-/// order so the weighted roll keeps its historical result for a given rng
-/// state. Times are the §1 "First appearances" column for the five base kinds.
-const UNLOCKS: [(f32, EnemyKind, f32); 4] = [
-    (45.0, EnemyKind::Bat, 4.0),
-    (75.0, EnemyKind::Cat, 3.0),
-    (215.0, EnemyKind::Spitter, 2.0),
-    (395.0, EnemyKind::Brute, 1.5),
-];
-
-/// When a base kind first joins the roll, on the curve clock (the
-/// [`UNLOCKS`] row). `None` for a kind that is always in the roll or is not a
-/// base kind. The HUD's escalation callouts read this, so "bats inbound" lands
-/// on the second the first bat can spawn.
+/// When a kind first joins a floor's roll, on the curve clock: its earliest
+/// slot unlock over every floor that names it ([`crate::game::roster`]). `None`
+/// for a kind no floor fields (the level boss).
+///
+/// The HUD's escalation callouts read this, so "bats inbound" still lands on the
+/// second the first bat can spawn (0:45 in the Sewer, and every other floor's
+/// flying fodder slot is the same 0:45).
+#[inline]
 pub fn base_unlock_time(kind: EnemyKind) -> Option<f32> {
-    UNLOCKS.iter().find(|(_, k, _)| *k == kind).map(|(t, _, _)| *t)
+    roster::first_unlock(kind)
 }
 
-// ---- Wave 3 kinds ---------------------------------------------------------
+// ---- The kinds come from the floor's roster -------------------------------
 //
-// `WAVE3_DESIGN.md` §1 and §9. **Every time in this block is written on the
-// design's fifteen-minute clock** and scaled by [`WAVE3_TIME_SCALE`], so
-// `w3-timeline` can stretch `RUN_SECONDS` to 900 without touching a number
-// here: the scale is derived from `RUN_SECONDS` itself.
-
-/// The run length the wave-3 unlock times in `WAVE3_DESIGN.md` are written for.
-pub const DESIGN_RUN_SECONDS: f32 = 900.0;
+// `WAVE4_ROSTERS.md`: eight ordinary kinds and four named appointments per
+// floor, looked up by `Theme` in `crate::game::roster`. The director used to
+// own a global unlock table, a per-campaign-level mix and two special-kind
+// tiers here; all of that is one floor table now, so a per-floor content pass
+// never touches this file.
 
 /// Converts a design (fifteen-minute) time into the current build's clock.
 ///
-/// The 5-minute build (`RUN_SECONDS = 300`, this worker's base) sees every
-/// wave-3 kind at a third of its design time, so all five land inside one run;
-/// the 15-minute build gets the design times unchanged. Only this expression
-/// needs to stay right as the timeline grows — nothing else in the file hard
-/// codes a wave-3 arrival.
+/// The roster's unlock times and the featured rotation are written on the
+/// design's own clock, and [`curve_clock`] is that clock while `RUN_SECONDS` is
+/// the design's fifteen minutes. Kept because it is the one expression that has
+/// to stay right as the timeline grows.
 pub const WAVE3_TIME_SCALE: f32 = RUN_SECONDS / DESIGN_RUN_SECONDS;
 
-/// First appearance of each wave-3 kind, in **design** seconds (§1: Pillbugs
-/// at 2:00, Bell Fleas at 4:30, Wick Moths at 7:15, Porters at 8:15, Turnkeys
-/// at 9:45). Table order is the roll order, so a given rng state keeps picking
-/// the same kind.
-const WAVE3_UNLOCK_DESIGN: [(f32, EnemyKind); 5] = [
-    (120.0, EnemyKind::Pillbug),
-    (270.0, EnemyKind::BellFlea),
-    (435.0, EnemyKind::WickMoth),
-    (495.0, EnemyKind::Porter),
-    (585.0, EnemyKind::Turnkey),
-];
+/// The run length the design's own times are written for (fifteen minutes).
+pub const DESIGN_RUN_SECONDS: f32 = 900.0;
 
-/// Raw weight of each wave-3 kind before the 20 % cap is applied, in
-/// [`WAVE3_UNLOCK_DESIGN`] order (Pillbug, Bell Flea, Wick Moth, Porter,
-/// Turnkey). Deliberately close together: these are threats, not fodder, and
-/// the cap — not these numbers — decides how much of the horde they take.
-///
-/// The Pillbug is deliberately *not* weighted above the rest. It unlocks first
-/// (2:00, i.e. 40 s in the current build), so until the Bell Flea arrives it is
-/// the only wave-3 kind on the table and its weight *is* the wave-3 share; at
-/// 3.0 that filled the whole 20 % cap with the one kind that never chases
-/// (23 px/s, immobile while curled). Measured on the four-seed autoplay sample
-/// in `autoplay::tests::early_game_headline_rates_stay_inside_generous_bands`,
-/// Expert's damage over the first 120 s fell from 4.4 HP (no wave-3 kind) to
-/// 2.9 (the 3.0 weight), below that guard's 3.0 floor; at 2.0 it is 8.5 and the
-/// opening still meets its band. So no single kind gets to own the share.
-const WAVE3_WEIGHT: [f32; 5] = [2.0, 2.0, 2.5, 2.0, 2.0];
-
-/// §1: "Limit all five new kinds combined to 20 % of spawns."
-///
-/// A ceiling, and the shipped value: the five kinds together take at most a
-/// fifth of the roll, on every campaign level, at every point of the curve.
-/// (`WAVE3_WEIGHT` decides the mix *inside* that share, and the featured
-/// rotation doubles one kind's weight within it.)
-pub const WAVE3_SHARE_CAP: f32 = 0.20;
-
-/// §1: from 9:45 the three newest kinds rotate as *featured threats*, each
-/// taking twice its usual weight within that 20 % share for 30 s.
-const WAVE3_FEATURED_FROM_DESIGN: f32 = 585.0;
-const WAVE3_FEATURED_PERIOD_DESIGN: f32 = 30.0;
-const WAVE3_FEATURED: [EnemyKind; 3] = [
-    EnemyKind::WickMoth,
-    EnemyKind::Porter,
-    EnemyKind::Turnkey,
-];
-
-// ---- Wave 4 kinds ---------------------------------------------------------
-//
-// The four kinds the wave-4 batch adds, on the same 900 s design clock as the
-// wave-3 table above (no second scale: `WAVE3_TIME_SCALE` already converts
-// design seconds to this build's clock).
-
-/// First appearance of each wave-4 kind, in **design** seconds, in roll order.
-/// The centipede arrives mid-run, the horde at the six-minute mark, the hornet
-/// at 7:30 and the snake once the build is nearly complete.
-///
-/// Every one of these is after the opening 60 s on purpose: the determinism
-/// goldens (`ecs::harness`) and the map pin sample a 60 s run, so adding a kind
-/// that cannot appear before 4:00 leaves both untouched.
-pub const WAVE4_UNLOCK_DESIGN: [(f32, EnemyKind); 5] = [
-    (240.0, EnemyKind::HouseCentipede),
-    (330.0, EnemyKind::Lilliputian),
-    (360.0, EnemyKind::TermiteHorde),
-    (450.0, EnemyKind::MurderHornet),
-    (510.0, EnemyKind::BigSnake),
-];
-
-/// Raw weight of each wave-4 kind, in [`WAVE4_UNLOCK_DESIGN`] order. The snake
-/// is the rarest by a wide margin: it is also the only kind with a live cap
-/// (`enemy_wave4::SNAKE_LIVE_CAP`, enforced by `spawn::director_system`).
-const WAVE4_WEIGHT: [f32; 5] = [2.2, 1.6, 1.8, 1.8, 1.2];
-
-/// The second tier of the special-kind budget: the four wave-4 kinds together
-/// take at most 15 % of the roll.
-///
-/// **Decision (two tiers).** Wave 3's five told kinds keep their 20 % ceiling —
-/// they are the floor's texture — and the wave-4 kinds get a tighter 15 %
-/// because each one is a *response test* rather than a body (a snake splits the
-/// room, a horde ignores chip damage, a hornet punishes greed). A third ceiling
-/// ([`SPECIAL_SHARE_CAP`]) scales both if a generous level mix ever pushes the
-/// two groups past 30 % together, so the ordinary ten kinds stay the horde.
-pub const WAVE4_SHARE_CAP: f32 = 0.15;
-
-/// The combined ceiling for every special kind (wave 3 + wave 4).
-pub const SPECIAL_SHARE_CAP: f32 = 0.30;
-
-/// How many big snakes may be alive at once. A snake's body is a wall, so the
-/// cap is the room's: two snakes is an arena with three lanes, three snakes is
-/// a maze. `spawn::director_system` substitutes fodder for an over-cap roll.
+/// How many big snakes may be alive at once. Kept as the public name for the
+/// number; the roster enforces it through [`roster::kind_cap`], which reads
+/// `enemy_wave4::SNAKE_LIVE_CAP` itself.
 pub const WAVE4_SNAKE_LIVE_CAP: usize =
     crate::game::ecs::systems::enemy_wave4::SNAKE_LIVE_CAP;
 
@@ -666,151 +563,27 @@ pub const WAVE4_SNAKE_LIVE_CAP: usize =
 pub const WAVE4_LILLI_LIVE_CAP: usize =
     crate::game::ecs::systems::enemy_wave4::LILLI_LIVE_CAP;
 
-/// Design time of a wave-4 kind's first appearance, scaled to this build.
+/// The floor's weighted roll at curve time `curve`, with the live caps the
+/// director counted this pulse. This is the whole kind-selection surface.
 #[inline]
-pub fn wave4_unlock_time(kind: EnemyKind) -> Option<f32> {
-    WAVE4_UNLOCK_DESIGN
-        .iter()
-        .find(|(_, k)| *k == kind)
-        .map(|(t, _)| t * WAVE3_TIME_SCALE)
+pub fn pick_kind_for_theme(
+    theme: Theme,
+    curve: f32,
+    caps: &SlotCaps,
+    rng: &mut impl Rng,
+) -> EnemyKind {
+    roster::pick_kind(theme, curve, caps, rng)
 }
 
-/// Design time of a wave-3 kind's first appearance, scaled to this build.
-#[inline]
-pub fn wave3_unlock_time(kind: EnemyKind) -> Option<f32> {
-    WAVE3_UNLOCK_DESIGN
-        .iter()
-        .find(|(_, k)| *k == kind)
-        .map(|(t, _)| t * WAVE3_TIME_SCALE)
-}
-
-/// The featured wave-3 kind at curve time `curve`, if the rotation has started.
-#[inline]
-pub fn wave3_featured(curve: f32) -> Option<EnemyKind> {
-    let from = WAVE3_FEATURED_FROM_DESIGN * WAVE3_TIME_SCALE;
-    if curve < from {
-        return None;
-    }
-    let period = WAVE3_FEATURED_PERIOD_DESIGN * WAVE3_TIME_SCALE;
-    let slot = (((curve - from) / period.max(1e-3)).floor() as usize) % WAVE3_FEATURED.len();
-    Some(WAVE3_FEATURED[slot])
-}
-
-/// Weighted pick of an enemy kind appropriate to curve time `curve`.
+/// The Sewer's roll at curve time `curve` with nothing capped: the historical
+/// entry point for tests and tuning (the Sewer is the reference floor).
 pub fn pick_kind_at(curve: f32, rng: &mut impl Rng) -> EnemyKind {
-    pick_kind_mixed(curve, 0, rng)
+    roster::pick_kind(Theme::Sewer, curve, &SlotCaps::none(), rng)
 }
 
-/// [`pick_kind_at`] with a campaign level's [`LEVEL_MIX`] weighting applied
-/// (level 0 is the curve's own mix, bit for bit).
-///
-/// The roll is a single `random_range` over the summed weights and the table is
-/// walked in its historical order (skitterer first, then bat/cat/spitter/brute
-/// as they unlock, then the wave-3 kinds), so the number and order of rng draws
-/// is unchanged: only the weights differ, and only for levels above 0.
-pub fn pick_kind_mixed(curve: f32, level: usize, rng: &mut impl Rng) -> EnemyKind {
-    let mix = &LEVEL_MIX[level_slot(level)];
-    // One slot per possible kind, on the stack: this runs on every spawn roll
-    // and must not allocate.
-    let mut table = [(EnemyKind::Skitterer, 0.0f32);
-        1 + UNLOCKS.len() + WAVE3_UNLOCK_DESIGN.len() + WAVE4_UNLOCK_DESIGN.len()];
-    table[0] = (EnemyKind::Skitterer, 6.0 * mix[0]);
-    let mut n = 1;
-    for &(unlock, kind, weight) in UNLOCKS.iter() {
-        if curve > unlock {
-            let col = KIND_ORDER
-                .iter()
-                .position(|k| *k == kind)
-                .unwrap_or(0);
-            table[n] = (kind, weight * mix[col]);
-            n += 1;
-        }
-    }
-    let base_n = n;
-
-    // Wave-3 kinds are appended after the base table, so the roll over a
-    // run without them is bit-for-bit the historical one. Their combined
-    // weight is then capped to `WAVE3_SHARE_CAP` of the whole table, which is
-    // what keeps five special-behaviour bodies from becoming the horde.
-    let featured = wave3_featured(curve);
-    let mut new_weight = 0.0f32;
-    for (i, &(design_at, kind)) in WAVE3_UNLOCK_DESIGN.iter().enumerate() {
-        if curve <= design_at * WAVE3_TIME_SCALE {
-            continue;
-        }
-        let boosted = if featured == Some(kind) { 2.0 } else { 1.0 };
-        let w = WAVE3_WEIGHT[i] * boosted;
-        new_weight += w;
-        table[n] = (kind, w);
-        n += 1;
-    }
-    if new_weight > 0.0 {
-        let base_total: f32 = table[..base_n].iter().map(|(_, w)| w).sum();
-        // new / (base + new) <= cap  <=>  new <= cap/(1-cap) * base
-        let cap = WAVE3_SHARE_CAP / (1.0 - WAVE3_SHARE_CAP) * base_total;
-        if new_weight > cap {
-            let scale = cap / new_weight;
-            for slot in &mut table[base_n..n] {
-                slot.1 *= scale;
-            }
-        }
-    }
-
-    // Wave-4 kinds are appended after the wave-3 group, so the roll over a run
-    // without them is bit-for-bit the wave-3 result. Their combined weight is
-    // capped to `WAVE4_SHARE_CAP` of the table they join, and then both special
-    // groups are scaled together if they would take more than
-    // `SPECIAL_SHARE_CAP` of the whole roll.
-    let wave3_n = n;
-    let mut w4_weight = 0.0f32;
-    for (i, &(design_at, kind)) in WAVE4_UNLOCK_DESIGN.iter().enumerate() {
-        if curve <= design_at * WAVE3_TIME_SCALE {
-            continue;
-        }
-        let w = WAVE4_WEIGHT[i];
-        w4_weight += w;
-        table[n] = (kind, w);
-        n += 1;
-    }
-    if w4_weight > 0.0 {
-        let rest: f32 = table[..wave3_n].iter().map(|(_, w)| w).sum();
-        let cap = WAVE4_SHARE_CAP / (1.0 - WAVE4_SHARE_CAP) * rest;
-        if w4_weight > cap {
-            let scale = cap / w4_weight;
-            for slot in &mut table[wave3_n..n] {
-                slot.1 *= scale;
-            }
-        }
-    }
-    // The combined special-kind ceiling (see `SPECIAL_SHARE_CAP`).
-    {
-        let base_total: f32 = table[..base_n].iter().map(|(_, w)| w).sum();
-        let special: f32 = table[base_n..n].iter().map(|(_, w)| w).sum();
-        if special > 0.0 && base_total > 0.0 {
-            let cap = SPECIAL_SHARE_CAP / (1.0 - SPECIAL_SHARE_CAP) * base_total;
-            if special > cap {
-                let scale = cap / special;
-                for slot in &mut table[base_n..n] {
-                    slot.1 *= scale;
-                }
-            }
-        }
-    }
-
-    let live = &table[..n];
-    let total: f32 = live.iter().map(|(_, w)| w).sum();
-    let mut roll = rng.random_range(0.0..total);
-    for (k, w) in live {
-        if roll < *w {
-            return *k;
-        }
-        roll -= w;
-    }
-    EnemyKind::Skitterer
-}
-#[inline]
+/// [`pick_kind_at`] for a campaign level and the real run clock.
 pub fn pick_kind_for(level: usize, elapsed: f32, rng: &mut impl Rng) -> EnemyKind {
-    pick_kind_mixed(curve_clock(level, elapsed), level, rng)
+    pick_kind_at(curve_clock(level, elapsed), rng)
 }
 
 /// The horde's hp multiplier on a campaign level: the curve, times the level's
@@ -877,7 +650,7 @@ pub fn elite_interval_at(curve: f32) -> f32 {
 /// measured as near-lethal on a 15-minute level. The shallow ramp keeps the
 /// later stages readable: contact damage is the base kind's, plus a small
 /// per-stage ramp. The horde's bite lives in [`LEVEL_ELITE_INTERVAL`] and
-/// [`LEVEL_MIX`] (more visible brutes, a real ranged line) instead.
+/// the floor's roster (more visible heavies, a real ranged line) instead.
 const LEVEL_DAMAGE_TOP: [f32; 3] = [1.0, 1.12, 1.20];
 
 /// The horde's speed multiplier at the top of a level's ramp. The Lab's swarm
@@ -902,6 +675,7 @@ pub fn enemy_mods_for(level: usize, elapsed: f32) -> crate::game::enemy::EnemyMo
         speed: 1.0 + (LEVEL_SPEED_TOP[slot] - 1.0) * t,
     }
 }
+
 /// Weighted pick of an enemy kind appropriate to the current time (level 0),
 /// i.e. frozen at [`BOSS_TIME`] like the running system.
 pub fn pick_kind(elapsed: f32, rng: &mut impl Rng) -> EnemyKind {
@@ -919,9 +693,9 @@ mod tests {
         use rand::SeedableRng;
 
         // Same seed + clock ⇒ same picks. The roll consumes exactly one rng
-        // value and walks the table in the original order (skitterer first,
-        // then bat/cat/spitter/brute as they unlock), so the stack rewrite
-        // cannot change which kind a given rng state produces.
+        // value and walks the floor's eight slots in the design's stable order
+        // (A, B, C, I, R, II, H, III), so a locked or capped slot cannot shift
+        // the stream.
         let mut a = StdRng::seed_from_u64(42);
         let mut b = StdRng::seed_from_u64(42);
         for elapsed in [0.0f32, 30.0, 60.0, 100.0, 200.0] {
@@ -1004,7 +778,7 @@ mod tests {
 
     /// The §1 table's boundary values, re-expressed over fifteen minutes.
     #[test]
-    fn the_wave3_curve_boundaries_match_the_design_table() {
+    fn the_curve_boundaries_match_the_design_table() {
         // Bodies/s.
         for (t, v) in [
             (0.0, 0.8),
@@ -1036,11 +810,16 @@ mod tests {
         // Ordinary hp: ×1 at the start, ×2 at 15:00.
         assert!((hp_mult_at(0.0) - 1.0).abs() < 1e-6);
         assert!((hp_mult_at(RUN_SECONDS) - 2.0).abs() < 1e-6);
-        // The five base kinds' unlock times.
-        assert_eq!(UNLOCKS[0].0, 45.0);
-        assert_eq!(UNLOCKS[1].0, 75.0);
-        assert_eq!(UNLOCKS[2].0, 215.0);
-        assert_eq!(UNLOCKS[3].0, 395.0);
+        // The base kinds' unlock times are the roster's slot unlocks now
+        // (`WAVE4_ROSTERS.md` "Reading a room"): B 0:45, C 1:15, R 3:35,
+        // H 6:35. The old global table had exactly these numbers, so the HUD's
+        // escalation callouts did not move.
+        assert_eq!(base_unlock_time(EnemyKind::Skitterer), Some(0.0));
+        assert_eq!(base_unlock_time(EnemyKind::Bat), Some(45.0));
+        assert_eq!(base_unlock_time(EnemyKind::Cat), Some(75.0));
+        assert_eq!(base_unlock_time(EnemyKind::Spitter), Some(215.0));
+        assert_eq!(base_unlock_time(EnemyKind::Brute), Some(395.0));
+        assert_eq!(base_unlock_time(EnemyKind::Boss), None);
     }
 
     /// The first elite lands on the curve gate on every campaign level, and
@@ -1217,8 +996,10 @@ mod tests {
         }
     }
 
-    /// Level 1 is the base game, bit for bit: the campaign knobs must not touch
-    /// the Sewer, because the level-1 curve belongs to the early-game pass.
+    /// Level 0's scalar knobs are the base game, bit for bit: the campaign
+    /// must not touch the Sewer's hp, damage, speed or elite cadence, because
+    /// those curves belong to the early-game pass. The *kinds* are the floor's
+    /// roster, which is a separate axis (see `each_floor_fields_its_own_cast`).
     #[test]
     fn level_one_is_the_base_game() {
         use crate::game::enemy::EnemyMods;
@@ -1230,15 +1011,25 @@ mod tests {
             assert_eq!(horde_hp_mult_at(curve_clock(0, t), 0), hp_mult_at(curve_clock(0, t)));
         }
         assert_eq!(elite_interval_for(0), ELITE_INTERVAL);
-        assert_eq!(LEVEL_MIX[0], [1.0; 5]);
-        // And the kind roll is the historical one: same rng, same picks.
+        // The level-0 roll is the Sewer's roster roll, with or without a
+        // campaign level in front of it (`pick_kind_for` only shifts the
+        // clock).
         let mut a = StdRng::seed_from_u64(17);
         let mut b = StdRng::seed_from_u64(17);
         for t in [0.0f32, 60.0, 150.0, 250.0] {
             for _ in 0..200 {
                 assert_eq!(pick_kind_for(0, t, &mut a), pick_kind(t, &mut b));
+                assert_eq!(
+                    pick_kind_for(0, t, &mut a),
+                    pick_kind_at(curve_clock(0, t), &mut b)
+                );
             }
         }
+        // A practice run (`difficulty_override = Some(0)`) is level 0's scalars
+        // on whichever floor it is played on. The level index never selects a
+        // kind any more, so there is nothing for the override to disagree with.
+        assert_eq!(enemy_mods_for(0, 42.0), EnemyMods::NONE);
+        assert_eq!(hp_mult_for(0, 42.0), hp_mult_at(curve_clock(0, 42.0)));
     }
 
     /// Every later level is harder than the one before it at every instant, in
@@ -1295,232 +1086,177 @@ mod tests {
         }
     }
 
-    /// Each map fields a different horde: the Kitchen is the ranged one and the
-    /// Lab the fast one, while the Sewer keeps the historical mix.
+    /// Each floor fields its own cast: the roster says which eight kinds a
+    /// floor can spawn at all, and the director's picker never returns anything
+    /// outside that set.
+    ///
+    /// This replaces `later_levels_field_a_different_mix`, which pinned the old
+    /// global `LEVEL_MIX` weighting (Kitchen = more Spitters, Lab = more Bats).
+    /// The mix is now per floor by construction; the numbers it used to weigh
+    /// are the roster's pool shares, which are the same on every floor.
     #[test]
-    fn later_levels_field_a_different_mix() {
+    fn each_floor_fields_its_own_cast() {
+        use crate::game::level::Theme;
+        use crate::game::roster;
         use rand::rngs::StdRng;
         use rand::SeedableRng;
-        // Late enough that every kind is unlocked on every level.
-        let curve = curve_clock(2, BOSS_TIME);
-        let share = |level: usize| {
+        // Late enough that every slot on every floor is unlocked, and before
+        // 15:00 (where the roster deliberately fields only A/B again).
+        let curve = curve_clock(2, 700.0);
+        for theme in Theme::playable() {
+            let floor = roster::floor(theme);
+            let allowed: Vec<EnemyKind> = floor.slots.iter().map(|s| s.kind).collect();
             let mut rng = StdRng::seed_from_u64(99);
-            let mut counts: Vec<usize> = vec![0; KIND_ORDER.len()];
-            for _ in 0..20_000 {
-                let k = pick_kind_mixed(curve, level, &mut rng);
-                // The wave-3 kinds are not part of the per-level mix table;
-                // their share is capped separately, so this test measures the
-                // five base kinds' shares among themselves.
-                let Some(i) = KIND_ORDER.iter().position(|x| *x == k) else {
-                    continue;
-                };
-                counts[i] += 1;
-            }
-            counts
-        };
-        let base = share(0);
-        let kitchen = share(1);
-        let lab = share(2);
-        let spitter = |v: &[usize]| v[3] as f32 / v.iter().sum::<usize>() as f32;
-        let bat = |v: &[usize]| v[1] as f32 / v.iter().sum::<usize>() as f32;
-        assert!(
-            spitter(&kitchen) > spitter(&base) * 1.2,
-            "the Kitchen is not the ranged map: {} vs {}",
-            spitter(&kitchen),
-            spitter(&base)
-        );
-        assert!(
-            bat(&lab) > bat(&base) * 1.2,
-            "the Lab is not the swarm map: {} vs {}",
-            bat(&lab),
-            bat(&base)
-        );
-        // Still one rng draw per roll whatever the mix.
-        let mut a = StdRng::seed_from_u64(3);
-        let mut b = StdRng::seed_from_u64(3);
-        for _ in 0..500 {
-            let _ = pick_kind_mixed(curve, 1, &mut a);
-            let _ = pick_kind_mixed(curve, 2, &mut b);
-            assert_eq!(a.random::<u64>(), b.random::<u64>());
-        }
-    }
-
-    /// With the fifteen-minute timeline (`RUN_SECONDS = 900`) the five wave-3
-    /// kinds unlock at exactly the design's minutes — Pillbug 2:00, Bell Flea
-    /// 4:30, Wick Moth 7:15, Porter 8:15, Turnkey 9:45 — in the §1 order, and
-    /// never before their own instant.
-    #[test]
-    fn the_wave3_kinds_unlock_in_design_order() {
-        assert_eq!(RUN_SECONDS, 900.0);
-        assert_eq!(WAVE3_TIME_SCALE, 1.0, "the design clock is the run clock now");
-        // 2:00, 4:30, 7:15, 8:15, 9:45.
-        assert_eq!(wave3_unlock_time(EnemyKind::Pillbug), Some(2.0 * 60.0));
-        assert_eq!(wave3_unlock_time(EnemyKind::BellFlea), Some(4.0 * 60.0 + 30.0));
-        assert_eq!(wave3_unlock_time(EnemyKind::WickMoth), Some(7.0 * 60.0 + 15.0));
-        assert_eq!(wave3_unlock_time(EnemyKind::Porter), Some(8.0 * 60.0 + 15.0));
-        assert_eq!(wave3_unlock_time(EnemyKind::Turnkey), Some(9.0 * 60.0 + 45.0));
-        // The featured rotation starts with the Turnkey's unlock (9:45) and
-        // turns every 30 s.
-        assert_eq!(wave3_featured(584.0), None);
-        assert_eq!(wave3_featured(586.0), Some(EnemyKind::WickMoth));
-        assert_eq!(wave3_featured(616.0), Some(EnemyKind::Porter));
-        assert_eq!(wave3_featured(646.0), Some(EnemyKind::Turnkey));
-        assert_eq!(wave3_featured(676.0), Some(EnemyKind::WickMoth));
-        let expected = [
-            (EnemyKind::Pillbug, 120.0),
-            (EnemyKind::BellFlea, 270.0),
-            (EnemyKind::WickMoth, 435.0),
-            (EnemyKind::Porter, 495.0),
-            (EnemyKind::Turnkey, 585.0),
-        ];
-        let mut prev = 0.0;
-        for (kind, design_at) in expected {
-            let at = wave3_unlock_time(kind).expect("every wave-3 kind is in the table");
-            assert!(
-                (at - design_at * WAVE3_TIME_SCALE).abs() < 1e-3,
-                "{kind:?} unlocks at {at}, expected {}",
-                design_at * WAVE3_TIME_SCALE
-            );
-            assert!(
-                (at - design_at).abs() < 1e-3,
-                "{kind:?}: on the 15-minute clock the unlock is the design's own minute"
-            );
-            assert!(at > prev, "{kind:?} unlocked out of order");
-            prev = at;
-        }
-        // The last unlock is inside the run, and the whole set is inside the
-        // design's own 15 minutes.
-        assert!(prev < BOSS_TIME, "the last wave-3 kind arrives after the boss");
-        assert!(prev * DESIGN_RUN_SECONDS / RUN_SECONDS < DESIGN_RUN_SECONDS);
-
-        // No wave-3 kind before its unlock, every one after it.
-        use rand::rngs::StdRng;
-        use rand::SeedableRng;
-        for (kind, design_at) in expected {
-            let at = design_at * WAVE3_TIME_SCALE;
-            let mut rng = StdRng::seed_from_u64(1234);
-            for _ in 0..400 {
-                assert_ne!(
-                    pick_kind_mixed(at - 0.5, 0, &mut rng),
-                    kind,
-                    "{kind:?} appeared before its own unlock"
+            let mut seen: Vec<EnemyKind> = Vec::new();
+            for _ in 0..4_000 {
+                let k = pick_kind_for_theme(theme, curve, &roster::SlotCaps::none(), &mut rng);
+                assert!(
+                    allowed.contains(&k),
+                    "{theme:?} spawned {k:?}, which is not on its roster"
                 );
-            }
-            let mut rng = StdRng::seed_from_u64(1234);
-            let mut seen = false;
-            for _ in 0..4000 {
-                if pick_kind_mixed(at + 5.0, 0, &mut rng) == kind {
-                    seen = true;
-                    break;
+                if !seen.contains(&k) {
+                    seen.push(k);
                 }
             }
-            assert!(seen, "{kind:?} never appeared after its unlock");
+            assert_eq!(
+                seen.len(),
+                allowed.len(),
+                "{theme:?} only fielded {seen:?}"
+            );
+            // Every one of the eight is in the draw, so a floor's own content
+            // cannot be silently missing from play.
+            let w = roster::masses(curve, &roster::SlotCaps::none());
+            for slot in roster::Slot::ALL {
+                assert!(
+                    w[slot.index()] > 0.0,
+                    "{theme:?}: {} has no share late in the run",
+                    slot.label()
+                );
+            }
         }
+        // The flats really are different casts, not one list relabelled.
+        assert_ne!(
+            roster::appointments(Theme::Sewer),
+            roster::appointments(Theme::Kitchen)
+        );
+        assert_ne!(roster::kind(Theme::Sewer, roster::Slot::III), roster::kind(Theme::Lab, roster::Slot::III));
     }
 
-    /// §1: "Limit all five new kinds combined to 20 % of spawns." The cap holds
-    /// on every campaign level, and the kinds are still a real presence.
+    /// §1 over *simulated time*, on every floor: the special pool (I+II+III)
+    /// never takes more than a fifth of the roll, the fodder pool keeps its
+    /// minimum, and from 15:00 only the floor's own A/B spawn.
+    ///
+    /// This replaces `the_wave3_kinds_are_capped_at_a_fifth_of_spawns`, which
+    /// measured the old global wave-3 tier. The numbers now come from the
+    /// roster's clock table (`WAVE4_ROSTERS.md` "Director and campaign"), and
+    /// the check runs through the real picker, draw for draw.
     #[test]
-    fn the_wave3_kinds_are_capped_at_a_fifth_of_spawns() {
+    fn the_special_pool_never_exceeds_a_fifth_on_any_floor() {
+        use crate::game::level::Theme;
+        use crate::game::roster;
         use rand::rngs::StdRng;
         use rand::SeedableRng;
-        for level in 0..LEVEL_COUNT {
-            // Design-clock instants with at least three wave-3 kinds on the
-            // table (7:30, 10:00, 12:30 and the boss time), where the raw
-            // weights overshoot and the cap is what limits them.
-            for curve in [450.0f32, 600.0, 750.0, BOSS_TIME] {
-                let mut rng = StdRng::seed_from_u64(4242);
-                let mut wave3 = 0usize;
-                let total = 40_000usize;
+        // One sample per design minute, the whole fifteen-minute build-up.
+        for theme in Theme::playable() {
+            let floor = roster::floor(theme);
+            let specials: Vec<EnemyKind> = roster::Pool::Special
+                .slots()
+                .iter()
+                .map(|s| floor.kind(*s))
+                .collect();
+            // 15:30 (minute 15) is the cleanup row, past the boss time.
+            for minute in 0..16u64 {
+                let clock = (minute as f32 + 0.5) * 60.0;
+                let mut rng = StdRng::seed_from_u64(4242 + minute);
+                let total = 12_000usize;
+                let mut special = 0usize;
+                let mut fodder = 0usize;
                 for _ in 0..total {
-                    if pick_kind_mixed(curve, level, &mut rng).is_wave3() {
-                        wave3 += 1;
+                    let k = pick_kind_for_theme(theme, clock, &roster::SlotCaps::none(), &mut rng);
+                    if specials.contains(&k) {
+                        special += 1;
+                    }
+                    if k == floor.kind(roster::Slot::A) || k == floor.kind(roster::Slot::B) {
+                        // A floor's fodder kinds are the only ones at 15:00+;
+                        // earlier this is a lower bound, not an equality.
+                        fodder += 1;
                     }
                 }
-                let share = wave3 as f32 / total as f32;
-                let cap = WAVE3_SHARE_CAP;
+                // Sampling tolerances: the exact masses are pinned in the
+                // roster's own tests, so these only have to prove the *picker*
+                // lands on them (a fixed seed, so a failure is reproducible).
+                let special_share = special as f32 / total as f32;
                 assert!(
-                    share <= cap + 0.012,
-                    "level {level} at {curve}s: wave-3 share {share} exceeds the cap {cap}"
+                    special_share <= roster::SPECIAL_CEILING + 0.015,
+                    "{theme:?} at {clock}s: the special pool took {special_share}"
                 );
-                // A cap that is never reached is a missing feature, not a cap.
+                // The ceiling is reached, not just never breached: with three
+                // specials on the table from 9:45 the pool is a real presence.
+                if clock >= 600.0 && clock < BOSS_TIME {
+                    assert!(
+                        special_share > roster::SPECIAL_CEILING * 0.5,
+                        "{theme:?} at {clock}s: the special pool is too rare ({special_share})"
+                    );
+                }
+                let fodder_share = fodder as f32 / total as f32;
                 assert!(
-                    share > cap * 0.6,
-                    "level {level} at {curve}s: wave-3 share {share} is too rare to matter"
+                    fodder_share >= roster::fodder_minimum(clock) - 0.05,
+                    "{theme:?} at {clock}s: fodder fell to {fodder_share}"
                 );
+                if clock >= BOSS_TIME {
+                    // 15:00: "new spawns use only local A/B at cleanup pace".
+                    assert!(
+                        (fodder_share - 1.0).abs() < 1e-6,
+                        "{theme:?}: the cleanup roll is not pure fodder ({fodder_share})"
+                    );
+                }
             }
-        }
-        // With only the Pillbug unlocked (2:00 to 4:30) the share sits under the
-        // cap on its raw weight alone; the cap must still hold there.
-        for level in 0..LEVEL_COUNT {
-            let mut rng = StdRng::seed_from_u64(4242);
-            let total = 40_000usize;
-            let wave3 = (0..total)
-                .filter(|_| pick_kind_mixed(250.0, level, &mut rng).is_wave3())
-                .count();
-            let share = wave3 as f32 / total as f32;
-            assert!(share > 0.0 && share <= WAVE3_SHARE_CAP + 0.012, "level {level}: {share}");
-        }
-        // Early on, before any of them unlock, the roll is the historical one:
-        // not one wave-3 body and exactly the same rng stream as a table without
-        // them.
-        let mut rng = StdRng::seed_from_u64(7);
-        for _ in 0..2000 {
-            assert!(!pick_kind_mixed(20.0, 0, &mut rng).is_wave3());
         }
     }
 
-    /// The three newest kinds rotate as featured threats from 9:45 (design
-    /// time), doubling their weight inside the same 20 % share.
+    /// The 7:15 → 8:15 rehearsals and the 9:45 rotation reach the draw: the
+    /// featured slot really is about twice as likely as its siblings, and the
+    /// pool's own share does not grow.
+    ///
+    /// This replaces `the_featured_wave3_kind_rotates_and_doubles`.
     #[test]
-    fn the_featured_wave3_kind_rotates_and_doubles() {
-        let from = WAVE3_FEATURED_FROM_DESIGN * WAVE3_TIME_SCALE;
-        let period = WAVE3_FEATURED_PERIOD_DESIGN * WAVE3_TIME_SCALE;
-        assert!(wave3_featured(from - 0.1).is_none(), "rotation started early");
-        assert_eq!(wave3_featured(from + 0.1), Some(EnemyKind::WickMoth));
-        assert_eq!(wave3_featured(from + period + 0.1), Some(EnemyKind::Porter));
-        assert_eq!(
-            wave3_featured(from + 2.0 * period + 0.1),
-            Some(EnemyKind::Turnkey)
-        );
-        // And it cycles.
-        assert_eq!(
-            wave3_featured(from + 3.0 * period + 0.1),
-            Some(EnemyKind::WickMoth)
-        );
-
-        // Doubling one kind inside a fixed share really is a doubled share: the
-        // featured kind shows up about twice as often as the same kind does in
-        // its own (rotating) off-window.
+    fn the_featured_slot_rehearses_and_then_rotates() {
+        use crate::game::level::Theme;
+        use crate::game::roster;
         use rand::rngs::StdRng;
         use rand::SeedableRng;
-        let share_of = |curve: f32, kind: EnemyKind| {
+        // 8:15 to 9:45 doubles I; 9:45 starts the I → II → III rotation.
+        assert_eq!(roster::featured(494.0), Some(roster::Slot::II));
+        assert_eq!(roster::featured(495.0), Some(roster::Slot::I));
+        assert_eq!(roster::featured(585.0), Some(roster::Slot::I));
+        assert_eq!(roster::featured(615.0), Some(roster::Slot::II));
+        assert_eq!(roster::featured(645.0), Some(roster::Slot::III));
+        let theme = Theme::Sewer;
+        let floor = roster::floor(theme);
+        let share = |clock: f32, kind: EnemyKind| {
             let mut rng = StdRng::seed_from_u64(99);
-            let mut hits = 0usize;
-            let total = 60_000usize;
-            for _ in 0..total {
-                if pick_kind_mixed(curve, 0, &mut rng) == kind {
-                    hits += 1;
-                }
-            }
+            let total = 40_000usize;
+            let hits = (0..total)
+                .filter(|_| {
+                    pick_kind_for_theme(theme, clock, &roster::SlotCaps::none(), &mut rng) == kind
+                })
+                .count();
             hits as f32 / total as f32
         };
-        let featured_window = from + 0.5;
-        let other_window = from + period + 0.5;
-        let wick_featured = share_of(featured_window, EnemyKind::WickMoth);
-        let wick_off = share_of(other_window, EnemyKind::WickMoth);
+        // During I's rehearsal, I outdraws II and III without breaking the cap.
+        let i = floor.kind(roster::Slot::I);
+        let ii = floor.kind(roster::Slot::II);
+        let rehearsed = share(550.0, i);
+        let plain = share(550.0, ii);
         assert!(
-            wick_featured > wick_off * 1.6,
-            "the featured kind did not double: {wick_featured} vs {wick_off}"
+            rehearsed > plain * 1.6,
+            "the featured slot did not double: {rehearsed} vs {plain}"
         );
-        // The featured rotation never breaks the 20 % cap.
-        let mut total = 0.0;
-        for k in [EnemyKind::WickMoth, EnemyKind::Porter, EnemyKind::Turnkey] {
-            total += share_of(featured_window, k);
-        }
+        let iii = floor.kind(roster::Slot::III);
+        let special = rehearsed + plain + share(550.0, iii);
         assert!(
-            total <= WAVE3_SHARE_CAP + 0.012,
-            "the featured window broke the cap: {total}"
+            special <= roster::SPECIAL_CEILING + 0.012,
+            "the featured window broke the ceiling: {special}"
         );
     }
 

@@ -1371,8 +1371,14 @@ pub fn ripcord_system(
         return;
     };
     let dt = input.dt;
-    let radius = weapon.dash_radius();
-    let dmg = weapon.damage() * player.loadout.stats.damage_mult;
+    // The cord quotes the dash it came from, charge and all: a charged dash's
+    // longer route is joined by a wider, harder-hitting cord.
+    let charge = track.charge.clamp(0.0, 1.0);
+    let radius = weapon.dash_radius()
+        * (1.0 + crate::game::ecs::systems::weapons_wave3b::SUPER_DASH_RADIUS_PER_CHARGE * charge);
+    let dmg = weapon.damage()
+        * player.loadout.stats.damage_mult
+        * (1.0 + crate::game::ecs::systems::weapons_wave3b::SUPER_DASH_DAMAGE_PER_CHARGE * charge);
     let kind = WeaponKind::SuperDash;
     let taut = track.segment.is_none();
     let start = track.route_start();

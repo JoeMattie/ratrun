@@ -874,14 +874,22 @@ pub fn draw_pause(f: &mut Frame, area: Rect, controls_src: &Controls, hits: &mut
     let r = panel(f, centered_rect(46, 8, area), " RUN CONTROL ", MUTED);
     center(f, r, 1, Span::styled("━━━  ▌▌  ━━━", heavy(TAIL)));
     center(f, r, 2, Span::styled("PAUSED", heavy(COAT)));
+    // The keys are read from the live bindings, the way the `L` library chip
+    // is: `Esc` and `O` are `Action::Pause` / `Action::Options` and a rebind
+    // must move the text with it. `Q` has no action (it is a raw key in the
+    // App), so it stays literal — see the report on reserved keys.
+    let pause_key = controls_src.action_label(Action::Pause);
+    let opts_key = controls_src.action_label(Action::Options);
+    let resume_chip = format!(" {pause_key} resume ");
+    let opts_chip = format!(" {opts_key} options ");
     controls(
         f,
         band(r, 4, 1),
         hits,
         &[
-            (" Esc/P resume ", Some(Target::Resume)),
+            (resume_chip.as_str(), Some(Target::Resume)),
             ("  ", None),
-            (" O options ", Some(Target::Options)),
+            (opts_chip.as_str(), Some(Target::Options)),
             ("  ", None),
             (" Q to menu ", Some(Target::Menu)),
         ],
@@ -1095,14 +1103,16 @@ pub fn draw_pause_compact(
         format!(" {mute_label} mute ")
     };
     let lib_chip = format!(" {} lib ", controls_src.action_label(Action::Library));
+    let pause_chip = format!(" {} resume ", controls_src.action_label(Action::Pause));
+    let opts_chip = format!(" {} opts ", controls_src.action_label(Action::Options));
     controls(
         f,
         band(r, r.height.saturating_sub(1), 1),
         hits,
         &[
-            (" Esc resume ", Some(Target::Resume)),
+            (pause_chip.as_str(), Some(Target::Resume)),
             (" ", None),
-            (" O opts ", Some(Target::Options)),
+            (opts_chip.as_str(), Some(Target::Options)),
             (" ", None),
             (lib_chip.as_str(), Some(Target::Library)),
             (" ", None),
@@ -2226,20 +2236,24 @@ pub fn draw_pause_with_run(
     };
     // The clickable chip says just `Resume`: the legend above already names
     // `Esc/P`, and a duplicated label makes the chip's hit target ambiguous.
-    let (resume, opts, quit) = if icon_dossier {
-        (" Resume ", " O options ", " Q to menu ")
+    // Options names its own live key (the same `Action::Options` the app opens
+    // the screen with), so a rebind moves the text. `Q` has no action yet.
+    let opts_key = controls_src.action_label(Action::Options);
+    let opts = if icon_dossier {
+        format!(" {opts_key} options ")
     } else {
-        (" Resume ", " O opts ", " Q menu ")
+        format!(" {opts_key} opts ")
     };
+    let quit = if icon_dossier { " Q to menu " } else { " Q menu " };
     let library_chip = format!(" {} library ", controls_src.action_label(Action::Library));
     controls(
         f,
         band(r, r.height.saturating_sub(1), 1),
         hits,
         &[
-            (resume, Some(Target::Resume)),
+            (" Resume ", Some(Target::Resume)),
             (" ", None),
-            (opts, Some(Target::Options)),
+            (opts.as_str(), Some(Target::Options)),
             (" ", None),
             (library_chip.as_str(), Some(Target::Library)),
             (" ", None),

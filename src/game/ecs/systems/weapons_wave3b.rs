@@ -59,6 +59,14 @@ pub const MELEE_NUDGE_COOLDOWN: f32 = 0.4;
 /// other weapon's native shove).
 pub const SUPER_DASH_SHOVE: f32 = 40.0;
 
+/// A **full charge** widens the dash's swept radius by this fraction (a held
+/// dash is a taller corridor, not just a longer one).
+pub const SUPER_DASH_RADIUS_PER_CHARGE: f32 = 0.5;
+
+/// A **full charge** multiplies the per-body damage by `1 + this`: up to 2.5x
+/// the weapon's own hit, which is what makes the hold worth the wait.
+pub const SUPER_DASH_DAMAGE_PER_CHARGE: f32 = 1.5;
+
 /// The tick's stable `SpawnId` enemy order.
 ///
 /// Prefers the cached [`EnemyIndex`] (identical order, no sort) and falls back
@@ -471,6 +479,12 @@ pub fn super_dash_system(
     let radius = w.dash_radius();
     let stats = player.loadout.stats;
     let dmg = w.damage() * stats.damage_mult;
+    // A charged dash (the player held the dash input and released it) is wider
+    // and hits harder; the arms above are the whole curve, so a tap dash — the
+    // pre-charge behaviour, and every scripted `charge = 0` — is unchanged.
+    let charge = track.charge.clamp(0.0, 1.0);
+    let radius = radius * (1.0 + SUPER_DASH_RADIUS_PER_CHARGE * charge);
+    let dmg = dmg * (1.0 + SUPER_DASH_DAMAGE_PER_CHARGE * charge);
     // Counterweight scales the dash's native drag too: it is a shove, so the
     // passive that raises every weapon's shove has to reach it (it used to be
     // a hard-coded 40 px/s the passive could not touch).
@@ -1303,5 +1317,103 @@ mod tests {
         assert!(pushed > 1.5, "the body was not nudged: {pushed}");
         assert!(pushed < 4.0, "the nudge stacked twice: {pushed}");
         assert_eq!(w.ecs.resource::<MeleeNudge>().len(), 1);
+    }
+
+    /// Run a Super Dash started with `charge` (`0` = a tap) through the player
+    /// and weapon systems only, so nothing but the dash moves.
+    fn run_charged_dash(w: &mut World, charge: f32) {
+        w.begin_tick_charged(
+            1.0 / 60.0,
+            Vec2::new(1.0, 0.0),
+            true,
+            false,
+            None,
+            charge,
+        );
+        w.ecs
+            .run_system_cached(crate::game::ecs::systems::player::player_system)
+            .unwrap();
+        w.ecs.run_system_cached(super_dash_system).unwrap();
+        w.end_tick();
+    }
+
+    fn tick_dash(w: &mut World) {
+        w.begin_tick(1.0 / 60.0, Vec2::new(1.0, 0.0), false);
+        w.ecs
+            .run_system_cached(crate::game::ecs::systems::player::player_system)
+            .unwrap();
+        w.ecs.run_system_cached(super_dash_system).unwrap();
+        w.end_tick();
+    }
+
+    /// A charged release hits harder than the same level's tap, and Ripcord
+    /// keeps the longer route the charged dash actually travelled.
+    #[test]
+    fn a_charged_dash_hits_harder_and_ripcord_keeps_the_longer_route() {
+        let run = |charge: f32| -> (f32, f32) {
+            let mut w = World::new(Theme::Sewer, 33);
+            w.clear_enemies();
+            open_map(&mut w);
+            arm(&mut w, WeaponKind::SuperDash, 1);
+            w.player.loadout.weapons[0].evolved = true;
+            w.player.face = Vec2::new(1.0, 0.0);
+            w.player.vel = Vec2::new(58.0, 0.0);
+            w.player.dash_cd = 0.0;
+            let p = w.player.pos;
+            let body = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(10.0, 0.0), 1.0);
+            let hp0 = enemy_hp(&w, body);
+            run_charged_dash(&mut w, charge);
+            for _ in 0..40 {
+                tick_dash(&mut w);
+            }
+            let taken = hp0 - enemy_hp(&w, body);
+            let route: f32 = w
+                .ecs
+                .resource::<DashTrack>()
+                .route()
+                .iter()
+                .map(|&(a, b)| a.dist(b))
+                .sum();
+            (taken, route)
+        };
+        let (tap_dmg, tap_route) = run(0.0);
+        let (full_dmg, full_route) = run(1.0);
+        assert!(tap_dmg > 0.0, "the tap dash must still wound");
+        assert!(
+            full_dmg > tap_dmg * (1.0 + SUPER_DASH_DAMAGE_PER_CHARGE * 0.75),
+            "a full charge hit for {full_dmg}, a tap for {tap_dmg}"
+        );
+        assert!(
+            full_route > tap_route * 1.3,
+            "the cord must keep the longer route: {full_route} vs {tap_route}"
+        );
+    }
+
+    /// A charged dash sweeps a wider corridor: a body beside the lane that a tap
+    /// clears is caught by the full charge.
+    #[test]
+    fn a_charged_dash_sweeps_a_wider_corridor() {
+        let hit_beside = |charge: f32| -> bool {
+            let mut w = World::new(Theme::Sewer, 35);
+            w.clear_enemies();
+            open_map(&mut w);
+            arm(&mut w, WeaponKind::SuperDash, 1);
+            w.player.face = Vec2::new(1.0, 0.0);
+            w.player.vel = Vec2::new(58.0, 0.0);
+            w.player.dash_cd = 0.0;
+            let p = w.player.pos;
+            // A Skitterer (radius 2.5) 7.5 px beside a lane 10 px ahead: inside
+            // the tap's 4 px sweep + 2.5 px body (6.5) but inside a full
+            // charge's 6 px sweep (8.5).
+            let body = w.spawn_enemy(EnemyKind::Skitterer, p + Vec2::new(10.0, 7.5), 4.0);
+            let hp0 = enemy_hp(&w, body);
+            run_charged_dash(&mut w, charge);
+            for _ in 0..40 {
+                tick_dash(&mut w);
+            }
+            enemy_hp(&w, body) < hp0
+        };
+        assert!(!hit_beside(0.0), "a tap dash is the narrow sweep");
+        assert!(hit_beside(1.0), "a full charge must sweep wider");
     }
 }

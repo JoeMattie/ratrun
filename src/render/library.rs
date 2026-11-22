@@ -151,6 +151,35 @@ impl LibraryUi {
         let next = (self.cursor as isize + step).clamp(0, entries as isize - 1);
         self.cursor = next as usize;
     }
+
+    /// The key under the cursor in the current tab, if it has one.
+    pub fn selected_key(&self, rows: &[Row]) -> Option<Key> {
+        rows.iter()
+            .filter(|r| r.tab == self.tab)
+            .nth(self.cursor)
+            .map(|r| r.key)
+    }
+
+    /// Select one entry **by key** and open its card. Returns `false` when the
+    /// key is not in the current tab.
+    ///
+    /// Anything that names an entry from outside (a capture, a deep link, a
+    /// test) must go through this: a row index is positional and moves whenever
+    /// a group gains an entry — the `library-boss` capture's stale index landed
+    /// on a named miniboss instead of the floor boss it meant.
+    pub fn select_key(&mut self, rows: &[Row], key: Key) -> bool {
+        let Some(index) = rows
+            .iter()
+            .filter(|r| r.tab == self.tab)
+            .position(|r| r.key == key)
+        else {
+            return false;
+        };
+        self.cursor = index;
+        self.scroll = 0;
+        self.card_open = true;
+        true
+    }
 }
 
 /// The measurement the App needs after a frame: total display lines, how many

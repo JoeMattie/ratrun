@@ -373,12 +373,17 @@ pub const MINIBOSS_GOLD: u32 = 12;
 /// The full boss pays this, credited at the clear.
 pub const BOSS_GOLD: u32 = 30;
 
-/// The design's chance × value table, by kind.
+/// The design's chance × value table, by kind — the **gold row** step of the
+/// roster's registration seam (`crate::game::roster`, "Adding a new ordinary
+/// kind", step 3).
 ///
-/// Kinds the table does not name (new ordinary kinds land with their own
-/// tuning) fall back to the bat's row, so a new kind never silently pays
-/// nothing. The wildcard arm is therefore kept while every current variant is
-/// named — hence the `unreachable_patterns` allowance.
+/// Every kind a floor can spawn must have its own row here: the roster says
+/// which eight bodies a floor fields, and `every_roster_kind_pays_its_own_row`
+/// checks that all of them do. Kinds the table does not name fall back to the
+/// bat's row, so a new kind never silently pays nothing — but that fallback is
+/// a safety net, not a registration. The wildcard arm is therefore kept while
+/// every current variant is named — hence the `unreachable_patterns`
+/// allowance.
 #[allow(unreachable_patterns)]
 pub fn gold_row(kind: EnemyKind) -> (f32, u32) {
     match kind {
@@ -1757,6 +1762,39 @@ mod tests {
             .count();
         let rate = hits as f32 / 3999.0;
         assert!((rate - 0.08).abs() < 0.03, "skitterer rate {rate}");
+    }
+
+    /// The gold-row half of the roster registration seam: every kind on every
+    /// floor's eight slots owns a row of `gold_row` that pays something, so a
+    /// new kind cannot ship on a floor and silently inherit the bat's row.
+    #[test]
+    fn every_roster_kind_pays_its_own_row() {
+        use crate::game::level::Theme;
+        use crate::game::roster;
+        for theme in Theme::playable() {
+            for slot in roster::Slot::ALL {
+                let kind = roster::kind(theme, slot);
+                let (chance, value) = gold_row(kind);
+                assert!(
+                    chance > 0.0 && value > 0,
+                    "{theme:?} {}: {kind:?} pays nothing",
+                    slot.label()
+                );
+                // The design's rows are chance in percent × pieces, so the
+                // pieces are a small count and the chance a real roll.
+                assert!(value <= BOSS_GOLD, "{theme:?}: {kind:?} pays {value}");
+                assert!(chance <= 1.0, "{theme:?}: {kind:?} chance {chance}");
+                // And the roll agrees: a kill either pays nothing or exactly
+                // the row's value.
+                for spawn in 1..200u64 {
+                    let paid = gold_for(9, spawn, kind, false);
+                    assert!(
+                        paid == 0 || paid == value,
+                        "{theme:?}: {kind:?} paid {paid}, the row says {value}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

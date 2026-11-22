@@ -292,6 +292,23 @@ impl CampaignLevel {
         }
     }
 
+    /// The floor's boss fight(s): one name, or **both** when a seeded floor
+    /// draws one of two (`BossKind::pool_for_theme`: the Sewer fields the
+    /// Jaguar *or* the Horseshoe, the Kitchen the Sweeper or Subject R-01, the
+    /// Lab the mower or the King Cobra, and the Flatbed the Magpie or the
+    /// Redtail). The first name is always [`Self::boss_name`], i.e. the floor's
+    /// original boss and the HUD boss bar's pinned plate.
+    pub const fn boss_pair(self) -> (&'static str, Option<&'static str>) {
+        match self {
+            CampaignLevel::Sewer => (Self::Sewer.boss_name(), Some("THE HORSESHOE")),
+            CampaignLevel::Kitchen => (Self::Kitchen.boss_name(), Some("SUBJECT R-01")),
+            CampaignLevel::Lab => (Self::Lab.boss_name(), Some("KING COBRA")),
+            CampaignLevel::Trailer => (Self::Trailer.boss_name(), Some("THE REDTAIL")),
+            // One boss each: the Mangle and the Night Edition are pinned.
+            CampaignLevel::Laundry | CampaignLevel::Printworks => (self.boss_name(), None),
+        }
+    }
+
     pub const fn boss_verdict(self) -> &'static str {
         match self {
             CampaignLevel::Sewer => "APEX JAGUAR  —  DOWN",
@@ -3136,7 +3153,7 @@ fn draw_level_slot(
         },
     );
 
-    // Tall cards keep the old bay cards' emblem and boss codename.
+    // Tall cards keep the old bay cards' emblem.
     if h >= 11 && ci.width >= 19 {
         for (ey, line) in (3u16..).zip(level_emblem(slot.level)) {
             put_centered(
@@ -3147,17 +3164,26 @@ fn draw_level_slot(
                 ink(if slot.unlocked { accent } else { EDGE }).bg(bg),
             );
         }
-        put_centered(
-            buf,
-            ci,
-            7,
-            if slot.unlocked {
-                slot.level.boss_name()
-            } else {
-                "BOSS CLASSIFIED"
-            },
-            ink(if slot.unlocked { MUTED } else { EDGE }).bg(bg),
-        );
+    }
+
+    // The floor's boss fight(s), on every card with room for them: a floor with
+    // a boss pool draws one of two by seed, so the card names **both** — one
+    // line each under the tall cards' emblem, or two rows under the header on a
+    // medium card. A card too short for a boss row leaves it to the screen's
+    // subtitle line (`draw_level_select`), which names the selected floor.
+    let boss_row = if h >= 11 { 7 } else { 2 };
+    if h >= 6 {
+        if slot.unlocked {
+            let (first, second) = slot.level.boss_pair();
+            put_centered(buf, ci, boss_row, first, ink(MUTED).bg(bg));
+            if let Some(second) = second {
+                let mut line = StackBuf::<32>::new();
+                let _ = write!(line, "or {second}");
+                put_centered(buf, ci, boss_row + 1, line.as_str(), ink(EDGE).bg(bg));
+            }
+        } else if h >= 11 {
+            put_centered(buf, ci, boss_row, "BOSS CLASSIFIED", ink(EDGE).bg(bg));
+        }
     }
 
     // The best result — or, for a locked floor, what opens it.
@@ -3264,17 +3290,6 @@ pub fn draw_level_select(
     if avail_h < 2 {
         return hits;
     }
-    if subtitle {
-        let line = if inner.width >= 70 {
-            "Clear any floor of a stage to open the next · Flatbed always open"
-        } else if inner.width >= 52 {
-            "Clear a stage to open the next · Flatbed always open"
-        } else {
-            "Clear a stage to open the next"
-        };
-        put_centered(buf, inner, 0, line, ink(MUTED).bg(PLATE));
-    }
-
     // Grid geometry. Everything fits when each row can keep two lines; a
     // taller terminal spreads the cards instead. When it does not fit, the
     // window follows the selection (a seventh floor would scroll into view).
@@ -3295,6 +3310,36 @@ pub fn draw_level_select(
         .min(grid_w);
     let used_w = card_w * cols as u16 + gap_total;
     let grid_x = inner.x + 1 + grid_w.saturating_sub(used_w) / 2;
+    // Row 0: the unlock rule when the cards are tall enough to name the boss
+    // fight themselves, and the **selected floor's** boss line when they are
+    // not (the 57x20 grid leaves three content rows, so a card has no room —
+    // but the screen still has to say who is waiting on that floor).
+    if subtitle {
+        if card_h >= 8 {
+            let line = if inner.width >= 70 {
+                "Clear any floor of a stage to open the next · Flatbed always open"
+            } else if inner.width >= 52 {
+                "Clear a stage to open the next · Flatbed always open"
+            } else {
+                "Clear a stage to open the next"
+            };
+            put_centered(buf, inner, 0, line, ink(MUTED).bg(PLATE));
+        } else if sel_slot.unlocked {
+            let (first, second) = sel_slot.level.boss_pair();
+            let mut line = StackBuf::<48>::new();
+            match second {
+                Some(second) => {
+                    let _ = write!(line, "BOSS  {first} or {second}");
+                }
+                None => {
+                    let _ = write!(line, "BOSS  {first}");
+                }
+            }
+            put_centered(buf, inner, 0, line.as_str(), ink(MUTED).bg(PLATE));
+        } else {
+            put_centered(buf, inner, 0, "BOSS CLASSIFIED", ink(EDGE).bg(PLATE));
+        }
+    }
     let sel_row = sel_idx / cols;
     let first_row = if visible_rows >= rows_all {
         0
@@ -4199,6 +4244,96 @@ mod tests {
             assert!(
                 !plate.name().is_empty() && !plate.boss_name().is_empty(),
                 "{theme:?}: a plate is missing its copy"
+            );
+        }
+    }
+
+    /// Every floor's card names the fight(s) the seed can field there: the
+    /// first name is the floor's own boss (the HUD bar's plate), and a pooled
+    /// floor names its pool mate too. The table is read from
+    /// `BossKind::pool_for_theme`, so a new pool mate cannot be missed here.
+    #[test]
+    fn every_floor_card_names_its_whole_boss_pool() {
+        use crate::game::ecs::systems::boss::BossKind;
+        for theme in Theme::playable() {
+            let plate = CampaignLevel::from_theme(theme);
+            let pool = BossKind::pool_for_theme(theme);
+            let (first, second) = plate.boss_pair();
+            assert_eq!(first, plate.boss_name(), "{theme:?}: first name");
+            assert_eq!(
+                first,
+                crate::render::hud::boss_codename_kind(pool[0]).0,
+                "{theme:?}: the card and the boss bar disagree"
+            );
+            assert_eq!(
+                second.is_some(),
+                pool.len() > 1,
+                "{theme:?}: a pooled floor must name both bosses"
+            );
+            if let (Some(second), Some(kind)) = (second, pool.get(1)) {
+                assert_eq!(
+                    second,
+                    crate::render::hud::boss_codename_kind(*kind).0,
+                    "{theme:?}: the pool mate's name"
+                );
+            }
+        }
+    }
+
+    /// The cards carry both names of a pooled floor, and at 57x20 — where a card
+    /// is three content rows and has no boss row — the selected floor's pair is
+    /// named on the screen's own subtitle line instead.
+    #[test]
+    fn the_sector_cards_name_both_bosses_of_a_pooled_floor() {
+        // Every floor open, so no card reads BOSS CLASSIFIED.
+        let mut all_open = sample_slots();
+        for slot in all_open.iter_mut() {
+            slot.unlocked = true;
+        }
+        for &(w, h) in &[(80u16, 24u16), (120, 40)] {
+            let view = LevelSelectView {
+                slots: &all_open,
+                selected: 0,
+                hovered: None,
+            };
+            let (term, _) = draw_select_hits(&view, w, h);
+            let txt = buffer_text(&term);
+            for slot in &all_open {
+                let (first, second) = slot.level.boss_pair();
+                assert!(
+                    txt.contains(first),
+                    "{w}x{h}: {} does not name {first}:\n{txt}",
+                    slot.level.name()
+                );
+                if let Some(second) = second {
+                    assert!(
+                        txt.contains(second),
+                        "{w}x{h}: {} names only one of its two bosses:\n{txt}",
+                        slot.level.name()
+                    );
+                }
+            }
+        }
+        // 57x20: the selected floor's pool is printed above the grid.
+        let slots = sample_slots();
+        for selected in [0usize, 1, 5] {
+            let view = LevelSelectView {
+                slots: &slots,
+                selected,
+                hovered: None,
+            };
+            let (term, _) = draw_select_hits(&view, 57, 20);
+            let txt = buffer_text(&term);
+            let (first, second) = slots[selected].level.boss_pair();
+            assert!(
+                txt.contains(first),
+                "57x20: {} is missing its first boss {first}:\n{txt}",
+                slots[selected].level.name()
+            );
+            assert!(
+                txt.contains(second.unwrap_or("")),
+                "57x20: {} does not name its second boss:\n{txt}",
+                slots[selected].level.name()
             );
         }
     }

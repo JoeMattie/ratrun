@@ -2288,8 +2288,16 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
     // (CTRL where a lone modifier press reports, SPACE where it cannot).
     let dashing = world.player.dash_active > 0.0;
     let dash_ready = world.player.dash_cd <= 0.0;
+    // Super Dash: while the dash input is held the module is a CHARGE meter
+    // (the sim's own held meter, refilled at `super_dash_charge_secs`), and it
+    // reads in the weapon's blue-white rather than the cooldown's amber.
+    let charging = world.player.dash_charging;
+    let dash_charge = world.player.dash_charge.clamp(0.0, 1.0);
+    let charge_full = charging && dash_charge >= 1.0;
     let dash_max_cd = world.player.loadout.stats.dash_cd.max(0.1);
-    let dash_fill = if dash_ready || dashing {
+    let dash_fill = if charging {
+        dash_charge
+    } else if dash_ready || dashing {
         1.0
     } else {
         (1.0 - world.player.dash_cd / dash_max_cd).clamp(0.0, 1.0)
@@ -2298,14 +2306,21 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
     // module goes red for a beat so a refused dash is never silent.
     let dash_denied = !dash_ready && world.player.dash_denied > 0.0;
     refill(&mut state.dash, |b| {
+        let word = if charging { "CHARGE" } else { "DASH" };
         if area.width >= 44 {
-            let _ = write!(b, "{} DASH", state.dash_name);
+            let _ = write!(b, "{} {}", state.dash_name, word);
         } else {
-            b.push_str("DASH");
+            b.push_str(word);
         }
     });
     refill(&mut state.dash_status, |b| {
-        if dashing {
+        if charging {
+            if charge_full {
+                b.push_str("FULL");
+            } else {
+                let _ = write!(b, "{:>3}%", (dash_charge * 100.0).round() as u32);
+            }
+        } else if dashing {
             b.push_str("DASHING");
         } else if dash_ready {
             b.push_str("READY");
@@ -2403,18 +2418,30 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
         dx = dx.saturating_add(2);
     }
     // The label: muted while recharging, bright when the dash is back, red on a
-    // refused press.
+    // refused press, blue-white while a Super Dash charge fills.
     let label_style = if dash_denied {
         Style::default().fg(DANGER).bg(PLATE).add_modifier(Modifier::BOLD)
-    } else if dash_ready || dashing {
+    } else if charging || dash_ready || dashing {
         Style::default().fg(COAT).bg(PLATE).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(MUTED).bg(PLATE)
     };
     // The badge is the loud part: an accent plate for READY (flashing to near
-    // white when it first comes back), danger red for a refused press, and a
+    // white when it first comes back), danger red for a refused press, the
+    // weapon's blue-white for a charge (pulsing once the meter is full) and a
     // plain amber countdown while it recharges.
-    let badge_style = if dash_ready {
+    let badge_style = if charging {
+        let bg = if charge_full {
+            palette::to_color(palette::mix(
+                (198, 230, 255),
+                (255, 255, 255),
+                0.5 + 0.5 * (state.clock * 9.0).sin(),
+            ))
+        } else {
+            Color::Rgb(198, 230, 255)
+        };
+        Style::default().fg(PLATE).bg(bg).add_modifier(Modifier::BOLD)
+    } else if dash_ready {
         // Either the HUD's own edge detection or the sim's `dash_ready_flash`
         // (which also drives the on-rat gauge) lights the just-became-ready pop.
         let bg = if state.dash_ready_flash > 0.0 || world.player.dash_ready_flash > 0.0 {
@@ -2436,7 +2463,13 @@ pub fn draw_bottom(frame: &mut Frame, area: Rect, world: &World, state: &mut Hud
     } else {
         Style::default().fg(WARN_AMBER).bg(PLATE)
     };
-    let bar_color = if dash_ready {
+    let bar_color = if charging {
+        if charge_full {
+            COAT
+        } else {
+            Color::Rgb(198, 230, 255)
+        }
+    } else if dash_ready {
         accent
     } else if dash_denied {
         DANGER_DIM

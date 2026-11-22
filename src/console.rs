@@ -601,6 +601,12 @@ const TP_KINDS: &[&str] = &["arena", "shop", "chest", "maze"];
 const LIGHTS_KINDS: &[&str] = &["full", "hard", "coarse", "compact"];
 const LIBRARY_KINDS: &[&str] = &["unlock", "lock"];
 const NEST_KINDS: &[&str] = &["max", "reset"];
+/// The word that makes a command that edits the saved profile actually run.
+const CONFIRM_WORD: &[&str] = &["confirm"];
+
+/// Commands that build a new run: the run they start is flagged as
+/// console-started, and never banks, records or counts a discovery.
+const RUN_STARTERS: &[&str] = &["floor", "campaign", "restart"];
 
 /// The command table. Order is the order `help` lists them in.
 pub static COMMANDS: &[CommandSpec] = &[
@@ -877,9 +883,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "pause",
         aliases: &[],
-        usage: "pause",
-        summary: "Toggle the simulation pause.",
-        args: &[],
+        usage: "pause [on|off]",
+        summary: "Toggle the simulation pause (the console keeps one frozen tick).",
+        args: &[ArgKind::OnOff],
         read_only: false,
         handler: cmd_pause,
     },
@@ -1030,18 +1036,18 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "bank",
         aliases: &[],
-        usage: "bank <n>",
-        summary: "Set the Nest's banked gold.",
-        args: &[ArgKind::Text],
+        usage: "bank <n> confirm",
+        summary: "Set the Nest's banked gold (needs `confirm`: it edits the save).",
+        args: &[ArgKind::Text, ArgKind::Words(CONFIRM_WORD)],
         read_only: false,
         handler: cmd_bank,
     },
     CommandSpec {
         name: "nest",
         aliases: &[],
-        usage: "nest max|reset",
-        summary: "Max every Nest track, or wipe the Nest.",
-        args: &[ArgKind::Words(NEST_KINDS)],
+        usage: "nest max|reset confirm",
+        summary: "Max every Nest track, or wipe the Nest (needs `confirm`).",
+        args: &[ArgKind::Words(NEST_KINDS), ArgKind::Words(CONFIRM_WORD)],
         read_only: false,
         handler: cmd_nest,
     },
@@ -1265,7 +1271,15 @@ pub fn run_command(app: &mut crate::app::App, line: &str) -> Result<(), String> 
         app.console_flag_cheat();
     }
     let args: Vec<&str> = argv[1..].iter().map(|s| s.as_str()).collect();
-    (cmd.handler)(app, &args)
+    let outcome = (cmd.handler)(app, &args);
+    // A run the console started is never an earned run. The app's own start
+    // paths clear the taint for a clean start (a fresh campaign, a retry), so
+    // `floor`, `campaign` and `restart` are re-flagged here: whichever door the
+    // run came through, "started from the console" means "banked nothing".
+    if outcome.is_ok() && RUN_STARTERS.contains(&cmd.name) {
+        app.console_flag_cheat();
+    }
+    outcome
 }
 
 /// Split a command line into words. Double quotes group a word; a backslash
@@ -1343,7 +1357,18 @@ fn cmd_help(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
         let ro = if cmd.read_only { "" } else { " *" };
         app.console_line(format!("  {:<12}{}{}", cmd.name, cmd.summary, ro), LineKind::Output);
     }
-    app.console_line("  * = flags the run as CONSOLE USED", LineKind::Info);
+    app.console_line(
+        "  * = flags the run as CONSOLE USED (no bank, no record, no Library counts)",
+        LineKind::Info,
+    );
+    app.console_line(
+        "  floor / campaign / restart always start a CONSOLE USED run, whichever stage or route they pick",
+        LineKind::Info,
+    );
+    app.console_line(
+        "  bank / nest edit the saved profile: repeat them with `confirm`",
+        LineKind::Info,
+    );
     Ok(())
 }
 
@@ -1434,6 +1459,18 @@ fn cmd_speed(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
 }
 
 fn cmd_give(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
+    // `give` fills the **run's** racks, not the hard 8-slot ceiling: the caps
+    // are `Loadout::max_weapons()` / `Loadout::max_passives()`, i.e. what this
+    // profile has actually bought in the Nest. The world's own adders stop at
+    // `MAX_WEAPONS`, so without this check a 4-slot run could be handed 8
+    // weapons and the HUD, the shop and the pause plate would disagree.
+    let (max_w, max_p) = match app.world_ref() {
+        Some(w) => (
+            w.player.loadout.max_weapons(),
+            w.player.loadout.max_passives(),
+        ),
+        None => return Err("no run in progress".into()),
+    };
     let Some(world) = app.world_mut() else {
         return Err("no run in progress".into());
     };
@@ -1441,17 +1478,38 @@ fn cmd_give(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
     match kind.as_deref() {
         Some("all") => {
             for w in WeaponKind::all() {
+                let held = world.player.loadout.weapons.iter().any(|x| x.kind == w);
+                if !held && world.player.loadout.weapons.len() >= max_w {
+                    continue;
+                }
                 world.give_weapon(w, 5);
             }
             for p in PassiveKind::all() {
+                let held = world.player.loadout.passives.iter().any(|x| x.0 == p);
+                if !held && world.player.loadout.passives.len() >= max_p {
+                    continue;
+                }
                 world.give_passive(p, 3);
             }
-            app.console_line("gave every weapon and passive", LineKind::Success);
+            let msg = format!(
+                "gave every weapon and passive the racks hold ({}/{} weapons, {}/{} passives)",
+                world.player.loadout.weapons.len().min(max_w),
+                max_w,
+                world.player.loadout.passives.len().min(max_p),
+                max_p
+            );
+            app.console_line(msg, LineKind::Success);
         }
         Some("weapon") => {
             let name = args.get(1).ok_or("usage: give weapon <name> [level]")?;
             let w = find_weapon(name).ok_or_else(|| format!("unknown weapon `{name}`"))?;
             let level = args.get(2).map(|s| parse_u32(s, "level")).transpose()?.unwrap_or(1);
+            let held = world.player.loadout.weapons.iter().any(|x| x.kind == w);
+            if !held && world.player.loadout.weapons.len() >= max_w {
+                return Err(format!(
+                    "all {max_w} weapon slots are full — `remove` one, or buy WEAPON SLOTS in the Nest"
+                ));
+            }
             world.give_weapon(w, level.min(255) as u8);
             app.console_line(format!("gave {} L{}", w.name(), level), LineKind::Success);
         }
@@ -1459,6 +1517,12 @@ fn cmd_give(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
             let name = args.get(1).ok_or("usage: give passive <name> [stacks]")?;
             let p = find_passive(name).ok_or_else(|| format!("unknown passive `{name}`"))?;
             let stacks = args.get(2).map(|s| parse_u32(s, "stacks")).transpose()?.unwrap_or(1);
+            let held = world.player.loadout.passives.iter().any(|x| x.0 == p);
+            if !held && world.player.loadout.passives.len() >= max_p {
+                return Err(format!(
+                    "all {max_p} passive slots are full — `remove` one, or buy PASSIVE SLOTS in the Nest"
+                ));
+            }
             world.give_passive(p, stacks);
             app.console_line(format!("gave {} ×{}", p.name(), stacks), LineKind::Success);
         }
@@ -1728,10 +1792,20 @@ fn cmd_timescale(app: &mut crate::app::App, args: &[&str]) -> Result<(), String>
     Ok(())
 }
 
-fn cmd_pause(app: &mut crate::app::App, _args: &[&str]) -> Result<(), String> {
-    let on = app.toggle_console_pause();
+fn cmd_pause(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
+    // `pause` toggles; `pause on` / `pause off` say it outright, so a scripted
+    // run never depends on the state it finds (the flag is a plain toggle
+    // underneath).
+    let want = parse_on_off(args.first().copied(), app.console_paused)?;
+    if want != app.console_paused {
+        app.toggle_console_pause();
+    }
     app.console_line(
-        format!("simulation {}", if on { "paused" } else { "running" }),
+        if want {
+            "simulation paused — the console stays open: `pause off` resumes, `step n` advances it"
+        } else {
+            "simulation running"
+        },
         LineKind::Success,
     );
     Ok(())
@@ -1976,28 +2050,59 @@ fn cmd_library(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
     }
 }
 
+/// `bank` and `nest` edit the **saved** profile, so both need the same explicit
+/// second word a destructive command gets. A mistyped `bank 400` on the title
+/// used to rewrite the save file on the spot.
+fn confirmed(args: &[&str], what: &str) -> Result<(), String> {
+    if args.get(1).is_some_and(|s| s.eq_ignore_ascii_case("confirm")) {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{what}` edits the saved profile: repeat it with `confirm` (e.g. `{what} confirm`)"
+        ))
+    }
+}
+
 fn cmd_bank(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
-    let n = args.first().ok_or("usage: bank <n>")?;
+    let n = args.first().ok_or("usage: bank <n> confirm")?;
     let amount = parse_u32(n, "bank")?;
+    confirmed(args, &format!("bank {amount}"))?;
+    let before = app.nest_bank();
     app.console_set_bank(amount);
-    app.console_line(format!("nest bank = {amount}"), LineKind::Success);
+    app.console_line(
+        format!("nest bank {before}¢ → {amount}¢ (saved)"),
+        LineKind::Success,
+    );
     Ok(())
 }
 
 fn cmd_nest(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
-    match args.first().map(|s| s.to_ascii_lowercase()).as_deref() {
-        Some("max") => {
-            app.console_nest(true);
-            app.console_line("nest: every track maxed (applies from the next run)", LineKind::Success);
-            Ok(())
-        }
-        Some("reset") => {
-            app.console_nest(false);
-            app.console_line("nest: bank and tracks wiped", LineKind::Success);
-            Ok(())
-        }
-        _ => Err("usage: nest max|reset".into()),
+    let what = args
+        .first()
+        .map(|s| s.to_ascii_lowercase())
+        .ok_or("usage: nest max|reset confirm")?;
+    if !matches!(what.as_str(), "max" | "reset") {
+        return Err("usage: nest max|reset confirm".into());
     }
+    confirmed(args, &format!("nest {what}"))?;
+    let bank = app.nest_bank();
+    match what.as_str() {
+        "max" => {
+            app.console_nest(true);
+            app.console_line(
+                format!("nest: every track maxed, bank kept at {bank}¢ (applies from the next run)"),
+                LineKind::Success,
+            );
+        }
+        _ => {
+            app.console_nest(false);
+            app.console_line(
+                format!("nest: bank {bank}¢ → 0¢ and every track wiped"),
+                LineKind::Success,
+            );
+        }
+    }
+    Ok(())
 }
 
 fn cmd_set(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {

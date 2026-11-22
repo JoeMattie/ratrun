@@ -75,7 +75,8 @@ use super::ecs::components::{
 use super::ecs::constants::{GRID_CELL, PARTICLE_CAP, PLAYER_RADIUS};
 use super::ecs::resources::{
     collect_sorted, spawn_with_id, swap_in, swap_out, ActiveFx, BossDue, BossOverride, BossVirus,
-    Cvars, DamageLedger, DashTrack, DebugFlags, DifficultyLevel, EnemyIndex, EvoRuntime, GridScratch,
+    Cvars, DamageLedger, DashHold, DashTrack, DebugFlags, DifficultyLevel, EnemyIndex, EvoRuntime,
+    GridScratch,
     LaserFx, LastPickups, LevelIndex, MeleeNudge, NeighborScratch, NextEnemyId, NextSpawnId,
     NukeTick, PickupScratch, RngRes, RunCounters, SfxQueue, Shake, TickInput, Viewport, XpBank,
 };
@@ -1143,11 +1144,46 @@ impl World {
         aim: Option<Vec2>,
         charge: f32,
     ) {
+        self.update_full(dt, move_dir, dash, active, aim, charge, DashHold::NONE);
+    }
+
+    /// [`update_with_charge`](Self::update_with_charge) plus the dash button's
+    /// **live held state and edges** — how the App runs the hold-to-charge
+    /// Super Dash. `dash` keeps its press-to-dash meaning; `hold.down` starts a
+    /// charge, `hold.held` fills the meter and `hold.up` fires it. A focus loss
+    /// drops the hold (both edges false, `held` false): the charge is cancelled,
+    /// never fired.
+    ///
+    /// Another entry point rather than a new argument on `update_with`, so the
+    /// bot, the harness `update` path and every existing test keep their exact
+    /// signature and behaviour.
+    pub fn update_with_dash_hold(
+        &mut self,
+        dt: f32,
+        move_dir: Vec2,
+        dash: bool,
+        active: bool,
+        aim: Option<Vec2>,
+        hold: DashHold,
+    ) {
+        self.update_full(dt, move_dir, dash, active, aim, 0.0, hold);
+    }
+
+    fn update_full(
+        &mut self,
+        dt: f32,
+        move_dir: Vec2,
+        dash: bool,
+        active: bool,
+        aim: Option<Vec2>,
+        charge: f32,
+        hold: DashHold,
+    ) {
         // Neon merge: the HUD reads only this tick's pickups.
         self.last_pickups.clear();
         if self.finished() {
             // Keep particles settling for a beat, but freeze the sim.
-            self.begin_tick_full(dt, move_dir, dash, active, aim, charge);
+            self.begin_tick_full(dt, move_dir, dash, active, aim, charge, hold);
             self.settle_schedule.run(&mut self.ecs);
             self.end_tick();
             return;
@@ -1155,7 +1191,7 @@ impl World {
         // Legacy `update` line 123.
         self.elapsed += dt;
 
-        self.begin_tick_full(dt, move_dir, dash, active, aim, charge);
+        self.begin_tick_full(dt, move_dir, dash, active, aim, charge, hold);
         self.schedule.run(&mut self.ecs);
         self.end_tick();
         self.try_revive();
@@ -1197,7 +1233,7 @@ impl World {
     /// [`begin_tick`](Self::begin_tick) with the two presses told apart (see
     /// [`update_with`](Self::update_with)).
     pub fn begin_tick_with(&mut self, dt: f32, move_dir: Vec2, dash: bool, active: bool) {
-        self.begin_tick_full(dt, move_dir, dash, active, None, 0.0);
+        self.begin_tick_full(dt, move_dir, dash, active, None, 0.0, DashHold::NONE);
     }
 
     /// [`begin_tick_with`](Self::begin_tick_with) plus the aim point.
@@ -1209,7 +1245,7 @@ impl World {
         active: bool,
         aim: Option<Vec2>,
     ) {
-        self.begin_tick_full(dt, move_dir, dash, active, aim, 0.0);
+        self.begin_tick_full(dt, move_dir, dash, active, aim, 0.0, DashHold::NONE);
     }
 
     /// [`begin_tick_with_aim`](Self::begin_tick_with_aim) plus the dash charge
@@ -1223,7 +1259,21 @@ impl World {
         aim: Option<Vec2>,
         charge: f32,
     ) {
-        self.begin_tick_full(dt, move_dir, dash, active, aim, charge);
+        self.begin_tick_full(dt, move_dir, dash, active, aim, charge, DashHold::NONE);
+    }
+
+    /// [`begin_tick_charged`](Self::begin_tick_charged) plus the dash button's
+    /// live held state and edges (single-system tests of the hold-to-charge
+    /// Super Dash: press, hold, release).
+    pub fn begin_tick_with_dash_hold(
+        &mut self,
+        dt: f32,
+        move_dir: Vec2,
+        dash: bool,
+        active: bool,
+        hold: DashHold,
+    ) {
+        self.begin_tick_full(dt, move_dir, dash, active, None, 0.0, hold);
     }
 
     fn begin_tick_full(
@@ -1234,6 +1284,7 @@ impl World {
         active: bool,
         aim: Option<Vec2>,
         charge: f32,
+        hold: DashHold,
     ) {
         self.ecs.insert_resource(TickInput {
             dt,
@@ -1241,8 +1292,9 @@ impl World {
             dash,
             active,
             aim,
-            dash_down: false,
-            dash_released: false,
+            dash_down: hold.down,
+            dash_held: hold.held,
+            dash_released: hold.up,
             charge: charge.clamp(0.0, 1.0),
         });
         self.ecs.insert_resource(Viewport(self.viewport));
@@ -2611,6 +2663,12 @@ impl World {
     }
 
     fn draw_player(&mut self, pb: &mut PixelBuffer, cam: Vec2) {
+        // Super Dash charge: the lane preview under the rat. Faint blue-white
+        // (the weapon's own colour, never a telegraph red), at the length this
+        // charge would carry, stopped by the first wall.
+        if self.player.dash_charging {
+            art_rat::draw_dash_preview(pb, &self.player, &self.level.tiles, cam);
+        }
         // The Tail Thrash's long tail rides *under* the rat, so the body stays
         // readable mid-sweep and the arc reads as coming out of its rump.
         if let Some((angle, reach, fade)) = self.thrash_visual() {

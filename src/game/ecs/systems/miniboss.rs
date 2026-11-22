@@ -516,26 +516,21 @@ pub fn appointment_xp(appointment: usize) -> u32 {
     }
 }
 
-/// The per-theme schedule: the `WAVE3_DESIGN.md` §8 table, row for row. The
-/// match is exhaustive over `Theme`, so a new floor cannot ship without a row.
+/// The per-theme schedule: four fixed appointments per floor, in order
+/// (3:00, 6:00, 9:00, 12:00).
 ///
-/// The **Flatbed** is not in the design table (it was added after it). It is a
-/// last-stage getaway, so it takes the four signatures that read best on an
-/// open deck with holes in it — the two straight lanes first (Corkscrew's
-/// trench, the Foreman's stamps), then the two that sweep (Bobbin's cord, the
-/// Bell Diver's ring) — and never the Milk Carton, whose wide spill would
-/// cover a whole plank lane.
+/// The table itself lives in the roster ([`crate::game::roster`]), beside the
+/// floor's eight ordinary slots, so a per-floor content pass edits one file.
+/// `WAVE4_ROSTERS.md` gives every floor four fixed appointments in increasing
+/// complexity — the last one a rehearsal for the floor's boss — and the six
+/// existing minibosses keep their home slots (Sewer Corkscrew/Bell Diver,
+/// Kitchen Milk Carton, Laundry Sister Snip/Bobbin, Printworks The Foreman).
+/// Slots whose designed miniboss does not exist yet hold a stand-in chosen from
+/// the existing six by the design's own "data, <base>" note; see
+/// `roster::FloorRoster::appointment_stand_ins`.
 pub fn schedule_for(theme: Theme, appointment: usize) -> MinibossKind {
-    use MinibossKind::*;
-    let row = match theme {
-        Theme::Sewer => [Corkscrew, BellDiver, MilkCarton, SisterSnip],
-        Theme::Kitchen => [MilkCarton, SisterSnip, BellDiver, Foreman],
-        Theme::Lab => [BellDiver, Corkscrew, Foreman, Bobbin],
-        Theme::Laundry => [Bobbin, SisterSnip, Corkscrew, MilkCarton],
-        Theme::Printworks => [Foreman, Bobbin, SisterSnip, BellDiver],
-        Theme::Trailer => [Corkscrew, Foreman, Bobbin, BellDiver],
-    };
-    row[appointment.min(3)]
+    let row = crate::game::roster::appointments(theme);
+    row[appointment.min(row.len() - 1)]
 }
 
 /// Appointment schedule + spawn grace state. Lives on the ECS world for the
@@ -1087,18 +1082,34 @@ mod tests {
     #[test]
     fn schedule_is_the_design_table_and_total_over_every_playable_theme() {
         use MinibossKind::*;
-        // WAVE3_DESIGN.md §8, row for row.
+        // WAVE4_ROSTERS.md "Named appointments", row for row: four fixed
+        // appointments per floor, in order. The existing six keep their homes
+        // (Sewer 3:00 Corkscrew / 6:00 Bell Diver, Kitchen 3:00 Milk Carton,
+        // Laundry 3:00 Sister Snip / 6:00 Bobbin, Printworks 3:00 Foreman) and
+        // the rest are the design's "data, <base>" stand-ins.
         let rows = [
-            (Theme::Sewer, [Corkscrew, BellDiver, MilkCarton, SisterSnip]),
-            (Theme::Kitchen, [MilkCarton, SisterSnip, BellDiver, Foreman]),
-            (Theme::Lab, [BellDiver, Corkscrew, Foreman, Bobbin]),
-            (Theme::Laundry, [Bobbin, SisterSnip, Corkscrew, MilkCarton]),
-            (Theme::Printworks, [Foreman, Bobbin, SisterSnip, BellDiver]),
+            (Theme::Sewer, [Corkscrew, BellDiver, Bobbin, SisterSnip]),
+            (Theme::Kitchen, [MilkCarton, Corkscrew, Foreman, Bobbin]),
+            (Theme::Lab, [Corkscrew, BellDiver, Foreman, Bobbin]),
+            (Theme::Laundry, [SisterSnip, Bobbin, BellDiver, Corkscrew]),
+            (Theme::Printworks, [Foreman, SisterSnip, MilkCarton, BellDiver]),
+            (Theme::Trailer, [MilkCarton, Corkscrew, Bobbin, Foreman]),
         ];
         for (theme, row) in rows {
             for (i, kind) in row.into_iter().enumerate() {
                 assert_eq!(schedule_for(theme, i), kind, "{theme:?} appointment {i}");
             }
+        }
+        // Every existing miniboss is still somebody's appointment, so no floor
+        // lost the six's work, and every floor escalates from a real body to a
+        // fixed rehearsal.
+        for kind in MinibossKind::all() {
+            assert!(
+                Theme::playable()
+                    .iter()
+                    .any(|&t| (0..4).any(|i| schedule_for(t, i) == kind)),
+                "{kind:?} is on no floor"
+            );
         }
         // Every playable floor (the Flatbed included) has four distinct names.
         for theme in Theme::playable() {

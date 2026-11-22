@@ -105,9 +105,10 @@
 //! - **Hold.** A victim is pinned to its own pad slot for its class hold
 //!   (`enemy_hold`), then tears free (the existing release feedback) and its
 //!   capacity is freed. A victim killed on the board frees its units at once:
-//!   the corpse never blocks the pad. A board ignores a body it has just
-//!   released for [`STICKY_TRAP_RELEASE_GRACE_SECS`], so one body cannot be
-//!   re-caught until it has walked off.
+//!   the corpse never blocks the pad. A board **remembers a body it has just
+//!   released** ([`StickySlot::freed`]) and will not catch it again until it
+//!   has walked off the pad once — a time-only grace let a body jammed on the
+//!   pad by the crowd be re-caught 1.2 s later and spend the budget twice.
 //! - **Overflow.** A body too big for the room left (or arriving once the
 //!   budget is gone) is only *slowed* while it crosses, never held: the horde
 //!   behind a full board keeps moving. Stuck bodies do not block pathing
@@ -201,12 +202,13 @@ struct StuckVictim {
     who: Victim,
     /// Glue units it occupies (0 in the post-release grace).
     units: u8,
-    /// Seconds of hold left (or of post-release grace when `held` is false).
+    /// Seconds of hold left (or of the rat's post-release grace when `held` is
+    /// `false`; a freed body is remembered in [`StickySlot::freed`] instead).
     remaining: f32,
     /// Total hold this victim got, for the art's `progress`.
     hold: f32,
-    /// `true` while it is held; `false` while the board ignores it after a
-    /// release (so a body still standing on the pad is not re-caught).
+    /// `true` while it is held; `false` only for the rat's short grace after a
+    /// dash / sock / spent hold.
     held: bool,
 }
 
@@ -216,6 +218,10 @@ struct BossSlow {
     entity: Entity,
     remaining: f32,
 }
+
+/// How many released bodies a board remembers (one per victim slot: a board can
+/// only free what it could hold).
+const FREED_MEMORY: usize = STICKY_TRAP_SLOTS;
 
 /// Runtime side table for one sticky board.
 ///
@@ -230,6 +236,11 @@ struct StickySlot {
     budget_left: u8,
     /// The boss-like body this board is slowing (takes no capacity).
     boss: Option<BossSlow>,
+    /// Bodies this board has just let go, newest last. Each is immune to *this*
+    /// board until it has walked off the pad once (the documented rule), so a
+    /// body jammed on the pad by the crowd is never re-caught and never spends
+    /// the same glue twice. Fixed array: no per-tick allocation.
+    freed: [Option<Entity>; FREED_MEMORY],
 }
 
 impl Default for StickySlot {
@@ -240,6 +251,7 @@ impl Default for StickySlot {
             // A fresh board carries the whole lifetime budget.
             budget_left: STICKY_TRAP_BUDGET,
             boss: None,
+            freed: [None; FREED_MEMORY],
         }
     }
 }
@@ -258,6 +270,29 @@ impl StickySlot {
     #[inline]
     fn free_slot(&self) -> Option<usize> {
         self.slots.iter().position(|s| s.is_none())
+    }
+
+    /// Has this board just let this body go, with the body still on the pad?
+    /// A freed body is not caught (and not slowed) again until it walks off.
+    #[inline]
+    fn is_freed(&self, entity: Entity) -> bool {
+        self.freed.iter().flatten().any(|&e| e == entity)
+    }
+
+    /// Remember a body this board has just released.
+    ///
+    /// Entries are appended in a fixed array; a full memory drops the oldest
+    /// (the body that has had the longest chance to walk off the pad).
+    fn remember_freed(&mut self, entity: Entity) {
+        if self.is_freed(entity) {
+            return;
+        }
+        if let Some(empty) = self.freed.iter_mut().find(|s| s.is_none()) {
+            *empty = Some(entity);
+            return;
+        }
+        self.freed.copy_within(1.., 0);
+        self.freed[FREED_MEMORY - 1] = Some(entity);
     }
 }
 
@@ -758,23 +793,38 @@ pub fn traps_system(
         // Rebuilt from the live slots every tick; the sim is the only writer.
         view.victims = [None; STICKY_TRAP_SLOTS];
 
+        // A body the board has let go stays immune until it has walked off the
+        // pad once: drop the memory of anything that is dead, despawned or has
+        // left. (This is the whole of the re-catch rule — the old timer let a
+        // jammed body be caught again 1.2 s after release.)
+        for entry in slot.freed.iter_mut() {
+            let Some(entity) = *entry else {
+                continue;
+            };
+            let still_on_pad = match enemies.get(entity) {
+                Ok((_, _, e)) if e.alive() => {
+                    e.pos.dist_sq(pos) <= PAD_REACH_SQ && on_pad(pos, facing, e.pos)
+                }
+                _ => false,
+            };
+            if !still_on_pad {
+                *entry = None;
+            }
+        }
+
         // ---- 1. Advance the victims this board already holds ----------------
         for s in 0..STICKY_TRAP_SLOTS {
             let Some(v) = slot.slots[s] else {
                 continue;
             };
             if !v.held {
-                // Post-release grace: the body is still standing on the pad but
-                // the board has just let it go, so it must not be re-caught
-                // (a re-catch would spend the whole lifetime budget on it).
+                // The rat's own short grace after a dash, the socks or a spent
+                // hold: it must not be re-stuck the instant it stops. Freed
+                // *bodies* live in `freed` instead (they are immune until they
+                // walk off the pad, however long that takes).
                 let remaining = v.remaining - dt;
-                slot.slots[s] = match v.who {
-                    Victim::Enemy(e) if remaining > 0.0 && enemies.get(e).is_ok() => {
-                        Some(StuckVictim { remaining, ..v })
-                    }
-                    Victim::Player if remaining > 0.0 => Some(StuckVictim { remaining, ..v }),
-                    _ => None,
-                };
+                let keep = matches!(v.who, Victim::Player) && remaining > 0.0;
+                slot.slots[s] = keep.then_some(StuckVictim { remaining, ..v });
                 continue;
             }
             match v.who {
@@ -880,17 +930,15 @@ pub fn traps_system(
                                 commands.entity(entity).remove::<TrapSlow>();
                             }
                             slot.load = slot.load.saturating_sub(v.units);
-                            slot.slots[s] = if live.is_some() {
-                                Some(StuckVictim {
-                                    who: v.who,
-                                    units: 0,
-                                    remaining: STICKY_TRAP_RELEASE_GRACE_SECS,
-                                    hold: v.hold,
-                                    held: false,
-                                })
-                            } else {
-                                None
-                            };
+                            // Freed for good: the slot goes back to the pool at
+                            // once, and the board remembers the body so it is
+                            // not caught again until it has walked off the pad.
+                            slot.slots[s] = None;
+                            if live.is_some() {
+                                if let Victim::Enemy(entity) = v.who {
+                                    slot.remember_freed(entity);
+                                }
+                            }
                         }
                     }
                 }
@@ -933,7 +981,12 @@ pub fn traps_system(
                 boss_here = Some(c.entity);
                 continue;
             }
-            if scratch.held.contains(&c.entity) || slot.touches(c.entity) {
+            if scratch.held.contains(&c.entity)
+                || slot.touches(c.entity)
+                || slot.is_freed(c.entity)
+            {
+                // Held by this board, cooling in a slot, or a body this board
+                // has just let go and which has not walked off the pad yet.
                 continue;
             }
             let units = enemy_units(c.kind);
@@ -1658,6 +1711,65 @@ mod tests {
         let _ = (cat, spitter);
     }
 
+    /// The documented rule is "cannot be re-caught until it has walked off": a
+    /// body jammed on the pad by the crowd is not caught again, however long it
+    /// stays (the old time-only grace re-caught it 1.2 s after release and spent
+    /// the board's budget on it a second time). Once it leaves the pad its
+    /// immunity ends and stepping back on is a fresh catch.
+    #[test]
+    fn a_freed_body_is_not_caught_again_until_it_has_walked_off() {
+        let mut w = open_arena(251);
+        let c = centre(&w);
+        add_board(&mut w, c);
+        w.player.pos = c + Vec2::new(400.0, 0.0);
+        // A small crowd on the pad. Nothing moves a body in this narrow
+        // harness, which is exactly the jam the rule is about.
+        let bodies: Vec<Entity> = [-5.0f32, 0.0, 5.0]
+            .iter()
+            .map(|dx| add_enemy(&mut w, EnemyKind::Skitterer, c + Vec2::new(*dx, 2.0), 40.0))
+            .collect();
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert_eq!(held_on(&mut w, 0, EnemyKind::Skitterer), 3);
+        assert_eq!(slot(&mut w, 0).budget_left, STICKY_TRAP_BUDGET - 3);
+
+        // Long past the hold *and* well past the old grace, all three are free
+        // and still standing on the pad: none is caught again and the budget
+        // does not move.
+        let ticks = ((STICKY_TRAP_HOLD_SMALL_ENEMY_SECS + 3.0 * STICKY_TRAP_RELEASE_GRACE_SECS) / DT)
+            as usize
+            + 4;
+        for _ in 0..ticks {
+            traps_tick(&mut w, Vec2::ZERO, false);
+        }
+        assert_eq!(held_on(&mut w, 0, EnemyKind::Skitterer), 0);
+        assert_eq!(
+            slot(&mut w, 0).budget_left,
+            STICKY_TRAP_BUDGET - 3,
+            "a body jammed on the pad spent the budget a second time"
+        );
+        assert!(
+            !has_slow(&mut w, bodies[0]),
+            "a freed body on the pad is immune, not slowed"
+        );
+
+        // The crowd breaks up. One body walks off the pad (that is what clears
+        // the board's memory of it), then steps back on: a fresh catch.
+        if let Ok(mut e) = w.ecs.query::<&mut Enemy>().get_mut(&mut w.ecs, bodies[1]) {
+            e.pos = c + Vec2::new(0.0, 60.0);
+        }
+        traps_tick(&mut w, Vec2::ZERO, false);
+        if let Ok(mut e) = w.ecs.query::<&mut Enemy>().get_mut(&mut w.ecs, bodies[1]) {
+            e.pos = c + Vec2::new(1.0, 1.0);
+        }
+        traps_tick(&mut w, Vec2::ZERO, false);
+        assert_eq!(
+            held_on(&mut w, 0, EnemyKind::Skitterer),
+            1,
+            "walking off the pad must clear the immunity"
+        );
+        assert_eq!(slot(&mut w, 0).budget_left, STICKY_TRAP_BUDGET - 4);
+    }
+
     /// Each victim keeps its own class hold and tears free on its own clock,
     /// and a big body too large for the room left is never caught.
     #[test]
@@ -1681,9 +1793,9 @@ mod tests {
         assert_eq!(held_on(&mut w, 0, EnemyKind::Skitterer), 1);
         assert!(!has_slow(&mut w, brute), "the released Brute lost its slow");
         assert_eq!(board(&w, 0).load, 1);
-        // The freed Brute walks off (nothing moves a body in this narrow
-        // harness): one left standing on the pad past the release grace is
-        // fair game for a second catch, which is not what this test times.
+        // The freed Brute walks off the pad: that is what clears the board's
+        // memory of it. (One left standing on the pad is *not* caught again —
+        // see `a_freed_body_is_not_caught_again_until_it_has_walked_off`.)
         if let Ok(mut e) = w.ecs.query::<&mut Enemy>().get_mut(&mut w.ecs, brute) {
             e.pos = c + Vec2::new(0.0, 80.0);
         }

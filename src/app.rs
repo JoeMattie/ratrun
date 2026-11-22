@@ -14,6 +14,7 @@ use crate::game::library::{self as library_index, Key as LibraryKey};
 use crate::game::level::Theme;
 use crate::game::loadout::{ChestReward, Loadout, PassiveKind, SlotCaps, Upgrade};
 use crate::game::shop;
+use crate::game::ecs::resources::DashHold;
 use crate::game::world::World;
 use crate::controls::{self, Action, Binding, Device, KeyBind, MouseBind, Scheme, ACTIONS};
 use crate::gamepad::PadPoller;
@@ -2816,10 +2817,23 @@ impl App {
             .world
             .as_ref()
             .is_none_or(|w| w.player.dash_cd <= 0.0);
+        // The dash button itself: its press edge, whether it is still held and
+        // its release edge, on whatever device the dash Action is bound to.
+        // The sim owns the Super Dash charge meter; this is only the button.
+        let dash_hold = DashHold {
+            down: self.input.dash_down(),
+            held: self.input.dash_held(),
+            up: self.input.dash_up(),
+        };
         // Classic/Gamepad: a click is dash + (ready) actives, as it always was.
         // Mouse aim: the clicks are split — LMB fires the actives, RMB dashes —
         // so a left click never spends the dash and a right click never spends
         // a charge.
+        //
+        // A **fresh** press only (`dash_pressed_fresh`): an auto-repeat is the
+        // only "hold" a terminal without key releases can give, and it must
+        // never re-press the dash — with the Super Dash owned that is what would
+        // machine-gun taps instead of charging.
         let (dash, active) = if self.input.controls.mouse_aims() {
             (
                 self.input.action_pressed(Action::Dash),
@@ -2828,7 +2842,7 @@ impl App {
         } else {
             let click = click_dash && dash_ready;
             (
-                click_dash || self.input.dash_pressed(),
+                click_dash || self.input.dash_pressed_fresh(),
                 click || self.input.active_pressed(),
             )
         };
@@ -2841,7 +2855,7 @@ impl App {
             let hp_before = w.player.hp;
             // Console `timescale x` scales the simulation step; default 1.0.
             let sim_dt = dt * self.timescale;
-            w.update_with_aim(sim_dt, move_dir, dash, active, aim);
+            w.update_with_dash_hold(sim_dt, move_dir, dash, active, aim, dash_hold);
             // Drain SFX into a reused buffer, de-duplicated per frame so a
             // 16-shot nova is one sound.
             self.sfx_frame.clear();
@@ -4329,12 +4343,11 @@ impl App {
 
     /// Draw the Controls plate over whatever opened Options.
     fn draw_controls(&mut self, frame: &mut Frame, area: Rect) {
+        // The terminal caveat also carries the Super Dash's hold-to-charge
+        // reality: where a key release cannot be reported, a key only taps and
+        // the mouse or the pad does the charging.
         let note = if self.controls_note.is_empty() {
-            if self.input.lone_ctrl {
-                "Ctrl and Shift can be bound here · Cmd/Fn cannot"
-            } else {
-                "this terminal cannot bind a lone Ctrl or Shift"
-            }
+            self.input.controls.terminal_note()
         } else {
             self.controls_note.as_str()
         };
@@ -7256,6 +7269,101 @@ mod tests {
             h.app.world.as_ref().unwrap().player.dash_cd > 0.0,
             "Space must still dash in the fallback mode"
         );
+    }
+
+    /// Super Dash is hold-to-charge on a Kitty terminal: Ctrl starts the charge
+    /// (no dash yet), the hold fills the meter while the rat keeps moving, and
+    /// the key-up fires the longer dash.
+    #[test]
+    fn a_held_ctrl_charges_the_super_dash_and_its_release_fires_it() {
+        let app = App::with_options(true, None, ScoreTable::default(), false, Some(TEST_SEED));
+        let mut h = Harness::with_app(app, 100, 30);
+        h.enter_playing();
+        {
+            use crate::game::weapon::WeaponKind;
+            let w = h.app.world.as_mut().unwrap();
+            w.player
+                .loadout
+                .apply(&Upgrade::NewWeapon(WeaponKind::SuperDash));
+            w.player.dash_cd = 0.0;
+            w.player.dash_active = 0.0;
+            w.player.hp = 1.0e9;
+            w.player.xp_to_next = 1_000_000;
+        }
+        h.frame_events(&[ctrl_press()]);
+        {
+            let w = h.app.world.as_ref().unwrap();
+            assert!(
+                w.player.dash_charging,
+                "the press must start a charge, not a dash"
+            );
+            assert_eq!(w.player.dash_active, 0.0);
+            assert_eq!(w.player.dash_cd, 0.0, "the cooldown starts on the release");
+        }
+        for _ in 0..30 {
+            h.frame_events(&[]);
+        }
+        assert!(
+            h.app.world.as_ref().unwrap().player.dash_charge > 0.3,
+            "the hold must fill the meter"
+        );
+        let release = KeyEvent::new_with_kind(
+            KeyCode::Modifier(ModifierKeyCode::LeftControl),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release,
+        );
+        h.frame_events(&[release]);
+        let w = h.app.world.as_ref().unwrap();
+        assert!(
+            w.player.dash_active > 0.17,
+            "the key-up must fire the charged dash: {}",
+            w.player.dash_active
+        );
+        assert!(w.player.dash_cd > 0.0, "the cooldown starts on the release");
+        assert!(!w.player.dash_charging);
+    }
+
+    /// The mouse charges in either input mode: a terminal always reports the
+    /// button's Up, so a held click fires a charged dash on the mouse-up (and a
+    /// press alone never dashes while the weapon is owned).
+    #[test]
+    fn a_held_click_charges_and_the_mouse_up_fires_the_super_dash() {
+        let mut h = Harness::new(100, 30);
+        h.enter_playing();
+        {
+            use crate::game::weapon::WeaponKind;
+            let w = h.app.world.as_mut().unwrap();
+            w.player
+                .loadout
+                .apply(&Upgrade::NewWeapon(WeaponKind::SuperDash));
+            w.player.dash_cd = 0.0;
+            w.player.dash_active = 0.0;
+            w.player.hp = 1.0e9;
+            w.player.xp_to_next = 1_000_000;
+        }
+        let field = h.locate("▀");
+        h.events(&[], &[(MouseEventKind::Down(MouseButton::Left), field)]);
+        {
+            let w = h.app.world.as_ref().unwrap();
+            assert!(w.player.dash_charging, "the press must start a charge");
+            assert_eq!(w.player.dash_active, 0.0, "the press must not dash");
+            assert_eq!(w.player.dash_cd, 0.0);
+        }
+        for _ in 0..30 {
+            h.frame(&[]);
+        }
+        assert!(
+            h.app.world.as_ref().unwrap().player.dash_charge > 0.3,
+            "the hold must fill the meter"
+        );
+        h.events(&[], &[(MouseEventKind::Up(MouseButton::Left), field)]);
+        let w = h.app.world.as_ref().unwrap();
+        assert!(
+            w.player.dash_active > 0.17,
+            "the mouse-up must fire the charged dash: {}",
+            w.player.dash_active
+        );
+        assert!(!w.player.dash_charging);
     }
 
     /// A dash refused by the cooldown is never silent: the sim sets the shake

@@ -56,10 +56,11 @@ use bevy_ecs::prelude::*;
 use crate::audio::Sfx;
 use crate::game::collision::SizeClass;
 use crate::game::ecs::constants::{PLAYER_RADIUS, PLAYER_SUBSTEP};
-use crate::game::ecs::resources::{DashTrack, DebugFlags, RngRes, SfxQueue, TickInput};
+use crate::game::ecs::resources::{DashTrack, DebugFlags, RngRes, Shake, SfxQueue, TickInput};
 use crate::game::level::Level;
 use crate::game::particle::{vfx, Particles};
 use crate::game::player::Player;
+use crate::game::weapon::WeaponKind;
 use crate::math::Vec2;
 
 /// How long the on-rat gauge and the HUD's dash module stay lit once the dash
@@ -68,6 +69,34 @@ const DASH_READY_SECS: f32 = 0.35;
 /// How long a refused dash shakes the gauge and turns the HUD module red. Also
 /// the throttle on the refused blip (see `player_system`).
 pub const DASH_DENIED_SECS: f32 = 0.16;
+/// How long an ordinary dash runs (seconds). A charged Super Dash scales this
+/// by up to [`SUPER_DASH_DISTANCE`], which is the distance.
+const DASH_SECS: f32 = 0.16;
+/// Seconds of holding the dash input to fill the Super Dash meter at weapon
+/// level 1. Each weapon level takes [`SUPER_DASH_CHARGE_STEP`] less.
+pub const SUPER_DASH_CHARGE_SECS: f32 = 0.90;
+/// How much faster each Super Dash level fills the meter (seconds off the
+/// level-1 fill).
+pub const SUPER_DASH_CHARGE_STEP: f32 = 0.04;
+/// A hold shorter than this is today's ordinary dash: same distance, same
+/// cooldown, same crossing damage.
+pub const SUPER_DASH_TAP_SECS: f32 = 0.15;
+/// How far a full charge reaches, as a multiple of the ordinary dash's travel
+/// (the dash's own duration is scaled, so the boost stays the same).
+pub const SUPER_DASH_DISTANCE: f32 = 2.0;
+/// Immunity granted past the end of a charged dash's travel, so the whole route
+/// is covered and nothing can land on the frame it stops.
+const SUPER_DASH_IFRAME_PAD: f32 = 0.02;
+/// Screen shake on a charged release, in px, at full charge (the ordinary dash
+/// has none).
+const SUPER_DASH_SHAKE: f32 = 7.0;
+
+/// Seconds of holding that fill the Super Dash meter at weapon `level`
+/// (1..=5): 0.90 s at L1 down to 0.74 s at L5 ("a little faster per level").
+pub fn super_dash_charge_secs(level: u32) -> f32 {
+    (SUPER_DASH_CHARGE_SECS - SUPER_DASH_CHARGE_STEP * level.saturating_sub(1).min(4) as f32)
+        .max(0.55)
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn player_system(
@@ -80,6 +109,8 @@ pub fn player_system(
     // w3-weapons-b: the dash owner's record of what the dash actually did, so
     // the Super Dash weapon never has to guess (see the hooks below).
     mut dash_track: ResMut<DashTrack>,
+    // A charged release lands heavier than an ordinary dash.
+    mut shake: ResMut<Shake>,
     // Console `noclip on`: skip tile collision. Default false = normal.
     debug: Res<DebugFlags>,
 ) {
@@ -99,28 +130,139 @@ pub fn player_system(
         player.face = d.normalized();
     }
 
-    // Dash (legacy 189-199). `was_charging` is read here, before the trigger,
-    // so the ready tick below is the tick the *old* cooldown ran out (a dash
-    // that starts now must not also announce itself as ready).
+    // ---- Super Dash: hold to charge, release to fire -----------------------
+    // Only while the weapon is owned. A *tap* (released inside
+    // `SUPER_DASH_TAP_SECS`) is today's ordinary dash: same distance, same
+    // cooldown, same crossing damage. A longer hold fills the meter at
+    // `super_dash_charge_secs(level)` while the rat keeps moving; releasing
+    // fires the charged dash. A full meter can be held indefinitely (no
+    // auto-fire) and grants no immunity until it is released.
+    //
+    // `release` is the meter to fire with on this tick (`Some(0.0)` = an
+    // ordinary dash); `None` = no dash requested.
+    let super_dash_level = player
+        .loadout
+        .weapons
+        .iter()
+        .find(|w| w.kind == WeaponKind::SuperDash)
+        .map(|w| u32::from(w.level.max(1)));
+    let mut release: Option<f32> = None;
+    match super_dash_level {
+        None => {
+            // No weapon: drop any stale meter. The press-to-dash path below is
+            // exactly the pre-charge one, with no release latency.
+            player.dash_charging = false;
+            player.dash_charge = 0.0;
+        }
+        Some(level) => {
+            if input.charge > 0.0 && (dash || input.dash_held || input.dash_released) {
+                // A scripted charged release (`World::update_with_charge`: the
+                // bot and the single-system tests hand the meter over whole).
+                release = Some(input.charge.clamp(0.0, 1.0));
+                player.dash_charging = false;
+                player.dash_charge = 0.0;
+            } else if player.dash_charging {
+                if input.dash_released {
+                    let frac = player.dash_charge.clamp(0.0, 1.0);
+                    // A hold shorter than the tap window is an ordinary dash.
+                    let held = frac * super_dash_charge_secs(level);
+                    release = Some(if held < SUPER_DASH_TAP_SECS { 0.0 } else { frac });
+                    player.dash_charging = false;
+                    player.dash_charge = 0.0;
+                } else if !input.dash_held {
+                    // The hold vanished without a release edge (the terminal
+                    // lost focus, the button's owner went away): drop the
+                    // charge, never fire it.
+                    player.dash_charging = false;
+                    player.dash_charge = 0.0;
+                } else {
+                    let before = player.dash_charge;
+                    player.dash_charge =
+                        (before + dt / super_dash_charge_secs(level)).min(1.0);
+                    if before < 1.0 && player.dash_charge >= 1.0 {
+                        // The click at a full meter; the whine started on the
+                        // press (`Sfx::DashCharge`).
+                        sfx.0.push(Sfx::DashCharged);
+                    }
+                }
+            } else if input.dash_down && (input.dash_released || !input.dash_held) {
+                // A press and a release inside one tick is a click, not a hold
+                // — and on a terminal that cannot report a key release the key
+                // can only ever tap (the mouse and the pad still charge).
+                release = Some(0.0);
+            } else if input.dash_down && player.dash_cd <= 0.0 {
+                // A fresh press with the dash ready starts the charge. While
+                // the cooldown runs it is the refused press below instead: a
+                // charge never starts from a press that could not dash.
+                player.dash_charging = true;
+                player.dash_charge = 0.0;
+                sfx.0.push(Sfx::DashCharge);
+            }
+        }
+    }
+
+    // Dash (legacy 189-199), plus the charged release above. `was_charging` is
+    // read here, before the trigger, so the ready tick below is the tick the
+    // *old* cooldown ran out (a dash that starts now must not also announce
+    // itself as ready).
     let was_charging = player.dash_cd > 0.0;
-    if dash && player.dash_cd <= 0.0 {
-        player.dash_active = 0.16;
-        player.dash_cd = stats.dash_cd;
-        player.iframes = player.iframes.max(0.18);
-        let pos = player.pos;
-        let face = player.face;
-        vfx::emit_dash_start(&mut particles, &mut rng.0, pos, face);
-        sfx.0.push(Sfx::Dash);
-        // ---- w3-weapons-b hook 1/2: a *successful* dash just began --------
-        // Only this branch (a live press with the cooldown ready) reaches here,
-        // so a blocked or cooling dash buys no Super Dash hit by construction.
-        dash_track.begin();
-    } else if dash && player.dash_denied <= 0.0 {
-        // Asked for a dash that is not ready: never silent. The timer throttles
-        // the feedback so a held (auto-repeating) key gives one refused blip
-        // and one gauge shake per 0.16 s instead of machine-gunning them.
-        player.dash_denied = DASH_DENIED_SECS;
-        sfx.0.push(Sfx::DashDenied);
+    // The App reports a live held dash input as edges; on such a tick the plain
+    // `dash` flag must not also fire an instant dash (the release does). Without
+    // the weapon, or without hold information (the bot, the harness, `update`),
+    // `dash` keeps its press-to-dash meaning exactly as before.
+    let live_hold = super_dash_level.is_some()
+        && (input.dash_down || input.dash_held || input.dash_released);
+    let request: Option<f32> = if let Some(charge) = release {
+        Some(charge)
+    } else if dash && !live_hold {
+        Some(0.0)
+    } else if super_dash_level.is_some() && input.dash_down && !player.dash_charging {
+        // A press that could not start a charge (the cooldown is still
+        // running): the existing refusal feedback, never a free dash.
+        Some(0.0)
+    } else {
+        None
+    };
+    if let Some(charge) = request {
+        if player.dash_cd <= 0.0 {
+            // Up to `SUPER_DASH_DISTANCE` times the ordinary travel: the boost
+            // is unchanged, the dash simply lasts longer.
+            player.dash_active = DASH_SECS * (1.0 + (SUPER_DASH_DISTANCE - 1.0) * charge);
+            player.dash_cd = stats.dash_cd;
+            if charge > 0.0 {
+                // Immune for the whole travel of a charged dash (not while it
+                // is charging: the meter grants nothing until it is spent).
+                player.iframes = player.iframes.max(player.dash_active + SUPER_DASH_IFRAME_PAD);
+            } else {
+                player.iframes = player.iframes.max(0.18);
+            }
+            let pos = player.pos;
+            let face = player.face;
+            vfx::emit_dash_start(&mut particles, &mut rng.0, pos, face);
+            sfx.0.push(Sfx::Dash);
+            if charge > 0.0 {
+                // The release kicks: the weapon's own `Sfx::SuperDash` lands on
+                // the dash's first leg, and the shake scales with the meter
+                // (the longer dash already draws the bigger streak).
+                shake.amount = shake.amount.max(SUPER_DASH_SHAKE * (0.4 + 0.6 * charge));
+            }
+            // ---- w3-weapons-b hook 1/2: a *successful* dash just began ----
+            // Only this branch (a live press or release with the cooldown
+            // ready) reaches here, so a blocked or cooling dash buys no Super
+            // Dash hit by construction.
+            dash_track.begin();
+            // How hard this dash was charged: the weapon's swept radius and
+            // per-body damage scale with it (`weapons_wave3b`), and so does
+            // Ripcord's cord, which outlives the dash.
+            dash_track.charge = charge;
+        } else if player.dash_denied <= 0.0 {
+            // Asked for a dash that is not ready: never silent. The timer
+            // throttles the feedback so a held (auto-repeating) key gives one
+            // refused blip and one gauge shake per 0.16 s instead of
+            // machine-gunning them.
+            player.dash_denied = DASH_DENIED_SECS;
+            sfx.0.push(Sfx::DashDenied);
+        }
     }
     // ---- w3-weapons-b hook 2/2: record the segment this tick travels -------
     // `dashing` is the pre-decay flag, so the dash's last tick still counts and
@@ -213,17 +355,37 @@ pub fn player_system(
 #[cfg(test)]
 mod tests {
     use super::player_system;
-    use super::DASH_DENIED_SECS;
+    use super::{
+        super_dash_charge_secs, DASH_DENIED_SECS, DASH_SECS, SUPER_DASH_CHARGE_SECS,
+        SUPER_DASH_DISTANCE,
+    };
     use crate::audio::Sfx;
     use crate::game::art_walls::WallKind;
     use crate::game::collision::{TileKind, TileMap};
     use crate::game::ecs::constants::PLAYER_RADIUS;
-    use crate::game::ecs::resources::SfxQueue;
+    use crate::game::ecs::resources::{DashHold, SfxQueue};
     use crate::game::level::{Theme, MAP_COLS, MAP_ROWS};
     use crate::game::particle::{Particles, Ramp, Shape};
     use crate::game::player::Player;
+    use crate::game::weapon::WeaponKind;
     use crate::game::world::World;
     use crate::math::Vec2;
+
+    const DT: f32 = 1.0 / 60.0;
+
+    /// Give the rat the Super Dash weapon, level 1.
+    fn own_super_dash(w: &mut World) {
+        use crate::game::loadout::Upgrade;
+        w.player
+            .loadout
+            .apply(&Upgrade::NewWeapon(WeaponKind::SuperDash));
+    }
+
+    fn run_player(w: &mut World) {
+        w.ecs
+            .run_system_cached(player_system)
+            .expect("player system must run");
+    }
 
     /// Strip the generated layout's walls so the test measures the movement
     /// system instead of the map (what `Level::walls.clear()` used to do
@@ -662,5 +824,303 @@ mod tests {
             }
         }
         w.end_tick();
+    }
+
+    // ---- Super Dash: hold to charge, release to fire ----------------------
+
+    const HELD: DashHold = DashHold {
+        down: false,
+        held: true,
+        up: false,
+    };
+    const PRESS: DashHold = DashHold {
+        down: true,
+        held: true,
+        up: false,
+    };
+    const RELEASE: DashHold = DashHold {
+        down: false,
+        held: false,
+        up: true,
+    };
+
+    /// A tap (released inside the tap window) is today's ordinary dash — and a
+    /// press with the weapon owned never dashes on its own.
+    #[test]
+    fn a_quick_tap_with_super_dash_is_the_ordinary_dash() {
+        let mut w = World::new(Theme::Sewer, 71);
+        open_map(&mut w);
+        own_super_dash(&mut w);
+        w.player.pos = w.level.arena * 0.5;
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.player.dash_cd = 0.0;
+
+        w.begin_tick_with_dash_hold(DT, Vec2::new(1.0, 0.0), false, false, PRESS);
+        run_player(&mut w);
+        w.end_tick();
+        assert!(w.player.dash_charging, "the press must start a charge");
+        assert_eq!(w.player.dash_active, 0.0, "the press must not dash");
+        assert_eq!(w.player.dash_cd, 0.0, "the cooldown starts on the release");
+
+        let before = w.player.pos.x;
+        w.begin_tick_with_dash_hold(DT, Vec2::new(1.0, 0.0), false, false, RELEASE);
+        run_player(&mut w);
+        w.end_tick();
+        assert!(!w.player.dash_charging);
+        assert!(w.player.dash_active > DASH_SECS * 0.5, "a tap must dash");
+        assert!(
+            w.player.dash_active <= DASH_SECS + 1e-4,
+            "a tap is not charged: {}",
+            w.player.dash_active
+        );
+        assert!(w.player.dash_cd > 0.0, "the cooldown starts on the release");
+        assert!(w.player.pos.x > before, "the tap dash must move the rat");
+    }
+
+    /// Holding fills the meter at the weapon's rate and the release fires a
+    /// longer dash; holding itself grants nothing (no dash, no immunity).
+    #[test]
+    fn holding_charges_and_the_release_fires_a_longer_dash() {
+        let mut w = World::new(Theme::Sewer, 73);
+        open_map(&mut w);
+        own_super_dash(&mut w);
+        w.player.pos = w.level.arena * 0.5;
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.player.dash_cd = 0.0;
+
+        w.begin_tick_with_dash_hold(DT, Vec2::new(1.0, 0.0), false, false, PRESS);
+        run_player(&mut w);
+        w.end_tick();
+        let ticks = (SUPER_DASH_CHARGE_SECS / DT).ceil() as usize + 2;
+        for _ in 0..ticks {
+            w.begin_tick_with_dash_hold(DT, Vec2::new(1.0, 0.0), false, false, HELD);
+            run_player(&mut w);
+            w.end_tick();
+            assert_eq!(w.player.dash_active, 0.0, "holding must not dash");
+            assert_eq!(w.player.iframes, 0.0, "holding grants no immunity");
+        }
+        assert!(
+            w.player.dash_charge >= 1.0,
+            "the meter must fill: {}",
+            w.player.dash_charge
+        );
+        assert!(w.player.dash_charging, "a full meter is held, not fired");
+
+        w.begin_tick_with_dash_hold(DT, Vec2::new(1.0, 0.0), false, false, RELEASE);
+        run_player(&mut w);
+        w.end_tick();
+        assert!(
+            w.player.dash_active > DASH_SECS + 0.01,
+            "a charged dash lasts longer: {}",
+            w.player.dash_active
+        );
+        assert!(
+            w.player.dash_active <= SUPER_DASH_DISTANCE * DASH_SECS + 1e-4,
+            "the charged dash must not exceed the cap: {}",
+            w.player.dash_active
+        );
+        assert!(
+            w.player.iframes >= w.player.dash_active,
+            "a charged dash is immune for the whole travel"
+        );
+    }
+
+    /// A full meter can be held indefinitely: it caps at 1.0 and never fires on
+    /// its own.
+    #[test]
+    fn a_full_charge_caps_and_never_auto_fires() {
+        let mut w = World::new(Theme::Sewer, 75);
+        open_map(&mut w);
+        own_super_dash(&mut w);
+        w.player.pos = w.level.arena * 0.5;
+        w.player.dash_cd = 0.0;
+        w.begin_tick_with_dash_hold(DT, Vec2::ZERO, false, false, PRESS);
+        run_player(&mut w);
+        w.end_tick();
+        for _ in 0..600 {
+            w.begin_tick_with_dash_hold(DT, Vec2::ZERO, false, false, HELD);
+            run_player(&mut w);
+            w.end_tick();
+        }
+        assert_eq!(w.player.dash_charge, 1.0, "the meter caps at a full charge");
+        assert_eq!(w.player.dash_active, 0.0, "a full charge must not auto-fire");
+        assert!(w.player.dash_charging);
+    }
+
+    /// The fill rate is per weapon level: a higher level reaches a given meter
+    /// sooner ("a little faster per level"), and the curve is monotone.
+    #[test]
+    fn a_higher_level_fills_the_meter_faster() {
+        assert!((super_dash_charge_secs(1) - SUPER_DASH_CHARGE_SECS).abs() < 1e-6);
+        for level in 2..=5u32 {
+            assert!(
+                super_dash_charge_secs(level) < super_dash_charge_secs(level - 1),
+                "level {level} must fill faster than {}",
+                level - 1
+            );
+        }
+        assert!(super_dash_charge_secs(99) >= 0.5, "the rate has a floor");
+
+        let meter_after = |level: u8| -> f32 {
+            let mut w = World::new(Theme::Sewer, 79);
+            open_map(&mut w);
+            own_super_dash(&mut w);
+            for weapon in w.player.loadout.weapons.iter_mut() {
+                if weapon.kind == WeaponKind::SuperDash {
+                    weapon.level = level;
+                }
+            }
+            w.player.dash_cd = 0.0;
+            w.begin_tick_with_dash_hold(DT, Vec2::ZERO, false, false, PRESS);
+            run_player(&mut w);
+            w.end_tick();
+            for _ in 0..20 {
+                w.begin_tick_with_dash_hold(DT, Vec2::ZERO, false, false, HELD);
+                run_player(&mut w);
+                w.end_tick();
+            }
+            w.player.dash_charge
+        };
+        assert!(
+            meter_after(5) > meter_after(1),
+            "L5 must fill faster than L1"
+        );
+    }
+
+    /// A press while the cooldown is still running is the existing refused
+    /// press: no charge starts, and the release that follows fires nothing.
+    #[test]
+    fn a_press_during_the_cooldown_is_refused_and_starts_no_charge() {
+        let mut w = World::new(Theme::Sewer, 83);
+        open_map(&mut w);
+        own_super_dash(&mut w);
+        w.player.pos = w.level.arena * 0.5;
+        w.player.dash_cd = 1.0;
+        w.player.dash_denied = 0.0;
+
+        w.begin_tick_with_dash_hold(DT, Vec2::ZERO, false, false, PRESS);
+        run_player(&mut w);
+        w.end_tick();
+        assert!(!w.player.dash_charging, "a refused press must not charge");
+        assert_eq!(w.player.dash_charge, 0.0);
+        assert_eq!(w.player.dash_active, 0.0);
+        assert!(w.player.dash_denied > 0.0, "the refusal must be felt");
+
+        w.begin_tick_with_dash_hold(DT, Vec2::ZERO, false, false, RELEASE);
+        run_player(&mut w);
+        w.end_tick();
+        assert_eq!(
+            w.player.dash_active, 0.0,
+            "a refused press must not dash on the release"
+        );
+        assert!(w.player.dash_cd > 0.0);
+    }
+
+    /// A hold dropped without a release edge (the terminal lost focus) cancels
+    /// the charge: it is never fired.
+    #[test]
+    fn losing_the_hold_without_a_release_cancels_the_charge() {
+        let mut w = World::new(Theme::Sewer, 87);
+        open_map(&mut w);
+        own_super_dash(&mut w);
+        w.player.pos = w.level.arena * 0.5;
+        w.player.dash_cd = 0.0;
+        w.begin_tick_with_dash_hold(DT, Vec2::ZERO, false, false, PRESS);
+        run_player(&mut w);
+        w.end_tick();
+        for _ in 0..20 {
+            w.begin_tick_with_dash_hold(DT, Vec2::ZERO, false, false, HELD);
+            run_player(&mut w);
+            w.end_tick();
+        }
+        assert!(w.player.dash_charge > 0.0);
+        w.begin_tick_with_dash_hold(DT, Vec2::ZERO, false, false, DashHold::NONE);
+        run_player(&mut w);
+        w.end_tick();
+        assert!(!w.player.dash_charging, "the charge is cancelled");
+        assert_eq!(w.player.dash_charge, 0.0);
+        assert_eq!(w.player.dash_active, 0.0, "a cancelled charge never fires");
+    }
+
+    /// A charged dash is still stopped by a wall: the longer route buys no
+    /// phasing.
+    #[test]
+    fn a_charged_dash_is_stopped_by_a_wall() {
+        let mut w = World::new(Theme::Sewer, 89);
+        open_map(&mut w);
+        own_super_dash(&mut w);
+        let (cx, cy) = (40, 40);
+        w.level
+            .tiles
+            .fill_cells(cx + 2, cy - 4, 1, 9, TileKind::Wall(WallKind::Maze));
+        w.level.tiles.rebuild_masks();
+        w.player.pos = TileMap::tile_rect(cx, cy).center();
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.player.dash_cd = 0.0;
+
+        w.begin_tick_charged(DT, Vec2::new(1.0, 0.0), true, false, None, 1.0);
+        run_player(&mut w);
+        w.end_tick();
+        for _ in 0..40 {
+            w.begin_tick(DT, Vec2::new(1.0, 0.0), false);
+            run_player(&mut w);
+            w.end_tick();
+        }
+        let wall_left = TileMap::tile_rect(cx + 2, cy).x;
+        assert!(
+            w.player.pos.x <= wall_left - PLAYER_RADIUS + 0.01,
+            "the charged dash went through the wall at {:?}",
+            w.player.pos
+        );
+    }
+
+    /// Without the weapon there is no release latency: the press is the dash,
+    /// exactly as before, and no charge state is ever written.
+    #[test]
+    fn without_the_weapon_the_press_dashes_immediately() {
+        let mut w = World::new(Theme::Sewer, 91);
+        open_map(&mut w);
+        w.player.pos = w.level.arena * 0.5;
+        w.player.face = Vec2::new(1.0, 0.0);
+        w.player.dash_cd = 0.0;
+        w.begin_tick_with_dash_hold(DT, Vec2::new(1.0, 0.0), true, false, PRESS);
+        run_player(&mut w);
+        w.end_tick();
+        assert!(w.player.dash_active > 0.0, "the press must dash at once");
+        assert!(!w.player.dash_charging);
+        assert_eq!(w.player.dash_charge, 0.0);
+    }
+
+    /// A scripted hold-and-release run is deterministic: two worlds fed the same
+    /// ticks land on the same state, bit for bit.
+    #[test]
+    fn a_scripted_hold_and_release_is_deterministic() {
+        let mut a = World::new(Theme::Sewer, 93);
+        let mut b = World::new(Theme::Sewer, 93);
+        for w in [&mut a, &mut b] {
+            own_super_dash(w);
+            w.player.pos = w.level.arena * 0.5;
+            w.player.dash_cd = 0.0;
+        }
+        for i in 0..150u32 {
+            let hold = match i {
+                0 => PRESS,
+                1..=40 => HELD,
+                41 => RELEASE,
+                _ => DashHold::NONE,
+            };
+            let mv = Vec2::new(((i % 3) as f32) - 1.0, 1.0).normalized();
+            for w in [&mut a, &mut b] {
+                w.update_with_dash_hold(DT, mv, false, false, None, hold);
+            }
+        }
+        assert_eq!(a.elapsed.to_bits(), b.elapsed.to_bits());
+        assert_eq!(a.player.pos.x.to_bits(), b.player.pos.x.to_bits());
+        assert_eq!(a.player.pos.y.to_bits(), b.player.pos.y.to_bits());
+        assert_eq!(a.player.hp.to_bits(), b.player.hp.to_bits());
+        assert_eq!(a.player.dash_charge.to_bits(), b.player.dash_charge.to_bits());
+        assert_eq!(a.kills, b.kills);
+        assert_eq!(a.score, b.score);
+        assert_eq!(a.enemies().len(), b.enemies().len());
     }
 }

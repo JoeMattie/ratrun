@@ -134,6 +134,13 @@ const DIRS: usize = 16;
 /// a pack is part of how the bot kites.
 const FOE_ON_RAT_PX: f32 = 6.0;
 
+/// How far ahead a charged Super Dash is worth holding for, in px (the full
+/// charge travels about twice the ordinary dash's distance).
+const SUPER_DASH_LANE_PX: f32 = 96.0;
+/// Half-width of that lane, in px: the dash's swept radius plus a body's own
+/// radius has to overlap it for the body to be a reason to charge.
+const SUPER_DASH_LANE_HALF_W: f32 = 10.0;
+
 /// How well the bot plays; see the module docs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Skill {
@@ -191,12 +198,18 @@ enum Vision {
 pub struct BotInput {
     pub move_dir: Vec2,
     pub dash: bool,
+    /// How hard to charge the dash, `0.0` (a tap: today's dash) to `1.0`.
+    /// Only non-zero when the bot owns Super Dash *and* the lane ahead is
+    /// worth holding for (see `Bot::charge_for_lane`); it is fed through
+    /// `World::update_with_charge`, so the plain `update` path is unchanged.
+    pub charge: f32,
 }
 
 impl BotInput {
     pub const IDLE: BotInput = BotInput {
         move_dir: Vec2::ZERO,
         dash: false,
+        charge: 0.0,
     };
 }
 
@@ -494,9 +507,15 @@ impl Bot {
             // One press is both the dash and the active-weapon release, so the
             // bot presses when either wants it.
             let dash = self.wants_dash(w, &dirs) || self.wants_active(w);
+            let charge = if dash {
+                self.charge_for_lane(w, self.held.move_dir)
+            } else {
+                0.0
+            };
             let input = BotInput {
                 move_dir: self.held.move_dir,
                 dash,
+                charge,
             };
             self.held = input;
             return input;
@@ -568,17 +587,68 @@ impl Bot {
         } else {
             1.0
         };
+        // A charged Super Dash is spent only when the lane is worth it (see
+        // `charge_for_lane`); every other dash is the ordinary tap.
+        let charge = if dash {
+            self.charge_for_lane(w, best_dir)
+        } else {
+            0.0
+        };
         let input = BotInput {
             move_dir: best_dir * throttle,
             dash,
+            charge,
         };
         // Never hand the simulation a NaN or an over-long throttle vector.
         let input = BotInput {
             move_dir: sanitize(input.move_dir),
             dash: input.dash,
+            charge: input.charge,
         };
         self.held = input;
         input
+    }
+
+    /// How hard to charge a Super Dash down `dir`: full when the lane ahead is a
+    /// corridor of bodies (three or more) or the boss's body sits on it, and no
+    /// charge otherwise (so the dash is today's ordinary tap).
+    ///
+    /// A charged dash is up to twice as long, wider, up to 2.5x the damage, and
+    /// immune for the whole travel — but it costs the whole hold, so it is only
+    /// worth it when the route is a line of bodies rather than an escape.
+    fn charge_for_lane(&self, w: &World, dir: Vec2) -> f32 {
+        if dir.len_sq() <= 0.25 || !w.player.loadout.has(WeaponKind::SuperDash) {
+            return 0.0;
+        }
+        let dir = dir.normalized();
+        let p = w.player.pos;
+        let mut bodies = 0u32;
+        let mut on_boss = false;
+        for t in &self.threats {
+            let (pos, radius, is_boss) = match *t {
+                Threat::Enemy { pos, radius, .. } => (pos, radius, false),
+                Threat::BossBody { pos, radius, .. } => (pos, radius, true),
+                _ => continue,
+            };
+            let rel = pos - p;
+            let along = rel.dot(dir);
+            // Inside the super dash's reach, ahead of the rat, and close enough
+            // to the lane that the swept radius would touch it.
+            if along > 0.0
+                && along < SUPER_DASH_LANE_PX + radius
+                && (rel - dir * along).len() < radius + SUPER_DASH_LANE_HALF_W
+            {
+                bodies += 1;
+                if is_boss {
+                    on_boss = true;
+                }
+            }
+        }
+        if on_boss || bodies >= 3 {
+            1.0
+        } else {
+            0.0
+        }
     }
 
     /// How fast to move right now: 1.0 to break away, less to graze.
@@ -2560,7 +2630,7 @@ mod tests {
                 let mut steps = 0u32;
                 while w.elapsed < 60.0 && w.player.alive() {
                     let input = bot.decide(&w, dt);
-                    w.update(dt, input.move_dir, input.dash);
+                    w.update_with_charge(dt, input.move_dir, input.dash, input.dash, None, input.charge);
                     // Spend level-ups like the app does (first card), so the
                     // build keeps up with the director.
                     if w.pending_levelups > 0 {
@@ -2819,7 +2889,7 @@ mod tests {
         let limit = 60 * 600;
         while ticks < limit && !w.level_complete && w.player.alive() {
             let input = bot.decide(&w, dt);
-            w.update(dt, input.move_dir, input.dash);
+            w.update_with_charge(dt, input.move_dir, input.dash, input.dash, None, input.charge);
             assert!(
                 w.level.trailer.pit_at(w.player.pos).is_none(),
                 "the bot stepped into a hole at t={:.1}",
@@ -2874,5 +2944,85 @@ mod tests {
             );
             assert_eq!(completing.priority_partner(), None, "{kind:?}: already paired");
         }
+    }
+
+    /// The bot spends a charged Super Dash only when the lane ahead is a
+    /// corridor of bodies (or the boss's body sits on it), and taps otherwise.
+    #[test]
+    fn the_bot_charges_a_super_dash_only_into_a_lane_of_bodies() {
+        use crate::math::Vec2;
+
+        let mut w = World::new(Theme::Sewer, 41);
+        w.clear_enemies();
+        let mut bot = seeded_bot(Skill::Expert, 41);
+        bot.scan(&w);
+        let ahead = Vec2::new(1.0, 0.0);
+        // No weapon: never a charge, whatever the lane looks like.
+        let p = w.player.pos;
+        for i in 0..3 {
+            w.spawn_enemy(
+                crate::game::enemy::EnemyKind::Brute,
+                p + Vec2::new(14.0 + 6.0 * i as f32, 0.5),
+                4.0,
+            );
+        }
+        bot.scan(&w);
+        assert_eq!(
+            bot.charge_for_lane(&w, ahead),
+            0.0,
+            "a charge without the weapon would be a wasted dash"
+        );
+
+        // With Super Dash owned and three bodies in the lane: a full charge.
+        w.player
+            .loadout
+            .apply(&Upgrade::NewWeapon(WeaponKind::SuperDash));
+        assert_eq!(
+            bot.charge_for_lane(&w, ahead),
+            1.0,
+            "three bodies in the lane must be worth a charged dash"
+        );
+
+        // Behind the rat, or off to the side: only a tap.
+        w.clear_enemies();
+        for i in 0..3 {
+            w.spawn_enemy(
+                crate::game::enemy::EnemyKind::Brute,
+                p - Vec2::new(14.0 + 6.0 * i as f32, 0.0),
+                4.0,
+            );
+        }
+        bot.scan(&w);
+        assert_eq!(
+            bot.charge_for_lane(&w, ahead),
+            0.0,
+            "a lane behind the rat is not a lane"
+        );
+
+        // The boss's body on the lane is worth it on its own.
+        w.clear_enemies();
+        bot.threats.clear();
+        bot.threats.push(Threat::BossBody {
+            pos: p + Vec2::new(40.0, 0.0),
+            radius: 14.0,
+            damage: 20.0,
+        });
+        assert_eq!(
+            bot.charge_for_lane(&w, ahead),
+            1.0,
+            "the boss on the lane must be worth a charged dash"
+        );
+        // …but not from behind.
+        bot.threats.clear();
+        bot.threats.push(Threat::BossBody {
+            pos: p - Vec2::new(40.0, 0.0),
+            radius: 14.0,
+            damage: 20.0,
+        });
+        assert_eq!(
+            bot.charge_for_lane(&w, ahead),
+            0.0,
+            "a boss behind the rat is not a lane"
+        );
     }
 }

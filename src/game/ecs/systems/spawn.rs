@@ -80,8 +80,9 @@ use crate::game::ecs::resources::{
 };
 use crate::game::ecs::systems::miniboss::MinibossSchedule;
 use crate::game::enemy::{Enemy, EnemyKind};
-use crate::game::level::{Level, MazeSection, Room, RoomKind, TileRect};
+use crate::game::level::{Level, MazeSection, Room, RoomKind, Theme, TileRect};
 use crate::game::player::Player;
+use crate::game::roster;
 use crate::math::Vec2;
 
 // ---- Spawn ring tuning -----------------------------------------------------
@@ -333,24 +334,21 @@ pub fn director_system(
         } else {
             None
         };
+        // Live ordinary bodies per roster slot, so the picker can hand a capped
+        // slot's share back to its floor's fodder inside the one draw. Counted
+        // once per pulse and topped up as this pulse queues bodies (the design
+        // counts queued bodies toward every cap).
+        let mut slot_counts = live_slot_counts(level.theme, enemies.iter());
         for i in 0..count {
             if live + queued >= cap || live + queued >= budget {
                 break;
             }
-            let mut kind = director::pick_kind_for(difficulty.0, elapsed, &mut rng.0);
-            // The big snake is a moving wall, so it is also the one kind with a
-            // live cap: a third one on the floor would cut the room into
-            // corridors. The substitution draws no rng and no extra body, so a
-            // run without a snake is bit-for-bit the old roll.
-            if kind == EnemyKind::BigSnake
-                && enemies
-                    .iter()
-                    .filter(|e| e.kind == EnemyKind::BigSnake)
-                    .count()
-                    >= director::WAVE4_SNAKE_LIVE_CAP
-            {
-                kind = EnemyKind::Skitterer;
-            }
+            // One weighted draw over the floor's eight slots (see
+            // `roster::pick_kind`): a locked or capped slot is at zero mass, so
+            // the caps cost no retry and no extra rng. The snake's own live cap
+            // and every slot cap arrive the same way.
+            let caps = roster::SlotCaps::from_counts(level.theme, slot_counts);
+            let mut kind = roster::pick_kind(level.theme, curve, &caps, &mut rng.0);
             // A lilliputian roll brings a whole squad instead of one body.
             // The cap keeps it to two squads on the floor; over the cap the
             // roll is substituted with fodder, and the squad itself is
@@ -366,7 +364,9 @@ pub fn director_system(
                     .min(crate::game::ecs::systems::enemy_wave4::LILLI_SQUAD_SIZE)
                     .min(director::WAVE4_LILLI_LIVE_CAP.saturating_sub(live_lill));
                 if room == 0 {
-                    kind = EnemyKind::Skitterer;
+                    // No room for the squad: the floor's own fodder takes the
+                    // roll instead, which draws nothing extra.
+                    kind = roster::fodder_kind(level.theme);
                 } else if let Some(centre) = spawn_pulse_point(
                     &mut rng.0,
                     &level,
@@ -416,6 +416,13 @@ pub fn director_system(
                         spawned += 1;
                     }
                     queued += spawned;
+                    // One roll, one body against the cap, however many of the
+                    // squad made it onto the floor.
+                    if let Some(slot) = roster::floor(level.theme).slot_of(EnemyKind::Lilliputian)
+                    {
+                        let at = slot.index();
+                        slot_counts[at] = slot_counts[at].saturating_add(1);
+                    }
                     continue;
                 } else {
                     // No safe off-screen point for the squad: skip the pulse
@@ -446,6 +453,10 @@ pub fn director_system(
             enemy.id = ids.next_enemy_id.take();
             commands.spawn((enemy, ids.next_id.take()));
             queued += 1;
+            if let Some(slot) = roster::floor(level.theme).slot_of(kind) {
+                let at = slot.index();
+                slot_counts[at] = slot_counts[at].saturating_add(1);
+            }
         }
     }
 
@@ -471,11 +482,21 @@ pub fn director_system(
                 &mut scratch,
             ) {
                 let mult = director::horde_hp_mult_for(difficulty.0, elapsed) * 1.6;
-                let mut enemy =
-                    Enemy::spawn_with_mods(EnemyKind::Brute, pos, mult, mods, &mut rng.0);
+                // The elite wears the floor's own heavy (the roster's H slot):
+                // its elite is that body with the double stripe and the
+                // attachment, so the silhouette the rat has been fighting since
+                // 6:35 is the one that turns up armoured.
+                let mut enemy = Enemy::spawn_with_mods(
+                    roster::elite_kind(level.theme),
+                    pos,
+                    mult,
+                    mods,
+                    &mut rng.0,
+                );
                 enemy.id = ids.next_enemy_id.take();
                 // Director elites are flagged so the art and death VFX can tell
-                // them apart from late-game Brutes with overlapping scaled HP.
+                // them apart from an ordinary late-game heavy with overlapping
+                // scaled HP.
                 enemy.elite = true;
                 commands.spawn((enemy, ids.next_id.take()));
             }
@@ -485,6 +506,46 @@ pub fn director_system(
     // Boss hand-off (no generic boss spawn any more): the boss framework reads
     // `BossDue` and spawns the level's boss in its arena.
     director::raise_boss_due(&mut director, &mut boss_due, elapsed, level_index.0);
+}
+
+/// Live ordinary bodies per roster slot on `theme`, counted the way the
+/// design's caps count them.
+///
+/// * A **named miniboss** is a `Brute` body but not the floor's heavy, and an
+///   **elite** is the heavy plus its armour: neither is an ordinary body, so
+///   neither spends a slot's cap.
+/// * A **squad** counts once ("count a squad, segment chain or swarm as one
+///   body with one payout"): ten lilliputians are one II body, and a
+///   half-destroyed squad still counts once, which is why the count rounds up.
+fn live_slot_counts<'a>(
+    theme: Theme,
+    enemies: impl Iterator<Item = &'a Enemy>,
+) -> [u16; roster::SLOT_COUNT] {
+    use crate::game::ecs::systems::enemy_wave4 as w4;
+    let floor = roster::floor(theme);
+    let mut counts = [0u16; roster::SLOT_COUNT];
+    let mut lillis = 0u16;
+    for e in enemies {
+        if e.named || e.elite {
+            continue;
+        }
+        if e.kind == EnemyKind::Lilliputian {
+            lillis = lillis.saturating_add(1);
+            continue;
+        }
+        if let Some(slot) = floor.slot_of(e.kind) {
+            let i = slot.index();
+            counts[i] = counts[i].saturating_add(1);
+        }
+    }
+    if lillis > 0 {
+        if let Some(slot) = floor.slot_of(EnemyKind::Lilliputian) {
+            let squads = (lillis as usize).div_ceil(w4::LILLI_SQUAD_SIZE);
+            let i = slot.index();
+            counts[i] = counts[i].saturating_add(squads as u16);
+        }
+    }
+    counts
 }
 
 /// 8-connected neighbourhood, cardinals first.
@@ -1987,6 +2048,155 @@ mod tests {
             Some(1),
             "first director enemy must get id 1"
         );
+    }
+
+    /// **Twin runs, one per floor.** The roster decides the kinds, so every
+    /// floor has to be reproducible draw for draw: same seed, same map, same
+    /// clock ⇒ the same bodies in the same order, kinds included.
+    #[test]
+    fn every_floor_is_deterministic_across_twin_runs() {
+        let seed = 41;
+        for theme in Theme::playable() {
+            let mut a = World::new(theme, seed);
+            let mut b = World::new(theme, seed);
+            let dt = 0.5;
+            let mut elapsed = 0.0;
+            let mut kinds: Vec<EnemyKind> = Vec::new();
+            for _ in 0..1200 {
+                elapsed += dt;
+                director_tick(&mut a, dt, elapsed);
+                director_tick(&mut b, dt, elapsed);
+                let (ea, eb) = (a.enemies(), b.enemies());
+                assert_eq!(ea.len(), eb.len(), "{theme:?}: count differs at {elapsed:.1}s");
+                for (x, y) in ea.iter().zip(eb.iter()) {
+                    assert_eq!(fingerprint(x), fingerprint(y), "{theme:?}: enemy differs");
+                    if !kinds.contains(&x.kind) {
+                        kinds.push(x.kind);
+                    }
+                }
+                assert_eq!(a.director.spawn_timer, b.director.spawn_timer, "{theme:?}");
+                assert_eq!(a.director.elite_timer, b.director.elite_timer, "{theme:?}");
+            }
+            assert!(a.enemies().len() > 30, "{theme:?}: the run spawned almost nothing");
+            // And it only ever spawned its own cast.
+            let floor = crate::game::roster::floor(theme);
+            for kind in kinds {
+                assert!(
+                    floor.slot_of(kind).is_some(),
+                    "{theme:?} ran the {:?} roster but spawned {kind:?}",
+                    theme
+                );
+            }
+        }
+    }
+
+    /// A practice run (`difficulty_override = Some(0)`) keeps the level-0
+    /// scalars *and* the floor it is played on: the Flatbed's own cast, at the
+    /// Sewer's hp, speed and elite numbers.
+    #[test]
+    fn practice_scalars_do_not_change_the_floors_cast() {
+        let mut w = World::new(Theme::Trailer, 61);
+        w.difficulty_override = Some(0);
+        let floor = crate::game::roster::floor(Theme::Trailer);
+        let mut elapsed = 0.0;
+        let mut first_spawned_at: Option<f32> = None;
+        for _ in 0..120 {
+            elapsed += 0.5;
+            let before = w.enemies().len();
+            director_tick(&mut w, 0.5, elapsed);
+            if first_spawned_at.is_none() && w.enemies().len() > before {
+                first_spawned_at = Some(elapsed);
+            }
+        }
+        assert!(!w.enemies().is_empty(), "the practice run spawned nothing");
+        let spawned_at = first_spawned_at.expect("a body appeared");
+        assert!(
+            spawned_at < director::ELITE_START,
+            "the first body must precede the elite gate: {spawned_at}"
+        );
+        // The scalars are level 0's: hp is the kind's own pool times the level-0
+        // curve at spawn, with no per-stage extra.
+        let expected_mult = director::horde_hp_mult_for(0, spawned_at);
+        for e in w.enemies() {
+            assert!(
+                floor.slot_of(e.kind).is_some(),
+                "practice spawned {:?}, which is not on the Flatbed",
+                e.kind
+            );
+            let expected = e.kind.base_hp() * expected_mult;
+            assert!(
+                (e.max_hp - expected).abs() < 1e-2,
+                "{:?} has {} hp, level 0 says {expected}",
+                e.kind,
+                e.max_hp
+            );
+            break; // every body spawned on the same tick shares the multiplier
+        }
+    }
+
+    /// The elite wears the floor's own heavy (the roster's H slot), not a
+    /// hard-coded Brute, and it keeps the 1.6× pool and the elite flag.
+    #[test]
+    fn the_elite_is_the_floors_heavy() {
+        for theme in Theme::playable() {
+            let heavy = crate::game::roster::elite_kind(theme);
+            let mut w = World::new(theme, 67);
+            w.director.elite_timer = 0.0;
+            w.director.spawn_timer = 1.0e6; // keep the ordinary pulse out of it
+            let open = director::MINIBOSS_TIMES[0] + director::ELITE_APPOINTMENT_GAP + 0.5;
+            director_tick(&mut w, 0.1, open);
+            let elites: Vec<&Enemy> = w.enemies().iter().filter(|e| e.elite).collect();
+            assert_eq!(elites.len(), 1, "{theme:?}: no elite arrived");
+            assert_eq!(elites[0].kind, heavy, "{theme:?}: the wrong elite body");
+            let expected = heavy.base_hp() * director::horde_hp_mult_for(0, open) * 1.6;
+            assert!(
+                (elites[0].max_hp - expected).abs() < 1e-3,
+                "{theme:?}: elite hp {} is not the 1.6x pool {expected}",
+                elites[0].max_hp
+            );
+        }
+    }
+
+    /// The caps are the roster's: four shooters, eight heavies, and the big
+    /// snake at two. A pulse that keeps rolling never exceeds them, and the
+    /// capped share goes to fodder instead (no extra draw, no retry).
+    #[test]
+    fn the_pulse_respects_the_roster_caps() {
+        use crate::game::roster;
+        let mut w = World::new(Theme::Sewer, 71);
+        let dt = 0.2;
+        let mut elapsed = 0.0;
+        let mut peak_snake = 0usize;
+        let mut peak_shooter = 0usize;
+        let mut peak_heavy = 0usize;
+        for _ in 0..4200 {
+            elapsed += dt;
+            director_tick(&mut w, dt, elapsed);
+            let count = |k: EnemyKind| w.enemies().iter().filter(|e| e.kind == k).count();
+            peak_snake = peak_snake.max(count(roster::kind(Theme::Sewer, roster::Slot::III)));
+            peak_shooter = peak_shooter.max(count(roster::kind(Theme::Sewer, roster::Slot::R)));
+            peak_heavy = peak_heavy.max(
+                w.enemies()
+                    .iter()
+                    .filter(|e| e.kind == roster::kind(Theme::Sewer, roster::Slot::H) && !e.elite)
+                    .count(),
+            );
+        }
+        assert!(
+            peak_snake <= roster::kind_cap(EnemyKind::BigSnake),
+            "the snake cap slipped: {peak_snake} snakes"
+        );
+        assert!(
+            peak_shooter <= roster::Slot::R.cap(),
+            "the shooter cap slipped: {peak_shooter} shooters"
+        );
+        assert!(
+            peak_heavy <= roster::Slot::H.cap(),
+            "the heavy cap slipped: {peak_heavy} heavies"
+        );
+        // The caps are reached, not just never breached: later in the run the
+        // roster really does hold a full shooter line and a snake.
+        assert!(peak_snake > 0, "no snake ever spawned on the Sewer");
     }
 
     // ---- Neon-merge hooks (`run_director`) -------------------------------

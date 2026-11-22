@@ -185,7 +185,9 @@ pub fn draw(
 
     // ---- header: the bank and the tally -----------------------------------
     let mut hx = inner.x + 1;
-    let bank = format!("BANK {}g", profile.bank);
+    // The currency mark is the style guide's `¢` (STYLE.md, "Currency"), not a
+    // bare `g`: the shop's badges and the Nest have to read as one purse.
+    let bank = format!("BANK {}¢", profile.bank);
     put(f, hx, inner.y, inner.right().saturating_sub(hx), &bank, heavy(TRAIL_GOLD));
     hx += bank.len() as u16 + 3;
     let owned = profile.total_levels();
@@ -197,7 +199,9 @@ pub fn draw(
     put(f, hx, inner.y, inner.right().saturating_sub(hx), &count, ink(COAT));
     hx += count.len() as u16 + 3;
     if owned > 0 && hx + 12 < inner.right() {
-        let spent = format!("{}g WORN", profile.spent_total());
+        // Plain words: the sum already paid for the tracks owned, which the
+        // refund row hands back. "WORN" read like gear condition, not gold.
+        let spent = format!("SPENT {}¢", profile.spent_total());
         put(f, hx, inner.y, inner.right().saturating_sub(hx), &spent, ink(MUTED));
     }
     if inner.width >= 44 {
@@ -233,18 +237,6 @@ pub fn draw(
         draw_track_row(f, inner, y, row_h, idx, track, ui, profile, hits);
         y += row_h;
     }
-    if Track::ALL.len() > visible {
-        // Windowed list: say so instead of silently cutting the table.
-        let last = (ui.scroll + visible).min(Track::ALL.len());
-        let chip = format!("{}-{last} of {}", ui.scroll + 1, Track::ALL.len());
-        let cw = chip.chars().count() as u16;
-        if cw + 2 < inner.width {
-            let x = inner.right().saturating_sub(cw + 1);
-            if y.saturating_sub(1) >= list_top {
-                put(f, x, y - 1, cw, &chip, ink(MUTED));
-            }
-        }
-    }
 
     // ---- refund row -------------------------------------------------------
     if detailed {
@@ -258,7 +250,7 @@ pub fn draw(
         let next = profile.next_price(track);
         let line = match next {
             Some(price) => format!(
-                "{} → {}   ({}g)",
+                "{} → {}   ({}¢)",
                 track.value_text(level),
                 track.value_text(level + 1),
                 price
@@ -284,13 +276,13 @@ pub fn draw(
     if let Some(pending) = ui.pending {
         let prompt = match pending {
             Pending::Buy(t) => format!(
-                " BUY {} LV{} FOR {}g?  Enter confirm · Esc cancel ",
+                " BUY {} LV{} FOR {}¢?  Enter confirm · Esc cancel ",
                 t.name(),
                 profile.level(t) + 1,
                 profile.next_price(t).unwrap_or(0)
             ),
             Pending::Refund => format!(
-                " WIPE EVERY TRACK AND RETURN {}g?  Enter confirm · Esc cancel ",
+                " WIPE EVERY TRACK AND RETURN {}¢?  Enter confirm · Esc cancel ",
                 profile.spent_total()
             ),
         };
@@ -313,22 +305,36 @@ pub fn draw(
     let back = Rect::new(inner.x, footer, back_w, 1);
     put(f, inner.x, footer, back_w, " ‹ BACK ›", heavy(COAT).bg(TRACK));
     hits.add(back, Target::Back);
-    let keys = if inner.width >= 76 {
-        "↑↓ choose · Enter buy · R refund all · Enter twice on a big buy · Esc back"
+    let keys = if inner.width >= 70 {
+        "↑↓ choose · Enter buy · R refund · Esc back"
     } else if inner.width >= 54 {
         "↑↓ · Enter buy · R refund · Esc back"
     } else {
         "↑↓ · Enter · Esc"
     };
     let kx = inner.x + back_w + 1;
-    put(
-        f,
-        kx,
-        footer,
-        inner.right().saturating_sub(kx),
-        keys,
-        ink(MUTED),
-    );
+    // A windowed list says which rows are on screen. The chip has its own cell
+    // range at the right end of the footer row, and the key legend is clipped
+    // one cell short of it: it used to be stamped on the last visible row
+    // (`y - 1`), where at 57x20 it painted over that row's pips and price.
+    let chip = (Track::ALL.len() > visible).then(|| {
+        let last = (ui.scroll + visible).min(Track::ALL.len());
+        format!("{}-{last} of {}", ui.scroll + 1, Track::ALL.len())
+    });
+    let chip_w = chip
+        .as_ref()
+        .map_or(0u16, |c| c.chars().count() as u16);
+    let chip_fits = chip_w > 0 && inner.x + back_w + chip_w + 3 < inner.right();
+    let keys_max = if chip_fits {
+        inner.right().saturating_sub(chip_w + 2).saturating_sub(kx)
+    } else {
+        inner.right().saturating_sub(kx)
+    };
+    put(f, kx, footer, keys_max, keys, ink(MUTED));
+    if let (Some(chip), true) = (chip.as_ref(), chip_fits) {
+        let x = inner.right().saturating_sub(chip_w + 1);
+        put(f, x, footer, chip_w, chip, ink(MUTED));
+    }
 
     DrawInfo {
         visible,
@@ -384,7 +390,7 @@ fn draw_track_row(
 
     // Price (or MAX) right-aligned, pips just left of it.
     let price_text = match price {
-        Some(p) => format!("{p}g"),
+        Some(p) => format!("{p}¢"),
         None => "MAX".to_string(),
     };
     let price_w = price_text.chars().count() as u16;
@@ -466,9 +472,9 @@ fn draw_refund_row(
             .set_fg(TAIL);
     }
     let line = if paid == 0 {
-        "⟲ REFUND ALL   nothing worn yet".to_string()
+        "▸ REFUND ALL   nothing paid yet".to_string()
     } else {
-        format!("⟲ REFUND ALL   wipe every track, return {paid}g")
+        format!("▸ REFUND ALL   wipe every track, return {paid}¢")
     };
     let style = if paid == 0 {
         ink(MUTED)
@@ -576,7 +582,7 @@ mod tests {
 
             // The plate, the bank and the five tracks the owner named by hand.
             assert!(text.contains("THE NEST"), "{w}x{h} lost the plate title");
-            assert!(text.contains("BANK 240g"), "{w}x{h} lost the bank");
+            assert!(text.contains("BANK 240¢"), "{w}x{h} lost the bank");
             for name in ["WEAPON SLOTS", "PASSIVE SLOTS", "QUICK PAWS"] {
                 assert!(text.contains(name), "{w}x{h} lost {name}:\n{text}");
             }
@@ -599,7 +605,7 @@ mod tests {
             assert!(hits.rect_for(Target::Back).is_some(), "{w}x{h} lost back");
             // The selected track's next step is printed with its price.
             assert!(
-                text.contains('g') || text.contains("MAX"),
+                text.contains('¢') || text.contains("MAX"),
                 "{w}x{h} printed no price"
             );
             // Roomier plates get the icons (the 4 x 2 small sprite).
@@ -619,10 +625,70 @@ mod tests {
         let mut ui = NestUi::default();
         let (text, _, _) = frame(120, 40, &profile, &mut ui);
         assert!(text.contains("MAX"), "a bought-out track says MAX:\n{text}");
-        // The dearest track still prints its price, even on a 10 g bank.
+        // The dearest track still prints its price, even on a 10¢ bank.
         let revive = Track::Revive;
         assert_eq!(profile.next_price(revive), None);
-        assert!(text.contains("60g"), "the cheapest step's price is printed");
+        assert!(text.contains("60¢"), "the cheapest step's price is printed");
+    }
+
+    /// The currency mark is the style guide's `¢` everywhere the screen prints
+    /// money, and gold already paid reads as plain `SPENT`, not `WORN`.
+    #[test]
+    fn every_price_uses_the_gold_mark_and_spent_reads_plainly() {
+        let profile = started();
+        let mut ui = NestUi::default();
+        let (text, _, _) = frame(120, 40, &profile, &mut ui);
+        assert!(text.contains("BANK 240¢"), "the bank:\n{text}");
+        assert!(
+            text.contains(&format!("SPENT {}¢", profile.spent_total())),
+            "the spent badge:\n{text}"
+        );
+        assert!(!text.contains("WORN"), "plain words, not `WORN`:\n{text}");
+        assert!(!text.contains("g WORN") && !text.contains("60g"), "no bare `g`:\n{text}");
+        assert!(text.contains("REFUND ALL"), "the refund row is missing:\n{text}");
+        // The old `⟲` is not in the safe glyph set; the arrow the rest of the
+        // menus use is.
+        assert!(!text.contains('⟲'), "⟲ is not in the UI's glyph set");
+        assert!(text.contains("▸ REFUND ALL"), "the refund row lost its pointer");
+    }
+
+    /// The window chip has its own cell range (the footer row) and never paints
+    /// over a track: at 57x20 it used to sit on the last visible row, covering
+    /// that row's pips and price.
+    #[test]
+    fn the_window_chip_keeps_off_the_last_visible_row() {
+        for (w, h) in [(57u16, 20u16), (80, 24)] {
+            let profile = started();
+            let mut ui = NestUi::default();
+            let (text, _, info) = frame(w, h, &profile, &mut ui);
+            assert!(info.visible < Track::ALL.len(), "{w}x{h} is not windowed");
+            let lines: Vec<&str> = text.lines().collect();
+            let chip = format!("1-{} of {}", info.visible, Track::ALL.len());
+            let footer = lines
+                .iter()
+                .find(|l| l.contains("BACK"))
+                .unwrap_or_else(|| panic!("{w}x{h}: no footer row:\n{text}"));
+            assert!(
+                footer.contains(&chip),
+                "{w}x{h}: the window chip is not on the footer row:\n{text}"
+            );
+            // The last visible track keeps its name, its pips and its price.
+            let last = Track::ALL[ui.scroll + info.visible - 1];
+            let row = lines
+                .iter()
+                .find(|l| l.contains(last.name()))
+                .unwrap_or_else(|| panic!("{w}x{h}: {} is missing:\n{text}", last.name()));
+            assert!(
+                !row.contains(&chip),
+                "{w}x{h}: the chip overwrote the last visible row:\n{text}"
+            );
+            assert!(row.contains('¢'), "{w}x{h}: {} lost its price:\n{text}", last.name());
+            assert!(
+                row.contains(&pips(last, profile.level(last))),
+                "{w}x{h}: {} lost its pips:\n{text}",
+                last.name()
+            );
+        }
     }
 
     #[test]

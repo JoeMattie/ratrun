@@ -219,7 +219,7 @@ impl Track {
             Track::FireRate => "+2% base fire rate per level.",
             Track::MaxHp => "+8 max HP per level.",
             Track::Regen => "+0.08 HP/s regeneration per level.",
-            Track::Armor => "+0.5 armour per level (-0.5 damage a hit).",
+            Track::Armor => "+0.5 armor per level (-0.5 damage a hit).",
             Track::Damage => "+2.5% weapon damage per level.",
             Track::DashCooldown => "-0.05s dash cooldown per level.",
             Track::XpGain => "+4% gem XP per level.",
@@ -653,7 +653,7 @@ impl RunModifiers {
             parts.push(format!("+{:.1} regen", self.regen));
         }
         if self.armor > 0.0 {
-            parts.push(format!("+{:.0} armour", self.armor));
+            parts.push(format!("+{:.0} armor", self.armor));
         }
         if self.dash_cd > 0.0 {
             parts.push(format!("-{:.2}s dash", self.dash_cd));
@@ -774,17 +774,25 @@ impl BankTally {
         if self.voided {
             return "NEST  console used — nothing banked".to_string();
         }
+        // Plain words and the style guide's gold mark. The old line said
+        // `= +120 → 120 banked`, which reads as the same number twice (the two
+        // figures are the *gain* and the *new balance*, and on a fresh nest
+        // they are equal), and it called the floors' bosses `apex`, which is
+        // design jargon. Both are fixed here: the balance is named.
         let mut s = format!(
-            "NEST  purse {} + floors {} + apex {}",
+            "NEST  kept {}¢ + floors {}¢ + bosses {}¢",
             self.purse, self.floor_bonus, self.apex_bonus
         );
         if self.win_bonus > 0 {
-            s.push_str(&format!(" + clear {}", self.win_bonus));
+            s.push_str(&format!(" + clear {}¢", self.win_bonus));
         }
         if self.halved {
-            s.push_str(" (practice, half)");
+            s.push_str(" (practice: half)");
         }
-        s.push_str(&format!(" = +{} → {} banked", self.banked, self.total));
+        s.push_str(&format!(
+            " = +{}¢  ·  bank now {}¢",
+            self.banked, self.total
+        ));
         s
     }
 }
@@ -1280,7 +1288,7 @@ mod tests {
             "+15% dmg",
             "+48 HP",
             "+0.4 regen",
-            "+2 armour",
+            "+2 armor",
             "-0.25s dash",
             "+20% XP",
             "+25% gold",
@@ -1393,6 +1401,44 @@ mod tests {
         assert_eq!(tally.raised, 900, "the report still says what was raised");
         assert!(tally.line().contains("console"));
         assert!(!run.pays());
+    }
+
+    /// The end report's tally line: plain words, the style guide's gold mark,
+    /// and the new balance named (the old text printed the gain and the balance
+    /// side by side, which read as the same number twice on a fresh nest).
+    #[test]
+    fn the_end_tally_names_the_balance_and_uses_the_gold_mark() {
+        let mut profile = MetaProfile::default();
+        profile.bank = 55;
+        let tally = bank(
+            &mut profile,
+            &RunEnd {
+                purse: 40,
+                floors: 1,
+                apex: 2,
+                won: true,
+                ..RunEnd::default()
+            },
+        );
+        assert!(tally.total > tally.banked, "the bank already held 55");
+        let line = tally.line();
+        assert!(line.contains(&format!("+{}¢", tally.banked)), "{line}");
+        assert!(
+            line.contains(&format!("bank now {}¢", tally.total)),
+            "the line must name the new balance: {line}"
+        );
+        assert!(!line.contains("apex"), "design jargon on screen: {line}");
+        assert!(!line.contains("purse"), "plain words only: {line}");
+        assert!(!line.contains(" banked "), "one reading of the balance: {line}");
+        // A console run says why it paid nothing, in the same words.
+        let voided = bank(
+            &mut profile,
+            &RunEnd {
+                console_used: true,
+                ..RunEnd::default()
+            },
+        );
+        assert!(voided.line().contains("console"), "{}", voided.line());
     }
 
     #[test]

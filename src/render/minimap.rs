@@ -78,18 +78,47 @@ const PLATE_RGB: Rgb = (19, 24, 27);
 const COAT_RGB: Rgb = (235, 232, 232);
 const TAIL_RGB: Rgb = (239, 168, 185);
 
-/// The warm "unknown" veil: never-seen territory reads as a dim, desaturated
-/// infrared red rather than a cool blank. It is deliberately darker than the
-/// coolest remembered floor so explored space still reads as the brighter
-/// cartography; its red channel is kept high enough to fold to ANSI maroon
-/// (not black) in 16-colour terminals.
-pub const UNKNOWN_VEIL_RGB: Rgb = (66, 0, 0);
-/// A slightly darker red for the sparse 8×8 cartography dots inside the veil
-/// (coordinate-driven only: it never reads unseen terrain).
-const UNKNOWN_VEIL_GRID_RGB: Rgb = (56, 0, 0);
+/// The **oxblood veil**: never-seen territory reads as a dark, desaturated red
+/// wash rather than a flat saturated red field (which read like an error
+/// screen across 99 % of the panel).
+///
+/// It is deliberately darker than the plate's own chrome ([`PLATE_RGB`]) and
+/// than *every* floor's remembered ground, so explored space still reads as the
+/// brighter cartography and the map never outshines the UI around it.
+pub const UNKNOWN_VEIL_RGB: Rgb = (40, 14, 16);
+/// The same veil for a terminal with only **16 colours**.
+///
+/// Every dark red folds to the base `maroon` there, and folding to maroon needs
+/// a red channel this oxblood does not have: it would land on black and lose
+/// the "reddish until seen" read entirely. So a 16-colour terminal asks for a
+/// value that still folds to maroon (the owner's "still red in 16 colours"),
+/// and the fold happens at the edge like every other colour.
+pub const UNKNOWN_VEIL_ANSI16_RGB: Rgb = (66, 0, 0);
+/// The sparse 8×8 cartography dots: a hair warmer than the veil, so the grid
+/// reads as faint weave, not noise. Coordinate-driven only (never terrain).
+const UNKNOWN_VEIL_GRID_RGB: Rgb = (42, 15, 17);
+/// The faint every-fourth-row weave inside the veil: darker than the veil by a
+/// single step, enough to read as cloth at a glance and never as a grid.
+const UNKNOWN_VEIL_SCANLINE_RGB: Rgb = (36, 13, 15);
 /// The dark rim on unseen pixels that touch seen ground. Kept *below* the veil
 /// so every unseen pixel stays darker than the coolest remembered floor.
-const UNKNOWN_VEIL_FRONTIER_RGB: Rgb = (58, 0, 0);
+const UNKNOWN_VEIL_FRONTIER_RGB: Rgb = (30, 10, 12);
+
+/// The veil to paint for this terminal's colour depth.
+#[inline]
+pub fn unknown_veil_rgb() -> Rgb {
+    unknown_veil_rgb_for(crate::term::color_depth())
+}
+
+/// [`unknown_veil_rgb`] for an explicit depth, so the tests can drive every
+/// depth without touching the process-wide capability.
+#[inline]
+pub fn unknown_veil_rgb_for(depth: crate::term::ColorDepth) -> Rgb {
+    match depth {
+        crate::term::ColorDepth::Ansi16 => UNKNOWN_VEIL_ANSI16_RGB,
+        _ => UNKNOWN_VEIL_RGB,
+    }
+}
 /// Ticks of the first-sight reveal wipe (≈ 0.4 s at 60 FPS): a cell fades from
 /// the red veil to its real colour. Render-only; it never touches the fog.
 pub const REVEAL_WIPE_TICKS: u32 = 24;
@@ -1766,6 +1795,22 @@ pub fn draw_expanded(
         }
     }
 
+    // The cells the post-label stamps take: the boss (Pass C) and the rat.
+    // Labels are placed clear of them, so no marker eats a letter.
+    let mut occupied: [(u16, u16); 2] = [(0, 0); 2];
+    let mut occupied_n = 0usize;
+    if let Some(m) = view.markers.iter().find(|m| m.kind == MarkerKind::Boss) {
+        if let Some(cell) = cell_to_term(m.cx, m.cy) {
+            occupied[occupied_n] = cell;
+            occupied_n += 1;
+        }
+    }
+    if let Some(cell) = cell_to_term(view.player_cell.0, view.player_cell.1) {
+        occupied[occupied_n] = cell;
+        occupied_n += 1;
+    }
+    let occupied = &occupied[..occupied_n];
+
     // Pass B: discovered room/arena labels (expanded mode only).
     for lbl in view.labels {
         if !lbl.discovered || lbl.text.is_empty() {
@@ -1786,14 +1831,9 @@ pub fn draw_expanded(
                 LabelKind::Hall => (MUTED, PLATE),
             };
             let lw = lbl.text.chars().count() as u16 + 2;
-            let ly = if ty + 1 < map_rect.bottom() {
-                ty + 1
-            } else {
-                ty.saturating_sub(1).max(map_rect.y)
-            };
-            let lx = tx
-                .saturating_sub(lw / 2)
-                .clamp(map_rect.x, map_rect.right().saturating_sub(lw).max(map_rect.x));
+            // Clear of the boss and the rat: the start tag used to lose its last
+            // letter to a marker standing on it (`STAR◆`).
+            let (lx, ly) = place_label(map_rect, (tx, ty), lw, occupied);
             let avail = map_rect.right().saturating_sub(lx) as usize;
             let style = Style::default()
                 .fg(fg)
@@ -2224,9 +2264,10 @@ fn draw_expanded_sidebar(
 
 struct DerivedPalette {
     fog_base: Rgb,
-    /// The warm red "unknown" veil for never-seen territory.
+    /// The dark oxblood veil for never-seen territory.
     unknown: Rgb,
     unknown_grid: Rgb,
+    unknown_scanline: Rgb,
     unknown_frontier: Rgb,
     memory_sink: Rgb,
     floor_live: Rgb,
@@ -2258,8 +2299,9 @@ impl DerivedPalette {
 
         Self {
             fog_base,
-            unknown: UNKNOWN_VEIL_RGB,
+            unknown: unknown_veil_rgb(),
             unknown_grid: UNKNOWN_VEIL_GRID_RGB,
+            unknown_scanline: UNKNOWN_VEIL_SCANLINE_RGB,
             unknown_frontier: UNKNOWN_VEIL_FRONTIER_RGB,
             memory_sink,
             floor_live,
@@ -2297,12 +2339,18 @@ fn decode_reveal(v: u8) -> f32 {
     f32::from(v) / 255.0
 }
 
-/// Sparse 8×8 cartographic coordinate dots for unseen void.
-/// Strictly coordinate-driven; never reads map geometry.
+/// The unseen void's weave: sparse 8×8 cartographic coordinate dots plus a
+/// faint every-fourth-row line, so the veil reads as a woven oxblood cloth and
+/// not as a flat error-red field.
+///
+/// Strictly coordinate-driven — it never reads map geometry — so the veil still
+/// leaks no layout.
 #[inline]
 fn fog_void_color(theme: &DerivedPalette, x: i32, y: i32) -> Rgb {
     if x.rem_euclid(8) == 0 && y.rem_euclid(8) == 0 {
         theme.unknown_grid
+    } else if y.rem_euclid(4) == 0 {
+        theme.unknown_scanline
     } else {
         theme.unknown
     }
@@ -2413,6 +2461,52 @@ fn apply_wall_rims_and_fog_frontier(
             }
         }
     }
+}
+
+/// Place a discovered-name tag on the expanded map.
+///
+/// The boss and the rat are stamped **after** the labels (they have to stay on
+/// top), so a label that lands on one of them loses a letter — the start tag
+/// read `STAR◆` because a marker stood on its last letter. Try the row below the
+/// anchor, then the row above, then those two rows shifted clear, and take the
+/// first placement that does not cover an `occupied` cell. The first placement
+/// is the historic one, so an unobstructed map is unchanged.
+fn place_label(
+    map: Rect,
+    anchor: (u16, u16),
+    label_w: u16,
+    occupied: &[(u16, u16)],
+) -> (u16, u16) {
+    let (tx, ty) = anchor;
+    let last_x = map.right().saturating_sub(label_w).max(map.x);
+    let centred = |x: u16| {
+        x.saturating_sub(label_w / 2)
+            .clamp(map.x, last_x)
+    };
+    let below = if ty + 1 < map.bottom() {
+        ty + 1
+    } else {
+        ty.saturating_sub(1).max(map.y)
+    };
+    let above = ty.saturating_sub(1).max(map.y);
+    let lx = centred(tx);
+    let shifted = centred(tx)
+        .saturating_add(label_w + 1)
+        .min(last_x);
+    let clear = |row: u16, x: u16| -> bool {
+        if row < map.y || row >= map.bottom() || x.saturating_add(label_w) > map.right() {
+            return false;
+        }
+        !occupied
+            .iter()
+            .any(|&(mx, my)| my == row && mx >= x && mx < x + label_w)
+    };
+    for (row, x) in [(below, lx), (above, lx), (below, shifted), (above, shifted)] {
+        if clear(row, x) {
+            return (x, row);
+        }
+    }
+    (lx, below)
 }
 
 // ---- Geometry & Raster Helpers ---------------------------------------------
@@ -3898,10 +3992,24 @@ mod tests {
             let theme = DerivedPalette::from_palette(pal);
             let veil = fog_void_color(&theme, 3, 3);
             let dot = fog_void_color(&theme, 0, 0);
+            let scan = fog_void_color(&theme, 3, 4);
+            let rim = theme.unknown_frontier;
             let memory = apply_recency_shading(&theme, theme.floor_live, 0.0);
             let live = theme.floor_live;
 
-            for (label, c) in [("veil", veil), ("grid dot", dot)] {
+            // The veil is calmer than the plate's chrome: the panel never glows
+            // brighter than the UI around it (the review's "error screen").
+            assert!(
+                rel_luminance(veil) < rel_luminance(PLATE_RGB),
+                "{name}: the veil {veil:?} outshines the plate"
+            );
+
+            for (label, c) in [
+                ("veil", veil),
+                ("grid dot", dot),
+                ("scanline", scan),
+                ("frontier rim", rim),
+            ] {
                 assert!(
                     c.0 > c.1 && c.0 > c.2,
                     "{name}: {label} is not red-dominant: {c:?}"
@@ -3928,17 +4036,57 @@ mod tests {
         }
     }
 
+    /// The veil the renderer asks for at each depth still reads red after the
+    /// fold: a 24-bit/256-colour terminal gets the calm oxblood, and a 16-colour
+    /// one gets the maroon-folding value (a calmer red would fold to black and
+    /// lose the read entirely).
+    /// The start tag keeps its letters: the boss and the rat stamp *after* the
+    /// labels, so a label under one of them used to lose a letter (`STAR◆`).
+    #[test]
+    fn a_discovered_label_moves_off_a_marker_standing_on_it() {
+        let map = Rect::new(0, 0, 40, 20);
+        let anchor = (20u16, 10u16);
+        // " START " — five letters plus a cell of padding each side.
+        let w = 7u16;
+        // An empty map is unchanged: the row below the anchor, centred.
+        assert_eq!(place_label(map, anchor, w, &[]), (17, 11));
+        // The rat (or a chest marker) stands on the label's last letter: the tag
+        // moves to the row above instead of being eaten.
+        let placed = place_label(map, anchor, w, &[(20, 11)]);
+        assert_eq!(placed, (17, 9), "the tag must move off the marker's row");
+        // Both neighbouring rows blocked: it slides clear to the right.
+        let placed = place_label(map, anchor, w, &[(20, 11), (20, 9)]);
+        assert_eq!(placed, (25, 11));
+        assert!(
+            !(placed.0..placed.0 + w).contains(&20) || placed.1 != 11,
+            "the tag still covers the marker"
+        );
+        // Everything blocked: it falls back to the historic spot rather than
+        // vanishing off the map.
+        let mut blocked = Vec::new();
+        for y in 0..20u16 {
+            for x in 0..40u16 {
+                blocked.push((x, y));
+            }
+        }
+        assert_eq!(place_label(map, anchor, w, &blocked), (17, 11));
+        // A label at the map's edge still lands inside it.
+        let edge = place_label(Rect::new(0, 0, 40, 20), (1, 0), w, &[]);
+        assert_eq!(edge, (0, 1));
+        let edge = place_label(Rect::new(0, 0, 40, 20), (39, 19), w, &[]);
+        assert_eq!(edge, (33, 18));
+    }
+
     #[test]
     fn unseen_veil_folds_to_red_in_every_colour_depth() {
         use crate::term::ColorDepth;
-        for (name, pal) in VEIL_THEMES {
-            let theme = DerivedPalette::from_palette(pal);
-            let veil = fog_void_color(&theme, 3, 3);
+        for (name, _pal) in VEIL_THEMES {
             for depth in [
                 ColorDepth::Truecolor,
                 ColorDepth::Ansi256,
                 ColorDepth::Ansi16,
             ] {
+                let veil = unknown_veil_rgb_for(depth);
                 let folded = fold_rgb(veil, depth);
                 assert!(
                     folded.0 > folded.1 && folded.0 > folded.2,
@@ -4070,6 +4218,8 @@ mod tests {
 
     #[test]
     fn markers_stay_legible_on_the_unknown_veil() {
+        // The calmest veil any depth asks for (a 16-colour terminal's maroon
+        // value is *brighter*, so it is the harder case and is checked too).
         let veil = UNKNOWN_VEIL_RGB;
         for (name, _pal) in VEIL_THEMES {
             for kind in all_marker_kinds() {
@@ -4093,7 +4243,7 @@ mod tests {
                 tag.glyph()
             );
             seen_glyphs.push(tag.glyph());
-            let ratio = contrast_ratio(tag.rgb(), UNKNOWN_VEIL_RGB);
+            let ratio = contrast_ratio(tag.rgb(), UNKNOWN_VEIL_ANSI16_RGB);
             assert!(
                 ratio >= 3.0,
                 "{tag:?} icon only reaches {ratio:.2}:1 on the veil"

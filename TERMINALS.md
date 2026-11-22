@@ -5,9 +5,10 @@ colour, the Kitty keyboard protocol, and a monospace font that carries every
 glyph the art uses. This document records what the game does for terminals that
 are less generous, what was measured, and what is still unknown.
 
-Everything below is decided in one place, [`src/term.rs`](src/term.rs), and
-exposed through three cheap lookups: `color_depth()`, `glyph_set()` and
-`is_multiplexer()`. The renderer never guesses.
+Detection is decided in one place, [`src/term.rs`](src/term.rs), and exposed
+through three cheap lookups: `color_depth()`, `glyph_set()` and
+`is_multiplexer()`. The renderer never guesses. The **keyboard** half is decided
+by asking the terminal (see *The startup query*), not by sniffing `TERM`.
 
 ## Overrides
 
@@ -19,6 +20,11 @@ exposed through three cheap lookups: `color_depth()`, `glyph_set()` and
 | `--glyphs <v>` | same as `RATRUN_GLYPHS` | Command-line form; beats the environment. |
 | `--caps` | flag | Print the resolved capability set and exit (no TTY needed). |
 | `--probe` | flag | Print the capability set **and** the terminal's real answer to the keyboard-protocol query, then exit. Needs a TTY. |
+
+`--caps` on its own is the diagnostic above. `--bot-batch … --caps W:P` is a
+different flag (distinct-kind slot caps for a headless batch): the batch runner
+parses its command line *before* capability resolution, so the two never
+collide.
 
 The resolution order for colour is: flag → `RATRUN_COLOR` → `COLORTERM=truecolor|24bit`
 → `TERM` suffix (`*truecolor`, `*direct`, `*256color`) → known `TERM_PROGRAM`
@@ -48,17 +54,58 @@ CJK locale       color=truecolor (COLORTERM) glyphs=safe (locale)        multipl
 ssh, unknown     color=256 (TERM)            glyphs=unicode (default)    multiplexer=no
 ```
 
+## The keyboard protocol: what is pushed
+
+At startup the game asks the terminal whether it speaks the Kitty keyboard
+protocol, and if it answers it pushes **two flags**:
+
+```text
+REPORT_EVENT_TYPES | REPORT_ALL_KEYS_AS_ESCAPE_CODES
+```
+
+* **`REPORT_EVENT_TYPES`** is what buys **key-release events**. Held movement
+  keys stay down until the terminal reports their release, so there is no
+  auto-repeat guesswork and no stuck rat.
+* **`REPORT_ALL_KEYS_AS_ESCAPE_CODES`** is what makes a **lone modifier press**
+  report at all. It is the only way a bare `Ctrl` can be the dash key, which is
+  the shipped mapping (`input::DashKey`).
+
+The push is then **verified by asking again**: the protocol's query answers with
+the flags currently in effect, so a second `CSI ? u` proves the enhancement
+stuck. Only then does `KeyboardMode { lone_ctrl: true }` reach the app. A
+terminal that answers the first query but ignores the push (or never answers the
+second) keeps `lone_ctrl: false`, and **Space dashes *and* fires the charged
+weapons** — the pre-protocol mapping. That fallback is deliberate: losing the
+dash key entirely would make the game unplayable, and every legend in the game
+names whichever key is live.
+
+### What a release event is required for
+
+| key | release needed? | why |
+| --- | --- | --- |
+| movement (`WASD`, pad direction) | **yes**, when available | a held key is the movement input; without releases the game uses a short auto-repeat **grace window** and the key lapses unless it repeats |
+| `Ctrl` dash | yes (press *and* release) | the lone-modifier press is the dash; release ends the press |
+| letters, `Space`, `Q`, digits | no | used as discrete presses from the per-frame `pressed` list |
+| `Enter`, `Tab`, `Backspace` | **not relied on** | under `REPORT_EVENT_TYPES` alone these do not report releases; the game only ever treats them as discrete presses, so it never needs one |
+
+Under `report-all-keys` *every* key reports press/repeat/release as escape codes,
+which is why the push is a pair rather than just `REPORT_EVENT_TYPES`.
+
+**Focus loss.** A key held when the terminal loses focus never reports its
+release, so focus reporting is enabled and `FocusLost` calls `input.release_all()`
+— movement cannot stick after an `Alt-Tab`.
+
 ## Support table
 
 | Terminal | Colour mode used | Keyboard protocol | Mouse | Known issues |
 | --- | --- | --- | --- | --- |
-| **Ghostty** (reference) | 24-bit | Kitty, verified (`--probe`: an answer is received; releases arrive under `REPORT_EVENT_TYPES`) | yes | none observed |
-| **Kitty** | 24-bit | Kitty. Probe reply `1b 5b 3f 30 75` = `CSI ? 0 u` — an answer, flags 0, i.e. supported with no flags pushed | yes | Window capture with `screencapture -l` returns a black image (Metal surface); verify with the pane's own text instead |
-| **WezTerm** | 24-bit | **no** — the probe gets only DA1 (`CSI ? 65;4;6;18;22c`), so held keys use the grace-window fallback | yes | none observed |
+| **Ghostty** (reference) | 24-bit | Kitty, verified (`--probe`: an answer is received; releases arrive under `REPORT_EVENT_TYPES`; the pushed flags read back, so lone Ctrl dashes) | yes | none observed |
+| **Kitty** | 24-bit | Kitty. Probe reply `1b 5b 3f 30 75` = `CSI ? 0 u` — an answer, flags 0, i.e. supported with no flags pushed (so the first query is positive and the push is what is verified) | yes | Window capture with `screencapture -l` returns a black image (Metal surface); verify with the pane's own text instead |
+| **WezTerm** | 24-bit | **no** — the probe gets only DA1 (`CSI ? 65;4;6;18;22c`), so held keys use the grace-window fallback and **Space** dashes | yes | none observed |
 | **iTerm2** | 24-bit (`COLORTERM`) | not measured here (automation unavailable) — iTerm2 ≥3.5 supports the protocol | yes | — |
-| **Apple Terminal** | **256**, never 24-bit: Terminal.app parses `38;2;r;g;b` wrongly | no (falls back to the grace window) | yes | Its default font `SFMonoTerminal-Regular` lacks the geometric shapes the art uses, so the safe glyph set is selected |
+| **Apple Terminal** | **256**, never 24-bit: Terminal.app parses `38;2;r;g;b` wrongly | no (falls back to the grace window; Space dashes) | yes | Its default font `SFMonoTerminal-Regular` lacks the geometric shapes the art uses, so the safe glyph set is selected |
 | **tmux** (screen-256color) | 256 by default; 24-bit only with `terminal-features` configured | forwarded to the outer terminal; depends on both | yes (passed through) | Reported as `multiplexer=yes`; colour defaults conservatively to 256 even on a 24-bit outer terminal |
-| **Linux console** (`TERM=linux`) | 16 | no | no (no mouse reporting) | Kernel font has no geometric shapes; safe glyphs selected |
+| **Linux console** (`TERM=linux`) | 16 | no | no (no mouse reporting) | Kernel font has no geometric shapes; safe glyphs selected; no OSC 22, so the OS pointer is left alone |
 | **`TERM=dumb`** | 16 | no | no | No cursor addressing at all, so the TUI cannot run; colour/keys degrade gracefully but the screen does not |
 | **SSH / unknown xterm-256color** | 256 | no | yes | Nothing to detect beyond `TERM`; default 256 is correct |
 
@@ -90,9 +137,29 @@ the worst case — flat UI panels lose far less):
 | play, 120×40 | 143 | **46** (256) / **8** (16) |
 
 Renders, left to right = 24-bit, the same 24-bit frame folded to 256, and the
-game's own 16-colour output:
-`scratchpad/terminals/colour_256_before_after_80x24.png` and
-`..._120x40.png`.
+game's own 16-colour output: `colour_256_before_after_80x24.png` and
+`..._120x40.png`. These captures live with the review scratchpad and are **not
+checked into the repository**; regenerate them with the dump harness
+(`RATRUN_DUMP`, `RATRUN_DUMP_DIR`, `RATRUN_COLOR`) if you need them again.
+
+### Lighting tiers follow the colour depth
+
+The 2D lighting pass (`src/render/lighting/`) is the one effect whose *look*
+changes with the terminal. `LightingMode::default_for_depth` picks the base
+tier; a cost controller can drop it further:
+
+| depth | `LightingMode` | what differs |
+| --- | --- | --- |
+| truecolor | **Full** | 4-pixel sampling stride, 28 dynamic lights (3 shadowed), **soft** shadows (each light's own softness knob), per-surface colour, no palette dithering |
+| 256 | **Hard** | same stride and light budget, but **hard** shadow edges (softness is off outside Full), and the composite dithers into the 256-colour palette to fake the gradients the cube cannot hold |
+| 16 | **Coarse** | same geometry as Hard, dithered into the 16 base colours; the minimum brightness it lifts a body to is higher (118 vs 78 of 255), because a 16-colour terminal has less room between "dark" and "unreadable" |
+| any | **Compact** | the automatic fallback: 8-pixel stride, 14 lights (1 shadowed), and no Brute/boss **shadow bodies**. Entered when the pass exceeds its own cost budget (160 µs + 0.035 µs/pixel) for 8 consecutive frames, stepped back up when it drops below 56 % of budget |
+
+So a 256-colour terminal loses shadow *softness*, not shadows; a 16-colour one
+loses the tint gradient, not the lighting. Separately, a **theme** can ask for
+hard pools regardless of mode (the Lab does, via `ThemeAmbient::hard_pools`),
+because a clinical floor should have crisp-edged light. None of this changes
+what the lights *illuminate*, so no tier can reveal or hide a route.
 
 ## Glyph audit
 
@@ -199,6 +266,14 @@ what Kitty sends when no flags are pushed) is **supported**: the verdict is "an
 answer arrived", not "flags > 0". An earlier revision got that wrong and
 misdetected Kitty.
 
+When the first query is positive the game **pushes**
+`REPORT_EVENT_TYPES | REPORT_ALL_KEYS_AS_ESCAPE_CODES` and then asks a **second
+time**: the protocol's reply carries the flags currently in effect, so the
+second answer is the proof that the push stuck. That second answer, not the
+first, is what sets `KeyboardMode::lone_ctrl` and therefore whether `Ctrl` or
+`Space` is the dash key. Both queries share the same 300 ms budget; the second
+one is only issued on a terminal that already answered once.
+
 ## Test matrix
 
 Two independent engines, both automated, plus the real windows.
@@ -224,12 +299,11 @@ the other parser. **All agree.**
 
 **Real windows** (one launch each, closed afterwards):
 * **Ghostty** — rendered the title and gameplay correctly at the window's own
-  size; contact sheet in `scratchpad/terminals/ghostty_contact.png`.
+  size.
 * **Kitty** — the capability probe ran and reported `TERM=xterm-kitty`,
   `COLORTERM=truecolor`, and a protocol answer (`CSI ? 0 u`). Its window could
   not be screenshotted: macOS `screencapture -l` returns a black image for
-  kitty's Metal surface. `scratchpad/terminals/kitty_contact.png` shows that
-  limitation next to the probe result.
+  kitty's Metal surface.
 * **WezTerm** — probe ran: `TERM=xterm-256color`, `TERM_PROGRAM=WezTerm`,
   no protocol (DA1 only).
 * **iTerm2**, **Apple Terminal** — could not be driven: the screen locked part
@@ -237,9 +311,10 @@ the other parser. **All agree.**
   automation timed out. Their rows above come from `--caps` with the
   environment each app sets, not from a live run.
 
-Per-terminal captures and the raw logs are in
-`scratchpad/terminals/` (`frames/`, `frames_matrix.txt`,
-`headless_matrix.log`, `tmux_matrix.log`).
+Per-terminal captures, the contact sheets and the raw logs live with the review
+scratchpad and are **not part of this repository**. The harnesses named above
+(`matrix.py`, `tmux_matrix.sh`, `xterm_check.js`) are likewise scratchpad-only;
+`--caps` and `--probe` are the in-tree way to re-measure a terminal.
 
 ## Not tested from this machine
 
@@ -260,19 +335,56 @@ Per-terminal captures and the raw logs are in
   ambiguous-width characters as single-width; there is no glyph substitution
   that can fix the canvas without abandoning the half-block renderer.
 * **`--ai` wall mode** is not sanitised: `spectate.rs` has its own composite
-  render path (out of scope for this change), so the wall still emits 24-bit
-  colour and unicode glyphs regardless of detection.
+  render path, so the wall still emits 24-bit colour and unicode glyphs
+  regardless of detection. The normal game sanitises every finished frame.
 * **Audio** was not exercised anywhere (headless runs have no device).
+* **A real gamepad** was not exercised in this pass: the whole pad path
+  (movement, aim, dash, actives, menu navigation, hot-plug, dead zone) is
+  covered by injected `PadEvent`s in tests, and the `gilrs` poller itself was
+  only verified to compile and start.
+
+## Gamepad focus caveat
+
+A terminal application has no window of its own, so a controller is readable
+whether or not the terminal is in the foreground. The game therefore feeds
+terminal **focus reporting** (the same `CSI ? 1004 h` it already enables to fix
+stuck keys) into the pad layer and **drops pad input while unfocused**: a pad
+resting in someone's lap must not drive a game nobody is watching. `Alt-Tab`
+away and back therefore costs one frame of pad input, never a stuck stick.
+
+The pad is also read only when the `gamepad` cargo feature is compiled in (the
+default) and a device is connected; with `--no-default-features` or no pad,
+every pad function is a no-op costing one branch per frame. On Linux, `gilrs`
+links `libudev` at build time (`libudev-dev`).
+
+## Pointer shape (OSC 22)
+
+While the in-game cheese cursor is visible the game asks the terminal to switch
+the OS pointer to `crosshair` with OSC 22, and resets it on the way out
+(Ghostty, Kitty and iTerm2 ≥ 3.5 honour it; WezTerm and Apple Terminal ignore
+unknown OSC). It is skipped on 16-colour consoles, and it never runs in `--ai`
+mode, which has its own pointer-free input path.
 
 ## Files
 
-* `src/term.rs` (new) — capability detection, colour folding, glyph
-  sanitising, the bounded keyboard query, and their tests.
-* `src/main.rs` — resolves capabilities before the first draw, adds `--caps` /
-  `--probe`, uses the bounded query, sanitises each finished frame.
+* `src/term.rs` — capability detection, colour folding, glyph sanitising, the
+  bounded keyboard query, and their tests.
+* `src/main.rs` — resolves capabilities before the first draw; owns the
+  terminal lifecycle (raw mode, alternate screen, mouse, focus reporting,
+  synchronized updates); pushes and pops the keyboard flags; runs the startup
+  query and the verifying second query; adds `--caps` / `--probe`; sanitises
+  each finished frame; switches the OSC 22 pointer.
+* `src/input.rs` — `InputState`, the per-frame `pressed` list, the held-key
+  grace window and `DashKey` (which key the HUD and legends name);
+  `release_all()` on focus loss.
+* `src/controls.rs` — the remappable layer over `input.rs` (three schemes, 23
+  actions, the legends), including the lone-modifier rule in
+  `KeyBind::from_event`.
+* `src/gamepad.rs` — the `gilrs` poller behind the `gamepad` feature, gated on
+  terminal focus; `PadState`/`PadEvent` are the test seam.
 * `src/render/palette.rs` — `to_term()`: the output colour fold.
 * `src/render/framebuffer.rs` — the half-block blit folds colours at the edge.
-* `src/render/hud.rs` — the emoji-with-variation-selector removed from the test
-  fixture (the only emoji in the source).
-* `Cargo.toml` — `libc` (unix only, already in the dependency tree) for the
-  bounded `poll`/`read` used by the startup query.
+* `src/render/lighting/engine.rs` — `LightingMode::default_for_depth` (the tier
+  per colour depth) and the cost-driven quality controller.
+* `Cargo.toml` — `libc` (unix only) for the bounded `poll`/`read` used by the
+  startup query; `gilrs` as an optional dependency behind `gamepad`.
