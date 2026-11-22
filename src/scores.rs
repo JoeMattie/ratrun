@@ -298,6 +298,8 @@ pub fn controls_to_file(controls: &Controls) -> ControlsFile {
         deadzone: saved.deadzone,
         rumble: saved.rumble,
     }
+}
+
 /// The nest, tolerant of a hand-edited file: anything that is not a nest object
 /// (a string, a list, null) loads as a fresh profile instead of failing the
 /// whole table and dropping the player's scores with it.

@@ -8,8 +8,10 @@ description = "Rat Run — a terminal bullet-hell horde survivor built with rata
 # The admin drop-down console. On by default in this development build; a
 # release build can `--no-default-features` to compile it out entirely.
 # `RATRUN_CONSOLE=0` also disables it at runtime.
-default = ["console"]
+default = ["console", "gamepad"]
 console = []
+# Gamepad support (wave 3 controls); see the optional `gilrs` dependency.
+gamepad = ["dep:gilrs"]
 
 [dependencies]
 ratatui = "0.30"
@@ -30,9 +32,6 @@ bevy_ecs = { version = "0.20", default-features = false, features = ["std"] }
 # on a machine without libudev: gilrs needs it on Linux, nothing on macOS.
 gilrs = { version = "0.11", optional = true }
 
-[features]
-default = ["gamepad"]
-gamepad = ["dep:gilrs"]
 # Terminal capability detection polls stdin with a short timeout when it asks
 # the terminal for its keyboard protocol (see src/term.rs). Already in the tree
 # through crossterm/signal-hook, so this adds no new download.
