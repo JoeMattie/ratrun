@@ -531,6 +531,30 @@ fn the_arsenal_targets_stand_at_the_effects_range() {
     }
 }
 
+/// The standing targets (and room for the digits above them) are inside the
+/// frame: centred on the rat, a 66 px plate cut the targets at its right edge.
+#[test]
+fn the_arsenal_targets_stand_inside_the_plate() {
+    for kind in WeaponKind::all() {
+        if kind == WeaponKind::SuperDash {
+            // The one arsenal plate whose rat travels.
+            continue;
+        }
+        let mut scene = LibraryScene::build(Key::Weapon(kind)).expect("a weapon scene");
+        let mut art = PixelBuffer::new(44, 30);
+        for _ in 0..30 {
+            scene.step();
+        }
+        plate(&mut scene, &mut art);
+        let (cam, view) = (scene.world.cam, scene.view);
+        for home in dummy_homes(scene.world.player.pos) {
+            let right = cam.x + view.x - home.x;
+            assert!(right >= 12.0, "{kind:?}: a target stands {right} px from the right edge");
+            assert!(on_plate(&scene, home), "{kind:?}: a target is off the plate");
+        }
+    }
+}
+
 /// A brief active weapon fires several times inside one loop: the plate keeps
 /// the charge off (the cost is on the card's facts, not in its picture) while
 /// the effect, the hit flash and the digits are the weapon's own.

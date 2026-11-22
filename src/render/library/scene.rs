@@ -286,6 +286,10 @@ struct Script {
     /// How far past the dummy the aim point is framed: a leading shot's pellet
     /// travels past its target, so the plate has to hold that far too.
     lead: f32,
+    /// A [`Framing::Rat`] plate's offset from the rat: an arsenal plate leans
+    /// towards its standing targets, so the rat, the targets and the hit
+    /// digits above them all sit inside the frame instead of at its edge.
+    lean: Vec2,
 }
 
 fn idle(_: f32) -> Input {
@@ -303,6 +307,7 @@ impl Script {
             feed: None,
             cue: None,
             dummy: false,
+            lean: Vec2::ZERO,
             fit: false,
             lead: 0.0,
         }
@@ -540,7 +545,7 @@ impl LibraryScene {
     fn focus_target(&mut self) -> Vec2 {
         let rat = self.world.player.pos;
         match self.script.framing {
-            Framing::Rat => rat,
+            Framing::Rat => rat + self.script.lean,
             Framing::Pair => {
                 // A leading shot lands past its target, so a card that stages
                 // one frames that far beyond the dummy as well (`Script::lead`).
@@ -1398,6 +1403,9 @@ fn stage_weapon(theme: Theme, kind: WeaponKind, evolved: bool) -> Staged {
     }
     let mut script = Script::new(5.0, 1.5);
     script.framing = Framing::Rat;
+    // The targets stand `ARSENAL_RING` in front of the rat and the plate is 66 px
+    // wide: centred on the rat they were cut by its right edge, digits and all.
+    script.lean = Vec2::new(ARSENAL_RING * 0.5, 0.0);
     // Standing targets, not a chase: the arsenal plate is about what the
     // weapon does to a body, and a brief effect (a squeak ring, a thrash arc)
     // needs something on the plate to land on between its own flashes. The cue
