@@ -890,8 +890,23 @@ mod tests {
 
     // ---- harness ---------------------------------------------------------
 
+    /// A Lab seed whose pool pick is the **Mower**.
+    ///
+    /// The Lab pools its boss now (`BossKind::pool_for_theme`: the Mower and
+    /// the King Cobra), so a test that wants this fight asks for a seed that
+    /// fields it rather than assuming the floor's original.
+    fn mower_seed(mut seed: u64) -> u64 {
+        for _ in 0..8192 {
+            if BossKind::for_theme_seeded(Theme::Lab, seed) == BossKind::Mower {
+                return seed;
+            }
+            seed = seed.wrapping_add(1);
+        }
+        seed
+    }
+
     fn lab_world(seed: u64) -> World {
-        let mut w = World::new(Theme::Lab, seed);
+        let mut w = World::new(Theme::Lab, mower_seed(seed));
         // Campaign slot 2 is the Lab, i.e. the mower.
         w.level_index = 2;
         w
