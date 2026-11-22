@@ -20,8 +20,8 @@
 //! is planted until its exposed second is over ([`Miniboss::holds`]). The
 //! whole footprint is outlined for the full second (a swinging cord tells
 //! as the whole sector it sweeps), and one strike bites the rat once
-//! (`hit_this_strike`). Slot HP is [`appointment_hp`]: 3800 / 8000 / 10000 /
-//! 12000.
+//! (`hit_this_strike`). Slot HP is [`appointment_hp`]: 4500 / 10700 / 14400 /
+//! 18100.
 //! A signature whose shape leaves no walkable escape is re-aimed (up to 8
 //! tries) and skipped if still trapped.
 //!
@@ -1185,22 +1185,26 @@ impl Miniboss {
     }
 }
 
-/// HP by appointment (3:00 / 6:00 / 9:00 / 12:00): 3800 / 8000 / 10000 /
-/// 12000.
+/// HP by appointment (3:00 / 6:00 / 9:00 / 12:00): 4500 / 10700 / 14400 /
+/// 18100.
 ///
 /// The wave-3 ladder (160 / 320 / 540 / 780) died in 2–6 s, and batch six's
 /// (800 / 1600 / 2500 / 3400) in 5 / 7 / 10 / 14 s for the Skilled bot: one
 /// signature at most. Batch seven sized it for a 20–45 s fight by slot
-/// (measured 23 / 30 / 40 / 48 s over 96 campaigns). Every reader (the spawn, the console
+/// (3800 / 8000 / 10000 / 12000, measured 23 / 30 / 40 / 48 s over 96
+/// campaigns). Batch eight gave the rat +1 % weapon damage per character level
+/// and multiplied each pool by the bonus a typical rat carries at its
+/// appointment (×1.19 / ×1.34 / ×1.44 / ×1.51, `director::level_bonus_hp_at`),
+/// so the fights keep their length. Every reader (the spawn, the console
 /// and test spawn in `World::spawn_miniboss`, the Library's HIT POINTS fact)
 /// goes through this function.
 #[inline]
 pub fn appointment_hp(appointment: usize) -> f32 {
     match appointment {
-        0 => 3800.0,
-        1 => 8000.0,
-        2 => 10000.0,
-        _ => 12000.0,
+        0 => 4500.0,
+        1 => 10700.0,
+        2 => 14400.0,
+        _ => 18100.0,
     }
 }
 
@@ -2069,10 +2073,21 @@ mod tests {
     fn appointment_stats_match_the_design() {
         // Batch seven's ladder: sized for 20-45 s fights by slot (measured
         // with the Skilled bot: 23 / 30 / 40 / 48 s).
-        assert_eq!(appointment_hp(0), 3800.0);
-        assert_eq!(appointment_hp(1), 8000.0);
-        assert_eq!(appointment_hp(2), 10000.0);
-        assert_eq!(appointment_hp(3), 12000.0);
+        // Batch eight: the same fights against a rat whose level adds damage
+        // (batch seven's 3800 / 8000 / 10000 / 12000 times the level bonus at
+        // each appointment).
+        let base = [3800.0f32, 8000.0, 10000.0, 12000.0];
+        let pools = [4500.0f32, 10700.0, 14400.0, 18100.0];
+        for (slot, time) in MINIBOSS_TIMES.iter().enumerate() {
+            assert_eq!(appointment_hp(slot), pools[slot]);
+            let want = base[slot] * crate::game::director::level_bonus_hp_at(*time);
+            assert!(
+                (pools[slot] - want).abs() < want * 0.02,
+                "slot {slot}: {} is not the level bonus on {}",
+                pools[slot],
+                base[slot]
+            );
+        }
         assert_eq!(appointment_signature_damage(0), 18.0);
         assert_eq!(appointment_signature_damage(1), 22.0);
         assert_eq!(appointment_signature_damage(2), 26.0);

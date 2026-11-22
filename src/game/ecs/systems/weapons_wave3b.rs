@@ -275,7 +275,7 @@ pub fn laser_eyes_system(
     let dt = input.dt;
     let (dmg_mult, fire_rate, reach_mult) = {
         let s = player.loadout.stats;
-        (s.damage_mult, s.fire_rate_mult.max(0.1), s.reach_mult)
+        (player.damage_mult(), s.fire_rate_mult.max(0.1), s.reach_mult)
     };
 
     // 1. Charge (and trigger). Only one burst is in flight at a time, and a
@@ -477,8 +477,7 @@ pub fn super_dash_system(
         return;
     };
     let radius = w.dash_radius();
-    let stats = player.loadout.stats;
-    let dmg = w.damage() * stats.damage_mult;
+    let dmg = w.damage() * player.damage_mult();
     // A charged dash (the player held the dash input and released it) is wider
     // and hits harder; the arms above are the whole curve, so a tap dash — the
     // pre-charge behaviour, and every scripted `charge = 0` — is unchanged.
@@ -488,7 +487,7 @@ pub fn super_dash_system(
     // Counterweight scales the dash's native drag too: it is a shove, so the
     // passive that raises every weapon's shove has to reach it (it used to be
     // a hard-coded 40 px/s the passive could not touch).
-    let shove = stats.shove(SUPER_DASH_SHOVE);
+    let shove = player.loadout.stats.shove(SUPER_DASH_SHOVE);
     let kind = WeaponKind::SuperDash;
     // The legs the rat actually travelled this tick (collision-resolved
     // sub-steps). A chord across them could cut a corner a wall put in the

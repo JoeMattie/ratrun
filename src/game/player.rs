@@ -103,6 +103,22 @@ pub struct Player {
 
 /// First card's cost, in XP. Six XP is the design's "first card in 12-20 s"
 /// anchor: the opening horde hands that over in about fifteen seconds.
+/// Weapon damage gained per character level above the first: +1 %, so level
+/// 31 hits ×1.30 and level 51 ×1.50. No cap.
+pub const LEVEL_DAMAGE_PER_LEVEL: f32 = 0.01;
+
+/// The character level's weapon-damage multiplier
+/// (`1 + LEVEL_DAMAGE_PER_LEVEL × (level − 1)`). The level restarts at 1 on
+/// every floor, and so does this.
+pub fn level_damage_mult(level: u32) -> f32 {
+    1.0 + LEVEL_DAMAGE_PER_LEVEL * level.saturating_sub(1) as f32
+}
+
+/// The same bonus as a whole percentage, for the screens (`+11` at level 12).
+pub fn level_damage_percent(level: u32) -> u32 {
+    level.saturating_sub(1)
+}
+
 pub const XP_BASE: f64 = 6.0;
 
 /// Growth ratio of the geometric XP curve.
@@ -175,6 +191,19 @@ impl Player {
 
     pub fn max_hp(&self) -> f32 {
         self.loadout.stats.max_hp
+    }
+
+    /// The multiplier on every weapon's damage: the build's
+    /// (`Stats::damage_mult` — Sharp Teeth, the nest, splices) times the
+    /// character level's ([`level_damage_mult`]).
+    ///
+    /// This is the **one** place the two are composed. Every weapon pass reads
+    /// it when it fires (the auto-fire pass, the active weapons, Laser Eyes,
+    /// Super Dash and its Ripcord), and a pool, a mark or an evolved effect
+    /// carries the damage it was fired with, so nothing downstream multiplies
+    /// again.
+    pub fn damage_mult(&self) -> f32 {
+        self.loadout.stats.damage_mult * level_damage_mult(self.level)
     }
 
     /// Add XP; returns how many level-ups were triggered.
@@ -344,4 +373,19 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn the_level_bonus_is_one_percent_a_level_with_no_cap() {
+        assert_eq!(level_damage_mult(0), 1.0);
+        assert_eq!(level_damage_mult(1), 1.0);
+        assert!((level_damage_mult(2) - 1.01).abs() < 1e-6);
+        assert!((level_damage_mult(31) - 1.30).abs() < 1e-6);
+        assert!((level_damage_mult(51) - 1.50).abs() < 1e-6);
+        assert!((level_damage_mult(201) - 3.0).abs() < 1e-5);
+        assert_eq!(level_damage_percent(1), 0);
+        assert_eq!(level_damage_percent(12), 11);
+        // A fresh rat (every floor starts one) is at level 1: no bonus.
+        let p = Player::new(Vec2::ZERO, WeaponKind::Gnaw);
+        assert_eq!(p.damage_mult(), p.loadout.stats.damage_mult);
+    }
+
 }

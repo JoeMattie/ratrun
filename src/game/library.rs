@@ -1389,7 +1389,8 @@ fn passive_text(k: PassiveKind) -> (&'static str, &'static str) {
         PassiveKind::Damage => (
             "Level-up card · any floor",
             "Filed sharp on rebar. It is the partner most weapons are waiting for, and \
-             the shortest path from a build to an evolution.",
+             the shortest path from a build to an evolution. Every level the rat \
+             gains on a floor adds 1% weapon damage on top.",
         ),
         PassiveKind::FireRate => (
             "Level-up card · any floor",

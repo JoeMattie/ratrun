@@ -624,7 +624,7 @@ pub fn draw_levelup_keyed(
     let r = panel(
         f,
         centered_rect(panel_w, panel_h, area),
-        &format!(" LEVEL UP   /   LV {level:02} "),
+        &levelup_header(level),
         TAIL,
     );
     let content = r.inner(Margin::new(1, 0));
@@ -1018,6 +1018,15 @@ pub fn draw_map_intro(f: &mut Frame, area: Rect, theme: Theme, accent: Color, hi
     );
 }
 
+/// The level-up plate's header: the level reached and the weapon damage that
+/// level is worth (`player::level_damage_mult`).
+pub fn levelup_header(level: u32) -> String {
+    format!(
+        " LEVEL UP   /   LV {level:02}   /   +{}% WEAPON DAMAGE ",
+        crate::game::player::level_damage_percent(level)
+    )
+}
+
 pub fn draw_pause(f: &mut Frame, area: Rect, controls_src: &Controls, hits: &mut HitMap) {
     // Nine rows: the border's two plus seven content rows, the last of which
     // (content row 6) is the legend. The plate used to be eight rows tall,
@@ -1112,7 +1121,13 @@ pub fn draw_pause_compact(
         format!("BOSS FIGHT +{:02}:{:02}", fought / 60, fought % 60)
     } else {
         let rem = world.time_left().max(0.0) as u32;
-        format!("{:02}:{:02} to boss  ·  Lv {}", rem / 60, rem % 60, world.player.level)
+        format!(
+            "{:02}:{:02} to boss  ·  Lv {}  ·  +{}% damage",
+            rem / 60,
+            rem % 60,
+            world.player.level,
+            crate::game::player::level_damage_percent(world.player.level)
+        )
     };
     center(f, r, 1, label(&clock_text, COAT));
     let rule = "─".repeat(usize::from(r.width));
@@ -1929,7 +1944,7 @@ pub fn draw_levelup_with_loadout_keyed(
     let r = panel(
         f,
         centered_rect(panel_w, panel_h, area),
-        &format!(" LEVEL UP   /   LV {level:02} "),
+        &levelup_header(level),
         TAIL,
     );
     let content = r.inner(Margin::new(1, 0));
@@ -2417,7 +2432,18 @@ pub fn draw_pause_with_run(
     let st = &world.player.loadout.stats;
     let stats_rows: [(&str, String); 6] = [
         ("HP", format!("{:.0}/{:.0}", world.player.hp.max(0.0), world.player.max_hp())),
-        ("Damage", format!("{}%", (st.damage_mult * 100.0).round() as u32)),
+        // The build's multiplier times the character level's, then the
+        // level's own share so the player can see what a level is worth.
+        ("Damage", {
+            let total = (world.player.damage_mult() * 100.0).round() as u32;
+            let level = crate::game::player::level_damage_percent(world.player.level);
+            let long = format!("{total}% · Lv +{level}%");
+            if long.chars().count() as u16 + 10 < right_w {
+                long
+            } else {
+                format!("{total}%")
+            }
+        }),
         ("Fire Rate", format!("{}%", (st.fire_rate_mult * 100.0).round() as u32)),
         ("Speed", format!("{}%", (st.move_speed / 58.0 * 100.0).round() as u32)),
         ("Armor/Reg", format!("{:.0} / +{:.1}/s", st.armor, st.regen)),
@@ -3947,4 +3973,16 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn the_levelup_header_states_the_levels_damage() {
+        assert_eq!(
+            levelup_header(12),
+            " LEVEL UP   /   LV 12   /   +11% WEAPON DAMAGE "
+        );
+        assert!(levelup_header(2).contains("+1% WEAPON DAMAGE"));
+        // The widest header still fits the narrowest plate (57 columns less
+        // the frame).
+        assert!(levelup_header(199).chars().count() <= 55);
+    }
+
 }

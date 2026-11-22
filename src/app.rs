@@ -4126,7 +4126,7 @@ impl App {
                 .iter()
                 .map(|wp| (wp.kind, wp.level))
                 .collect(),
-            damage_mult: w.player.loadout.stats.damage_mult,
+            damage_mult: w.player.damage_mult(),
             fire_rate_mult: w.player.loadout.stats.fire_rate_mult,
             armor: w.player.loadout.stats.armor,
             sector: (w.level_index + 1).clamp(1, campaign::LEVEL_COUNT) as u8,

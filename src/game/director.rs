@@ -322,9 +322,39 @@ pub fn boss_hp_mult_for(level: usize, elapsed: f32) -> f32 {
 /// curve is linear over the fifteen minutes, so a skitterer that took one hit
 /// at 0:00 takes two at the boss. Later campaign stages add their own
 /// [`LEVEL_HP_EXTRA`] on top after the grace window.
+///
+/// On top of that sits [`level_bonus_hp_at`]: the rat's character level now
+/// adds weapon damage, and the pools grow by the bonus a typical rat carries
+/// at that minute, so a body still takes the hits it took before.
 #[inline]
 pub fn hp_mult_at(curve: f32) -> f32 {
-    1.0 + curve / RUN_SECONDS
+    (1.0 + curve / RUN_SECONDS) * level_bonus_hp_at(curve)
+}
+
+/// The weapon-damage bonus a typical rat's character level is worth on the
+/// curve clock (`player::level_damage_mult` at the measured mean level: 5 at
+/// 1:00, 13 at 2:00, 20 at 3:00, 35 at 6:00, 45 at 9:00, 52 at 12:00, 56 at
+/// the boss — 48 mixed-skill campaigns, batch eight).
+///
+/// Every pool that is sized against the rat's damage is multiplied by it (the
+/// horde and the boss through [`hp_mult_at`], the named minibosses through
+/// their own table), so the per-level damage reads as the rat getting
+/// stronger without shortening a fight that was tuned by length.
+const LEVEL_BONUS_HP: [(f32, f32); 8] = [
+    (0.0, 1.0),
+    (60.0, 1.04),
+    (120.0, 1.12),
+    (180.0, 1.19),
+    (360.0, 1.34),
+    (540.0, 1.44),
+    (720.0, 1.51),
+    (900.0, 1.55),
+];
+
+/// [`LEVEL_BONUS_HP`] at a curve time.
+#[inline]
+pub fn level_bonus_hp_at(curve: f32) -> f32 {
+    lerp_table(&LEVEL_BONUS_HP, curve)
 }
 
 /// [`hp_mult_at`] for a campaign level and the real run clock.
@@ -846,7 +876,17 @@ mod tests {
         }
         // Ordinary hp: ×1 at the start, ×2 at 15:00.
         assert!((hp_mult_at(0.0) - 1.0).abs() < 1e-6);
-        assert!((hp_mult_at(RUN_SECONDS) - 2.0).abs() < 1e-6);
+        // ×2 by the boss on the design's curve, times the level bonus a
+        // typical rat carries there (×1.55 at level 56).
+        assert!((level_bonus_hp_at(0.0) - 1.0).abs() < 1e-6);
+        assert!((level_bonus_hp_at(RUN_SECONDS) - 1.55).abs() < 1e-6);
+        assert!((hp_mult_at(RUN_SECONDS) - 2.0 * 1.55).abs() < 1e-5);
+        let mut last = 0.0;
+        for t in 0..=RUN_SECONDS as u32 {
+            let b = level_bonus_hp_at(t as f32);
+            assert!(b >= last, "the level bonus falls at {t}s");
+            last = b;
+        }
         // The base kinds' unlock times are the roster's slot unlocks now
         // (`WAVE4_ROSTERS.md` "Reading a room"): B 0:45, C 1:15, R 3:35,
         // H 6:35. The old global table had exactly these numbers, so the HUD's

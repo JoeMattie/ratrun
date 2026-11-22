@@ -109,6 +109,7 @@ dark.*
   pool.
 - **13 weapons**, **12 passives**, and **13 evolutions** — a maxed weapon plus
   the right passive evolves into something else entirely when you open a chest.
+  Every level the rat gains on a floor also adds 1% weapon damage.
 - **Gold, and two places to spend it.** Mouse holes in the walls hide a
   gene-splice shelf: two splice sockets, plus a heal, a reroll and a Molt
   service. Between runs, the **Nest** spends banked gold on 15 permanent tracks

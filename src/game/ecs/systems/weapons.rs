@@ -147,7 +147,7 @@ pub fn fire_weapons_system(
     let ppos = player.pos;
     let pface = player.face;
     let fire_rate = player.loadout.stats.fire_rate_mult;
-    let dmg_mult = player.loadout.stats.damage_mult * scratch.cvars.damage_mult.max(0.0);
+    let dmg_mult = player.damage_mult() * scratch.cvars.damage_mult.max(0.0);
     // Wave 3: the passive hooks (Lens Cap, Long Fuse, Counterweight) are a copy
     // of the stat block, so `fire_one` can read them while the loop still
     // mutates weapon timers.
@@ -673,7 +673,7 @@ pub fn active_weapons_system(
     let ppos = player.pos;
     let pface = player.face;
     let fire_rate = player.loadout.stats.fire_rate_mult.max(0.1);
-    let dmg_mult = player.loadout.stats.damage_mult;
+    let dmg_mult = player.damage_mult();
     // Wave 3: copy the passive hooks out before the loadout is borrowed mutably
     // (`Stats` is `Copy`).
     let stats = player.loadout.stats;
@@ -3757,4 +3757,91 @@ mod tests {
         };
         assert!(before(&near_boss, &enemy));
     }
+    // ---- Character-level damage (`Player::damage_mult`) --------------------
+
+    /// Damage a build deals in `ticks` to one planted, unkillable body beside
+    /// the rat, with the rat's character level forced to `level`.
+    fn dealt_at_level(build: impl Fn(&mut World), level: u32, ticks: usize) -> f32 {
+        const POOL: f32 = 100_000.0;
+        let mut w = World::new(Theme::Sewer, 77);
+        w.peace = true;
+        w.player.god = true;
+        w.player.loadout.weapons.clear();
+        build(&mut w);
+        w.player.level = level;
+        let at = w.player.pos + Vec2::new(14.0, 0.0);
+        let e = w.spawn_enemy(EnemyKind::Brute, at, 1.0);
+        {
+            let mut body = w.ecs.get_mut::<Enemy>(e).unwrap();
+            body.hp = POOL;
+            body.max_hp = POOL;
+            body.speed_scale = 0.0;
+        }
+        for _ in 0..ticks {
+            w.update_with(1.0 / 60.0, Vec2::ZERO, false, false);
+        }
+        assert_eq!(w.player.level, level, "the rat must not level mid-measurement");
+        POOL - w.ecs.get::<Enemy>(e).unwrap().hp
+    }
+
+    fn assert_ratio(hi: f32, lo: f32, want: f32, what: &str) {
+        assert!(lo > 0.0, "{what}: the level-1 build dealt nothing");
+        let got = hi / lo;
+        assert!(
+            (got - want).abs() < want * 0.01,
+            "{what}: {hi} / {lo} = {got}, wanted {want}"
+        );
+    }
+
+    #[test]
+    fn a_hit_at_level_21_deals_a_fifth_more_than_at_level_1() {
+        let gnaw = |w: &mut World| w.player.loadout.weapons.push(Weapon::new(WeaponKind::Gnaw));
+        let lo = dealt_at_level(gnaw, 1, 240);
+        let hi = dealt_at_level(gnaw, 21, 240);
+        assert_ratio(hi, lo, 1.20, "Gnaw");
+    }
+
+    #[test]
+    fn the_level_bonus_multiplies_with_sharp_teeth() {
+        use crate::game::loadout::PassiveKind;
+        let plain = |w: &mut World| w.player.loadout.weapons.push(Weapon::new(WeaponKind::Gnaw));
+        let sharp = |w: &mut World| {
+            w.player.loadout.weapons.push(Weapon::new(WeaponKind::Gnaw));
+            assert!(w.give_passive(PassiveKind::Damage, 1));
+        };
+        let lo = dealt_at_level(plain, 1, 240);
+        let teeth = dealt_at_level(sharp, 1, 240);
+        let both = dealt_at_level(sharp, 21, 240);
+        let teeth_mult = teeth / lo;
+        assert!(teeth_mult > 1.05, "Sharp Teeth must add damage: {teeth_mult}");
+        assert_ratio(both, lo, teeth_mult * 1.20, "Gnaw + Sharp Teeth");
+    }
+
+    #[test]
+    fn pools_marks_and_evolutions_carry_the_level_bonus() {
+        use crate::game::loadout::PassiveKind;
+        // A pool (Acid Spit's lob lands as a damaging puddle) and a mark
+        // (Hantavirus ticks): both carry the damage they were fired with.
+        for kind in [WeaponKind::AcidSpit, WeaponKind::Hantavirus] {
+            let build = move |w: &mut World| w.player.loadout.weapons.push(Weapon::new(kind));
+            let lo = dealt_at_level(build, 1, 600);
+            let hi = dealt_at_level(build, 21, 600);
+            assert_ratio(hi, lo, 1.20, kind.name());
+        }
+        // An evolution: Ratchet Tail (Tail Whip, evolved).
+        let ratchet = |w: &mut World| {
+            let kind = WeaponKind::TailWhip;
+            let mut weapon = Weapon::new(kind);
+            weapon.level = kind.max_level();
+            weapon.evolved = true;
+            w.player.loadout.weapons.push(weapon);
+            let partner = kind.evolution().expect("Tail Whip evolves").passive;
+            assert!(w.give_passive(partner, 1));
+            let _ = PassiveKind::Damage;
+        };
+        let lo = dealt_at_level(ratchet, 1, 600);
+        let hi = dealt_at_level(ratchet, 21, 600);
+        assert_ratio(hi, lo, 1.20, "Ratchet Tail");
+    }
+
 }
