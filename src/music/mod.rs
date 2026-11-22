@@ -280,10 +280,10 @@ pub static SONGS: [&Song; 6] = [
 
 /// The one and only theme -> song table.
 ///
-/// By `Theme::playable()` order the owner's stems are: Silent Return -> Sewer,
-/// The Great Dash -> Kitchen, A Minor Waltz -> Laundry, Platen Pace -> Lab,
-/// B-C-D# Warning -> Printworks, Rat on the Flatbed -> Flatbed. Swapping two
-/// songs is a two-line change here (and nothing else).
+/// The owner's pairing: Silent Return -> Sewer, The Great Dash -> Kitchen,
+/// A Minor Waltz -> Laundry, B-C-D# Warning -> Lab, Platen Pace -> Printworks,
+/// Rat on the Flatbed -> Flatbed. Each floor's file holds its own song, so
+/// swapping two songs is a two-line change here (and nothing else).
 pub fn song_for(theme: Theme) -> &'static Song {
     match theme {
         Theme::Sewer => &sewer::SONG,
