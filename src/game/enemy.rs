@@ -232,7 +232,7 @@ impl EnemyKind {
 
     /// Every kind, in enum order. The console's `spawn` command and its Tab
     /// completion read this table rather than a retyped list.
-    pub fn all() -> [EnemyKind; 11] {
+    pub fn all() -> [EnemyKind; 16] {
         [
             EnemyKind::Skitterer,
             EnemyKind::Bat,
@@ -245,6 +245,11 @@ impl EnemyKind {
             EnemyKind::WickMoth,
             EnemyKind::Porter,
             EnemyKind::Turnkey,
+            EnemyKind::BigSnake,
+            EnemyKind::HouseCentipede,
+            EnemyKind::MurderHornet,
+            EnemyKind::TermiteHorde,
+            EnemyKind::Lilliputian,
         ]
     }
 
@@ -262,6 +267,11 @@ impl EnemyKind {
             EnemyKind::WickMoth => "wickmoth",
             EnemyKind::Porter => "porter",
             EnemyKind::Turnkey => "turnkey",
+            EnemyKind::BigSnake => "bigsnake",
+            EnemyKind::HouseCentipede => "housecentipede",
+            EnemyKind::MurderHornet => "murderhornet",
+            EnemyKind::TermiteHorde => "termitehorde",
+            EnemyKind::Lilliputian => "lilliputian",
         }
     }
 }

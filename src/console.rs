@@ -598,8 +598,9 @@ const ON_OFF: &[&str] = &["on", "off"];
 const GIVE_KINDS: &[&str] = &["weapon", "passive", "all"];
 const REMOVE_KINDS: &[&str] = &["weapon", "passive"];
 const TP_KINDS: &[&str] = &["arena", "shop", "chest", "maze"];
-const LIGHTS_KINDS: &[&str] = &["on", "off", "soft", "debug"];
+const LIGHTS_KINDS: &[&str] = &["full", "hard", "coarse", "compact"];
 const LIBRARY_KINDS: &[&str] = &["unlock", "lock"];
+const NEST_KINDS: &[&str] = &["max", "reset"];
 
 /// The command table. Order is the order `help` lists them in.
 pub static COMMANDS: &[CommandSpec] = &[
@@ -1002,7 +1003,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "lights",
         aliases: &["lighting"],
-        usage: "lights [on|off|soft|debug]",
+        usage: "lights [full|hard|coarse|compact]",
         summary: "Set the lighting quality mode.",
         args: &[ArgKind::Words(LIGHTS_KINDS)],
         read_only: true,
@@ -1027,10 +1028,28 @@ pub static COMMANDS: &[CommandSpec] = &[
         handler: cmd_music,
     },
     CommandSpec {
+        name: "bank",
+        aliases: &[],
+        usage: "bank <n>",
+        summary: "Set the Nest's banked gold.",
+        args: &[ArgKind::Text],
+        read_only: false,
+        handler: cmd_bank,
+    },
+    CommandSpec {
+        name: "nest",
+        aliases: &[],
+        usage: "nest max|reset",
+        summary: "Max every Nest track, or wipe the Nest.",
+        args: &[ArgKind::Words(NEST_KINDS)],
+        read_only: false,
+        handler: cmd_nest,
+    },
+    CommandSpec {
         name: "library",
         aliases: &[],
-        usage: "library unlock|lock all",
-        summary: "Unlock or lock all library entries (if present).",
+        usage: "library unlock|lock",
+        summary: "Reveal or lock every Library entry.",
         args: &[ArgKind::Words(LIBRARY_KINDS), ArgKind::Text],
         read_only: false,
         handler: cmd_library,
@@ -1899,27 +1918,24 @@ fn cmd_hitboxes(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> 
 }
 
 fn cmd_lights(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
+    use crate::render::lighting::LightingMode;
     let raw = args.first().map(|s| s.to_ascii_lowercase());
-    match raw.as_deref() {
-        Some("debug") => {
-            return Err("no lighting debug view in this build".into());
-        }
-        Some("on") | Some("full") => app.set_lighting(crate::render::lighting::LightingMode::Full),
-        Some("off") => app.set_lighting(crate::render::lighting::LightingMode::Off),
-        Some("soft") => app.set_lighting(crate::render::lighting::LightingMode::Soft),
+    let next = match raw.as_deref() {
+        Some("on") | Some("full") => LightingMode::Full,
+        Some("hard") => LightingMode::Hard,
+        Some("coarse") => LightingMode::Coarse,
+        Some("compact") => LightingMode::Compact,
         None => {
+            // No argument: step to the next live mode.
             let cur = app.lighting_mode();
-            let next = if cur == crate::render::lighting::LightingMode::Off {
-                crate::render::lighting::LightingMode::Full
-            } else {
-                crate::render::lighting::LightingMode::Off
-            };
-            app.set_lighting(next);
+            let i = LightingMode::LIVE.iter().position(|m| *m == cur).unwrap_or(0);
+            LightingMode::LIVE[(i + 1) % LightingMode::LIVE.len()]
         }
-        Some(other) => return Err(format!("expected on/off/soft/debug, got `{other}`")),
-    }
+        Some(other) => return Err(format!("expected full/hard/coarse/compact, got `{other}`")),
+    };
+    app.set_lighting(next);
     app.console_line(
-        format!("lights {}", app.lighting_mode().as_str()),
+        format!("lights {}", format!("{:?}", app.lighting_mode()).to_ascii_lowercase()),
         LineKind::Success,
     );
     Ok(())
@@ -1944,10 +1960,44 @@ fn cmd_music(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_library(app: &mut crate::app::App, _args: &[&str]) -> Result<(), String> {
-    // Guarded: this base has no library/discovery subsystem.
-    let _ = app;
-    Err("no library in this build".into())
+fn cmd_library(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
+    match args.first().map(|s| s.to_ascii_lowercase()).as_deref() {
+        Some("unlock") => {
+            app.console_library(true);
+            app.console_line("library: every entry revealed", LineKind::Success);
+            Ok(())
+        }
+        Some("lock") => {
+            app.console_library(false);
+            app.console_line("library: every entry locked", LineKind::Success);
+            Ok(())
+        }
+        _ => Err("usage: library unlock|lock".into()),
+    }
+}
+
+fn cmd_bank(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
+    let n = args.first().ok_or("usage: bank <n>")?;
+    let amount = parse_u32(n, "bank")?;
+    app.console_set_bank(amount);
+    app.console_line(format!("nest bank = {amount}"), LineKind::Success);
+    Ok(())
+}
+
+fn cmd_nest(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
+    match args.first().map(|s| s.to_ascii_lowercase()).as_deref() {
+        Some("max") => {
+            app.console_nest(true);
+            app.console_line("nest: every track maxed (applies from the next run)", LineKind::Success);
+            Ok(())
+        }
+        Some("reset") => {
+            app.console_nest(false);
+            app.console_line("nest: bank and tracks wiped", LineKind::Success);
+            Ok(())
+        }
+        _ => Err("usage: nest max|reset".into()),
+    }
 }
 
 fn cmd_set(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
@@ -2404,6 +2454,10 @@ mod tests {
             "sfx shoot",
             "music 1",
             "library unlock",
+            "library lock",
+            "bank 500",
+            "nest max",
+            "nest reset",
             "set enemy_cap 100",
             "get enemy_cap",
             "exec /dev/null",
@@ -2411,13 +2465,7 @@ mod tests {
         for cmd in cases {
             let mut app = fresh_app();
             let result = run_command(&mut app, cmd);
-            // `library` is guarded in this build and returns an error; every
-            // other command must succeed.
-            if cmd.starts_with("library") {
-                assert!(result.is_err(), "`{cmd}` should be guarded");
-            } else {
-                assert!(result.is_ok(), "`{cmd}` failed: {:?}", result.err());
-            }
+            assert!(result.is_ok(), "`{cmd}` failed: {:?}", result.err());
         }
     }
 

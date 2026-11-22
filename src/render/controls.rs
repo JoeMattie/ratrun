@@ -33,7 +33,7 @@ pub fn action_row(action: Action) -> usize {
 
 /// Preferred panel size; clamped to the terminal.
 pub const PANEL_W: u16 = 66;
-pub const PANEL_H: u16 = 28;
+pub const PANEL_H: u16 = 30;
 const LABEL_W: u16 = 13;
 const KEY_W: u16 = 16;
 const PAD_W: u16 = 7;

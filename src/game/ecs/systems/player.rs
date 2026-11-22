@@ -69,6 +69,7 @@ const DASH_READY_SECS: f32 = 0.35;
 /// the throttle on the refused blip (see `player_system`).
 pub const DASH_DENIED_SECS: f32 = 0.16;
 
+#[allow(clippy::too_many_arguments)]
 pub fn player_system(
     input: Res<TickInput>,
     mut player: ResMut<Player>,

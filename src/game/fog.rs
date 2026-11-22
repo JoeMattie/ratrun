@@ -384,6 +384,7 @@ impl Fog {
         let total = (self.cols * self.rows) as usize;
         let words = total.div_ceil(64);
         let mut fresh = 0usize;
+        #[allow(clippy::needless_range_loop)]
         for w in 0..words {
             let remaining = total.saturating_sub(w * 64);
             let full = if remaining >= 64 {

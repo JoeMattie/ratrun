@@ -380,11 +380,11 @@ pub fn director_system(
                     use crate::game::ecs::systems::enemy_wave4 as w4;
                     // The leader's `SpawnId` is the squad's id, so a straggler
                     // can name the squad it wants to rejoin.
-                    let first = next_id.take();
+                    let first = ids.next_id.take();
                     let squad = first.0 as u32;
                     let mut spawned = 0usize;
                     for k in 0..room {
-                        let id = if k == 0 { first } else { next_id.take() };
+                        let id = if k == 0 { first } else { ids.next_id.take() };
                         let off = Vec2::from_angle(
                             k as f32 / room as f32 * std::f32::consts::TAU,
                         ) * 7.0;
@@ -402,7 +402,7 @@ pub fn director_system(
                             mods,
                             &mut rng.0,
                         );
-                        enemy.id = next_enemy_id.take();
+                        enemy.id = ids.next_enemy_id.take();
                         enemy.w4.role = match k {
                             0 => w4::LILLI_ROLE_LEADER,
                             1..=3 => w4::LILLI_ROLE_SPEAR,

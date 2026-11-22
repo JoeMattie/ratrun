@@ -1906,6 +1906,7 @@ mod tests {
                     &world.player.loadout,
                     0,
                     false,
+                    "U",
                     &mut hits,
                 );
             })

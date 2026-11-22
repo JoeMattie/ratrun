@@ -1354,8 +1354,7 @@ impl World {
         // its post-tick value back so a one-shot override does not linger.
         self.boss_override = self
             .ecs
-            .get_resource::<BossOverride>()
-            .map_or(None, |o| o.0);
+            .get_resource::<BossOverride>().and_then(|o| o.0);
 
         let shake = self
             .ecs
@@ -4238,7 +4237,8 @@ mod meta_tests {
     use super::*;
     use crate::game::campaign::CampaignTotals;
     use crate::game::level::Theme;
-    use crate::game::loadout::{Loadout, WeaponKind};
+    use crate::game::loadout::Loadout;
+    use crate::game::weapon::WeaponKind;
 
     const DT: f32 = 1.0 / 60.0;
 

@@ -358,8 +358,12 @@ pub fn draw_title(
     let clock = f.count();
     let large = r.width >= 78 && r.height >= 21;
     let logo_h = if large { 6 } else { 3 };
-    let rat_h = (rat.len() as u16).min(r.height.saturating_sub(logo_h + 11));
-    let gap = u16::from(r.height >= 17);
+    // Six menu rows (LIBRARY and THE NEST joined the list): the specimen art
+    // gives up the row, never the menu or the legend.
+    let rat_h = (rat.len() as u16).min(r.height.saturating_sub(logo_h + 12));
+    // The 57x20 plate (18 inner rows) closes the two blank rows around the
+    // menu so all six rows and the whole legend fit.
+    let gap = u16::from(r.height >= 19);
     let art_gap = u16::from(rat_h > 0);
     let body_h = rat_h + art_gap + logo_h + 9 + gap * 2;
     let mut body_top = r.height.saturating_sub(body_h + 3) / 2;
@@ -525,6 +529,8 @@ pub fn draw_title(
         for (i, line) in lines.iter().take(n).enumerate() {
             center(f, r, r.height - 2 - i as u16, label(line, MUTED));
         }
+        // The story key follows its binding (the STORY / LIBRARY action).
+        let story_chip = format!(" {} story ", controls_src.action_label(Action::Library));
         controls(
             f,
             band(r, r.height - 1, 1),
@@ -540,7 +546,7 @@ pub fn draw_title(
                     },
                     None,
                 ),
-                (" L story ", Some(Target::Story)),
+                (story_chip.as_str(), Some(Target::Story)),
                 (if wide { " · Q quit" } else { "· Q quit" }, None),
             ],
         );
@@ -889,8 +895,9 @@ pub fn draw_pause(f: &mut Frame, area: Rect, controls_src: &Controls, hits: &mut
             6,
             label(
                 &format!(
-                    "[ ] music · - = fx · {} dash · L library",
-                    controls_src.live_dash_label()
+                    "[ ] music · - = fx · {} dash · {} library",
+                    controls_src.live_dash_label(),
+                    controls_src.action_label(Action::Library)
                 ),
                 MUTED,
             ),
@@ -1087,6 +1094,7 @@ pub fn draw_pause_compact(
     } else {
         format!(" {mute_label} mute ")
     };
+    let lib_chip = format!(" {} lib ", controls_src.action_label(Action::Library));
     controls(
         f,
         band(r, r.height.saturating_sub(1), 1),
@@ -1096,7 +1104,7 @@ pub fn draw_pause_compact(
             (" ", None),
             (" O opts ", Some(Target::Options)),
             (" ", None),
-            (" L lib ", Some(Target::Library)),
+            (lib_chip.as_str(), Some(Target::Library)),
             (" ", None),
             (mute_txt.as_str(), None),
             (" ", None),
@@ -2223,6 +2231,7 @@ pub fn draw_pause_with_run(
     } else {
         (" Resume ", " O opts ", " Q menu ")
     };
+    let library_chip = format!(" {} library ", controls_src.action_label(Action::Library));
     controls(
         f,
         band(r, r.height.saturating_sub(1), 1),
@@ -2232,7 +2241,7 @@ pub fn draw_pause_with_run(
             (" ", None),
             (opts, Some(Target::Options)),
             (" ", None),
-            (" L library ", Some(Target::Library)),
+            (library_chip.as_str(), Some(Target::Library)),
             (" ", None),
             (" B nest ", Some(Target::Nest)),
             (" ", None),
@@ -2582,7 +2591,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 26)).unwrap();
         terminal
             .draw(|f| {
-                draw_levelup_with_loadout(f, f.area(), 4, &desc, &upgrades, &lo, 0, false, &mut hits);
+                draw_levelup_with_loadout(f, f.area(), 4, &desc, &upgrades, &lo, 0, false, "U", &mut hits);
             })
             .unwrap();
         let text = screen_text(&terminal);
@@ -2758,7 +2767,7 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(tw, th)).unwrap();
             terminal
                 .draw(|f| {
-                    draw_levelup_with_loadout(f, f.area(), 5, &desc, &upgrades, &lo, 1, false, &mut hits);
+                    draw_levelup_with_loadout(f, f.area(), 5, &desc, &upgrades, &lo, 1, false, "U", &mut hits);
                 })
                 .unwrap();
 
@@ -3031,6 +3040,8 @@ mod tests {
                         &upgrades,
                         &w.player.loadout,
                         1,
+                        false,
+                        "U",
                         &mut hits,
                     )
                 })
@@ -3063,6 +3074,8 @@ mod tests {
                     &upgrades,
                     &small.player.loadout,
                     0,
+                    false,
+                    "U",
                     &mut hits,
                 )
             })

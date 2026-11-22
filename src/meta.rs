@@ -626,6 +626,7 @@ impl RunModifiers {
     /// for the whole run, so the pause line and the floor callout allocate
     /// nothing per frame).
     pub fn summary_into(&self, out: &mut String) {
+        out.clear();
         if self.is_neutral() {
             return;
         }
@@ -865,7 +866,7 @@ static BATCH_META: AtomicU32 = AtomicU32::new(META_NONE);
 pub fn set_batch_meta(stage: Option<MetaStage>) {
     BATCH_META.store(
         match stage {
-            None => META_NONE,
+            None | Some(MetaStage::None) => META_NONE,
             Some(MetaStage::Mid) => META_MID,
             Some(MetaStage::Max) => META_MAX,
         },
@@ -937,6 +938,7 @@ impl MetaStage {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 
@@ -1253,7 +1255,8 @@ mod tests {
             maxed.luck_mult,
             maxed.move_speed / base.move_speed,
         ] {
-            assert!(mult < 1.6, "a permanent multiplier reached {mult}");
+            // Luck tops out at exactly +60% (4 x 15%); nothing goes past it.
+            assert!(mult <= 1.6 + 1e-4, "a permanent multiplier reached {mult}");
         }
     }
 

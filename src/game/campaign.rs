@@ -888,8 +888,8 @@ mod tests {
         );
         assert_eq!(
             campaign.loadout.passives.len(),
-            5,
-            "the five kept passives were carried"
+            4,
+            "the kept pack (the weapon and four passives) was carried"
         );
     }
 

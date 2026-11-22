@@ -409,9 +409,6 @@ pub struct App {
     /// Was a named miniboss alive on the last simulated frame? The kill is the
     /// `Some -> None` edge of `World::miniboss_hp`.
     prev_miniboss_alive: bool,
-    /// Did this run use the console? Another worker is adding the flag; until
-    /// it lands this is `false` and nothing is voided (see `meta::RunEnd`).
-    console_used: bool,
     /// The options screen's RESET row is armed (press again to wipe the nest).
     reset_armed: bool,
     /// The Quake-style drop-down console's presentation state. Present but
@@ -549,7 +546,6 @@ impl App {
             floors_cleared: 0,
             apex_kills: 0,
             prev_miniboss_alive: false,
-            console_used: false,
             reset_armed: false,
             console: crate::console::Console::new(),
             console_cheat: false,
@@ -1081,7 +1077,7 @@ impl App {
                 apex: self.apex_kills.min(u32::from(u8::MAX)) as u8,
                 won: self.run_won(w),
                 practice: self.practice.is_some(),
-                console_used: self.console_used,
+                console_used: self.console_cheat,
             },
             None => return,
         };
@@ -1278,7 +1274,9 @@ impl App {
             if backtick {
                 if self.console.open {
                     self.console.close();
-                } else if matches!(self.screen, Screen::Title) || self.world.is_some() {
+                } else {
+                    // Any screen: the title, a run, the Library, the Nest,
+                    // Options and Controls all sit under the console.
                     self.console.open();
                 }
                 // The toggle key is consumed: nothing leaks to the game.
@@ -1486,6 +1484,49 @@ impl App {
         }
     }
 
+    /// Console `bank <n>`: set the nest's banked gold.
+    pub fn console_set_bank(&mut self, gold: u32) {
+        self.scores.meta.bank = gold;
+        if self.persist {
+            self.scores.save();
+        }
+    }
+
+    /// Console `nest max|reset`: every track at its cap, or a fresh profile
+    /// (the bank is kept by `max`, wiped by `reset`, as the options row does).
+    pub fn console_nest(&mut self, max: bool) {
+        if max {
+            let bank = self.scores.meta.bank;
+            self.scores.meta = meta::MetaProfile::maxed();
+            self.scores.meta.bank = bank;
+            if !self.slot_caps_pinned {
+                self.slot_caps = meta::RunModifiers::from_profile(&self.scores.meta).caps;
+            }
+            if self.persist {
+                self.scores.save();
+            }
+        } else {
+            self.reset_nest();
+        }
+    }
+
+    /// The nest's banked gold (console read-out).
+    pub fn nest_bank(&self) -> u32 {
+        self.scores.meta.bank
+    }
+
+    /// Console `library unlock|lock`: reveal every entry, or forget them all.
+    pub fn console_library(&mut self, unlock: bool) {
+        if unlock {
+            self.scores.library.reveal_all();
+        } else {
+            self.scores.library = Default::default();
+        }
+        if self.persist {
+            self.scores.save();
+        }
+    }
+
     /// Play a sound effect from the console's `sfx` command.
     pub fn play_sfx(&self, sfx: Sfx) {
         self.sfx(sfx);
@@ -1531,6 +1572,8 @@ impl App {
     pub fn start_floor(&mut self, theme: Theme) -> Result<(), String> {
         self.console_floor = Some(theme);
         self.start_practice(theme);
+        // The console picked the floor (locked or not): the run stays flagged.
+        self.console_cheat = true;
         Ok(())
     }
 
@@ -1557,6 +1600,9 @@ impl App {
             .map(|c| c.world())
             .ok_or_else(|| "campaign could not start".to_string())?;
         self.enter_world(world, false);
+        // A console-chosen stage or route is not an earned one: that run stays
+        // flagged. Stage 1 on the default route is an ordinary fresh campaign.
+        self.console_cheat = stage > 0 || route.is_some();
         Ok(())
     }
 
@@ -1801,28 +1847,23 @@ impl App {
             }
             return;
         }
-        if self.input.just_pressed(KeyCode::Up) || self.input.pressed_char('k') {
-            if self.nest_ui.step(-1) {
+        if (self.input.just_pressed(KeyCode::Up) || self.input.pressed_char('k'))
+            && self.nest_ui.step(-1) {
                 self.sfx(Sfx::UiMove);
             }
-        }
-        if self.input.just_pressed(KeyCode::Down) || self.input.pressed_char('s')
-            || self.input.pressed_char('j')
-        {
-            if self.nest_ui.step(1) {
+        if (self.input.just_pressed(KeyCode::Down) || self.input.pressed_char('s')
+            || self.input.pressed_char('j'))
+            && self.nest_ui.step(1) {
                 self.sfx(Sfx::UiMove);
             }
-        }
-        if self.input.just_pressed(KeyCode::PageUp) {
-            if self.nest_ui.step(-(self.nest_shape.visible.max(1) as isize)) {
+        if self.input.just_pressed(KeyCode::PageUp)
+            && self.nest_ui.step(-(self.nest_shape.visible.max(1) as isize)) {
                 self.sfx(Sfx::UiMove);
             }
-        }
-        if self.input.just_pressed(KeyCode::PageDown) {
-            if self.nest_ui.step(self.nest_shape.visible.max(1) as isize) {
+        if self.input.just_pressed(KeyCode::PageDown)
+            && self.nest_ui.step(self.nest_shape.visible.max(1) as isize) {
                 self.sfx(Sfx::UiMove);
             }
-        }
 
         // Pointer: a row selects (and, on a click, buys); the refund row and the
         // back chip have targets of their own.
@@ -2819,8 +2860,10 @@ impl App {
                 if pk == PickupKind::Heal {
                     self.heals_picked += 1;
                 }
-                // Collecting a find catalogues it.
-                self.scores.library.note_collected(pk);
+                // Collecting a find catalogues it (never on a CONSOLE USED run).
+                if !self.console_cheat {
+                    self.scores.library.note_collected(pk);
+                }
             }
             let boss_hp = w.boss_hp();
             let boss_alive = boss_hp.is_some();
@@ -2872,16 +2915,22 @@ impl App {
         // The Library's sighting pass. Read-only over the world (no rng, no
         // simulation writes) and gated by a per-category early-out, so a run
         // that has met everything costs a handful of bitset tests.
-        if let Some(w) = self.world.as_ref() {
-            self.scores.library.survey(w);
+        // A CONSOLE USED run discovers and counts nothing: a spawned boss is
+        // not a sighting.
+        if !self.console_cheat {
+            if let Some(w) = self.world.as_ref() {
+                self.scores.library.survey(w);
+            }
         }
         self.drain_library_news();
         self.request_music_intensity(intensity);
         if ended {
             // Book the loss against the nearest body (the simulation keeps no
             // damage source; the card says so).
-            if let Some(w) = self.world.as_ref() {
-                self.scores.library.note_death(w);
+            if !self.console_cheat {
+                if let Some(w) = self.world.as_ref() {
+                    self.scores.library.note_death(w);
+                }
             }
             self.finalize();
             self.screen = Screen::End;
@@ -2934,7 +2983,9 @@ impl App {
                 // An evolution gets its own fanfare (`Sfx::Evolve`), and the
                 // chest is where the player meets it.
                 ChestReward::Evolve { kind, .. } => {
-                    self.scores.library.mark_seen(LibraryKey::Evolution(kind));
+                    if !self.console_cheat {
+                        self.scores.library.mark_seen(LibraryKey::Evolution(kind));
+                    }
                     self.sfx(Sfx::Evolve);
                 }
                 _ => self.sfx(Sfx::CacheOpen),
@@ -3538,7 +3589,9 @@ impl App {
             self.levelup_choices = choices;
             for i in 0..self.levelup_choices.len() {
                 let up = self.levelup_choices[i].clone();
-                self.scores.library.note_offered(&up);
+                if !self.console_cheat {
+                    self.scores.library.note_offered(&up);
+                }
             }
             self.levelup_idx = 0;
             self.screen = Screen::LevelUp;
@@ -3985,16 +4038,19 @@ impl App {
                     draw_backdrop(frame, area);
                 } else {
                     self.ensure_rat_art(area);
+                    let theme = self.theme();
+                    let floor = self.floor();
+                    let unlocked = self.sector_unlocked();
                     menu::draw_title(
                         frame,
                         area,
-                        self.theme(),
+                        theme,
                         self.menu_idx,
-                        self.floor(),
-                        self.sector_unlocked(),
+                        floor,
+                        unlocked,
                         &self.scores,
                         &self.rat_art,
-                        self.dash_key(),
+                        &self.input.controls,
                         &mut self.hits,
                     );
                 }
@@ -4008,7 +4064,7 @@ impl App {
                 } else {
                     self.scores.meta.clone()
                 };
-                let accent = menu::material(self.theme());
+                let accent = options::accent_from(menu::material(self.theme()));
                 self.nest_shape = nest_ui::draw(
                     frame,
                     area,
@@ -5704,6 +5760,7 @@ mod tests {
         assert!(hh.app.world.as_ref().unwrap().elapsed > before, "play did not resume");
     }
 
+    #[allow(clippy::field_reassign_with_default)]
     #[test]
     fn dump_frame_ppm() {
         let target = match std::env::var("RATRUN_DUMP") {
@@ -7434,9 +7491,70 @@ mod tests {
         assert_eq!((h.app.pixels.w, h.app.pixels.h), (80, resized_h * 2));
     }
 
-    /// Item 1: the test constructor is pinned to a fixed seed sequence and keeps
-    /// scores in memory only.
     // ---- The nest (permanent upgrades) ------------------------------------
+
+    /// Every drawn title row is reachable: the keyboard walks all six in the
+    /// drawn order and Enter activates the selected one; a click on a row's
+    /// label does the same thing. START RUN is the default selection.
+    #[test]
+    fn every_title_row_is_selectable_by_keyboard_and_mouse_at_every_size() {
+        const ROWS: [(&str, &str); TITLE_ROWS] = [
+            ("START RUN", "run"),
+            ("Sector", "SectorSelect"),
+            ("OPTIONS", "Options"),
+            ("LIBRARY", "Library"),
+            ("THE NEST", "Nest"),
+            ("QUIT", "quit"),
+        ];
+        let landed = |h: &Harness, want: &str, how: &str, size: (u16, u16)| {
+            let name = h.app.screen.name_for_test();
+            match want {
+                "run" => assert!(
+                    name != "Title" && !h.app.should_quit,
+                    "{size:?} {how}: START RUN left the app on {name}"
+                ),
+                "quit" => assert!(h.app.should_quit, "{size:?} {how}: QUIT did not quit"),
+                other => assert_eq!(name, other, "{size:?} {how}: wrong screen"),
+            }
+        };
+        for size in [(57u16, 20u16), (80, 24), (120, 40)] {
+            let mut first = Harness::new(size.0, size.1);
+            let text = first.frame(&[]);
+            assert_eq!(first.app.menu_idx, 0, "START RUN is the default row");
+            // Every row is drawn, top to bottom in table order.
+            let mut last_y = 0;
+            for (i, (label, _)) in ROWS.iter().enumerate() {
+                assert!(text.contains(label), "{size:?}: {label} is not drawn:\n{text}");
+                let (_, y) = first.locate(label);
+                assert!(i == 0 || y > last_y, "{size:?}: {label} is out of order");
+                last_y = y;
+            }
+            for (i, (label, want)) in ROWS.iter().enumerate() {
+                // Keyboard: Down i times, then Enter.
+                let mut h = Harness::new(size.0, size.1);
+                h.frame(&[]);
+                for _ in 0..i {
+                    h.frame(&[KeyCode::Down]);
+                }
+                assert_eq!(h.app.menu_idx, i, "{size:?}: Down did not reach {label}");
+                assert_eq!(TITLE_ACTIONS.len(), ROWS.len());
+                h.frame(&[KeyCode::Enter]);
+                landed(&h, want, "keyboard", size);
+                // Mouse: a click on the row's own label.
+                let mut h = Harness::new(size.0, size.1);
+                h.frame(&[]);
+                h.click(label);
+                landed(&h, want, "mouse", size);
+            }
+            // Down wraps from QUIT back to START RUN.
+            let mut h = Harness::new(size.0, size.1);
+            h.frame(&[]);
+            for _ in 0..TITLE_ROWS {
+                h.frame(&[KeyCode::Down]);
+            }
+            assert_eq!(h.app.menu_idx, 0, "{size:?}: the rows do not wrap");
+        }
+    }
 
     /// The title's NEST row shows the bank, opens the plate, and a cheap track
     /// buys on one Enter (the price is also debited once).
@@ -7644,8 +7762,8 @@ mod tests {
     /// pointer buys exactly the row it is on, and the wheel walks the list.
     #[test]
     fn the_nest_rows_buy_by_click_at_57_and_120() {
-        for (w, h) in [(57u16, 20u16), (120, 40)] {
-            let mut h = Harness::new(w, h);
+        for (w, rows) in [(57u16, 20u16), (120, 40)] {
+            let mut h = Harness::new(w, rows);
             h.app.scores.meta.bank = 300;
             h.app.open_nest(Screen::Title);
             h.frame(&[]);
@@ -7654,7 +7772,7 @@ mod tests {
             assert_eq!(
                 h.app.scores.meta.level(meta::Track::MoveSpeed),
                 1,
-                "{w}x{h}: the click did not buy the row under the pointer"
+                "{w}x{rows}: the click did not buy the row under the pointer"
             );
             assert_eq!(h.app.scores.meta.bank, 300 - 40);
             assert_eq!(h.app.nest_ui.cursor, meta::Track::MoveSpeed.index());
@@ -7664,6 +7782,8 @@ mod tests {
         }
     }
 
+    /// Item 1: the test constructor is pinned to a fixed seed sequence and keeps
+    /// scores in memory only.
     #[test]
     fn test_app_is_deterministic_and_does_not_persist() {
         let mut a = Harness::new(80, 30);
@@ -10742,6 +10862,9 @@ mod tests {
         let rumble = h.app.input.controls.rumble;
         h.frame(&[KeyCode::Right]);
         assert_ne!(h.app.input.controls.rumble, rumble);
+        // The nest's reset row sits just above Back.
+        h.frame(&[KeyCode::Down]);
+        assert_eq!(h.app.options_row, options::RESET_ROW);
         // Enter on the Back row leaves the screen.
         h.frame(&[KeyCode::Down]);
         assert_eq!(h.app.options_row, options::BACK_ROW);
@@ -10787,7 +10910,7 @@ mod tests {
             pick, 1,
             "the valuation takes Armor out of Damage/Armor/Magnet"
         );
-        h.frame(&[KeyCode::Char('a')]);
+        h.frame(&[KeyCode::Char('u')]);
         assert!(h.app.scores.auto_pick);
         // The reveal holds the screen for a beat, then the card lands.
         let mut picked = false;
@@ -10920,13 +11043,13 @@ mod tests {
                 PassiveKind::Magnet,
                 PassiveKind::Damage,
                 PassiveKind::Regen,
-                PassiveKind::MoveSpeed,
             ] {
                 w.player.loadout.apply(&Upgrade::Passive(p));
             }
+            // A fresh profile's rack: four passives fill it.
             assert_eq!(
                 w.player.loadout.passives.len(),
-                crate::game::loadout::MAX_PASSIVES
+                w.player.loadout.max_passives()
             );
         }
         let (choices, _pick) = h.app.auto_pick_one().expect("a card was dealt");
@@ -11821,4 +11944,42 @@ mod tests {
             1.0 / 60.0
         );
     }
+    /// The console opens over every menu screen, and while it is open nothing
+    /// typed or clicked reaches the screen under it (`update` returns before
+    /// any screen, the action layer or the pad's presses are read).
+    #[test]
+    fn the_console_opens_over_every_menu_and_swallows_their_input() {
+        for label in ["OPTIONS", "LIBRARY", "THE NEST"] {
+            let mut h = Harness::new(80, 24);
+            h.frame(&[]);
+            h.click(label);
+            let screen = h.app.screen.name_for_test();
+            assert_ne!(screen, "Title", "{label} did not open");
+            h.frame(&[KeyCode::Char('`')]);
+            assert!(h.app.console.open, "the console did not open over {screen}");
+            // Keys the screen would act on (navigation, confirm, quit) and a
+            // click on the panel all stop at the prompt.
+            let row = h.app.options_row;
+            h.frame(&[KeyCode::Down, KeyCode::Char('q'), KeyCode::Char('l')]);
+            h.events(&[], &[(MouseEventKind::Down(MouseButton::Left), (40, 12))]);
+            assert_eq!(h.app.screen.name_for_test(), screen, "input leaked past the console");
+            assert_eq!(h.app.options_row, row);
+            assert!(!h.app.should_quit);
+            assert_eq!(h.app.console.input, "ql");
+            // Esc closes the console, not the screen under it.
+            h.frame(&[KeyCode::Esc]);
+            assert!(!h.app.console.open);
+            assert_eq!(h.app.screen.name_for_test(), screen);
+        }
+        // The Controls screen too (it is reached through Options).
+        let mut h = Harness::new(80, 24);
+        h.frame(&[]);
+        h.app.open_controls();
+        h.frame(&[KeyCode::Char('`')]);
+        assert!(h.app.console.open);
+        h.frame(&[KeyCode::Enter]);
+        assert!(h.app.bind_capture.is_none(), "Enter armed a capture under the console");
+        assert_eq!(h.app.screen.name_for_test(), "Controls");
+    }
+
 }

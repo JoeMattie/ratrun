@@ -1232,11 +1232,12 @@ impl Controls {
                 key(Action::Mute)
             ),
             format!(
-                "{} {} music · {} {} effects · L story · Q quit",
+                "{} {} music · {} {} effects · {} story · Q quit",
                 key(Action::MusicDown),
                 key(Action::MusicUp),
                 key(Action::EffectsDown),
-                key(Action::EffectsUp)
+                key(Action::EffectsUp),
+                key(Action::Library)
             ),
         ];
         let narrow_first = if share {

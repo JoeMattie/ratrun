@@ -30,6 +30,7 @@ const INFO_FG: Color = Color::Rgb(150, 180, 200);
 const CARET_FG: Color = Color::Rgb(255, 210, 90);
 
 /// Draw the console over `area`. A no-op when the slide animation is closed.
+#[allow(clippy::explicit_counter_loop)]
 pub fn draw(frame: &mut Frame, area: Rect, console: &Console) {
     let anim = console.anim.clamp(0.0, 1.0);
     if anim <= 0.001 || area.width < 16 || area.height < 5 {

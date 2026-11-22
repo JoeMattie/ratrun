@@ -154,7 +154,7 @@ pub fn draw(
     if area.is_empty() {
         return DrawInfo::default();
     }
-    let w = area.width.saturating_sub(2).min(88).max(20);
+    let w = area.width.saturating_sub(2).clamp(20, 88);
     let h = area.height.saturating_sub(1).max(8);
     let card = menu::centered_rect(w, h, area);
     let inner = menu::panel(f, card, " ☗ THE NEST  /  R-47 STASH ", accent);
@@ -490,9 +490,9 @@ pub fn profile_from_modifiers(mods: &crate::meta::RunModifiers) -> MetaProfile {
     let mut profile = MetaProfile::default();
     for track in Track::ALL {
         let level = match track {
-            Track::WeaponSlots => mods.caps.weapons.saturating_sub(crate::game::loadout::MIN_SLOTS),
+            Track::WeaponSlots => (mods.caps.weapons.saturating_sub(crate::game::loadout::MIN_SLOTS)) as u8,
             Track::PassiveSlots => {
-                mods.caps.passives.saturating_sub(crate::game::loadout::MIN_SLOTS)
+                (mods.caps.passives.saturating_sub(crate::game::loadout::MIN_SLOTS)) as u8
             }
             Track::MoveSpeed => percent_steps(mods.move_speed, 0.03),
             Track::PickupRange => percent_steps(mods.magnet, 0.08),
@@ -519,6 +519,7 @@ fn percent_steps(mult: f32, step: f32) -> u8 {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use crate::meta::{MetaProfile, Track};
@@ -538,9 +539,7 @@ mod tests {
     }
 
     fn frame(w: u16, h: u16, profile: &MetaProfile, ui: &mut NestUi) -> (String, HitMap, DrawInfo) {
-        let Ok(mut term) = Terminal::new(TestBackend::new(w, h)) else {
-            return (String::new(), HitMap::default(), DrawInfo::default());
-        };
+        let Ok(mut term) = Terminal::new(TestBackend::new(w, h));
         let mut hits = HitMap::default();
         let mut info = DrawInfo::default();
         let _ = term.draw(|f| {
@@ -700,7 +699,8 @@ mod tests {
         let mut ui = NestUi::default();
         for (w, h) in [(0u16, 0u16), (1, 1), (20, 6), (30, 8)] {
             let (_, _, info) = frame(w, h, &profile, &mut ui);
-            assert!(info.visible >= 0);
+            // Reaching here is the assertion: no size panics the draw.
+            let _ = info.visible;
         }
     }
 }
