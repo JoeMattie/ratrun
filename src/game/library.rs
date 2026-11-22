@@ -1491,7 +1491,35 @@ fn enemy_facts(k: EnemyKind, f: &mut Facts) {
             "needs a doorway"
         },
     );
+    if let Some(home) = enemy_floors(k) {
+        f.push("FOUND ON", home);
+    }
     f.push("TELL", enemy_answer(k));
+}
+
+/// Where a kind actually spawns, read from the per-floor rosters
+/// ([`crate::game::roster`]): every floor that names it, and the earliest
+/// clock any of them may field it. `None` for a kind no roster carries (the
+/// generic boss body).
+pub fn enemy_floors(k: EnemyKind) -> Option<String> {
+    use crate::game::roster;
+    let floors: Vec<&'static str> = Theme::playable()
+        .into_iter()
+        .filter(|&t| roster::floor(t).slot_of(k).is_some())
+        .map(Theme::name)
+        .collect();
+    let first = roster::first_unlock(k)?;
+    let secs = first.round() as u32;
+    let places = if floors.len() == Theme::playable().len() {
+        "every floor".to_string()
+    } else {
+        floors.join(", ")
+    };
+    Some(if secs == 0 {
+        format!("{places} · from the start")
+    } else {
+        format!("{places} · from {}:{:02}", secs / 60, secs % 60)
+    })
 }
 
 /// One line naming the kind's tell and the answer to it (the words on the

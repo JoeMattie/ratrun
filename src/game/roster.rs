@@ -105,6 +105,8 @@ fn design(secs: f32) -> f32 {
 ///
 /// Declaration order **is** [`Slot::index`] order and the draw order, so the
 /// weighted roll is stable: A, B, C, I, R, II, H, III.
+// `I`, `II`, `III` are the design's own slot names (the trick slots).
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Slot {
     /// Ground fodder: opens alone, the first six approach from one direction.
@@ -780,7 +782,10 @@ pub fn masses(clock: f32, caps: &SlotCaps) -> [f32; SLOT_COUNT] {
     // A:B = 3:1 among the fodder slots that are unlocked.
     let mut fodder_total = 0.0f32;
     for &slot in Pool::Fodder.slots() {
-        if clock < slot.unlock() {
+        // A capped fodder slot (the live budget itself is full) takes nothing;
+        // its share stays with the other fodder slot, and with both capped the
+        // floor has no mass at all (`pick_kind` then answers fodder).
+        if clock < slot.unlock() || caps.at_cap[slot.index()] {
             continue;
         }
         w[slot.index()] = slot.pool_weight();

@@ -293,13 +293,23 @@ fn trace_hash(script_mode: Script, theme: Theme, seed: u64) -> u64 {
 /// active pass draws nothing unless a charged weapon is actually spent, which
 /// `weapons::tests::pressing_space_without_active_weapons_changes_nothing`
 /// pins down directly.
+///
+/// **Regenerated for the per-floor rosters** (2026-11-21, batch four): the
+/// director's one global kind mix became `roster::pick_kind` (eight role slots
+/// per floor, one weighted draw, capped shares returned to fodder), the elite
+/// wears the floor's heavy and the minibosses are the floor's fixed four, so
+/// every run meets different bodies from the first pulse. All six traces
+/// moved. The hold-to-charge Super Dash landed in the same batch and moved
+/// nothing: with the roster files reverted and every other batch-four change
+/// in place, all six rows still matched (`update` passes `DashHold::NONE` and
+/// charge 0, where each new multiplier is exactly x1).
 const CASES: [(Script, Theme, u64, u64); 6] = [
-    (Script::Wander, Theme::Sewer, 11, 1706803928869238678),
-    (Script::Wander, Theme::Kitchen, 29, 12449832504535678973),
-    (Script::Wander, Theme::Lab, 1234, 2680499850170036809),
-    (Script::Evade, Theme::Sewer, 11, 17915666862626768775),
-    (Script::Evade, Theme::Kitchen, 29, 15021285781780043282),
-    (Script::Evade, Theme::Lab, 1234, 17044355885626339298),
+    (Script::Wander, Theme::Sewer, 11, 3399399480612306495),
+    (Script::Wander, Theme::Kitchen, 29, 9949834066686273646),
+    (Script::Wander, Theme::Lab, 1234, 11352760301977891564),
+    (Script::Evade, Theme::Sewer, 11, 6992361633073324508),
+    (Script::Evade, Theme::Kitchen, 29, 14213407755660189337),
+    (Script::Evade, Theme::Lab, 1234, 1991218235867177224),
 ];
 
 #[test]

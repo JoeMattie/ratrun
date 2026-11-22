@@ -2117,12 +2117,16 @@ mod tests {
         // The scalars are level 0's: hp is the kind's own pool times the level-0
         // curve at spawn, with no per-stage extra.
         let expected_mult = director::horde_hp_mult_for(0, spawned_at);
-        for e in w.enemies() {
+        let spawned = w.enemies();
+        for e in spawned.iter() {
             assert!(
                 floor.slot_of(e.kind).is_some(),
                 "practice spawned {:?}, which is not on the Flatbed",
                 e.kind
             );
+        }
+        // Every body spawned on the first tick shares the multiplier.
+        if let Some(e) = spawned.first() {
             let expected = e.kind.base_hp() * expected_mult;
             assert!(
                 (e.max_hp - expected).abs() < 1e-2,
@@ -2130,7 +2134,6 @@ mod tests {
                 e.kind,
                 e.max_hp
             );
-            break; // every body spawned on the same tick shares the multiplier
         }
     }
 
@@ -2145,7 +2148,8 @@ mod tests {
             w.director.spawn_timer = 1.0e6; // keep the ordinary pulse out of it
             let open = director::MINIBOSS_TIMES[0] + director::ELITE_APPOINTMENT_GAP + 0.5;
             director_tick(&mut w, 0.1, open);
-            let elites: Vec<&Enemy> = w.enemies().iter().filter(|e| e.elite).collect();
+            let snapshot = w.enemies();
+            let elites: Vec<&Enemy> = snapshot.iter().filter(|e| e.elite).collect();
             assert_eq!(elites.len(), 1, "{theme:?}: no elite arrived");
             assert_eq!(elites[0].kind, heavy, "{theme:?}: the wrong elite body");
             let expected = heavy.base_hp() * director::horde_hp_mult_for(0, open) * 1.6;
@@ -2172,15 +2176,35 @@ mod tests {
         for _ in 0..4200 {
             elapsed += dt;
             director_tick(&mut w, dt, elapsed);
-            let count = |k: EnemyKind| w.enemies().iter().filter(|e| e.kind == k).count();
+            let snapshot = w.enemies();
+            let count = |k: EnemyKind| snapshot.iter().filter(|e| e.kind == k).count();
             peak_snake = peak_snake.max(count(roster::kind(Theme::Sewer, roster::Slot::III)));
             peak_shooter = peak_shooter.max(count(roster::kind(Theme::Sewer, roster::Slot::R)));
             peak_heavy = peak_heavy.max(
-                w.enemies()
+                snapshot
                     .iter()
                     .filter(|e| e.kind == roster::kind(Theme::Sewer, roster::Slot::H) && !e.elite)
                     .count(),
             );
+            // Nothing in this harness kills anything, so the crowd-pool
+            // bodies (A, B, C) are swept each tick: otherwise the opening
+            // fodder fills the live budget for good and the later slots never
+            // get a roll. The capped slots' own bodies stay and pile up.
+            let sweep: Vec<bevy_ecs::entity::Entity> = w
+                .ecs
+                .query::<(bevy_ecs::entity::Entity, &Enemy)>()
+                .iter(&w.ecs)
+                .filter(|(_, e)| {
+                    matches!(
+                        roster::floor(Theme::Sewer).slot_of(e.kind),
+                        Some(roster::Slot::A | roster::Slot::B | roster::Slot::C)
+                    )
+                })
+                .map(|(id, _)| id)
+                .collect();
+            for id in sweep {
+                w.despawn_entity(id);
+            }
         }
         assert!(
             peak_snake <= roster::kind_cap(EnemyKind::BigSnake),

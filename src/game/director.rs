@@ -1192,7 +1192,7 @@ mod tests {
                 );
                 // The ceiling is reached, not just never breached: with three
                 // specials on the table from 9:45 the pool is a real presence.
-                if clock >= 600.0 && clock < BOSS_TIME {
+                if (600.0..BOSS_TIME).contains(&clock) {
                     assert!(
                         special_share > roster::SPECIAL_CEILING * 0.5,
                         "{theme:?} at {clock}s: the special pool is too rare ({special_share})"
