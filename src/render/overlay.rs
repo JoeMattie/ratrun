@@ -5,12 +5,18 @@
 
 use std::fmt::Write as _;
 
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::Frame;
 
+use crate::game::collision::{cell_of, TILE_F};
 use crate::game::director;
+use crate::game::gem::{Chest, Pickup, PickupKind};
 use crate::game::world::World;
+use crate::math::Vec2;
+use crate::render::minimap::{MarkerKind, PickupTag};
+use crate::render::minimap_source;
 use crate::render::hud::{
     boss_codename_kind, HudState, BOSS_HOT, BOSS_ROSE, DANGER, DANGER_DIM, TRAIL_GOLD,
     WARN_AMBER,
@@ -27,7 +33,322 @@ pub fn draw_overlays(frame: &mut Frame, game: Rect, world: &World, state: &mut H
     let top_reserved = draw_boss_ui(frame, game, world, state);
     let miniboss_reserved = draw_miniboss_ui(frame, game, world, state, top_reserved);
     draw_boss_compass(frame, game, world, state);
+    draw_poi_arrows(frame, game, world, state);
     draw_callouts(frame, game, world, state, top_reserved + miniboss_reserved);
+}
+
+// ---- Point-of-interest edge arrows -----------------------------------------
+
+/// One walk-back-worthy object the edge arrows can point at.
+#[derive(Clone, Copy)]
+struct PoiTarget {
+    pos: Vec2,
+    kind: MarkerKind,
+    /// Lower is more important: chest `0` > shop `1` > maze `2` > find `3`.
+    priority: u8,
+}
+
+impl PoiTarget {
+    const NONE: Self = Self {
+        pos: Vec2::ZERO,
+        kind: MarkerKind::Start,
+        priority: u8::MAX,
+    };
+}
+
+/// The plate colour the edge badges sit on (same value as the minimap plate).
+const PLATE_RGB: (u8, u8, u8) = (19, 24, 27);
+
+/// At most this many edge arrows on screen at once.
+const MAX_POI_ARROWS: usize = 5;
+/// Scan bound for the per-frame POI pass (fixed, so nothing allocates).
+const MAX_POI_SCAN: usize = 32;
+
+#[inline]
+fn push_poi(out: &mut [PoiTarget; MAX_POI_SCAN], n: &mut usize, t: PoiTarget) {
+    if *n < MAX_POI_SCAN {
+        out[*n] = t;
+        *n += 1;
+    }
+}
+
+/// Draw a small edge arrow for each **seen** point of interest that is currently
+/// off screen.
+///
+/// This generalises the boss compass: same projection onto the viewport edge,
+/// same chevron badge, but each category carries its own icon and colour from
+/// [`MarkerKind::glyph`]/[`MarkerKind::rgb`] (the same icon set the minimap
+/// stamps), and the badge is bolder the closer the target is. Targets already
+/// inside the viewport draw nothing; at most [`MAX_POI_ARROWS`] are shown, in
+/// priority order chest > shop > maze > rare find.
+fn draw_poi_arrows(frame: &mut Frame, game: Rect, world: &World, _state: &HudState) {
+    if game.width < 28 || game.height < 12 {
+        return;
+    }
+    let span = world.view_span();
+    let half_w = (span.x * 0.5).max(f32::from(game.width) * 0.5);
+    let half_h = (span.y * 0.5).max(f32::from(game.height));
+    let player = world.player.pos;
+    let fog = world.fog();
+
+    let mut targets = [PoiTarget::NONE; MAX_POI_SCAN];
+    let mut n = 0usize;
+
+    // Chests first so a crowded floor never hides them.
+    for entity in world.ecs.iter_entities() {
+        if let Some(chest) = entity.get::<Chest>() {
+            let (cx, cy) = cell_of(chest.pos);
+            if fog.is_seen(cx, cy) {
+                push_poi(
+                    &mut targets,
+                    &mut n,
+                    PoiTarget {
+                        pos: chest.pos,
+                        kind: MarkerKind::Pickup(PickupTag::Chest),
+                        priority: 0,
+                    },
+                );
+            }
+        }
+    }
+
+    // Seen mouse-hole shops, keyed by shelf status.
+    for hole in &world.level.objects.shop_holes {
+        let (cx, cy) = cell_of(hole.pos);
+        if fog.is_seen(cx, cy) {
+            push_poi(
+                &mut targets,
+                &mut n,
+                PoiTarget {
+                    pos: hole.pos,
+                    kind: minimap_source::shop_marker_kind(world, hole.index),
+                    priority: 1,
+                },
+            );
+        }
+    }
+
+    // Mazes: the breach once seen, and the cache pedestal while its own cell is
+    // explored (or remembered).
+    for maze in world.maze_markers() {
+        if maze.entrance_seen {
+            push_poi(
+                &mut targets,
+                &mut n,
+                PoiTarget {
+                    pos: cell_center(maze.entrance),
+                    kind: MarkerKind::MazeEntrance,
+                    priority: 2,
+                },
+            );
+        }
+        if maze.reward_seen {
+            push_poi(
+                &mut targets,
+                &mut n,
+                PoiTarget {
+                    pos: maze.reward,
+                    kind: if maze.claimed {
+                        MarkerKind::MazeCacheClaimed
+                    } else {
+                        MarkerKind::MazeCacheHollow
+                    },
+                    priority: 2,
+                },
+            );
+        }
+    }
+
+    // A seen boss arena stays findable from anywhere on the map.
+    if let Some(room) = world.level.boss_room() {
+        if world.boss_arena_marker().is_some() {
+            push_poi(
+                &mut targets,
+                &mut n,
+                PoiTarget {
+                    pos: room.center(),
+                    kind: MarkerKind::BossArena,
+                    priority: 2,
+                },
+            );
+        }
+    }
+
+    // Rare floor finds on explored ground.
+    for entity in world.ecs.iter_entities() {
+        let Some(pickup) = entity.get::<Pickup>() else {
+            continue;
+        };
+        let (cx, cy) = cell_of(pickup.pos);
+        if !fog.is_seen(cx, cy) {
+            continue;
+        }
+        push_poi(
+            &mut targets,
+            &mut n,
+            PoiTarget {
+                pos: pickup.pos,
+                kind: MarkerKind::Pickup(pickup_tag(pickup.kind)),
+                priority: 3,
+            },
+        );
+        if n >= MAX_POI_SCAN {
+            break;
+        }
+    }
+
+    if n == 0 {
+        return;
+    }
+
+    // Partial selection sort: pick the best few by (priority, distance), so the
+    // scan stays allocation-free and the nearest target wins within a category.
+    let mut order: [usize; MAX_POI_SCAN] = [0; MAX_POI_SCAN];
+    for (i, slot) in order.iter_mut().enumerate().take(n) {
+        *slot = i;
+    }
+    let key = |t: &PoiTarget| -> (u8, f32) {
+        let d = t.pos - player;
+        (t.priority, d.x * d.x + d.y * d.y)
+    };
+    let shown = n.min(MAX_POI_ARROWS);
+    for k in 0..shown {
+        let mut best = k;
+        for j in (k + 1)..n {
+            let a = key(&targets[order[j]]);
+            let b = key(&targets[order[best]]);
+            if a.0 < b.0 || (a.0 == b.0 && a.1 < b.1) {
+                best = j;
+            }
+        }
+        order.swap(k, best);
+    }
+
+    let mut placed: [(u16, u16); MAX_POI_ARROWS] = [(0, 0); MAX_POI_ARROWS];
+    let mut placed_n = 0usize;
+    let buf = frame.buffer_mut();
+    for &idx in order.iter().take(shown) {
+        let t = &targets[idx];
+        let offset = t.pos - player;
+        if offset.x.abs() <= half_w * 0.92 && offset.y.abs() <= half_h * 0.92 {
+            continue; // already visible inside the viewport
+        }
+        let d = (offset.x * offset.x + offset.y * offset.y).sqrt();
+        let reach = (half_w * half_w + half_h * half_h).sqrt().max(1.0);
+        let near = (1.0 - (d / reach).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        let rgb = t.kind.rgb();
+        // Nearer targets keep their full icon colour; distant ones fade toward
+        // the plate so the badge reads as "further away".
+        let color = palette::to_color(palette::mix(
+            palette::mix(PLATE_RGB, rgb, 0.45),
+            rgb,
+            0.35 + 0.65 * near,
+        ));
+        // A duplicate edge slot is silently skipped; the next target gets the
+        // next free row on the same edge.
+        let _ = draw_edge_badge(
+            buf,
+            game,
+            offset,
+            half_w,
+            half_h,
+            t.kind.glyph(),
+            color,
+            near > 0.55,
+            &mut placed,
+            &mut placed_n,
+        );
+    }
+}
+
+/// Map a floor find to its shared icon tag.
+#[inline]
+fn pickup_tag(kind: PickupKind) -> PickupTag {
+    match kind {
+        PickupKind::Heal => PickupTag::Heal,
+        PickupKind::Magnet => PickupTag::Magnet,
+        PickupKind::Nuke => PickupTag::Nuke,
+        PickupKind::BottleCap => PickupTag::BottleCap,
+        PickupKind::WindupMouse => PickupTag::WindupMouse,
+        PickupKind::PocketWatch => PickupTag::PocketWatch,
+        PickupKind::CleanSocks => PickupTag::CleanSocks,
+    }
+}
+
+/// Centre of a map cell in world pixels.
+#[inline]
+fn cell_center(cell: (i32, i32)) -> Vec2 {
+    Vec2::new(
+        (cell.0 as f32 + 0.5) * TILE_F,
+        (cell.1 as f32 + 0.5) * TILE_F,
+    )
+}
+
+/// Project one target onto the viewport edge and stamp `chevron + glyph`.
+///
+/// Returns `true` when the badge was drawn, `false` when the edge slot was
+/// already taken by another arrow (so the caller's `continue` is meaningful).
+#[allow(clippy::too_many_arguments)]
+fn draw_edge_badge(
+    buf: &mut Buffer,
+    game: Rect,
+    offset: Vec2,
+    half_w: f32,
+    half_h: f32,
+    glyph: char,
+    color: Color,
+    bold: bool,
+    placed: &mut [(u16, u16); MAX_POI_ARROWS],
+    placed_n: &mut usize,
+) -> bool {
+    let nx = offset.x / half_w.max(1.0);
+    let ny = offset.y / half_h.max(1.0);
+    let style = if bold {
+        Style::default()
+            .fg(color)
+            .bg(PLATE)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(color).bg(PLATE)
+    };
+
+    let (x, y, chevron, glyph_first) = if nx.abs() >= ny.abs() {
+        let frac_y = ((ny / nx.abs().max(1.0)) * 0.5 + 0.5).clamp(0.16, 0.84);
+        let y = game.y + ((game.height.saturating_sub(2)) as f32 * frac_y) as u16;
+        if nx < 0.0 {
+            (game.x + 1, y, '◄', false)
+        } else {
+            (game.right().saturating_sub(3).max(game.x), y, '►', true)
+        }
+    } else {
+        let frac_x = ((nx / ny.abs().max(1.0)) * 0.5 + 0.5).clamp(0.12, 0.88);
+        let x = game.x + ((game.width.saturating_sub(3)) as f32 * frac_x) as u16;
+        if ny < 0.0 {
+            (x, game.y, '▲', false)
+        } else {
+            (x, game.bottom().saturating_sub(1), '▼', false)
+        }
+    };
+
+    // Keep the two arrows from colliding on the same edge row.
+    for &(px, py) in placed.iter().take(*placed_n) {
+        if py == y && px.abs_diff(x) < 4 {
+            return false;
+        }
+    }
+    if *placed_n < MAX_POI_ARROWS {
+        placed[*placed_n] = (x, y);
+        *placed_n += 1;
+    }
+
+    if glyph_first {
+        buf[(x, y)].set_char(glyph).set_style(style);
+        buf[(x + 1, y)].set_char(chevron).set_style(style);
+    } else {
+        buf[(x, y)].set_char(chevron).set_style(style);
+        buf[(x + 1, y)].set_char(glyph).set_style(style);
+    }
+    true
 }
 
 /// Subtle perimeter brackets on damage impact and critical low health.

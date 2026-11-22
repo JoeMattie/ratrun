@@ -192,7 +192,7 @@ impl MinimapFrame {
                 self.markers.push(MapMarker {
                     cx: hx as f32,
                     cy: hy as f32,
-                    kind: MarkerKind::Shop,
+                    kind: shop_marker_kind(world, hole.index),
                 });
             }
         }
@@ -247,15 +247,16 @@ impl MinimapFrame {
             if !fog.is_seen(cx, cy) {
                 continue;
             }
+            // Every find keeps its own icon: the map must never merge two
+            // different pocket finds into one "good for you" blip.
             let tag = match pickup.kind {
                 PickupKind::Heal => PickupTag::Heal,
                 PickupKind::Magnet => PickupTag::Magnet,
                 PickupKind::Nuke => PickupTag::Nuke,
-                // The wave-3 pocket finds share the two "good for you" blip
-                // colours: a defensive find reads mint, a utility find ice.
-                // (A dedicated tag waits for the Neon minimap pass.)
-                PickupKind::BottleCap | PickupKind::CleanSocks => PickupTag::Heal,
-                PickupKind::WindupMouse | PickupKind::PocketWatch => PickupTag::Magnet,
+                PickupKind::BottleCap => PickupTag::BottleCap,
+                PickupKind::WindupMouse => PickupTag::WindupMouse,
+                PickupKind::PocketWatch => PickupTag::PocketWatch,
+                PickupKind::CleanSocks => PickupTag::CleanSocks,
             };
             self.markers.push(MapMarker {
                 cx: cx as f32,
@@ -339,6 +340,7 @@ impl MinimapFrame {
             hovered,
             explored_pct: Some(pct),
             maze_discovered,
+            reveal_clock: world.fog().clock(),
         }
     }
 }
@@ -471,6 +473,34 @@ fn first_seen_cell(world: &World, x: i32, y: i32, w: i32, h: i32) -> Option<(i32
         }
     }
     None
+}
+
+/// Which spoon key a seen mouse-hole shop gets on the map.
+///
+/// A hole whose shelf has never been opened reads as a plain `Shop` (the rat
+/// has walked past it, not shopped there). Once opened, the marker follows the
+/// shelf: nothing left ⇒ `ShopSoldOut`, and a cheapest remaining splice above
+/// the current purse ⇒ `ShopTooPricey`. Re-evaluated every frame — the icon is
+/// render-only and never changes the shop.
+pub fn shop_marker_kind(world: &World, hole: usize) -> MarkerKind {
+    let Some(stock) = world.shop.get(hole) else {
+        return MarkerKind::Shop;
+    };
+    let mut cheapest: Option<u32> = None;
+    for slot in 0..crate::game::shop::STOCK_SIZE {
+        if stock.sold.get(slot).copied().unwrap_or(false) {
+            continue;
+        }
+        if let Some(kind) = stock.slot(slot) {
+            let price = kind.price();
+            cheapest = Some(cheapest.map_or(price, |c| c.min(price)));
+        }
+    }
+    match cheapest {
+        None => MarkerKind::ShopSoldOut,
+        Some(price) if price > world.gold => MarkerKind::ShopTooPricey,
+        Some(_) => MarkerKind::Shop,
+    }
 }
 
 // ---- The art module's data source, implemented for the facade -------------

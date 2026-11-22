@@ -78,6 +78,22 @@ const PLATE_RGB: Rgb = (19, 24, 27);
 const COAT_RGB: Rgb = (235, 232, 232);
 const TAIL_RGB: Rgb = (239, 168, 185);
 
+/// The warm "unknown" veil: never-seen territory reads as a dim, desaturated
+/// infrared red rather than a cool blank. It is deliberately darker than the
+/// coolest remembered floor so explored space still reads as the brighter
+/// cartography; its red channel is kept high enough to fold to ANSI maroon
+/// (not black) in 16-colour terminals.
+pub const UNKNOWN_VEIL_RGB: Rgb = (66, 0, 0);
+/// A slightly darker red for the sparse 8×8 cartography dots inside the veil
+/// (coordinate-driven only: it never reads unseen terrain).
+const UNKNOWN_VEIL_GRID_RGB: Rgb = (56, 0, 0);
+/// The dark rim on unseen pixels that touch seen ground. Kept *below* the veil
+/// so every unseen pixel stays darker than the coolest remembered floor.
+const UNKNOWN_VEIL_FRONTIER_RGB: Rgb = (58, 0, 0);
+/// Ticks of the first-sight reveal wipe (≈ 0.4 s at 60 FPS): a cell fades from
+/// the red veil to its real colour. Render-only; it never touches the fog.
+pub const REVEAL_WIPE_TICKS: u32 = 24;
+
 /// Maximum inner pixel capacity pre-allocated for compact mode (`42 × 32`).
 const COMPACT_PREALLOC_PIXELS: usize = 44 * 34;
 
@@ -361,6 +377,72 @@ pub enum PickupTag {
     Magnet,
     Nuke,
     Chest,
+    // ---- Wave 3 pocket finds, appended after the legacy tags so every
+    // existing discriminant and match keeps its place.
+    BottleCap,
+    WindupMouse,
+    PocketWatch,
+    CleanSocks,
+}
+
+impl PickupTag {
+    /// Every icon this tag can draw, in legend order (chest first: it is the
+    /// landmark the player walks back for).
+    pub const ALL: [Self; 8] = [
+        Self::Chest,
+        Self::Heal,
+        Self::Magnet,
+        Self::Nuke,
+        Self::BottleCap,
+        Self::WindupMouse,
+        Self::PocketWatch,
+        Self::CleanSocks,
+    ];
+
+    /// The single glyph that stands for this find on the expanded map and in
+    /// the legend. One shape language: one character per find, matching the
+    /// playfield art's own glyphs so the map and the floor agree.
+    pub const fn glyph(self) -> char {
+        match self {
+            Self::Chest => '◆',
+            Self::Heal => '+',
+            Self::Magnet => 'M',
+            Self::Nuke => '*',
+            Self::BottleCap => 'o',
+            Self::WindupMouse => 'k',
+            Self::PocketWatch => 'w',
+            Self::CleanSocks => 's',
+        }
+    }
+
+    /// Icon colour. Every one of these clears the red unknown veil by a wide
+    /// margin (see `UNKNOWN_VEIL_RGB`), so an icon stays readable on fog.
+    pub const fn rgb(self) -> Rgb {
+        match self {
+            Self::Chest => (255, 204, 83),
+            Self::Heal => CLAIMED_MINT_RGB,
+            Self::Magnet => MAGNET_ICE_RGB,
+            Self::Nuke => BOSS_HOT_RGB,
+            Self::BottleCap => (232, 226, 206),
+            Self::WindupMouse => (232, 190, 96),
+            Self::PocketWatch => (150, 210, 226),
+            Self::CleanSocks => (240, 240, 232),
+        }
+    }
+
+    /// Legend name on the expanded map's sidebar.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Chest => "Chest",
+            Self::Heal => "Heal",
+            Self::Magnet => "Magnet",
+            Self::Nuke => "Nuke",
+            Self::BottleCap => "Bottle Cap",
+            Self::WindupMouse => "Wind-up Mouse",
+            Self::PocketWatch => "Pocket Watch",
+            Self::CleanSocks => "Clean Socks",
+        }
+    }
 }
 
 /// Category of a minimap landmark or entity blip.
@@ -394,6 +476,54 @@ pub enum MarkerKind {
     /// remembered for the rest of the run — the fog's `seen` bit is the
     /// memory). Shown in both modes.
     Shop,
+    // ---- Wave 3 icon set: appended so existing discriminants keep their
+    // place. A seen hole whose shelf is sold out, and a seen hole the rat
+    // cannot afford right now, are the same spoon icon at a lower key.
+    /// Seen shop hole with nothing left on the shelf.
+    ShopSoldOut,
+    /// Seen shop hole whose cheapest remaining item costs more than the rat's
+    /// purse right now (re-evaluated every frame; render-only).
+    ShopTooPricey,
+}
+
+impl MarkerKind {
+    /// The single glyph this marker draws on **every** map surface: the compact
+    /// radar, the full Tab map and the playfield edge arrows all stamp the same
+    /// icon, so there is one shape language and not three.
+    pub const fn glyph(self) -> char {
+        match self {
+            Self::Boss => '◆',
+            Self::Miniboss => '✸',
+            Self::BossArena => '◈',
+            Self::ArenaBearing => '◤',
+            Self::MazeEntrance => '▸',
+            Self::MazeReward => '✦',
+            Self::MazeCacheHollow => '◇',
+            Self::MazeCacheClaimed => '◆',
+            Self::Pickup(tag) => tag.glyph(),
+            Self::Start => '◎',
+            Self::Shop | Self::ShopSoldOut | Self::ShopTooPricey => '☌',
+        }
+    }
+
+    /// The icon's base colour, before any pulse or theme mix. This is the single
+    /// source of truth for marker colour: the map stamps and the playfield
+    /// arrows both read it.
+    pub const fn rgb(self) -> Rgb {
+        match self {
+            Self::Boss => BOSS_ROSE_RGB,
+            Self::Miniboss | Self::ArenaBearing => WARN_AMBER_RGB,
+            Self::BossArena => BOSS_ROSE_RGB,
+            Self::MazeEntrance => COAT_RGB,
+            Self::MazeReward | Self::MazeCacheHollow => CACHE_GOLD_RGB,
+            Self::MazeCacheClaimed => CLAIMED_MINT_RGB,
+            Self::Pickup(tag) => tag.rgb(),
+            Self::Start => COAT_RGB,
+            Self::Shop => SHOP_SPOON_RGB,
+            Self::ShopSoldOut => (120, 126, 138),
+            Self::ShopTooPricey => WARN_AMBER_RGB,
+        }
+    }
 }
 
 /// A point-of-interest blip in map cell coordinates.
@@ -461,6 +591,9 @@ pub struct MinimapView<'a> {
     pub hud_compass_active: bool,
     /// True when the mouse cursor hovers the compact minimap hit rect.
     pub hovered: bool,
+    /// Fog reveal clock in ticks (`Fog::clock`), used only by the render-side
+    /// first-sight wipe. It never changes the fog.
+    pub reveal_clock: u32,
     /// Optional precomputed exploration percentage (`0..=100`) for the expanded
     /// map readout; if `None`, computed on the fly in expanded mode only.
     pub explored_pct: Option<u8>,
@@ -488,6 +621,16 @@ pub struct MinimapScratch {
     text_buf: String,
     /// Reusable text buffer for secondary legend lines.
     sub_buf: String,
+    /// First-sight stamp per map cell (`0` = not sampled yet), driving the
+    /// render-only red-to-real reveal wipe.
+    reveal: Vec<u32>,
+    /// Per-sub-pixel reveal strength (`0` = settled, `255` = just seen).
+    reveal_px: Vec<u8>,
+    /// Map dimensions the reveal buffers were sized for.
+    reveal_cols: i32,
+    reveal_rows: i32,
+    /// Last fog reveal clock seen (`0` before the first frame).
+    reveal_clock: u32,
 }
 
 impl Default for MinimapScratch {
@@ -505,6 +648,11 @@ impl MinimapScratch {
             kind: Vec::with_capacity(COMPACT_PREALLOC_PIXELS),
             text_buf: String::with_capacity(48),
             sub_buf: String::with_capacity(32),
+            reveal: Vec::new(),
+            reveal_px: Vec::new(),
+            reveal_cols: 0,
+            reveal_rows: 0,
+            reveal_clock: 0,
         }
     }
 
@@ -515,6 +663,53 @@ impl MinimapScratch {
         self.pixels.resize(len, PLATE_RGB);
         self.vis.resize(len, 0);
         self.kind.resize(len, KIND_UNSEEN);
+        self.reveal_px.clear();
+        self.reveal_px.resize(len, 0);
+    }
+
+    /// Size the per-cell reveal stamps for a `cols × rows` map and reset them
+    /// when the fog clock wraps or a new level starts (the clock goes
+    /// backwards). Allocation happens once per level, never per frame.
+    fn prepare_reveal(&mut self, cols: i32, rows: i32, clock: u32) {
+        let n = (cols.max(1) as usize) * (rows.max(1) as usize);
+        if self.reveal.len() != n {
+            self.reveal.clear();
+            self.reveal.resize(n, 0);
+        }
+        if clock < self.reveal_clock {
+            self.reveal.fill(0);
+        }
+        self.reveal_cols = cols;
+        self.reveal_rows = rows;
+        self.reveal_clock = clock;
+    }
+
+    /// First-sight reveal strength in `[0, 1]` for one map cell.
+    ///
+    /// A cell seen for the first time while it is still in live sight starts
+    /// the wipe; a cell sampled long after it was explored (the compact radar
+    /// scrolling into remembered ground, or the full map opened mid-run) is
+    /// stamped as already settled, so no wipe replays on old ground.
+    #[inline]
+    fn reveal_at(&mut self, cx: i32, cy: i32, seen: bool, recency: f32, clock: u32) -> f32 {
+        if !seen || cx < 0 || cy < 0 || cx >= self.reveal_cols || cy >= self.reveal_rows {
+            return 0.0;
+        }
+        let i = (cy as usize) * (self.reveal_cols as usize) + cx as usize;
+        if self.reveal[i] == 0 {
+            let now = clock.wrapping_add(1);
+            self.reveal[i] = if recency > 0.0 {
+                now
+            } else {
+                now.wrapping_sub(REVEAL_WIPE_TICKS)
+            };
+        }
+        let age = clock.wrapping_add(1).wrapping_sub(self.reveal[i]);
+        if age >= REVEAL_WIPE_TICKS {
+            0.0
+        } else {
+            1.0 - age as f32 / REVEAL_WIPE_TICKS as f32
+        }
     }
 }
 
@@ -759,6 +954,7 @@ pub fn draw_compact(
 
     let cols = source.cols();
     let rows = source.rows();
+    scratch.prepare_reveal(cols, rows, view.reveal_clock);
     let theme = DerivedPalette::from_palette(view.palette);
 
     // Normal renders 1:1 cells-per-pixel; Small uses feature-preserving 2×2
@@ -792,10 +988,13 @@ pub fn draw_compact(
                 }
                 let rec = source.recency(cx, cy).clamp(0.0, 1.0);
                 scratch.vis[idx] = encode_vis(rec);
+                let reveal = scratch.reveal_at(cx, cy, true, rec, view.reveal_clock);
+                scratch.reveal_px[idx] = encode_reveal(reveal);
                 let cell = source.cell_at(cx, cy);
                 let (base_col, k) = classify_compact_cell(&theme, cell, cx, cy, source);
                 scratch.kind[idx] = k;
-                scratch.pixels[idx] = apply_recency_shading(&theme, base_col, rec);
+                let col = apply_recency_shading(&theme, base_col, rec);
+                scratch.pixels[idx] = apply_reveal_shading(&theme, col, reveal);
             }
         }
     } else {
@@ -807,6 +1006,7 @@ pub fn draw_compact(
 
                 let mut seen_n = 0u32;
                 let mut max_rec = 0.0f32;
+                let mut max_reveal = 0.0f32;
                 let mut floor_n = 0u32;
                 let mut boss_floor_n = 0u32;
                 let mut wall_n = 0u32;
@@ -830,6 +1030,10 @@ pub fn draw_compact(
                         let r = source.recency(cx, cy).clamp(0.0, 1.0);
                         if r > max_rec {
                             max_rec = r;
+                        }
+                        let rev = scratch.reveal_at(cx, cy, true, r, view.reveal_clock);
+                        if rev > max_reveal {
+                            max_reveal = rev;
                         }
                         match source.cell_at(cx, cy) {
                             MinimapCell::Unknown => {}
@@ -861,6 +1065,7 @@ pub fn draw_compact(
                 }
 
                 scratch.vis[idx] = encode_vis(max_rec);
+                scratch.reveal_px[idx] = encode_reveal(max_reveal);
                 let floor_col = if boss_floor_n > 0 && boss_floor_n >= floor_n {
                     theme.boss_floor
                 } else {
@@ -888,7 +1093,8 @@ pub fn draw_compact(
                     (floor_col, KIND_FLOOR)
                 };
                 scratch.kind[idx] = k;
-                scratch.pixels[idx] = apply_recency_shading(&theme, base_col, max_rec);
+                let col = apply_recency_shading(&theme, base_col, max_rec);
+                scratch.pixels[idx] = apply_reveal_shading(&theme, col, max_reveal);
             }
         }
     }
@@ -913,11 +1119,11 @@ pub fn draw_compact(
         );
     }
 
-    // 4. Compact markers:
-    //    - Normal: found forks (seen maze entrances), live boss, seen rewards,
-    //      seen pickups, and fog-edge arena bearing.
-    //    - Small: only live boss, arena bearing, and seen maze entrances so
-    //      every bright pixel reads immediately on the smaller canvas.
+    // 4. Compact markers: found forks (seen maze entrances), live boss, seen
+    //    rewards, seen shops (in three spoon keys), every seen find in its own
+    //    icon colour, and the fog-edge arena bearing. Small has no room for the
+    //    multi-pixel spoon or the maze cache, so those degrade to a single
+    //    coloured dot; the boss, bearing and maze breach keep their blips.
     let pulse = 0.5 + 0.5 * (view.clock * 6.0).sin();
     let fast_pulse = 0.5 + 0.5 * (view.clock * 9.5).sin();
 
@@ -966,16 +1172,32 @@ pub fn draw_compact(
                     col,
                 );
             }
-            MarkerKind::Shop => {
+            MarkerKind::Shop | MarkerKind::ShopSoldOut | MarkerKind::ShopTooPricey => {
                 let (mcx, mcy) = (m.cx.floor() as i32, m.cy.floor() as i32);
                 if !in_bounds(source, mcx, mcy) || !source.seen(mcx, mcy) {
                     continue;
                 }
                 let lx = (m.cx - origin_x as f32) * inv_step;
                 let ly = (m.cy - origin_y as f32) * inv_step;
-                let bowl = palette::mix(SHOP_SPOON_RGB, COAT_RGB, 0.38 + 0.42 * pulse);
-                let handle = palette::mix((142, 150, 168), SHOP_SPOON_RGB, 0.55 + 0.35 * pulse);
-                let warm = palette::mix((214, 148, 72), COAT_RGB, 0.25 * pulse);
+                // The spoon icon is one glyph in three keys: live/stocked pewter,
+                // sold-out dim pewter, and too-pricey amber-rimmed.
+                let (bowl, handle, warm) = match m.kind {
+                    MarkerKind::ShopSoldOut => (
+                        palette::mix(SHOP_SPOON_RGB, theme.unknown, 0.55),
+                        palette::mix((142, 150, 168), theme.unknown, 0.55),
+                        palette::mix((214, 148, 72), theme.unknown, 0.60),
+                    ),
+                    MarkerKind::ShopTooPricey => (
+                        palette::mix(SHOP_SPOON_RGB, WARN_AMBER_RGB, 0.34 + 0.30 * pulse),
+                        palette::mix((142, 150, 168), WARN_AMBER_RGB, 0.30),
+                        palette::mix(WARN_AMBER_RGB, COAT_RGB, 0.25 * pulse),
+                    ),
+                    _ => (
+                        palette::mix(SHOP_SPOON_RGB, COAT_RGB, 0.38 + 0.42 * pulse),
+                        palette::mix((142, 150, 168), SHOP_SPOON_RGB, 0.55 + 0.35 * pulse),
+                        palette::mix((214, 148, 72), COAT_RGB, 0.25 * pulse),
+                    ),
+                };
                 if !is_small {
                     // Miniature bent spoon: warm threshold glint, pewter bowl, angled handle.
                     plot_pixel_in_window(&mut scratch.pixels, pw, ph, lx, ly + 1.0, warm);
@@ -984,19 +1206,14 @@ pub fn draw_compact(
                 plot_pixel_in_window(&mut scratch.pixels, pw, ph, lx, ly, bowl);
             }
             MarkerKind::Pickup(tag) => {
-                if is_small && tag != PickupTag::Chest {
-                    continue;
-                }
                 let (mcx, mcy) = (m.cx.floor() as i32, m.cy.floor() as i32);
                 if !in_bounds(source, mcx, mcy) || !source.seen(mcx, mcy) {
                     continue;
                 }
-                let base = match tag {
-                    PickupTag::Heal => CLAIMED_MINT_RGB,
-                    PickupTag::Magnet => MAGNET_ICE_RGB,
-                    PickupTag::Nuke => BOSS_HOT_RGB,
-                    PickupTag::Chest => (255, 204, 83),
-                };
+                // Small has no room for a 2-3 px icon, so every find degrades to
+                // its own coloured dot — still one dot per category, never a
+                // merged "good for you" colour.
+                let base = tag.rgb();
                 plot_pixel_in_window(
                     &mut scratch.pixels,
                     pw,
@@ -1211,7 +1428,7 @@ pub fn draw_expanded(
     let has_sidebar = inner.width >= 50 && inner.height >= 14;
     let sidebar_w: u16 = if !has_sidebar {
         0
-    } else if inner.width >= 120 {
+    } else if inner.width >= 108 {
         32
     } else if inner.width >= 96 {
         28
@@ -1238,6 +1455,7 @@ pub fn draw_expanded(
     }
 
     scratch.prepare(pw * ph);
+    scratch.prepare_reveal(cols, rows, view.reveal_clock);
     let sx = cols as f32 / pw as f32;
     let sy = rows as f32 / ph as f32;
 
@@ -1260,6 +1478,7 @@ pub fn draw_expanded(
 
             let mut seen_n = 0u32;
             let mut max_rec = 0.0f32;
+            let mut max_reveal = 0.0f32;
             let mut floor_n = 0u32;
             let mut boss_floor_n = 0u32;
             let mut wall_n = 0u32;
@@ -1279,6 +1498,10 @@ pub fn draw_expanded(
                     let r = source.recency(cx, cy).clamp(0.0, 1.0);
                     if r > max_rec {
                         max_rec = r;
+                    }
+                    let rev = scratch.reveal_at(cx, cy, true, r, view.reveal_clock);
+                    if rev > max_reveal {
+                        max_reveal = rev;
                     }
                     match source.cell_at(cx, cy) {
                         MinimapCell::Unknown => {}
@@ -1309,6 +1532,7 @@ pub fn draw_expanded(
 
             total_seen_blocks += 1;
             scratch.vis[idx] = encode_vis(max_rec);
+            scratch.reveal_px[idx] = encode_reveal(max_reveal);
 
             let floor_col = if boss_floor_n > 0 && boss_floor_n >= floor_n {
                 theme.boss_floor
@@ -1344,7 +1568,8 @@ pub fn draw_expanded(
             };
 
             scratch.kind[idx] = k;
-            scratch.pixels[idx] = apply_recency_shading(&theme, base_col, max_rec);
+            let col = apply_recency_shading(&theme, base_col, max_rec);
+            scratch.pixels[idx] = apply_reveal_shading(&theme, col, max_reveal);
         }
     }
 
@@ -1382,7 +1607,7 @@ pub fn draw_expanded(
     if let Some((bx, by, _, _)) = bearing_pos {
         let px = ((bx / sx).floor() as isize).clamp(0, pw as isize - 1) as usize;
         let py = ((by / sy).floor() as isize).clamp(0, ph as isize - 1) as usize;
-        let glow = palette::mix(theme.fog_base, WARN_AMBER_RGB, 0.34 + 0.16 * pulse);
+        let glow = palette::mix(theme.unknown, WARN_AMBER_RGB, 0.34 + 0.16 * pulse);
         for dy in -2isize..=2 {
             for dx in -2isize..=2 {
                 let d2 = dx * dx + dy * dy;
@@ -1440,14 +1665,7 @@ pub fn draw_expanded(
             MarkerKind::Pickup(tag) => {
                 if in_bounds(source, mcx, mcy) && source.seen(mcx, mcy) {
                     if let Some((tx, ty)) = cell_to_term(m.cx, m.cy) {
-                        let c = match tag {
-                            PickupTag::Heal => palette::to_color(CLAIMED_MINT_RGB),
-                            PickupTag::Magnet => palette::to_color(MAGNET_ICE_RGB),
-                            PickupTag::Nuke => palette::to_color(BOSS_HOT_RGB),
-                            PickupTag::Chest => palette::to_color((255, 204, 83)),
-                        };
-                        let glyph = if tag == PickupTag::Chest { '◆' } else { '•' };
-                        stamp_glyph(buf, tx, ty, glyph, c, true);
+                        stamp_glyph(buf, tx, ty, tag.glyph(), palette::to_color(tag.rgb()), true);
                     }
                 }
             }
@@ -1473,15 +1691,26 @@ pub fn draw_expanded(
                     }
                 }
             }
-            MarkerKind::Shop => {
+            MarkerKind::Shop | MarkerKind::ShopSoldOut | MarkerKind::ShopTooPricey => {
                 if in_bounds(source, mcx, mcy) && source.seen(mcx, mcy) {
                     if let Some((tx, ty)) = cell_to_term(m.cx, m.cy) {
-                        // The bent spoon: a gleaming pewter bowl + handle that pulses softly.
-                        let c = palette::to_color(palette::mix(
-                            SHOP_SPOON_RGB,
-                            COAT_RGB,
-                            0.30 + 0.40 * fast_pulse,
-                        ));
+                        // The bent spoon: one icon in three keys — stocked pewter,
+                        // sold-out dim pewter, too-pricey amber.
+                        let c = match m.kind {
+                            MarkerKind::ShopSoldOut => {
+                                palette::to_color(palette::mix(SHOP_SPOON_RGB, theme.unknown, 0.55))
+                            }
+                            MarkerKind::ShopTooPricey => palette::to_color(palette::mix(
+                                SHOP_SPOON_RGB,
+                                WARN_AMBER_RGB,
+                                0.34 + 0.30 * fast_pulse,
+                            )),
+                            _ => palette::to_color(palette::mix(
+                                SHOP_SPOON_RGB,
+                                COAT_RGB,
+                                0.30 + 0.40 * fast_pulse,
+                            )),
+                        };
                         stamp_glyph(buf, tx, ty, '☌', c, true);
                     }
                 }
@@ -1812,6 +2041,48 @@ fn draw_expanded_sidebar(
         y += 1;
     }
 
+    // Rare finds key: one glyph per walk-back-worthy object, so every icon the
+    // map stamps is named. Two columns when the rail is wide enough, so eight
+    // finds cost four rows instead of eight.
+    if y + 2 < bottom {
+        y += 1;
+        buf.set_stringn(
+            x,
+            y,
+            "FINDS",
+            max_w,
+            Style::default().fg(MUTED).bg(PLATE),
+        );
+        y += 1;
+        let two_col = max_w >= 30;
+        let col_w = if two_col { max_w / 2 } else { max_w };
+        let mut i = 0usize;
+        while i < PickupTag::ALL.len() && y + 2 < bottom {
+            let per_row = if two_col { 2 } else { 1 };
+            for slot in 0..per_row {
+                let Some(&tag) = PickupTag::ALL.get(i + slot) else {
+                    break;
+                };
+                let cx = x + (slot as u16) * (col_w as u16);
+                buf[(cx, y)].set_char(tag.glyph()).set_style(
+                    Style::default()
+                        .fg(palette::to_color(tag.rgb()))
+                        .bg(PLATE)
+                        .add_modifier(Modifier::BOLD),
+                );
+                buf.set_stringn(
+                    cx + 2,
+                    y,
+                    tag.label(),
+                    col_w.saturating_sub(2),
+                    Style::default().fg(COAT).bg(PLATE),
+                );
+            }
+            i += per_row;
+            y += 1;
+        }
+    }
+
     // Status telemetry (caches & boss arena / bearing).
     if y + 2 < bottom {
         y += 1;
@@ -1903,7 +2174,11 @@ fn draw_expanded_sidebar(
                 palette::to_color(apply_recency_shading(theme, theme.floor_live, 0.0)),
                 "Explored Memory",
             ),
-            ("░", palette::to_color(theme.fog_frontier), "Uncharted Fog"),
+            (
+                "░",
+                palette::to_color(palette::mix(theme.unknown, COAT_RGB, 0.35)),
+                "Unknown (red veil)",
+            ),
         ];
         for &(swatch, col, lbl) in vis_rows {
             if y + 2 >= bottom {
@@ -1949,8 +2224,10 @@ fn draw_expanded_sidebar(
 
 struct DerivedPalette {
     fog_base: Rgb,
-    fog_grid: Rgb,
-    fog_frontier: Rgb,
+    /// The warm red "unknown" veil for never-seen territory.
+    unknown: Rgb,
+    unknown_grid: Rgb,
+    unknown_frontier: Rgb,
     memory_sink: Rgb,
     floor_live: Rgb,
     boss_floor: Rgb,
@@ -1964,8 +2241,6 @@ struct DerivedPalette {
 impl DerivedPalette {
     fn from_palette(p: MinimapPalette) -> Self {
         let fog_base = palette::scale(palette::mix(PLATE_RGB, p.bg, 0.32), 0.52);
-        let fog_grid = palette::add(fog_base, (5, 6, 7));
-        let fog_frontier = palette::mix(fog_base, p.wall_edge, 0.24);
         let memory_sink = palette::mix(fog_base, PLATE_RGB, 0.52);
 
         // Figure-ground hierarchy:
@@ -1983,8 +2258,9 @@ impl DerivedPalette {
 
         Self {
             fog_base,
-            fog_grid,
-            fog_frontier,
+            unknown: UNKNOWN_VEIL_RGB,
+            unknown_grid: UNKNOWN_VEIL_GRID_RGB,
+            unknown_frontier: UNKNOWN_VEIL_FRONTIER_RGB,
             memory_sink,
             floor_live,
             boss_floor,
@@ -2011,14 +2287,35 @@ fn decode_recency(v: u8) -> f32 {
     }
 }
 
+#[inline]
+fn encode_reveal(reveal: f32) -> u8 {
+    (reveal.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+#[inline]
+fn decode_reveal(v: u8) -> f32 {
+    f32::from(v) / 255.0
+}
+
 /// Sparse 8×8 cartographic coordinate dots for unseen void.
 /// Strictly coordinate-driven; never reads map geometry.
 #[inline]
 fn fog_void_color(theme: &DerivedPalette, x: i32, y: i32) -> Rgb {
     if x.rem_euclid(8) == 0 && y.rem_euclid(8) == 0 {
-        theme.fog_grid
+        theme.unknown_grid
     } else {
-        theme.fog_base
+        theme.unknown
+    }
+}
+
+/// Fade a seen cell's real colour back toward the red unknown veil during the
+/// first-sight wipe (`reveal == 1.0` = pure veil, `0.0` = today's colour).
+#[inline]
+fn apply_reveal_shading(theme: &DerivedPalette, col: Rgb, reveal: f32) -> Rgb {
+    if reveal <= 0.0 {
+        col
+    } else {
+        palette::mix(col, theme.unknown, reveal.clamp(0.0, 1.0))
     }
 }
 
@@ -2081,7 +2378,7 @@ fn apply_wall_rims_and_fog_frontier(
                     || (py > 0 && scratch.vis[idx - pw] > 0)
                     || (py + 1 < ph && scratch.vis[idx + pw] > 0);
                 if touches_seen {
-                    scratch.pixels[idx] = theme.fog_frontier;
+                    scratch.pixels[idx] = theme.unknown_frontier;
                 }
                 continue;
             }
@@ -2098,7 +2395,9 @@ fn apply_wall_rims_and_fog_frontier(
                     } else {
                         theme.wall_rim
                     };
-                    scratch.pixels[idx] = apply_recency_shading(theme, rim, rec);
+                    let rim = apply_recency_shading(theme, rim, rec);
+                    scratch.pixels[idx] =
+                        apply_reveal_shading(theme, rim, decode_reveal(scratch.reveal_px[idx]));
                 }
             }
 
@@ -2107,7 +2406,10 @@ fn apply_wall_rims_and_fog_frontier(
                 || (py > 0 && scratch.vis[idx - pw] == 0)
                 || (py + 1 < ph && scratch.vis[idx + pw] == 0);
             if touches_unseen && scratch.kind[idx] != KIND_FEATURE {
-                scratch.pixels[idx] = palette::mix(scratch.pixels[idx], theme.fog_base, 0.22);
+                // Fade the known edge into the *unknown* red rather than into the
+                // old cool fog, so the border reads as "here the map ends" and
+                // never dips darker than the veil itself.
+                scratch.pixels[idx] = palette::mix(scratch.pixels[idx], theme.unknown, 0.10);
             }
         }
     }
@@ -2666,6 +2968,7 @@ mod tests {
             hovered: false,
             explored_pct: None,
             maze_discovered: true,
+            reveal_clock: 1,
         }
     }
 
@@ -3327,7 +3630,20 @@ mod tests {
             view.hovered = hovered;
             view.maze_discovered = maze_disc;
 
+            // Two passes: the first stamps each cell's first-sight clock, the
+            // second (clock advanced past the wipe) settles the reveal so the
+            // capture shows the steady-state fog-of-war, not the 0.4 s fade.
             let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            view.reveal_clock = 1;
+            terminal
+                .draw(|f| {
+                    let area = f.area();
+                    let game = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(2));
+                    paint_mock_game_backdrop(f.buffer_mut(), area, pal, sector);
+                    draw(f, game, &view, map, &mut scratch);
+                })
+                .unwrap();
+            view.reveal_clock = REVEAL_WIPE_TICKS + 4;
             terminal
                 .draw(|f| {
                     let area = f.area();
@@ -3443,5 +3759,389 @@ mod tests {
             }
             std::fs::write(dir.join(format!("{}.ansi", c.name)), ansi).unwrap();
         }
+    }
+
+    // ---- Unknown-territory red veil ---------------------------------------
+
+    /// The six shipped minimap palettes, one per theme.
+    const VEIL_THEMES: [(&str, MinimapPalette); 6] = [
+        ("sewer", MinimapPalette::SEWER),
+        ("kitchen", MinimapPalette::KITCHEN),
+        ("lab", MinimapPalette::LAB),
+        ("laundry", MinimapPalette::LAUNDRY),
+        ("printworks", MinimapPalette::PRINTWORKS),
+        ("trailer", MinimapPalette::TRAILER),
+    ];
+
+    /// WCAG relative luminance of an sRGB triple.
+    fn rel_luminance(c: Rgb) -> f32 {
+        fn ch(v: u8) -> f32 {
+            let s = f32::from(v) / 255.0;
+            if s <= 0.03928 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        0.2126 * ch(c.0) + 0.7152 * ch(c.1) + 0.0722 * ch(c.2)
+    }
+
+    /// WCAG contrast ratio between two sRGB colours.
+    fn contrast_ratio(a: Rgb, b: Rgb) -> f32 {
+        let (la, lb) = (rel_luminance(a), rel_luminance(b));
+        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// Resolve an xterm-256 index back to RGB (the cube plus the grey ramp).
+    fn xterm_rgb(idx: u8) -> Rgb {
+        const CUBE: [u8; 6] = [0, 95, 135, 175, 215, 255];
+        match idx {
+            0 => (0, 0, 0),
+            1 => (128, 0, 0),
+            2 => (0, 128, 0),
+            3 => (128, 128, 0),
+            4 => (0, 0, 128),
+            5 => (128, 0, 128),
+            6 => (0, 128, 128),
+            7 => (192, 192, 192),
+            8 => (128, 128, 128),
+            9 => (255, 0, 0),
+            10 => (0, 255, 0),
+            11 => (255, 255, 0),
+            12 => (0, 0, 255),
+            13 => (255, 0, 255),
+            14 => (0, 255, 255),
+            15 => (255, 255, 255),
+            n if n >= 232 => {
+                let v = 8 + (n - 232) * 10;
+                (v, v, v)
+            }
+            n => {
+                let n = n - 16;
+                (
+                    CUBE[(n / 36) as usize],
+                    CUBE[((n / 6) % 6) as usize],
+                    CUBE[(n % 6) as usize],
+                )
+            }
+        }
+    }
+
+    /// Fold one RGB through a terminal colour depth and read it back as RGB.
+    fn fold_rgb(c: Rgb, depth: crate::term::ColorDepth) -> Rgb {
+        match crate::term::map_rgb_with(depth, c) {
+            Color::Rgb(r, g, b) => (r, g, b),
+            Color::Indexed(i) => xterm_rgb(i),
+            Color::Black => (0, 0, 0),
+            Color::Red => (128, 0, 0),
+            Color::Green => (0, 128, 0),
+            Color::Yellow => (128, 128, 0),
+            Color::Blue => (0, 0, 128),
+            Color::Magenta => (128, 0, 128),
+            Color::Cyan => (0, 128, 128),
+            Color::Gray => (192, 192, 192),
+            Color::DarkGray => (128, 128, 128),
+            Color::LightRed => (255, 0, 0),
+            Color::LightGreen => (0, 255, 0),
+            Color::LightYellow => (255, 255, 0),
+            Color::LightBlue => (0, 0, 255),
+            Color::LightMagenta => (255, 0, 255),
+            Color::LightCyan => (0, 255, 255),
+            Color::White => (255, 255, 255),
+            _ => (0, 0, 0),
+        }
+    }
+
+    /// Every marker kind the art can draw, for the contrast sweep.
+    fn all_marker_kinds() -> Vec<MarkerKind> {
+        let mut kinds = vec![
+            MarkerKind::Start,
+            MarkerKind::Boss,
+            MarkerKind::Miniboss,
+            MarkerKind::BossArena,
+            MarkerKind::ArenaBearing,
+            MarkerKind::MazeEntrance,
+            MarkerKind::MazeReward,
+            MarkerKind::MazeCacheHollow,
+            MarkerKind::MazeCacheClaimed,
+            MarkerKind::Shop,
+            MarkerKind::ShopSoldOut,
+            MarkerKind::ShopTooPricey,
+        ];
+        for tag in PickupTag::ALL {
+            kinds.push(MarkerKind::Pickup(tag));
+        }
+        kinds
+    }
+
+    /// Draw once to stamp first-sight, advance the fog clock past the wipe and
+    /// draw again: the scratch then holds settled (today's) colours.
+    fn render_settled(
+        view: &mut MinimapView<'_>,
+        map: &FakeMap,
+        w: u16,
+        h: u16,
+        scratch: &mut MinimapScratch,
+    ) -> Terminal<TestBackend> {
+        view.reveal_clock = 1;
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, f.area(), view, map, scratch)).unwrap();
+        view.reveal_clock = REVEAL_WIPE_TICKS + 4;
+        term.draw(|f| draw(f, f.area(), view, map, scratch)).unwrap();
+        term
+    }
+
+    #[test]
+    fn unseen_territory_is_red_and_darker_than_memory_in_every_theme() {
+        for (name, pal) in VEIL_THEMES {
+            let theme = DerivedPalette::from_palette(pal);
+            let veil = fog_void_color(&theme, 3, 3);
+            let dot = fog_void_color(&theme, 0, 0);
+            let memory = apply_recency_shading(&theme, theme.floor_live, 0.0);
+            let live = theme.floor_live;
+
+            for (label, c) in [("veil", veil), ("grid dot", dot)] {
+                assert!(
+                    c.0 > c.1 && c.0 > c.2,
+                    "{name}: {label} is not red-dominant: {c:?}"
+                );
+                assert!(
+                    rel_luminance(c) < rel_luminance(memory),
+                    "{name}: {label} {c:?} is not darker than remembered {memory:?}"
+                );
+            }
+            // Remembered ground keeps its own theme tint (it is *not* the veil)
+            // and stays brighter than the veil; live sight is brighter still.
+            assert!(
+                memory != theme.unknown,
+                "{name}: remembered floor collapsed into the veil: {memory:?}"
+            );
+            assert!(
+                rel_luminance(memory) < rel_luminance(live),
+                "{name}: memory should be darker than live vision"
+            );
+            assert!(
+                rel_luminance(memory) > rel_luminance(veil),
+                "{name}: explored memory must out-shine the unknown veil"
+            );
+        }
+    }
+
+    #[test]
+    fn unseen_veil_folds_to_red_in_every_colour_depth() {
+        use crate::term::ColorDepth;
+        for (name, pal) in VEIL_THEMES {
+            let theme = DerivedPalette::from_palette(pal);
+            let veil = fog_void_color(&theme, 3, 3);
+            for depth in [
+                ColorDepth::Truecolor,
+                ColorDepth::Ansi256,
+                ColorDepth::Ansi16,
+            ] {
+                let folded = fold_rgb(veil, depth);
+                assert!(
+                    folded.0 > folded.1 && folded.0 > folded.2,
+                    "{name}/{depth:?}: veil folded to {folded:?}, not red-dominant"
+                );
+                assert_ne!(
+                    folded, (0, 0, 0),
+                    "{name}/{depth:?}: veil folded to black"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_veil_is_identical_over_wall_and_floor_cells() {
+        // Two maps that differ only in the *terrain* of unseen cells: everything
+        // the veil draws must come out identical.
+        let base = FakeMap::showcase(false);
+        let mut swapped = FakeMap::showcase(false);
+        for i in 0..swapped.cells.len() {
+            if !swapped.seen[i] {
+                swapped.cells[i] = match swapped.cells[i] {
+                    MinimapCell::Wall => MinimapCell::Floor,
+                    MinimapCell::Floor => MinimapCell::MazeWall,
+                    MinimapCell::MazeWall => MinimapCell::BossFloor,
+                    _ => MinimapCell::Wall,
+                };
+            }
+        }
+        let markers = sample_markers(false);
+        let labels = sample_labels(false);
+        let mut scratch = MinimapScratch::new();
+        for (name, pal) in VEIL_THEMES {
+            for (w, h) in [(57, 20), (80, 24), (120, 40)] {
+                for mode in [MinimapMode::Compact, MinimapMode::Expanded] {
+                    let mut view = make_view(mode, pal, "SECTOR", &markers, &labels, false, w, h);
+                    let a = render_settled(&mut view, &base, w, h, &mut scratch);
+                    let b = render_settled(&mut view, &swapped, w, h, &mut scratch);
+                    assert_eq!(
+                        a.backend().buffer().content,
+                        b.backend().buffer().content,
+                        "{name} {mode:?} {w}x{h}: unseen terrain leaked through the veil"
+                    );
+                }
+            }
+        }
+        assert_eq!(base.unseen_reads.get(), 0);
+        assert_eq!(swapped.unseen_reads.get(), 0);
+    }
+
+    #[test]
+    fn seen_pixels_never_show_the_veil_after_the_reveal_settles() {
+        let map = FakeMap::showcase(false);
+        let markers = sample_markers(false);
+        let labels = sample_labels(false);
+        let mut scratch = MinimapScratch::new();
+        for (name, pal) in VEIL_THEMES {
+            let mut view = make_view(
+                MinimapMode::Expanded,
+                pal,
+                "SECTOR",
+                &markers,
+                &labels,
+                false,
+                120,
+                40,
+            );
+            let _ = render_settled(&mut view, &map, 120, 40, &mut scratch);
+            let theme = DerivedPalette::from_palette(pal);
+            for (i, &v) in scratch.vis.iter().enumerate() {
+                let px = scratch.pixels[i];
+                if v == 0 {
+                    // Unseen pixels are the red veil or a marker/glow stamped
+                    // over it (the fog-edge bearing beacon) — both stay
+                    // red-dominant, never a cool or neutral blank.
+                    assert!(
+                        px.0 > px.1 && px.0 > px.2,
+                        "{name}: unseen pixel {i} is not red-dominant: {px:?}"
+                    );
+                } else {
+                    assert!(
+                        px != theme.unknown && px != theme.unknown_grid,
+                        "{name}: seen pixel {i} still shows the veil"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn first_sight_reveal_finishes_and_leaves_todays_colours() {
+        let mut scratch = MinimapScratch::new();
+        let (cols, rows) = (40, 30);
+        scratch.prepare_reveal(cols, rows, 0);
+
+        // First sight of a live cell starts at full veil.
+        let r0 = scratch.reveal_at(5, 5, true, 1.0, 0);
+        assert!(r0 > 0.99, "first sight should start at full veil, got {r0}");
+        // Halfway through the wipe it is partial.
+        let r_mid = scratch.reveal_at(5, 5, true, 1.0, REVEAL_WIPE_TICKS / 2);
+        assert!(
+            r_mid > 0.3 && r_mid < 0.7,
+            "mid-wipe should be partial, got {r_mid}"
+        );
+        // And it finishes.
+        let r_end = scratch.reveal_at(5, 5, true, 1.0, REVEAL_WIPE_TICKS + 1);
+        assert_eq!(r_end, 0.0, "reveal must finish");
+        // Remembered ground (recency 0) is stamped settled: no wipe replays.
+        assert_eq!(
+            scratch.reveal_at(9, 9, true, 0.0, 0),
+            0.0,
+            "remembered ground must not wipe"
+        );
+        // Unseen cells never wipe.
+        assert_eq!(scratch.reveal_at(11, 11, false, 1.0, 0), 0.0);
+
+        // The shading itself: finished → today's colour, full → the veil.
+        let theme = DerivedPalette::from_palette(MinimapPalette::SEWER);
+        let live = theme.floor_live;
+        assert_eq!(apply_reveal_shading(&theme, live, 0.0), live);
+        let wiped = apply_reveal_shading(&theme, live, 1.0);
+        assert_eq!(wiped, theme.unknown);
+        assert!(rel_luminance(wiped) < rel_luminance(live));
+        let half = apply_reveal_shading(&theme, live, 0.5);
+        assert!(
+            rel_luminance(wiped) < rel_luminance(half) && rel_luminance(half) < rel_luminance(live)
+        );
+    }
+
+    #[test]
+    fn markers_stay_legible_on_the_unknown_veil() {
+        let veil = UNKNOWN_VEIL_RGB;
+        for (name, _pal) in VEIL_THEMES {
+            for kind in all_marker_kinds() {
+                let rgb = kind.rgb();
+                let ratio = contrast_ratio(rgb, veil);
+                assert!(
+                    ratio >= 3.0,
+                    "{name}: {kind:?} ({rgb:?}) only reaches {ratio:.2}:1 on the veil"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_pickup_icon_is_distinct_and_legible() {
+        let mut seen_glyphs = Vec::new();
+        for tag in PickupTag::ALL {
+            assert!(
+                !seen_glyphs.contains(&tag.glyph()),
+                "pickup glyph {:?} is reused by {tag:?}",
+                tag.glyph()
+            );
+            seen_glyphs.push(tag.glyph());
+            let ratio = contrast_ratio(tag.rgb(), UNKNOWN_VEIL_RGB);
+            assert!(
+                ratio >= 3.0,
+                "{tag:?} icon only reaches {ratio:.2}:1 on the veil"
+            );
+        }
+        // The shared icon set is one language: every marker resolves to a glyph
+        // and an RGB, and no marker glyph is empty.
+        for kind in all_marker_kinds() {
+            assert!(!kind.glyph().is_whitespace(), "{kind:?} has no glyph");
+        }
+    }
+
+    #[test]
+    fn expanded_legend_names_every_pickup_icon() {
+        let map = FakeMap::showcase(false);
+        let markers = sample_markers(false);
+        let labels = sample_labels(false);
+        let mut scratch = MinimapScratch::new();
+        let mut view = make_view(
+            MinimapMode::Expanded,
+            MinimapPalette::SEWER,
+            "SEWER",
+            &markers,
+            &labels,
+            false,
+            120,
+            40,
+        );
+        let term = render_settled(&mut view, &map, 120, 40, &mut scratch);
+        let buf = term.backend().buffer();
+        let mut text = String::new();
+        for y in 0..40 {
+            for x in 0..120 {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        for tag in PickupTag::ALL {
+            assert!(
+                text.contains(tag.label()),
+                "legend is missing the {} icon",
+                tag.label()
+            );
+        }
+        // The red veil is named in the visibility key.
+        assert!(
+            text.contains("Unknown"),
+            "legend does not name the unknown red veil"
+        );
     }
 }
