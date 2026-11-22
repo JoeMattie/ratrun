@@ -52,6 +52,7 @@ stages! {
     // App level
     AppUpdate,
     AppRender,
+    Present,
     Blit,
     Overlays,
     Hud,

@@ -143,6 +143,10 @@ pub struct World {
     pub noclip: bool,
     /// Render-only: draw collision shapes over the world (console `hitboxes`).
     pub hitboxes: bool,
+    /// How many times `update` has run (simulation and settle ticks alike).
+    /// Render-side bookkeeping only — the App uses it to tell whether the
+    /// picture can have changed since it was last drawn; no system reads it.
+    pub ticks: u64,
     /// Console-only: the next boss spawn uses this kind instead of the floor's
     /// (`boss <kind>`). Taken by `boss_spawn_system` on the next spawn.
     pub boss_override: Option<BossKind>,
@@ -424,6 +428,7 @@ impl World {
             peace: false,
             noclip: false,
             hitboxes: false,
+            ticks: 0,
             boss_override: None,
             fog,
             elapsed: 0.0,
@@ -1181,6 +1186,7 @@ impl World {
         hold: DashHold,
     ) {
         let _prof = crate::prof::scope(crate::prof::Stage::SimTick);
+        self.ticks = self.ticks.wrapping_add(1);
         // Neon merge: the HUD reads only this tick's pickups.
         self.last_pickups.clear();
         if self.finished() {
@@ -2714,9 +2720,15 @@ impl World {
         self.light_map.observe_cost(scene.mode, started.elapsed() + ambience_cost, pb.w * pb.h);
     }
 
+    /// The tier the next frame's lighting will run at: the setting, lowered
+    /// by the cost controller's current penalty.
+    pub(crate) fn lighting_tier(&self) -> LightingMode {
+        self.light_map.quality(self.lighting)
+    }
+
     /// `--prof-bench`: the tier the last frame's lighting ran at.
     pub(crate) fn prof_tier(&self) -> LightingMode {
-        self.light_map.quality(self.lighting)
+        self.lighting_tier()
     }
 
     /// `--prof-bench`: forget the cost controller's state between configs.

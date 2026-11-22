@@ -540,6 +540,8 @@ pub(crate) fn drain_input(
                     // returns (`App::poll_pad` reads `input.focused`).
                     Event::FocusLost => input.set_focused(false),
                     Event::FocusGained => input.set_focused(true),
+                    // A new size is a frame that must be rendered now.
+                    Event::Resize(..) => input.note_resize(),
                     _ => {}
                 }
             }
@@ -578,6 +580,7 @@ fn run(
     // the reader has finished.
     let (_input, rx) = InputThread::spawn();
     install_termination_handlers();
+    let mut frames = present::FrameLoop::default();
 
     while !app.should_quit {
         let frame_start = Instant::now();
@@ -606,16 +609,11 @@ fn run(
         let want_crosshair =
             app.cursor_visible() && term::color_depth() != term::ColorDepth::Ansi16;
         let _ = sync_pointer_shape_to(&mut out, want_crosshair);
-        // Present the frame atomically: a half-block frame redrawn cell by cell
+        // Render and present — unless nothing can have changed (a still menu
+        // with no input), in which case the frame is skipped entirely. The
+        // frame is sent atomically: a half-block frame redrawn cell by cell
         // would otherwise tear mid-frame on a fast terminal.
-        present::synchronized_frame(terminal, |f| {
-            app.render(f);
-            // Fold the finished frame into what this terminal can draw:
-            // RGB → palette when truecolor is unavailable, and risky glyphs
-            // → safe ones when the terminal mis-sizes them. A no-op when
-            // the terminal supports everything (the default path).
-            term::sanitize(f.buffer_mut());
-        })?;
+        frames.present(terminal, &mut app, now)?;
 
         let elapsed = frame_start.elapsed();
         if elapsed < target {

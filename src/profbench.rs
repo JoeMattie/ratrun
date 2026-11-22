@@ -501,7 +501,13 @@ fn bench_app(
     let swap = |app: &mut App, run: &mut AutoRun| {
         std::mem::swap(app.world_mut().expect("world"), run.world_mut());
     };
-    let frame = |app: &mut App,
+    // Exactly what `main::run` does per frame, on a simulated 60 Hz clock (the
+    // pacer skips still frames by time, and the bench runs flat out).
+    let mut frames = crate::present::FrameLoop::default();
+    let clock0 = Instant::now();
+    let mut ticks = 0u32;
+    let rendered = std::cell::Cell::new(0u64);
+    let mut frame = |app: &mut App,
                      run: &mut Option<&mut AutoRun>,
                      terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
                      acc: &mut [u64; 5],
@@ -521,27 +527,29 @@ fn bench_app(
         app.update(DT);
         let t2 = Instant::now();
         let app_tick = prof::ns(Stage::SimTick) - tick_before;
-        let mut render_ns = 0u64;
-        let mut sanitize_ns = 0u64;
-        // Exactly what `main::run` does per frame.
-        crate::present::synchronized_frame(terminal, |f| {
-            let r0 = Instant::now();
-            app.render(f);
-            let r1 = Instant::now();
-            crate::term::sanitize(f.buffer_mut());
-            render_ns = (r1 - r0).as_nanos() as u64;
-            sanitize_ns = r1.elapsed().as_nanos() as u64;
-        })
-        .expect("draw");
+        let before = [
+            prof::ns(Stage::AppRender),
+            prof::ns(Stage::Sanitize),
+            prof::ns(Stage::Present),
+        ];
+        ticks += 1;
+        let now = clock0 + Duration::from_micros(16_667) * ticks;
+        if frames.present(terminal, app, now).expect("present").is_some() {
+            rendered.set(rendered.get() + 1);
+        }
         let t3 = Instant::now();
         if let Some(run) = run.as_deref_mut() {
             swap(app, run);
         }
+        let render_ns = prof::ns(Stage::AppRender) - before[0];
+        let sanitize_ns = prof::ns(Stage::Sanitize) - before[1];
+        let present_ns = prof::ns(Stage::Present) - before[2];
         acc[0] += (t1 - t).as_nanos() as u64; // bot + sim step
         acc[1] += (t2 - t1).as_nanos() as u64 - app_tick; // App::update minus its own (near-zero dt) tick
         acc[2] += render_ns;
         acc[3] += sanitize_ns;
-        acc[4] += (t3 - t2).as_nanos() as u64 - render_ns - sanitize_ns; // ratatui diff + encode + write
+        // Diff + encode + write, plus the loop's own bookkeeping.
+        acc[4] += ((t3 - t2).as_nanos() as u64).saturating_sub(render_ns + sanitize_ns).max(present_ns);
     };
     let mut acc = [0u64; 5];
     let mut fno = 0usize;
@@ -570,6 +578,7 @@ fn bench_app(
     let started = Instant::now();
     acc = [0; 5];
     let (bytes0, writes0) = (sink.bytes.get(), sink.writes.get());
+    let rendered0 = rendered.get();
     prof::reset();
     prof::enable(true);
     let mut frames = 0usize;
@@ -599,12 +608,13 @@ fn bench_app(
         .as_deref()
         .map_or((0, 0.0), |r| (r.world().enemy_count(), r.world().elapsed));
     let mut out = format!(
-        "{{\"out\":\"{}\",\"mode\":\"{mode}\",\"screen\":\"{screen}\",\"floor\":\"{floor}\",\"at\":{at},\"elapsed_end\":{elapsed_end:.1},\"size\":\"{}x{}\",\"zoom\":{},\"tier\":\"{}\",\"frames\":{n},\"enemies\":{enemies},\"step_us\":{:.1},\"app_update_us\":{:.1},\"render_us\":{:.1},\"sanitize_us\":{:.1},\"present_us\":{:.1},\"frame_p50\":{:.1},\"frame_p95\":{:.1},\"frame_max\":{:.1},\"bytes_per_frame\":{:.0},\"writes_per_frame\":{:.1},",
+        "{{\"out\":\"{}\",\"mode\":\"{mode}\",\"screen\":\"{screen}\",\"floor\":\"{floor}\",\"at\":{at},\"elapsed_end\":{elapsed_end:.1},\"size\":\"{}x{}\",\"zoom\":{},\"tier\":\"{}\",\"frames\":{n},\"rendered\":{},\"enemies\":{enemies},\"step_us\":{:.1},\"app_update_us\":{:.1},\"render_us\":{:.1},\"sanitize_us\":{:.1},\"present_us\":{:.1},\"frame_p50\":{:.1},\"frame_p95\":{:.1},\"frame_max\":{:.1},\"bytes_per_frame\":{:.0},\"writes_per_frame\":{:.1},",
         if BUFFERED.load(std::sync::atomic::Ordering::Relaxed) { "buf" } else { "line" },
         cfg.cols,
         cfg.rows,
         cfg.zoom,
         cfg.tier_name,
+        rendered.get() - rendered0,
         per(acc[0]),
         per(acc[1]),
         per(acc[2]),

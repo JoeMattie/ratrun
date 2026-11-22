@@ -215,6 +215,43 @@ impl PerfStats {
     }
 }
 
+/// Everything `World::draw` reads that is not simulation state, plus the
+/// simulation's own tick count: two frames with the same key draw the same
+/// pixels, so the second can reuse the first's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PictureKey {
+    /// Which run's world (a new floor is a new picture even at tick 0).
+    run: u64,
+    /// `World::ticks`: every simulation or settle tick.
+    ticks: u64,
+    /// The pixel buffer's size (the terminal's, less the HUD rails).
+    size: (usize, usize),
+    /// The eased zoom being rendered and the rung it is easing toward.
+    zoom: (u32, u32),
+    /// The lighting setting, the tier the cost controller currently runs it
+    /// at, and the colour depth it dithers for.
+    lighting: (
+        crate::render::lighting::LightingMode,
+        crate::render::lighting::LightingMode,
+        crate::term::ColorDepth,
+    ),
+    /// Render-only toggles: the hitbox overlay and the smoke layer.
+    toggles: (bool, bool),
+}
+
+impl PictureKey {
+    fn of(w: &World, run: u64, pixels: &PixelBuffer) -> Self {
+        Self {
+            run,
+            ticks: w.ticks,
+            size: (pixels.w, pixels.h),
+            zoom: (w.zoom_view.to_bits(), w.zoom.to_bits()),
+            lighting: (w.lighting, w.lighting_tier(), w.lighting_depth),
+            toggles: (w.hitboxes, w.smoke_enabled),
+        }
+    }
+}
+
 pub struct App {
     screen: Screen,
     pub should_quit: bool,
@@ -305,6 +342,19 @@ pub struct App {
     fixed_seed: Option<u64>,
     /// Reused game-viewport pixel buffer, reallocated only on resize.
     pixels: PixelBuffer,
+    /// What `pixels` holds: the key of the world picture last drawn into it
+    /// (see [`PictureKey`]). A frame whose key matches reuses the pixels
+    /// instead of running `World::draw` (scene + lighting) again — the frozen
+    /// field under the pause, level-up, shop and Library plates.
+    picture_key: Option<PictureKey>,
+    /// Something happened that the key cannot see (discrete input, the
+    /// console, a screen change): the next frame redraws the world.
+    picture_dirty: bool,
+    /// How many times `World::draw` has run (tests; a paused frame must not
+    /// add to it).
+    pub world_draws: u64,
+    /// The screen changed since the last render: render at once.
+    repaint: bool,
     /// Reused per-frame SFX de-duplication buffer.
     sfx_frame: Vec<Sfx>,
     /// A sting that plays a beat *after* the event that caused it
@@ -517,6 +567,10 @@ impl App {
             persist,
             fixed_seed,
             pixels: PixelBuffer::new(0, 0),
+            picture_key: None,
+            picture_dirty: true,
+            world_draws: 0,
+            repaint: true,
             sfx_frame: Vec::new(),
             sting: None,
             hud: hud::HudState::default(),
@@ -1289,6 +1343,12 @@ impl App {
         // pressed this frame is an action this frame.
         let was_pad = self.input.controls.device() == Device::Pad;
         self.poll_pad();
+        // Discrete input and the console can change what a frozen world looks
+        // like in ways the picture key cannot see (a console `give`, a debug
+        // toggle): redraw it this frame rather than reuse the cached pixels.
+        if self.input.discrete || self.console.open || self.input.pad.active() {
+            self.picture_dirty = true;
+        }
         self.input.tick(dt);
         self.input.controls.note_device(self.input.last_device);
         // The HUD's dash/active names follow the device in hand: when the pad
@@ -1430,6 +1490,8 @@ impl App {
         if self.screen != previous {
             self.hits.clear();
             self.hits.hovered = None;
+            self.picture_dirty = true;
+            self.repaint = true;
         }
         let kb_pressed = !self.input.pressed.is_empty() && !cursor_toggled;
         self.cursor.update(
@@ -4107,9 +4169,41 @@ impl App {
 
     // ---- Rendering ------------------------------------------------------
 
+    /// How often the current screen wants rendering: every frame while the
+    /// simulation runs, the menu cadence everywhere else (`present::FramePacer`).
+    pub fn frame_demand(&self) -> crate::present::Demand {
+        if matches!(self.screen, Screen::Playing) {
+            crate::present::Demand::Live
+        } else {
+            crate::present::Demand::Menu
+        }
+    }
+
+    /// Must the next frame be rendered now, whatever the pacer's cadence says?
+    ///
+    /// True when input of any kind arrived this frame (keys, pointer motion,
+    /// pad, focus, a resize), when the screen changed, and while a clock the
+    /// app knows about is running on a screen that is otherwise still: the
+    /// console, the zoom easing, the volume/zoom read-outs and the auto-pick
+    /// toast spacing. Anything not listed here is still caught by the pacer,
+    /// which only stops rendering a screen whose frames have stopped changing.
+    pub fn repaint_urgent(&self) -> bool {
+        self.repaint
+            || self.input.events > 0
+            || self.input.pad.active()
+            || self.console.open
+            || self.hud.flashing()
+            || self.auto_pick_wait > 0.0
+            || self
+                .world
+                .as_ref()
+                .is_some_and(|w| w.zoom_view != w.zoom)
+    }
+
     pub fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
         self.last_area = area;
+        self.repaint = false;
         self.hits.clear();
         match self.screen {
             Screen::Title => {
@@ -4850,7 +4944,18 @@ impl App {
                 // placement), never by `World::draw`. So a run drawn at a
                 // resized terminal and one that never drew simulate the same.
                 w.viewport = Vec2::new(game.width as f32, (game.height * 2) as f32);
-                w.draw(&mut self.pixels);
+                // Scene + lighting only when the picture can have changed: the
+                // world ticked, the view moved, or something the key cannot
+                // see happened (`picture_dirty`). The key is taken *before*
+                // the draw, so a lighting tier the cost controller changes
+                // during this draw is a different key next frame.
+                let key = PictureKey::of(w, self.run_counter, &self.pixels);
+                if self.picture_dirty || self.picture_key != Some(key) {
+                    w.draw(&mut self.pixels);
+                    self.world_draws += 1;
+                    self.picture_key = Some(key);
+                    self.picture_dirty = false;
+                }
                 let _p = crate::prof::scope(crate::prof::Stage::Blit);
                 self.pixels.render_to(game, frame.buffer_mut());
             }
@@ -8714,6 +8819,258 @@ mod tests {
     }
 
     /// Item 11: pause freezes the simulation and resumes, and Q bails to the menu.
+    /// A paused run at 100x40 with a few seconds of play behind it.
+    fn paused_harness() -> Harness {
+        let mut h = Harness::new(100, 40);
+        h.enter_playing();
+        for _ in 0..40 {
+            h.frame(&[]);
+        }
+        h.frame(&[KeyCode::Esc]);
+        assert!(matches!(h.app.screen, Screen::Paused));
+        // Let the render-only clocks (zoom easing, read-outs) settle.
+        for _ in 0..30 {
+            h.frame(&[]);
+        }
+        h
+    }
+
+    #[test]
+    fn a_paused_frame_does_not_draw_the_world_again() {
+        let mut h = paused_harness();
+        let drawn = h.app.world_draws;
+        assert!(drawn > 40, "play draws the world every frame");
+        let before = h.terminal.backend().buffer().clone();
+        for _ in 0..20 {
+            h.frame(&[]);
+        }
+        assert_eq!(
+            h.app.world_draws, drawn,
+            "a frozen world must be drawn once, not once per frame"
+        );
+        // The field is still on screen under the pause plate, cell for cell.
+        assert_eq!(h.terminal.backend().buffer(), &before);
+        assert!(
+            before.content.iter().filter(|c| c.symbol() == "▀").count() > 500,
+            "the paused frame should still show the play field"
+        );
+        assert!(!h.app.repaint_urgent(), "a still pause screen asks for nothing");
+        assert_eq!(h.app.frame_demand(), crate::present::Demand::Menu);
+    }
+
+    #[test]
+    fn the_cached_world_picture_is_the_picture_a_redraw_would_make() {
+        let mut h = paused_harness();
+        let cached = h.terminal.backend().buffer().clone();
+        let drawn = h.app.world_draws;
+        h.app.picture_dirty = true;
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 1);
+        assert_eq!(
+            h.terminal.backend().buffer(),
+            &cached,
+            "reusing the pixels must not change a single cell"
+        );
+    }
+
+    #[test]
+    fn overlays_over_a_frozen_run_reuse_the_world_picture() {
+        // The options plate and the Library, both opened from pause.
+        let mut h = paused_harness();
+        h.frame(&[KeyCode::Char('o')]);
+        assert!(matches!(h.app.screen, Screen::Options));
+        h.frame(&[]);
+        let drawn = h.app.world_draws;
+        for _ in 0..10 {
+            h.frame(&[]);
+        }
+        assert_eq!(h.app.world_draws, drawn, "options over a paused run");
+
+        // A level-up plate over the field.
+        let mut h = Harness::new(100, 40);
+        h.enter_playing();
+        for _ in 0..20 {
+            h.frame(&[]);
+        }
+        h.app.world.as_mut().unwrap().pending_levelups = 1;
+        h.frame(&[]);
+        assert!(matches!(h.app.screen, Screen::LevelUp));
+        h.frame(&[]);
+        let drawn = h.app.world_draws;
+        for _ in 0..10 {
+            h.frame(&[]);
+        }
+        assert_eq!(h.app.world_draws, drawn, "the level-up plate");
+
+        // The expanded map pauses the world on the Playing screen.
+        let mut h = Harness::new(100, 40);
+        h.enter_playing();
+        for _ in 0..20 {
+            h.frame(&[]);
+        }
+        h.frame(&[KeyCode::Tab]);
+        h.frame(&[]);
+        let ticks = h.app.world.as_ref().unwrap().ticks;
+        let drawn = h.app.world_draws;
+        for _ in 0..10 {
+            h.frame(&[]);
+        }
+        if h.app.world.as_ref().unwrap().ticks == ticks {
+            assert_eq!(h.app.world_draws, drawn, "the open map");
+        }
+    }
+
+    #[test]
+    fn everything_that_changes_the_frozen_picture_redraws_it() {
+        // A resize: the pixel buffer changes size.
+        let mut h = paused_harness();
+        let drawn = h.app.world_draws;
+        h.terminal.backend_mut().resize(120, 44);
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 1, "a resize must redraw");
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 1, "and then settle again");
+
+        // The zoom: every frame of the ease is a new picture, then it stops.
+        let mut h = paused_harness();
+        let drawn = h.app.world_draws;
+        h.app.world.as_mut().unwrap().zoom_by(1);
+        h.app.input.begin_frame();
+        h.app.update(1.0 / 60.0);
+        assert!(h.app.repaint_urgent(), "the zoom ease is a running clock");
+        h.terminal.draw(|f| h.app.render(f)).unwrap();
+        h.frame(&[]);
+        assert!(h.app.world_draws >= drawn + 2, "the ease redraws each frame");
+        for _ in 0..60 {
+            h.frame(&[]);
+        }
+        let settled = h.app.world_draws;
+        assert!(!h.app.repaint_urgent(), "the ease has landed");
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, settled);
+
+        // The lighting setting and the debug overlays.
+        let mut h = paused_harness();
+        let drawn = h.app.world_draws;
+        h.app.set_lighting(crate::render::lighting::LightingMode::Coarse);
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 1, "a lighting change must redraw");
+        h.app.world.as_mut().unwrap().hitboxes = true;
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 2, "the hitbox overlay must redraw");
+        h.app.world.as_mut().unwrap().smoke_enabled = false;
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 3, "the smoke toggle must redraw");
+
+        // Any discrete input (it may have changed anything): redraw once.
+        let mut h = paused_harness();
+        let drawn = h.app.world_draws;
+        h.frame(&[KeyCode::Down]);
+        assert_eq!(h.app.world_draws, drawn + 1, "a key press must redraw");
+        h.frame(&[]);
+        assert_eq!(h.app.world_draws, drawn + 1);
+        // Pointer motion alone does not (the world cannot see the pointer),
+        // but it does ask for a frame: the cheese cursor moved.
+        h.app.input.begin_frame();
+        h.app.input.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        });
+        h.app.update(1.0 / 60.0);
+        assert!(h.app.repaint_urgent(), "pointer motion repaints");
+        h.terminal.draw(|f| h.app.render(f)).unwrap();
+        assert_eq!(h.app.world_draws, drawn + 1);
+
+        // Resuming: the world ticks, so every frame is a new picture.
+        let mut h = paused_harness();
+        h.frame(&[KeyCode::Char('p')]);
+        assert!(matches!(h.app.screen, Screen::Playing));
+        let drawn = h.app.world_draws;
+        for _ in 0..5 {
+            h.frame(&[]);
+        }
+        assert_eq!(h.app.world_draws, drawn + 5);
+        assert_eq!(h.app.frame_demand(), crate::present::Demand::Live);
+    }
+
+    #[cfg(feature = "console")]
+    #[test]
+    fn the_console_keeps_the_frame_and_the_world_picture_live() {
+        let mut h = paused_harness();
+        if !h.app.console_enabled() {
+            return;
+        }
+        h.frame(&[KeyCode::Char('`')]);
+        assert!(h.app.console.open);
+        let drawn = h.app.world_draws;
+        for _ in 0..5 {
+            h.frame(&[]);
+            assert!(h.app.repaint_urgent(), "an open console is always repainted");
+        }
+        assert_eq!(
+            h.app.world_draws,
+            drawn + 5,
+            "a console command can change anything: no cached picture under it"
+        );
+    }
+
+    #[test]
+    fn input_resize_focus_and_clocks_all_ask_for_a_frame() {
+        let mut h = paused_harness();
+        assert!(!h.app.repaint_urgent());
+
+        // A key (even one that does nothing here).
+        h.app.input.begin_frame();
+        h.app.input.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        h.app.update(1.0 / 60.0);
+        assert!(h.app.repaint_urgent(), "a key press");
+        h.frame(&[]);
+        assert!(!h.app.repaint_urgent());
+
+        // A resize report.
+        h.app.input.begin_frame();
+        h.app.input.note_resize();
+        h.app.update(1.0 / 60.0);
+        assert!(h.app.repaint_urgent() && h.app.input.resized, "a resize");
+
+        // Focus coming back (and it is flagged for a full repaint).
+        h.app.input.begin_frame();
+        h.app.input.set_focused(false);
+        h.app.input.begin_frame();
+        h.app.input.set_focused(true);
+        h.app.update(1.0 / 60.0);
+        assert!(h.app.repaint_urgent() && h.app.input.refocused, "focus regained");
+        h.frame(&[]);
+        assert!(!h.app.input.refocused && !h.app.repaint_urgent());
+
+        // A screen change is flagged until the next render.
+        h.app.input.begin_frame();
+        h.app.input.handle_key(KeyEvent::from(KeyCode::Char('p')));
+        h.app.update(1.0 / 60.0);
+        assert!(matches!(h.app.screen, Screen::Playing) && h.app.repaint);
+        h.terminal.draw(|f| h.app.render(f)).unwrap();
+        assert!(!h.app.repaint);
+
+        // The volume read-out is a clock: it must also disappear on time.
+        let mut h = paused_harness();
+        h.frame(&[KeyCode::Char('[')]);
+        h.app.input.begin_frame();
+        h.app.update(1.0 / 60.0);
+        assert!(h.app.hud.flashing(), "the volume key shows a read-out");
+        assert!(h.app.repaint_urgent(), "the volume read-out is on screen");
+        for _ in 0..600 {
+            h.frame(&[]);
+        }
+        assert!(!h.app.repaint_urgent(), "and it expires");
+
+        // The auto-pick toast spacing clock.
+        let mut h = paused_harness();
+        h.app.auto_pick_wait = 0.4;
+        assert!(h.app.repaint_urgent(), "auto-pick toasts are spaced by a clock");
+    }
+
     #[test]
     fn pause_freezes_run_and_resumes() {
         let mut h = Harness::new(80, 30);

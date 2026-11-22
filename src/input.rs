@@ -221,6 +221,18 @@ pub struct InputState {
     pub mouse_clicked: bool,
     /// True if any pointer movement, drag, press or release occurred this frame.
     pub mouse_active: bool,
+    /// Input events of every kind seen this frame (keys, releases, pointer
+    /// motion, pad, focus, resize). The frame loop renders at once when this
+    /// is non-zero; a still screen with no input is not re-rendered at all.
+    pub events: u32,
+    /// Did anything other than pointer motion arrive this frame? Discrete
+    /// input may have changed what the frozen world looks like (a zoom key, a
+    /// console command), so the cached world picture is redrawn.
+    pub discrete: bool,
+    /// The terminal reported a new size this frame.
+    pub resized: bool,
+    /// Focus came back this frame: the screen is repainted in full.
+    pub refocused: bool,
 }
 
 impl InputState {
@@ -252,11 +264,32 @@ impl InputState {
             prefer_mouse: false,
             mouse_down: false,
             mouse_clicked: false,
+            events: 0,
+            discrete: false,
+            resized: false,
+            refocused: false,
             mouse_active: false,
         }
     }
 
+    /// Count one input event for the frame loop's repaint decisions (see
+    /// [`InputState::events`]). `discrete` is false for pointer motion.
+    pub fn note_event(&mut self, discrete: bool) {
+        self.events = self.events.saturating_add(1);
+        self.discrete |= discrete;
+    }
+
+    /// The terminal reported a new size this frame.
+    pub fn note_resize(&mut self) {
+        self.note_event(true);
+        self.resized = true;
+    }
+
     pub fn begin_frame(&mut self) {
+        self.events = 0;
+        self.discrete = false;
+        self.resized = false;
+        self.refocused = false;
         self.pressed.clear();
         self.mouse_events.clear();
         self.mouse_clicked = false;
@@ -279,6 +312,7 @@ impl InputState {
 
     /// Inject one pad event (the seam tests use; `main` feeds these from gilrs).
     pub fn pad_event(&mut self, ev: PadEvent) {
+        self.note_event(true);
         let was = self.dash_input_held();
         self.pad.apply(ev);
         if matches!(ev, PadEvent::Disconnected) {
@@ -299,6 +333,10 @@ impl InputState {
     /// Terminal focus reporting. Losing focus drops every held key, mouse
     /// button and pad button (their releases never arrive).
     pub fn set_focused(&mut self, focused: bool) {
+        self.note_event(true);
+        if focused && !self.focused {
+            self.refocused = true;
+        }
         let was = self.focused;
         self.focused = focused;
         self.pad.set_focused(focused);
@@ -572,6 +610,7 @@ impl InputState {
     }
 
     pub fn handle_key(&mut self, ev: KeyEvent) {
+        self.note_event(true);
         if self.handle_modifier(ev) {
             return;
         }
@@ -632,6 +671,10 @@ impl InputState {
     }
 
     pub fn handle_mouse(&mut self, ev: MouseEvent) {
+        self.note_event(!matches!(
+            ev.kind,
+            MouseEventKind::Moved | MouseEventKind::Drag(_)
+        ));
         if !matches!(ev.kind, MouseEventKind::Up(_)) {
             self.last_device = Device::Mouse;
         }

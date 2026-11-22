@@ -862,6 +862,12 @@ impl HudState {
     /// Age the volume read-out. Called by [`Self::tick`] during play and by the
     /// app on the other screens, so a read-out set on the title or the options
     /// plate fades instead of lingering until the next run starts.
+    /// Is a timed read-out (volume, zoom) on screen? The frame loop keeps
+    /// rendering while one is, so it also disappears on time.
+    pub fn flashing(&self) -> bool {
+        self.volume_flash.is_some() || self.zoom_flash.is_some()
+    }
+
     pub fn tick_volume_flash(&mut self, dt: f32) {
         if let Some((channel, pct, left)) = self.volume_flash {
             self.volume_flash = if left - dt.max(0.0) > 0.0 {
