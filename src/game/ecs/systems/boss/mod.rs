@@ -3527,6 +3527,52 @@ fn level_blood() -> Rgb {
 // Systems
 // ============================================================================
 
+/// Where and for whom a boss arrives: everything [`open_fight`] needs.
+pub(crate) struct Arrival {
+    pub kind: BossKind,
+    pub pos: Vec2,
+    pub arena: TileRect,
+    pub dock: Vec2,
+    /// The rat's position (the boss faces and targets it).
+    pub rat: Vec2,
+    pub difficulty: usize,
+    /// The body's damage-number identity (`NextEnemyId`).
+    pub id: u32,
+    /// The level seed the fight's own rng stream is derived from.
+    pub seed: u64,
+}
+
+/// The books every boss arrival keeps, in one place: the body with the
+/// arrival's HP, its facing, and a fresh fight (own rng stream, no completion
+/// flag, the horde parted). Shared by the scheduled spawn
+/// ([`boss_spawn_system`]) and the console's `boss <kind> here`
+/// (`World::force_boss_here`), so the two cannot drift apart. The caller picks
+/// the place, emits the arrival burst from `fight.rng`, and spawns the body.
+pub(crate) fn open_fight(fight: &mut BossFight, a: Arrival) -> Boss {
+    let hunting = !a.arena.contains_world(a.rat);
+    // The director's curve freezes at BOSS_TIME; the boss spawns then.
+    let hp = a.kind.base_hp()
+        * a.kind.hp_scale()
+        * director::boss_hp_mult_for(a.difficulty, director::BOSS_TIME);
+    let mut boss = Boss::new(a.kind, a.pos, hp, a.arena, a.dock, hunting);
+    boss.id = a.id;
+    boss.facing = (a.rat - a.pos).normalized();
+    boss.target = a.rat;
+    fight.rng = BossRng::for_run(a.seed, a.kind);
+    fight.next_id = boss.id;
+    fight.level_complete = false;
+    // The horde parts for its master: the arriving boss scatters the live
+    // bodies (the same no-loot removal the boss's *death* uses — see
+    // [`BossFight::horde_break`]). Measured (bot batches, seed 900): with 400+
+    // bodies up at the boss time, most of the rat's fire went into the crowd
+    // and measurably none into the boss, so boss fights ranged from 16 s to 35
+    // minutes on the same build. A clean stage is the fair version of that: the
+    // fight is about the boss, the throttled horde trickles back in, and the
+    // gems already on the floor are untouched.
+    fight.horde_break = true;
+    boss
+}
+
 /// Spawn the level's boss when the director raises [`BossDue`].
 ///
 /// `BossDue` is raised by `director::raise_boss_due`; P3 owns that call site.
@@ -3584,27 +3630,19 @@ pub fn boss_spawn_system(
             .nearest_open_center(centre, SizeClass::Large, 16)
             .unwrap_or(centre)
     };
-    let hunting = !arena.contains_world(player.pos);
-    // The director's curve freezes at BOSS_TIME; the boss spawns then.
-    let hp = kind.base_hp()
-        * kind.hp_scale()
-        * director::boss_hp_mult_for(difficulty.0, director::BOSS_TIME);
-    let mut boss = Boss::new(kind, pos, hp, arena, dock, hunting);
-    boss.id = next_enemy_id.take();
-    boss.facing = (player.pos - pos).normalized();
-    boss.target = player.pos;
-    fight.rng = BossRng::for_run(level.seed, kind);
-    fight.next_id = boss.id;
-    fight.level_complete = false;
-    // The horde parts for its master: the arriving boss scatters the live
-    // bodies (the same no-loot removal the boss's *death* uses — see
-    // [`BossFight::horde_break`]). Measured (bot batches, seed 900): with 400+
-    // bodies up at the boss time, most of the rat's fire went into the crowd
-    // and measurably none into the boss, so boss fights ranged from 16 s to 35
-    // minutes on the same build. A clean stage is the fair version of that: the
-    // fight is about the boss, the throttled horde trickles back in, and the
-    // gems already on the floor are untouched.
-    fight.horde_break = true;
+    let boss = open_fight(
+        &mut fight,
+        Arrival {
+            kind,
+            pos,
+            arena,
+            dock,
+            rat: player.pos,
+            difficulty: difficulty.0,
+            id: next_enemy_id.take(),
+            seed: level.seed,
+        },
+    );
     let accent = level.palette.accent;
     vfx::emit_boss_spawn(&mut particles, &mut fight.rng.0, pos, accent);
     shake.amount = shake.amount.max(14.0);

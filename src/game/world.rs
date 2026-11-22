@@ -1813,30 +1813,32 @@ impl World {
             .nearest_open_center(arena.center_world(), large, 16)
             .unwrap_or_else(|| arena.center_world());
         let pos = self.boss_point_beside(self.player.pos, kind.body_radius());
-        let hunting = !arena.contains_world(self.player.pos);
         let difficulty = self.difficulty_override.unwrap_or(self.level_index);
-        let hp = kind.base_hp()
-            * kind.hp_scale()
-            * director::boss_hp_mult_for(difficulty, director::BOSS_TIME);
-        let mut boss = Boss::new(kind, pos, hp, arena, dock, hunting);
-        boss.id = self.next_enemy_id;
+        let id = self.next_enemy_id;
         self.next_enemy_id = self.next_enemy_id.wrapping_add(1).max(1);
-        boss.facing = (self.player.pos - pos).normalized();
-        boss.target = self.player.pos;
-        // The arrival's burst draws from the boss's own stream, exactly as the
-        // scheduled spawn's does, so it never perturbs the run rng.
-        let mut rng = super::ecs::systems::boss::BossRng::for_run(self.level.seed, kind);
+        // The same books as the scheduled arrival (`boss::open_fight`): HP,
+        // facing, a fresh fight on the boss's own rng stream, the horde parted.
         let accent = self.level.palette.accent;
-        crate::game::particle::vfx::emit_boss_spawn(&mut self.particles, &mut rng.0, pos, accent);
-        {
+        let boss = {
             let mut fight = self.ecs.resource_mut::<BossFight>();
-            fight.rng = rng;
-            fight.next_id = boss.id;
-            fight.level_complete = false;
-            // The horde parts for its master, as it does for the arrival at
-            // the boss time (see `boss_spawn_system`).
-            fight.horde_break = true;
-        }
+            let boss = super::ecs::systems::boss::open_fight(
+                &mut fight,
+                super::ecs::systems::boss::Arrival {
+                    kind,
+                    pos,
+                    arena,
+                    dock,
+                    rat: self.player.pos,
+                    difficulty,
+                    id,
+                    seed: self.level.seed,
+                },
+            );
+            // The arrival's burst draws from the boss's own stream, exactly as
+            // the scheduled spawn's does, so it never perturbs the run rng.
+            crate::game::particle::vfx::emit_boss_spawn(&mut self.particles, &mut fight.rng.0, pos, accent);
+            boss
+        };
         spawn_with_id(&mut self.ecs, boss);
         // This is the level's fight now: the director's hand-off checks this
         // flag, so there is no second arrival at `BOSS_TIME`, and the horde
