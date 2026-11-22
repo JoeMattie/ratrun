@@ -330,7 +330,12 @@ pub const SPIRAL_TURN: f32 = 30.0;
 /// Distance between two body points in the laid lane.
 pub const SPIRAL_SPACING: f32 = 15.0;
 /// How fast the head comes down the lane.
-pub const SPIRAL_SPEED: f32 = 118.0;
+///
+/// Only just over the rat's own 58 px/s walk: the lane is 21 px wide, so a rat
+/// that simply outruns it survives, and one that hesitates is caught and
+/// bumped. A pursuit the rat can win is the whole point — `SpiralEnd` pays it
+/// back with the hood.
+pub const SPIRAL_SPEED: f32 = 72.0;
 /// Radians of the outermost turn left open (the way out).
 pub const SPIRAL_OPEN: f32 = 1.10;
 /// How far inside the arena's own edge the outermost turn stops.
