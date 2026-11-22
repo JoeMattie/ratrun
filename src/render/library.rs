@@ -639,7 +639,18 @@ fn boss_extent(kind: BossKind) -> (f32, f32) {
             2.0 * (art_boss_broom::STANCE_HALF_WIDTH + 13.0 + 2.0),
         ),
         BossKind::Mower => (44.0, 42.0),
-        BossKind::Mangle => (46.0, 42.0),
+        // The machine is 26 px across, but its card pose is the intake: the
+        // lane runs `NIP_OFFSET + INTAKE_LANE_LEN` (47.5 px) ahead of the body
+        // point. Centred, that lane ran off the plate's right edge, so the
+        // frame is the machine plus the whole lane and the body stands left
+        // of centre (`boss_anchor_x`).
+        BossKind::Mangle => (
+            art_boss_mangle::BODY_RADIUS
+                + art_boss_mangle::NIP_OFFSET
+                + art_boss_mangle::INTAKE_LANE_LEN
+                + 16.0,
+            42.0,
+        ),
         BossKind::NightEdition => (48.0, 44.0),
         BossKind::Magpie => (52.0, 42.0),
         // The tail trails 39 px astern of the body point.
@@ -658,6 +669,19 @@ fn boss_extent(kind: BossKind) -> (f32, f32) {
                 2.0 * (cobra::HOOD_RADIUS + 8.0),
             )
         }
+    }
+}
+
+/// Where the body point stands across the card, as a fraction of its width.
+/// Every boss is centred but the Mangle, whose pose is one-sided: the machine
+/// on the left, its intake lane reaching right.
+fn boss_anchor_x(kind: BossKind) -> f32 {
+    match kind {
+        BossKind::Mangle => {
+            let (need_w, _) = boss_extent(kind);
+            (art_boss_mangle::BODY_RADIUS + 10.0) / need_w
+        }
+        _ => 0.5,
     }
 }
 
@@ -710,7 +734,7 @@ fn draw_boss(art: &mut PixelBuffer, kind: BossKind, accent: Rgb, t: f32) {
 
 /// Draw a boss's card pose at 1:1, body at the buffer's `(w/2, 0.56h)`.
 fn pose_boss(art: &mut PixelBuffer, kind: BossKind, accent: Rgb, t: f32) {
-    let c = Vec2::new(art.w as f32 * 0.5, art.h as f32 * 0.56);
+    let c = Vec2::new(art.w as f32 * boss_anchor_x(kind), art.h as f32 * 0.56);
     let facing = Vec2::new(1.0, 0.0);
     let target = c + Vec2::new(28.0, 4.0);
     let cycle = t.rem_euclid(3.2) / 3.2;
@@ -1570,6 +1594,43 @@ mod boss_plate_tests {
                 }
             }
         }
+    }
+
+    /// The Mangle's card pose is its intake: the machine and the whole lane
+    /// ahead of it are on the plate. (Centred, the lane ran off the right
+    /// edge.) Nothing touches the plate's first or last column at any point
+    /// of the loop.
+    #[test]
+    fn the_mangle_and_its_intake_lane_fit_the_plate() {
+        let (w, h) = (44usize, 30usize);
+        for t in [0.0f32, 0.4, 0.9, 1.5, 2.1, 2.9] {
+            let art = plate(BossKind::Mangle, w, h, t);
+            let px = art.pixels();
+            for y in 0..h * 2 {
+                if y * w + w > px.len() {
+                    break;
+                }
+                assert_eq!(px[y * w + w - 1], BG, "t={t}: row {y} runs off the right edge");
+                // The machine's soft ground shadow may graze the left column;
+                // nothing solid does.
+                let left = px[y * w];
+                let off = |a: u8, b: u8| a.abs_diff(b) > 10;
+                assert!(
+                    !(off(left.0, BG.0) || off(left.1, BG.1) || off(left.2, BG.2)),
+                    "t={t}: row {y} runs off the left edge ({left:?})"
+                );
+            }
+        }
+        // The body stands left of centre, with room for itself.
+        let (need_w, _) = boss_extent(BossKind::Mangle);
+        let anchor = boss_anchor_x(BossKind::Mangle) * need_w;
+        assert!(anchor >= crate::game::art_boss_mangle::BODY_RADIUS);
+        assert!(
+            anchor
+                + crate::game::art_boss_mangle::NIP_OFFSET
+                + crate::game::art_boss_mangle::INTAKE_LANE_LEN
+                < need_w
+        );
     }
 
     /// The reduction covers the animal: the extent table always yields a

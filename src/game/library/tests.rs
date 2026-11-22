@@ -753,3 +753,28 @@ fn barbed_wire_is_the_thirteenth_evolution() {
     assert!(evolves.value.contains(WeaponKind::TailThrash.name()));
     assert!(evolves.value.contains(WeaponKind::SpikedTail.name()));
 }
+
+/// A boss card prints the pool the fight really has (the art base, the kind's
+/// scale and the director's boss multiplier, as the spawn computes it), and no
+/// row that reads as a fight length: the old card showed KING COBRA with 630
+/// hit points and "DIES IN 2.6s" (its death animation).
+#[test]
+fn boss_cards_print_the_real_pool_and_no_death_animation_row() {
+    use crate::game::director;
+    for kind in BossKind::all() {
+        let rows = facts(Key::Boss(kind));
+        let rows = rows.rows();
+        assert!(
+            rows.iter().all(|r| r.label != "DIES IN"),
+            "{kind:?} still prints its death animation as a fact"
+        );
+        let hp = rows
+            .iter()
+            .find(|r| r.label == "HIT POINTS")
+            .unwrap_or_else(|| panic!("{kind:?} has no HIT POINTS row"));
+        let pool = kind.base_hp() * kind.hp_scale() * director::boss_hp_mult_for(2, director::BOSS_TIME);
+        assert_eq!(hp.value, format!("{pool:.0}"), "{kind:?}");
+        assert!(pool >= 5_000.0, "{kind:?}: {pool} is not a boss pool");
+        assert!((0.0..=1.0).contains(&hp.bar), "{kind:?}: bar {}", hp.bar);
+    }
+}

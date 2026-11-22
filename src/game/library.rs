@@ -1953,12 +1953,20 @@ fn miniboss_home(k: MinibossKind) -> Option<(Theme, usize)> {
 }
 
 fn boss_facts(k: BossKind, f: &mut Facts) {
-    const HP_REF: f32 = 3000.0;
-    let hp = k.base_hp() * k.hp_scale();
+    // The pool the fight really has: the art's base, the kind's scale and the
+    // director's boss multiplier at the boss clock, exactly as the spawn
+    // computes it (`boss::spawn`). The card used to print `base × scale`
+    // alone, an eighth of the real pool (KING COBRA read 630).
+    const HP_REF: f32 = 30_000.0;
+    let stage = boss_theme(k).stage();
+    let hp = k.base_hp()
+        * k.hp_scale()
+        * crate::game::director::boss_hp_mult_for(stage, crate::game::director::BOSS_TIME);
     f.push_bar("HIT POINTS", format!("{hp:.0}"), hp / HP_REF);
     f.push("CONTACT", format!("{:.0}", k.contact_damage()));
     f.push("PHASES", format!("{}", k.phase_for(1.0).max(3)));
-    f.push("DIES IN", format!("{:.1}s", k.death_duration()));
+    // (No "DIES IN" row: it printed the death animation's length, which read
+    // as "this boss dies in 2.6 s".)
     f.push(
         "FLOOR",
         format!(

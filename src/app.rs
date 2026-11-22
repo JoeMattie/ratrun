@@ -4928,7 +4928,15 @@ impl App {
                 return;
             }
             self.last_map = panel;
-            draw_map_legend(frame, game, panel);
+            let back = self.input.controls.action_label(Action::Back).to_uppercase();
+            draw_map_legend(
+                frame,
+                game,
+                panel,
+                &self.map_key_label,
+                &back,
+                &self.size_key_label,
+            );
         } else {
             let panel = minimap_source::compact_rect_for_size(game, compact_size);
             if panel.is_empty() {
@@ -5034,17 +5042,36 @@ fn entries_for(items: &[Keepable]) -> Vec<campaign_ui::UpgradeEntry<'static>> {
 /// the one rule that rail does not state: opening the map pauses the world.
 /// Drawn on the first free row under the modal, and skipped when the terminal
 /// has no room for it.
-fn draw_map_legend(frame: &mut Frame, game: Rect, panel: Rect) {
+fn draw_map_legend(
+    frame: &mut Frame,
+    game: Rect,
+    panel: Rect,
+    map_key: &str,
+    back_key: &str,
+    size_key: &str,
+) {
     let y = panel.bottom();
     if y >= game.bottom() || game.height == 0 {
         return;
     }
-    let text = if game.width >= 72 {
-        " Tab/Esc close · N minimap size · click to close · game paused "
-    } else if game.width >= 60 {
-        " Tab/Esc close · N size · click to close · game paused "
+    // The live Map, Back and MinimapSize bindings, not the default key names
+    // (this modal is paused, so building the line each frame costs nothing
+    // that matters). A key bound to both closes is named once.
+    let close = if map_key.eq_ignore_ascii_case(back_key) {
+        map_key.to_string()
     } else {
-        " Tab/Esc close · N size · game paused "
+        format!("{map_key}/{back_key}")
+    };
+    let wide = format!(" {close} close · {size_key} minimap size · click to close · game paused ");
+    let mid = format!(" {close} close · {size_key} size · click to close · game paused ");
+    let narrow = format!(" {close} close · {size_key} size · game paused ");
+    let fits = |t: &str| (t.chars().count() as u16) < game.width;
+    let text: &str = if game.width >= 72 && fits(&wide) {
+        &wide
+    } else if game.width >= 60 && fits(&mid) {
+        &mid
+    } else {
+        &narrow
     };
     let width = text.chars().count() as u16;
     if width >= game.width {
@@ -6630,6 +6657,14 @@ mod tests {
         assert!(map.contains("[J] CLOSE"), "the modal names the new Map key:\n{map}");
         assert!(map.contains("[J] Close  [H] Size"), "the rail names both keys:\n{map}");
         assert!(!map.contains("[TAB]"), "a stale map hint:\n{map}");
+        // The line under the modal names them too (it used to print a literal
+        // "Tab/Esc close · N minimap size").
+        let screen = hh.screen_text();
+        assert!(
+            screen.contains("J/ESC close · H minimap size"),
+            "the line under the map names the live keys:\n{screen}"
+        );
+        assert!(!screen.contains("Tab/Esc"), "a stale line under the map:\n{screen}");
         hh.frame(&[KeyCode::Char('j')]);
         assert!(!hh.app.map_open);
 
