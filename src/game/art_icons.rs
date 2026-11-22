@@ -1254,6 +1254,33 @@ const RIPCORD: Icon = {
     }
 };
 
+/// Barbed Wire (Spiked Tail) — a taut rust-red strand strung with steel barbs.
+const BARBED_WIRE: Icon = {
+    const PAL: &[(u8, Rgb)] = &[
+        (b'W', (255, 255, 255)), // barb tip
+        (b'S', (206, 214, 226)), // barb steel
+        (b'R', (214, 96, 62)),   // wire
+        (b'D', (128, 52, 40)),   // wire shade
+    ];
+    Icon {
+        large: grid8(
+            [
+                b".W....W.",
+                b".S.W..S.",
+                b"RRDSRRDR",
+                b".S.S..S.",
+                b".W..W.W.",
+                b"...WS...",
+                b"DRRSRRDR",
+                b"..W.S...",
+            ],
+            PAL,
+        ),
+        small: grid4([b"W.W.", b"RSRS", b".W.W", b"DRSR"], PAL),
+        accent: (214, 96, 62),
+    }
+};
+
 // ============================================================================
 // Gene splices (10)
 // ============================================================================
@@ -1559,7 +1586,7 @@ pub fn weapon(kind: WeaponKind) -> &'static Icon {
 }
 
 /// Look up the icon for a weapon's **evolution** (`WeaponKind::evolution`), or
-/// `None` for a weapon that has none (Spiked Tail). No wildcard: a new weapon
+/// `None` for a weapon that has none (none today). No wildcard: a new weapon
 /// must say here whether it has an evolved icon.
 pub fn evolution(kind: WeaponKind) -> Option<&'static Icon> {
     Some(match kind {
@@ -1575,7 +1602,7 @@ pub fn evolution(kind: WeaponKind) -> Option<&'static Icon> {
         WeaponKind::Hantavirus => &DEAD_LETTER,
         WeaponKind::LaserEyes => &CARBON_COPY,
         WeaponKind::SuperDash => &RIPCORD,
-        WeaponKind::SpikedTail => return None,
+        WeaponKind::SpikedTail => &BARBED_WIRE,
     })
 }
 
@@ -1907,6 +1934,7 @@ pub fn draw_evolved_with_depth(buf: &mut Buffer, area: Rect, icon: &Icon, depth:
         // The 8×8 icon centred in a 10×10 box (one column, one half-row in),
         // inside a complete gold border.
         let mut combined = [[None; 10]; 10];
+        #[allow(clippy::needless_range_loop)]
         for y in 0..10 {
             for x in 0..10 {
                 if x == 0 || y == 0 || x == 9 || y == 9 {
@@ -2079,6 +2107,7 @@ mod tests {
             ("DeadLetter", &DEAD_LETTER),
             ("CarbonCopy", &CARBON_COPY),
             ("Ripcord", &RIPCORD),
+            ("Barbed Wire", &BARBED_WIRE),
             ("GlassIncisors", &GLASS_INCISORS),
             ("BoilerHeart", &BOILER_HEART),
             ("HollowBones", &HOLLOW_BONES),

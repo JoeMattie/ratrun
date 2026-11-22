@@ -1549,10 +1549,19 @@ fn escape_exists(mb: &Miniboss, ppos: Vec2, level: &Level) -> bool {
     for i in 0..8 {
         let ang = i as f32 * std::f32::consts::TAU / 8.0;
         let dir = Vec2::from_angle(ang);
-        let sample = ppos + dir * 12.0;
-        if !shape.contains(sample, crate::game::ecs::constants::PLAYER_RADIUS) {
+        // Walk outward a step at a time, as far as the rat can get inside the
+        // 1 s tell. A row that engages from inside its own reach
+        // (`engage_range`) covers every 12 px sample around the rat, so one
+        // ring of samples would call every such tell inescapable and turn the
+        // aim off the rat; the way out only has to be open floor all the way
+        // to the first sample the shape does not cover.
+        for step in 1..=3 {
+            let sample = ppos + dir * (12.0 * step as f32);
             let cell = crate::game::collision::cell_of(sample);
-            if level.tiles.get(cell.0, cell.1).passable(SizeClass::Small) {
+            if !level.tiles.get(cell.0, cell.1).passable(SizeClass::Small) {
+                break;
+            }
+            if !shape.contains(sample, crate::game::ecs::constants::PLAYER_RADIUS) {
                 return true;
             }
         }

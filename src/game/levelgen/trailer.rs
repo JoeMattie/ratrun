@@ -288,7 +288,12 @@ fn build_layout(tiles: &mut TileMap, rng: &mut StdRng) -> (Layout, TrailerDeck) 
     // About one map in eight hides a warren inside the first crate stack
     // cluster, within the maze contract's near-start radius (32 cells).
     let slot = if rng.random_range(0..MAZE_ONE_IN) == 0 {
-        let slot = TileRect::new(DECK_LEFT + TAILGATE_W + 6, DECK_TOP + 2, 16, 12);
+        // Odd on both axes: the warren's aisle lattice steps by two from the
+        // ring's inner edge, so only an odd inner span puts the last aisle
+        // hard against the far ring. An even slot (it was 16 x 12) left a
+        // partition between the east/south ring and the lattice, and a one-way
+        // door cut there could never be reached from inside.
+        let slot = TileRect::new(DECK_LEFT + TAILGATE_W + 6, DECK_TOP + 2, 15, 11);
         // The walkway around the warren is open deck, so the breach and the
         // one-way door both open onto public floor.
         carve(tiles, slot.inflate(2));

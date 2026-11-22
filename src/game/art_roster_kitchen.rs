@@ -743,7 +743,7 @@ pub(crate) fn draw_sinkcrab(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, _cam: V
         // Legs: three a side, reaching out sideways, in two scuttle frames.
         let swap = step(fr, 0.8);
         for (i, u) in [1.4f32, 0.0, -1.4].into_iter().enumerate() {
-            let out = if (i % 2 == 0) == swap { 6.4 } else { 5.6 };
+            let out = if (i % 2 == 0) == swap { 6.5 } else { 5.5 };
             for side in [-1.0f32, 1.0] {
                 let (x, y) = at(fr, u * s, side * out * s);
                 pb.plot(x, y, shell.lo);
