@@ -129,3 +129,22 @@ pub const HORSESHOE_CLASS: &str = "PRE-PIPE — STILL HERE";
 /// The field note the drain rats pass around. It is the boss's lore: something
 /// older than the facility crawled up the outflow and has not left.
 pub const HORSESHOE_FIELD_NOTE: &str = "It was here before the pipes were. It will be here after.";
+
+// ============================================================================
+// The Flatbed's pool mate: THE REDTAIL
+// ============================================================================
+
+/// Name plate for the hawk (the getaway ride's second possible boss).
+///
+/// The magpie is the trailer's thief; this is the thing that has been following
+/// the truck. Its plate carries its own class tag like the crab's and the
+/// megabat's, because the flatbed is not a campaign floor.
+pub const HAWK_NAME: &str = "THE REDTAIL";
+
+/// Classification tag beside the name plate. While the bird is high the plate
+/// swaps this for `art_boss_hawk::OVERHEAD_TAG`, so the rat is told why its
+/// weapons are finding nothing.
+pub const HAWK_CLASS: &str = "CLASS-V STOOPING PREDATOR";
+
+/// The field note on the deck's wind-blasted noticeboard.
+pub const HAWK_FIELD_NOTE: &str = "Nothing on this deck is bigger than its shadow.";

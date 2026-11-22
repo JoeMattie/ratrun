@@ -99,8 +99,8 @@ use super::smoke::{SmokeLayer, SmokeScene};
 use super::weapon::{Weapon, WeaponKind};
 use super::art_walls::{Cardinal, WallKind};
 use super::{
-    art_boss_broom, art_boss_cat, art_boss_horseshoe_crab, art_boss_magpie, art_boss_mangle,
-    art_boss_megarat,
+    art_boss_broom, art_boss_cat, art_boss_hawk, art_boss_horseshoe_crab, art_boss_magpie,
+    art_boss_mangle, art_boss_megarat,
     art_boss_mower, art_boss_night_edition, art_enemy, art_floor, art_marks, art_miniboss,
     art_props, art_rat, art_traps, art_walls, art_wave3a,
 };
@@ -753,6 +753,15 @@ impl World {
     /// accessors.
     pub fn boss_kind(&self) -> Option<BossKind> {
         self.living_boss().map(|b| b.kind)
+    }
+
+    /// Is the living boss out of reach (the Redtail overhead, only a shadow)?
+    ///
+    /// The HUD's boss bar and name plate read this so the rat is told why its
+    /// weapons are finding nothing (`render::overlay`, `render::hud::boss_plate`).
+    /// `&self`, allocation-free, like the other HUD accessors.
+    pub fn boss_overhead(&self) -> bool {
+        self.living_boss().map(|b| b.overhead()).unwrap_or(false)
     }
 
     /// Targetable points for auto-aim: the boss's art-defined hit shapes.
@@ -2474,6 +2483,24 @@ impl World {
             }
         }
 
+        // The Redtail's live marks (the locked talon reticle, the rake lane, the
+        // nape of a bird with its feet in the planks): re-stamped over the
+        // lighting for the same reason as the crab's tells — the deck's ambient
+        // must never dim the shape the rat has to leave.
+        {
+            let mut query = self.ecs.query::<&Boss>();
+            for boss in query.iter(&self.ecs) {
+                if let BossArtView::Hawk(v) = boss.view() {
+                    let margin = boss.kind.cull_margin();
+                    if on_screen(self.w2s(boss.pos, cam), margin, viewport)
+                        || on_screen(self.w2s(boss.target, cam), margin + 40.0, viewport)
+                    {
+                        art_boss_hawk::draw_tell_overlay(pb, &v, cam);
+                    }
+                }
+            }
+        }
+
         // Boss-owned projectiles (blade discs, shrapnel).
         self.draw_boss_projectiles(pb, cam);
 
@@ -2651,6 +2678,9 @@ impl World {
                 BossArtView::MegaRat(v) => {
                     art_boss_megarat::draw_megarat_ground(pb, &v, cam, accent);
                 }
+                BossArtView::Hawk(v) => {
+                    art_boss_hawk::draw_hawk_ground(pb, &v, cam, accent);
+                }
             }
         }
     }
@@ -2696,6 +2726,7 @@ impl World {
                     art_boss_horseshoe_crab::draw(pb, &v, cam, accent)
                 }
                 BossArtView::MegaRat(v) => art_boss_megarat::draw_megarat(pb, &v, cam, accent),
+                BossArtView::Hawk(v) => art_boss_hawk::draw_hawk(pb, &v, cam, accent),
             }
             self.light_map.mark_emissive_highlights(pb, self.w2s(boss.pos, cam), 19);
         }

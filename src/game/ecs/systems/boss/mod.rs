@@ -11,6 +11,7 @@
 //! | 3 | Laundry | The Mangle (wringer) | [`crate::game::art_boss_mangle`] |
 //! | 4 | Printworks | THE NIGHT EDITION (press) | [`crate::game::art_boss_night_edition`] |
 //! | — (getaway) | Flatbed | The Magpie (bird) | [`crate::game::art_boss_magpie`] |
+//! | — (getaway) | Flatbed | The Redtail (hawk) | [`crate::game::art_boss_hawk`] |
 //!
 //! Every floor's boss comes from [`BossKind::pool_for_theme`] + the level seed
 //! ([`BossKind::pool_pick`]; `for_theme` is the first entry, the floor's
@@ -108,6 +109,7 @@ use rand::{RngExt, SeedableRng};
 
 use crate::audio::Sfx;
 use crate::game::art_boss_broom::{self, BroomBossState, BroomBossView};
+use crate::game::art_boss_hawk::{self, HawkState, HawkView};
 use crate::game::art_boss_horseshoe_crab::{self, CrabState, CrabView};
 use crate::game::art_boss_mangle::{self, MangleState, MangleView};
 use crate::game::art_boss_cat::{self, BossCatState, BossCatView};
@@ -141,6 +143,7 @@ use crate::render::palette::Rgb;
 
 pub mod broom;
 pub mod cat;
+pub mod hawk;
 pub mod horseshoe_crab;
 pub mod magpie;
 pub mod mangle;
@@ -169,6 +172,15 @@ pub enum BossKind {
     Magpie,
     /// Sewer pool mate of the Jungle Cat — The Horseshoe (horseshoe crab).
     HorseshoeCrab,
+    /// The Flatbed's pool mate — **The Redtail**, the hawk that has been
+    /// following the truck.
+    ///
+    /// A predator from above: it arrives as a shadow (no hit shapes at all
+    /// while it is high), dive bombs a talon reticle onto the deck, and
+    /// sometimes stoops to a low hover where it is fully hittable and reaches
+    /// down with feather darts, a marked grab or a strafing talon rake. See
+    /// [`hawk`] and [`crate::game::art_boss_hawk`].
+    Hawk,
     /// Kitchen's second fight — SUBJECT R-01, the Megarat.
     ///
     /// The facility's first success: a rat the size of the room, collared and
@@ -195,7 +207,7 @@ const KITCHEN_POOL: &[BossKind] = &[BossKind::Broom, BossKind::MegaRat];
 const LAB_POOL: &[BossKind] = &[BossKind::Mower];
 const LAUNDRY_POOL: &[BossKind] = &[BossKind::Mangle];
 const PRINTWORKS_POOL: &[BossKind] = &[BossKind::NightEdition];
-const TRAILER_POOL: &[BossKind] = &[BossKind::Magpie];
+const TRAILER_POOL: &[BossKind] = &[BossKind::Magpie, BossKind::Hawk];
 
 impl BossKind {
     /// The floor's **original** boss — the pinned, seedless choice.
@@ -294,6 +306,7 @@ impl BossKind {
             BossKind::Magpie => art_boss_magpie::BOSS_BASE_HP,
             BossKind::HorseshoeCrab => art_boss_horseshoe_crab::BOSS_BASE_HP,
             BossKind::MegaRat => art_boss_megarat::BOSS_BASE_HP,
+            BossKind::Hawk => art_boss_hawk::BOSS_BASE_HP,
         }
     }
 
@@ -309,6 +322,7 @@ impl BossKind {
             BossKind::Magpie => art_boss_magpie::BODY_RADIUS,
             BossKind::HorseshoeCrab => art_boss_horseshoe_crab::BODY_RADIUS,
             BossKind::MegaRat => art_boss_megarat::BODY_RADIUS,
+            BossKind::Hawk => art_boss_hawk::BODY_RADIUS,
         }
     }
 
@@ -418,6 +432,18 @@ impl BossKind {
             // the final number. Measured with
             // `megarat::tests::a_bot_kills_the_megarat_on_the_real_arena`.
             BossKind::MegaRat => 2.6,
+            // The flatbed's second bird, expressed like the first: art pool ×
+            // scale × the framework's ×8. **Assumed, not measured** (the wave-3
+            // rule is no bot batches for content workers): a near-complete
+            // build lands ~1.1 k dps into the magpie, and the hawk is *only
+            // hittable while it is low* — roughly 45 % of a rotation (the
+            // stoop, the hover, its attacks and the buried punish window) —
+            // so the raw pool has to be a little over half the magpie's for the
+            // same 45-80 s beat. 1,600 × 2.6 lands the fight beside the Magpie's
+            // ~54 s at the assumed uptime; a balance pass owns the number. See
+            // `hawk::tests::a_bot_kills_the_hawk_on_the_real_deck` for the
+            // measurement that must be taken.
+            BossKind::Hawk => 2.6,
         }
     }
 
@@ -439,6 +465,7 @@ impl BossKind {
             BossKind::Magpie => art_boss_magpie::CONTACT_DAMAGE,
             BossKind::HorseshoeCrab => art_boss_horseshoe_crab::CONTACT_DAMAGE,
             BossKind::MegaRat => art_boss_megarat::CONTACT_DAMAGE,
+            BossKind::Hawk => art_boss_hawk::CONTACT_DAMAGE,
         }
     }
 
@@ -454,6 +481,7 @@ impl BossKind {
             BossKind::Magpie => art_boss_magpie::DEATH_DURATION,
             BossKind::HorseshoeCrab => art_boss_horseshoe_crab::DEATH_DURATION,
             BossKind::MegaRat => art_boss_megarat::DEATH_DURATION,
+            BossKind::Hawk => art_boss_hawk::DEATH_DURATION,
         }
     }
 
@@ -532,6 +560,15 @@ impl BossKind {
                     1
                 }
             }
+            BossKind::Hawk => {
+                if hp_frac <= art_boss_hawk::PHASE3_HP_FRAC {
+                    3
+                } else if hp_frac <= art_boss_hawk::PHASE2_HP_FRAC {
+                    2
+                } else {
+                    1
+                }
+            }
         }
     }
 
@@ -547,6 +584,8 @@ impl BossKind {
             BossKind::Magpie => BossState::Magpie(MagpieState::Perch),
             BossKind::HorseshoeCrab => BossState::HorseshoeCrab(CrabState::Dome),
             BossKind::MegaRat => BossState::MegaRat(MegaRatState::Groom),
+            // It arrives as a shadow: the first state is the circling overhead.
+            BossKind::Hawk => BossState::Hawk(HawkState::Circle),
         }
     }
 
@@ -563,6 +602,7 @@ impl BossKind {
             BossKind::Magpie => art_boss_magpie::PERCH_DURATION[0],
             BossKind::HorseshoeCrab => art_boss_horseshoe_crab::DOME_DURATION[0],
             BossKind::MegaRat => art_boss_megarat::GROOM_DURATION[0],
+            BossKind::Hawk => art_boss_hawk::CIRCLE_DURATION[0],
         }
     }
 
@@ -578,6 +618,7 @@ impl BossKind {
             BossKind::Magpie => BossState::Magpie(MagpieState::Death),
             BossKind::HorseshoeCrab => BossState::HorseshoeCrab(CrabState::Death),
             BossKind::MegaRat => BossState::MegaRat(MegaRatState::Death),
+            BossKind::Hawk => BossState::Hawk(HawkState::Death),
         }
     }
 
@@ -593,6 +634,7 @@ impl BossKind {
             BossKind::Magpie => 0x7C15_9E37_A1B2_C3D4,
             BossKind::HorseshoeCrab => 0x51ED_270B_9C4D_0A6F,
             BossKind::MegaRat => 0x3F2A_8D71_C6B4_05E9,
+            BossKind::Hawk => 0x8D4C_2F91_B7A3_6E52,
         }
     }
 
@@ -608,6 +650,7 @@ impl BossKind {
             BossKind::Magpie => art_boss_magpie::CULL_MARGIN,
             BossKind::HorseshoeCrab => art_boss_horseshoe_crab::CULL_MARGIN,
             BossKind::MegaRat => art_boss_megarat::CULL_MARGIN,
+            BossKind::Hawk => art_boss_hawk::CULL_MARGIN,
         }
     }
 
@@ -623,6 +666,7 @@ impl BossKind {
             BossKind::Magpie => &magpie::MagpieController,
             BossKind::HorseshoeCrab => &horseshoe_crab::HorseshoeCrabController,
             BossKind::MegaRat => &megarat::MegaRatController,
+            BossKind::Hawk => &hawk::HawkController,
         }
     }
 
@@ -800,6 +844,8 @@ pub enum BossState {
     /// Sewer pool mate: the horseshoe crab.
     HorseshoeCrab(CrabState),
     MegaRat(MegaRatState),
+    /// The Flatbed's pool mate: the hawk (overhead, diving, hovering).
+    Hawk(HawkState),
 }
 
 /// One art-defined hit shape. Bosses are hit through these, not a single circle.
@@ -1006,6 +1052,7 @@ pub enum BossArtView {
     Magpie(MagpieView),
     HorseshoeCrab(CrabView),
     MegaRat(MegaRatView),
+    Hawk(HawkView),
 }
 
 // ============================================================================
@@ -1516,6 +1563,24 @@ impl Boss {
                     && self.progress() > 0.12
                     && self.progress() < art_boss_cat::POUNCE_LAND_PROGRESS
             }
+            // The hawk is *out of reach* while it is high: it bumps nothing and
+            // the body is drawn in the overhead pass (over the rat, as a bird
+            // over a deck should be). The art owns the rule.
+            BossState::Hawk(s) => art_boss_hawk::is_overhead(s),
+            _ => false,
+        }
+    }
+
+    /// Is the hawk only a shadow right now (out of reach for every weapon)?
+    ///
+    /// Always false for the other kinds. The HUD reads it for the boss bar's
+    /// header (`render::overlay`) and `boss_plate` swaps the classification tag
+    /// for [`art_boss_hawk::OVERHEAD_TAG`], so the rat is told *why* its
+    /// weapons are finding nothing.
+    #[inline]
+    pub fn overhead(&self) -> bool {
+        match self.state {
+            BossState::Hawk(s) => art_boss_hawk::is_overhead(s),
             _ => false,
         }
     }
@@ -1718,6 +1783,37 @@ impl Boss {
                 ];
                 BossHitShapes::from_slice(&out)
             }
+            BossKind::Hawk => {
+                // **While it is high it has no hit shapes at all**: the shadow
+                // is the boss on the screen and the bird is out of every
+                // weapon's reach (the plate says so — see `Boss::overhead`).
+                // Down on the deck all three circles are grounded, and while the
+                // talons are buried the *nape* replaces the tail root, which is
+                // what makes it the first auto-aim point of the punish window.
+                let view = self.hawk_view();
+                if art_boss_hawk::is_overhead(view.state) {
+                    return BossHitShapes::empty();
+                }
+                let circles = art_boss_hawk::body_hit_circles(&view);
+                let shapes: [BossHitShape; 3] = [
+                    BossHitShape::Circle {
+                        center: circles[0].0,
+                        radius: circles[0].1,
+                        grounded: true,
+                    },
+                    BossHitShape::Circle {
+                        center: circles[1].0,
+                        radius: circles[1].1,
+                        grounded: true,
+                    },
+                    BossHitShape::Circle {
+                        center: circles[2].0,
+                        radius: circles[2].1,
+                        grounded: true,
+                    },
+                ];
+                BossHitShapes::from_slice(&shapes)
+            }
         }
     }
 
@@ -1772,6 +1868,7 @@ impl Boss {
             BossKind::Magpie => BossArtView::Magpie(self.magpie_view()),
             BossKind::HorseshoeCrab => BossArtView::HorseshoeCrab(self.crab_view()),
             BossKind::MegaRat => BossArtView::MegaRat(self.megarat_view()),
+            BossKind::Hawk => BossArtView::Hawk(self.hawk_view()),
         }
     }
 
@@ -1906,6 +2003,34 @@ impl Boss {
             dash_cd: (self.scratch[megarat::S_DASH_CD] / art_boss_megarat::DASH_COOLDOWN)
                 .clamp(0.0, 1.0),
             walled: self.scratch[megarat::S_WALLED] > 0.5,
+        }
+    }
+
+    fn hawk_state(&self) -> HawkState {
+        match self.state {
+            BossState::Hawk(s) => s,
+            _ => HawkState::Circle,
+        }
+    }
+
+    /// The Redtail's view. The framework hands it one of the controller's own
+    /// scratch slots (the feint's decoy point) so the art can draw the hollow
+    /// print the shadow jinked to without knowing anything else about the fight.
+    pub(crate) fn hawk_view(&self) -> HawkView {
+        HawkView {
+            pos: self.pos,
+            facing: self.facing,
+            state: self.hawk_state(),
+            progress: self.progress(),
+            anim: self.anim,
+            hit_flash: self.hit_flash,
+            hp_frac: self.hp_frac(),
+            phase: self.phase,
+            target: self.target,
+            lane_start: self.pounce_origin,
+            decoy: Vec2::new(self.scratch[hawk::S_DECOY_X], self.scratch[hawk::S_DECOY_Y]),
+            sweep: self.swipe_side,
+            hunting: self.hunting,
         }
     }
 
@@ -2237,6 +2362,41 @@ pub enum BossCue {
     MegaRatCall,
     /// The `Death` beat: the first success going down.
     MegaRatDeath,
+    // ---- THE REDTAIL (the Flatbed's second bird) ----
+    /// `Circle` entry: the keening "ca-caww" of a raptor taking up the sky.
+    HawkCall,
+    /// The dive's lock: the reticle is in and the scream rises.
+    HawkLock,
+    /// The feint's jink: a cut-off cry as the shadow throws sideways.
+    HawkFeint,
+    /// The impact: a single frame of talons into the planks.
+    HawkImpact,
+    /// `TalonBury` entry: splinters, and a bird that cannot pull its feet out.
+    HawkStuck,
+    /// `Wheel` / `Climb` entry: two hard wing-beats off the deck.
+    HawkWings,
+    /// `Stoop` entry: the air coming down with it.
+    HawkStoop,
+    /// `Hover` entry: the low wash of a raptor beating its wings.
+    HawkHover,
+    /// One downdraft ring (a wing-beat that pushes the deck).
+    HawkDowndraft,
+    /// `DartWindup` entry: the head thrown forward over the mark.
+    HawkDartWindup,
+    /// The feather darts crossing the deck.
+    HawkDarts,
+    /// `GrabWindup` entry: the feet come down.
+    HawkGrabWindup,
+    /// The talons closing on the mark.
+    HawkGrab,
+    /// `RakeWindup` entry: it banks over the lane.
+    HawkRakeWindup,
+    /// The rake itself: talons ripping down the planks.
+    HawkRake,
+    /// `Alight` entry (phase change): the hackles going up and resettling.
+    HawkRuffle,
+    /// The `Death` beat: it comes down out of the sky for the last time.
+    HawkDeath,
 }
 
 impl BossCue {
@@ -2325,6 +2485,27 @@ impl BossCue {
             BossCue::MegaRatDash => Sfx::MegaRatDash,
             BossCue::MegaRatCall => Sfx::MegaRatCall,
             BossCue::MegaRatDeath => Sfx::MegaRatDeath,
+            // The hawk's own voice: the cry, the lock's scream, the slam, the
+            // wind. The feint is a truncated cry (the same sample, its own
+            // particle read) and the tells that share the bird's body borrow
+            // its wing-beat rather than inventing a new one each.
+            BossCue::HawkCall => Sfx::HawkCry,
+            BossCue::HawkLock => Sfx::HawkLock,
+            BossCue::HawkFeint => Sfx::HawkCry,
+            BossCue::HawkImpact => Sfx::HawkImpact,
+            BossCue::HawkStuck => Sfx::HawkStuck,
+            BossCue::HawkWings => Sfx::HawkWings,
+            BossCue::HawkStoop => Sfx::HawkWings,
+            BossCue::HawkHover => Sfx::HawkHover,
+            BossCue::HawkDowndraft => Sfx::HawkWings,
+            BossCue::HawkDartWindup => Sfx::HawkRuffle,
+            BossCue::HawkDarts => Sfx::HawkDarts,
+            BossCue::HawkGrabWindup => Sfx::HawkRuffle,
+            BossCue::HawkGrab => Sfx::HawkGrab,
+            BossCue::HawkRakeWindup => Sfx::HawkCry,
+            BossCue::HawkRake => Sfx::HawkRake,
+            BossCue::HawkRuffle => Sfx::HawkRuffle,
+            BossCue::HawkDeath => Sfx::HawkDeath,
         }
     }
 }
@@ -2932,6 +3113,76 @@ fn emit_cues(
             BossCue::MegaRatDeath => {
                 let blood = level_blood();
                 vfx::emit_boss_cat_death(particles, rng, boss.pos, boss.facing, blood);
+            }
+
+            // ---- the redtail --------------------------------------------
+            // The bird is *in the air*, so its own beats are read on the deck:
+            // a call and a jink are a puff of dust off the boards under the
+            // shadow, the lock is the wind gathering on the mark, the impact
+            // and the buried feet are the deck's own dust and splinters, and
+            // the wing beats are the flatbed's gust family.
+            BossCue::HawkCall | BossCue::HawkFeint | BossCue::HawkRuffle => {
+                vfx::emit_boss_cat_skid(particles, rng, boss.pos, boss.facing, 0.12);
+            }
+            BossCue::HawkLock => {
+                vfx::emit_boss_mower_charge_trail(
+                    particles,
+                    rng,
+                    boss.target,
+                    boss.facing,
+                    false,
+                    0.12,
+                );
+            }
+            BossCue::HawkImpact => {
+                vfx::emit_boss_cat_pounce_land(
+                    particles,
+                    rng,
+                    boss.target,
+                    art_boss_hawk::DIVE_RADIUS,
+                    boss.phase >= 2,
+                );
+            }
+            BossCue::HawkStuck => {
+                vfx::emit_boss_broom_stomp(
+                    particles,
+                    rng,
+                    boss.target,
+                    art_boss_hawk::DIVE_RADIUS,
+                    boss.phase >= 2,
+                );
+            }
+            BossCue::HawkWings | BossCue::HawkStoop | BossCue::HawkHover | BossCue::HawkDowndraft => {
+                vfx::emit_boss_magpie_gust(particles, rng, boss.pos, 0.13);
+            }
+            BossCue::HawkDartWindup | BossCue::HawkGrabWindup | BossCue::HawkRakeWindup => {
+                vfx::emit_boss_cat_skid(particles, rng, boss.pos, boss.facing, 0.10);
+            }
+            BossCue::HawkDarts => {
+                vfx::emit_boss_mower_charge_trail(
+                    particles,
+                    rng,
+                    boss.target,
+                    boss.facing,
+                    false,
+                    0.10,
+                );
+            }
+            BossCue::HawkGrab => {
+                vfx::emit_boss_broom_stomp(
+                    particles,
+                    rng,
+                    boss.target,
+                    art_boss_hawk::GRAB_DROP_RADIUS,
+                    false,
+                );
+            }
+            BossCue::HawkRake => {
+                vfx::emit_boss_cat_skid(particles, rng, boss.pos, boss.facing, 0.16);
+            }
+            BossCue::HawkDeath => {
+                let blood = level_blood();
+                vfx::emit_boss_magpie_death(particles, rng, boss.pos, boss.facing, blood);
             }
         }
     }
@@ -3851,6 +4102,7 @@ impl BossTrace {
                     art_boss_megarat::MegaRatState::GnawStuck
                         | art_boss_megarat::MegaRatState::ThrashRecover
                 )
+                | BossState::Hawk(HawkState::TalonBury)
         )
     }
 

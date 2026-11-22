@@ -214,11 +214,35 @@ pub enum Sfx {
     /// hard whip-crack. Announced when the tail starts bristling, so the crack
     /// in the sample lands on the frame the tail does.
     Lash,
+    // ---- THE REDTAIL (the Flatbed's second bird, appended for wave 3) ----
+    /// The keening "ca-caww" as it takes up the sky: a raptor's call, nothing
+    /// like the magpie's corvid rattle.
+    HawkCry,
+    /// The dive's lock: a rising scream that ends on the reticle.
+    HawkLock,
+    /// The impact: a single frame of talons into the planks.
+    HawkImpact,
+    /// The talons buried: splinters, and a bird that cannot pull its feet out.
+    HawkStuck,
+    /// Two hard wing-beats (the wheel, the climb, the stoop, a downdraft ring).
+    HawkWings,
+    /// The low hover's wash: wings working two body-lengths over the deck.
+    HawkHover,
+    /// The feather darts crossing.
+    HawkDarts,
+    /// The talons closing on the mark.
+    HawkGrab,
+    /// Talons ripping down the planks: the strafing rake.
+    HawkRake,
+    /// The hackles going up and resettling (the harmless phase pose).
+    HawkRuffle,
+    /// The last fall.
+    HawkDeath,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 128] = [
+    pub const ALL: [Sfx; 139] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -366,6 +390,18 @@ impl Sfx {
         Sfx::MegaRatCall,
         Sfx::MegaRatDeath,
         Sfx::Lash,
+        // THE REDTAIL (the Flatbed's second bird).
+        Sfx::HawkCry,
+        Sfx::HawkLock,
+        Sfx::HawkImpact,
+        Sfx::HawkStuck,
+        Sfx::HawkWings,
+        Sfx::HawkHover,
+        Sfx::HawkDarts,
+        Sfx::HawkGrab,
+        Sfx::HawkRake,
+        Sfx::HawkRuffle,
+        Sfx::HawkDeath,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -499,6 +535,17 @@ impl Sfx {
             Sfx::MegaRatCall => "MEGARAT_CALL",
             Sfx::MegaRatDeath => "MEGARAT_DEATH",
             Sfx::Lash => "LASH",
+            Sfx::HawkCry => "HAWK_CRY",
+            Sfx::HawkLock => "HAWK_LOCK",
+            Sfx::HawkImpact => "HAWK_IMPACT",
+            Sfx::HawkStuck => "HAWK_STUCK",
+            Sfx::HawkWings => "HAWK_WINGS",
+            Sfx::HawkHover => "HAWK_HOVER",
+            Sfx::HawkDarts => "HAWK_DARTS",
+            Sfx::HawkGrab => "HAWK_GRAB",
+            Sfx::HawkRake => "HAWK_RAKE",
+            Sfx::HawkRuffle => "HAWK_RUFFLE",
+            Sfx::HawkDeath => "HAWK_DEATH",
         }
     }
 
@@ -627,6 +674,11 @@ impl Sfx {
             Sfx::MegaRatStuck | Sfx::MegaRatDash | Sfx::MegaRatCall | Sfx::MegaRatDeath => 1,
             // The crack is one sharp event; pitch variants would only smear it.
             Sfx::Lash => 1,
+            // The bird's voice is heard constantly (three wing-beats a hover),
+            // so it gets a spread; the set-piece slams are single.
+            Sfx::HawkCry | Sfx::HawkLock | Sfx::HawkWings | Sfx::HawkHover => 3,
+            Sfx::HawkDarts | Sfx::HawkRake | Sfx::HawkRuffle => 2,
+            Sfx::HawkImpact | Sfx::HawkStuck | Sfx::HawkGrab | Sfx::HawkDeath => 1,
         }
     }
 
@@ -754,6 +806,11 @@ impl Sfx {
             Sfx::MegaRatChitter => 0,
             // A weapon shot: it must not steal a voice from a hurt or a kill.
             Sfx::Lash => 1,
+            // The bird's set pieces outrank the horde: the scream that locks the
+            // reticle and the slam that follows it are the fight's grammar.
+            Sfx::HawkLock | Sfx::HawkImpact | Sfx::HawkDeath => 3,
+            Sfx::HawkStuck | Sfx::HawkGrab | Sfx::HawkRake => 2,
+            Sfx::HawkCry | Sfx::HawkWings | Sfx::HawkHover | Sfx::HawkDarts | Sfx::HawkRuffle => 1,
         }
     }
 
@@ -8448,6 +8505,472 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             }
             m.add_short_tail(0.11, 2600.0);
             m.finish(0.46, 1.5, 0.8, 12.0)
+        }
+
+        // ---- THE REDTAIL (the Flatbed's second bird) -------------------
+
+        // 92. HawkCry: the keening "ca-caww" of a raptor taking up the sky.
+        // Two falling formant notes with a hard, tight throat and a rasp on
+        // the second — a hawk's voice, not the magpie's rattle.
+        Sfx::HawkCry => {
+            const PITCH: [f32; 3] = [1.0, 0.90, 1.12];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.46);
+            // "kee-": the sharp rising front.
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.09,
+                f0: 780.0 * p,
+                f1: 1320.0 * p,
+                pitch_pow: 0.55,
+                wave: Wave::Saw,
+                gain: 0.40,
+                attack_s: 0.004,
+                decay_pow: 1.2,
+                filter: FilterMode::BandPass,
+                fc0: 1600.0 * p,
+                fc1: 2600.0 * p,
+                q: 3.4,
+                ..Default::default()
+            });
+            // "-aaww": the long falling tail with a rasp of throat.
+            m.add_osc(OscLayer {
+                start_s: 0.08,
+                dur_s: 0.26,
+                f0: 1280.0 * p,
+                f1: 540.0 * p,
+                pitch_pow: 0.85,
+                wave: Wave::Saw,
+                gain: 0.34,
+                attack_s: 0.006,
+                decay_pow: 1.5,
+                filter: FilterMode::BandPass,
+                fc0: 2200.0 * p,
+                fc1: 900.0 * p,
+                q: 2.6,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.04,
+                dur_s: 0.28,
+                pink: true,
+                gain: 0.12,
+                attack_s: 0.02,
+                decay_pow: 1.4,
+                filter: FilterMode::BandPass,
+                fc0: 1400.0,
+                fc1: 700.0,
+                q: 1.8,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_short_tail(0.12, 5200.0);
+            m.finish(0.44, 1.4, 1.6, 30.0)
+        }
+
+        // 93. HawkLock: the dive's tell. A rising scream over a wind that is
+        // already moving — the sound of something committing above you.
+        Sfx::HawkLock => {
+            const PITCH: [f32; 3] = [1.0, 0.94, 1.07];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.50);
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.34,
+                f0: 620.0 * p,
+                f1: 2050.0 * p,
+                pitch_pow: 1.35,
+                wave: Wave::Saw,
+                gain: 0.36,
+                attack_s: 0.05,
+                decay_pow: 0.9,
+                filter: FilterMode::BandPass,
+                fc0: 900.0,
+                fc1: 3400.0,
+                fc_pow: 1.2,
+                q: 3.0,
+                ..Default::default()
+            });
+            // A thin harmonic riding the same rise, so it cuts through a horde.
+            m.add_osc(OscLayer {
+                start_s: 0.04,
+                dur_s: 0.30,
+                f0: 1240.0 * p,
+                f1: 4100.0 * p,
+                pitch_pow: 1.35,
+                wave: Wave::Triangle,
+                gain: 0.16,
+                attack_s: 0.04,
+                decay_pow: 1.0,
+                ..Default::default()
+            });
+            // The air already moving: the fall's wind starting up.
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.40,
+                pink: false,
+                gain: 0.30,
+                attack_s: 0.10,
+                decay_pow: 0.65,
+                filter: FilterMode::BandPass,
+                fc0: 700.0,
+                fc1: 2600.0,
+                fc_pow: 1.1,
+                q: 1.4,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_short_tail(0.14, 6000.0);
+            m.finish(0.46, 1.5, 4.0, 18.0)
+        }
+
+        // 94. HawkImpact: one frame of talons into the planks. A hard low thud,
+        // a bright crack and a scatter of splinters.
+        Sfx::HawkImpact => {
+            let mut m = MixBuf::new(0.46);
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.16,
+                f0: 150.0,
+                f1: 46.0,
+                pitch_pow: 0.85,
+                wave: Wave::Sine,
+                gain: 0.62,
+                attack_s: 0.001,
+                decay_pow: 1.8,
+                ..Default::default()
+            });
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.030,
+                pink: false,
+                gain: 0.46,
+                attack_s: 0.0006,
+                decay_pow: 2.6,
+                filter: FilterMode::BandPass,
+                fc0: 3200.0,
+                fc1: 1100.0,
+                q: 1.2,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // Splinters: three quick ticks off the deck.
+            for k in 0..3 {
+                m.add_noise(NoiseLayer {
+                    start_s: 0.03 + k as f32 * 0.045,
+                    dur_s: 0.05,
+                    pink: true,
+                    gain: 0.16 - 0.03 * k as f32,
+                    attack_s: 0.002,
+                    decay_pow: 2.0,
+                    filter: FilterMode::BandPass,
+                    fc0: 1900.0,
+                    fc1: 800.0,
+                    q: 2.2,
+                    seed: base_seed ^ (0xC0 + k as u32),
+                    ..Default::default()
+                });
+            }
+            m.add_short_tail(0.14, 3600.0);
+            m.finish(0.44, 1.6, 0.6, 26.0)
+        }
+
+        // 95. HawkStuck: the feet in the planks. Wood, then a trapped cry.
+        Sfx::HawkStuck => {
+            let mut m = MixBuf::new(0.52);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.018,
+                pink: false,
+                gain: 0.36,
+                attack_s: 0.0008,
+                decay_pow: 2.6,
+                filter: FilterMode::BandPass,
+                fc0: 2400.0,
+                fc1: 1200.0,
+                q: 1.5,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // The cry of a bird that is stuck: high, short, indignant.
+            m.add_osc(OscLayer {
+                start_s: 0.05,
+                dur_s: 0.26,
+                f0: 980.0,
+                f1: 470.0,
+                pitch_pow: 0.8,
+                wave: Wave::Saw,
+                gain: 0.26,
+                attack_s: 0.006,
+                decay_pow: 1.5,
+                filter: FilterMode::BandPass,
+                fc0: 1900.0,
+                fc1: 900.0,
+                q: 2.5,
+                ..Default::default()
+            });
+            m.add_short_tail(0.12, 4600.0);
+            m.finish(0.48, 1.4, 1.2, 20.0)
+        }
+
+        // 96. HawkWings: two hard wing-beats. The wheel, the climb, the stoop
+        // and every downdraft ring are this sample.
+        Sfx::HawkWings => {
+            const PITCH: [f32; 3] = [1.0, 0.92, 1.08];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.40);
+            for k in 0..2 {
+                let at = k as f32 * 0.11;
+                m.add_noise(NoiseLayer {
+                    start_s: at,
+                    dur_s: 0.12,
+                    pink: true,
+                    gain: 0.34 - 0.08 * k as f32,
+                    attack_s: 0.007,
+                    decay_pow: 1.7,
+                    filter: FilterMode::LowPass,
+                    fc0: 1100.0 * p,
+                    fc1: 320.0 * p,
+                    q: 0.9,
+                    seed: base_seed ^ (0xD0 + k as u32),
+                    ..Default::default()
+                });
+            }
+            m.add_short_tail(0.09, 2400.0);
+            m.finish(0.36, 1.3, 8.0, 34.0)
+        }
+
+        // 97. HawkHover: the low wash of a raptor holding station. Two slow
+        // overlapping breaths rather than beats: it is working, not striking.
+        Sfx::HawkHover => {
+            const PITCH: [f32; 3] = [1.0, 0.95, 1.05];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.60);
+            for k in 0..2 {
+                m.add_noise(NoiseLayer {
+                    start_s: k as f32 * 0.16,
+                    dur_s: 0.34,
+                    pink: true,
+                    gain: 0.24 - 0.06 * k as f32,
+                    attack_s: 0.05,
+                    decay_pow: 0.8,
+                    filter: FilterMode::BandPass,
+                    fc0: 520.0 * p,
+                    fc1: 1400.0 * p,
+                    q: 1.1,
+                    seed: base_seed ^ (0xE0 + k as u32),
+                    ..Default::default()
+                });
+            }
+            m.add_short_tail(0.12, 3000.0);
+            m.finish(0.56, 1.2, 14.0, 44.0)
+        }
+
+        // 98. HawkDarts: three feather darts out of the bill, a beat apart.
+        Sfx::HawkDarts => {
+            const PITCH: [f32; 2] = [1.0, 0.93];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.36);
+            for k in 0..3 {
+                let at = k as f32 * 0.045;
+                m.add_osc(OscLayer {
+                    start_s: at,
+                    dur_s: 0.09,
+                    f0: 2600.0 * p,
+                    f1: 900.0 * p,
+                    pitch_pow: 1.4,
+                    wave: Wave::Sine,
+                    gain: 0.22 - 0.04 * k as f32,
+                    attack_s: 0.002,
+                    decay_pow: 2.0,
+                    ..Default::default()
+                });
+            }
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.20,
+                pink: true,
+                gain: 0.18,
+                attack_s: 0.01,
+                decay_pow: 1.4,
+                filter: FilterMode::BandPass,
+                fc0: 3200.0,
+                fc1: 1300.0,
+                q: 2.0,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_short_tail(0.08, 6200.0);
+            m.finish(0.32, 1.3, 1.5, 30.0)
+        }
+
+        // 99. HawkGrab: the talons closing. A snap, a soft weight taken, and a
+        // short possessive cry.
+        Sfx::HawkGrab => {
+            let mut m = MixBuf::new(0.42);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.020,
+                pink: false,
+                gain: 0.34,
+                attack_s: 0.0006,
+                decay_pow: 2.4,
+                filter: FilterMode::BandPass,
+                fc0: 3600.0,
+                fc1: 1600.0,
+                q: 1.4,
+                seed: base_seed,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.01,
+                dur_s: 0.14,
+                f0: 240.0,
+                f1: 120.0,
+                pitch_pow: 0.7,
+                wave: Wave::Triangle,
+                gain: 0.30,
+                attack_s: 0.004,
+                decay_pow: 1.6,
+                ..Default::default()
+            });
+            m.add_osc(OscLayer {
+                start_s: 0.09,
+                dur_s: 0.18,
+                f0: 880.0,
+                f1: 520.0,
+                pitch_pow: 0.9,
+                wave: Wave::Saw,
+                gain: 0.18,
+                attack_s: 0.008,
+                decay_pow: 1.4,
+                filter: FilterMode::BandPass,
+                fc0: 1800.0,
+                fc1: 900.0,
+                q: 2.4,
+                ..Default::default()
+            });
+            m.add_short_tail(0.10, 4000.0);
+            m.finish(0.38, 1.4, 1.0, 22.0)
+        }
+
+        // 100. HawkRake: talons ripping down the planks at speed.
+        Sfx::HawkRake => {
+            const PITCH: [f32; 2] = [1.0, 0.92];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.40);
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.18,
+                pink: true,
+                gain: 0.42,
+                attack_s: 0.02,
+                decay_pow: 0.8,
+                filter: FilterMode::BandPass,
+                fc0: 500.0 * p,
+                fc1: 3200.0 * p,
+                fc_pow: 1.3,
+                q: 1.6,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // The claws catching on the boards, in a fast ripple.
+            for k in 0..4 {
+                m.add_noise(NoiseLayer {
+                    start_s: 0.05 + k as f32 * 0.05,
+                    dur_s: 0.045,
+                    pink: false,
+                    gain: 0.22 - 0.03 * k as f32,
+                    attack_s: 0.001,
+                    decay_pow: 2.2,
+                    filter: FilterMode::BandPass,
+                    fc0: 2600.0 * p,
+                    fc1: 1200.0,
+                    q: 2.4,
+                    seed: base_seed ^ (0xF0 + k as u32),
+                    ..Default::default()
+                });
+            }
+            m.add_short_tail(0.10, 4400.0);
+            m.finish(0.36, 1.5, 3.0, 20.0)
+        }
+
+        // 101. HawkRuffle: the hackles going up and resettling. Dry, tight
+        // feathers — the same family as the magpie's clatter, an octave up.
+        Sfx::HawkRuffle => {
+            const PITCH: [f32; 2] = [1.0, 1.09];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.34);
+            for k in 0..6 {
+                m.add_noise(NoiseLayer {
+                    start_s: k as f32 * 0.038,
+                    dur_s: 0.045,
+                    pink: true,
+                    gain: 0.20 - 0.02 * k as f32,
+                    attack_s: 0.002,
+                    decay_pow: 2.1,
+                    filter: FilterMode::BandPass,
+                    fc0: (2100.0 + 260.0 * k as f32) * p,
+                    fc1: 1300.0,
+                    q: 2.0,
+                    seed: base_seed ^ (0x60 + k as u32),
+                    ..Default::default()
+                });
+            }
+            m.add_short_tail(0.09, 4800.0);
+            m.finish(0.30, 1.2, 2.0, 26.0)
+        }
+
+        // 102. HawkDeath: the last fall. A long falling cry, then the deck.
+        Sfx::HawkDeath => {
+            let mut m = MixBuf::new(0.92);
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.46,
+                f0: 1180.0,
+                f1: 260.0,
+                pitch_pow: 1.15,
+                wave: Wave::Saw,
+                gain: 0.32,
+                attack_s: 0.01,
+                decay_pow: 1.2,
+                filter: FilterMode::BandPass,
+                fc0: 2200.0,
+                fc1: 620.0,
+                fc_pow: 1.2,
+                q: 2.6,
+                ..Default::default()
+            });
+            // The wind going out of it.
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.50,
+                pink: true,
+                gain: 0.22,
+                attack_s: 0.03,
+                decay_pow: 0.9,
+                filter: FilterMode::LowPass,
+                fc0: 1600.0,
+                fc1: 420.0,
+                q: 0.8,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // The deck.
+            m.add_osc(OscLayer {
+                start_s: 0.46,
+                dur_s: 0.20,
+                f0: 130.0,
+                f1: 38.0,
+                pitch_pow: 0.85,
+                wave: Wave::Sine,
+                gain: 0.42,
+                attack_s: 0.002,
+                decay_pow: 1.7,
+                ..Default::default()
+            });
+            m.add_short_tail(0.20, 3200.0);
+            m.finish(0.86, 1.5, 1.4, 44.0)
         }
     }
 }

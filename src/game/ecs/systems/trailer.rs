@@ -95,6 +95,10 @@ const ENEMY_RECOVERY_MARGIN: i32 = 2;
 pub const GUST_WIND_GEMS: f32 = 44.0;
 /// The same for light bodies (a bird's wing-beat is nothing to a brute).
 pub const GUST_WIND_ENEMIES: f32 = 22.0;
+/// How hard the Redtail's hover downdraft shoves a loose gem off the planks
+/// under it (px/s, radial). The light bodies get half of it: a wing-beat is
+/// nothing to a brute.
+pub const HAWK_DRAFT_PUSH: f32 = 52.0;
 
 /// The flatbed's per-tick hazard pass. See the module docs for the order.
 #[allow(clippy::too_many_arguments)]
@@ -276,6 +280,51 @@ pub fn trailer_system(
                     continue;
                 }
                 let to = e.pos + Vec2::new(-GUST_WIND_ENEMIES * dt, 0.0);
+                if slipstream_floor(&level, to) {
+                    e.pos = to;
+                }
+            }
+        }
+    }
+
+    // ---- the redtail's downdraft ----------------------------------------
+    //
+    // The hawk's hover beats damage-free rings at the *rat* (they are its own
+    // hazards, queued by the controller). This is what the same wing-beat does
+    // to everything lying loose on the planks: a radial shove away from the
+    // bird, so a hovering raptor scatters a gem pile and shoves light bodies
+    // out from under itself. Read from the boss component — a pure function of
+    // its state and progress — so there is no new resource and no rng.
+    if dt > 0.0 && !deck.is_empty() {
+        let mut hover: Option<(Vec2, f32)> = None;
+        for boss in bosses.iter() {
+            if boss.dead || boss.kind != BossKind::Hawk {
+                continue;
+            }
+            let BossState::Hawk(state) = boss.state else {
+                continue;
+            };
+            if crate::game::art_boss_hawk::downdraft_active(state, boss.progress()) {
+                hover = Some((boss.pos, HAWK_DRAFT_PUSH));
+            }
+        }
+        if let Some((from, push)) = hover {
+            for mut gem in gems.iter_mut() {
+                let away = (gem.pos - from).normalized();
+                let to = gem.pos + away * (push * dt);
+                if slipstream_floor(&level, to) {
+                    gem.pos = to;
+                }
+            }
+            for &(_, entity) in order.iter() {
+                let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
+                    continue;
+                };
+                if !e.alive() || e.radius > WIND_MAX_RADIUS || e.stun > 0.0 {
+                    continue;
+                }
+                let away = (e.pos - from).normalized();
+                let to = e.pos + away * (push * 0.5 * dt);
                 if slipstream_floor(&level, to) {
                     e.pos = to;
                 }

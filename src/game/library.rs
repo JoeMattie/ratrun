@@ -317,6 +317,7 @@ fn boss_name(k: BossKind) -> &'static str {
         BossKind::HorseshoeCrab | BossKind::MegaRat => {
             crate::render::hud::boss_codename_kind(k).0
         }
+        BossKind::Hawk => crate::render::hud::boss_codename_kind(BossKind::Hawk).0,
     }
 }
 
@@ -506,6 +507,7 @@ pub fn all_rows() -> Vec<Row> {
         BossKind::Magpie,
         BossKind::HorseshoeCrab,
         BossKind::MegaRat,
+        BossKind::Hawk,
     ] {
         let (hint, dossier) = boss_text(k);
         rows.push(Row {
@@ -879,6 +881,15 @@ fn boss_text(k: BossKind) -> (&'static str, &'static str) {
              fights with your kit: the bite, the tail, the squeak, the dash, each one \
              larger, slower and marked on the floor first. Every move it misses is a \
              window. It has won this fight before.",
+        ),
+        BossKind::Hawk => (
+            "Flatbed · the getaway",
+            "The other bird. The magpie wants the cargo; this one wants you, and it has \
+             been following the truck since the last weigh station with its shadow. High \
+             up it cannot be touched at all — watch the shape crossing the planks, step \
+             off the talon print, and be there when it buries its feet in the oak. When \
+             it stoops to hover, it is finally reachable, and it knows it: darts, a \
+             marked grab and a talon rake down the boards.",
         ),
     }
 }
@@ -1560,6 +1571,7 @@ fn boss_answer(k: BossKind) -> &'static str {
         BossKind::Magpie => "cross the wind, not against it",
         BossKind::HorseshoeCrab => "get behind the dome, hit the gills",
         BossKind::MegaRat => "leave the marked shape, punish the miss",
+        BossKind::Hawk => "step off the talon print, then bite the nape",
     }
 }
 
@@ -2307,6 +2319,7 @@ fn boss_at(i: usize) -> Option<BossKind> {
         BossKind::Magpie,
         BossKind::HorseshoeCrab,
         BossKind::MegaRat,
+        BossKind::Hawk,
     ]
     .get(i)
     .copied()

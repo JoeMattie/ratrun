@@ -193,7 +193,8 @@ impl BossController for NightEditionController {
             | BossState::Mangle(_)
             | BossState::HorseshoeCrab(_)
             | BossState::Magpie(_)
-            | BossState::MegaRat(_) => {}
+            | BossState::MegaRat(_)
+            | BossState::Hawk(_) => {}
         }
 
         // The art owns the multiplier and the recovery states' contact rule;

@@ -1949,6 +1949,70 @@ impl LightMap {
                     }
                 }
             }
+            BossState::Hawk(st) => {
+                use crate::game::art_boss_hawk::HawkState;
+                // While the bird is high the only thing on the deck is its
+                // shadow, so the key light sits *there*: a tawny pool that
+                // reads the bird's position through the flatbed's ambient.
+                let (col, r, int, sc) = match st {
+                    HawkState::Dive => {
+                        if progress >= 0.55 {
+                            ((255, 96, 62), 62.0, 262, 66)
+                        } else {
+                            ((255, 176, 96), 58.0, 220, 52)
+                        }
+                    }
+                    HawkState::TalonBury => ((255, 214, 128), 56.0, 244, 58),
+                    HawkState::Hover
+                    | HawkState::DartFan
+                    | HawkState::Grab
+                    | HawkState::RakePass => ((255, 168, 92), 54.0, 226, 52),
+                    HawkState::Death => ((206, 174, 150), 62.0, 220, 56),
+                    _ => ((186, 142, 96), 52.0, 186, 40),
+                };
+                if in_range(bsx, bsy, r) {
+                    self.lights.push(PointLight {
+                        x: bsx,
+                        y: bsy,
+                        radius: r,
+                        color: col,
+                        intensity: int,
+                        scatter: sc,
+                        priority: 2,
+                        occlude: false,
+                        hard: false,
+                    });
+                }
+                // The locked reticle and the buried nape are the two marks the
+                // fight is read on: they stay lit through the dark.
+                let weak = match st {
+                    HawkState::Dive if progress >= 0.55 => Some((boss.target, (255, 108, 72), 46.0)),
+                    HawkState::TalonBury => Some((
+                        crate::game::art_boss_hawk::nape_pos(&boss.hawk_view()),
+                        (255, 232, 138),
+                        42.0,
+                    )),
+                    _ => None,
+                };
+                if let Some((at, colour, radius)) = weak {
+                    let wx = at.x - cam.x;
+                    let wy = at.y - cam.y;
+                    if in_range(wx, wy, radius + 4.0) {
+                        let pulse = 0.86 + 0.14 * (elapsed * 12.0).sin().abs();
+                        self.lights.push(PointLight {
+                            x: wx,
+                            y: wy,
+                            radius,
+                            color: colour,
+                            intensity: (268.0 * pulse) as u16,
+                            scatter: 62,
+                            priority: 3,
+                            occlude: false,
+                            hard: false,
+                        });
+                    }
+                }
+            }
             _ => {
                 // Fallback aura for future wave-3 bosses.
                 if in_range(bsx, bsy, 58.0) {

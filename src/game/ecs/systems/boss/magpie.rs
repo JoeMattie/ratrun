@@ -147,7 +147,8 @@ impl BossController for MagpieController {
             | BossState::Mangle(_)
             | BossState::NightEdition(_)
             | BossState::HorseshoeCrab(_)
-            | BossState::MegaRat(_) => {}
+            | BossState::MegaRat(_)
+            | BossState::Hawk(_) => {}
         }
 
         // The art owns the multiplier and the contact rule; apply them after the
@@ -769,8 +770,26 @@ mod tests {
 
     // ---- harness ---------------------------------------------------------
 
+    /// A flatbed seed that draws **the magpie**.
+    ///
+    /// The trailer's boss pool holds two birds now (`BossKind::pool_for_theme`:
+    /// the magpie and the Redtail), and `boss_spawn_system` picks by the level
+    /// seed, so a suite pinned to arbitrary seeds would spend half its tests
+    /// fighting the hawk's file. Seeds that already draw the magpie keep their
+    /// layout; the rest are mapped onto one of the magpie seeds, keeping the
+    /// spread the seeds were chosen for.
+    fn magpie_seed(seed: u64) -> u64 {
+        if BossKind::pool_pick(Theme::Trailer, seed) == BossKind::Magpie {
+            return seed;
+        }
+        (0..4096u64)
+            .filter(|s| BossKind::pool_pick(Theme::Trailer, *s) == BossKind::Magpie)
+            .nth((seed % 32) as usize)
+            .unwrap_or(seed)
+    }
+
     fn trailer_world(seed: u64) -> World {
-        let mut w = World::new(Theme::Trailer, seed);
+        let mut w = World::new(Theme::Trailer, magpie_seed(seed));
         w.level_index = campaign::LEVEL_COUNT;
         w
     }

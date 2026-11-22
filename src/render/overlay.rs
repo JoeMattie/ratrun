@@ -493,7 +493,13 @@ fn draw_boss_ui(frame: &mut Frame, game: Rect, world: &World, state: &mut HudSta
     let kind = world.boss_kind().unwrap_or_else(|| {
         crate::game::ecs::systems::boss::BossKind::pool_pick(world.level.theme, world.level.seed)
     });
-    let (codename, class_tag) = boss_codename_kind(kind);
+    // A bird that is only a shadow names itself as out of reach: the plate is
+    // the fight's own explanation of why the rat's weapons are finding nothing.
+    let (codename, class_tag) = if world.boss_overhead() {
+        crate::render::hud::boss_plate(world)
+    } else {
+        boss_codename_kind(kind)
+    };
 
     // Case 1: pre-boss warning (see `draw_boss_warning`).
     if boss_soon {
@@ -577,7 +583,24 @@ fn draw_boss_ui(frame: &mut Frame, game: Rect, world: &World, state: &mut HudSta
         // allocation-free. Skipped when the header cannot also fit the HP
         // readout to its right.
         let hp_tw = state.boss_hp_text.chars().count() as u16;
-        if let Some(phase) = world.boss_phase() {
+        if world.boss_overhead() {
+            // The hawk's own read in the header's phase slot: it has no phase
+            // worth showing while it is out of reach.
+            let over = "  OVERHEAD";
+            let over_w = over.chars().count() as u16;
+            if hdr_right.saturating_sub(cx) >= over_w + hp_tw + 2 {
+                (cx, _) = buf.set_stringn(
+                    cx,
+                    y_hdr,
+                    over,
+                    hdr_right.saturating_sub(cx) as usize,
+                    Style::default()
+                        .fg(WARN_AMBER)
+                        .bg(PLATE)
+                        .add_modifier(Modifier::BOLD),
+                );
+            }
+        } else if let Some(phase) = world.boss_phase() {
             let mut digit = [0u8; 4];
             let d = char::from_digit(u32::from(phase.min(9)), 10)
                 .unwrap_or('1')

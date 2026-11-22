@@ -300,6 +300,12 @@ pub enum BossAttack {
     Thrash,
     Squeak,
     Dash,
+    // The Flatbed's second bird, the Redtail (appended for wave 3).
+    Dive,
+    TalonBury,
+    Darts,
+    Grab,
+    Rake,
 }
 
 impl BossAttack {
@@ -333,6 +339,11 @@ impl BossAttack {
             BossAttack::Thrash => "tail thrash",
             BossAttack::Squeak => "sonic squeak",
             BossAttack::Dash => "dash",
+            BossAttack::Dive => "dive bomb",
+            BossAttack::TalonBury => "buried talons",
+            BossAttack::Darts => "feather darts",
+            BossAttack::Grab => "talon grab",
+            BossAttack::Rake => "talon rake",
         }
     }
 }
@@ -428,6 +439,18 @@ impl DamageCause {
             },
             // It fires no projectiles; the arm exists so the label never lies.
             DamageCause::BossProjectile(BossKind::MegaRat) => "subject r-01",
+            DamageCause::BossContact(BossKind::Hawk) => "the redtail's body",
+            DamageCause::BossHazard(BossKind::Hawk, a) => match a {
+                BossAttack::Dive => "the dive bomb",
+                BossAttack::TalonBury => "the buried talons",
+                BossAttack::Darts => "feather darts",
+                BossAttack::Grab => "the talon grab",
+                BossAttack::Rake => "the talon rake",
+                _ => "the redtail's hazard",
+            },
+            // It throws darts as boss hazards, never as projectiles; the arm
+            // exists so the label never lies.
+            DamageCause::BossProjectile(BossKind::Hawk) => "the redtail",
             DamageCause::Trap => "mousetrap",
             DamageCause::MinibossSignature(kind) => {
             // The batch's damage-by-source column used to lump every
@@ -1550,6 +1573,7 @@ fn boss_name(kind: BossKind) -> &'static str {
         BossKind::Magpie => "magpie",
         BossKind::HorseshoeCrab => "horseshoe crab",
         BossKind::MegaRat => "subject r-01",
+        BossKind::Hawk => "the redtail",
     }
 }
 
@@ -1800,6 +1824,17 @@ fn boss_attack(state: &BossState) -> BossAttack {
             | crate::game::art_boss_horseshoe_crab::CrabState::Burrow
             | crate::game::art_boss_horseshoe_crab::CrabState::Emerge => BossAttack::Burrow,
             crate::game::art_boss_horseshoe_crab::CrabState::Flipped => BossAttack::Legs,
+            _ => BossAttack::Other,
+        },
+        BossState::Hawk(s) => match s {
+            crate::game::art_boss_hawk::HawkState::Dive => BossAttack::Dive,
+            crate::game::art_boss_hawk::HawkState::TalonBury => BossAttack::TalonBury,
+            crate::game::art_boss_hawk::HawkState::DartWindup
+            | crate::game::art_boss_hawk::HawkState::DartFan => BossAttack::Darts,
+            crate::game::art_boss_hawk::HawkState::GrabWindup
+            | crate::game::art_boss_hawk::HawkState::Grab => BossAttack::Grab,
+            crate::game::art_boss_hawk::HawkState::RakeWindup
+            | crate::game::art_boss_hawk::HawkState::RakePass => BossAttack::Rake,
             _ => BossAttack::Other,
         },
     }
