@@ -22,6 +22,10 @@ use crate::math::Vec2;
 
 use super::*;
 
+/// Enemy rim glints kept per frame: one pixel per visible body. Past this the
+/// crowd is past what the eye separates anyway.
+const MAX_RIMS: usize = 512;
+
 impl LightMap {
     /// Gather all lights from world state; returns the active boss phase if any.
     pub(super) fn gather_lights(
@@ -37,6 +41,9 @@ impl LightMap {
         let theme_prof = theme_ambient(scene.level.theme);
 
         let in_range = |sx: f32, sy: f32, r: f32| -> bool {
+            // A small light throws its faint tail out to `TAIL_REACH` times its
+            // stated radius; cull by the whole reach, not just the core.
+            let r = r * TAIL_REACH;
             sx + r >= 0.0 && sy + r >= 0.0 && sx - r < vw && sy - r < vh
         };
 
@@ -525,6 +532,7 @@ impl LightMap {
                 let sx = e.pos.x - cam.x;
                 let sy = e.pos.y - cam.y;
                 self.gather_floor_tells(e, cam, vw, vh, elapsed);
+                self.gather_rim(e, sx, sy, vw, vh);
                 if e.kind == EnemyKind::Boss {
                     boss_phase = Some(boss_phase.unwrap_or(1));
                     let r = 136.0;
@@ -1057,6 +1065,25 @@ impl LightMap {
         boss_phase
     }
 
+    /// A constant one-pixel rim glint on a living body, in the kind's own
+    /// colour. Ordinary enemies are drawn before the lighting pass, so a body
+    /// standing outside every pool would otherwise be part of the dark floor.
+    /// The glint is a mark, so it survives the darkness at every colour depth
+    /// and costs one pixel per enemy.
+    fn gather_rim(&mut self, e: &Enemy, sx: f32, sy: f32, vw: f32, vh: f32) {
+        if self.rims.len() >= MAX_RIMS {
+            return;
+        }
+        let (x, y) = (
+            sx.round() as i32,
+            (sy - e.radius * 0.6).round() as i32,
+        );
+        if x < 0 || y < 0 || x >= vw as i32 || y >= vh as i32 {
+            return;
+        }
+        self.rims.push((x, y, rim_glint(e.kind.color())));
+    }
+
     /// Light for the floor kinds' own warned attacks, read from the state each
     /// `floor_*` system mirrors onto the body: the Loose Can's lane, the Sump
     /// Leech's tongue, the Walking Syringe's ray, the Egg Timer's ring, the Peg
@@ -1142,7 +1169,9 @@ impl LightMap {
     fn gather_fixed_lights(&mut self, scene: &LightScene<'_>, vw: f32, vh: f32, hard_pools: bool) {
         let cam = scene.cam;
         let elapsed = scene.elapsed;
+        // Small prop lights reach past their stated radius (see `Falloff::Small`).
         let in_range = |sx: f32, sy: f32, r: f32| -> bool {
+            let r = r * TAIL_REACH;
             sx + r >= 0.0 && sy + r >= 0.0 && sx - r < vw && sy - r < vh
         };
 
@@ -1457,7 +1486,9 @@ impl LightMap {
     /// Lights for living/dying bosses: mower headlamp & lidar, cat eyes & pounce
     /// tell, broom slam/sweep tells, and all active `BossHazard` warnings.
     fn gather_boss_lights(&mut self, boss: &Boss, cam: Vec2, vw: f32, vh: f32, elapsed: f32) {
+        // A boss's own small tells and halos reach past their stated radius.
         let in_range = |sx: f32, sy: f32, r: f32| -> bool {
+            let r = r * TAIL_REACH;
             sx + r >= 0.0 && sy + r >= 0.0 && sx - r < vw && sy - r < vh
         };
         let bsx = boss.pos.x - cam.x;
@@ -2250,6 +2281,21 @@ fn emissive_rgb(c: Rgb) -> Rgb {
     let peak = u32::from(c.0.max(c.1).max(c.2)).max(1);
     let lift = |v: u8| (u32::from(v) * 255 / peak) as u8;
     (lift(c.0), lift(c.1), lift(c.2))
+}
+
+/// Share of full brightness an enemy rim glint carries: a hint of the body's
+/// own colour, never a lamp.
+const RIM_GAIN: f32 = 0.12;
+/// The rim in the body's own colour, as a mark pixel. The mark pass keeps it
+/// only if nothing repainted over that pixel, and then lifts the pixel rather
+/// than dimming it.
+fn rim_glint(c: Rgb) -> Rgb {
+    let (r, g, b) = emissive_rgb(c);
+    (
+        (f32::from(r) * RIM_GAIN) as u8,
+        (f32::from(g) * RIM_GAIN) as u8,
+        (f32::from(b) * RIM_GAIN) as u8,
+    )
 }
 
 #[inline]

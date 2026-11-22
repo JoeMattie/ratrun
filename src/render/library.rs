@@ -12,6 +12,21 @@
 //! The card art is drawn into a side [`PixelBuffer`] (the same half-block grid
 //! the playfield uses) and blitted with [`PixelBuffer::render_to`]:
 //!
+//! ## The animated plate
+//!
+//! A card with a runnable subject is drawn from the **real game**: the selected,
+//! unlocked entry owns a [`scene::LibraryScene`] (a sandbox `World` running the
+//! real schedule over a hand-built floor patch) and its art plate is that
+//! world's own `draw` output. The scene is built only after the cursor has
+//! rested on the card for [`scene::REST_SECS`], steps at a fixed dt from the
+//! screen's clock, and is torn down when the selection, the tab or the screen
+//! moves. `RATRUN_LIBRARY_STILL=1` freezes every card to the still pose below;
+//! a locked (`???`) or half-catalogued card never builds one at all.
+//!
+//! The still pose — drawn for a card whose scene does not exist (locked, or
+//! before the cursor has settled) and for every [`scene::Plan::Still`] entry —
+//! is:
+//!
 //! | entry | drawn by |
 //! |---|---|
 //! | enemy | [`art_enemy::draw_enemy_styled`] at ~3× radius, posed through its walk/tell |
@@ -137,8 +152,17 @@ pub struct LibraryUi {
     pub scroll: usize,
     /// Narrow terminals: the card replaces the list.
     pub card_open: bool,
-    /// The card art's own clock (seconds), advanced by the App.
+    /// The still pose's own clock. It only advances while a card's scene runs
+    /// (the scene draws its own picture), so a still plate never moves and the
+    /// screen can go idle on it.
     pub anim: f32,
+    /// `RATRUN_LIBRARY_STILL=1`: every card stays on its still pose.
+    pub still: bool,
+    /// The selected card's running scene, if any.
+    scene: Option<scene::LibraryScene>,
+    /// The key the cursor is resting on, and for how long.
+    resting: Option<Key>,
+    rest: f32,
     art: PixelBuffer,
     scenes: Scenes,
 }
@@ -151,6 +175,10 @@ impl Default for LibraryUi {
             scroll: 0,
             card_open: false,
             anim: 0.0,
+            still: scene::still_from_env(),
+            scene: None,
+            resting: None,
+            rest: 0.0,
             art: PixelBuffer::new(1, 1),
             scenes: Scenes::default(),
         }
@@ -163,6 +191,67 @@ impl LibraryUi {
         self.tab = tab;
         self.cursor = 0;
         self.scroll = 0;
+        self.stop();
+    }
+
+    /// Tear the running scene down (the screen closed, the tab changed).
+    pub fn stop(&mut self) {
+        self.scene = None;
+        self.resting = None;
+        self.rest = 0.0;
+        self.anim = 0.0;
+    }
+
+    /// Has the card on screen got a scene that has moved on since the last
+    /// draw? The App treats this as an animation clock: it repaints at once, so
+    /// an animating card holds the Library at 30 Hz.
+    pub fn frame_due(&self) -> bool {
+        self.scene.as_ref().is_some_and(|s| s.due())
+    }
+
+    /// The running scene's key, for tests and captures.
+    pub fn scene_key(&self) -> Option<Key> {
+        self.scene.as_ref().map(|s| s.key())
+    }
+
+    /// The running scene, for tests and captures.
+    pub fn running_scene(&mut self) -> Option<&mut scene::LibraryScene> {
+        self.scene.as_mut()
+    }
+
+    /// Drive the selected card's animation. `key` is the selection and `live`
+    /// says whether its card is unlocked, catalogued and on screen; anything
+    /// else stops the scene, and a card that stays selected long enough for
+    /// [`scene::REST_SECS`] starts one.
+    pub fn tick_card(&mut self, dt: f32, key: Option<Key>, live: bool) {
+        let want = if self.still { None } else { key.filter(|_| live) };
+        // A different card: the scene belongs to the old one.
+        if self
+            .scene
+            .as_ref()
+            .is_some_and(|running| Some(running.key()) != want)
+        {
+            self.scene = None;
+            self.anim = 0.0;
+        }
+        if want != self.resting {
+            self.resting = want;
+            self.rest = 0.0;
+        }
+        let Some(key) = want else {
+            return;
+        };
+        self.rest += dt.max(0.0);
+        if self.scene.is_none() {
+            if self.rest < scene::REST_SECS {
+                return;
+            }
+            self.scene = scene::LibraryScene::build(key);
+        }
+        if let Some(running) = self.scene.as_mut() {
+            running.advance(dt);
+            self.anim += dt.max(0.0);
+        }
     }
 
     /// Step the selected entry by `step`, clamped to the tab's entries.
@@ -459,7 +548,7 @@ fn draw_list(
                 drawn += 1;
                 let selected = idx == ui.cursor;
                 let seen = lib.is_seen(row.key);
-                let full = full_entry(lib, row.key);
+                let full = catalogued(lib, row.key);
                 if selected {
                     fill_bg(f, r, ROW_SEL_BG);
                 }
@@ -500,7 +589,11 @@ fn draw_list(
 
 /// True when the entry counts as fully catalogued (owned, met, seen). A weapon
 /// or passive only *offered* on a card is a silhouette with a name.
-fn full_entry(lib: &Library, key: Key) -> bool {
+///
+/// This is also the animation gate: a plate that is silhouetted, or a `???`
+/// card, never runs a scene (`App::tick_library_card`), so the art a player is
+/// shown is never louder than the entry they have earned.
+pub fn catalogued(lib: &Library, key: Key) -> bool {
     if !lib.is_seen(key) {
         return false;
     }
@@ -1149,7 +1242,9 @@ fn paint_floor(pb: &mut PixelBuffer, pal: &Palette, t: f32) {
         }
         y += 8;
     }
-    // A faint moving seam, so the still card is not completely static.
+    // A faint seam, so a still card is not completely dead. It is fixed
+    // because `anim` only advances while a scene runs (a moving still plate
+    // would keep the screen from ever going idle).
     let seam = (t * 6.0) as i32 % (pb.w as i32).max(1);
     for yy in 0..pb.h as i32 {
         pb.plot(seam, yy, mix(alt, pal.accent, 0.22));
@@ -1174,7 +1269,7 @@ fn draw_card(
     }
     let row = entry_row(rows, ui.tab, ui.cursor)?;
     let seen = lib.is_seen(row.key);
-    let full = full_entry(lib, row.key);
+    let full = catalogued(lib, row.key);
     // Everything the text half will need, measured before the art takes a row.
     let facts = library::facts(row.key);
     let fact_rows = facts.rows().len() as u16;
@@ -1237,8 +1332,16 @@ fn draw_card(
             .resize(art_rect.width as usize, art_rect.height as usize * 2);
         let anim = ui.anim;
         {
-            let LibraryUi { art, scenes, .. } = ui;
-            draw_art(art, scenes, row.key, accent_rgb, anim);
+            let LibraryUi {
+                art, scenes, scene, ..
+            } = ui;
+            // The card on screen and its scene: the real game. Anything else
+            // (locked, half catalogued, still pose, the cursor still moving)
+            // is the posed art.
+            match scene.as_mut() {
+                Some(running) if running.key() == row.key => running.draw(art),
+                _ => draw_art(art, scenes, row.key, accent_rgb, anim),
+            }
             if !seen || !full {
                 silhouette(art);
             }

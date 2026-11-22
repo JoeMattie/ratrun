@@ -550,7 +550,14 @@ fn bbox_segment(
     b: Vec2,
     pad: f32,
 ) -> Option<(i32, i32, i32, i32)> {
-    if pb.w == 0 || pb.h == 0 || !a.x.is_finite() || !b.x.is_finite() {
+    if pb.w == 0
+        || pb.h == 0
+        || !a.x.is_finite()
+        || !a.y.is_finite()
+        || !b.x.is_finite()
+        || !b.y.is_finite()
+        || !pad.is_finite()
+    {
         return None;
     }
     let x0 = (a.x.min(b.x) - pad).floor() as i32;
@@ -700,28 +707,35 @@ fn draw_line_styled(
     phase: i32,
     additive: bool,
 ) {
-    if !a.x.is_finite() || !b.x.is_finite() || pb.w == 0 || pb.h == 0 {
+    if !a.x.is_finite()
+        || !a.y.is_finite()
+        || !b.x.is_finite()
+        || !b.y.is_finite()
+        || pb.w == 0
+        || pb.h == 0
+        || bbox_segment(pb, a, b, 1.0).is_none()
+    {
         return;
     }
-    let ax = a.x.round() as i32;
-    let ay = a.y.round() as i32;
-    let bx = b.x.round() as i32;
-    let by = b.y.round() as i32;
+    let ax = a.x.clamp(-1e6, 1e6).round() as i64;
+    let ay = a.y.clamp(-1e6, 1e6).round() as i64;
+    let bx = b.x.clamp(-1e6, 1e6).round() as i64;
+    let by = b.y.clamp(-1e6, 1e6).round() as i64;
     let dx = (bx - ax).abs();
     let dy = -(by - ay).abs();
-    let sx = if ax < bx { 1 } else { -1 };
-    let sy = if ay < by { 1 } else { -1 };
+    let sx: i64 = if ax < bx { 1 } else { -1 };
+    let sy: i64 = if ay < by { 1 } else { -1 };
     let mut err = dx + dy;
     let (mut x, mut y) = (ax, ay);
     let mut step = 0i32;
-    let max_steps = (dx - dy + 2).min(640);
+    let max_steps = (dx - dy + 2).min(640) as i32;
     while step <= max_steps {
         let on = dash_period <= 0 || ((step + phase).rem_euclid(dash_period) < dash_on);
-        if on {
+        if on && x >= 0 && y >= 0 && x < pb.w as i64 && y < pb.h as i64 {
             if additive {
-                pb.plot_add(x, y, scale(c, alpha));
+                pb.plot_add(x as i32, y as i32, scale(c, alpha));
             } else {
-                blend_px(pb, x, y, c, alpha);
+                blend_px(pb, x as i32, y as i32, c, alpha);
             }
         }
         if x == bx && y == by {
@@ -1004,11 +1018,28 @@ pub fn draw_mower_ground(pb: &mut PixelBuffer, view: &MowerView, cam: Vec2, acce
         }
         MowerState::FlingBlades => draw_fling_telegraph_ground(pb, &fr),
         MowerState::Overheat => draw_vulnerable_ground_ring(pb, &fr, LED_DANGER, 15.5),
-        MowerState::Flipped => draw_vulnerable_ground_ring(pb, &fr, PCB_TRACE, 14.5),
+        MowerState::Flipped => {
+            draw_vulnerable_ground_ring(pb, &fr, PCB_TRACE, 14.5);
+            // Self-righting slam warning ring (`r = 16 px`, matches `FLIP_SLAM_RADIUS`) during the
+            // final 15% roll-back window so players see the slam coming.
+            if fr.prog >= 0.85 {
+                let t = ((fr.prog - 0.85) / 0.15).clamp(0.0, 1.0);
+                let slam_col = mix(LED_WARN, LED_DANGER, t);
+                draw_ring_styled(pb, fr.pos, 16.0, slam_col, 0.45 + 0.45 * t, 2, fr.anim * 5.0, true);
+            }
+        }
         MowerState::Docking => {
             let chg = ((fr.prog - 0.25) / 0.75).clamp(0.0, 1.0);
             draw_dock_pad(pb, view.dock_pos, fr.anim, chg.max(0.25), cam, accent);
             draw_docking_tether_ground(pb, &fr, view.dock_pos - cam, chg);
+            // Defensive surge annulus telegraph (`r ∈ [8, 26] px` around `dock_pos`) before release.
+            if fr.prog >= 0.54 {
+                let t = ((fr.prog - 0.54) / 0.46).clamp(0.0, 1.0);
+                let dock_s = view.dock_pos - cam;
+                let surge_col = mix(LED_DOCK, LED_DANGER, t);
+                draw_ring_styled(pb, dock_s, 26.0, surge_col, 0.40 + 0.48 * t, 2, fr.anim * 4.5, true);
+                draw_ring_styled(pb, dock_s, 8.0, surge_col, 0.35 + 0.35 * t, 0, 0.0, true);
+            }
         }
         MowerState::Dying => draw_dying_ground(pb, &fr),
     }
@@ -1056,6 +1087,8 @@ fn draw_scan_cone_ground(pb: &mut PixelBuffer, fr: &Frame, target: Vec2) {
     let locked = fr.prog >= 0.70;
     let lock_t = ((fr.prog - 0.70) / 0.30).clamp(0.0, 1.0);
     let origin = fr.place(10.5, 0.0);
+    // Keep the drawn cone ending at `SCAN_CONE_RANGE` from `fr.pos` (matching the sim check).
+    let cone_reach = (SCAN_CONE_RANGE - 10.5).max(12.0);
 
     let (cone_dir, half_ang, range) = if locked {
         let to = target - origin;
@@ -1064,14 +1097,14 @@ fn draw_scan_cone_ground(pb: &mut PixelBuffer, fr: &Frame, target: Vec2) {
         } else {
             fr.f
         };
-        let r = to.len().clamp(18.0, SCAN_CONE_RANGE);
+        let r = to.len().clamp(4.0, cone_reach);
         // Cone narrows sharply as it locks onto the target!
         let ha = SCAN_CONE_HALF_ANGLE * (1.0 - 0.62 * lock_t);
         (dir, ha, r)
     } else {
         let sweep_t = fr.prog / 0.70;
         let angle_ofs = (sweep_t * PI * 2.0 - FRAC_PI_2).sin() * 0.58;
-        (fr.f.rotate(angle_ofs), SCAN_CONE_HALF_ANGLE, SCAN_CONE_RANGE)
+        (fr.f.rotate(angle_ofs), SCAN_CONE_HALF_ANGLE, cone_reach)
     };
 
     let cone_col = if locked {
@@ -1159,7 +1192,7 @@ fn draw_scan_cone_ground(pb: &mut PixelBuffer, fr: &Frame, target: Vec2) {
 fn draw_charge_windup_ground(pb: &mut PixelBuffer, fr: &Frame, target: Vec2) {
     let origin = fr.place(11.5, 0.0);
     let to = target - fr.pos;
-    let dist = to.len().clamp(16.0, 150.0);
+    let dist = to.len().clamp(1.0, 150.0);
     let dir = if to.len_sq() > 1.0 {
         to.normalized()
     } else {
@@ -1346,9 +1379,35 @@ fn draw_ricochet_telegraph_ground(
         draw_ring_styled(pb, bounce_origin, r, col, 0.75 * fade, 0, 0.0, true);
     }
 
-    // Dashed amber-red bank-shot preview line to next wall `next_target`.
+    // Dashed amber-red bank-shot preview line + `±CHARGE_CORRIDOR_HALF_WIDTH` corridor rails
+    // during the bounce pause so the full rebound sweep width reads clearly.
     let origin = fr.place(12.0, 0.0);
     let col = if bounce_count >= 2 { LED_DANGER } else { LED_WARN };
+    let to = next_target - fr.pos;
+    let dir = if to.len_sq() > 1.0 {
+        to.normalized()
+    } else {
+        fr.f
+    };
+    let perp = dir.perp();
+    let phase = -(fr.anim * 26.0) as i32;
+    if fr.prog < 0.45 {
+        let rail_a = 0.58 * (1.0 - fr.prog / 0.45 * 0.35);
+        for side in [-1.0f32, 1.0] {
+            let off = perp * (side * CHARGE_CORRIDOR_HALF_WIDTH);
+            draw_line_styled(
+                pb,
+                fr.pos + dir * 10.0 + off,
+                next_target + off,
+                col,
+                rail_a,
+                4,
+                7,
+                phase,
+                false,
+            );
+        }
+    }
     draw_line_styled(
         pb,
         origin,
@@ -1357,7 +1416,7 @@ fn draw_ricochet_telegraph_ground(
         0.65,
         4,
         7,
-        -(fr.anim * 26.0) as i32,
+        phase,
         true,
     );
     // Target rebound marker.
@@ -1544,7 +1603,7 @@ pub fn draw_mower(pb: &mut PixelBuffer, view: &MowerView, cam: Vec2, accent: Rgb
 
     // 4) Main sculpted hard-surface mower body (wheels, bumper, gunmetal skirt,
     //    safety-orange cowl, panel seams, STOP button, visor LEDs, progressive phase cracks).
-    draw_upright_chassis(pb, &fr, view.state, view.bounce_count);
+    draw_upright_chassis(pb, &fr, view.state, view.bounce_count, 1.0);
 
     // 5) Overheat steam / Phase 2-3 damage smoke & arcing sparks.
     if view.state == MowerState::Overheat {
@@ -1649,10 +1708,17 @@ fn draw_exposed_blades(pb: &mut PixelBuffer, fr: &Frame, state: MowerState) {
 }
 
 /// Sculpted hard-surface upright mower chassis, bumper, wheels, LEDs, STOP button & phase damage.
-fn draw_upright_chassis(pb: &mut PixelBuffer, fr: &Frame, state: MowerState, bounce_count: u8) {
+fn draw_upright_chassis(
+    pb: &mut PixelBuffer,
+    fr: &Frame,
+    state: MowerState,
+    bounce_count: u8,
+    scale_v: f32,
+) {
     let Some((x0, x1, y0, y1)) = fr.bbox(pb, 16.0) else {
         return;
     };
+    let inv_scale_v = 1.0 / scale_v.max(0.20);
 
     // Slight front bumper spring compression during wall ricochet or charge impact.
     let bumper_push = match state {
@@ -1733,7 +1799,8 @@ fn draw_upright_chassis(pb: &mut PixelBuffer, fr: &Frame, state: MowerState, bou
 
     for y in y0..=y1 {
         for x in x0..=x1 {
-            let (u, v) = fr.local(x, y);
+            let (u, v_raw) = fr.local(x, y);
+            let v = v_raw * inv_scale_v;
 
             let d_hull = sd_mower_hull(u, v);
             let d_bump = sd_front_bumper(u, v, bumper_push);
@@ -1750,16 +1817,16 @@ fn draw_upright_chassis(pb: &mut PixelBuffer, fr: &Frame, state: MowerState, bou
             let cover = (0.55 - d_all * 1.25).clamp(0.0, 1.0);
 
             if cover <= 0.0 {
-                if d_all < 1.1 {
+                if d_all < 1.2 {
                     let bg = pb.pixel_at(x as usize, y as usize);
-                    pb.plot(x, y, mix(bg, rim_col, 0.72));
+                    pb.plot(x, y, mix(bg, rim_col, 0.90));
                 }
                 continue;
             }
 
             let bg = pb.pixel_at(x as usize, y as usize);
             let mut out = if cover < 1.0 {
-                mix(bg, rim_col, 0.72 * (1.0 - cover))
+                mix(bg, rim_col, 0.90 * (1.0 - cover))
             } else {
                 bg
             };
@@ -1996,17 +2063,17 @@ fn shade_upright_hull(
     // 6) Sculpted Safety-Orange ABS Molded Upper Cowl with restrained hard-surface chamfers!
     let bevel_edge = (d_hull + 1.85).abs();
     let dome = (1.0 - (nu * nu * 0.32 + nv * nv * 0.48)).clamp(0.0, 1.0);
-    let mut lum = 0.38 + 0.24 * dome + 0.56 * lit;
-    if bevel_edge < 1.25 {
-        if lit > 0.20 {
-            lum += 0.22;
+    let mut lum = 0.40 + 0.24 * dome + 0.58 * lit;
+    if bevel_edge < 1.35 {
+        if lit > 0.16 {
+            lum += 0.28;
         } else if lit < -0.15 {
-            lum -= 0.24;
+            lum -= 0.26;
         }
     }
     let mut c = shade3(SHELL_SHADOW, SHELL_MID, SHELL_HI, lum);
-    if lum > 1.05 {
-        c = mix(c, SHELL_SPEC, ((lum - 1.05) * 1.8).clamp(0.0, 0.48));
+    if lum > 0.98 {
+        c = mix(c, SHELL_SPEC, ((lum - 0.98) * 2.1).clamp(0.0, 0.62));
     }
 
     // Industrial decals: twin crisp white-silver racing stripes down the cowl flanks!
@@ -2066,8 +2133,8 @@ fn draw_flipped_mower(pb: &mut PixelBuffer, fr: &Frame) {
     };
     let show_belly = fr.prog >= 0.075 && fr.prog <= 0.925;
     if !show_belly {
-        // Mid-flip upright half — compress lateral axis briefly.
-        draw_upright_chassis(pb, fr, MowerState::Overheat, 0);
+        // Mid-flip upright half — compress lateral axis smoothly into the roll.
+        draw_upright_chassis(pb, fr, MowerState::Overheat, 0, roll_scale_v);
         return;
     }
 
@@ -2233,24 +2300,24 @@ fn draw_charge_exhaust(pb: &mut PixelBuffer, fr: &Frame, bounce_count: u8) {
     }
 }
 
-/// Animated preview of flung blade discs & grass shrapnel emerging during `FlingBlades`.
+/// Muzzle-burst ejector glints inside the real `15.5 px` deck aura during `FlingBlades`.
+/// (Live flung discs are rendered on the projectile layer by [`draw_blade_disc`] so no
+/// phantom non-damaging projectiles appear outside the deck.)
 fn draw_fling_volley_preview(pb: &mut PixelBuffer, fr: &Frame) {
     let fire_t = ((fr.prog - 0.35) / 0.65).clamp(0.0, 1.0);
+    let fade = (1.0 - fire_t).clamp(0.0, 1.0);
+    if fade <= 0.04 {
+        return;
+    }
     let spokes = if fr.hp <= 0.66 { 8 } else { 6 };
     let base_ang = fr.f.angle() + fire_t * 1.1;
 
     for k in 0..spokes {
         let a = base_ang + k as f32 / spokes as f32 * TAU;
         let dir = Vec2::from_angle(a);
-        let dist = 14.5 + fire_t * 13.0;
-        let pos = fr.pos + dir * dist;
-        draw_blade_disc_screen(pb, pos, fr.anim, 1.0 - fire_t * 0.25);
-
-        // Interleaved grass-clipping shrapnel dart halfway between blade discs!
-        let a_clip = a + PI / spokes as f32;
-        let cdir = Vec2::from_angle(a_clip);
-        let cpos = fr.pos + cdir * (12.5 + fire_t * 16.5);
-        draw_grass_shrapnel_screen(pb, cpos, cdir, 1.0 - fire_t * 0.25);
+        let p0 = fr.pos + dir * 10.5;
+        let p1 = fr.pos + dir * (12.0 + fire_t * 3.2);
+        draw_line_styled(pb, p0, p1, mix(LED_BLADE, SPARK_HOT, 0.45), 0.80 * fade, 0, 0, 0, true);
     }
 }
 
@@ -2327,7 +2394,7 @@ fn draw_dying_sequence(pb: &mut PixelBuffer, fr: &Frame) {
         jf.hp = 0.05;
 
         draw_exposed_blades(pb, &jf, MowerState::Overheat);
-        draw_upright_chassis(pb, &jf, MowerState::Overheat, 0);
+        draw_upright_chassis(pb, &jf, MowerState::Overheat, 0, 1.0);
         draw_overheat_smoke(pb, &jf, 0.9);
         draw_hit_sparks(pb, &jf);
 
@@ -2545,6 +2612,9 @@ fn draw_wheel_debris(pb: &mut PixelBuffer, pos: Vec2, alpha: f32) {
 
 /// Clean segmented 3-phase radial Boss Health Arc (ticks at 33% and 66% matching damage phases).
 fn draw_boss_hp_arc(pb: &mut PixelBuffer, fr: &Frame) {
+    if fr.hp <= 0.0 {
+        return;
+    }
     let arc_r = BODY_RADIUS + 4.5;
     if bbox_around(pb, fr.pos, arc_r + 2.0).is_none() {
         return;
@@ -3095,5 +3165,70 @@ mod tests {
             }
         }
         std::fs::write("/tmp/ratrun_mower.ppm", out).unwrap();
+    }
+
+    #[test]
+    fn mower_audit_fixes_nonfinite_and_telegraph_geometry() {
+        // Non-finite and far off-screen coordinates must never panic or overflow.
+        let mut pb = PixelBuffer::new(96, 96);
+        let bad = MowerView {
+            pos: Vec2::new(48.0, 48.0),
+            facing: Vec2::new(1.0, 0.0),
+            state: MowerState::ChargeWindup,
+            progress: f32::NAN,
+            anim: f32::INFINITY,
+            hit_flash: f32::NAN,
+            hp_frac: 0.0,
+            target: Vec2::new(48.0, f32::NAN),
+            trail_start: Vec2::new(-1e12, 1e12),
+            dock_pos: Vec2::new(48.0, 48.0),
+            bounce_count: 1,
+        };
+        draw_mower_ground(&mut pb, &bad, Vec2::ZERO, (255, 160, 40));
+        draw_mower(&mut pb, &bad, Vec2::ZERO, (255, 160, 40));
+
+        // Scan cone stays within SCAN_CONE_RANGE from pos.
+        let mut scan_pb = PixelBuffer::new(220, 120);
+        let scan_v = MowerView {
+            pos: Vec2::new(40.0, 60.0),
+            facing: Vec2::new(1.0, 0.0),
+            state: MowerState::Scan,
+            progress: 0.35,
+            anim: 0.5,
+            hit_flash: 0.0,
+            hp_frac: 1.0,
+            target: Vec2::new(160.0, 60.0),
+            trail_start: Vec2::new(40.0, 60.0),
+            dock_pos: Vec2::new(40.0, 60.0),
+            bounce_count: 0,
+        };
+        draw_mower_ground(&mut scan_pb, &scan_v, Vec2::ZERO, (255, 160, 40));
+        for x in (40 + SCAN_CONE_RANGE as usize + 3)..220 {
+            assert_eq!(
+                scan_pb.pixel_at(x, 60),
+                (0, 0, 0),
+                "scan cone overshot SCAN_CONE_RANGE at x={x}"
+            );
+        }
+
+        // Flipped self-righting slam warning appears for prog >= 0.85.
+        let mut early = PixelBuffer::new(96, 96);
+        let mut late = PixelBuffer::new(96, 96);
+        let mut fv = scan_v;
+        fv.pos = Vec2::new(48.0, 48.0);
+        fv.state = MowerState::Flipped;
+        fv.progress = 0.50;
+        draw_mower_ground(&mut early, &fv, Vec2::ZERO, (255, 160, 40));
+        fv.progress = 0.92;
+        draw_mower_ground(&mut late, &fv, Vec2::ZERO, (255, 160, 40));
+        let mut diff = 0usize;
+        for y in 0..96 {
+            for x in 0..96 {
+                if early.pixel_at(x, y) != late.pixel_at(x, y) {
+                    diff += 1;
+                }
+            }
+        }
+        assert!(diff > 10, "expected self-righting slam warning ring at prog=0.92");
     }
 }

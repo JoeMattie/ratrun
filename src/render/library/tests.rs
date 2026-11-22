@@ -425,3 +425,129 @@ fn the_tab_strip_registers_targets_and_counts() {
             .join("\n")
     );
 }
+
+// ---- The animated card -----------------------------------------------------
+
+#[test]
+fn a_card_animates_only_after_the_cursor_rests() {
+    let rows = all_rows();
+    let mut lib = Library::default();
+    lib.reveal_all();
+    let mut ui = LibraryUi::default();
+    ui.still = false;
+    let key = ui.selected_key(&rows).expect("a selection");
+    assert!(catalogued(&lib, key));
+    // Nothing on the frame the selection arrives: a card scrolled past is a
+    // still plate, never a simulation.
+    ui.tick_card(0.0, Some(key), true);
+    assert_eq!(ui.scene_key(), None, "the scene was built before the rest");
+    // One frame is not a rest either (60 Hz).
+    ui.tick_card(1.0 / 60.0, Some(key), true);
+    assert_eq!(ui.scene_key(), None);
+    // Past the rest window it runs.
+    ui.tick_card(scene::REST_SECS, Some(key), true);
+    assert_eq!(ui.scene_key(), Some(key), "the card never started");
+    assert!(ui.frame_due(), "a running scene is a clock");
+
+    // Moving the cursor drops it, and the next key gets its own rest window.
+    let other = rows
+        .iter()
+        .filter(|r| r.tab == ui.tab)
+        .nth(1)
+        .map(|r| r.key)
+        .expect("a second row");
+    ui.tick_card(1.0 / 60.0, Some(other), true);
+    assert_ne!(ui.scene_key(), Some(key), "the old card kept running");
+
+    // Closing the screen tears it down.
+    ui.tick_card(1.0, Some(other), true);
+    ui.stop();
+    assert_eq!(ui.scene_key(), None);
+}
+
+#[test]
+fn a_locked_card_builds_nothing_however_long_it_rests() {
+    let rows = all_rows();
+    let mut lib = Library::default();
+    lib.reveal_all();
+    let mut ui = LibraryUi::default();
+    ui.still = false;
+    // An entry that is seen but not owned is still silhouetted: its plate must
+    // not run a scene either (a weapon only offered on a card).
+    let row = rows
+        .iter()
+        .find(|r| matches!(r.key, Key::Weapon(_)))
+        .expect("a weapon row");
+    assert!(lib.is_seen(row.key));
+    assert!(!catalogued(&lib, row.key), "an unowned weapon is not catalogued");
+    for _ in 0..40 {
+        ui.tick_card(0.1, Some(row.key), true);
+    }
+    assert_eq!(ui.scene_key(), None, "a half-catalogued card ran a scene");
+    // A locked entry (live = false) never builds, whatever it is.
+    let unseen = rows
+        .iter()
+        .find(|r| !lib.is_seen(r.key))
+        .map(|r| r.key);
+    if let Some(unseen) = unseen {
+        for _ in 0..40 {
+            ui.tick_card(0.1, Some(unseen), false);
+        }
+        assert_eq!(ui.scene_key(), None, "a locked card ran a scene");
+    }
+}
+
+#[test]
+fn the_still_switch_freezes_every_card() {
+    let rows = all_rows();
+    let mut lib = Library::default();
+    lib.reveal_all();
+    let mut ui = LibraryUi::default();
+    ui.still = true;
+    let key = ui.selected_key(&rows).expect("a selection");
+    for _ in 0..40 {
+        ui.tick_card(0.1, Some(key), true);
+    }
+    assert_eq!(ui.scene_key(), None, "RATRUN_LIBRARY_STILL built a scene");
+    assert!(!ui.frame_due());
+    // The still pose's own clock never ran, so the posed art is frozen: two
+    // frames of a still card are the same plate, cell for cell.
+    assert_eq!(ui.anim, 0.0, "the still pose's clock ran");
+    let mut a = PixelBuffer::new(44, 60);
+    let mut b = PixelBuffer::new(44, 60);
+    let mut scenes = Scenes::default();
+    draw_art(&mut a, &mut scenes, key, (150, 190, 176), ui.anim);
+    draw_art(&mut b, &mut scenes, key, (150, 190, 176), ui.anim);
+    assert_eq!(a.pixels(), b.pixels(), "the still pose moved on its own");
+}
+
+#[test]
+fn a_running_scene_is_what_the_plate_draws() {
+    let rows = all_rows();
+    let mut lib = Library::default();
+    lib.reveal_all();
+    let mut ui = LibraryUi::default();
+    ui.still = false;
+    let key = ui.selected_key(&rows).expect("a selection");
+    for _ in 0..3 {
+        ui.tick_card(0.1, Some(key), true);
+    }
+    assert_eq!(ui.scene_key(), Some(key));
+    render(&rows, &lib, &mut ui, 80, 24);
+    let first = ui.art.pixels().to_vec();
+    assert!(first.iter().any(|p| *p != (0, 0, 0)), "an empty plate");
+    // Ten ticks of the real simulation, then a second frame: the still pose is
+    // frozen, so only the scene can have moved the pixels.
+    {
+        let running = ui.running_scene().expect("a running scene");
+        for _ in 0..10 {
+            running.step();
+        }
+    }
+    render(&rows, &lib, &mut ui, 80, 24);
+    assert_ne!(
+        ui.art.pixels(),
+        first.as_slice(),
+        "the plate is the posed art, not the scene"
+    );
+}

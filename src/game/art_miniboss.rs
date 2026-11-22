@@ -2686,833 +2686,4397 @@ fn spokes(pb: &mut PixelBuffer, fr: &Frame, at: Vec2, r: f32, n: i32, spin: f32,
     }
 }
 
-// ---- 7. VALVE WIDOW · "Someone left the water running." --------------------
-// A 26 px wheel spider: a brass hand-wheel with a rust-red hub and a long
-// wrench foreleg that winds back through the tell and strikes forward.
-fn draw_valve_widow(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
-    let brass = pal((255, 236, 172), (206, 152, 54), (104, 68, 22));
-    let rust = pal((255, 148, 108), (188, 74, 42), (96, 32, 18));
-    let steel = pal((236, 244, 255), (158, 176, 196), (72, 84, 100));
-    let fr = Frame::new(center, f, pose, anim, flash);
-    if let Pose::Death(t) = pose {
-        wave4_death(pb, &fr, t, brass);
+// ============================================================================
+// Private helpers for minibosses 7–15 (Sewer, Kitchen, Lab).
+// Prefixed `mb_a_` to stay isolated from sibling miniboss art passes.
+// ============================================================================
+
+/// Arrival drop with landing squash: returns `(y_offset, land_squash)`.
+#[inline]
+fn mb_a_ent_drop(t: f32, height: f32) -> (f32, f32) {
+    if t < 0.46 {
+        let u = t / 0.46;
+        ((1.0 - u * u) * -height, 0.0)
+    } else {
+        let u = (t - 0.46) / 0.54;
+        let bounce = -((u * PI).sin()) * 2.4 * (1.0 - u);
+        let sq = if u < 0.28 { 1.0 - u / 0.28 } else { 0.0 };
+        (bounce, sq)
+    }
+}
+
+/// Outlined, top-left lit annular ring (handwheels, tally rims, hubs).
+#[allow(clippy::too_many_arguments)]
+fn mb_a_ring(
+    pb: &mut PixelBuffer,
+    cx: f32,
+    cy: f32,
+    r_in: f32,
+    r_out: f32,
+    p: Pal,
+    flash: f32,
+) {
+    let bw = pb.w as i32;
+    let bh = pb.h as i32;
+    let outer = r_out + 0.9;
+    let inner = (r_in - 0.85).max(0.0);
+    let o2 = outer * outer;
+    let i2 = inner * inner;
+    let ro_rim = (r_out - 0.25).max(0.0);
+    let ri_rim = r_in + 0.25;
+    let ro2 = ro_rim * ro_rim;
+    let ri2 = ri_rim * ri_rim;
+    let inv_r = 1.0 / r_out.max(0.5);
+    let ir = outer.ceil() as i32;
+    let x0 = (cx.floor() as i32 - ir).max(0);
+    let x1 = (cx.ceil() as i32 + ir).min(bw - 1);
+    let y0 = (cy.floor() as i32 - ir).max(0);
+    let y1 = (cy.ceil() as i32 + ir).min(bh - 1);
+    let ink_c = apply_flash(INK, flash * 0.35);
+    for y in y0..=y1 {
+        let dy = y as f32 + 0.5 - cy;
+        let dy2 = dy * dy;
+        for x in x0..=x1 {
+            let dx = x as f32 + 0.5 - cx;
+            let d2 = dx * dx + dy2;
+            if d2 > o2 || d2 < i2 {
+                continue;
+            }
+            let c = if d2 > ro2 || d2 < ri2 {
+                ink_c
+            } else {
+                let lit = (0.52 + 0.54 * ((dx * LIGHT.x + dy * LIGHT.y) * inv_r)).clamp(0.0, 1.0);
+                let base = if lit > 0.58 {
+                    mix(p.mid, p.hi, (lit - 0.58) / 0.42)
+                } else {
+                    mix(p.lo, p.mid, lit / 0.58)
+                };
+                apply_flash(base, flash)
+            };
+            pb.plot(x, y, c);
+        }
+    }
+}
+
+/// Crisp glowing `+` glint star for tell charge-ups, blade tips, and impacts.
+fn mb_a_spark_cross(pb: &mut PixelBuffer, pos: Vec2, arm: i32, core: Rgb, glow: Rgb, alpha: f32) {
+    if alpha <= 0.03 {
         return;
     }
-    fr.shadow(pb, 11.5, 5.0);
-    // Eight spokes of the hand-wheel, spinning as it walks.
-    spokes(pb, &fr, fr.c, 8.0, 8, anim * 2.4, 1.1, brass);
-    fr.disc(pb, fr.c, 3.4, rust);
-    // The long wrench foreleg: wound back through the tell, thrown forward on
-    // the strike. This is the row's tell.
-    // Long (the silhouette's one asymmetry): out past the wheel at rest, cocked
-    // back beside the hub through the tell, at full stretch on the strike.
-    let reach = if matches!(pose, Pose::Strike(_)) {
-        15.0
-    } else {
-        11.0 - fr.coil * 7.0
-    };
-    let jaw = fr.at(reach, -5.4 - fr.coil * 2.2);
-    fr.capsule(pb, fr.at(1.5, -3.4), jaw, 1.9, 1.3, steel);
-    // Open-ended wrench jaw.
-    fr.capsule(pb, jaw, jaw + fr.f.rotate(0.35) * 4.4, 1.2, 0.8, steel);
-    fr.capsule(pb, jaw, jaw + fr.f.rotate(-0.35) * 4.4, 1.2, 0.8, steel);
-    // Six thin legs.
-    for i in 0..3 {
-        let t = i as f32 - 1.0;
-        let step = (anim * 5.0 + i as f32).sin() * 1.2;
-        fr.capsule(pb, fr.at(-1.0, t * 3.6), fr.at(-5.0 + step, t * 5.4), 0.9, 0.6, brass);
-        fr.capsule(pb, fr.at(1.0, t * 3.6), fr.at(5.0 - step, t * 5.4), 0.9, 0.6, brass);
+    let cx = pos.x.round() as i32;
+    let cy = pos.y.round() as i32;
+    blend_px(pb, cx, cy, core, alpha.clamp(0.0, 1.0));
+    for d in 1..=arm {
+        let a = alpha * (1.0 - d as f32 / (arm as f32 + 1.0));
+        let col = if d == 1 { core } else { glow };
+        blend_px(pb, cx - d, cy, col, a);
+        blend_px(pb, cx + d, cy, col, a);
+        blend_px(pb, cx, cy - d, col, a);
+        blend_px(pb, cx, cy + d, col, a);
     }
-    fr.eye(pb, 0.6, -0.4, 1.5, (255, 246, 214), (96, 32, 18));
-    fr.cues(pb, (255, 202, 96), steel.hi);
+}
+
+/// Soft drifting steam / vapor / overload-smoke puff.
+fn mb_a_puff(pb: &mut PixelBuffer, pos: Vec2, r: i32, col: Rgb, alpha: f32) {
+    if alpha <= 0.03 || r <= 0 {
+        return;
+    }
+    let cx = pos.x.round() as i32;
+    let cy = pos.y.round() as i32;
+    let rf = r as f32 + 0.5;
+    let inv = 1.0 / (rf * rf);
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let d2 = (dx * dx + dy * dy) as f32 * inv;
+            if d2 < 1.0 {
+                blend_px(pb, cx + dx, cy + dy, col, alpha * (1.0 - d2 * 0.7));
+            }
+        }
+    }
+}
+
+/// Crisp 2-pixel specular rim glint that survives low ambient and 2× zoom-out.
+#[inline]
+fn mb_a_glint(pb: &mut PixelBuffer, pos: Vec2, col: Rgb) {
+    let x = pos.x.round() as i32;
+    let y = pos.y.round() as i32;
+    plot_px(pb, x, y, (255, 255, 255));
+    blend_px(pb, x + 1, y, col, 0.8);
+    blend_px(pb, x, y + 1, col, 0.75);
+}
+
+/// Outlined 2-segment articulated limb (spider, crab, or tripod leg).
+#[allow(clippy::too_many_arguments)]
+fn mb_a_jointed_leg(
+    pb: &mut PixelBuffer,
+    hip: Vec2,
+    knee: Vec2,
+    foot: Vec2,
+    r_hip: f32,
+    r_foot: f32,
+    p: Pal,
+    foot_col: Rgb,
+    flash: f32,
+) {
+    let r_mid = (r_hip + r_foot) * 0.55;
+    draw_tapered_capsule(pb, hip, knee, r_hip, r_mid, p.hi, p.mid, p.lo, flash);
+    draw_tapered_capsule(pb, knee, foot, r_mid, r_foot, p.mid, p.lo, INK, flash);
+    plot_px(pb, foot.x.round() as i32, foot.y.round() as i32, apply_flash(foot_col, flash));
+}
+
+// ---- 7. VALVE WIDOW · "Someone left the water running." --------------------
+// 26–34 px crimson cast-iron valve-wheel spider with brass hub, leaking water
+// gland, 3-eye arachnid cluster, and a long chrome pipe-wrench foreleg that
+// cocks back to -50° through Tell and whips 100° across on Strike.
+fn draw_valve_widow(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let s = f.perp();
+    let valve = pal((255, 128, 102), (206, 46, 46), (102, 18, 24));
+    let brass = pal((255, 244, 174), (216, 162, 54), (108, 70, 20));
+    let iron = pal((146, 158, 174), (78, 88, 102), (34, 38, 48));
+    let steel = pal((252, 255, 255), (172, 192, 214), (68, 82, 102));
+    let water_hi: Rgb = (218, 252, 255);
+    let water_mid: Rgb = (104, 220, 242);
+    let water_lo: Rgb = (38, 114, 144);
+
+    if let Pose::Death(t) = pose {
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 3.8;
+        draw_shadow(pb, center.x + 1.0, center.y + 5.5, 15.5, 7.2, 0.50);
+        // Spreading blue-cyan puddle from the burst valve!
+        let pr = 7.5 + burst * 6.5;
+        draw_shaded_ellipse(pb, center.x, center.y + 2.5, pr, pr * 0.52, water_hi, water_mid, water_lo, flash);
+        // Split crimson valve wheel halves flung apart.
+        let h1 = center - s * (4.0 + burst * 5.0) - Vec2::new(0.0, bounce * 0.8);
+        let h2 = center + s * (4.0 + burst * 5.0) + Vec2::new(0.0, 1.0 - bounce * 0.5);
+        draw_tapered_capsule(pb, h1 - f * 5.0, h1 + f * 4.5, 2.3, 2.0, valve.hi, valve.mid, valve.lo, flash);
+        draw_tapered_capsule(pb, h2 - f * 4.5, h2 + f * 5.0, 2.2, 1.9, valve.mid, valve.lo, INK, flash);
+        // Snapped brass stem hub.
+        draw_shaded_disc(pb, center.x - f.x * 3.0, center.y - 1.5 - bounce, 3.2, brass.hi, brass.mid, brass.lo, flash);
+        // Long chrome pipe wrench flung forward pointing back toward the chest!
+        let w_base = center + f * (5.5 + burst * 6.5) + s * 4.0 - Vec2::new(0.0, bounce * 0.6);
+        let w_jaw = w_base + f * 6.5 - s * 3.5;
+        draw_tapered_capsule(pb, w_base, w_jaw, 1.8, 1.3, steel.hi, steel.mid, steel.lo, flash);
+        draw_tapered_capsule(pb, w_jaw, w_jaw + f.rotate(0.5) * 3.6, 1.1, 0.7, steel.hi, steel.mid, steel.lo, flash);
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, water_hi);
+        }
+        draw_chest_pointer(pb, center, t);
+        return;
+    }
+
+    let half_sweep = 50.0_f32.to_radians(); // exact half of 100° Cord sweep
+    let (ent_y, ent_sq) = if let Pose::Entrance(t) = pose {
+        mb_a_ent_drop(t, 22.0)
+    } else {
+        (0.0, 0.0)
+    };
+
+    let (recoil, lift, wheel_spin, leg_freq, tilt_x) = match pose {
+        Pose::Entrance(t) => (0.0, ent_y, t * 18.0, 10.0, 0.0),
+        Pose::Idle => (0.0, (anim * 2.6).sin() * 0.7, (anim * 1.4).sin() * 0.55, 2.4, (anim * 1.4).cos() * 0.4),
+        Pose::Approach => ((anim * 8.0).sin() * 1.1, -(anim * 8.0).sin().abs() * 1.4, anim * 4.8, 9.5, 0.0),
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            (-4.2 * c + q * 0.8, -2.2 * c, anim * 2.0 + t * 22.0, 3.0, q * 0.9)
+        }
+        Pose::Strike(t) => {
+            let lunge = (t * PI).sin();
+            (4.6 * lunge, -0.6 + 1.2 * lunge, anim * 2.0 + t * 38.0, 4.0, 0.0)
+        }
+        Pose::Recover(t) => {
+            let wob = (t * 11.0).sin() * 0.9;
+            (-2.0, 1.8, 0.0, 12.0, 2.8 + wob)
+        }
+        Pose::Retreat(t) => (-2.6, -(t * 12.0).sin().abs() * 1.2, -t * 12.0, 8.5, 0.0),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let base = center + f * recoil + jolt + Vec2::new(tilt_x, lift);
+    let sh_s = (1.0 - (-lift).max(0.0) * 0.025).clamp(0.48, 1.15);
+    draw_shadow(pb, center.x + 1.5, center.y + 7.2, 13.0 * sh_s + ent_sq * 2.0, 5.8 * sh_s, 0.54);
+
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.44 {
+            draw_entrance_ring(pb, center, ((t - 0.44) / 0.56).clamp(0.0, 1.0), water_mid);
+        }
+    }
+
+    // 1. Six articulated spider legs splayed around the valve body (3 per side).
+    let leg_spread = match pose {
+        Pose::Tell(t) => 1.0 + tell_coil(t) * 0.16,
+        Pose::Recover(_) => 1.12,
+        _ => 1.0,
+    };
+    for i in 0..3 {
+        let idx = i as f32 - 1.0;
+        let phase = anim * leg_freq + i as f32 * 2.1;
+        for side in [-1.0_f32, 1.0] {
+            let step = (phase + if side > 0.0 { PI } else { 0.0 }).sin();
+            let stride = if matches!(pose, Pose::Approach | Pose::Retreat(_)) {
+                step * 2.8
+            } else if matches!(pose, Pose::Idle) {
+                step * 0.7
+            } else if matches!(pose, Pose::Recover(_)) {
+                step * 1.8
+            } else {
+                0.0
+            };
+            let hip = base + f * (idx * 3.4) + s * (side * 6.0) + Vec2::new(0.0, 1.6);
+            let knee = base + f * (idx * 5.2 + stride * 0.5) + s * (side * 10.2 * leg_spread) + Vec2::new(0.0, -2.4);
+            let foot = base + f * (idx * 6.8 + stride) + s * (side * 13.0 * leg_spread) + Vec2::new(0.0, 4.6 - stride.max(0.0) * 0.6);
+            mb_a_jointed_leg(pb, hip, knee, foot, 1.25, 0.6, iron, brass.hi, flash);
+        }
+    }
+
+    // 2. Heavy crimson cast-iron gate-valve handwheel (5 spokes + thick outer rim).
+    let wheel_c = base + Vec2::new(0.0, -1.0 + ent_sq * 1.0);
+    for k in 0..5 {
+        let a = wheel_spin + k as f32 * (TAU / 5.0);
+        let d = Vec2::from_angle(a);
+        draw_tapered_capsule(
+            pb,
+            wheel_c + d * 2.4,
+            wheel_c + d * 8.6,
+            1.45,
+            1.2,
+            valve.hi,
+            valve.mid,
+            valve.lo,
+            flash,
+        );
+    }
+    mb_a_ring(pb, wheel_c.x, wheel_c.y, 7.0, 9.6, valve, flash);
+    // Specular crimson top-left rim glint so the wheel pops in dark Sewer lighting.
+    mb_a_glint(pb, wheel_c + Vec2::new(-5.8, -5.6), valve.hi);
+
+    // 3. Central riveted brass valve gland & hex stem nut!
+    draw_shaded_disc(pb, wheel_c.x, wheel_c.y, 4.4, brass.hi, brass.mid, brass.lo, flash);
+    draw_shaded_disc(pb, wheel_c.x, wheel_c.y, 2.0, iron.hi, iron.mid, iron.lo, flash);
+    mb_a_glint(pb, wheel_c + Vec2::new(-1.5, -2.0), brass.hi);
+
+    // Leaking sewer water drops in Idle / pressurized mist in Tell / geyser in Recover!
+    if matches!(pose, Pose::Idle | Pose::Approach) {
+        let ph = (anim * 1.8).fract();
+        let drop_p = wheel_c + Vec2::new(0.5, -2.5 - ph * (1.0 - ph) * 8.0 + ph * 6.0);
+        plot_px(pb, drop_p.x.round() as i32, drop_p.y.round() as i32, water_hi);
+        blend_px(pb, drop_p.x.round() as i32, drop_p.y.round() as i32 + 1, water_mid, 0.8);
+    } else if let Pose::Recover(t) = pose {
+        // Blown gasket: pressurized water fountain gushing straight up out of the brass nut!
+        for k in 0..5 {
+            let ph = (t * 4.5 + k as f32 * 0.2).fract();
+            let sp_x = (k as f32 - 2.0) * (1.4 + ph * 3.0);
+            let sp_y = -2.0 - ph * 13.0 + ph * ph * 5.0;
+            let q = wheel_c + Vec2::new(sp_x, sp_y);
+            plot_px(pb, q.x.round() as i32, q.y.round() as i32, if k % 2 == 0 { water_hi } else { water_mid });
+        }
+    }
+
+    // 4. Oversized gleaming chrome PIPE-WRENCH FORELEG!
+    //    Cocks back to -50° (-half_sweep) during Tell, whips -50° -> +50° during Strike!
+    let (wrench_ang, wrench_len, jaw_open) = match pose {
+        Pose::Idle => (-0.52 + (anim * 2.2).sin() * 0.14, 13.5, 0.28 + (anim * 3.5).sin().abs() * 0.16),
+        Pose::Approach => (-0.42 + (anim * 7.0).sin() * 0.20, 14.0, 0.30),
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            let a = -0.40 + (-half_sweep - 0.18 - (-0.40)) * c + q * 0.07;
+            (a, 14.5 + c * 2.2, 0.36 + c * 0.36)
+        }
+        Pose::Strike(t) => (-half_sweep + 2.0 * half_sweep * t, 18.0, 0.20),
+        Pose::Recover(_) => (half_sweep + 0.18, 15.0, 0.55),
+        Pose::Retreat(_) => (-0.85, 11.5, 0.22),
+        Pose::Entrance(_) => (-0.6, 12.5, 0.32),
+        Pose::Death(_) => unreachable!(),
+    };
+    let w_dir = f.rotate(wrench_ang);
+    let w_perp = w_dir.perp();
+    let shoulder = wheel_c + f * 3.2 - s * 2.4;
+    let jaw_base = shoulder + w_dir * wrench_len;
+
+    // Strike motion smear arc following the exact 100° pipe-wrench whip!
+    if let Pose::Strike(t) = pose {
+        let base_a = f.angle();
+        let cur_a = base_a + wrench_ang;
+        let trail_a = (base_a - half_sweep).max(cur_a - 0.95);
+        draw_smear_arc(pb, shoulder, trail_a, cur_a, 10.0, 20.5, water_mid, steel.hi, 0.78 * (1.0 - t * 0.25));
+        for k in 0..4 {
+            let ph = (t * 4.0 + k as f32 * 0.25).fract();
+            let sp = jaw_base - w_perp * (ph * 8.0) + w_dir * ((k as f32 - 1.5) * 2.2);
+            plot_px(pb, sp.x.round() as i32, sp.y.round() as i32, if k % 2 == 0 { water_hi } else { brass.hi });
+        }
+    }
+
+    // Thick chrome wrench beam with red adjustment knurl collar & serrated open C-jaw!
+    draw_tapered_capsule(pb, shoulder, jaw_base, 2.2, 1.6, steel.hi, steel.mid, steel.lo, flash);
+    // Red valve-wrench adjustment nut near the head.
+    let knurl = shoulder + w_dir * (wrench_len - 3.6);
+    draw_shaded_disc(pb, knurl.x, knurl.y, 1.9, valve.hi, valve.mid, valve.lo, flash);
+    // Fixed upper jaw & hinged lower serrated hook jaw.
+    let jaw_hi = jaw_base + w_dir.rotate(jaw_open) * 5.2;
+    let jaw_lo = jaw_base + w_dir.rotate(-jaw_open) * 4.8;
+    draw_tapered_capsule(pb, jaw_base, jaw_hi, 1.5, 0.95, steel.hi, steel.mid, steel.lo, flash);
+    draw_tapered_capsule(pb, jaw_base, jaw_lo, 1.4, 0.9, steel.hi, steel.mid, steel.lo, flash);
+    mb_a_glint(pb, jaw_hi, steel.hi);
+
+    // Tell charge glints & pressurized hissing sparks on the cocked wrench head!
+    if let Pose::Tell(t) = pose {
+        let pulse = 0.55 + 0.45 * (t * 28.0).sin();
+        mb_a_spark_cross(pb, jaw_base + w_dir * 2.2, 3, (255, 255, 240), water_mid, pulse * t.min(1.0));
+        for k in 0..3 {
+            let ph = (t * 5.0 + k as f32 * 0.33).fract();
+            let sp = wheel_c + Vec2::new((k as f32 - 1.0) * 4.5 * ph, -3.0 - ph * 7.0);
+            blend_px(pb, sp.x.round() as i32, sp.y.round() as i32, water_hi, 1.0 - ph);
+        }
+    }
+
+    // 5. Three-eye arachnid cluster facing `f` on the front brass hub bezel!
+    let expr = eye_expr_for(pose, anim, flash);
+    let eye_col = match pose {
+        Pose::Tell(_) | Pose::Strike(_) => (255, 232, 102),
+        _ => (255, 246, 206),
+    };
+    let face = wheel_c + f * 3.0;
+    draw_eye(pb, face, 1.75, eye_col, valve.lo, f, expr, flash);
+    // Two tiny glowing spider side-ocelli that survive low ambient light.
+    let oc_col = if matches!(pose, Pose::Tell(_) | Pose::Strike(_)) { (255, 196, 72) } else { (255, 124, 92) };
+    for side in [-1.0_f32, 1.0] {
+        let oc = wheel_c + f * 2.4 + s * (side * 2.9);
+        plot_px(pb, oc.x.round() as i32, oc.y.round() as i32, apply_flash(oc_col, flash));
+    }
+
+    if let Pose::Retreat(t) = pose {
+        let ph = (t * 3.0).fract();
+        mb_a_puff(pb, wheel_c + Vec2::new(0.0, -4.5 - ph * 6.0), 2, water_hi, (1.0 - ph) * 0.7);
+    }
+    if let Pose::Recover(t) = pose {
+        draw_dizzy_stars(pb, wheel_c + Vec2::new(0.0, -9.5), 7.2, t);
+        draw_recover_beacon(pb, wheel_c, t);
+    }
+    draw_hurt_burst(pb, base, f, flash, steel.hi);
 }
 
 // ---- 8. THE MUDLARK · "Both traps are occupied." ---------------------------
-// A 32 px mud crab under two broken mousetraps; the claws astride the aim open
-// wide for the tell and shut on the strike.
+// 34–38 px broad mud-armoured sewer crab wearing two sprung wooden mousetraps
+// on its carapace, eight wide splayed crab legs, elevated glowing eyestalks,
+// and twin massive serrated steel trap-claws that throw wide in Tell (28+ px)
+// and clap violently shut down the centre line on Strike.
 fn draw_mudlark(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
-    let mud = pal((186, 160, 112), (124, 100, 64), (62, 48, 28));
-    let trap = pal((232, 226, 206), (168, 154, 128), (74, 66, 52));
-    let steel = pal((230, 240, 250), (152, 168, 184), (66, 76, 90));
-    let fr = Frame::new(center, f, pose, anim, flash);
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let s = f.perp();
+    let mud = pal((232, 180, 114), (156, 104, 54), (72, 44, 22));
+    let shell_lo = pal((174, 128, 76), (112, 74, 38), (50, 32, 16));
+    let wood = pal((254, 240, 202), (202, 172, 122), (96, 74, 44));
+    let steel = pal((248, 254, 255), (168, 186, 206), (66, 78, 96));
+    let bait: Rgb = (255, 218, 76);
+    let spark_hi: Rgb = (255, 232, 126);
+    let spark_hot: Rgb = (255, 134, 68);
+
     if let Pose::Death(t) = pose {
-        wave4_death(pb, &fr, t, mud);
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 4.0;
+        draw_shadow(pb, center.x + 1.5, center.y + 5.5, 17.0, 8.0, 0.52);
+        // Dark mud splatter puddle.
+        draw_shaded_ellipse(pb, center.x, center.y + 2.5, 10.0 + burst * 5.0, 5.5 + burst * 2.5, shell_lo.mid, shell_lo.lo, INK, 0.0);
+        // Cracked mud carapace halves + flung broken wooden mousetraps!
+        for side in [-1.0_f32, 1.0] {
+            let off = s * (side * (5.5 + burst * 6.5)) - Vec2::new(0.0, bounce * 0.7);
+            draw_rotated_box(pb, center + off, f.rotate(side * 0.35), 4.6, 3.0, wood.hi, wood.mid, wood.lo, flash);
+            let cl = center + f * (5.0 + burst * 5.5) + s * (side * (4.0 + burst * 4.5));
+            draw_tapered_capsule(pb, cl, cl + f * 5.5, 2.2, 0.9, steel.hi, steel.mid, steel.lo, flash);
+        }
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, spark_hi);
+        }
+        draw_chest_pointer(pb, center, t);
         return;
     }
-    let striking = matches!(pose, Pose::Strike(_));
-    fr.shadow(pb, 15.0, 5.6);
-    // Eight jointed legs splayed wide under the shell: the crab is far wider
-    // than it is long (about 30 px toe to toe).
-    for i in 0..4 {
-        let t = i as f32 - 1.5;
-        let step = (anim * 6.0 + i as f32 * 1.3).sin() * 1.2;
-        for side in [-1.0f32, 1.0] {
-            let knee = fr.at(t * 2.6, side * 9.4);
-            fr.capsule(pb, fr.at(t * 1.8, side * 4.0), knee, 1.1, 0.9, mud);
-            fr.capsule(pb, knee, fr.at(t * 3.4 + step * side, side * 13.4), 0.9, 0.5, mud);
+
+    let (ent_rise, ent_mud) = if let Pose::Entrance(t) = pose {
+        let ease = 1.0 - (1.0 - t).powi(3);
+        ((1.0 - ease) * 14.0, (1.0 - t).clamp(0.0, 1.0))
+    } else {
+        (0.0, 0.0)
+    };
+
+    let (recoil, lift, sway, trap_rattle) = match pose {
+        Pose::Entrance(t) => (0.0, ent_rise, (t * 18.0).sin() * 1.2, 1.4),
+        Pose::Idle => (0.0, (anim * 2.4).sin() * 0.65, (anim * 1.8).sin() * 0.7, 0.0),
+        Pose::Approach => ((anim * 7.5).sin() * 1.0, -(anim * 7.5).sin().abs() * 1.4, (anim * 7.5).cos() * 1.8, 0.5),
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            (-3.8 * c, -1.6 * c, q * 1.2, 1.2 + q * 1.4)
+        }
+        Pose::Strike(t) => {
+            let lunge = (t * PI).sin();
+            (4.8 * lunge, 0.8 * lunge, 0.0, 1.8)
+        }
+        Pose::Recover(t) => (2.0, 2.0, (t * 10.0).sin() * 1.1, 0.4),
+        Pose::Retreat(t) => (-2.5, -(t * 11.0).sin().abs() * 1.1, (t * 11.0).sin() * 1.6, 0.2),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let base = center + f * recoil + s * sway + jolt + Vec2::new(0.0, lift);
+    draw_shadow(pb, base.x + 1.5, center.y + 6.5, 16.5, 6.8, 0.56);
+
+    // Entrance mud eruption!
+    if let Pose::Entrance(t) = pose {
+        draw_shaded_ellipse(pb, center.x, center.y + 4.0, 13.0 * ent_mud + 4.0, 6.0 * ent_mud + 2.0, shell_lo.mid, shell_lo.lo, INK, 0.0);
+        draw_entrance_ring(pb, center, t, mud.hi);
+        for k in 0..6 {
+            let a = k as f32 * (TAU / 6.0) + 0.3;
+            let q = center + Vec2::new(a.cos() * (6.0 + t * 14.0), a.sin() * (4.0 + t * 8.0) - t * (1.0 - t) * 16.0);
+            plot_px(pb, q.x.round() as i32, q.y.round() as i32, if k % 2 == 0 { mud.hi } else { wood.hi });
         }
     }
-    // The carapace: a stadium lying across the facing.
-    fr.capsule(pb, fr.at(0.0, -5.2), fr.at(0.0, 5.2), 5.4, 5.4, mud);
-    // The two broken mousetraps it wears on its back: a plank each, with the
-    // sprung bail bent up across it.
-    for side in [-1.0f32, 1.0] {
-        let at = fr.at(-1.2, side * 4.6);
-        fr.slab(pb, at, fr.f, 4.2, 2.6, trap);
-        fr.capsule(
-            pb,
-            at - fr.f * 3.0 - fr.s * (side * 1.8),
-            at + fr.f * 1.6 + fr.s * (side * 2.6),
-            0.6,
-            0.6,
-            steel,
-        );
-        fr.disc(pb, at, 0.9, steel);
+
+    // 1. Eight wide articulated crab legs (4 per side, ~32 px toe-to-toe!).
+    for i in 0..4 {
+        let u = i as f32 - 1.5;
+        for side in [-1.0_f32, 1.0] {
+            let ph = anim * 7.5 + i as f32 * 1.45 + if side > 0.0 { PI } else { 0.0 };
+            let stride = match pose {
+                Pose::Approach | Pose::Retreat(_) => ph.sin() * 2.6,
+                Pose::Idle => (anim * 3.0 + i as f32 * 1.7 + side).sin() * 0.75,
+                Pose::Recover(_) => (anim * 14.0 + i as f32 * 2.0).sin() * 1.6,
+                _ => 0.0,
+            };
+            let hip = base + f * (u * 2.2 - 0.8) + s * (side * 6.0) + Vec2::new(0.0, 1.5);
+            let knee = base + f * (u * 3.2 - 0.5 + stride * 0.4) + s * (side * 11.4) + Vec2::new(0.0, -2.0);
+            let foot = base + f * (u * 4.2 + stride) + s * (side * 15.2) + Vec2::new(0.0, 4.4 - stride.max(0.0) * 0.5);
+            mb_a_jointed_leg(pb, hip, knee, foot, 1.35, 0.65, shell_lo, mud.hi, flash);
+        }
     }
-    // The claws astride the aim: arms thrown wide for the tell (they start 28
-    // apart), slammed to the centre line on the strike. Each ends in a
-    // two-finger pincer that gapes through the tell and is shut on the strike.
-    let sep = if matches!(pose, Pose::Tell(_)) {
-        13.0 + fr.coil * 1.5
-    } else if striking {
-        2.0
-    } else {
-        8.0
+
+    // 2. Sculpted broad mud-crab carapace (stadium across `s` + wet ridge highlights).
+    draw_tapered_capsule(pb, base - s * 6.2, base + s * 6.2, 6.2, 6.2, mud.hi, mud.mid, mud.lo, flash);
+    // Darker muddy central dorsal ridge seam.
+    draw_tapered_capsule(pb, base - f * 3.5, base + f * 3.5, 2.4, 2.0, shell_lo.hi, shell_lo.mid, shell_lo.lo, flash);
+
+    // 3. TWO BROKEN WOODEN MOUSETRAPS strapped onto the carapace!
+    for side in [-1.0_f32, 1.0] {
+        let rattle_off = Vec2::new(0.0, (anim * 32.0 + side).sin() * trap_rattle * 0.5);
+        let at = base - f * 1.2 + s * (side * 5.2) + Vec2::new(0.0, -1.6) + rattle_off;
+        draw_rotated_box(pb, at, f.rotate(side * 0.14), 4.8, 3.0, wood.hi, wood.mid, wood.lo, flash);
+        // Yellow cheese-bait treadle near the front of each trap board!
+        let treadle = at + f * 2.2;
+        draw_shaded_disc(pb, treadle.x, treadle.y, 1.25, (255, 248, 178), bait, mud.lo, flash);
+        // Coiled steel torsion spring & bent sprung wire bail rising across the plank!
+        draw_shaded_disc(pb, at.x, at.y, 1.2, steel.hi, steel.mid, steel.lo, flash);
+        let bail_a = at - f * 3.4 - s * (side * 2.0);
+        let bail_b = at + f * 2.4 + s * (side * 2.8) + Vec2::new(0.0, -1.8 - trap_rattle * 0.7);
+        draw_tapered_capsule(pb, bail_a, bail_b, 0.75, 0.7, steel.hi, steel.mid, steel.lo, flash);
+        mb_a_glint(pb, bail_b, steel.hi);
+    }
+
+    // 4. TWIN MASSIVE SERRATED STEEL PINCER CLAWS!
+    //    Throw WIDE apart in Tell (matching 28 px opening) and SLAM SHUT to ~4 px on Strike!
+    let (sep, reach, gape, idle_snap) = match pose {
+        Pose::Idle => (9.0, 9.5, 0.30, (anim * 3.2).sin()),
+        Pose::Approach => (9.6, 10.2, 0.34, (anim * 6.5).sin()),
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            (12.2 + 3.2 * c + q * 0.6, 9.2 - 1.2 * c, 0.44 + 0.38 * c, 0.0)
+        }
+        Pose::Strike(t) => {
+            // Fast accelerating clamp from wide open (15.4) to shut (2.2)!
+            let close = (1.0 - t).powf(1.35);
+            (2.2 + 13.2 * close, 12.6 + (t * PI).sin() * 2.4, 0.06 + 0.55 * close, 0.0)
+        }
+        Pose::Recover(_) => (3.0, 11.0, 0.05, 0.0),
+        Pose::Retreat(_) => (7.8, 8.2, 0.24, 0.0),
+        Pose::Entrance(_) => (10.5, 9.5, 0.45, 0.0),
+        Pose::Death(_) => unreachable!(),
     };
-    let gape = if striking { 0.08 } else { 0.35 + fr.coil * 0.35 };
-    for side in [-1.0f32, 1.0] {
-        let shoulder = fr.at(3.0, side * 6.0);
-        let wrist = fr.at(9.0, side * sep);
-        fr.capsule(pb, shoulder, wrist, 2.2, 2.6, mud);
-        fr.capsule(pb, wrist, wrist + fr.f.rotate(side * gape) * 6.0, 2.0, 0.8, steel);
-        fr.capsule(pb, wrist, wrist + fr.f.rotate(-side * gape) * 5.0, 1.6, 0.7, steel);
+
+    // Strike dual curved closing-claw motion smears + central clap impact flash!
+    if let Pose::Strike(t) = pose {
+        let base_a = f.angle();
+        for side in [-1.0_f32, 1.0] {
+            let a0 = base_a + side * 0.95;
+            let a1 = base_a + side * 0.12;
+            draw_smear_arc(pb, base + f * 3.0, a0.min(a1), a0.max(a1), 11.0, 17.5, spark_hot, spark_hi, 0.72 * (1.0 - t * 0.35));
+        }
+        if t > 0.45 {
+            let imp = base + f * 15.0;
+            mb_a_spark_cross(pb, imp, 4, (255, 255, 236), spark_hot, (1.0 - (t - 0.45) / 0.55).clamp(0.0, 1.0));
+        }
     }
-    // Two eyes on stalks.
-    fr.disc(pb, fr.at(5.4, -2.2), 1.2, mud);
-    fr.disc(pb, fr.at(5.4, 2.2), 1.2, mud);
-    fr.eye(pb, 5.6, -2.2, 1.3, (255, 250, 220), (52, 40, 22));
-    fr.eye(pb, 5.6, 2.2, 1.3, (255, 250, 220), (52, 40, 22));
-    fr.cues(pb, (196, 168, 116), steel.hi);
+
+    for side in [-1.0_f32, 1.0] {
+        let alt_gape = if matches!(pose, Pose::Idle | Pose::Approach) {
+            let sn = if side > 0.0 { idle_snap.max(0.0) } else { (-idle_snap).max(0.0) };
+            (gape - sn * 0.20).max(0.08)
+        } else {
+            gape
+        };
+        let alt_lift = if matches!(pose, Pose::Idle) {
+            (if side > 0.0 { idle_snap } else { -idle_snap }) * 1.1
+        } else {
+            0.0
+        };
+        let shoulder = base + f * 3.2 + s * (side * 6.8);
+        let elbow = base + f * (reach * 0.55) + s * (side * (sep * 0.85)) + Vec2::new(0.0, -1.0 - alt_lift);
+        let wrist = base + f * reach + s * (side * sep) + Vec2::new(0.0, -0.8 - alt_lift);
+        draw_tapered_capsule(pb, shoulder, elbow, 2.5, 2.2, mud.hi, mud.mid, mud.lo, flash);
+        draw_tapered_capsule(pb, elbow, wrist, 2.3, 2.8, mud.hi, mud.mid, mud.lo, flash);
+        // Heavy curved steel serrated pincer jaws!
+        let outer_tip = wrist + f.rotate(side * alt_gape) * 7.2;
+        let inner_tip = wrist + f.rotate(-side * alt_gape * 0.85) * 6.0;
+        draw_tapered_capsule(pb, wrist, outer_tip, 2.2, 0.9, steel.hi, steel.mid, steel.lo, flash);
+        draw_tapered_capsule(pb, wrist, inner_tip, 1.7, 0.8, steel.hi, steel.mid, steel.lo, flash);
+        mb_a_glint(pb, outer_tip, steel.hi);
+        // Tell tension sparks between the gaping serrated jaws!
+        if let Pose::Tell(t) = pose {
+            if t > 0.45 {
+                let mid_jaw = (outer_tip + inner_tip) * 0.5;
+                mb_a_spark_cross(pb, mid_jaw, 2, (255, 252, 210), spark_hot, ((t - 0.45) / 0.55).clamp(0.0, 1.0));
+            }
+        }
+    }
+
+    // 5. Twin expressive elevated eyestalks + frothing crab mandibles!
+    let expr = eye_expr_for(pose, anim, flash);
+    let eye_col = match pose {
+        Pose::Tell(_) | Pose::Strike(_) => (255, 224, 92),
+        _ => (255, 250, 210),
+    };
+    let stalk_bob = if matches!(pose, Pose::Idle) { (anim * 2.8).sin() * 0.7 } else { 0.0 };
+    for side in [-1.0_f32, 1.0] {
+        let st_root = base + f * 4.5 + s * (side * 2.4);
+        let st_tip = base + f * 6.4 + s * (side * 2.8) + Vec2::new(0.0, -2.6 + stalk_bob * side);
+        draw_tapered_capsule(pb, st_root, st_tip, 1.1, 0.9, mud.hi, mud.mid, mud.lo, flash);
+        draw_eye(pb, st_tip, 1.55, eye_col, (50, 28, 12), f, expr, flash);
+    }
+    // Tiny frothy mud bubbles at mouthparts in Idle!
+    if matches!(pose, Pose::Idle) {
+        let bph = (anim * 1.9).fract();
+        let bub = base + f * (6.2 + bph * 2.0) + Vec2::new(0.0, 1.0 - bph * 3.5);
+        blend_px(pb, bub.x.round() as i32, bub.y.round() as i32, (236, 246, 232), 1.0 - bph);
+    }
+
+    if let Pose::Recover(t) = pose {
+        draw_dizzy_stars(pb, base + Vec2::new(0.0, -10.5), 7.6, t);
+        draw_recover_beacon(pb, base + Vec2::new(0.0, -1.5), t);
+    }
+    draw_hurt_burst(pb, base, f, flash, steel.hi);
 }
 
 // ---- 9. PASTRY WHEEL · "Makes six equal portions." -------------------------
-// A 22 px fluted cutter wheel on a fork handle; the wheel spins up through the
-// tell and throws the cut forward.
+// 26–30 px gleaming mirror-silver 12-flute steel cutting wheel in a forked
+// yoke on a turned cherry-mahogany handle with brass bolster & pommel ring.
+// Rears up and spins to a sparkling blur in Tell; slams down the 46×8 cut in Strike.
 fn draw_pastry_wheel(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
-    let steel = pal((246, 250, 255), (172, 186, 202), (78, 88, 104));
-    let wood = pal((236, 190, 132), (172, 118, 66), (86, 54, 26));
-    let dough = pal((255, 248, 224), (226, 208, 168), (150, 132, 96));
-    let fr = Frame::new(center, f, pose, anim, flash);
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let s = f.perp();
+    let steel = pal((254, 255, 255), (178, 198, 218), (68, 84, 104));
+    let cherry = pal((246, 162, 104), (186, 86, 46), (86, 36, 18));
+    let brass = pal((255, 242, 168), (218, 166, 58), (108, 72, 22));
+    let dough = pal((255, 252, 232), (234, 214, 164), (148, 126, 82));
+    let flour: Rgb = (255, 252, 244);
+
     if let Pose::Death(t) = pose {
-        wave4_death(pb, &fr, t, steel);
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 4.2;
+        draw_shadow(pb, center.x + 1.0, center.y + 5.5, 14.0, 6.5, 0.48);
+        // Scattered flour dusting & dough curls.
+        draw_shaded_ellipse(pb, center.x, center.y + 2.5, 9.0 + burst * 4.0, 4.5 + burst * 2.0, flour, dough.mid, dough.lo, 0.0);
+        // Snapped cherry handle flung back.
+        let h_c = center - f * (5.0 + burst * 6.0) + s * 3.0 - Vec2::new(0.0, bounce * 0.7);
+        draw_tapered_capsule(pb, h_c - f * 5.0, h_c + f * 4.0, 2.3, 1.5, cherry.hi, cherry.mid, cherry.lo, flash);
+        // Detached fluted steel wheel rolling away forward!
+        let w_c = center + f * (5.5 + burst * 6.5) - s * 2.5 - Vec2::new(0.0, bounce);
+        draw_shaded_disc(pb, w_c.x, w_c.y, 5.4, steel.hi, steel.mid, steel.lo, flash);
+        draw_shaded_disc(pb, w_c.x, w_c.y, 1.8, brass.hi, brass.mid, brass.lo, flash);
+        if t < 0.40 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.40, steel.hi);
+        }
+        draw_chest_pointer(pb, center, t);
         return;
     }
-    let striking = matches!(pose, Pose::Strike(_));
-    fr.shadow(pb, 10.5, 4.6);
-    let spin = anim * (3.0 + fr.coil * 9.0);
-    // The wheel rears back along its handle through the tell and is thrown
-    // forward down the cut on the strike.
-    let wheel = fr.at(if striking { 7.0 } else { 5.0 - fr.coil * 2.4 }, 0.0);
-    // The handle: a long wooden grip ending in a two-tine fork that carries
-    // the axle either side of the wheel.
-    fr.capsule(pb, fr.at(-11.0, 0.0), fr.at(-2.5, 0.0), 2.0, 1.5, wood);
-    for side in [-1.0f32, 1.0] {
-        fr.capsule(pb, fr.at(-2.5, side * 1.0), wheel + fr.s * (side * 2.8), 0.9, 0.8, steel);
+
+    let (ent_y, ent_sq) = if let Pose::Entrance(t) = pose {
+        mb_a_ent_drop(t, 22.0)
+    } else {
+        (0.0, 0.0)
+    };
+
+    let (recoil, lift, wheel_spin, pitch_y) = match pose {
+        Pose::Entrance(t) => (0.0, ent_y, t * 28.0, 0.0),
+        Pose::Idle => ((anim * 2.6).sin() * 1.1, (anim * 2.6).cos() * 0.6, (anim * 2.6).sin() * 0.9, 0.0),
+        Pose::Approach => ((anim * 9.0).sin() * 1.3, -(anim * 9.0).sin().abs() * 1.3, anim * 11.5, 0.0),
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            (-4.8 * c + q * 0.7, -3.0 * c, anim * 3.0 + t * 46.0, -3.2 * c)
+        }
+        Pose::Strike(t) => {
+            let lunge = (t * PI).sin();
+            (6.4 * lunge, 0.8 * lunge, anim * 3.0 + t * 72.0, 1.5 * lunge)
+        }
+        Pose::Recover(t) => (2.6, 1.8, 0.0, 4.6 + (t * 10.0).sin() * 0.9),
+        Pose::Retreat(t) => (-3.0, -(t * 10.0).sin().abs() * 1.0, -t * 18.0, -1.0),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let base = center + f * recoil + jolt + Vec2::new(0.0, lift);
+    let sh_s = (1.0 - (-lift).max(0.0) * 0.025).clamp(0.46, 1.15);
+    draw_shadow(pb, base.x + 1.2, center.y + 6.5, 13.0 * sh_s + ent_sq * 2.0, 5.4 * sh_s, 0.54);
+
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.44 {
+            draw_entrance_ring(pb, center, ((t - 0.44) / 0.56).clamp(0.0, 1.0), flour);
+        }
     }
-    // The fluted coin: ten scallops round a solid disc, so the edge is wavy
-    // rather than spoked.
-    for i in 0..10 {
-        let dir = fr.f.rotate(spin + i as f32 * TAU / 10.0);
-        fr.disc(pb, wheel + dir * 5.4, 1.5, steel);
+
+    // Scored pastry cut seam under the jammed wheel during Recover!
+    if matches!(pose, Pose::Recover(_)) {
+        let seam = base + f * 7.5 + Vec2::new(0.0, 4.5);
+        draw_tapered_capsule(pb, seam - f * 5.0, seam + f * 6.0, 1.6, 1.2, dough.lo, (64, 48, 32), INK, 0.0);
     }
-    fr.disc(pb, wheel, 5.2, steel);
-    fr.disc(pb, wheel, 2.0, wood);
-    // One dark flute so the spin (and the spin-up of the tell) is visible.
-    fr.capsule(pb, wheel + fr.f.rotate(spin) * 2.0, wheel + fr.f.rotate(spin) * 4.6, 0.6, 0.6, wood);
-    // A curl of cut pastry at the wheel's leading edge, growing with the tell.
-    if fr.coil > 0.15 {
-        fr.disc(pb, wheel + fr.f * 5.0 + fr.s * 3.4, 1.0 + fr.coil * 1.4, dough);
+
+    let handle_tail = base - f * 13.5 + Vec2::new(0.0, -pitch_y * 1.15);
+    let bolster = base - f * 3.0 + Vec2::new(0.0, -pitch_y * 0.25);
+    let wheel_c = base + f * 6.8 + Vec2::new(0.0, pitch_y * 0.55);
+
+    // 1. Hanging brass pommel loop + turned cherry-wood grip + brass bolster collar!
+    let pommel = handle_tail - f * 1.6;
+    mb_a_ring(pb, pommel.x, pommel.y, 1.2, 2.5, brass, flash);
+    draw_tapered_capsule(pb, handle_tail, bolster, 2.8, 1.9, cherry.hi, cherry.mid, cherry.lo, flash);
+    draw_shaded_disc(pb, (handle_tail + f * 2.5).x, (handle_tail + f * 2.5).y, 3.1, cherry.hi, cherry.mid, cherry.lo, flash);
+    mb_a_glint(pb, handle_tail + f * 1.8 + Vec2::new(-1.0, -1.5), cherry.hi);
+    // Gleaming brass ferrule collar right where the steel fork begins.
+    draw_shaded_disc(pb, bolster.x, bolster.y, 2.6, brass.hi, brass.mid, brass.lo, flash);
+
+    // 2. Two-tine steel yoke fork embracing the fluted wheel!
+    for side in [-1.0_f32, 1.0] {
+        let tine_mid = bolster + f * 4.5 + s * (side * 3.4);
+        let tine_end = wheel_c + s * (side * 2.8);
+        draw_tapered_capsule(pb, bolster + s * (side * 1.2), tine_mid, 1.15, 1.0, steel.hi, steel.mid, steel.lo, flash);
+        draw_tapered_capsule(pb, tine_mid, tine_end, 1.0, 0.9, steel.hi, steel.mid, steel.lo, flash);
     }
-    fr.eye(pb, -6.0, 0.0, 1.4, (255, 252, 240), (86, 54, 26));
-    fr.cues(pb, (232, 236, 244), steel.hi);
+
+    // 3. Large 12-flute scalloped mirror-steel cutting coin!
+    let wheel_r = 6.2;
+    for i in 0..12 {
+        let a = wheel_spin + i as f32 * (TAU / 12.0);
+        let d = Vec2::from_angle(a);
+        let flute = wheel_c + d * wheel_r;
+        let gleam = (a * 2.0 - wheel_spin).sin() * 0.5 + 0.5;
+        let tooth_hi = mix(steel.mid, steel.hi, 0.45 + 0.55 * gleam);
+        draw_shaded_disc(pb, flute.x, flute.y, 1.55, tooth_hi, steel.mid, steel.lo, flash);
+    }
+    draw_shaded_disc(pb, wheel_c.x, wheel_c.y, 5.7, steel.hi, steel.mid, steel.lo, flash);
+    // Two high-contrast radial machined slots so rotation reads unmistakably at 2× zoom-out!
+    for k in 0..2 {
+        let d = Vec2::from_angle(wheel_spin + k as f32 * PI);
+        draw_tapered_capsule(pb, wheel_c + d * 1.6, wheel_c + d * 4.8, 0.85, 0.65, cherry.lo, INK, INK, flash);
+    }
+    // Bright brass center axle rivet.
+    draw_shaded_disc(pb, wheel_c.x, wheel_c.y, 2.0, brass.hi, brass.mid, brass.lo, flash);
+    mb_a_glint(pb, wheel_c + Vec2::new(-2.4, -2.6), steel.hi);
+
+    // Approach: kicking tiny pale flour puffs behind the rolling cutter!
+    if matches!(pose, Pose::Approach) {
+        for k in 0..3 {
+            let ph = (anim * 2.0 + k as f32 * 0.33).fract();
+            let q = wheel_c - f * (4.0 + ph * 9.0) + s * ((k as f32 - 1.0) * 3.2) + Vec2::new(0.0, 3.0 - ph * 4.0);
+            blend_px(pb, q.x.round() as i32, q.y.round() as i32, flour, (1.0 - ph) * 0.85);
+        }
+    }
+
+    // Tell: curling golden pastry ribbon + revving friction sparks off the fluted teeth!
+    if let Pose::Tell(t) = pose {
+        let c = tell_coil(t);
+        let curl_p = wheel_c + f * 5.6 + s * 3.4;
+        draw_shaded_disc(pb, curl_p.x, curl_p.y, 1.4 + c * 1.8, dough.hi, dough.mid, dough.lo, flash);
+        for k in 0..4 {
+            let ph = (t * 5.5 + k as f32 * 0.25).fract();
+            let side = if k % 2 == 0 { 1.0 } else { -1.0 };
+            let sp = wheel_c + f * (4.5 - ph * 9.0) + s * (side * (3.0 + ph * 6.5)) + Vec2::new(0.0, -ph * 5.0);
+            plot_px(pb, sp.x.round() as i32, sp.y.round() as i32, if k % 2 == 0 { brass.hi } else { steel.hi });
+        }
+        mb_a_spark_cross(pb, wheel_c + f * 6.2, 3, (255, 255, 236), brass.hi, c.min(1.0));
+    }
+
+    // Strike: screaming silver-gold circular speed smear + cutting-edge impact flare + dough spray!
+    if let Pose::Strike(t) = pose {
+        let a0 = f.angle() - 1.2 + t * 5.0;
+        draw_smear_arc(pb, wheel_c, a0, a0 + 2.4, 6.0, 10.2, brass.hi, steel.hi, 0.82 * (1.0 - t * 0.3));
+        mb_a_spark_cross(pb, wheel_c + f * 6.8, 4, (255, 255, 240), brass.hi, 1.0 - t * 0.35);
+        for k in 0..5 {
+            let ph = (t * 3.5 + k as f32 * 0.2).fract();
+            let side = if k % 2 == 0 { 1.0 } else { -1.0 };
+            let q = wheel_c + f * (4.0 - ph * 13.0) + s * (side * (2.5 + ph * 7.5)) + Vec2::new(0.0, -ph * 4.5);
+            plot_px(pb, q.x.round() as i32, q.y.round() as i32, if k % 2 == 0 { dough.hi } else { flour });
+        }
+    }
+
+    // 4. Twin fiery baker's-oven amber eyes peeking from the brass bolster!
+    let expr = eye_expr_for(pose, anim, flash);
+    let eye_col = match pose {
+        Pose::Tell(_) | Pose::Strike(_) => (255, 224, 96),
+        _ => (255, 252, 238),
+    };
+    for side in [-1.0_f32, 1.0] {
+        let ep = bolster - f * 1.4 + s * (side * 2.1) + Vec2::new(0.0, -0.8);
+        draw_eye(pb, ep, 1.4, eye_col, cherry.lo, f, expr, flash);
+    }
+
+    if let Pose::Recover(t) = pose {
+        draw_dizzy_stars(pb, handle_tail + Vec2::new(0.0, -6.5), 6.8, t);
+        draw_recover_beacon(pb, bolster, t);
+    }
+    draw_hurt_burst(pb, base, f, flash, steel.hi);
 }
 
 // ---- 10. SALT HEN · "Season to taste. Hers." -------------------------------
-// A 24 px china hen with three holes in its high tail; the tail lifts through
-// the tell and the three piles fall.
+// 26–30 px glazed Delftware porcelain china hen with cobalt floral wing,
+// scarlet comb/wattle, golden beak/feet, and a tall perforated 3-hole salt
+// shaker fan-tail that tips forward in Tell and pours 3 rhythmic salt bursts
+// synced to the 0 / 0.3 / 0.6 stamp beats in Strike.
 fn draw_salt_hen(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
-    let china = pal((255, 252, 244), (226, 216, 200), (150, 140, 126));
-    let blue = pal((176, 214, 244), (92, 138, 190), (44, 70, 106));
-    let hole = pal((44, 70, 106), (26, 42, 66), (14, 22, 36));
-    let salt = pal((255, 255, 250), (238, 240, 236), (188, 194, 190));
-    let beak = pal((255, 206, 120), (214, 158, 62), (110, 74, 24));
-    let fr = Frame::new(center, f, pose, anim, flash);
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let s = f.perp();
+    let china = pal((255, 254, 250), (228, 224, 218), (132, 134, 146));
+    let delft = pal((122, 180, 252), (48, 92, 182), (22, 44, 98));
+    let comb = pal((255, 118, 108), (208, 38, 46), (108, 18, 24));
+    let beak = pal((255, 226, 122), (220, 162, 52), (112, 74, 20));
+    let salt: Rgb = (255, 255, 255);
+    let hole_c: Rgb = (18, 28, 52);
+
     if let Pose::Death(t) = pose {
-        wave4_death(pb, &fr, t, china);
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 4.0;
+        draw_shadow(pb, center.x + 1.0, center.y + 5.5, 14.5, 6.8, 0.50);
+        // Expanding white mound of spilled table salt!
+        let sr = 7.5 + burst * 6.5;
+        draw_shaded_ellipse(pb, center.x, center.y + 2.8, sr, sr * 0.50, salt, (226, 232, 236), (156, 166, 174), 0.0);
+        // Shattered Delft porcelain shards & red comb fragment!
+        for k in 0..4 {
+            let a = k as f32 * FRAC_PI_2 + 0.5;
+            let sh = center + Vec2::from_angle(a) * (4.5 + burst * 6.5) - Vec2::new(0.0, bounce * 0.8);
+            let p_col = if k % 2 == 0 { china } else { delft };
+            draw_rotated_box(pb, sh, Vec2::from_angle(a + 0.4), 3.4, 2.0, p_col.hi, p_col.mid, p_col.lo, flash);
+        }
+        let comb_p = center + f * (5.5 + burst * 4.0) - Vec2::new(0.0, 2.5 + bounce);
+        draw_shaded_disc(pb, comb_p.x, comb_p.y, 2.1, comb.hi, comb.mid, comb.lo, flash);
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, salt);
+        }
+        draw_chest_pointer(pb, center, t);
         return;
     }
-    let striking = matches!(pose, Pose::Strike(_));
-    fr.shadow(pb, 10.5, 4.4);
-    // Two china feet under the body.
-    for side in [-1.0f32, 1.0] {
-        fr.capsule(pb, fr.at(0.4, side * 2.4), fr.at(0.4, side * 3.4) + Vec2::new(0.0, 4.0), 0.9, 0.5, blue);
-    }
-    // Plump china body with a painted wing.
-    fr.ellipse(pb, fr.c, 7.0, 6.0, china);
-    fr.capsule(pb, fr.at(-2.0, 0.0) + Vec2::new(0.0, 1.0), fr.at(2.5, 0.0) + Vec2::new(0.0, 2.2), 1.3, 0.8, blue);
-    // The high tail is the shaker's cap: a tall fan with three dark holes. It
-    // stands upright at rest and tips over toward the rat to pour.
-    let tip = if striking { 6.0 } else { fr.coil * 5.0 };
-    let root = fr.at(-4.5, 0.0) + Vec2::new(0.0, -3.0);
-    let top = fr.at(-6.5 + tip, 0.0) + Vec2::new(0.0, -10.5 + tip * 0.3);
-    fr.capsule(pb, root, top, 3.0, 3.6, china);
-    for k in 0..3 {
-        let at = top + fr.s * ((k as f32 - 1.0) * 2.2) + Vec2::new(0.0, -0.4);
-        fr.disc(pb, at, 1.0, hole);
-    }
-    // Head, comb and beak.
-    let head = fr.at(6.0, 0.0) + Vec2::new(0.0, -3.5);
-    fr.disc(pb, head, 2.6, china);
-    fr.slab(pb, head + Vec2::new(0.0, -2.6), fr.f, 1.6, 0.8, blue);
-    fr.capsule(pb, head + fr.f * 1.8, head + fr.f * 3.8 + Vec2::new(0.0, 0.4), 1.0, 0.4, beak);
-    // Salt running out of the tipped cap: three grains, one per hole.
-    if fr.coil > 0.2 {
-        for k in 0..3 {
-            let fall = ((anim * 2.4 + k as f32 * 0.33).fract()) * 6.0;
-            let at = top + fr.f * (2.0 + fr.coil * 2.0) + fr.s * ((k as f32 - 1.0) * 2.2) + Vec2::new(0.0, fall);
-            fr.disc(pb, at, 0.9, salt);
+
+    let (ent_y, ent_sq) = if let Pose::Entrance(t) = pose {
+        mb_a_ent_drop(t, 20.0)
+    } else {
+        (0.0, 0.0)
+    };
+
+    // Synced 3-beat rhythmic pour shake matching the 0 / 0.3 / 0.6 s stamp cadence!
+    let (recoil, lift, waddle, tail_tip, wing_flare, pour_pulse) = match pose {
+        Pose::Entrance(_) => (0.0, ent_y, 0.0, 0.0, 0.5, 0.0),
+        Pose::Idle => (0.0, (anim * 2.6).sin() * 0.5, (anim * 2.0).sin() * 0.4, (anim * 2.2).sin() * 0.6, 0.0, 0.0),
+        Pose::Approach => {
+            let w = (anim * 8.2).sin();
+            (w * 0.9, -w.abs() * 1.6, w * 1.8, w * 0.8, w.abs() * 0.4, 0.0)
+        }
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            (-2.6 * c, -2.0 * c, q * 1.1, 6.2 * c + q * 0.8, 2.6 * c, c * 0.55)
+        }
+        Pose::Strike(t) => {
+            let beat = (t * 3.0).fract();
+            let shake = if beat < 0.34 { 1.0 - beat / 0.34 } else { 0.0 };
+            (3.6 * shake, -2.2 + 3.8 * shake, 0.0, 7.6 + 3.2 * shake, 3.2, shake)
+        }
+        Pose::Recover(t) => (2.4, 2.0, (t * 10.0).sin() * 1.1, -1.2, -1.2, 0.0),
+        Pose::Retreat(t) => (-2.2, -(t * 10.0).sin().abs() * 1.2, (t * 10.0).sin() * 1.4, -0.8, 0.3, 0.0),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let base = center + f * recoil + jolt + Vec2::new(waddle, lift);
+    let sh_s = (1.0 - (-lift).max(0.0) * 0.025).clamp(0.48, 1.15);
+    draw_shadow(pb, center.x + 1.2, center.y + 7.4, 12.0 * sh_s + ent_sq * 2.0, 5.2 * sh_s, 0.54);
+
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.44 {
+            draw_entrance_ring(pb, center, ((t - 0.44) / 0.56).clamp(0.0, 1.0), salt);
         }
     }
-    fr.eye(pb, 6.6, 0.0, 1.2, (255, 255, 255), (44, 70, 106));
-    fr.cues(pb, (236, 242, 252), china.hi);
+
+    // 1. Two tucked golden ceramic hen feet striding underneath!
+    let foot_step = match pose {
+        Pose::Approach => (anim * 8.2).sin() * 2.8,
+        Pose::Retreat(t) => (t * 10.0).sin() * 2.2,
+        _ => 0.0,
+    };
+    for side in [-1.0_f32, 1.0] {
+        let lift_f = if side > 0.0 { foot_step.max(0.0) } else { (-foot_step).max(0.0) };
+        let hip = base + s * (side * 2.6) + Vec2::new(0.0, 3.8);
+        let toe = base + f * (1.2 + side * foot_step * 0.4) + s * (side * 3.4) + Vec2::new(0.0, 7.4 - lift_f);
+        draw_tapered_capsule(pb, hip, toe, 1.1, 0.7, beak.hi, beak.mid, beak.lo, flash);
+    }
+
+    // 2. ICONIC TALL PERFORATED FAN TAIL (THE 3-HOLE SALT SHAKER CAP)!
+    let tail_root = base - f * 5.2 + Vec2::new(0.0, -2.0);
+    let tail_top = base - f * (7.2 - tail_tip) + Vec2::new(0.0, -12.2 + tail_tip * 0.34);
+    draw_tapered_capsule(pb, tail_root, tail_top, 3.6, 4.8, china.hi, china.mid, china.lo, flash);
+    // Delft-cobalt decorative glazed band around the shaker crown!
+    let band_a = tail_top - s * 4.4 + Vec2::new(0.0, 2.0);
+    let band_b = tail_top + s * 4.4 + Vec2::new(0.0, 2.0);
+    draw_tapered_capsule(pb, band_a, band_b, 1.1, 1.1, delft.hi, delft.mid, delft.lo, flash);
+    // THREE UNMISTAKABLE DARK SHAKER HOLES across the high porcelain tail rim!
+    let mut holes = [Vec2::ZERO; 3];
+    for (k, slot) in holes.iter_mut().enumerate() {
+        let h_pos = tail_top + s * ((k as f32 - 1.0) * 2.7) + Vec2::new(0.0, -0.6);
+        *slot = h_pos;
+        draw_shaded_disc(pb, h_pos.x, h_pos.y, 1.25, delft.lo, hole_c, INK, flash);
+        // Tiny white salt grain peeking at the lip when pouring/telling.
+        if pour_pulse > 0.15 {
+            plot_px(pb, h_pos.x.round() as i32, h_pos.y.round() as i32, salt);
+        }
+    }
+
+    // 3. Plump glazed white porcelain hen body + Delft cobalt floral scalloped wing!
+    draw_shaded_ellipse(pb, base.x, base.y + 0.4, 8.2 + ent_sq * 1.2, 6.6 - ent_sq * 0.6, china.hi, china.mid, china.lo, flash);
+    // Crisp specular porcelain glaze glint on the chest!
+    mb_a_glint(pb, base + Vec2::new(-3.2, -2.6), china.hi);
+    // Painted Delft blue wing (flares outward on Tell/Strike!).
+    let w_a = base - f * 2.6 + Vec2::new(0.0, 0.2 - wing_flare * 0.6);
+    let w_b = base + f * 3.0 + Vec2::new(0.0, 2.2 - wing_flare * 0.9);
+    draw_tapered_capsule(pb, w_a, w_b, 2.3, 1.4, delft.hi, delft.mid, delft.lo, flash);
+    // Decorative cobalt tail-breast dots.
+    plot_px(pb, (base.x - f.x * 1.0).round() as i32, (base.y + 3.4).round() as i32, apply_flash(delft.hi, flash));
+    plot_px(pb, (base.x + f.x * 1.8).round() as i32, (base.y + 3.2).round() as i32, apply_flash(delft.hi, flash));
+
+    // 4. Proud arched china neck, scarlet comb, crimson wattle & sharp golden beak!
+    //    Sharp hen peck-bob in Idle!
+    let peck = match pose {
+        Pose::Idle => {
+            let cyc = (anim * 1.3).fract();
+            if cyc > 0.78 { ((cyc - 0.78) / 0.22 * PI).sin() * 2.2 } else { 0.0 }
+        }
+        Pose::Approach => (anim * 8.2).cos() * 1.2,
+        Pose::Recover(_) => 3.0,
+        _ => 0.0,
+    };
+    let head = base + f * (6.8 + peck) + Vec2::new(0.0, -4.6 + peck * 0.7);
+    draw_tapered_capsule(pb, base + f * 3.8 + Vec2::new(0.0, -1.4), head, 3.0, 2.6, china.hi, china.mid, china.lo, flash);
+    draw_shaded_disc(pb, head.x, head.y, 3.2, china.hi, china.mid, china.lo, flash);
+    // Three-lobed scarlet porcelain comb on crown!
+    for k in 0..3 {
+        let u = k as f32 - 1.0;
+        let cp = head + f * (u * 1.5) + Vec2::new(0.0, -3.2 - (1.0 - u.abs()) * 0.9);
+        draw_shaded_disc(pb, cp.x, cp.y, 1.35, comb.hi, comb.mid, comb.lo, flash);
+    }
+    // Crimson chin wattle & sharp golden beak!
+    let wattle = head + f * 2.2 + Vec2::new(0.0, 2.2);
+    draw_shaded_disc(pb, wattle.x, wattle.y, 1.2, comb.hi, comb.mid, comb.lo, flash);
+    let beak_tip = head + f * 5.6 + Vec2::new(0.0, 0.5);
+    draw_tapered_capsule(pb, head + f * 2.2, beak_tip, 1.45, 0.45, beak.hi, beak.mid, beak.lo, flash);
+
+    // 5. Sparkling white salt stream sifting in Tell & erupting in 3 cascades on Strike!
+    if let Pose::Tell(t) = pose {
+        if t > 0.22 {
+            for (k, &hp) in holes.iter().enumerate() {
+                let fall = ((anim * 3.6 + k as f32 * 0.33).fract()) * 8.5;
+                let g = hp + f * (2.0 + t * 3.5) + Vec2::new(0.0, fall);
+                plot_px(pb, g.x.round() as i32, g.y.round() as i32, salt);
+                blend_px(pb, g.x.round() as i32, g.y.round() as i32 - 1, (226, 238, 250), 0.7);
+            }
+        }
+    } else if let Pose::Strike(t) = pose {
+        for (k, &hp) in holes.iter().enumerate() {
+            for j in 0..3 {
+                let ph = (t * 6.0 + k as f32 * 0.22 + j as f32 * 0.31).fract();
+                let sp = hp + f * (3.0 + ph * 11.0) + Vec2::new(0.0, ph * 11.0 - (1.0 - ph) * 2.0);
+                plot_px(pb, sp.x.round() as i32, sp.y.round() as i32, salt);
+            }
+        }
+        if pour_pulse > 0.45 {
+            mb_a_spark_cross(pb, tail_top + f * 3.2, 3, salt, delft.hi, pour_pulse);
+        }
+    }
+
+    // Expressive glossy hen eye!
+    let expr = eye_expr_for(pose, anim, flash);
+    let eye_col = match pose {
+        Pose::Tell(_) | Pose::Strike(_) => (255, 224, 98),
+        _ => (255, 255, 255),
+    };
+    draw_eye(pb, head + f * 1.1 + Vec2::new(0.0, -0.4), 1.45, eye_col, delft.lo, f, expr, flash);
+
+    if let Pose::Recover(t) = pose {
+        draw_dizzy_stars(pb, base + Vec2::new(0.0, -13.0), 7.0, t);
+        draw_recover_beacon(pb, base + Vec2::new(0.0, -2.5), t);
+    }
+    draw_hurt_burst(pb, base, f, flash, salt);
 }
 
 // ---- 11. POT BRUSH · "Scrub until the stain runs away." --------------------
-// A 34 px bristle fan at the end of a jointed handle; the fan splay is the
-// tell and the whole arm swings on the strike.
+// 34–38 px jointed beechwood handle with riveted brass knuckle, glaring wooden
+// brush-block, 15-tuft golden-straw bristle fan, and iridescent mint-aqua soap
+// suds. Coils to -55° in Tell with bristles splayed wide; whips 110° in Strike.
 fn draw_pot_brush(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
-    let bristle = pal((244, 226, 168), (198, 168, 96), (104, 82, 40));
-    let wood = pal((238, 200, 146), (176, 122, 68), (88, 56, 28));
-    let soap = pal((240, 252, 250), (176, 212, 208), (92, 128, 128));
-    let fr = Frame::new(center, f, pose, anim, flash);
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let s = f.perp();
+    let wood = pal((248, 206, 144), (186, 124, 62), (88, 52, 24));
+    let brass = pal((255, 232, 132), (208, 148, 50), (104, 64, 20));
+    let bristle = pal((255, 242, 170), (216, 174, 78), (112, 82, 28));
+    let soap = pal((238, 255, 252), (124, 230, 226), (48, 134, 144));
+
     if let Pose::Death(t) = pose {
-        wave4_death(pb, &fr, t, bristle);
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 4.0;
+        draw_shadow(pb, center.x + 1.5, center.y + 5.5, 16.0, 7.2, 0.50);
+        // Spreading iridescent aqua dish-soap puddle!
+        let pr = 8.0 + burst * 6.5;
+        draw_shaded_ellipse(pb, center.x, center.y + 2.5, pr, pr * 0.52, soap.hi, soap.mid, soap.lo, 0.0);
+        // Snapped beechwood handle halves & scattered bristle tufts!
+        let h1 = center - f * (5.5 + burst * 5.5) + s * 3.5 - Vec2::new(0.0, bounce * 0.8);
+        let h2 = center + f * (5.0 + burst * 5.5) - s * 3.0 - Vec2::new(0.0, bounce * 0.6);
+        draw_tapered_capsule(pb, h1 - f * 5.5, h1 + f * 3.0, 1.8, 1.5, wood.hi, wood.mid, wood.lo, flash);
+        draw_tapered_capsule(pb, h2 - f * 2.5, h2 + f * 5.0, 2.0, 1.2, bristle.hi, bristle.mid, bristle.lo, flash);
+        draw_shaded_disc(pb, center.x - s.x * 4.0, center.y - 2.0 - bounce, 2.1, brass.hi, brass.mid, brass.lo, flash);
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, soap.hi);
+        }
+        draw_chest_pointer(pb, center, t);
         return;
     }
-    fr.shadow(pb, 12.5, 5.2);
-    // Jointed handle from the back to the elbow.
-    let elbow = fr.at(-1.0 + fr.coil * 2.0, -4.0);
-    // Two sections with a visible knuckle, so the whole reads as a long
-    // jointed arm rather than a stub behind a fan.
-    let knuckle = fr.at(-8.0, 1.6);
-    fr.capsule(pb, fr.at(-15.0, -1.0), knuckle, 1.4, 1.4, wood);
-    fr.capsule(pb, knuckle, elbow, 1.5, 1.3, wood);
-    fr.disc(pb, knuckle, 1.7, bristle);
-    fr.disc(pb, elbow, 1.6, wood);
-    // The bristle fan: eleven short strokes spreading from the elbow.
-    let spread = 0.55 + fr.coil * 0.45;
-    for i in 0..11 {
-        let u = i as f32 / 10.0 - 0.5;
-        let dir = fr.f.rotate(u * spread * 2.0);
-        let root = elbow + dir * 1.0;
-        let tip = root + dir * (5.0 + (1.0 - u.abs() * 1.4) * 2.4);
-        draw_tapered_capsule(pb, root, tip, 1.1, 0.7, bristle.hi, bristle.mid, bristle.lo, fr.flash);
+
+    let half_sweep = 55.0_f32.to_radians(); // exact half of 110° Cord sweep
+    let (ent_y, ent_sq) = if let Pose::Entrance(t) = pose {
+        mb_a_ent_drop(t, 22.0)
+    } else {
+        (0.0, 0.0)
+    };
+
+    let (arm_ang, arm_reach, fan_spread, body_lift, knuckle_flex) = match pose {
+        Pose::Entrance(_) => (-0.25, 10.5, 0.62, ent_y, 0.0),
+        Pose::Idle => ((anim * 2.2).sin() * 0.24, 11.2, 0.60 + (anim * 3.2).sin() * 0.06, (anim * 2.2).cos() * 0.7, (anim * 2.2).sin() * 1.2),
+        Pose::Approach => ((anim * 6.8).sin() * 0.52, 12.2, 0.68, -(anim * 6.8).sin().abs() * 1.4, (anim * 6.8).cos() * 2.0),
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            (-half_sweep * c - 0.16 * c + q * 0.08, 11.0 + 3.2 * c, 0.65 + 0.48 * c, -2.2 * c, -3.2 * c)
+        }
+        Pose::Strike(t) => (-half_sweep + 2.0 * half_sweep * t, 14.5 + (t * PI).sin() * 2.0, 0.92, -0.6, 2.2),
+        Pose::Recover(t) => (half_sweep + 0.16, 12.5, 0.42, 2.0 + (t * 9.0).sin() * 0.5, 3.0),
+        Pose::Retreat(t) => (-0.55 + (t * 8.0).sin() * 0.2, 9.5, 0.50, -(t * 10.0).sin().abs() * 1.0, -1.5),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let base = center + jolt + Vec2::new(0.0, body_lift);
+    let sh_s = (1.0 - (-body_lift).max(0.0) * 0.024).clamp(0.46, 1.15);
+    draw_shadow(pb, base.x + 1.4, center.y + 6.8, 14.5 * sh_s + ent_sq * 2.2, 5.8 * sh_s, 0.54);
+
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.44 {
+            draw_entrance_ring(pb, center, ((t - 0.44) / 0.56).clamp(0.0, 1.0), soap.mid);
+        }
     }
-    // A soap bubble or two.
-    if matches!(pose, Pose::Idle | Pose::Strike(_)) {
-        let ph = (anim * 1.6).fract();
-        fr.disc(pb, fr.at(7.0 - ph * 3.0, -7.0 - ph * 4.0), 1.2, soap);
+
+    let arm_dir = f.rotate(arm_ang);
+    let arm_perp = arm_dir.perp();
+    // Long jointed handle: tail grip -> riveted brass elbow knuckle -> brush head!
+    let tail_end = base - f * 15.5 + s * (-2.2 + knuckle_flex * 0.4);
+    let knuckle = base - f * (5.2 - knuckle_flex * 0.5) + s * 3.4;
+    let head = base + arm_dir * arm_reach;
+
+    // Strike frothy aqua & straw scrub smear arc across the full 110° sweep!
+    if let Pose::Strike(t) = pose {
+        let base_a = f.angle();
+        let cur_a = base_a + arm_ang;
+        let trail_a = (base_a - half_sweep).max(cur_a - 1.15);
+        draw_smear_arc(pb, base, trail_a, cur_a, 11.5, 22.5, soap.mid, soap.hi, 0.80 * (1.0 - t * 0.25));
+        draw_smear_arc(pb, base, trail_a, cur_a, 13.5, 20.0, bristle.mid, bristle.hi, 0.55 * (1.0 - t * 0.3));
     }
-    fr.eye(pb, -3.0, 1.6, 1.4, (255, 250, 232), (88, 56, 28));
-    fr.cues(pb, (240, 226, 176), bristle.hi);
+
+    // 1. Two-segment articulated beechwood lever-handle + brass hanging ring + elbow rivet!
+    mb_a_ring(pb, (tail_end - f * 1.4).x, (tail_end - f * 1.4).y, 1.0, 2.2, brass, flash);
+    draw_tapered_capsule(pb, tail_end, knuckle, 1.7, 2.1, wood.hi, wood.mid, wood.lo, flash);
+    draw_tapered_capsule(pb, knuckle, head, 2.0, 2.4, wood.hi, wood.mid, wood.lo, flash);
+    draw_shaded_disc(pb, knuckle.x, knuckle.y, 2.9, brass.hi, brass.mid, brass.lo, flash);
+    draw_shaded_disc(pb, knuckle.x, knuckle.y, 1.1, wood.lo, INK, INK, flash);
+    mb_a_glint(pb, knuckle + Vec2::new(-1.0, -1.2), brass.hi);
+
+    // 2. Massive 15-tuft golden-straw bristle fan fanning out from the brush head!
+    let head_tip = head + arm_dir * 2.0;
+    for i in 0..15 {
+        let u = i as f32 / 14.0 - 0.5;
+        let rustle = if matches!(pose, Pose::Idle | Pose::Approach) {
+            (anim * 6.0 + i as f32 * 0.7).sin() * 0.05
+        } else {
+            0.0
+        };
+        let b_dir = arm_dir.rotate(u * fan_spread * 2.0 + rustle);
+        let root = head_tip + arm_perp * (u * 5.2);
+        let len = 6.2 + (1.0 - u.abs() * 1.35) * 3.4;
+        let tip = root + b_dir * len;
+        let b_hi = if i % 3 == 0 { soap.hi } else { bristle.hi };
+        let b_mid = if i % 3 == 0 { mix(bristle.mid, soap.mid, 0.45) } else { bristle.mid };
+        draw_tapered_capsule(pb, root, tip, 1.25, 0.75, b_hi, b_mid, bristle.lo, flash);
+    }
+
+    // 3. Wooden oval brush-block head + copper-brass ferrule band!
+    draw_tapered_capsule(pb, head - arm_perp * 3.4, head + arm_perp * 3.4, 3.0, 3.0, wood.hi, wood.mid, wood.lo, flash);
+    draw_tapered_capsule(
+        pb,
+        head + arm_dir * 2.1 - arm_perp * 3.8,
+        head + arm_dir * 2.1 + arm_perp * 3.8,
+        1.25,
+        1.25,
+        brass.hi,
+        brass.mid,
+        brass.lo,
+        flash,
+    );
+    mb_a_glint(pb, head - arm_dir * 1.0 - Vec2::new(1.5, 1.5), wood.hi);
+
+    // 4. Floating iridescent mint-aqua soap bubbles (Idle/Approach/Tell/Strike)!
+    let bub_count = if matches!(pose, Pose::Strike(_)) { 5 } else { 3 };
+    for k in 0..bub_count {
+        let ph = (anim * 1.5 + k as f32 * 0.31).fract();
+        let spread_k = (k as f32 - 1.5) * 3.4;
+        let bp = head + arm_dir * (7.5 + ph * 4.5) + arm_perp * spread_k + Vec2::new(0.0, -ph * 9.0);
+        let br = if k % 2 == 0 { 1.45 } else { 1.1 };
+        draw_shaded_disc(pb, bp.x, bp.y, br, soap.hi, soap.mid, soap.lo, flash);
+        plot_px(pb, bp.x.round() as i32 - 1, bp.y.round() as i32 - 1, (255, 255, 255));
+    }
+
+    if let Pose::Tell(t) = pose {
+        let c = tell_coil(t);
+        mb_a_spark_cross(pb, head + arm_dir * 9.5, 3, (255, 255, 250), soap.mid, c.min(1.0));
+    }
+
+    // 5. Twin furious eyes set into the wooden brush block!
+    let expr = eye_expr_for(pose, anim, flash);
+    let eye_col = match pose {
+        Pose::Tell(_) | Pose::Strike(_) => (255, 232, 108),
+        _ => (255, 252, 238),
+    };
+    for side in [-1.0_f32, 1.0] {
+        let ep = head - arm_dir * 0.6 + arm_perp * (side * 2.2);
+        draw_eye(pb, ep, 1.4, eye_col, wood.lo, arm_dir, expr, flash);
+    }
+
+    if let Pose::Recover(t) = pose {
+        draw_shaded_ellipse(pb, (head + arm_dir * 6.0).x, (head + arm_dir * 6.0).y + 2.5, 6.2, 2.8, soap.hi, soap.mid, soap.lo, 0.0);
+        draw_dizzy_stars(pb, knuckle + Vec2::new(0.0, -9.5), 7.0, t);
+        draw_recover_beacon(pb, knuckle, t);
+    }
+    draw_hurt_burst(pb, base, f, flash, soap.hi);
 }
 
 // ---- 12. DOSE PUMP · "Read the label twice." ------------------------------
-// A 19 px glass barrel on a plunger foot; the plunger draws back through the
-// tell and drives through the strike.
+// 22–26 px borosilicate glass syringe cylinder on a springy rubber-and-steel
+// plunger foot, filled with glowing radioactive neon-chartreuse serum and a
+// scarlet warning collar. Pogo-hops on Approach, levels along aim & draws the
+// plunger way back in Tell, then slams home shooting a glowing jet in Strike.
 fn draw_dose_pump(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
-    let glass = pal((244, 254, 255), (186, 218, 226), (96, 128, 140));
-    let fluid = pal((196, 226, 130), (130, 170, 70), (60, 88, 34));
-    let steel = pal((236, 244, 252), (156, 172, 190), (70, 80, 96));
-    let fr = Frame::new(center, f, pose, anim, flash);
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let glass = pal((248, 255, 255), (174, 224, 238), (68, 108, 128));
+    let serum = pal((234, 255, 118), (132, 228, 52), (46, 112, 22));
+    let steel = pal((246, 252, 255), (158, 176, 196), (62, 74, 92));
+    let label = pal((255, 122, 112), (206, 44, 48), (102, 18, 24));
+
     if let Pose::Death(t) = pose {
-        wave4_death(pb, &fr, t, glass);
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 4.0;
+        draw_shadow(pb, center.x + 1.0, center.y + 5.5, 13.5, 6.2, 0.50);
+        // Spreading radioactive chartreuse serum puddle!
+        let pr = 7.5 + burst * 6.5;
+        draw_shaded_ellipse(pb, center.x, center.y + 2.6, pr, pr * 0.50, serum.hi, serum.mid, serum.lo, 0.0);
+        // Shattered glass barrel & bent steel needle!
+        let g1 = center - f * (4.5 + burst * 5.0) - Vec2::new(0.0, bounce * 0.8);
+        let g2 = center + f * (5.0 + burst * 5.5) - Vec2::new(0.0, bounce * 0.6);
+        draw_rotated_box(pb, g1, f.rotate(-0.35), 4.2, 2.8, glass.hi, glass.mid, glass.lo, flash);
+        draw_tapered_capsule(pb, g2, g2 + f.rotate(0.4) * 6.5, 1.1, 0.4, steel.hi, steel.mid, steel.lo, flash);
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, serum.hi);
+        }
+        draw_chest_pointer(pb, center, t);
         return;
     }
-    let striking = matches!(pose, Pose::Strike(_));
-    fr.shadow(pb, 8.0, 4.2);
-    // The barrel stands on its nose at rest and is levelled at the rat through
-    // the tell: `nose` swings from straight down to the locked aim, which is
-    // the line the injection trench will run along.
-    let down = Vec2::new(0.0, 1.0);
-    let level = if striking || matches!(pose, Pose::Recover(_)) {
-        1.0
+
+    let (ent_y, ent_sq) = if let Pose::Entrance(t) = pose {
+        mb_a_ent_drop(t, 20.0)
     } else {
-        fr.coil.min(1.0)
+        (0.0, 0.0)
     };
-    let nose = safe_dir(down * (1.0 - level) + fr.f * level, down);
-    let side = nose.perp();
-    // Glass barrel.
-    fr.slab(pb, fr.c, nose, 6.4, 3.4, glass);
-    // The dose: drawn in as the plunger pulls back, gone once it is driven.
-    let dose = if striking { 0.8 } else { 1.6 + fr.coil * 2.4 };
-    fr.slab(pb, fr.c + nose * (5.6 - dose), nose, dose, 2.8, fluid);
-    // Two printed graduations.
-    for k in 0..2 {
-        fr.slab(pb, fr.c + nose * (-3.4 + k as f32 * 2.4), side, 1.8, 0.4, fluid);
+
+    // Pogo-hop bounce on Approach; springy idle pulse on the plunger foot!
+    let hop = if matches!(pose, Pose::Approach) {
+        let cyc = (anim * 2.2).fract();
+        if cyc < 0.68 { -(cyc / 0.68 * PI).sin() * 5.2 } else { 0.8 }
+    } else if matches!(pose, Pose::Idle) {
+        (anim * 3.2).sin() * 1.4
+    } else {
+        0.0
+    };
+
+    let (level, pull, dose_len, needle_ext, recoil, lift) = match pose {
+        Pose::Entrance(_) => (0.15, 9.8, 2.2, 9.5, 0.0, ent_y),
+        Pose::Idle => (0.18 + (anim * 1.6).sin() * 0.08, 9.6 - hop * 0.35, 2.6, 9.8, 0.0, hop),
+        Pose::Approach => (0.42, 9.2, 2.8, 10.2, (anim * 7.0).sin() * 1.0, hop),
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            (0.25 + 0.75 * c.min(1.0), 10.0 + 4.8 * c + q * 0.6, 2.2 + 3.6 * c.min(1.0), 10.4 + c * 1.2, -3.4 * c, -1.8 * c)
+        }
+        Pose::Strike(t) => {
+            let drive = (t * 1.35).clamp(0.0, 1.0);
+            (1.0, 14.8 - 7.6 * drive, (5.8 * (1.0 - drive)).max(0.6), 13.8 + (t * PI).sin() * 1.6, 4.8 * (t * PI).sin(), 0.0)
+        }
+        Pose::Recover(t) => (0.85, 7.2, 0.6, 10.2, 1.6, 1.8 + (t * 9.0).sin() * 0.5),
+        Pose::Retreat(t) => (0.35, 9.6, 1.4, 9.4, -2.4, -(t * 10.0).sin().abs() * 1.8),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let base = center + f * recoil + jolt + Vec2::new(0.0, lift);
+    let sh_s = (1.0 - (-lift).max(0.0) * 0.03).clamp(0.45, 1.15);
+    draw_shadow(pb, base.x + 1.0, center.y + 8.5, 9.5 * sh_s + ent_sq * 2.0, 4.4 * sh_s, 0.54);
+
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.44 {
+            draw_entrance_ring(pb, center, ((t - 0.44) / 0.56).clamp(0.0, 1.0), serum.mid);
+        }
     }
-    // The plunger foot: a wide flange on the barrel's back end, the rod
-    // through it, and the thumb plate — pulled far back through the tell.
-    let pull = if striking { 7.6 } else { 10.0 + fr.coil * 2.6 };
-    fr.capsule(pb, fr.c - nose * 6.0, fr.c - nose * pull, 1.3, 1.0, steel);
-    fr.slab(pb, fr.c - nose * pull, side, 3.0, 1.0, steel);
-    fr.slab(pb, fr.c - nose * 6.8, side, 4.4, 1.0, steel);
-    // The needle, shot out on the strike.
-    let needle = if striking { 13.0 } else { 9.6 };
-    fr.capsule(pb, fr.c + nose * 6.4, fr.c + nose * needle, 0.8, 0.4, steel);
-    fr.eye(pb, 0.0, 0.0, 1.3, (250, 255, 255), (60, 88, 34));
-    fr.cues(pb, (200, 232, 214), glass.hi);
+
+    // Barrel stands near-vertical on its plunger foot at rest (`up` = (0, -1),
+    // nose pointing toward floor-front), levelling dead onto `f` through Tell/Strike!
+    let rest_dir = safe_dir(Vec2::new(f.x * 0.35, 0.94), Vec2::new(0.0, 1.0));
+    let nose = safe_dir(rest_dir * (1.0 - level) + f * level, f);
+    let side = nose.perp();
+
+    // 1. Wide flanged steel plunger rod & rubber T-foot behind the barrel!
+    let rod_end = base - nose * pull;
+    draw_tapered_capsule(pb, base - nose * 6.5, rod_end, 1.5, 1.2, steel.hi, steel.mid, steel.lo, flash);
+    // Thumb-plate / hopping rubber foot at the back end of the plunger.
+    draw_rotated_box(pb, rod_end, side, 4.2, 1.35, steel.hi, steel.mid, steel.lo, flash);
+    // Wide finger-flange collar at the back of the glass barrel.
+    draw_rotated_box(pb, base - nose * 7.2, side, 5.2, 1.15, steel.hi, steel.mid, steel.lo, flash);
+
+    // 2. Crisp borosilicate glass cylinder barrel + glowing chartreuse serum!
+    draw_rotated_box(pb, base, nose, 7.2, 4.1, glass.hi, glass.mid, glass.lo, flash);
+    // Glowing neon-lime serum chamber (visibly fills during Tell and empties on Strike!).
+    let fluid_c = base + nose * (6.2 - dose_len);
+    draw_rotated_box(pb, fluid_c, nose, dose_len, 3.2, serum.hi, serum.mid, serum.lo, flash);
+    // Bubbling serum motes inside the barrel!
+    for k in 0..3 {
+        let ph = (anim * 2.6 + k as f32 * 0.37).fract();
+        let bp = fluid_c + nose * ((ph - 0.5) * dose_len * 1.4) + side * (((k as f32) - 1.0) * 1.4);
+        plot_px(pb, bp.x.round() as i32, bp.y.round() as i32, (250, 255, 224));
+    }
+    // Scarlet hazard label collar & printed graduation ticks!
+    draw_rotated_box(pb, base - nose * 2.2, nose, 1.4, 4.2, label.hi, label.mid, label.lo, flash);
+    for k in 0..3 {
+        let tick = base + nose * (-0.2 + k as f32 * 2.3) - side * 1.4;
+        draw_tapered_capsule(pb, tick - side * 1.2, tick + side * 1.0, 0.45, 0.45, glass.lo, INK, INK, flash);
+    }
+    // Bright glass specular reflection streak running along the top-left barrel edge!
+    let gl_a = base - nose * 5.2 - side * 2.3;
+    let gl_b = base + nose * 5.2 - side * 2.3;
+    pb.line(gl_a.x.round() as i32, gl_a.y.round() as i32, gl_b.x.round() as i32, gl_b.y.round() as i32, (255, 255, 255));
+
+    // 3. Tapered luer-lock steel hub & razor surgical needle!
+    let hub = base + nose * 7.6;
+    let tip = base + nose * needle_ext;
+    draw_tapered_capsule(pb, hub, hub + nose * 1.8, 2.2, 1.2, steel.hi, steel.mid, steel.lo, flash);
+    draw_tapered_capsule(pb, hub + nose * 1.5, tip, 1.0, 0.45, steel.hi, steel.mid, steel.lo, flash);
+
+    // Glowing chartreuse bead trembling at the needle tip in Idle / Tell; blazing jet on Strike!
+    if matches!(pose, Pose::Idle | Pose::Approach) {
+        let pulse = 0.8 + (anim * 4.0).sin().abs() * 0.55;
+        draw_shaded_disc(pb, tip.x, tip.y, pulse, serum.hi, serum.mid, serum.lo, flash);
+    } else if let Pose::Tell(t) = pose {
+        let c = tell_coil(t);
+        draw_shaded_disc(pb, tip.x, tip.y, 1.2 + c * 1.2, (255, 255, 232), serum.hi, serum.mid, flash);
+        mb_a_spark_cross(pb, tip, 3, (255, 255, 230), serum.mid, c.min(1.0));
+    } else if let Pose::Strike(t) = pose {
+        // High-pressure neon-lime injection spray & speed streaks!
+        let jet_len = 9.0 + (1.0 - t) * 7.0;
+        draw_tapered_capsule(pb, tip, tip + nose * jet_len, 1.8, 0.6, (255, 255, 236), serum.hi, serum.mid, flash);
+        mb_a_spark_cross(pb, tip + nose * 2.5, 4, (255, 255, 240), serum.hi, 1.0 - t * 0.4);
+        for k in 0..4 {
+            let ph = (t * 5.0 + k as f32 * 0.25).fract();
+            let sp = tip + nose * (ph * 14.0) + side * ((k as f32 - 1.5) * 2.4 * ph);
+            plot_px(pb, sp.x.round() as i32, sp.y.round() as i32, if k % 2 == 0 { serum.hi } else { (255, 255, 240) });
+        }
+    }
+
+    // 4. Expressive glowing clinical eye mounted on the scarlet label band!
+    let expr = eye_expr_for(pose, anim, flash);
+    let eye_col = match pose {
+        Pose::Tell(_) | Pose::Strike(_) => serum.hi,
+        _ => (248, 255, 255),
+    };
+    draw_eye(pb, base - nose * 1.8, 1.6, eye_col, serum.lo, f, expr, flash);
+
+    if let Pose::Recover(t) = pose {
+        // Hissing green vapor wisps leaking from the depleted plunger seal!
+        for k in 0..2 {
+            let ph = (t * 3.0 + k as f32 * 0.5).fract();
+            let vp = rod_end + Vec2::new(((k as f32) - 0.5) * 4.0, -2.0 - ph * 8.0);
+            mb_a_puff(pb, vp, 2, serum.hi, (1.0 - ph) * 0.72);
+        }
+        draw_dizzy_stars(pb, base + Vec2::new(0.0, -10.0), 6.5, t);
+        draw_recover_beacon(pb, base, t);
+    }
+    draw_hurt_burst(pb, base, f, flash, serum.hi);
 }
 
 // ---- 13. PETRI MOTHER · "The blank sample had children." -------------------
-// A 24 px shallow culture dish on cilia with a missing rim; the colony swells
-// inside it through the tell.
+// 26–30 px shallow borosilicate culture dish gliding on rippling translucent
+// cilia, filled with warm gold agar and a pulsing bioluminescent magenta mother
+// colony + budding daughter spores. Carves an unmistakable 75° broken sterile
+// rim notch STRICTLY aligned to `f.rotate(RING_GAP_TURN)`!
 fn draw_petri_mother(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
-    let glass = pal((240, 250, 252), (182, 208, 214), (94, 120, 128));
-    let colony = pal((255, 196, 226), (206, 122, 172), (108, 56, 92));
-    let agar = pal((232, 226, 186), (184, 176, 132), (104, 98, 68));
-    let fr = Frame::new(center, f, pose, anim, flash);
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let s = f.perp();
+    let glass = pal((246, 254, 255), (170, 214, 226), (66, 104, 122));
+    let agar = pal((246, 230, 162), (190, 168, 94), (98, 84, 42));
+    let colony = pal((255, 206, 242), (242, 94, 178), (122, 32, 88));
+    let cilia = pal((224, 252, 255), (132, 198, 214), (56, 98, 116));
+    let gap_gold: Rgb = (255, 240, 146);
+
     if let Pose::Death(t) = pose {
-        wave4_death(pb, &fr, t, glass);
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 3.8;
+        draw_shadow(pb, center.x + 1.0, center.y + 5.5, 15.0, 7.0, 0.50);
+        // Spilled warm agar & deflated magenta spore pool!
+        draw_shaded_ellipse(pb, center.x, center.y + 2.5, 9.5 + burst * 5.0, 4.8 + burst * 2.2, agar.mid, agar.lo, INK, 0.0);
+        draw_shaded_ellipse(pb, center.x, center.y + 1.8, 5.5 + burst * 3.5, 3.0 + burst * 1.5, colony.mid, colony.lo, INK, 0.0);
+        // Shattered curved glass dish shards flung apart!
+        for k in 0..3 {
+            let a = k as f32 * (TAU / 3.0) + 0.4;
+            let sh = center + Vec2::from_angle(a) * (5.5 + burst * 5.5) - Vec2::new(0.0, bounce * 0.7);
+            draw_rotated_box(pb, sh, Vec2::from_angle(a + FRAC_PI_2), 4.0, 1.3, glass.hi, glass.mid, glass.lo, flash);
+        }
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, colony.hi);
+        }
+        draw_chest_pointer(pb, center, t);
         return;
     }
-    fr.shadow(pb, 12.0, 4.4);
-    // Shallow dish: a wide flat ellipse with a rim and one missing arc.
-    fr.ellipse(pb, fr.c, 10.4, 4.0, glass);
-    fr.ellipse(pb, fr.c + Vec2::new(0.0, -0.8), 7.6, 2.4, agar);
-    // The rim, broken where the sterile gap is: a quarter turn off the aim.
-    let gap = fr.f.rotate(RING_GAP_TURN);
-    for i in 0..18 {
-        let a = i as f32 * TAU / 18.0;
-        let dir = Vec2::from_angle(a);
-        // The break is as wide as the ring's own 75° sterile gap.
-        if dir.dot(gap) > 0.79 {
+
+    let (ent_y, ent_sq) = if let Pose::Entrance(t) = pose {
+        mb_a_ent_drop(t, 20.0)
+    } else {
+        (0.0, 0.0)
+    };
+
+    let (lift, sway, cilia_spd, colony_swell, tilt_y) = match pose {
+        Pose::Entrance(_) => (ent_y, 0.0, 8.0, 0.3, 0.0),
+        Pose::Idle => ((anim * 2.5).sin() * 0.9, (anim * 1.7).sin() * 0.7, 4.8, (anim * 2.8).sin() * 0.35, 0.0),
+        Pose::Approach => ((anim * 6.5).sin() * 1.0 - 0.8, (anim * 5.0).cos() * 1.2, 10.5, 0.3, 0.0),
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            (-3.2 * c, q * 1.1, 14.0, 2.8 * c, 0.0)
+        }
+        Pose::Strike(t) => {
+            let ring = (1.0 - t) * (t * 48.0).sin() * 1.6;
+            (0.6, ring, 16.0, 3.2 * (1.0 - t * 0.6), 0.0)
+        }
+        Pose::Recover(t) => (2.0, (t * 8.0).sin() * 0.9, 2.2, -1.2, 1.6),
+        Pose::Retreat(t) => (-0.8, (t * 9.0).sin() * 1.1, -9.0, 0.0, 0.0),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let base = center + jolt + Vec2::new(sway, lift);
+    let sh_s = (1.0 - (-lift).max(0.0) * 0.028).clamp(0.48, 1.15);
+    draw_shadow(pb, base.x + 1.2, center.y + 7.2, 14.0 * sh_s + ent_sq * 2.0, 6.2 * sh_s, 0.52);
+
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.44 {
+            draw_entrance_ring(pb, center, ((t - 0.44) / 0.56).clamp(0.0, 1.0), colony.mid);
+        }
+    }
+
+    // 1. Nine undulating translucent cyan cilia flagella rippling under the dish skirt!
+    let dish_rx = 11.6 + ent_sq * 1.4;
+    let dish_ry = 6.2 - ent_sq * 0.5;
+    for i in 0..9 {
+        let u = i as f32 / 8.0 - 0.5;
+        let x_off = u * 20.0;
+        let wave = (anim * cilia_spd + i as f32 * 0.95).sin();
+        let root = base + Vec2::new(x_off, dish_ry * 0.55 + (1.0 - (u * 2.0).powi(2)) * 1.8);
+        let tip = root + Vec2::new(wave * 2.2 + u * 2.6, 4.4 + (wave.abs() * 0.8));
+        draw_tapered_capsule(pb, root, tip, 0.95, 0.45, cilia.hi, cilia.mid, cilia.lo, flash);
+    }
+
+    // 2. Shallow borosilicate glass dish base + warm golden agar interior!
+    draw_shaded_ellipse(pb, base.x, base.y + tilt_y * 0.3, dish_rx, dish_ry, glass.hi, glass.mid, glass.lo, flash);
+    draw_shaded_ellipse(pb, base.x, base.y - 0.9, dish_rx - 2.4, dish_ry - 1.8, agar.hi, agar.mid, agar.lo, flash);
+
+    // 3. Broken glass Petri rim with UNMISTAKABLE 75° sterile gap aligned to `f.rotate(RING_GAP_TURN)`!
+    let gap = f.rotate(RING_GAP_TURN);
+    let cos_gap = 0.793_f32; // cos(37.5°) -> exact 75° sterile break!
+    let gap_glow = matches!(pose, Pose::Tell(_) | Pose::Strike(_));
+    let rim_steps = 28;
+    for i in 0..rim_steps {
+        let a = i as f32 * (TAU / rim_steps as f32);
+        let d = Vec2::from_angle(a);
+        let dot = d.dot(gap);
+        if dot > cos_gap {
             continue;
         }
-        let at = fr.c + Vec2::new(dir.x * 11.0, dir.y * 4.6);
-        fr.disc(pb, at, 1.3, glass);
+        let near_break = dot > 0.68;
+        let pt = base + Vec2::new(d.x * (dish_rx + 0.5), d.y * (dish_ry + 0.3) - 0.6);
+        let rim_p = if near_break && gap_glow {
+            pal((255, 255, 232), gap_gold, glass.lo)
+        } else {
+            glass
+        };
+        draw_shaded_disc(pb, pt.x, pt.y, if near_break { 1.6 } else { 1.35 }, rim_p.hi, rim_p.mid, rim_p.lo, flash);
     }
-    // The culture front: a ring of spots creeping out across the agar toward
-    // the rim through the tell — the ring that is about to leave the dish.
-    if fr.coil > 0.1 {
-        let front = 3.0 + fr.coil.min(1.0) * 6.0;
-        for i in 0..10 {
-            let dir = Vec2::from_angle(i as f32 * TAU / 10.0 + anim);
-            if dir.dot(gap) > 0.79 {
-                continue;
-            }
-            let at = fr.c + Vec2::new(dir.x * front, dir.y * front * 0.42 - 0.8);
-            fr.disc(pb, at, 0.8, colony);
+    // Subtle golden-white fracture rays radiating from the two broken rim edges during Tell/Strike!
+    if gap_glow {
+        let ray_len = match pose {
+            Pose::Tell(t) => 3.5 + t * 4.5,
+            Pose::Strike(t) => 7.5 * (1.0 - t * 0.45),
+            _ => 0.0,
+        };
+        for sign in [-1.0_f32, 1.0] {
+            let edge = gap.rotate(sign * 0.654); // ±37.5°
+            let p0 = base + Vec2::new(edge.x * dish_rx, edge.y * dish_ry - 0.6);
+            let p1 = p0 + edge * ray_len;
+            pb.line(p0.x.round() as i32, p0.y.round() as i32, p1.x.round() as i32, p1.y.round() as i32, gap_gold);
         }
     }
-    // The colony, swelling with the tell.
-    let r = 1.8 + fr.coil * 2.6 + (anim * 3.0).sin() * 0.3;
-    fr.disc(pb, fr.c + Vec2::new(0.0, -1.0), r, colony);
+
+    // 4. Creeping culture spore front in Tell + 285° magenta spore eruption in Strike!
+    if let Pose::Tell(t) = pose {
+        let c = tell_coil(t);
+        let front = 3.2 + c.min(1.0) * 7.6;
+        for i in 0..14 {
+            let d = Vec2::from_angle(i as f32 * (TAU / 14.0) + anim * 1.4);
+            if d.dot(gap) > cos_gap {
+                continue;
+            }
+            let pt = base + Vec2::new(d.x * front, d.y * front * 0.52 - 0.9);
+            draw_shaded_disc(pb, pt.x, pt.y, 1.05, colony.hi, colony.mid, colony.lo, flash);
+        }
+    } else if let Pose::Strike(t) = pose {
+        let expand = 9.5 + t * 7.5;
+        for i in 0..20 {
+            let d = Vec2::from_angle(i as f32 * (TAU / 20.0));
+            if d.dot(gap) > cos_gap {
+                continue;
+            }
+            let pt = base + Vec2::new(d.x * expand, d.y * expand * 0.56 - 0.8);
+            let col = if i % 2 == 0 { colony.hi } else { colony.mid };
+            blend_px(pb, pt.x.round() as i32, pt.y.round() as i32, col, (1.0 - t * 0.55) * 0.92);
+            blend_px(pb, pt.x.round() as i32 + 1, pt.y.round() as i32, colony.hi, (1.0 - t * 0.65) * 0.65);
+        }
+    }
+
+    // 5. Pulsing central bioluminescent magenta Mother Colony + 3 orbiting daughter buds!
+    let col_c = base + Vec2::new(0.0, -1.2);
+    let mother_r = (3.4 + colony_swell).max(2.1);
+    // Budding daughter colonies orbiting gently inside the agar.
     for k in 0..3 {
-        let a = anim * 1.6 + k as f32 * TAU / 3.0;
-        fr.disc(pb, fr.c + Vec2::from_angle(a) * 3.4 + Vec2::new(0.0, -1.0), 0.9, colony);
+        let a = anim * 1.8 + k as f32 * (TAU / 3.0);
+        let orbit = 4.6 + colony_swell * 0.45;
+        let d_pos = col_c + Vec2::new(a.cos() * orbit, a.sin() * orbit * 0.5);
+        draw_shaded_disc(pb, d_pos.x, d_pos.y, 1.45, colony.hi, colony.mid, colony.lo, flash);
     }
-    // Cilia under the dish.
-    for i in 0..5 {
-        let x = (i as f32 - 2.0) * 3.4;
-        let wob = (anim * 5.0 + i as f32).sin() * 0.9;
-        fr.capsule(
-            pb,
-            fr.c + Vec2::new(x, 3.4),
-            fr.c + Vec2::new(x + wob, 7.0),
-            0.7,
-            0.4,
-            glass,
-        );
+    let m_hi = if matches!(pose, Pose::Tell(_) | Pose::Strike(_)) { (255, 236, 250) } else { colony.hi };
+    draw_shaded_disc(pb, col_c.x, col_c.y, mother_r, m_hi, colony.mid, colony.lo, flash);
+    mb_a_glint(pb, col_c + Vec2::new(-1.4, -1.6), colony.hi);
+
+    // 6. Twin glowing mother-colony eyes nestled in the pink nucleus!
+    let expr = eye_expr_for(pose, anim, flash);
+    let eye_col = match pose {
+        Pose::Tell(_) | Pose::Strike(_) => (255, 240, 128),
+        _ => (255, 254, 248),
+    };
+    for side in [-1.0_f32, 1.0] {
+        let ep = col_c + f * 1.4 + s * (side * 2.1);
+        draw_eye(pb, ep, 1.35, eye_col, colony.lo, f, expr, flash);
     }
-    fr.eye(pb, 3.4, -1.2, 1.2, (255, 255, 255), (108, 56, 92));
-    fr.cues(pb, (232, 240, 246), colony.hi);
+
+    if let Pose::Recover(t) = pose {
+        draw_dizzy_stars(pb, col_c + Vec2::new(0.0, -9.5), 7.2, t);
+        draw_recover_beacon(pb, col_c, t);
+    }
+    draw_hurt_burst(pb, base, f, flash, colony.hi);
 }
 
 // ---- 14. CAGE COUNTER · "One rat short again." -----------------------------
-// A 26 px tally wheel on a tripod; the wheel clicks round through the tell.
+// 26–30 px brushed-brass clicking tally wheel on a tripedal gunmetal frame,
+// crowned by a spring-loaded crimson ratchet clicker flag and carrying a 3-lamp
+// reader console bar underneath that counts up and pulses in exact simulation
+// order (left, right, centre).
 fn draw_cage_counter(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
-    let brass = pal((255, 236, 176), (204, 154, 62), (104, 70, 24));
-    let ink = pal((196, 208, 226), (120, 136, 158), (54, 62, 74));
-    let pad = pal((255, 172, 170), (200, 84, 92), (98, 34, 44));
-    let fr = Frame::new(center, f, pose, anim, flash);
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let brass = pal((255, 240, 158), (214, 160, 52), (106, 70, 22));
+    let steel = pal((206, 222, 240), (108, 124, 148), (42, 50, 66));
+    let ruby = pal((255, 174, 166), (238, 52, 66), (112, 18, 28));
+    let lamp_off = pal((84, 94, 110), (46, 54, 66), (22, 26, 34));
+    let ivory: Rgb = (250, 248, 236);
+
     if let Pose::Death(t) = pose {
-        wave4_death(pb, &fr, t, brass);
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 4.0;
+        draw_shadow(pb, center.x + 1.0, center.y + 5.8, 14.5, 6.8, 0.50);
+        // Splayed broken steel tripod legs.
+        for k in 0..3 {
+            let a = k as f32 * (TAU / 3.0) + 0.5;
+            let p0 = center + Vec2::from_angle(a) * 2.5;
+            let p1 = center + Vec2::from_angle(a) * (8.5 + burst * 5.0);
+            draw_tapered_capsule(pb, p0, p1, 1.3, 0.8, steel.hi, steel.mid, steel.lo, flash);
+        }
+        // Detached brass tally wheel lying sideways!
+        let wc = center + f * (5.0 + burst * 5.5) - Vec2::new(0.0, 1.0 + bounce);
+        mb_a_ring(pb, wc.x, wc.y, 3.0, 6.2, brass, flash);
+        draw_shaded_disc(pb, wc.x, wc.y, 2.6, steel.hi, steel.mid, steel.lo, flash);
+        // Snapped crimson ratchet flag.
+        let fl_p = center - f * (5.0 + burst * 4.0) - Vec2::new(0.0, 2.0 + bounce * 0.7);
+        draw_shaded_disc(pb, fl_p.x, fl_p.y, 1.9, ruby.hi, ruby.mid, ruby.lo, flash);
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, brass.hi);
+        }
+        draw_chest_pointer(pb, center, t);
         return;
     }
-    fr.shadow(pb, 10.0, 4.6);
-    // Tripod.
-    for k in 0..3 {
-        let a = k as f32 * TAU / 3.0 + FRAC_PI_2;
-        let foot = fr.c + Vec2::from_angle(a) * 7.4 + Vec2::new(0.0, 4.4);
-        fr.capsule(pb, fr.c + Vec2::new(0.0, 1.4), foot, 1.0, 0.7, ink);
-    }
-    // Tally wheel with ten notches, clicking round with the coil.
-    let spin = anim * 1.4 + fr.coil * 2.6;
-    spokes(pb, &fr, fr.c - Vec2::new(0.0, 2.0), 6.2, 10, spin, 1.0, brass);
-    fr.disc(pb, fr.c - Vec2::new(0.0, 2.0), 3.0, ink);
-    // The pointer arm at the top, and the tally mark it lands on.
-    fr.capsule(pb, fr.c - Vec2::new(0.0, 8.4), fr.c - Vec2::new(0.0, 5.4), 1.0, 0.7, pad);
-    fr.disc(pb, fr.c - Vec2::new(0.0, 9.0), 1.2, pad);
-    // Three reader lamps under the wheel: dark at rest, lit one by one as the
-    // tell counts up (left, right, centre — the order its pads pulse in).
-    let lit = if matches!(pose, Pose::Strike(_)) {
-        3
+
+    let (ent_y, ent_sq) = if let Pose::Entrance(t) = pose {
+        mb_a_ent_drop(t, 22.0)
     } else {
-        (fr.coil * 3.0).floor() as i32
+        (0.0, 0.0)
     };
-    for (n, x) in [(0, -4.0f32), (1, 4.0), (2, 0.0)] {
-        let at = fr.c + Vec2::new(x, 5.6);
-        fr.disc(pb, at, 1.3, if n < lit { pad } else { ink });
+
+    // Quantized mechanical ratchet click angle (discrete stepped clicks + tiny snap overshoot!).
+    let raw_ticks = match pose {
+        Pose::Idle => anim * 2.0,
+        Pose::Approach => anim * 5.5,
+        Pose::Tell(t) => anim * 2.0 + t * 14.0,
+        Pose::Strike(t) => anim * 2.0 + 14.0 + (t * 3.0).floor() * 3.0,
+        Pose::Retreat(t) => -t * 6.0,
+        _ => anim * 1.5,
+    };
+    let tick_i = raw_ticks.floor();
+    let tick_frac = raw_ticks - tick_i;
+    let snap = if tick_frac < 0.22 {
+        (tick_frac / 0.22 * PI).sin() * 0.16
+    } else {
+        0.0
+    };
+    let wheel_spin = (tick_i + snap) * (TAU / 10.0);
+    let pawl_kick = if tick_frac < 0.24 { (1.0 - tick_frac / 0.24) * 2.2 } else { 0.0 };
+
+    let (lift, sway, leg_brace, strike_beat_idx, strike_flash) = match pose {
+        Pose::Entrance(_) => (ent_y, 0.0, 1.0, -1i32, 0.0),
+        Pose::Idle => ((anim * 2.2).sin() * 0.45, 0.0, 1.0, -1, 0.0),
+        Pose::Approach => (-(anim * 7.2).sin().abs() * 1.6, (anim * 7.2).sin() * 1.3, 1.05, -1, 0.0),
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            (-1.8 * c, q * 0.9, 1.0 + 0.24 * c, -1, 0.0)
+        }
+        Pose::Strike(t) => {
+            let idx = ((t * 3.0).floor() as i32).clamp(0, 2);
+            let beat = (t * 3.0).fract();
+            let fl = if beat < 0.45 { 1.0 - beat / 0.45 } else { 0.0 };
+            (-2.6 * fl, 0.0, 1.24, idx, fl)
+        }
+        Pose::Recover(t) => (1.8, (t * 10.0).sin() * 1.0, 1.12, -1, 0.0),
+        Pose::Retreat(t) => (-(t * 10.0).sin().abs() * 1.2, (t * 10.0).sin() * 1.2, 0.95, -1, 0.0),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let base = center + jolt + Vec2::new(sway, lift);
+    let sh_s = (1.0 - (-lift).max(0.0) * 0.025).clamp(0.46, 1.15);
+    draw_shadow(pb, center.x + 1.2, center.y + 8.6, 12.2 * sh_s + ent_sq * 2.0, 5.2 * sh_s, 0.54);
+
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.44 {
+            draw_entrance_ring(pb, center, ((t - 0.44) / 0.56).clamp(0.0, 1.0), ruby.hi);
+        }
     }
-    fr.eye(pb, 1.8, 0.0, 1.4, (255, 252, 236), (54, 62, 74));
-    fr.cues(pb, (236, 224, 188), brass.hi);
+
+    // 1. Three telescopic gunmetal tripod legs stepping in Approach & bracing wide in Tell!
+    let leg_x = [-8.6_f32, 0.0, 8.6];
+    let leg_y = [8.2_f32, 9.6, 8.2];
+    for (k, (&lx, &ly)) in leg_x.iter().zip(leg_y.iter()).enumerate() {
+        let ph = anim * 7.2 + k as f32 * (TAU / 3.0);
+        let step_y = if matches!(pose, Pose::Approach | Pose::Retreat(_)) {
+            ph.sin().max(0.0) * 2.6
+        } else {
+            0.0
+        };
+        let step_x = if matches!(pose, Pose::Approach | Pose::Retreat(_)) {
+            ph.cos() * 1.6
+        } else {
+            0.0
+        };
+        let hip = base + Vec2::new(lx * 0.25, 2.2);
+        let knee = base + Vec2::new(lx * 0.72 * leg_brace + step_x * 0.5, ly * 0.55 - step_y * 0.5);
+        let foot = base + Vec2::new(lx * leg_brace + step_x, ly - step_y);
+        mb_a_jointed_leg(pb, hip, knee, foot, 1.35, 0.85, steel, brass.hi, flash);
+    }
+
+    // 2. Large notched brushed-brass tally wheel (10 teeth + outer brass ring + dark odometer drum)!
+    let wheel_c = base + Vec2::new(0.0, -3.2 + ent_sq * 0.8);
+    for i in 0..10 {
+        let a = wheel_spin + i as f32 * (TAU / 10.0);
+        let d = Vec2::from_angle(a);
+        let p0 = wheel_c + d * 5.2;
+        let p1 = wheel_c + d * 8.2;
+        draw_tapered_capsule(pb, p0, p1, 1.35, 0.85, brass.hi, brass.mid, brass.lo, flash);
+    }
+    mb_a_ring(pb, wheel_c.x, wheel_c.y, 4.4, 6.8, brass, flash);
+    draw_shaded_disc(pb, wheel_c.x, wheel_c.y, 4.6, steel.hi, steel.mid, steel.lo, flash);
+    // Crisp ivory tally index ticks on the inner odometer drum!
+    for k in 0..4 {
+        let a = wheel_spin + k as f32 * FRAC_PI_2;
+        let q = wheel_c + Vec2::from_angle(a) * 3.5;
+        plot_px(pb, q.x.round() as i32, q.y.round() as i32, apply_flash(ivory, flash));
+    }
+    mb_a_glint(pb, wheel_c + Vec2::new(-4.0, -4.2), brass.hi);
+
+    // 3. Spring-loaded crimson mechanical ratchet clicker flag at 12 o'clock!
+    let pawl_tilt = if matches!(pose, Pose::Recover(_)) { 4.2 } else { pawl_kick * 0.8 };
+    let pawl_base = wheel_c + Vec2::new(0.0, -7.2);
+    let pawl_tip = wheel_c + Vec2::new(pawl_tilt, -11.6 - pawl_kick * 0.5);
+    draw_tapered_capsule(pb, pawl_base, pawl_tip, 1.3, 0.9, ruby.hi, ruby.mid, ruby.lo, flash);
+    draw_shaded_disc(pb, pawl_tip.x, pawl_tip.y, 1.7, ruby.hi, ruby.mid, ruby.lo, flash);
+    if let Pose::Tell(t) = pose {
+        if pawl_kick > 0.8 || t > 0.6 {
+            mb_a_spark_cross(pb, pawl_base + Vec2::new(0.0, -0.6), 2, (255, 252, 210), brass.hi, 0.85);
+        }
+    }
+
+    // 4. Lower gunmetal reader console bar carrying THREE BOLD READER LAMPS
+    //    (index 0 = left, 1 = right, 2 = centre — matching exact stamp pulse order!).
+    let bar_c = base + Vec2::new(0.0, 4.4);
+    draw_rotated_box(pb, bar_c, Vec2::new(1.0, 0.0), 8.0, 2.2, steel.hi, steel.mid, steel.lo, flash);
+    let lit_count = match pose {
+        Pose::Tell(t) => ((t * 3.0).floor() as i32 + 1).clamp(1, 3),
+        Pose::Strike(_) => 3,
+        _ => 0,
+    };
+    for (idx, lx) in [(0i32, -5.2_f32), (1, 5.2), (2, 0.0)] {
+        let lp = bar_c + Vec2::new(lx, 0.0);
+        let is_active_beat = strike_beat_idx == idx;
+        let standby = matches!(pose, Pose::Idle) && ((anim * 2.0).floor() as i32).rem_euclid(3) == idx;
+        let lp_pal = if is_active_beat {
+            pal((255, 255, 248), ruby.hi, ruby.mid)
+        } else if idx < lit_count || standby {
+            ruby
+        } else {
+            lamp_off
+        };
+        draw_shaded_disc(pb, lp.x, lp.y, if is_active_beat { 2.0 } else { 1.6 }, lp_pal.hi, lp_pal.mid, lp_pal.lo, flash);
+        if is_active_beat && strike_flash > 0.08 {
+            mb_a_spark_cross(pb, lp, 4, (255, 255, 248), ruby.hi, strike_flash);
+        }
+    }
+
+    // 5. Stern brass-bezeled cyclops optical scanner lens centered on the tally hub!
+    let expr = eye_expr_for(pose, anim, flash);
+    let eye_c = wheel_c + f * 1.4;
+    let eye_col = match pose {
+        Pose::Tell(_) => (255, 224, 108),
+        Pose::Strike(_) => (255, 168, 152),
+        _ => (234, 252, 255),
+    };
+    draw_eye(pb, eye_c, 2.0, eye_col, steel.lo, f, expr, flash);
+
+    if let Pose::Recover(t) = pose {
+        // Overloaded circuit smoke puffs rising from the jammed tally housing!
+        for k in 0..2 {
+            let ph = (t * 3.0 + k as f32 * 0.5).fract();
+            let sp = wheel_c + Vec2::new(((k as f32) - 0.5) * 5.0, -7.0 - ph * 8.0);
+            mb_a_puff(pb, sp, 2, (206, 218, 232), (1.0 - ph) * 0.78);
+        }
+        draw_dizzy_stars(pb, wheel_c + Vec2::new(0.0, -12.5), 7.4, t);
+        draw_recover_beacon(pb, wheel_c, t);
+    }
+    draw_hurt_burst(pb, base, f, flash, brass.hi);
 }
 
 // ---- 15. ROTOR TECHNICIAN · "Switch off before removing tail." -------------
-// A 32 px triangular rotor head over a snaking cable; the head turns through
-// the tell and the cable whips on the strike.
+// 34–38 px clinical ice-cobalt equilateral triangular centrifuge rotor head
+// trailed by a 9-segment high-voltage hazard-yellow/black snaking power cable
+// with a sparking two-prong brass plug, and a blazing plasma-edged 18 px steel
+// blade that cocks to -75° in Tell and whips through 150° (-75° -> +75°) in Strike.
 fn draw_rotor_technician(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
-    let shell = pal((176, 214, 236), (98, 140, 172), (46, 68, 92));
-    let cable = pal((236, 196, 90), (172, 122, 44), (82, 56, 20));
-    let spark = pal((255, 250, 214), (250, 208, 96), (176, 116, 32));
-    let steel = pal((244, 250, 255), (176, 190, 206), (80, 90, 108));
-    let fr = Frame::new(center, f, pose, anim, flash);
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let s = f.perp();
+    let shell = pal((228, 246, 255), (118, 176, 222), (42, 74, 118));
+    let hazard = pal((255, 246, 152), (242, 196, 42), (126, 90, 16));
+    let rubber = pal((98, 104, 122), (46, 50, 64), (20, 22, 32));
+    let blade_p = pal((255, 255, 252), (168, 234, 252), (60, 102, 134));
+    let spark_hi: Rgb = (255, 252, 220);
+    let spark_gold: Rgb = (255, 214, 72);
+    let cyan_glow: Rgb = (132, 244, 255);
+
     if let Pose::Death(t) = pose {
-        wave4_death(pb, &fr, t, shell);
-        return;
-    }
-    fr.shadow(pb, 12.0, 5.0);
-    // The snaking cable behind the head: seven beads on a travelling sine,
-    // long enough that head and cable together run about 32 px.
-    for i in 0..7 {
-        let u = i as f32;
-        let ph = anim * 4.0 + u * 1.1 + fr.coil * 2.0;
-        let at = fr.at(-7.0 - u * 2.4, ph.sin() * (1.0 + u * 0.45));
-        fr.disc(pb, at, 1.5 - u * 0.1, cable);
-    }
-    // The triangular rotor head: three corners joined by straight sides, idly
-    // turning, squared up to the rat as the tell locks.
-    let turn = anim * 1.2 * (1.0 - fr.coil.min(1.0));
-    let corners: [Vec2; 3] =
-        std::array::from_fn(|k| fr.c + fr.f.rotate(turn + k as f32 * TAU / 3.0) * 8.6);
-    for k in 0..3 {
-        fr.capsule(pb, corners[k], corners[(k + 1) % 3], 1.6, 1.6, shell);
-    }
-    fr.disc(pb, fr.c, 4.6, shell);
-    fr.disc(pb, fr.c, 2.2, spark);
-    // The blade. Folded back over the cable at rest; through the tell it
-    // swings out to the edge its 150° turn starts from (never across the aim),
-    // then follows the strike round to the far edge and hangs there, spent.
-    let half_sweep = 75.0_f32.to_radians();
-    let (ang, reach) = match pose {
-        Pose::Tell(_) => {
-            let k = fr.coil.min(1.0);
-            (-PI + (PI - half_sweep) * k, 9.0 + 5.0 * k)
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 4.2;
+        draw_shadow(pb, center.x + 1.5, center.y + 5.8, 16.5, 7.2, 0.50);
+        // Frayed hazard cable coiled limp around the wreckage.
+        for i in 0..6 {
+            let u = i as f32;
+            let p_c = center - f * (3.0 + u * 2.4) + s * ((u * 1.1).sin() * 3.5);
+            let cp = if i % 2 == 0 { hazard } else { rubber };
+            draw_shaded_disc(pb, p_c.x, p_c.y + 2.0, 1.7, cp.hi, cp.mid, cp.lo, flash);
         }
-        Pose::Strike(t) => (-half_sweep + 2.0 * half_sweep * t, 15.0),
-        Pose::Recover(_) => (half_sweep, 12.0),
-        _ => (-PI, 9.0),
-    };
-    let blade = fr.f.rotate(ang);
-    fr.capsule(pb, fr.c, fr.c + blade * reach, 1.8, 0.9, steel);
-    // A live spark on the blade's tip through the tell.
-    if fr.coil > 0.3 {
-        fr.disc(pb, fr.c + blade * (reach + 1.0), 1.1, spark);
-    }
-    fr.eye(pb, 2.0, 0.0, 1.3, (255, 255, 255), (46, 68, 92));
-    fr.cues(pb, (180, 220, 240), spark.hi);
-}
-
-// ---- 16. SUDS BAILIFF · "All delicates report to rinse." ------------------
-// A 27 px soap dome with one flat broken edge, foaming through the tell.
-fn draw_suds_bailiff(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
-    let soap = pal((236, 250, 252), (176, 214, 222), (88, 124, 138));
-    let cut = pal((88, 124, 138), (58, 86, 98), (34, 52, 62));
-    let foam = pal((255, 255, 255), (222, 240, 244), (150, 180, 190));
-    let brass = pal((255, 230, 158), (196, 148, 58), (96, 66, 22));
-    let fr = Frame::new(center, f, pose, anim, flash);
-    if let Pose::Death(t) = pose {
-        wave4_death(pb, &fr, t, soap);
-        return;
-    }
-    fr.shadow(pb, 13.0, 5.0);
-    // The dome: a big round bubble sitting in a flat skirt of foam.
-    let dome = fr.c + Vec2::new(0.0, -1.0);
-    fr.disc(pb, dome, 9.0, soap);
-    fr.slab(pb, fr.c + Vec2::new(0.0, 6.8), Vec2::new(1.0, 0.0), 9.8, 1.6, foam);
-    // The one flat broken edge: a chord sliced off the dome on the side its
-    // rim's gap opens (a quarter turn off the facing), dark with a bright lip.
-    let gap = fr.f.rotate(RING_GAP_TURN);
-    let chord = dome + gap * 7.6;
-    fr.slab(pb, chord, gap.perp(), 4.6, 1.5, cut);
-    fr.slab(pb, chord - gap * 1.6, gap.perp(), 4.2, 0.5, foam);
-    // A peaked bailiff's cap on top.
-    fr.slab(pb, dome + Vec2::new(0.0, -9.6), Vec2::new(1.0, 0.0), 2.6, 1.2, brass);
-    fr.slab(pb, dome + Vec2::new(0.0, -8.2), Vec2::new(1.0, 0.0), 4.4, 0.8, brass);
-    // Foam beads boiling off the dome: more of them, further out, through the
-    // tell — the rim that is about to roll outward.
-    let n = 4 + (fr.coil * 6.0) as i32;
-    for k in 0..n {
-        let a = anim * 1.2 + k as f32 * TAU / n as f32;
-        let dir = Vec2::from_angle(a);
-        if dir.dot(gap) > 0.84 {
-            continue;
+        // Split cobalt rotor chassis rails & flung centrifuge blade!
+        for side in [-1.0_f32, 1.0] {
+            let r_c = center + s * (side * (4.5 + burst * 5.5)) - Vec2::new(0.0, bounce * 0.8);
+            draw_tapered_capsule(pb, r_c - f * 5.0, r_c + f * 5.0, 1.9, 1.6, shell.hi, shell.mid, shell.lo, flash);
         }
-        let r = 10.0 + (k as f32 * 1.7 + anim * 3.0).sin() * 1.2 + fr.coil * 3.0;
-        fr.disc(pb, dome + dir * r, 1.3, foam);
-    }
-    fr.eye(pb, 3.0, -1.8, 1.5, (255, 255, 255), (88, 124, 138));
-    fr.cues(pb, (236, 250, 250), foam.hi);
-}
-
-// ---- 17. THE WRINGER BOY · "Please remove hands before pressing." ----------
-// A 36 px pair of rollers with a limp glove between them; the rollers spin up
-// and close on the strike.
-fn draw_wringer_boy(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
-    let steel = pal((240, 248, 255), (162, 182, 204), (70, 86, 108));
-    let rubber = pal((206, 196, 224), (136, 122, 158), (62, 54, 76));
-    let glove = pal((255, 226, 202), (206, 160, 132), (108, 76, 56));
-    let fr = Frame::new(center, f, pose, anim, flash);
-    if let Pose::Death(t) = pose {
-        wave4_death(pb, &fr, t, steel);
+        let bl_a = center + f * (5.0 + burst * 6.5) - Vec2::new(0.0, bounce);
+        draw_tapered_capsule(pb, bl_a, bl_a + f.rotate(0.5) * 9.0, 1.9, 0.7, blade_p.hi, blade_p.mid, blade_p.lo, flash);
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, cyan_glow);
+        }
+        draw_chest_pointer(pb, center, t);
         return;
     }
-    fr.shadow(pb, 15.5, 5.4);
-    // The frame the pair runs in: a low bed behind the rollers.
-    fr.slab(pb, fr.at(-3.4, 0.0), fr.s, 12.0, 1.6, rubber);
-    // Two rollers end to end across the aim, exactly as the strike's bars lie:
-    // a cylinder either side of the central seam the glove hangs through.
-    // They part for the tell and slam back to the seam on the strike.
-    let inner = if matches!(pose, Pose::Tell(_)) {
-        4.4 + fr.coil * 1.6
-    } else if matches!(pose, Pose::Strike(_)) {
-        2.6
+
+    let half_sweep = 75.0_f32.to_radians(); // exact half of 150° Cord sweep
+    let (ent_y, ent_sq) = if let Pose::Entrance(t) = pose {
+        mb_a_ent_drop(t, 22.0)
     } else {
-        3.4
+        (0.0, 0.0)
     };
-    let roll = (anim * (3.4 + fr.coil * 6.0)).rem_euclid(TAU);
-    for side in [-1.0f32, 1.0] {
-        let mid = fr.at(0.6, side * (inner + 6.0));
-        fr.slab(pb, mid, fr.s, 6.0, 2.8, steel);
-        // End caps and a rolling seam line, so the cylinder visibly turns.
-        fr.disc(pb, fr.at(0.6, side * inner), 2.8, rubber);
-        fr.disc(pb, fr.at(0.6, side * (inner + 12.0)), 2.8, rubber);
-        fr.slab(pb, mid + fr.f * (roll.cos() * 2.0), fr.s, 5.4, 0.5, rubber);
-    }
-    // The limp glove hanging between them, dragged further in by the coil.
-    let hand = fr.at(5.6 - fr.coil * 1.4, 0.0);
-    fr.disc(pb, hand, 1.8, glove);
-    for k in 0..3 {
-        let a = -0.5 + k as f32 * 0.5;
-        fr.capsule(pb, hand, hand + fr.f.rotate(a) * (3.0 + fr.coil), 0.8, 0.5, glove);
-    }
-    fr.eye(pb, -4.0, 0.0, 1.4, (255, 255, 255), (62, 54, 76));
-    fr.cues(pb, (196, 204, 226), steel.hi);
-}
 
-// ---- 18. QUOIN KEY · "Locks the story in place." ---------------------------
-// A 23 px steel fork driven by a walking wedge; the fork closes over the tell.
-fn draw_quoin_key(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
-    let steel = pal((244, 250, 255), (168, 184, 202), (74, 86, 104));
-    let wood = pal((244, 202, 148), (182, 132, 78), (90, 60, 30));
-    let ink = pal((120, 130, 148), (72, 80, 96), (34, 38, 48));
-    let fr = Frame::new(center, f, pose, anim, flash);
-    if let Pose::Death(t) = pose {
-        wave4_death(pb, &fr, t, steel);
-        return;
-    }
-    fr.shadow(pb, 9.5, 4.6);
-    // The walking wedge behind: a tapered block on two feet.
-    fr.capsule(pb, fr.at(-4.0, 0.0), fr.at(-10.4, 0.0), 3.4, 1.4, wood);
-    for side in [-1.0f32, 1.0] {
-        let step = (anim * 5.0 + side).sin() * 1.0;
-        fr.capsule(pb, fr.at(-6.0, side * 2.4), fr.at(-6.0 + step, side * 3.6) + Vec2::new(0.0, 2.4), 0.9, 0.5, ink);
-    }
-    // The steel fork: the prongs spread wide through the tell (the wedge the
-    // chase frame is about to close over) and snap shut on the strike.
-    let close = if matches!(pose, Pose::Strike(_)) {
-        2.6
-    } else {
-        -fr.coil * 2.6
+    let (recoil, lift, head_turn, cable_whip, blade_ang, blade_reach) = match pose {
+        Pose::Entrance(t) => (0.0, ent_y, t * 14.0, 1.8, -PI, 10.0),
+        Pose::Idle => (0.0, (anim * 2.4).sin() * 0.9, (anim * 1.8).sin() * 0.36, 1.0, -PI + (anim * 2.2).sin() * 0.12, 10.5),
+        Pose::Approach => ((anim * 7.0).sin() * 0.9, (anim * 5.5).cos() * 1.0 - 0.8, anim * 2.6, 1.7, -PI, 11.0),
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            let k = c.min(1.0);
+            // Head squares dead onto `f`; blade swings out cleanly from -PI to -75°!
+            (-3.4 * c + q * 0.7, -2.0 * c, q * 0.08, 1.5 + c, -PI + (PI - half_sweep) * k, 10.5 + 5.8 * k)
+        }
+        Pose::Strike(t) => {
+            let ang = -half_sweep + 2.0 * half_sweep * t;
+            (3.4 * (t * PI).sin(), -0.5, -ang * 0.22, 2.5, ang, 18.5)
+        }
+        Pose::Recover(t) => (-1.6, 1.8, 0.42 + (t * 8.0).sin() * 0.10, 0.35, half_sweep + 0.14, 13.5),
+        Pose::Retreat(t) => (-2.4, -(t * 9.0).sin().abs() * 1.0, -t * 4.0, 1.3, -PI, 10.0),
+        Pose::Death(_) => unreachable!(),
     };
-    for side in [-1.0f32, 1.0] {
-        let root = fr.at(-1.0, side * (3.6 - close * 0.5));
-        let tip = fr.at(7.4, side * (3.0 - close));
-        fr.capsule(pb, root, tip, 1.5, 0.9, steel);
-    }
-    fr.slab(pb, fr.at(-1.6, 0.0), fr.s, 1.6, 4.2, steel);
-    fr.eye(pb, 2.0, 0.0, 1.3, (240, 246, 255), (34, 38, 48));
-    fr.cues(pb, (232, 240, 250), steel.hi);
-}
 
-// ---- 19. CARBON TWIN · "Your duplicate stayed behind." ---------------------
-// A 26 px pair of offset sheets peeling apart; they separate further through
-// the tell and slap down on the strike.
-fn draw_carbon_twin(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
-    let sheet = pal((252, 252, 250), (222, 222, 216), (150, 152, 148));
-    let carbon = pal((128, 138, 158), (74, 82, 100), (34, 38, 50));
-    let inkline = pal((96, 104, 124), (60, 66, 82), (28, 32, 42));
-    let fr = Frame::new(center, f, pose, anim, flash);
-    if let Pose::Death(t) = pose {
-        wave4_death(pb, &fr, t, sheet);
-        return;
-    }
-    fr.shadow(pb, 12.0, 4.8);
-    // Two real sheets, offset: dark carbon under, white paper over. They peel
-    // further apart through the tell and slap flat together on the strike.
-    let apart = if matches!(pose, Pose::Strike(_)) {
-        0.6
-    } else {
-        2.0 + fr.coil * 3.0 + (anim * 3.0).sin() * 0.3
-    };
-    fr.slab(pb, fr.at(-apart * 0.6, -apart), fr.f, 10.0, 5.0, carbon);
-    let top = fr.at(apart * 0.6, apart);
-    fr.slab(pb, top, fr.f, 10.0, 5.0, sheet);
-    // Ruled lines on the paper.
-    for k in 0..3 {
-        fr.slab(pb, top + fr.s * ((k as f32 - 1.0) * 2.6), fr.f, 7.0, 0.4, inkline);
-    }
-    // The folded edge the transfer is laid from: a dark spine joining the two
-    // at the front.
-    fr.slab(pb, fr.at(10.2, 0.0), fr.s, apart + 5.0, 0.8, inkline);
-    // The paper's back corner curling up as it peels.
-    if fr.coil > 0.1 {
-        let corner = top - fr.f * 9.0 + fr.s * 4.2 + Vec2::new(0.0, -fr.coil * 2.0);
-        fr.disc(pb, corner, 1.4 + fr.coil, sheet);
-    }
-    fr.eye(pb, 3.0 + apart * 0.6, apart, 1.4, (255, 255, 255), (34, 38, 50));
-    fr.cues(pb, (212, 218, 228), sheet.hi);
-}
+    let jolt = hurt_jolt(f, flash, anim);
+    let base = center + f * recoil + jolt + Vec2::new(0.0, lift);
+    let sh_s = (1.0 - (-lift).max(0.0) * 0.025).clamp(0.46, 1.15);
+    draw_shadow(pb, base.x + 1.4, center.y + 7.2, 14.2 * sh_s + ent_sq * 2.0, 6.0 * sh_s, 0.54);
 
-// ---- 20. LATE PLATE · "That's all the room we have tonight." ---------------
-// A 32 px curved printing plate with a torn registration notch; the plate
-// curls tighter through the tell.
-fn draw_late_plate(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
-    let steel = pal((236, 240, 248), (158, 168, 186), (68, 74, 92));
-    let ink = pal((150, 128, 210), (94, 76, 146), (44, 34, 72));
-    let paper = pal((255, 252, 240), (228, 222, 202), (152, 146, 126));
-    let fr = Frame::new(center, f, pose, anim, flash);
-    if let Pose::Death(t) = pose {
-        wave4_death(pb, &fr, t, steel);
-        return;
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.44 {
+            draw_entrance_ring(pb, center, ((t - 0.44) / 0.56).clamp(0.0, 1.0), cyan_glow);
+        }
     }
-    fr.shadow(pb, 11.5, 4.8);
-    // The curved plate: nine tangent segments on a wide arc bowed toward the
-    // rat (about 30 px tip to tip), curling tighter through the tell the way
-    // its ring closes. One segment is missing: the torn registration notch,
-    // a real break in the silhouette like the break in its ring.
-    let curl = 1.0 + fr.coil * 0.45;
-    let radius = 11.0 - fr.coil * 2.4;
-    let hub = fr.c - fr.f * 4.0;
+
+    // 1. Long 9-segment high-voltage HAZARD-YELLOW & BLACK snaking power cable + sparking brass plug!
+    let mut prev_c = base - f * 5.8;
+    let mut tail_dir = -f;
     for i in 0..9 {
-        if i == 6 {
+        let u = i as f32;
+        let ph = anim * 5.0 - u * 0.95;
+        let counter = if let Pose::Strike(t) = pose {
+            (0.5 - t) * (2.5 + u * 0.9)
+        } else {
+            0.0
+        };
+        let amp = (1.1 + u * 0.58) * cable_whip;
+        let q = base - f * (7.2 + u * 2.3) + s * (ph.sin() * amp + counter);
+        tail_dir = safe_dir(q - prev_c, -f);
+        let seg_p = if i % 2 == 0 { hazard } else { rubber };
+        let rad = (2.05 - u * 0.08).max(1.25);
+        draw_tapered_capsule(pb, prev_c, q, rad, rad * 0.92, seg_p.hi, seg_p.mid, seg_p.lo, flash);
+        prev_c = q;
+    }
+    // Two-prong brass power plug at the cable's tail end with live static ticks!
+    let plug_p = tail_dir.perp();
+    for side in [-1.0_f32, 1.0] {
+        let pr0 = prev_c + plug_p * (side * 1.1);
+        let pr1 = pr0 + tail_dir * 3.0;
+        draw_tapered_capsule(pb, pr0, pr1, 0.75, 0.55, hazard.hi, hazard.mid, hazard.lo, flash);
+    }
+    if (anim * 4.2).fract() < 0.35 || matches!(pose, Pose::Tell(_) | Pose::Strike(_)) {
+        mb_a_spark_cross(pb, prev_c + tail_dir * 3.4, 2, spark_hi, cyan_glow, 0.85);
+    }
+
+    // 2. Strike wide dazzling electric-cyan & gold 150° plasma blade smear!
+    let blade_dir = f.rotate(blade_ang);
+    let blade_tip = base + blade_dir * blade_reach;
+    if let Pose::Strike(t) = pose {
+        let base_a = f.angle();
+        let cur_a = base_a + blade_ang;
+        let trail_a = (base_a - half_sweep).max(cur_a - 1.35);
+        draw_smear_arc(pb, base, trail_a, cur_a, 9.0, 20.5, cyan_glow, spark_hi, 0.82 * (1.0 - t * 0.2));
+        draw_smear_arc(pb, base, trail_a, cur_a, 13.0, 19.5, spark_gold, spark_hi, 0.65 * (1.0 - t * 0.25));
+    }
+
+    // 3. Sculpted equilateral triangular ice-cobalt centrifuge rotor head!
+    let corners: [Vec2; 3] =
+        std::array::from_fn(|k| base + f.rotate(head_turn + k as f32 * (TAU / 3.0)) * 9.8);
+    // Dark recessed turbine housing disc behind the delta frame.
+    draw_shaded_disc(pb, base.x, base.y, 6.4, rubber.hi, rubber.mid, rubber.lo, flash);
+    // Thick chamfered triangular frame rails + corner weight pods.
+    for k in 0..3 {
+        let a = corners[k];
+        let b = corners[(k + 1) % 3];
+        draw_tapered_capsule(pb, a, b, 2.0, 2.0, shell.hi, shell.mid, shell.lo, flash);
+    }
+    for c_pt in corners {
+        draw_shaded_disc(pb, c_pt.x, c_pt.y, 2.3, shell.hi, shell.mid, shell.lo, flash);
+        plot_px(pb, c_pt.x.round() as i32, c_pt.y.round() as i32, apply_flash(hazard.hi, flash));
+    }
+    // Pulsing central golden-cyan centrifuge motor core!
+    let core_pulse = 0.5 + 0.5 * (anim * 6.0).sin();
+    let core_hi = if matches!(pose, Pose::Tell(_) | Pose::Strike(_)) {
+        spark_hi
+    } else {
+        mix(cyan_glow, spark_gold, core_pulse)
+    };
+    draw_shaded_disc(pb, base.x, base.y, 4.0, shell.hi, shell.mid, shell.lo, flash);
+    draw_shaded_disc(pb, base.x, base.y, 2.4, core_hi, spark_gold, hazard.lo, flash);
+    mb_a_glint(pb, corners[0] + Vec2::new(-1.0, -1.0), shell.hi);
+
+    // 4. Long razor centrifuge rotor blade with live plasma-spark tip!
+    draw_tapered_capsule(pb, base + blade_dir * 2.5, blade_tip, 2.2, 0.9, blade_p.hi, blade_p.mid, blade_p.lo, flash);
+    // Bright cyan edge highlight running down the blade's leading edge!
+    let edge_a = base + blade_dir * 4.5 + blade_dir.perp() * 0.9;
+    let edge_b = blade_tip + blade_dir.perp() * 0.4;
+    pb.line(edge_a.x.round() as i32, edge_a.y.round() as i32, edge_b.x.round() as i32, edge_b.y.round() as i32, (255, 255, 255));
+    if let Pose::Tell(t) = pose {
+        let c = tell_coil(t);
+        mb_a_spark_cross(pb, blade_tip + blade_dir * 1.0, 3, spark_hi, spark_gold, c.min(1.0));
+        // Crackling electric arc nodes dancing along the cocked blade!
+        for k in 0..3 {
+            let u = (t * 4.5 + k as f32 * 0.33).fract();
+            let sp = base + blade_dir * (5.0 + u * (blade_reach - 5.0)) + blade_dir.perp() * ((t * 40.0 + k as f32 * 3.0).sin() * 2.2);
+            plot_px(pb, sp.x.round() as i32, sp.y.round() as i32, if k % 2 == 0 { spark_hi } else { cyan_glow });
+        }
+    } else if matches!(pose, Pose::Strike(_)) {
+        mb_a_spark_cross(pb, blade_tip + blade_dir * 1.2, 4, spark_hi, cyan_glow, 0.95);
+    }
+
+    // 5. Twin cold glowing diagnostic visor eyes set on the forward bevel!
+    let expr = eye_expr_for(pose, anim, flash);
+    let eye_col = match pose {
+        Pose::Tell(_) | Pose::Strike(_) => spark_gold,
+        _ => (226, 254, 255),
+    };
+    for side in [-1.0_f32, 1.0] {
+        let ep = base + f * 3.4 + s * (side * 2.2);
+        draw_eye(pb, ep, 1.35, eye_col, shell.lo, f, expr, flash);
+    }
+
+    if let Pose::Recover(t) = pose {
+        // Stalled turbine smoking & flickering sparks!
+        for k in 0..2 {
+            let ph = (t * 3.2 + k as f32 * 0.5).fract();
+            let sp = base + Vec2::new(((k as f32) - 0.5) * 4.5, -4.5 - ph * 8.0);
+            mb_a_puff(pb, sp, 2, (206, 224, 238), (1.0 - ph) * 0.78);
+        }
+        draw_dizzy_stars(pb, base + Vec2::new(0.0, -11.5), 7.4, t);
+        draw_recover_beacon(pb, base, t);
+    }
+    draw_hurt_burst(pb, base, f, flash, cyan_glow);
+}
+
+// ============================================================================
+// Private helpers for minibosses 16–24 (Laundry, Printworks, Flatbed)
+// ============================================================================
+
+/// Three-stop shaded material palette (light rim, rich midtone, deep shadow).
+#[derive(Clone, Copy)]
+struct Mb2Pal {
+    hi: Rgb,
+    mid: Rgb,
+    lo: Rgb,
+}
+
+#[inline]
+const fn mb2_pal(hi: Rgb, mid: Rgb, lo: Rgb) -> Mb2Pal {
+    Mb2Pal { hi, mid, lo }
+}
+
+/// Crisp dark-outlined warning "!" pip floating above a winding-up miniboss so
+/// Tell reads cleanly in low ambient light, under Tell bloom, and at 2× zoom.
+fn mb2_tell_pip(pb: &mut PixelBuffer, top: Vec2, t: f32) {
+    if t < 0.58 && (t * 11.0).fract() >= 0.62 {
+        return;
+    }
+    let x = top.x.round() as i32;
+    let y = top.y.round() as i32;
+    let col: Rgb = if t > 0.84 {
+        (255, 250, 186)
+    } else {
+        (255, 214, 72)
+    };
+    // 1 px dark ink outline behind the exclamation stem & dot.
+    pb.rect_fill(x - 1, y - 1, 4, 8, INK);
+    for dy in 0..4 {
+        plot_px(pb, x, y + dy, col);
+        plot_px(pb, x + 1, y + dy, col);
+    }
+    plot_px(pb, x, y + 5, col);
+    plot_px(pb, x + 1, y + 5, col);
+}
+
+/// Four-point impact cross-flash for Strike climaxes.
+fn mb2_star_flash(pb: &mut PixelBuffer, at: Vec2, r: i32, core: Rgb, outer: Rgb) {
+    let cx = at.x.round() as i32;
+    let cy = at.y.round() as i32;
+    let rf = r.max(1) as f32;
+    for d in -r..=r {
+        let a = (1.0 - (d.abs() as f32 / (rf + 1.0))).clamp(0.0, 1.0);
+        let col = if d.abs() <= 1 { core } else { outer };
+        blend_px(pb, cx + d, cy, col, 0.92 * a);
+        blend_px(pb, cx, cy + d, col, 0.92 * a);
+    }
+    let diag = (r / 2).max(1);
+    for d in -diag..=diag {
+        blend_px(pb, cx + d, cy + d, outer, 0.62);
+        blend_px(pb, cx + d, cy - d, outer, 0.62);
+    }
+    plot_px(pb, cx, cy, (255, 255, 255));
+}
+
+/// Exact signed-distance rotated regular hexagon (inradius `h`) with crisp
+/// dark outline, bright machined top-left chamfer bevel (`spec`), and shaded face.
+fn mb2_draw_hex(
+    pb: &mut PixelBuffer,
+    center: Vec2,
+    h: f32,
+    angle: f32,
+    pal: Mb2Pal,
+    spec: Rgb,
+    flash: f32,
+) {
+    let circum = h * 1.154_700_5;
+    let pad = circum + 1.6;
+    let bw = pb.w as i32;
+    let bh = pb.h as i32;
+    let x0 = ((center.x - pad).floor() as i32).max(0);
+    let x1 = ((center.x + pad).ceil() as i32).min(bw - 1);
+    let y0 = ((center.y - pad).floor() as i32).max(0);
+    let y1 = ((center.y + pad).ceil() as i32).min(bh - 1);
+    let (s, c) = angle.sin_cos();
+    let inv_h = 1.0 / h.max(1.0);
+    let ink_c = apply_flash(INK, flash * 0.35);
+    for y in y0..=y1 {
+        let dy = y as f32 + 0.5 - center.y;
+        for x in x0..=x1 {
+            let dx = x as f32 + 0.5 - center.x;
+            let lx = (dx * c + dy * s).abs();
+            let ly = (-dx * s + dy * c).abs();
+            let d = ly.max(lx * 0.866_025_4 + ly * 0.5);
+            if d > h + 0.95 {
+                continue;
+            }
+            let col = if d > h - 0.25 {
+                ink_c
+            } else if d > h - 2.1 {
+                // Machined chamfer bevel catches the top-left key light sharply.
+                let ldot = (dx * LIGHT.x + dy * LIGHT.y) * inv_h;
+                let bev = if ldot > 0.18 {
+                    spec
+                } else if ldot > -0.18 {
+                    pal.hi
+                } else {
+                    pal.lo
+                };
+                apply_flash(bev, flash)
+            } else {
+                let lit = (0.50 + 0.52 * ((dx * LIGHT.x + dy * LIGHT.y) * inv_h)).clamp(0.0, 1.0);
+                let base = if lit > 0.56 {
+                    mix(pal.mid, pal.hi, (lit - 0.56) / 0.44)
+                } else {
+                    mix(pal.lo, pal.mid, lit / 0.56)
+                };
+                apply_flash(base, flash)
+            };
+            pb.plot(x, y, col);
+        }
+    }
+}
+
+/// Shaded outlined triangle (exact edge signed-distance; no per-pixel `sqrt`).
+fn mb2_draw_poly_tri(
+    pb: &mut PixelBuffer,
+    a: Vec2,
+    b: Vec2,
+    c: Vec2,
+    pal: Mb2Pal,
+    flash: f32,
+) {
+    let area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    if area.abs() < 0.5 {
+        return;
+    }
+    let sign = if area > 0.0 { 1.0 } else { -1.0 };
+    let edge_n = |p0: Vec2, p1: Vec2| -> Vec2 {
+        let e = p1 - p0;
+        let l = e.len().max(1e-4);
+        Vec2::new((e.y / l) * sign, (-e.x / l) * sign)
+    };
+    let n0 = edge_n(a, b);
+    let n1 = edge_n(b, c);
+    let n2 = edge_n(c, a);
+    let bw = pb.w as i32;
+    let bh = pb.h as i32;
+    let x0 = ((a.x.min(b.x).min(c.x) - 1.5).floor() as i32).max(0);
+    let x1 = ((a.x.max(b.x).max(c.x) + 1.5).ceil() as i32).min(bw - 1);
+    let y0 = ((a.y.min(b.y).min(c.y) - 1.5).floor() as i32).max(0);
+    let y1 = ((a.y.max(b.y).max(c.y) + 1.5).ceil() as i32).min(bh - 1);
+    let ctr = (a + b + c) * (1.0 / 3.0);
+    let inv_rad = 1.0 / a.dist(ctr).max(b.dist(ctr)).max(c.dist(ctr)).max(1.5);
+    let ink_c = apply_flash(INK, flash * 0.35);
+    for y in y0..=y1 {
+        let py = y as f32 + 0.5;
+        for x in x0..=x1 {
+            let px = x as f32 + 0.5;
+            let d0 = (px - a.x) * n0.x + (py - a.y) * n0.y;
+            let d1 = (px - b.x) * n1.x + (py - b.y) * n1.y;
+            let d2 = (px - c.x) * n2.x + (py - c.y) * n2.y;
+            let dmax = d0.max(d1).max(d2);
+            if dmax > 0.90 {
+                continue;
+            }
+            let col = if dmax > -0.25 {
+                ink_c
+            } else {
+                let lit = (0.52 + 0.52 * (((px - ctr.x) * LIGHT.x + (py - ctr.y) * LIGHT.y) * inv_rad))
+                    .clamp(0.0, 1.0);
+                let base = if lit > 0.58 {
+                    mix(pal.mid, pal.hi, (lit - 0.58) / 0.42)
+                } else {
+                    mix(pal.lo, pal.mid, lit / 0.58)
+                };
+                apply_flash(base, flash)
+            };
+            pb.plot(x, y, col);
+        }
+    }
+}
+
+/// Oval forged-iron chain link from `a` to `b` with crisp `INK` outer contour
+/// and a dark recessed center slot so links read as real chain metal.
+fn mb2_draw_ring_link(
+    pb: &mut PixelBuffer,
+    a: Vec2,
+    b: Vec2,
+    r: f32,
+    pal: Mb2Pal,
+    flash: f32,
+) {
+    draw_capsule(pb, a, b, r, pal.hi, pal.mid, pal.lo, flash);
+    let mid = (a + b) * 0.5;
+    let dir = safe_dir(b - a, Vec2::new(1.0, 0.0));
+    let slot_half = ((b - a).len() * 0.32).max(0.4);
+    let s0 = mid - dir * slot_half;
+    let s1 = mid + dir * slot_half;
+    pb.line(
+        s0.x.round() as i32,
+        s0.y.round() as i32,
+        s1.x.round() as i32,
+        s1.y.round() as i32,
+        apply_flash(INK, flash * 0.25),
+    );
+}
+
+/// Elliptical soap dome with one clean flat broken cleavage face perpendicular
+/// to `cut_dir` at normalized offset `cut_frac`, plus iridescent rim sheen.
+#[allow(clippy::too_many_arguments)]
+fn mb2_draw_sliced_dome(
+    pb: &mut PixelBuffer,
+    center: Vec2,
+    rx: f32,
+    ry: f32,
+    cut_dir: Vec2,
+    cut_frac: f32,
+    pal: Mb2Pal,
+    lip_col: Rgb,
+    inner_col: Rgb,
+    irid_phase: f32,
+    flash: f32,
+) {
+    let bw = pb.w as i32;
+    let bh = pb.h as i32;
+    let ox = rx + 1.2;
+    let oy = ry + 1.2;
+    let x0 = ((center.x - ox).floor() as i32).max(0);
+    let x1 = ((center.x + ox).ceil() as i32).min(bw - 1);
+    let y0 = ((center.y - oy).floor() as i32).max(0);
+    let y1 = ((center.y + oy).ceil() as i32).min(bh - 1);
+    let inv_rx = 1.0 / rx.max(1.0);
+    let inv_ry = 1.0 / ry.max(1.0);
+    let ink_c = apply_flash(INK, flash * 0.35);
+    let irid_pink: Rgb = (232, 162, 248);
+    let irid_mint: Rgb = (144, 252, 232);
+    for y in y0..=y1 {
+        let ny = (y as f32 + 0.5 - center.y) * inv_ry;
+        let ny2 = ny * ny;
+        for x in x0..=x1 {
+            let nx = (x as f32 + 0.5 - center.x) * inv_rx;
+            let d2 = nx * nx + ny2;
+            if d2 > 1.18 {
+                continue;
+            }
+            let proj = nx * cut_dir.x + ny * cut_dir.y;
+            if proj > cut_frac + 0.14 {
+                continue;
+            }
+            let col = if d2 > 0.93 || proj > cut_frac + 0.04 {
+                ink_c
+            } else if proj > cut_frac - 0.15 {
+                // Flat fractured soap slab face: razor-bright lip + dark recessed glass.
+                let edge_c = if proj > cut_frac - 0.05 { lip_col } else { inner_col };
+                apply_flash(edge_c, flash)
+            } else {
+                let lit = (0.48 + 0.56 * (nx * LIGHT.x + ny * LIGHT.y)).clamp(0.0, 1.0);
+                let mut base = if lit > 0.58 {
+                    mix(pal.mid, pal.hi, (lit - 0.58) / 0.42)
+                } else {
+                    mix(pal.lo, pal.mid, lit / 0.58)
+                };
+                // Subtle translucent soap-film iridescence along the upper outer rim.
+                if d2 > 0.48 && ny < 0.35 {
+                    let wave = (nx * 3.8 - ny * 2.4 + irid_phase).sin() * 0.5 + 0.5;
+                    let tint = mix(irid_mint, irid_pink, wave);
+                    base = mix(base, tint, 0.28 * ((d2 - 0.48) / 0.45).clamp(0.0, 1.0));
+                }
+                apply_flash(base, flash)
+            };
+            pb.plot(x, y, col);
+        }
+    }
+}
+
+/// Solid curved rotary printing plate arc with zinc-steel outer bevel, wet
+/// royal-violet inked inner printing face, and a jagged torn registration notch
+/// aligned with `gap_dir`.
+#[allow(clippy::too_many_arguments)]
+fn mb2_draw_curved_plate(
+    pb: &mut PixelBuffer,
+    hub: Vec2,
+    f: Vec2,
+    gap_dir: Vec2,
+    r_in: f32,
+    r_out: f32,
+    half_span: f32,
+    steel: Mb2Pal,
+    ink_pal: Mb2Pal,
+    tear_col: Rgb,
+    flash: f32,
+) {
+    let bw = pb.w as i32;
+    let bh = pb.h as i32;
+    let pad = r_out + 1.6;
+    let x0 = ((hub.x - pad).floor() as i32).max(0);
+    let x1 = ((hub.x + pad).ceil() as i32).min(bw - 1);
+    let y0 = ((hub.y - pad).floor() as i32).max(0);
+    let y1 = ((hub.y + pad).ceil() as i32).min(bh - 1);
+    let r_in_lo = (r_in - 1.1).max(0.5);
+    let r_out_hi = r_out + 1.1;
+    let r_in_lo2 = r_in_lo * r_in_lo;
+    let r_out_hi2 = r_out_hi * r_out_hi;
+    let cos_outer = (half_span + 0.08).cos();
+    let cos_inner = half_span.cos();
+    let cos_notch = 0.935_f32; // ~21° half-angle torn bite cleanly visible at 2× zoom
+    let ink_c = apply_flash(INK, flash * 0.35);
+    for y in y0..=y1 {
+        let dy = y as f32 + 0.5 - hub.y;
+        let dy2 = dy * dy;
+        for x in x0..=x1 {
+            let dx = x as f32 + 0.5 - hub.x;
+            let d2 = dx * dx + dy2;
+            if d2 < r_in_lo2 || d2 > r_out_hi2 {
+                continue;
+            }
+            let d = d2.sqrt();
+            let inv_d = 1.0 / d.max(1e-4);
+            let ux = dx * inv_d;
+            let uy = dy * inv_d;
+            let fdot = ux * f.x + uy * f.y;
+            if fdot < cos_outer {
+                continue;
+            }
+            let gdot = ux * gap_dir.x + uy * gap_dir.y;
+            let jag = (d * 2.1).sin() * 0.022;
+            if gdot > cos_notch + jag {
+                continue;
+            }
+            let on_tear = gdot > cos_notch - 0.055 + jag;
+            let on_rim = d > r_out - 0.25 || d < r_in + 0.25 || fdot < cos_inner;
+            let col = if on_tear {
+                apply_flash(tear_col, flash)
+            } else if on_rim {
+                ink_c
+            } else if d < r_in + 2.3 {
+                // Wet violet press-ink face with embossed lead type-line ticks.
+                let ridge = ((ux * f.y - uy * f.x) * 26.0).sin() > 0.35;
+                let base = if ridge {
+                    ink_pal.hi
+                } else if d < r_in + 1.2 {
+                    ink_pal.lo
+                } else {
+                    ink_pal.mid
+                };
+                apply_flash(base, flash)
+            } else {
+                let lit = (0.50 + 0.54 * (ux * LIGHT.x + uy * LIGHT.y)).clamp(0.0, 1.0);
+                let base = if lit > 0.78 && d > r_out - 1.8 {
+                    (255, 255, 255)
+                } else if lit > 0.56 {
+                    mix(steel.mid, steel.hi, (lit - 0.56) / 0.44)
+                } else {
+                    mix(steel.lo, steel.mid, lit / 0.56)
+                };
+                apply_flash(base, flash)
+            };
+            pb.plot(x, y, col);
+        }
+    }
+}
+
+// ============================================================================
+// 16. SUDS BAILIFF — "All delicates report to rinse." (Laundry 9:00)
+//     27–30 px translucent cerulean soap dome with one flat broken cleavage
+//     edge aligned to RING_GAP_TURN, constable cap, foaming mustache & boots
+// ============================================================================
+
+fn draw_suds_bailiff(
+    pb: &mut PixelBuffer,
+    center: Vec2,
+    f: Vec2,
+    pose: Pose,
+    anim: f32,
+    flash: f32,
+) {
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let s = f.perp();
+    let gap = f.rotate(RING_GAP_TURN);
+    let soap = mb2_pal((124, 232, 246), (44, 142, 178), (18, 62, 92));
+    let foam = mb2_pal((246, 255, 255), (164, 214, 228), (64, 108, 130));
+    let cap_navy = mb2_pal((88, 108, 166), (42, 54, 96), (18, 22, 44));
+    let brass = mb2_pal((255, 236, 134), (206, 152, 48), (102, 66, 18));
+    let boot = mb2_pal((72, 84, 108), (38, 44, 62), (18, 20, 30));
+    let lip_col: Rgb = (224, 255, 255);
+    let inner_col: Rgb = (20, 56, 78);
+
+    if let Pose::Death(t) = pose {
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 4.0;
+        draw_shadow(pb, center.x + 1.0, center.y + 5.5, 16.0, 7.2, 0.48);
+        // Spreading foamy soap puddle with iridescent bubbles!
+        let pr = 8.5 + burst * 6.5;
+        draw_shaded_ellipse(
+            pb,
+            center.x,
+            center.y + 3.0,
+            pr,
+            pr * 0.52,
+            foam.hi,
+            soap.mid,
+            soap.lo,
+            flash,
+        );
+        // Two shattered soap-dome shards flung apart along the cleavage line.
+        let sep = gap.perp() * (3.5 + burst * 6.0);
+        let s1 = center - sep - Vec2::new(0.0, bounce * 0.7);
+        let s2 = center + sep + Vec2::new(0.0, 1.0 - bounce * 0.5);
+        draw_shaded_disc(pb, s1.x, s1.y, 4.6, soap.hi, soap.mid, soap.lo, flash);
+        draw_shaded_disc(pb, s2.x, s2.y, 3.8, foam.hi, soap.mid, soap.lo, flash);
+        // Upside-down navy bailiff cap with gleaming brass badge tumbled beside the chest!
+        let cap_p = center + f * (5.0 + burst * 4.5) - Vec2::new(0.0, bounce * 1.1);
+        draw_rotated_box(
+            pb,
+            cap_p,
+            f.rotate(0.4),
+            4.8,
+            2.4,
+            cap_navy.hi,
+            cap_navy.mid,
+            cap_navy.lo,
+            flash,
+        );
+        draw_shaded_disc(pb, cap_p.x, cap_p.y, 1.5, brass.hi, brass.mid, brass.lo, flash);
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, lip_col);
+        }
+        draw_chest_pointer(pb, center, t);
+        return;
+    }
+
+    let ent_drop = if let Pose::Entrance(t) = pose {
+        if t < 0.45 {
+            let u = t / 0.45;
+            (1.0 - u * u) * -22.0
+        } else {
+            let u = (t - 0.45) / 0.55;
+            (u * PI * 2.0).sin() * (1.0 - u) * 2.4
+        }
+    } else {
+        0.0
+    };
+
+    let (lift, squash, rattle, cap_pop, coil) = match pose {
+        Pose::Entrance(t) => (
+            ent_drop,
+            if (0.45..0.64).contains(&t) { 1.6 } else { 0.0 },
+            0.0,
+            if t > 0.45 { ((t - 0.45) * PI * 2.0).sin().abs() * 2.6 } else { 0.0 },
+            0.0,
+        ),
+        Pose::Idle => ((anim * 2.6).sin() * 0.8, (anim * 2.6).cos() * 0.35, 0.0, 0.0, 0.0),
+        Pose::Approach => {
+            let st = (anim * 6.4).sin();
+            (-st.abs() * 1.8, st.abs() * 0.5, st * 0.9, st.abs() * 0.6, 0.0)
+        }
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            (-1.2 * c, 1.6 * c, q * 1.3, 2.8 * c, c)
+        }
+        Pose::Strike(t) => {
+            let slam = (1.0 - t) * (t * 48.0).sin() * 1.8;
+            (1.6 * (1.0 - t * 0.5), 2.2 * (1.0 - t * 0.6), slam, 1.2 * (1.0 - t), 1.0)
+        }
+        Pose::Recover(t) => (
+            2.2,
+            2.4 - t * 0.8,
+            (t * 9.0).sin() * 0.9,
+            -0.5,
+            0.0,
+        ),
+        Pose::Retreat(t) => (-(t * 9.0).sin().abs() * 1.8, 0.0, -1.2, 0.4, 0.0),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let body = center + jolt + Vec2::new(rattle, lift);
+    let sh_s = (1.0 - (-lift).max(0.0) * 0.03).clamp(0.45, 1.15);
+    draw_shadow(pb, center.x + 1.2, center.y + 8.0, 14.5 * sh_s, 6.4 * sh_s, 0.54);
+
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.42 {
+            draw_entrance_ring(pb, center, ((t - 0.42) / 0.58).clamp(0.0, 1.0), soap.hi);
+        }
+    }
+
+    // 1. Chunky rubber galosh boots marching beneath the foam skirt.
+    let stride = match pose {
+        Pose::Approach => (anim * 6.4).sin() * 3.0,
+        Pose::Retreat(t) => (t * 9.0).sin() * 2.2,
+        _ => 0.0,
+    };
+    for &side in &[-1.0_f32, 1.0] {
+        let foot = body
+            + f * (side * stride)
+            + s * (side * 4.8)
+            + Vec2::new(0.0, 7.6 - (side * stride).max(0.0) * 0.45);
+        draw_shaded_ellipse(pb, foot.x, foot.y, 3.0, 2.0, boot.hi, boot.mid, boot.lo, flash);
+        plot_px(pb, foot.x.round() as i32 - 1, foot.y.round() as i32 - 1, (166, 186, 214));
+    }
+
+    // 2. Churning foamy suds skirt at base of dome.
+    let skirt_y = body.y + 5.8;
+    for k in 0..7 {
+        let u = (k as f32 - 3.0) / 3.0;
+        let bob = (anim * 4.2 + k as f32 * 1.3).sin() * 0.8;
+        let p_b = Vec2::new(body.x + u * (9.5 + squash), skirt_y + bob + u.abs() * 0.8);
+        let r = 2.4 + (1.0 - u.abs() * 0.35) * 0.9;
+        draw_shaded_disc(pb, p_b.x, p_b.y, r, foam.hi, foam.mid, foam.lo, flash);
+    }
+
+    // 3. Strike outward foaming splash arcs (skipping the 65° safe gap!).
+    if let Pose::Strike(t) = pose {
+        let gap_ang = gap.angle();
+        let a0 = gap_ang + 0.58;
+        let a1 = gap_ang + TAU - 0.58;
+        let r0 = 9.5 + t * 5.0;
+        let r1 = 14.5 + t * 7.5;
+        draw_smear_arc(
+            pb,
+            body,
+            a0,
+            a1,
+            r0,
+            r1,
+            soap.hi,
+            (255, 255, 255),
+            0.74 * (1.0 - t * 0.55),
+        );
+    }
+
+    // 4. Main translucent cerulean soap dome with ONE FLAT BROKEN EDGE along `gap`!
+    let dome_c = body + Vec2::new(0.0, -1.6 + squash * 0.35);
+    let dome_rx = 10.6 + squash * 0.9;
+    let dome_ry = (10.0 - squash * 0.7).max(6.8);
+    let break_lip = if matches!(pose, Pose::Tell(_) | Pose::Strike(_)) {
+        (255, 248, 168)
+    } else {
+        lip_col
+    };
+    mb2_draw_sliced_dome(
+        pb,
+        dome_c,
+        dome_rx,
+        dome_ry,
+        gap,
+        0.50,
+        soap,
+        break_lip,
+        inner_col,
+        anim * 2.2,
+        flash,
+    );
+
+    // Bright specular soap-bubble highlight crescent on top-left (away from broken face).
+    if gap.x > -0.35 || gap.y > -0.35 {
+        draw_capsule(
+            pb,
+            dome_c + Vec2::new(-5.8, -3.4),
+            dome_c + Vec2::new(-3.2, -5.8),
+            1.1,
+            (255, 255, 255),
+            lip_col,
+            soap.hi,
+            flash,
+        );
+    }
+
+    // Fracture gap indicator rays on Tell & Strike pointing cleanly out the flat broken edge!
+    if matches!(pose, Pose::Tell(_) | Pose::Strike(_)) {
+        let t_ray = match pose {
+            Pose::Tell(t) => t,
+            Pose::Strike(t) => 1.0 - t * 0.5,
+            _ => 0.0,
+        };
+        let gp = gap.perp();
+        let chord_c = dome_c + Vec2::new(gap.x * dome_rx * 0.56, gap.y * dome_ry * 0.56);
+        for &side in &[-1.0_f32, 1.0] {
+            let p0 = chord_c + gp * (side * 5.2);
+            let p1 = p0 + gap.rotate(side * 0.44) * (4.0 + t_ray * 4.5);
+            pb.line(
+                p0.x.round() as i32,
+                p0.y.round() as i32,
+                p1.x.round() as i32,
+                p1.y.round() as i32,
+                (255, 238, 128),
+            );
+        }
+    }
+
+    // 5. Pressurized foaming bubbles boiling around the intact rim (skipping the broken edge!).
+    let n_bub = 5 + (coil * 7.0) as i32;
+    for k in 0..n_bub {
+        let ang = anim * (1.4 + coil * 2.4) + k as f32 * (TAU / n_bub as f32);
+        let dir = Vec2::from_angle(ang);
+        if dir.dot(gap) > 0.78 {
             continue;
         }
-        let u = i as f32 - 4.0;
-        let dir = fr.f.rotate(u * 0.32 * curl);
-        let at = hub + dir * radius;
-        fr.slab(pb, at, dir.perp(), 2.4, 1.7, steel);
-        // The inked printing face on the inside of the curve.
-        fr.slab(pb, at - dir * 1.4, dir.perp(), 2.0, 0.5, ink);
+        let rad = 11.2 + (k as f32 * 1.9 + anim * 3.8).sin() * 1.4 + coil * 3.4;
+        let bp = dome_c + Vec2::new(dir.x * rad, dir.y * rad * 0.88);
+        let br = if k % 2 == 0 { 1.7 } else { 1.2 };
+        draw_shaded_disc(pb, bp.x, bp.y, br, (255, 255, 255), foam.hi, soap.mid, flash);
     }
-    // Torn paper edges either side of the notch.
-    for u in [1.45f32, 2.55] {
-        let dir = fr.f.rotate(u * 0.32 * curl);
-        fr.disc(pb, hub + dir * radius, 1.0, paper);
-    }
-    // A registration cross on the plate.
-    fr.slab(pb, fr.c, fr.f, 2.2, 0.4, ink);
-    fr.slab(pb, fr.c, fr.s, 2.2, 0.4, ink);
-    fr.eye(pb, 0.6, -2.6, 1.3, (255, 255, 255), (44, 34, 72));
-    fr.cues(pb, (206, 214, 230), steel.hi);
-}
 
-// ---- 21. TARPAULIN PUP · "Contents may have shifted." ---------------------
-// A 20 px folded tarp on four grommet feet; it unfurls wider through the tell.
-fn draw_tarpaulin_pup(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
-    let tarp = pal((176, 190, 128), (118, 132, 78), (58, 68, 38));
-    let weave = pal((226, 232, 196), (176, 184, 144), (96, 104, 72));
-    let grommet = pal((236, 226, 178), (176, 160, 98), (84, 74, 42));
-    let fr = Frame::new(center, f, pose, anim, flash);
-    if let Pose::Death(t) = pose {
-        wave4_death(pb, &fr, t, tarp);
-        return;
-    }
-    fr.shadow(pb, 10.0, 4.2);
-    // A wagging tail of tarp at the back.
-    fr.capsule(pb, fr.at(-6.0, 0.0), fr.at(-9.4, (anim * 7.0).sin() * 1.8), 1.3, 0.6, tarp);
-    // Four grommet feet under the fold.
-    for (a, s) in [(-4.4f32, -3.0f32), (-4.4, 3.0), (4.4, -3.0), (4.4, 3.0)] {
-        let at = fr.at(a, s);
-        fr.capsule(pb, at, at + Vec2::new(0.0, 3.0), 0.9, 0.6, grommet);
-        fr.disc(pb, at, 1.0, grommet);
-    }
-    // The folded tarp: a base panel with two seams...
-    fr.slab(pb, fr.at(-1.2, 0.0), fr.f, 5.6, 3.6, tarp);
-    for k in 0..2 {
-        fr.slab(pb, fr.at(-4.0 + k as f32 * 2.6, 0.0), fr.s, 3.4, 0.4, grommet);
-    }
-    // ...and the top fold, which slides forward and lengthens as it unfurls:
-    // a little through the tell, all the way out on the strike.
-    let unfurl = if matches!(pose, Pose::Strike(_)) {
-        7.0
-    } else {
-        fr.coil * 4.0
+    // 6. Stern Bailiff face: piercing amber eyes + bristling foamy handlebar mustache!
+    let expr = eye_expr_for(pose, anim, flash);
+    let face_c = dome_c + f * 3.6 + Vec2::new(0.0, 0.2);
+    let eye_col = match pose {
+        Pose::Tell(_) => (255, 232, 92),
+        Pose::Strike(_) => (255, 138, 108),
+        Pose::Recover(_) => (148, 255, 206),
+        _ => (255, 214, 102),
     };
-    fr.slab(pb, fr.at(1.4 + unfurl * 0.5, 0.0), fr.f, 4.6 + unfurl * 0.5, 3.2, weave);
-    // The hem on its leading edge.
-    fr.slab(pb, fr.at(6.0 + unfurl, 0.0), fr.s, 3.2, 0.5, grommet);
-    // Two floppy corner ears.
-    for side in [-1.0f32, 1.0] {
-        fr.capsule(pb, fr.at(3.4, side * 2.6), fr.at(1.8, side * 5.2), 1.3, 0.6, weave);
-    }
-    fr.eye(pb, 3.2, -0.8, 1.3, (255, 255, 250), (58, 68, 38));
-    fr.cues(pb, (186, 196, 148), weave.hi);
-}
+    draw_eye(pb, face_c + s * 2.7 + Vec2::new(0.0, -1.6), 1.7, eye_col, INK, f, expr, flash);
+    draw_eye(pb, face_c - s * 2.7 + Vec2::new(0.0, -1.6), 1.7, eye_col, INK, f, expr, flash);
 
-// ---- 22. AXLE NUT · "Last seen under the truck." --------------------------
-// A 24 px walking hex nut with a black hole in its face; it rolls up to speed
-// through the tell.
-fn draw_axle_nut(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
-    let steel = pal((238, 244, 252), (160, 176, 196), (70, 80, 96));
-    let hole = pal((52, 54, 66), (28, 30, 38), (14, 16, 22));
-    let grease = pal((120, 116, 92), (78, 76, 58), (38, 36, 26));
-    let fr = Frame::new(center, f, pose, anim, flash);
-    if let Pose::Death(t) = pose {
-        wave4_death(pb, &fr, t, steel);
-        return;
+    // Foamy handlebar mustache curls!
+    let stache_flare = 1.0 + coil * 0.45 + (anim * 3.4).sin() * 0.08;
+    for &side in &[-1.0_f32, 1.0] {
+        let m0 = face_c + Vec2::new(0.0, 1.4) + s * (side * 0.8);
+        let m1 = face_c + f * 1.4 + s * (side * 4.6 * stache_flare) + Vec2::new(0.0, 2.2 - coil * 1.0);
+        draw_tapered_capsule(pb, m0, m1, 1.5, 0.9, (255, 255, 255), foam.hi, soap.mid, flash);
     }
-    fr.shadow(pb, 9.6, 4.4);
-    // Six flat facets: a ring of short slabs, rolling with the coil.
-    let spin = anim * 1.8 + fr.coil * 2.2;
-    // Each flat is a slab lying along the tangent, so the outline has six
-    // straight sides and six corners instead of reading as a toothed gear.
-    for k in 0..6 {
-        let dir = fr.f.rotate(spin + k as f32 * TAU / 6.0);
-        let at = fr.c + dir * 8.4;
-        fr.slab(pb, at, dir.perp(), 5.6, 1.6, steel);
-    }
-    fr.disc(pb, fr.c, 8.2, steel);
-    // The black hole in its face: big enough to be the first thing read.
-    fr.disc(pb, fr.c, 4.0, hole);
-    fr.disc(pb, fr.c + Vec2::new(-0.8, -0.8), 1.8, grease);
-    // Two stubby walking legs, out of phase with the roll.
-    for side in [-1.0f32, 1.0] {
-        let step = (anim * 6.0 + side * 1.6).sin() * 1.2;
-        fr.capsule(pb, fr.at(-1.0, side * 4.0), fr.at(-2.6 + step, side * 5.4) + Vec2::new(0.0, 2.6), 0.9, 0.5, steel);
-    }
-    fr.eye(pb, 2.8, -1.8, 1.2, (255, 255, 255), (14, 16, 22));
-    fr.cues(pb, (212, 222, 236), steel.hi);
-}
 
-// ---- 23. CHAIN DOG · "Stays where it's tied. Mostly." ----------------------
-// A 28 px chain loop dragging a triangular binder; the chain lifts through the
-// tell and swings on the strike.
-fn draw_chain_dog(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
-    let chain = pal((236, 240, 250), (156, 166, 184), (64, 70, 86));
-    let link = pal((156, 166, 184), (98, 106, 124), (44, 48, 60));
-    let binder = pal((255, 196, 108), (196, 124, 48), (96, 54, 20));
-    let hide = pal((206, 186, 150), (146, 124, 92), (70, 58, 40));
-    let fr = Frame::new(center, f, pose, anim, flash);
-    if let Pose::Death(t) = pose {
-        wave4_death(pb, &fr, t, chain);
-        return;
-    }
-    fr.shadow(pb, 12.5, 4.8);
-    // The triangular load binder on its drag chain. Dragged behind at rest;
-    // through the tell it is hauled round to the edge the swing starts from
-    // (never across the aim), then follows the strike to the far edge.
-    let half_sweep = 57.5_f32.to_radians();
-    let (ang, reach) = match pose {
-        Pose::Tell(_) => {
-            let k = fr.coil.min(1.0);
-            (-PI + (PI - half_sweep) * k, 11.0 + 2.0 * k)
+    // 7. Tall constable navy peaked Bailiff's cap with glossy visor & gleaming brass badge!
+    let cap_tilt = match pose {
+        Pose::Recover(_) => 0.48,
+        Pose::Approach => (anim * 6.4).sin() * 0.14,
+        _ => 0.0,
+    };
+    let cap_off = if matches!(pose, Pose::Recover(_)) {
+        s * 3.6 + Vec2::new(0.0, 1.8)
+    } else {
+        Vec2::new(0.0, -dome_ry - 1.2 - cap_pop)
+    };
+    let cap_c = dome_c + cap_off;
+    let cap_axis = Vec2::from_angle(cap_tilt);
+    // Cap crown
+    draw_rotated_box(
+        pb,
+        cap_c + Vec2::new(0.0, -1.6),
+        cap_axis,
+        5.2,
+        2.6,
+        cap_navy.hi,
+        cap_navy.mid,
+        cap_navy.lo,
+        flash,
+    );
+    // Glossy visor brim projecting toward `f`
+    draw_rotated_box(
+        pb,
+        cap_c + f * 1.6 + Vec2::new(0.0, 0.6),
+        cap_axis,
+        6.4,
+        1.1,
+        (96, 110, 140),
+        (30, 34, 52),
+        INK,
+        flash,
+    );
+    // Gleaming golden Bailiff star badge centered on the crown!
+    let badge = cap_c + f * 1.4 + Vec2::new(0.0, -1.6);
+    draw_shaded_disc(pb, badge.x, badge.y, 1.8, (255, 252, 204), brass.hi, brass.lo, flash);
+
+    // Retreat: indignant soap bubbles drifting off top of cap.
+    if let Pose::Retreat(t) = pose {
+        for k in 0..3 {
+            let ph = (t * 2.8 + k as f32 * 0.33).fract();
+            let q = cap_c + Vec2::new((k as f32 - 1.0) * 3.0, -3.5 - ph * 6.5);
+            blend_px(pb, q.x.round() as i32, q.y.round() as i32, lip_col, (1.0 - ph) * 0.85);
         }
-        Pose::Strike(t) => (-half_sweep + 2.0 * half_sweep * t, 14.0),
-        Pose::Recover(_) => (half_sweep, 12.0),
-        _ => (-PI + (anim * 3.0).sin() * 0.25, 11.0),
-    };
-    let drag = fr.f.rotate(ang);
-    let anchor = fr.at(-1.0, 0.0);
-    let at_binder = anchor + drag * reach;
-    for k in 1..4 {
-        fr.disc(pb, anchor + drag * (reach * k as f32 / 4.0), 1.2, link);
     }
-    let corners: [Vec2; 3] =
-        std::array::from_fn(|k| at_binder + drag.rotate(k as f32 * TAU / 3.0) * 3.8);
-    for k in 0..3 {
-        fr.capsule(pb, corners[k], corners[(k + 1) % 3], 1.2, 1.2, binder);
+
+    if let Pose::Tell(t) = pose {
+        mb2_tell_pip(pb, cap_c + Vec2::new(0.0, -9.5), t);
     }
-    // The body: a closed loop of chain, twelve links on an oval, crawling.
-    for i in 0..12 {
-        let a = i as f32 * TAU / 12.0 + anim * 0.8;
-        let at = fr.at(a.cos() * 6.5 - 1.0, a.sin() * 4.6);
-        fr.disc(pb, at, 1.5, if i % 2 == 0 { chain } else { link });
+    if let Pose::Recover(t) = pose {
+        let broken_spot = dome_c + Vec2::new(gap.x * dome_rx * 0.55, gap.y * dome_ry * 0.55);
+        draw_dizzy_stars(pb, dome_c + Vec2::new(0.0, -11.5), 7.4, t);
+        draw_recover_beacon(pb, broken_spot, t);
     }
-    // Head, snout and two ears at the front of the loop.
-    let head = fr.at(6.5, 0.0);
-    for side in [-1.0f32, 1.0] {
-        fr.capsule(pb, head + fr.s * (side * 1.8), fr.at(4.6, side * 4.4), 1.1, 0.6, hide);
-    }
-    fr.disc(pb, head, 3.0, hide);
-    fr.capsule(pb, head, fr.at(10.0, 0.0), 1.8, 1.0, hide);
-    fr.eye(pb, 7.0, -0.8, 1.3, (255, 250, 232), (70, 58, 40));
-    fr.cues(pb, (226, 214, 190), binder.hi);
+    draw_hurt_burst(pb, body, f, flash, lip_col);
 }
 
-// ---- 24. THE ROAD ATLAS · "Every exit has a bird on it." -------------------
-// A 34 px gull with a road map folded over its wings; the wings sweep back
-// through the tell and hammer down on the strike.
-fn draw_road_atlas(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
-    let gull = pal((252, 252, 250), (216, 216, 210), (140, 142, 140));
-    let slate = pal((168, 186, 204), (108, 126, 146), (52, 62, 74));
-    let map = pal((255, 246, 214), (224, 208, 160), (146, 132, 92));
-    let route = pal((240, 96, 96), (192, 52, 60), (104, 24, 30));
-    let fr = Frame::new(center, f, pose, anim, flash);
+// ============================================================================
+// 17. THE WRINGER BOY — "Please remove hands before pressing." (Laundry 12:00)
+//     36–38 px crimson cast-iron twin-roller mangle frame with spinning ribbed
+//     steel rollers across `s`, brass crank, and limp yellow rubber glove in seam
+// ============================================================================
+
+fn draw_wringer_boy(
+    pb: &mut PixelBuffer,
+    center: Vec2,
+    f: Vec2,
+    pose: Pose,
+    anim: f32,
+    flash: f32,
+) {
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let s = f.perp();
+    let iron = mb2_pal((214, 74, 82), (138, 36, 46), (62, 16, 24));
+    let roller = mb2_pal((186, 206, 232), (96, 114, 142), (38, 46, 62));
+    let rubber = mb2_pal((126, 114, 152), (66, 58, 86), (28, 24, 38));
+    let brass = mb2_pal((255, 232, 128), (204, 148, 44), (98, 64, 18));
+    let glove = mb2_pal((255, 224, 112), (234, 152, 42), (132, 72, 18));
+    let chrome: Rgb = (244, 250, 255);
+
     if let Pose::Death(t) = pose {
-        wave4_death(pb, &fr, t, gull);
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 4.5;
+        draw_shadow(pb, center.x + 1.0, center.y + 6.0, 18.0, 7.5, 0.50);
+        // Snapped crimson iron bridge halves!
+        for &side in &[-1.0_f32, 1.0] {
+            let drift = s * (side * (7.0 + burst * 6.5)) + f * (side * burst * 2.5)
+                - Vec2::new(0.0, bounce * 0.7);
+            draw_rotated_box(
+                pb,
+                center + drift,
+                s.rotate(side * 0.25),
+                6.2,
+                3.0,
+                roller.hi,
+                roller.mid,
+                roller.lo,
+                flash,
+            );
+            draw_shaded_disc(
+                pb,
+                (center + drift - s * (side * 5.0)).x,
+                (center + drift - s * (side * 5.0)).y,
+                2.8,
+                iron.hi,
+                iron.mid,
+                iron.lo,
+                flash,
+            );
+        }
+        // Limp marigold rubber glove sprawled dramatically pointing at the chest!
+        let gp = center + f * (4.0 + burst * 3.5) - Vec2::new(0.0, bounce * 0.9);
+        draw_shaded_disc(pb, gp.x, gp.y, 2.6, glove.hi, glove.mid, glove.lo, flash);
+        for k in -1..=2 {
+            let tip = gp + f.rotate(k as f32 * 0.35) * 4.6;
+            draw_tapered_capsule(pb, gp, tip, 1.0, 0.6, glove.hi, glove.mid, glove.lo, flash);
+        }
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, brass.hi);
+        }
+        draw_chest_pointer(pb, center, t);
         return;
     }
-    fr.shadow(pb, 13.0, 4.8);
-    // Two swept wings, drawn back further as the tell coils.
-    // A gull's span: held out to the sides at rest (the 34 px silhouette),
-    // swept back through the tell, thrown forward and down on the strike.
-    let sweep = if matches!(pose, Pose::Strike(_)) {
-        0.75
+
+    let ent_drop = if let Pose::Entrance(t) = pose {
+        if t < 0.44 {
+            let u = t / 0.44;
+            (1.0 - u * u) * -22.0
+        } else {
+            let u = (t - 0.44) / 0.56;
+            (u * PI * 2.0).sin() * (1.0 - u) * 2.2
+        }
     } else {
-        1.35 + fr.coil * 0.75
+        0.0
     };
-    for side in [-1.0f32, 1.0] {
-        let dir = fr.f.rotate(side * sweep);
-        let wrist = fr.c + dir * 8.0;
-        fr.capsule(pb, fr.at(-1.0, side * 1.6), wrist, 2.2, 1.6, slate);
-        // The outer wing kinks back at the wrist, as a gull's does.
-        fr.capsule(pb, wrist, wrist + fr.f.rotate(side * (sweep + 0.45)) * 7.6, 1.6, 0.7, gull);
+
+    let (lunge, lift, seam_half, spin_rate, skew, coil) = match pose {
+        Pose::Entrance(_) => (0.0, ent_drop, 4.2, 8.0, 0.0, 0.0),
+        Pose::Idle => (
+            (anim * 2.0).sin() * 0.6,
+            (anim * 2.0).cos() * 0.4,
+            4.2,
+            2.6,
+            0.0,
+            0.0,
+        ),
+        Pose::Approach => {
+            let st = (anim * 6.0).sin();
+            (st * 1.8, -st.abs() * 1.4, 4.2, 6.2, st * 0.10, 0.0)
+        }
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            (-3.8 * c + q * 0.8, -2.0 * c, 4.4 + c * 2.0, 14.0 + c * 18.0, q * 0.04, c)
+        }
+        Pose::Strike(t) => {
+            let thrust = (t * PI).sin();
+            (5.2 * thrust + 1.4, 0.6, 4.0, 26.0, 0.0, 1.0)
+        }
+        Pose::Recover(t) => (
+            -2.4,
+            1.4,
+            5.0,
+            0.0,
+            0.22 * (1.0 - t * 0.3) + (t * 14.0).sin() * 0.04,
+            0.0,
+        ),
+        Pose::Retreat(t) => (-2.6, -(t * 8.0).sin().abs() * 1.2, 4.2, -5.0, 0.0, 0.0),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let body = center + f * lunge + jolt + Vec2::new(0.0, lift);
+    let sh_s = (1.0 - (-lift).max(0.0) * 0.028).clamp(0.45, 1.12);
+    draw_shadow(pb, center.x + 1.0, center.y + 6.5, 18.5 * sh_s, 6.8 * sh_s, 0.54);
+
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.42 {
+            draw_entrance_ring(pb, center, ((t - 0.42) / 0.58).clamp(0.0, 1.0), iron.hi);
+        }
     }
-    // Body and tail.
-    fr.ellipse(pb, fr.c, 5.6, 3.0, gull);
-    fr.capsule(pb, fr.at(-4.0, 0.0), fr.at(-8.4, 0.0), 1.4, 0.8, slate);
-    // Beak.
-    fr.capsule(pb, fr.at(5.0, 0.0), fr.at(8.4, 0.0), 0.9, 0.3, route);
-    // The road map folded over the near wing: a cream panel with a red route.
-    let panel = fr.at(-2.0, 4.6);
-    fr.slab(pb, panel, fr.f.rotate(0.25), 4.2, 2.6, map);
-    for k in 0..2 {
-        fr.slab(pb, panel + fr.f * (k as f32 * 1.6 - 0.8), fr.f.rotate(0.25), 1.0, 0.4, route);
+
+    // 1. Heavy crimson cast-iron rear yoke & twin outer uprights spanning ~36 px!
+    let span_outer = seam_half + 12.8;
+    let yoke_c = body - f * 4.2;
+    draw_rotated_box(pb, yoke_c, s, span_outer + 0.6, 2.4, iron.hi, iron.mid, iron.lo, flash);
+    // Decorative brass tension bolts & springs on the rear iron yoke.
+    for &side in &[-1.0_f32, 1.0] {
+        let up_a = yoke_c + s * (side * span_outer);
+        let up_b = body + f * 3.4 + s * (side * span_outer);
+        draw_tapered_capsule(pb, up_a, up_b, 2.5, 2.2, iron.hi, iron.mid, iron.lo, flash);
+        // Brass top pressure screw on each upright!
+        let screw = up_a - f * 2.4;
+        draw_shaded_disc(pb, screw.x, screw.y, 2.0, brass.hi, brass.mid, brass.lo, flash);
+        // Inner seam bracket holding the roller shaft cleanly at the central gap.
+        let inner_b = yoke_c + s * (side * seam_half);
+        draw_capsule(
+            pb,
+            inner_b,
+            body + f * 1.2 + s * (side * seam_half),
+            1.6,
+            iron.hi,
+            iron.mid,
+            iron.lo,
+            flash,
+        );
     }
-    fr.eye(pb, 3.0, -1.4, 1.3, (255, 255, 255), (52, 62, 74));
-    fr.cues(pb, (236, 240, 246), map.hi);
+
+    // 2. Spinning brass side crank-handle on the outer +s housing!
+    let crank_hub = body + f * 1.2 + s * (span_outer + 2.4);
+    let crank_ang = anim * spin_rate * 0.45;
+    let crank_arm = crank_hub + f * (crank_ang.cos() * 4.5) + Vec2::new(0.0, crank_ang.sin() * 3.6);
+    draw_capsule(pb, crank_hub, crank_arm, 1.1, brass.hi, brass.mid, brass.lo, flash);
+    draw_shaded_disc(pb, crank_arm.x, crank_arm.y, 1.8, (255, 248, 198), brass.hi, brass.lo, flash);
+
+    // 3. Strike motion smear trails forward of BOTH rollers (leaving central seam open!).
+    if let Pose::Strike(t) = pose {
+        let smear_a = (1.0 - t * 0.55) * 0.78;
+        for &side in &[-1.0_f32, 1.0] {
+            let rc = body + f * 2.2 + s * (side * (seam_half + 6.0));
+            for step in 1..=5 {
+                let d = step as f32 * 2.2;
+                let col = if step <= 2 { chrome } else { iron.hi };
+                let a_pt = rc + f * d - s * 4.8;
+                let b_pt = rc + f * d + s * 4.8;
+                let segs = 8;
+                for j in 0..=segs {
+                    let u = j as f32 / segs as f32;
+                    let q = a_pt + (b_pt - a_pt) * u;
+                    blend_px(pb, q.x.round() as i32, q.y.round() as i32, col, smear_a * (1.0 - step as f32 * 0.15));
+                }
+            }
+        }
+    }
+
+    // 4. Twin ribbed gunmetal-and-chrome wringer rollers mounted end-to-end across `s`!
+    let roll_phase = (anim * spin_rate).rem_euclid(TAU);
+    for &side in &[-1.0_f32, 1.0] {
+        let r_axis = s.rotate(side * skew);
+        let r_mid = body + f * 1.4 + s * (side * (seam_half + 6.2));
+        // Main heavy cylinder body (~12 px long × 6.4 px diameter).
+        draw_rotated_box(pb, r_mid, r_axis, 5.8, 3.2, roller.hi, roller.mid, roller.lo, flash);
+        // Three scrolling rubber wringer ribs across the cylinder so rotation is unmistakable!
+        for rib in 0..3 {
+            let ph = (roll_phase + rib as f32 * (TAU / 3.0)).rem_euclid(TAU);
+            if ph < PI {
+                let off = (ph / PI * 2.0 - 1.0) * 2.4;
+                let rib_c = r_mid + f * off;
+                let is_glint = (off + 0.6).abs() < 0.7;
+                draw_rotated_box(
+                    pb,
+                    rib_c,
+                    r_axis,
+                    5.2,
+                    0.55,
+                    if is_glint { chrome } else { rubber.hi },
+                    if is_glint { roller.hi } else { rubber.mid },
+                    rubber.lo,
+                    flash,
+                );
+            }
+        }
+        // Dark rubber end-collars framing both ends of each roller.
+        let inner_cap = r_mid - r_axis * 5.6;
+        let outer_cap = r_mid + r_axis * 5.6;
+        draw_shaded_disc(pb, inner_cap.x, inner_cap.y, 3.0, rubber.hi, rubber.mid, rubber.lo, flash);
+        draw_shaded_disc(pb, outer_cap.x, outer_cap.y, 3.0, brass.hi, brass.mid, brass.lo, flash);
+    }
+
+    // 5. Tell sparks spraying off the high-RPM rollers & brass crank!
+    if let Pose::Tell(t) = pose {
+        for k in 0..6 {
+            let ph = (t * 4.5 + k as f32 * 0.17).fract();
+            let side = if k % 2 == 0 { 1.0 } else { -1.0 };
+            let origin = body + f * 1.4 + s * (side * (seam_half + 5.0 + (k as f32) * 1.1));
+            let sp = origin - f * (ph * 7.0) + Vec2::new(0.0, -ph * 5.0);
+            blend_px(pb, sp.x.round() as i32, sp.y.round() as i32, brass.hi, 1.0 - ph * 0.5);
+        }
+    }
+
+    // 6. Central iron bridge face: twin riveted glowing furnace eyes!
+    let bridge = body - f * 3.8;
+    draw_shaded_disc(pb, bridge.x, bridge.y, 3.8, iron.hi, iron.mid, iron.lo, flash);
+    let expr = eye_expr_for(pose, anim, flash);
+    let eye_c = match pose {
+        Pose::Tell(_) => (255, 224, 88),
+        Pose::Strike(_) => (255, 108, 86),
+        Pose::Recover(_) => (148, 255, 206),
+        _ => (255, 236, 176),
+    };
+    draw_eye(pb, bridge + f * 1.0 + s * 1.9, 1.5, eye_c, INK, f, expr, flash);
+    draw_eye(pb, bridge + f * 1.0 - s * 1.9, 1.5, eye_c, INK, f, expr, flash);
+
+    // 7. THE LIMP MARIGOLD RUBBER GLOVE dangling in the central 12 px seam!
+    let glove_reach = match pose {
+        Pose::Tell(_) => 3.6 - coil * 2.2, // sucked taut back toward the nip!
+        Pose::Strike(t) => 2.0 + (t * 28.0).sin() * 1.4, // whipping wildly in slipstream!
+        Pose::Recover(_) => 7.2, // flopped limply way out forward!
+        _ => 5.6,
+    };
+    let glove_sway = match pose {
+        Pose::Tell(t) => tell_quiver(t) * 1.4,
+        Pose::Strike(t) => (t * 34.0).sin() * 2.4,
+        Pose::Recover(_) => (anim * 2.2).sin() * 0.6,
+        _ => (anim * 4.4).sin() * 1.5,
+    };
+    let cuff = body + f * 1.2;
+    let palm = body + f * glove_reach + s * glove_sway;
+    draw_tapered_capsule(pb, cuff, palm, 2.2, 2.5, glove.hi, glove.mid, glove.lo, flash);
+    // Four splayed yellow rubber fingers!
+    let splay = 0.34 + coil * 0.24;
+    for k in 0..4 {
+        let ang = (k as f32 - 1.5) * splay + glove_sway * 0.08;
+        let flen = if k == 1 || k == 2 { 4.2 } else { 3.3 };
+        let ftip = palm + f.rotate(ang) * (flen + coil * 0.8);
+        draw_tapered_capsule(pb, palm, ftip, 0.95, 0.55, glove.hi, glove.mid, glove.lo, flash);
+    }
+
+    // Recover: popped zig-zag brass tension spring + steam hiss!
+    if let Pose::Recover(t) = pose {
+        let sp_base = yoke_c + s * (span_outer * 0.5);
+        for k in 0..4 {
+            let p0 = sp_base + Vec2::new((k as f32) * 1.2 - 1.8, -(k as f32) * 2.2);
+            let p1 = sp_base + Vec2::new(((k + 1) as f32 % 2.0) * 2.4 - 1.2, -((k + 1) as f32) * 2.2);
+            pb.line(p0.x.round() as i32, p0.y.round() as i32, p1.x.round() as i32, p1.y.round() as i32, brass.hi);
+        }
+        draw_dizzy_stars(pb, bridge + Vec2::new(0.0, -9.5), 7.5, t);
+        draw_recover_beacon(pb, bridge, t);
+    }
+    if let Pose::Tell(t) = pose {
+        mb2_tell_pip(pb, bridge + Vec2::new(0.0, -11.5), t);
+    }
+    draw_hurt_burst(pb, body, f, flash, brass.hi);
+}
+
+// ============================================================================
+// 18. QUOIN KEY — "Locks the story in place." (Printworks 6:00)
+//     26–28 px blued-steel printer's fork jaw driven by a serrated hardwood &
+//     copper walking wedge on brass ratchet feet; fork clamps shut over a 55° cone
+// ============================================================================
+
+fn draw_quoin_key(
+    pb: &mut PixelBuffer,
+    center: Vec2,
+    f: Vec2,
+    pose: Pose,
+    anim: f32,
+    flash: f32,
+) {
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let s = f.perp();
+    let steel = mb2_pal((198, 232, 255), (86, 118, 152), (32, 46, 68));
+    let wood = mb2_pal((248, 184, 96), (178, 102, 40), (84, 42, 16));
+    let brass = mb2_pal((255, 234, 124), (206, 150, 46), (98, 66, 18));
+    let leg_col = mb2_pal((136, 150, 174), (68, 78, 98), (28, 32, 44));
+    let cyan_glow: Rgb = (118, 246, 255);
+    let steel_spec: Rgb = (255, 255, 255);
+
+    if let Pose::Death(t) = pose {
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 4.5;
+        draw_shadow(pb, center.x + 1.0, center.y + 5.5, 14.5, 6.8, 0.48);
+        // Two sheared blued-steel fork prongs crossed in front of the chest!
+        for &side in &[-1.0_f32, 1.0] {
+            let drift = s * (side * (4.0 + burst * 5.2)) - Vec2::new(0.0, bounce * 0.7);
+            let dir = f.rotate(side * (0.32 + burst * 0.38));
+            draw_tapered_capsule(
+                pb,
+                center + drift - dir * 5.0,
+                center + drift + dir * 10.0,
+                2.2,
+                0.9,
+                steel.hi,
+                steel.mid,
+                steel.lo,
+                flash,
+            );
+        }
+        // Split serrated copper-wood wedge tumbled behind!
+        let w_pos = center - f * (5.0 + burst * 5.0) - Vec2::new(0.0, bounce * 0.9);
+        mb2_draw_poly_tri(
+            pb,
+            w_pos - f * 6.5,
+            w_pos + f * 3.0 + s * 4.0,
+            w_pos + f * 3.0 - s * 4.0,
+            wood,
+            flash,
+        );
+        // Popped brass hex bolt rolling aside.
+        let bolt = center + f * (4.0 + burst * 4.0) + s * 3.0;
+        draw_shaded_disc(pb, bolt.x, bolt.y, 2.2, brass.hi, brass.mid, brass.lo, flash);
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, cyan_glow);
+        }
+        draw_chest_pointer(pb, center, t);
+        return;
+    }
+
+    let ent_drop = if let Pose::Entrance(t) = pose {
+        if t < 0.44 {
+            let u = t / 0.44;
+            (1.0 - u * u) * -20.0
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
+    // `jaw_ang`: half-angle of the steel fork prongs (opens to ~0.58 rad in Tell, snaps shut in Strike).
+    let (lunge, lift, jaw_ang, wedge_shift, coil) = match pose {
+        Pose::Entrance(t) => {
+            let open = if t < 0.44 { 0.10 } else { 0.10 + ((t - 0.44) / 0.56) * 0.36 };
+            (0.0, ent_drop, open, 0.0, 0.0)
+        }
+        Pose::Idle => (
+            (anim * 2.4).sin() * 0.6,
+            (anim * 2.4).cos() * 0.4,
+            0.24 + (anim * 3.2).sin().abs() * 0.09,
+            (anim * 2.4).sin() * 0.8,
+            0.0,
+        ),
+        Pose::Approach => {
+            let st = (anim * 6.6).sin();
+            (st * 1.8, -st.abs() * 1.6, 0.22 + st.abs() * 0.16, st * 1.4, 0.0)
+        }
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            (-3.4 * c + q * 0.7, -2.2 * c, 0.24 + 0.42 * c + q * 0.05, -2.8 * c, c)
+        }
+        Pose::Strike(t) => {
+            let close = (t / 0.38).clamp(0.0, 1.0);
+            let ease = close * close;
+            (4.8 * ease, 0.5 * ease, 0.66 * (1.0 - ease) + 0.04, 3.2 * ease, 1.0)
+        }
+        Pose::Recover(t) => {
+            let wob = (t * 16.0).sin() * (1.0 - t * 0.5) * 0.05;
+            (2.2 * (1.0 - t * 0.3), 1.4, 0.03 + wob, 1.8, 0.0)
+        }
+        Pose::Retreat(t) => (-2.8, -(t * 8.0).sin().abs() * 1.2, 0.16 + (t * 8.0).sin().abs() * 0.14, -1.6, 0.0),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let body = center + f * lunge + jolt + Vec2::new(0.0, lift);
+    let sh_s = (1.0 - (-lift).max(0.0) * 0.03).clamp(0.45, 1.12);
+    draw_shadow(pb, center.x + 1.0, center.y + 6.5, 13.5 * sh_s, 6.2 * sh_s, 0.52);
+
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.42 {
+            draw_entrance_ring(pb, center, ((t - 0.42) / 0.58).clamp(0.0, 1.0), cyan_glow);
+        }
+    }
+
+    // 1. Articulated brass-shod ratchet legs striding under the walking wedge!
+    let stride = match pose {
+        Pose::Approach => (anim * 6.6).sin() * 3.2,
+        Pose::Retreat(t) => (t * 8.0).sin() * 2.4,
+        _ => 0.0,
+    };
+    for &side in &[-1.0_f32, 1.0] {
+        let hip = body - f * 5.8 + s * (side * 3.2);
+        let knee = hip - f * (1.5 - side * stride * 0.4) + s * (side * 2.6) + Vec2::new(0.0, 1.2);
+        let foot = hip + f * (side * stride - 1.2) + s * (side * 4.4)
+            + Vec2::new(0.0, 4.4 - (side * stride).max(0.0) * 0.55);
+        draw_capsule(pb, hip, knee, 1.2, leg_col.hi, leg_col.mid, leg_col.lo, flash);
+        draw_capsule(pb, knee, foot, 1.0, leg_col.hi, leg_col.mid, leg_col.lo, flash);
+        draw_shaded_disc(pb, foot.x, foot.y, 1.5, brass.hi, brass.mid, brass.lo, flash);
+    }
+
+    // 2. Strike inward jaw-clamp smear arcs!
+    if let Pose::Strike(t) = pose {
+        if t < 0.62 {
+            let a = f.angle();
+            let alpha = (1.0 - t / 0.62).clamp(0.0, 1.0) * 0.80;
+            draw_smear_arc(pb, body, a - 0.66, a - jaw_ang, 4.5, 15.5, cyan_glow, steel_spec, alpha);
+            draw_smear_arc(pb, body, a + jaw_ang, a + 0.66, 4.5, 15.5, cyan_glow, steel_spec, alpha);
+        }
+    }
+
+    // 3. The walking hardwood & copper driving wedge (the vulnerable heel behind `-f`)!
+    let wedge_base = body + f * (-1.8 + wedge_shift);
+    let heel_tip = wedge_base - f * 12.2;
+    let w_left = wedge_base + s * 5.4;
+    let w_right = wedge_base - s * 5.4;
+    mb2_draw_poly_tri(pb, heel_tip, w_left, w_right, wood, flash);
+    // Serrated brass rack teeth running along the driving wedge spine!
+    for k in 0..4 {
+        let u = 0.22 + k as f32 * 0.20;
+        let pt = heel_tip + (wedge_base - heel_tip) * u;
+        let tooth_w = 1.1 + u * 2.2;
+        draw_rotated_box(pb, pt, s, tooth_w, 0.75, brass.hi, brass.mid, brass.lo, flash);
+    }
+
+    // 4. Heavy blued-steel T-bar yoke & twin caliper fork prongs projecting forward (+15 px)!
+    let yoke = body - f * 0.6;
+    draw_rotated_box(pb, yoke, s, 6.2, 2.2, steel.hi, steel.mid, steel.lo, flash);
+    for &side in &[-1.0_f32, 1.0] {
+        let pdir = f.rotate(side * jaw_ang);
+        let root = yoke + s * (side * 3.6);
+        let elbow = root + pdir * 7.8 + pdir.perp() * (side * 1.2);
+        let tip = root + pdir * 14.8 - pdir.perp() * (side * 0.9); // hooked inward caliper claw!
+        draw_tapered_capsule(pb, root, elbow, 2.3, 1.9, steel.hi, steel.mid, steel.lo, flash);
+        draw_tapered_capsule(pb, elbow, tip, 1.9, 0.9, steel_spec, steel.hi, steel.lo, flash);
+        // Honed inner jaw glint racing down the prong during Tell!
+        let gu = if let Pose::Tell(t) = pose {
+            (t * 2.8).fract()
+        } else {
+            (anim * 0.9).fract()
+        };
+        let gp = root + (tip - root) * (0.25 + gu * 0.68);
+        plot_px(pb, gp.x.round() as i32, gp.y.round() as i32, steel_spec);
+        // Tell cyan tension sparks bridging between the wide-open fork tips!
+        if matches!(pose, Pose::Tell(_)) && coil > 0.45 {
+            let spark_pt = tip - pdir.perp() * (side * (1.2 + (anim * 18.0).sin().abs() * 1.8));
+            plot_px(pb, spark_pt.x.round() as i32, spark_pt.y.round() as i32, cyan_glow);
+        }
+    }
+
+    // 5. Gleaming brass hex lock-pivot & piercing glowing eye right on the steel bridge!
+    let expr = eye_expr_for(pose, anim, flash);
+    draw_shaded_disc(pb, yoke.x, yoke.y, 3.6, brass.hi, brass.mid, brass.lo, flash);
+    let eye_col = match pose {
+        Pose::Tell(_) => (255, 224, 96),
+        Pose::Strike(_) => (255, 114, 92),
+        Pose::Recover(_) => (148, 255, 206),
+        _ => (232, 248, 255),
+    };
+    draw_eye(pb, yoke + f * 0.8, 2.1, eye_col, INK, f, expr, flash);
+
+    // Strike metallic clash flash at the closed fork tips!
+    if let Pose::Strike(t) = pose {
+        if (0.26..0.78).contains(&t) {
+            mb2_star_flash(pb, body + f * 13.5, 5, steel_spec, cyan_glow);
+        }
+    }
+
+    if let Pose::Tell(t) = pose {
+        mb2_tell_pip(pb, yoke + Vec2::new(0.0, -11.5), t);
+    }
+    if let Pose::Recover(t) = pose {
+        // Expose the rear wooden wedge heel ("Step around the heel")!
+        let heel_spot = heel_tip + f * 3.0;
+        draw_dizzy_stars(pb, yoke + Vec2::new(0.0, -9.5), 6.8, t);
+        draw_recover_beacon(pb, heel_spot, t);
+    }
+    draw_hurt_burst(pb, body, f, flash, cyan_glow);
+}
+
+// ============================================================================
+// 19. CARBON TWIN — "Your duplicate stayed behind." (Printworks 9:00)
+//     28–30 px offset ivory ledger sheet & midnight-indigo carbon duplicate
+//     peeling dramatically apart from a crimson folded spine, with twin eyes!
+// ============================================================================
+
+fn draw_carbon_twin(
+    pb: &mut PixelBuffer,
+    center: Vec2,
+    f: Vec2,
+    pose: Pose,
+    anim: f32,
+    flash: f32,
+) {
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let s = f.perp();
+    let paper = mb2_pal((252, 244, 218), (206, 194, 164), (122, 112, 90));
+    let carbon = mb2_pal((88, 112, 174), (42, 54, 96), (18, 22, 44));
+    let spine = mb2_pal((236, 86, 98), (168, 42, 56), (82, 18, 28));
+    let ink_bar = mb2_pal((72, 82, 108), (40, 46, 64), (20, 24, 36));
+    let ghost_cyan: Rgb = (108, 232, 255);
+
+    if let Pose::Death(t) = pose {
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 4.5;
+        draw_shadow(pb, center.x + 1.0, center.y + 5.5, 16.0, 7.2, 0.48);
+        // Carbon sheet and ivory original torn cleanly apart along the crimson spine!
+        let c_pos = center - s * (5.0 + burst * 5.5) - f * 2.0 - Vec2::new(0.0, bounce * 0.6);
+        let p_pos = center + s * (5.0 + burst * 5.5) + f * 2.0 - Vec2::new(0.0, bounce);
+        draw_rotated_box(pb, c_pos, f.rotate(-0.35), 9.0, 4.8, carbon.hi, carbon.mid, carbon.lo, flash);
+        draw_rotated_box(pb, p_pos, f.rotate(0.32), 9.0, 4.8, paper.hi, paper.mid, paper.lo, flash);
+        // Torn crimson spine strip fluttering between them.
+        draw_capsule(
+            pb,
+            center - s * 4.0,
+            center + s * 4.0 + f * 2.0,
+            1.1,
+            spine.hi,
+            spine.mid,
+            spine.lo,
+            flash,
+        );
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, ghost_cyan);
+        }
+        draw_chest_pointer(pb, center, t);
+        return;
+    }
+
+    let ent_drop = if let Pose::Entrance(t) = pose {
+        (1.0 - t) * (1.0 - t) * -22.0
+    } else {
+        0.0
+    };
+
+    let (lunge, lift, peel, flap, coil) = match pose {
+        Pose::Entrance(t) => (0.0, ent_drop, (1.0 - t) * 6.0 + 2.4, (t * 14.0).sin() * 0.24, 0.0),
+        Pose::Idle => (
+            (anim * 2.2).sin() * 0.7,
+            (anim * 2.2).cos() * 0.6,
+            2.6 + (anim * 2.8).sin() * 0.7,
+            (anim * 3.0).sin() * 0.08,
+            0.0,
+        ),
+        Pose::Approach => {
+            let st = (anim * 6.2).sin();
+            (st * 2.2, -st.abs() * 1.4, 2.8 + st.abs() * 1.4, st * 0.14, 0.0)
+        }
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            (-3.2 * c + q * 0.7, -2.4 * c, 3.0 + c * 5.2 + q * 0.5, -0.22 * c, c)
+        }
+        Pose::Strike(t) => {
+            let slap = (t / 0.28).clamp(0.0, 1.0);
+            let ease = slap * slap;
+            (5.4 * ease, 1.0 * ease, 8.0 * (1.0 - ease) + 0.8, 0.14 * (1.0 - ease), 1.0)
+        }
+        Pose::Recover(t) => (
+            -1.8,
+            1.2,
+            4.8 + (t * 7.0).sin() * 0.8,
+            0.28,
+            0.0,
+        ),
+        Pose::Retreat(t) => (-2.8, -(t * 8.0).sin().abs() * 1.6, 3.4, (t * 12.0).sin() * 0.16, 0.0),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let body = center + f * lunge + jolt + Vec2::new(0.0, lift);
+    let sh_s = (1.0 - (-lift).max(0.0) * 0.028).clamp(0.45, 1.12);
+    draw_shadow(pb, center.x + 1.2, center.y + 7.0, 14.5 * sh_s, 6.4 * sh_s, 0.52);
+
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.42 {
+            draw_entrance_ring(pb, center, ((t - 0.42) / 0.58).clamp(0.0, 1.0), ghost_cyan);
+        }
+    }
+
+    let expr = eye_expr_for(pose, anim, flash);
+
+    // 1. LOWER SHEET: Deep midnight-indigo CARBON DUPLICATE peeking dramatically out!
+    let carb_axis = f.rotate(-flap * 0.7);
+    let carb_c = body - f * (peel * 0.45) - s * (peel * 0.88) + Vec2::new(0.0, 1.4);
+    draw_rotated_box(pb, carb_c, carb_axis, 11.2, 5.8, carbon.hi, carbon.mid, carbon.lo, flash);
+    // Shimmering electric-cyan carbon ghost-text lines across the carbon sheet!
+    let carb_s = carb_axis.perp();
+    for k in -1..=1 {
+        let lp = carb_c + carb_s * (k as f32 * 2.5);
+        let a = lp - carb_axis * 7.2;
+        let b = lp + carb_axis * 6.5;
+        pb.line(
+            a.x.round() as i32,
+            a.y.round() as i32,
+            b.x.round() as i32,
+            b.y.round() as i32,
+            apply_flash(if k == 0 { ghost_cyan } else { carbon.hi }, flash),
+        );
+    }
+    // Glowing cyan DUPLICATE EYE on the exposed carbon twin!
+    let carb_eye_pos = carb_c + carb_axis * 4.2 - carb_s * 1.4;
+    draw_eye(pb, carb_eye_pos, 1.7, ghost_cyan, INK, f, expr, flash);
+
+    // 2. Strike page-slap cyan-ivory shockwave!
+    if let Pose::Strike(t) = pose {
+        if t < 0.65 {
+            let ang = f.angle();
+            draw_smear_arc(
+                pb,
+                body + f * 6.0,
+                ang - 0.95,
+                ang + 0.95,
+                5.0,
+                14.5,
+                ghost_cyan,
+                paper.hi,
+                0.76 * (1.0 - t / 0.65),
+            );
+        }
+    }
+
+    // 3. UPPER SHEET: Warm ivory ledger original peeling high upward/across!
+    let top_axis = f.rotate(flap);
+    let top_s = top_axis.perp();
+    let top_c = body + f * (peel * 0.35) + s * (peel * 0.82) + Vec2::new(0.0, -1.6 - coil * 2.6);
+    draw_rotated_box(pb, top_c, top_axis, 11.2, 5.8, paper.hi, paper.mid, paper.lo, flash);
+    // Crisp dark printed ledger rows + vermilion margin rule!
+    let margin_a = top_c + top_axis * 5.8 - top_s * 4.6;
+    let margin_b = top_c + top_axis * 5.8 + top_s * 4.6;
+    pb.line(
+        margin_a.x.round() as i32,
+        margin_a.y.round() as i32,
+        margin_b.x.round() as i32,
+        margin_b.y.round() as i32,
+        apply_flash(spine.hi, flash),
+    );
+    for k in -1..=1 {
+        let lp = top_c - top_axis * 1.2 + top_s * (k as f32 * 2.6);
+        draw_rotated_box(pb, lp, top_axis, 5.6, 0.45, ink_bar.hi, ink_bar.mid, ink_bar.lo, flash);
+    }
+    // Dog-eared curling rear corner flapping upward as the page peels back!
+    let corner_base = top_c - top_axis * 9.5 + top_s * 3.8;
+    let corner_tip = corner_base - top_axis * (2.6 + coil * 2.2) + top_s * (1.6 + coil * 1.8)
+        + Vec2::new(0.0, -1.4 - coil * 3.0);
+    mb2_draw_poly_tri(
+        pb,
+        corner_base + top_axis * 2.4,
+        corner_base - top_s * 2.8,
+        corner_tip,
+        paper,
+        flash,
+    );
+    // Sharp ink-black ORIGINAL EYE on the ivory top sheet!
+    let top_eye_col = match pose {
+        Pose::Tell(_) => (255, 236, 128),
+        Pose::Strike(_) => (255, 134, 122),
+        Pose::Recover(_) => (148, 255, 206),
+        _ => (255, 255, 255),
+    };
+    draw_eye(pb, top_c + top_axis * 2.4 + top_s * 1.2, 1.8, top_eye_col, INK, f, expr, flash);
+
+    // 4. Heavy crimson-bound FOLDED FRONT SPINE joining both sheets (where the transfer lays)!
+    let spine_top = top_c + top_axis * 10.6;
+    let spine_bot = carb_c + carb_axis * 10.6;
+    draw_capsule(pb, spine_bot, spine_top, 1.8, spine.hi, spine.mid, spine.lo, flash);
+    // Cyan carbon-transfer sparks fizzing between the peeling sheets during Tell!
+    if let Pose::Tell(t) = pose {
+        for k in 0..5 {
+            let ph = (t * 4.2 + k as f32 * 0.2).fract();
+            let q = carb_c + (top_c - carb_c) * ph + f * ((k as f32 - 2.0) * 3.4);
+            blend_px(pb, q.x.round() as i32, q.y.round() as i32, ghost_cyan, 0.92);
+        }
+        mb2_tell_pip(pb, top_c + Vec2::new(0.0, -11.5), t);
+    }
+
+    if let Pose::Recover(t) = pose {
+        // Expose the ruffled short edge!
+        let short_edge = body - f * 10.5;
+        draw_dizzy_stars(pb, top_c + Vec2::new(0.0, -8.5), 7.2, t);
+        draw_recover_beacon(pb, short_edge, t);
+    }
+    draw_hurt_burst(pb, body, f, flash, ghost_cyan);
+}
+
+// ============================================================================
+// 20. LATE PLATE — "That's all the room we have tonight." (Printworks 12:00)
+//     32–34 px heavy curved zinc-steel rotary printing plate with royal press-
+//     violet inked inner face, real jagged torn registration notch along
+//     RING_GAP_TURN, and electric cyan crop-marks!
+// ============================================================================
+
+fn draw_late_plate(
+    pb: &mut PixelBuffer,
+    center: Vec2,
+    f: Vec2,
+    pose: Pose,
+    anim: f32,
+    flash: f32,
+) {
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let s = f.perp();
+    let gap = f.rotate(RING_GAP_TURN);
+    let steel = mb2_pal((214, 228, 246), (108, 122, 146), (42, 48, 66));
+    let ink_pal = mb2_pal((196, 124, 255), (112, 52, 174), (48, 20, 82));
+    let brass = mb2_pal((255, 228, 118), (202, 146, 44), (96, 62, 18));
+    let reg_cyan: Rgb = (112, 246, 255);
+    let tear_spec: Rgb = (242, 252, 255);
+
+    if let Pose::Death(t) = pose {
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 4.5;
+        draw_shadow(pb, center.x + 1.0, center.y + 6.0, 17.0, 7.6, 0.50);
+        // Spilled pool of royal violet press ink!
+        let pr = 8.0 + burst * 6.5;
+        draw_shaded_ellipse(
+            pb,
+            center.x,
+            center.y + 3.0,
+            pr,
+            pr * 0.54,
+            ink_pal.hi,
+            ink_pal.mid,
+            ink_pal.lo,
+            flash,
+        );
+        // Snapped curved zinc plate halves flying apart from the torn registration notch!
+        for &side in &[-1.0_f32, 1.0] {
+            let drift = s * (side * (5.5 + burst * 6.5)) - Vec2::new(0.0, bounce * 0.75);
+            let dir = f.rotate(side * (0.55 + burst * 0.35));
+            draw_tapered_capsule(
+                pb,
+                center + drift - dir.perp() * 7.5,
+                center + drift + dir.perp() * 7.5,
+                2.8,
+                2.2,
+                steel.hi,
+                steel.mid,
+                steel.lo,
+                flash,
+            );
+        }
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, ink_pal.hi);
+        }
+        draw_chest_pointer(pb, center, t);
+        return;
+    }
+
+    let ent_drop = if let Pose::Entrance(t) = pose {
+        if t < 0.44 {
+            let u = t / 0.44;
+            (1.0 - u * u) * -24.0
+        } else {
+            let u = (t - 0.44) / 0.56;
+            (u * PI * 2.0).sin() * (1.0 - u) * 2.6
+        }
+    } else {
+        0.0
+    };
+
+    // Plate curvature (`r_out`, `half_span`) curls tighter through Tell & clamps in Strike!
+    let (lunge, lift, rock, r_out, half_span, coil) = match pose {
+        Pose::Entrance(_) => (0.0, ent_drop, 0.0, 14.8, 1.72, 0.0),
+        Pose::Idle => (
+            (anim * 2.0).sin() * 0.6,
+            (anim * 2.0).cos() * 0.5,
+            (anim * 2.2).sin() * 0.10,
+            14.8,
+            1.72,
+            0.0,
+        ),
+        Pose::Approach => {
+            let st = (anim * 5.8).sin();
+            (st * 1.6, -st.abs() * 1.4, st * 0.24, 14.8, 1.74, 0.0)
+        }
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            (-3.2 * c + q * 0.8, -2.2 * c, q * 0.06, 15.6 - c * 2.2, 1.66 + c * 0.36, c)
+        }
+        Pose::Strike(t) => {
+            let clamp = (t * PI).sin();
+            (4.0 * clamp, 0.8, (t * 42.0).sin() * 0.05, 13.0 - clamp * 1.6, 2.08, 1.0)
+        }
+        Pose::Recover(t) => (
+            -2.0,
+            1.8,
+            0.34 * (1.0 - t * 0.25),
+            16.0,
+            1.42, // sprung awkwardly open & flat!
+            0.0,
+        ),
+        Pose::Retreat(t) => (-2.6, -(t * 8.0).sin().abs() * 1.4, (t * 8.0).sin() * 0.16, 15.0, 1.68, 0.0),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let body = center + f * lunge + jolt + Vec2::new(0.0, lift);
+    let sh_s = (1.0 - (-lift).max(0.0) * 0.028).clamp(0.45, 1.14);
+    draw_shadow(pb, center.x + 1.2, center.y + 7.2, 16.0 * sh_s, 6.8 * sh_s, 0.54);
+
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.42 {
+            draw_entrance_ring(pb, center, ((t - 0.42) / 0.58).clamp(0.0, 1.0), ink_pal.hi);
+        }
+    }
+
+    let plate_f = f.rotate(rock);
+    let hub = body - plate_f * 4.4;
+    let r_in = (r_out - 5.4).max(5.5);
+
+    // 1. Strike inward violet-white ink-spray smear arcs (skipping the torn notch!).
+    if let Pose::Strike(t) = pose {
+        let g_ang = gap.angle();
+        draw_smear_arc(
+            pb,
+            hub,
+            g_ang + 0.55,
+            g_ang + TAU - 0.55,
+            r_in - 2.0,
+            r_out + 2.6,
+            ink_pal.hi,
+            reg_cyan,
+            0.70 * (1.0 - t * 0.5),
+        );
+    }
+
+    // 2. Main solid curved zinc-and-violet printing plate (~32 px tip-to-tip) with
+    //    REAL JAGGED TORN REGISTRATION NOTCH along `gap`!
+    let tear_c = if matches!(pose, Pose::Tell(_) | Pose::Strike(_)) {
+        (255, 242, 148)
+    } else {
+        tear_spec
+    };
+    mb2_draw_curved_plate(
+        pb,
+        hub,
+        plate_f,
+        gap,
+        r_in,
+        r_out,
+        half_span,
+        steel,
+        ink_pal,
+        tear_c,
+        flash,
+    );
+
+    // 3. Brass registration alignment pins at both curved plate tips!
+    for &side in &[-1.0_f32, 1.0] {
+        let tip_dir = plate_f.rotate(side * (half_span - 0.08));
+        let pin = hub + tip_dir * ((r_in + r_out) * 0.5);
+        draw_shaded_disc(pb, pin.x, pin.y, 1.8, brass.hi, brass.mid, brass.lo, flash);
+    }
+
+    // 4. Electric cyan registration crop-mark reticle (`⊕`) & optical pressman eye!
+    let eye_hub = body + plate_f * 1.4;
+    let cross_r = 4.6 + coil * 1.4;
+    let ca = eye_hub - f * cross_r;
+    let cb = eye_hub + f * cross_r;
+    let cc = eye_hub - s * cross_r;
+    let cd = eye_hub + s * cross_r;
+    pb.line(ca.x.round() as i32, ca.y.round() as i32, cb.x.round() as i32, cb.y.round() as i32, reg_cyan);
+    pb.line(cc.x.round() as i32, cc.y.round() as i32, cd.x.round() as i32, cd.y.round() as i32, reg_cyan);
+    draw_shaded_disc(pb, eye_hub.x, eye_hub.y, 4.0, steel.hi, steel.mid, steel.lo, flash);
+    let expr = eye_expr_for(pose, anim, flash);
+    let eye_col = match pose {
+        Pose::Tell(_) => (255, 224, 96),
+        Pose::Strike(_) => ink_pal.hi,
+        Pose::Recover(_) => (148, 255, 206),
+        _ => reg_cyan,
+    };
+    draw_eye(pb, eye_hub, 2.4, eye_col, INK, f, expr, flash);
+
+    // 5. Torn notch beacon rays & flying ink droplets during Tell!
+    let notch_pt = hub + gap * ((r_in + r_out) * 0.5);
+    if let Pose::Tell(t) = pose {
+        for &side in &[-1.0_f32, 1.0] {
+            let e_dir = gap.rotate(side * 0.36);
+            let p0 = hub + e_dir * r_out;
+            let p1 = p0 + e_dir * (3.5 + t * 4.5);
+            pb.line(p0.x.round() as i32, p0.y.round() as i32, p1.x.round() as i32, p1.y.round() as i32, reg_cyan);
+        }
+        mb2_tell_pip(pb, body + Vec2::new(0.0, -14.5), t);
+    }
+
+    if let Pose::Recover(t) = pose {
+        draw_dizzy_stars(pb, body + Vec2::new(0.0, -12.5), 7.6, t);
+        draw_recover_beacon(pb, notch_pt, t);
+    }
+    draw_hurt_burst(pb, body, f, flash, reg_cyan);
+}
+
+// ============================================================================
+// 21. TARPAULIN PUP — "Contents may have shifted." (Flatbed 3:00)
+//     22–25 px (32 px unfurled) army-olive folded canvas tarp hound with four
+//     brass grommet-ring paws, crimson bungee collar, floppy ears & wagging tail
+// ============================================================================
+
+fn draw_tarpaulin_pup(
+    pb: &mut PixelBuffer,
+    center: Vec2,
+    f: Vec2,
+    pose: Pose,
+    anim: f32,
+    flash: f32,
+) {
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let s = f.perp();
+    let tarp = mb2_pal((152, 188, 92), (82, 116, 46), (34, 54, 22));
+    let khaki = mb2_pal((242, 222, 158), (180, 152, 88), (94, 76, 40));
+    let brass = mb2_pal((255, 234, 120), (206, 150, 44), (98, 64, 18));
+    let bungee = mb2_pal((248, 102, 92), (206, 48, 44), (108, 22, 22));
+
+    if let Pose::Death(t) = pose {
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 4.0;
+        draw_shadow(pb, center.x + 1.0, center.y + 5.0, 15.0, 6.8, 0.48);
+        // Rumpled collapsed olive tarp heap!
+        draw_shaded_ellipse(
+            pb,
+            center.x - 1.5,
+            center.y + 2.0 - bounce * 0.4,
+            10.5,
+            5.2,
+            tarp.hi,
+            tarp.mid,
+            tarp.lo,
+            flash,
+        );
+        draw_rotated_box(
+            pb,
+            center + f * 3.0,
+            f.rotate(0.3),
+            6.0,
+            2.8,
+            khaki.hi,
+            khaki.mid,
+            khaki.lo,
+            flash,
+        );
+        // Four popped brass grommet rings scattered outward!
+        for k in 0..4 {
+            let a = k as f32 * FRAC_PI_2 + 0.55;
+            let gp = center + Vec2::from_angle(a) * (6.5 + burst * 5.0);
+            draw_shaded_disc(pb, gp.x, gp.y, 1.8, brass.hi, brass.mid, brass.lo, flash);
+            plot_px(pb, gp.x.round() as i32, gp.y.round() as i32, INK);
+        }
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, khaki.hi);
+        }
+        draw_chest_pointer(pb, center, t);
+        return;
+    }
+
+    let ent_drop = if let Pose::Entrance(t) = pose {
+        if t < 0.44 {
+            let u = t / 0.44;
+            (1.0 - u * u) * -20.0
+        } else {
+            let u = (t - 0.44) / 0.56;
+            -(u * PI).sin() * (1.0 - u) * 5.0
+        }
+    } else {
+        0.0
+    };
+
+    let (lunge, lift, unfurl, tail_wag, ear_flap, coil) = match pose {
+        Pose::Entrance(_) => (0.0, ent_drop, 0.0, (anim * 12.0).sin() * 3.4, 0.4, 0.0),
+        Pose::Idle => (
+            (anim * 3.0).sin() * 0.7,
+            -(anim * 3.0).sin().abs() * 0.9,
+            0.0,
+            (anim * 9.5).sin() * 3.2,
+            (anim * 5.0).sin() * 0.25,
+            0.0,
+        ),
+        Pose::Approach => {
+            let st = (anim * 7.8).sin();
+            (st * 2.2, -st.abs() * 2.6, 0.8 + st.abs() * 1.0, (anim * 12.0).sin() * 3.8, -0.35 + st * 0.2, 0.0)
+        }
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            // Play-bow crouch: haunches high, front hem hunkered & puffing with wind!
+            (-3.2 * c + q * 0.6, 1.4 * c, c * 4.4, (t * 28.0).sin() * 4.2, 0.55 * c, c)
+        }
+        Pose::Strike(t) => {
+            let snap = (t / 0.26).clamp(0.0, 1.0);
+            let billow = (t * 22.0).sin() * 1.1;
+            (4.8 * snap, -0.6 * snap, 4.4 + snap * 7.2 + billow, (t * 20.0).sin() * 2.0, -0.55, 1.0)
+        }
+        Pose::Recover(t) => (
+            1.4,
+            2.0,
+            6.2 * (1.0 - t * 0.35),
+            (t * 5.0).sin() * 1.0,
+            0.85,
+            0.0,
+        ),
+        Pose::Retreat(t) => (-2.6, -(t * 9.0).sin().abs() * 1.8, 0.0, -(t * 10.0).sin() * 2.5, 0.2, 0.0),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let body = center + f * lunge + jolt + Vec2::new(0.0, lift);
+    let sh_s = (1.0 - (-lift).max(0.0) * 0.032).clamp(0.45, 1.14);
+    draw_shadow(pb, center.x + 1.0 + unfurl * f.x * 0.25, center.y + 6.5, (12.5 + unfurl * 0.45) * sh_s, 5.6 * sh_s, 0.52);
+
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.42 {
+            draw_entrance_ring(pb, center, ((t - 0.42) / 0.58).clamp(0.0, 1.0), tarp.hi);
+        }
+    }
+
+    // 1. Wagging frayed rope-and-tarp tail behind `-f`!
+    let tail_base = body - f * 7.2 + Vec2::new(0.0, -coil * 2.6);
+    let tail_tip = tail_base - f * 5.6 + s * tail_wag + Vec2::new(0.0, -2.4 - coil * 2.2);
+    draw_tapered_capsule(pb, tail_base, tail_tip, 1.6, 0.7, tarp.hi, tarp.mid, tarp.lo, flash);
+    draw_shaded_disc(pb, tail_tip.x, tail_tip.y, 1.1, khaki.hi, khaki.mid, khaki.lo, flash);
+
+    // 2. FOUR brass-ring grommet paws galloping under the folded tarp!
+    let gallop = match pose {
+        Pose::Approach => (anim * 7.8).sin() * 3.0,
+        Pose::Retreat(t) => (t * 9.0).sin() * 2.2,
+        _ => 0.0,
+    };
+    let paw_specs = [
+        (-5.6_f32, -4.4_f32, -gallop, true),
+        (-5.6, 4.4, -gallop, true),
+        (5.0, -4.4, gallop, false),
+        (5.0, 4.4, gallop, false),
+    ];
+    for &(ax, sx, step, is_rear) in &paw_specs {
+        let rear_kick = if is_rear { -coil * 2.6 } else { coil * 0.8 };
+        let recover_air = if matches!(pose, Pose::Recover(_)) && sx < 0.0 { -3.2 } else { 0.0 };
+        let paw = body
+            + f * (ax + step * 0.8)
+            + s * sx
+            + Vec2::new(0.0, 4.6 - step.max(0.0) * 0.55 + rear_kick + recover_air);
+        draw_shaded_disc(pb, paw.x, paw.y, 2.2, brass.hi, brass.mid, brass.lo, flash);
+        // Dark hollow eyelet center so every foot reads as a real tarp grommet!
+        plot_px(pb, paw.x.round() as i32, paw.y.round() as i32, INK);
+    }
+
+    // 3. Base folded army-olive canvas body with crisp stitched cross-fold seams!
+    let main_c = body - f * 1.4;
+    draw_rotated_box(pb, main_c, f, 7.2, 5.2, tarp.hi, tarp.mid, tarp.lo, flash);
+    for k in -1..=1 {
+        let seam = main_c + f * (k as f32 * 3.0);
+        let a = seam - s * 4.6;
+        let b = seam + s * 4.6;
+        pb.line(a.x.round() as i32, a.y.round() as i32, b.x.round() as i32, b.y.round() as i32, apply_flash(tarp.lo, flash));
+    }
+
+    // 4. Crimson elastic tie-down bungee collar with gleaming silver S-hook clasp!
+    let collar = body + f * 3.4;
+    draw_rotated_box(pb, collar, s, 5.4, 1.0, bungee.hi, bungee.mid, bungee.lo, flash);
+    let clasp = collar + f * 0.8;
+    draw_shaded_disc(pb, clasp.x, clasp.y, 1.3, (255, 255, 255), brass.hi, brass.lo, flash);
+
+    // 5. Strike billowing wind-smear lines as the canvas sheet snaps out!
+    if let Pose::Strike(t) = pose {
+        let ang = f.angle();
+        draw_smear_arc(
+            pb,
+            body + f * 3.0,
+            ang - 0.72,
+            ang + 0.72,
+            6.5,
+            15.5,
+            khaki.hi,
+            (255, 255, 240),
+            0.72 * (1.0 - t * 0.5),
+        );
+    }
+
+    // 6. Upper khaki duck-cloth flap that puffs up in Tell and UNFURLS way forward in Strike!
+    let flap_len = 5.2 + unfurl * 0.58;
+    let flap_c = body + f * (2.2 + unfurl * 0.58) + Vec2::new(0.0, -1.2 - coil * 1.8);
+    draw_rotated_box(pb, flap_c, f, flap_len, 4.4 + coil * 0.5, khaki.hi, khaki.mid, khaki.lo, flash);
+    // Reinforced brass-grommeted leading hem edge!
+    let hem_c = flap_c + f * (flap_len - 0.6);
+    draw_rotated_box(pb, hem_c, s, 4.6 + coil * 0.4, 0.9, brass.hi, brass.mid, brass.lo, flash);
+    for &side in &[-1.0_f32, 1.0] {
+        let ey = hem_c + s * (side * 3.4);
+        draw_shaded_disc(pb, ey.x, ey.y, 1.4, brass.hi, brass.mid, brass.lo, flash);
+        plot_px(pb, ey.x.round() as i32, ey.y.round() as i32, INK);
+    }
+
+    // 7. Two big floppy triangular tarp-corner ears flapping in the highway slipstream!
+    for &side in &[-1.0_f32, 1.0] {
+        let e_root = body + f * 4.2 + s * (side * 3.4) + Vec2::new(0.0, -1.5);
+        let e_back = body + f * 1.2 + s * (side * 4.8) + Vec2::new(0.0, -1.0);
+        let e_tip = body
+            + f * (2.6 - ear_flap * 2.5)
+            + s * (side * (8.4 + coil * 1.4))
+            + Vec2::new(0.0, -2.0 + ear_flap * 2.4 * side);
+        mb2_draw_poly_tri(pb, e_root, e_back, e_tip, tarp, flash);
+        // Tiny brass eyelet at each ear tip!
+        plot_px(pb, e_tip.x.round() as i32, e_tip.y.round() as i32, brass.hi);
+    }
+
+    // 8. Eager bright amber pup eyes & dark rubber nose peering under the folded brim!
+    let expr = eye_expr_for(pose, anim, flash);
+    let head_c = body + f * 5.2 + Vec2::new(0.0, -1.0);
+    let eye_col = match pose {
+        Pose::Tell(_) => (255, 224, 88),
+        Pose::Strike(_) => (255, 134, 92),
+        Pose::Recover(_) => (148, 255, 206),
+        _ => (255, 246, 202),
+    };
+    draw_eye(pb, head_c + s * 2.1, 1.5, eye_col, INK, f, expr, flash);
+    draw_eye(pb, head_c - s * 2.1, 1.5, eye_col, INK, f, expr, flash);
+    let nose = head_c + f * 2.6;
+    draw_shaded_disc(pb, nose.x, nose.y, 1.3, (78, 72, 64), (32, 28, 26), INK, flash);
+
+    if let Pose::Tell(t) = pose {
+        mb2_tell_pip(pb, body + Vec2::new(0.0, -11.5), t);
+    }
+    if let Pose::Recover(t) = pose {
+        draw_dizzy_stars(pb, body + Vec2::new(0.0, -10.5), 6.8, t);
+        draw_recover_beacon(pb, body - f * 5.5, t);
+    }
+    draw_hurt_burst(pb, body, f, flash, khaki.hi);
+}
+
+// ============================================================================
+// 22. AXLE NUT — "Last seen under the truck." (Flatbed 6:00)
+//     26 px razor-sharp machined gunmetal-steel HEXAGONAL truck axle nut with
+//     a deep pitch-black threaded central bore, glowing inner eyes & stud feet!
+// ============================================================================
+
+fn draw_axle_nut(
+    pb: &mut PixelBuffer,
+    center: Vec2,
+    f: Vec2,
+    pose: Pose,
+    anim: f32,
+    flash: f32,
+) {
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let s = f.perp();
+    let steel = mb2_pal((206, 220, 238), (104, 118, 138), (40, 48, 62));
+    let grease = mb2_pal((236, 172, 64), (156, 88, 28), (68, 36, 14));
+    let stud = mb2_pal((168, 178, 196), (86, 94, 110), (34, 38, 48));
+    let steel_spec: Rgb = (255, 255, 255);
+    let spark_gold: Rgb = (255, 214, 96);
+
+    if let Pose::Death(t) = pose {
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 4.5;
+        draw_shadow(pb, center.x + 1.0, center.y + 5.5, 15.5, 7.2, 0.52);
+        // Dark axle-grease oil slick under the sheared nut!
+        draw_shaded_ellipse(
+            pb,
+            center.x,
+            center.y + 3.0,
+            9.5 + burst * 4.5,
+            5.0 + burst * 2.0,
+            (58, 52, 46),
+            (26, 24, 24),
+            INK,
+            0.0,
+        );
+        // Two sheared steel hex halves clattering apart left & right!
+        for &side in &[-1.0_f32, 1.0] {
+            let half_c = center + s * (side * (4.5 + burst * 5.8)) - Vec2::new(0.0, bounce * 0.75);
+            draw_rotated_box(
+                pb,
+                half_c,
+                f.rotate(side * 0.35),
+                6.5,
+                3.4,
+                steel.hi,
+                steel.mid,
+                steel.lo,
+                flash,
+            );
+        }
+        // Bent brass cotter pin sprung loose beside the chest!
+        let pin = center + f * (5.0 + burst * 4.5) - Vec2::new(0.0, bounce * 1.1);
+        draw_capsule(pb, pin - s * 3.5, pin + s * 3.5, 1.1, grease.hi, grease.mid, grease.lo, flash);
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, spark_gold);
+        }
+        draw_chest_pointer(pb, center, t);
+        return;
+    }
+
+    let ent_drop = if let Pose::Entrance(t) = pose {
+        if t < 0.44 {
+            let u = t / 0.44;
+            (1.0 - u * u) * -22.0
+        } else {
+            let u = (t - 0.44) / 0.56;
+            -(u * PI * 2.0).sin().abs() * (1.0 - u) * 4.0
+        }
+    } else {
+        0.0
+    };
+
+    let (lunge, lift, spin, feet_tuck, coil) = match pose {
+        Pose::Entrance(t) => (0.0, ent_drop, t * 18.0, 1.0 - t, 0.0),
+        Pose::Idle => (
+            0.0,
+            (anim * 2.6).sin() * 0.6,
+            (anim * 2.0).sin() * 0.14,
+            0.0,
+            0.0,
+        ),
+        Pose::Approach => {
+            let st = (anim * 6.2).sin();
+            (st * 1.4, -st.abs() * 1.6, st * 0.28, 0.0, 0.0)
+        }
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            // Tucks feet, rears back, revs up spinning violently!
+            (-4.6 * c + q * 0.9, -2.0 * c, t * (8.0 + c * 22.0), c, c)
+        }
+        Pose::Strike(t) => {
+            let thrust = (t * PI).sin();
+            (6.0 * thrust, 0.4, t * 44.0, 1.0, 1.0)
+        }
+        Pose::Recover(t) => (
+            2.4 * (1.0 - t * 0.4),
+            2.2,
+            0.42 + (t * 10.0).sin() * 0.15,
+            0.2,
+            0.0,
+        ),
+        Pose::Retreat(t) => (-2.6, -(t * 8.0).sin().abs() * 1.2, -t * 5.0, 0.0, 0.0),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let body = center + f * lunge + jolt + Vec2::new(0.0, lift);
+    let sh_s = (1.0 - (-lift).max(0.0) * 0.03).clamp(0.45, 1.15);
+    draw_shadow(pb, center.x + 1.2, center.y + 8.5, 13.5 * sh_s, 6.2 * sh_s, 0.56);
+
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.42 {
+            draw_entrance_ring(pb, center, ((t - 0.42) / 0.58).clamp(0.0, 1.0), spark_gold);
+        }
+    }
+
+    // 1. Chunky splayed steel axle-stud feet (retract into the nut as it revs up to roll!).
+    let leg_vis = 1.0 - feet_tuck * 0.85;
+    if leg_vis > 0.15 {
+        let stride = match pose {
+            Pose::Approach => (anim * 6.2).sin() * 3.0,
+            Pose::Retreat(t) => (t * 8.0).sin() * 2.2,
+            _ => 0.0,
+        };
+        for &side in &[-1.0_f32, 1.0] {
+            let hip = body + s * (side * 5.2) + Vec2::new(0.0, 4.0);
+            let foot = body
+                + f * (side * stride)
+                + s * (side * 6.6)
+                + Vec2::new(0.0, 4.0 + 5.8 * leg_vis - (side * stride).max(0.0) * 0.5);
+            draw_tapered_capsule(pb, hip, foot, 1.9, 1.4, stud.hi, stud.mid, stud.lo, flash);
+            draw_shaded_ellipse(pb, foot.x, foot.y, 2.6, 1.5, grease.hi, grease.mid, grease.lo, flash);
+        }
+    }
+
+    // 2. Strike high-RPM circular axle-spin blur arcs + impact flash!
+    if let Pose::Strike(t) = pose {
+        let ang = f.angle();
+        draw_smear_arc(
+            pb,
+            body,
+            ang - 2.3,
+            ang + 2.3,
+            10.2,
+            15.6,
+            spark_gold,
+            steel_spec,
+            0.76 * (1.0 - t * 0.4),
+        );
+        mb2_star_flash(pb, body + f * 12.0, 4, steel_spec, spark_gold);
+    }
+
+    // 3. EXACT RAZOR-CRISP SIX-SIDED MACHINED HEXAGONAL NUT BODY (~26 px across)!
+    let hex_h = 10.6 + coil * 0.45;
+    mb2_draw_hex(pb, body, hex_h, spin, steel, steel_spec, flash);
+
+    // Subtle truck-grease & rust streak on the lower right facet for industrial character.
+    let rust_p = body + Vec2::from_angle(spin + 0.7) * 7.8;
+    draw_shaded_disc(pb, rust_p.x, rust_p.y, 2.0, grease.hi, grease.mid, grease.lo, flash);
+
+    // 4. MASSIVE PITCH-BLACK CENTRAL THREADED BORE HOLE (first thing the eye reads)!
+    draw_shaded_disc(pb, body.x, body.y, 6.2, steel.lo, (30, 36, 48), INK, flash);
+    draw_shaded_disc(pb, body.x, body.y, 5.1, (18, 20, 28), (10, 10, 16), (6, 6, 10), 0.0);
+    // Concentric machined steel screw-thread glints curving inside the black bore!
+    for k in 0..8 {
+        let a = spin * 1.4 + k as f32 * (TAU / 8.0);
+        let p_th = body + Vec2::from_angle(a) * (4.4 - coil * 0.4);
+        if k % 2 == 0 {
+            blend_px(pb, p_th.x.round() as i32, p_th.y.round() as i32, steel.mid, 0.72);
+        }
+    }
+
+    // 5. Twin fierce glowing furnace-amber eyes peering OUT OF THE BLACK BORE HOLE!
+    let expr = eye_expr_for(pose, anim, flash);
+    let eye_col = match pose {
+        Pose::Tell(_) => (255, 232, 92),
+        Pose::Strike(_) => (255, 112, 74),
+        Pose::Recover(_) => (148, 255, 206),
+        _ => (255, 198, 72),
+    };
+    draw_eye(pb, body + f * 1.4 + s * 2.1, 1.5, eye_col, INK, f, expr, flash);
+    draw_eye(pb, body + f * 1.4 - s * 2.1, 1.5, eye_col, INK, f, expr, flash);
+
+    // 6. Tell grinding friction spark shower spraying backward off the spinning flats!
+    if let Pose::Tell(t) = pose {
+        for k in 0..6 {
+            let ph = (t * 5.0 + k as f32 * 0.17).fract();
+            let side = if k % 2 == 0 { 1.0 } else { -1.0 };
+            let sp = body - f * (5.5 + ph * 10.5)
+                + s * (side * (4.5 + ph * 5.0))
+                + Vec2::new(0.0, 3.0 - ph * 6.5);
+            blend_px(
+                pb,
+                sp.x.round() as i32,
+                sp.y.round() as i32,
+                if k % 2 == 0 { spark_gold } else { steel_spec },
+                1.0 - ph * 0.55,
+            );
+        }
+        mb2_tell_pip(pb, body + Vec2::new(0.0, -14.5), t);
+    }
+
+    if let Pose::Recover(t) = pose {
+        draw_dizzy_stars(pb, body + Vec2::new(0.0, -12.5), 7.2, t);
+        draw_recover_beacon(pb, body, t);
+    }
+    draw_hurt_burst(pb, body, f, flash, spark_gold);
+}
+
+// ============================================================================
+// 23. CHAIN DOG — "Stays where it's tied. Mostly." (Flatbed 9:00)
+//     32 px forged-iron chain-link hound with spiked collar, snapping fangs,
+//     and a blazing highway-orange triangular ratchet load-binder swinging 115°!
+// ============================================================================
+
+fn draw_chain_dog(
+    pb: &mut PixelBuffer,
+    center: Vec2,
+    f: Vec2,
+    pose: Pose,
+    anim: f32,
+    flash: f32,
+) {
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let s = f.perp();
+    let iron = mb2_pal((192, 206, 226), (92, 104, 126), (34, 40, 54));
+    let iron_dark = mb2_pal((134, 148, 170), (62, 70, 88), (24, 28, 38));
+    let binder = mb2_pal((255, 178, 76), (228, 88, 26), (124, 38, 12));
+    let hide = mb2_pal((164, 132, 102), (96, 72, 52), (42, 28, 20));
+    let collar = mb2_pal((244, 86, 78), (186, 38, 36), (92, 16, 18));
+    let brass = mb2_pal((255, 228, 114), (204, 146, 44), (98, 62, 18));
+
+    if let Pose::Death(t) = pose {
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 4.5;
+        draw_shadow(pb, center.x + 1.0, center.y + 5.5, 16.5, 7.2, 0.50);
+        // Scattered rattling forged iron chain links!
+        for k in 0..7 {
+            let a = k as f32 * (TAU / 7.0) + 0.3;
+            let rad = 5.5 + burst * 5.8;
+            let p0 = center + Vec2::from_angle(a) * rad - Vec2::new(0.0, bounce * 0.6);
+            let p1 = p0 + Vec2::from_angle(a + 0.9) * 3.8;
+            mb2_draw_ring_link(pb, p0, p1, 1.7, if k % 2 == 0 { iron } else { iron_dark }, flash);
+        }
+        // Broken orange triangular load binder clattered flat beside the chest!
+        let bp = center - f * (5.5 + burst * 5.5) - Vec2::new(0.0, bounce * 0.9);
+        for k in 0..3 {
+            let c0 = bp + f.rotate(k as f32 * (TAU / 3.0) + 0.4) * 4.6;
+            let c1 = bp + f.rotate(((k + 1) % 3) as f32 * (TAU / 3.0) + 0.4) * 4.6;
+            draw_capsule(pb, c0, c1, 1.5, binder.hi, binder.mid, binder.lo, flash);
+        }
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, binder.hi);
+        }
+        draw_chest_pointer(pb, center, t);
+        return;
+    }
+
+    let ent_drop = if let Pose::Entrance(t) = pose {
+        if t < 0.42 {
+            let u = t / 0.42;
+            (1.0 - u * u) * -20.0
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
+    // Exact 115° swing matching `MinibossKind::ChainDog` (`half_sweep = 57.5°`).
+    let half_sweep = 57.5_f32.to_radians();
+    let (lunge, lift, bind_ang, bind_reach, jaw_open, coil) = match pose {
+        Pose::Entrance(t) => (
+            0.0,
+            ent_drop,
+            -PI + (1.0 - t) * 0.6,
+            13.5,
+            1.4,
+            0.0,
+        ),
+        Pose::Idle => (
+            (anim * 2.8).sin() * 0.8,
+            (anim * 2.8).cos() * 0.4,
+            -PI + (anim * 2.6).sin() * 0.28,
+            13.5,
+            0.8 + (anim * 4.2).sin().abs() * 0.8,
+            0.0,
+        ),
+        Pose::Approach => {
+            let st = (anim * 7.2).sin();
+            (st * 2.0, -st.abs() * 1.8, -PI + st * 0.36, 14.0, 1.4, 0.0)
+        }
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            // Hauls the blazing orange binder around to `-half_sweep` ready to whip!
+            let k = c.min(1.0);
+            (
+                -3.0 * c + q * 0.7,
+                -1.4 * c,
+                -PI + (PI - half_sweep) * k + q * 0.05,
+                13.5 + 3.2 * k,
+                2.4 * c + 0.8,
+                c,
+            )
+        }
+        Pose::Strike(t) => (
+            3.6 * (t * PI).sin(),
+            0.4,
+            -half_sweep + 2.0 * half_sweep * t,
+            17.0,
+            2.8,
+            1.0,
+        ),
+        Pose::Recover(t) => (
+            -1.4,
+            1.6,
+            half_sweep + 0.14 * (1.0 - t * 0.3),
+            15.0,
+            2.2,
+            0.0,
+        ),
+        Pose::Retreat(t) => (
+            -2.8,
+            -(t * 8.0).sin().abs() * 1.4,
+            -PI + (1.0 - t) * 0.5,
+            13.0,
+            1.0,
+            0.0,
+        ),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let body = center + f * lunge + jolt + Vec2::new(0.0, lift);
+    let sh_s = (1.0 - (-lift).max(0.0) * 0.03).clamp(0.45, 1.14);
+    draw_shadow(pb, center.x + 1.0, center.y + 6.8, 15.5 * sh_s, 6.4 * sh_s, 0.54);
+
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.40 {
+            draw_entrance_ring(pb, center, ((t - 0.40) / 0.60).clamp(0.0, 1.0), binder.hi);
+        }
+    }
+
+    let anchor = body - f * 2.0;
+    let drag = f.rotate(bind_ang);
+    let at_binder = anchor + drag * bind_reach;
+
+    // 1. Strike fiery orange-and-white 115° chain-whip smear arc!
+    if let Pose::Strike(t) = pose {
+        let base_a = f.angle();
+        let trail_a = (bind_ang - 0.72).max(-half_sweep);
+        draw_smear_arc(
+            pb,
+            anchor,
+            base_a + trail_a,
+            base_a + bind_ang,
+            7.5,
+            bind_reach + 4.5,
+            binder.mid,
+            (255, 246, 198),
+            0.80 * (1.0 - t * 0.35),
+        );
+    }
+
+    // 2. Whipping heavy iron tether links + BLAZING SAFETY-ORANGE TRIANGULAR BINDER!
+    let tether_links = 4;
+    for k in 0..tether_links {
+        let u0 = (k as f32 + 0.15) / tether_links as f32;
+        let u1 = (k as f32 + 0.85) / tether_links as f32;
+        let sag = if matches!(pose, Pose::Tell(_) | Pose::Strike(_)) {
+            0.0
+        } else {
+            (u0 * PI).sin() * 2.2
+        };
+        let p0 = anchor + drag * (bind_reach * u0) + Vec2::new(0.0, sag);
+        let p1 = anchor + drag * (bind_reach * u1) + Vec2::new(0.0, sag);
+        mb2_draw_ring_link(pb, p0, p1, 1.6, if k % 2 == 0 { iron } else { iron_dark }, flash);
+    }
+    // Bold safety-orange steel triangle load binder + chrome ratchet lever!
+    let b_corners: [Vec2; 3] = [
+        at_binder + drag * 5.4,
+        at_binder + drag.rotate(TAU / 3.0) * 5.0,
+        at_binder + drag.rotate(2.0 * TAU / 3.0) * 5.0,
+    ];
+    for k in 0..3 {
+        draw_capsule(
+            pb,
+            b_corners[k],
+            b_corners[(k + 1) % 3],
+            1.7,
+            binder.hi,
+            binder.mid,
+            binder.lo,
+            flash,
+        );
+    }
+    // Bright chrome ratchet latch bar across the binder center!
+    draw_capsule(
+        pb,
+        at_binder - drag * 2.6,
+        at_binder + drag * 3.4,
+        1.0,
+        (255, 255, 255),
+        iron.hi,
+        iron.lo,
+        flash,
+    );
+
+    // Tell friction sparks shooting off the hauled triangular binder!
+    if let Pose::Tell(t) = pose {
+        for k in 0..4 {
+            let ph = (t * 4.5 + k as f32 * 0.25).fract();
+            let sp = at_binder + drag.perp() * ((k as f32 - 1.5) * 2.8) - drag * (ph * 4.0)
+                + Vec2::new(0.0, -ph * 4.5);
+            blend_px(pb, sp.x.round() as i32, sp.y.round() as i32, (255, 244, 152), 1.0 - ph * 0.5);
+        }
+    }
+
+    // 3. Four clanking chain-link hound paws!
+    let stride = match pose {
+        Pose::Approach => (anim * 7.2).sin() * 3.2,
+        Pose::Retreat(t) => (t * 8.0).sin() * 2.2,
+        _ => 0.0,
+    };
+    for &(ax, sx, phase) in &[(-5.5_f32, -4.2_f32, -1.0_f32), (-5.5, 4.2, 1.0), (3.6, -4.4, 1.0), (3.6, 4.4, -1.0)] {
+        let step = stride * phase;
+        let paw = body + f * (ax + step * 0.7) + s * sx + Vec2::new(0.0, 4.6 - step.max(0.0) * 0.5);
+        draw_shaded_disc(pb, paw.x, paw.y, 1.8, iron.hi, iron.mid, iron.lo, flash);
+    }
+
+    // 4. Forged-iron interlocking CHAIN LOOP BODY (10 distinct oval chain links)!
+    let links = 10;
+    for i in 0..links {
+        let a0 = i as f32 * (TAU / links as f32) + anim * 0.9;
+        let a1 = (i as f32 + 0.78) * (TAU / links as f32) + anim * 0.9;
+        let ripple = (anim * 5.0 + i as f32 * 0.9).sin() * 0.7;
+        let p0 = body + f * (a0.cos() * 7.0 - 1.4) + s * (a0.sin() * 4.8 + ripple);
+        let p1 = body + f * (a1.cos() * 7.0 - 1.4) + s * (a1.sin() * 4.8 + ripple);
+        mb2_draw_ring_link(pb, p0, p1, 1.85, if i % 2 == 0 { iron } else { iron_dark }, flash);
+    }
+
+    // 5. Spiked crimson-and-brass guard collar at the neck!
+    let neck = body + f * 4.8;
+    draw_rotated_box(pb, neck, s, 4.2, 1.4, collar.hi, collar.mid, collar.lo, flash);
+    for &side in &[-1.0_f32, 0.0, 1.0] {
+        let sp = neck + s * (side * 2.8) + Vec2::new(0.0, -1.0);
+        draw_shaded_disc(pb, sp.x, sp.y, 1.1, brass.hi, brass.mid, brass.lo, flash);
+    }
+
+    // 6. Snarling iron-hound head, swept pointed ears, snapping steel-fanged jaws & fiery eyes!
+    let head = body + f * 7.8 + Vec2::new(0.0, -1.0 - coil * 0.8);
+    for &side in &[-1.0_f32, 1.0] {
+        let ear_a = head + s * (side * 2.2) - f * 0.8;
+        let ear_b = head + s * (side * 3.4) - f * 2.8;
+        let ear_tip = head - f * (3.6 + coil * 1.4) + s * (side * 5.6) + Vec2::new(0.0, -2.4);
+        mb2_draw_poly_tri(pb, ear_a, ear_b, ear_tip, hide, flash);
+    }
+    draw_shaded_disc(pb, head.x, head.y, 3.8, hide.hi, hide.mid, hide.lo, flash);
+    // Snapping upper & lower jaws with gleaming white steel fangs!
+    let snout_top = head + f * 5.0 + Vec2::new(0.0, -0.5 - jaw_open * 0.35);
+    let snout_bot = head + f * 4.4 + Vec2::new(0.0, 1.2 + jaw_open * 0.55);
+    draw_tapered_capsule(pb, head + f * 1.4, snout_bot, 1.8, 1.0, hide.mid, hide.lo, INK, flash);
+    draw_tapered_capsule(pb, head + f * 1.4, snout_top, 2.2, 1.3, hide.hi, hide.mid, hide.lo, flash);
+    // Gleaming fangs between the parted jaws!
+    if jaw_open > 0.7 {
+        let f1 = head + f * 3.8 + Vec2::new(0.0, 0.5);
+        let f2 = head + f * 5.2 + Vec2::new(0.0, 0.4);
+        plot_px(pb, f1.x.round() as i32, f1.y.round() as i32, (255, 255, 255));
+        plot_px(pb, f2.x.round() as i32, f2.y.round() as i32, (255, 255, 255));
+    }
+    // Fiery guard-dog eyes!
+    let expr = eye_expr_for(pose, anim, flash);
+    let eye_col = match pose {
+        Pose::Tell(_) => (255, 232, 92),
+        Pose::Strike(_) => (255, 118, 72),
+        Pose::Recover(_) => (148, 255, 206),
+        _ => (255, 204, 88),
+    };
+    draw_eye(pb, head + f * 1.2 + s * 1.9 + Vec2::new(0.0, -0.8), 1.5, eye_col, INK, f, expr, flash);
+    draw_eye(pb, head + f * 1.2 - s * 1.9 + Vec2::new(0.0, -0.8), 1.5, eye_col, INK, f, expr, flash);
+
+    if let Pose::Tell(t) = pose {
+        mb2_tell_pip(pb, head + Vec2::new(0.0, -11.5), t);
+    }
+    if let Pose::Recover(t) = pose {
+        // Exposed rear latch behind the chain loop ("Slip behind the latch")!
+        let latch_spot = body - f * 7.8;
+        draw_dizzy_stars(pb, head + Vec2::new(0.0, -9.0), 7.0, t);
+        draw_recover_beacon(pb, latch_spot, t);
+    }
+    draw_hurt_burst(pb, body, f, flash, binder.hi);
+}
+
+// ============================================================================
+// 24. THE ROAD ATLAS — "Every exit has a bird on it." (Flatbed 12:00)
+//     36–38 px coastal herring gull (slate wings, jet-black primary wingtips
+//     with white mirrors, hooked yellow beak with red spot) draped in an
+//     accordion-folded crimson-and-azure highway road map!
+// ============================================================================
+
+fn draw_road_atlas(
+    pb: &mut PixelBuffer,
+    center: Vec2,
+    f: Vec2,
+    pose: Pose,
+    anim: f32,
+    flash: f32,
+) {
+    let f = safe_dir(f, Vec2::new(1.0, 0.0));
+    let s = f.perp();
+    let gull = mb2_pal((250, 250, 246), (194, 204, 214), (108, 120, 138));
+    let slate = mb2_pal((136, 162, 192), (72, 92, 120), (32, 42, 60));
+    let tip_blk = mb2_pal((62, 68, 84), (28, 32, 44), (14, 16, 24));
+    let map_pal = mb2_pal((255, 242, 196), (220, 198, 138), (138, 118, 72));
+    let beak = mb2_pal((255, 224, 84), (218, 146, 34), (118, 66, 14));
+    let hwy_red: Rgb = (228, 54, 54);
+    let river_blue: Rgb = (56, 152, 232);
+    let park_green: Rgb = (74, 166, 88);
+
+    if let Pose::Death(t) = pose {
+        let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+        let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 4.5;
+        draw_shadow(pb, center.x + 1.0, center.y + 6.0, 18.0, 7.6, 0.48);
+        // Scattered slate & black gull feathers!
+        for &side in &[-1.0_f32, 1.0] {
+            let w_p = center + s * (side * (6.5 + burst * 6.0)) - Vec2::new(0.0, bounce * 0.7);
+            mb2_draw_poly_tri(
+                pb,
+                w_p - f * 4.0,
+                w_p + f * 3.0,
+                w_p + s * (side * 8.0) - f * 2.0,
+                slate,
+                flash,
+            );
+            plot_px(pb, (w_p + s * (side * 7.0)).x.round() as i32, (w_p + s * (side * 7.0)).y.round() as i32, (255, 255, 255));
+        }
+        // Torn accordion highway road map sprawled flat beside the chest!
+        let mp = center + f * (3.5 + burst * 4.0) - Vec2::new(0.0, bounce * 0.9);
+        draw_rotated_box(pb, mp, f.rotate(0.28), 7.5, 4.8, map_pal.hi, map_pal.mid, map_pal.lo, flash);
+        let ra = mp - f * 5.0 - s * 2.0;
+        let rb = mp + f * 5.0 + s * 2.0;
+        pb.line(ra.x.round() as i32, ra.y.round() as i32, rb.x.round() as i32, rb.y.round() as i32, hwy_red);
+        if t < 0.42 {
+            draw_hurt_burst(pb, center, f, 1.0 - t / 0.42, map_pal.hi);
+        }
+        draw_chest_pointer(pb, center, t);
+        return;
+    }
+
+    let ent_drop = if let Pose::Entrance(t) = pose {
+        (1.0 - t) * (1.0 - t) * -26.0
+    } else {
+        0.0
+    };
+
+    // `sweep`: wing angle from facing `f` (1.35 = broad soaring gull span; 2.05 = cocked far back in Tell; 0.78 = hammered forward in Strike!).
+    // `bank`: lateral lean on each of the 3 V-stamp talon beats (left / tip / right)!
+    let (lunge, lift, sweep, flap_y, bank, talons_out, coil) = match pose {
+        Pose::Entrance(t) => (0.0, ent_drop, 1.20 + (1.0 - t) * 0.45, -(1.0 - t) * 5.0, 0.0, 1.0 - t, 0.0),
+        Pose::Idle => {
+            let beat = (anim * 3.0).sin();
+            (0.0, -2.2 + beat * 1.4, 1.36 + beat * 0.14, -beat * 2.4, beat * 0.6, 0.0, 0.0)
+        }
+        Pose::Approach => {
+            let beat = (anim * 6.4).sin();
+            (beat * 1.8, -3.2 + beat * 1.8, 1.32 + beat * 0.24, -beat * 4.0, (anim * 3.2).cos() * 2.0, 0.25, 0.0)
+        }
+        Pose::Tell(t) => {
+            let c = tell_coil(t);
+            let q = tell_quiver(t);
+            // Stoop wind-up: rises high, sweeps wings dramatically back, flares golden talons!
+            (-3.4 * c + q * 0.8, -5.8 * c, 1.38 + 0.66 * c + q * 0.05, -5.2 * c, q * 1.0, c, c)
+        }
+        Pose::Strike(t) => {
+            // Three-beat V-talon hammer matching left / tip / right stamp cadence!
+            let (b_bank, b_u) = if t < 0.33 {
+                (-3.6, t / 0.33)
+            } else if t < 0.66 {
+                (0.0, (t - 0.33) / 0.33)
+            } else {
+                (3.6, (t - 0.66) / 0.34)
+            };
+            let slam = (b_u * PI).sin();
+            (4.6 * slam + 1.4, -3.8 * (1.0 - slam) + 1.2 * slam, 0.82 + (1.0 - slam) * 0.55, 3.6 * slam, b_bank * slam, 1.0, 1.0)
+        }
+        Pose::Recover(t) => (
+            -1.4,
+            2.2, // grounded & winded!
+            1.12 + (t * 6.0).sin() * 0.08,
+            2.8,
+            (t * 7.0).sin() * 1.2,
+            0.0,
+            0.0,
+        ),
+        Pose::Retreat(t) => (
+            -2.6,
+            -2.2 - (t * 10.0).sin().abs() * 2.4,
+            1.44 + (t * 10.0).sin() * 0.25,
+            -(t * 10.0).sin() * 3.2,
+            0.0,
+            0.0,
+            0.0,
+        ),
+        Pose::Death(_) => unreachable!(),
+    };
+
+    let jolt = hurt_jolt(f, flash, anim);
+    let body = center + f * lunge + s * bank + jolt + Vec2::new(0.0, lift);
+    let sh_s = (1.0 - (-lift).max(0.0) * 0.028).clamp(0.42, 1.12);
+    draw_shadow(pb, center.x + 1.5, center.y + 8.5, 17.5 * sh_s, 6.8 * sh_s, 0.50);
+
+    if let Pose::Entrance(t) = pose {
+        if t >= 0.40 {
+            draw_entrance_ring(pb, center, ((t - 0.40) / 0.60).clamp(0.0, 1.0), map_pal.hi);
+        }
+    }
+
+    // 1. Strike sweeping wind-gust wing smear arcs!
+    if let Pose::Strike(t) = pose {
+        let ang = f.angle();
+        let a = (1.0 - t * 0.4) * 0.72;
+        draw_smear_arc(pb, body, ang - 1.95, ang - sweep, 8.0, 18.0, slate.hi, (255, 255, 250), a);
+        draw_smear_arc(pb, body, ang + sweep, ang + 1.95, 8.0, 18.0, slate.hi, (255, 255, 250), a);
+    }
+
+    // 2. Spread golden-orange predatory talons flaring forward during Tell & Strike!
+    if talons_out > 0.12 {
+        for &side in &[-1.0_f32, 1.0] {
+            let ankle = body + f * (2.6 + talons_out * 3.0) + s * (side * 3.6) + Vec2::new(0.0, 3.8);
+            draw_capsule(pb, body + s * (side * 2.0), ankle, 1.1, beak.hi, beak.mid, beak.lo, flash);
+            for k in -1..=1 {
+                let claw = ankle + f.rotate(k as f32 * 0.45) * (2.4 + talons_out * 1.4) + Vec2::new(0.0, 1.4);
+                draw_tapered_capsule(pb, ankle, claw, 0.9, 0.45, beak.hi, beak.mid, beak.lo, flash);
+            }
+        }
+    }
+
+    // 3. Broad coastal herring-gull WINGS (~36–38 px span!) with slate upper wings,
+    //    jet-black primary tips & crisp white herring-gull wingtip mirrors!
+    for &side in &[-1.0_f32, 1.0] {
+        let root_f = body + f * 2.2 + s * (side * 2.4);
+        let root_b = body - f * 4.4 + s * (side * 2.2);
+        let w_dir = f.rotate(side * sweep);
+        let wrist = body + w_dir * 10.2 + Vec2::new(0.0, flap_y * 0.55);
+        let tip_dir = f.rotate(side * (sweep + 0.42));
+        let tip = wrist + tip_dir * 9.2 + Vec2::new(0.0, flap_y);
+        let trail = wrist - f * 4.2 + s * (side * 1.2) + Vec2::new(0.0, flap_y * 0.6);
+
+        // Inner coastal-slate wing panel!
+        mb2_draw_poly_tri(pb, root_f, root_b, wrist, slate, flash);
+        mb2_draw_poly_tri(pb, root_b, trail, wrist, slate, flash);
+        // Outer swept jet-black primary wingtip feather blade!
+        mb2_draw_poly_tri(pb, wrist, trail, tip, tip_blk, flash);
+        // Crisp white leading-edge feather highlight + iconic white herring-gull tip mirror dots!
+        let lead_mid = (root_f + wrist) * 0.5;
+        pb.line(
+            root_f.x.round() as i32,
+            root_f.y.round() as i32,
+            lead_mid.x.round() as i32,
+            lead_mid.y.round() as i32,
+            apply_flash(gull.hi, flash),
+        );
+        let mirror1 = wrist + (tip - wrist) * 0.68;
+        let mirror2 = wrist + (tip - wrist) * 0.84;
+        plot_px(pb, mirror1.x.round() as i32, mirror1.y.round() as i32, (255, 255, 255));
+        plot_px(pb, mirror2.x.round() as i32, mirror2.y.round() as i32, (255, 255, 255));
+    }
+
+    // 4. Fanned white & black-banded tail feathers behind `-f`!
+    let tail_root = body - f * 5.2;
+    mb2_draw_poly_tri(
+        pb,
+        tail_root,
+        tail_root - f * 6.4 + s * 3.8,
+        tail_root - f * 6.4 - s * 3.8,
+        gull,
+        flash,
+    );
+    draw_rotated_box(pb, tail_root - f * 5.6, s, 3.0, 0.7, tip_blk.hi, tip_blk.mid, tip_blk.lo, flash);
+
+    // 5. Sleek sea-foam ivory gull torso & neck!
+    draw_tapered_capsule(pb, body - f * 5.0, body + f * 5.6, 3.4, 3.0, gull.hi, gull.mid, gull.lo, flash);
+
+    // 6. THE FOLDED HIGHWAY ROAD MAP draped across the gull's back & wings!
+    //    Three crisp accordion-folded cream panels with scarlet highways, azure river & green park!
+    let map_spread = 1.0 + coil * 0.35;
+    let map_c = body - f * 1.4 + Vec2::new(0.0, -1.2 + flap_y * 0.25);
+    let fold_ax = f.rotate(0.18);
+    let fold_s = fold_ax.perp();
+    // Center map panel + two angled accordion side-folds!
+    for &panel_s in &[-1.0_f32, 0.0, 1.0] {
+        let pc = map_c + fold_s * (panel_s * 4.4 * map_spread)
+            + Vec2::new(0.0, panel_s.abs() * flap_y * 0.35);
+        let p_ax = fold_ax.rotate(panel_s * (0.24 - coil * 0.12));
+        let p_pal = if panel_s == 0.0 {
+            map_pal
+        } else {
+            mb2_pal(map_pal.hi, mix(map_pal.mid, map_pal.lo, 0.25), map_pal.lo)
+        };
+        draw_rotated_box(pb, pc, p_ax, 4.4, 2.5, p_pal.hi, p_pal.mid, p_pal.lo, flash);
+    }
+    // Bold scarlet interstate highway zig-zag across the folded map!
+    let r0 = map_c - fold_s * (6.2 * map_spread) - fold_ax * 1.8;
+    let r1 = map_c + fold_ax * 1.6;
+    let r2 = map_c + fold_s * (6.2 * map_spread) - fold_ax * 1.0;
+    pb.line(r0.x.round() as i32, r0.y.round() as i32, r1.x.round() as i32, r1.y.round() as i32, apply_flash(hwy_red, flash));
+    pb.line(r1.x.round() as i32, r1.y.round() as i32, r2.x.round() as i32, r2.y.round() as i32, apply_flash(hwy_red, flash));
+    // Azure river line & green park blotch so it reads unmistakably as a road atlas!
+    let rv0 = map_c - fold_s * (4.2 * map_spread) + fold_ax * 2.2;
+    let rv1 = map_c + fold_s * (3.6 * map_spread) + fold_ax * 2.6;
+    pb.line(rv0.x.round() as i32, rv0.y.round() as i32, rv1.x.round() as i32, rv1.y.round() as i32, apply_flash(river_blue, flash));
+    let pk = map_c + fold_s * (3.8 * map_spread) - fold_ax * 2.2;
+    plot_px(pb, pk.x.round() as i32, pk.y.round() as i32, apply_flash(park_green, flash));
+    plot_px(pb, pk.x.round() as i32 + 1, pk.y.round() as i32, apply_flash(park_green, flash));
+
+    // 7. Fierce gull head, hooked maritime-gold beak with iconic red gonys spot, & sharp eyes!
+    let head = body + f * 6.8 + Vec2::new(0.0, -1.6 - coil * 0.8);
+    draw_shaded_disc(pb, head.x, head.y, 3.2, gull.hi, gull.mid, gull.lo, flash);
+    let beak_open = matches!(pose, Pose::Tell(_) | Pose::Strike(_) | Pose::Recover(_));
+    let beak_tip = head + f * 6.2 + Vec2::new(0.0, if beak_open { -0.8 } else { 0.4 });
+    draw_tapered_capsule(pb, head + f * 2.2, beak_tip, 1.5, 0.55, beak.hi, beak.mid, beak.lo, flash);
+    if beak_open {
+        let lower_tip = head + f * 5.2 + Vec2::new(0.0, 2.0);
+        draw_tapered_capsule(pb, head + f * 2.0 + Vec2::new(0.0, 0.8), lower_tip, 1.1, 0.45, beak.mid, beak.lo, INK, flash);
+        plot_px(pb, (head + f * 4.2 + Vec2::new(0.0, 1.6)).x.round() as i32, (head + f * 4.2 + Vec2::new(0.0, 1.6)).y.round() as i32, hwy_red);
+    } else {
+        // Signature crimson herring-gull spot on the lower bill!
+        let spot = head + f * 4.6 + Vec2::new(0.0, 0.9);
+        plot_px(pb, spot.x.round() as i32, spot.y.round() as i32, hwy_red);
+    }
+    let expr = eye_expr_for(pose, anim, flash);
+    let eye_col = match pose {
+        Pose::Tell(_) => (255, 232, 92),
+        Pose::Strike(_) => (255, 118, 72),
+        Pose::Recover(_) => (148, 255, 206),
+        _ => (255, 238, 128),
+    };
+    draw_eye(pb, head + f * 0.8 + s * 1.6 + Vec2::new(0.0, -0.8), 1.4, eye_col, INK, f, expr, flash);
+    draw_eye(pb, head + f * 0.8 - s * 1.6 + Vec2::new(0.0, -0.8), 1.4, eye_col, INK, f, expr, flash);
+
+    if let Pose::Tell(t) = pose {
+        mb2_tell_pip(pb, head + Vec2::new(0.0, -11.5), t);
+    }
+    if let Pose::Recover(t) = pose {
+        draw_dizzy_stars(pb, head + Vec2::new(0.0, -9.0), 7.6, t);
+        draw_recover_beacon(pb, map_c, t);
+    }
+    draw_hurt_burst(pb, body, f, flash, map_pal.hi);
 }
 
 // ============================================================================

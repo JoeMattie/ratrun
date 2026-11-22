@@ -29,7 +29,9 @@ mod tests;
 
 #[allow(unused_imports)] // Artist-facing blend modes.
 pub use engine::Blend;
-use engine::PointLight;
+#[cfg(test)]
+use engine::{ambient_level, zone_gain, Curve, AMBIENT_FLOOR, MIN_GAIN};
+use engine::{PointLight, TAIL_REACH};
 pub use engine::{
     Falloff, Flicker, LayerMask, Light, LightMap, LightShape, LightingMode, ShadowColor,
     ShadowSoftness,

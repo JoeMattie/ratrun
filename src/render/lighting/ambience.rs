@@ -211,6 +211,15 @@ fn paired_light(emit: AmbientEmitter, spec: Recipe, time: f32) -> Light {
     light.casts_shadow = matches!(emit.kind, EmitterKind::Fire | EmitterKind::Cable);
     light.shadow_softness = ShadowSoftness::Soft;
     light.flicker = Some(phase);
+    // Embers, a pilot flame and a sparking cable are point sources: the soft
+    // tail is what makes them pools rather than dots. The haze kinds (steam,
+    // fog, dust) are already broad and stay on their own curve.
+    if matches!(
+        emit.kind,
+        EmitterKind::Fire | EmitterKind::Pilot | EmitterKind::Cable
+    ) {
+        light.falloff = super::Falloff::Small;
+    }
     light
 }
 

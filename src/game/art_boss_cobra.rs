@@ -612,9 +612,11 @@ pub fn hood_pos(view: &CobraView) -> Vec2 {
 pub fn hood_open(view: &CobraView) -> f32 {
     let idle = 0.28 + 0.08 * (view.anim * 2.1).sin();
     match view.state {
-        CobraState::HoodTell => smoothstep(view.progress / 0.45),
+        // Flared right from the start of the tell so both the combat read and
+        // the library boss card show the king's signature hood immediately.
+        CobraState::HoodTell => 0.74 + 0.26 * smoothstep(view.progress / 0.45),
         CobraState::Strike | CobraState::FangsStuck => 1.0,
-        CobraState::ReStrikeTell => smoothstep(view.progress / 0.5),
+        CobraState::ReStrikeTell => 0.58 + 0.42 * smoothstep(view.progress / 0.5),
         CobraState::SwayTell => 0.55 + 0.45 * sway_phase(view).abs(),
         CobraState::Rise => smoothstep(view.progress / 0.35) * (1.0 - smoothstep((view.progress - 0.8) / 0.2) * 0.2),
         CobraState::VenomTell | CobraState::VenomSpit => 0.70,
@@ -1559,20 +1561,22 @@ fn draw_body(pb: &mut PixelBuffer, pts: &[Vec2], cam: Vec2, f: Vec2, hit: f32, d
         if !on_screen(pb, s, r + 3.0) {
             continue;
         }
+        // Crisp dark exterior outline so the coiled body survives dark floors and downscale.
+        fill_disc(pb, s, r + 1.1, (8, 10, 8), 0.85);
         // Segments: the banding is the scale row, and it costs nothing.
         let seg = ((i as f32 * 0.55 + 0.4).sin() * 0.5 + 0.5).powf(1.6);
-        let col = shade3(HIDE_SH, HIDE_MID, HIDE_HI, 0.32 + 0.5 * seg);
+        let col = shade3(HIDE_SH, HIDE_MID, HIDE_HI, 0.34 + 0.52 * seg);
         fill_disc(pb, s, r, apply_hit(col, hit), 1.0);
         // The spine's shadow: a soft dark line down the middle.
         fill_disc(pb, s + Vec2::new(0.0, r * 0.28), r * 0.52, apply_hit(HIDE_SH, hit), 0.45);
         // Dorsal highlight, up and to the left of the light.
-        if r > 2.6 {
+        if r > 2.4 {
             fill_disc(
                 pb,
                 s + Vec2::new(-r * 0.34, -r * 0.40),
-                r * 0.30,
+                r * 0.34,
                 apply_hit(HIDE_HI, hit),
-                0.55,
+                0.78,
             );
         }
         // A dark saddle every fifth segment, and a pale flank scale between.
@@ -1608,38 +1612,48 @@ fn draw_head(
 
     // ---- the hood ---------------------------------------------------------
     if open > 0.06 {
-        let hx = 4.0 + HOOD_RADIUS * 1.02 * open;
-        let hy = 3.4 + HOOD_RADIUS * 0.78 * open;
+        // Broad flared hood spanning wide ACROSS the neck (`hy > hx`) so the
+        // classic cobra silhouette is unmistakable even at library card scale!
+        let hx = 3.4 + HOOD_RADIUS * 0.78 * open;
+        let hy = 4.6 + HOOD_RADIUS * 1.15 * open;
+        // Crisp dark exterior outline framing the flared hood.
+        ellipse(pb, hood_c, hx + 1.35, hy + 1.35, f, (8, 10, 8), 0.92);
         ellipse(pb, hood_c, hx, hy, f, apply_hit(HOOD_SH, hit), 1.0);
         ellipse(
             pb,
-            hood_c - f * 0.8 - p * 0.4,
-            hx * 0.92,
-            hy * 0.90,
+            hood_c - f * 0.5 - p * 0.4,
+            hx * 0.90,
+            hy * 0.92,
             f,
             apply_hit(HOOD_MID, hit),
             1.0,
         );
-        // The light catching the rim.
+        // Sunlit top-left rim bevel catching the flared hood wings!
         ellipse(
             pb,
-            hood_c - f * 1.4 - p * 1.0,
-            hx * 0.80,
-            hy * 0.72,
+            hood_c - f * 1.0 - p * 1.4,
+            hx * 0.76,
+            hy * 0.80,
             f,
             apply_hit(HOOD_HI, hit),
-            0.22,
+            0.58,
         );
-        // Three chevrons opening forward, the king's own marking.
+        // Pale belly-gold rim lining along the flaring wing edges.
+        for s in [-1.0f32, 1.0] {
+            let rim_a = hood_c + f * (hx * 0.35) + p * (hy * 0.78 * s);
+            let rim_b = hood_c - f * (hx * 0.45) + p * (hy * 0.72 * s);
+            line_solid(pb, rim_a, rim_b, apply_hit(BELLY, hit), if s < 0.0 { 0.78 } else { 0.42 });
+        }
+        // Three dark chevrons opening forward, the king's own marking.
         for k in 0..3 {
             let t = k as f32 / 3.0;
-            let back = hood_c - f * (hx * (0.15 + 0.42 * t));
-            let w = hy * (0.82 - 0.22 * t);
-            line_solid(pb, back - p * w, back + f * (hx * 0.28), apply_hit(HOOD_SH, hit), 0.55);
-            line_solid(pb, back + p * w, back + f * (hx * 0.28), apply_hit(HOOD_SH, hit), 0.55);
+            let back = hood_c - f * (hx * (0.12 + 0.38 * t));
+            let w = hy * (0.82 - 0.20 * t);
+            line_solid(pb, back - p * w, back + f * (hx * 0.28), apply_hit(HOOD_SH, hit), 0.65);
+            line_solid(pb, back + p * w, back + f * (hx * 0.28), apply_hit(HOOD_SH, hit), 0.65);
         }
         // ---- the spectacle mark (the fight's one weak point) --------------
-        let mark = 0.30 + 0.70 * open;
+        let mark = 0.40 + 0.60 * open;
         let weak = weak_point(view).is_some();
         let ring_col = if weak {
             let pulse = 0.6 + 0.4 * (view.anim * 6.0).sin().abs();
@@ -1647,31 +1661,44 @@ fn draw_head(
         } else {
             BELLY
         };
-        let mark_c = hood_c + f * 0.4;
-        ring(pb, mark_c, 4.6 * mark, apply_hit(ring_col, hit), 0.80, 1.0);
-        ring(pb, mark_c, 2.5 * mark, apply_hit(ring_col, hit), 0.55, 1.0);
-        line_solid(pb, mark_c - p * 4.6 * mark, mark_c + p * 4.6 * mark, apply_hit(ring_col, hit), 0.5);
+        let mark_c = hood_c - f * 0.3;
+        let spec_off = hy * 0.34 * mark;
+        let spec_r = (2.8 * mark).max(1.6);
+        // Classic spectacled twin-ocelli mark bridged across the dorsal hood!
+        line_solid(
+            pb,
+            mark_c - p * spec_off,
+            mark_c + p * spec_off,
+            apply_hit(ring_col, hit),
+            0.92,
+        );
+        for s in [-1.0f32, 1.0] {
+            let oc = mark_c + p * (spec_off * s);
+            fill_disc(pb, oc, spec_r + 0.5, apply_hit(ring_col, hit), 0.94);
+            fill_disc(pb, oc, (spec_r - 1.1).max(0.7), apply_hit(SPEC_SH, hit), 0.95);
+        }
         if weak {
             let halo = 6.8 + 1.2 * (view.anim * 5.0).sin();
-            ring(pb, mark_c, halo, WEAK, 0.55, 1.0);
-            line_solid(pb, mark_c + f * halo, mark_c + f * (halo + 3.0), WEAK, 0.7);
-            line_solid(pb, mark_c - f * halo, mark_c - f * (halo + 3.0), WEAK, 0.7);
+            ring(pb, mark_c, halo, WEAK, 0.65, 1.1);
+            line_solid(pb, mark_c + f * halo, mark_c + f * (halo + 3.0), WEAK, 0.78);
+            line_solid(pb, mark_c - f * halo, mark_c - f * (halo + 3.0), WEAK, 0.78);
         }
     }
 
     // ---- the skull --------------------------------------------------------
     let rx = HEAD_RADIUS * 1.00;
     let ry = HEAD_RADIUS * 0.80;
+    ellipse(pb, head, rx + 1.2, ry + 1.2, f, (8, 10, 8), 0.92);
     ellipse(pb, head, rx, ry, f, apply_hit(HIDE_SH, hit), 1.0);
     ellipse(pb, head - f * 0.6 - p * 0.4, rx * 0.90, ry * 0.88, f, apply_hit(HIDE_MID, hit), 1.0);
     ellipse(
         pb,
         head - f * 2.0 - p * 1.4,
-        rx * 0.60,
-        ry * 0.55,
+        rx * 0.62,
+        ry * 0.56,
         f,
         apply_hit(HIDE_HI, hit),
-        0.22,
+        0.52,
     );
     // The snout: a blunt wedge of a king's head, wider than a viper's.
     let tip = head + f * (HEAD_RADIUS * 1.18);

@@ -245,30 +245,30 @@ pub const TAIL_WHIP: Icon = {
     }
 };
 
-/// `WeaponKind::SpikedTail` — a steel tail rising out of the floor into a knob
-/// of bone-white spikes (the lash's "spikes out, then the crack").
+/// `WeaponKind::SpikedTail` — a curled steel rat tail bristling with bone-white
+/// spikes along its outer spine (the lash's "spikes out, then the crack").
 pub const SPIKED_TAIL: Icon = {
     const PAL: &[(u8, Rgb)] = &[
         (b'W', (255, 255, 255)), // spike tip, white-hot
         (b'S', (206, 214, 226)), // steel body (WeaponKind::SpikedTail)
         (b'G', (150, 160, 178)), // steel shade
-        (b'D', (92, 100, 118)),  // shadow at the rump
+        (b'D', (84, 92, 112)),   // dark iron underside
     ];
     Icon {
         large: grid8(
             [
-                b"....W.W.",
-                b"...WSWSW",
-                b"..SSSSSS",
-                b"..GSSSG.",
-                b".SSSG...",
-                b"SSSG....",
-                b"DSG.....",
-                b"DG......",
+                b"..W..W..",
+                b".WSWSWS.",
+                b"WSSGGSSW",
+                b".G...DS.",
+                b".....GSW",
+                b"..W.SSG.",
+                b"..DSSG..",
+                b"..DD....",
             ],
             PAL,
         ),
-        small: grid4([b"..SW", b".SSW", b"SSS.", b"DG.."], PAL),
+        small: grid4([b".W.W", b"WSSG", b"..SW", b".DG."], PAL),
         accent: (206, 214, 226),
     }
 };
@@ -581,30 +581,30 @@ pub const ACID_RAIN: Icon = {
     }
 };
 
-/// Upcoming weapon: **Hantavirus** — crimson-violet spiked pathogen orb.
+/// `WeaponKind::Hantavirus` — symmetric crimson-violet spiked pathogen orb.
 pub const HANTAVIRUS: Icon = {
     const PAL: &[(u8, Rgb)] = &[
         (b'Y', (252, 228, 72)),  // biohazard yellow spike tip
         (b'O', (186, 146, 26)),  // spike stalk
-        (b'W', (255, 186, 214)), // glowing nucleus
-        (b'P', (218, 48, 114)),  // viral capsid crimson-magenta
+        (b'W', (255, 198, 222)), // glowing nucleus
+        (b'P', (222, 48, 116)),  // viral capsid crimson-magenta
         (b'D', (134, 22, 68)),   // deep capsid shade
     ];
     Icon {
         large: grid8(
             [
-                b"Y..Y...Y",
-                b".O.P..O.",
-                b"..PWPP..",
-                b"Y.PWPP.Y",
-                b"..PPDD..",
-                b".O.PD.O.",
-                b"Y..O...Y",
-                b"...Y....",
+                b"...YY...",
+                b"Y..OO..Y",
+                b".OPWWPO.",
+                b"YOWPPWOY",
+                b"YOPPPDOY",
+                b".OPDDPO.",
+                b"Y..DD..Y",
+                b"...YY...",
             ],
             PAL,
         ),
-        small: grid4([b"Y..Y", b".WP.", b".PD.", b"Y..Y"], PAL),
+        small: grid4([b".Y.Y", b"YWP.", b".PDY", b"Y.Y."], PAL),
         accent: (224, 68, 128),
     }
 };
@@ -665,30 +665,31 @@ pub const SUPER_DASH: Icon = {
     }
 };
 
-/// Upcoming passive: **Dash Cooldown** — gilded cyan-sand hourglass.
+/// `PassiveKind::SpringHeel` ("Spring Heel" / dash cooldown) — coiled brass
+/// heel-spring launching a bright cyan rebound spark.
 pub const DASH_COOLDOWN: Icon = {
     const PAL: &[(u8, Rgb)] = &[
-        (b'G', (248, 206, 76)),  // bright gold cap
-        (b'B', (174, 118, 24)),  // bronze rim
-        (b'W', (226, 255, 255)), // sparkling cyan sand
-        (b'C', (92, 232, 255)),  // cyan time sand
-        (b'S', (54, 88, 106)),   // glass frame
+        (b'G', (248, 206, 76)),  // lit brass coil
+        (b'B', (174, 118, 24)),  // shaded back coil
+        (b'W', (232, 255, 255)), // white-cyan launch glint
+        (b'C', (92, 232, 255)),  // cyan dash spark
+        (b'D', (78, 96, 112)),   // steel heel base plate
     ];
     Icon {
         large: grid8(
             [
-                b".GGGGGG.",
-                b".SWCCCS.",
-                b"..SWCS..",
-                b"...WC...",
-                b"...CW...",
-                b"..SCCS..",
-                b".SCCWCS.",
-                b".BBBBBB.",
+                b"..C.WC..",
+                b"..GGGG..",
+                b".B...GG.",
+                b".GGGG...",
+                b"...BBGG.",
+                b".GGGG...",
+                b".B...BB.",
+                b".DDDDDD.",
             ],
             PAL,
         ),
-        small: grid4([b"GGGG", b".WC.", b".CW.", b"BBBB"], PAL),
+        small: grid4([b".CW.", b"GGG.", b".BGG", b"DDD."], PAL),
         accent: (116, 224, 248),
     }
 };
@@ -780,7 +781,7 @@ pub const SECOND_SCENT: Icon = {
     }
 };
 
-/// `PassiveKind::LensCap` — cut green-glass bottle-bottom magnifying lens.
+/// `PassiveKind::LensCap` — dark-rimmed cap with grip tab over gleaming green bottle-glass lens.
 pub const LENS_CAP: Icon = {
     const PAL: &[(u8, Rgb)] = &[
         (b'W', (242, 255, 255)), // crisp glass specular glare
@@ -788,22 +789,23 @@ pub const LENS_CAP: Icon = {
         (b'L', (122, 242, 212)), // sunlit seafoam bottle glass (LightCyan/LightGreen in 16c)
         (b'G', (42, 168, 146)),  // mid bottle-green glass (Cyan/Green in 16c)
         (b'D', (22, 92, 92)),    // thick bottle-base rim shadow
+        (b'K', (52, 64, 76)),    // dark rubber cap housing & grip tab
     ];
     Icon {
         large: grid8(
             [
-                b"..SSSS..",
-                b".SLLGGS.",
-                b"SLWWLGDD",
-                b"SLWLLGDD",
-                b"SLLGGLDD",
-                b".DGGWDD.",
-                b"..DDDD..",
-                b"........",
+                b"..KKKK..",
+                b".KSSSSK.",
+                b"KSWWLGKK",
+                b"KSWLLGKK",
+                b"KSLGGLDK",
+                b".KGGWDK.",
+                b"..KKKKK.",
+                b"......K.",
             ],
             PAL,
         ),
-        small: grid4([b".SS.", b"SWLD", b"SLGD", b".DD."], PAL),
+        small: grid4([b".KK.", b"KWLD", b"KLGK", b".KKK"], PAL),
         accent: (122, 232, 214),
     }
 };
@@ -918,102 +920,105 @@ pub const PLACEHOLDER: Icon = {
 };
 
 // ============================================================================
-// Evolutions (12)
+// Evolutions (13)
 // ============================================================================
 //
 // One silhouette per evolution, in the base weapon's colour family. An evolved
 // weapon used to wear its base icon inside a frame; at HUD size that frame was
 // four corner pixels, so the rack could not say which weapons had evolved.
 
-/// Milk Teeth (Gnaw) — two baby teeth in a gum and a third out on its thread.
+/// Milk Teeth (Gnaw) — two baby teeth in an arched gum and a third dangling on its thread.
 const MILK_TEETH: Icon = {
     const PAL: &[(u8, Rgb)] = &[
-        (b'P', (236, 128, 150)), // gum
+        (b'P', (242, 108, 136)), // gum
         (b'W', (255, 254, 240)), // enamel glint
-        (b'I', (232, 218, 180)), // ivory
-        (b'T', (150, 196, 214)), // the thread
+        (b'I', (236, 222, 180)), // ivory
+        (b'S', (184, 164, 124)), // tooth shade
+        (b'T', (104, 224, 246)), // the taut thread
     ];
     Icon {
         large: grid8(
             [
-                b"PPPPPPPP",
-                b"PWIPWIPP",
-                b".WI.WI..",
-                b".WI.WI.T",
-                b"..I..I.T",
-                b"......T.",
-                b"..WI.T..",
-                b"..WIT...",
+                b".PPPPPP.",
+                b"PWIPPWIP",
+                b".WI..WI.",
+                b".IS..IS.",
+                b".......T",
+                b"..WI..T.",
+                b"..WIST..",
+                b"...IS...",
             ],
             PAL,
         ),
-        small: grid4([b"PPPP", b"W.W.", b"I.IT", b"..WT"], PAL),
+        small: grid4([b".PP.", b"W.W.", b"I.IT", b".WT."], PAL),
         accent: (244, 232, 200),
     }
 };
 
-/// Fondue Fork (Cheese Spray) — a two-pronged fork run through a melting lump of cheese.
+/// Fondue Fork (Cheese Spray) — twin gleaming steel tines piercing a melting cheese cube.
 const FONDUE_FORK: Icon = {
     const PAL: &[(u8, Rgb)] = &[
-        (b'S', (206, 214, 226)), // steel
-        (b'K', (110, 122, 142)), // steel shade
-        (b'H', (255, 244, 170)), // hot cheese
-        (b'Y', (255, 206, 58)), // cheese
-        (b'O', (196, 124, 24)), // cheese rind
+        (b'W', (252, 254, 255)), // steel tine glint
+        (b'S', (206, 216, 230)), // steel
+        (b'K', (118, 130, 150)), // steel shade
+        (b'H', (255, 246, 174)), // hot cheese highlight
+        (b'Y', (255, 206, 58)),  // melted cheese
+        (b'O', (196, 124, 24)),  // cheese rind
+        (b'M', (134, 68, 36)),   // wooden handle
     ];
     Icon {
         large: grid8(
             [
-                b".S...K..",
-                b".S...K..",
-                b".SHYYK..",
-                b".SSSKK..",
-                b"HYYSYYO.",
-                b".YYSYO..",
-                b"...S.O..",
-                b"...K....",
+                b"..W..W..",
+                b"..S..S..",
+                b".HSYYSO.",
+                b".HYYYSY.",
+                b"..YYYYO.",
+                b"..YSSO..",
+                b"...SK...",
+                b"...MM...",
             ],
             PAL,
         ),
-        small: grid4([b"S.K.", b"SHK.", b"YSYO", b".K.."], PAL),
+        small: grid4([b".S.S", b"HYYO", b".SS.", b"..M."], PAL),
         accent: (255, 206, 58),
     }
 };
 
-/// Echo Chamber (Squeak Nova) — a squeak boxed in by two walls.
+/// Echo Chamber (Squeak Nova) — a pulsing squeak resonating between two thick chamber walls.
 const ECHO_CHAMBER: Icon = {
     const PAL: &[(u8, Rgb)] = &[
-        (b'L', (226, 196, 255)), // lit wall
-        (b'V', (176, 104, 248)), // wall
-        (b'D', (92, 44, 160)), // shaded wall
-        (b'W', (255, 255, 255)), // the squeak
+        (b'L', (228, 196, 255)), // lit wall
+        (b'V', (176, 98, 248)),  // wall
+        (b'D', (96, 42, 168)),   // shaded wall
+        (b'W', (255, 255, 255)), // the bouncing squeak
     ];
     Icon {
         large: grid8(
             [
-                b"LLLLLLLV",
-                b"L......D",
-                b"L.VVVV.D",
-                b"L.VWWD.D",
-                b"L.VWWD.D",
-                b"L.VDDD.D",
-                b"L......D",
-                b"VDDDDDDD",
+                b".L....D.",
+                b"LL....DD",
+                b"LV.WW.VD",
+                b"LVW..WVD",
+                b"LVW..WVD",
+                b"LV.WW.VD",
+                b"VD....DD",
+                b".D....D.",
             ],
             PAL,
         ),
-        small: grid4([b"LLLV", b"LWWD", b"LWWD", b"VDDD"], PAL),
+        small: grid4([b"L..V", b"LWWD", b"LWWD", b"V..D"], PAL),
         accent: (196, 140, 255),
     }
 };
 
-/// Fairy Ring (Spore Orbit) — four mint mushrooms round an empty circle.
+/// Fairy Ring (Spore Orbit) — four glowing mint mushrooms round an empty circle.
 const FAIRY_RING: Icon = {
     const PAL: &[(u8, Rgb)] = &[
         (b'W', (232, 255, 244)), // cap glint
-        (b'M', (108, 248, 172)), // cap
-        (b'G', (40, 150, 98)), // cap shade
-        (b'S', (206, 232, 218)), // stem
+        (b'M', (96, 248, 164)),  // cap
+        (b'G', (36, 154, 96)),   // cap shade
+        (b'S', (248, 240, 214)), // warm ivory stem
     ];
     Icon {
         large: grid8(
@@ -1029,47 +1034,48 @@ const FAIRY_RING: Icon = {
             ],
             PAL,
         ),
-        small: grid4([b".WM.", b"M..M", b"S..S", b".MG."], PAL),
+        small: grid4([b".WM.", b"M.SM", b"S..S", b".MG."], PAL),
         accent: (108, 248, 172),
     }
 };
 
-/// Ratchet Tail (Tail Whip) — a toothed ratchet wheel with the tail wound off it.
+/// Ratchet Tail (Tail Whip) — a toothed steel ratchet wheel with a hot-pink tail snapping off it.
 const RATCHET_TAIL: Icon = {
     const PAL: &[(u8, Rgb)] = &[
-        (b'W', (240, 244, 250)), // tooth glint
-        (b'S', (170, 182, 200)), // steel
-        (b'D', (52, 60, 78)), // hub
-        (b'P', (248, 150, 172)), // tail
-        (b'R', (190, 84, 112)), // tail shade
+        (b'W', (246, 250, 255)), // tooth glint
+        (b'S', (174, 188, 208)), // steel
+        (b'D', (52, 60, 80)),    // hub
+        (b'P', (255, 108, 178)), // hot-pink tail
+        (b'R', (196, 46, 118)),  // tail shade
     ];
     Icon {
         large: grid8(
             [
                 b"..W.S...",
-                b".WSSSS..",
-                b"WSDDSSS.",
+                b".WSSSW..",
+                b"WSDDDSW.",
                 b".SD.DS..",
-                b"SSDDSSSP",
+                b"WSDDDSSP",
                 b".SSSSS.P",
                 b"..S.S.PR",
                 b"....PPR.",
             ],
             PAL,
         ),
-        small: grid4([b"W.S.", b"SDSP", b"S.SP", b".PR."], PAL),
+        small: grid4([b".WS.", b"WDSP", b".SSP", b"..PR"], PAL),
         accent: (200, 208, 222),
     }
 };
 
-/// Drain Cleaner (Acid Spit) — a capped bottle of something green.
+/// Drain Cleaner (Acid Spit) — a capped caustic bottle wearing a yellow hazard diamond.
 const DRAIN_CLEANER: Icon = {
     const PAL: &[(u8, Rgb)] = &[
-        (b'K', (60, 92, 200)), // cap
+        (b'K', (64, 104, 218)),  // cap
         (b'W', (236, 255, 214)), // glass glint
-        (b'A', (196, 255, 92)), // acid
-        (b'G', (96, 200, 48)), // acid shade
-        (b'D', (36, 96, 30)), // bottle shade
+        (b'A', (196, 255, 92)),  // acid
+        (b'G', (88, 198, 46)),   // acid shade
+        (b'D', (32, 92, 28)),    // bottle shade
+        (b'Y', (255, 228, 76)),  // hazard warning label
     ];
     Icon {
         large: grid8(
@@ -1078,25 +1084,25 @@ const DRAIN_CLEANER: Icon = {
                 b"...KK...",
                 b"..WGGD..",
                 b".WGGGGD.",
-                b".WAAAGD.",
-                b".WAAAGD.",
+                b".WAGYGD.",
+                b".WAYYAD.",
                 b".WGGGGD.",
                 b"..DDDD..",
             ],
             PAL,
         ),
-        small: grid4([b".KK.", b"WGGD", b"WAAD", b".DD."], PAL),
+        small: grid4([b".KK.", b"WGGD", b"WAYD", b".DD."], PAL),
         accent: (150, 236, 70),
     }
 };
 
-/// Flywheel (Tail Thrash) — a heavy spoked wheel, rim hot.
+/// Flywheel (Tail Thrash) — a heavy spoked iron wheel with a blazing hot rim.
 const FLYWHEEL: Icon = {
     const PAL: &[(u8, Rgb)] = &[
-        (b'W', (255, 246, 214)), // hub
-        (b'O', (255, 170, 72)), // rim
-        (b'F', (206, 96, 30)), // rim shade
-        (b'S', (140, 110, 96)), // spokes
+        (b'W', (255, 248, 216)), // white-hot hub
+        (b'O', (255, 174, 70)),  // blazing rim
+        (b'F', (208, 92, 26)),   // rim shade
+        (b'S', (80, 56, 50)),    // dark iron spokes
     ];
     Icon {
         large: grid8(
@@ -1112,7 +1118,7 @@ const FLYWHEEL: Icon = {
             ],
             PAL,
         ),
-        small: grid4([b".OO.", b"OWWF", b"OWWF", b".FF."], PAL),
+        small: grid4([b".OO.", b"OSWF", b"OWSF", b".FF."], PAL),
         accent: (255, 170, 72),
     }
 };
@@ -1144,13 +1150,13 @@ const ROLL_CALL: Icon = {
     }
 };
 
-/// Downspout (Acid Rain) — a pipe elbow letting go of what it carries.
+/// Downspout (Acid Rain) — a steel pipe elbow letting go of bright lime acid drops.
 const DOWNSPOUT: Icon = {
     const PAL: &[(u8, Rgb)] = &[
         (b'L', (206, 216, 226)), // lit pipe
         (b'S', (120, 134, 150)), // pipe
-        (b'D', (58, 68, 84)), // pipe shade
-        (b'A', (170, 255, 72)), // acid
+        (b'D', (58, 68, 84)),    // pipe shade
+        (b'A', (170, 255, 72)),  // acid
     ];
     Icon {
         large: grid8(
@@ -1166,19 +1172,19 @@ const DOWNSPOUT: Icon = {
             ],
             PAL,
         ),
-        small: grid4([b"LLL.", b"DDSL", b".DSL", b"..A."], PAL),
+        small: grid4([b".LL.", b"LDSL", b"..SL", b".AA."], PAL),
         accent: (170, 255, 72),
     }
 };
 
-/// Dead Letter (Hantavirus) — a sealed envelope; the seal is the wrong colour.
+/// Dead Letter (Hantavirus) — a wide sealed envelope; the wax seal is the wrong colour.
 const DEAD_LETTER: Icon = {
     const PAL: &[(u8, Rgb)] = &[
         (b'W', (246, 240, 226)), // paper
         (b'D', (176, 164, 142)), // fold
-        (b'S', (120, 108, 92)), // paper shade
-        (b'P', (232, 78, 204)), // the seal
-        (b'Y', (255, 226, 96)), // seal glint
+        (b'S', (120, 108, 92)),  // paper shade
+        (b'P', (232, 78, 204)),  // the seal
+        (b'Y', (255, 226, 96)),  // seal glint
     ];
     Icon {
         large: grid8(
@@ -1187,14 +1193,14 @@ const DEAD_LETTER: Icon = {
                 b"WWWWWWWW",
                 b"WDWWWWDW",
                 b"WWDWWDWW",
-                b"WWWYPWWW",
+                b"WWWYPWWS",
                 b"WWWPPWWS",
-                b"WWWWWWWS",
                 b"SSSSSSSS",
+                b"........",
             ],
             PAL,
         ),
-        small: grid4([b"WDDW", b"WYPW", b"WPPS", b"SSSS"], PAL),
+        small: grid4([b"....", b"WDDW", b"WYPW", b"SSSS"], PAL),
         accent: (232, 78, 204),
     }
 };
@@ -1254,30 +1260,31 @@ const RIPCORD: Icon = {
     }
 };
 
-/// Barbed Wire (Spiked Tail) — a taut rust-red strand strung with steel barbs.
+/// Barbed Wire (Spiked Tail) — a taut twisted rust-iron strand knotted with two
+/// razor-white steel X-barbs.
 const BARBED_WIRE: Icon = {
     const PAL: &[(u8, Rgb)] = &[
-        (b'W', (255, 255, 255)), // barb tip
-        (b'S', (206, 214, 226)), // barb steel
-        (b'R', (214, 96, 62)),   // wire
-        (b'D', (128, 52, 40)),   // wire shade
+        (b'W', (255, 255, 255)), // razor barb tip
+        (b'S', (198, 214, 232)), // steel barb wrap
+        (b'R', (216, 78, 52)),   // lit rust-red wire strand
+        (b'D', (82, 34, 28)),    // dark iron-rust wire shadow
     ];
     Icon {
         large: grid8(
             [
-                b".W....W.",
-                b".S.W..S.",
-                b"RRDSRRDR",
-                b".S.S..S.",
-                b".W..W.W.",
-                b"...WS...",
-                b"DRRSRRDR",
-                b"..W.S...",
+                b".W.W....",
+                b"..S..W.W",
+                b"RRSR..S.",
+                b"DDSDRRSR",
+                b"..S.DDSD",
+                b".W.W..S.",
+                b".....W.W",
+                b"........",
             ],
             PAL,
         ),
-        small: grid4([b"W.W.", b"RSRS", b".W.W", b"DRSR"], PAL),
-        accent: (214, 96, 62),
+        small: grid4([b".W..", b"RSSW", b"WDDR", b"..W."], PAL),
+        accent: (216, 78, 52),
     }
 };
 
@@ -1290,7 +1297,7 @@ const BARBED_WIRE: Icon = {
 // left two pairs (Double Lid / Copper Nerves, Blackboard Belly / Long Fingers)
 // pixel-identical.
 
-/// Glass Incisors — two long glass teeth hanging from a pink gum.
+/// Glass Incisors — two long translucent glass teeth hanging from a pink gum.
 const GLASS_INCISORS: Icon = {
     const PAL: &[(u8, Rgb)] = &[
         (b'P', (236, 128, 150)), // gum
@@ -1301,104 +1308,105 @@ const GLASS_INCISORS: Icon = {
     Icon {
         large: grid8(
             [
-                b"PPPPPPPP",
+                b".PPPPPP.",
+                b"PWCDPWCD",
                 b".WCD.WCD",
-                b".WCD.WCD",
-                b".WCD.WCD",
+                b".CWD.CWD",
                 b".WCD.WCD",
                 b".WC..WC.",
-                b"..C...C.",
+                b"..W...W.",
                 b"........",
             ],
             PAL,
         ),
-        small: grid4([b"PPPP", b"WC.W", b"WC.W", b".C.C"], PAL),
+        small: grid4([b"PPPP", b"WCWC", b"CDCD", b".W.W"], PAL),
         accent: (132, 214, 236),
     }
 };
 
-/// Boiler Heart — a furnace-orange heart with a dark grate and a wisp of steam.
+/// Boiler Heart — a furnace-orange heart with glowing coals behind an iron grate and steam.
 const BOILER_HEART: Icon = {
     const PAL: &[(u8, Rgb)] = &[
         (b'W', (236, 240, 244)), // steam
-        (b'Y', (255, 226, 120)), // hot glint
+        (b'Y', (255, 228, 120)), // hot furnace coals & glint
         (b'O', (244, 138, 48)),  // boiler body
         (b'R', (172, 70, 28)),   // shaded side
-        (b'D', (48, 24, 20)),    // grate slot
+        (b'D', (44, 22, 20)),    // iron grate bar
     ];
     Icon {
         large: grid8(
             [
-                b"...W.W..",
-                b".OO.OO..",
-                b"OYOOOOR.",
-                b"OOOOOOR.",
-                b"ODDDDDR.",
-                b".OOOOR..",
-                b"..OOR...",
-                b"...R....",
+                b"..W..W..",
+                b".OO..OO.",
+                b"OYOOOOOR",
+                b"ODDYDDOR",
+                b"ODYDYDDR",
+                b".OODDOR.",
+                b"..OORR..",
+                b"...RR...",
             ],
             PAL,
         ),
-        small: grid4([b".W.W", b"OYOR", b"ODDR", b".OR."], PAL),
+        small: grid4([b".W.W", b"OYOR", b"ODYR", b".RR."], PAL),
         accent: (244, 138, 48),
     }
 };
 
-/// Hollow Bones — a bone on the diagonal with a dark hollow down its shaft.
+/// Hollow Bones — a double-knobbed bone on the diagonal with a dark hollow down its shaft.
 const HOLLOW_BONES: Icon = {
     const PAL: &[(u8, Rgb)] = &[
         (b'W', (250, 246, 232)), // bone highlight
         (b'B', (206, 196, 172)), // bone shade
-        (b'D', (58, 50, 62)),    // the hollow
+        (b'D', (52, 44, 58)),    // the hollow
     ];
     Icon {
         large: grid8(
             [
-                b".WW.....",
+                b".W.W....",
                 b"WWWW....",
-                b"WWWDW...",
-                b".WDDDW..",
-                b"..WDDDB.",
-                b"...WDBBB",
+                b".WWDW...",
+                b"..WDDW..",
+                b"...WDDW.",
+                b"...BWDB.",
                 b"....BBBB",
-                b".....BB.",
+                b"....B.B.",
             ],
             PAL,
         ),
-        small: grid4([b"WW..", b"WDW.", b".WDB", b"..BB"], PAL),
+        small: grid4([b"WW..", b"WDB.", b".WDB", b"..BB"], PAL),
         accent: (226, 218, 196),
     }
 };
 
-/// Double Lid — an eye under two stacked lids.
+/// Double Lid — an almond eye peering out from beneath two stacked drooping eyelids.
 const DOUBLE_LID: Icon = {
     const PAL: &[(u8, Rgb)] = &[
-        (b'V', (146, 98, 214)),  // outer lid
-        (b'L', (206, 176, 244)), // inner lid
-        (b'W', (250, 250, 255)), // sclera
-        (b'K', (24, 18, 40)),    // pupil
+        (b'V', (136, 86, 206)),  // outer lid
+        (b'L', (204, 174, 246)), // inner translucent lid
+        (b'W', (252, 252, 255)), // sclera
+        (b'A', (255, 204, 76)),  // amber iris
+        (b'K', (22, 16, 36)),    // pupil
     ];
     Icon {
         large: grid8(
             [
                 b"..VVVV..",
-                b".VLLLLV.",
-                b"VLWWWWLV",
-                b"LWWKKWWL",
-                b"LWWKKWWL",
-                b"VLWWWWLV",
-                b".VLLLLV.",
+                b".VVVVVV.",
+                b"VLLLLLLV",
+                b"LWAKKAWL",
+                b"WWAKKAWW",
+                b".WWWWWW.",
                 b"..VVVV..",
+                b"........",
             ],
             PAL,
         ),
-        small: grid4([b"VVVV", b"LLLL", b"WKKW", b".VV."], PAL),
+        small: grid4([b"VVVV", b"LLLL", b"WKKW", b".WW."], PAL),
         accent: (176, 136, 232),
     }
 };
 
-/// Hoard Gland — a pink cheek pouch with a coin showing through.
+/// Hoard Gland — a bulging pink cheek pouch hanging from its duct with a gold coin inside.
 const HOARD_GLAND: Icon = {
     const PAL: &[(u8, Rgb)] = &[
         (b'W', (255, 232, 236)), // pouch sheen
@@ -1406,41 +1414,42 @@ const HOARD_GLAND: Icon = {
         (b'M', (168, 82, 110)),  // pouch shade
         (b'Y', (255, 240, 150)), // coin glint
         (b'G', (236, 178, 44)),  // coin
+        (b'D', (132, 82, 16)),   // coin rim shade
     ];
     Icon {
         large: grid8(
             [
-                b"..PPPP..",
-                b".PWWPPP.",
-                b"PWPGGPPM",
+                b".PP.....",
+                b"..PPM...",
+                b".PWWPPM.",
+                b"PWPYYGPM",
                 b"PPGYGGPM",
-                b"PPGGGGPM",
-                b"PPPGGPMM",
+                b"PPPDDGMM",
                 b".PPPMMM.",
                 b"..MMMM..",
             ],
             PAL,
         ),
-        small: grid4([b".WP.", b"PYGM", b"PGGM", b".MM."], PAL),
+        small: grid4([b"P...", b"PYGM", b"PGDM", b".MM."], PAL),
         accent: (240, 150, 170),
     }
 };
 
-/// Copper Nerves — a copper nerve cell: a bright node with six bare-wire
-/// branches.
+/// Copper Nerves — a live copper neuron: dendrites, glowing soma, and a firing axon spark.
 const COPPER_NERVES: Icon = {
     const PAL: &[(u8, Rgb)] = &[
-        (b'Y', (255, 244, 190)), // live node
-        (b'C', (226, 132, 72)),  // copper
+        (b'W', (255, 252, 224)), // white-hot synapse spark
+        (b'Y', (255, 214, 96)),  // live soma node
+        (b'C', (226, 132, 72)),  // copper wire
         (b'B', (148, 76, 40)),   // tarnished copper
     ];
     Icon {
         large: grid8(
             [
-                b"C.....C.",
-                b".C...C..",
-                b"..C.C...",
-                b"CCCYCCCB",
+                b"C...C...",
+                b".C.C....",
+                b"..CYC...",
+                b"CCYWCCBW",
                 b"..CYC...",
                 b".C...B..",
                 b"C.....B.",
@@ -1448,7 +1457,7 @@ const COPPER_NERVES: Icon = {
             ],
             PAL,
         ),
-        small: grid4([b"C..C", b".YY.", b"CYYB", b"C..B"], PAL),
+        small: grid4([b"C.C.", b".YCW", b"CYCB", b"C..B"], PAL),
         accent: (226, 132, 72),
     }
 };
@@ -1533,28 +1542,28 @@ const BALLAST_SAC: Icon = {
     }
 };
 
-/// Long Fingers — a paw with three long thin fingers reaching up.
+/// Long Fingers — a splayed rat paw with four staggered spindly fingers reaching up.
 const LONG_FINGERS: Icon = {
     const PAL: &[(u8, Rgb)] = &[
-        (b'W', (255, 236, 232)), // fingertip
+        (b'W', (255, 244, 240)), // pale claw tip
         (b'P', (244, 176, 172)), // skin
         (b'M', (176, 104, 110)), // shaded palm
     ];
     Icon {
         large: grid8(
             [
-                b".W..W..W",
-                b".P..P..P",
-                b".P..P..P",
-                b".P..P..P",
-                b".P..P.PM",
-                b".PPPPPM.",
-                b"..PPPM..",
-                b"..MMM...",
+                b"...W....",
+                b".W.P.W..",
+                b".P.P.P..",
+                b".P.P.P.W",
+                b".P.P.P.P",
+                b".PPPPPP.",
+                b"..PPPPM.",
+                b"...MMM..",
             ],
             PAL,
         ),
-        small: grid4([b"W.W.", b"P.P.", b"PPPM", b".MM."], PAL),
+        small: grid4([b".W..", b"WPW.", b"PPPW", b".MM."], PAL),
         accent: (244, 176, 172),
     }
 };

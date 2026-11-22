@@ -726,3 +726,262 @@ fn a_room_seen_from_a_passage_is_no_brighter_than_the_passage() {
     assert_eq!(lum(&from_room, 8, 8), lum(&open, 8, 8));
     assert_eq!(lum(&from_room, 70, 52), lum(&open, 70, 52));
 }
+
+// ---------------------------------------------------------------------------
+// Batch 8: the small-light tail and the darker base level
+// ---------------------------------------------------------------------------
+
+/// `Curve` samples for a small light at `d` px: the raw shape and what the
+/// pixel actually sees (core plus the quantised tail).
+fn small_light_samples(d: f32) -> (f32, f32) {
+    let mut light = Light::radial(Vec2::ZERO, 24.0, (255, 208, 148), 0.9);
+    light.falloff = Falloff::Small;
+    let curve = Curve::new(&light);
+    let (core, tail) = curve.parts(Vec2::new(d, 0.0), d * d, 0.0);
+    (core + tail, core + curve.quantise(tail))
+}
+
+#[test]
+fn a_small_light_reaches_farther_and_fades_softer() {
+    let mut light = Light::radial(Vec2::ZERO, 24.0, (255, 208, 148), 0.9);
+    light.falloff = Falloff::Small;
+    let curve = Curve::new(&light);
+    let old_radius = 24.0;
+    let reach = light.extent();
+    assert!((reach - old_radius * 1.7).abs() < 0.01, "reach {reach}");
+
+    // Monotone all the way out, both the physical shape and the painted one.
+    let (mut raw_before, mut painted_before) = small_light_samples(0.0);
+    let mut d = 0.0;
+    while d < reach + 8.0 {
+        d += 0.5;
+        let (raw, painted) = small_light_samples(d);
+        assert!(raw <= raw_before + 1e-6, "raw rises at {d} px");
+        assert!(painted <= painted_before + 1e-6, "painted rises at {d} px");
+        raw_before = raw;
+        painted_before = painted;
+    }
+
+    // Exactly zero from the end of the reach: no edge, no ring.
+    assert_eq!(small_light_samples(reach).0, 0.0);
+    assert_eq!(small_light_samples(reach + 0.5).0, 0.0);
+    // Still lit at 1.5x the old radius, and under 8 % of the core by 60 % of
+    // the reach.
+    let at_old_edge = small_light_samples(old_radius * 1.5).0;
+    assert!(at_old_edge > 0.0, "dark at 1.5x the old radius");
+    assert!(
+        small_light_samples(reach * 0.6).0 < 0.08,
+        "60 % of the reach still holds {}",
+        small_light_samples(reach * 0.6).0
+    );
+
+    // Past the old radius the pool is the quantised tail, and a step there is
+    // at most one output level of this light's own brightness.
+    let one_level = curve.step();
+    assert!((one_level * curve.gain() - MIN_GAIN).abs() < 1e-3, "step");
+    let mut d = old_radius;
+    while d < reach {
+        let (_, near) = small_light_samples(d);
+        let (_, far) = small_light_samples(d + 0.5);
+        assert!(near - far <= one_level + 1e-6, "a step at {d} px");
+        d += 0.5;
+    }
+}
+
+#[test]
+fn every_floor_and_zone_is_darker_by_two_fifths_and_never_black() {
+    let zones = [
+        None,
+        Some(LightZoneKind::Start),
+        Some(LightZoneKind::Room),
+        Some(LightZoneKind::Corridor),
+        Some(LightZoneKind::Arena),
+        Some(LightZoneKind::Blackout),
+        Some(LightZoneKind::Maze),
+    ];
+    for theme in Theme::playable() {
+        let profile = theme_ambient(theme);
+        for zone in zones {
+            let gain = zone_gain(zone);
+            for channel in 0..3 {
+                let before = f32::from(profile.mul[channel]) * gain;
+                let now = ambient_level(profile.mul[channel], gain);
+                assert!(
+                    now >= AMBIENT_FLOOR,
+                    "{theme:?} {zone:?} ch{channel} is black"
+                );
+                assert!(
+                    f32::from(now) < before,
+                    "{theme:?} {zone:?} ch{channel}: {now} vs {before}"
+                );
+                let ratio = f32::from(now) / before;
+                assert!(
+                    (0.55..=0.65).contains(&ratio),
+                    "{theme:?} {zone:?} ch{channel}: ratio {ratio}"
+                );
+            }
+        }
+    }
+    // The tint survives the lowering: the plane keeps its own hue.
+    let sewer = theme_ambient(Theme::Sewer);
+    assert!(sewer.mul[2] > sewer.mul[0], "Sewer should stay green-blue");
+    assert!(theme_ambient(Theme::Kitchen).mul[0] > theme_ambient(Theme::Kitchen).mul[2]);
+}
+
+#[test]
+fn the_far_tail_is_frozen_while_the_core_breathes() {
+    // A moving halo is what repaints cells, so a *still* frame must not pay for
+    // a flickering light's faint skirt: the tail is quantised and the flicker
+    // animates the core only.
+    let w = test_world(Theme::Sewer);
+    let mut light = Light::radial(Vec2::new(64.0, 48.0), 26.0, (255, 176, 88), 1.0);
+    light.falloff = Falloff::Small;
+    light.casts_shadow = false;
+    light.scatter = 0.24;
+    let flicker = Flicker {
+        amount: 0.40,
+        speed: 8.9,
+        phase: 0.0,
+    };
+    light.flicker = Some(flicker);
+    // The two times are the flicker's own minimum and maximum.
+    let (low, high) = (0.176, 0.529);
+    assert!(
+        flicker.gain(high) > flicker.gain(low) + 0.2,
+        "{} vs {}",
+        flicker.gain(low),
+        flicker.gain(high)
+    );
+    let shot = |elapsed: f32| {
+        let mut pb = PixelBuffer::new(128, 96);
+        pb.clear((32, 40, 38));
+        let mut map = LightMap::new();
+        map.begin_frame();
+        map.push_shaped(light, 3);
+        let mut scene = test_scene(&w, LightingMode::Full, ColorDepth::Truecolor, Vec2::ZERO);
+        scene.elapsed = elapsed;
+        map.apply_scene(&mut pb, &scene);
+        pb
+    };
+    let dim = shot(low);
+    let bright = shot(high);
+    let mut changed_in_core = 0;
+    for y in 0..96usize {
+        for x in 0..128usize {
+            let d = (Vec2::new(x as f32, y as f32) - light.pos).len();
+            if d > light.shape.extent() {
+                assert_eq!(
+                    dim.pixel_at(x, y),
+                    bright.pixel_at(x, y),
+                    "the tail moved at {x},{y} ({d} px out)"
+                );
+            } else if d < light.shape.extent() * 0.5
+                && dim.pixel_at(x, y) != bright.pixel_at(x, y)
+            {
+                changed_in_core += 1;
+            }
+        }
+    }
+    assert!(changed_in_core > 20, "the core never animated");
+}
+
+#[test]
+fn an_enemy_rim_glint_stays_lit_in_the_dark() {
+    // The mark itself: a body pixel drawn before the lighting pass keeps a
+    // pixel of its own colour however dark the ambient is.
+    let w = test_world(Theme::Sewer);
+    // `rim_glint` of a warm coat. Asserted at full colour: at 16 and 256
+    // colours a glint this faint is inside the palette's first step, and the
+    // silhouette there is carried by the readable mark the enemy draw pass
+    // takes (asserted end to end below).
+    let tint = (30, 13, 9);
+    let mut pb = PixelBuffer::new(64, 48);
+    pb.clear((14, 22, 20));
+    pb.plot(32, 24, (52, 44, 40));
+    let mut map = LightMap::new();
+    map.mark_glint(&pb, 32, 24, tint);
+    map.apply_scene(
+        &mut pb,
+        &test_scene(&w, LightingMode::Full, ColorDepth::Truecolor, Vec2::ZERO),
+    );
+    let lit = pb.pixel_at(32, 24);
+    assert!(
+        lit.0 >= tint.0 && lit.1 >= tint.1 && lit.2 >= tint.2,
+        "{lit:?}"
+    );
+    assert!(
+        luminance(lit) > luminance(pb.pixel_at(40, 24)) + 8,
+        "{lit:?} vs the floor"
+    );
+
+    // And end to end: every floor's darkest zone still shows a live body.
+    for theme in Theme::playable() {
+        let mut w = test_world(theme);
+        w.player.pos = Vec2::new(400.0, 400.0);
+        w.level.objects.light_zones.push(LightZone {
+            rect: TileRect::new(20, 20, 16, 12),
+            kind: LightZoneKind::Maze,
+        });
+        let mut pb = PixelBuffer::new(120, 80);
+        for depth in [ColorDepth::Truecolor, ColorDepth::Ansi256, ColorDepth::Ansi16] {
+            w.lighting = LightingMode::default_for_depth(depth);
+            w.lighting_depth = depth;
+            w.clear_enemies();
+            w.draw(&mut pb);
+            let floor = pb.pixels().to_vec();
+            w.spawn_enemy(
+                EnemyKind::Skitterer,
+                w.player.pos + Vec2::new(56.0, 2.0),
+                1.0,
+            );
+            w.draw(&mut pb);
+            let margin = (36..48)
+                .flat_map(|y| (112..120).map(move |x| y * 120 + x))
+                .map(|i| {
+                    let lum = |c| luminance(super::gallery::terminal_rgb(c, depth));
+                    lum(pb.pixels()[i]).saturating_sub(lum(floor[i]))
+                })
+                .max()
+                .unwrap_or(0);
+            assert!(margin >= 20, "{theme:?} {depth:?}: only {margin} contrast");
+        }
+    }
+}
+
+#[test]
+fn a_lit_wall_stays_a_step_above_the_floor_at_every_colour_depth() {
+    // The darker base level must not fold a wall face and a floor tile into the
+    // same terminal colour where a lamp reaches them, or the maze's shape is
+    // lost. (Outside a pool both are the near-black ambient, as before.) At 16
+    // colours the palette is coarse enough that a mid-tone wall face and a lit
+    // floor can share the one grey; the wall's own edge highlight is what a
+    // 16-colour terminal reads, so that is the pixel probed there.
+    let light = Light::radial(Vec2::new(64.0, 48.0), 90.0, (255, 244, 224), 1.35);
+    for theme in Theme::playable() {
+        let pal = crate::game::level::Palette::for_theme(theme);
+        let w = test_world(theme);
+        for depth in [ColorDepth::Truecolor, ColorDepth::Ansi256, ColorDepth::Ansi16] {
+            let mut pb = PixelBuffer::new(128, 96);
+            for y in 0..96usize {
+                for x in 0..128usize {
+                    pb.plot(x as i32, y as i32, if x < 64 { pal.bg } else { pal.wall });
+                }
+            }
+            pb.plot(70, 48, pal.wall_edge);
+            let mut map = LightMap::new();
+            map.begin_frame();
+            map.push_shaped(light, 3);
+            map.apply_scene(
+                &mut pb,
+                &test_scene(&w, LightingMode::default_for_depth(depth), depth, Vec2::ZERO),
+            );
+            let floor = crate::term::map_rgb_with(depth, pb.pixel_at(58, 48));
+            let edge = crate::term::map_rgb_with(depth, pb.pixel_at(70, 48));
+            assert_ne!(floor, edge, "{theme:?} {depth:?}: the wall edge vanished");
+            if depth != ColorDepth::Ansi16 {
+                let wall = crate::term::map_rgb_with(depth, pb.pixel_at(72, 48));
+                assert_ne!(floor, wall, "{theme:?} {depth:?}: the wall face vanished");
+            }
+        }
+    }
+}

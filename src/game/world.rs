@@ -1785,6 +1785,140 @@ impl World {
         self.ecs.resource_mut::<BossDue>().due = true;
     }
 
+    /// Console `boss <kind> here`: start the fight **where the rat stands**.
+    ///
+    /// [`force_boss`](Self::force_boss) hands the floor's arena, spawn point
+    /// and dock to `boss_spawn_system`; a fight that starts where you stand
+    /// needs all three to follow the rat, and the one-shot [`BossOverride`]
+    /// carries only a kind. So this spawns the boss straight into the ECS,
+    /// between ticks (where the console's handlers run and the facade is
+    /// authoritative), keeping the books the spawn system keeps: the boss's own
+    /// rng stream, the damage-number id, the horde break, the arrival's shake
+    /// and sound, and the director's hand-off flag. `false` when a boss is
+    /// already on the floor — the scheduled spawn refuses that too.
+    ///
+    /// The arena is the floor's own arena rectangle's **size**, recentred on
+    /// the rat and clamped inside the map; the body goes into a clear cell
+    /// 40-60 px away (never a wall or a pit) and the dock is the nearest
+    /// large-class cell to the arena's centre.
+    pub fn force_boss_here(&mut self, kind: BossKind) -> bool {
+        if self.ecs.iter_entities().any(|e| e.contains::<Boss>()) {
+            return false;
+        }
+        let large = crate::game::collision::SizeClass::Large;
+        let arena = self.boss_arena_around(self.player.pos);
+        let dock = self
+            .level
+            .tiles
+            .nearest_open_center(arena.center_world(), large, 16)
+            .unwrap_or_else(|| arena.center_world());
+        let pos = self.boss_point_beside(self.player.pos, kind.body_radius());
+        let hunting = !arena.contains_world(self.player.pos);
+        let difficulty = self.difficulty_override.unwrap_or(self.level_index);
+        let hp = kind.base_hp()
+            * kind.hp_scale()
+            * director::boss_hp_mult_for(difficulty, director::BOSS_TIME);
+        let mut boss = Boss::new(kind, pos, hp, arena, dock, hunting);
+        boss.id = self.next_enemy_id;
+        self.next_enemy_id = self.next_enemy_id.wrapping_add(1).max(1);
+        boss.facing = (self.player.pos - pos).normalized();
+        boss.target = self.player.pos;
+        // The arrival's burst draws from the boss's own stream, exactly as the
+        // scheduled spawn's does, so it never perturbs the run rng.
+        let mut rng = super::ecs::systems::boss::BossRng::for_run(self.level.seed, kind);
+        let accent = self.level.palette.accent;
+        crate::game::particle::vfx::emit_boss_spawn(&mut self.particles, &mut rng.0, pos, accent);
+        {
+            let mut fight = self.ecs.resource_mut::<BossFight>();
+            fight.rng = rng;
+            fight.next_id = boss.id;
+            fight.level_complete = false;
+            // The horde parts for its master, as it does for the arrival at
+            // the boss time (see `boss_spawn_system`).
+            fight.horde_break = true;
+        }
+        spawn_with_id(&mut self.ecs, boss);
+        // This is the level's fight now: the director's hand-off checks this
+        // flag, so there is no second arrival at `BOSS_TIME`, and the horde
+        // drops to the boss's cleanup pace.
+        self.director.boss_spawned = true;
+        self.boss_override = None;
+        {
+            let mut due = self.ecs.resource_mut::<BossDue>();
+            due.due = false;
+            due.claimed = true;
+        }
+        self.shake = self.shake.max(14.0);
+        self.sfx.push(Sfx::Boss);
+        true
+    }
+
+    /// The floor's real arena rectangle's size, recentred on `pos` and clamped
+    /// inside the map (console `boss <name> here`).
+    fn boss_arena_around(&self, pos: Vec2) -> super::level::TileRect {
+        let (cols, rows) = (self.level.tiles.cols(), self.level.tiles.rows());
+        let real = self
+            .level
+            .boss_room()
+            .map(|r| r.rect)
+            .unwrap_or_else(|| super::level::TileRect::new(0, 0, cols, rows));
+        let w = real.w.clamp(1, cols.max(1));
+        let h = real.h.clamp(1, rows.max(1));
+        let (cx, cy) = crate::game::collision::cell_of(pos);
+        super::level::TileRect::new(
+            (cx - w / 2).clamp(0, (cols - w).max(0)),
+            (cy - h / 2).clamp(0, (rows - h).max(0)),
+            w,
+            h,
+        )
+    }
+
+    /// A clear cell beside `rat` for a body of `radius`: 40-60 px away, closest
+    /// to 48 px first, never a wall cell or a pit.
+    ///
+    /// The first pass also asks that the body fit (`circle_clear`); a boss is
+    /// 27 px across and does not fit a one-cell aisle, so the second pass
+    /// settles for a walkable cell and lets `wall_resolve` nudge the body clear
+    /// of the wall it clips. Fixed sweep, no rng draw.
+    fn boss_point_beside(&self, rat: Vec2, radius: f32) -> Vec2 {
+        const STEPS: usize = 16;
+        const DISTANCES: [f32; 6] = [48.0, 44.0, 52.0, 40.0, 56.0, 60.0];
+        let large = crate::game::collision::SizeClass::Large;
+        for strict in [true, false] {
+            let mut best: Option<(f32, Vec2)> = None;
+            for step in 0..STEPS {
+                let angle = step as f32 * std::f32::consts::TAU / STEPS as f32;
+                let dir = Vec2::new(angle.cos(), angle.sin());
+                for d in DISTANCES {
+                    let p = rat + dir * d;
+                    if self.level.pit_at(p).is_some() {
+                        continue;
+                    }
+                    let (cx, cy) = crate::game::collision::cell_of(p);
+                    if !self.level.tiles.passable(cx, cy, large) {
+                        continue;
+                    }
+                    if strict && !self.level.tiles.circle_clear(p, radius, large) {
+                        continue;
+                    }
+                    let key = (d - 48.0).abs();
+                    if best.is_none_or(|(bk, _)| key < bk) {
+                        best = Some((key, p));
+                    }
+                }
+            }
+            if let Some((_, p)) = best {
+                return p;
+            }
+        }
+        // Nowhere within reach is walkable: the nearest open cell, so the body
+        // can never end up inside a wall.
+        self.level
+            .tiles
+            .nearest_open_center(rat, large, 8)
+            .unwrap_or(rat)
+    }
+
     /// Console `magnet`: pull every gem toward the rat.
     pub fn magnetize_all_gems(&mut self) -> usize {
         let mut q = self.ecs.query::<&mut Gem>();

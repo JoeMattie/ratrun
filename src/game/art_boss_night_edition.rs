@@ -735,25 +735,39 @@ fn draw_line_styled(
     dash_period: i32,
     phase: i32,
 ) {
-    if !a.x.is_finite() || !b.x.is_finite() || pb.w == 0 || pb.h == 0 || alpha <= 0.004 {
+    if !a.x.is_finite()
+        || !a.y.is_finite()
+        || !b.x.is_finite()
+        || !b.y.is_finite()
+        || pb.w == 0
+        || pb.h == 0
+        || alpha <= 0.004
+    {
         return;
     }
-    let ax = a.x.round() as i32;
-    let ay = a.y.round() as i32;
-    let bx = b.x.round() as i32;
-    let by = b.y.round() as i32;
+    let min_x = a.x.min(b.x);
+    let max_x = a.x.max(b.x);
+    let min_y = a.y.min(b.y);
+    let max_y = a.y.max(b.y);
+    if max_x < -1.0 || min_x > pb.w as f32 + 1.0 || max_y < -1.0 || min_y > pb.h as f32 + 1.0 {
+        return;
+    }
+    let ax = a.x.clamp(-1e6, 1e6).round() as i64;
+    let ay = a.y.clamp(-1e6, 1e6).round() as i64;
+    let bx = b.x.clamp(-1e6, 1e6).round() as i64;
+    let by = b.y.clamp(-1e6, 1e6).round() as i64;
     let dx = (bx - ax).abs();
     let dy = -(by - ay).abs();
-    let sx = if ax < bx { 1 } else { -1 };
-    let sy = if ay < by { 1 } else { -1 };
+    let sx: i64 = if ax < bx { 1 } else { -1 };
+    let sy: i64 = if ay < by { 1 } else { -1 };
     let mut err = dx + dy;
     let (mut x, mut y) = (ax, ay);
     let mut step = 0i32;
-    let max_steps = (dx - dy + 2).min(360);
+    let max_steps = (dx - dy + 2).min(360) as i32;
     while step <= max_steps {
         let on = dash_period <= 0 || ((step + phase).rem_euclid(dash_period) < dash_on);
-        if on {
-            blend_px(pb, x, y, c, alpha);
+        if on && x >= 0 && y >= 0 && x < pb.w as i64 && y < pb.h as i64 {
+            blend_px(pb, x as i32, y as i32, c, alpha);
         }
         if x == bx && y == by {
             break;
@@ -822,20 +836,33 @@ fn fill_rect(pb: &mut PixelBuffer, center: Vec2, half: Vec2, c: Rgb, alpha: f32)
     }
 }
 
-/// The outline of an axis-aligned rectangle.
+/// The outline of an axis-aligned rectangle (clipped to `pb` so off-screen/huge
+/// coordinates never loop unnecessarily).
 fn outline_rect(pb: &mut PixelBuffer, center: Vec2, half: Vec2, c: Rgb, alpha: f32, dashed: bool) {
-    let x0 = (center.x - half.x).round() as i32;
-    let x1 = (center.x + half.x).round() as i32;
-    let y0 = (center.y - half.y).round() as i32;
-    let y1 = (center.y + half.y).round() as i32;
+    if !center.x.is_finite()
+        || !center.y.is_finite()
+        || !half.x.is_finite()
+        || !half.y.is_finite()
+        || bbox_rect(pb, center, half, 1.0).is_none()
+    {
+        return;
+    }
+    let x0 = (center.x - half.x).clamp(-1e6, 1e6).round() as i32;
+    let x1 = (center.x + half.x).clamp(-1e6, 1e6).round() as i32;
+    let y0 = (center.y - half.y).clamp(-1e6, 1e6).round() as i32;
+    let y1 = (center.y + half.y).clamp(-1e6, 1e6).round() as i32;
+    let cx0 = x0.max(0);
+    let cx1 = x1.min(pb.w as i32 - 1);
+    let cy0 = y0.max(0);
+    let cy1 = y1.min(pb.h as i32 - 1);
     let dash = |i: i32| !dashed || (i / 2) % 2 == 0;
-    for x in x0..=x1 {
+    for x in cx0..=cx1 {
         if dash(x - x0) {
             blend_px(pb, x, y0, c, alpha);
             blend_px(pb, x, y1, c, alpha);
         }
     }
-    for y in y0..=y1 {
+    for y in cy0..=cy1 {
         if dash(y - y0) {
             blend_px(pb, x0, y, c, alpha);
             blend_px(pb, x1, y, c, alpha);
@@ -917,6 +944,9 @@ fn draw_smoke_puff(pb: &mut PixelBuffer, center: Vec2, r: f32, alpha: f32) {
 /// Draw the Night Edition's floor layer: press bed plinth, shadow, page and
 /// rule telegraphs, recovery markers, pose-change sheets and wreck ink flood.
 pub fn draw_ground(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, accent: Rgb) {
+    if pb.w == 0 || pb.h == 0 {
+        return;
+    }
     let fr = Frame::from_view(view, cam, accent);
     draw_press_bed(pb, view.bed - cam, accent);
 
@@ -1091,10 +1121,6 @@ fn draw_page(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, prog: f32
     }
 
     // Crisp newspaper headline banner + reversed type columns inside the inked zone!
-    let x0 = (ink.x - ink_half.x).round() as i32;
-    let x1 = (ink.x + ink_half.x).round() as i32;
-    let y0 = (ink.y - ink_half.y).round() as i32;
-    let y1 = (ink.y + ink_half.y).round() as i32;
     // Bold headline bar across the top of the page.
     let head_col = mix(PAPER_SPEC, DANGER_RED, if stamping { 0.45 } else { prog * 0.35 });
     fill_rect(
@@ -1104,22 +1130,30 @@ fn draw_page(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, prog: f32
         head_col,
         0.48 + 0.38 * flood,
     );
-    // Newspaper text lines below the headline.
-    let mut ty = y0 + 8;
-    while ty < y1 - 2 {
-        let mut tx = x0 + 2;
-        while tx < x1 - 2 {
-            let glyph = hash01(tx / 3, ty / 3);
-            if glyph > 0.38 {
-                let lit = mix(INK_HI, PAPER_HI, 0.35 + 0.35 * flood);
-                blend_px(pb, tx, ty, lit, 0.40 + 0.45 * flood);
-                if glyph > 0.68 {
-                    blend_px(pb, tx + 1, ty, lit, 0.35 + 0.40 * flood);
+    // Newspaper text lines below the headline (clipped to viewport).
+    if let Some((bx0, bx1, by0, by1)) = bbox_rect(pb, ink, ink_half, 0.0) {
+        let raw_x0 = (ink.x - ink_half.x).round() as i32;
+        let raw_y0 = (ink.y - ink_half.y).round() as i32;
+        let start_y = (raw_y0 + 8).max(by0);
+        let end_y = ((ink.y + ink_half.y).round() as i32 - 2).min(by1);
+        let start_x = (raw_x0 + 2).max(bx0);
+        let end_x = ((ink.x + ink_half.x).round() as i32 - 2).min(bx1);
+        let mut ty = start_y;
+        while ty < end_y {
+            let mut tx = start_x;
+            while tx < end_x {
+                let glyph = hash01(tx / 3, ty / 3);
+                if glyph > 0.38 {
+                    let lit = mix(INK_HI, PAPER_HI, 0.35 + 0.35 * flood);
+                    blend_px(pb, tx, ty, lit, 0.40 + 0.45 * flood);
+                    if glyph > 0.68 {
+                        blend_px(pb, tx + 1, ty, lit, 0.35 + 0.40 * flood);
+                    }
                 }
+                tx += 3;
             }
-            tx += 3;
+            ty += 3;
         }
-        ty += 3;
     }
 
     // Crisp danger border around the inked area.
@@ -1190,20 +1224,22 @@ fn draw_misprint(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, prog:
         };
         fill_rect(pb, *ink, *ink_half, fill_col, 0.38 + 0.46 * flood);
 
-        let x0 = (ink.x - ink_half.x).round() as i32;
-        let x1 = (ink.x + ink_half.x).round() as i32;
-        let y0 = (ink.y - ink_half.y).round() as i32;
-        let y1 = (ink.y + ink_half.y).round() as i32;
-        let mut ty = y0 + 3;
-        while ty < y1 - 2 {
-            let mut tx = x0 + 2;
-            while tx < x1 - 2 {
-                if hash01(tx / 3 + i as i32 * 5, ty / 3) > 0.42 {
-                    blend_px(pb, tx, ty, mix(INK_HI, PAPER_SPEC, 0.35 + 0.30 * flood), 0.46);
+        if let Some((bx0, bx1, by0, by1)) = bbox_rect(pb, *ink, *ink_half, 0.0) {
+            let start_y = ((ink.y - ink_half.y).round() as i32 + 3).max(by0);
+            let end_y = ((ink.y + ink_half.y).round() as i32 - 2).min(by1);
+            let start_x = ((ink.x - ink_half.x).round() as i32 + 2).max(bx0);
+            let end_x = ((ink.x + ink_half.x).round() as i32 - 2).min(bx1);
+            let mut ty = start_y;
+            while ty < end_y {
+                let mut tx = start_x;
+                while tx < end_x {
+                    if hash01(tx / 3 + i as i32 * 5, ty / 3) > 0.42 {
+                        blend_px(pb, tx, ty, mix(INK_HI, PAPER_SPEC, 0.35 + 0.30 * flood), 0.46);
+                    }
+                    tx += 3;
                 }
-                tx += 3;
+                ty += 3;
             }
-            ty += 3;
         }
         let edge = if second { TELL_AMBER } else { mix(PAPER_SPEC, DANGER_RED, prog * 0.65) };
         outline_rect(pb, *ink, *ink_half, edge, 0.72 + 0.20 * pulse, second);
@@ -1223,14 +1259,17 @@ fn draw_misprint(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, prog:
     }
 
     if stamping {
-        let first = (prog * 1.9).min(1.0);
-        let second = ((prog - 0.45) * 1.9).clamp(0.0, 1.0);
+        // Beat 1 stamps immediately (`prog 0.0..0.55`); beat 2 lands at `prog ≈ 0.55..1.0`
+        // and must not flash before it lands!
+        let f0 = (1.0 - (prog * 1.9).clamp(0.0, 1.0)).powi(2);
+        let f1 = if prog >= 0.55 {
+            let second = ((prog - 0.55) / 0.45).clamp(0.0, 1.0);
+            (1.0 - second).powi(2)
+        } else {
+            0.0
+        };
         for (i, (ink, ink_half)) in rects.iter().enumerate() {
-            let f = if i == 0 {
-                (1.0 - first).powi(2)
-            } else {
-                (1.0 - second).powi(2)
-            };
+            let f = if i == 0 { f0 } else { f1 };
             if f > 0.01 {
                 fill_rect(pb, *ink, *ink_half, DANGER_RED, 0.44 * f);
                 outline_rect(pb, *ink, *ink_half, (255, 244, 218), 0.92 * f, false);
@@ -1243,6 +1282,9 @@ fn draw_misprint(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, prog:
 fn draw_rule(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, fr: &Frame) {
     let from = view.rule_from - cam;
     let to = view.rule_to - cam;
+    if !from.x.is_finite() || !from.y.is_finite() || !to.x.is_finite() || !to.y.is_finite() {
+        return;
+    }
     let dir = to - from;
     let len = dir.len();
     let u = if len > 1e-4 {
@@ -1253,51 +1295,85 @@ fn draw_rule(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, fr: &Fram
     let perp = Vec2::new(-u.y, u.x);
     let sweeping = view.state == NightEditionState::CarriageSweep;
     let telling = view.state == NightEditionState::CarriageTell;
+    let ribbon = view.state == NightEditionState::Ribbon;
     let prog = fr.prog;
     let pulse = 0.5 + 0.5 * (fr.anim * 12.0).sin();
 
-    // Subtle darkened danger carpet inside the 8 px rule band so it reads on bright floors too!
-    let band_steps = (len.ceil() as i32).min(120);
-    let band_col = if sweeping { DANGER_RED } else { TELL_AMBER };
-    for i in 0..=band_steps {
-        let p = from + u * (i as f32);
-        for k in -(RULE_HALF_WIDTH as i32 - 1)..=(RULE_HALF_WIDTH as i32 - 1) {
-            let q = p + perp * k as f32;
-            blend_px(pb, q.x.round() as i32, q.y.round() as i32, band_col, if sweeping { 0.22 } else { 0.11 + 0.06 * pulse });
+    // Rasterize the exact `±RULE_HALF_WIDTH` corridor over a clipped screen AABB (zero diagonal
+    // gaps, no 120 px truncation). During `Ribbon` recovery the rule is harmless, so show only a
+    // subdued spent ink track instead of an amber danger carpet!
+    let pad = RULE_HALF_WIDTH + 1.5;
+    let x0 = (from.x.min(to.x) - pad).floor().max(0.0) as i32;
+    let x1 = (from.x.max(to.x) + pad).ceil().min((pb.w as i32 - 1) as f32) as i32;
+    let y0 = (from.y.min(to.y) - pad).floor().max(0.0) as i32;
+    let y1 = (from.y.max(to.y) + pad).ceil().min((pb.h as i32 - 1) as f32) as i32;
+    if x0 <= x1 && y0 <= y1 {
+        let (band_col, band_a) = if sweeping {
+            (DANGER_RED, 0.22)
+        } else if ribbon {
+            (INK_SHADOW, 0.16)
+        } else {
+            (TELL_AMBER, 0.11 + 0.06 * pulse)
+        };
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let rx = x as f32 - from.x;
+                let ry = y as f32 - from.y;
+                let along = rx * u.x + ry * u.y;
+                if along < 0.0 || along > len {
+                    continue;
+                }
+                let across = (rx * perp.x + ry * perp.y).abs();
+                if across <= RULE_HALF_WIDTH {
+                    blend_px(pb, x, y, band_col, band_a);
+                }
+            }
         }
     }
 
-    // Crisp outer dotted rails.
+    // Crisp outer dotted rails (muted cool iron during harmless Ribbon recovery).
     let rail = if sweeping {
         mix(DANGER_RED, PAPER_SPEC, 0.25)
+    } else if ribbon {
+        IRON_MID
     } else {
         mix(PAPER_HI, TELL_AMBER, 0.45 + 0.35 * prog)
     };
+    let rail_a = if ribbon { 0.42 } else { 0.85 };
     for side in [-1.0f32, 1.0] {
         let off = perp * (RULE_HALF_WIDTH - 0.3) * side;
-        draw_line_styled(pb, from + off, to + off, rail, 0.85, 2, 4, -(fr.anim * 18.0) as i32);
+        draw_line_styled(pb, from + off, to + off, rail, rail_a, 2, 4, -(fr.anim * 18.0) as i32);
     }
     // Centre printer's dotted rule.
     draw_line_styled(
         pb,
         from,
         to,
-        if sweeping { (255, 232, 198) } else { TELL_AMBER },
-        0.72,
+        if sweeping {
+            (255, 232, 198)
+        } else if ribbon {
+            IRON_SHADOW
+        } else {
+            TELL_AMBER
+        },
+        if ribbon { 0.38 } else { 0.72 },
         1,
         3,
         0,
     );
 
-    // Marching directional chevrons along the rule toward the brass stop.
-    let march = (fr.anim * (if sweeping { 36.0 } else { 22.0 })) % 11.0;
-    let mut d = march;
-    while d < len - 4.0 {
-        let p = from + u * d;
-        let col = if sweeping { (255, 236, 200) } else { TELL_AMBER };
-        draw_line_styled(pb, p - perp * 2.5 - u * 1.2, p + u * 2.2, col, 0.80, 0, 0, 0);
-        draw_line_styled(pb, p + perp * 2.5 - u * 1.2, p + u * 2.2, col, 0.80, 0, 0, 0);
-        d += 11.0;
+    // Marching directional chevrons along the rule only while active (`CarriageTell` / `CarriageSweep`).
+    if !ribbon {
+        let march = (fr.anim * (if sweeping { 36.0 } else { 22.0 })) % 11.0;
+        let mut d = march;
+        let max_d = (len - 4.0).min(400.0);
+        while d < max_d {
+            let p = from + u * d;
+            let col = if sweeping { (255, 236, 200) } else { TELL_AMBER };
+            draw_line_styled(pb, p - perp * 2.5 - u * 1.2, p + u * 2.2, col, 0.80, 0, 0, 0);
+            draw_line_styled(pb, p + perp * 2.5 - u * 1.2, p + u * 2.2, col, 0.80, 0, 0, 0);
+            d += 11.0;
+        }
     }
 
     // Chunky brass stop bracket at the far end (`rule_to`).
@@ -1322,8 +1398,9 @@ fn draw_rule(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, fr: &Fram
     }
 
     if sweeping {
-        // Wet glossy purple-black ink smear laid down behind the racing carriage!
-        let swept = from + u * (len * prog);
+        // Wet glossy purple-black ink smear laid down behind the carriage's actual swept position!
+        let swept_d = ((fr.pos - from).dot(u)).clamp(0.0, len);
+        let swept = from + u * swept_d;
         for side in [-1.0f32, 1.0] {
             let off = perp * (RULE_HALF_WIDTH - 1.6) * side;
             draw_line_styled(pb, from + off, swept + off, INK_FRESH, 0.65, 3, 5, 0);
@@ -1332,7 +1409,7 @@ fn draw_rule(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, fr: &Fram
     }
 
     // Exposed Ribbon weak-point ground reticle at the stopped carriage end!
-    if view.state == NightEditionState::Ribbon {
+    if ribbon {
         let rib = fr.place(RIBBON_OFFSET, 0.0);
         let r = RIBBON_WINDOW_RADIUS + 2.2 + 1.2 * pulse;
         draw_ring_styled(pb, rib, r, SAFE_CYAN, 0.65 + 0.30 * pulse, 2, fr.anim * 1.8);
@@ -1417,6 +1494,9 @@ fn draw_wreck_ground(pb: &mut PixelBuffer, fr: &Frame) {
 
 /// Draw the Night Edition's body (and its multi-stage wreck collapse).
 pub fn draw(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, accent: Rgb) {
+    if pb.w == 0 || pb.h == 0 {
+        return;
+    }
     let mut fr = Frame::from_view(view, cam, accent);
     let state = view.state;
 
@@ -1443,7 +1523,8 @@ pub fn draw(pb: &mut PixelBuffer, view: &NightEditionView, cam: Vec2, accent: Rg
         }
         NightEditionState::CarriageSweep => (1.05, 1.0, Vec2::ZERO),
         NightEditionState::BedLowered => (0.96, 0.0, Vec2::ZERO),
-        NightEditionState::Ribbon => (1.0, -0.8, Vec2::ZERO),
+        // Keep zero longitudinal shift in Ribbon so the lifted silk ribbon aligns with `weak_point`.
+        NightEditionState::Ribbon => (1.0, 0.0, Vec2::ZERO),
         NightEditionState::PhaseTurn => {
             let sh = (fr.anim * 48.0).sin() * 1.4 * (1.0 - fr.prog);
             (1.0, 0.0, fr.p * sh)
@@ -1550,8 +1631,8 @@ fn draw_slab(pb: &mut PixelBuffer, fr: &Frame, view: &NightEditionView, squash: 
             let d = sd_rbox(u, v, hu, hv, 2.2);
             let cover = (0.55 - d * 1.25).clamp(0.0, 1.0);
             if cover <= 0.0 {
-                if d < 1.15 {
-                    blend_px(pb, x, y, rim_col, 0.84 * alpha);
+                if d < 1.25 {
+                    blend_px(pb, x, y, rim_col, 0.94 * alpha);
                 }
                 continue;
             }
@@ -1561,14 +1642,14 @@ fn draw_slab(pb: &mut PixelBuffer, fr: &Frame, view: &NightEditionView, squash: 
             let lit = fr.lit(nu, nv);
             let outer_rim = d > -2.8;
             let bevel = if outer_rim {
-                if lit > 0.15 { 0.26 } else { -0.20 }
+                if lit > 0.12 { 0.30 } else { -0.22 }
             } else {
                 -0.14
             };
-            let mut col = shade3(IRON_SHADOW, IRON_MID, IRON_HI, 0.42 + 0.52 * lit + bevel);
-            // Machined top-left specular sheen on the cast-iron bevel!
-            if outer_rim && d > -1.35 && lit > 0.35 {
-                col = mix(col, IRON_SPEC, 0.52);
+            let mut col = shade3(IRON_SHADOW, IRON_MID, IRON_HI, 0.44 + 0.54 * lit + bevel);
+            // Crisp machined top-left specular sheen on the cast-iron bevel so it survives card downscale!
+            if outer_rim && d > -1.45 && lit > 0.25 {
+                col = mix(col, IRON_SPEC, 0.72);
             }
             // Embossed side grip ribs on the iron rim.
             if outer_rim && (u.abs() < hu - 4.0) && (v.abs() > hv - 2.3) && ((u * 1.6).sin() > 0.4) {
@@ -2346,5 +2427,64 @@ mod tests {
             w.draw(&mut pb);
             let _ = std::fs::write(dir.join(format!("{name}_off.ppm")), to_ppm(&pb));
         }
+    }
+
+    #[test]
+    fn night_edition_audit_fixes_misprint_ribbon_and_nonfinite() {
+        // 1) Non-finite / extreme coordinates and empty buffers must never panic or hang.
+        let mut empty = PixelBuffer::new(0, 0);
+        let mut bad = NightEditionView::roll(Vec2::new(60.0, 60.0), Vec2::new(1.0, 0.0), f32::NAN);
+        bad.state = NightEditionState::CarriageTell;
+        bad.rule_from = Vec2::new(f32::NAN, 0.0);
+        bad.rule_to = Vec2::new(1e12, -1e12);
+        bad.page = Vec2::new(1e9, 1e9);
+        draw_ground(&mut empty, &bad, Vec2::ZERO, (120, 120, 140));
+        draw(&mut empty, &bad, Vec2::ZERO, (120, 120, 140));
+        let mut pb = PixelBuffer::new(96, 96);
+        draw_ground(&mut pb, &bad, Vec2::ZERO, (120, 120, 140));
+        draw(&mut pb, &bad, Vec2::ZERO, (120, 120, 140));
+
+        // 2) MisprintStamp at prog=0.20 must NOT flash sheet 2 before beat 2 lands (`prog >= 0.55`).
+        let mut early = PixelBuffer::new(120, 100);
+        let mut late = PixelBuffer::new(120, 100);
+        let mut mv = NightEditionView::roll(Vec2::new(40.0, 50.0), Vec2::new(1.0, 0.0), 1.0);
+        mv.state = NightEditionState::MisprintStamp;
+        mv.page = Vec2::new(64.0, 50.0);
+        mv.margin_side = 1.0;
+        mv.progress = 0.20;
+        draw_misprint(&mut early, &mv, Vec2::ZERO, mv.progress, mv.anim);
+        mv.progress = 0.58;
+        draw_misprint(&mut late, &mv, Vec2::ZERO, mv.progress, mv.anim);
+        // Sample inside sheet 2's exclusive band (right of sheet 1, left of safe margin).
+        let rects = misprint_rects(mv.page, mv.side());
+        let s2_only_x = (rects[1].0.x + rects[1].1.x - 2.0).round() as usize;
+        let s2_y = rects[1].0.y.round() as usize;
+        // At prog=0.58 sheet 2 flashes bright red; at prog=0.20 it should be much dimmer.
+        assert!(
+            late.pixel_at(s2_only_x, s2_y).0 > early.pixel_at(s2_only_x, s2_y).0 + 25,
+            "sheet 2 should flash at beat 2 (prog=0.58), not early (prog=0.20): early={:?}, late={:?}",
+            early.pixel_at(s2_only_x, s2_y),
+            late.pixel_at(s2_only_x, s2_y),
+        );
+
+        // 3) Ribbon recovery must not paint TELL_AMBER danger carpet on the rule.
+        let mut tell_pb = PixelBuffer::new(120, 80);
+        let mut rib_pb = PixelBuffer::new(120, 80);
+        let mut rv = NightEditionView::roll(Vec2::new(30.0, 40.0), Vec2::new(1.0, 0.0), 1.0);
+        rv.rule_from = Vec2::new(20.0, 40.0);
+        rv.rule_to = Vec2::new(74.0, 40.0);
+        rv.state = NightEditionState::CarriageTell;
+        let fr_t = Frame::from_view(&rv, Vec2::ZERO, (120, 120, 140));
+        draw_rule(&mut tell_pb, &rv, Vec2::ZERO, &fr_t);
+        rv.state = NightEditionState::Ribbon;
+        let fr_r = Frame::from_view(&rv, Vec2::ZERO, (120, 120, 140));
+        draw_rule(&mut rib_pb, &rv, Vec2::ZERO, &fr_r);
+        // Midpoint of rule band: amber tell has noticeably higher red+green than subdued Ribbon track.
+        let tp = tell_pb.pixel_at(47, 42);
+        let rp = rib_pb.pixel_at(47, 42);
+        assert!(
+            (tp.0 as u16 + tp.1 as u16) > (rp.0 as u16 + rp.1 as u16) + 10,
+            "Ribbon recovery should not draw bright amber danger fill: tell={tp:?}, ribbon={rp:?}"
+        );
     }
 }

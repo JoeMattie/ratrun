@@ -2144,8 +2144,8 @@ fn draw_body(pb: &mut PixelBuffer, pose: &Pose) {
             let cover = (0.52 - d * 1.15).clamp(0.0, 1.0);
 
             if cover <= 0.0 {
-                if d < 1.32 {
-                    let rim_a = ((1.32 - d) / 0.85).clamp(0.0, 1.0) * 0.78 * a;
+                if d < 1.38 {
+                    let rim_a = ((1.38 - d) / 0.88).clamp(0.0, 1.0) * 0.92 * a;
                     blend_px(pb, x, y, pal.rim, rim_a);
                 }
                 continue;
@@ -2153,7 +2153,7 @@ fn draw_body(pb: &mut PixelBuffer, pose: &Pose) {
 
             let bg = pb.pixel_at(x as usize, y as usize);
             let mut out = if cover < 1.0 {
-                mix(bg, pal.rim, 0.78 * (1.0 - cover) * a)
+                mix(bg, pal.rim, 0.92 * (1.0 - cover) * a)
             } else {
                 bg
             };
@@ -2198,9 +2198,9 @@ fn draw_body(pb: &mut PixelBuffer, pose: &Pose) {
                     let nv = (vs / rv + dnv).clamp(-1.0, 1.0);
                     let dome = (1.0 - (nu * nu * 0.42 + nv * nv * 0.78)).clamp(0.0, 1.0);
                     let lit = pose.lit(nu, nv);
-                    let mut lum = 0.36 + 0.36 * dome + 0.58 * lit + bump_lift * (0.58 + 0.42 * lit);
-                    if lit > 0.40 && dome > 0.34 {
-                        lum += 0.18;
+                    let mut lum = 0.38 + 0.36 * dome + 0.60 * lit + bump_lift * (0.58 + 0.42 * lit);
+                    if lit > 0.34 && dome > 0.28 {
+                        lum += 0.26;
                     }
                     let mut fur = shade3(pal.shadow, pal.mid, pal.hi, lum);
 

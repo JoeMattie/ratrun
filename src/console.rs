@@ -604,6 +604,8 @@ const TP_KINDS: &[&str] = &["arena", "shop", "chest", "maze"];
 const LIGHTS_KINDS: &[&str] = &["full", "hard", "coarse", "compact"];
 const LIBRARY_KINDS: &[&str] = &["unlock", "lock"];
 const NEST_KINDS: &[&str] = &["max", "reset"];
+/// `boss <name> here`: start the fight where the rat stands.
+const BOSS_SLOTS: &[&str] = &["here"];
 /// The word that makes a command that edits the saved profile actually run.
 const CONFIRM_WORD: &[&str] = &["confirm"];
 
@@ -814,8 +816,8 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "spawn",
         aliases: &[],
-        usage: "spawn <enemy> [count] [elite]",
-        summary: "Spawn enemies around the rat.",
+        usage: "spawn <enemy|miniboss> [count] [elite]",
+        summary: "Spawn enemies (or a named miniboss) around the rat.",
         args: &[ArgKind::Enemy, ArgKind::Text, ArgKind::Text],
         read_only: false,
         handler: cmd_spawn,
@@ -832,9 +834,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "boss",
         aliases: &[],
-        usage: "boss [kind]",
+        usage: "boss [kind] [here]",
         summary: "Start the floor's boss fight now (or a named boss).",
-        args: &[ArgKind::Boss],
+        args: &[ArgKind::Boss, ArgKind::Words(BOSS_SLOTS)],
         read_only: false,
         handler: cmd_boss,
     },
@@ -1147,6 +1149,80 @@ pub fn slug(s: &str) -> String {
         .collect()
 }
 
+/// A name's slug plus the same name without its leading article, when it has
+/// one: `"The Mudlark"` → `["themudlark", "mudlark"]`. Only a real article is
+/// dropped — `"Thermite"` keeps its whole word.
+fn slug_and_bare(name: &str) -> Vec<String> {
+    let full = slug(name);
+    let mut out = vec![full.clone()];
+    let trimmed = name.trim_start();
+    for article in ["The ", "THE ", "the "] {
+        if let Some(rest) = trimmed.strip_prefix(article) {
+            let bare = slug(rest);
+            if !bare.is_empty() && bare != full {
+                out.push(bare);
+            }
+            break;
+        }
+    }
+    out
+}
+
+/// Extra short forms the console accepts for a boss, beyond its internal name
+/// and the plate the HUD shows. Every entry is already a [`slug`].
+///
+/// The plate names (`render::hud::boss_codename_kind`) cover the printable
+/// half — `apex jaguar`, `the sweeper`, `turf-reaper mk.iv`, `the night
+/// edition`, `subject r-01`, `the redtail`, `king cobra` — and these are what a
+/// player who has only read the boss bar would shorten them to.
+const BOSS_SHORT_NAMES: &[(BossKind, &[&str])] = &[
+    // The Sewer's jaguar: `cat` is the internal name, `apex jaguar` the bar.
+    (BossKind::Cat, &["jaguar", "junglecat"]),
+    (BossKind::Broom, &[]),
+    // `TURF-REAPER MK.IV` slugs to `turfreapermkiv`; a player types the front.
+    (BossKind::Mower, &["turfreaper", "reaper"]),
+    (BossKind::Mangle, &["wringer"]),
+    (BossKind::NightEdition, &["press"]),
+    (BossKind::Magpie, &[]),
+    (BossKind::HorseshoeCrab, &["crab"]),
+    (BossKind::MegaRat, &["r01"]),
+    (BossKind::Hawk, &[]),
+    (BossKind::Cobra, &[]),
+];
+
+/// Every name `boss` accepts for `kind`: the internal name, the HUD plate's
+/// slug (with and without its article), then the short forms. Case and
+/// punctuation never matter, because every entry is a [`slug`].
+fn boss_names(kind: BossKind) -> Vec<String> {
+    let mut out = Vec::new();
+    let plate = crate::render::hud::boss_codename_kind(kind).0;
+    for name in [kind.name(), plate] {
+        for candidate in slug_and_bare(name) {
+            if !out.contains(&candidate) {
+                out.push(candidate);
+            }
+        }
+    }
+    let shorts = BOSS_SHORT_NAMES
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, names)| *names)
+        .unwrap_or(&[]);
+    for short in shorts {
+        let short = (*short).to_string();
+        if !out.contains(&short) {
+            out.push(short);
+        }
+    }
+    out
+}
+
+/// The same for a named miniboss, whose names are printed with their article
+/// (`"The Mudlark"`): `themudlark` and `mudlark` both work.
+fn miniboss_names(kind: MinibossKind) -> Vec<String> {
+    slug_and_bare(kind.name())
+}
+
 // ============================================================================
 // Completion candidates — always derived from the real tables.
 // ============================================================================
@@ -1158,9 +1234,19 @@ pub fn candidates(kind: ArgKind) -> Vec<String> {
         ArgKind::Words(words) => words.iter().map(|s| s.to_string()).collect(),
         ArgKind::Weapon => WeaponKind::all().iter().map(|w| slug(w.name())).collect(),
         ArgKind::Passive => PassiveKind::all().iter().map(|p| slug(p.name())).collect(),
-        ArgKind::Enemy => EnemyKind::all().iter().map(|e| slug(e.name())).collect(),
-        ArgKind::Boss => BossKind::all().iter().map(|b| slug(b.name())).collect(),
-        ArgKind::Miniboss => MinibossKind::all().iter().map(|m| slug(m.name())).collect(),
+        // `spawn` answers to a named miniboss too (`spawn mudlark`): the body
+        // is an ordinary enemy with a `Miniboss` component on it.
+        ArgKind::Enemy => {
+            let mut out: Vec<String> =
+                EnemyKind::all().iter().map(|e| slug(e.name())).collect();
+            out.extend(MinibossKind::all().iter().flat_map(|m| miniboss_names(*m)));
+            out
+        }
+        ArgKind::Boss => BossKind::all().iter().flat_map(|b| boss_names(*b)).collect(),
+        ArgKind::Miniboss => MinibossKind::all()
+            .iter()
+            .flat_map(|m| miniboss_names(*m))
+            .collect(),
         ArgKind::Pickup => PickupKind::all()
             .iter()
             .flat_map(|p| [slug(p.name()), slug(p.label())])
@@ -1381,6 +1467,25 @@ fn parse_u32(arg: &str, what: &str) -> Result<u32, String> {
         .map_err(|_| format!("expected a whole number for {what}, got `{arg}`"))
 }
 
+/// Print a name table into the scrollback, wrapped so a long table fits the
+/// console panel instead of being cut off by it.
+fn list_names(app: &mut crate::app::App, title: &str, names: &[String]) {
+    app.console_line(title.to_string(), LineKind::Info);
+    let mut line = String::from("  ");
+    for name in names {
+        if line.len() + name.len() + 2 > 70 {
+            app.console_line(line.trim_end().to_string(), LineKind::Output);
+            line.clear();
+            line.push_str("  ");
+        }
+        line.push_str(name);
+        line.push_str("  ");
+    }
+    if !line.trim().is_empty() {
+        app.console_line(line.trim_end().to_string(), LineKind::Output);
+    }
+}
+
 fn cmd_help(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
     if let Some(name) = args.first() {
         let Some(cmd) = find_command(&name.to_ascii_lowercase()) else {
@@ -1389,6 +1494,32 @@ fn cmd_help(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
         app.console_line(format!("{} — {}", cmd.usage, cmd.summary), LineKind::Info);
         if !cmd.aliases.is_empty() {
             app.console_line(format!("aliases: {}", cmd.aliases.join(", ")), LineKind::Info);
+        }
+        // The name tables are long, so only the commands that take a whole one
+        // spell out how their argument is spelled.
+        match cmd.name {
+            "boss" => {
+                app.console_line(
+                    "names: the internal name, the boss bar's plate, or a short form — case and",
+                    LineKind::Info,
+                );
+                app.console_line(
+                    "punctuation are ignored, so `cat`, `jaguar`, `apex jaguar` and `jungle cat`",
+                    LineKind::Info,
+                );
+                app.console_line(
+                    "all start the same fight. `boss <name> here` starts it where the rat stands.",
+                    LineKind::Info,
+                );
+            }
+            "miniboss" | "spawn" => {
+                app.console_line(
+                    "names ignore case and punctuation, and a leading `the` is optional",
+                    LineKind::Info,
+                );
+                app.console_line("(`spawn mudlark` is The Mudlark).", LineKind::Info);
+            }
+            _ => {}
         }
         return Ok(());
     }
@@ -1742,31 +1873,70 @@ fn cmd_killall(app: &mut crate::app::App, _args: &[&str]) -> Result<(), String> 
 }
 
 fn cmd_spawn(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
+    let name = args
+        .first()
+        .ok_or("usage: spawn <enemy|miniboss> [count] [elite]")?
+        .to_string();
+    // A named miniboss is spawnable here too: the body it spawns is an ordinary
+    // `Enemy` with a `Miniboss` component on it.
+    let enemy = find_enemy(&name);
+    let miniboss = if enemy.is_none() {
+        find_miniboss(&name)
+    } else {
+        None
+    };
+    if enemy.is_none() && miniboss.is_none() {
+        list_names(
+            app,
+            &format!("`{name}` is not a body `spawn` knows — the ones you can name:"),
+            &candidates(ArgKind::Enemy),
+        );
+        return Err(format!("unknown enemy `{name}`"));
+    }
     let Some(world) = app.world_mut() else {
         return Err("no run in progress".into());
     };
-    let name = args.first().ok_or("usage: spawn <enemy> [count] [elite]")?;
-    let kind = find_enemy(name).ok_or_else(|| format!("unknown enemy `{name}`"))?;
     let count = parse_count(args.get(1), "count")?;
-    let elite = args.get(2).is_some_and(|s| s.eq_ignore_ascii_case("elite"));
     let pos = world.player.pos;
-    for i in 0..count {
-        world.spawn_enemy_near(kind, pos, i as f32, elite);
-    }
-    app.console_line(
-        format!("spawned {count} {}{}", kind.name(), if elite { " (elite)" } else { "" }),
-        LineKind::Success,
-    );
+    let message = if let Some(kind) = enemy {
+        let elite = args.get(2).is_some_and(|s| s.eq_ignore_ascii_case("elite"));
+        for i in 0..count {
+            world.spawn_enemy_near(kind, pos, i as f32, elite);
+        }
+        format!(
+            "spawned {count} {}{}",
+            kind.name(),
+            if elite { " (elite)" } else { "" }
+        )
+    } else {
+        let kind = miniboss.expect("a name that is neither is refused above");
+        for i in 0..count {
+            world.spawn_miniboss(kind, 0, pos + crate::math::Vec2::new(i as f32 * 22.0, 0.0));
+        }
+        format!("spawned {count} {} (miniboss)", kind.name())
+    };
+    app.console_line(message, LineKind::Success);
     Ok(())
 }
 
 fn cmd_miniboss(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
+    let named = args.first().copied();
+    let kind = match named {
+        Some(name) => match find_miniboss(name) {
+            Some(kind) => kind,
+            None => {
+                list_names(
+                    app,
+                    &format!("`{name}` is not a miniboss — the ones you can name:"),
+                    &candidates(ArgKind::Miniboss),
+                );
+                return Err(format!("unknown miniboss `{name}`"));
+            }
+        },
+        None => MinibossKind::all()[0],
+    };
     let Some(world) = app.world_mut() else {
         return Err("no run in progress".into());
-    };
-    let kind = match args.first() {
-        Some(name) => find_miniboss(name).ok_or_else(|| format!("unknown miniboss `{name}`"))?,
-        None => MinibossKind::all()[0],
     };
     let pos = world.player.pos;
     world.spawn_miniboss_near(kind, pos);
@@ -1775,15 +1945,44 @@ fn cmd_miniboss(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> 
 }
 
 fn cmd_boss(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
+    // `boss <name> here` and `boss here` start the fight where the rat stands;
+    // without the word nothing changes (the floor's own arrival).
+    let here = args.iter().any(|a| slug(a) == "here");
+    let named = args.iter().find(|a| slug(a) != "here").copied();
+    let kind = match named {
+        Some(name) => match find_boss(name) {
+            Some(kind) => kind,
+            None => {
+                list_names(
+                    app,
+                    &format!("`{name}` is not a boss — the ones you can name:"),
+                    &candidates(ArgKind::Boss),
+                );
+                return Err(format!("unknown boss `{name}`"));
+            }
+        },
+        None => {
+            let Some(world) = app.world_ref() else {
+                return Err("no run in progress".into());
+            };
+            BossKind::for_theme(world.level.theme)
+        }
+    };
     let Some(world) = app.world_mut() else {
         return Err("no run in progress".into());
     };
-    let kind = match args.first() {
-        Some(name) => find_boss(name).ok_or_else(|| format!("unknown boss `{name}`"))?,
-        None => BossKind::for_theme(world.level.theme),
-    };
-    world.force_boss(kind);
-    app.console_line(format!("boss fight started: {}", kind.name()), LineKind::Success);
+    if here {
+        if !world.force_boss_here(kind) {
+            return Err("a boss is already on the floor".into());
+        }
+        app.console_line(
+            format!("boss fight started here: {}", kind.name()),
+            LineKind::Success,
+        );
+    } else {
+        world.force_boss(kind);
+        app.console_line(format!("boss fight started: {}", kind.name()), LineKind::Success);
+    }
     Ok(())
 }
 
@@ -2277,12 +2476,16 @@ fn find_enemy(name: &str) -> Option<EnemyKind> {
 
 fn find_boss(name: &str) -> Option<BossKind> {
     let s = slug(name);
-    BossKind::all().into_iter().find(|b| slug(b.name()) == s)
+    BossKind::all()
+        .into_iter()
+        .find(|b| boss_names(*b).contains(&s))
 }
 
 fn find_miniboss(name: &str) -> Option<MinibossKind> {
     let s = slug(name);
-    MinibossKind::all().into_iter().find(|m| slug(m.name()) == s)
+    MinibossKind::all()
+        .into_iter()
+        .find(|m| miniboss_names(*m).contains(&s))
 }
 
 fn find_pickup(name: &str) -> Option<PickupKind> {
@@ -2356,6 +2559,17 @@ mod tests {
         );
         app.start_campaign_at(0, None).expect("a campaign starts");
         app
+    }
+
+    /// Every console line, joined, for the tests that check what a command
+    /// printed.
+    fn scrollback(app: &crate::app::App) -> String {
+        app.console
+            .output
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     // ---- Presentation state ---------------------------------------------
@@ -2846,6 +3060,196 @@ mod tests {
             "the depth guard never spoke"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- Boss and miniboss names (batch 8) --------------------------------
+
+    /// Every name a player is likely to type, case and punctuation aside.
+    #[test]
+    fn boss_alias_lookup_ignores_case_and_punctuation() {
+        for (name, kind) in [
+            ("cat", BossKind::Cat),
+            ("Jaguar", BossKind::Cat),
+            ("apex jaguar", BossKind::Cat),
+            ("APEX-JAGUAR", BossKind::Cat),
+            ("jungle cat", BossKind::Cat),
+            ("broom", BossKind::Broom),
+            ("sweeper", BossKind::Broom),
+            ("THE SWEEPER", BossKind::Broom),
+            ("mower", BossKind::Mower),
+            ("turfreaper", BossKind::Mower),
+            ("TURF-REAPER MK.IV", BossKind::Mower),
+            ("reaper", BossKind::Mower),
+            ("horseshoe crab", BossKind::HorseshoeCrab),
+            ("horseshoe", BossKind::HorseshoeCrab),
+            ("crab", BossKind::HorseshoeCrab),
+            ("megarat", BossKind::MegaRat),
+            ("r01", BossKind::MegaRat),
+            ("R-01", BossKind::MegaRat),
+            ("subject r-01", BossKind::MegaRat),
+            ("hawk", BossKind::Hawk),
+            ("redtail", BossKind::Hawk),
+            ("the redtail", BossKind::Hawk),
+            ("cobra", BossKind::Cobra),
+            ("king cobra", BossKind::Cobra),
+            ("KING-COBRA", BossKind::Cobra),
+            ("nightedition", BossKind::NightEdition),
+            ("the night edition", BossKind::NightEdition),
+            ("press", BossKind::NightEdition),
+            ("mangle", BossKind::Mangle),
+            ("THE MANGLE", BossKind::Mangle),
+            ("wringer", BossKind::Mangle),
+            ("magpie", BossKind::Magpie),
+            ("The Magpie", BossKind::Magpie),
+        ] {
+            assert_eq!(find_boss(name), Some(kind), "`{name}` did not resolve");
+        }
+        assert_eq!(find_boss("triceratops"), None);
+    }
+
+    #[test]
+    fn boss_completion_offers_the_aliases_and_here() {
+        let offered = candidates(ArgKind::Boss);
+        for name in [
+            "jaguar",
+            "junglecat",
+            "apexjaguar",
+            "sweeper",
+            "turfreaper",
+            "reaper",
+            "horseshoe",
+            "crab",
+            "r01",
+            "subjectr01",
+            "redtail",
+            "kingcobra",
+            "the night edition",
+            "press",
+            "wringer",
+        ] {
+            let name = slug(name);
+            assert!(offered.contains(&name), "completion is missing `{name}`");
+        }
+        // `boss <name> <Tab>` offers the one word the second slot takes, and
+        // Tab fills it in because it is the only candidate.
+        let mut c = Console::new();
+        c.open_panel();
+        c.input = "boss cat h".into();
+        c.cursor = c.input.len();
+        assert_eq!(complete(&c), vec!["here".to_string()]);
+        assert_eq!(begin_completion(&mut c), 1);
+        assert_eq!(c.input, "boss cat here");
+    }
+
+    #[test]
+    fn boss_accepts_a_display_name_on_the_command_line() {
+        let mut app = fresh_app();
+        run_command(&mut app, "boss Apex-Jaguar").expect("apex jaguar");
+        let world = app.world_ref().expect("a run is up");
+        assert_eq!(world.boss_override, Some(BossKind::Cat));
+    }
+
+    #[test]
+    fn an_unknown_boss_name_lists_the_ones_that_work() {
+        let mut app = fresh_app();
+        let e = run_command(&mut app, "boss triceratops").unwrap_err();
+        assert!(e.contains("triceratops"), "expected the name, got {e}");
+        let text = scrollback(&app);
+        assert!(text.contains("jaguar"), "the valid names were never listed: {text}");
+        assert!(text.contains("sweeper"), "the list stopped before the second boss: {text}");
+    }
+
+    #[test]
+    fn spawn_takes_a_miniboss_name_with_or_without_its_article() {
+        use crate::game::ecs::systems::miniboss::Miniboss;
+        for name in ["mudlark", "themudlark", "THE-MUDLARK", "Wringer Boy"] {
+            assert!(find_miniboss(name).is_some(), "`{name}` did not resolve");
+        }
+        for name in ["foreman", "roadatlas", "wringerboy"] {
+            assert!(find_miniboss(name).is_some(), "`{name}` did not resolve");
+        }
+        // A miniboss body is spawnable through `spawn`, and the completion
+        // offers its short name.
+        assert!(candidates(ArgKind::Enemy).contains(&"mudlark".to_string()));
+        let mut app = fresh_app();
+        run_command(&mut app, "spawn mudlark").expect("spawn mudlark");
+        let world = app.world_ref().expect("a run is up");
+        let spawned = world
+            .ecs
+            .iter_entities()
+            .any(|e| e.get::<Miniboss>().is_some());
+        assert!(spawned, "`spawn mudlark` spawned no miniboss");
+    }
+
+    #[test]
+    fn an_unknown_spawn_name_lists_the_bodies() {
+        let mut app = fresh_app();
+        let e = run_command(&mut app, "spawn triceratops").unwrap_err();
+        assert!(e.contains("triceratops"), "expected the name, got {e}");
+        let text = scrollback(&app);
+        assert!(text.contains("skitterer"), "the enemy names were never listed: {text}");
+        assert!(text.contains("mudlark"), "the miniboss names were never listed: {text}");
+    }
+
+    /// `boss <name> here` starts the fight where the rat stands: a clear cell
+    /// beside it, in an arena centred on it.
+    #[test]
+    fn boss_here_spawns_beside_the_rat_in_a_centred_arena() {
+        use crate::game::collision::SizeClass;
+        use crate::game::ecs::systems::boss::Boss;
+        let mut app = fresh_app();
+        run_command(&mut app, "boss jaguar here").expect("boss here");
+        assert!(app.console_cheat, "`boss ... here` must flag the run");
+        let world = app.world_ref().expect("a run is up");
+        let rat = world.player.pos;
+        let (pos, arena) = world
+            .ecs
+            .iter_entities()
+            .find_map(|e| e.get::<Boss>().map(|b| (b.pos, b.arena)))
+            .expect("the boss was never spawned");
+        let dist = pos.dist(rat);
+        assert!(
+            (40.0..=80.0).contains(&dist),
+            "the boss landed {dist:.1} px from the rat"
+        );
+        let (cx, cy) = crate::game::collision::cell_of(pos);
+        assert!(
+            world.level.tiles.passable(cx, cy, SizeClass::Large),
+            "the boss landed in a wall at {cx},{cy}"
+        );
+        assert!(world.level.pit_at(pos).is_none(), "the boss landed in a pit");
+        assert!(arena.contains_world(rat), "the arena is not centred on the rat");
+        assert!(arena.contains_world(pos), "the arena does not hold the boss");
+        // The floor's real arena's own size, recentred and clamped to the map.
+        let real = world
+            .level
+            .boss_room()
+            .expect("a generated level has an arena")
+            .rect;
+        assert_eq!((arena.w, arena.h), (real.w, real.h), "arena size drifted");
+        assert!(arena.x >= 0 && arena.y >= 0);
+        assert!(arena.right() <= world.level.tiles.cols());
+        assert!(arena.bottom() <= world.level.tiles.rows());
+    }
+
+    #[test]
+    fn boss_here_refuses_a_second_boss() {
+        let mut app = fresh_app();
+        run_command(&mut app, "boss here").expect("boss here");
+        let e = run_command(&mut app, "boss cat here").unwrap_err();
+        assert!(e.contains("already"), "expected a refusal, got {e}");
+    }
+
+    /// Without `here` nothing changed: the kind rides the one-shot override to
+    /// the next tick's boss spawn, in the floor's own arena.
+    #[test]
+    fn boss_without_here_still_queues_the_floor_arrival() {
+        use crate::game::ecs::systems::boss::Boss;
+        let mut app = fresh_app();
+        run_command(&mut app, "boss").expect("boss");
+        let world = app.world_ref().expect("a run is up");
+        assert_eq!(world.boss_override, Some(BossKind::for_theme(world.level.theme)));
+        assert!(!world.ecs.iter_entities().any(|e| e.contains::<Boss>()));
     }
 
     // ---- Availability ----------------------------------------------------

@@ -107,6 +107,11 @@ pub(super) fn light(
             light.color = secondary;
             light.energy = 0.67;
             light.height = 15.0;
+            // A corridor lamp is a small source: the soft, long tail carries
+            // it down the passage without a hard pool edge.
+            if light.falloff == Falloff::Smooth {
+                light.falloff = Falloff::Small;
+            }
         }
         Kind::Arena => {
             light.color = if fixture.seed & 1 == 0 {
@@ -154,6 +159,11 @@ pub(super) fn light(
             };
             light.scatter = light.energy * 0.30;
             light.color = secondary;
+            // A dying bulb is a small source too, so its infrequent flash has
+            // a soft skirt rather than a ring.
+            if light.falloff == Falloff::Smooth {
+                light.falloff = Falloff::Small;
+            }
         }
         Kind::Sun => {
             let angle = 0.85 + (scene.elapsed * 0.043).sin() * 0.27;

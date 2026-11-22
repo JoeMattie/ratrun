@@ -11413,14 +11413,14 @@ fn wrap_phase(p: f32) -> f32 {
 }
 
 #[inline(always)]
-fn fast_tri(p: f32) -> f32 {
+pub(crate) fn fast_tri(p: f32) -> f32 {
     2.0 * (2.0 * p - 1.0).abs() - 1.0
 }
 
 /// Fast, branch-light sine approximation on phase `p in [0, 1)` (max error < 0.0011,
 /// exact 0 at 0 and 0.5, exact ±1 at 0.25 and 0.75, zero libm calls).
 #[inline(always)]
-fn fast_sin_unit(p: f32) -> f32 {
+pub(crate) fn fast_sin_unit(p: f32) -> f32 {
     let u = p * 2.0;
     let y = if u < 1.0 {
         4.0 * u * (1.0 - u)
@@ -11433,7 +11433,7 @@ fn fast_sin_unit(p: f32) -> f32 {
 
 /// Division-free PolyBLEP residual using precomputed `inv_dt = 1.0 / dt`.
 #[inline(always)]
-fn poly_blep_fast(t: f32, dt: f32, inv_dt: f32) -> f32 {
+pub(crate) fn poly_blep_fast(t: f32, dt: f32, inv_dt: f32) -> f32 {
     if t < dt {
         let u = t * inv_dt;
         u + u - u * u - 1.0
@@ -11447,7 +11447,7 @@ fn poly_blep_fast(t: f32, dt: f32, inv_dt: f32) -> f32 {
 
 /// DC-centered, division-free PolyBLEP pulse oscillator (zero DC bias at every duty cycle).
 #[inline(always)]
-fn fast_pulse_dc_free(p: f32, dt: f32, inv_dt: f32, duty: f32, dc_bias: f32) -> f32 {
+pub(crate) fn fast_pulse_dc_free(p: f32, dt: f32, inv_dt: f32, duty: f32, dc_bias: f32) -> f32 {
     let raw = if p < duty { 1.0 } else { -1.0 };
     let mut p2 = p - duty;
     if p2 < 0.0 {
@@ -11459,7 +11459,7 @@ fn fast_pulse_dc_free(p: f32, dt: f32, inv_dt: f32, duty: f32, dc_bias: f32) -> 
 
 /// Fast rational Padé soft clipper approximating `tanh(x)` without transcendentals.
 #[inline(always)]
-fn fast_tanh(x: f32) -> f32 {
+pub(crate) fn fast_tanh(x: f32) -> f32 {
     let x = x.clamp(-3.0, 3.0);
     let x2 = x * x;
     x * (27.0 + x2) / (27.0 + 9.0 * x2)
@@ -12551,8 +12551,16 @@ impl AudioEngine {
     pub fn play_music(&mut self, theme: Theme, intensity: u32) {
         self.intensity.store(intensity, Ordering::Relaxed);
         self.music.clear();
-        let synth = MusicSynth::new(theme, self.intensity.clone());
-        self.music.append(synth);
+        // The floor's song (generated from the owner's MIDI stems) is the
+        // default track; `RATRUN_MUSIC=classic` keeps the pre-MIDI chiptune
+        // synth, which stays untouched and fully tested behind this switch.
+        if crate::music::classic_requested() {
+            let synth = MusicSynth::new(theme, self.intensity.clone());
+            self.music.append(synth);
+        } else {
+            let synth = crate::music::SongSynth::new(theme, self.intensity.clone());
+            self.music.append(synth);
+        }
         self.apply_volumes();
         self.music.play();
     }

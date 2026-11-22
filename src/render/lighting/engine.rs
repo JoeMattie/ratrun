@@ -9,6 +9,36 @@
 //!   [`LayerMask`], [`ShadowSoftness`], [`ShadowColor`] — what a light is.
 //!   Radii are world pixels, cone half-angles radians; receiver and occluder
 //!   masks are independent.
+//!
+//! ## Small lights and the darker base level (batch 8)
+//!
+//! A small source — a projectile, orbiter or enemy halo, a gem, gold, a pickup
+//! or chest, an ember or pilot light, an emissive prop, a fixture smaller than
+//! a room lamp — uses [`Falloff::Small`]: the smooth core it always had plus a
+//! faint, long tail out to [`TAIL_REACH`] times its stated radius. The tail is
+//! `TAIL_SHARE * (1 - u²)²` with `u = d / reach`, so it is exactly zero at the
+//! end of the reach (no edge, no ring) and is skippable: `TAIL_SHARE` is a
+//! share of the core, so 60 % of the reach already carries under 8 % of it.
+//! Large lights — the Arena fixtures, the sun and the rat's own aura — keep
+//! their size and their own curves.
+//!
+//! The tail is not free: a moving halo is what makes the terminal repaint
+//! cells, and a tail that creeps with every flicker would repaint a whole room
+//! for a light that is barely there. Two rules keep the cost down. The tail is
+//! quantised into flat steps of at most one output level ([`MIN_GAIN`] in
+//! `Q8.8` units, so four coarse levels for a typical halo), and it is added
+//! *after* the flicker, so a breathing flame animates its core only. And any
+//! contribution below that same level is exactly zero: it could not change a
+//! pixel, and painting it would repaint cells for nothing.
+//!
+//! The ambient is the same story from the other side. Every floor's and zone's
+//! base level is [`AMBIENT_SCALE`] of its theme tint (never below
+//! [`AMBIENT_FLOOR`]), so the room is a dark floor with pools of light on it,
+//! not a lit room. Tints and the zone ordering are untouched.
+//!
+//! Ordinary enemy bodies are drawn before this pass. [`LightMap::mark_glint`]
+//! keeps one pixel of each body lit in the body's own colour, so a silhouette
+//! still reads outside any pool.
 //! * [`LightMap`] — owns its scratch buffers, the occluder set and the cached
 //!   angular visibility profiles, so a steady frame allocates nothing.
 //!
@@ -136,11 +166,16 @@ pub enum Blend {
     Mix,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Falloff {
     Smooth,
     Linear,
     Hard,
+    /// A small pool: the smooth core unchanged, plus a faint long tail
+    /// ([`TAIL_SHARE`]) out to [`TAIL_REACH`] times the stated radius and
+    /// exactly zero at the end of it. The tail is painted in flat steps of at
+    /// most one output level and is not animated by the flicker.
+    Small,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,6 +261,104 @@ impl Light {
             occluders: LayerMask::ALL,
         }
     }
+
+    /// How far this light reaches in world pixels: its shape's own extent, and
+    /// for a small pool the whole length of its soft tail.
+    pub(super) fn extent(&self) -> f32 {
+        let extent = self.shape.extent();
+        if self.falloff == Falloff::Small {
+            extent * TAIL_REACH
+        } else {
+            extent
+        }
+    }
+}
+
+/// The falloff of one light, with the per-sample reciprocals hoisted out of
+/// the pixel loop.
+///
+/// The core is the light's own shape weight (for a radial light
+/// `1 - d²/r²`, squared for [`Falloff::Smooth`]). A [`Falloff::Small`] light
+/// adds a raw tail `TAIL_SHARE * (1 - u²)²` — `u = d / reach` — which
+/// [`Curve::quantise`] steps in coarse levels and which is exactly zero from
+/// the end of the reach. The parts are returned separately so the caller can
+/// flicker the core and leave the tail steady.
+#[derive(Clone, Copy)]
+pub(super) struct Curve {
+    light: Light,
+    inv_core: f32,
+    inv_reach: f32,
+    small: bool,
+    /// The light's peak contribution at weight 1, in `Q8.8` multiplier units:
+    /// the brightest channel times the energy and scatter it can add.
+    gain: f32,
+}
+
+impl Curve {
+    pub(super) fn new(light: &Light) -> Self {
+        let core = light.shape.extent().max(0.001);
+        let reach = light.extent().max(0.001);
+        let peak = f32::from(light.color.0.max(light.color.1).max(light.color.2));
+        Self {
+            light: *light,
+            inv_core: 1.0 / (core * core),
+            inv_reach: 1.0 / (reach * reach),
+            small: light.falloff == Falloff::Small
+                && matches!(light.shape, LightShape::Radial { .. }),
+            gain: (peak * (light.energy.abs() + light.scatter.abs())).max(1e-3),
+        }
+    }
+
+    /// The light's peak contribution at weight 1, in `Q8.8` units.
+    pub(super) fn gain(&self) -> f32 {
+        self.gain
+    }
+
+    /// How much a falloff weight must change to move one channel of one pixel
+    /// by a whole `Q8.8` level at this light's brightness. This is also the
+    /// smallest contribution worth painting.
+    pub(super) fn step(&self) -> f32 {
+        MIN_GAIN / self.gain
+    }
+
+    /// The raw `(core, tail)` at squared distance `d2` from the light. The
+    /// shape, not the terminal: [`Curve::quantise`] is what a pixel sees.
+    pub(super) fn parts(&self, delta: Vec2, d2: f32, cone_limit: f32) -> (f32, f32) {
+        let w = if matches!(self.light.shape, LightShape::Radial { .. }) {
+            1.0 - d2 * self.inv_core
+        } else {
+            self.light.shape.weight(delta, cone_limit)
+        };
+        if self.small {
+            let core = if w > 0.0 { w * w } else { 0.0 };
+            let q = d2 * self.inv_reach;
+            if q >= 1.0 {
+                return (core, 0.0);
+            }
+            let a = 1.0 - q;
+            return (core, a * a * TAIL_SHARE);
+        }
+        if w <= 0.0 {
+            return (0.0, 0.0);
+        }
+        let core = match self.light.falloff {
+            Falloff::Linear => w,
+            Falloff::Hard => (w * 1.6).min(1.0),
+            Falloff::Smooth | Falloff::Small => w * w,
+        };
+        (core, 0.0)
+    }
+
+    /// The flat steps the far tail is painted in: never more than one output
+    /// level each, so a still frame's changed cells do not grow and the end of
+    /// the pool cannot ring.
+    pub(super) fn quantise(&self, tail: f32) -> f32 {
+        let step = self.step();
+        if tail < step {
+            return 0.0;
+        }
+        (tail / step).floor() * step
+    }
 }
 
 // Existing combat art supplies small screen-space pools using this adapter.
@@ -258,8 +391,30 @@ const MAX_BACKOFF: u8 = 4;
 /// Share of the gap the ambient cap closes per frame (about 0.4 s at 60 FPS).
 const CAP_EASE: f32 = 0.12;
 
+/// Share of a small light's core emission that carries into its soft tail.
+/// The tail is `TAIL_SHARE * (1 - u²)²` for `u = distance / reach`, so 60 % of
+/// the reach already holds under 8 % of the core.
+pub(super) const TAIL_SHARE: f32 = 0.19;
+/// How far a small light reaches, as a multiple of its stated radius.
+pub(super) const TAIL_REACH: f32 = 1.7;
+/// The largest stated radius a _point_ light may have and still count as a
+/// small pool. Above it the source is a room-scale light (the rat's aura, a
+/// boss presence, a nuke, an arena fixture) and keeps its own size.
+const SMALL_LIGHT_MAX: f32 = 52.0;
+/// A contribution this small in `Q8.8` multiplier units cannot move a mid-tone
+/// pixel by a whole level, so it is exactly zero: it would only repaint cells
+/// as the light breathes.
+pub(super) const MIN_GAIN: f32 = 2.0;
+/// The base level of every floor and zone, as a share of the theme's tint.
+/// Batch 8 lowered it by 40 %: the room is a dark floor with pools of light on
+/// it, so the pools, the auras and the enemy glints read as light.
+pub(super) const AMBIENT_SCALE: f32 = 0.60;
+/// The darkest a floor can be, in `Q8.8` (`5.5 %`): no zone and no theme is
+/// ever pure black, so shapes still read by their own tint.
+pub(super) const AMBIENT_FLOOR: u16 = 14;
+
 /// Ambient gain of a light zone; `None` is unzoned floor.
-fn zone_gain(zone: Option<LightZoneKind>) -> f32 {
+pub(super) fn zone_gain(zone: Option<LightZoneKind>) -> f32 {
     match zone {
         Some(LightZoneKind::Start) => 0.95,
         Some(LightZoneKind::Room) => 0.80,
@@ -269,6 +424,14 @@ fn zone_gain(zone: Option<LightZoneKind>) -> f32 {
         Some(LightZoneKind::Maze) => 0.25,
         None => 0.70,
     }
+}
+
+/// The ambient multiplier of one sample, in `Q8.8`: the theme's tint times the
+/// zone's gain, lowered by [`AMBIENT_SCALE`] and never below [`AMBIENT_FLOOR`].
+#[inline]
+pub(super) fn ambient_level(theme_mul: u16, gain: f32) -> u16 {
+    let level = (f32::from(theme_mul) * gain * AMBIENT_SCALE) as u16;
+    level.max(AMBIENT_FLOOR)
 }
 
 pub(super) struct Candidates {
@@ -302,6 +465,9 @@ struct Mark {
     index: usize,
     source: Rgb,
     readable: bool,
+    /// `Some(tint)`: keep the drawn pixel but lift it to at least `tint`. This
+    /// is the enemy rim — a self-lit pixel that the darkness cannot swallow.
+    glint: Option<Rgb>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -358,6 +524,9 @@ pub struct LightMap {
     pub(super) lights: Candidates,
     shaped: Vec<(Light, u8)>,
     marks: Vec<Mark>,
+    /// Screen-space enemy rim glints for this frame, filled by the gather and
+    /// stamped as marks once the sprites are final (`sources.rs`).
+    pub(super) rims: Vec<(i32, i32, Rgb)>,
     grid: Grid,
     geometry: Geometry,
     static_shadows: Vec<ShadowProfile>,
@@ -388,6 +557,7 @@ impl LightMap {
             },
             shaped: Vec::with_capacity(MAX_SHAPED),
             marks: Vec::with_capacity(MAX_MARKS),
+            rims: Vec::new(),
             grid: Grid::default(),
             geometry: Geometry::default(),
             static_shadows: Vec::new(),
@@ -456,6 +626,7 @@ impl LightMap {
     pub fn begin_frame(&mut self) {
         self.shaped.clear();
         self.marks.clear();
+        self.rims.clear();
     }
 
     /// Submit a light for this frame. The list holds `MAX_SHAPED`; once full,
@@ -471,6 +642,8 @@ impl LightMap {
         let mut light = Light::radial(pos, radius, color, strength);
         light.scatter = strength * 0.32;
         light.casts_shadow = false;
+        // A halo is the archetypal small light: bright core, long faint tail.
+        light.falloff = Falloff::Small;
         self.push_shaped(light, 1);
     }
 
@@ -486,6 +659,22 @@ impl LightMap {
 
     pub fn mark_readable(&mut self, pb: &PixelBuffer, x: i32, y: i32) {
         self.mark(pb, x, y, true);
+    }
+
+    /// Keep one pixel of a body lit in `tint` whatever the ambient and the
+    /// lights do. Ordinary enemies are drawn *before* the lighting pass, so
+    /// without this a body in an unlit room is indistinguishable from the
+    /// floor; a rim glint leaves the silhouette and its own colour readable.
+    pub fn mark_glint(&mut self, pb: &PixelBuffer, x: i32, y: i32, tint: Rgb) {
+        if x >= 0 && y >= 0 && x < pb.w as i32 && y < pb.h as i32 && self.marks.len() < MAX_MARKS {
+            let index = y as usize * pb.w + x as usize;
+            self.marks.push(Mark {
+                index,
+                source: pb.pixels()[index],
+                readable: false,
+                glint: Some(tint),
+            });
+        }
     }
 
     pub fn mark_emissive_highlights(&mut self, pb: &PixelBuffer, center: (i32, i32), radius: i32) {
@@ -507,6 +696,7 @@ impl LightMap {
                 index,
                 source: pb.pixels()[index],
                 readable,
+                glint: None,
             });
         }
     }
@@ -556,6 +746,12 @@ impl LightMap {
             let _p = crate::prof::scope(crate::prof::Stage::LGather);
             self.gather_lights(pb.w, pb.h, scene)
         };
+        // Enemy rim glints: taken now, while the body pixels are final and the
+        // lighting has not yet covered them.
+        for i in 0..self.rims.len() {
+            let (x, y, tint) = self.rims[i];
+            self.mark_glint(pb, x, y, tint);
+        }
         crate::prof::count(crate::prof::Stage::CPoints, self.lights.points.len() as u64);
         let _pstatic = crate::prof::scope(crate::prof::Stage::LStaticLights);
         self.static_shadows
@@ -623,6 +819,10 @@ impl LightMap {
             light.casts_shadow = p.occlude && p.radius >= 26.0;
             light.falloff = if p.hard {
                 Falloff::Hard
+            } else if p.radius <= SMALL_LIGHT_MAX {
+                // A halo, a gem, an emissive prop or a fixture smaller than a
+                // room lamp: the core it always had, and a long faint tail.
+                Falloff::Small
             } else {
                 Falloff::Smooth
             };
@@ -686,7 +886,15 @@ impl LightMap {
         let _pm = crate::prof::scope(crate::prof::Stage::LMarks);
         for mark in &self.marks {
             let pixel = &mut pb.pixels_mut()[mark.index];
-            if mark.readable {
+            if let Some(tint) = mark.glint {
+                // A rim glint only ever lifts the pixel: it never dims a body
+                // that a light is already shining on.
+                *pixel = (
+                    pixel.0.max(tint.0),
+                    pixel.1.max(tint.1),
+                    pixel.2.max(tint.2),
+                );
+            } else if mark.readable {
                 // A tiny silhouette highlight reads at the edge of darkness.
                 // Lift dark coats only; fully lit actors keep their own colour.
                 let minimum: u8 = if scene.depth == ColorDepth::Ansi16 {
@@ -838,7 +1046,7 @@ impl Grid {
             let surface = geometry.surface(p);
             let gain = zone_gain(surface.zone).min(cap);
             self.samples[i] = Sample {
-                mul: profile.mul.map(|c| (c as f32 * gain) as u16),
+                mul: profile.mul.map(|c| ambient_level(c, gain)),
                 ..Sample::default()
             };
             self.surfaces[i] = surface;
@@ -850,7 +1058,7 @@ impl Grid {
     }
 
     fn overlaps(&self, light: Light) -> bool {
-        let r = light.shape.extent();
+        let r = light.extent();
         let end = self.point(self.w, self.h);
         light.pos.x + r >= self.start.x
             && light.pos.x - r <= end.x
@@ -866,7 +1074,7 @@ impl Grid {
         elapsed: f32,
         theme: Theme,
     ) {
-        let radius = light.shape.extent();
+        let radius = light.extent();
         let centre = light.pos - self.start;
         let spacing = self.stride as f32;
         let lo = |p: f32| ((p - radius) / spacing).ceil().max(0.0) as usize;
@@ -883,12 +1091,19 @@ impl Grid {
             LightShape::Cone { half_angle, .. } => half_angle.cos(),
             _ => 0.0,
         };
+        let curve = Curve::new(&light);
+        // A light too dim to move any channel by a whole level lights nothing.
+        let min_amount = curve.step();
+        if min_amount > 1.0 {
+            return;
+        }
         let mut touched = 0u64;
         for y in lo(centre.y)..hi(centre.y, self.h) {
             for x in lo(centre.x)..hi(centre.x, self.w) {
                 let delta = self.point(x, y) - light.pos;
-                let w = light.shape.weight(delta, cone_limit);
-                if w <= 0.0 {
+                let (core, tail) = curve.parts(delta, delta.len_sq(), cone_limit);
+                let tail = curve.quantise(tail);
+                if core <= 0.0 && tail <= 0.0 {
                     continue;
                 }
                 let i = y * self.w + x;
@@ -902,11 +1117,6 @@ impl Grid {
                 } else {
                     1.0
                 };
-                let fall = match light.falloff {
-                    Falloff::Smooth => w * w,
-                    Falloff::Linear => w,
-                    Falloff::Hard => (w * 1.6).min(1.0),
-                };
                 let glint = if shadow.is_some()
                     && surface.height == 0.0
                     && matches!(theme, Theme::Sewer | Theme::Lab)
@@ -918,8 +1128,14 @@ impl Grid {
                 } else {
                     0.0
                 };
+                // The flicker animates the core only: a faint, far tail that
+                // breathed with it would repaint cells for no visible reason.
+                let amount = (core * face + glint) * flicker + tail * face;
+                if amount.abs() < min_amount {
+                    continue;
+                }
                 touched += 1;
-                self.samples[i].light(light, (fall * face + glint) * flicker, visibility);
+                self.samples[i].light(light, amount, visibility);
             }
         }
         crate::prof::count(crate::prof::Stage::CSplatSamples, touched);

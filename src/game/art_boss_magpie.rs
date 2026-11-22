@@ -776,20 +776,21 @@ impl Pose {
                 head_lunge = -0.35 * ruffle;
             }
             MagpieState::PeckWindup => {
-                // Coiled spring anticipation: head pulls far back, wings half-flare for balance!
+                // Coiled spring anticipation: head pulls back, pied wings & diamond
+                // tail flare immediately so both combat and library card show them!
                 let coil = (prog / PECK_LOCK_PROGRESS).min(1.0);
                 let ease = smoothstep(0.0, 1.0, coil);
                 head_lunge = -1.15 * ease;
                 stretch = -0.45 * ease;
                 tail_lift = -0.35 * ease;
-                tail_fan = 0.25 + 0.35 * ease;
+                tail_fan = 0.42 + 0.30 * ease;
                 let tremble = if prog >= PECK_LOCK_PROGRESS {
                     (anim * 48.0).sin() * 0.95
                 } else {
                     0.0
                 };
                 jitter = p * tremble;
-                spread = 0.26 * ease;
+                spread = 0.36 + 0.24 * ease;
             }
             MagpieState::Peck => {
                 // Violent forward lunge down the beak line!
@@ -1938,8 +1939,8 @@ fn draw_torso(pb: &mut PixelBuffer, pose: &Pose, pal: &Plumage) {
             let d = torso_sdf(pose, u, v);
             let cover = (0.55 - d * 1.25).clamp(0.0, 1.0);
             if cover <= 0.0 {
-                if d < 1.2 {
-                    blend_px(pb, x, y, pal.outline, 0.84 * pose.alpha);
+                if d < 1.3 {
+                    blend_px(pb, x, y, pal.outline, 0.92 * pose.alpha);
                 }
                 continue;
             }

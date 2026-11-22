@@ -2040,7 +2040,12 @@ fn draw_body(pb: &mut PixelBuffer, pose: &Pose, pal: &Coat) {
             let (u, v) = pose.local(x, y);
             let p = body_parts(pose, u, v);
             let d = smin(smin(p.haunch, p.back, 3.0), smin(p.belly, p.neck, 3.0), 3.5);
+            if d > 1.25 {
+                continue;
+            }
             if d > 0.0 {
+                let rim_a = ((1.25 - d) / 1.25).clamp(0.0, 1.0) * 0.92;
+                blend_px(pb, x, y, pal.outline, rim_a * pose.alpha);
                 continue;
             }
             // The coat's own two-tone: a greasy dark back over a pale gut. The
@@ -2050,8 +2055,12 @@ fn draw_body(pb: &mut PixelBuffer, pose: &Pose, pal: &Coat) {
             let ventral_t = smoothstep(v, 2.0, 7.5);
             let mut fur = mix(pal.dorsal, pal.base, dorsal_t);
             fur = mix(fur, pal.belly, ventral_t * 0.55);
-            let lum = ((x as f32 - pose.body.x) * LIGHT.x + (y as f32 - pose.body.y) * LIGHT.y) / 22.0;
+            let lum = ((x as f32 - pose.body.x) * LIGHT.x + (y as f32 - pose.body.y) * LIGHT.y) / 20.0;
             fur = shade3(pal.shadow, fur, pal.light, lum.clamp(-1.0, 1.0));
+            // Crisp sunlit top-left fur rim so the silhouette survives low ambient & downscale.
+            if d > -2.4 && lum > 0.22 {
+                fur = mix(fur, pal.light, 0.45);
+            }
             // Ticking: a coarse matted mottle (a caged rat's coat is not smooth).
             let mottle = hash2((u * 0.42) as i32, (v * 0.42) as i32, 19);
             fur = mix(fur, pal.dorsal, (0.55 * mottle).min(0.55));
@@ -2063,7 +2072,7 @@ fn draw_body(pb: &mut PixelBuffer, pose: &Pose, pal: &Coat) {
                 fur = mix(fur, pal.belly_shadow, 0.40 * rib);
             }
             // The rim is the outline; a body this big needs a heavy one.
-            let edge = (-d / 3.4).clamp(0.0, 1.0);
+            let edge = (-d / 2.6).clamp(0.0, 1.0);
             blend_px(pb, x, y, mix(pal.outline, apply_hit(fur, pose.hit), edge), pose.alpha);
         }
     }
@@ -2261,15 +2270,15 @@ fn draw_head(pb: &mut PixelBuffer, pose: &Pose, pal: &Coat) {
     let jaw_open = pose.jaw.clamp(0.0, 1.0);
     let drop = 0.6 + 1.4 * jaw_open;
     for &side in &[-1.0f32, 1.0] {
-        let root = h + f * 9.0 + p * (side * 1.6) + Vec2::new(0.0, drop * 0.4);
-        let len = 3.2 + 5.0 * jaw_open;
+        let root = h + f * 9.0 + p * (side * 1.7) + Vec2::new(0.0, drop * 0.4);
+        let len = 3.8 + 5.0 * jaw_open;
         let dir = (f * 0.45 + p * (side * 0.30) + Vec2::new(0.0, 0.82)).normalized();
         let tip = root + dir * len;
-        draw_segment(pb, root, tip, 2.2, pal.outline, 0.85 * pose.alpha);
-        draw_segment(pb, root, tip, 1.3, pal.incisor, 0.98 * pose.alpha);
-        soft_dot(pb, tip, 0.9, (255, 255, 246), 0.9 * pose.alpha);
+        draw_segment(pb, root, tip, 2.5, pal.outline, 0.92 * pose.alpha);
+        draw_segment(pb, root, tip, 1.5, pal.incisor, 1.0 * pose.alpha);
+        soft_dot(pb, tip, 1.0, (255, 255, 248), 0.96 * pose.alpha);
         // The orange front a rat's incisor wears.
-        soft_dot(pb, root + dir * (len * 0.35), 0.8, pal.tooth, 0.55 * pose.alpha);
+        soft_dot(pb, root + dir * (len * 0.35), 0.9, pal.tooth, 0.70 * pose.alpha);
         if jaw_open > 0.65 {
             soft_dot(pb, tip + Vec2::new(0.0, 1.6), 0.7, (206, 236, 244), 0.45 * pose.alpha);
         }

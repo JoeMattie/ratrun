@@ -1562,7 +1562,10 @@ pub fn draw(pb: &mut PixelBuffer, view: &BroomBossView, cam: Vec2, accent: Rgb) 
     let ry = pose.right.ground.y;
     let by = pose.broom.ground.y;
 
-    let broom_behind = by < ly.min(ry) - 2.0;
+    // Only hide the broom behind the legs when it is genuinely behind the
+    // sweeper's facing plane — a broom sweeping in front stays readable!
+    let broom_behind =
+        by < ly.min(ry) - 2.0 && (pose.broom.ground - view.pos).dot(norm_face(view.facing)) < 0.0;
     if broom_behind {
         draw_broom(
             pb,
@@ -2082,8 +2085,8 @@ fn draw_broom(
 
             let cover = (0.52 - d * 1.25).clamp(0.0, 1.0);
             if cover <= 0.0 {
-                if d < 1.0 {
-                    blend_px(pb, x, y, (0, 0, 0), 0.70 * alpha);
+                if d < 1.15 {
+                    blend_px(pb, x, y, (0, 0, 0), 0.92 * alpha);
                 }
                 continue;
             }
@@ -2094,26 +2097,26 @@ fn draw_broom(
             let dome = (1.0 - nv * nv * 0.55).clamp(0.0, 1.0);
 
             let mut col = if u < -1.3 {
-                let lum = 0.42 + 0.35 * dome + 0.55 * lit;
+                let lum = 0.46 + 0.35 * dome + 0.58 * lit;
                 let mut c = shade3(CAP_SH, CAP_MID, CAP_HI, lum);
                 if u < -3.2 {
                     c = mix(c, CAP_SH, 0.45);
                 }
                 c
             } else if (u - -1.0).abs() < 0.52 || (u - 0.55).abs() < 0.45 {
-                let wire_lum = (0.55 + 0.5 * lit).clamp(0.25, 1.15);
+                let wire_lum = (0.60 + 0.5 * lit).clamp(0.25, 1.15);
                 scale(WIRE_COL, wire_lum)
             } else {
                 let strand = (v * 2.55 + u * 0.15).sin();
                 let groove = if strand < -0.58 {
                     -0.36
                 } else if strand > 0.52 {
-                    0.22
+                    0.26
                 } else {
                     0.0
                 };
-                let tip_wear = if u > 3.2 { 0.14 } else { 0.0 };
-                let lum = 0.46 + 0.28 * dome + 0.48 * lit + groove + tip_wear;
+                let tip_wear = if u > 3.2 { 0.18 } else { 0.0 };
+                let lum = 0.50 + 0.28 * dome + 0.52 * lit + groove + tip_wear;
                 let mut c = shade3(STRAW_SH, STRAW_MID, STRAW_HI, lum);
                 if anger > 0.5 && u > 2.6 {
                     let flick = 0.28 + 0.24 * (anim * 14.0 + v).sin().abs();
@@ -2125,7 +2128,7 @@ fn draw_broom(
             col = apply_hit(col, hit);
             if cover < 1.0 {
                 let bg = pb.pixel_at(x as usize, y as usize);
-                let rimmed = mix(bg, (0, 0, 0), 0.70 * alpha);
+                let rimmed = mix(bg, (0, 0, 0), 0.92 * alpha);
                 pb.plot(x, y, mix(rimmed, col, cover * alpha));
             } else {
                 blend_px(pb, x, y, col, alpha);

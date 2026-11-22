@@ -1457,43 +1457,43 @@ fn draw_dome(
                 lum *= 0.55;
             }
             let mut col = shade3(SHELL_SH, SHELL_MID, SHELL_HI, lum.clamp(0.0, 1.0));
-            if dome > 0.78 && lit > 0.30 {
-                col = mix(col, SHELL_SPEC, 0.30);
+            if dome > 0.68 && lit > 0.22 {
+                col = mix(col, SHELL_SPEC, 0.58);
             }
             // Wet-sand grit.
             let g = hash01(x - 3, y + 1);
             if g > 0.93 {
-                col = mix(col, SHELL_SPEC, 0.18);
+                col = mix(col, SHELL_SPEC, 0.22);
             } else if g < 0.05 {
-                col = mix(col, SHELL_OUT, 0.20);
+                col = mix(col, SHELL_OUT, 0.22);
             }
             // The ridges: three concentric arcs and the median keel.
             let ridge = ((u * 0.52 + v.abs() * 0.10).sin() * 4.0).abs() < 0.55 && dome < 0.9;
             if ridge && !rim {
-                col = mix(col, SHELL_SH, 0.30);
+                col = mix(col, SHELL_SH, 0.34);
             }
-            if v.abs() < 0.8 && u > -7.0 {
-                col = mix(col, SHELL_SH, 0.22);
+            if v.abs() < 0.9 && u > -7.0 {
+                col = mix(col, if lit > 0.0 { SHELL_SPEC } else { SHELL_SH }, 0.34);
             }
             // The hinge seam between the head shield and the abdomen, and the
             // two eye ridges running forward from it: the shell's own drawing.
-            if (u + 2.0).abs() < 0.75 && !rim {
-                col = mix(col, SHELL_OUT, 0.50);
-            } else if (u + 0.6).abs() < 0.6 && !rim {
-                col = mix(col, SHELL_HI, 0.30);
+            if (u + 2.0).abs() < 0.85 && !rim {
+                col = mix(col, SHELL_OUT, 0.68);
+            } else if (u + 0.5).abs() < 0.7 && !rim {
+                col = mix(col, SHELL_SPEC, 0.48);
             }
-            if (v.abs() - 6.2).abs() < 0.75 && u > -1.0 && u < 12.5 {
-                col = mix(col, if nv * pl > 0.0 { SHELL_SPEC } else { SHELL_SH }, 0.42);
+            if (v.abs() - 6.2).abs() < 0.85 && u > -1.0 && u < 12.5 {
+                col = mix(col, if nv * pl > 0.0 { SHELL_SPEC } else { SHELL_SH }, 0.66);
             }
-            // A light edge and a dark edge just inside the outline, so the
-            // dome has a lit side and a shaded side at any size.
+            // A strong light edge and dark edge just inside the outline, so the
+            // domed horseshoe shell survives library card downscale and dark floors.
             let edge = (half_w - v.abs()).min(16.5 - u).min(u + DOME_HALF_LEN);
-            if !rim && edge < 3.0 {
-                let k = 1.0 - ((edge - 1.0) / 2.0).clamp(0.0, 1.0);
-                if lit > 0.12 {
-                    col = mix(col, SHELL_SPEC, 0.50 * k);
-                } else if lit < -0.12 {
-                    col = mix(col, SHELL_OUT, 0.50 * k);
+            if !rim && edge < 3.4 {
+                let k = 1.0 - ((edge - 1.0) / 2.4).clamp(0.0, 1.0);
+                if lit > 0.10 {
+                    col = mix(col, SHELL_SPEC, 0.78 * k);
+                } else if lit < -0.10 {
+                    col = mix(col, SHELL_OUT, 0.62 * k);
                 }
             }
             // The hinge: two knuckle bumps at the back of the shell.
@@ -1546,9 +1546,9 @@ fn draw_dome(
                 (14.0 + (u + 2.0) * 0.64).max(3.6)
             };
             let inside = (-DOME_HALF_LEN - 0.5..=16.5).contains(&u) && v.abs() <= half_w;
-            let near_edge = (v.abs() - half_w).abs() < 1.2 || (u - 16.5).abs() < 1.2 || (u + DOME_HALF_LEN).abs() < 1.2;
+            let near_edge = (v.abs() - half_w).abs() < 1.35 || (u - 16.5).abs() < 1.35 || (u + DOME_HALF_LEN).abs() < 1.35;
             if !inside && near_edge {
-                blend_px(pb, x, y, SHELL_OUT, 0.75);
+                blend_px(pb, x, y, SHELL_OUT, 0.92);
             }
         }
     }
@@ -1585,27 +1585,58 @@ fn draw_telson(pb: &mut PixelBuffer, view: &CrabView, c: &Vec2, f: Vec2, hit: f3
     let hinge = *c - f * TELSON_HINGE;
     let tip = w2s(telson_tip(view), Vec2::ZERO) + (*c - w2s(view.pos, Vec2::ZERO));
     let lift = telson_lift(view);
-    let dir = smooth_dir(tip - hinge);
+    let seg = tip - hinge;
+    let len = seg.len().max(1.0);
+    let dir = smooth_dir(seg);
     let perp = dir.perp();
-    // A tapered spike: three segments of decreasing width.
-    let mut prev = hinge;
-    for k in 1..=6 {
-        let t = k as f32 / 6.0;
-        let q = hinge + (tip - hinge) * t;
-        let w = (2.6 * (1.0 - t) + 0.6).max(0.6);
-        let col = shade3(HINGE_SH, HINGE_MID, HINGE_HI, 0.45 + 0.30 * (1.0 - t));
-        line_solid(pb, prev, q, apply_hit(col, hit * 0.8), 0.95);
-        line_solid(pb, prev + perp * w, q + perp * w * 0.6, SHELL_OUT, 0.55);
-        line_solid(pb, prev - perp * w, q - perp * w * 0.6, SHELL_OUT, 0.55);
-        prev = q;
+    let pl = perp.dot(LIGHT);
+
+    // Solid tapered chitin tail spike with dark outline flanks and a bright
+    // sunlit dorsal ridge so the telson survives dark floors & card downscale!
+    let min_x = (hinge.x.min(tip.x) - 5.0).floor().max(0.0) as i32;
+    let max_x = (hinge.x.max(tip.x) + 5.0).ceil().min((pb.w as i32 - 1) as f32) as i32;
+    let min_y = (hinge.y.min(tip.y) - 5.0).floor().max(0.0) as i32;
+    let max_y = (hinge.y.max(tip.y) + 5.0).ceil().min((pb.h as i32 - 1) as f32) as i32;
+    if min_x <= max_x && min_y <= max_y {
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                let rx = x as f32 - hinge.x;
+                let ry = y as f32 - hinge.y;
+                let along = rx * dir.x + ry * dir.y;
+                if along < -1.0 || along > len + 1.5 {
+                    continue;
+                }
+                let t = (along / len).clamp(0.0, 1.0);
+                let hw = (3.1 * (1.0 - t * 0.80)).max(0.65);
+                let across = rx * perp.x + ry * perp.y;
+                let aa = across.abs();
+                if aa > hw + 1.2 || along < 0.0 || along > len + 0.5 {
+                    if aa <= hw + 1.2 && along >= -1.0 && along <= len + 1.4 {
+                        blend_px(pb, x, y, SHELL_OUT, 0.90);
+                    }
+                    continue;
+                }
+                if aa > hw {
+                    blend_px(pb, x, y, SHELL_OUT, 0.92);
+                    continue;
+                }
+                let lit = (across / hw.max(0.5)) * pl;
+                let mut col = shade3(HINGE_SH, SHELL_MID, SHELL_HI, 0.45 + 0.45 * lit + 0.25 * (1.0 - aa / hw.max(0.5)));
+                // Crisp sunlit dorsal spine ridge running the full length of the spike!
+                if aa < (hw * 0.38).max(0.55) {
+                    col = mix(col, SHELL_SPEC, 0.65 + 0.25 * t);
+                }
+                blend_px(pb, x, y, apply_hit(col, hit * 0.8), 1.0);
+            }
+        }
     }
-    // The spike's bright tip and the lift's vertical ticks.
-    blend_px(pb, tip.x.round() as i32, tip.y.round() as i32, SHELL_SPEC, 0.95);
+    // The spike's gleaming bone-bright tip and the lift's warning ticks.
+    fill_disc(pb, tip, 1.2, apply_hit(SHELL_SPEC, hit), 0.98);
     if lift > 0.05 {
         for k in 0..3 {
             let t = (k as f32 + 1.0) / 4.0;
-            let q = hinge + (tip - hinge) * t;
-            line_solid(pb, q, q + Vec2::new(0.0, -3.0 * lift), WEAK_GOLD, 0.30 + 0.30 * pulse);
+            let q = hinge + seg * t;
+            line_solid(pb, q, q + Vec2::new(0.0, -3.2 * lift), WEAK_GOLD, 0.42 + 0.34 * pulse);
         }
     }
 }

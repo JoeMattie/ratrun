@@ -15,6 +15,7 @@ mod input;
 mod lore;
 mod meta;
 mod math;
+mod music;
 mod present;
 mod prof;
 mod profbench;
@@ -113,6 +114,12 @@ fn main() -> Result<()> {
     }
     if args.iter().any(|a| a == "--prof-bench") {
         profbench::run(&args);
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--music-render") {
+        // Dev only: synthesize one floor's music to a WAV file. No terminal,
+        // no audio device, no save file -- it returns before raw mode.
+        music::render::run_cli(&args)?;
         return Ok(());
     }
     if args.iter().any(|a| a == "--probe") {

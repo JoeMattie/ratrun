@@ -368,7 +368,8 @@ impl Default for ShadowProfile {
 
 impl ShadowProfile {
     pub(super) fn bake(&mut self, geometry: &Geometry, light: Light) -> bool {
-        let radius = light.shape.extent();
+        // The full reach, so a small pool's soft tail is shadowed as well.
+        let radius = light.extent();
         let key = (
             geometry.revision,
             light.pos,

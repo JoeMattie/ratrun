@@ -1456,7 +1456,7 @@ fn plumage(pose: &Pose) -> Plumage {
     let mut tail = mix(TAIL, (206, 62, 34), e * 0.8);
     let mut tail_hi = mix(TAIL_HI, (240, 108, 52), e * 0.8);
     let mut bar = mix(BAR, (126, 48, 34), e * 0.6);
-    let mut shadow = (12, 10, 12);
+    let mut shadow = (36, 24, 20);
     let outline = if pose.hit > 0.55 { (96, 62, 40) } else { INK };
     if dead > 0.0 {
         mantle = mix(mantle, (62, 56, 52), dead * 0.6);
@@ -2109,31 +2109,37 @@ fn draw_bird(pb: &mut PixelBuffer, pose: &Pose, pal: &Plumage, alpha: f32, dead:
                 d = d_beak;
                 layer = 4;
             }
-            if d >= 1.0 {
+            if d >= 1.35 {
                 continue;
             }
             if d > 0.0 {
-                // Feather-edge softness.
-                blend_px(pb, x, y, pal.outline, alpha * (0.9 - d * 0.8));
-                continue;
-            }
-            if d > -1.15 {
-                blend_px(pb, x, y, pal.outline, alpha);
+                // Crisp exterior outline outside the feather silhouette so thin
+                // wingtips and tail fans are never eaten by the outline.
+                let edge_a = if d < 0.80 {
+                    0.94
+                } else {
+                    (1.35 - d) / 0.55 * 0.90
+                };
+                blend_px(pb, x, y, pal.outline, alpha * edge_a);
                 continue;
             }
             // Surface normal, roughly, for the key light: the bird's own
             // cross-axis lean, plus a little shading off the spine.
             let nv = (v / 10.0).clamp(-1.0, 1.0);
-            let lum = pose.lit(-0.22, nv);
+            let lum = pose.lit(-0.22, nv * 0.65);
             let c = match layer {
                 0 => {
-                    // Torso: dark mantle over a barred cream chest, split down
-                    // the middle of the back.
+                    // Torso: rich chocolate mantle over a barred cream chest, with
+                    // sunlit top-left ridge so the barrel chest reads at card scale.
                     let belly = (u / 9.0).clamp(-1.0, 1.0);
                     let base = if belly > 0.15 {
-                        mix(pal.cream_sh, pal.cream, (nv.abs() * -0.6 + 0.7).clamp(0.0, 1.0))
+                        mix(pal.cream_sh, pal.cream, (nv.abs() * -0.5 + 0.8).clamp(0.0, 1.0))
                     } else {
-                        mix(pal.mantle, pal.mantle_hi, 0.5 + 0.5 * lum)
+                        let mut m = shade3(pal.shadow, pal.mantle, pal.back_hi, 0.15 + lum * 0.85);
+                        if d > -1.4 && lum > 0.05 {
+                            m = mix(m, pal.cream, 0.35);
+                        }
+                        m
                     };
                     if belly > 0.2 {
                         // Chest bars.
@@ -2144,53 +2150,68 @@ fn draw_bird(pb: &mut PixelBuffer, pose: &Pose, pal: &Plumage, alpha: f32, dead:
                     }
                 }
                 1 => {
-                    // Wings: broad secondaries, pale leading edge, barred tips.
+                    // Spread raptor wings: shade primarily along the chord (sunlit
+                    // leading edge, shaded trailing edge) with gentle cross-body
+                    // tilt so BOTH spread wings read clearly on dark floors!
                     let span = if dwl <= dwr { spanl } else { spanr };
                     let chord = if dwl <= dwr { chordl } else { chordr };
-                    let (lo, hi) = if span < 0.35 {
-                        (pal.mantle, pal.mantle_hi)
-                    } else if span < 0.85 {
+                    let wing_lum = (chord * 0.90 - 0.12 + pose.lit(0.18, nv * 0.26) * 0.48)
+                        .clamp(-0.65, 1.0);
+                    let (lo, hi) = if span < 0.38 {
+                        (pal.mantle, pal.back_hi)
+                    } else if span < 0.86 {
                         (pal.cream_sh, pal.cream)
                     } else {
-                        (pal.bar, pal.cream_sh)
+                        (pal.bar, pal.cream)
                     };
-                    let mut c = shade3(pal.shadow, lo, hi, lum);
-                    // Barring across the primaries.
-                    if span > 0.72 {
-                        let band = ((span * 26.0 - pose.anim * 0.0).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
-                        c = mix(c, pal.bar, band * 0.45);
+                    let mut c = shade3(pal.shadow, lo, hi, wing_lum);
+                    // Sunlit leading-edge rim highlight across the wing arm.
+                    if chord > 0.72 && d > -2.2 {
+                        c = mix(c, pal.cream, 0.55);
                     }
-                    // The shoulder patch that gives a redtail its name.
-                    if span < 0.22 && chord > 0.2 && chord < 0.8 {
-                        c = mix(c, pal.tail, 0.35 + 0.3 * pose.enraged);
+                    // High-contrast barring across the outer primaries.
+                    if span > 0.65 {
+                        let band = ((span * 22.0).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+                        c = mix(c, pal.bar, band * 0.42);
+                    }
+                    // The rufous shoulder patch that gives a redtail its name.
+                    if span < 0.26 && chord > 0.18 && chord < 0.84 {
+                        c = mix(c, pal.tail_hi, 0.42 + 0.30 * pose.enraged);
                     }
                     c
                 }
                 2 => {
-                    // Tail: rufous, with the dark terminal band.
-                    let mut c = shade3(pal.shadow, pal.tail, pal.tail_hi, lum);
+                    // Tail: vivid sunlit rufous fan with bold dark terminal band!
+                    let tail_lum = (0.28 + pose.lit(-0.15, nv * 0.35) * 0.55).clamp(-0.5, 1.0);
+                    let mut c = shade3(pal.shadow, pal.tail, pal.tail_hi, tail_lum);
                     if tail_along > 0.74 {
-                        c = mix(c, pal.tail_band, 0.75);
-                    } else if tail_along > 0.60 {
-                        c = mix(c, pal.tail_band, 0.30);
+                        c = mix(c, pal.tail_band, 0.80);
+                    } else if tail_along > 0.62 {
+                        c = mix(c, pal.tail_band, 0.32);
+                    } else if tail_along < 0.60 && v.abs() < 1.2 {
+                        c = mix(c, pal.cream, 0.22);
                     }
                     // Fine barring between the bands.
                     if tail_along > 0.2 && tail_along < 0.6 {
-                        let band = ((tail_along * 40.0).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+                        let band = ((tail_along * 34.0).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
                         c = mix(c, pal.bar, band * 0.16);
                     }
                     c
                 }
                 3 => {
-                    // Head: the dark hood and the pale throat.
+                    // Head: dark hood, sunlit crown edge and pale throat.
                     let throat = (v / 4.0).clamp(-1.0, 1.0);
                     if throat > 0.35 {
                         shade3(pal.cream_sh, pal.cream, pal.cream, lum)
                     } else {
-                        shade3(pal.shadow, pal.mantle, pal.mantle_hi, lum * 1.2)
+                        let mut h = shade3(pal.shadow, pal.mantle, pal.back_hi, 0.15 + lum * 1.1);
+                        if d > -1.3 && lum > 0.0 {
+                            h = mix(h, pal.cream, 0.32);
+                        }
+                        h
                     }
                 }
-                _ => shade3(pal.shadow, pal.cere, pal.foot, lum),
+                _ => shade3(pal.shadow, pal.cere, pal.foot, 0.2 + lum),
             };
             let mut c = c;
             // Hackles up: a little more red in the mantle, phase 2+.
@@ -2205,22 +2226,46 @@ fn draw_bird(pb: &mut PixelBuffer, pose: &Pose, pal: &Plumage, alpha: f32, dead:
         }
     }
 
-    // The eye: a raptor's one bright point, forward of the hood.
+    // Splayed primary "finger" flight feathers at both spread wingtips so the
+    // Redtail's broad soaring wings read unmistakably even when downscaled!
+    if pose.spread > 0.55 {
+        let spread = pose.spread.clamp(0.0, 1.0);
+        let flap_pull = pose.flap * 2.4 * spread;
+        for &side in &[-1.0f32, 1.0] {
+            let tip = pose.place(
+                -2.5 - 16.0 * (1.0 - spread) + 8.0 * pose.sweep + flap_pull,
+                side * (4.4 + 21.5 * spread),
+            );
+            for k in 0..4 {
+                let t = k as f32 / 3.0;
+                let base = tip + pose.f * ((0.45 - t) * 4.4) - pose.p * (side * t * 2.0);
+                let fan_dir = (pose.p * side * (0.78 + 0.22 * (1.0 - t))
+                    + pose.f * (0.28 - t * 0.85))
+                    .normalized();
+                let end = base + fan_dir * (3.8 + (1.0 - (t - 0.33).abs()) * 2.0);
+                let perp = fan_dir.perp();
+                line_solid(pb, base + perp, end + perp, pal.outline, 0.85 * alpha);
+                line_solid(pb, base - perp, end - perp, pal.outline, 0.85 * alpha);
+                line_solid(pb, base, end, apply_hit(pal.cream, pose.hit), 0.96 * alpha);
+                blend_px(
+                    pb,
+                    end.x.round() as i32,
+                    end.y.round() as i32,
+                    apply_hit(pal.bar, pose.hit),
+                    0.92 * alpha,
+                );
+            }
+        }
+    }
+
+    // The eye: a raptor's piercing golden glint with white catchlight, forward of the hood.
     let eye = pose.place(HEAD_OFFSET + 1.4, -2.4);
-    blend_px(
-        pb,
-        eye.x.round() as i32,
-        eye.y.round() as i32,
-        apply_hit(EYE, pose.hit),
-        alpha,
-    );
-    blend_px(
-        pb,
-        eye.x.round() as i32,
-        (eye.y + 1.0).round() as i32,
-        apply_hit((122, 84, 24), pose.hit),
-        alpha * 0.8,
-    );
+    let ex = eye.x.round() as i32;
+    let ey = eye.y.round() as i32;
+    blend_px(pb, ex, ey - 1, pal.outline, 0.88 * alpha);
+    blend_px(pb, ex, ey, apply_hit(EYE, pose.hit), alpha);
+    blend_px(pb, ex + 1, ey, apply_hit((255, 250, 220), pose.hit), 0.92 * alpha);
+    blend_px(pb, ex, ey + 1, apply_hit((132, 90, 26), pose.hit), alpha * 0.85);
     // The hooked bill tip.
     let tip = pose.place(HEAD_OFFSET + BEAK_LENGTH - 0.5, 1.2);
     blend_px(

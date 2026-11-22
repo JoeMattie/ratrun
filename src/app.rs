@@ -1490,7 +1490,15 @@ impl App {
             Screen::End => self.update_end(click),
             Screen::Chest => self.update_chest(click),
             Screen::Shop => self.update_shop(click),
-            Screen::Library => self.update_library(click),
+            Screen::Library => {
+                self.update_library(click);
+                // The card's scene runs on the screen's own clock; the input
+                // above may have just moved the selection (or closed the
+                // screen), which is what decides whether it runs at all.
+                if matches!(self.screen, Screen::Library) {
+                    self.tick_library_card(dt);
+                }
+            }
             Screen::Controls => self.update_controls(click),
             Screen::Nest => self.update_nest(click),
         }
@@ -1948,12 +1956,15 @@ impl App {
         // calls `World::update`, exactly like the pause plate and the shelf.
         self.map_open = false;
         self.library_ui.card_open = false;
+        // No scene survives the screen it was built for.
+        self.library_ui.stop();
         self.screen = Screen::Library;
     }
 
     /// Leave the index for wherever it was opened from.
     fn close_library(&mut self) {
         self.sfx(Sfx::UiSelect);
+        self.library_ui.stop();
         self.screen = self.library_return;
     }
 
@@ -2152,6 +2163,21 @@ impl App {
         let max = self.library_shape.lines.saturating_sub(visible);
         let next = (self.library_ui.scroll as isize + step * 3).clamp(0, max as isize);
         self.library_ui.scroll = next as usize;
+    }
+
+    /// Drive the selected card's scene (`render::library::scene`).
+    ///
+    /// Only the entry the cursor is on animates, and only when its card is
+    /// actually on screen and fully catalogued (a `???` row and a silhouetted
+    /// plate build nothing). The scene is a separate sandbox `World`: the run
+    /// behind a pause-opened index is never ticked, and its cached picture is
+    /// never invalidated.
+    fn tick_library_card(&mut self, dt: f32) {
+        let key = self.library_ui.selected_key(&self.library_rows);
+        let on_screen = !self.library_shape.narrow || self.library_ui.card_open;
+        let live = on_screen
+            && key.is_some_and(|k| library_ui::catalogued(&self.scores.library, k));
+        self.library_ui.tick_card(dt, key, live);
     }
 
     /// One frame of the Library screen. Every key and pointer action lives
@@ -4212,9 +4238,10 @@ impl App {
     /// True when input of any kind arrived this frame (keys, pointer motion,
     /// pad, focus, a resize), when the screen changed, and while a clock the
     /// app knows about is running on a screen that is otherwise still: the
-    /// console, the zoom easing, the volume/zoom read-outs and the auto-pick
-    /// toast spacing. Anything not listed here is still caught by the pacer,
-    /// which only stops rendering a screen whose frames have stopped changing.
+    /// console, the zoom easing, the volume/zoom read-outs, the auto-pick
+    /// toast spacing and the Library's animating card. Anything not listed
+    /// here is still caught by the pacer, which only stops rendering a screen
+    /// whose frames have stopped changing.
     pub fn repaint_urgent(&self) -> bool {
         self.repaint
             || self.input.events > 0
@@ -4222,6 +4249,10 @@ impl App {
             || self.console.open
             || self.hud.flashing()
             || self.auto_pick_wait > 0.0
+            // The Library's card scene steps at a fixed dt; a new step is a
+            // new picture, and this is the clock that keeps it at 30 Hz (a
+            // still or locked card leaves this false, so the screen idles).
+            || self.library_ui.frame_due()
             || self
                 .world
                 .as_ref()
@@ -13950,6 +13981,121 @@ mod tests {
         h.frame(&[KeyCode::Enter]);
         assert!(h.app.bind_capture.is_none(), "Enter armed a capture under the console");
         assert_eq!(h.app.screen.name_for_test(), "Controls");
+    }
+
+
+    /// The Library's animated card: the selected, unlocked entry builds a
+    /// sandbox scene after the cursor rests, that scene is a clock (so the
+    /// screen stays at 30 Hz), and none of it touches the run behind the
+    /// pause plate or its cached picture.
+    #[test]
+    fn a_library_card_animates_without_touching_the_run() {
+        use crate::game::enemy::EnemyKind;
+        let mut h = Harness::new(100, 40);
+        h.enter_playing();
+        for _ in 0..30 {
+            h.frame(&[]);
+        }
+        h.frame(&[KeyCode::Esc]);
+        for _ in 0..30 {
+            h.frame(&[]);
+        }
+        // Open the index from the pause plate and let its own frame settle.
+        h.frame(&[KeyCode::Char('l')]);
+        assert_eq!(h.app.screen.name_for_test(), "Library");
+        h.frame(&[]);
+        let elapsed = h.app.world.as_ref().unwrap().elapsed;
+        let ticks = h.app.world.as_ref().unwrap().ticks;
+        let drawn = h.app.world_draws;
+
+        // A body the rat has met: a Bestiary row is catalogued the moment it
+        // is seen, so its plate is not silhouetted.
+        let key = LibraryKey::Enemy(EnemyKind::Skitterer);
+        h.app.scores.library.mark_seen(key);
+        let rows = h.app.library_rows.clone();
+        assert!(
+            h.app.library_ui.select_key(&rows, key),
+            "no Library row for the skitterer"
+        );
+        assert_eq!(h.app.library_ui.scene_key(), None, "built before the rest");
+        for _ in 0..12 {
+            h.frame(&[]);
+        }
+        assert_eq!(
+            h.app.library_ui.scene_key(),
+            Some(key),
+            "the card never started after the cursor rested"
+        );
+
+        // It is a clock: over 20 loop iterations the screen asks for a frame
+        // often enough to hold 30 Hz, and no idle probe can swallow it.
+        let mut urgent = 0;
+        for _ in 0..20 {
+            h.app.input.begin_frame();
+            h.app.update(1.0 / 60.0);
+            if h.app.repaint_urgent() {
+                urgent += 1;
+            }
+        }
+        assert!(
+            urgent >= 8,
+            "an animating card must keep the Library live ({urgent}/20)"
+        );
+
+        // The run behind it is frozen and its picture is not redrawn: the
+        // scene has a world of its own.
+        assert_eq!(h.app.world.as_ref().unwrap().elapsed, elapsed);
+        assert_eq!(h.app.world.as_ref().unwrap().ticks, ticks);
+        assert_eq!(h.app.world_draws, drawn, "the paused picture was redrawn");
+
+        // Closing the index drops the scene.
+        h.frame(&[KeyCode::Esc]);
+        assert_eq!(h.app.screen.name_for_test(), "Paused");
+        assert_eq!(h.app.library_ui.scene_key(), None);
+        assert!(!h.app.library_ui.frame_due());
+    }
+
+    /// A still card (the legacy `Boss` body's posed art) builds nothing and
+    /// asks for nothing: after its last input the screen goes idle.
+    #[test]
+    fn a_still_library_card_lets_the_screen_go_idle() {
+        use crate::game::enemy::EnemyKind;
+        let mut h = Harness::new(100, 40);
+        h.enter_playing();
+        h.frame(&[KeyCode::Esc]);
+        h.frame(&[KeyCode::Char('l')]);
+        assert_eq!(h.app.screen.name_for_test(), "Library");
+        let rows = h.app.library_rows.clone();
+        // The one bestiary body the game never spawns: its card has no scene
+        // by design, only a stated reason.
+        let key = LibraryKey::Enemy(EnemyKind::Boss);
+        h.app.scores.library.mark_seen(key);
+        assert!(
+            h.app.library_ui.select_key(&rows, key),
+            "no Library row for the legacy boss body"
+        );
+        for _ in 0..40 {
+            h.frame(&[]);
+        }
+        assert_eq!(
+            h.app.library_ui.scene_key(),
+            None,
+            "a still card built a scene"
+        );
+        assert!(!h.app.library_ui.frame_due());
+        assert!(!h.app.repaint_urgent(), "a still card asks for nothing");
+
+        // The pacer settles: an unchanged frame counts toward stillness, and
+        // no urgent frame resets it.
+        let mut pacer = crate::present::FramePacer::default();
+        let mut now = std::time::Instant::now();
+        for _ in 0..180 {
+            now += std::time::Duration::from_micros(16_667);
+            if pacer.should_render(now, h.app.frame_demand(), h.app.repaint_urgent()) {
+                pacer.rendered(now, false);
+            }
+        }
+        assert!(pacer.idle(), "the Library never went idle on a still card");
     }
 
 }
