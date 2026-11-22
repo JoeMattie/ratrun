@@ -729,6 +729,24 @@ pub fn draw(pb: &mut PixelBuffer, e: &Enemy, mb: &Miniboss, cam: Vec2, accent: R
         MinibossKind::BellDiver => draw_bell_diver(pb, p, facing, bell_gap_dir, pose, anim, flash),
         MinibossKind::Foreman => draw_foreman(pb, p, facing, pose, anim, flash),
         MinibossKind::MilkCarton => draw_milk_carton(pb, p, facing, pose, anim, flash),
+        MinibossKind::ValveWidow => draw_valve_widow(pb, p, facing, pose, anim, flash),
+        MinibossKind::Mudlark => draw_mudlark(pb, p, facing, pose, anim, flash),
+        MinibossKind::PastryWheel => draw_pastry_wheel(pb, p, facing, pose, anim, flash),
+        MinibossKind::SaltHen => draw_salt_hen(pb, p, facing, pose, anim, flash),
+        MinibossKind::PotBrush => draw_pot_brush(pb, p, facing, pose, anim, flash),
+        MinibossKind::DosePump => draw_dose_pump(pb, p, facing, pose, anim, flash),
+        MinibossKind::PetriMother => draw_petri_mother(pb, p, facing, pose, anim, flash),
+        MinibossKind::CageCounter => draw_cage_counter(pb, p, facing, pose, anim, flash),
+        MinibossKind::RotorTechnician => draw_rotor_technician(pb, p, facing, pose, anim, flash),
+        MinibossKind::SudsBailiff => draw_suds_bailiff(pb, p, facing, pose, anim, flash),
+        MinibossKind::WringerBoy => draw_wringer_boy(pb, p, facing, pose, anim, flash),
+        MinibossKind::QuoinKey => draw_quoin_key(pb, p, facing, pose, anim, flash),
+        MinibossKind::CarbonTwin => draw_carbon_twin(pb, p, facing, pose, anim, flash),
+        MinibossKind::LatePlate => draw_late_plate(pb, p, facing, pose, anim, flash),
+        MinibossKind::TarpaulinPup => draw_tarpaulin_pup(pb, p, facing, pose, anim, flash),
+        MinibossKind::AxleNut => draw_axle_nut(pb, p, facing, pose, anim, flash),
+        MinibossKind::ChainDog => draw_chain_dog(pb, p, facing, pose, anim, flash),
+        MinibossKind::RoadAtlas => draw_road_atlas(pb, p, facing, pose, anim, flash),
     }
 
     // Outer radial HP ring framed cleanly outside the ~32 px character silhouette
@@ -2493,6 +2511,792 @@ fn draw_milk_carton(
     draw_hurt_burst(pb, base, f, flash, sour_hi);
 }
 
+
+// ============================================================================
+// 7–24. THE WAVE-4 NAMED BODIES
+//
+// Eighteen further silhouettes (WAVE4_ROSTERS.md "Named appointments and
+// elites"), one per row, each drawn from three or four primitives along its
+// own axis so the twenty-four are told apart at a glance: a light edge, a dark
+// edge, one accessory that IS the signature (the wrench foreleg, the claws,
+// the rollers, the ring's torn notch) and a tell pose that winds it up.
+//
+// A dedicated art pass follows this batch. These are deliberately simple: the
+// budget went on correct shapes and visible tells, not polish.
+// ============================================================================
+
+/// A three-stop palette: light edge, body, dark edge.
+#[derive(Clone, Copy)]
+struct Pal {
+    hi: Rgb,
+    mid: Rgb,
+    lo: Rgb,
+}
+
+#[inline]
+const fn pal(hi: Rgb, mid: Rgb, lo: Rgb) -> Pal {
+    Pal { hi, mid, lo }
+}
+
+/// One wave-4 body's pose, resolved once into the offsets the drawing uses:
+/// where the body is, which way it faces, how far it has coiled and how much
+/// hurt jolt to add. The six wave-3 bodies resolve their own poses; the
+/// eighteen shared the same recipe so their tells read alike.
+struct Frame {
+    /// The body centre after the hurt jolt and the pose's own lift.
+    c: Vec2,
+    /// Facing (normalised).
+    f: Vec2,
+    /// `f.perp()`.
+    s: Vec2,
+    pose: Pose,
+    anim: f32,
+    flash: f32,
+    /// 0 → 1 (and a little past, at the trigger) through the tell.
+    coil: f32,
+}
+
+impl Frame {
+    fn new(center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) -> Self {
+        let (lean, lift, coil) = match pose {
+            Pose::Entrance(t) => (0.0, -13.0 * (1.0 - t) * (1.0 - t), 0.0),
+            Pose::Idle => ((anim * 2.0).sin() * 0.7, (anim * 2.0).cos() * 0.4, 0.0),
+            Pose::Approach => {
+                let s = (anim * 6.0).sin();
+                (s * 1.6, -s.abs() * 1.5, 0.0)
+            }
+            Pose::Tell(t) => {
+                let c = tell_coil(t);
+                (c * 2.6, -c * 1.1, c)
+            }
+            Pose::Strike(_) => (4.4, 0.0, 1.0),
+            Pose::Recover(_) => (-2.6, 0.0, 0.0),
+            Pose::Retreat(t) => (-((t * 9.0).sin().abs()) * 2.0, 0.0, 0.0),
+            Pose::Death(_) => (0.0, 0.0, 0.0),
+        };
+        Frame {
+            c: center + hurt_jolt(f, flash, anim) + Vec2::new(lean, lift),
+            f: safe_dir(f, Vec2::new(1.0, 0.0)),
+            s: safe_dir(f, Vec2::new(1.0, 0.0)).perp(),
+            pose,
+            anim,
+            flash,
+            coil,
+        }
+    }
+
+    /// A point `along` the facing and `across` it, from the body centre.
+    #[inline]
+    fn at(&self, along: f32, across: f32) -> Vec2 {
+        self.c + self.f * along + self.s * across
+    }
+
+    fn shadow(&self, pb: &mut PixelBuffer, rx: f32, ry: f32) {
+        draw_shadow(pb, self.c.x, self.c.y + ry + 1.0, rx, ry, 0.50);
+    }
+
+    fn disc(&self, pb: &mut PixelBuffer, at: Vec2, r: f32, p: Pal) {
+        draw_shaded_disc(pb, at.x, at.y, r, p.hi, p.mid, p.lo, self.flash);
+    }
+
+    fn ellipse(&self, pb: &mut PixelBuffer, at: Vec2, rx: f32, ry: f32, p: Pal) {
+        draw_shaded_ellipse(pb, at.x, at.y, rx, ry, p.hi, p.mid, p.lo, self.flash);
+    }
+
+    fn capsule(&self, pb: &mut PixelBuffer, a: Vec2, b: Vec2, ra: f32, rb: f32, p: Pal) {
+        draw_tapered_capsule(pb, a, b, ra, rb, p.hi, p.mid, p.lo, self.flash);
+    }
+
+    fn slab(&self, pb: &mut PixelBuffer, at: Vec2, axis: Vec2, hl: f32, hw: f32, p: Pal) {
+        draw_rotated_box(pb, at, axis, hl, hw, p.hi, p.mid, p.lo, self.flash);
+    }
+
+    /// One expressive eye on the body at (along, across).
+    fn eye(&self, pb: &mut PixelBuffer, along: f32, across: f32, r: f32, sclera: Rgb, pupil: Rgb) {
+        let at = self.at(along, across);
+        let expr = eye_expr_for(self.pose, self.anim, self.flash);
+        draw_eye(pb, at, r, sclera, pupil, self.f, expr, self.flash);
+    }
+
+    /// The three cues every named body owes the player: an arrival ring, the
+    /// exposed-body beacon with its dizzy stars, and the hurt sparks.
+    fn cues(&self, pb: &mut PixelBuffer, accent: Rgb, spark: Rgb) {
+        if let Pose::Entrance(t) = self.pose {
+            draw_entrance_ring(pb, self.c, t, accent);
+        }
+        if let Pose::Recover(t) = self.pose {
+            draw_recover_beacon(pb, self.c, t);
+            draw_dizzy_stars(pb, self.c - Vec2::new(0.0, 11.0), 6.4, t);
+        }
+        draw_hurt_burst(pb, self.c, self.f, self.flash, spark);
+    }
+}
+
+/// The shared defeat pose: the body flattened, two of its own parts flung out,
+/// and the golden pointer at the chest it leaves behind.
+fn wave4_death(pb: &mut PixelBuffer, fr: &Frame, t: f32, p: Pal) {
+    let bounce = ((1.0 - t) * PI * 2.0).sin().abs() * (1.0 - t) * 3.0;
+    let c = fr.c + Vec2::new(0.0, -bounce);
+    draw_shadow(pb, fr.c.x, fr.c.y + 5.0, 10.5, 4.6, 0.48);
+    draw_shaded_ellipse(pb, c.x, c.y + 2.0, 8.4, 3.6, p.lo, p.lo, p.lo, 0.0);
+    let burst = (1.0 - (1.0 - t).powi(3)).clamp(0.0, 1.0);
+    let spread = 6.0 + burst * 6.0;
+    fr_capsule_plain(pb, c - fr.f * spread, c - fr.f * (spread - 4.5), 2.2, 1.2, p);
+    fr_capsule_plain(pb, c + fr.f * (spread - 4.5), c + fr.f * spread, 2.2, 1.2, p);
+    if t < 0.40 {
+        draw_hurt_burst(pb, fr.c, fr.f, 1.0 - t / 0.40, p.hi);
+    }
+    draw_chest_pointer(pb, fr.c, t);
+}
+
+/// A capsule with no hurt flash (the wreckage is already dead).
+fn fr_capsule_plain(pb: &mut PixelBuffer, a: Vec2, b: Vec2, ra: f32, rb: f32, p: Pal) {
+    draw_tapered_capsule(pb, a, b, ra, rb, p.hi, p.mid, p.lo, 0.0);
+}
+
+/// A ring of short spokes: wheels, fans, rollers and tally faces all use it.
+#[allow(clippy::too_many_arguments)]
+fn spokes(pb: &mut PixelBuffer, fr: &Frame, at: Vec2, r: f32, n: i32, spin: f32, w: f32, p: Pal) {
+    for i in 0..n {
+        let a = spin + i as f32 * TAU / n as f32;
+        let dir = Vec2::from_angle(a);
+        draw_tapered_capsule(pb, at + dir * (r * 0.30), at + dir * r, w, w * 0.6, p.hi, p.mid, p.lo, fr.flash);
+    }
+}
+
+// ---- 7. VALVE WIDOW · "Someone left the water running." --------------------
+// A 26 px wheel spider: a brass hand-wheel with a rust-red hub and a long
+// wrench foreleg that winds back through the tell and strikes forward.
+fn draw_valve_widow(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
+    let brass = pal((255, 236, 172), (206, 152, 54), (104, 68, 22));
+    let rust = pal((255, 148, 108), (188, 74, 42), (96, 32, 18));
+    let steel = pal((236, 244, 255), (158, 176, 196), (72, 84, 100));
+    let fr = Frame::new(center, f, pose, anim, flash);
+    if let Pose::Death(t) = pose {
+        wave4_death(pb, &fr, t, brass);
+        return;
+    }
+    fr.shadow(pb, 11.5, 5.0);
+    // Eight spokes of the hand-wheel, spinning as it walks.
+    spokes(pb, &fr, fr.c, 8.0, 8, anim * 2.4, 1.1, brass);
+    fr.disc(pb, fr.c, 3.4, rust);
+    // The long wrench foreleg: wound back through the tell, thrown forward on
+    // the strike. This is the row's tell.
+    let reach = 8.0 + fr.coil * 5.0 - if matches!(pose, Pose::Strike(_)) { 4.0 } else { 0.0 };
+    let jaw = fr.at(reach * 0.6, -5.4 - fr.coil * 1.6);
+    fr.capsule(pb, fr.at(1.5, -3.4), jaw, 1.9, 1.3, steel);
+    // Open-ended wrench jaw.
+    fr.capsule(pb, jaw, jaw + fr.f.rotate(0.35) * 4.4, 1.2, 0.8, steel);
+    fr.capsule(pb, jaw, jaw + fr.f.rotate(-0.35) * 4.4, 1.2, 0.8, steel);
+    // Six thin legs.
+    for i in 0..3 {
+        let t = i as f32 - 1.0;
+        let step = (anim * 5.0 + i as f32).sin() * 1.2;
+        fr.capsule(pb, fr.at(-1.0, t * 3.6), fr.at(-5.0 + step, t * 5.4), 0.9, 0.6, brass);
+        fr.capsule(pb, fr.at(1.0, t * 3.6), fr.at(5.0 - step, t * 5.4), 0.9, 0.6, brass);
+    }
+    fr.eye(pb, 0.6, -0.4, 1.5, (255, 246, 214), (96, 32, 18));
+    fr.cues(pb, (255, 202, 96), steel.hi);
+}
+
+// ---- 8. THE MUDLARK · "Both traps are occupied." ---------------------------
+// A 32 px mud crab under two broken mousetraps; the claws astride the aim open
+// wide for the tell and shut on the strike.
+fn draw_mudlark(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
+    let mud = pal((186, 160, 112), (124, 100, 64), (62, 48, 28));
+    let trap = pal((232, 226, 206), (168, 154, 128), (74, 66, 52));
+    let steel = pal((230, 240, 250), (152, 168, 184), (66, 76, 90));
+    let fr = Frame::new(center, f, pose, anim, flash);
+    if let Pose::Death(t) = pose {
+        wave4_death(pb, &fr, t, mud);
+        return;
+    }
+    fr.shadow(pb, 15.0, 5.6);
+    // Wide low carapace.
+    fr.ellipse(pb, fr.c, 9.6, 5.2, mud);
+    // The two claws: 5 px bars astride the aim, open at the tell and closed on
+    // the strike. They start 28 apart and shut to 4.
+    let sep = if matches!(pose, Pose::Tell(_)) {
+        13.0 + fr.coil * 1.5
+    } else if matches!(pose, Pose::Strike(_)) {
+        2.0
+    } else {
+        8.0
+    };
+    for side in [-1.0f32, 1.0] {
+        let base = fr.at(-2.0, side * 3.0);
+        let tip = fr.at(9.6, side * sep);
+        fr.capsule(pb, base, tip, 2.4, 2.0, steel);
+        // The broken mousetrap it wears: a sprung frame on each claw.
+        fr.slab(pb, base + fr.f * 2.0 + fr.s * (side * 2.0), fr.f, 3.4, 2.2, trap);
+        fr.disc(pb, base + fr.f * 2.0 + fr.s * (side * 2.0), 0.9, steel);
+    }
+    // Six stubby walking legs.
+    for i in 0..3 {
+        let t = i as f32 - 1.0;
+        let step = (anim * 6.0 + i as f32 * 1.3).sin() * 1.1;
+        fr.capsule(pb, fr.at(1.0, t * 4.8), fr.at(4.5 + step, t * 7.4), 0.9, 0.5, mud);
+        fr.capsule(pb, fr.at(-1.0, t * 4.8), fr.at(-4.5 - step, t * 7.4), 0.9, 0.5, mud);
+    }
+    // Two eyes on stalks.
+    fr.disc(pb, fr.at(5.4, -2.2), 1.2, mud);
+    fr.disc(pb, fr.at(5.4, 2.2), 1.2, mud);
+    fr.eye(pb, 5.6, -2.2, 1.3, (255, 250, 220), (52, 40, 22));
+    fr.eye(pb, 5.6, 2.2, 1.3, (255, 250, 220), (52, 40, 22));
+    fr.cues(pb, (196, 168, 116), steel.hi);
+}
+
+// ---- 9. PASTRY WHEEL · "Makes six equal portions." -------------------------
+// A 22 px fluted cutter wheel on a fork handle; the wheel spins up through the
+// tell and throws the cut forward.
+fn draw_pastry_wheel(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
+    let steel = pal((246, 250, 255), (172, 186, 202), (78, 88, 104));
+    let wood = pal((236, 190, 132), (172, 118, 66), (86, 54, 26));
+    let dough = pal((255, 248, 224), (226, 208, 168), (150, 132, 96));
+    let fr = Frame::new(center, f, pose, anim, flash);
+    if let Pose::Death(t) = pose {
+        wave4_death(pb, &fr, t, steel);
+        return;
+    }
+    fr.shadow(pb, 9.5, 4.6);
+    let spin = anim * (3.0 + fr.coil * 9.0);
+    // The fluted coin at the front.
+    let wheel = fr.at(4.0 + fr.coil * 1.6, 0.0);
+    spokes(pb, &fr, wheel, 6.4, 10, spin, 1.0, steel);
+    fr.disc(pb, wheel, 3.2, wood);
+    // The fork handle behind it.
+    let grip = fr.at(-8.4, 0.0);
+    fr.capsule(pb, grip, wheel - fr.f * 1.0, 1.8, 1.2, wood);
+    for k in [-1.0f32, 0.0, 1.0] {
+        fr.capsule(pb, grip + fr.s * (k * 1.6), grip - fr.f * 4.0 + fr.s * (k * 2.2), 0.8, 0.5, steel);
+    }
+    // A curl of cut pastry under the wheel, growing through the tell.
+    if fr.coil > 0.15 {
+        fr.disc(pb, fr.at(9.0, 3.4), 1.0 + fr.coil * 1.4, dough);
+    }
+    fr.eye(pb, 1.0, 0.0, 1.4, (255, 252, 240), (86, 54, 26));
+    fr.cues(pb, (232, 236, 244), steel.hi);
+}
+
+// ---- 10. SALT HEN · "Season to taste. Hers." -------------------------------
+// A 24 px china hen with three holes in its high tail; the tail lifts through
+// the tell and the three piles fall.
+fn draw_salt_hen(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
+    let china = pal((255, 252, 244), (226, 216, 200), (150, 140, 126));
+    let blue = pal((176, 214, 244), (92, 138, 190), (44, 70, 106));
+    let salt = pal((255, 255, 250), (238, 240, 236), (188, 194, 190));
+    let beak = pal((255, 206, 120), (214, 158, 62), (110, 74, 24));
+    let fr = Frame::new(center, f, pose, anim, flash);
+    if let Pose::Death(t) = pose {
+        wave4_death(pb, &fr, t, china);
+        return;
+    }
+    fr.shadow(pb, 10.0, 4.4);
+    // Plump china body.
+    fr.ellipse(pb, fr.c, 7.2, 6.0, china);
+    // High tail with the three holes, tipped further back through the tell.
+    let tail = fr.at(-6.0 - fr.coil * 1.4, -3.0 - fr.coil * 2.2);
+    fr.capsule(pb, fr.at(-3.0, -1.0), tail, 2.6, 1.8, china);
+    for k in 0..3 {
+        let at = tail + fr.s * ((k as f32 - 1.0) * 1.5) + fr.f * 0.2;
+        fr.disc(pb, at, 0.7, blue);
+    }
+    // Head, comb and beak.
+    let head = fr.at(6.4, -3.0);
+    fr.disc(pb, head, 2.6, china);
+    fr.slab(pb, head + fr.s * -2.2, fr.f, 1.6, 0.8, blue);
+    fr.capsule(pb, head + fr.f * 1.8, head + fr.f * 3.6 + fr.s * 0.4, 1.0, 0.4, beak);
+    // Two china feet.
+    for side in [-1.0f32, 1.0] {
+        fr.capsule(pb, fr.at(0.4, side * 2.4), fr.at(0.4, side * 3.4) + Vec2::new(0.0, 3.0), 0.9, 0.5, blue);
+    }
+    // The salt it is about to lay: a swelling pile at the beak.
+    if fr.coil > 0.2 {
+        fr.disc(pb, head + fr.f * 5.0 + Vec2::new(0.0, 2.4), 1.0 + fr.coil * 1.2, salt);
+    }
+    fr.eye(pb, 6.8, -4.0, 1.2, (255, 255, 255), (44, 70, 106));
+    fr.cues(pb, (236, 242, 252), china.hi);
+}
+
+// ---- 11. POT BRUSH · "Scrub until the stain runs away." --------------------
+// A 34 px bristle fan at the end of a jointed handle; the fan splay is the
+// tell and the whole arm swings on the strike.
+fn draw_pot_brush(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
+    let bristle = pal((244, 226, 168), (198, 168, 96), (104, 82, 40));
+    let wood = pal((238, 200, 146), (176, 122, 68), (88, 56, 28));
+    let soap = pal((240, 252, 250), (176, 212, 208), (92, 128, 128));
+    let fr = Frame::new(center, f, pose, anim, flash);
+    if let Pose::Death(t) = pose {
+        wave4_death(pb, &fr, t, bristle);
+        return;
+    }
+    fr.shadow(pb, 12.5, 5.2);
+    // Jointed handle from the back to the elbow.
+    let elbow = fr.at(-1.0 + fr.coil * 2.0, -4.0);
+    fr.capsule(pb, fr.at(-9.5, -1.0), elbow, 1.5, 1.3, wood);
+    fr.disc(pb, elbow, 1.6, wood);
+    // The bristle fan: eleven short strokes spreading from the elbow.
+    let spread = 0.55 + fr.coil * 0.45;
+    for i in 0..11 {
+        let u = i as f32 / 10.0 - 0.5;
+        let dir = fr.f.rotate(u * spread * 2.0);
+        let root = elbow + dir * 1.0;
+        let tip = root + dir * (5.0 + (1.0 - u.abs() * 1.4) * 2.4);
+        draw_tapered_capsule(pb, root, tip, 1.1, 0.7, bristle.hi, bristle.mid, bristle.lo, fr.flash);
+    }
+    // A soap bubble or two.
+    if matches!(pose, Pose::Idle | Pose::Strike(_)) {
+        let ph = (anim * 1.6).fract();
+        fr.disc(pb, fr.at(7.0 - ph * 3.0, -7.0 - ph * 4.0), 1.2, soap);
+    }
+    fr.eye(pb, -3.0, 1.6, 1.4, (255, 250, 232), (88, 56, 28));
+    fr.cues(pb, (240, 226, 176), bristle.hi);
+}
+
+// ---- 12. DOSE PUMP · "Read the label twice." ------------------------------
+// A 19 px glass barrel on a plunger foot; the plunger draws back through the
+// tell and drives through the strike.
+fn draw_dose_pump(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
+    let glass = pal((244, 254, 255), (186, 218, 226), (96, 128, 140));
+    let fluid = pal((196, 226, 130), (130, 170, 70), (60, 88, 34));
+    let steel = pal((236, 244, 252), (156, 172, 190), (70, 80, 96));
+    let fr = Frame::new(center, f, pose, anim, flash);
+    if let Pose::Death(t) = pose {
+        wave4_death(pb, &fr, t, glass);
+        return;
+    }
+    fr.shadow(pb, 8.0, 4.2);
+    // The barrel, upright: length along `up`, not the facing.
+    let up = Vec2::new(0.0, -1.0);
+    fr.slab(pb, fr.c, up, 6.4, 3.4, glass);
+    // The dose inside, rising as the plunger draws back.
+    let level = -4.0 + fr.coil * 2.6;
+    fr.slab(pb, fr.c + up * level, up, 2.2, 2.9, fluid);
+    // Plunger rod through the top.
+    fr.capsule(pb, fr.c + up * 6.0, fr.c + up * (10.0 + fr.coil * 2.0), 1.4, 1.0, steel);
+    fr.slab(pb, fr.c + up * (10.0 + fr.coil * 2.0), fr.s, 1.2, 1.0, steel);
+    // Wide plunger foot at the bottom.
+    fr.slab(pb, fr.c + up * -7.2, fr.s, 1.4, 3.6, steel);
+    // Needle out the bottom, extending on the strike.
+    let needle = if matches!(pose, Pose::Strike(_)) { 6.0 } else { 3.0 };
+    fr.capsule(pb, fr.c + up * -8.0, fr.c + up * (-8.0 - needle), 0.8, 0.4, steel);
+    // Two printed ticks on the glass.
+    for k in 0..2 {
+        fr.slab(pb, fr.c + up * (-1.0 + k as f32 * 2.4) + fr.s * 2.0, fr.s, 0.6, 0.9, fluid);
+    }
+    fr.eye(pb, 2.2, 1.6, 1.3, (250, 255, 255), (60, 88, 34));
+    fr.cues(pb, (200, 232, 214), glass.hi);
+}
+
+// ---- 13. PETRI MOTHER · "The blank sample had children." -------------------
+// A 24 px shallow culture dish on cilia with a missing rim; the colony swells
+// inside it through the tell.
+fn draw_petri_mother(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
+    let glass = pal((240, 250, 252), (182, 208, 214), (94, 120, 128));
+    let colony = pal((255, 196, 226), (206, 122, 172), (108, 56, 92));
+    let agar = pal((232, 226, 186), (184, 176, 132), (104, 98, 68));
+    let fr = Frame::new(center, f, pose, anim, flash);
+    if let Pose::Death(t) = pose {
+        wave4_death(pb, &fr, t, glass);
+        return;
+    }
+    fr.shadow(pb, 12.0, 4.4);
+    // Shallow dish: a wide flat ellipse with a rim and one missing arc.
+    fr.ellipse(pb, fr.c, 10.4, 4.0, glass);
+    fr.ellipse(pb, fr.c + Vec2::new(0.0, -0.8), 7.6, 2.4, agar);
+    // The rim, broken where the sterile gap is: a quarter turn off the aim.
+    let gap = fr.f.rotate(RING_GAP_TURN);
+    for i in 0..18 {
+        let a = i as f32 * TAU / 18.0;
+        let dir = Vec2::from_angle(a);
+        if dir.dot(gap) > 0.86 {
+            continue;
+        }
+        let at = fr.c + Vec2::new(dir.x * 10.4, dir.y * 4.0);
+        fr.disc(pb, at, 0.9, agar);
+    }
+    // The colony, swelling with the tell.
+    let r = 1.8 + fr.coil * 2.6 + (anim * 3.0).sin() * 0.3;
+    fr.disc(pb, fr.c + Vec2::new(0.0, -1.0), r, colony);
+    for k in 0..3 {
+        let a = anim * 1.6 + k as f32 * TAU / 3.0;
+        fr.disc(pb, fr.c + Vec2::from_angle(a) * 3.4 + Vec2::new(0.0, -1.0), 0.9, colony);
+    }
+    // Cilia under the dish.
+    for i in 0..5 {
+        let x = (i as f32 - 2.0) * 3.4;
+        let wob = (anim * 5.0 + i as f32).sin() * 0.9;
+        fr.capsule(
+            pb,
+            fr.c + Vec2::new(x, 3.4),
+            fr.c + Vec2::new(x + wob, 7.0),
+            0.7,
+            0.4,
+            glass,
+        );
+    }
+    fr.eye(pb, 3.4, -1.2, 1.2, (255, 255, 255), (108, 56, 92));
+    fr.cues(pb, (232, 240, 246), colony.hi);
+}
+
+// ---- 14. CAGE COUNTER · "One rat short again." -----------------------------
+// A 26 px tally wheel on a tripod; the wheel clicks round through the tell.
+fn draw_cage_counter(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
+    let brass = pal((255, 236, 176), (204, 154, 62), (104, 70, 24));
+    let ink = pal((196, 208, 226), (120, 136, 158), (54, 62, 74));
+    let pad = pal((255, 172, 170), (200, 84, 92), (98, 34, 44));
+    let fr = Frame::new(center, f, pose, anim, flash);
+    if let Pose::Death(t) = pose {
+        wave4_death(pb, &fr, t, brass);
+        return;
+    }
+    fr.shadow(pb, 10.0, 4.6);
+    // Tripod.
+    for k in 0..3 {
+        let a = k as f32 * TAU / 3.0 + FRAC_PI_2;
+        let foot = fr.c + Vec2::from_angle(a) * 7.4 + Vec2::new(0.0, 4.4);
+        fr.capsule(pb, fr.c + Vec2::new(0.0, 1.4), foot, 1.0, 0.7, ink);
+    }
+    // Tally wheel with ten notches, clicking round with the coil.
+    let spin = anim * 1.4 + fr.coil * 2.6;
+    spokes(pb, &fr, fr.c - Vec2::new(0.0, 2.0), 6.2, 10, spin, 1.0, brass);
+    fr.disc(pb, fr.c - Vec2::new(0.0, 2.0), 3.0, ink);
+    // The pointer arm at the top, and the tally mark it lands on.
+    fr.capsule(pb, fr.c - Vec2::new(0.0, 8.4), fr.c - Vec2::new(0.0, 5.4), 1.0, 0.7, pad);
+    fr.disc(pb, fr.c - Vec2::new(0.0, 9.0), 1.2, pad);
+    fr.eye(pb, 1.8, 0.0, 1.4, (255, 252, 236), (54, 62, 74));
+    fr.cues(pb, (236, 224, 188), brass.hi);
+}
+
+// ---- 15. ROTOR TECHNICIAN · "Switch off before removing tail." -------------
+// A 32 px triangular rotor head over a snaking cable; the head turns through
+// the tell and the cable whips on the strike.
+fn draw_rotor_technician(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
+    let shell = pal((176, 214, 236), (98, 140, 172), (46, 68, 92));
+    let cable = pal((236, 196, 90), (172, 122, 44), (82, 56, 20));
+    let spark = pal((255, 250, 214), (250, 208, 96), (176, 116, 32));
+    let fr = Frame::new(center, f, pose, anim, flash);
+    if let Pose::Death(t) = pose {
+        wave4_death(pb, &fr, t, shell);
+        return;
+    }
+    fr.shadow(pb, 11.0, 5.0);
+    // Snaking cable behind the head: five beads on a travelling sine.
+    for i in 0..5 {
+        let u = i as f32;
+        let ph = anim * 4.0 + u * 1.1 + fr.coil * 2.0;
+        let at = fr.at(-5.0 - u * 3.2, (ph.sin()) * (1.4 + u * 0.5));
+        fr.disc(pb, at, 1.6 - u * 0.12, cable);
+    }
+    // The triangular rotor head: three blades 120° apart, turning with the coil.
+    let turn = anim * 2.4 + fr.coil * 1.8;
+    for k in 0..3 {
+        let dir = fr.f.rotate(turn + k as f32 * TAU / 3.0);
+        fr.capsule(pb, fr.c, fr.c + dir * 6.6, 2.2, 1.0, shell);
+    }
+    fr.disc(pb, fr.c, 2.6, spark);
+    // A tiny spark at the live tip during the tell.
+    if fr.coil > 0.3 {
+        let tip = fr.c + fr.f.rotate(turn) * 7.6;
+        fr.disc(pb, tip, 1.1, spark);
+    }
+    fr.eye(pb, 2.0, 0.0, 1.3, (255, 255, 255), (46, 68, 92));
+    fr.cues(pb, (180, 220, 240), spark.hi);
+}
+
+// ---- 16. SUDS BAILIFF · "All delicates report to rinse." ------------------
+// A 27 px soap dome with one flat broken edge, foaming through the tell.
+fn draw_suds_bailiff(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
+    let soap = pal((236, 250, 252), (176, 214, 222), (88, 124, 138));
+    let foam = pal((255, 255, 255), (222, 240, 244), (150, 180, 190));
+    let brass = pal((255, 230, 158), (196, 148, 58), (96, 66, 22));
+    let fr = Frame::new(center, f, pose, anim, flash);
+    if let Pose::Death(t) = pose {
+        wave4_death(pb, &fr, t, soap);
+        return;
+    }
+    fr.shadow(pb, 12.0, 5.0);
+    // The dome: a tall ellipse with a flat broken chord on its dark side.
+    fr.ellipse(pb, fr.c, 8.4, 7.4, soap);
+    let flat = fr.at(-4.6, 0.0);
+    fr.slab(pb, flat, Vec2::new(0.0, 1.0), 5.2, 1.2, soap);
+    fr.slab(pb, flat + fr.f * -0.6, Vec2::new(0.0, 1.0), 4.0, 0.6, foam);
+    // A peaked bailiff's cap on top.
+    fr.slab(pb, fr.c + Vec2::new(0.0, -7.4), fr.s, 1.0, 3.4, brass);
+    fr.slab(pb, fr.c + Vec2::new(0.0, -6.2), fr.s, 0.8, 4.0, brass);
+    // Foam beads: more of them, further out, through the tell.
+    let n = 3 + (fr.coil * 4.0) as i32;
+    for k in 0..n {
+        let a = anim * 1.2 + k as f32 * TAU / n.max(1) as f32;
+        let r = 8.0 + (k as f32 * 1.7 + anim * 3.0).sin() * 1.6 + fr.coil;
+        let at = fr.c + Vec2::from_angle(a) * r;
+        fr.disc(pb, at, 1.2, foam);
+    }
+    fr.eye(pb, 3.0, -1.8, 1.4, (255, 255, 255), (88, 124, 138));
+    fr.cues(pb, (236, 250, 250), foam.hi);
+}
+
+// ---- 17. THE WRINGER BOY · "Please remove hands before pressing." ----------
+// A 36 px pair of rollers with a limp glove between them; the rollers spin up
+// and close on the strike.
+fn draw_wringer_boy(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
+    let steel = pal((240, 248, 255), (162, 182, 204), (70, 86, 108));
+    let rubber = pal((206, 196, 224), (136, 122, 158), (62, 54, 76));
+    let glove = pal((255, 226, 202), (206, 160, 132), (108, 76, 56));
+    let fr = Frame::new(center, f, pose, anim, flash);
+    if let Pose::Death(t) = pose {
+        wave4_death(pb, &fr, t, steel);
+        return;
+    }
+    fr.shadow(pb, 15.5, 5.4);
+    // The frame the pair runs in.
+    fr.slab(pb, fr.c, fr.f, 4.2, 9.0, rubber);
+    // Two rollers astride the aim, spinning.
+    let sep = if matches!(pose, Pose::Tell(_)) {
+        9.5 + fr.coil
+    } else if matches!(pose, Pose::Strike(_)) {
+        4.6
+    } else {
+        7.0
+    };
+    for side in [-1.0f32, 1.0] {
+        let at = fr.at(0.0, side * sep);
+        spokes(pb, &fr, at, 4.6, 8, anim * 3.4 + side, 0.9, steel);
+        fr.disc(pb, at, 2.0, rubber);
+    }
+    // The limp glove hanging between them, dragged further in by the coil.
+    let hand = fr.at(5.6 - fr.coil * 1.4, 0.0);
+    fr.disc(pb, hand, 1.8, glove);
+    for k in 0..3 {
+        let a = -0.5 + k as f32 * 0.5;
+        fr.capsule(pb, hand, hand + fr.f.rotate(a) * (3.0 + fr.coil), 0.8, 0.5, glove);
+    }
+    fr.eye(pb, -4.0, 0.0, 1.4, (255, 255, 255), (62, 54, 76));
+    fr.cues(pb, (196, 204, 226), steel.hi);
+}
+
+// ---- 18. QUOIN KEY · "Locks the story in place." ---------------------------
+// A 23 px steel fork driven by a walking wedge; the fork closes over the tell.
+fn draw_quoin_key(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
+    let steel = pal((244, 250, 255), (168, 184, 202), (74, 86, 104));
+    let wood = pal((244, 202, 148), (182, 132, 78), (90, 60, 30));
+    let ink = pal((120, 130, 148), (72, 80, 96), (34, 38, 48));
+    let fr = Frame::new(center, f, pose, anim, flash);
+    if let Pose::Death(t) = pose {
+        wave4_death(pb, &fr, t, steel);
+        return;
+    }
+    fr.shadow(pb, 9.5, 4.6);
+    // The walking wedge behind: a tapered block on two feet.
+    fr.capsule(pb, fr.at(-4.0, 0.0), fr.at(-10.4, 0.0), 3.4, 1.4, wood);
+    for side in [-1.0f32, 1.0] {
+        let step = (anim * 5.0 + side).sin() * 1.0;
+        fr.capsule(pb, fr.at(-6.0, side * 2.4), fr.at(-6.0 + step, side * 3.6) + Vec2::new(0.0, 2.4), 0.9, 0.5, ink);
+    }
+    // The steel fork: two prongs that close as the tell coils.
+    let close = fr.coil * 3.0;
+    for side in [-1.0f32, 1.0] {
+        let root = fr.at(-1.0, side * (3.6 - close * 0.5));
+        let tip = fr.at(7.4, side * (3.0 - close));
+        fr.capsule(pb, root, tip, 1.5, 0.9, steel);
+    }
+    fr.slab(pb, fr.at(-1.6, 0.0), fr.s, 1.6, 4.2, steel);
+    fr.eye(pb, 2.0, 0.0, 1.3, (240, 246, 255), (34, 38, 48));
+    fr.cues(pb, (232, 240, 250), steel.hi);
+}
+
+// ---- 19. CARBON TWIN · "Your duplicate stayed behind." ---------------------
+// A 26 px pair of offset sheets peeling apart; they separate further through
+// the tell and slap down on the strike.
+fn draw_carbon_twin(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
+    let sheet = pal((252, 252, 250), (222, 222, 216), (150, 152, 148));
+    let carbon = pal((128, 138, 158), (74, 82, 100), (34, 38, 50));
+    let inkline = pal((96, 104, 124), (60, 66, 82), (28, 32, 42));
+    let fr = Frame::new(center, f, pose, anim, flash);
+    if let Pose::Death(t) = pose {
+        wave4_death(pb, &fr, t, sheet);
+        return;
+    }
+    fr.shadow(pb, 11.0, 4.6);
+    // Two sheets: the carbon one under, the paper one over, peeling apart.
+    let peel = 1.2 + fr.coil * 2.6 + (anim * 3.0).sin() * 0.3;
+    fr.slab(pb, fr.at(-2.0, -peel), fr.f, 10.4, 1.4, carbon);
+    fr.slab(pb, fr.at(0.0, peel), fr.f.rotate(0.10), 10.4, 1.4, sheet);
+    // Ruled lines on the paper sheet.
+    for k in 0..3 {
+        let at = fr.at(-6.0 + k as f32 * 5.0, peel + 0.2);
+        fr.slab(pb, at, fr.f, 2.2, 0.4, inkline);
+    }
+    // The offset ghost edge: the telling detail of a carbon copy.
+    fr.slab(pb, fr.at(9.6, -1.6), fr.f, 1.2, 1.0, inkline);
+    fr.eye(pb, 4.0, peel + 0.4, 1.3, (255, 255, 255), (34, 38, 50));
+    fr.cues(pb, (212, 218, 228), sheet.hi);
+}
+
+// ---- 20. LATE PLATE · "That's all the room we have tonight." ---------------
+// A 32 px curved printing plate with a torn registration notch; the plate
+// curls tighter through the tell.
+fn draw_late_plate(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
+    let steel = pal((236, 240, 248), (158, 168, 186), (68, 74, 92));
+    let ink = pal((150, 128, 210), (94, 76, 146), (44, 34, 72));
+    let paper = pal((255, 252, 240), (228, 222, 202), (152, 146, 126));
+    let fr = Frame::new(center, f, pose, anim, flash);
+    if let Pose::Death(t) = pose {
+        wave4_death(pb, &fr, t, steel);
+        return;
+    }
+    fr.shadow(pb, 11.5, 4.8);
+    // The curved plate: five linked segments along an arc that curls in.
+    let curl = 1.0 + fr.coil * 0.5;
+    for i in 0..5 {
+        let u = i as f32 - 2.0;
+        let a = u * 0.42 * curl;
+        let dir = fr.f.rotate(a);
+        let at = fr.c + dir * (6.0 - fr.coil * 0.8);
+        fr.slab(pb, at, dir, 3.2, 1.6, steel);
+    }
+    // The torn registration notch: a dark bite out of the plate's rim.
+    let notch = fr.c + fr.f.rotate(0.55) * 6.4;
+    fr.disc(pb, notch, 1.3, paper);
+    fr.disc(pb, notch, 0.7, ink);
+    // A registration cross on the plate.
+    fr.slab(pb, fr.c, fr.f, 2.2, 0.4, ink);
+    fr.slab(pb, fr.c, fr.s, 2.2, 0.4, ink);
+    fr.eye(pb, 0.6, -2.6, 1.3, (255, 255, 255), (44, 34, 72));
+    fr.cues(pb, (206, 214, 230), steel.hi);
+}
+
+// ---- 21. TARPAULIN PUP · "Contents may have shifted." ---------------------
+// A 20 px folded tarp on four grommet feet; it unfurls wider through the tell.
+fn draw_tarpaulin_pup(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
+    let tarp = pal((176, 190, 128), (118, 132, 78), (58, 68, 38));
+    let weave = pal((226, 232, 196), (176, 184, 144), (96, 104, 72));
+    let grommet = pal((236, 226, 178), (176, 160, 98), (84, 74, 42));
+    let fr = Frame::new(center, f, pose, anim, flash);
+    if let Pose::Death(t) = pose {
+        wave4_death(pb, &fr, t, tarp);
+        return;
+    }
+    fr.shadow(pb, 10.0, 4.2);
+    // Folded tarp: two overlapping slabs, opening out with the coil.
+    let open = fr.coil * 0.30;
+    fr.slab(pb, fr.at(-1.2, 0.0), fr.f, 5.4, 3.2, tarp);
+    fr.slab(pb, fr.at(1.4, 0.0), fr.f.rotate(open), 5.0, 3.0, weave);
+    // Seams along the fold.
+    for k in 0..2 {
+        fr.slab(pb, fr.at(-3.0 + k as f32 * 3.4, 0.0), fr.f.rotate(open * 0.5), 1.0, 2.6, tarp);
+    }
+    // Four grommet feet.
+    for (a, s) in [(-4.4f32, -2.6f32), (-4.4, 2.6), (4.4, -2.6), (4.4, 2.6)] {
+        let at = fr.at(a, s);
+        fr.capsule(pb, at, at + Vec2::new(0.0, 2.6), 0.9, 0.6, grommet);
+        fr.disc(pb, at, 0.8, grommet);
+    }
+    fr.eye(pb, 3.2, -0.8, 1.3, (255, 255, 250), (58, 68, 38));
+    fr.cues(pb, (186, 196, 148), weave.hi);
+}
+
+// ---- 22. AXLE NUT · "Last seen under the truck." --------------------------
+// A 24 px walking hex nut with a black hole in its face; it rolls up to speed
+// through the tell.
+fn draw_axle_nut(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
+    let steel = pal((238, 244, 252), (160, 176, 196), (70, 80, 96));
+    let hole = pal((52, 54, 66), (28, 30, 38), (14, 16, 22));
+    let grease = pal((120, 116, 92), (78, 76, 58), (38, 36, 26));
+    let fr = Frame::new(center, f, pose, anim, flash);
+    if let Pose::Death(t) = pose {
+        wave4_death(pb, &fr, t, steel);
+        return;
+    }
+    fr.shadow(pb, 9.6, 4.4);
+    // Six flat facets: a ring of short slabs, rolling with the coil.
+    let spin = anim * 1.8 + fr.coil * 2.2;
+    for k in 0..6 {
+        let dir = fr.f.rotate(spin + k as f32 * TAU / 6.0);
+        let at = fr.c + dir * 6.6;
+        fr.slab(pb, at, dir.perp(), 1.1, 2.6, steel);
+    }
+    fr.disc(pb, fr.c, 5.2, steel);
+    // The black hole in its face.
+    fr.disc(pb, fr.c, 2.6, hole);
+    fr.disc(pb, fr.c + Vec2::new(-0.6, -0.6), 1.4, grease);
+    // Two stubby walking legs, out of phase with the roll.
+    for side in [-1.0f32, 1.0] {
+        let step = (anim * 6.0 + side * 1.6).sin() * 1.2;
+        fr.capsule(pb, fr.at(-1.0, side * 4.0), fr.at(-2.6 + step, side * 5.4) + Vec2::new(0.0, 2.6), 0.9, 0.5, steel);
+    }
+    fr.eye(pb, 2.8, -1.8, 1.2, (255, 255, 255), (14, 16, 22));
+    fr.cues(pb, (212, 222, 236), steel.hi);
+}
+
+// ---- 23. CHAIN DOG · "Stays where it's tied. Mostly." ----------------------
+// A 28 px chain loop dragging a triangular binder; the chain lifts through the
+// tell and swings on the strike.
+fn draw_chain_dog(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
+    let chain = pal((236, 240, 250), (156, 166, 184), (64, 70, 86));
+    let binder = pal((255, 196, 108), (196, 124, 48), (96, 54, 20));
+    let hide = pal((206, 186, 150), (146, 124, 92), (70, 58, 40));
+    let fr = Frame::new(center, f, pose, anim, flash);
+    if let Pose::Death(t) = pose {
+        wave4_death(pb, &fr, t, chain);
+        return;
+    }
+    fr.shadow(pb, 11.0, 4.6);
+    // The chain loop: eight links on a travelling curve behind the body.
+    for i in 0..8 {
+        let u = i as f32;
+        let ph = anim * 3.0 + u * 0.9 + fr.coil * 1.6;
+        let at = fr.at(-4.0 - u * 2.2, ph.sin() * (1.2 + u * 0.35));
+        fr.disc(pb, at, 1.5 - u * 0.07, chain);
+    }
+    // Triangular binder head.
+    let tip = fr.at(7.4, 0.0);
+    fr.capsule(pb, fr.at(1.0, -3.4), tip, 2.0, 1.4, binder);
+    fr.capsule(pb, fr.at(1.0, 3.4), tip, 2.0, 1.4, binder);
+    fr.slab(pb, fr.at(1.4, 0.0), fr.s, 1.4, 3.4, hide);
+    // Two ears.
+    for side in [-1.0f32, 1.0] {
+        fr.capsule(pb, fr.at(-0.4, side * 2.0), fr.at(-2.0, side * 3.4), 1.0, 0.6, hide);
+    }
+    fr.eye(pb, 4.6, -1.4, 1.3, (255, 250, 232), (70, 58, 40));
+    fr.cues(pb, (226, 214, 190), binder.hi);
+}
+
+// ---- 24. THE ROAD ATLAS · "Every exit has a bird on it." -------------------
+// A 34 px gull with a road map folded over its wings; the wings sweep back
+// through the tell and hammer down on the strike.
+fn draw_road_atlas(pb: &mut PixelBuffer, center: Vec2, f: Vec2, pose: Pose, anim: f32, flash: f32) {
+    let gull = pal((252, 252, 250), (216, 216, 210), (140, 142, 140));
+    let slate = pal((168, 186, 204), (108, 126, 146), (52, 62, 74));
+    let map = pal((255, 246, 214), (224, 208, 160), (146, 132, 92));
+    let route = pal((240, 96, 96), (192, 52, 60), (104, 24, 30));
+    let fr = Frame::new(center, f, pose, anim, flash);
+    if let Pose::Death(t) = pose {
+        wave4_death(pb, &fr, t, gull);
+        return;
+    }
+    fr.shadow(pb, 13.0, 4.8);
+    // Two swept wings, drawn back further as the tell coils.
+    let sweep = 0.5 + fr.coil * 0.35;
+    for side in [-1.0f32, 1.0] {
+        let dir = fr.f.rotate(side * sweep);
+        fr.capsule(pb, fr.at(-1.0, side * 1.6), fr.c + dir * (10.4 + fr.coil * 1.6), 1.8, 0.9, slate);
+    }
+    // Body and tail.
+    fr.ellipse(pb, fr.c, 5.6, 3.0, gull);
+    fr.capsule(pb, fr.at(-4.0, 0.0), fr.at(-8.4, 0.0), 1.4, 0.8, slate);
+    // Beak.
+    fr.capsule(pb, fr.at(5.0, 0.0), fr.at(8.4, 0.0), 0.9, 0.3, route);
+    // The road map folded over the near wing: a cream panel with a red route.
+    let panel = fr.at(-2.0, 4.6);
+    fr.slab(pb, panel, fr.f.rotate(0.25), 4.2, 2.6, map);
+    for k in 0..2 {
+        fr.slab(pb, panel + fr.f * (k as f32 * 1.6 - 0.8), fr.f.rotate(0.25), 1.0, 0.4, route);
+    }
+    fr.eye(pb, 3.0, -1.4, 1.3, (255, 255, 255), (52, 62, 74));
+    fr.cues(pb, (236, 240, 246), map.hi);
+}
+
 // ============================================================================
 // Public Ground Telegraph Renderer (Driven Strictly by MinibossShape Data!)
 // ============================================================================
@@ -2557,6 +3361,243 @@ pub fn draw_telegraph(pb: &mut PixelBuffer, mb: &Miniboss, cam: Vec2, _accent: R
         } => {
             draw_spill_telegraph(pb, center, aim, half_len, half_w, cam, is_active, progress);
         }
+        MinibossShape::Pincer {
+            origin,
+            aim,
+            len,
+            half,
+            gap_lo,
+            gap_hi,
+        } => {
+            draw_pincer_telegraph(
+                pb,
+                origin,
+                aim,
+                len,
+                half,
+                gap_lo,
+                gap_hi,
+                active_shape,
+                cam,
+                is_active,
+                progress,
+            );
+        }
+        MinibossShape::Lane {
+            origin,
+            aim,
+            len,
+            seam_half,
+            half,
+            ..
+        } => {
+            draw_lane_telegraph(
+                pb,
+                origin,
+                aim,
+                len,
+                seam_half,
+                half,
+                active_shape,
+                cam,
+                is_active,
+                progress,
+            );
+        }
+    }
+}
+
+/// One oriented band of a signature, mirrored on both sides of the lane: the
+/// stretch `from..to` along `aim` from `origin`, `inner..outer` across it.
+///
+/// The pincer's claw travel and the rollers' lane are both two bands like this,
+/// so both tell renderers read from one primitive and the drawing cannot
+/// disagree with [`MinibossShape::contains`].
+#[allow(clippy::too_many_arguments)]
+fn band_wash(
+    pb: &mut PixelBuffer,
+    origin: Vec2,
+    aim: Vec2,
+    from: f32,
+    to: f32,
+    inner: f32,
+    outer: f32,
+    cam: Vec2,
+    fill: Rgb,
+    edge: Rgb,
+    alpha: f32,
+    dashed: bool,
+    progress: f32,
+) {
+    if to <= from || outer <= inner {
+        return;
+    }
+    let o = origin - cam;
+    let dir = safe_dir(aim, Vec2::new(1.0, 0.0));
+    let perp = dir.perp();
+    let pad = to.max(outer).max(-from) + 1.5;
+    let x0 = (o.x - pad).floor().max(0.0) as i32;
+    let x1 = (o.x + pad).ceil().min(((pb.w as i32) - 1) as f32) as i32;
+    let y0 = (o.y - pad).floor().max(0.0) as i32;
+    let y1 = (o.y + pad).ceil().min(((pb.h as i32) - 1) as f32) as i32;
+    for y in y0..=y1 {
+        let qy = y as f32 + 0.5 - o.y;
+        for x in x0..=x1 {
+            let qx = x as f32 + 0.5 - o.x;
+            let along = qx * dir.x + qy * dir.y;
+            if along < from || along > to {
+                continue;
+            }
+            let across = (qx * perp.x + qy * perp.y).abs();
+            if across < inner || across > outer {
+                continue;
+            }
+            let on_edge = (across - inner).abs() < 0.9 || (outer - across).abs() < 0.9;
+            let c = if on_edge { edge } else { fill };
+            let a = if dashed && !on_edge {
+                // Chevrons travelling down the lane.
+                if ((along - across - progress * 20.0).rem_euclid(9.0)) < 1.8 {
+                    alpha
+                } else {
+                    alpha * 0.42
+                }
+            } else {
+                alpha
+            };
+            blend_px(pb, x, y, c, a);
+        }
+    }
+}
+
+/// The Mudlark: the two claws' whole travel marked at the tell, and the pair's
+/// live position lit on the strike.
+///
+/// "Two 30×5 straight claws start 28 apart and close to 4 apart in 0.65 s":
+/// the tell has to mark where the claws *will* be, not only where they start,
+/// or the closing mouth between them would be an unmarked trap.
+#[allow(clippy::too_many_arguments)]
+fn draw_pincer_telegraph(
+    pb: &mut PixelBuffer,
+    origin: Vec2,
+    aim: Vec2,
+    len: f32,
+    half: f32,
+    gap_lo: f32,
+    gap_hi: f32,
+    active_shape: Option<MinibossShape>,
+    cam: Vec2,
+    is_active: bool,
+    progress: f32,
+) {
+    let warn_fill: Rgb = (150, 118, 84);
+    let warn_edge: Rgb = (246, 214, 150);
+    let hot_fill: Rgb = (255, 132, 72);
+    let hot_core: Rgb = (255, 250, 196);
+    // The swept travel, in warning colours.
+    band_wash(
+        pb,
+        origin,
+        aim,
+        0.0,
+        len,
+        gap_lo * 0.5 - half,
+        gap_hi * 0.5 + half,
+        cam,
+        warn_fill,
+        warn_edge,
+        if is_active { 0.34 } else { 0.72 },
+        true,
+        progress,
+    );
+    // The claws where they are right now.
+    if is_active {
+        if let Some(MinibossShape::Pincer {
+            gap_lo: lo,
+            gap_hi: hi,
+            ..
+        }) = active_shape
+        {
+            band_wash(
+                pb,
+                origin,
+                aim,
+                0.0,
+                len,
+                lo * 0.5 - half,
+                hi * 0.5 + half,
+                cam,
+                hot_fill,
+                hot_core,
+                0.86,
+                false,
+                progress,
+            );
+        }
+    }
+}
+
+/// The Wringer Boy: the whole lane marked at the tell (seam free), and the bar
+/// pair's live stretch lit as it rolls.
+///
+/// The live stretch comes from `active_shape`, never from the tell's own
+/// `covered` (the tell marks the whole lane, so reading it would paint the
+/// entire lane as if it were being pressed).
+#[allow(clippy::too_many_arguments)]
+fn draw_lane_telegraph(
+    pb: &mut PixelBuffer,
+    origin: Vec2,
+    aim: Vec2,
+    len: f32,
+    seam_half: f32,
+    half: f32,
+    active_shape: Option<MinibossShape>,
+    cam: Vec2,
+    is_active: bool,
+    progress: f32,
+) {
+    let warn_fill: Rgb = (120, 140, 168);
+    let warn_edge: Rgb = (218, 236, 255);
+    let hot_fill: Rgb = (255, 124, 168);
+    let hot_core: Rgb = (255, 248, 210);
+    // The lane it will press, seam and all.
+    band_wash(
+        pb,
+        origin,
+        aim,
+        0.0,
+        len,
+        seam_half,
+        seam_half + half * 2.0,
+        cam,
+        warn_fill,
+        warn_edge,
+        if is_active { 0.30 } else { 0.74 },
+        true,
+        progress,
+    );
+    if !is_active {
+        return;
+    }
+    // The stretch the bars are pressing right now.
+    if let Some(MinibossShape::Lane {
+        bar_len, covered, ..
+    }) = active_shape
+    {
+        band_wash(
+            pb,
+            origin,
+            aim,
+            (covered - bar_len).max(0.0),
+            covered.min(len),
+            seam_half,
+            seam_half + half * 2.0,
+            cam,
+            hot_fill,
+            hot_core,
+            0.86,
+            false,
+            progress,
+        );
     }
 }
 

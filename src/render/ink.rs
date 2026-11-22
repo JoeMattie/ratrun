@@ -493,6 +493,53 @@ fn outline_shape(pb: &mut PixelBuffer, v: &InkView, shape: &MinibossShape, unit:
                 thick_line(pb, a, b, c, 1);
             }
         }
+        MinibossShape::Pincer { origin, aim, len, half, gap_lo, gap_hi } => {
+            // The claws' whole travel: two bands astride the aim.
+            let o = screen(origin, v.cam, v.scale);
+            let dir = if aim.len_sq() > 1e-6 { aim.normalized() } else { Vec2::new(1.0, 0.0) };
+            let (ux, uy) = (dir.x, dir.y);
+            let (vx, vy) = (dir.perp().x, dir.perp().y);
+            let reach = len / unit.max(0.01);
+            let inner = (gap_lo.max(0.0) * 0.5 - half) / unit.max(0.01);
+            let outer = (gap_hi * 0.5 + half) / unit.max(0.01);
+            let at = |a: f32, b: f32| {
+                (
+                    o.0 + (ux * a + vx * b).round() as i32,
+                    o.1 + (uy * a + vy * b).round() as i32,
+                )
+            };
+            for side in [-1.0f32, 1.0] {
+                let (bi, bo) = (side * inner, side * outer);
+                dotted_line(pb, at(0.0, bi), at(reach, bi), c, 2);
+                dotted_line(pb, at(0.0, bo), at(reach, bo), c, 2);
+                thick_line(pb, at(reach, bi), at(reach, bo), c, 1);
+            }
+        }
+        MinibossShape::Lane { origin, aim, len, seam_half, half, covered, .. } => {
+            // The whole lane, both rails, the seam left clean, and a rule
+            // where the rollers are right now.
+            let o = screen(origin, v.cam, v.scale);
+            let dir = if aim.len_sq() > 1e-6 { aim.normalized() } else { Vec2::new(1.0, 0.0) };
+            let (ux, uy) = (dir.x, dir.y);
+            let (vx, vy) = (dir.perp().x, dir.perp().y);
+            let reach = len / unit.max(0.01);
+            let inner = seam_half / unit.max(0.01);
+            let outer = (seam_half + half * 2.0) / unit.max(0.01);
+            let head = covered.min(len) / unit.max(0.01);
+            let at = |a: f32, b: f32| {
+                (
+                    o.0 + (ux * a + vx * b).round() as i32,
+                    o.1 + (uy * a + vy * b).round() as i32,
+                )
+            };
+            for side in [-1.0f32, 1.0] {
+                let (bi, bo) = (side * inner, side * outer);
+                thick_line(pb, at(0.0, bi), at(reach, bi), c, 1);
+                thick_line(pb, at(0.0, bo), at(reach, bo), c, 1);
+                thick_line(pb, at(reach, bi), at(reach, bo), c, 1);
+                dotted_line(pb, at(head, bi), at(head, bo), c, 1);
+            }
+        }
     }
 }
 

@@ -1123,7 +1123,9 @@ impl Bot {
     /// Push the floor shapes a wave-3 body's tell has already committed to.
     fn scan_wave3_enemy(&mut self, w: &World, en: &Enemy, p: Vec2) {
         use crate::game::ecs::systems::enemy_wave3 as w3;
-        match en.kind {
+        // The hazard a body has committed to is its archetype's shape (a
+        // registered kind posts the same threat its base body does).
+        match en.kind.archetype() {
             EnemyKind::BellFlea => {
                 if en.w3.flea_phase == 0 {
                     return;
@@ -1177,7 +1179,7 @@ impl Bot {
     #[allow(clippy::needless_range_loop)]
     fn scan_wave4_enemy(&mut self, w: &World, en: &Enemy, p: Vec2) {
         use crate::game::ecs::systems::enemy_wave4 as w4;
-        match en.kind {
+        match en.kind.archetype() {
             EnemyKind::BigSnake => {
                 // The body is a moving wall: a chain of small soft circles so
                 // the bot walks round it instead of being pushed along it.
@@ -1888,7 +1890,7 @@ impl Bot {
             matches!(
                 t,
                 Threat::Enemy { pos, kind, .. }
-                    if matches!(kind, EnemyKind::Brute | EnemyKind::Boss)
+                    if matches!(kind.archetype(), EnemyKind::Brute | EnemyKind::Boss)
                         && pos.dist(p) < 90.0
             )
         });

@@ -236,7 +236,7 @@ pub fn enemy_steering_system(
                 // Spitters keep a stand-off from whatever they chase, so hand
                 // steering a point well past the key along the same line: the
                 // body then walks up to the key instead of backing away from it.
-                target = match e.kind {
+                target = match e.kind.archetype() {
                     EnemyKind::Spitter => key + (key - e.pos).normalized() * 130.0,
                     _ => key,
                 };

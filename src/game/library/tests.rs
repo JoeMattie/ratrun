@@ -440,3 +440,63 @@ fn enemies_are_discovered_only_in_sight() {
         "an off-screen body was discovered"
     );
 }
+
+/// Every wave-four registration has a whole Bestiary card: one row, a locked
+/// hint that does not leak its own name, an answer line, and fact rows read
+/// from its own stat/gold tables (never its archetype's).
+#[test]
+fn every_wave_four_registration_has_a_card() {
+    let rows = all_rows();
+    let mut registered = 0;
+    for kind in EnemyKind::all().into_iter().filter(|k| k.is_registration()) {
+        registered += 1;
+        let row = rows
+            .iter()
+            .find(|r| r.key == Key::Enemy(kind))
+            .unwrap_or_else(|| panic!("{kind:?} has no Bestiary row"));
+        assert!(!row.name.is_empty(), "{kind:?} has no display name");
+        assert!(!row.hint.is_empty(), "{} has no locked hint", row.name);
+        assert!(!row.dossier.is_empty(), "{} has an empty dossier", row.name);
+        assert!(
+            !row.hint.to_lowercase().contains(&row.name.to_lowercase()),
+            "{}'s locked hint leaks its name: {:?}",
+            row.name,
+            row.hint
+        );
+        assert!(
+            !enemy_answer(kind).trim().is_empty(),
+            "{kind:?} has no answer line"
+        );
+        // The roster carries it and it is on exactly one floor.
+        assert!(
+            enemy_floors(kind).is_some(),
+            "{kind:?} is on no floor's roster"
+        );
+
+        let facts = facts(Key::Enemy(kind));
+        let hp = facts
+            .rows()
+            .iter()
+            .find(|f| f.label == "HIT POINTS")
+            .expect("an HP fact");
+        assert_eq!(hp.value, format!("{:.0}", kind.base_hp()), "{kind:?}");
+        let coin = facts
+            .rows()
+            .iter()
+            .find(|f| f.label == "COIN DROP")
+            .expect("a coin fact");
+        let (chance, gold) = shop::gold_row(kind);
+        assert_eq!(
+            coin.value,
+            format!("{:.0}% × {} gold", chance * 100.0, gold),
+            "{kind:?}"
+        );
+        let tell = facts
+            .rows()
+            .iter()
+            .find(|f| f.label == "TELL")
+            .expect("a tell fact");
+        assert_eq!(tell.value, enemy_answer(kind), "{kind:?}");
+    }
+    assert_eq!(registered, 33, "the batch registers 33 ordinary kinds");
+}

@@ -590,7 +590,7 @@ impl LightMap {
                     );
                 } else if let Some(e) = entity
                     .get::<Enemy>()
-                    .filter(|e| e.kind == EnemyKind::Brute && e.alive())
+                    .filter(|e| e.kind.archetype() == EnemyKind::Brute && e.alive())
                 {
                     add_body(
                         &mut self.bodies,

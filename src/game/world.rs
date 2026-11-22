@@ -2475,7 +2475,12 @@ impl World {
             let accent = self.level.palette.accent;
             let mut query = self.ecs.query::<(&SpawnId, &Enemy)>();
             for (_, e) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
-                if !e.alive() || !matches!(e.kind, EnemyKind::BellFlea | EnemyKind::Turnkey) {
+                if !e.alive()
+                    || !matches!(
+                        e.kind.archetype(),
+                        EnemyKind::BellFlea | EnemyKind::Turnkey
+                    )
+                {
                     continue;
                 }
                 if !on_screen(self.w2s(e.pos, cam), e.radius * 3.0 + 8.0, viewport) {

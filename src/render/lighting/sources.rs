@@ -540,7 +540,7 @@ impl LightMap {
                             hard: false,
                         });
                     }
-                } else if e.kind == EnemyKind::WickMoth {
+                } else if e.kind.archetype() == EnemyKind::WickMoth {
                     // Lit lantern tail of the Wick Moth: small flickering ember glow.
                     let face = if e.facing.len_sq() > 0.01 {
                         e.facing.normalized()
@@ -565,7 +565,10 @@ impl LightMap {
                             hard: false,
                         });
                     }
-                } else if e.kind == EnemyKind::Turnkey && e.w3.bar_t > 0.0 && !e.w3.bar_spent {
+                } else if e.kind.archetype() == EnemyKind::Turnkey
+                    && e.w3.bar_t > 0.0
+                    && !e.w3.bar_spent
+                {
                     // Turnkey crossbar: subtle warning pulse while telling, crisp brass glow live.
                     let bx = e.w3.bar_pos.x - cam.x;
                     let by = e.w3.bar_pos.y - cam.y;
@@ -661,6 +664,28 @@ impl LightMap {
                             MinibossKind::BellDiver => (114, 242, 218),
                             MinibossKind::Foreman => (255, 134, 86),
                             MinibossKind::MilkCarton => (238, 248, 196),
+                            // The eighteen wave-four appointments
+                            // (`WAVE4_ROSTERS.md`), each on its own body
+                            // colour so a floor's four read apart in a dark
+                            // room (`art_miniboss`'s palettes).
+                            MinibossKind::ValveWidow => (214, 158, 58),
+                            MinibossKind::Mudlark => (140, 112, 72),
+                            MinibossKind::PastryWheel => (196, 208, 222),
+                            MinibossKind::SaltHen => (240, 232, 216),
+                            MinibossKind::PotBrush => (208, 178, 104),
+                            MinibossKind::DosePump => (196, 228, 236),
+                            MinibossKind::PetriMother => (214, 130, 180),
+                            MinibossKind::CageCounter => (216, 166, 68),
+                            MinibossKind::RotorTechnician => (110, 152, 184),
+                            MinibossKind::SudsBailiff => (186, 226, 234),
+                            MinibossKind::WringerBoy => (172, 194, 216),
+                            MinibossKind::QuoinKey => (206, 216, 230),
+                            MinibossKind::CarbonTwin => (132, 144, 166),
+                            MinibossKind::LatePlate => (152, 132, 206),
+                            MinibossKind::TarpaulinPup => (128, 144, 88),
+                            MinibossKind::AxleNut => (168, 180, 198),
+                            MinibossKind::ChainDog => (206, 136, 56),
+                            MinibossKind::RoadAtlas => (122, 142, 164),
                         };
                         let pulse = 0.84 + 0.16 * (elapsed * 7.0).sin();
                         let entrance =

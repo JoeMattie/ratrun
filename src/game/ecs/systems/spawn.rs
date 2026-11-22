@@ -1900,15 +1900,16 @@ mod tests {
         assert!(w.enemies().len() <= ENEMY_CAP, "the cap slipped");
     }
 
-    /// Elites are gated on `elapsed > ELITE_START` (strictly greater), spawn a
-    /// Brute at 1.6× the current hp mult and reset the timer to the interval.
+    /// Elites are gated on `elapsed > ELITE_START` (strictly greater), spawn
+    /// the floor's own heavy (its H slot) at 1.6× the current hp mult and reset
+    /// the timer to the interval.
     #[test]
     fn elites_start_after_the_gate_and_scale_their_hp() {
         let mut w = World::new(Theme::Sewer, 29);
         w.director.elite_timer = 0.0;
         // Exactly at the gate: no elite (legacy `elapsed > ELITE_START`).
         director_tick(&mut w, 0.0, director::ELITE_START);
-        assert!(!w.enemies().iter().any(|e| e.kind == EnemyKind::Brute));
+        assert!(!w.enemies().iter().any(|e| e.kind == EnemyKind::SluiceToad));
 
         // Past the gate but inside the first appointment's window: the due
         // elite is held (one named threat at a time), and its timer stays
@@ -1925,13 +1926,22 @@ mod tests {
         let brute = enemies
             .iter()
             .find(|e| e.elite)
-            .expect("an elite brute must spawn once the appointment window closes");
-        assert_eq!(brute.kind, EnemyKind::Brute);
+            .expect("an elite heavy must spawn once the appointment window closes");
+        // The elite wears the floor's H body (`WAVE4_ROSTERS.md`: "Elite uses
+        // the local H body"), which on the Sewer is the Sluice Toad.
+        assert_eq!(
+            brute.kind,
+            crate::game::roster::kind(Theme::Sewer, crate::game::roster::Slot::H)
+        );
+        assert_eq!(brute.kind, EnemyKind::SluiceToad);
         assert_eq!(
             w.director.elite_timer,
             director::elite_interval_at(director::curve_clock(0, open))
         );
-        let expected = EnemyKind::Brute.base_hp() * director::hp_mult(open) * 1.6;
+        let expected = crate::game::roster::kind(Theme::Sewer, crate::game::roster::Slot::H)
+            .base_hp()
+            * director::hp_mult(open)
+            * 1.6;
         assert!((brute.max_hp - expected).abs() < 1e-3, "hp = {}", brute.hp);
     }
 
@@ -1978,7 +1988,7 @@ mod tests {
         let open = director::MINIBOSS_TIMES[0] + director::ELITE_APPOINTMENT_GAP + 1.0;
         director_tick(&mut w, 0.1, open);
         assert_eq!(w.enemies().len(), ENEMY_CAP - 1, "elite took the boss slot");
-        assert!(!w.enemies().iter().any(|e| e.kind == EnemyKind::Brute));
+        assert!(!w.enemies().iter().any(|e| e.kind == EnemyKind::SluiceToad));
     }
 
     /// A tick that both pulses *and* crosses the boss time still respects the
@@ -2269,13 +2279,16 @@ mod tests {
             "a non-elite spawn was flagged elite"
         );
 
-        // Now the elite branch fires: exactly one flagged Brute.
+        // Now the elite branch fires: exactly one flagged heavy.
         w.director.elite_timer = 0.0;
         director_tick(&mut w, 0.1, 200.1);
         let enemies = w.enemies();
         let elites: Vec<&Enemy> = enemies.iter().filter(|e| e.elite).collect();
         assert_eq!(elites.len(), 1, "exactly one elite per elite spawn");
-        assert_eq!(elites[0].kind, EnemyKind::Brute);
+        assert_eq!(
+            elites[0].kind,
+            crate::game::roster::kind(Theme::Sewer, crate::game::roster::Slot::H)
+        );
         assert_ne!(elites[0].id, 0, "the elite still needs a runtime id");
     }
 

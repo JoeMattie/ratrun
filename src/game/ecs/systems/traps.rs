@@ -304,7 +304,9 @@ impl StickySlot {
 /// [`is_boss_like`]) and report 0.
 #[inline]
 pub fn enemy_units(kind: EnemyKind) -> u8 {
-    match kind {
+    // A registered kind takes the glue its base body takes (the floor's heavy
+    // fills a pad like a Brute).
+    match kind.archetype() {
         EnemyKind::Boss => 0,
         // A snake is a long heavy body; a termite horde is a mass (it fills
         // the pad like a Brute does).
@@ -321,6 +323,8 @@ pub fn enemy_units(kind: EnemyKind) -> u8 {
         | EnemyKind::HouseCentipede
         | EnemyKind::MurderHornet
         | EnemyKind::Lilliputian => 1,
+        // Unreachable: `archetype()` answers one of the sixteen kinds above.
+        _ => 1,
     }
 }
 
@@ -504,14 +508,18 @@ fn is_live_mouse(view: &MousetrapView) -> bool {
 #[inline]
 fn is_ground(kind: EnemyKind) -> bool {
     // The Wick Moth flies (a teardrop with a lit tail) exactly like the Bat, so
-    // glue and mousetraps do not hold it either.
-    !matches!(kind, EnemyKind::Bat | EnemyKind::WickMoth | EnemyKind::MurderHornet)
+    // glue and mousetraps do not hold it either. A registered kind flies or
+    // walks exactly as its base body does.
+    !matches!(
+        kind.archetype(),
+        EnemyKind::Bat | EnemyKind::WickMoth | EnemyKind::MurderHornet
+    )
 }
 
 /// `(hold seconds, movement multiplier)` for a ground enemy caught by glue.
 #[inline]
 fn enemy_hold(kind: EnemyKind) -> (f32, f32) {
-    match kind {
+    match kind.archetype() {
         // Art `Stuck`: bosses take the shorter 0.8 s at a milder 40 % slow.
         EnemyKind::Boss => (STICKY_HOLD_BOSS_SECS, STICKY_SLOW_BOSS),
         // Art `Stuck`: Brutes are heavy, so they tear free sooner.

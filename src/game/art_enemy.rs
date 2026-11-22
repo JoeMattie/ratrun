@@ -307,6 +307,9 @@ static NOVA_10: [(f32, f32); 10] = build_nova_10();
 /// shadow, and boss HP ring).
 #[inline(always)]
 fn cull_reach(kind: EnemyKind, r: f32) -> f32 {
+    // A registration paints its archetype's body, so it needs the archetype's
+    // screen bound.
+    let kind = kind.archetype();
     match kind {
         EnemyKind::Skitterer => r * 2.2 + 2.0, // 5.5 * (r/2.5) + 2
         EnemyKind::Bat => r * 4.25 + 2.0,      // 8.5 * (r/2.0) + 2
@@ -330,6 +333,9 @@ fn cull_reach(kind: EnemyKind, r: f32) -> f32 {
         EnemyKind::MurderHornet => r * 4.5 + 6.0,
         EnemyKind::TermiteHorde => r * 4.0 + 8.0,
         EnemyKind::Lilliputian => r * 4.0 + 6.0,
+        // Unreachable: `archetype()` answers one of the sixteen kinds above.
+        // Generous rather than tight, so a future base body cannot be clipped.
+        _ => r * 4.5 + 8.0,
     }
 }
 
@@ -376,13 +382,15 @@ pub fn draw_enemy_crowd(
 /// **without** the body. `World::draw_hostile_layer` re-stamps them after the
 /// lighting pass with this; the sprites are the ones the body pass draws.
 pub fn draw_w3_tells(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2, accent: Rgb) {
-    if !matches!(e.kind, EnemyKind::BellFlea | EnemyKind::Turnkey) {
+    // The tell belongs to the archetype: a registered body that inherits the
+    // Bell Flea's hop or the Turnkey's crossbar posts the same floor mark.
+    if !matches!(e.kind.archetype(), EnemyKind::BellFlea | EnemyKind::Turnkey) {
         return;
     }
     let Some(fr) = prepare_frame(pb, e, cam, accent) else {
         return;
     };
-    match e.kind {
+    match e.kind.archetype() {
         EnemyKind::BellFlea => draw_bellflea_tells(pb, &fr, e, cam),
         EnemyKind::Turnkey => draw_turnkey_bar(pb, &fr, e, cam),
         _ => {}
@@ -400,7 +408,7 @@ pub fn draw_wave4_tells(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2, accent: Rgb)
     let Some(fr) = prepare_frame(pb, e, cam, accent) else {
         return;
     };
-    match e.kind {
+    match e.kind.archetype() {
         EnemyKind::BigSnake => draw_snake_warn(pb, &fr, e),
         EnemyKind::HouseCentipede => draw_centipede_warn(pb, &fr, e),
         EnemyKind::MurderHornet => draw_hornet_warn(pb, &fr, e),
@@ -492,29 +500,83 @@ pub fn draw_enemy_styled(
         return;
     }
 
-    match e.kind {
-        EnemyKind::Skitterer => draw_skitterer(pb, &fr),
-        EnemyKind::Bat => draw_bat(pb, &fr),
-        EnemyKind::Cat => draw_cat(pb, &fr, e.vel, e.contact_cd),
-        EnemyKind::Spitter => draw_spitter(pb, &fr, e.fire_cd),
-        EnemyKind::Brute => draw_brute(pb, &fr, elite),
-        EnemyKind::Boss => draw_boss(pb, &fr, e.fire_cd),
-        EnemyKind::Pillbug => draw_pillbug(pb, &fr, e, elite),
-        EnemyKind::BellFlea => draw_bellflea(pb, &fr, e, cam, elite),
-        EnemyKind::WickMoth => draw_wickmoth(pb, &fr, e, elite),
-        EnemyKind::Porter => draw_porter(pb, &fr, e, elite),
-        EnemyKind::Turnkey => draw_turnkey(pb, &fr, e, cam, elite),
-        EnemyKind::BigSnake => draw_bigsnake(pb, &fr, e, elite),
-        EnemyKind::HouseCentipede => draw_centipede(pb, &fr, e, elite),
-        EnemyKind::MurderHornet => draw_hornet(pb, &fr, e, elite),
-        EnemyKind::TermiteHorde => draw_horde(pb, &fr, e, elite),
-        EnemyKind::Lilliputian => draw_lilliputian(pb, &fr, e, elite),
+    if wears_base_body(e.kind) {
+        // The registration fallback: the archetype's body, recoloured to this
+        // kind's own `color()` (`recolor_body`).
+        let at = fr.pos;
+        let (kind, r) = (e.kind, fr.r);
+        recolor_body(pb, kind, at, r, |pb| draw_base_body(pb, &fr, e, cam, elite));
+    } else {
+        draw_body(pb, &fr, e, cam, elite);
+    }
+}
+
+/// One body's own draw: a bespoke registration if it has one, else its
+/// archetype's body.
+fn draw_body(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam: Vec2, elite: bool) {
+    if let Some(bespoke) = bespoke_body(e.kind) {
+        bespoke(pb, fr, e, cam, elite);
+        return;
+    }
+    draw_base_body(pb, fr, e, cam, elite);
+}
+
+/// The pre-wave-four bodies, unchanged, chosen by the **archetype**.
+///
+/// A kind that existed before the wave-four batch is its own archetype, so this
+/// is exactly the old per-kind match for it; a registration without a bespoke
+/// draw reaches its base body's arm and is recoloured around it by
+/// [`recolor_body`].
+fn draw_base_body(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam: Vec2, elite: bool) {
+    match e.kind.archetype() {
+        EnemyKind::Skitterer => draw_skitterer(pb, fr),
+        EnemyKind::Bat => draw_bat(pb, fr),
+        EnemyKind::Cat => draw_cat(pb, fr, e.vel, e.contact_cd),
+        EnemyKind::Spitter => draw_spitter(pb, fr, e.fire_cd),
+        EnemyKind::Brute => draw_brute(pb, fr, elite),
+        EnemyKind::Boss => draw_boss(pb, fr, e.fire_cd),
+        EnemyKind::Pillbug => draw_pillbug(pb, fr, e, elite),
+        EnemyKind::BellFlea => draw_bellflea(pb, fr, e, cam, elite),
+        EnemyKind::WickMoth => draw_wickmoth(pb, fr, e, elite),
+        EnemyKind::Porter => draw_porter(pb, fr, e, elite),
+        EnemyKind::Turnkey => draw_turnkey(pb, fr, e, cam, elite),
+        EnemyKind::BigSnake => draw_bigsnake(pb, fr, e, elite),
+        EnemyKind::HouseCentipede => draw_centipede(pb, fr, e, elite),
+        EnemyKind::MurderHornet => draw_hornet(pb, fr, e, elite),
+        EnemyKind::TermiteHorde => draw_horde(pb, fr, e, elite),
+        EnemyKind::Lilliputian => draw_lilliputian(pb, fr, e, elite),
+        // Unreachable: `archetype()` answers one of the sixteen kinds above.
+        _ => {}
     }
 }
 
 #[inline]
 fn draw_enemy_lod_frame(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam: Vec2, elite: bool) {
-    match e.kind {
+    if e.kind.is_registration() && bespoke_lod(e.kind).is_none() {
+        // Far LOD takes the same fallback: the archetype's silhouette in the
+        // registered kind's own colour.
+        let (kind, at, r) = (e.kind, fr.pos, fr.r);
+        recolor_body(pb, kind, at, r, |pb| draw_base_lod(pb, fr, e, cam, elite));
+    } else {
+        draw_lod_body(pb, fr, e, cam, elite);
+    }
+}
+
+/// One far-LOD body: a bespoke registration if it has one, else its archetype's.
+#[inline]
+fn draw_lod_body(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam: Vec2, elite: bool) {
+    if let Some(bespoke) = bespoke_lod(e.kind) {
+        bespoke(pb, fr, e, cam, elite);
+        return;
+    }
+    draw_base_lod(pb, fr, e, cam, elite);
+}
+
+/// The pre-wave-four far-LOD bodies, chosen by the archetype (see
+/// [`draw_base_body`]).
+#[inline]
+fn draw_base_lod(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam: Vec2, elite: bool) {
+    match e.kind.archetype() {
         EnemyKind::Skitterer => draw_skitterer_lod(pb, fr),
         EnemyKind::Bat => draw_bat_lod(pb, fr),
         EnemyKind::Cat => draw_cat_lod(pb, fr, e.contact_cd),
@@ -531,7 +593,123 @@ fn draw_enemy_lod_frame(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam: Vec2, 
         EnemyKind::MurderHornet => draw_hornet_lod(pb, fr, e, elite),
         EnemyKind::TermiteHorde => draw_horde_lod(pb, fr, e, elite),
         EnemyKind::Lilliputian => draw_lilliputian_lod(pb, fr, e, elite),
+        // Unreachable: `archetype()` answers one of the sixteen kinds above.
+        _ => {}
     }
+}
+
+// ---- The registration fallback --------------------------------------------
+
+thread_local! {
+    /// Reused snapshot of the screen box a fallback body is about to paint, so
+    /// the remap pass knows exactly which pixels the body wrote (and leaves the
+    /// floor, props and every earlier body untouched). Grow-only and reused, so
+    /// a frame with a hundred registrations allocates nothing.
+    static RECOLOR_SCRATCH: std::cell::RefCell<Vec<Rgb>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// **The art hook.** One row per finished registration; `None` means the kind
+/// still wears its archetype's body, recoloured to its own colour.
+///
+/// The six per-floor art workers each add their kinds here
+/// (`EnemyKind::PipeEel => Some(draw_pipeeel),`) and write the matching
+/// `draw_*` beside the others. Nothing else changes: the draw entry points, the
+/// far-LOD path, the tells and the death cue all dispatch through these two
+/// hooks.
+type BodyDraw = fn(&mut PixelBuffer, &Frame, &Enemy, Vec2, bool);
+
+fn bespoke_body(kind: EnemyKind) -> Option<BodyDraw> {
+    /// The per-floor art batch adds its rows here:
+    /// `(EnemyKind::PipeEel, draw_pipeeel as BodyDraw)`.
+    const TABLE: &[(EnemyKind, BodyDraw)] = &[];
+    TABLE.iter().find(|(k, _)| *k == kind).map(|(_, draw)| *draw)
+}
+
+/// The far-LOD half of [`bespoke_body`].
+fn bespoke_lod(kind: EnemyKind) -> Option<BodyDraw> {
+    /// The per-floor art batch adds its rows here, beside the full-detail row.
+    const TABLE: &[(EnemyKind, BodyDraw)] = &[];
+    TABLE.iter().find(|(k, _)| *k == kind).map(|(_, draw)| *draw)
+}
+
+/// Does this kind still wear its archetype's body (recoloured)?
+fn wears_base_body(kind: EnemyKind) -> bool {
+    kind.is_registration() && bespoke_body(kind).is_none()
+}
+
+/// Run a body draw and remap every pixel it painted onto `kind`'s own colour.
+///
+/// The remap is a per-channel gain between the archetype's `color()` and the
+/// kind's: the body's own shading survives (dark rims stay dark, a cream
+/// highlight still reads as a highlight) while its hue becomes the kind's, so a
+/// Sluice Toad is instantly a different body from a Brute at a glance and at
+/// far zoom.
+fn recolor_body(
+    pb: &mut PixelBuffer,
+    kind: EnemyKind,
+    at: Vec2,
+    r: f32,
+    draw: impl FnOnce(&mut PixelBuffer),
+) {
+    let base = kind.archetype();
+    if base == kind {
+        draw(&mut *pb);
+        return;
+    }
+    let reach = cull_reach(base, r.max(1.0)).ceil() as i32 + 1;
+    let x0 = ((at.x.floor() as i32) - reach).max(0);
+    let y0 = ((at.y.floor() as i32) - reach).max(0);
+    let x1 = ((at.x.ceil() as i32) + reach).min(pb.w as i32 - 1);
+    let y1 = ((at.y.ceil() as i32) + reach).min(pb.h as i32 - 1);
+    if x0 > x1 || y0 > y1 {
+        draw(&mut *pb);
+        return;
+    }
+    let (w, h) = ((x1 - x0 + 1) as usize, (y1 - y0 + 1) as usize);
+    let from = base.color();
+    let to = kind.color();
+    let gain = [
+        channel_gain(from.0, to.0),
+        channel_gain(from.1, to.1),
+        channel_gain(from.2, to.2),
+    ];
+    RECOLOR_SCRATCH.with(|scratch| {
+        let mut buf = scratch.borrow_mut();
+        buf.clear();
+        for row in 0..h {
+            let start = (y0 as usize + row) * pb.w + x0 as usize;
+            buf.extend_from_slice(&pb.pixels()[start..start + w]);
+        }
+        draw(&mut *pb);
+        for row in 0..h {
+            for col in 0..w {
+                let before = buf[row * w + col];
+                let x = x0 as usize + col;
+                let y = y0 as usize + row;
+                let after = pb.pixel_at(x, y);
+                if after != before {
+                    pb.plot(x as i32, y as i32, recolor_pixel(after, gain));
+                }
+            }
+        }
+    });
+}
+
+/// Per-channel gain from one body colour to another (never divides by zero).
+#[inline]
+fn channel_gain(from: u8, to: u8) -> f32 {
+    (to as f32 + 1.0) / (from as f32 + 1.0)
+}
+
+/// One painted pixel, moved onto the registered kind's colour.
+#[inline]
+fn recolor_pixel(px: Rgb, gain: [f32; 3]) -> Rgb {
+    #[inline]
+    fn ch(c: u8, g: f32) -> u8 {
+        (c as f32 * g).round().clamp(0.0, 255.0) as u8
+    }
+    (ch(px.0, gain[0]), ch(px.1, gain[1]), ch(px.2, gain[2]))
 }
 
 /// Precomputed per-enemy screen-space frame.

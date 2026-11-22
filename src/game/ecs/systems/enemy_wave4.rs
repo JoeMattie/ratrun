@@ -330,7 +330,7 @@ pub fn warn_active(e: &Enemy) -> bool {
     if !e.kind.is_wave4() {
         return false;
     }
-    match e.kind {
+    match e.kind.archetype() {
         EnemyKind::BigSnake => e.w4.phase == SNAKE_PHASE_COIL,
         EnemyKind::HouseCentipede => e.w4.phase == CENTIPEDE_PHASE_FLUTTER,
         EnemyKind::MurderHornet => e.w4.phase == HORNET_PHASE_CHARGE,
@@ -342,7 +342,7 @@ pub fn warn_active(e: &Enemy) -> bool {
 /// counts both batches)?
 #[inline]
 fn wave3_warn_active(e: &Enemy) -> bool {
-    match e.kind {
+    match e.kind.archetype() {
         EnemyKind::Pillbug => e.w3.curl_t > 0.0,
         EnemyKind::BellFlea => e.w3.flea_phase != 0,
         EnemyKind::Porter => e.w3.raise_t > 0.0,
@@ -413,7 +413,7 @@ pub fn wave4_system(
     scratch.squads.clear();
     for &(_, entity) in scratch.order.iter() {
         if let Ok((_, _, e)) = enemies.get(entity) {
-            if e.alive() && e.kind == EnemyKind::Lilliputian {
+            if e.alive() && e.kind.archetype() == EnemyKind::Lilliputian {
                 // A flag, not `match find(...)`: the borrow of the table must
                 // end before the push (the classic get-mut-then-insert case).
                 let mut found = false;
@@ -461,7 +461,9 @@ pub fn wave4_system(
         // Glue and ink, the same product `enemy_steering_system` feeds to
         // `Enemy::steer`.
         let speed_mult = glue.get(entity).map_or(1.0, |s| s.0) * ink.get(entity).map_or(1.0, |s| s.0);
-        match e.kind {
+        // The state machines are the archetype's (a registered kind runs its
+        // base body's warned attack until its floor's own batch).
+        match e.kind.archetype() {
             EnemyKind::BigSnake => snake_tick(
                 &mut e,
                 target,
@@ -552,7 +554,7 @@ pub fn wave4_system(
             let Ok((_, _, e)) = enemies.get(entity) else {
                 continue;
             };
-            if !e.alive() || e.kind != EnemyKind::Lilliputian {
+            if !e.alive() || e.kind.archetype() != EnemyKind::Lilliputian {
                 continue;
             }
             if e.w4.role == LILLI_ROLE_ROPE
@@ -633,7 +635,7 @@ fn lure_target(e: &Enemy, ppos: Vec2, decoy: Option<Vec2>, level: &Level) -> Vec
 /// spawn bodies without touching the wave-4 fields).
 fn arm(e: &mut Enemy) {
     e.w4.armed = 1;
-    match e.kind {
+    match e.kind.archetype() {
         EnemyKind::BigSnake => {
             e.w4.phase = SNAKE_PHASE_SLITHER;
             e.w4.cd = SNAKE_STRIKE_COOLDOWN * 0.5;
@@ -794,7 +796,7 @@ fn snake_tick(
                 e.w4.t = SNAKE_TELL_SECS;
                 e.w4.warn_age = 0.0;
                 e.vel = Vec2::ZERO;
-                vfx::emit_wave4_tell(particles, &mut rng.0, e.pos, e.w4.dir, EnemyKind::BigSnake);
+                vfx::emit_wave4_tell(particles, &mut rng.0, e.pos, e.w4.dir, e.kind);
                 sfx.0.push(Sfx::Warn);
             }
         }
@@ -932,7 +934,7 @@ fn centipede_tick(
                     &mut rng.0,
                     e.pos,
                     e.w4.dir,
-                    EnemyKind::HouseCentipede,
+                    e.kind,
                 );
                 sfx.0.push(Sfx::Warn);
             }
@@ -1085,7 +1087,7 @@ fn hornet_tick(
                     &mut rng.0,
                     e.pos,
                     e.w4.dir,
-                    EnemyKind::MurderHornet,
+                    e.kind,
                 );
                 sfx.0.push(Sfx::Warn);
                 sfx.0.push(Sfx::HornetBuzz);
@@ -1215,7 +1217,7 @@ fn lilliputian_tick(
                         &mut rng.0,
                         e.pos,
                         e.facing,
-                        EnemyKind::Lilliputian,
+                        e.kind,
                     );
                     sfx.0.push(Sfx::Warn);
                 }
@@ -1288,7 +1290,7 @@ fn lilliputian_tick(
                         &mut rng.0,
                         e.pos,
                         e.w4.dir,
-                        EnemyKind::Lilliputian,
+                        e.kind,
                     );
                     sfx.0.push(Sfx::Warn);
                 }
@@ -1333,7 +1335,7 @@ fn lilliputian_tick(
                         &mut rng.0,
                         e.pos,
                         e.facing,
-                        EnemyKind::Lilliputian,
+                        e.kind,
                     );
                     sfx.0.push(Sfx::Warn);
                 }
@@ -1465,7 +1467,7 @@ fn body_bullet_pass(
     let has_snake = order.iter().any(|&(_, entity)| {
         enemies
             .get(entity)
-            .is_ok_and(|(_, _, e)| e.kind == EnemyKind::BigSnake && e.alive())
+            .is_ok_and(|(_, _, e)| e.kind.archetype() == EnemyKind::BigSnake && e.alive())
     });
     if !has_snake {
         return;
@@ -1482,7 +1484,7 @@ fn body_bullet_pass(
         let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
             continue;
         };
-        if e.kind != EnemyKind::BigSnake || !e.alive() {
+        if e.kind.archetype() != EnemyKind::BigSnake || !e.alive() {
             continue;
         }
         for j in 0..bullet_order.len() {

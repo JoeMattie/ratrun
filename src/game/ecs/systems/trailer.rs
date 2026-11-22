@@ -172,7 +172,10 @@ pub fn trailer_system(
         // the holes like the moth flies them.
         if !e.alive()
             || e.named
-            || matches!(e.kind, EnemyKind::WickMoth | EnemyKind::MurderHornet)
+            || matches!(
+                e.kind.archetype(),
+                EnemyKind::WickMoth | EnemyKind::MurderHornet
+            )
             || deck.pit_at(e.pos).is_none()
         {
             continue;

@@ -77,8 +77,9 @@ pub struct InkSlow(pub f32);
 /// direction, so directional armour never applies to it.
 #[inline]
 pub fn is_ground(kind: EnemyKind) -> bool {
+    // A registered kind walks or flies exactly as its base body does.
     !matches!(
-        kind,
+        kind.archetype(),
         EnemyKind::Bat | EnemyKind::WickMoth | EnemyKind::MurderHornet
     )
 }

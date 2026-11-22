@@ -34,6 +34,89 @@ pub enum EnemyKind {
     TermiteHorde,
     /// Wave 4: a tiny human squad member (spear, archer, rope crew, leader).
     Lilliputian,
+
+    // ---- Wave-four registrations -----------------------------------------
+    //
+    // The 33 ordinary kinds `WAVE4_ROSTERS.md`'s six floor tables add, in
+    // floor and table order (the enum and `all()` are append-only). Each one
+    // is a real, named, correctly-statted body from the day it registers;
+    // until its floor's own batch gives it a rule it behaves exactly as
+    // [`EnemyKind::archetype`] says, and it draws its archetype's body in its
+    // own colour. Per-kind rules and bespoke art are the next batch's work.
+    ///
+    /// Sewer · C · V(Cat): steers at half turning rate.
+    PipeEel,
+    /// Sewer · R · R(Spitter): a shot through the puckered lip.
+    GrateArcher,
+    /// Sewer · II · N: a warned tongue extension (archetype Pillbug for now).
+    SumpLeech,
+    /// Sewer · H · R(Brute): the wide slow blocker.
+    SluiceToad,
+    /// Kitchen · A · V(Skitterer): holds its heading between corrections.
+    CrumbAnt,
+    /// Kitchen · B · R(Bat): a weaving flyer with a red eye.
+    FruitFly,
+    /// Kitchen · I · N: winds up close, then rings a departing footprint
+    /// (archetype Pillbug for now).
+    EggTimer,
+    /// Kitchen · R · V(Spitter): the shot splits into two rays.
+    PepperMill,
+    /// Kitchen · H · R(Brute): keeps advancing under fire.
+    PieWeight,
+    /// Kitchen · III · V(Pillbug): a curl behind a pot-lid claw.
+    SinkCrab,
+    /// Lab · A · R(Skitterer): a small direct cleaner.
+    SwabFoot,
+    /// Lab · B · V(Bat): the weave flips handedness.
+    SpinnerLid,
+    /// Lab · C · R(Cat): a direct large-class route.
+    GlassRunner,
+    /// Lab · I · N: plants a tip and draws a dotted ray (archetype Bell Flea
+    /// for now).
+    WalkingSyringe,
+    /// Lab · H · R(Brute): a wide slow blocker.
+    AutoclaveCart,
+    /// Laundry · A · V(Skitterer): the rank stalls to pull its strand free.
+    WoolPill,
+    /// Laundry · B · R(Bat): a moving shawl over a blunt head.
+    ClothesMoth,
+    /// Laundry · I · N: two jaws shown, then slid together (archetype Bell
+    /// Flea for now).
+    PegSnapper,
+    /// Laundry · R · V(Spitter): the shot accelerates after its first half
+    /// second.
+    StarchBulb,
+    /// Laundry · H · R(Brute): a slow solid plug.
+    LintGolem,
+    /// Printworks · A · R(Skitterer): a small direct streamer.
+    Silverfish,
+    /// Printworks · B · V(Bat): weaves twice as wide for its first second.
+    ErratumSlip,
+    /// Printworks · C · V(Cat): keeps its last heading after losing sight.
+    TypeSlug,
+    /// Printworks · I · N: two needle feet marked, then planted (archetype
+    /// Bell Flea for now).
+    StapleCrawler,
+    /// Printworks · R · R(Spitter): a shot from the rolled tip.
+    PaperWasp,
+    /// Printworks · H · R(Brute): wide continuous contact.
+    PaperReel,
+    /// Printworks · III · V(Wick Moth): the burst centre slides along the last
+    /// velocity.
+    InkBlot,
+    /// Flatbed · A · V(Skitterer): drifts toward the tailgate while chasing.
+    GravelTick,
+    /// Flatbed · B · R(Bat): wobbles into the rat's line around cargo.
+    JuneBug,
+    /// Flatbed · C · R(Cat): a straight large-class chaser.
+    TarRat,
+    /// Flatbed · I · N: a warned roll that rebounds off the first solid face
+    /// (archetype Murder Hornet for now).
+    LooseCan,
+    /// Flatbed · R · V(Spitter): the shot leads the rat.
+    TollGull,
+    /// Flatbed · III · V(Turnkey): the crossbar pulls the rat toward its hook.
+    LooseBungee,
 }
 
 impl EnemyKind {
@@ -57,6 +140,50 @@ impl EnemyKind {
             EnemyKind::MurderHornet => 14.0,
             EnemyKind::TermiteHorde => 64.0,
             EnemyKind::Lilliputian => 3.0,
+            // ---- Wave-four registrations ----------------------------------
+            // `WAVE4_ROSTERS.md`, one row per kind: HP / speed / contact / XP.
+            // These numbers are the kind's own; behaviour is its archetype's
+            // until the floor's own batch lands.
+            //
+            // Sewer.
+            EnemyKind::PipeEel => 16.0,
+            EnemyKind::GrateArcher => 12.0,
+            EnemyKind::SumpLeech => 11.0,
+            EnemyKind::SluiceToad => 58.0,
+            // Kitchen.
+            EnemyKind::CrumbAnt => 5.0,
+            EnemyKind::FruitFly => 4.0,
+            EnemyKind::EggTimer => 13.0,
+            EnemyKind::PepperMill => 13.0,
+            EnemyKind::PieWeight => 60.0,
+            EnemyKind::SinkCrab => 22.0,
+            // Lab.
+            EnemyKind::SwabFoot => 6.0,
+            EnemyKind::SpinnerLid => 4.0,
+            EnemyKind::GlassRunner => 17.0,
+            EnemyKind::WalkingSyringe => 13.0,
+            EnemyKind::AutoclaveCart => 60.0,
+            // Laundry.
+            EnemyKind::WoolPill => 5.0,
+            EnemyKind::ClothesMoth => 4.0,
+            EnemyKind::PegSnapper => 14.0,
+            EnemyKind::StarchBulb => 12.0,
+            EnemyKind::LintGolem => 58.0,
+            // Printworks.
+            EnemyKind::Silverfish => 5.0,
+            EnemyKind::ErratumSlip => 4.0,
+            EnemyKind::TypeSlug => 18.0,
+            EnemyKind::StapleCrawler => 14.0,
+            EnemyKind::PaperWasp => 12.0,
+            EnemyKind::PaperReel => 62.0,
+            EnemyKind::InkBlot => 12.0,
+            // Flatbed.
+            EnemyKind::GravelTick => 6.0,
+            EnemyKind::JuneBug => 4.0,
+            EnemyKind::TarRat => 17.0,
+            EnemyKind::LooseCan => 13.0,
+            EnemyKind::TollGull => 12.0,
+            EnemyKind::LooseBungee => 20.0,
         }
     }
     pub fn speed(self) -> f32 {
@@ -79,6 +206,40 @@ impl EnemyKind {
             EnemyKind::MurderHornet => 32.0,
             EnemyKind::TermiteHorde => 26.0,
             EnemyKind::Lilliputian => 22.0,
+            // Registrations (`WAVE4_ROSTERS.md` px/s).
+            EnemyKind::PipeEel => 39.0,
+            EnemyKind::GrateArcher => 22.0,
+            EnemyKind::SumpLeech => 25.0,
+            EnemyKind::SluiceToad => 16.0,
+            EnemyKind::CrumbAnt => 31.0,
+            EnemyKind::FruitFly => 41.0,
+            EnemyKind::EggTimer => 21.0,
+            EnemyKind::PepperMill => 20.0,
+            EnemyKind::PieWeight => 16.0,
+            EnemyKind::SinkCrab => 23.0,
+            EnemyKind::SwabFoot => 29.0,
+            EnemyKind::SpinnerLid => 40.0,
+            EnemyKind::GlassRunner => 39.0,
+            EnemyKind::WalkingSyringe => 25.0,
+            EnemyKind::AutoclaveCart => 15.0,
+            EnemyKind::WoolPill => 34.0,
+            EnemyKind::ClothesMoth => 40.0,
+            EnemyKind::PegSnapper => 24.0,
+            EnemyKind::StarchBulb => 21.0,
+            EnemyKind::LintGolem => 16.0,
+            EnemyKind::Silverfish => 32.0,
+            EnemyKind::ErratumSlip => 38.0,
+            EnemyKind::TypeSlug => 39.0,
+            EnemyKind::StapleCrawler => 23.0,
+            EnemyKind::PaperWasp => 23.0,
+            EnemyKind::PaperReel => 15.0,
+            EnemyKind::InkBlot => 25.0,
+            EnemyKind::GravelTick => 30.0,
+            EnemyKind::JuneBug => 41.0,
+            EnemyKind::TarRat => 38.0,
+            EnemyKind::LooseCan => 22.0,
+            EnemyKind::TollGull => 22.0,
+            EnemyKind::LooseBungee => 25.0,
         }
     }
     /// Collision radius, which also picks the navigation size class
@@ -109,6 +270,15 @@ impl EnemyKind {
             EnemyKind::MurderHornet => 2.6,
             EnemyKind::TermiteHorde => 3.2,
             EnemyKind::Lilliputian => 2.0,
+            // A registration borrows its base body's collision radius, and so
+            // its navigation size class, until its floor's art pass says
+            // otherwise. `archetype()` is always one of the kinds above, so
+            // this cannot recurse; `debug_assert` catches a future variant
+            // that forgot to name a base kind.
+            _ => {
+                debug_assert!(self.archetype() != self, "a kind must name its archetype");
+                self.archetype().radius()
+            }
         }
     }
     pub fn damage(self) -> f32 {
@@ -131,6 +301,40 @@ impl EnemyKind {
             EnemyKind::MurderHornet => 6.0,
             EnemyKind::TermiteHorde => 3.0,
             EnemyKind::Lilliputian => 3.0,
+            // Registrations (`WAVE4_ROSTERS.md` contact damage).
+            EnemyKind::PipeEel => 8.0,
+            EnemyKind::GrateArcher => 6.0,
+            EnemyKind::SumpLeech => 5.0,
+            EnemyKind::SluiceToad => 15.0,
+            EnemyKind::CrumbAnt => 5.0,
+            EnemyKind::FruitFly => 4.0,
+            EnemyKind::EggTimer => 4.0,
+            EnemyKind::PepperMill => 6.0,
+            EnemyKind::PieWeight => 15.0,
+            EnemyKind::SinkCrab => 6.0,
+            EnemyKind::SwabFoot => 5.0,
+            EnemyKind::SpinnerLid => 4.0,
+            EnemyKind::GlassRunner => 8.0,
+            EnemyKind::WalkingSyringe => 5.0,
+            EnemyKind::AutoclaveCart => 16.0,
+            EnemyKind::WoolPill => 5.0,
+            EnemyKind::ClothesMoth => 4.0,
+            EnemyKind::PegSnapper => 5.0,
+            EnemyKind::StarchBulb => 6.0,
+            EnemyKind::LintGolem => 16.0,
+            EnemyKind::Silverfish => 5.0,
+            EnemyKind::ErratumSlip => 4.0,
+            EnemyKind::TypeSlug => 9.0,
+            EnemyKind::StapleCrawler => 5.0,
+            EnemyKind::PaperWasp => 6.0,
+            EnemyKind::PaperReel => 15.0,
+            EnemyKind::InkBlot => 4.0,
+            EnemyKind::GravelTick => 5.0,
+            EnemyKind::JuneBug => 4.0,
+            EnemyKind::TarRat => 8.0,
+            EnemyKind::LooseCan => 5.0,
+            EnemyKind::TollGull => 6.0,
+            EnemyKind::LooseBungee => 6.0,
         }
     }
     pub fn xp(self) -> u32 {
@@ -152,6 +356,40 @@ impl EnemyKind {
             EnemyKind::MurderHornet => 4,
             EnemyKind::TermiteHorde => 3,
             EnemyKind::Lilliputian => 1,
+            // Registrations (`WAVE4_ROSTERS.md` gem XP).
+            EnemyKind::PipeEel => 3,
+            EnemyKind::GrateArcher => 4,
+            EnemyKind::SumpLeech => 3,
+            EnemyKind::SluiceToad => 10,
+            EnemyKind::CrumbAnt => 1,
+            EnemyKind::FruitFly => 1,
+            EnemyKind::EggTimer => 3,
+            EnemyKind::PepperMill => 4,
+            EnemyKind::PieWeight => 10,
+            EnemyKind::SinkCrab => 4,
+            EnemyKind::SwabFoot => 1,
+            EnemyKind::SpinnerLid => 1,
+            EnemyKind::GlassRunner => 3,
+            EnemyKind::WalkingSyringe => 3,
+            EnemyKind::AutoclaveCart => 10,
+            EnemyKind::WoolPill => 1,
+            EnemyKind::ClothesMoth => 1,
+            EnemyKind::PegSnapper => 3,
+            EnemyKind::StarchBulb => 4,
+            EnemyKind::LintGolem => 10,
+            EnemyKind::Silverfish => 1,
+            EnemyKind::ErratumSlip => 1,
+            EnemyKind::TypeSlug => 3,
+            EnemyKind::StapleCrawler => 3,
+            EnemyKind::PaperWasp => 4,
+            EnemyKind::PaperReel => 10,
+            EnemyKind::InkBlot => 3,
+            EnemyKind::GravelTick => 1,
+            EnemyKind::JuneBug => 1,
+            EnemyKind::TarRat => 3,
+            EnemyKind::LooseCan => 3,
+            EnemyKind::TollGull => 4,
+            EnemyKind::LooseBungee => 4,
         }
     }
     pub fn color(self) -> Rgb {
@@ -177,40 +415,213 @@ impl EnemyKind {
             EnemyKind::TermiteHorde => (206, 190, 150),
             // Facility staff, shrunk: the pale lab-coat grey-blue of the walls.
             EnemyKind::Lilliputian => (198, 206, 216),
+            // ---- Wave-four registrations ----------------------------------
+            // Picked from each row's silhouette and its floor's palette so the
+            // eight bodies of a floor read apart at a glance. The colour is
+            // the kind's own even while it draws its archetype's body.
+            //
+            // Sewer: bone, barnacle, black sump, wet olive.
+            EnemyKind::PipeEel => (222, 214, 190),
+            EnemyKind::GrateArcher => (140, 168, 150),
+            EnemyKind::SumpLeech => (58, 54, 62),
+            EnemyKind::SluiceToad => (104, 138, 96),
+            // Kitchen: crust, peach fly, enamel, wood, tin, rust.
+            EnemyKind::CrumbAnt => (92, 66, 44),
+            EnemyKind::FruitFly => (196, 96, 72),
+            EnemyKind::EggTimer => (222, 214, 196),
+            EnemyKind::PepperMill => (168, 120, 72),
+            EnemyKind::PieWeight => (176, 180, 188),
+            EnemyKind::SinkCrab => (184, 86, 64),
+            // Lab: cotton, cyan rim, glass, steel, enamel grey.
+            EnemyKind::SwabFoot => (236, 238, 242),
+            EnemyKind::SpinnerLid => (120, 208, 224),
+            EnemyKind::GlassRunner => (176, 214, 208),
+            EnemyKind::WalkingSyringe => (156, 168, 186),
+            EnemyKind::AutoclaveCart => (150, 156, 170),
+            // Laundry: ivory wool, dusty shawl, peg wood, starch, lint.
+            EnemyKind::WoolPill => (226, 218, 198),
+            EnemyKind::ClothesMoth => (170, 150, 120),
+            EnemyKind::PegSnapper => (190, 146, 92),
+            EnemyKind::StarchBulb => (198, 206, 214),
+            EnemyKind::LintGolem => (140, 136, 130),
+            // Printworks: silver, paper, lead, staple steel, newsprint, spool,
+            // dried ink.
+            EnemyKind::Silverfish => (196, 200, 206),
+            EnemyKind::ErratumSlip => (232, 228, 208),
+            EnemyKind::TypeSlug => (108, 110, 118),
+            EnemyKind::StapleCrawler => (150, 166, 190),
+            EnemyKind::PaperWasp => (206, 196, 164),
+            EnemyKind::PaperReel => (140, 112, 80),
+            EnemyKind::InkBlot => (64, 54, 80),
+            // Flatbed: gravel, beetle brown, tar, aluminium, gull white, red
+            // rubber.
+            EnemyKind::GravelTick => (150, 146, 138),
+            EnemyKind::JuneBug => (120, 84, 52),
+            EnemyKind::TarRat => (56, 52, 48),
+            EnemyKind::LooseCan => (188, 192, 196),
+            EnemyKind::TollGull => (232, 232, 224),
+            EnemyKind::LooseBungee => (186, 78, 74),
         }
+    }
+
+    /// The **existing** kind whose steering, attack, navigation size class,
+    /// collision radius, wave-3/4 behaviour state and behaviour systems this
+    /// kind reuses.
+    ///
+    /// Every kind that existed before the wave-four batch is its own archetype.
+    /// Each of the batch's 33 registrations names one of them — `R(X)` and
+    /// `V(X)` rows name `X`, and the six `N` rows name the nearest existing
+    /// behaviour for their slot until the floor's own batch gives them their
+    /// own. That is the whole inheritance seam: every **behavioural** decision
+    /// in the simulation keys on `archetype()`, while stats, name, colour,
+    /// gold, XP, Library identity and art tint stay keyed on the real kind.
+    /// The next batch replaces an `N` row's base by changing one arm here.
+    pub fn archetype(self) -> EnemyKind {
+        match self {
+            // ---- Sewer ----------------------------------------------------
+            // Pipe Eel · V(Cat): the design inherits the Cat's straight
+            // large-class pursuit.
+            EnemyKind::PipeEel => EnemyKind::Cat,
+            // Grate Archer · R(Spitter): the Spitter's aimed pellet.
+            EnemyKind::GrateArcher => EnemyKind::Spitter,
+            // Sump Leech · N: a warned extension the rat steps out of. The
+            // Pillbug is the nearest existing "commit in place, then expose"
+            // body on the same floor.
+            EnemyKind::SumpLeech => EnemyKind::Pillbug,
+            // Sluice Toad · R(Brute): the Brute's slow wide block.
+            EnemyKind::SluiceToad => EnemyKind::Brute,
+            // ---- Kitchen --------------------------------------------------
+            // Crumb Ant · V(Skitterer): the Skitterer's direct column.
+            EnemyKind::CrumbAnt => EnemyKind::Skitterer,
+            // Fruit Fly · R(Bat): the Bat's weave.
+            EnemyKind::FruitFly => EnemyKind::Bat,
+            // Egg Timer · N: a stationary timed footprint. Pillbug (stop,
+            // commit, expose) for now.
+            EnemyKind::EggTimer => EnemyKind::Pillbug,
+            // Pepper Mill · V(Spitter): the Spitter's stand-off and shot.
+            EnemyKind::PepperMill => EnemyKind::Spitter,
+            // Pie Weight · R(Brute): the Brute.
+            EnemyKind::PieWeight => EnemyKind::Brute,
+            // Sink Crab · V(Pillbug): the Pillbug's curl.
+            EnemyKind::SinkCrab => EnemyKind::Pillbug,
+            // ---- Lab ------------------------------------------------------
+            // Swab Foot · R(Skitterer): the Skitterer.
+            EnemyKind::SwabFoot => EnemyKind::Skitterer,
+            // Spinner Lid · V(Bat): the Bat.
+            EnemyKind::SpinnerLid => EnemyKind::Bat,
+            // Glass Runner · R(Cat): the Cat.
+            EnemyKind::GlassRunner => EnemyKind::Cat,
+            // Walking Syringe · N: a planted, warned thrust. The Bell Flea's
+            // "mark two points, then commit" read is the nearest.
+            EnemyKind::WalkingSyringe => EnemyKind::BellFlea,
+            // Autoclave Cart · R(Brute): the Brute.
+            EnemyKind::AutoclaveCart => EnemyKind::Brute,
+            // ---- Laundry --------------------------------------------------
+            // Wool Pill · V(Skitterer): the Skitterer.
+            EnemyKind::WoolPill => EnemyKind::Skitterer,
+            // Clothes Moth · R(Bat): the Bat.
+            EnemyKind::ClothesMoth => EnemyKind::Bat,
+            // Peg Snapper · N: two jaws shown, then closed. Bell Flea (two
+            // marked points, then a commit) for now.
+            EnemyKind::PegSnapper => EnemyKind::BellFlea,
+            // Starch Bulb · V(Spitter): the Spitter.
+            EnemyKind::StarchBulb => EnemyKind::Spitter,
+            // Lint Golem · R(Brute): the Brute.
+            EnemyKind::LintGolem => EnemyKind::Brute,
+            // ---- Printworks ----------------------------------------------
+            // Silverfish · R(Skitterer): the Skitterer.
+            EnemyKind::Silverfish => EnemyKind::Skitterer,
+            // Erratum Slip · V(Bat): the Bat.
+            EnemyKind::ErratumSlip => EnemyKind::Bat,
+            // Type Slug · V(Cat): the Cat.
+            EnemyKind::TypeSlug => EnemyKind::Cat,
+            // Staple Crawler · N: two needle feet marked, then planted. Bell
+            // Flea for now (the same two-cross read).
+            EnemyKind::StapleCrawler => EnemyKind::BellFlea,
+            // Paper Wasp · R(Spitter): the Spitter.
+            EnemyKind::PaperWasp => EnemyKind::Spitter,
+            // Paper Reel · R(Brute): the Brute.
+            EnemyKind::PaperReel => EnemyKind::Brute,
+            // Ink Blot · V(Wick Moth): the Moth's fuse and burst.
+            EnemyKind::InkBlot => EnemyKind::WickMoth,
+            // ---- Flatbed --------------------------------------------------
+            // Gravel Tick · V(Skitterer): the Skitterer.
+            EnemyKind::GravelTick => EnemyKind::Skitterer,
+            // June Bug · R(Bat): the Bat.
+            EnemyKind::JuneBug => EnemyKind::Bat,
+            // Tar Rat · R(Cat): the Cat.
+            EnemyKind::TarRat => EnemyKind::Cat,
+            // Loose Can · N: a warned roll that rebounds. The Murder Hornet's
+            // locked, warned lane and grounded recovery is the nearest.
+            EnemyKind::LooseCan => EnemyKind::MurderHornet,
+            // Toll Gull · V(Spitter): the Spitter.
+            EnemyKind::TollGull => EnemyKind::Spitter,
+            // Loose Bungee · V(Turnkey): the Turnkey's crossbar.
+            EnemyKind::LooseBungee => EnemyKind::Turnkey,
+            // ---- Every earlier kind is its own archetype -------------------
+            EnemyKind::Skitterer
+            | EnemyKind::Bat
+            | EnemyKind::Cat
+            | EnemyKind::Spitter
+            | EnemyKind::Brute
+            | EnemyKind::Boss
+            | EnemyKind::Pillbug
+            | EnemyKind::BellFlea
+            | EnemyKind::WickMoth
+            | EnemyKind::Porter
+            | EnemyKind::Turnkey
+            | EnemyKind::BigSnake
+            | EnemyKind::HouseCentipede
+            | EnemyKind::MurderHornet
+            | EnemyKind::TermiteHorde
+            | EnemyKind::Lilliputian => self,
+        }
+    }
+
+    /// True for a wave-four registration: a kind that reuses another body's
+    /// behaviour intact until its floor's own batch gives it a rule.
+    #[inline]
+    pub fn is_registration(self) -> bool {
+        self.archetype() != self
     }
     /// Spitters fire enemy bullets; others are melee.
     ///
     /// A wave-3 kind is never `ranged`: its damage arrives as a floor hazard the
     /// behaviour system resolves (`enemy_wave3`), not as a bullet.
     pub fn ranged(self) -> bool {
-        matches!(self, EnemyKind::Spitter | EnemyKind::Boss)
+        match self {
+            EnemyKind::Spitter | EnemyKind::Boss => true,
+            // A registration shoots exactly when its base body does.
+            _ => self.is_registration() && self.archetype().ranged(),
+        }
     }
 
     /// One of the five kinds `WAVE3_DESIGN.md` §9 added.
     #[inline]
     pub fn is_wave3(self) -> bool {
-        matches!(
-            self,
+        match self {
             EnemyKind::Pillbug
-                | EnemyKind::BellFlea
-                | EnemyKind::WickMoth
-                | EnemyKind::Porter
-                | EnemyKind::Turnkey
-        )
+            | EnemyKind::BellFlea
+            | EnemyKind::WickMoth
+            | EnemyKind::Porter
+            | EnemyKind::Turnkey => true,
+            // A registration runs its base body's wave-3 state machine.
+            _ => self.is_registration() && self.archetype().is_wave3(),
+        }
     }
 
     /// One of the four kinds the wave-4 batch added (`enemy_wave4`).
     #[inline]
     pub fn is_wave4(self) -> bool {
-        matches!(
-            self,
+        match self {
             EnemyKind::BigSnake
-                | EnemyKind::HouseCentipede
-                | EnemyKind::MurderHornet
-                | EnemyKind::TermiteHorde
-                | EnemyKind::Lilliputian
-        )
+            | EnemyKind::HouseCentipede
+            | EnemyKind::MurderHornet
+            | EnemyKind::TermiteHorde
+            | EnemyKind::Lilliputian => true,
+            // A registration runs its base body's wave-4 state machine.
+            _ => self.is_registration() && self.archetype().is_wave4(),
+        }
     }
 
     /// A body that cannot be shoved around by an ordinary melee hit.
@@ -220,19 +631,22 @@ impl EnemyKind {
     /// the whip hit but is never swung.
     #[inline]
     pub fn heavy(self) -> bool {
-        matches!(
-            self,
+        match self {
             EnemyKind::Brute
-                | EnemyKind::Boss
-                | EnemyKind::Pillbug
-                | EnemyKind::BigSnake
-                | EnemyKind::TermiteHorde
-        )
+            | EnemyKind::Boss
+            | EnemyKind::Pillbug
+            | EnemyKind::BigSnake
+            | EnemyKind::TermiteHorde => true,
+            // A registration is exactly as immovable as its base body: the
+            // floor's heavy (a Sluice Toad, a Pie Weight, …) takes the whip
+            // hit without ever being swung.
+            _ => self.is_registration() && self.archetype().heavy(),
+        }
     }
 
     /// Every kind, in enum order. The console's `spawn` command and its Tab
     /// completion read this table rather than a retyped list.
-    pub fn all() -> [EnemyKind; 16] {
+    pub fn all() -> [EnemyKind; 49] {
         [
             EnemyKind::Skitterer,
             EnemyKind::Bat,
@@ -250,6 +664,40 @@ impl EnemyKind {
             EnemyKind::MurderHornet,
             EnemyKind::TermiteHorde,
             EnemyKind::Lilliputian,
+            // The 33 wave-four registrations, in floor and table order.
+            EnemyKind::PipeEel,
+            EnemyKind::GrateArcher,
+            EnemyKind::SumpLeech,
+            EnemyKind::SluiceToad,
+            EnemyKind::CrumbAnt,
+            EnemyKind::FruitFly,
+            EnemyKind::EggTimer,
+            EnemyKind::PepperMill,
+            EnemyKind::PieWeight,
+            EnemyKind::SinkCrab,
+            EnemyKind::SwabFoot,
+            EnemyKind::SpinnerLid,
+            EnemyKind::GlassRunner,
+            EnemyKind::WalkingSyringe,
+            EnemyKind::AutoclaveCart,
+            EnemyKind::WoolPill,
+            EnemyKind::ClothesMoth,
+            EnemyKind::PegSnapper,
+            EnemyKind::StarchBulb,
+            EnemyKind::LintGolem,
+            EnemyKind::Silverfish,
+            EnemyKind::ErratumSlip,
+            EnemyKind::TypeSlug,
+            EnemyKind::StapleCrawler,
+            EnemyKind::PaperWasp,
+            EnemyKind::PaperReel,
+            EnemyKind::InkBlot,
+            EnemyKind::GravelTick,
+            EnemyKind::JuneBug,
+            EnemyKind::TarRat,
+            EnemyKind::LooseCan,
+            EnemyKind::TollGull,
+            EnemyKind::LooseBungee,
         ]
     }
 
@@ -272,6 +720,41 @@ impl EnemyKind {
             EnemyKind::MurderHornet => "murderhornet",
             EnemyKind::TermiteHorde => "termitehorde",
             EnemyKind::Lilliputian => "lilliputian",
+            // The wave-four registrations (no spaces: the console's `spawn`
+            // command slugs these names).
+            EnemyKind::PipeEel => "pipeeel",
+            EnemyKind::GrateArcher => "gratearcher",
+            EnemyKind::SumpLeech => "sumpleech",
+            EnemyKind::SluiceToad => "sluicetoad",
+            EnemyKind::CrumbAnt => "crumbant",
+            EnemyKind::FruitFly => "fruitfly",
+            EnemyKind::EggTimer => "eggtimer",
+            EnemyKind::PepperMill => "peppermill",
+            EnemyKind::PieWeight => "pieweight",
+            EnemyKind::SinkCrab => "sinkcrab",
+            EnemyKind::SwabFoot => "swabfoot",
+            EnemyKind::SpinnerLid => "spinnerlid",
+            EnemyKind::GlassRunner => "glassrunner",
+            EnemyKind::WalkingSyringe => "walkingsyringe",
+            EnemyKind::AutoclaveCart => "autoclavecart",
+            EnemyKind::WoolPill => "woolpill",
+            EnemyKind::ClothesMoth => "clothesmoth",
+            EnemyKind::PegSnapper => "pegsnapper",
+            EnemyKind::StarchBulb => "starchbulb",
+            EnemyKind::LintGolem => "lintgolem",
+            EnemyKind::Silverfish => "silverfish",
+            EnemyKind::ErratumSlip => "erratumslip",
+            EnemyKind::TypeSlug => "typeslug",
+            EnemyKind::StapleCrawler => "staplecrawler",
+            EnemyKind::PaperWasp => "paperwasp",
+            EnemyKind::PaperReel => "paperreel",
+            EnemyKind::InkBlot => "inkblot",
+            EnemyKind::GravelTick => "graveltick",
+            EnemyKind::JuneBug => "junebug",
+            EnemyKind::TarRat => "tarrat",
+            EnemyKind::LooseCan => "loosecan",
+            EnemyKind::TollGull => "tollgull",
+            EnemyKind::LooseBungee => "loosebungee",
         }
     }
 }
@@ -458,7 +941,7 @@ impl W4 {
     /// darts. The horde is an ordinary flow-field chaser.
     #[inline]
     pub fn holds(&self, kind: EnemyKind) -> bool {
-        match kind {
+        match kind.archetype() {
             // Every wave-4 body with a state machine owns its own position for
             // the whole tick: the snake slithers S-curves, the hornet orbits,
             // the centipede scuttles along walls and the lilliputian walks in
@@ -705,7 +1188,10 @@ impl Enemy {
             direct
         };
         let speed = self.kind.speed() * self.speed_scale * speed_mult * self.slow_mult;
-        let desired = match self.kind {
+        // Steering and gait are the **archetype's**: a registration flies, kites
+        // or walks exactly as the base body it names, until its own batch.
+        let archetype = self.kind.archetype();
+        let desired = match archetype {
             EnemyKind::Bat => {
                 self.wander += dt * 4.0;
                 (chase + Vec2::from_angle(self.wander) * 0.6).normalized() * speed
@@ -729,7 +1215,7 @@ impl Enemy {
         // Animation + facing.
         let sp = self.vel.len();
         // Flyers buzz constantly; crawlers scuttle in proportion to speed.
-        let cadence = if matches!(self.kind, EnemyKind::Bat) {
+        let cadence = if matches!(archetype, EnemyKind::Bat) {
             22.0
         } else {
             4.0 + sp * 0.5
@@ -767,7 +1253,7 @@ impl Enemy {
     fn apply_damage(&mut self, dmg: f32) -> f32 {
         use crate::game::ecs::systems::enemy_wave4 as w4;
         let mut dmg = dmg.max(0.0);
-        if self.kind == EnemyKind::TermiteHorde {
+        if self.kind.archetype() == EnemyKind::TermiteHorde {
             if self.hp > 0.0
                 && self.w4.tier >= w4::HORDE_SPLIT_TIER
                 && dmg >= self.max_hp * w4::HORDE_SPLIT_FRACTION
@@ -799,7 +1285,7 @@ impl Enemy {
     #[inline]
     pub fn damage_mult_from(&self, from: Vec2) -> f32 {
         use crate::game::ecs::systems::enemy_wave4 as w4;
-        match self.kind {
+        match self.kind.archetype() {
             EnemyKind::Pillbug => {
                 if self.w3.curl_t <= 0.0 {
                     return 1.0;
@@ -857,9 +1343,12 @@ impl Enemy {
     /// flash) and by the nuke, so a Porter still flinches and a Wick Moth still
     /// arms its fuse however it died. Draws no rng.
     pub fn note_damage(&mut self) {
+        // Every side effect below belongs to the **archetype's** rule, so a
+        // registration reacts to a hit exactly as its base body does.
+        let archetype = self.kind.archetype();
         // The Porter drops its raise and has to try again (a flinch window, so
         // one stray shot does not disable it for its whole 5 s cycle).
-        if self.kind == EnemyKind::Porter && self.w3.raise_t > 0.0 {
+        if archetype == EnemyKind::Porter && self.w3.raise_t > 0.0 {
             self.w3.raise_t = 0.0;
             self.w3.heal_target = u64::MAX;
             self.w3.heal_cd = self.w3.heal_cd.max(
@@ -867,25 +1356,25 @@ impl Enemy {
             );
         }
         // A Wick Moth that dies lights its own fuse, whatever killed it.
-        if self.kind == EnemyKind::WickMoth && self.hp <= 0.0 && self.w3.wick_t == 0.0 {
+        if archetype == EnemyKind::WickMoth && self.hp <= 0.0 && self.w3.wick_t == 0.0 {
             self.w3.wick_t = crate::game::ecs::systems::enemy_wave3::WICK_FUSE_SECS;
         }
         // A centipede bolts for the nearest wall the moment anything touches
         // it: that is the whole "hard to pin down" clause, and it is booked
         // here so every damage source (a pool tick, a boss hazard, a trap) makes
         // it run, not just bullets.
-        if self.kind == EnemyKind::HouseCentipede && self.hp > 0.0 {
+        if archetype == EnemyKind::HouseCentipede && self.hp > 0.0 {
             self.w4.flee_t = self.w4.flee_t.max(
                 crate::game::ecs::systems::enemy_wave4::CENTIPEDE_FLEE_SECS,
             );
         }
         // Any hit on the horde restarts its regrowth clock.
-        if self.kind == EnemyKind::TermiteHorde {
+        if archetype == EnemyKind::TermiteHorde {
             self.w4.regrow_t = 0.0;
         }
         // A hit on a rope carrier drops its rope: killing the crew is one of
         // the two ways out of a knot (the other is the dash).
-        if self.kind == EnemyKind::Lilliputian
+        if archetype == EnemyKind::Lilliputian
             && self.w4.role == crate::game::ecs::systems::enemy_wave4::LILLI_ROLE_ROPE
             && (self.w4.phase == crate::game::ecs::systems::enemy_wave4::LILLI_PHASE_TELL
                 || self.w4.phase == crate::game::ecs::systems::enemy_wave4::LILLI_PHASE_ACTION)
@@ -1050,5 +1539,225 @@ mod tests {
                 .collect();
             assert!(stuck.is_empty(), "{theme:?}: stuck enemies at {stuck:?}");
         }
+    }
+
+    /// The console's spawn table is the enum: 49 kinds, no duplicates, and the
+    /// 33 wave-four registrations are the tail of it (`all()` is append-only).
+    #[test]
+    fn all_lists_every_kind_once() {
+        let all = EnemyKind::all();
+        assert_eq!(all.len(), 49, "16 earlier kinds + 33 registrations");
+        for (i, a) in all.iter().enumerate() {
+            for b in all.iter().skip(i + 1) {
+                assert_ne!(a, b, "{a:?} is listed twice");
+            }
+        }
+        assert_eq!(
+            all.iter().filter(|k| k.is_registration()).count(),
+            33,
+            "the batch registers 33 ordinary kinds"
+        );
+    }
+
+    /// Every registration inherits from a kind that already existed, the
+    /// inheritance is idempotent, and it really is the base body's collision
+    /// radius (and so its navigation size class).
+    #[test]
+    fn every_registration_names_an_existing_archetype() {
+        let all = EnemyKind::all();
+        let existing = &all[..16];
+        for &k in all.iter().filter(|k| k.is_registration()) {
+            let base = k.archetype();
+            assert!(
+                existing.contains(&base),
+                "{k:?} inherits {base:?}, which is not one of the sixteen existing kinds"
+            );
+            assert_eq!(base.archetype(), base, "{base:?} is not its own archetype");
+            assert_eq!(
+                k.archetype().archetype(),
+                base,
+                "archetype() is not idempotent for {k:?}"
+            );
+            assert_eq!(
+                k.radius(),
+                base.radius(),
+                "{k:?} must inherit its base body's collision radius"
+            );
+            assert_eq!(
+                k.heavy(),
+                base.heavy(),
+                "{k:?} must be exactly as immovable as {base:?}"
+            );
+            assert_eq!(k.ranged(), base.ranged(), "{k:?} must shoot like {base:?}");
+        }
+        for &k in existing {
+            assert_eq!(k.archetype(), k, "an existing kind is its own archetype");
+            assert!(!k.is_registration(), "{k:?} is not a registration");
+        }
+    }
+
+    /// Three sampled kinds per floor carry their `WAVE4_ROSTERS.md` row exactly
+    /// (HP / speed / contact / XP): the design's numbers are the kind's own,
+    /// not its archetype's.
+    #[test]
+    fn sampled_registrations_match_the_design_table() {
+        use EnemyKind::*;
+        // (kind, hp, px/s, contact, xp), three rows per floor.
+        let rows: [(EnemyKind, f32, f32, f32, u32); 18] = [
+            // Sewer.
+            (PipeEel, 16.0, 39.0, 8.0, 3),
+            (GrateArcher, 12.0, 22.0, 6.0, 4),
+            (SluiceToad, 58.0, 16.0, 15.0, 10),
+            // Kitchen.
+            (CrumbAnt, 5.0, 31.0, 5.0, 1),
+            (PepperMill, 13.0, 20.0, 6.0, 4),
+            (PieWeight, 60.0, 16.0, 15.0, 10),
+            // Lab.
+            (SwabFoot, 6.0, 29.0, 5.0, 1),
+            (WalkingSyringe, 13.0, 25.0, 5.0, 3),
+            (AutoclaveCart, 60.0, 15.0, 16.0, 10),
+            // Laundry.
+            (WoolPill, 5.0, 34.0, 5.0, 1),
+            (StarchBulb, 12.0, 21.0, 6.0, 4),
+            (LintGolem, 58.0, 16.0, 16.0, 10),
+            // Printworks.
+            (Silverfish, 5.0, 32.0, 5.0, 1),
+            (TypeSlug, 18.0, 39.0, 9.0, 3),
+            (PaperReel, 62.0, 15.0, 15.0, 10),
+            // Flatbed.
+            (GravelTick, 6.0, 30.0, 5.0, 1),
+            (TollGull, 12.0, 22.0, 6.0, 4),
+            (LooseBungee, 20.0, 25.0, 6.0, 4),
+        ];
+        for (kind, hp, speed, contact, xp) in rows {
+            assert_eq!(kind.base_hp(), hp, "{kind:?} HP");
+            assert_eq!(kind.speed(), speed, "{kind:?} speed");
+            assert_eq!(kind.damage(), contact, "{kind:?} contact");
+            assert_eq!(kind.xp(), xp, "{kind:?} XP");
+        }
+        // The gold column, chance × pieces (`WAVE4_ROSTERS.md`), read from the
+        // shop's own row.
+        use crate::game::shop;
+        assert_eq!(shop::gold_row(EnemyKind::PipeEel), (0.18, 2));
+        assert_eq!(shop::gold_row(EnemyKind::CrumbAnt), (0.08, 1));
+        assert_eq!(shop::gold_row(EnemyKind::PaperReel), (0.45, 3));
+        assert_eq!(shop::gold_row(EnemyKind::LooseBungee), (0.32, 3));
+    }
+
+    /// One floor's registrations, in roster order (`Boss` is nobody's slot).
+    fn floor_registrations(theme: Theme) -> Vec<EnemyKind> {
+        crate::game::roster::floor(theme)
+            .slots
+            .iter()
+            .map(|s| s.kind)
+            .filter(|k| k.is_registration())
+            .collect()
+    }
+
+    /// One floor's new kinds spawn, steer, take damage and die through a few
+    /// hundred ticks on their own floor without panicking.
+    ///
+    /// The ticks run the real schedule (`World::update_with`), so this also
+    /// exercises the archetype inheritance the registrations lean on: a Sump
+    /// Leech runs the Pillbug's curl, a Loose Can the hornet's dive, and so on.
+    /// The rat neither moves nor attacks, so every body that dies is killed by
+    /// the floor itself (a pit, a steam plume) — which is the point of running
+    /// it rather than simulating a bare `Enemy`.
+    fn exercise_floor(theme: Theme) {
+        use crate::game::world::World;
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let kinds = floor_registrations(theme);
+        assert!(!kinds.is_empty(), "{theme:?} adds no registrations");
+
+        let mut w = World::new(theme, 13);
+        let p = w.player.pos;
+        let mut rng = StdRng::seed_from_u64(17);
+        for (i, &kind) in kinds.iter().enumerate() {
+            let a = i as f32 / kinds.len() as f32 * std::f32::consts::TAU;
+            // A ring 48 px out from the rat: on screen, wall-resolved by the
+            // mover, and close enough that every body is chasing within a tick.
+            let at = p + Vec2::from_angle(a) * 48.0;
+            w.spawn_enemy(kind, at, 1.0);
+        }
+        assert!(
+            w.enemies().len() >= kinds.len(),
+            "{theme:?}: only {} of {} bodies spawned",
+            w.enemies().len(),
+            kinds.len()
+        );
+
+        for _ in 0..300 {
+            w.update_with(1.0 / 60.0, Vec2::ZERO, false, false);
+        }
+
+        // The run is coherent: nothing went non-finite and nothing healed past
+        // its pool. (The rat neither moves nor attacks, so this is the floor's
+        // own hazards and bodies doing all of the moving and hitting.)
+        assert!(
+            w.player.hp.is_finite() && w.player.pos.x.is_finite(),
+            "{theme:?}: the rat's state went non-finite"
+        );
+        for e in w.enemies() {
+            assert!(
+                e.pos.x.is_finite() && e.pos.y.is_finite(),
+                "{:?} on {theme:?} has a non-finite position",
+                e.kind
+            );
+            assert!(
+                e.hp <= e.max_hp + 1e-3,
+                "{:?} on {theme:?} healed past its pool",
+                e.kind
+            );
+            assert!(
+                e.pos.x >= 0.0
+                    && e.pos.y >= 0.0
+                    && e.pos.x <= w.level.arena.x
+                    && e.pos.y <= w.level.arena.y,
+                "{:?} on {theme:?} left the arena",
+                e.kind
+            );
+        }
+
+        // And every one of them takes a hit and dies through the ordinary
+        // damage path (the same `hurt` every weapon, pool and trap calls).
+        for &kind in kinds.iter() {
+            let mut e = Enemy::spawn(kind, Vec2::ZERO, 1.0, &mut rng);
+            let before = e.hp;
+            e.hurt(before + 1.0);
+            assert!(e.hp <= 0.0, "{kind:?} survived a lethal hit");
+            assert!(!e.alive(), "{kind:?} still reports alive");
+        }
+    }
+
+    #[test]
+    fn sewer_registrations_run_on_their_own_floor() {
+        exercise_floor(Theme::Sewer);
+    }
+
+    #[test]
+    fn kitchen_registrations_run_on_their_own_floor() {
+        exercise_floor(Theme::Kitchen);
+    }
+
+    #[test]
+    fn lab_registrations_run_on_their_own_floor() {
+        exercise_floor(Theme::Lab);
+    }
+
+    #[test]
+    fn laundry_registrations_run_on_their_own_floor() {
+        exercise_floor(Theme::Laundry);
+    }
+
+    #[test]
+    fn printworks_registrations_run_on_their_own_floor() {
+        exercise_floor(Theme::Printworks);
+    }
+
+    #[test]
+    fn flatbed_registrations_run_on_their_own_floor() {
+        exercise_floor(Theme::Trailer);
     }
 }

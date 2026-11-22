@@ -34,18 +34,45 @@
 //! locked or capped slot is simply at zero mass, so it costs no extra rng and
 //! there are no retries.
 //!
-//! ## Stand-ins (today's build)
+//! ## The roster is complete
 //!
-//! Each floor's design table names eight kinds, and only fifteen ordinary
-//! kinds exist: the design's fifteen `E` rows plus the five in-flight ones
-//! already in the tree. Every other slot is filled with the nearest existing
-//! kind **for that role**, flagged by [`RosterSlot::stand_in_for`] with the
-//! kind the design intends, so every floor is playable now and a later worker
-//! replaces a stand-in by editing one table row. The design's own home
-//! assignment is kept exactly: Sewer Skitterer/Bat/Pillbug/Big Snake, Kitchen
-//! Cat/Porter, Lab Spitter/Lilliputians/Turnkey, Laundry House
-//! Centipede/Bell Flea/Wick Moth, Printworks Termite Horde, Flatbed Murder
-//! Hornet/Brute.
+//! Each floor's design table names eight kinds and every one of them is a
+//! real, registered body: `WAVE4_ROSTERS.md`'s fifteen `E`/`F` rows, plus the
+//! 33 wave-four registrations this batch added. **No ordinary slot carries a
+//! stand-in any more** — `RosterSlot::stand_in_for` is `None` on all six floors
+//! — and no ordinary kind appears on two floors: six floors × eight slots is
+//! 48 distinct ordinary kinds. The design's own home assignment is kept
+//! exactly: Sewer Skitterer/Bat/Pillbug/Big Snake, Kitchen Cat/Porter, Lab
+//! Spitter/Lilliputians/Turnkey, Laundry House Centipede/Bell Flea/Wick Moth,
+//! Printworks Termite Horde, Flatbed Murder Hornet/Brute.
+//!
+//! ## Rules still pending (the per-floor batch's list)
+//!
+//! A registration's stats, name, colour, gold, XP and Library entry are its
+//! own from the day it ships, and **every behavioural decision in the
+//! simulation keys on [`EnemyKind::archetype`]**, so today it behaves exactly
+//! as its base body. That is the one mechanism the next batch hooks.
+//!
+//! * `V(X)` rows — one new rule each, on `X`'s behaviour: Pipe Eel (half
+//!   turning rate), Crumb Ant (holds heading 0.25 s), Pepper Mill (split shot),
+//!   Sink Crab (shield faces 90° off), Spinner Lid (weave flips), Erratum Slip
+//!   (wide weave on spawn), Type Slug (last heading 0.6 s), Starch Bulb
+//!   (accelerating shot), Ink Blot (sliding burst centre), Gravel Tick (drift
+//!   toward the tailgate), Toll Gull (leading shot), Loose Bungee (crossbar
+//!   pull). Where: the archetype's own system (`ecs/systems/enemy_move`,
+//!   `enemy_wave3`, `enemy_wave4`) plus the constants beside it.
+//! * `N` rows — a new behaviour: Sump Leech (tongue), Egg Timer (ring),
+//!   Walking Syringe (drawn ray), Peg Snapper (sliding jaws), Staple Crawler
+//!   (planted feet), Loose Can (rebounding roll). Each currently inherits a
+//!   named base (`Pillbug`, `Pillbug`, `Bell Flea`, `Bell Flea`, `Bell Flea`,
+//!   `Murder Hornet`); an `N` row graduates by adding its own arm to
+//!   `EnemyKind::archetype`'s inverse — a real state machine in its floor's
+//!   system — and then returning `self` from `archetype()`.
+//! * Art: every registration draws its archetype's body recoloured to its own
+//!   `color()` through one fallback (`art_enemy::recolor_body`). A floor's art
+//!   pass adds the kind to `art_enemy::bespoke_body`/`bespoke_lod`'s table and
+//!   writes its `draw_*` beside the others; its own death cue is a new arm in
+//!   `vfx::emit_enemy_death`.
 //!
 //! ## Adding a new ordinary kind (the registration seam)
 //!
@@ -54,16 +81,16 @@
 //! compiling until they are filled in: that is intended, and it is the list a
 //! new kind has to satisfy.
 //!
-//! 1. `game/enemy.rs`: the [`EnemyKind`] variant, plus its row in `base_hp`,
-//!    `speed`, `radius`, `damage`, `xp`, `color`, `name` and `all` (and in
-//!    `heavy`/`ranged`/`is_wave3`/`is_wave4` if it belongs there).
-//! 2. **This file**: replace the stand-in row — `kind: EnemyKind::New` and
-//!    `stand_in_for: None` — in the floor's `slots` table. Nothing else moves.
+//! 1. `game/enemy.rs`: the [`EnemyKind`] variant, its row in `base_hp`,
+//!    `speed`, `damage`, `xp`, `color`, `name` and `all`, and its arm in
+//!    `archetype` — the base body whose steering, attack, nav size class and
+//!    behaviour systems it reuses.
+//! 2. **This file**: the floor's `slots` row (`kind: EnemyKind::New`).
 //! 3. `game/shop.rs::gold_row`: the kind's chance × value row.
 //! 4. `game/library.rs`: display name, the one-line "how to answer it" role
 //!    line and the bestiary entry.
 //! 5. `game/art_enemy.rs`: body scale, the idle/walk draw, the tell pose draw
-//!    and the far-LOD draw.
+//!    and the far-LOD draw (and its row in the bespoke table).
 //! 6. `game/vfx.rs`: the death cue.
 //! 7. `game/bot.rs`: the hazard/response knowledge (which shapes it must step
 //!    out of).
@@ -71,8 +98,9 @@
 //! 9. `autoplay.rs`: the damage-cause label and the kind name.
 //!
 //! A new **miniboss** is one line as well: the floor's `appointments` row here,
-//! plus its arm in `ecs/systems/miniboss.rs` (name, active window, body radius,
-//! telegraph and active shape) and `MinibossKind::all`.
+//! plus its arm in `ecs/systems/miniboss.rs` (name, body radius, one
+//! `signature()` row — a shared shape evaluator with its own numbers — its body
+//! in `art_miniboss`, and its row in `MinibossKind::all`).
 
 use rand::{Rng, RngExt};
 
@@ -273,17 +301,16 @@ pub fn kind_cap(kind: EnemyKind) -> usize {
     }
 }
 
-/// One slot's binding: which kind answers it, and whether that kind is a
-/// stand-in for the one the design names.
+/// One slot's binding: which kind answers it, and (for a future content pass)
+/// whether that kind is a stand-in for the one the design names.
 #[derive(Clone, Copy, Debug)]
 pub struct RosterSlot {
     pub slot: Slot,
     /// The kind that actually spawns in this slot today.
     pub kind: EnemyKind,
-    /// `Some(name)` when `kind` stands in for a kind that does not exist yet —
-    /// the design's intended body for the slot, in its own words. `None` when
-    /// the design assigns this slot to `kind` itself (an `E` row) or to the
-    /// in-flight kind that is already in the tree.
+    /// `Some(name)` when `kind` stands in for a kind that does not exist yet.
+    /// `None` on every ordinary slot today: all 48 ordinary bodies the design
+    /// names are registered, so a floor fields exactly its own eight.
     pub stand_in_for: Option<&'static str>,
 }
 
@@ -295,8 +322,10 @@ pub struct FloorRoster {
     pub slots: [RosterSlot; SLOT_COUNT],
     /// The four appointments at 3:00, 6:00, 9:00 and 12:00, in order.
     pub appointments: [MinibossKind; APPOINTMENT_COUNT],
-    /// The design's intended name for a stand-in appointment (`None` where the
-    /// name is the real body).
+    /// The design's intended name for an appointment that still holds a
+    /// stand-in. Empty (`None` everywhere) now that all twenty-four named
+    /// minibosses exist; kept so a future floor can borrow a body without
+    /// losing the design's name for it.
     pub appointment_stand_ins: [Option<&'static str>; APPOINTMENT_COUNT],
 }
 
@@ -326,9 +355,10 @@ impl FloorRoster {
 
 // ---- The six floors -------------------------------------------------------
 //
-// Row by row from `WAVE4_ROSTERS.md`. `stand_in_for` names the design's body
-// for a slot that does not exist yet; the comment above each such row says
-// which one and why it is the nearest existing body **for that role**.
+// Row by row from `WAVE4_ROSTERS.md`: every slot names the design's own body.
+// `stand_in_for` is `None` everywhere — the ordinary roster has no stand-ins —
+// and the comment above each row carries the kind's build (`R`/`V`/`N`) and
+// which rule is still pending.
 
 static SEWER: FloorRoster = FloorRoster {
     theme: Theme::Sewer,
@@ -338,209 +368,193 @@ static SEWER: FloorRoster = FloorRoster {
         // B: the design's own weaving flyer.
         RosterSlot { slot: Slot::B, kind: EnemyKind::Bat, stand_in_for: None },
         // C: Pipe Eel · V(Cat) — half turning rate, reverse round a pipe end.
-        RosterSlot { slot: Slot::C, kind: EnemyKind::Cat, stand_in_for: Some("Pipe Eel") },
+        RosterSlot { slot: Slot::C, kind: EnemyKind::PipeEel, stand_in_for: None },
         // I: the design's own curling shield.
         RosterSlot { slot: Slot::I, kind: EnemyKind::Pillbug, stand_in_for: None },
         // R: Grate Archer · R(Spitter) — shot through the puckered lip.
-        RosterSlot { slot: Slot::R, kind: EnemyKind::Spitter, stand_in_for: Some("Grate Archer") },
+        RosterSlot { slot: Slot::R, kind: EnemyKind::GrateArcher, stand_in_for: None },
         // II: Sump Leech · N — a warned extension the rat steps out of and
-        // circles behind; the Bell Flea's two marked crosses are the nearest
-        // existing "footprint, then commit" trick.
-        RosterSlot { slot: Slot::II, kind: EnemyKind::BellFlea, stand_in_for: Some("Sump Leech") },
+        // circles behind. Its tongue is the next batch's rule; until then it
+        // behaves as its archetype, the Pillbug.
+        RosterSlot { slot: Slot::II, kind: EnemyKind::SumpLeech, stand_in_for: None },
         // H: Sluice Toad · R(Brute) — wide slow blocker.
-        RosterSlot { slot: Slot::H, kind: EnemyKind::Brute, stand_in_for: Some("Sluice Toad") },
+        RosterSlot { slot: Slot::H, kind: EnemyKind::SluiceToad, stand_in_for: None },
         // III: the design's own moving wall.
         RosterSlot { slot: Slot::III, kind: EnemyKind::BigSnake, stand_in_for: None },
     ],
     appointments: [
         MinibossKind::Corkscrew,
         MinibossKind::BellDiver,
-        // Valve Widow · data, Bobbin.
-        MinibossKind::Bobbin,
-        // The Mudlark · new, pincer (two claws closing): the Snip's blades.
-        MinibossKind::SisterSnip,
+        // 9:00 · Valve Widow — data, Bobbin's evaluator.
+        MinibossKind::ValveWidow,
+        // 12:00 · The Mudlark — new, the closing pincer.
+        MinibossKind::Mudlark,
     ],
-    appointment_stand_ins: [None, None, Some("Valve Widow"), Some("The Mudlark")],
+    appointment_stand_ins: [None, None, None, None],
 };
 
 static KITCHEN: FloorRoster = FloorRoster {
     theme: Theme::Kitchen,
     slots: [
         // A: Crumb Ant · V(Skitterer) — a small direct column.
-        RosterSlot { slot: Slot::A, kind: EnemyKind::Skitterer, stand_in_for: Some("Crumb Ant") },
+        RosterSlot { slot: Slot::A, kind: EnemyKind::CrumbAnt, stand_in_for: None },
         // B: Fruit Fly · R(Bat) — a weaving flyer.
-        RosterSlot { slot: Slot::B, kind: EnemyKind::Bat, stand_in_for: Some("Fruit Fly") },
+        RosterSlot { slot: Slot::B, kind: EnemyKind::FruitFly, stand_in_for: None },
         // C: the design's own kitchen staff.
         RosterSlot { slot: Slot::C, kind: EnemyKind::Cat, stand_in_for: None },
         // I: Egg Timer · N — winds up close, then rings a departing footprint.
-        RosterSlot { slot: Slot::I, kind: EnemyKind::BellFlea, stand_in_for: Some("Egg Timer") },
+        RosterSlot { slot: Slot::I, kind: EnemyKind::EggTimer, stand_in_for: None },
         // R: Pepper Mill · V(Spitter) — the shot splits in two.
-        RosterSlot { slot: Slot::R, kind: EnemyKind::Spitter, stand_in_for: Some("Pepper Mill") },
+        RosterSlot { slot: Slot::R, kind: EnemyKind::PepperMill, stand_in_for: None },
         // II: the design's own sugar-cube healer.
         RosterSlot { slot: Slot::II, kind: EnemyKind::Porter, stand_in_for: None },
         // H: Pie Weight · R(Brute) — keeps advancing under fire.
-        RosterSlot { slot: Slot::H, kind: EnemyKind::Brute, stand_in_for: Some("Pie Weight") },
+        RosterSlot { slot: Slot::H, kind: EnemyKind::PieWeight, stand_in_for: None },
         // III: Sink Crab · V(Pillbug) — pillbug curl behind a pot-lid claw.
-        RosterSlot { slot: Slot::III, kind: EnemyKind::Pillbug, stand_in_for: Some("Sink Crab") },
+        RosterSlot { slot: Slot::III, kind: EnemyKind::SinkCrab, stand_in_for: None },
     ],
     appointments: [
         MinibossKind::MilkCarton,
-        // Pastry Wheel · data, Corkscrew.
-        MinibossKind::Corkscrew,
-        // Salt Hen · data, Foreman.
-        MinibossKind::Foreman,
-        // Pot Brush · data, Bobbin.
-        MinibossKind::Bobbin,
+        // 6:00 · Pastry Wheel — data, Corkscrew's trench.
+        MinibossKind::PastryWheel,
+        // 9:00 · Salt Hen — data, The Foreman's stamps.
+        MinibossKind::SaltHen,
+        // 12:00 · Pot Brush — data, Bobbin's sweeping cord.
+        MinibossKind::PotBrush,
     ],
-    appointment_stand_ins: [
-        None,
-        Some("Pastry Wheel"),
-        Some("Salt Hen"),
-        Some("Pot Brush"),
-    ],
+    appointment_stand_ins: [None, None, None, None],
 };
 
 static LAB: FloorRoster = FloorRoster {
     theme: Theme::Lab,
     slots: [
         // A: Swab Foot · R(Skitterer) — a small direct cleaner.
-        RosterSlot { slot: Slot::A, kind: EnemyKind::Skitterer, stand_in_for: Some("Swab Foot") },
+        RosterSlot { slot: Slot::A, kind: EnemyKind::SwabFoot, stand_in_for: None },
         // B: Spinner Lid · V(Bat) — a weave that flips handedness.
-        RosterSlot { slot: Slot::B, kind: EnemyKind::Bat, stand_in_for: Some("Spinner Lid") },
+        RosterSlot { slot: Slot::B, kind: EnemyKind::SpinnerLid, stand_in_for: None },
         // C: Glass Runner · R(Cat) — a direct large-class route.
-        RosterSlot { slot: Slot::C, kind: EnemyKind::Cat, stand_in_for: Some("Glass Runner") },
+        RosterSlot { slot: Slot::C, kind: EnemyKind::GlassRunner, stand_in_for: None },
         // I: Walking Syringe · N — plants a tip and draws a dotted ray.
-        RosterSlot { slot: Slot::I, kind: EnemyKind::BellFlea, stand_in_for: Some("Walking Syringe") },
+        RosterSlot { slot: Slot::I, kind: EnemyKind::WalkingSyringe, stand_in_for: None },
         // R: the design's own acid sac.
         RosterSlot { slot: Slot::R, kind: EnemyKind::Spitter, stand_in_for: None },
         // II: the design's own tiny squad.
         RosterSlot { slot: Slot::II, kind: EnemyKind::Lilliputian, stand_in_for: None },
         // H: Autoclave Cart · R(Brute) — a wide slow blocker.
-        RosterSlot { slot: Slot::H, kind: EnemyKind::Brute, stand_in_for: Some("Autoclave Cart") },
+        RosterSlot { slot: Slot::H, kind: EnemyKind::AutoclaveCart, stand_in_for: None },
         // III: the design's own crossbar drone.
         RosterSlot { slot: Slot::III, kind: EnemyKind::Turnkey, stand_in_for: None },
     ],
     appointments: [
-        // Dose Pump · data, Corkscrew.
-        MinibossKind::Corkscrew,
-        // Petri Mother · data, Bell Diver.
-        MinibossKind::BellDiver,
-        // Cage Counter · data, Foreman.
-        MinibossKind::Foreman,
-        // Rotor Technician · data, Bobbin.
-        MinibossKind::Bobbin,
+        // 3:00 · Dose Pump — data, Corkscrew's trench.
+        MinibossKind::DosePump,
+        // 6:00 · Petri Mother — data, Bell Diver's ring.
+        MinibossKind::PetriMother,
+        // 9:00 · Cage Counter — data, The Foreman's stamps.
+        MinibossKind::CageCounter,
+        // 12:00 · Rotor Technician — data, Bobbin's sweeping cord.
+        MinibossKind::RotorTechnician,
     ],
-    appointment_stand_ins: [
-        Some("Dose Pump"),
-        Some("Petri Mother"),
-        Some("Cage Counter"),
-        Some("Rotor Technician"),
-    ],
+    appointment_stand_ins: [None, None, None, None],
 };
 
 static LAUNDRY: FloorRoster = FloorRoster {
     theme: Theme::Laundry,
     slots: [
         // A: Wool Pill · V(Skitterer) — a small direct rank that stalls.
-        RosterSlot { slot: Slot::A, kind: EnemyKind::Skitterer, stand_in_for: Some("Wool Pill") },
+        RosterSlot { slot: Slot::A, kind: EnemyKind::WoolPill, stand_in_for: None },
         // B: Clothes Moth · R(Bat) — a weaving flyer.
-        RosterSlot { slot: Slot::B, kind: EnemyKind::Bat, stand_in_for: Some("Clothes Moth") },
+        RosterSlot { slot: Slot::B, kind: EnemyKind::ClothesMoth, stand_in_for: None },
         // C: the design's own wall-hugger.
         RosterSlot { slot: Slot::C, kind: EnemyKind::HouseCentipede, stand_in_for: None },
-        // I: Peg Snapper · N — two jaws shown, then slid together. The
-        // Pillbug is the nearest existing "commit, expose, punish the timing"
-        // body (it also holds its ground while its trick runs).
-        RosterSlot { slot: Slot::I, kind: EnemyKind::Pillbug, stand_in_for: Some("Peg Snapper") },
+        // I: Peg Snapper · N — two jaws shown, then slid together. The jaws
+        // are the next batch's rule; until then it behaves as its archetype,
+        // the Bell Flea.
+        RosterSlot { slot: Slot::I, kind: EnemyKind::PegSnapper, stand_in_for: None },
         // R: Starch Bulb · V(Spitter) — the shot accelerates.
-        RosterSlot { slot: Slot::R, kind: EnemyKind::Spitter, stand_in_for: Some("Starch Bulb") },
+        RosterSlot { slot: Slot::R, kind: EnemyKind::StarchBulb, stand_in_for: None },
         // II: the design's own tuning-fork hopper.
         RosterSlot { slot: Slot::II, kind: EnemyKind::BellFlea, stand_in_for: None },
         // H: Lint Golem · R(Brute) — a slow solid plug.
-        RosterSlot { slot: Slot::H, kind: EnemyKind::Brute, stand_in_for: Some("Lint Golem") },
+        RosterSlot { slot: Slot::H, kind: EnemyKind::LintGolem, stand_in_for: None },
         // III: the design's own fuse-on-death moth.
         RosterSlot { slot: Slot::III, kind: EnemyKind::WickMoth, stand_in_for: None },
     ],
     appointments: [
         MinibossKind::SisterSnip,
         MinibossKind::Bobbin,
-        // Suds Bailiff · data, Bell Diver.
-        MinibossKind::BellDiver,
-        // The Wringer Boy · new, rollers (two parallel bars down a lane): the
-        // Corkscrew's filling trench, doubled.
-        MinibossKind::Corkscrew,
+        // 9:00 · Suds Bailiff — data, Bell Diver's ring.
+        MinibossKind::SudsBailiff,
+        // 12:00 · The Wringer Boy — new, the paired rollers.
+        MinibossKind::WringerBoy,
     ],
-    appointment_stand_ins: [None, None, Some("Suds Bailiff"), Some("The Wringer Boy")],
+    appointment_stand_ins: [None, None, None, None],
 };
 
 static PRINTWORKS: FloorRoster = FloorRoster {
     theme: Theme::Printworks,
     slots: [
         // A: Silverfish · R(Skitterer) — a small direct streamer.
-        RosterSlot { slot: Slot::A, kind: EnemyKind::Skitterer, stand_in_for: Some("Silverfish") },
+        RosterSlot { slot: Slot::A, kind: EnemyKind::Silverfish, stand_in_for: None },
         // B: Erratum Slip · V(Bat) — a wider-weaving flyer.
-        RosterSlot { slot: Slot::B, kind: EnemyKind::Bat, stand_in_for: Some("Erratum Slip") },
+        RosterSlot { slot: Slot::B, kind: EnemyKind::ErratumSlip, stand_in_for: None },
         // C: Type Slug · V(Cat) — a ruled, last-heading chaser.
-        RosterSlot { slot: Slot::C, kind: EnemyKind::Cat, stand_in_for: Some("Type Slug") },
+        RosterSlot { slot: Slot::C, kind: EnemyKind::TypeSlug, stand_in_for: None },
         // I: Staple Crawler · N — two needle feet marked, then planted.
-        RosterSlot { slot: Slot::I, kind: EnemyKind::BellFlea, stand_in_for: Some("Staple Crawler") },
+        RosterSlot { slot: Slot::I, kind: EnemyKind::StapleCrawler, stand_in_for: None },
         // R: Paper Wasp · R(Spitter) — shot from a rolled tip.
-        RosterSlot { slot: Slot::R, kind: EnemyKind::Spitter, stand_in_for: Some("Paper Wasp") },
+        RosterSlot { slot: Slot::R, kind: EnemyKind::PaperWasp, stand_in_for: None },
         // II: the design's own many-bodied swarm.
         RosterSlot { slot: Slot::II, kind: EnemyKind::TermiteHorde, stand_in_for: None },
         // H: Paper Reel · R(Brute) — wide continuous contact.
-        RosterSlot { slot: Slot::H, kind: EnemyKind::Brute, stand_in_for: Some("Paper Reel") },
+        RosterSlot { slot: Slot::H, kind: EnemyKind::PaperReel, stand_in_for: None },
         // III: Ink Blot · V(Wick Moth) — the wick's burst centre slides.
-        RosterSlot { slot: Slot::III, kind: EnemyKind::WickMoth, stand_in_for: Some("Ink Blot") },
+        RosterSlot { slot: Slot::III, kind: EnemyKind::InkBlot, stand_in_for: None },
     ],
     appointments: [
         MinibossKind::Foreman,
-        // Quoin Key · data, Sister Snip.
-        MinibossKind::SisterSnip,
-        // Carbon Twin · data, Milk Carton.
-        MinibossKind::MilkCarton,
-        // Late Plate · new, closing ring (a gap to escape through): the Bell
-        // Diver's ring is the same read.
-        MinibossKind::BellDiver,
+        // 6:00 · Quoin Key — data, Sister Snip's cone.
+        MinibossKind::QuoinKey,
+        // 9:00 · Carbon Twin — data, Milk Carton's spill.
+        MinibossKind::CarbonTwin,
+        // 12:00 · Late Plate — new, the closing ring (Bell Diver's evaluator,
+        // centred on the rat and shrinking).
+        MinibossKind::LatePlate,
     ],
-    appointment_stand_ins: [None, Some("Quoin Key"), Some("Carbon Twin"), Some("Late Plate")],
+    appointment_stand_ins: [None, None, None, None],
 };
 
 static TRAILER: FloorRoster = FloorRoster {
     theme: Theme::Trailer,
     slots: [
         // A: Gravel Tick · V(Skitterer) — a small direct crab-walker.
-        RosterSlot { slot: Slot::A, kind: EnemyKind::Skitterer, stand_in_for: Some("Gravel Tick") },
+        RosterSlot { slot: Slot::A, kind: EnemyKind::GravelTick, stand_in_for: None },
         // B: June Bug · R(Bat) — a wobbling flyer.
-        RosterSlot { slot: Slot::B, kind: EnemyKind::Bat, stand_in_for: Some("June Bug") },
+        RosterSlot { slot: Slot::B, kind: EnemyKind::JuneBug, stand_in_for: None },
         // C: Tar Rat · R(Cat) — a straight large-class chaser.
-        RosterSlot { slot: Slot::C, kind: EnemyKind::Cat, stand_in_for: Some("Tar Rat") },
+        RosterSlot { slot: Slot::C, kind: EnemyKind::TarRat, stand_in_for: None },
         // I: Loose Can · N — a warned roll that rebounds off the first face.
-        RosterSlot { slot: Slot::I, kind: EnemyKind::BellFlea, stand_in_for: Some("Loose Can") },
+        RosterSlot { slot: Slot::I, kind: EnemyKind::LooseCan, stand_in_for: None },
         // R: Toll Gull · V(Spitter) — the shot leads the rat.
-        RosterSlot { slot: Slot::R, kind: EnemyKind::Spitter, stand_in_for: Some("Toll Gull") },
+        RosterSlot { slot: Slot::R, kind: EnemyKind::TollGull, stand_in_for: None },
         // II: the design's own diving hornet.
         RosterSlot { slot: Slot::II, kind: EnemyKind::MurderHornet, stand_in_for: None },
         // H: the design's own plated blocker.
         RosterSlot { slot: Slot::H, kind: EnemyKind::Brute, stand_in_for: None },
         // III: Loose Bungee · V(Turnkey) — the crossbar with a pull on it.
-        RosterSlot { slot: Slot::III, kind: EnemyKind::Turnkey, stand_in_for: Some("Loose Bungee") },
+        RosterSlot { slot: Slot::III, kind: EnemyKind::LooseBungee, stand_in_for: None },
     ],
     appointments: [
-        // Tarpaulin Pup · data, Milk Carton.
-        MinibossKind::MilkCarton,
-        // Axle Nut · data, Corkscrew.
-        MinibossKind::Corkscrew,
-        // Chain Dog · data, Bobbin.
-        MinibossKind::Bobbin,
-        // The Road Atlas · data, Foreman.
-        MinibossKind::Foreman,
+        // 3:00 · Tarpaulin Pup — data, Milk Carton's spill.
+        MinibossKind::TarpaulinPup,
+        // 6:00 · Axle Nut — data, Corkscrew's trench.
+        MinibossKind::AxleNut,
+        // 9:00 · Chain Dog — data, Bobbin's sweeping cord.
+        MinibossKind::ChainDog,
+        // 12:00 · The Road Atlas — data, The Foreman's stamps.
+        MinibossKind::RoadAtlas,
     ],
-    appointment_stand_ins: [
-        Some("Tarpaulin Pup"),
-        Some("Axle Nut"),
-        Some("Chain Dog"),
-        Some("The Road Atlas"),
-    ],
+    appointment_stand_ins: [None, None, None, None],
 };
 
 /// The floor table for `theme`. Exhaustive over [`Theme`], so a new floor
@@ -924,24 +938,60 @@ mod tests {
         }
     }
 
-    /// A stand-in always names the kind the design intends for its slot, and
-    /// only the fifteen existing kinds stand in for anything.
+    /// The ordinary roster has no stand-ins left: every slot names the
+    /// design's own body, and that body is a registered kind.
     #[test]
-    fn every_stand_in_names_the_kind_the_design_intends() {
-        use EnemyKind::*;
-        let existing = [
-            Skitterer, Bat, Cat, Spitter, Brute, Pillbug, BellFlea, WickMoth, Porter, Turnkey,
-            BigSnake, HouseCentipede, MurderHornet, TermiteHorde, Lilliputian,
-        ];
+    fn every_ordinary_slot_names_its_own_kind() {
         for theme in themes() {
             let roster = floor(theme);
             for entry in roster.slots.iter() {
-                assert!(existing.contains(&entry.kind), "{theme:?}: {:?}", entry.kind);
-                if let Some(intended) = entry.stand_in_for {
-                    assert!(!intended.is_empty(), "{theme:?}: an unnamed stand-in");
-                }
+                assert_eq!(
+                    entry.stand_in_for,
+                    None,
+                    "{theme:?} {}: the design's body is still a stand-in",
+                    entry.slot.label()
+                );
+                assert!(
+                    EnemyKind::all().contains(&entry.kind),
+                    "{theme:?} {}: {:?} is not a registered kind",
+                    entry.slot.label(),
+                    entry.kind
+                );
             }
         }
+    }
+
+    /// Six floors × eight slots is 48 **distinct** ordinary kinds: no ordinary
+    /// body appears on two floors ("each level should have a unique set of even
+    /// basic enemies"). 33 of the 48 are this batch's registrations and the
+    /// other 15 are the bodies that already existed.
+    #[test]
+    fn the_six_floors_field_48_distinct_ordinary_kinds() {
+        let mut seen: Vec<EnemyKind> = Vec::new();
+        for theme in themes() {
+            let roster = floor(theme);
+            for entry in roster.slots.iter() {
+                assert!(
+                    !seen.contains(&entry.kind),
+                    "{theme:?} {} repeats {:?}, which another floor already fields",
+                    entry.slot.label(),
+                    entry.kind
+                );
+                seen.push(entry.kind);
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            themes().len() * SLOT_COUNT,
+            "48 ordinary kinds, eight per floor"
+        );
+        let registered = seen.iter().filter(|k| k.is_registration()).count();
+        assert_eq!(registered, 33, "the batch registers 33 ordinary kinds");
+        assert_eq!(
+            seen.len() - registered,
+            15,
+            "the fifteen E/F rows stay on their home floors"
+        );
     }
 
     /// Unlocks, pool weights and caps, exactly as "Reading a room" and the
@@ -1294,12 +1344,12 @@ mod tests {
         // The design's fixed four, floor by floor.
         use MinibossKind::*;
         let rows = [
-            (Theme::Sewer, [Corkscrew, BellDiver, Bobbin, SisterSnip]),
-            (Theme::Kitchen, [MilkCarton, Corkscrew, Foreman, Bobbin]),
-            (Theme::Lab, [Corkscrew, BellDiver, Foreman, Bobbin]),
-            (Theme::Laundry, [SisterSnip, Bobbin, BellDiver, Corkscrew]),
-            (Theme::Printworks, [Foreman, SisterSnip, MilkCarton, BellDiver]),
-            (Theme::Trailer, [MilkCarton, Corkscrew, Bobbin, Foreman]),
+            (Theme::Sewer, [Corkscrew, BellDiver, ValveWidow, Mudlark]),
+            (Theme::Kitchen, [MilkCarton, PastryWheel, SaltHen, PotBrush]),
+            (Theme::Lab, [DosePump, PetriMother, CageCounter, RotorTechnician]),
+            (Theme::Laundry, [SisterSnip, Bobbin, SudsBailiff, WringerBoy]),
+            (Theme::Printworks, [Foreman, QuoinKey, CarbonTwin, LatePlate]),
+            (Theme::Trailer, [TarpaulinPup, AxleNut, ChainDog, RoadAtlas]),
         ];
         for (theme, row) in rows {
             assert_eq!(appointments(theme), row, "{theme:?}");
@@ -1307,6 +1357,24 @@ mod tests {
         for theme in themes() {
             let roster = floor(theme);
             assert_eq!(roster.appointment_stand_ins.len(), APPOINTMENT_COUNT);
+            // Every appointment is the real body: no floor borrows another's.
+            assert!(
+                roster.appointment_stand_ins.iter().all(|s| s.is_none()),
+                "{theme:?} still holds a stand-in"
+            );
+        }
+        // The four appointments are unique across the whole campaign: 24 names,
+        // 24 slots, one home each.
+        let mut all: Vec<MinibossKind> = Vec::new();
+        for theme in themes() {
+            for kind in appointments(theme) {
+                assert!(!all.contains(&kind), "{kind:?} is on two floors");
+                all.push(kind);
+            }
+        }
+        assert_eq!(all.len(), MinibossKind::all().len());
+        for kind in MinibossKind::all() {
+            assert!(all.contains(&kind), "{kind:?} keeps no appointment");
         }
         // The six existing minibosses keep their home slots and are not
         // flagged as stand-ins.

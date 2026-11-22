@@ -230,7 +230,10 @@ fn reap_dead(
         commands.entity(entity).despawn();
 
         let blood = level.palette.blood;
-        let big = matches!(e.kind, EnemyKind::Brute | EnemyKind::Boss);
+        // The death cue follows the **archetype** (the floor's heavy dies like
+        // a Brute); the ichor and the drop roll keep the real kind's colour and
+        // row.
+        let big = matches!(e.kind.archetype(), EnemyKind::Brute | EnemyKind::Boss);
         // Neon hook: enemy-kind-specific burst + wet ichor floor stain (the
         // legacy 120/28/10-particle inline burst now lives in here).
         vfx::emit_enemy_death(particles, rng, e.pos, e.radius, e.kind, blood);

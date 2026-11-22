@@ -406,6 +406,49 @@ pub fn gold_row(kind: EnemyKind) -> (f32, u32) {
         EnemyKind::MurderHornet => (0.22, 2),
         EnemyKind::TermiteHorde => (0.20, 2),
         EnemyKind::Boss => (1.0, BOSS_GOLD),
+        // ---- Wave-four registrations ---------------------------------------
+        // `WAVE4_ROSTERS.md`'s Gold column, percent × pieces: chance 0.08 is
+        // 8 % × 1. The row is the kind's own, not its archetype's.
+        //
+        // Sewer.
+        EnemyKind::PipeEel => (0.18, 2),
+        EnemyKind::GrateArcher => (0.20, 2),
+        EnemyKind::SumpLeech => (0.20, 2),
+        EnemyKind::SluiceToad => (0.45, 3),
+        // Kitchen.
+        EnemyKind::CrumbAnt => (0.08, 1),
+        EnemyKind::FruitFly => (0.10, 1),
+        EnemyKind::EggTimer => (0.18, 2),
+        EnemyKind::PepperMill => (0.20, 2),
+        EnemyKind::PieWeight => (0.45, 3),
+        EnemyKind::SinkCrab => (0.25, 2),
+        // Lab.
+        EnemyKind::SwabFoot => (0.08, 1),
+        EnemyKind::SpinnerLid => (0.10, 1),
+        EnemyKind::GlassRunner => (0.18, 2),
+        EnemyKind::WalkingSyringe => (0.18, 2),
+        EnemyKind::AutoclaveCart => (0.45, 3),
+        // Laundry.
+        EnemyKind::WoolPill => (0.08, 1),
+        EnemyKind::ClothesMoth => (0.10, 1),
+        EnemyKind::PegSnapper => (0.18, 2),
+        EnemyKind::StarchBulb => (0.20, 2),
+        EnemyKind::LintGolem => (0.45, 3),
+        // Printworks.
+        EnemyKind::Silverfish => (0.08, 1),
+        EnemyKind::ErratumSlip => (0.10, 1),
+        EnemyKind::TypeSlug => (0.18, 2),
+        EnemyKind::StapleCrawler => (0.18, 2),
+        EnemyKind::PaperWasp => (0.20, 2),
+        EnemyKind::PaperReel => (0.45, 3),
+        EnemyKind::InkBlot => (0.22, 2),
+        // Flatbed.
+        EnemyKind::GravelTick => (0.08, 1),
+        EnemyKind::JuneBug => (0.10, 1),
+        EnemyKind::TarRat => (0.18, 2),
+        EnemyKind::LooseCan => (0.18, 2),
+        EnemyKind::TollGull => (0.20, 2),
+        EnemyKind::LooseBungee => (0.32, 3),
         _ => (0.10, 1),
     }
 }

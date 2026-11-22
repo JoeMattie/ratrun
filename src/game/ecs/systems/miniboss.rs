@@ -1,6 +1,7 @@
-//! Named minibosses (`WAVE3_DESIGN.md` §8): four appointments per level, each
-//! with one distinct signature shape, a 1 s tell, an exposed recovery and a
-//! chest on death.
+//! Named minibosses (`WAVE3_DESIGN.md` §8, `WAVE4_ROSTERS.md` "Named
+//! appointments and elites"): four appointments per level, each with one
+//! distinct signature shape, a 1 s tell, an exposed recovery and a chest on
+//! death.
 //!
 //! A miniboss is an ordinary [`Enemy`] body (kind [`EnemyKind::Brute`] so the
 //! weapons, traps, bullets and contact rules already target it) carrying a
@@ -12,8 +13,10 @@
 //!
 //! Timings: `TELL_TIME` 1 s → active window (per kind) → `RECOVER_TIME` 1 s
 //! exposed → cooldown so the next tell is 4 s after the last signature ended.
-//! Aim is locked at the tell's first tick. A signature whose shape leaves no
-//! walkable escape is re-aimed (up to 8 tries) and skipped if still trapped.
+//! Aim is locked at the tell's first tick, the whole footprint is outlined for
+//! the full second, and one strike bites the rat once (`hit_this_strike`).
+//! A signature whose shape leaves no walkable escape is re-aimed (up to 8
+//! tries) and skipped if still trapped.
 //!
 //! Appointments: `MINIBOSS_TIMES` = 3:00, 6:00, 9:00, 12:00. A surviving
 //! miniboss retreats without loot when the next appointment arrives, so only
@@ -39,16 +42,19 @@
 //! Spawn grace: 20 s at half spawn rate after an arrival and 8 s with no fresh
 //! ordinary spawns after a death ([`MinibossSchedule`]).
 //!
-//! ## The six signatures (§8)
+//! ## The signatures (`WAVE4_ROSTERS.md`, "Named appointments and elites")
 //!
-//! | Name | Shape |
-//! |---|---|
-//! | Corkscrew | a trench that extends from the tail over 0.5 s |
-//! | Sister Snip | a 45° cone |
-//! | Bobbin | a cord that swings through an arc |
-//! | Bell Diver | a ring with a gap |
-//! | The Foreman | three 12 px stamps |
-//! | Milk Carton | a spill rectangle |
+//! Twenty-four rows, four a floor, one signature each. Every row is *data*:
+//! a [`Signature`] names one of eight shared evaluators ([`SignatureShape`])
+//! with that row's own dimensions, sweep angle, gap, timings and stamp layout,
+//! and [`MinibossKind::telegraph`] / [`MinibossKind::active_shape`] are the
+//! only two places that turn it into geometry, so the tell and the strike can
+//! never disagree. The six wave-3 names keep their wave-3 numbers exactly; the
+//! fifteen "data, <base>" rows reuse a base evaluator; the three "new" rows
+//! are the closing pincer ([`MinibossShape::Pincer`]), the paired rollers
+//! ([`MinibossShape::Lane`]) and the closing ring (a [`SignatureShape::Ring`]
+//! centred on the rat's locked position, the same evaluator the Bell Diver
+//! expands) — see the table in [`MinibossKind::signature`].
 //!
 //! Every shape is exact: see [`MinibossShape::contains`] and its tests.
 
@@ -124,15 +130,42 @@ pub const SPILL_HALF: f32 = 10.0;
 /// How close the rat must be before the miniboss starts its tell.
 pub const ENGAGE_RANGE: f32 = 70.0;
 
-/// The six named minibosses.
+/// The twenty-four named minibosses: `WAVE4_ROSTERS.md`, "Named appointments
+/// and elites". The first six are wave 3's; the rest are wave 4's eighteen,
+/// appended in the design table's order (three per floor: the 9:00 and 12:00
+/// appointments on every floor).
+///
+/// **Append-only.** `library::Key::Miniboss` uses the discriminant as the
+/// inside-category index, so a new variant must go at the end and an old
+/// variant must never move: a save's bestiary bits index this list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MinibossKind {
+    // ---- wave 3: the six that already existed ---------------------------
     Corkscrew,
     SisterSnip,
     Bobbin,
     BellDiver,
     Foreman,
     MilkCarton,
+    // ---- wave 4: the eighteen that fill the rest of the table -----------
+    ValveWidow,
+    Mudlark,
+    PastryWheel,
+    SaltHen,
+    PotBrush,
+    DosePump,
+    PetriMother,
+    CageCounter,
+    RotorTechnician,
+    SudsBailiff,
+    WringerBoy,
+    QuoinKey,
+    CarbonTwin,
+    LatePlate,
+    TarpaulinPup,
+    AxleNut,
+    ChainDog,
+    RoadAtlas,
 }
 
 impl MinibossKind {
@@ -144,12 +177,31 @@ impl MinibossKind {
             MinibossKind::BellDiver => "Bell Diver",
             MinibossKind::Foreman => "The Foreman",
             MinibossKind::MilkCarton => "Milk Carton",
+            MinibossKind::ValveWidow => "Valve Widow",
+            MinibossKind::Mudlark => "The Mudlark",
+            MinibossKind::PastryWheel => "Pastry Wheel",
+            MinibossKind::SaltHen => "Salt Hen",
+            MinibossKind::PotBrush => "Pot Brush",
+            MinibossKind::DosePump => "Dose Pump",
+            MinibossKind::PetriMother => "Petri Mother",
+            MinibossKind::CageCounter => "Cage Counter",
+            MinibossKind::RotorTechnician => "Rotor Technician",
+            MinibossKind::SudsBailiff => "Suds Bailiff",
+            MinibossKind::WringerBoy => "The Wringer Boy",
+            MinibossKind::QuoinKey => "Quoin Key",
+            MinibossKind::CarbonTwin => "Carbon Twin",
+            MinibossKind::LatePlate => "Late Plate",
+            MinibossKind::TarpaulinPup => "Tarpaulin Pup",
+            MinibossKind::AxleNut => "Axle Nut",
+            MinibossKind::ChainDog => "Chain Dog",
+            MinibossKind::RoadAtlas => "The Road Atlas",
         }
     }
 
-    /// Every named miniboss, in enum order. The console's `miniboss` command
-    /// and its Tab completion read this table rather than a retyped list.
-    pub fn all() -> [MinibossKind; 6] {
+    /// Every named miniboss, in enum order. The console's `miniboss` command,
+    /// its Tab completion, the Library's Named Minibosses section and the
+    /// roster test all read this table rather than a retyped list.
+    pub fn all() -> [MinibossKind; 24] {
         [
             MinibossKind::Corkscrew,
             MinibossKind::SisterSnip,
@@ -157,22 +209,35 @@ impl MinibossKind {
             MinibossKind::BellDiver,
             MinibossKind::Foreman,
             MinibossKind::MilkCarton,
+            MinibossKind::ValveWidow,
+            MinibossKind::Mudlark,
+            MinibossKind::PastryWheel,
+            MinibossKind::SaltHen,
+            MinibossKind::PotBrush,
+            MinibossKind::DosePump,
+            MinibossKind::PetriMother,
+            MinibossKind::CageCounter,
+            MinibossKind::RotorTechnician,
+            MinibossKind::SudsBailiff,
+            MinibossKind::WringerBoy,
+            MinibossKind::QuoinKey,
+            MinibossKind::CarbonTwin,
+            MinibossKind::LatePlate,
+            MinibossKind::TarpaulinPup,
+            MinibossKind::AxleNut,
+            MinibossKind::ChainDog,
+            MinibossKind::RoadAtlas,
         ]
     }
 
-    /// Seconds the active window lasts.
+    /// Seconds the active window lasts. One source of truth: the row's
+    /// [`Signature`].
+    #[inline]
     pub fn active_duration(self) -> f32 {
-        match self {
-            MinibossKind::Corkscrew => 0.5,
-            MinibossKind::SisterSnip => 0.8,
-            MinibossKind::Bobbin => 0.7,
-            MinibossKind::BellDiver => 1.2,
-            MinibossKind::Foreman => 0.9,
-            MinibossKind::MilkCarton => 1.2,
-        }
+        self.signature().active
     }
 
-    /// Silhouette radius for the placeholder art.
+    /// Collision radius (§8: every named body is 6.5–7.5 px).
     pub fn body_radius(self) -> f32 {
         match self {
             MinibossKind::Corkscrew => 7.0,
@@ -181,46 +246,352 @@ impl MinibossKind {
             MinibossKind::BellDiver => 7.0,
             MinibossKind::Foreman => 7.5,
             MinibossKind::MilkCarton => 7.0,
+            MinibossKind::ValveWidow => 7.0,
+            MinibossKind::Mudlark => 7.5,
+            MinibossKind::PastryWheel => 6.5,
+            MinibossKind::SaltHen => 7.0,
+            MinibossKind::PotBrush => 7.0,
+            MinibossKind::DosePump => 6.5,
+            MinibossKind::PetriMother => 7.5,
+            MinibossKind::CageCounter => 7.0,
+            MinibossKind::RotorTechnician => 7.5,
+            MinibossKind::SudsBailiff => 7.0,
+            MinibossKind::WringerBoy => 7.5,
+            MinibossKind::QuoinKey => 6.5,
+            MinibossKind::CarbonTwin => 7.0,
+            MinibossKind::LatePlate => 7.5,
+            MinibossKind::TarpaulinPup => 6.5,
+            MinibossKind::AxleNut => 7.0,
+            MinibossKind::ChainDog => 7.0,
+            MinibossKind::RoadAtlas => 7.5,
         }
     }
 
-    /// The telegraph outline drawn during the tell.
-    pub fn telegraph(self, mb: &Miniboss) -> MinibossShape {
+    /// The row's signature: which shared evaluator it uses and with what
+    /// numbers, and how long its active window lasts.
+    ///
+    /// `WAVE4_ROSTERS.md` calls fifteen of the wave-4 rows "data, <base>":
+    /// the base's evaluator with the row's own dimensions, sweep angle, gap,
+    /// timings and stamp layout. The first six rows are the original wave-3
+    /// signatures and keep their numbers to the digit (their constants are
+    /// still the ones in this module's head, and the tests pin them).
+    pub fn signature(self) -> Signature {
+        use SignatureShape as S;
         match self {
-            MinibossKind::Corkscrew => MinibossShape::Trench {
+            // ---- wave 3 ----------------------------------------------------
+            MinibossKind::Corkscrew => Signature {
+                active: 0.5,
+                shape: S::Trench {
+                    len: TRENCH_LEN,
+                    half: TRENCH_HALF,
+                },
+            },
+            MinibossKind::SisterSnip => Signature {
+                active: 0.8,
+                shape: S::Cone {
+                    half_angle: CONE_HALF_ANGLE,
+                    len: CONE_LEN,
+                },
+            },
+            MinibossKind::Bobbin => Signature {
+                active: 0.7,
+                // The cord swings from straight ahead through a 90° arc.
+                shape: S::Cord {
+                    len: CORD_LEN,
+                    half: CORD_HALF,
+                    sweep: std::f32::consts::FRAC_PI_2,
+                },
+            },
+            MinibossKind::BellDiver => Signature {
+                active: 1.2,
+                shape: S::Ring {
+                    from: 0.0,
+                    to: RING_RADIUS,
+                    half: RING_HALF,
+                    gap_half: RING_GAP_HALF,
+                    on_rat: false,
+                },
+            },
+            MinibossKind::Foreman => Signature {
+                active: 0.9,
+                shape: S::Stamps {
+                    half: STAMP_HALF,
+                    layout: StampLayout::Along {
+                        spacing: STAMP_SPACING,
+                    },
+                },
+            },
+            MinibossKind::MilkCarton => Signature {
+                active: 1.2,
+                shape: S::Spill {
+                    len: SPILL_LEN,
+                    half_w: SPILL_HALF,
+                },
+            },
+            // ---- sewer 9:00: "Wrench sweeps a 36×5 radius arm through 100°
+            // over 0.85." -----------------------------------------------
+            MinibossKind::ValveWidow => Signature {
+                active: 0.85,
+                shape: S::Cord {
+                    len: 36.0,
+                    half: 2.5,
+                    sweep: 100.0_f32.to_radians(),
+                },
+            },
+            // ---- sewer 12:00, new: two 30×5 claws that close from 28 apart
+            // to 4 apart in 0.65, leaving the far tip open ----------------
+            MinibossKind::Mudlark => Signature {
+                active: 0.65,
+                shape: S::Pincer {
+                    len: 30.0,
+                    half: 2.5,
+                    open: 28.0,
+                    closed: 4.0,
+                },
+            },
+            // ---- kitchen 6:00: "A 46×8 cut fills down the counter over
+            // 0.6." ------------------------------------------------------
+            MinibossKind::PastryWheel => Signature {
+                active: 0.6,
+                shape: S::Trench {
+                    len: 46.0,
+                    half: 4.0,
+                },
+            },
+            // ---- kitchen 9:00: three 12×12 piles at 0 / 0.3 / 0.6, centres
+            // 16 apart along the rat's heading ---------------------------
+            MinibossKind::SaltHen => Signature {
+                active: 0.9,
+                shape: S::Stamps {
+                    half: 6.0,
+                    layout: StampLayout::Along { spacing: 16.0 },
+                },
+            },
+            // ---- kitchen 12:00: "A 42×6 arm sweeps 110° in 0.85." --------
+            MinibossKind::PotBrush => Signature {
+                active: 0.85,
+                shape: S::Cord {
+                    len: 42.0,
+                    half: 3.0,
+                    sweep: 110.0_f32.to_radians(),
+                },
+            },
+            // ---- lab 3:00: "Injection trench 40×8 fills in 0.65." --------
+            MinibossKind::DosePump => Signature {
+                active: 0.65,
+                shape: S::Trench {
+                    len: 40.0,
+                    half: 4.0,
+                },
+            },
+            // ---- lab 6:00: "Culture front 6 wide expands to 36 over 1.2
+            // with a 75° sterile gap." -----------------------------------
+            MinibossKind::PetriMother => Signature {
+                active: 1.2,
+                shape: S::Ring {
+                    from: 0.0,
+                    to: 36.0,
+                    half: 3.0,
+                    gap_half: 75.0_f32.to_radians() * 0.5,
+                    on_rat: false,
+                },
+            },
+            // ---- lab 9:00: "Three 12×12 reader pads pulse for 0.3 each,
+            // left, right, centre, at rat's locked position and ±15 across
+            // aim." ------------------------------------------------------
+            MinibossKind::CageCounter => Signature {
+                active: 0.9,
+                shape: S::Stamps {
+                    half: 6.0,
+                    layout: StampLayout::AroundRat { across: 15.0 },
+                },
+            },
+            // ---- lab 12:00: "A 40×5 blade turns 150° in 1.1." ------------
+            MinibossKind::RotorTechnician => Signature {
+                active: 1.1,
+                shape: S::Cord {
+                    len: 40.0,
+                    half: 2.5,
+                    sweep: 150.0_f32.to_radians(),
+                },
+            },
+            // ---- laundry 9:00: "Foam rim 8 wide expands to 42 in 1.2, 65°
+            // gap." ------------------------------------------------------
+            MinibossKind::SudsBailiff => Signature {
+                active: 1.2,
+                shape: S::Ring {
+                    from: 0.0,
+                    to: 42.0,
+                    half: 4.0,
+                    gap_half: 65.0_f32.to_radians() * 0.5,
+                    on_rat: false,
+                },
+            },
+            // ---- laundry 12:00, new: two 32×6 bars down a 44-long lane in
+            // 1 s, end to end with a 12-wide central seam -----------------
+            MinibossKind::WringerBoy => Signature {
+                active: 1.0,
+                shape: S::Lane {
+                    len: 44.0,
+                    seam_half: 6.0,
+                    half: 3.0,
+                    bar_len: 32.0,
+                },
+            },
+            // ---- printworks 6:00: "Chase frame closes over a 38-long, 55°
+            // wedge in 0.75." --------------------------------------------
+            MinibossKind::QuoinKey => Signature {
+                active: 0.75,
+                shape: S::Cone {
+                    half_angle: 55.0_f32.to_radians() * 0.5,
+                    len: 38.0,
+                },
+            },
+            // ---- printworks 9:00: "Lays a 38×20 transfer rectangle from the
+            // folded edge for 1.4." --------------------------------------
+            MinibossKind::CarbonTwin => Signature {
+                active: 1.4,
+                shape: S::Spill {
+                    len: 38.0,
+                    half_w: 10.0,
+                },
+            },
+            // ---- printworks 12:00, new: a 5-wide ring on the rat's locked
+            // position, radius 32 → 6 in 1.2, with a 65° break. The break is
+            // a fixed quarter turn off the locked aim, exactly as the Bell
+            // Diver's chipped rim is, so it is never the rat's own line. ----
+            MinibossKind::LatePlate => Signature {
+                active: 1.2,
+                shape: S::Ring {
+                    from: 32.0,
+                    to: 6.0,
+                    half: 2.5,
+                    gap_half: 65.0_f32.to_radians() * 0.5,
+                    on_rat: true,
+                },
+            },
+            // ---- flatbed 3:00: "Unfurls a 30×18 rectangle for 1.1." ------
+            MinibossKind::TarpaulinPup => Signature {
+                active: 1.1,
+                shape: S::Spill {
+                    len: 30.0,
+                    half_w: 9.0,
+                },
+            },
+            // ---- flatbed 6:00: "Rolls a 50×10 trench out along locked aim
+            // over 0.65." ------------------------------------------------
+            MinibossKind::AxleNut => Signature {
+                active: 0.65,
+                shape: S::Trench {
+                    len: 50.0,
+                    half: 5.0,
+                },
+            },
+            // ---- flatbed 9:00: "Chain 36×6 swings 115° in 0.9." ----------
+            MinibossKind::ChainDog => Signature {
+                active: 0.9,
+                shape: S::Cord {
+                    len: 36.0,
+                    half: 3.0,
+                    sweep: 115.0_f32.to_radians(),
+                },
+            },
+            // ---- flatbed 12:00: three 14×14 talon marks in a V, tip on the
+            // locked rat, the others 16 forward and ±14 sideways, landing
+            // left / tip / right at 0.3 apart ----------------------------
+            MinibossKind::RoadAtlas => Signature {
+                active: 0.9,
+                shape: S::Stamps {
+                    half: 7.0,
+                    layout: StampLayout::V {
+                        forward: 16.0,
+                        across: 14.0,
+                    },
+                },
+            },
+        }
+    }
+
+    /// The tell's outline: the whole hazard area, drawn for the full
+    /// [`TELL_TIME`] before the strike starts. It is derived from the same
+    /// row data as [`Self::active_shape`], so the two can never disagree.
+    pub fn telegraph(self, mb: &Miniboss) -> MinibossShape {
+        match self.signature().shape {
+            SignatureShape::Trench { len, half } => MinibossShape::Trench {
                 a: mb.origin,
-                b: mb.origin + mb.aim * TRENCH_LEN,
-                half: TRENCH_HALF,
+                b: mb.origin + mb.aim * len,
+                half,
             },
-            MinibossKind::SisterSnip => MinibossShape::Cone {
+            SignatureShape::Cone {
+                half_angle,
+                len,
+            } => MinibossShape::Cone {
                 origin: mb.origin,
                 aim: mb.aim,
-                half_angle: CONE_HALF_ANGLE,
-                len: CONE_LEN,
+                half_angle,
+                len,
             },
-            MinibossKind::Bobbin => MinibossShape::Cord {
+            SignatureShape::Cord { len, half, .. } => MinibossShape::Cord {
                 spool: mb.origin,
-                tip: mb.origin + mb.aim * CORD_LEN,
-                half: CORD_HALF,
+                tip: mb.origin + mb.aim * len,
+                half,
             },
-            MinibossKind::BellDiver => MinibossShape::RingGap {
-                origin: mb.origin,
-                radius: RING_RADIUS,
-                half: RING_HALF,
-                // A fixed gap a quarter turn off the locked aim, never aimed at
-                // the rat (see `RING_GAP_TURN`).
+            SignatureShape::Ring {
+                from,
+                to,
+                half,
+                gap_half,
+                on_rat,
+            } => MinibossShape::RingGap {
+                origin: if on_rat { mb.rat_lock() } else { mb.origin },
+                // The widest the ring ever gets: the whole hazard area.
+                radius: from.max(to),
+                half,
+                // A fixed gap a quarter turn off the locked aim, never aimed
+                // at the rat (see `RING_GAP_TURN`).
                 gap_dir: mb.aim.rotate(RING_GAP_TURN),
-                gap_half: RING_GAP_HALF,
+                gap_half,
             },
-            MinibossKind::Foreman => MinibossShape::Stamps {
+            SignatureShape::Stamps { half, .. } => MinibossShape::Stamps {
                 centers: mb.stamp_centers,
-                half: STAMP_HALF,
+                half,
             },
-            MinibossKind::MilkCarton => MinibossShape::Spill {
-                center: mb.origin + mb.aim * (SPILL_LEN * 0.5),
+            SignatureShape::Spill { len, half_w } => MinibossShape::Spill {
+                center: mb.origin + mb.aim * (len * 0.5),
                 aim: mb.aim,
-                half_len: SPILL_LEN * 0.5,
-                half_w: SPILL_HALF,
+                half_len: len * 0.5,
+                half_w,
+            },
+            SignatureShape::Pincer {
+                len,
+                half,
+                open,
+                closed,
+            } => MinibossShape::Pincer {
+                origin: mb.origin,
+                aim: mb.aim,
+                len,
+                half,
+                // The claws' whole travel: open at the tell, closed at the
+                // end of the strike, and everything between.
+                gap_lo: closed,
+                gap_hi: open,
+            },
+            SignatureShape::Lane {
+                len,
+                seam_half,
+                half,
+                ..
+            } => MinibossShape::Lane {
+                origin: mb.origin,
+                aim: mb.aim,
+                len,
+                seam_half,
+                half,
+                // The tell marks the whole lane: one bar as long as the lane,
+                // running its full length, with the seam free.
+                bar_len: len,
+                covered: len,
             },
         }
     }
@@ -228,57 +599,173 @@ impl MinibossKind {
     /// The active hit shape at `t` seconds into the active window, or `None`
     /// when the window has expired.
     pub fn active_shape(self, mb: &Miniboss, t: f32) -> Option<MinibossShape> {
-        let d = self.active_duration();
+        let sig = self.signature();
+        let d = sig.active;
         if t < 0.0 || t > d {
             return None;
         }
         let p = (t / d).clamp(0.0, 1.0);
-        Some(match self {
-            MinibossKind::Corkscrew => MinibossShape::Trench {
+        Some(match sig.shape {
+            SignatureShape::Trench { len, half } => MinibossShape::Trench {
                 a: mb.origin,
-                b: mb.origin + mb.aim * (TRENCH_LEN * p),
-                half: TRENCH_HALF,
+                b: mb.origin + mb.aim * (len * p),
+                half,
             },
-            MinibossKind::SisterSnip => MinibossShape::Cone {
+            SignatureShape::Cone {
+                half_angle,
+                len,
+            } => MinibossShape::Cone {
                 origin: mb.origin,
                 aim: mb.aim,
-                half_angle: CONE_HALF_ANGLE,
-                len: CONE_LEN,
+                half_angle,
+                len,
             },
-            MinibossKind::Bobbin => {
-                // The cord swings from straight ahead through a 90° arc.
-                let angle = -std::f32::consts::FRAC_PI_4 + p * std::f32::consts::FRAC_PI_2;
+            SignatureShape::Cord { len, half, sweep } => {
+                // The cord sweeps from `-sweep/2` to `+sweep/2` about the aim.
+                let angle = -sweep * 0.5 + p * sweep;
                 let dir = mb.aim.rotate(angle);
                 MinibossShape::Cord {
                     spool: mb.origin,
-                    tip: mb.origin + dir * CORD_LEN,
-                    half: CORD_HALF,
+                    tip: mb.origin + dir * len,
+                    half,
                 }
             }
-            MinibossKind::BellDiver => MinibossShape::RingGap {
-                origin: mb.origin,
-                radius: RING_RADIUS * p,
-                half: RING_HALF,
+            SignatureShape::Ring {
+                from,
+                to,
+                half,
+                gap_half,
+                on_rat,
+            } => MinibossShape::RingGap {
+                origin: if on_rat { mb.rat_lock() } else { mb.origin },
+                radius: from + (to - from) * p,
+                half,
                 gap_dir: mb.aim.rotate(RING_GAP_TURN),
-                gap_half: RING_GAP_HALF,
+                gap_half,
             },
-            MinibossKind::Foreman => {
-                // One stamp at a time, 0.3 s apart.
-                let idx = ((t / 0.3).floor() as usize).min(2);
+            SignatureShape::Stamps { half, .. } => {
+                // One stamp at a time, `STAMP_STEP` apart, in the order the
+                // layout locked them.
+                let idx = ((t / STAMP_STEP).floor() as usize).min(2);
                 MinibossShape::Stamps {
                     centers: [mb.stamp_centers[idx], mb.stamp_centers[idx], mb.stamp_centers[idx]],
-                    half: STAMP_HALF,
+                    half,
                 }
             }
-            MinibossKind::MilkCarton => MinibossShape::Spill {
-                center: mb.origin + mb.aim * (SPILL_LEN * 0.5),
+            SignatureShape::Spill { len, half_w } => MinibossShape::Spill {
+                center: mb.origin + mb.aim * (len * 0.5),
                 aim: mb.aim,
-                half_len: SPILL_LEN * 0.5,
-                half_w: SPILL_HALF,
+                half_len: len * 0.5,
+                half_w,
+            },
+            SignatureShape::Pincer {
+                len,
+                half,
+                open,
+                closed,
+            } => {
+                let gap = open + (closed - open) * p;
+                MinibossShape::Pincer {
+                    origin: mb.origin,
+                    aim: mb.aim,
+                    len,
+                    half,
+                    gap_lo: gap,
+                    gap_hi: gap,
+                }
+            }
+            SignatureShape::Lane {
+                len,
+                seam_half,
+                half,
+                bar_len,
+            } => MinibossShape::Lane {
+                origin: mb.origin,
+                aim: mb.aim,
+                len,
+                seam_half,
+                half,
+                bar_len,
+                // The pair rolls from the near end to clear the far end: the
+                // leading edge travels the lane plus the bar's own length.
+                covered: (len + bar_len) * p,
             },
         })
     }
 }
+
+/// The shared evaluator one row's signature uses, with that row's own numbers.
+///
+/// Every row is *data*: [`MinibossKind::telegraph`] and
+/// [`MinibossKind::active_shape`] are the only two places that turn these into
+/// geometry, so the tell and the strike can never drift apart, and the bot,
+/// the ink pass and the renderer read the same [`MinibossShape`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SignatureShape {
+    /// A trench from the body to its tip that fills over the active window.
+    Trench { len: f32, half: f32 },
+    /// A cone from the body along the locked aim.
+    Cone { half_angle: f32, len: f32 },
+    /// A cord from the body to its tip, swinging `sweep` radians through the
+    /// locked aim (`-sweep/2 .. +sweep/2`). Behind the pivot is always safe.
+    Cord { len: f32, half: f32, sweep: f32 },
+    /// A ring with one gap, growing (or shrinking) from radius `from` to
+    /// `to`. `on_rat` centres it on the rat's locked position instead of the
+    /// body (the closing ring). The gap is a fixed quarter turn off the aim.
+    Ring {
+        from: f32,
+        to: f32,
+        half: f32,
+        gap_half: f32,
+        on_rat: bool,
+    },
+    /// Three stamps, marked together for the tell and landed one at a time,
+    /// [`STAMP_STEP`] apart, in the layout's landing order.
+    Stamps { half: f32, layout: StampLayout },
+    /// A rectangle laid from the body along the locked aim.
+    Spill { len: f32, half_w: f32 },
+    /// Two claws astride the aim, `gap_lo..gap_hi` apart centre to centre and
+    /// `len` long: an open tip along the aim is always safe.
+    Pincer {
+        len: f32,
+        half: f32,
+        open: f32,
+        closed: f32,
+    },
+    /// Two `bar_len`-long bars down a `len`-long lane with a
+    /// `2·seam_half`-wide seam down the middle. They roll from the body's end
+    /// to clear the far end over the active window. The seam is always safe.
+    Lane {
+        len: f32,
+        seam_half: f32,
+        half: f32,
+        bar_len: f32,
+    },
+}
+
+/// Where a row's three stamps sit, relative to what the tell locked.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StampLayout {
+    /// Three pads `spacing` apart along the locked aim from the body.
+    Along { spacing: f32 },
+    /// The rat's locked position, then `across` either side of it. Landing
+    /// order: left, right, centre.
+    AroundRat { across: f32 },
+    /// A V: the tip on the rat's locked position, the other two `forward`
+    /// ahead and `across` either side. Landing order: left, tip, right.
+    V { forward: f32, across: f32 },
+}
+
+/// One row's signature: the active window in seconds and the footprint it
+/// uses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Signature {
+    pub active: f32,
+    pub shape: SignatureShape,
+}
+
+/// Seconds between one stamp landing and the next.
+pub const STAMP_STEP: f32 = 0.3;
 
 /// A distinct signature footprint. All units are world pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -313,6 +800,30 @@ pub enum MinibossShape {
         half_len: f32,
         half_w: f32,
     },
+    /// The closing pincer: two `len × 2·half` claws astride `aim` whose
+    /// centre-line separation sweeps `gap_lo..gap_hi`. The footprint is the
+    /// whole travel, so the tell marks every place a claw can pass through.
+    Pincer {
+        origin: Vec2,
+        aim: Vec2,
+        len: f32,
+        half: f32,
+        gap_lo: f32,
+        gap_hi: f32,
+    },
+    /// The rollers: two `bar_len`-long bars astride `aim`, each `2·half` wide,
+    /// starting `seam_half` either side of the centre line, rolling down a
+    /// `len`-long lane. `covered` is the leading edge's distance from the
+    /// body. The seam between the bars is never covered.
+    Lane {
+        origin: Vec2,
+        aim: Vec2,
+        len: f32,
+        seam_half: f32,
+        half: f32,
+        bar_len: f32,
+        covered: f32,
+    },
 }
 
 impl MinibossShape {
@@ -326,6 +837,16 @@ impl MinibossShape {
             MinibossShape::RingGap { origin, .. } => origin,
             MinibossShape::Stamps { centers, .. } => centers[1],
             MinibossShape::Spill { center, .. } => center,
+            MinibossShape::Pincer {
+                origin, aim, len, ..
+            } => origin + aim.normalized() * (len * 0.5),
+            MinibossShape::Lane {
+                origin,
+                aim,
+                covered,
+                bar_len,
+                ..
+            } => origin + aim.normalized() * ((covered - bar_len * 0.5).max(0.0)),
         }
     }
 
@@ -387,6 +908,53 @@ impl MinibossShape {
                 let across = v.dot(aim.normalized().perp());
                 along.abs() <= half_len + radius && across.abs() <= half_w + radius
             }
+            MinibossShape::Pincer {
+                origin,
+                aim,
+                len,
+                half,
+                gap_lo,
+                gap_hi,
+            } => {
+                // Work in the claws' own frame: `along` down the aim, `across`
+                // sideways. A claw is a line from the body to its tip at
+                // `across = ±separation/2`, so the nearest one to `p` uses the
+                // separation that lands closest to `|across|`'s side, clamped
+                // to the travel the claw actually makes.
+                let dir = aim.normalized();
+                let v = p - origin;
+                let along = v.dot(dir);
+                let across = v.dot(dir.perp()).abs();
+                let sep = (across * 2.0).clamp(gap_lo.min(gap_hi), gap_lo.max(gap_hi));
+                let along_off = along - along.clamp(0.0, len);
+                let across_off = across - sep * 0.5;
+                along_off * along_off + across_off * across_off <= (half + radius) * (half + radius)
+            }
+            MinibossShape::Lane {
+                origin,
+                aim,
+                len,
+                seam_half,
+                half,
+                bar_len,
+                covered,
+            } => {
+                let dir = aim.normalized();
+                let v = p - origin;
+                let along = v.dot(dir);
+                let across = v.dot(dir.perp()).abs();
+                // The stretch the pair is pressing right now, clipped to the
+                // lane: the bars lead with `covered` and trail by `bar_len`.
+                let head = covered.min(len);
+                let tail = (covered - bar_len).max(0.0);
+                // The two bars: `seam_half .. seam_half + 2·half` either side
+                // of the lane's centre line. The seam itself is never covered.
+                head - tail > 0.0
+                    && along + radius >= tail
+                    && along - radius <= head
+                    && across + radius >= seam_half
+                    && across <= seam_half + half * 2.0 + radius
+            }
         }
     }
 }
@@ -423,7 +991,10 @@ pub struct Miniboss {
     pub origin: Vec2,
     /// The locked aim direction at tell start.
     pub aim: Vec2,
-    /// The three stamp centres, locked at tell start.
+    /// The rat's position at tell start. The closing ring (Late Plate) is
+    /// centred here; every other row ignores it.
+    pub target: Vec2,
+    /// The three stamp centres, locked at tell start, in landing order.
     pub stamp_centers: [Vec2; 3],
     /// One-shot arrival cue.
     pub announced: bool,
@@ -431,6 +1002,10 @@ pub struct Miniboss {
     pub tell_cued: bool,
     /// One-shot active cue for this signature.
     pub active_cued: bool,
+    /// The signature has already bitten this rat: one hit per strike, however
+    /// many ticks the active window lasts and however long the shape lingers
+    /// over the body. Cleared when the next strike starts.
+    pub hit_this_strike: bool,
     /// Set once the chest has been queued.
     pub chest_dropped: bool,
     /// XP this miniboss leaves (§1 budget).
@@ -448,13 +1023,29 @@ impl Miniboss {
             timer: 0.0,
             origin: Vec2::ZERO,
             aim: Vec2::new(1.0, 0.0),
+            target: Vec2::ZERO,
             stamp_centers: [Vec2::ZERO; 3],
             announced: false,
             tell_cued: false,
             active_cued: false,
+            hit_this_strike: false,
             chest_dropped: false,
             xp: appointment_xp(appointment),
             signature_damage: appointment_signature_damage(appointment),
+        }
+    }
+
+    /// Where a signature centred on the rat locks to.
+    ///
+    /// A card with no tell (the Library's animated preview) never sets a
+    /// target, so it falls back to the body: a ring centred on nowhere would
+    /// draw off the card.
+    #[inline]
+    pub fn rat_lock(&self) -> Vec2 {
+        if self.target == Vec2::ZERO {
+            self.origin
+        } else {
+            self.target
         }
     }
 
@@ -522,12 +1113,11 @@ pub fn appointment_xp(appointment: usize) -> u32 {
 /// The table itself lives in the roster ([`crate::game::roster`]), beside the
 /// floor's eight ordinary slots, so a per-floor content pass edits one file.
 /// `WAVE4_ROSTERS.md` gives every floor four fixed appointments in increasing
-/// complexity — the last one a rehearsal for the floor's boss — and the six
-/// existing minibosses keep their home slots (Sewer Corkscrew/Bell Diver,
-/// Kitchen Milk Carton, Laundry Sister Snip/Bobbin, Printworks The Foreman).
-/// Slots whose designed miniboss does not exist yet hold a stand-in chosen from
-/// the existing six by the design's own "data, <base>" note; see
-/// `roster::FloorRoster::appointment_stand_ins`.
+/// complexity — the last one a rehearsal for the floor's boss — and each row
+/// is now the real body, on its own floor: the six wave-3 names keep their
+/// homes (Sewer Corkscrew/Bell Diver, Kitchen Milk Carton, Laundry Sister
+/// Snip/Bobbin, Printworks The Foreman) and the eighteen wave-4 names fill the
+/// other slots. See `roster::floor(theme).appointments`.
 pub fn schedule_for(theme: Theme, appointment: usize) -> MinibossKind {
     let row = crate::game::roster::appointments(theme);
     row[appointment.min(row.len() - 1)]
@@ -666,6 +1256,7 @@ pub fn miniboss_system(
                     mb.state = MinibossState::Active;
                     mb.timer = 0.0;
                     mb.active_cued = false;
+                    mb.hit_this_strike = false;
                 }
             }
             MinibossState::Active => {
@@ -675,12 +1266,19 @@ pub fn miniboss_system(
                     sfx.0.push(Sfx::MinibossTell);
                 }
                 if let Some(shape) = mb.active_shape() {
-                    // The hit lands once per activation: the rat's i-frames
-                    // would block a repeat anyway, but the flag keeps the
-                    // semantics explicit.
-                    if shape.contains(ppos, crate::game::ecs::constants::PLAYER_RADIUS)
+                    // One hit per strike (`hit_this_strike`): a shape that
+                    // lingers over the rat for most of its window — a closing
+                    // ring, a claw sweeping back through the same ground —
+                    // bites once, not once a tick. The rat's i-frames would
+                    // hide a repeat inside half a second anyway; the latch is
+                    // what makes the rule independent of the i-frame length,
+                    // and of whether the first bite was blocked by a dash or
+                    // an unrelated hurt.
+                    if !mb.hit_this_strike
+                        && shape.contains(ppos, crate::game::ecs::constants::PLAYER_RADIUS)
                         && player.take_damage(mb.signature_damage)
                     {
+                        mb.hit_this_strike = true;
                         sfx.0.push(Sfx::Hurt);
                         crate::game::particle::vfx::emit_player_hurt(
                             &mut particles,
@@ -774,22 +1372,14 @@ fn begin_tell(
     };
     mb.origin = e.pos;
     mb.aim = aim;
-    // Three stamps in a line from the miniboss toward the rat.
-    mb.stamp_centers = [
-        e.pos + aim * STAMP_SPACING,
-        e.pos + aim * (STAMP_SPACING * 2.0),
-        e.pos + aim * (STAMP_SPACING * 3.0),
-    ];
+    mb.target = ppos;
+    lock_stamps(mb);
     // Reposition when the signature leaves no walkable escape: try rotating
     // the aim until a sample direction is clear.
     let mut tries = 0;
     while tries < 8 && !escape_exists(mb, ppos, level) {
         mb.aim = mb.aim.rotate(std::f32::consts::FRAC_PI_4);
-        mb.stamp_centers = [
-            e.pos + mb.aim * STAMP_SPACING,
-            e.pos + mb.aim * (STAMP_SPACING * 2.0),
-            e.pos + mb.aim * (STAMP_SPACING * 3.0),
-        ];
+        lock_stamps(mb);
         tries += 1;
     }
     if tries >= 8 {
@@ -829,6 +1419,40 @@ fn escape_exists(mb: &Miniboss, ppos: Vec2, level: &Level) -> bool {
         }
     }
     false
+}
+
+/// Lock the three stamp centres for the aim the tell just fixed, in the row's
+/// own landing order.
+///
+/// The layout is part of the row data ([`StampLayout`]); a row that does not
+/// use stamps still gets three centres, so the field is never left stale.
+fn lock_stamps(mb: &mut Miniboss) {
+    let origin = mb.origin;
+    let aim = mb.aim;
+    let left = aim.perp();
+    let layout = match mb.kind.signature().shape {
+        SignatureShape::Stamps { layout, .. } => layout,
+        _ => StampLayout::Along {
+            spacing: STAMP_SPACING,
+        },
+    };
+    let centers = match layout {
+        StampLayout::Along { spacing } => [
+            origin + aim * spacing,
+            origin + aim * (spacing * 2.0),
+            origin + aim * (spacing * 3.0),
+        ],
+        StampLayout::AroundRat { across } => {
+            let at = mb.rat_lock();
+            [at - left * across, at + left * across, at]
+        }
+        StampLayout::V { forward, across } => {
+            let at = mb.rat_lock();
+            let ahead = at + aim * forward;
+            [ahead - left * across, at, ahead + left * across]
+        }
+    };
+    mb.stamp_centers = centers;
 }
 
 /// Drop a dead miniboss's loot: exactly one chest plus [`MINIBOSS_GOLD`], and
@@ -926,11 +1550,9 @@ mod tests {
         let mut m = Miniboss::new(kind, 0);
         m.origin = origin;
         m.aim = aim;
-        m.stamp_centers = [
-            origin + aim * STAMP_SPACING,
-            origin + aim * (STAMP_SPACING * 2.0),
-            origin + aim * (STAMP_SPACING * 3.0),
-        ];
+        // The tell locks all three of these from the row's own stamp layout.
+        m.target = origin + aim * 24.0;
+        lock_stamps(&mut m);
         m
     }
 
@@ -1082,46 +1704,64 @@ mod tests {
     #[test]
     fn schedule_is_the_design_table_and_total_over_every_playable_theme() {
         use MinibossKind::*;
-        // WAVE4_ROSTERS.md "Named appointments", row for row: four fixed
-        // appointments per floor, in order. The existing six keep their homes
-        // (Sewer 3:00 Corkscrew / 6:00 Bell Diver, Kitchen 3:00 Milk Carton,
-        // Laundry 3:00 Sister Snip / 6:00 Bobbin, Printworks 3:00 Foreman) and
-        // the rest are the design's "data, <base>" stand-ins.
+        // WAVE4_ROSTERS.md "Named appointments and elites", row for row: four
+        // fixed appointments per floor, in order (3:00, 6:00, 9:00, 12:00).
+        // The six wave-3 names keep their homes (Sewer 3:00 Corkscrew / 6:00
+        // Bell Diver, Kitchen 3:00 Milk Carton, Laundry 3:00 Sister Snip /
+        // 6:00 Bobbin, Printworks 3:00 The Foreman) and every other slot is now
+        // the design's own body.
         let rows = [
-            (Theme::Sewer, [Corkscrew, BellDiver, Bobbin, SisterSnip]),
-            (Theme::Kitchen, [MilkCarton, Corkscrew, Foreman, Bobbin]),
-            (Theme::Lab, [Corkscrew, BellDiver, Foreman, Bobbin]),
-            (Theme::Laundry, [SisterSnip, Bobbin, BellDiver, Corkscrew]),
-            (Theme::Printworks, [Foreman, SisterSnip, MilkCarton, BellDiver]),
-            (Theme::Trailer, [MilkCarton, Corkscrew, Bobbin, Foreman]),
+            (Theme::Sewer, [Corkscrew, BellDiver, ValveWidow, Mudlark]),
+            (Theme::Kitchen, [MilkCarton, PastryWheel, SaltHen, PotBrush]),
+            (Theme::Lab, [DosePump, PetriMother, CageCounter, RotorTechnician]),
+            (Theme::Laundry, [SisterSnip, Bobbin, SudsBailiff, WringerBoy]),
+            (Theme::Printworks, [Foreman, QuoinKey, CarbonTwin, LatePlate]),
+            (Theme::Trailer, [
+                TarpaulinPup,
+                AxleNut,
+                ChainDog,
+                RoadAtlas,
+            ]),
         ];
         for (theme, row) in rows {
             for (i, kind) in row.into_iter().enumerate() {
                 assert_eq!(schedule_for(theme, i), kind, "{theme:?} appointment {i}");
             }
         }
-        // Every existing miniboss is still somebody's appointment, so no floor
-        // lost the six's work, and every floor escalates from a real body to a
-        // fixed rehearsal.
-        for kind in MinibossKind::all() {
-            assert!(
-                Theme::playable()
-                    .iter()
-                    .any(|&t| (0..4).any(|i| schedule_for(t, i) == kind)),
-                "{kind:?} is on no floor"
-            );
+        // Every named miniboss has exactly one home (24 names, 24 slots), so no
+        // floor borrows another floor's body and none of the six's work is
+        // lost. This is the "tie them to specific floors" rule.
+        assert_eq!(MinibossKind::all().len(), 24);
+        for (i, kind) in MinibossKind::all().into_iter().enumerate() {
+            let homes: Vec<(Theme, usize)> = Theme::playable()
+                .iter()
+                .flat_map(|&t| (0..4).map(move |at| (t, at)))
+                .filter(|&(t, at)| schedule_for(t, at) == kind)
+                .collect();
+            assert_eq!(homes.len(), 1, "{kind:?} does not have exactly one home: {homes:?}");
+            // Every variant is in `all()`, in enum order.
+            assert_eq!(kind as usize, i, "{kind:?} is out of order in all()");
         }
-        // Every playable floor (the Flatbed included) has four distinct names.
+        // Every playable floor (the Flatbed included) has four distinct names,
+        // and the four are unique across the whole campaign.
+        let mut seen: Vec<MinibossKind> = Vec::new();
         for theme in Theme::playable() {
             let row: Vec<MinibossKind> = (0..4).map(|i| schedule_for(theme, i)).collect();
             for i in 0..4 {
                 for j in 0..i {
                     assert_ne!(row[i], row[j], "{theme:?} repeats a miniboss");
                 }
+                assert!(
+                    !seen.contains(&row[i]),
+                    "{:?} appears on two floors",
+                    row[i]
+                );
+                seen.push(row[i]);
             }
             // Out-of-range appointments clamp to the last row.
             assert_eq!(schedule_for(theme, 9), row[3]);
         }
+        assert_eq!(seen.len(), 24, "the six floors must field all 24 names");
     }
 
     #[test]
@@ -1419,6 +2059,587 @@ mod tests {
     fn gold_values(w: &mut crate::game::world::World) -> Vec<u32> {
         let mut q = w.ecs.query::<&Gold>();
         q.iter(&w.ecs).map(|g| g.value).collect()
+    }
+
+    /// The six wave-3 rows keep their wave-3 numbers to the digit: same active
+    /// windows, same radii, same geometry. The wave-4 pass parameterised the
+    /// shapes; it must not have retuned the bodies it moved into the table.
+    #[test]
+    fn the_existing_six_keep_their_numbers() {
+        let want = [
+            (MinibossKind::Corkscrew, 0.5, 7.0),
+            (MinibossKind::SisterSnip, 0.8, 7.0),
+            (MinibossKind::Bobbin, 0.7, 6.5),
+            (MinibossKind::BellDiver, 1.2, 7.0),
+            (MinibossKind::Foreman, 0.9, 7.5),
+            (MinibossKind::MilkCarton, 1.2, 7.0),
+        ];
+        for (kind, active, radius) in want {
+            assert_eq!(kind.active_duration(), active, "{kind:?} active window");
+            assert_eq!(kind.body_radius(), radius, "{kind:?} body radius");
+        }
+    }
+
+    fn close(a: f32, b: f32, what: &str) {
+        assert!((a - b).abs() < 1e-3, "{what}: {a} != {b}");
+    }
+
+    /// The eighteen wave-4 rows, against `WAVE4_ROSTERS.md` row for row.
+    /// The numbers are retyped from the table on purpose: this test has to
+    /// fail when a row drifts from the design, not merely from itself.
+    #[test]
+    fn the_eighteen_new_rows_carry_the_design_numbers() {
+        use SignatureShape as S;
+        // "a 46×8 cut fills down the counter over 0.6" / "injection trench
+        // 40×8 fills in 0.65" / "rolls a 50×10 trench out … over 0.65".
+        for (kind, len, width, active) in [
+            (MinibossKind::PastryWheel, 46.0, 8.0, 0.6),
+            (MinibossKind::DosePump, 40.0, 8.0, 0.65),
+            (MinibossKind::AxleNut, 50.0, 10.0, 0.65),
+        ] {
+            match kind.signature() {
+                Signature {
+                    active: a,
+                    shape: S::Trench { len: l, half },
+                } => {
+                    close(a, active, "active");
+                    close(l, len, "length");
+                    close(half * 2.0, width, "width");
+                }
+                other => panic!("{kind:?} is not a trench: {other:?}"),
+            }
+        }
+        // "a 38-long, 55° wedge in 0.75".
+        match MinibossKind::QuoinKey.signature() {
+            Signature {
+                active,
+                shape: S::Cone { half_angle, len },
+            } => {
+                close(active, 0.75, "active");
+                close(len, 38.0, "length");
+                close(half_angle.to_degrees() * 2.0, 55.0, "wedge");
+            }
+            other => panic!("Quoin Key is not a cone: {other:?}"),
+        }
+        // The swinging arms: 36×5 through 100°, 42×6 through 110°, 40×5
+        // through 150°, 36×6 through 115°.
+        for (kind, len, width, sweep, active) in [
+            (MinibossKind::ValveWidow, 36.0, 5.0, 100.0, 0.85),
+            (MinibossKind::PotBrush, 42.0, 6.0, 110.0, 0.85),
+            (MinibossKind::RotorTechnician, 40.0, 5.0, 150.0, 1.1),
+            (MinibossKind::ChainDog, 36.0, 6.0, 115.0, 0.9),
+        ] {
+            match kind.signature() {
+                Signature {
+                    active: a,
+                    shape: S::Cord {
+                        len: l,
+                        half,
+                        sweep: sw,
+                    },
+                } => {
+                    close(a, active, "active");
+                    close(l, len, "length");
+                    close(half * 2.0, width, "width");
+                    close(sw.to_degrees(), sweep, "sweep");
+                }
+                other => panic!("{kind:?} is not a cord: {other:?}"),
+            }
+        }
+        // The rings: "6 wide expands to 36 … 75° gap", "8 wide expands to 42
+        // … 65° gap", and the closing one (32 → 6, 5 wide, 65°, on the rat).
+        for (kind, from, to, width, gap, on_rat, active) in [
+            (MinibossKind::PetriMother, 0.0, 36.0, 6.0, 75.0, false, 1.2),
+            (MinibossKind::SudsBailiff, 0.0, 42.0, 8.0, 65.0, false, 1.2),
+            (MinibossKind::LatePlate, 32.0, 6.0, 5.0, 65.0, true, 1.2),
+        ] {
+            match kind.signature() {
+                Signature {
+                    active: a,
+                    shape:
+                        S::Ring {
+                            from: f0,
+                            to: f1,
+                            half,
+                            gap_half,
+                            on_rat: r,
+                        },
+                } => {
+                    close(a, active, "active");
+                    close(f0, from, "from radius");
+                    close(f1, to, "to radius");
+                    close(half * 2.0, width, "width");
+                    close((gap_half * 2.0).to_degrees(), gap, "gap");
+                    assert_eq!(r, on_rat, "{kind:?} ring centre");
+                }
+                other => panic!("{kind:?} is not a ring: {other:?}"),
+            }
+        }
+        // The stamps: 12×12 piles 16 apart; 12×12 pads ±15 across the rat;
+        // 14×14 talons 16 forward and ±14 sideways.
+        match MinibossKind::SaltHen.signature() {
+            Signature {
+                active,
+                shape: S::Stamps { half, layout },
+            } => {
+                close(active, 0.9, "active");
+                close(half * 2.0, 12.0, "pad");
+                assert_eq!(layout, StampLayout::Along { spacing: 16.0 });
+            }
+            other => panic!("Salt Hen is not three stamps: {other:?}"),
+        }
+        match MinibossKind::CageCounter.signature() {
+            Signature {
+                shape: S::Stamps { half, layout },
+                ..
+            } => {
+                close(half * 2.0, 12.0, "pad");
+                assert_eq!(layout, StampLayout::AroundRat { across: 15.0 });
+            }
+            other => panic!("Cage Counter is not three stamps: {other:?}"),
+        }
+        match MinibossKind::RoadAtlas.signature() {
+            Signature {
+                shape: S::Stamps { half, layout },
+                ..
+            } => {
+                close(half * 2.0, 14.0, "talon");
+                assert_eq!(
+                    layout,
+                    StampLayout::V {
+                        forward: 16.0,
+                        across: 14.0
+                    }
+                );
+            }
+            other => panic!("The Road Atlas is not three stamps: {other:?}"),
+        }
+        // The spills: 38×20 over 1.4, 30×18 over 1.1.
+        for (kind, len, width, active) in [
+            (MinibossKind::CarbonTwin, 38.0, 20.0, 1.4),
+            (MinibossKind::TarpaulinPup, 30.0, 18.0, 1.1),
+        ] {
+            match kind.signature() {
+                Signature {
+                    active: a,
+                    shape: S::Spill { len: l, half_w },
+                } => {
+                    close(a, active, "active");
+                    close(l, len, "length");
+                    close(half_w * 2.0, width, "width");
+                }
+                other => panic!("{kind:?} is not a spill: {other:?}"),
+            }
+        }
+        // The pincer: two 30×5 claws closing from 28 apart to 4 in 0.65.
+        match MinibossKind::Mudlark.signature() {
+            Signature {
+                active,
+                shape:
+                    S::Pincer {
+                        len,
+                        half,
+                        open,
+                        closed,
+                    },
+            } => {
+                close(active, 0.65, "active");
+                close(len, 30.0, "claw length");
+                close(half * 2.0, 5.0, "claw width");
+                close(open, 28.0, "open");
+                close(closed, 4.0, "closed");
+            }
+            other => panic!("The Mudlark is not a pincer: {other:?}"),
+        }
+        // The rollers: two 32×6 bars, a 44-long lane, a 12-wide seam, 1 s.
+        match MinibossKind::WringerBoy.signature() {
+            Signature {
+                active,
+                shape:
+                    S::Lane {
+                        len,
+                        seam_half,
+                        half,
+                        bar_len,
+                    },
+            } => {
+                close(active, 1.0, "active");
+                close(len, 44.0, "lane");
+                close(seam_half * 2.0, 12.0, "seam");
+                close(half * 2.0, 6.0, "bar width");
+                close(bar_len, 32.0, "bar length");
+            }
+            other => panic!("The Wringer Boy is not rollers: {other:?}"),
+        }
+    }
+
+    /// `all()` is the enum, in order, with 24 unique display names.
+    #[test]
+    fn all_has_twenty_four_unique_names() {
+        let all = MinibossKind::all();
+        assert_eq!(all.len(), 24);
+        let mut names: Vec<&'static str> = Vec::new();
+        for (i, kind) in all.into_iter().enumerate() {
+            assert_eq!(kind as usize, i);
+            assert!(!names.contains(&kind.name()), "{} appears twice", kind.name());
+            names.push(kind.name());
+            // The design's own capitalisation, never all-caps or lower case.
+            assert_eq!(kind.name().trim(), kind.name());
+            assert!(kind.name().chars().next().is_some_and(|c| c.is_uppercase()));
+        }
+        // The three the design names with an article keep it, and the ones it
+        // does not name with one do not.
+        assert_eq!(MinibossKind::Mudlark.name(), "The Mudlark");
+        assert_eq!(MinibossKind::WringerBoy.name(), "The Wringer Boy");
+        assert_eq!(MinibossKind::RoadAtlas.name(), "The Road Atlas");
+        assert_eq!(MinibossKind::ValveWidow.name(), "Valve Widow");
+    }
+
+    /// A locked miniboss at a fixed spot, for the geometry tests.
+    fn locked(kind: MinibossKind) -> Miniboss {
+        mb(kind, Vec2::new(200.0, 160.0), Vec2::new(1.0, 0.0))
+    }
+
+    /// §8/`WAVE4_ROSTERS.md`: outline the full footprint for the whole tell.
+    /// Everywhere the strike can bite was already marked, and a swinging cord's
+    /// tell is the same cord on the locked aim (its art draws the arc).
+    #[test]
+    fn the_tell_outlines_the_whole_strike_footprint() {
+        for kind in MinibossKind::all() {
+            let m = locked(kind);
+            let tell = kind.telegraph(&m);
+            let d = kind.active_duration();
+            let sweeping = matches!(kind.signature().shape, SignatureShape::Cord { .. });
+            for i in 0..=8 {
+                let t = d * i as f32 / 8.0;
+                let strike = kind
+                    .active_shape(&m, t)
+                    .unwrap_or_else(|| panic!("{kind:?}: no strike at {t}"));
+                if sweeping {
+                    match (tell, strike) {
+                        (
+                            MinibossShape::Cord {
+                                spool: s0,
+                                tip: t0,
+                                half: h0,
+                            },
+                            MinibossShape::Cord {
+                                spool: s1,
+                                tip: t1,
+                                half: h1,
+                            },
+                        ) => {
+                            assert!(s0.dist(s1) < 1e-3, "{kind:?}: the spool moved");
+                            assert!(
+                                (h0 - h1).abs() < 1e-6,
+                                "{kind:?}: the tell's width is not the strike's"
+                            );
+                            assert!(
+                                (t0.dist(s0) - t1.dist(s1)).abs() < 1e-3,
+                                "{kind:?}: the tell's reach is not the strike's"
+                            );
+                            // Mid-window the swing is on the locked aim, which
+                            // is exactly the line the tell drew.
+                            if i == 4 {
+                                assert!(t0.dist(t1) < 1e-3, "{kind:?}: mid-sweep is off the tell");
+                            }
+                        }
+                        _ => panic!("{kind:?} is not a cord"),
+                    }
+                    continue;
+                }
+                // A travelling ring's tell is its outermost rim (the Bell
+                // Diver's wave-3 tell, unchanged): it *encloses* the strike
+                // rather than painting it, so the claim is that the live ring
+                // never leaves that rim and keeps the same centre and break.
+                if let (
+                    MinibossShape::RingGap {
+                        origin: o0,
+                        radius: r0,
+                        half: h0,
+                        gap_dir: g0,
+                        gap_half: gh0,
+                    },
+                    MinibossShape::RingGap {
+                        origin: o1,
+                        radius: r1,
+                        half: h1,
+                        gap_dir: g1,
+                        gap_half: gh1,
+                    },
+                ) = (tell, strike)
+                {
+                    assert!(o0.dist(o1) < 1e-3, "{kind:?}: the ring's centre moved");
+                    assert!(r1 <= r0 + 1e-3, "{kind:?}: the ring outgrew its tell");
+                    assert!((h0 - h1).abs() < 1e-6, "{kind:?}: the rim's width changed");
+                    assert!(g0.dist(g1) < 1e-3, "{kind:?}: the break moved");
+                    assert!((gh0 - gh1).abs() < 1e-6, "{kind:?}: the break's width changed");
+                    continue;
+                }
+                // A coarse world grid around the tell: anywhere the strike
+                // bites, the tell already marked.
+                for gy in 0..=64 {
+                    for gx in 0..=96 {
+                        let q = m.origin
+                            + Vec2::new((gx as f32 - 48.0) * 2.0, (gy as f32 - 32.0) * 2.0);
+                        if strike.contains(q, crate::game::ecs::constants::PLAYER_RADIUS) {
+                            assert!(
+                                tell.contains(q, crate::game::ecs::constants::PLAYER_RADIUS),
+                                "{kind:?}: {q:?} is struck at t={t} but was not marked"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Where `WAVE4_ROSTERS.md` says the answer is, row by row: the gap, the
+    /// seam, behind the pivot, the open tip, off the sheet.
+    fn safe_spot(m: &Miniboss) -> Vec2 {
+        use MinibossKind::*;
+        let o = m.origin;
+        let aim = m.aim;
+        let side = aim.perp();
+        // The swinging arms, the wedge and the cone never come back past their
+        // own origin.
+        let behind = o - aim * 12.0;
+        // Off the axis: wider than any trench, lane or cut is deep.
+        let aside = o + aim * 20.0 + side * 16.0;
+        // The break in the ring, on the rim it reaches.
+        let gap_at = |r: f32| o + aim.rotate(RING_GAP_TURN) * r;
+        match m.kind {
+            Corkscrew | PastryWheel | DosePump | AxleNut => aside,
+            SisterSnip | QuoinKey | ValveWidow | PotBrush | RotorTechnician | ChainDog | Bobbin => {
+                behind
+            }
+            BellDiver => gap_at(RING_RADIUS),
+            PetriMother => gap_at(36.0),
+            SudsBailiff => gap_at(42.0),
+            // The closing ring is centred on the rat: its break is the way out.
+            LatePlate => m.rat_lock() + aim.rotate(RING_GAP_TURN) * 20.0,
+            // Out through the open tip of the claws.
+            Mudlark => o + aim * 44.0,
+            // Down the central seam between the rollers.
+            WringerBoy => o + aim * 22.0,
+            // Off the sheet by its short edge.
+            MilkCarton | CarbonTwin | TarpaulinPup => o + aim * 16.0 + side * 16.0,
+            // Off the marked line.
+            Foreman | SaltHen => o + aim * 16.0 + side * 16.0,
+            // Clear of the last reader pad.
+            CageCounter => m.rat_lock() + aim * 40.0,
+            // Clear of the talon marks.
+            RoadAtlas => m.rat_lock() + aim * 16.0 + side * 30.0,
+        }
+    }
+
+    /// Every row's documented answer works: the rat standing there is never
+    /// touched, on any tick of the strike.
+    #[test]
+    fn every_kind_misses_a_rat_in_the_documented_safe_spot() {
+        const R: f32 = crate::game::ecs::constants::PLAYER_RADIUS;
+        for kind in MinibossKind::all() {
+            let m = locked(kind);
+            let safe = safe_spot(&m);
+            let d = kind.active_duration();
+            for i in 0..=24 {
+                // `d * 24 / 24` can land an ulp past `d`, where the window
+                // has (correctly) already closed.
+                let t = (d * i as f32 / 24.0).min(d);
+                let strike = kind.active_shape(&m, t).expect("active");
+                assert!(
+                    !strike.contains(safe, R),
+                    "{kind:?} bites the documented safe spot {safe:?} at t={t}"
+                );
+            }
+        }
+    }
+
+    /// The common rule, on the real system: a 1 s tell, the row's active
+    /// window, at least a second exposed, and 4 s from the strike's end to the
+    /// next tell.
+    #[test]
+    fn every_kind_tells_for_a_second_and_exposes_itself() {
+        use crate::game::level::Theme;
+        use crate::game::world::World;
+        const DT: f32 = 1.0 / 60.0;
+        for kind in MinibossKind::all() {
+            let mut w = World::new(Theme::Sewer, 21);
+            w.ecs.resource_mut::<MinibossSchedule>().next = MINIBOSS_TIMES.len();
+            w.player.hp = 1.0e6;
+            w.elapsed = 30.0;
+            let p = w.player.pos;
+            let e = w.spawn_miniboss(kind, 0, p + Vec2::new(40.0, 0.0));
+            let mut states: Vec<MinibossState> = Vec::new();
+            let ticks = (((kind.active_duration() + 8.0) / DT) as usize) + 8;
+            for _ in 0..ticks {
+                w.begin_tick(DT, Vec2::ZERO, false);
+                w.ecs
+                    .run_system_cached(miniboss_system)
+                    .expect("miniboss system");
+                w.end_tick();
+                let mb = w.ecs.get::<Miniboss>(e).expect("the miniboss is still alive");
+                states.push(mb.state);
+            }
+            let longest = |state: MinibossState| -> f32 {
+                let (mut best, mut cur) = (0usize, 0usize);
+                for s in &states {
+                    if *s == state {
+                        cur += 1;
+                        best = best.max(cur);
+                    } else {
+                        cur = 0;
+                    }
+                }
+                best as f32 * DT
+            };
+            let tell = longest(MinibossState::Tell);
+            assert!(
+                (tell - TELL_TIME).abs() <= 2.0 * DT + 1e-3,
+                "{kind:?}: the tell lasted {tell}"
+            );
+            let active = longest(MinibossState::Active);
+            assert!(
+                (active - kind.active_duration()).abs() <= 2.0 * DT + 1e-3,
+                "{kind:?}: the strike lasted {active}"
+            );
+            let recover = longest(MinibossState::Recover);
+            assert!(
+                recover >= RECOVER_TIME - 1e-3,
+                "{kind:?}: the body was exposed for only {recover}"
+            );
+            // The design's gap is measured from the strike's end: the body
+            // lies exposed for `RECOVER_TIME`, then waits the rest, so the
+            // next tell starts `SIGNATURE_GAP` after the last signature.
+            let first_active_end = states
+                .iter()
+                .position(|s| *s == MinibossState::Active)
+                .map(|i| i + (kind.active_duration() / DT) as usize);
+            let second_tell = states
+                .windows(2)
+                .position(|w| w[0] != MinibossState::Tell && w[1] == MinibossState::Tell)
+                .map(|i| i + 1);
+            if let (Some(a), Some(b)) = (first_active_end, second_tell) {
+                let gap = (b as f32 - a as f32) * DT;
+                // Each of the four transitions between the two (strike →
+                // recover → cooldown → approach → tell) lands on the first
+                // tick at or past its mark, so the measured gap runs up to
+                // four ticks long (plus one where `active / DT` rounds down in
+                // this test's own arithmetic). That is the wave-3 state
+                // machine, unchanged.
+                assert!(
+                    (gap - SIGNATURE_GAP).abs() <= 6.0 * DT,
+                    "{kind:?}: {gap}s between the strike and the next tell"
+                );
+            } else {
+                panic!("{kind:?}: no second tell, so the gap could not be measured");
+            }
+        }
+    }
+
+    /// A strike bites the rat once, not once a tick: the rat stands inside the
+    /// footprint for the whole active window with its i-frames cleared, and
+    /// still takes one signature's damage.
+    #[test]
+    fn a_signature_bites_at_most_once_per_strike() {
+        use crate::game::level::Theme;
+        use crate::game::world::World;
+        const DT: f32 = 1.0 / 60.0;
+        for kind in MinibossKind::all() {
+            let mut w = World::new(Theme::Sewer, 23);
+            w.ecs.resource_mut::<MinibossSchedule>().next = MINIBOSS_TIMES.len();
+            w.player.hp = 1.0e6;
+            w.elapsed = 30.0;
+            let p = w.player.pos;
+            let e = w.spawn_miniboss(kind, 0, p + Vec2::new(30.0, 0.0));
+            let mut start_hp: Option<f32> = None;
+            let mut placed = false;
+            let ticks = (((TELL_TIME + kind.active_duration()) / DT) as usize) + 8;
+            for _ in 0..ticks {
+                // Once the strike starts, stand where the row actually bites:
+                // on a roller's bar, or on the closing ring's own path (a rat
+                // that stays put in the middle of that ring is never touched).
+                let (active, hot) = {
+                    let Some(mb) = w.ecs.get::<Miniboss>(e) else {
+                        break;
+                    };
+                    let active = mb.state == MinibossState::Active;
+                    let hot = match kind {
+                        MinibossKind::WringerBoy if active => {
+                            Some(mb.origin + mb.aim * 22.0 + mb.aim.perp() * 9.0)
+                        }
+                        MinibossKind::LatePlate if active => Some(
+                            mb.rat_lock()
+                                + mb.aim.rotate(RING_GAP_TURN + std::f32::consts::PI) * 20.0,
+                        ),
+                        _ => None,
+                    };
+                    (active, hot)
+                };
+                if active {
+                    if let (false, Some(hot)) = (placed, hot) {
+                        placed = true;
+                        w.player.pos = hot;
+                    }
+                    if start_hp.is_none() {
+                        start_hp = Some(w.player.hp);
+                    }
+                    // Clear the i-frames the last bite granted: without the
+                    // one-per-strike latch this would bite every tick.
+                    w.player.iframes = 0.0;
+                }
+                w.begin_tick(DT, Vec2::ZERO, false);
+                w.ecs
+                    .run_system_cached(miniboss_system)
+                    .expect("miniboss system");
+                w.end_tick();
+            }
+            let start = start_hp.unwrap_or_else(|| panic!("{kind:?}: the strike never started"));
+            let armor = w.player.loadout.stats.armor;
+            let one_hit = (appointment_signature_damage(0) - armor).max(1.0);
+            let drop = start - w.player.hp;
+            assert!(
+                (drop - one_hit).abs() < 0.01,
+                "{kind:?}: the strike took {drop} hp, expected exactly one hit of {one_hit}"
+            );
+        }
+    }
+
+    /// Each of the eighteen new kinds dropped into a world dies to damage and
+    /// leaves exactly one chest plus the appointment's gold.
+    #[test]
+    fn every_new_kind_dies_and_leaves_one_chest_and_gold() {
+        use crate::game::level::Theme;
+        use crate::game::shop::MINIBOSS_GOLD;
+        use crate::game::world::World;
+        for kind in MinibossKind::all() {
+            let mut w = World::new(Theme::Sewer, 31);
+            w.ecs.resource_mut::<MinibossSchedule>().next = MINIBOSS_TIMES.len();
+            w.elapsed = 300.0;
+            let p = w.player.pos;
+            let e = w.spawn_miniboss(kind, 2, p + Vec2::new(30.0, 0.0));
+            assert_eq!(
+                w.ecs.get::<Enemy>(e).map(|x| x.max_hp),
+                Some(appointment_hp(2)),
+                "{kind:?}: slot 2's HP"
+            );
+            w.ecs.get_mut::<Enemy>(e).expect("body").hp = 0.0;
+            reap(&mut w);
+            assert_eq!(chests(&mut w), 1, "{kind:?}: a kill must leave exactly one chest");
+            assert_eq!(
+                gold_values(&mut w),
+                vec![MINIBOSS_GOLD],
+                "{kind:?}: the appointment's gold"
+            );
+            // A second reap (the Nuke's) must not pay twice.
+            reap(&mut w);
+            assert_eq!(chests(&mut w), 1, "{kind:?}: the chest was queued twice");
+            let mut gems = w.ecs.query::<&crate::game::gem::Gem>();
+            assert!(
+                gems.iter(&w.ecs).any(|g| g.value == appointment_xp(2)),
+                "{kind:?}: no gem worth the appointment's XP"
+            );
+        }
     }
 
     #[test]

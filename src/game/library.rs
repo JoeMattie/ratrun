@@ -300,6 +300,40 @@ fn enemy_name(k: EnemyKind) -> &'static str {
         EnemyKind::MurderHornet => "Murder Hornet",
         EnemyKind::TermiteHorde => "Termite Horde",
         EnemyKind::Lilliputian => "Lilliputians",
+        // The 33 wave-four registrations (`WAVE4_ROSTERS.md`).
+        EnemyKind::PipeEel => "Pipe Eel",
+        EnemyKind::GrateArcher => "Grate Archer",
+        EnemyKind::SumpLeech => "Sump Leech",
+        EnemyKind::SluiceToad => "Sluice Toad",
+        EnemyKind::CrumbAnt => "Crumb Ant",
+        EnemyKind::FruitFly => "Fruit Fly",
+        EnemyKind::EggTimer => "Egg Timer",
+        EnemyKind::PepperMill => "Pepper Mill",
+        EnemyKind::PieWeight => "Pie Weight",
+        EnemyKind::SinkCrab => "Sink Crab",
+        EnemyKind::SwabFoot => "Swab Foot",
+        EnemyKind::SpinnerLid => "Spinner Lid",
+        EnemyKind::GlassRunner => "Glass Runner",
+        EnemyKind::WalkingSyringe => "Walking Syringe",
+        EnemyKind::AutoclaveCart => "Autoclave Cart",
+        EnemyKind::WoolPill => "Wool Pill",
+        EnemyKind::ClothesMoth => "Clothes Moth",
+        EnemyKind::PegSnapper => "Peg Snapper",
+        EnemyKind::StarchBulb => "Starch Bulb",
+        EnemyKind::LintGolem => "Lint Golem",
+        EnemyKind::Silverfish => "Silverfish",
+        EnemyKind::ErratumSlip => "Erratum Slip",
+        EnemyKind::TypeSlug => "Type Slug",
+        EnemyKind::StapleCrawler => "Staple Crawler",
+        EnemyKind::PaperWasp => "Paper Wasp",
+        EnemyKind::PaperReel => "Paper Reel",
+        EnemyKind::InkBlot => "Ink Blot",
+        EnemyKind::GravelTick => "Gravel Tick",
+        EnemyKind::JuneBug => "June Bug",
+        EnemyKind::TarRat => "Tar Rat",
+        EnemyKind::LooseCan => "Loose Can",
+        EnemyKind::TollGull => "Toll Gull",
+        EnemyKind::LooseBungee => "Loose Bungee",
     }
 }
 
@@ -462,6 +496,41 @@ pub fn all_rows() -> Vec<Row> {
         // The legacy generic boss body (tests and the facade can spawn it); the
         // floors' own fights have their own BOSSES rows below.
         EnemyKind::Boss,
+        // The 33 wave-four registrations, so every ordinary body on a floor
+        // has its own Bestiary row.
+        EnemyKind::PipeEel,
+        EnemyKind::GrateArcher,
+        EnemyKind::SumpLeech,
+        EnemyKind::SluiceToad,
+        EnemyKind::CrumbAnt,
+        EnemyKind::FruitFly,
+        EnemyKind::EggTimer,
+        EnemyKind::PepperMill,
+        EnemyKind::PieWeight,
+        EnemyKind::SinkCrab,
+        EnemyKind::SwabFoot,
+        EnemyKind::SpinnerLid,
+        EnemyKind::GlassRunner,
+        EnemyKind::WalkingSyringe,
+        EnemyKind::AutoclaveCart,
+        EnemyKind::WoolPill,
+        EnemyKind::ClothesMoth,
+        EnemyKind::PegSnapper,
+        EnemyKind::StarchBulb,
+        EnemyKind::LintGolem,
+        EnemyKind::Silverfish,
+        EnemyKind::ErratumSlip,
+        EnemyKind::TypeSlug,
+        EnemyKind::StapleCrawler,
+        EnemyKind::PaperWasp,
+        EnemyKind::PaperReel,
+        EnemyKind::InkBlot,
+        EnemyKind::GravelTick,
+        EnemyKind::JuneBug,
+        EnemyKind::TarRat,
+        EnemyKind::LooseCan,
+        EnemyKind::TollGull,
+        EnemyKind::LooseBungee,
     ] {
         let (hint, dossier) = enemy_text(k);
         rows.push(Row {
@@ -484,14 +553,7 @@ pub fn all_rows() -> Vec<Row> {
         dossier,
     });
     const APPOINTMENTS: &str = "NAMED MINIBOSSES";
-    for k in [
-        MinibossKind::Corkscrew,
-        MinibossKind::SisterSnip,
-        MinibossKind::Bobbin,
-        MinibossKind::BellDiver,
-        MinibossKind::Foreman,
-        MinibossKind::MilkCarton,
-    ] {
+    for k in MinibossKind::all() {
         let (hint, dossier) = miniboss_text(k);
         rows.push(Row {
             key: Key::Miniboss(k),
@@ -787,46 +849,289 @@ fn enemy_text(k: EnemyKind) -> (&'static str, &'static str) {
              a marked line before it lunges, then lies stretched out and regrets it. \
              Go round the tail, or dash across, and bite the head while it rests.",
         ),
+        EnemyKind::PipeEel => (
+            "Sewer · chaser · from 1:15",
+            "Knows every bend but the last. Steers at half turning rate. Reverse around a pipe end to shed it.",
+        ),
+        EnemyKind::GrateArcher => (
+            "Sewer · shooter · from 3:35",
+            "Something spits back up the drain. Shot through its puckered lip. Put a pipe between lip and rat.",
+        ),
+        EnemyKind::SumpLeech => (
+            "Sewer · second trick · from 4:30",
+            "Drainage works both ways. At 24 px it extends a straight 24×4 tongue after 0.7 s, holds 0.4 s, then rests 4. Bait the tongue and cross behind its head.",
+        ),
+        EnemyKind::SluiceToad => (
+            "Sewer · heavy · from 6:35",
+            "The valve is open. The toad is not. Heavy continuous contact. Draw its broad belly out of the valve throat.",
+        ),
+        EnemyKind::CrumbAnt => (
+            "Kitchen · ground fodder · from the start",
+            "Someone counted the crumbs. Holds its heading for 0.25 s between corrections. Cut across the file.",
+        ),
+        EnemyKind::FruitFly => (
+            "Kitchen · flying fodder · from 0:45",
+            "Yesterday's peach has company. A weaving flyer that catches a rat trailing the ant file. Sweep across its nose.",
+        ),
+        EnemyKind::EggTimer => (
+            "Kitchen · first trick · from 2:00",
+            "Lunch is on time. Run. Within 26 px it winds for 1 s, ticks a 5-wide ring out from radius 4 to 22 in 0.8 s for 7, then sleeps 2 s. Stay inside its departing ring or clear the dial early.",
+        ),
+        EnemyKind::PepperMill => (
+            "Kitchen · shooter · from 3:35",
+            "Two turns for a small rat. The shot splits into two rays, slightly apart, on release. Walk the seam as the cap twists.",
+        ),
+        EnemyKind::PieWeight => (
+            "Kitchen · heavy · from 6:35",
+            "The recipe calls for a blind bake. Keeps advancing under fire. Lead it along the counter's long side to open the aisle.",
+        ),
+        EnemyKind::SinkCrab => (
+            "Kitchen · third trick · from 9:45",
+            "Left the plug in. Took the lid. Curls like the pillbug, with the shield a quarter turn left of its approach. Let the shield pass and cut right behind the lid.",
+        ),
+        EnemyKind::SwabFoot => (
+            "Lab · ground fodder · from the start",
+            "The floor tested positive for you. Small direct cleaner. Shave the head off the approaching column.",
+        ),
+        EnemyKind::SpinnerLid => (
+            "Lab · flying fodder · from 0:45",
+            "Nothing in this room stayed sealed. Its weave flips handedness every 1.2 s. Cross while it shows its broad face.",
+        ),
+        EnemyKind::GlassRunner => (
+            "Lab · chaser · from 1:15",
+            "Return empties to the lab. Runs a direct large-class route. Turn through the narrow service chase.",
+        ),
+        EnemyKind::WalkingSyringe => (
+            "Lab · first trick · from 2:00",
+            "Hold very still, said the machine. Within 30 px it plants its tip and draws a 26×3 dotted ray for 0.75 s. The thrust fills the ray for 0.2 s at 8 damage, then retracts over 0.8 s. Step across the needle and approach the barrel.",
+        ),
+        EnemyKind::AutoclaveCart => (
+            "Lab · heavy · from 6:35",
+            "Sterile inside. Very busy outside. Wide slow blocker. Tow it past the tanks before circling for gems.",
+        ),
+        EnemyKind::WoolPill => (
+            "Laundry · ground fodder · from the start",
+            "Hot wash. Cold feet. Pauses 0.15 s every 1.1 s to pull its strand free. Double back through the stalled rank.",
+        ),
+        EnemyKind::ClothesMoth => (
+            "Laundry · flying fodder · from 0:45",
+            "Holes sold separately. Weaves through the break the pills leave. Give the moving shawls room.",
+        ),
+        EnemyKind::PegSnapper => (
+            "Laundry · first trick · from 2:00",
+            "Mind the business end of the line. Within 20 px it shows two 16×3 jaws 14 apart for 0.8 s. They slide together in 0.3 s for 7, stay closed 1 s. Walk out through an open end.",
+        ),
+        EnemyKind::StarchBulb => (
+            "Laundry · shooter · from 3:35",
+            "Keeps a fine crease in the air. The shot travels at 45 px/s for its first 0.5 s, then 95. Cross near the bulb before the jet picks up.",
+        ),
+        EnemyKind::LintGolem => (
+            "Laundry · heavy · from 6:35",
+            "Clean the filter after every shift. A slow solid plug between washers. Lead it into the sorting bay.",
+        ),
+        EnemyKind::Silverfish => (
+            "Printworks · ground fodder · from the start",
+            "Eats yesterday's news first. Streams through the gaps in the press beds. Meet its nose to collect the close gems.",
+        ),
+        EnemyKind::ErratumSlip => (
+            "Printworks · flying fodder · from 0:45",
+            "A small correction is on its way. Weaves twice as wide for its first second. Wait for the loose sheets to fold in before turning.",
+        ),
+        EnemyKind::TypeSlug => (
+            "Printworks · chaser · from 1:15",
+            "Set in twelve-point pursuit. Keeps its last heading for 0.6 s after losing sight. Break sight at a reel, then reverse.",
+        ),
+        EnemyKind::StapleCrawler => (
+            "Printworks · first trick · from 2:00",
+            "Leave room in the margin. Within 26 px it marks two radius-4 holes 14 apart astride you for 0.8 s. Both feet land for 0.4 s at 7 each on one shared hit. Walk between the feet.",
+        ),
+        EnemyKind::PaperWasp => (
+            "Printworks · shooter · from 3:35",
+            "Delivers the morning sting. Shot from the rolled tip. Move across the press lane as the tube opens.",
+        ),
+        EnemyKind::PaperReel => (
+            "Printworks · heavy · from 6:35",
+            "Stop press means stop press. Wide continuous contact. Pull the roll off the aisle before entering.",
+        ),
+        EnemyKind::InkBlot => (
+            "Printworks · third trick · from 9:45",
+            "Allow one second to dry. Its wick, radius and damage are the moth's; the burst centre slides 12 px along its last velocity over the 1 s fuse, with the endpoint marked. Lead the travelling spot into the swarm.",
+        ),
+        EnemyKind::GravelTick => (
+            "Flatbed · ground fodder · from the start",
+            "That chip in the paint just moved. Drifts 5 px/s toward the tailgate while chasing. Collect on the cab side of its line.",
+        ),
+        EnemyKind::JuneBug => (
+            "Flatbed · flying fodder · from 0:45",
+            "Caught the late truck. Wobbles into your line around cargo. Step across its belly shadow.",
+        ),
+        EnemyKind::TarRat => (
+            "Flatbed · chaser · from 1:15",
+            "Didn't pay the toll either. Straight large-class chaser. Put a wide crate corner in its path.",
+        ),
+        EnemyKind::LooseCan => (
+            "Flatbed · first trick · from 2:00",
+            "Still has a deposit on it. Within 32 px it rocks for 0.8 s and outlines a 48×6 roll with one bounce off the first solid face. It rolls at 60 px/s, stops at a second obstacle, then lies still 1 s. Cross behind the rebound.",
+        ),
+        EnemyKind::TollGull => (
+            "Flatbed · shooter · from 3:35",
+            "Exact change, dropped from above. The shot aims 0.35 s ahead along your current velocity. Reverse as the beak opens.",
+        ),
+        EnemyKind::LooseBungee => (
+            "Flatbed · third trick · from 9:45",
+            "Rated for twice your weight. Crossbar tell, length, life and damage; on the first crossing it pulls you 6 toward its hook, swept against solids and stopped before pits. Route around the free end.",
+        ),
     }
 }
 
 fn miniboss_text(k: MinibossKind) -> (&'static str, &'static str) {
+    // The hint names the one floor and clock the row keeps
+    // (`WAVE4_ROSTERS.md` "Named appointments and elites"); the roster tests
+    // pin the table, so this text cannot drift from the schedule.
     match k {
         MinibossKind::Corkscrew => (
-            "Named miniboss · between 3:00 and 12:00",
+            "Sewer · 3:00 — named miniboss",
             "The drain has grown a tooth. A brass auger under a pink worm, it fills a \
              trench from its tail to its tip and then the trench is teeth. Step sideways \
              out of the lane and bite the exposed head while it works.",
         ),
         MinibossKind::SisterSnip => (
-            "Named miniboss · between 3:00 and 12:00",
+            "Laundry · 3:00 — named miniboss",
             "She trims loose ends. The shears open over a wedge, hold the shape long \
              enough to be read, and close once. Walk behind the pivot and the whole \
              attack is behind you.",
         ),
         MinibossKind::Bobbin => (
-            "Named miniboss · between 3:00 and 12:00",
+            "Laundry · 6:00 — named miniboss",
             "It learned to sew in circles. A spindle rat pays out a cord to a fixed spool \
              and then swings the whole length through a quarter turn. Cross behind the \
              moving cord, not in front of it.",
         ),
         MinibossKind::BellDiver => (
-            "Named miniboss · between 3:00 and 12:00",
+            "Sewer · 6:00 — named miniboss",
             "Listen for the missing note. Its ring expands all the way out to arm's \
              length with one chipped gap in the rim, and the gap is never the side you \
              are standing on. Line yourself up with the chip.",
         ),
         MinibossKind::Foreman => (
-            "Named miniboss · between 3:00 and 12:00",
+            "Printworks · 3:00 — named miniboss",
             "Denied in triplicate. It walks your last heading and stamps three squares \
              along it, one after the other. The first mark is an invitation: turn the \
              corner and let the rest land on nothing.",
         ),
         MinibossKind::MilkCarton => (
-            "Named miniboss · between 3:00 and 12:00",
+            "Kitchen · 3:00 — named miniboss",
             "Three weeks past instructions. It tilts on its printed corners and spills \
              one long rectangle out of the spout. Circle around the folded seam while \
              the puddle decides where it lives.",
+        ),
+        MinibossKind::ValveWidow => (
+            "Sewer · 9:00 — named miniboss",
+            "Someone left the water running. A wheel spider drags a wrench for a \
+             foreleg: it winds the arm back over the marked arc, then sweeps it across \
+             your feet. Cross behind the trailing edge and put the damage into the hub.",
+        ),
+        MinibossKind::Mudlark => (
+            "Sewer · 12:00 — named miniboss",
+            "Both traps are occupied. A mud crab under two broken mousetraps opens its \
+             claws wide, closes them once, and the tips stay open the whole way out. \
+             Leave through the open tip and take its flank.",
+        ),
+        MinibossKind::PastryWheel => (
+            "Kitchen · 6:00 — named miniboss",
+            "Makes six equal portions. A fluted cutter on a fork draws a long seam down \
+             the counter, then cuts the whole seam at once. Step sideways off the line \
+             and let it portion bare tile.",
+        ),
+        MinibossKind::SaltHen => (
+            "Kitchen · 9:00 — named miniboss",
+            "Season to taste. Hers. A china hen lays three piles of salt along the way \
+             you were already going, the first where you stand. Turn across the row and \
+             the rest land behind you.",
+        ),
+        MinibossKind::PotBrush => (
+            "Kitchen · 12:00 — named miniboss",
+            "Scrub until the stain runs away. A bristle fan on a jointed handle, with a \
+             scrubber's reach: the arm sweeps wide but it pivots at the elbow. Cut in \
+             behind the handle and work on the joint.",
+        ),
+        MinibossKind::DosePump => (
+            "Lab · 3:00 — named miniboss",
+            "Read the label twice. A glass barrel on a plunger foot marks a tube of \
+             solution along its aim, then injects the whole tube. Sidestep the barrel's \
+             line and it doses the floor.",
+        ),
+        MinibossKind::PetriMother => (
+            "Lab · 6:00 — named miniboss",
+            "The blank sample had children. A shallow dish with a missing rim spools the \
+             culture out in a ring with one sterile gap. Meet the gap: it is the only \
+             part of the sample that never grows.",
+        ),
+        MinibossKind::CageCounter => (
+            "Lab · 9:00 — named miniboss",
+            "One rat short again. A tally wheel on a tripod lights three reader pads — \
+             left, right, then centre — where you stand and either side of it. Leave \
+             the centre before the last count.",
+        ),
+        MinibossKind::RotorTechnician => (
+            "Lab · 12:00 — named miniboss",
+            "Switch off before removing tail. A rotor head drags a live cable and turns \
+             its blade a long way round. The hub is the safest ground it owns: follow \
+             the blade near the axle and switch it off.",
+        ),
+        MinibossKind::SudsBailiff => (
+            "Laundry · 9:00 — named miniboss",
+            "All delicates report to rinse. A soap dome with one flat, broken edge \
+             pushes a foam rim out with a wedge missing. Match the missing wedge and \
+             keep moving between the washers.",
+        ),
+        MinibossKind::WringerBoy => (
+            "Laundry · 12:00 — named miniboss",
+            "Please remove hands before pressing. Two rollers pass down a lane end to \
+             end with a limp glove still between them, and leave a seam down the middle \
+             they never touch. Line up with the seam and let them pass.",
+        ),
+        MinibossKind::QuoinKey => (
+            "Printworks · 6:00 — named miniboss",
+            "Locks the story in place. A steel fork walked in by a wedge: the chase \
+             closes over a narrow frame and then lets go. Step round the heel, where \
+             the wedge cannot follow.",
+        ),
+        MinibossKind::CarbonTwin => (
+            "Printworks · 9:00 — named miniboss",
+            "Your duplicate stayed behind. Two offset sheets peel apart and lay a \
+             transfer rectangle the size of the whole desk. Skirt the sheet by its short \
+             edge, where the copy does not reach.",
+        ),
+        MinibossKind::LatePlate => (
+            "Printworks · 12:00 — named miniboss",
+            "That's all the room we have tonight. The last mark is a ring that closes on \
+             the spot you were standing on, one break in it for the margin. Be at the \
+             break, not in the middle of the room.",
+        ),
+        MinibossKind::TarpaulinPup => (
+            "Flatbed · 3:00 — named miniboss",
+            "Contents may have shifted. A folded tarp on four grommet feet unfurls a \
+             rectangle across the deck and holds it there. Pass round the hem on solid \
+             deck and it has nothing left to cover.",
+        ),
+        MinibossKind::AxleNut => (
+            "Flatbed · 6:00 — named miniboss",
+            "Last seen under the truck. A walking hex nut with a hole where its face \
+             should be rolls a trench out along its aim and lets the trench keep it. \
+             Move one plank aside and the plank is yours.",
+        ),
+        MinibossKind::ChainDog => (
+            "Flatbed · 9:00 — named miniboss",
+            "Stays where it's tied. Mostly. A chain loop drags a triangular binder round \
+             a wide arc, but the hook is where it is tied. Slip behind the latch instead \
+             of backing toward a hole.",
+        ),
+        MinibossKind::RoadAtlas => (
+            "Flatbed · 12:00 — named miniboss",
+            "Every exit has a bird on it. A gull wearing the map marks three talons in a \
+             V, the tip where you stand, and brings them down left, tip, right. Cross a \
+             spent print and face the next one.",
         ),
     }
 }
@@ -1542,24 +1847,58 @@ pub fn enemy_answer(k: EnemyKind) -> &'static str {
         EnemyKind::MurderHornet => "rising buzz, locked line — punish it on the floor",
         EnemyKind::TermiteHorde => "none — darts only nibble, bring an area hit",
         EnemyKind::Lilliputian => "spears level, archers kneel — hit the line from behind",
+        // The 33 wave-four registrations: each row's "player's answer".
+        EnemyKind::PipeEel => "Steers at half turning rate. Reverse around a pipe end to shed it.",
+        EnemyKind::GrateArcher => "Shot through its puckered lip. Put a pipe between lip and rat.",
+        EnemyKind::SumpLeech => "At 24 px it extends a straight 24×4 tongue after 0.7 s, holds 0.4 s, then rests 4. Bait the tongue and cross behind its head.",
+        EnemyKind::SluiceToad => "Heavy continuous contact. Draw its broad belly out of the valve throat.",
+        EnemyKind::CrumbAnt => "Holds its heading for 0.25 s between corrections. Cut across the file.",
+        EnemyKind::FruitFly => "A weaving flyer that catches a rat trailing the ant file. Sweep across its nose.",
+        EnemyKind::EggTimer => "Within 26 px it winds for 1 s, ticks a 5-wide ring out from radius 4 to 22 in 0.8 s for 7, then sleeps 2 s. Stay inside its departing ring or clear the dial early.",
+        EnemyKind::PepperMill => "The shot splits into two rays, slightly apart, on release. Walk the seam as the cap twists.",
+        EnemyKind::PieWeight => "Keeps advancing under fire. Lead it along the counter's long side to open the aisle.",
+        EnemyKind::SinkCrab => "Curls like the pillbug, with the shield a quarter turn left of its approach. Let the shield pass and cut right behind the lid.",
+        EnemyKind::SwabFoot => "Small direct cleaner. Shave the head off the approaching column.",
+        EnemyKind::SpinnerLid => "Its weave flips handedness every 1.2 s. Cross while it shows its broad face.",
+        EnemyKind::GlassRunner => "Runs a direct large-class route. Turn through the narrow service chase.",
+        EnemyKind::WalkingSyringe => "Within 30 px it plants its tip and draws a 26×3 dotted ray for 0.75 s. The thrust fills the ray for 0.2 s at 8 damage, then retracts over 0.8 s. Step across the needle and approach the barrel.",
+        EnemyKind::AutoclaveCart => "Wide slow blocker. Tow it past the tanks before circling for gems.",
+        EnemyKind::WoolPill => "Pauses 0.15 s every 1.1 s to pull its strand free. Double back through the stalled rank.",
+        EnemyKind::ClothesMoth => "Weaves through the break the pills leave. Give the moving shawls room.",
+        EnemyKind::PegSnapper => "Within 20 px it shows two 16×3 jaws 14 apart for 0.8 s. They slide together in 0.3 s for 7, stay closed 1 s. Walk out through an open end.",
+        EnemyKind::StarchBulb => "The shot travels at 45 px/s for its first 0.5 s, then 95. Cross near the bulb before the jet picks up.",
+        EnemyKind::LintGolem => "A slow solid plug between washers. Lead it into the sorting bay.",
+        EnemyKind::Silverfish => "Streams through the gaps in the press beds. Meet its nose to collect the close gems.",
+        EnemyKind::ErratumSlip => "Weaves twice as wide for its first second. Wait for the loose sheets to fold in before turning.",
+        EnemyKind::TypeSlug => "Keeps its last heading for 0.6 s after losing sight. Break sight at a reel, then reverse.",
+        EnemyKind::StapleCrawler => "Within 26 px it marks two radius-4 holes 14 apart astride you for 0.8 s. Both feet land for 0.4 s at 7 each on one shared hit. Walk between the feet.",
+        EnemyKind::PaperWasp => "Shot from the rolled tip. Move across the press lane as the tube opens.",
+        EnemyKind::PaperReel => "Wide continuous contact. Pull the roll off the aisle before entering.",
+        EnemyKind::InkBlot => "Its wick, radius and damage are the moth's; the burst centre slides 12 px along its last velocity over the 1 s fuse, with the endpoint marked. Lead the travelling spot into the swarm.",
+        EnemyKind::GravelTick => "Drifts 5 px/s toward the tailgate while chasing. Collect on the cab side of its line.",
+        EnemyKind::JuneBug => "Wobbles into your line around cargo. Step across its belly shadow.",
+        EnemyKind::TarRat => "Straight large-class chaser. Put a wide crate corner in its path.",
+        EnemyKind::LooseCan => "Within 32 px it rocks for 0.8 s and outlines a 48×6 roll with one bounce off the first solid face. It rolls at 60 px/s, stops at a second obstacle, then lies still 1 s. Cross behind the rebound.",
+        EnemyKind::TollGull => "The shot aims 0.35 s ahead along your current velocity. Reverse as the beak opens.",
+        EnemyKind::LooseBungee => "Crossbar tell, length, life and damage; on the first crossing it pulls you 6 toward its hook, swept against solids and stopped before pits. Route around the free end.",
     }
 }
 
 fn miniboss_facts(k: MinibossKind, f: &mut Facts) {
-    let last_appointment = crate::game::director::MINIBOSS_TIMES
-        .len()
-        .saturating_sub(1);
-    let first = miniboss::appointment_hp(0);
-    let last = miniboss::appointment_hp(last_appointment);
+    // Every named miniboss keeps exactly one floor and one clock, so the card
+    // reads that slot's real numbers instead of the whole schedule's range.
+    let (theme, at) = miniboss_home(k).unwrap_or((Theme::Sewer, 0));
+    let clock = crate::game::director::MINIBOSS_TIMES
+        .get(at)
+        .copied()
+        .unwrap_or(0.0);
+    f.push("HIT POINTS", format!("{:.0}", miniboss::appointment_hp(at)));
     f.push(
-        "HIT POINTS",
-        format!("{first:.0} at 3:00 → {last:.0} at 12:00"),
-    );
-    let dmg_first = miniboss::appointment_signature_damage(0);
-    let dmg_last = miniboss::appointment_signature_damage(last_appointment);
-    f.push(
-        "SIGNATURE",
-        format!("{dmg_first:.0} → {dmg_last:.0} damage"),
+        "STRIKE",
+        format!(
+            "{:.0} damage",
+            miniboss::appointment_signature_damage(at)
+        ),
     );
     f.push(
         "TELL → HIT",
@@ -1575,14 +1914,30 @@ fn miniboss_facts(k: MinibossKind, f: &mut Facts) {
     );
     f.push(
         "COMES AT",
-        crate::game::director::MINIBOSS_TIMES
-            .iter()
-            .map(|s| format!("{:02}:{:02}", (*s as u32) / 60, (*s as u32) % 60))
-            .collect::<Vec<_>>()
-            .join(" "),
+        format!(
+            "{} · {:02}:{:02}",
+            theme.name(),
+            (clock as u32) / 60,
+            (clock as u32) % 60
+        ),
     );
     f.push("DROPS", format!("a chest + {} gold", shop::MINIBOSS_GOLD));
     f.push("SIZE", "one at a time");
+}
+
+/// The floor and appointment index a named miniboss keeps, read from the
+/// rosters rather than retyped (the design gives every one of the
+/// twenty-four exactly one home; the roster tests pin that).
+fn miniboss_home(k: MinibossKind) -> Option<(Theme, usize)> {
+    for theme in Theme::playable() {
+        if let Some(at) = crate::game::roster::appointments(theme)
+            .iter()
+            .position(|scheduled| *scheduled == k)
+        {
+            return Some((theme, at));
+        }
+    }
+    None
 }
 
 fn boss_facts(k: BossKind, f: &mut Facts) {
@@ -2333,39 +2688,15 @@ fn key_at(category: usize, kind: usize) -> Option<Key> {
 }
 
 fn enemy_at(i: usize) -> Option<EnemyKind> {
-    [
-        EnemyKind::Skitterer,
-        EnemyKind::Bat,
-        EnemyKind::Cat,
-        EnemyKind::Spitter,
-        EnemyKind::Brute,
-        EnemyKind::Boss,
-        EnemyKind::Pillbug,
-        EnemyKind::BellFlea,
-        EnemyKind::WickMoth,
-        EnemyKind::Porter,
-        EnemyKind::Turnkey,
-        EnemyKind::BigSnake,
-        EnemyKind::HouseCentipede,
-        EnemyKind::MurderHornet,
-        EnemyKind::TermiteHorde,
-        EnemyKind::Lilliputian,
-    ]
-    .get(i)
-    .copied()
+    // `EnemyKind::all()` is the enum's own order, so a kind appended to the
+    // enum cannot fall out of the registry (a new kind still needs its
+    // `enemy_name`/`enemy_text`/`enemy_answer` arm, which the compiler forces).
+    EnemyKind::all().get(i).copied()
 }
 
 fn miniboss_at(i: usize) -> Option<MinibossKind> {
-    [
-        MinibossKind::Corkscrew,
-        MinibossKind::SisterSnip,
-        MinibossKind::Bobbin,
-        MinibossKind::BellDiver,
-        MinibossKind::Foreman,
-        MinibossKind::MilkCarton,
-    ]
-    .get(i)
-    .copied()
+    // `Key::Miniboss` indexes by discriminant, so the list is the enum itself.
+    MinibossKind::all().get(i).copied()
 }
 
 fn boss_at(i: usize) -> Option<BossKind> {

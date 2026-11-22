@@ -1135,7 +1135,20 @@ pub fn emit_enemy_death(
     let ichor = palette::mix(theme_blood, enemy_col, 0.35);
     let stain_col = palette::scale(ichor, 0.56);
 
-    match kind {
+    // A registered wave-four kind dies with its **archetype's** cue, recoloured:
+    // `tone` pulls every signature colour the arm hard-codes toward the body's
+    // own `color()` (the ichor and the stain already carry it). For a kind that
+    // is its own archetype `tone` is the identity, so every existing corpse is
+    // bit-for-bit the cue it always was.
+    let recolored = kind.is_registration();
+    let tone = |sig: Rgb| {
+        if recolored {
+            palette::mix(sig, enemy_col, 0.55)
+        } else {
+            sig
+        }
+    };
+    match kind.archetype() {
         EnemyKind::Skitterer => {
             // Crisp chitin flecks + small ichor pop.
             let drops = ps.budget_count(7, false);
@@ -1183,7 +1196,7 @@ pub fn emit_enemy_death(
                 wisps,
                 44.0,
                 radius * 0.8,
-                Ramp::Custom((195, 165, 245), (58, 38, 92)),
+                Ramp::Custom(tone((195, 165, 245)), tone((58, 38, 92))),
                 0.45,
                 true,
                 Shape::Ember,
@@ -1234,7 +1247,7 @@ pub fn emit_enemy_death(
                 shell,
                 56.0,
                 radius * 0.6,
-                Ramp::Custom((145, 150, 168), (38, 40, 50)),
+                Ramp::Custom(tone((145, 150, 168)), tone((38, 40, 50))),
                 0.45,
                 false,
                 Shape::Blob,
@@ -1271,8 +1284,8 @@ pub fn emit_enemy_death(
                 end_r: 10.5,
                 life: 0.22,
                 max_life: 0.22,
-                color: (145, 240, 75),
-                core: (235, 255, 170),
+                color: tone((145, 240, 75)),
+                core: tone((235, 255, 170)),
                 thick: 1.0,
                 additive: true,
                 arc_dir: None,
@@ -1307,7 +1320,7 @@ pub fn emit_enemy_death(
             ps.push_stain(Stain {
                 pos,
                 radius: 3.3,
-                color: (58, 118, 34),
+                color: tone((58, 118, 34)),
                 life: 7.0,
                 max_life: 7.0,
                 seed: rng.random::<u16>(),
@@ -1322,7 +1335,7 @@ pub fn emit_enemy_death(
                 end_r: 22.0,
                 life: 0.30,
                 max_life: 0.30,
-                color: (245, 120, 70),
+                color: tone((245, 120, 70)),
                 core: (255, 245, 210),
                 thick: 2.0,
                 additive: true,
@@ -1505,7 +1518,7 @@ pub fn emit_enemy_death(
                 chips,
                 62.0,
                 radius * 0.5,
-                Ramp::Custom((214, 220, 232), (86, 92, 108)),
+                Ramp::Custom(tone((214, 220, 232)), tone((86, 92, 108))),
                 0.44,
                 false,
                 Shape::Blob,
@@ -1543,7 +1556,7 @@ pub fn emit_enemy_death(
                 filings,
                 88.0,
                 1.6,
-                Ramp::Custom((236, 168, 96), (108, 62, 30)),
+                Ramp::Custom(tone((236, 168, 96)), tone((108, 62, 30))),
                 0.30,
                 true,
                 Shape::Streak,
@@ -1636,7 +1649,7 @@ pub fn emit_enemy_death(
                 scrap,
                 76.0,
                 radius * 0.5,
-                Ramp::Custom((236, 214, 122), (96, 82, 40)),
+                Ramp::Custom(tone((236, 214, 122)), tone((96, 82, 40))),
                 0.40,
                 false,
                 Shape::Streak,
@@ -1743,7 +1756,7 @@ pub fn emit_enemy_death(
                 shell,
                 74.0,
                 radius * 0.6,
-                Ramp::Custom((238, 168, 52), (112, 64, 20)),
+                Ramp::Custom(tone((238, 168, 52)), tone((112, 64, 20))),
                 0.42,
                 false,
                 Shape::Blob,
@@ -1832,6 +1845,8 @@ pub fn emit_enemy_death(
                 3.0,
             );
         }
+        // Unreachable: `archetype()` answers one of the sixteen kinds above.
+        _ => {}
     }
 }
 
@@ -5607,11 +5622,14 @@ pub fn emit_wave4_tell(
     kind: crate::game::enemy::EnemyKind,
 ) {
     use crate::game::enemy::EnemyKind;
+    // The cue's shape is the archetype's (a registered body posts its base
+    // body's tell); the colour is the body's own.
+    let archetype = kind.archetype();
     let col = crate::render::palette::scale(kind.color(), 1.15);
     ps.push_shockwave(Shockwave {
         pos,
         start_r: 1.5,
-        end_r: match kind {
+        end_r: match archetype {
             EnemyKind::BigSnake => 12.0,
             EnemyKind::MurderHornet => 10.0,
             _ => 6.0,
@@ -5631,7 +5649,7 @@ pub fn emit_wave4_tell(
         pos,
         dir,
         n,
-        match kind {
+        match archetype {
             EnemyKind::BigSnake => 46.0,
             EnemyKind::MurderHornet => 30.0,
             _ => 22.0,

@@ -172,7 +172,7 @@ fn warn_active(e: &Enemy) -> bool {
     if !e.kind.is_wave3() {
         return false;
     }
-    match e.kind {
+    match e.kind.archetype() {
         EnemyKind::Pillbug => e.w3.curl_t > 0.0,
         EnemyKind::BellFlea => e.w3.flea_phase != 0,
         EnemyKind::Porter => e.w3.raise_t > 0.0,
@@ -349,8 +349,9 @@ pub fn wave3_system(
             continue;
         }
 
-        // A dead Wick Moth becomes a burning wick, once.
-        if e.kind == EnemyKind::WickMoth && e.hp <= 0.0 && e.w3.wick_t > 0.0 {
+        // A dead Wick Moth becomes a burning wick, once (a registration that
+        // inherits the moth's fuse does the same).
+        if e.kind.archetype() == EnemyKind::WickMoth && e.hp <= 0.0 && e.w3.wick_t > 0.0 {
             let pos = e.pos;
             e.w3.wick_t = -1.0;
             commands.spawn((Wick::new(pos), next_id.take()));
@@ -369,7 +370,9 @@ pub fn wave3_system(
         // key would be free crowd control with the worst attacks still
         // pointing at the rat.
         let target = lure_target(&e, ppos, decoy, &level);
-        match e.kind {
+        // The state machines are the archetype's: a registered kind runs its
+        // base body's tell until its floor's own batch replaces it.
+        match e.kind.archetype() {
             EnemyKind::Pillbug => pillbug_tick(&mut e, target, dt, &scratch.warns, &mut particles, &mut rng, &mut sfx),
             EnemyKind::BellFlea => flea_tick(
                 &mut e,
@@ -461,7 +464,7 @@ fn lure_target(e: &Enemy, ppos: Vec2, decoy: Option<Vec2>, level: &Level) -> Vec
 /// the director — the facade, tests — never touch the wave-3 fields).
 fn arm(e: &mut Enemy) {
     e.w3.armed = 1;
-    match e.kind {
+    match e.kind.archetype() {
         EnemyKind::BellFlea => {
             e.w3.flea_cd = FLEA_JUMP_PERIOD;
             e.w3.flea_phase = 0;
@@ -507,7 +510,7 @@ fn pillbug_tick(
     e.w3.curl_t = PILLBUG_CURL_SECS;
     e.w3.warn_age = 0.0;
     e.vel = Vec2::ZERO;
-    vfx::emit_wave3_tell(particles, &mut rng.0, e.pos, e.facing, EnemyKind::Pillbug);
+    vfx::emit_wave3_tell(particles, &mut rng.0, e.pos, e.facing, e.kind);
     sfx.0.push(Sfx::Warn);
 }
 
@@ -562,7 +565,7 @@ fn flea_tick(
             e.w3.flea_t = FLEA_TELL_SECS;
             e.w3.warn_age = 0.0;
             e.facing = dir;
-            vfx::emit_wave3_tell(particles, &mut rng.0, hop, dir, EnemyKind::BellFlea);
+            vfx::emit_wave3_tell(particles, &mut rng.0, hop, dir, e.kind);
             sfx.0.push(Sfx::Warn);
         }
         1 => {
@@ -667,7 +670,7 @@ fn porter_tick(
     e.w3.heal_target = target_id;
     e.w3.warn_age = 0.0;
     e.vel = Vec2::ZERO;
-    vfx::emit_wave3_tell(particles, &mut rng.0, e.pos, e.facing, EnemyKind::Porter);
+    vfx::emit_wave3_tell(particles, &mut rng.0, e.pos, e.facing, e.kind);
     sfx.0.push(Sfx::Warn);
 }
 
@@ -728,7 +731,7 @@ fn turnkey_tick(
     e.w3.bar_spent = false;
     e.w3.bar_cd = TURNKEY_PERIOD;
     e.w3.warn_age = 0.0;
-    vfx::emit_wave3_tell(particles, &mut rng.0, e.pos, dir, EnemyKind::Turnkey);
+    vfx::emit_wave3_tell(particles, &mut rng.0, e.pos, dir, e.kind);
     sfx.0.push(Sfx::Warn);
 }
 

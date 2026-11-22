@@ -381,6 +381,39 @@ impl DamageCause {
             DamageCause::EnemyContact(EnemyKind::MurderHornet) => "murder hornet contact",
             DamageCause::EnemyContact(EnemyKind::TermiteHorde) => "termite horde contact",
             DamageCause::EnemyContact(EnemyKind::Lilliputian) => "lilliputian contact",
+            DamageCause::EnemyContact(EnemyKind::PipeEel) => "pipe eel contact",
+            DamageCause::EnemyContact(EnemyKind::GrateArcher) => "grate archer contact",
+            DamageCause::EnemyContact(EnemyKind::SumpLeech) => "sump leech contact",
+            DamageCause::EnemyContact(EnemyKind::SluiceToad) => "sluice toad contact",
+            DamageCause::EnemyContact(EnemyKind::CrumbAnt) => "crumb ant contact",
+            DamageCause::EnemyContact(EnemyKind::FruitFly) => "fruit fly contact",
+            DamageCause::EnemyContact(EnemyKind::EggTimer) => "egg timer contact",
+            DamageCause::EnemyContact(EnemyKind::PepperMill) => "pepper mill contact",
+            DamageCause::EnemyContact(EnemyKind::PieWeight) => "pie weight contact",
+            DamageCause::EnemyContact(EnemyKind::SinkCrab) => "sink crab contact",
+            DamageCause::EnemyContact(EnemyKind::SwabFoot) => "swab foot contact",
+            DamageCause::EnemyContact(EnemyKind::SpinnerLid) => "spinner lid contact",
+            DamageCause::EnemyContact(EnemyKind::GlassRunner) => "glass runner contact",
+            DamageCause::EnemyContact(EnemyKind::WalkingSyringe) => "walking syringe contact",
+            DamageCause::EnemyContact(EnemyKind::AutoclaveCart) => "autoclave cart contact",
+            DamageCause::EnemyContact(EnemyKind::WoolPill) => "wool pill contact",
+            DamageCause::EnemyContact(EnemyKind::ClothesMoth) => "clothes moth contact",
+            DamageCause::EnemyContact(EnemyKind::PegSnapper) => "peg snapper contact",
+            DamageCause::EnemyContact(EnemyKind::StarchBulb) => "starch bulb contact",
+            DamageCause::EnemyContact(EnemyKind::LintGolem) => "lint golem contact",
+            DamageCause::EnemyContact(EnemyKind::Silverfish) => "silverfish contact",
+            DamageCause::EnemyContact(EnemyKind::ErratumSlip) => "erratum slip contact",
+            DamageCause::EnemyContact(EnemyKind::TypeSlug) => "type slug contact",
+            DamageCause::EnemyContact(EnemyKind::StapleCrawler) => "staple crawler contact",
+            DamageCause::EnemyContact(EnemyKind::PaperWasp) => "paper wasp contact",
+            DamageCause::EnemyContact(EnemyKind::PaperReel) => "paper reel contact",
+            DamageCause::EnemyContact(EnemyKind::InkBlot) => "ink blot contact",
+            DamageCause::EnemyContact(EnemyKind::GravelTick) => "gravel tick contact",
+            DamageCause::EnemyContact(EnemyKind::JuneBug) => "june bug contact",
+            DamageCause::EnemyContact(EnemyKind::TarRat) => "tar rat contact",
+            DamageCause::EnemyContact(EnemyKind::LooseCan) => "loose can contact",
+            DamageCause::EnemyContact(EnemyKind::TollGull) => "toll gull contact",
+            DamageCause::EnemyContact(EnemyKind::LooseBungee) => "loose bungee contact",
             DamageCause::EnemyBullet => "spitter bullets",
             DamageCause::BossContact(BossKind::Cat) => "jaguar body",
             DamageCause::BossContact(BossKind::Broom) => "broom human body",
@@ -495,6 +528,62 @@ impl DamageCause {
                 }
                 crate::game::ecs::systems::miniboss::MinibossKind::MilkCarton => {
                     "miniboss: milk carton"
+                }
+                // The eighteen wave-four appointments (`WAVE4_ROSTERS.md`),
+                // named so a run's damage log never says "unknown miniboss".
+                crate::game::ecs::systems::miniboss::MinibossKind::ValveWidow => {
+                    "miniboss: valve widow"
+                }
+                crate::game::ecs::systems::miniboss::MinibossKind::Mudlark => {
+                    "miniboss: the mudlark"
+                }
+                crate::game::ecs::systems::miniboss::MinibossKind::PastryWheel => {
+                    "miniboss: pastry wheel"
+                }
+                crate::game::ecs::systems::miniboss::MinibossKind::SaltHen => {
+                    "miniboss: salt hen"
+                }
+                crate::game::ecs::systems::miniboss::MinibossKind::PotBrush => {
+                    "miniboss: pot brush"
+                }
+                crate::game::ecs::systems::miniboss::MinibossKind::DosePump => {
+                    "miniboss: dose pump"
+                }
+                crate::game::ecs::systems::miniboss::MinibossKind::PetriMother => {
+                    "miniboss: petri mother"
+                }
+                crate::game::ecs::systems::miniboss::MinibossKind::CageCounter => {
+                    "miniboss: cage counter"
+                }
+                crate::game::ecs::systems::miniboss::MinibossKind::RotorTechnician => {
+                    "miniboss: rotor technician"
+                }
+                crate::game::ecs::systems::miniboss::MinibossKind::SudsBailiff => {
+                    "miniboss: suds bailiff"
+                }
+                crate::game::ecs::systems::miniboss::MinibossKind::WringerBoy => {
+                    "miniboss: the wringer boy"
+                }
+                crate::game::ecs::systems::miniboss::MinibossKind::QuoinKey => {
+                    "miniboss: quoin key"
+                }
+                crate::game::ecs::systems::miniboss::MinibossKind::CarbonTwin => {
+                    "miniboss: carbon twin"
+                }
+                crate::game::ecs::systems::miniboss::MinibossKind::LatePlate => {
+                    "miniboss: late plate"
+                }
+                crate::game::ecs::systems::miniboss::MinibossKind::TarpaulinPup => {
+                    "miniboss: tarpaulin pup"
+                }
+                crate::game::ecs::systems::miniboss::MinibossKind::AxleNut => {
+                    "miniboss: axle nut"
+                }
+                crate::game::ecs::systems::miniboss::MinibossKind::ChainDog => {
+                    "miniboss: chain dog"
+                }
+                crate::game::ecs::systems::miniboss::MinibossKind::RoadAtlas => {
+                    "miniboss: the road atlas"
                 }
             }
         }
@@ -1585,6 +1674,41 @@ fn enemy_kind_name(kind: EnemyKind) -> &'static str {
         EnemyKind::MurderHornet => "murder hornet",
         EnemyKind::TermiteHorde => "termite horde",
         EnemyKind::Lilliputian => "lilliputian",
+        // The 33 wave-four registrations (the damage-cause label names the
+        // body that actually landed the hit, not its base behaviour).
+        EnemyKind::PipeEel => "pipe eel",
+        EnemyKind::GrateArcher => "grate archer",
+        EnemyKind::SumpLeech => "sump leech",
+        EnemyKind::SluiceToad => "sluice toad",
+        EnemyKind::CrumbAnt => "crumb ant",
+        EnemyKind::FruitFly => "fruit fly",
+        EnemyKind::EggTimer => "egg timer",
+        EnemyKind::PepperMill => "pepper mill",
+        EnemyKind::PieWeight => "pie weight",
+        EnemyKind::SinkCrab => "sink crab",
+        EnemyKind::SwabFoot => "swab foot",
+        EnemyKind::SpinnerLid => "spinner lid",
+        EnemyKind::GlassRunner => "glass runner",
+        EnemyKind::WalkingSyringe => "walking syringe",
+        EnemyKind::AutoclaveCart => "autoclave cart",
+        EnemyKind::WoolPill => "wool pill",
+        EnemyKind::ClothesMoth => "clothes moth",
+        EnemyKind::PegSnapper => "peg snapper",
+        EnemyKind::StarchBulb => "starch bulb",
+        EnemyKind::LintGolem => "lint golem",
+        EnemyKind::Silverfish => "silverfish",
+        EnemyKind::ErratumSlip => "erratum slip",
+        EnemyKind::TypeSlug => "type slug",
+        EnemyKind::StapleCrawler => "staple crawler",
+        EnemyKind::PaperWasp => "paper wasp",
+        EnemyKind::PaperReel => "paper reel",
+        EnemyKind::InkBlot => "ink blot",
+        EnemyKind::GravelTick => "gravel tick",
+        EnemyKind::JuneBug => "june bug",
+        EnemyKind::TarRat => "tar rat",
+        EnemyKind::LooseCan => "loose can",
+        EnemyKind::TollGull => "toll gull",
+        EnemyKind::LooseBungee => "loose bungee",
     }
 }
 
