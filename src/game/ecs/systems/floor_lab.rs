@@ -280,6 +280,7 @@ fn lure_target(e: &Enemy, ppos: Vec2, decoy: Option<Vec2>, level: &Level) -> Vec
 /// `target` is where it plants on and aims at (the Wind-up Mouse's key while
 /// the key lures it, the rat otherwise); `ppos` is the rat, the only thing the
 /// ray can hurt.
+#[allow(clippy::too_many_arguments)]
 fn needle_tick(
     n: &mut Needle,
     e: &mut Enemy,
@@ -429,8 +430,8 @@ pub fn floor_lab_system(
         let target = lure_target(&e, ppos, decoy, &level);
         // Explicit reborrows: `Mut`/`ResMut` down to the plain `&mut T` the
         // helpers take.
-        if needle_tick(&mut *needle, &mut *e, target, ppos, dt, &level, &mut *player, &mut *sfx) {
-            vfx::emit_player_hurt(&mut *particles, &mut rng.0, ppos);
+        if needle_tick(&mut needle, &mut e, target, ppos, dt, &level, &mut player, &mut sfx) {
+            vfx::emit_player_hurt(&mut particles, &mut rng.0, ppos);
         }
     }
 }
@@ -562,7 +563,7 @@ mod tests {
     fn the_ray_reaches_the_rat_it_planted_on() {
         // Anything inside the plant range along the aim is inside the ray's
         // reach (tip offset + length), or the thrust could never land.
-        assert!(SYRINGE_TIP + SYRINGE_RAY_LEN >= SYRINGE_PLANT_RANGE);
+        const { assert!(SYRINGE_TIP + SYRINGE_RAY_LEN >= SYRINGE_PLANT_RANGE) };
     }
 
     #[test]
@@ -630,7 +631,7 @@ mod tests {
         tick(&mut w);
         assert_eq!(needle(&w, s).phase, SYRINGE_TELL);
         // The aim is locked: sidestep and the thrust misses.
-        w.player.pos = w.player.pos + Vec2::new(0.0, 14.0);
+        w.player.pos += Vec2::new(0.0, 14.0);
         let hp0 = w.player.hp;
         for _ in 0..secs(SYRINGE_TELL_SECS + SYRINGE_THRUST_SECS + SYRINGE_RETRACT_SECS) + 2 {
             w.player.iframes = 0.0;
@@ -690,7 +691,8 @@ mod tests {
     /// With the rat at x = 652 (cell 40) and the body at 672 (cell 42), the
     /// midpoint 662 is cell 41: neither stands in the wall.
     fn wall_between(w: &mut World) {
-        use crate::game::collision::{cell_of, TileKind, WallKind};
+        use crate::game::art_walls::WallKind;
+        use crate::game::collision::{cell_of, TileKind};
         let mid = w.player.pos + Vec2::new(10.0, 0.0);
         let cell = cell_of(mid);
         for dy in -2i32..=2 {

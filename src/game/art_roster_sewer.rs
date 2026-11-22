@@ -229,7 +229,7 @@ pub(crate) fn draw_pipe_eel(pb: &mut PixelBuffer, _fr: &Frame, e: &Enemy, cam: V
     // itself to one side, leaving a dark notch between jaw and neck.
     paint(pb, &lf, 7.0 * s, |u, v| {
         let (u, v) = (u / s, v / s);
-        let neck = u >= -2.5 && u <= 3.0 && v.abs() <= 2.0 - (u + 2.5).max(0.0) * 0.06;
+        let neck = (-2.5..=3.0).contains(&u) && v.abs() <= 2.0 - (u + 2.5).max(0.0) * 0.06;
         let skull = in_disc(u, v, 3.6, 0.4, 2.3);
         let barb = in_disc(u, v, 3.0, 3.4, 1.3) || in_disc(u, v, 1.6, 4.0, 0.9);
         let notch = in_disc(u, v, 1.9, 2.5, 0.8);
@@ -326,7 +326,7 @@ pub(crate) fn draw_grate_archer_lod(pb: &mut PixelBuffer, _fr: &Frame, e: &Enemy
     let plate = lf.flash(ARCHER_PLATE);
     // A wide base bar, a narrower mid bar, and the lip pixel: a triangle.
     line(pb, lf.px(-3.0 * s, -3.0 * s), lf.px(-3.0 * s, 3.0 * s), plate, 1.0);
-    line(pb, lf.px(-1.0 * s, -2.2 * s), lf.px(-1.0 * s, 2.2 * s), shell, 1.0);
+    line(pb, lf.px(-s, -2.2 * s), lf.px(-s, 2.2 * s), shell, 1.0);
     line(pb, lf.px(1.0 * s, -1.2 * s), lf.px(1.0 * s, 1.2 * s), shell, 1.0);
     let lip = lf.px(3.0 * s, 0.0);
     blend(pb, lip.0, lip.1, lf.flash(mix(ARCHER_LIP, ARCHER_CHARGE, charge)), 1.0);

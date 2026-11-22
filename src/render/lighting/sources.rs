@@ -1126,14 +1126,13 @@ impl LightMap {
                     }
                 }
             }
-            EnemyKind::StapleCrawler => {
-                if floor_printworks::staple_warned(e) {
+            EnemyKind::StapleCrawler
+                if floor_printworks::staple_warned(e) => {
                     let live = e.w4.phase == floor_printworks::STAPLE_PHASE_STRIKE;
                     for foot in [e.w4.trail[0], e.w4.trail[1]] {
                         pool(foot, 15.0, live, 1.0);
                     }
                 }
-            }
             _ => {}
         }
     }

@@ -270,7 +270,7 @@ pub fn enemy_steering_system(
         // course corrections; every other kind gets `flow_dir` back untouched.
         if e.kind == EnemyKind::CrumbAnt {
             flow_dir = crate::game::ecs::systems::floor_kitchen::crumb_ant_course(
-                &mut *e, target, flow_dir, dt,
+                &mut e, target, flow_dir, dt,
             );
         }
         // Lab (`floor_lab`): a Spinner Lid's weave flips handedness; a no-op

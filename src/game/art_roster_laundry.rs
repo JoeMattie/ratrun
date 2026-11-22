@@ -305,7 +305,7 @@ pub(crate) fn draw_clothes_moth_lod(pb: &mut PixelBuffer, fr: &Frame, _e: &Enemy
     let near = at(fr, 0.0, 0.0);
     pb.plot(near.0, near.1, mid);
     // The hem row: three wide when open, one when shut.
-    let w = if open { 2 } else { 1 };
+    let w: i32 = if open { 2 } else { 1 };
     for iv in -w..=w {
         let p = at(fr, -1.5, iv as f32);
         pb.plot(p.0, p.1, if iv.abs() == w { dark } else { mid });
@@ -417,7 +417,7 @@ pub(crate) fn draw_peg_snapper(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, cam:
         // Lit outer edge on whichever prong faces the screen's upper left.
         let outer = at(fr, 2.0 * k, side * (spread * 0.55 + 1.0) * k);
         if (outer.0 as f32 - fr.pos.x) + (outer.1 as f32 - fr.pos.y) < 0.0 {
-            let o0 = at(fr, -1.0 * k, side * 1.4 * k);
+            let o0 = at(fr, -k, side * 1.4 * k);
             let o1 = at(fr, 4.5 * k, side * (spread + 0.6) * k);
             seg(pb, o0, o1, hi);
         }

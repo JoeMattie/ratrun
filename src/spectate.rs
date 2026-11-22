@@ -2020,7 +2020,7 @@ mod tests {
     #[test]
     fn speed_changes_are_driven_by_the_plus_and_minus_keys() {
         use crossterm::event::{KeyEvent, KeyModifiers};
-        let mut state = WallState::new(4);
+        let mut state = WallState::new(8);
         let area = Rect::new(0, 0, 80, 24);
         let mut input = InputState::new(false);
         input.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE));

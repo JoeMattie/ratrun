@@ -475,20 +475,20 @@ pub fn floor_flatbed_system(
             EnemyKind::LooseCan => {
                 let speed_mult =
                     glue.get(entity).map_or(1.0, |s| s.0) * ink.get(entity).map_or(1.0, |s| s.0);
-                let target = lure_target(&*e, player.pos, decoy, level);
+                let target = lure_target(&e, player.pos, decoy, level);
                 match state {
                     Some(mut state) => can_tick(
-                        &mut *e,
-                        &mut *state,
+                        &mut e,
+                        &mut state,
                         target,
                         dt,
                         level,
                         flow,
                         speed_mult,
-                        &mut *player,
-                        &mut *particles,
-                        &mut *rng,
-                        &mut *sfx,
+                        &mut player,
+                        &mut particles,
+                        &mut rng,
+                        &mut sfx,
                     ),
                     None => {
                         // First tick: run it on a fresh state and attach that
@@ -498,17 +498,17 @@ pub fn floor_flatbed_system(
                             ..CanRoll::default()
                         };
                         can_tick(
-                            &mut *e,
+                            &mut e,
                             &mut fresh,
                             target,
                             dt,
                             level,
                             flow,
                             speed_mult,
-                            &mut *player,
-                            &mut *particles,
-                            &mut *rng,
-                            &mut *sfx,
+                            &mut player,
+                            &mut particles,
+                            &mut rng,
+                            &mut sfx,
                         );
                         commands.entity(entity).insert(fresh);
                     }
@@ -918,12 +918,17 @@ mod tests {
         // The roll: along the marked path, one hit at most.
         let mut rolled = false;
         let mut rested = false;
+        // Where the can lay while resting (it walks on again afterwards).
+        let mut rest_pos = rock_pos;
         for _ in 0..((CAN_ROLL_LENGTH / CAN_ROLL_SPEED + CAN_REST_SECS + 0.5) / DT) as usize {
             run(&mut w);
             let e = w.ecs.get::<Enemy>(can).unwrap();
             match e.w4.phase {
                 CAN_PHASE_ROLL => rolled = true,
-                CAN_PHASE_REST => rested = true,
+                CAN_PHASE_REST => {
+                    rested = true;
+                    rest_pos = e.pos;
+                }
                 _ => {}
             }
         }
@@ -940,9 +945,9 @@ mod tests {
             e.damage
         );
         assert!(
-            e.pos.dist(path.end()) < 4.0,
+            rest_pos.dist(path.end()) < 4.0,
             "the can stops where the outline ended: {:?} vs {:?}",
-            e.pos,
+            rest_pos,
             path.end()
         );
     }

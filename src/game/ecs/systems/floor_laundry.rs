@@ -497,11 +497,11 @@ pub fn floor_laundry_system(
             continue;
         };
         let target = lure_target(&e, player.pos, decoy, &level);
-        if peg_tick(&mut *e, &mut *jaws, target, &level, dt, &mut *player, &mut *sfx) {
+        if peg_tick(&mut e, &mut jaws, target, &level, dt, &mut player, &mut sfx) {
             // The one rng draw in this file: the same hurt burst every other
             // hit makes, and only when a bite actually lands.
             let at = player.pos;
-            vfx::emit_player_hurt(&mut *particles, &mut rng.0, at);
+            vfx::emit_player_hurt(&mut particles, &mut rng.0, at);
         }
     }
 }

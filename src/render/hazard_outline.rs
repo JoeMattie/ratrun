@@ -786,7 +786,7 @@ mod tests {
                 let mut loops = [(0usize, 0usize); MAX_LOOPS];
                 assert_eq!(miniboss_footprint(&mb, &mut pts, &mut loops), 1, "{kind:?}");
                 let (start, n) = loops[0];
-                assert!(n >= 8 && n < MAX_PTS, "{kind:?}: {n} points");
+                assert!((8..MAX_PTS).contains(&n), "{kind:?}: {n} points");
                 let poly = &pts[start..start + n];
                 for step in 0..=20 {
                     let t = sig.active * step as f32 / 20.0;

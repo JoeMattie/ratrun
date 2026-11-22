@@ -345,7 +345,7 @@ pub fn floor_sewer_system(
     if let Some(slow) = slow.as_mut() {
         if slow.0 > 0.0 {
             slow.0 = (slow.0 - dt).max(0.0);
-            if !slow_exempt(&*player) {
+            if !slow_exempt(&player) {
                 let cap = player.loadout.stats.move_speed * LEECH_SLOW_MULT;
                 player.vel = player.vel.clamp_len(cap);
             }
@@ -388,20 +388,20 @@ pub fn floor_sewer_system(
         if !e.alive() {
             if state.phase != LEECH_PHASE_IDLE {
                 state.phase = LEECH_PHASE_IDLE;
-                mirror(&mut *e, &*state);
+                mirror(&mut e, &state);
             }
             continue;
         }
         // The tongue is aimed at whatever the body is chasing: the key while
         // the key lures it. Only the rat can be touched (and slowed).
-        let aim = lure_target(&*e, rat, decoy, &*level);
-        if leech_tick(&mut *e, &mut *state, dt, aim, rat, rat_alive, &*level, &mut *sfx) {
+        let aim = lure_target(&e, rat, decoy, &level);
+        if leech_tick(&mut e, &mut state, dt, aim, rat, rat_alive, &level, &mut sfx) {
             touched = true;
         }
-        mirror(&mut *e, &*state);
+        mirror(&mut e, &state);
     }
 
-    if touched && !slow_exempt(&*player) {
+    if touched && !slow_exempt(&player) {
         match slow.as_mut() {
             Some(slow) => slow.0 = slow.0.max(LEECH_SLOW_SECS),
             None => commands.insert_resource(TongueSlow(LEECH_SLOW_SECS)),
@@ -420,7 +420,7 @@ pub fn floor_sewer_slow_system(
     let Some(slow) = slow else {
         return;
     };
-    if slow.0 <= 0.0 || slow_exempt(&*player) || (input.dash && player.dash_cd <= 0.0) {
+    if slow.0 <= 0.0 || slow_exempt(&player) || (input.dash && player.dash_cd <= 0.0) {
         return;
     }
     input.move_dir = input.move_dir * LEECH_SLOW_MULT;
@@ -588,7 +588,7 @@ mod tests {
         tick(&mut w);
         assert_eq!(leech(&w, e).phase, LEECH_PHASE_WARN);
         // Cross behind its head.
-        w.player.pos = w.player.pos + Vec2::new(40.0, 0.0);
+        w.player.pos += Vec2::new(40.0, 0.0);
         for _ in 0..secs(LEECH_WARN_SECS + LEECH_HOLD_SECS) + 2 {
             tick(&mut w);
         }

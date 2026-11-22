@@ -1067,10 +1067,10 @@ mod tests {
         let mut w = printworks(7);
         let boss = spawn_press(&mut w);
         // `WAVE3_DESIGN.md` §12: 3,000 HP for the Printworks, times the same
-        // framework scale the other three use (`hp_scale` 2.0 × BOSS_POOL_SCALE
+        // framework scale the others use (`BossKind::hp_scale` × BOSS_POOL_SCALE
         // 4.0 × the frozen hp curve at BOSS_TIME, 2.0).
         let expected = art::BOSS_BASE_HP
-            * 2.0
+            * BossKind::NightEdition.hp_scale()
             * crate::game::director::boss_hp_mult_for(2, crate::game::director::BOSS_TIME);
         assert!(
             (boss.max_hp - expected).abs() < 1.0,
@@ -1079,7 +1079,8 @@ mod tests {
             expected
         );
         assert!(
-            boss.max_hp > 40_000.0,
+            // 20,400 after the batch-six `hp_scale` retune (2.0 -> 0.85).
+            boss.max_hp > 15_000.0,
             "the final floor's fight must be a real pool, got {:.0}",
             boss.max_hp
         );

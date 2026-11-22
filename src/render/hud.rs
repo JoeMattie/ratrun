@@ -3230,8 +3230,7 @@ mod tests {
     fn a_rebound_active_key_is_never_called_spc_on_the_one_row_rail() {
         let w = active_loadout_world(0.0);
         for width in [68u16, 72, 76, 79, 80, 100] {
-            let mut state = HudState::default();
-            state.active_name = "L-CLICK".to_string();
+            let mut state = HudState { active_name: "L-CLICK".to_string(), ..Default::default() };
             state.tick(1.0 / 60.0, &w, &[], false);
             state.tick(1.0 / 60.0, &w, &[], false);
             let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
@@ -3285,9 +3284,7 @@ mod tests {
             let mut w = known_world();
             w.player.dash_cd = 0.0;
             w.player.dash_ready_flash = 0.0;
-            let mut state = HudState::default();
-
-            state.dash_ready_flash = 0.6;
+            let mut state = HudState { dash_ready_flash: 0.6, ..Default::default() };
             let (cells, bgs) = bottom_rail(&w, &mut state, cols, rows);
             let from = find_cells(&cells, "SPACE DASH").unwrap_or_else(|| panic!("{cols}x{rows}: no label: {cells:?}"));
             let ready = find_cells(&cells, "READY").unwrap_or_else(|| panic!("{cols}x{rows}: no READY: {cells:?}"));

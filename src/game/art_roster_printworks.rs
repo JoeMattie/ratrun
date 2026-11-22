@@ -345,7 +345,7 @@ pub(crate) fn draw_typeslug_lod(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, _ca
     let lit = lit_side(fr);
     line(pb, at(fr, -2.5 * s, 2.0 * s * lit), at(fr, 2.5 * s, 2.0 * s * lit), tone(fr, LEAD_HI), 1.0);
     line(pb, at(fr, -2.5 * s, -2.0 * s * lit), at(fr, 2.5 * s, -2.0 * s * lit), tone(fr, LEAD_DARK), 1.0);
-    line(pb, at(fr, 1.5 * s, -1.0 * s), at(fr, 1.5 * s, 1.0 * s), tone(fr, PAPER_HI), 1.0);
+    line(pb, at(fr, 1.5 * s, -s), at(fr, 1.5 * s, 1.0 * s), tone(fr, PAPER_HI), 1.0);
 }
 
 // ---- Staple Crawler (I, r 2.0) ---------------------------------------------

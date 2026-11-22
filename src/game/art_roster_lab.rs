@@ -633,7 +633,7 @@ mod tests {
     }
 
     fn painted(kind: EnemyKind, anim: f32, full: bool) -> Vec<Rgb> {
-        let mut pb = PixelBuffer::new(64, 32);
+        let mut pb = PixelBuffer::new(64, 64);
         let floor: Rgb = (9, 9, 9);
         pb.clear(floor);
         let mut e = body(kind);
@@ -696,7 +696,7 @@ mod tests {
         let gold = |c: &Rgb| c.0 > 240 && c.1 > 190 && c.2 < 170;
         for full in [true, false] {
             let count = |elite: bool| {
-                let mut pb = PixelBuffer::new(64, 32);
+                let mut pb = PixelBuffer::new(64, 64);
                 pb.clear((9, 9, 9));
                 let mut e = body(EnemyKind::AutoclaveCart);
                 e.elite = elite;
@@ -724,7 +724,7 @@ mod tests {
     #[test]
     fn the_syringe_ray_is_dotted_then_solid() {
         let count = |phase: u8| {
-            let mut pb = PixelBuffer::new(96, 32);
+            let mut pb = PixelBuffer::new(96, 64);
             pb.clear((9, 9, 9));
             let mut e = body(EnemyKind::WalkingSyringe);
             floor_lab::pose_for_test(&mut e, phase, Vec2::new(1.0, 0.0));

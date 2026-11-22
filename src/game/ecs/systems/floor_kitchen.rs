@@ -275,17 +275,17 @@ pub fn floor_kitchen_system(
         e.w3.curl_t = 0.0;
         // What the dial measures: the key while it lures this body, else the
         // rat. The ring itself only ever hurts the rat.
-        let target = lure_target(&*e, player.pos, decoy, &*level);
+        let target = lure_target(&e, player.pos, decoy, &level);
         egg_tick(
-            &mut *e,
-            &mut *dial,
-            &mut *player,
-            &*level,
+            &mut e,
+            &mut dial,
+            &mut player,
+            &level,
             target,
             dt,
-            &mut *rng,
-            &mut *particles,
-            &mut *sfx,
+            &mut rng,
+            &mut particles,
+            &mut sfx,
         );
         e.w4.phase = dial.phase;
         e.w4.t = dial.t;

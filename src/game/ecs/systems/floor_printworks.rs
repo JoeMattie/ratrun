@@ -273,7 +273,7 @@ pub fn floor_printworks_system(
         // A dead Ink Blot whose wick `wave3_system` lit this tick (`-1` =
         // spent). The corpse is reaped later this tick, so this is seen once.
         if e.kind == EnemyKind::InkBlot {
-            let end = ink_slide_end(&*level, e.pos, e.vel, e.facing);
+            let end = ink_slide_end(&level, e.pos, e.vel, e.facing);
             if !e.alive() && e.w3.wick_t < 0.0 {
                 scratch.corpses.push((e.pos, end, false));
             } else if e.w3.wick_t >= 0.0 {
@@ -292,11 +292,11 @@ pub fn floor_printworks_system(
             EnemyKind::ErratumSlip => {
                 let Some(mut st) = state else {
                     commands.entity(entity).insert(PressBody { age: dt, ..PressBody::default() });
-                    slip_weave(&mut *e, dt);
+                    slip_weave(&mut e, dt);
                     continue;
                 };
                 if st.age < SLIP_WIDE_SECS {
-                    slip_weave(&mut *e, dt);
+                    slip_weave(&mut e, dt);
                     st.age += dt;
                 }
             }
@@ -305,13 +305,13 @@ pub fn floor_printworks_system(
                     commands.entity(entity).insert(PressBody::default());
                     continue;
                 };
-                slug_tick(&mut *e, &mut *st, &*level, ppos, dt);
+                slug_tick(&mut e, &mut st, &level, ppos, dt);
             }
             EnemyKind::StapleCrawler => {
                 let mark = lure_target(&e, ppos, decoy, &level);
-                if staple_tick(&mut *e, spawn_id, mark, &*level, &mut *player, dt) {
+                if staple_tick(&mut e, spawn_id, mark, &level, &mut player, dt) {
                     sfx.0.push(Sfx::Hurt);
-                    vfx::emit_player_hurt(&mut *particles, &mut rng.0, ppos);
+                    vfx::emit_player_hurt(&mut particles, &mut rng.0, ppos);
                 }
             }
             _ => {}

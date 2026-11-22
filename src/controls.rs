@@ -1790,7 +1790,8 @@ mod tests {
         for k in keys {
             assert_eq!(KeyBind::parse(&k.as_str()), Some(k), "{k:?}");
             let label = k.label();
-            assert!(!label.is_empty() && label != "KEY" && label != "F", "{k:?}: {label}");
+            assert!(!label.is_empty() && label != "KEY", "{k:?}: {label}");
+            assert!(label != "F" || k == KeyBind::Char('f'), "{k:?}: {label}");
         }
         for m in [
             MouseBind::Left, MouseBind::Right, MouseBind::Middle,
@@ -2049,8 +2050,8 @@ mod tests {
         let c = Controls::from_saved(&SavedControls::default());
         assert_eq!(c.scheme(), Scheme::Classic);
         assert!((c.deadzone - DEFAULT_DEADZONE).abs() < 1e-6 && !c.rumble);
-        for i in 0..3 {
-            assert!(same_table(&c.sets[i], &defaults(i)));
+        for (i, set) in c.sets.iter().enumerate().take(3) {
+            assert!(same_table(set, &defaults(i)));
         }
 
         // Garbage in every slot, an unknown scheme, impossible dead zones.
@@ -2071,8 +2072,8 @@ mod tests {
                 let c = Controls::from_saved(&saved);
                 assert_eq!(c.scheme(), Scheme::Classic, "{junk:?}");
                 assert!((0.05..=0.9).contains(&c.deadzone), "{deadzone} -> {}", c.deadzone);
-                for i in 0..3 {
-                    assert!(same_table(&c.sets[i], &defaults(i)), "{junk:?} scheme {i}");
+                for (i, set) in c.sets.iter().enumerate().take(3) {
+                    assert!(same_table(set, &defaults(i)), "{junk:?} scheme {i}");
                 }
             }
         }
@@ -2086,8 +2087,8 @@ mod tests {
             }
         }
         let c = Controls::from_saved(&long);
-        for i in 0..3 {
-            assert!(same_table(&c.sets[i], &defaults(i)), "scheme {i}");
+        for (i, set) in c.sets.iter().enumerate().take(3) {
+            assert!(same_table(set, &defaults(i)), "scheme {i}");
         }
 
         // One scheme block missing: only that scheme falls back.

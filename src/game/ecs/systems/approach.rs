@@ -125,7 +125,7 @@ mod tests {
         w.begin_tick(DT, Vec2::ZERO, false);
         w.ecs.run_system_cached(approach_sfx_system).unwrap();
         w.end_tick();
-        w.sfx.drain(..).collect()
+        std::mem::take(&mut w.sfx)
     }
 
     fn count(w: &mut World, ticks: usize, sound: Sfx) -> usize {

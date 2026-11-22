@@ -2182,7 +2182,10 @@ mod tests {
         w.player.face = Vec2::new(1.0, 0.0);
         w.player.loadout.weapons[0].timer = 0.0;
         let half = (w.player.loadout.weapons[0].level_projectiles() as f32 - 1.0) * 0.5;
-        let cross = origin + Vec2::from_angle(-half * 0.18) * 20.0;
+        // Auto-aim centres the fan on the body itself, so the outer tine
+        // leaves `half * 0.18` rad off the line to it: the body stands close
+        // enough (10 px) that the tine still crosses its radius.
+        let cross = origin + Vec2::from_angle(-half * 0.18) * 10.0;
         let body = w.spawn_enemy(EnemyKind::Brute, cross, 400.0);
         // Fire by hand so the inner darts never fly: only the tines and the
         // string can touch the body in this harness.
