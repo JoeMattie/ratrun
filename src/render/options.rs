@@ -85,8 +85,8 @@ pub const ROWS: [Row; ROW_COUNT] = [
     Row::Controls,
     Row::Deadzone,
     Row::Rumble,
-    Row::Back,
     Row::Reset,
+    Row::Back,
 ];
 
 impl Row {

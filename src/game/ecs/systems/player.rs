@@ -56,7 +56,7 @@ use bevy_ecs::prelude::*;
 use crate::audio::Sfx;
 use crate::game::collision::SizeClass;
 use crate::game::ecs::constants::{PLAYER_RADIUS, PLAYER_SUBSTEP};
-use crate::game::ecs::resources::{DashTrack, RngRes, SfxQueue, TickInput};
+use crate::game::ecs::resources::{DashTrack, DebugFlags, RngRes, SfxQueue, TickInput};
 use crate::game::level::Level;
 use crate::game::particle::{vfx, Particles};
 use crate::game::player::Player;
@@ -79,6 +79,8 @@ pub fn player_system(
     // w3-weapons-b: the dash owner's record of what the dash actually did, so
     // the Super Dash weapon never has to guess (see the hooks below).
     mut dash_track: ResMut<DashTrack>,
+    // Console `noclip on`: skip tile collision. Default false = normal.
+    debug: Res<DebugFlags>,
 ) {
     let dt = input.dt;
     let move_dir = input.move_dir;
@@ -135,7 +137,8 @@ pub fn player_system(
     } else {
         move_dir.clamp_len(1.0)
     };
-    let target_vel = throttle * stats.move_speed * dash_boost;
+    // Console `speed x` scales the throttle; default 1.0 is a no-op.
+    let target_vel = throttle * stats.move_speed * player.speed_mult.max(0.0) * dash_boost;
     // Copy out `vel` first (the legacy "disjoint borrow" convention) so the
     // arithmetic reads the pre-lerp velocity exactly once.
     let vel = player.vel;
@@ -163,9 +166,11 @@ pub fn player_system(
         // permission — it is the only entity that may push a gate leaf open,
         // every enemy passes `None`.
         let vel = player.vel;
-        player.pos = level
-            .tiles
-            .resolve_circle(player.pos, PLAYER_RADIUS, SizeClass::Small, Some(vel));
+        if !debug.noclip {
+            player.pos = level
+                .tiles
+                .resolve_circle(player.pos, PLAYER_RADIUS, SizeClass::Small, Some(vel));
+        }
         if dashing {
             dash_track.push_leg(leg_from, player.pos);
         }

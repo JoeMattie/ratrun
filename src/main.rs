@@ -10,6 +10,7 @@ mod audio;
 mod config;
 mod controls;
 mod gamepad;
+mod console;
 mod input;
 mod lore;
 mod meta;

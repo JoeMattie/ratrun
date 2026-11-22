@@ -67,6 +67,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use bevy_ecs::prelude::*;
+use bevy_ecs::system::SystemParam;
 use rand::rngs::StdRng;
 use rand::RngExt;
 
@@ -74,7 +75,8 @@ use crate::game::collision::{SizeClass, TileMap};
 use crate::game::director::{self, Director};
 use crate::game::ecs::constants::ENEMY_CAP;
 use crate::game::ecs::resources::{
-    BossDue, DifficultyLevel, LevelIndex, NextEnemyId, NextSpawnId, RngRes, RunCounters, TickInput, Viewport,
+    BossDue, Cvars, DebugFlags, DifficultyLevel, LevelIndex, NextEnemyId, NextSpawnId, RngRes,
+    RunCounters, TickInput, Viewport,
 };
 use crate::game::ecs::systems::miniboss::MinibossSchedule;
 use crate::game::enemy::{Enemy, EnemyKind};
@@ -202,6 +204,22 @@ const ROOM_INSET: i32 = 2;
 /// Legacy `World::run_director`, now with the campaign curve, the maze-free
 /// spawn rule, room waves and the two-group flank.
 #[allow(clippy::too_many_arguments)]
+/// Read-only console tunables and switches, bundled so `director_system` stays
+/// within Bevy's 16-parameter `IntoSystem` limit. Neutral defaults: a run that
+/// never opens the console reads the same numbers as before.
+#[derive(SystemParam)]
+pub struct DirectorConsole<'w> {
+    pub cvars: Res<'w, Cvars>,
+    pub debug: Res<'w, DebugFlags>,
+}
+
+/// The two monotonic id counters, bundled for the same reason.
+#[derive(SystemParam)]
+pub struct DirectorIds<'w> {
+    pub next_id: ResMut<'w, NextSpawnId>,
+    pub next_enemy_id: ResMut<'w, NextEnemyId>,
+}
+
 pub fn director_system(
     mut commands: Commands,
     input: Res<TickInput>,
@@ -213,10 +231,11 @@ pub fn director_system(
     difficulty: Res<DifficultyLevel>,
     mut director: ResMut<Director>,
     schedule: Res<MinibossSchedule>,
+    // Console tunables: `set enemy_cap/spawn_rate`, `peace`. Neutral defaults.
+    console: DirectorConsole,
     mut boss_due: ResMut<BossDue>,
     mut rng: ResMut<RngRes>,
-    mut next_id: ResMut<NextSpawnId>,
-    mut next_enemy_id: ResMut<NextEnemyId>,
+    mut ids: DirectorIds,
     enemies: Query<&Enemy>,
     // Per-run scratch, reused across ticks: the per-level reachability cache
     // costs one flood fill per map and must not be recomputed per spawn.
@@ -235,10 +254,17 @@ pub fn director_system(
     // count stays `<= ENEMY_CAP` for the whole level: the boss framework spends
     // the reservation on the boss itself. A living miniboss also has its own
     // reserved slot, separate from the horde's budget.
-    let cap = (if director.boss_spawned {
+    // The console's `set enemy_cap N` overrides the built-in cap; 0 means the
+    // compiled-in value. A zero cap would stall the horde, so clamp it to 1.
+    let base_cap = if console.cvars.enemy_cap == 0 {
         ENEMY_CAP
     } else {
-        ENEMY_CAP - 1
+        console.cvars.enemy_cap.max(1)
+    };
+    let cap = (if director.boss_spawned {
+        base_cap
+    } else {
+        base_cap.saturating_sub(1)
     })
     .saturating_sub(schedule.active as usize);
     // Legacy `self.enemies.len()` is the *live* length, which grows with every
@@ -264,13 +290,21 @@ pub fn director_system(
         // its death suppresses fresh spawns for 8 s.
         let boss_phase = director.boss_spawned;
         let grace = schedule.spawn_interval_mult(elapsed);
-        director.spawn_timer = director::horde_interval(elapsed, boss_phase) * grace;
+        // `set spawn_rate N` scales the interval (higher = faster spawns).
+        // A zero/negative rate would divide by zero, so clamp to a positive
+        // floor; the default 1.0 leaves the interval untouched.
+        let rate = if console.cvars.spawn_rate > 0.0 {
+            console.cvars.spawn_rate
+        } else {
+            0.01
+        };
+        director.spawn_timer = director::horde_interval(elapsed, boss_phase) * grace / rate;
         let count = director::horde_pulse(elapsed, boss_phase);
         let budget = director::horde_live_budget(elapsed, boss_phase);
         let live = enemies.iter().count();
-        if schedule.suppress(elapsed) {
-            // Quiet after the death: hold every fresh spawn, but keep the
-            // boss hand-off alive.
+        if schedule.suppress(elapsed) || console.debug.peace {
+            // Quiet after the death, or `peace on`: hold every fresh spawn,
+            // but keep the boss hand-off alive.
             director::raise_boss_due(&mut director, &mut boss_due, elapsed, level_index.0);
             return;
         }
@@ -409,8 +443,8 @@ pub fn director_system(
             // enemy from the monotonic `next_enemy_id` counter (0 is reserved
             // for "anonymous enemy" in `DamageNumbers`). `SpawnId` and the
             // enemy id are two independent orderings; never share them.
-            enemy.id = next_enemy_id.take();
-            commands.spawn((enemy, next_id.take()));
+            enemy.id = ids.next_enemy_id.take();
+            commands.spawn((enemy, ids.next_id.take()));
             queued += 1;
         }
     }
@@ -439,11 +473,11 @@ pub fn director_system(
                 let mult = director::horde_hp_mult_for(difficulty.0, elapsed) * 1.6;
                 let mut enemy =
                     Enemy::spawn_with_mods(EnemyKind::Brute, pos, mult, mods, &mut rng.0);
-                enemy.id = next_enemy_id.take();
+                enemy.id = ids.next_enemy_id.take();
                 // Director elites are flagged so the art and death VFX can tell
                 // them apart from late-game Brutes with overlapping scaled HP.
                 enemy.elite = true;
-                commands.spawn((enemy, next_id.take()));
+                commands.spawn((enemy, ids.next_id.take()));
             }
         }
     }

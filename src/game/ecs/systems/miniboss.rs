@@ -147,6 +147,19 @@ impl MinibossKind {
         }
     }
 
+    /// Every named miniboss, in enum order. The console's `miniboss` command
+    /// and its Tab completion read this table rather than a retyped list.
+    pub fn all() -> [MinibossKind; 6] {
+        [
+            MinibossKind::Corkscrew,
+            MinibossKind::SisterSnip,
+            MinibossKind::Bobbin,
+            MinibossKind::BellDiver,
+            MinibossKind::Foreman,
+            MinibossKind::MilkCarton,
+        ]
+    }
+
     /// Seconds the active window lasts.
     pub fn active_duration(self) -> f32 {
         match self {

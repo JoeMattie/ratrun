@@ -88,7 +88,7 @@ use crate::game::collision::{SizeClass, SpatialGrid};
 use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::constants::GRID_CELL;
 use crate::game::ecs::resources::{
-    EnemyIndex, GridScratch, NeighborScratch, NextSpawnId, RunCounters, TickInput,
+    DebugFlags, EnemyIndex, GridScratch, NeighborScratch, NextSpawnId, RunCounters, TickInput,
 };
 #[cfg(debug_assertions)]
 use crate::game::ecs::resources::debug_assert_enemy_index;
@@ -153,8 +153,21 @@ pub fn enemy_steering_system(
     // A named miniboss owns its own position during a signature (tell and
     // active window): see `miniboss::Miniboss::holds`.
     minibosses: Query<&crate::game::ecs::systems::miniboss::Miniboss>,
+    // Console `freeze on`: the horde holds still. Default false = normal.
+    debug: Res<DebugFlags>,
 ) {
     let dt = input.dt;
+    if debug.freeze {
+        // Freeze: bodies keep their positions and their timers tick down so
+        // the horde resumes exactly where it left off when unfrozen.
+        for (_, _, mut e) in enemies.iter_mut() {
+            e.contact_cd = (e.contact_cd - dt).max(0.0);
+            if e.flash > 0.0 {
+                e.flash -= dt;
+            }
+        }
+        return;
+    }
     let ppos = player.pos;
     // The horde's own speed ramp: ×1.0 → ×1.75 over the first five minutes,
     // then frozen at that ceiling to the boss (see

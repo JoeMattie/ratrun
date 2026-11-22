@@ -125,7 +125,8 @@ use crate::game::director;
 use crate::game::ecs::components::{Pool, SpawnId};
 use crate::game::ecs::constants::PLAYER_RADIUS;
 use crate::game::ecs::resources::{
-    BossDue, DifficultyLevel, NextEnemyId, NextSpawnId, RunCounters, Shake, SfxQueue, TickInput,
+    BossDue, BossOverride, DifficultyLevel, NextEnemyId, NextSpawnId, RunCounters, Shake, SfxQueue,
+    TickInput,
 };
 use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::level::{Level, Rectf, Theme, TileRect};
@@ -622,6 +623,31 @@ impl BossKind {
             BossKind::Magpie => &magpie::MagpieController,
             BossKind::HorseshoeCrab => &horseshoe_crab::HorseshoeCrabController,
             BossKind::MegaRat => &megarat::MegaRatController,
+        }
+    }
+
+    /// Every boss, in enum order. The console's `boss` command and its Tab
+    /// completion read this table rather than a retyped list.
+    pub fn all() -> [BossKind; 6] {
+        [
+            BossKind::Cat,
+            BossKind::Broom,
+            BossKind::Mower,
+            BossKind::Mangle,
+            BossKind::NightEdition,
+            BossKind::Magpie,
+        ]
+    }
+
+    /// Lowercase display name used by the console and diagnostics.
+    pub fn name(self) -> &'static str {
+        match self {
+            BossKind::Cat => "cat",
+            BossKind::Broom => "broom",
+            BossKind::Mower => "mower",
+            BossKind::Mangle => "mangle",
+            BossKind::NightEdition => "nightedition",
+            BossKind::Magpie => "magpie",
         }
     }
 }
@@ -2932,6 +2958,8 @@ pub fn boss_spawn_system(
     mut fight: ResMut<BossFight>,
     mut next_enemy_id: ResMut<NextEnemyId>,
     mut next_spawn_id: ResMut<NextSpawnId>,
+    // Console `boss <kind>`: one-shot override of the floor's boss.
+    mut override_kind: ResMut<BossOverride>,
     level: Res<Level>,
     difficulty: Res<DifficultyLevel>,
     player: Res<Player>,
@@ -2949,7 +2977,12 @@ pub fn boss_spawn_system(
     // name a floor's boss.
     // The floor's pool, chosen by the level seed: a floor with more than one
     // possible boss draws without spending rng (see [`BossKind::pool_pick`]).
-    let kind = BossKind::pool_pick(level.theme, level.seed);
+    // The console's `boss <kind>` override takes priority for one spawn, then
+    // clears.
+    let kind = override_kind
+        .0
+        .take()
+        .unwrap_or_else(|| BossKind::pool_pick(level.theme, level.seed));
     let arena = level
         .boss_room()
         .map(|r| r.rect)

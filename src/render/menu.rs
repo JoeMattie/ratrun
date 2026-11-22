@@ -1597,6 +1597,8 @@ pub struct RunSummary {
     /// purse, the floor/apex bonuses and the clear put in the bank, and the new
     /// total. `None` on a report drawn outside a finished run (the tests).
     pub nest: Option<crate::meta::BankTally>,
+    /// The run used the admin console (no score or record was saved).
+    pub console_used: bool,
 }
 
 /// `SECTOR 2/3`, plus a `PRACTICE` marker for single-sector runs.
@@ -2317,6 +2319,13 @@ pub fn draw_end_summary(
             heavy(PLATE).bg(TRAIL_GOLD),
         ));
     }
+    if summary.console_used {
+        header_spans.push(Span::raw("  "));
+        header_spans.push(Span::styled(
+            " CONSOLE USED ",
+            heavy(PLATE).bg(Color::Rgb(255, 120, 120)),
+        ));
+    }
     header_spans.push(Span::styled(format!("   GOLD {}", summary.gold), heavy(TRAIL_GOLD)));
     center(f, r, y_stamp, Line::from(header_spans));
 
@@ -2681,6 +2690,7 @@ mod tests {
                 banked: 378,
                 total: 900,
             }),
+            console_used: false,
         };
         let mut scores = ScoreTable::default();
         scores.insert(ScoreEntry {

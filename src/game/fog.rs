@@ -378,6 +378,27 @@ impl Fog {
         fresh
     }
 
+    /// Console `reveal`: mark every cell explored so the whole map shows.
+    /// One pass over the bitset, no flood fill. Returns the cells newly seen.
+    pub fn reveal_all(&mut self, _level: &Level) -> u32 {
+        let total = (self.cols * self.rows) as usize;
+        let words = total.div_ceil(64);
+        let mut fresh = 0usize;
+        for w in 0..words {
+            let remaining = total.saturating_sub(w * 64);
+            let full = if remaining >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << remaining) - 1
+            };
+            let new = full & !self.seen[w];
+            fresh += new.count_ones() as usize;
+            self.seen[w] |= full;
+        }
+        self.seen_count += fresh;
+        fresh as u32
+    }
+
     /// Size the per-maze flags to the level (once per level: no per-tick
     /// allocation).
     fn sync_mazes(&mut self, mazes: usize) {
