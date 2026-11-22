@@ -200,7 +200,7 @@ impl Style {
             bass_lp: 700.0,
             lead_duty: 0.32,
             lead_lp: 2800.0,
-            pad_detune: 0.12,
+            pad_detune: 0.004,
             pad_lp: 1600.0,
             arp_lp: 3000.0,
             stab_duty: 0.40,

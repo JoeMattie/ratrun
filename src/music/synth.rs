@@ -1390,13 +1390,19 @@ mod tests {
 
     #[test]
     fn sewer_and_kitchen_have_v2_brightness_and_clear_pad_detune() {
+        // The pad's second oscillator runs at `1 + pad_detune` times the note:
+        // 0.06 is a semitone sharp. Every floor's pad is a chorus (under ten
+        // cents), and so is the default a new song inherits.
+        for theme in Theme::playable() {
+            let detune = song_for(theme).style.pad_detune;
+            assert!(
+                (0.0..=0.006).contains(&detune),
+                "{theme:?}: pad_detune {detune} is out of tune (a ratio: keep it under 0.006)"
+            );
+        }
+        assert!(crate::music::Style::base().pad_detune <= 0.006, "the default pad is out of tune");
         for theme in [Theme::Sewer, Theme::Kitchen] {
             let song = song_for(theme);
-            assert!(
-                song.style.pad_detune < 0.02,
-                "{theme:?}: pad_detune {} is out of tune (should be < 0.02)",
-                song.style.pad_detune
-            );
             assert!(song.style.enhanced_drums, "{theme:?}: expected v2 voice mode");
             for role in Role::ALL {
                 assert!(

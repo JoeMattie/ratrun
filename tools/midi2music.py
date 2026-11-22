@@ -69,41 +69,49 @@ SONGS = [
 # where the lead sits in the spectrum, how dark the bass is, how wide the pad
 # is detuned, how the bus is driven. Written per song on purpose -- the six
 # floors are meant to be recognisable from each other.
+#
+# `pad_detune` is a frequency ratio, not cents: keep it under ~0.006 (10 cents).
+# The first tables shipped 0.07-0.20, which put the pad's second oscillator one
+# to three semitones sharp of the chord it was playing.
+#
+# Songs 1 and 2 (Sewer, Kitchen) are no longer generated: `src/music/sewer.rs`
+# and `kitchen.rs` are arranged by hand from the audio stems. Do not run this
+# tool with `--only 1` / `--only 2` (or without `--only`) into `src/music`.
 STYLES = {
     # Sewer: dark and muffled, everything filtered down under the drip.
     "1": dict(
         drive=1.16, master=1.0, bass_tri=0.62, bass_lp=520.0, lead_duty=0.30,
-        lead_lp=1900.0, pad_detune=0.13, pad_lp=1200.0, arp_lp=2600.0,
+        lead_lp=1900.0, pad_detune=0.0045, pad_lp=1200.0, arp_lp=2600.0,
         stab_duty=0.38, stab_lp=1500.0, kick_hz=48.0,
     ),
     # Kitchen: bright and plucky, the dash floor.
     "2": dict(
         drive=1.24, master=1.0, bass_tri=0.45, bass_lp=900.0, lead_duty=0.34,
-        lead_lp=3400.0, pad_detune=0.10, pad_lp=2100.0, arp_lp=4200.0,
+        lead_lp=3400.0, pad_detune=0.0035, pad_lp=2100.0, arp_lp=4200.0,
         stab_duty=0.42, stab_lp=2400.0, kick_hz=58.0,
     ),
     # Laundry: the strings waltz. Soft, slow pad, no bite on the lead.
     "3": dict(
         drive=1.08, master=1.0, bass_tri=0.75, bass_lp=680.0, lead_duty=0.44,
-        lead_lp=2400.0, pad_detune=0.16, pad_lp=2000.0, arp_lp=2800.0,
+        lead_lp=2400.0, pad_detune=0.004, pad_lp=2000.0, arp_lp=2800.0,
         stab_duty=0.40, stab_lp=1700.0, kick_hz=52.0,
     ),
     # Lab: the press. Square lead, hard arp, the tightest bus.
     "4": dict(
         drive=1.32, master=1.0, bass_tri=0.40, bass_lp=780.0, lead_duty=0.50,
-        lead_lp=2900.0, pad_detune=0.08, pad_lp=1600.0, arp_lp=2400.0,
+        lead_lp=2900.0, pad_detune=0.004, pad_lp=1600.0, arp_lp=2400.0,
         stab_duty=0.50, stab_lp=2100.0, kick_hz=62.0,
     ),
     # Printworks: brassy and wide, the three-note warning.
     "5": dict(
         drive=1.20, master=1.0, bass_tri=0.50, bass_lp=640.0, lead_duty=0.36,
-        lead_lp=2700.0, pad_detune=0.20, pad_lp=1500.0, arp_lp=3400.0,
+        lead_lp=2700.0, pad_detune=0.004, pad_lp=1500.0, arp_lp=3400.0,
         stab_duty=0.44, stab_lp=2000.0, kick_hz=44.0,
     ),
     # Flatbed: driving, wide pad, the ride home.
     "6": dict(
         drive=1.28, master=1.0, bass_tri=0.52, bass_lp=860.0, lead_duty=0.32,
-        lead_lp=4000.0, pad_detune=0.07, pad_lp=1900.0, arp_lp=3800.0,
+        lead_lp=4000.0, pad_detune=0.004, pad_lp=1900.0, arp_lp=3800.0,
         stab_duty=0.36, stab_lp=2200.0, kick_hz=60.0,
     ),
 }
@@ -1124,6 +1132,13 @@ def emit_rust(song, out_dir):
     lines.append(f"    mix: [{gains}],")
     for key in STYLE_KEYS:
         if key == "master":
+            continue
+        if key == "pad_detune":
+            # A frequency *ratio* offset on the pad's second oscillator
+            # (`dt2 = dt * (1 + pad_detune)`): 0.004 is ~7 cents, a gentle
+            # chorus. 0.06 is already a semitone sharp, so two decimals are
+            # not enough to print it.
+            lines.append(f"    {key}: {style[key]:.4f},")
             continue
         lines.append(f"    {key}: {style[key]:.2f},")
     lines.append("    ..Style::base()")

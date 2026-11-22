@@ -90,7 +90,7 @@ pub static STYLE: Style = Style {
     bass_lp: 640.00,
     lead_duty: 0.36,
     lead_lp: 2700.00,
-    pad_detune: 0.20,
+    pad_detune: 0.0040,
     pad_lp: 1500.00,
     arp_lp: 3400.00,
     stab_duty: 0.44,
