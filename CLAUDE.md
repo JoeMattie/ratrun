@@ -103,3 +103,7 @@ Sprites live in `game/art_floor.rs` (floor + arena border), `art_props.rs` (them
 Four layers, all runnable without audio/TTY: pure-logic unit tests (math, collision, director, loadout, scores, audio synth, damage numbers); **per-system narrow tests** in each `systems/*.rs`, driving one system through `begin_tick` → `ecs.run_system_cached(…)` → `end_tick` and asserting on facade caches; the **ported suite** in `game/ecs/tests.rs` (thousands of headless ticks across themes/viewports, plus spawn/wall/cap/nuke/tie-order regressions); and **`TestBackend` end-to-end** tests (`app.rs`, `render/*`) driving the full App + render stack with simulated keystrokes. Construct `App::new(false, None)` / `World::new(theme, seed)` to stay silent and deterministic. `ecs/harness.rs` is the determinism regression: six scripted seeded games (both scripts, all three themes) whose full state trace is hashed against goldens generated from the pre-port reference, so any change in numbers, rng draws or ordering fails `cargo test`.
 
 The default profile is `[profile.dev] opt-level = 1`, so `cargo test` (no `--release`) is fast enough for the full-run tests.
+
+## Spinning up workers
+
+When spinning up workers, use `/orchestration` to split the work across parallel child agents. They must show up under the **same workspace in Orca** as the coordinator, so the owner can tab-tile them in one window.
