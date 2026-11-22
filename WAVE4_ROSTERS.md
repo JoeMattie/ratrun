@@ -118,7 +118,7 @@ Road-yellow, bare aluminium and white ties over dark oak. Gravel clicks on the d
 
 ## Named appointments and elites
 
-All 24 minibosses have exactly one home. Fixed order gives every player the same four lessons in increasing complexity, including a repeatable 12:00 rehearsal for the boss. One signature per kind. For **every** row lock aim and outline the full footprint for 1 s, strike as specified, expose the body for at least 1 s, leave 4 s between the strike ending and the next tell. Draw 16–40 px along the longest axis, collision radius 6.5–7.5. Use slot HP 800/1600/2500/3400, contact 8 and signature damage 14/16/18/20. Each signature hits once per rat. Existing encounter rewards, retreat, arena checks and chest rules apply.
+All 24 minibosses have exactly one home. Fixed order gives every player the same four lessons in increasing complexity, including a repeatable 12:00 rehearsal for the boss. One signature per kind. For **every** row lock aim and outline the full footprint for 1 s, strike as specified, expose the body for at least 1 s, leave 2.6 s between the strike ending and the next tell. (Batch seven: the outline **tracks** the body and leads the rat for the first 0.5 s of the tell, then locks; the body is planted from the lock to the end of its exposed second.) Draw 16–40 px along the longest axis, collision radius 6.5–7.5. Use slot HP 3800/8000/10000/12000, contact 7.5 and signature damage 18/22/26/30 (batch seven, measured: 23 / 30 / 40 / 48 s fights for the Skilled bot). Each signature hits once per rat. Existing encounter rewards, retreat, arena checks and chest rules apply.
 
 Shape dimensions are length × full width unless noted. Stamp patterns mark every centre during the tell and pulse in listed order. Ring gaps stay fixed, a quarter turn off locked aim. **Data** means an existing signature evaluator with different dimensions, centres or angles and new art. **New** means new collision and matching tell geometry. Existing rows retain their own evaluator.
 
@@ -149,7 +149,7 @@ Shape dimensions are length × full width unless noted. Stamp patterns mark ever
 | Flatbed 9:00 | Chain Dog · data, Bobbin | 28 px chain loop dragging a triangular binder | Chain 36×6 swings 115° in 0.9. Slip behind the latch instead of retreating toward a pit. | Stays where it's tied. Mostly. |
 | Flatbed 12:00 | The Road Atlas · data, Foreman | 34 px gull with a road map folded over its wings | Three 14×14 talon marks in a V, tip at locked rat, others 16 forward and ±14 sideways, land left/tip/right for 0.3 each. Cross a spent print, facing the next. Teaches the magpie and hawk landing marks. | Every exit has a bird on it. |
 
-Elite uses the local H body with its original gait, a thick double shoulder stripe, and a distinct attachment visible from either side. Sewer toad wears a split valve collar, Kitchen weight a doubled pie rim, Lab cart an open crown of safety latches, Laundry golem two brass coat buttons, Printworks reel a pair of metal flanges, Flatbed Brute its existing plated crest. Keep the elite flag, ×1.6 spawn HP, triple base XP and guaranteed 5 gold. Its damage, reach and speed stay readable from the base body. Cap three elites, hold due elites within 20 s either side of every appointment.
+Elite uses the local H body with its original gait, a thick double shoulder stripe, and a distinct attachment visible from either side. Sewer toad wears a split valve collar, Kitchen weight a doubled pie rim, Lab cart an open crown of safety latches, Laundry golem two brass coat buttons, Printworks reel a pair of metal flanges, Flatbed Brute its existing plated crest. Keep the elite flag, ×1.6 spawn HP, triple base XP and guaranteed 2 gold. Its damage, reach and speed stay readable from the base body. Cap three elites, hold due elites within 20 s either side of every appointment.
 
 ## Director and campaign
 
@@ -160,9 +160,9 @@ Look up the eight rows by **theme** (Flatbed is `Theme::Trailer`). Use campaign 
 | 0–1 | 0.8→1.5 | 18 | 100% | 0 | 0 |
 | 1–3 | 1.5→3 | 42 | 70% | 0 until 2:00, then 8% | 0 |
 | 3–6 | 3→5 | 72 | 60% | 12% | 0→1% |
-| 6–9 | 5→7 | 105 | 55% | 16% | 1→2% |
-| 9–12 | 7→9 | 135 | 55% | 20% | 2→3% |
-| 12–15 | 9→11 | 165 | 55% | 20% | 3→4% |
+| 6–9 | 5→7 | 115 | 55% | 16% | 1→2% |
+| 9–12 | 7→9 | 150 | 55% | 20% | 2→3% |
+| 12–15 | 9→11 | 185 | 55% | 20% | 3→4% |
 | 15+ | 1 | 35 | 100% | 0 | 0 |
 
 Within fodder use weights A:B = 3:1. Remaining probability goes to C:R:H at 2:1:1. Special weights I:II:III = 1:1:1. In each pool normalize among unlocked members, then return each capped member's mass to fodder. Empty pools also return their mass to fodder. Count queued bodies toward all caps. Caps by slot are A/B/C up to live budget, R 4, H 8 ordinary, I 5, II 4, III 3. Big Snake caps at 2. Count a squad, segment chain or swarm as one body with one payout. At most two nearby ordinary warned attacks may start within 64 px. Cosmetic tells cannot hide an active hazard. Reject a ground signature that blocks every walkable exit, counts pit as safe floor, or begins offscreen without a visible target-side tell.
