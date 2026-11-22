@@ -1472,8 +1472,8 @@ impl World {
         enemy.hp = appointment_hp(appointment);
         enemy.max_hp = enemy.hp;
         enemy.radius = kind.body_radius();
-        enemy.damage = 8.0;
-        enemy.speed_scale = 2.4;
+        enemy.damage = crate::game::ecs::systems::miniboss::MINIBOSS_CONTACT_DAMAGE;
+        enemy.speed_scale = crate::game::ecs::systems::miniboss::MINIBOSS_SPEED_SCALE;
         enemy.named = true;
         enemy.id = self.next_enemy_id;
         self.next_enemy_id = self.next_enemy_id.wrapping_add(1).max(1);

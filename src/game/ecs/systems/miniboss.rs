@@ -12,12 +12,16 @@
 //! contract stays one ordered chain.
 //!
 //! Timings: `TELL_TIME` 1 s → active window (per kind) → `RECOVER_TIME` 1 s
-//! exposed → cooldown so the next tell is 4 s after the last signature ended.
-//! The body walks to within its own reach first
-//! ([`MinibossKind::engage_range`]), aim is locked at the tell's first tick,
-//! the whole footprint is outlined for the full second (a swinging cord tells
+//! exposed → cooldown so the next tell is [`SIGNATURE_GAP`] (2.6 s) after the
+//! last signature ended. The body walks to within its own reach first
+//! ([`MinibossKind::engage_range`]). The tell **tracks, then locks**: until
+//! [`TELL_LOCK`] the body keeps walking and the outline follows it, aimed at
+//! where the rat is heading; from the lock on the aim is frozen and the body
+//! is planted until its exposed second is over ([`Miniboss::holds`]). The
+//! whole footprint is outlined for the full second (a swinging cord tells
 //! as the whole sector it sweeps), and one strike bites the rat once
-//! (`hit_this_strike`). Slot HP is [`appointment_hp`]: 800 / 1600 / 2500 / 3400.
+//! (`hit_this_strike`). Slot HP is [`appointment_hp`]: 3800 / 8000 / 10000 /
+//! 12000.
 //! A signature whose shape leaves no walkable escape is re-aimed (up to 8
 //! tries) and skipped if still trapped.
 //!
@@ -84,10 +88,35 @@ use crate::math::Vec2;
 
 /// Seconds between the appointment and the first signature.
 pub const TELL_TIME: f32 = 1.0;
+/// How long into the tell the signature still **tracks**: until then the body
+/// keeps walking and the outline follows it, aimed where the rat is heading;
+/// from here to the strike everything is frozen and the body is planted.
+///
+/// A tell that locked on its first frame never had to be answered: the body
+/// stood still for the whole second while a rat at walking pace covered 58 px,
+/// further than any body-anchored shape reaches, so a rat that simply kept
+/// moving was missed every time (about 2,800 signatures to 28 hits in the
+/// batch that found it, nearly all of them rings). The warning is still the
+/// full [`TELL_TIME`]; the last half of it is the committed, readable part.
+pub const TELL_LOCK: f32 = 0.5;
+/// The fastest rat the tracking aim leads (px/s): a walk with a few speed
+/// stacks. A dash is not led, so it always clears the shape.
+pub const TELL_LEAD_SPEED_MAX: f32 = 72.0;
 /// Seconds the rat has to punish a signature.
 pub const RECOVER_TIME: f32 = 1.0;
 /// Seconds between one signature ending and the next tell starting.
-pub const SIGNATURE_GAP: f32 = 4.0;
+pub const SIGNATURE_GAP: f32 = 2.6;
+/// A named body's walk, as a multiple of the Brute it is built on (16 px/s):
+/// 48 px/s, under the rat's base 58 so it can always be outrun, but close
+/// enough that a rat which stops to fight is in its reach again within a
+/// second or two. At the old 2.4 (38 px/s) a kiting rat was rarely caught, so
+/// most of an appointment passed with no signature at all.
+pub const MINIBOSS_SPEED_SCALE: f32 = 3.0;
+/// A named body's contact damage. The signature is the threat; the body is
+/// what makes standing on it a bad idea. (At 8, with the faster walk, the body
+/// alone was a fifth of all damage taken in a batch and the signatures under
+/// one percent.)
+pub const MINIBOSS_CONTACT_DAMAGE: f32 = 7.5;
 /// Seconds of half-rate ordinary spawning after a miniboss arrives.
 pub const SPAWN_GRACE_HALF: f32 = 20.0;
 /// Seconds with no fresh ordinary spawns after a miniboss dies.
@@ -1121,7 +1150,14 @@ impl Miniboss {
     /// which lets the miniboss be *slowed* — an elite-grade body — instead of
     /// stunned, so no crowd control is cancelled by the appointment.)
     pub fn holds(&self) -> bool {
-        matches!(self.state, MinibossState::Tell | MinibossState::Active)
+        match self.state {
+            // The strike, and the exposed second after it: the punish window
+            // is a planted body, not one that is already chasing again.
+            MinibossState::Active | MinibossState::Recover => true,
+            // Planted once the aim has locked; until then it is still closing.
+            MinibossState::Tell => self.timer >= TELL_LOCK,
+            _ => false,
+        }
     }
 
     /// The telegraph outline currently drawn, if any.
@@ -1149,31 +1185,35 @@ impl Miniboss {
     }
 }
 
-/// HP by appointment (3:00 / 6:00 / 9:00 / 12:00): 800 / 1600 / 2500 / 3400.
+/// HP by appointment (3:00 / 6:00 / 9:00 / 12:00): 3800 / 8000 / 10000 /
+/// 12000.
 ///
-/// `WAVE4_ROSTERS.md` still prints the wave-3 ladder (160 / 320 / 540 / 780);
-/// bot runs killed those bodies in 2–6 s, before a second signature, so batch
-/// six raised the ladder about fivefold. Every reader (the spawn, the console
+/// The wave-3 ladder (160 / 320 / 540 / 780) died in 2–6 s, and batch six's
+/// (800 / 1600 / 2500 / 3400) in 5 / 7 / 10 / 14 s for the Skilled bot: one
+/// signature at most. Batch seven sized it for a 20–45 s fight by slot
+/// (measured 23 / 30 / 40 / 48 s over 96 campaigns). Every reader (the spawn, the console
 /// and test spawn in `World::spawn_miniboss`, the Library's HIT POINTS fact)
 /// goes through this function.
 #[inline]
 pub fn appointment_hp(appointment: usize) -> f32 {
     match appointment {
-        0 => 800.0,
-        1 => 1600.0,
-        2 => 2500.0,
-        _ => 3400.0,
+        0 => 3800.0,
+        1 => 8000.0,
+        2 => 10000.0,
+        _ => 12000.0,
     }
 }
 
-/// Signature damage by appointment (§8): 14 / 16 / 18 / 20.
+/// Signature damage by appointment: 18 / 22 / 26 / 30 (the design's §8 row
+/// was 14 / 16 / 18 / 20; batch seven raised it so the signature, not the
+/// body, is what a named fight punishes).
 #[inline]
 pub fn appointment_signature_damage(appointment: usize) -> f32 {
     match appointment {
-        0 => 14.0,
-        1 => 16.0,
-        2 => 18.0,
-        _ => 20.0,
+        0 => 18.0,
+        1 => 22.0,
+        2 => 26.0,
+        _ => 30.0,
     }
 }
 
@@ -1259,9 +1299,9 @@ fn spawn_miniboss(
     e.hp = appointment_hp(appointment);
     e.max_hp = e.hp;
     e.radius = kind.body_radius();
-    e.damage = 8.0;
+    e.damage = MINIBOSS_CONTACT_DAMAGE;
     // Faster than an ordinary brute so the approach reads as a named arrival.
-    e.speed_scale = 2.4;
+    e.speed_scale = MINIBOSS_SPEED_SCALE;
     e.elite = false;
     e.named = true;
     e.id = next_enemy_id.take();
@@ -1291,6 +1331,7 @@ pub fn miniboss_system(
     let dt = input.dt;
     let elapsed = counters.elapsed;
     let ppos = player.pos;
+    let pvel = player.vel;
 
     // 1. Tick the living minibosses.
     let mut alive = 0u32;
@@ -1331,6 +1372,7 @@ pub fn miniboss_system(
                         &mut mb,
                         &mut e,
                         ppos,
+                        pvel,
                         &level,
                         &mut sfx,
                         &mut particles,
@@ -1343,7 +1385,14 @@ pub fn miniboss_system(
                 // not by a stun: a miniboss is an elite-grade body and takes
                 // **slows**, so a Sonic Squeak ring must slow it exactly like
                 // it slows an elite instead of being cancelled here.
-                e.vel = Vec2::ZERO;
+                if mb.timer < TELL_LOCK {
+                    // Still tracking: the body walks on (`holds` is false) and
+                    // the outline follows it. A re-aim that would leave the
+                    // rat no walkable way out keeps the last good lock.
+                    let _ = aim_signature(&mut mb, e.pos, ppos, pvel, &level);
+                } else {
+                    e.vel = Vec2::ZERO;
+                }
                 if mb.timer >= TELL_TIME {
                     mb.state = MinibossState::Active;
                     mb.timer = 0.0;
@@ -1448,17 +1497,24 @@ pub fn miniboss_system(
     }
 }
 
-/// Enter the tell: lock the aim, stamp centres and telegraph, and cue the tell.
-fn begin_tell(
-    mb: &mut Miniboss,
-    e: &mut Enemy,
-    ppos: Vec2,
-    level: &Level,
-    sfx: &mut SfxQueue,
-    particles: &mut Particles,
-    rng: &mut StdRng,
-) {
-    let aim = (ppos - e.pos).normalized();
+/// Aim the signature from a body at `body` at a rat at `ppos` moving at
+/// `pvel`: the origin, the aim, the rat lock and the stamp centres.
+///
+/// The aim **leads** the rat by the frozen part of the tell
+/// ([`TELL_TIME`] − [`TELL_LOCK`]), so a rat that keeps its heading walks into
+/// the strike and a rat that turns at the lock walks out of it. Returns
+/// `false`, leaving `mb` untouched, when no turn of the aim leaves the rat a
+/// walkable way out.
+fn aim_signature(mb: &mut Miniboss, body: Vec2, ppos: Vec2, pvel: Vec2, level: &Level) -> bool {
+    let speed = pvel.len();
+    let led = if speed > TELL_LEAD_SPEED_MAX {
+        // A dash (or a shove): not a heading the rat will keep.
+        Vec2::ZERO
+    } else {
+        pvel * (TELL_TIME - TELL_LOCK)
+    };
+    let at = ppos + led;
+    let aim = (at - body).normalized();
     let aim = if aim.len_sq() < 0.5 {
         Vec2::new(1.0, 0.0)
     } else {
@@ -1472,14 +1528,15 @@ fn begin_tell(
         SignatureShape::Lane {
             seam_half, half, ..
         } => {
-            let d = ppos.dist(e.pos).max(1.0);
+            let d = at.dist(body).max(1.0);
             aim.rotate(((seam_half + half) / d).clamp(0.0, 0.7).asin())
         }
         _ => aim,
     };
-    mb.origin = e.pos;
+    let before = (mb.origin, mb.aim, mb.target, mb.stamp_centers);
+    mb.origin = body;
     mb.aim = aim;
-    mb.target = ppos;
+    mb.target = at;
     lock_stamps(mb);
     // Reposition when the signature leaves no walkable escape: try rotating
     // the aim until a sample direction is clear.
@@ -1490,6 +1547,25 @@ fn begin_tell(
         tries += 1;
     }
     if tries >= 8 {
+        (mb.origin, mb.aim, mb.target, mb.stamp_centers) = before;
+        return false;
+    }
+    true
+}
+
+/// Enter the tell: aim the signature and cue it. The aim keeps tracking until
+/// [`TELL_LOCK`] (see `miniboss_system`).
+fn begin_tell(
+    mb: &mut Miniboss,
+    e: &mut Enemy,
+    ppos: Vec2,
+    pvel: Vec2,
+    level: &Level,
+    sfx: &mut SfxQueue,
+    particles: &mut Particles,
+    rng: &mut StdRng,
+) {
+    if !aim_signature(mb, e.pos, ppos, pvel, level) {
         // Still trapped: skip this signature and go straight to cooldown.
         mb.state = MinibossState::Cooldown;
         mb.timer = 0.0;
@@ -1743,11 +1819,18 @@ mod tests {
     fn a_signature_holds_the_body_without_stunning_it() {
         use crate::game::ecs::systems::miniboss::MinibossState;
         let mut m = Miniboss::new(MinibossKind::Corkscrew, 0);
+        // The tell tracks first (the body is still closing), then plants.
         m.state = MinibossState::Tell;
+        m.timer = 0.0;
+        assert!(!m.holds());
+        m.timer = TELL_LOCK;
         assert!(m.holds());
         m.state = MinibossState::Active;
         assert!(m.holds());
+        // The exposed second after the strike is a planted body too.
         m.state = MinibossState::Recover;
+        assert!(m.holds());
+        m.state = MinibossState::Cooldown;
         assert!(!m.holds());
         m.state = MinibossState::Approach;
         assert!(!m.holds());
@@ -1984,12 +2067,16 @@ mod tests {
 
     #[test]
     fn appointment_stats_match_the_design() {
-        assert_eq!(appointment_hp(0), 800.0);
-        assert_eq!(appointment_hp(1), 1600.0);
-        assert_eq!(appointment_hp(2), 2500.0);
-        assert_eq!(appointment_hp(3), 3400.0);
-        assert_eq!(appointment_signature_damage(0), 14.0);
-        assert_eq!(appointment_signature_damage(3), 20.0);
+        // Batch seven's ladder: sized for 20-45 s fights by slot (measured
+        // with the Skilled bot: 23 / 30 / 40 / 48 s).
+        assert_eq!(appointment_hp(0), 3800.0);
+        assert_eq!(appointment_hp(1), 8000.0);
+        assert_eq!(appointment_hp(2), 10000.0);
+        assert_eq!(appointment_hp(3), 12000.0);
+        assert_eq!(appointment_signature_damage(0), 18.0);
+        assert_eq!(appointment_signature_damage(1), 22.0);
+        assert_eq!(appointment_signature_damage(2), 26.0);
+        assert_eq!(appointment_signature_damage(3), 30.0);
         assert_eq!(appointment_xp(0), 25);
         assert_eq!(appointment_xp(3), 70);
     }
@@ -2806,6 +2893,69 @@ mod tests {
                 (drop - one_hit).abs() < 0.01,
                 "{kind:?}: the strike took {drop} hp, expected exactly one hit of {one_hit}"
             );
+        }
+    }
+
+    /// The tell tracks and leads until [`TELL_LOCK`], then commits: a rat that
+    /// keeps its heading walks into the strike, a rat that turns at the lock
+    /// walks out of it. (With the aim frozen on the first frame, any rat that
+    /// simply kept moving was missed: the batch that found it counted about
+    /// 2,800 signatures and 28 hits.)
+    #[test]
+    fn the_tell_leads_a_walking_rat_and_a_turn_at_the_lock_escapes() {
+        use crate::game::level::Theme;
+        use crate::game::world::World;
+        const DT: f32 = 1.0 / 60.0;
+        let kind = MinibossKind::MilkCarton;
+        let walk = Vec2::new(0.0, 20.0);
+        for turns in [false, true] {
+            let mut w = World::new(Theme::Sewer, 23);
+            w.ecs.resource_mut::<MinibossSchedule>().next = MINIBOSS_TIMES.len();
+            w.player.hp = 1.0e6;
+            w.elapsed = 30.0;
+            let start = w.player.pos;
+            let e = w.spawn_miniboss(kind, 0, start + Vec2::new(20.0, 0.0));
+            let hp = w.player.hp;
+            let mut vel = walk;
+            let mut locked_aim = None;
+            let ticks = (((TELL_TIME + kind.active_duration()) / DT) as usize) + 8;
+            for _ in 0..ticks {
+                let (state, timer, aim) = {
+                    let mb = w.ecs.get::<Miniboss>(e).expect("the miniboss");
+                    (mb.state, mb.timer, mb.aim)
+                };
+                if state == MinibossState::Tell && timer >= TELL_LOCK {
+                    // Frozen from the lock on, whatever the rat does.
+                    let locked = *locked_aim.get_or_insert(aim);
+                    assert!((aim - locked).len() < 1e-6, "the aim moved after the lock");
+                    if turns {
+                        vel = -walk;
+                    }
+                }
+                w.player.vel = vel;
+                w.player.pos += vel * DT;
+                w.player.iframes = 0.0;
+                w.begin_tick(DT, Vec2::ZERO, false);
+                w.ecs
+                    .run_system_cached(miniboss_system)
+                    .expect("miniboss system");
+                w.end_tick();
+            }
+            let locked = locked_aim.expect("the tell reached its lock");
+            // The lock leads the rat: the aim is turned toward where it was
+            // heading, not at where it stood when the tell began.
+            assert!(locked.y > 0.2, "the aim did not lead the walk: {locked:?}");
+            let drop = hp - w.player.hp;
+            if turns {
+                assert_eq!(drop, 0.0, "a rat that turned at the lock was still bitten");
+            } else {
+                let armor = w.player.loadout.stats.armor;
+                let one_hit = (appointment_signature_damage(0) - armor).max(1.0);
+                assert!(
+                    (drop - one_hit).abs() < 0.01,
+                    "a rat that kept walking took {drop}, expected one hit of {one_hit}"
+                );
+            }
         }
     }
 
