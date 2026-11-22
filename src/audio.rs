@@ -8654,7 +8654,6 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
                 filter: FilterMode::BandPass,
                 fc0: 900.0,
                 fc1: 3400.0,
-                fc_pow: 1.2,
                 q: 3.0,
                 ..Default::default()
             });
@@ -8947,9 +8946,9 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
                     start_s: 0.05 + k as f32 * 0.05,
                     dur_s: 0.045,
                     pink: false,
-                    gain: 0.22 - 0.03 * k as f32,
+                    gain: 0.16 - 0.02 * k as f32,
                     attack_s: 0.001,
-                    decay_pow: 2.2,
+                    decay_pow: 1.6,
                     filter: FilterMode::BandPass,
                     fc0: 2600.0 * p,
                     fc1: 1200.0,
@@ -8975,7 +8974,7 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
                     pink: true,
                     gain: 0.20 - 0.02 * k as f32,
                     attack_s: 0.002,
-                    decay_pow: 2.1,
+                    decay_pow: 1.5,
                     filter: FilterMode::BandPass,
                     fc0: (2100.0 + 260.0 * k as f32) * p,
                     fc1: 1300.0,
@@ -8984,6 +8983,22 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
                     ..Default::default()
                 });
             }
+            // The feather bed under the ticks: one soft rustle that carries
+            // the body of the sound, so the six ticks are not bare spikes.
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.27,
+                pink: true,
+                gain: 0.13,
+                attack_s: 0.02,
+                decay_pow: 1.1,
+                filter: FilterMode::BandPass,
+                fc0: 1900.0 * p,
+                fc1: 1200.0,
+                q: 1.0,
+                seed: base_seed ^ 0x6F,
+                ..Default::default()
+            });
             m.add_short_tail(0.09, 4800.0);
             m.finish(0.30, 1.2, 2.0, 26.0)
         }
@@ -9004,7 +9019,6 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
                 filter: FilterMode::BandPass,
                 fc0: 2200.0,
                 fc1: 620.0,
-                fc_pow: 1.2,
                 q: 2.6,
                 ..Default::default()
             });
@@ -9054,11 +9068,11 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             for k in 0..2 {
                 m.add_noise(NoiseLayer {
                     start_s: k as f32 * 0.075,
-                    dur_s: 0.030,
+                    dur_s: 0.045,
                     pink: true,
-                    gain: 0.20 - 0.04 * k as f32,
+                    gain: 0.18 - 0.03 * k as f32,
                     attack_s: 0.002,
-                    decay_pow: 2.2,
+                    decay_pow: 1.4,
                     filter: FilterMode::BandPass,
                     fc0: 2400.0 * p,
                     fc1: 1500.0 * p,
@@ -9071,7 +9085,7 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
                 start_s: 0.0,
                 dur_s: 0.20,
                 pink: true,
-                gain: 0.10,
+                gain: 0.28,
                 attack_s: 0.02,
                 decay_pow: 1.4,
                 filter: FilterMode::BandPass,
@@ -9082,7 +9096,7 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
                 ..Default::default()
             });
             m.add_short_tail(0.05, 3600.0);
-            m.finish(0.22, 1.1, 3.0, 18.0)
+            m.finish(0.26, 1.1, 3.0, 18.0)
         }
 
         // CobraHood: the hood's dry rattle — plates of scale going up, five
@@ -9282,7 +9296,6 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
                 trem_hz: 18.0,
                 trem_depth: 0.35,
                 seed: base_seed,
-                ..Default::default()
             });
             m.add_osc(OscLayer {
                 start_s: 0.0,
@@ -9309,7 +9322,7 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
         Sfx::CobraSpit => {
             const PITCH: [f32; 2] = [1.0, 1.18];
             let p = PITCH[v];
-            let mut m = MixBuf::new(0.40);
+            let mut m = MixBuf::new(0.32);
             m.add_noise(NoiseLayer {
                 start_s: 0.0,
                 dur_s: 0.05,
@@ -9339,9 +9352,9 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             // The spray falling: a wet scatter that keeps hissing.
             m.add_noise(NoiseLayer {
                 start_s: 0.04,
-                dur_s: 0.30,
+                dur_s: 0.26,
                 pink: true,
-                gain: 0.18,
+                gain: 0.28,
                 attack_s: 0.02,
                 decay_pow: 1.3,
                 filter: FilterMode::BandPass,
@@ -9360,12 +9373,12 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
         Sfx::CobraTail => {
             const PITCH: [f32; 2] = [1.0, 0.88];
             let p = PITCH[v];
-            let mut m = MixBuf::new(0.30);
+            let mut m = MixBuf::new(0.24);
             m.add_noise(NoiseLayer {
                 start_s: 0.0,
                 dur_s: 0.12,
                 pink: true,
-                gain: 0.30,
+                gain: 0.38,
                 attack_s: 0.010,
                 decay_pow: 0.8,
                 filter: FilterMode::BandPass,
@@ -9380,9 +9393,9 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
                 start_s: 0.118,
                 dur_s: 0.040,
                 pink: false,
-                gain: 0.62,
+                gain: 0.50,
                 attack_s: 0.0006,
-                decay_pow: 2.8,
+                decay_pow: 2.0,
                 filter: FilterMode::BandPass,
                 fc0: 2600.0 * p,
                 fc1: 800.0,
@@ -12612,18 +12625,24 @@ mod tests {
 
     #[test]
     fn sfx_crest_factor_and_dynamic_range_are_balanced() {
+        // Every offender is listed at once, so a new voice is tuned in one pass.
+        let mut bad = Vec::new();
         for sfx in Sfx::ALL {
             for v in 0..sfx.variant_count() {
                 let s = sfx_variant_samples(sfx, v);
                 let pk = peak(&s);
                 let r = rms(&s);
                 let crest = pk / r.max(1e-6);
-                assert!(
-                    (1.8..=7.5).contains(&crest),
-                    "{sfx:?} v{v} crest factor out of healthy range: {crest:.2} (pk={pk:.3}, rms={r:.3})"
-                );
+                if !(1.8..=7.5).contains(&crest) {
+                    bad.push(format!("{sfx:?} v{v}: {crest:.2} (pk={pk:.3}, rms={r:.3})"));
+                }
             }
         }
+        assert!(
+            bad.is_empty(),
+            "crest factor out of the healthy 1.8..=7.5 range:\n{}",
+            bad.join("\n")
+        );
     }
 
     #[test]
@@ -12736,7 +12755,8 @@ mod tests {
         // 16 MiB line); the budget is a tripwire against a runaway variant
         // count, not a hard limit.
         assert!(
-            bytes < 18 * 1024 * 1024,
+            // 151 sounds now (ten bosses' voices): about 20 MB.
+            bytes < 24 * 1024 * 1024,
             "audio cache unexpectedly large: {bytes} bytes"
         );
     }

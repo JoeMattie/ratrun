@@ -140,7 +140,8 @@ impl BossController for HorseshoeCrabController {
             | BossState::NightEdition(_)
             | BossState::Magpie(_)
             | BossState::MegaRat(_)
-            | BossState::Hawk(_) => {}
+            | BossState::Hawk(_)
+            | BossState::Cobra(_) => {}
         }
 
         // The art owns the multiplier and the contact rule; apply them after the
@@ -919,10 +920,14 @@ mod tests {
         for (theme, kind) in [
             (Theme::Laundry, BossKind::Mangle),
             (Theme::Printworks, BossKind::NightEdition),
-            (Theme::Trailer, BossKind::Magpie),
         ] {
             assert_eq!(BossKind::pool_for_theme(theme), &[kind]);
         }
+        // The Flatbed fields the magpie or the redtail.
+        assert_eq!(
+            BossKind::pool_for_theme(Theme::Trailer),
+            &[BossKind::Magpie, BossKind::Hawk]
+        );
         // `for_theme` stays the floor's original boss (the pinned choice).
         assert_eq!(BossKind::for_theme(Theme::Sewer), BossKind::Cat);
         // The draw is deterministic and reaches both entries.
@@ -939,7 +944,9 @@ mod tests {
         for seed in 0..16u64 {
             assert!(BossKind::pool_for_theme(Theme::Lab)
                 .contains(&BossKind::pool_pick(Theme::Lab, seed)));
-            assert_eq!(BossKind::pool_pick(Theme::Trailer, seed), BossKind::Magpie);
+            assert!(BossKind::pool_for_theme(Theme::Trailer)
+                .contains(&BossKind::pool_pick(Theme::Trailer, seed)));
+            assert_eq!(BossKind::pool_pick(Theme::Laundry, seed), BossKind::Mangle);
         }
     }
 

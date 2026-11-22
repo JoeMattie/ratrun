@@ -851,6 +851,7 @@ pub fn rest_chain(view: &CobraView, out: &mut [Vec2]) -> usize {
     let back = view.pos - f * 16.0;
     let n = (out.len()).min(88);
     let breath = 0.5 + 0.5 * (view.anim * 0.7).sin();
+    #[allow(clippy::needless_range_loop)]
     for i in 0..n {
         let t = i as f32 / (n - 1).max(1) as f32;
         // A long loop: the first turn wraps left, the second right, and the
@@ -1795,7 +1796,7 @@ mod tests {
             let n = coil_chain(&v, &mut pts);
             assert!(n > 8, "the loop is a chain of body points");
             let r = coil_radius(&v);
-            assert!(r >= COIL_END_R - 0.01 && r <= COIL_START_R + 0.01);
+            assert!((COIL_END_R - 0.01..=COIL_START_R + 0.01).contains(&r));
             for q in pts.iter().take(n) {
                 let d = q.dist(v.target);
                 assert!((d - r).abs() < 0.5, "every point is on the loop ({d} vs {r})");
@@ -1808,7 +1809,7 @@ mod tests {
             // No point sits inside the opening.
             let gap = coil_gap_angle(&v);
             for q in pts.iter().take(n) {
-                let a = (q - v.target).angle();
+                let a = (*q - v.target).angle();
                 let mut rel = (a - gap).abs();
                 if rel > std::f32::consts::PI {
                     rel = std::f32::consts::TAU - rel;
@@ -1869,12 +1870,23 @@ mod tests {
         }
         // Spacing is tight enough that a 10 px rat cannot walk between two
         // points, and the lane between turns is wider than it is.
+        let mut doorways = 0;
         for i in 1..n {
             let d = pts[i].dist(pts[i - 1]);
-            assert!(d <= SPIRAL_SPACING + 0.01 && d > 1.0);
-            assert!(d < 2.0 * (COIL_BODY_HALF + 5.0));
+            assert!(d > 1.0);
+            // Spaced by arc length; the radius grows along the lane too, so
+            // a chord near the centre runs a little over one spacing.
+            if d <= SPIRAL_SPACING * 1.2 {
+                assert!(d < 2.0 * (COIL_BODY_HALF + 5.0));
+            } else {
+                // The one opening in the outermost turn: a real doorway.
+                doorways += 1;
+                assert!(d >= 2.0 * (COIL_BODY_HALF + 5.0), "a {d:.1} px slit is not a door");
+            }
         }
-        assert!(SPIRAL_TURN > 2.0 * (COIL_BODY_HALF + 5.0), "turns stay walkable");
+        assert!(doorways <= 1, "the lane has one open end, not {doorways}");
+        // Turns stay walkable.
+        const _: () = assert!(SPIRAL_TURN > 2.0 * (COIL_BODY_HALF + 5.0));
     }
 
     #[test]
@@ -1914,7 +1926,8 @@ mod tests {
 
     #[test]
     fn the_sway_has_three_beats() {
-        let beats = [0.0f32, 0.25, 0.5, 0.75, 1.0]
+        // Sampled at the six crests (three beats, each a left and a right).
+        let beats = [1.0f32 / 12.0, 3.0 / 12.0, 5.0 / 12.0, 7.0 / 12.0, 9.0 / 12.0, 11.0 / 12.0]
             .iter()
             .filter(|t| sway_phase(&view(CobraState::SwayTell, **t)).abs() > 0.2)
             .count();

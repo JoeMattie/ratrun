@@ -314,11 +314,10 @@ fn tick_strike(ctx: &mut BossContext<'_>, boss: &mut Boss) {
     let want = boss.target - boss.facing * art::FANG_REACH;
     let to = want - boss.pos;
     let arrived = to.len() <= 2.5;
-    if !arrived {
-        if !move_boss(ctx, boss, to, art::STRIKE_SPEED) {
+    if !arrived
+        && !move_boss(ctx, boss, to, art::STRIKE_SPEED) {
             boss.scratch[S_WALLED] = 1.0;
         }
-    }
     if boss.progress() >= 1.0 || arrived {
         let walled = boss.scratch[S_WALLED] > 0.5;
         let duration = if walled {
@@ -332,7 +331,7 @@ fn tick_strike(ctx: &mut BossContext<'_>, boss: &mut Boss) {
 
 /// `FangsStuck`: the fangs are in the floor. No movement, no contact, the hood's
 /// back exposed — and from phase 2 the animal does not wait to be punished.
-fn tick_stuck(ctx: &mut BossContext<'_>, boss: &mut Boss) {
+fn tick_stuck(_ctx: &mut BossContext<'_>, boss: &mut Boss) {
     if boss.progress() < 1.0 {
         return;
     }
@@ -451,7 +450,7 @@ fn tick_tail_sweep(ctx: &mut BossContext<'_>, boss: &mut Boss) {
 }
 
 /// `TailRecover`: it drags a coil's worth of tail back in, off balance.
-fn tick_tail_recover(ctx: &mut BossContext<'_>, boss: &mut Boss) {
+fn tick_tail_recover(_ctx: &mut BossContext<'_>, boss: &mut Boss) {
     if boss.progress() >= 1.0 {
         after_attack(boss);
     }
@@ -512,7 +511,7 @@ fn tick_constrict(ctx: &mut BossContext<'_>, boss: &mut Boss) {
 }
 
 /// `Loosen`: the loop slides off and the head comes back over it.
-fn tick_loosen(ctx: &mut BossContext<'_>, boss: &mut Boss) {
+fn tick_loosen(_ctx: &mut BossContext<'_>, boss: &mut Boss) {
     if boss.progress() >= 1.0 {
         after_attack(boss);
     }
@@ -1211,6 +1210,19 @@ mod tests {
 
     /// Spawn the level's boss through the real spawn system.
     fn spawn_cobra(w: &mut World) -> Boss {
+        let boss = spawn_cobra_real(w);
+        // The unit tests stage their moves on bare floor: the generated arena's
+        // own furniture (benches, pillars) would decide the lines otherwise.
+        let arena = w.level.boss_room().map(|r| r.rect).expect("boss room");
+        w.level
+            .tiles
+            .fill_cells(arena.x + 1, arena.y + 1, arena.w - 2, arena.h - 2, TileKind::Open);
+        w.level.tiles.rebuild_masks();
+        boss
+    }
+
+    /// The same spawn on the arena exactly as the generator built it.
+    fn spawn_cobra_real(w: &mut World) -> Boss {
         w.ecs.resource_mut::<BossDue>().due = true;
         w.begin_tick(DT, Vec2::ZERO, false);
         w.ecs
@@ -1550,13 +1562,14 @@ mod tests {
         w.level.tiles.rebuild_masks();
         let row = centre.y;
         let face_x = (col as f32) * TILE_F;
+        // The rat has its back to the wall and the head a strike's length in
+        // front of it: the fangs go through the mark and into the column. (A
+        // rat *behind* the wall is out of sight and the strike is refused.)
         place(
             &mut w,
-            Vec2::new(face_x - 26.0, row),
-            Vec2::new(face_x - 90.0, row),
+            Vec2::new(face_x - 30.0, row),
+            Vec2::new(face_x - 7.0, row),
         );
-        // Aim it at the wall by putting the rat beyond it.
-        w.player.pos = Vec2::new(face_x + 30.0, row);
         set_state(&mut w, CobraState::HoodTell, art::HOOD_TELL[0]);
         let mut t = 0.0;
         while state_of(&mut w) != CobraState::FangsStuck && t < 2.0 {
@@ -1610,7 +1623,8 @@ mod tests {
         set_state(&mut w, CobraState::SwayTell, art::SWAY_TELL[1]);
         // Before the late lock the aim is still swinging: no hazard exists.
         let mut t = 0.0;
-        while t < art::SWAY_TELL[1] * art::SWAY_LOCK_PROGRESS {
+        // (Two ticks short of the lock itself: that tick commits the line.)
+        while t < art::SWAY_TELL[1] * art::SWAY_LOCK_PROGRESS - 2.0 * DT {
             tick(&mut w);
             t += DT;
             let boss = boss_of(&mut w).expect("alive");
@@ -1689,6 +1703,13 @@ mod tests {
             }
             w.player.pos = centre + Vec2::new(50.0, 0.0);
             w.player.iframes = (w.player.iframes - DT).max(0.0);
+            // Hold it between attacks: this test counts one volley's hits, not
+            // whatever it would pick next against a rat that never moves.
+            with_boss(&mut w, |b| {
+                if cobrastate(b) == CobraState::Rear {
+                    b.elapsed = 0.0;
+                }
+            });
         }
         assert!(hits >= 1, "the splash lands (hp {hp} -> {})", w.player.hp);
         assert!(hits <= 2, "the puddle bites once and drips once: {hits}");
@@ -1764,11 +1785,11 @@ mod tests {
         let mut pts = [Vec2::ZERO; art::COIL_MAX];
         let n = art::blocking_chain(&view, &mut pts);
         assert!(n > 8, "the body is laid as a wall");
-        let r = art::coil_radius(&view);
+        let _r = art::coil_radius(&view);
         let gap = art::coil_gap_angle(&view);
         let half = art::coil_gap_half(&view);
         for q in pts.iter().take(n) {
-            let a = (q - view.target).angle();
+            let a = (*q - view.target).angle();
             let mut rel = (a - gap).abs();
             if rel > std::f32::consts::PI {
                 rel = std::f32::consts::TAU - rel;
@@ -1928,13 +1949,13 @@ mod tests {
         with_boss(&mut w, |b| *b = boss.clone());
         assert!(committed, "the lane fits the arena and the rat is inside it");
         assert_eq!(state_of(&mut w), CobraState::SpiralCoil);
-        // The laid lane blocks, and its outer end is open.
+        // The head comes down the lane, then the coils drop and it is spent.
+        assert_eq!(drive_until_change(&mut w, 2.0), CobraState::SpiralChase);
+        // Once the tell has drawn it on, the laid lane blocks.
         let view = boss_of(&mut w).expect("alive").cobra_view();
         let mut pts = [Vec2::ZERO; art::COIL_MAX];
         assert!(art::spiral_chain(&view, &mut pts) > 8);
         assert!(art::blocking_chain(&view, &mut pts) > 8);
-        // The head comes down the lane, then the coils drop and it is spent.
-        assert_eq!(drive_until_change(&mut w, 2.0), CobraState::SpiralChase);
         let before = boss_of(&mut w).expect("alive").pos;
         for _ in 0..30 {
             tick(&mut w);
@@ -1980,7 +2001,8 @@ mod tests {
             "its telegraphs stop with it ({} left)",
             boss.hazards.len()
         );
-        for _ in 0..(art::DEATH_DURATION / DT) as usize {
+        // (A few ticks over: the beat ends on the tick after its clock.)
+        for _ in 0..(art::DEATH_DURATION / DT) as usize + 12 {
             w.player.pos = centre;
             tick(&mut w);
             if boss_of(&mut w).is_none() {
@@ -2052,7 +2074,7 @@ mod tests {
         let mut lengths = Vec::new();
         for seed in SEEDS {
             let mut w = lab_world(seed);
-            spawn_cobra(&mut w);
+            spawn_cobra_real(&mut w);
             // A near-complete build (what a survivor of the 15-minute build-up
             // carries to a boss) and the arena.
             w.player.loadout = CarryPreset::Typical.loadout();
@@ -2070,7 +2092,7 @@ mod tests {
                 w.update(DT, input.move_dir, input.dash);
                 // The App drains the sound queue every frame; do the same so
                 // nothing the sim reads back is left sitting in it.
-                w.sfx.0.clear();
+                w.sfx.clear();
                 let mut guard = 0;
                 while w.pending_levelups > 0 && guard < 32 {
                     guard += 1;
@@ -2091,9 +2113,12 @@ mod tests {
                 }
                 t += DT;
             }
+            let left = boss_of(&mut w).map(|b| (b.hp_frac(), cobrastate(&b), b.pos, b.phase));
             assert!(
                 w.level_complete() || w.finished(),
-                "seed {seed}: the king cobra was still alive after {t:.1} s"
+                "seed {seed}: the king cobra was still alive after {t:.1} s ({left:?}, rat {:?} hp {})",
+                w.player.pos,
+                w.player.hp
             );
             assert!(
                 boss_of(&mut w).is_none(),

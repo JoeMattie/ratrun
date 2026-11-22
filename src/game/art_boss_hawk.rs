@@ -541,6 +541,17 @@ pub fn is_overhead(state: HawkState) -> bool {
     )
 }
 
+/// Is the bird too high to touch **right now**? The overhead states always
+/// are; a stoop still coming down and a climb already going up are too, for as
+/// long as the body is drawn well above the hover height. The hit shapes, the
+/// body contact and the plate's `OVERHEAD` tag all read this one rule, so the
+/// bird is never hittable where it is not drawn.
+#[inline]
+pub fn out_of_reach(view: &HawkView) -> bool {
+    is_overhead(view.state)
+        || altitude(view.state, view.phase, view.progress) > HOVER_LIFT + 6.0
+}
+
 /// Is the bird down where a ground weapon can reach it?
 #[inline]
 pub fn is_grounded(state: HawkState) -> bool {
@@ -567,7 +578,8 @@ pub fn has_body_contact(state: HawkState) -> bool {
             | HawkState::DartWindup
             | HawkState::DartFan
             | HawkState::GrabWindup
-            | HawkState::Grab
+            // Not `Grab`: the carry drags the rat onto the talons, and a body
+            // bump there would spend its i-frames and swallow the drop.
             | HawkState::RakeWindup
             | HawkState::RakePass
     )
@@ -954,10 +966,10 @@ impl Pose {
         let lift01 = (lift / HIGH_LIFT).clamp(0.0, 1.0);
         let ground = view.pos - cam;
 
-        let mut spread = 0.0f32;
+        let spread: f32;
         let mut sweep = 0.0f32;
-        let mut flap = 0.0f32;
-        let mut head_lunge = 0.0f32;
+        let mut flap: f32;
+        let head_lunge: f32;
         let mut stretch = 0.0f32;
         let mut tail_lift = 0.0f32;
         let mut tail_fan = 0.15f32;
@@ -2360,7 +2372,6 @@ mod tests {
         for state in [
             HawkState::Hover,
             HawkState::DartFan,
-            HawkState::Grab,
             HawkState::RakePass,
         ] {
             assert!(has_body_contact(state));
@@ -2434,6 +2445,11 @@ mod tests {
             for prog in [0.2f32, 0.6, 0.95] {
                 let mut v = view(state);
                 v.progress = prog;
+                // A stoop still falling has no hit shapes yet (`out_of_reach`).
+                if out_of_reach(&v) {
+                    assert_eq!(state, HawkState::Stoop, "{state:?} at {prog} is not low");
+                    continue;
+                }
                 let pose = Pose::from_view(&v, Vec2::ZERO, (206, 150, 70));
                 let reach = body_hit_circles(&v)
                     .iter()
@@ -2444,7 +2460,14 @@ mod tests {
                     "{state:?} at {prog}: the body is drawn {reach:.1}px off every hit circle"
                 );
                 // …and the shadow is under it, never above it.
-                assert!(pose.body.y <= pose.ground.y + 0.01);
+                assert!(
+                    // (A pixel of settle: the buried bird bobs on its feet and
+                    // the dead one slumps onto the boards.)
+                    pose.body.y <= pose.ground.y + 1.0,
+                    "{state:?} at {prog}: body {:?} below ground {:?}",
+                    pose.body,
+                    pose.ground
+                );
             }
         }
     }
@@ -2699,7 +2722,6 @@ mod tests {
             boss.facing = Vec2::new(1.0, 0.0);
             boss.target = centre + Vec2::new(38.0, 10.0);
             boss.pounce_origin = centre + Vec2::new(-40.0, -8.0);
-            boss.lane_start = boss.pounce_origin;
             boss.hp = 1600.0 * hp_frac;
             boss.set_state(BossState::Hawk(*state), 1.4);
             boss.elapsed = prog * 1.4;

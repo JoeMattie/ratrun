@@ -156,7 +156,8 @@ impl BossController for HawkController {
             | BossState::NightEdition(_)
             | BossState::Magpie(_)
             | BossState::HorseshoeCrab(_)
-            | BossState::MegaRat(_) => {}
+            | BossState::MegaRat(_)
+            | BossState::Cobra(_) => {}
         }
 
         // The art owns the multiplier and the contact rule; apply them after the
@@ -675,7 +676,7 @@ fn enter(boss: &mut Boss, state: HawkState, duration: f32) {
 }
 
 /// Take up the sky: the shadow starts circling, on a fresh side.
-fn enter_circle(ctx: &BossContext<'_>, boss: &mut Boss) {
+fn enter_circle(ctx: &mut BossContext<'_>, boss: &mut Boss) {
     let slot = phase_slot(boss);
     let roll = ctx.rng.random::<f32>();
     enter(boss, HawkState::Circle, art::CIRCLE_DURATION[slot]);
@@ -925,7 +926,7 @@ fn pick_grab(ctx: &BossContext<'_>, boss: &Boss) -> Option<(Vec2, Vec2)> {
             far + perp * (*s * art::GRAB_ESCAPE_STEP),
             ctx.player_radius,
         )
-    }) || ctx.los_clear(far, far - dir * art::GRAB_ESCAPE_STEP, ctx.player_radius);
+    }) || ctx.los_clear(far, far + dir * art::GRAB_ESCAPE_STEP, ctx.player_radius);
     if !can_leave {
         return None;
     }
@@ -1370,7 +1371,8 @@ mod tests {
 
         // The tell: nothing lands before the impact. The mark is on the rat
         // until the lock freezes it.
-        let until = art::DIVE_DURATION[0] * art::DIVE_IMPACT_PROGRESS - DT;
+        // (Two ticks of margin: the hazard's own clock starts on the lock tick.)
+        let until = art::DIVE_DURATION[0] * art::DIVE_IMPACT_PROGRESS - 2.0 * DT;
         let mut t = 0.0;
         while t < until {
             tick(&mut w);
@@ -1525,6 +1527,11 @@ mod tests {
             t += DT;
             assert_eq!(w.player.hp, hp0, "the darts flew before their tell");
         }
+        // Across the lock itself: the wedge is queued on that tick.
+        for _ in 0..3 {
+            tick(&mut w);
+        }
+        assert_eq!(w.player.hp, hp0, "the darts flew before their tell");
         assert!(!boss_of(&mut w).unwrap().hazards.is_empty(), "the wedge was never queued");
         // Then one hit inside the wedge.
         let mut hits = 0;
@@ -1622,13 +1629,13 @@ mod tests {
             tick(&mut w);
         }
         let boss = boss_of(&mut w).unwrap();
-        let (start, end, _) = art::rake_lane(&view_of(&boss));
+        let (start, end) = art::rake_lane(&view_of(&boss));
         assert!(
             (start.y - rat.y).abs() < 20.0 && (end.y - rat.y).abs() < 20.0,
             "the lane {start:?}..{end:?} misses the rat's row {rat:?}"
         );
         let mut hits = 0;
-        let mut last = w.player.hp;
+        let last = w.player.hp;
         for _ in 0..(3.0 / DT) as usize {
             tick(&mut w);
             if w.player.hp < last {
@@ -1770,11 +1777,20 @@ mod tests {
             1,
             crate::game::collision::TileKind::Wall(crate::game::art_walls::WallKind::Solid),
         );
-        w.level.tiles.rebuild_masks();
         let row = Vec2::new(
             c.x,
             (arena.y + (arena.h / 2)) as f32 * TILE_F + 8.0,
         );
+        // ...and the slot is a dead end right behind him, so backing off the
+        // reach is not a step either.
+        w.level.tiles.fill_cells(
+            ((row.x + 12.0) / TILE_F).floor() as i32 + 1,
+            arena.y + (arena.h / 2),
+            1,
+            1,
+            crate::game::collision::TileKind::Wall(crate::game::art_walls::WallKind::Solid),
+        );
+        w.level.tiles.rebuild_masks();
         place(&mut w, row - Vec2::new(34.0, 0.0), row + Vec2::new(4.0, 0.0));
         let mut rng = rand::rngs::StdRng::seed_from_u64(5);
         let mut boss = boss_of(&mut w).unwrap();

@@ -464,7 +464,15 @@ impl BossKind {
             // 1,800 x 2.0 x the framework's x8 lands ~29 k, i.e. the same
             // 45-80 s beat the Mower holds at 3,200 with no weak point at all.
             // Provisional: the balance pass owns the final number.
-            BossKind::Cobra => 2.0,
+            //
+            // Measured at integration (`cobra::tests::a_bot_kills_the_king_cobra_
+            // on_the_real_arena`, the Typical melee carry): at 2.0 the bot had
+            // taken 80 % of the pool after 300 s (about 77 dps landed, not the
+            // 250-600 assumed above, because the animal holds a 70 px stand-off
+            // and a short-range kit only reaches it during its strikes). Halved
+            // so the fight ends; it is still long for a melee build and the
+            // stand-off band is the thing a balance pass should look at.
+            BossKind::Cobra => 1.0,
         }
     }
 
@@ -705,12 +713,13 @@ impl BossKind {
             BossKind::HorseshoeCrab => &horseshoe_crab::HorseshoeCrabController,
             BossKind::MegaRat => &megarat::MegaRatController,
             BossKind::Hawk => &hawk::HawkController,
+            BossKind::Cobra => &cobra::CobraController,
         }
     }
 
     /// Every boss, in enum order. The console's `boss` command and its Tab
     /// completion read this table rather than a retyped list.
-    pub fn all() -> [BossKind; 6] {
+    pub fn all() -> [BossKind; 10] {
         [
             BossKind::Cat,
             BossKind::Broom,
@@ -718,6 +727,10 @@ impl BossKind {
             BossKind::Mangle,
             BossKind::NightEdition,
             BossKind::Magpie,
+            BossKind::HorseshoeCrab,
+            BossKind::MegaRat,
+            BossKind::Hawk,
+            BossKind::Cobra,
         ]
     }
 
@@ -730,7 +743,10 @@ impl BossKind {
             BossKind::Mangle => "mangle",
             BossKind::NightEdition => "nightedition",
             BossKind::Magpie => "magpie",
-            BossKind::Cobra => &cobra::CobraController,
+            BossKind::HorseshoeCrab => "horseshoecrab",
+            BossKind::MegaRat => "megarat",
+            BossKind::Hawk => "hawk",
+            BossKind::Cobra => "cobra",
         }
     }
 }
@@ -1608,7 +1624,7 @@ impl Boss {
             // The hawk is *out of reach* while it is high: it bumps nothing and
             // the body is drawn in the overhead pass (over the rat, as a bird
             // over a deck should be). The art owns the rule.
-            BossState::Hawk(s) => art_boss_hawk::is_overhead(s),
+            BossState::Hawk(_) => art_boss_hawk::out_of_reach(&self.hawk_view()),
             _ => false,
         }
     }
@@ -1622,7 +1638,7 @@ impl Boss {
     #[inline]
     pub fn overhead(&self) -> bool {
         match self.state {
-            BossState::Hawk(s) => art_boss_hawk::is_overhead(s),
+            BossState::Hawk(_) => art_boss_hawk::out_of_reach(&self.hawk_view()),
             _ => false,
         }
     }
@@ -1833,7 +1849,7 @@ impl Boss {
                 // talons are buried the *nape* replaces the tail root, which is
                 // what makes it the first auto-aim point of the punish window.
                 let view = self.hawk_view();
-                if art_boss_hawk::is_overhead(view.state) {
+                if art_boss_hawk::out_of_reach(&view) {
                     return BossHitShapes::empty();
                 }
                 let circles = art_boss_hawk::body_hit_circles(&view);
