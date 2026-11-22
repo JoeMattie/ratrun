@@ -14,9 +14,10 @@ mod console;
 mod input;
 mod lore;
 mod meta;
+mod math;
+mod present;
 mod prof;
 mod profbench;
-mod math;
 mod render;
 mod scores;
 mod spectate;
@@ -40,15 +41,13 @@ use crossterm::event::{
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
-use crossterm::terminal::{
-    self, BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen,
-    LeaveAlternateScreen,
-};
+use crossterm::terminal::{self, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use app::App;
 use input::InputState;
+use present::FrameOut;
 
 static KITTY_PUSHED: AtomicBool = AtomicBool::new(false);
 static POINTER_SHAPE_SET: AtomicBool = AtomicBool::new(false);
@@ -285,7 +284,7 @@ fn keyboard_mode_from(in_effect: Option<u32>) -> (bool, bool) {
 /// Set up the alternate screen, mouse + focus reporting and the Kitty keyboard
 /// protocol flags (Ghostty, Kitty and others report them).
 /// Raw mode is enabled by `main` (which owns the restore guard).
-fn setup_terminal() -> Result<(Terminal<CrosstermBackend<io::Stdout>>, KeyboardMode)> {
+fn setup_terminal() -> Result<(Terminal<CrosstermBackend<FrameOut>>, KeyboardMode)> {
     let mut stdout = io::stdout();
     execute!(
         stdout,
@@ -327,7 +326,10 @@ fn setup_terminal() -> Result<(Terminal<CrosstermBackend<io::Stdout>>, KeyboardM
         (kitty, lone_ctrl) = keyboard_mode_from(in_effect);
     }
 
-    let backend = CrosstermBackend::new(stdout);
+    // The frame writer: everything ratatui draws is collected and sent in one
+    // `write` per frame (see `present::FrameOut`). Setup and restore keep
+    // writing straight to stdout, so they can never sit behind a frame.
+    let backend = CrosstermBackend::new(FrameOut::new(stdout));
     let terminal = Terminal::new(backend)?;
     Ok((
         terminal,
@@ -472,22 +474,6 @@ impl Drop for InputThread {
     }
 }
 
-/// Run `draw` inside a synchronized update (DEC mode 2026), so the frame is
-/// presented atomically instead of tearing. Terminals without support ignore
-/// the sequences. The end sequence is always issued, even when the draw fails,
-/// so the terminal is never left in a held update.
-pub(crate) fn with_synchronized_update<T>(
-    out: &mut impl io::Write,
-    draw: impl FnOnce() -> io::Result<T>,
-) -> io::Result<T> {
-    execute!(out, BeginSynchronizedUpdate)?;
-    let drawn = draw();
-    let ended = execute!(out, EndSynchronizedUpdate);
-    let value = drawn?;
-    ended?;
-    Ok(value)
-}
-
 /// Events handled per frame. A mouse-motion flood (mode 1003) can put far more
 /// than a frame's worth into the channel; the rest wait for the next frame so a
 /// single frame can never be monopolised by input.
@@ -574,7 +560,7 @@ pub(crate) fn drain_input(
 }
 
 fn run(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Terminal<CrosstermBackend<FrameOut>>,
     keys: KeyboardMode,
 ) -> Result<()> {
     let audio = audio::AudioEngine::new();
@@ -622,15 +608,13 @@ fn run(
         let _ = sync_pointer_shape_to(&mut out, want_crosshair);
         // Present the frame atomically: a half-block frame redrawn cell by cell
         // would otherwise tear mid-frame on a fast terminal.
-        with_synchronized_update(&mut out, || {
-            terminal.draw(|f| {
-                app.render(f);
-                // Fold the finished frame into what this terminal can draw:
-                // RGB → palette when truecolor is unavailable, and risky glyphs
-                // → safe ones when the terminal mis-sizes them. A no-op when
-                // the terminal supports everything (the default path).
-                term::sanitize(f.buffer_mut());
-            })
+        present::synchronized_frame(terminal, |f| {
+            app.render(f);
+            // Fold the finished frame into what this terminal can draw:
+            // RGB → palette when truecolor is unavailable, and risky glyphs
+            // → safe ones when the terminal mis-sizes them. A no-op when
+            // the terminal supports everything (the default path).
+            term::sanitize(f.buffer_mut());
         })?;
 
         let elapsed = frame_start.elapsed();
@@ -917,29 +901,6 @@ mod tests {
         restore_to(&mut second).unwrap();
         assert!(!second.is_empty());
         assert!(!KITTY_PUSHED.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn synchronized_update_wraps_the_draw() {
-        let mut out = Vec::new();
-        let value = with_synchronized_update(&mut out, || Ok::<_, io::Error>(42u8)).unwrap();
-        assert_eq!(value, 42);
-        let text = String::from_utf8_lossy(&out);
-        let begin = text.find("\x1b[?2026h").expect("missing begin sequence");
-        let end = text.find("\x1b[?2026l").expect("missing end sequence");
-        assert!(begin < end, "end must follow begin: {text:?}");
-    }
-
-    #[test]
-    fn synchronized_update_ends_on_the_error_path() {
-        let mut out = Vec::new();
-        let err = with_synchronized_update(&mut out, || Err::<(), _>(io::Error::other("boom")));
-        assert_eq!(err.unwrap_err().to_string(), "boom");
-        let text = String::from_utf8_lossy(&out);
-        assert!(
-            text.contains("\x1b[?2026l"),
-            "end sequence missing after a failed draw: {text:?}"
-        );
     }
 
     #[test]

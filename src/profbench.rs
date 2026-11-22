@@ -43,8 +43,9 @@ use crate::scores::ScoreTable;
 const DT: f32 = 1.0 / 60.0;
 /// `--still`: the rat stands still (no bot) during the measured frames.
 static STILL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// `--out buf`: the app modes write through a 1 MiB `BufWriter` instead of the
-/// 1 KiB `LineWriter` that `io::stdout()` is.
+/// `--out line`: the app modes write straight through the 1 KiB `LineWriter`
+/// that `io::stdout()` is (the pre-`FrameOut` path); the default is the real
+/// stack, `present::FrameOut` over that `LineWriter`.
 static BUFFERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// `--horde N`: keep at least N live enemies around the rat while measuring.
 static HORDE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -241,7 +242,7 @@ pub fn run(args: &[String]) {
         std::sync::atomic::Ordering::Relaxed,
     );
     prof::skip_lighting(args.iter().any(|a| a == "--nolight"));
-    BUFFERED.store(arg(args, "--out") == Some("buf"), std::sync::atomic::Ordering::Relaxed);
+    BUFFERED.store(arg(args, "--out") != Some("line"), std::sync::atomic::Ordering::Relaxed);
     let cfgs: Vec<Cfg> = args
         .iter()
         .enumerate()
@@ -471,7 +472,11 @@ fn bench_app(
     // count the `write` calls a frame really makes, and the byte total.
     let sink = Sink::default();
     let writer: Box<dyn Write> = if BUFFERED.load(std::sync::atomic::Ordering::Relaxed) {
-        Box::new(io::BufWriter::with_capacity(1 << 20, sink.clone()))
+        // The real stack: the frame writer over stdout's 1 KiB `LineWriter`.
+        Box::new(crate::present::FrameOut::new(io::LineWriter::with_capacity(
+            1024,
+            sink.clone(),
+        )))
     } else {
         Box::new(io::LineWriter::with_capacity(1024, sink.clone()))
     };
@@ -518,20 +523,16 @@ fn bench_app(
         let app_tick = prof::ns(Stage::SimTick) - tick_before;
         let mut render_ns = 0u64;
         let mut sanitize_ns = 0u64;
-        // `main::with_synchronized_update` + `terminal.draw`.
-        let _ = crossterm::queue!(terminal.backend_mut(), crossterm::terminal::BeginSynchronizedUpdate);
-        terminal
-            .draw(|f| {
-                let r0 = Instant::now();
-                app.render(f);
-                let r1 = Instant::now();
-                crate::term::sanitize(f.buffer_mut());
-                render_ns = (r1 - r0).as_nanos() as u64;
-                sanitize_ns = r1.elapsed().as_nanos() as u64;
-            })
-            .expect("draw");
-        let _ = crossterm::queue!(terminal.backend_mut(), crossterm::terminal::EndSynchronizedUpdate);
-        let _ = io::Write::flush(terminal.backend_mut());
+        // Exactly what `main::run` does per frame.
+        crate::present::synchronized_frame(terminal, |f| {
+            let r0 = Instant::now();
+            app.render(f);
+            let r1 = Instant::now();
+            crate::term::sanitize(f.buffer_mut());
+            render_ns = (r1 - r0).as_nanos() as u64;
+            sanitize_ns = r1.elapsed().as_nanos() as u64;
+        })
+        .expect("draw");
         let t3 = Instant::now();
         if let Some(run) = run.as_deref_mut() {
             swap(app, run);

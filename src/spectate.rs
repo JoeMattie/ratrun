@@ -28,7 +28,6 @@
 //! possible and reports the rest as hidden.
 
 use std::cell::RefCell;
-use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
@@ -1524,7 +1523,7 @@ pub fn spectate_keys(state: &mut WallState, input: &InputState, area: Rect) -> b
 
 /// `ratrun --ai`: run the wall until the user quits.
 pub fn run(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Terminal<CrosstermBackend<crate::present::FrameOut>>,
     kitty: bool,
     opts: AiOpts,
 ) -> Result<()> {
@@ -1556,13 +1555,10 @@ pub fn run(
         }
 
         wall.pump(area);
-        let mut out = io::stdout();
         let wall_state = &wall.state;
-        crate::with_synchronized_update(&mut out, || {
-            terminal.draw(|f| {
-                let area = f.area();
-                render_wall(f.buffer_mut(), area, wall_state)
-            })
+        crate::present::synchronized_frame(terminal, |f| {
+            let area = f.area();
+            render_wall(f.buffer_mut(), area, wall_state)
         })?;
 
         // Up to 60 FPS; drop to 30 when compositing cannot keep up.
