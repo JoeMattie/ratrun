@@ -60,7 +60,7 @@ pub struct TickInput {
     ///
     /// Input, never a simulation decision: `World::update` and
     /// `World::update_with` pass `None`, so the bot, the harness goldens and
-    /// every pre-wave-3 test are byte-identical. The App passes the reticle's
+    /// every pre-wave-3 test are byte-identical. The App passes the pointer's
     /// world position in the Mouse aim / Gamepad schemes (see
     /// `App::aim_point`). Each aiming weapon reads it in the way that suits it
     /// — a direction for Gnaw, Spray and the laser, a point for the lobbed and
