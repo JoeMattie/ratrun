@@ -511,7 +511,7 @@ pub(crate) fn draw_pipe_eel(pb: &mut PixelBuffer, _fr: &Frame, e: &Enemy, cam: V
             let lit = lf.lit(nu, nv);
             let mut lum = 0.42 + 0.34 * dome + 0.58 * lit;
             // Bright bleached-bone rim catch toward the lamp.
-            if d > -1.0 * s && lit > 0.25 {
+            if d > -s && lit > 0.25 {
                 lum += 0.24;
             }
             let mut col = shade3(EEL_SHADOW, EEL_BONE, EEL_IVORY, lum);
@@ -891,7 +891,7 @@ pub fn draw_leech_tongue(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
     }
 
     // Tip cap: crisp pale bracket on warn, plump bright sucker-pad tip on hold.
-    for w in -2..=2 {
+    for w in -2i32..=2 {
         let p = b + side * (w as f32 * half * 0.5);
         let col = if live && w.abs() <= 1 {
             LEECH_TONGUE_HI

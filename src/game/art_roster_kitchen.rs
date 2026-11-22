@@ -523,7 +523,9 @@ pub(crate) fn draw_fruitfly(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, _cam: V
         for k in 1..=tall {
             let t = k as f32 / tall as f32; // 0 = hinge, 1 = rounded seed tip
             // Seed envelope: narrow at hinge, widest at t ~ 0.65, tapered tip.
-            let belly = (t * PI).sin().powf(0.75);
+            // `sin(PI)` is a hair below zero in f32: clamp, or the tip row is NaN
+            // and lands a stray pixel at screen x = 0.
+            let belly = (t * PI).sin().max(0.0).powf(0.75);
             let half_w = (0.35 + 0.95 * belly) * s;
             let wx_c = cx as f32 + sf * (0.75 + k as f32 * splay);
             let wy = cy - 1 - k;

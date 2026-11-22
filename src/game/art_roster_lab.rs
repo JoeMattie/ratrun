@@ -1378,7 +1378,7 @@ mod tests {
         assert_ne!(tell, thrust, "thrust slams forward");
         assert_ne!(thrust, retract, "retract relaxes to punish pose");
         // Tell fills the barrel with glowing specimen pink.
-        let pink = |c: &Rgb| c.0 > 200 && c.2 > 120 && c.0 > c.1 + 40;
+        let pink = |c: &Rgb| c.0 > 200 && c.2 > 120 && c.0 > c.1.saturating_add(40);
         let tell_pink = tell.iter().filter(|c| pink(c)).count();
         let walk_pink = walk.iter().filter(|c| pink(c)).count();
         assert!(

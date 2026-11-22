@@ -638,7 +638,7 @@ fn gravel_tick(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
                 // Subtle diagonal stone fracture ridge.
                 let seam = (dx * 0.8 + dy * 1.15 - 0.3 * s).abs();
                 let mut c = shade3(stone_sh, stone_mid, stone_hi, lum);
-                if seam < 0.42 * s && dx > -1.4 * s && dy > -1.0 * s {
+                if seam < 0.42 * s && dx > -1.4 * s && dy > -s {
                     c = mix(c, crack_c, 0.52);
                 }
                 // Highway-yellow paint fleck clinging to the top-left table facet.
@@ -1354,7 +1354,7 @@ fn loose_can_lod(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
     pb.plot(spec.0, spec.1, fx.c(ALU_HI));
     let pull_u = match pose {
         CanPose::Rest => 0.0,
-        CanPose::Rock => if ((e.w4.warn_age * 10.0) as i32 & 1) == 0 { 1.0 * s } else { -1.0 * s },
+        CanPose::Rock => if ((e.w4.warn_age * 10.0) as i32 & 1) == 0 { 1.0 * s } else { -s },
         _ => if fx.frame == 0 { 0.8 * s } else { -0.8 * s },
     };
     let r = fx.px(pull_u, 3.6 * s);
@@ -1626,7 +1626,7 @@ fn toll_gull_lod(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
         pb.plot(tip.0, tip.1, blk);
     }
     if gull_beak_open(e) {
-        let b1 = fx.px(3.2 * s, -1.0 * s);
+        let b1 = fx.px(3.2 * s, -s);
         let b2 = fx.px(3.2 * s, 1.0 * s);
         let g = fx.px(2.6 * s, 0.0);
         pb.plot(b1.0, b1.1, fx.c(ROAD_YELLOW_HI));
@@ -1719,7 +1719,10 @@ fn loose_bungee(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2) {
             let du = (u - centre_u) * inv_ru;
             let dv = v_adj * inv_rv;
             let r_el = du.hypot(dv);
-            let grad = (du * inv_ru).hypot(dv * inv_rv).max(0.12);
+            // |grad r_el| is this over r_el. Leaving that factor out made the
+            // estimate saturate at about `rv` far from a flat (taut) loop, so
+            // the whole bounding box read as "on the cord" and filled.
+            let grad = ((du * inv_ru).hypot(dv * inv_rv) / r_el.max(1e-3)).max(0.5 * inv_ru.min(inv_rv));
             (r_el - 1.0).abs() / grad - cord_r
         } else {
             10.0
@@ -2125,6 +2128,31 @@ mod tests {
                     draw(&mut pb, &e, Vec2::new(200.0, 200.0));
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod taut_loop_tests {
+    use super::*;
+    use rand::SeedableRng;
+
+    /// The taut (telling) loop is a thin cord, not a filled block: the loop's
+    /// distance estimate once saturated far from a flat ellipse and painted
+    /// the whole bounding box.
+    #[test]
+    fn the_taut_bungee_is_a_cord_not_a_block() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        for facing in [Vec2::new(1.0, 0.0), Vec2::new(0.6, -0.8), Vec2::new(0.0, 1.0)] {
+            let mut e = Enemy::spawn(crate::game::enemy::EnemyKind::LooseBungee, Vec2::new(24.0, 20.0), 1.0, &mut rng);
+            e.facing = facing;
+            e.w3.bar_t = crate::game::ecs::systems::enemy_wave3::CROSSBAR_LIVE_SECS + 0.5;
+            assert!(e.w3.bar_telling());
+            let mut pb = PixelBuffer::new(48, 40);
+            pb.clear((0, 0, 0));
+            loose_bungee(&mut pb, &e, Vec2::ZERO);
+            let painted = pb.pixels().iter().filter(|c| **c != (0, 0, 0)).count();
+            assert!((20..=120).contains(&painted), "{facing:?}: {painted} pixels");
         }
     }
 }

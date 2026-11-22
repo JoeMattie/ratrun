@@ -504,8 +504,8 @@ pub(crate) fn draw_silverfish_lod(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, _
     // Tapered spindle core with light & dark edges.
     let nose = at(fr, 3.3 * s, 0.0);
     line(pb, root, nose, body, 1.0);
-    line(pb, at(fr, -1.0 * s, 1.0 * s * lit), at(fr, 2.2 * s, 1.0 * s * lit), hi, 1.0);
-    line(pb, at(fr, -1.0 * s, -1.0 * s * lit), at(fr, 2.2 * s, -1.0 * s * lit), dark, 1.0);
+    line(pb, at(fr, -s, 1.0 * s * lit), at(fr, 2.2 * s, 1.0 * s * lit), hi, 1.0);
+    line(pb, at(fr, -s, -s * lit), at(fr, 2.2 * s, -s * lit), dark, 1.0);
     put(pb, nose.0, nose.1, GLINT_AMBER, 1.0);
 }
 
@@ -557,7 +557,7 @@ pub(crate) fn draw_erratumslip(pb: &mut PixelBuffer, fr: &Frame, _e: &Enemy, _ca
         let foot = box_sdf(a, b, -0.1 * s, -1.9 * s, 3.2 * s, 1.2 * s);
         let torn_bump = (a * (3.8 / s)).sin() * 0.38 * s;
         let b_end = 3.35 * s + torn_bump;
-        let mid_b = 0.5 * (-1.0 * s + b_end);
+        let mid_b = 0.5 * (-s + b_end);
         let half_b = 0.5 * (b_end + 1.0 * s);
         let upright = box_sdf(a, b, -2.0 * s, mid_b, 1.3 * s, half_b);
         foot.min(upright)
@@ -1093,13 +1093,13 @@ pub(crate) fn draw_paperwasp(pb: &mut PixelBuffer, fr: &Frame, e: &Enemy, _cam: 
 
     // Coiled abdomen centreline v(u).
     let tail_spine = |u: f32| -> f32 {
-        let t = ((-1.0 * s - u) / (tail_len - 1.0 * s).max(0.5)).clamp(0.0, 1.0);
+        let t = ((-s - u) / (tail_len - 1.0 * s).max(0.5)).clamp(0.0, 1.0);
         (fr.anim * 0.95 + t * 3.8).sin() * coil_amp * t
     };
 
     // Rolled newsprint tube SDF.
     let tube_sd = |u: f32, v: f32| -> f32 {
-        let t = ((-1.0 * s - u) / (tail_len - 1.0 * s).max(0.5)).clamp(0.0, 1.0);
+        let t = ((-s - u) / (tail_len - 1.0 * s).max(0.5)).clamp(0.0, 1.0);
         // Tapered rolled cone that flares wider at the open nozzle tip while charging.
         let rad = (1.30 * (1.0 - 0.42 * t) + 0.52 * charge * t * t) * s;
         let sp = tail_spine(u);
@@ -1782,7 +1782,7 @@ mod tests {
         for kind in KINDS {
             for &elite in &[false, true] {
                 let mut e = body(kind, 1.7);
-                e.facing = Vec2::new(0.7071, 0.7071);
+                e.facing = Vec2::new(std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2);
                 e.elite = elite;
                 e.fire_cd = 0.12;
                 e.contact_cd = 0.45;
