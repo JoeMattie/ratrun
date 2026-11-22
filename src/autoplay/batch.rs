@@ -221,6 +221,15 @@ pub struct LevelOutcome {
     /// Shop purchases made on this level.
     #[serde(default)]
     pub shop_purchases: u32,
+    /// Gold paid by Purse cards (part of `gold_collected`).
+    #[serde(default)]
+    pub gold_purse: u32,
+    /// Gold paid by chests with nothing left to grant.
+    #[serde(default)]
+    pub gold_chest: u32,
+    /// Elites killed on this level.
+    #[serde(default)]
+    pub elite_kills: u32,
     /// Cumulative XP collected on this level.
     #[serde(default)]
     pub xp_total: u32,
@@ -230,6 +239,9 @@ pub struct LevelOutcome {
     /// The boss fought on this level (display name), if one appeared.
     #[serde(default)]
     pub boss_kind: Option<String>,
+    /// The fight by boss state: `[seconds, damage landed, distance × seconds]`.
+    #[serde(default)]
+    pub boss_states: BTreeMap<String, [f32; 3]>,
     /// Seconds each weapon kind was owned on this level.
     #[serde(default)]
     pub weapon_uptime: BTreeMap<String, f32>,
@@ -255,6 +267,11 @@ pub struct MinibossOutcome {
     /// too small or the rat's build is too strong.
     #[serde(default)]
     pub hp_max: f32,
+    /// Signatures it started, and how many of them hit the rat.
+    #[serde(default)]
+    pub strikes: u32,
+    #[serde(default)]
+    pub hits: u32,
 }
 
 /// A progression checkpoint as it appears in a report.
@@ -316,6 +333,9 @@ impl LevelOutcome {
             gold_collected: s.gold_collected,
             gold_spent: s.gold_spent,
             shop_purchases: s.shop_purchases,
+            gold_purse: s.gold_purse,
+            gold_chest: s.gold_chest,
+            elite_kills: s.elite_kills,
             xp_total: s.xp_total,
             minibosses: s
                 .minibosses
@@ -328,9 +348,12 @@ impl LevelOutcome {
                     length: m.length(),
                     killed: m.killed,
                     hp_max: m.hp_max,
+                    strikes: m.strikes,
+                    hits: m.hits,
                 })
                 .collect(),
             boss_kind: s.boss_kind.map(|s| s.to_string()),
+            boss_states: s.boss_states.clone(),
             weapon_uptime: s
                 .weapon_uptime
                 .iter()
@@ -485,6 +508,11 @@ pub struct MinibossAgg {
     pub killed: usize,
     /// Fight length in seconds, for the fights that ended.
     pub seconds: Percentiles,
+    /// Signatures started across those fights, and how many hit the rat.
+    #[serde(default)]
+    pub strikes: u32,
+    #[serde(default)]
+    pub hits: u32,
 }
 
 /// One boss's fight summary.
@@ -495,6 +523,22 @@ pub struct BossAgg {
     pub defeated: usize,
     pub seconds: Percentiles,
     pub dps: f32,
+    /// The fight by controller state, longest first: where the time goes and
+    /// what the rat lands in each.
+    #[serde(default)]
+    pub states: Vec<BossStateAgg>,
+}
+
+/// One controller state's share of a boss's fights.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct BossStateAgg {
+    pub state: String,
+    /// Share of all fight seconds spent in this state.
+    pub share: f32,
+    /// Damage per second the rat landed while the boss was in it.
+    pub dps: f32,
+    /// Mean rat-to-boss distance in it (px).
+    pub distance: f32,
 }
 
 /// The gold economy per level.
@@ -512,6 +556,20 @@ pub struct GoldAgg {
     pub at_3m: f32,
     /// Mean gold collected by the 3:00 checkpoint.
     pub collected_at_3m: f32,
+    /// Where a level's gold came from (means per level): Purse cards, chests
+    /// with nothing left to grant, elites (kills × `ELITE_GOLD`), the named
+    /// minibosses (kills × `MINIBOSS_GOLD`) and the boss. The rest of
+    /// `collected` is ordinary coin drops.
+    #[serde(default)]
+    pub from_purse: f32,
+    #[serde(default)]
+    pub from_chests: f32,
+    #[serde(default)]
+    pub from_elites: f32,
+    #[serde(default)]
+    pub from_minibosses: f32,
+    #[serde(default)]
+    pub from_boss: f32,
 }
 
 /// Deaths bucketed by minute on the level.
@@ -544,6 +602,28 @@ pub struct RunSummary {
     #[serde(default)]
     pub max_player_level: u32,
     pub death: Option<DeathOutcome>,
+    /// Each level the run played: the fights and the purse, so a mixed-skill
+    /// batch can be split by skill after the fact.
+    #[serde(default)]
+    pub levels: Vec<RunLevelSummary>,
+}
+
+/// One level of one run, as [`RunSummary::levels`] carries it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RunLevelSummary {
+    pub level: usize,
+    pub cleared: bool,
+    pub time: f32,
+    pub boss: Option<String>,
+    pub boss_seconds: f32,
+    pub boss_defeated: bool,
+    pub damage_total: f32,
+    pub gold_collected: u32,
+    pub gold_spent: u32,
+    pub shop_purchases: u32,
+    pub minibosses: Vec<MinibossOutcome>,
+    #[serde(default)]
+    pub boss_states: BTreeMap<String, [f32; 3]>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1110,9 +1190,12 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
     let mut evo_dealt: BTreeMap<String, f32> = BTreeMap::new();
     let mut mb_fights: BTreeMap<(u8, String), Vec<f32>> = BTreeMap::new();
     let mut mb_killed: BTreeMap<(u8, String), usize> = BTreeMap::new();
+    let mut mb_strikes: BTreeMap<(u8, String), (u32, u32)> = BTreeMap::new();
+    let mut gold_src = [0f32; 5];
     let mut boss_fights: BTreeMap<String, Vec<f32>> = BTreeMap::new();
     let mut boss_defeated: BTreeMap<String, usize> = BTreeMap::new();
     let mut boss_dps: BTreeMap<String, Vec<f32>> = BTreeMap::new();
+    let mut boss_states: BTreeMap<String, BTreeMap<String, [f32; 3]>> = BTreeMap::new();
     let mut gold_levels = 0usize;
     let mut gold_collected = 0f32;
     let mut gold_spent = 0f32;
@@ -1151,6 +1234,24 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
                 .max()
                 .unwrap_or(0),
             death: outcome.death.clone(),
+            levels: outcome
+                .levels
+                .iter()
+                .map(|l| RunLevelSummary {
+                    level: l.level,
+                    cleared: l.cleared,
+                    time: l.time,
+                    boss: l.boss_kind.clone(),
+                    boss_seconds: l.boss_seconds,
+                    boss_defeated: l.boss_defeated,
+                    damage_total: l.damage_total,
+                    gold_collected: l.gold_collected,
+                    gold_spent: l.gold_spent,
+                    shop_purchases: l.shop_purchases,
+                    minibosses: l.minibosses.clone(),
+                    boss_states: l.boss_states.clone(),
+                })
+                .collect(),
         });
         // A weapon "was taken" by a run once, however many levels levelled it.
         let mut taken_in_run = [false; crate::game::weapon::WEAPON_SLOTS];
@@ -1251,6 +1352,9 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
             for mb in &level.minibosses {
                 let key = (mb.appointment, mb.kind.clone());
                 mb_fights.entry(key.clone()).or_default().push(mb.length);
+                let tally = mb_strikes.entry(key.clone()).or_insert((0, 0));
+                tally.0 += mb.strikes;
+                tally.1 += mb.hits;
                 if mb.killed {
                     *mb_killed.entry(key).or_insert(0) += 1;
                 }
@@ -1265,6 +1369,13 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
                         .entry(boss.clone())
                         .or_default()
                         .push(level.boss_dps);
+                    let rows = boss_states.entry(boss.clone()).or_default();
+                    for (state, v) in &level.boss_states {
+                        let row = rows.entry(state.clone()).or_insert([0.0; 3]);
+                        for i in 0..3 {
+                            row[i] += v[i];
+                        }
+                    }
                     if level.boss_defeated {
                         *boss_defeated.entry(boss.clone()).or_insert(0) += 1;
                     }
@@ -1274,6 +1385,7 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
             gold_collected += level.gold_collected as f32;
             gold_spent += level.gold_spent as f32;
             gold_purchases += level.shop_purchases as f32;
+            add_gold_sources(&mut gold_src, level);
             if let Some(p) = level.progress.iter().find(|p| (p.at - 180.0).abs() < 0.01) {
                 gold_at_3m.push(p.gold as f32);
                 gold_collected_at_3m.push(p.gold_collected as f32);
@@ -1323,6 +1435,8 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
         // Wave 3 balance columns for this level: named fights, gold, deaths.
         let mut mb_fights: BTreeMap<(u8, String), Vec<f32>> = BTreeMap::new();
         let mut mb_killed: BTreeMap<(u8, String), usize> = BTreeMap::new();
+        let mut mb_strikes: BTreeMap<(u8, String), (u32, u32)> = BTreeMap::new();
+        let mut gold_src = [0f32; 5];
         let mut gold_levels = 0usize;
         let mut gold_collected = 0f32;
         let mut gold_spent = 0f32;
@@ -1402,6 +1516,9 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
                 for mb in &level.minibosses {
                     let key = (mb.appointment, mb.kind.clone());
                     mb_fights.entry(key.clone()).or_default().push(mb.length);
+                    let tally = mb_strikes.entry(key.clone()).or_insert((0, 0));
+                    tally.0 += mb.strikes;
+                    tally.1 += mb.hits;
                     if mb.killed {
                         *mb_killed.entry(key).or_insert(0) += 1;
                     }
@@ -1410,6 +1527,7 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
                 gold_collected += level.gold_collected as f32;
                 gold_spent += level.gold_spent as f32;
                 gold_purchases += level.shop_purchases as f32;
+                add_gold_sources(&mut gold_src, level);
                 if let Some(p) = level.progress.iter().find(|p| (p.at - 180.0).abs() < 0.01) {
                     gold_at_3m.push(p.gold as f32);
                     gold_collected_at_3m.push(p.gold_collected as f32);
@@ -1458,7 +1576,7 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
             agg.attempted,
             agg.cleared,
         );
-        agg.minibosses = miniboss_aggs(&mb_fights, &mb_killed);
+        agg.minibosses = miniboss_aggs(&mb_fights, &mb_killed, &mb_strikes);
         agg.mean_xp = mean(&xp_seen);
         agg.gold = GoldAgg {
             levels: gold_levels,
@@ -1467,6 +1585,11 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
             purchases: mean_or_zero(&gold_purchases, gold_levels),
             at_3m: mean(&gold_at_3m),
             collected_at_3m: mean(&gold_collected_at_3m),
+            from_purse: mean_or_zero(&gold_src[0], gold_levels),
+            from_chests: mean_or_zero(&gold_src[1], gold_levels),
+            from_elites: mean_or_zero(&gold_src[2], gold_levels),
+            from_minibosses: mean_or_zero(&gold_src[3], gold_levels),
+            from_boss: mean_or_zero(&gold_src[4], gold_levels),
         };
         agg.death_minutes = death_minute_aggs(&death_minutes);
     }
@@ -1629,8 +1752,8 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
             campaign_wins,
         ),
         evolutions: evolution_aggs(&evo_owned, &evo_uptime, &evo_dealt, &w_dealt),
-        minibosses: miniboss_aggs(&mb_fights, &mb_killed),
-        bosses: boss_aggs(&boss_fights, &boss_defeated, &boss_dps),
+        minibosses: miniboss_aggs(&mb_fights, &mb_killed, &mb_strikes),
+        bosses: boss_aggs(&boss_fights, &boss_defeated, &boss_dps, &boss_states),
         gold: GoldAgg {
             levels: gold_levels,
             collected: mean_or_zero(&gold_collected, gold_levels),
@@ -1638,6 +1761,11 @@ fn aggregate(opts: &BatchOpts, outcomes: Vec<RunOutcome>, wall_seconds: f64) -> 
             purchases: mean_or_zero(&gold_purchases, gold_levels),
             at_3m: mean(&gold_at_3m),
             collected_at_3m: mean(&gold_collected_at_3m),
+            from_purse: mean_or_zero(&gold_src[0], gold_levels),
+            from_chests: mean_or_zero(&gold_src[1], gold_levels),
+            from_elites: mean_or_zero(&gold_src[2], gold_levels),
+            from_minibosses: mean_or_zero(&gold_src[3], gold_levels),
+            from_boss: mean_or_zero(&gold_src[4], gold_levels),
         },
         nest,
         death_minutes: death_minute_aggs(&death_minutes),
@@ -1686,9 +1814,24 @@ fn evolution_aggs(
 }
 
 /// Build the named-miniboss rows.
+/// Add one level's gold-by-source to `[purse, chests, elites, minibosses,
+/// boss]`. Elites, minibosses and the boss are kills times their fixed payout
+/// (the coin still has to be picked up, so these are upper bounds).
+fn add_gold_sources(into: &mut [f32; 5], level: &LevelOutcome) {
+    use crate::game::shop::{BOSS_GOLD, ELITE_GOLD, MINIBOSS_GOLD};
+    into[0] += level.gold_purse as f32;
+    into[1] += level.gold_chest as f32;
+    into[2] += (level.elite_kills * ELITE_GOLD) as f32;
+    into[3] += (level.minibosses.iter().filter(|m| m.killed).count() as u32 * MINIBOSS_GOLD) as f32;
+    if level.boss_defeated {
+        into[4] += BOSS_GOLD as f32;
+    }
+}
+
 fn miniboss_aggs(
     fights: &BTreeMap<(u8, String), Vec<f32>>,
     killed: &BTreeMap<(u8, String), usize>,
+    strikes: &BTreeMap<(u8, String), (u32, u32)>,
 ) -> Vec<MinibossAgg> {
     let mut out: Vec<MinibossAgg> = fights
         .iter()
@@ -1701,6 +1844,8 @@ fn miniboss_aggs(
                 .copied()
                 .unwrap_or(0),
             seconds: Percentiles::of(seconds.clone()),
+            strikes: strikes.get(&(*appointment, kind.clone())).map_or(0, |t| t.0),
+            hits: strikes.get(&(*appointment, kind.clone())).map_or(0, |t| t.1),
         })
         .collect();
     out.sort_by(|a, b| {
@@ -1716,6 +1861,7 @@ fn boss_aggs(
     fights: &BTreeMap<String, Vec<f32>>,
     defeated: &BTreeMap<String, usize>,
     dps: &BTreeMap<String, Vec<f32>>,
+    states: &BTreeMap<String, BTreeMap<String, [f32; 3]>>,
 ) -> Vec<BossAgg> {
     let mut out: Vec<BossAgg> = fights
         .iter()
@@ -1725,6 +1871,23 @@ fn boss_aggs(
             defeated: defeated.get(boss).copied().unwrap_or(0),
             seconds: Percentiles::of(seconds.clone()),
             dps: mean(dps.get(boss).map(|v| v.as_slice()).unwrap_or(&[])),
+            states: {
+                let rows = states.get(boss);
+                let total: f32 = rows.map_or(0.0, |r| r.values().map(|v| v[0]).sum());
+                let mut out: Vec<BossStateAgg> = rows
+                    .into_iter()
+                    .flatten()
+                    .filter(|(_, v)| v[0] > 0.0)
+                    .map(|(state, v)| BossStateAgg {
+                        state: state.clone(),
+                        share: v[0] / total.max(1e-6),
+                        dps: v[1] / v[0],
+                        distance: v[2] / v[0],
+                    })
+                    .collect();
+                out.sort_by(|a, b| b.share.total_cmp(&a.share).then_with(|| a.state.cmp(&b.state)));
+                out
+            },
         })
         .collect();
     out.sort_by(|a, b| {
@@ -2333,8 +2496,8 @@ pub fn maybe_run_cli() -> Option<i32> {
 }
 
 const USAGE: &str = "\
-usage: ratrun --bot-batch <N> [--seed <S>] [--level <1-3>] [--practice] \
-[--carry none|typical] [--route sewer|kitchen|lab|laundry|printworks] \
+usage: ratrun --bot-batch <N> [--seed <S>] [--level <1-4>] [--practice] \
+[--carry none|typical] [--route sewer|kitchen|lab|laundry|printworks|flatbed] \
 [--skill expert|skilled|casual] [--cycle-skills] \
 [--seed-exact] [--max-sim-seconds <T>] [--threads <K>] [--analyze] [--json] \
 [--trace] [--caps <W:P>] \
@@ -2346,8 +2509,10 @@ usage: ratrun --bot-batch <N> [--seed <S>] [--level <1-3>] [--practice] \
   --analyze        also run the anomaly scan (see autoplay::anomaly) and list
                    every class it finds with example seeds (costs ~10 %)
   --cycle-skills   rotate Expert, Skilled, Casual per run (mixed-skill batch)
-  --route          play --level on this floor instead of the original route's
-                   (laundry / printworks are the two side routes)
+  --route          a campaign takes this floor at its own stage (laundry is
+                   level 2, printworks level 3); with --practice it is the
+                   floor played, at its own level unless --level says otherwise
+                   (flatbed is practice only, or --level 4)
   --seed-exact     read --seed as a run seed (replay an anomaly's seed)
   --caps W:P       distinct-kind slot caps (4:4 fresh profile, 8:8 maxed)
   --meta STAGE     nest stage: none (fresh), mid (half upgraded), max (everything)
@@ -2388,6 +2553,7 @@ pub fn parse_route(s: &str) -> Result<crate::game::level::Theme, String> {
 /// Parse the batch flags. `Ok(None)` means "the flag was not for us".
 pub fn parse_args(args: &[String]) -> Result<Option<BatchOpts>, String> {
     let mut opts = BatchOpts::default();
+    let mut level_given = false;
     let mut i = 0;
     let mut saw = false;
     while i < args.len() {
@@ -2414,6 +2580,7 @@ pub fn parse_args(args: &[String]) -> Result<Option<BatchOpts>, String> {
                     return Err(format!("level must be 1-{}", campaign::SECTOR_COUNT));
                 }
                 opts.start_level = level - 1;
+                level_given = true;
             }
             "--practice" => opts.practice = true,
             "--carry" => {
@@ -2476,18 +2643,38 @@ pub fn parse_args(args: &[String]) -> Result<Option<BatchOpts>, String> {
     if opts.runs == 0 {
         return Err("N must be at least 1".into());
     }
-    // The getaway ride is not a campaign step: `choose_route` only picks the
-    // *next* level's fork, so a campaign run that asked for the flatbed used to
-    // print a flatbed-looking run and silently play the original route. Refuse
-    // it instead, and keep `--practice --route flatbed` (a real practice floor).
-    if opts.route == Some(crate::game::level::Theme::Trailer)
-        && !opts.practice
-        && !campaign::is_getaway_sector(opts.start_level)
-    {
-        return Err(
-            "--route flatbed/trailer is a practice floor: add --practice (or --level 4 for the getaway ride)"
-                .into(),
-        );
+    // `--route` names a floor; make the level agree with it instead of
+    // silently playing something else.
+    if let Some(theme) = opts.route {
+        use crate::game::level::Theme;
+        let getaway = theme == Theme::Trailer;
+        if opts.practice {
+            // A practice run plays that floor alone. Without `--level` it gets
+            // the floor's own index (the Flatbed's is the getaway sector), so
+            // `--practice --route flatbed` is the ride and not the Sewer.
+            if !level_given {
+                opts.start_level = if getaway { campaign::LEVEL_COUNT } else { theme.stage() };
+            }
+        } else if getaway {
+            // The getaway ride is not a campaign step.
+            if !campaign::is_getaway_sector(opts.start_level) {
+                return Err(
+                    "--route flatbed/trailer is a practice floor: add --practice (or --level 4 for the getaway ride)"
+                        .into(),
+                );
+            }
+        } else if campaign::is_getaway_sector(opts.start_level) {
+            return Err(format!("--route {} cannot apply to --level 4 (the getaway ride)", theme.name()));
+        } else if opts.start_level > theme.stage() {
+            // A campaign takes the pick at the floor's own stage; a run that
+            // starts past it would never play it.
+            return Err(format!(
+                "--route {} is level {}: a campaign starting at --level {} never reaches it",
+                theme.name(),
+                theme.stage() + 1,
+                opts.start_level + 1
+            ));
+        }
     }
     Ok(Some(opts))
 }
@@ -2783,12 +2970,14 @@ resolving a 5-point difference between two arms needs ~{} runs per arm (95% conf
             s.push_str("  minibosses:\n");
             for m in &l.minibosses {
                 s.push_str(&format!(
-                    "    {} {:<16} {} of {} killed  length {}\n",
+                    "    {} {:<16} {} of {} killed  length {}  strikes {} hits {}\n",
                     m.appointment,
                     m.kind,
                     m.killed,
                     m.fights,
-                    dist(&m.seconds)
+                    dist(&m.seconds),
+                    m.strikes,
+                    m.hits
                 ));
             }
         }
@@ -2836,10 +3025,10 @@ resolving a 5-point difference between two arms needs ~{} runs per arm (95% conf
         s.push('\n');
     }
     if !r.minibosses.is_empty() {
-        s.push_str("Minibosses (fights / killed / fight length):\n");
+        s.push_str("Minibosses (fights / killed / fight length / signatures started and landed):\n");
         for m in &r.minibosses {
             s.push_str(&format!(
-                "  {:<2} {:<16} fights {:>3}  killed {:>3} ({})  length {}\n",
+                "  {:<2} {:<16} fights {:>3}  killed {:>3} ({})  length {}  strikes {} hits {}\n",
                 m.appointment,
                 m.kind,
                 m.fights,
@@ -2849,7 +3038,9 @@ resolving a 5-point difference between two arms needs ~{} runs per arm (95% conf
                 } else {
                     0.0
                 }),
-                dist(&m.seconds)
+                dist(&m.seconds),
+                m.strikes,
+                m.hits
             ));
         }
         s.push('\n');
@@ -2870,6 +3061,23 @@ resolving a 5-point difference between two arms needs ~{} runs per arm (95% conf
                 dist(&b.seconds),
                 b.dps
             ));
+            if !b.states.is_empty() {
+                let cells: Vec<String> = b
+                    .states
+                    .iter()
+                    .take(8)
+                    .map(|st| {
+                        format!(
+                            "{} {:.0}% {:.0}dps @{:.0}px",
+                            st.state,
+                            st.share * 100.0,
+                            st.dps,
+                            st.distance
+                        )
+                    })
+                    .collect();
+                s.push_str(&format!("      by state: {}\n", cells.join(", ")));
+            }
         }
         s.push('\n');
     }
@@ -2881,6 +3089,20 @@ resolving a 5-point difference between two arms needs ~{} runs per arm (95% conf
             r.gold.purchases,
             r.gold.at_3m,
             r.gold.collected_at_3m
+        ));
+        let named = r.gold.from_purse
+            + r.gold.from_chests
+            + r.gold.from_elites
+            + r.gold.from_minibosses
+            + r.gold.from_boss;
+        s.push_str(&format!(
+            "  by source per level: coins {:.0}, elites {:.0}, purse cards {:.0}, minibosses {:.0}, boss {:.0}, chests {:.0}\n",
+            (r.gold.collected - named).max(0.0),
+            r.gold.from_elites,
+            r.gold.from_purse,
+            r.gold.from_minibosses,
+            r.gold.from_boss,
+            r.gold.from_chests
         ));
         s.push('\n');
     }
@@ -3114,6 +3336,33 @@ mod tests {
         // And the getaway ride needs no route at all.
         let opts = parse_args(&args(&["--level", "4"])).expect("getaway parses").expect("ours");
         assert_eq!(opts.route, None);
+        // `--practice --route flatbed` with no level is the ride itself (it
+        // used to play the Sewer: the route was dropped at level 1).
+        let opts = parse_args(&args(&["--practice", "--route", "flatbed"]))
+            .expect("parses")
+            .expect("ours");
+        assert_eq!(opts.start_level, campaign::LEVEL_COUNT);
+        let run = AutoRun::new(7, auto_opts(&opts));
+        assert_eq!(run.world().level.theme, crate::game::level::Theme::Trailer);
+        // A side route without a level is that floor in practice, and its own
+        // stage of a campaign that starts at level 1.
+        let opts = parse_args(&args(&["--practice", "--route", "printworks"]))
+            .expect("parses")
+            .expect("ours");
+        assert_eq!(opts.start_level, 2);
+        let run = AutoRun::new(7, auto_opts(&opts));
+        assert_eq!(run.world().level.theme, crate::game::level::Theme::Printworks);
+        let opts = parse_args(&args(&["--route", "laundry"])).expect("parses").expect("ours");
+        assert_eq!(opts.start_level, 0);
+        let run = AutoRun::new(7, auto_opts(&opts));
+        assert_eq!(run.world().level.theme, crate::game::level::Theme::Sewer);
+        assert_eq!(
+            run.campaign_route().map(|r| r.theme(1)),
+            Some(crate::game::level::Theme::Laundry),
+            "the campaign takes the pick at the floor's own stage"
+        );
+        // A campaign that starts past the floor's stage can never play it.
+        assert!(parse_args(&args(&["--level", "3", "--route", "laundry"])).is_err());
     }
 
     #[test]

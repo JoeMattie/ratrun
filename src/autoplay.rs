@@ -258,6 +258,9 @@ pub enum DamageCause {
     BossProjectile(BossKind),
     /// A named miniboss's signature hit (the appointment's own warned shape).
     MinibossSignature(crate::game::ecs::systems::miniboss::MinibossKind),
+    /// Body contact with a named miniboss. It is a `Brute` body, so this used
+    /// to be booked as "brute contact" and hid in the horde's numbers.
+    MinibossBody,
     /// A floor trap (the mousetrap snap; glue only slows).
     Trap,
     /// A Laundry steam grate's plume (it used to be booked to the nearest
@@ -521,6 +524,7 @@ impl DamageCause {
             },
             // It fires nothing but its own spit; the arm keeps the label honest.
             DamageCause::BossProjectile(BossKind::Cobra) => "cobra venom",
+            DamageCause::MinibossBody => "miniboss body",
             DamageCause::Trap => "mousetrap",
             DamageCause::Steam => "steam grate",
             DamageCause::Pit => "deck hole",
@@ -685,10 +689,20 @@ pub struct LevelStats {
     pub gold_spent: u32,
     /// Purchases made at the gene-splice shop on this level.
     pub shop_purchases: u32,
+    /// Gold paid by Purse cards on this level (part of `gold_collected`).
+    pub gold_purse: u32,
+    /// Gold paid by chests with nothing left to grant.
+    pub gold_chest: u32,
+    /// Elites that died on this level (each drops `shop::ELITE_GOLD`).
+    pub elite_kills: u32,
     /// Named miniboss fights on this level, in appointment order.
     pub minibosses: Vec<MinibossFight>,
     /// The boss fought on this level (its `BossKind` name), if one appeared.
     pub boss_kind: Option<&'static str>,
+    /// The boss fight by controller state: `[seconds spent, damage the rat
+    /// landed, rat-to-boss distance summed per second]`. This is what says
+    /// whether a long fight is a big pool or a boss that cannot be reached.
+    pub boss_states: BTreeMap<String, [f32; 3]>,
     /// Seconds each weapon kind was owned on this level (uptime by kind).
     pub weapon_uptime: BTreeMap<&'static str, f32>,
     /// Damage each evolved weapon dealt on this level, keyed by evolution
@@ -721,6 +735,10 @@ pub struct MinibossFight {
     pub hp_max: f32,
     /// Did the rat kill it (chest paid) or did it retreat?
     pub killed: bool,
+    /// Signatures it started (tells that reached their strike).
+    pub strikes: u32,
+    /// Signature hits it landed on the rat.
+    pub hits: u32,
 }
 
 impl MinibossFight {
@@ -833,6 +851,13 @@ pub struct AutoRun {
     ticks: u64,
     /// The miniboss fight currently open (started, not yet ended).
     mb_open: Option<MinibossFight>,
+    /// Was the open miniboss mid-strike last tick? (A rise counts a strike.)
+    mb_striking: bool,
+    /// `Enemy::id`s of the elites alive before last tick: one that is gone
+    /// before the next died (elites never retreat).
+    elites_alive: Vec<u32>,
+    /// Scratch for the next `elites_alive`.
+    elites_now: Vec<u32>,
     /// Last tick's `MinibossSchedule::grace_suppress_until`, so a rise means a
     /// miniboss was killed (the retreat path does not touch it).
     prev_grace_suppress: f32,
@@ -857,7 +882,14 @@ impl AutoRun {
         }
         // `--route`: play the start level on a side-route floor (Laundry,
         // Printworks) instead of the original route's own.
-        let route = opts.route.filter(|_| !getaway && start_level > 0);
+        //
+        // A practice run plays `start_level` on that floor whatever the index
+        // (it used to be dropped at level 1, so `--practice --route flatbed`
+        // quietly played the Sewer). A campaign applies the pick to the floor's
+        // **own stage**, so `--route laundry` from level 1 plays Sewer →
+        // Laundry → Lab (it used to call `choose_route`, which only ever
+        // names the *next* stage, and so never took effect).
+        let route = opts.route.filter(|_| !getaway);
         let (campaign, world) = if getaway {
             (None, {
                 let mut world = World::new_level_with_theme(
@@ -875,7 +907,7 @@ impl AutoRun {
             state.level = start_level;
             state.loadout = start_loadout;
             if let Some(theme) = route {
-                let _ = state.choose_route(theme);
+                let _ = state.route.choose(theme.stage(), theme);
             }
             let world = state.world();
             (Some(state), world)
@@ -920,6 +952,9 @@ impl AutoRun {
             won: false,
             ticks: 0,
             mb_open: None,
+            mb_striking: false,
+            elites_alive: Vec::new(),
+            elites_now: Vec::new(),
             prev_grace_suppress: 0.0,
             prev_gold: start_gold,
         }
@@ -927,6 +962,11 @@ impl AutoRun {
 
     pub fn opts(&self) -> AutoOpts {
         self.opts
+    }
+
+    /// The campaign's route (`None` for a practice run).
+    pub fn campaign_route(&self) -> Option<campaign::Route> {
+        self.campaign.as_ref().map(|c| c.route)
     }
 
     /// One simulation tick plus every bot decision it implies.
@@ -962,7 +1002,12 @@ impl AutoRun {
             self.world.pending_levelups -= 1;
             self.take_upgrade();
         }
+        let before_chests = self.world.gold;
         Bot::claim_chests(&mut self.world);
+        let chest_gold = self.world.gold.saturating_sub(before_chests);
+        if chest_gold > 0 {
+            self.level_stats().gold_chest += chest_gold;
+        }
         // The mouse-hole shelf takes over the frame the threshold fires: buy
         // what is worth buying and leave, so a self-playing run never stalls on
         // a menu it cannot see.
@@ -1126,6 +1171,7 @@ impl AutoRun {
                 .world
                 .gold
                 .saturating_add(crate::game::loadout::PURSE_GOLD);
+            self.level_stats().gold_purse += crate::game::loadout::PURSE_GOLD;
         }
         self.level_stats().upgrades.push(title);
     }
@@ -1240,6 +1286,8 @@ impl AutoRun {
     /// Reset the per-level economy/miniboss trackers when a new level starts.
     fn start_level_tracking(&mut self) {
         self.mb_open = None;
+        self.mb_striking = false;
+        self.elites_alive.clear();
         self.prev_grace_suppress = 0.0;
         self.prev_gold = self.world.gold;
     }
@@ -1270,9 +1318,15 @@ impl AutoRun {
         } else {
             None
         };
+        if let (Some(DamageCause::MinibossSignature(_)), Some(open)) = (cause, self.mb_open.as_mut())
+        {
+            open.hits += 1;
+        }
         let level = self.world.level_index;
         let elapsed = self.world.elapsed;
         let boss_after = self.boss_state();
+        let boss_pose = living_boss_pose(&self.world);
+        let rat_pos = self.world.player.pos;
         let boss_max = self.world.boss_hp().map(|(_, max)| max).unwrap_or(1.0);
         let level_complete = self.world.level_complete();
         let dps_now = analytic_dps(&self.world.player.loadout);
@@ -1345,6 +1399,12 @@ impl AutoRun {
                 if dealt > 0.0 {
                     self.boss_damage += dealt;
                 }
+                if let Some((state, pos)) = boss_pose {
+                    let row = stats.boss_states.entry(state).or_insert([0.0; 3]);
+                    row[0] += dt;
+                    row[1] += dealt.max(0.0);
+                    row[2] += pos.dist(rat_pos) * dt;
+                }
                 stats.boss_seconds += dt;
                 if stats.boss_seconds > 0.0 {
                     stats.boss_dps = self.boss_damage / stats.boss_seconds;
@@ -1384,6 +1444,13 @@ impl AutoRun {
             .resource::<MinibossSchedule>()
             .grace_suppress_until;
         let mb = living_miniboss_info(&self.world);
+        let striking = living_miniboss_striking(&self.world);
+        if striking && !self.mb_striking {
+            if let Some(open) = self.mb_open.as_mut() {
+                open.strikes += 1;
+            }
+        }
+        self.mb_striking = striking;
         match (self.mb_open, mb) {
             (None, Some((appointment, kind, hp_max))) => {
                 self.mb_open = Some(MinibossFight {
@@ -1393,6 +1460,8 @@ impl AutoRun {
                     ended_at: 0.0,
                     hp_max,
                     killed: false,
+                    strikes: 0,
+                    hits: 0,
                 });
             }
             (Some(open), Some((appointment, kind, hp_max))) => {
@@ -1408,6 +1477,8 @@ impl AutoRun {
                         ended_at: 0.0,
                         hp_max,
                         killed: false,
+                        strikes: 0,
+                        hits: 0,
                     });
                 }
             }
@@ -1494,6 +1565,7 @@ impl AutoRun {
     fn snapshot_threats(&mut self) {
         self.threats.clear();
         self.near_enemy = false;
+        self.elites_now.clear();
         let w = &self.world;
         let p = w.player.pos;
         let armor = w.player.loadout.stats.armor;
@@ -1524,6 +1596,9 @@ impl AutoRun {
                 if !en.alive() {
                     continue;
                 }
+                if en.elite {
+                    self.elites_now.push(en.id);
+                }
                 let d = en.pos.dist(p);
                 if d - en.radius <= NEAR_ENEMY_PX {
                     self.near_enemy = true;
@@ -1540,7 +1615,11 @@ impl AutoRun {
                 }
                 if d < en.radius + R + 4.0 {
                     self.threats.push((
-                        DamageCause::EnemyContact(en.kind),
+                        if en.named {
+                            DamageCause::MinibossBody
+                        } else {
+                            DamageCause::EnemyContact(en.kind)
+                        },
                         (en.damage - armor).max(1.0),
                         d,
                     ));
@@ -1590,9 +1669,17 @@ impl AutoRun {
                 // A dead Wick Moth's fuse running out inside this tick.
                 use crate::game::ecs::systems::enemy_wave3 as w3;
                 let d = wick.pos.dist(p);
+                // An Ink Blot's wick slides before it bursts: read the burst
+                // where it will be, and name it for the blot.
+                let slide = e.get::<crate::game::ecs::systems::floor_printworks::InkSlide>();
+                let (owner, at) = match slide {
+                    Some(slide) => (EnemyKind::InkBlot, slide.at(wick.fuse.max(0.0))),
+                    None => (EnemyKind::WickMoth, wick.pos),
+                };
+                let d = d.min(at.dist(p));
                 if wick.fuse <= 0.05 && d <= w3::WICK_BURST_RADIUS + R + 2.0 {
                     self.threats.push((
-                        DamageCause::FloorAttack(EnemyKind::WickMoth),
+                        DamageCause::FloorAttack(owner),
                         (w3::WICK_RAT_DAMAGE - armor).max(1.0),
                         d,
                     ));
@@ -1619,6 +1706,13 @@ impl AutoRun {
                 self.threats.push((DamageCause::EnemyContact(kind), 1.0, d));
             }
         }
+        // Elites that were alive before last tick and are gone now died in it.
+        let dead_elites = self
+            .elites_alive
+            .iter()
+            .filter(|id| !self.elites_now.contains(id))
+            .count() as u32;
+        std::mem::swap(&mut self.elites_alive, &mut self.elites_now);
         for trap in &w.level.objects.mousetraps {
             // Any trap that can still bite this tick: a counting-down or
             // swinging bar, and an **armed** one too (the snapshot is pre-tick,
@@ -1693,6 +1787,9 @@ impl AutoRun {
                 ));
             }
         }
+        if dead_elites > 0 {
+            self.level_stats().elite_kills += dead_elites;
+        }
     }
 }
 
@@ -1740,8 +1837,17 @@ fn floor_attack_landing(en: &Enemy, p: Vec2) -> Option<f32> {
                 && [en.w4.trail[0], en.w4.trail[1]].iter().any(|f| f.dist(p) <= reach))
             .then_some(floor_printworks::STAPLE_FOOT_DAMAGE)
         }
-        // The tongue only slows, and a rolling can is its own body's contact.
-        EnemyKind::SumpLeech | EnemyKind::LooseCan => None,
+        // The tongue only slows: it has no damage to book.
+        EnemyKind::SumpLeech => None,
+        // The roll is the can's one warned hit (its body's own damage), along
+        // the lane it rocked over: a rolling can within a couple of ticks'
+        // travel of the rat. (A rock that ends this tick only starts the roll.)
+        EnemyKind::LooseCan => {
+            use crate::game::ecs::systems::floor_flatbed as fb;
+            let rolling = en.w4.phase == fb::CAN_PHASE_ROLL;
+            let reach = fb::CAN_LANE_HALF_WIDTH + slack + fb::CAN_ROLL_SPEED / 30.0;
+            (rolling && en.pos.dist(p) <= reach).then_some(en.damage)
+        }
         _ => match en.kind.archetype() {
             EnemyKind::BellFlea => {
                 // Phase 1: the first cross (at `hop_to`) is pending. Phase 2:
@@ -1786,6 +1892,11 @@ fn floor_attack_name(kind: EnemyKind) -> &'static str {
         EnemyKind::WalkingSyringe => "syringe needle",
         EnemyKind::PegSnapper => "peg snapper jaws",
         EnemyKind::StapleCrawler => "staple crawler feet",
+        EnemyKind::LooseCan => "loose can roll",
+        // The crossbar that lands the hook's pull, and the blot's sliding
+        // burst: the base body's attack under the floor's own name.
+        EnemyKind::LooseBungee => "loose bungee hook",
+        EnemyKind::InkBlot => "ink blot burst",
         _ => match kind.archetype() {
             EnemyKind::BellFlea => "bell flea landing",
             EnemyKind::Turnkey => "turnkey crossbar",
@@ -1809,6 +1920,7 @@ fn classify_death(w: &World, cause: DamageCause) -> String {
         DamageCause::Cargo => "hazard: sliding cargo".to_string(),
         DamageCause::FloorAttack(kind) => format!("floor attack: {}", floor_attack_name(kind)),
         DamageCause::MinibossSignature(kind) => format!("miniboss: {} signature", kind.name()),
+        DamageCause::MinibossBody => "miniboss: body contact".to_string(),
         DamageCause::BossContact(kind) => format!("boss: {} body", boss_name(kind)),
         DamageCause::BossHazard(kind, attack) => {
             format!("boss: {} {}", boss_name(kind), attack.name())
@@ -1940,6 +2052,33 @@ fn living_miniboss_info(w: &World) -> Option<(u8, &'static str, f32)> {
             return None;
         }
         Some((mb.appointment as u8, mb.kind.name(), e.max_hp))
+    })
+}
+
+/// Is a living miniboss inside its strike's active window right now?
+fn living_miniboss_striking(w: &World) -> bool {
+    w.ecs.iter_entities().any(|entity| {
+        entity.get::<Enemy>().is_some_and(|e| e.alive())
+            && entity.get::<Miniboss>().is_some_and(|mb| {
+                mb.state == crate::game::ecs::systems::miniboss::MinibossState::Active
+            })
+    })
+}
+
+/// The living boss's controller state (the variant's name, payload dropped)
+/// and position.
+fn living_boss_pose(w: &World) -> Option<(String, Vec2)> {
+    w.ecs.iter_entities().find_map(|entity| {
+        let b = entity.get::<Boss>()?;
+        if b.dead {
+            return None;
+        }
+        // `Mower(Flipped)` / `Broom(StompWalk { left_foot: true })` -> the
+        // inner variant's bare name.
+        let full = format!("{:?}", b.state);
+        let inner = full.split_once('(').map_or(full.as_str(), |(_, rest)| rest);
+        let name: String = inner.chars().take_while(|c| c.is_alphanumeric()).collect();
+        Some((name, b.pos))
     })
 }
 
@@ -2240,6 +2379,51 @@ pub fn run_to_end(run: &mut AutoRun, dt: f32, max_seconds: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every warned floor attack has its own row in the damage table, and a
+    /// named body's contact is not booked as a Brute's.
+    #[test]
+    fn warned_floor_attacks_and_miniboss_bodies_have_their_own_labels() {
+        let mut seen = std::collections::BTreeSet::new();
+        for kind in [
+            EnemyKind::EggTimer,
+            EnemyKind::WalkingSyringe,
+            EnemyKind::PegSnapper,
+            EnemyKind::StapleCrawler,
+            EnemyKind::LooseCan,
+            EnemyKind::LooseBungee,
+            EnemyKind::InkBlot,
+            EnemyKind::WickMoth,
+            EnemyKind::BellFlea,
+            EnemyKind::Turnkey,
+            EnemyKind::MurderHornet,
+        ] {
+            let name = DamageCause::FloorAttack(kind).name();
+            assert_ne!(name, "warned floor attack", "{kind:?} has no label of its own");
+            assert_ne!(name, DamageCause::EnemyContact(kind).name(), "{kind:?}");
+            assert!(seen.insert(name), "{kind:?} shares the label {name:?}");
+        }
+        assert_ne!(
+            DamageCause::MinibossBody.name(),
+            DamageCause::EnemyContact(EnemyKind::Brute).name()
+        );
+    }
+
+    /// A rolling Loose Can within reach of the rat is read as its roll, not
+    /// as body contact.
+    #[test]
+    fn a_rolling_can_is_attributed_to_its_roll() {
+        use crate::game::ecs::systems::floor_flatbed as fb;
+        let mut rng = StdRng::seed_from_u64(3);
+        let p = Vec2::new(100.0, 100.0);
+        let mut can = Enemy::spawn(EnemyKind::LooseCan, p + Vec2::new(4.0, 0.0), 1.0, &mut rng);
+        assert_eq!(floor_attack_landing(&can, p), None, "a walking can has no roll");
+        can.w4.phase = fb::CAN_PHASE_ROLL;
+        assert_eq!(floor_attack_landing(&can, p), Some(can.damage));
+        can.pos = p + Vec2::new(60.0, 0.0);
+        assert_eq!(floor_attack_landing(&can, p), None, "out of the roll's reach");
+    }
+
     use crate::game::level::Theme;
     use crate::game::loadout::Upgrade;
 
@@ -2493,10 +2677,19 @@ mod tests {
     /// campaign-level clear/win bands live in
     /// [`early_game_headline_rates_stay_inside_generous_bands`] and in the
     /// 60-run batches.
+    ///
+    /// **Batch seven re-baseline (un-ignored).** On the fifteen-minute curve the
+    /// first 120 s are a calm opening and the window read noise (Expert 4,
+    /// Skilled 50, Casual 48 HP over six seeds). At **300 s** the same seeds
+    /// read Expert 39, Skilled 72, Casual 435 (release batch, seed base 900,
+    /// practice level 1, nobody dead), so the window is five minutes and the
+    /// bands are: Expert no worse than Skilled plus one hit's slack, and
+    /// Casual at least twice Skilled. (At 480 s: 491 / 569 / 1,314.) The
+    /// campaign win rates the ladder is tuned to (about 92 / 85 / 38 % over 48
+    /// campaigns a skill) are a batch measurement, not a suite one.
     #[test]
-    #[ignore = "re-baseline in the wave 3 balance pass"]
     fn skills_form_an_ordered_ladder_on_the_same_seeds() {
-        const EARLY_CAP: f32 = 120.0;
+        const EARLY_CAP: f32 = 300.0;
         const EARLY_SEEDS: usize = 6;
         const BOSS_SEEDS: usize = 3;
         // Wave 3: the boss arrives at 900 s, so a cap below that can never
@@ -2533,16 +2726,17 @@ mod tests {
             damage_taken(skilled),
             damage_taken(casual),
         );
-        // The 15-minute re-base opens much calmer (0.8→1.5 bodies/s), so the
-        // 120 s window is close to noise: check the ladder's direction, not a
-        // fixed percentage.
+        // Expert and Skilled are close this early (39 against 72 measured,
+        // one seed's single 46 HP hit decides it), so the top step is checked
+        // with one hit of slack; the bottom step is wide and checked as a
+        // ratio.
         assert!(
-            de <= ds,
+            de <= ds + 40.0,
             "expert took {de:.0} HP in {EARLY_CAP:.0} s, skilled {ds:.0}: the ladder reversed"
         );
         assert!(
-            ds <= dc,
-            "skilled took {ds:.0} HP in {EARLY_CAP:.0} s, casual {dc:.0}: the ladder reversed"
+            ds * 2.0 <= dc,
+            "skilled took {ds:.0} HP in {EARLY_CAP:.0} s, casual only {dc:.0}: the bottom step closed"
         );
         // Per-seed, not just in aggregate: expert picks up less damage than
         // casual on (almost) every one of these seeds.
