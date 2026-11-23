@@ -1185,8 +1185,10 @@ impl Miniboss {
     }
 }
 
-/// HP by appointment (3:00 / 6:00 / 9:00 / 12:00): 4500 / 10700 / 14400 /
-/// 18100.
+/// HP by appointment (3:00 / 6:00 / 9:00 / 12:00) on campaign level one:
+/// 270 / 1498 / 2736 / 4163 since batch twelve ([`appointment_hp_for`] has the
+/// later levels). The full-build pools they are scaled from are 4500 / 10700
+/// / 14400 / 18100.
 ///
 /// The wave-3 ladder (160 / 320 / 540 / 780) died in 2–6 s, and batch six's
 /// (800 / 1600 / 2500 / 3400) in 5 / 7 / 10 / 14 s for the Skilled bot: one
@@ -1200,13 +1202,32 @@ impl Miniboss {
 /// goes through this function.
 #[inline]
 pub fn appointment_hp(appointment: usize) -> f32 {
-    match appointment {
-        0 => 4500.0,
-        1 => 10700.0,
-        2 => 14400.0,
-        _ => 18100.0,
-    }
+    appointment_hp_for(0, appointment)
 }
+
+/// [`appointment_hp`] on a campaign level (the difficulty level: a practice
+/// run plays level one's row).
+#[inline]
+pub fn appointment_hp_for(level: usize, appointment: usize) -> f32 {
+    let i = appointment.min(3);
+    APPOINTMENT_HP_FULL[i] * APPOINTMENT_BUILD_SCALE[level.min(3)][i]
+}
+
+/// The pools sized against a full batch-eight build (see [`appointment_hp`]).
+const APPOINTMENT_HP_FULL: [f32; 4] = [4500.0, 10700.0, 14400.0, 18100.0];
+/// Batch twelve: what a quarter-as-many-cards build is worth against that
+/// one, by campaign level (rows) and appointment (columns).
+/// `director::BUILD_HP` is the horde's and the boss's version of the same
+/// correction. Level one starts from the bare Gnaw, so its 3:00 pool is 270;
+/// levels two to four arrive with a carried build. Measured medians over 48
+/// mixed-skill campaigns: 24 / 32 / 40 / 43 s by slot (the batch-seven targets
+/// were 23 / 32 / 42 / 44).
+const APPOINTMENT_BUILD_SCALE: [[f32; 4]; 4] = [
+    [0.06, 0.14, 0.19, 0.23],
+    [0.58, 0.48, 0.64, 0.49],
+    [0.52, 0.45, 0.47, 0.39],
+    [0.48, 0.36, 0.46, 0.45],
+];
 
 /// Signature damage by appointment: 18 / 22 / 26 / 30 (the design's §8 row
 /// was 14 / 16 / 18 / 20; batch seven raised it so the signature, not the
@@ -1292,6 +1313,7 @@ fn spawn_miniboss(
     commands: &mut Commands,
     kind: MinibossKind,
     appointment: usize,
+    level: usize,
     pos: Vec2,
     next_id: &mut NextSpawnId,
     next_enemy_id: &mut NextEnemyId,
@@ -1300,7 +1322,7 @@ fn spawn_miniboss(
     // A Brute body carries the miniboss so every existing weapon, trap and
     // bullet path already targets it. The stats are overwritten below.
     let mut e = Enemy::spawn(EnemyKind::Brute, pos, 1.0, rng);
-    e.hp = appointment_hp(appointment);
+    e.hp = appointment_hp_for(level, appointment);
     e.max_hp = e.hp;
     e.radius = kind.body_radius();
     e.damage = MINIBOSS_CONTACT_DAMAGE;
@@ -1328,6 +1350,7 @@ pub fn miniboss_system(
     mut next_enemy_id: ResMut<NextEnemyId>,
     mut sfx: ResMut<SfxQueue>,
     mut particles: ResMut<Particles>,
+    difficulty: Res<crate::game::ecs::resources::DifficultyLevel>,
     mut scratch: Local<SpawnScratch>,
     mut order: Local<Vec<(u64, Entity)>>,
     mut bosses: Query<(Entity, &mut Enemy, &mut Miniboss, &SpawnId)>,
@@ -1479,6 +1502,7 @@ pub fn miniboss_system(
                     &mut commands,
                     kind,
                     schedule.next,
+                    difficulty.0,
                     pos,
                     &mut next_id,
                     &mut next_enemy_id,
@@ -2076,10 +2100,23 @@ mod tests {
         // Batch eight: the same fights against a rat whose level adds damage
         // (batch seven's 3800 / 8000 / 10000 / 12000 times the level bonus at
         // each appointment).
+        // Batch twelve: each is scaled for the smaller builds, by level and
+        // slot (`APPOINTMENT_BUILD_SCALE`); level one's row is the default.
         let base = [3800.0f32, 8000.0, 10000.0, 12000.0];
-        let pools = [4500.0f32, 10700.0, 14400.0, 18100.0];
+        let pools = APPOINTMENT_HP_FULL;
+        assert_eq!(pools, [4500.0f32, 10700.0, 14400.0, 18100.0]);
+        let level_one = [270.0f32, 1498.0, 2736.0, 4163.0];
         for (slot, time) in MINIBOSS_TIMES.iter().enumerate() {
-            assert_eq!(appointment_hp(slot), pools[slot]);
+            assert!((appointment_hp(slot) - level_one[slot]).abs() < 0.5, "slot {slot}");
+            assert_eq!(appointment_hp(slot), appointment_hp_for(0, slot));
+            for level in 1..4 {
+                assert!(
+                    appointment_hp_for(level, slot) > appointment_hp(slot),
+                    "a carried build meets a larger pool (level {level}, slot {slot})"
+                );
+            }
+            // The full-build pool is batch seven's times the level bonus
+            // (without batch twelve's build correction).
             let want = base[slot] * crate::game::director::level_bonus_hp_at(*time);
             assert!(
                 (pools[slot] - want).abs() < want * 0.02,

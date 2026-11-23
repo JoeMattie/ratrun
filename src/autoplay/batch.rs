@@ -60,11 +60,11 @@ use crate::game::weapon::WeaponKind;
 pub const DT: f32 = 1.0 / 60.0;
 /// Default cap on simulated time per run (seconds).
 ///
-/// A campaign is **three fifteen-minute levels** (3 × 900 s) plus three boss
-/// fights, so the old 1500 s cap cut every full campaign off in the middle of
-/// its second level: the batch could never report a campaign clear at all. 3600
-/// leaves room for a long boss beat on every floor.
-pub const DEFAULT_MAX_SIM_SECONDS: f32 = 3600.0;
+/// A campaign is **four fifteen-minute levels** (4 × 900 s) plus four boss
+/// fights. The three-level cap (3600) cut every campaign off in the middle of
+/// the Flatbed, so no batch could report a clear; 4800 leaves room for a long
+/// boss beat on every floor.
+pub const DEFAULT_MAX_SIM_SECONDS: f32 = 4800.0;
 
 /// Parsed command line.
 #[derive(Clone, Debug)]

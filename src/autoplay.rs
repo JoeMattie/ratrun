@@ -917,6 +917,13 @@ impl AutoRun {
                 ),
                 None => World::new_level(start_level, seed, start_loadout),
             };
+            // A practice run on the bare starting loadout plays the first
+            // level's curve, exactly as the App's practice floors do
+            // (`App::start_practice`): the later rows assume a carried build.
+            let mut world = world;
+            if matches!(opts.carry, CarryPreset::None) {
+                world.difficulty_override = Some(0);
+            }
             (None, world)
         };
         let mut stats = RunStats::default();
@@ -2914,8 +2921,10 @@ mod tests {
         assert!(!level_at_60.is_empty(), "no run reached the 60 s checkpoint");
         let mean_level = level_at_60.iter().sum::<f32>() / level_at_60.len() as f32;
         assert!(
-            (1.5..8.0).contains(&mean_level),
-            "mean player level at 60 s is {mean_level:.1} (band 1.5-8): the XP curve moved"
+            // Batch twelve: level-ups cost four times the XP, and the first
+            // card lands at 40-80 s on a bare-Gnaw start (measured 1.2-1.6).
+            (1.0..3.0).contains(&mean_level),
+            "mean player level at 60 s is {mean_level:.1} (band 1.0-3): the XP curve moved"
         );
         let mut firsts: Vec<f32> = all
             .iter()
@@ -2926,8 +2935,10 @@ mod tests {
         if !firsts.is_empty() {
             let median = firsts[firsts.len() / 2];
             assert!(
-                (8.0..50.0).contains(&median),
-                "first level-up median {median:.1} s (band 8-50 s): the opening moved"
+                // Batch twelve: the first level costs 13 XP (it was 6) and the
+                // starting Gnaw is a bite; measured 41-77 s.
+                (20.0..110.0).contains(&median),
+                "first level-up median {median:.1} s (band 20-110 s): the opening moved"
             );
         }
     }

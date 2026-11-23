@@ -326,7 +326,7 @@ pub const BOSS_POOL_SCALE: f32 = 4.0;
 /// [`BOSS_POOL_SCALE`] (the horde's own extra is deliberately excluded).
 #[inline]
 pub fn boss_hp_mult_for(level: usize, elapsed: f32) -> f32 {
-    hp_mult_for(level, elapsed) * BOSS_POOL_SCALE
+    hp_mult_for(level, elapsed) * BOSS_POOL_SCALE * BOSS_BUILD_LEVEL[level_slot(level)]
 }
 
 /// How tough enemies are right now (HP multiplier) on the curve clock.
@@ -338,10 +338,12 @@ pub fn boss_hp_mult_for(level: usize, elapsed: f32) -> f32 {
 ///
 /// On top of that sits [`level_bonus_hp_at`]: the rat's character level now
 /// adds weapon damage, and the pools grow by the bonus a typical rat carries
-/// at that minute, so a body still takes the hits it took before.
+/// at that minute, so a body still takes the hits it took before. And on top
+/// of that, [`build_hp_at`]: batch twelve's builds hold a quarter of the cards,
+/// and the pools are cut to match.
 #[inline]
 pub fn hp_mult_at(curve: f32) -> f32 {
-    (1.0 + curve / RUN_SECONDS) * level_bonus_hp_at(curve)
+    (1.0 + curve / RUN_SECONDS) * level_bonus_hp_at(curve) * build_hp_at(curve)
 }
 
 /// The weapon-damage bonus a typical rat's character level is worth on the
@@ -379,10 +381,57 @@ pub fn level_bonus_hp_at(curve: f32) -> f32 {
     lerp_table(&LEVEL_BONUS_HP, curve)
 }
 
+/// How much smaller a batch-twelve build's damage is than the build every
+/// pool was sized against, on the curve clock.
+///
+/// Level-ups come a quarter as often (about 13 cards by the boss instead of
+/// 55), so a rat reaches 6:00 with three weapons at low rank and two passive
+/// stacks where it used to have a full maxed rack, and the starting Gnaw is a
+/// bite, not a homing dart. The per-level damage bonus is unchanged by
+/// construction ([`LEVEL_BONUS_HP`]); this table is the rest of the gap. It
+/// scales every pool that is sized against the rat's damage: the horde and
+/// the boss through [`hp_mult_at`], and `miniboss::appointment_hp` carries
+/// its own table of the same correction.
+///
+/// Measured over four 48-campaign mixed-skill batches (seed 1000): with these
+/// knots the kill counts on levels two to four match batch eight's to the
+/// minute (320 / 980 / 1970 / 3260 at 3 / 6 / 9 / 12 min) and the character
+/// level reads 5.5 / 9.0 / 11.8 / 13.2 there. Level one lags (178 kills at
+/// 3:00 against 332): from 5:00 on its ordinary bodies are already one or two
+/// bites each, so a lower pool no longer buys anything there; what is left is
+/// the bite's reach and the missing defensive stacks, which are not hp.
+const BUILD_HP: [(f32, f32); 7] = [
+    (0.0, 0.60),
+    (60.0, 0.45),
+    (180.0, 0.30),
+    (300.0, 0.20),
+    (480.0, 0.16),
+    (660.0, 0.20),
+    (900.0, 0.28),
+];
+
+/// The carried build's share of that gap, per campaign level: a rat arrives
+/// on levels two to four with its kept upgrades already ranked, so the pools
+/// there are larger than level one's (which starts from the bare Gnaw). A
+/// practice run plays level one's row (`DifficultyLevel`). Rising, so the
+/// Flatbed finale is the hardest level.
+pub const BUILD_HP_LEVEL: [f32; 4] = [0.8, 2.2, 2.4, 2.6];
+
+/// The boss pool's own correction per campaign level, on top of
+/// [`BUILD_HP_LEVEL`]: measured median fights 66 / 78 / 72 / 66 s against the
+/// 50-80 s target.
+pub const BOSS_BUILD_LEVEL: [f32; 4] = [0.75, 0.78, 0.57, 0.68];
+
+/// [`BUILD_HP`] at a curve time.
+#[inline]
+pub fn build_hp_at(curve: f32) -> f32 {
+    lerp_table(&BUILD_HP, curve)
+}
+
 /// [`hp_mult_at`] for a campaign level and the real run clock.
 #[inline]
 pub fn hp_mult_for(level: usize, elapsed: f32) -> f32 {
-    hp_mult_at(curve_clock(level, elapsed))
+    hp_mult_at(curve_clock(level, elapsed)) * BUILD_HP_LEVEL[level_slot(level)]
 }
 
 /// The director's actual hp curve at the real run clock (level 0): the curve
@@ -836,7 +885,10 @@ mod tests {
 
     #[test]
     fn difficulty_escalates() {
-        assert!(hp_mult(120.0) > hp_mult(0.0));
+        // The design's own curve rises; the pool a body actually gets also
+        // carries the batch-twelve build correction (`BUILD_HP`), which falls
+        // through the opening minutes.
+        assert!(hp_mult(120.0) / build_hp_at(120.0) > hp_mult(0.0) / build_hp_at(0.0));
         // Measured from the end of the opening's quick pulse (`OPENING_SECS`):
         // the first twelve seconds are deliberately faster than what follows.
         assert!(spawn_interval(200.0) < spawn_interval(OPENING_SECS));
@@ -938,12 +990,16 @@ mod tests {
             );
         }
         // Ordinary hp: ×1 at the start, ×2 at 15:00.
-        assert!((hp_mult_at(0.0) - 1.0).abs() < 1e-6);
+        // (Times the batch-twelve build correction, `BUILD_HP`: 0.60 at the
+        // start, 0.28 at the boss.)
+        assert!((hp_mult_at(0.0) - build_hp_at(0.0)).abs() < 1e-6);
+        assert!((build_hp_at(0.0) - 0.60).abs() < 1e-6);
+        assert!((build_hp_at(RUN_SECONDS) - 0.28).abs() < 1e-6);
         // ×2 by the boss on the design's curve, times the level bonus a
-        // typical rat carries there (×1.55 at level 56).
+        // typical rat carries there (×1.55 at level 14.75).
         assert!((level_bonus_hp_at(0.0) - 1.0).abs() < 1e-6);
         assert!((level_bonus_hp_at(RUN_SECONDS) - 1.55).abs() < 1e-6);
-        assert!((hp_mult_at(RUN_SECONDS) - 2.0 * 1.55).abs() < 1e-5);
+        assert!((hp_mult_at(RUN_SECONDS) - 2.0 * 1.55 * build_hp_at(RUN_SECONDS)).abs() < 1e-5);
         let mut last = 0.0;
         for t in 0..=RUN_SECONDS as u32 {
             let b = level_bonus_hp_at(t as f32);
@@ -1041,7 +1097,13 @@ mod tests {
         }
         // The opening really is a different game: level 3 starts at the hp and
         // the pulse count level 1 only reaches 150 s in.
-        assert!((hp_mult_for(2, 0.0) - hp_mult_for(0, LEVEL_CLOCK_OFFSET[2])).abs() < 1e-4);
+        // (Each level also carries its own build scale, `BUILD_HP_LEVEL`.)
+        assert!(
+            (hp_mult_for(2, 0.0) / BUILD_HP_LEVEL[2]
+                - hp_mult_for(0, LEVEL_CLOCK_OFFSET[2]) / BUILD_HP_LEVEL[0])
+                .abs()
+                < 1e-4
+        );
         assert_eq!(
             pulse_count_for(2, 0.0),
             pulse_count_for(0, LEVEL_CLOCK_OFFSET[2])
@@ -1075,12 +1137,12 @@ mod tests {
         assert_eq!(LEVEL_HP_EXTRA[3], 1.9);
         assert_eq!(LEVEL_DAMAGE_TOP[3], 2.1);
         assert_eq!(LEVEL_SPEED_TOP[3], 1.2);
-        assert!(LEVEL_ELITE_INTERVAL[3] < LEVEL_ELITE_INTERVAL[2]);
+        const { assert!(LEVEL_ELITE_INTERVAL[3] < LEVEL_ELITE_INTERVAL[2]) };
         assert_eq!(LEVEL_CLOCK_OFFSET[3], 0.0, "the ride opens with the grace");
         // Strictly harder than the Printworks/Lab at every real clock second
         // past the grace, and never softer in damage or speed at any instant.
         for t in [0.0f32, 30.0, 180.0, 181.0, 480.0, BOSS_TIME, BOSS_TIME + 60.0] {
-            if t >= LEVEL_HP_EXTRA_AFTER {
+            if t > LEVEL_HP_EXTRA_AFTER {
                 assert!(
                     horde_hp_mult_for(3, t) > horde_hp_mult_for(2, t),
                     "the ride's horde hp is not above stage three at {t}s"
@@ -1094,7 +1156,7 @@ mod tests {
         // The boss pool follows the ride's clock, never the horde's extra.
         assert_eq!(
             boss_hp_mult_for(3, BOSS_TIME),
-            hp_mult_for(3, BOSS_TIME) * BOSS_POOL_SCALE
+            hp_mult_for(3, BOSS_TIME) * BOSS_POOL_SCALE * BOSS_BUILD_LEVEL[3]
         );
         assert_eq!(level_hp_extra(3, BOSS_TIME), LEVEL_HP_EXTRA[3]);
         assert_eq!(elite_interval_for(3), LEVEL_ELITE_INTERVAL[3]);
@@ -1205,7 +1267,10 @@ mod tests {
                 assert!(extra > 1.0 && extra <= LEVEL_HP_EXTRA[0], "{extra} at {t}s");
             }
             // The boss pool never carries the horde's extra.
-            assert_eq!(boss_hp_mult_for(0, t), hp_mult_for(0, t) * BOSS_POOL_SCALE);
+            assert_eq!(
+                boss_hp_mult_for(0, t),
+                hp_mult_for(0, t) * BOSS_POOL_SCALE * BOSS_BUILD_LEVEL[0]
+            );
         }
         assert_eq!(level_hp_extra(0, BOSS_TIME), LEVEL_HP_EXTRA[0]);
         assert_eq!(elite_interval_for(0), ELITE_INTERVAL);
@@ -1227,7 +1292,10 @@ mod tests {
         // on whichever floor it is played on. The level index never selects a
         // kind any more, so there is nothing for the override to disagree with.
         assert_eq!(enemy_mods_for(0, 42.0), EnemyMods::NONE);
-        assert_eq!(hp_mult_for(0, 42.0), hp_mult_at(curve_clock(0, 42.0)));
+        assert_eq!(
+            hp_mult_for(0, 42.0),
+            hp_mult_at(curve_clock(0, 42.0)) * BUILD_HP_LEVEL[0]
+        );
     }
 
     /// Every later level is harder than the one before it at every instant, in
@@ -1273,7 +1341,9 @@ mod tests {
             let pool = boss_hp_mult_for(level, BOSS_TIME);
             let horde = horde_hp_mult_for(level, BOSS_TIME);
             assert!(
-                (pool - hp_mult_for(level, BOSS_TIME) * BOSS_POOL_SCALE).abs() < 1e-4,
+                (pool - hp_mult_for(level, BOSS_TIME) * BOSS_POOL_SCALE * BOSS_BUILD_LEVEL[level_slot(level)])
+                    .abs()
+                    < 1e-4,
                 "level {level}: boss pool {pool} is not the curve times the scale"
             );
             assert!(
