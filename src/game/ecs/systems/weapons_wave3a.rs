@@ -94,7 +94,7 @@ use crate::game::particle::damage_number::{DamageNumbers, DamageSource};
 use crate::game::particle::{vfx, Particles};
 use crate::game::player::Player;
 use crate::game::weapon::{
-    WeaponKind, DROPPING_ARM, DROPPING_BACK, DROPPING_LIFE, DROPPING_RADIUS, RAIN_STAGGER,
+    WeaponKind, DROPPING_ARM, DROPPING_BACK, DROPPING_LIFE, RAIN_STAGGER,
     RAIN_WINDUP, VIRUS_TICK,
 };
 use crate::math::Vec2;
@@ -514,7 +514,7 @@ pub fn droppings_system(
     mut sfx: ResMut<SfxQueue>,
     mut rng: ResMut<RngRes>,
     mut particles: ResMut<Particles>,
-    mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
+    enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
     infected: Query<&Infection>,
     mut bosses: Query<&mut Boss>,
     mut boss_virus: ResMut<BossVirus>,
@@ -624,7 +624,7 @@ pub fn droppings_system(
             continue;
         }
         let mut marked = false;
-        for mut boss in bosses.iter_mut() {
+        for boss in bosses.iter_mut() {
             if boss.dead {
                 continue;
             }
@@ -1328,16 +1328,11 @@ mod tests {
         entity
     }
 
-    /// Three values drawn from a **copy** of the world's rng, so comparing a
-    /// fingerprint never advances the world's own stream.
-    fn rng_fingerprint(rng: &rand::rngs::StdRng) -> [u64; 3] {
-        use rand::Rng as _;
-        let mut twin = rng.clone();
-        [
-            twin.random::<u64>(),
-            twin.random::<u64>(),
-            twin.random::<u64>(),
-        ]
+    /// The next three values of a world's rng. `StdRng` is not `Clone`, so this
+    /// **consumes** them: compare two worlds built the same way, at the end.
+    fn rng_fingerprint(rng: &mut rand::rngs::StdRng) -> [u64; 3] {
+        use rand::RngExt as _;
+        [rng.random::<u64>(), rng.random::<u64>(), rng.random::<u64>()]
     }
 
     /// Plant the chain the way the weapon does now: fire one cycle, put the
@@ -1795,22 +1790,28 @@ mod tests {
     /// the tag vfx at the infection — the draw the old ranged tag made.
     #[test]
     fn a_drop_and_its_aging_draw_no_rng() {
-        let mut w = arena(93, WeaponKind::Hantavirus, 3);
-        let p = w.player.pos;
-        let at = p + Vec2::new(-5.0, 0.0);
-        let body = w.spawn_enemy(EnemyKind::Brute, at, 1.0);
-        let untouched = rng_fingerprint(&w.rng);
-        assert!(run_fire(&mut w));
-        assert_eq!(rng_fingerprint(&w.rng), untouched, "a drop draws no rng");
-        run_droppings(&mut w, DROPPING_ARM - 1.0 / 60.0);
-        assert_eq!(rng_fingerprint(&w.rng), untouched, "aging draws no rng");
-        run_droppings(&mut w, 1.0 / 30.0);
-        assert!(mark_of(&w, body).is_some(), "the armed drop infects");
-        assert_ne!(
-            rng_fingerprint(&w.rng),
-            untouched,
-            "the tag vfx is the one draw"
-        );
+        // Three worlds built identically: one left alone, one that drops and
+        // ages a dropping short of arming, one that lets it infect.
+        let build = || {
+            let mut w = arena(93, WeaponKind::Hantavirus, 3);
+            let at = w.player.pos + Vec2::new(-5.0, 0.0);
+            let body = w.spawn_enemy(EnemyKind::Brute, at, 1.0);
+            (w, body)
+        };
+        let (mut fresh, _) = build();
+        let untouched = rng_fingerprint(&mut fresh.rng);
+
+        let (mut aged, _) = build();
+        assert!(run_fire(&mut aged));
+        run_droppings(&mut aged, DROPPING_ARM - 1.0 / 60.0);
+        assert_eq!(rng_fingerprint(&mut aged.rng), untouched, "a drop and its aging draw no rng");
+
+        let (mut hit, body) = build();
+        assert!(run_fire(&mut hit));
+        run_droppings(&mut hit, DROPPING_ARM - 1.0 / 60.0);
+        run_droppings(&mut hit, 1.0 / 30.0);
+        assert!(mark_of(&hit, body).is_some(), "the armed drop infects");
+        assert_ne!(rng_fingerprint(&mut hit.rng), untouched, "the tag vfx is the one draw");
     }
 
     /// Three ticks, 0.35 s apart, each worth the level's per-tick damage.
@@ -2045,10 +2046,10 @@ mod tests {
     fn a_drop_that_would_land_in_a_wall_lands_under_the_rat() {
         let mut w = arena(79, WeaponKind::Hantavirus, 5);
         let p = w.player.pos;
-        // The rat faces left, so the drop must land 5 px to its left — and that
-        // point is inside a solid cell.
+        // The rat faces left, so the drop would land 5 px behind it, to its
+        // right — and that point is inside a solid cell.
         w.player.face = Vec2::new(-1.0, 0.0);
-        let behind = p - Vec2::new(5.0, 0.0);
+        let behind = p + Vec2::new(5.0, 0.0);
         let cx = (behind.x / 16.0).floor() as i32;
         let cy = (behind.y / 16.0).floor() as i32;
         w.level.tiles.set(

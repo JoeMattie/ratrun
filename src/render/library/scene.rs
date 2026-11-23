@@ -2104,7 +2104,7 @@ fn arsenal_droppings_cue(world: &mut World, _subject: Option<Entity>, tick: u32)
     arsenal_dummies(world, &dummy_homes(world.player.pos), ARSENAL_HP);
     let every = (DROP_EVERY / TICK).round() as u32;
     if let Some(weapon) = world.player.loadout.weapons.first_mut() {
-        weapon.timer = if every > 0 && tick % every == 0 {
+        weapon.timer = if every > 0 && tick.is_multiple_of(every) {
             0.0
         } else {
             999.0
@@ -2113,7 +2113,7 @@ fn arsenal_droppings_cue(world: &mut World, _subject: Option<Entity>, tick: u32)
     world.player.face = Vec2::from_angle(tick as f32 * TICK * DROP_TURN);
     let rat = world.player.pos;
     let mut q = world.ecs.query::<&mut Enemy>();
-    for body in q.iter_mut(&mut world.ecs) {
+    for mut body in q.iter_mut(&mut world.ecs) {
         // Only the plate's own targets walk: they are the bodies the arsenal
         // staged, and the zero gait is how they are found.
         if body.speed_scale != 0.0 {

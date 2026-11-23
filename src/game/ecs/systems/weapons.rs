@@ -304,6 +304,7 @@ pub fn fire_weapons_system(
             &mut scratch.active,
             // The unzoomed view, for the one weapon whose reach runs past it.
             scratch.viewport.0,
+            &scratch.droppings,
         );
         if fired {
             player.loadout.weapons[i].timer += cd;
@@ -1551,6 +1552,8 @@ fn fire_one(
     // The tick's [`Viewport`]: the unzoomed screen rectangle the Spiked Tail's
     // target pick is capped to (`weapon_spiketail::LASH_VIEW_INSET`).
     view: Vec2,
+    // Hantavirus's live droppings (the cap evicts the oldest).
+    droppings: &Query<(Entity, &SpawnId, &crate::game::ecs::components::Dropping)>,
 ) -> bool {
     let color = kind.color();
     let mut fired = false;
@@ -2164,7 +2167,7 @@ fn fire_one(
                 stats.ranged_reach(crate::game::weapon::DROPPING_RADIUS),
                 crate::game::weapon::DROPPING_CAP[i],
                 // The cap's victims: the oldest live dropping goes first.
-                &scratch.droppings,
+                droppings,
                 next_id,
             );
         }
