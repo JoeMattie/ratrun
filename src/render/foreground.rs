@@ -1,101 +1,124 @@
-//! Parallax **foreground**: overhead things nearer the viewer than the floor.
+//! Parallax **foreground**: the few, huge overhead things nearest the viewer.
 //!
-//! The owner asked for "a foreground layer in some cases with parallax". This
-//! module is the layer; [`crate::game::art_foreground`] is the art, one item at
-//! a time. Nothing here is simulation state: the layer is generated from the
-//! finished level, drawn into the world-resolution picture, and read by no
-//! system — so it cannot move a golden or the map pin (see *Determinism*).
+//! The owner asked for "a foreground layer in some cases with parallax"; v1's
+//! small, floating props did not read, so v2 is **huge and few**: an item is
+//! 3–6× v1's draw size, at most ~2 are in view at once, and no item floats —
+//! every one is visibly attached to something (a wall, the map edge, or the
+//! ceiling above the frame). [`crate::game::art_foreground`] is the art, one
+//! item at a time. Nothing here is simulation state: the layer is generated
+//! from the finished level, drawn into the world-resolution picture, and read
+//! by no system — so it cannot move a golden or the map pin (*Determinism*).
 //!
-//! ## What it is
+//! ## Attachments (never floating)
 //!
-//! A run of overhead objects placed from `(theme, level seed, the level's
-//! rooms/corridors)` once per level ([`ForeLayer::sync`]), in three roles:
+//! [`Attach::Span`] runs wall to wall: the code walks the tile grid along the
+//! axis through the anchor to the nearest **solid** wall both ways, so
+//! [`ForeItem::len`] is the real gap plus 6 px bitten into each wall, and the
+//! art draws collars/brackets at both ends. [`Attach::Edge`] enters from beyond
+//! the map/room on one side ([`Side`]): its anchor is a point on a solid wall
+//! face and its reach goes into the open. [`Attach::Drop`] hangs from above the
+//! frame: the art runs the cord/chain/trunk up the screen for [`DROP_TAIL`] px,
+//! so it always leaves the top of the view. [`Attach::Sky`] is the outdoor
+//! floor's own movers (see *Sky movers*).
 //!
-//! * **corridor runs** — a pipe / cable / line following the corridor's long
-//!   axis, one corridor in two;
-//! * **doorway hangers or beams** — one across the middle of a doorway, one
-//!   doorway in two;
-//! * **point items** in large rooms (up to three a room).
+//! ## Placement
 //!
-//! Never over the start room's centre (96 px), never within 5 tiles (80 px) of
-//! a mouse-hole shop. The per-theme kinds are [`kinds_for`].
+//! From `(theme, level seed, the level's rooms/corridors)` once per level
+//! ([`ForeLayer::sync`]), at most [`MAX_ITEMS`] 60 items and never two anchors
+//! closer than [`MIN_SPACING`] 220 world px:
 //!
-//! **No dependence on a boss arena.** The layer reads rooms, tile kinds and shop
-//! holes only — never `Level::boss` and never a `RoomKind` the like of the boss
-//! arena's — so removing arenas from the levels cannot break it (batch 12: they
-//! were removed; a former arena is just a large room here, and it gets the same
-//! at most three point items as any other).
+//! * **corridors** at least 5 tiles long get one Span *across* the corridor
+//!   (perpendicular to its long axis) per ~14 tiles, in one corridor of two.
+//!   A corridor is 1–3 cells across, so a cross-span is measured against
+//!   [`CORRIDOR_SPAN_MIN`] 28 px, not a room's [`SPAN_MIN_PX`] 64: the look is
+//!   a fat pipe or beam crossing the passage overhead;
+//! * **rooms/halls** at least 12 × 9 tiles get a Span across the short
+//!   dimension, an Edge reaching 80–160 px in from a wall face, or a Drop over
+//!   open floor at least 4 tiles from any wall, one per ~120 tiles² and at most
+//!   three a room, the kind chosen among the theme's three whose attach class
+//!   fits ([`kinds_for`]).
+//!
+//! Keep-outs: the start room's centre (96 px), a mouse-hole shop's face
+//! (5 tiles), and 48 px around any rat-hole, one-way door or maze cache.
+//!
+//! **No dependence on a boss arena.** The layer reads rooms, tile kinds and the
+//! object lists only — never `Level::boss` — so a former arena is just a large
+//! room here (batch 12 removed the arenas; this module cannot care).
 //!
 //! ## Where in the frame
 //!
-//! `World::draw_scene` calls [`draw`] **after the lighting pass and before
-//! `World::draw_hostile_layer`**: pellets, telegraphs, tells, miniboss shapes,
+//! `World::draw_scene` calls [`draw`] **after the lighting pass and before**
+//! `World::draw_hostile_layer`: pellets, telegraphs, tells, miniboss shapes,
 //! damage digits and the ink pass are always stamped on top, so the layer can
 //! never hide the fight. It is drawn in the world picture (before the zoom
 //! resample), so it works at every zoom rung including sub-cell detail.
 //!
-//! ## Parallax
+//! ## Parallax, size and depth
 //!
 //! An item at world position `P` is drawn at
-//! `screen = centre + (P - cam_centre) * depth`, with `depth` in `1.15..=1.6`:
-//! it slides faster than the floor and is drawn larger by `scale = depth`. The
-//! camera is the one the scene drew with, shake offset included, so the shake
-//! is amplified slightly on the overhead layer (which reads as depth). The
-//! shadow stays at the item's **un-parallaxed** floor position — the depth cue.
+//! `screen = view_centre + (P - cam_centre) * depth`, `depth` in `1.8..=3.0`
+//! (near the eye: it slides fast as the camera moves, which is intended). Draw
+//! size is *separate*: `scale` in `3.0..=6.0` multiplies the art's thickness and
+//! detail. The floor shadow stays at the item's **un-parallaxed** world
+//! position (`w2s(P)` plus (+10, +14) px) with the same footprint, so the body
+//! visibly slides over its own shadow.
 //!
 //! ## Never hide the fight
 //!
-//! * Every pixel goes through [`blend`], which **clamps the alpha to
-//!   [`ALPHA_MAX`]** (150/255): no pixel of this layer is ever opaque.
-//! * The whole item fades to [`ALPHA_FLOOR`] (40) within [`FADE_RAT_PX`] of the
-//!   rat and within [`FADE_THREAT_PX`] of a miniboss/boss body, ramping back
-//!   over [`FADE_RAMP_PX`]. The distance is measured from the rat to the item's
-//!   nearest on-screen pixel (the art takes one alpha for the whole item).
-//! * The layer is **darkened by a fixed factor** ([`DARKEN`]) inside [`blend`]
-//!   rather than lit per pixel: overhead things read as dark silhouettes
-//!   against the lit floor whatever colours the art hands over. [`rim_tint`]
-//!   gives the art the floor's ambient tint for a rim (§ the brief).
-//! * The floor shadow is a *darken* ([`shadow`]), drawn after the lighting
-//!   pass, so it costs no extra pass and can never brighten anything.
+//! * Every body pixel goes through [`blend`], which **clamps alpha to
+//!   [`ALPHA_MAX`]** (215/255): no pixel of this layer is ever opaque.
+//! * The item fades to [`ALPHA_FLOOR`] (28) within [`FADE_RAT_PX`] of the rat
+//!   and [`FADE_THREAT_PX`] of a miniboss/boss body, ramping back over
+//!   [`FADE_RAMP_PX`]. The distance is measured to the item's on-screen **body
+//!   rect** (0 inside), not to its anchor, so a huge pipe over the rat fades.
+//! * A **clear disc** around the rat: inside 22 px of the rat every [`blend`]
+//!   alpha is quartered, ramping back to full at 40 px. It is a thread-local set
+//!   by [`draw`] for the frame and cleared afterwards (a direct `blend` call,
+//!   as in a test, sees no disc).
+//! * **Coverage cap** [`COVERAGE_PCT`] 22 % of the view's pixels (item pixels;
+//!   shadows are darkens and are not counted). Past it the remaining items draw
+//!   at half alpha, past [`COVERAGE_SKIP_PCT`] 30 % they are skipped, and
+//!   [`blend`] refuses writes past the budget, so no art can break the cap.
+//! * The colour is **darkened by [`DARKEN`]** inside [`blend`], so the layer
+//!   reads as dark soft silhouettes against the lit floor. [`rim_tint`] gives
+//!   the art a dim ambient colour for the rim highlight.
+//!
+//! ## Sky movers (the outdoor floor)
+//!
+//! The Flatbed level (`Theme::Trailer`, a moving truck bed) scrolls on its own,
+//! so its [`Attach::Sky`] items are not placed by the room logic: [`sky_items`]
+//! computes three analytic tracks from `(level seed, elapsed)` alone, with the
+//! clock quantised to 1/30 s — two drifting clouds, a power line pinned across
+//! the view with a pole passing every ~4 s, and a branch sweeping across every
+//! 5–9 s. Paused, `elapsed` does not advance, so nothing moves. The art needs
+//! no clock: it gets ordinary [`ForeDraw`] positions.
 //!
 //! ## Cost and stillness
 //!
-//! * **Coverage cap.** A frame may paint at most [`COVERAGE_PCT`] percent of
-//!   the view's pixels. This is enforced for real, not estimated: [`blend`]
-//!   counts every pixel it writes and refuses to write past the frame's budget
-//!   (a thread-local counter, so a test or a one-off call outside [`draw`] is
-//!   unlimited). No art can break the cap.
-//! * **No allocation per frame.** The item list is built once per level; the
-//!   per-frame plan is a `Vec` that is cleared and refilled (its capacity is
-//!   reached on the first frame a level draws), and the threat list is a fixed
-//!   eight-entry array on the stack.
-//! * **Cost estimate** (unmeasured: this batch does not build) at the 120 × 40
-//!   reference view (120 × 80 = 9 600 world pixels): a typical frame paints
-//!   400–2 500 pixels through two thread-local touches each, and plans ~130
-//!   items with one box test each — about 20–60 µs, well under the 0.15 ms
-//!   budget. The three per-level sorts and the generation run once.
-//! * **Stillness.** With the camera still and no sway step, the layer writes
-//!   the same pixels with the same colours, so the presenter sees an unchanged
-//!   frame and sends nothing. Sway is stepped at [`SWAY_HZ`] (3 Hz) and only
-//!   for the kinds that sway, so a still scene repaints the layer's cells at
-//!   most three times a second; the palette's own still-frame rule then keeps
-//!   the rest of the terminal untouched.
+//! No allocation per frame: the item list is built once per level, the planned
+//! list and the frame plan are `Vec`s that are cleared and refilled (their
+//! capacity is reached on the first frame a level draws), and the threat list is
+//! a fixed eight-entry array on the stack. With a still camera and no sway step
+//! the layer writes the same pixels, so the presenter sees an unchanged frame;
+//! sway is stepped at [`SWAY_HZ`] (3 Hz) for the kinds that sway, so a still
+//! scene repaints the layer's cells at most three times a second.
 //!
 //! ## Determinism
 //!
-//! [`generate`] is a pure function of the finished [`Level`] (its theme, seed,
-//! start, rooms, tile kinds and shop holes) with its own splitmix stream
-//! salted away from the map's, so it draws no simulation rng and touches no
-//! simulation state. The item list is kept on `World` as **render state**
-//! (like `light_map`/`detail`), not as a resource, and [`World::draw`] never
-//! writes anything a system reads. The goldens (`game/ecs/harness.rs`) fold
-//! simulation state only and `levelgen`'s `TRACE_HASHES` pins `generate_once`,
-//! which this module only reads — so neither can move.
+//! [`generate`] is a pure function of the finished [`Level`] (theme, seed,
+//! start, rooms, tile kinds and the object lists) with its own splitmix stream
+//! salted away ([`GEN_SALT`]) from the map's, so it draws no simulation rng and
+//! touches no simulation state. The item list is kept on `World` as **render
+//! state** (like `light_map`/`detail`), not as a resource, and `World::draw`
+//! never writes anything a system reads. The goldens (`game/ecs/harness.rs`)
+//! fold simulation state only and `levelgen`'s `TRACE_HASHES` pins
+//! `generate_once`, which this module only reads — so neither can move.
 
 use bevy_ecs::world::World as EcsWorld;
 
 use crate::game::art_foreground;
-use crate::game::collision::TILE_F;
+use crate::game::art_walls::WallKind;
+use crate::game::collision::{TileKind, TileMap, TILE_F};
 use crate::game::ecs::systems::boss::Boss;
 use crate::game::ecs::systems::miniboss::Miniboss;
 use crate::game::enemy::Enemy;
@@ -106,123 +129,296 @@ use crate::render::palette::{self, Rgb};
 
 // ---- Public tuning constants ---------------------------------------------
 
-/// The largest alpha any pixel of this layer can reach (150/255). [`blend`]
-/// clamps to it, so nothing in the layer is ever opaque.
-pub const ALPHA_MAX: u8 = 150;
+/// The largest alpha any body pixel of this layer can reach (215/255).
+/// [`blend`] clamps to it, so nothing in the layer is ever opaque.
+pub const ALPHA_MAX: u8 = 215;
 /// The dimmest the rat/threat fade takes an item to (out of 255).
-pub const ALPHA_FLOOR: f32 = 40.0;
+pub const ALPHA_FLOOR: f32 = 28.0;
 /// Fade to [`ALPHA_FLOOR`] within this many pixels of the rat.
-pub const FADE_RAT_PX: f32 = 36.0;
+pub const FADE_RAT_PX: f32 = 56.0;
 /// … and within this many pixels of a miniboss/boss body.
-pub const FADE_THREAT_PX: f32 = 28.0;
+pub const FADE_THREAT_PX: f32 = 48.0;
 /// … ramping back to full over this many pixels.
-pub const FADE_RAMP_PX: f32 = 24.0;
+pub const FADE_RAMP_PX: f32 = 40.0;
 /// Sway is stepped at this rate (Hz), for the kinds that sway only.
 pub const SWAY_HZ: f32 = 3.0;
-/// How far the whole layer may paint per frame, as a percentage of the view.
-pub const COVERAGE_PCT: u32 = 8;
+/// How much of the view the layer may paint at full alpha, in percent.
+pub const COVERAGE_PCT: u32 = 22;
+/// Past this percentage the remaining items are skipped outright.
+pub const COVERAGE_SKIP_PCT: u32 = 30;
+/// The alpha multiplier for items drawn inside the coverage grace band.
+pub const COVERAGE_HALF: f32 = 0.5;
 /// The fixed silhouette darkening [`blend`] applies to every colour.
 pub const DARKEN: f32 = 0.72;
 /// How far [`shadow`] may darken a floor pixel at its strongest.
 pub const SHADOW_MAX: f32 = 0.55;
+/// How far a [`Attach::Drop`] item's cord/chain/trunk runs up the screen, so it
+/// always leaves the top of the view.
+pub const DROP_TAIL: i32 = 400;
 
-/// Placement keep-out: never within this many world px of a shop hole's face
-/// (5 tiles).
+/// Inside this radius of the rat every body alpha is multiplied by
+/// [`CLEAR_DISC_MIN`] (the per-pixel guard, see [`blend`]).
+pub const CLEAR_DISC_IN_PX: f32 = 22.0;
+/// … ramping back to 1.0 at this radius.
+pub const CLEAR_DISC_OUT_PX: f32 = 40.0;
+/// The alpha multiplier at the centre of the clear disc.
+pub const CLEAR_DISC_MIN: f32 = 0.25;
+
+// ---- Internal tuning ------------------------------------------------------
+
+/// Placement keep-out around a shop hole's face (5 tiles).
 const CLEAR_PX: f32 = 5.0 * TILE_F;
 /// Placement keep-out around the start room's centre (6 tiles).
 const START_CLEAR_PX: f32 = 6.0 * TILE_F;
+/// Placement keep-out around a rat-hole, one-way door or maze cache (3 tiles).
+const FIXTURE_CLEAR_PX: f32 = 3.0 * TILE_F;
+/// No two anchors closer than this (world px): at most ~2 items in a view.
+const MIN_SPACING: f32 = 220.0;
+/// The most items a level can hold.
+const MAX_ITEMS: usize = 60;
 /// The layer's own splitmix salt, so its stream is not the map's.
 const GEN_SALT: u32 = 0x0F0E_6000;
-/// The most items a level can hold (a safety net; a real level has a few dozen).
-const MAX_ITEMS: usize = 240;
 /// The radius given to a boss body for the fade (the art's bodies are ~27 px
 /// across; this is deliberately generous).
 const BOSS_BODY_RADIUS: f32 = 20.0;
 
-// ---- The item types (the art's contract) ----------------------------------
+/// The parallax range for a placed item ([`ForeItem::depth`]).
+const DEPTH_MIN: f32 = 1.8;
+const DEPTH_MAX: f32 = 3.0;
+/// The draw-size range for a placed item ([`ForeItem::scale`]).
+const SCALE_MIN: f32 = 3.0;
+const SCALE_MAX: f32 = 6.0;
+
+/// A room Span shorter than this (or longer than [`SPAN_MAX_PX`]) is not
+/// placed.
+const SPAN_MIN_PX: f32 = 64.0;
+/// A **corridor** cross-span's minimum. A 1–3-cell corridor is only 16–48 px
+/// across, and a fat pipe or beam crossing it overhead (28 px of span, 30–50 px
+/// of body) is exactly the look the owner asked for, so the corridor rule has
+/// its own, smaller floor.
+const CORRIDOR_SPAN_MIN: f32 = 28.0;
+const SPAN_MAX_PX: f32 = 420.0;
+/// How far a Span's `len` bites into each wall.
+const SPAN_BITE_PX: f32 = 6.0;
+/// An Edge's reach bounds, from its wall face into the open.
+const EDGE_LEN_MIN_PX: f32 = 80.0;
+const EDGE_LEN_MAX_PX: f32 = 160.0;
+/// A Drop must hang over floor at least this many tiles from any wall.
+const DROP_CLEAR_TILES: i32 = 4;
+/// Corridors at least this long get cross-spans, one per
+/// [`CORRIDOR_TILES_PER_SPAN`] tiles.
+const CORRIDOR_MIN_TILES: i32 = 5;
+const CORRIDOR_TILES_PER_SPAN: i32 = 14;
+/// Rooms: at least [`ROOM_MIN_SHORT`] on the short side and
+/// [`ROOM_MIN_CELLS`] cells, one item per [`ROOM_TILES2_PER_ITEM`] cells up to
+/// [`ROOM_MAX_ITEMS`].
+const ROOM_MIN_SHORT: i32 = 9;
+const ROOM_MIN_LONG: i32 = 12;
+const ROOM_MIN_CELLS: i32 = 108;
+const ROOM_TILES2_PER_ITEM: i32 = 120;
+const ROOM_MAX_ITEMS: i32 = 3;
+/// How many anchor draws one room slot may spend before it is given up.
+const PLACE_ATTEMPTS: u32 = 4;
+/// The longest wall walk (cells) before a span or edge gives up.
+const MAX_WALL_WALK: i32 = 48;
+
+/// The sky clock is quantised to this rate, so a frame is a function of a held
+/// step and a paused frame is still.
+const SKY_QUANT_HZ: f32 = 30.0;
+/// One branch event every [`SKY_BRANCH_PERIOD`] s ± jitter (5–9 s), sweeping at
+/// [`SKY_BRANCH_SPEED`] px/s.
+const SKY_BRANCH_PERIOD: f32 = 7.0;
+const SKY_BRANCH_SPEED: f32 = 220.0;
+/// A pole passes every [`SKY_POLE_PERIOD`] s at [`SKY_POLE_SPEED`] px/s.
+const SKY_POLE_PERIOD: f32 = 4.0;
+const SKY_POLE_SPEED: f32 = 300.0;
+/// Clouds drift at [`SKY_CLOUD_SPEED`] px/s over a [`SKY_CLOUD_LOOP`] px loop.
+const SKY_CLOUD_SPEED: f32 = 12.0;
+const SKY_CLOUD_LOOP: f32 = 1200.0;
+/// How far outside the view a sky mover starts and ends.
+const SKY_MARGIN: f32 = 200.0;
+/// The sky items' parallax. The wires and the branch are *pinned to the view*
+/// (`depth` 1.0 with their world position taken from the camera), because they
+/// are painted across the whole frame; clouds are the far horizon, so they sit
+/// in bed space with a very low `depth`: they barely slide as the camera moves
+/// and their floor shadow falls well away from the haze body, which is the
+/// depth cue. A low depth is also what keeps them on screen while the camera
+/// pans across the bed.
+const SKY_PINNED_DEPTH: f32 = 1.0;
+const SKY_CLOUD_DEPTH: f32 = 0.15;
+const SKY_WIRE_SCALE: f32 = 2.0;
+const SKY_POLE_SCALE: f32 = 3.5;
+/// A cloud's body is a haze: never above this alpha, whatever the fades say.
+const CLOUD_ALPHA_MAX: u8 = 60;
+
+// ---- Attachment, side and kind (the art's contract) -----------------------
+
+/// The side of the frame an [`Attach::Edge`] item enters from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    N,
+    E,
+    S,
+    W,
+}
+
+impl Side {
+    /// The grid/world delta of a side (`+y` is south, as everywhere else).
+    pub const fn dir(self) -> (i32, i32) {
+        match self {
+            Side::N => (0, -1),
+            Side::E => (1, 0),
+            Side::S => (0, 1),
+            Side::W => (-1, 0),
+        }
+    }
+
+    /// Is this side's inward axis horizontal (so an Edge from it is a
+    /// horizontal item)?
+    pub const fn is_horizontal(self) -> bool {
+        matches!(self, Side::E | Side::W)
+    }
+}
+
+/// Attach-class codes, for [`ForeKind::attach_class`] and the placement rule
+/// (a candidate asks for a class, the theme's fitting kinds answer).
+pub const ATTACH_SPAN: u8 = 0;
+pub const ATTACH_EDGE: u8 = 1;
+pub const ATTACH_DROP: u8 = 2;
+pub const ATTACH_SKY: u8 = 3;
+
+/// How an item is attached to the world — never floating.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Attach {
+    /// Wall to wall; `len` reaches into both walls.
+    Span,
+    /// In from beyond the map/room on `side`; `pos` is on a solid wall face.
+    Edge(Side),
+    /// Hangs from above the frame; the art draws [`DROP_TAIL`] px up the screen.
+    Drop,
+    /// The outdoor floor's own movers (see [`sky_items`]).
+    Sky,
+}
+
+impl Attach {
+    /// The attach-class code of this attachment ([`ATTACH_SPAN`] and friends).
+    pub const fn class(self) -> u8 {
+        match self {
+            Attach::Span => ATTACH_SPAN,
+            Attach::Edge(_) => ATTACH_EDGE,
+            Attach::Drop => ATTACH_DROP,
+            Attach::Sky => ATTACH_SKY,
+        }
+    }
+}
 
 /// One overhead kind. Each floor uses three (see [`kinds_for`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ForeKind {
     // Sewer
-    PipeRun,
-    Grate,
-    DripChain,
+    /// Span: a fat riveted pipe with flanges and a valve wheel.
+    MainPipe,
+    /// Span: a walkway of open grating, light shows through the holes.
+    CatwalkGrating,
+    /// Drop: a hook block on a heavy chain.
+    ChainHoist,
     // Kitchen
-    PotRack,
-    ShelfEdge,
-    HangingUtensils,
+    /// Edge: a canopy hood corner with a filter grid.
+    ExtractorHood,
+    /// Span: a rail with big pans/ladles hanging from it (sway).
+    PotRail,
+    /// Drop: a wide enamel shade on a cord (sway).
+    HangingLamp,
     // Lab
+    /// Span: a ladder tray carrying bundled cables, some drooping.
     CableTray,
+    /// Span: a square duct with seams and a louvre.
     VentDuct,
-    HangingLampCord,
+    /// Edge: a jointed equipment arm reaching in.
+    ArticulatedArm,
     // Laundry
+    /// Span: a line tied at both walls with big sheets and shirts (sway).
     Clothesline,
-    SheetOnLine,
-    SteamBank,
+    /// Span: a lagged pipe with a leaking joint.
+    SteamPipe,
+    /// Drop: a ceiling airer (slatted frame) on four cords.
+    DryingRack,
     // Printworks
+    /// Span: a wide paper ribbon over rollers.
     PaperWeb,
-    HangingProofs,
+    /// Span: a gantry beam with a roller carriage.
     RollerBeam,
-    // Flatbed
-    TarpStrap,
-    SignGantryShadow,
-    CargoNetEdge,
+    /// Drop: a rack of big printed sheets on clips (sway).
+    HangingProofs,
+    // Flatbed (OUTDOORS)
+    /// Edge: a roadside branch with twigs and leaf clusters, sweeping past.
+    TreeBranch,
+    /// Sky: a soft cloud; only its shadow falls on the bed plus a faint haze.
+    Cloud,
+    /// Span across the whole view: 2–3 sagging wires, with a pole passing.
+    PowerLine,
 }
 
 impl ForeKind {
     /// Every kind, in declaration order (the art worker's checklist).
     pub const fn all() -> [ForeKind; 18] {
         [
-            ForeKind::PipeRun,
-            ForeKind::Grate,
-            ForeKind::DripChain,
-            ForeKind::PotRack,
-            ForeKind::ShelfEdge,
-            ForeKind::HangingUtensils,
+            ForeKind::MainPipe,
+            ForeKind::CatwalkGrating,
+            ForeKind::ChainHoist,
+            ForeKind::ExtractorHood,
+            ForeKind::PotRail,
+            ForeKind::HangingLamp,
             ForeKind::CableTray,
             ForeKind::VentDuct,
-            ForeKind::HangingLampCord,
+            ForeKind::ArticulatedArm,
             ForeKind::Clothesline,
-            ForeKind::SheetOnLine,
-            ForeKind::SteamBank,
+            ForeKind::SteamPipe,
+            ForeKind::DryingRack,
             ForeKind::PaperWeb,
-            ForeKind::HangingProofs,
             ForeKind::RollerBeam,
-            ForeKind::TarpStrap,
-            ForeKind::SignGantryShadow,
-            ForeKind::CargoNetEdge,
+            ForeKind::HangingProofs,
+            ForeKind::TreeBranch,
+            ForeKind::Cloud,
+            ForeKind::PowerLine,
         ]
     }
 
-    /// Does this kind swing, and so take a non-zero [`ForeDraw::sway`]?
-    /// Lines, chains, sheets and steam only — everything else is nailed up, and
-    /// a still scene with nothing swaying in view makes the terminal repaint
+    /// The [`Attach`] class this kind is drawn for ([`ATTACH_SPAN`] and
+    /// friends), which is what placement asks for.
+    pub const fn attach_class(self) -> u8 {
+        match self {
+            ForeKind::MainPipe
+            | ForeKind::CatwalkGrating
+            | ForeKind::PotRail
+            | ForeKind::CableTray
+            | ForeKind::VentDuct
+            | ForeKind::Clothesline
+            | ForeKind::SteamPipe
+            | ForeKind::PaperWeb
+            | ForeKind::RollerBeam
+            | ForeKind::PowerLine => ATTACH_SPAN,
+            ForeKind::ExtractorHood | ForeKind::ArticulatedArm | ForeKind::TreeBranch => ATTACH_EDGE,
+            ForeKind::ChainHoist
+            | ForeKind::HangingLamp
+            | ForeKind::DryingRack
+            | ForeKind::HangingProofs => ATTACH_DROP,
+            ForeKind::Cloud => ATTACH_SKY,
+        }
+    }
+
+    /// Does this kind swing, and so take a non-zero [`ForeDraw::sway`]? Lines,
+    /// rails, racks and branches only — everything else is nailed up, and a
+    /// still scene with nothing swaying in view makes the terminal repaint
     /// nothing.
     pub const fn sways(self) -> bool {
         matches!(
             self,
-            ForeKind::DripChain
-                | ForeKind::HangingLampCord
-                | ForeKind::HangingUtensils
+            ForeKind::PotRail
+                | ForeKind::HangingLamp
                 | ForeKind::Clothesline
-                | ForeKind::SheetOnLine
-                | ForeKind::SteamBank
                 | ForeKind::HangingProofs
-                | ForeKind::PaperWeb
-        )
-    }
-
-    /// Hangs from above (its long axis is vertical when it hangs in a doorway)
-    /// rather than spanning the opening (a beam, long axis horizontal).
-    pub const fn hangs(self) -> bool {
-        !matches!(
-            self,
-            ForeKind::PotRack
-                | ForeKind::RollerBeam
-                | ForeKind::SignGantryShadow
-                | ForeKind::ShelfEdge
-                | ForeKind::Grate
+                | ForeKind::TreeBranch
         )
     }
 }
@@ -231,15 +427,21 @@ impl ForeKind {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ForeItem {
     pub kind: ForeKind,
-    /// Anchor in **world** pixels: where it hangs over.
+    /// Anchor in **world** pixels: the centre of a [`Attach::Span`], the root
+    /// of an [`Attach::Edge`] (on a solid wall face), the object of an
+    /// [`Attach::Drop`].
     pub pos: Vec2,
-    /// Long axis in world px (runs, lines, beams); `0` for point items.
+    /// Span: the wall-to-wall length, +6 px into each wall. Edge: the reach
+    /// into the open from the wall face. Drop/Sky: 0.
     pub len: f32,
-    /// Orientation of the long axis.
+    /// Orientation of the long axis, for a Span or an Edge.
     pub horizontal: bool,
-    /// Parallax factor: `1.15` (just overhead) ..= `1.6` (near the eye). Also
-    /// the draw scale.
+    /// How it is attached — what the art must show.
+    pub attach: Attach,
+    /// Parallax: screen pixels per camera pixel, `1.8..=3.0` for placed items.
     pub depth: f32,
+    /// Draw size, `3.0..=6.0` for placed items (Cloud `1.0..=1.6`).
+    pub scale: f32,
     /// Per-item variation (art detail, sway phase).
     pub seed: u32,
 }
@@ -247,16 +449,22 @@ pub struct ForeItem {
 /// What the art function is handed for one item, one frame.
 #[derive(Clone, Copy, Debug)]
 pub struct ForeDraw {
-    /// Where the anchor lands in the buffer after the parallax transform.
+    /// The anchor in the buffer after the parallax transform.
     pub screen: (i32, i32),
-    /// Draw scale: equal to the item's depth (nearer things are larger).
+    /// Where the same anchor's **floor shadow** lands: world 1:1 plus the
+    /// (10, 14) px offset. The art draws the shadow there (not at `screen`).
+    pub shadow: (i32, i32),
+    /// Draw size: equal to the item's [`ForeItem::scale`].
     pub scale: f32,
-    /// Overall opacity after the rat/threat fade, `0..=`[`ALPHA_MAX`].
+    /// Overall opacity after the fades, `0..=`[`ALPHA_MAX`].
     pub alpha: u8,
     /// `-1.0..=1.0`, stepped at [`SWAY_HZ`]; `0.0` for a kind that never sways.
     pub sway: f32,
     /// The floor, for palette and rim tint ([`rim_tint`]).
     pub theme: Theme,
+    /// Sign of `(view centre - anchor)` per axis: which side of the body faces
+    /// the middle of the screen, for the rim highlight.
+    pub toward_centre: (i8, i8),
 }
 
 /// The rim tint the brief asks for: the floor's ambient character colour, dim
@@ -265,20 +473,35 @@ pub fn rim_tint(theme: Theme) -> Rgb {
     palette::scale(crate::render::lighting::theme_ambient(theme).rat_tint, 0.30)
 }
 
-/// The three kinds a floor's foreground uses, in role order:
-/// `[corridor run, doorway hanger/beam, room point item]`.
+/// The three kinds a floor's foreground uses.
 pub const fn kinds_for(theme: Theme) -> [ForeKind; 3] {
     match theme {
-        Theme::Sewer => [ForeKind::PipeRun, ForeKind::DripChain, ForeKind::Grate],
-        Theme::Kitchen => [ForeKind::ShelfEdge, ForeKind::PotRack, ForeKind::HangingUtensils],
-        Theme::Lab => [ForeKind::CableTray, ForeKind::HangingLampCord, ForeKind::VentDuct],
-        Theme::Laundry => [ForeKind::Clothesline, ForeKind::SheetOnLine, ForeKind::SteamBank],
-        Theme::Printworks => [ForeKind::PaperWeb, ForeKind::HangingProofs, ForeKind::RollerBeam],
-        Theme::Trailer => [
-            ForeKind::CargoNetEdge,
-            ForeKind::TarpStrap,
-            ForeKind::SignGantryShadow,
+        Theme::Sewer => [
+            ForeKind::MainPipe,
+            ForeKind::CatwalkGrating,
+            ForeKind::ChainHoist,
         ],
+        Theme::Kitchen => [
+            ForeKind::ExtractorHood,
+            ForeKind::PotRail,
+            ForeKind::HangingLamp,
+        ],
+        Theme::Lab => [
+            ForeKind::CableTray,
+            ForeKind::VentDuct,
+            ForeKind::ArticulatedArm,
+        ],
+        Theme::Laundry => [
+            ForeKind::Clothesline,
+            ForeKind::SteamPipe,
+            ForeKind::DryingRack,
+        ],
+        Theme::Printworks => [
+            ForeKind::PaperWeb,
+            ForeKind::RollerBeam,
+            ForeKind::HangingProofs,
+        ],
+        Theme::Trailer => [ForeKind::TreeBranch, ForeKind::Cloud, ForeKind::PowerLine],
     }
 }
 
@@ -303,6 +526,11 @@ thread_local! {
     static WRITE_BUDGET: std::cell::Cell<u32> = const { std::cell::Cell::new(u32::MAX) };
     /// Pixels painted since [`budget_start`].
     static WRITES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// The rat's **clear disc** for this frame: `(x, y, active)`. Set by [`draw`]
+    /// at frame start and cleared at the end; a direct [`blend`] call (a test,
+    /// a one-off) sees no disc.
+    static CLEAR_DISC: std::cell::Cell<(i32, i32, bool)> =
+        const { std::cell::Cell::new((0, 0, false)) };
 }
 
 /// Take one pixel of the frame's budget; `false` when it is spent.
@@ -331,24 +559,66 @@ fn budget_finish() -> u32 {
     WRITES.with(|w| w.get())
 }
 
+/// Pixels painted so far this frame (0 outside a [`draw`]).
+#[inline]
+fn writes_so_far() -> u32 {
+    WRITES.with(|w| w.get())
+}
+
+fn clear_disc_set(centre: (i32, i32)) {
+    CLEAR_DISC.with(|c| c.set((centre.0, centre.1, true)));
+}
+
+fn clear_disc_reset() {
+    CLEAR_DISC.with(|c| c.set((0, 0, false)));
+}
+
+/// The alpha multiplier the rat's clear disc asks for at `(x, y)`: 1.0 with no
+/// disc, [`CLEAR_DISC_MIN`] inside [`CLEAR_DISC_IN_PX`], ramping back to 1.0 at
+/// [`CLEAR_DISC_OUT_PX`].
+#[inline]
+fn clear_disc_factor(x: i32, y: i32) -> f32 {
+    CLEAR_DISC.with(|c| {
+        let (cx, cy, on) = c.get();
+        if !on {
+            return 1.0;
+        }
+        let dx = (x - cx) as f32;
+        let dy = (y - cy) as f32;
+        let d = (dx * dx + dy * dy).sqrt();
+        if d <= CLEAR_DISC_IN_PX {
+            CLEAR_DISC_MIN
+        } else if d >= CLEAR_DISC_OUT_PX {
+            1.0
+        } else {
+            let t = (d - CLEAR_DISC_IN_PX) / (CLEAR_DISC_OUT_PX - CLEAR_DISC_IN_PX);
+            CLEAR_DISC_MIN + (1.0 - CLEAR_DISC_MIN) * t
+        }
+    })
+}
+
 /// Alpha-blend `rgb` over the existing pixel at `(x, y)`, clipped to the
-/// buffer. The **only** painter the layer's art may use.
+/// buffer. The **only** body painter the layer's art may use.
 ///
 /// * The alpha is clamped to [`ALPHA_MAX`], so no pixel of this layer is ever
-///   opaque (the fight can never be hidden).
+///   opaque (the fight can never be hidden), and quartered near the rat by the
+///   frame's clear disc.
 /// * The colour is darkened by [`DARKEN`] first, so the layer reads as a
 ///   silhouette against the lit floor without a per-pixel lighting pass. Ask
 ///   [`rim_tint`] for a rim colour on top.
-/// * It counts against the frame's coverage budget ([`COVERAGE_PCT`]); past it
-///   the write is dropped, so the cap holds whatever the art paints.
+/// * It counts against the frame's coverage budget ([`COVERAGE_SKIP_PCT`]);
+///   past it the write is dropped, so the cap holds whatever the art paints.
 #[inline]
 pub fn blend(pb: &mut PixelBuffer, x: i32, y: i32, rgb: Rgb, alpha: u8) {
-    let a = alpha.min(ALPHA_MAX);
-    if a == 0 || x < 0 || y < 0 {
+    if alpha == 0 || x < 0 || y < 0 {
         return;
     }
     let (xu, yu) = (x as usize, y as usize);
     if xu >= pb.w || yu >= pb.h {
+        return;
+    }
+    let a = (alpha.min(ALPHA_MAX) as f32 * clear_disc_factor(x, y)).round() as u8;
+    if a == 0 {
         return;
     }
     if !take_budget() {
@@ -362,6 +632,8 @@ pub fn blend(pb: &mut PixelBuffer, x: i32, y: i32, rgb: Rgb, alpha: u8) {
 
 /// Darken the pixel at `(x, y)` by `strength` (clamped to `0..=1`, scaled by
 /// [`SHADOW_MAX`]), clipped to the buffer: the layer's floor-shadow writer.
+/// It is a darken, so it can never brighten anything, and it is **not** counted
+/// against the body coverage budget (the cap counts item pixels only).
 #[inline]
 pub fn shadow(pb: &mut PixelBuffer, x: i32, y: i32, strength: f32) {
     let s = strength.clamp(0.0, 1.0) * SHADOW_MAX;
@@ -382,16 +654,22 @@ pub fn shadow(pb: &mut PixelBuffer, x: i32, y: i32, strength: f32) {
 /// One item's placement in this frame (the plan [`draw`] executes).
 #[derive(Clone, Copy, Debug)]
 pub struct Plan {
-    /// Index into [`ForeLayer::items`].
+    /// Index into the layer's planned list (the placed items, then any sky
+    /// movers), far to near.
     pub item: usize,
     /// The anchor's screen position after the parallax transform.
     pub screen: (i32, i32),
-    /// The anchor's screen position **without** parallax: the floor shadow.
+    /// Where the anchor's **un-parallaxed** floor shadow lands (world 1:1 plus
+    /// the (+10, +14) px offset).
     pub shadow: (i32, i32),
-    /// Opacity after the rat/threat fade.
+    /// Draw size: the item's [`ForeItem::scale`].
+    pub scale: f32,
+    /// Opacity after the fades, `0..=ALPHA_MAX`.
     pub alpha: u8,
     /// `-1.0..=1.0` sway for this frame (stepped at [`SWAY_HZ`]).
     pub sway: f32,
+    /// Which way the body's rim highlight faces (see [`ForeDraw`]).
+    pub toward_centre: (i8, i8),
 }
 
 /// The layer's item list and its per-frame scratch. **Render state**: built
@@ -399,6 +677,8 @@ pub struct Plan {
 /// simulation resource.
 pub struct ForeLayer {
     items: Vec<ForeItem>,
+    /// This frame's items in draw order: any sky movers, then `items`.
+    planned: Vec<ForeItem>,
     /// The `(theme, level seed)` the items were built for.
     key: Option<(Theme, u64)>,
     frame: Vec<Plan>,
@@ -417,6 +697,7 @@ impl ForeLayer {
     pub fn new() -> Self {
         Self {
             items: Vec::new(),
+            planned: Vec::new(),
             key: None,
             frame: Vec::new(),
             #[cfg(test)]
@@ -440,11 +721,11 @@ impl ForeLayer {
         generate(level, &mut self.items);
         // Draw order, far to near, decided once per level: a stable sort keeps
         // the generation order among equal depths, so the order is total and
-        // deterministic and the frame loop needs no scratch list.
+        // deterministic and the frame loop needs no sort of its own.
         self.items.sort_by(|a, b| a.depth.total_cmp(&b.depth));
     }
 
-    /// The placed items, in generation order.
+    /// The placed items, in generation order (depths ascending).
     pub fn items(&self) -> &[ForeItem] {
         &self.items
     }
@@ -463,16 +744,15 @@ impl ForeLayer {
         self.frame.clear();
     }
 
-    /// Plan one frame: cull with the art's own extent, apply the parallax
-    /// transform, work out the fade and the sway step. Pure in its arguments
-    /// (`cam`, `size`, `rat`, `elapsed` and the threat list only decide *where*
-    /// and *how opaque*, never *what* is placed).
+    /// Plan one frame: assemble the draw list (sky movers first, they are the
+    /// farthest thing in the layer), cull with the art's own extent, apply the
+    /// parallax transform, work out the fade and the sway step.
     ///
-    /// Draw order is far to near (`depth` ascending), which is the only order
-    /// in which two overlapping items look right, with the item's list index as
-    /// the tie-break so the order is total and deterministic.
+    /// Pure in its arguments (`cam`, `size`, `rat`, `elapsed` and the threat
+    /// list only decide *where* and *how opaque*, never *what* is placed).
     fn plan_frame(
         &mut self,
+        level: &Level,
         cam: Vec2,
         size: (f32, f32),
         rat: Vec2,
@@ -480,46 +760,75 @@ impl ForeLayer {
         threats: &[(Vec2, f32)],
     ) {
         self.frame.clear();
-        if self.items.is_empty() || size.0 <= 0.0 || size.1 <= 0.0 {
+        self.planned.clear();
+        if size.0 <= 0.0 || size.1 <= 0.0 {
+            return;
+        }
+        sky_items(level, cam, size, elapsed, &mut self.planned);
+        self.planned.extend_from_slice(&self.items);
+        if self.planned.is_empty() {
             return;
         }
         let centre = Vec2::new(size.0 * 0.5, size.1 * 0.5);
         let cam_centre = cam + centre;
         let rat_screen = rat - cam;
-        for (i, item) in self.items.iter().enumerate() {
+        for (i, item) in self.planned.iter().enumerate() {
             let item = *item;
+            // The art's own half-extent, already including `scale`, long axis
+            // first. The code never re-derives it: the art owns its box.
             let (ex, ey) = art_foreground::extent(&item);
             let (hx, hy) = if item.horizontal {
                 (ex.max(0.0), ey.max(0.0))
             } else {
                 (ey.max(0.0), ex.max(0.0))
             };
-            let s = item.depth.clamp(1.0, 2.0);
-            let p = centre + (item.pos - cam_centre) * s;
-            let (bx, by) = ((hx * s).max(1.0), (hy * s).max(1.0));
-            // Cull: the art's box at the draw scale, plus the sway reach.
-            const SWAY_REACH: f32 = 4.0;
-            if p.x + bx + SWAY_REACH < 0.0
-                || p.y + by + SWAY_REACH < 0.0
-                || p.x - bx - SWAY_REACH >= size.0
-                || p.y - by - SWAY_REACH >= size.1
+            let depth = item.depth.clamp(0.2, 4.0);
+            let p = centre + (item.pos - cam_centre) * depth;
+            // Cull: the art's box plus the sway reach, and a Drop's tail above.
+            const SWAY_REACH: f32 = 6.0;
+            let tail = if item.attach == Attach::Drop {
+                DROP_TAIL as f32
+            } else {
+                0.0
+            };
+            if p.x + hx + SWAY_REACH < 0.0
+                || p.x - hx - SWAY_REACH >= size.0
+                || p.y + hy + SWAY_REACH < 0.0
+                || p.y - hy - tail >= size.1
             {
                 continue;
             }
-            // Fade: from the item's nearest on-screen pixel, because the art
-            // takes one alpha for the whole item.
-            let mut alpha = proximity_alpha(ALPHA_MAX as f32, box_dist(p, bx, by, rat_screen), FADE_RAT_PX);
+            // Fade: from the rat/threat to the item's on-screen BODY RECT (0
+            // inside), so a huge pipe over the rat fades even though its anchor
+            // is far away.
+            let mut alpha =
+                proximity_alpha(ALPHA_MAX as f32, box_dist(p, hx, hy, rat_screen), FADE_RAT_PX);
             for &(body, radius) in threats {
-                let d = (box_dist(p, bx, by, body - cam) - radius.max(0.0)).max(0.0);
+                let d = (box_dist(p, hx, hy, body - cam) - radius.max(0.0)).max(0.0);
                 alpha = alpha.min(proximity_alpha(ALPHA_MAX as f32, d, FADE_THREAT_PX));
             }
-            let shadow_at = item.pos - cam;
+            if item.kind == ForeKind::Cloud {
+                // A cloud is a haze, never a silhouette.
+                alpha = alpha.min(CLOUD_ALPHA_MAX as f32);
+            }
+            let shadow_at = item.pos - cam + Vec2::new(10.0, 14.0);
+            let sign = |v: f32| -> i8 {
+                if v > 0.5 {
+                    1
+                } else if v < -0.5 {
+                    -1
+                } else {
+                    0
+                }
+            };
             self.frame.push(Plan {
                 item: i,
                 screen: (p.x.round() as i32, p.y.round() as i32),
                 shadow: (shadow_at.x.round() as i32, shadow_at.y.round() as i32),
+                scale: item.scale,
                 alpha: alpha.round().clamp(0.0, ALPHA_MAX as f32) as u8,
                 sway: sway_of(&item, elapsed),
+                toward_centre: (sign(centre.x - p.x), sign(centre.y - p.y)),
             });
         }
     }
@@ -544,7 +853,7 @@ pub struct ForeScene<'a> {
 /// Call it **after** the lighting pass and **before** the hostile layer.
 pub fn draw(pb: &mut PixelBuffer, layer: &mut ForeLayer, scene: &mut ForeScene) -> u32 {
     layer.sync(scene.level);
-    if layer.items.is_empty() || pb.w == 0 || pb.h == 0 {
+    if pb.w == 0 || pb.h == 0 {
         return 0;
     }
     // The bodies the fade must keep clear of: every live miniboss's body and
@@ -573,59 +882,60 @@ pub fn draw(pb: &mut PixelBuffer, layer: &mut ForeLayer, scene: &mut ForeScene) 
         }
     }
     layer.plan_frame(
+        scene.level,
         scene.cam,
         scene.size,
         scene.rat,
         scene.elapsed,
         &threats[..n],
     );
-    let budget = ((pb.w * pb.h) as u32) * COVERAGE_PCT / 100;
-    budget_start(budget);
-    // Shadows first — every one of them is on the *floor*, under every item —
-    // then the items themselves, far to near. Both loops walk the same plan,
-    // so the order is the sorted item order and nothing allocates.
-    for plan in layer.frame.iter().copied() {
-        let item = layer.items[plan.item];
-        draw_shadow(pb, &item, plan.shadow);
+    if layer.frame.is_empty() {
+        return 0;
     }
-    for plan in layer.frame.iter().copied() {
-        let item = layer.items[plan.item];
+    let total = (pb.w * pb.h) as u32;
+    let cap_full = total * COVERAGE_PCT / 100;
+    let cap_skip = total * COVERAGE_SKIP_PCT / 100;
+    budget_start(cap_skip);
+    // The per-pixel guard: quarter the alpha within 22 px of the rat, ramping
+    // back to full at 40 px, whatever the art paints.
+    let rat_screen = scene.rat - scene.cam;
+    clear_disc_set((rat_screen.x.round() as i32, rat_screen.y.round() as i32));
+    // Far to near. The plan is already in that order (sky movers first, then
+    // the depth-sorted placed items), and each item draws its own floor shadow
+    // first, so a nearer body covers a farther shadow.
+    for i in 0..layer.frame.len() {
+        let plan = layer.frame[i];
+        let Some(alpha) = coverage_alpha(plan.alpha, writes_so_far(), cap_full, cap_skip) else {
+            break;
+        };
+        let item = layer.planned[plan.item];
         let d = ForeDraw {
             screen: plan.screen,
-            scale: item.depth.clamp(1.0, 2.0),
-            alpha: plan.alpha,
+            shadow: plan.shadow,
+            scale: plan.scale,
+            alpha,
             sway: plan.sway,
             theme: scene.level.theme,
+            toward_centre: plan.toward_centre,
         };
         art_foreground::draw(pb, &item, &d);
     }
+    clear_disc_reset();
     budget_finish()
 }
 
-/// The item's floor shadow: a soft ellipse at its **un-parallaxed** world
-/// position, thin across its long axis, so the object visibly slides over the
-/// floor while the shadow stays with the world.
-fn draw_shadow(pb: &mut PixelBuffer, item: &ForeItem, at: (i32, i32)) {
-    let (ex, ey) = art_foreground::extent(item);
-    let (hx, hy) = if item.horizontal {
-        (ex.max(0.0), ey.max(0.0))
-    } else {
-        (ey.max(0.0), ex.max(0.0))
-    };
-    let rx = hx.max(2.0);
-    let ry = (hy * 0.45).max(1.0);
-    let (irx, iry) = (rx.round() as i32, ry.round() as i32);
-    for dy in -iry..=iry {
-        for dx in -irx..=irx {
-            let nx = dx as f32 / rx;
-            let ny = dy as f32 / ry;
-            let d2 = nx * nx + ny * ny;
-            if d2 > 1.0 {
-                continue;
-            }
-            shadow(pb, at.0 + dx, at.1 + dy, 0.65 * (1.0 - d2));
-        }
+/// What alpha an item draws at, given the pixels already painted this frame:
+/// full below [`COVERAGE_PCT`], half up to [`COVERAGE_SKIP_PCT`], then `None`
+/// (the item is skipped).
+#[inline]
+fn coverage_alpha(alpha: u8, painted: u32, cap_full: u32, cap_skip: u32) -> Option<u8> {
+    if painted >= cap_skip {
+        return None;
     }
+    if painted < cap_full {
+        return Some(alpha);
+    }
+    Some((alpha as f32 * COVERAGE_HALF).round().clamp(0.0, 255.0) as u8)
 }
 
 /// Alpha for an item whose nearest pixel is `d` px from the rat/a body:
@@ -650,9 +960,9 @@ fn box_dist(p: Vec2, bx: f32, by: f32, q: Vec2) -> f32 {
 }
 
 /// Sway for `item` at `elapsed`: `0.0` for a kind that never sways, else a
-/// value in `-1.0..=1.0` quantised to eighths and **stepped at
-/// [`SWAY_HZ`]** — within one step the value is constant, so a still camera
-/// does not repaint between steps.
+/// value in `-1.0..=1.0` quantised to quarters and **stepped at [`SWAY_HZ`]** —
+/// within one step the value is constant, so a still camera does not repaint
+/// between steps.
 fn sway_of(item: &ForeItem, elapsed: f32) -> f32 {
     if !item.kind.sways() {
         return 0.0;
@@ -711,157 +1021,445 @@ impl Gen {
     }
 }
 
+/// The cell a world position falls in.
+#[inline]
+fn cell_of(p: Vec2) -> (i32, i32) {
+    ((p.x / TILE_F).floor() as i32, (p.y / TILE_F).floor() as i32)
+}
+
+/// The world centre of a cell.
+#[inline]
+fn cell_centre(c: (i32, i32)) -> Vec2 {
+    Vec2::new((c.0 as f32 + 0.5) * TILE_F, (c.1 as f32 + 0.5) * TILE_F)
+}
+
+/// Distance in px from `origin` to the near face of the first **solid** wall
+/// along `dir`, or `None` when the walk leaves the map or ends on a wall that is
+/// not solid (a doorway, a rat-hole, a maze bar) — a span or a root there would
+/// be a lie about where the thing is attached.
+fn reach_to_wall(tiles: &TileMap, origin: Vec2, dir: (i32, i32)) -> Option<f32> {
+    let (cx, cy) = cell_of(origin);
+    let mut k = 0i32;
+    loop {
+        k += 1;
+        if k > MAX_WALL_WALK {
+            return None;
+        }
+        let (nx, ny) = (cx + dir.0 * k, cy + dir.1 * k);
+        if !tiles.in_bounds(nx, ny) {
+            return None;
+        }
+        let kind = tiles.get(nx, ny);
+        if kind.is_open() {
+            continue;
+        }
+        if !matches!(kind, TileKind::Wall(WallKind::Solid)) {
+            return None;
+        }
+        let face = match (dir.0, dir.1) {
+            (1, 0) => Vec2::new(nx as f32 * TILE_F, origin.y),
+            (-1, 0) => Vec2::new((nx + 1) as f32 * TILE_F, origin.y),
+            (0, 1) => Vec2::new(origin.x, ny as f32 * TILE_F),
+            (0, -1) => Vec2::new(origin.x, (ny + 1) as f32 * TILE_F),
+            _ => return None,
+        };
+        return Some((face - origin).len());
+    }
+}
+
+/// Measure the span through `at` along its long axis: walk the tile grid both
+/// ways to the solid walls, then return the recentred anchor (the midpoint of
+/// the two wall faces) and `len` = the gap + 6 px bitten into each wall.
+///
+/// `None` when either end leaves the map without a wall, or when the span is
+/// shorter than `min_len` (rooms: [`SPAN_MIN_PX`], corridors:
+/// [`CORRIDOR_SPAN_MIN`]) or longer than [`SPAN_MAX_PX`].
+fn span_across(
+    tiles: &TileMap,
+    at: Vec2,
+    horizontal: bool,
+    min_len: f32,
+) -> Option<(Vec2, f32)> {
+    if !tiles.get_at(at).is_open() {
+        return None;
+    }
+    let (a, b) = if horizontal {
+        (
+            reach_to_wall(tiles, at, (1, 0))?,
+            reach_to_wall(tiles, at, (-1, 0))?,
+        )
+    } else {
+        (
+            reach_to_wall(tiles, at, (0, 1))?,
+            reach_to_wall(tiles, at, (0, -1))?,
+        )
+    };
+    let len = a + b + 2.0 * SPAN_BITE_PX;
+    if len < min_len || len > SPAN_MAX_PX {
+        return None;
+    }
+    let mid = if horizontal {
+        Vec2::new(at.x + (a - b) * 0.5, at.y)
+    } else {
+        Vec2::new(at.x, at.y + (a - b) * 0.5)
+    };
+    Some((mid, len))
+}
+
+/// Put an Edge's root on the solid wall face that `at` faces along `side`, and
+/// return it with its reach: `want` (80–160 px) clamped so the tip stops a cell
+/// short of the opposite wall. `None` when there is no solid wall that way or no
+/// room to reach into.
+fn edge_from_wall(tiles: &TileMap, at: Vec2, side: Side, want: f32) -> Option<(Vec2, f32)> {
+    if !tiles.get_at(at).is_open() {
+        return None;
+    }
+    let (dx, dy) = side.dir();
+    let dist = reach_to_wall(tiles, at, (dx, dy))?;
+    let room = dist - TILE_F;
+    if room < EDGE_LEN_MIN_PX {
+        return None;
+    }
+    let pos = Vec2::new(at.x + dx as f32 * dist, at.y + dy as f32 * dist);
+    Some((pos, want.min(room)))
+}
+
+/// Is every cell within `r` of `at` an open floor cell? (A Drop needs open floor
+/// around it: it hangs over the middle of a room, never over a wall.)
+fn open_around(tiles: &TileMap, at: Vec2, r: i32) -> bool {
+    let (cx, cy) = cell_of(at);
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let (x, y) = (cx + dx, cy + dy);
+            if !tiles.in_bounds(x, y) || !tiles.get(x, y).is_open() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// The theme's kind of `class`, chosen by `rng` when the theme has more than
+/// one. `None` when no kind of that floor fits the attachment.
+fn kind_of_class(theme: Theme, class: u8, rng: &mut Gen) -> Option<ForeKind> {
+    let kinds = kinds_for(theme);
+    let matching = kinds.iter().filter(|k| k.attach_class() == class).count();
+    // The draw is taken whatever the answer, so the stream order is stable.
+    let roll = rng.next_u64() as usize;
+    if matching == 0 {
+        return None;
+    }
+    kinds
+        .iter()
+        .filter(|k| k.attach_class() == class)
+        .nth(roll % matching)
+        .copied()
+}
+
+/// The side a `0..4` roll names, in declaration order.
+fn side_from_roll(v: f32) -> Side {
+    match v as i32 {
+        0 => Side::N,
+        1 => Side::E,
+        2 => Side::S,
+        _ => Side::W,
+    }
+}
+
 /// Build the layer's items for `level`: a pure function of the finished level
-/// (theme, seed, rooms, tile kinds, shop holes, boss floor) and its own rng.
+/// (theme, seed, start, rooms, tile kinds and the object lists) and its own rng.
 /// Draws no simulation rng, so it cannot move a golden.
 fn generate(level: &Level, out: &mut Vec<ForeItem>) {
     let theme = level.theme;
-    let [run_kind, door_kind, point_kind] = kinds_for(theme);
+    let tiles = &level.tiles;
     let mut rng = Gen::new(crate::game::level::level_seed(theme, level.seed, GEN_SALT));
     let start = level.start;
     let shops = &level.objects.shop_holes;
+    let holes = &level.objects.rat_holes;
+    let doors = &level.objects.one_way_doors;
+    let caches = &level.mazes;
 
-    // Keep-outs: the start room's centre and the mouse holes (a shelf needs a
-    // clear threshold). Deliberately **nothing** about a boss arena: the layer
-    // reads rooms, tile kinds and shop holes only, so removing arenas from the
-    // levels (batch 12) cannot break it.
-    let blocked = |p: Vec2| -> bool {
-        p.dist(start) < START_CLEAR_PX || shops.iter().any(|h| h.pos.dist(p) < CLEAR_PX)
+    // Keep-outs: the start room's centre, a shop hole's threshold, and the
+    // fixtures that must stay legible under the layer. Deliberately **nothing**
+    // about a boss arena: the layer reads rooms, tile kinds and the object lists
+    // only, so removing arenas from the levels (batch 12) cannot break it.
+    let clear_of_fixtures = |p: Vec2| -> bool {
+        p.dist(start) >= START_CLEAR_PX
+            && shops.iter().all(|h| h.pos.dist(p) >= CLEAR_PX)
+            && holes
+                .iter()
+                .all(|h| cell_centre(h.cell).dist(p) >= FIXTURE_CLEAR_PX)
+            && doors
+                .iter()
+                .all(|d| cell_centre(d.cell).dist(p) >= FIXTURE_CLEAR_PX)
+            && caches.iter().all(|m| m.reward.dist(p) >= FIXTURE_CLEAR_PX)
+    };
+    let spaced = |out: &[ForeItem], p: Vec2| -> bool {
+        out.iter().all(|i| i.pos.dist(p) >= MIN_SPACING)
+    };
+    let can_place = |out: &[ForeItem], p: Vec2| -> bool {
+        out.len() < MAX_ITEMS && clear_of_fixtures(p) && spaced(out, p)
     };
 
-    let push = |out: &mut Vec<ForeItem>, item: ForeItem| {
-        if out.len() < MAX_ITEMS {
-            out.push(item);
-        }
-    };
-
-    // 1. Corridor runs: one corridor in two, along its long axis.
+    // 1. Corridors: a Span ACROSS the corridor (perpendicular to its long
+    // axis), one corridor in two, one per ~14 tiles of length.
     for room in level.rooms.iter().filter(|r| r.kind == RoomKind::Corridor) {
-        if !rng.flip() {
+        let long_axis_horizontal = room.rect.w >= room.rect.h;
+        let long_cells = if long_axis_horizontal {
+            room.rect.w
+        } else {
+            room.rect.h
+        };
+        if long_cells < CORRIDOR_MIN_TILES || !rng.flip() {
             continue;
         }
-        let horizontal = room.rect.w >= room.rect.h;
-        let long_cells = if horizontal { room.rect.w } else { room.rect.h };
-        let long_px = long_cells as f32 * TILE_F;
-        // Shorter than the corridor (the ends are the doorways' business).
-        let len = (long_px * 0.85).clamp(TILE_F * 1.5, 128.0);
+        let slots = (long_cells / CORRIDOR_TILES_PER_SPAN).max(1);
         let centre = room.rect.center_world();
-        if blocked(centre) {
-            continue;
-        }
-        let depth = rng.range(1.15, 1.40);
-        let seed = rng.u32();
-        push(
-            out,
-            ForeItem {
-                kind: run_kind,
-                pos: centre,
-                len,
-                horizontal,
-                depth,
-                seed,
-            },
-        );
-    }
-
-    // 2. Doorway hangers/beams: one doorway in two, at the opening's middle.
-    // Doorways are wall cells (`WallKind::Doorway`), so they come from the tile
-    // grid rather than the room list; a two-cell opening is one doorway.
-    {
-        use crate::game::art_walls::{WallAxis, WallKind};
-        let (cols, rows) = (level.tiles.cols(), level.tiles.rows());
-        for cy in 1..rows - 1 {
-            for cx in 1..cols - 1 {
-                let Some(WallKind::Doorway { axis }) = level.tiles.get(cx, cy).wall_kind() else {
-                    continue;
-                };
-                // The second cell of a two-cell opening shares the first's run.
-                let prev = match axis {
-                    WallAxis::Horizontal => (cx - 1, cy),
-                    WallAxis::Vertical => (cx, cy - 1),
-                };
-                if matches!(
-                    level.tiles.get(prev.0, prev.1).wall_kind(),
-                    Some(WallKind::Doorway { axis: a }) if a == axis
-                ) {
-                    continue;
-                }
-                if !rng.flip() {
-                    continue;
-                }
-                let pos = Vec2::new(
-                    (cx as f32 + 0.5) * TILE_F,
-                    (cy as f32 + 0.5) * TILE_F,
-                );
-                if blocked(pos) {
-                    continue;
-                }
-                let depth = rng.range(1.20, 1.50);
-                let seed = rng.u32();
-                let horizontal = match door_kind {
-                    // The art hangs these +y itself.
-                    ForeKind::DripChain | ForeKind::HangingLampCord => false,
-                    // A line with things hanging +v: keep the line level.
-                    k if k.hangs() => true,
-                    // A beam spans the opening.
-                    _ => axis == WallAxis::Horizontal,
-                };
-                push(
-                    out,
-                    ForeItem {
-                        kind: door_kind,
-                        pos,
-                        len: TILE_F * 2.2,
-                        horizontal,
-                        depth,
-                        seed,
-                    },
-                );
-            }
-        }
-    }
-
-    // 3. Point items in the large rooms (three at most a room). A room's kind
-    // is not read: a former boss arena is just a large room and gets the same
-    // treatment as a hall.
-    for room in &level.rooms {
-        let cells = room.rect.area();
-        if matches!(room.kind, RoomKind::Corridor | RoomKind::Maze) || cells < 36 {
-            continue;
-        }
-        let n = (cells / 120).clamp(1, 3) as usize;
-        if room.rect.w < 6 || room.rect.h < 6 {
-            continue;
-        }
-        let (x0, y0) = (
-            (room.rect.x + 2) as f32 * TILE_F,
-            (room.rect.y + 2) as f32 * TILE_F,
-        );
-        let (x1, y1) = (
-            (room.rect.right() - 2) as f32 * TILE_F,
-            (room.rect.bottom() - 2) as f32 * TILE_F,
-        );
-        for _ in 0..n {
-            let pos = Vec2::new(rng.range(x0, x1), rng.range(y0, y1));
-            let depth = rng.range(1.25, 1.60);
+        for _ in 0..slots {
+            let along = rng.range(1.0, (long_cells - 1).max(1) as f32);
+            let depth = rng.range(DEPTH_MIN, DEPTH_MAX);
+            let scale = rng.range(SCALE_MIN, SCALE_MAX);
             let seed = rng.u32();
-            // The draw is kept (stream order); utensils always hang level.
-            let horizontal = rng.flip() || point_kind == ForeKind::HangingUtensils;
-            if blocked(pos) {
+            let Some(kind) = kind_of_class(theme, ATTACH_SPAN, &mut rng) else {
+                continue;
+            };
+            let at = if long_axis_horizontal {
+                Vec2::new(
+                    (room.rect.x as f32 + along + 0.5) * TILE_F,
+                    centre.y,
+                )
+            } else {
+                Vec2::new(
+                    centre.x,
+                    (room.rect.y as f32 + along + 0.5) * TILE_F,
+                )
+            };
+            // Across the corridor: the item's long axis is the short one. A
+            // corridor is narrow, so this rule has its own, smaller minimum.
+            let span_horizontal = !long_axis_horizontal;
+            let Some((pos, len)) =
+                span_across(tiles, at, span_horizontal, CORRIDOR_SPAN_MIN)
+            else {
+                continue;
+            };
+            if !can_place(out.as_slice(), pos) {
                 continue;
             }
-            push(
-                out,
-                ForeItem {
-                    kind: point_kind,
-                    pos,
-                    len: 0.0,
-                    horizontal,
-                    depth,
-                    seed,
-                },
-            );
+            out.push(ForeItem {
+                kind,
+                pos,
+                len,
+                horizontal: span_horizontal,
+                attach: Attach::Span,
+                depth,
+                scale,
+                seed,
+            });
         }
+    }
+
+    // 2. Rooms/halls: a Span across the short dimension, an Edge from a wall
+    // face, or a Drop over open floor; one per ~120 tiles², three a room at
+    // most. A room's kind is not read: a former boss arena is just a large room.
+    for room in &level.rooms {
+        if matches!(room.kind, RoomKind::Corridor | RoomKind::Maze) {
+            continue;
+        }
+        let (w, h) = (room.rect.w, room.rect.h);
+        if w.min(h) < ROOM_MIN_SHORT || w.max(h) < ROOM_MIN_LONG || w * h < ROOM_MIN_CELLS {
+            continue;
+        }
+        let slots = (w * h / ROOM_TILES2_PER_ITEM).clamp(1, ROOM_MAX_ITEMS);
+        // One cell in from the rect's edge: the edge itself is the wall row.
+        let x0 = (room.rect.x + 1) as f32 * TILE_F;
+        let y0 = (room.rect.y + 1) as f32 * TILE_F;
+        let x1 = (room.rect.right() - 1) as f32 * TILE_F;
+        let y1 = (room.rect.bottom() - 1) as f32 * TILE_F;
+        if x1 <= x0 || y1 <= y0 {
+            continue;
+        }
+        for _ in 0..slots {
+            for _attempt in 0..PLACE_ATTEMPTS {
+                let at = Vec2::new(rng.range(x0, x1), rng.range(y0, y1));
+                let class_roll = rng.range(0.0, 3.0);
+                let side_roll = rng.range(0.0, 4.0);
+                let want = rng.range(EDGE_LEN_MIN_PX, EDGE_LEN_MAX_PX);
+                let depth = rng.range(DEPTH_MIN, DEPTH_MAX);
+                let scale = rng.range(SCALE_MIN, SCALE_MAX);
+                let seed = rng.u32();
+                // A Span lies across the room's short dimension.
+                let class = if class_roll < 1.0 {
+                    ATTACH_SPAN
+                } else if class_roll < 2.0 {
+                    ATTACH_EDGE
+                } else {
+                    ATTACH_DROP
+                };
+                let Some(kind) = kind_of_class(theme, class, &mut rng) else {
+                    continue;
+                };
+                let placed: Option<(Vec2, f32, bool, Attach)> = match class {
+                    ATTACH_SPAN => {
+                        let span_horizontal = w < h;
+                        span_across(tiles, at, span_horizontal, SPAN_MIN_PX)
+                            .map(|(pos, len)| (pos, len, span_horizontal, Attach::Span))
+                    }
+                    ATTACH_EDGE => {
+                        let side = side_from_roll(side_roll);
+                        edge_from_wall(tiles, at, side, want).map(|(pos, len)| {
+                            (pos, len, side.is_horizontal(), Attach::Edge(side))
+                        })
+                    }
+                    _ => {
+                        if open_around(tiles, at, DROP_CLEAR_TILES) {
+                            Some((at, 0.0, true, Attach::Drop))
+                        } else {
+                            None
+                        }
+                    }
+                };
+                let Some((pos, len, horizontal, attach)) = placed else {
+                    continue;
+                };
+                if !can_place(out.as_slice(), pos) {
+                    continue;
+                }
+                out.push(ForeItem {
+                    kind,
+                    pos,
+                    len,
+                    horizontal,
+                    attach,
+                    depth,
+                    scale,
+                    seed,
+                });
+                break;
+            }
+        }
+    }
+}
+
+// ---- Sky movers (the outdoor floor) ---------------------------------------
+
+/// A 0..=1 hash of `(seed, k)`.
+fn hash01(seed: u64, k: u64) -> f32 {
+    let h = mix32((seed as u32) ^ mix32(k as u32 ^ 0x5BD1_E995));
+    (h & 0x00FF_FFFF) as f32 / 16_777_215.0
+}
+
+/// A per-item `u32` seed from `(seed, k)`.
+fn hash_u32(seed: u64, k: u64) -> u32 {
+    mix32((seed as u32).wrapping_add(mix32(k as u32)))
+}
+
+/// The outdoor floor's own movers: a pure function of `(level seed, elapsed)`
+/// (plus the camera and the view, which only say where "the view" is), with the
+/// clock quantised to 1/30 s, so a paused frame is still and two calls at the
+/// same instant agree exactly.
+///
+/// * **Cloud** — two, drifting at 12 px/s over a 1200 px loop in bed space,
+///   distant (`depth` below 1, so they slide slower than the floor and their
+///   shadow falls away from the body).
+/// * **PowerLine** — one Span pinned across the whole view at a seed-chosen
+///   band, plus a pole crossing every ~4 s at 300 px/s (a second PowerLine item,
+///   `len` 0, vertical).
+/// * **TreeBranch** — one event every 5–9 s (the period is the jittered gap
+///   between consecutive event starts, from a hash of the index), sweeping
+///   tail-ward at 220 px/s, anchored on the N or S edge of the view.
+///
+/// The sky list is far to near: clouds, wires, pole, branch.
+fn sky_items(level: &Level, cam: Vec2, size: (f32, f32), elapsed: f32, out: &mut Vec<ForeItem>) {
+    if level.theme != Theme::Trailer {
+        return;
+    }
+    let (vw, vh) = (size.0.max(1.0), size.1.max(1.0));
+    let t = (elapsed.max(0.0) * SKY_QUANT_HZ).floor() / SKY_QUANT_HZ;
+    let seed = level.seed;
+
+    // ---- Clouds: distant, in bed space, drifting over a 1200 px loop.
+    for i in 0..2u64 {
+        let base = hash01(seed ^ 0xC10D_0000, i);
+        let drift = base * SKY_CLOUD_LOOP + SKY_CLOUD_SPEED * t;
+        let wrapped = drift % SKY_CLOUD_LOOP;
+        let x = level.arena.x * 0.5 - SKY_CLOUD_LOOP * 0.5 + wrapped;
+        let y = level.arena.y * (0.15 + hash01(seed ^ 0x7E57_0000, i) * 0.7);
+        out.push(ForeItem {
+            kind: ForeKind::Cloud,
+            pos: Vec2::new(x, y),
+            len: 0.0,
+            horizontal: true,
+            attach: Attach::Sky,
+            depth: SKY_CLOUD_DEPTH,
+            scale: 1.0 + hash01(seed ^ 0x0D0D_0000, i) * 0.6,
+            seed: hash_u32(seed ^ 0xC10D_0000, i),
+        });
+    }
+
+    // ---- The wires: one Span across the whole view, pinned to the frame.
+    let band = 0.16 + hash01(seed, 0x11) * 0.26;
+    let wire_y = cam.y + vh * band;
+    out.push(ForeItem {
+        kind: ForeKind::PowerLine,
+        pos: Vec2::new(cam.x + vw * 0.5, wire_y),
+        len: vw + 160.0,
+        horizontal: true,
+        attach: Attach::Sky,
+        depth: SKY_PINNED_DEPTH,
+        scale: SKY_WIRE_SCALE,
+        seed: hash_u32(seed, 0x12),
+    });
+
+    // ---- A pole passing every ~4 s at 300 px/s.
+    let pole_span = vw + 2.0 * SKY_MARGIN;
+    let pole_sweep = pole_span / SKY_POLE_SPEED;
+    let pole_phase = t - (t / SKY_POLE_PERIOD).floor() * SKY_POLE_PERIOD;
+    if pole_phase < pole_sweep {
+        let x = cam.x + vw + SKY_MARGIN - SKY_POLE_SPEED * pole_phase;
+        out.push(ForeItem {
+            kind: ForeKind::PowerLine,
+            pos: Vec2::new(x, wire_y + 8.0),
+            len: 0.0,
+            horizontal: false,
+            attach: Attach::Sky,
+            depth: SKY_PINNED_DEPTH,
+            scale: SKY_POLE_SCALE,
+            seed: hash_u32(seed, 0x13),
+        });
+    }
+
+    // ---- Branches: one event per jittered period, sweeping the view.
+    let jitter = |k: u64| (hash01(seed ^ 0x5EED_0000, k) - 0.5) * 2.0;
+    let branch_sweep = (vw + 2.0 * SKY_MARGIN) / SKY_BRANCH_SPEED;
+    let candidate = (t / SKY_BRANCH_PERIOD).floor().max(0.0) as u64;
+    for k in candidate.saturating_sub(1)..=candidate + 1 {
+        let start = SKY_BRANCH_PERIOD * k as f32 + jitter(k);
+        let end = SKY_BRANCH_PERIOD * (k + 1) as f32 + jitter(k + 1);
+        if t < start || t >= end || (t - start) >= branch_sweep {
+            continue;
+        }
+        let from_north = hash01(seed ^ 0x9E37_0000, k) < 0.5;
+        let x = cam.x + vw + SKY_MARGIN - SKY_BRANCH_SPEED * (t - start);
+        let y = if from_north {
+            cam.y + SKY_MARGIN * 0.45
+        } else {
+            cam.y + vh - SKY_MARGIN * 0.45
+        };
+        out.push(ForeItem {
+            kind: ForeKind::TreeBranch,
+            pos: Vec2::new(x, y),
+            len: EDGE_LEN_MAX_PX,
+            horizontal: false,
+            attach: if from_north {
+                Attach::Edge(Side::N)
+            } else {
+                Attach::Edge(Side::S)
+            },
+            depth: SKY_PINNED_DEPTH,
+            scale: 3.6 + hash01(seed ^ 0x1EAF_0000, k) * 2.4,
+            seed: hash_u32(seed ^ 0x1EAF_0000, k),
+        });
+        break;
     }
 }
 
@@ -880,9 +1478,39 @@ mod tests {
         (w, layer)
     }
 
+    /// A hand-built item, so a test never repeats all eight fields.
+    #[allow(clippy::too_many_arguments)]
+    fn mk(
+        kind: ForeKind,
+        pos: Vec2,
+        len: f32,
+        horizontal: bool,
+        attach: Attach,
+        depth: f32,
+        scale: f32,
+        seed: u32,
+    ) -> ForeItem {
+        ForeItem {
+            kind,
+            pos,
+            len,
+            horizontal,
+            attach,
+            depth,
+            scale,
+            seed,
+        }
+    }
+
     /// Draw one frame over a mid-grey floor and return the buffer plus the
     /// pixels painted.
-    fn render(w: &mut World, layer: &mut ForeLayer, cam: Vec2, rat: Vec2, elapsed: f32) -> (PixelBuffer, u32) {
+    fn render(
+        w: &mut World,
+        layer: &mut ForeLayer,
+        cam: Vec2,
+        rat: Vec2,
+        elapsed: f32,
+    ) -> (PixelBuffer, u32) {
         let mut pb = PixelBuffer::new(VIEW.0, VIEW.1);
         pb.clear((70, 66, 60));
         let mut scene = ForeScene {
@@ -901,8 +1529,48 @@ mod tests {
         a.pixels().iter().zip(b.pixels()).filter(|(x, y)| x != y).count()
     }
 
+    fn lum(c: Rgb) -> u32 {
+        u32::from(c.0) + u32::from(c.1) + u32::from(c.2)
+    }
+
+    fn kind_code(kind: TileKind) -> u64 {
+        match kind {
+            TileKind::Open => 0,
+            TileKind::Wall(WallKind::Solid) => 1,
+            TileKind::Wall(WallKind::Maze) => 2,
+            TileKind::Wall(WallKind::RatHole { .. }) => 3,
+            TileKind::Wall(WallKind::Doorway { .. }) => 4,
+            TileKind::Wall(WallKind::OneWayDoor { .. }) => 5,
+        }
+    }
+
+    fn fold(h: &mut u64, v: u64) {
+        *h ^= v;
+        *h = h.wrapping_mul(0x0000_0100_0000_01b3).rotate_left(7);
+    }
+
+    /// Everything about a level a render-only layer must never write.
+    fn level_fingerprint(level: &Level) -> u64 {
+        let mut h: u64 = 0x9E37_79B9_7F4A_7C15;
+        for cy in 0..level.tiles.rows() {
+            for cx in 0..level.tiles.cols() {
+                fold(&mut h, kind_code(level.tiles.get(cx, cy)));
+            }
+        }
+        fold(&mut h, level.seed);
+        fold(&mut h, level.rooms.len() as u64);
+        fold(&mut h, level.objects.shop_holes.len() as u64);
+        fold(&mut h, level.objects.rat_holes.len() as u64);
+        fold(&mut h, level.objects.one_way_doors.len() as u64);
+        fold(&mut h, level.mazes.len() as u64);
+        fold(&mut h, level.start.x.to_bits() as u64);
+        fold(&mut h, level.start.y.to_bits() as u64);
+        h
+    }
+
     /// Generation is a pure function of the level: the same `(theme, seed)`
-    /// twice gives the same list, in the same order.
+    /// twice gives the same list, in the same order, and every item honours its
+    /// kind's attachment and the v2 size bands.
     #[test]
     fn generation_is_deterministic_for_every_theme_and_seed() {
         for theme in Theme::playable() {
@@ -915,22 +1583,58 @@ mod tests {
                         kinds_for(theme).contains(&item.kind),
                         "{theme:?}: a foreign kind"
                     );
-                    assert!((1.15..=1.6).contains(&item.depth), "depth {}", item.depth);
+                    assert_eq!(
+                        item.kind.attach_class(),
+                        item.attach.class(),
+                        "{theme:?}: {item:?} is not drawn for its attachment"
+                    );
+                    assert!(
+                        (DEPTH_MIN..=DEPTH_MAX).contains(&item.depth),
+                        "depth {}",
+                        item.depth
+                    );
+                    assert!(
+                        (SCALE_MIN..=SCALE_MAX).contains(&item.scale),
+                        "scale {}",
+                        item.scale
+                    );
                     assert!(item.len >= 0.0, "a negative length");
+                    match item.attach {
+                        Attach::Span => assert!(
+                            (CORRIDOR_SPAN_MIN..=SPAN_MAX_PX).contains(&item.len),
+                            "span len {}",
+                            item.len
+                        ),
+                        Attach::Edge(_) => assert!(
+                            (EDGE_LEN_MIN_PX..=EDGE_LEN_MAX_PX).contains(&item.len),
+                            "edge len {}",
+                            item.len
+                        ),
+                        Attach::Drop => assert_eq!(item.len, 0.0, "a hanging item has no length"),
+                        Attach::Sky => {}
+                    }
                 }
             }
         }
     }
 
-    /// A different seed on the same floor is a different layer (the stream is
-    /// live), and every floor actually places something.
+    /// Every floor places items over a handful of seeds (at most two of the
+    /// three kinds of an outdoor floor ever fit a room, so Trailer is the
+    /// thinnest), and a different seed on the same floor is a different layer.
     #[test]
     fn every_floor_places_items_and_seeds_change_them() {
         for theme in Theme::playable() {
+            let mut total = 0;
+            for seed in 0..8u64 {
+                let (_, a) = layer_for(theme, seed);
+                total += a.items().len();
+            }
+            assert!(total > 0, "{theme:?} placed nothing over 8 seeds");
             let (_, a) = layer_for(theme, 11);
             let (_, b) = layer_for(theme, 12);
-            assert!(!a.items().is_empty(), "{theme:?} placed nothing");
-            assert_ne!(a.items(), b.items(), "{theme:?}: the seed does nothing");
+            if !a.items().is_empty() && !b.items().is_empty() {
+                assert_ne!(a.items(), b.items(), "{theme:?}: the seed does nothing");
+            }
         }
     }
 
@@ -948,14 +1652,17 @@ mod tests {
             assert_eq!(layer.items(), base.as_slice(), "zoom {z} changed the list");
         }
         let _ = render(&mut w, &mut layer, Vec2::new(400.0, 300.0), Vec2::ZERO, 9.0);
-        assert_eq!(layer.items(), base.as_slice(), "a camera move changed the list");
+        assert_eq!(
+            layer.items(),
+            base.as_slice(),
+            "a camera move changed the list"
+        );
     }
 
-    /// Nothing sits over the start room's centre or within 5 tiles of a shop
-    /// hole. (There is deliberately no arena rule: batch 12 removed the boss
-    /// arenas and this module must not care either way.)
+    /// Nothing sits over the start room's centre, within 5 tiles of a shop hole,
+    /// or within 48 px of a rat-hole, one-way door or maze cache.
     #[test]
-    fn nothing_covers_the_start_or_a_shop_hole() {
+    fn nothing_covers_the_start_a_shop_hole_or_a_fixture() {
         for theme in Theme::playable() {
             for seed in 0..20u64 {
                 let (w, layer) = layer_for(theme, seed);
@@ -970,17 +1677,158 @@ mod tests {
                             "{theme:?} {seed}: an item crowds a shop hole"
                         );
                     }
+                    for hole in &w.level.objects.rat_holes {
+                        assert!(
+                            item.pos.dist(cell_centre(hole.cell)) >= FIXTURE_CLEAR_PX,
+                            "{theme:?} {seed}: an item crowds a rat-hole"
+                        );
+                    }
+                    for door in &w.level.objects.one_way_doors {
+                        assert!(
+                            item.pos.dist(cell_centre(door.cell)) >= FIXTURE_CLEAR_PX,
+                            "{theme:?} {seed}: an item crowds a one-way door"
+                        );
+                    }
+                    for maze in &w.level.mazes {
+                        assert!(
+                            item.pos.dist(maze.reward) >= FIXTURE_CLEAR_PX,
+                            "{theme:?} {seed}: an item crowds a maze cache"
+                        );
+                    }
                 }
+            }
+        }
+    }
+
+    /// HUGE and FEW: no two anchors closer than [`MIN_SPACING`], and no level
+    /// holds more than sixty items.
+    #[test]
+    fn no_two_anchors_are_closer_than_the_spacing_and_no_level_exceeds_the_cap() {
+        for theme in Theme::playable() {
+            for seed in 0..20u64 {
+                let (_, layer) = layer_for(theme, seed);
+                let items = layer.items();
+                assert!(
+                    items.len() <= MAX_ITEMS,
+                    "{theme:?} {seed}: {} items",
+                    items.len()
+                );
+                assert!(items.len() <= 60, "{theme:?} {seed}: the per-level cap is 60");
+                for i in 0..items.len() {
+                    for j in i + 1..items.len() {
+                        assert!(
+                            items[i].pos.dist(items[j].pos) >= MIN_SPACING,
+                            "{theme:?} {seed}: anchors {} px apart",
+                            items[i].pos.dist(items[j].pos)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Never floating: on a generated Sewer level, the two ends of every Span
+    /// sit **inside solid wall tiles**, so `len` really reaches into both walls,
+    /// and the anchor hangs over open floor.
+    #[test]
+    fn every_span_ends_inside_a_solid_wall() {
+        let mut spans = 0;
+        for seed in [1u64, 2, 5, 9, 21] {
+            let (w, layer) = layer_for(Theme::Sewer, seed);
+            let tiles = &w.level.tiles;
+            for item in layer.items() {
+                if item.attach != Attach::Span {
+                    continue;
+                }
+                spans += 1;
+                let half = item.len * 0.5;
+                let (ax, ay) = if item.horizontal {
+                    (half, 0.0)
+                } else {
+                    (0.0, half)
+                };
+                for s in [1.0f32, -1.0] {
+                    let end = Vec2::new(item.pos.x + ax * s, item.pos.y + ay * s);
+                    assert!(
+                        matches!(tiles.get_at(end), TileKind::Wall(WallKind::Solid)),
+                        "seed {seed}: a span end at {end:?} is not inside a solid wall"
+                    );
+                }
+                assert!(
+                    tiles.get_at(item.pos).is_open(),
+                    "seed {seed}: a span's anchor is inside a wall"
+                );
+            }
+        }
+        assert!(spans > 0, "no span was placed, so the test proves nothing");
+    }
+
+    /// A corridor cross-span is measured against the corridor's own, smaller
+    /// minimum ([`CORRIDOR_SPAN_MIN`] 28 px), so a fat pipe really does cross a
+    /// 1–3-cell corridor overhead; a room span still has to reach
+    /// [`SPAN_MIN_PX`].
+    #[test]
+    fn corridor_cross_spans_use_the_smaller_minimum() {
+        let mut short_corridor_spans = 0;
+        for seed in 0..12u64 {
+            let (w, layer) = layer_for(Theme::Sewer, seed);
+            for item in layer.items() {
+                if item.attach != Attach::Span {
+                    continue;
+                }
+                // A span's anchor is recentred onto the middle of what it
+                // crosses, so the room rect says exactly which rule placed it.
+                let in_corridor = w.level.rooms.iter().any(|r| {
+                    r.kind == RoomKind::Corridor && r.rect.contains_world(item.pos)
+                });
+                let min = if in_corridor {
+                    CORRIDOR_SPAN_MIN
+                } else {
+                    SPAN_MIN_PX
+                };
+                assert!(
+                    item.len >= min && item.len <= SPAN_MAX_PX,
+                    "seed {seed}: a {} span of {} px is outside {min}..={SPAN_MAX_PX}",
+                    if in_corridor { "corridor" } else { "room" },
+                    item.len
+                );
+                if in_corridor && item.len < SPAN_MIN_PX {
+                    short_corridor_spans += 1;
+                }
+            }
+        }
+        assert!(
+            short_corridor_spans > 0,
+            "no corridor cross-span used the 28 px minimum over 12 Sewer seeds"
+        );
+    }
+
+    /// Generation is render-only: it never writes the level (whose tile kinds
+    /// the map pin folds).
+    #[test]
+    fn generation_never_touches_the_level() {
+        for theme in Theme::playable() {
+            for seed in [0u64, 3, 17] {
+                let w = World::new(theme, seed);
+                let before = level_fingerprint(&w.level);
+                let mut items = Vec::new();
+                generate(&w.level, &mut items);
+                assert_eq!(
+                    before,
+                    level_fingerprint(&w.level),
+                    "{theme:?} {seed}: generation wrote to the level"
+                );
+                assert!(items.len() <= MAX_ITEMS);
             }
         }
     }
 
     /// The coverage cap holds over 20 seeds × 6 themes at several cameras: the
     /// enforced budget (pixels `blend` actually painted) never exceeds
-    /// [`COVERAGE_PCT`] of the view.
+    /// [`COVERAGE_SKIP_PCT`] of the view, and the layer does paint.
     #[test]
     fn the_coverage_cap_holds_everywhere() {
-        let cap = (VIEW.0 * VIEW.1) as u32 * COVERAGE_PCT / 100;
+        let cap = (VIEW.0 * VIEW.1) as u32 * COVERAGE_SKIP_PCT / 100;
         let mut painted_any = false;
         for theme in Theme::playable() {
             for seed in 0..20u64 {
@@ -1004,24 +1852,28 @@ mod tests {
                 }
             }
         }
-        assert!(painted_any, "the layer never painted at all: the cap is vacuous");
+        assert!(
+            painted_any,
+            "the layer never painted at all: the cap is vacuous"
+        );
     }
 
-    /// Parallax: an item at depth 1.5 slides 1.5 px for every camera pixel (and
-    /// its shadow stays on the world).
+    /// Parallax: an item at depth 2.5 slides 2.5 px per camera px, and its
+    /// floor shadow stays on the world (1:1 plus the (+10, +14) offset).
     #[test]
-    fn an_item_at_depth_one_point_five_moves_one_and_a_half_pixels_per_camera_pixel() {
+    fn an_item_at_depth_two_point_five_moves_two_and_a_half_pixels_per_camera_pixel() {
         let mut w = World::new(Theme::Sewer, 5);
         let mut layer = ForeLayer::new();
-        let item = ForeItem {
-            kind: ForeKind::PipeRun,
-            pos: Vec2::new(600.0, 400.0),
-            len: 40.0,
-            horizontal: true,
-            depth: 1.5,
-            seed: 3,
-        };
-        layer.force_items(vec![item]);
+        layer.force_items(vec![mk(
+            ForeKind::MainPipe,
+            Vec2::new(600.0, 400.0),
+            200.0,
+            true,
+            Attach::Span,
+            2.5,
+            5.0,
+            3,
+        )]);
         let plan_at = |layer: &mut ForeLayer, w: &mut World, cam: Vec2| -> Plan {
             let mut scene = ForeScene {
                 ecs: &mut w.ecs,
@@ -1034,19 +1886,15 @@ mod tests {
             let mut pb = PixelBuffer::new(VIEW.0, VIEW.1);
             pb.clear((70, 66, 60));
             draw(&mut pb, layer, &mut scene);
-            let mut it = layer.frame().iter();
-            *it.next().expect("a plan")
+            *layer.frame().first().expect("a plan")
         };
         let a = plan_at(&mut layer, &mut w, Vec2::new(540.0, 360.0));
         let b = plan_at(&mut layer, &mut w, Vec2::new(542.0, 362.0));
-        // The camera moved +2 px, so the item's screen position moved −3 px:
-        // exactly `depth` (1.5) screen pixels for every camera pixel.
         assert_eq!(
             (a.screen.0 - b.screen.0, a.screen.1 - b.screen.1),
-            (3, 3),
-            "2 px of camera at depth 1.5 must be 3 px of item"
+            (5, 5),
+            "2 px of camera at depth 2.5 must be 5 px of item"
         );
-        // The shadow is the world position: it moves exactly with the camera.
         assert_eq!(
             (a.shadow.0 - b.shadow.0, a.shadow.1 - b.shadow.1),
             (2, 2),
@@ -1054,89 +1902,58 @@ mod tests {
         );
     }
 
-    /// The fade: an item over the rat is at the alpha floor, an item well away
-    /// is at max, and the ramp in between is monotone.
+    /// The fade is measured to the item's on-screen **body rect**, not to its
+    /// anchor: the rat standing under a huge pipe fades it even though the
+    /// anchor is far away.
     #[test]
-    fn the_fade_near_the_rat_reaches_the_floor_and_back() {
-        // Pure maths first, then through the plan.
-        assert_eq!(proximity_alpha(ALPHA_MAX as f32, 0.0, FADE_RAT_PX), ALPHA_FLOOR);
-        assert_eq!(
-            proximity_alpha(ALPHA_MAX as f32, FADE_RAT_PX + FADE_RAMP_PX + 1.0, FADE_RAT_PX),
-            ALPHA_MAX as f32
-        );
-        let mut last = 0.0;
-        for d in 0..120 {
-            let a = proximity_alpha(ALPHA_MAX as f32, d as f32, FADE_RAT_PX);
-            assert!(a >= last, "the ramp must not go backwards at {d}");
-            last = a;
-        }
-
+    fn the_fade_measures_the_body_rect_not_the_anchor() {
         let mut w = World::new(Theme::Sewer, 5);
         let mut layer = ForeLayer::new();
-        let item = ForeItem {
-            kind: ForeKind::Grate,
-            // The view centre, where parallax cancels with the camera at 0.
-            pos: Vec2::new(VIEW.0 as f32 * 0.5, VIEW.1 as f32 * 0.5),
-            len: 0.0,
-            horizontal: true,
-            depth: 1.2,
-            seed: 9,
-        };
+        let item = mk(
+            ForeKind::MainPipe,
+            Vec2::new(VIEW.0 as f32 * 0.5, VIEW.1 as f32 * 0.5),
+            400.0,
+            true,
+            Attach::Span,
+            2.0,
+            4.0,
+            7,
+        );
         layer.force_items(vec![item]);
-        // The rat is placed in *screen* space: the anchor's own screen position
-        // (planned with the rat far away) plus `dx`. The camera is at the
-        // origin, so a screen position is also a world position here.
-        let alpha_at = |layer: &mut ForeLayer, w: &mut World, dx: f32| -> u8 {
-            let plan = |layer: &mut ForeLayer, w: &mut World, rat: Vec2| -> u8 {
-                let mut scene = ForeScene {
-                    ecs: &mut w.ecs,
-                    level: &w.level,
-                    cam: Vec2::ZERO,
-                    size: (VIEW.0 as f32, VIEW.1 as f32),
-                    rat,
-                    elapsed: 0.0,
-                };
-                let mut pb = PixelBuffer::new(VIEW.0, VIEW.1);
-                pb.clear((70, 66, 60));
-                draw(&mut pb, layer, &mut scene);
-                let mut it = layer.frame().iter();
-                it.next().expect("a plan").alpha
+        let (ex, _ey) = art_foreground::extent(&item);
+        assert!(
+            ex * 0.5 > FADE_RAT_PX + FADE_RAMP_PX,
+            "the body rect ({ex} px half-length) is too small to tell the rect from the anchor"
+        );
+        let alpha_with_rat = |layer: &mut ForeLayer, w: &mut World, rat: Vec2| -> u8 {
+            let mut scene = ForeScene {
+                ecs: &mut w.ecs,
+                level: &w.level,
+                cam: Vec2::ZERO,
+                size: (VIEW.0 as f32, VIEW.1 as f32),
+                rat,
+                elapsed: 0.0,
             };
-            let away = Vec2::new(-9000.0, -9000.0);
-            let anchor = {
-                // Learn the anchor's screen position from a frame with the rat
-                // far away, so the test never has to repeat the transform.
-                let mut scene = ForeScene {
-                    ecs: &mut w.ecs,
-                    level: &w.level,
-                    cam: Vec2::ZERO,
-                    size: (VIEW.0 as f32, VIEW.1 as f32),
-                    rat: away,
-                    elapsed: 0.0,
-                };
-                let mut pb = PixelBuffer::new(VIEW.0, VIEW.1);
-                pb.clear((70, 66, 60));
-                draw(&mut pb, layer, &mut scene);
-                let mut it = layer.frame().iter();
-                it.next().expect("a plan").screen
-            };
-            // On the anchor: the floor. Far away: full. Both through the plan.
-            plan(
-                layer,
-                w,
-                Vec2::new(anchor.0 as f32 + dx, anchor.1 as f32),
-            )
+            let mut pb = PixelBuffer::new(VIEW.0, VIEW.1);
+            pb.clear((70, 66, 60));
+            draw(&mut pb, layer, &mut scene);
+            layer.frame().first().expect("a plan").alpha
         };
-        // Right on the item (its box contains the rat): the alpha floor.
-        let on_rat = alpha_at(&mut layer, &mut w, 0.0);
-        assert_eq!(on_rat, ALPHA_FLOOR as u8);
-        // Well away: full.
-        let far = alpha_at(&mut layer, &mut w, 200.0);
-        assert_eq!(far, ALPHA_MAX);
-        // In the ramp: between the two. The box is 6 px wide each way, so the
-        // nearest pixel is `dx - 6` away.
-        let mid = alpha_at(&mut layer, &mut w, FADE_RAT_PX + FADE_RAMP_PX * 0.5 + 6.0);
-        assert!(mid > on_rat && mid < far, "mid-ramp alpha {mid}");
+        let anchor = Vec2::new(VIEW.0 as f32 * 0.5, VIEW.1 as f32 * 0.5);
+        // Under the body, far from the anchor along it: the floor alpha.
+        let under = alpha_with_rat(
+            &mut layer,
+            &mut w,
+            Vec2::new(anchor.x + ex * 0.5, anchor.y),
+        );
+        assert_eq!(under, ALPHA_FLOOR as u8, "the body rect did not fade");
+        // Clear of the body: full alpha.
+        let clear = alpha_with_rat(
+            &mut layer,
+            &mut w,
+            Vec2::new(anchor.x + ex + FADE_RAT_PX + FADE_RAMP_PX + 4.0, anchor.y),
+        );
+        assert_eq!(clear, ALPHA_MAX, "the fade never returned to full");
     }
 
     /// **The layer can never paint an opaque pixel**, whatever the art asks
@@ -1148,7 +1965,6 @@ mod tests {
         pb.clear((200, 100, 50));
         blend(&mut pb, 0, 0, (0, 0, 0), 255);
         let got = pb.pixel_at(0, 0);
-        // At most ALPHA_MAX of the way to the (darkened) art colour.
         let floor: (u8, u8, u8) = (200, 100, 50);
         for (g, f) in [(got.0, floor.0), (got.1, floor.1), (got.2, floor.2)] {
             let moved = f32::from(f) - f32::from(g);
@@ -1164,25 +1980,65 @@ mod tests {
         assert_eq!(pb.pixel_at(1, 0), (200, 100, 50), "the refused write landed");
     }
 
+    /// The per-pixel guard: the frame's clear disc quarters the alpha inside
+    /// [`CLEAR_DISC_IN_PX`] of the rat, ramps back out, and touches nothing past
+    /// [`CLEAR_DISC_OUT_PX`]. It is inert outside [`draw`].
+    #[test]
+    fn the_clear_disc_cuts_alpha_around_the_rat() {
+        let floor: Rgb = (200, 200, 200);
+        let paint = |disc: Option<(i32, i32)>, x: i32, y: i32| -> Rgb {
+            let mut pb = PixelBuffer::new(96, 96);
+            pb.clear(floor);
+            if let Some(c) = disc {
+                clear_disc_set(c);
+            }
+            blend(&mut pb, x, y, (0, 0, 0), ALPHA_MAX);
+            clear_disc_reset();
+            pb.pixel_at(x as usize, y as usize)
+        };
+        let plain = paint(None, 40, 40);
+        let inside = paint(Some((40, 40)), 40, 40);
+        let ramp = paint(Some((40, 40)), 40 + 31, 40);
+        let outside = paint(Some((40, 40)), 40 + 44, 40);
+        assert!(lum(inside) > lum(plain), "the disc did not cut the alpha");
+        assert!(
+            lum(ramp) > lum(plain) && lum(ramp) < lum(inside),
+            "the disc ramp is not between the centre and the untouched pixel"
+        );
+        assert_eq!(outside, plain, "outside the disc the alpha must be untouched");
+        assert_eq!(paint(None, 40, 40), plain, "the disc was left set");
+    }
+
+    /// The coverage tiers: full alpha below the cap, half in the grace band,
+    /// skipped past it.
+    #[test]
+    fn the_coverage_tiers_drop_the_layer_to_half_then_nothing() {
+        let (full, skip) = (220u32, 300u32);
+        assert_eq!(coverage_alpha(200, 0, full, skip), Some(200));
+        assert_eq!(coverage_alpha(200, full - 1, full, skip), Some(200));
+        assert_eq!(coverage_alpha(200, full, full, skip), Some(100));
+        assert_eq!(coverage_alpha(200, skip - 1, full, skip), Some(100));
+        assert_eq!(coverage_alpha(200, skip, full, skip), None);
+    }
+
     /// A hostile pellet under an item survives the frame: the layer is drawn
     /// **before** the hostile layer, so the pellet still marks its pixel on top
     /// of the layer's paint.
     #[test]
     fn a_pellet_under_an_item_is_never_overwritten() {
-        // The rat sits on the camera centre, so an item placed on the rat lands
-        // on the rat's screen pixel (the parallax transform cancels there); the
-        // pellet sits 6 px to its right, inside the item's box too.
         let mut w = World::new(Theme::Sewer, 7);
         w.player.pos = Vec2::new(90.0, 60.0);
         let mut layer = ForeLayer::new();
-        layer.force_items(vec![ForeItem {
-            kind: ForeKind::PipeRun,
-            pos: w.player.pos,
-            len: 60.0,
-            horizontal: true,
-            depth: 1.6,
-            seed: 1,
-        }]);
+        layer.force_items(vec![mk(
+            ForeKind::MainPipe,
+            w.player.pos,
+            200.0,
+            true,
+            Attach::Span,
+            2.0,
+            5.0,
+            1,
+        )]);
         w.foreground_layer = layer;
         w.set_zoom_instant(1.0);
 
@@ -1226,10 +2082,6 @@ mod tests {
         );
     }
 
-    fn lum(c: Rgb) -> u32 {
-        u32::from(c.0) + u32::from(c.1) + u32::from(c.2)
-    }
-
     /// A still frame changes nothing: two draws with the same camera and the
     /// same sway step produce the same pixels, and a new sway step (which is
     /// what the 3 Hz clock does) is what moves them.
@@ -1240,19 +2092,18 @@ mod tests {
         let rat = cam + Vec2::new(200.0, 200.0);
         // One swaying line in the middle of the view, so the test does not
         // depend on where this seed happened to hang one.
-        let item = ForeItem {
-            kind: ForeKind::SheetOnLine,
-            pos: cam + Vec2::new(VIEW.0 as f32 * 0.5, VIEW.1 as f32 * 0.5),
-            len: 24.0,
-            horizontal: false,
-            depth: 1.3,
-            seed: 5,
-        };
+        let item = mk(
+            ForeKind::Clothesline,
+            cam + Vec2::new(VIEW.0 as f32 * 0.5, VIEW.1 as f32 * 0.5),
+            240.0,
+            true,
+            Attach::Span,
+            2.0,
+            4.0,
+            5,
+        );
         layer.force_items(vec![item]);
 
-        // A time inside one sway step, and a time in a later step whose sway
-        // value is genuinely different (the values are quantised, so the test
-        // keeps looking rather than trusting the first step).
         let t0 = 1.0f32;
         let s0 = sway_of(&item, t0);
         let mut t1 = t0;
@@ -1273,19 +2124,120 @@ mod tests {
         assert!(changed(&a, &c) > 0, "the sway step moved nothing");
     }
 
-    /// Every kind is reachable and has a positive extent: the art's `extent`
-    /// is what the cull and the plan rely on.
+    /// The outdoor floor's sky is a pure function of `(seed, elapsed)` — and of
+    /// nothing else — so a held frame is still and two calls agree.
+    #[test]
+    fn the_sky_tracks_are_pure_and_still() {
+        let w = World::new(Theme::Trailer, 5);
+        let cam = Vec2::new(300.0, 200.0);
+        let size = (640.0f32, 360.0f32);
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        sky_items(&w.level, cam, size, 12.5, &mut a);
+        sky_items(&w.level, cam, size, 12.5, &mut b);
+        assert_eq!(a, b, "the sky is not a function of (seed, elapsed)");
+        assert!(!a.is_empty(), "the outdoor floor has no sky");
+        assert!(
+            a.iter().any(|i| i.kind == ForeKind::PowerLine),
+            "no power line"
+        );
+        assert!(
+            a.iter().any(|i| i.kind == ForeKind::Cloud),
+            "no cloud"
+        );
+        for item in &a {
+            assert_eq!(item.attach, Attach::Sky, "a sky mover is not Sky");
+            if item.kind == ForeKind::Cloud {
+                assert!(
+                    (1.0..=1.6).contains(&item.scale),
+                    "a cloud's scale {} is outside 1.0..=1.6",
+                    item.scale
+                );
+            }
+        }
+        // A frozen clock is a frozen sky …
+        let mut c = Vec::new();
+        sky_items(&w.level, cam, size, 12.5, &mut c);
+        assert_eq!(a, c, "the sky moved with a frozen clock");
+        // … and later it has moved.
+        let mut moved = false;
+        for step in 1..31 {
+            let mut d = Vec::new();
+            sky_items(&w.level, cam, size, 12.5 + step as f32 / SKY_QUANT_HZ, &mut d);
+            if d != a {
+                moved = true;
+                break;
+            }
+        }
+        assert!(moved, "nothing in the sky ever moves");
+        // An indoor floor has no sky movers at all.
+        let indoor = World::new(Theme::Sewer, 5);
+        let mut none = Vec::new();
+        sky_items(&indoor.level, cam, size, 12.5, &mut none);
+        assert!(none.is_empty(), "an indoor floor has sky movers");
+    }
+
+    /// A cloud is a haze, never a silhouette: its planned alpha is capped at
+    /// [`CLOUD_ALPHA_MAX`] whatever the fades say.
+    #[test]
+    fn a_cloud_is_only_ever_a_haze() {
+        let mut w = World::new(Theme::Trailer, 5);
+        let mut layer = ForeLayer::new();
+        layer.force_items(vec![mk(
+            ForeKind::Cloud,
+            Vec2::new(VIEW.0 as f32 * 0.5, VIEW.1 as f32 * 0.5),
+            0.0,
+            true,
+            Attach::Sky,
+            0.55,
+            1.3,
+            4,
+        )]);
+        let (_, used) = render(
+            &mut w,
+            &mut layer,
+            Vec2::ZERO,
+            Vec2::new(-9000.0, -9000.0),
+            0.0,
+        );
+        assert!(used > 0, "the cloud painted nothing");
+        // The outdoor floor also emits its own sky, so check every cloud in the
+        // plan (the forced one and the two the sky track adds).
+        let mut clouds = 0;
+        for plan in layer.frame() {
+            if layer.planned[plan.item].kind != ForeKind::Cloud {
+                continue;
+            }
+            clouds += 1;
+            assert!(
+                plan.alpha <= CLOUD_ALPHA_MAX,
+                "a cloud at alpha {} is not a haze",
+                plan.alpha
+            );
+        }
+        assert!(clouds > 0, "no cloud reached the plan");
+    }
+
+    /// Every kind is reachable and has a positive extent: the art's `extent` is
+    /// what the cull and the plan rely on.
     #[test]
     fn every_kind_has_an_extent_and_is_used_by_a_floor() {
         for kind in ForeKind::all() {
-            let item = ForeItem {
-                kind,
-                pos: Vec2::ZERO,
-                len: 24.0,
-                horizontal: true,
-                depth: 1.3,
-                seed: 0,
+            // A span or an edge needs a length; a drop and a cloud do not.
+            let len = if kind.attach_class() == ATTACH_SPAN
+                || kind.attach_class() == ATTACH_EDGE
+            {
+                200.0
+            } else {
+                0.0
             };
+            let attach = match kind.attach_class() {
+                ATTACH_SPAN => Attach::Span,
+                ATTACH_EDGE => Attach::Edge(Side::E),
+                ATTACH_DROP => Attach::Drop,
+                _ => Attach::Sky,
+            };
+            let item = mk(kind, Vec2::ZERO, len, true, attach, 2.0, 4.0, 0);
             let (ex, ey) = art_foreground::extent(&item);
             assert!(ex > 0.0 && ey > 0.0, "{kind:?} has no extent");
         }
@@ -1298,5 +2250,10 @@ mod tests {
             }
         }
         assert_eq!(used, ForeKind::all().len(), "a kind no floor uses");
+        // Every kind sways or does not, and every kind names one attach class.
+        for kind in ForeKind::all() {
+            assert!(kind.attach_class() <= ATTACH_SKY, "{kind:?}");
+            let _ = kind.sways();
+        }
     }
 }
