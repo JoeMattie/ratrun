@@ -58,39 +58,63 @@
 //! An item at world position `P` is drawn at
 //! `screen = view_centre + (P - cam_centre) * depth`, `depth` in `1.8..=3.0`
 //! (near the eye: it slides fast as the camera moves, which is intended). Draw
-//! size is *separate*: `scale` in `3.0..=6.0` multiplies the art's thickness and
+//! size is *separate*: `scale` in `2.0..=3.4` multiplies the art's thickness and
 //! detail. The floor shadow stays at the item's **un-parallaxed** world
 //! position (`w2s(P)` plus (+10, +14) px) with the same footprint, so the body
 //! visibly slides over its own shadow.
+//!
+//! ## The upscale (chunky pixels)
+//!
+//! The owner: "the pixels themselves need to be made bigger (actually scaled
+//! up, not redrawn with regular sized pixels)". The art draws each item at its
+//! own `scale` into a kept offscreen [`Scratch`] (rgb + alpha, and a shadow
+//! strength plane), and the layer blits it **nearest-neighbour** at the integer
+//! [`pixel_scale`]: [`PIXEL_SCALE`] 2, or [`PIXEL_SCALE_NEAR`] 3 from depth
+//! [`PIXEL_SCALE_NEAR_DEPTH`] 2.6 (a Cloud is always 2). Every art pixel is a
+//! `k x k` block, a hole in a grating is a block of alpha 0, and the shadow is
+//! chunky too. The art does not know: [`blend`] and [`shadow`] route to the
+//! lent scratch while it runs ([`target_rect`] tells it the window). Net size
+//! on screen is `scale x k`: a pipe is ~35-85 px thick in a 120 x 84 px view
+//! and most items are bigger than the view, on purpose. `len` is world-measured,
+//! so the art is given `len / k` ([`art_item`]) and a Span still ends in its
+//! walls (to within `k` px). The scratch window is the item's art box clipped
+//! to what can reach the view, so a long span or a Drop's 400 px cord never
+//! rasterises off-screen pixels; the blocks are rigid with the item (fixed
+//! phase to its anchor), so nothing crawls as the camera moves.
 //!
 //! ## Never hide the fight
 //!
 //! * Every body pixel goes through [`blend`], which **clamps alpha to
 //!   [`ALPHA_MAX`]** (215/255): no pixel of this layer is ever opaque.
-//! * The item fades to [`ALPHA_FLOOR`] (28) within [`FADE_RAT_PX`] of the rat
-//!   and [`FADE_THREAT_PX`] of a miniboss/boss body, ramping back over
-//!   [`FADE_RAMP_PX`]. The distance is measured to the item's on-screen **body
-//!   rect** (0 inside), not to its anchor, so a huge pipe over the rat fades.
-//! * A **clear disc** around the rat: inside 22 px of the rat every [`blend`]
-//!   alpha is quartered, ramping back to full at 40 px. It is a thread-local set
-//!   by [`draw`] for the frame and cleared afterwards (a direct `blend` call,
-//!   as in a test, sees no disc).
-//! * **Coverage cap** [`COVERAGE_PCT`] 22 % of the view's pixels (item pixels;
-//!   shadows are darkens and are not counted). Past it the remaining items draw
-//!   at half alpha, past [`COVERAGE_SKIP_PCT`] 30 % they are skipped, and
-//!   [`blend`] refuses writes past the budget, so no art can break the cap.
-//! * The colour is **darkened by [`DARKEN`]** inside [`blend`], so the layer
-//!   reads as dark soft silhouettes against the lit floor. [`rim_tint`] gives
-//!   the art a dim ambient colour for the rim highlight.
+//! * The item fades to [`ALPHA_FLOOR_RAT`] (120) within [`FADE_RAT_PX`] 48 px
+//!   of the rat and to [`ALPHA_FLOOR`] (28) within [`FADE_THREAT_PX`] of a
+//!   miniboss/boss body, ramping back over [`FADE_RAMP_PX`]. The distance is
+//!   measured to the item's on-screen **body rect** (0 inside, after the
+//!   upscale), not to its anchor, so a huge pipe over the rat fades.
+//! * A **clear disc** around the rat, per screen pixel: nothing at all is
+//!   written within [`RAT_SKIP_PX`] 10 px, alpha is quartered inside
+//!   [`CLEAR_DISC_IN_PX`] 14 px, ramping back to full at [`CLEAR_DISC_OUT_PX`]
+//!   30 px. It is a thread-local set by [`draw`] for the frame and cleared
+//!   afterwards (a direct `blend` call, as in a test, sees no disc).
+//! * **Coverage**: when the items' body rects would cover more than
+//!   [`COVERAGE_PCT`] 45 % of the view, every alpha is scaled down (to
+//!   [`COVERAGE_ALPHA_MIN`] at most), and [`blend`] refuses writes past
+//!   [`COVERAGE_SKIP_PCT`] 85 % of the view (shadows are darkens and are not
+//!   counted), so no art can break the cap.
+//! * The colour is **darkened by [`DARKEN`]** (0.88) inside [`blend`]. The art's
+//!   bodies are a mid-dark per-floor colour clearly lighter than the floor
+//!   (batch 13c: the near-black v2 bodies were murky on the dark floors), so
+//!   the layer reads at a glance and still looks like a dim overhead thing.
 //!
 //! ## Sky movers (the outdoor floor)
 //!
 //! The Flatbed level (`Theme::Trailer`, a moving truck bed) scrolls on its own,
 //! so its [`Attach::Sky`] items are not placed by the room logic: [`sky_items`]
 //! computes three analytic tracks from `(level seed, elapsed)` alone, with the
-//! clock quantised to 1/30 s — two drifting clouds, a power line pinned across
-//! the view with a pole passing every ~4 s, and a branch sweeping across every
-//! 5–9 s. Paused, `elapsed` does not advance, so nothing moves. The art needs
+//! clock quantised to 1/30 s — two drifting clouds, three power wires always in
+//! view (drawn by [`draw_wires`]: one art pixel thick, [`WIRE_RGB`], mean y at
+//! [`WIRE_BANDS`] 18/24/31 % of the view, sagging between the poles) with a
+//! pole passing every ~4 s, and a branch sweeping across every 5–9 s. Paused, `elapsed` does not advance, so nothing moves. The art needs
 //! no clock: it gets ordinary [`ForeDraw`] positions.
 //!
 //! ## Cost and stillness
@@ -138,11 +162,12 @@ pub const ALPHA_FLOOR: f32 = 28.0;
 /// The dimmest the **rat** fade takes a whole item to. Higher than
 /// [`ALPHA_FLOOR`] on purpose: a 1x view is only 120 x 84 px, so every item on
 /// screen is within [`FADE_RAT_PX`] of the rat and a floor of 28 made the layer
-/// invisible in play. The rat's own surroundings are cleared per pixel instead
-/// (the clear disc: [`CLEAR_DISC_MIN`] of this, i.e. about 38/255 at the rat).
-pub const ALPHA_FLOOR_RAT: f32 = 150.0;
+/// invisible in play. 120 (it was 150 before the upscale made every item 2-3x
+/// bigger). The rat's own surroundings are cleared per pixel instead (the clear
+/// disc, and nothing at all within [`RAT_SKIP_PX`]).
+pub const ALPHA_FLOOR_RAT: f32 = 120.0;
 /// Fade to [`ALPHA_FLOOR_RAT`] within this many pixels of the rat.
-pub const FADE_RAT_PX: f32 = 56.0;
+pub const FADE_RAT_PX: f32 = 48.0;
 /// … and within this many pixels of a miniboss/boss body.
 pub const FADE_THREAT_PX: f32 = 48.0;
 /// … ramping back to full over this many pixels.
@@ -153,19 +178,21 @@ pub const SWAY_HZ: f32 = 3.0;
 /// whose items would cover more (estimated from their on-screen body rects) is
 /// drawn proportionally more transparent, down to [`COVERAGE_ALPHA_MIN`] of its
 /// alpha, so a huge item is seen through rather than cut off.
-pub const COVERAGE_PCT: u32 = 30;
+pub const COVERAGE_PCT: u32 = 45;
 /// The hard writer cap: past this percentage of the view [`blend`] drops the
 /// write and the remaining items are skipped outright (a safety net; the alpha
 /// scaling above is what normally holds the layer back).
-pub const COVERAGE_SKIP_PCT: u32 = 60;
+pub const COVERAGE_SKIP_PCT: u32 = 85;
 /// The least the coverage scaling multiplies an item's alpha by.
 pub const COVERAGE_ALPHA_MIN: f32 = 0.5;
 /// The share of an item's body rect its silhouette is taken to fill.
 const COVERAGE_FILL: f32 = 0.7;
 /// The alpha multiplier for items drawn inside the coverage grace band.
 pub const COVERAGE_HALF: f32 = 0.5;
-/// The fixed silhouette darkening [`blend`] applies to every colour.
-pub const DARKEN: f32 = 0.72;
+/// The fixed silhouette darkening [`blend`] applies to every colour. 0.88 (it
+/// was 0.72, which with the v2 near-black bodies crushed them into the dark
+/// floors; the bodies now carry their own mid-dark colour).
+pub const DARKEN: f32 = 0.88;
 /// How far [`shadow`] may darken a floor pixel at its strongest.
 pub const SHADOW_MAX: f32 = 1.0;
 /// How far a [`Attach::Drop`] item's cord/chain/trunk runs up the screen, so it
@@ -179,6 +206,47 @@ pub const CLEAR_DISC_IN_PX: f32 = 14.0;
 pub const CLEAR_DISC_OUT_PX: f32 = 30.0;
 /// The alpha multiplier at the centre of the clear disc.
 pub const CLEAR_DISC_MIN: f32 = 0.25;
+/// Inside this radius of the rat the layer writes **nothing** at all (the clear
+/// disc's hard core): with items 2-3x bigger, the rat's own body and the few
+/// pixels around it are never under the layer.
+pub const RAT_SKIP_PX: f32 = 10.0;
+
+/// **The upscale.** Every item is rasterised by the art at its own `scale` into
+/// a small offscreen scratch and blitted nearest-neighbour at this integer
+/// factor, so each art pixel is a `k x k` block on screen: the layer reads as
+/// magnified, nearer than the floor. `PIXEL_SCALE` for items nearer than
+/// [`PIXEL_SCALE_NEAR_DEPTH`], [`PIXEL_SCALE_NEAR`] from it (a Cloud is always
+/// `PIXEL_SCALE`). See [`pixel_scale`].
+pub const PIXEL_SCALE: i32 = 2;
+/// The upscale factor of the nearest items (`depth >=` [`PIXEL_SCALE_NEAR_DEPTH`]).
+pub const PIXEL_SCALE_NEAR: i32 = 3;
+/// From this parallax depth an item is drawn at [`PIXEL_SCALE_NEAR`].
+pub const PIXEL_SCALE_NEAR_DEPTH: f32 = 2.6;
+/// Art pixels of slack around an item's [`art_foreground::extent`] in the
+/// scratch (feathers, sway, the shadow's own soft edge).
+const SCRATCH_MARGIN: i32 = 12;
+/// Where the art is told the item's anchor is, in scratch (art) coordinates.
+/// Fixed, so an art pixel's coordinate never depends on how much of the item
+/// is visible this frame (hash-textured art cannot crawl), and positive, so no
+/// art arithmetic ever sees a negative coordinate.
+const ART_ORIGIN: i32 = 2048;
+/// The most pixels the scratch is ever asked to hold (a safety net: the window
+/// is already clipped to the view, so a real frame is far below it).
+const SCRATCH_MAX_PX: i32 = 1 << 20;
+
+/// The Flatbed's power wires: three lines, one **art** pixel thick (so `k`
+/// screen px), pinned inside the view at these fractions of its height (their
+/// mean y), sagging [`WIRE_SAG_ART`] art px between the passing poles and
+/// sliding horizontally with them. Drawn by the layer itself ([`draw_wires`]).
+pub const WIRE_BANDS: [f32; 3] = [0.18, 0.24, 0.31];
+/// How far a wire sags between two poles, in art px.
+pub const WIRE_SAG_ART: f32 = 6.0;
+/// The wires' colour and alpha (before [`DARKEN`] and the fades): a light
+/// grey-blue that reads against the dark bed.
+pub const WIRE_RGB: Rgb = (150, 160, 175);
+pub const WIRE_ALPHA: u8 = 200;
+/// The wires' floor shadow strength (0..=1).
+const WIRE_SHADOW: f32 = 0.18;
 
 // ---- Internal tuning ------------------------------------------------------
 
@@ -461,7 +529,8 @@ pub struct ForeItem {
     pub attach: Attach,
     /// Parallax: screen pixels per camera pixel, `1.8..=3.0` for placed items.
     pub depth: f32,
-    /// Draw size, `3.0..=6.0` for placed items (Cloud `1.0..=1.6`).
+    /// Art draw size, `2.0..=3.4` for placed items (Cloud `1.0..=1.6`); the
+    /// on-screen size is this times [`pixel_scale`].
     pub scale: f32,
     /// Per-item variation (art detail, sway phase).
     pub seed: u32,
@@ -526,6 +595,50 @@ pub const fn kinds_for(theme: Theme) -> [ForeKind; 3] {
     }
 }
 
+/// The integer upscale an item is blitted at ([`PIXEL_SCALE`] or
+/// [`PIXEL_SCALE_NEAR`]): nearer items (higher parallax) are magnified more.
+/// A cloud is far haze and always takes [`PIXEL_SCALE`].
+pub fn pixel_scale(item: &ForeItem) -> i32 {
+    if item.kind != ForeKind::Cloud && item.depth >= PIXEL_SCALE_NEAR_DEPTH {
+        PIXEL_SCALE_NEAR
+    } else {
+        PIXEL_SCALE
+    }
+}
+
+/// The item as the **art** sees it at upscale `k`: `len` is world-measured
+/// (a Span must still end in its walls, an Edge reach exactly as far), so the
+/// art is handed `len / k` and the upscale brings it back to `len`. Every other
+/// field is the item's own (`scale` stays 2.0-3.4: the upscale multiplies it).
+pub fn art_item(item: &ForeItem, k: i32) -> ForeItem {
+    let mut art = *item;
+    if art.len > 0.0 {
+        art.len /= k.max(1) as f32;
+    }
+    art
+}
+
+/// The item's on-screen half-extent `(x, y)` after the upscale (the art's
+/// [`art_foreground::extent`] of [`art_item`], times `k`, oriented to screen
+/// axes as the plan reads it).
+pub fn screen_extent(item: &ForeItem) -> (f32, f32) {
+    let k = pixel_scale(item);
+    let (ex, ey) = art_foreground::extent(&art_item(item, k));
+    let kf = k as f32;
+    if item.horizontal {
+        (ex.max(0.0) * kf, ey.max(0.0) * kf)
+    } else {
+        (ey.max(0.0) * kf, ex.max(0.0) * kf)
+    }
+}
+
+/// Is this item the Flatbed's pinned wire span (drawn by [`draw_wires`], not
+/// the art)?
+#[inline]
+fn is_wire_span(item: &ForeItem) -> bool {
+    item.kind == ForeKind::PowerLine && item.attach == Attach::Sky && item.len > 0.0
+}
+
 /// Is the layer on by default? `RATRUN_FOREGROUND=0` (or `off`/`false`/`no`)
 /// pins it off for a session; the console's read-only `foreground on|off` is
 /// the in-run switch.
@@ -552,6 +665,89 @@ thread_local! {
     /// a one-off) sees no disc.
     static CLEAR_DISC: std::cell::Cell<(i32, i32, bool)> =
         const { std::cell::Cell::new((0, 0, false)) };
+    /// Where [`blend`] and [`shadow`] write. `None` (the default, and what a
+    /// test calling the art directly sees) is the frame buffer they are handed;
+    /// `Some` is the item scratch [`draw`] lends out around one art call, so the
+    /// art keeps calling the same two functions and is upscaled afterwards.
+    static TARGET: std::cell::RefCell<Option<Scratch>> = const { std::cell::RefCell::new(None) };
+}
+
+/// One item's offscreen raster: a window `[x0, x0 + w) x [y0, y0 + h)` of art
+/// coordinates holding the body's colour and alpha and the floor shadow's
+/// strength. Kept on [`ForeLayer`] and only ever grown, so once a level has
+/// drawn its largest item no frame allocates.
+#[derive(Default)]
+pub(crate) struct Scratch {
+    x0: i32,
+    y0: i32,
+    w: i32,
+    h: i32,
+    rgb: Vec<Rgb>,
+    alpha: Vec<u8>,
+    shade: Vec<u8>,
+}
+
+impl Scratch {
+    /// Make the scratch the window `(x0, y0, w, h)`, cleared. Reuses the
+    /// buffers: `clear` + `resize` only allocates past the capacity reached.
+    fn reset(&mut self, x0: i32, y0: i32, w: i32, h: i32) {
+        let n = (w.max(0) * h.max(0)) as usize;
+        self.x0 = x0;
+        self.y0 = y0;
+        self.w = w.max(0);
+        self.h = h.max(0);
+        self.rgb.clear();
+        self.rgb.resize(n, (0, 0, 0));
+        self.alpha.clear();
+        self.alpha.resize(n, 0);
+        self.shade.clear();
+        self.shade.resize(n, 0);
+    }
+
+    #[inline]
+    fn index(&self, x: i32, y: i32) -> Option<usize> {
+        let (lx, ly) = (x - self.x0, y - self.y0);
+        if lx < 0 || ly < 0 || lx >= self.w || ly >= self.h {
+            return None;
+        }
+        Some((ly * self.w + lx) as usize)
+    }
+
+    /// The art wrote a body pixel: keep its colour and alpha (the art writes
+    /// each pixel once a pass, so the last write is the pixel).
+    #[inline]
+    fn put(&mut self, x: i32, y: i32, rgb: Rgb, alpha: u8) {
+        if let Some(i) = self.index(x, y) {
+            self.rgb[i] = rgb;
+            self.alpha[i] = alpha;
+        }
+    }
+
+    /// The art wrote a shadow pixel: keep the strongest.
+    #[inline]
+    fn put_shade(&mut self, x: i32, y: i32, strength: f32) {
+        if let Some(i) = self.index(x, y) {
+            let v = (strength.clamp(0.0, 1.0) * 255.0).round() as u8;
+            if v > self.shade[i] {
+                self.shade[i] = v;
+            }
+        }
+    }
+
+    /// The buffers' combined capacity (tests: nothing grows once warm).
+    #[cfg(test)]
+    fn capacity(&self) -> usize {
+        self.rgb.capacity() + self.alpha.capacity() + self.shade.capacity()
+    }
+}
+
+/// The rectangle the art may draw into, `(x0, y0, w, h)`: the lent scratch's
+/// window while an item is being rasterised, else the whole of `pb`. The art
+/// clips its primitives to it, so it never rasterises a pixel nobody keeps.
+pub fn target_rect(pb: &PixelBuffer) -> (i32, i32, i32, i32) {
+    TARGET
+        .with(|t| t.borrow().as_ref().map(|s| (s.x0, s.y0, s.w, s.h)))
+        .unwrap_or((0, 0, pb.w as i32, pb.h as i32))
 }
 
 /// Take one pixel of the frame's budget; `false` when it is spent.
@@ -618,6 +814,21 @@ fn clear_disc_factor(x: i32, y: i32) -> f32 {
     })
 }
 
+/// Is `(x, y)` inside the clear disc's hard core ([`RAT_SKIP_PX`])? Never true
+/// outside a [`draw`].
+#[inline]
+fn in_rat_core(x: i32, y: i32) -> bool {
+    CLEAR_DISC.with(|c| {
+        let (cx, cy, on) = c.get();
+        if !on {
+            return false;
+        }
+        let dx = (x - cx) as f32;
+        let dy = (y - cy) as f32;
+        dx * dx + dy * dy <= RAT_SKIP_PX * RAT_SKIP_PX
+    })
+}
+
 /// Alpha-blend `rgb` over the existing pixel at `(x, y)`, clipped to the
 /// buffer. The **only** body painter the layer's art may use.
 ///
@@ -629,13 +840,38 @@ fn clear_disc_factor(x: i32, y: i32) -> f32 {
 ///   [`rim_tint`] for a rim colour on top.
 /// * It counts against the frame's coverage budget ([`COVERAGE_SKIP_PCT`]);
 ///   past it the write is dropped, so the cap holds whatever the art paints.
+///
+/// While [`draw`] is rasterising an item the write goes to the item's scratch
+/// instead (see [`TARGET`]); the scratch is then blitted as `k x k` blocks
+/// through [`blend_screen`], which applies all of the above per screen pixel.
 #[inline]
 pub fn blend(pb: &mut PixelBuffer, x: i32, y: i32, rgb: Rgb, alpha: u8) {
+    if alpha == 0 {
+        return;
+    }
+    let to_scratch = TARGET.with(|t| match t.borrow_mut().as_mut() {
+        Some(s) => {
+            s.put(x, y, rgb, alpha);
+            true
+        }
+        None => false,
+    });
+    if !to_scratch {
+        blend_screen(pb, x, y, rgb, alpha);
+    }
+}
+
+/// The screen half of [`blend`]: clip, clamp, clear disc, budget, darken, mix.
+#[inline]
+fn blend_screen(pb: &mut PixelBuffer, x: i32, y: i32, rgb: Rgb, alpha: u8) {
     if alpha == 0 || x < 0 || y < 0 {
         return;
     }
     let (xu, yu) = (x as usize, y as usize);
     if xu >= pb.w || yu >= pb.h {
+        return;
+    }
+    if in_rat_core(x, y) {
         return;
     }
     let a = (alpha.min(ALPHA_MAX) as f32 * clear_disc_factor(x, y)).round() as u8;
@@ -657,8 +893,28 @@ pub fn blend(pb: &mut PixelBuffer, x: i32, y: i32, rgb: Rgb, alpha: u8) {
 /// [`SHADOW_MAX`]), clipped to the buffer: the layer's floor-shadow writer.
 /// It is a darken, so it can never brighten anything, and it is **not** counted
 /// against the body coverage budget (the cap counts item pixels only).
+///
+/// Like [`blend`], it writes the lent scratch while an item is rasterised.
 #[inline]
 pub fn shadow(pb: &mut PixelBuffer, x: i32, y: i32, strength: f32) {
+    if strength <= 0.0 {
+        return;
+    }
+    let to_scratch = TARGET.with(|t| match t.borrow_mut().as_mut() {
+        Some(s) => {
+            s.put_shade(x, y, strength);
+            true
+        }
+        None => false,
+    });
+    if !to_scratch {
+        shadow_screen(pb, x, y, strength);
+    }
+}
+
+/// The screen half of [`shadow`].
+#[inline]
+fn shadow_screen(pb: &mut PixelBuffer, x: i32, y: i32, strength: f32) {
     let s = strength.clamp(0.0, 1.0) * SHADOW_MAX;
     if s <= 0.0 || x < 0 || y < 0 {
         return;
@@ -693,6 +949,8 @@ pub struct Plan {
     pub sway: f32,
     /// Which way the body's rim highlight faces (see [`ForeDraw`]).
     pub toward_centre: (i8, i8),
+    /// The integer upscale this item is blitted at ([`pixel_scale`]).
+    pub k: i32,
 }
 
 /// The layer's item list and its per-frame scratch. **Render state**: built
@@ -705,6 +963,8 @@ pub struct ForeLayer {
     /// The `(theme, level seed)` the items were built for.
     key: Option<(Theme, u64)>,
     frame: Vec<Plan>,
+    /// The kept item raster the upscale blits from (see [`Scratch`]).
+    scratch: Scratch,
     /// Test-only: keep a hand-placed list through [`ForeLayer::sync`].
     #[cfg(test)]
     forced: bool,
@@ -723,6 +983,7 @@ impl ForeLayer {
             planned: Vec::new(),
             key: None,
             frame: Vec::new(),
+            scratch: Scratch::default(),
             #[cfg(test)]
             forced: false,
         }
@@ -756,6 +1017,12 @@ impl ForeLayer {
     /// This frame's plan, in draw order (far to near).
     pub fn frame(&self) -> &[Plan] {
         &self.frame
+    }
+
+    /// The scratch's buffer capacity (tests: no growth once warm).
+    #[cfg(test)]
+    pub(crate) fn scratch_capacity(&self) -> usize {
+        self.scratch.capacity()
     }
 
     /// Replace the item list with a hand-built one and stop rebuilding from the
@@ -799,14 +1066,10 @@ impl ForeLayer {
         let mut covered = 0.0f32;
         for (i, item) in self.planned.iter().enumerate() {
             let item = *item;
-            // The art's own half-extent, already including `scale`, long axis
-            // first. The code never re-derives it: the art owns its box.
-            let (ex, ey) = art_foreground::extent(&item);
-            let (hx, hy) = if item.horizontal {
-                (ex.max(0.0), ey.max(0.0))
-            } else {
-                (ey.max(0.0), ex.max(0.0))
-            };
+            // The art's own half-extent (it owns its box), of the item as the
+            // art draws it, times the upscale: what the item covers on screen.
+            let k = pixel_scale(&item);
+            let (hx, hy) = screen_extent(&item);
             let depth = item.depth.clamp(0.2, 4.0);
             // Parallax, per attachment, so an attached item stays attached:
             // a Span slides only ACROSS its long axis (along it the item rides
@@ -822,16 +1085,17 @@ impl ForeLayer {
             };
             let off = item.pos - cam_centre;
             let p = centre + Vec2::new(off.x * dx, off.y * dy);
-            // Cull: the art's box plus the sway reach, and a Drop's tail above.
-            const SWAY_REACH: f32 = 6.0;
+            // Cull: the art's box plus the sway reach (art px, so times the
+            // upscale), and a Drop's tail above.
+            let sway_reach = 6.0 * k as f32;
             let tail = if item.attach == Attach::Drop {
                 DROP_TAIL as f32
             } else {
                 0.0
             };
-            if p.x + hx + SWAY_REACH < 0.0
-                || p.x - hx - SWAY_REACH >= size.0
-                || p.y + hy + SWAY_REACH < 0.0
+            if p.x + hx + sway_reach < 0.0
+                || p.x - hx - sway_reach >= size.0
+                || p.y + hy + sway_reach < 0.0
                 || p.y - hy - tail >= size.1
             {
                 continue;
@@ -876,7 +1140,9 @@ impl ForeLayer {
                     0
                 }
             };
-            if item.kind != ForeKind::Cloud {
+            // Clouds are a haze and the wires are three thin lines: neither is
+            // counted as cover (the wires' box is the whole view's width).
+            if item.kind != ForeKind::Cloud && !is_wire_span(&item) {
                 let w = (p.x + hx).min(size.0) - (p.x - hx).max(0.0);
                 let h = (p.y + hy).min(size.1) - (p.y - hy).max(0.0);
                 covered += w.max(0.0) * h.max(0.0) * COVERAGE_FILL;
@@ -889,6 +1155,7 @@ impl ForeLayer {
                 alpha: alpha.round().clamp(0.0, ALPHA_MAX as f32) as u8,
                 sway: sway_of(&item, elapsed),
                 toward_centre: (sign(centre.x - p.x), sign(centre.y - p.y)),
+                k,
             });
         }
         // Too much of the view under the layer: see through all of it rather
@@ -967,8 +1234,9 @@ pub fn draw(pb: &mut PixelBuffer, layer: &mut ForeLayer, scene: &mut ForeScene) 
     let cap_full = total * COVERAGE_PCT / 100;
     let cap_skip = total * COVERAGE_SKIP_PCT / 100;
     budget_start(cap_skip);
-    // The per-pixel guard: quarter the alpha within 22 px of the rat, ramping
-    // back to full at 40 px, whatever the art paints.
+    // The per-pixel guard, per SCREEN pixel (so after the upscale): nothing
+    // within RAT_SKIP_PX of the rat, the alpha quartered within 14 px, ramping
+    // back to full at 30 px, whatever the art paints.
     let rat_screen = scene.rat - scene.cam;
     clear_disc_set((rat_screen.x.round() as i32, rat_screen.y.round() as i32));
     // Far to near. The plan is already in that order (sky movers first, then
@@ -980,19 +1248,213 @@ pub fn draw(pb: &mut PixelBuffer, layer: &mut ForeLayer, scene: &mut ForeScene) 
             break;
         };
         let item = layer.planned[plan.item];
-        let d = ForeDraw {
-            screen: plan.screen,
-            shadow: plan.shadow,
-            scale: plan.scale,
-            alpha,
-            sway: plan.sway,
-            theme: scene.level.theme,
-            toward_centre: plan.toward_centre,
-        };
-        art_foreground::draw(pb, &item, &d);
+        if is_wire_span(&item) {
+            draw_wires(pb, plan.k, alpha, scene.elapsed);
+            continue;
+        }
+        draw_item(pb, &mut layer.scratch, &item, &plan, alpha, scene.level.theme);
     }
     clear_disc_reset();
     budget_finish()
+}
+
+/// Rasterise one item into `scratch` at its art scale and blit it
+/// nearest-neighbour at `plan.k`: the floor shadow plane at `plan.shadow`, then
+/// the body at `plan.screen`, every art pixel a `k x k` block written through
+/// [`shadow_screen`] / [`blend_screen`] (so the alpha clamp, [`DARKEN`], the
+/// clear disc per screen pixel and the coverage budget all hold).
+///
+/// The art is told the anchor is at [`ART_ORIGIN`] and may draw into the
+/// scratch window only ([`target_rect`]): the item's art box
+/// ([`art_foreground::extent`] + [`SCRATCH_MARGIN`], plus a Drop's
+/// [`DROP_TAIL`] above) clipped to the art pixels that can land in the view
+/// from either anchor. A 420 px span is therefore never rasterised past the
+/// view, and a Drop's cord is rasterised (chunky, like the rest) up to the
+/// view's top edge and no further.
+///
+/// Block grid: art pixel `X` lands at `plan.screen.x + k * (X - ART_ORIGIN)`,
+/// so the blocks are rigid with the item — their edges sit at a fixed phase
+/// relative to its anchor whatever the camera does, and the art (rasterised at
+/// a fixed integer anchor) is identical frame to frame. Nothing crawls.
+fn draw_item(
+    pb: &mut PixelBuffer,
+    scratch: &mut Scratch,
+    item: &ForeItem,
+    plan: &Plan,
+    alpha: u8,
+    theme: Theme,
+) {
+    if alpha == 0 {
+        return;
+    }
+    let k = plan.k.max(1);
+    let art = art_item(item, k);
+    let (ex, ey) = art_foreground::extent(&art);
+    let (hx, hy) = if art.horizontal {
+        (ex.max(0.0), ey.max(0.0))
+    } else {
+        (ey.max(0.0), ex.max(0.0))
+    };
+    let (hx, hy) = (hx.ceil() as i32 + SCRATCH_MARGIN, hy.ceil() as i32 + SCRATCH_MARGIN);
+    let tail = if art.attach == Attach::Drop { DROP_TAIL } else { 0 };
+    // The art box, in art coordinates around ART_ORIGIN.
+    let (bx0, bx1) = (ART_ORIGIN - hx, ART_ORIGIN + hx);
+    let (by0, by1) = (ART_ORIGIN - hy - tail, ART_ORIGIN + hy);
+    // The art pixels that can land in the view from an anchor at `a` (screen).
+    let (w, h) = (pb.w as i32, pb.h as i32);
+    let vis = |a: i32, len: i32| -> (i32, i32) {
+        (
+            ART_ORIGIN + (-a).div_euclid(k) - 1,
+            ART_ORIGIN + (len - 1 - a).div_euclid(k) + 1,
+        )
+    };
+    let (bvx0, bvx1) = vis(plan.screen.0, w);
+    let (svx0, svx1) = vis(plan.shadow.0, w);
+    let (bvy0, bvy1) = vis(plan.screen.1, h);
+    let (svy0, svy1) = vis(plan.shadow.1, h);
+    let x0 = bx0.max(bvx0.min(svx0));
+    let x1 = bx1.min(bvx1.max(svx1));
+    let y0 = by0.max(bvy0.min(svy0));
+    let y1 = by1.min(bvy1.max(svy1));
+    if x0 > x1 || y0 > y1 {
+        return;
+    }
+    let sw = (x1 - x0 + 1).min(SCRATCH_MAX_PX / (y1 - y0 + 1).max(1));
+    let sh = y1 - y0 + 1;
+    scratch.reset(x0, y0, sw, sh);
+
+    let d = ForeDraw {
+        screen: (ART_ORIGIN, ART_ORIGIN),
+        shadow: (ART_ORIGIN, ART_ORIGIN),
+        scale: plan.scale,
+        alpha,
+        sway: plan.sway,
+        theme,
+        toward_centre: plan.toward_centre,
+    };
+    // Lend the scratch to the two writers for the art call, then take it back.
+    let lent = std::mem::take(scratch);
+    TARGET.with(|t| *t.borrow_mut() = Some(lent));
+    art_foreground::draw(pb, &art, &d);
+    *scratch = TARGET.with(|t| t.borrow_mut().take()).unwrap_or_default();
+
+    blit(pb, scratch, plan.shadow, k, true);
+    blit(pb, scratch, plan.screen, k, false);
+}
+
+/// Blit one plane of `sc` with the art origin at screen `anchor`, each art
+/// pixel a `k x k` block: the shadow plane (`shade`) through [`shadow_screen`],
+/// or the body through [`blend_screen`].
+fn blit(pb: &mut PixelBuffer, sc: &Scratch, anchor: (i32, i32), k: i32, shade: bool) {
+    let (bw, bh) = (pb.w as i32, pb.h as i32);
+    let ox = anchor.0 + k * (sc.x0 - ART_ORIGIN);
+    let oy = anchor.1 + k * (sc.y0 - ART_ORIGIN);
+    for j in 0..sc.h {
+        let sy = oy + j * k;
+        if sy + k <= 0 {
+            continue;
+        }
+        if sy >= bh {
+            break;
+        }
+        let (ya, yb) = (sy.max(0), (sy + k).min(bh));
+        for i in 0..sc.w {
+            let sx = ox + i * k;
+            if sx + k <= 0 {
+                continue;
+            }
+            if sx >= bw {
+                break;
+            }
+            let idx = (j * sc.w + i) as usize;
+            let (xa, xb) = (sx.max(0), (sx + k).min(bw));
+            if shade {
+                let v = sc.shade[idx];
+                if v == 0 {
+                    continue;
+                }
+                let st = v as f32 / 255.0;
+                for y in ya..yb {
+                    for x in xa..xb {
+                        shadow_screen(pb, x, y, st);
+                    }
+                }
+            } else {
+                let a = sc.alpha[idx];
+                if a == 0 {
+                    continue;
+                }
+                let rgb = sc.rgb[idx];
+                for y in ya..yb {
+                    for x in xa..xb {
+                        blend_screen(pb, x, y, rgb, a);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The Flatbed's three power wires, drawn by the layer (not the art) so they are
+/// in every Flatbed frame: each is one art pixel thick (`k` screen px, chunky
+/// like the rest of the layer) in [`WIRE_RGB`] at [`WIRE_ALPHA`] (scaled by
+/// the item's faded `alpha` against [`SKY_ALPHA`]), its mean y pinned to
+/// [`WIRE_BANDS`] of the view's height on the `k` grid, sagging
+/// [`WIRE_SAG_ART`] art px between the passing poles and sliding horizontally
+/// with them (the poles' own track: [`SKY_POLE_SPEED`] px/s, one every
+/// [`SKY_POLE_PERIOD`] s). A thin floor shadow is pinned 10, 14 px below.
+fn draw_wires(pb: &mut PixelBuffer, k: i32, alpha: u8, elapsed: f32) {
+    let k = k.max(1);
+    let (w, h) = (pb.w as i32, pb.h as i32);
+    if w == 0 || h == 0 || alpha == 0 {
+        return;
+    }
+    let a = (WIRE_ALPHA as f32 * (alpha as f32 / SKY_ALPHA).min(1.0)).round() as u8;
+    if a == 0 {
+        return;
+    }
+    let t = (elapsed.max(0.0) * SKY_QUANT_HZ).floor() / SKY_QUANT_HZ;
+    let span = SKY_POLE_SPEED * SKY_POLE_PERIOD;
+    let phase = t - (t / SKY_POLE_PERIOD).floor() * SKY_POLE_PERIOD;
+    // A pole's screen x: the same track `sky_items` puts the pole on.
+    let pole_x = w as f32 + SKY_MARGIN - SKY_POLE_SPEED * phase;
+    for pass_shadow in [true, false] {
+        for &band in &WIRE_BANDS {
+            let base = wire_base_y(h as f32, band, k);
+            let mut x0 = 0;
+            while x0 < w {
+                let off = wire_offset_art(x0 as f32 + k as f32 * 0.5, pole_x, span);
+                let y0 = base + k * off;
+                for y in y0..y0 + k {
+                    for x in x0..(x0 + k).min(w) {
+                        if pass_shadow {
+                            shadow_screen(pb, x + 10, y + 14, WIRE_SHADOW);
+                        } else {
+                            blend_screen(pb, x, y, WIRE_RGB, a);
+                        }
+                    }
+                }
+                x0 += k;
+            }
+        }
+    }
+}
+
+/// A wire's mean y on screen for `band` (a fraction of the view height),
+/// snapped to the `k` grid.
+#[inline]
+fn wire_base_y(view_h: f32, band: f32, k: i32) -> i32 {
+    ((view_h * band) / k as f32).round() as i32 * k
+}
+
+/// A wire's offset from its mean, in whole art px, at screen x `x` with a pole
+/// at `pole_x` and poles every `span` px: highest at a pole, [`WIRE_SAG_ART`]
+/// lower midway, mean zero over a span.
+#[inline]
+fn wire_offset_art(x: f32, pole_x: f32, span: f32) -> i32 {
+    let u = (x - pole_x).rem_euclid(span) / span; // 0..1 between two poles
+    let sag = WIRE_SAG_ART * 4.0 * u * (1.0 - u); // 0 at a pole, SAG midway
+    (sag - WIRE_SAG_ART * 2.0 / 3.0).round() as i32
 }
 
 /// What alpha an item draws at, given the pixels already painted this frame:
@@ -1467,15 +1929,12 @@ fn sky_items(level: &Level, cam: Vec2, size: (f32, f32), elapsed: f32, out: &mut
         });
     }
 
-    // ---- The wires: one Span across the whole view, pinned to the frame.
-    // The wires hang at a seed-chosen band and slide against the camera's
-    // cross-bed movement (1.8 px a camera px), wrapping every 1.7 view heights:
-    // walk across the bed and the line passes overhead and is gone, instead of
-    // sitting on the screen like a scratch on the lens.
-    let band = 0.16 + hash01(seed, 0x11) * 0.26;
-    let wrap = vh * 1.7;
-    let slide = vh * band - cam.y * 0.8;
-    let wire_y = cam.y + (slide - (slide / wrap).floor() * wrap) - vh * 0.35;
+    // ---- The wires: one Span across the whole view, pinned to the frame and
+    // always inside it (the v2 wires slid with the camera and wrapped, and in
+    // the captures they were never on screen). The item only marks them: the
+    // layer draws the three lines itself ([`draw_wires`]) at [`WIRE_BANDS`] of
+    // the view height, sliding horizontally with the poles.
+    let wire_y = cam.y + vh * WIRE_BANDS[1];
     out.push(ForeItem {
         kind: ForeKind::PowerLine,
         pos: Vec2::new(cam.x + vw * 0.5, wire_y),
@@ -1493,9 +1952,13 @@ fn sky_items(level: &Level, cam: Vec2, size: (f32, f32), elapsed: f32, out: &mut
     let pole_phase = t - (t / SKY_POLE_PERIOD).floor() * SKY_POLE_PERIOD;
     if pole_phase < pole_sweep {
         let x = cam.x + vw + SKY_MARGIN - SKY_POLE_SPEED * pole_phase;
+        // The crossarm sits on the middle wire where it meets the pole: the
+        // art's arm is 6.5 * scale art px above the anchor and a wire is
+        // `2/3 * WIRE_SAG_ART` above its mean at a pole, both times the upscale.
+        let arm_drop = (6.5 * SKY_POLE_SCALE - WIRE_SAG_ART * 2.0 / 3.0) * PIXEL_SCALE as f32;
         out.push(ForeItem {
             kind: ForeKind::PowerLine,
-            pos: Vec2::new(x, wire_y + 8.0),
+            pos: Vec2::new(x, wire_y + arm_drop),
             len: 0.0,
             horizontal: false,
             attach: Attach::Sky,
@@ -2005,7 +2468,8 @@ mod tests {
             7,
         );
         layer.force_items(vec![item]);
-        let (ex, _ey) = art_foreground::extent(&item);
+        // The on-screen box, after the upscale (horizontal: x is the long axis).
+        let (ex, _ey) = screen_extent(&item);
         assert!(
             ex * 0.5 > FADE_RAT_PX + FADE_RAMP_PX,
             "the body rect ({ex} px half-length) is too small to tell the rect from the anchor"
@@ -2339,6 +2803,411 @@ mod tests {
         for kind in ForeKind::all() {
             assert!(kind.attach_class() <= ATTACH_SKY, "{kind:?}");
             let _ = kind.sways();
+        }
+    }
+
+    /// Draw one frame into a buffer of `size` over `floor`, the rat far away.
+    fn render_sized(
+        w: &mut World,
+        layer: &mut ForeLayer,
+        cam: Vec2,
+        size: (usize, usize),
+        floor: Rgb,
+        elapsed: f32,
+    ) -> PixelBuffer {
+        let mut pb = PixelBuffer::new(size.0, size.1);
+        pb.clear(floor);
+        let mut scene = ForeScene {
+            ecs: &mut w.ecs,
+            level: &w.level,
+            cam,
+            size: (size.0 as f32, size.1 as f32),
+            rat: Vec2::new(-9000.0, -9000.0),
+            elapsed,
+        };
+        draw(&mut pb, layer, &mut scene);
+        pb
+    }
+
+    /// Every pixel transition along a row or a column falls on the item's block
+    /// grid: `(x - plan.screen.x) % k == 0`. Returns how many transitions it saw.
+    fn assert_on_block_grid(pb: &PixelBuffer, origin: (i32, i32), k: i32, what: &str) -> usize {
+        let mut seen = 0;
+        for y in 0..pb.h {
+            for x in 1..pb.w {
+                if pb.pixel_at(x, y) != pb.pixel_at(x - 1, y) {
+                    seen += 1;
+                    assert_eq!(
+                        (x as i32 - origin.0).rem_euclid(k),
+                        0,
+                        "{what}: a column edge at x {x} is off the {k}-px grid of the item at {origin:?}"
+                    );
+                }
+            }
+        }
+        for x in 0..pb.w {
+            for y in 1..pb.h {
+                if pb.pixel_at(x, y) != pb.pixel_at(x, y - 1) {
+                    seen += 1;
+                    assert_eq!(
+                        (y as i32 - origin.1).rem_euclid(k),
+                        0,
+                        "{what}: a row edge at y {y} is off the {k}-px grid of the item at {origin:?}"
+                    );
+                }
+            }
+        }
+        seen
+    }
+
+    /// The upscale factor: 2 below depth 2.6, 3 from it, a cloud always 2.
+    #[test]
+    fn the_pixel_scale_is_two_or_three_by_depth() {
+        let at = |kind, depth| mk(kind, Vec2::ZERO, 100.0, true, Attach::Span, depth, 2.5, 0);
+        assert_eq!(pixel_scale(&at(ForeKind::MainPipe, 1.8)), 2);
+        assert_eq!(pixel_scale(&at(ForeKind::MainPipe, 2.59)), 2);
+        assert_eq!(pixel_scale(&at(ForeKind::MainPipe, 2.6)), 3);
+        assert_eq!(pixel_scale(&at(ForeKind::MainPipe, 3.0)), 3);
+        assert_eq!(pixel_scale(&at(ForeKind::Cloud, 3.0)), 2);
+        // The art gets len / k, and the screen box is the art's box times k.
+        let item = at(ForeKind::VentDuct, 2.8);
+        let art = art_item(&item, 3);
+        assert!((art.len - 100.0 / 3.0).abs() < 1e-4);
+        let (ax, ay) = art_foreground::extent(&art);
+        let (sx, sy) = screen_extent(&item);
+        assert!((sx - ax * 3.0).abs() < 1e-3 && (sy - ay * 3.0).abs() < 1e-3);
+        // A span's on-screen length is still its world length.
+        assert!((sx - 50.0).abs() < 1.0, "a 100 px span is {sx} px half-long on screen");
+    }
+
+    /// **Chunky pixels**: a drawn item is made of uniform `k x k` blocks. Every
+    /// colour edge of the body lies on the item's own `k` grid, and there are
+    /// edges to check, for both factors. (A black floor: the shadow plane is a
+    /// darken, so it cannot show, and its own grid is phased to `plan.shadow`.)
+    #[test]
+    fn a_drawn_item_is_made_of_uniform_k_by_k_blocks() {
+        for (depth, k) in [(2.0f32, 2), (2.8f32, 3)] {
+            let mut w = World::new(Theme::Lab, 5);
+            let mut layer = ForeLayer::new();
+            let size = (240usize, 200usize);
+            let item = mk(
+                ForeKind::VentDuct,
+                Vec2::new(size.0 as f32 * 0.5, size.1 as f32 * 0.5),
+                200.0,
+                true,
+                Attach::Span,
+                depth,
+                2.0,
+                9,
+            );
+            layer.force_items(vec![item]);
+            let pb = render_sized(&mut w, &mut layer, Vec2::ZERO, size, (0, 0, 0), 0.0);
+            let plan = *layer.frame().first().expect("a plan");
+            assert_eq!(plan.k, k);
+            let edges = assert_on_block_grid(&pb, plan.screen, k, "vent duct");
+            assert!(edges > 40, "only {edges} edges: the item barely drew");
+            // And every block really is uniform.
+            let (ox, oy) = (plan.screen.0.rem_euclid(k), plan.screen.1.rem_euclid(k));
+            let mut blocks = 0;
+            let mut by = oy;
+            while by + k <= size.1 as i32 {
+                let mut bx = ox;
+                while bx + k <= size.0 as i32 {
+                    let c = pb.pixel_at(bx as usize, by as usize);
+                    for dy in 0..k {
+                        for dx in 0..k {
+                            assert_eq!(
+                                pb.pixel_at((bx + dx) as usize, (by + dy) as usize),
+                                c,
+                                "the block at ({bx}, {by}) is not uniform (k {k})"
+                            );
+                        }
+                    }
+                    if c != (0, 0, 0) {
+                        blocks += 1;
+                    }
+                    bx += k;
+                }
+                by += k;
+            }
+            assert!(blocks > 100, "only {blocks} painted blocks");
+        }
+    }
+
+    /// See-through structures keep real holes after the upscale: a catwalk
+    /// grating shows the floor through it, as whole blocks.
+    #[test]
+    fn a_grating_keeps_its_holes_after_the_upscale() {
+        let mut w = World::new(Theme::Sewer, 5);
+        let mut layer = ForeLayer::new();
+        let size = (240usize, 200usize);
+        let floor: Rgb = (0, 0, 0);
+        let item = mk(
+            ForeKind::CatwalkGrating,
+            Vec2::new(120.0, 100.0),
+            200.0,
+            true,
+            Attach::Span,
+            2.0,
+            3.0,
+            4,
+        );
+        layer.force_items(vec![item]);
+        let pb = render_sized(&mut w, &mut layer, Vec2::ZERO, size, floor, 0.0);
+        let plan = *layer.frame().first().expect("a plan");
+        // On the body's rows, between its first and last lit pixel, some pixels
+        // are untouched floor: holes the floor shows through (a black floor, so
+        // the shadow, a darken, cannot fill them).
+        let (_, hy) = screen_extent(&item);
+        let mut holes = 0;
+        let y0 = (plan.screen.1 - (hy * 0.6) as i32).max(0);
+        let y1 = (plan.screen.1 + (hy * 0.6) as i32).min(size.1 as i32 - 1);
+        for y in y0..=y1 {
+            let lit: Vec<usize> = (0..size.0).filter(|&x| pb.pixel_at(x, y as usize) != floor).collect();
+            if let (Some(&a), Some(&b)) = (lit.first(), lit.last()) {
+                holes += (a..=b).filter(|&x| pb.pixel_at(x, y as usize) == floor).count();
+            }
+        }
+        assert!(holes > 0, "the upscaled grating has no holes");
+        assert_on_block_grid(&pb, plan.screen, plan.k, "grating");
+    }
+
+    /// Block grid stability: two camera positions 1 px apart put the block
+    /// edges at the same phase relative to the item (they move with it, never
+    /// crawl across it).
+    #[test]
+    fn block_edges_keep_their_phase_when_the_camera_moves_a_pixel() {
+        let mut w = World::new(Theme::Kitchen, 5);
+        let mut layer = ForeLayer::new();
+        let size = (240usize, 200usize);
+        let item = mk(
+            ForeKind::HangingLamp,
+            Vec2::new(120.0, 110.0),
+            0.0,
+            true,
+            Attach::Drop,
+            2.7,
+            2.4,
+            3,
+        );
+        layer.force_items(vec![item]);
+        let mut origins = Vec::new();
+        for cam in [Vec2::ZERO, Vec2::new(1.0, 0.0), Vec2::new(1.0, 1.0)] {
+            let pb = render_sized(&mut w, &mut layer, cam, size, (0, 0, 0), 0.0);
+            let plan = *layer.frame().first().expect("a plan");
+            let edges = assert_on_block_grid(&pb, plan.screen, plan.k, "lamp");
+            assert!(edges > 20, "the lamp barely drew");
+            origins.push(plan.screen);
+        }
+        assert_ne!(origins[0], origins[1], "the camera move did not move the item");
+    }
+
+    /// A span still ends **in its walls** after the upscale: on generated Sewer
+    /// levels, the outermost body pixel at each end lands inside a solid wall
+    /// tile, within `k + 1` px of the span's true end.
+    #[test]
+    fn a_span_blitted_end_lands_inside_its_wall() {
+        let size = (160usize, 120usize);
+        let mut checked = 0;
+        for seed in [1u64, 2, 5, 9] {
+            let (mut w, generated) = layer_for(Theme::Sewer, seed);
+            let spans: Vec<ForeItem> = generated
+                .items()
+                .iter()
+                .filter(|i| i.attach == Attach::Span)
+                .copied()
+                .take(4)
+                .collect();
+            for item in spans {
+                let k = pixel_scale(&item);
+                for dir in [1.0f32, -1.0] {
+                    let along = if item.horizontal {
+                        Vec2::new(1.0, 0.0)
+                    } else {
+                        Vec2::new(0.0, 1.0)
+                    };
+                    let end = item.pos + along * (item.len * 0.5 * dir);
+                    // The end at the middle of the view; along the span the item
+                    // rides the world 1:1, across it the camera centre sits on it.
+                    let cam = end - Vec2::new(size.0 as f32 * 0.5, size.1 as f32 * 0.5);
+                    let mut layer = ForeLayer::new();
+                    layer.force_items(vec![item]);
+                    // A black floor: the shadow (a darken) cannot show, so every
+                    // lit pixel is the body.
+                    let pb = render_sized(&mut w, &mut layer, cam, size, (0, 0, 0), 0.0);
+                    let Some(plan) = layer.frame().first().copied() else {
+                        continue;
+                    };
+                    // Scan the rows (columns) through the anchor line and keep
+                    // the outermost lit pixel on the `dir` side.
+                    let mut outer: Option<i32> = None;
+                    let run = if item.horizontal { size.0 } else { size.1 } as i32;
+                    for cross in -6i32..=6 {
+                        for t in 0..run {
+                            let (x, y) = if item.horizontal {
+                                (t, plan.screen.1 + cross)
+                            } else {
+                                (plan.screen.0 + cross, t)
+                            };
+                            if x < 0 || y < 0 || x >= size.0 as i32 || y >= size.1 as i32 {
+                                continue;
+                            }
+                            if pb.pixel_at(x as usize, y as usize) != (0, 0, 0) {
+                                let c = if item.horizontal { x } else { y };
+                                outer = Some(match outer {
+                                    Some(o) if dir > 0.0 => o.max(c),
+                                    Some(o) => o.min(c),
+                                    None => c,
+                                });
+                            }
+                        }
+                    }
+                    let Some(edge) = outer else { continue };
+                    let world_c = if item.horizontal {
+                        cam.x + edge as f32 + 0.5
+                    } else {
+                        cam.y + edge as f32 + 0.5
+                    };
+                    let true_c = if item.horizontal { end.x } else { end.y };
+                    assert!(
+                        (world_c - true_c).abs() <= k as f32 + 1.0,
+                        "seed {seed}: the blitted end is {} px from the span's end (k {k})",
+                        (world_c - true_c).abs()
+                    );
+                    let probe = if item.horizontal {
+                        Vec2::new(world_c, item.pos.y)
+                    } else {
+                        Vec2::new(item.pos.x, world_c)
+                    };
+                    assert!(
+                        matches!(w.level.tiles.get_at(probe), TileKind::Wall(WallKind::Solid)),
+                        "seed {seed}: the blitted end at {probe:?} is not inside a solid wall"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0, "no span end was checked, so the test proves nothing");
+    }
+
+    /// No allocation growth once warm: the scratch reaches its capacity on the
+    /// first frame and keeps it over ten more (a still camera, a running clock).
+    #[test]
+    fn the_scratch_does_not_grow_after_the_first_frame() {
+        for theme in [Theme::Sewer, Theme::Laundry, Theme::Trailer] {
+            let (mut w, mut layer) = layer_for(theme, 3);
+            // Stand on an item so something draws.
+            let at = layer.items().first().map(|i| i.pos).unwrap_or(Vec2::new(400.0, 300.0));
+            let cam = at - Vec2::new(VIEW.0 as f32 * 0.5, VIEW.1 as f32 * 0.5);
+            let _ = render(&mut w, &mut layer, cam, cam - Vec2::new(500.0, 500.0), 1.0);
+            let warm = layer.scratch_capacity();
+            let frames = layer.frame.capacity();
+            for i in 0..10 {
+                // Indoors the clock only steps the sway (no window changes);
+                // the Flatbed's movers change their windows, so hold its clock.
+                let t = if theme == Theme::Trailer { 1.0 } else { 1.0 + i as f32 * 0.4 };
+                let _ = render(&mut w, &mut layer, cam, cam - Vec2::new(500.0, 500.0), t);
+                assert_eq!(layer.scratch_capacity(), warm, "{theme:?}: the scratch grew on frame {i}");
+                assert_eq!(layer.frame.capacity(), frames, "{theme:?}: the plan grew on frame {i}");
+            }
+        }
+    }
+
+    /// With the layer off nothing is drawn: a world holding a huge item over the
+    /// rat draws exactly the picture it draws with no items at all.
+    #[test]
+    fn with_the_layer_off_nothing_is_drawn() {
+        let mut w = World::new(Theme::Sewer, 7);
+        w.set_zoom_instant(1.0);
+        let mut layer = ForeLayer::new();
+        layer.force_items(vec![mk(
+            ForeKind::MainPipe,
+            w.player.pos,
+            300.0,
+            true,
+            Attach::Span,
+            2.8,
+            3.0,
+            1,
+        )]);
+        w.foreground_layer = layer;
+        w.foreground = false;
+        let mut off = PixelBuffer::new(VIEW.0, VIEW.1);
+        w.draw(&mut off);
+        let mut empty = ForeLayer::new();
+        empty.force_items(Vec::new());
+        w.foreground_layer = empty;
+        w.foreground = true;
+        let mut none = PixelBuffer::new(VIEW.0, VIEW.1);
+        w.draw(&mut none);
+        assert_eq!(changed(&off, &none), 0, "the switched-off layer drew something");
+    }
+
+    /// A still scene (fixed clock, fixed camera) draws identically twice, on
+    /// every floor including the Flatbed's sky.
+    #[test]
+    fn a_still_scene_draws_identically_twice() {
+        for theme in Theme::playable() {
+            let (mut w, mut layer) = layer_for(theme, 4);
+            let at = layer.items().first().map(|i| i.pos).unwrap_or(Vec2::new(400.0, 300.0));
+            let cam = at - Vec2::new(VIEW.0 as f32 * 0.5, VIEW.1 as f32 * 0.5);
+            let rat = at + Vec2::new(0.0, 30.0);
+            let (a, ua) = render(&mut w, &mut layer, cam, rat, 6.25);
+            let (b, ub) = render(&mut w, &mut layer, cam, rat, 6.25);
+            assert_eq!(ua, ub, "{theme:?}");
+            assert_eq!(changed(&a, &b), 0, "{theme:?}: a still scene repainted");
+        }
+    }
+
+    /// The rat's hard core: nothing at all is written within [`RAT_SKIP_PX`].
+    #[test]
+    fn nothing_is_written_within_ten_pixels_of_the_rat() {
+        let floor: Rgb = (90, 90, 90);
+        let mut pb = PixelBuffer::new(64, 64);
+        pb.clear(floor);
+        clear_disc_set((32, 32));
+        for (x, y) in [(32, 32), (32 + 9, 32), (32, 32 - 7), (32 + 6, 32 + 6)] {
+            blend(&mut pb, x, y, (0, 0, 0), ALPHA_MAX);
+            assert_eq!(pb.pixel_at(x as usize, y as usize), floor, "({x}, {y}) was painted");
+        }
+        blend(&mut pb, 32 + 12, 32, (0, 0, 0), ALPHA_MAX);
+        clear_disc_reset();
+        assert_ne!(pb.pixel_at(44, 32), floor, "the disc ramp past the core painted nothing");
+    }
+
+    /// The Flatbed's wires are in **every** frame: the wire item is always in
+    /// the plan (pinned inside the view), and the drawn lines cross the whole
+    /// view's width in `k`-px blocks around their pinned bands.
+    #[test]
+    fn the_power_wires_are_in_every_flatbed_frame() {
+        let w = World::new(Theme::Trailer, 5);
+        let size = (VIEW.0 as f32, VIEW.1 as f32);
+        for t in [0.0f32, 0.7, 1.9, 3.3, 4.0, 7.1, 13.37] {
+            for cam in [Vec2::ZERO, Vec2::new(500.0, 300.0), Vec2::new(1234.5, 77.7)] {
+                let sky = sky_probe(&w.level, cam, size, t);
+                let wire = sky.iter().find(|i| is_wire_span(i)).expect("no wire item");
+                let p = wire.pos - cam;
+                assert!(
+                    p.x >= 0.0 && p.x <= size.0 && p.y >= 0.0 && p.y <= size.1,
+                    "t {t} cam {cam:?}: the wires are pinned at {p:?}, outside the view"
+                );
+            }
+            let floor: Rgb = (40, 36, 30);
+            let mut pb = PixelBuffer::new(VIEW.0, VIEW.1);
+            pb.clear(floor);
+            draw_wires(&mut pb, PIXEL_SCALE, SKY_ALPHA as u8, t);
+            for &band in &WIRE_BANDS {
+                let base = wire_base_y(VIEW.1 as f32, band, PIXEL_SCALE);
+                let lo = base - (WIRE_SAG_ART as i32 + 1) * PIXEL_SCALE;
+                let hi = base + (WIRE_SAG_ART as i32 + 1) * PIXEL_SCALE;
+                for x in 0..VIEW.0 {
+                    let hit = (lo.max(0)..hi.min(VIEW.1 as i32)).any(|y| {
+                        let c = pb.pixel_at(x, y as usize);
+                        lum(c) > lum(floor) + 120
+                    });
+                    assert!(hit, "t {t}: column {x} has no wire near the {band} band");
+                }
+            }
         }
     }
 }

@@ -16,6 +16,16 @@
 //!   [`ForeKind::Cloud`], 4 px soft edge) and [`crate::render::foreground::blend`]
 //!   (drawn second, at `d.screen`, 2 px soft alpha edge, rim highlight in
 //!   [`crate::render::foreground::rim_tint`] on the `d.toward_centre` side).
+//! * **Upscaled by the layer.** In play the layer lends both writers an
+//!   offscreen scratch ([`crate::render::foreground::target_rect`] is its window,
+//!   in art coordinates), and blits it nearest-neighbour at an integer 2 or 3,
+//!   so every pixel drawn here is a `k x k` block on screen. Nothing here knows:
+//!   the art draws at `d.scale` around `d.screen` exactly as before, clipped to
+//!   the target rect, and a Span/Edge is handed `len / k` so it still reaches its
+//!   walls. Draw thin things one pixel wide; the upscale makes them chunky.
+//! * Bodies are a **mid-dark per-floor colour lighter than the floor**, a darker
+//!   underside/far edge and a rim about 35 % lighter on the `toward_centre` side
+//!   ([`ForePal::for_theme`]); the near-black v2 bodies vanished on dark floors.
 //! * Rasterized through a stack-allocated scanline strip buffer (zero heap
 //!   allocations per frame, no per-pixel `sqrt`/trig, single write per pixel per
 //!   pass so effective opacity never double-blends or exceeds `d.alpha`).
@@ -31,7 +41,8 @@
 
 use crate::game::level::Theme;
 use crate::render::foreground::{
-    blend, rim_tint, shadow, Attach, ForeDraw, ForeItem, ForeKind, Side, ALPHA_MAX, DROP_TAIL,
+    blend, rim_tint, shadow, target_rect, Attach, ForeDraw, ForeItem, ForeKind, Side, ALPHA_MAX,
+    DROP_TAIL, WIRE_RGB,
 };
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette::{self, Rgb};
@@ -119,8 +130,13 @@ pub fn extent(item: &ForeItem) -> (f32, f32) {
 /// Draw one foreground item into `pb`: soft floor shadow at `d.shadow` first
 /// (via [`shadow`]), then the dark soft-edged silhouette at `d.screen` (via
 /// [`blend`]).
+///
+/// While the layer is upscaling, the two writers land in its scratch and
+/// [`target_rect`] is the scratch's window (art coordinates); otherwise it is
+/// the whole of `pb`. Primitives are clipped to it.
 pub fn draw(pb: &mut PixelBuffer, item: &ForeItem, d: &ForeDraw) {
-    if d.alpha == 0 || pb.w == 0 || pb.h == 0 {
+    let (tx0, ty0, tw, th) = target_rect(pb);
+    if d.alpha == 0 || tw <= 0 || th <= 0 {
         return;
     }
     let scale = d.scale.max(0.25);
@@ -150,7 +166,7 @@ pub fn draw(pb: &mut PixelBuffer, item: &ForeItem, d: &ForeDraw) {
         tc,
     };
 
-    let mut list = PrimList::new(pb.w as i32, pb.h as i32);
+    let mut list = PrimList::new(tx0, ty0, tw, th);
 
     match item.kind {
         // ---- Sewer ----
@@ -255,73 +271,81 @@ struct ForePal {
     bark_mid: Rgb,
 }
 
+/// How much lighter than the body its rim highlight is (about 35 %).
+const RIM_LIGHTEN: f32 = 1.35;
+/// The underside / far-edge shade, as a share of the body colour.
+const DEEP_SHADE: f32 = 0.70;
+/// The lit-side face, as a share of the body colour.
+const SOFT_LIFT: f32 = 1.16;
+/// How much of the floor's ambient character tints the rim.
+const RIM_TINT_MIX: f32 = 0.15;
+
 impl ForePal {
+    /// The floor's foreground palette. Batch 13c: the v2 bodies were near-black
+    /// and murky on the dark floors (Kitchen, Laundry, Sewer, Printworks), so
+    /// each floor now has a **mid-dark body colour clearly lighter than its
+    /// floor** (`mid`), a darker shade for the underside and far edge
+    /// ([`DEEP_SHADE`]), a lit face ([`SOFT_LIFT`]) and a rim about 35 %
+    /// lighter ([`RIM_LIGHTEN`], lightly tinted by the floor's ambient), which
+    /// the emitters already put on the `toward_centre` side. With the layer's
+    /// `DARKEN` (0.88) and alpha clamp it still reads as a dim overhead thing.
     fn for_theme(theme: Theme) -> Self {
         let rt = rim_tint(theme);
         let peak = rt.0.max(rt.1).max(rt.2).max(1) as f32;
         let gain = (195.0 / peak).clamp(1.0, 2.6);
-        let rim = palette::scale(rt, gain);
+        let tint = palette::scale(rt, gain);
+        let shades = |body: Rgb| -> (Rgb, Rgb, Rgb, Rgb) {
+            let rim = palette::mix(palette::scale(body, RIM_LIGHTEN), tint, RIM_TINT_MIX);
+            (
+                palette::scale(body, DEEP_SHADE),
+                body,
+                palette::scale(body, SOFT_LIFT),
+                rim,
+            )
+        };
+        let build = |body: Rgb, accent: Rgb, pale: Rgb, bark: Rgb| -> Self {
+            let (deep, mid, soft, rim) = shades(body);
+            Self {
+                deep,
+                mid,
+                soft,
+                accent,
+                pale,
+                rim,
+                bark_deep: palette::scale(bark, DEEP_SHADE),
+                bark_mid: bark,
+            }
+        };
         match theme {
-            Theme::Sewer => Self {
-                deep: (13, 21, 20),
-                mid: (26, 42, 39),
-                soft: (46, 70, 64),
-                accent: (118, 68, 38),
-                pale: (152, 174, 166),
-                rim,
-                bark_deep: (13, 21, 20),
-                bark_mid: (26, 42, 39),
-            },
-            Theme::Kitchen => Self {
-                deep: (22, 15, 11),
-                mid: (46, 32, 22),
-                soft: (78, 56, 38),
-                accent: (156, 92, 48),
-                pale: (184, 166, 140),
-                rim,
-                bark_deep: (22, 15, 11),
-                bark_mid: (46, 32, 22),
-            },
-            Theme::Lab => Self {
-                deep: (13, 17, 30),
-                mid: (26, 36, 60),
-                soft: (48, 66, 100),
-                accent: (72, 144, 168),
-                pale: (156, 188, 204),
-                rim,
-                bark_deep: (13, 17, 30),
-                bark_mid: (26, 36, 60),
-            },
-            Theme::Laundry => Self {
-                deep: (18, 23, 38),
-                mid: (38, 48, 72),
-                soft: (70, 86, 114),
-                accent: (134, 102, 74),
-                pale: (196, 206, 214),
-                rim,
-                bark_deep: (18, 23, 38),
-                bark_mid: (38, 48, 72),
-            },
-            Theme::Printworks => Self {
-                deep: (16, 17, 23),
-                mid: (36, 38, 48),
-                soft: (66, 70, 82),
-                accent: (66, 134, 142),
-                pale: (188, 186, 174),
-                rim,
-                bark_deep: (16, 17, 23),
-                bark_mid: (36, 38, 48),
-            },
-            Theme::Trailer => Self {
-                deep: (16, 28, 14),
-                mid: (28, 52, 24),
-                soft: (46, 74, 36),
-                accent: (74, 112, 48),
-                pale: (182, 194, 204),
-                rim,
-                bark_deep: (22, 16, 11),
-                bark_mid: (44, 32, 21),
-            },
+            // Wet iron.
+            Theme::Sewer => build((58, 74, 70), (128, 78, 44), (152, 174, 166), (58, 74, 70)),
+            // Warm steel.
+            Theme::Kitchen => build((96, 84, 70), (166, 102, 56), (184, 166, 140), (96, 84, 70)),
+            // Cold grey-blue.
+            Theme::Lab => build((70, 84, 104), (82, 154, 178), (156, 188, 204), (70, 84, 104)),
+            // Pale enamel.
+            Theme::Laundry => {
+                build((120, 126, 136), (144, 112, 82), (196, 206, 214), (120, 126, 136))
+            }
+            // Oiled steel.
+            Theme::Printworks => {
+                build((92, 80, 84), (76, 144, 152), (188, 186, 174), (92, 80, 84))
+            }
+            // Outdoors: leaves in two greens, bark for the pole and the limb.
+            Theme::Trailer => {
+                let leaf_deep: Rgb = (40, 78, 44);
+                let leaf: Rgb = (64, 108, 58);
+                Self {
+                    deep: leaf_deep,
+                    mid: leaf,
+                    soft: palette::scale(leaf, SOFT_LIFT),
+                    accent: (98, 140, 64),
+                    pale: (182, 194, 204),
+                    rim: palette::mix(palette::scale(leaf, RIM_LIGHTEN), tint, RIM_TINT_MIX),
+                    bark_deep: palette::scale((64, 48, 34), DEEP_SHADE),
+                    bark_mid: (64, 48, 34),
+                }
+            }
         }
     }
 }
@@ -824,6 +848,9 @@ enum BdKind {
 }
 
 struct PrimList {
+    /// The clip window: `[bx0, bx0 + bw) x [by0, by0 + bh)`.
+    bx0: i32,
+    by0: i32,
     bw: i32,
     bh: i32,
     sh: [ShPrim; MAX_SH_PRIMS],
@@ -835,14 +862,16 @@ struct PrimList {
 }
 
 impl PrimList {
-    fn new(bw: i32, bh: i32) -> Self {
+    fn new(bx0: i32, by0: i32, bw: i32, bh: i32) -> Self {
         let empty_bb = PrimBox {
-            x0: bw,
-            y0: bh,
-            x1: -1,
-            y1: -1,
+            x0: bx0 + bw,
+            y0: by0 + bh,
+            x1: bx0 - 1,
+            y1: by0 - 1,
         };
         Self {
+            bx0,
+            by0,
             bw,
             bh,
             sh: [ShPrim {
@@ -862,10 +891,10 @@ impl PrimList {
 
     #[inline]
     fn clip_bb(&self, x0: f32, y0: f32, x1: f32, y1: f32) -> Option<PrimBox> {
-        let ix0 = (x0.floor() as i32).max(0);
-        let iy0 = (y0.floor() as i32).max(0);
-        let ix1 = (x1.ceil() as i32).min(self.bw - 1);
-        let iy1 = (y1.ceil() as i32).min(self.bh - 1);
+        let ix0 = (x0.floor() as i32).max(self.bx0);
+        let iy0 = (y0.floor() as i32).max(self.by0);
+        let ix1 = (x1.ceil() as i32).min(self.bx0 + self.bw - 1);
+        let iy1 = (y1.ceil() as i32).min(self.by0 + self.bh - 1);
         if ix0 > ix1 || iy0 > iy1 {
             None
         } else {
@@ -2663,11 +2692,13 @@ fn eval_bd_row(
                     let dv = v - wy;
                     let d = wire_r - dv.abs();
                     if d > 0.0 {
-                        let wa = soft_u8(d, 0.9, 255);
-                        let c = if dv * tc_v > 0.0 && d <= 0.95 {
+                        // Light grey-blue: the v2 near-black wires never
+                        // showed on the dark bed.
+                        let wa = soft_u8(d, 0.25, 255);
+                        let c = if dv * tc_v > 0.0 && d <= 0.3 {
                             rim
                         } else {
-                            (16, 19, 24)
+                            WIRE_RGB
                         };
                         paint_bd_px(col_row, alp_row, (x - tile_x0) as usize, c, wa);
                     }
@@ -3163,12 +3194,13 @@ fn emit_pot_rail(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
     }
 
     // Clip hanging cookware slots to the visible buffer axis so huge spans stay fast
-    let (axis_o, axis_max) = if horiz {
-        (c.sc.0, list.bw as f32)
+    // The clip window along the axis (the scratch window while upscaling).
+    let (axis_o, axis_min, axis_max) = if horiz {
+        (c.sc.0, list.bx0 as f32, (list.bx0 + list.bw) as f32)
     } else {
-        (c.sc.1, list.bh as f32)
+        (c.sc.1, list.by0 as f32, (list.by0 + list.bh) as f32)
     };
-    let u_vis0 = (-axis_o - 20.0 * s).max(-hl + cw + spacing * 0.52);
+    let u_vis0 = (axis_min - axis_o - 20.0 * s).max(-hl + cw + spacing * 0.52);
     let u_vis1 = (axis_max - axis_o + 20.0 * s).min(hl - cw - spacing * 0.35);
     let u_origin = -hl + cw + spacing * 0.52;
     let first_slot = ((u_vis0 - u_origin) / spacing).floor().max(0.0) as i32;
@@ -3577,12 +3609,13 @@ fn emit_clothesline(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool) {
         }
         return;
     }
-    let (axis_o, axis_max) = if horiz {
-        (c.sc.0, list.bw as f32)
+    // The clip window along the axis (the scratch window while upscaling).
+    let (axis_o, axis_min, axis_max) = if horiz {
+        (c.sc.0, list.bx0 as f32, (list.bx0 + list.bw) as f32)
     } else {
-        (c.sc.1, list.bh as f32)
+        (c.sc.1, list.by0 as f32, (list.by0 + list.bh) as f32)
     };
-    let u_vis0 = (-axis_o - 22.0 * s).max(u_origin);
+    let u_vis0 = (axis_min - axis_o - 22.0 * s).max(u_origin);
     let u_vis1 = (axis_max - axis_o + 22.0 * s).min(hl - cw - step * 0.45);
     let first_slot = ((u_vis0 - u_origin) / step).floor().max(0.0) as i32;
     let last_slot = ((u_vis1 - u_origin) / step).ceil() as i32;
@@ -4168,7 +4201,8 @@ fn emit_cloud(list: &mut PrimList, c: &DrawCtx) {
 // 18a. Flatbed (Outdoors): PowerLine — 3 sagging catenary wires
 fn emit_power_wires(list: &mut PrimList, c: &DrawCtx, hl: f32, horiz: bool, draw_knobs: bool) {
     let s = c.s;
-    let wire_r = 1.25;
+    // One art pixel thick (the layer's upscale makes it `k` px on screen).
+    let wire_r = 0.75;
     let spacing = 4.2 * s;
     let sag = (3.4 * s).min(22.0);
     let v_lo = -spacing - wire_r - 3.0;
