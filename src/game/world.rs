@@ -69,14 +69,15 @@ use super::director::{self, Director};
 pub use super::ecs::components::Pool;
 use super::fog::{Fog, MazeMarker};
 use super::ecs::components::{
-    AcidDrop, BiteSnap, CheeseString, ChestSpawn, CorrosiveChannel, Dropping, EchoSpoke, FairyRing,
+    AcidDrop, BiteSnap, CheeseString, ChestSpawn, CorrosiveChannel, Drake, Dropping, EchoSpoke,
+    FairyRing,
     FondueTine, Infection, MilkTooth, SpawnId, WhipCrack,
 };
 use super::ecs::constants::{GRID_CELL, PARTICLE_CAP, PLAYER_RADIUS};
 use super::ecs::resources::{
     collect_sorted, spawn_with_id, swap_in, swap_out, ActiveFx, BossDue, BossOverride, BossVirus,
-    Cvars, DamageLedger, DashHold, DashTrack, DebugFlags, DifficultyLevel, EnemyIndex, EvoRuntime,
-    GridScratch,
+    Cvars, DamageLedger, DashHold, DashTrack, DebugFlags, DifficultyLevel, DrakeSpawner,
+    EnemyIndex, EvoRuntime, GridScratch,
     LaserFx, LastPickups, LevelIndex, MeleeNudge, NeighborScratch, NextEnemyId, NextSpawnId,
     NukeTick, PickupScratch, PuddleSteps, RngRes, RunCounters, SfxQueue, Shake, TickInput,
     Viewport, XpBank,
@@ -474,6 +475,10 @@ impl World {
         // The director's boss hand-off (raised at `director::BOSS_TIME`, taken
         // by the boss framework). Permanent, like `NukeTick`.
         ecs.insert_resource(BossDue::default());
+        // The guest's clock (the Drake's 45 s gap and live count). Permanent
+        // scratch, like `BossDue`; a fresh level starts with no Drake and no
+        // gap running.
+        ecs.insert_resource(DrakeSpawner::default());
         // The boss fight's own state (private rng stream, damage-number id,
         // reusable scratch). Permanent, like `BossDue`; a spawn re-seeds it.
         ecs.insert_resource(BossFight::default());
@@ -2531,16 +2536,23 @@ impl World {
         _s = crate::prof::scope(crate::prof::Stage::SceneEnemies);
         let accent = self.level.palette.accent;
         {
-            let mut query = self
-                .ecs
-                .query::<(&SpawnId, &Enemy, Option<&super::ecs::systems::miniboss::Miniboss>)>();
+            let mut query = self.ecs.query::<(
+                &SpawnId,
+                &Enemy,
+                Option<&super::ecs::systems::miniboss::Miniboss>,
+                // The guest's own state: the Drake is drawn through
+                // `art_duck`, from the same view its peck's hit test asks.
+                Option<&Drake>,
+            )>();
             // Count what is on screen first: past CROWD_LOD_THRESHOLD the art
             // switches small enemies to its cheaper level-of-detail drawing.
             let visible = query
                 .iter(&self.ecs)
-                .filter(|(_, e, _)| on_screen(self.w2s(e.pos, cam), e.radius * 3.0 + 8.0, viewport))
+                .filter(|(_, e, _, _)| {
+                    on_screen(self.w2s(e.pos, cam), e.radius * 3.0 + 8.0, viewport)
+                })
                 .count();
-            for (_, e, mb) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+            for (_, e, mb, drake) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
                 let s = self.w2s(e.pos, cam);
                 if !on_screen(s, e.radius * 3.0 + 8.0, viewport) {
                     continue;
@@ -2550,6 +2562,20 @@ impl World {
                 let pen = pb.set_pen(crate::render::lighting::enemy_pen(e.kind, mb.map(|m| m.kind)));
                 match mb {
                     Some(mb) => art_miniboss::draw(pb, e, mb, cam, accent),
+                    // A Drake is always drawn in full (a body this size is
+                    // never level-of-detail'd), and always through the one
+                    // view function `drake::drake_view` — a body spawned
+                    // between ticks has no state component yet, so it stands
+                    // in its Waddle pose for the one frame before
+                    // `drake_system` attaches it.
+                    None if drake.is_some() || e.kind == EnemyKind::Drake => {
+                        let idle = Drake::default();
+                        let view = super::ecs::systems::drake::drake_view(
+                            e,
+                            drake.unwrap_or(&idle),
+                        );
+                        super::art_duck::draw_duck(pb, &view, cam);
+                    }
                     None => art_enemy::draw_enemy_crowd(pb, e, cam, accent, visible),
                 }
                 pb.set_pen(pen);
@@ -3042,6 +3068,30 @@ impl World {
                     continue;
                 }
                 draw_floor_tell(pb, e, cam, accent);
+            }
+        }
+
+        // The Sewer guest: the Drake's peck lane, for the whole tell and every
+        // peck. The geometry is `drake::peck_lane` — the same line the hit test
+        // and the bot read — drawn here rather than in `draw_floor_tell`
+        // because the lane needs the body's `Drake` state and that function
+        // only ever gets an `&Enemy`.
+        {
+            use super::ecs::components::DrakeState;
+            let mut query = self
+                .ecs
+                .query::<(&SpawnId, &Enemy, &super::ecs::components::Drake)>();
+            for (_, e, d) in query.iter(&self.ecs).sort_by_key::<&SpawnId, _>(|id| id.0) {
+                if !e.alive() || !matches!(d.state, DrakeState::Tell | DrakeState::Peck) {
+                    continue;
+                }
+                let (a, b) = super::ecs::systems::drake::peck_lane(e.pos, d.aim);
+                let mid = (a + b) * 0.5;
+                let margin = a.dist(b) * 0.5 + super::ecs::systems::drake::PECK_LANE_WIDTH;
+                if !on_screen(self.w2s(mid, cam), margin, viewport) {
+                    continue;
+                }
+                draw_drake_lane(pb, self.w2s(a, cam), self.w2s(b, cam), d.state == DrakeState::Peck);
             }
         }
 
@@ -4042,6 +4092,50 @@ fn draw_floor_tell(pb: &mut PixelBuffer, e: &Enemy, cam: Vec2, accent: palette::
             crate::game::art_roster_printworks::draw_staple_tell(pb, e, cam)
         }
         _ => art_enemy::draw_w3_tells(pb, e, cam, accent),
+    }
+}
+
+/// The peck lane's two rails (hostile layer, self-lit): a 6 px wide outlined
+/// corridor from the body to the bill's reach, with a cap at the reach marking
+/// where the bill stops.
+///
+/// Dashed while the tell is harmless, solid and brighter from the first peck
+/// on, which is the same "shape first, colour second" rule the other floors'
+/// tells keep. The screen endpoints come from `World::w2s`, so this is the one
+/// place the lane is drawn and the shape is `drake::peck_lane`'s.
+fn draw_drake_lane(pb: &mut PixelBuffer, a: (i32, i32), b: (i32, i32), live: bool) {
+    const RAIL: palette::Rgb = (240, 236, 222);
+    const RAIL_LIVE: palette::Rgb = (255, 250, 236);
+    const CAP: palette::Rgb = (240, 158, 62);
+    let (dx, dy) = ((b.0 - a.0) as f32, (b.1 - a.1) as f32);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1.0 {
+        return;
+    }
+    let dir = (dx / len, dy / len);
+    let side = (-dir.1, dir.0);
+    // Half the lane, in whole pixels either side of the centre line.
+    let half = (super::ecs::systems::drake::PECK_LANE_WIDTH * 0.5).round() as i32;
+    let steps = len.ceil() as i32;
+    let rail = if live { RAIL_LIVE } else { RAIL };
+    for i in 0..=steps {
+        // A dash of two pixels on, two off, while the lane is only a warning.
+        if !live && (i / 2) % 2 == 1 {
+            continue;
+        }
+        let t = i as f32;
+        let c = (a.0 as f32 + dir.0 * t, a.1 as f32 + dir.1 * t);
+        for sgn in [-1.0f32, 1.0] {
+            let x = (c.0 + side.0 * sgn * half as f32).round() as i32;
+            let y = (c.1 + side.1 * sgn * half as f32).round() as i32;
+            pb.plot(x, y, rail);
+        }
+    }
+    // The cap: where the bill reaches, a bracket across the lane.
+    for w in -half..=half {
+        let x = (b.0 as f32 + side.0 * w as f32).round() as i32;
+        let y = (b.1 as f32 + side.1 * w as f32).round() as i32;
+        pb.plot(x, y, CAP);
     }
 }
 

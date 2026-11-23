@@ -9,6 +9,9 @@ pub mod art_boss_night_edition;
 pub mod art_boss_horseshoe_crab;
 pub mod art_boss_hawk;
 pub mod art_enemy;
+// The guest: the Drake's body, its bill and the one pose table the hit test
+// and the drawn duck share (`art_duck::bill_tip`).
+pub mod art_duck;
 pub mod art_floor;
 pub mod art_icons;
 pub mod art_marks;

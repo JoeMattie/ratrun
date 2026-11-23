@@ -1490,3 +1490,25 @@ mod tests {
         debug_assert_enemy_index(&[a, a], [(1u64, a)].into_iter());
     }
 }
+
+// ---- The guest spawner (the Drake, Sewer only) ----------------------------
+//
+// Permanent scratch (inserted by `World::new`, like `BossDue`): a new `World`
+// per campaign level starts with no Drake on the floor and no gap running, so
+// level one's 2:30 is the same moment on every run of a seed.
+
+/// The Drake's clock: when the floor last gained or lost one, and how many
+/// were alive on the previous tick.
+///
+/// It lives here rather than in a system `Local` so the gap is part of the
+/// world a test can read and force between ticks, and so a captured Library
+/// world and a run world agree about it. It draws no rng and holds no geometry.
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct DrakeSpawner {
+    /// Run clock (`RunCounters::elapsed`) at which the last Drake spawned or
+    /// the last one left the floor. The guest rule's 45 s gate reads this.
+    pub last: f32,
+    /// How many Drakes were alive on the previous tick, so "one died" is a
+    /// count that went down (a Drake is never despawned any other way).
+    pub live: u8,
+}

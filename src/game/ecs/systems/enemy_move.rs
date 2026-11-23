@@ -266,6 +266,9 @@ pub fn enemy_steering_system(
         // Laundry (`floor_laundry`): a Wool Pill's stall and a planted Peg
         // Snapper stand still; exactly 1.0 for every other body.
         let ink = ink * crate::game::ecs::systems::floor_laundry::gait_mult(&e);
+        // Sewer guest (`drake`): a Drake paddles at 40 px/s in a puddle against
+        // its 30 on the dry floor; exactly 1.0 for every other body.
+        let ink = ink * crate::game::ecs::systems::drake::water_gait(&e, &level);
         // Kitchen (`floor_kitchen`): a Crumb Ant holds its heading between
         // course corrections; every other kind gets `flow_dir` back untouched.
         if e.kind == EnemyKind::CrumbAnt {

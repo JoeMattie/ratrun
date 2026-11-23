@@ -46,6 +46,15 @@
 //! Spitter/Lilliputians/Turnkey, Laundry House Centipede/Bell Flea/Wick Moth,
 //! Printworks Termite Horde, Flatbed Murder Hornet/Brute.
 //!
+//! ## A guest is not a slot
+//!
+//! `EnemyKind::Drake` (the Sewer's big duck that pecks) is on a floor without
+//! being in one: it holds no slot here, spends no slot cap and no live budget,
+//! and it is not an ordinary kind this table can name. Its own clock and rule
+//! live in `ecs::systems::drake`, and `first_unlock` answers `None` for it. A
+//! future guest follows the same seam: a body with a rule of its own and no
+//! row here.
+//!
 //! ## Rules still pending (the per-floor batch's list)
 //!
 //! A registration's stats, name, colour, gold, XP and Library entry are its
@@ -951,13 +960,20 @@ mod tests {
             );
         }
         // Every existing kind has a home somewhere, so no floor is short and
-        // the console's spawn table is fully covered.
+        // the console's spawn table is fully covered. Two exceptions, neither
+        // of them an ordinary roster body: the level boss (`Boss`) is nobody's
+        // row, and the **guest** (the Drake) is deliberately in no slot — the
+        // director's own clock brings it (see `systems::drake`).
         for k in EnemyKind::all() {
-            if k == Boss {
-                continue; // the level boss is nobody's roster row
+            if k == Boss || k == EnemyKind::Drake {
+                continue;
             }
             assert!(first_unlock(k).is_some(), "{k:?} is on no floor");
         }
+        assert!(
+            first_unlock(EnemyKind::Drake).is_none(),
+            "the guest must not hold a roster slot"
+        );
     }
 
     /// The ordinary roster has no stand-ins left: every slot names the

@@ -212,6 +212,10 @@ fn enemy_material(kind: EnemyKind) -> MaterialKind {
         EnemyKind::TollGull => MaterialKind::Fur,
         // A J hook dragging a rubber loop.
         EnemyKind::LooseBungee => MaterialKind::Cloth,
+        // ---- The guest ----------------------------------------------------
+        // Feathers: matte (rim light only, no highlight), the one place a
+        // white body must not blow out under a lamp.
+        EnemyKind::Drake => MaterialKind::Fur,
     }
 }
 

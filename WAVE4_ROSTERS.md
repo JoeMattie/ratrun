@@ -1,7 +1,7 @@
 # The things underfoot
 
 > **Status (in the tree now).** This is the design contract; `src/game/roster.rs` is its implementation.
-> - **Registered:** all 48 ordinary kinds (`EnemyKind::all()` is 49 with the legacy `Boss` body) and all 24 minibosses (`MinibossKind`). Every floor's eight slots and four appointments hold their designed kind; no slot carries a stand-in.
+> - **Registered:** all 48 ordinary kinds (`EnemyKind::all()` is 50 with the legacy `Boss` body and the Sewer's guest) and all 24 minibosses (`MinibossKind`). Every floor's eight slots and four appointments hold their designed kind; no slot carries a stand-in.
 > - **Director:** the slot unlocks, caps, pool shares, single weighted draw and the 9:45 featured rotation below are live (`roster::pick_kind`).
 > - **Still pending:** the per-kind rules of the 33 wave-four ordinary kinds. Each behaves as its `EnemyKind::archetype()` base today: the `V(X)` rows lack their one new rule and the six `N` rows (Sump Leech, Egg Timer, Walking Syringe, Peg Snapper, Staple Crawler, Loose Can) borrow a neighbour's behaviour. Bodies without bespoke art draw their archetype recoloured. `roster.rs`'s module docs carry the exact list.
 
@@ -150,6 +150,14 @@ Shape dimensions are length × full width unless noted. Stamp patterns mark ever
 | Flatbed 12:00 | The Road Atlas · data, Foreman | 34 px gull with a road map folded over its wings | Three 14×14 talon marks in a V, tip at locked rat, others 16 forward and ±14 sideways, land left/tip/right for 0.3 each. Cross a spent print, facing the next. Teaches the magpie and hawk landing marks. | Every exit has a bird on it. |
 
 Elite uses the local H body with its original gait, a thick double shoulder stripe, and a distinct attachment visible from either side. Sewer toad wears a split valve collar, Kitchen weight a doubled pie rim, Lab cart an open crown of safety latches, Laundry golem two brass coat buttons, Printworks reel a pair of metal flanges, Flatbed Brute its existing plated crest. Keep the elite flag, ×1.6 spawn HP, triple base XP and guaranteed 2 gold. Its damage, reach and speed stay readable from the base body. Cap three elites, hold due elites within 20 s either side of every appointment.
+
+## Guests
+
+One enemy is on a floor **without** a roster slot: the **Drake**, the Sewer's big duck that pecks (owner: "new enemy: a big duck that pecks at you"). A guest spends no slot, no live budget and no per-slot cap — a floor table cannot carry one.
+
+- **Clock** (`systems/drake.rs`, `DrakeSpawner`): Sewer only, from 2:30 on the curve clock, at most one alive (two from 8:00), 45 s after the last one spawned or died, never once the boss is due and never beside a live named miniboss. It arrives through the ordinary out-of-sight ladder (`spawn::spawn_point_reachable`), so it appears where a straggler would.
+- **Build:** 8 px body radius (the widest ordinary body; the rat is 3), 92.8 HP (the Sluice Toad's 58 × 1.6), 30 px/s on a dry floor and 40 in a puddle, fodder contact damage, 30 XP (three times the heavy), gold always at the elite's value. White body `(236, 232, 220)`, orange bill.
+- **Rule:** Waddle → Tell 0.45 s (planted; the aim tracks the rat for the first 0.25 s then locks; a 6 px lane out to the bill's 22 px reach is outlined on the hostile layer) → 3 pecks of 0.12 s out + 0.10 s back, 9 damage each if the rat's centre is within 5 px of the bill tip at full extension, re-aimed at most 35° between pecks → Recover 1.3 s (planted, ×1.5 incoming damage). `art_duck::bill_tip` is the geometry the hit test and the picture share. It is its own card in the BESTIARY ("guest · from 2:30"), staged as a trick plate.
 
 ## Director and campaign
 

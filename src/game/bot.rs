@@ -1440,6 +1440,35 @@ impl Bot {
                 }
                 true
             }
+            // The guest (Sewer): the peck lane, from the body out to
+            // `art_duck::PECK_REACH` along the aim the bird locked (or is
+            // turning between pecks). One lane, read exactly as the hostile
+            // layer draws it (`drake::peck_lane`), so the bot steps off the
+            // shape the player sees.
+            EnemyKind::Drake => {
+                use crate::game::ecs::systems::drake;
+                if en.w4.phase == drake::PHASE_TELL || en.w4.phase == drake::PHASE_PECK {
+                    let (a, b) = drake::peck_lane(en.pos, en.w4.dir);
+                    let mid = (a + b) * 0.5;
+                    if self.sees(w, p, mid) {
+                        let (warn_left, active_left) = if en.w4.phase == drake::PHASE_TELL {
+                            let warn = en.w4.t.max(0.0);
+                            (warn, warn + drake::PECK_SECS * drake::PECK_COUNT as f32)
+                        } else {
+                            (0.0, en.w4.t.max(0.0) + 0.05)
+                        };
+                        self.threats.push(Threat::WaveHazard {
+                            pos: mid,
+                            radius: a.dist(b) * 0.5,
+                            dir: en.w4.dir,
+                            warn_left: self.quantise_warn(warn_left),
+                            active_left,
+                            damage: drake::PECK_DAMAGE,
+                        });
+                    }
+                }
+                true
+            }
             _ => false,
         }
     }
@@ -3851,6 +3880,42 @@ mod tests {
             Threat::WaveHazard { warn_left, .. } => assert!((warn_left - 0.3).abs() < 1e-3),
             other => panic!("not a floor hazard: {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_bot_reads_the_drakes_peck_lane() {
+        use crate::game::ecs::systems::drake;
+        // A tell locked straight at the rat (the rat 20 px to the east).
+        let (_, en, threats) = floor_scan(EnemyKind::Drake, |e, _| {
+            e.w4.phase = drake::PHASE_TELL;
+            e.w4.t = 0.3;
+            e.w4.dir = Vec2::new(1.0, 0.0);
+        });
+        assert_eq!(threats.len(), 1);
+        let (a, b) = drake::peck_lane(en.pos, en.w4.dir);
+        assert!(floor_cost(&threats, (a + b) * 0.5) > 0.0, "on the lane");
+        assert!(floor_cost(&threats, b) > 0.0, "at the bill's reach");
+        assert_eq!(
+            floor_cost(&threats, en.pos + Vec2::new(0.0, 30.0)),
+            0.0,
+            "beside it"
+        );
+        match threats[0] {
+            Threat::WaveHazard {
+                warn_left,
+                active_left,
+                ..
+            } => {
+                assert!((warn_left - 0.3).abs() < 1e-3);
+                assert!(active_left > warn_left, "the volley outlives the tell");
+            }
+            other => panic!("not a floor hazard: {other:?}"),
+        }
+        // Waddling: nothing on the floor yet.
+        let (_, _, quiet) = floor_scan(EnemyKind::Drake, |e, _| {
+            e.w4.phase = drake::PHASE_WADDLE;
+        });
+        assert!(quiet.is_empty());
     }
 
     #[test]

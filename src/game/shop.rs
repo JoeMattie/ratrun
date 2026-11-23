@@ -483,6 +483,9 @@ pub fn gold_row(kind: EnemyKind) -> (f32, u32) {
         EnemyKind::LooseCan => (0.043, 2),
         EnemyKind::TollGull => (0.05, 2),
         EnemyKind::LooseBungee => (0.079, 3),
+        // The guest: always drops gold, at the elite's own value
+        // (`ELITE_GOLD`), so a Drake is a visible payday and not a coin-flip.
+        EnemyKind::Drake => (1.0, ELITE_GOLD),
         _ => (0.025, 1),
     }
 }

@@ -96,8 +96,8 @@ use crate::game::director::{self, Director};
 use crate::game::ecs::constants::ENEMY_CAP;
 use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::resources::{
-    BossDue, Cvars, DebugFlags, DifficultyLevel, LevelIndex, NextEnemyId, NextSpawnId, RngRes,
-    RunCounters, TickInput, Viewport,
+    BossDue, Cvars, DebugFlags, DifficultyLevel, DrakeSpawner, LevelIndex, NextEnemyId, NextSpawnId,
+    RngRes, RunCounters, TickInput, Viewport,
 };
 use crate::game::ecs::systems::approach::in_sim_view;
 use crate::game::ecs::systems::miniboss::MinibossSchedule;
@@ -329,6 +329,9 @@ pub fn director_system(
     mut boss_due: ResMut<BossDue>,
     mut rng: ResMut<RngRes>,
     mut ids: DirectorIds,
+    // The guest's clock (the Drake): permanent scratch, so a refusal on a tick
+    // costs one `Copy`.
+    mut guest: ResMut<DrakeSpawner>,
     // `&mut`: the approach boost below is the one write the director makes to a
     // living body (its speed scale, never its position or its rng).
     mut enemies: Query<(&SpawnId, &mut Enemy)>,
@@ -606,6 +609,48 @@ pub fn director_system(
                 commands.spawn((enemy, ids.next_id.take()));
             }
         }
+    }
+
+    // The guest: at most one Drake on the Sewer (two from 8:00), from 2:30 on
+    // the curve clock, 45 s after the last one spawned or died, never during
+    // the boss fight and never beside a live miniboss. It spends no roster
+    // slot, no live budget and no cap: it is placed through the same
+    // out-of-sight ladder a straggler uses, and it is the only body on the
+    // floor that is not the roster's (`systems::drake`).
+    //
+    // The `peace`/suppress early return above has already held it, like every
+    // other spawn. The curve clock freezes at the boss time, so "after
+    // `BossDue`" is read from the director and the hand-off, not from it.
+    //
+    // The theme and clock gate is first: the other five floors and the first
+    // two and a half minutes of the Sewer pay one compare a tick (nothing can
+    // exist before 2:30, so the death clock starts empty and correct).
+    if level.theme == Theme::Sewer
+        && curve >= crate::game::ecs::systems::drake::FROM_CLOCK
+    {
+        let live_drakes = enemies
+            .iter_mut()
+            .filter(|(_, e)| e.kind == EnemyKind::Drake)
+            .count();
+        let mut tick = crate::game::ecs::systems::drake::GuestTick {
+            elapsed,
+            curve,
+            theme: level.theme,
+            player: &player,
+            viewport: viewport.0,
+            level: &level,
+            boss_phase: director.boss_spawned || boss_due.due || boss_due.claimed,
+            miniboss_alive: schedule.active > 0,
+            live_drakes,
+            hp_mult: director::horde_hp_mult_for(difficulty.0, elapsed),
+            mods,
+            spawner: &mut guest,
+            scratch: &mut *scratch,
+            rng: &mut rng.0,
+            next_id: &mut ids.next_id,
+            next_enemy_id: &mut ids.next_enemy_id,
+        };
+        crate::game::ecs::systems::drake::spawn_guest(&mut tick, &mut commands);
     }
 
     // Boss hand-off (no generic boss spawn any more): the boss framework reads
