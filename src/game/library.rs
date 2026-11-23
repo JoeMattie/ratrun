@@ -366,6 +366,7 @@ fn pickup_name(k: PickupKind) -> &'static str {
         PickupKind::WindupMouse => "Wind-up Mouse",
         PickupKind::PocketWatch => "Pocket Watch",
         PickupKind::CleanSocks => "Clean Socks",
+        PickupKind::GrowthSerum => "Growth Serum",
     }
 }
 
@@ -652,6 +653,7 @@ pub fn all_rows() -> Vec<Row> {
         PickupKind::WindupMouse,
         PickupKind::PocketWatch,
         PickupKind::CleanSocks,
+        PickupKind::GrowthSerum,
     ] {
         let (hint, dossier) = pickup_text(k);
         rows.push(Row {
@@ -1539,6 +1541,12 @@ fn pickup_text(k: PickupKind) -> (&'static str, &'static str) {
             "Stolen from the lost and found. The dash comes back immediately and glue \
              boards refuse to hold the rat for as long as the socks hold out.",
         ),
+        PickupKind::GrowthSerum => (
+            "Rare drop · any floor",
+            "A dose of labelled growth medium. Five times the size, and every ordinary \
+             body under the rat is crushed where it stands. The picture grows; the \
+             skeleton, the corridors and the rat-hole clearances do not.",
+        ),
     }
 }
 
@@ -2197,6 +2205,20 @@ fn pickup_facts(k: PickupKind, f: &mut Facts) {
             f.push("EFFECT", "dash readied, glue boards let go");
             f.push("LASTS", format!("{:.0}s", powerups::CLEAN_SOCKS_SECS));
         }
+        PickupKind::GrowthSerum => {
+            f.push("EFFECT", "x5 size; the horde is stomped");
+            f.push("STOMP", format!("{:.0} px disc", powerups::GIANT_STOMP_RADIUS));
+            f.push(
+                "ON A HEAVY",
+                format!("{:.0} a beat", powerups::GIANT_ELITE_DAMAGE),
+            );
+            f.push(
+                "ON A NAMED",
+                format!("{:.0} a beat", powerups::GIANT_BOSS_DAMAGE),
+            );
+            f.push("TAKES", "half damage except contact");
+            f.push("LASTS", format!("{:.0}s", powerups::GROWTH_SECS));
+        }
     }
     f.push("FOUND", "the rare pickup roll");
     f.push("SHOWN AS", "a solid two-tone silhouette");
@@ -2788,7 +2810,7 @@ fn category_len(cat: Category) -> usize {
 }
 
 /// Every pickup kind, in discriminant order.
-const PICKUP_KINDS: [PickupKind; 7] = [
+const PICKUP_KINDS: [PickupKind; 8] = [
     PickupKind::Heal,
     PickupKind::Magnet,
     PickupKind::Nuke,
@@ -2796,6 +2818,7 @@ const PICKUP_KINDS: [PickupKind; 7] = [
     PickupKind::WindupMouse,
     PickupKind::PocketWatch,
     PickupKind::CleanSocks,
+    PickupKind::GrowthSerum,
 ];
 
 /// Rebuild a [`Key`] from its persisted `(category, kind)` pair, so

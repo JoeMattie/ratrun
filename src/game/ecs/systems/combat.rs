@@ -325,6 +325,7 @@ fn contact_one(
     enemies: &mut Query<(Entity, &SpawnId, &mut Enemy)>,
     hit_dmg: &mut f32,
     hit_kind: &mut Option<EnemyKind>,
+    giant: bool,
 ) {
     let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
         return;
@@ -332,6 +333,14 @@ fn contact_one(
     // An enemy killed earlier this tick (by a bullet or a pool) must
     // not still land contact damage or knockback.
     if !e.alive() {
+        return;
+    }
+    // Growth Serum (batch 13): an ordinary body touching the giant is being
+    // stomped, not biting it — no damage, no knockback and no spent cooldown
+    // (the stomp pass treats the pair on its own beat). Elites, named
+    // minibosses and the boss still land their contact, at the giant's half
+    // (`Player::take_damage` does that multiplication).
+    if giant && crate::game::ecs::systems::powerups::giant_crushes(&*e) {
         return;
     }
     if e.contact_cd <= 0.0 && collision::circles_overlap(ppos, PLAYER_RADIUS, e.pos, e.radius) {
@@ -376,6 +385,8 @@ pub fn contact_system(
     if player.iframes > 0.0 {
         return;
     }
+    // Growth Serum: ordinary bodies cannot bite the giant (see `contact_one`).
+    let giant = player.buffs.is_giant();
     let mut hit_dmg = 0.0f32;
     let mut hit_kind: Option<EnemyKind> = None;
     // `EnemyIndex` was rebuilt by `enemy_move::grid_refresh_system` from the
@@ -401,6 +412,7 @@ pub fn contact_system(
                 &mut enemies,
                 &mut hit_dmg,
                 &mut hit_kind,
+                giant,
             );
         }
     } else {
@@ -415,6 +427,7 @@ pub fn contact_system(
                 &mut enemies,
                 &mut hit_dmg,
                 &mut hit_kind,
+                giant,
             );
         }
     }

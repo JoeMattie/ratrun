@@ -2191,6 +2191,40 @@ fn stage_pickup(theme: Theme, kind: PickupKind) -> Staged {
         kind,
         bob: 0.0,
     });
+    // The Growth Serum (batch 13) is the one find whose effect is a size
+    // change plus a stomp: the rat walks onto the flask and then stands on the
+    // fodder, so the card shows the real thing — the real
+    // `powerups::giant_stomp_system` crushing real bodies — and not a staged
+    // effect. Three bodies start inside the 30 px disc and three walk in from
+    // beyond it, so a loop keeps stomping something.
+    if kind == PickupKind::GrowthSerum {
+        let fodder = roster::kind(theme, Slot::A);
+        for (dx, dy) in [
+            (26.0, -10.0),
+            (28.0, 9.0),
+            (-12.0, 11.0),
+            (62.0, -22.0),
+            (68.0, 16.0),
+            (-48.0, 20.0),
+        ] {
+            let e = world.spawn_enemy(fodder, rat + Vec2::new(dx, dy), 1.0);
+            if let Some(mut body) = world.ecs.get_mut::<Enemy>(e) {
+                // The rats are the subject here, not the fodder's speed.
+                body.speed_scale = 0.55;
+            }
+        }
+        let mut script = Script::new(4.6, 1.2);
+        script.framing = Framing::Point(rat + Vec2::new(10.0, 0.0));
+        script.input = |t| Input {
+            mv: if (0.2..1.0).contains(&t) {
+                Vec2::new(1.0, 0.0)
+            } else {
+                Vec2::ZERO
+            },
+            ..Input::default()
+        };
+        return (world, script, None);
+    }
     for i in 0..6 {
         let a = i as f32 * 1.05 + 0.4;
         world.spawn_gem(Gem::new(rat + Vec2::new(a.cos() * 30.0 + 22.0, a.sin() * 18.0), 1));

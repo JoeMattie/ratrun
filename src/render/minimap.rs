@@ -446,12 +446,15 @@ pub enum PickupTag {
     WindupMouse,
     PocketWatch,
     CleanSocks,
+    // ---- Batch 13: the giant-rat powerup, appended so the wave-3 tags keep
+    // their discriminants.
+    GrowthSerum,
 }
 
 impl PickupTag {
     /// Every icon this tag can draw, in legend order (chest first: it is the
     /// landmark the player walks back for).
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Chest,
         Self::Heal,
         Self::Magnet,
@@ -460,6 +463,7 @@ impl PickupTag {
         Self::WindupMouse,
         Self::PocketWatch,
         Self::CleanSocks,
+        Self::GrowthSerum,
     ];
 
     /// The single glyph that stands for this find on the expanded map and in
@@ -475,6 +479,7 @@ impl PickupTag {
             Self::WindupMouse => 'k',
             Self::PocketWatch => 'w',
             Self::CleanSocks => 's',
+            Self::GrowthSerum => 'G',
         }
     }
 
@@ -490,6 +495,7 @@ impl PickupTag {
             Self::WindupMouse => (232, 190, 96),
             Self::PocketWatch => (150, 210, 226),
             Self::CleanSocks => (240, 240, 232),
+            Self::GrowthSerum => (255, 88, 196),
         }
     }
 
@@ -504,6 +510,7 @@ impl PickupTag {
             Self::WindupMouse => "Wind-up Mouse",
             Self::PocketWatch => "Pocket Watch",
             Self::CleanSocks => "Clean Socks",
+            Self::GrowthSerum => "Growth Serum",
         }
     }
 }

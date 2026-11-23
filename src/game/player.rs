@@ -27,18 +27,22 @@ pub struct Buffs {
     /// Wind-up Mouse: the brass key is on the floor (`powerups::Decoy` carries
     /// its position and timer; this mirror is what the HUD counts down). 5 s.
     pub decoy: f32,
+    /// Growth Serum (batch 13): the rat is drawn five times its size, stomps
+    /// the ordinary horde and shrugs off ordinary contact. 20 s.
+    pub giant: f32,
 }
 
 impl Buffs {
     /// Every tick: age the countdowns. Returns the kinds that expired this
     /// tick, so the caller can play the release cue without a second pass.
-    pub fn tick(&mut self, dt: f32) -> [bool; 4] {
-        let mut expired = [false; 4];
+    pub fn tick(&mut self, dt: f32) -> [bool; 5] {
+        let mut expired = [false; 5];
         for (slot, was) in [
             (&mut self.shield, 0),
             (&mut self.slow_bullets, 1),
             (&mut self.socks, 2),
             (&mut self.decoy, 3),
+            (&mut self.giant, 4),
         ] {
             if *slot > 0.0 {
                 *slot = (*slot - dt).max(0.0);
@@ -50,7 +54,34 @@ impl Buffs {
 
     /// Is any timed buff running? (The HUD skips its strip when not.)
     pub fn any(&self) -> bool {
-        self.shield > 0.0 || self.slow_bullets > 0.0 || self.socks > 0.0 || self.decoy > 0.0
+        self.shield > 0.0
+            || self.slow_bullets > 0.0
+            || self.socks > 0.0
+            || self.decoy > 0.0
+            || self.giant > 0.0
+    }
+
+    /// Is the rat giant right now? (`Growth Serum`.) One reader-facing name for
+    /// the state, so the draw pass, the collision rules and the stomp pass all
+    /// ask the same question.
+    #[inline]
+    pub fn is_giant(&self) -> bool {
+        self.giant > 0.0
+    }
+
+    /// How much of an incoming hit the rat takes while giant.
+    ///
+    /// Growth Serum halves everything that still reaches it: hostile pellets,
+    /// traps, hazards, miniboss signatures and boss attacks. Ordinary enemy
+    /// **contact** never gets here at all (`combat::contact_system` drops it
+    /// while the rat is giant: those bodies are being stomped).
+    #[inline]
+    pub fn damage_taken_scale(&self) -> f32 {
+        if self.is_giant() {
+            crate::game::ecs::systems::powerups::GIANT_DAMAGE_TAKEN
+        } else {
+            1.0
+        }
     }
 }
 
@@ -325,6 +356,9 @@ impl Player {
             return true;
         }
         let raw = raw + super::shop::incoming_extra(&self.loadout.splices);
+        // Growth Serum: the giant takes half from everything but ordinary
+        // contact, which `contact_system` never lands while the serum runs.
+        let raw = raw * self.buffs.damage_taken_scale();
         let dmg = (raw - self.loadout.stats.armor).max(1.0);
         self.hp -= dmg;
         self.iframes = 0.9 + super::shop::iframe_extra(&self.loadout.splices);

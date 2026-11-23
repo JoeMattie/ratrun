@@ -240,6 +240,7 @@ impl MinimapFrame {
                 PickupKind::WindupMouse => PickupTag::WindupMouse,
                 PickupKind::PocketWatch => PickupTag::PocketWatch,
                 PickupKind::CleanSocks => PickupTag::CleanSocks,
+                PickupKind::GrowthSerum => PickupTag::GrowthSerum,
             };
             self.markers.push(MapMarker {
                 cx: cx as f32,

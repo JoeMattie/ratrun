@@ -781,7 +781,11 @@ pub fn traps_system(
     // without sticking — because the design has one rule ("ignore
     // sticky-board drag") and no per-board exceptions. Socks do nothing to a
     // mousetrap: the bar does not care about laundry.
-    let player_socked = player.buffs.socks > 0.0;
+    //
+    // Batch 13: the Growth Serum's giant is the same case — a five-times rat
+    // is not held by a sticky board either ("sticky boards do not hold the
+    // giant"). Mousetraps still snap, at the giant's half damage.
+    let player_socked = player.buffs.socks > 0.0 || player.buffs.is_giant();
 
     scratch.spent_sticky.clear();
     scratch.spent_mice.clear();

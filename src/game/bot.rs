@@ -342,6 +342,11 @@ enum Threat {
         radius: f32,
         damage: f32,
         kind: EnemyKind,
+        /// Growth Serum (batch 13): while the rat is giant this body is one it
+        /// **crushes** rather than one it must avoid — set at scan time from
+        /// `powerups::giant_crushes` and the live buff, so `threat_cost` only
+        /// has to read a flag. Never true when the rat is not giant.
+        stomp_free: bool,
     },
     Bullet {
         pos: Vec2,
@@ -1001,6 +1006,11 @@ impl Bot {
                     radius: en.radius,
                     damage: en.damage,
                     kind: en.kind,
+                    // Growth Serum: an ordinary body under a giant rat is not a
+                    // hazard, it is a stomp. Elites and named bodies keep their
+                    // full weight (they hit back at half damage).
+                    stomp_free: w.player.buffs.is_giant()
+                        && crate::game::ecs::systems::powerups::giant_crushes(en),
                 });
                 // Wave 3: the warned attacks that are already on the floor.
                 // The body is a threat of its own above; these are the shapes
@@ -1816,6 +1826,16 @@ impl Bot {
                     }
                 }
                 PickupKind::CleanSocks => 3.5,
+                // Growth Serum (batch 13): twenty seconds in which the horde
+                // cannot touch the rat and dies under it. The best find on the
+                // floor when there is a crowd, still worth a detour without one.
+                PickupKind::GrowthSerum => {
+                    if w.enemy_count() > 8 {
+                        9.0
+                    } else {
+                        5.0
+                    }
+                }
             };
             bonus += want * (1.0 - d / 190.0) * dir.dot((ppos - p).normalized());
         }
@@ -2528,6 +2548,12 @@ fn on_pad(pos: Vec2, facing: Vec2, q: Vec2) -> bool {
     d.dot(f).abs() <= pad.x + R && d.dot(f.perp()).abs() <= pad.y + R
 }
 
+/// Growth Serum (batch 13): how much of its ordinary-body contact danger the
+/// bot still feels while the rat is giant. The bodies cannot hurt the giant and
+/// die under it, so the only reason to weigh them at all is that walking over
+/// one is a stomp and not a movement mistake.
+const STOMP_FREE_CONTACT: f32 = 0.2;
+
 /// Danger of one threat to a candidate position `q` at `t` seconds from now.
 fn threat_cost(_p: Vec2, threat: Threat, q: Vec2, t: f32, contact_scale: f32) -> f32 {
     match threat {
@@ -2537,6 +2563,7 @@ fn threat_cost(_p: Vec2, threat: Threat, q: Vec2, t: f32, contact_scale: f32) ->
             radius,
             damage,
             kind,
+            stomp_free,
         } => {
             // Each kind chases at `EnemyKind::speed` px/s (Skitterer 30, Bat
             // 42, Cat 38, Spitter 22, Brute 16) and the velocity sample
@@ -2545,6 +2572,11 @@ fn threat_cost(_p: Vec2, threat: Threat, q: Vec2, t: f32, contact_scale: f32) ->
             // better than a kind-speed chase model (the A/B lost 60 s of
             // median survival), so the kind only decides the weight below.
             let _ = kind;
+            // Growth Serum: a body the giant crushes is almost free to walk
+            // into (`STOMP_FREE_CONTACT`). This is the one place the giant
+            // changes the bot's reading of the floor, and it applies to
+            // ordinary bodies only (see the flag's doc).
+            let stomp_scale = if stomp_free { STOMP_FREE_CONTACT } else { 1.0 };
             let pred = pos + vel * t;
             // Faster kinds are read a moment earlier: 0.9 x their own speed
             // (34 px for the 30-38 px/s crawlers and cats, 38 px for the
@@ -2555,7 +2587,7 @@ fn threat_cost(_p: Vec2, threat: Threat, q: Vec2, t: f32, contact_scale: f32) ->
                 0.0
             } else {
                 let w = (1.0 - (near.max(-reach) / reach)).clamp(0.0, 1.0);
-                w * w * (damage / 6.0).clamp(0.6, 3.0) * 6.0 * contact_scale
+                w * w * (damage / 6.0).clamp(0.6, 3.0) * 6.0 * contact_scale * stomp_scale
             }
         }
         Threat::Bullet {

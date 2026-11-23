@@ -2444,6 +2444,8 @@ pub fn emit_pickup_ambient(
             PickupKind::WindupMouse => Ramp::Gold,
             PickupKind::PocketWatch => Ramp::Custom((198, 236, 250), (58, 96, 128)),
             PickupKind::CleanSocks => Ramp::Custom((250, 250, 246), (150, 156, 158)),
+            // Growth Serum: a hot pink-magenta bubble of lab growth medium.
+            PickupKind::GrowthSerum => Ramp::Custom((255, 176, 232), (140, 24, 104)),
         };
         let a = rng.random_range(0.0..std::f32::consts::TAU);
         let d = rng.random_range(2.5..5.5);
@@ -4964,6 +4966,15 @@ pub fn emit_pickup_find(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, kind:
             12,
             64.0,
         ),
+        // Growth Serum (batch 13): a magenta flask bursting into a big bubble
+        // ring — the one find that announces a size change rather than a rule.
+        PickupKind::GrowthSerum => (
+            (255, 96, 200),
+            (255, 226, 246),
+            Ramp::Custom((255, 176, 232), (140, 24, 104)),
+            16,
+            86.0,
+        ),
         // Not a pocket find: fall back to the heal burst's gentle read.
         _ => (
             (126, 224, 152),
@@ -5059,7 +5070,46 @@ pub fn emit_sock_print(ps: &mut Particles, pos: Vec2, facing: Vec2) {
     }
 }
 
-/// The quiet fizzle when a timed find runs out (or the key winds down).
+/// The **Growth Serum** stomp: one flat ring of dust under the giant's feet.
+///
+/// rng-free on purpose: a stomp can land on any tick of any run, so it must not
+/// perturb the simulation's stream (the beat, its shake and its `Sfx::Bump` are
+/// the whole event). The ring is fixed, the puffs are evenly spaced, and the
+/// colours are the floor's own dust rather than the serum's pink — the pink is
+/// the find, this is the floor being hit.
+pub fn emit_giant_stomp(ps: &mut Particles, pos: Vec2) {
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 12.0,
+        end_r: 30.0,
+        life: 0.26,
+        max_life: 0.26,
+        color: (198, 188, 172),
+        core: (236, 230, 218),
+        thick: 1.6,
+        additive: false,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    let n = ps.budget_count(10, false);
+    for i in 0..n {
+        let a = i as f32 / n.max(1) as f32 * std::f32::consts::TAU + 0.31;
+        let dir = Vec2::from_angle(a);
+        let life = 0.24 + 0.06 * (i % 3) as f32;
+        ps.push(Particle {
+            pos: pos + dir * 14.0,
+            vel: dir * (34.0 + 6.0 * (i % 2) as f32),
+            life,
+            max_life: life,
+            drag: 5.0,
+            gravity: 0.0,
+            ramp: Ramp::Custom((206, 196, 180), (92, 86, 78)),
+            additive: false,
+            shape: Shape::Puff,
+        });
+    }
+}
+
 ///
 /// rng-free on purpose: expiry has to be the same beat every time, and it can
 /// happen on any tick of any run, so it must not perturb the draws.
@@ -5069,6 +5119,7 @@ pub fn emit_buff_expire(ps: &mut Particles, pos: Vec2, kind: PickupKind) {
         PickupKind::WindupMouse => ((232, 190, 96), 6),
         PickupKind::PocketWatch => ((150, 210, 226), 5),
         PickupKind::CleanSocks => ((240, 240, 232), 5),
+        PickupKind::GrowthSerum => ((255, 88, 196), 6),
         _ => ((190, 190, 190), 4),
     };
     let n = ps.budget_count(count, false);

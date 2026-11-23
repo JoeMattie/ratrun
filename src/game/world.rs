@@ -2162,7 +2162,17 @@ impl World {
     /// called once per frame by the app, never from the simulation schedule.
     pub fn tick_zoom(&mut self, dt: f32) {
         self.zoom = zoom::snap(self.zoom);
-        self.zoom_view = zoom::ease(self.zoom_view, self.zoom, dt.max(0.0));
+        // Growth Serum (batch 13): while the giant find runs the view pulls back
+        // to the widest rung and eases home again, as a **render-only** target
+        // layered over the player's own choice (the wheel and `Z`/`X` keep
+        // moving `self.zoom`; only what `zoom_view` chases is overridden). The
+        // simulation reads neither value.
+        let target = zoom::giant_target(
+            self.zoom,
+            self.player.buffs.giant,
+            crate::game::ecs::systems::powerups::GROWTH_SECS,
+        );
+        self.zoom_view = zoom::ease(self.zoom_view, target, dt.max(0.0));
     }
 
     /// Step the zoom one rung (`dir > 0` widens the view). Returns the setting.
@@ -2405,6 +2415,7 @@ impl World {
                         | PickupKind::WindupMouse
                         | PickupKind::PocketWatch
                         | PickupKind::CleanSocks
+                        | PickupKind::GrowthSerum
                 );
                 let gr = (if is_pocket { 6.0 } else { 7.0 } + pulse * 3.5) as i32;
                 let grf = gr as f32;
@@ -3259,15 +3270,22 @@ impl World {
             &mut self.tail_ready_at,
         );
         let pen = pb.set_pen(crate::render::lighting::rat_pen());
-        art_rat::draw_rat_with_whip(
-            pb,
-            &self.player,
-            self.elapsed,
-            cam,
-            flash,
-            lash,
-            Some(&self.whip_chain),
-        );
+        // Growth Serum (batch 13): while the find runs, the rat is rasterised at
+        // 1:1 into a small offscreen buffer and blitted back five times as big
+        // (see `draw_giant_rat`), so the giant is made of the rat's own pixels.
+        // The camera, the zoom and everything else are untouched.
+        match giant_draw_scale(self.player.buffs.giant) {
+            Some(scale) => self.draw_giant_rat(pb, cam, scale, flash),
+            None => art_rat::draw_rat_with_whip(
+                pb,
+                &self.player,
+                self.elapsed,
+                cam,
+                flash,
+                lash,
+                Some(&self.whip_chain),
+            ),
+        }
         pb.set_pen(pen);
         if self.whip_chain.is_active() {
             let tip_s = self.w2s(self.whip_chain.tip(), cam);
@@ -3288,6 +3306,89 @@ impl World {
         if let Some(beam) = self.laser_visual() {
             art_rat::draw_laser_eyes(pb, &self.player, beam, cam);
             self.light_map.mark_emissive_highlights(pb, self.w2s(self.player.pos, cam), 9);
+        }
+    }
+
+    /// **Growth Serum**: the rat, five times its size.
+    ///
+    /// The ordinary rat art is rasterised **at 1:1** into a small offscreen
+    /// buffer and blitted back nearest-neighbour at `scale`, so the giant is
+    /// literally the rat's own pixels made five times bigger (chunky blocks are
+    /// the intended look — this is not a resample of the screen). The buffer is
+    /// seeded with the floor under the rat, which does two jobs: the art's own
+    /// blending (`mix(bg, fur, …)`) sees the real floor instead of black, and a
+    /// pixel that came back unchanged can be left alone, so no square patch of
+    /// floor is painted over.
+    ///
+    /// Only the bounded part of the rat goes through the big pass — body, tail,
+    /// feet, face, the dash streaks and the Super Dash charge ring, all inside
+    /// [`GIANT_SRC_HALF`]. The long weapon effects (Laser Eyes' beam, the Spiked
+    /// Tail's live whip and its impact star, the Tail Thrash arc and the dash
+    /// preview) are drawn at their ordinary size by their own call sites, from
+    /// the same rat centre: a 120 px whip cannot live in a 37 px window, and a
+    /// weapon effect is not the body.
+    ///
+    /// Render-only: it reads the player, the frame clock and the render-only
+    /// whip chain, and writes pixels.
+    fn draw_giant_rat(&mut self, pb: &mut PixelBuffer, cam: Vec2, scale: f32, tail_flash: f32) {
+        let half = GIANT_SRC_HALF;
+        let side = (half * 2 + 1) as usize;
+        let (sx, sy) = self.w2s(self.player.pos, cam);
+        let (x0, y0) = (sx - half, sy - half);
+
+        let mut src = PixelBuffer::new(side, side);
+        let mut under = PixelBuffer::new(side, side);
+        for j in 0..side {
+            for i in 0..side {
+                let (px, py) = (x0 + i as i32, y0 + j as i32);
+                // Off the frame: black, in both buffers, so an unchanged pixel
+                // there is simply skipped (the blit clips at the same edge).
+                let c = if px >= 0 && py >= 0 && (px as usize) < pb.w && (py as usize) < pb.h {
+                    pb.pixel_at(px as usize, py as usize)
+                } else {
+                    (0, 0, 0)
+                };
+                under.plot(i as i32, j as i32, c);
+                src.plot(i as i32, j as i32, c);
+            }
+        }
+
+        // Shift the camera so the rat lands in the middle of the small buffer.
+        let cam_small = cam + Vec2::new((sx - half) as f32, (sy - half) as f32);
+        // A live lash runs up to 120 px past this window: it keeps its ordinary
+        // size (see the doc comment), and the resting/settling chain is inside.
+        let whip = if self.whip_chain.is_active() {
+            None
+        } else {
+            Some(&self.whip_chain)
+        };
+        art_rat::draw_rat_with_whip(
+            &mut src,
+            &self.player,
+            self.elapsed,
+            cam_small,
+            tail_flash,
+            None,
+            whip,
+        );
+
+        // Blit. The block edges are the scaled coordinates rounded, so a
+        // fractional scale (the grow-in and the 4.5x blink) tiles exactly: every
+        // source pixel owns the destination columns between its own rounded
+        // edges, with no gap and no overlap.
+        let left = (-(half as f32) * scale).round() as i32;
+        for j in 0..side {
+            let ay = left + (j as f32 * scale).round() as i32;
+            let by = left + ((j as f32 + 1.0) * scale).round() as i32;
+            for i in 0..side {
+                let c = src.pixel_at(i, j);
+                if c == under.pixel_at(i, j) {
+                    continue;
+                }
+                let ax = left + (i as f32 * scale).round() as i32;
+                let bx = left + ((i as f32 + 1.0) * scale).round() as i32;
+                pb.rect_fill(sx + ax, sy + ay, bx - ax, by - ay, c);
+            }
         }
     }
 
@@ -3730,6 +3831,41 @@ const DAMAGE_CLEAR_RADIUS: f32 = 26.0;
 /// Extra cells to draw around the viewport: wall art casts shadows up to 4 px
 /// south/east and the overhang layer reaches a few pixels up.
 const WALL_DRAW_MARGIN: i32 = 1;
+
+/// **Growth Serum** (batch 13): half the side of the offscreen window the giant
+/// rat is rasterised into before it is blitted back at five times the size.
+/// 37 × 37 covers the body, the feet, the face and the resting tail (the tail is
+/// 13 px, and 27 px at a full Tail Thrash charge) with a pixel of slack; the long
+/// weapon effects keep their ordinary size and stay out of it.
+const GIANT_SRC_HALF: i32 = 18;
+
+/// The scale the giant rat is drawn at, or `None` when the find is not running.
+///
+/// Three phases, all read straight off the buff clock so there is no render
+/// state to keep: the rat **grows** from 1x to [`powerups::GIANT_SCALE`] over
+/// [`powerups::GIANT_GROW_SECS`], holds, then **blinks** between 5x and 4.5x
+/// for the last [`powerups::GIANT_BLINK_SECS`] while it shrinks back over
+/// [`powerups::GIANT_SHRINK_SECS`]. Never below 1x, so the first and last frames
+/// of the find are exactly the rat the player always has.
+pub fn giant_draw_scale(buff_left: f32) -> Option<f32> {
+    use crate::game::ecs::systems::powerups as p;
+    if buff_left <= 0.0 {
+        return None;
+    }
+    let elapsed = (p::GROWTH_SECS - buff_left).max(0.0);
+    let grow = (elapsed / p::GIANT_GROW_SECS).clamp(0.0, 1.0);
+    let shrink = (buff_left / p::GIANT_SHRINK_SECS).clamp(0.0, 1.0);
+    let mut scale = p::GIANT_SCALE * grow.min(shrink).max(0.0);
+    // The warning blink: about three blinks a second over the last seconds, at
+    // the smaller of the two sizes so the picture never grows past its hold.
+    if buff_left <= p::GIANT_BLINK_SECS {
+        let blink = (buff_left * 6.0) as i32;
+        if blink % 2 == 0 {
+            scale = scale.min(p::GIANT_BLINK_SCALE);
+        }
+    }
+    Some(scale.max(1.0))
+}
 
 /// Fraction of max HP a nest revive (`meta::Track::Revive`) stands the rat back
 /// up with. Half a bar is enough to run, not enough to ignore the mistake.
@@ -4382,6 +4518,112 @@ mod zoom_tests {
         assert_eq!(prints[1], prints[3], "a run never drawn diverged from the drawn one");
         assert_ne!(hashes[0], hashes[1], "z = 0.5 must render a different frame");
         assert_ne!(hashes[1], hashes[2], "z = 2 must render a different frame");
+    }
+
+    /// **The Growth Serum's zoom override** (batch 13): the view pulls back to
+    /// the widest rung while the find runs and returns to the player's own zoom
+    /// afterwards — and the same run ticks out identically whether the override
+    /// moves the render zoom or not, because it only ever touches `zoom_view`.
+    #[test]
+    fn the_giant_zoom_override_widens_the_view_and_returns_without_touching_the_sim() {
+        use crate::game::ecs::systems::powerups;
+        let logical = Vec2::new(SCREEN.0 as f32, SCREEN.1 as f32);
+        let mut prints = Vec::new();
+        let mut views = Vec::new();
+        // Both runs are the same giant run; only one of them lets the render
+        // zoom ease at all (`tick_zoom` is what the App calls each frame).
+        for with_override in [false, true] {
+            let mut w = World::new(Theme::Sewer, 11);
+            w.viewport = logical;
+            w.set_zoom_instant(1.0);
+            let mut pb = screen();
+            let (mut hold, mut back) = (0.0f32, 0.0f32);
+            for tick in 0..1500u32 {
+                // Armed by hand at 0.5 s: a real pickup would spend rng, and
+                // this test is about the render override, not the drop table.
+                if tick == 30 {
+                    w.player.buffs.giant = powerups::GROWTH_SECS;
+                }
+                let dir = match (tick / 30) % 4 {
+                    0 => Vec2::new(1.0, 0.0),
+                    1 => Vec2::new(0.0, 1.0),
+                    2 => Vec2::new(-1.0, 0.0),
+                    _ => Vec2::new(0.0, -1.0),
+                };
+                w.update(1.0 / 60.0, dir, tick % 120 == 0);
+                if with_override {
+                    w.tick_zoom(1.0 / 60.0);
+                }
+                w.draw(&mut pb);
+                // The middle of the find (5.5 s in) and 1 s after it ran out.
+                if tick == 330 {
+                    hold = w.zoom_view;
+                }
+                if tick == 1290 {
+                    back = w.zoom_view;
+                }
+            }
+            prints.push(fingerprint(&mut w));
+            views.push((hold, back));
+        }
+        assert_eq!(
+            prints[0], prints[1],
+            "the zoom override must not reach the simulation"
+        );
+        assert_eq!(views[0].0, 1.0, "a pinned view never moves");
+        assert_eq!(views[0].1, 1.0);
+        assert!(
+            (views[1].0 - crate::render::zoom::MAX).abs() < 0.01,
+            "the giant view must reach the widest rung, got {}",
+            views[1].0
+        );
+        assert!(
+            (views[1].1 - 1.0).abs() < 0.01,
+            "the view must return to the player's own zoom, got {}",
+            views[1].1
+        );
+    }
+
+    /// The giant draw scale's three phases: it grows from 1x to 5x over the
+    /// first 0.4 s, holds at 5x, blinks down to 4.5x over the last 3 s, and
+    /// never leaves 1x..=5x.
+    #[test]
+    fn the_giant_grows_holds_blinks_and_never_exceeds_five() {
+        use crate::game::ecs::systems::powerups as p;
+        assert_eq!(giant_draw_scale(0.0), None, "no serum, no giant");
+        assert_eq!(giant_draw_scale(p::GROWTH_SECS), Some(1.0), "it starts at life size");
+        // The clock is f32, so the phase boundaries land within a rounding error
+        // of their exact values: compare to a tolerance, not to the bit.
+        let half = giant_draw_scale(p::GROWTH_SECS - p::GIANT_GROW_SECS * 0.5)
+            .expect("still giant");
+        assert!(
+            (half - p::GIANT_SCALE * 0.5).abs() < 1e-3,
+            "half way through the grow-in it is {half}, not {}",
+            p::GIANT_SCALE * 0.5
+        );
+        let grown = giant_draw_scale(p::GROWTH_SECS - p::GIANT_GROW_SECS).expect("still giant");
+        assert!(
+            (grown - p::GIANT_SCALE).abs() < 1e-3,
+            "the grow-in must end at {}x, got {grown}",
+            p::GIANT_SCALE
+        );
+        assert_eq!(giant_draw_scale(15.0), Some(p::GIANT_SCALE));
+        // The last three seconds blink between 5x and 4.5x.
+        let mut seen = [false; 2];
+        let mut t = p::GIANT_BLINK_SECS.max(p::GIANT_SHRINK_SECS);
+        while t > 0.0 {
+            let s = giant_draw_scale(t).expect("still giant");
+            assert!((1.0..=p::GIANT_SCALE).contains(&s), "{s} is off the scale");
+            if s >= p::GIANT_SCALE - 1e-4 {
+                seen[1] = true;
+            }
+            if (s - p::GIANT_BLINK_SCALE).abs() < 1e-4 {
+                seen[0] = true;
+            }
+            t -= 1.0 / 60.0;
+        }
+        assert!(seen[0] && seen[1], "the warning blink never showed both sizes");
+        assert_eq!(giant_draw_scale(0.0), None);
     }
 
     /// Mean luminance of the `2r × 2r` block of screen pixels around `(cx, cy)`

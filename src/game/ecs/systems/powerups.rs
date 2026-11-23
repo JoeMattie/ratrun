@@ -48,12 +48,19 @@
 
 use bevy_ecs::prelude::*;
 
-use crate::game::ecs::resources::{NextSpawnId, RngRes, RunCounters, TickInput};
-use crate::game::enemy::EnemyKind;
+use crate::audio::Sfx;
+use crate::game::ecs::components::SpawnId;
+use crate::game::ecs::resources::{
+    DamageLedger, NextSpawnId, RngRes, RunCounters, Shake, SfxQueue, TickInput,
+};
+use crate::game::ecs::systems::boss::Boss;
+use crate::game::enemy::{Enemy, EnemyKind};
 use crate::game::gem::PickupKind;
+use crate::game::particle::damage_number::{DamageNumbers, DamageSource};
 use crate::game::particle::vfx;
 use crate::game::particle::Particles;
 use crate::game::player::Player;
+use crate::game::weapon::WeaponKind;
 use crate::math::Vec2;
 
 /// Bottle Cap: how long the tin dome keeps its charge.
@@ -74,6 +81,50 @@ pub const POCKET_WATCH_BULLET_SLOW: f32 = 0.4;
 
 /// Clean Socks: how long the rat ignores sticky-board drag.
 pub const CLEAN_SOCKS_SECS: f32 = 6.0;
+
+/// Growth Serum (batch 13): how long the rat stays giant.
+pub const GROWTH_SECS: f32 = 20.0;
+
+/// Growth Serum: how much bigger than life the rat is drawn. The stomp disc
+/// and the picture grow; the **collision** radius does not
+/// ([`GIANT_STOMP_RADIUS`] is a damage disc, never a body).
+pub const GIANT_SCALE: f32 = 5.0;
+
+/// Growth Serum: seconds the rat takes to grow from 1x to [`GIANT_SCALE`]
+/// (the draw pass ramps the block size over this window), and the seconds it
+/// takes to shrink back at the end of the find.
+pub const GIANT_GROW_SECS: f32 = 0.4;
+pub const GIANT_SHRINK_SECS: f32 = 0.6;
+
+/// Growth Serum: the last seconds of the find, during which the picture blinks
+/// between [`GIANT_SCALE`] and [`GIANT_BLINK_SCALE`] as the warning that it is
+/// about to end.
+pub const GIANT_BLINK_SECS: f32 = 3.0;
+pub const GIANT_BLINK_SCALE: f32 = 4.5;
+
+/// Growth Serum: the radius (world px) of the stomp disc under the giant rat.
+/// Six tiles wide — the rat's ordinary body is three pixels across.
+pub const GIANT_STOMP_RADIUS: f32 = 30.0;
+
+/// Growth Serum: the gap between two stomp beats, in seconds. One beat is one
+/// shake, one dust ring and one thud, however many bodies it crushes.
+pub const GIANT_STOMP_INTERVAL: f32 = 0.25;
+
+/// Growth Serum: damage one stomp beat deals to an **elite** and to a named
+/// miniboss or a grounded boss. Ordinary bodies are crushed outright.
+pub const GIANT_ELITE_DAMAGE: f32 = 60.0;
+pub const GIANT_BOSS_DAMAGE: f32 = 40.0;
+
+/// Growth Serum: how much of an incoming hit still lands on the giant (see
+/// [`crate::game::player::Buffs::damage_taken_scale`]).
+pub const GIANT_DAMAGE_TAKEN: f32 = 0.5;
+
+/// Growth Serum: the giant's walking speed multiplier. The dash is untouched.
+pub const GIANT_MOVE_MULT: f32 = 0.9;
+
+/// Growth Serum: the screen shake one crushing stomp beat adds (the camera
+/// scales every amplitude down by `world::SHAKE_SCALE` already).
+pub const GIANT_STOMP_SHAKE: f32 = 3.5;
 
 /// World px the rat walks between two little heel prints.
 const SOCK_PRINT_SPACING: f32 = 9.0;
@@ -165,6 +216,9 @@ pub fn powerups_system(
         *walked = 0.0;
         *last_pos = None;
     }
+    if expired[4] {
+        vfx::emit_buff_expire(&mut particles, ppos, PickupKind::GrowthSerum);
+    }
 
     // 2. Materialise a Wind-up Mouse collected since the last tick: move the
     //    one key if it is already on the floor (a repeat find replaces it at
@@ -236,7 +290,166 @@ pub fn powerups_system(
 const _: () = {
     assert!(POCKET_WATCH_BULLET_SLOW > 0.0 && POCKET_WATCH_BULLET_SLOW < 1.0);
     assert!(WINDUP_MOUSE_RADIUS >= 3.0 * 16.0);
+    assert!(GIANT_SCALE > 1.0 && GIANT_STOMP_RADIUS > 16.0);
+    assert!(GIANT_DAMAGE_TAKEN > 0.0 && GIANT_DAMAGE_TAKEN < 1.0);
 };
+
+/// Does one stomp beat crush this body outright?
+///
+/// Only the **ordinary** horde: an elite (the floor's heavy wearing its gild),
+/// a named miniboss and a boss each take a fixed chunk and keep fighting — an
+/// appointment is a promised fight, not a pickup's footnote.
+#[inline]
+pub fn giant_crushes(e: &Enemy) -> bool {
+    !e.elite && !e.named && e.kind != EnemyKind::Boss
+}
+
+/// **Growth Serum's stomp**: the giant body is a damage disc, and every
+/// [`GIANT_STOMP_INTERVAL`] it crushes whatever is standing in it.
+///
+/// Runs right after `combat::contact_system` and before the reap
+/// (`schedule.rs`), so a body the stomp kills this tick is despawned, drops its
+/// gem, gold and rare pickup, and counts in `RunCounters` on the same tick —
+/// exactly like a trap kill. Nothing here spawns an entity or draws rng:
+/// * the beat is a `Local` countdown, so the stomp cannot shift the
+///   simulation's stream;
+/// * the dust ring ([`vfx::emit_giant_stomp`]) is a fixed-shape emitter.
+///
+/// Rules (batch 13):
+/// * ordinary body inside the disc → crushed outright (`hp = -1`, the same
+///   path a Nuke takes for fodder) and reaped by the schedule's normal reap;
+/// * elite → [`GIANT_ELITE_DAMAGE`] through `hurt_from`, so the Pillbug's shell
+///   and every other directional rule still applies;
+/// * named miniboss → [`GIANT_BOSS_DAMAGE`] the same way;
+/// * boss → [`GIANT_BOSS_DAMAGE`] but only while a **grounded** hit shape is in
+///   the disc (a leaping jaguar and a hawk overhead are not stomped).
+///
+/// Every hit books the Gnaw column of `DamageLedger`: the ledger's columns are
+/// weapon indices and it has no free-form source, so the stomp is credited to
+/// the rat's own bite rather than inventing a sixteenth column (a batch-harness
+/// reader would have to know it anyway). The floating number is
+/// `DamageSource::Normal`, the same read as an untyped hit.
+pub fn giant_stomp_system(
+    input: Res<TickInput>,
+    player: Res<Player>,
+    mut enemies: Query<(Entity, &SpawnId, &mut Enemy)>,
+    mut bosses: Query<&mut Boss>,
+    mut particles: ResMut<Particles>,
+    mut damage_numbers: ResMut<DamageNumbers>,
+    mut sfx: ResMut<SfxQueue>,
+    mut shake: ResMut<Shake>,
+    mut ledger: ResMut<DamageLedger>,
+    mut beat: Local<f32>,
+    mut order: Local<Vec<(u64, Entity)>>,
+) {
+    // Not giant: the beat is parked at zero, so a find always opens on a fresh
+    // stomp (the first crush lands on the tick the serum's first beat is up).
+    if !player.buffs.is_giant() {
+        *beat = 0.0;
+        return;
+    }
+    *beat += input.dt;
+    if *beat < GIANT_STOMP_INTERVAL {
+        return;
+    }
+    *beat -= GIANT_STOMP_INTERVAL;
+    if *beat < 0.0 {
+        *beat = 0.0;
+    }
+
+    let ppos = player.pos;
+    let reach = GIANT_STOMP_RADIUS;
+    let mut crushed = false;
+
+    // `SpawnId` order decides everything here (which body's kill the reap folds
+    // first, which damage numbers are recorded in which order), never the
+    // query's storage order.
+    order.clear();
+    order.extend(enemies.iter().map(|(entity, id, _)| (id.0, entity)));
+    order.sort_unstable_by_key(|&(id, _)| id);
+    for &(_, entity) in order.iter() {
+        let Ok((_, _, mut e)) = enemies.get_mut(entity) else {
+            continue;
+        };
+        if !e.alive() || !grounded_body(e.kind) {
+            continue;
+        }
+        if !crate::game::collision::circles_overlap(ppos, reach, e.pos, e.radius) {
+            continue;
+        }
+        let pos = e.pos;
+        let radius = e.radius;
+        let id = e.id;
+        if giant_crushes(&*e) {
+            // Crushed outright: the same damage path a Nuke uses on fodder, so
+            // the reap below pays the kill, its gem, its gold and its rare drop.
+            let applied = e.hp.max(1.0);
+            e.hp = -1.0;
+            e.flash = 0.12;
+            e.note_damage();
+            ledger.add(WeaponKind::Gnaw, applied);
+            damage_numbers.record(id, pos, radius, applied, true, DamageSource::Normal);
+        } else {
+            let dmg = if e.elite {
+                GIANT_ELITE_DAMAGE
+            } else {
+                GIANT_BOSS_DAMAGE
+            };
+            let applied = e.hurt_from(dmg, ppos);
+            let killed = !e.alive();
+            ledger.add(WeaponKind::Gnaw, applied);
+            damage_numbers.record(id, pos, radius, applied, killed, DamageSource::Normal);
+        }
+        crushed = true;
+    }
+
+    // The full boss is not an `Enemy`: it takes the same chunk through its own
+    // art-defined **grounded** hit shapes, so a leaping jaguar or a hawk on the
+    // wing cannot be stomped out of the air.
+    for mut boss in bosses.iter_mut() {
+        if boss.dead || boss.is_airborne() {
+            continue;
+        }
+        if !boss.hit_shapes().circle_hits_grounded(ppos, reach) {
+            continue;
+        }
+        let amount = GIANT_BOSS_DAMAGE;
+        if !boss.take_damage(amount) {
+            continue;
+        }
+        ledger.add_boss(WeaponKind::Gnaw, amount);
+        let killed = boss.hp <= 0.0;
+        damage_numbers.record(
+            boss.id,
+            boss.pos,
+            boss.kind.body_radius(),
+            amount,
+            killed,
+            DamageSource::Normal,
+        );
+        crushed = true;
+    }
+
+    if crushed {
+        // One beat, one read: a small shudder, a ring of dust and a soft thud
+        // (`Sfx::Bump` is the game's existing floor-thud sample).
+        shake.amount = shake.amount.max(GIANT_STOMP_SHAKE);
+        vfx::emit_giant_stomp(&mut particles, ppos);
+        sfx.0.push(Sfx::Bump);
+    }
+}
+
+/// Which bodies a stomp can reach at all: only a creature standing on the
+/// floor. The flyers pass over the giant's feet, exactly as they pass over a
+/// glue board or a mousetrap's striker bar (`traps::is_ground`'s rule, read
+/// through the archetype so a registered kind flies exactly as its base does).
+#[inline]
+fn grounded_body(kind: EnemyKind) -> bool {
+    !matches!(
+        kind.archetype(),
+        EnemyKind::Bat | EnemyKind::WickMoth | EnemyKind::MurderHornet
+    )
+}
 
 #[cfg(test)]
 mod tests {
@@ -847,11 +1060,301 @@ mod tests {
         );
     }
 
+    // ---- Growth Serum (batch 13) ----------------------------------------
+
+    /// One stomp-beat's worth of ticks of the stomp system through the facade
+    /// round-trip. The beat lives in a `Local`, so the cached system keeps the
+    /// countdown across these calls exactly as it would across a live run.
+    fn stomp_ticks(w: &mut World, n: usize) {
+        for _ in 0..n {
+            w.begin_tick(DT, Vec2::ZERO, false);
+            w.ecs
+                .run_system_cached(giant_stomp_system)
+                .expect("the stomp system must run");
+            w.end_tick();
+        }
+    }
+
+    /// The beats a full interval needs at this dt, with one to spare.
+    fn one_beat() -> usize {
+        (GIANT_STOMP_INTERVAL / DT).ceil() as usize + 1
+    }
+
+    fn enemy_hp(w: &mut World, e: Entity) -> Option<f32> {
+        let mut q = w.ecs.query::<&Enemy>();
+        q.get(&w.ecs, e).ok().map(|en| en.hp)
+    }
+
+    /// The serum arms a 20 s timer, a second find refreshes it, and it runs out
+    /// on its own.
+    #[test]
+    fn the_growth_serum_lasts_twenty_seconds_and_refreshes() {
+        let mut w = open_arena(401);
+        collect(&mut w, PickupKind::GrowthSerum);
+        assert!((w.player.buffs.giant - GROWTH_SECS).abs() < 1e-6);
+        assert!(w.player.buffs.is_giant());
+
+        for _ in 0..600 {
+            buff_tick(&mut w);
+        }
+        let left = w.player.buffs.giant;
+        assert!(
+            (left - (GROWTH_SECS - 600.0 * DT)).abs() < 0.05,
+            "ten seconds in the serum has {left} left"
+        );
+        collect(&mut w, PickupKind::GrowthSerum);
+        assert!(
+            (w.player.buffs.giant - GROWTH_SECS).abs() < 1e-6,
+            "a second serum must refresh to 20 s, not stack"
+        );
+
+        for _ in 0..(GROWTH_SECS / DT) as usize + 4 {
+            buff_tick(&mut w);
+        }
+        assert_eq!(w.player.buffs.giant, 0.0, "the serum should expire");
+        assert!(!w.player.buffs.is_giant());
+        assert!(!w.player.buffs.any(), "nothing else may be left running");
+    }
+
+    /// A run that never finds the serum carries a zero, so the stomp pass is a
+    /// no-op and the twin runs still match.
+    #[test]
+    fn a_world_without_the_serum_never_stomps() {
+        let mut w = open_arena(403);
+        let p = w.player.pos;
+        w.clear_enemies();
+        let body = w.spawn_enemy(EnemyKind::Skitterer, p + Vec2::new(10.0, 0.0), 1.0);
+        stomp_ticks(&mut w, one_beat() * 4);
+        assert!(
+            enemy_hp(&mut w, body).is_some_and(|hp| hp > 0.0),
+            "a rat that is not giant must not crush anything"
+        );
+        assert!(!w.sfx.contains(&crate::audio::Sfx::Bump));
+    }
+
+    /// An ordinary body inside the 30 px disc is crushed outright and takes the
+    /// normal loot path: the reap in the same tick's slot drops its gem and
+    /// books the kill. A body outside the disc is untouched.
+    #[test]
+    fn the_stomp_crushes_the_horde_inside_the_disc_and_loots_it() {
+        let mut w = open_arena(405);
+        w.player.buffs.giant = GROWTH_SECS;
+        let p = w.player.pos;
+        w.clear_enemies();
+        let near = w.spawn_enemy(EnemyKind::Skitterer, p + Vec2::new(12.0, 0.0), 1.0);
+        let far = w.spawn_enemy(EnemyKind::Skitterer, p + Vec2::new(90.0, 0.0), 1.0);
+        let gems_before = w.gems().len();
+
+        stomp_ticks(&mut w, one_beat());
+        assert!(
+            enemy_hp(&mut w, near).is_some_and(|hp| hp <= 0.0),
+            "the body inside the disc must be crushed"
+        );
+        assert!(
+            enemy_hp(&mut w, far).is_some_and(|hp| hp > 0.0),
+            "a body outside the disc must be untouched"
+        );
+        assert!(
+            w.sfx.contains(&crate::audio::Sfx::Bump),
+            "the crush must thud"
+        );
+
+        // The kill is an ordinary corpse: the reap (the schedule's next slot)
+        // despawns it and pays its gem, exactly as for a trap or a bullet.
+        w.begin_tick(DT, Vec2::ZERO, false);
+        w.ecs
+            .run_system_cached(loot::reap_enemies_system)
+            .expect("the reap must run");
+        w.end_tick();
+        assert_eq!(
+            w.gems().len(),
+            gems_before + 1,
+            "the crushed body must drop its gem on the same tick"
+        );
+        assert_eq!(w.kills, 1, "the crushed body must count as a kill");
+    }
+
+    /// An elite takes 60 a stomp and a named body 40, and neither is killed
+    /// outright: the stomp is not a Nuke.
+    #[test]
+    fn an_elite_and_a_named_body_take_their_listed_damage_and_survive() {
+        let mut w = open_arena(407);
+        w.player.buffs.giant = GROWTH_SECS;
+        let p = w.player.pos;
+        w.clear_enemies();
+        let elite = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(14.0, 0.0), 1.0);
+        let named = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(0.0, 14.0), 1.0);
+        {
+            let mut e = w.ecs.get_mut::<Enemy>(elite).expect("the elite is alive");
+            e.elite = true;
+            e.max_hp = 4000.0;
+            e.hp = 4000.0;
+        }
+        {
+            let mut e = w.ecs.get_mut::<Enemy>(named).expect("the named body is alive");
+            e.named = true;
+            e.max_hp = 4000.0;
+            e.hp = 4000.0;
+        }
+
+        stomp_ticks(&mut w, one_beat());
+        let elite_hp = enemy_hp(&mut w, elite).expect("the elite must survive a stomp");
+        assert!(
+            (elite_hp - (4000.0 - GIANT_ELITE_DAMAGE)).abs() < 0.01,
+            "an elite took {} damage, expected {GIANT_ELITE_DAMAGE}",
+            4000.0 - elite_hp
+        );
+        let named_hp = enemy_hp(&mut w, named).expect("the named body must survive a stomp");
+        assert!(
+            (named_hp - (4000.0 - GIANT_BOSS_DAMAGE)).abs() < 0.01,
+            "a named body took {} damage, expected {GIANT_BOSS_DAMAGE}",
+            4000.0 - named_hp
+        );
+    }
+
+    /// An ordinary body cannot bite the giant; a hostile pellet still lands, at
+    /// half; an elite's contact also lands, at half.
+    #[test]
+    fn the_giant_ignores_ordinary_contact_and_takes_half_from_the_rest() {
+        // 1. Ordinary contact: nothing at all.
+        let mut w = open_arena(409);
+        w.player.buffs.giant = GROWTH_SECS;
+        w.player.iframes = 0.0;
+        let p = w.player.pos;
+        w.clear_enemies();
+        w.spawn_enemy(EnemyKind::Brute, p, 1.0);
+        let hp = w.player.hp;
+        w.begin_tick(DT, Vec2::ZERO, false);
+        w.ecs
+            .run_system_cached(combat::contact_system)
+            .expect("contact runs");
+        w.end_tick();
+        assert_eq!(w.player.hp, hp, "an ordinary body must not bite the giant");
+
+        // 2. An elite's contact lands, at the giant's half.
+        let mut w = open_arena(411);
+        w.player.buffs.giant = GROWTH_SECS;
+        w.player.iframes = 0.0;
+        let p = w.player.pos;
+        w.clear_enemies();
+        let elite = w.spawn_enemy(EnemyKind::Brute, p, 1.0);
+        let mut body = w.ecs.get_mut::<Enemy>(elite).expect("the elite is alive");
+        body.elite = true;
+        let raw = body.damage;
+        drop(body);
+        let hp = w.player.hp;
+        w.begin_tick(DT, Vec2::ZERO, false);
+        w.ecs
+            .run_system_cached(combat::contact_system)
+            .expect("contact runs");
+        w.end_tick();
+        assert!(
+            (hp - w.player.hp - raw * GIANT_DAMAGE_TAKEN).abs() < 1e-3,
+            "an elite dealt {} to the giant, expected {}",
+            hp - w.player.hp,
+            raw * GIANT_DAMAGE_TAKEN
+        );
+
+        // 3. A hostile pellet lands, at exactly half of what it does to a rat
+        //    that is not giant.
+        fn pellet_damage(giant: bool) -> f32 {
+            let mut w = open_arena(413);
+            if giant {
+                w.player.buffs.giant = GROWTH_SECS;
+            }
+            w.clear_bullets();
+            w.player.iframes = 0.0;
+            let p = w.player.pos;
+            let mut pellet = Bullet::new(p, Vec2::ZERO, 20.0, Faction::Enemy, (255, 0, 0));
+            pellet.life = 4.0;
+            w.spawn_bullet(pellet);
+            let hp = w.player.hp;
+            w.begin_tick(DT, Vec2::ZERO, false);
+            w.ecs
+                .run_system_cached(combat::enemy_bullet_hits_system)
+                .expect("the pellet pass runs");
+            w.end_tick();
+            hp - w.player.hp
+        }
+        let plain = pellet_damage(false);
+        let giant = pellet_damage(true);
+        assert!(plain > 1.0, "setup: the pellet must land: {plain}");
+        assert!(
+            (giant - plain * GIANT_DAMAGE_TAKEN).abs() < 1e-3,
+            "the giant took {giant} from a pellet that deals {plain}"
+        );
+    }
+
+    /// The giant grows the picture and the stomp disc, never the body: its
+    /// collision is still `PLAYER_RADIUS` as a `SizeClass::Small` circle, so a
+    /// corridor (and a rat-hole) the rat fits, the giant fits.
+    #[test]
+    fn the_giant_keeps_the_ordinary_rats_collision() {
+        use crate::game::art_walls::WallKind;
+        use crate::game::collision::{SizeClass, TileKind};
+        use crate::game::ecs::constants::PLAYER_RADIUS;
+        let mut w = open_arena(415);
+        w.player.buffs.giant = GROWTH_SECS;
+        // Two solid walls with one floor cell between them, straight ahead:
+        // only a small-class body fits the gap, and only at its own radius.
+        w.level
+            .tiles
+            .fill_cells(6, 6, 1, 6, TileKind::Wall(WallKind::Solid));
+        w.level
+            .tiles
+            .fill_cells(8, 6, 1, 6, TileKind::Wall(WallKind::Solid));
+        w.level.tiles.rebuild_masks();
+        let gap = Vec2::new(7.0 * 16.0 + 8.0, w.player.pos.y);
+        w.player.pos = Vec2::new(gap.x, 4.0 * 16.0);
+        for _ in 0..90 {
+            w.begin_tick(DT, Vec2::new(0.0, 1.0), false);
+            w.ecs
+                .run_system_cached(crate::game::ecs::systems::player::player_system)
+                .expect("the rat moves");
+            w.end_tick();
+        }
+        // It walked down the one-cell corridor and never left it: the giant's
+        // collision is the ordinary rat's, so the walls are 16 px apart around a
+        // 3 px body rather than around a 30 px one.
+        assert!(
+            (w.player.pos.x - gap.x).abs() <= 1.0,
+            "the giant was pushed out of a corridor it fits: {:?}",
+            w.player.pos
+        );
+        assert!(
+            w.player.pos.y > 4.0 * 16.0 + 16.0,
+            "the giant never walked down the corridor: {:?}",
+            w.player.pos
+        );
+        assert_eq!(
+            SizeClass::of_radius(PLAYER_RADIUS),
+            SizeClass::Small,
+            "the rat's own class is what a rat-hole passes"
+        );
+    }
+
+    /// The drop table still spends exactly one word, and every bucket still
+    /// pays a kind — now including the serum.
+    #[test]
+    fn the_drop_table_pays_the_serum_too() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        let mut rng = StdRng::seed_from_u64(0xBEEF);
+        let mut saw_serum = false;
+        for _ in 0..4096 {
+            if loot::roll_pickup_kind(&mut rng) == PickupKind::GrowthSerum {
+                saw_serum = true;
+            }
+        }
+        assert!(saw_serum, "the serum must be reachable on the rare table");
+    }
+
     // ---- Drop weights ----------------------------------------------------
 
-    /// The weighted table is the design's (Heal 32, Magnet 18, Nuke 8, Bottle
-    /// Cap 14, Wind-up Mouse 10, Pocket Watch 9, Clean Socks 9) and every kind
-    /// is reachable.
+    /// The weighted table is the design's (Heal 32, Magnet 18, Nuke 4 + Growth
+    /// Serum 4 — the Nuke's bucket split between them, batch 13 — Bottle Cap
+    /// 14, Wind-up Mouse 10, Pocket Watch 9, Clean Socks 9) and every kind is
+    /// reachable. The total stays 100, so no other find's bucket moved.
     #[test]
     fn drop_weights_match_the_design() {
         use rand::rngs::StdRng;
@@ -866,7 +1369,8 @@ mod tests {
         for (kind, want) in [
             (PickupKind::Heal, 32.0),
             (PickupKind::Magnet, 18.0),
-            (PickupKind::Nuke, 8.0),
+            (PickupKind::Nuke, 4.0),
+            (PickupKind::GrowthSerum, 4.0),
             (PickupKind::BottleCap, 14.0),
             (PickupKind::WindupMouse, 10.0),
             (PickupKind::PocketWatch, 9.0),
@@ -878,7 +1382,7 @@ mod tests {
                 "{kind:?} came up {got:.2}%, the design says {want}%"
             );
         }
-        assert_eq!(counts.len(), 7, "every kind must be reachable");
+        assert_eq!(counts.len(), 8, "every kind must be reachable");
     }
 
     /// A successful drop spends the same number of rng draws as before: the

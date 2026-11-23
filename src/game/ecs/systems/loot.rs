@@ -90,7 +90,9 @@ use crate::game::ecs::systems::powerups;
 pub const NUKE_NAMED_CHUNK: f32 = 0.35;
 
 /// Weights of the rare-pickup table, in `WAVE3_DESIGN.md` §10 order:
-/// Heal 32, Magnet 18, Nuke 8, Bottle Cap 14, Wind-up Mouse 10, Pocket Watch 9,
+/// Heal 32, Magnet 18, Nuke 4 + **Growth Serum 4** (the Nuke's own bucket split
+/// between them, so the table still totals 100 and every other find keeps the
+/// bucket it always had), Bottle Cap 14, Wind-up Mouse 10, Pocket Watch 9,
 /// Clean Socks 9. The **chance** of a drop is unchanged (ordinary 1.2 %, big
 /// 12 %, boss 100 %); this table only decides *which* find a successful roll
 /// yields, and it costs exactly the one `random_range` draw the legacy three-way
@@ -124,7 +126,12 @@ pub fn roll_pickup_kind_from_word(word: u32) -> PickupKind {
     match bucket {
         0..=31 => PickupKind::Heal,
         32..=49 => PickupKind::Magnet,
-        50..=57 => PickupKind::Nuke,
+        // Batch 13 split the Nuke's eight points between the Nuke and the
+        // Growth Serum: the serum is as rare as the Nuke, and because the
+        // table still totals 100 every *other* find keeps the exact bucket it
+        // had, so no seed's Heal, Magnet, Cap, Mouse, Watch or Socks moved.
+        50..=53 => PickupKind::Nuke,
+        54..=57 => PickupKind::GrowthSerum,
         58..=71 => PickupKind::BottleCap,
         72..=81 => PickupKind::WindupMouse,
         82..=90 => PickupKind::PocketWatch,
@@ -779,6 +786,19 @@ pub fn pickups_system(
                     sfx.0.push(Sfx::DashReady);
                 }
                 player.dash_cd = 0.0;
+                vfx::emit_pickup_find(&mut particles, &mut rng.0, at, k);
+                sfx.0.push(Sfx::PocketFind);
+            }
+            // ---- Growth Serum (batch 13) ---------------------------------
+            //
+            // A 20 s find like the wave-3 four: the collection pass only arms
+            // the timer. Everything the buff *does* lives elsewhere and reads
+            // that timer through the player — the stomp pass
+            // (`powerups::giant_stomp_system`), the draw pass (the 5x rat),
+            // the contact rule (`combat::contact_system`) and the damage funnel
+            // (`Player::take_damage`).
+            PickupKind::GrowthSerum => {
+                player.buffs.giant = powerups::GROWTH_SECS;
                 vfx::emit_pickup_find(&mut particles, &mut rng.0, at, k);
                 sfx.0.push(Sfx::PocketFind);
             }

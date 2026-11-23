@@ -104,6 +104,39 @@ pub fn ease(current: f32, target: f32, dt: f32) -> f32 {
     }
 }
 
+/// **Growth Serum** (batch 13): seconds the view takes to pull back to [`MAX`]
+/// when the rat goes giant (in step with the picture's own 0.4 s growth), and
+/// seconds it takes to come back to the player's chosen zoom at the end.
+pub const GIANT_EASE_IN_SECS: f32 = 0.4;
+pub const GIANT_EASE_OUT_SECS: f32 = 0.6;
+
+/// The zoom target in force while the Growth Serum runs: the player's own
+/// `chosen` rung blended toward the widest rung ([`MAX`]) as the find eases in,
+/// held for its middle, and blended back as it eases out.
+///
+/// **Render-only**, and it never *writes* the setting: `World::zoom` keeps the
+/// rung the player picked (the wheel, `Z`/`X` and the options row go on moving
+/// it while the find runs), this only decides what the eased `zoom_view`
+/// chases. So the view pulls back on the giant and returns to whatever zoom the
+/// player is holding by the time it ends, and the simulation — which reads
+/// neither value — plays out identically (spawns are placed outside the 2.0
+/// view already, so nothing pops in as the view widens).
+///
+/// `buff_left` is the buff clock in seconds and `buff_total` its full length:
+/// those two and the chosen rung are all it reads, so the override is a pure
+/// function of the find.
+pub fn giant_target(chosen: f32, buff_left: f32, buff_total: f32) -> f32 {
+    let chosen = clamp(chosen);
+    if buff_left <= 0.0 || chosen >= MAX {
+        return chosen;
+    }
+    let elapsed = (buff_total - buff_left).max(0.0);
+    let ease_in = (elapsed / GIANT_EASE_IN_SECS).clamp(0.0, 1.0);
+    let ease_out = (buff_left / GIANT_EASE_OUT_SECS).clamp(0.0, 1.0);
+    let t = ease_in.min(ease_out);
+    chosen + (MAX - chosen) * t
+}
+
 /// Write a human-facing zoom read-out into `buf` (`"1x"`, `"1.5x"`, `"0.75x"`),
 /// trailing zeros trimmed so the common rungs read as whole numbers.
 ///

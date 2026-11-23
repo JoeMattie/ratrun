@@ -1294,11 +1294,16 @@ pub fn snap_spec(
     } else if roll < CHEST_ROLL + CHEESE_ROLL {
         TrapBait::Cheese
     } else {
-        // The valuable finds only (no common filler): Magnet, Nuke, Bottle Cap,
-        // Pocket Watch and a big Heal, weighted by how much the run wants them.
-        const GOOD: [(PickupKind, u64); 5] = [
+        // The valuable finds only (no common filler): Magnet, Nuke, Growth
+        // Serum, Bottle Cap, Pocket Watch and a big Heal, weighted by how much
+        // the run wants them. Batch 13's Growth Serum shares the Nuke's slot
+        // (one point each, so the total stays 13 and every bait whose roll is
+        // not a Nuke still reads the same) — it is as rare as the Nuke, which
+        // is what the design asked for.
+        const GOOD: [(PickupKind, u64); 6] = [
             (PickupKind::Magnet, 3),
-            (PickupKind::Nuke, 2),
+            (PickupKind::Nuke, 1),
+            (PickupKind::GrowthSerum, 1),
             (PickupKind::BottleCap, 3),
             (PickupKind::PocketWatch, 3),
             (PickupKind::Heal, 2),
