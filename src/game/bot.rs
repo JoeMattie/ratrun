@@ -3140,6 +3140,42 @@ mod tests {
         );
     }
 
+    /// Sockets empty on every floor: the bot's "both sockets full, nothing to
+    /// buy" rule reads the live loadout, and a campaign level starts with no
+    /// splices (`campaign::next_loadout` drops them), so it splices again on the
+    /// next floor instead of remembering a full rat.
+    #[test]
+    fn the_bot_splices_again_on_the_next_floor() {
+        use crate::game::campaign::CampaignState;
+        let mut camp = CampaignState::new(77);
+        let mut w = camp.world();
+        w.gold = 600;
+        w.pending_shop = true;
+        w.pending_shop_hole = 0;
+        let mut bot = seeded_bot(Skill::Expert, 6);
+        let bought = bot.shop_visit(&mut w);
+        assert_eq!(bought, 2, "a rich rat fills both sockets on floor one");
+        assert_eq!(w.player.loadout.splices.len(), 2);
+
+        // Clear the floor and carry the build the way the App does.
+        w.mark_level_complete();
+        camp.complete_level(&w, &[]).expect("an empty pack is legal");
+        let mut next = camp.world();
+        assert!(
+            next.player.loadout.splices.is_empty(),
+            "a splice rode into the next floor, so the bot would skip the shelf"
+        );
+        next.gold = 600;
+        next.pending_shop = true;
+        next.pending_shop_hole = 0;
+        let again = bot.shop_visit(&mut next);
+        assert!(
+            again > 0,
+            "the bot thought the sockets were still full on the new floor"
+        );
+        assert_eq!(next.player.loadout.splices.len(), again as usize);
+    }
+
     /// A headless run on each wave 3 floor: the bot survives the opening, keeps
     /// moving (never frozen for a long window), and its path crosses the floor.
     ///

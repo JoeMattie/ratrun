@@ -305,8 +305,9 @@ pub struct App {
     keep_items: Vec<Keepable>,
     keep_entries: Vec<campaign_ui::UpgradeEntry<'static>>,
     keep_selected: Vec<bool>,
-    /// The gene splices in the rat when the manifest opened (they ride along
-    /// whatever the pack choice is; the screen accounts for them).
+    /// The gene splices in the rat when the manifest opened, by name. They do
+    /// **not** travel (a splice lasts for the floor it was bought on), so the
+    /// plate names them as left behind rather than as part of the pack.
     keep_splices: Vec<&'static str>,
     keep_cursor: usize,
     keep_scroll: usize,
@@ -10492,8 +10493,8 @@ mod tests {
             hh.frame(&[]);
             dump_term(&hh.terminal, w, h, &dir, "full8-levelup");
 
-            // Keep-three: the sixteen-entry manifest plus the splices that ride
-            // along.
+            // Keep-three: the sixteen-entry manifest plus the splices, which
+            // are named as left behind on this floor.
             {
                 let (items, entries, splices) = {
                     let world = hh.app.world.as_ref().unwrap();

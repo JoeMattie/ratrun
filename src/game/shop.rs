@@ -18,12 +18,18 @@
 //! ## Where the owned splices live
 //!
 //! On the [`Loadout`](crate::game::loadout::Loadout) — `loadout.splices`, in
-//! purchase order — because the loadout is the one thing the campaign carries
-//! from level to level (`campaign::next_loadout` copies it) and because the
-//! stat rebuild already replays the passive stacks there. Splices occupy
-//! **neither rack**: they are not weapons and not passive stacks, they never
-//! count against `MAX_WEAPONS`/`MAX_PASSIVES`, and the keep-three screen cannot
-//! see them. They last until the run is over.
+//! purchase order — because the stat rebuild already replays the passive stacks
+//! there. Splices occupy **neither rack**: they are not weapons and not passive
+//! stacks, they never count against `MAX_WEAPONS`/`MAX_PASSIVES`, and the
+//! keep-three screen cannot keep them.
+//!
+//! **They last for the floor they were bought on.**
+//! [`crate::game::campaign::next_loadout`] carries the weapons and the passive
+//! stacks into the next level and deliberately does **not** copy `splices`, so
+//! every new level starts with both sockets empty and its stats rebuilt without
+//! them. That is what makes the shelf worth a visit on every floor of a
+//! campaign rather than only on the first. A practice run plays one floor, so
+//! its splices last the whole run.
 //!
 //! ## Determinism
 //!
@@ -1441,6 +1447,58 @@ mod tests {
     }
 
     #[test]
+    fn a_practice_floor_keeps_its_splices_and_touches_nothing_else() {
+        // A practice run plays one floor and never calls
+        // `campaign::next_loadout`, so nothing in a level may clear a splice:
+        // they last exactly as long as the floor they were bought on.
+        let mut w = shop_world(52, 600);
+        let weapons = w.player.loadout.weapons.len();
+        let passives = w.player.loadout.passives.clone();
+        let caps = w.player.loadout.caps;
+        let meta = w.player.loadout.meta;
+        let mut bought = 0;
+        for slot in 0..STOCK_SIZE {
+            if buy(&mut w, 0, ShopItem::Splice(slot)).is_bought() {
+                bought += 1;
+            }
+        }
+        assert_eq!(bought, MAX_SPLICES, "the shelf must fill both sockets");
+        assert_eq!(w.player.loadout.splices.len(), MAX_SPLICES);
+        let stats = [
+            w.player.loadout.stats.max_hp,
+            w.player.loadout.stats.damage_mult,
+            w.player.loadout.stats.magnet,
+            w.player.loadout.stats.dash_cd,
+        ];
+        // A second of play: no system in a level clears a splice.
+        for _ in 0..60 {
+            w.update(1.0 / 60.0, crate::math::Vec2::new(1.0, 0.0), false);
+        }
+        assert_eq!(
+            w.player.loadout.splices.len(),
+            MAX_SPLICES,
+            "a splice was lost mid-floor"
+        );
+        assert_eq!(
+            [
+                w.player.loadout.stats.max_hp,
+                w.player.loadout.stats.damage_mult,
+                w.player.loadout.stats.magnet,
+                w.player.loadout.stats.dash_cd,
+            ],
+            stats,
+            "the splice multipliers drifted mid-floor"
+        );
+        // Nothing else moved: the racks, the nest modifiers and the rack caps
+        // are the profile's, not the shelf's (the save format is untouched by
+        // the reset rule — a splice was never part of it).
+        assert_eq!(w.player.loadout.weapons.len(), weapons);
+        assert_eq!(w.player.loadout.passives, passives);
+        assert_eq!(w.player.loadout.caps, caps);
+        assert_eq!(w.player.loadout.meta, meta);
+    }
+
+    #[test]
     fn stitch_heals_once_per_hole_and_refuses_at_full_health() {
         let mut w = shop_world(9, 100);
         w.player.hp = w.player.max_hp() * 0.5;
@@ -1667,10 +1725,14 @@ mod tests {
             }
             assert!(passive_ranks > 0, "rack {n}: no chest ranked a passive");
 
-            // Campaign carry-over: three kept entries, the splices ride along.
+            // Campaign carry-over: three kept entries, and the splices stay on
+            // the floor they were bought on (they are not part of the pack).
             let keep: Vec<_> = keepables(&w.player.loadout).into_iter().rev().take(3).collect();
             let carried = campaign::next_loadout(&w.player.loadout, &keep).expect("a valid keep");
-            assert_eq!(carried.splices, w.player.loadout.splices, "splices last the campaign");
+            assert!(
+                carried.splices.is_empty(),
+                "rack {n}: a splice rode into the next floor"
+            );
             assert_eq!(
                 format!("{:?}", carried.stats),
                 from_scratch(&carried),

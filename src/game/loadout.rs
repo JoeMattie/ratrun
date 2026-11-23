@@ -597,12 +597,12 @@ pub struct Loadout {
     pub caps: SlotCaps,
     /// Owned **gene splices**, in purchase order (`game::shop`).
     ///
-    /// Permanent for the run and on neither rack: they are not weapons and not
-    /// passive stacks, so they never count against [`Loadout::max_weapons`] /
-    /// [`Loadout::max_passives`] and the keep-three screen cannot see them. They ride
-    /// along with the loadout between campaign levels
-    /// (`campaign::next_loadout`), which is what makes them last until the run
-    /// ends. [`Loadout::rebuild_stats`] applies them **after** the passives.
+    /// For **this floor only**, and on neither rack: they are not weapons and
+    /// not passive stacks, so they never count against [`Loadout::max_weapons`]
+    /// / [`Loadout::max_passives`] and the keep-three screen cannot keep them.
+    /// `campaign::next_loadout` deliberately does not copy this list, so the
+    /// next level starts with both sockets empty and its stats rebuilt without
+    /// them. [`Loadout::rebuild_stats`] applies them **after** the passives.
     pub splices: Vec<super::shop::SpliceKind>,
     /// The profile's **permanent** upgrades, compiled at run start
     /// ([`crate::meta::RunModifiers`]).

@@ -571,8 +571,9 @@ pub struct KeepThreeView<'a> {
     /// The **gene splices** in the rat, by name (`shop::SpliceKind::name`).
     ///
     /// Splices occupy neither rack (`WAVE3_DESIGN` §6) so they are not
-    /// selectable rows, but the manifest still accounts for them: they ride
-    /// along whatever the pack choice was, and the screen says so.
+    /// selectable rows, and they do **not** come through the vent: a splice
+    /// lasts for the floor it was bought on. The manifest still accounts for
+    /// them, as left behind, because the player will notice them missing.
     pub splices: &'a [&'static str],
 }
 
@@ -1870,12 +1871,12 @@ pub fn draw_keep_three_with(
         );
         put_str(buf, left_x, inner.y, lhdr.as_str(), left_w, heavy(COAT).bg(PLATE));
         // The subtitle also accounts for the gene splices: they occupy neither
-        // rack, so they are not selectable rows, but they ride along whatever
-        // the pack choice is (`WAVE3_DESIGN` §6).
+        // rack and they do **not** come through the vent — a splice lasts for
+        // the floor it was bought on — so they are named as staying behind.
         let mut sub = StackBuf::<96>::new();
         let _ = write!(sub, "Only what fits in your pack comes through the vent.");
         if !view.splices.is_empty() {
-            let _ = write!(sub, "  ·  Splices ride along:");
+            let _ = write!(sub, "  ·  Splices left behind:");
             for (i, name) in view.splices.iter().enumerate() {
                 let _ = write!(sub, "{}{}", if i == 0 { " " } else { ", " }, name);
             }
@@ -2170,11 +2171,11 @@ pub fn draw_keep_three_with(
         let mut lmsg = StackBuf::<44>::new();
         if compact {
             let _ = write!(lmsg, "  ·  {} left behind", leaving);
-            // The compact plate has no narrative row: the gene splices (which
-            // ride along without a slot, `WAVE3_DESIGN` §6) get their count
-            // here instead.
+            // The compact plate has no narrative row: the gene splices are
+            // left behind as well (they last for this floor only), so their
+            // count joins the leaving tally.
             if !view.splices.is_empty() {
-                let _ = write!(lmsg, "  ·  SPLICE {}", view.splices.len());
+                let _ = write!(lmsg, "  ·  {} SPLICES LEFT", view.splices.len());
             }
         } else {
             let _ = write!(
@@ -2216,15 +2217,15 @@ pub fn draw_keep_three_with(
         }
 
         if !compact {
-            // Subtle narrative reminder, plus the splices that ride along
-            // without a slot (`WAVE3_DESIGN` §6).
+            // Subtle narrative reminder, plus the splices that stay behind on
+            // this floor (they last for the floor they were bought on).
             let mut hint = StackBuf::<96>::new();
             let _ = write!(
                 hint,
                 "Choose what fits through the vent. Unselected gear stays behind."
             );
             if !view.splices.is_empty() {
-                let _ = write!(hint, "  ·  Splices ride along:");
+                let _ = write!(hint, "  ·  Splices left behind:");
                 for (i, name) in view.splices.iter().enumerate() {
                     let _ = write!(hint, "{}{}", if i == 0 { " " } else { ", " }, name);
                 }
@@ -5208,10 +5209,11 @@ mod tests {
     }
 
     /// The keep-three manifest at the **widest possible rack** (16 owned
-    /// upgrades: 8 weapons + 8 passives) plus the gene splices that ride along
-    /// without a slot. The list windows with its scrollbar (nothing is cut), the
-    /// header counts every entry, and the splices are accounted for on the
-    /// narrative row (two-pane / medium) or in the header chip (57×20).
+    /// upgrades: 8 weapons + 8 passives) plus the gene splices, which stay
+    /// behind on this floor. The list windows with its scrollbar (nothing is
+    /// cut), the header counts every entry, and the splices are accounted for
+    /// on the narrative row (two-pane / medium) or in the compact plate's
+    /// leaving tally (57×20).
     #[test]
     fn the_manifest_lays_out_a_sixteen_entry_rack_and_the_splices() {
         let mut items: Vec<UpgradeEntry<'static>> = Vec::with_capacity(16);
@@ -5267,13 +5269,24 @@ mod tests {
                 text.contains("16 OWNED") || text.contains("PACK"),
                 "{tw}x{th}: the manifest does not count its entries: {text}"
             );
-            // The splices are accounted for at every size.
+            // The splices are accounted for at every size — as left behind,
+            // because a splice lasts for the floor it was bought on. (The wide
+            // rows are ellipsised, so the check is on the prefix.)
             if tw >= 120 {
-                assert!(text.contains("Splices"), "{tw}x{th}: splices unaccounted: {text}");
+                assert!(
+                    text.contains("Splices"),
+                    "{tw}x{th}: splices unaccounted: {text}"
+                );
             } else if tw >= 80 {
-                assert!(text.contains("Spl"), "{tw}x{th}: splices unaccounted: {text}");
+                assert!(
+                    text.contains("Spl"),
+                    "{tw}x{th}: splices unaccounted: {text}"
+                );
             } else {
-                assert!(text.contains("SPLICE 2"), "{tw}x{th}: splices unaccounted: {text}");
+                assert!(
+                    text.contains("SPLICES LEFT"),
+                    "{tw}x{th}: splices unaccounted: {text}"
+                );
             }
             // The pack choices still work, and the manifest windows on the list.
             assert!(hits.find(KeepThreeAction::ToggleItem(0)).is_some(), "{tw}x{th}: no rows");

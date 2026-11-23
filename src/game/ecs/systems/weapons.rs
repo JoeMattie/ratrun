@@ -132,7 +132,7 @@ use crate::game::ecs::components::{
 use crate::game::ecs::systems::evolutions;
 use crate::game::ecs::resources::{
     ActiveFx, Cvars, DamageLedger, EnemyIndex, MeleeNudge, NextSpawnId, RngRes, SfxQueue, Shake,
-    TickInput,
+    TickInput, Viewport,
 };
 use crate::game::ecs::systems::boss::{Boss, BossTargetable};
 use crate::game::ecs::systems::projectiles::los_clear;
@@ -163,6 +163,9 @@ pub fn fire_weapons_system(
     mut ledger: ResMut<DamageLedger>,
     // Wave 3: Counterweight's "once per target per 0.4 s" melee-nudge log.
     mut melee_nudge: ResMut<MeleeNudge>,
+    // The unzoomed simulation view: the Spiked Tail only hooks what is on it
+    // (see `weapon_spiketail::LASH_VIEW_INSET`).
+    viewport: Res<Viewport>,
     mut scratch: FireScratch,
 ) {
     let dt = input.dt;
@@ -304,6 +307,8 @@ pub fn fire_weapons_system(
             // Batch 12: the Squeak Nova's ring is the weapon's live effect; the
             // arm below seats it and `nova_ring` (after this loop) steps it.
             &mut scratch.active,
+            // The unzoomed view, for the one weapon whose reach runs past it.
+            viewport.0,
         );
         if fired {
             player.loadout.weapons[i].timer += cd;
@@ -1544,6 +1549,9 @@ fn fire_one(
     // The concentrated weapons' live effects: this pass writes the **Squeak
     // Nova** ring (the ring is stepped after the loadout loop).
     fx: &mut crate::game::ecs::resources::ActiveFx,
+    // The tick's [`Viewport`]: the unzoomed screen rectangle the Spiked Tail's
+    // target pick is capped to (`weapon_spiketail::LASH_VIEW_INSET`).
+    view: Vec2,
 ) -> bool {
     let color = kind.color();
     let mut fired = false;
@@ -2139,6 +2147,7 @@ fn fire_one(
                 evolved,
                 next_id,
                 aim,
+                view,
             );
         }
         WeaponKind::Hantavirus => {
