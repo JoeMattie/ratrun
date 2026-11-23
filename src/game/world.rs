@@ -539,7 +539,7 @@ impl World {
             zoom_scale: Vec2::new(1.0, 1.0),
             world_buf: None,
             subcell: crate::render::subcell::SubcellSet::Off,
-            smooth: crate::render::subcell::Smooth::Strong,
+            smooth: crate::render::subcell::Smooth::default(),
             detail: crate::render::subcell::DetailFrame::new(),
             detail_live: false,
             detail_base: PixelBuffer::new(0, 0),
@@ -2080,18 +2080,25 @@ impl World {
             if let Some(grid) =
                 crate::render::subcell::grid_for_frame(self.subcell, z, self.smooth)
             {
-                let filled = if self.smooth == crate::render::subcell::Smooth::Strong {
-                    // Antialiasing reads the picture at world resolution: `pb`
-                    // itself when unzoomed, else the world buffer this draw
-                    // just resampled it from (zoomed in, an edge then sits at
-                    // its true place inside a cell).
-                    let src = match self.world_buf.as_ref() {
-                        Some(buf) if (z - 1.0).abs() >= 0.002 => buf,
-                        _ => &*pb,
-                    };
-                    self.detail.antialias_from(self.subcell, sw, sh / 2, src, pb)
-                } else {
-                    self.detail.smooth_from(grid, sw, sh / 2, pb)
+                use crate::render::subcell::Smooth;
+                let filled = match self.smooth {
+                    Smooth::Strong | Smooth::Wedge => {
+                        // Antialiasing reads the picture at world resolution:
+                        // `pb` itself when unzoomed, else the world buffer this
+                        // draw just resampled it from (zoomed in, an edge then
+                        // sits at its true place inside a cell). `Wedge` adds
+                        // the wedge glyphs and the diagonal-stroke rule.
+                        let src = match self.world_buf.as_ref() {
+                            Some(buf) if (z - 1.0).abs() >= 0.002 => buf,
+                            _ => &*pb,
+                        };
+                        let wedges = self.smooth == Smooth::Wedge;
+                        self.detail.antialias_with(self.subcell, wedges, sw, sh / 2, src, pb)
+                    }
+                    // The xBR fit (the default) reads the screen picture
+                    // itself at every zoom; `grid` is the grid it fits to.
+                    Smooth::Xbr => self.detail.xbr_from(grid, sw, sh / 2, pb),
+                    Smooth::Epx | Smooth::Off => self.detail.smooth_from(grid, sw, sh / 2, pb),
                 };
                 if filled {
                     self.detail_base.copy_from(pb);

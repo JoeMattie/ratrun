@@ -394,9 +394,9 @@ pub struct App {
     /// `RATRUN_SUBCELL`, read once at startup: pins the glyph set for the
     /// session (there is no saved option any more).
     subcell_env: Option<crate::render::subcell::Choice>,
-    /// Edge treatment of the 1x (and zoomed-in) picture: antialiasing by
-    /// default (`RATRUN_SMOOTH=0|1|2` pins off / EPX / antialiasing for a
-    /// session; the console `smooth` command switches it live). Render-only:
+    /// Edge treatment of the 1x (and zoomed-in) picture: the xBR fit by
+    /// default (`RATRUN_SMOOTH=0|1|2|3|4` pins off / EPX / antialiasing / xBR /
+    /// antialiasing with wedges for a session; the console `smooth` command switches it live). Render-only:
     /// it never reaches the simulation.
     smooth: crate::render::subcell::Smooth,
     /// The parallax foreground layer (overhead pipes, lines, proofs). On by
@@ -4065,7 +4065,7 @@ impl App {
     }
 
     /// Turn the 1x edge smoothing off, or on at its default level (the
-    /// antialiasing). Render-only: no run state, no save, no golden can see it.
+    /// xBR fit). Render-only: no run state, no save, no golden can see it.
     pub(crate) fn set_smooth(&mut self, on: bool) {
         use crate::render::subcell::Smooth;
         if on != self.smooth_enabled() {
@@ -4079,7 +4079,8 @@ impl App {
     }
 
     /// Pick the 1x edge treatment (the console `smooth` command): off, the
-    /// EPX rounding, or the antialiasing. Render-only.
+    /// EPX rounding, the antialiasing, the xBR fit, or the antialiasing with
+    /// wedge glyphs. Render-only.
     pub(crate) fn set_smooth_level(&mut self, level: crate::render::subcell::Smooth) {
         if self.smooth != level {
             self.smooth = level;
