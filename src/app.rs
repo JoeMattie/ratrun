@@ -8685,6 +8685,159 @@ mod tests {
                     hh.frame(&[]);
                 }
             }
+            // `lit-<scene>-<floor>` (batch 13b): staged scenes for judging the
+            // lighting effects. `sconce`: the rat in front of the nearest wall
+            // lamp with bodies between lamp and camera; `pendant`: bodies in a
+            // ring under the nearest hanging lamp; `wet`: the same lamp with no
+            // bodies (floor reflections); `corner`: the rat in the room farthest
+            // from the map centre with bodies round it (the overhead offset).
+            // `RATRUN_DUMP_N=n` takes the n-th nearest lamp. The frame is frozen.
+            t if t.starts_with("lit-") => {
+                use crate::game::collision::SizeClass;
+                use crate::game::enemy::EnemyKind;
+                use crate::game::level::LightFixtureKind;
+                let mut parts = t["lit-".len()..].splitn(2, '-');
+                let scene = parts.next().unwrap_or("sconce").to_string();
+                let theme = match parts.next().unwrap_or("sewer") {
+                    "kitchen" => Theme::Kitchen,
+                    "lab" => Theme::Lab,
+                    "laundry" => Theme::Laundry,
+                    "printworks" => Theme::Printworks,
+                    "flatbed" => Theme::Trailer,
+                    _ => Theme::Sewer,
+                };
+                if theme == Theme::Sewer {
+                    hh.enter_playing();
+                } else {
+                    hh.app.start_practice(theme);
+                    hh.frame(&[KeyCode::Enter]);
+                }
+                let nth = std::env::var("RATRUN_DUMP_N")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let w = hh.app.world.as_mut().unwrap();
+                w.clear_enemies();
+                w.player.god = true;
+                let roster: [EnemyKind; 4] = match theme {
+                    Theme::Sewer => [
+                        EnemyKind::SumpLeech,
+                        EnemyKind::PipeEel,
+                        EnemyKind::SluiceToad,
+                        EnemyKind::Skitterer,
+                    ],
+                    Theme::Kitchen => [
+                        EnemyKind::CrumbAnt,
+                        EnemyKind::SinkCrab,
+                        EnemyKind::EggTimer,
+                        EnemyKind::PieWeight,
+                    ],
+                    Theme::Lab => [
+                        EnemyKind::GlassRunner,
+                        EnemyKind::WalkingSyringe,
+                        EnemyKind::SpinnerLid,
+                        EnemyKind::AutoclaveCart,
+                    ],
+                    Theme::Laundry => [
+                        EnemyKind::WoolPill,
+                        EnemyKind::PegSnapper,
+                        EnemyKind::StarchBulb,
+                        EnemyKind::LintGolem,
+                    ],
+                    Theme::Printworks => [
+                        EnemyKind::InkBlot,
+                        EnemyKind::TypeSlug,
+                        EnemyKind::Silverfish,
+                        EnemyKind::StapleCrawler,
+                    ],
+                    Theme::Trailer => [
+                        EnemyKind::GravelTick,
+                        EnemyKind::JuneBug,
+                        EnemyKind::LooseCan,
+                        EnemyKind::TarRat,
+                    ],
+                };
+                let p = w.player.pos;
+                let lamp_kind = if scene == "sconce" {
+                    LightFixtureKind::Sconce
+                } else {
+                    LightFixtureKind::Pendant
+                };
+                let mut lamps: Vec<_> = w
+                    .level
+                    .objects
+                    .lights
+                    .iter()
+                    .filter(|f| f.kind == lamp_kind)
+                    .copied()
+                    .collect();
+                lamps.sort_by(|a, b| a.pos.dist(p).partial_cmp(&b.pos.dist(p)).unwrap());
+                let mut spots: Vec<Vec2> = Vec::new();
+                let rat_at;
+                if scene == "corner" {
+                    let centre = Vec2::new(
+                        w.level.tiles.cols() as f32 * 8.0,
+                        w.level.tiles.rows() as f32 * 8.0,
+                    );
+                    let far = w
+                        .level
+                        .rooms
+                        .iter()
+                        .map(|r| r.center())
+                        .max_by(|a, b| a.dist(centre).partial_cmp(&b.dist(centre)).unwrap())
+                        .unwrap_or(p);
+                    rat_at = far;
+                    for i in 0..10 {
+                        let a = i as f32 * 0.628;
+                        let r = 22.0 + (i % 3) as f32 * 14.0;
+                        spots.push(far + Vec2::new(a.cos() * r, a.sin() * r));
+                    }
+                } else if let Some(lamp) = lamps.get(nth).copied() {
+                    if scene == "sconce" {
+                        let f = lamp.wall_facing(&w.level.tiles);
+                        let side = Vec2::new(-f.y, f.x);
+                        rat_at = lamp.pos + f * 46.0;
+                        for (d, s) in [
+                            (16.0, -16.0),
+                            (20.0, 12.0),
+                            (30.0, -34.0),
+                            (34.0, 30.0),
+                            (58.0, -26.0),
+                            (62.0, 22.0),
+                            (74.0, -4.0),
+                            (28.0, 52.0),
+                        ] {
+                            spots.push(lamp.pos + f * d + side * s);
+                        }
+                    } else {
+                        rat_at = lamp.pos + Vec2::new(30.0, 22.0);
+                        if scene != "wet" {
+                            for i in 0..9 {
+                                let a = i as f32 * 0.698 + 0.3;
+                                let r = 16.0 + (i % 3) as f32 * 13.0;
+                                spots.push(lamp.pos + Vec2::new(a.cos() * r * 1.3, a.sin() * r));
+                            }
+                        }
+                    }
+                } else {
+                    rat_at = p;
+                }
+                w.player.pos = w
+                    .level
+                    .tiles
+                    .nearest_open_center(rat_at, SizeClass::Small, 16)
+                    .unwrap_or(p);
+                let rat = w.player.pos;
+                for (i, at) in spots.into_iter().enumerate() {
+                    if at.dist(rat) > 10.0 && w.level.tiles.circle_clear(at, 6.0, SizeClass::Small) {
+                        w.spawn_enemy(roster[i % roster.len()], at, 1.0);
+                    }
+                }
+                hh.app.picture_dirty = true;
+                hh.app.console_paused = true;
+                hh.frame(&[]);
+                hh.frame(&[]);
+            }
             "levelup" => {
                 hh.frame(&[KeyCode::Enter]); // -> Story
                 hh.frame(&[KeyCode::Enter]); // dossier -> MapIntro
@@ -8827,6 +8980,65 @@ mod tests {
                 w.damage_numbers.clear();
                 hh.frame(&[]);
             }
+        }
+        // `RATRUN_DUMP_CHURN=n` (batch 13b): after the capture, walk right for
+        // `n` live frames and write `<target>.churn.txt`: the cells that
+        // changed per frame and a rough estimate of the bytes a diff encoder
+        // would send for them (a proxy, not the presenter's real count).
+        if let Some(n) = std::env::var("RATRUN_DUMP_CHURN").ok().and_then(|v| v.parse::<u32>().ok()) {
+            hh.app.console_paused = false;
+            let mut prev = hh.terminal.backend().buffer().clone();
+            let (mut cells, mut bytes) = (0u64, 0u64);
+            for _ in 0..n.max(1) {
+                if let Some(w) = hh.app.world.as_mut() {
+                    w.player.hp = w.player.max_hp();
+                }
+                let text = hh.frame(&[KeyCode::Right]);
+                if text.contains("LEVEL UP") || text.contains("CHEST OPENED") {
+                    hh.frame(&[KeyCode::Enter]);
+                    prev = hh.terminal.backend().buffer().clone();
+                    continue;
+                }
+                let cur = hh.terminal.backend().buffer().clone();
+                let mut last: Option<(u16, u16)> = None;
+                let mut pen: Option<(ratatui::style::Color, ratatui::style::Color)> = None;
+                for y in 0..h {
+                    for x in 0..w {
+                        let (a, b) = (&prev[(x, y)], &cur[(x, y)]);
+                        if a == b {
+                            continue;
+                        }
+                        cells += 1;
+                        if last != Some((x.wrapping_sub(1), y)) {
+                            bytes += 8;
+                        }
+                        last = Some((x, y));
+                        match pen {
+                            Some((fg, bg)) => {
+                                if fg != b.fg {
+                                    bytes += 17;
+                                }
+                                if bg != b.bg {
+                                    bytes += 17;
+                                }
+                            }
+                            None => bytes += 36,
+                        }
+                        pen = Some((b.fg, b.bg));
+                        bytes += b.symbol().len() as u64;
+                    }
+                }
+                prev = cur;
+            }
+            let dir = std::env::var_os("RATRUN_DUMP_DIR")
+                .map_or_else(|| std::path::PathBuf::from("/tmp"), std::path::PathBuf::from);
+            let n = u64::from(n.max(1));
+            std::fs::write(
+                dir.join(format!("{target}.churn.txt")),
+                format!("frames {n} cells/frame {} est_bytes/frame {}\n", cells / n, bytes / n),
+            )
+            .unwrap();
+            return;
         }
         let buf = hh.terminal.backend().buffer().clone();
         if let Some(dir) = std::env::var_os("RATRUN_DUMP_DIR") {
