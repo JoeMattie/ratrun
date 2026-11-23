@@ -35,14 +35,23 @@
 //! rule) are what keep it from touching a pellet, a whisker or a soft
 //! gradient; see `smooth_into`.
 //!
-//! That EPX pass is [`Smooth::Epx`]. The default, [`Smooth::Strong`], is real
-//! **antialiasing** (`antialias`): a staircase between two regions is read as
+//! That EPX pass is [`Smooth::Epx`]. The default is [`Smooth::Xbr`]
+//! (`subcell/xbr.rs`): an xBR 2× upscale of the same picture, whose edge
+//! detection reads a radius-two neighbourhood, fitted in two colours (which
+//! may be blends) to the quadrant, sextant or octant pattern nearest it.
+//! [`Smooth::XbrCrisp`] is the same filter kept to the picture's own two
+//! colours and to stairs only, for comparison.
+//! [`Smooth::Strong`] is coverage **antialiasing** (`antialias`): a staircase
+//! between two regions is read as
 //! the straight slanted edge it stands for, each cell it crosses gets an 8 × 8
 //! coverage mask, and the cell is drawn with the block glyph nearest that mask
 //! — the **eighth blocks** (`▏▎▍▌▋▊▉`, `▁▂▃▄▅▆▇`, and their complements by
 //! swapping the two colours), the quadrants, and sextants/octants where the
 //! terminal has them. Zoomed in, the same masks are sampled from the world
-//! buffer, so an edge sits where it really is inside a cell.
+//! buffer, so an edge sits where it really is inside a cell. [`Smooth::Wedge`]
+//! (built, off by default) is the same pass with the wedge and triangle glyphs
+//! (`U+1FB3C..=U+1FB6F`, `U+25E2..=U+25E5`) as further candidates, and with
+//! one-pixel diagonal strokes drawn as a band instead of left alone.
 //!
 //! **Render-only.** Nothing here reads or writes simulation state. With
 //! smoothing off (`RATRUN_SMOOTH=0`, console `smooth off`) a 1× frame is
@@ -55,6 +64,7 @@ use super::framebuffer::PixelBuffer;
 use super::palette::{self, Rgb};
 
 mod tables;
+mod xbr;
 
 /// Above this eased zoom the view is zoomed out and the detail path may run
 /// (the same line the ink pass draws, [`super::ink::ZOOMED_OUT`]).
@@ -115,18 +125,32 @@ pub enum Smooth {
     Off,
     /// The EPX / Scale2x corner rounding (`smooth_into`).
     Epx,
-    /// Antialiasing with part-cell glyphs (`antialias`). The default.
-    #[default]
+    /// Antialiasing with part-cell glyphs (`antialias`).
     Strong,
+    /// An xBR 2× upscale fitted to quadrants, sextants or octants in two
+    /// colours that may be blends (`subcell/xbr.rs`). The default.
+    #[default]
+    Xbr,
+    /// [`Smooth::Strong`] plus the wedge and triangle glyphs, and diagonal
+    /// one-pixel strokes drawn as a band. Needs sextants or better; on a
+    /// lesser terminal it is `Strong`.
+    Wedge,
+    /// [`Smooth::Xbr`]'s filter read conservatively: stairs only, and a cell's
+    /// two colours are exact source colours. Kept for A/B.
+    XbrCrisp,
 }
 
 impl Smooth {
-    /// `0`/`off`, `1`/`on`/`epx`, `2`/`strong`.
+    /// `0`/`off`, `1`/`on`/`epx`, `2`/`strong`, `3`/`xbr`, `4`/`wedge`,
+    /// `5`/`crisp`.
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s.trim().to_ascii_lowercase().as_str() {
             "0" | "off" | "false" | "no" => Smooth::Off,
             "1" | "on" | "epx" => Smooth::Epx,
             "2" | "strong" | "aa" => Smooth::Strong,
+            "3" | "xbr" => Smooth::Xbr,
+            "4" | "wedge" | "wedges" => Smooth::Wedge,
+            "5" | "crisp" | "xbrcrisp" | "xbr-crisp" => Smooth::XbrCrisp,
             _ => return None,
         })
     }
@@ -137,14 +161,18 @@ impl Smooth {
             Smooth::Off => "off",
             Smooth::Epx => "on",
             Smooth::Strong => "strong",
+            Smooth::Xbr => "xbr",
+            Smooth::Wedge => "wedge",
+            Smooth::XbrCrisp => "crisp",
         }
     }
 }
 
 /// The 1× edge treatment for the session: `RATRUN_SMOOTH=0` pins plain half
-/// blocks, `1` the EPX rounding, `2` the antialiasing; unset or unreadable
-/// leaves the default ([`Smooth::Strong`]). The console `smooth` command is the
-/// live A/B; this is the capture pin.
+/// blocks, `1` the EPX rounding, `2` the antialiasing, `3` the xBR fit, `4` the
+/// antialiasing with wedges, `5` the crisp xBR fit; unset or unreadable leaves the default
+/// ([`Smooth::Xbr`]). The console `smooth` command is the live A/B; this is the
+/// capture pin.
 pub fn smooth_from_env() -> Smooth {
     std::env::var("RATRUN_SMOOTH").ok().and_then(|v| Smooth::parse(&v)).unwrap_or_default()
 }
@@ -244,8 +272,13 @@ pub fn grid_for(set: SubcellSet, zoom: f32) -> Option<Grid> {
 /// either way, and one sub-row per world pixel at the quad grid (the vertical
 /// resolution the half-block blit already had) or two at the octant grid (the
 /// full 2 × 2 of the rule). `None` when the set is `Off` or smoothing is off.
-/// The antialiasing ([`Smooth::Strong`]) keeps its own 8 × 8 masks, so its
-/// frame is the plain picture on the quad grid whatever the set.
+/// The antialiasing ([`Smooth::Strong`], [`Smooth::Wedge`]) keeps its own
+/// 8 × 8 masks, so its frame is the plain picture on the quad grid whatever the
+/// set. For [`Smooth::Xbr`] and [`Smooth::XbrCrisp`] the answer is the finest grid the 2 × 4 xBR block
+/// of a cell may be **fitted** to — the set's own, sextants included (the
+/// block's rows are weighed onto the three sextant rows); the frame that
+/// carries the ink marks under it is still the quad one
+/// ([`DetailFrame::xbr_from`]).
 pub fn grid_for_frame(set: SubcellSet, zoom: f32, smooth: Smooth) -> Option<Grid> {
     if let Some(g) = grid_for(set, zoom) {
         return Some(g);
@@ -253,8 +286,16 @@ pub fn grid_for_frame(set: SubcellSet, zoom: f32, smooth: Smooth) -> Option<Grid
     if smooth == Smooth::Off || set == SubcellSet::Off {
         return None;
     }
-    if smooth == Smooth::Strong {
+    if matches!(smooth, Smooth::Strong | Smooth::Wedge) {
         return Some(Grid::Quad);
+    }
+    if matches!(smooth, Smooth::Xbr | Smooth::XbrCrisp) {
+        return Some(match set {
+            SubcellSet::Off => return None,
+            SubcellSet::Quad => Grid::Quad,
+            SubcellSet::Sextant => Grid::Sextant,
+            SubcellSet::Octant => Grid::Octant,
+        });
     }
     // A sextant grid has one and a half sub-rows per world pixel, which the
     // 2 × 2 rule cannot fill exactly; the quad grid is the honest answer (and
@@ -574,6 +615,8 @@ fn smooth_into(src: &PixelBuffer, dst: &mut PixelBuffer, grid: Grid, thin: &mut 
 const E_R: u8 = 1;
 const E_D: u8 = 2;
 const THIN: u8 = 4;
+/// [`cut_diagonal`]'s mark: a thin pixel that is part of a diagonal stroke.
+const STROKE: u8 = 8;
 
 /// A pixel's four cut masks, by the neighbour whose colour moves in.
 const FROM_UP: usize = 0;
@@ -850,7 +893,12 @@ fn px_mask(s: &[Rgb], w: usize, cuts: &[[u32; 4]], i: usize, pair: &mut Pair) ->
 /// both ways round (the glyph is the left / lower part, so the right / upper
 /// part is the same glyph with the colours swapped); a finer grid's glyph is
 /// taken only where it is strictly closer still.
-fn choose(m: u64, x: Rgb, y: Rgb, set: SubcellSet) -> Option<Encoded> {
+///
+/// With `wedges` set (and a terminal that has them, `has_wedges`) the wedges
+/// and triangles of `tables::WEDGES` are further candidates: each competes by
+/// the same distance, both ways round, and like every other family must be
+/// strictly closer than what the cell already has.
+fn choose_from(m: u64, x: Rgb, y: Rgb, set: SubcellSet, wedges: bool) -> Option<Encoded> {
     let ones = m.count_ones();
     let half = (m ^ UPPER).count_ones();
     let mut best = ones.min(64 - ones).min(half).min(64 - half);
@@ -899,7 +947,123 @@ fn choose(m: u64, x: Rgb, y: Rgb, set: SubcellSet) -> Option<Encoded> {
             });
         }
     }
+    if wedges && has_wedges(set) {
+        for &(glyph, gm) in tables::WEDGES.iter() {
+            let d = (m ^ gm).count_ones();
+            if d < best {
+                best = d;
+                out = Some(Encoded { glyph, fg: y, bg: x });
+            }
+            if 64 - d < best {
+                best = 64 - d;
+                out = Some(Encoded { glyph, fg: x, bg: y });
+            }
+        }
+    }
     out
+}
+
+/// A pixel's four corners as 8 × 4 sample masks: the triangle whose legs are
+/// half the pixel's sides (three samples on the row at the corner, one on the
+/// next).
+const CORNER_TL: u32 = 0x0000_0107;
+const CORNER_TR: u32 = 0x0000_80E0;
+const CORNER_BL: u32 = 0x0701_0000;
+const CORNER_BR: u32 = 0xE080_0000;
+
+/// [`Smooth::Wedge`] only: draw one-pixel **diagonal strokes** as a band.
+///
+/// A pixel is on such a stroke when all four axial neighbours differ from it
+/// (by `EDGE`) and both diagonal neighbours on one diagonal match it: a tail,
+/// a whisker, a limb drawn one pixel wide. The thin rule would leave it a row
+/// of squares touching at their corners. Here the pixel gives up its two
+/// corners off the stroke, and the two background pixels beside each joint
+/// take the corner that touches it, so consecutive squares become one band of
+/// even width with straight sides (the cut every wedge glyph is shaped for).
+///
+/// A bright or saturated isolated sample (`xbr::View::bright_isolated`: a
+/// pellet, a telegraph dot, a spark) is never such a pixel, so hostile marks
+/// stay exact; and a background pixel that is itself thin takes nothing. The
+/// stroke pixel's `THIN` flag is cleared, so the stair cuts may read it too.
+fn cut_diagonal(src: &PixelBuffer, flags: &mut [u8], cuts: &mut [[u32; 4]]) {
+    let (w, h) = (src.w, src.h);
+    if w < 3 || h < 3 {
+        return;
+    }
+    let s = src.pixels();
+    let marks = xbr::View::marks(src);
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let i = y * w + x;
+            if flags[i] & THIN == 0
+                || flags[i] & (E_R | E_D) != (E_R | E_D)
+                || flags[i - 1] & E_R == 0
+                || flags[i - w] & E_D == 0
+            {
+                continue;
+            }
+            let p = s[i];
+            let down_right = !differs(p, s[i - w - 1]) && !differs(p, s[i + w + 1]);
+            let down_left = !differs(p, s[i - w + 1]) && !differs(p, s[i + w - 1]);
+            if !(down_right || down_left) || marks.bright_isolated(x, y) {
+                continue;
+            }
+            flags[i] |= STROKE;
+            // (the stroke pixel's lost corners; then, for the joint above and
+            // the joint below, the background pixel and the corner it gains.)
+            let (up_corner, down_corner, joints) = if down_right {
+                (
+                    CORNER_TR,
+                    CORNER_BL,
+                    [
+                        (i - w, FROM_DOWN, CORNER_BL),
+                        (i - 1, FROM_RIGHT, CORNER_TR),
+                        (i + 1, FROM_LEFT, CORNER_BL),
+                        (i + w, FROM_UP, CORNER_TR),
+                    ],
+                )
+            } else {
+                (
+                    CORNER_TL,
+                    CORNER_BR,
+                    [
+                        (i - w, FROM_DOWN, CORNER_BR),
+                        (i + 1, FROM_LEFT, CORNER_TL),
+                        (i - 1, FROM_RIGHT, CORNER_BR),
+                        (i + w, FROM_UP, CORNER_TL),
+                    ],
+                )
+            };
+            cuts[i][FROM_UP] |= up_corner;
+            cuts[i][FROM_DOWN] |= down_corner;
+            for (j, dir, corner) in joints {
+                // A neighbour that is thin itself (a mark, another stroke) is
+                // left whole. `THIN` is only cleared below, so the answer does
+                // not depend on the order the pixels are visited in.
+                if flags[j] & THIN == 0 {
+                    cuts[j][dir] |= corner;
+                }
+            }
+        }
+    }
+    for f in flags.iter_mut() {
+        if *f & STROKE != 0 {
+            *f &= !THIN;
+        }
+    }
+}
+
+/// `choose_from` without the wedges: the [`Smooth::Strong`] vocabulary.
+#[cfg(test)]
+fn choose(m: u64, x: Rgb, y: Rgb, set: SubcellSet) -> Option<Encoded> {
+    choose_from(m, x, y, set, false)
+}
+
+/// Can `set`'s terminal draw the wedge and triangle glyphs? The wedges sit in
+/// the sextants' Unicode block (Symbols for Legacy Computing), so a terminal
+/// known to draw sextants as geometry is taken to draw them too.
+fn has_wedges(set: SubcellSet) -> bool {
+    matches!(set, SubcellSet::Sextant | SubcellSet::Octant)
 }
 
 /// # Antialiasing (the 1× and zoomed-in picture at [`Smooth::Strong`])
@@ -924,6 +1088,11 @@ fn choose(m: u64, x: Rgb, y: Rgb, set: SubcellSet) -> Option<Encoded> {
 /// 4. **Two colours.** A cell whose samples hold a third colour is left alone.
 /// 5. **Glyph.** `choose`: least `popcount(mask ^ glyph)`, ties to today's.
 ///
+/// With `wedges` ([`Smooth::Wedge`], on a terminal with sextants or better)
+/// two things are added: `cut_diagonal` runs first, so a one-pixel diagonal
+/// stroke that is not a bright mark is drawn as a band, and `choose_from` also
+/// tries the wedge and triangle glyphs.
+///
 /// Zoomed in, a cell covers part of a pixel or straddles a pixel boundary, and
 /// its 64 samples are read from the (cut) pixels under them, so a boundary that
 /// falls inside a cell is drawn where it is.
@@ -936,10 +1105,13 @@ fn antialias(
     cols: usize,
     rows: usize,
     set: SubcellSet,
+    wedges: bool,
     flags: &mut Vec<u8>,
     cuts: &mut Vec<[u32; 4]>,
     out: &mut Vec<Encoded>,
 ) {
+    // Wedges need the sextants' block; without it the pass is `Strong`.
+    let wedges = wedges && has_wedges(set);
     out.clear();
     out.resize(cols * rows, NO_CELL);
     let (w, h) = (src.w, src.h);
@@ -949,6 +1121,9 @@ fn antialias(
     edge_flags(src, flags);
     cuts.clear();
     cuts.resize(w * h, [0; 4]);
+    if wedges {
+        cut_diagonal(src, flags, cuts);
+    }
     cut_horizontal(w, h, flags, cuts);
     cut_vertical(w, h, flags, cuts);
     let s = src.pixels();
@@ -966,7 +1141,8 @@ fn antialias(
                 let Some(mt) = px_mask(s, w, cuts, t, &mut pair) else { continue };
                 let Some(mb) = px_mask(s, w, cuts, b, &mut pair) else { continue };
                 let Some(y) = pair.y else { continue };
-                if let Some(e) = choose(u64::from(mt) | (u64::from(mb) << 32), pair.x, y, set) {
+                let m = u64::from(mt) | (u64::from(mb) << 32);
+                if let Some(e) = choose_from(m, pair.x, y, set, wedges) {
                     out[cy * cols + cx] = e;
                 }
             }
@@ -1030,7 +1206,7 @@ fn antialias(
                     }
                 }
             }
-            if let Some(e) = choose(m, pair.x, y, set) {
+            if let Some(e) = choose_from(m, pair.x, y, set, wedges) {
                 out[cy * cols + cx] = e;
             }
         }
@@ -1055,6 +1231,8 @@ pub struct DetailFrame {
     aa: Vec<Encoded>,
     flags: Vec<u8>,
     cuts: Vec<[u32; 4]>,
+    /// The xBR pass's scratch (one YUV triple a source pixel), held likewise.
+    yuv: Vec<Rgb>,
 }
 
 impl Default for DetailFrame {
@@ -1075,6 +1253,7 @@ impl DetailFrame {
             aa: Vec::new(),
             flags: Vec::new(),
             cuts: Vec::new(),
+            yuv: Vec::new(),
         }
     }
 
@@ -1122,6 +1301,21 @@ impl DetailFrame {
         src: &PixelBuffer,
         half: &PixelBuffer,
     ) -> bool {
+        self.antialias_with(set, false, cols, rows, src, half)
+    }
+
+    /// [`DetailFrame::antialias_from`], with the wedge glyphs and the diagonal
+    /// stroke rule when `wedges` is set ([`Smooth::Wedge`]). Where the terminal
+    /// has no sextants the two are the same frame.
+    pub fn antialias_with(
+        &mut self,
+        set: SubcellSet,
+        wedges: bool,
+        cols: usize,
+        rows: usize,
+        src: &PixelBuffer,
+        half: &PixelBuffer,
+    ) -> bool {
         if cols == 0 || rows == 0 || half.w != cols || half.h != rows * 2 {
             return false;
         }
@@ -1130,8 +1324,39 @@ impl DetailFrame {
             dst[0] = c;
             dst[1] = c;
         }
-        antialias(src, cols, rows, set, &mut self.flags, &mut self.cuts, &mut self.aa);
+        antialias(src, cols, rows, set, wedges, &mut self.flags, &mut self.cuts, &mut self.aa);
         true
+    }
+
+    /// Start an xBR frame ([`Smooth::Xbr`], or [`Smooth::XbrCrisp`] with
+    /// `crisp`) of `cols × rows` cells from `half`, the half-block picture
+    /// (`cols × 2·rows`). `fit` is the finest grid a cell may be fitted to
+    /// ([`grid_for_frame`]'s answer). Every cell gets its answer from
+    /// `xbr::xbr` — the plain `▀` with its own two colours wherever nothing
+    /// leaned, so an untouched cell is what [`Smooth::Off`] draws,
+    /// byte for byte. Underneath, the frame is the plain picture on the
+    /// **quad** grid (as for the antialiasing), which is what
+    /// [`DetailFrame::overlay`] stamps and what a stamped cell is encoded
+    /// from: a mark covers exactly the half cell it always did, whatever grid
+    /// the smoothing used. Returns whether it filled the frame; the scratch
+    /// lives here, so a steady-state frame allocates nothing.
+    pub fn xbr_from(
+        &mut self,
+        fit: Grid,
+        crisp: bool,
+        cols: usize,
+        rows: usize,
+        half: &PixelBuffer,
+    ) -> bool {
+        if cols == 0 || rows == 0 || half.w != cols || half.h != rows * 2 {
+            return false;
+        }
+        let px = self.begin(Grid::Quad, cols, rows);
+        for (dst, &c) in px.pixels_mut().as_chunks_mut::<2>().0.iter_mut().zip(half.pixels()) {
+            dst[0] = c;
+            dst[1] = c;
+        }
+        xbr::xbr(half, fit, crisp, &mut self.yuv, &mut self.flags, &mut self.aa)
     }
 
     /// Start a smoothing frame of `cols × rows` cells on `grid` and fill it
@@ -1270,6 +1495,9 @@ pub fn glyph_card() -> String {
     row(&mut out, "quadrant", &mut (1..15u8).map(|p| Grid::Quad.glyph(p)).cycle());
     // The 1x antialiasing's part-cell blocks: left 1/8 ..= 7/8, lower 1/8 ..= 7/8.
     row(&mut out, "eighths", &mut tables::EIGHTHS.iter().map(|&(g, _)| g).cycle());
+    // The `smooth wedge` vocabulary: wedges and triangles. They should meet
+    // the cell's edges with no seam, like the sextants below.
+    row(&mut out, "wedges", &mut tables::WEDGES.iter().map(|&(g, _)| g).cycle());
     let _ = writeln!(out);
     row(&mut out, "sextant", &mut (1..63u8).map(|p| Grid::Sextant.glyph(p)));
     // Checkers and stripes: the patterns where a font's gaps show first.
@@ -1525,6 +1753,11 @@ mod tests {
         assert_eq!(grid_for_frame(Octant, 2.0, off), Some(Grid::Octant), "zoomed out is not smoothing");
         assert_eq!(grid_for_frame(Octant, 2.0, strong), Some(Grid::Octant));
         assert_eq!(grid_for_frame(Sextant, 1.25, epx), Some(Grid::Quad));
+        // Zoomed out the resample path is untouched by the 1x level.
+        for level in [Smooth::Xbr, Smooth::Wedge, Smooth::XbrCrisp] {
+            assert_eq!(grid_for_frame(Octant, 2.0, level), Some(Grid::Octant));
+            assert_eq!(grid_for_frame(Sextant, 1.25, level), Some(Grid::Quad));
+        }
         for z in [0.5, 0.75, 1.0] {
             assert_eq!(grid_for_frame(Octant, z, epx), Some(Grid::Octant));
             assert_eq!(grid_for_frame(Quad, z, epx), Some(Grid::Quad));
@@ -1539,13 +1772,24 @@ mod tests {
             // picture on the quad grid on every terminal that has one.
             for set in [Quad, Sextant, Octant] {
                 assert_eq!(grid_for_frame(set, z, strong), Some(Grid::Quad), "{set:?} at {z}");
+                assert_eq!(grid_for_frame(set, z, Smooth::Wedge), Some(Grid::Quad), "{set:?} at {z}");
+            }
+            // The xBR block is fitted to the terminal's own finest grid,
+            // sextants included.
+            for level in [Smooth::Xbr, Smooth::XbrCrisp] {
+                assert_eq!(grid_for_frame(Quad, z, level), Some(Grid::Quad));
+                assert_eq!(grid_for_frame(Sextant, z, level), Some(Grid::Sextant));
+                assert_eq!(grid_for_frame(Octant, z, level), Some(Grid::Octant));
+            }
+            for level in [Smooth::Xbr, Smooth::Wedge, Smooth::XbrCrisp] {
+                assert_eq!(grid_for_frame(Off, z, level), None, "half blocks: nothing to encode");
             }
         }
     }
 
     #[test]
-    fn the_smoothing_level_reads_as_a_number_or_a_word_and_defaults_to_strong() {
-        assert_eq!(Smooth::default(), Smooth::Strong);
+    fn the_smoothing_level_reads_as_a_number_or_a_word_and_defaults_to_xbr() {
+        assert_eq!(Smooth::default(), Smooth::Xbr);
         for (text, want) in [
             ("0", Smooth::Off),
             ("off", Smooth::Off),
@@ -1553,11 +1797,19 @@ mod tests {
             ("on", Smooth::Epx),
             ("2", Smooth::Strong),
             (" Strong ", Smooth::Strong),
+            ("3", Smooth::Xbr),
+            ("XBR", Smooth::Xbr),
+            ("4", Smooth::Wedge),
+            ("wedge", Smooth::Wedge),
+            ("5", Smooth::XbrCrisp),
+            ("crisp", Smooth::XbrCrisp),
         ] {
             assert_eq!(Smooth::parse(text), Some(want), "{text:?}");
         }
         assert_eq!(Smooth::parse("lots"), None);
-        for level in [Smooth::Off, Smooth::Epx, Smooth::Strong] {
+        for level in
+            [Smooth::Off, Smooth::Epx, Smooth::Strong, Smooth::Xbr, Smooth::Wedge, Smooth::XbrCrisp]
+        {
             assert_eq!(Smooth::parse(level.as_str()), Some(level));
         }
     }
@@ -1764,6 +2016,11 @@ mod tests {
             (SubcellSet::Quad, Smooth::Strong),
             (SubcellSet::Sextant, Smooth::Strong),
             (SubcellSet::Octant, Smooth::Strong),
+            (SubcellSet::Quad, Smooth::Xbr),
+            (SubcellSet::Sextant, Smooth::Xbr),
+            (SubcellSet::Octant, Smooth::Xbr),
+            (SubcellSet::Sextant, Smooth::XbrCrisp),
+            (SubcellSet::Sextant, Smooth::Wedge),
         ] {
             let mut w = World::new(Theme::Sewer, 7);
             let p = w.player.pos;
@@ -1786,7 +2043,13 @@ mod tests {
             w.draw(&mut pb);
             let frame = w.detail().expect("1x with smoothing: a detail frame");
             assert_eq!(frame.cells(), (120, 40));
-            assert_eq!(frame.grid(), grid_for_frame(set, 1.0, level).unwrap());
+            // (The xBR frame carries its marks on the quad grid whatever grid
+            // the cells were fitted to.)
+            let carried = match level {
+                Smooth::Xbr | Smooth::XbrCrisp => Grid::Quad,
+                _ => grid_for_frame(set, 1.0, level).unwrap(),
+            };
+            assert_eq!(frame.grid(), carried);
 
             let mut seen = [0usize; 4];
             for y in 0..pb.h {
@@ -2002,6 +2265,9 @@ mod tests {
                     return grid.mask(p as u8);
                 }
             }
+        }
+        if let Some(&(_, m)) = tables::WEDGES.iter().find(|&&(g, _)| g == glyph) {
+            return m;
         }
         panic!("U+{:X} is not a playfield glyph", glyph as u32);
     }
@@ -2382,10 +2648,218 @@ mod tests {
         assert!(part >= 4, "{part} eighth-block cells reached the buffer");
     }
 
+    // ---- wedges (`Smooth::Wedge`) ----
+
+    fn is_wedge(glyph: char) -> bool {
+        tables::WEDGES.iter().any(|&(g, _)| g == glyph)
+    }
+
+    /// An antialiased 1x frame of `src` with the wedge rules asked for.
+    fn wedged(src: &PixelBuffer, set: SubcellSet) -> DetailFrame {
+        let mut frame = DetailFrame::new();
+        assert!(frame.antialias_with(set, true, src.w, src.h / 2, src, src));
+        frame
+    }
+
+    #[test]
+    fn the_wedge_table_is_one_polarity_of_twenty_eight_shapes() {
+        assert_eq!(tables::WEDGES.len(), 28);
+        let mut seen: Vec<u64> = Vec::new();
+        for &(g, m) in tables::WEDGES.iter() {
+            assert_eq!(g.to_string().as_str().cell_width(), 1, "U+{:X}", g as u32);
+            let cp = g as u32;
+            assert!(
+                (0x1FB3C..=0x1FB6F).contains(&cp) || (0x25E2..=0x25E5).contains(&cp),
+                "U+{cp:X} is not a wedge or a triangle"
+            );
+            assert!(m != 0 && m != !0, "U+{cp:X} is flat");
+            assert!(!seen.contains(&m) && !seen.contains(&!m), "U+{cp:X} repeats a shape");
+            seen.push(m);
+            // No wedge is a shape the block families already draw.
+            assert!(tables::EIGHTHS.iter().all(|&(_, e)| e != m && e != !m));
+            assert!((0..64u8).all(|p| Grid::Sextant.mask(p) != m));
+        }
+        // Known points: the lower-left wedge to the lower centre covers the
+        // bottom-left corner and nothing of the top row; `◢` is the half of the
+        // cell below the rising diagonal.
+        let small = tables::WEDGES.iter().find(|&&(g, _)| g == '\u{1FB3C}').unwrap().1;
+        assert!(small >> 56 & 1 == 1 && small & 0xFF == 0 && small.count_ones() < 8);
+        let tri = tables::WEDGES.iter().find(|&&(g, _)| g == '\u{25E2}').unwrap().1;
+        assert!(tri >> 63 & 1 == 1 && tri & 1 == 0 && (28..=36).contains(&tri.count_ones()));
+    }
+
+    #[test]
+    fn a_wedge_competes_by_distance_and_must_be_strictly_closer() {
+        let set = SubcellSet::Sextant;
+        for &(g, m) in tables::WEDGES.iter() {
+            // Its own shape picks it, either way round.
+            assert_eq!(choose_from(m, A, B, set, true), Some(Encoded { glyph: g, fg: B, bg: A }));
+            assert_eq!(choose_from(!m, A, B, set, true), Some(Encoded { glyph: g, fg: A, bg: B }));
+            // Not asked for, or no sextants: never a wedge.
+            for (set, wedges) in [(set, false), (SubcellSet::Quad, true)] {
+                let e = choose_from(m, A, B, set, wedges);
+                assert!(e.is_none_or(|e| !is_wedge(e.glyph)), "U+{:X}: {e:?}", g as u32);
+            }
+        }
+        // A shape a block already draws exactly stays that block.
+        let left5 = tables::EIGHTHS[4].1;
+        assert_eq!(choose_from(left5, A, B, set, true), choose(left5, A, B, set));
+        assert_eq!(choose_from(UPPER, A, B, set, true), None);
+    }
+
+    /// A clean 45° edge between two regions is drawn with wedges where the
+    /// terminal has them, and is exactly the `Strong` frame where it does not.
+    #[test]
+    fn a_clean_diagonal_edge_picks_wedges_and_falls_back_without_sextants() {
+        let mut src = PixelBuffer::new(32, 24);
+        for y in 0..24 {
+            for x in 0..32 {
+                src.plot(x, y, if y >= 4 + x { B } else { A });
+            }
+        }
+        for set in [SubcellSet::Sextant, SubcellSet::Octant] {
+            let frame = wedged(&src, set);
+            let wedges = frame.aa.iter().filter(|e| is_wedge(e.glyph)).count();
+            assert!(wedges >= 8, "{set:?}: {wedges} wedge cells along the diagonal");
+            for e in frame.aa.iter().filter(|e| e.glyph != '\0') {
+                assert!((e.fg == A && e.bg == B) || (e.fg == B && e.bg == A), "{e:?}");
+            }
+            // And the plain antialiasing never uses one.
+            assert!(strong(&src, set).aa.iter().all(|e| !is_wedge(e.glyph)));
+        }
+        let (with, without) = (wedged(&src, SubcellSet::Quad), strong(&src, SubcellSet::Quad));
+        assert!(with.aa == without.aa, "without sextants `wedge` must be `strong`");
+    }
+
+    /// A dull one-pixel diagonal stroke becomes a band of wedges; a bright one
+    /// (a telegraph, a pellet trail) and the axis-aligned lines stay exact.
+    #[test]
+    fn a_dull_diagonal_stroke_is_drawn_as_a_band_and_a_bright_one_is_not() {
+        let floor = (40, 44, 52);
+        let line = |c: Rgb| {
+            let mut src = PixelBuffer::new(24, 24);
+            src.clear(floor);
+            for i in 2..20 {
+                src.plot(i, i, c);
+            }
+            src.line(22, 2, 22, 20, c);
+            src
+        };
+        let dull = wedged(&line((120, 90, 70)), SubcellSet::Sextant);
+        let wedges = dull.aa.iter().filter(|e| is_wedge(e.glyph)).count();
+        assert!(wedges >= 16, "{wedges} wedge cells along the stroke");
+        // The upright line beside it is still thin: column 22 is untouched.
+        for cy in 0..12 {
+            assert_eq!(dull.aa[cy * 24 + 22].glyph, '\0', "row {cy}");
+        }
+        let bright = wedged(&line((255, 236, 120)), SubcellSet::Sextant);
+        assert!(bright.aa.iter().all(|e| e.glyph == '\0'), "a bright stroke was redrawn");
+        // `Strong` leaves both alone.
+        assert!(strong(&line((120, 90, 70)), SubcellSet::Sextant).aa.iter().all(|e| e.glyph == '\0'));
+    }
+
+    // ---- xBR (`Smooth::Xbr`): the frame around `xbr.rs`'s own tests ----
+
+    fn xbr_frame(src: &PixelBuffer, fit: Grid, crisp: bool) -> DetailFrame {
+        let mut frame = DetailFrame::new();
+        assert!(frame.xbr_from(fit, crisp, src.w, src.h / 2, src));
+        frame
+    }
+
+    /// Where nothing leans the xBR frame is the half-block blit, cell for cell:
+    /// `▀`, top colour in front, bottom colour behind (not the `▄` the plain
+    /// encoder would write for a dark-over-bright cell). For the crisp fit
+    /// that is any axis-aligned picture; the blended fit rounds a rectangle's
+    /// corners as the reference does, so its picture has straight edges only.
+    #[test]
+    fn an_untouched_xbr_frame_is_the_half_block_blit() {
+        let mut rects = PixelBuffer::new(32, 24);
+        rects.clear(B);
+        rects.rect_fill(3, 3, 9, 7, A);
+        rects.rect_fill(16, 5, 4, 11, (200, 60, 60));
+        let mut bands = PixelBuffer::new(32, 24);
+        bands.clear(A);
+        bands.rect_fill(0, 5, 32, 9, B);
+        bands.rect_fill(0, 19, 32, 2, (200, 60, 60));
+        for (name, src, crisp) in [("rects", &rects, true), ("bands", &bands, true), ("bands", &bands, false)] {
+            for fit in [Grid::Quad, Grid::Sextant, Grid::Octant] {
+                let frame = xbr_frame(src, fit, crisp);
+                assert_eq!(frame.grid(), Grid::Quad);
+                let area = Rect::new(0, 0, 32, 12);
+                let (mut got, mut want) = (Buffer::empty(area), Buffer::empty(area));
+                frame.render_to(area, &mut got);
+                src.render_to(area, &mut want);
+                assert!(got == want, "{name}, crisp {crisp}, {fit:?}: an untouched picture changed");
+            }
+        }
+    }
+
+    /// A stair is smoothed (in the picture's own two colours by the crisp fit,
+    /// in blends of them by the default), a stamped mark wins its cell
+    /// exactly, and no state survives a frame.
+    #[test]
+    fn an_xbr_frame_smooths_a_stair_and_carries_a_stamped_mark() {
+        let stair = |run: usize| {
+            let mut src = PixelBuffer::new(32, 24);
+            for y in 0..24 {
+                for x in 0..32 {
+                    src.plot(x as i32, y as i32, if y >= 6 + x / run { B } else { A });
+                }
+            }
+            src
+        };
+        let between = |c: Rgb| {
+            let inside = |v: u8, p: u8, q: u8| v >= p.min(q) && v <= p.max(q);
+            inside(c.0, A.0, B.0) && inside(c.1, A.1, B.1) && inside(c.2, A.2, B.2)
+        };
+        for crisp in [false, true] {
+            for fit in [Grid::Quad, Grid::Sextant, Grid::Octant] {
+                let src = stair(1);
+                let mut frame = xbr_frame(&src, fit, crisp);
+                let shaped: Vec<usize> =
+                    (0..32 * 12).filter(|&i| frame.cell(i % 32, i / 32).glyph != '▀').collect();
+                assert!(shaped.len() >= 4, "{fit:?}: {} cells changed shape", shaped.len());
+                let mut blends = 0;
+                for i in 0..32 * 12 {
+                    let e = frame.cell(i % 32, i / 32);
+                    assert!(between(e.fg) && between(e.bg), "{fit:?} {i}: {e:?}");
+                    blends += usize::from(![A, B].contains(&e.fg) || ![A, B].contains(&e.bg));
+                    assert_eq!(e.glyph.to_string().as_str().cell_width(), 1);
+                }
+                if crisp {
+                    assert_eq!(blends, 0, "{fit:?}: the crisp fit showed a colour that was not there");
+                } else {
+                    assert!(blends >= 8, "{fit:?}: the default fit blended {blends} cells");
+                }
+                // Stamp the top half of every smoothed cell: the mark is exact
+                // and the cell is a half block again.
+                let mark = (255, 255, 255);
+                let mut after = PixelBuffer::new(32, 24);
+                after.copy_from(&src);
+                for &i in &shaped {
+                    after.plot((i % 32) as i32, (i / 32 * 2) as i32, mark);
+                }
+                frame.overlay(&src, &after);
+                for &i in &shaped {
+                    let e = frame.cell(i % 32, i / 32);
+                    assert!(e.fg == mark || e.bg == mark, "{fit:?} cell {i}: the mark became {e:?}");
+                    assert!(e.glyph == '▀' || e.glyph == '▄', "{fit:?} cell {i}: {e:?}");
+                }
+                // The same picture again, after another one in the other
+                // mode: the same cells.
+                let fresh = xbr_frame(&src, fit, crisp).aa.clone();
+                let mut reused = DetailFrame::new();
+                assert!(reused.xbr_from(fit, !crisp, 32, 12, &stair(2)));
+                assert!(reused.xbr_from(fit, crisp, 32, 12, &src));
+                assert!(reused.aa == fresh, "{fit:?}: the frame remembered an earlier picture");
+            }
+        }
+    }
+
     #[test]
     fn the_glyph_card_names_every_set() {
         let card = glyph_card();
-        for label in ["half", "quadrant", "sextant", "octant", "RATRUN_SUBCELL", "always on"] {
+        for label in ["half", "quadrant", "wedges", "sextant", "octant", "RATRUN_SUBCELL", "always on"] {
             assert!(card.contains(label), "{label}");
         }
         assert!(card.contains('\u{1FB00}') && card.contains('\u{1CD00}') && card.contains('▚'));
