@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+- **Lighting effects.** Light pools are smooth instead of blocky, floors and
+  walls take a little relief, wet and metal things catch the lamp, bodies
+  throw soft shadows (one straight down, one from each nearby lamp), lamps
+  put faint shafts and dust in the air, and wet floors carry a streak of the
+  lamp above them. All of it is restrained by design. `RATRUN_FX=0` (or the
+  console's `fx off`) restores the previous look exactly. Costs about a third
+  of a millisecond a frame and a fifth to a third more terminal output.
+- **Laser Eyes** is now two beams that close inward like scissors, at every
+  rank; from rank four they cross and carry on to the far edges. It reaches
+  1.6 times as far and sweeps in a third of the time. Damage per sweep is
+  unchanged.
+- **Growth Serum.** A rare pocket find: for twenty seconds the rat is five
+  times its size, the view pulls back, and everything ordinary underfoot is
+  crushed. Elites, minibosses and grounded bosses take a heavy stomp instead.
+  The giant takes half damage.
+- **Bosses can no longer be stun-locked or kited forever.** A stagger is
+  rationed (0.3 s in any 4 s) and never interrupts an attack that has begun;
+  shoves are capped; a boss that cannot reach the rat for three seconds
+  sprints or leaps to close the gap. The jaguar pounces from range, and the
+  mower locks on to a rat that backs out of its scan.
+
 ## 0.2.0 (2026-11-22)
 
 Subject R-47's escape is now a campaign: four sectors, fifteen minutes each,
