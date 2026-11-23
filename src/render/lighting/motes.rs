@@ -1,20 +1,782 @@
 //! W7 — particulate in beams (dust, steam, marine snow) and caustics
-//! (contract §4, techniques 10 + 11). Analytic from `(level.seed, step8)`,
-//! masked by the air channel, held on 8 Hz steps and sparse.
+//! (contract §4, techniques 10 + 11).
 //!
-//! STUB: no caustics anywhere, no motes.
+//! Both terms are **analytic**: every position and phase is a pure function of
+//! the level seed and `frame.step8` (8 Hz; 4 Hz on Hard), reconstructed the way
+//! [`super::ambience`] rebuilds its emitters. There is no particle pool, no
+//! rng, no allocation and no wall clock, so a still frame inside one 8 Hz step
+//! is bit-identical, and only about one mote per two moves a cell per step.
+//!
+//! * Motes exist **only inside lit air**: the air channel
+//!   (`fx::LightInfo::air`, written by `air.rs`, W2) is the beam mask, so dust
+//!   appears in the shafts and nowhere else and can never cross a wall (W2's
+//!   scatter already carries visibility).
+//! * Caustics are water light on a floor: off for every shipped theme
+//!   ([`caustics_here`] returns false for all six). The under-ocean floor flips
+//!   one arm of that function and the whole tested path lights up; the tests
+//!   below drive it through a thread-local override.
 
-#![allow(unused_variables)] // Stub: remove when filled in.
-
-use super::engine::Grid;
-use super::fx::{Canvas, FxFrame};
+use super::engine::{Grid, LayerMask, LightingMode};
+use super::fx::{strength, Canvas, FxFrame};
+use super::material;
 use crate::game::level::{LightZoneKind, Theme};
+use crate::render::palette::Rgb;
+
+// ---------------------------------------------------------------------------
+// Motes
+// ---------------------------------------------------------------------------
+
+/// World pixels per mote at Full: a 120×80 view gets 60, a 240×160 one 80.
+const MOTE_AREA_PER_MOTE: usize = 160;
+/// The contract's band: 30–80 sparse 1 px motes per view.
+const MOTE_COUNT_MIN: usize = 30;
+const MOTE_COUNT_MAX: usize = 80;
+/// Steam wisps per view (Kitchen, Laundry): 2–4 low-alpha puffs.
+const STEAM_PUFFS: usize = 4;
+/// A mote is only drawn where the air channel reaches this share of the
+/// view's brightest air (1/8, at least one Q8.8 level). W2's absolute scale is
+/// its own; the ratio is the invariant — dust lives in the body of a beam, not
+/// only at its core, and nowhere in the dark.
+const AIR_GATE_SHIFT: u32 = 3;
+/// A mote's lift in output levels at the beam gate / at the brightest air,
+/// before `fx::strength::MOTES` (0.5) halves it to 9..=32 levels.
+const MOTE_LIFT_MIN: i32 = 18;
+const MOTE_LIFT_SPAN: i32 = 46;
+/// Beam brightness buckets: flat steps, never a gradient creeping one level.
+const MOTE_REL_STEP: i32 = 85;
+
+// ---------------------------------------------------------------------------
+// Caustics
+// ---------------------------------------------------------------------------
+
+/// The quarter wave of the sine LUT: `round(256 · sin(kπ/128))`, Q8.8. Written
+/// out rather than built from `f64::sin` so the pattern is identical on every
+/// platform (no libm, no init, no allocation).
+const SIN_QUARTER: [i16; 65] = [
+    0, 6, 13, 19, 25, 31, 38, 44, 50, 56, 62, 68, 74, 80, 86, 92, 98, 104, 109, 115, 121, 126,
+    132, 137, 142, 147, 152, 157, 162, 167, 172, 177, 181, 185, 190, 194, 198, 202, 206, 209, 213,
+    216, 220, 223, 226, 229, 231, 234, 237, 239, 241, 243, 245, 247, 248, 250, 251, 252, 253, 254,
+    255, 255, 256, 256, 256,
+];
+
+/// Integer wave numbers of the two interfering fronts, in 256ths of a cycle
+/// per world pixel: wavelengths ≈ 21 px and 21 px along (1, 0.5) and
+/// (-0.6, 1). Both are integers, so the pattern is periodic in world space
+/// (64 px in x) and rides the floor as the camera pans.
+const CAUSTIC_AX: i32 = 12;
+const CAUSTIC_AY: i32 = 6;
+const CAUSTIC_BX: i32 = -8;
+const CAUSTIC_BY: i32 = 14;
+/// Phase advance per 8 Hz step, in 256ths of a cycle (≈ 0.63 cycles a second).
+const CAUSTIC_PHASE_STEP: u32 = 20;
+/// The brightest a caustic lifts a floor pixel, in output levels before
+/// `fx::strength::CAUSTICS` (0.5), and the flat step it is quantised to (the
+/// edges of a slack-water pattern must not repaint cells one level at a time).
+const CAUSTIC_GAIN: i32 = 30;
+const CAUSTIC_LEVEL_STEP: i32 = 3;
+/// The cool cast a beam's own colour is pulled toward: water light reads cold
+/// even under a warm lamp.
+const CAUSTIC_COOL: Rgb = (120, 200, 255);
+
+/// The per-stage strength, Q8. The game always uses [`Gains::live`]; the tests
+/// zero it to prove that strength 0 draws nothing.
+#[derive(Clone, Copy)]
+struct Gains {
+    motes: i32,
+    caustics: i32,
+}
+
+impl Gains {
+    fn live() -> Self {
+        Self {
+            motes: (strength::MOTES * 256.0) as i32,
+            caustics: (strength::CAUSTICS * 256.0) as i32,
+        }
+    }
+
+    #[cfg(test)]
+    const ZERO: Self = Self {
+        motes: 0,
+        caustics: 0,
+    };
+}
+
+/// What floats in this theme's air.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Flavour {
+    /// Fine grit in a wet shaft (the Sewer, the Printworks, road dust).
+    Dust,
+    /// Rising wisps off warm floors (the Kitchen, the Laundry).
+    Steam,
+    /// Sparse cold motes (the Lab).
+    Cold,
+}
+
+const fn flavour(theme: Theme) -> Flavour {
+    match theme {
+        Theme::Kitchen | Theme::Laundry => Flavour::Steam,
+        Theme::Lab => Flavour::Cold,
+        Theme::Sewer | Theme::Printworks | Theme::Trailer => Flavour::Dust,
+    }
+}
 
 /// Does this theme/zone show caustics? Off everywhere by default.
+///
+/// No water-light floor ships yet: every theme is dry. The under-ocean level
+/// adds its arm in the `match` below (`Theme::Ocean => true`) and its floor
+/// lights up — the pattern, its 8 Hz stepping, its floor and light gates and
+/// its churn are all built and tested here already.
 pub(super) fn caustics_here(theme: Theme, zone: Option<LightZoneKind>) -> bool {
-    false
+    #[cfg(test)]
+    {
+        if caustics_override() {
+            return true;
+        }
+    }
+    let water: bool = match theme {
+        Theme::Sewer | Theme::Kitchen | Theme::Lab | Theme::Laundry | Theme::Printworks
+        | Theme::Trailer => false,
+    };
+    // A blacked-out zone has its lamps dead: no water light there either.
+    water && !matches!(zone, Some(LightZoneKind::Blackout))
+}
+
+/// Test-only switch: pretend the level asked for caustics (the ocean arm).
+#[cfg(test)]
+thread_local! {
+    static CAUSTICS_OVERRIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn set_caustics_override(on: bool) {
+    CAUSTICS_OVERRIDE.with(|c| c.set(on));
+}
+
+#[cfg(test)]
+fn caustics_override() -> bool {
+    CAUSTICS_OVERRIDE.with(|c| c.get())
 }
 
 /// Last pixel stage: motes inside lit air, caustics where flagged
 /// (`fx::strength::MOTES`, `CAUSTICS`).
-pub(super) fn draw(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>) {}
+pub(super) fn draw(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>) {
+    draw_with(grid, canvas, frame, Gains::live());
+}
+
+fn draw_with(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, gains: Gains) {
+    // §5: 8 Hz at Full, 4 Hz at Hard, off at Coarse/Compact (and fx-off never
+    // calls this at all).
+    let clock = match frame.mode {
+        LightingMode::Full => frame.step8,
+        LightingMode::Hard => frame.step8 / 2,
+        _ => return,
+    };
+    if canvas.w == 0 || canvas.h == 0 {
+        return;
+    }
+    caustics(grid, canvas, frame, clock, gains);
+    if gains.motes > 0 {
+        particulate(grid, canvas, frame, clock, gains);
+    }
+}
+
+fn particulate(
+    grid: &Grid,
+    canvas: &mut Canvas<'_>,
+    frame: &FxFrame<'_>,
+    clock: u32,
+    gains: Gains,
+) {
+    let Some(beam) = Beam::measure(grid) else {
+        return;
+    };
+    let flavour = flavour(frame.theme);
+    let count = mote_count(canvas.w, canvas.h, frame.mode, flavour);
+    let seed = (frame.level.seed as u32) ^ (frame.level.seed >> 32) as u32;
+    let field = (canvas.w * canvas.h) as u32;
+    let cold = flavour == Flavour::Cold;
+    for i in 0..count {
+        // Ambience's hashing, cloned: the mote's whole life comes from these
+        // bits, so two runs (or two frames in a step) agree exactly.
+        let h0 = hash(seed ^ (i as u32).wrapping_mul(0x9e37_79b9));
+        let h1 = hash(h0 ^ 0x5bf0_3635);
+        let cell = (h0 % field) as i32;
+        let (base_x, base_y) = (cell % canvas.w as i32, cell / canvas.w as i32);
+        let (mut vx, mut vy) = ((h1 % 3) as i32 - 1, ((h1 / 3) % 3) as i32 - 1);
+        match flavour {
+            // A wisp rises whether or not its hash wanted to drift.
+            Flavour::Steam => vy = -1,
+            _ => {
+                if vx == 0 && vy == 0 {
+                    vy = 1;
+                }
+            }
+        }
+        // Each mote steps on every other 8 Hz step, so about half the field
+        // moves a pixel at a time: 30 moves ≈ 60 changed cells, the budget.
+        let moves = (i64::from(clock) + 1 + i64::from(i as u32 & 1)) / 2;
+        let x = (i64::from(base_x) + i64::from(vx) * moves).rem_euclid(canvas.w as i64) as i32;
+        let y = (i64::from(base_y) + i64::from(vy) * moves).rem_euclid(canvas.h as i64) as i32;
+        let Some((rel, tint)) = beam.at(grid, x as usize, y as usize) else {
+            continue;
+        };
+        let lift = lift_q8(rel, cold) * gains.motes >> 8;
+        if lift <= 0 {
+            continue;
+        }
+        if flavour == Flavour::Steam {
+            // A soft wisp: a core with two dimmer companions leaning whichever
+            // way this mote's hash points.
+            let side = if h1 & 1 == 0 { 1 } else { -1 };
+            stamp(canvas, x, y, lift, tint);
+            stamp(canvas, x + side, y - 1, lift * 2 / 3, tint);
+            stamp(canvas, x, y + 1, lift / 2, tint);
+        } else {
+            stamp(canvas, x, y, lift, tint);
+        }
+    }
+}
+
+/// The lit-air mask of one frame: the view's brightest air and the gate a mote
+/// must reach.
+struct Beam {
+    peak: u16,
+    gate: u16,
+}
+
+impl Beam {
+    /// `None` when this view has no lit air at all (every mote is then in the
+    /// dark, and the whole pass is free).
+    fn measure(grid: &Grid) -> Option<Self> {
+        let mut peak = 0u16;
+        for info in grid.info.iter().take(grid.w * grid.h) {
+            peak = peak.max(info.air[0]).max(info.air[1]).max(info.air[2]);
+        }
+        if peak == 0 {
+            return None;
+        }
+        Some(Self {
+            peak,
+            gate: (peak >> AIR_GATE_SHIFT).max(1),
+        })
+    }
+
+    /// The beam's brightness bucket (0..=255, flat-stepped) and its colour at
+    /// one pixel, or `None` where the air is too thin for a mote.
+    fn at(&self, grid: &Grid, px: usize, py: usize) -> Option<(i32, Rgb)> {
+        let info = grid.info.get(grid.sample_index(px, py))?;
+        let air = info.air[0].max(info.air[1]).max(info.air[2]);
+        if air < self.gate {
+            return None;
+        }
+        let rel = ((u32::from(air) * 255) / u32::from(self.peak)).min(255) as i32;
+        let tint = if info.dom == 0 {
+            (210, 214, 230)
+        } else {
+            info.dom_rgb
+        };
+        Some(((rel / MOTE_REL_STEP) * MOTE_REL_STEP, tint))
+    }
+}
+
+/// A mote's lift in output levels before the strength scale, Q8.
+#[inline]
+fn lift_q8(rel: i32, cold: bool) -> i32 {
+    let base = MOTE_LIFT_MIN + rel * MOTE_LIFT_SPAN / 255;
+    if cold {
+        base * 3 / 4
+    } else {
+        base
+    }
+}
+
+/// Add `amount` levels toward `tint` (at least half white, so a cold beam's
+/// mote is still a spark and not a blue hole).
+#[inline]
+fn stamp(canvas: &mut Canvas<'_>, x: i32, y: i32, amount: i32, tint: Rgb) {
+    if amount <= 0 || x < 0 || y < 0 || x as usize >= canvas.w || y as usize >= canvas.h {
+        return;
+    }
+    let i = y as usize * canvas.w + x as usize;
+    if material::is_creature(canvas.mat_at(i)) {
+        return;
+    }
+    let pixel = &mut canvas.px[i];
+    *pixel = (
+        pixel.0.saturating_add(channel(amount, tint.0)),
+        pixel.1.saturating_add(channel(amount, tint.1)),
+        pixel.2.saturating_add(channel(amount, tint.2)),
+    );
+}
+
+/// One channel's share of an additive amount: half the lift is white, the rest
+/// carries the beam's colour.
+#[inline]
+fn channel(amount: i32, tint: u8) -> u8 {
+    (((amount * (128 + i32::from(tint) / 2)) >> 8).clamp(0, 255)) as u8
+}
+
+/// [`SIN_QUARTER`] looked up over the full turn, Q8.8 (`-256..=256`).
+#[inline]
+fn sin_q8(index: u8) -> i32 {
+    let i = usize::from(index);
+    let (i, sign) = if i < 128 { (i, 1) } else { (i - 128, -1) };
+    let v = if i <= 64 {
+        SIN_QUARTER[i]
+    } else {
+        SIN_QUARTER[128 - i]
+    };
+    sign * i32::from(v)
+}
+
+/// The two-wave interference of technique 10 at a world pixel, Q8.8
+/// (`0..=256`): the product of two `1 - |sin|` fronts, squared, so the crests
+/// are thin and the troughs broad (the plates' caustic cells).
+#[inline]
+fn caustics_q8(wx: i32, wy: i32, phase: i32) -> i32 {
+    let i1 = (wx * CAUSTIC_AX + wy * CAUSTIC_AY + phase) & 255;
+    let i2 = (wx * CAUSTIC_BX + wy * CAUSTIC_BY - phase) & 255;
+    let f1 = 256 - sin_q8(i1 as u8).abs();
+    let f2 = 256 - sin_q8(i2 as u8).abs();
+    let fil = (f1 * f2) >> 8;
+    (fil * fil) >> 8
+}
+
+fn caustics(grid: &Grid, canvas: &mut Canvas<'_>, frame: &FxFrame<'_>, clock: u32, gains: Gains) {
+    if gains.caustics <= 0 {
+        return;
+    }
+    // A view-wide flag (or any flagged zone in this level) gates the pass; the
+    // per-sample `Surface::zone` then decides pixel by pixel. Today this is
+    // false for every theme, so the pass costs one comparison.
+    let whole_view = caustics_here(frame.theme, None);
+    if !whole_view
+        && !frame
+            .level
+            .objects
+            .light_zones
+            .iter()
+            .any(|z| caustics_here(frame.theme, Some(z.kind)))
+    {
+        return;
+    }
+    let phase = ((u64::from(clock) * u64::from(CAUSTIC_PHASE_STEP)) & 255) as i32;
+    let cam = (frame.cam.x.round() as i32, frame.cam.y.round() as i32);
+    let (w, h) = (canvas.w, canvas.h);
+    for py in 0..h {
+        let wy = cam.1 + py as i32;
+        for px in 0..w {
+            let wx = cam.0 + px as i32;
+            let i = grid.sample_index(px, py);
+            let Some(surface) = grid.surfaces.get(i) else {
+                continue;
+            };
+            // Water light lands on the floor, never on a wall face.
+            if surface.layer & LayerMask::FLOOR.0 == 0 {
+                continue;
+            }
+            let Some(info) = grid.info.get(i) else {
+                continue;
+            };
+            // Caustics need the light that makes them: a dark floor is dry.
+            if info.dom == 0 {
+                continue;
+            }
+            if !whole_view && !caustics_here(frame.theme, surface.zone) {
+                continue;
+            }
+            let index = py * w + px;
+            let byte = canvas.mat_at(index);
+            let emissive = material::kind(byte) == material::MaterialKind::Emissive;
+            if material::is_creature(byte) || emissive {
+                continue;
+            }
+            let level = (caustics_q8(wx, wy, phase) * CAUSTIC_GAIN) >> 8;
+            let level = ((level * gains.caustics) >> 8) / CAUSTIC_LEVEL_STEP * CAUSTIC_LEVEL_STEP;
+            if level <= 0 {
+                continue;
+            }
+            let tint = (
+                ((u16::from(info.dom_rgb.0) + u16::from(CAUSTIC_COOL.0)) / 2) as u8,
+                ((u16::from(info.dom_rgb.1) + u16::from(CAUSTIC_COOL.1)) / 2) as u8,
+                ((u16::from(info.dom_rgb.2) + u16::from(CAUSTIC_COOL.2)) / 2) as u8,
+            );
+            let pixel = &mut canvas.px[index];
+            *pixel = (
+                pixel.0.saturating_add(channel(level, tint.0)),
+                pixel.1.saturating_add(channel(level, tint.1)),
+                pixel.2.saturating_add(channel(level, tint.2)),
+            );
+        }
+    }
+}
+
+/// How many elements a view floats: the contract's 30–80 motes (half on Hard),
+/// fewer cold ones in the Lab, and 2–4 steam wisps in the warm floors.
+fn mote_count(w: usize, h: usize, mode: LightingMode, flavour: Flavour) -> usize {
+    let base = (w * h / MOTE_AREA_PER_MOTE).clamp(MOTE_COUNT_MIN, MOTE_COUNT_MAX);
+    match flavour {
+        Flavour::Steam => STEAM_PUFFS,
+        Flavour::Cold => (base * 3 / 5).max(MOTE_COUNT_MIN),
+        Flavour::Dust => match mode {
+            LightingMode::Hard => (base / 2).max(MOTE_COUNT_MIN / 2),
+            _ => base,
+        },
+    }
+}
+
+/// `ambience.rs`'s integer hash, cloned: the effects stage must not depend on
+/// the simulation's rng and must not advance a pool.
+fn hash(mut seed: u32) -> u32 {
+    seed ^= seed >> 16;
+    seed = seed.wrapping_mul(0x7feb_352d);
+    seed ^ (seed >> 15)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::engine::LightingMode;
+    use super::super::fx::{step8, testkit, LightInfo};
+    use super::{
+        caustics_here, caustics_q8, draw_with, mote_count, set_caustics_override, Flavour, FxFrame,
+        Gains, Grid, LayerMask, LightZoneKind, Rgb, Theme, MOTE_COUNT_MAX, MOTE_COUNT_MIN,
+    };
+    use crate::game::level::Level;
+    use crate::math::Vec2;
+    use crate::render::framebuffer::PixelBuffer;
+    use crate::term::ColorDepth;
+
+    fn frame<'a>(level: &'a Level, mode: LightingMode, elapsed: f32) -> FxFrame<'a> {
+        FxFrame {
+            mode,
+            depth: ColorDepth::Truecolor,
+            theme: level.theme,
+            level,
+            cam: Vec2::ZERO,
+            elapsed,
+            step8: step8(elapsed),
+            rat: Vec2::new(32.0, 24.0),
+            lights: &[],
+            ambient: [256, 256, 256],
+        }
+    }
+
+    fn level(theme: Theme) -> Level {
+        Level::empty(theme)
+    }
+
+    /// A lit floor buffer of `w × h` and its (still black) canvas.
+    fn run(grid: &Grid, frame: &FxFrame<'_>, gains: Gains, w: usize, h: usize) -> Vec<Rgb> {
+        let mut pb = PixelBuffer::new(w, h);
+        pb.set_pen(0);
+        pb.clear((85, 71, 78));
+        let mut canvas = testkit::canvas(&mut pb);
+        draw_with(grid, &mut canvas, frame, gains);
+        pb.pixels().to_vec()
+    }
+
+    fn changed(grid: &Grid, frame: &FxFrame<'_>, w: usize, h: usize) -> Vec<usize> {
+        let before = vec![(85, 71, 78); w * h];
+        let after = run(grid, frame, Gains::live(), w, h);
+        (0..w * h).filter(|&i| after[i] != before[i]).collect()
+    }
+
+    #[test]
+    fn motes_draw_only_inside_lit_air() {
+        let lvl = level(Theme::Sewer);
+        let (w, h) = (60, 40);
+        let f = frame(&lvl, LightingMode::Full, 1.0);
+        let mut grid = testkit::flat_grid(w, h, 1, [256, 256, 256]);
+        // The beam covers the left half of the view; the right half is dark.
+        for y in 0..h {
+            for x in 0..w {
+                if x < w / 2 {
+                    grid.info[y * w + x].air = [900, 720, 480];
+                    grid.info[y * w + x].dom = 512;
+                    grid.info[y * w + x].dom_rgb = (255, 210, 140);
+                }
+            }
+        }
+        let hit = changed(&grid, &f, w, h);
+        assert!(!hit.is_empty(), "motes must appear in a lit beam");
+        for i in hit {
+            assert!(
+                i % w < w / 2,
+                "a mote outside the lit air at pixel {}",
+                i % w
+            );
+        }
+        // And nothing at all in a view with no light in the air.
+        let dark = testkit::flat_grid(w, h, 1, [256, 256, 256]);
+        assert!(changed(&dark, &f, w, h).is_empty(), "no air, no motes");
+    }
+
+    #[test]
+    fn a_still_view_is_frozen_between_eight_hz_steps_and_moves_on_the_next() {
+        let lvl = level(Theme::Sewer);
+        let (w, h) = (120, 80);
+        let mut grid = testkit::flat_grid(w, h, 1, [256, 256, 256]);
+        for info in grid.info.iter_mut() {
+            *info = LightInfo {
+                air: [1200, 1000, 800],
+                dom: 700,
+                dom_rgb: (240, 220, 190),
+                ..LightInfo::default()
+            };
+        }
+        // 1.000 s and 1.100 s are the same step (8); 1.125 s is the next one.
+        let a = frame(&lvl, LightingMode::Full, 1.000);
+        let b = frame(&lvl, LightingMode::Full, 1.100);
+        let c = frame(&lvl, LightingMode::Full, 1.125);
+        assert_eq!(a.step8, b.step8);
+        assert_ne!(a.step8, c.step8);
+        let first = run(&grid, &a, Gains::live(), w, h);
+        assert_eq!(first, run(&grid, &b, Gains::live(), w, h), "held on the step");
+        assert_ne!(first, run(&grid, &c, Gains::live(), w, h), "moved on the next");
+    }
+
+    #[test]
+    fn a_step_moves_about_one_mote_per_cell_of_budget() {
+        let lvl = level(Theme::Sewer);
+        let (w, h) = (120, 80);
+        let mut grid = testkit::flat_grid(w, h, 1, [256, 256, 256]);
+        for info in grid.info.iter_mut() {
+            info.air = [1500, 1500, 1500];
+            info.dom = 800;
+            info.dom_rgb = (230, 230, 230);
+        }
+        let a = run(&grid, &frame(&lvl, LightingMode::Full, 2.0), Gains::live(), w, h);
+        let b = run(&grid, &frame(&lvl, LightingMode::Full, 2.125), Gains::live(), w, h);
+        let moved = (0..w * h).filter(|&i| a[i] != b[i]).count();
+        assert!(moved > 0, "the step must move something");
+        assert!(
+            moved <= 64,
+            "{moved} changed cells in one step, over the 60-cell budget"
+        );
+        // Nothing above the strength band either: a mote is a spark, not a lamp.
+        for pixel in &b {
+            let d = i32::from(pixel.0) - i32::from(85u8);
+            assert!(d <= 33, "a mote lifted a pixel by {d} levels");
+        }
+    }
+
+    #[test]
+    fn mote_counts_stay_in_the_contract_band() {
+        for (w, h) in [(40, 30), (60, 40), (120, 80), (200, 120), (240, 160)] {
+            let full = mote_count(w, h, LightingMode::Full, Flavour::Dust);
+            assert!(
+                (MOTE_COUNT_MIN..=MOTE_COUNT_MAX).contains(&full),
+                "{w}x{h} floats {full} motes"
+            );
+            let hard = mote_count(w, h, LightingMode::Hard, Flavour::Dust);
+            assert!(hard <= full && hard >= 12, "Hard is sparser, not empty");
+            let cold = mote_count(w, h, LightingMode::Full, Flavour::Cold);
+            assert!((MOTE_COUNT_MIN..=MOTE_COUNT_MAX).contains(&cold));
+            let steam = mote_count(w, h, LightingMode::Full, Flavour::Steam);
+            assert!((2..=4).contains(&steam), "2-4 steam wisps, got {steam}");
+        }
+    }
+
+    #[test]
+    fn every_shipped_theme_is_dry() {
+        let zones = [
+            None,
+            Some(LightZoneKind::Corridor),
+            Some(LightZoneKind::Room),
+            Some(LightZoneKind::Start),
+            Some(LightZoneKind::Arena),
+            Some(LightZoneKind::Blackout),
+            Some(LightZoneKind::Maze),
+        ];
+        for theme in Theme::playable() {
+            for zone in zones {
+                assert!(
+                    !caustics_here(theme, zone),
+                    "{} shows caustics in {zone:?}",
+                    theme.name()
+                );
+            }
+        }
+    }
+
+    fn caustic_grid(w: usize, h: usize) -> Grid {
+        let mut grid = testkit::flat_grid(w, h, 1, [256, 256, 256]);
+        for info in grid.info.iter_mut() {
+            info.dom = 600;
+            info.dom_rgb = (200, 230, 255);
+        }
+        grid
+    }
+
+    #[test]
+    fn caustics_light_a_flagged_floor_and_nothing_else() {
+        let lvl = level(Theme::Sewer);
+        let (w, h) = (64, 32);
+        let mut grid = caustic_grid(w, h);
+        // The top rows are a wall face: a wall takes no water light.
+        for y in 0..8 {
+            for x in 0..w {
+                grid.surfaces[y * w + x].layer = LayerMask::WALLS.0;
+            }
+        }
+        let f = frame(&lvl, LightingMode::Full, 3.0);
+        // Dry: the arm is off, so the pass is a no-op.
+        assert!(changed(&grid, &f, w, h).is_empty(), "no water light here yet");
+
+        set_caustics_override(true);
+        let hit = changed(&grid, &f, w, h);
+        set_caustics_override(false);
+        assert!(!hit.is_empty(), "the ocean arm must light the floor");
+        for i in &hit {
+            assert!(*i / w >= 8, "caustics on a wall at row {}", *i / w);
+        }
+        // Bounded: at restrained strength a crest lifts a pixel by a few levels,
+        // never past the free-step band.
+        let after = {
+            set_caustics_override(true);
+            let out = run(&grid, &f, Gains::live(), w, h);
+            set_caustics_override(false);
+            out
+        };
+        for (index, pixel) in after.iter().enumerate() {
+            let now = [pixel.0, pixel.1, pixel.2];
+            for (channel, before) in [85u8, 71, 78].into_iter().enumerate() {
+                assert!(now[channel] >= before, "a caustic dimmed a pixel at {index}");
+                assert!(
+                    now[channel] - before <= 16,
+                    "caustic crest too bright: {} at {index}",
+                    now[channel]
+                );
+            }
+        }
+        // Darkness is dry even where the floor is flagged.
+        let mut dark = testkit::flat_grid(w, h, 1, [256, 256, 256]);
+        for s in dark.surfaces.iter_mut() {
+            s.layer = LayerMask::FLOOR.0;
+        }
+        set_caustics_override(true);
+        let dark_hit = changed(&dark, &f, w, h);
+        set_caustics_override(false);
+        assert!(dark_hit.is_empty(), "caustics cannot light a dark floor");
+    }
+
+    #[test]
+    fn caustics_tile_across_the_floor_and_step_at_eight_hz() {
+        // Period of both fronts in x: 64 px (both wave numbers divide it).
+        for phase in [0i32, 20, 44, 128, 255] {
+            for wy in [-37i32, 0, 11, 91] {
+                for wx in [0i32, 7, 33, -45] {
+                    assert_eq!(
+                        caustics_q8(wx, wy, phase),
+                        caustics_q8(wx + 64, wy, phase),
+                        "seam at ({wx}, {wy}) phase {phase}"
+                    );
+                }
+                // Smooth enough to read as water: measured over every phase
+                // and position the steepest cell-to-cell step is 173 in x and
+                // 175 in y, so neither axis has a cliff.
+                let mut last = caustics_q8(-100, wy, phase);
+                for wx in -99..100 {
+                    let now = caustics_q8(wx, wy, phase);
+                    assert!((now - last).abs() <= 176, "a caustic cliff at {wx}");
+                    last = now;
+                }
+                let mut last = caustics_q8(3, -100, phase);
+                for wy in -99..100 {
+                    let now = caustics_q8(3, wy, phase);
+                    assert!((now - last).abs() <= 180, "a caustic cliff at {wy}");
+                    last = now;
+                }
+            }
+        }
+
+        let lvl = level(Theme::Sewer);
+        let (w, h) = (64, 32);
+        let grid = caustic_grid(w, h);
+        let mut f = frame(&lvl, LightingMode::Full, 4.0);
+        f.cam = Vec2::new(37.0, 21.0);
+        set_caustics_override(true);
+        let here = run(&grid, &f, Gains::live(), w, h);
+        let mut same = frame(&lvl, LightingMode::Full, 4.05);
+        same.cam = Vec2::new(37.0, 21.0);
+        let held = run(&grid, &same, Gains::live(), w, h);
+        let mut next = frame(&lvl, LightingMode::Full, 4.125);
+        next.cam = Vec2::new(37.0, 21.0);
+        let stepped = run(&grid, &next, Gains::live(), w, h);
+        set_caustics_override(false);
+        assert_eq!(here, held, "held inside the 8 Hz step");
+        assert_ne!(here, stepped, "the pattern steps at 8 Hz");
+
+        // Panning by a whole period in x shows the same water.
+        let mut panned = frame(&lvl, LightingMode::Full, 4.0);
+        panned.cam = Vec2::new(37.0 + 64.0, 21.0);
+        set_caustics_override(true);
+        let shifted = run(&grid, &panned, Gains::live(), w, h);
+        set_caustics_override(false);
+        for (index, (a, b)) in here.iter().zip(shifted.iter()).enumerate() {
+            assert_eq!(a, b, "the pattern tiles at {index}");
+        }
+    }
+
+    #[test]
+    fn strength_zero_draws_nothing() {
+        let lvl = level(Theme::Sewer);
+        let (w, h) = (120, 80);
+        let mut airy = testkit::flat_grid(w, h, 1, [256, 256, 256]);
+        for info in airy.info.iter_mut() {
+            info.air = [1500, 1200, 900];
+            info.dom = 600;
+            info.dom_rgb = (240, 220, 190);
+        }
+        let mut watery = caustic_grid(w, h);
+        for s in watery.surfaces.iter_mut() {
+            s.layer = LayerMask::FLOOR.0;
+        }
+        let f = frame(&lvl, LightingMode::Full, 5.0);
+        set_caustics_override(true);
+        let quiet = run(&airy, &f, Gains::ZERO, w, h);
+        assert!(quiet.iter().all(|&p| p == (85, 71, 78)));
+        let dry = run(&watery, &f, Gains::ZERO, w, h);
+        set_caustics_override(false);
+        assert!(dry.iter().all(|&p| p == (85, 71, 78)));
+        // And the same frame at full strength does draw, so the zero case is
+        // not vacuous.
+        assert!(!changed(&airy, &f, w, h).is_empty());
+    }
+
+    #[test]
+    fn coarse_and_compact_tiers_draw_nothing() {
+        let lvl = level(Theme::Sewer);
+        let (w, h) = (60, 40);
+        let mut grid = testkit::flat_grid(w, h, 1, [256, 256, 256]);
+        for info in grid.info.iter_mut() {
+            info.air = [1500, 1200, 900];
+            info.dom = 600;
+            info.dom_rgb = (240, 220, 190);
+        }
+        set_caustics_override(true);
+        for mode in [LightingMode::Coarse, LightingMode::Compact] {
+            let f = frame(&lvl, mode, 6.0);
+            assert!(changed(&grid, &f, w, h).is_empty(), "{mode:?} motes are off");
+        }
+        set_caustics_override(false);
+    }
+
+    #[test]
+    fn hard_steps_at_four_hz() {
+        let lvl = level(Theme::Sewer);
+        let (w, h) = (60, 40);
+        let mut grid = testkit::flat_grid(w, h, 1, [256, 256, 256]);
+        for info in grid.info.iter_mut() {
+            info.air = [1500, 1500, 1500];
+            info.dom = 800;
+            info.dom_rgb = (230, 230, 230);
+        }
+        // 0.000 s → step 0, 0.125 s → step 1: one clock at 4 Hz, so identical.
+        let a = run(&grid, &frame(&lvl, LightingMode::Hard, 0.0), Gains::live(), w, h);
+        let b = run(&grid, &frame(&lvl, LightingMode::Hard, 0.125), Gains::live(), w, h);
+        let c = run(&grid, &frame(&lvl, LightingMode::Hard, 0.25), Gains::live(), w, h);
+        assert_eq!(a, b, "Hard holds two 8 Hz steps per step");
+        assert_ne!(a, c, "and moves at 4 Hz");
+    }
+}
