@@ -96,20 +96,24 @@ dark.*
 
 - **You only move.** Eight-direction movement with a dash; every weapon fires,
   aims and reloads itself.
-- **Three sectors on a route, plus two side routes and a getaway ride.** Sewer →
-  Kitchen *or* Laundry → Lab *or* Printworks. Between sectors you pack up to
-  three powerups and pick which floor the next sector plays. The Flatbed is a
-  bonus practice floor, playable on its own from sector select.
+- **Four sectors on a route, with two side routes.** Sewer → Kitchen *or*
+  Laundry → Lab *or* Printworks → the Flatbed, the getaway ride and the finale.
+  Between sectors you pack up to three powerups and pick which floor the next
+  sector plays. The Flatbed is also always open as a practice floor from sector
+  select.
 - **Every floor has its own roster**: eight enemy kinds that unlock on the
   clock, from the first fodder to a third trick at 9:45, and its own four
   minibosses — 48 ordinary kinds and 24 named minibosses across the six floors.
 - **Fifteen minutes a floor**, escalating hordes, **four named minibosses** at
   3:00, 6:00, 9:00 and 12:00 (each leaves a chest), then **the floor's boss** at
-  15:00. Ten bosses across the six floors; a floor draws its boss from its own
+  15:00. There is no arena to walk to: the boss comes to wherever you are. Ten bosses across the six floors; a floor draws its boss from its own
   pool.
 - **13 weapons**, **12 passives**, and **13 evolutions** — a maxed weapon plus
   the right passive evolves into something else entirely when you open a chest.
-  Every level the rat gains on a floor also adds 1% weapon damage.
+  Level-ups are rare (about thirteen a floor) and every one adds 4% weapon
+  damage. Each weapon has its own shape: Gnaw bites, the Tail Whip swipes the
+  half-circle ahead, Squeak Nova is one expanding ring, Sonic Squeak a forward
+  cone, Laser Eyes a sweeping beam, and the Spiked Tail cracks a real whip.
 - **Gold, and two places to spend it.** Mouse holes in the walls hide a
   gene-splice shelf: two splice sockets, plus a heal, a reroll and a Molt
   service. Between runs, the **Nest** spends banked gold on 15 permanent tracks
@@ -118,7 +122,7 @@ dark.*
 - **The Library**: a four-tab dossier that unlocks as you actually meet things —
   bestiary, arsenal, field guide and the floors themselves.
 - **Procedural levels**: a 200 × 160 tile facility per seed with rooms, halls,
-  corridors, an arena, wall rat-holes only you fit through, sometimes a maze with
+  corridors, wall rat-holes only you fit through, sometimes a maze with
   a cache and a one-way door, glue boards, baited mousetraps, steam grates and
   ink pads.
 - **Fog of war** and a minimap with a compact radar, a small mode, or the full
@@ -321,6 +325,9 @@ keyboard-protocol query. `--color truecolor|256|16` and
 | `RATRUN_GLYPHS` | force the glyph set: `unicode` or `safe`. |
 | `RATRUN_CONSOLE` | `RATRUN_CONSOLE=0` disables the admin console in a build that has it. |
 | `RATRUN_CURSOR` | force the cheese cursor on/off for the session. |
+| `RATRUN_MUSIC` | `chip` plays the floor songs on the old chip oscillators, `classic` the original chiptune; the default is the 16-bit palette. |
+| `RATRUN_SMOOTH` | `0` plain half blocks, `1` corner smoothing, `2` (default) antialiasing at 1× zoom. |
+| `RATRUN_FOREGROUND` | `0` hides the overhead parallax layer (pipes, lines, hanging things). |
 | `RATRUN_MUSIC_VOLUME`, `RATRUN_SFX_VOLUME` | pin a volume (0–100, `%` optional) for the session without writing it to your preferences. |
 
 (Development-only switches — the screenshot dumper and the capture harnesses —
