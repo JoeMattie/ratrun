@@ -28,8 +28,9 @@
 //! Render-only: nothing here reads or writes simulation state, no rng, no
 //! clock (the light does not move, so the shadows are still).
 
-use super::engine::LightingMode;
-use super::fx::strength;
+use super::engine::{Grid, LayerMask, LightingMode};
+use super::fx::{strength, Canvas};
+use super::material::{self, MaterialKind};
 use crate::game::collision::{TileMap, TILE_F};
 use crate::game::ecs::components::SpawnId;
 use crate::game::ecs::systems::boss::{Boss, BossState};
@@ -50,11 +51,16 @@ const LIGHT_HEIGHT: f32 = 900.0;
 const DISP_MAX: f32 = 22.0;
 /// Flyers (and airborne bosses) sit high, so their shadow slides further and
 /// visibly separates from the body.
-const DISP_MAX_FLYER: f32 = 36.0;
+const DISP_MAX_FLYER: f32 = 20.0;
 /// How much longer the shadow gets along its slide, per pixel of slide
 /// (`a = b + slide * ELONGATION`): round under a body at the map's centre,
 /// clearly oblong toward the edges.
-const ELONGATION: f32 = 0.75;
+const ELONGATION: f32 = 0.5;
+/// A ground body's longest slide, as a share of its footprint half-width.
+const GROUND_SLIDE: f32 = 0.8;
+/// The share of a footprint table entry the shadow's half-width is.
+const FOOTPRINT_NUM: i32 = 2;
+const FOOTPRINT_DEN: i32 = 3;
 /// Bodies per frame, nearest the rat first.
 const MAX_BODIES: usize = 160;
 
@@ -153,6 +159,59 @@ struct Scratch {
     /// The touched span of each screen row (see [`Rows`]).
     row_x0: Vec<i32>,
     row_x1: Vec<i32>,
+    /// The size of the frame `dark` was rasterised for and not yet multiplied
+    /// into ([`apply_lit`] takes it); `None` when nothing is pending.
+    applied: Option<(usize, usize)>,
+}
+
+/// The lit-space half of a deferred cast ([`draw_deferred`]): multiply this
+/// frame's shadows into the **lit** picture, once, right after the body
+/// shadows. Floor pixels only — no wall, prop or raised sample, no creature
+/// or emissive pixel — by the same test `softshadow::entity_shadows` uses.
+///
+/// Why lit space: on a dark floor (the Sewer) most of what the eye sees is
+/// additive (scatter, the rat's aura, bounce), so a multiply of the albedo
+/// under it moved the pixel by a few levels however deep the shadow was; and
+/// the shadow's edge, sitting in the albedo, was embossed by the bump stage
+/// like a crack in the floor.
+pub(super) fn apply_lit(grid: &Grid, canvas: &mut Canvas<'_>) {
+    SCRATCH.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let s: &mut Scratch = &mut guard;
+        let (w, h) = (canvas.w, canvas.h);
+        if s.applied.take() != Some((w, h)) || s.dark.len() < w * h || s.row_x0.len() < h {
+            return;
+        }
+        for y in 0..h {
+            let (xa, xb) = (s.row_x0[y], s.row_x1[y]);
+            if xa > xb {
+                continue;
+            }
+            for x in xa.max(0) as usize..=(xb.min(w as i32 - 1)) as usize {
+                let i = y * w + x;
+                let d = s.dark[i];
+                if d == 0 {
+                    continue;
+                }
+                let m = canvas.mat_at(i);
+                if material::is_creature(m) || material::kind(m) != MaterialKind::Default {
+                    continue;
+                }
+                let si = grid.sample_index(x, y);
+                let Some(surface) = grid.surfaces.get(si) else {
+                    continue;
+                };
+                if surface.height > 0.0 || surface.layer & LayerMask::FLOOR.0 == 0 {
+                    continue;
+                }
+                let keep = u32::from(255 - d);
+                let p = &mut canvas.px[i];
+                p.0 = ((u32::from(p.0) * keep + 127) / 255) as u8;
+                p.1 = ((u32::from(p.1) * keep + 127) / 255) as u8;
+                p.2 = ((u32::from(p.2) * keep + 127) / 255) as u8;
+            }
+        }
+    });
 }
 
 thread_local! {
@@ -186,9 +245,25 @@ impl Clip<'_> {
     }
 }
 
-/// Darken the floor under every body (`fx::strength::OVERHEAD_DARKEN`).
+/// Darken the floor under every body (`fx::strength::OVERHEAD_DARKEN`),
+/// straight into `pb` (the unlit picture).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn draw(pb: &mut PixelBuffer, scene: &OverheadScene<'_>) {
-    if pb.w == 0 || pb.h == 0 {
+    cast(pb, scene, false);
+}
+
+/// What the scene draw calls: on the tiers that run the lit-space pixel
+/// stages (Full, Hard) only rasterise the shadows and leave the multiply to
+/// [`apply_lit`]; on Coarse there is no such stage, so darken `pb` here.
+pub(crate) fn draw_deferred(pb: &mut PixelBuffer, scene: &OverheadScene<'_>) {
+    let lit = matches!(scene.mode, LightingMode::Full | LightingMode::Hard);
+    cast(pb, scene, lit);
+}
+
+fn cast(pb: &mut PixelBuffer, scene: &OverheadScene<'_>, defer: bool) {
+    // Whatever an earlier frame left pending is stale now.
+    SCRATCH.with(|cell| cell.borrow_mut().applied = None);
+    if pb.w == 0 || pb.h == 0 || super::fx::skip("overhead") {
         return;
     }
     // The tier table (contract §5): on at Full/Hard/Coarse, off at Compact.
@@ -309,6 +384,10 @@ pub(crate) fn draw(pb: &mut PixelBuffer, scene: &OverheadScene<'_>) {
         if written == 0 {
             return;
         }
+        if defer {
+            s.applied = Some((pb.w, pb.h));
+            return;
+        }
 
         // One multiply per shadowed pixel: the shadows never stack and never
         // reach black. Each row only visits the span its shadows touched.
@@ -379,13 +458,24 @@ fn cast_of(
     cam: Vec2,
     (bw, bh): (i32, i32),
 ) -> Option<Cast> {
+    // The footprint tables are generous (they were sized for a cone that
+    // faded from its centre line); the plateau profile wants the body's own
+    // width, or a crowd's shadows merge into one dim floor.
+    let b = (half * FOOTPRINT_NUM / FOOTPRINT_DEN).max(2);
     let slide = Vec2::new(pos.x - centre.x, pos.y - centre.y)
         * (height as f32 / LIGHT_HEIGHT);
-    let slide = slide.clamp_len(if flyer { DISP_MAX_FLYER } else { DISP_MAX });
+    // A ground body's shadow stays attached: it slides at most about its own
+    // half-width, so it peeks out on the side away from the map's centre
+    // instead of lying loose beside the body (a 22 px slide with a 16 px
+    // stretch covered the floor between bodies and read as nothing at all).
+    let slide = slide.clamp_len(if flyer {
+        DISP_MAX_FLYER
+    } else {
+        DISP_MAX.min(b as f32 * GROUND_SLIDE + 2.0)
+    });
     let d = slide.len();
     let x = (pos.x + slide.x - cam.x).round() as i32;
     let y = (pos.y + slide.y - cam.y).round() as i32;
-    let b = half.max(1);
     let a = b + (d * ELONGATION).round() as i32;
     let (ux, uy) = if d > 0.5 {
         (
@@ -454,6 +544,7 @@ fn splat(
     let a2 = a * a;
     let mut span_of = [0i32; (2 * MAX_A + 1) as usize];
     let mut step_of = [0i32; (2 * MAX_A + 1) as usize];
+    let mut core_of = [0i32; (2 * MAX_A + 1) as usize];
     for u in -a..=a {
         let t2 = a2 - u * u;
         // Q8 half-width factor: 256 * sqrt(1 - u²/a²).
@@ -472,6 +563,7 @@ fn splat(
         }
         let k = (u + a) as usize;
         span_of[k] = span;
+        core_of[k] = core_row;
         // Darkness per pixel across the row; `v = 0` is the darkest line, and
         // its value is the core exactly (the ceiling keeps the rounding from
         // eating a level at the core).
@@ -505,7 +597,11 @@ fn splat(
                 if left <= 0 {
                     continue;
                 }
-                (step_of[k] * left) >> 16
+                // A plateau, then a ramp: the core holds out to two thirds of
+                // the row's width and fades over the rest, so the part that
+                // shows past the body's own sprite is still the core (a
+                // linear cone left only its faint skirt in view).
+                ((step_of[k] * left * 3) >> 16).min(core_of[k])
             } else {
                 if vq * 5 > span * 3 * 256 {
                     continue;
@@ -605,11 +701,22 @@ mod tests {
         let cam = c - Vec2::splat(SIZE as f32 * 0.5);
         let mut pb = canvas();
         draw(&mut pb, &scene(&w, cam));
-        let (x, y, loss) = darkest(&pb).expect("a shadow at the centre");
-        assert!(
-            (x - SIZE as i32 / 2).abs() <= 1 && (y - SIZE as i32 / 2).abs() <= 1,
-            "shadow centred under the rat: got ({x}, {y})"
+        let (_, _, loss) = darkest(&pb).expect("a shadow at the centre");
+        // The core is a plateau now, so "the darkest pixel" is a patch: it
+        // must hold the centre, and be symmetric about it.
+        let mid = SIZE / 2;
+        assert_eq!(
+            i32::from(FLOOR.0) - i32::from(pb.pixel_at(mid, mid).0),
+            loss,
+            "the rat's own pixel is in the core"
         );
+        for d in 1..6 {
+            assert_eq!(
+                pb.pixel_at(mid - d, mid).0,
+                pb.pixel_at(mid + d, mid).0,
+                "shadow centred under the rat ({d} px either side)"
+            );
+        }
         assert_eq!(
             loss,
             i32::from(FLOOR.0) - i32::from(darkened(core())),
@@ -802,6 +909,44 @@ mod tests {
         sc.hide_rat = true;
         draw(&mut hidden, &sc);
         assert_eq!(darkest(&hidden), None, "a plate with no rat is untouched");
+    }
+
+    #[test]
+    fn full_defers_to_the_lit_picture_and_spares_bodies_and_coarse_does_not() {
+        let mut w = world(Theme::Sewer);
+        let c = centre(&w);
+        w.player.pos = c;
+        let cam = c - Vec2::splat(SIZE as f32 * 0.5);
+        let mid = SIZE / 2;
+
+        // Full: the scene draw only rasterises; the unlit picture is untouched.
+        let mut pb = canvas();
+        pb.set_materials(true);
+        // A creature pixel in the core and a floor pixel beside it.
+        let prev = pb.set_pen(material::pen(MaterialKind::Fur, true, 2));
+        pb.plot(mid as i32, mid as i32, FLOOR);
+        pb.set_pen(prev);
+        draw_deferred(&mut pb, &scene(&w, cam));
+        assert_eq!(darkest(&pb), None, "Full leaves the albedo alone");
+        let grid = testkit::flat_grid(SIZE, SIZE, 1, [256, 256, 256]);
+        apply_lit(&grid, &mut testkit::canvas(&mut pb));
+        assert_eq!(pb.pixel_at(mid, mid), FLOOR, "a creature pixel is never shadowed");
+        assert_eq!(
+            pb.pixel_at(mid, mid + 1).0,
+            darkened(core()),
+            "the floor beside it takes the core"
+        );
+        // Taken once: a second call (a frame that cast nothing) is a no-op.
+        let once = pb.pixels().to_vec();
+        apply_lit(&grid, &mut testkit::canvas(&mut pb));
+        assert_eq!(pb.pixels(), &once[..], "the pending shadows are applied once");
+
+        // Coarse has no lit-space stage: the scene draw darkens the albedo.
+        let mut pb = canvas();
+        let mut sc = scene(&w, cam);
+        sc.mode = LightingMode::Coarse;
+        draw_deferred(&mut pb, &sc);
+        assert!(darkest(&pb).is_some(), "Coarse darkens in place");
     }
 
     #[test]

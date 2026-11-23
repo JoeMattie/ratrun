@@ -443,6 +443,15 @@ fn highlight_add(lobe: i32, energy: i32, colour: Rgb) -> [i32; 3] {
     out
 }
 
+/// The lamp's colour pulled [`WET_WHITE`]/256 of the way to white.
+const WET_WHITE: i32 = 160;
+
+#[inline]
+fn wet_white(c: Rgb) -> Rgb {
+    let mix = |v: u8| (i32::from(v) + (((255 - i32::from(v)) * WET_WHITE) >> 8)) as u8;
+    (mix(c.0), mix(c.1), mix(c.2))
+}
+
 /// Post-composite pixel stage: specular highlights by material and the rim
 /// light on CREATURE perimeter pixels (`fx::strength::SPECULAR`, `RIM`).
 pub(super) fn apply(grid: &Grid, canvas: &mut Canvas<'_>, normals: &[Normal], frame: &FxFrame<'_>) {
@@ -579,10 +588,18 @@ fn run(
                             );
                             let dot = nx * half[0] + ny * half[1] + nz * half[2];
                             let index = (dot >> 7).clamp(0, (LUT - 1) as i32) as usize;
+                            // A wet body's glint is the lamp's image, not its
+                            // wash: pulled most of the way to white, so it
+                            // shows on a body the same lamp already tints.
+                            let colour = if slot == MaterialKind::Slime as usize {
+                                wet_white(info.dom_rgb)
+                            } else {
+                                info.dom_rgb
+                            };
                             add = highlight_add(
                                 i32::from(tables.lobe[slot][index]),
                                 energy,
-                                info.dom_rgb,
+                                colour,
                             );
                         }
                     }

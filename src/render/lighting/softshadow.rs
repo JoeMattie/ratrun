@@ -235,16 +235,16 @@ pub(super) const MAX_BODIES: usize = 64;
 pub(super) const LIGHTS_PER_BODY: usize = 2;
 /// The floor keeps at least this share of its lit brightness under the
 /// overhead shadow and a body shadow together.
-pub(super) const FLOOR_KEEP: f32 = 0.45;
-/// The deepest body shadow, absolute: `1 − 0.45 / (1 − OVERHEAD_DARKEN)`
-/// (≈ 0.357), so even stacked on the overhead core the floor keeps 45 %.
+pub(super) const FLOOR_KEEP: f32 = 0.32;
+/// The deepest body shadow, absolute: `1 − 0.32 / (1 − OVERHEAD_DARKEN)`
+/// (≈ 0.448), so even stacked on the overhead core the floor keeps 32 %.
 pub(super) const MAX_DARK: f32 = 1.0 - FLOOR_KEEP / (1.0 - strength::OVERHEAD_DARKEN);
 const MAX_DARK_Q8: i32 = (MAX_DARK * 256.0) as i32;
 /// How much of the light's share a body's shadow core takes away.
 const BODY_OPACITY: f32 = 0.5 + 0.6 * strength::LONG_SHADOW;
 const BODY_OPACITY_Q8: i32 = (BODY_OPACITY * 256.0) as i32;
 /// A light must bring at least this much (`Q8.8` peak) to a body to cast.
-const MIN_CAST: f32 = 24.0;
+const MIN_CAST: f32 = 14.0;
 /// The longest body shadow, world px.
 const MAX_BODY_LEN: f32 = 40.0;
 /// Penumbra growth per px of distance behind the body (Q12 below).
@@ -702,9 +702,9 @@ const MAX_REFLECT: usize = 5;
 /// A light dimmer than this (`Q8.8` peak) is not reflected.
 const MIN_REFLECT_GAIN: f32 = 48.0;
 /// The gain at which a streak reaches its full brightness.
-const FULL_REFLECT_GAIN: f32 = 384.0;
+const FULL_REFLECT_GAIN: f32 = 256.0;
 /// Peak share of the light's colour a fully reflective floor returns (bold).
-const REFLECT_PEAK: f32 = 0.6;
+const REFLECT_PEAK: f32 = 1.0;
 /// Received light (`LightInfo::spec`, `Q8.8`) at which the streak is ungated.
 const GATE_SPEC: i32 = 80;
 /// Bump displacement of the streak, px at a full tangent normal.
@@ -757,8 +757,8 @@ fn streak(
     let s = l.pos - frame.cam;
     let height = l.height.clamp(2.0, 40.0);
     let start = s.y + height * 0.5;
-    let len = 14.0 + height * 1.6;
-    let half = 1.5 + height * 0.08;
+    let len = 18.0 + height * 1.8;
+    let half = 2.0 + height * 0.08;
     let x0 = ((s.x - 2.0 * half - BUMP_PX as f32 - 1.0).floor() as i32).max(0);
     let x1 = ((s.x + 2.0 * half + BUMP_PX as f32 + 2.0).ceil() as i32).min(w);
     let y0 = ((start - BUMP_PX as f32 - 1.0).floor() as i32).max(0);
@@ -1098,8 +1098,8 @@ mod tests {
     #[test]
     fn body_darkening_never_passes_the_clamp() {
         const {
-            assert!(MAX_DARK > 0.3 && MAX_DARK < 0.36);
-            // Under the overhead core the floor keeps 45 %.
+            assert!(MAX_DARK > 0.42 && MAX_DARK < 0.48);
+            // Under the overhead core the floor keeps 32 %.
             assert!((1.0 - strength::OVERHEAD_DARKEN) * (1.0 - MAX_DARK) >= FLOOR_KEEP - 1e-4);
         }
         let lights: Vec<FxLight> = (0..4)

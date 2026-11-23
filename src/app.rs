@@ -8779,13 +8779,20 @@ mod tests {
                         w.level.tiles.cols() as f32 * 8.0,
                         w.level.tiles.rows() as f32 * 8.0,
                     );
-                    let far = w
+                    // Lit rooms only (a hanging lamp inside), farthest first.
+                    let mut far: Vec<Vec2> = w
                         .level
                         .rooms
                         .iter()
+                        .filter(|r| {
+                            w.level.objects.lights.iter().any(|f| {
+                                f.kind == LightFixtureKind::Pendant && r.rect.contains_world(f.pos)
+                            })
+                        })
                         .map(|r| r.center())
-                        .max_by(|a, b| a.dist(centre).partial_cmp(&b.dist(centre)).unwrap())
-                        .unwrap_or(p);
+                        .collect();
+                    far.sort_by(|a, b| b.dist(centre).partial_cmp(&a.dist(centre)).unwrap());
+                    let far = far.get(nth).copied().unwrap_or(p);
                     rat_at = far;
                     for i in 0..10 {
                         let a = i as f32 * 0.628;

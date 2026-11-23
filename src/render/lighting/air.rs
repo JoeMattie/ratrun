@@ -42,7 +42,7 @@ use crate::term::ColorDepth;
 /// `core * visibility = 1` and the *bold* (1.0) strength. `strength::SHAFTS`
 /// halves it, so a room lamp hazes its own beam at about 9 levels at the lens
 /// and fades with the cone — a beam read in the air, not a white wash.
-const SHAFT_LEVELS: f32 = 18.0;
+const SHAFT_LEVELS: f32 = 44.0;
 /// A light shorter than this does not throw a visible shaft (a glowing pebble
 /// is bloom's job, not a god ray).
 const SHAFT_MIN_REACH: f32 = 24.0;
@@ -73,7 +73,7 @@ const BLOOM_CUT_SIGMAS: f32 = 2.8;
 /// screen, not across the map: at a 120×80 view the far corner is at full fog).
 const FOG_REACH_SHARE: f32 = 0.55;
 /// No fog at all within this many world px of the rat.
-const FOG_NEAR: f32 = 24.0;
+const FOG_NEAR: f32 = 44.0;
 /// The share of a sample's colour the fog lerps toward at full amount, before
 /// `strength::FOG`.
 const FOG_MAX: f32 = 0.72;
@@ -93,7 +93,7 @@ const FOG_STEP: u8 = 8;
 const AIR_STEP: u16 = 8;
 /// The most any channel of `air` holds, Q8.8 (40 levels): shafts plus bloom
 /// haze a bright room, they never wash it white.
-const AIR_MAX: u16 = 40 * 256;
+const AIR_MAX: u16 = 64 * 256;
 /// Below truecolor the interpolated air is snapped to this many levels and the
 /// fog to a multiple of this many parts in 255, so a faint gradient stays a few
 /// flat cells instead of repainting a band every frame.
@@ -170,9 +170,15 @@ pub(super) fn splat_sample(info: &mut LightInfo, hit: &SampleHit<'_>) {
     if hit.core <= 0.0 || hit.visibility <= 0.0 {
         return;
     }
-    let mut weight = hit.core * hit.visibility * strength::SHAFTS * SHAFT_LEVELS;
-    if hit.mode == LightingMode::Full && caged_sconce(hit) {
-        weight *= cage_bars(hit.delta);
+    // `core²`: the scatter gathers toward the lens, so the beam reads as a
+    // volume leaving the lamp and the outer pool keeps its floor contrast (a
+    // haze as wide as the pool only looked like a brighter pool).
+    let mut weight = hit.core * hit.core * hit.visibility * strength::SHAFTS * SHAFT_LEVELS;
+    if hit.mode == LightingMode::Full {
+        if caged_sconce(hit) {
+            weight *= cage_bars(hit.delta);
+        }
+        weight *= rays(hit);
     }
     if weight <= 0.0 {
         return;
@@ -188,6 +194,32 @@ pub(super) fn splat_sample(info: &mut LightInfo, hit: &SampleHit<'_>) {
         }
         info.air[n] = info.air[n].saturating_add(add).min(AIR_MAX);
     }
+}
+
+/// How deep the rays cut a wall lamp's fan and a hanging lamp's disc.
+const RAY_DEPTH_SCONCE: f32 = 0.60;
+const RAY_DEPTH_HANGING: f32 = 0.35;
+/// Inside this many px of the lens the beam is whole (no pinwheel at the lamp).
+const RAY_NEAR: f32 = 7.0;
+
+/// Irregular rays: the beam's scatter banded by angle round the lamp, two
+/// incommensurate harmonics with a phase from the lamp's own position, so
+/// every lamp has its own streaks and none of them ever moves (no clock).
+fn rays(hit: &SampleHit<'_>) -> f32 {
+    let d2 = hit.delta.len_sq();
+    if d2 < RAY_NEAR * RAY_NEAR {
+        return 1.0;
+    }
+    let depth = match hit.tag {
+        LightTag::Fixture(LightFixtureKind::Sconce) => RAY_DEPTH_SCONCE,
+        _ => RAY_DEPTH_HANGING,
+    };
+    let seed = hit.light.pos.x * 0.37 + hit.light.pos.y * 0.61;
+    let a = hit.delta.y.atan2(hit.delta.x);
+    let v = 0.5 + 0.28 * (a * 7.0 + seed).sin() + 0.22 * (a * 13.0 - seed * 1.7).sin();
+    // Ease in over the first few px past the lens.
+    let ease = ((d2.sqrt() - RAY_NEAR) / 8.0).min(1.0);
+    1.0 - depth * ease * (1.0 - v.clamp(0.0, 1.0))
 }
 
 /// Is this the caged bulkhead (the Sewer's sconce)?
@@ -570,6 +602,27 @@ mod tests {
         let mut back = LightInfo::default();
         splat_sample(&mut back, &hit(&light, Vec2::new(0.0, -30.0), behind, 1.0));
         assert_eq!(back.air, [0, 0, 0]);
+    }
+
+    #[test]
+    fn rays_band_the_beam_by_angle_and_never_darken_past_their_depth() {
+        let light = sconce_light();
+        let mut lo = f32::MAX;
+        let mut hi = f32::MIN;
+        for step in 0..360 {
+            let a = (step as f32).to_radians();
+            let delta = Vec2::new(a.cos(), a.sin()) * 40.0;
+            let h = hit(&light, delta, 1.0, 1.0);
+            let r = rays(&h);
+            assert_eq!(r, rays(&h), "no clock: the same sample, the same ray");
+            lo = lo.min(r);
+            hi = hi.max(r);
+        }
+        assert!(hi > 0.95, "somewhere the beam is whole ({hi})");
+        assert!(lo < 0.7, "somewhere a ray is cut ({lo})");
+        assert!(lo >= 1.0 - RAY_DEPTH_SCONCE - 1e-3, "never past the depth ({lo})");
+        // At the lens the beam is whole.
+        assert_eq!(rays(&hit(&light, Vec2::new(3.0, 2.0), 1.0, 1.0)), 1.0);
     }
 
     #[test]

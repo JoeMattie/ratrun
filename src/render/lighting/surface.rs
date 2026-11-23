@@ -58,7 +58,7 @@ const NOISE_FLOOR: i32 = 6;
 
 /// The gradient (luminance levels across the 2 px stencil) that tilts a normal
 /// fully sideways. Brick/mortar steps are 40-90, so they land at 15-30°.
-const SLOPE_FULL: i32 = 192;
+const SLOPE_FULL: i32 = 112;
 
 /// `N·L` is clamped to `[-0.35, +0.55]` before the material gain (contract
 /// §4), in Q8 (`256` = 1.0).
@@ -350,10 +350,11 @@ mod tests {
         assert_eq!(after[top], before[top], "the ridge top has a zero gradient");
         assert!(normals[lamp_side][0] < 0, "the lamp-side flank faces -x");
         assert!(normals[far_side][0] > 0, "the far flank faces +x");
-        // Restrained: never more than a fifth on this picture.
+        // Readable, not a bevel: never more than two fifths on this picture
+        // (a full-contrast ridge under a grazing lamp, the steepest case).
         let gain = lum(after[lamp_side]) - lum(before[lamp_side]);
         let base = lum(before[lamp_side]).max(1);
-        assert!(gain * 5 < base, "bump must stay subtle, got +{gain} on {base}");
+        assert!(gain * 5 < base * 2, "bump must stay readable, got +{gain} on {base}");
 
         // Move the lamp to the right: the two flanks swap roles.
         let grid = grid_with_dir(W, H, [DIR_ONE, 0, 0]);

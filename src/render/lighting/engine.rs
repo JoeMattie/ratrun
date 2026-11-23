@@ -49,7 +49,7 @@
 use super::fx::{self, Canvas, FxFrame, FxLight, LightInfo, LightTag, Normal, SampleHit, ShadowQuery};
 use super::shadow::{Body, Geometry, ShadowProfile, Surface};
 use super::softshadow::SoftProfile;
-use super::{air, motes, softshadow, specular, surface, upsample};
+use super::{air, motes, overhead, softshadow, specular, surface, upsample};
 use super::{fixtures, LightScene, ThemeAmbient};
 use crate::game::ecs::systems::boss::Boss;
 use crate::game::enemy::{Enemy, EnemyKind};
@@ -1047,9 +1047,11 @@ impl LightMap {
                 self.normals.resize(w * h, [0, 0]);
                 let (px, mat) = pb.split_mat();
                 let mut canvas = Canvas { w, h, px, mat };
-                surface::apply(&self.grid, &mut canvas, &mut self.normals, &frame);
+                if !fx::skip("bump") {
+                    surface::apply(&self.grid, &mut canvas, &mut self.normals, &frame);
+                }
                 upsample::composite(&self.grid, &mut canvas, &frame);
-                if bodies_on {
+                if bodies_on && !fx::skip("body") {
                     softshadow::entity_shadows(
                         &self.grid,
                         &mut canvas,
@@ -1058,10 +1060,20 @@ impl LightMap {
                         &self.geometry,
                     );
                 }
-                specular::apply(&self.grid, &mut canvas, &self.normals, &frame);
-                softshadow::reflections(&self.grid, &mut canvas, &self.normals, &frame);
-                air::composite(&self.grid, &mut canvas, &frame);
-                motes::draw(&self.grid, &mut canvas, &frame);
+                // The overhead light's shadows, rasterised by the scene draw.
+                overhead::apply_lit(&self.grid, &mut canvas);
+                if !fx::skip("spec") {
+                    specular::apply(&self.grid, &mut canvas, &self.normals, &frame);
+                }
+                if !fx::skip("reflect") {
+                    softshadow::reflections(&self.grid, &mut canvas, &self.normals, &frame);
+                }
+                if !fx::skip("air") {
+                    air::composite(&self.grid, &mut canvas, &frame);
+                }
+                if !fx::skip("motes") {
+                    motes::draw(&self.grid, &mut canvas, &frame);
+                }
             } else {
                 self.grid.composite(pb, scene.depth);
             }
