@@ -3342,7 +3342,7 @@ fn emit_cues(
                 );
             }
             BossCue::MegaRatSqueak => {
-                vfx::emit_sonic_squeak(
+                vfx::emit_squeak_ring(
                     particles,
                     rng,
                     boss.pos,
@@ -3427,7 +3427,7 @@ fn emit_cues(
             BossCue::CobraCoil | BossCue::CobraTighten => {
                 // The loop arrives as a ring of grit, not a puff: the body is
                 // the wall, so the floor has to show it landing.
-                vfx::emit_sonic_squeak(
+                vfx::emit_squeak_ring(
                     particles,
                     rng,
                     boss.target,

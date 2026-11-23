@@ -996,14 +996,18 @@ mod tests {
             TileRect::new(20, 40, 6, 2).contains(cell.0, cell.1),
             "lamp {cell:?} is outside the corridor"
         );
-        // Three cells from each doorway: the room rule would have refused it.
+        // Three cells from a doorway: the room rule's clearance holds too, and
+        // the corridor rule's own (tighter) clearance is what admitted it.
         let doorways = doorway_cells(&level);
         assert_eq!(doorways.len(), 4, "{doorways:?}");
         assert!(
-            !near(&doorways, cell, SCONCE_DOOR_GAP),
-            "the fixture sits inside the old doorway clearance"
+            near(&doorways, cell, SCONCE_DOOR_GAP),
+            "the fixture is expected within the old doorway clearance"
         );
-        assert!(near(&doorways, cell, SCONCE_CORRIDOR_DOOR_GAP + 1));
+        assert!(
+            !near(&doorways, cell, SCONCE_CORRIDOR_DOOR_GAP),
+            "the fixture is inside the corridor rule's own clearance"
+        );
         // On a wall at least four cells long, which is the corridor rule.
         let dir = lamps[0].wall_facing(&level.tiles);
         let wall = (cell.0 - dir.x as i32, cell.1 - dir.y as i32);
@@ -1050,7 +1054,10 @@ mod tests {
     /// emitters are exactly what the pre-batch-9 stage produces on its own.
     #[test]
     fn sconces_do_not_move_the_hanging_lamps() {
-        for theme in Theme::playable() {
+        // Not the Flatbed: its cab hold is lit as an arena and then normalised
+        // to a hall (`strip_boss_arena`), so re-running the stage on the
+        // finished level is not the same input.
+        for theme in Theme::all() {
             for seed in 0..20u64 {
                 let full = generate_once(theme, seed, 0);
                 let hanging: Vec<LightFixture> = full

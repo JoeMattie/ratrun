@@ -857,7 +857,7 @@ fn draw_miniboss_ui(
 ///
 /// Returns the label's rectangle (empty when nothing was drawn) so the edge
 /// arrows can keep off it.
-fn draw_boss_compass(frame: &mut Frame, game: Rect, _world: &World, state: &HudState) -> Rect {
+fn draw_boss_compass(frame: &mut Frame, game: Rect, world: &World, state: &HudState) -> Rect {
     let Some(offset) = state.telemetry.boss_offset else {
         return Rect::default();
     };

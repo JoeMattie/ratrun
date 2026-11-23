@@ -1685,13 +1685,15 @@ mod tests {
 
         // Squeak Nova expanding ring + Echo Chamber inbound ring.
         pb.clear(bg);
-        let mut fx = ActiveFx::default();
-        fx.nova_left = 0.25;
-        fx.nova_age = 0.15;
-        fx.nova_prev_r = 18.0;
-        fx.nova_r = 22.0;
-        fx.nova_max_r = 50.0;
-        fx.nova_pos = Vec2::new(48.0, 48.0);
+        let mut fx = ActiveFx {
+            nova_left: 0.25,
+            nova_age: 0.15,
+            nova_prev_r: 18.0,
+            nova_r: 22.0,
+            nova_max_r: 50.0,
+            nova_pos: Vec2::new(48.0, 48.0),
+            ..Default::default()
+        };
         draw_squeak_nova_ring(&mut pb, &fx, Vec2::ZERO);
         assert!(count_lit(&pb) >= 40, "squeak nova rings should paint concentric cyan rings");
         fx.nova_echo = true;

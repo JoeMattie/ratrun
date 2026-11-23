@@ -1105,7 +1105,7 @@ fn stamp_header_pips(
         return;
     }
     let y = panel_rect.y;
-    let pips_w: u16 = 14;
+    let pips_w: u16 = 16;
     let x = panel_rect.right().saturating_sub(pips_w + 1);
     let cap_end = panel_rect.x + 2 + caption.chars().count() as u16 + 2;
     if x <= cap_end {
@@ -1125,7 +1125,8 @@ fn stamp_header_pips(
     // route (Laundry, Printworks) is never equal to the original route's plate
     // and used to show no current pip at all.
     let current_stage = usize::from(current.stage_number().saturating_sub(1));
-    for idx in 0..CampaignLevel::all().len() {
+    let pips = CampaignLevel::all().len();
+    for idx in 0..pips {
         let (ch, col) = if (idx as u8) < cleared_count {
             ('●', HEAL_MINT)
         } else if idx == current_stage {
@@ -1135,7 +1136,7 @@ fn stamp_header_pips(
         };
         let mut g = [0u8; 4];
         cx = put_str(buf, cx, y, ch.encode_utf8(&mut g), 1, heavy(col).bg(PLATE));
-        if idx < 2 {
+        if idx + 1 < pips {
             cx = put_str(buf, cx, y, " ", 1, base);
         }
     }
@@ -3029,9 +3030,11 @@ pub fn draw_campaign_victory_with(
         }
     }
 
-    // Per-Level Breakdown table (Sewer, Kitchen, Lab).
+    // Per-Level Breakdown table (Sewer, stage two, stage three, the Flatbed):
+    // a rule, a header and one row per level.
     let btn_row = inner.height.saturating_sub(1);
-    if y + 5 <= btn_row {
+    let rows = view.levels.len() as u16;
+    if y + 2 + rows <= btn_row {
         hline(buf, inner.x + 2, inner.y + y, inner.width.saturating_sub(4), '─', ink(TRACK).bg(PLATE));
         y += 1;
 
@@ -3676,10 +3679,10 @@ pub fn draw_level_select_with(
 ///
 /// Adapts gracefully across widths:
 /// - `>= 24`: `LV 2/4  ● ◆ ○ ○  Kitchen`
-/// - `>= 14`: `LV 2/4  ● ◆ ○ ○`
+/// - `>= 15`: `LV 2/4  ● ◆ ○ ○`
 /// - `>= 9`:  `2/4 ●◆○○`
-/// - `>= 5`:  `● ◆ ○ ○`
-/// - `>= 3`:  `●◆○○`
+/// - `>= 7`:  `● ◆ ○ ○`
+/// - `>= 4`:  `●◆○○`
 ///
 /// Returns the exact bounding [`Rect`] drawn inside `area`.
 pub fn draw_campaign_pips(
@@ -3698,7 +3701,7 @@ pub fn draw_campaign_pips(
     let mut cx = r.x;
     let accent = view.current.accent();
 
-    if r.width >= 14 {
+    if r.width >= 15 {
         cx = put_str(buf, cx, y, "LV ", 3, ink(MUTED).bg(bg));
         let mut nb = StackBuf::<8>::new();
         let _ = write!(
@@ -3724,7 +3727,7 @@ pub fn draw_campaign_pips(
         );
         cx = put_str(buf, cx, y, nb.as_str(), 4, heavy(COAT).bg(bg));
         cx = draw_three_pips(buf, cx, y, r.right(), view.current, view.cleared_count, false, bg);
-    } else if r.width >= 5 {
+    } else if r.width >= 7 {
         cx = draw_three_pips(buf, cx, y, r.right(), view.current, view.cleared_count, true, bg);
     } else {
         cx = draw_three_pips(buf, cx, y, r.right(), view.current, view.cleared_count, false, bg);
@@ -4621,7 +4624,9 @@ mod tests {
                     floor,
                     level,
                     stage,
-                    unlocked: theme == Theme::Sewer || theme == Theme::Kitchen,
+                    unlocked: theme == Theme::Sewer
+                        || theme == Theme::Kitchen
+                        || theme == Theme::Trailer,
                     best: match theme {
                         Theme::Sewer => Some(LevelBest {
                             score: 6420,
@@ -4679,10 +4684,7 @@ mod tests {
             crate::game::campaign::LEVEL_COUNT - 1,
             "the ride is the campaign's fourth level"
         );
-        assert!(
-            !slots[5].unlocked,
-            "the sample has no stage-three clear, so the ride is locked"
-        );
+        assert!(slots[5].unlocked, "the practice ride is always open");
     }
 
     #[test]
@@ -4923,7 +4925,7 @@ mod tests {
                 assert_single_cell_glyphs(&term);
                 if w >= 9 {
                     let txt = buffer_text(&term);
-                    let want = format!("{}/3", lvl.number());
+                    let want = format!("{}/4", lvl.number());
                     assert!(txt.contains(&want), "missing {want} at width {w}: {txt}");
                 }
             }

@@ -473,7 +473,8 @@ pub fn cone_hits_circle(
     let rel = center - origin;
     let dist = rel.len();
     // Behind the muzzle (a body the rat is standing on is not "behind").
-    if rel.dot(dir) + r < 0.0 {
+    // A half-angle of PI means "any direction" (Gnaw's auto-aim).
+    if half < std::f32::consts::PI && rel.dot(dir) + r < 0.0 {
         return false;
     }
     if dist - r > len {
@@ -943,7 +944,15 @@ pub fn active_weapons_system(
                     // A fresh cone starts with no tags (Roll Call).
                     fx.clear_roll_call();
                     shake.amount = shake.amount.max(1.6);
-                    vfx::emit_sonic_squeak(&mut particles, &mut rng.0, ppos, reach, SQUEAK_EXPAND);
+                    vfx::emit_sonic_squeak_cone(
+                        &mut particles,
+                        &mut rng.0,
+                        ppos,
+                        cone_dir,
+                        reach,
+                        SQUEAK_CONE_HALF,
+                        SQUEAK_EXPAND,
+                    );
                     sfx.0.push(Sfx::SonicSqueak);
                     squeak_cone(
                         &level,
@@ -1264,7 +1273,9 @@ fn squeak_cone(
             continue;
         }
         let shapes = boss.hit_shapes();
-        if shapes.iter().next().is_none() {
+        // An airborne boss (no grounded shape) is out of a floor-level
+        // attack's reach, exactly as it is for bullets.
+        if !shapes.iter().any(|s| s.grounded()) {
             continue;
         }
         if !cone_hits_circle(origin, axis, reach, half, boss.pos, boss.kind.body_radius()) {
@@ -1319,17 +1330,25 @@ fn nova_ring(
 ) {
     let kind = WeaponKind::SqueakNova;
     let origin = fx.nova_pos;
-    let prev = fx.nova_prev_r;
+    // Last tick's front is this tick's inner (outbound) or outer (inbound)
+    // band edge, so each body is met exactly once per pass.
+    let prev = fx.nova_r;
     let dmg = fx.nova_dmg;
     let max_r = fx.nova_max_r;
+    let prev_phase = fx.nova_age / NOVA_EXPAND;
     fx.nova_age += dt;
-    // Out for `NOVA_EXPAND`, then (Echo Chamber) back in for the same again.
+    // Out for `NOVA_EXPAND`, then (Echo Chamber only) back in for the same
+    // again. The tick that crosses the turnaround finishes the outbound pass
+    // and starts the return from the rim.
     let phase = fx.nova_age / NOVA_EXPAND;
-    let inbound = phase > 1.0;
+    let outbound = prev_phase < 1.0;
+    let inbound = fx.nova_echo && phase > 1.0;
+    let out_to = max_r * phase.min(1.0);
+    let in_from = if outbound { max_r } else { prev };
     let now = if inbound {
         max_r * (2.0 - phase).clamp(0.0, 1.0)
     } else {
-        max_r * phase.clamp(0.0, 1.0)
+        out_to
     };
     fx.nova_prev_r = prev;
     fx.nova_r = now;
@@ -1343,54 +1362,58 @@ fn nova_ring(
         }
         let dist = e.pos.dist(origin);
         // The front meets the body's near edge on the way out and its far edge
-        // on the way back, so a ring that sweeps a body never skips it.
-        let passed = if inbound {
-            let far = dist + e.radius;
-            now <= far && far < prev
-        } else {
-            let near = dist - e.radius;
-            prev < near && near <= now
-        };
-        if !passed || !los_clear(level, origin, e.pos, MELEE_LOS_RADIUS) {
+        // on the way back, so a ring that sweeps a body never skips it. A body
+        // on top of the rat is met by the first tick; one straddling the rim
+        // by the last.
+        let near = (dist - e.radius).max(1e-3);
+        let far = (dist + e.radius).min(max_r - 1e-3);
+        let out_hit = outbound && prev < near && near <= out_to;
+        let in_hit = inbound && now <= far && far < in_from;
+        if !(out_hit || in_hit) || !los_clear(level, origin, e.pos, MELEE_LOS_RADIUS) {
             continue;
         }
-        let hp_before = e.hp.max(0.0);
-        // The ring arrives from its own origin, so the shell faces it.
-        let applied = e.hurt_from(dmg, origin);
-        let killed = !e.alive();
-        ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
-        let pos = e.pos;
-        let enemy_radius = e.radius;
-        let enemy_id = e.id;
-        let enemy_kind = e.kind;
-        if inbound {
-            // Echo Chamber: the returning front, drawn as the rebound
-            // (`vfx::emit_echo_return`'s "inward" direction).
-            vfx::emit_echo_return(
-                particles,
-                &mut rng.0,
+        for returning in [false, true] {
+            if !(if returning { in_hit } else { out_hit }) || !e.alive() {
+                continue;
+            }
+            let hp_before = e.hp.max(0.0);
+            // The ring arrives from its own origin, so the shell faces it.
+            let applied = e.hurt_from(dmg, origin);
+            let killed = !e.alive();
+            ledger.add(kind, (hp_before - e.hp.max(0.0)).max(0.0));
+            let pos = e.pos;
+            let enemy_radius = e.radius;
+            let enemy_id = e.id;
+            let enemy_kind = e.kind;
+            if returning {
+                // Echo Chamber: the returning front, drawn as the rebound
+                // (`vfx::emit_echo_return`'s "inward" direction).
+                vfx::emit_echo_return(
+                    particles,
+                    &mut rng.0,
+                    pos,
+                    (origin - pos).normalized(),
+                );
+            } else {
+                vfx::emit_weapon_hit(
+                    particles,
+                    &mut rng.0,
+                    pos,
+                    pos - origin,
+                    Some(kind),
+                    enemy_kind,
+                    killed,
+                );
+            }
+            damage_numbers.record(
+                enemy_id,
                 pos,
-                (origin - pos).normalized(),
-            );
-        } else {
-            vfx::emit_weapon_hit(
-                particles,
-                &mut rng.0,
-                pos,
-                pos - origin,
-                Some(kind),
-                enemy_kind,
+                enemy_radius,
+                applied,
                 killed,
+                DamageSource::Normal,
             );
         }
-        damage_numbers.record(
-            enemy_id,
-            pos,
-            enemy_radius,
-            applied,
-            killed,
-            DamageSource::Normal,
-        );
     }
 
     // The boss takes the ring too, once per pass, exactly like the horde.
@@ -1399,44 +1422,48 @@ fn nova_ring(
             continue;
         }
         let shapes = boss.hit_shapes();
-        if shapes.iter().next().is_none() {
+        // An airborne boss (no grounded shape) is out of a floor-level
+        // attack's reach, exactly as it is for bullets.
+        if !shapes.iter().any(|s| s.grounded()) {
             continue;
         }
         let dist = boss.pos.dist(origin);
-        let passed = if inbound {
-            let far = dist + boss.kind.body_radius();
-            now <= far && far < prev
-        } else {
-            let near = dist - boss.kind.body_radius();
-            prev < near && near <= now
-        };
-        if !passed || level.tiles.segment_hit(origin, boss.pos, 1.0).is_some() {
+        let near = (dist - boss.kind.body_radius()).max(1e-3);
+        let far = (dist + boss.kind.body_radius()).min(max_r - 1e-3);
+        let out_hit = outbound && prev < near && near <= out_to;
+        let in_hit = inbound && now <= far && far < in_from;
+        if !(out_hit || in_hit) || level.tiles.segment_hit(origin, boss.pos, 1.0).is_some() {
             continue;
         }
-        let amount = dmg * boss.damage_mult;
-        if !boss.take_damage(amount) {
-            continue;
+        for returning in [false, true] {
+            if !(if returning { in_hit } else { out_hit }) || boss.dead {
+                continue;
+            }
+            let amount = dmg * boss.damage_mult;
+            if !boss.take_damage(amount) {
+                continue;
+            }
+            ledger.add_boss(kind, amount);
+            let killed = boss.hp <= 0.0;
+            let (boss_pos, boss_radius, boss_id) = (boss.pos, boss.kind.body_radius(), boss.id);
+            vfx::emit_weapon_hit(
+                particles,
+                &mut rng.0,
+                boss_pos,
+                boss_pos - origin,
+                Some(kind),
+                EnemyKind::Boss,
+                killed,
+            );
+            damage_numbers.record(
+                boss_id,
+                boss_pos,
+                boss_radius,
+                amount,
+                killed,
+                DamageSource::Normal,
+            );
         }
-        ledger.add_boss(kind, amount);
-        let killed = boss.hp <= 0.0;
-        let (boss_pos, boss_radius, boss_id) = (boss.pos, boss.kind.body_radius(), boss.id);
-        vfx::emit_weapon_hit(
-            particles,
-            &mut rng.0,
-            boss_pos,
-            boss_pos - origin,
-            Some(kind),
-            EnemyKind::Boss,
-            killed,
-        );
-        damage_numbers.record(
-            boss_id,
-            boss_pos,
-            boss_radius,
-            amount,
-            killed,
-            DamageSource::Normal,
-        );
     }
 
     // The ring's own clock. Once it is spent the whole cast is forgotten (the
@@ -1570,7 +1597,9 @@ fn fire_one(
                         continue;
                     }
                     let shapes = boss.hit_shapes();
-                    if shapes.iter().next().is_none() {
+                    // An airborne boss (no grounded shape) is out of a floor-level
+                    // attack's reach, exactly as it is for bullets.
+                    if !shapes.iter().any(|s| s.grounded()) {
                         continue;
                     }
                     if !cone_hits_circle(
@@ -1751,7 +1780,7 @@ fn fire_one(
                 nova_echo: evolved,
                 ..*fx
             };
-            vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, pface, 0.0);
+            vfx::emit_weapon_fire(particles, &mut rng.0, kind, ppos, pface, reach);
             fired = true;
         }
         WeaponKind::SporeOrbit => {
@@ -1909,7 +1938,9 @@ fn fire_one(
                     continue;
                 }
                 let shapes = boss.hit_shapes();
-                if shapes.iter().next().is_none() {
+                // An airborne boss (no grounded shape) is out of a floor-level
+                // attack's reach, exactly as it is for bullets.
+                if !shapes.iter().any(|s| s.grounded()) {
                     continue;
                 }
                 // Inside the front half-circle: the boss's own body radius is
@@ -2418,100 +2449,11 @@ mod tests {
         w.end_tick();
     }
 
-    /// **Gnaw, aimed**: with a reticle the dart flies along it — even into an
-    /// empty corridor (no more "dud with no target") — and its mild homing only
-    /// claims bodies inside a narrow cone of the aim.
+    /// An aimed lob is clamped to the weapon's reach and stays on the aim
+    /// line. (Gnaw is a bite since batch 12: its aimed cone is pinned by
+    /// `gnaw_bites_one_body_at_arm_s_length`.)
     #[test]
-    fn gnaw_fires_along_the_aim_and_homes_only_inside_the_cone() {
-        // Nothing in reach: the dart still goes where the player pointed.
-        let mut w = World::new(Theme::Sewer, 21);
-        open_map(&mut w);
-        w.clear_enemies();
-        w.clear_bullets();
-        arm(&mut w, WeaponKind::Gnaw);
-        let p = w.player.pos;
-        run_weapons_aim(&mut w, 1.0 / 60.0, Some(p + Vec2::new(200.0, 0.0)));
-        assert_eq!(w.bullets().len(), 1, "an aimed Gnaw always fires");
-        let v = w.bullets()[0].vel;
-        assert!(
-            (v.x - 120.0).abs() < 1e-2 && v.y.abs() < 1e-2,
-            "the dart did not fly along the reticle: {v:?}"
-        );
-
-        // A body inside the cone steals the shot (homing)...
-        let mut w = World::new(Theme::Sewer, 22);
-        open_map(&mut w);
-        w.clear_enemies();
-        w.clear_bullets();
-        arm(&mut w, WeaponKind::Gnaw);
-        let p = w.player.pos;
-        // ~11° off the aim, in front of the rat.
-        let near = p + Vec2::new(120.0, 24.0);
-        w.spawn_enemy(EnemyKind::Skitterer, near, 20.0);
-        run_weapons_aim(&mut w, 1.0 / 60.0, Some(p + Vec2::new(200.0, 0.0)));
-        let v = w.bullets()[0].vel.normalized();
-        let to_enemy = (near - p).normalized();
-        assert!(
-            v.dot(to_enemy) > 0.99,
-            "the dart ignored the in-cone body: {v:?}"
-        );
-
-        // ...but a body far off the aim does not.
-        let mut w = World::new(Theme::Sewer, 23);
-        open_map(&mut w);
-        w.clear_enemies();
-        w.clear_bullets();
-        arm(&mut w, WeaponKind::Gnaw);
-        let p = w.player.pos;
-        w.spawn_enemy(EnemyKind::Skitterer, p + Vec2::new(0.0, 60.0), 20.0);
-        run_weapons_aim(&mut w, 1.0 / 60.0, Some(p + Vec2::new(200.0, 0.0)));
-        let v = w.bullets()[0].vel.normalized();
-        assert!(v.x > 0.99, "the dart left the reticle for an off-cone body: {v:?}");
-    }
-
-    /// **Cheese Spray, aimed**: the fan is centred on the reticle, not on the
-    /// nearest body (which sits to the side here).
-    #[test]
-    fn cheese_spray_fans_around_the_aim() {
-        let mut w = World::new(Theme::Sewer, 24);
-        open_map(&mut w);
-        w.clear_enemies();
-        w.clear_bullets();
-        arm(&mut w, WeaponKind::CheeseSpray);
-        w.player.loadout.weapons[0].level = 3;
-        let p = w.player.pos;
-        w.spawn_enemy(EnemyKind::Skitterer, p + Vec2::new(0.0, 60.0), 20.0);
-        run_weapons_aim(&mut w, 1.0 / 60.0, Some(p + Vec2::new(200.0, 0.0)));
-        let spray = w.bullets();
-        assert!(!spray.is_empty(), "the spray fired nothing");
-        let mean: Vec2 = spray.iter().fold(Vec2::ZERO, |a, b| a + b.vel.normalized());
-        let mean = mean.normalized();
-        assert!(
-            mean.x > 0.99,
-            "the fan centred on the body instead of the reticle: {mean:?}"
-        );
-    }
-
-    /// **Acid Spit, aimed**: the lob lands where the reticle is, clamped to the
-    /// weapon's reach (and never beyond it).
-    #[test]
-    fn acid_spit_lobs_to_the_aim_point_clamped_to_reach() {
-        let mut w = World::new(Theme::Sewer, 25);
-        open_map(&mut w);
-        w.clear_enemies();
-        w.clear_bullets();
-        arm(&mut w, WeaponKind::AcidSpit);
-        let p = w.player.pos;
-        let near = p + Vec2::new(0.0, -60.0);
-        run_weapons_aim(&mut w, 1.0 / 60.0, Some(near));
-        let b = &w.bullets()[0];
-        let lob = b.lob.expect("an Acid Spit lob");
-        assert!(
-            (lob.target - near).len() < 1.0,
-            "the lob did not land on the reticle: {:?} vs {near:?}",
-            lob.target
-        );
-
+    fn an_aimed_lob_is_clamped_to_its_reach() {
         // Far past the reach: clamped to it, still along the aim.
         let mut w = World::new(Theme::Sewer, 26);
         open_map(&mut w);
@@ -2537,6 +2479,8 @@ mod tests {
         w.player.loadout.weapons[0].level = 5;
         w.player.loadout.weapons[0].evolved = true;
         let p = w.player.pos;
+        // The tooth is spat with the bite, so there is a body in the jaw.
+        w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(0.0, 14.0), 50.0);
         run_weapons_aim(&mut w, 1.0 / 60.0, Some(p + Vec2::new(0.0, 150.0)));
         let mut q = w.ecs.query::<(&MilkTooth, &SpawnId)>();
         let tooth = q
@@ -2544,7 +2488,7 @@ mod tests {
             .min_by_key(|(_, id)| id.0)
             .map(|(t, _)| t.vel)
             .expect("the lead tooth");
-        assert!(tooth.y > 0.0 && tooth.x.abs() < 1e-3, "tooth flew {tooth:?}");
+        assert!(tooth.y > 0.0 && tooth.x.abs() < 1.0, "tooth flew {tooth:?}");
     }
 
     /// **Fondue Fork, aimed**: the two tines straddle the reticle, so the
@@ -2595,21 +2539,23 @@ mod tests {
         );
     }
 
-    /// **Milk Teeth** evolves the **lead** dart: the level-5 pair keeps its
-    /// second dart as a Gnaw dart, so an earned evolution is never a downgrade
-    /// in output (the tooth flies one dart's worth of range, gets its return
-    /// bite on top, and the other dart still fires).
+    /// **Milk Teeth** adds its tooth on top of the bite: the level-5 bite
+    /// still lands both old darts' damage, so an earned evolution is never a
+    /// downgrade in output, and no Gnaw projectile is fired.
     #[test]
-    fn milk_teeth_keeps_the_level_five_second_dart() {
+    fn milk_teeth_spits_one_tooth_on_top_of_the_bite() {
         let mut w = World::new(Theme::Sewer, 31);
+        open_map(&mut w);
         w.clear_enemies();
         w.clear_bullets();
         arm(&mut w, WeaponKind::Gnaw);
         w.player.loadout.weapons[0].level = WeaponKind::Gnaw.max_level();
         w.player.loadout.weapons[0].evolved = true;
         w.player.loadout.weapons[0].timer = 0.0;
-        let target = w.player.pos + Vec2::new(120.0, 0.0);
-        w.spawn_enemy(EnemyKind::Cat, target, 1.0);
+        let per_dart = w.player.loadout.weapons[0].damage();
+        let target = w.player.pos + Vec2::new(14.0, 0.0);
+        let body = w.spawn_enemy(EnemyKind::Brute, target, 50.0);
+        let hp = w.ecs.get::<Enemy>(body).unwrap().hp;
         run_weapons(&mut w, 1.0 / 60.0);
 
         let mut darts = w.ecs.query::<&crate::game::ecs::components::MilkTooth>();
@@ -2619,8 +2565,13 @@ mod tests {
             .iter()
             .filter(|b| b.weapon == Some(WeaponKind::Gnaw))
             .count();
-        assert_eq!(teeth, 1, "the evolved Gnaw fires one Milk Tooth");
-        assert_eq!(gnaw, 1, "and keeps the second level-5 dart");
+        assert_eq!(teeth, 1, "the evolved Gnaw spits one Milk Tooth");
+        assert_eq!(gnaw, 0, "the bite fires no dart");
+        let lost = hp - w.ecs.get::<Enemy>(body).unwrap().hp;
+        assert!(
+            (lost - per_dart * 2.0).abs() < 1e-3,
+            "the level-5 bite lands both darts' worth: {lost} vs {per_dart} x 2"
+        );
     }
 
     /// The whip's boss damage is resolved with the cast (reach, damage and
@@ -2846,15 +2797,22 @@ mod tests {
         w.spawn_enemy_with_rng(EnemyKind::Skitterer, alive_pos, 1.0, &mut rng);
         arm(&mut w, WeaponKind::Gnaw);
 
+        let alive = {
+            let mut q = w.ecs.query::<(Entity, &Enemy)>();
+            q.iter(&w.ecs)
+                .find(|(_, e)| e.alive() && e.pos.x.is_finite())
+                .map(|(entity, e)| (entity, e.hp))
+                .expect("the live enemy")
+        };
+
         run_weapons(&mut w, 1.0 / 60.0);
 
-        assert_eq!(w.bullets().len(), 1, "should pick exactly the live enemy");
-        let v = w.bullets()[0].vel;
+        // Gnaw is a bite: it closes on exactly the live enemy.
         assert!(
-            (v.x - 120.0).abs() < 1e-3 && v.y.abs() < 1e-3,
-            "aimed at {:?} instead of the live enemy",
-            v
+            w.ecs.get::<Enemy>(alive.0).unwrap().hp < alive.1,
+            "the bite missed the live enemy"
         );
+        assert!(w.bullets().is_empty(), "a bite fires no projectile");
     }
 
     /// The plain pick shared with `World::nearest_enemy`: ties keep the lowest
@@ -4117,7 +4075,8 @@ mod tests {
         open_map(&mut w);
         w.clear_enemies();
         w.player.pos = Vec2::new(170.0, 168.0);
-        // The cone points north; the wall is the band of cells 20 px up.
+        // The cone points north; the wall is the row of cells between the
+        // rat (row 10) and the body (row 8).
         w.player.face = Vec2::new(0.0, -1.0);
         let p = w.player.pos;
         let hidden = w.spawn_enemy(EnemyKind::Cat, Vec2::new(p.x, p.y - 30.0), 1.0);
@@ -4144,7 +4103,7 @@ mod tests {
         for cx in 9..=12 {
             w.level
                 .tiles
-                .set(cx, 10, TileKind::Wall(WallKind::Solid));
+                .set(cx, 9, TileKind::Wall(WallKind::Solid));
         }
         w.level.tiles.rebuild_masks();
         let body = w.ecs.get::<Enemy>(hidden).unwrap();
@@ -4437,20 +4396,18 @@ mod tests {
         let face = wall_between(&mut w);
         let p = w.player.pos;
         spawn_boss_at(&mut w, BossKind::Cat, Vec2::new(face + 20.0, p.y));
+        // The rat faces up; the boss is +x behind masonry.
+        w.player.face = Vec2::new(0.0, -1.0);
         arm(&mut w, WeaponKind::CheeseSpray);
 
         run_weapons(&mut w, 1.0 / 60.0);
 
         let bullets = w.bullets();
         assert!(!bullets.is_empty(), "Cheese Spray must still fire");
-        // The rat faces +x, and the boss is +x behind masonry: the fan must not
-        // centre on the boss's grounded points (which are *not* dead ahead).
+        // The fan keeps the facing: its middle wedge flies up, not at the boss.
         let mid = heading(&bullets[bullets.len() / 2]);
-        let points: Vec<Vec2> = w.boss_target_points().expect("boss alive").iter().collect();
         assert!(
-            !points
-                .iter()
-                .any(|q| ((*q - p).normalized() - mid).len() < 1e-3),
+            mid.y < -0.9,
             "the fan centred on a boss behind a wall: {mid:?}"
         );
     }
@@ -4569,10 +4526,10 @@ mod tests {
     }
 
     #[test]
-    fn a_hit_at_level_21_deals_a_fifth_more_than_at_level_1() {
+    fn a_hit_at_level_6_deals_a_fifth_more_than_at_level_1() {
         let gnaw = |w: &mut World| w.player.loadout.weapons.push(Weapon::new(WeaponKind::Gnaw));
         let lo = dealt_at_level(gnaw, 1, 240);
-        let hi = dealt_at_level(gnaw, 21, 240);
+        let hi = dealt_at_level(gnaw, 6, 240);
         assert_ratio(hi, lo, 1.20, "Gnaw");
     }
 
@@ -4586,7 +4543,7 @@ mod tests {
         };
         let lo = dealt_at_level(plain, 1, 240);
         let teeth = dealt_at_level(sharp, 1, 240);
-        let both = dealt_at_level(sharp, 21, 240);
+        let both = dealt_at_level(sharp, 6, 240);
         let teeth_mult = teeth / lo;
         assert!(teeth_mult > 1.05, "Sharp Teeth must add damage: {teeth_mult}");
         assert_ratio(both, lo, teeth_mult * 1.20, "Gnaw + Sharp Teeth");
@@ -4600,7 +4557,7 @@ mod tests {
         for kind in [WeaponKind::AcidSpit, WeaponKind::Hantavirus] {
             let build = move |w: &mut World| w.player.loadout.weapons.push(Weapon::new(kind));
             let lo = dealt_at_level(build, 1, 600);
-            let hi = dealt_at_level(build, 21, 600);
+            let hi = dealt_at_level(build, 6, 600);
             assert_ratio(hi, lo, 1.20, kind.name());
         }
         // An evolution: Ratchet Tail (Tail Whip, evolved).
@@ -4615,7 +4572,7 @@ mod tests {
             let _ = PassiveKind::Damage;
         };
         let lo = dealt_at_level(ratchet, 1, 600);
-        let hi = dealt_at_level(ratchet, 21, 600);
+        let hi = dealt_at_level(ratchet, 6, 600);
         assert_ratio(hi, lo, 1.20, "Ratchet Tail");
     }
 

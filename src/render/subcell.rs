@@ -1126,7 +1126,7 @@ impl DetailFrame {
             return false;
         }
         let px = self.begin(Grid::Quad, cols, rows);
-        for (dst, &c) in px.pixels_mut().chunks_exact_mut(2).zip(half.pixels()) {
+        for (dst, &c) in px.pixels_mut().as_chunks_mut::<2>().0.iter_mut().zip(half.pixels()) {
             dst[0] = c;
             dst[1] = c;
         }
@@ -2311,7 +2311,7 @@ mod tests {
         let mut src = PixelBuffer::new(32, 16);
         for y in 0..16 {
             for x in 0..32 {
-                src.plot(x as i32, y as i32, if y >= 5 + x / 4 { B } else { A });
+                src.plot(x, y, if y >= 5 + x / 4 { B } else { A });
             }
         }
         let mut frame = strong(&src, SubcellSet::Quad);
@@ -2363,7 +2363,7 @@ mod tests {
         let mut src = PixelBuffer::new(32, 16);
         for y in 0..16 {
             for x in 0..32 {
-                src.plot(x as i32, y as i32, if y >= 4 + x / 8 { B } else { A });
+                src.plot(x, y, if y >= 4 + x / 8 { B } else { A });
             }
         }
         let frame = strong(&src, SubcellSet::Sextant);

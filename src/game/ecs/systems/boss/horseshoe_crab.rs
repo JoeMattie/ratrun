@@ -1560,12 +1560,20 @@ mod tests {
     fn it_follows_the_rat_out_of_the_arena() {
         let mut w = crab_world(CRAB_SEED);
         spawn_crab(&mut w);
-        let arena = w.level.fight_rect_around(w.player.pos);
-        let c = arena.center_world();
-        // The rat stands well outside the arena, on connected floor.
+        // The rat stands just outside a small fight rectangle, on connected
+        // floor (a rat that walks far away gets the rectangle recentred
+        // instead: batch 12), and the crab starts 90 px off.
         let rat = w.player.pos;
-        assert!(!arena.contains_world(rat), "the spawn must be outside the arena");
+        let (rx, ry) = crate::game::collision::cell_of(rat);
+        let arena = crate::game::level::TileRect::new(rx + 2, ry - 3, 6, 6);
+        assert!(!arena.contains_world(rat), "the rat must be outside the rectangle");
+        let c = w
+            .level
+            .tiles
+            .nearest_open_center(rat + Vec2::new(90.0, 0.0), SizeClass::Large, 16)
+            .expect("open floor near the start");
         place(&mut w, c, rat);
+        with_boss(&mut w, |b| b.arena = arena);
         w.clear_enemies();
         let d0 = boss_of(&mut w).unwrap().pos.dist(rat);
         for _ in 0..120 {

@@ -1075,9 +1075,10 @@ mod tests {
             expected
         );
         assert!(
-            // 14,880 after the batch-seven `hp_scale` retune (0.85 -> 0.62,
-            // measured: a 53 s median fight for the Skilled bot).
-            boss.max_hp > 12_000.0,
+            // 14,880 after the batch-seven `hp_scale` retune (0.85 -> 0.62),
+            // then batch twelve's build correction for the smaller racks
+            // (`director::BUILD_HP`, `BUILD_HP_LEVEL`, `BOSS_BUILD_LEVEL`).
+            boss.max_hp > 6_000.0,
             "the final floor's fight must be a real pool, got {:.0}",
             boss.max_hp
         );

@@ -3146,10 +3146,6 @@ mod tests {
                     "{theme:?}: hole {cell:?} is in the start room"
                 );
                 assert!(
-                    !cell.intersects(&level.boss_room().expect("boss room").rect),
-                    "{theme:?}: hole {cell:?} is in the boss arena"
-                );
-                assert!(
                     cx >= 2 && cy >= 2 && cx <= MAP_COLS - 3 && cy <= MAP_ROWS - 3,
                     "{theme:?}: hole {cell:?} is in the border"
                 );
@@ -3428,7 +3424,8 @@ mod tests {
                 let sticky_cells: Vec<(i32, i32)> =
                     stickies.iter().map(|t| validate::cell_of(t.pos)).collect();
                 let start_rect = level.start_room().expect("start room").rect;
-                let boss_rect = level.boss_room().expect("boss room").rect;
+                // No generated level has an arena any more (batch 12).
+                let boss_rect = level.boss_room().map_or(TileRect::new(-8, -8, 1, 1), |r| r.rect);
 
                 for (i, trap) in stickies.iter().enumerate() {
                     let (cx, cy) = sticky_cells[i];
@@ -3679,7 +3676,8 @@ mod tests {
                 }
                 let start = validate::cell_of(level.start);
                 let dist = public_distances(&level.tiles, start);
-                let boss = level.boss_room().expect("a boss arena").rect;
+                // No generated level has an arena any more (batch 12).
+                let boss = level.boss_room().map_or(TileRect::new(-8, -8, 1, 1), |r| r.rect);
                 let start_room = level.start_room().expect("a start room").rect;
                 for (i, hole) in holes.iter().enumerate() {
                     assert_eq!(hole.index, i, "the index is the shelf's seed key");

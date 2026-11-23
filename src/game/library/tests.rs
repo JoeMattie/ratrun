@@ -772,9 +772,21 @@ fn boss_cards_print_the_real_pool_and_no_death_animation_row() {
             .iter()
             .find(|r| r.label == "HIT POINTS")
             .unwrap_or_else(|| panic!("{kind:?} has no HIT POINTS row"));
-        let pool = kind.base_hp() * kind.hp_scale() * director::boss_hp_mult_for(2, director::BOSS_TIME);
+        // The pool on the boss's own campaign level.
+        let level = BossKind::all()
+            .iter()
+            .position(|k| *k == kind)
+            .map(|_| {
+                crate::game::level::Theme::playable()
+                    .into_iter()
+                    .find(|t| BossKind::pool_for_theme(*t).contains(&kind))
+                    .map(crate::game::campaign::theme_stage)
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        let pool = kind.base_hp() * kind.hp_scale() * director::boss_hp_mult_for(level, director::BOSS_TIME);
         assert_eq!(hp.value, format!("{pool:.0}"), "{kind:?}");
-        assert!(pool >= 5_000.0, "{kind:?}: {pool} is not a boss pool");
+        assert!(pool >= 2_500.0, "{kind:?}: {pool} is not a boss pool");
         assert!((0.0..=1.0).contains(&hp.bar), "{kind:?}: bar {}", hp.bar);
     }
 }

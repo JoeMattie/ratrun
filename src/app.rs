@@ -823,8 +823,8 @@ impl App {
 
     fn menu_music(&mut self) {
         let theme = self.theme();
-        // The menus keep the classic title music; the floor songs start with
-        // the run (`AudioEngine::play_music`).
+        // The menus play the floor's song at the calm tier with a soft entry
+        // (`AudioEngine::play_menu_music`).
         self.music_intensity = 0;
         if let Some(a) = self.audio.as_mut() {
             a.play_menu_music(theme);
@@ -2944,6 +2944,7 @@ impl App {
             }
         }
         let mut esc_used = false;
+        let mut right_spent = false;
         if self.input.action_pressed(Action::Map) || click == Some(Target::Minimap) {
             self.map_open = !self.map_open;
             self.sfx(Sfx::UiMove);
@@ -2952,6 +2953,7 @@ impl App {
         {
             // The expanded map is an overlay: a right click closes it exactly
             // as Esc does (and, like Esc, never also pauses).
+            right_spent = self.input.right_clicked();
             self.map_open = false;
             esc_used = true;
             self.sfx(Sfx::UiMove);
@@ -3003,7 +3005,7 @@ impl App {
         // The dash button itself: its press edge, whether it is still held and
         // its release edge, on whatever device the dash Action is bound to.
         // The sim owns the Super Dash charge meter; this is only the button.
-        let dash_hold = DashHold {
+        let mut dash_hold = DashHold {
             down: self.input.dash_down(),
             held: self.input.dash_held(),
             up: self.input.dash_up(),
@@ -3020,7 +3022,7 @@ impl App {
         // only "hold" a terminal without key releases can give, and it must
         // never re-press the dash — with the Super Dash owned that is what would
         // machine-gun taps instead of charging.
-        let (dash, active) = if self.input.controls.mouse_aims() {
+        let (mut dash, mut active) = if self.input.controls.mouse_aims() {
             (
                 self.input.action_pressed(Action::Dash),
                 click_dash || self.input.action_pressed(Action::FireActives),
@@ -3032,6 +3034,12 @@ impl App {
                 click || self.input.active_pressed(),
             )
         };
+        if right_spent {
+            // The right click was the map's Back: it must not also fire or dash.
+            dash = false;
+            active = false;
+            dash_hold = DashHold::NONE;
+        }
         let mut ended = false;
         let mut level_done = false;
         let mut intensity = 1u32;
@@ -3498,6 +3506,9 @@ impl App {
         if campaign_won {
             // `finalize` owns the victory sting (it knows the run won).
             self.finalize();
+            // The getaway song at full tier plays under the victory plate.
+            // After `finalize`, which drops the tier to calm.
+            self.play_music(Theme::Trailer, 3);
             self.screen = Screen::Victory;
         } else {
             // The simulation already played the boss's own death sting this
@@ -5995,11 +6006,9 @@ mod tests {
                 let text = hh.frame(&[]);
                 assert_eq!(hh.app.theme(), theme);
                 let number = campaign::theme_stage(theme) + 1;
-                // A fresh save has only stage one open. The ride is the
-                // campaign's fourth level now, so it is locked like any other
-                // floor until a stage-three sector is cleared — and it is still
-                // reachable as a practice floor once it opens.
-                let locked = theme.stage() > 0;
+                // A fresh save has only stage one open; the ride is the
+                // campaign's fourth level and, as a practice floor, always open.
+                let locked = theme.stage() > 0 && !theme.is_trailer();
                 let label = if locked {
                     format!("‹ {number:02} {} × ›", theme.name())
                 } else {
@@ -6994,11 +7003,15 @@ mod tests {
             assert_eq!(w.level.theme, Theme::Trailer);
             assert_eq!(w.level_index(), campaign::LEVEL_COUNT - 1);
             assert_eq!(w.difficulty_override, Some(0), "level 0's scalars");
-            assert_eq!(w.level.seed, campaign::level_seed(hh.app.seed(), 3));
             assert_eq!(w.player.loadout.weapons.len(), 1, "no carried build");
         }
         assert!(hh.app.campaign.is_none(), "not a campaign run");
         assert_eq!(hh.app.practice, Some(Theme::Trailer));
+        // Past the ride's intro plate and into play.
+        if hh.app.screen.name_for_test() == "LevelIntro" {
+            hh.frame(&[KeyCode::Enter]);
+        }
+        assert_eq!(hh.app.screen.name_for_test(), "Playing");
         // Clearing it ends the run (the incident report), never a campaign win.
         hh.app.world.as_mut().unwrap().mark_level_complete();
         hh.frame(&[]);
@@ -7643,8 +7656,16 @@ mod tests {
                     // The reel starts at LASH_RECOIL_AT (0.20 s); a few frames
                     // later the caught body is standing at the rat's feet.
                     "barbedwire" => 17,
+                    // A lash at long reach (one body 108 px out): the frame
+                    // count picks the moment (`RATRUN_DUMP_FRAMES`, default
+                    // the crack tick).
+                    "spiketail-far" => std::env::var("RATRUN_DUMP_FRAMES")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(9),
                     _ => 9,
                 };
+                let far = t == "spiketail-far";
                 let mut rng = rand::rngs::StdRng::seed_from_u64(31);
                 {
                     let w = hh.app.world.as_mut().unwrap();
@@ -7652,7 +7673,7 @@ mod tests {
                         vec![{
                             let mut weapon =
                                 crate::game::weapon::Weapon::new(WeaponKind::SpikedTail);
-                            weapon.level = if evolved { 5 } else { 4 };
+                            weapon.level = if evolved || far { 5 } else { 4 };
                             weapon.evolved = evolved;
                             weapon.timer = 0.0;
                             weapon
@@ -7678,9 +7699,20 @@ mod tests {
                         // Flavour off the line, so the burst's edge is visible.
                         ((38.0, 14.0), crate::game::enemy::EnemyKind::Skitterer),
                     ] {
+                        if far {
+                            break;
+                        }
                         w.spawn_enemy_with_rng(
                             kind,
                             p + crate::math::Vec2::new(off.0, off.1),
+                            400.0,
+                            &mut rng,
+                        );
+                    }
+                    if far {
+                        w.spawn_enemy_with_rng(
+                            crate::game::enemy::EnemyKind::Brute,
+                            p + crate::math::Vec2::new(108.0, 0.0),
                             400.0,
                             &mut rng,
                         );
@@ -7929,7 +7961,7 @@ mod tests {
                     w.level.objects.sticky_traps.clear();
                     w.level.objects.mousetraps.clear();
                     let spot = if target.ends_with("arena") {
-                        w.level.boss_room().map(|room| room.center())
+                        w.level.largest_hall().map(|room| room.center())
                     } else if theme == Theme::Laundry {
                         w.level
                             .objects
@@ -8316,9 +8348,9 @@ mod tests {
                     let w = hh.app.world.as_mut().unwrap();
                     let centre = w
                         .level
-                        .boss_room()
+                        .largest_hall()
                         .map(|r| r.rect.center_world())
-                        .expect("the Lab has an arena");
+                        .expect("the Lab has a hall");
                     w.clear_enemies();
                     w.player.pos = centre + Vec2::new(18.0, 22.0);
                     w.force_boss(BossKind::Cobra);
@@ -8354,6 +8386,38 @@ mod tests {
             // `floor-<name>`: fifteen seconds of real play on a named floor
             // (sewer, kitchen, lab, laundry, printworks, flatbed), a few
             // minutes into the curve so the frame has a horde in it.
+            // `arrival-<floor>`: the boss arriving with no arena. The clock is
+            // set to 14:40 and `RATRUN_DUMP_FRAMES` plays on from there (0 is
+            // the warning, 1200 the arrival at 15:00, 1800 the fight at 15:10).
+            t if t.starts_with("arrival-") => {
+                let theme = match &t["arrival-".len()..] {
+                    "kitchen" => Theme::Kitchen,
+                    "lab" => Theme::Lab,
+                    "laundry" => Theme::Laundry,
+                    "printworks" => Theme::Printworks,
+                    "flatbed" => Theme::Trailer,
+                    _ => Theme::Sewer,
+                };
+                if theme == Theme::Sewer {
+                    hh.enter_playing();
+                } else {
+                    hh.app.start_practice(theme);
+                    hh.frame(&[KeyCode::Enter]);
+                }
+                {
+                    let w = hh.app.world.as_mut().unwrap();
+                    w.elapsed = crate::game::director::BOSS_TIME - 20.0;
+                    w.player.god = true;
+                    w.player.xp_to_next = 9_999_999;
+                }
+                let frames = std::env::var("RATRUN_DUMP_FRAMES")
+                    .ok()
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(1200);
+                for _ in 0..frames {
+                    hh.frame(&[]);
+                }
+            }
             t if t.starts_with("floor-") => {
                 let theme = match &t["floor-".len()..] {
                     "kitchen" => Theme::Kitchen,
@@ -8430,12 +8494,22 @@ mod tests {
                     let w = hh.app.world.as_mut().unwrap();
                     let centre = w
                         .level
-                        .boss_room()
+                        .largest_hall()
                         .map(|r| r.rect.center_world())
-                        .expect("every floor has an arena");
+                        .expect("every floor has a hall");
                     w.clear_enemies();
-                    w.player.pos = centre + Vec2::new(64.0, 30.0);
-                    w.force_boss(kind);
+                    w.player.pos = w
+                        .level
+                        .tiles
+                        .nearest_open_center(
+                            centre,
+                            crate::game::collision::SizeClass::Large,
+                            16,
+                        )
+                        .unwrap_or(centre);
+                    // No arena any more: the fight starts beside the rat (the
+                    // scheduled arrival is a screen away and walks in).
+                    w.force_boss_here(kind);
                 }
                 let frames = std::env::var("RATRUN_DUMP_FRAMES")
                     .ok()
@@ -8601,6 +8675,89 @@ mod tests {
             }
         }
 
+        // `RATRUN_DUMP_FORE=n` walks the capture to the n-th nearest foreground
+        // item (the layer keeps clear of the start room, where most captures
+        // stand): the rat is put 50 px below it and the camera on the item.
+        if let Some(n) = std::env::var("RATRUN_DUMP_FORE").ok().and_then(|v| v.parse::<usize>().ok()) {
+            if let Some(w) = hh.app.world.as_mut() {
+                let level = &w.level;
+                w.foreground_layer.sync(level);
+                let p = w.player.pos;
+                let mut items: Vec<Vec2> = w.foreground_layer.items().iter().map(|i| i.pos).collect();
+                items.sort_by(|a, b| a.dist(p).partial_cmp(&b.dist(p)).unwrap());
+                if let Some(at) = items.get(n).copied() {
+                    w.clear_enemies();
+                    w.player.pos = w
+                        .level
+                        .tiles
+                        .nearest_open_center(
+                            at + Vec2::new(0.0, 50.0),
+                            crate::game::collision::SizeClass::Small,
+                            16,
+                        )
+                        .unwrap_or(at);
+                    w.cam_focus = Some(at);
+                    hh.app.picture_dirty = true;
+                    hh.app.console_paused = true;
+                    hh.frame(&[]);
+                }
+            }
+        }
+        // `RATRUN_DUMP_SCONCE=n` stands the rat 34 px in front of the n-th
+        // nearest wall lamp (a corridor one with `RATRUN_DUMP_SCONCE_IN=corridor`).
+        if let Some(n) = std::env::var("RATRUN_DUMP_SCONCE").ok().and_then(|v| v.parse::<usize>().ok()) {
+            let corridor = std::env::var("RATRUN_DUMP_SCONCE_IN").is_ok_and(|v| v == "corridor");
+            if let Some(w) = hh.app.world.as_mut() {
+                use crate::game::level::{LightFixtureKind, RoomKind};
+                let p = w.player.pos;
+                let mut lamps: Vec<_> = w
+                    .level
+                    .objects
+                    .lights
+                    .iter()
+                    .filter(|f| f.kind == LightFixtureKind::Sconce)
+                    .filter(|f| {
+                        let in_corridor = w
+                            .level
+                            .rooms
+                            .iter()
+                            .any(|r| r.kind == RoomKind::Corridor && r.rect.contains_world(f.pos));
+                        in_corridor == corridor
+                    })
+                    .copied()
+                    .collect();
+                lamps.sort_by(|a, b| a.pos.dist(p).partial_cmp(&b.pos.dist(p)).unwrap());
+                if let Some(lamp) = lamps.get(n).copied() {
+                    let facing = lamp.wall_facing(&w.level.tiles);
+                    w.clear_enemies();
+                    w.player.pos = w
+                        .level
+                        .tiles
+                        .nearest_open_center(
+                            lamp.pos + facing * 34.0,
+                            crate::game::collision::SizeClass::Small,
+                            16,
+                        )
+                        .unwrap_or(lamp.pos);
+                    hh.app.picture_dirty = true;
+                    hh.app.console_paused = true;
+                    hh.frame(&[]);
+                }
+            }
+        }
+        // `RATRUN_DUMP_CAM=dx,dy` slides the camera off the rat by that many
+        // world pixels (a parallax strip is the same frame at three offsets).
+        if let Some((dx, dy)) = std::env::var("RATRUN_DUMP_CAM").ok().and_then(|v| {
+            let (a, b) = v.split_once(',')?;
+            Some((a.trim().parse::<f32>().ok()?, b.trim().parse::<f32>().ok()?))
+        }) {
+            if let Some(w) = hh.app.world.as_mut() {
+                w.cam_focus = Some(w.cam_focus.unwrap_or(w.player.pos) + Vec2::new(dx, dy));
+                hh.app.picture_dirty = true;
+                hh.app.console_paused = true;
+                hh.frame(&[]);
+            }
+        }
         // `RATRUN_DUMP_ZOOM=2` re-frames any in-run capture at that zoom.
         if let Some(zoom) = std::env::var("RATRUN_DUMP_ZOOM")
             .ok()
@@ -9321,7 +9478,7 @@ mod tests {
         h.app.world.as_mut().unwrap().smoke_enabled = false;
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 3, "the smoke toggle must redraw");
-        h.app.world.as_mut().unwrap().foreground = false;
+        h.app.set_foreground(false);
         h.frame(&[]);
         assert_eq!(h.app.world_draws, drawn + 4, "the foreground toggle must redraw");
 
@@ -9986,8 +10143,9 @@ mod tests {
                     }
                     "Victory" => {
                         hh.enter_playing();
-                        hh.app.world.as_mut().unwrap().level_index = 2;
-                        hh.app.campaign.as_mut().unwrap().level = 2;
+                        let last = campaign::LEVEL_COUNT - 1;
+                        hh.app.world.as_mut().unwrap().level_index = last;
+                        hh.app.campaign.as_mut().unwrap().level = last;
                         hh.finish_level();
                     }
                     _ => {
@@ -10990,38 +11148,19 @@ mod tests {
         );
     }
 
+    /// There is no boss arena, so the map never draws a bearing to one
+    /// (batch twelve): the boss arrives where the rat is.
     #[test]
-    fn the_boss_bearing_appears_on_the_map_after_three_minutes() {
-        use crate::render::minimap::{fog_edge_cell, MinimapSource};
+    fn no_boss_bearing_is_drawn_on_the_map() {
         let mut hh = Harness::new(120, 40);
         hh.enter_playing();
         hh.frame(&[]);
-        {
-            let w = hh.app.world.as_ref().unwrap();
-            assert!(minimap_source::boss_bearing_dir(w).is_none(), "bearing too early");
-        }
         let w = hh.app.world.as_mut().unwrap();
-        w.elapsed = crate::render::minimap_source::ARENA_BEARING_AFTER_SECS + 1.0;
-        let player_cell = (w.player.pos.x / 16.0, w.player.pos.y / 16.0);
-        let dir = minimap_source::boss_bearing_dir(w).expect("no bearing after 180 s");
-        // The art projects it onto the fog boundary, so it lands on explored
-        // ground and never uncovers the route.
-        let edge = fog_edge_cell(w, player_cell, dir).expect("no fog boundary on the bearing ray");
-        let (ecx, ecy) = (edge.0.floor() as i32, edge.1.floor() as i32);
-        assert!(w.seen(ecx, ecy), "the bearing marker is outside the fog");
-        let arena_cell = w
-            .level
-            .boss_room()
-            .map(|room| {
-                let c = room.center();
-                (c.x / 16.0, c.y / 16.0)
-            })
-            .unwrap();
-        assert!(
-            !w.seen(arena_cell.0.floor() as i32, arena_cell.1.floor() as i32),
-            "the bearing must not uncover the arena"
-        );
-        // And the frame still draws with the bearing active.
+        for t in [0.0, crate::render::minimap_source::ARENA_BEARING_AFTER_SECS + 1.0, 600.0] {
+            w.elapsed = t;
+            assert!(minimap_source::boss_bearing_dir(w).is_none(), "a bearing at {t}s");
+        }
+        assert!(w.level.boss_room().is_none(), "a generated level has no arena");
         hh.frame(&[]);
         assert!(!hh.app.last_minimap.is_empty());
     }
@@ -11299,8 +11438,10 @@ mod tests {
         assert_eq!((hh.app.last_minimap.width, hh.app.last_minimap.height), (14, 7));
     }
 
+    /// A hidden minimap keeps its quiet `N` hint: with no arena there is no
+    /// bearing chevron for it to show, before or during the boss warning.
     #[test]
-    fn hidden_minimap_keeps_pre_warning_bearing_without_duplicating_hud_compass() {
+    fn hidden_minimap_shows_only_the_north_hint() {
         use crate::render::minimap::MinimapSize;
 
         let mut hh = Harness::new(80, 24);
@@ -11310,33 +11451,18 @@ mod tests {
         assert_eq!(hh.app.scores.minimap_size, MinimapSize::Hidden);
         assert!(hh.app.last_minimap.is_empty());
 
-        // 185s: arena bearing active (180..230s), HUD warning compass not yet active.
-        hh.app.world.as_mut().unwrap().elapsed =
-            crate::render::minimap_source::ARENA_BEARING_AFTER_SECS + 5.0;
-        hh.frame(&[]);
-        let game = hh.app.last_game;
-        let corner = hh.terminal.backend().buffer()[(game.right() - 2, game.bottom() - 2)]
-            .symbol()
-            .to_string();
-        assert!(
-            matches!(
-                corner.as_str(),
-                "▲" | "◥" | "►" | "◢" | "▼" | "◣" | "◄" | "◤"
-            ),
-            "expected 1-cell arena bearing chevron when hidden at 185s, got {corner:?}"
-        );
-
-        // 240s: pre-boss warning active (230..255s); HUD compass now owns the
-        // arena bearing so the hidden corner reverts to the quiet `N` hint.
-        hh.app.world.as_mut().unwrap().elapsed = crate::game::director::BOSS_TIME - 15.0;
-        hh.frame(&[]);
-        let corner_warn = hh.terminal.backend().buffer()[(game.right() - 2, game.bottom() - 2)]
-            .symbol()
-            .to_string();
-        assert_eq!(
-            corner_warn, "N",
-            "hidden corner must not duplicate the HUD warning compass"
-        );
+        for t in [
+            crate::render::minimap_source::ARENA_BEARING_AFTER_SECS + 5.0,
+            crate::game::director::BOSS_TIME - 15.0,
+        ] {
+            hh.app.world.as_mut().unwrap().elapsed = t;
+            hh.frame(&[]);
+            let game = hh.app.last_game;
+            let corner = hh.terminal.backend().buffer()[(game.right() - 2, game.bottom() - 2)]
+                .symbol()
+                .to_string();
+            assert_eq!(corner, "N", "the hidden corner at {t}s");
+        }
     }
 
     #[test]
@@ -11530,7 +11656,7 @@ mod tests {
         }
         assert!(text.contains("4 / 4"), "the sectors column must read 4/4");
         assert!(
-            text.contains("THE FLATBED"),
+            text.contains("04 Flatbed"),
             "the ride is not on the victory plate: {text}"
         );
         assert!(h.app.new_best, "the first campaign win is a new best");

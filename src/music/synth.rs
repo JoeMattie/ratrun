@@ -1913,7 +1913,7 @@ fn init_drum16_voice(v: &mut Voice, role: Role, midi: u8, sr: f32, k: KitParams)
                 }
                 49 | 51 | 52 | 53 | 55 | 57 | 59 => {
                     // Crash & ride cymbals
-                    let (f_base, dec_ms) = match midi {
+                    let (f_base, dec_ms): (f32, f32) = match midi {
                         49 => (3200.0, 460.0),
                         57 => (3400.0, 440.0),
                         51 => (4600.0, 320.0),

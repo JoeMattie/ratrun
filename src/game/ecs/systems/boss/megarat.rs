@@ -1127,7 +1127,7 @@ mod tests {
     fn boss_context<'a>(
         w: &'a World,
         rng: &'a mut rand::rngs::StdRng,
-        arena: crate::game::level::TileRect,
+        _arena: crate::game::level::TileRect,
     ) -> BossContext<'a> {
         let boss_arena = w.level.fight_rect_around(w.player.pos);
         BossContext {
@@ -1200,7 +1200,7 @@ mod tests {
         // The pool is the framework's: art pool × scale × the director curve.
         let expect = art::BOSS_BASE_HP
             * BossKind::MegaRat.hp_scale()
-            * crate::game::director::boss_hp_mult_for(1, crate::game::director::BOSS_TIME);
+            * crate::game::director::boss_hp_mult_for(w.level_index(), crate::game::director::BOSS_TIME);
         assert!(
             (boss.max_hp - expect).abs() < 1.0,
             "pool {} vs {expect}",

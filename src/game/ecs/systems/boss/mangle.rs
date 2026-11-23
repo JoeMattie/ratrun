@@ -1086,7 +1086,9 @@ mod tests {
         // A small arena at the centre: the rat leaves it.
         let arena = TileRect::new(96, 74, 8, 8);
         rig.edit(|b| b.arena = arena);
-        let outside = CENTER + Vec2::new(150.0, 0.0);
+        // Just outside: a rat more than half a rectangle away gets the
+        // rectangle recentred instead (batch 12).
+        let outside = CENTER + Vec2::new(110.0, 0.0);
         rig.set_player(outside);
         rig.tick();
         assert!(rig.boss().hunting, "the rat is outside the arena");

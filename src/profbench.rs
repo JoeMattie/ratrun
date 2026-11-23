@@ -138,7 +138,7 @@ fn opts_for(floor: &str) -> (AutoOpts, Theme) {
             Theme::Printworks,
         ),
         "flatbed" => (
-            mk(campaign::LEVEL_COUNT, CarryPreset::Typical, None),
+            mk(campaign::LEVEL_COUNT - 1, CarryPreset::Typical, None),
             Theme::Trailer,
         ),
         _ => (mk(0, CarryPreset::None, None), Theme::Sewer),

@@ -1111,7 +1111,7 @@ mod tests {
             BossKind::Hawk,
             "this test needs a Trailer seed that fields the hawk"
         );
-        w.level_index = campaign::LEVEL_COUNT;
+        w.level_index = campaign::LEVEL_COUNT - 1;
         w
     }
 
@@ -1270,7 +1270,7 @@ mod tests {
         let expect = art::BOSS_BASE_HP
             * BossKind::Hawk.hp_scale()
             * crate::game::director::boss_hp_mult_for(
-                campaign::LEVEL_COUNT,
+                campaign::LEVEL_COUNT - 1,
                 crate::game::director::BOSS_TIME,
             );
         assert!((boss.max_hp - expect).abs() < 1.0, "pool {} vs {expect}", boss.max_hp);
@@ -1878,6 +1878,14 @@ mod tests {
             (deck.y as f32 + deck.h as f32 * 0.5) * TILE_F,
         );
         place(&mut w, centre, rat);
+        // The fight rectangle follows a rat that walks far away (batch 12),
+        // so the hunt is the band just outside it: a small rectangle two cells
+        // from the rat.
+        {
+            let (rx, ry) = crate::game::collision::cell_of(rat);
+            let near = crate::game::level::TileRect::new(rx + 2, ry - 3, 6, 6);
+            with_boss(&mut w, |b| b.arena = near);
+        }
         w.clear_enemies();
         let d0 = boss_of(&mut w).unwrap().pos.dist(rat);
         for _ in 0..180 {

@@ -49,7 +49,7 @@ mod sewer;
 
 use crate::game::level::Theme;
 
-pub use synth::{SongSynth, SynthMode};
+pub use synth::SongSynth;
 
 /// One generated note: `(delta_steps, midi, gate_steps, velocity)`.
 pub type Note = (u8, u8, u8, u8);

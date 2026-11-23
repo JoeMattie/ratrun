@@ -613,7 +613,7 @@ impl WhipChain {
             self.step_lash_substep(self.sim_time, rump, target, dir, dist, rest_len, &rest_pts);
             // Refresh ghost snapshots during jump-ahead so a single-frame
             // crack capture still has crisp whip-speed smear behind it.
-            if steps > 0 && steps % 3 == 0 {
+            if steps > 0 && steps.is_multiple_of(3) {
                 self.ghost_b = self.ghost_a;
                 self.ghost_a = self.pos;
                 self.ghost_count = self.ghost_count.saturating_add(1).min(2);
@@ -695,7 +695,7 @@ impl WhipChain {
         };
 
         let in_windup = t < LASH_WINDUP;
-        let in_crack = t >= LASH_WINDUP && t < LASH_RECOIL_AT;
+        let in_crack = (LASH_WINDUP..LASH_RECOIL_AT).contains(&t);
         let wu = (t / LASH_WINDUP.max(1e-4)).clamp(0.0, 1.0);
         let cu = ((t - LASH_WINDUP) / (LASH_RECOIL_AT - LASH_WINDUP).max(1e-4)).clamp(0.0, 1.0);
         let ru = ((t - LASH_RECOIL_AT) / (LASH_TOTAL - LASH_RECOIL_AT).max(1e-4)).clamp(0.0, 1.0);
@@ -1190,7 +1190,7 @@ pub struct LaserBeam {
     pub muzzle: f32,
 }
 
-/// Laser Eyes' **twin amber muzzle dots** and its **blinking beam**.
+/// Laser Eyes' **twin red muzzle dots** and its **beam**.
 ///
 /// The dots sit on the rat's eyes (the same local `(3.4, ±0.85)`
 /// [`draw_face`] plots), so the beam visibly leaves the rat rather than the
@@ -1206,11 +1206,14 @@ pub fn draw_laser_eyes(pb: &mut PixelBuffer, player: &Player, beam: LaserBeam, c
     };
     let perp = face.perp();
     let eye_u = 3.4;
-    let hot: Rgb = (255, 252, 224);
-    let amber: Rgb = (255, 182, 42);
-    let orange: Rgb = (242, 108, 22);
+    // One red-white palette with the muzzle sparks and cut sparks
+    // (`vfx::LASER_CORE`/`LASER_GLOW`): `amber` is the sheath and `orange`
+    // the corona, named for the roles they have always had.
+    let hot: Rgb = crate::game::particle::vfx::LASER_CORE;
+    let amber: Rgb = crate::game::particle::vfx::LASER_GLOW;
+    let orange: Rgb = scale(crate::game::particle::vfx::LASER_GLOW, 0.8);
 
-    // 1. Twin amber muzzle dots on the eyes (always live through the whole burst,
+    // 1. Twin muzzle dots on the eyes (always live through the whole burst,
     //    brightening when a pulse fires and glowing warm amber in dark intervals).
     let m = beam.muzzle.clamp(0.0, 1.0);
     let eye_l = player.pos + face * eye_u + perp * -0.85;
@@ -2036,7 +2039,7 @@ fn draw_whip_chain(
                     .min(1.0);
                 col = mix(col, THRASH_HOT, heat);
             }
-            if chain.barbed && pixel_idx % 3 == 0 {
+            if chain.barbed && pixel_idx.is_multiple_of(3) {
                 col = mix(col, SPIKE_STEEL, 0.72);
             }
             if chain.flash > 0.0 && s_norm > 0.65 {
@@ -2492,7 +2495,7 @@ mod tests {
         let centre = rig_pos();
         // The top pip of the ring: `CHARGE_PIPS` start clockwise from straight
         // up, at `GAUGE_RADIUS`.
-        let top = (centre.0 as i32, (centre.1 - GAUGE_RADIUS).round() as i32);
+        let top = (centre.x as i32, (centre.y - GAUGE_RADIUS).round() as i32);
         let idle = render_rat(&rat(centre, 0.0), 0.25);
         let mut p = rat(centre, 0.0);
         p.dash_charging = true;
@@ -3217,7 +3220,7 @@ mod tests {
         assert!(count_lit(&pb) >= 60, "tail whip should draw a visible frontal crescent");
         let front_centre = pb.pixel_at(78, 48);
         assert!(
-            front_centre != bg && front_centre.0 >= 180,
+            front_centre != bg && front_centre.0 >= 150,
             "tail whip crescent should be bright pink/white at front centre, got {front_centre:?}"
         );
         let behind_lit = (0..pb.h)

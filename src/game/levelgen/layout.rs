@@ -2728,8 +2728,9 @@ mod tests {
         for theme in Theme::all() {
             for seed in 0..per_theme {
                 let level = crate::game::levelgen::generate_once(theme, seed, 0);
-                if validate::validate(&level).is_err() {
+                if let Err(errors) = validate::validate(&level) {
                     failures += 1;
+                    println!("first-attempt failure: {theme:?} seed {seed}: {errors:?}");
                 }
                 let start = validate::cell_of(level.start);
                 let cell_len = |p: Vec2| {

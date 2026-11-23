@@ -170,7 +170,7 @@ impl LightMap {
                         x: mx,
                         y: my,
                         radius: 28.0,
-                        color: (255, 196, 74),
+                        color: (255, 96, 90),
                         intensity: (175.0 * m) as u16,
                         scatter: (44.0 * m) as u16,
                         priority: 3,
@@ -180,10 +180,24 @@ impl LightMap {
                 }
                 if b > 0.05 && lfx.beam > 2.0 {
                     let dir = Vec2::from_angle(lfx.angle);
-                    let mut beam = Light::radial(muzzle, lfx.beam + 18.0, (255, 178, 48), 0.85 * b);
+                    let mut beam = Light::radial(muzzle, lfx.beam + 18.0, (255, 86, 84), 0.85 * b);
                     beam.shape = LightShape::Beam {
                         dir,
                         length: lfx.beam + 12.0,
+                        half_width: 16.0,
+                    };
+                    beam.scatter = 0.22 * b;
+                    beam.height = 7.0;
+                    self.push_shaped(beam, 3);
+                }
+                // The L4+ mirrored beam lights the floor too.
+                if b > 0.05 && lfx.twin && lfx.beam_b > 2.0 {
+                    let dir = Vec2::from_angle(lfx.angle_b);
+                    let mut beam =
+                        Light::radial(muzzle, lfx.beam_b + 18.0, (255, 86, 84), 0.85 * b);
+                    beam.shape = LightShape::Beam {
+                        dir,
+                        length: lfx.beam_b + 12.0,
                         half_width: 16.0,
                     };
                     beam.scatter = 0.22 * b;

@@ -806,7 +806,7 @@ mod tests {
 
     fn trailer_world(seed: u64) -> World {
         let mut w = World::new(Theme::Trailer, magpie_seed(seed));
-        w.level_index = campaign::LEVEL_COUNT;
+        w.level_index = campaign::LEVEL_COUNT - 1;
         w
     }
 
@@ -927,7 +927,7 @@ mod tests {
         // The pool is the framework's: art pool x scale x the director's curve.
         let expect = art::BOSS_BASE_HP
             * BossKind::Magpie.hp_scale()
-            * crate::game::director::boss_hp_mult_for(campaign::LEVEL_COUNT, crate::game::director::BOSS_TIME);
+            * crate::game::director::boss_hp_mult_for(campaign::LEVEL_COUNT - 1, crate::game::director::BOSS_TIME);
         assert!((boss.max_hp - expect).abs() < 1.0, "pool {} vs {expect}", boss.max_hp);
     }
 
@@ -1084,25 +1084,26 @@ mod tests {
         spawn_magpie(&mut w);
         // A cargo column right behind the bird: it can lunge but it cannot get
         // any purchase to pull its bill back out.
+        // Built where the other fixtures stand (the fight rectangle's
+        // centre): a column two cells west of it, seven cells tall.
         let centre = arena_centre(&w);
-        let arena = w.level.fight_rect_around(w.player.pos);
+        let (cx, cy) = crate::game::collision::cell_of(centre);
         w.level.tiles.fill_cells(
-            arena.x + 2,
-            arena.y + 2,
+            cx - 2,
+            cy - 3,
             1,
-            arena.h - 4,
+            7,
             TileKind::Wall(crate::game::art_walls::WallKind::Solid),
         );
         w.level.tiles.rebuild_masks();
-        let row = (arena.y + arena.h / 2) as f32 * TILE_F + TILE_F * 0.5;
+        let row = cy as f32 * TILE_F + TILE_F * 0.5;
         // 24 px east of the cargo face: the back-probe reaches into it.
-        let wall_x = (arena.x + 3) as f32 * TILE_F + 24.0;
+        let wall_x = (cx - 1) as f32 * TILE_F + 24.0;
         place(
             &mut w,
             Vec2::new(wall_x, row),
             Vec2::new(wall_x + 44.0, row),
         );
-        let _ = centre;
         set_state(&mut w, MagpieState::PeckWindup, art::PECK_WINDUP[0]);
         let mut t = 0.0;
         while state_of(&mut w) != MagpieState::Stuck && t < 2.0 {
@@ -1426,6 +1427,14 @@ mod tests {
             (deck.y as f32 + deck.h as f32 * 0.5) * TILE_F,
         );
         place(&mut w, centre, rat);
+        // The fight rectangle follows a rat that walks far away (batch 12),
+        // so the hunt is the band just outside it: a small rectangle two cells
+        // from the rat.
+        {
+            let (rx, ry) = crate::game::collision::cell_of(rat);
+            let near = crate::game::level::TileRect::new(rx + 2, ry - 3, 6, 6);
+            with_boss(&mut w, |b| b.arena = near);
+        }
         w.clear_enemies();
         let d0 = boss_of(&mut w).expect("alive").pos.dist(rat);
         for _ in 0..180 {

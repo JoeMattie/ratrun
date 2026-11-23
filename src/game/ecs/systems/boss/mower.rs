@@ -1895,6 +1895,20 @@ mod tests {
             let mut w = lab_world(seed);
             let boss = spawn_mower(&mut w);
             let arena = boss.arena;
+            // Batch 12: the fight rectangle is no longer a walled room, so the
+            // fixture builds its own: open floor with a solid column on the
+            // rectangle's west side.
+            w.level.tiles.fill_cells(arena.x, arena.y, arena.w, arena.h, TileKind::Open);
+            if arena.x >= 1 {
+                w.level.tiles.fill_cells(
+                    arena.x - 1,
+                    arena.y,
+                    1,
+                    arena.h,
+                    TileKind::Wall(WallKind::Solid),
+                );
+            }
+            w.level.tiles.rebuild_masks();
             let west = f32::from(arena.x as i16) * TILE_F;
             let y = arena.center_world().y;
             // The wall ring column beside the arena's interior, and the rows

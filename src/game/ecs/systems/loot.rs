@@ -1359,8 +1359,9 @@ mod tests {
     /// The final level's completion *is* the campaign win.
     #[test]
     fn the_final_levels_completion_wins_the_campaign() {
-        let mut w = World::new_level(2, 13, Loadout::starting());
-        assert_eq!(w.level_index(), 2);
+        let last = crate::game::campaign::LEVEL_COUNT - 1;
+        let mut w = World::new_level(last, 13, Loadout::starting());
+        assert_eq!(w.level_index(), last);
         assert!(w.is_final_level());
         w.mark_level_complete();
         outcome_tick(&mut w);
@@ -1405,7 +1406,10 @@ mod tests {
         w.begin_tick(DT, Vec2::ZERO, false);
         assert_eq!(w.ecs.resource::<LevelIndex>().0, 1);
         assert!(!w.ecs.resource::<LevelIndex>().is_final());
-        assert_eq!(w.ecs.resource::<LevelIndex>().levels_remaining(), 1);
+        assert_eq!(
+            w.ecs.resource::<LevelIndex>().levels_remaining(),
+            crate::game::campaign::LEVEL_COUNT - 2
+        );
         w.end_tick();
     }
 

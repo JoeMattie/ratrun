@@ -45,7 +45,6 @@ use ratatui::Terminal;
 use crate::autoplay::{AutoOpts, AutoRun, AutoStatus};
 use crate::game::bot::Skill;
 use crate::game::campaign;
-use crate::game::level::Theme;
 use crate::input::InputState;
 use crate::render::framebuffer::PixelBuffer;
 use crate::render::palette;
@@ -1395,7 +1394,7 @@ fn tile_info(index: usize, run: &AutoRun) -> TileInfo {
     TileInfo {
         index,
         level,
-        theme: Theme::all()[level].name().chars().next().unwrap_or('?'),
+        theme: w.level.theme.name().chars().next().unwrap_or('?'),
         elapsed: w.elapsed,
         hp,
         max_hp,

@@ -839,9 +839,13 @@ mod tests {
                     } else {
                         assert_eq!(world.level.theme, Theme::Trailer);
                         assert_eq!(world.level_index(), LEVEL_COUNT - 1);
-                        assert!(world.campaign_won(), "the ride's boss wins the run");
                     }
                     world.mark_level_complete();
+                    assert_eq!(
+                        world.campaign_won(),
+                        world.is_final_level(),
+                        "only the ride's boss wins the run"
+                    );
                     camp.complete_level(&world, &[]).expect("valid keep");
                 }
                 assert_eq!(

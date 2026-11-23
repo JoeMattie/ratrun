@@ -2845,7 +2845,7 @@ mod tests {
             .unwrap();
         let text = row_text(&terminal);
         assert!(
-            text.contains("LV 2/3"),
+            text.contains("LV 2/4"),
             "no campaign pips on the rail: {text:?}"
         );
         assert!(
@@ -3973,7 +3973,8 @@ mod tests {
             w.player.buffs.socks = 6.0;
             w.gold = 47;
             w.player.dash_cd = 0.9;
-            w.player.xp = w.player.xp_to_next / 2;
+            w.player.xp_to_next = 12; // an even cost: half is exactly 50 %
+            w.player.xp = 6;
 
             let mut state = HudState::default();
             state.tick(1.0 / 60.0, &w, &[], false);
@@ -4132,7 +4133,8 @@ mod tests {
         w.player.buffs.shield = 12.0;
         w.player.buffs.socks = 6.0;
         w.gold = 47;
-        w.player.xp = w.player.xp_to_next / 2;
+        w.player.xp_to_next = 12; // an even cost: half is exactly 50 %
+            w.player.xp = 6;
         w.player.dash_cd = 0.9;
 
         let mut state = HudState::default();

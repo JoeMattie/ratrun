@@ -299,13 +299,10 @@ fn draw_sconce(
 /// dim passage, or a spent one, washes as faintly as it lights; and it does not
 /// flicker, so the hot core stays still while the fan breathes and the held-step
 /// flicker only ever repaints the fan's own cells.
-pub(super) fn sconce_wash(fan: &Light) -> Light {
-    let mut wash = Light::radial(
-        fan.pos,
-        SCONCE_WASH_RADIUS,
-        lens_color(fan.color),
-        fan.energy,
-    );
+pub(super) fn sconce_wash(fan: &Light, seed: u32, elapsed: f32) -> Light {
+    // The fan's energy with its held flicker divided back out.
+    let steady = fan.energy / sconce_flicker_gain(seed, elapsed).max(1e-3);
+    let mut wash = Light::radial(fan.pos, SCONCE_WASH_RADIUS, lens_color(fan.color), steady);
     wash.scatter = fan.scatter;
     wash.height = fan.height;
     // A small pool: the smooth core plus the engine's faint long tail, out to
@@ -315,6 +312,21 @@ pub(super) fn sconce_wash(fan: &Light) -> Light {
     wash.layers = fan.layers;
     wash.occluders = fan.occluders;
     wash
+}
+
+/// A live wall lamp's held-step flicker gain (1.0 for a spent lamp, whose
+/// sputter is its own rule).
+pub(super) fn sconce_flicker_gain(seed: u32, elapsed: f32) -> f32 {
+    if sconce_spent(seed) {
+        return 1.0;
+    }
+    let held = (elapsed * SCONCE_FLICKER_HZ).floor() / SCONCE_FLICKER_HZ;
+    Flicker {
+        amount: SCONCE_FLICKER_AMOUNT,
+        speed: 7.0,
+        phase: (seed & 63) as f32 * 0.43,
+    }
+    .gain(held)
 }
 
 pub(super) fn light(
@@ -391,13 +403,7 @@ pub(super) fn light(
                 // screen with one lamp in view); held steps repaint it three
                 // times a second. The amplitude is 3 % of the light, so the
                 // step a lit pixel takes is the size it took in batch 9.
-                let held = (scene.elapsed * SCONCE_FLICKER_HZ).floor() / SCONCE_FLICKER_HZ;
-                light.energy *= Flicker {
-                    amount: SCONCE_FLICKER_AMOUNT,
-                    speed: 7.0,
-                    phase: phase_offset,
-                }
-                .gain(held);
+                light.energy *= sconce_flicker_gain(fixture.seed, scene.elapsed);
             }
         }
         Kind::Arena => {

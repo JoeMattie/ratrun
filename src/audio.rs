@@ -12566,7 +12566,7 @@ impl AudioEngine {
     pub fn play_menu_music(&mut self, theme: Theme) {
         self.intensity.store(0, Ordering::Relaxed);
         self.music.clear();
-        if crate::music::classic_requested() {
+        if Self::music_selection() == MusicSelection::Classic {
             self.music.append(MusicSynth::new(theme, self.intensity.clone()));
         } else {
             self.music
@@ -12586,13 +12586,17 @@ impl AudioEngine {
         }
     }
 
+    fn music_selection() -> MusicSelection {
+        Self::music_selection_for_env(std::env::var("RATRUN_MUSIC").ok().as_deref())
+    }
+
     pub fn play_music(&mut self, theme: Theme, intensity: u32) {
         self.intensity.store(intensity, Ordering::Relaxed);
         self.music.clear();
         // The floor's song (generated from the owner's MIDI stems) is the
         // default track; `RATRUN_MUSIC=classic` keeps the pre-MIDI chiptune
         // synth, which stays untouched and fully tested behind this switch.
-        if crate::music::classic_requested() {
+        if Self::music_selection() == MusicSelection::Classic {
             let synth = MusicSynth::new(theme, self.intensity.clone());
             self.music.append(synth);
         } else {
@@ -14245,7 +14249,7 @@ mod tests {
             for theme in Theme::playable() {
                 let mut menu =
                     crate::music::SongSynth::new_menu(theme, Arc::new(AtomicU32::new(0)));
-                assert_eq!(menu.mode(), crate::music::SynthMode::Bit16);
+                assert_eq!(menu.mode(), crate::music::synth::SynthMode::Bit16);
                 let sample = menu.next().unwrap();
                 assert!(sample.is_finite());
             }

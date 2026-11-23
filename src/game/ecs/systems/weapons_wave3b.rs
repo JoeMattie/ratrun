@@ -528,7 +528,7 @@ pub fn laser_eyes_system(
                     c_prev,
                     c_angle,
                     copy.reach,
-                    copy.dmg,
+                    copy.dmg * crate::game::ecs::systems::evolutions::CARBON_COPY_DAMAGE,
                     true,
                     &mut hits,
                     &mut boss_hit,
@@ -788,7 +788,11 @@ mod tests {
         open_map(&mut w);
         arm(&mut w, WeaponKind::LaserEyes, 3);
         w.player.face = Vec2::new(1.0, 0.0);
-        let half = Weapon::new(WeaponKind::LaserEyes).laser_half_arc();
+        let half = {
+            let mut l3 = Weapon::new(WeaponKind::LaserEyes);
+            l3.level = 3;
+            l3.laser_half_arc()
+        };
         // Level 3 is the third tier: 80° of arc.
         assert!((half - 40.0f32.to_radians()).abs() < 1e-4, "L3 half-arc {half}");
         run_laser(&mut w, 1.0 / 60.0);
@@ -796,8 +800,9 @@ mod tests {
         let base = 0.0; // facing +x
         assert!(first.active());
         assert_eq!(first.dir, 1.0, "the first sweep of a run starts at -half");
+        // (Read after the trigger tick, so the beam is one step in.)
         assert!(
-            (first.angle - (base - half)).abs() < 1e-4,
+            (first.angle - (base - half)).abs() < 0.05,
             "a sweep starts at one edge: {}",
             first.angle
         );
@@ -813,23 +818,23 @@ mod tests {
         let second = *w.ecs.resource::<LaserFx>();
         assert_eq!(second.dir, -done.dir, "the sweep direction alternates");
         assert!(
-            (second.angle - (base + half)).abs() < 1e-4,
+            (second.angle - (base + half)).abs() < 0.05,
             "the next sweep starts at the other edge: {}",
             second.angle
         );
     }
 
     /// Per level: the beam's length, the damage one body takes **per sweep**
-    /// (the whole old pulse burst's), the arc, its duration, and whether a
+    /// (one old pulse's), the arc, its duration, and whether a
     /// second mirrored beam joins in.
     #[test]
     fn laser_numbers_per_level() {
         for (level, (pulses, reach, dmg, arc_deg, secs, twin)) in [
-            (1u8, (3u32, 34.0f32, 18.0f32, 60.0f32, 0.55f32, false)),
-            (2, (3, 40.0, 21.0, 70.0, 0.63, false)),
-            (3, (4, 40.0, 32.0, 80.0, 0.70, false)),
-            (4, (4, 48.0, 36.0, 95.0, 0.80, true)),
-            (5, (5, 54.0, 50.0, 110.0, 0.90, true)),
+            (1u8, (3u32, 34.0f32, 6.0f32, 60.0f32, 0.55f32, false)),
+            (2, (3, 40.0, 7.0, 70.0, 0.63, false)),
+            (3, (4, 40.0, 8.0, 80.0, 0.70, false)),
+            (4, (4, 48.0, 9.0, 95.0, 0.80, true)),
+            (5, (5, 54.0, 10.0, 110.0, 0.90, true)),
         ] {
             let mut w = World::new(Theme::Sewer, 11);
             w.clear_enemies();
@@ -871,7 +876,7 @@ mod tests {
         let mut w = World::new(Theme::Sewer, 13);
         w.clear_enemies();
         open_map(&mut w);
-        arm(&mut w, WeaponKind::LaserEyes, 1); // 60° arc, 34 px, 18 damage
+        arm(&mut w, WeaponKind::LaserEyes, 1); // 60° arc, 34 px, 6 damage
         w.player.face = Vec2::new(1.0, 0.0);
         let p = w.player.pos;
         // Three bodies on the dead-ahead line (the beam pierces all of them),
@@ -901,10 +906,10 @@ mod tests {
                 break;
             }
         }
-        // 18 damage each (the old burst's three 6-damage pulses), once.
+        // 6 damage each (one old pulse), once.
         for (entity, before) in [near, mid, far, edge].iter().zip(full.iter()) {
             assert!(
-                (enemy_hp(&w, *entity) - (before - 18.0)).abs() < 1e-3,
+                (enemy_hp(&w, *entity) - (before - 6.0)).abs() < 1e-3,
                 "a body the beam crossed must take the sweep once: {} -> {}",
                 before,
                 enemy_hp(&w, *entity)
@@ -921,7 +926,7 @@ mod tests {
         let mut w = World::new(Theme::Sewer, 18);
         w.clear_enemies();
         open_map(&mut w);
-        arm(&mut w, WeaponKind::LaserEyes, 4); // 95° arc, 48 px, 36 damage
+        arm(&mut w, WeaponKind::LaserEyes, 4); // 95° arc, 48 px, 9 damage
         w.player.face = Vec2::new(1.0, 0.0);
         let p = w.player.pos;
         let ahead = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(14.0, 0.0), 1.0);
@@ -937,7 +942,7 @@ mod tests {
             }
         }
         assert!(
-            (enemy_hp(&w, ahead) - (full - 36.0)).abs() < 1e-3,
+            (enemy_hp(&w, ahead) - (full - 9.0)).abs() < 1e-3,
             "two beams must not double-hit one body: {} -> {}",
             full,
             enemy_hp(&w, ahead)
@@ -984,24 +989,29 @@ mod tests {
         let behind = w.spawn_enemy(EnemyKind::Cat, p - Vec2::new(18.0, 0.0), 1.0);
         let full = [near, mid, far, beside, behind].map(|e| enemy_hp(&w, e));
 
-        for _ in 0..40 {
-            if w.ecs.resource::<LaserFx>().fired > 0
-                && !w.ecs.resource::<LaserFx>().active()
-            {
+        let hit = Weapon {
+            kind: WeaponKind::LaserEyes,
+            level: 1,
+            timer: 0.0,
+            evolved: false,
+        }
+        .laser_hit_damage();
+        let mut ticks = 0;
+        while ticks < 60 {
+            run_laser(&mut w, 1.0 / 60.0);
+            ticks += 1;
+            if !w.ecs.resource::<LaserFx>().active() {
                 break;
             }
-            run_laser(&mut w, 1.0 / 60.0);
         }
-        // Three pulses, 6 damage each. The big brute 10 px out is wide enough
-        // for all three rays (-35°, 0°, +35°); the two cats further down the
-        // line are only on the dead-ahead ray.
-        assert_eq!(enemy_hp(&w, near), full[0] - 18.0, "near body missed pulses");
+        // One sweep: every body the beam crosses takes the same single hit.
+        assert_eq!(enemy_hp(&w, near), full[0] - hit, "the near body");
         assert_eq!(
             enemy_hp(&w, mid),
-            full[1] - 6.0,
+            full[1] - hit,
             "the beam stopped at the near body"
         );
-        assert_eq!(enemy_hp(&w, far), full[2] - 6.0, "the far body was shadowed");
+        assert_eq!(enemy_hp(&w, far), full[2] - hit, "the far body was shadowed");
         assert_eq!(enemy_hp(&w, beside), full[3], "a body beside the sweep was hit");
         assert_eq!(enemy_hp(&w, behind), full[4], "a body behind the rat was hit");
     }
@@ -1302,10 +1312,11 @@ mod tests {
         use crate::game::loadout::{PassiveKind, Upgrade};
         use crate::game::ecs::systems::weapons::active_weapons_system;
 
-        // Lens Cap x4 (+32% ranged / +16% melee): a Gnaw dart's life, a Tail
-        // Whip's aura radius, a Spore Orbit ring's radius, and the laser's
-        // beam all grow by the hook's multiplier; without the passive they are
-        // the plain numbers.
+        // Lens Cap x4 (+32% ranged / +16% melee): Gnaw's bite (melee reach), a
+        // Tail Whip's swipe, a Spore Orbit ring's radius, and the laser's beam
+        // all grow by the hook's multiplier; without the passive they are the
+        // plain numbers. Gnaw: a body just past the plain jaw is only bitten
+        // with the passive.
         for lens in [false, true] {
             let mut w = World::new(Theme::Sewer, 41);
             w.clear_enemies();
@@ -1317,20 +1328,21 @@ mod tests {
                     w.player.loadout.apply(&Upgrade::Passive(PassiveKind::LensCap));
                 }
             }
-            let reach = w.player.loadout.stats.ranged_reach(2.5);
-            w.spawn_enemy(EnemyKind::Cat, w.player.pos + Vec2::new(10.0, 0.0), 9.0);
+            let plain = crate::game::weapon::GNAW_BITE_REACH[0];
+            let reach = w.player.loadout.stats.melee_reach(plain);
+            assert_eq!(lens, reach > plain, "Lens Cap must change the reach");
+            // A small body whose near edge is 1.5 px past the plain jaw.
+            let cat = w.spawn_enemy(EnemyKind::Skitterer, w.player.pos, 9.0);
+            let r = w.ecs.get::<Enemy>(cat).unwrap().radius;
+            let at = w.player.pos + Vec2::new(plain + r + 1.5, 0.0);
+            w.ecs.get_mut::<Enemy>(cat).unwrap().pos = at;
+            let hp = w.ecs.get::<Enemy>(cat).unwrap().hp;
             w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
             w.ecs.run_system_cached(fire_weapons_system).unwrap();
             w.end_tick();
-            let b = w.bullets();
-            assert_eq!(b.len(), 1);
-            assert!((b[0].life - reach).abs() < 1e-5, "Gnaw reach: {}", b[0].life);
-            let asleep = World::new(Theme::Sewer, 41);
-            assert_eq!(
-                lens,
-                reach > asleep.player.loadout.stats.ranged_reach(2.5),
-                "Lens Cap must change the reach"
-            );
+            assert!(w.bullets().is_empty(), "a bite fires no projectile");
+            let bitten = w.ecs.get::<Enemy>(cat).unwrap().hp < hp;
+            assert_eq!(bitten, lens, "Gnaw reach with Lens Cap = {lens}");
         }
 
         // Tail Whip's radius (melee reach) and Counterweight's shove.
@@ -1352,12 +1364,18 @@ mod tests {
                 }
             }
             let p = w.player.pos;
-            let plain_radius = 26.0 + 3.0;
-            // A body just outside the plain aura but inside the stretched one.
-            // Just past the plain aura (`plain_radius + cat radius`), inside the
-            // Lens Cap one.
-            let edge = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(plain_radius + 4.5, 0.0), 9.0);
-            let inside = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(plain_radius - 2.0, 0.0), 9.0);
+            // The swipe's plain reach plus the body's own radius: the rat faces
+            // +x, so both bodies stand in the front half-circle.
+            w.player.face = Vec2::new(1.0, 0.0);
+            let cat_r = {
+                let probe = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(900.0, 0.0), 9.0);
+                w.ecs.get::<Enemy>(probe).unwrap().radius
+            };
+            let plain_radius = crate::game::weapon::WHIP_REACH[0] + cat_r;
+            // Just past the plain swipe, inside the Lens Cap one; and one well
+            // inside both.
+            let edge = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(plain_radius + 1.5, 0.0), 9.0);
+            let inside = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(plain_radius - 4.0, 0.0), 9.0);
             let edge_hp = enemy_hp(&w, edge);
             let inside_hp = enemy_hp(&w, inside);
             w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
@@ -1436,19 +1454,23 @@ mod tests {
         }
         w.player.loadout.weapons[0].timer = 0.0;
         let p = w.player.pos;
+        // The squeak is a cone along the facing: the body stands in it.
+        w.player.face = Vec2::new(1.0, 0.0);
         let body = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(20.0, 0.0), 40.0);
         let ring = w.player.loadout.stats.splash_radius(90.0);
         w.begin_tick(1.0 / 60.0, Vec2::ZERO, true);
         w.ecs.run_system_cached(active_weapons_system).unwrap();
         w.end_tick();
         assert!((w.active_fx().squeak_max_r - ring).abs() < 1e-4, "ring reach");
+        // The cone lands on the press tick.
+        let shoved = w.ecs.get::<Enemy>(body).unwrap().vel.len();
         for _ in 0..40 {
             w.begin_tick(1.0 / 60.0, Vec2::ZERO, false);
             w.ecs.run_system_cached(active_weapons_system).unwrap();
             w.end_tick();
         }
-        let vel = w.ecs.get::<Enemy>(body).unwrap().vel.len();
-        assert!(vel > 1.0, "the ring did not shove the body");
+        let vel = w.ecs.get::<Enemy>(body).unwrap().vel.len().max(shoved);
+        assert!(vel > 1.0, "the cone did not shove the body");
     }
 
     /// Second Scent: gem XP is scaled and the fraction is banked across

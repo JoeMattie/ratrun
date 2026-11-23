@@ -3063,7 +3063,7 @@ mod tests {
     #[test]
     fn carbon_copy_replays_the_last_sweep_backwards_at_half_damage() {
         use crate::game::ecs::systems::weapons_wave3b;
-        let mut w = evolved_world(WeaponKind::LaserEyes); // L5: 50 per hit, 54 px
+        let mut w = evolved_world(WeaponKind::LaserEyes); // L5: 10 per hit, 54 px
         let origin = w.player.pos;
         w.player.face = Vec2::new(1.0, 0.0);
         w.player.loadout.weapons[0].timer = 0.0;
@@ -3100,9 +3100,9 @@ mod tests {
                 }
             }
         }
-        // Half of one sweep's hit (the whole old burst = 50, so 25).
+        // Half of one sweep's hit (one pulse = 10, so 5).
         assert!(
-            (hp - hp_of(&w, body) - 25.0).abs() < 0.01,
+            (hp - hp_of(&w, body) - 5.0).abs() < 0.01,
             "the copy deals half of one sweep hit: {:.1} -> {:.1}",
             hp,
             hp_of(&w, body)

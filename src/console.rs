@@ -3310,13 +3310,12 @@ mod tests {
         assert!(world.level.pit_at(pos).is_none(), "the boss landed in a pit");
         assert!(arena.contains_world(rat), "the arena is not centred on the rat");
         assert!(arena.contains_world(pos), "the arena does not hold the boss");
-        // The floor's real arena's own size, recentred and clamped to the map.
-        let real = world
-            .level
-            .boss_room()
-            .expect("a generated level has an arena")
-            .rect;
-        assert_eq!((arena.w, arena.h), (real.w, real.h), "arena size drifted");
+        // The nominal fight rectangle, recentred and clamped to the map.
+        assert_eq!(
+            (arena.w, arena.h),
+            crate::game::level::BOSS_FIGHT_TILES,
+            "arena size drifted"
+        );
         assert!(arena.x >= 0 && arena.y >= 0);
         assert!(arena.right() <= world.level.tiles.cols());
         assert!(arena.bottom() <= world.level.tiles.rows());

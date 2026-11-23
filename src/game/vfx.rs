@@ -779,6 +779,58 @@ pub fn emit_thrash_hit(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, out_di
     );
 }
 
+/// A full 360° squeak ring out to `radius`: the MegaRat's squeak attack and
+/// the Cobra's coil landing. (The player's Sonic Squeak is a cone:
+/// [`emit_sonic_squeak_cone`].)
+pub fn emit_squeak_ring(
+    ps: &mut Particles,
+    rng: &mut impl Rng,
+    pos: Vec2,
+    radius: f32,
+    dur: f32,
+) {
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 3.0,
+        end_r: radius,
+        life: dur,
+        max_life: dur,
+        color: (150, 236, 255),
+        core: (245, 254, 255),
+        thick: 2.0,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    // A second, slower ring gives the wavefront some thickness.
+    ps.push_shockwave(Shockwave {
+        pos,
+        start_r: 2.0,
+        end_r: radius * 0.86,
+        life: dur * 1.25,
+        max_life: dur * 1.25,
+        color: (110, 196, 240),
+        core: (210, 246, 255),
+        thick: 1.5,
+        additive: true,
+        arc_dir: None,
+        arc_half_angle: 0.0,
+    });
+    let n = ps.budget_count(12, false);
+    ps.burst_shaped(
+        rng,
+        pos,
+        n,
+        70.0,
+        1.2,
+        Ramp::Custom((245, 254, 255), (120, 210, 245)),
+        0.26,
+        true,
+        Shape::Dot,
+        5.0,
+    );
+}
+
 /// Sonic Squeak press apex pop (legacy 5-arg signature kept for existing
 /// callers; the directional forward wedge of nested white chevrons is drawn by
 /// `art_wave3a::draw_sonic_cone` — NEVER a big 360° ring!).
@@ -914,9 +966,9 @@ pub fn emit_squeak_hit(ps: &mut Particles, rng: &mut impl Rng, pos: Vec2, out_di
 // ---- Wave 3 weapons: Laser Eyes and Super Dash ----------------------------
 
 /// White-hot core of a Laser Eyes sweeping beam (red-white searchlight).
-const LASER_CORE: Rgb = (255, 246, 246);
+pub(crate) const LASER_CORE: Rgb = (255, 246, 246);
 /// Searing crimson-red outer sheath & cut sparks of the beam.
-const LASER_GLOW: Rgb = (255, 56, 64);
+pub(crate) const LASER_GLOW: Rgb = (255, 56, 64);
 
 /// The burst's first tick: two muzzle sparks at the eyes (`dir` is the locked
 /// facing). One rng draw per spark, so a burst is a fixed cost.
@@ -8307,8 +8359,9 @@ mod tests {
                 EnemyKind::Skitterer,
                 true,
             );
+            // (The Super Dash comb, unchanged by batch 12, is the largest: 26.)
             assert!(
-                ps_hit.len() <= 24,
+                ps_hit.len() <= 32,
                 "{kind:?} hit exceeded bounded count: {}",
                 ps_hit.len()
             );

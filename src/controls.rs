@@ -1537,10 +1537,17 @@ impl Controls {
                 let stock = Bindings::defaults(*scheme);
                 let left = Binding::Mouse(MouseBind::Left);
                 let fire_alt = Action::FireActives.index();
+                let right = stock.alt[fire_alt];
+                // Never double-bind: a player who already gave the right
+                // click to another action keeps it there.
+                let right_taken = ACTIONS.into_iter().any(|o| {
+                    o != Action::FireActives && set.kbm_slots(o).contains(&right)
+                });
                 if *scheme != Scheme::MouseAim
                     && set.alt[Action::Dash.index()] == left
                     && set.alt[fire_alt] == left
-                    && stock.alt[fire_alt] != left
+                    && right != left
+                    && !right_taken
                 {
                     set.alt[fire_alt] = stock.alt[fire_alt];
                 }
@@ -1995,7 +2002,7 @@ mod tests {
         }
         let c = Controls::from_saved(&saved);
         assert_eq!(
-            c.active().alt_of(Action::FireActives),
+            c.sets[Scheme::Gamepad.index()].alt_of(Action::FireActives),
             Binding::Mouse(MouseBind::Left),
             "the actives' own button was migrated although the dash was rebound"
         );
@@ -2008,7 +2015,7 @@ mod tests {
         }
         let c = Controls::from_saved(&saved);
         assert_eq!(
-            c.active().alt_of(Action::FireActives),
+            c.sets[Scheme::MouseAim.index()].alt_of(Action::FireActives),
             Binding::Mouse(MouseBind::Left),
             "mouse aim's saved table was rewritten"
         );

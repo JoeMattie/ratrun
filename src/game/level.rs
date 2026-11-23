@@ -1201,6 +1201,19 @@ impl Level {
         )
     }
 
+    /// The largest hall on the level (first in generation order on a tie): "a
+    /// big open room" for tests and captures. The far hall the old boss arena
+    /// became is usually it.
+    pub fn largest_hall(&self) -> Option<&Room> {
+        let mut best: Option<&Room> = None;
+        for room in self.rooms.iter().filter(|r| r.kind == RoomKind::Hall) {
+            if best.is_none_or(|b| room.rect.area() > b.rect.area()) {
+                best = Some(room);
+            }
+        }
+        best
+    }
+
     /// Every room of one kind, in generation order.
     pub fn rooms_of(&self, kind: RoomKind) -> impl Iterator<Item = &Room> {
         self.rooms.iter().filter(move |r| r.kind == kind)

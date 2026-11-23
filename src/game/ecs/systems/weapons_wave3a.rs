@@ -581,7 +581,8 @@ pub fn acid_rain_system(
             vfx::emit_acid_splash(&mut particles, &mut rng.0, pos, radius * 0.7);
             vfx::emit_downspout_step(&mut particles, &mut rng.0, pos, radius);
         } else {
-            vfx::emit_acid_splash(&mut particles, &mut rng.0, pos, radius);
+            // A teal ripple, never a pool: that is Acid Spit's mark.
+            vfx::emit_acid_rain_ripple(&mut particles, &mut rng.0, pos, radius);
         }
         if gutter && last_of_volley {
             // The gutter has marched all the way home: the stripe it walked

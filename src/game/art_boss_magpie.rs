@@ -2472,7 +2472,7 @@ mod tests {
         ];
         for (i, (state, prog)) in poses.iter().enumerate() {
             let mut w = World::new(Theme::Trailer, 11);
-            w.level_index = crate::game::campaign::LEVEL_COUNT;
+            w.level_index = crate::game::campaign::LEVEL_COUNT - 1;
             w.lighting = crate::render::lighting::LightingMode::Full;
             let arena = w
                 .level
@@ -2719,7 +2719,7 @@ mod tests {
         for &(name, state, prog, hp_frac) in shots {
             for &(lit, suffix) in &[(LightingMode::Full, ""), (LightingMode::Off, "_off")] {
                 let mut w = World::new(Theme::Trailer, 11);
-                w.level_index = crate::game::campaign::LEVEL_COUNT;
+                w.level_index = crate::game::campaign::LEVEL_COUNT - 1;
                 w.lighting = lit;
                 let arena = w
                     .level

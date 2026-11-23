@@ -239,19 +239,12 @@ pub(crate) fn panel(f: &mut Frame, r: Rect, caption: &str, edge: Color) -> Rect 
 /// and a `×` when its stage has not been unlocked yet.
 ///
 /// The side-route floors carry their stage's number (`02 Laundry`,
-/// `03 Printworks`). The row's last entry is the getaway ride: the flatbed is a
-/// bonus practice floor rather than a campaign step (see
-/// `campaign::getaway_theme`), numbered one past the stages and never locked.
+/// `03 Printworks`). The row's last entry is the getaway ride, the campaign's
+/// fourth level (`04 Flatbed`); as a practice floor it is always open
+/// (`ScoreTable::floor_unlocked`), so it never shows the lock mark.
 fn sector_name(floor: usize, unlocked: bool) -> String {
     let floors = Theme::playable();
     let theme = floors[floor.min(floors.len() - 1)];
-    if theme.is_trailer() {
-        return format!(
-            "{:02} {}",
-            crate::game::campaign::LEVEL_COUNT + 1,
-            theme.name()
-        );
-    }
     let level = crate::render::campaign::CampaignLevel::from_theme(theme);
     if unlocked {
         format!("{:02} {}", level.number(), level.short_name())
@@ -3582,7 +3575,7 @@ mod tests {
         .unwrap();
         let bt = screen_text(&big);
         assert!(bt.contains("YOU SURVIVED"));
-        assert!(bt.contains("SECTOR 3/3"), "the header names the sector reached");
+        assert!(bt.contains("SECTOR 3/4"), "the header names the sector reached");
         assert!(bt.contains("APEX NEUTRALIZED"));
         assert!(bt.contains("SCORE BREAKDOWN"));
         assert!(bt.contains("COMBAT METRICS"));
@@ -3600,7 +3593,7 @@ mod tests {
         .unwrap();
         let pt = screen_text(&big);
         assert!(pt.contains("SECTOR CLEARED"), "practice clear status missing");
-        assert!(pt.contains("SECTOR 2/3 PRACTICE"), "practice label missing");
+        assert!(pt.contains("SECTOR 2/4 PRACTICE"), "practice label missing");
 
         for (tw, th) in [(0, 0), (1, 1), (57, 20), (80, 16)] {
             hits.clear();

@@ -751,13 +751,14 @@ impl Weapon {
         }
     }
 
-    /// Laser Eyes: what one body the beam crosses takes per sweep, i.e. the
-    /// whole old pulse burst's damage. `Weapon::damage()` is the per-pulse
-    /// table, so this is exactly the dps the burst had against one body.
+    /// Laser Eyes: what one body the beam crosses takes per sweep: one old
+    /// pulse's damage (`Weapon::damage()` is the per-pulse table). The old
+    /// burst fanned its pulses at distinct angles, so a body normally took
+    /// one; the sweep's gain is its coverage, not its per-body damage.
     #[inline]
     pub fn laser_hit_damage(&self) -> f32 {
         match self.kind {
-            WeaponKind::LaserEyes => self.damage() * self.laser_pulses().max(1) as f32,
+            WeaponKind::LaserEyes => self.damage(),
             _ => 0.0,
         }
     }
@@ -1151,18 +1152,18 @@ mod tests {
     }
 
     /// The Spiked Tail's five-entry rows, straight from the design brief: it
-    /// auto-fires (no charge gauge), its reach grows 44 → 64 px, its burst
+    /// auto-fires (no charge gauge), its reach grows 80 → 120 px, its burst
     /// 10 → 16 px, its cycle 1.3 → 0.85 s, and the spike shards only exist
     /// from level 4.
     #[test]
     fn spiked_tail_matches_its_design_tables() {
         assert_eq!(WEAPON_SLOTS, 13);
         let expect = [
-            (1u8, 22.0f32, 1.3f32, 44.0f32, 10.0f32, 0u8),
-            (2, 27.0, 1.19, 49.0, 11.5, 0),
-            (3, 33.0, 1.08, 54.0, 13.0, 0),
-            (4, 38.0, 0.96, 59.0, 14.5, 2),
-            (5, 44.0, 0.85, 64.0, 16.0, 3),
+            (1u8, 22.0f32, 1.3f32, 80.0f32, 10.0f32, 0u8),
+            (2, 27.0, 1.19, 90.0, 11.5, 0),
+            (3, 33.0, 1.08, 100.0, 13.0, 0),
+            (4, 38.0, 0.96, 110.0, 14.5, 2),
+            (5, 44.0, 0.85, 120.0, 16.0, 3),
         ];
         for (level, dmg, cycle, reach, radius, shards) in expect {
             let mut w = Weapon::new(WeaponKind::SpikedTail);
@@ -1185,7 +1186,7 @@ mod tests {
         let mut w = Weapon::new(WeaponKind::SpikedTail);
         w.level = 9;
         assert_eq!(w.damage(), 44.0);
-        assert_eq!(w.lash_reach(), 64.0);
+        assert_eq!(w.lash_reach(), 120.0);
     }
 
     /// **Dps parity (batch 12)**: every weapon whose hit *shape* changed keeps
@@ -1200,7 +1201,7 @@ mod tests {
     /// | Squeak Nova | one spoke |
     /// | Tail Whip | one aura hit |
     /// | Sonic Squeak | one ring hit |
-    /// | Laser Eyes | every pulse of the burst (`pulses x damage`) |
+    /// | Laser Eyes | one pulse of the fanned burst |
     /// | Tail Thrash | three sweeps |
     ///
     /// The new build has to stay within 10 % of that, per level. What *did*
@@ -1216,12 +1217,12 @@ mod tests {
         };
         // What one body took per cycle before batch 12, L1 → L5.
         let old: [(WeaponKind, [f32; 5]); 7] = [
-            (WeaponKind::Gnaw, [9.0, 11.25, 13.5, 33.75, 40.5]),
+            (WeaponKind::Gnaw, [9.0, 11.25, 13.5, 31.5, 36.0]),
             (WeaponKind::CheeseSpray, [7.0, 8.75, 10.5, 12.25, 14.0]),
             (WeaponKind::SqueakNova, [6.5, 8.125, 9.75, 11.375, 13.0]),
             (WeaponKind::TailWhip, [10.0, 12.5, 15.0, 17.5, 20.0]),
             (WeaponKind::SonicSqueak, [9.0, 11.25, 13.5, 15.75, 18.0]),
-            (WeaponKind::LaserEyes, [18.0, 21.0, 32.0, 36.0, 50.0]),
+            (WeaponKind::LaserEyes, [6.0, 7.0, 8.0, 9.0, 10.0]),
             (WeaponKind::TailThrash, [78.0, 97.5, 117.0, 136.5, 156.0]),
         ];
         for (kind, want) in old {
@@ -1273,10 +1274,8 @@ mod tests {
             );
             assert!((w.laser_sweep_secs() - secs).abs() < 1e-6, "L{level} sweep");
             assert_eq!(w.laser_twin(), twin, "L{level} twin beam");
-            // One body takes the old burst's whole damage.
-            assert!(
-                (w.laser_hit_damage() - w.damage() * w.laser_pulses() as f32).abs() < 1e-6
-            );
+            // One body takes one old pulse's damage per sweep.
+            assert!((w.laser_hit_damage() - w.damage()).abs() < 1e-6);
         }
     }
 

@@ -418,8 +418,8 @@ fn fixtures_and_emitters_are_seeded_sparse_and_walkable_over_200_seeds() {
                         .iter()
                         .filter(|f| f.kind == LightFixtureKind::Arena)
                         .count(),
-                    4,
-                    "{ctx:?}"
+                    0,
+                    "{ctx:?}: no floor has arena lamps any more"
                 );
             }
             let emitters = &level.objects.emitters;
@@ -508,7 +508,7 @@ fn lighting_timings_with_600_enemies_and_ambient_particles() {
     for theme in [Theme::Lab, Theme::Trailer] {
         let mut world = World::new(theme, 42);
         if theme == Theme::Lab {
-            world.player.pos = world.level.boss_room().unwrap().center();
+            world.player.pos = world.level.largest_hall().unwrap().center();
         }
         let center = world.player.pos;
         for i in 0..600 {

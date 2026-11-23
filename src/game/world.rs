@@ -107,6 +107,12 @@ use super::{
     art_props, art_rat, art_traps, art_walls, art_wave3a,
 };
 
+/// How much of the simulation's screen shake reaches the camera. The owner
+/// found the shake distracting, so every effect's amplitude is cut to 65 % in
+/// this one place (the only place the offset is applied); durations are the
+/// simulation's and unchanged, and nothing simulated reads the camera.
+pub const SHAKE_SCALE: f32 = 0.65;
+
 pub struct World {
     /// The Bevy world: entity components + the singleton resources during a
     /// tick. Public so narrow (single-system) tests can drive it directly.
@@ -1550,9 +1556,10 @@ impl World {
         appointment: usize,
         pos: Vec2,
     ) -> Entity {
-        use super::ecs::systems::miniboss::{appointment_hp, Miniboss};
+        use super::ecs::systems::miniboss::{appointment_hp_for, Miniboss};
         let mut enemy = Enemy::spawn(EnemyKind::Brute, pos, 1.0, &mut self.rng);
-        enemy.hp = appointment_hp(appointment);
+        let difficulty = self.difficulty_override.unwrap_or(self.level_index);
+        enemy.hp = appointment_hp_for(difficulty, appointment);
         enemy.max_hp = enemy.hp;
         enemy.radius = kind.body_radius();
         enemy.damage = crate::game::ecs::systems::miniboss::MINIBOSS_CONTACT_DAMAGE;
@@ -1892,21 +1899,9 @@ impl World {
     /// The floor's real arena rectangle's size, recentred on `pos` and clamped
     /// inside the map (console `boss <name> here`).
     fn boss_arena_around(&self, pos: Vec2) -> super::level::TileRect {
-        let (cols, rows) = (self.level.tiles.cols(), self.level.tiles.rows());
-        let real = self
-            .level
-            .boss_room()
-            .map(|r| r.rect)
-            .unwrap_or_else(|| super::level::TileRect::new(0, 0, cols, rows));
-        let w = real.w.clamp(1, cols.max(1));
-        let h = real.h.clamp(1, rows.max(1));
-        let (cx, cy) = crate::game::collision::cell_of(pos);
-        super::level::TileRect::new(
-            (cx - w / 2).clamp(0, (cols - w).max(0)),
-            (cy - h / 2).clamp(0, (rows - h).max(0)),
-            w,
-            h,
-        )
+        // No floor has an arena room any more: the fight rectangle is the
+        // nominal one, exactly as the scheduled arrival builds it.
+        self.level.fight_rect_around(pos)
     }
 
     /// A clear cell beside `rat` for a body of `radius`: 40-60 px away, closest
@@ -2204,7 +2199,7 @@ impl World {
         } else {
             cam.y.clamp(0.0, arena.y - vh)
         };
-        cam += self.shake_ofs;
+        cam += self.shake_ofs * SHAKE_SCALE;
         self.cam = cam;
         self.light_map.begin_frame();
         let mut _s = crate::prof::scope(crate::prof::Stage::SceneFloor);
@@ -3813,6 +3808,23 @@ mod draw_tests {
         (pb, w.cam)
     }
 
+    /// The camera takes [`super::SHAKE_SCALE`] of the simulation's shake
+    /// offset, and the simulation's own number is untouched.
+    #[test]
+    fn the_camera_takes_a_scaled_share_of_the_shake() {
+        let mut w = World::new(Theme::Sewer, 1);
+        let mut pb = PixelBuffer::new(VIEW.0, VIEW.1);
+        w.draw(&mut pb);
+        let still = w.cam;
+        w.shake_ofs = Vec2::new(10.0, -4.0);
+        w.draw(&mut pb);
+        let moved = w.cam - still;
+        assert!((moved.x - 10.0 * super::SHAKE_SCALE).abs() < 1e-4, "{moved:?}");
+        assert!((moved.y + 4.0 * super::SHAKE_SCALE).abs() < 1e-4, "{moved:?}");
+        assert_eq!(w.shake_ofs, Vec2::new(10.0, -4.0), "the sim's offset changed");
+        assert_eq!(super::SHAKE_SCALE, 0.65);
+    }
+
     /// A blank map with a 2 × 2 block of solid cells and one rat-hole cell to
     /// its east, both a few pixels off the camera origin.
     fn walled(theme: Theme) -> Level {
@@ -4121,50 +4133,6 @@ mod draw_tests {
                     "{theme:?}: mouth cell {cx},75 got no threshold decal"
                 );
             }
-        }
-    }
-
-    /// The detector the threshold overlay hangs off has to find real mouths:
-    /// every generated map has a boss arena whose double door pierces its wall
-    /// ring, and the inward direction points from the corridor into the arena.
-    #[test]
-    fn every_generated_map_has_a_boss_arena_mouth() {
-        for (theme, seed) in [
-            (Theme::Sewer, 0u64),
-            (Theme::Sewer, 1),
-            (Theme::Kitchen, 2),
-            (Theme::Kitchen, 5),
-            (Theme::Lab, 3),
-            (Theme::Lab, 9),
-        ] {
-            let w = World::new(theme, seed);
-            let arena = w
-                .level
-                .boss_room()
-                .expect("every generated map has a boss arena")
-                .rect;
-            let ring = arena.inflate(1);
-            let mut mouths = 0;
-            let mut bad = None;
-            w.for_each_boss_threshold(|view| {
-                mouths += 1;
-                let (cx, cy) = (view.cell.cell_x, view.cell.cell_y);
-                let on_ring = ring.contains(cx, cy) && !arena.contains(cx, cy);
-                let points_in = match view.inward {
-                    Cardinal::North => cy == arena.bottom(),
-                    Cardinal::South => cy == arena.y - 1,
-                    Cardinal::East => cx == arena.x - 1,
-                    Cardinal::West => cx == arena.right(),
-                };
-                if !on_ring || !points_in {
-                    bad = Some((cx, cy, view.inward));
-                }
-            });
-            assert!(
-                mouths >= 1,
-                "{theme:?}/{seed}: the boss arena mouth was not found"
-            );
-            assert_eq!(bad, None, "{theme:?}/{seed}: mouth outside the wall ring");
         }
     }
 

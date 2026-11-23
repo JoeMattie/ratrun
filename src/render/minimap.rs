@@ -2043,9 +2043,9 @@ fn draw_expanded_sidebar(
     maze_discovered: bool,
     caches_unclaimed: u32,
     caches_claimed: u32,
-    boss_arena_discovered: bool,
+    _boss_arena_discovered: bool,
     boss_active: bool,
-    bearing_active: bool,
+    _bearing_active: bool,
     compact_size: MinimapSize,
     keys: (&str, &str),
     scratch: &mut MinimapScratch,
@@ -3119,7 +3119,7 @@ mod tests {
         markers
     }
 
-    fn sample_labels(boss_discovered: bool) -> Vec<MapLabel<'static>> {
+    fn sample_labels(_boss_discovered: bool) -> Vec<MapLabel<'static>> {
         vec![
             MapLabel { cx: 100.0, cy: 80.0, text: "START", kind: LabelKind::Start, discovered: true },
             MapLabel { cx: 108.0, cy: 128.0, text: "SECRET MAZE", kind: LabelKind::Maze, discovered: false },
@@ -3133,7 +3133,7 @@ mod tests {
         sector: &'a str,
         markers: &'a [MapMarker],
         labels: &'a [MapLabel<'a>],
-        boss_discovered: bool,
+        _boss_discovered: bool,
         term_w: u16,
         term_h: u16,
     ) -> MinimapView<'a> {
@@ -3338,8 +3338,8 @@ mod tests {
         let labels = sample_labels(false);
         let mut scratch = MinimapScratch::new();
 
-        // Pre-warning bearing active (hud_compass_active = false): single corner
-        // cell shows the 8-way amber bearing chevron (`◤` for NW), nothing else.
+        // There is no arena bearing any more (batch twelve), so the hidden
+        // corner is the quiet `N` hint whether or not the HUD compass is up.
         let mut view = make_view(
             MinimapMode::Compact,
             MinimapPalette::SEWER,
@@ -3363,7 +3363,7 @@ mod tests {
                 (s != " ").then_some((x, y, s))
             })
             .collect();
-        assert_eq!(non_blank, vec![(78, 22, "◤")]);
+        assert_eq!(non_blank, vec![(78, 22, "N")]);
 
         // When the HUD warning compass is active, do NOT duplicate the bearing:
         // only the quiet 1-cell `N` hint appears.

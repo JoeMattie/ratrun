@@ -623,12 +623,14 @@ impl ScoreTable {
     /// stage has been cleared on at least one of its floors (so clearing the
     /// Laundry opens stage three exactly like clearing the Kitchen does).
     ///
-    /// Since batch twelve the Flatbed is the campaign's **fourth** level, so it
-    /// follows the same rule as every other floor: it opens when a stage-three
-    /// floor (the Lab or the Printworks) has been cleared. It stays reachable as
-    /// a practice floor — the sector select starts it as a practice run — and it
-    /// is never cleared until its own boss dies.
+    /// Since batch twelve the Flatbed is the campaign's **fourth** level, and
+    /// the campaign ends on it; as a practice floor it is **always open** (the
+    /// sector select starts it as a practice run), and it is never cleared
+    /// until its own boss dies.
     pub fn floor_unlocked(&self, theme: Theme) -> bool {
+        if theme == campaign::getaway_theme() {
+            return true;
+        }
         let stage = campaign::theme_stage(theme);
         (0..stage).all(|earlier| {
             campaign::Route::options(earlier)
@@ -1007,7 +1009,7 @@ mod tests {
         assert_eq!(t.level_best(0).map(|b| b.score), Some(1000));
         assert_eq!(t.level_best(1).map(|b| b.score), Some(2000));
         assert!(t.floor_unlocked(Theme::Lab));
-        assert!(!t.level_unlocked(3), "no stage-three floor is cleared yet");
+        assert!(t.level_unlocked(3), "the ride is always open for practice");
         assert!(!t.level_cleared(3));
         assert!(t.level_best(3).is_none());
     }
@@ -1038,7 +1040,7 @@ mod tests {
         assert!(t.floor_cleared(Theme::Trailer));
         assert_eq!(t.level_best(3).map(|b| b.score), Some(7000));
         assert_eq!(t.floor_best(Theme::Lab).map(|b| b.score), Some(5210));
-        // And an *incomplete* old save keeps the ride locked.
+        // The practice ride is always open, even on an incomplete old save.
         let partial = ScoreTable::parse(
             r#"{"entries":[],"progress":{"levels":[
                 {"cleared":true,"score":6420,"time":252.0},
@@ -1046,7 +1048,7 @@ mod tests {
                 {"cleared":false,"score":0,"time":0.0}
             ]}}"#,
         );
-        assert!(!partial.floor_unlocked(Theme::Trailer));
+        assert!(partial.floor_unlocked(Theme::Trailer));
     }
 
     /// A cleared floor stays unlocked even when its score entry has been pushed

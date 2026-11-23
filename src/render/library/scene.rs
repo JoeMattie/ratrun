@@ -184,6 +184,8 @@ const SHOT_LEAD: f32 = 22.0;
 /// squeak ring 90+), and outside the `< 26 px` radius where the renderer
 /// suppresses hit digits — so the flash *and* the number both show.
 const ARSENAL_RING: f32 = 30.0;
+/// How far Gnaw's targets stand from the rat: inside the level-5 jaw (24 px).
+const BITE_RING: f32 = 20.0;
 
 /// How much of a fitted plate the subject's footprint is allowed to take: the
 /// rest is the margin that keeps a clipped edge impossible.
@@ -497,8 +499,10 @@ impl LibraryScene {
             opened: None,
         };
         if scene.script.boss_fit {
-            let union = scene.probe_boss_union();
-            scene.boss_union = union;
+            scene.boss_union = match key {
+                Key::Boss(kind) => cached_boss_union(&mut scene, kind),
+                _ => scene.probe_boss_union(),
+            };
         }
         scene.focus = scene.focus_target();
         Some(scene)
@@ -930,7 +934,7 @@ impl LibraryScene {
     ///
     /// The scene has its own seed and no director, so the probe is a fixture:
     /// it cannot reach a run, a golden or the map pin.
-    fn probe_boss_union(&mut self) -> Option<(Vec2, Vec2)> {
+    pub(super) fn probe_boss_union(&mut self) -> Option<(Vec2, Vec2)> {
         let ticks = (self.script.loop_secs / TICK).ceil() as u32 + 2;
         let loops = self.loops;
         let mut union: Option<Bounds> = None;
@@ -1764,7 +1768,12 @@ fn stage_trick(theme: Theme, kind: EnemyKind) -> Staged {
     // A body under 4 px is a speck at the plate's 1:1 zoom: its card is drawn at
     // 2 × and its dummy stands the minimum gap off the body's rest position, so
     // the pair fills the tighter frame instead of leaving the body lost in it.
-    let tiny = kind.radius() < TINY_BODY_RADIUS;
+    // Only the four named specks: other small trick bodies have tells far
+    // wider than a 2 × view.
+    let tiny = matches!(
+        kind,
+        EnemyKind::BellFlea | EnemyKind::WickMoth | EnemyKind::Lilliputian | EnemyKind::InkBlot
+    );
     let gap = if tiny { TINY_DUMMY_GAP } else { 20.0 };
     // Close enough that the body's own rule starts inside the loop, far enough
     // that the dummy reads as a target and not as a hat.
@@ -1979,6 +1988,11 @@ fn stage_weapon(theme: Theme, kind: WeaponKind, evolved: bool) -> Staged {
         script.lean = Vec2::ZERO;
         script.cue = Some(arsenal_sweep_cue);
     }
+    if kind == WeaponKind::Gnaw {
+        // A bite reaches 24 px at most: its targets stand in the jaw.
+        script.cue = Some(arsenal_bite_cue);
+        script.lean = Vec2::new(BITE_RING * 0.5, 0.0);
+    }
     if kind == WeaponKind::SuperDash {
         // The dash leaves the fan of targets behind it. Its targets are laid
         // along the lane the charged dash runs, and the camera holds the lane's
@@ -2029,6 +2043,20 @@ fn stage_weapon(theme: Theme, kind: WeaponKind, evolved: bool) -> Staged {
 fn arsenal_cue(world: &mut World, _subject: Option<Entity>, _tick: u32) {
     keep_actives_ready(world);
     arsenal_dummies(world, &dummy_homes(world.player.pos), ARSENAL_HP);
+}
+
+/// Gnaw's and Milk Teeth's plate: the targets stand inside the bite's reach
+/// (closer than the radius that hides hit digits: a jaw cannot be shown at
+/// arm's length).
+fn arsenal_bite_cue(world: &mut World, _subject: Option<Entity>, _tick: u32) {
+    keep_actives_ready(world);
+    let rat = world.player.pos;
+    let mut homes = [rat; 3];
+    for (i, home) in homes.iter_mut().enumerate() {
+        let a = (i as f32 - 1.0) * 0.66;
+        *home = rat + Vec2::from_angle(a) * BITE_RING;
+    }
+    arsenal_dummies(world, &homes, ARSENAL_HP);
 }
 
 /// The Tail Thrash's and the Flywheel's plate: the same standing targets, with
@@ -2912,6 +2940,29 @@ fn draw_practice_dummy(pb: &mut PixelBuffer, floor: &PixelBuffer, s: (i32, i32),
 }
 
 /// Every colour the card's dummy paints (its shadow included).
+/// The boss's loop union, probed once per kind per process: the probe is a
+/// whole loop of world ticks, and the scene is a fixture (own seed, same stage
+/// every time), so the answer never changes.
+fn cached_boss_union(scene: &mut LibraryScene, kind: BossKind) -> Option<(Vec2, Vec2)> {
+    use std::sync::{Mutex, OnceLock};
+    type Slot = Option<Option<(Vec2, Vec2)>>;
+    static CACHE: OnceLock<Mutex<[Slot; 16]>> = OnceLock::new();
+    let i = BossKind::all()
+        .iter()
+        .position(|k| *k == kind)
+        .unwrap_or(0)
+        .min(15);
+    let cache = CACHE.get_or_init(|| Mutex::new([None; 16]));
+    if let Some(hit) = cache.lock().ok().and_then(|c| c[i]) {
+        return hit;
+    }
+    let union = scene.probe_boss_union();
+    if let Ok(mut c) = cache.lock() {
+        c[i] = Some(union);
+    }
+    union
+}
+
 #[cfg(test)]
 const DUMMY_INK: [Rgb; 6] = [CORK, CORK_LIT, CORK_RIND, RIND, CHALK, CORK_SHADOW];
 

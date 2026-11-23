@@ -802,7 +802,7 @@ impl LightMap {
             // through its own wall. One more splat per sconce in view, with no
             // second bake.
             if fixture.kind == LightFixtureKind::Sconce {
-                let wash = fixtures::sconce_wash(&light);
+                let wash = fixtures::sconce_wash(&light, fixture.seed, scene.elapsed);
                 if self.grid.overlaps(wash) {
                     self.grid
                         .splat(wash, Some(shadow), scene.mode, scene.elapsed, theme);

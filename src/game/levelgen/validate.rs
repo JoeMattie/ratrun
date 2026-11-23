@@ -637,7 +637,7 @@ pub fn travel_dir(a: (i32, i32), b: (i32, i32)) -> Option<Cardinal> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::art_traps::{MousetrapView, RatHoleView, StickyTrapView};
+    use crate::game::art_traps::{RatHoleView, StickyTrapView};
     use crate::game::art_walls::WallAxis;
     use crate::game::level::{MazeSection, RatHole, Theme};
 

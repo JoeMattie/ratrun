@@ -653,6 +653,11 @@ mod tests {
             w.ecs
                 .run_system_cached(powerups_system)
                 .expect("powerups run");
+            // The flow field was built for the generated walls this fixture
+            // replaced: refresh it for the open map.
+            w.ecs
+                .run_system_cached(enemy_move::flow_refresh_system)
+                .expect("flow refresh runs");
             w.ecs
                 .run_system_cached(enemy_move::enemy_steering_system)
                 .expect("steering runs");

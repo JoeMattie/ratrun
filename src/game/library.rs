@@ -1217,20 +1217,22 @@ fn weapon_text(k: WeaponKind) -> (&'static str, &'static str) {
     match k {
         WeaponKind::Gnaw => (
             "Level-up card · the starting weapon",
-            "The original solution to every problem the facility has. One dart, aimed at \
-             whatever body is nearest, forever. It scales politely and never needs a \
-             second thought — which is exactly why it evolves into something with a \
-             return trip.",
+            "The original solution to every problem the facility has. One bite, closed \
+             on whatever body is nearest the nose, forever. It has no reach to speak \
+             of and never needs a second thought — which is exactly why it evolves \
+             into something with a return trip.",
         ),
         WeaponKind::CheeseSpray => (
             "Level-up card · any floor",
-            "Weaponised dairy, in a forward arc, because the rat cannot aim and does not \
-             intend to learn. Best at exactly the range you are already fleeing through.",
+            "Weaponised dairy, in a forward fan of wedges that fly a short way and drop, \
+             because the rat cannot aim and does not intend to learn. Best at exactly \
+             the range you are already fleeing through.",
         ),
         WeaponKind::SqueakNova => (
             "Level-up card · any floor",
-            "A scream pitched past hearing, thrown in every direction at once. The \
-             answer to being surrounded, which the facility arranges regularly.",
+            "A scream pitched past hearing, thrown in every direction at once: one ring, \
+             cutting each body it passes once. The answer to being surrounded, which \
+             the facility arranges regularly.",
         ),
         WeaponKind::SporeOrbit => (
             "Level-up card · any floor",
@@ -1240,9 +1242,9 @@ fn weapon_text(k: WeaponKind) -> (&'static str, &'static str) {
         ),
         WeaponKind::TailWhip => (
             "Level-up card · any floor",
-            "Forty grams of pure indignation, delivered in a ring at arm's length. No \
-             aiming, no travel time, no mercy for anything that chose to stand next \
-             to you.",
+            "Forty grams of pure indignation, delivered as a quick low swipe across the \
+             half-circle in front of you. No travel time, no mercy for anything that \
+             chose to stand where you were looking.",
         ),
         WeaponKind::AcidSpit => (
             "Level-up card · any floor",
@@ -1258,15 +1260,15 @@ fn weapon_text(k: WeaponKind) -> (&'static str, &'static str) {
         ),
         WeaponKind::SonicSqueak => (
             "Level-up card · any floor",
-            "Past hearing, straight into the skull. An expanding ring that stuns what it \
-             touches, so the horde that was winning the argument has to stand still and \
-             think about it.",
+            "Past hearing, straight into the skull. A cone thrown the way you face that \
+             shoves and stuns what it catches, so the horde that was winning the \
+             argument has to stand still and think about it.",
         ),
         WeaponKind::LaserEyes => (
             "Level-up card · any floor",
             "Please look directly at the sensor. This is the one weapon the facility \
-             holds that is genuinely its own: a fan of pulses that sweeps across the \
-             rat's facing and pierces everything the rays reach.",
+             holds that is genuinely its own: one steady beam that sweeps across the \
+             rat's facing and cuts everything it passes, once.",
         ),
         WeaponKind::SuperDash => (
             "Level-up card · any floor",
@@ -1298,19 +1300,19 @@ fn evolution_text(k: WeaponKind) -> (&'static str, &'static str) {
     match k {
         WeaponKind::Gnaw => (
             "Chest · Gnaw L5 + Sharp Teeth",
-            "The dart lodges instead of dying, waits a beat, and then pulls back to \
+            "The bite spits a tooth that lodges, waits a beat, and then pulls back to \
              wherever the rat has got to, biting on the way home. Nothing is wasted; \
              everything comes back in.",
         ),
         WeaponKind::CheeseSpray => (
             "Chest · Cheese Spray L5 + Fat Reserves",
-            "The two outer darts plant into the floor and run a cheese string between \
+            "Two tines plant into the floor and run a cheese string between \
              them. The string does not care who crosses it. Dinner is a tripwire.",
         ),
         WeaponKind::SqueakNova => (
             "Chest · Squeak Nova L5 + Frenzy",
-            "Spokes that find a wall come home along the line they left by. One \
-             reflection each, no stacking. The walls know the chorus.",
+            "The ring reaches its edge and comes back in through everything it already \
+             passed. One return, no stacking. The walls know the chorus.",
         ),
         WeaponKind::SporeOrbit => (
             "Chest · Spore Orbit L5 + Resilience",
@@ -1337,7 +1339,7 @@ fn evolution_text(k: WeaponKind) -> (&'static str, &'static str) {
         ),
         WeaponKind::SonicSqueak => (
             "Chest · Sonic Squeak L5 + Whiskers",
-            "The ring tags what it stuns or slows, and a moment later every tagged body \
+            "The cone tags what it stuns or slows, and a moment later every tagged body \
              answers with a pulse of its own. Capped so a crowd cannot cascade. Every \
              cage answers.",
         ),
@@ -1390,7 +1392,7 @@ fn passive_text(k: PassiveKind) -> (&'static str, &'static str) {
             "Level-up card · any floor",
             "Filed sharp on rebar. It is the partner most weapons are waiting for, and \
              the shortest path from a build to an evolution. Every level the rat \
-             gains on a floor adds 1% weapon damage on top.",
+             gains on a floor adds 4% weapon damage on top.",
         ),
         PassiveKind::FireRate => (
             "Level-up card · any floor",
@@ -1703,10 +1705,11 @@ fn floor_text(t: Theme) -> (&'static str, &'static str) {
 
 /// Facts the card shows under the dossier: short label/value lines with an
 /// optional five-cell bar.
-/// How many facts one card prints. Nine is the widest row set in the registry
-/// (a boss card: hit points, contact, phases, death, floor, **shares**, drops,
-/// answer — the pooled floors' `SHARES` row used to push `ANSWER` off the card).
-pub const FACT_ROWS: usize = 9;
+/// How many facts one card holds. Eleven is the widest row set in the registry
+/// (a pooled floor: sector, two bosses, the boss clock, four minibosses, the
+/// hazard, the shop holes and the mazes); a boss card has nine. A card too
+/// short for all of them clips from the bottom.
+pub const FACT_ROWS: usize = 11;
 
 /// Columns one fact value gets on the card at 80×24, the smallest terminal
 /// that shows the list and the card side by side: the panel's inner width is
@@ -1905,7 +1908,13 @@ fn miniboss_facts(k: MinibossKind, f: &mut Facts) {
         .get(at)
         .copied()
         .unwrap_or(0.0);
-    f.push("HIT POINTS", format!("{:.0}", miniboss::appointment_hp(at)));
+    // The pool it has on its own floor in a campaign (later levels meet a
+    // carried build: `miniboss::appointment_hp_for`).
+    let level = crate::game::campaign::theme_stage(theme);
+    f.push(
+        "HIT POINTS",
+        format!("{:.0}", miniboss::appointment_hp_for(level, at)),
+    );
     f.push(
         "STRIKE",
         format!(
@@ -1959,7 +1968,7 @@ fn boss_facts(k: BossKind, f: &mut Facts) {
     // computes it (`boss::spawn`). The card used to print `base × scale`
     // alone, an eighth of the real pool (KING COBRA read 630).
     const HP_REF: f32 = 30_000.0;
-    let stage = boss_theme(k).stage();
+    let stage = crate::game::campaign::theme_stage(boss_theme(k));
     let hp = k.base_hp()
         * k.hp_scale()
         * crate::game::director::boss_hp_mult_for(stage, crate::game::director::BOSS_TIME);
@@ -2216,6 +2225,15 @@ fn floor_facts(t: Theme, f: &mut Facts) {
     for (i, boss) in BossKind::pool_for_theme(t).iter().enumerate() {
         f.push(if i == 0 { "BOSS" } else { "OR" }, boss_name(*boss));
     }
+    // When the boss comes: it arrives where the rat is.
+    f.push(
+        "BOSS CLOCK",
+        format!(
+            "at {}:{:02}, wherever you are",
+            (crate::game::director::BOSS_TIME as u32) / 60,
+            (crate::game::director::BOSS_TIME as u32) % 60
+        ),
+    );
     // The floor's four named minibosses, a row each with its clock.
     for (i, at) in crate::game::director::MINIBOSS_TIMES.iter().enumerate() {
         f.push(
@@ -2229,6 +2247,11 @@ fn floor_facts(t: Theme, f: &mut Facts) {
         );
     }
     f.push("HAZARD", floor_hazard(t));
+    f.push(
+        "SHOP HOLES",
+        // `placement::place_shop_holes` cuts two per level.
+        "two mouse holes in the walls",
+    );
     f.push(
         "MAZES",
         format!(

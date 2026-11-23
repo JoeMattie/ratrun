@@ -182,7 +182,7 @@ fn main() -> Result<()> {
 }
 
 /// Parse the self-playing wall's flags: `--ai [N]`, `--seed S`,
-/// `--skill expert|casual`, `--level 1|2|3`, `--once`.
+/// `--skill expert|casual`, `--level 1|2|3|4`, `--once`.
 ///
 /// Returns `None` for normal play (no `--ai`), so the default no-argument
 /// behaviour — and any other mode's flags — stay exactly as they were. Unknown
@@ -727,7 +727,7 @@ mod tests {
         assert!(parse_spectate_args(&args(&["--ai", "2", "--skill"])).is_err());
         assert!(parse_spectate_args(&args(&["--ai", "2", "--skill", "godlike"])).is_err());
         assert!(parse_spectate_args(&args(&["--ai", "2", "--level", "0"])).is_err());
-        assert!(parse_spectate_args(&args(&["--ai", "2", "--level", "4"])).is_err());
+        assert!(parse_spectate_args(&args(&["--ai", "2", "--level", "5"])).is_err());
         assert!(parse_spectate_args(&args(&["--ai", "2", "junk"])).is_err());
     }
 

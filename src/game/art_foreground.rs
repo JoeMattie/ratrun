@@ -1165,7 +1165,7 @@ fn eval_sheet_on_line(
             return if v < -3.9 {
                 Paint::Blend(pal.rim, 220)
             } else {
-                Paint::Blend(pal.accent, 230);
+                Paint::Blend(pal.accent, 230)
             };
         }
     }

@@ -855,7 +855,10 @@ mod tests {
             "SqueakNova maps to the normal damage source"
         );
         assert!(
-            w.particles.items.iter().any(|p| matches!(p.ramp, Ramp::Nova)),
+            w.particles
+                .items
+                .iter()
+                .any(|p| matches!(p.ramp, Ramp::Custom((242, 255, 255), _))),
             "the impact spark must be the SqueakNova one"
         );
         assert!(

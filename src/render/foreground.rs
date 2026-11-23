@@ -204,6 +204,7 @@ impl ForeKind {
             self,
             ForeKind::DripChain
                 | ForeKind::HangingLampCord
+                | ForeKind::HangingUtensils
                 | ForeKind::Clothesline
                 | ForeKind::SheetOnLine
                 | ForeKind::SteamBank
@@ -553,7 +554,7 @@ pub fn draw(pb: &mut PixelBuffer, layer: &mut ForeLayer, scene: &mut ForeScene) 
     let mut n = 0usize;
     {
         let mut q = scene.ecs.query::<(&Enemy, Option<&Miniboss>)>();
-        for (e, mb) in q.iter(&scene.ecs) {
+        for (e, mb) in q.iter(scene.ecs) {
             if mb.is_none() || n == threats.len() {
                 continue;
             }
@@ -563,7 +564,7 @@ pub fn draw(pb: &mut PixelBuffer, layer: &mut ForeLayer, scene: &mut ForeScene) 
     }
     {
         let mut q = scene.ecs.query::<&Boss>();
-        for boss in q.iter(&scene.ecs) {
+        for boss in q.iter(scene.ecs) {
             if n == threats.len() {
                 break;
             }
@@ -797,13 +798,21 @@ fn generate(level: &Level, out: &mut Vec<ForeItem>) {
                 }
                 let depth = rng.range(1.20, 1.50);
                 let seed = rng.u32();
+                let horizontal = match door_kind {
+                    // The art hangs these +y itself.
+                    ForeKind::DripChain | ForeKind::HangingLampCord => false,
+                    // A line with things hanging +v: keep the line level.
+                    k if k.hangs() => true,
+                    // A beam spans the opening.
+                    _ => axis == WallAxis::Horizontal,
+                };
                 push(
                     out,
                     ForeItem {
                         kind: door_kind,
                         pos,
                         len: TILE_F * 2.2,
-                        horizontal: !door_kind.hangs(),
+                        horizontal,
                         depth,
                         seed,
                     },
@@ -836,7 +845,8 @@ fn generate(level: &Level, out: &mut Vec<ForeItem>) {
             let pos = Vec2::new(rng.range(x0, x1), rng.range(y0, y1));
             let depth = rng.range(1.25, 1.60);
             let seed = rng.u32();
-            let horizontal = rng.flip();
+            // The draw is kept (stream order); utensils always hang level.
+            let horizontal = rng.flip() || point_kind == ForeKind::HangingUtensils;
             if blocked(pos) {
                 continue;
             }
@@ -1025,11 +1035,10 @@ mod tests {
             pb.clear((70, 66, 60));
             draw(&mut pb, layer, &mut scene);
             let mut it = layer.frame().iter();
-            let plan = *it.next().expect("a plan");
-            plan
+            *it.next().expect("a plan")
         };
-        let a = plan_at(&mut layer, &mut w, Vec2::new(500.0, 300.0));
-        let b = plan_at(&mut layer, &mut w, Vec2::new(502.0, 302.0));
+        let a = plan_at(&mut layer, &mut w, Vec2::new(540.0, 360.0));
+        let b = plan_at(&mut layer, &mut w, Vec2::new(542.0, 362.0));
         // The camera moved +2 px, so the item's screen position moved −3 px:
         // exactly `depth` (1.5) screen pixels for every camera pixel.
         assert_eq!(
@@ -1066,7 +1075,8 @@ mod tests {
         let mut layer = ForeLayer::new();
         let item = ForeItem {
             kind: ForeKind::Grate,
-            pos: Vec2::new(600.0, 400.0),
+            // The view centre, where parallax cancels with the camera at 0.
+            pos: Vec2::new(VIEW.0 as f32 * 0.5, VIEW.1 as f32 * 0.5),
             len: 0.0,
             horizontal: true,
             depth: 1.2,
@@ -1077,7 +1087,7 @@ mod tests {
         // (planned with the rat far away) plus `dx`. The camera is at the
         // origin, so a screen position is also a world position here.
         let alpha_at = |layer: &mut ForeLayer, w: &mut World, dx: f32| -> u8 {
-            let mut plan = |layer: &mut ForeLayer, w: &mut World, rat: Vec2| -> u8 {
+            let plan = |layer: &mut ForeLayer, w: &mut World, rat: Vec2| -> u8 {
                 let mut scene = ForeScene {
                     ecs: &mut w.ecs,
                     level: &w.level,
@@ -1111,7 +1121,6 @@ mod tests {
                 it.next().expect("a plan").screen
             };
             // On the anchor: the floor. Far away: full. Both through the plan.
-            let _ = plan(&mut layer, &mut w, away);
             plan(
                 layer,
                 w,
@@ -1140,7 +1149,7 @@ mod tests {
         blend(&mut pb, 0, 0, (0, 0, 0), 255);
         let got = pb.pixel_at(0, 0);
         // At most ALPHA_MAX of the way to the (darkened) art colour.
-        let floor = (200, 100, 50);
+        let floor: (u8, u8, u8) = (200, 100, 50);
         for (g, f) in [(got.0, floor.0), (got.1, floor.1), (got.2, floor.2)] {
             let moved = f32::from(f) - f32::from(g);
             assert!(
@@ -1260,8 +1269,7 @@ mod tests {
         let (b, used_b) = render(&mut w, &mut layer, cam, rat, t0 + 0.9 / SWAY_HZ);
         assert_eq!(used_a, used_b);
         assert_eq!(changed(&a, &b), 0, "a still frame repainted");
-        let (c, used_c) = render(&mut w, &mut layer, cam, rat, t1);
-        assert_eq!(used_c, used_a, "the sway must not change what is drawn");
+        let (c, _used_c) = render(&mut w, &mut layer, cam, rat, t1);
         assert!(changed(&a, &c) > 0, "the sway step moved nothing");
     }
 

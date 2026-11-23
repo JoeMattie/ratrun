@@ -894,7 +894,7 @@ impl Default for LaserFx {
             half: 0.0,
             // The first sweep of a run starts from the negative edge; every
             // trigger flips it, so consecutive sweeps alternate.
-            dir: 1.0,
+            dir: -1.0,
             twin: false,
             angle: 0.0,
             beam: 0.0,

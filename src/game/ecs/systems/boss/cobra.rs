@@ -1381,7 +1381,7 @@ mod tests {
         assert!(arena.contains_world(boss.pos), "it spawns in its arena");
         let expect = art::BOSS_BASE_HP
             * BossKind::Cobra.hp_scale()
-            * crate::game::director::boss_hp_mult_for(1, crate::game::director::BOSS_TIME);
+            * crate::game::director::boss_hp_mult_for(w.level_index(), crate::game::director::BOSS_TIME);
         assert!(
             (boss.max_hp - expect).abs() < 1.0,
             "pool {} vs {expect}",

@@ -91,10 +91,12 @@ fn every_boss_arrives_out_of_sight_around_the_rat() {
         let arena = boss.arena;
         assert!(arena.contains_world(rat), "{kind:?}: the rectangle misses the rat");
         assert!(arena.contains_world(boss.pos), "{kind:?}: the boss is outside its rectangle");
-        let centre = arena.center_world();
-        assert!(
-            (centre - rat).len() <= 16.0 * 1.5,
-            "{kind:?}: the rectangle is not centred on the rat ({centre:?} vs {rat:?})"
+        // Centred on the rat, then clamped inside the map (the Flatbed's
+        // tailgate is near the map's west edge).
+        assert_eq!(
+            arena,
+            w.level.fight_rect_around(rat),
+            "{kind:?}: the rectangle is not the one built around the rat"
         );
     }
 }
