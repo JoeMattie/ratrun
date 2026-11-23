@@ -261,6 +261,7 @@ fn pickup_tag(kind: PickupKind) -> PickupTag {
         PickupKind::WindupMouse => PickupTag::WindupMouse,
         PickupKind::PocketWatch => PickupTag::PocketWatch,
         PickupKind::CleanSocks => PickupTag::CleanSocks,
+        PickupKind::GrowthSerum => PickupTag::GrowthSerum,
     }
 }
 

@@ -129,6 +129,10 @@ pub const BOTTLE_TIN: Color = Color::Rgb(232, 226, 206);
 pub const BRASS_KEY: Color = Color::Rgb(232, 190, 96);
 pub const WATCH_ICE: Color = Color::Rgb(150, 210, 226);
 pub const SOCK_WHITE: Color = Color::Rgb(240, 240, 232);
+/// The Growth Serum's hot lab pink-magenta (batch 13): the find's own colour in
+/// [`crate::game::gem::PickupKind::color`], so the callout, the strip and the
+/// floor sprite agree.
+pub const SERUM_PINK: Color = Color::Rgb(255, 88, 196);
 
 /// Distinct single-cell geometric glyph for each weapon kind.
 pub fn weapon_glyph(kind: WeaponKind) -> char {
@@ -379,6 +383,9 @@ pub enum CalloutKind {
     /// (`NEST  8+8 slots · +18% move · …`). Appended last so the legacy kinds
     /// keep their order.
     Nest,
+    /// Growth Serum (batch 13): the rat is huge and crushes what it walks over.
+    /// Appended last so the legacy kinds keep their order.
+    GrowthSerum,
 }
 
 impl CalloutKind {
@@ -403,6 +410,7 @@ impl CalloutKind {
             CalloutKind::Library => TRAIL_GOLD,
             CalloutKind::AutoPick => TRAIL_GOLD,
             CalloutKind::Nest => TRAIL_GOLD,
+            CalloutKind::GrowthSerum => SERUM_PINK,
         }
     }
 }
@@ -786,6 +794,16 @@ impl HudState {
             PickupKind::CleanSocks => {
                 self.push_callout(CalloutKind::CleanSocks, "+CLEAN SOCKS", "DASH READY · NO GLUE · 6s", 2.2);
             }
+            // Growth Serum (batch 13): name the size change and the stomp rule;
+            // the timed chip on the buff strip counts the 20 s down.
+            PickupKind::GrowthSerum => {
+                self.push_callout(
+                    CalloutKind::GrowthSerum,
+                    "+GROWTH SERUM",
+                    "5X SIZE · STOMPS FOES · 20s",
+                    2.6,
+                );
+            }
         }
     }
 
@@ -1093,6 +1111,7 @@ impl HudState {
                 (PickupKind::WindupMouse, buffs.decoy),
                 (PickupKind::PocketWatch, buffs.slow_bullets),
                 (PickupKind::CleanSocks, buffs.socks),
+                (PickupKind::GrowthSerum, buffs.giant),
             ] {
                 if left <= 0.0 {
                     continue;
@@ -2251,6 +2270,7 @@ fn buff_chip_name(kind: PickupKind) -> &'static str {
         PickupKind::WindupMouse => "MOUSE",
         PickupKind::PocketWatch => "WATCH",
         PickupKind::CleanSocks => "SOCKS",
+        PickupKind::GrowthSerum => "GIANT",
         PickupKind::Heal => "HEAL",
         PickupKind::Magnet => "MAGNET",
         PickupKind::Nuke => "PURGE",
@@ -3884,6 +3904,7 @@ mod tests {
                 decoy: 4.4,
                 slow_bullets: 3.2,
                 socks: 5.9,
+                giant: 0.0,
             };
             let mut state = HudState::default();
             state.tick(1.0 / 60.0, &w, &[], false);
@@ -3908,6 +3929,58 @@ mod tests {
                 "{width}x{height}: an idle run drew a buff chip: {text:?}"
             );
         }
+    }
+
+    /// The Growth Serum wears `G` on the one-letter strip and its name on a wide
+    /// terminal, exactly like the four wave-3 finds (batch 13).
+    #[test]
+    fn the_buff_strip_shows_the_growth_serum() {
+        fn strip(w: &World, width: u16, height: u16, state: &mut HudState) -> String {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|f| {
+                    let area = f.area();
+                    let bottom = Rect::new(0, area.height - 1, area.width, 1);
+                    draw_bottom(f, bottom, w, state);
+                })
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            let y = height - 2;
+            let mut text = String::new();
+            for x in 0..width {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text
+        }
+
+        // Narrow: the one-letter chip. The strip names the find only at 96+
+        // columns, so a 57-column terminal must still say `G`.
+        let mut w = known_world();
+        w.player.buffs = crate::game::player::Buffs {
+            giant: 18.4,
+            ..crate::game::player::Buffs::default()
+        };
+        let mut state = HudState::default();
+        state.tick(1.0 / 60.0, &w, &[], false);
+        state.tick(1.0 / 60.0, &w, &[], false);
+        let narrow = strip(&w, 57, 20, &mut state);
+        assert!(
+            narrow.contains("G19") || narrow.contains("G18"),
+            "the giant chip is missing from the strip: {narrow:?}"
+        );
+
+        // Wide: the find's own name. `wide_chips` is set by the previous frame's
+        // draw (the strip reuses its retained buffer), so one throwaway frame
+        // turns the wide layout on before the text is refilled.
+        let mut state = HudState::default();
+        let _ = strip(&w, 120, 40, &mut state);
+        state.tick(1.0 / 60.0, &w, &[], false);
+        state.tick(1.0 / 60.0, &w, &[], false);
+        let wide = strip(&w, 120, 40, &mut state);
+        assert!(
+            wide.contains("GIANT"),
+            "a wide strip must name the find: {wide:?}"
+        );
     }
 
     /// A claim made during a tick the HUD never saw (the reward view is already

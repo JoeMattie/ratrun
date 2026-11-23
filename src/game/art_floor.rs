@@ -978,6 +978,7 @@ pub fn draw_pickup(pb: &mut PixelBuffer, kind: crate::game::gem::PickupKind, s: 
         PickupKind::WindupMouse => draw_windup_pickup(pb, s, bob),
         PickupKind::PocketWatch => draw_pocket_watch(pb, s, bob),
         PickupKind::CleanSocks => draw_clean_socks(pb, s, pulse),
+        PickupKind::GrowthSerum => draw_growth_serum(pb, s, bob),
     }
 }
 
@@ -1325,6 +1326,75 @@ fn draw_clean_socks(pb: &mut PixelBuffer, s: (i32, i32), pulse: f32) {
     pb.plot(cx + 1, cy + 2, grey_hi);
     pb.plot(cx + 2, cy + 2, grey_lo);
     pb.plot(cx + 3, cy + 2, grey_lo);
+}
+
+/// Growth Serum (batch 13): a squat lab flask of hot pink growth medium, corked,
+/// with two bubbles rising through it.
+///
+/// It is the one find that is **emissive**: the meniscus and the liquid's core
+/// are mixed toward white (and the vial gets a faint additive halo) so it glows
+/// on the dark floors, exactly like the halos the caller paints round every
+/// pickup. The alternating bubble height is `bob`, so a row of serums on the
+/// floor never bubble in step.
+fn draw_growth_serum(pb: &mut PixelBuffer, s: (i32, i32), bob: f32) {
+    let (cx, cy) = s;
+    for dx in -3..=4 {
+        shade_floor(pb, cx + dx, cy + 5, 0.44);
+    }
+
+    let out: Rgb = (30, 24, 40);
+    let glass_hi: Rgb = (238, 228, 248);
+    let glass_lo: Rgb = (148, 128, 168);
+    let liquid_hi: Rgb = (255, 168, 232);
+    let liquid: Rgb = (232, 48, 168);
+    let liquid_lo: Rgb = (146, 14, 102);
+    let cork: Rgb = (198, 148, 96);
+    let cork_lo: Rgb = (140, 96, 58);
+
+    // 1. Dark contour: a narrow neck over a rounded body (the flask silhouette).
+    pb.rect_fill(cx - 2, cy - 5, 5, 3, out);
+    pb.rect_fill(cx - 3, cy - 2, 7, 7, out);
+    pb.plot(cx - 4, cy + 2, out);
+    pb.plot(cx + 4, cy + 2, out);
+    pb.plot(cx - 4, cy + 1, out);
+    pb.plot(cx + 4, cy + 1, out);
+
+    // 2. Fluted cork plugging the neck, lit from the top-left like everything.
+    pb.rect_fill(cx - 1, cy - 6, 3, 2, cork);
+    pb.plot(cx - 1, cy - 6, mix(cork, (255, 255, 255), 0.4));
+    pb.plot(cx + 1, cy - 5, cork_lo);
+
+    // 3. Glass walls of the neck: bright on the lit side, steel on the far side.
+    pb.plot(cx - 2, cy - 4, glass_hi);
+    pb.plot(cx - 2, cy - 3, glass_hi);
+    pb.plot(cx + 2, cy - 4, glass_lo);
+    pb.plot(cx + 2, cy - 3, glass_lo);
+
+    // 4. The medium: a bright pink body with a white meniscus and a dark
+    //    meniscus line, so it reads as liquid rather than as a pink block.
+    pb.rect_fill(cx - 3, cy - 1, 7, 5, liquid);
+    pb.rect_fill(cx - 2, cy + 1, 5, 3, liquid_hi);
+    pb.rect_fill(cx - 2, cy + 2, 3, 2, liquid_hi);
+    pb.rect_fill(cx - 3, cy + 4, 7, 1, liquid_lo);
+    pb.rect_fill(cx - 2, cy - 1, 5, 1, mix(liquid, (255, 255, 255), 0.62));
+    // Glass rim highlights down the lit edge and the far wall's shadow.
+    pb.plot(cx - 3, cy - 1, glass_hi);
+    pb.plot(cx - 3, cy, glass_hi);
+    pb.plot(cx - 3, cy + 1, glass_hi);
+    pb.plot(cx + 3, cy, glass_lo);
+    pb.plot(cx + 3, cy + 1, glass_lo);
+    pb.plot(cx + 3, cy + 2, glass_lo);
+
+    // 5. Two bubbles climbing the medium, out of phase with each other.
+    let t = bob * 1.6;
+    for (i, bx) in [-1i32, 1].into_iter().enumerate() {
+        let phase = t + i as f32 * 1.9;
+        let rise = ((phase.sin() * 0.5 + 0.5) * 3.0).round() as i32;
+        pb.plot(cx + bx, cy + 3 - rise, (255, 238, 252));
+    }
+
+    // 6. Emissive core: one additive pixel so the find glows through the dark.
+    pb.plot_add(cx, cy + 2, (86, 26, 66));
 }
 
 /// The stationary decoy key a Wind-up Mouse drops (`systems::powerups::Decoy`).
