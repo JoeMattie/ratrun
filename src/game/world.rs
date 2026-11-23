@@ -1080,12 +1080,14 @@ impl World {
         Some((fx.thrash_angle, fx.thrash_reach, fade))
     }
 
-    /// The Laser Eyes beam to draw this frame, if its bar is lit.
+    /// The Laser Eyes beams to draw this frame, if its bar is lit.
     ///
-    /// `brightness` blinks: the pulses are 0.10 s apart, so the bar is lit for
-    /// the first part of each interval and dark for the rest ("a blinking bar
-    /// leaves dark intervals"). The twin muzzle dots stay on for the whole
-    /// burst (see `art_rat::draw_laser_eyes`), so the rat visibly *has* eyes.
+    /// A sweep is **two** beams closing inward (one from each edge of the arc),
+    /// so both are carried here and `art_rat::draw_laser_eyes` draws the pair
+    /// plus the flash where they meet on the aim line. `brightness` is steady
+    /// for the whole sweep and only fades at its very end; the twin muzzle dots
+    /// stay lit regardless (see `art_rat::draw_laser_eyes`), so the rat visibly
+    /// *has* eyes.
     pub fn laser_visual(&self) -> Option<art_rat::LaserBeam> {
         let fx = self.ecs.resource::<LaserFx>();
         if !fx.active() {
@@ -1100,6 +1102,9 @@ impl World {
             origin: fx.origin,
             angle: fx.angle,
             len: fx.beam,
+            angle_b: fx.angle_b,
+            len_b: fx.beam_b,
+            aim: fx.facing.angle(),
             // A hard blink, so the dark interval is real.
             brightness: lit * fade,
             muzzle: 0.55 + 0.45 * lit,
@@ -3236,20 +3241,11 @@ impl World {
         if self.player.buffs.shield > 0.0 {
             art_wave3a::draw_bottle_cap_rim(pb, self.player.pos, self.elapsed, cam);
         }
-        // Wave 3: Laser Eyes' twin muzzle dots and its steady sweeping beam(s),
-        // drawn over the rat so the eyes read as the source. At L4+ (`fx.twin`),
-        // also draw the mirrored second beam (`angle_b`, `beam_b`).
+        // Wave 3: Laser Eyes' twin muzzle dots and its two inward-closing beams,
+        // drawn over the rat so the eyes read as the source (the pair and the
+        // flash where they meet are `draw_laser_eyes`'s own job).
         if let Some(beam) = self.laser_visual() {
             art_rat::draw_laser_eyes(pb, &self.player, beam, cam);
-            let fx = *self.ecs.resource::<LaserFx>();
-            if fx.twin && fx.beam_b > 1.0 {
-                let twin_beam = art_rat::LaserBeam {
-                    angle: fx.angle_b,
-                    len: fx.beam_b,
-                    ..beam
-                };
-                art_rat::draw_laser_eyes(pb, &self.player, twin_beam, cam);
-            }
             self.light_map.mark_emissive_highlights(pb, self.w2s(self.player.pos, cam), 9);
         }
     }

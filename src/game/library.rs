@@ -1266,9 +1266,11 @@ fn weapon_text(k: WeaponKind) -> (&'static str, &'static str) {
         ),
         WeaponKind::LaserEyes => (
             "Level-up card · any floor",
-            "Please look directly at the sensor. This is the one weapon the facility \
-             holds that is genuinely its own: one steady beam that sweeps across the \
-             rat's facing and cuts everything it passes, once.",
+            "Please look directly at the sensor. Two steady beams start wide at the \
+             edges of an arc and close inward like scissors, cutting everything they \
+             pass, once. From rank four they do not stop where they meet: they cross \
+             and carry on, and every rank reaches further than eyes have any business \
+             reaching.",
         ),
         WeaponKind::SuperDash => (
             "Level-up card · any floor",
@@ -1345,9 +1347,9 @@ fn evolution_text(k: WeaponKind) -> (&'static str, &'static str) {
         ),
         WeaponKind::LaserEyes => (
             "Chest · Laser Eyes L5 + Lens Cap",
-            "Each completed sweep is recorded, and the next one replays the old sweep \
-             from the old place, backwards, at half weight. One copy, kept. The camera \
-             kept a negative.",
+            "Each completed sweep is recorded, and the next one replays it from the old \
+             place, at half weight — the same closing pair, done again a beat later. One \
+             copy, kept. The camera kept a negative.",
         ),
         WeaponKind::SuperDash => (
             "Chest · Super Dash L5 + Spring Heel",

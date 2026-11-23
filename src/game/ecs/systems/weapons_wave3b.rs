@@ -7,12 +7,15 @@
 //!
 //! - **Laser Eyes** is an ordinary auto-firing weapon whose shot is a **sweep**:
 //!   it charges its own `Weapon::timer` here, and on the trigger tick it locks
-//!   the aim direction and pivots one continuous beam from one edge of the arc
-//!   to the other over `Weapon::laser_sweep_secs` (L1 60° / 0.55 s, L5 110° /
-//!   0.90 s). Everything the beam passes over takes the whole old pulse burst's
-//!   damage, once per sweep (a per-sweep hit set), and the next sweep runs the
-//!   other way. From L4 a second, mirrored beam sweeps at the same time and
-//!   shares that hit set. Each beam stops at the first wall on its own ray.
+//!   the aim direction and sweeps **two** continuous beams **inward**: one from
+//!   each outer edge of the arc (`aim ± half`) closing on the aim line over
+//!   `Weapon::laser_sweep_secs` (L1 60° / 0.26 s, L5 110° / 0.34 s). From L4
+//!   (`Weapon::laser_twin`) they do not stop where they meet: they cross and
+//!   carry on to the opposite edges over the same sweep (an X-shaped scissor),
+//!   so the pair covers the whole arc at twice the angular speed. Everything the
+//!   beams pass over takes the whole old pulse burst's damage, once per sweep
+//!   (a per-sweep hit set **shared by both beams**). Each beam stops at the
+//!   first wall on its own ray, and its reach is the weapon's ×1.6.
 //! - **Super Dash** is a weapon whose *fire* is the dash. `player_system`
 //!   records the dash's real travelled segments into [`DashTrack`]; this system
 //!   damages every body those segments crossed, once per body per dash. A
@@ -122,8 +125,9 @@ pub fn ray_hits_circle(origin: Vec2, dir: Vec2, len: f32, half_w: f32, center: V
 
 /// The angular step a sweep is cut into when two ticks are far apart: a beam
 /// that jumped a whole tick's angle would skip a body whose radius is a few px.
-/// 0.035 rad (2°) is about 2 px of gap at the L5 reach, well under the smallest
-/// body's radius, so every body between two ticks is crossed by some sample.
+/// 0.035 rad (2°) is about 3 px of gap at the L5 reach (86 px), well under the
+/// smallest body's radius, so every body between two ticks is crossed by some
+/// sample.
 const SWEEP_STEP_RAD: f32 = 0.035;
 
 /// How often (seconds) the sweep emits its beam sparkle. The drawn beam is
@@ -148,25 +152,33 @@ struct SweepCast {
     half: f32,
     /// Seconds the sweep lasts.
     secs: f32,
-    /// A second, mirrored beam sweeps too (L4+).
+    /// Do the two beams cross the aim line and run on to the opposite edges
+    /// (L4+)? Otherwise they stop where they meet, on the aim line.
     twin: bool,
 }
 
-/// The angle a sweep holds at progress `t` (0..1): from one edge of the arc to
-/// the other, in this sweep's direction.
+/// Both beams' angles at progress `t` (0..1).
+///
+/// The pair starts at the two outer edges of the arc — `base - half` and
+/// `base + half` — and closes **inward**: at L1–L3 each beam travels `half` and
+/// both land on the aim line as the sweep ends; at L4+ (`twin`) each travels the
+/// whole arc (`2 * half`), so they cross on the aim line at the halfway mark and
+/// finish on the opposite edges. There is no alternating direction any more:
+/// every sweep is the same symmetrical pair.
 #[inline]
-fn sweep_angle(base: f32, dir: f32, half: f32, t: f32) -> f32 {
-    base + dir * (-half + 2.0 * half * t.clamp(0.0, 1.0))
+fn sweep_pair(base: f32, half: f32, span: f32, t: f32) -> (f32, f32) {
+    let t = t.clamp(0.0, 1.0);
+    (base - half + span * t, base + half - span * t)
 }
 
 /// Resolve one beam's angular **step**: every body the segment crosses at any
 /// sample angle between `from_angle` and `to_angle`, once per sweep.
 ///
 /// The sweep keeps its own hit set, so a body the beam passes over is cut
-/// exactly once however many ticks the crossing takes, and the second (L4+)
-/// beam shares that set — both beams together deal one sweep's damage. Walls
-/// stop each sample ray where they stop the drawn beam, so a body past the
-/// first face is never touched.
+/// exactly once however many ticks the crossing takes, and both beams (they are
+/// always a pair) share that set — so the pair together deals one sweep's
+/// damage. Walls stop each sample ray where they stop the drawn beam, so a body
+/// past the first face is never touched.
 ///
 /// Returns the wall-stopped beam length at `to_angle` (the art draws the live
 /// beam there).
@@ -302,13 +314,14 @@ fn sweep_step(
 /// **once**, at the trigger tick — turning afterwards does not drag the arc,
 /// which is what makes a sweep read as one deliberate cut.
 ///
-/// Batch 12 replaced the old burst of evenly spaced pulses with this: the beam
-/// pivots from one edge of the arc to the other over `laser_sweep_secs`,
-/// painting the whole arc, and the **next** sweep runs the other way
-/// (`LaserFx::dir` alternates). Everything it crosses takes the whole old
-/// burst's damage once (a per-sweep hit set), so a body the beam passes over
-/// takes exactly what the fan dealt it and the weapon's dps is unchanged. From
-/// L4 a second, mirrored beam sweeps the other way at the same time.
+/// Batch 13 replaced batch 12's one beam (which alternated direction) with a
+/// **symmetrical pair**: one beam starts at each outer edge of the arc and both
+/// close inward over `laser_sweep_secs`, meeting on the aim line as the sweep
+/// ends. From L4 they do not stop there — they cross and carry on to the
+/// opposite edges over the same sweep, so the pair moves twice as fast. Every
+/// body the pair crosses takes the whole old burst's damage once (one hit set,
+/// shared by both beams), so a body the beams pass over takes exactly what the
+/// fan dealt it and the weapon's dps per body is unchanged.
 #[allow(clippy::too_many_arguments)]
 pub fn laser_eyes_system(
     input: Res<TickInput>,
@@ -371,24 +384,27 @@ pub fn laser_eyes_system(
             None => Vec2::new(0.0, -1.0),
         };
         let origin = player.pos;
-        // Alternate: the sweep that just finished started from one edge, so
-        // this one starts from the other.
-        let dir = if fx.dir >= 0.0 { -1.0 } else { 1.0 };
         let base_angle = base.angle();
-        let angle = sweep_angle(base_angle, dir, cast.half, 0.0);
-        // The second beam mirrors the first about the aim, sweeping the other
-        // way through the same arc.
-        let angle_b = 2.0 * base_angle - angle;
+        // Both beams start at the two outer edges of the arc at the same
+        // instant and close inward, so there is no direction to alternate any
+        // more: every sweep is the same symmetrical pair.
+        let span = if cast.twin {
+            2.0 * cast.half
+        } else {
+            cast.half
+        };
+        let (angle, angle_b) = sweep_pair(base_angle, cast.half, span, 0.0);
         // Carbon Copy: the sweep recorded at the end of the *previous* burst
-        // replays now from its own origin and facing, the other (mirrored) way
-        // through the arc. One copy is kept, and a copy is never itself
-        // recorded (only a real sweep is).
+        // replays now from its own origin and facing — the same inward-closing
+        // pair, at half the recorded hit. One copy is kept, and a copy is never
+        // itself recorded (only a real sweep is).
         let recorded = if cast.evolved { fx.copy } else { None };
-        let copy_secs = if recorded.is_some() { cast.secs } else { 0.0 };
-        let copy_dir = -dir;
-        let copy_prev = match recorded {
-            Some(copy) => sweep_angle(copy.facing.angle(), copy_dir, cast.half, 0.0),
-            None => 0.0,
+        let (copy_left, copy_prev, copy_prev_b) = match recorded {
+            Some(copy) => {
+                let (a, b) = sweep_pair(copy.facing.angle(), cast.half, span, 0.0);
+                (cast.secs, a, b)
+            }
+            None => (0.0, 0.0, 0.0),
         };
         *fx = LaserFx {
             left: cast.secs,
@@ -399,7 +415,6 @@ pub fn laser_eyes_system(
             reach: cast.reach,
             dmg: cast.dmg,
             half: cast.half,
-            dir,
             twin: cast.twin,
             angle,
             beam: 0.0,
@@ -410,13 +425,14 @@ pub fn laser_eyes_system(
             total: cast.secs,
             evolved: cast.evolved,
             copy: recorded,
-            copy_left: copy_secs,
+            copy_left,
             copy_age: 0.0,
             copy_fired: 0,
             copy_half: cast.half,
-            copy_secs,
-            copy_dir,
+            copy_span: span,
+            copy_secs: copy_left,
             copy_prev_angle: copy_prev,
+            copy_prev_angle_b: copy_prev_b,
             ..LaserFx::default()
         };
         shake.amount = shake.amount.max(0.9);
@@ -440,15 +456,13 @@ pub fn laser_eyes_system(
         return;
     }
 
-    // 2. Sweep the live beam (and its mirror) forward. The angles are a pure
-    // function of `age`, so a replay with the same dt cuts the same arc.
+    // 2. Sweep the two live beams inward. The angles are a pure function of
+    // `age`, so a replay with the same dt cuts the same band.
     fx.age += dt;
     let t = (fx.age / fx.total.max(1e-4)).clamp(0.0, 1.0);
-    let base_angle = fx.facing.angle();
-    let (dir, half, reach, dmg) = (fx.dir, fx.half, fx.reach, fx.dmg);
-    let angle = sweep_angle(base_angle, dir, half, t);
-    let angle_b = 2.0 * base_angle - angle;
-    let (prev, prev_b, twin) = (fx.prev_angle, fx.prev_angle_b, fx.twin);
+    let (half, span, reach, dmg) = (fx.half, fx.span(), fx.reach, fx.dmg);
+    let (angle, angle_b) = sweep_pair(fx.facing.angle(), half, span, t);
+    let (prev, prev_b) = (fx.prev_angle, fx.prev_angle_b);
     let spin = (fx.age / LASER_SPARK_EVERY).floor() != ((fx.age - dt) / LASER_SPARK_EVERY).floor();
     {
         let order: &[Entity] = stable_order(&index, &enemies, &mut fallback);
@@ -472,28 +486,26 @@ pub fn laser_eyes_system(
             &mut damage_numbers,
             &mut ledger,
         );
-        let len_b = if twin {
-            sweep_step(
-                fx.origin,
-                prev_b,
-                angle_b,
-                reach,
-                dmg,
-                false,
-                &mut hits,
-                &mut boss_hit,
-                &level,
-                &mut rng,
-                &mut particles,
-                order,
-                &mut enemies,
-                &mut bosses,
-                &mut damage_numbers,
-                &mut ledger,
-            )
-        } else {
-            0.0
-        };
+        // The mirrored beam shares the same hit set, so the pair still cuts a
+        // body once per sweep.
+        let len_b = sweep_step(
+            fx.origin,
+            prev_b,
+            angle_b,
+            reach,
+            dmg,
+            false,
+            &mut hits,
+            &mut boss_hit,
+            &level,
+            &mut rng,
+            &mut particles,
+            order,
+            &mut enemies,
+            &mut bosses,
+            &mut damage_numbers,
+            &mut ledger,
+        );
         fx.hits = hits;
         fx.boss_hit = boss_hit;
         fx.prev_angle = angle;
@@ -509,26 +521,45 @@ pub fn laser_eyes_system(
         }
     }
 
-    // 3. The Carbon Copy afterimage, on the same clock and the other way round
-    // the arc (it starts where the live beam will end).
+    // 3. The Carbon Copy afterimage: the recorded sweep's own inward-closing
+    // pair, from the recorded origin and facing, on the same clock.
     if fx.copy_left > 0.0 {
         if let Some(copy) = fx.copy {
             fx.copy_age += dt;
             let ct = (fx.copy_age / fx.copy_secs.max(1e-4)).clamp(0.0, 1.0);
-            let cdir = fx.copy_dir;
-            let c_base = copy.facing.angle();
-            let c_angle = sweep_angle(c_base, cdir, fx.copy_half, ct);
-            let c_prev = fx.copy_prev_angle;
+            let (c_angle, c_angle_b) =
+                sweep_pair(copy.facing.angle(), fx.copy_half, fx.copy_span, ct);
+            let (c_prev, c_prev_b) = (fx.copy_prev_angle, fx.copy_prev_angle_b);
             {
                 let order: &[Entity] = stable_order(&index, &enemies, &mut fallback);
                 let mut hits = fx.copy_hits;
                 let mut boss_hit = fx.copy_boss_hit;
+                let ghost_dmg = copy.dmg
+                    * crate::game::ecs::systems::evolutions::CARBON_COPY_DAMAGE;
                 sweep_step(
                     copy.origin,
                     c_prev,
                     c_angle,
                     copy.reach,
-                    copy.dmg * crate::game::ecs::systems::evolutions::CARBON_COPY_DAMAGE,
+                    ghost_dmg,
+                    true,
+                    &mut hits,
+                    &mut boss_hit,
+                    &level,
+                    &mut rng,
+                    &mut particles,
+                    order,
+                    &mut enemies,
+                    &mut bosses,
+                    &mut damage_numbers,
+                    &mut ledger,
+                );
+                sweep_step(
+                    copy.origin,
+                    c_prev_b,
+                    c_angle_b,
+                    copy.reach,
+                    ghost_dmg,
                     true,
                     &mut hits,
                     &mut boss_hit,
@@ -544,6 +575,7 @@ pub fn laser_eyes_system(
                 fx.copy_hits = hits;
                 fx.copy_boss_hit = boss_hit;
                 fx.copy_prev_angle = c_angle;
+                fx.copy_prev_angle_b = c_angle_b;
                 fx.copy_fired = fx.copy_hits.len();
             }
             fx.copy_left = (fx.copy_left - dt).max(0.0);
@@ -555,13 +587,10 @@ pub fn laser_eyes_system(
     fx.left = (fx.left - dt).max(0.0);
     if fx.left <= 0.0 {
         // Done. A completed sweep is what the next burst's afterimage replays
-        // (Carbon Copy keeps exactly one); everything else starts clean, and
-        // the sweep direction is carried so the next sweep runs the other way.
+        // (Carbon Copy keeps exactly one); everything else starts clean.
         let recorded = if fx.evolved { fx.copy_of_this_sweep() } else { None };
-        let dir = fx.dir;
         *fx = LaserFx {
             copy: recorded,
-            dir,
             ..LaserFx::default()
         };
     }
@@ -779,62 +808,141 @@ mod tests {
         w.ecs.get::<Enemy>(e).map(|e| e.hp).unwrap_or(f32::NAN)
     }
 
-    /// One sweep crosses its whole arc, from one edge to the other, and
-    /// consecutive sweeps run the other way.
+    /// One sweep is a **symmetrical pair**: a beam starts at each outer edge of
+    /// the arc at the same instant and both close inward, landing on the aim
+    /// line together when the sweep ends (L1–L3).
     #[test]
-    fn a_sweep_spans_the_whole_arc_and_alternates() {
-        let mut w = World::new(Theme::Sewer, 10);
-        w.clear_enemies();
-        open_map(&mut w);
-        arm(&mut w, WeaponKind::LaserEyes, 3);
-        w.player.face = Vec2::new(1.0, 0.0);
-        let half = {
-            let mut l3 = Weapon::new(WeaponKind::LaserEyes);
-            l3.level = 3;
-            l3.laser_half_arc()
-        };
-        // Level 3 is the third tier: 80° of arc.
-        assert!((half - 40.0f32.to_radians()).abs() < 1e-4, "L3 half-arc {half}");
-        run_laser(&mut w, 1.0 / 60.0);
-        let first = *w.ecs.resource::<LaserFx>();
-        let base = 0.0; // facing +x
-        assert!(first.active());
-        assert_eq!(first.dir, 1.0, "the first sweep of a run starts at -half");
-        // (Read after the trigger tick, so the beam is one step in.)
-        assert!(
-            (first.angle - (base - half)).abs() < 0.05,
-            "a sweep starts at one edge: {}",
-            first.angle
-        );
-        // Run it out, then trigger the next one.
-        let mut ticks = 0;
-        while w.ecs.resource::<LaserFx>().active() && ticks < 200 {
+    fn both_beams_start_at_the_edges_and_meet_on_the_aim_line() {
+        for level in [1u8, 2, 3] {
+            let mut w = World::new(Theme::Sewer, 10);
+            w.clear_enemies();
+            open_map(&mut w);
+            arm(&mut w, WeaponKind::LaserEyes, level);
+            w.player.face = Vec2::new(1.0, 0.0);
+            let half = {
+                let mut l = Weapon::new(WeaponKind::LaserEyes);
+                l.level = level;
+                l.laser_half_arc()
+            };
+            let base = 0.0; // facing +x
             run_laser(&mut w, 1.0 / 60.0);
-            ticks += 1;
+            let first = *w.ecs.resource::<LaserFx>();
+            assert!(first.active());
+            assert!(!first.twin, "L{level} must not cross the aim line");
+            assert!((first.span() - half).abs() < 1e-5, "L{level} each beam travels half");
+            // (Read after the trigger tick, so each beam is one step in.)
+            assert!(
+                (first.angle - (base - half)).abs() < 0.08,
+                "L{level}: the first beam starts at the minus edge: {}",
+                first.angle
+            );
+            assert!(
+                (first.angle_b - (base + half)).abs() < 0.08,
+                "L{level}: the second beam starts at the plus edge: {}",
+                first.angle_b
+            );
+            // Run it out: the last frame before the reset has both beams on the
+            // aim line, having closed the whole way in.
+            let mut last = first;
+            let mut ticks = 0;
+            while w.ecs.resource::<LaserFx>().active() && ticks < 200 {
+                last = *w.ecs.resource::<LaserFx>();
+                run_laser(&mut w, 1.0 / 60.0);
+                ticks += 1;
+            }
+            assert!(!w.ecs.resource::<LaserFx>().active(), "the sweep never ended");
+            assert!(
+                (last.angle - base).abs() < 0.08,
+                "L{level}: the beams must meet on the aim line: {}",
+                last.angle
+            );
+            assert!(
+                (last.angle_b - base).abs() < 0.08,
+                "L{level}: the second beam must land on the aim line: {}",
+                last.angle_b
+            );
+            // …and the next sweep is the same pair, not the reverse: there is no
+            // direction to alternate any more.
+            w.player.loadout.weapons[0].timer = 0.0;
+            run_laser(&mut w, 1.0 / 60.0);
+            let second = *w.ecs.resource::<LaserFx>();
+            assert!(
+                (second.angle - (base - half)).abs() < 0.08
+                    && (second.angle_b - (base + half)).abs() < 0.08,
+                "L{level}: every sweep is the same inward pair"
+            );
         }
-        let done = *w.ecs.resource::<LaserFx>();
-        w.player.loadout.weapons[0].timer = 0.0;
-        run_laser(&mut w, 1.0 / 60.0);
-        let second = *w.ecs.resource::<LaserFx>();
-        assert_eq!(second.dir, -done.dir, "the sweep direction alternates");
-        assert!(
-            (second.angle - (base + half)).abs() < 0.05,
-            "the next sweep starts at the other edge: {}",
-            second.angle
-        );
     }
 
-    /// Per level: the beam's length, the damage one body takes **per sweep**
-    /// (one old pulse's), the arc, its duration, and whether a
-    /// second mirrored beam joins in.
+    /// From L4 the pair does not stop on the aim line: it crosses there and
+    /// carries on to the opposite edges over the same sweep — the X — so each
+    /// beam covers the whole arc and moves twice as fast.
+    #[test]
+    fn from_level_four_the_beams_cross_and_end_on_the_opposite_edges() {
+        for level in [4u8, 5] {
+            let mut w = World::new(Theme::Sewer, 19);
+            w.clear_enemies();
+            open_map(&mut w);
+            arm(&mut w, WeaponKind::LaserEyes, level);
+            w.player.face = Vec2::new(1.0, 0.0);
+            let half = {
+                let mut l = Weapon::new(WeaponKind::LaserEyes);
+                l.level = level;
+                l.laser_half_arc()
+            };
+            let base = 0.0;
+            run_laser(&mut w, 1.0 / 60.0);
+            let first = *w.ecs.resource::<LaserFx>();
+            assert!(first.twin, "L{level} must cross the aim line");
+            assert!(
+                (first.span() - 2.0 * half).abs() < 1e-5,
+                "L{level} each beam travels the whole arc"
+            );
+            // Track the closest the pair comes to the aim line (it has to pass
+            // through it) and the last frame before the reset.
+            let mut last = first;
+            let mut closest = f32::MAX;
+            let mut ticks = 0;
+            while w.ecs.resource::<LaserFx>().active() && ticks < 200 {
+                let fx = *w.ecs.resource::<LaserFx>();
+                if fx.angle.abs() < closest {
+                    closest = fx.angle.abs();
+                }
+                if fx.angle_b.abs() < closest {
+                    closest = fx.angle_b.abs();
+                }
+                last = fx;
+                run_laser(&mut w, 1.0 / 60.0);
+                ticks += 1;
+            }
+            assert!(
+                closest < 3.0f32.to_radians(),
+                "L{level}: the beams must cross on the aim line ({closest})"
+            );
+            assert!(
+                (last.angle - (base + half)).abs() < 0.15,
+                "L{level}: the first beam ends on the opposite (plus) edge: {}",
+                last.angle
+            );
+            assert!(
+                (last.angle_b - (base - half)).abs() < 0.15,
+                "L{level}: the second beam ends on the opposite (minus) edge: {}",
+                last.angle_b
+            );
+        }
+    }
+
+    /// Per level: the beam's length (×1.6 the design row), the damage one body
+    /// takes **per sweep** (one old pulse's), the arc, its faster duration, and
+    /// which ranks cross the aim line.
     #[test]
     fn laser_numbers_per_level() {
         for (level, (pulses, reach, dmg, arc_deg, secs, twin)) in [
-            (1u8, (3u32, 34.0f32, 6.0f32, 60.0f32, 0.55f32, false)),
-            (2, (3, 40.0, 7.0, 70.0, 0.63, false)),
-            (3, (4, 40.0, 8.0, 80.0, 0.70, false)),
-            (4, (4, 48.0, 9.0, 95.0, 0.80, true)),
-            (5, (5, 54.0, 10.0, 110.0, 0.90, true)),
+            (1u8, (3u32, 54.4f32, 6.0f32, 60.0f32, 0.26f32, false)),
+            (2, (3, 64.0, 7.0, 70.0, 0.28, false)),
+            (3, (4, 64.0, 8.0, 80.0, 0.30, false)),
+            (4, (4, 76.8, 9.0, 95.0, 0.32, true)),
+            (5, (5, 86.4, 10.0, 110.0, 0.34, true)),
         ] {
             let mut w = World::new(Theme::Sewer, 11);
             w.clear_enemies();
@@ -844,7 +952,7 @@ mod tests {
             let fx = *w.ecs.resource::<LaserFx>();
             assert!(fx.active(), "L{level} sweep did not start");
             assert_eq!(fx.pulses, pulses, "L{level} pulse multiplier");
-            assert_eq!(fx.reach, reach, "L{level} beam length");
+            assert!((fx.reach - reach).abs() < 1e-3, "L{level} beam length");
             assert_eq!(fx.dmg, dmg, "L{level} damage per sweep hit");
             assert!(
                 (fx.half - (arc_deg * 0.5f32).to_radians()).abs() < 1e-4,
@@ -852,7 +960,7 @@ mod tests {
                 fx.half
             );
             assert!((fx.total - secs).abs() < 1e-4, "L{level} sweep length");
-            assert_eq!(fx.twin, twin, "L{level} second beam");
+            assert_eq!(fx.twin, twin, "L{level} crossing beams");
             // …and the sweep runs for its own duration, no longer.
             let mut ticks = 1;
             while w.ecs.resource::<LaserFx>().active() && ticks < 200 {
@@ -868,35 +976,46 @@ mod tests {
         }
     }
 
-    /// A body the beam passes over is cut **once** however many ticks the
-    /// crossing takes, the beam pierces a whole line of bodies, and a body
-    /// outside the arc is never touched.
+    /// A body anywhere in the arc is cut **once** per sweep however many ticks
+    /// the crossing takes (the two beams share one hit set), the beams pierce a
+    /// whole line of bodies, and a body outside the arc is never touched.
     #[test]
     fn a_sweep_cuts_each_body_once_and_misses_what_it_does_not_cross() {
         let mut w = World::new(Theme::Sewer, 13);
         w.clear_enemies();
         open_map(&mut w);
-        arm(&mut w, WeaponKind::LaserEyes, 1); // 60° arc, 34 px, 6 damage
+        arm(&mut w, WeaponKind::LaserEyes, 1); // 60° arc, 54.4 px, 6 damage
         w.player.face = Vec2::new(1.0, 0.0);
         let p = w.player.pos;
-        // Three bodies on the dead-ahead line (the beam pierces all of them),
-        // one just inside the arc's edge, and two it never reaches: one well
+        // A lattice of bodies across the whole arc — both beams' halves, the
+        // aim line they close on, and its edges — plus the dead-ahead line the
+        // beams pierce end to end, and two the sweep never reaches: one well
         // outside the 30° half-arc, one behind the rat.
-        let near = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(8.0, 0.0), 1.0);
-        let mid = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(18.0, 0.0), 1.0);
-        let far = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(26.0, 0.0), 1.0);
-        let edge = w.spawn_enemy(
-            EnemyKind::Cat,
-            p + Vec2::from_angle(25.0f32.to_radians()) * 20.0,
-            1.0,
-        );
+        let mut inside: Vec<(Entity, f32)> = Vec::new();
+        for deg in [-25.0f32, -12.0, 0.0, 12.0, 25.0] {
+            let e = w.spawn_enemy(
+                EnemyKind::Cat,
+                p + Vec2::from_angle(deg.to_radians()) * 20.0,
+                1.0,
+            );
+            inside.push((e, enemy_hp(&w, e)));
+        }
+        for (kind, offset) in [
+            (EnemyKind::Brute, Vec2::new(8.0, 0.0)),
+            (EnemyKind::Cat, Vec2::new(18.0, 0.0)),
+            (EnemyKind::Cat, Vec2::new(26.0, 0.0)),
+        ] {
+            let e = w.spawn_enemy(kind, p + offset, 1.0);
+            inside.push((e, enemy_hp(&w, e)));
+        }
         let outside = w.spawn_enemy(
             EnemyKind::Cat,
             p + Vec2::from_angle(60.0f32.to_radians()) * 20.0,
             1.0,
         );
         let behind = w.spawn_enemy(EnemyKind::Cat, p - Vec2::new(18.0, 0.0), 1.0);
-        let full = [near, mid, far, edge, outside, behind].map(|e| enemy_hp(&w, e));
+        let outside_hp = enemy_hp(&w, outside);
+        let behind_hp = enemy_hp(&w, behind);
 
         let mut ticks = 0;
         while ticks < 200 {
@@ -906,47 +1025,53 @@ mod tests {
                 break;
             }
         }
-        // 6 damage each (one old pulse), once.
-        for (entity, before) in [near, mid, far, edge].iter().zip(full.iter()) {
+        // 6 damage each (one old pulse), once — whichever beam crossed it and
+        // however many ticks the two beams spent over it.
+        for (entity, before) in &inside {
             assert!(
                 (enemy_hp(&w, *entity) - (before - 6.0)).abs() < 1e-3,
-                "a body the beam crossed must take the sweep once: {} -> {}",
+                "a body the beams crossed must take the sweep once: {} -> {}",
                 before,
                 enemy_hp(&w, *entity)
             );
         }
-        assert_eq!(enemy_hp(&w, outside), full[4], "a body outside the arc was cut");
-        assert_eq!(enemy_hp(&w, behind), full[5], "a body behind the rat was cut");
+        assert_eq!(enemy_hp(&w, outside), outside_hp, "a body outside the arc was cut");
+        assert_eq!(enemy_hp(&w, behind), behind_hp, "a body behind the rat was cut");
     }
 
-    /// From L4 the second beam mirrors the first, and the two together still
-    /// cut a body once (they share the sweep's hit set).
+    /// Both beams always exist, and they share the sweep's hit set: a body on
+    /// the aim line — which both beams cross — is still cut once per sweep, at
+    /// every rank.
     #[test]
-    fn the_second_beam_shares_the_sweeps_hits() {
-        let mut w = World::new(Theme::Sewer, 18);
-        w.clear_enemies();
-        open_map(&mut w);
-        arm(&mut w, WeaponKind::LaserEyes, 4); // 95° arc, 48 px, 9 damage
-        w.player.face = Vec2::new(1.0, 0.0);
-        let p = w.player.pos;
-        let ahead = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(14.0, 0.0), 1.0);
-        let full = enemy_hp(&w, ahead);
-        let mut ticks = 0;
-        while ticks < 200 {
-            run_laser(&mut w, 1.0 / 60.0);
-            ticks += 1;
-            let fx = *w.ecs.resource::<LaserFx>();
-            assert!(fx.twin || !fx.active(), "L4 must sweep a second beam");
-            if !fx.active() {
-                break;
+    fn both_beams_share_the_sweeps_hits() {
+        for (level, dmg, crossing) in [(1u8, 6.0f32, false), (4, 9.0, true)] {
+            let mut w = World::new(Theme::Sewer, 18);
+            w.clear_enemies();
+            open_map(&mut w);
+            arm(&mut w, WeaponKind::LaserEyes, level);
+            w.player.face = Vec2::new(1.0, 0.0);
+            let p = w.player.pos;
+            let ahead = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(14.0, 0.0), 1.0);
+            let full = enemy_hp(&w, ahead);
+            let mut ticks = 0;
+            while ticks < 200 {
+                run_laser(&mut w, 1.0 / 60.0);
+                ticks += 1;
+                let fx = *w.ecs.resource::<LaserFx>();
+                if fx.active() {
+                    assert_eq!(fx.twin, crossing, "L{level}: which ranks cross");
+                    assert!(fx.beam_b > 1.0, "L{level} must sweep both beams");
+                } else {
+                    break;
+                }
             }
+            assert!(
+                (enemy_hp(&w, ahead) - (full - dmg)).abs() < 1e-3,
+                "two beams must not double-hit one body: {} -> {}",
+                full,
+                enemy_hp(&w, ahead)
+            );
         }
-        assert!(
-            (enemy_hp(&w, ahead) - (full - 9.0)).abs() < 1e-3,
-            "two beams must not double-hit one body: {} -> {}",
-            full,
-            enemy_hp(&w, ahead)
-        );
     }
 
     /// The facing is locked at the trigger tick: turning the rat mid-burst
@@ -980,8 +1105,8 @@ mod tests {
         arm(&mut w, WeaponKind::LaserEyes, 1);
         w.player.face = Vec2::new(1.0, 0.0);
         let p = w.player.pos;
-        // Three bodies dead ahead inside the 34 px beam, plus two well off the
-        // sweep (one beside, one behind the rat).
+        // Three bodies dead ahead inside the 54.4 px beam, plus two well off
+        // the sweep (one beside, one behind the rat).
         let near = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(10.0, 0.0), 1.0);
         let mid = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(18.0, 0.0), 1.0);
         let far = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(26.0, 0.0), 1.0);
@@ -1022,7 +1147,7 @@ mod tests {
         let mut w = World::new(Theme::Sewer, 14);
         w.clear_enemies();
         open_map(&mut w);
-        arm(&mut w, WeaponKind::LaserEyes, 5); // 54 px reach
+        arm(&mut w, WeaponKind::LaserEyes, 5); // 86.4 px reach
         w.player.face = Vec2::new(1.0, 0.0);
         let p = w.player.pos;
         // A solid column 16 px ahead of the rat, and a body behind it.
@@ -1044,6 +1169,44 @@ mod tests {
             enemy_hp(&w, behind_wall),
             behind_hp,
             "the beam reached through the wall"
+        );
+    }
+
+    /// Batch 13's longer beam: at L1 the sweep reaches 54.4 px (×1.6 of the
+    /// 34 px design row), so a body the old beam would have left alone is cut,
+    /// and one past the new reach still is not.
+    #[test]
+    fn the_beam_reaches_one_point_six_times_further() {
+        let mut w = World::new(Theme::Sewer, 22);
+        w.clear_enemies();
+        open_map(&mut w);
+        arm(&mut w, WeaponKind::LaserEyes, 1); // 54.4 px, 6 damage
+        w.player.face = Vec2::new(1.0, 0.0);
+        let p = w.player.pos;
+        // 48 px is past the old 34 px reach; 66 px is past the new one even
+        // with the body's own radius.
+        let in_reach = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(48.0, 0.0), 1.0);
+        let past_reach = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(66.0, 0.0), 1.0);
+        let near_hp = enemy_hp(&w, in_reach);
+        let far_hp = enemy_hp(&w, past_reach);
+        let mut ticks = 0;
+        while ticks < 200 {
+            run_laser(&mut w, 1.0 / 60.0);
+            ticks += 1;
+            if !w.ecs.resource::<LaserFx>().active() {
+                break;
+            }
+        }
+        assert!(
+            (enemy_hp(&w, in_reach) - (near_hp - 6.0)).abs() < 1e-3,
+            "a body 48 px out must be inside the longer beam: {} -> {}",
+            near_hp,
+            enemy_hp(&w, in_reach)
+        );
+        assert_eq!(
+            enemy_hp(&w, past_reach),
+            far_hp,
+            "the beam reached past its own length"
         );
     }
 
@@ -1092,7 +1255,7 @@ mod tests {
         let on = w.laser_visual().expect("a beam on the trigger tick");
         assert!(on.brightness > 0.9, "the bar should be lit: {on:?}");
         assert!(on.muzzle > 0.0);
-        // 0.2 s into a 0.55 s sweep it is exactly as lit.
+        // 0.2 s into a 0.26 s sweep it is exactly as lit.
         for _ in 0..12 {
             run_laser(&mut w, 1.0 / 60.0);
         }

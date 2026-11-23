@@ -722,12 +722,14 @@ impl BossDue {
 /// Live state of one **Laser Eyes** sweep.
 ///
 /// Laser Eyes is an ordinary auto-firing weapon (not an active one: it has no
-/// charge gauge and Space does not spend it) whose shot is a **sweep**: one
-/// continuous beam pivoting through an arc over `laser_sweep_secs`, cutting
-/// what it crosses once (a per-sweep hit set), then a new sweep the next cycle
-/// from the other edge. `weapons_wave3b::laser_eyes_system` charges the weapon's
-/// `Weapon::timer` and owns the sweep; `fire_weapons_system` skips the kind
-/// entirely (`WeaponKind::fires_outside_fire_one`).
+/// charge gauge and Space does not spend it) whose shot is a **sweep**: two
+/// continuous beams start at the two outer edges of the arc and close **inward**
+/// on the aim line over `laser_sweep_secs`, cutting what they cross once (one
+/// per-sweep hit set shared by both beams). From L4 (`twin`) they do not stop
+/// where they meet: they cross and carry on to the opposite edges over the same
+/// sweep, so the pair moves twice as fast and ends swapped. `weapons_wave3b::laser_eyes_system`
+/// charges the weapon's `Weapon::timer` and owns the sweep; `fire_weapons_system`
+/// skips the kind entirely (`WeaponKind::fires_outside_fire_one`).
 ///
 /// The facing is **locked at the trigger tick**, so a rat that turns mid-sweep
 /// does not drag it — the arc is centred on where it was looking when it fired.
@@ -740,8 +742,10 @@ pub struct LaserFx {
     /// [`LaserHits`] entries used by this sweep (mirrors `hits.len()`, kept for
     /// the art and for tests that want a count).
     pub fired: u32,
-    /// The old burst's pulse count at this level: the **damage multiplier** of
-    /// a sweep hit (one body takes `pulses x damage` per sweep), not a cadence.
+    /// The old burst's pulse count at this level: the size of the burst a
+    /// sweep replaces (the Carbon Copy afterimage's spark count), not a cadence
+    /// and not the per-body damage — one body the beams cross takes
+    /// `Weapon::laser_hit_damage()`, once per sweep.
     pub pulses: u32,
     /// The facing the sweep is centred on (unit vector).
     pub facing: Vec2,
@@ -754,20 +758,22 @@ pub struct LaserFx {
     pub dmg: f32,
     /// Half the sweep's arc in radians.
     pub half: f32,
-    /// `+1.0` / `-1.0`: the edge this sweep started from. Flips every cycle, so
-    /// consecutive sweeps alternate direction.
-    pub dir: f32,
-    /// Is a second, mirrored beam sweeping at the same time (L4+)?
+    /// Do the beams **cross** the aim line and run on to the opposite edges
+    /// (L4+)? At L1–L3 they stop where they meet. Both beams always exist; this
+    /// flag is what doubles their angular speed (see [`LaserFx::span`]).
     pub twin: bool,
-    /// World angle of the live beam, and the length it reached after the wall
-    /// stop (art; `beam` is the value `laser_visual` draws).
+    /// World angle of the first beam (it starts at `facing - half`) and the
+    /// length it reached after the wall stop (art; `beam` is the value
+    /// `laser_visual` draws).
     pub angle: f32,
     pub beam: f32,
-    /// The second beam's angle and wall-stopped length (`twin` only).
+    /// The second beam's angle and wall-stopped length: it starts at
+    /// `facing + half` and mirrors the first across the aim line.
     pub angle_b: f32,
     pub beam_b: f32,
     /// The angles both beams held on the previous resolution: the swept band is
-    /// `prev_angle..angle`, so a fast tick cannot step over a body.
+    /// `prev_angle..angle` (and `prev_angle_b..angle_b`), so a fast tick cannot
+    /// step over a body.
     pub prev_angle: f32,
     pub prev_angle_b: f32,
     /// Bodies already cut this sweep (once per sweep each).
@@ -792,22 +798,24 @@ pub struct LaserFx {
     pub copy_age: f32,
     /// Afterimage hits already resolved (mirrors `copy_hits.len()`).
     pub copy_fired: u32,
-    /// The replay's own arc half-width, duration and sweep direction (mirrored
-    /// from the live sweep, so the copy runs backwards).
+    /// The replay's own arc: half the arc, how far each of its two beams travels
+    /// (see [`LaserFx::span`]), and how long it takes — the same shape the live
+    /// sweep it was recorded from had.
     pub copy_half: f32,
+    pub copy_span: f32,
     pub copy_secs: f32,
-    pub copy_dir: f32,
     /// Bodies the replay has already cut, and the boss.
     pub copy_hits: LaserHits,
     pub copy_boss_hit: bool,
-    /// Angles the replay's beams held on the previous resolution.
+    /// Angles the replay's two beams held on the previous resolution.
     pub copy_prev_angle: f32,
+    pub copy_prev_angle_b: f32,
 }
 
 /// Bodies one Laser Eyes sweep may remember as already cut.
 ///
 /// The sweep is a per-cast "each body once" set, the same rule Super Dash uses
-/// per dash. A beam reaches 54 px through an arc, so a full horde screens a
+/// per dash. Two beams reach 54–86 px through an arc, so a full horde screens a
 /// bounded number of bodies; the fixed set keeps the tick allocation-free. A
 /// sweep that somehow overflows simply stops recording new bodies (the extra
 /// ones can be cut again by a later tick of the same sweep), which cannot
@@ -862,10 +870,10 @@ impl LaserHits {
 /// afterimage replays on the next sweep (design §3: "Record the facing and
 /// origin of a completed sweep").
 ///
-/// Batch 12's sweep is continuous, so the replay's own arc width, duration and
-/// direction live on [`LaserFx`] (`copy_half`, `copy_secs`, `copy_dir`) rather
-/// than here: the recorded sweep is only *where* and *what*, and the copy runs
-/// it the other way round.
+/// The replay's own shape — half-arc, span and duration — lives on [`LaserFx`]
+/// (`copy_half`, `copy_span`, `copy_secs`): the recorded sweep is only *where*
+/// and *what*, and the copy runs the same inward-closing pair a beat later at
+/// [`crate::game::ecs::systems::evolutions::CARBON_COPY_DAMAGE`] of the hit.
 #[derive(Clone, Copy, Debug)]
 pub struct LaserCopy {
     /// Where the recorded burst fired from.
@@ -892,9 +900,6 @@ impl Default for LaserFx {
             reach: 0.0,
             dmg: 0.0,
             half: 0.0,
-            // The first sweep of a run starts from the negative edge; every
-            // trigger flips it, so consecutive sweeps alternate.
-            dir: -1.0,
             twin: false,
             angle: 0.0,
             beam: 0.0,
@@ -912,11 +917,12 @@ impl Default for LaserFx {
             copy_age: 0.0,
             copy_fired: 0,
             copy_half: 0.0,
+            copy_span: 0.0,
             copy_secs: 0.0,
-            copy_dir: -1.0,
             copy_hits: LaserHits::default(),
             copy_boss_hit: false,
             copy_prev_angle: 0.0,
+            copy_prev_angle_b: 0.0,
         }
     }
 }
@@ -926,6 +932,19 @@ impl LaserFx {
     #[inline]
     pub fn active(&self) -> bool {
         self.left > 0.0
+    }
+
+    /// How far **each** beam travels across the sweep, in radians: half the arc
+    /// at L1–L3 (the pair starts at the two edges and meets on the aim line),
+    /// the whole arc at L4+ (they cross and swap edges). Two beams over the
+    /// same sweep make the pair sweep twice as fast as one beam would.
+    #[inline]
+    pub fn span(&self) -> f32 {
+        if self.twin {
+            2.0 * self.half
+        } else {
+            self.half
+        }
     }
 
     /// Is a **Carbon Copy** afterimage replaying right now?
