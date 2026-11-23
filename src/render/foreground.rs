@@ -28,7 +28,10 @@
 //! closer than [`MIN_SPACING`] 220 world px:
 //!
 //! * **corridors** at least 5 tiles long get one Span *across* the corridor
-//!   (perpendicular to its long axis) per ~14 tiles, in one corridor of two;
+//!   (perpendicular to its long axis) per ~14 tiles, in one corridor of two.
+//!   A corridor is 1–3 cells across, so a cross-span is measured against
+//!   [`CORRIDOR_SPAN_MIN`] 28 px, not a room's [`SPAN_MIN_PX`] 64: the look is
+//!   a fat pipe or beam crossing the passage overhead;
 //! * **rooms/halls** at least 12 × 9 tiles get a Span across the short
 //!   dimension, an Edge reaching 80–160 px in from a wall face, or a Drop over
 //!   open floor at least 4 tiles from any wall, one per ~120 tiles² and at most
@@ -186,8 +189,14 @@ const DEPTH_MAX: f32 = 3.0;
 const SCALE_MIN: f32 = 3.0;
 const SCALE_MAX: f32 = 6.0;
 
-/// A Span shorter than this (or longer than [`SPAN_MAX_PX`]) is not placed.
+/// A room Span shorter than this (or longer than [`SPAN_MAX_PX`]) is not
+/// placed.
 const SPAN_MIN_PX: f32 = 64.0;
+/// A **corridor** cross-span's minimum. A 1–3-cell corridor is only 16–48 px
+/// across, and a fat pipe or beam crossing it overhead (28 px of span, 30–50 px
+/// of body) is exactly the look the owner asked for, so the corridor rule has
+/// its own, smaller floor.
+const CORRIDOR_SPAN_MIN: f32 = 28.0;
 const SPAN_MAX_PX: f32 = 420.0;
 /// How far a Span's `len` bites into each wall.
 const SPAN_BITE_PX: f32 = 6.0;
@@ -1063,8 +1072,14 @@ fn reach_to_wall(tiles: &TileMap, origin: Vec2, dir: (i32, i32)) -> Option<f32> 
 /// the two wall faces) and `len` = the gap + 6 px bitten into each wall.
 ///
 /// `None` when either end leaves the map without a wall, or when the span is
-/// shorter than [`SPAN_MIN_PX`] or longer than [`SPAN_MAX_PX`].
-fn span_across(tiles: &TileMap, at: Vec2, horizontal: bool) -> Option<(Vec2, f32)> {
+/// shorter than `min_len` (rooms: [`SPAN_MIN_PX`], corridors:
+/// [`CORRIDOR_SPAN_MIN`]) or longer than [`SPAN_MAX_PX`].
+fn span_across(
+    tiles: &TileMap,
+    at: Vec2,
+    horizontal: bool,
+    min_len: f32,
+) -> Option<(Vec2, f32)> {
     if !tiles.get_at(at).is_open() {
         return None;
     }
@@ -1080,7 +1095,7 @@ fn span_across(tiles: &TileMap, at: Vec2, horizontal: bool) -> Option<(Vec2, f32
         )
     };
     let len = a + b + 2.0 * SPAN_BITE_PX;
-    if len < SPAN_MIN_PX || len > SPAN_MAX_PX {
+    if len < min_len || len > SPAN_MAX_PX {
         return None;
     }
     let mid = if horizontal {
@@ -1219,9 +1234,12 @@ fn generate(level: &Level, out: &mut Vec<ForeItem>) {
                     (room.rect.y as f32 + along + 0.5) * TILE_F,
                 )
             };
-            // Across the corridor: the item's long axis is the short one.
+            // Across the corridor: the item's long axis is the short one. A
+            // corridor is narrow, so this rule has its own, smaller minimum.
             let span_horizontal = !long_axis_horizontal;
-            let Some((pos, len)) = span_across(tiles, at, span_horizontal) else {
+            let Some((pos, len)) =
+                span_across(tiles, at, span_horizontal, CORRIDOR_SPAN_MIN)
+            else {
                 continue;
             };
             if !can_place(out.as_slice(), pos) {
@@ -1283,7 +1301,7 @@ fn generate(level: &Level, out: &mut Vec<ForeItem>) {
                 let placed: Option<(Vec2, f32, bool, Attach)> = match class {
                     ATTACH_SPAN => {
                         let span_horizontal = w < h;
-                        span_across(tiles, at, span_horizontal)
+                        span_across(tiles, at, span_horizontal, SPAN_MIN_PX)
                             .map(|(pos, len)| (pos, len, span_horizontal, Attach::Span))
                     }
                     ATTACH_EDGE => {
@@ -1583,7 +1601,7 @@ mod tests {
                     assert!(item.len >= 0.0, "a negative length");
                     match item.attach {
                         Attach::Span => assert!(
-                            (SPAN_MIN_PX..=SPAN_MAX_PX).contains(&item.len),
+                            (CORRIDOR_SPAN_MIN..=SPAN_MAX_PX).contains(&item.len),
                             "span len {}",
                             item.len
                         ),
@@ -1743,6 +1761,46 @@ mod tests {
             }
         }
         assert!(spans > 0, "no span was placed, so the test proves nothing");
+    }
+
+    /// A corridor cross-span is measured against the corridor's own, smaller
+    /// minimum ([`CORRIDOR_SPAN_MIN`] 28 px), so a fat pipe really does cross a
+    /// 1–3-cell corridor overhead; a room span still has to reach
+    /// [`SPAN_MIN_PX`].
+    #[test]
+    fn corridor_cross_spans_use_the_smaller_minimum() {
+        let mut short_corridor_spans = 0;
+        for seed in 0..12u64 {
+            let (w, layer) = layer_for(Theme::Sewer, seed);
+            for item in layer.items() {
+                if item.attach != Attach::Span {
+                    continue;
+                }
+                // A span's anchor is recentred onto the middle of what it
+                // crosses, so the room rect says exactly which rule placed it.
+                let in_corridor = w.level.rooms.iter().any(|r| {
+                    r.kind == RoomKind::Corridor && r.rect.contains_world(item.pos)
+                });
+                let min = if in_corridor {
+                    CORRIDOR_SPAN_MIN
+                } else {
+                    SPAN_MIN_PX
+                };
+                assert!(
+                    item.len >= min && item.len <= SPAN_MAX_PX,
+                    "seed {seed}: a {} span of {} px is outside {min}..={SPAN_MAX_PX}",
+                    if in_corridor { "corridor" } else { "room" },
+                    item.len
+                );
+                if in_corridor && item.len < SPAN_MIN_PX {
+                    short_corridor_spans += 1;
+                }
+            }
+        }
+        assert!(
+            short_corridor_spans > 0,
+            "no corridor cross-span used the 28 px minimum over 12 Sewer seeds"
+        );
     }
 
     /// Generation is render-only: it never writes the level (whose tile kinds
