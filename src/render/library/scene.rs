@@ -1443,7 +1443,13 @@ fn stage_enemy(theme: Theme, kind: EnemyKind, elite: bool) -> Staged {
     if elite {
         return stage_heavy(theme, kind, true);
     }
-    let slot = roster::floor(theme).slot_of(kind).unwrap_or(Slot::A);
+    let Some(slot) = roster::floor(theme).slot_of(kind) else {
+        // A **guest** is in no roster slot (`EnemyKind::Drake`): it is a
+        // tell-and-strike body, so it takes the trick staging — its own lane
+        // on the floor and a peck volley at the card's dummy. The smallest
+        // change: no new family, and nothing else can reach this arm.
+        return stage_trick(theme, kind);
+    };
     match slot {
         // Fodder: a pack, crossing the plate.
         Slot::A | Slot::B => stage_pack(theme, kind),

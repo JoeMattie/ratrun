@@ -431,6 +431,7 @@ impl DamageCause {
             DamageCause::EnemyContact(EnemyKind::LooseCan) => "loose can contact",
             DamageCause::EnemyContact(EnemyKind::TollGull) => "toll gull contact",
             DamageCause::EnemyContact(EnemyKind::LooseBungee) => "loose bungee contact",
+            DamageCause::EnemyContact(EnemyKind::Drake) => "drake contact",
             DamageCause::EnemyBullet => "spitter bullets",
             DamageCause::BossContact(BossKind::Cat) => "jaguar body",
             DamageCause::BossContact(BossKind::Broom) => "broom human body",
@@ -1840,6 +1841,28 @@ fn floor_attack_landing(en: &Enemy, p: Vec2) -> Option<f32> {
         }
         // The tongue only slows: it has no damage to book.
         EnemyKind::SumpLeech => None,
+        // The guest (Sewer): the peck. It lands on the tick the out-stroke ends,
+        // with one hit test against the bill tip at full extension — so the
+        // attribution asks the same `bill_tip` the damage does, with the phase
+        // clock snapped to the same progress.
+        EnemyKind::Drake => {
+            use crate::game::ecs::systems::drake;
+            let striking = en.w4.phase == drake::PHASE_PECK
+                && en.w4.t > drake::PECK_BACK_SECS
+                && en.w4.t - drake::PECK_BACK_SECS <= SOON;
+            if !striking {
+                return None;
+            }
+            let mut probe = en.clone();
+            probe.w4.t = drake::PECK_BACK_SECS;
+            let tip = drake::mirrored_view(&probe).map(|v| crate::game::art_duck::bill_tip(&v))?;
+            if tip.dist(p) > drake::PECK_HIT_RADIUS + 1.0 {
+                return None;
+            }
+            let base = en.kind.damage();
+            let scale = if base > 0.0 { en.damage / base } else { 1.0 };
+            Some(drake::PECK_DAMAGE * scale)
+        }
         // The roll is the can's one warned hit (its body's own damage), along
         // the lane it rocked over: a rolling can within a couple of ticks'
         // travel of the rat. (A rock that ends this tick only starts the roll.)
@@ -1898,6 +1921,8 @@ fn floor_attack_name(kind: EnemyKind) -> &'static str {
         // burst: the base body's attack under the floor's own name.
         EnemyKind::LooseBungee => "loose bungee hook",
         EnemyKind::InkBlot => "ink blot burst",
+        // The guest: the only thing a Sewer Drake does to the rat.
+        EnemyKind::Drake => "drake peck",
         _ => match kind.archetype() {
             EnemyKind::BellFlea => "bell flea landing",
             EnemyKind::Turnkey => "turnkey crossbar",
@@ -2021,6 +2046,7 @@ fn enemy_kind_name(kind: EnemyKind) -> &'static str {
         EnemyKind::LooseCan => "loose can",
         EnemyKind::TollGull => "toll gull",
         EnemyKind::LooseBungee => "loose bungee",
+        EnemyKind::Drake => "drake",
     }
 }
 

@@ -1374,8 +1374,9 @@ pub fn emit_enemy_death(
     // `tone` pulls every signature colour the arm hard-codes toward the body's
     // own `color()` (the ichor and the stain already carry it). For a kind that
     // is its own archetype `tone` is the identity, so every existing corpse is
-    // bit-for-bit the cue it always was.
-    let recolored = kind.is_registration();
+    // bit-for-bit the cue it always was. The guest (the Drake) borrows the
+    // Brute's cue the same way: its palette carries the duck, not the beetle.
+    let recolored = kind.is_registration() || kind == EnemyKind::Drake;
     let tone = |sig: Rgb| {
         if recolored {
             palette::mix(sig, enemy_col, 0.55)
@@ -1494,12 +1495,15 @@ pub fn emit_enemy_death(
     }
     // Sewer (batch 6b): one accent per Sewer body on top of its archetype's
     // recoloured cue (bone chips, shell plates, a pale sucker pop, valve
-    // slime). One extra burst per death, for these four kinds only.
+    // slime, and the guest's white feathers and orange bill shards). One extra
+    // burst per death, for these five kinds only.
     let sewer_accent: Option<(Rgb, Rgb, usize, f32)> = match kind {
         EnemyKind::PipeEel => Some(((244, 238, 216), (96, 84, 70), 6, 74.0)),
         EnemyKind::GrateArcher => Some(((226, 232, 208), (86, 108, 100), 6, 60.0)),
         EnemyKind::SumpLeech => Some(((236, 222, 206), (58, 54, 62), 6, 44.0)),
         EnemyKind::SluiceToad => Some(((170, 190, 132), (62, 88, 62), 10, 52.0)),
+        // The guest: a puff of body-feathers, then the bill's own orange.
+        EnemyKind::Drake => Some(((244, 240, 230), (226, 148, 52), 9, 56.0)),
         _ => None,
     };
     if let Some((hot, cold, count, speed)) = sewer_accent {

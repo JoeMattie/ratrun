@@ -335,6 +335,8 @@ fn enemy_name(k: EnemyKind) -> &'static str {
         EnemyKind::LooseCan => "Loose Can",
         EnemyKind::TollGull => "Toll Gull",
         EnemyKind::LooseBungee => "Loose Bungee",
+        // The guest, appended after the roster's registrations.
+        EnemyKind::Drake => "Drake",
     }
 }
 
@@ -533,6 +535,9 @@ pub fn all_rows() -> Vec<Row> {
         EnemyKind::LooseCan,
         EnemyKind::TollGull,
         EnemyKind::LooseBungee,
+        // The guest: no roster slot anywhere, but it is on the floor and it
+        // has its own card.
+        EnemyKind::Drake,
     ] {
         let (hint, dossier) = enemy_text(k);
         rows.push(Row {
@@ -983,6 +988,17 @@ fn enemy_text(k: EnemyKind) -> (&'static str, &'static str) {
         EnemyKind::LooseBungee => (
             "Flatbed · third trick · from 9:45",
             "Rated for twice your weight. Crossbar tell, length, life and damage; on the first crossing it pulls you 6 toward its hook, swept against solids and stopped before pits. Route around the free end.",
+        ),
+        // The guest: it holds no roster slot, so the hint says so instead of
+        // naming one (`enemy_floors` prints the same words on the card).
+        EnemyKind::Drake => (
+            "Sewer · guest · from 2:30",
+            "Followed the bread down. A white duck the size of a door, holding one \
+             drake at a time, two from 8:00. Inside 30 px it plants and draws its \
+             bill's lane on the floor: the aim tracks you for a quarter second, then \
+             locks. Three pecks go down that lane, 9 damage each, re-aiming 35° between \
+             them; then it stands exposed for 1.3 s. Step off the line during the \
+             warning and hit it while it recovers.",
         ),
     }
 }
@@ -1833,6 +1849,18 @@ fn enemy_facts(k: EnemyKind, f: &mut Facts) {
 /// generic boss body).
 pub fn enemy_floors(k: EnemyKind) -> Option<String> {
     use crate::game::roster;
+    // The guest is in no roster slot: it keeps one floor and one clock of its
+    // own (`ecs::systems::drake::FROM_CLOCK`), and it is the only body the
+    // card calls a guest.
+    if k == EnemyKind::Drake {
+        let secs = crate::game::ecs::systems::drake::FROM_CLOCK.round() as u32;
+        return Some(format!(
+            "{} · guest · from {}:{:02}",
+            Theme::Sewer.name(),
+            secs / 60,
+            secs % 60
+        ));
+    }
     let floors: Vec<&'static str> = Theme::playable()
         .into_iter()
         .filter(|&t| roster::floor(t).slot_of(k).is_some())
@@ -1907,6 +1935,8 @@ pub fn enemy_answer(k: EnemyKind) -> &'static str {
         EnemyKind::LooseCan => "outlines its roll — cross behind",
         EnemyKind::TollGull => "beak opens — reverse",
         EnemyKind::LooseBungee => "dotted cord — round the free end",
+        // The guest.
+        EnemyKind::Drake => "lane locks, then 3 pecks — step off it",
     }
 }
 

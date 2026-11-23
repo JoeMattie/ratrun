@@ -851,3 +851,55 @@ pub struct WhipCrack {
     /// The swipe's whole life in seconds.
     pub total: f32,
 }
+
+// ---- The guest: the Drake (Sewer only) ------------------------------------
+//
+// One per body, inserted at spawn (`systems::drake::spawn_guest`) and, for a
+// body that reached the floor another way (`spawn drake`, a test), on the
+// first tick `drake_system` sees it — the Sump Leech's own rule. The component
+// is authoritative; the three numbers an `&Enemy` reader needs (the phase, the
+// phase clock and the aim) are mirrored into the body's otherwise-unused `w4`
+// scratch, exactly as `floor_sewer` mirrors a leech's tongue.
+
+/// Which of the Drake's four states the body is in.
+///
+/// The discriminant **is** the `u8` the wave-4 scratch mirrors
+/// (`w4.phase`), so the bot, the damage attribution and
+/// `Enemy::damage_mult_from` read one number.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DrakeState {
+    /// Walking toward the rat on the ordinary flow field (the only state it
+    /// moves itself in).
+    #[default]
+    Waddle,
+    /// Planted, neck drawn back, the peck lane outlined on the floor.
+    Tell,
+    /// Planted, the bill going out and back: three pecks.
+    Peck,
+    /// Planted, exposed: x1.5 incoming damage for 1.3 s.
+    Recover,
+}
+
+/// One Drake's state machine (`ecs/systems/drake.rs` owns the timings).
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct Drake {
+    pub state: DrakeState,
+    /// Seconds left in the current state (for `Peck`, in the current peck).
+    pub t: f32,
+    /// Pecks still to throw in this volley (0 outside `Peck`).
+    pub pecks_left: u8,
+    /// Unit vector the bill travels along: it tracks the rat until
+    /// `drake::TELL_LOCK_SECS` into the tell, then locks.
+    pub aim: Vec2,
+    /// Seconds spent walking, for the waddle cycle (never reset by a tell).
+    pub walk: f32,
+    /// Where the body planted itself for this tell → peck → recover cycle. It
+    /// is pinned here every tick, so a shove, a separation nudge or a wall
+    /// resolution cannot drag a committed bird off its mark.
+    pub anchor: Vec2,
+    /// Standing in a puddle this tick: the drawn lower body is hidden by a
+    /// ripple line (`art_duck::DuckView::on_water`). Cached on the component
+    /// because the view is built from the body and its state alone — art never
+    /// asks the map a question.
+    pub on_water: bool,
+}

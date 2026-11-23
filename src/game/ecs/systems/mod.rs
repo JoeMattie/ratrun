@@ -39,6 +39,10 @@ pub mod floor_kitchen;
 pub mod floor_lab;
 pub mod floor_sewer;
 pub mod floor_flatbed;
+// The guest: the Drake, the big duck that pecks (Sewer only). Its own file so
+// the spawner, the state machine, the one lane geometry and the art bridge sit
+// together; chained in the same slot as `floor_sewer`.
+pub mod drake;
 // Fodder approach sounds (one pair per floor); not yet in the schedule.
 pub mod approach;
 // Standing water: the rat's wet-floor footsteps and the ripples (right after

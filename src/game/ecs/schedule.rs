@@ -49,6 +49,7 @@
 //! | 16c | `enemy_wave3::wave3_system` | wave-3 kinds' tells, hazards, wick fuse (new); after every weapon damage pass so a moth any of them killed lights its wick |
 //! | 16c2 | `enemy_wave4::wave4_system` | wave-4 kinds' tells and hazards (new); right after 16c |
 //! | 16c3 | `floor_sewer::floor_sewer_system`, `floor_kitchen::floor_kitchen_system`, `floor_lab::floor_lab_system`, `floor_laundry::floor_laundry_system`, `floor_printworks::floor_printworks_system`, `floor_flatbed::floor_flatbed_system` | the per-floor roster rules (new), in this order; right after 16c2 |
+//! | 16c3a | `drake::drake_system` | the guest's tell → peck → recover (Sewer only, a no-op without a Drake); in the same slot, right after `floor_sewer_system` |
 //! | 16c4 | `approach::approach_sfx_system` | fodder approach sounds (new; writes only `SfxQueue`); right after 16c3 |
 //! | 16d | `trailer::trailer_system` | the flatbed's holes, cargo and wind (new; `Theme::Trailer` only); a fall can kill, so it runs before 16e |
 //! | 16e | `weapons_wave3a::hantavirus_death_system` | death-triggered jumps (sees evolution, wick-burst and fall kills), before the reap |
@@ -96,7 +97,7 @@ use bevy_ecs::prelude::*;
 
 use super::resources::TickInput;
 use super::systems::{
-    approach, boss, combat, enemy_move, enemy_wave3, enemy_wave4, evolutions, floor_flatbed,
+    approach, boss, combat, drake, enemy_move, enemy_wave3, enemy_wave4, evolutions, floor_flatbed,
     floor_kitchen, floor_lab, floor_laundry, floor_printworks, floor_sewer, fog, fx, gates, hazards,
     loot, miniboss, player, powerups, projectiles, puddles, shop, spawn, trailer, traps,
     weapon_spiketail, weapons, weapons_wave3a, weapons_wave3b,
@@ -380,6 +381,15 @@ pub fn build_tick_schedule() -> Schedule {
             // at `IntoScheduleConfigs`' 20-entry limit.
             (
                 floor_sewer::floor_sewer_system,
+                // 16c3a: the guest (the Drake). Its own narrow system in the
+                // same slot: it returns on its first line without a Drake on
+                // the floor (no sort, no rng), it never spawns or despawns
+                // (it only attaches its state component to a body that reached
+                // the floor another way), and it draws no rng of its own. Its
+                // body is an ordinary `Enemy`, so every damage pass above has
+                // already seen it, and the peck's hit on the rat lands before
+                // the reap like every other floor strike.
+                drake::drake_system,
                 floor_kitchen::floor_kitchen_system,
                 floor_lab::floor_lab_system,
                 floor_laundry::floor_laundry_system,

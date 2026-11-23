@@ -1,10 +1,11 @@
 //! Enemies: kinds, per-kind stats, and steering behavior toward the player.
 //!
 //! `EnemyKind` is append-only and `EnemyKind::all()` lists every kind: the 48
-//! ordinary bodies the floor rosters own (`game/roster.rs`) plus the legacy
-//! `Boss` body. Stats, name, colour and XP key on the kind itself; behaviour
-//! keys on [`EnemyKind::archetype`], the existing body whose steering, attack
-//! and nav size class a kind reuses until it has a rule of its own.
+//! ordinary bodies the floor rosters own (`game/roster.rs`), one **guest**
+//! (the Drake, which no roster slot carries) and the legacy `Boss` body: 50.
+//! Stats, name, colour and XP key on the kind itself; behaviour keys on
+//! [`EnemyKind::archetype`], the existing body whose steering, attack and nav
+//! size class a kind reuses until it has a rule of its own.
 
 use crate::math::Vec2;
 use crate::render::palette::Rgb;
@@ -123,6 +124,15 @@ pub enum EnemyKind {
     TollGull,
     /// Flatbed · III · V(Turnkey): the crossbar pulls the rat toward its hook.
     LooseBungee,
+
+    // ---- The guest ---------------------------------------------------------
+    /// A **guest** body: the Drake, a big duck that pecks (Sewer only, outside
+    /// the eight roster slots). It is not a registration and not a slot: the
+    /// director's own guest rule keeps at most one alive (two from 8:00), and
+    /// its own system (`ecs/systems/drake.rs`) owns its movement states. It
+    /// names the Brute as its archetype only so the *nav* size class, the glue
+    /// weight, `holds()` and the steering rules agree with a body of its mass.
+    Drake,
 }
 
 impl EnemyKind {
@@ -190,6 +200,10 @@ impl EnemyKind {
             EnemyKind::LooseCan => 13.0,
             EnemyKind::TollGull => 12.0,
             EnemyKind::LooseBungee => 20.0,
+            // The guest: the Sewer heavy's own pool (the Sluice Toad's 58.0)
+            // times 1.6, so a pecking duck is a real fight and not a fodder
+            // body that happens to be wide.
+            EnemyKind::Drake => 92.8,
         }
     }
     pub fn speed(self) -> f32 {
@@ -246,6 +260,9 @@ impl EnemyKind {
             EnemyKind::LooseCan => 22.0,
             EnemyKind::TollGull => 22.0,
             EnemyKind::LooseBungee => 25.0,
+            // Dry-floor speed. The paddling 40 px/s on a puddle is the floor's
+            // own rule (`drake::water_gait`), not this number.
+            EnemyKind::Drake => 30.0,
         }
     }
     /// Collision radius, which also picks the navigation size class
@@ -276,6 +293,9 @@ impl EnemyKind {
             EnemyKind::MurderHornet => 2.6,
             EnemyKind::TermiteHorde => 3.2,
             EnemyKind::Lilliputian => 2.0,
+            // The guest: a big body (the rat is 3), one size class above the
+            // Brute's 6.5 and the widest ordinary body in the game.
+            EnemyKind::Drake => 8.0,
             // A registration borrows its base body's collision radius, and so
             // its navigation size class, until its floor's art pass says
             // otherwise. `archetype()` is always one of the kinds above, so
@@ -341,6 +361,9 @@ impl EnemyKind {
             EnemyKind::LooseCan => 5.0,
             EnemyKind::TollGull => 6.0,
             EnemyKind::LooseBungee => 6.0,
+            // Body contact only: the Sewer's ground fodder's number. It is the
+            // peck that hurts (`drake::PECK_DAMAGE`), not the shoulder.
+            EnemyKind::Drake => 5.0,
         }
     }
     pub fn xp(self) -> u32 {
@@ -396,6 +419,8 @@ impl EnemyKind {
             EnemyKind::LooseCan => 3,
             EnemyKind::TollGull => 4,
             EnemyKind::LooseBungee => 4,
+            // The guest: three times the Sewer heavy (the Sluice Toad's 10).
+            EnemyKind::Drake => 30,
         }
     }
     pub fn color(self) -> Rgb {
@@ -467,6 +492,10 @@ impl EnemyKind {
             EnemyKind::LooseCan => (188, 192, 196),
             EnemyKind::TollGull => (232, 232, 224),
             EnemyKind::LooseBungee => (186, 78, 74),
+            // The guest: a white body under an orange bill (the bill itself is
+            // `art_duck`'s own colour; this is what the rim, the corpse and the
+            // Library card read).
+            EnemyKind::Drake => (236, 232, 220),
         }
     }
 
@@ -564,6 +593,15 @@ impl EnemyKind {
             EnemyKind::TollGull => EnemyKind::Spitter,
             // Loose Bungee · V(Turnkey): the Turnkey's crossbar.
             EnemyKind::LooseBungee => EnemyKind::Turnkey,
+            // ---- The guest --------------------------------------------------
+            // The Drake names the Brute for the decisions that are *not* a rule
+            // of its own: the navigation size class (`SizeClass::of_enemy`),
+            // the glue weight and hold (`traps::enemy_units`/`enemy_hold`), the
+            // steering shape (`Enemy::steer`), the bot's archetype scans and
+            // `W4::holds`. Its movement states, tell, peck volley and recovery
+            // live in its own system, so it is **not** a registration (see
+            // `is_registration`).
+            EnemyKind::Drake => EnemyKind::Brute,
             // ---- Every earlier kind is its own archetype -------------------
             EnemyKind::Skitterer
             | EnemyKind::Bat
@@ -586,9 +624,13 @@ impl EnemyKind {
 
     /// True for a wave-four registration: a kind that reuses another body's
     /// behaviour intact until its floor's own batch gives it a rule.
+    ///
+    /// The **guest** (the Drake) is not one: it names the Brute as its
+    /// archetype for the nav and mass decisions alone, and has owned its own
+    /// tell → peck → recover state machine from the day it shipped.
     #[inline]
     pub fn is_registration(self) -> bool {
-        self.archetype() != self
+        self != EnemyKind::Drake && self.archetype() != self
     }
     /// Spitters fire enemy bullets; others are melee.
     ///
@@ -643,6 +685,10 @@ impl EnemyKind {
             | EnemyKind::Pillbug
             | EnemyKind::BigSnake
             | EnemyKind::TermiteHorde => true,
+            // The guest: a body twice the rat's width and four times its mass
+            // keeps its footing (and fills a glue board like the floor's
+            // heavy).
+            EnemyKind::Drake => true,
             // A registration is exactly as immovable as its base body: the
             // floor's heavy (a Sluice Toad, a Pie Weight, …) takes the whip
             // hit without ever being swung.
@@ -652,7 +698,11 @@ impl EnemyKind {
 
     /// Every kind, in enum order. The console's `spawn` command and its Tab
     /// completion read this table rather than a retyped list.
-    pub fn all() -> [EnemyKind; 49] {
+    ///
+    /// 50 kinds: the 16 earlier bodies, the 33 wave-four registrations, the
+    /// guest (the Drake, appended last: it is nobody's roster slot) and the
+    /// legacy `Boss` body (second, where it has always been).
+    pub fn all() -> [EnemyKind; 50] {
         [
             EnemyKind::Skitterer,
             EnemyKind::Bat,
@@ -704,6 +754,8 @@ impl EnemyKind {
             EnemyKind::LooseCan,
             EnemyKind::TollGull,
             EnemyKind::LooseBungee,
+            // The guest, appended after the roster's 33 registrations.
+            EnemyKind::Drake,
         ]
     }
 
@@ -761,6 +813,8 @@ impl EnemyKind {
             EnemyKind::LooseCan => "loosecan",
             EnemyKind::TollGull => "tollgull",
             EnemyKind::LooseBungee => "loosebungee",
+            // The guest (one word: the console's `spawn` command slugs names).
+            EnemyKind::Drake => "drake",
         }
     }
 }
@@ -1291,6 +1345,19 @@ impl Enemy {
     #[inline]
     pub fn damage_mult_from(&self, from: Vec2) -> f32 {
         use crate::game::ecs::systems::enemy_wave4 as w4;
+        // The guest's exposed second: the 1.3 s recovery after a peck volley
+        // takes x1.5 from every source, the same mechanism the Pillbug's rear
+        // and the hornet's grounded punish use. Keyed on the **real** kind
+        // (its archetype is the Brute, which has no armour of its own) and read
+        // off the `w4` mirror `drake_system` keeps, so a source holding only an
+        // `&Enemy` still gets the right answer.
+        if self.kind == EnemyKind::Drake {
+            return if self.w4.phase == crate::game::ecs::systems::drake::PHASE_RECOVER {
+                crate::game::ecs::systems::drake::RECOVER_DAMAGE_MULT
+            } else {
+                1.0
+            };
+        }
         match self.kind.archetype() {
             EnemyKind::Pillbug => {
                 if self.w3.curl_t <= 0.0 {
@@ -1552,7 +1619,11 @@ mod tests {
     #[test]
     fn all_lists_every_kind_once() {
         let all = EnemyKind::all();
-        assert_eq!(all.len(), 49, "16 earlier kinds + 33 registrations");
+        assert_eq!(
+            all.len(),
+            50,
+            "16 earlier kinds + 33 registrations + the guest"
+        );
         for (i, a) in all.iter().enumerate() {
             for b in all.iter().skip(i + 1) {
                 assert_ne!(a, b, "{a:?} is listed twice");
@@ -1561,8 +1632,12 @@ mod tests {
         assert_eq!(
             all.iter().filter(|k| k.is_registration()).count(),
             33,
-            "the batch registers 33 ordinary kinds"
+            "the batch registers 33 ordinary kinds (the guest is not one)"
         );
+        // The guest is appended last and is nobody's roster slot.
+        assert_eq!(all[49], EnemyKind::Drake);
+        assert!(!EnemyKind::Drake.is_registration());
+        assert_eq!(EnemyKind::Drake.archetype(), EnemyKind::Brute);
     }
 
     /// Every registration inherits from a kind that already existed, the
