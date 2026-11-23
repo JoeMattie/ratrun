@@ -132,9 +132,16 @@ use crate::render::palette::{self, Rgb};
 /// The largest alpha any body pixel of this layer can reach (215/255).
 /// [`blend`] clamps to it, so nothing in the layer is ever opaque.
 pub const ALPHA_MAX: u8 = 215;
-/// The dimmest the rat/threat fade takes an item to (out of 255).
+/// The dimmest the **threat** fade takes an item to (out of 255): an item over
+/// a boss or a miniboss all but disappears.
 pub const ALPHA_FLOOR: f32 = 28.0;
-/// Fade to [`ALPHA_FLOOR`] within this many pixels of the rat.
+/// The dimmest the **rat** fade takes a whole item to. Higher than
+/// [`ALPHA_FLOOR`] on purpose: a 1x view is only 120 x 84 px, so every item on
+/// screen is within [`FADE_RAT_PX`] of the rat and a floor of 28 made the layer
+/// invisible in play. The rat's own surroundings are cleared per pixel instead
+/// (the clear disc: [`CLEAR_DISC_MIN`] of this, i.e. about 38/255 at the rat).
+pub const ALPHA_FLOOR_RAT: f32 = 150.0;
+/// Fade to [`ALPHA_FLOOR_RAT`] within this many pixels of the rat.
 pub const FADE_RAT_PX: f32 = 56.0;
 /// … and within this many pixels of a miniboss/boss body.
 pub const FADE_THREAT_PX: f32 = 48.0;
@@ -142,25 +149,34 @@ pub const FADE_THREAT_PX: f32 = 48.0;
 pub const FADE_RAMP_PX: f32 = 40.0;
 /// Sway is stepped at this rate (Hz), for the kinds that sway only.
 pub const SWAY_HZ: f32 = 3.0;
-/// How much of the view the layer may paint at full alpha, in percent.
-pub const COVERAGE_PCT: u32 = 22;
-/// Past this percentage the remaining items are skipped outright.
-pub const COVERAGE_SKIP_PCT: u32 = 30;
+/// How much of the view the layer may cover at full alpha, in percent. A frame
+/// whose items would cover more (estimated from their on-screen body rects) is
+/// drawn proportionally more transparent, down to [`COVERAGE_ALPHA_MIN`] of its
+/// alpha, so a huge item is seen through rather than cut off.
+pub const COVERAGE_PCT: u32 = 30;
+/// The hard writer cap: past this percentage of the view [`blend`] drops the
+/// write and the remaining items are skipped outright (a safety net; the alpha
+/// scaling above is what normally holds the layer back).
+pub const COVERAGE_SKIP_PCT: u32 = 60;
+/// The least the coverage scaling multiplies an item's alpha by.
+pub const COVERAGE_ALPHA_MIN: f32 = 0.5;
+/// The share of an item's body rect its silhouette is taken to fill.
+const COVERAGE_FILL: f32 = 0.7;
 /// The alpha multiplier for items drawn inside the coverage grace band.
 pub const COVERAGE_HALF: f32 = 0.5;
 /// The fixed silhouette darkening [`blend`] applies to every colour.
 pub const DARKEN: f32 = 0.72;
 /// How far [`shadow`] may darken a floor pixel at its strongest.
-pub const SHADOW_MAX: f32 = 0.55;
+pub const SHADOW_MAX: f32 = 1.0;
 /// How far a [`Attach::Drop`] item's cord/chain/trunk runs up the screen, so it
 /// always leaves the top of the view.
 pub const DROP_TAIL: i32 = 400;
 
 /// Inside this radius of the rat every body alpha is multiplied by
 /// [`CLEAR_DISC_MIN`] (the per-pixel guard, see [`blend`]).
-pub const CLEAR_DISC_IN_PX: f32 = 22.0;
+pub const CLEAR_DISC_IN_PX: f32 = 14.0;
 /// … ramping back to 1.0 at this radius.
-pub const CLEAR_DISC_OUT_PX: f32 = 40.0;
+pub const CLEAR_DISC_OUT_PX: f32 = 30.0;
 /// The alpha multiplier at the centre of the clear disc.
 pub const CLEAR_DISC_MIN: f32 = 0.25;
 
@@ -186,8 +202,11 @@ const BOSS_BODY_RADIUS: f32 = 20.0;
 const DEPTH_MIN: f32 = 1.8;
 const DEPTH_MAX: f32 = 3.0;
 /// The draw-size range for a placed item ([`ForeItem::scale`]).
-const SCALE_MIN: f32 = 3.0;
-const SCALE_MAX: f32 = 6.0;
+/// 2.0–3.4 (the contract's first 3.0–6.0 was sized on a 240 x 148 px preview;
+/// in a 120 x 84 px view a 50 px pipe is the whole picture and reads as
+/// nothing): a pipe is 17–29 px thick, a fifth to a third of the view's height.
+const SCALE_MIN: f32 = 2.0;
+const SCALE_MAX: f32 = 3.4;
 
 /// A room Span shorter than this (or longer than [`SPAN_MAX_PX`]) is not
 /// placed.
@@ -201,8 +220,8 @@ const SPAN_MAX_PX: f32 = 420.0;
 /// How far a Span's `len` bites into each wall.
 const SPAN_BITE_PX: f32 = 6.0;
 /// An Edge's reach bounds, from its wall face into the open.
-const EDGE_LEN_MIN_PX: f32 = 80.0;
-const EDGE_LEN_MAX_PX: f32 = 160.0;
+const EDGE_LEN_MIN_PX: f32 = 44.0;
+const EDGE_LEN_MAX_PX: f32 = 90.0;
 /// A Drop must hang over floor at least this many tiles from any wall.
 const DROP_CLEAR_TILES: i32 = 4;
 /// Corridors at least this long get cross-spans, one per
@@ -246,10 +265,12 @@ const SKY_MARGIN: f32 = 200.0;
 /// pans across the bed.
 const SKY_PINNED_DEPTH: f32 = 1.0;
 const SKY_CLOUD_DEPTH: f32 = 0.15;
-const SKY_WIRE_SCALE: f32 = 2.0;
-const SKY_POLE_SCALE: f32 = 3.5;
+const SKY_WIRE_SCALE: f32 = 1.5;
+const SKY_POLE_SCALE: f32 = 2.0;
 /// A cloud's body is a haze: never above this alpha, whatever the fades say.
 const CLOUD_ALPHA_MAX: u8 = 60;
+/// The alpha of a pinned sky mover (wires, pole, branch) before the threat fade.
+const SKY_ALPHA: f32 = 185.0;
 
 // ---- Attachment, side and kind (the art's contract) -----------------------
 
@@ -621,7 +642,9 @@ pub fn blend(pb: &mut PixelBuffer, x: i32, y: i32, rgb: Rgb, alpha: u8) {
     if a == 0 {
         return;
     }
-    if !take_budget() {
+    // A haze-level write (a cloud's body, an item faded right down) hides
+    // nothing, so it is not charged to the coverage budget.
+    if a > CLOUD_ALPHA_MAX && !take_budget() {
         return;
     }
     let i = yu * pb.w + xu;
@@ -772,6 +795,8 @@ impl ForeLayer {
         let centre = Vec2::new(size.0 * 0.5, size.1 * 0.5);
         let cam_centre = cam + centre;
         let rat_screen = rat - cam;
+        // The frame's estimated body coverage, in pixels (clouds are a haze).
+        let mut covered = 0.0f32;
         for (i, item) in self.planned.iter().enumerate() {
             let item = *item;
             // The art's own half-extent, already including `scale`, long axis
@@ -783,7 +808,20 @@ impl ForeLayer {
                 (ey.max(0.0), ex.max(0.0))
             };
             let depth = item.depth.clamp(0.2, 4.0);
-            let p = centre + (item.pos - cam_centre) * depth;
+            // Parallax, per attachment, so an attached item stays attached:
+            // a Span slides only ACROSS its long axis (along it the item rides
+            // the world 1:1 and its two ends stay in their walls), an Edge only
+            // along its wall (its root stays on the wall face), a Drop and the
+            // sky movers on both axes.
+            let (dx, dy) = match item.attach {
+                Attach::Span if item.horizontal => (1.0, depth),
+                Attach::Span => (depth, 1.0),
+                Attach::Edge(side) if side.is_horizontal() => (1.0, depth),
+                Attach::Edge(_) => (depth, 1.0),
+                Attach::Drop | Attach::Sky => (depth, depth),
+            };
+            let off = item.pos - cam_centre;
+            let p = centre + Vec2::new(off.x * dx, off.y * dy);
             // Cull: the art's box plus the sway reach, and a Drop's tail above.
             const SWAY_REACH: f32 = 6.0;
             let tail = if item.attach == Attach::Drop {
@@ -801,11 +839,28 @@ impl ForeLayer {
             // Fade: from the rat/threat to the item's on-screen BODY RECT (0
             // inside), so a huge pipe over the rat fades even though its anchor
             // is far away.
-            let mut alpha =
-                proximity_alpha(ALPHA_MAX as f32, box_dist(p, hx, hy, rat_screen), FADE_RAT_PX);
+            // The sky movers are pinned to the view, so the rat is always
+            // "under" them: they take a fixed alpha instead of the rat fade
+            // (they pass in a second or two, and the clear disc still opens
+            // the rat's own surroundings).
+            let mut alpha = if item.attach == Attach::Sky || item.kind == ForeKind::TreeBranch {
+                SKY_ALPHA
+            } else {
+                proximity_alpha(
+                    ALPHA_MAX as f32,
+                    box_dist(p, hx, hy, rat_screen),
+                    FADE_RAT_PX,
+                    ALPHA_FLOOR_RAT,
+                )
+            };
             for &(body, radius) in threats {
                 let d = (box_dist(p, hx, hy, body - cam) - radius.max(0.0)).max(0.0);
-                alpha = alpha.min(proximity_alpha(ALPHA_MAX as f32, d, FADE_THREAT_PX));
+                alpha = alpha.min(proximity_alpha(
+                    ALPHA_MAX as f32,
+                    d,
+                    FADE_THREAT_PX,
+                    ALPHA_FLOOR,
+                ));
             }
             if item.kind == ForeKind::Cloud {
                 // A cloud is a haze, never a silhouette.
@@ -821,6 +876,11 @@ impl ForeLayer {
                     0
                 }
             };
+            if item.kind != ForeKind::Cloud {
+                let w = (p.x + hx).min(size.0) - (p.x - hx).max(0.0);
+                let h = (p.y + hy).min(size.1) - (p.y - hy).max(0.0);
+                covered += w.max(0.0) * h.max(0.0) * COVERAGE_FILL;
+            }
             self.frame.push(Plan {
                 item: i,
                 screen: (p.x.round() as i32, p.y.round() as i32),
@@ -830,6 +890,17 @@ impl ForeLayer {
                 sway: sway_of(&item, elapsed),
                 toward_centre: (sign(centre.x - p.x), sign(centre.y - p.y)),
             });
+        }
+        // Too much of the view under the layer: see through all of it rather
+        // than cut an item off.
+        let cap = size.0 * size.1 * COVERAGE_PCT as f32 / 100.0;
+        if covered > cap {
+            let k = (cap / covered).max(COVERAGE_ALPHA_MIN);
+            for plan in self.frame.iter_mut() {
+                if self.planned[plan.item].kind != ForeKind::Cloud {
+                    plan.alpha = (plan.alpha as f32 * k).round() as u8;
+                }
+            }
         }
     }
 }
@@ -941,14 +1012,14 @@ fn coverage_alpha(alpha: u8, painted: u32, cap_full: u32, cap_skip: u32) -> Opti
 /// Alpha for an item whose nearest pixel is `d` px from the rat/a body:
 /// [`ALPHA_FLOOR`] inside `near`, ramping back to `base` over
 /// [`FADE_RAMP_PX`].
-fn proximity_alpha(base: f32, d: f32, near: f32) -> f32 {
+fn proximity_alpha(base: f32, d: f32, near: f32, floor: f32) -> f32 {
     if d <= near {
-        ALPHA_FLOOR.min(base)
+        floor.min(base)
     } else if d >= near + FADE_RAMP_PX {
         base
     } else {
         let t = (d - near) / FADE_RAMP_PX;
-        (ALPHA_FLOOR + (base - ALPHA_FLOOR) * t).min(base)
+        (floor + (base - floor) * t).min(base)
     }
 }
 
@@ -1397,8 +1468,14 @@ fn sky_items(level: &Level, cam: Vec2, size: (f32, f32), elapsed: f32, out: &mut
     }
 
     // ---- The wires: one Span across the whole view, pinned to the frame.
+    // The wires hang at a seed-chosen band and slide against the camera's
+    // cross-bed movement (1.8 px a camera px), wrapping every 1.7 view heights:
+    // walk across the bed and the line passes overhead and is gone, instead of
+    // sitting on the screen like a scratch on the lens.
     let band = 0.16 + hash01(seed, 0x11) * 0.26;
-    let wire_y = cam.y + vh * band;
+    let wrap = vh * 1.7;
+    let slide = vh * band - cam.y * 0.8;
+    let wire_y = cam.y + (slide - (slide / wrap).floor() * wrap) - vh * 0.35;
     out.push(ForeItem {
         kind: ForeKind::PowerLine,
         pos: Vec2::new(cam.x + vw * 0.5, wire_y),
@@ -1440,15 +1517,14 @@ fn sky_items(level: &Level, cam: Vec2, size: (f32, f32), elapsed: f32, out: &mut
         }
         let from_north = hash01(seed ^ 0x9E37_0000, k) < 0.5;
         let x = cam.x + vw + SKY_MARGIN - SKY_BRANCH_SPEED * (t - start);
-        let y = if from_north {
-            cam.y + SKY_MARGIN * 0.45
-        } else {
-            cam.y + vh - SKY_MARGIN * 0.45
-        };
+        // Rooted just outside the view's N or S edge, reaching 55–80 % of the
+        // way across it.
+        let y = if from_north { cam.y - 6.0 } else { cam.y + vh + 6.0 };
+        let reach = vh * (0.55 + 0.25 * hash01(seed ^ 0xB4A2_0000, k));
         out.push(ForeItem {
             kind: ForeKind::TreeBranch,
             pos: Vec2::new(x, y),
-            len: EDGE_LEN_MAX_PX,
+            len: reach,
             horizontal: false,
             attach: if from_north {
                 Attach::Edge(Side::N)
@@ -1456,7 +1532,7 @@ fn sky_items(level: &Level, cam: Vec2, size: (f32, f32), elapsed: f32, out: &mut
                 Attach::Edge(Side::S)
             },
             depth: SKY_PINNED_DEPTH,
-            scale: 3.6 + hash01(seed ^ 0x1EAF_0000, k) * 2.4,
+            scale: 3.0 + hash01(seed ^ 0x1EAF_0000, k) * 1.2,
             seed: hash_u32(seed ^ 0x1EAF_0000, k),
         });
         break;
@@ -1901,8 +1977,8 @@ mod tests {
         let b = plan_at(&mut layer, &mut w, Vec2::new(542.0, 362.0));
         assert_eq!(
             (a.screen.0 - b.screen.0, a.screen.1 - b.screen.1),
-            (5, 5),
-            "2 px of camera at depth 2.5 must be 5 px of item"
+            (2, 5),
+            "2 px of camera at depth 2.5 must be 5 px of item across a Span and 2 along it"
         );
         assert_eq!(
             (a.shadow.0 - b.shadow.0, a.shadow.1 - b.shadow.1),
@@ -1925,7 +2001,7 @@ mod tests {
             true,
             Attach::Span,
             2.0,
-            4.0,
+            1.0,
             7,
         );
         layer.force_items(vec![item]);
@@ -1955,7 +2031,7 @@ mod tests {
             &mut w,
             Vec2::new(anchor.x + ex * 0.5, anchor.y),
         );
-        assert_eq!(under, ALPHA_FLOOR as u8, "the body rect did not fade");
+        assert_eq!(under, ALPHA_FLOOR_RAT as u8, "the body rect did not fade");
         // Clear of the body: full alpha.
         let clear = alpha_with_rat(
             &mut layer,
@@ -2007,8 +2083,8 @@ mod tests {
         };
         let plain = paint(None, 40, 40);
         let inside = paint(Some((40, 40)), 40, 40);
-        let ramp = paint(Some((40, 40)), 40 + 31, 40);
-        let outside = paint(Some((40, 40)), 40 + 44, 40);
+        let ramp = paint(Some((40, 40)), 40 + 22, 40);
+        let outside = paint(Some((40, 40)), 40 + 34, 40);
         assert!(lum(inside) > lum(plain), "the disc did not cut the alpha");
         assert!(
             lum(ramp) > lum(plain) && lum(ramp) < lum(inside),

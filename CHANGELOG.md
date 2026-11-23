@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Foreground layer, second version.** The overhead things are few and big
+  now, and attached: pipes, ducts, rails and clotheslines run wall to wall,
+  hoods and arms reach in from a wall, lamps and hoists hang on cords that
+  leave the top of the view. The Flatbed gets roadside branches sweeping
+  past, power lines with passing poles, and cloud shadows. They thin out
+  around the rat and near a boss.
+
 - **Lighting effects.** Light pools are smooth instead of blocky, floors and
   walls take a little relief, wet and metal things catch the lamp, bodies
   throw soft shadows (one straight down, one from each nearby lamp), lamps

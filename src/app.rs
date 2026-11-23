@@ -8769,6 +8769,7 @@ mod tests {
                         "edge" => i.kind.attach_class() == ATTACH_EDGE,
                         "drop" => i.kind.attach_class() == ATTACH_DROP,
                         "room-span" => i.kind.attach_class() == ATTACH_SPAN && i.len >= 100.0,
+                        "corridor-span" => i.kind.attach_class() == ATTACH_SPAN && i.len < 100.0,
                         name => format!("{:?}", i.kind).to_ascii_lowercase() == name,
                     })
                     .copied()
