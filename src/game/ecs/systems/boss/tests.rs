@@ -1522,3 +1522,460 @@ fn measure_campaign_boss_dps() {
         }
     }
 }
+
+// ============================================================================
+// The control budget and the pursuit rule (batch 13)
+//
+// The owner's report: "with certain weapons, apex jaguar is never able to
+// attack". Two mechanisms did it, both diagnosed in `cat.rs`/`mod.rs`:
+//
+// * the cat's `Hurt` beat was re-tripped by any 55-damage tick, and a max-rank
+//   Spiked Tail (44 lash + 18 burst on one tick, every 0.85 s), one Tail Thrash
+//   sweep (52 at rank 5, three a second) and one Laser sweep (5 x 10 in a tick)
+//   all clear it — so every `SwipeWindup` (0.55 s) and every `Crouch` (0.95 s)
+//   was cancelled before it fired;
+// * the cat stalks at 24 px/s while the rat runs 58-114 px/s and lashes from
+//   80-120 px, so a rat holding 100 px was outside the pounce band (45..95) for
+//   the whole fight.
+//
+// These tests are the lock: every boss starts and fires attacks under every
+// weapon script, and the stagger a boss can be given never exceeds the budget.
+// ============================================================================
+
+use crate::game::nav::NavBudget;
+use crate::game::weapon::Weapon;
+
+/// The rat's character level in these fights (the level a campaign reaches at
+/// the boss): `Player::damage_mult` is 1.36 there.
+const RAT_LEVEL: u32 = 10;
+/// The rat's speed cap while kiting (a build with MoveSpeed stacks).
+const RAT_SPEED: f32 = 110.0;
+
+/// One weapon, replayed the way the weapon systems land it on a boss.
+///
+/// The real weapon systems need a loadout, an `ActiveFx` and a rat that presses
+/// a key; what they actually do to a boss is `Boss::take_damage` once per hit at
+/// the weapon's own table number, plus the Sonic Squeak's `slow_for` and the few
+/// pixels of `Boss::shove` the squeak and the thrash ask for. This replays that
+/// with the real tables, so the cadence in the test is the cadence in the game.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Script {
+    /// Sonic Squeak at rank 5, pressed on cooldown.
+    Squeak,
+    /// Tail Thrash at rank 5, on cooldown: three sweeps a third of a second
+    /// apart, then its charge.
+    Thrash,
+    /// Spiked Tail at rank 5, kited at 100 px: the lash plus the burst it lands
+    /// on the same tick.
+    Lash,
+    /// Laser Eyes at rank 5, kited at 70 px: one sweep's worth of pulses a tick.
+    Laser,
+    /// Tail Whip at rank 5 behind Counterweight x6, at hugging range.
+    Whip6,
+}
+
+impl Script {
+    fn all() -> [Script; 5] {
+        [
+            Script::Squeak,
+            Script::Thrash,
+            Script::Lash,
+            Script::Laser,
+            Script::Whip6,
+        ]
+    }
+
+    /// The radius the rat holds this weapon's range at (px from the boss).
+    fn ring(self) -> f32 {
+        match self {
+            Script::Squeak => 60.0,
+            Script::Thrash => 50.0,
+            // The lash reaches 120 px: this is the kite that beat the jaguar.
+            Script::Lash => 100.0,
+            // The beam reaches 54-86 px.
+            Script::Laser => 70.0,
+            // A whip hit needs the rat inside 42 px.
+            Script::Whip6 => 34.0,
+        }
+    }
+
+    /// Every hit this weapon lands in `secs`, as
+    /// `(time, damage, shove px, seconds of movement slow)`.
+    fn events(self, secs: f32) -> Vec<(f32, f32, f32, f32)> {
+        let kind = match self {
+            Script::Squeak => WeaponKind::SonicSqueak,
+            Script::Thrash => WeaponKind::TailThrash,
+            Script::Lash => WeaponKind::SpikedTail,
+            Script::Laser => WeaponKind::LaserEyes,
+            Script::Whip6 => WeaponKind::TailWhip,
+        };
+        let mut weapon = Weapon::new(kind);
+        weapon.level = kind.max_level();
+        let mult = 1.0 + 0.04 * (RAT_LEVEL.saturating_sub(1)) as f32;
+        let mut out = Vec::new();
+        match self {
+            Script::Squeak => {
+                // One cone a press: the damage, then the slow (applied by the
+                // caller for the first 0.8 s of each press).
+                let mut t = 0.0;
+                while t < secs {
+                    out.push((
+                        t,
+                        weapon.damage() * mult,
+                        0.0,
+                        crate::game::weapon::SQUEAK_BOSS_SLOW_SECS,
+                    ));
+                    t += weapon.cooldown();
+                }
+            }
+            Script::Thrash => {
+                // Three sweeps inside `THRASH_BURST`, then the charge time.
+                let sweep = crate::game::weapon::THRASH_BURST
+                    / crate::game::weapon::THRASH_SWEEPS as f32;
+                let mut burst = 0.5;
+                while burst < secs {
+                    for k in 0..crate::game::weapon::THRASH_SWEEPS {
+                        let t = burst + k as f32 * sweep;
+                        if t < secs {
+                            out.push((t, weapon.damage() * mult, 0.0, 0.0));
+                        }
+                    }
+                    burst += weapon.cooldown();
+                }
+            }
+            Script::Lash => {
+                // The lash and the burst it lands on the same tick, as
+                // `weapon_spiketail::land` books them.
+                let hit = weapon.damage() * (1.0 + crate::game::weapon::LASH_BURST_FRAC) * mult;
+                let mut t = 0.0;
+                while t < secs {
+                    out.push((t, hit, 0.0, 0.0));
+                    t += weapon.cooldown();
+                }
+            }
+            Script::Laser => {
+                let hit = weapon.laser_hit_damage() * weapon.laser_pulses() as f32 * mult;
+                let mut t = 0.0;
+                while t < secs {
+                    out.push((t, hit, 0.0, 0.0));
+                    t += weapon.cooldown();
+                }
+            }
+            Script::Whip6 => {
+                // Counterweight x6 is `Stats::shove_px` 12 px a whip hit.
+                let mut t = 0.0;
+                while t < secs {
+                    out.push((t, weapon.damage() * mult, 12.0, 0.0));
+                    t += weapon.cooldown();
+                }
+            }
+        }
+        out
+    }
+}
+
+/// The floor a kind is fought on (the controllers read `level.theme`).
+fn theme_for_boss(kind: BossKind) -> Theme {
+    match kind {
+        BossKind::Cat | BossKind::HorseshoeCrab => Theme::Sewer,
+        BossKind::Broom | BossKind::MegaRat => Theme::Kitchen,
+        BossKind::Mower | BossKind::Cobra => Theme::Lab,
+        BossKind::Mangle => Theme::Laundry,
+        BossKind::NightEdition => Theme::Printworks,
+        BossKind::Magpie | BossKind::Hawk => Theme::Trailer,
+    }
+}
+
+/// What the scripted fight measured.
+#[derive(Default, Clone, Copy, Debug)]
+struct Tally {
+    /// Attack beats entered (a committed state after a non-committed one).
+    started: u32,
+    /// Attack beats that fired — a hazard went active or a projectile flew.
+    fired: u32,
+    /// Seconds the boss spent in its own stagger pose.
+    controlled: f32,
+}
+
+/// One scripted fight: an open floor, one boss, and a rat that kites.
+struct ScriptedFight {
+    w: World,
+}
+
+impl ScriptedFight {
+    fn new(kind: BossKind, seed: u64) -> Self {
+        let mut w = World::new(theme_for_boss(kind), seed);
+        open_arena(&mut w);
+        w.flow = crate::game::nav::FlowField::new(&w.level.tiles);
+        // The rat cannot die: the point of the test is the boss's beats, and a
+        // rat death would end the fight early.
+        w.player.loadout.stats.max_hp = 1.0e6;
+        w.player.hp = 1.0e6;
+        w.player.level = RAT_LEVEL;
+        let room = Vec2::new(800.0, 800.0);
+        w.player.pos = room + Vec2::new(100.0, 0.0);
+        // A pool nothing in 30 s can empty, so the fight stays in phase 1.
+        spawn_boss_at(&mut w, kind, room, 1.0e6);
+        Self { w }
+    }
+
+    fn boss_pos(&mut self) -> Vec2 {
+        boss_of(&mut self.w).expect("the boss survives").pos
+    }
+
+    /// Move the rat one tick: orbit the boss and hold `ring` px from it, at (at
+    /// most) [`RAT_SPEED`]. A real kiter, not a teleport: the boss can close
+    /// when it is faster, and the rat can run back out when it is not.
+    fn kite(&mut self, ring: f32, bearing: f32) {
+        let boss = self.boss_pos();
+        let offset = self.w.player.pos - boss;
+        let want = if offset.len_sq() > 1e-6 {
+            offset.normalized() * ring
+        } else {
+            Vec2::new(ring, 0.0)
+        };
+        let tangent = Vec2::from_angle(bearing) * RAT_SPEED * 0.35;
+        let mut vel = tangent + (want - offset) * 4.0;
+        let speed = vel.len();
+        if speed > RAT_SPEED {
+            vel = vel * (RAT_SPEED / speed);
+        }
+        self.w.player.pos += vel * DT;
+        self.w.player.vel = vel;
+        self.w.player.hp = self.w.player.loadout.stats.max_hp;
+    }
+
+    /// Run `secs` of fight with `scripts` firing, and measure the boss's beats.
+    fn run(&mut self, secs: f32, scripts: &[Script]) -> Tally {
+        let mut events: Vec<(f32, f32, f32, f32)> = Vec::new();
+        for script in scripts {
+            events.extend(script.events(secs));
+        }
+        events.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let rings: Vec<f32> = scripts.iter().map(|s| s.ring()).collect();
+        let ring = rings.iter().copied().fold(0.0f32, f32::max);
+
+        let mut tally = Tally::default();
+        let mut cursor = 0usize;
+        let ticks = (secs / DT).round() as usize;
+        let mut prev_committed = false;
+        let mut beat_fired = false;
+        for i in 0..ticks {
+            let t = i as f32 * DT;
+            self.kite(ring, t * 0.4);
+            // The large-class flow field is the schedule's own refresh; in an
+            // open room it is only the fallback path, so a coarse cadence is
+            // plenty and keeps the test quick.
+            if i % 20 == 0 {
+                let goal = self.w.player.pos;
+                self.w.flow.update(&self.w.level.tiles, goal, NavBudget::FULL);
+            }
+            while cursor < events.len() && events[cursor].0 <= t {
+                let (_, dmg, shove, slow) = events[cursor];
+                let dir = self.boss_pos() - self.w.player.pos;
+                // The one path every weapon uses on a boss.
+                {
+                    let level = &self.w.level;
+                    let mut query = self.w.ecs.query::<&mut Boss>();
+                    if let Some(mut boss) = query.iter_mut(&mut self.w.ecs).next() {
+                        let amount = dmg * boss.damage_mult;
+                        boss.take_damage(amount);
+                        if slow > 0.0 {
+                            boss.slow_for(crate::game::weapon::SQUEAK_BOSS_SLOW, slow);
+                        }
+                        if shove > 0.0 {
+                            let _ = boss.shove(level, dir, shove);
+                        }
+                    }
+                }
+                cursor += 1;
+            }
+            update_boss(&mut self.w, DT);
+
+            let boss = boss_of(&mut self.w).expect("the boss survives 30 s");
+            let committed = boss.committed();
+            if boss.is_stagger_state() {
+                tally.controlled += DT;
+            }
+            let mut firing = boss.hazards.iter().any(|h| h.is_active());
+            if !firing {
+                let mut query = self.w.ecs.query::<&BossProjectile>();
+                firing = query.iter(&self.w.ecs).next().is_some();
+            }
+            if committed && !prev_committed {
+                tally.started += 1;
+                beat_fired = false;
+            }
+            if committed && firing {
+                beat_fired = true;
+            }
+            if !committed && prev_committed && beat_fired {
+                tally.fired += 1;
+            }
+            prev_committed = committed;
+        }
+        tally
+    }
+}
+
+/// The jaguar, under every weapon script, in a 30 s fight.
+#[test]
+fn the_jaguar_attacks_under_every_weapon_script() {
+    for (i, script) in Script::all().iter().enumerate() {
+        let mut fight = ScriptedFight::new(BossKind::Cat, 700 + i as u64);
+        let tally = fight.run(30.0, &[ *script ]);
+        assert!(
+            tally.started >= 3,
+            "the jaguar started only {} attacks under {script:?} in 30 s",
+            tally.started
+        );
+        assert!(
+            tally.fired >= 3,
+            "the jaguar completed only {} attacks under {script:?} in 30 s",
+            tally.fired
+        );
+        // The whole report in one number: a stun-locked cat is controlled for
+        // most of the fight.
+        assert!(
+            tally.controlled <= CONTROL_BUDGET_SECS * (30.0 / CONTROL_WINDOW_SECS + 1.0) + DT,
+            "a {script:?} build held the jaguar under control for {} s of 30",
+            tally.controlled
+        );
+    }
+}
+
+/// Three more kinds (a melee walker, a charger and the Lab's striker) under the
+/// same scripts: the budget is shared machinery, not a cat special case.
+#[test]
+fn other_bosses_attack_under_every_weapon_script() {
+    for (k, kind) in [BossKind::Broom, BossKind::Mower, BossKind::Cobra]
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        for (i, script) in Script::all().iter().enumerate() {
+            let mut fight = ScriptedFight::new(kind, 900 + (k * 16 + i) as u64);
+            let tally = fight.run(30.0, &[*script]);
+            assert!(
+                tally.started >= 3,
+                "{kind:?} started only {} attacks under {script:?} in 30 s",
+                tally.started
+            );
+            assert!(
+                tally.fired >= 3,
+                "{kind:?} completed only {} attacks under {script:?} in 30 s",
+                tally.fired
+            );
+            assert!(
+                tally.controlled <= CONTROL_BUDGET_SECS * (30.0 / CONTROL_WINDOW_SECS + 1.0) + DT,
+                "{kind:?} was held under control for {} s of 30 by {script:?}",
+                tally.controlled
+            );
+        }
+    }
+}
+
+/// **All ten kinds**, with the two weapons that were locking the cat firing
+/// together: a boss may be staggered, never taken out of the fight.
+#[test]
+fn every_boss_starts_and_fires_attacks_under_the_heaviest_build() {
+    for (i, kind) in BossKind::all().iter().copied().enumerate() {
+        let mut fight = ScriptedFight::new(kind, 1300 + i as u64);
+        let tally = fight.run(30.0, &[Script::Lash, Script::Thrash, Script::Laser]);
+        assert!(
+            tally.started >= 3,
+            "{kind:?} started only {} attacks under the heaviest build in 30 s",
+            tally.started
+        );
+        assert!(
+            tally.fired >= 3,
+            "{kind:?} completed only {} attacks under the heaviest build in 30 s",
+            tally.fired
+        );
+        assert!(
+            tally.controlled <= CONTROL_BUDGET_SECS * (30.0 / CONTROL_WINDOW_SECS + 1.0) + DT,
+            "{kind:?} was held under control for {} s of 30",
+            tally.controlled
+        );
+    }
+}
+
+/// The budget itself, on the API every controller uses.
+#[test]
+fn grant_control_caps_the_window_and_refuses_committed_beats() {
+    let arena = TileRect::new(0, 0, 25, 19);
+    let level = crate::game::level::Level::empty(Theme::Sewer);
+    let mut boss = Boss::new(BossKind::Cat, Vec2::new(90.0, 74.0), 900.0, arena, Vec2::ZERO, false);
+
+    // Neutral: the art's `HURT_DURATION` (0.45 s) is clipped to the budget.
+    let granted = boss.grant_control(art_boss_cat::HURT_DURATION);
+    assert!(
+        (granted - CONTROL_BUDGET_SECS).abs() < 1e-5,
+        "a fresh window pays the budget ({granted})"
+    );
+    // ...and the same window pays nothing more.
+    assert_eq!(boss.grant_control(0.45), 0.0, "the window is spent");
+
+    // A committed beat is never granted, even with a fresh window.
+    boss.control_window = 0.0;
+    boss.control_used = 0.0;
+    boss.set_state(
+        BossState::Cat(BossCatState::SwipeWindup),
+        art_boss_cat::SWIPE_WINDUP_P1,
+    );
+    assert!(boss.committed(), "a wind-up is a committed beat");
+    assert_eq!(boss.grant_control(0.45), 0.0, "a wind-up is never staggered");
+    assert_eq!(
+        boss.shove(&level, Vec2::new(1.0, 0.0), 40.0),
+        0.0,
+        "a wind-up is never shoved"
+    );
+
+    // A neutral boss takes at most `SHOVE_PER_HIT_PX` a hit and
+    // `SHOVE_PER_SEC_PX` a second.
+    boss.set_state(
+        BossState::Cat(BossCatState::Stalk),
+        BossKind::Cat.initial_duration(),
+    );
+    assert!(!boss.committed(), "Stalk is the neutral beat");
+    let first = boss.shove(&level, Vec2::new(1.0, 0.0), 40.0);
+    assert!((first - SHOVE_PER_HIT_PX).abs() < 1e-5, "one hit is 4 px ({first})");
+    let mut moved = first;
+    for _ in 0..8 {
+        moved += boss.shove(&level, Vec2::new(1.0, 0.0), 40.0);
+    }
+    assert!(
+        moved <= SHOVE_PER_SEC_PX + 1e-5,
+        "a second of shoves is at most 12 px ({moved})"
+    );
+
+    // The stagger pose cannot be re-entered or extended.
+    boss.control_window = 0.0;
+    boss.control_used = 0.0;
+    boss.set_state(BossState::Cat(BossCatState::Hurt), 0.2);
+    assert_eq!(
+        boss.grant_control(0.3),
+        0.0,
+        "a stagger is not re-tripped while it plays"
+    );
+}
+
+/// The pursuit rule: a rat that holds whip range is closed down, so the jaguar
+/// gets its band back instead of stalking forever at 24 px/s.
+#[test]
+fn a_kited_jaguar_closes_the_gap_instead_of_idling() {
+    let mut fight = ScriptedFight::new(BossKind::Cat, 4242);
+    // No weapons at all: this is the pure pursue rule.
+    // 150 px is outside the pounce band (45..95) and outside `engage_range`.
+    let start = fight.boss_pos().dist(fight.w.player.pos);
+    let mut closest = start;
+    for i in 0..(12.0 / DT) as usize {
+        fight.kite(150.0, i as f32 * DT * 0.3);
+        update_boss(&mut fight.w, DT);
+        closest = closest.min(fight.boss_pos().dist(fight.w.player.pos));
+    }
+    assert!(
+        closest < start - 30.0,
+        "the jaguar never closed (start {start} px, closest {closest})"
+    );
+}

@@ -1159,6 +1159,14 @@ fn thrash_sweep(
         if !boss.take_damage(amount) {
             continue;
         }
+        // A sweep shoves a boss the same few pixels a squeak does: capped by
+        // `Boss::shove` (4 px a hit, 12 px a second) and never inside a
+        // committed beat.
+        let _ = boss.shove(
+            &level,
+            boss.pos - ppos,
+            crate::game::ecs::systems::boss::SHOVE_PER_HIT_PX,
+        );
         ledger.add_boss(kind, amount);
         let killed = boss.hp <= 0.0;
         vfx::emit_thrash_hit(particles, &mut rng.0, boss.pos, boss.pos - ppos, killed);
@@ -1289,6 +1297,15 @@ fn squeak_cone(
             continue;
         }
         boss.slow_for(SQUEAK_BOSS_SLOW, SQUEAK_BOSS_SLOW_SECS);
+        // The cone's native outward shove, on a boss: `Boss::shove` caps it at
+        // 4 px a hit and 12 px a second and refuses it outright inside a
+        // committed beat (batch 13 — a shove mid-wind-up would slide the pose
+        // out from under its own tell).
+        let _ = boss.shove(
+            &level,
+            boss.pos - origin,
+            crate::game::ecs::systems::boss::SHOVE_PER_HIT_PX,
+        );
         ledger.add_boss(kind, amount);
         let killed = boss.hp <= 0.0;
         let (boss_pos, boss_radius, boss_id) = (boss.pos, boss.kind.body_radius(), boss.id);

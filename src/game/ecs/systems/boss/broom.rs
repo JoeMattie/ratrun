@@ -39,8 +39,14 @@
 //! * **The hurt hop and the walk-off matter more than another attack.** A heavy
 //!   burst on one foot (`STAGGER_HP_FRAC`) trips the art's comic
 //!   `Hurt { left_foot_hit }` reprieve — the foot nearest the rat is the one it
-//!   stubbed — and cancels any wind-up it interrupts. The indignant retreat is
-//!   the art's `Defeat` pose, driven by the shared death state.
+//!   stubbed. Batch 13 put the hop on the shared control budget
+//!   (`Boss::grant_control`), so it is 1.20 s when the budget is full and at
+//!   most `CONTROL_BUDGET_SECS` (0.30 s) inside one 4 s window, and it never
+//!   lands inside a committed beat: a rake cancelled on its first frame can
+//!   never fire, which is exactly what a high-burst build used to do to every
+//!   telegraph. `poise_broken` counts from the beat's own anchor, so a refused
+//!   hop stays owed. The indignant retreat is the art's `Defeat` pose, driven
+//!   by the shared death state.
 //! * **The planted foot is the target.** [`Boss::hit_shapes`] takes both feet
 //!   straight from `foot_hitboxes`, so the lifted foot is `grounded: false` and
 //!   ground weapons (bullets, acid pools, Tail Whip) skip it automatically.
@@ -166,7 +172,9 @@ const DUSTPAN_MAX_RANGE: f32 = 56.0;
 /// The pan is unlocked only after the rat has seen this many rakes.
 const DUSTPAN_RAKES_REQUIRED: f32 = 2.0;
 
-/// `Hurt` hop (art: `1.20 s`).
+/// `Hurt` hop (art: `1.20 s`). This is what the hop *asks* the shared control
+/// budget for (`Boss::grant_control`); under sustained fire it runs for the
+/// granted remainder, which is at most `CONTROL_BUDGET_SECS` a window.
 const HURT: f32 = 1.20;
 /// A burst of this fraction of max hp **in one beat** trips the art's heavy
 /// stagger.
@@ -279,15 +287,26 @@ impl BossController for BroomController {
         // Heavy burst on a foot → the comic single-foot reprieve. Any wind-up
         // it interrupts is cancelled (`hazards.clear`), so a telegraph never
         // fires from a pose the rat can no longer see.
+        //
+        // Batch 13: the hop is *control*, so the shared budget pays for it
+        // (`Boss::grant_control`) — the art's 1.20 s is what we ask for, the
+        // granted remainder (at most `CONTROL_BUDGET_SECS` per 4 s) is what the
+        // hop runs — and it may never land inside a committed beat: a rake that
+        // is cancelled on its first frame can never fire, and a build with
+        // enough burst dps was cancelling every tell. `poise_broken` is measured
+        // from the beat's own anchor, so a refused hop leaves the burst owed. 
         // ------------------------------------------------------------------
-        if stagger_ready && poise_broken(boss) && !busy(boss) {
-            let feet = art_boss_broom::foot_hitboxes(&boss.broom_view());
-            let left_foot_hit =
-                ctx.player_pos.dist_sq(feet[0].pos) <= ctx.player_pos.dist_sq(feet[1].pos);
-            boss.hazards.clear();
-            boss.scratch[S_STAGGER_CD] = STAGGER_COOLDOWN;
-            enter(boss, BroomBossState::Hurt { left_foot_hit }, HURT);
-            return;
+        if stagger_ready && poise_broken(boss) {
+            let granted = boss.grant_control(HURT);
+            if granted > 0.0 {
+                let feet = art_boss_broom::foot_hitboxes(&boss.broom_view());
+                let left_foot_hit =
+                    ctx.player_pos.dist_sq(feet[0].pos) <= ctx.player_pos.dist_sq(feet[1].pos);
+                boss.hazards.clear();
+                boss.scratch[S_STAGGER_CD] = STAGGER_COOLDOWN;
+                enter(boss, BroomBossState::Hurt { left_foot_hit }, granted);
+                return;
+            }
         }
 
         match boss.state {
@@ -1593,7 +1612,9 @@ mod tests {
     // ---- hurt ---------------------------------------------------------------
 
     #[test]
-    fn a_heavy_burst_trips_the_hurt_hop_and_cancels_the_wind_up() {
+    fn a_heavy_burst_trips_the_hurt_hop_in_the_idle_beat_only() {
+        // Batch 13: the hop is control on the shared budget, and a committed
+        // beat is never cancelled. Both halves are pinned here.
         let mut rig = Rig::new(59);
         // With `facing = (1, 0)` the left slipper sits on `-perp`, i.e. up-screen.
         rig.set_player(CENTER + Vec2::new(25.0, -12.0));
@@ -1603,30 +1624,45 @@ mod tests {
         });
         rig.tick();
         assert!(!rig.boss().hazards.is_empty(), "the rake queued its telegraph");
-        // 18 % of max hp in one burst, on the rat's side of the stance.
+        // 1.5 % of max hp in one burst — the art's heavy stagger — on the rat's
+        // side of the stance. It must NOT cancel the rake.
         rig.edit(|b| {
             b.hp -= STAGGER_HP_FRAC * b.max_hp + 1.0;
         });
         rig.tick();
-        let boss = rig.boss();
-        assert_eq!(
-            boss.state,
-            BossState::Broom(BroomBossState::Hurt {
-                left_foot_hit: true
-            }),
-            "the rat is on the left slipper's side"
+        assert!(
+            matches!(rig.state(), BroomBossState::BroomSweep { .. }),
+            "a heavy burst cancelled a committed rake (the bosslock bug)"
         );
         assert!(
-            boss.hazards.is_empty(),
-            "an interrupted rake must never fire untracked"
+            !rig.boss().hazards.is_empty(),
+            "the rake's telegraph is still owed"
+        );
+
+        // From the neutral beat the hop does fire, for what the budget pays.
+        rig.edit(|b| {
+            b.hp -= STAGGER_HP_FRAC * b.max_hp + 1.0;
+            enter(b, BroomBossState::Idle, IDLE_P1);
+        });
+        rig.tick();
+        let boss = rig.boss();
+        assert!(
+            matches!(boss.state, BroomBossState::Hurt { left_foot_hit: true }),
+            "the rat is on the left slipper's side ({:?})",
+            boss.state
         );
         assert!(
             boss.scratch[S_STAGGER_CD] <= STAGGER_COOLDOWN + 1e-3,
             "the stagger cooldown restarts"
         );
-        // The hop runs its full 1.20 s and the fight resumes.
+        // The art's 1.20 s is clipped to the control budget.
+        let hop = boss.duration;
+        assert!(
+            (hop - CONTROL_BUDGET_SECS).abs() <= DT + 1e-4,
+            "the hop runs for the granted budget ({hop})"
+        );
         let ticks = rig.run_until(200, |r| !matches!(r.state(), BroomBossState::Hurt { .. }));
-        assert!((ticks as f32 * DT - HURT).abs() <= 2.0 * DT + 1e-4);
+        assert!((ticks as f32 * DT - hop).abs() <= 2.0 * DT + 1e-4);
         // A second burst inside the cooldown does not re-trip it.
         rig.edit(|b| b.hp -= STAGGER_HP_FRAC * b.max_hp + 1.0);
         rig.tick();
