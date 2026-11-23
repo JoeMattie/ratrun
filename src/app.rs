@@ -8737,29 +8737,115 @@ mod tests {
         // `RATRUN_DUMP_FORE=n` walks the capture to the n-th nearest foreground
         // item (the layer keeps clear of the start room, where most captures
         // stand): the rat is put 50 px below it and the camera on the item.
+        // `RATRUN_DUMP_FORE_KIND=span|edge|drop|<KindName>` narrows the list,
+        // `RATRUN_DUMP_FORE_RAT=dx,dy` moves the rat relative to the anchor
+        // (`0,0` stands it directly under the item) and
+        // `RATRUN_DUMP_FORE_HORDE=n` rings the rat with fodder.
         if let Some(n) = std::env::var("RATRUN_DUMP_FORE").ok().and_then(|v| v.parse::<usize>().ok()) {
+            use crate::render::foreground::{ATTACH_DROP, ATTACH_EDGE, ATTACH_SPAN};
+            let want = std::env::var("RATRUN_DUMP_FORE_KIND").unwrap_or_default().to_ascii_lowercase();
+            let rat_off = std::env::var("RATRUN_DUMP_FORE_RAT")
+                .ok()
+                .and_then(|v| {
+                    let (a, b) = v.split_once(',')?;
+                    Some(Vec2::new(a.trim().parse::<f32>().ok()?, b.trim().parse::<f32>().ok()?))
+                })
+                .unwrap_or(Vec2::new(0.0, 50.0));
+            let horde = std::env::var("RATRUN_DUMP_FORE_HORDE")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
             if let Some(w) = hh.app.world.as_mut() {
                 let level = &w.level;
                 w.foreground_layer.sync(level);
                 let p = w.player.pos;
-                let mut items: Vec<Vec2> = w.foreground_layer.items().iter().map(|i| i.pos).collect();
-                items.sort_by(|a, b| a.dist(p).partial_cmp(&b.dist(p)).unwrap());
-                if let Some(at) = items.get(n).copied() {
+                let mut items: Vec<_> = w
+                    .foreground_layer
+                    .items()
+                    .iter()
+                    .filter(|i| match want.as_str() {
+                        "" => true,
+                        "span" => i.kind.attach_class() == ATTACH_SPAN,
+                        "edge" => i.kind.attach_class() == ATTACH_EDGE,
+                        "drop" => i.kind.attach_class() == ATTACH_DROP,
+                        "room-span" => i.kind.attach_class() == ATTACH_SPAN && i.len >= 100.0,
+                        name => format!("{:?}", i.kind).to_ascii_lowercase() == name,
+                    })
+                    .copied()
+                    .collect();
+                items.sort_by(|a, b| a.pos.dist(p).partial_cmp(&b.pos.dist(p)).unwrap());
+                if let Some(item) = items.get(n).copied() {
+                    let at = item.pos;
+                    eprintln!("dump fore: {item:?}");
                     w.clear_enemies();
                     w.player.pos = w
                         .level
                         .tiles
                         .nearest_open_center(
-                            at + Vec2::new(0.0, 50.0),
+                            at + rat_off,
                             crate::game::collision::SizeClass::Small,
                             16,
                         )
                         .unwrap_or(at);
+                    let rat = w.player.pos;
+                    for k in 0..horde {
+                        let ang = k as f32 / horde.max(1) as f32 * std::f32::consts::TAU;
+                        let q = rat + Vec2::new(ang.cos(), ang.sin()) * (22.0 + (k % 3) as f32 * 9.0);
+                        if w.level.tiles.get_at(q).is_open() {
+                            w.spawn_enemy(crate::game::enemy::EnemyKind::Skitterer, q, 8.0);
+                        }
+                    }
                     w.cam_focus = Some(at);
                     hh.app.picture_dirty = true;
                     hh.app.console_paused = true;
                     hh.frame(&[]);
+                } else {
+                    eprintln!("dump fore: no item matches {want:?} #{n}");
                 }
+            }
+        }
+        // `RATRUN_DUMP_SKY=branch|pole|cloud` (the Flatbed) winds the clock on
+        // to the next moment that mover is mid-view; `cloud` also puts the
+        // camera on the cloud's floor shadow.
+        if let Ok(kind) = std::env::var("RATRUN_DUMP_SKY") {
+            use crate::render::foreground::{self, ForeKind};
+            if let Some(w) = hh.app.world.as_mut() {
+                let size = (w.render_viewport.x, w.render_viewport.y);
+                let mut t = w.elapsed;
+                for _ in 0..(40 * 30) {
+                    t += 1.0 / 30.0;
+                    let cam = w.cam;
+                    let sky = foreground::sky_probe(&w.level, cam, size, t);
+                    let hit = sky.iter().find(|i| match kind.as_str() {
+                        "branch" => {
+                            i.kind == ForeKind::TreeBranch
+                                && (i.pos.x - cam.x - size.0 * 0.5).abs() < 12.0
+                        }
+                        "pole" => {
+                            i.kind == ForeKind::PowerLine
+                                && !i.horizontal
+                                && (i.pos.x - cam.x - size.0 * 0.5).abs() < 14.0
+                        }
+                        _ => i.kind == ForeKind::Cloud,
+                    });
+                    if let Some(i) = hit {
+                        eprintln!("dump sky: t={t:.2} {i:?}");
+                        if kind == "cloud" {
+                            let at = Vec2::new(i.pos.x, w.player.pos.y);
+                            w.player.pos = w
+                                .level
+                                .tiles
+                                .nearest_open_center(at, crate::game::collision::SizeClass::Small, 40)
+                                .unwrap_or(w.player.pos);
+                        }
+                        break;
+                    }
+                }
+                w.elapsed = t;
+                w.clear_enemies();
+                hh.app.picture_dirty = true;
+                hh.app.console_paused = true;
+                hh.frame(&[]);
             }
         }
         // `RATRUN_DUMP_SCONCE=n` stands the rat 34 px in front of the n-th
@@ -8828,6 +8914,9 @@ mod tests {
                 hh.frame(&[]);
             }
         }
+        // `RATRUN_DUMP_NAME` names the output files (several captures of one
+        // target in one directory).
+        let target = std::env::var("RATRUN_DUMP_NAME").unwrap_or(target);
         let buf = hh.terminal.backend().buffer().clone();
         if let Some(dir) = std::env::var_os("RATRUN_DUMP_DIR") {
             use std::fmt::Write;

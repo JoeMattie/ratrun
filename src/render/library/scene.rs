@@ -1354,6 +1354,10 @@ fn sandbox(level: Level) -> World {
     // very thing the card is about. Every plate is flat-lit, and the hostile
     // layer (tells, footprints) stays self-lit above it as always.
     world.flat_lit = true;
+    // And nothing hangs between the camera and the subject: the foreground
+    // layer's big overhead silhouettes (and the Flatbed's sky movers, which
+    // need no placement) would cross the plate and the practice dummy.
+    world.foreground = false;
     // `god` is what makes "the card rat never dies" a property of the game
     // rather than a hope: nothing writes `player.hp` directly.
     world.player.god = true;

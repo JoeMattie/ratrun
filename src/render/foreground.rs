@@ -1463,6 +1463,15 @@ fn sky_items(level: &Level, cam: Vec2, size: (f32, f32), elapsed: f32, out: &mut
     }
 }
 
+/// The sky movers at `elapsed` for a view at `cam` (captures: finding the
+/// moment a branch or a pole is mid-view).
+#[cfg(test)]
+pub(crate) fn sky_probe(level: &Level, cam: Vec2, size: (f32, f32), elapsed: f32) -> Vec<ForeItem> {
+    let mut out = Vec::new();
+    sky_items(level, cam, size, elapsed, &mut out);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
