@@ -1119,6 +1119,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         read_only: true,
         handler: cmd_fx,
     },
+    CommandSpec {
+        name: "glyphfx",
+        aliases: &[],
+        usage: "glyphfx [on|off]",
+        summary: "Toggle the round-glyph particles (a render-only A/B).",
+        args: &[ArgKind::OnOff],
+        read_only: true,
+        handler: cmd_glyphfx,
+    },
 ];
 
 /// Find a command by name or alias.
@@ -2308,6 +2317,19 @@ fn cmd_fx(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+/// `glyphfx` is the round-glyph particle layer (`render::glyphfx`): motes, hit
+/// sparks and rising bubbles drawn into the frame's cells. Render-only, so it
+/// never flags the run — and it does not even dirty the cached picture.
+fn cmd_glyphfx(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
+    let on = parse_on_off(args.first().copied(), app.glyphfx_enabled())?;
+    app.set_glyphfx(on);
+    app.console_line(
+        format!("glyphfx {}", if on { "on" } else { "off" }),
+        LineKind::Success,
+    );
+    Ok(())
+}
+
 fn cmd_lights(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
     use crate::render::lighting::LightingMode;
     let raw = args.first().map(|s| s.to_ascii_lowercase());
@@ -2879,6 +2901,22 @@ mod tests {
         run_command(&mut app, "foreground").expect("foreground steps");
         assert!(!app.foreground_enabled(), "no argument flips it");
         assert!(scrollback(&app).contains("foreground off"));
+    }
+
+    /// `glyphfx` is the round-glyph particle layer: render-only, so it must be
+    /// usable mid-run without branding the run CONSOLE USED.
+    #[test]
+    fn the_glyphfx_command_a_bs_the_particles_without_flagging() {
+        let mut app = fresh_app();
+        assert!(app.glyphfx_enabled(), "on by default");
+        run_command(&mut app, "glyphfx off").expect("glyphfx off");
+        assert!(!app.glyphfx_enabled());
+        assert!(!app.console_cheat, "a render-only toggle must not flag the run");
+        run_command(&mut app, "glyphfx on").expect("glyphfx on");
+        assert!(app.glyphfx_enabled());
+        run_command(&mut app, "glyphfx").expect("glyphfx steps");
+        assert!(!app.glyphfx_enabled(), "no argument flips it");
+        assert!(scrollback(&app).contains("glyphfx off"));
     }
 
     #[test]
