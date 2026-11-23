@@ -257,6 +257,10 @@ const MAX_CAST_PX: i64 = 60_000;
 /// Darkness steps (flat steps keep the terminal's bytes down).
 const DARK_STEP_MASK: i32 = !3;
 
+/// A per-frame light with less reach than this (world px) casts no body
+/// shadow: every halo (`Falloff::Small`, at most 52 x 1.7 = 88 px) is under it.
+const MOVING_CAST_EXTENT: f32 = 90.0;
+
 const RAT_RADIUS: f32 = 4.5;
 const RAT_HEIGHT: f32 = 8.0;
 const FLYER_LIFT: f32 = 10.0;
@@ -435,6 +439,12 @@ fn strongest(
     for (i, l) in lights.iter().enumerate() {
         if l.tag == LightTag::Sun {
             continue; // the sun's body shadows are `Grid::sun`'s
+        }
+        // Lamps cast body shadows; a projectile's or a pickup's halo does not
+        // (a cheese wedge at the rat's feet threw a dark, twitching wedge
+        // behind it). A big moving light (a blast, a boss glow) still does.
+        if matches!(l.tag, LightTag::Moving { .. }) && l.extent < MOVING_CAST_EXTENT {
+            continue;
         }
         let d = l.pos.dist(b.pos);
         // A light inside the body is its own (the rat's aura): no shadow.

@@ -1275,6 +1275,7 @@ impl Grid {
     ) {
         let (mode, elapsed, theme) = (pass.mode, pass.elapsed, pass.theme);
         let radius = light.extent();
+        let halo = light.falloff == Falloff::Small && matches!(tag, LightTag::Moving { .. });
         let centre = light.pos - self.start;
         let spacing = self.stride as f32;
         let lo = |p: f32| ((p - radius) / spacing).ceil().max(0.0) as usize;
@@ -1378,7 +1379,11 @@ impl Grid {
                 }
                 touched += 1;
                 self.samples[i].light(light, amount, visibility, ceiling);
-                if fx_on && matches!(light.blend, Blend::Add) {
+                // A halo (a gem, a spore orb, a cheese wedge, a spark) lights the
+                // floor but is not a light source for relief, sheen and rim: as
+                // a sample's dominant light it drew glinting grout lines round
+                // every pickup and projectile on the floor.
+                if fx_on && matches!(light.blend, Blend::Add) && !halo {
                     let shadowed = (1.0 - visibility) * light.shadow_color.opacity;
                     fx::note_light(
                         &mut self.info[i],

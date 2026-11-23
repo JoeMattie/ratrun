@@ -55,7 +55,15 @@ impl LightMap {
         } else {
             66.0
         };
-        let rat_flicker = 1.0 + 0.03 * (elapsed * 4.3).sin();
+        // With the effects on the pool is a smooth gradient, and a continuous
+        // 3 % breath repainted all of it every frame: hold it in 4 Hz steps
+        // (as the sconces do). Effects off keeps the batch-12 breath exactly.
+        let breath_t = if scene.fx {
+            (elapsed * 4.0).floor() * 0.25
+        } else {
+            elapsed
+        };
+        let rat_flicker = 1.0 + 0.03 * (breath_t * 4.3).sin();
         self.lights.push(PointLight {
             x: px,
             y: py,
