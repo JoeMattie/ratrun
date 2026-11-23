@@ -1868,15 +1868,16 @@ mod tests {
     }
 
     #[test]
-    fn splices_carry_through_the_keep_three_screen() {
+    fn splices_are_left_behind_at_the_keep_three_screen() {
         use crate::game::campaign::{keepables, next_loadout};
         let mut lo = Loadout::starting();
         lo.apply(&Upgrade::NewWeapon(WeaponKind::CheeseSpray));
+        let plain_damage = lo.stats.damage_mult;
+        let plain_hp = lo.stats.max_hp;
         lo.splices = vec![SpliceKind::GlassIncisors, SpliceKind::BoilerHeart];
         lo.rebuild_stats();
-        let purchased_damage = lo.stats.damage_mult;
-        // Keep only one weapon: the splices stay anyway (the racks do not own
-        // them).
+        // Whatever is kept, the splices shed with the floor (the racks do not
+        // own them, and since the reset rule nothing carries them).
         let keep = keepables(&lo);
         let chosen: Vec<_> = keep
             .iter()
@@ -1884,12 +1885,12 @@ mod tests {
             .filter(|k| k.title().contains("Gnaw"))
             .collect();
         let carried = next_loadout(&lo, &chosen).expect("a valid keep");
-        assert_eq!(carried.splices, lo.splices);
+        assert!(carried.splices.is_empty(), "a splice lasts one sector");
         assert!(
-            (carried.stats.damage_mult - purchased_damage).abs() < 1e-5,
-            "the carried loadout has the same splice multipliers"
+            (carried.stats.damage_mult - plain_damage).abs() < 1e-5,
+            "the carried loadout has no splice multiplier left"
         );
-        assert_eq!(carried.stats.max_hp, lo.stats.max_hp);
+        assert_eq!(carried.stats.max_hp, plain_hp);
         // And a run that owned none carries none (no behaviour change).
         let plain = Loadout::starting();
         let carried = next_loadout(&plain, &keepables(&plain)[..]).expect("keep");

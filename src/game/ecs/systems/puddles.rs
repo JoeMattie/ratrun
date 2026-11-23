@@ -95,6 +95,7 @@ pub fn on_the_floor(theme: Theme, kind: EnemyKind) -> bool {
     !matches!(kind.archetype(), EnemyKind::MurderHornet)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn puddle_steps_system(
     input: Res<TickInput>,
     level: Res<Level>,
@@ -103,7 +104,7 @@ pub fn puddle_steps_system(
     mut sfx: ResMut<SfxQueue>,
     mut steps: ResMut<PuddleSteps>,
     enemies: Query<(&SpawnId, &Enemy)>,
-    mut order: Local<Vec<(u32, Vec2)>>,
+    mut order: Local<Vec<(u64, Vec2)>>,
 ) {
     let dt = input.dt.max(0.0);
 
@@ -233,6 +234,7 @@ mod tests {
     use crate::game::collision::{TileKind, TileMap};
     use crate::game::level::Theme;
     use crate::game::world::World;
+    use rand::Rng;
 
     const DT: f32 = 1.0 / 60.0;
 
@@ -316,7 +318,22 @@ mod tests {
     #[test]
     fn a_step_splash_every_eleven_pixels_of_wet_travel() {
         let (mut w, start) = wet_world();
-        let dir = Vec2::new(1.0, 0.0);
+        // Walk the way the water runs furthest: the largest puddle may sit
+        // against a wall on one side (only floor cells are wet).
+        let run = |dir: Vec2| {
+            (1..200)
+                .take_while(|&i| w.level.wet_at(start + dir * i as f32))
+                .count()
+        };
+        let dir = [
+            Vec2::new(1.0, 0.0),
+            Vec2::new(-1.0, 0.0),
+            Vec2::new(0.0, 1.0),
+            Vec2::new(0.0, -1.0),
+        ]
+        .into_iter()
+        .max_by_key(|&d| run(d))
+        .unwrap();
         let mut last = start;
         let mut total_wet = 0.0;
         let mut small = 0;
@@ -331,6 +348,8 @@ mod tests {
             let (s, b) = splashes(&w.sfx);
             small += s;
             big += b;
+            // The facade queue is drained by the App, not by the tick.
+            w.sfx.clear();
             if !w.level.wet_at(last) {
                 break;
             }
@@ -356,7 +375,8 @@ mod tests {
     #[test]
     fn entering_water_splashes_at_once_and_dry_floor_is_silent() {
         let (mut w, wet) = wet_world();
-        teleport(&mut w, dry_spot(&w, wet));
+        let dry = dry_spot(&w, wet);
+        teleport(&mut w, dry);
         // Standing on dry floor: silent for a second.
         assert_eq!(splashes(&run(&mut w, 60, Vec2::ZERO, false)), (0, 0));
         // Walking about on dry floor: still silent, and it really walks.
@@ -403,7 +423,8 @@ mod tests {
     #[test]
     fn a_dash_on_dry_floor_is_silent() {
         let (mut w, wet) = wet_world();
-        teleport(&mut w, dry_spot(&w, wet));
+        let dry = dry_spot(&w, wet);
+        teleport(&mut w, dry);
         assert_eq!(
             splashes(&run(&mut w, 5, Vec2::new(1.0, 0.0), true)),
             (0, 0),
@@ -443,7 +464,7 @@ mod tests {
         // The slots are `SpawnId`-ordered, so the six that ripple are the first
         // six of the eight.
         let slots = w.ecs.resource::<PuddleSteps>().enemy_slots;
-        let ids: Vec<u32> = slots.iter().map(|s| s.id).collect();
+        let ids: Vec<u64> = slots.iter().map(|s| s.id).collect();
         let mut sorted = ids.clone();
         sorted.sort_unstable();
         assert_eq!(ids, sorted, "the enemy slots are not in SpawnId order");
@@ -471,8 +492,10 @@ mod tests {
         let (mut a, _) = wet_world();
         let (mut b, _) = wet_world();
         b.level.puddles.clear();
-        teleport(&mut b, b.level.start);
-        teleport(&mut a, a.level.start);
+        let start = b.level.start;
+        teleport(&mut b, start);
+        let start = a.level.start;
+        teleport(&mut a, start);
         for _ in 0..30 {
             a.update(DT, Vec2::new(1.0, 0.0), false);
             b.update(DT, Vec2::new(1.0, 0.0), false);

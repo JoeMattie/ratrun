@@ -297,7 +297,7 @@ impl GiantPose {
 
     /// Screen offset from `center` → local `(u, v)` in normalised rat units.
     #[inline]
-    fn to_local(&self, d: Vec2) -> (f32, f32) {
+    fn to_local(self, d: Vec2) -> (f32, f32) {
         (d.dot(self.face) / self.su, d.dot(self.perp) / self.sv)
     }
 

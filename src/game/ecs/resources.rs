@@ -167,7 +167,7 @@ pub struct Ripple {
 pub struct EnemyRippleSlot {
     /// The `SpawnId` that held the slot when the cooldown started; a different
     /// body taking the slot ripples at once rather than inheriting the wait.
-    pub id: u32,
+    pub id: u64,
     /// Seconds until the slot may ripple again.
     pub cooldown: f32,
 }

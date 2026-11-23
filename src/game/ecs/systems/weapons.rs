@@ -163,9 +163,6 @@ pub fn fire_weapons_system(
     mut ledger: ResMut<DamageLedger>,
     // Wave 3: Counterweight's "once per target per 0.4 s" melee-nudge log.
     mut melee_nudge: ResMut<MeleeNudge>,
-    // The unzoomed simulation view: the Spiked Tail only hooks what is on it
-    // (see `weapon_spiketail::LASH_VIEW_INSET`).
-    viewport: Res<Viewport>,
     mut scratch: FireScratch,
 ) {
     let dt = input.dt;
@@ -308,7 +305,7 @@ pub fn fire_weapons_system(
             // arm below seats it and `nova_ring` (after this loop) steps it.
             &mut scratch.active,
             // The unzoomed view, for the one weapon whose reach runs past it.
-            viewport.0,
+            scratch.viewport.0,
         );
         if fired {
             player.loadout.weapons[i].timer += cd;
@@ -680,6 +677,10 @@ pub struct FireScratch<'w, 's> {
     /// `fire_one` writes it on the cast; the Tail Thrash and the Sonic Squeak
     /// cone are `active_weapons_system`'s business and never touched here.
     active: ResMut<'w, ActiveFx>,
+    /// The unzoomed simulation view: the Spiked Tail only hooks what is on it
+    /// (see `weapon_spiketail::LASH_VIEW_INSET`). Bundled here for the same
+    /// 16-parameter cap as `cvars`.
+    viewport: Res<'w, Viewport>,
 }
 
 /// The active-weapons pass's two reused buffers.

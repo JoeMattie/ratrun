@@ -75,7 +75,7 @@
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::Rect;
 
-use crate::game::damage_number::DamageNumber;
+use crate::game::particle::damage_number::DamageNumber;
 use crate::game::hazards::{SteamGrate, SteamPhase};
 use crate::game::level::{AmbientEmitter, EmitterKind};
 use crate::game::world::World;
@@ -256,7 +256,21 @@ impl GlyphFx {
         scene: &Scene,
     ) {
         let depth = term::color_depth();
-        let batch = collect(scene);
+        // A mote slot only counts toward the cap where its cell is a lit, flat
+        // patch: without this the first twenty slots in scan order (the top
+        // rows of the view) spent the whole cap whether or not they could show.
+        let lit = |cx: i32, cy: i32| {
+            let lx = (cx - area.x as i32) as usize;
+            let ly = (cy - area.y as i32) as usize;
+            if lx >= pixels.w || ly * 2 + 1 >= pixels.h {
+                return false;
+            }
+            let top = pixels.pixel_at(lx, ly * 2);
+            let bot = pixels.pixel_at(lx, ly * 2 + 1);
+            contrast(top, bot) < EDGE_GUARD
+                && luma(average(top, bot)) >= u32::from(MOTE_LUMA_MIN)
+        };
+        let batch = collect_lit(scene, lit);
         for g in batch.as_slice() {
             if !scene.inside(g.cx, g.cy) || scene.near_rat(g.cx, g.cy) {
                 continue;
@@ -460,9 +474,16 @@ const CAPS_ZOOMED_OUT: Caps = Caps {
 /// Every particle for this frame, in draw order (motes, bubbles, sparks), each
 /// category capped and no two on one cell.
 pub fn collect(scene: &Scene) -> Batch {
+    collect_lit(scene, |_, _| true)
+}
+
+/// [`collect`] with the picture's say on the motes: `lit(cx, cy)` is whether a
+/// frame cell is a lit pool a mote may sit in, asked **before** the slot is
+/// counted against the mote cap.
+pub fn collect_lit(scene: &Scene, lit: impl Fn(i32, i32) -> bool) -> Batch {
     let caps = if scene.zoom.x > 1.5 { CAPS_ZOOMED_OUT } else { CAPS };
     let mut out = Batch::default();
-    motes(scene, caps.motes, &mut out);
+    motes(scene, caps.motes, &lit, &mut out);
     bubbles(scene, caps.bubbles, &mut out);
     sparks(scene, caps.sparks, &mut out);
     out
@@ -472,7 +493,7 @@ pub fn collect(scene: &Scene) -> Batch {
 /// either is a mote (forever, for this seed) or is not, and the camera offset is
 /// subtracted at draw time, so the field of motes holds still while the rat
 /// runs and the motes do not swim.
-fn motes(scene: &Scene, cap: usize, out: &mut Batch) {
+fn motes(scene: &Scene, cap: usize, lit: &impl Fn(i32, i32) -> bool, out: &mut Batch) {
     if cap == 0 || scene.area.is_empty() {
         return;
     }
@@ -518,7 +539,7 @@ fn motes(scene: &Scene, cap: usize, out: &mut Batch) {
             let wcy = sy * MOTE_LATTICE + jy;
             let cx = scene.area.x as i32 + (wcx - c0x) + dx;
             let cy = scene.area.y as i32 + (wcy - c0y) + dy;
-            if !scene.inside(cx, cy) {
+            if !scene.inside(cx, cy) || !lit(cx, cy) {
                 continue;
             }
             out.push(Glyph {
@@ -753,7 +774,7 @@ pub fn hash(a: u64, b: u64, c: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::damage_number::DamageSource;
+    use crate::game::particle::damage_number::DamageSource;
     use ratatui::style::Color;
 
     const W: u16 = 80;

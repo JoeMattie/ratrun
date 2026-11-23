@@ -14311,15 +14311,16 @@ mod tests {
     /// glyphs on the average of the two colours the cell had.
     #[test]
     fn the_glyph_layer_never_moves_the_frozen_field_and_off_restores_it() {
-        use crate::game::damage_number::DamageSource;
+        use crate::game::particle::damage_number::DamageSource;
 
         let mut h = paused_harness();
-        // A fresh hit a dozen cells to the right of the rat (one cell is one
-        // world pixel across at 1x): sparks have no lit-pool test, so plain
+        // A fresh hit forty cells to the right of the rat (one cell is one
+        // world pixel across at 1x), clear of the pause plate, which is drawn
+        // over the field afterwards: sparks have no lit-pool test, so plain
         // floor cells are enough for the layer to have something to draw.
         {
             let w = h.app.world.as_mut().unwrap();
-            let p = w.player.pos + Vec2::new(18.0 * w.zoom_scale.x, 0.0);
+            let p = w.player.pos + Vec2::new(40.0 * w.zoom_scale.x, 0.0);
             w.damage_numbers
                 .record(9001, p, 3.0, 12.0, false, DamageSource::Normal);
         }

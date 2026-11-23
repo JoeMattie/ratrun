@@ -1088,7 +1088,7 @@ mod tests {
         let mut w = arena(210, 5);
         w.viewport = small;
         let p = w.player.pos;
-        assert!(LASH_REACH[4] > 100.0, "the reach must run past this view");
+        const { assert!(LASH_REACH[4] > 100.0, "the reach must run past this view") };
         let far = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(100.0, 0.0), 400.0);
         assert!(
             !run_fire(&mut w),
@@ -1109,8 +1109,12 @@ mod tests {
             l.target - p
         );
 
-        // The same 100 px body, once the view is wide enough to hold it.
+        // The same 100 px body alone, once the view is wide enough to hold it
+        // (a fresh arena: the weapon above is on its cooldown).
+        let mut w = arena(210, 5);
         w.viewport = Vec2::new(1200.0, 1200.0);
+        let p = w.player.pos;
+        let far = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(100.0, 0.0), 400.0);
         assert!(run_fire(&mut w), "a wide view leaves the reach in charge");
         let l = lashes(&mut w)[0];
         assert_eq!(l.primary, Some(LashTarget::Enemy(far)));

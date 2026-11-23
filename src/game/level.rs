@@ -1049,7 +1049,7 @@ pub const PUDDLE_EDGE_PX: f32 = 6.0;
 /// as water rather than as an ellipse; eight lobes is the fewest that gives a
 /// blob two independent bays without looking like a gear.
 pub fn puddle_wobble(seed: u32, angle: f32) -> f32 {
-    let turns = angle * std::f32::consts::FRAC_1_TAU;
+    let turns = angle / std::f32::consts::TAU;
     let turns = turns.rem_euclid(1.0) * PUDDLE_LOBES as f32;
     let lobe = turns.floor();
     let frac = turns - lobe;
@@ -1658,12 +1658,15 @@ mod tests {
             let p = test_puddle(seed);
             for i in 0..360 {
                 let angle = i as f32 * (std::f32::consts::TAU / 360.0);
+                // `contains` reads the rim at the point's *geometric* bearing,
+                // which is not the ellipse parameter unless `rx == ry`.
+                let bearing = (angle.sin() * p.ry).atan2(angle.cos() * p.rx);
                 // Just outside the blob at that angle must be outside.
-                let r = p.edge_factor(angle) + 0.01;
+                let r = p.edge_factor(bearing) + 0.01;
                 let on = p.pos + Vec2::new(angle.cos() * p.rx * r, angle.sin() * p.ry * r);
                 assert!(!p.contains(on), "seed {seed}: a point outside the edge is wet");
                 // And just inside must be inside.
-                let r = p.edge_factor(angle) * 0.99;
+                let r = p.edge_factor(bearing) * 0.99;
                 let inside = p.pos + Vec2::new(angle.cos() * p.rx * r, angle.sin() * p.ry * r);
                 assert!(p.contains(inside), "seed {seed}: a point inside the edge is dry");
                 // The bounding ellipse holds every blob.
