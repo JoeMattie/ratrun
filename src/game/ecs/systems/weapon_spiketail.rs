@@ -38,6 +38,16 @@
 //! (`BossTargetable`), takes the full lash through its hit shapes, and can
 //! take the burst once on top (the design's rule for the big bodies).
 //!
+//! ## The screen
+//!
+//! `LASH_REACH` is 80–120 px, which is past the edge of a 120-column view at
+//! 1× (120 px half-width, 40 px half-height), so a target is only eligible
+//! inside the **unzoomed simulation view** ([`LASH_VIEW_INSET`], 4 px inside),
+//! as well as within the tail's reach. The crack's burst centre and the drawn
+//! whip's tip are therefore always on screen. That rectangle is the tick's
+//! `Viewport` centred on the rat — never the render zoom, because every zoom
+//! must simulate identically.
+//!
 //! ## Determinism
 //!
 //! - The enemy walk uses the cached [`EnemyIndex`] order (valid at this slot:
@@ -63,6 +73,7 @@ use crate::game::ecs::components::{Entity, Lash, LashTarget, SpawnId};
 use crate::game::ecs::resources::{
     DamageLedger, EnemyIndex, NextSpawnId, RngRes, Shake, TickInput,
 };
+use crate::game::ecs::systems::approach::in_sim_view_inset;
 use crate::game::ecs::systems::boss::{Boss, BossTargetable};
 use crate::game::ecs::systems::projectiles::los_clear;
 use crate::game::enemy::Enemy;
@@ -89,6 +100,17 @@ const FIELD_LOS_RADIUS: f32 = 1.0;
 /// pick is nearest-first, so a screen of covered bodies costs a fixed number of
 /// tile queries.
 const CANDIDATES: usize = 12;
+/// How far inside the **unzoomed screen's** edge a lash target has to be.
+///
+/// The tail reaches 80–120 px, which is past the edge of a 120-column view at
+/// 1× (120 px half-width, 40 px half-height), so a body could be lashed while
+/// the player cannot see it. A target is therefore only eligible inside the
+/// simulation view rectangle ([`in_sim_view_inset`], the
+/// [`Viewport`](crate::game::ecs::resources::Viewport) resource
+/// at zoom 1.0 — never the render zoom) with this margin, so the crack's burst
+/// centre and the drawn whip's tip land on screen. (The 0.12 s wind-up still
+/// follows its body, so the point can drift a few px from where it was picked.)
+const LASH_VIEW_INSET: f32 = 4.0;
 /// The boss is huge; a locked impact point still counts as "on it" inside this
 /// many px of a grounded hit shape (the shape moves under the point for the
 /// 0.12 s of wind-up).
@@ -188,6 +210,14 @@ fn push_candidate(out: &mut [Candidate; CANDIDATES], n: &mut usize, c: Candidate
 /// candidate, nearest first, and returns the first body the tail can actually
 /// reach (walls stop a lash: it is a tail, not a bullet).
 ///
+/// **Eligible** means inside the unzoomed view rectangle as well as in reach:
+/// `view` is the [`Viewport`](crate::game::ecs::resources::Viewport) resource
+/// and the rectangle is centred on the
+/// rat (`from`), inset by [`LASH_VIEW_INSET`]. A body the player cannot see is
+/// never picked, so the burst lands on screen. This is the one pick for every
+/// lash — the plain Spiked Tail and the evolved **Barbed Wire**'s long cast
+/// included.
+///
 /// `aim` is **the hook the mouse/gamepad aim worker plugs into**. `None` (the
 /// keyboard/auto-fire case) picks the body nearest the *rat*; `Some(point)`
 /// picks the eligible body nearest that world point instead, so an aimed
@@ -213,6 +243,7 @@ pub(crate) fn pick_lash_target(
     reach: f32,
     aim: Option<Vec2>,
     hook: bool,
+    view: Vec2,
 ) -> Option<LashPick> {
     let reach_sq = reach * reach;
     // Only auto-aim casts long; see the doc comment.
@@ -239,6 +270,10 @@ pub(crate) fn pick_lash_target(
         if dist_sq.is_nan() || dist_sq > limit * limit {
             continue;
         }
+        // The player has to be able to see the crack land.
+        if !in_sim_view_inset(e.pos, from, view, LASH_VIEW_INSET) {
+            continue;
+        }
         // A negated key sorts every hookable body ahead of the rest, farthest
         // first; everything else keeps its plain nearest-first key.
         let key = if cast_long && !unhookable(e) {
@@ -261,6 +296,10 @@ pub(crate) fn pick_lash_target(
     for (index, point) in boss_points.iter().enumerate() {
         let dist_sq = point.dist_sq(from);
         if dist_sq.is_nan() || dist_sq > reach_sq {
+            continue;
+        }
+        // The boss is huge; only the hit shape the tail can reach *on screen*.
+        if !in_sim_view_inset(point, from, view, LASH_VIEW_INSET) {
             continue;
         }
         push_candidate(
@@ -294,6 +333,10 @@ pub(crate) fn pick_lash_target(
 /// for a whip that cracked at nothing. Draws no rng and spawns nothing else:
 /// the wind-up's whole tell is the drawn tail (`art_rat::draw_tail` with a
 /// bristle), so a lash that never lands costs the rng stream nothing.
+///
+/// `view` is the tick's [`Viewport`](crate::game::ecs::resources::Viewport):
+/// a target past the edge of the unzoomed screen is not eligible (see
+/// [`LASH_VIEW_INSET`]), so the tail never cracks at something out of view.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fire_spiked_tail(
     commands: &mut Commands,
@@ -310,12 +353,13 @@ pub(crate) fn fire_spiked_tail(
     evolved: bool,
     next_id: &mut NextSpawnId,
     aim: Option<Vec2>,
+    view: Vec2,
 ) -> bool {
     // The aim hook: `None` is auto-fire (nearest the rat); an aimed scheme
     // hands its reticle point through and the lash takes the eligible body
     // nearest it.
     let Some(pick) =
-        pick_lash_target(level, order, enemies, boss_points, ppos, reach, aim, evolved)
+        pick_lash_target(level, order, enemies, boss_points, ppos, reach, aim, evolved, view)
     else {
         return false;
     };
@@ -846,6 +890,10 @@ mod tests {
     use rand::SeedableRng;
 
     const DT: f32 = 1.0 / 60.0;
+    /// The view these tests measure the tail in: bigger than any reach on the
+    /// table, so the screen cap (`LASH_VIEW_INSET`) never decides a hit and a
+    /// test of the *reach* really tests the reach. The cap has its own tests.
+    const WIDE_VIEW: Vec2 = Vec2 { x: 1600.0, y: 1600.0 };
 
     /// Wipe the generated layout's walls so a test measures the weapon, not
     /// the map.
@@ -858,6 +906,7 @@ mod tests {
     /// facing +x.
     fn arena(seed: u64, level: u8) -> World {
         let mut w = World::new(Theme::Sewer, seed);
+        w.viewport = WIDE_VIEW;
         open_map(&mut w);
         w.clear_enemies();
         w.clear_bullets();
@@ -878,6 +927,7 @@ mod tests {
     /// behind the wall" is a real configuration at level 1.
     fn wall_between(w: &mut World) -> f32 {
         open_map(w);
+        w.viewport = WIDE_VIEW;
         w.player.pos = Vec2::new(170.0, 168.0);
         w.player.face = Vec2::new(1.0, 0.0);
         w.clear_enemies();
@@ -1024,6 +1074,83 @@ mod tests {
             assert!(!run_fire(&mut w), "L{level}: out of reach must not fire");
             assert!(lashes(&mut w).is_empty());
             assert_eq!(w.player.loadout.weapons[0].timer, 0.0, "retry next tick");
+        }
+    }
+
+    /// **The screen caps the tail.** A body 100 px away is inside L5's 120 px
+    /// reach, but a 120 x 80 px view (a narrow terminal at 1x) is 60 x 40 px
+    /// from the rat: a body past that edge is not a target, so the crack always
+    /// lands where the player can see it. The body on screen is still lashed,
+    /// and a wide view leaves the reach in charge exactly as before.
+    #[test]
+    fn a_body_past_the_edge_of_the_screen_is_not_lashed() {
+        let small = Vec2::new(120.0, 80.0);
+        let mut w = arena(210, 5);
+        w.viewport = small;
+        let p = w.player.pos;
+        assert!(LASH_REACH[4] > 100.0, "the reach must run past this view");
+        let far = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(100.0, 0.0), 400.0);
+        assert!(
+            !run_fire(&mut w),
+            "a body 100 px out is past a 120 px wide view at 1x"
+        );
+        assert!(lashes(&mut w).is_empty(), "nothing was thrown off screen");
+
+        // A body the player can see is a target, and the impact point (the
+        // burst centre and the drawn tip) is inside the view.
+        let near = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(50.0, 0.0), 400.0);
+        assert!(run_fire(&mut w), "a body on screen is lashed");
+        let l = lashes(&mut w)[0];
+        assert_eq!(l.primary, Some(LashTarget::Enemy(near)));
+        assert_ne!(near, far);
+        assert!(
+            in_sim_view_inset(l.target, p, small, LASH_VIEW_INSET),
+            "the crack landed off screen: {:?}",
+            l.target - p
+        );
+
+        // The same 100 px body, once the view is wide enough to hold it.
+        w.viewport = Vec2::new(1200.0, 1200.0);
+        assert!(run_fire(&mut w), "a wide view leaves the reach in charge");
+        let l = lashes(&mut w)[0];
+        assert_eq!(l.primary, Some(LashTarget::Enemy(far)));
+    }
+
+    /// The cap is on the **pick**, so an off-screen body is not even a
+    /// candidate: an on-screen body behind it in reach is what the tail takes.
+    #[test]
+    fn an_off_screen_body_does_not_shadow_an_on_screen_one() {
+        for evolved in [false, true] {
+            let mut w = arena(211, 5);
+            w.viewport = Vec2::new(120.0, 80.0);
+            w.player.loadout.weapons[0].evolved = evolved;
+            let p = w.player.pos;
+            // The off-screen body is the nearest *and* (under Barbed Wire's
+            // long cast) the farthest hookable one: it must lose either way.
+            let off = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(0.0, -70.0), 400.0);
+            let on = w.spawn_enemy(EnemyKind::Skitterer, p + Vec2::new(30.0, 0.0), 400.0);
+            assert!(run_fire(&mut w), "the on-screen body is a target");
+            assert_eq!(
+                lashes(&mut w)[0].primary,
+                Some(LashTarget::Enemy(on)),
+                "evolved = {evolved}: an off-screen body was picked"
+            );
+            assert_ne!(on, off);
+        }
+    }
+
+    /// With a huge viewport the tail behaves exactly as it did before the cap:
+    /// the farthest body in reach is still eligible at every level.
+    #[test]
+    fn a_view_bigger_than_the_reach_changes_nothing() {
+        for level in 1..=5u8 {
+            let mut w = arena(212 + level as u64, level);
+            assert_eq!(w.viewport, WIDE_VIEW);
+            let p = w.player.pos;
+            let reach = LASH_REACH[(level - 1) as usize];
+            let body = w.spawn_enemy(EnemyKind::Brute, p + Vec2::new(reach - 1.0, 0.0), 400.0);
+            assert!(run_fire(&mut w), "L{level}: a body inside the reach is hit");
+            assert_eq!(lashes(&mut w)[0].primary, Some(LashTarget::Enemy(body)));
         }
     }
 

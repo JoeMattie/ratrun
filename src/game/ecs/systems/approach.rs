@@ -58,6 +58,52 @@ pub fn in_sim_view(pos: Vec2, player: Vec2, viewport: Vec2) -> bool {
     (pos.x - player.x).abs() <= viewport.x * 0.5 && (pos.y - player.y).abs() <= viewport.y * 0.5
 }
 
+/// [`in_sim_view`] with a margin: the same rectangle, shrunk by `inset` px on
+/// every side (a weapon that draws its own burst wants its centre a little
+/// inside the edge, not on it). `inset` is clamped so the rectangle cannot
+/// invert.
+///
+/// This is the **screen** every melee/beam reach is capped to: the
+/// [`Viewport`] resource at zoom 1.0, centred on the point the caller passes,
+/// never the render zoom (see the module docs of `spawn::widest_view`).
+#[inline]
+pub fn in_sim_view_inset(pos: Vec2, center: Vec2, viewport: Vec2, inset: f32) -> bool {
+    let hw = (viewport.x * 0.5 - inset).max(0.0);
+    let hh = (viewport.y * 0.5 - inset).max(0.0);
+    (pos.x - center.x).abs() <= hw && (pos.y - center.y).abs() <= hh
+}
+
+/// How far a ray from `from` along `dir` may travel before it leaves the
+/// simulation view rectangle: the same rectangle [`in_sim_view_inset`] tests,
+/// centred on `center`, `viewport` px across, inset by `inset` px a side.
+///
+/// The slab test of the ray against the rectangle, so a beam drawn from a
+/// point inside the view always ends **on** the screen and its hit test can
+/// never reach a body the player cannot see. `dir` must be a unit vector
+/// (every caller passes an angle); a zero direction returns `0.0`, and a
+/// rectangle that the inset collapsed returns `0.0` as well.
+#[inline]
+pub fn sim_view_ray_exit(from: Vec2, dir: Vec2, center: Vec2, viewport: Vec2, inset: f32) -> f32 {
+    let hw = (viewport.x * 0.5 - inset).max(0.0);
+    let hh = (viewport.y * 0.5 - inset).max(0.0);
+    let (dx, dy) = (from.x - center.x, from.y - center.y);
+    let mut t = f32::INFINITY;
+    if dir.x > 1e-6 {
+        t = t.min((hw - dx) / dir.x);
+    } else if dir.x < -1e-6 {
+        t = t.min((-hw - dx) / dir.x);
+    }
+    if dir.y > 1e-6 {
+        t = t.min((hh - dy) / dir.y);
+    } else if dir.y < -1e-6 {
+        t = t.min((-hh - dy) / dir.y);
+    }
+    if !t.is_finite() {
+        return 0.0;
+    }
+    t.max(0.0)
+}
+
 pub fn approach_sfx_system(
     input: Res<TickInput>,
     viewport: Res<Viewport>,
@@ -215,5 +261,44 @@ mod tests {
         assert!(!in_sim_view(c + Vec2::new(120.5, 0.0), c, VIEW));
         assert!(!in_sim_view(c + Vec2::new(0.0, 46.5), c, VIEW));
         assert!(!in_sim_view(c, c + Vec2::new(500.0, 0.0), Vec2::ZERO));
+    }
+
+    /// The inset rectangle is the same rectangle with a margin, and a margin
+    /// wider than the view cannot invert it into "everything is outside".
+    #[test]
+    fn the_inset_view_shrinks_every_side() {
+        let c = Vec2::new(0.0, 0.0);
+        assert!(in_sim_view_inset(Vec2::new(116.0, 0.0), c, VIEW, 4.0));
+        assert!(!in_sim_view_inset(Vec2::new(116.5, 0.0), c, VIEW, 4.0));
+        assert!(!in_sim_view_inset(Vec2::new(0.0, 42.5), c, VIEW, 4.0));
+        // A degenerate inset collapses the rectangle onto its centre only.
+        assert!(in_sim_view_inset(Vec2::ZERO, c, VIEW, 400.0));
+        assert!(!in_sim_view_inset(Vec2::new(1.0, 0.0), c, VIEW, 400.0));
+    }
+
+    /// The beam exit is the slab test against the same rectangle: a beam along
+    /// an axis is cut by the near wall, and a diagonal one by whichever wall it
+    /// meets first.
+    #[test]
+    fn a_beam_leaves_the_view_where_the_rectangle_ends() {
+        let c = Vec2::new(0.0, 0.0);
+        // Straight out: the x wall.
+        let t = sim_view_ray_exit(c, Vec2::new(1.0, 0.0), c, VIEW, 0.0);
+        assert!((t - 120.0).abs() < 1e-3, "{t}");
+        let t = sim_view_ray_exit(c, Vec2::new(0.0, -1.0), c, VIEW, 0.0);
+        assert!((t - 46.0).abs() < 1e-3, "{t}");
+        // 45 degrees up-right: the y wall (46) comes first.
+        let d = Vec2::from_angle(std::f32::consts::FRAC_PI_4);
+        let t = sim_view_ray_exit(c, d, c, VIEW, 0.0);
+        assert!((t - 46.0 / d.y).abs() < 1e-3, "{t}");
+        // The inset pulls the exit in by that much on an axis.
+        let t = sim_view_ray_exit(c, Vec2::new(1.0, 0.0), c, VIEW, 4.0);
+        assert!((t - 116.0).abs() < 1e-3, "{t}");
+        // A ray that starts off-centre leaves earlier on that side.
+        let t = sim_view_ray_exit(Vec2::new(100.0, 0.0), Vec2::new(1.0, 0.0), c, VIEW, 0.0);
+        assert!((t - 20.0).abs() < 1e-3, "{t}");
+        // Degenerate: no direction, no beam.
+        assert_eq!(sim_view_ray_exit(c, Vec2::ZERO, c, VIEW, 0.0), 0.0);
+        assert_eq!(sim_view_ray_exit(c, Vec2::new(1.0, 0.0), c, Vec2::ZERO, 0.0), 0.0);
     }
 }

@@ -751,7 +751,9 @@ pub struct LaserFx {
     pub facing: Vec2,
     /// The beam's origin (the rat's eye line at the trigger tick).
     pub origin: Vec2,
-    /// Nominal beam length in px before the wall stop (Lens Cap applied).
+    /// Nominal beam length in px before the wall and screen stops (Lens Cap
+    /// applied). The length actually used — drawn, lit and hit-tested — is the
+    /// per-angle [`LaserFx::beam`].
     pub reach: f32,
     /// Per-**hit** damage at the owning weapon's level (Sharp Teeth applied):
     /// the whole old burst's damage, so dps per body is unchanged.
@@ -763,12 +765,13 @@ pub struct LaserFx {
     /// flag is what doubles their angular speed (see [`LaserFx::span`]).
     pub twin: bool,
     /// World angle of the first beam (it starts at `facing - half`) and the
-    /// length it reached after the wall stop (art; `beam` is the value
-    /// `laser_visual` draws).
+    /// length it reached after the wall and unzoomed-screen stops (art;
+    /// `beam` is the value `laser_visual` draws, and the same number the hit
+    /// test used).
     pub angle: f32,
     pub beam: f32,
-    /// The second beam's angle and wall-stopped length: it starts at
-    /// `facing + half` and mirrors the first across the aim line.
+    /// The second beam's angle and stopped length: it starts at `facing + half`
+    /// and mirrors the first across the aim line.
     pub angle_b: f32,
     pub beam_b: f32,
     /// The angles both beams held on the previous resolution: the swept band is

@@ -1622,8 +1622,8 @@ fn object_text(k: ObjectKind) -> (&'static str, &'static str) {
         ObjectKind::ShopHole => (
             "Any floor · two per level, under a bent spoon",
             "Under the spoon, the cameras have a blind spot. Someone keeps a shelf of \
-             gene splices in the wall and takes gold for the kind of changes you cannot \
-             take back.",
+             gene splices in the wall and takes gold for changes the body keeps for \
+             one sector, then sheds.",
         ),
         ObjectKind::MazeCache => (
             "Any floor · the end of the maze",
@@ -2144,10 +2144,10 @@ fn splice_facts(k: SpliceKind, f: &mut Facts) {
     f.push("PRICE", format!("{} gold", k.price()));
     f.push("GAIN", k.plus());
     f.push("COST", k.minus());
-    f.push("LASTS", "to the end of the run");
+    f.push("LASTS", "this sector only");
     f.push(
         "LIMIT",
-        format!("{} per run · takes no slot", shop::MAX_SPLICES),
+        format!("{} per sector · takes no slot", shop::MAX_SPLICES),
     );
     f.push("BOUGHT FROM", "a mouse-hole shop");
     f.push("APPLIED", "after the passive stacks");
@@ -2484,7 +2484,7 @@ fn object_facts(k: ObjectKind, f: &mut Facts) {
             f.push("TAKES", "gold for gene splices");
             f.push(
                 "SPLICES",
-                format!("{} per run, each bought once", shop::MAX_SPLICES),
+                format!("{} per sector, each bought once", shop::MAX_SPLICES),
             );
             f.push(
                 "SERVICES",

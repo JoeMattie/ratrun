@@ -41,7 +41,9 @@ use crate::game::collision::segment_circle_hit;
 use crate::game::ecs::components::{Entity, SpawnId};
 use crate::game::ecs::resources::{
     DamageLedger, DashTrack, EnemyIndex, LaserFx, MeleeNudge, RngRes, SfxQueue, Shake, TickInput,
+    Viewport,
 };
+use crate::game::ecs::systems::approach::sim_view_ray_exit;
 use crate::game::ecs::systems::boss::Boss;
 use crate::game::enemy::Enemy;
 use crate::game::level::Level;
@@ -200,6 +202,7 @@ fn sweep_step(
     bosses: &mut Query<&mut Boss>,
     damage_numbers: &mut DamageNumbers,
     ledger: &mut DamageLedger,
+    view: Vec2,
 ) -> f32 {
     let kind = WeaponKind::LaserEyes;
     let delta = to_angle - from_angle;
@@ -215,7 +218,14 @@ fn sweep_step(
             .segment_hit(origin, end, LASER_HALF_WIDTH)
             .map(|t| t.clamp(0.0, 1.0))
             .unwrap_or(1.0);
-        let len = nominal * stop;
+        // …and the **screen** stops it too: the beam is cut where this ray
+        // leaves the unzoomed view rectangle centred on the cast's own origin
+        // (`sim_view_ray_exit`), so the drawn beam and the hit test share one
+        // length and no body outside the view can be burned. Centring the
+        // rectangle on the cast's origin is what lets a Carbon Copy replay draw
+        // the lengths of the sweep it copies, whatever the rat has done since.
+        let screen = sim_view_ray_exit(origin, dir, origin, view, 0.0);
+        let len = (nominal * stop).min(screen);
         last_len = len;
 
         for &entity in order {
@@ -322,11 +332,19 @@ fn sweep_step(
 /// body the pair crosses takes the whole old burst's damage once (one hit set,
 /// shared by both beams), so a body the beams pass over takes exactly what the
 /// fan dealt it and the weapon's dps per body is unchanged.
+///
+/// **The screen caps the reach**: a beam is cut where it leaves the unzoomed
+/// simulation view ([`Viewport`], centred on the cast's own origin), so a body
+/// the player cannot see is never burned and `LaserFx::beam`/`beam_b` — the
+/// numbers the renderer and the lighting read — are the lengths the hit tests
+/// used. Carbon Copy's replay therefore draws the lengths of the sweep it
+/// copies.
 #[allow(clippy::too_many_arguments)]
 pub fn laser_eyes_system(
     input: Res<TickInput>,
     mut player: ResMut<Player>,
     level: Res<Level>,
+    viewport: Res<Viewport>,
     mut rng: ResMut<RngRes>,
     mut particles: ResMut<Particles>,
     mut sfx: ResMut<SfxQueue>,
@@ -485,6 +503,7 @@ pub fn laser_eyes_system(
             &mut bosses,
             &mut damage_numbers,
             &mut ledger,
+            viewport.0,
         );
         // The mirrored beam shares the same hit set, so the pair still cuts a
         // body once per sweep.
@@ -505,6 +524,7 @@ pub fn laser_eyes_system(
             &mut bosses,
             &mut damage_numbers,
             &mut ledger,
+            viewport.0,
         );
         fx.hits = hits;
         fx.boss_hit = boss_hit;
@@ -553,6 +573,7 @@ pub fn laser_eyes_system(
                     &mut bosses,
                     &mut damage_numbers,
                     &mut ledger,
+                    viewport.0,
                 );
                 sweep_step(
                     copy.origin,
@@ -571,6 +592,7 @@ pub fn laser_eyes_system(
                     &mut bosses,
                     &mut damage_numbers,
                     &mut ledger,
+                    viewport.0,
                 );
                 fx.copy_hits = hits;
                 fx.copy_boss_hit = boss_hit;
@@ -1208,6 +1230,67 @@ mod tests {
             far_hp,
             "the beam reached past its own length"
         );
+    }
+
+    /// **The screen caps the beam.** With a 240 x 80 px view (a narrow terminal
+    /// at 1x: 40 px from the rat to the top edge) a beam swept to the near edge
+    /// is cut far short of its 54.4 px nominal reach, so a body just past the
+    /// edge — a body the beam would otherwise reach — is not burned, while the
+    /// one on screen still is. The drawn length and the hit test are the same
+    /// number ([`LaserFx::beam`]), so what is drawn is what hits.
+    ///
+    /// A wide view leaves the weapon exactly as it was.
+    #[test]
+    fn the_beam_stops_at_the_edge_of_the_screen() {
+        let view = Vec2::new(240.0, 80.0);
+        let run_one = |view: Vec2, seed: u64| {
+            let mut w = World::new(Theme::Sewer, seed);
+            w.clear_enemies();
+            open_map(&mut w);
+            w.viewport = view;
+            arm(&mut w, WeaponKind::LaserEyes, 1); // 54.4 px nominal
+            w.player.face = Vec2::new(0.0, -1.0); // straight at the near edge
+            let p = w.player.pos;
+            let inside = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(0.0, -36.0), 1.0);
+            let outside = w.spawn_enemy(EnemyKind::Cat, p + Vec2::new(0.0, -50.0), 1.0);
+            let before = [enemy_hp(&w, inside), enemy_hp(&w, outside)];
+            let mut longest = 0.0f32;
+            let mut last = 0.0f32;
+            let mut ticks = 0;
+            while ticks < 200 {
+                run_laser(&mut w, 1.0 / 60.0);
+                ticks += 1;
+                let fx = *w.ecs.resource::<LaserFx>();
+                if !fx.active() {
+                    break;
+                }
+                assert!((fx.reach - 54.4).abs() < 1e-3, "the nominal reach moved");
+                longest = longest.max(fx.beam.max(fx.beam_b));
+                last = fx.beam;
+            }
+            let lost = [before[0] - enemy_hp(&w, inside), before[1] - enemy_hp(&w, outside)];
+            (lost, longest, last)
+        };
+
+        let (lost, longest, last) = run_one(view, 31);
+        assert!(
+            longest < 54.4 - 1.0,
+            "the beam was not cut by the 40 px half-height: {longest}"
+        );
+        // On the aim line the beam ends where the rectangle does: 40 px up.
+        assert!((last - 40.0).abs() < 1.0, "the beam ends on the top edge: {last}");
+        assert!(lost[0] > 0.0, "a body on screen must still be cut");
+        assert_eq!(
+            lost[1], 0.0,
+            "a body 50 px out is past the 40 px screen edge and must not be cut"
+        );
+
+        // The same layout with a view big enough to hold the far body: both
+        // are cut, exactly as before the cap existed.
+        let (lost, longest, _) = run_one(Vec2::new(1600.0, 1600.0), 32);
+        assert!(longest > 50.0, "a wide view does not shorten the beam: {longest}");
+        assert!(lost[0] > 0.0, "the near body is cut");
+        assert!(lost[1] > 0.0, "a wide view leaves the 50 px body in reach");
     }
 
     /// The weapon never fires through the auto-fire pass: it charges itself and

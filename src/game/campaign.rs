@@ -418,6 +418,12 @@ pub fn validate_keep(previous: &Loadout, chosen: &[Keepable]) -> Result<(), Keep
 /// * Weapons are emitted in `previous`'s order and passives in `previous`'s
 ///   order, so the carried loadout's slots are stable however the cards were
 ///   picked.
+/// * **Gene splices do not travel.** They last for the floor they were bought
+///   on, so the new level starts with no splices and both sockets empty; the
+///   stats are a from-scratch rebuild, which replays the passives and the nest
+///   but not the splices (`shop::apply_splices` has nothing to apply). That is
+///   what makes the in-run shop worth a visit on every floor rather than only
+///   on the first.
 ///
 /// Returns [`KeepError`] (and touches nothing) when the selection is invalid.
 pub fn next_loadout(previous: &Loadout, chosen: &[Keepable]) -> Result<Loadout, KeepError> {
@@ -455,11 +461,11 @@ pub fn next_loadout(previous: &Loadout, chosen: &[Keepable]) -> Result<Loadout, 
     // The nest's permanent upgrades ride along too (they are part of every
     // floor's base stats — `Loadout::rebuild_stats` applies them first).
     carried.meta = previous.meta;
-    // Gene splices sit **outside the racks**: they ride along whatever the
-    // keep-three choice was, and last until the run ends (`WAVE3_DESIGN` §6).
-    if !previous.splices.is_empty() {
-        carried.splices = previous.splices.clone();
-    }
+    // Gene splices do **not** ride along: they last for the floor they were
+    // bought on. `from_parts_with_caps` starts with an empty `splices` vec, so
+    // the rebuild below is already splice-free and both sockets open again on
+    // the new floor (the shop's shelves roll as they always do).
+    debug_assert!(carried.splices.is_empty());
     carried.rebuild_stats();
     Ok(carried)
 }
@@ -1198,31 +1204,29 @@ mod tests {
         assert_eq!(campaign.world().level.theme, Theme::Kitchen);
     }
 
-    /// **Splices carry over cleanly** (`WAVE3_DESIGN` §6: they last until the
-    /// campaign ends, occupy no rack slot and are applied after the passives).
-    ///
-    /// Two things have to hold on the next floor: the stats are exactly what a
-    /// from-scratch rebuild of the carried loadout gives (no doubled or lost
-    /// splice multiplier), and HP is clamped to the new max — Glass Incisors
-    /// and Long Fingers both *lower* the pool, so a rat that walked in with a
-    /// full bar must not carry the old, larger number into the next level.
+    /// **Splices reset on every floor.** They last for the floor they were
+    /// bought on: the next level starts with none, both sockets free, and stats
+    /// equal to the same carried loadout built without them. Glass Incisors and
+    /// Long Fingers both *lower* the pool, so the drop has to show up in the
+    /// numbers (not just in the list), and the rat starts the floor on a full
+    /// bar of the larger, splice-free pool.
     #[test]
-    fn carried_splices_rebuild_the_same_stats_and_clamp_hp() {
+    fn splices_reset_on_every_floor() {
         use crate::game::shop::SpliceKind;
         let mut campaign = CampaignState::new(67);
         let mut world = campaign.world();
         let mut rich = rich_loadout();
-        // Buy the two max-HP penalties and a damage multiplier.
-        rich.splices = vec![
-            SpliceKind::GlassIncisors,
-            SpliceKind::LongFingers,
-            SpliceKind::HoardGland,
-        ];
+        // Two splices, filling both sockets on this floor: Glass Incisors
+        // (+22 % damage, -18 % max HP) and Long Fingers (-10 % max HP), so
+        // both the pool and the damage multiplier move and the reset has to
+        // show up in the numbers, not only in the list.
+        rich.splices = vec![SpliceKind::GlassIncisors, SpliceKind::LongFingers];
         rich.rebuild_stats();
+        let spliced_pool = rich.stats.max_hp;
+        let spliced_damage = rich.stats.damage_mult;
         world.player.loadout = rich.clone();
-        let hp_before = world.player.max_hp();
         // Walk in with a full health bar at the old cap.
-        world.player.hp = hp_before;
+        world.player.hp = world.player.max_hp();
 
         let chosen = vec![
             entry(&rich, KeepKind::Weapon(WeaponKind::Gnaw)),
@@ -1233,37 +1237,36 @@ mod tests {
         let next = campaign.world();
         let lo = &next.player.loadout;
 
-        // The same loadout rebuilt from scratch gives the same stats.
-        let mut rebuilt = Loadout::from_parts(
-            lo.weapons.clone(),
-            lo.passives.clone(),
-        );
-        rebuilt.splices = lo.splices.clone();
-        rebuilt.rebuild_stats();
-        assert_eq!(lo.stats.max_hp, rebuilt.stats.max_hp, "max HP");
-        assert_eq!(lo.stats.damage_mult, rebuilt.stats.damage_mult, "damage");
-        assert_eq!(lo.stats.magnet, rebuilt.stats.magnet, "pickup radius");
-        assert_eq!(lo.stats.dash_cd, rebuilt.stats.dash_cd, "dash cooldown");
-        // HP starts at the *new* (smaller) pool, never above it.
+        // No splice comes through, so both sockets are open again.
         assert!(
-            next.player.hp <= next.player.max_hp() + 1e-3,
-            "carried HP {} over the new cap {}",
-            next.player.hp,
-            next.player.max_hp()
+            lo.splices.is_empty(),
+            "a splice rode into the next floor: {:?}",
+            lo.splices
         );
-        assert_eq!(next.player.hp, next.player.max_hp(), "a new level starts full");
-        // The two HP-penalty splices are still in the carried stats: the pool
-        // is smaller than the same loadout with no splices.
-        let mut plain = rebuilt.clone();
-        plain.splices.clear();
+        // …and the stats are exactly the same loadout built without them
+        // (the from-scratch rebuild replays the passives and the nest only).
+        let mut plain = Loadout::from_parts(lo.weapons.clone(), lo.passives.clone());
+        plain.meta = lo.meta;
         plain.rebuild_stats();
+        assert_eq!(lo.stats.max_hp, plain.stats.max_hp, "max HP");
+        assert_eq!(lo.stats.damage_mult, plain.stats.damage_mult, "damage");
+        assert_eq!(lo.stats.magnet, plain.stats.magnet, "pickup radius");
+        assert_eq!(lo.stats.dash_cd, plain.stats.dash_cd, "dash cooldown");
+        // The splice multipliers are really gone, not merely delisted.
         assert!(
-            next.player.max_hp() < plain.stats.max_hp,
-            "the carried max-HP penalties were lost ({} vs {})",
-            next.player.max_hp(),
-            plain.stats.max_hp
+            (lo.stats.max_hp - spliced_pool).abs() > 1e-3,
+            "the max-HP penalties survived the floor ({} vs {})",
+            lo.stats.max_hp,
+            spliced_pool
         );
-        let _ = hp_before;
+        assert!(
+            (lo.stats.damage_mult - spliced_damage).abs() > 1e-3,
+            "the damage multipliers survived the floor ({} vs {})",
+            lo.stats.damage_mult,
+            spliced_damage
+        );
+        // HP starts at the *new* pool, and a new level starts full.
+        assert_eq!(next.player.hp, next.player.max_hp(), "a new level starts full");
     }
 
     /// Carry-over end to end: finish a level with a rich loadout, keep three
