@@ -104,7 +104,7 @@ use super::{
     art_boss_magpie,
     art_boss_mangle, art_boss_megarat,
     art_boss_mower, art_boss_night_edition, art_enemy, art_floor, art_marks, art_miniboss,
-    art_props, art_rat, art_traps, art_walls, art_wave3a,
+    art_props, art_rat, art_rat_giant, art_traps, art_walls, art_wave3a,
 };
 
 /// How much of the simulation's screen shake reaches the camera. The owner
@@ -245,8 +245,6 @@ pub struct World {
     /// The eased zoom the renderer used last frame (chases `zoom` over about
     /// 0.15 s, so a wheel step glides instead of snapping).
     pub zoom_view: f32,
-    /// Growth Serum: the giant rat's two offscreen windows (render scratch).
-    giant_scratch: (PixelBuffer, PixelBuffer),
     /// Source pixels per screen pixel of the last draw (`1,1` unzoomed). The
     /// app's screen→world mapping (mouse steering, click targets) scales the
     /// cell offset by this so aim stays exact at every zoom.
@@ -535,7 +533,6 @@ impl World {
             render_viewport: Vec2::new(160.0, 80.0),
             zoom: zoom::DEFAULT,
             zoom_view: zoom::DEFAULT,
-            giant_scratch: (PixelBuffer::new(0, 0), PixelBuffer::new(0, 0)),
             zoom_scale: Vec2::new(1.0, 1.0),
             world_buf: None,
             subcell: crate::render::subcell::SubcellSet::Off,
@@ -3293,10 +3290,10 @@ impl World {
         } else {
             crate::render::lighting::rat_pen()
         });
-        // Growth Serum (batch 13): while the find runs, the rat is rasterised at
-        // 1:1 into a small offscreen buffer and blitted back five times as big
-        // (see `draw_giant_rat`), so the giant is made of the rat's own pixels.
-        // The camera, the zoom and everything else are untouched.
+        // Growth Serum (batch 13): while the find runs, the giant rat is drawn
+        // directly at high resolution (`art_rat_giant::draw_giant_rat`) across
+        // `scale` 1.0..=5.0. The camera, the zoom and everything else are
+        // untouched.
         match giant {
             Some(scale) => self.draw_giant_rat(pb, cam, scale, flash),
             None => art_rat::draw_rat_with_whip(
@@ -3332,93 +3329,20 @@ impl World {
         }
     }
 
-    /// **Growth Serum**: the rat, five times its size.
+    /// **Growth Serum**: the rat, drawn procedurally at up to five times its
+    /// ordinary size (`scale` in `1.0..=5.0`).
     ///
-    /// The ordinary rat art is rasterised **at 1:1** into a small offscreen
-    /// buffer and blitted back nearest-neighbour at `scale`, so the giant is
-    /// literally the rat's own pixels made five times bigger (chunky blocks are
-    /// the intended look — this is not a resample of the screen). The buffer is
-    /// seeded with the floor under the rat, which does two jobs: the art's own
-    /// blending (`mix(bg, fur, …)`) sees the real floor instead of black, and a
-    /// pixel that came back unchanged can be left alone, so no square patch of
-    /// floor is painted over.
-    ///
-    /// Only the bounded part of the rat goes through the big pass — body, tail,
-    /// feet, face, the dash streaks and the Super Dash charge ring, all inside
-    /// [`GIANT_SRC_HALF`]. The long weapon effects (Laser Eyes' beam, the Spiked
-    /// Tail's live whip and its impact star, the Tail Thrash arc and the dash
-    /// preview) are drawn at their ordinary size by their own call sites, from
-    /// the same rat centre: a 120 px whip cannot live in a 37 px window, and a
-    /// weapon effect is not the body.
+    /// Calls [`art_rat_giant::draw_giant_rat`] directly into the scene buffer so
+    /// the giant rat renders at full detail rather than as a nearest-neighbour
+    /// upscale of the 1× sprite. The long weapon effects (Laser Eyes' beam, the
+    /// Spiked Tail's live whip and its impact star, the Tail Thrash arc and the
+    /// dash preview) keep their ordinary size at their own call sites, from the
+    /// same rat centre: a weapon effect is not the body.
     ///
     /// Render-only: it reads the player, the frame clock and the render-only
     /// whip chain, and writes pixels.
-    fn draw_giant_rat(&mut self, pb: &mut PixelBuffer, cam: Vec2, scale: f32, tail_flash: f32) {
-        let half = GIANT_SRC_HALF;
-        let side = (half * 2 + 1) as usize;
-        let (sx, sy) = self.w2s(self.player.pos, cam);
-        let (x0, y0) = (sx - half, sy - half);
-
-        // Kept scratch: no allocation on the per-frame path.
-        let (mut src, mut under) = std::mem::replace(
-            &mut self.giant_scratch,
-            (PixelBuffer::new(0, 0), PixelBuffer::new(0, 0)),
-        );
-        src.resize(side, side);
-        under.resize(side, side);
-        for j in 0..side {
-            for i in 0..side {
-                let (px, py) = (x0 + i as i32, y0 + j as i32);
-                // Off the frame: black, in both buffers, so an unchanged pixel
-                // there is simply skipped (the blit clips at the same edge).
-                let c = if px >= 0 && py >= 0 && (px as usize) < pb.w && (py as usize) < pb.h {
-                    pb.pixel_at(px as usize, py as usize)
-                } else {
-                    (0, 0, 0)
-                };
-                under.plot(i as i32, j as i32, c);
-                src.plot(i as i32, j as i32, c);
-            }
-        }
-
-        // Shift the camera so the rat lands in the middle of the small buffer.
-        let cam_small = cam + Vec2::new((sx - half) as f32, (sy - half) as f32);
-        // A live lash runs up to 120 px past this window: it keeps its ordinary
-        // size (see the doc comment), and the resting/settling chain is inside.
-        let whip = if self.whip_chain.is_active() {
-            None
-        } else {
-            Some(&self.whip_chain)
-        };
-        art_rat::draw_rat_with_whip(
-            &mut src,
-            &self.player,
-            self.elapsed,
-            cam_small,
-            tail_flash,
-            None,
-            whip,
-        );
-
-        // Blit. The block edges are the scaled coordinates rounded, so a
-        // fractional scale (the grow-in and the 4.5x blink) tiles exactly: every
-        // source pixel owns the destination columns between its own rounded
-        // edges, with no gap and no overlap.
-        let left = (-(half as f32) * scale).round() as i32;
-        for j in 0..side {
-            let ay = left + (j as f32 * scale).round() as i32;
-            let by = left + ((j as f32 + 1.0) * scale).round() as i32;
-            for i in 0..side {
-                let c = src.pixel_at(i, j);
-                if c == under.pixel_at(i, j) {
-                    continue;
-                }
-                let ax = left + (i as f32 * scale).round() as i32;
-                let bx = left + ((i as f32 + 1.0) * scale).round() as i32;
-                pb.rect_fill(sx + ax, sy + ay, bx - ax, by - ay, c);
-            }
-        }
-        self.giant_scratch = (src, under);
+    fn draw_giant_rat(&self, pb: &mut PixelBuffer, cam: Vec2, scale: f32, tail_flash: f32) {
+        art_rat_giant::draw_giant_rat(pb, &self.player, self.elapsed, cam, scale, tail_flash);
         // The live lash at its ordinary size, over the giant.
         if self.whip_chain.is_active() {
             art_rat::draw_live_whip(
@@ -3871,13 +3795,6 @@ const DAMAGE_CLEAR_RADIUS: f32 = 26.0;
 /// Extra cells to draw around the viewport: wall art casts shadows up to 4 px
 /// south/east and the overhang layer reaches a few pixels up.
 const WALL_DRAW_MARGIN: i32 = 1;
-
-/// **Growth Serum** (batch 13): half the side of the offscreen window the giant
-/// rat is rasterised into before it is blitted back at five times the size.
-/// 37 × 37 covers the body, the feet, the face and the resting tail (the tail is
-/// 13 px, and 27 px at a full Tail Thrash charge) with a pixel of slack; the long
-/// weapon effects keep their ordinary size and stay out of it.
-const GIANT_SRC_HALF: i32 = 18;
 
 /// The scale the giant rat is drawn at, or `None` when the find is not running.
 ///
