@@ -7654,7 +7654,20 @@ mod tests {
                         weapon.level = kind.max_level();
                         weapon.timer = 0.0;
                     }
-                    w.player.face = crate::math::Vec2::new(1.0, 0.0);
+                    // `RATRUN_DUMP_FACE=x,y` turns the rat (and the laser's fan
+                    // of targets with it): `0,-1` aims at the near top edge.
+                    let face = std::env::var("RATRUN_DUMP_FACE")
+                        .ok()
+                        .and_then(|v| {
+                            let (a, b) = v.split_once(',')?;
+                            Some(crate::math::Vec2::new(
+                                a.trim().parse::<f32>().ok()?,
+                                b.trim().parse::<f32>().ok()?,
+                            ))
+                        })
+                        .unwrap_or(crate::math::Vec2::new(1.0, 0.0));
+                    let turn = face.y.atan2(face.x);
+                    w.player.face = face;
                     w.player.dash_cd = 0.0;
                     // Untouchable, so the capture is the weapon and not the
                     // rat's hurt flash.
@@ -7665,7 +7678,7 @@ mod tests {
                         // A loose fan in front: bodies at three distances, so
                         // the sweep's 3-5 bars are each visible crossing one.
                         for i in 0..12 {
-                            let a = -0.45 + (i % 6) as f32 * 0.18;
+                            let a = turn - 0.45 + (i % 6) as f32 * 0.18;
                             let r = 18.0 + (i / 6) as f32 * 10.0;
                             let at = p + crate::math::Vec2::from_angle(a) * r;
                             w.spawn_enemy_with_rng(
@@ -8498,7 +8511,14 @@ mod tests {
                     let w = hh.app.world.as_mut().unwrap();
                     w.elapsed = 150.0;
                 }
-                for tick in 0..630u32 {
+                // `RATRUN_DUMP_GIANT_TICKS` changes where in the walk square
+                // the capture stops (45 ticks a side): 630 faces down, 585
+                // right, 675 left, 720 up.
+                let ticks = std::env::var("RATRUN_DUMP_GIANT_TICKS")
+                    .ok()
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(630);
+                for tick in 0..ticks {
                     if tick == 480 {
                         let w = hh.app.world.as_mut().unwrap();
                         w.player.buffs.giant =
@@ -8936,6 +8956,126 @@ mod tests {
                     hh.app.picture_dirty = true;
                     hh.app.console_paused = true;
                     hh.frame(&[]);
+                }
+            }
+        }
+        // `RATRUN_DUMP_PUDDLE=n|lamp` stands the rat on the n-th nearest puddle
+        // (`lamp`: the puddle whose centre is nearest a light fixture).
+        // `RATRUN_DUMP_PUDDLE_RAT=dx,dy` offsets the rat from its centre,
+        // `RATRUN_DUMP_PUDDLE_HORDE=n` rings it with ground fodder and
+        // `RATRUN_DUMP_PUDDLE_WALK=n` then plays n live frames walking right
+        // (ripples under the rat and the waders); without it the frame is held.
+        if let Ok(which) = std::env::var("RATRUN_DUMP_PUDDLE") {
+            let rat_off = std::env::var("RATRUN_DUMP_PUDDLE_RAT")
+                .ok()
+                .and_then(|v| {
+                    let (a, b) = v.split_once(',')?;
+                    Some(Vec2::new(a.trim().parse::<f32>().ok()?, b.trim().parse::<f32>().ok()?))
+                })
+                .unwrap_or(Vec2::ZERO);
+            let horde = std::env::var("RATRUN_DUMP_PUDDLE_HORDE")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
+            let walk = std::env::var("RATRUN_DUMP_PUDDLE_WALK")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok());
+            let mut staged = false;
+            if let Some(w) = hh.app.world.as_mut() {
+                let p = w.player.pos;
+                let mut puddles = w.level.puddles.clone();
+                if which == "lamp" {
+                    let lights = &w.level.objects.lights;
+                    let near = |q: Vec2| {
+                        lights.iter().map(|l| l.pos.dist(q)).fold(f32::MAX, f32::min)
+                    };
+                    puddles.sort_by(|a, b| near(a.pos).partial_cmp(&near(b.pos)).unwrap());
+                } else {
+                    puddles.sort_by(|a, b| a.pos.dist(p).partial_cmp(&b.pos.dist(p)).unwrap());
+                }
+                let n = which.parse::<usize>().unwrap_or(0);
+                if let Some(puddle) = puddles.get(n).copied() {
+                    eprintln!("dump puddle: {puddle:?}");
+                    w.clear_enemies();
+                    w.player.pos = w
+                        .level
+                        .tiles
+                        .nearest_open_center(
+                            puddle.pos + rat_off,
+                            crate::game::collision::SizeClass::Small,
+                            16,
+                        )
+                        .unwrap_or(puddle.pos);
+                    w.player.hp = w.player.max_hp();
+                    w.player.iframes = 30.0;
+                    let rat = w.player.pos;
+                    for k in 0..horde {
+                        let ang = k as f32 / horde.max(1) as f32 * std::f32::consts::TAU;
+                        let q = rat + Vec2::new(ang.cos(), ang.sin()) * (24.0 + (k % 3) as f32 * 10.0);
+                        if w.level.tiles.get_at(q).is_open() {
+                            w.spawn_enemy(crate::game::enemy::EnemyKind::Skitterer, q, 60.0);
+                        }
+                    }
+                    staged = true;
+                }
+            }
+            if staged {
+                hh.app.picture_dirty = true;
+                match walk {
+                    Some(frames) => {
+                        for _ in 0..frames {
+                            if let Some(w) = hh.app.world.as_mut() {
+                                w.player.hp = w.player.max_hp();
+                            }
+                            hh.frame(&[KeyCode::Right]);
+                        }
+                    }
+                    None => {
+                        hh.app.console_paused = true;
+                        hh.frame(&[]);
+                    }
+                }
+            }
+        }
+        // `RATRUN_DUMP_EMITTER=steam|drip|fumes[:n]` stands the rat 30 px below
+        // the n-th nearest ambient emitter of that kind.
+        if let Ok(spec) = std::env::var("RATRUN_DUMP_EMITTER") {
+            use crate::game::level::EmitterKind;
+            let (name, n) = spec.split_once(':').unwrap_or((spec.as_str(), "0"));
+            let n = n.parse::<usize>().unwrap_or(0);
+            let kind = match name {
+                "drip" => EmitterKind::Drip,
+                "fumes" => EmitterKind::Fumes,
+                _ => EmitterKind::Steam,
+            };
+            if let Some(w) = hh.app.world.as_mut() {
+                let p = w.player.pos;
+                let mut list: Vec<_> = w
+                    .level
+                    .objects
+                    .emitters
+                    .iter()
+                    .filter(|e| e.kind == kind)
+                    .copied()
+                    .collect();
+                list.sort_by(|a, b| a.pos.dist(p).partial_cmp(&b.pos.dist(p)).unwrap());
+                if let Some(e) = list.get(n).copied() {
+                    eprintln!("dump emitter: {e:?}");
+                    w.clear_enemies();
+                    w.player.pos = w
+                        .level
+                        .tiles
+                        .nearest_open_center(
+                            e.pos + Vec2::new(0.0, 30.0),
+                            crate::game::collision::SizeClass::Small,
+                            16,
+                        )
+                        .unwrap_or(e.pos);
+                    hh.app.picture_dirty = true;
+                    hh.app.console_paused = true;
+                    hh.frame(&[]);
+                } else {
+                    eprintln!("dump emitter: none of kind {name}");
                 }
             }
         }

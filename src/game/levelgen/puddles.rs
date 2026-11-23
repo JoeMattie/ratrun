@@ -77,9 +77,9 @@ const BIAS_CHANCE: f32 = 0.8;
 /// get none.
 pub fn count_for(theme: Theme) -> Option<(usize, usize)> {
     match theme {
-        Theme::Sewer => Some((26, 34)),
-        Theme::Laundry => Some((10, 14)),
-        Theme::Kitchen => Some((4, 6)),
+        Theme::Sewer => Some((225, 255)),
+        Theme::Laundry => Some((22, 30)),
+        Theme::Kitchen => Some((8, 12)),
         Theme::Lab | Theme::Printworks | Theme::Trailer => None,
     }
 }
@@ -132,23 +132,32 @@ pub(super) fn place(level: &mut Level, attempt: u32) {
 /// Both axes stay inside the contract's band (half-width `24..=90`, half-height
 /// `14..=60`). Three bands, because the three wet floors want different water:
 /// the Sewer wants big blobs that merge — top-heavy in the band, because the
-/// count is fixed at 26–34 and the area target (~18 % of the floor) has to come
+/// count is 96–112 and the area target (~18 % of the floor) has to come
 /// out of their size — and, in a corridor, a long one along the corridor's axis
 /// so a walk down it is wet all the way. The Laundry takes medium ones and the
 /// Kitchen small spills.
 fn size_for(level: &Level, cx: i32, cy: i32, rng: &mut rand::rngs::StdRng) -> (f32, f32) {
     match level.theme {
         Theme::Sewer => {
+            // Three in ten are the big sheets (a corridor's runs along its long
+            // axis and the walls are drawn over its rim); the rest are pools
+            // small enough for their whole shore to sit inside a 120 x 80 px
+            // view. A sheet wider than the screen has no visible edge, and
+            // without an edge it did not read as water at all.
+            let big = rng.random_range(0..10) < 3;
             if let Some(room) = corridor_at(level, cx, cy) {
-                // Along the corridor's long axis; the walls are drawn over the
-                // rim, which is exactly the "long wet stretch" the brief wants.
-                return if room.w >= room.h {
-                    (rng.random_range(78.0..=90.0), rng.random_range(34.0..=44.0))
-                } else {
-                    (rng.random_range(34.0..=44.0), rng.random_range(48.0..=60.0))
+                return match (big, room.w >= room.h) {
+                    (true, true) => (rng.random_range(78.0..=90.0), rng.random_range(34.0..=44.0)),
+                    (true, false) => (rng.random_range(34.0..=44.0), rng.random_range(48.0..=60.0)),
+                    (false, true) => (rng.random_range(34.0..=52.0), rng.random_range(14.0..=22.0)),
+                    (false, false) => (rng.random_range(24.0..=30.0), rng.random_range(22.0..=34.0)),
                 };
             }
-            (rng.random_range(64.0..=90.0), rng.random_range(44.0..=60.0))
+            if big {
+                (rng.random_range(64.0..=90.0), rng.random_range(44.0..=60.0))
+            } else {
+                (rng.random_range(24.0..=46.0), rng.random_range(14.0..=30.0))
+            }
         }
         Theme::Laundry => (rng.random_range(30.0..=64.0), rng.random_range(20.0..=44.0)),
         // Kitchen spills: small, and slightly wider than deep, like a splash on
@@ -508,6 +517,9 @@ mod tests {
                 let wet = cells.iter().filter(|&&c| level.wet_at(c)).count();
                 shares.push(wet as f32 / cells.len().max(1) as f32);
             }
+            let per_seed: Vec<String> =
+                shares.iter().take(5).map(|s| format!("{:.1}", s * 100.0)).collect();
+            println!("{theme:?}: first five seeds, % wet: {}", per_seed.join(" / "));
             shares.sort_by(|a, b| a.total_cmp(b));
             let median = shares[shares.len() / 2];
             let mean_px = levels
@@ -530,7 +542,7 @@ mod tests {
     fn the_sewer_is_biased_to_corridors_and_walls() {
         // Not a statistical claim: on every seed, most of the Sewer's puddles
         // sit on a corridor cell or against a wall (the bias is 4:1 by design,
-        // so this cannot be flaky at 26+ puddles a map).
+        // so this cannot be flaky at 96+ puddles a map).
         for level in levels(Theme::Sewer) {
             let biased = level
                 .puddles

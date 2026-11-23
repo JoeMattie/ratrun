@@ -115,16 +115,20 @@ pub const GLYPHS: [char; 9] = ['·', '∙', '◦', '✦', '✧', '•', '°', '�
 /// treated as an edge (a wall border, a seam, a sprite outline) and left alone.
 /// The mock used 48…62 for ambient glyphs; a glyph costs 18 px of split, and
 /// below 40 the two halves were already reading as one flat patch.
-pub const EDGE_GUARD: u16 = 40;
+pub const EDGE_GUARD: u16 = 60;
 
 /// Cells within this Chebyshev distance of the rat's own cell are never
 /// written: the silhouette, its dash arc and every digit over it stay intact.
 const RAT_CLEAR: i32 = 2;
 
+/// Rows above and below a damage number's own cell that belong to its digits
+/// (seven to nine screen pixels tall, plus the pop's rise).
+const DIGIT_CLEAR_ROWS: i32 = 3;
+
 /// A dust mote only sits where the cell's mean luma says "lit pool". The
 /// mock's simple version of the brightness test (the median comparison it also
 /// tried was not worth the extra pass).
-const MOTE_LUMA_MIN: u8 = 70;
+const MOTE_LUMA_MIN: u8 = 56;
 
 // ---------------------------------------------------------------------------
 // Colours
@@ -133,14 +137,14 @@ const MOTE_LUMA_MIN: u8 = 70;
 /// Warm white a mote is lifted toward off the cell average.
 const MOTE_TINT: Rgb = (255, 236, 200);
 /// Lift off the cell average, in percent.
-const MOTE_LIFT: u8 = 35;
+const MOTE_LIFT: u8 = 62;
 
 /// Pale teal for the damp floors' drips and fumes.
 const BUBBLE_TEAL: Rgb = (156, 232, 218);
 /// Steam reads white, not tinted.
 const BUBBLE_WHITE: Rgb = (232, 240, 246);
 /// Lift off the cell average, in percent.
-const BUBBLE_LIFT: u8 = 25;
+const BUBBLE_LIFT: u8 = 48;
 
 /// Spark steps, hottest first: white-hot → gold → cooling ember.
 const SPARK_HOT: [Rgb; 3] = [(255, 250, 235), (255, 214, 120), (255, 140, 60)];
@@ -162,7 +166,7 @@ const BUBBLE_GLYPHS: [char; 4] = ['°', '◦', '○', '◌'];
 const MOTE_LATTICE: i32 = 2;
 /// One slot in `MOTE_ONE_IN` carries a mote. At a 120×40 view that is about
 /// 32 candidates, inside the mock's 20–40 band; the cap then takes 20.
-const MOTE_ONE_IN: u64 = 128;
+const MOTE_ONE_IN: u64 = 64;
 const MOTE_GATE: u64 = 3;
 /// A mote steps one cell sideways every 1.5 s…
 const MOTE_DRIFT_STEPS: u64 = 12;
@@ -256,23 +260,54 @@ impl GlyphFx {
         scene: &Scene,
     ) {
         let depth = term::color_depth();
+        // The picture's own say on a cell, beyond the per-cell guard in
+        // `stamp`: its mean colour must also sit within `EDGE_GUARD` of each
+        // of its four neighbours'. A pellet, a loot marker, a gem or a sprite
+        // edge is a small bright feature, so every cell of one (and every cell
+        // beside one) differs from a neighbour and is left alone; open floor
+        // under a lamp's gradient does not.
+        let mean = |lx: i32, ly: i32| -> Option<Rgb> {
+            if lx < 0 || ly < 0 {
+                return None;
+            }
+            let (lx, ly) = (lx as usize, ly as usize);
+            if lx >= pixels.w || ly * 2 + 1 >= pixels.h {
+                return None;
+            }
+            Some(average(pixels.pixel_at(lx, ly * 2), pixels.pixel_at(lx, ly * 2 + 1)))
+        };
+        let calm = |cx: i32, cy: i32| {
+            let (lx, ly) = (cx - area.x as i32, cy - area.y as i32);
+            let Some(here) = mean(lx, ly) else {
+                return false;
+            };
+            [(-1, 0), (1, 0), (0, -1), (0, 1)].into_iter().all(|(dx, dy)| {
+                mean(lx + dx, ly + dy).is_none_or(|n| contrast(here, n) < EDGE_GUARD)
+            })
+        };
         // A mote slot only counts toward the cap where its cell is a lit, flat
         // patch: without this the first twenty slots in scan order (the top
         // rows of the view) spent the whole cap whether or not they could show.
         let lit = |cx: i32, cy: i32| {
-            let lx = (cx - area.x as i32) as usize;
-            let ly = (cy - area.y as i32) as usize;
-            if lx >= pixels.w || ly * 2 + 1 >= pixels.h {
+            let (lx, ly) = (cx - area.x as i32, cy - area.y as i32);
+            if lx < 0 || ly < 0 || lx as usize >= pixels.w || ly as usize * 2 + 1 >= pixels.h {
                 return false;
             }
-            let top = pixels.pixel_at(lx, ly * 2);
-            let bot = pixels.pixel_at(lx, ly * 2 + 1);
+            let top = pixels.pixel_at(lx as usize, ly as usize * 2);
+            let bot = pixels.pixel_at(lx as usize, ly as usize * 2 + 1);
             contrast(top, bot) < EDGE_GUARD
                 && luma(average(top, bot)) >= u32::from(MOTE_LUMA_MIN)
+                && calm(cx, cy)
+                && !scene.near_rat(cx, cy)
+                && !scene.near_digit(cx, cy)
         };
         let batch = collect_lit(scene, lit);
         for g in batch.as_slice() {
-            if !scene.inside(g.cx, g.cy) || scene.near_rat(g.cx, g.cy) {
+            if !scene.inside(g.cx, g.cy)
+                || scene.near_rat(g.cx, g.cy)
+                || scene.near_digit(g.cx, g.cy)
+                || !calm(g.cx, g.cy)
+            {
                 continue;
             }
             let lx = (g.cx - area.x as i32) as usize;
@@ -439,6 +474,27 @@ impl<'a> Scene<'a> {
         let (rx, ry) = self.cell(self.rat);
         (cx - rx).abs() <= RAT_CLEAR && (cy - ry).abs() <= RAT_CLEAR
     }
+
+    /// The half-width, in cells, of the box a damage number's digits are
+    /// printed in (a digit is four screen pixels wide with its gap, bold ones
+    /// five, plus the dark plate's margin).
+    fn digit_half_width(dn: &DamageNumber) -> i32 {
+        let digits = dn.display_value().max(1).ilog10() as i32 + 1;
+        let per = if dn.is_big() { 5 } else { 4 };
+        (digits * per) / 2 + 3
+    }
+
+    /// Inside the box of a live damage number: the digits are text, and a
+    /// particle on one makes it a different number.
+    pub fn near_digit(&self, cx: i32, cy: i32) -> bool {
+        self.hits.iter().any(|dn| {
+            if !dn.visible() {
+                return false;
+            }
+            let (ax, ay) = self.cell(dn.pos);
+            (cx - ax).abs() <= Self::digit_half_width(dn) && (cy - ay).abs() <= DIGIT_CLEAR_ROWS
+        })
+    }
 }
 
 /// The held step [`STEP_HZ`] a given elapsed time is on. Saturating, so a
@@ -592,10 +648,18 @@ fn sparks(scene: &Scene, cap: usize, out: &mut Batch) {
                 return;
             }
             let hk = hash(h, k as u64, 0x5350_4152_4B00);
-            let ox = (hk % (2 * SPARK_REACH + 1) as u64) as i32 - SPARK_REACH;
-            let oy = ((hk >> 8) % (2 * SPARK_REACH + 1) as u64) as i32 - SPARK_REACH;
-            let cx = ax + ox + ox.signum() * t;
-            let cy = ay + oy - t;
+            // Sparks fly from the *edge* of the number's own box, never from
+            // inside it: mostly out of the sides (where the struck body is),
+            // one in three from above.
+            let half = Scene::digit_half_width(dn);
+            let side = if hk & 1 == 0 { 1 } else { -1 };
+            let (cx, cy) = if (hk >> 1).is_multiple_of(3) {
+                let ox = ((hk >> 8) % (2 * SPARK_REACH + 1) as u64) as i32 - SPARK_REACH;
+                (ax + ox + ox.signum() * t, ay - DIGIT_CLEAR_ROWS - 1 - t)
+            } else {
+                let oy = ((hk >> 8) % (2 * SPARK_REACH + 1) as u64) as i32 - SPARK_REACH;
+                (ax + side * (half + 1 + t), ay + oy)
+            };
             if !scene.inside(cx, cy) {
                 continue;
             }

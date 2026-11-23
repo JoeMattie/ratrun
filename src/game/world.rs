@@ -3487,12 +3487,30 @@ impl World {
         let pen = pb.set_pen(crate::render::lighting::pool_pen());
         let theme = self.level.theme;
         let elapsed = self.elapsed;
+        // The puddles in view, on the stack (the Sewer has a couple of hundred
+        // a map but only a handful a screen): each is drawn knowing the others,
+        // so merged puddles share one shoreline. Past the array's size the
+        // extras are still drawn, just without that knowledge.
+        let mut seen = [crate::game::level::Puddle {
+            pos: Vec2::ZERO,
+            rx: 0.0,
+            ry: 0.0,
+            seed: 0,
+        }; PUDDLES_IN_VIEW];
+        let mut count = 0;
+        for puddle in &self.level.puddles {
+            let margin = puddle.rx.max(puddle.ry) + 2.0;
+            if on_screen(self.w2s(puddle.pos, cam), margin, viewport) && count < PUDDLES_IN_VIEW {
+                seen[count] = *puddle;
+                count += 1;
+            }
+        }
         for puddle in &self.level.puddles {
             let margin = puddle.rx.max(puddle.ry) + 2.0;
             if !on_screen(self.w2s(puddle.pos, cam), margin, viewport) {
                 continue;
             }
-            art_puddle::draw_puddle(pb, puddle, cam, elapsed, theme);
+            art_puddle::draw_puddle_among(pb, puddle, &seen[..count], cam, elapsed, theme);
         }
         // The ripples come straight from the resource the footstep system
         // writes; between ticks it is the ECS world's own (never a facade
@@ -3858,6 +3876,10 @@ const WALL_DRAW_MARGIN: i32 = 1;
 /// `art_puddle::draw_ripple` draws, in px (it is a screen-space effect, so this
 /// is not a world radius).
 const RIPPLE_DRAW_MARGIN: f32 = 26.0;
+
+/// How many on-screen puddles `draw_puddles` lets each other know about (the
+/// shared shoreline of merged puddles). A 2x view of the Sewer holds about 20.
+const PUDDLES_IN_VIEW: usize = 48;
 
 /// The scale the giant rat is drawn at, or `None` when the find is not running.
 ///

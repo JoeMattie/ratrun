@@ -161,7 +161,9 @@ pub(super) const fn params(kind: MaterialKind) -> MaterialParams {
         MaterialKind::Glass => p(180, 96, 140, 0),
         MaterialKind::Grease => p(110, 20, 60, 60),
         MaterialKind::Ink => p(120, 32, 150, 40),
-        MaterialKind::Water => p(160, 64, 200, 30),
+        // Batch fourteen: 160/200 → 210/255, so a lamp's streak and glint on a
+        // puddle are the brightest wet response on any floor.
+        MaterialKind::Water => p(210, 64, 255, 30),
         MaterialKind::Fur => p(12, 6, 0, 0),
         MaterialKind::Slime => MaterialParams {
             gloss: 200,

@@ -46,50 +46,55 @@ struct WaterStyle {
 }
 
 fn style_for(theme: Theme) -> WaterStyle {
+    // Tuned on captures (batch fourteen): the first pass darkened the floor
+    // toward a near-black tint, which read as a shadow or a hole on the dark
+    // floors and vanished in an unlit room. Water is now a *cooler, slightly
+    // lighter* sheet than the stone under it, closed by a dark waterline and
+    // a pale meniscus all the way round, so the shore is the shape.
     match theme {
         Theme::Sewer => WaterStyle {
-            darken: 0.74,
-            tint: (7, 26, 26), // murky green-teal
-            body_alpha: 0.52,
-            rim_tint: (4, 11, 11),
-            rim_alpha: 0.62,
-            ul_highlight: (52, 108, 102),
-            ul_alpha: 0.50,
-            shimmer: (48, 98, 94),
-            shimmer_alpha: 0.42,
+            darken: 0.92,
+            tint: (28, 72, 82), // cool teal sheet
+            body_alpha: 0.58,
+            rim_tint: (5, 14, 16),
+            rim_alpha: 0.60,
+            ul_highlight: (112, 184, 180),
+            ul_alpha: 0.72,
+            shimmer: (132, 196, 190),
+            shimmer_alpha: 0.60,
         },
         Theme::Laundry => WaterStyle {
-            darken: 0.84,
-            tint: (54, 74, 92), // soapy pale blue-grey
-            body_alpha: 0.46,
+            darken: 0.92,
+            tint: (62, 86, 108), // soapy pale blue-grey
+            body_alpha: 0.50,
             rim_tint: (18, 24, 38),
             rim_alpha: 0.56,
-            ul_highlight: (106, 136, 150),
-            ul_alpha: 0.48,
-            shimmer: (104, 132, 148),
-            shimmer_alpha: 0.38,
+            ul_highlight: (128, 160, 176),
+            ul_alpha: 0.56,
+            shimmer: (140, 170, 186),
+            shimmer_alpha: 0.50,
         },
         Theme::Kitchen => WaterStyle {
-            darken: 0.86,
-            tint: (44, 54, 58), // thin pale spill
-            body_alpha: 0.34,
+            darken: 0.90,
+            tint: (52, 66, 74), // thin pale spill
+            body_alpha: 0.40,
             rim_tint: (16, 14, 14),
-            rim_alpha: 0.46,
-            ul_highlight: (96, 112, 116),
-            ul_alpha: 0.42,
-            shimmer: (88, 104, 108),
-            shimmer_alpha: 0.30,
+            rim_alpha: 0.50,
+            ul_highlight: (120, 138, 144),
+            ul_alpha: 0.50,
+            shimmer: (120, 138, 144),
+            shimmer_alpha: 0.42,
         },
         Theme::Lab | Theme::Printworks | Theme::Trailer => WaterStyle {
-            darken: 0.82,
-            tint: (30, 44, 52),
-            body_alpha: 0.40,
+            darken: 0.90,
+            tint: (36, 54, 64),
+            body_alpha: 0.44,
             rim_tint: (12, 18, 22),
             rim_alpha: 0.50,
-            ul_highlight: (86, 112, 120),
-            ul_alpha: 0.44,
-            shimmer: (78, 104, 112),
-            shimmer_alpha: 0.34,
+            ul_highlight: (104, 132, 140),
+            ul_alpha: 0.50,
+            shimmer: (104, 132, 140),
+            shimmer_alpha: 0.42,
         },
     }
 }
@@ -111,6 +116,21 @@ fn hash3(x: i32, y: i32, z: u32) -> u32 {
 /// Writes through [`PixelBuffer::plot`] so only pixels strictly inside the
 /// puddle (`depth > 0.0`) receive the caller's active material pen.
 pub fn draw_puddle(pb: &mut PixelBuffer, puddle: &Puddle, cam: Vec2, elapsed: f32, theme: Theme) {
+    draw_puddle_among(pb, puddle, &[], cam, elapsed, theme);
+}
+
+/// [`draw_puddle`] for a puddle that overlaps others: `neighbours` are the
+/// puddles on screen with it (it may be among them). A shore pixel that is deep
+/// inside a neighbour is drawn as open water, so a run of merged puddles has
+/// one waterline round the whole sheet and none across it.
+pub fn draw_puddle_among(
+    pb: &mut PixelBuffer,
+    puddle: &Puddle,
+    neighbours: &[Puddle],
+    cam: Vec2,
+    elapsed: f32,
+    theme: Theme,
+) {
     if pb.w == 0 || pb.h == 0 || puddle.rx <= 0.0 || puddle.ry <= 0.0 {
         return;
     }
@@ -146,9 +166,22 @@ pub fn draw_puddle(pb: &mut PixelBuffer, puddle: &Puddle, cam: Vec2, elapsed: f3
         for sx in x0..=x1 {
             let wx = sx + cam_x;
             let wx_f = wx as f32 + 0.5;
-            let depth = puddle.depth(Vec2::new(wx_f, wy_f));
+            let here = Vec2::new(wx_f, wy_f);
+            let mut depth = puddle.depth(here);
             if depth <= 0.0 {
                 continue;
+            }
+            if depth <= 0.37 {
+                // The shore band: the sheet's depth here is the deepest of
+                // the puddles that cover it.
+                for other in neighbours {
+                    if (wx_f - other.pos.x).abs() < other.rx
+                        && (wy_f - other.pos.y).abs() < other.ry
+                        && other != puddle
+                    {
+                        depth = depth.max(other.depth(here));
+                    }
+                }
             }
 
             let already_wet =
@@ -171,15 +204,17 @@ pub fn draw_puddle(pb: &mut PixelBuffer, puddle: &Puddle, cam: Vec2, elapsed: f3
                     // 1-px darker waterline rim right at the wet meniscus.
                     c = mix(c, style.rim_tint, style.rim_alpha);
                 } else if depth <= 0.37 {
-                    // Broken lighter highlight along the upper-left arc.
+                    // The pale meniscus just inside the waterline: solid on the
+                    // upper-left arc (the key light), broken and fainter round
+                    // the rest, so the whole shore is drawn.
                     let nx = (wx_f - puddle.pos.x) * inv_rx;
                     let ul = -(nx * 0.72 + ny * 0.70);
-                    if ul > 0.34 {
-                        let h = hash3(wx.div_euclid(3), wy.div_euclid(2), puddle.seed ^ 0x51A);
-                        if (h & 7) < 4 {
-                            let strength = ((ul - 0.34) * 1.6).clamp(0.0, 1.0);
-                            c = mix(c, style.ul_highlight, style.ul_alpha * strength);
-                        }
+                    let h = hash3(wx.div_euclid(3), wy.div_euclid(2), puddle.seed ^ 0x51A);
+                    if ul > 0.20 {
+                        let strength = (0.55 + (ul - 0.20) * 1.2).clamp(0.0, 1.0);
+                        c = mix(c, style.ul_highlight, style.ul_alpha * strength);
+                    } else if (h & 7) < 5 {
+                        c = mix(c, style.ul_highlight, style.ul_alpha * 0.42);
                     }
                 }
                 c
@@ -202,6 +237,16 @@ pub fn draw_puddle(pb: &mut PixelBuffer, puddle: &Puddle, cam: Vec2, elapsed: f3
                     && (step.wrapping_add(phase) & 7) == 0
                 {
                     col = mix(col, style.shimmer, style.shimmer_alpha * depth);
+                }
+                // Still wavelets: a faint 3 px dash in one cell of three, the
+                // surface texture that tells a sheet of water wider than the
+                // view from the dry stone beside it. Never animated.
+                if !already_wet && (ch >> 16).is_multiple_of(3) {
+                    let wy_off = ((ch >> 20) % 6) as i32;
+                    let wx_off = ((ch >> 24) % 7) as i32;
+                    if oy == wy_off && (wx_off..wx_off + 3).contains(&ox) {
+                        col = mix(col, style.ul_highlight, 0.20 * depth);
+                    }
                 }
 
                 // Stationary theme-specific floating accents.

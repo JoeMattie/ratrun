@@ -180,7 +180,7 @@ pub fn puddle_steps_system(
         if !on_the_floor(level.theme, enemy.kind) {
             continue;
         }
-        if !level.wet_at(enemy.pos) || !in_sim_view(enemy.pos, pos, viewport.0) {
+        if !in_sim_view(enemy.pos, pos, viewport.0) || !level.wet_at(enemy.pos) {
             continue;
         }
         order.push((id.0, enemy.pos));
@@ -270,7 +270,14 @@ mod tests {
                     continue;
                 }
                 let centre = TileMap::tile_rect(cx, cy).center();
-                if !w.level.wet_at(centre) && centre.dist(from) > 160.0 {
+                // Dry all round, with room to walk: the Sewer is a fifth
+                // water, so a dry cell alone can be a step from a puddle.
+                let clear = (-6..=6).all(|i| {
+                    (-2..=2).all(|j| {
+                        !w.level.wet_at(centre + Vec2::new(i as f32 * 8.0, j as f32 * 8.0))
+                    })
+                });
+                if clear && centre.dist(from) > 160.0 {
                     return centre;
                 }
             }
