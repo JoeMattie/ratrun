@@ -297,11 +297,16 @@ pub enum Sfx {
     ApproachGravel,
     /// Flatbed flying fodder: a loose-washer rattle.
     ApproachWasher,
+    // ---- Wet floor puddles: footstep splash and heavy slosh ----
+    /// One soft footstep splash in a puddle (~90 ms).
+    Splash,
+    /// Heavier slosh (dash through water, heavy body landing, ~160 ms).
+    SplashBig,
 }
 
 impl Sfx {
     /// Every effect, in cache order. `index` must agree with this ordering.
-    pub const ALL: [Sfx; 165] = [
+    pub const ALL: [Sfx; 167] = [
         Sfx::Shoot,
         Sfx::Hit,
         Sfx::Kill,
@@ -490,6 +495,9 @@ impl Sfx {
         Sfx::ApproachPaperFlap,
         Sfx::ApproachGravel,
         Sfx::ApproachWasher,
+        // Wet floor puddles.
+        Sfx::Splash,
+        Sfx::SplashBig,
     ];
 
     /// Short uppercase identifier for diagnostics and logging.
@@ -660,6 +668,8 @@ impl Sfx {
             Sfx::ApproachPaperFlap => "APPROACH_PAPER_FLAP",
             Sfx::ApproachGravel => "APPROACH_GRAVEL",
             Sfx::ApproachWasher => "APPROACH_WASHER",
+            Sfx::Splash => "SPLASH",
+            Sfx::SplashBig => "SPLASH_BIG",
         }
     }
 
@@ -818,6 +828,8 @@ impl Sfx {
             | Sfx::ApproachPaperFlap
             | Sfx::ApproachGravel
             | Sfx::ApproachWasher => APPROACH_TAKES,
+            // Wet-floor footstep splashes: three slight variations to avoid fatigue.
+            Sfx::Splash | Sfx::SplashBig => 3,
         }
     }
 
@@ -972,6 +984,18 @@ impl Sfx {
             | Sfx::ApproachPaperFlap
             | Sfx::ApproachGravel
             | Sfx::ApproachWasher => 0,
+            // Puddle splashes: lowest priority so footsteps never mask combat.
+            Sfx::Splash | Sfx::SplashBig => 0,
+        }
+    }
+
+    /// Minimum spacing in milliseconds between consecutive plays of this effect
+    /// (`0` = unthrottled). Keeps rapid walking splashes from fatiguing or
+    /// crowding the mixer.
+    pub(crate) fn min_spacing_ms(self) -> u64 {
+        match self {
+            Sfx::Splash | Sfx::SplashBig => 70,
+            _ => 0,
         }
     }
 
@@ -10154,6 +10178,128 @@ pub fn sfx_variant_samples(sfx: Sfx, variant: usize) -> Vec<f32> {
             });
             m.finish(APPROACH_PEAK, 1.1, 3.0, 24.0)
         }
+
+        // Wet floor footstep splash (~90 ms): soft filtered-noise "plip" with
+        // a quick downward pitch-swept sine blip underneath, quiet enough to
+        // play ~6×/s without fatigue or masking combat.
+        Sfx::Splash => {
+            const PITCH: [f32; 3] = [1.0, 1.11, 0.90];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.090);
+            // Soft filtered-noise spray ("plip" onset).
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.072,
+                pink: false,
+                gain: 0.44,
+                attack_s: 0.004,
+                decay_pow: 1.45,
+                filter: FilterMode::BandPass,
+                fc0: 2350.0 * p,
+                fc1: 1050.0 * p,
+                fc_pow: 0.80,
+                q: 1.65,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // Quick downward pitch-swept sine blip underneath.
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.052,
+                f0: 740.0 * p,
+                f1: 275.0 * p,
+                pitch_pow: 0.62,
+                wave: Wave::Sine,
+                gain: 0.38,
+                attack_s: 0.0035,
+                decay_pow: 1.55,
+                ..Default::default()
+            });
+            // Soft water-settle pink tail.
+            m.add_noise(NoiseLayer {
+                start_s: 0.014,
+                dur_s: 0.072,
+                pink: true,
+                gain: 0.34,
+                attack_s: 0.008,
+                decay_pow: 1.35,
+                filter: FilterMode::BandPass,
+                fc0: 1450.0 * p,
+                fc1: 680.0 * p,
+                fc_pow: 0.90,
+                q: 1.35,
+                seed: base_seed ^ 0x47,
+                ..Default::default()
+            });
+            m.finish(0.19, 1.05, 3.0, 16.0)
+        }
+
+        // Heavy wet slosh (~160 ms): dash through water or a heavy landing.
+        // Lower pitched with a fuller noise wash and trailing liquid gulp.
+        Sfx::SplashBig => {
+            const PITCH: [f32; 3] = [1.0, 0.91, 1.09];
+            let p = PITCH[v];
+            let mut m = MixBuf::new(0.160);
+            // Low wet impact body.
+            m.add_osc(OscLayer {
+                start_s: 0.0,
+                dur_s: 0.088,
+                f0: 310.0 * p,
+                f1: 108.0 * p,
+                pitch_pow: 0.58,
+                wave: Wave::Sine,
+                gain: 0.40,
+                attack_s: 0.0045,
+                decay_pow: 1.45,
+                ..Default::default()
+            });
+            // Full sloshing pink-noise body.
+            m.add_noise(NoiseLayer {
+                start_s: 0.0,
+                dur_s: 0.148,
+                pink: true,
+                gain: 0.64,
+                attack_s: 0.006,
+                decay_pow: 1.25,
+                filter: FilterMode::BandPass,
+                fc0: 1400.0 * p,
+                fc1: 460.0 * p,
+                fc_pow: 0.75,
+                q: 1.10,
+                seed: base_seed,
+                ..Default::default()
+            });
+            // Water-spray wash on top.
+            m.add_noise(NoiseLayer {
+                start_s: 0.008,
+                dur_s: 0.142,
+                pink: false,
+                gain: 0.32,
+                attack_s: 0.009,
+                decay_pow: 1.45,
+                filter: FilterMode::BandPass,
+                fc0: 2500.0 * p,
+                fc1: 900.0 * p,
+                fc_pow: 0.88,
+                q: 1.40,
+                seed: base_seed ^ 0x93,
+                ..Default::default()
+            });
+            // Trailing liquid gulp as displaced water folds back.
+            m.add_osc(OscLayer {
+                start_s: 0.028,
+                dur_s: 0.085,
+                f0: 510.0 * p,
+                f1: 215.0 * p,
+                pitch_pow: 0.72,
+                wave: Wave::Sine,
+                gain: 0.22,
+                attack_s: 0.007,
+                decay_pow: 1.50,
+                ..Default::default()
+            });
+            m.finish(0.23, 1.15, 3.5, 24.0)
+        }
     }
 }
 
@@ -12322,9 +12468,10 @@ const MAX_SFX_VOICES: usize = 24;
 /// Window in milliseconds during which consecutive gem pickups climb the scale.
 const GEM_COMBO_WINDOW_MS: u64 = 480;
 
-/// Lock-free variant rotation & gem combo pitch-ladder selector.
+/// Lock-free variant rotation, per-sfx rate-limiting & gem combo pitch-ladder selector.
 struct VariantPicker {
     counters: Vec<AtomicUsize>,
+    last_played_ms: Vec<AtomicU64>,
     last_gem_ms: AtomicU64,
     gem_combo: AtomicUsize,
 }
@@ -12332,10 +12479,35 @@ struct VariantPicker {
 impl VariantPicker {
     fn new() -> Self {
         let counters = (0..Sfx::ALL.len()).map(|_| AtomicUsize::new(0)).collect();
+        let last_played_ms = (0..Sfx::ALL.len()).map(|_| AtomicU64::new(0)).collect();
         Self {
             counters,
+            last_played_ms,
             last_gem_ms: AtomicU64::new(0),
             gem_combo: AtomicUsize::new(0),
+        }
+    }
+
+    /// Enforce per-sfx minimum spacing ([`Sfx::min_spacing_ms`]). Returns
+    /// `true` when `sfx` may play at `now_ms` (recording the timestamp), or
+    /// `false` if it played too recently.
+    fn allow_play(&self, sfx: Sfx, now_ms: u64) -> bool {
+        let min_ms = sfx.min_spacing_ms();
+        if min_ms == 0 {
+            return true;
+        }
+        let slot = &self.last_played_ms[sfx.index()];
+        loop {
+            let prev = slot.load(Ordering::Relaxed);
+            if prev > 0 && now_ms.saturating_sub(prev) < min_ms {
+                return false;
+            }
+            if slot
+                .compare_exchange_weak(prev, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return true;
+            }
         }
     }
 
@@ -12684,6 +12856,9 @@ impl AudioEngine {
     /// sound is better than stalling the frame that produced it.
     pub fn play_sfx_pitched(&self, sfx: Sfx, pitch_ratio: f32) {
         let now_ms = self.started_at.elapsed().as_millis() as u64 + 1;
+        if !self.picker.allow_play(sfx, now_ms) {
+            return;
+        }
         let Some(samples) = cached_sample(&self.cache, &self.picker, sfx, now_ms) else {
             return;
         };
@@ -13240,7 +13415,11 @@ mod tests {
     /// enough that a crowd cannot smear into a drone or mask a tell.
     #[test]
     fn approach_sounds_are_quiet_short_and_lowest_priority() {
-        let approach = &Sfx::ALL[Sfx::ALL.len() - 12..];
+        let start = Sfx::ALL
+            .iter()
+            .position(|&s| s == Sfx::ApproachPipeClaws)
+            .expect("ApproachPipeClaws must be in Sfx::ALL");
+        let approach = &Sfx::ALL[start..start + 12];
         assert_eq!(approach[0], Sfx::ApproachPipeClaws);
         assert_eq!(approach[11], Sfx::ApproachWasher);
         let hit = peak(&sfx_samples(Sfx::Hit));
@@ -13257,6 +13436,53 @@ mod tests {
                 assert!(pk < hit && pk < warn, "{sfx:?} v{v} peak {pk} vs hit {hit}, warn {warn}");
             }
         }
+    }
+
+    #[test]
+    fn splash_sfx_render_quiet_finite_and_bounded() {
+        let quiet_ref = peak(&sfx_samples(Sfx::UiMove));
+        let pickup_pk = peak(&sfx_samples(Sfx::Pickup));
+        for sfx in [Sfx::Splash, Sfx::SplashBig] {
+            assert_eq!(sfx.priority(), 0, "{sfx:?} must be lowest priority");
+            assert_eq!(sfx.variant_count(), 3, "{sfx:?} should provide 3 variants");
+            assert!(
+                sfx.min_spacing_ms() >= 70,
+                "{sfx:?} must enforce at least 70 ms spacing"
+            );
+            for v in 0..sfx.variant_count() {
+                let s = sfx_variant_samples(sfx, v);
+                assert!(!s.is_empty(), "{sfx:?} v{v} must be non-empty");
+                assert!(
+                    s.iter().all(|x| x.is_finite()),
+                    "{sfx:?} v{v} must be finite"
+                );
+                let pk = peak(&s);
+                assert!(
+                    pk <= quiet_ref + 1e-4,
+                    "{sfx:?} v{v} peak {pk:.4} exceeded quiet reference UiMove ({quiet_ref:.4})"
+                );
+                assert!(
+                    pk <= pickup_pk * 0.55,
+                    "{sfx:?} v{v} peak {pk:.4} too loud vs Pickup ({pickup_pk:.4})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn splash_min_spacing_throttles_rapid_retriggers() {
+        let picker = VariantPicker::new();
+        assert!(picker.allow_play(Sfx::Splash, 100));
+        assert!(!picker.allow_play(Sfx::Splash, 130));
+        assert!(!picker.allow_play(Sfx::Splash, 169));
+        assert!(picker.allow_play(Sfx::Splash, 170));
+        assert!(!picker.allow_play(Sfx::Splash, 200));
+        // Heavy slosh has independent spacing and unthrottled combat SFX are unaffected.
+        assert!(picker.allow_play(Sfx::SplashBig, 110));
+        assert!(!picker.allow_play(Sfx::SplashBig, 150));
+        assert!(picker.allow_play(Sfx::SplashBig, 180));
+        assert!(picker.allow_play(Sfx::Hit, 100));
+        assert!(picker.allow_play(Sfx::Hit, 101));
     }
 
     /// The Flatbed is not a campaign floor, so the `Theme::all()` music tests
