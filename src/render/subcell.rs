@@ -37,8 +37,10 @@
 //!
 //! That EPX pass is [`Smooth::Epx`]. The default is [`Smooth::Xbr`]
 //! (`subcell/xbr.rs`): an xBR 2× upscale of the same picture, whose edge
-//! detection reads a radius-two neighbourhood, fitted to the quadrant, sextant
-//! or octant pattern nearest it in the picture's own two colours.
+//! detection reads a radius-two neighbourhood, fitted in two colours (which
+//! may be blends) to the quadrant, sextant or octant pattern nearest it.
+//! [`Smooth::XbrCrisp`] is the same filter kept to the picture's own two
+//! colours and to stairs only, for comparison.
 //! [`Smooth::Strong`] is coverage **antialiasing** (`antialias`): a staircase
 //! between two regions is read as
 //! the straight slanted edge it stands for, each cell it crosses gets an 8 × 8
@@ -125,18 +127,22 @@ pub enum Smooth {
     Epx,
     /// Antialiasing with part-cell glyphs (`antialias`).
     Strong,
-    /// An xBR 2× upscale fitted to quadrants, sextants or octants
-    /// (`subcell/xbr.rs`). The default.
+    /// An xBR 2× upscale fitted to quadrants, sextants or octants in two
+    /// colours that may be blends (`subcell/xbr.rs`). The default.
     #[default]
     Xbr,
     /// [`Smooth::Strong`] plus the wedge and triangle glyphs, and diagonal
     /// one-pixel strokes drawn as a band. Needs sextants or better; on a
     /// lesser terminal it is `Strong`.
     Wedge,
+    /// [`Smooth::Xbr`]'s filter read conservatively: stairs only, and a cell's
+    /// two colours are exact source colours. Kept for A/B.
+    XbrCrisp,
 }
 
 impl Smooth {
-    /// `0`/`off`, `1`/`on`/`epx`, `2`/`strong`, `3`/`xbr`, `4`/`wedge`.
+    /// `0`/`off`, `1`/`on`/`epx`, `2`/`strong`, `3`/`xbr`, `4`/`wedge`,
+    /// `5`/`crisp`.
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s.trim().to_ascii_lowercase().as_str() {
             "0" | "off" | "false" | "no" => Smooth::Off,
@@ -144,6 +150,7 @@ impl Smooth {
             "2" | "strong" | "aa" => Smooth::Strong,
             "3" | "xbr" => Smooth::Xbr,
             "4" | "wedge" | "wedges" => Smooth::Wedge,
+            "5" | "crisp" | "xbrcrisp" | "xbr-crisp" => Smooth::XbrCrisp,
             _ => return None,
         })
     }
@@ -156,13 +163,14 @@ impl Smooth {
             Smooth::Strong => "strong",
             Smooth::Xbr => "xbr",
             Smooth::Wedge => "wedge",
+            Smooth::XbrCrisp => "crisp",
         }
     }
 }
 
 /// The 1× edge treatment for the session: `RATRUN_SMOOTH=0` pins plain half
 /// blocks, `1` the EPX rounding, `2` the antialiasing, `3` the xBR fit, `4` the
-/// antialiasing with wedges; unset or unreadable leaves the default
+/// antialiasing with wedges, `5` the crisp xBR fit; unset or unreadable leaves the default
 /// ([`Smooth::Xbr`]). The console `smooth` command is the live A/B; this is the
 /// capture pin.
 pub fn smooth_from_env() -> Smooth {
@@ -266,7 +274,7 @@ pub fn grid_for(set: SubcellSet, zoom: f32) -> Option<Grid> {
 /// full 2 × 2 of the rule). `None` when the set is `Off` or smoothing is off.
 /// The antialiasing ([`Smooth::Strong`], [`Smooth::Wedge`]) keeps its own
 /// 8 × 8 masks, so its frame is the plain picture on the quad grid whatever the
-/// set. For [`Smooth::Xbr`] the answer is the finest grid the 2 × 4 xBR block
+/// set. For [`Smooth::Xbr`] and [`Smooth::XbrCrisp`] the answer is the finest grid the 2 × 4 xBR block
 /// of a cell may be **fitted** to — the set's own, sextants included (the
 /// block's rows are weighed onto the three sextant rows); the frame that
 /// carries the ink marks under it is still the quad one
@@ -281,7 +289,7 @@ pub fn grid_for_frame(set: SubcellSet, zoom: f32, smooth: Smooth) -> Option<Grid
     if matches!(smooth, Smooth::Strong | Smooth::Wedge) {
         return Some(Grid::Quad);
     }
-    if smooth == Smooth::Xbr {
+    if matches!(smooth, Smooth::Xbr | Smooth::XbrCrisp) {
         return Some(match set {
             SubcellSet::Off => return None,
             SubcellSet::Quad => Grid::Quad,
@@ -1320,18 +1328,26 @@ impl DetailFrame {
         true
     }
 
-    /// Start an xBR frame ([`Smooth::Xbr`]) of `cols × rows` cells from `half`,
-    /// the half-block picture (`cols × 2·rows`). `fit` is the finest grid a
-    /// cell may be fitted to ([`grid_for_frame`]'s answer). Every cell gets its
-    /// answer from `xbr::xbr` — the plain `▀` with its own two colours wherever
-    /// nothing leaned, so an untouched cell is what [`Smooth::Off`] draws,
+    /// Start an xBR frame ([`Smooth::Xbr`], or [`Smooth::XbrCrisp`] with
+    /// `crisp`) of `cols × rows` cells from `half`, the half-block picture
+    /// (`cols × 2·rows`). `fit` is the finest grid a cell may be fitted to
+    /// ([`grid_for_frame`]'s answer). Every cell gets its answer from
+    /// `xbr::xbr` — the plain `▀` with its own two colours wherever nothing
+    /// leaned, so an untouched cell is what [`Smooth::Off`] draws,
     /// byte for byte. Underneath, the frame is the plain picture on the
     /// **quad** grid (as for the antialiasing), which is what
     /// [`DetailFrame::overlay`] stamps and what a stamped cell is encoded
     /// from: a mark covers exactly the half cell it always did, whatever grid
     /// the smoothing used. Returns whether it filled the frame; the scratch
     /// lives here, so a steady-state frame allocates nothing.
-    pub fn xbr_from(&mut self, fit: Grid, cols: usize, rows: usize, half: &PixelBuffer) -> bool {
+    pub fn xbr_from(
+        &mut self,
+        fit: Grid,
+        crisp: bool,
+        cols: usize,
+        rows: usize,
+        half: &PixelBuffer,
+    ) -> bool {
         if cols == 0 || rows == 0 || half.w != cols || half.h != rows * 2 {
             return false;
         }
@@ -1340,7 +1356,7 @@ impl DetailFrame {
             dst[0] = c;
             dst[1] = c;
         }
-        xbr::xbr(half, cols, rows, fit, &mut self.yuv, &mut self.flags, &mut self.aa)
+        xbr::xbr(half, fit, crisp, &mut self.yuv, &mut self.flags, &mut self.aa)
     }
 
     /// Start a smoothing frame of `cols × rows` cells on `grid` and fill it
@@ -1738,7 +1754,7 @@ mod tests {
         assert_eq!(grid_for_frame(Octant, 2.0, strong), Some(Grid::Octant));
         assert_eq!(grid_for_frame(Sextant, 1.25, epx), Some(Grid::Quad));
         // Zoomed out the resample path is untouched by the 1x level.
-        for level in [Smooth::Xbr, Smooth::Wedge] {
+        for level in [Smooth::Xbr, Smooth::Wedge, Smooth::XbrCrisp] {
             assert_eq!(grid_for_frame(Octant, 2.0, level), Some(Grid::Octant));
             assert_eq!(grid_for_frame(Sextant, 1.25, level), Some(Grid::Quad));
         }
@@ -1760,10 +1776,12 @@ mod tests {
             }
             // The xBR block is fitted to the terminal's own finest grid,
             // sextants included.
-            assert_eq!(grid_for_frame(Quad, z, Smooth::Xbr), Some(Grid::Quad));
-            assert_eq!(grid_for_frame(Sextant, z, Smooth::Xbr), Some(Grid::Sextant));
-            assert_eq!(grid_for_frame(Octant, z, Smooth::Xbr), Some(Grid::Octant));
-            for level in [Smooth::Xbr, Smooth::Wedge] {
+            for level in [Smooth::Xbr, Smooth::XbrCrisp] {
+                assert_eq!(grid_for_frame(Quad, z, level), Some(Grid::Quad));
+                assert_eq!(grid_for_frame(Sextant, z, level), Some(Grid::Sextant));
+                assert_eq!(grid_for_frame(Octant, z, level), Some(Grid::Octant));
+            }
+            for level in [Smooth::Xbr, Smooth::Wedge, Smooth::XbrCrisp] {
                 assert_eq!(grid_for_frame(Off, z, level), None, "half blocks: nothing to encode");
             }
         }
@@ -1783,11 +1801,15 @@ mod tests {
             ("XBR", Smooth::Xbr),
             ("4", Smooth::Wedge),
             ("wedge", Smooth::Wedge),
+            ("5", Smooth::XbrCrisp),
+            ("crisp", Smooth::XbrCrisp),
         ] {
             assert_eq!(Smooth::parse(text), Some(want), "{text:?}");
         }
         assert_eq!(Smooth::parse("lots"), None);
-        for level in [Smooth::Off, Smooth::Epx, Smooth::Strong, Smooth::Xbr, Smooth::Wedge] {
+        for level in
+            [Smooth::Off, Smooth::Epx, Smooth::Strong, Smooth::Xbr, Smooth::Wedge, Smooth::XbrCrisp]
+        {
             assert_eq!(Smooth::parse(level.as_str()), Some(level));
         }
     }
@@ -1997,6 +2019,7 @@ mod tests {
             (SubcellSet::Quad, Smooth::Xbr),
             (SubcellSet::Sextant, Smooth::Xbr),
             (SubcellSet::Octant, Smooth::Xbr),
+            (SubcellSet::Sextant, Smooth::XbrCrisp),
             (SubcellSet::Sextant, Smooth::Wedge),
         ] {
             let mut w = World::new(Theme::Sewer, 7);
@@ -2023,7 +2046,7 @@ mod tests {
             // (The xBR frame carries its marks on the quad grid whatever grid
             // the cells were fitted to.)
             let carried = match level {
-                Smooth::Xbr => Grid::Quad,
+                Smooth::Xbr | Smooth::XbrCrisp => Grid::Quad,
                 _ => grid_for_frame(set, 1.0, level).unwrap(),
             };
             assert_eq!(frame.grid(), carried);
@@ -2737,34 +2760,43 @@ mod tests {
 
     // ---- xBR (`Smooth::Xbr`): the frame around `xbr.rs`'s own tests ----
 
-    fn xbr_frame(src: &PixelBuffer, fit: Grid) -> DetailFrame {
+    fn xbr_frame(src: &PixelBuffer, fit: Grid, crisp: bool) -> DetailFrame {
         let mut frame = DetailFrame::new();
-        assert!(frame.xbr_from(fit, src.w, src.h / 2, src));
+        assert!(frame.xbr_from(fit, crisp, src.w, src.h / 2, src));
         frame
     }
 
     /// Where nothing leans the xBR frame is the half-block blit, cell for cell:
     /// `▀`, top colour in front, bottom colour behind (not the `▄` the plain
-    /// encoder would write for a dark-over-bright cell).
+    /// encoder would write for a dark-over-bright cell). For the crisp fit
+    /// that is any axis-aligned picture; the blended fit rounds a rectangle's
+    /// corners as the reference does, so its picture has straight edges only.
     #[test]
     fn an_untouched_xbr_frame_is_the_half_block_blit() {
-        let mut src = PixelBuffer::new(32, 24);
-        src.clear(B);
-        src.rect_fill(3, 3, 9, 7, A);
-        src.rect_fill(16, 5, 4, 11, (200, 60, 60));
-        for fit in [Grid::Quad, Grid::Sextant, Grid::Octant] {
-            let frame = xbr_frame(&src, fit);
-            assert_eq!(frame.grid(), Grid::Quad);
-            let area = Rect::new(0, 0, 32, 12);
-            let (mut got, mut want) = (Buffer::empty(area), Buffer::empty(area));
-            frame.render_to(area, &mut got);
-            src.render_to(area, &mut want);
-            assert!(got == want, "{fit:?}: an axis-aligned picture changed");
+        let mut rects = PixelBuffer::new(32, 24);
+        rects.clear(B);
+        rects.rect_fill(3, 3, 9, 7, A);
+        rects.rect_fill(16, 5, 4, 11, (200, 60, 60));
+        let mut bands = PixelBuffer::new(32, 24);
+        bands.clear(A);
+        bands.rect_fill(0, 5, 32, 9, B);
+        bands.rect_fill(0, 19, 32, 2, (200, 60, 60));
+        for (name, src, crisp) in [("rects", &rects, true), ("bands", &bands, true), ("bands", &bands, false)] {
+            for fit in [Grid::Quad, Grid::Sextant, Grid::Octant] {
+                let frame = xbr_frame(src, fit, crisp);
+                assert_eq!(frame.grid(), Grid::Quad);
+                let area = Rect::new(0, 0, 32, 12);
+                let (mut got, mut want) = (Buffer::empty(area), Buffer::empty(area));
+                frame.render_to(area, &mut got);
+                src.render_to(area, &mut want);
+                assert!(got == want, "{name}, crisp {crisp}, {fit:?}: an untouched picture changed");
+            }
         }
     }
 
-    /// A stair is smoothed in the picture's own two colours, a stamped mark
-    /// wins its cell exactly, and no state survives a frame.
+    /// A stair is smoothed (in the picture's own two colours by the crisp fit,
+    /// in blends of them by the default), a stamped mark wins its cell
+    /// exactly, and no state survives a frame.
     #[test]
     fn an_xbr_frame_smooths_a_stair_and_carries_a_stamped_mark() {
         let stair = |run: usize| {
@@ -2776,38 +2808,51 @@ mod tests {
             }
             src
         };
-        for fit in [Grid::Quad, Grid::Sextant, Grid::Octant] {
-            let src = stair(1);
-            let mut frame = xbr_frame(&src, fit);
-            let shaped: Vec<usize> =
-                (0..32 * 12).filter(|&i| frame.cell(i % 32, i / 32).glyph != '▀').collect();
-            assert!(shaped.len() >= 4, "{fit:?}: {} cells changed shape", shaped.len());
-            for i in 0..32 * 12 {
-                let e = frame.cell(i % 32, i / 32);
-                assert!((e.fg == A || e.fg == B) && (e.bg == A || e.bg == B), "{fit:?} {i}: {e:?}");
-                assert_eq!(e.glyph.to_string().as_str().cell_width(), 1);
+        let between = |c: Rgb| {
+            let inside = |v: u8, p: u8, q: u8| v >= p.min(q) && v <= p.max(q);
+            inside(c.0, A.0, B.0) && inside(c.1, A.1, B.1) && inside(c.2, A.2, B.2)
+        };
+        for crisp in [false, true] {
+            for fit in [Grid::Quad, Grid::Sextant, Grid::Octant] {
+                let src = stair(1);
+                let mut frame = xbr_frame(&src, fit, crisp);
+                let shaped: Vec<usize> =
+                    (0..32 * 12).filter(|&i| frame.cell(i % 32, i / 32).glyph != '▀').collect();
+                assert!(shaped.len() >= 4, "{fit:?}: {} cells changed shape", shaped.len());
+                let mut blends = 0;
+                for i in 0..32 * 12 {
+                    let e = frame.cell(i % 32, i / 32);
+                    assert!(between(e.fg) && between(e.bg), "{fit:?} {i}: {e:?}");
+                    blends += usize::from(![A, B].contains(&e.fg) || ![A, B].contains(&e.bg));
+                    assert_eq!(e.glyph.to_string().as_str().cell_width(), 1);
+                }
+                if crisp {
+                    assert_eq!(blends, 0, "{fit:?}: the crisp fit showed a colour that was not there");
+                } else {
+                    assert!(blends >= 8, "{fit:?}: the default fit blended {blends} cells");
+                }
+                // Stamp the top half of every smoothed cell: the mark is exact
+                // and the cell is a half block again.
+                let mark = (255, 255, 255);
+                let mut after = PixelBuffer::new(32, 24);
+                after.copy_from(&src);
+                for &i in &shaped {
+                    after.plot((i % 32) as i32, (i / 32 * 2) as i32, mark);
+                }
+                frame.overlay(&src, &after);
+                for &i in &shaped {
+                    let e = frame.cell(i % 32, i / 32);
+                    assert!(e.fg == mark || e.bg == mark, "{fit:?} cell {i}: the mark became {e:?}");
+                    assert!(e.glyph == '▀' || e.glyph == '▄', "{fit:?} cell {i}: {e:?}");
+                }
+                // The same picture again, after another one in the other
+                // mode: the same cells.
+                let fresh = xbr_frame(&src, fit, crisp).aa.clone();
+                let mut reused = DetailFrame::new();
+                assert!(reused.xbr_from(fit, !crisp, 32, 12, &stair(2)));
+                assert!(reused.xbr_from(fit, crisp, 32, 12, &src));
+                assert!(reused.aa == fresh, "{fit:?}: the frame remembered an earlier picture");
             }
-            // Stamp the top half of every smoothed cell: the mark is exact and
-            // the cell is a half block again.
-            let mark = (255, 255, 255);
-            let mut after = PixelBuffer::new(32, 24);
-            after.copy_from(&src);
-            for &i in &shaped {
-                after.plot((i % 32) as i32, (i / 32 * 2) as i32, mark);
-            }
-            frame.overlay(&src, &after);
-            for &i in &shaped {
-                let e = frame.cell(i % 32, i / 32);
-                assert!(e.fg == mark || e.bg == mark, "{fit:?} cell {i}: the mark became {e:?}");
-                assert!(e.glyph == '▀' || e.glyph == '▄', "{fit:?} cell {i}: {e:?}");
-            }
-            // The same picture again, after another one: the same cells.
-            let fresh = xbr_frame(&src, fit).aa.clone();
-            let mut reused = DetailFrame::new();
-            for s in [&src, &stair(2), &src] {
-                assert!(reused.xbr_from(fit, 32, 12, s));
-            }
-            assert!(reused.aa == fresh, "{fit:?}: the frame remembered an earlier picture");
         }
     }
 

@@ -1095,9 +1095,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "smooth",
         aliases: &["epx"],
-        usage: "smooth [off|on|strong|xbr|wedge]",
-        summary: "Set the 1x edge smoothing: off, on (rounding), strong (antialiasing), xbr or wedge.",
-        args: &[ArgKind::Words(&["off", "on", "strong", "xbr", "wedge"])],
+        usage: "smooth [off|on|strong|xbr|wedge|crisp]",
+        summary: "Set the 1x edge smoothing: off, on (rounding), strong (antialiasing), xbr, wedge or crisp.",
+        args: &[ArgKind::Words(&["off", "on", "strong", "xbr", "wedge", "crisp"])],
         read_only: true,
         handler: cmd_smooth,
     },
@@ -2277,7 +2277,9 @@ fn cmd_smooth(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
         None if app.smooth_enabled() => Smooth::Off,
         None => Smooth::default(),
         Some(word) => Smooth::parse(word)
-            .ok_or_else(|| format!("expected off, on, strong, xbr or wedge, got `{word}`"))?,
+            .ok_or_else(|| {
+                format!("expected off, on, strong, xbr, wedge or crisp, got `{word}`")
+            })?,
     };
     app.set_smooth_level(level);
     app.console_line(format!("smooth {}", level.as_str()), LineKind::Success);
@@ -2852,7 +2854,8 @@ mod tests {
         assert!(!app.smooth_enabled(), "no argument flips it");
         assert!(scrollback(&app).contains("smooth off"));
         // The levels: off, on (the EPX rounding), strong (antialiasing), xbr
-        // (the default, and what a bare `smooth` turns back on) and wedge.
+        // (the default, and what a bare `smooth` turns back on), wedge and
+        // crisp.
         use crate::render::subcell::Smooth;
         run_command(&mut app, "smooth on").expect("smooth on");
         assert_eq!(app.smooth_level(), Smooth::Epx);
@@ -2862,6 +2865,9 @@ mod tests {
         run_command(&mut app, "smooth wedge").expect("smooth wedge");
         assert_eq!(app.smooth_level(), Smooth::Wedge);
         assert!(scrollback(&app).contains("smooth wedge"));
+        run_command(&mut app, "smooth crisp").expect("smooth crisp");
+        assert_eq!(app.smooth_level(), Smooth::XbrCrisp);
+        assert!(scrollback(&app).contains("smooth crisp"));
         run_command(&mut app, "smooth xbr").expect("smooth xbr");
         assert_eq!(app.smooth_level(), Smooth::Xbr);
         run_command(&mut app, "smooth 0").expect("smooth 0");

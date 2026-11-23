@@ -5,7 +5,7 @@ Dev tool only: nothing in the game reads it. It exists because the Rust is
 integer arithmetic that is easy to mirror, so a change to the rules can be
 looked at on a real frame before it is compiled:
 
-    python3 xbr_sim.py frame.ppm out_prefix [--set quad|sextant|octant]
+    python3 xbr_sim.py frame.ppm out_prefix [--set quad|sextant|octant] [--crisp]
 
 `frame.ppm` is a `RATRUN_DUMP` capture (W x 2H, one pixel a half cell). Writes
 `<prefix>-before.png`, `<prefix>-after.png` (9 x 18 px a cell) and prints the
@@ -15,6 +15,7 @@ itself (`frame()`) is plain integers on lists.
 import sys
 
 EDGE = 48            # subcell.rs `EDGE`
+GATE = 6             # xbr.rs `GATE`: the least channel step the blended fit reads
 EQ = 155             # xBR's `eq` threshold on the YUV distance
 BASE = 512           # a sub-pixel's weights sum to this
 BRIGHT_PEAK, SAT_PEAK, SAT_RANGE = 172, 96, 80
@@ -56,17 +57,19 @@ def brighter(a, b):
 
 
 class Pic:
-    def __init__(self, w, h, px):
+    def __init__(self, w, h, px, crisp=True):
         self.w, self.h, self.px = w, h, px
         self.yuv = [yuv(c) for c in px]
+        self.crisp = crisp
+        step = differs if crisp else (lambda a, b: max(abs(a[0] - b[0]), abs(a[1] - b[1]), abs(a[2] - b[2])) >= GATE)
         self.flags = [0] * (w * h)
         for y in range(h):
             for x in range(w):
                 i = y * w + x
                 f = 0
-                if x + 1 < w and differs(px[i], px[i + 1]):
+                if x + 1 < w and step(px[i], px[i + 1]):
                     f |= E_R
-                if y + 1 < h and differs(px[i], px[i + w]):
+                if y + 1 < h and step(px[i], px[i + w]):
                     f |= E_D
                 self.flags[i] = f
 
@@ -151,10 +154,12 @@ def xbr_pixel(p, x, y):
         ii = D(h, d) + D(h, i5) + D(f, i4) + D(f, b) + (D(e, i_) << 2)
         if ee > ii:
             continue
-        # A stair, not a corner: the pixel's colour carries on along the
-        # diagonal on at least one side. (A rectangle keeps its corners.)
-        if differs(px[e], px[c]) and differs(px[e], px[g]):
+        # Crisp only. A stair, not a corner: the pixel's colour carries on
+        # along the diagonal on at least one side. (A rectangle keeps its
+        # corners.)
+        if p.crisp and differs(px[e], px[c]) and differs(px[e], px[g]):
             continue
+        ne = differs if p.crisp else (lambda a, bb: a != bb)
         take_f = D(e, f) <= D(e, h)
         donor, other = (f, h) if take_f else (h, f)
         ddir = DIRS.index((fx, fy) if take_f else (hx, hy))
@@ -176,8 +181,8 @@ def xbr_pixel(p, x, y):
         if ee < ii and ((not eq(f, b) and not eq(h, d)) or (eq(e, i_) and not eq(f, i4) and not eq(h, i5))
                         or eq(e, g) or eq(e, c)):
             ke, ki = D(f, g), D(h, c)
-            left = (ke << 1) <= ki and differs(px[e], px[g]) and differs(px[d], px[g])
-            up = ke >= (ki << 1) and differs(px[e], px[c]) and differs(px[b], px[c])
+            left = (ke << 1) <= ki and ne(px[e], px[g]) and ne(px[d], px[g])
+            up = ke >= (ki << 1) and ne(px[e], px[c]) and ne(px[b], px[c])
             if left and up:
                 blend(n3, 7, 8)
                 blend(n2, 1, 4)
@@ -238,8 +243,114 @@ def reduce(cov, bands, x_wins_ties):
     return pat, err
 
 
+def dist(a, b):
+    return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2
+
+
+def rdiv(a, b):
+    return (a + b // 2) // b
+
+
+def split(px):
+    """Two-means of a cell's sub-cells (`encode`'s seeds and two refinement
+    steps, unweighted): (mask of the first cluster, its colour, the other's),
+    or None when they are all one colour."""
+    n = len(px)
+    mean = tuple(sum(c[k] for c in px) // n for k in range(3))
+    a = max(range(n), key=lambda i: (dist(px[i], mean), -i))
+    b = max(range(n), key=lambda i: (dist(px[i], px[a]), -i))
+    if dist(px[b], px[a]) == 0:
+        return None
+    ca, cb, mask = px[a], px[b], 0
+    for _ in range(2):
+        nxt, sa, sb = 0, [0, 0, 0, 0], [0, 0, 0, 0]
+        for i, c in enumerate(px):
+            if dist(c, ca) <= dist(c, cb):
+                nxt |= 1 << i
+                t = sa
+            else:
+                t = sb
+            for k in range(3):
+                t[k] += c[k]
+            t[3] += 1
+        if sa[3] == 0 or sb[3] == 0:
+            break
+        mask = nxt
+        ca = tuple(rdiv(sa[k], sa[3]) for k in range(3))
+        cb = tuple(rdiv(sb[k], sb[3]) for k in range(3))
+    if mask == 0:
+        return None
+    return mask, ca, cb
+
+
+def cell_blend(p, cx, cy, glyph_set):
+    """One cell of the default pass: xBR's blended block, fitted in two colours."""
+    w = p.w
+    top, bot = p.px[cy * 2 * w + cx], p.px[(cy * 2 + 1) * w + cx]
+    plain = (PLAIN, top, bot)
+    if not (p.active(cx, cy * 2) or p.active(cx, cy * 2 + 1)):
+        return plain
+    if p.feature(cx, cy * 2) or p.feature(cx, cy * 2 + 1):
+        return plain
+    block = []
+    moved = False
+    for y0 in (cy * 2, cy * 2 + 1):
+        ws = xbr_pixel(p, cx, y0)
+        own = p.px[y0 * w + cx]
+        for s in range(4):
+            acc = [own[k] * BASE for k in range(3)]
+            for q, (dx, dy) in enumerate(DIRS):
+                if ws[s][q]:
+                    moved = True
+                    n = p.px[p.at(cx + dx, y0 + dy)]
+                    for k in range(3):
+                        acc[k] += (n[k] - own[k]) * ws[s][q]
+            block.append(tuple(rdiv(v, BASE) for v in acc))
+    if not moved:
+        return plain
+
+    def error(bands, pat, fg, bg):
+        e = 0
+        for r, band in enumerate(bands):
+            for col in range(2):
+                c = fg if pat >> (r * 2 + col) & 1 else bg
+                for j in range(4):
+                    if band[j]:
+                        e += band[j] * dist(block[j * 2 + col], c)
+        return e
+    best = (PLAIN, top, bot)
+    best_err = error(BANDS['quad'], 0b0011, top, bot)
+    for fam in FAMILIES[glyph_set]:
+        bands = BANDS[fam]
+        sub = []
+        for band in bands:
+            tot = sum(band)
+            for col in range(2):
+                sub.append(tuple(rdiv(sum(band[j] * block[j * 2 + col][k] for j in range(4)), tot) for k in range(3)))
+        sp = split(sub)
+        full = (1 << len(sub)) - 1
+        if sp is None:
+            cand = (('quad', 0b0011), sub[0], sub[0])
+            err = error(BANDS['quad'], 0, sub[0], sub[0])
+        else:
+            mask, ca, cb = sp
+            if fam == 'quad' and mask in (0b0011, 0b1100):
+                fg, bg = (ca, cb) if mask == 0b0011 else (cb, ca)
+                cand = (PLAIN if (fg, bg) == (top, bot) else ('quad', 0b0011), fg, bg)
+                err = error(bands, 0b0011, fg, bg)
+            elif luma(ca) >= luma(cb):
+                cand, err = ((fam, mask), ca, cb), error(bands, mask, ca, cb)
+            else:
+                cand, err = ((fam, mask ^ full), cb, ca), error(bands, mask ^ full, cb, ca)
+        if err < best_err:
+            best, best_err = cand, err
+    return best
+
+
 def cell(p, cx, cy, glyph_set):
     """One cell: ('▀'-plain marker or (family, pattern)), fg, bg."""
+    if not p.crisp:
+        return cell_blend(p, cx, cy, glyph_set)
     w = p.w
     t, b = cy * 2 * w + cx, (cy * 2 + 1) * w + cx
     top, bot = p.px[t], p.px[b]
@@ -344,25 +455,27 @@ def render(cells, path):
     im.save(path)
 
 
-def load(path):
+def load(path, crisp=False):
     from PIL import Image
     im = Image.open(path).convert('RGB')
-    return Pic(im.width, im.height, [im.getpixel((x, y)) for y in range(im.height) for x in range(im.width)])
+    return Pic(im.width, im.height, [im.getpixel((x, y)) for y in range(im.height) for x in range(im.width)], crisp)
 
 
 if __name__ == '__main__':
     a = sys.argv[1:]
     glyph_set = a[a.index('--set') + 1] if '--set' in a else 'sextant'
-    p = load(a[0])
+    p = load(a[0], '--crisp' in a)
     rows = p.h // 2
     before = frame(p, glyph_set, 0, 0)
     after = frame(p, glyph_set, 1, rows - 2)   # the dump's HUD rows stay plain
     render(before, a[1] + '-before.png')
     render(after, a[1] + '-after.png')
     flat = [c for row in after for c in row]
-    shaped = sum(1 for (g, _, _) in flat if g[1] is not None)
+    plain = [c for row in before for c in row]
+    changed = sum(1 for c, q in zip(flat, plain) if c != q)
+    shaped = sum(1 for (g, _, _) in flat if g[1] is not None and g != ('quad', 0b0011))
     fams = {}
     for (g, _, _) in flat:
         if g[1] is not None:
             fams[g[0]] = fams.get(g[0], 0) + 1
-    print(a[0].split('/')[-1], 'cells', len(flat), 'changed', shaped, fams)
+    print(a[0].split('/')[-1], 'cells', len(flat), 'changed', changed, 'reshaped', shaped, fams)

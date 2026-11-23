@@ -2095,9 +2095,13 @@ impl World {
                         let wedges = self.smooth == Smooth::Wedge;
                         self.detail.antialias_with(self.subcell, wedges, sw, sh / 2, src, pb)
                     }
-                    // The xBR fit (the default) reads the screen picture
-                    // itself at every zoom; `grid` is the grid it fits to.
-                    Smooth::Xbr => self.detail.xbr_from(grid, sw, sh / 2, pb),
+                    // The xBR fit (the default, and its crisp reading) reads
+                    // the screen picture itself at every zoom; `grid` is the
+                    // grid it fits to.
+                    Smooth::Xbr | Smooth::XbrCrisp => {
+                        let crisp = self.smooth == Smooth::XbrCrisp;
+                        self.detail.xbr_from(grid, crisp, sw, sh / 2, pb)
+                    }
                     Smooth::Epx | Smooth::Off => self.detail.smooth_from(grid, sw, sh / 2, pb),
                 };
                 if filled {
