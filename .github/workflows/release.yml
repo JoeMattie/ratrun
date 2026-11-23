@@ -99,7 +99,7 @@ jobs:
   # and the bare binary for people who launch it from their own terminal.
   macos:
     needs: create-release
-    runs-on: macos-14
+    runs-on: macos-latest
     env:
       HAVE_CERT: ${{ secrets.MACOS_CERT_P12 != '' }}
       HAVE_NOTARY: ${{ secrets.APPLE_API_KEY_P8 != '' }}
