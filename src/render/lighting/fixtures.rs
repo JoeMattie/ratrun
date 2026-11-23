@@ -538,6 +538,7 @@ mod tests {
             elapsed: 0.0,
             mode: LightingMode::Full,
             depth: ColorDepth::Truecolor,
+            fx: false,
         }
     }
 

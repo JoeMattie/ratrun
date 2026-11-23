@@ -1110,6 +1110,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         read_only: true,
         handler: cmd_foreground,
     },
+    CommandSpec {
+        name: "fx",
+        aliases: &[],
+        usage: "fx [on|off]",
+        summary: "Toggle the lighting effects (a render-only A/B).",
+        args: &[ArgKind::OnOff],
+        read_only: true,
+        handler: cmd_fx,
+    },
 ];
 
 /// Find a command by name or alias.
@@ -2282,6 +2291,18 @@ fn cmd_foreground(app: &mut crate::app::App, args: &[&str]) -> Result<(), String
     app.set_foreground(on);
     app.console_line(
         format!("foreground {}", if on { "on" } else { "off" }),
+        LineKind::Success,
+    );
+    Ok(())
+}
+
+/// `fx` is the batch-13 lighting effects (`render::lighting::fx`):
+/// render-only, so it never flags the run.
+fn cmd_fx(app: &mut crate::app::App, args: &[&str]) -> Result<(), String> {
+    let on = parse_on_off(args.first().copied(), app.fx_enabled())?;
+    app.set_fx(on);
+    app.console_line(
+        format!("fx {}", if on { "on" } else { "off" }),
         LineKind::Success,
     );
     Ok(())

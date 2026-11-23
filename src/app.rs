@@ -243,6 +243,8 @@ struct PictureKey {
     smooth: crate::render::subcell::Smooth,
     /// Whether the parallax foreground layer draws (see `render::foreground`).
     foreground: bool,
+    /// Whether the batch-13 lighting effects run (`render::lighting::fx`).
+    fx: bool,
 }
 
 impl PictureKey {
@@ -257,6 +259,7 @@ impl PictureKey {
             subcell: w.subcell,
             smooth: w.smooth,
             foreground: w.foreground,
+            fx: w.lighting_fx,
         }
     }
 }
@@ -400,6 +403,10 @@ pub struct App {
     /// default (`RATRUN_FOREGROUND=0` pins it off for a session; the console
     /// `foreground` command A/Bs it live). Render-only, like `smooth`.
     foreground: bool,
+    /// The batch-13 lighting effects. On by default (`RATRUN_FX=0` pins them
+    /// off for a session; the console `fx` command A/Bs them live).
+    /// Render-only, like `foreground`.
+    fx: bool,
     /// Options screen: the selected row (`0..options::ROW_COUNT`).
     options_row: usize,
     /// Where Esc/Back on the options screen returns to (`Title` or `Paused`).
@@ -604,6 +611,7 @@ impl App {
             subcell_env: crate::render::subcell::Choice::from_env(),
             smooth: crate::render::subcell::smooth_from_env(),
             foreground: crate::render::foreground::enabled_from_env(),
+            fx: crate::render::lighting::fx_enabled_from_env(),
             options_row: options::MUSIC_ROW,
             options_return: Screen::Title,
             preview_cd: 0.0,
@@ -4098,6 +4106,20 @@ impl App {
         self.foreground
     }
 
+    /// Turn the batch-13 lighting effects on or off (the console `fx`
+    /// command). Render-only: no run state, no save, no golden can see it.
+    pub(crate) fn set_fx(&mut self, on: bool) {
+        if self.fx != on {
+            self.fx = on;
+            self.picture_dirty = true;
+        }
+    }
+
+    /// Whether the batch-13 lighting effects are on.
+    pub(crate) fn fx_enabled(&self) -> bool {
+        self.fx
+    }
+
     fn toggle_auto_pick(&mut self) {
         let on = !self.scores.auto_pick;
         self.scores.auto_pick = on;
@@ -5077,6 +5099,7 @@ impl App {
                     crate::render::subcell::resolve(self.subcell_env, crate::term::block_set());
                 w.smooth = self.smooth;
                 w.foreground = self.foreground;
+                w.lighting_fx = self.fx;
                 let key = PictureKey::of(w, self.run_counter, &self.pixels);
                 if self.picture_dirty || self.picture_key != Some(key) {
                     w.draw(&mut self.pixels);

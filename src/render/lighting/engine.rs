@@ -46,7 +46,10 @@
 //! Render-only: nothing here reads or writes simulation state, and a change of
 //! tier must never change a simulated number.
 
+use super::fx::{self, Canvas, FxFrame, FxLight, LightInfo, LightTag, Normal, SampleHit, ShadowQuery};
 use super::shadow::{Body, Geometry, ShadowProfile, Surface};
+use super::softshadow::SoftProfile;
+use super::{air, motes, softshadow, specular, surface, upsample};
 use super::{fixtures, LightScene, ThemeAmbient};
 use crate::game::ecs::systems::boss::Boss;
 use crate::game::enemy::{Enemy, EnemyKind};
@@ -439,8 +442,30 @@ pub(super) fn zone_gain(zone: Option<LightZoneKind>) -> f32 {
 /// zone's gain, lowered by [`AMBIENT_SCALE`] and never below [`AMBIENT_FLOOR`].
 #[inline]
 pub(super) fn ambient_level(theme_mul: u16, gain: f32) -> u16 {
-    let level = (f32::from(theme_mul) * gain * AMBIENT_SCALE) as u16;
+    ambient_level_scaled(theme_mul, gain, AMBIENT_SCALE)
+}
+
+/// [`ambient_level`] with the scale given (the effects' tone curve picks its
+/// own, `upsample::ambient_scale`).
+#[inline]
+pub(super) fn ambient_level_scaled(theme_mul: u16, gain: f32, scale: f32) -> u16 {
+    let level = (f32::from(theme_mul) * gain * scale) as u16;
     level.max(AMBIENT_FLOOR)
+}
+
+/// The `mul` clamp of [`Sample::light`] with the effects off.
+const MUL_CLAMP: i32 = 350;
+
+/// What one lighting pass runs with, handed to the grid's methods.
+#[derive(Clone, Copy)]
+pub(super) struct Pass {
+    pub mode: LightingMode,
+    pub elapsed: f32,
+    pub theme: Theme,
+    /// The batch-13 effects are on (`LightScene::fx`).
+    pub fx: bool,
+    /// The ambient share of the theme tint ([`AMBIENT_SCALE`] with fx off).
+    pub ambient_scale: f32,
 }
 
 pub(super) struct Candidates {
@@ -480,20 +505,29 @@ struct Mark {
 }
 
 #[derive(Clone, Copy, Default)]
-struct Sample {
-    mul: [u16; 3],
-    add: [i16; 3],
-    tint: [u8; 4],
+pub(super) struct Sample {
+    /// Multiplier per channel, `Q8.8`.
+    pub(super) mul: [u16; 3],
+    /// Additive light toward white per channel, `Q8.8`.
+    pub(super) add: [i16; 3],
+    /// Mix tint (`tint[3]` is the amount).
+    pub(super) tint: [u8; 4],
 }
 
-struct Grid {
-    w: usize,
-    h: usize,
-    stride: usize,
-    start: Vec2,
-    offset: (usize, usize),
-    samples: Vec<Sample>,
-    surfaces: Vec<Surface>,
+/// The light grid: one [`Sample`] per `stride × stride` block of world pixels,
+/// snapped to world space so the pools do not crawl as the camera pans.
+pub(super) struct Grid {
+    pub(super) w: usize,
+    pub(super) h: usize,
+    pub(super) stride: usize,
+    /// World position of sample (0, 0) (a block centre).
+    pub(super) start: Vec2,
+    /// Pixel (0, 0)'s offset inside its block.
+    pub(super) offset: (usize, usize),
+    pub(super) samples: Vec<Sample>,
+    pub(super) surfaces: Vec<Surface>,
+    /// Batch-13 light record per sample (`fx.rs`); empty while fx is off.
+    pub(super) info: Vec<LightInfo>,
 }
 
 impl Default for Grid {
@@ -506,6 +540,7 @@ impl Default for Grid {
             offset: (0, 0),
             samples: Vec::new(),
             surfaces: Vec::new(),
+            info: Vec::new(),
         }
     }
 }
@@ -549,6 +584,16 @@ pub struct LightMap {
     /// passage he is in; it brightens as he enters. `None` until he has stood
     /// in a zone (an unzoned level is not capped at all).
     ambient_cap: Option<f32>,
+    /// Batch 13: the frame's strongest lights (`FxFrame::lights`).
+    fx_lights: Vec<FxLight>,
+    /// Batch 13: one tangent normal per world pixel (`surface.rs` writes).
+    normals: Vec<Normal>,
+    /// Batch 13: `softshadow.rs`'s cache beside each static shadow profile
+    /// and each moving shadow slot.
+    static_soft: Vec<SoftProfile>,
+    moving_soft: [SoftProfile; 3],
+    /// Whether the last pass ran the effects (widens the cost budget).
+    fx_active: bool,
 }
 
 impl Default for LightMap {
@@ -575,6 +620,11 @@ impl LightMap {
             controller: QualityController::default(),
             plume: Vec::new(),
             ambient_cap: None,
+            fx_lights: Vec::with_capacity(fx::MAX_FX_LIGHTS),
+            normals: Vec::new(),
+            static_soft: Vec::new(),
+            moving_soft: Default::default(),
+            fx_active: false,
         }
     }
 
@@ -594,7 +644,10 @@ impl LightMap {
         if crate::prof::controller_frozen() {
             return;
         }
-        let budget = 160.0 + pixels as f64 * 0.035;
+        let mut budget = 160.0 + pixels as f64 * 0.035;
+        if self.fx_active {
+            budget += pixels as f64 * fx::FX_BUDGET_PER_PX;
+        }
         let micros = elapsed.as_secs_f64() * 1e6;
         let state = &mut self.controller;
         if state.probation != 0 {
@@ -718,11 +771,27 @@ impl LightMap {
         if pb.w == 0 || pb.h == 0 {
             return;
         }
+        // The batch-13 effects (`fx.rs`, the stage files). With `fx` off
+        // every line below is the batch-12 pass exactly.
+        let fx = scene.fx;
+        self.fx_active = fx;
+        self.fx_lights.clear();
         {
             let _p = crate::prof::scope(crate::prof::Stage::LSync);
             self.geometry.sync(scene.level);
         }
         let theme = scene.level.theme;
+        let pass = Pass {
+            mode: scene.mode,
+            elapsed: scene.elapsed,
+            theme,
+            fx,
+            ambient_scale: if fx {
+                upsample::ambient_scale(theme, scene.mode)
+            } else {
+                AMBIENT_SCALE
+            },
+        };
         let profile = super::theme_ambient(theme);
         // The rat's own zone bounds the ambient everywhere and the reach of
         // lamps hung in brighter zones. Eased per frame (render-only state), and
@@ -746,7 +815,7 @@ impl LightMap {
         {
             let _p = crate::prof::scope(crate::prof::Stage::LPrepare);
             self.grid
-                .prepare(pb, scene.cam, scene.mode, &self.geometry, profile, cap);
+                .prepare(pb, scene.cam, &self.geometry, profile, cap, pass);
         }
         crate::prof::count(crate::prof::Stage::CSamples, self.grid.samples.len() as u64);
         self.lights.points.clear();
@@ -756,15 +825,20 @@ impl LightMap {
             self.gather_lights(pb.w, pb.h, scene)
         };
         // Enemy rim glints: taken now, while the body pixels are final and the
-        // lighting has not yet covered them.
-        for i in 0..self.rims.len() {
-            let (x, y, tint) = self.rims[i];
-            self.mark_glint(pb, x, y, tint);
+        // lighting has not yet covered them. (The effects' directional rim,
+        // `specular.rs`, may replace them.)
+        if !fx || specular::keep_glints(scene.mode) {
+            for i in 0..self.rims.len() {
+                let (x, y, tint) = self.rims[i];
+                self.mark_glint(pb, x, y, tint);
+            }
         }
         crate::prof::count(crate::prof::Stage::CPoints, self.lights.points.len() as u64);
         let _pstatic = crate::prof::scope(crate::prof::Stage::LStaticLights);
         self.static_shadows
             .resize(scene.level.objects.lights.len(), ShadowProfile::default());
+        self.static_soft
+            .resize(scene.level.objects.lights.len(), SoftProfile::default());
         for (i, fixture) in scene.level.objects.lights.iter().enumerate() {
             let mut light = fixtures::light(*fixture, theme, profile, phase, scene);
             if !self.grid.overlaps(light) || light.energy <= 0.001 {
@@ -785,17 +859,29 @@ impl LightMap {
                 self.sun(pb, scene, light);
                 continue;
             }
+            let tag = LightTag::Fixture(fixture.kind);
+            if fx {
+                fx::push_fx_light(
+                    &mut self.fx_lights,
+                    FxLight::of(&light, tag, fx::flicker_of(&light, scene.elapsed)),
+                );
+            }
             let shadow = &mut self.static_shadows[i];
-            {
+            let rebaked = {
                 let _p = crate::prof::scope(crate::prof::Stage::LStaticBake);
-                if shadow.bake(&self.geometry, light) {
+                let rebaked = shadow.bake(&self.geometry, light);
+                if rebaked {
                     crate::prof::count(crate::prof::Stage::CStaticBakeMiss, 1);
                 }
+                rebaked
+            };
+            if fx {
+                softshadow::bake(&mut self.static_soft[i], &self.geometry, &light, tag, rebaked);
             }
             let shadow: &ShadowProfile = shadow;
+            let soft = Some(&self.static_soft[i]);
             let _p = crate::prof::scope(crate::prof::Stage::LStaticSplat);
-            self.grid
-                .splat(light, Some(shadow), scene.mode, scene.elapsed, theme);
+            self.grid.splat(light, Some(shadow), soft, tag, pass);
             // A wall lamp also washes the face it hangs on and the floor at its
             // foot (batch 12): a second, very small and very bright source at
             // the mount, sharing the fan's cached bake so it cannot leak
@@ -805,7 +891,7 @@ impl LightMap {
                 let wash = fixtures::sconce_wash(&light, fixture.seed, scene.elapsed);
                 if self.grid.overlaps(wash) {
                     self.grid
-                        .splat(wash, Some(shadow), scene.mode, scene.elapsed, theme);
+                        .splat(wash, Some(shadow), soft, LightTag::SconceWash, pass);
                 }
             }
         }
@@ -861,33 +947,74 @@ impl LightMap {
         drop(_prank);
         crate::prof::count(crate::prof::Stage::CShaped, self.shaped.len() as u64);
         let mut shadow_index = 0;
-        for &(mut light, _) in self.shaped.iter().take(cap) {
+        for &(mut light, priority) in self.shaped.iter().take(cap) {
             if !self.grid.overlaps(light) {
                 continue;
             }
             crate::prof::count(crate::prof::Stage::CShapedLit, 1);
-            if matches!(light.shape, LightShape::Directional { .. }) {
-                self.grid.sun(light, &self.geometry, &[], scene.mode);
+            let directional = matches!(light.shape, LightShape::Directional { .. });
+            let tag = if directional {
+                LightTag::Sun
+            } else {
+                LightTag::Moving { priority }
+            };
+            if fx {
+                fx::push_fx_light(
+                    &mut self.fx_lights,
+                    FxLight::of(&light, tag, fx::flicker_of(&light, scene.elapsed)),
+                );
+            }
+            if directional {
+                self.grid.sun(light, &self.geometry, &[], scene.mode, fx);
                 continue;
             }
-            let shadow = if light.casts_shadow && shadow_index < shadows {
+            let (shadow, soft) = if light.casts_shadow && shadow_index < shadows {
                 let profile = &mut self.moving_shadows[shadow_index];
                 // Stabilise the visibility origin at pixel scale as the rat moves.
                 light.pos = Vec2::new(light.pos.x.round(), light.pos.y.round());
-                {
+                let rebaked = {
                     let _p = crate::prof::scope(crate::prof::Stage::LMovingBake);
-                    if profile.bake(&self.geometry, light) {
+                    let rebaked = profile.bake(&self.geometry, light);
+                    if rebaked {
                         crate::prof::count(crate::prof::Stage::CMovingBakeMiss, 1);
                     }
+                    rebaked
+                };
+                if fx {
+                    softshadow::bake(
+                        &mut self.moving_soft[shadow_index],
+                        &self.geometry,
+                        &light,
+                        tag,
+                        rebaked,
+                    );
                 }
+                let soft = &self.moving_soft[shadow_index];
                 shadow_index += 1;
-                Some(&*profile)
+                (Some(&*profile), Some(soft))
             } else {
-                None
+                (None, None)
             };
             let _p = crate::prof::scope(crate::prof::Stage::LMovingSplat);
-            self.grid
-                .splat(light, shadow, scene.mode, scene.elapsed, theme);
+            self.grid.splat(light, shadow, soft, tag, pass);
+        }
+        fx::sort_fx_lights(&mut self.fx_lights);
+        let frame = FxFrame {
+            mode: scene.mode,
+            depth: scene.depth,
+            theme,
+            level: scene.level,
+            cam: Vec2::new(scene.cam.x.round(), scene.cam.y.round()),
+            elapsed: scene.elapsed,
+            step8: fx::step8(scene.elapsed),
+            rat: scene.player.pos,
+            lights: &self.fx_lights,
+            ambient: profile.mul,
+        };
+        if fx {
+            let _p = crate::prof::scope(crate::prof::Stage::LComposite);
+            upsample::bounce(&mut self.grid, &frame);
+            air::grid_pass(&mut self.grid, &frame);
         }
         let hp = (scene.player.hp / scene.player.max_hp().max(1.0)).clamp(0.0, 1.0);
         if hp < 0.35 {
@@ -903,7 +1030,23 @@ impl LightMap {
         drop(_pm);
         {
             let _p = crate::prof::scope(crate::prof::Stage::LComposite);
-            self.grid.composite(pb, scene.depth);
+            if fx {
+                // The effects' pixel stages, in the contract's order: the
+                // albedo pass, the shade, then the lit-space passes.
+                let (w, h) = (pb.w, pb.h);
+                self.normals.clear();
+                self.normals.resize(w * h, [0, 0]);
+                let (px, mat) = pb.split_mat();
+                let mut canvas = Canvas { w, h, px, mat };
+                surface::apply(&self.grid, &mut canvas, &mut self.normals, &frame);
+                upsample::composite(&self.grid, &mut canvas, &frame);
+                specular::apply(&self.grid, &mut canvas, &self.normals, &frame);
+                softshadow::reflections(&self.grid, &mut canvas, &self.normals, &frame);
+                air::composite(&self.grid, &mut canvas, &frame);
+                motes::draw(&self.grid, &mut canvas, &frame);
+            } else {
+                self.grid.composite(pb, scene.depth);
+            }
         }
         let _pm = crate::prof::scope(crate::prof::Stage::LMarks);
         for mark in &self.marks {
@@ -1010,8 +1153,11 @@ impl LightMap {
                 },
             );
         }
+        if scene.fx {
+            fx::push_fx_light(&mut self.fx_lights, FxLight::of(&light, LightTag::Sun, 1.0));
+        }
         self.grid
-            .sun(light, &self.geometry, &self.bodies, scene.mode);
+            .sun(light, &self.geometry, &self.bodies, scene.mode, scene.fx);
     }
 }
 
@@ -1039,12 +1185,12 @@ impl Grid {
         &mut self,
         pb: &PixelBuffer,
         cam: Vec2,
-        mode: LightingMode,
         geometry: &Geometry,
         profile: ThemeAmbient,
         cap: f32,
+        pass: Pass,
     ) {
-        self.stride = mode.stride();
+        self.stride = pass.mode.stride();
         let s = self.stride as i32;
         let pos = (cam.x.round() as i32, cam.y.round() as i32);
         self.offset = (pos.0.rem_euclid(s) as usize, pos.1.rem_euclid(s) as usize);
@@ -1063,12 +1209,20 @@ impl Grid {
         }
         self.samples.resize(self.w * self.h, Sample::default());
         self.surfaces.resize(self.w * self.h, Surface::default());
+        self.info.clear();
+        if pass.fx {
+            if self.info.capacity() < max_len {
+                self.info.reserve_exact(max_len);
+            }
+            self.info.resize(self.w * self.h, LightInfo::default());
+        }
+        let scale = pass.ambient_scale;
         for i in 0..self.samples.len() {
             let p = self.point(i % self.w, i / self.w);
             let surface = geometry.surface(p);
             let gain = zone_gain(surface.zone).min(cap);
             self.samples[i] = Sample {
-                mul: profile.mul.map(|c| ambient_level(c, gain)),
+                mul: profile.mul.map(|c| ambient_level_scaled(c, gain, scale)),
                 ..Sample::default()
             };
             self.surfaces[i] = surface;
@@ -1088,14 +1242,20 @@ impl Grid {
             && light.pos.y - r <= end.y
     }
 
+    /// Add one light to every sample it reaches. With the effects on it also
+    /// folds the light into each sample's [`LightInfo`] (the dominant
+    /// direction, colour and the specular energy), offers each sample to
+    /// `air::splat_sample` and takes its visibility from
+    /// `softshadow::visibility`.
     fn splat(
         &mut self,
         light: Light,
         shadow: Option<&ShadowProfile>,
-        mode: LightingMode,
-        elapsed: f32,
-        theme: Theme,
+        soft: Option<&SoftProfile>,
+        tag: LightTag,
+        pass: Pass,
     ) {
+        let (mode, elapsed, theme) = (pass.mode, pass.elapsed, pass.theme);
         let radius = light.extent();
         let centre = light.pos - self.start;
         let spacing = self.stride as f32;
@@ -1119,6 +1279,15 @@ impl Grid {
         if min_amount > 1.0 {
             return;
         }
+        let fx_on = pass.fx;
+        let air_on = fx_on && air::wants(&light, tag, mode);
+        let floor_glint = !fx_on || softshadow::keep_floor_glint(mode);
+        let ceiling = if fx_on {
+            upsample::MUL_CEILING
+        } else {
+            MUL_CLAMP
+        };
+        let peak = f32::from(light.color.0.max(light.color.1).max(light.color.2));
         let mut touched = 0u64;
         for y in lo(centre.y)..hi(centre.y, self.h) {
             for x in lo(centre.x)..hi(centre.x, self.w) {
@@ -1133,13 +1302,45 @@ impl Grid {
                 if surface.layer & light.layers.0 == 0 {
                     continue;
                 }
-                let visibility = shadow.map_or(1.0, |s| s.visibility(delta, surface, softness));
+                let visibility = match shadow {
+                    None => 1.0,
+                    Some(s) if fx_on => softshadow::visibility(
+                        s,
+                        soft,
+                        &ShadowQuery {
+                            light: &light,
+                            tag,
+                            delta,
+                            surface,
+                            softness,
+                            mode,
+                        },
+                    ),
+                    Some(s) => s.visibility(delta, surface, softness),
+                };
+                if air_on {
+                    air::splat_sample(
+                        &mut self.info[i],
+                        &SampleHit {
+                            light: &light,
+                            tag,
+                            delta,
+                            point: light.pos + delta,
+                            core,
+                            tail,
+                            visibility,
+                            surface,
+                            mode,
+                        },
+                    );
+                }
                 let face = if surface.height > 0.0 {
                     facing_gain(surface, -delta)
                 } else {
                     1.0
                 };
-                let glint = if shadow.is_some()
+                let glint = if floor_glint
+                    && shadow.is_some()
                     && surface.height == 0.0
                     && matches!(theme, Theme::Sewer | Theme::Lab)
                 {
@@ -1157,17 +1358,40 @@ impl Grid {
                     continue;
                 }
                 touched += 1;
-                self.samples[i].light(light, amount, visibility);
+                self.samples[i].light(light, amount, visibility, ceiling);
+                if fx_on && matches!(light.blend, Blend::Add) {
+                    let shadowed = (1.0 - visibility) * light.shadow_color.opacity;
+                    fx::note_light(
+                        &mut self.info[i],
+                        &light,
+                        -delta,
+                        light.height,
+                        amount * (1.0 - shadowed) * light.energy * peak,
+                    );
+                }
             }
         }
         crate::prof::count(crate::prof::Stage::CSplatSamples, touched);
     }
 
-    fn sun(&mut self, light: Light, geometry: &Geometry, bodies: &[Body], mode: LightingMode) {
+    fn sun(
+        &mut self,
+        light: Light,
+        geometry: &Geometry,
+        bodies: &[Body],
+        mode: LightingMode,
+        fx_on: bool,
+    ) {
         let LightShape::Directional { dir } = light.shape else {
             return;
         };
         let ray = -dir.normalized();
+        let ceiling = if fx_on {
+            upsample::MUL_CEILING
+        } else {
+            MUL_CLAMP
+        };
+        let peak = f32::from(light.color.0.max(light.color.1).max(light.color.2));
         for i in 0..self.samples.len() {
             let surface = self.surfaces[i];
             if surface.zone == Some(LightZoneKind::Maze) || surface.layer & light.layers.0 == 0 {
@@ -1194,7 +1418,18 @@ impl Grid {
                     + geometry.sun_visibility(p + side, surface, light, ray, &[]))
                     * 0.25;
             }
-            self.samples[i].light(light, facing_gain(surface, ray), vis);
+            let facing = facing_gain(surface, ray);
+            self.samples[i].light(light, facing, vis, ceiling);
+            if fx_on && matches!(light.blend, Blend::Add) {
+                let shadowed = (1.0 - vis) * light.shadow_color.opacity;
+                fx::note_light(
+                    &mut self.info[i],
+                    &light,
+                    ray,
+                    light.height,
+                    facing * (1.0 - shadowed) * light.energy * peak,
+                );
+            }
         }
     }
 
@@ -1224,11 +1459,16 @@ impl Grid {
     /// provably no-ops removed (pinned by `composite_fast_paths_match_the_reference`).
     fn composite(&self, pb: &mut PixelBuffer, depth: ColorDepth) {
         let (w, h) = (pb.w, pb.h);
+        self.composite_px(pb.pixels_mut(), w, h, depth);
+    }
+
+    /// [`Grid::composite`] over a bare `w × h` pixel slice (the effects'
+    /// `upsample::composite` stub calls this).
+    pub(super) fn composite_px(&self, pixels: &mut [Rgb], w: usize, h: usize, depth: ColorDepth) {
         if w == 0 || h == 0 || self.stride == 0 {
             return;
         }
         let stride = self.stride;
-        let pixels = pb.pixels_mut();
         let low_colour = depth != ColorDepth::Truecolor;
         // The first run of a row ends at the next sample boundary; every later
         // run is a whole stride.
@@ -1272,15 +1512,15 @@ impl Grid {
 
 /// The most the emission term can raise a multiplier to: a channel peak of
 /// 255 is `(255 - 218) * 5`.
-const MAX_SHINE: u16 = (255 - SHINE_FLOOR as u16) * 5;
+pub(super) const MAX_SHINE: u16 = (255 - SHINE_FLOOR as u16) * 5;
 /// Channel peaks above this carry a little emission of their own.
-const SHINE_FLOOR: u8 = 218;
+pub(super) const SHINE_FLOOR: u8 = 218;
 
 impl Sample {
     /// The reference shade of one pixel under this sample: multiply (never
     /// below the pixel's own emission), add toward white, then mix the tint.
     #[inline(always)]
-    fn shade_exact(&self, (r, g, b): Rgb) -> Rgb {
+    pub(super) fn shade_exact(&self, (r, g, b): Rgb) -> Rgb {
         // Transient highlights from older sprite art still carry a
         // little emission. Marked cores are restored explicitly.
         let peak = r.max(g).max(b);
@@ -1311,7 +1551,7 @@ impl Sample {
     ///   the multiply is already in `0..=255`;
     /// * the identity sample (`mul == 256`, `add == 0`) — nothing to do.
     #[inline(always)]
-    fn shade_run(&self, run: &mut [Rgb]) {
+    pub(super) fn shade_run(&self, run: &mut [Rgb]) {
         if self.tint[3] != 0 {
             for pixel in run {
                 *pixel = self.shade_exact(*pixel);
@@ -1376,7 +1616,8 @@ impl Sample {
 }
 
 impl Sample {
-    fn light(&mut self, light: Light, weight: f32, visibility: f32) {
+    /// `ceiling` is the `mul` clamp ([`MUL_CLAMP`] with the effects off).
+    fn light(&mut self, light: Light, weight: f32, visibility: f32, ceiling: i32) {
         let shadow = (1.0 - visibility) * light.shadow_color.opacity;
         let strength = weight * (1.0 - shadow);
         let color = [light.color.0, light.color.1, light.color.2];
@@ -1407,7 +1648,7 @@ impl Sample {
         for (n, (color, shade)) in color.into_iter().zip(shade).enumerate() {
             let gain = (f32::from(color) * gain) as i32;
             let scatter = (f32::from(color) * scatter + f32::from(shade) * tint) as i32;
-            self.mul[n] = (i32::from(self.mul[n]) + gain).clamp(0, 350) as u16;
+            self.mul[n] = (i32::from(self.mul[n]) + gain).clamp(0, ceiling) as u16;
             self.add[n] = (i32::from(self.add[n]) + scatter).clamp(-128, 142) as i16;
         }
     }
@@ -1424,7 +1665,7 @@ fn facing_gain(surface: Surface, toward: Vec2) -> f32 {
 
 /// Ordered luminance dither before the terminal's palette mapper. Its phase
 /// moves with world pixels, so the light pools do not crawl as the camera pans.
-fn palette_dither(color: Rgb, depth: ColorDepth, x: usize, y: usize) -> Rgb {
+pub(super) fn palette_dither(color: Rgb, depth: ColorDepth, x: usize, y: usize) -> Rgb {
     const BAYER: [[i16; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
     // With only 16 colours, group the dither into 2×2 world pixels and
     // restrain its range so the plank and wall art remains legible at 2×.
@@ -1597,6 +1838,7 @@ mod composite_tests {
                         offset,
                         samples: samples(&mut rng, gw * gh),
                         surfaces: Vec::new(),
+                        info: Vec::new(),
                     };
                     for depth in [ColorDepth::Truecolor, ColorDepth::Ansi256, ColorDepth::Ansi16] {
                         let mut fast = PixelBuffer::new(pw, ph);

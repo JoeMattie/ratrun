@@ -7,7 +7,7 @@ use crate::game::level::{Level, LightZoneKind, PropKind, Rectf, Theme};
 use crate::math::Vec2;
 
 const SUB: f32 = 4.0;
-const RAYS: usize = 256;
+pub(super) const RAYS: usize = 256;
 
 #[derive(Clone, Copy, Default)]
 struct Tile {
@@ -200,7 +200,7 @@ impl Geometry {
     }
 
     #[inline]
-    fn height_at(&self, x: i32, y: i32, layers: LayerMask) -> f32 {
+    pub(super) fn height_at(&self, x: i32, y: i32, layers: LayerMask) -> f32 {
         let tile = self.lookup(x, y);
         let bit = 1 << ((x & 3) + 4 * (y & 3));
         if tile.footprint & bit != 0 && tile.layer & layers.0 != 0 {
@@ -237,7 +237,7 @@ impl Geometry {
 
     /// Trace a 4px grid with DDA, visiting each crossed subcell exactly once.
     /// The straight line can skim a thin jamb or the corner of a prop.
-    fn trace(
+    pub(super) fn trace(
         &self,
         origin: Vec2,
         ray: Vec2,
@@ -401,6 +401,31 @@ impl ShadowProfile {
             );
         }
         true
+    }
+
+    /// The baked blocker distance per ray (L∞ metric; infinite = clear).
+    pub(super) fn depth(&self) -> &[f32; RAYS] {
+        &self.depth
+    }
+
+    /// The ray of the angular atlas that `delta` (receiver - light) falls on,
+    /// as [`ShadowProfile::visibility`] picks it; `None` at the light itself.
+    pub(super) fn ray_index(delta: Vec2) -> Option<usize> {
+        let (x, y) = (delta.x, delta.y);
+        let dist = x.abs().max(y.abs());
+        if dist < 0.5 {
+            return None;
+        }
+        let (quadrant, n) = if x >= y.abs() {
+            (0, y)
+        } else if y >= x.abs() {
+            (64, -x)
+        } else if -x >= y.abs() {
+            (128, -y)
+        } else {
+            (192, x)
+        };
+        Some((quadrant + (32.0 + 32.0 * n / dist).round() as usize) & (RAYS - 1))
     }
 
     pub(super) fn visibility(

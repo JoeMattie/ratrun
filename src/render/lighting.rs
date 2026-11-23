@@ -14,14 +14,27 @@
 //! Fog and the minimap use their existing sight and maze rules. Lighting only
 //! shades the playfield, so a distant lamp cannot reveal a route.
 
+mod air;
 mod ambience;
 mod engine;
 mod fixtures;
+mod fx;
+mod material;
+mod motes;
+mod overhead;
 mod shadow;
+mod softshadow;
 mod sources;
+mod specular;
+mod surface;
+mod upsample;
 
 pub(crate) use ambience::draw_ambience;
 pub(crate) use fixtures::draw_fixtures;
+// Batch-13 effects (`.review/handoff/lighting/CONTRACT.md`).
+pub(crate) use fx::enabled_from_env as fx_enabled_from_env;
+pub(crate) use overhead::{draw as draw_overhead_shadows, OverheadScene};
+pub(crate) use specular::{boss_pen, enemy_pen, pool_pen, prop_pen, rat_pen};
 #[cfg(test)]
 mod gallery;
 #[cfg(test)]
@@ -56,6 +69,9 @@ pub struct LightScene<'a> {
     pub elapsed: f32,
     pub mode: LightingMode,
     pub depth: ColorDepth,
+    /// The batch-13 lighting effects (`fx.rs`): off, the pass is the
+    /// batch-12 one byte for byte.
+    pub fx: bool,
 }
 
 /// Per-theme lighting character.

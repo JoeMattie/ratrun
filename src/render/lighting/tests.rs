@@ -38,6 +38,7 @@ fn test_scene(world: &World, mode: LightingMode, depth: ColorDepth, cam: Vec2) -
         elapsed: world.elapsed,
         mode,
         depth,
+        fx: false,
     }
 }
 

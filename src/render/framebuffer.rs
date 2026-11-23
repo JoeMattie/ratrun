@@ -14,6 +14,13 @@ pub struct PixelBuffer {
     pub w: usize,
     pub h: usize,
     px: Vec<Rgb>,
+    /// One material byte per pixel (`render::lighting::material`), present
+    /// only while [`PixelBuffer::set_materials`] is on; empty otherwise.
+    mat: Vec<u8>,
+    /// Whether the writers stamp [`PixelBuffer::pen`] into `mat`.
+    mats_on: bool,
+    /// The material byte every writer stamps while materials are on.
+    pen: u8,
 }
 
 impl PixelBuffer {
@@ -22,6 +29,9 @@ impl PixelBuffer {
             w,
             h,
             px: vec![(0, 0, 0); w * h],
+            mat: Vec::new(),
+            mats_on: false,
+            pen: 0,
         }
     }
 
@@ -36,6 +46,71 @@ impl PixelBuffer {
         // `clear` + `resize` keeps the existing allocation when growing.
         self.px.clear();
         self.px.resize(w * h, (0, 0, 0));
+        if self.mats_on {
+            self.mat.clear();
+            self.mat.resize(w * h, 0);
+        }
+    }
+
+    /// Keep a material byte per pixel (render-only lighting data; see
+    /// `render::lighting::material`). Off frees nothing but stops every
+    /// writer stamping, and empties [`PixelBuffer::mat`].
+    pub fn set_materials(&mut self, on: bool) {
+        if on {
+            if !self.mats_on || self.mat.len() != self.w * self.h {
+                self.mat.clear();
+                self.mat.resize(self.w * self.h, 0);
+            }
+        } else {
+            self.mat.clear();
+        }
+        self.mats_on = on;
+    }
+
+    /// Whether materials are being kept.
+    pub fn materials_on(&self) -> bool {
+        self.mats_on
+    }
+
+    /// Set the pen every writer stamps into the material byte of the pixels
+    /// it writes; returns the previous pen so a caller can restore it:
+    /// `let prev = pb.set_pen(p); draw(pb); pb.set_pen(prev);`.
+    #[inline]
+    pub fn set_pen(&mut self, pen: u8) -> u8 {
+        std::mem::replace(&mut self.pen, pen)
+    }
+
+    /// The current pen.
+    #[inline]
+    pub fn pen(&self) -> u8 {
+        self.pen
+    }
+
+    /// The material bytes (`w * h`, or empty while materials are off).
+    #[inline]
+    pub fn mat(&self) -> &[u8] {
+        &self.mat
+    }
+
+    /// Stamp `pen` over a rectangle of material bytes (clipped), for art that
+    /// writes through [`PixelBuffer::pixels_mut`] and so is not stamped.
+    pub fn stamp_mat(&mut self, x: i32, y: i32, w: i32, h: i32, pen: u8) {
+        if !self.mats_on || w <= 0 || h <= 0 {
+            return;
+        }
+        let (bw, bh) = (self.w as i32, self.h as i32);
+        let (xa, xb) = (x.clamp(0, bw), x.saturating_add(w).clamp(0, bw));
+        let (ya, yb) = (y.clamp(0, bh), y.saturating_add(h).clamp(0, bh));
+        for yy in ya..yb {
+            let row = yy as usize * self.w;
+            self.mat[row + xa as usize..row + xb as usize].fill(pen);
+        }
+    }
+
+    /// The pixels (mutable) and the material bytes (read-only) at once.
+    #[inline]
+    pub fn split_mat(&mut self) -> (&mut [Rgb], &[u8]) {
+        (&mut self.px, &self.mat)
     }
 
     /// Resample this buffer into `dst` (the zoomed render → the screen grid).
@@ -135,11 +210,18 @@ impl PixelBuffer {
         self.h = src.h;
         self.px.clear();
         self.px.extend_from_slice(&src.px);
+        if self.mats_on {
+            self.mat.clear();
+            self.mat.resize(self.w * self.h, 0);
+        }
     }
 
     pub fn clear(&mut self, c: Rgb) {
         for p in self.px.iter_mut() {
             *p = c;
+        }
+        if self.mats_on {
+            self.mat.fill(self.pen);
         }
     }
 
@@ -152,7 +234,11 @@ impl PixelBuffer {
         if x >= self.w || y >= self.h {
             return;
         }
-        self.px[y * self.w + x] = c;
+        let i = y * self.w + x;
+        self.px[i] = c;
+        if self.mats_on {
+            self.mat[i] = self.pen;
+        }
     }
 
     /// Additive plot — useful for glowing particles / overlapping light.
@@ -168,6 +254,9 @@ impl PixelBuffer {
         let i = y * self.w + x;
         let cur = self.px[i];
         self.px[i] = super::palette::add(cur, c);
+        if self.mats_on {
+            self.mat[i] = self.pen;
+        }
     }
 
     pub fn filled_circle(&mut self, cx: i32, cy: i32, r: i32, c: Rgb) {
@@ -216,6 +305,9 @@ impl PixelBuffer {
         for y in ya..yb {
             let row = y as usize * self.w;
             self.px[row + xa as usize..row + xb as usize].fill(c);
+            if self.mats_on {
+                self.mat[row + xa as usize..row + xb as usize].fill(self.pen);
+            }
         }
     }
 

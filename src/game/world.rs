@@ -281,6 +281,10 @@ pub struct World {
     /// (`RATRUN_FOREGROUND=0` pins it off for a session; the console's
     /// read-only `foreground on|off` is the in-run switch).
     pub foreground: bool,
+    /// The batch-13 lighting effects (`render::lighting::fx`). Render-only,
+    /// on by default (`RATRUN_FX=0` pins them off for a session; the
+    /// console's read-only `fx on|off` is the in-run A/B).
+    pub lighting_fx: bool,
     /// SFX events emitted this tick; drained by the app after `update`.
     pub sfx: Vec<Sfx>,
 
@@ -538,6 +542,7 @@ impl World {
             detail_base: PixelBuffer::new(0, 0),
             foreground_layer: crate::render::foreground::ForeLayer::new(),
             foreground: crate::render::foreground::enabled_from_env(),
+            lighting_fx: crate::render::lighting::fx_enabled_from_env(),
             sfx: Vec::new(),
             tail_ready_at: f32::NEG_INFINITY,
             whip_chain: art_rat::WhipChain::new(),
@@ -2204,6 +2209,17 @@ impl World {
         self.light_map.begin_frame();
         let mut _s = crate::prof::scope(crate::prof::Stage::SceneFloor);
 
+        // Batch-13 material bytes (`render::lighting::material`): kept only
+        // when the effects run at a tier that reads them. Every buffer writer
+        // stamps the current pen; the sprite passes below set it around their
+        // draw calls. `clear` resets every byte to the untagged floor.
+        let fx_tier = self.light_map.quality(self.lighting);
+        pb.set_pen(0);
+        pb.set_materials(
+            self.lighting_fx
+                && !self.flat_lit
+                && matches!(fx_tier, LightingMode::Full | LightingMode::Hard),
+        );
         pb.clear(self.level.palette.bg);
 
         // Floor and arena border.
@@ -2216,6 +2232,22 @@ impl World {
 
         // Floor stains (ichor splatters & explosion scorches) beneath props/entities.
         self.particles.draw_stains(pb, cam);
+
+        // The overhead light's ground shadows (batch 13, `render::lighting::
+        // overhead`): on the floor, before the walls, props and bodies, so
+        // they cover it and the wall layers clip it. Render-only.
+        if self.lighting_fx && !self.flat_lit {
+            let scene = crate::render::lighting::OverheadScene {
+                ecs: &self.ecs,
+                level: &self.level,
+                player: &self.player,
+                cam,
+                elapsed: self.elapsed,
+                mode: fx_tier,
+                hide_rat: self.hide_rat,
+            };
+            crate::render::lighting::draw_overhead_shadows(pb, &scene);
+        }
 
         // Boss ground layer: floor telegraphs and drop shadows, after the
         // stains and before props/entities (the art's "Ground" layer).
@@ -2242,7 +2274,9 @@ impl World {
             if !on_screen((x, y), margin, viewport) {
                 continue;
             }
+            let pen = pb.set_pen(crate::render::lighting::prop_pen(p.kind));
             art_props::draw_prop(pb, p, cam, &self.level.palette);
+            pb.set_pen(pen);
             if matches!(p.kind, PropKind::Console | PropKind::Tank) {
                 let (mx, my) = self.w2s(p.rect.center(), cam);
                 self.light_map.mark_emissive_rect(pb, mx - 2, my - 3, 5, 2);
@@ -2265,7 +2299,9 @@ impl World {
                 if !on_screen(s, p.radius + 2.0, viewport) {
                     continue;
                 }
+                let pen = pb.set_pen(crate::render::lighting::pool_pen());
                 art_wave3a::draw_acid_pool(pb, p, s, self.elapsed, sid.0);
+                pb.set_pen(pen);
                 let ri = (p.radius.round() as i32).clamp(3, 24);
                 self.light_map.mark_emissive_rect(pb, s.0, s.1, 1, 1);
                 for &(ox, oy) in &[(ri, 0), (-ri, 0), (0, ri), (0, -ri)] {
@@ -2422,10 +2458,12 @@ impl World {
                 }
                 let points = [(s.0, s.1), (s.0 + 1, s.1), (s.0 - 1, s.1), (s.0, s.1 - 1)];
                 let before = points.map(|(x, y)| pb.pixel_at(x as usize, y as usize));
+                let pen = pb.set_pen(crate::render::lighting::enemy_pen(e.kind, mb.map(|m| m.kind)));
                 match mb {
                     Some(mb) => art_miniboss::draw(pb, e, mb, cam, accent),
                     None => art_enemy::draw_enemy_crowd(pb, e, cam, accent, visible),
                 }
+                pb.set_pen(pen);
                 for ((x, y), floor) in points.into_iter().zip(before) {
                     let body = pb.pixel_at(x as usize, y as usize);
                     if body != floor {
@@ -3113,6 +3151,7 @@ impl World {
             elapsed: self.elapsed,
             mode: self.light_map.quality(self.lighting),
             depth: self.lighting_depth,
+            fx: self.lighting_fx,
         };
         let started = std::time::Instant::now();
         self.light_map.apply_scene(pb, &scene);
@@ -3214,6 +3253,7 @@ impl World {
             self.elapsed,
             &mut self.tail_ready_at,
         );
+        let pen = pb.set_pen(crate::render::lighting::rat_pen());
         art_rat::draw_rat_with_whip(
             pb,
             &self.player,
@@ -3223,6 +3263,7 @@ impl World {
             lash,
             Some(&self.whip_chain),
         );
+        pb.set_pen(pen);
         if self.whip_chain.is_active() {
             let tip_s = self.w2s(self.whip_chain.tip(), cam);
             self.light_map.mark_emissive_highlights(pb, tip_s, 5);
@@ -3333,6 +3374,7 @@ impl World {
             if !on_screen(self.w2s(boss.pos, cam), boss.kind.cull_margin(), self.render_viewport) {
                 continue;
             }
+            let pen = pb.set_pen(crate::render::lighting::boss_pen(boss.kind));
             match boss.view() {
                 BossArtView::Cat(v) => art_boss_cat::draw_boss_cat(pb, &v, cam, accent),
                 BossArtView::Broom(v) => art_boss_broom::draw(pb, &v, cam, accent),
@@ -3348,6 +3390,7 @@ impl World {
                 BossArtView::Hawk(v) => art_boss_hawk::draw_hawk(pb, &v, cam, accent),
                 BossArtView::Cobra(v) => art_boss_cobra::draw(pb, &v, cam, accent),
             }
+            pb.set_pen(pen);
             self.light_map.mark_emissive_highlights(pb, self.w2s(boss.pos, cam), 19);
         }
     }
